@@ -3,9 +3,143 @@
 package lsm
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// writeFakePasswd dumps a synthetic /etc/passwd to a temp file and
+// swaps passwdPath at the package var for the duration of the test.
+// The cleanup restores the original passwdPath via t.Cleanup so a
+// failed subtest doesn't leak the override.
+func writeFakePasswd(t *testing.T, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write fake passwd: %v", err)
+	}
+	orig := passwdPath
+	passwdPath = path
+	t.Cleanup(func() { passwdPath = orig })
+}
+
+// TestComputeWatchedUids_Layers exercises the three additive layers
+// against a synthetic /etc/passwd. computeWatchedUids is the pure
+// core extracted from populateWatchedUids; testing it directly
+// avoids needing a real *ebpf.Map.
+//
+// Fake passwd layout:
+//   root            0    0     (excluded by everything by convention; not in any layer)
+//   apache         48   48     (Layer 1: in WebUserNames)
+//   nobody         99   99     (Layer 1: in WebUserNames)
+//   alt-php-N5    700  700     (Layer 1: WebUserNamePrefixes hit)
+//   chris        1000 1000     (Layer 3 only — uid >= fallback)
+//   devops       1001 10       (Layer 3 + primary gid 10)
+//   batch1       1500 1500     (Layer 3 only)
+//   ftpaccount   1002 1002     (Layer 3 only)
+func TestComputeWatchedUids_Layers(t *testing.T) {
+	writeFakePasswd(t, `root:x:0:0::/root:/bin/bash
+apache:x:48:48::/var/www:/sbin/nologin
+nobody:x:99:99:Nobody:/:/sbin/nologin
+alt-php-N5:x:700:700::/:/sbin/nologin
+chris:x:1000:1000::/home/chris:/bin/bash
+devops:x:1001:10::/home/devops:/bin/bash
+batch1:x:1500:1500::/home/batch1:/bin/bash
+ftpaccount:x:1002:1002::/home/ftpaccount:/bin/bash
+`)
+
+	cases := []struct {
+		name string
+		opts WatchedUidsOptions
+		want []uint32 // sorted ascending
+	}{
+		{
+			name: "layer 1 only when fallback disabled",
+			opts: WatchedUidsOptions{FallbackMin: 0},
+			want: []uint32{48, 99, 700}, // apache, nobody, alt-php-N5
+		},
+		{
+			name: "fallback 1000 watches all regular users",
+			opts: WatchedUidsOptions{FallbackMin: 1000},
+			want: []uint32{48, 99, 700, 1000, 1001, 1002, 1500},
+		},
+		{
+			name: "deprecated -1 mapped to 1000",
+			opts: WatchedUidsOptions{FallbackMin: -1},
+			want: []uint32{48, 99, 700, 1000, 1001, 1002, 1500},
+		},
+		{
+			name: "exclude_user removes only that uid",
+			opts: WatchedUidsOptions{FallbackMin: 1000, ExcludeUsers: []string{"chris"}},
+			want: []uint32{48, 99, 700, 1001, 1002, 1500},
+		},
+		{
+			name: "exclude_user with unknown name skips silently",
+			opts: WatchedUidsOptions{FallbackMin: 1000, ExcludeUsers: []string{"nobody-such-account"}},
+			want: []uint32{48, 99, 700, 1000, 1001, 1002, 1500},
+		},
+		{
+			name: "exclude_uid removes by number",
+			opts: WatchedUidsOptions{FallbackMin: 1000, ExcludeUIDs: []uint32{1500}},
+			want: []uint32{48, 99, 700, 1000, 1001, 1002},
+		},
+		{
+			name: "exclude_gid removes by primary group",
+			opts: WatchedUidsOptions{FallbackMin: 1000, ExcludeGIDs: []uint32{10}},
+			want: []uint32{48, 99, 700, 1000, 1002, 1500}, // devops (gid 10) dropped
+		},
+		{
+			name: "exclude_user CAN drop a static WebUserNames hit (documented footgun)",
+			opts: WatchedUidsOptions{FallbackMin: 0, ExcludeUsers: []string{"apache"}},
+			want: []uint32{99, 700},
+		},
+		{
+			name: "exclude_gid can drop Layer 1 too (documented footgun)",
+			opts: WatchedUidsOptions{FallbackMin: 0, ExcludeGIDs: []uint32{48}},
+			want: []uint32{99, 700}, // apache (gid 48) dropped despite Layer 1
+		},
+		{
+			name: "combined exclusions",
+			opts: WatchedUidsOptions{
+				FallbackMin:   1000,
+				ExcludeUsers:  []string{"chris"},
+				ExcludeUIDs:   []uint32{1500},
+				ExcludeGIDs:   []uint32{10},
+			},
+			want: []uint32{48, 99, 700, 1002}, // 1000(chris), 1001(devops gid 10), 1500 all dropped
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := computeWatchedUids(tc.opts)
+			if err != nil {
+				t.Fatalf("computeWatchedUids: %v", err)
+			}
+			gotSorted := sortedUids(got)
+			if !equalUint32Slices(gotSorted, tc.want) {
+				t.Errorf("computeWatchedUids(%+v) = %v, want %v",
+					tc.opts, gotSorted, tc.want)
+			}
+		})
+	}
+}
+
+func sortedUids(m map[uint32]struct{}) []uint32 {
+	out := make([]uint32, 0, len(m))
+	for u := range m {
+		out = append(out, u)
+	}
+	// simple insertion sort — small slices, no sort import needed
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
+}
 
 // TestResolveWatchedUidFallback covers the three meaningful inputs.
 // Panel-detect was removed — auto-detect was a coverage gap on panel

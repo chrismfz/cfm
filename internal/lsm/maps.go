@@ -222,7 +222,7 @@ var DefaultKernelKnobPaths = []string{
 // conf may be nil; in that case the allow_exe merge is skipped and
 // only the disk-walked suid binaries seed cfm_setuid_inodes.
 func PopulateMaps(l *Loader, conf *Conf) (uidsAdded, inodesAdded, setuidAdded, knobsAdded int, err error) {
-	opts := WatchedUidsOptions{FallbackMin: 1000}
+	opts := WatchedUidsOptions{FallbackMin: defaultWatchedUidFallbackMin}
 	if conf != nil {
 		opts.FallbackMin = conf.WatchedUidFallbackMin
 		opts.ExcludeUsers = conf.ExcludeUsers
@@ -307,37 +307,19 @@ type WatchedUidsOptions struct {
 	ExcludeGIDs   []uint32
 }
 
-// populateWatchedUids walks /etc/passwd, identifies web-class
-// system users, adds every cPanel / DirectAdmin account uid, layers
-// on the uid-range fallback per opts.FallbackMin, then removes any
-// uid covered by opts.Exclude{Users,UIDs,GIDs}. Writes uid → 1 to
-// the supplied BPF map. Returns the count of uids added.
-//
-// Three additive layers:
-//   1. static WebUserNames + WebUserNamePrefixes match (always)
-//   2. panel manifest contributions (cPanel /etc/userdomains,
-//      DirectAdmin domain-owners — always, best-effort)
-//   3. uid-range fallback (opts.FallbackMin; 0 disables, >0 sweeps
-//      every uid >= threshold).
-//
-// Then the exclude lists are applied: any uid produced by the
-// layers above that appears in ExcludeUIDs, has a name in
-// ExcludeUsers, or has a primary gid in ExcludeGIDs is dropped
-// before the map write. The order matters — excluding is the last
-// step so an operator can declare "watch everyone >= 1000 but
-// not chris" without re-listing the names of every uid they
-// DO want watched.
-func populateWatchedUids(m *ebpf.Map, opts WatchedUidsOptions) (int, error) {
-	if m == nil {
-		return 0, fmt.Errorf("nil map")
-	}
-
+// computeWatchedUids is the pure / testable core of populateWatchedUids.
+// It reads /etc/passwd, applies the three additive layers and the
+// exclude pass, and returns the resulting uid set without touching
+// any BPF map. populateWatchedUids wraps this with the map write.
+// Separated so tests can swap passwdPath at the package var and
+// assert on the computed set directly.
+func computeWatchedUids(opts WatchedUidsOptions) (map[uint32]struct{}, error) {
 	// Read /etc/passwd ONCE into name→uid and uid→gid maps. Every
 	// code path below consumes one or both — single pass keeps
 	// hosts with 500+ accounts at O(passwd_lines), not O(passwd_lines * users).
 	nameToUID, uidToGID, err := loadPasswdMaps()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	uids := map[uint32]struct{}{}
@@ -400,6 +382,35 @@ func populateWatchedUids(m *ebpf.Map, opts WatchedUidsOptions) (int, error) {
 		delete(uids, u)
 	}
 
+	return uids, nil
+}
+
+// populateWatchedUids computes the watched-uid set (via
+// computeWatchedUids) and writes uid → 1 to the supplied BPF map.
+// Returns the count of uids successfully written. See computeWatchedUids
+// for the layer / exclude semantics.
+//
+// CAVEAT on exclude semantics: excludes apply to uids from ANY of
+// the three layers, including Layer 1's static WebUserNames.
+// `exclude_user = apache` or an `exclude_gid` that catches apache's
+// primary gid WILL drop apache from the watched set, defeating
+// Layer 1's contribution. Treated as an explicit operator decision
+// — "operator told us they don't want this uid watched." The
+// FormatConf-rendered comments and docs/cfm-lsm.md flag this.
+//
+// ExcludeGIDs matches /etc/passwd PRIMARY gid only. Supplementary
+// groups (/etc/group) are NOT consulted — `exclude_gid = 10` will
+// NOT exclude every user listed in /etc/group's wheel entry, only
+// those whose /etc/passwd column 4 is 10.
+func populateWatchedUids(m *ebpf.Map, opts WatchedUidsOptions) (int, error) {
+	if m == nil {
+		return 0, fmt.Errorf("nil map")
+	}
+	uids, err := computeWatchedUids(opts)
+	if err != nil {
+		return 0, err
+	}
+
 	one := uint8(1)
 	count := 0
 	for uid := range uids {
@@ -415,18 +426,10 @@ func populateWatchedUids(m *ebpf.Map, opts WatchedUidsOptions) (int, error) {
 	return count, nil
 }
 
-// loadPasswdMap reads /etc/passwd once and returns username→uid for
-// every parseable line. Used by populateWatchedUids and the panel-
-// manifest path to avoid re-opening the file per user.
-func loadPasswdMap() (map[string]uint32, error) {
-	nameToUID, _, err := loadPasswdMaps()
-	return nameToUID, err
-}
-
 // loadPasswdMaps reads /etc/passwd once and returns both name→uid and
 // uid→gid for every parseable line. The uid→gid view is consumed by
 // the exclude_gid filter in populateWatchedUids; callers that only
-// need name→uid can use loadPasswdMap above.
+// need name→uid can ignore the second return value.
 //
 // The (name, uid) fields are at /etc/passwd columns 0 and 2; gid is
 // at column 3. We split with SplitN limit 5 so a malformed GECOS

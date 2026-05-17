@@ -20,6 +20,13 @@ var ConfPath = "/etc/cfm/lsm.conf"
 // information an attacker on the box can use to plan around them.
 const ConfFileMode os.FileMode = 0o600
 
+// defaultWatchedUidFallbackMin is the shipped default for the
+// watched_uid_fallback_min conf knob. Matches /etc/login.defs UID_MIN
+// on every modern distro. Both DefaultConf and ParseConf seed their
+// zero-value Conf with this so an absent-key conf and a generated-
+// default conf agree without drifting.
+const defaultWatchedUidFallbackMin = 1000
+
 // Conf is the parsed contents of /etc/cfm/lsm.conf.
 type Conf struct {
 	// Enabled is the global on/off switch. When false (the default),
@@ -74,9 +81,21 @@ type Conf struct {
 	//     Missing names are skipped silently (no fatal error if a
 	//     listed account doesn't exist on this host).
 	//   - ExcludeUIDs: numeric uid match.
-	//   - ExcludeGIDs: every uid whose primary group is in this set
-	//     is excluded. Useful for "exclude everyone in the `wheel`
-	//     group" style policies.
+	//   - ExcludeGIDs: every uid whose /etc/passwd PRIMARY group
+	//     (column 4) is in this set is excluded. Useful for "exclude
+	//     everyone whose primary group is wheel" style policies.
+	//     NOTE: supplementary groups in /etc/group are NOT consulted.
+	//     `exclude_gid = 10` does NOT exclude every user listed in
+	//     /etc/group's wheel entry — only those whose passwd primary
+	//     gid is literally 10.
+	//
+	// CAVEAT: excludes apply to every uid produced by the three
+	// additive layers, including Layer 1's static WebUserNames. An
+	// exclude_user / exclude_uid / exclude_gid that happens to match
+	// apache / nginx / nobody / etc WILL drop them from the watched
+	// set, defeating Layer 1. Treated as an explicit operator
+	// decision — verify with `bpftool map dump pinned
+	// /sys/fs/bpf/cfm/maps/cfm_watched_uids` after `cfm lsm restart`.
 	ExcludeUsers []string
 	ExcludeUIDs  []uint32
 	ExcludeGIDs  []uint32
@@ -192,7 +211,7 @@ func DefaultConf() *Conf {
 	}
 	return &Conf{
 		Enabled:               false,
-		WatchedUidFallbackMin: 1000,
+		WatchedUidFallbackMin: defaultWatchedUidFallbackMin,
 		Modes:                 modes,
 		FS005WebOriginMonitor: true,
 		PersistencePaths:      map[PolicyID][]string{},
@@ -824,7 +843,7 @@ const (
 func ParseConf(r io.Reader) (*Conf, error) {
 	c := &Conf{
 		Enabled:               false,
-		WatchedUidFallbackMin: 1000,
+		WatchedUidFallbackMin: defaultWatchedUidFallbackMin,
 		Modes:                 map[PolicyID]Mode{},
 		FS005WebOriginMonitor: false,
 		PersistencePaths:      map[PolicyID][]string{},
@@ -1127,10 +1146,20 @@ func FormatConf(c *Conf) string {
 	b.WriteString("# batch-job sessions quiet without dropping coverage of the rest of\n")
 	b.WriteString("# the host's uid >= fallback range.\n")
 	b.WriteString("#\n")
+	b.WriteString("# Footgun: excludes apply to EVERY uid produced by the three layers,\n")
+	b.WriteString("# including the static web-daemon names (apache, nginx, nobody, ...).\n")
+	b.WriteString("# exclude_user = apache (or an exclude_gid that catches apache's primary\n")
+	b.WriteString("# group) WILL drop apache from the watched set. Verify with:\n")
+	b.WriteString("#   bpftool map dump pinned /sys/fs/bpf/cfm/maps/cfm_watched_uids\n")
+	b.WriteString("# after cfm lsm restart.\n")
+	b.WriteString("#\n")
+	b.WriteString("# exclude_gid matches /etc/passwd PRIMARY gid (column 4) only;\n")
+	b.WriteString("# supplementary groups in /etc/group are NOT consulted.\n")
+	b.WriteString("#\n")
 	b.WriteString("# exclude_user = chris        # by username (resolved at adoption time;\n")
 	b.WriteString("#                             # missing names skip silently)\n")
 	b.WriteString("# exclude_uid  = 1001         # by numeric uid\n")
-	b.WriteString("# exclude_gid  = 10           # every uid whose primary gid matches\n")
+	b.WriteString("# exclude_gid  = 10           # by primary gid (/etc/passwd col 4 only)\n")
 	for _, n := range c.ExcludeUsers {
 		fmt.Fprintf(&b, "exclude_user = %s\n", n)
 	}

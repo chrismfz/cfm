@@ -1060,6 +1060,25 @@ would otherwise have watched them. An attacker who compromised
 accepted as a deprecated alias for `1000`; the daemon emits a
 one-time warning at adoption when it sees the legacy value.
 
+**Migration notes — panel hosts upgrading from `-1`.** This is a
+**behaviour change** for hosts that previously ran with
+`watched_uid_fallback_min = -1` AND had a cPanel/DirectAdmin
+manifest. Under the old model the fallback was silently skipped, so
+only the static `WebUserNames` and the panel-manifest uids were
+watched. Under the new model the fallback applies at 1000, so
+admin / sysadmin accounts at uid >= 1000 join the watched set —
+which means previously-silent uids may start producing FS-005 /
+FS-007 / EXEC-004 / EXEC-006 events. Three migration paths:
+
+| Goal | Set in `/etc/cfm/lsm.conf` |
+|---|---|
+| Preserve the old behaviour exactly (panel-manifest + static names only) | `watched_uid_fallback_min = 0` |
+| Adopt the new coverage; opt-out your known-trusted admin accounts | `watched_uid_fallback_min = 1000` plus `exclude_user = <admin>` / `exclude_uid = N` / `exclude_gid = N` |
+| Adopt the new coverage broadly (default) | `watched_uid_fallback_min = 1000` (shipped default; no edits needed) |
+
+Then run `cfm lsm restart`. The daemon emits the one-time deprecation
+warning on adoption if it sees `-1`, with the same recipes inline.
+
 **Excluding known-trusted accounts.** Operators who want the broad
 coverage of `watched_uid_fallback_min = 1000` but need to silence
 specific accounts (the host's own sudoers, batch-job uids, build
