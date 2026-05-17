@@ -142,15 +142,22 @@ test_user_is_watched() {
     if [ -z "$TEST_UID" ]; then
         return 2
     fi
-    # Format TEST_UID as four little-endian hex bytes the way bpftool
-    # prints them: e.g. 1500 (0x5DC) -> "dc 05 00 00".
-    local hexkey
-    hexkey=$(printf '%02x %02x %02x %02x' \
-        $(( TEST_UID        & 0xff )) \
-        $(( (TEST_UID >>  8) & 0xff )) \
-        $(( (TEST_UID >> 16) & 0xff )) \
-        $(( (TEST_UID >> 24) & 0xff )))
-    if bpftool map dump pinned "$map_path" 2>/dev/null | grep -qiE "key.*$hexkey"; then
+    # Use `bpftool map lookup` for the actual lookup semantic: returns
+    # 0 on hit, non-zero on miss. No output-format dependency — the
+    # earlier `bpftool map dump | grep "key.*HEX"` approach was fragile
+    # across bpftool versions (EL10's bpftool prints map dumps without
+    # the literal "key" prefix the regex expected, so the test always
+    # returned "miss" even when the uid WAS in the map; observed live
+    # on edge after watched_uid_fallback_min=1000 + cfm lsm restart).
+    #
+    # bpftool's `key` argument accepts decimal byte values; pass the
+    # four LE bytes of TEST_UID as a u32.
+    local b0 b1 b2 b3
+    b0=$(( TEST_UID        & 0xff ))
+    b1=$(( (TEST_UID >>  8) & 0xff ))
+    b2=$(( (TEST_UID >> 16) & 0xff ))
+    b3=$(( (TEST_UID >> 24) & 0xff ))
+    if bpftool map lookup pinned "$map_path" key "$b0" "$b1" "$b2" "$b3" >/dev/null 2>&1; then
         return 0
     fi
     return 1
