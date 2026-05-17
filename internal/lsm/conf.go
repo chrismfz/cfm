@@ -428,6 +428,39 @@ var DefaultGlobalAllowExe = []string{
 	// catches both master and per-session children uniformly.
 	"/usr/sbin/pure-ftpd",
 	"/usr/local/sbin/pure-ftpd",
+
+	// Apache httpd with per-vhost UID switching (mod_ruid2 / mpm-itk /
+	// suexec). Same privilege model as sshd: the worker runs as
+	// `nobody` (in cfm_watched_uids when fallback or panel-manifest
+	// covers it) but keeps root in the saved-uid so it can setresuid
+	// back to 0 momentarily before dropping to the per-vhost user for
+	// each request. That round-trip through uid 0 is what trips
+	// CFML-CRED-002. Inode short-circuit via setuid_inodes is safe:
+	// /usr/sbin/httpd is root-owned and an attacker with write access
+	// to it already has root. Covers RHEL/CentOS (cPanel EA4) and
+	// Debian/Ubuntu layouts plus the legacy /usr/local/apache prefix
+	// some hosts keep for ad-hoc builds.
+	"/usr/sbin/httpd",
+	"/usr/sbin/apache2",
+	"/usr/local/apache/bin/httpd",
+
+	// LiteSpeed Web Server's HTTP daemon. Same per-vhost UID model as
+	// Apache+mpm-itk — the request-serving worker setresuids back to
+	// root before dropping to the per-account uid. Companion to the
+	// lscgid allowlist entries earlier in this list. Three binary
+	// names cover the commercial product (`lshttpd` / `litespeed`)
+	// and OpenLiteSpeed (`openlitespeed`).
+	"/usr/local/lsws/bin/lshttpd",
+	"/usr/local/lsws/bin/litespeed",
+	"/usr/local/lsws/bin/openlitespeed",
+
+	// nginx is intentionally NOT listed here. Stock nginx drops
+	// privileges at startup (root master → nginx-user workers) and
+	// then stays put — there's no per-request setuid round-trip to
+	// trigger CFML-CRED-002. Same for openresty / angie. If a host
+	// runs a third-party nginx module that does per-vhost UID
+	// switching (rare), add `allow_exe = /usr/sbin/nginx` locally
+	// rather than baking it into the global list.
 }
 
 // DefaultGlobalAllowComm is the curated cross-distro list of comm
@@ -533,6 +566,29 @@ var DefaultGlobalAllowComm = []string{
 	// proftpd: comm is the stable handle across master and forked
 	// session workers.
 	"pure-ftpd",
+
+	// Apache httpd master + per-vhost worker children. Same comm on
+	// both RHEL ("httpd") and Debian ("apache2") families. Pairs with
+	// the allow_exe entries above; the comm match catches workers
+	// whose exe lookup races against the d_name resolution path in
+	// the userspace post-filter (the d_name we get from the BPF event
+	// is "httpd"/"apache2" but if the inode isn't in setuid_inodes
+	// yet — fresh build, daemon adopted before PopulateMaps — the
+	// userspace filter still suppresses on comm).
+	"httpd",
+	"apache2",
+
+	// LiteSpeed Web Server's HTTP daemon. Same per-vhost UID model as
+	// Apache+mpm-itk: workers setresuid back to root via the saved
+	// uid before dropping to the per-account uid for each request.
+	// Companion to lscgid (already allowlisted above) which handles
+	// the CGI subprocess; lshttpd handles the request-serving worker
+	// itself. OpenLiteSpeed ships the same binary under
+	// `openlitespeed`; the commercial product alternates between
+	// `lshttpd` and `litespeed` depending on the release.
+	"lshttpd",
+	"litespeed",
+	"openlitespeed",
 }
 
 // DefaultGlobalAllowPath lists path prefixes that identify legitimate
