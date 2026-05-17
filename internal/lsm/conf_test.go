@@ -54,6 +54,18 @@ persistence_path = /opt/panel/hooks
 	if !c.FS005WebOriginMonitor {
 		t.Fatal("origin_tracking=monitor was not parsed")
 	}
+	// Regression: an lsm.conf with no origin_tracking line should
+	// inherit the shipped default (true) — same as DefaultConf and
+	// the shipped template, NOT false as the ParseConf seed used to
+	// have it. Caught by the audit on commit 47dc8dd.
+	noOriginLine := "enabled = true\n[policy \"CFML-FS-005\"]\nmode = monitor\n"
+	c2, err := ParseConf(strings.NewReader(noOriginLine))
+	if err != nil {
+		t.Fatalf("ParseConf without origin_tracking: %v", err)
+	}
+	if !c2.FS005WebOriginMonitor {
+		t.Error("FS005WebOriginMonitor should default to true when origin_tracking line is absent")
+	}
 	gotPersistence := c.PersistencePathsFor(PolicySensitiveWrite)
 	if len(gotPersistence) != 1 || gotPersistence[0] != "/opt/panel/hooks" {
 		t.Fatalf("persistence_path parse: got %v", gotPersistence)

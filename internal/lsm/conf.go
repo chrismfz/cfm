@@ -27,6 +27,15 @@ const ConfFileMode os.FileMode = 0o600
 // default conf agree without drifting.
 const defaultWatchedUidFallbackMin = 1000
 
+// defaultFS005WebOriginMonitor is the shipped default for the FS-005
+// `origin_tracking = monitor` per-policy knob. The conf parser
+// accepts only `disabled | monitor` for this key (enforce isn't
+// supported — origin-only matches never enforce yet). DefaultConf
+// and ParseConf both seed from this so an operator whose lsm.conf
+// has no origin_tracking line gets the same behaviour as the shipped
+// template and as `cfm lsm init`'s generated default.
+const defaultFS005WebOriginMonitor = true
+
 // Conf is the parsed contents of /etc/cfm/lsm.conf.
 type Conf struct {
 	// Enabled is the global on/off switch. When false (the default),
@@ -213,7 +222,7 @@ func DefaultConf() *Conf {
 		Enabled:               false,
 		WatchedUidFallbackMin: defaultWatchedUidFallbackMin,
 		Modes:                 modes,
-		FS005WebOriginMonitor: true,
+		FS005WebOriginMonitor: defaultFS005WebOriginMonitor,
 		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
 		AllowComm:             map[PolicyID][]string{},
@@ -845,7 +854,7 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		Enabled:               false,
 		WatchedUidFallbackMin: defaultWatchedUidFallbackMin,
 		Modes:                 map[PolicyID]Mode{},
-		FS005WebOriginMonitor: false,
+		FS005WebOriginMonitor: defaultFS005WebOriginMonitor,
 		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
 		AllowComm:             map[PolicyID][]string{},
