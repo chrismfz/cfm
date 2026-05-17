@@ -78,6 +78,8 @@ type cfmlsmProgramSpecs struct {
 	CfmEphemeralExec        *ebpf.ProgramSpec `ebpf:"cfm_ephemeral_exec"`
 	CfmExec007Finit         *ebpf.ProgramSpec `ebpf:"cfm_exec007_finit"`
 	CfmExec007Init          *ebpf.ProgramSpec `ebpf:"cfm_exec007_init"`
+	CfmExec008Kexec         *ebpf.ProgramSpec `ebpf:"cfm_exec008_kexec"`
+	CfmExec008KexecFile     *ebpf.ProgramSpec `ebpf:"cfm_exec008_kexec_file"`
 	CfmFs005Create          *ebpf.ProgramSpec `ebpf:"cfm_fs005_create"`
 	CfmFs005Link            *ebpf.ProgramSpec `ebpf:"cfm_fs005_link"`
 	CfmFs005MarkExec        *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_exec"`
@@ -193,6 +195,8 @@ type cfmlsmPrograms struct {
 	CfmEphemeralExec        *ebpf.Program `ebpf:"cfm_ephemeral_exec"`
 	CfmExec007Finit         *ebpf.Program `ebpf:"cfm_exec007_finit"`
 	CfmExec007Init          *ebpf.Program `ebpf:"cfm_exec007_init"`
+	CfmExec008Kexec         *ebpf.Program `ebpf:"cfm_exec008_kexec"`
+	CfmExec008KexecFile     *ebpf.Program `ebpf:"cfm_exec008_kexec_file"`
 	CfmFs005Create          *ebpf.Program `ebpf:"cfm_fs005_create"`
 	CfmFs005Link            *ebpf.Program `ebpf:"cfm_fs005_link"`
 	CfmFs005MarkExec        *ebpf.Program `ebpf:"cfm_fs005_mark_exec"`
@@ -224,6 +228,8 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmEphemeralExec,
 		p.CfmExec007Finit,
 		p.CfmExec007Init,
+		p.CfmExec008Kexec,
+		p.CfmExec008KexecFile,
 		p.CfmFs005Create,
 		p.CfmFs005Link,
 		p.CfmFs005MarkExec,

@@ -23,6 +23,7 @@ const (
 	bpfPolicyPrivInstall         uint32 = 13
 	bpfPolicyKernelModuleLoad    uint32 = 14
 	bpfPolicyKernelKnobWrite     uint32 = 15
+	bpfPolicyKexecLoad           uint32 = 16
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
@@ -39,6 +40,8 @@ const (
 	bpfBPFOpProgLoad  uint8 = 21
 	bpfKmodOpInit     uint8 = 30
 	bpfKmodOpFinit    uint8 = 31
+	bpfKexecOpLoad    uint8 = 32
+	bpfKexecOpFileLoad  uint8 = 33
 )
 
 // FSOp is the Go-side label for the file-system operation that
@@ -58,6 +61,8 @@ const (
 	BPFOpProgLoad  FSOp = 21
 	KmodOpInit     FSOp = 30
 	KmodOpFinit    FSOp = 31
+	KexecOpLoad    FSOp = 32
+	KexecOpFileLoad  FSOp = 33
 )
 
 // String renders the operation as a short token suitable for logs
@@ -84,6 +89,10 @@ func (o FSOp) String() string {
 		return "init_module"
 	case KmodOpFinit:
 		return "finit_module"
+	case KexecOpLoad:
+		return "kexec_load"
+	case KexecOpFileLoad:
+		return "kexec_file_load"
 	}
 	return "none"
 }
@@ -295,6 +304,8 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicyKernelModuleLoad
 	case bpfPolicyKernelKnobWrite:
 		e.PolicyID = PolicyKernelKnobWrite
+	case bpfPolicyKexecLoad:
+		e.PolicyID = PolicyKexecLoad
 	default:
 		return Event{}, fmt.Errorf("unknown BPF policy_id %d", policyID)
 	}

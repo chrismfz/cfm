@@ -18,7 +18,8 @@ HELPERS = \
 	$(BINDIR)/interp-stdio-helper \
 	$(BINDIR)/setcapper \
 	$(BINDIR)/kmod-loader \
-	$(BINDIR)/knob-writer
+	$(BINDIR)/knob-writer \
+	$(BINDIR)/kexec-loader
 
 .PHONY: all clean
 all: $(BINDIR) $(HELPERS)
