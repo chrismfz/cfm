@@ -29,6 +29,7 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_PRIV_INSTALL      = 13, /* CFML-FS-007   */
     CFM_LSM_POLICY_KMOD_LOAD         = 14, /* CFML-EXEC-007 */
     CFM_LSM_POLICY_KERNEL_KNOB_WRITE = 15, /* CFML-FS-008   */
+    CFM_LSM_POLICY_KEXEC_LOAD        = 16, /* CFML-EXEC-008 */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the
@@ -49,6 +50,13 @@ enum cfm_event_op {
      * Either one means a kernel module is being loaded. */
     CFM_KMOD_OP_INIT      = 30,
     CFM_KMOD_OP_FINIT     = 31,
+    /* CFML-EXEC-008 kexec-load primitives. kexec_load(2) takes a list
+     * of memory segments to assemble into a kernel image; kexec_file_load(2)
+     * takes an fd to a kernel image file. Either one stages a
+     * replacement kernel for the next kexec_reboot — the rootkit-
+     * persistence vector the rule watches for. */
+    CFM_KEXEC_OP_LOAD      = 32,
+    CFM_KEXEC_OP_FILE_LOAD = 33,
 };
 
 #define CFM_TASK_COMM_LEN 16

@@ -173,6 +173,32 @@ const (
 	// fail. Promote to enforce after a 30-day monitor window confirms
 	// no in-the-wild legitimate writer outside the trusted set.
 	PolicyKernelKnobWrite PolicyID = "CFML-FS-008"
+
+	// PolicyKexecLoad — CFML-EXEC-008: detect a kexec_load(2) or
+	// kexec_file_load(2) syscall from a non-trusted comm. Threat:
+	// rootkit persistence via post-boot kernel replacement. An
+	// attacker with root + CAP_SYS_BOOT stages a backdoored kernel
+	// image, then the next kexec_reboot boots that image without
+	// going through firmware — defeating every audit that compares
+	// the running kernel hash to its package on disk.
+	//
+	// Hooks: tracepoint/syscalls/sys_enter_kexec_load +
+	//        tracepoint/syscalls/sys_enter_kexec_file_load
+	//
+	// Trusted-comm allowlist: kexec (kexec-tools userspace, also
+	// what kdump.service invokes) and systemctl (`systemctl kexec`).
+	// Any other comm calling these syscalls, or any of the trusted
+	// comms running from a watched uid (comm spoofing via prctl by a
+	// web-class user), fires the rule.
+	//
+	// Mode: monitor ONLY by design — tracepoint hooks are
+	// observation-only, the kernel ignores any return value the BPF
+	// program sets. Use kernsec's kernel.kexec_load_disabled=1
+	// (KSEC-SCT-kspp.kexec-001) on non-kdump hosts to actually block
+	// the syscall at the kernel layer; CFML-EXEC-008 is the always-on
+	// telemetry that surfaces both legitimate kexec-tools calls and
+	// any unexpected callers.
+	PolicyKexecLoad PolicyID = "CFML-EXEC-008"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -311,6 +337,13 @@ func AllPolicies() []Policy {
 			DefaultMode: ModeDisabled,
 			Description: "Detect a write to /proc/sys/kernel/{core_pattern,modprobe_path,hotplug} / /proc/sysrq-trigger / /sys/kernel/uevent_helper / /proc/sys/fs/binfmt_misc/register from outside the trusted-writer set (cfm / sysctl / systemd / systemd-sysctl). Catches kernel-exploit completion pivots through these knobs. Monitor by default; enforce-capable but requires telemetry first.",
 		},
+		{
+			ID:          PolicyKexecLoad,
+			Title:       "kexec_load / kexec_file_load by non-trusted comm",
+			Hook:        "tracepoint/syscalls/sys_enter_{kexec_load,kexec_file_load}",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a kexec_load(2) or kexec_file_load(2) call from outside the small trusted set (kexec / systemctl). Catches rootkit-persistence-via-replacement-kernel primitives. Monitor-only by design — tracepoint hooks are observation-only; pair with kernel.kexec_load_disabled=1 (kernsec) for actual block on non-kdump hosts.",
+		},
 	}
 }
 
@@ -346,7 +379,8 @@ func isEnforceCapable(id PolicyID) bool {
 		PolicyDirectCredInstall,
 		PolicyUnexpectedBPF,
 		PolicyFdCredMismatch,
-		PolicyKernelModuleLoad:
+		PolicyKernelModuleLoad,
+		PolicyKexecLoad:
 		return false
 	}
 	return true
