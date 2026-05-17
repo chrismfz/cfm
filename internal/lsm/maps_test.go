@@ -20,7 +20,7 @@ func TestInodeMapsUseCompoundKeys(t *testing.T) {
 	}
 	out := string(src)
 
-	for _, name := range []string{"cfm_watched_inodes", "cfm_setuid_inodes"} {
+	for _, name := range []string{"cfm_watched_inodes", "cfm_setuid_inodes", "cfm_kernel_knob_inodes"} {
 		idx := strings.Index(out, "} "+name+" SEC(\".maps\");")
 		if idx < 0 {
 			t.Fatalf("BPF source missing map %q", name)

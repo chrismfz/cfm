@@ -1899,13 +1899,22 @@ static __always_inline int cfm_fs007_check_setxattr(struct dentry *dentry,
         return 0;
 
     /* Match name == "security.capability" exactly. The string is 19
-     * chars + NUL = 20 bytes. cfm_str_eq is the same helper used by
-     * the suspicious-basename matcher. */
+     * chars + NUL = 20 bytes. We open-code the byte compare because
+     * the cfm_str_eq helper's #pragma unroll is bounded to 16
+     * iterations — fine for the short interpreter basenames it was
+     * built for, but it cannot reach the NUL at index 19 here and
+     * would always return 0, making this whole leg dead code. The
+     * explicit char compare also matches the comm-allowlist pattern
+     * used in cfm_comm_is_trusted_bpf_agent / _modprobe / _sysctl. */
     char buf[20] = {};
     long n = bpf_probe_read_kernel_str(buf, sizeof(buf), name);
     if (n != 20)
         return 0;
-    if (!cfm_str_eq(buf, "security.capability", 19))
+    if (!(buf[0]  == 's' && buf[1]  == 'e' && buf[2]  == 'c' && buf[3]  == 'u' &&
+          buf[4]  == 'r' && buf[5]  == 'i' && buf[6]  == 't' && buf[7]  == 'y' &&
+          buf[8]  == '.' && buf[9]  == 'c' && buf[10] == 'a' && buf[11] == 'p' &&
+          buf[12] == 'a' && buf[13] == 'b' && buf[14] == 'i' && buf[15] == 'l' &&
+          buf[16] == 'i' && buf[17] == 't' && buf[18] == 'y' && buf[19] == '\0'))
         return 0;
 
     __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
