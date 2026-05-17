@@ -351,7 +351,18 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 				}
 			}
 			l.objs.Close()
-			return nil, fmt.Errorf("%w: pin to %s: %v", ErrBPFLSMUnavailable, opts.PinDir, err)
+			// Do NOT wrap with ErrBPFLSMUnavailable — pin failures
+			// are typically a transient race with a concurrent
+			// `cfm lsm enable`, a bpffs perms issue, or `no space
+			// left on device`. The kernel's BPF-LSM support is
+			// fine; the misleading "BPF LSM unavailable on this
+			// kernel" prefix on a pin-race line would have an
+			// operator chasing kernel config when the root cause
+			// is "two enablers ran concurrently, retry will fix
+			// it." The daemon's drift-detect adopts on the next
+			// tick once one of the racers wins; UnpinAll above
+			// clears the rollback state so the next try is clean.
+			return nil, fmt.Errorf("pin BPF state to %s: %w", opts.PinDir, err)
 		}
 		l.pinned = true
 	}
