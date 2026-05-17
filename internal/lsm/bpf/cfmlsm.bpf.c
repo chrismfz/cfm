@@ -1756,4 +1756,489 @@ int BPF_PROG(cfm_fs006, struct file *file, int mask, int ret)
     return ret;  /* monitor-only — never deny */
 }
 
+/* ------------------------------------------------------------------- *
+ * CFML-FS-007 — setuid bit / file capability install by watched uid.
+ *
+ * Hooks: lsm/inode_setattr  (catches chmod adding S_ISUID or S_ISGID)
+ *        lsm/inode_setxattr (catches `setcap` writing security.capability)
+ *
+ * Threat scenario: classic Linux persistence. After any privesc bug,
+ * the attacker drops a binary and grants it a root-acquiring primitive
+ * so a later unprivileged shell can re-enter root without re-exploiting:
+ *
+ *   - `chmod 4755 /tmp/.bd`            (the suid bit pattern)
+ *   - `setcap cap_setuid+ep /tmp/.bd`  (the file-cap pattern — harder
+ *                                       to spot in `ls -l`, only `getcap`
+ *                                       reveals the privilege)
+ *
+ * CFML-CRED-002 catches the *use* of the dropped binary. FS-007 catches
+ * the *install* step — the moment the dropper creates the persistence
+ * primitive, before any second exec happens.
+ *
+ * Watched-uid gate: the rule only fires when the calling task's uid is
+ * in cfm_watched_uids (web-class user / panel-managed account). A web
+ * worker creating a setuid binary is structurally illegitimate; an
+ * admin running `chmod 4755 /usr/local/bin/my-helper` is not watched
+ * and won't trip the rule.
+ *
+ * No watched-inode gate (unlike FS-005): the target file can be
+ * anywhere on disk — the privilege primitive itself is the signal,
+ * not the path.
+ *
+ * Mode: monitor by default. Enforce returns -EPERM from the LSM hook;
+ * the kernel propagates that out of chmod(2) / setxattr(2) so the
+ * dropper sees the failure and the persistence primitive never lands.
+ * Enforce promotion is safe — there is no legitimate workflow for a
+ * web-class uid to set the suid bit or cap_setuid on a file. The
+ * companion EXEC-006 (web-user exec from /tmp) sees the same lack of
+ * legitimate workflows from the same uid set.
+ * ------------------------------------------------------------------- */
+
+volatile const __u8 cfm_enforce_priv_install = 0;
+
+/* Emit one FS-007 event. Caller has already established that the uid
+ * is watched and the operation actually adds a privilege primitive. */
+static __always_inline void cfm_fs007_emit(struct dentry *target,
+                                           __u8 op, __u8 flags)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_PRIV_INSTALL;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = op;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    const unsigned char *name = NULL;
+    if (target)
+        name = BPF_CORE_READ(target, d_name.name);
+    if (name)
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), name);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+/* setattr leg. Fires when the watched uid is chmoding a file to add
+ * S_ISUID or S_ISGID. Removing the bits is benign (security hardening)
+ * and not flagged. */
+static __always_inline int cfm_fs007_check_setattr(struct dentry *dentry,
+                                                    struct iattr *attr, int ret)
+{
+    if (ret != 0)
+        return ret;
+    if (!attr || !dentry)
+        return 0;
+
+    /* ATTR_MODE = 1 << 0 — the only ia_valid bit we care about. */
+    unsigned int ia_valid = BPF_CORE_READ(attr, ia_valid);
+    if (!(ia_valid & 1))
+        return 0;
+
+    /* ia_mode carries the new mode bits. S_ISUID = 04000, S_ISGID = 02000. */
+    __u16 ia_mode = BPF_CORE_READ(attr, ia_mode);
+    __u8 flags = 0;
+    if (ia_mode & 04000)
+        flags |= CFM_LSM_F_PRIV_SUID;
+    if (ia_mode & 02000)
+        flags |= CFM_LSM_F_PRIV_SGID;
+    if (!flags)
+        return 0;
+
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    if (!cfm_uid_watched(uid))
+        return 0;
+
+    cfm_fs007_emit(dentry, CFM_FS_OP_SETATTR, flags);
+    return cfm_enforce_priv_install ? CFM_LSM_DENY : 0;
+}
+
+/* inode_setattr drifted with the same shape as FS-005's variants —
+ * see the long comment in the FS-005 section. Two BPF_PROG variants;
+ * btfprobe.go picks one based on the live kernel's hook arity. */
+
+SEC("lsm/inode_setattr")
+int BPF_PROG(cfm_fs007_setattr_noidmap, struct dentry *dentry,
+             struct iattr *attr, int ret)
+{
+    return cfm_fs007_check_setattr(dentry, attr, ret);
+}
+
+SEC("lsm/inode_setattr")
+int BPF_PROG(cfm_fs007_setattr_idmap, void *idmap_or_ns,
+             struct dentry *dentry, struct iattr *attr, int ret)
+{
+    return cfm_fs007_check_setattr(dentry, attr, ret);
+}
+
+/* setxattr leg. Fires when the watched uid is writing the
+ * security.capability xattr — the mechanism behind `setcap`. We don't
+ * parse the cap value (vfs_cap_data) because any non-zero cap install
+ * by a watched uid is illegitimate; cap_setuid is the high-risk case
+ * but cap_dac_override / cap_dac_read_search / cap_sys_admin are
+ * equally weaponisable. */
+static __always_inline int cfm_fs007_check_setxattr(struct dentry *dentry,
+                                                     const char *name, int ret)
+{
+    if (ret != 0)
+        return ret;
+    if (!name || !dentry)
+        return 0;
+
+    /* Match name == "security.capability" exactly. The string is 19
+     * chars + NUL = 20 bytes. We open-code the byte compare because
+     * the cfm_str_eq helper's #pragma unroll is bounded to 16
+     * iterations — fine for the short interpreter basenames it was
+     * built for, but it cannot reach the NUL at index 19 here and
+     * would always return 0, making this whole leg dead code. The
+     * explicit char compare also matches the comm-allowlist pattern
+     * used in cfm_comm_is_trusted_bpf_agent / _modprobe / _sysctl. */
+    char buf[20] = {};
+    long n = bpf_probe_read_kernel_str(buf, sizeof(buf), name);
+    if (n != 20)
+        return 0;
+    if (!(buf[0]  == 's' && buf[1]  == 'e' && buf[2]  == 'c' && buf[3]  == 'u' &&
+          buf[4]  == 'r' && buf[5]  == 'i' && buf[6]  == 't' && buf[7]  == 'y' &&
+          buf[8]  == '.' && buf[9]  == 'c' && buf[10] == 'a' && buf[11] == 'p' &&
+          buf[12] == 'a' && buf[13] == 'b' && buf[14] == 'i' && buf[15] == 'l' &&
+          buf[16] == 'i' && buf[17] == 't' && buf[18] == 'y' && buf[19] == '\0'))
+        return 0;
+
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    if (!cfm_uid_watched(uid))
+        return 0;
+
+    cfm_fs007_emit(dentry, CFM_FS_OP_SETXATTR, CFM_LSM_F_PRIV_FILECAP);
+    return cfm_enforce_priv_install ? CFM_LSM_DENY : 0;
+}
+
+SEC("lsm/inode_setxattr")
+int BPF_PROG(cfm_fs007_setxattr_noidmap, struct dentry *dentry,
+             const char *name, const void *value, size_t size,
+             int flags, int ret)
+{
+    return cfm_fs007_check_setxattr(dentry, name, ret);
+}
+
+SEC("lsm/inode_setxattr")
+int BPF_PROG(cfm_fs007_setxattr_idmap, void *idmap_or_ns, struct dentry *dentry,
+             const char *name, const void *value, size_t size,
+             int flags, int ret)
+{
+    return cfm_fs007_check_setxattr(dentry, name, ret);
+}
+
+/* ------------------------------------------------------------------- *
+ * CFML-EXEC-007 — kernel module load by a non-trusted comm.
+ *
+ * Hooks: tracepoint/syscalls/sys_enter_init_module
+ *        tracepoint/syscalls/sys_enter_finit_module
+ *
+ * Threat: a kernel module is being loaded by something other than the
+ * tiny set of distro tooling that legitimately loads modules. The
+ * canonical post-exploit primitive for installing a kernel-level
+ * rootkit (bvp47-style, hidden processes, syscall-table hooks, ...).
+ * On a panel host, no user-visible workload should ever load kernel
+ * modules — modprobe is invoked only from boot scripts, udev rules,
+ * and a handful of NetworkManager / systemd actions, all of which
+ * run under well-known comm names.
+ *
+ * The detector is comm-allowlist driven (same shape as CFML-BPF-001).
+ * Any uid is in scope — the kernel checks CAP_SYS_MODULE later, but
+ * a non-root task even *attempting* the syscall is interesting
+ * telemetry on a panel host. Web-class uid attempts are tagged with
+ * WEB_ORIGIN.
+ *
+ * Mode: monitor ONLY (tracepoint, not an LSM decision hook — the
+ * kernel ignores any return value we set, so enforce is impossible
+ * here). Companion kernsec sysctl kernel.modules_disabled=1 (KSEC-
+ * MOD-kspp.kernel-007) is the actual block at the kernel layer for
+ * hosts that don't load any modules post-boot; FS-007 is the
+ * always-on telemetry for everyone else.
+ * ------------------------------------------------------------------- */
+
+/* Comm names that legitimately load kernel modules. Truncated to
+ * CFM_TASK_COMM_LEN-1 = 15 chars by the kernel. */
+static __always_inline bool cfm_comm_is_trusted_modprobe(const char *comm)
+{
+    if (!comm)
+        return false;
+
+    /* modprobe (the userspace loader) */
+    if (comm[0] == 'm' && comm[1] == 'o' && comm[2] == 'd' && comm[3] == 'p' &&
+        comm[4] == 'r' && comm[5] == 'o' && comm[6] == 'b' && comm[7] == 'e' &&
+        comm[8] == '\0')
+        return true;
+
+    /* insmod (rarely used directly post-systemd era, but still ships) */
+    if (comm[0] == 'i' && comm[1] == 'n' && comm[2] == 's' && comm[3] == 'm' &&
+        comm[4] == 'o' && comm[5] == 'd' && comm[6] == '\0')
+        return true;
+
+    /* kmod (the busybox-style multi-call binary; modprobe / insmod are
+     * symlinks to it on some distros) */
+    if (comm[0] == 'k' && comm[1] == 'm' && comm[2] == 'o' && comm[3] == 'd' &&
+        comm[4] == '\0')
+        return true;
+
+    /* systemd-modules-load.service. Real comm is
+     * "systemd-modules-load" but TASK_COMM_LEN truncates to 15 chars:
+     * "systemd-modules". */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '-' &&
+        comm[8] == 'm' && comm[9] == 'o' && comm[10] == 'd' && comm[11] == 'u' &&
+        comm[12] == 'l' && comm[13] == 'e' && comm[14] == 's')
+        return true;
+
+    /* systemd (PID 1) loads built-ins on boot via the same syscall path */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '\0')
+        return true;
+
+    /* systemd-udevd loads kernel modules in response to uevents */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '-' &&
+        comm[8] == 'u' && comm[9] == 'd' && comm[10] == 'e' && comm[11] == 'v' &&
+        comm[12] == 'd' && comm[13] == '\0')
+        return true;
+
+    return false;
+}
+
+static __always_inline void cfm_exec007_emit(__u8 op, __u8 flags, const char *comm)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_KMOD_LOAD;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = op;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
+    if (op == CFM_KMOD_OP_INIT)
+        __builtin_memcpy(e->filename, "init_module", 12);
+    else if (op == CFM_KMOD_OP_FINIT)
+        __builtin_memcpy(e->filename, "finit_module", 13);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+static __always_inline int cfm_exec007_check(__u8 op)
+{
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    bool web_uid = cfm_uid_watched(uid);
+
+    char comm[CFM_TASK_COMM_LEN] = {};
+    bpf_get_current_comm(&comm, sizeof(comm));
+
+    /* Trusted modprobe-class caller AND not a web-class uid impersonating
+     * one — suppress. A watched-uid task running with comm "modprobe"
+     * is exactly the suspicious case (an attacker spoofing comm via
+     * prctl). */
+    if (!web_uid && cfm_comm_is_trusted_modprobe(comm))
+        return 0;
+
+    __u8 flags = 0;
+    if (web_uid)
+        flags |= CFM_LSM_F_WEB_ORIGIN;
+
+    cfm_exec007_emit(op, flags, comm);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_init_module")
+int cfm_exec007_init(struct trace_event_raw_sys_enter *ctx)
+{
+    (void)ctx;
+    return cfm_exec007_check(CFM_KMOD_OP_INIT);
+}
+
+SEC("tracepoint/syscalls/sys_enter_finit_module")
+int cfm_exec007_finit(struct trace_event_raw_sys_enter *ctx)
+{
+    (void)ctx;
+    return cfm_exec007_check(CFM_KMOD_OP_FINIT);
+}
+
+/* ------------------------------------------------------------------- *
+ * CFML-FS-008 — write to a sensitive kernel knob.
+ *
+ * Hook: lsm/file_permission (every read/write through any fd)
+ *
+ * Threat: kernel-exploit completion + post-exploit persistence. The
+ * watched paths are the small set of /proc/sys and /sys nodes that
+ * every public Linux kernel exploit from the last five years pivots
+ * through once it has the write primitive:
+ *
+ *   /proc/sys/kernel/core_pattern      — pipe-to-program on coredump
+ *                                        (CVE-2022-0185, dirtypipe followup)
+ *   /proc/sys/kernel/modprobe_path     — substitute modprobe binary
+ *                                        (BPF verifier bug chains)
+ *   /proc/sys/kernel/hotplug           — uevent helper, legacy variant
+ *   /proc/sysrq-trigger                — magic sysrq for arbitrary
+ *                                        kernel actions
+ *   /sys/kernel/uevent_helper          — modern uevent helper
+ *   /proc/sys/fs/binfmt_misc/register  — register a binfmt handler
+ *                                        that runs on every matching exec
+ *
+ * Each of these gives the writer a path to run code as root on the
+ * next triggering event (a coredump / a binary that no userspace knows
+ * how to handle / a uevent firing / etc).
+ *
+ * Userspace populates cfm_kernel_knob_inodes from these paths at
+ * adoption time (paths absent on this kernel are skipped silently).
+ * The BPF program checks file inode against the map on every write-
+ * class access, comparing comm against a small trusted-writer set
+ * (cfm / sysctl / systemd / systemd-sysctl) before emitting.
+ *
+ * Mode: monitor by default. Enforce-capable but DEFAULT to monitor —
+ * an unanticipated legitimate writer of any of these knobs (operator
+ * tuning script, RPM postinstall) would otherwise silently fail.
+ * Promote to enforce after a 30-day monitor window confirms no in-
+ * the-wild legitimate writer.
+ * ------------------------------------------------------------------- */
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, struct cfm_inode_key);
+    __type(value, __u8);
+} cfm_kernel_knob_inodes SEC(".maps");
+
+volatile const __u8 cfm_enforce_kernel_knob_write = 0;
+
+/* Trusted writer comm allowlist. The legitimate sysctl pipeline is
+ * narrow: `sysctl(8)` and systemd-sysctl on boot / reload, cfm itself
+ * for the few knobs the kernsec subsystem manages. */
+static __always_inline bool cfm_comm_is_trusted_sysctl(const char *comm)
+{
+    if (!comm)
+        return false;
+
+    /* cfm — own daemon (kernsec subsystem applies sysctl tweaks) */
+    if (comm[0] == 'c' && comm[1] == 'f' && comm[2] == 'm' && comm[3] == '\0')
+        return true;
+
+    /* sysctl */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 'c' &&
+        comm[4] == 't' && comm[5] == 'l' && comm[6] == '\0')
+        return true;
+
+    /* systemd-sysctl. Real comm "systemd-sysctl" — fits in 15 chars. */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '-' &&
+        comm[8] == 's' && comm[9] == 'y' && comm[10] == 's' && comm[11] == 'c' &&
+        comm[12] == 't' && comm[13] == 'l' && comm[14] == '\0')
+        return true;
+
+    /* systemd (PID 1 writes some knobs during early boot) */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '\0')
+        return true;
+
+    return false;
+}
+
+static __always_inline void cfm_fs008_emit(struct file *file, const char *comm)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_KERNEL_KNOB_WRITE;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = CFM_OP_NONE;
+    e->flags     = 0;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
+
+    /* Best-effort filename via the file's dentry. For procfs these
+     * are short tokens like "core_pattern" / "sysrq-trigger". */
+    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
+    const unsigned char *name = NULL;
+    if (dentry)
+        name = BPF_CORE_READ(dentry, d_name.name);
+    if (name)
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), name);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+/* MAY_WRITE from include/linux/fs.h. The mask is a bitfield;
+ * MAY_EXEC=1, MAY_WRITE=2, MAY_READ=4, MAY_APPEND=8. We fire on
+ * any write-class access (write or append). */
+#define CFM_MAY_WRITE  2
+#define CFM_MAY_APPEND 8
+
+SEC("lsm/file_permission")
+int BPF_PROG(cfm_fs008, struct file *file, int mask, int ret)
+{
+    if (!file)
+        return ret;
+
+    /* Fast path: read-only access on most file_permission calls.
+     * Bail before any deref. */
+    if (!(mask & (CFM_MAY_WRITE | CFM_MAY_APPEND)))
+        return ret;
+
+    /* Inode in the watched-knob set? */
+    struct inode *inode = BPF_CORE_READ(file, f_inode);
+    struct cfm_inode_key key = {};
+    if (!cfm_inode_key_from_inode(inode, &key))
+        return ret;
+    if (!bpf_map_lookup_elem(&cfm_kernel_knob_inodes, &key))
+        return ret;
+
+    /* Trusted writer? Suppress. We compare task->comm rather than the
+     * exe identity because /sbin/sysctl and /usr/sbin/sysctl can be
+     * different inodes across distros — comm is the stable signal. */
+    char comm[CFM_TASK_COMM_LEN] = {};
+    bpf_get_current_comm(&comm, sizeof(comm));
+    if (cfm_comm_is_trusted_sysctl(comm))
+        return ret;
+
+    cfm_fs008_emit(file, comm);
+
+    if (cfm_enforce_kernel_knob_write)
+        return CFM_LSM_DENY;
+    return ret;
+}
+
 char LICENSE[] SEC("license") = "GPL";

@@ -76,6 +76,8 @@ type cfmlsmProgramSpecs struct {
 	CfmCred003              *ebpf.ProgramSpec `ebpf:"cfm_cred003"`
 	CfmDeletedFileExec      *ebpf.ProgramSpec `ebpf:"cfm_deleted_file_exec"`
 	CfmEphemeralExec        *ebpf.ProgramSpec `ebpf:"cfm_ephemeral_exec"`
+	CfmExec007Finit         *ebpf.ProgramSpec `ebpf:"cfm_exec007_finit"`
+	CfmExec007Init          *ebpf.ProgramSpec `ebpf:"cfm_exec007_init"`
 	CfmFs005Create          *ebpf.ProgramSpec `ebpf:"cfm_fs005_create"`
 	CfmFs005Link            *ebpf.ProgramSpec `ebpf:"cfm_fs005_link"`
 	CfmFs005MarkExec        *ebpf.ProgramSpec `ebpf:"cfm_fs005_mark_exec"`
@@ -88,6 +90,11 @@ type cfmlsmProgramSpecs struct {
 	CfmFs005SetxattrNoidmap *ebpf.ProgramSpec `ebpf:"cfm_fs005_setxattr_noidmap"`
 	CfmFs005Unlink          *ebpf.ProgramSpec `ebpf:"cfm_fs005_unlink"`
 	CfmFs006                *ebpf.ProgramSpec `ebpf:"cfm_fs006"`
+	CfmFs007SetattrIdmap    *ebpf.ProgramSpec `ebpf:"cfm_fs007_setattr_idmap"`
+	CfmFs007SetattrNoidmap  *ebpf.ProgramSpec `ebpf:"cfm_fs007_setattr_noidmap"`
+	CfmFs007SetxattrIdmap   *ebpf.ProgramSpec `ebpf:"cfm_fs007_setxattr_idmap"`
+	CfmFs007SetxattrNoidmap *ebpf.ProgramSpec `ebpf:"cfm_fs007_setxattr_noidmap"`
+	CfmFs008                *ebpf.ProgramSpec `ebpf:"cfm_fs008"`
 	CfmInterpNetStdio       *ebpf.ProgramSpec `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec            *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
 	CfmRevshell             *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
@@ -99,6 +106,7 @@ type cfmlsmProgramSpecs struct {
 type cfmlsmMapSpecs struct {
 	CfmCredTransitionTasks *ebpf.MapSpec `ebpf:"cfm_cred_transition_tasks"`
 	CfmEvents              *ebpf.MapSpec `ebpf:"cfm_events"`
+	CfmKernelKnobInodes    *ebpf.MapSpec `ebpf:"cfm_kernel_knob_inodes"`
 	CfmSetuidInodes        *ebpf.MapSpec `ebpf:"cfm_setuid_inodes"`
 	CfmWatchedInodes       *ebpf.MapSpec `ebpf:"cfm_watched_inodes"`
 	CfmWatchedUids         *ebpf.MapSpec `ebpf:"cfm_watched_uids"`
@@ -111,7 +119,9 @@ type cfmlsmMapSpecs struct {
 type cfmlsmVariableSpecs struct {
 	CfmEnforceDeletedFileExec *ebpf.VariableSpec `ebpf:"cfm_enforce_deleted_file_exec"`
 	CfmEnforceEphemeralExec   *ebpf.VariableSpec `ebpf:"cfm_enforce_ephemeral_exec"`
+	CfmEnforceKernelKnobWrite *ebpf.VariableSpec `ebpf:"cfm_enforce_kernel_knob_write"`
 	CfmEnforceMemfdExec       *ebpf.VariableSpec `ebpf:"cfm_enforce_memfd_exec"`
+	CfmEnforcePrivInstall     *ebpf.VariableSpec `ebpf:"cfm_enforce_priv_install"`
 	CfmEnforceRevshell        *ebpf.VariableSpec `ebpf:"cfm_enforce_revshell"`
 	CfmEnforceSensitiveWrite  *ebpf.VariableSpec `ebpf:"cfm_enforce_sensitive_write"`
 	CfmFs005WebOriginMonitor  *ebpf.VariableSpec `ebpf:"cfm_fs005_web_origin_monitor"`
@@ -139,6 +149,7 @@ func (o *cfmlsmObjects) Close() error {
 type cfmlsmMaps struct {
 	CfmCredTransitionTasks *ebpf.Map `ebpf:"cfm_cred_transition_tasks"`
 	CfmEvents              *ebpf.Map `ebpf:"cfm_events"`
+	CfmKernelKnobInodes    *ebpf.Map `ebpf:"cfm_kernel_knob_inodes"`
 	CfmSetuidInodes        *ebpf.Map `ebpf:"cfm_setuid_inodes"`
 	CfmWatchedInodes       *ebpf.Map `ebpf:"cfm_watched_inodes"`
 	CfmWatchedUids         *ebpf.Map `ebpf:"cfm_watched_uids"`
@@ -149,6 +160,7 @@ func (m *cfmlsmMaps) Close() error {
 	return _CfmlsmClose(
 		m.CfmCredTransitionTasks,
 		m.CfmEvents,
+		m.CfmKernelKnobInodes,
 		m.CfmSetuidInodes,
 		m.CfmWatchedInodes,
 		m.CfmWatchedUids,
@@ -162,7 +174,9 @@ func (m *cfmlsmMaps) Close() error {
 type cfmlsmVariables struct {
 	CfmEnforceDeletedFileExec *ebpf.Variable `ebpf:"cfm_enforce_deleted_file_exec"`
 	CfmEnforceEphemeralExec   *ebpf.Variable `ebpf:"cfm_enforce_ephemeral_exec"`
+	CfmEnforceKernelKnobWrite *ebpf.Variable `ebpf:"cfm_enforce_kernel_knob_write"`
 	CfmEnforceMemfdExec       *ebpf.Variable `ebpf:"cfm_enforce_memfd_exec"`
+	CfmEnforcePrivInstall     *ebpf.Variable `ebpf:"cfm_enforce_priv_install"`
 	CfmEnforceRevshell        *ebpf.Variable `ebpf:"cfm_enforce_revshell"`
 	CfmEnforceSensitiveWrite  *ebpf.Variable `ebpf:"cfm_enforce_sensitive_write"`
 	CfmFs005WebOriginMonitor  *ebpf.Variable `ebpf:"cfm_fs005_web_origin_monitor"`
@@ -177,6 +191,8 @@ type cfmlsmPrograms struct {
 	CfmCred003              *ebpf.Program `ebpf:"cfm_cred003"`
 	CfmDeletedFileExec      *ebpf.Program `ebpf:"cfm_deleted_file_exec"`
 	CfmEphemeralExec        *ebpf.Program `ebpf:"cfm_ephemeral_exec"`
+	CfmExec007Finit         *ebpf.Program `ebpf:"cfm_exec007_finit"`
+	CfmExec007Init          *ebpf.Program `ebpf:"cfm_exec007_init"`
 	CfmFs005Create          *ebpf.Program `ebpf:"cfm_fs005_create"`
 	CfmFs005Link            *ebpf.Program `ebpf:"cfm_fs005_link"`
 	CfmFs005MarkExec        *ebpf.Program `ebpf:"cfm_fs005_mark_exec"`
@@ -189,6 +205,11 @@ type cfmlsmPrograms struct {
 	CfmFs005SetxattrNoidmap *ebpf.Program `ebpf:"cfm_fs005_setxattr_noidmap"`
 	CfmFs005Unlink          *ebpf.Program `ebpf:"cfm_fs005_unlink"`
 	CfmFs006                *ebpf.Program `ebpf:"cfm_fs006"`
+	CfmFs007SetattrIdmap    *ebpf.Program `ebpf:"cfm_fs007_setattr_idmap"`
+	CfmFs007SetattrNoidmap  *ebpf.Program `ebpf:"cfm_fs007_setattr_noidmap"`
+	CfmFs007SetxattrIdmap   *ebpf.Program `ebpf:"cfm_fs007_setxattr_idmap"`
+	CfmFs007SetxattrNoidmap *ebpf.Program `ebpf:"cfm_fs007_setxattr_noidmap"`
+	CfmFs008                *ebpf.Program `ebpf:"cfm_fs008"`
 	CfmInterpNetStdio       *ebpf.Program `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec            *ebpf.Program `ebpf:"cfm_memfd_exec"`
 	CfmRevshell             *ebpf.Program `ebpf:"cfm_revshell"`
@@ -201,6 +222,8 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmCred003,
 		p.CfmDeletedFileExec,
 		p.CfmEphemeralExec,
+		p.CfmExec007Finit,
+		p.CfmExec007Init,
 		p.CfmFs005Create,
 		p.CfmFs005Link,
 		p.CfmFs005MarkExec,
@@ -213,6 +236,11 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmFs005SetxattrNoidmap,
 		p.CfmFs005Unlink,
 		p.CfmFs006,
+		p.CfmFs007SetattrIdmap,
+		p.CfmFs007SetattrNoidmap,
+		p.CfmFs007SetxattrIdmap,
+		p.CfmFs007SetxattrNoidmap,
+		p.CfmFs008,
 		p.CfmInterpNetStdio,
 		p.CfmMemfdExec,
 		p.CfmRevshell,

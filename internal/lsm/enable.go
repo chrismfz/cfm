@@ -103,7 +103,7 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 		// files post-uid-drop. Warn and downgrade if an operator set
 		// enforce — better than silently respecting it and then not
 		// blocking, which would mislead them.
-		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF || p.ID == PolicyFdCredMismatch) && m == ModeEnforce {
+		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF || p.ID == PolicyFdCredMismatch || p.ID == PolicyKernelModuleLoad) && m == ModeEnforce {
 			fmt.Fprintf(w, "Note: %s is monitor-only by design; downgrading lsm.conf's enforce setting.\n", p.ID)
 			fmt.Fprintln(w, "      See docs/cfm-lsm.md → monitor-only telemetry policies.")
 			fmt.Fprintln(w)
@@ -164,13 +164,13 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 	// Populate the FS-005 + CRED-002 maps from the live host so the
 	// BPF programs have something to match against. Best-effort:
 	// partial population is far better than failing the enable.
-	if uids, inodes, setuid, perr := PopulateMaps(l, conf); perr != nil {
+	if uids, inodes, setuid, knobs, perr := PopulateMaps(l, conf); perr != nil {
 		fmt.Fprintf(w, "Warning: partial map population: %v\n", perr)
-		fmt.Fprintf(w, "         watched_uids=%d watched_inodes=%d setuid_inodes=%d (populated before error)\n",
-			uids, inodes, setuid)
+		fmt.Fprintf(w, "         watched_uids=%d watched_inodes=%d setuid_inodes=%d kernel_knob_inodes=%d (populated before error)\n",
+			uids, inodes, setuid, knobs)
 	} else {
-		fmt.Fprintf(w, "Maps populated: watched_uids=%d watched_inodes=%d setuid_inodes=%d\n",
-			uids, inodes, setuid)
+		fmt.Fprintf(w, "Maps populated: watched_uids=%d watched_inodes=%d setuid_inodes=%d kernel_knob_inodes=%d\n",
+			uids, inodes, setuid, knobs)
 		fmt.Fprintln(w)
 	}
 

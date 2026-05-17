@@ -109,6 +109,70 @@ const (
 	// cPanel easyapache builds) needs allowlist tuning first — see
 	// docs/cfm-lsm.md and the lsm.conf allow_exe / allow_path keys.
 	PolicyEphemeralExec PolicyID = "CFML-EXEC-006"
+
+	// PolicyPrivInstall — CFML-FS-007: detect a watched (web-class)
+	// uid installing a privilege primitive on a file — either setting
+	// the suid/sgid bit via chmod, or writing the security.capability
+	// xattr via setcap. The post-exploit-persistence "drop a binary
+	// the unprivileged shell can later use to re-acquire root without
+	// re-exploiting" pattern. Companion to CFML-CRED-002, which catches
+	// the *use* of the dropped primitive; FS-007 catches the *install*.
+	//
+	// Hooks: inode_setattr (suid/sgid bit) + inode_setxattr
+	// (security.capability). No watched-inode gate — the target can be
+	// any path; the privilege primitive itself is the signal.
+	//
+	// Mode: monitor by default. Enforce-capable — there is no
+	// legitimate workflow for a web-class uid to set suid or
+	// security.capability, so blocking the syscall is safe (returns
+	// -EPERM out of chmod/setxattr; the dropper sees the failure and
+	// the primitive never lands).
+	PolicyPrivInstall PolicyID = "CFML-FS-007"
+
+	// PolicyKernelModuleLoad — CFML-EXEC-007: detect a kernel module
+	// being loaded from a non-trusted comm. Threat: kernel-rootkit
+	// installer. Companion telemetry to the kernsec sysctl
+	// kernel.modules_disabled=1 which actually blocks at the kernel
+	// layer for hosts that don't load any modules post-boot.
+	//
+	// Hooks: tracepoint/syscalls/sys_enter_init_module +
+	//        tracepoint/syscalls/sys_enter_finit_module
+	//
+	// The kernel-side allowlist matches comm names that legitimately
+	// load modules: modprobe / insmod / kmod / systemd /
+	// systemd-modules / systemd-udevd. Any other comm — or any of
+	// those comms running from a watched uid (comm spoofing via
+	// prctl by a web-class user) — fires the rule.
+	//
+	// Mode: monitor ONLY. Tracepoint hooks are observation-only —
+	// the kernel ignores any return value the BPF program sets, so
+	// enforce is structurally impossible here. Use
+	// kernel.modules_disabled=1 to block at the kernel layer.
+	PolicyKernelModuleLoad PolicyID = "CFML-EXEC-007"
+
+	// PolicyKernelKnobWrite — CFML-FS-008: detect a write to one of
+	// the small set of /proc/sys and /sys kernel knobs that every
+	// public kernel exploit from the last five years pivots through
+	// once it has the write primitive:
+	//
+	//   /proc/sys/kernel/core_pattern     — pipe-to-program on coredump
+	//   /proc/sys/kernel/modprobe_path    — substitute modprobe binary
+	//   /proc/sys/kernel/hotplug          — legacy uevent helper
+	//   /proc/sysrq-trigger               — magic sysrq trigger
+	//   /sys/kernel/uevent_helper         — modern uevent helper
+	//   /proc/sys/fs/binfmt_misc/register — register binfmt exec handler
+	//
+	// Hook: file_permission. The userspace populator stats each path
+	// at adoption time and puts its inode in cfm_kernel_knob_inodes;
+	// paths absent on this kernel (CONFIG_MAGIC_SYSRQ=n etc.) skip
+	// silently. Writer comms in the trusted set (cfm / sysctl /
+	// systemd / systemd-sysctl) are suppressed.
+	//
+	// Mode: monitor by default. Enforce-capable but DEFAULT monitor —
+	// an unanticipated legitimate writer would otherwise silently
+	// fail. Promote to enforce after a 30-day monitor window confirms
+	// no in-the-wild legitimate writer outside the trusted set.
+	PolicyKernelKnobWrite PolicyID = "CFML-FS-008"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -225,6 +289,27 @@ func AllPolicies() []Policy {
 			Hook:        "bprm_check_security",
 			DefaultMode: ModeDisabled,
 			Description: "Detect a web-class user executing a binary whose backing file lives on tmpfs (/dev/shm, /run/user/<uid>/, distro /tmp mounted as tmpfs) or under /tmp/ or /var/tmp/ on a non-tmpfs root. Execution-phase companion to Imunify Proactive Defense's write-phase guard: catches the staged-payload-and-exec pattern at the kernel layer. Monitor-first; enforce returns -EPERM.",
+		},
+		{
+			ID:          PolicyPrivInstall,
+			Title:       "Privilege-primitive install by web user",
+			Hook:        "inode_{setattr,setxattr}",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a web-class user installing a privilege primitive — setting the suid/sgid bit via chmod, or writing the security.capability xattr via setcap — on any file. Install-step companion to CFML-CRED-002 which catches the use of the dropped primitive. Monitor-first; enforce returns -EPERM out of chmod/setxattr.",
+		},
+		{
+			ID:          PolicyKernelModuleLoad,
+			Title:       "Kernel module load by non-trusted comm",
+			Hook:        "tracepoint/syscalls/sys_enter_{init,finit}_module",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a kernel module being loaded from outside the small trusted-loader set (modprobe / insmod / kmod / systemd / systemd-modules / systemd-udevd). Catches kernel-rootkit installer primitives. Monitor-only by design — tracepoint hooks are observation-only; pair with kernel.modules_disabled=1 (kernsec) for actual block.",
+		},
+		{
+			ID:          PolicyKernelKnobWrite,
+			Title:       "Write to a sensitive kernel knob",
+			Hook:        "file_permission",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a write to /proc/sys/kernel/{core_pattern,modprobe_path,hotplug} / /proc/sysrq-trigger / /sys/kernel/uevent_helper / /proc/sys/fs/binfmt_misc/register from outside the trusted-writer set (cfm / sysctl / systemd / systemd-sysctl). Catches kernel-exploit completion pivots through these knobs. Monitor by default; enforce-capable but requires telemetry first.",
 		},
 	}
 }

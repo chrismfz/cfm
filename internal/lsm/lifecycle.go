@@ -207,14 +207,14 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	// be stale (new cPanel/DA accounts, newly-installed setuid
 	// binaries) so refreshing on every daemon start is cheap and
 	// keeps the detector accurate.
-	uids, inodes, setuid, perr := PopulateMaps(loader, conf)
+	uids, inodes, setuid, knobs, perr := PopulateMaps(loader, conf)
 	if perr != nil {
-		logging.LogfLSM("[lsm] partial map population: %v (uids=%d inodes=%d setuid=%d)",
-			perr, uids, inodes, setuid)
+		logging.LogfLSM("[lsm] partial map population: %v (uids=%d inodes=%d setuid=%d knobs=%d)",
+			perr, uids, inodes, setuid, knobs)
 		KmsgStatef("ISSUE", "partial map population: %v", perr)
 	} else {
-		logging.LogfLSM("[lsm] maps populated: watched_uids=%d watched_inodes=%d setuid_inodes=%d",
-			uids, inodes, setuid)
+		logging.LogfLSM("[lsm] maps populated: watched_uids=%d watched_inodes=%d setuid_inodes=%d kernel_knob_inodes=%d",
+			uids, inodes, setuid, knobs)
 	}
 }
 
@@ -272,7 +272,7 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 			logging.LogfLSM("[lsm] auto-enable: %s unavailable on this kernel; skipping policy: %s", p.ID, pa.Reason)
 			continue
 		}
-		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall) && m == ModeEnforce {
+		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF || p.ID == PolicyFdCredMismatch || p.ID == PolicyKernelModuleLoad) && m == ModeEnforce {
 			logging.LogfLSM("[lsm] auto-enable: %s enforce downgraded to monitor (policy is monitor-only; see docs/cfm-lsm.md)", p.ID)
 			m = ModeMonitor
 		}
@@ -398,14 +398,17 @@ func emitNotify(ev Event) {
 	if ev.Filename != "" {
 		reason += " path=" + ev.Filename
 	}
-	if ev.PolicyID == PolicyUnexpectedBPF && ev.Op != FSOpNone {
+	if ev.Op != FSOpNone {
 		reason += " op=" + ev.Op.String()
 	}
-	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF) && ev.Flags&EventFlagWebOrigin != 0 {
+	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad) && ev.Flags&EventFlagWebOrigin != 0 {
 		reason += " origin=web"
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
 		reason += " stdio=" + signal
+	}
+	if prim := ev.PrivInstallPrimitive(); prim != "" {
+		reason += " primitive=" + prim
 	}
 
 	extra := map[string]string{
@@ -420,14 +423,17 @@ func emitNotify(ev Event) {
 	if ev.Filename != "" {
 		extra["path"] = ev.Filename
 	}
-	if ev.PolicyID == PolicyUnexpectedBPF && ev.Op != FSOpNone {
+	if ev.Op != FSOpNone {
 		extra["op"] = ev.Op.String()
 	}
-	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF) && ev.Flags&EventFlagWebOrigin != 0 {
+	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad) && ev.Flags&EventFlagWebOrigin != 0 {
 		extra["origin"] = "web"
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
 		extra["stdio_signal"] = signal
+	}
+	if prim := ev.PrivInstallPrimitive(); prim != "" {
+		extra["primitive"] = prim
 	}
 
 	// Userspace sinks (cfm.log + notify) and the kmsg sink have

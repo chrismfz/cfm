@@ -158,14 +158,17 @@ func KmsgDetect(ev Event) {
 	if ev.Filename != "" {
 		msg += " path=" + ev.Filename
 	}
-	if ev.PolicyID == PolicyUnexpectedBPF && ev.Op != FSOpNone {
+	if ev.Op != FSOpNone {
 		msg += " op=" + ev.Op.String()
 	}
-	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF) && ev.Flags&EventFlagWebOrigin != 0 {
+	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad) && ev.Flags&EventFlagWebOrigin != 0 {
 		msg += " origin=web"
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
 		msg += " stdio=" + signal
+	}
+	if prim := ev.PrivInstallPrimitive(); prim != "" {
+		msg += " primitive=" + prim
 	}
 	defaultKmsg.writeLine(kmsgPriWarning, "DETECT", msg)
 }

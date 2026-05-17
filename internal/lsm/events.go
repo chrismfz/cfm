@@ -20,6 +20,9 @@ const (
 	bpfPolicyUnexpectedBPF       uint32 = 10
 	bpfPolicyFdCredMismatch      uint32 = 11
 	bpfPolicyEphemeralExec       uint32 = 12
+	bpfPolicyPrivInstall         uint32 = 13
+	bpfPolicyKernelModuleLoad    uint32 = 14
+	bpfPolicyKernelKnobWrite     uint32 = 15
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
@@ -34,6 +37,8 @@ const (
 	bpfFSOpSetxattr   uint8 = 6
 	bpfBPFOpMapCreate uint8 = 20
 	bpfBPFOpProgLoad  uint8 = 21
+	bpfKmodOpInit     uint8 = 30
+	bpfKmodOpFinit    uint8 = 31
 )
 
 // FSOp is the Go-side label for the file-system operation that
@@ -51,6 +56,8 @@ const (
 	FSOpSetxattr   FSOp = 6
 	BPFOpMapCreate FSOp = 20
 	BPFOpProgLoad  FSOp = 21
+	KmodOpInit     FSOp = 30
+	KmodOpFinit    FSOp = 31
 )
 
 // String renders the operation as a short token suitable for logs
@@ -73,6 +80,10 @@ func (o FSOp) String() string {
 		return "bpf_map_create"
 	case BPFOpProgLoad:
 		return "bpf_prog_load"
+	case KmodOpInit:
+		return "init_module"
+	case KmodOpFinit:
+		return "finit_module"
 	}
 	return "none"
 }
@@ -104,6 +115,16 @@ const (
 	// signals simultaneously.
 	EventFlagTmpfsBacked  uint8 = 1 << 6
 	EventFlagEphemeralDir uint8 = 1 << 7
+
+	// CFML-FS-007 — which privilege primitive the watched uid was
+	// installing. Bits 4-6 are reused from the stdio/EXEC-006 flag
+	// bits at the same numeric positions; PolicyID disambiguates per
+	// event. SUID and SGID may coexist on a single chmod 6755; FILECAP
+	// is mutually exclusive with the chmod bits because it arrives
+	// via a different LSM hook (setxattr).
+	EventFlagPrivSUID    uint8 = 1 << 4
+	EventFlagPrivSGID    uint8 = 1 << 5
+	EventFlagPrivFileCap uint8 = 1 << 6
 )
 
 // Event is the Go-side projection of struct cfm_lsm_event emitted by
@@ -157,10 +178,43 @@ func (e Event) Time(bootTime time.Time) time.Time {
 	return bootTime.Add(time.Duration(e.TimestampNS))
 }
 
+// PrivInstallPrimitive renders the CFML-FS-007 privilege primitive bits
+// encoded in Event.Flags as a short token suitable for log lines.
+// Returns empty for events from other policies (the same numeric bits
+// belong to other detectors' flag fields — PolicyID disambiguates).
+func (e Event) PrivInstallPrimitive() string {
+	if e.PolicyID != PolicyPrivInstall {
+		return ""
+	}
+	if e.Flags&EventFlagPrivFileCap != 0 {
+		return "file_cap"
+	}
+	suid := e.Flags&EventFlagPrivSUID != 0
+	sgid := e.Flags&EventFlagPrivSGID != 0
+	switch {
+	case suid && sgid:
+		return "suid+sgid"
+	case suid:
+		return "suid"
+	case sgid:
+		return "sgid"
+	}
+	return ""
+}
+
 // ExecStdioSignal renders the EXEC-003/EXEC-005 stdio signal encoded in
 // Event.Flags. Empty means the event is not from an exec stdio detector or
 // carries no stdio signal bits.
+//
+// Gated on PolicyID because bits 4-7 are reused across detectors with
+// different semantics: FS-007 uses the same numeric positions for
+// PRIV_SUID / PRIV_SGID / PRIV_FILECAP, EXEC-006 for TMPFS_BACKED /
+// EPHEMERAL_DIR. Without the gate, a FS-007 event with PRIV_SUID
+// would be mis-rendered as a reverse-shell-strict stdio signal.
 func (e Event) ExecStdioSignal() string {
+	if e.PolicyID != PolicyReverseShell && e.PolicyID != PolicyInterpreterNetStdio {
+		return ""
+	}
 	if e.Flags&EventFlagRevshellStrict != 0 {
 		return "strict_all_stdio_remote"
 	}
@@ -235,6 +289,12 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicyFdCredMismatch
 	case bpfPolicyEphemeralExec:
 		e.PolicyID = PolicyEphemeralExec
+	case bpfPolicyPrivInstall:
+		e.PolicyID = PolicyPrivInstall
+	case bpfPolicyKernelModuleLoad:
+		e.PolicyID = PolicyKernelModuleLoad
+	case bpfPolicyKernelKnobWrite:
+		e.PolicyID = PolicyKernelKnobWrite
 	default:
 		return Event{}, fmt.Errorf("unknown BPF policy_id %d", policyID)
 	}

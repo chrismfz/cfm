@@ -114,19 +114,50 @@ func TestParseEvent_DirectCredInstall(t *testing.T) {
 
 func TestEventExecStdioSignal(t *testing.T) {
 	cases := []struct {
-		name  string
-		flags uint8
-		want  string
+		name    string
+		policy  PolicyID
+		flags   uint8
+		want    string
 	}{
-		{"strict", EventFlagRevshellStrict, "strict_all_stdio_remote"},
-		{"weak two", EventFlagInterpreterStdioWeak | EventFlagStdioTwoRemote, "weak_two_stdio_remote"},
-		{"weak one", EventFlagInterpreterStdioWeak | EventFlagStdioOneRemote, "weak_one_stdio_remote"},
-		{"none", 0, ""},
+		{"strict", PolicyReverseShell, EventFlagRevshellStrict, "strict_all_stdio_remote"},
+		{"weak two", PolicyInterpreterNetStdio, EventFlagInterpreterStdioWeak | EventFlagStdioTwoRemote, "weak_two_stdio_remote"},
+		{"weak one", PolicyInterpreterNetStdio, EventFlagInterpreterStdioWeak | EventFlagStdioOneRemote, "weak_one_stdio_remote"},
+		{"none", PolicyReverseShell, 0, ""},
+		// PolicyID gating: same numeric flag bits are reused by FS-007
+		// (PRIV_SUID at bit 4 collides with REVSHELL_STRICT). The
+		// renderer must return "" when called on a non-exec-stdio
+		// policy regardless of flag bits set.
+		{"fs007 not misrendered", PolicyPrivInstall, EventFlagPrivSUID, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := (Event{Flags: tc.flags}).ExecStdioSignal(); got != tc.want {
+			if got := (Event{PolicyID: tc.policy, Flags: tc.flags}).ExecStdioSignal(); got != tc.want {
 				t.Fatalf("ExecStdioSignal() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEventPrivInstallPrimitive(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy PolicyID
+		flags  uint8
+		want   string
+	}{
+		{"file_cap", PolicyPrivInstall, EventFlagPrivFileCap, "file_cap"},
+		{"suid", PolicyPrivInstall, EventFlagPrivSUID, "suid"},
+		{"sgid", PolicyPrivInstall, EventFlagPrivSGID, "sgid"},
+		{"suid+sgid", PolicyPrivInstall, EventFlagPrivSUID | EventFlagPrivSGID, "suid+sgid"},
+		{"none flags", PolicyPrivInstall, 0, ""},
+		// PolicyID gating: a reverse-shell event with REVSHELL_STRICT
+		// at bit 4 must not be rendered as "suid".
+		{"revshell not misrendered", PolicyReverseShell, EventFlagRevshellStrict, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (Event{PolicyID: tc.policy, Flags: tc.flags}).PrivInstallPrimitive(); got != tc.want {
+				t.Fatalf("PrivInstallPrimitive() = %q, want %q", got, tc.want)
 			}
 		})
 	}

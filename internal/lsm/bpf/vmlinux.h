@@ -225,10 +225,16 @@ struct task_struct {
     const struct cred     *cred;
 } ___NCO;
 
-/* Used by CFML-FS-005 (sensitive-file modification by web user).
- * Empty struct definition is enough — we only need the type to exist
- * for BPF_PROG signature compatibility; we don't read any fields. */
-struct iattr {} ___NCO;
+/* Used by CFML-FS-005 (opaque — only the type matters for BPF_PROG
+ * signature compatibility) and by CFML-FS-007 (reads ia_valid + ia_mode
+ * to detect suid/sgid bits being set). The ___NCO / preserve_access_index
+ * attribute makes CO-RE resolve field offsets against the live kernel
+ * BTF at load time, so this in-source layout is just a shape hint —
+ * the compiler doesn't need every kernel iattr field to be enumerated. */
+struct iattr {
+    unsigned int ia_valid;
+    umode_t      ia_mode;
+} ___NCO;
 
 /* The first argument of inode_setattr / inode_setxattr drifted across
  * kernels (commit `9452e93e` and friends, "fs: port to mnt_idmap"):
