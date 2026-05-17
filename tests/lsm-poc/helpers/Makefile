@@ -15,7 +15,10 @@ HELPERS = \
 	$(BINDIR)/fdleak-attacker \
 	$(BINDIR)/bpf-mapcreate \
 	$(BINDIR)/suid-dropper \
-	$(BINDIR)/interp-stdio-helper
+	$(BINDIR)/interp-stdio-helper \
+	$(BINDIR)/setcapper \
+	$(BINDIR)/kmod-loader \
+	$(BINDIR)/knob-writer
 
 .PHONY: all clean
 all: $(BINDIR) $(HELPERS)
