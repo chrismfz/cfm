@@ -306,7 +306,7 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 			logging.LogfLSM("[lsm] auto-enable: %s unavailable on this kernel; skipping policy: %s", p.ID, pa.Reason)
 			continue
 		}
-		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF || p.ID == PolicyFdCredMismatch || p.ID == PolicyKernelModuleLoad) && m == ModeEnforce {
+		if !isEnforceCapable(p.ID) && m == ModeEnforce {
 			logging.LogfLSM("[lsm] auto-enable: %s enforce downgraded to monitor (policy is monitor-only; see docs/cfm-lsm.md)", p.ID)
 			m = ModeMonitor
 		}
