@@ -13,14 +13,19 @@
  * (d_hash.pprev == NULL) on bprm->file, when the calling uid is in
  * cfm_watched_uids.
  *
- * Usage: deleted-exec /path/to/source/binary [args...]
+ * Usage: deleted-exec STAGE_DIR /path/to/source/binary [args...]
  *
- * Copies the source binary into a fresh /tmp/.cfmpoc-deleted-XXXXXX
- * file, opens it, unlinks the path, then execs the open fd.
+ * Copies the source binary into a fresh STAGE_DIR/.cfmpoc-XXXXXX
+ * file, opens it, unlinks the path, then execs the open fd. The
+ * harness passes SCRATCH_DIR (typically /var/lib/cfmpoc/) as STAGE_DIR
+ * so the staged file lives on an exec-capable mount; passing /tmp on
+ * a hardened host (noexec) makes the final execve fail before the
+ * LSM hook even runs.
  */
 
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,13 +34,21 @@
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s /path/to/source/binary [args...]\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr, "usage: %s STAGE_DIR /path/to/source/binary [args...]\n", argv[0]);
         return 2;
     }
-    const char *src_path = argv[1];
+    const char *stage_dir = argv[1];
+    const char *src_path = argv[2];
 
-    char tmp_path[] = "/tmp/.cfmpoc-deleted-XXXXXX";
+    /* Build the template inside STAGE_DIR rather than hard-coding /tmp,
+     * because /tmp is noexec on hardened EL10 hosts. */
+    char tmp_path[PATH_MAX];
+    int written = snprintf(tmp_path, sizeof(tmp_path), "%s/.cfmpoc-deleted-XXXXXX", stage_dir);
+    if (written <= 0 || written >= (int)sizeof(tmp_path)) {
+        fprintf(stderr, "STAGE_DIR too long\n");
+        return 2;
+    }
     int tmp = mkstemp(tmp_path);
     if (tmp < 0) { perror("mkstemp"); return 1; }
     if (fchmod(tmp, 0700) < 0) { perror("fchmod"); return 1; }
@@ -69,8 +82,8 @@ int main(int argc, char **argv)
     char proc_path[64];
     snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
 
-    char **child_argv = &argv[2];
-    if (argc == 2) {
+    char **child_argv = &argv[3];
+    if (argc == 3) {
         static char *defv[] = { (char *)"cfm-poc-deleted", NULL };
         child_argv = defv;
     }

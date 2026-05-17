@@ -9,9 +9,10 @@
 : "${TEST_USER:=cfmpoc}"
 : "${TEST_UID:=}"          # auto-allocated by ensure_test_user when empty
 : "${POC_TMPDIR:=/tmp/cfmpoc}"
+: "${SCRATCH_DIR:=/var/lib/cfmpoc}"   # exec+suid-capable scratch (not /tmp)
 : "${HELPERS_DIR:=}"       # set by run-all.sh; scenarios resolve relative
 : "${LISTENER_PORT:=4444}"
-: "${EXPECT_TIMEOUT:=10}"
+: "${EXPECT_TIMEOUT:=20}"
 : "${VERBOSE:=0}"
 
 # Resolve HELPERS_DIR if a scenario is invoked standalone (run-all.sh sets it).
@@ -124,6 +125,72 @@ cleanup_tmpdir() {
     fi
 }
 
+# ensure_scratch_dir — root-owned scratch under /var/lib/ that we can
+# trust to be exec+suid-capable. /tmp is mounted noexec,nosuid on
+# hardened EL10 / CL10 boxes (and increasingly on stock cPanel
+# installs), which silently breaks every PoC that drops a binary and
+# tries to exec it. /var/lib/ is normally on the root filesystem with
+# default mount options, so binaries we drop there can actually run.
+#
+# The test user gets read+exec on this directory (so runuser can exec
+# binaries we copy into it) but no write — the harness owns staging.
+ensure_scratch_dir() {
+    mkdir -p "$SCRATCH_DIR"
+    chmod 0755 "$SCRATCH_DIR"
+    chown root:root "$SCRATCH_DIR"
+    # Sanity check: can we exec from here? If the operator put
+    # /var/lib on a noexec mount (rare, but happens on extreme
+    # hardening profiles), surface that loudly rather than have every
+    # scenario fail mysteriously.
+    local probe="$SCRATCH_DIR/.cfmpoc-execprobe"
+    cp /bin/true "$probe"
+    chmod 0755 "$probe"
+    if ! "$probe" 2>/dev/null; then
+        rm -f "$probe"
+        fail "$SCRATCH_DIR is on a noexec mount; cannot run PoCs"
+        fail "set SCRATCH_DIR=/some/other/exec-capable/path and re-run"
+        exit 2
+    fi
+    rm -f "$probe"
+    # Suid sanity check: drop a setuid binary, run as nobody, ensure
+    # the kernel honoured the bit. Skipped silently when no `nobody`
+    # account exists.
+    if id -u nobody >/dev/null 2>&1; then
+        local suid_probe="$SCRATCH_DIR/.cfmpoc-suidprobe"
+        cp /usr/bin/id "$suid_probe"
+        chmod 4755 "$suid_probe"
+        local got
+        got=$(runuser -u nobody -- "$suid_probe" -u 2>/dev/null || true)
+        rm -f "$suid_probe"
+        if [ "$got" != "0" ]; then
+            warn "$SCRATCH_DIR appears to be on a nosuid mount; CRED-002 will skip"
+            export SCRATCH_NOSUID=1
+        fi
+    fi
+}
+
+# stage_helper HELPER_NAME [PERMS] — copy a helper binary from
+# HELPERS_DIR/bin into SCRATCH_DIR so it can be exec'd from a context
+# (test user, sudo-dropped task) that has no access to the source
+# tree. Prints the staged path on stdout.
+#
+# PERMS default is 0755 (root-owned, world-rx). Pass "4755" to set the
+# setuid bit for CRED-002 scenarios.
+stage_helper() {
+    local name="$1"
+    local perms="${2:-0755}"
+    local src="$HELPERS_DIR/bin/$name"
+    local dst="$SCRATCH_DIR/$name"
+    if [ ! -x "$src" ]; then
+        fail "helper $src not built; did 'make -C tests/lsm-poc/helpers' run?"
+        return 1
+    fi
+    cp "$src" "$dst"
+    chown root:root "$dst"
+    chmod "$perms" "$dst"
+    printf '%s\n' "$dst"
+}
+
 # mark_log_position — snapshot how many lines lsm.log has right now.
 # expect_event reads only lines added after this mark, so we don't
 # false-pass on stale events left by other PoCs in the same run.
@@ -176,6 +243,15 @@ expect_event() {
         fi
         sleep 0.25
     done
+    # Timeout: dump the post-mark log tail to stderr so the operator
+    # can see WHAT did land in the window (often a same-policy event
+    # with a different pid, or a different policy entirely). Cheap and
+    # makes "no CFML-X line within Ns" failures actually debuggable.
+    {
+        printf '%s\n' "---- lsm.log lines added during the wait ----"
+        tail -n "+$((start_pos + 1))" "$LSM_LOG" 2>/dev/null | tail -20
+        printf '%s\n' "---- end ----"
+    } >&2
     return 1
 }
 

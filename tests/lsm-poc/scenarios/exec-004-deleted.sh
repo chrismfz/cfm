@@ -13,16 +13,20 @@ set -uo pipefail
 
 note "[EXEC-004] drop-unlink-exec as web-class uid $TEST_USER"
 ensure_test_user
+ensure_scratch_dir
 
-helper="$HELPERS_DIR/bin/deleted-exec"
-# The helper itself runs as the test user, so the watched-uid check in
-# the BPF program matches. The helper copies /bin/echo into a fresh
-# /tmp/.cfmpoc-deleted-XXXXXX file, opens it, unlinks it, then execs
-# the fd.
-trace "runuser -u $TEST_USER -- $helper /bin/echo cfm-poc-deleted-payload"
+# Stage the helper into SCRATCH_DIR so the test user (who has no
+# access to the source tree under /root/) can exec it.
+helper=$(stage_helper deleted-exec) || exit 1
+trace "runuser -u $TEST_USER -- $helper $SCRATCH_DIR /bin/echo cfm-poc-deleted-payload"
+
+# Give the test user write access to SCRATCH_DIR for this scenario
+# only — the helper needs to create its mkstemp staging file there.
+chmod 1777 "$SCRATCH_DIR"
+add_cleanup "chmod 0755 '$SCRATCH_DIR'"
 
 start_pos=$(mark_log_position)
-run_as_test_user "$helper" /bin/echo cfm-poc-deleted-payload &
+run_as_test_user "$helper" "$SCRATCH_DIR" /bin/echo cfm-poc-deleted-payload &
 trigger_pid=$!
 wait "$trigger_pid"
 trigger_rc=$?
