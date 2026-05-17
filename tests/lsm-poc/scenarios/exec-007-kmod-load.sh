@@ -21,6 +21,7 @@ set -uo pipefail
 . "$HARNESS_DIR/lib.sh"
 
 note "[EXEC-007] init_module / finit_module from non-trusted comm"
+require_policy_enabled CFML-EXEC-007
 ensure_scratch_dir
 
 src="$HELPERS_DIR/bin/kmod-loader"

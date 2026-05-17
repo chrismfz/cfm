@@ -24,6 +24,7 @@ set -uo pipefail
 . "$HARNESS_DIR/lib.sh"
 
 note "[FS-007] privilege-primitive install by watched uid $TEST_USER"
+require_policy_enabled CFML-FS-007
 ensure_test_user
 ensure_scratch_dir
 require_test_user_watched CFML-FS-007

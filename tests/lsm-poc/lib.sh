@@ -83,7 +83,15 @@ require_cfm_lsm_monitor() {
 # account. Tracks "we created this" in /var/run/cfmpoc.created so
 # cleanup_test_user only deletes users we owned.
 ensure_test_user() {
+    # Each scenario runs in its own subshell (see run-all.sh), so
+    # TEST_UID set by useradd-time discovery in the first scenario
+    # is lost by the time the second scenario sources lib.sh. The
+    # user itself persists (we created it on disk), but the variable
+    # doesn't — repopulate from the live passwd db when the user
+    # already exists so downstream helpers like test_user_is_watched
+    # have a uid to look up.
     if id -u "$TEST_USER" >/dev/null 2>&1; then
+        TEST_UID=$(id -u "$TEST_USER")
         return 0
     fi
     if [ -z "$TEST_UID" ]; then
@@ -146,6 +154,49 @@ test_user_is_watched() {
         return 0
     fi
     return 1
+}
+
+# require_policy_enabled — preflight that confirms a policy is at
+# least in monitor mode before running its trigger. The shipped
+# configs/lsm.conf template carries `mode = monitor` for every rule,
+# but operators who edited /etc/cfm/lsm.conf before a new rule was
+# added — or who installed the new cfm release without merging
+# template additions into their conf — see the new policy default
+# to ModeDisabled. Running the PoC trigger in that state would fail
+# silently (BPF program isn't attached, no event possible).
+#
+# Parses `cfm lsm status` for a line of the form
+#   CFML-XXX-NNN  mode=disabled  runtime=skip (...)
+# and SKIPs the scenario cleanly with an actionable hint when the
+# policy is disabled. Optimistic fall-through when the cfm CLI is
+# unavailable or the status output shape changes.
+require_policy_enabled() {
+    local rule="$1"
+    if ! command -v cfm >/dev/null 2>&1; then
+        warn "$rule: cfm CLI not on PATH; cannot verify policy mode (proceeding optimistically)"
+        return 0
+    fi
+    local mode
+    mode=$(cfm lsm status 2>/dev/null \
+        | awk -v p="$rule" '$1==p {sub(/^mode=/, "", $2); print $2; exit}')
+    case "$mode" in
+        monitor|enforce)
+            return 0
+            ;;
+        disabled|"")
+            warn "$rule SKIP: policy is mode=$mode in /etc/cfm/lsm.conf (or missing entirely)"
+            warn "  the BPF program for this rule isn't attached, so the trigger has nothing to catch."
+            warn "  to enable it, add this stanza to /etc/cfm/lsm.conf:"
+            warn "    [policy \"$rule\"]"
+            warn "    mode = monitor"
+            warn "  then run 'cfm lsm restart' and re-run this harness."
+            exit 0
+            ;;
+        *)
+            warn "$rule: unexpected mode=$mode in cfm lsm status; proceeding optimistically"
+            return 0
+            ;;
+    esac
 }
 
 # require_test_user_watched — preflight for scenarios whose rule

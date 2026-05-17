@@ -44,18 +44,20 @@ else
     warn "  cfm CLI not on PATH; skipping status check"
 fi
 
-# (2) bpftool sees at least one cfm_-prefixed program. The exact
-# program name varies (cfm_cred003 / cfm_cred003.0 / etc depending on
-# libbpf-tools version), so we just look for the prefix.
-if command -v bpftool >/dev/null 2>&1; then
-    if bpftool prog list 2>/dev/null | grep -qE 'cfm_[a-z0-9_]+'; then
-        note "  bpftool prog list: at least one cfm_ program loaded"
-    else
-        warn "  bpftool prog list shows no cfm_ programs"
-        ok=0
-    fi
+# (2) The bpffs link pin for cfm_cred003 exists. This is the
+# authoritative kernel-side signal — the pin is created by
+# `cfm lsm enable` only when the fentry/commit_creds attach
+# actually succeeded. We check the file directly rather than parsing
+# `bpftool prog list` because the latter's output format varies
+# between bpftool versions (EL10 / EL9 / Debian all differ in
+# whether prog->aux->name appears, and the cilium-ebpf-loaded
+# programs sometimes show up without the cfm_ prefix in the
+# default human-readable view).
+if [ -e /sys/fs/bpf/cfm/links/cfm_cred003 ]; then
+    note "  bpffs link pin /sys/fs/bpf/cfm/links/cfm_cred003 present"
 else
-    warn "  bpftool not installed; skipping kernel-side attach check"
+    warn "  bpffs link pin for cfm_cred003 missing — fentry/commit_creds did not attach"
+    ok=0
 fi
 
 # (3) drain is healthy — fire EXEC-001 (cheapest, no scratch dir
