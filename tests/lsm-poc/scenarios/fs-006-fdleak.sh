@@ -38,4 +38,17 @@ if hit=$(expect_event "$start_pos" "CFML-FS-006"); then
     exit 0
 fi
 fail "no CFML-FS-006 line in $LSM_LOG within ${EXPECT_TIMEOUT}s"
+# Likely cause: /etc/shadow's inode has rotated since the cfm-lsm
+# daemon last ran PopulateMaps. Background password / chage / cron
+# activity occasionally rewrites shadow (creates shadow.new, renames
+# over shadow), which changes its inode. The watched_inodes map
+# still has the old inode → BPF returns early on the lookup.
+#
+# Verify with:
+#   stat -c 'live ino=%i' /etc/shadow
+#   bpftool map dump pinned /sys/fs/bpf/cfm/maps/cfm_watched_inodes \
+#     | grep -E 'key|ino'
+# Resolve with: cfm lsm restart  (re-runs PopulateMaps).
+warn "  if this is the second+ FAIL of the session, '/etc/shadow' inode likely rotated"
+warn "  re-run 'cfm lsm restart' to refresh cfm_watched_inodes and try again"
 exit 1

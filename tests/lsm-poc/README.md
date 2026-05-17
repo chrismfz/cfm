@@ -118,6 +118,75 @@ The harness emits a final summary table with per-scenario PASS / FAIL
 / SKIP and exits non-zero if any scenario failed unless
 `--keep-going` was passed.
 
+## Diagnostics for partial-PASS runs
+
+### "scenario SKIPped because test user is not in cfm_watched_uids"
+
+EXEC-004, EXEC-006, and FS-005 are gated on the calling task's uid
+being in the `cfm_watched_uids` BPF map. On a host with a
+cPanel / DirectAdmin / Plesk manifest, the daemon populates that
+map from the panel's account list and skips the uid-range fallback.
+The harness's throwaway `cfmpoc` user (uid 1500) is then **not** in
+the map and those three rules won't fire from it.
+
+To make the harness exercise those rules on a panel host:
+
+```sh
+# 1. Edit /etc/cfm/lsm.conf, change:
+#       watched_uid_fallback_min = -1
+#    to:
+#       watched_uid_fallback_min = 1500
+# 2. Apply:
+sudo cfm lsm restart
+# 3. Re-run the harness. EXEC-004 / EXEC-006 / FS-005 should now PASS.
+# 4. After testing, restore watched_uid_fallback_min = -1 and
+#    `cfm lsm restart` again.
+```
+
+Inspect the live map to confirm:
+
+```sh
+sudo bpftool map dump pinned /sys/fs/bpf/cfm/maps/cfm_watched_uids
+```
+
+### "no CFML-FS-006 line within Ns" after FS-006 PASSed previously
+
+Background activity that rewrites `/etc/shadow` (`passwd` /
+`chage` / `cron` shadow rotation) changes the file's inode. The
+`cfm_watched_inodes` map still has the old inode from the last
+`PopulateMaps` run; the live read goes to a different inode, the BPF
+lookup misses, and FS-006 stays silent.
+
+Compare live inode to the cached map:
+
+```sh
+stat -c 'live ino=%i' /etc/shadow
+sudo bpftool map dump pinned /sys/fs/bpf/cfm/maps/cfm_watched_inodes \
+  | grep -A1 key
+```
+
+Resolve by re-running `sudo cfm lsm restart` — it re-runs
+`PopulateMaps` against the live filesystem.
+
+### "no CFML-CRED-002 line" with a setuid-bit dropper
+
+If you write your own CRED-002 PoC: the rule fires on
+`task_fix_setuid` (the LSM hook for the setuid SYSCALL family) but
+**not** on execve's setuid-bit elevation (which uses
+`bprm_creds_for_exec`). A `chmod 4755` dropper that does `setuid(0)`
+inside `main()` sees `old_euid == 0` already (set by execve), so
+CRED-002 returns early on the "already root" check.
+
+The right trigger is `cap_setuid+ep` file capabilities:
+
+```sh
+setcap cap_setuid+ep /tmp/.bd  # no setuid bit, just cap_setuid
+```
+
+The shipped scenario does exactly this — same threat model as a
+suid-bit dropper, but with a privilege primitive that `task_fix_setuid`
+actually observes.
+
 ## Maintenance
 
 When a detector's trigger condition changes (e.g. a new dimension

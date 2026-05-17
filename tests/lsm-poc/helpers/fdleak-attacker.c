@@ -55,6 +55,19 @@ int main(int argc, char **argv)
     int fd = open(path, O_RDONLY);
     if (fd < 0) { perror("open"); return 1; }
 
+    /* Print the inode of the opened file so the harness can compare
+     * against the cfm_watched_inodes map dump. If /etc/shadow has
+     * been rewritten (passwd / chage / cron-managed shadow rotation)
+     * since the daemon's last PopulateMaps, the live inode won't
+     * match the cached one and FS-006 won't fire — that's a stale
+     * map, not a detector bug. `bpftool map dump pinned
+     * /sys/fs/bpf/cfm/maps/cfm_watched_inodes` shows what's cached. */
+    struct stat st;
+    if (fstat(fd, &st) == 0) {
+        fprintf(stderr, "fdleak: opened %s ino=%llu (compare to cfm_watched_inodes map dump)\n",
+                path, (unsigned long long)st.st_ino);
+    }
+
     /* Step 2: drop privileges entirely. setresuid with all three
      * arguments equal kills the saved-uid escape hatch, so the task
      * is genuinely a non-root euid from the kernel's POV. */

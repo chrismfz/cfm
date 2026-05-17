@@ -14,6 +14,7 @@ set -uo pipefail
 note "[EXEC-004] drop-unlink-exec as web-class uid $TEST_USER"
 ensure_test_user
 ensure_scratch_dir
+require_test_user_watched CFML-EXEC-004
 
 # Stage the helper into SCRATCH_DIR so the test user (who has no
 # access to the source tree under /root/) can exec it.
