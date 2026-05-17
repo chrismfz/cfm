@@ -177,8 +177,16 @@ require_policy_enabled() {
         return 0
     fi
     local mode
+    # `cfm lsm status` mentions each policy twice:
+    #   - In the [Pinned BPF state] section as a bare token:  CFML-FS-007
+    #   - In the [Policies] section as:  CFML-FS-007  mode=monitor  runtime=...
+    # Without the `$2 ~ /^mode=/` guard, awk matched the pinned-state
+    # line first, returned an empty mode, and the SKIP message printed
+    # `policy is mode=` with nothing after the `=`. Requiring the
+    # `mode=` prefix makes us skip the bare-token line and reach the
+    # actual policy table row.
     mode=$(cfm lsm status 2>/dev/null \
-        | awk -v p="$rule" '$1==p {sub(/^mode=/, "", $2); print $2; exit}')
+        | awk -v p="$rule" '$1==p && $2 ~ /^mode=/ {sub(/^mode=/, "", $2); print $2; exit}')
     case "$mode" in
         monitor|enforce)
             return 0
@@ -211,8 +219,9 @@ require_policy_enabled() {
 # failure.
 #
 # The operator can either:
-#   - set watched_uid_fallback_min = $TEST_UID in /etc/cfm/lsm.conf
-#     and run `cfm lsm restart`, OR
+#   - set watched_uid_fallback_min = 1000 in /etc/cfm/lsm.conf (the
+#     login.defs UID_MIN convention; includes every regular account
+#     including the test user at uid 1500) and run `cfm lsm restart`, OR
 #   - move TEST_USER to a uid that the host's panel manifest already
 #     includes (DA / cPanel / Plesk reseller account, etc.)
 require_test_user_watched() {
@@ -224,8 +233,9 @@ require_test_user_watched() {
         1)
             warn "$rule SKIP: test user $TEST_USER (uid=$TEST_UID) is not in cfm_watched_uids"
             warn "  the host has a panel manifest (cPanel/DA/Plesk) that overrides the uid fallback"
-            warn "  to include cfmpoc, edit /etc/cfm/lsm.conf:"
-            warn "    watched_uid_fallback_min = $TEST_UID"
+            warn "  to include cfmpoc (and every other uid >= 1000, the login.defs UID_MIN"
+            warn "  convention), edit /etc/cfm/lsm.conf:"
+            warn "    watched_uid_fallback_min = 1000"
             warn "  then run 'cfm lsm restart' and re-run this harness"
             exit 0
             ;;

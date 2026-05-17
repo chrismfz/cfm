@@ -138,13 +138,20 @@ To make the harness exercise those rules on a panel host:
 # 1. Edit /etc/cfm/lsm.conf, change:
 #       watched_uid_fallback_min = -1
 #    to:
-#       watched_uid_fallback_min = 1500
+#       watched_uid_fallback_min = 1000      # login.defs UID_MIN convention
 # 2. Apply:
 sudo cfm lsm restart
 # 3. Re-run the harness. EXEC-004 / EXEC-006 / FS-005 should now PASS.
 # 4. After testing, restore watched_uid_fallback_min = -1 and
 #    `cfm lsm restart` again.
 ```
+
+1000 is the production-realistic value: it matches `/etc/login.defs`'s
+`UID_MIN` on every modern distro, so the watched-uid set includes
+every regular login account on the host — exactly what you want
+post-test-window for catching webshell behavior on a real workload.
+The throwaway `cfmpoc` user the harness creates lives at uid 1500
+and falls inside that range.
 
 Inspect the live map to confirm:
 
