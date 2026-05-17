@@ -238,4 +238,6 @@ func (f *EventFilter) addPathPrefixes(id PolicyID, prefixes []string) {
 // is editing the actual effective allowlist — no compiled-in defaults
 // silently re-add entries the operator deliberately removed. A daemon
 // running against a config that pre-dates `[allow]` will see no
-// suppression and the operator can regenerate via `cfm lsm init`.
+// suppression and the operator can refresh by diffing the shipped
+// configs/lsm.conf template into their /etc/cfm/lsm.conf and running
+// `cfm lsm restart`.

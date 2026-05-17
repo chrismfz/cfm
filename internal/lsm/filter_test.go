@@ -270,10 +270,12 @@ allow_exe = /usr/sbin/postfix
 	}
 }
 
-// TestDefaultConf_GlobalAllowSeeded documents the contract that a
-// fresh `cfm lsm init` writes a ready-to-use allowlist covering the
-// universal false-positive surface (postfix, dovecot, sshd, systemd
-// privsep helpers, container runtimes).
+// TestDefaultConf_GlobalAllowSeeded documents the contract that the
+// shipped configs/lsm.conf template (and the in-memory DefaultConf()
+// used for FormatConf round-trips and external bootstrappers) carries
+// a ready-to-use allowlist covering the universal false-positive
+// surface (postfix, dovecot, sshd, systemd privsep helpers, container
+// runtimes).
 func TestDefaultConf_GlobalAllowSeeded(t *testing.T) {
 	c := DefaultConf()
 	if len(c.GlobalAllowExe) == 0 {

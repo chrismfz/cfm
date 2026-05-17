@@ -33,7 +33,7 @@ const defaultWatchedUidFallbackMin = 1000
 // supported — origin-only matches never enforce yet). DefaultConf
 // and ParseConf both seed from this so an operator whose lsm.conf
 // has no origin_tracking line gets the same behaviour as the shipped
-// template and as `cfm lsm init`'s generated default.
+// configs/lsm.conf template.
 const defaultFS005WebOriginMonitor = true
 
 // Conf is the parsed contents of /etc/cfm/lsm.conf.

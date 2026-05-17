@@ -64,6 +64,26 @@ func RunInit(w io.Writer) int {
 	// Step 2: enable. AssumeYes=true because init is the no-prompt
 	// bring-up path; an operator running it knows they want to
 	// activate. Per-policy enforce decisions stay in lsm.conf.
+	//
+	// Idempotency: detect already-pinned state up front. RunEnable
+	// returns rc=1 with "cfm-lsm is already enabled" when InspectPinned
+	// sees existing pins, which would otherwise make `cfm lsm init`
+	// non-idempotent — re-running for convergence (Ansible, systemd
+	// ConditionPathExists wrappers, manual operator iteration) would
+	// see failures. The convergent contract here is "ensure cfm-lsm
+	// is up"; if it's already up, just refresh the operator's view
+	// of state and exit 0.
+	if InspectPinned(DefaultPinDir).Exists {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "===== cfm lsm init: already enabled =====")
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "cfm-lsm is already enabled (pinned state at %s).\n", DefaultPinDir)
+		fmt.Fprintln(w, "Showing current status without re-attaching.")
+		fmt.Fprintln(w)
+		RunStatus(w, StatusOptions{})
+		return 0
+	}
+
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "===== cfm lsm init: enable =====")
 	fmt.Fprintln(w)

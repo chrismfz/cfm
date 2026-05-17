@@ -1180,7 +1180,7 @@ or prevent other enabled policies from attaching.
 | `cfm lsm` | Alias for `cfm lsm status`. Read-only. |
 | `cfm lsm status [--json]` | Preflight + lsm.conf state + live pinned attach state. Read-only. |
 | `cfm lsm preview` | Predicts what `cfm lsm enable` would attach given the current conf + kernel. Read-only; never opens the kernel. |
-| `cfm lsm init` | Writes the default `/etc/cfm/lsm.conf` if absent. |
+| `cfm lsm init` | One-shot bring-up: preflight + enable + status. Requires `/etc/cfm/lsm.conf` to exist already (install the rpm/deb or copy `configs/lsm.conf` from the source tree). Idempotent: skips enable when already pinned. |
 | `cfm lsm enable` | Loads, attaches, and pins the BPF programs + ringbuf map to `/sys/fs/bpf/cfm/`. Programs stay attached past daemon and CLI exit. Needs root. |
 | `cfm lsm disable` | Removes everything pinned under `/sys/fs/bpf/cfm/`. The kernel detaches the programs when the last reference drops. Needs root. |
 | `cfm lsm help` | Usage. |
@@ -1358,9 +1358,12 @@ ones (e.g. the CRED-003 PR that landed on top of CRED-002):
    `cfmlsm_*_bpfel.{go,o}` files must update.
 6. Update `events.go` if the wire format changed. Keep
    `TestPolicyByID_BPFConstantsMatchGoConstants` passing.
-7. Extend `configs/lsm.conf` with a stanza for the new ID.
-   `cfm lsm init`'s generated output picks the new policy up
-   automatically via `AllPolicies()`.
+7. Extend `configs/lsm.conf` with a stanza for the new ID — the
+   shipped template is the authoritative starting point operators
+   install at `/etc/cfm/lsm.conf`. The `FormatConf` round-trip in
+   the test suite also iterates `AllPolicies()`, so omitting the
+   new ID from the catalogue would surface as a test failure even
+   without a manual edit.
 8. If the new policy needs an LSM hook that the kernel may not
    expose as a tracing target (as with CRED-003's
    `fentry/commit_creds`), report it through preflight as a
