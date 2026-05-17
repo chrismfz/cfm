@@ -1,0 +1,121 @@
+# cfm-lsm PoC harness
+
+End-to-end proof-of-concept harness that exercises every detector
+shipped under `internal/lsm/` against realistic post-exploit
+threat scenarios. Each PoC is the smallest realistic workflow an
+attacker would actually run; the harness then tails `/var/log/cfm/lsm.log`
+and confirms the expected `CFML-XXX-NNN` line appears.
+
+The PoCs are **deliberately destructive primitives**: dropped setuid
+binaries, fileless memfd payloads, sensitive-file writes by web
+users, BPF map creation from non-trusted comms. They are exactly what
+the LSM is supposed to catch — running them on a test host gives
+you a reproducible baseline of detection.
+
+## Hard rules — read before running
+
+1. **Test host only.** Never run on production. The harness creates a
+   throwaway `cfmpoc` user, temporarily loosens permissions on a
+   sentinel file under `/etc/sudoers.d/`, drops setuid binaries in
+   `/tmp`, and other state changes that are routine for a scratch
+   VM but unacceptable on a live server.
+
+2. **cfm-lsm must be in `mode = monitor`.** The PoCs are designed to
+   fire the rule; in enforce mode the kernel will refuse the
+   underlying syscall and the test will report a different failure.
+   The harness checks this and refuses to run if any policy is in
+   enforce mode (override with `--allow-enforce` once you've read
+   that section below).
+
+3. **Cleanup is best-effort.** A `trap` runs on every exit path, but
+   `kill -9` of the harness can leave the test user, sentinel files,
+   and `/tmp/cfmpoc-*` artefacts behind. `make clean` removes them
+   manually.
+
+4. **Some PoCs need a network socket.** EXEC-003 / EXEC-005 open a
+   loopback TCP listener on a randomly chosen port (default 4444).
+   Pass `--listener-port N` to override. If your test box has
+   nothing listening on 0.0.0.0, this is harmless; if it does, pick
+   a different port.
+
+5. **CRED-003 has no clean userland PoC.** The rule fires on direct
+   `commit_creds()` calls that bypass `task_fix_setuid` — that path
+   is reachable only via a kernel exploit or a custom kernel module.
+   The CRED-003 scenario reports the hook's attached state from
+   `bpftool prog list` and links to an out-of-tree kernel-module
+   variant for operators who want full coverage.
+
+## Usage
+
+```sh
+# Build the C helpers (requires gcc + kernel headers for the bpf one)
+make -C tests/lsm-poc/helpers
+
+# Run every scenario; fail fast on first mismatch
+sudo tests/lsm-poc/run-all.sh
+
+# Run a single scenario
+sudo tests/lsm-poc/scenarios/exec-001-memfd.sh
+
+# Continue on failure to collect a full report
+sudo tests/lsm-poc/run-all.sh --keep-going
+
+# Verbose mode shows the trigger commands as they execute
+sudo tests/lsm-poc/run-all.sh -v
+```
+
+## What each scenario proves
+
+| Rule | Scenario | Threat model |
+|---|---|---|
+| CFML-EXEC-001 | `exec-001-memfd.sh` | Fileless ELF loader: payload lives only in a `memfd_create` fd, never touches disk. The textbook fileless-malware pattern. |
+| CFML-EXEC-003 | `exec-003-revshell.sh` | Classic reverse shell: `bash -i` with stdin/stdout/stderr dup'd to a remote TCP socket in `ESTABLISHED` state. |
+| CFML-EXEC-004 | `exec-004-deleted.sh` | Drop-unlink-exec by a web-class uid: webshell writes a binary to `/tmp`, opens it, unlinks the path, then `fexecve()`s the still-open fd to break forensics. |
+| CFML-EXEC-005 | `exec-005-interp.sh` | Weak reverse-shell variant: interpreter (python/bash) with only one or two of stdin/stdout/stderr pointing at a remote TCP socket. Survives the strict-three-fd bypass. |
+| CFML-EXEC-006 | `exec-006-tmp.sh` | Web-class uid exec from `/tmp`: payload staged in `/tmp/.<obfuscated>` and exec'd by the same PHP-FPM-like worker that wrote it. Execution-phase companion to Imunify Proactive Defense's write-phase guard. |
+| CFML-FS-005 | `fs-005-sensitive.sh` | Post-privesc cash-in: web user (after gaining root via any other bug) writes to `/etc/sudoers.d/` to install a persistent backdoor. |
+| CFML-FS-006 | `fs-006-fdleak.sh` | Setuid-helper fd-leak class: a privileged process opens `/etc/shadow`, drops to a non-root uid, then reads through the fd it still holds. Same kernel-side fingerprint as the `pidfd_getfd` race against ssh-keysign / chage / unix_chkpwd. |
+| CFML-CRED-002 | `cred-002-suid-dropper.sh` | Post-exploit persistence: attacker dropped a setuid-root binary at `/tmp/.bd` during a transient root window. Subsequent runs by an unprivileged user re-acquire root without re-exploiting. The dropper is not on the disk-walked setuid path list, so CRED-002 fires. |
+| CFML-CRED-003 | `cred-003-direct-cred.sh` | Kernel-exploit fingerprint: direct `commit_creds(prepare_kernel_cred(NULL))` from ROP without going through `task_fix_setuid`. No clean userland PoC; scenario reports attached-state from `bpftool` and points to the optional kernel-module harness. |
+| CFML-BPF-001 | `bpf-001-mapcreate.sh` | BPF rootkit installer: untrusted comm calls `bpf(BPF_MAP_CREATE, ...)` and `bpf(BPF_PROG_LOAD, ...)` to set up a stealth tracing program. Real-world example: bvp47 / boopkit. |
+
+## File layout
+
+```
+tests/lsm-poc/
+├── README.md                      this file
+├── run-all.sh                     top-level harness
+├── lib.sh                         shared bash helpers
+├── scenarios/                     one .sh per detector
+└── helpers/                       small C programs the scenarios invoke
+    ├── Makefile
+    └── *.c
+```
+
+## What "PASS" actually means
+
+A PASS for a scenario means: between the moment the harness marked
+`lsm.log`'s position and the timeout, a line tagged with the
+expected policy ID appeared with a pid matching the trigger process.
+
+A FAIL means either:
+- the policy is in `disabled` (rule not loaded, no events possible),
+- the policy line never appeared within the timeout (detector miss),
+- the policy line appeared with the wrong pid (some other event
+  unrelated to this PoC — the harness flags this as a probable
+  false-positive in the log rather than a genuine PASS).
+
+The harness emits a final summary table with per-scenario PASS / FAIL
+/ SKIP and exits non-zero if any scenario failed unless
+`--keep-going` was passed.
+
+## Maintenance
+
+When a detector's trigger condition changes (e.g. a new dimension
+added to CFML-CRED-002's setuid check), the corresponding scenario
+script needs to be updated to keep firing the rule. Add the new
+allowlist dimension to `internal/lsm/conf.go` AND a matching
+"this would still fire" PoC variant under `scenarios/`. The point
+of the harness is regression coverage — a quiet `run-all.sh` after
+an allowlist tightening is the early warning that the tightening
+went too far.
