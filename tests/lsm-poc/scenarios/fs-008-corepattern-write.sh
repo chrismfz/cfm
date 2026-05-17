@@ -24,6 +24,7 @@ set -uo pipefail
 
 KNOB="/proc/sys/kernel/core_pattern"
 note "[FS-008] write to $KNOB from non-trusted comm"
+require_policy_enabled CFML-FS-008
 ensure_scratch_dir
 
 if [ ! -e "$KNOB" ]; then

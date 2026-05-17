@@ -38,17 +38,48 @@ if hit=$(expect_event "$start_pos" "CFML-FS-006"); then
     exit 0
 fi
 fail "no CFML-FS-006 line in $LSM_LOG within ${EXPECT_TIMEOUT}s"
+
 # Likely cause: /etc/shadow's inode has rotated since the cfm-lsm
 # daemon last ran PopulateMaps. Background password / chage / cron
 # activity occasionally rewrites shadow (creates shadow.new, renames
 # over shadow), which changes its inode. The watched_inodes map
 # still has the old inode → BPF returns early on the lookup.
 #
-# Verify with:
-#   stat -c 'live ino=%i' /etc/shadow
-#   bpftool map dump pinned /sys/fs/bpf/cfm/maps/cfm_watched_inodes \
-#     | grep -E 'key|ino'
-# Resolve with: cfm lsm restart  (re-runs PopulateMaps).
-warn "  if this is the second+ FAIL of the session, '/etc/shadow' inode likely rotated"
-warn "  re-run 'cfm lsm restart' to refresh cfm_watched_inodes and try again"
+# Auto-diagnose: stat the live file and compare its inode to the
+# values the BPF map currently holds. If they don't intersect, the
+# map is stale and the operator should re-run `cfm lsm restart`.
+live_ino=$(stat -c '%i' /etc/shadow 2>/dev/null)
+warn "  /etc/shadow live inode: ${live_ino:-unreadable}"
+if command -v bpftool >/dev/null 2>&1 && [ -e /sys/fs/bpf/cfm/maps/cfm_watched_inodes ]; then
+    # bpftool dumps {"key":[byte0,byte1,...], "value":[...]}. The key
+    # is cfm_inode_key { dev:u64, ino:u64 } in little-endian — bytes
+    # 8-15 are the ino. We extract every ino in the map and grep
+    # for the live one.
+    cached_inos=$(bpftool map dump pinned /sys/fs/bpf/cfm/maps/cfm_watched_inodes 2>/dev/null \
+        | awk '/key:/{found=1; bytes=""} found && /value:/{found=0; print bytes} found{bytes=bytes" "$0}')
+    if [ -n "$live_ino" ] && [ -n "$cached_inos" ]; then
+        # Format live_ino as the 8-byte little-endian hex pattern
+        # bpftool prints. uint64; we only need to print as much as
+        # the inode actually consumes (typically 4 bytes for ext4 +
+        # 4 zero bytes).
+        hexkey=$(printf '%02x %02x %02x %02x %02x %02x %02x %02x' \
+            $(( live_ino        & 0xff )) \
+            $(( (live_ino >>  8) & 0xff )) \
+            $(( (live_ino >> 16) & 0xff )) \
+            $(( (live_ino >> 24) & 0xff )) \
+            $(( (live_ino >> 32) & 0xff )) \
+            $(( (live_ino >> 40) & 0xff )) \
+            $(( (live_ino >> 48) & 0xff )) \
+            $(( (live_ino >> 56) & 0xff )))
+        if printf '%s\n' "$cached_inos" | grep -qiF "$hexkey"; then
+            warn "  cached map DOES contain /etc/shadow's live inode — different root cause"
+            warn "  (rate cap? hook unattached? check 'cfm lsm status')"
+        else
+            warn "  cached map does NOT contain /etc/shadow's live inode — inode rotated under daemon"
+            warn "  resolve with: cfm lsm restart"
+        fi
+    fi
+else
+    warn "  install bpftool to auto-compare live vs cached inode on next FAIL"
+fi
 exit 1
