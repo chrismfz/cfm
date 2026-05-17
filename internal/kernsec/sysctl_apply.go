@@ -31,6 +31,12 @@ var readLiveSysctl = ReadSysctl
 // by rebooting onto the paired boot arg.
 var stickyOneWaySysctls = map[string]bool{
 	"kernel.unprivileged_bpf_disabled": true,
+	// kexec_load_disabled is also one-way sticky: once non-zero, the
+	// kernel refuses every subsequent write with EPERM until reboot.
+	// Without this registration, the second `cfm kernsec apply` after
+	// the first successful one would fail rc=1 trying to re-write the
+	// same value we already set.
+	"kernel.kexec_load_disabled": true,
 }
 
 // stickyAdvisoryBootArg names the matching boot arg an operator
@@ -50,6 +56,10 @@ var stickyAdvisoryBootArg = map[string]string{
 // must be added to the other.
 var stickyAcceptValues = map[string][]string{
 	"kernel.unprivileged_bpf_disabled": {"1"},
+	// kexec_load_disabled accepts only the sticky target value (1) as
+	// already-acceptable. No alternative value can land at runtime
+	// (writes after the first one return EPERM).
+	"kernel.kexec_load_disabled": {"1"},
 }
 
 // SysctlPath is where kernsec persists the sysctl rule set. Number 99

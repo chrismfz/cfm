@@ -119,6 +119,24 @@ type MountRule struct {
 	// disable reverts only the options kernsec actually added on
 	// top of the distro baseline, never the baseline itself.
 	DefaultLiveOptions string
+
+	// OptionAliases lets a recommended option match alternative live
+	// renderings the kernel may show in /proc/mounts. The key is the
+	// canonical option as written in Recommended (e.g. "hidepid=2");
+	// the value is a list of equivalents that, when present in the
+	// live options column, satisfy the recommendation.
+	//
+	// The /proc hidepid knob is the motivating case: kernels >=5.8
+	// render hidepid=2 as the string `hidepid=invisible`, and
+	// hidepid=4 / hidepid=ptraceable are strictly stricter variants
+	// that should not produce a false-positive MISSING. Without this
+	// map the audit row would render as permanently MISSING on every
+	// correctly-configured modern host.
+	//
+	// Matching is by literal-token equality on either the canonical
+	// recommendation OR any alias in the list; whitespace is trimmed.
+	// Nil/empty is the default — most rules don't need aliases.
+	OptionAliases map[string][]string
 }
 
 // KSPPSysctls is the server-safe sysctl profile from kspp.sh.

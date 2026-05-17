@@ -258,17 +258,26 @@ func detectLivePatchingModules() bool {
 // (kernel.kexec_load_disabled=1) to auto-skip on hosts where the
 // sysctl would break crash-dump preloading.
 //
-// Two signals — either is sufficient evidence that the operator wants
-// kdump usable:
+// Three signals — any one is sufficient evidence that the operator
+// wants kdump usable:
 //
 //   - crashkernel= in /proc/cmdline. kdump requires a reserved memory
 //     region for the crash kernel; the boot arg is the bootloader's
 //     side of that contract. Present even on freshly-booted hosts
 //     where the kdump userspace hasn't been started yet.
-//   - kdump.service / kdump-tools.service installed (unit file present).
+//   - /sys/kernel/kexec_crash_loaded reports 1. The kernel sets this
+//     to 1 exactly when a crash kernel image has been loaded via
+//     kexec_load(KEXEC_ON_CRASH); it's the definitive runtime signal
+//     that kdump is armed right now. Catches operator-driven
+//     `kexec -p` invocations that bypass the unit file entirely.
+//   - kdump.service / kdump-tools.service installed AND not masked.
 //     We don't check is-active because operators routinely keep the
 //     service installed-but-stopped while debugging an unrelated
-//     issue; the unit file's existence already signals intent.
+//     issue; the unit file's existence already signals intent. We DO
+//     filter out masked units (symlink → /dev/null) because a masked
+//     unit is the operator explicitly disabling kdump — gating the
+//     sysctl on a disabled-but-package-installed kdump-tools would
+//     be the wrong direction.
 //
 // Layered probe so we err on the side of caution — the cost of
 // false-positive "kdump present" is one skipped sysctl with a clear
@@ -283,16 +292,51 @@ func detectKdump() bool {
 			}
 		}
 	}
+	// /sys/kernel/kexec_crash_loaded == "1" → a crash kernel is
+	// loaded into the kexec slot right now. Definitive runtime
+	// signal, independent of unit-file presence.
+	if b, err := os.ReadFile(hostProfilePath("/sys/kernel/kexec_crash_loaded")); err == nil {
+		if strings.TrimSpace(string(b)) == "1" {
+			return true
+		}
+	}
 	// kdump service / unit file present (RHEL: kdump.service, Debian/
-	// Ubuntu: kdump-tools.service).
-	return anyPathExists(
+	// Ubuntu: kdump-tools.service). Masked units (symlink → /dev/null)
+	// are an explicit operator disable and don't count.
+	for _, p := range []string{
 		"/usr/lib/systemd/system/kdump.service",
 		"/lib/systemd/system/kdump.service",
 		"/etc/systemd/system/kdump.service",
 		"/usr/lib/systemd/system/kdump-tools.service",
 		"/lib/systemd/system/kdump-tools.service",
 		"/etc/systemd/system/kdump-tools.service",
-	)
+	} {
+		if unitFilePresentAndNotMasked(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// unitFilePresentAndNotMasked reports whether a systemd unit-file path
+// exists and is NOT masked. systemd masks a unit by replacing it with a
+// symlink to /dev/null; the file is "present" by Stat but represents
+// the operator's explicit intent to disable the service. Treating a
+// masked kdump-tools.service as "kdump configured" would gate the
+// kexec sysctl exactly where the operator told us not to.
+func unitFilePresentAndNotMasked(unitPath string) bool {
+	resolved := hostProfilePath(unitPath)
+	info, err := os.Lstat(resolved)
+	if err != nil {
+		return false
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, lerr := os.Readlink(resolved)
+		if lerr == nil && (target == "/dev/null" || target == os.DevNull) {
+			return false
+		}
+	}
+	return true
 }
 
 // detectLibvirt reports whether libvirt is installed/running on this

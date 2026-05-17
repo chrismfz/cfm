@@ -426,4 +426,56 @@ func TestProcHidepidRule(t *testing.T) {
 	if d.State != MountMissingOptions && d.State != MountPartialOptions {
 		t.Errorf("default /proc mount audit state = %v, want MountMissingOptions or MountPartialOptions", d.State)
 	}
+
+	// On a host where the operator followed the recipe, the kernel
+	// renders hidepid=2 as either the literal "hidepid=2" (older
+	// kernels) or "hidepid=invisible" (kernels >=5.8). Both must
+	// satisfy the recommendation: any other behaviour would flag a
+	// correctly-configured host as permanently MISSING.
+	for _, live := range []string{
+		"rw,nosuid,nodev,noexec,relatime,hidepid=2,gid=1234",
+		"rw,nosuid,nodev,noexec,relatime,hidepid=invisible,gid=1234",
+		"rw,nosuid,nodev,noexec,relatime,hidepid=4,gid=1234",
+		"rw,nosuid,nodev,noexec,relatime,hidepid=ptraceable,gid=1234",
+	} {
+		mounts := "proc /proc proc " + live + " 0 0\n"
+		got := checkMountDetail(mounts, procRule, Tier1Mounts,
+			stubFS{}.lstat, stubFS{}.readlink, nil, nil)
+		if got.State != MountOK {
+			t.Errorf("live %q: state = %v, want MountOK (hidepid alias must satisfy recommendation)",
+				live, got.State)
+		}
+	}
+}
+
+// TestSplitMountOptionsAware_HidepidAliases is the unit test that
+// pins the alias-aware matching behaviour at the splitMountOptions
+// layer — independent of the /proc rule's specific catalogue entry,
+// so regressions in the rule definition can't mask regressions in
+// the matching function (and vice versa).
+func TestSplitMountOptionsAware_HidepidAliases(t *testing.T) {
+	aliases := map[string][]string{
+		"hidepid=2": {"hidepid=invisible", "hidepid=4", "hidepid=ptraceable"},
+	}
+	cases := []struct {
+		name        string
+		current     string
+		recommended string
+		wantMissing []string
+	}{
+		{"canonical hidepid=2 satisfies", "rw,hidepid=2", "hidepid=2", nil},
+		{"hidepid=invisible satisfies", "rw,hidepid=invisible", "hidepid=2", nil},
+		{"hidepid=4 satisfies (stricter)", "rw,hidepid=4", "hidepid=2", nil},
+		{"hidepid=ptraceable satisfies", "rw,hidepid=ptraceable", "hidepid=2", nil},
+		{"no hidepid at all → missing", "rw,relatime", "hidepid=2", []string{"hidepid=2"}},
+		{"unrelated alias rendering → missing", "rw,hidepid=0", "hidepid=2", []string{"hidepid=2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, missing := splitMountOptionsAware(tc.current, tc.recommended, aliases)
+			if !reflect.DeepEqual(missing, tc.wantMissing) {
+				t.Errorf("missing = %v, want %v", missing, tc.wantMissing)
+			}
+		})
+	}
 }

@@ -278,6 +278,14 @@ func recommendedFstabLine(rule MountRule) string {
 	case "/tmp", "/var/tmp":
 		return fmt.Sprintf("tmpfs %s tmpfs defaults,%s,size=4G,mode=1777 0 0",
 			rule.MountPoint, rule.Recommended)
+	case "/proc":
+		// /proc is a kernel pseudo-fs; source and fstype are both
+		// `proc`. The gid=<group> escape valve is part of the
+		// operator-facing recipe (Recommended carries only the
+		// audit-checkable hidepid token), so the suggested line
+		// includes the placeholder explicitly.
+		return fmt.Sprintf("proc %s proc defaults,%s,gid=<group> 0 0",
+			rule.MountPoint, rule.Recommended)
 	}
 	return fmt.Sprintf("<DEVICE> %s <FSTYPE> defaults,%s 0 0",
 		rule.MountPoint, rule.Recommended)
