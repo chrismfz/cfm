@@ -31,11 +31,29 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+/* Fallback syscall numbers for hosts whose libc headers don't ship
+ * the __NR_kexec_{,file_}load defines (musl, very old glibc, some
+ * cross-compile environments). Numbers are arch-specific — using the
+ * x86_64 values on arm64 would issue the wrong syscall (mq_open on
+ * arm64), the kexec tracepoint would never fire, and the PoC would
+ * silently report failure.
+ *
+ *   x86_64 (asm/unistd_64.h):    kexec_load=246, kexec_file_load=320
+ *   arm64  (asm-generic/unistd): kexec_load=104, kexec_file_load=294
+ */
 #ifndef __NR_kexec_load
-#define __NR_kexec_load 246
+# if defined(__aarch64__)
+#  define __NR_kexec_load 104
+# else
+#  define __NR_kexec_load 246
+# endif
 #endif
 #ifndef __NR_kexec_file_load
-#define __NR_kexec_file_load 320
+# if defined(__aarch64__)
+#  define __NR_kexec_file_load 294
+# else
+#  define __NR_kexec_file_load 320
+# endif
 #endif
 
 int main(void)

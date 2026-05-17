@@ -41,7 +41,7 @@ const (
 	bpfKmodOpInit     uint8 = 30
 	bpfKmodOpFinit    uint8 = 31
 	bpfKexecOpLoad    uint8 = 32
-	bpfKexecOpFileLd  uint8 = 33
+	bpfKexecOpFileLoad  uint8 = 33
 )
 
 // FSOp is the Go-side label for the file-system operation that
@@ -62,7 +62,7 @@ const (
 	KmodOpInit     FSOp = 30
 	KmodOpFinit    FSOp = 31
 	KexecOpLoad    FSOp = 32
-	KexecOpFileLd  FSOp = 33
+	KexecOpFileLoad  FSOp = 33
 )
 
 // String renders the operation as a short token suitable for logs
@@ -91,7 +91,7 @@ func (o FSOp) String() string {
 		return "finit_module"
 	case KexecOpLoad:
 		return "kexec_load"
-	case KexecOpFileLd:
+	case KexecOpFileLoad:
 		return "kexec_file_load"
 	}
 	return "none"

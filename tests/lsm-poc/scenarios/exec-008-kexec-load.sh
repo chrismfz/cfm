@@ -11,6 +11,16 @@
 # need a valid kernel image — bogus args still cause the tracepoint
 # to emit before the syscall returns -EPERM / -EINVAL / -ENOEXEC.
 #
+# Architecture / kernel-config note: kexec_load(2) is present on every
+# supported kernel + arch. kexec_file_load(2) on arm64 requires
+# CONFIG_KEXEC_FILE=y in the kernel build (default-on for distro
+# kernels but absent on some embedded arm64 boards); when missing,
+# the syscall returns -ENOSYS but the entry tracepoint still fires
+# and EXEC-008 still emits — exactly the desired behaviour. The
+# helper uses arch-guarded syscall-number fallbacks so the PoC works
+# on both x86_64 and arm64 even on libcs that don't ship the __NR_
+# defines.
+#
 # Trusted-comm allowlist: kexec / systemctl. The harness renames the
 # kexec-loader helper to a non-trusted comm before executing so the
 # BPF program doesn't suppress.
