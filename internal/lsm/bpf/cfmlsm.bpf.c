@@ -2077,4 +2077,159 @@ int cfm_exec007_finit(struct trace_event_raw_sys_enter *ctx)
     return cfm_exec007_check(CFM_KMOD_OP_FINIT);
 }
 
+/* ------------------------------------------------------------------- *
+ * CFML-FS-008 — write to a sensitive kernel knob.
+ *
+ * Hook: lsm/file_permission (every read/write through any fd)
+ *
+ * Threat: kernel-exploit completion + post-exploit persistence. The
+ * watched paths are the small set of /proc/sys and /sys nodes that
+ * every public Linux kernel exploit from the last five years pivots
+ * through once it has the write primitive:
+ *
+ *   /proc/sys/kernel/core_pattern      — pipe-to-program on coredump
+ *                                        (CVE-2022-0185, dirtypipe followup)
+ *   /proc/sys/kernel/modprobe_path     — substitute modprobe binary
+ *                                        (BPF verifier bug chains)
+ *   /proc/sys/kernel/hotplug           — uevent helper, legacy variant
+ *   /proc/sysrq-trigger                — magic sysrq for arbitrary
+ *                                        kernel actions
+ *   /sys/kernel/uevent_helper          — modern uevent helper
+ *   /proc/sys/fs/binfmt_misc/register  — register a binfmt handler
+ *                                        that runs on every matching exec
+ *
+ * Each of these gives the writer a path to run code as root on the
+ * next triggering event (a coredump / a binary that no userspace knows
+ * how to handle / a uevent firing / etc).
+ *
+ * Userspace populates cfm_kernel_knob_inodes from these paths at
+ * adoption time (paths absent on this kernel are skipped silently).
+ * The BPF program checks file inode against the map on every write-
+ * class access, comparing comm against a small trusted-writer set
+ * (cfm / sysctl / systemd / systemd-sysctl) before emitting.
+ *
+ * Mode: monitor by default. Enforce-capable but DEFAULT to monitor —
+ * an unanticipated legitimate writer of any of these knobs (operator
+ * tuning script, RPM postinstall) would otherwise silently fail.
+ * Promote to enforce after a 30-day monitor window confirms no in-
+ * the-wild legitimate writer.
+ * ------------------------------------------------------------------- */
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, struct cfm_inode_key);
+    __type(value, __u8);
+} cfm_kernel_knob_inodes SEC(".maps");
+
+volatile const __u8 cfm_enforce_kernel_knob_write = 0;
+
+/* Trusted writer comm allowlist. The legitimate sysctl pipeline is
+ * narrow: `sysctl(8)` and systemd-sysctl on boot / reload, cfm itself
+ * for the few knobs the kernsec subsystem manages. */
+static __always_inline bool cfm_comm_is_trusted_sysctl(const char *comm)
+{
+    if (!comm)
+        return false;
+
+    /* cfm — own daemon (kernsec subsystem applies sysctl tweaks) */
+    if (comm[0] == 'c' && comm[1] == 'f' && comm[2] == 'm' && comm[3] == '\0')
+        return true;
+
+    /* sysctl */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 'c' &&
+        comm[4] == 't' && comm[5] == 'l' && comm[6] == '\0')
+        return true;
+
+    /* systemd-sysctl. Real comm "systemd-sysctl" — fits in 15 chars. */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '-' &&
+        comm[8] == 's' && comm[9] == 'y' && comm[10] == 's' && comm[11] == 'c' &&
+        comm[12] == 't' && comm[13] == 'l' && comm[14] == '\0')
+        return true;
+
+    /* systemd (PID 1 writes some knobs during early boot) */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '\0')
+        return true;
+
+    return false;
+}
+
+static __always_inline void cfm_fs008_emit(struct file *file, const char *comm)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_KERNEL_KNOB_WRITE;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = CFM_OP_NONE;
+    e->flags     = 0;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
+
+    /* Best-effort filename via the file's dentry. For procfs these
+     * are short tokens like "core_pattern" / "sysrq-trigger". */
+    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
+    const unsigned char *name = NULL;
+    if (dentry)
+        name = BPF_CORE_READ(dentry, d_name.name);
+    if (name)
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), name);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+/* MAY_WRITE from include/linux/fs.h. The mask is a bitfield;
+ * MAY_EXEC=1, MAY_WRITE=2, MAY_READ=4, MAY_APPEND=8. We fire on
+ * any write-class access (write or append). */
+#define CFM_MAY_WRITE  2
+#define CFM_MAY_APPEND 8
+
+SEC("lsm/file_permission")
+int BPF_PROG(cfm_fs008, struct file *file, int mask, int ret)
+{
+    if (!file)
+        return ret;
+
+    /* Fast path: read-only access on most file_permission calls.
+     * Bail before any deref. */
+    if (!(mask & (CFM_MAY_WRITE | CFM_MAY_APPEND)))
+        return ret;
+
+    /* Inode in the watched-knob set? */
+    struct inode *inode = BPF_CORE_READ(file, f_inode);
+    struct cfm_inode_key key = {};
+    if (!cfm_inode_key_from_inode(inode, &key))
+        return ret;
+    if (!bpf_map_lookup_elem(&cfm_kernel_knob_inodes, &key))
+        return ret;
+
+    /* Trusted writer? Suppress. We compare task->comm rather than the
+     * exe identity because /sbin/sysctl and /usr/sbin/sysctl can be
+     * different inodes across distros — comm is the stable signal. */
+    char comm[CFM_TASK_COMM_LEN] = {};
+    bpf_get_current_comm(&comm, sizeof(comm));
+    if (cfm_comm_is_trusted_sysctl(comm))
+        return ret;
+
+    cfm_fs008_emit(file, comm);
+
+    if (cfm_enforce_kernel_knob_write)
+        return CFM_LSM_DENY;
+    return ret;
+}
+
 char LICENSE[] SEC("license") = "GPL";

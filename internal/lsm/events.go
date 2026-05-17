@@ -22,6 +22,7 @@ const (
 	bpfPolicyEphemeralExec       uint32 = 12
 	bpfPolicyPrivInstall         uint32 = 13
 	bpfPolicyKernelModuleLoad    uint32 = 14
+	bpfPolicyKernelKnobWrite     uint32 = 15
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
@@ -292,6 +293,8 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicyPrivInstall
 	case bpfPolicyKernelModuleLoad:
 		e.PolicyID = PolicyKernelModuleLoad
+	case bpfPolicyKernelKnobWrite:
+		e.PolicyID = PolicyKernelKnobWrite
 	default:
 		return Event{}, fmt.Errorf("unknown BPF policy_id %d", policyID)
 	}

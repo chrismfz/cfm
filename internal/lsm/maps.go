@@ -183,40 +183,90 @@ var DefaultPersistencePaths = []string{
 // and DefaultPersistencePaths separately so enforcement semantics stay clear.
 var DefaultSensitivePaths = append(append([]string{}, DefaultCoreSensitivePaths...), DefaultPersistencePaths...)
 
+// DefaultKernelKnobPaths is the set of /proc/sys and /sys nodes CFML-FS-008
+// watches for writes. Each is a kernel-exploit completion / persistence pivot
+// — writes go through file_permission and the BPF program suppresses callers
+// whose comm is in the trusted-writer set (sysctl / systemd-sysctl / systemd
+// / cfm). Paths absent on this kernel (CONFIG_MAGIC_SYSRQ=n, no
+// CONFIG_BINFMT_MISC, ...) are skipped silently by the populator.
+//
+// Note: these paths are stat()'d as ordinary files; the daemon reads
+// their procfs/sysfs inode and stores it in cfm_kernel_knob_inodes.
+// procfs / sysfs inodes are stable for the kernel-boot's lifetime,
+// which matches the daemon's adopt-on-start contract.
+var DefaultKernelKnobPaths = []string{
+	"/proc/sys/kernel/core_pattern",
+	"/proc/sys/kernel/modprobe_path",
+	"/proc/sys/kernel/hotplug",
+	"/proc/sysrq-trigger",
+	"/sys/kernel/uevent_helper",
+	"/proc/sys/fs/binfmt_misc/register",
+}
+
 // PopulateMaps populates the cfm-lsm map state from the live host
 // at adoption time. Called by the daemon's lifecycle.go after
 // AdoptPinned succeeds. Errors are logged but never fatal — a
 // partial population is far better than the daemon refusing to
 // start.
 //
-// The three maps:
-//   - cfm_watched_uids:    web-class user uids (from /etc/passwd +
-//     panel manifests)
-//   - cfm_watched_inodes:  core sensitive keys plus monitor-only persistence keys
-//   - cfm_setuid_inodes:   setuid-binary filesystem+inode keys (walks setuidWalkRoots)
-//     plus the operator-supplied allow_exe paths from conf for
-//     CFML-CRED-002.
+// The four maps:
+//   - cfm_watched_uids:        web-class user uids (from /etc/passwd +
+//                              panel manifests)
+//   - cfm_watched_inodes:      core sensitive keys plus monitor-only persistence keys
+//   - cfm_setuid_inodes:       setuid-binary filesystem+inode keys (walks setuidWalkRoots)
+//                              plus the operator-supplied allow_exe paths from conf for
+//                              CFML-CRED-002.
+//   - cfm_kernel_knob_inodes:  the small fixed set of sensitive /proc/sys and
+//                              /sys nodes CFML-FS-008 watches for writes.
 //
 // conf may be nil; in that case the allow_exe merge is skipped and
 // only the disk-walked suid binaries seed cfm_setuid_inodes.
-func PopulateMaps(l *Loader, conf *Conf) (uidsAdded, inodesAdded, setuidAdded int, err error) {
+func PopulateMaps(l *Loader, conf *Conf) (uidsAdded, inodesAdded, setuidAdded, knobsAdded int, err error) {
 	fallback := -1
 	if conf != nil {
 		fallback = conf.WatchedUidFallbackMin
 	}
 	uidsAdded, err = populateWatchedUids(l.WatchedUidsMap(), fallback)
 	if err != nil {
-		return uidsAdded, 0, 0, fmt.Errorf("watched uids: %w", err)
+		return uidsAdded, 0, 0, 0, fmt.Errorf("watched uids: %w", err)
 	}
 	inodesAdded, err = populateWatchedInodes(l.WatchedInodesMap(), DefaultCoreSensitivePaths, DefaultPersistencePaths, conf.PersistencePathsFor(PolicySensitiveWrite))
 	if err != nil {
-		return uidsAdded, inodesAdded, 0, fmt.Errorf("watched inodes: %w", err)
+		return uidsAdded, inodesAdded, 0, 0, fmt.Errorf("watched inodes: %w", err)
 	}
 	setuidAdded, err = populateSetuidInodes(l.SetuidInodesMap(), setuidWalkRoots, conf.AllowExeFor(PolicyCredEscal))
 	if err != nil {
-		return uidsAdded, inodesAdded, setuidAdded, fmt.Errorf("setuid inodes: %w", err)
+		return uidsAdded, inodesAdded, setuidAdded, 0, fmt.Errorf("setuid inodes: %w", err)
 	}
-	return uidsAdded, inodesAdded, setuidAdded, nil
+	knobsAdded, err = populateInodeSet(l.KernelKnobInodesMap(), DefaultKernelKnobPaths)
+	if err != nil {
+		return uidsAdded, inodesAdded, setuidAdded, knobsAdded, fmt.Errorf("kernel knob inodes: %w", err)
+	}
+	return uidsAdded, inodesAdded, setuidAdded, knobsAdded, nil
+}
+
+// populateInodeSet stat()s each path and inserts its (dev, ino) into m.
+// Missing paths are skipped silently — CFML-FS-008's watch list contains
+// paths whose presence depends on kernel config (CONFIG_MAGIC_SYSRQ,
+// CONFIG_BINFMT_MISC, ...). Map nil is treated as a "policy disabled"
+// silent-skip so the populator stays single-pass.
+func populateInodeSet(m *ebpf.Map, paths []string) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	one := uint8(1)
+	added := 0
+	for _, p := range paths {
+		key, ok := statInodeKey(p)
+		if !ok {
+			continue
+		}
+		if err := m.Put(key, &one); err != nil {
+			return added, fmt.Errorf("insert %s: %w", p, err)
+		}
+		added++
+	}
+	return added, nil
 }
 
 // resolveWatchedUidFallback decides whether to apply the uid-threshold

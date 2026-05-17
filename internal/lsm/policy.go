@@ -149,6 +149,30 @@ const (
 	// enforce is structurally impossible here. Use
 	// kernel.modules_disabled=1 to block at the kernel layer.
 	PolicyKernelModuleLoad PolicyID = "CFML-EXEC-007"
+
+	// PolicyKernelKnobWrite — CFML-FS-008: detect a write to one of
+	// the small set of /proc/sys and /sys kernel knobs that every
+	// public kernel exploit from the last five years pivots through
+	// once it has the write primitive:
+	//
+	//   /proc/sys/kernel/core_pattern     — pipe-to-program on coredump
+	//   /proc/sys/kernel/modprobe_path    — substitute modprobe binary
+	//   /proc/sys/kernel/hotplug          — legacy uevent helper
+	//   /proc/sysrq-trigger               — magic sysrq trigger
+	//   /sys/kernel/uevent_helper         — modern uevent helper
+	//   /proc/sys/fs/binfmt_misc/register — register binfmt exec handler
+	//
+	// Hook: file_permission. The userspace populator stats each path
+	// at adoption time and puts its inode in cfm_kernel_knob_inodes;
+	// paths absent on this kernel (CONFIG_MAGIC_SYSRQ=n etc.) skip
+	// silently. Writer comms in the trusted set (cfm / sysctl /
+	// systemd / systemd-sysctl) are suppressed.
+	//
+	// Mode: monitor by default. Enforce-capable but DEFAULT monitor —
+	// an unanticipated legitimate writer would otherwise silently
+	// fail. Promote to enforce after a 30-day monitor window confirms
+	// no in-the-wild legitimate writer outside the trusted set.
+	PolicyKernelKnobWrite PolicyID = "CFML-FS-008"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -279,6 +303,13 @@ func AllPolicies() []Policy {
 			Hook:        "tracepoint/syscalls/sys_enter_{init,finit}_module",
 			DefaultMode: ModeDisabled,
 			Description: "Detect a kernel module being loaded from outside the small trusted-loader set (modprobe / insmod / kmod / systemd / systemd-modules / systemd-udevd). Catches kernel-rootkit installer primitives. Monitor-only by design — tracepoint hooks are observation-only; pair with kernel.modules_disabled=1 (kernsec) for actual block.",
+		},
+		{
+			ID:          PolicyKernelKnobWrite,
+			Title:       "Write to a sensitive kernel knob",
+			Hook:        "file_permission",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a write to /proc/sys/kernel/{core_pattern,modprobe_path,hotplug} / /proc/sysrq-trigger / /sys/kernel/uevent_helper / /proc/sys/fs/binfmt_misc/register from outside the trusted-writer set (cfm / sysctl / systemd / systemd-sysctl). Catches kernel-exploit completion pivots through these knobs. Monitor by default; enforce-capable but requires telemetry first.",
 		},
 	}
 }

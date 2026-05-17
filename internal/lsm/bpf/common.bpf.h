@@ -28,6 +28,7 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_EPHEMERAL_EXEC    = 12, /* CFML-EXEC-006 */
     CFM_LSM_POLICY_PRIV_INSTALL      = 13, /* CFML-FS-007   */
     CFM_LSM_POLICY_KMOD_LOAD         = 14, /* CFML-EXEC-007 */
+    CFM_LSM_POLICY_KERNEL_KNOB_WRITE = 15, /* CFML-FS-008   */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the

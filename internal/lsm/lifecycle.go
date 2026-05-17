@@ -207,14 +207,14 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	// be stale (new cPanel/DA accounts, newly-installed setuid
 	// binaries) so refreshing on every daemon start is cheap and
 	// keeps the detector accurate.
-	uids, inodes, setuid, perr := PopulateMaps(loader, conf)
+	uids, inodes, setuid, knobs, perr := PopulateMaps(loader, conf)
 	if perr != nil {
-		logging.LogfLSM("[lsm] partial map population: %v (uids=%d inodes=%d setuid=%d)",
-			perr, uids, inodes, setuid)
+		logging.LogfLSM("[lsm] partial map population: %v (uids=%d inodes=%d setuid=%d knobs=%d)",
+			perr, uids, inodes, setuid, knobs)
 		KmsgStatef("ISSUE", "partial map population: %v", perr)
 	} else {
-		logging.LogfLSM("[lsm] maps populated: watched_uids=%d watched_inodes=%d setuid_inodes=%d",
-			uids, inodes, setuid)
+		logging.LogfLSM("[lsm] maps populated: watched_uids=%d watched_inodes=%d setuid_inodes=%d kernel_knob_inodes=%d",
+			uids, inodes, setuid, knobs)
 	}
 }
 
