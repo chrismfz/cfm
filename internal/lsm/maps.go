@@ -139,6 +139,31 @@ var DefaultPersistencePaths = []string{
 	"/root/.ssh",
 	"/root/.bashrc",
 	"/root/.profile",
+	// Dynamic-linker persistence. /etc/ld.so.preload is the classic
+	// userland-rootkit injection point (libprocesshider, vlany, ...);
+	// /etc/ld.so.conf{,.d/} let an attacker prepend a writable library
+	// search path so future binaries load their replacement libc.
+	"/etc/ld.so.preload",
+	"/etc/ld.so.conf",
+	"/etc/ld.so.conf.d",
+	// Login/shell startup persistence. Anything dropped under
+	// /etc/profile.d/ runs in every interactive login shell, and the
+	// /etc/bash{,.}rc paths run for non-login shells. /etc/environment
+	// is parsed by PAM and lets an attacker prepend PATH / LD_*
+	// variables so root tools resolve to attacker-owned wrappers.
+	"/etc/profile",
+	"/etc/profile.d",
+	"/etc/bashrc",
+	"/etc/bash.bashrc",
+	"/etc/environment",
+	// Per-user crontab directory. /etc/cron.d/ above catches root-cron
+	// drops that come in via the system stanza; /var/spool/cron/ catches
+	// `crontab -e` writes that bypass /etc/cron.d entirely. Distro
+	// path differs (RHEL uses /var/spool/cron/, Debian uses
+	// /var/spool/cron/crontabs/) — both are listed because each can
+	// be the active dir on different hosts.
+	"/var/spool/cron",
+	"/var/spool/cron/crontabs",
 	// cPanel hook and include directories that can create durable panel-level
 	// persistence or root-executed callbacks on cPanel/WHM hosts.
 	"/usr/local/cpanel/scripts/postupcp",
