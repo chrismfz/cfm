@@ -244,6 +244,7 @@ Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
 | `tier2.oops` | 2 | `kernel.panic_on_oops=1`, `kernel.panic=10` | Any kernel oops can become a reboot; opt-in only. |
 | `sysctl.kernel.surface` | 1 | `dev.tty.ldisc_autoload=0`, `kernel.sysrq=0` | Disables automatic TTY line-discipline loading and Magic SysRq. |
 | `sysctl.kernel.coredump` | 2 | `kernel.core_pattern=|/bin/false` | Suppresses userspace core dumps globally; skipped for hosting panels, backup agents, and crash-diagnostic monitoring. kdump is independent (kexec/vmcore) and does not gate this rule. |
+| `sysctl.kernel.kexec` | 1 | `kernel.kexec_load_disabled=1` | Locks out the `kexec_load(2)` / `kexec_file_load(2)` syscalls so a compromised process cannot load a replacement kernel post-boot — a long-standing rootkit-persistence vector. Once written non-zero the knob is sticky until reboot (kernel-enforced). **Not** a KernelCare / Ksplice conflict (both live-patch via kernel modules, not kexec) and **not** a standard-kernel-update conflict (`yum`/`dnf` use bootloader entries). The one real conflict is kdump, which preloads a crash kernel via the same syscall; auto-skipped on hosts where `/proc/cmdline` carries `crashkernel=` or `kdump.service` is installed (HasKdump host-profile gate). |
 | `tier2.namespace` | 2 | `user.max_user_namespaces=0`, `kernel.unprivileged_userns_clone=0` | Breaks rootless containers, bubblewrap, Chromium sandbox, and some hosting isolation; skipped when containers/hosting panels are detected. |
 | `sysctl.net.harden` | 1 | `net.ipv4.icmp_echo_ignore_broadcasts=1`, `net.ipv4.conf.all.accept_source_route=0`, `net.ipv4.conf.default.accept_source_route=0`, `net.ipv4.conf.all.log_martians=1`, `net.ipv4.tcp_rfc1337=1` | Static-IP servers should be unaffected. |
 
@@ -366,12 +367,54 @@ edits `/etc/fstab`.
 | `KSEC-FS-mount.tmp-001` | `fs.mount.tmp` | `/tmp` | `nodev,nosuid,noexec` | Review before enabling; `noexec` can break composer, pip, and hosting-panel workflows. |
 | `KSEC-FS-mount.tmp-002` | `fs.mount.tmp` | `/var/tmp` | `nodev,nosuid,noexec` | Same compatibility considerations as `/tmp`. |
 | `KSEC-FS-mount.tmp-003` | `fs.mount.tmp` | `/dev/shm` | `nodev,nosuid,noexec` | Usually safe, but review JVM/Python multiprocessing workloads. |
+| `KSEC-FS-mount.proc-001` | `fs.mount.proc` | `/proc` | `hidepid=2,gid=<group>` | Hides other users' `/proc/<pid>` entries from non-root readers — single largest reconnaissance-channel reduction on shared hosting. Strictly audit-only (`CanEnable=false`); operator opts in manually after creating the escape group. See below for the recipe. |
 
 `/home` was previously audited for `nodev,nosuid`. It was removed because operator setups vary too widely (panels with setuid helpers under `/home`, NFS-exported homes, CageFS layouts) for a one-size recommendation to produce more signal than noise.
 
 The mount audit renders one of: `OK` (every recommended option live), `PARTIAL` (some live, some missing — the remediation hint names only the missing options), `MISSING` (mount exists but no recommended options live), or `SKIP` (path is not a separate mount, is a symlink to another audited mount point, or is a bind sibling of another audited mount point). For PARTIAL and MISSING rows the audit prints the exact `mount -o remount,…` command and the matching `/etc/fstab` or systemd `.mount` change.
 
 For `/tmp` and `/var/tmp` the audit is strictly informational — kernsec never mutates fstab for them via the regular `apply` path. Live MySQL temp tables, the `/var/tmp`-survives-reboot contract, and the dedicated-filesystem provisioning step (loop file vs tmpfs) make those changes too operator-specific for the unattended apply flow. Operators who want to harden them can run `cfm kernsec secure-tmp --size <N>G` as a separate explicit step — see the dedicated section below.
+
+#### `/proc hidepid=2,gid=<group>` — operator-applied process-table hiding
+
+The `KSEC-FS-mount.proc-001` rule is strictly **audit-only**: kernsec does not auto-edit `/etc/fstab` for `/proc` even at conf.Tier 2/3, because the third-party-monitoring blast radius is uncatalogueable in advance (every site has some `ps`-scraping agent we haven't profiled). The rule's value is the recommendation surfaced in `cfm kernsec status` — operators apply it manually after setting up the escape group.
+
+Why it matters on shared hosting: without `hidepid`, every vhost user can `ps aux` and read other tenants' `/proc/<pid>/cmdline`, `/proc/<pid>/status`, `/proc/<pid>/environ`, `/proc/<pid>/fd`, and `/proc/<pid>/maps`. That leaks sshd command-lines, `mysql -p<password>` arguments, the contents of process address space layouts (KASLR-leak primitive), open file descriptors, and admin sessions. `hidepid=2` makes every `/proc/<other-pid>` directory invisible to non-root non-group-member users; root sees everything regardless.
+
+Recipe:
+
+1. **Create the escape group.** Pick any free gid (the convention this doc uses is the symbolic name `cfmprocreaders`, but the gid number is what `/proc` mounts with):
+   ```
+   groupadd --system cfmprocreaders
+   ```
+2. **Add monitoring uids to the group** (the agents that legitimately scrape `/proc` as non-root). Common candidates: `netdata`, `munin`, `zabbix`, `nrpe`. Skip cPanel / DirectAdmin / CloudLinux daemons — they all run as root and don't need the group.
+   ```
+   usermod -aG cfmprocreaders netdata
+   usermod -aG cfmprocreaders zabbix
+   # restart the agents so the new supplementary group lands in their session
+   systemctl restart netdata zabbix-agent
+   ```
+3. **Edit `/etc/fstab`** to mount `/proc` with the options. If a `proc` line already exists, append the options; otherwise add the line:
+   ```
+   proc   /proc   proc   defaults,hidepid=2,gid=cfmprocreaders   0 0
+   ```
+4. **Apply live without reboot:**
+   ```
+   mount -o remount,hidepid=2,gid=cfmprocreaders /proc
+   ```
+5. **Verify:** as a non-root non-group user, `ps aux` should show only their own processes; as root or as a group member, `ps aux` continues to show everything.
+
+What stays correct after `hidepid=2`:
+
+- cPanel / WHM "Process Manager" UI: runs as root, sees everything.
+- DirectAdmin's `dataskq`, `directadmin` daemon, mail helpers: all root.
+- cPanel-user-facing "Process Manager" inside the user's cPanel UI: only sees that user's own processes — that IS the intended hardening (previously, vhost A could enumerate vhost B's processes).
+- CageFS-confined users: continue to see only their own; the cage's own `/proc` bind-mount is a separate namespace and is not affected by the host's `hidepid` setting.
+- lve-stats / cl-smart-advice / Imunify360 / KernelCare: all run as root, unaffected.
+
+What needs the escape group (or breaks if you forget):
+
+- Munin's `proc_*` plugins, Netdata's `apps.plugin`, Zabbix-agent's per-process discovery, New Relic / Datadog process metrics — anything that reads `/proc/<pid>/status` for non-self pids as a non-root user.
 
 #### `cfm kernsec secure-tmp` — operator-invoked /tmp + /var/tmp hardening
 

@@ -461,6 +461,14 @@ var KernelSurface = []SysctlRule{
 		Description: "Redirect coredumps to /bin/false — prevents exploit-writable core-dump paths used by OverlayFS-class privilege escalations (CVE-2023-0386 and similar). On a shared hosting server where tenants can trigger process crashes you do not want coredumps landing anywhere.",
 		Affects:     "Tier 2: coredumps are suppressed for all processes, which can break support diagnostics, backup/monitoring crash capture, and hosting-panel/vendor troubleshooting. Skipped when those risks are detected.",
 	},
+
+	// --- sysctl.kernel.kexec: lock out kexec_load (Tier 1, gated) -----
+	{
+		ID: "KSEC-SCT-kspp.kexec-001", Group: "sysctl.kernel.kexec", Tier: Tier1,
+		Key: "kernel.kexec_load_disabled", Value: "1",
+		Description: "Disable kexec_load(2) and kexec_file_load(2) — closes a rootkit-persistence vector that loads a replacement kernel post-boot. KernelCare / Ksplice live-patch through kernel modules, not kexec, so this knob does NOT conflict with them. Standard package-manager kernel updates use the bootloader, not kexec. The one real conflict — kdump's crash-kernel preloading — is gated by the host-profile probe HasKdump (skipped when /proc/cmdline carries crashkernel= or kdump.service is installed).",
+		Affects:     "On hosts without kdump configured: zero user-visible change. On hosts WITH kdump: rule is auto-skipped with an audit line so crash-dump capability stays intact. Once set, the knob is sticky — kexec_load cannot be re-enabled until reboot.",
+	},
 }
 
 // NetHardenSysctls is the network hardening sysctl group owned

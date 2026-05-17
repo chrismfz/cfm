@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -384,5 +385,45 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel 0 0
 	// mount row references it any more.
 	if _, ok := stateByMountPoint["/home"]; ok {
 		t.Errorf("/home should no longer appear in Tier1Mounts audit rows")
+	}
+}
+
+// TestProcHidepidRule covers the audit-only /proc hidepid=2 row added
+// to Tier1Mounts:
+//   - the rule exists in the catalogue;
+//   - CanEnable is FALSE (operator-managed, kernsec must not mutate
+//     fstab for this rule even at conf.Tier 2/3);
+//   - on a live /proc mount without hidepid, the audit reports a
+//     missing-option state so the recommendation surfaces in
+//     `cfm kernsec status`.
+func TestProcHidepidRule(t *testing.T) {
+	var procRule MountRule
+	for _, r := range Tier1Mounts {
+		if r.MountPoint == "/proc" {
+			procRule = r
+			break
+		}
+	}
+	if procRule.MountPoint == "" {
+		t.Fatal("Tier1Mounts must contain a /proc rule (KSEC-FS-mount.proc-001)")
+	}
+	if procRule.CanEnable {
+		t.Error("Tier1Mounts /proc rule must be audit-only (CanEnable=false); auto-mutating fstab for /proc would silently break monitoring agents on the next reboot")
+	}
+	if procRule.Recommended == "" {
+		t.Error("Tier1Mounts /proc rule must carry a Recommended string")
+	}
+	if !strings.Contains(procRule.Recommended, "hidepid=2") {
+		t.Errorf("Tier1Mounts /proc rule should recommend hidepid=2; got %q", procRule.Recommended)
+	}
+
+	// A typical default /proc mount on RHEL/Debian carries no hidepid.
+	// The audit must mark the row as MissingOptions so the status
+	// renderer surfaces the recommendation.
+	procMounts := "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
+	d := checkMountDetail(procMounts, procRule, Tier1Mounts,
+		stubFS{}.lstat, stubFS{}.readlink, nil, nil)
+	if d.State != MountMissingOptions && d.State != MountPartialOptions {
+		t.Errorf("default /proc mount audit state = %v, want MountMissingOptions or MountPartialOptions", d.State)
 	}
 }

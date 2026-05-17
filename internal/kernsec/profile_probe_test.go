@@ -194,15 +194,73 @@ func TestSkipReason_OldModulesBusNoLongerMatches(t *testing.T) {
 }
 
 func TestSkipReasonDoesNotGateRemovedSysctlGroups(t *testing.T) {
+	// "sysctl.kernel.kexec" used to live here as a permanently-removed
+	// group. Re-introduced under KSEC-SCT-kspp.kexec-001 with a HasKdump
+	// gate; see TestSkipReason_KexecKdumpGate below for its dedicated
+	// regression coverage. Removed-group test still applies to the
+	// genuinely-excluded groups.
 	p := HostProfile{HasDKMS: true}
 	for _, group := range []string{
-		"sysctl.kernel." + "kexec",
 		"sysctl.kernel." + "lock" + "down",
 		"sysctl.module." + "sig",
 	} {
 		if reason := p.SkipReason(group); reason != "" {
 			t.Fatalf("removed sysctl group %q still has host-profile gate %q", group, reason)
 		}
+	}
+}
+
+// TestSkipReason_KexecKdumpGate covers KSEC-SCT-kspp.kexec-001's
+// host-profile gate: HasKdump=true must produce a skip reason
+// (kexec_load_disabled would break crash-kernel preloading);
+// HasKdump=false must NOT skip (apply cleanly on the common case
+// where the host has no kdump configured).
+func TestSkipReason_KexecKdumpGate(t *testing.T) {
+	if reason := (HostProfile{HasKdump: true}).SkipReason("sysctl.kernel.kexec"); reason == "" {
+		t.Error("HasKdump=true should produce a SkipReason for sysctl.kernel.kexec")
+	}
+	if reason := (HostProfile{HasKdump: false}).SkipReason("sysctl.kernel.kexec"); reason != "" {
+		t.Errorf("HasKdump=false should NOT skip sysctl.kernel.kexec; got %q", reason)
+	}
+}
+
+// TestDetectKdump_Crashkernel proves the cmdline-based signal works.
+func TestDetectKdump_Crashkernel(t *testing.T) {
+	root := withHostProfileRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc/cmdline"),
+		[]byte("BOOT_IMAGE=/vmlinuz crashkernel=512M ro rhgb quiet\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !detectKdump() {
+		t.Error("crashkernel= in /proc/cmdline should signal kdump configured")
+	}
+}
+
+// TestDetectKdump_UnitFile proves the systemd-unit signal works.
+func TestDetectKdump_UnitFile(t *testing.T) {
+	root := withHostProfileRoot(t)
+	touchHostPath(t, root, "/usr/lib/systemd/system/kdump.service")
+	if !detectKdump() {
+		t.Error("kdump.service unit file presence should signal kdump configured")
+	}
+}
+
+// TestDetectKdump_NoKdump proves the negative path — neither signal,
+// no detection. The common case for hosting boxes.
+func TestDetectKdump_NoKdump(t *testing.T) {
+	root := withHostProfileRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc/cmdline"),
+		[]byte("BOOT_IMAGE=/vmlinuz ro rhgb quiet\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if detectKdump() {
+		t.Error("no crashkernel= and no kdump.service should NOT signal kdump")
 	}
 }
 

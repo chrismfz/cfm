@@ -155,7 +155,14 @@ func TestRemovedSysctlRulesAbsentFromRegistry(t *testing.T) {
 	}
 	removedKeys := []string{
 		"net.ipv6.conf.all." + "accept" + "_ra",
-		"kernel." + "kexec" + "_load_disabled",
+		// "kernel.kexec_load_disabled" used to live here as a permanently-
+		// excluded knob. Re-introduced under KSEC-SCT-kspp.kexec-001 with
+		// a HasKdump host-profile gate: applies cleanly on hosts without
+		// kdump (the common case on hosting boxes), auto-skips with an
+		// audit line on hosts where kdump is configured. The original
+		// concern (breaking crash-dump preloading) is addressed by the
+		// gate; KernelCare / Ksplice are NOT a conflict (they live-patch
+		// via kernel modules, not kexec).
 		"kernel." + "lock" + "down",
 		"module." + "sig" + "_enforce",
 	}

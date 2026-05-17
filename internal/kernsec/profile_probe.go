@@ -68,6 +68,7 @@ type HostProfile struct {
 	HasNVIDIA                bool   `json:"has_nvidia"`                            // loaded NVIDIA modules
 	HasBackupWorkload        bool   `json:"has_backup_workload"`                   // common backup agents/services present
 	HasMonitoringWorkload    bool   `json:"has_monitoring_workload"`               // common monitoring/crash-diagnostic agents present
+	HasKdump                 bool   `json:"has_kdump"`                             // kdump configured (crashkernel= reserved OR kdump.service active) → kexec_load_disabled would break crash-dump capability
 	HasHostingPanelWorkload  bool   `json:"has_hosting_panel_workload"`            // cPanel/DirectAdmin/CloudLinux/CageFS/Imunify360 aggregate
 	Reason                   string `json:"reason,omitempty"`                      // freeform note used in --check output
 }
@@ -98,6 +99,7 @@ func DetectHostProfile() HostProfile {
 		HasNVIDIA:              detectNVIDIA(),
 		HasBackupWorkload:      detectBackupWorkload(),
 		HasMonitoringWorkload:  detectMonitoringWorkload(),
+		HasKdump:               detectKdump(),
 	}
 	p.HasHostingPanelWorkload = p.IsCPanel || p.IsDirectAdmin || p.HasCloudLinuxLVE || p.HasCageFS || p.HasImunify360
 	p.HasDKMS = hasOutOfTreeModuleEvidence(p)
@@ -249,6 +251,48 @@ func detectKsplice() bool {
 
 func detectLivePatchingModules() bool {
 	return anyModuleLoaded("kcare", "kpatch", "kgraft", "uptrack", "ksplice") || anyModuleLoadedWithPrefix("livepatch", "kpatch_", "ksplice_")
+}
+
+// detectKdump reports whether kdump (the kernel-crash-dump pipeline)
+// is configured on this host. Used by KSEC-SCT-kspp.kexec-001
+// (kernel.kexec_load_disabled=1) to auto-skip on hosts where the
+// sysctl would break crash-dump preloading.
+//
+// Two signals — either is sufficient evidence that the operator wants
+// kdump usable:
+//
+//   - crashkernel= in /proc/cmdline. kdump requires a reserved memory
+//     region for the crash kernel; the boot arg is the bootloader's
+//     side of that contract. Present even on freshly-booted hosts
+//     where the kdump userspace hasn't been started yet.
+//   - kdump.service / kdump-tools.service installed (unit file present).
+//     We don't check is-active because operators routinely keep the
+//     service installed-but-stopped while debugging an unrelated
+//     issue; the unit file's existence already signals intent.
+//
+// Layered probe so we err on the side of caution — the cost of
+// false-positive "kdump present" is one skipped sysctl with a clear
+// audit line, vs. the cost of false-negative "no kdump" is silently
+// breaking the operator's crash-dump capability.
+func detectKdump() bool {
+	// crashkernel= boot arg → kdump memory was reserved at boot.
+	if cmdline, err := os.ReadFile(hostProfilePath("/proc/cmdline")); err == nil {
+		for _, tok := range strings.Fields(string(cmdline)) {
+			if tok == "crashkernel" || strings.HasPrefix(tok, "crashkernel=") {
+				return true
+			}
+		}
+	}
+	// kdump service / unit file present (RHEL: kdump.service, Debian/
+	// Ubuntu: kdump-tools.service).
+	return anyPathExists(
+		"/usr/lib/systemd/system/kdump.service",
+		"/lib/systemd/system/kdump.service",
+		"/etc/systemd/system/kdump.service",
+		"/usr/lib/systemd/system/kdump-tools.service",
+		"/lib/systemd/system/kdump-tools.service",
+		"/etc/systemd/system/kdump-tools.service",
+	)
 }
 
 // detectLibvirt reports whether libvirt is installed/running on this
@@ -466,6 +510,18 @@ func (p HostProfile) SkipReason(group string) string {
 		// writing it to the cmdline would be a no-op but confuse operators.
 		if !p.IsEFIBoot {
 			return "non-EFI boot — efi=disable_early_pci_dma is a no-op on BIOS/legacy-boot systems"
+		}
+	case "sysctl.kernel.kexec":
+		// kernel.kexec_load_disabled=1 locks out kexec_load(2) and
+		// kexec_file_load(2) — closes a rootkit-persistence path
+		// (load a replacement kernel post-boot) but breaks kdump,
+		// which preloads a crash kernel via the same syscall.
+		//
+		// KernelCare / Ksplice live-patch through kernel modules,
+		// not kexec, so they are NOT a conflict here — only kdump
+		// gates the rule.
+		if p.HasKdump {
+			return "kdump configured (crashkernel= in cmdline OR kdump.service installed) — kexec_load_disabled=1 would prevent crash-kernel preloading"
 		}
 	case "sysctl.kernel.coredump":
 		// kernel.core_pattern=|/bin/false disables coredumps globally.

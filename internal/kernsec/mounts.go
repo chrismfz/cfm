@@ -460,4 +460,37 @@ var Tier1Mounts = []MountRule{
 		Description:        "Same protection family for /dev/shm (POSIX shared-memory tmpfs).",
 		Affects:            "Mostly safe in practice; double-check JVM / Python multiprocessing usage.",
 	},
+
+	// --- /proc hidepid (audit-only; CanEnable defaults to false) -----
+	//
+	// hidepid=2 hides /proc/<pid> entries from users who don't own them:
+	// `ps aux` by a non-root user only shows their own processes,
+	// /proc/<other-pid>/cmdline / status / environ / fd /maps become
+	// unreadable. Root sees everything regardless. Closes a huge
+	// reconnaissance channel for compromised vhost users — sshd
+	// command-lines, mysql args, and admin sessions all leak through
+	// /proc otherwise.
+	//
+	// gid=<group> is the escape valve: members of that group keep full
+	// visibility. Needed for third-party monitoring agents (Munin node,
+	// Netdata's apps.plugin, Zabbix agent, New Relic, Datadog) that
+	// scrape /proc as non-root for per-process metrics. The operator
+	// creates the group, adds the monitoring uids, then mounts with
+	// gid=<gid>.
+	//
+	// CanEnable is intentionally FALSE here even though the same machinery
+	// could mutate fstab and remount. The reason is the gid= escape: we
+	// can't know the operator's monitoring layout at apply time, and
+	// silently breaking metric collection on a production host erodes
+	// trust faster than any single hardening can recover. Operators
+	// review the recommendation, set up the group, then opt in via a
+	// manual fstab edit. The audit hint surfaces in `cfm kernsec status`
+	// alongside the /tmp / /var/tmp / /dev/shm rows.
+	{
+		ID: "KSEC-FS-mount.proc-001", Group: "fs.mount.proc", Tier: Tier1,
+		MountPoint:  "/proc",
+		Recommended: "hidepid=2,gid=cfmprocreaders",
+		Description: "Recommend hidepid=2,gid=<group> on /proc to hide other users' processes from non-root readers. The single largest reconnaissance-channel reduction on shared hosting: vhost users can no longer enumerate sshd command-lines, mysql -p args, or other tenants' workloads via ps / /proc/*. Group escape valve preserves monitoring-agent visibility.",
+		Affects:     "Third-party monitoring agents (Munin, Netdata, Zabbix, New Relic, Datadog) that scrape /proc as non-root stop collecting per-process metrics until their uid is added to the gid= group. cPanel / DirectAdmin / CloudLinux daemons all run as root and are unaffected. CageFS-confined users get correct narrower visibility (a feature, not a break). Operator opts in manually after creating the group and adding monitoring uids — kernsec does not auto-mutate fstab for this rule.",
+	},
 }
