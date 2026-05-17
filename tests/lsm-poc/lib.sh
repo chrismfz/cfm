@@ -177,8 +177,16 @@ require_policy_enabled() {
         return 0
     fi
     local mode
+    # `cfm lsm status` mentions each policy twice:
+    #   - In the [Pinned BPF state] section as a bare token:  CFML-FS-007
+    #   - In the [Policies] section as:  CFML-FS-007  mode=monitor  runtime=...
+    # Without the `$2 ~ /^mode=/` guard, awk matched the pinned-state
+    # line first, returned an empty mode, and the SKIP message printed
+    # `policy is mode=` with nothing after the `=`. Requiring the
+    # `mode=` prefix makes us skip the bare-token line and reach the
+    # actual policy table row.
     mode=$(cfm lsm status 2>/dev/null \
-        | awk -v p="$rule" '$1==p {sub(/^mode=/, "", $2); print $2; exit}')
+        | awk -v p="$rule" '$1==p && $2 ~ /^mode=/ {sub(/^mode=/, "", $2); print $2; exit}')
     case "$mode" in
         monitor|enforce)
             return 0
