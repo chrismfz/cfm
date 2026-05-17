@@ -109,6 +109,25 @@ const (
 	// cPanel easyapache builds) needs allowlist tuning first — see
 	// docs/cfm-lsm.md and the lsm.conf allow_exe / allow_path keys.
 	PolicyEphemeralExec PolicyID = "CFML-EXEC-006"
+
+	// PolicyPrivInstall — CFML-FS-007: detect a watched (web-class)
+	// uid installing a privilege primitive on a file — either setting
+	// the suid/sgid bit via chmod, or writing the security.capability
+	// xattr via setcap. The post-exploit-persistence "drop a binary
+	// the unprivileged shell can later use to re-acquire root without
+	// re-exploiting" pattern. Companion to CFML-CRED-002, which catches
+	// the *use* of the dropped primitive; FS-007 catches the *install*.
+	//
+	// Hooks: inode_setattr (suid/sgid bit) + inode_setxattr
+	// (security.capability). No watched-inode gate — the target can be
+	// any path; the privilege primitive itself is the signal.
+	//
+	// Mode: monitor by default. Enforce-capable — there is no
+	// legitimate workflow for a web-class uid to set suid or
+	// security.capability, so blocking the syscall is safe (returns
+	// -EPERM out of chmod/setxattr; the dropper sees the failure and
+	// the primitive never lands).
+	PolicyPrivInstall PolicyID = "CFML-FS-007"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -225,6 +244,13 @@ func AllPolicies() []Policy {
 			Hook:        "bprm_check_security",
 			DefaultMode: ModeDisabled,
 			Description: "Detect a web-class user executing a binary whose backing file lives on tmpfs (/dev/shm, /run/user/<uid>/, distro /tmp mounted as tmpfs) or under /tmp/ or /var/tmp/ on a non-tmpfs root. Execution-phase companion to Imunify Proactive Defense's write-phase guard: catches the staged-payload-and-exec pattern at the kernel layer. Monitor-first; enforce returns -EPERM.",
+		},
+		{
+			ID:          PolicyPrivInstall,
+			Title:       "Privilege-primitive install by web user",
+			Hook:        "inode_{setattr,setxattr}",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a web-class user installing a privilege primitive — setting the suid/sgid bit via chmod, or writing the security.capability xattr via setcap — on any file. Install-step companion to CFML-CRED-002 which catches the use of the dropped primitive. Monitor-first; enforce returns -EPERM out of chmod/setxattr.",
 		},
 	}
 }

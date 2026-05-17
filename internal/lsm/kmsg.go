@@ -167,6 +167,9 @@ func KmsgDetect(ev Event) {
 	if signal := ev.ExecStdioSignal(); signal != "" {
 		msg += " stdio=" + signal
 	}
+	if prim := ev.PrivInstallPrimitive(); prim != "" {
+		msg += " primitive=" + prim
+	}
 	defaultKmsg.writeLine(kmsgPriWarning, "DETECT", msg)
 }
 

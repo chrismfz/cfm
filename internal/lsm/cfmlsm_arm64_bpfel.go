@@ -88,6 +88,10 @@ type cfmlsmProgramSpecs struct {
 	CfmFs005SetxattrNoidmap *ebpf.ProgramSpec `ebpf:"cfm_fs005_setxattr_noidmap"`
 	CfmFs005Unlink          *ebpf.ProgramSpec `ebpf:"cfm_fs005_unlink"`
 	CfmFs006                *ebpf.ProgramSpec `ebpf:"cfm_fs006"`
+	CfmFs007SetattrIdmap    *ebpf.ProgramSpec `ebpf:"cfm_fs007_setattr_idmap"`
+	CfmFs007SetattrNoidmap  *ebpf.ProgramSpec `ebpf:"cfm_fs007_setattr_noidmap"`
+	CfmFs007SetxattrIdmap   *ebpf.ProgramSpec `ebpf:"cfm_fs007_setxattr_idmap"`
+	CfmFs007SetxattrNoidmap *ebpf.ProgramSpec `ebpf:"cfm_fs007_setxattr_noidmap"`
 	CfmInterpNetStdio       *ebpf.ProgramSpec `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec            *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
 	CfmRevshell             *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
@@ -112,6 +116,7 @@ type cfmlsmVariableSpecs struct {
 	CfmEnforceDeletedFileExec *ebpf.VariableSpec `ebpf:"cfm_enforce_deleted_file_exec"`
 	CfmEnforceEphemeralExec   *ebpf.VariableSpec `ebpf:"cfm_enforce_ephemeral_exec"`
 	CfmEnforceMemfdExec       *ebpf.VariableSpec `ebpf:"cfm_enforce_memfd_exec"`
+	CfmEnforcePrivInstall     *ebpf.VariableSpec `ebpf:"cfm_enforce_priv_install"`
 	CfmEnforceRevshell        *ebpf.VariableSpec `ebpf:"cfm_enforce_revshell"`
 	CfmEnforceSensitiveWrite  *ebpf.VariableSpec `ebpf:"cfm_enforce_sensitive_write"`
 	CfmFs005WebOriginMonitor  *ebpf.VariableSpec `ebpf:"cfm_fs005_web_origin_monitor"`
@@ -163,6 +168,7 @@ type cfmlsmVariables struct {
 	CfmEnforceDeletedFileExec *ebpf.Variable `ebpf:"cfm_enforce_deleted_file_exec"`
 	CfmEnforceEphemeralExec   *ebpf.Variable `ebpf:"cfm_enforce_ephemeral_exec"`
 	CfmEnforceMemfdExec       *ebpf.Variable `ebpf:"cfm_enforce_memfd_exec"`
+	CfmEnforcePrivInstall     *ebpf.Variable `ebpf:"cfm_enforce_priv_install"`
 	CfmEnforceRevshell        *ebpf.Variable `ebpf:"cfm_enforce_revshell"`
 	CfmEnforceSensitiveWrite  *ebpf.Variable `ebpf:"cfm_enforce_sensitive_write"`
 	CfmFs005WebOriginMonitor  *ebpf.Variable `ebpf:"cfm_fs005_web_origin_monitor"`
@@ -189,6 +195,10 @@ type cfmlsmPrograms struct {
 	CfmFs005SetxattrNoidmap *ebpf.Program `ebpf:"cfm_fs005_setxattr_noidmap"`
 	CfmFs005Unlink          *ebpf.Program `ebpf:"cfm_fs005_unlink"`
 	CfmFs006                *ebpf.Program `ebpf:"cfm_fs006"`
+	CfmFs007SetattrIdmap    *ebpf.Program `ebpf:"cfm_fs007_setattr_idmap"`
+	CfmFs007SetattrNoidmap  *ebpf.Program `ebpf:"cfm_fs007_setattr_noidmap"`
+	CfmFs007SetxattrIdmap   *ebpf.Program `ebpf:"cfm_fs007_setxattr_idmap"`
+	CfmFs007SetxattrNoidmap *ebpf.Program `ebpf:"cfm_fs007_setxattr_noidmap"`
 	CfmInterpNetStdio       *ebpf.Program `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec            *ebpf.Program `ebpf:"cfm_memfd_exec"`
 	CfmRevshell             *ebpf.Program `ebpf:"cfm_revshell"`
@@ -213,6 +223,10 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmFs005SetxattrNoidmap,
 		p.CfmFs005Unlink,
 		p.CfmFs006,
+		p.CfmFs007SetattrIdmap,
+		p.CfmFs007SetattrNoidmap,
+		p.CfmFs007SetxattrIdmap,
+		p.CfmFs007SetxattrNoidmap,
 		p.CfmInterpNetStdio,
 		p.CfmMemfdExec,
 		p.CfmRevshell,

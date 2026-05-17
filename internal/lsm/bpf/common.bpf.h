@@ -26,6 +26,7 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_UNEXPECTED_BPF    = 10, /* CFML-BPF-001  */
     CFM_LSM_POLICY_FD_CRED_MISMATCH  = 11, /* CFML-FS-006   */
     CFM_LSM_POLICY_EPHEMERAL_EXEC    = 12, /* CFML-EXEC-006 */
+    CFM_LSM_POLICY_PRIV_INSTALL      = 13, /* CFML-FS-007   */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the
@@ -65,6 +66,15 @@ enum cfm_event_op {
  *                   on the same exec. */
 #define CFM_LSM_F_TMPFS_BACKED        (1U << 6)
 #define CFM_LSM_F_EPHEMERAL_DIR       (1U << 7)
+
+/* CFML-FS-007 — which privilege primitive the watched uid was installing.
+ * SUID and SGID may coexist (chmod 6755 sets both); FILECAP is mutually
+ * exclusive with the mode bits (it comes via the security.capability
+ * xattr, a different LSM hook). PolicyID disambiguates the bit reuse
+ * vs the EXEC-006 / stdio flag bits at the same numeric positions. */
+#define CFM_LSM_F_PRIV_SUID           (1U << 4)
+#define CFM_LSM_F_PRIV_SGID           (1U << 5)
+#define CFM_LSM_F_PRIV_FILECAP        (1U << 6)
 
 /* Compound inode map key shared by the watched-inode and setuid-inode
  * maps. `dev` is the target inode's stat-compatible filesystem

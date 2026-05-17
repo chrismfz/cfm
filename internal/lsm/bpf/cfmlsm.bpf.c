@@ -1756,4 +1756,180 @@ int BPF_PROG(cfm_fs006, struct file *file, int mask, int ret)
     return ret;  /* monitor-only — never deny */
 }
 
+/* ------------------------------------------------------------------- *
+ * CFML-FS-007 — setuid bit / file capability install by watched uid.
+ *
+ * Hooks: lsm/inode_setattr  (catches chmod adding S_ISUID or S_ISGID)
+ *        lsm/inode_setxattr (catches `setcap` writing security.capability)
+ *
+ * Threat scenario: classic Linux persistence. After any privesc bug,
+ * the attacker drops a binary and grants it a root-acquiring primitive
+ * so a later unprivileged shell can re-enter root without re-exploiting:
+ *
+ *   - `chmod 4755 /tmp/.bd`            (the suid bit pattern)
+ *   - `setcap cap_setuid+ep /tmp/.bd`  (the file-cap pattern — harder
+ *                                       to spot in `ls -l`, only `getcap`
+ *                                       reveals the privilege)
+ *
+ * CFML-CRED-002 catches the *use* of the dropped binary. FS-007 catches
+ * the *install* step — the moment the dropper creates the persistence
+ * primitive, before any second exec happens.
+ *
+ * Watched-uid gate: the rule only fires when the calling task's uid is
+ * in cfm_watched_uids (web-class user / panel-managed account). A web
+ * worker creating a setuid binary is structurally illegitimate; an
+ * admin running `chmod 4755 /usr/local/bin/my-helper` is not watched
+ * and won't trip the rule.
+ *
+ * No watched-inode gate (unlike FS-005): the target file can be
+ * anywhere on disk — the privilege primitive itself is the signal,
+ * not the path.
+ *
+ * Mode: monitor by default. Enforce returns -EPERM from the LSM hook;
+ * the kernel propagates that out of chmod(2) / setxattr(2) so the
+ * dropper sees the failure and the persistence primitive never lands.
+ * Enforce promotion is safe — there is no legitimate workflow for a
+ * web-class uid to set the suid bit or cap_setuid on a file. The
+ * companion EXEC-006 (web-user exec from /tmp) sees the same lack of
+ * legitimate workflows from the same uid set.
+ * ------------------------------------------------------------------- */
+
+volatile const __u8 cfm_enforce_priv_install = 0;
+
+/* Emit one FS-007 event. Caller has already established that the uid
+ * is watched and the operation actually adds a privilege primitive. */
+static __always_inline void cfm_fs007_emit(struct dentry *target,
+                                           __u8 op, __u8 flags)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_PRIV_INSTALL;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = op;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    const unsigned char *name = NULL;
+    if (target)
+        name = BPF_CORE_READ(target, d_name.name);
+    if (name)
+        bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), name);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+/* setattr leg. Fires when the watched uid is chmoding a file to add
+ * S_ISUID or S_ISGID. Removing the bits is benign (security hardening)
+ * and not flagged. */
+static __always_inline int cfm_fs007_check_setattr(struct dentry *dentry,
+                                                    struct iattr *attr, int ret)
+{
+    if (ret != 0)
+        return ret;
+    if (!attr || !dentry)
+        return 0;
+
+    /* ATTR_MODE = 1 << 0 — the only ia_valid bit we care about. */
+    unsigned int ia_valid = BPF_CORE_READ(attr, ia_valid);
+    if (!(ia_valid & 1))
+        return 0;
+
+    /* ia_mode carries the new mode bits. S_ISUID = 04000, S_ISGID = 02000. */
+    __u16 ia_mode = BPF_CORE_READ(attr, ia_mode);
+    __u8 flags = 0;
+    if (ia_mode & 04000)
+        flags |= CFM_LSM_F_PRIV_SUID;
+    if (ia_mode & 02000)
+        flags |= CFM_LSM_F_PRIV_SGID;
+    if (!flags)
+        return 0;
+
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    if (!cfm_uid_watched(uid))
+        return 0;
+
+    cfm_fs007_emit(dentry, CFM_FS_OP_SETATTR, flags);
+    return cfm_enforce_priv_install ? CFM_LSM_DENY : 0;
+}
+
+/* inode_setattr drifted with the same shape as FS-005's variants —
+ * see the long comment in the FS-005 section. Two BPF_PROG variants;
+ * btfprobe.go picks one based on the live kernel's hook arity. */
+
+SEC("lsm/inode_setattr")
+int BPF_PROG(cfm_fs007_setattr_noidmap, struct dentry *dentry,
+             struct iattr *attr, int ret)
+{
+    return cfm_fs007_check_setattr(dentry, attr, ret);
+}
+
+SEC("lsm/inode_setattr")
+int BPF_PROG(cfm_fs007_setattr_idmap, void *idmap_or_ns,
+             struct dentry *dentry, struct iattr *attr, int ret)
+{
+    return cfm_fs007_check_setattr(dentry, attr, ret);
+}
+
+/* setxattr leg. Fires when the watched uid is writing the
+ * security.capability xattr — the mechanism behind `setcap`. We don't
+ * parse the cap value (vfs_cap_data) because any non-zero cap install
+ * by a watched uid is illegitimate; cap_setuid is the high-risk case
+ * but cap_dac_override / cap_dac_read_search / cap_sys_admin are
+ * equally weaponisable. */
+static __always_inline int cfm_fs007_check_setxattr(struct dentry *dentry,
+                                                     const char *name, int ret)
+{
+    if (ret != 0)
+        return ret;
+    if (!name || !dentry)
+        return 0;
+
+    /* Match name == "security.capability" exactly. The string is 19
+     * chars + NUL = 20 bytes. cfm_str_eq is the same helper used by
+     * the suspicious-basename matcher. */
+    char buf[20] = {};
+    long n = bpf_probe_read_kernel_str(buf, sizeof(buf), name);
+    if (n != 20)
+        return 0;
+    if (!cfm_str_eq(buf, "security.capability", 19))
+        return 0;
+
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    if (!cfm_uid_watched(uid))
+        return 0;
+
+    cfm_fs007_emit(dentry, CFM_FS_OP_SETXATTR, CFM_LSM_F_PRIV_FILECAP);
+    return cfm_enforce_priv_install ? CFM_LSM_DENY : 0;
+}
+
+SEC("lsm/inode_setxattr")
+int BPF_PROG(cfm_fs007_setxattr_noidmap, struct dentry *dentry,
+             const char *name, const void *value, size_t size,
+             int flags, int ret)
+{
+    return cfm_fs007_check_setxattr(dentry, name, ret);
+}
+
+SEC("lsm/inode_setxattr")
+int BPF_PROG(cfm_fs007_setxattr_idmap, void *idmap_or_ns, struct dentry *dentry,
+             const char *name, const void *value, size_t size,
+             int flags, int ret)
+{
+    return cfm_fs007_check_setxattr(dentry, name, ret);
+}
+
 char LICENSE[] SEC("license") = "GPL";

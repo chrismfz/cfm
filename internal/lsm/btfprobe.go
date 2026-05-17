@@ -49,6 +49,15 @@ type lsmDriftVariant struct {
 	// e.g. "bpf_lsm_inode_setattr".
 	hook string
 
+	// pickKey is the identifier the chosen-program-name is stored
+	// under in the Loader's driftPicks map (and looked up via
+	// pickedDriftProgram). Defaults to `hook` when empty. Specified
+	// separately so multiple policies can attach to the same kernel
+	// hook with different program-name pairs — e.g. FS-005 and
+	// FS-007 both hook inode_setattr but with distinct (noidmap,
+	// idmap) variant program names.
+	pickKey string
+
 	// noidmap is the program name compiled for the pre-mnt_idmap
 	// signature (EL9 / pre-5.12 upstream).
 	noidmap string
@@ -64,6 +73,16 @@ type lsmDriftVariant struct {
 
 	// idmapHookArgs is the matching hook arg count for `idmap`.
 	idmapHookArgs int
+}
+
+// keyFor returns the picks-map key for this variant — pickKey when
+// set, otherwise hook for backward compatibility with entries that
+// have only one (noidmap, idmap) program pair per kernel hook.
+func (d lsmDriftVariant) keyFor() string {
+	if d.pickKey != "" {
+		return d.pickKey
+	}
+	return d.hook
 }
 
 // lsmDriftVariants is the set of LSM hooks whose BPF trampoline arity
@@ -86,6 +105,25 @@ var lsmDriftVariants = []lsmDriftVariant{
 		idmap:           "cfm_fs005_setxattr_idmap",
 		noidmapHookArgs: 5, // (dentry, name, value, size, flags)
 		idmapHookArgs:   6, // + first arg mnt_userns/mnt_idmap
+	},
+	// CFML-FS-007 shares the inode_setattr / inode_setxattr hooks with
+	// FS-005 but compiles its own program-name pair so the two
+	// policies can be enabled / disabled / enforced independently.
+	{
+		hook:            "bpf_lsm_inode_setattr",
+		pickKey:         "bpf_lsm_inode_setattr_fs007",
+		noidmap:         "cfm_fs007_setattr_noidmap",
+		idmap:           "cfm_fs007_setattr_idmap",
+		noidmapHookArgs: 2,
+		idmapHookArgs:   3,
+	},
+	{
+		hook:            "bpf_lsm_inode_setxattr",
+		pickKey:         "bpf_lsm_inode_setxattr_fs007",
+		noidmap:         "cfm_fs007_setxattr_noidmap",
+		idmap:           "cfm_fs007_setxattr_idmap",
+		noidmapHookArgs: 5,
+		idmapHookArgs:   6,
 	},
 }
 
@@ -147,7 +185,7 @@ func selectLsmDriftVariants(spec *ebpf.CollectionSpec) (map[string]string, error
 				return nil, fmt.Errorf("neutralise %s: %w", drop, err)
 			}
 		}
-		chosen[d.hook] = keep
+		chosen[d.keyFor()] = keep
 	}
 	return chosen, nil
 }

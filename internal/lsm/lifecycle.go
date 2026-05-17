@@ -407,6 +407,9 @@ func emitNotify(ev Event) {
 	if signal := ev.ExecStdioSignal(); signal != "" {
 		reason += " stdio=" + signal
 	}
+	if prim := ev.PrivInstallPrimitive(); prim != "" {
+		reason += " primitive=" + prim
+	}
 
 	extra := map[string]string{
 		"policy_id": string(ev.PolicyID),
@@ -428,6 +431,9 @@ func emitNotify(ev Event) {
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
 		extra["stdio_signal"] = signal
+	}
+	if prim := ev.PrivInstallPrimitive(); prim != "" {
+		extra["primitive"] = prim
 	}
 
 	// Userspace sinks (cfm.log + notify) and the kmsg sink have
