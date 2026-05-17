@@ -391,7 +391,7 @@ Usage:
   cfm lsm probe                   -- briefly attach the BPF programs to verify the kernel accepts them, then detach (needs root)
   cfm lsm enable [--yes]          -- attach + pin BPF programs to /sys/fs/bpf/cfm (survives daemon restart); prompts when any policy is mode=enforce
   cfm lsm disable                 -- unpin + detach BPF programs
-  cfm lsm init                    -- write default /etc/cfm/lsm.conf if absent
+  cfm lsm init                    -- one-shot bring-up: preflight + enable + status (needs /etc/cfm/lsm.conf)
 
   cfm clam status                  -- pipeline + hook state, recent infections
   cfm clam enable | disable        -- master pipeline (CLAMD_ENABLED)

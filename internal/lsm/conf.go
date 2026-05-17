@@ -208,11 +208,18 @@ type Conf struct {
 	Source string
 }
 
-// DefaultConf returns the default configuration that `cfm lsm init`
-// writes on a fresh host: cfm-lsm globally disabled, every policy at
-// its DefaultMode, kmsg emission on with the documented defaults, and
-// a curated global allowlist that silences the structural detector
-// matches every reasonably-configured Linux host exhibits.
+// DefaultConf returns the in-memory default configuration: cfm-lsm
+// globally disabled, every policy at its DefaultMode, kmsg emission
+// on with the documented defaults, and a curated global allowlist
+// that silences the structural detector matches every reasonably-
+// configured Linux host exhibits.
+//
+// Used by FormatConf round-trip tests and by callers that need a
+// fully-populated Conf in code (no file). Not used by `cfm lsm init`
+// anymore — init now refuses to write a generated default and relies
+// on the shipped configs/lsm.conf template instead, removing the
+// historical divergence between init-output and package-installed
+// conf.
 func DefaultConf() *Conf {
 	modes := map[PolicyID]Mode{}
 	for _, p := range AllPolicies() {
@@ -1301,6 +1308,12 @@ func FormatConf(c *Conf) string {
 // does not already exist. Returns (true, nil) when a new file was
 // created, (false, nil) when the file already existed, or (false, err)
 // on a write failure.
+//
+// Currently called only from the FormatConf round-trip test. The
+// `cfm lsm init` path no longer auto-generates a conf — see
+// DefaultConf's godoc and internal/lsm/init.go for the rationale.
+// Kept exported because external callers (packaging scripts, custom
+// bootstrappers) may still want a deterministic Conf-to-disk path.
 func WriteDefaultConf() (created bool, err error) {
 	if _, err := os.Stat(ConfPath); err == nil {
 		return false, nil

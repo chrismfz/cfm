@@ -6,26 +6,76 @@ import (
 	"os"
 )
 
-// RunInit writes a default /etc/cfm/lsm.conf if absent. Idempotent:
-// re-running on a host that already has the file is a no-op.
+// RunInit is the "bring this host up" convenience for cfm-lsm:
+// preflight → enable → status. Does NOT write a default lsm.conf —
+// the shipped template at configs/lsm.conf (installed to
+// /etc/cfm/lsm.conf by the rpm/deb package) is the authoritative
+// starting point. If /etc/cfm/lsm.conf is missing, init refuses
+// with a pointer at the shipped template; an operator running from
+// a source checkout should `cp configs/lsm.conf /etc/cfm/lsm.conf`
+// (or install the package) before retrying.
+//
+// Rationale: the old RunInit wrote a generated default that didn't
+// match the shipped template's per-policy modes — operators
+// bootstrapping with `cfm lsm init` got a different baseline
+// (every policy at ModeDisabled, the policy.DefaultMode) than
+// operators who installed the package (every policy at monitor,
+// per the hand-curated template). Removing the generated path
+// resolves the divergence and makes init a one-shot bring-up.
 func RunInit(w io.Writer) int {
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(w, "lsm init: must run as root")
 		return 1
 	}
-	created, err := WriteDefaultConf()
-	if err != nil {
-		fmt.Fprintln(w, "lsm init:", err)
+
+	// Bail early with a useful hint when the operator hasn't installed
+	// a conf yet. ConfPath is the canonical /etc/cfm/lsm.conf location.
+	if _, err := os.Stat(ConfPath); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(w, "lsm init: %s not found.\n", ConfPath)
+			fmt.Fprintln(w, "  Install the shipped template before running `cfm lsm init`:")
+			fmt.Fprintln(w, "    cp configs/lsm.conf /etc/cfm/lsm.conf")
+			fmt.Fprintln(w, "  (Or install the cfm rpm/deb package, which drops it in place.)")
+			return 1
+		}
+		fmt.Fprintln(w, "lsm init: stat", ConfPath+":", err)
 		return 1
 	}
-	if created {
-		fmt.Fprintf(w, "Created %s (cfm-lsm globally disabled; every policy at default mode).\n", ConfPath)
-		fmt.Fprintln(w, "Review with: cat", ConfPath)
-		fmt.Fprintln(w, "Check preflight: cfm lsm status")
-		fmt.Fprintln(w, "See what would attach: cfm lsm preview")
-	} else {
-		fmt.Fprintf(w, "%s already exists; not overwriting.\n", ConfPath)
-		fmt.Fprintln(w, "Edit by hand to change the enabled flag or per-policy modes.")
+
+	// Step 1: preflight + status. RunStatus already prints the full
+	// kernel-preflight table and the per-policy view. If preflight
+	// FAILs, RunEnable would refuse to attach — surface that here
+	// before attempting.
+	fmt.Fprintln(w, "===== cfm lsm init: preflight =====")
+	fmt.Fprintln(w)
+	res := RunStatus(w, StatusOptions{})
+	if !res.PreflightOK {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Preflight FAIL — see the table above for the specific check that failed.")
+		fmt.Fprintln(w, "Resolve the failing check before retrying `cfm lsm init`.")
+		return 1
 	}
+	if res.ConfError != "" {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Conf parse error:", res.ConfError)
+		return 1
+	}
+
+	// Step 2: enable. AssumeYes=true because init is the no-prompt
+	// bring-up path; an operator running it knows they want to
+	// activate. Per-policy enforce decisions stay in lsm.conf.
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "===== cfm lsm init: enable =====")
+	fmt.Fprintln(w)
+	if rc := RunEnable(w, EnableOptions{AssumeYes: true}); rc != 0 {
+		return rc
+	}
+
+	// Step 3: final status snapshot so the operator sees attached/
+	// pinned state without a second command.
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "===== cfm lsm init: post-enable status =====")
+	fmt.Fprintln(w)
+	RunStatus(w, StatusOptions{})
 	return 0
 }

@@ -18,7 +18,8 @@ import (
 //	cfm lsm probe            -> attach briefly to verify the kernel accepts; detach
 //	cfm lsm enable           -> attach + pin to bpffs (survives daemon restart)
 //	cfm lsm disable          -> unpin + detach all programs
-//	cfm lsm init             -> write default /etc/cfm/lsm.conf if absent
+//	cfm lsm init             -> preflight + enable + status (one-shot bring-up;
+//	                            requires /etc/cfm/lsm.conf to exist already)
 //	cfm lsm help / -h        -> usage
 //
 // Three subcommands touch kernel state:
@@ -192,7 +193,10 @@ Subcommands:
                       enabled) then enable. Picks up changed allow_* lists,
                       [events] / [kmsg] knobs, and per-policy modes.
                       Needs root.
-  init                Write default /etc/cfm/lsm.conf if absent
+  init                One-shot bring-up: preflight + enable + status.
+                      Requires /etc/cfm/lsm.conf to exist already
+                      (install via the rpm/deb package or copy
+                      configs/lsm.conf from the source tree).
   help                Show this message
 
 Status flags:
