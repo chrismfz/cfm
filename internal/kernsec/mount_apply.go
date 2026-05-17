@@ -190,7 +190,7 @@ func enableFstabEdit(rule MountRule, w io.Writer, opts EnableMountOptions, lines
 			return err
 		}
 		fmt.Fprintf(w, "[Mount] added %s to existing %s line in %s (backup: %s%s).\n",
-			strings.Join(missingFromCSV(rule.Recommended, lines, rule.MountPoint), ","),
+			strings.Join(missingFromCSV(rule.Recommended, rule.OptionAliases, lines, rule.MountPoint), ","),
 			rule.MountPoint, PathFstab, PathFstab, BackupSuffix)
 	}
 	return finishEnable(rule, w, opts)
@@ -694,12 +694,20 @@ func replaceOptionsColumn(line, oldOpts, newOpts string) string {
 // from the /etc/fstab line BEFORE this enable run. Used only for the
 // operator-facing log line; the actual diff is computed inside
 // applyEnableToFstabLines.
-func missingFromCSV(recommended string, originalLines []string, mountPoint string) []string {
+//
+// aliases must be the rule's OptionAliases — a recommended option
+// whose alias is already on the existing fstab line is NOT missing
+// (e.g. an fstab line carrying hidepid=invisible already satisfies a
+// hidepid=2 recommendation). Today only /dev/shm uses CanEnable, and
+// it has no aliases, but the parameter is wired through so any future
+// alias-bearing rule with CanEnable=true gets the right log line for
+// free instead of silently misreporting "added hidepid=2".
+func missingFromCSV(recommended string, aliases map[string][]string, originalLines []string, mountPoint string) []string {
 	_, parsed, ok := findFstabLineIndex(originalLines, mountPoint)
 	if !ok {
 		return splitCSV(recommended)
 	}
-	_, missing := splitMountOptions(parsed.Options, recommended)
+	_, missing := splitMountOptionsAware(parsed.Options, recommended, aliases)
 	return missing
 }
 

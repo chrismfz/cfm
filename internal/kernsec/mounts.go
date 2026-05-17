@@ -207,7 +207,7 @@ func checkMountDetail(
 		}
 	}
 
-	d.Present, d.Missing = splitMountOptions(d.CurrentOptions, rule.Recommended)
+	d.Present, d.Missing = splitMountOptionsAware(d.CurrentOptions, rule.Recommended, rule.OptionAliases)
 
 	// Resolve next-boot options from fstab + systemd unit + drop-ins.
 	// readFstab/findUnit can be nil in legacy test callers; treat that
@@ -225,7 +225,7 @@ func checkMountDetail(
 		// Remediation guidance is "fix the primary row to inherit",
 		// distinct from the standalone partial / missing cases.
 		d.State = MountBindOfAnother
-	case d.NextBootOptions != "" && nextBootCoversRecommended(d.NextBootOptions, rule.Recommended):
+	case d.NextBootOptions != "" && nextBootCoversRecommended(d.NextBootOptions, rule.Recommended, rule.OptionAliases):
 		// Next-boot config already carries every recommended option;
 		// the live mount just hasn't been remounted yet. Reboot (or a
 		// manual `mount -o remount`) clears this.
@@ -271,9 +271,11 @@ func resolveNextBootOptions(
 }
 
 // nextBootCoversRecommended returns true when every comma-separated
-// option in `recommended` is present in `nextBoot`.
-func nextBootCoversRecommended(nextBoot, recommended string) bool {
-	_, missing := splitMountOptions(nextBoot, recommended)
+// option in `recommended` is present in `nextBoot`. Honours the
+// rule's OptionAliases — a next-boot config that carries
+// `hidepid=invisible` covers a recommendation of `hidepid=2`.
+func nextBootCoversRecommended(nextBoot, recommended string, aliases map[string][]string) bool {
+	_, missing := splitMountOptionsAware(nextBoot, recommended, aliases)
 	return len(missing) == 0
 }
 
@@ -319,7 +321,33 @@ func isGenericMountSource(src string) bool {
 // splitMountOptions returns (present, missing) recommended options
 // against the live options column. Both inputs are comma-separated
 // option sets; ordering is irrelevant.
+//
+// Equivalent to splitMountOptionsAware with no alias map — kept as
+// the simple two-arg signature for callers (and tests) that don't
+// need alias-aware matching.
 func splitMountOptions(current, recommended string) (present, missing []string) {
+	return splitMountOptionsAware(current, recommended, nil)
+}
+
+// splitMountOptionsAware is splitMountOptions with a per-rule alias
+// map: a recommended option is considered present when either the
+// literal token OR any of its registered aliases appears in the
+// live options column. See MountRule.OptionAliases for the use case
+// (kernel rendering /proc hidepid=2 as "hidepid=invisible").
+//
+// When the recommendation IS satisfied by an alias rather than the
+// canonical token, the alias string is what gets appended to
+// `present` — that's what the operator actually sees on the host,
+// and what `cfm kernsec status` should echo back to them.
+//
+// Caveat for downstream consumers: `present` is therefore NOT
+// guaranteed to be a subset of the comma-tokens of `recommended` —
+// it can contain alias tokens that the recommendation doesn't list
+// literally. Today only the status renderer consumes it (via
+// strings.Join for display, which is alias-agnostic). Any future
+// consumer doing token-set arithmetic against `recommended` needs to
+// fold aliases back in via this map.
+func splitMountOptionsAware(current, recommended string, aliases map[string][]string) (present, missing []string) {
 	have := make(map[string]struct{})
 	for _, o := range strings.Split(current, ",") {
 		o = strings.TrimSpace(o)
@@ -334,6 +362,21 @@ func splitMountOptions(current, recommended string) (present, missing []string) 
 		}
 		if _, ok := have[o]; ok {
 			present = append(present, o)
+			continue
+		}
+		matched := ""
+		for _, alt := range aliases[o] {
+			alt = strings.TrimSpace(alt)
+			if alt == "" {
+				continue
+			}
+			if _, ok := have[alt]; ok {
+				matched = alt
+				break
+			}
+		}
+		if matched != "" {
+			present = append(present, matched)
 		} else {
 			missing = append(missing, o)
 		}
@@ -459,5 +502,55 @@ var Tier1Mounts = []MountRule{
 		DefaultLiveOptions: "nodev,nosuid",
 		Description:        "Same protection family for /dev/shm (POSIX shared-memory tmpfs).",
 		Affects:            "Mostly safe in practice; double-check JVM / Python multiprocessing usage.",
+	},
+
+	// --- /proc hidepid (audit-only; CanEnable defaults to false) -----
+	//
+	// hidepid=2 hides /proc/<pid> entries from users who don't own them:
+	// `ps aux` by a non-root user only shows their own processes,
+	// /proc/<other-pid>/cmdline / status / environ / fd /maps become
+	// unreadable. Root sees everything regardless. Closes a huge
+	// reconnaissance channel for compromised vhost users — sshd
+	// command-lines, mysql args, and admin sessions all leak through
+	// /proc otherwise.
+	//
+	// gid=<group> is the escape valve: members of that group keep full
+	// visibility. Needed for third-party monitoring agents (Munin node,
+	// Netdata's apps.plugin, Zabbix agent, New Relic, Datadog) that
+	// scrape /proc as non-root for per-process metrics. The operator
+	// creates the group, adds the monitoring uids, then mounts with
+	// gid=<gid>.
+	//
+	// CanEnable is intentionally FALSE here even though the same machinery
+	// could mutate fstab and remount. The reason is the gid= escape: we
+	// can't know the operator's monitoring layout at apply time, and
+	// silently breaking metric collection on a production host erodes
+	// trust faster than any single hardening can recover. Operators
+	// review the recommendation, set up the group, then opt in via a
+	// manual fstab edit. The audit hint surfaces in `cfm kernsec status`
+	// alongside the /tmp / /var/tmp / /dev/shm rows.
+	{
+		ID: "KSEC-FS-mount.proc-001", Group: "fs.mount.proc", Tier: Tier1,
+		MountPoint: "/proc",
+		// Recommended carries ONLY the audit-checkable security
+		// invariant (hidepid is on). gid=<group> is intentionally
+		// excluded from the literal match: the operator's chosen
+		// group name resolves to a numeric gid in /proc/mounts
+		// (e.g. `hidepid=2,gid=1234`), so a literal `gid=cfmprocreaders`
+		// in Recommended would render as permanent MISSING on every
+		// correctly-configured host. The recipe in docs/kernsec.md
+		// covers the group setup; here we just verify the kernel
+		// stopped exposing other users' /proc entries.
+		Recommended: "hidepid=2",
+		// Kernels >= 5.8 render hidepid=2 as the literal token
+		// `hidepid=invisible` in /proc/mounts (the symbolic name was
+		// introduced in commit 24a71ce5c47f); hidepid=4 /
+		// hidepid=ptraceable are strictly stricter. All three satisfy
+		// the recommendation.
+		OptionAliases: map[string][]string{
+			"hidepid=2": {"hidepid=invisible", "hidepid=4", "hidepid=ptraceable"},
+		},
+		Description: "Recommend hidepid=2,gid=<group> on /proc to hide other users' processes from non-root readers. The single largest reconnaissance-channel reduction on shared hosting: vhost users can no longer enumerate sshd command-lines, mysql -p args, or other tenants' workloads via ps / /proc/*. Group escape valve preserves monitoring-agent visibility.",
+		Affects:     "Third-party monitoring agents (Munin, Netdata, Zabbix, New Relic, Datadog) that scrape /proc as non-root stop collecting per-process metrics until their uid is added to the gid= group. cPanel / DirectAdmin / CloudLinux daemons all run as root and are unaffected. CageFS-confined users get correct narrower visibility (a feature, not a break). Operator opts in manually after creating the group and adding monitoring uids — kernsec does not auto-mutate fstab for this rule.",
 	},
 }

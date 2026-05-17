@@ -119,6 +119,24 @@ type MountRule struct {
 	// disable reverts only the options kernsec actually added on
 	// top of the distro baseline, never the baseline itself.
 	DefaultLiveOptions string
+
+	// OptionAliases lets a recommended option match alternative live
+	// renderings the kernel may show in /proc/mounts. The key is the
+	// canonical option as written in Recommended (e.g. "hidepid=2");
+	// the value is a list of equivalents that, when present in the
+	// live options column, satisfy the recommendation.
+	//
+	// The /proc hidepid knob is the motivating case: kernels >=5.8
+	// render hidepid=2 as the string `hidepid=invisible`, and
+	// hidepid=4 / hidepid=ptraceable are strictly stricter variants
+	// that should not produce a false-positive MISSING. Without this
+	// map the audit row would render as permanently MISSING on every
+	// correctly-configured modern host.
+	//
+	// Matching is by literal-token equality on either the canonical
+	// recommendation OR any alias in the list; whitespace is trimmed.
+	// Nil/empty is the default — most rules don't need aliases.
+	OptionAliases map[string][]string
 }
 
 // KSPPSysctls is the server-safe sysctl profile from kspp.sh.
@@ -460,6 +478,14 @@ var KernelSurface = []SysctlRule{
 		Key: "kernel.core_pattern", Value: "|/bin/false",
 		Description: "Redirect coredumps to /bin/false — prevents exploit-writable core-dump paths used by OverlayFS-class privilege escalations (CVE-2023-0386 and similar). On a shared hosting server where tenants can trigger process crashes you do not want coredumps landing anywhere.",
 		Affects:     "Tier 2: coredumps are suppressed for all processes, which can break support diagnostics, backup/monitoring crash capture, and hosting-panel/vendor troubleshooting. Skipped when those risks are detected.",
+	},
+
+	// --- sysctl.kernel.kexec: lock out kexec_load (Tier 1, gated) -----
+	{
+		ID: "KSEC-SCT-kspp.kexec-001", Group: "sysctl.kernel.kexec", Tier: Tier1,
+		Key: "kernel.kexec_load_disabled", Value: "1",
+		Description: "Disable kexec_load(2) and kexec_file_load(2) — closes a rootkit-persistence vector that loads a replacement kernel post-boot. KernelCare / Ksplice live-patch through kernel modules, not kexec, so this knob does NOT conflict with them. Standard package-manager kernel updates use the bootloader, not kexec. The one real conflict — kdump's crash-kernel preloading — is gated by the host-profile probe HasKdump (skipped when /proc/cmdline carries crashkernel= or kdump.service is installed).",
+		Affects:     "On hosts without kdump configured: zero user-visible change. On hosts WITH kdump: rule is auto-skipped with an audit line so crash-dump capability stays intact. Once set, the knob is sticky — kexec_load cannot be re-enabled until reboot.",
 	},
 }
 

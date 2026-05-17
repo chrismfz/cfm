@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -384,5 +385,126 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,seclabel 0 0
 	// mount row references it any more.
 	if _, ok := stateByMountPoint["/home"]; ok {
 		t.Errorf("/home should no longer appear in Tier1Mounts audit rows")
+	}
+}
+
+// TestProcHidepidRule covers the audit-only /proc hidepid=2 row added
+// to Tier1Mounts:
+//   - the rule exists in the catalogue;
+//   - CanEnable is FALSE (operator-managed, kernsec must not mutate
+//     fstab for this rule even at conf.Tier 2/3);
+//   - on a live /proc mount without hidepid, the audit reports a
+//     missing-option state so the recommendation surfaces in
+//     `cfm kernsec status`.
+func TestProcHidepidRule(t *testing.T) {
+	var procRule MountRule
+	for _, r := range Tier1Mounts {
+		if r.MountPoint == "/proc" {
+			procRule = r
+			break
+		}
+	}
+	if procRule.MountPoint == "" {
+		t.Fatal("Tier1Mounts must contain a /proc rule (KSEC-FS-mount.proc-001)")
+	}
+	if procRule.CanEnable {
+		t.Error("Tier1Mounts /proc rule must be audit-only (CanEnable=false); auto-mutating fstab for /proc would silently break monitoring agents on the next reboot")
+	}
+	if procRule.Recommended == "" {
+		t.Error("Tier1Mounts /proc rule must carry a Recommended string")
+	}
+	if !strings.Contains(procRule.Recommended, "hidepid=2") {
+		t.Errorf("Tier1Mounts /proc rule should recommend hidepid=2; got %q", procRule.Recommended)
+	}
+
+	// A typical default /proc mount on RHEL/Debian carries no hidepid.
+	// The audit must mark the row as MissingOptions so the status
+	// renderer surfaces the recommendation.
+	procMounts := "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
+	d := checkMountDetail(procMounts, procRule, Tier1Mounts,
+		stubFS{}.lstat, stubFS{}.readlink, nil, nil)
+	if d.State != MountMissingOptions && d.State != MountPartialOptions {
+		t.Errorf("default /proc mount audit state = %v, want MountMissingOptions or MountPartialOptions", d.State)
+	}
+
+	// On a host where the operator followed the recipe, the kernel
+	// renders hidepid=2 as either the literal "hidepid=2" (older
+	// kernels) or "hidepid=invisible" (kernels >=5.8). Both must
+	// satisfy the recommendation: any other behaviour would flag a
+	// correctly-configured host as permanently MISSING.
+	for _, live := range []string{
+		"rw,nosuid,nodev,noexec,relatime,hidepid=2,gid=1234",
+		"rw,nosuid,nodev,noexec,relatime,hidepid=invisible,gid=1234",
+		"rw,nosuid,nodev,noexec,relatime,hidepid=4,gid=1234",
+		"rw,nosuid,nodev,noexec,relatime,hidepid=ptraceable,gid=1234",
+	} {
+		mounts := "proc /proc proc " + live + " 0 0\n"
+		got := checkMountDetail(mounts, procRule, Tier1Mounts,
+			stubFS{}.lstat, stubFS{}.readlink, nil, nil)
+		if got.State != MountOK {
+			t.Errorf("live %q: state = %v, want MountOK (hidepid alias must satisfy recommendation)",
+				live, got.State)
+		}
+	}
+}
+
+// TestMountRuleAliasKeysAppearInRecommended is a catalogue-lint:
+// every key in MountRule.OptionAliases MUST be one of the literal
+// comma-tokens of Recommended. A typo (e.g. `hidepid=02` as the
+// alias-map key on a rule whose Recommended is `hidepid=2`) would
+// silently disable alias matching — splitMountOptionsAware looks
+// aliases up by the canonical option token while iterating
+// Recommended, and a stale key never gets consulted. Cheap to
+// enforce statically; expensive to debug if it ever ships.
+func TestMountRuleAliasKeysAppearInRecommended(t *testing.T) {
+	for _, rule := range Tier1Mounts {
+		if len(rule.OptionAliases) == 0 {
+			continue
+		}
+		recTokens := map[string]struct{}{}
+		for _, o := range strings.Split(rule.Recommended, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				recTokens[o] = struct{}{}
+			}
+		}
+		for key := range rule.OptionAliases {
+			if _, ok := recTokens[key]; !ok {
+				t.Errorf("rule %s: OptionAliases key %q is not a token of Recommended %q — alias matching would silently never fire for this entry",
+					rule.ID, key, rule.Recommended)
+			}
+		}
+	}
+}
+
+// TestSplitMountOptionsAware_HidepidAliases is the unit test that
+// pins the alias-aware matching behaviour at the splitMountOptions
+// layer — independent of the /proc rule's specific catalogue entry,
+// so regressions in the rule definition can't mask regressions in
+// the matching function (and vice versa).
+func TestSplitMountOptionsAware_HidepidAliases(t *testing.T) {
+	aliases := map[string][]string{
+		"hidepid=2": {"hidepid=invisible", "hidepid=4", "hidepid=ptraceable"},
+	}
+	cases := []struct {
+		name        string
+		current     string
+		recommended string
+		wantMissing []string
+	}{
+		{"canonical hidepid=2 satisfies", "rw,hidepid=2", "hidepid=2", nil},
+		{"hidepid=invisible satisfies", "rw,hidepid=invisible", "hidepid=2", nil},
+		{"hidepid=4 satisfies (stricter)", "rw,hidepid=4", "hidepid=2", nil},
+		{"hidepid=ptraceable satisfies", "rw,hidepid=ptraceable", "hidepid=2", nil},
+		{"no hidepid at all → missing", "rw,relatime", "hidepid=2", []string{"hidepid=2"}},
+		{"unrelated alias rendering → missing", "rw,hidepid=0", "hidepid=2", []string{"hidepid=2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, missing := splitMountOptionsAware(tc.current, tc.recommended, aliases)
+			if !reflect.DeepEqual(missing, tc.wantMissing) {
+				t.Errorf("missing = %v, want %v", missing, tc.wantMissing)
+			}
+		})
 	}
 }
