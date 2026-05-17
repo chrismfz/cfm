@@ -7,31 +7,31 @@ import (
 	"testing"
 )
 
-// TestResolveWatchedUidFallback covers the four meaningful sentinel
-// inputs and the panel-present interaction. Pure function, no fixtures
-// needed.
+// TestResolveWatchedUidFallback covers the three meaningful inputs.
+// Panel-detect was removed — auto-detect was a coverage gap on panel
+// hosts (sysadmin accounts at uid >= 1000 silently unwatched).
+// Deprecated -1 sentinel is mapped to 1000 with a one-time warning
+// emitted by the lifecycle code, not here.
 func TestResolveWatchedUidFallback(t *testing.T) {
 	cases := []struct {
 		name      string
 		cfg       int
-		panel     bool
 		wantThr   uint32
 		wantApply bool
 	}{
-		{"auto-no-panel applies default 1000", -1, false, 1000, true},
-		{"auto-with-panel disables fallback", -1, true, 0, false},
-		{"explicit-zero always disables", 0, false, 0, false},
-		{"explicit-zero overrides panel-absent", 0, false, 0, false},
-		{"explicit-500 applies regardless of panel", 500, true, 500, true},
-		{"explicit-1000 applies regardless of panel", 1000, true, 1000, true},
-		{"negative-other-than-minus-1 treated as auto", -7, false, 1000, true},
+		{"deprecated -1 mapped to 1000", -1, 1000, true},
+		{"any negative mapped to 1000", -7, 1000, true},
+		{"explicit zero disables", 0, 0, false},
+		{"explicit 500", 500, 500, true},
+		{"explicit 1000 (the shipped default)", 1000, 1000, true},
+		{"explicit large threshold", 65535, 65535, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			thr, apply := resolveWatchedUidFallback(tc.cfg, tc.panel)
+			thr, apply := resolveWatchedUidFallback(tc.cfg)
 			if thr != tc.wantThr || apply != tc.wantApply {
-				t.Errorf("cfg=%d panel=%t → (%d, %t), want (%d, %t)",
-					tc.cfg, tc.panel, thr, apply, tc.wantThr, tc.wantApply)
+				t.Errorf("cfg=%d → (%d, %t), want (%d, %t)",
+					tc.cfg, thr, apply, tc.wantThr, tc.wantApply)
 			}
 		})
 	}
@@ -45,10 +45,10 @@ func TestParseConf_WatchedUidFallbackMin(t *testing.T) {
 		body string
 		want int
 	}{
-		{"default sentinel", "enabled = true\n", -1},
-		{"explicit auto", "watched_uid_fallback_min = -1\n", -1},
+		{"default when key absent", "enabled = true\n", 1000},
+		{"deprecated -1 accepted (mapped at runtime)", "watched_uid_fallback_min = -1\n", -1},
 		{"explicit disable", "watched_uid_fallback_min = 0\n", 0},
-		{"explicit threshold", "watched_uid_fallback_min = 1000\n", 1000},
+		{"explicit shipped default", "watched_uid_fallback_min = 1000\n", 1000},
 		{"explicit non-default threshold", "watched_uid_fallback_min = 500\n", 500},
 	}
 	for _, tc := range cases {
@@ -89,6 +89,103 @@ func TestFormatConf_WatchedUidFallbackMin_RoundTrip(t *testing.T) {
 		t.Errorf("round-trip lost value: got %d, want 500\n--- rendered ---\n%s",
 			parsed.WatchedUidFallbackMin, rendered)
 	}
+}
+
+// TestParseConf_ExcludeKnobs covers the three opt-out conf keys
+// introduced with the watched-uid model cleanup.
+func TestParseConf_ExcludeKnobs(t *testing.T) {
+	body := `
+enabled = true
+watched_uid_fallback_min = 1000
+exclude_user = chris
+exclude_user = devops
+exclude_uid  = 1001
+exclude_uid  = 1002
+exclude_gid  = 10
+`
+	c, err := ParseConf(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got, want := c.ExcludeUsers, []string{"chris", "devops"}; !equalStringSlices(got, want) {
+		t.Errorf("ExcludeUsers: got %v, want %v", got, want)
+	}
+	if got, want := c.ExcludeUIDs, []uint32{1001, 1002}; !equalUint32Slices(got, want) {
+		t.Errorf("ExcludeUIDs: got %v, want %v", got, want)
+	}
+	if got, want := c.ExcludeGIDs, []uint32{10}; !equalUint32Slices(got, want) {
+		t.Errorf("ExcludeGIDs: got %v, want %v", got, want)
+	}
+}
+
+func TestParseConf_ExcludeKnobs_Validation(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty username", "exclude_user =\n"},
+		{"empty username with whitespace", "exclude_user =    \n"},
+		{"negative uid", "exclude_uid = -5\n"},
+		{"non-numeric uid", "exclude_uid = chris\n"},
+		{"negative gid", "exclude_gid = -1\n"},
+		{"non-numeric gid", "exclude_gid = wheel\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseConf(strings.NewReader(tc.body)); err == nil {
+				t.Errorf("expected parse error for %q", tc.body)
+			}
+		})
+	}
+}
+
+func TestFormatConf_ExcludeKnobs_RoundTrip(t *testing.T) {
+	original := DefaultConf()
+	original.ExcludeUsers = []string{"chris", "devops"}
+	original.ExcludeUIDs = []uint32{1001, 1002}
+	original.ExcludeGIDs = []uint32{10}
+
+	rendered := FormatConf(original)
+	parsed, err := ParseConf(strings.NewReader(rendered))
+	if err != nil {
+		t.Fatalf("ParseConf(FormatConf): %v\n--- rendered ---\n%s", err, rendered)
+	}
+	if !equalStringSlices(parsed.ExcludeUsers, original.ExcludeUsers) {
+		t.Errorf("ExcludeUsers round-trip: got %v, want %v\n%s",
+			parsed.ExcludeUsers, original.ExcludeUsers, rendered)
+	}
+	if !equalUint32Slices(parsed.ExcludeUIDs, original.ExcludeUIDs) {
+		t.Errorf("ExcludeUIDs round-trip: got %v, want %v\n%s",
+			parsed.ExcludeUIDs, original.ExcludeUIDs, rendered)
+	}
+	if !equalUint32Slices(parsed.ExcludeGIDs, original.ExcludeGIDs) {
+		t.Errorf("ExcludeGIDs round-trip: got %v, want %v\n%s",
+			parsed.ExcludeGIDs, original.ExcludeGIDs, rendered)
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalUint32Slices(a, b []uint32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestWebUserNames_HasNewAdditions guards against accidental deletion

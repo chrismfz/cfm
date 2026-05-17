@@ -135,18 +135,23 @@ the map and those three rules won't fire from it.
 To make the harness exercise those rules on a panel host:
 
 ```sh
-# 1. Edit /etc/cfm/lsm.conf, change:
-#       watched_uid_fallback_min = -1
-#    to:
+# 1. Ensure /etc/cfm/lsm.conf has the new shipped default:
 #       watched_uid_fallback_min = 1000      # login.defs UID_MIN convention
-# 2. Apply:
+#    (The default used to be -1 "auto", which silently skipped the
+#    uid-range fallback on panel hosts. That created a coverage gap
+#    for admin accounts; the new default closes it. -1 still parses
+#    as a deprecated alias for 1000 with a one-time warning.)
+# 2. Optionally opt-out your own admin accounts so YOUR sysadmin
+#    sessions stay quiet:
+#       exclude_user = your-admin-login
+#       exclude_uid  = 1001
+# 3. Apply:
 sudo cfm lsm restart
-# 3. Re-run the harness. EXEC-004 / EXEC-006 / FS-005 should now PASS.
-# 4. After testing, restore watched_uid_fallback_min = -1 and
-#    `cfm lsm restart` again.
+# 4. Re-run the harness. EXEC-004 / EXEC-006 / FS-005 / FS-007
+#    should now PASS from the cfmpoc test user (uid 1500).
 ```
 
-1000 is the production-realistic value: it matches `/etc/login.defs`'s
+1000 is the production-realistic threshold: it matches `/etc/login.defs`'s
 `UID_MIN` on every modern distro, so the watched-uid set includes
 every regular login account on the host — exactly what you want
 post-test-window for catching webshell behavior on a real workload.

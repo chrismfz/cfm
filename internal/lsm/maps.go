@@ -222,11 +222,14 @@ var DefaultKernelKnobPaths = []string{
 // conf may be nil; in that case the allow_exe merge is skipped and
 // only the disk-walked suid binaries seed cfm_setuid_inodes.
 func PopulateMaps(l *Loader, conf *Conf) (uidsAdded, inodesAdded, setuidAdded, knobsAdded int, err error) {
-	fallback := -1
+	opts := WatchedUidsOptions{FallbackMin: 1000}
 	if conf != nil {
-		fallback = conf.WatchedUidFallbackMin
+		opts.FallbackMin = conf.WatchedUidFallbackMin
+		opts.ExcludeUsers = conf.ExcludeUsers
+		opts.ExcludeUIDs = conf.ExcludeUIDs
+		opts.ExcludeGIDs = conf.ExcludeGIDs
 	}
-	uidsAdded, err = populateWatchedUids(l.WatchedUidsMap(), fallback)
+	uidsAdded, err = populateWatchedUids(l.WatchedUidsMap(), opts)
 	if err != nil {
 		return uidsAdded, 0, 0, 0, fmt.Errorf("watched uids: %w", err)
 	}
@@ -269,24 +272,22 @@ func populateInodeSet(m *ebpf.Map, paths []string) (int, error) {
 	return added, nil
 }
 
-// resolveWatchedUidFallback decides whether to apply the uid-threshold
-// fallback and which threshold to use, given the operator-supplied
-// Conf.WatchedUidFallbackMin and whether a panel manifest was found.
+// resolveWatchedUidFallback maps Conf.WatchedUidFallbackMin to the
+// threshold + apply pair populateWatchedUids uses.
 //
 // Behaviour by input:
-//   - cfg == -1 (auto): apply with min=1000 when no panel is present;
-//     skip when a panel manifest contributed uids.
-//   - cfg == 0:         skip unconditionally.
-//   - cfg >  0:         apply with min=cfg regardless of panel state.
-//   - cfg <  -1:        treated as auto (ParseConf already rejects
-//                       negatives <-1, this is paranoia for direct
-//                       struct construction).
-func resolveWatchedUidFallback(cfg int, panelPresent bool) (threshold uint32, apply bool) {
+//   - cfg == 0:   skip the fallback entirely.
+//   - cfg >  0:   apply with min=cfg.
+//   - cfg <  0:   deprecated; treated as the shipped default (1000)
+//                 with a one-time warning logged at adoption time
+//                 (see populateWatchedUids). The historical "auto"
+//                 panel-detect heuristic was removed because it
+//                 silently skipped the uid-range sweep on panel
+//                 hosts, leaving admin accounts unwatched.
+func resolveWatchedUidFallback(cfg int) (threshold uint32, apply bool) {
 	switch {
-	case cfg <= -1:
-		if panelPresent {
-			return 0, false
-		}
+	case cfg < 0:
+		// Deprecated -1 sentinel: behave as the explicit default.
 		return 1000, true
 	case cfg == 0:
 		return 0, false
@@ -295,70 +296,108 @@ func resolveWatchedUidFallback(cfg int, panelPresent bool) (threshold uint32, ap
 	}
 }
 
+// WatchedUidsOptions carries the conf-driven knobs that
+// populateWatchedUids consumes alongside the BPF map. Kept as a
+// struct so adding future filters (eg. exclude_shell) does not
+// churn every call site.
+type WatchedUidsOptions struct {
+	FallbackMin   int
+	ExcludeUsers  []string
+	ExcludeUIDs   []uint32
+	ExcludeGIDs   []uint32
+}
+
 // populateWatchedUids walks /etc/passwd, identifies web-class
-// system users, and adds every cPanel / DirectAdmin account user.
-// Writes uid → 1 to the supplied BPF map. Returns the count of
-// uids added.
+// system users, adds every cPanel / DirectAdmin account uid, layers
+// on the uid-range fallback per opts.FallbackMin, then removes any
+// uid covered by opts.Exclude{Users,UIDs,GIDs}. Writes uid → 1 to
+// the supplied BPF map. Returns the count of uids added.
 //
-// fallbackMin extends the watched set on hosts without a panel
-// manifest (standalone web servers — Nextcloud, GitLab, plain LAMP).
-// Sentinel values match Conf.WatchedUidFallbackMin:
-//   - -1: auto. Apply min=1000 if no panel manifest is found; disable
-//     otherwise. The panel manifest itself contributes account uids
-//     via the panelDomainOwnersToUIDs path above, so an auto-applied
-//     fallback would be redundant noise on those hosts.
-//   - 0:  disable the fallback entirely.
-//   - >0: explicit threshold; every uid in /etc/passwd at or above
-//     this value joins the watched set.
-func populateWatchedUids(m *ebpf.Map, fallbackMin int) (int, error) {
+// Three additive layers:
+//   1. static WebUserNames + WebUserNamePrefixes match (always)
+//   2. panel manifest contributions (cPanel /etc/userdomains,
+//      DirectAdmin domain-owners — always, best-effort)
+//   3. uid-range fallback (opts.FallbackMin; 0 disables, >0 sweeps
+//      every uid >= threshold).
+//
+// Then the exclude lists are applied: any uid produced by the
+// layers above that appears in ExcludeUIDs, has a name in
+// ExcludeUsers, or has a primary gid in ExcludeGIDs is dropped
+// before the map write. The order matters — excluding is the last
+// step so an operator can declare "watch everyone >= 1000 but
+// not chris" without re-listing the names of every uid they
+// DO want watched.
+func populateWatchedUids(m *ebpf.Map, opts WatchedUidsOptions) (int, error) {
 	if m == nil {
 		return 0, fmt.Errorf("nil map")
 	}
 
-	// Read /etc/passwd ONCE into a name→uid map. Both code paths
-	// (web-user-name match + panel-manifest lookup) consume the
-	// same map, so a host with 500 cPanel accounts walks
-	// /etc/passwd once total instead of 501 times.
-	nameToUID, err := loadPasswdMap()
+	// Read /etc/passwd ONCE into name→uid and uid→gid maps. Every
+	// code path below consumes one or both — single pass keeps
+	// hosts with 500+ accounts at O(passwd_lines), not O(passwd_lines * users).
+	nameToUID, uidToGID, err := loadPasswdMaps()
 	if err != nil {
 		return 0, err
 	}
 
 	uids := map[uint32]struct{}{}
 
-	// Static web-user-name match.
+	// Layer 1: Static web-user-name match.
 	for name, uid := range nameToUID {
 		if isWebUserName(name) {
 			uids[uid] = struct{}{}
 		}
 	}
 
-	// Panel-managed accounts: every uid that owns a hosted vhost is
-	// also a web-class user. Best-effort — missing manifest files
-	// just mean no panel accounts to add.
-	cpanelUIDs := panelDomainOwnersToUIDs(cpanelUserDomainsTSV, nameToUID)
-	for _, uid := range cpanelUIDs {
+	// Layer 2: Panel-managed accounts. Best-effort — missing manifest
+	// files just mean no panel accounts to add.
+	for _, uid := range panelDomainOwnersToUIDs(cpanelUserDomainsTSV, nameToUID) {
 		uids[uid] = struct{}{}
 	}
-	directAdminUIDs := panelDomainOwnersToUIDs(directAdminDomainsTSV, nameToUID)
-	for _, uid := range directAdminUIDs {
+	for _, uid := range panelDomainOwnersToUIDs(directAdminDomainsTSV, nameToUID) {
 		uids[uid] = struct{}{}
 	}
 
-	// Fallback for hosts without a panel manifest: treat every uid
-	// >= threshold as web-class. Auto mode (-1) only kicks in when
-	// no panel manifest was found — on panel hosts the manifest is
-	// the source of truth and adding a uid-range sweep on top would
-	// pull in non-web sysadmin accounts that happen to have uid >=
-	// 1000. Operators can force the fallback on with an explicit
-	// positive value, or off with 0.
-	threshold, apply := resolveWatchedUidFallback(fallbackMin, len(cpanelUIDs)+len(directAdminUIDs) > 0)
+	// Layer 3: uid-range fallback. Treats every uid >= threshold as
+	// web-class. Disabled (apply=false) when opts.FallbackMin == 0.
+	threshold, apply := resolveWatchedUidFallback(opts.FallbackMin)
 	if apply {
 		for _, uid := range nameToUID {
 			if uid >= threshold {
 				uids[uid] = struct{}{}
 			}
 		}
+	}
+
+	// Exclude pass: drop any uid covered by the operator's opt-out
+	// list. Applied after the three additive layers so the operator
+	// can express "watch broadly, except for these few" rather than
+	// having to enumerate every uid they want watched.
+	excludeUIDs := map[uint32]struct{}{}
+	for _, u := range opts.ExcludeUIDs {
+		excludeUIDs[u] = struct{}{}
+	}
+	for _, name := range opts.ExcludeUsers {
+		if uid, ok := nameToUID[name]; ok {
+			excludeUIDs[uid] = struct{}{}
+		}
+		// Names that don't resolve are skipped silently — operators
+		// commonly carry a single lsm.conf across heterogeneous hosts
+		// where not every admin account exists everywhere.
+	}
+	if len(opts.ExcludeGIDs) > 0 {
+		excludedGid := map[uint32]struct{}{}
+		for _, g := range opts.ExcludeGIDs {
+			excludedGid[g] = struct{}{}
+		}
+		for uid, gid := range uidToGID {
+			if _, hit := excludedGid[gid]; hit {
+				excludeUIDs[uid] = struct{}{}
+			}
+		}
+	}
+	for u := range excludeUIDs {
+		delete(uids, u)
 	}
 
 	one := uint8(1)
@@ -380,10 +419,24 @@ func populateWatchedUids(m *ebpf.Map, fallbackMin int) (int, error) {
 // every parseable line. Used by populateWatchedUids and the panel-
 // manifest path to avoid re-opening the file per user.
 func loadPasswdMap() (map[string]uint32, error) {
-	out := map[string]uint32{}
+	nameToUID, _, err := loadPasswdMaps()
+	return nameToUID, err
+}
+
+// loadPasswdMaps reads /etc/passwd once and returns both name→uid and
+// uid→gid for every parseable line. The uid→gid view is consumed by
+// the exclude_gid filter in populateWatchedUids; callers that only
+// need name→uid can use loadPasswdMap above.
+//
+// The (name, uid) fields are at /etc/passwd columns 0 and 2; gid is
+// at column 3. We split with SplitN limit 5 so a malformed GECOS
+// field can't truncate the parse.
+func loadPasswdMaps() (nameToUID map[string]uint32, uidToGID map[uint32]uint32, err error) {
+	nameToUID = map[string]uint32{}
+	uidToGID = map[uint32]uint32{}
 	f, err := os.Open(passwdPath)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", passwdPath, err)
+		return nil, nil, fmt.Errorf("open %s: %w", passwdPath, err)
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
@@ -392,20 +445,23 @@ func loadPasswdMap() (map[string]uint32, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		fields := strings.SplitN(line, ":", 4)
-		if len(fields) < 3 {
+		fields := strings.SplitN(line, ":", 5)
+		if len(fields) < 4 {
 			continue
 		}
 		uid, err := strconv.ParseUint(fields[2], 10, 32)
 		if err != nil {
 			continue
 		}
-		out[fields[0]] = uint32(uid)
+		nameToUID[fields[0]] = uint32(uid)
+		if gid, err := strconv.ParseUint(fields[3], 10, 32); err == nil {
+			uidToGID[uint32(uid)] = uint32(gid)
+		}
 	}
 	if err := scanner.Err(); err != nil {
-		return out, fmt.Errorf("scan %s: %w", passwdPath, err)
+		return nameToUID, uidToGID, fmt.Errorf("scan %s: %w", passwdPath, err)
 	}
-	return out, nil
+	return nameToUID, uidToGID, nil
 }
 
 // isWebUserName matches static names and known web-user prefixes

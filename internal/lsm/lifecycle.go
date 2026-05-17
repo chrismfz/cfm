@@ -147,6 +147,18 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 		l.mu.Unlock()
 		return
 	}
+	// One-time deprecation warning for the legacy -1 "auto" sentinel.
+	// Fires once per fresh daemon activation (the lifecycle is
+	// start-once so this won't repeat on subsequent ApplyConfig ticks).
+	// See resolveWatchedUidFallback godoc for why auto-detect was
+	// removed.
+	if conf.WatchedUidFallbackMin < 0 {
+		logging.LogfLSM("[lsm] watched_uid_fallback_min=-1 (auto) is deprecated; treating as 1000.")
+		logging.LogfLSM("[lsm]   set an explicit value in /etc/cfm/lsm.conf:")
+		logging.LogfLSM("[lsm]     watched_uid_fallback_min = 1000   # watch every regular user (recommended)")
+		logging.LogfLSM("[lsm]     watched_uid_fallback_min = 0      # panel-manifest-only (old auto behaviour on panel hosts)")
+		logging.LogfLSM("[lsm]   add exclude_user / exclude_uid / exclude_gid lines to opt out admin accounts.")
+	}
 	// Apply kmsg config early so subsequent emissions honour the
 	// operator's state_transitions / detect_events toggles.
 	ConfigureKmsg(conf.Kmsg)

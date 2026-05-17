@@ -1023,6 +1023,70 @@ program at load time** via a `bpf2go` constant rewrite, so the hot
 path does not branch on the mode and runtime cost is identical in
 both modes.
 
+### Watched-uid model
+
+Several rules (`CFML-FS-005`, `CFML-FS-007`, `CFML-EXEC-004`,
+`CFML-EXEC-006`) gate on whether the calling task's uid is in the
+daemon-populated `cfm_watched_uids` BPF map. The set is built at
+adoption time from three additive layers:
+
+1. **Static `WebUserNames` + `WebUserNamePrefixes`.** Hardcoded list
+   of system user names that are structurally web-class on any host:
+   `apache`, `nginx`, `www-data`, `http`, `httpd`, `lighttpd`,
+   `caddy`, `tomcat`, `php`, `lsphp`, `proxy`, `nobody`, plus the
+   `alt-php-*` and `alt-php-fpm-*` prefix matches for CloudLinux
+   per-version FPM workers. Always applied.
+
+2. **Panel manifest contributions.** Every uid that owns a vhost in
+   `/etc/userdomains` (cPanel) or DirectAdmin's domain-owners file.
+   Always applied, best-effort — a missing manifest file is silently
+   skipped.
+
+3. **`watched_uid_fallback_min` uid-range sweep.** Every uid in
+   `/etc/passwd` at or above this threshold joins the watched set.
+   Configurable per host. The shipped default is `1000` — the
+   `/etc/login.defs` UID_MIN convention on every modern distro —
+   which watches every regular login account, including admins.
+   Set to `0` to disable this layer entirely.
+
+The historical `-1` "auto" sentinel (default = 1000 if no panel
+manifest is detected, else disabled) was removed in favour of the
+explicit default. The auto-detect created a silent coverage gap on
+panel hosts: a sysadmin account added via `adduser chris` before
+DirectAdmin was installed would not appear in the DA vhost-owner
+manifest, and the auto-fallback would skip the uid-range sweep that
+would otherwise have watched them. An attacker who compromised
+`chris` would then evade every watched-uid-gated rule. `-1` is still
+accepted as a deprecated alias for `1000`; the daemon emits a
+one-time warning at adoption when it sees the legacy value.
+
+**Excluding known-trusted accounts.** Operators who want the broad
+coverage of `watched_uid_fallback_min = 1000` but need to silence
+specific accounts (the host's own sudoers, batch-job uids, build
+service accounts) declare exclusions in `lsm.conf`:
+
+```ini
+watched_uid_fallback_min = 1000
+exclude_user = chris        # by name; resolved at adoption time
+exclude_user = devops
+exclude_uid  = 1001         # by numeric uid
+exclude_gid  = 10           # every uid in this primary group
+```
+
+The exclude lists are applied **after** the three additive layers
+have built the watched set, so excluding an admin doesn't drop
+coverage of any other uid. Names that don't resolve at adoption
+time skip silently (operators commonly carry a single lsm.conf
+across heterogeneous hosts where not every admin account exists
+everywhere). The match dimensions are independent — a uid is
+excluded if ANY of the three lists matches.
+
+This model fails closed: newly-added user accounts are watched
+automatically; the operator opts out specific trusted accounts
+explicitly. The previous model required the operator to remember to
+update the watched set when adding new accounts; the new model
+mirrors the rest of cfm-lsm's allowlist-by-explicit-trust pattern.
+
 ## How it works — lifecycle, CLI, and kernel preflight
 
 cfm-lsm separates **detection** (kernel-level, BPF programs attached
