@@ -2087,6 +2087,139 @@ int cfm_exec007_finit(struct trace_event_raw_sys_enter *ctx)
 }
 
 /* ------------------------------------------------------------------- *
+ * CFML-EXEC-008 — kexec_load / kexec_file_load from non-trusted comm.
+ *
+ * Hook: tracepoint/syscalls/sys_enter_kexec_load +
+ *       tracepoint/syscalls/sys_enter_kexec_file_load
+ *
+ * Threat: rootkit persistence. kexec_load(2) and kexec_file_load(2)
+ * stage a replacement kernel image into a reserved memory region;
+ * the next kexec_reboot transitions to that image without going
+ * through firmware. An attacker with root + CAP_SYS_BOOT can use
+ * this to install a backdoored kernel that survives "reboot",
+ * defeating every audit that compares the running kernel hash to
+ * its package on disk.
+ *
+ * Trusted-comm allowlist matches the documented userspace tools that
+ * legitimately call these syscalls:
+ *   - kexec       — kexec-tools userspace (`/sbin/kexec` / `/usr/sbin/kexec`).
+ *                   Also the binary kdump.service launches at boot to
+ *                   preload the crash kernel.
+ *   - systemctl   — `systemctl kexec` triggers a kexec reboot via
+ *                   systemd; systemd invokes kexec under the hood.
+ *
+ * Any other comm calling these syscalls — or any of the trusted comms
+ * running from a watched (web-class) uid (comm spoofing via prctl by
+ * a web user) — fires the rule. The watched-uid case is structurally
+ * impossible to succeed (the syscall requires CAP_SYS_BOOT which
+ * watched uids never have), but the tracepoint fires on syscall ENTRY
+ * before the cap check, so the attempt itself is the signal.
+ *
+ * Companion to kernsec's KSEC-SCT-kspp.kexec-001 sysctl
+ * (kernel.kexec_load_disabled=1) which blocks the syscall at the
+ * kernel layer on hosts that don't run kdump. When the sysctl is on,
+ * the syscall returns -EPERM but the EXEC-008 tracepoint still fires
+ * — giving the operator forensic visibility of attackers probing the
+ * lockout. When the sysctl is off (kdump host), the rule surfaces
+ * every legitimate kexec call from kexec-tools plus any unexpected
+ * caller.
+ *
+ * Mode: monitor ONLY by design. Tracepoint hooks are observation-only
+ * — the kernel ignores any return value the BPF program sets, so
+ * enforce is structurally impossible here. The kernsec sysctl is the
+ * "actually block" layer.
+ * ------------------------------------------------------------------- */
+
+/* Allowlist of comm names that legitimately invoke kexec_load /
+ * kexec_file_load. The list is intentionally small: only the kexec
+ * userspace utility and systemctl. Matched as a NUL-terminated
+ * literal compare on the 16-byte TASK_COMM_LEN buffer. */
+static __always_inline bool cfm_comm_is_trusted_kexec(const char *comm)
+{
+    /* "kexec\0" */
+    if (comm[0] == 'k' && comm[1] == 'e' && comm[2] == 'x' && comm[3] == 'e' &&
+        comm[4] == 'c' && comm[5] == '\0')
+        return true;
+
+    /* "systemctl\0" — `systemctl kexec` calls kexec_file_load under
+     * the hood. Long enough that the first-9-byte compare is unique. */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'c' && comm[7] == 't' &&
+        comm[8] == 'l' && comm[9] == '\0')
+        return true;
+
+    return false;
+}
+
+static __always_inline void cfm_exec008_emit(__u8 op, __u8 flags, const char *comm)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_KEXEC_LOAD;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = op;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
+    if (op == CFM_KEXEC_OP_LOAD)
+        __builtin_memcpy(e->filename, "kexec_load", 11);
+    else if (op == CFM_KEXEC_OP_FILE_LOAD)
+        __builtin_memcpy(e->filename, "kexec_file_load", 16);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+static __always_inline int cfm_exec008_check(__u8 op)
+{
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    bool web_uid = cfm_uid_watched(uid);
+
+    char comm[CFM_TASK_COMM_LEN] = {};
+    bpf_get_current_comm(&comm, sizeof(comm));
+
+    /* Trusted kexec-class caller AND not a web-class uid impersonating
+     * one — suppress. A watched-uid task running with comm "kexec" is
+     * exactly the suspicious case (an attacker spoofing comm via
+     * prctl). */
+    if (!web_uid && cfm_comm_is_trusted_kexec(comm))
+        return 0;
+
+    __u8 flags = 0;
+    if (web_uid)
+        flags |= CFM_LSM_F_WEB_ORIGIN;
+
+    cfm_exec008_emit(op, flags, comm);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_kexec_load")
+int cfm_exec008_kexec(struct trace_event_raw_sys_enter *ctx)
+{
+    (void)ctx;
+    return cfm_exec008_check(CFM_KEXEC_OP_LOAD);
+}
+
+SEC("tracepoint/syscalls/sys_enter_kexec_file_load")
+int cfm_exec008_kexec_file(struct trace_event_raw_sys_enter *ctx)
+{
+    (void)ctx;
+    return cfm_exec008_check(CFM_KEXEC_OP_FILE_LOAD);
+}
+
+/* ------------------------------------------------------------------- *
  * CFML-FS-008 — write to a sensitive kernel knob.
  *
  * Hook: lsm/file_permission (every read/write through any fd)
