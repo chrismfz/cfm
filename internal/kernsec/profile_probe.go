@@ -267,9 +267,10 @@ func detectLivePatchingModules() bool {
 //     where the kdump userspace hasn't been started yet.
 //   - /sys/kernel/kexec_crash_loaded reports 1. The kernel sets this
 //     to 1 exactly when a crash kernel image has been loaded via
-//     kexec_load(KEXEC_ON_CRASH); it's the definitive runtime signal
-//     that kdump is armed right now. Catches operator-driven
-//     `kexec -p` invocations that bypass the unit file entirely.
+//     kexec_load(2) / kexec_file_load(2) with the KEXEC_ON_CRASH
+//     flag; it's the definitive runtime signal that kdump is armed
+//     right now. Catches operator-driven `kexec -p` invocations that
+//     bypass the unit file entirely.
 //   - kdump.service / kdump-tools.service installed AND not masked.
 //     We don't check is-active because operators routinely keep the
 //     service installed-but-stopped while debugging an unrelated
@@ -332,7 +333,7 @@ func unitFilePresentAndNotMasked(unitPath string) bool {
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		target, lerr := os.Readlink(resolved)
-		if lerr == nil && (target == "/dev/null" || target == os.DevNull) {
+		if lerr == nil && target == "/dev/null" {
 			return false
 		}
 	}

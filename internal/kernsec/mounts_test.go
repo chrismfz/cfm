@@ -448,6 +448,35 @@ func TestProcHidepidRule(t *testing.T) {
 	}
 }
 
+// TestMountRuleAliasKeysAppearInRecommended is a catalogue-lint:
+// every key in MountRule.OptionAliases MUST be one of the literal
+// comma-tokens of Recommended. A typo (e.g. `hidepid=02` as the
+// alias-map key on a rule whose Recommended is `hidepid=2`) would
+// silently disable alias matching — splitMountOptionsAware looks
+// aliases up by the canonical option token while iterating
+// Recommended, and a stale key never gets consulted. Cheap to
+// enforce statically; expensive to debug if it ever ships.
+func TestMountRuleAliasKeysAppearInRecommended(t *testing.T) {
+	for _, rule := range Tier1Mounts {
+		if len(rule.OptionAliases) == 0 {
+			continue
+		}
+		recTokens := map[string]struct{}{}
+		for _, o := range strings.Split(rule.Recommended, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				recTokens[o] = struct{}{}
+			}
+		}
+		for key := range rule.OptionAliases {
+			if _, ok := recTokens[key]; !ok {
+				t.Errorf("rule %s: OptionAliases key %q is not a token of Recommended %q — alias matching would silently never fire for this entry",
+					rule.ID, key, rule.Recommended)
+			}
+		}
+	}
+}
+
 // TestSplitMountOptionsAware_HidepidAliases is the unit test that
 // pins the alias-aware matching behaviour at the splitMountOptions
 // layer — independent of the /proc rule's specific catalogue entry,

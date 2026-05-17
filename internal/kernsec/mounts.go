@@ -339,6 +339,14 @@ func splitMountOptions(current, recommended string) (present, missing []string) 
 // canonical token, the alias string is what gets appended to
 // `present` — that's what the operator actually sees on the host,
 // and what `cfm kernsec status` should echo back to them.
+//
+// Caveat for downstream consumers: `present` is therefore NOT
+// guaranteed to be a subset of the comma-tokens of `recommended` —
+// it can contain alias tokens that the recommendation doesn't list
+// literally. Today only the status renderer consumes it (via
+// strings.Join for display, which is alias-agnostic). Any future
+// consumer doing token-set arithmetic against `recommended` needs to
+// fold aliases back in via this map.
 func splitMountOptionsAware(current, recommended string, aliases map[string][]string) (present, missing []string) {
 	have := make(map[string]struct{})
 	for _, o := range strings.Split(current, ",") {
