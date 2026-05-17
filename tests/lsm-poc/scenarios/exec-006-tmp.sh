@@ -17,11 +17,29 @@ set -uo pipefail
 note "[EXEC-006] watched-uid exec from /tmp"
 ensure_test_user
 
-stage="/tmp/.cfmpoc-staged-$$"
+# The whole point of EXEC-006 is exec-from-/tmp, so we genuinely need
+# /tmp (or /var/tmp) writeable AND executable. Detect noexec and pick
+# the first usable candidate.
+stage=""
+for candidate_dir in /tmp /var/tmp; do
+    probe="$candidate_dir/.cfmpoc-execprobe-$$"
+    cp /bin/true "$probe" 2>/dev/null || continue
+    chmod 0755 "$probe"
+    if "$probe" 2>/dev/null; then
+        rm -f "$probe"
+        stage="$candidate_dir/.cfmpoc-staged-$$"
+        break
+    fi
+    rm -f "$probe"
+done
+
+if [ -z "$stage" ]; then
+    warn "neither /tmp nor /var/tmp is exec-capable; EXEC-006 cannot be exercised"
+    warn "(this host has noexec on both — the rule still protects against tmpfs/dev/shm execs)"
+    exit 0
+fi
 add_cleanup "rm -f '$stage'"
 
-# Stage as the test user so the file is owned by them (and not deleted
-# by tmpwatch / systemd-tmpfiles before exec).
 run_as_test_user cp /bin/echo "$stage"
 run_as_test_user chmod 0755 "$stage"
 
@@ -33,7 +51,7 @@ wait "$trigger_pid"
 trigger_rc=$?
 
 if [ "$trigger_rc" -ne 0 ]; then
-    fail "/tmp exec returned $trigger_rc — was EXEC-006 in enforce mode?"
+    fail "exec from $stage returned $trigger_rc"
     exit 1
 fi
 

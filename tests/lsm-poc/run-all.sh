@@ -57,6 +57,7 @@ require_cfm_lsm_monitor
 trap 'run_cleanups; cleanup_test_user; cleanup_tmpdir' EXIT INT TERM
 
 ensure_tmpdir
+ensure_scratch_dir
 
 # Build C helpers up front so per-scenario failures aren't masked by a
 # stale binary. Idempotent — make does the right thing if everything

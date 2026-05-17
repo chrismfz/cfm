@@ -19,12 +19,23 @@
 set -uo pipefail
 . "$HARNESS_DIR/lib.sh"
 
-note "[CRED-002] setuid-root binary dropped to /tmp, run as $TEST_USER"
+note "[CRED-002] setuid-root binary dropped to scratch dir, run as $TEST_USER"
 ensure_test_user
+ensure_scratch_dir
 
-stash="/tmp/.cfmpoc-bd-$$"
+if [ "${SCRATCH_NOSUID:-0}" = "1" ]; then
+    warn "$SCRATCH_DIR is on a nosuid mount; CRED-002 cannot fire"
+    warn "(remount /var/lib without nosuid, or set SCRATCH_DIR=/some/exec+suid/path)"
+    exit 0
+fi
+
+# The threat model is: attacker dropped a setuid-root stash binary
+# during a transient root window so they can re-acquire root later
+# without re-exploiting. We mirror that exactly — root-owned, mode
+# 4755, dropped in an exec+suid-capable directory, run as a low-uid
+# user. The dropper's setuid(0) is what the LSM hook sees.
+stash="$SCRATCH_DIR/.cfmpoc-bd-$$"
 add_cleanup "rm -f '$stash'"
-
 cp "$HELPERS_DIR/bin/suid-dropper" "$stash"
 chown 0:0 "$stash"
 chmod 4755 "$stash"

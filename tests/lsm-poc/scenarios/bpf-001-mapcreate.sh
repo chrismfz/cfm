@@ -16,9 +16,12 @@ set -uo pipefail
 . "$HARNESS_DIR/lib.sh"
 
 note "[BPF-001] bpf(BPF_MAP_CREATE) from non-trusted comm"
+ensure_scratch_dir
 
+# SCRATCH_DIR is exec-capable; POC_TMPDIR (/tmp/cfmpoc) may be noexec
+# on hardened hosts so we can't masquerade-and-run from there.
 src="$HELPERS_DIR/bin/bpf-mapcreate"
-masquerade="$POC_TMPDIR/.cfm-bd-installer"
+masquerade="$SCRATCH_DIR/.cfm-bd-installer"
 cp "$src" "$masquerade"
 chmod 0755 "$masquerade"
 add_cleanup "rm -f '$masquerade'"

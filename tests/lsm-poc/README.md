@@ -16,9 +16,10 @@ you a reproducible baseline of detection.
 
 1. **Test host only.** Never run on production. The harness creates a
    throwaway `cfmpoc` user, temporarily loosens permissions on a
-   sentinel file under `/etc/sudoers.d/`, drops setuid binaries in
-   `/tmp`, and other state changes that are routine for a scratch
-   VM but unacceptable on a live server.
+   sentinel file under `/etc/cron.d/` (root would honour a cron entry
+   written there for the duration of the test), drops setuid binaries
+   under `/var/lib/cfmpoc/`, and other state changes that are routine
+   for a scratch VM but unacceptable on a live server.
 
 2. **cfm-lsm must be in `mode = monitor`.** The PoCs are designed to
    fire the rule; in enforce mode the kernel will refuse the
@@ -29,8 +30,16 @@ you a reproducible baseline of detection.
 
 3. **Cleanup is best-effort.** A `trap` runs on every exit path, but
    `kill -9` of the harness can leave the test user, sentinel files,
-   and `/tmp/cfmpoc-*` artefacts behind. `make clean` removes them
-   manually.
+   `/var/lib/cfmpoc/.cfmpoc-*` staged binaries, and `/tmp/cfmpoc-*`
+   artefacts behind. To clean up by hand:
+   `userdel cfmpoc; rm -rf /var/lib/cfmpoc /tmp/cfmpoc /etc/cron.d/.cfmpoc-*`.
+
+   On hardened hosts where `/tmp` is mounted `noexec,nosuid` (EL10 /
+   CL10 default, increasingly common on cPanel), the harness puts
+   stash binaries under `/var/lib/cfmpoc/` instead so the exec
+   actually lands. EXEC-006 (the only scenario whose threat model
+   *is* exec-from-/tmp) probes both `/tmp` and `/var/tmp`; if neither
+   is exec-capable it logs a SKIP rather than a false FAIL.
 
 4. **Some PoCs need a network socket.** EXEC-003 / EXEC-005 open a
    loopback TCP listener on a randomly chosen port (default 4444).
