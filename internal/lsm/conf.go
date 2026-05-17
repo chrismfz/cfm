@@ -20,6 +20,22 @@ var ConfPath = "/etc/cfm/lsm.conf"
 // information an attacker on the box can use to plan around them.
 const ConfFileMode os.FileMode = 0o600
 
+// defaultWatchedUidFallbackMin is the shipped default for the
+// watched_uid_fallback_min conf knob. Matches /etc/login.defs UID_MIN
+// on every modern distro. Both DefaultConf and ParseConf seed their
+// zero-value Conf with this so an absent-key conf and a generated-
+// default conf agree without drifting.
+const defaultWatchedUidFallbackMin = 1000
+
+// defaultFS005WebOriginMonitor is the shipped default for the FS-005
+// `origin_tracking = monitor` per-policy knob. The conf parser
+// accepts only `disabled | monitor` for this key (enforce isn't
+// supported — origin-only matches never enforce yet). DefaultConf
+// and ParseConf both seed from this so an operator whose lsm.conf
+// has no origin_tracking line gets the same behaviour as the shipped
+// configs/lsm.conf template.
+const defaultFS005WebOriginMonitor = true
+
 // Conf is the parsed contents of /etc/cfm/lsm.conf.
 type Conf struct {
 	// Enabled is the global on/off switch. When false (the default),
@@ -28,26 +44,70 @@ type Conf struct {
 	// modes set. Operators opt in by setting `enabled = true`.
 	Enabled bool
 
-	// WatchedUidFallbackMin extends cfm_watched_uids on hosts whose
-	// /etc/passwd does not have one of the static WebUserNames AND
-	// has no cPanel/DirectAdmin manifest to draw account uids from
-	// (e.g. a standalone Nextcloud / GitLab / plain LAMP server).
-	// Every uid in /etc/passwd at or above this value is added to
-	// the watched set alongside the static names.
+	// WatchedUidFallbackMin extends cfm_watched_uids with every uid in
+	// /etc/passwd at or above this threshold. Layered on top of the
+	// static WebUserNames and the panel-manifest uids — always additive,
+	// never alternative.
 	//
-	// Sentinel values:
-	//   -1  (default)  auto: fallback to 1000 when no panel manifest
-	//                  is detected; disabled (0) when one is present.
+	// Valid values:
 	//    0             disable the fallback entirely (rely on static
-	//                  names + panel manifest only).
-	//   >0             explicit threshold (typical: 1000, the
-	//                  /etc/login.defs UID_MIN on modern distros).
+	//                  names + panel manifest only). Use this on
+	//                  hosts where the panel manifest is the single
+	//                  source of truth for "what is web-class" and
+	//                  admin / sysadmin accounts at uid >= 1000
+	//                  should NOT be watched.
+	//   >0             explicit threshold. The default in the shipped
+	//                  template is 1000 — the /etc/login.defs UID_MIN
+	//                  on modern distros — which watches every regular
+	//                  user account. Combine with ExcludeUsers /
+	//                  ExcludeUIDs / ExcludeGIDs to opt-out known-
+	//                  trusted admin accounts.
+	//
+	// Deprecated: -1 ("auto") used to mean "1000 when no panel manifest
+	// is detected, disabled when one is present." That heuristic
+	// silently created a coverage gap for admin accounts on panel
+	// hosts (an `adduser chris` before DirectAdmin would not appear
+	// in the DA vhost-owner manifest, and the auto-fallback would skip
+	// the uid-range sweep that would otherwise watch them). Treated
+	// as 1000 with a deprecation warning at adoption time; will become
+	// a parse error in a future release.
 	//
 	// Watching extra uids is bounded by the per-detector secondary
-	// filter (sensitive-inode for FS-005, deleted-file for EXEC-004),
-	// so a permissive fallback adds candidates without flooding event
-	// volume. See WebUserNames godoc.
+	// filter (sensitive-inode for FS-005, deleted-file for EXEC-004,
+	// ephemeral-path for EXEC-006), so a permissive fallback adds
+	// candidates without flooding event volume.
 	WatchedUidFallbackMin int
+
+	// ExcludeUsers / ExcludeUIDs / ExcludeGIDs declare accounts that
+	// should NOT be in cfm_watched_uids even when the fallback or
+	// the panel manifest would otherwise include them. Each list is
+	// applied after the watched set has been built. Used to opt-out
+	// known-trusted admin / sysadmin / batch-job accounts on hosts
+	// where the default uid-range fallback is broader than desired.
+	//
+	// Match dimensions are checked independently:
+	//   - ExcludeUsers: resolved against /etc/passwd at adoption time.
+	//     Missing names are skipped silently (no fatal error if a
+	//     listed account doesn't exist on this host).
+	//   - ExcludeUIDs: numeric uid match.
+	//   - ExcludeGIDs: every uid whose /etc/passwd PRIMARY group
+	//     (column 4) is in this set is excluded. Useful for "exclude
+	//     everyone whose primary group is wheel" style policies.
+	//     NOTE: supplementary groups in /etc/group are NOT consulted.
+	//     `exclude_gid = 10` does NOT exclude every user listed in
+	//     /etc/group's wheel entry — only those whose passwd primary
+	//     gid is literally 10.
+	//
+	// CAVEAT: excludes apply to every uid produced by the three
+	// additive layers, including Layer 1's static WebUserNames. An
+	// exclude_user / exclude_uid / exclude_gid that happens to match
+	// apache / nginx / nobody / etc WILL drop them from the watched
+	// set, defeating Layer 1. Treated as an explicit operator
+	// decision — verify with `bpftool map dump pinned
+	// /sys/fs/bpf/cfm/maps/cfm_watched_uids` after `cfm lsm restart`.
+	ExcludeUsers []string
+	ExcludeUIDs  []uint32
+	ExcludeGIDs  []uint32
 
 	// Modes maps a policy ID to its configured mode. Policies absent
 	// from this map fall back to the policy's DefaultMode (currently
@@ -148,11 +208,18 @@ type Conf struct {
 	Source string
 }
 
-// DefaultConf returns the default configuration that `cfm lsm init`
-// writes on a fresh host: cfm-lsm globally disabled, every policy at
-// its DefaultMode, kmsg emission on with the documented defaults, and
-// a curated global allowlist that silences the structural detector
-// matches every reasonably-configured Linux host exhibits.
+// DefaultConf returns the in-memory default configuration: cfm-lsm
+// globally disabled, every policy at its DefaultMode, kmsg emission
+// on with the documented defaults, and a curated global allowlist
+// that silences the structural detector matches every reasonably-
+// configured Linux host exhibits.
+//
+// Used by FormatConf round-trip tests and by callers that need a
+// fully-populated Conf in code (no file). Not used by `cfm lsm init`
+// anymore — init now refuses to write a generated default and relies
+// on the shipped configs/lsm.conf template instead, removing the
+// historical divergence between init-output and package-installed
+// conf.
 func DefaultConf() *Conf {
 	modes := map[PolicyID]Mode{}
 	for _, p := range AllPolicies() {
@@ -160,9 +227,9 @@ func DefaultConf() *Conf {
 	}
 	return &Conf{
 		Enabled:               false,
-		WatchedUidFallbackMin: -1,
+		WatchedUidFallbackMin: defaultWatchedUidFallbackMin,
 		Modes:                 modes,
-		FS005WebOriginMonitor: true,
+		FS005WebOriginMonitor: defaultFS005WebOriginMonitor,
 		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
 		AllowComm:             map[PolicyID][]string{},
@@ -792,9 +859,9 @@ const (
 func ParseConf(r io.Reader) (*Conf, error) {
 	c := &Conf{
 		Enabled:               false,
-		WatchedUidFallbackMin: -1,
+		WatchedUidFallbackMin: defaultWatchedUidFallbackMin,
 		Modes:                 map[PolicyID]Mode{},
-		FS005WebOriginMonitor: false,
+		FS005WebOriginMonitor: defaultFS005WebOriginMonitor,
 		PersistencePaths:      map[PolicyID][]string{},
 		AllowExe:              map[PolicyID][]string{},
 		AllowComm:             map[PolicyID][]string{},
@@ -885,11 +952,18 @@ func ParseConf(r io.Reader) (*Conf, error) {
 		switch current {
 		case sectionTopLevel:
 			lk := strings.ToLower(key)
-			if firstLine, dup := seenTopLevel[lk]; dup {
-				return nil, fmt.Errorf("line %d: duplicate top-level key %q (first at line %d)",
-					lineno, lk, firstLine)
+			// exclude_user / exclude_uid / exclude_gid are explicitly
+			// repeatable — operators list one account per line. Every
+			// other top-level key is single-valued and rejecting dups
+			// catches conf editing errors.
+			repeatable := lk == "exclude_user" || lk == "exclude_uid" || lk == "exclude_gid"
+			if !repeatable {
+				if firstLine, dup := seenTopLevel[lk]; dup {
+					return nil, fmt.Errorf("line %d: duplicate top-level key %q (first at line %d)",
+						lineno, lk, firstLine)
+				}
+				seenTopLevel[lk] = lineno
 			}
-			seenTopLevel[lk] = lineno
 			switch lk {
 			case "enabled":
 				b, err := parseBool(val)
@@ -900,9 +974,27 @@ func ParseConf(r io.Reader) (*Conf, error) {
 			case "watched_uid_fallback_min":
 				n, err := strconv.Atoi(strings.TrimSpace(val))
 				if err != nil || n < -1 {
-					return nil, fmt.Errorf("line %d: watched_uid_fallback_min must be an integer >= -1 (got %q; -1=auto, 0=disable, >0=threshold)", lineno, val)
+					return nil, fmt.Errorf("line %d: watched_uid_fallback_min must be an integer >= 0 (got %q; 0=disable, >0=threshold). -1 is deprecated (treat as 1000)", lineno, val)
 				}
 				c.WatchedUidFallbackMin = n
+			case "exclude_user":
+				name := strings.TrimSpace(val)
+				if name == "" {
+					return nil, fmt.Errorf("line %d: exclude_user requires a non-empty username", lineno)
+				}
+				c.ExcludeUsers = append(c.ExcludeUsers, name)
+			case "exclude_uid":
+				n, err := strconv.ParseUint(strings.TrimSpace(val), 10, 32)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: exclude_uid must be a non-negative integer (got %q)", lineno, val)
+				}
+				c.ExcludeUIDs = append(c.ExcludeUIDs, uint32(n))
+			case "exclude_gid":
+				n, err := strconv.ParseUint(strings.TrimSpace(val), 10, 32)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: exclude_gid must be a non-negative integer (got %q)", lineno, val)
+				}
+				c.ExcludeGIDs = append(c.ExcludeGIDs, uint32(n))
 			default:
 				return nil, fmt.Errorf("line %d: unknown top-level key %q", lineno, key)
 			}
@@ -1041,32 +1133,68 @@ func FormatConf(c *Conf) string {
 	b.WriteString("# programs only when this is true AND preflight passes.\n")
 	fmt.Fprintf(&b, "enabled = %t\n", c.Enabled)
 	b.WriteString("\n")
-	b.WriteString("# Fallback uid threshold for cfm_watched_uids on hosts WITHOUT a\n")
-	b.WriteString("# cPanel / DirectAdmin manifest. Every uid in /etc/passwd at or\n")
-	b.WriteString("# above this value joins the watched-uid set, alongside the static\n")
+	b.WriteString("# Watched-uid extension threshold. Every uid in /etc/passwd at or\n")
+	b.WriteString("# above this value joins cfm_watched_uids alongside the static\n")
 	b.WriteString("# WebUserNames (apache / nginx / www-data / nobody / lighttpd /\n")
-	b.WriteString("# caddy / tomcat / php / lsphp / proxy / alt-php-*).\n")
+	b.WriteString("# caddy / tomcat / php / lsphp / proxy / alt-php-*) and any\n")
+	b.WriteString("# cPanel / DirectAdmin manifest contributions. Three layers\n")
+	b.WriteString("# (static names, panel manifest, uid-range fallback) are always\n")
+	b.WriteString("# additive — set this knob to 0 to disable the fallback layer.\n")
 	b.WriteString("#\n")
-	b.WriteString("#   -1  (default)  auto: 1000 if no panel found, disabled if panel present\n")
-	b.WriteString("#    0             disable the fallback entirely\n")
-	b.WriteString("#   >0             explicit threshold (typical: 1000 = login.defs UID_MIN)\n")
+	b.WriteString("#    0             disable the fallback (rely on static names +\n")
+	b.WriteString("#                   panel manifest only — admin / sysadmin accounts\n")
+	b.WriteString("#                   at uid >= 1000 will NOT be watched on a panel host)\n")
+	b.WriteString("#   1000  (default) the /etc/login.defs UID_MIN convention — watches\n")
+	b.WriteString("#                   every regular login account, including admins.\n")
+	b.WriteString("#                   Pair with exclude_user / exclude_uid / exclude_gid\n")
+	b.WriteString("#                   below to opt-out known-trusted admin accounts.\n")
+	b.WriteString("#   >0             explicit threshold; any other positive value works.\n")
 	b.WriteString("#\n")
-	b.WriteString("# Use 0 on panel hosts where the manifest is authoritative; use 1000\n")
-	b.WriteString("# (or just leave at -1) on standalone web hosts — Nextcloud, GitLab,\n")
-	b.WriteString("# plain LAMP. Watching extra uids is bounded by each detector's\n")
-	b.WriteString("# secondary filter (sensitive-inode, deleted-file, ephemeral-path)\n")
-	b.WriteString("# so a permissive fallback adds candidates without flooding events.\n")
+	b.WriteString("# -1 is accepted as a deprecated alias for 1000 (the auto-detect\n")
+	b.WriteString("# behaviour was removed because it silently created an admin-account\n")
+	b.WriteString("# coverage gap on panel hosts). Adoption emits a one-time warning\n")
+	b.WriteString("# when -1 is parsed; will become a parse error in a future release.\n")
 	fmt.Fprintf(&b, "watched_uid_fallback_min = %d\n", c.WatchedUidFallbackMin)
+	b.WriteString("\n")
+	b.WriteString("# Opt-out: accounts to exclude from cfm_watched_uids even when the\n")
+	b.WriteString("# fallback above or the panel manifest would otherwise include them.\n")
+	b.WriteString("# Repeat the key per entry. Used to keep legitimate admin / sysadmin /\n")
+	b.WriteString("# batch-job sessions quiet without dropping coverage of the rest of\n")
+	b.WriteString("# the host's uid >= fallback range.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Footgun: excludes apply to EVERY uid produced by the three layers,\n")
+	b.WriteString("# including the static web-daemon names (apache, nginx, nobody, ...).\n")
+	b.WriteString("# exclude_user = apache (or an exclude_gid that catches apache's primary\n")
+	b.WriteString("# group) WILL drop apache from the watched set. Verify with:\n")
+	b.WriteString("#   bpftool map dump pinned /sys/fs/bpf/cfm/maps/cfm_watched_uids\n")
+	b.WriteString("# after cfm lsm restart.\n")
+	b.WriteString("#\n")
+	b.WriteString("# exclude_gid matches /etc/passwd PRIMARY gid (column 4) only;\n")
+	b.WriteString("# supplementary groups in /etc/group are NOT consulted.\n")
+	b.WriteString("#\n")
+	b.WriteString("# exclude_user = chris        # by username (resolved at adoption time;\n")
+	b.WriteString("#                             # missing names skip silently)\n")
+	b.WriteString("# exclude_uid  = 1001         # by numeric uid\n")
+	b.WriteString("# exclude_gid  = 10           # by primary gid (/etc/passwd col 4 only)\n")
+	for _, n := range c.ExcludeUsers {
+		fmt.Fprintf(&b, "exclude_user = %s\n", n)
+	}
+	for _, u := range c.ExcludeUIDs {
+		fmt.Fprintf(&b, "exclude_uid = %d\n", u)
+	}
+	for _, g := range c.ExcludeGIDs {
+		fmt.Fprintf(&b, "exclude_gid = %d\n", g)
+	}
 	for _, p := range AllPolicies() {
 		mode := c.ModeFor(p.ID)
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "# %s — %s\n", p.ID, p.Title)
 		fmt.Fprintf(&b, "# Hook: %s\n", p.Hook)
 		fmt.Fprintf(&b, "[policy %q]\n", string(p.ID))
-		if p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF || p.ID == PolicyFdCredMismatch {
-			fmt.Fprintf(&b, "mode = %s  # disabled | monitor; enforce is downgraded to monitor\n", mode)
-		} else {
+		if isEnforceCapable(p.ID) {
 			fmt.Fprintf(&b, "mode = %s  # disabled | monitor | enforce\n", mode)
+		} else {
+			fmt.Fprintf(&b, "mode = %s  # disabled | monitor; enforce is downgraded to monitor\n", mode)
 		}
 		if p.ID == PolicySensitiveWrite {
 			state := "disabled"
@@ -1180,6 +1308,12 @@ func FormatConf(c *Conf) string {
 // does not already exist. Returns (true, nil) when a new file was
 // created, (false, nil) when the file already existed, or (false, err)
 // on a write failure.
+//
+// Currently called only from the FormatConf round-trip test. The
+// `cfm lsm init` path no longer auto-generates a conf — see
+// DefaultConf's godoc and internal/lsm/init.go for the rationale.
+// Kept exported because external callers (packaging scripts, custom
+// bootstrappers) may still want a deterministic Conf-to-disk path.
 func WriteDefaultConf() (created bool, err error) {
 	if _, err := os.Stat(ConfPath); err == nil {
 		return false, nil

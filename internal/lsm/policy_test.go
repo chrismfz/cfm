@@ -82,6 +82,29 @@ func TestMode_String(t *testing.T) {
 	}
 }
 
+// TestIsEnforceCapable pins the monitor-only-by-design set. New
+// monitor-only policies need to be added to isEnforceCapable's
+// switch in policy.go; this test catches accidental drift in the
+// opposite direction (an enforce-capable policy being demoted, or
+// a typo dropping one of the six from the list).
+func TestIsEnforceCapable(t *testing.T) {
+	monitorOnly := map[PolicyID]bool{
+		PolicyInterpreterNetStdio: true,
+		PolicyCredEscal:           true,
+		PolicyDirectCredInstall:   true,
+		PolicyUnexpectedBPF:       true,
+		PolicyFdCredMismatch:      true,
+		PolicyKernelModuleLoad:    true,
+	}
+	for _, p := range AllPolicies() {
+		got := isEnforceCapable(p.ID)
+		want := !monitorOnly[p.ID]
+		if got != want {
+			t.Errorf("isEnforceCapable(%s) = %t, want %t", p.ID, got, want)
+		}
+	}
+}
+
 func TestCheckStatus_String(t *testing.T) {
 	cases := map[CheckStatus]string{
 		CheckPass:    "PASS",

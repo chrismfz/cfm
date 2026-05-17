@@ -314,6 +314,44 @@ func AllPolicies() []Policy {
 	}
 }
 
+// isEnforceCapable reports whether the policy honours `mode = enforce`
+// or silently downgrades it to monitor at enable time.
+//
+// The single source of truth for which policies are monitor-only by
+// design. Consulted from:
+//   - enable.go (CLI path) — `cfm lsm enable` prints a downgrade note
+//   - lifecycle.go (daemon auto-enable path) — same downgrade with a
+//     deferred log line
+//   - conf.go FormatConf — renders the "disabled | monitor" vs
+//     "disabled | monitor | enforce" comment next to each mode= line
+//
+// Until this helper landed, the same switch was duplicated across
+// the three sites and drifted (conf.go was missing PolicyKernelModuleLoad
+// after EXEC-007 shipped, so FormatConf rendered the wrong comment
+// for that stanza). Add a new monitor-only policy: extend the switch
+// here once. The three callers pick up the change automatically.
+//
+// Reasons a policy is monitor-only:
+//   - Tracepoint hook (kernel ignores BPF return; enforce is
+//     structurally impossible): EXEC-005, BPF-001, EXEC-007.
+//   - LSM hook where -EPERM would deadlock or break legitimate
+//     userspace: CRED-002 (cred_prepare), CRED-003 (commit_creds
+//     is not a decision point), FS-006 (setuid helpers
+//     legitimately drop privs holding sensitive fds; enforce would
+//     break passwd / sudo / pkexec).
+func isEnforceCapable(id PolicyID) bool {
+	switch id {
+	case PolicyInterpreterNetStdio,
+		PolicyCredEscal,
+		PolicyDirectCredInstall,
+		PolicyUnexpectedBPF,
+		PolicyFdCredMismatch,
+		PolicyKernelModuleLoad:
+		return false
+	}
+	return true
+}
+
 // PolicyByID returns the Policy with the given ID, or (zero, false)
 // if the ID is unknown.
 func PolicyByID(id PolicyID) (Policy, bool) {

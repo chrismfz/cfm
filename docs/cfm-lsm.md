@@ -1023,6 +1023,89 @@ program at load time** via a `bpf2go` constant rewrite, so the hot
 path does not branch on the mode and runtime cost is identical in
 both modes.
 
+### Watched-uid model
+
+Several rules (`CFML-FS-005`, `CFML-FS-007`, `CFML-EXEC-004`,
+`CFML-EXEC-006`) gate on whether the calling task's uid is in the
+daemon-populated `cfm_watched_uids` BPF map. The set is built at
+adoption time from three additive layers:
+
+1. **Static `WebUserNames` + `WebUserNamePrefixes`.** Hardcoded list
+   of system user names that are structurally web-class on any host:
+   `apache`, `nginx`, `www-data`, `http`, `httpd`, `lighttpd`,
+   `caddy`, `tomcat`, `php`, `lsphp`, `proxy`, `nobody`, plus the
+   `alt-php-*` and `alt-php-fpm-*` prefix matches for CloudLinux
+   per-version FPM workers. Always applied.
+
+2. **Panel manifest contributions.** Every uid that owns a vhost in
+   `/etc/userdomains` (cPanel) or DirectAdmin's domain-owners file.
+   Always applied, best-effort — a missing manifest file is silently
+   skipped.
+
+3. **`watched_uid_fallback_min` uid-range sweep.** Every uid in
+   `/etc/passwd` at or above this threshold joins the watched set.
+   Configurable per host. The shipped default is `1000` — the
+   `/etc/login.defs` UID_MIN convention on every modern distro —
+   which watches every regular login account, including admins.
+   Set to `0` to disable this layer entirely.
+
+The historical `-1` "auto" sentinel (default = 1000 if no panel
+manifest is detected, else disabled) was removed in favour of the
+explicit default. The auto-detect created a silent coverage gap on
+panel hosts: a sysadmin account added via `adduser chris` before
+DirectAdmin was installed would not appear in the DA vhost-owner
+manifest, and the auto-fallback would skip the uid-range sweep that
+would otherwise have watched them. An attacker who compromised
+`chris` would then evade every watched-uid-gated rule. `-1` is still
+accepted as a deprecated alias for `1000`; the daemon emits a
+one-time warning at adoption when it sees the legacy value.
+
+**Migration notes — panel hosts upgrading from `-1`.** This is a
+**behaviour change** for hosts that previously ran with
+`watched_uid_fallback_min = -1` AND had a cPanel/DirectAdmin
+manifest. Under the old model the fallback was silently skipped, so
+only the static `WebUserNames` and the panel-manifest uids were
+watched. Under the new model the fallback applies at 1000, so
+admin / sysadmin accounts at uid >= 1000 join the watched set —
+which means previously-silent uids may start producing FS-005 /
+FS-007 / EXEC-004 / EXEC-006 events. Three migration paths:
+
+| Goal | Set in `/etc/cfm/lsm.conf` |
+|---|---|
+| Preserve the old behaviour exactly (panel-manifest + static names only) | `watched_uid_fallback_min = 0` |
+| Adopt the new coverage; opt-out your known-trusted admin accounts | `watched_uid_fallback_min = 1000` plus `exclude_user = <admin>` / `exclude_uid = N` / `exclude_gid = N` |
+| Adopt the new coverage broadly (default) | `watched_uid_fallback_min = 1000` (shipped default; no edits needed) |
+
+Then run `cfm lsm restart`. The daemon emits the one-time deprecation
+warning on adoption if it sees `-1`, with the same recipes inline.
+
+**Excluding known-trusted accounts.** Operators who want the broad
+coverage of `watched_uid_fallback_min = 1000` but need to silence
+specific accounts (the host's own sudoers, batch-job uids, build
+service accounts) declare exclusions in `lsm.conf`:
+
+```ini
+watched_uid_fallback_min = 1000
+exclude_user = chris        # by name; resolved at adoption time
+exclude_user = devops
+exclude_uid  = 1001         # by numeric uid
+exclude_gid  = 10           # every uid in this primary group
+```
+
+The exclude lists are applied **after** the three additive layers
+have built the watched set, so excluding an admin doesn't drop
+coverage of any other uid. Names that don't resolve at adoption
+time skip silently (operators commonly carry a single lsm.conf
+across heterogeneous hosts where not every admin account exists
+everywhere). The match dimensions are independent — a uid is
+excluded if ANY of the three lists matches.
+
+This model fails closed: newly-added user accounts are watched
+automatically; the operator opts out specific trusted accounts
+explicitly. The previous model required the operator to remember to
+update the watched set when adding new accounts; the new model
+mirrors the rest of cfm-lsm's allowlist-by-explicit-trust pattern.
+
 ## How it works — lifecycle, CLI, and kernel preflight
 
 cfm-lsm separates **detection** (kernel-level, BPF programs attached
@@ -1097,7 +1180,7 @@ or prevent other enabled policies from attaching.
 | `cfm lsm` | Alias for `cfm lsm status`. Read-only. |
 | `cfm lsm status [--json]` | Preflight + lsm.conf state + live pinned attach state. Read-only. |
 | `cfm lsm preview` | Predicts what `cfm lsm enable` would attach given the current conf + kernel. Read-only; never opens the kernel. |
-| `cfm lsm init` | Writes the default `/etc/cfm/lsm.conf` if absent. |
+| `cfm lsm init` | One-shot bring-up: preflight + enable + status. Requires `/etc/cfm/lsm.conf` to exist already (install the rpm/deb or copy `configs/lsm.conf` from the source tree). Idempotent: skips enable when already pinned. |
 | `cfm lsm enable` | Loads, attaches, and pins the BPF programs + ringbuf map to `/sys/fs/bpf/cfm/`. Programs stay attached past daemon and CLI exit. Needs root. |
 | `cfm lsm disable` | Removes everything pinned under `/sys/fs/bpf/cfm/`. The kernel detaches the programs when the last reference drops. Needs root. |
 | `cfm lsm help` | Usage. |
@@ -1275,9 +1358,12 @@ ones (e.g. the CRED-003 PR that landed on top of CRED-002):
    `cfmlsm_*_bpfel.{go,o}` files must update.
 6. Update `events.go` if the wire format changed. Keep
    `TestPolicyByID_BPFConstantsMatchGoConstants` passing.
-7. Extend `configs/lsm.conf` with a stanza for the new ID.
-   `cfm lsm init`'s generated output picks the new policy up
-   automatically via `AllPolicies()`.
+7. Extend `configs/lsm.conf` with a stanza for the new ID — the
+   shipped template is the authoritative starting point operators
+   install at `/etc/cfm/lsm.conf`. The `FormatConf` round-trip in
+   the test suite also iterates `AllPolicies()`, so omitting the
+   new ID from the catalogue would surface as a test failure even
+   without a manual edit.
 8. If the new policy needs an LSM hook that the kernel may not
    expose as a tracing target (as with CRED-003's
    `fentry/commit_creds`), report it through preflight as a

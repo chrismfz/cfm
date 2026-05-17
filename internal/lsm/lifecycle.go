@@ -49,6 +49,15 @@ type Lifecycle struct {
 	drainCancel context.CancelFunc
 	drainDone   chan struct{}
 
+	// deprecationWarnings fires the one-time configuration-deprecation
+	// log lines (watched_uid_fallback_min = -1 today, more in future).
+	// ApplyConfig runs every cfm.conf reload tick AND on every drift-
+	// adopt cycle, so a plain "log if -1" check would re-emit at the
+	// reload cadence on disabled hosts; a single Once per Lifecycle
+	// instance suppresses the flood while still surfacing the warning
+	// the first time the operator's conf is parsed.
+	deprecationWarnings sync.Once
+
 	// pinnedRingbufIno is the bpffs inode of the pinned ringbuf at
 	// activation time. Re-checked on every ApplyConfig tick: a missing
 	// pin (ENOENT) or a changed inode means the kernel state was torn
@@ -146,6 +155,31 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 		// the `cfm lsm status` command surfaces the underlying error.
 		l.mu.Unlock()
 		return
+	}
+	// One-time deprecation warning for the legacy -1 "auto" sentinel.
+	// Gated by sync.Once because ApplyConfig fires on every cfm.conf
+	// reload tick AND on every drift-adopt cycle; without the gate,
+	// a host with `enabled = false` would log this on every tick. The
+	// one-time semantics intentionally span Stop→re-Start cycles
+	// within the same process (the Once lives on the Lifecycle, which
+	// is created once in main.go and held for the daemon's lifetime).
+	// See resolveWatchedUidFallback godoc for why auto-detect was
+	// removed.
+	if conf.WatchedUidFallbackMin < 0 {
+		l.deprecationWarnings.Do(func() {
+			logging.LogfLSM("[lsm] watched_uid_fallback_min=-1 (auto) is deprecated; treating as 1000.\n" +
+				"[lsm]   This is a BEHAVIOUR CHANGE on panel hosts: under -1 with cPanel/DirectAdmin\n" +
+				"[lsm]   present, the uid-range fallback used to be SKIPPED. After this change it\n" +
+				"[lsm]   applies at 1000, so admin / sysadmin accounts at uid >= 1000 are now in\n" +
+				"[lsm]   cfm_watched_uids. To preserve the old behaviour exactly, set:\n" +
+				"[lsm]     watched_uid_fallback_min = 0      # panel-manifest-only (matches old -1 on panel hosts)\n" +
+				"[lsm]   To adopt the new coverage (recommended; closes the admin-account gap) plus\n" +
+				"[lsm]   opt out specific admin accounts, set:\n" +
+				"[lsm]     watched_uid_fallback_min = 1000\n" +
+				"[lsm]     exclude_user = <your-admin-username>\n" +
+				"[lsm]     exclude_uid  = <numeric-uid>\n" +
+				"[lsm]     exclude_gid  = <primary-gid>")
+		})
 	}
 	// Apply kmsg config early so subsequent emissions honour the
 	// operator's state_transitions / detect_events toggles.
@@ -272,7 +306,7 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 			logging.LogfLSM("[lsm] auto-enable: %s unavailable on this kernel; skipping policy: %s", p.ID, pa.Reason)
 			continue
 		}
-		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF || p.ID == PolicyFdCredMismatch || p.ID == PolicyKernelModuleLoad) && m == ModeEnforce {
+		if !isEnforceCapable(p.ID) && m == ModeEnforce {
 			logging.LogfLSM("[lsm] auto-enable: %s enforce downgraded to monitor (policy is monitor-only; see docs/cfm-lsm.md)", p.ID)
 			m = ModeMonitor
 		}
