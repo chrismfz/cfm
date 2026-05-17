@@ -128,6 +128,27 @@ const (
 	// -EPERM out of chmod/setxattr; the dropper sees the failure and
 	// the primitive never lands).
 	PolicyPrivInstall PolicyID = "CFML-FS-007"
+
+	// PolicyKernelModuleLoad — CFML-EXEC-007: detect a kernel module
+	// being loaded from a non-trusted comm. Threat: kernel-rootkit
+	// installer. Companion telemetry to the kernsec sysctl
+	// kernel.modules_disabled=1 which actually blocks at the kernel
+	// layer for hosts that don't load any modules post-boot.
+	//
+	// Hooks: tracepoint/syscalls/sys_enter_init_module +
+	//        tracepoint/syscalls/sys_enter_finit_module
+	//
+	// The kernel-side allowlist matches comm names that legitimately
+	// load modules: modprobe / insmod / kmod / systemd /
+	// systemd-modules / systemd-udevd. Any other comm — or any of
+	// those comms running from a watched uid (comm spoofing via
+	// prctl by a web-class user) — fires the rule.
+	//
+	// Mode: monitor ONLY. Tracepoint hooks are observation-only —
+	// the kernel ignores any return value the BPF program sets, so
+	// enforce is structurally impossible here. Use
+	// kernel.modules_disabled=1 to block at the kernel layer.
+	PolicyKernelModuleLoad PolicyID = "CFML-EXEC-007"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -251,6 +272,13 @@ func AllPolicies() []Policy {
 			Hook:        "inode_{setattr,setxattr}",
 			DefaultMode: ModeDisabled,
 			Description: "Detect a web-class user installing a privilege primitive — setting the suid/sgid bit via chmod, or writing the security.capability xattr via setcap — on any file. Install-step companion to CFML-CRED-002 which catches the use of the dropped primitive. Monitor-first; enforce returns -EPERM out of chmod/setxattr.",
+		},
+		{
+			ID:          PolicyKernelModuleLoad,
+			Title:       "Kernel module load by non-trusted comm",
+			Hook:        "tracepoint/syscalls/sys_enter_{init,finit}_module",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a kernel module being loaded from outside the small trusted-loader set (modprobe / insmod / kmod / systemd / systemd-modules / systemd-udevd). Catches kernel-rootkit installer primitives. Monitor-only by design — tracepoint hooks are observation-only; pair with kernel.modules_disabled=1 (kernsec) for actual block.",
 		},
 	}
 }

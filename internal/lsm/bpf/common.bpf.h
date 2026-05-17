@@ -27,6 +27,7 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_FD_CRED_MISMATCH  = 11, /* CFML-FS-006   */
     CFM_LSM_POLICY_EPHEMERAL_EXEC    = 12, /* CFML-EXEC-006 */
     CFM_LSM_POLICY_PRIV_INSTALL      = 13, /* CFML-FS-007   */
+    CFM_LSM_POLICY_KMOD_LOAD         = 14, /* CFML-EXEC-007 */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the
@@ -42,6 +43,11 @@ enum cfm_event_op {
     CFM_FS_OP_SETXATTR    = 6,
     CFM_BPF_OP_MAP_CREATE = 20,
     CFM_BPF_OP_PROG_LOAD  = 21,
+    /* CFML-EXEC-007 module-load primitives. init_module(2) takes the
+     * full module image; finit_module(2) takes an fd to a .ko file.
+     * Either one means a kernel module is being loaded. */
+    CFM_KMOD_OP_INIT      = 30,
+    CFM_KMOD_OP_FINIT     = 31,
 };
 
 #define CFM_TASK_COMM_LEN 16

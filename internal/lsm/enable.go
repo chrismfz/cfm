@@ -103,7 +103,7 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 		// files post-uid-drop. Warn and downgrade if an operator set
 		// enforce — better than silently respecting it and then not
 		// blocking, which would mislead them.
-		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF || p.ID == PolicyFdCredMismatch) && m == ModeEnforce {
+		if (p.ID == PolicyInterpreterNetStdio || p.ID == PolicyCredEscal || p.ID == PolicyDirectCredInstall || p.ID == PolicyUnexpectedBPF || p.ID == PolicyFdCredMismatch || p.ID == PolicyKernelModuleLoad) && m == ModeEnforce {
 			fmt.Fprintf(w, "Note: %s is monitor-only by design; downgrading lsm.conf's enforce setting.\n", p.ID)
 			fmt.Fprintln(w, "      See docs/cfm-lsm.md → monitor-only telemetry policies.")
 			fmt.Fprintln(w)

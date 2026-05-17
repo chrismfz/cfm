@@ -1932,4 +1932,149 @@ int BPF_PROG(cfm_fs007_setxattr_idmap, void *idmap_or_ns, struct dentry *dentry,
     return cfm_fs007_check_setxattr(dentry, name, ret);
 }
 
+/* ------------------------------------------------------------------- *
+ * CFML-EXEC-007 — kernel module load by a non-trusted comm.
+ *
+ * Hooks: tracepoint/syscalls/sys_enter_init_module
+ *        tracepoint/syscalls/sys_enter_finit_module
+ *
+ * Threat: a kernel module is being loaded by something other than the
+ * tiny set of distro tooling that legitimately loads modules. The
+ * canonical post-exploit primitive for installing a kernel-level
+ * rootkit (bvp47-style, hidden processes, syscall-table hooks, ...).
+ * On a panel host, no user-visible workload should ever load kernel
+ * modules — modprobe is invoked only from boot scripts, udev rules,
+ * and a handful of NetworkManager / systemd actions, all of which
+ * run under well-known comm names.
+ *
+ * The detector is comm-allowlist driven (same shape as CFML-BPF-001).
+ * Any uid is in scope — the kernel checks CAP_SYS_MODULE later, but
+ * a non-root task even *attempting* the syscall is interesting
+ * telemetry on a panel host. Web-class uid attempts are tagged with
+ * WEB_ORIGIN.
+ *
+ * Mode: monitor ONLY (tracepoint, not an LSM decision hook — the
+ * kernel ignores any return value we set, so enforce is impossible
+ * here). Companion kernsec sysctl kernel.modules_disabled=1 (KSEC-
+ * MOD-kspp.kernel-007) is the actual block at the kernel layer for
+ * hosts that don't load any modules post-boot; FS-007 is the
+ * always-on telemetry for everyone else.
+ * ------------------------------------------------------------------- */
+
+/* Comm names that legitimately load kernel modules. Truncated to
+ * CFM_TASK_COMM_LEN-1 = 15 chars by the kernel. */
+static __always_inline bool cfm_comm_is_trusted_modprobe(const char *comm)
+{
+    if (!comm)
+        return false;
+
+    /* modprobe (the userspace loader) */
+    if (comm[0] == 'm' && comm[1] == 'o' && comm[2] == 'd' && comm[3] == 'p' &&
+        comm[4] == 'r' && comm[5] == 'o' && comm[6] == 'b' && comm[7] == 'e' &&
+        comm[8] == '\0')
+        return true;
+
+    /* insmod (rarely used directly post-systemd era, but still ships) */
+    if (comm[0] == 'i' && comm[1] == 'n' && comm[2] == 's' && comm[3] == 'm' &&
+        comm[4] == 'o' && comm[5] == 'd' && comm[6] == '\0')
+        return true;
+
+    /* kmod (the busybox-style multi-call binary; modprobe / insmod are
+     * symlinks to it on some distros) */
+    if (comm[0] == 'k' && comm[1] == 'm' && comm[2] == 'o' && comm[3] == 'd' &&
+        comm[4] == '\0')
+        return true;
+
+    /* systemd-modules-load.service. Real comm is
+     * "systemd-modules-load" but TASK_COMM_LEN truncates to 15 chars:
+     * "systemd-modules". */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '-' &&
+        comm[8] == 'm' && comm[9] == 'o' && comm[10] == 'd' && comm[11] == 'u' &&
+        comm[12] == 'l' && comm[13] == 'e' && comm[14] == 's')
+        return true;
+
+    /* systemd (PID 1) loads built-ins on boot via the same syscall path */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '\0')
+        return true;
+
+    /* systemd-udevd loads kernel modules in response to uevents */
+    if (comm[0] == 's' && comm[1] == 'y' && comm[2] == 's' && comm[3] == 't' &&
+        comm[4] == 'e' && comm[5] == 'm' && comm[6] == 'd' && comm[7] == '-' &&
+        comm[8] == 'u' && comm[9] == 'd' && comm[10] == 'e' && comm[11] == 'v' &&
+        comm[12] == 'd' && comm[13] == '\0')
+        return true;
+
+    return false;
+}
+
+static __always_inline void cfm_exec007_emit(__u8 op, __u8 flags, const char *comm)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_KMOD_LOAD;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = op;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
+    if (op == CFM_KMOD_OP_INIT)
+        __builtin_memcpy(e->filename, "init_module", 12);
+    else if (op == CFM_KMOD_OP_FINIT)
+        __builtin_memcpy(e->filename, "finit_module", 13);
+    else
+        e->filename[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+static __always_inline int cfm_exec007_check(__u8 op)
+{
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    bool web_uid = cfm_uid_watched(uid);
+
+    char comm[CFM_TASK_COMM_LEN] = {};
+    bpf_get_current_comm(&comm, sizeof(comm));
+
+    /* Trusted modprobe-class caller AND not a web-class uid impersonating
+     * one — suppress. A watched-uid task running with comm "modprobe"
+     * is exactly the suspicious case (an attacker spoofing comm via
+     * prctl). */
+    if (!web_uid && cfm_comm_is_trusted_modprobe(comm))
+        return 0;
+
+    __u8 flags = 0;
+    if (web_uid)
+        flags |= CFM_LSM_F_WEB_ORIGIN;
+
+    cfm_exec007_emit(op, flags, comm);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_init_module")
+int cfm_exec007_init(struct trace_event_raw_sys_enter *ctx)
+{
+    (void)ctx;
+    return cfm_exec007_check(CFM_KMOD_OP_INIT);
+}
+
+SEC("tracepoint/syscalls/sys_enter_finit_module")
+int cfm_exec007_finit(struct trace_event_raw_sys_enter *ctx)
+{
+    (void)ctx;
+    return cfm_exec007_check(CFM_KMOD_OP_FINIT);
+}
+
 char LICENSE[] SEC("license") = "GPL";
