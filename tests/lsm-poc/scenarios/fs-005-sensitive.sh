@@ -18,6 +18,7 @@ set -uo pipefail
 
 note "[FS-005] watched-uid setattr on a sensitive path"
 ensure_test_user
+require_test_user_watched CFML-FS-005
 
 # Sentinel under /etc/cron.d/, which (a) is in
 # DefaultPersistencePaths so its inode is in the FS-005 watched-inode

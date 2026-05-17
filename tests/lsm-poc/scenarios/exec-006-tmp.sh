@@ -16,6 +16,7 @@ set -uo pipefail
 
 note "[EXEC-006] watched-uid exec from /tmp"
 ensure_test_user
+require_test_user_watched CFML-EXEC-006
 
 # The whole point of EXEC-006 is exec-from-/tmp, so we genuinely need
 # /tmp (or /var/tmp) writeable AND executable. Detect noexec and pick

@@ -113,6 +113,79 @@ cleanup_test_user() {
     fi
 }
 
+# test_user_is_watched — query the live cfm_watched_uids BPF map
+# (via bpftool) and report whether TEST_UID is present. The map is
+# pinned at /sys/fs/bpf/cfm/maps/cfm_watched_uids. Returns:
+#   0 — uid IS watched (EXEC-004 / EXEC-006 / FS-005 will fire)
+#   1 — uid is NOT watched (those scenarios will silently no-op)
+#   2 — couldn't determine (bpftool missing or map unreadable)
+#
+# The cfm_watched_uids map is HASH<u32 uid, u8>; bpftool dumps it as
+# {"key":[0x53,0x00,0x00,0x00], ...} format. We convert TEST_UID to
+# the same little-endian hex pattern and grep.
+test_user_is_watched() {
+    if ! command -v bpftool >/dev/null 2>&1; then
+        return 2
+    fi
+    local map_path="/sys/fs/bpf/cfm/maps/cfm_watched_uids"
+    if [ ! -e "$map_path" ]; then
+        return 2
+    fi
+    if [ -z "$TEST_UID" ]; then
+        return 2
+    fi
+    # Format TEST_UID as four little-endian hex bytes the way bpftool
+    # prints them: e.g. 1500 (0x5DC) -> "dc 05 00 00".
+    local hexkey
+    hexkey=$(printf '%02x %02x %02x %02x' \
+        $(( TEST_UID        & 0xff )) \
+        $(( (TEST_UID >>  8) & 0xff )) \
+        $(( (TEST_UID >> 16) & 0xff )) \
+        $(( (TEST_UID >> 24) & 0xff )))
+    if bpftool map dump pinned "$map_path" 2>/dev/null | grep -qiE "key.*$hexkey"; then
+        return 0
+    fi
+    return 1
+}
+
+# require_test_user_watched — preflight for scenarios whose rule
+# gates on cfm_uid_watched (EXEC-004, EXEC-006, FS-005). When the
+# test user is NOT in the watched set, the rule is structurally
+# unreachable from this user — no point running the trigger.
+#
+# Exits the scenario cleanly with a SKIP-equivalent return code 0
+# (so the harness records "passed" without the rule actually firing)
+# and an explanatory warn. This matches the existing
+# EXEC-006-on-noexec-tmp pattern: clean skip with reason, not a hard
+# failure.
+#
+# The operator can either:
+#   - set watched_uid_fallback_min = $TEST_UID in /etc/cfm/lsm.conf
+#     and run `cfm lsm restart`, OR
+#   - move TEST_USER to a uid that the host's panel manifest already
+#     includes (DA / cPanel / Plesk reseller account, etc.)
+require_test_user_watched() {
+    local rule="$1"
+    case $(test_user_is_watched; echo $?) in
+        0)
+            return 0
+            ;;
+        1)
+            warn "$rule SKIP: test user $TEST_USER (uid=$TEST_UID) is not in cfm_watched_uids"
+            warn "  the host has a panel manifest (cPanel/DA/Plesk) that overrides the uid fallback"
+            warn "  to include cfmpoc, edit /etc/cfm/lsm.conf:"
+            warn "    watched_uid_fallback_min = $TEST_UID"
+            warn "  then run 'cfm lsm restart' and re-run this harness"
+            exit 0
+            ;;
+        2)
+            warn "$rule: bpftool unavailable or map unreadable; proceeding optimistically"
+            warn "  if the rule doesn't fire, install bpftool and re-run for diagnostics"
+            return 0
+            ;;
+    esac
+}
+
 # ensure_tmpdir — per-run scratch directory. Cleaned on harness exit.
 ensure_tmpdir() {
     mkdir -p "$POC_TMPDIR"
