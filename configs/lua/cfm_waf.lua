@@ -191,6 +191,9 @@ local CFG = {
   rule_header_flood      = "challenge", -- total header bag > 16 KB excluding Cookie/Authorization volume
                                         -- (promoted from logonly: 16 KB threshold sits well above
                                         --  typical 1-3 KB real-world headers; 0 hits in 6 weeks)
+  rule_range_abuse       = "logonly",   -- Apache Killer (CVE-2011-3192) style multi-range floods,
+                                        -- oversized Range: values, legacy Request-Range: header,
+                                        -- duplicate Range: headers (slowhttp / smuggling fingerprints)
 
   -- ── Phase 1 — W4 polyglot upload (logonly rollout) ───────────────────────
   -- Source: docs/waf.md "Detector phases" §Phase 1 (W4). Distinct from rule
@@ -376,6 +379,7 @@ local RULE_IDS = {
   rule_exploit_methods         = 607,
   rule_smuggling_cl            = 608,
   rule_header_flood            = 609,
+  rule_range_abuse             = 610,
 
   -- 7xx SSRF
   rule_ssrf                    = 701,
@@ -1142,6 +1146,23 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_HEADER_FLOOD:" .. tag, ttl, mode, RULE_IDS.rule_header_flood) then goto done end
+      end
+    end
+  end
+
+  -- ── 45a) Range / Request-Range header abuse (slow-HTTP / Apache Killer) ──
+  -- Multi-range Range: floods (CVE-2011-3192), oversized Range values, the
+  -- deprecated Request-Range: header, and duplicate Range: headers. All
+  -- four patterns are foreign to legitimate browser/CDN/uploader traffic
+  -- but are common in slowhttptest range mode, RangeAmp variants, and
+  -- exploit-kit probes. Starts at logonly per the playbook.
+  do
+    local mode = rule_mode(CFG.rule_range_abuse, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_range_abuse(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RANGE_ABUSE:" .. tag, ttl, mode, RULE_IDS.rule_range_abuse) then goto done end
       end
     end
   end

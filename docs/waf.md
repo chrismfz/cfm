@@ -231,6 +231,7 @@ Current assignments:
   603  rule_header_vulns               607  rule_exploit_methods
   604  rule_content_type_anomaly       608  rule_smuggling_cl
                                        609  rule_header_flood
+                                       610  rule_range_abuse
 
 7xx — SSRF / external interaction
   701  rule_ssrf
