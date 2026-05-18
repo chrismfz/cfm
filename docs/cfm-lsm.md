@@ -503,6 +503,23 @@ build a baseline. This keeps the new persistence coverage inside `CFML-FS-005`
 rather than creating `CFML-FS-006`, while preserving the original low-risk
 enforcement boundary.
 
+**Setuid-root context skip.** The watched-uid gate (`cfm_uid_watched`)
+keys on the REAL uid via `bpf_get_current_uid_gid()`, so a watched
+user running a setuid-root helper — `passwd`, `chage`, `pkexec`,
+`sudo` writing `/etc/shadow` / `/etc/sudoers` legitimately — still
+matches `current_uid_watched=true` at the watched-set lookup. Without
+a further check, enforce mode would block password changes for every
+regular user with UID ≥ `watched_uid_fallback_min` (default 1000).
+The BPF program therefore reads `current->cred->euid` and skips the
+enforce decision when `euid == 0`: the kernel already granted root
+privs through a trusted setuid binary, and overriding that decision
+would break the password-database workflow. The audit event still
+fires (forensic record of who touched the sensitive file); only the
+`-EPERM` return is suppressed. Attackers cannot reach this skip
+without first passing through a setuid binary the kernel itself
+approved — which is CFML-FS-007's (install) and CFML-CRED-002's
+(use) territory, not FS-005's.
+
 **Host-persistence paths.** The default monitor-only persistence set includes
 common distro and panel locations used for durable post-exploit hooks:
 

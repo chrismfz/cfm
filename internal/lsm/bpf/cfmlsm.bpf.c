@@ -280,6 +280,21 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
     if (!task)
         return 0;
 
+    /* Honour the documented uid 0 exemption (see docs/cfm-lsm.md
+     * §"CFML-EXEC-003 — Reverse shell pattern" → Exemptions).
+     * Root reverse shells are an administrative choice — admin
+     * SSH→`nc` debug sessions, inetd-style root services, and
+     * incident-response rescue shells legitimately have stdio
+     * dup'd onto remote TCP. Enforce mode without this skip
+     * would break those workflows. Checking effective uid matches
+     * the doc's intent: "running as root via any mechanism."
+     * Real uid is left unchecked so attackers who somehow exec'd
+     * a setuid-root binary still get the rule's protection in the
+     * non-root caller case. */
+    __u32 euid = BPF_CORE_READ(task, cred, euid.val);
+    if (euid == 0)
+        return 0;
+
     files = BPF_CORE_READ(task, files);
     if (!files)
         return 0;
@@ -1117,7 +1132,29 @@ static __always_inline int cfm_fs005_check2(struct dentry *primary,
 
     /* Origin-only matches are intentionally monitor-only while we gather
      * production telemetry. Current-uid matches preserve the historical
-     * FS-005 enforcement semantics. */
+     * FS-005 enforcement semantics.
+     *
+     * Setuid-root context skip: cfm_uid_watched(uid) above keyed on
+     * the REAL uid (low 32 of bpf_get_current_uid_gid()). When a
+     * watched user runs a setuid-root helper — passwd / chage /
+     * pkexec / sudo writing /etc/shadow / /etc/sudoers / /etc/passwd
+     * legitimately — real_uid stays watched but euid is 0 because
+     * the kernel granted root privs through a trusted setuid binary.
+     * Denying that write would break password changes and other
+     * password-database workflows for every regular user.
+     *
+     * The event still fires above (forensic record of who touched
+     * the sensitive file); we just don't override the kernel's own
+     * cred decision in enforce mode. Attackers can't reach this
+     * skip without already passing through a setuid-root binary
+     * the kernel itself approved — which is FS-007 + CRED-002's
+     * territory, not FS-005's. */
+    struct task_struct *task = bpf_get_current_task_btf();
+    if (task) {
+        __u32 euid = BPF_CORE_READ(task, cred, euid.val);
+        if (euid == 0)
+            return 0;
+    }
     if (current_uid_watched && cfm_enforce_sensitive_write &&
         watch_mode == CFM_FS005_WATCH_ENFORCEABLE)
         return CFM_LSM_DENY;
