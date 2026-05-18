@@ -222,6 +222,81 @@ func TestDetectSCTPWorkload_NoSCTP(t *testing.T) {
 	}
 }
 
+func TestAdvisories_BPFDisabled_DevToolsPresent(t *testing.T) {
+	notes := (HostProfile{HasDevTools: true}).Advisories("KSEC-SCT-kspp.kernel-003", "kspp.kernel")
+	if len(notes) == 0 {
+		t.Fatal("expected advisory for unprivileged_bpf_disabled=2 with HasDevTools")
+	}
+	if !strings.Contains(notes[0], "developer tooling") {
+		t.Errorf("advisory should mention developer tooling; got %q", notes[0])
+	}
+}
+
+func TestAdvisories_BPFDisabled_NoDevTools(t *testing.T) {
+	notes := (HostProfile{}).Advisories("KSEC-SCT-kspp.kernel-003", "kspp.kernel")
+	if len(notes) != 0 {
+		t.Errorf("clean host should produce no advisory; got %v", notes)
+	}
+}
+
+func TestAdvisories_PtraceScope_DevToolsPresent(t *testing.T) {
+	notes := (HostProfile{HasDevTools: true}).Advisories("KSEC-SCT-kspp.kernel-006", "kspp.kernel")
+	if len(notes) == 0 {
+		t.Fatal("expected advisory for yama.ptrace_scope=2 with HasDevTools")
+	}
+	if !strings.Contains(notes[0], "sudo") {
+		t.Errorf("ptrace advisory should mention sudo; got %q", notes[0])
+	}
+}
+
+func TestAdvisories_KexecDisabled_LivePatching(t *testing.T) {
+	for _, p := range []HostProfile{
+		{HasLivePatchingModules: true},
+		{HasKernelCare: true},
+		{HasKsplice: true},
+	} {
+		notes := p.Advisories("KSEC-SCT-kspp.kexec-001", "sysctl.kernel.kexec")
+		if len(notes) == 0 {
+			t.Errorf("expected advisory for kexec_load_disabled with %+v", p)
+			continue
+		}
+		if !strings.Contains(notes[0], "live-patching") {
+			t.Errorf("kexec advisory should mention live-patching; got %q", notes[0])
+		}
+	}
+}
+
+func TestAdvisories_InitOnFree_ZFS(t *testing.T) {
+	notes := (HostProfile{HasZFS: true}).Advisories("KSEC-BOOT-tier3.mempaint-001", "tier3.mempaint")
+	if len(notes) == 0 {
+		t.Fatal("expected advisory for init_on_free with HasZFS")
+	}
+	if !strings.Contains(notes[0], "ZFS") {
+		t.Errorf("init_on_free advisory should mention ZFS; got %q", notes[0])
+	}
+}
+
+func TestAdvisories_OnlyOnApplyDecision(t *testing.T) {
+	// Sanity: rule that would normally advisory must NOT carry one
+	// when the decision is anything but Apply.
+	conf := &Conf{Tier: 0}
+	profile := HostProfile{HasDevTools: true}
+	rs := Resolve(conf, profile)
+	for _, r := range rs.Sysctls {
+		if r.ID != "KSEC-SCT-kspp.kernel-003" {
+			continue
+		}
+		if r.Decision == Apply {
+			t.Fatalf("test setup broken: tier-0 conf must not Apply %s", r.ID)
+		}
+		if len(r.Advisories) != 0 {
+			t.Errorf("non-Apply rule must not carry advisories; got %v", r.Advisories)
+		}
+		return
+	}
+	t.Fatal("KSEC-SCT-kspp.kernel-003 not found in resolved set")
+}
+
 func TestSkipReason_KSMBDGate(t *testing.T) {
 	if r := (HostProfile{HasKSMBDServer: true}).SkipReason("modules.recent_cves.ksmbd"); r == "" {
 		t.Error("HasKSMBDServer=true should produce a SkipReason for modules.recent_cves.ksmbd")

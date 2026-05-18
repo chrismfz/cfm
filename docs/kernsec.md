@@ -593,6 +593,27 @@ Mutating commands also run a pre-flight safety summary before risky applies.
 Use `--yes` only for unattended runs where that preview has already been
 reviewed operationally.
 
+### Advisories — soft warnings on Apply decisions
+
+In addition to the hard-skip `HostProfile.SkipReason` mechanism above,
+kernsec surfaces soft advisories via `HostProfile.Advisories(id, group)`.
+These do NOT change the rule's decision — the rule still applies — but
+they print in `cfm kernsec preview` (`note:` lines) and in the TUI
+detail pane (`Note:` lines) so the operator knows about workload-specific
+side-effects.
+
+Shipped advisories:
+
+| Rule ID | Triggers when | Advisory |
+|---|---|---|
+| `KSEC-SCT-kspp.kernel-003` (`unprivileged_bpf_disabled=2`) | `HasDevTools` (gdb / strace / py-spy / bpftrace / bcc-tools / perf installed) | Developer tooling detected — it runs as root and remains functional; unprivileged eBPF and non-root `bpftool` are blocked. |
+| `KSEC-SCT-kspp.kernel-006` (`yama.ptrace_scope=2`) | `HasDevTools` | Developer tooling detected — `gdb --attach`, `strace -p`, `py-spy`, `bpftrace -p` against your own processes will need sudo. |
+| `KSEC-SCT-kspp.kexec-001` (`kexec_load_disabled=1`) | `HasLivePatchingModules` or `HasKernelCare` or `HasKsplice` | Live-patching active — `kexec_load_disabled` is compatible (live-patches don't use kexec) but doesn't add to live-patching's protection. |
+| `KSEC-BOOT-tier3.mempaint-001` (`init_on_free=1`) | `HasZFS` or `HasNVIDIA` | ZFS / NVIDIA detected — `init_on_free` stacks ~1-3% alloc cost on those subsystems; benchmark before production. |
+
+Advisories appear in the `cfm kernsec status --json` output under the
+per-rule `advisories` field (omitted when empty).
+
 ## Bootloader backends
 
 kernsec detects and uses one of these bootloader backends:

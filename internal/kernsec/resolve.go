@@ -60,6 +60,12 @@ type ResolvedRule struct {
 	Decision        Decision
 	Reason          string
 	WouldSkipReason string
+	// Advisories are soft-warning notes attached to an Apply decision.
+	// They do not change the outcome — the rule still applies — but
+	// surface in audit/preview/TUI so the operator knows about
+	// workload impact (e.g. "developer tools need sudo after this").
+	// Nil/empty on rules that don't fire any advisory.
+	Advisories []string
 }
 
 // ResolvedSet is the full set of resolved rules in stable order
@@ -148,6 +154,9 @@ func decideSysctl(r SysctlRule, conf *Conf, profile HostProfile) ResolvedRule {
 		Display: r.Key + "=" + r.Value,
 	}
 	rr.Decision, rr.Reason, rr.WouldSkipReason = decide(r.ID, r.Tier, r.Group, conf, profile)
+	if rr.Decision == Apply {
+		rr.Advisories = profile.Advisories(r.ID, r.Group)
+	}
 	// Cross-component check: if another cfm component (sys_tweaks /
 	// firewall / etc.) owns this key per the managedsysctl registry,
 	// flip the decision to ManagedExternally — kernsec audits but
@@ -174,6 +183,9 @@ func decideBootArg(r BootArg, conf *Conf, profile HostProfile) ResolvedRule {
 		Display: r.String(),
 	}
 	rr.Decision, rr.Reason, rr.WouldSkipReason = decide(r.ID, r.Tier, r.Group, conf, profile)
+	if rr.Decision == Apply {
+		rr.Advisories = profile.Advisories(r.ID, r.Group)
+	}
 	return rr
 }
 
@@ -183,6 +195,9 @@ func decideModule(r ModuleRule, conf *Conf, profile HostProfile) ResolvedRule {
 		Display: r.Name,
 	}
 	rr.Decision, rr.Reason, rr.WouldSkipReason = decide(r.ID, r.Tier, r.Group, conf, profile)
+	if rr.Decision == Apply {
+		rr.Advisories = profile.Advisories(r.ID, r.Group)
+	}
 	return rr
 }
 
@@ -192,6 +207,9 @@ func decideMount(r MountRule, conf *Conf, profile HostProfile) ResolvedRule {
 		Display: r.MountPoint,
 	}
 	rr.Decision, rr.Reason, rr.WouldSkipReason = decide(r.ID, r.Tier, r.Group, conf, profile)
+	if rr.Decision == Apply {
+		rr.Advisories = profile.Advisories(r.ID, r.Group)
+	}
 	return rr
 }
 

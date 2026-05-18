@@ -64,6 +64,7 @@ type HostProfile struct {
 	MountedDeadFSDetail      string `json:"mounted_dead_fs_detail,omitempty"`      // which FS triggered HasMountedDeadFS — surfaced in the skip reason
 	HasFirewireHardware      bool   `json:"has_firewire_hardware"`                 // /sys/bus/firewire/devices non-empty → don't blacklist firewire-* modules
 	HasKSMBDServer           bool   `json:"has_ksmbd_server"`                      // kernel SMB server in use: /sys/class/ksmbd, ksmbd.mountd process, ksmbd-tools installed → don't blacklist ksmbd
+	HasDevTools              bool   `json:"has_dev_tools"`                         // gdb / strace / py-spy / bpftrace / bcc-tools installed → soft advisory for yama.ptrace_scope and unprivileged_bpf_disabled
 	HasNFS                   bool   `json:"has_nfs"`                               // active NFS mounts → keep NFS untouched (already excluded by policy)
 	IsEFIBoot                bool   `json:"is_efi_boot"`                           // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
 	IsCPanel                 bool   `json:"is_cpanel"`                             // /usr/local/cpanel exists → cPanel/WHM host
@@ -104,6 +105,7 @@ func DetectHostProfile() HostProfile {
 		HasRDSWorkload:         detectRDSWorkload(),
 		HasFirewireHardware:    dirHasEntries("/sys/bus/firewire/devices"),
 		HasKSMBDServer:         detectKSMBDServer(),
+		HasDevTools:            detectDevTools(),
 		HasNFS:                 procMountsHasFS("nfs", "nfs4"),
 		IsEFIBoot:              isEFIBoot(),
 		IsCPanel:               detectCPanel(),
@@ -408,6 +410,28 @@ func detectSCTPWorkload() bool {
 		"/etc/systemd/system/*sctp*.service",
 		"/usr/lib/systemd/system/*sctp*.service",
 		"/lib/systemd/system/*sctp*.service",
+	)
+}
+
+// detectDevTools reports whether common developer / observability
+// binaries are installed. Used only by the advisory system (not by
+// SkipReason): rules like yama.ptrace_scope=2 and
+// unprivileged_bpf_disabled=2 still apply, but the audit/preview
+// surfaces a soft note when these tools are present so the operator
+// knows their interactive workflows (gdb --attach, strace -p,
+// bpftrace -p) will need sudo afterward.
+func detectDevTools() bool {
+	return anyPathExists(
+		"/usr/bin/gdb",
+		"/usr/bin/strace",
+		"/usr/bin/ltrace",
+		"/usr/bin/py-spy",
+		"/usr/local/bin/py-spy",
+		"/usr/bin/bpftrace",
+		"/usr/sbin/bpftrace",
+		"/usr/share/bcc/tools",
+		"/usr/share/bcc-tools",
+		"/usr/bin/perf",
 	)
 }
 
@@ -803,6 +827,52 @@ func (p HostProfile) hostingPanelReason() string {
 		return "hosting panel workload detected"
 	}
 	return ""
+}
+
+// Advisories returns soft-warning notes for a rule that is going to
+// apply on this host. Unlike SkipReason, these do NOT change the
+// decision — the rule still applies — they surface in the audit /
+// preview / TUI as informational "heads up" notes so the operator
+// knows about workload impact they might not otherwise notice. Use
+// for cases like "rule applies safely, but tooling X needs sudo
+// afterward" or "rule stacks perf cost on top of subsystem Y".
+//
+// Each rule has its own targeted advisory keyed by ID — group-level
+// advisories don't fit when a group like kspp.kernel contains rules
+// with very different operational impact.
+func (p HostProfile) Advisories(id, _ string) []string {
+	var out []string
+	switch id {
+	case "KSEC-SCT-kspp.kernel-003":
+		// unprivileged_bpf_disabled=2 — root BPF (bpftrace, bcc, Cilium)
+		// is unaffected, but the operator should know unprivileged
+		// eBPF and non-root bpftool are now blocked.
+		if p.HasDevTools {
+			out = append(out, "developer tooling detected (gdb / strace / bpftrace / bcc / perf) — these run as root and remain functional; unprivileged eBPF and non-root bpftool are blocked")
+		}
+	case "KSEC-SCT-kspp.kernel-006":
+		// yama.ptrace_scope=2 — same-uid debugger attach now needs sudo.
+		if p.HasDevTools {
+			out = append(out, "developer tooling detected (gdb / strace / py-spy / bpftrace) — `gdb --attach`, `strace -p`, `py-spy`, `bpftrace -p` against your own processes will need sudo")
+		}
+	case "KSEC-SCT-kspp.kexec-001":
+		// kexec_load_disabled=1 — live-patching does not use kexec, so
+		// no conflict, but the operator should know this rule does not
+		// add to live-patching's existing protection.
+		if p.HasLivePatchingModules || p.HasKernelCare || p.HasKsplice {
+			out = append(out, "live-patching active (KernelCare / Ksplice / kpatch) — kexec_load_disabled is compatible (live-patches don't use kexec) but does not add to live-patching's protection")
+		}
+	case "KSEC-BOOT-tier3.mempaint-001":
+		// init_on_free=1 — stacks alloc cost on subsystems that
+		// already have heavy memory traffic.
+		if p.HasZFS {
+			out = append(out, "ZFS detected — init_on_free=1 adds ~1-3% alloc cost stacked on top of ZFS ARC overhead; benchmark before production")
+		}
+		if p.HasNVIDIA {
+			out = append(out, "NVIDIA driver detected — init_on_free=1 may add measurable alloc cost on GPU memory hot paths; benchmark if the workload is GPU-intensive")
+		}
+	}
+	return out
 }
 
 // SkipReason returns a non-empty explanation if the rule with the given
