@@ -222,6 +222,178 @@ func TestDetectSCTPWorkload_NoSCTP(t *testing.T) {
 	}
 }
 
+func TestSkipReason_TIPCGate(t *testing.T) {
+	if r := (HostProfile{HasTIPCWorkload: true}).SkipReason("modules.net.legacy.tipc"); r == "" {
+		t.Error("HasTIPCWorkload=true should produce a SkipReason for modules.net.legacy.tipc")
+	}
+	if r := (HostProfile{}).SkipReason("modules.net.legacy.tipc"); r != "" {
+		t.Errorf("clean host should not skip modules.net.legacy.tipc; got %q", r)
+	}
+}
+
+func TestSkipReason_AFSGate(t *testing.T) {
+	if r := (HostProfile{HasAFS: true}).SkipReason("modules.net.legacy.rxrpc"); r == "" {
+		t.Error("HasAFS=true should produce a SkipReason for modules.net.legacy.rxrpc")
+	}
+	if r := (HostProfile{}).SkipReason("modules.net.legacy.rxrpc"); r != "" {
+		t.Errorf("clean host should not skip modules.net.legacy.rxrpc; got %q", r)
+	}
+}
+
+func TestSkipReason_L2TPGate(t *testing.T) {
+	if r := (HostProfile{HasL2TPWorkload: true}).SkipReason("modules.net.legacy.l2tp"); r == "" {
+		t.Error("HasL2TPWorkload=true should produce a SkipReason for modules.net.legacy.l2tp")
+	}
+	if r := (HostProfile{}).SkipReason("modules.net.legacy.l2tp"); r != "" {
+		t.Errorf("clean host should not skip modules.net.legacy.l2tp; got %q", r)
+	}
+}
+
+func TestSkipReason_PPTPGate(t *testing.T) {
+	if r := (HostProfile{HasPPTPWorkload: true}).SkipReason("modules.net.legacy.pptp"); r == "" {
+		t.Error("HasPPTPWorkload=true should produce a SkipReason for modules.net.legacy.pptp")
+	}
+}
+
+func TestSkipReason_RDSGate(t *testing.T) {
+	if r := (HostProfile{HasRDSWorkload: true}).SkipReason("modules.net.legacy.rds"); r == "" {
+		t.Error("HasRDSWorkload=true should produce a SkipReason for modules.net.legacy.rds")
+	}
+}
+
+func TestSkipReason_FirewireGate(t *testing.T) {
+	if r := (HostProfile{HasFirewireHardware: true}).SkipReason("modules.bus.firewire"); r == "" {
+		t.Error("HasFirewireHardware=true should produce a SkipReason for modules.bus.firewire")
+	}
+	// FireWire-only host must NOT blanket-skip the other bus groups.
+	for _, g := range []string{"modules.bus.bluetooth", "modules.bus.thunderbolt", "modules.bus.misc"} {
+		if r := (HostProfile{HasFirewireHardware: true}).SkipReason(g); r != "" {
+			t.Errorf("HasFirewireHardware=true must not skip %s: got %q", g, r)
+		}
+	}
+}
+
+func TestSkipReason_MountedDeadFSGate(t *testing.T) {
+	if r := (HostProfile{HasMountedDeadFS: true, MountedDeadFSDetail: "udf mounted (/proc/mounts)"}).SkipReason("modules.fs.unused"); r == "" {
+		t.Error("HasMountedDeadFS=true should produce a SkipReason for modules.fs.unused")
+	} else if !strings.Contains(r, "udf") {
+		t.Errorf("SkipReason should surface MountedDeadFSDetail; got %q", r)
+	}
+	if r := (HostProfile{}).SkipReason("modules.fs.unused"); r != "" {
+		t.Errorf("clean host should not skip modules.fs.unused; got %q", r)
+	}
+}
+
+func TestDetectTIPCWorkload_ModuleLoaded(t *testing.T) {
+	root := withHostProfileRoot(t)
+	writeHostModules(t, root, "tipc")
+	if !detectTIPCWorkload() {
+		t.Error("tipc loaded in /proc/modules should signal TIPC workload")
+	}
+}
+
+func TestDetectAFS_AFSMount(t *testing.T) {
+	root := withHostProfileRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc/mounts"),
+		[]byte("AFS /afs afs rw,relatime 0 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !detectAFS() {
+		t.Error("AFS in /proc/mounts should signal AFS use")
+	}
+}
+
+func TestDetectL2TPWorkload_Daemon(t *testing.T) {
+	root := withHostProfileRoot(t)
+	touchHostPath(t, root, "/usr/sbin/xl2tpd")
+	if !detectL2TPWorkload() {
+		t.Error("xl2tpd binary should signal L2TP workload")
+	}
+}
+
+func TestDetectPPTPWorkload_Config(t *testing.T) {
+	root := withHostProfileRoot(t)
+	touchHostPath(t, root, "/etc/pptpd.conf")
+	if !detectPPTPWorkload() {
+		t.Error("/etc/pptpd.conf should signal PPTP workload")
+	}
+}
+
+func TestDetectRDSWorkload_OracleOratab(t *testing.T) {
+	root := withHostProfileRoot(t)
+	touchHostPath(t, root, "/etc/oratab")
+	if !detectRDSWorkload() {
+		t.Error("/etc/oratab should signal Oracle/RDS workload")
+	}
+}
+
+func TestDetectMountedDeadFS_ProcMounts(t *testing.T) {
+	root := withHostProfileRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// udf is in modules.fs.unused; a UDF mount must trigger the gate.
+	if err := os.WriteFile(filepath.Join(root, "proc/mounts"),
+		[]byte("/dev/sr0 /mnt/iso udf ro,relatime 0 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, detail := detectMountedDeadFS()
+	if !got {
+		t.Fatal("UDF mount should trigger HasMountedDeadFS")
+	}
+	if !strings.Contains(detail, "udf") {
+		t.Errorf("detail should name the matching FS; got %q", detail)
+	}
+}
+
+func TestDetectMountedDeadFS_Fstab(t *testing.T) {
+	root := withHostProfileRoot(t)
+	// Empty mounts, JFS-like entry in fstab — wait, jfs isn't in
+	// modules.fs.unused (deliberately). Use hpfs instead, which is.
+	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc/mounts"),
+		[]byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc/fstab"),
+		[]byte("# legacy partition kept for migration\n/dev/sdb1 /mnt/legacy hpfs noauto 0 0\n"), 0o644); err != nil {
+		_ = os.MkdirAll(filepath.Join(root, "etc"), 0o755)
+		if err := os.WriteFile(filepath.Join(root, "etc/fstab"),
+			[]byte("# legacy partition kept for migration\n/dev/sdb1 /mnt/legacy hpfs noauto 0 0\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, detail := detectMountedDeadFS()
+	if !got {
+		t.Fatal("hpfs in /etc/fstab should trigger HasMountedDeadFS")
+	}
+	if !strings.Contains(detail, "hpfs") {
+		t.Errorf("detail should name the fstab match; got %q", detail)
+	}
+}
+
+func TestDetectMountedDeadFS_NoMatch(t *testing.T) {
+	root := withHostProfileRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Standard hosting box: ext4 root, xfs data. Nothing in
+	// modules.fs.unused — must NOT trigger.
+	if err := os.WriteFile(filepath.Join(root, "proc/mounts"),
+		[]byte("/dev/sda1 / ext4 rw,relatime 0 0\n/dev/sda2 /var xfs rw,relatime 0 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := detectMountedDeadFS()
+	if got {
+		t.Error("standard ext4/xfs host must not trigger HasMountedDeadFS")
+	}
+}
+
 func TestSkipReason_MCTPGate(t *testing.T) {
 	// HasMCTPInBand=true → modules.mctp must skip (OpenBMC / NVMe-MI /
 	// PCIe VDM host where the kernel mctp stack is actually used).

@@ -55,6 +55,14 @@ type HostProfile struct {
 	HasThunderbolt           bool   `json:"has_thunderbolt"`                       // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
 	HasMCTPInBand            bool   `json:"has_mctp_in_band"`                      // in-band MCTP endpoint registered (OpenBMC, NVMe-MI) → don't blacklist mctp modules
 	HasSCTPWorkload          bool   `json:"has_sctp_workload"`                     // sctp module loaded / /proc/net/sctp populated / sctp_darn / Nagios check_sctp / *sctp*.service → don't blacklist sctp modules
+	HasTIPCWorkload          bool   `json:"has_tipc_workload"`                     // tipc loaded / /proc/net/tipc / tipc-config / *tipc*.service → don't blacklist tipc (Pacemaker/Corosync HA, Erlang OTP)
+	HasAFS                   bool   `json:"has_afs"`                               // rxrpc or kafs loaded / /proc/net/rxrpc / /afs mount / /etc/openafs → don't blacklist rxrpc (AFS clients)
+	HasL2TPWorkload          bool   `json:"has_l2tp_workload"`                     // xl2tpd / kl2tpd / accel-pptp / /proc/net/l2tp* → don't blacklist l2tp_* family
+	HasPPTPWorkload          bool   `json:"has_pptp_workload"`                     // pptpd / /etc/pptpd.conf / /proc/net/pptp / accel-pptp → don't blacklist pptp
+	HasRDSWorkload           bool   `json:"has_rds_workload"`                      // rds loaded / /proc/net/rds* / Oracle DB indicators → don't blacklist rds (Oracle RAC interconnect)
+	HasMountedDeadFS         bool   `json:"has_mounted_dead_fs"`                   // any modules.fs.unused FS actually mounted (/proc/mounts) or in /etc/fstab → don't blacklist the group
+	MountedDeadFSDetail      string `json:"mounted_dead_fs_detail,omitempty"`      // which FS triggered HasMountedDeadFS — surfaced in the skip reason
+	HasFirewireHardware      bool   `json:"has_firewire_hardware"`                 // /sys/bus/firewire/devices non-empty → don't blacklist firewire-* modules
 	HasNFS                   bool   `json:"has_nfs"`                               // active NFS mounts → keep NFS untouched (already excluded by policy)
 	IsEFIBoot                bool   `json:"is_efi_boot"`                           // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
 	IsCPanel                 bool   `json:"is_cpanel"`                             // /usr/local/cpanel exists → cPanel/WHM host
@@ -88,6 +96,12 @@ func DetectHostProfile() HostProfile {
 		HasThunderbolt:         dirHasEntries("/sys/bus/thunderbolt/devices"),
 		HasMCTPInBand:          detectMCTPInBand(),
 		HasSCTPWorkload:        detectSCTPWorkload(),
+		HasTIPCWorkload:        detectTIPCWorkload(),
+		HasAFS:                 detectAFS(),
+		HasL2TPWorkload:        detectL2TPWorkload(),
+		HasPPTPWorkload:        detectPPTPWorkload(),
+		HasRDSWorkload:         detectRDSWorkload(),
+		HasFirewireHardware:    dirHasEntries("/sys/bus/firewire/devices"),
 		HasNFS:                 procMountsHasFS("nfs", "nfs4"),
 		IsEFIBoot:              isEFIBoot(),
 		IsCPanel:               detectCPanel(),
@@ -108,6 +122,7 @@ func DetectHostProfile() HostProfile {
 	p.HasHostingPanelWorkload = p.IsCPanel || p.IsDirectAdmin || p.HasCloudLinuxLVE || p.HasCageFS || p.HasImunify360
 	p.HasDKMS = hasOutOfTreeModuleEvidence(p)
 	p.HasActiveUserNamespaces, p.ActiveUserNamespacesNote = defaultUsernsProbe().detect()
+	p.HasMountedDeadFS, p.MountedDeadFSDetail = detectMountedDeadFS()
 	return p
 }
 
@@ -394,6 +409,206 @@ func detectSCTPWorkload() bool {
 	)
 }
 
+// detectTIPCWorkload reports whether the host has any evidence of TIPC
+// (Transparent Inter-Process Communication) being used. TIPC is rare on
+// hosting but real on Pacemaker / Corosync HA clusters, Erlang/OTP
+// distributed setups, and a handful of OpenStack HA configurations.
+func detectTIPCWorkload() bool {
+	if anyModuleLoaded("tipc") || anyPathExists("/proc/net/tipc", "/sys/module/tipc") {
+		return true
+	}
+	if anyPathExists(
+		"/usr/bin/tipc",
+		"/usr/sbin/tipc",
+		"/usr/bin/tipc-config",
+		"/usr/sbin/tipc-config",
+		"/usr/lib/systemd/system/tipc.service",
+		"/lib/systemd/system/tipc.service",
+	) {
+		return true
+	}
+	return anyGlobMatches(
+		"/etc/systemd/system/*tipc*.service",
+		"/usr/lib/systemd/system/*tipc*.service",
+		"/lib/systemd/system/*tipc*.service",
+	)
+}
+
+// detectAFS reports whether the host runs an AFS client. rxrpc is the
+// kernel-side RPC stack AFS rides on; kafs is the in-tree AFS client,
+// openafs is the third-party one. Either client mounting /afs is the
+// strongest signal; the rest cover installed-but-not-yet-mounted cases.
+func detectAFS() bool {
+	if anyModuleLoaded("rxrpc", "kafs", "openafs") || anyPathExists("/proc/net/rxrpc", "/sys/module/rxrpc") {
+		return true
+	}
+	if procMountsHasFS("afs") {
+		return true
+	}
+	return anyPathExists(
+		"/afs",
+		"/etc/openafs",
+		"/usr/vice/etc",
+		"/usr/afs",
+		"/usr/bin/fs",
+		"/usr/bin/pts",
+		"/usr/bin/vos",
+		"/usr/lib/systemd/system/openafs-client.service",
+		"/lib/systemd/system/openafs-client.service",
+	)
+}
+
+// detectL2TPWorkload reports whether the host terminates L2TP tunnels.
+// Covers both userspace daemons (xl2tpd, kl2tpd, accel-ppp's accel-pppd)
+// and the kernel-side L2TPv3 data path.
+func detectL2TPWorkload() bool {
+	if anyModuleLoadedWithPrefix("l2tp_") || anyPathExists("/proc/net/l2tp", "/sys/module/l2tp_core") {
+		return true
+	}
+	if anyGlobMatches("/proc/net/l2tp*") {
+		return true
+	}
+	return anyPathExists(
+		"/usr/sbin/xl2tpd",
+		"/usr/bin/xl2tpd",
+		"/etc/xl2tpd",
+		"/usr/sbin/kl2tpd",
+		"/usr/sbin/accel-pppd",
+		"/etc/accel-ppp.conf",
+		"/usr/lib/systemd/system/xl2tpd.service",
+		"/lib/systemd/system/xl2tpd.service",
+		"/usr/lib/systemd/system/accel-ppp.service",
+		"/lib/systemd/system/accel-ppp.service",
+	)
+}
+
+// detectPPTPWorkload reports whether the host terminates PPTP tunnels.
+// Yes, this still happens — Mikrotik fleets, legacy site-to-site, ISP
+// helpdesks. Either kernel module loaded or a pptpd / accel-ppp install
+// counts.
+func detectPPTPWorkload() bool {
+	if anyModuleLoaded("pptp", "pptp_gre") || anyPathExists("/proc/net/pptp", "/sys/module/pptp") {
+		return true
+	}
+	return anyPathExists(
+		"/usr/sbin/pptpd",
+		"/usr/sbin/pptp",
+		"/usr/bin/pptp",
+		"/etc/pptpd.conf",
+		"/etc/ppp/pptpd-options",
+		"/usr/sbin/accel-pppd",
+		"/usr/lib/systemd/system/pptpd.service",
+		"/lib/systemd/system/pptpd.service",
+	)
+}
+
+// detectRDSWorkload reports whether the host runs Oracle Database
+// (RDS — Reliable Datagram Sockets — is Oracle's RAC interconnect
+// transport) or anything else linking against rds_tools. False
+// positives are cheap: the alternate consumers of rds are essentially
+// zero outside Oracle.
+func detectRDSWorkload() bool {
+	if anyModuleLoaded("rds", "rds_tcp", "rds_rdma") || anyPathExists("/proc/net/rds", "/sys/module/rds") {
+		return true
+	}
+	if anyGlobMatches("/proc/net/rds*") {
+		return true
+	}
+	return anyPathExists(
+		"/u01/app/oracle",
+		"/u01/oracle",
+		"/etc/oratab",
+		"/usr/bin/lsnrctl",
+		"/usr/local/bin/lsnrctl",
+		"/usr/lib/oracle",
+		"/opt/oracle",
+		"/usr/bin/rds-info",
+		"/usr/bin/rds-ping",
+	)
+}
+
+// deadFSNames returns the set of filesystem names that ship in the
+// modules.fs.unused group. The dead-FS gate (HasMountedDeadFS) derives
+// its watchlist from this so the rule list and the probe stay in sync —
+// adding a new dead FS to Tier1Modules automatically extends the gate.
+func deadFSNames() []string {
+	var names []string
+	seen := map[string]struct{}{}
+	for _, r := range Tier1Modules {
+		if r.Group != "modules.fs.unused" {
+			continue
+		}
+		if _, dup := seen[r.Name]; dup {
+			continue
+		}
+		seen[r.Name] = struct{}{}
+		names = append(names, r.Name)
+	}
+	return names
+}
+
+// detectMountedDeadFS scans /proc/mounts and /etc/fstab for any of the
+// filesystems shipped in the modules.fs.unused blacklist. A single hit
+// in either source skips the whole group — the cost of keeping cramfs
+// or hfs+ loadable is trivial compared to silently breaking a backup
+// pipeline that mounts UDF for archive recovery, or a 2014-era JFS
+// partition that nobody cleaned up. Returns the FS name (for the skip
+// reason) plus the bool.
+func detectMountedDeadFS() (bool, string) {
+	watch := make(map[string]struct{})
+	for _, name := range deadFSNames() {
+		watch[name] = struct{}{}
+	}
+	if len(watch) == 0 {
+		return false, ""
+	}
+	if hit := firstMatchingFSFromMounts(watch); hit != "" {
+		return true, hit + " mounted (/proc/mounts)"
+	}
+	if hit := firstMatchingFSFromFstab(watch); hit != "" {
+		return true, hit + " listed in /etc/fstab"
+	}
+	return false, ""
+}
+
+func firstMatchingFSFromMounts(watch map[string]struct{}) string {
+	b, err := os.ReadFile(hostProfilePath("/proc/mounts"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		if _, ok := watch[fields[2]]; ok {
+			return fields[2]
+		}
+	}
+	return ""
+}
+
+func firstMatchingFSFromFstab(watch map[string]struct{}) string {
+	b, err := os.ReadFile(hostProfilePath("/etc/fstab"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 3 {
+			continue
+		}
+		if _, ok := watch[fields[2]]; ok {
+			return fields[2]
+		}
+	}
+	return ""
+}
+
 // detectMCTPInBand reports whether the kernel's in-band MCTP stack has
 // at least one registered endpoint. Out-of-band BMC paths used by
 // Supermicro IPMI and Dell iDRAC ride their own NIC and do not touch
@@ -638,6 +853,61 @@ func (p HostProfile) SkipReason(group string) string {
 		// the kernel mctp bus or class has registered endpoints.
 		if p.HasMCTPInBand {
 			return "host has in-band MCTP endpoints (OpenBMC / NVMe-MI / PCIe VDM) — /sys/bus/mctp or /sys/class/mctp non-empty"
+		}
+	case "modules.net.legacy.tipc":
+		// TIPC has had LPEs and zero use on web hosting, but it's the
+		// transport some HA-cluster stacks ride on. Skip when there's
+		// any sign of TIPC use so we don't break Pacemaker/Corosync
+		// fabrics or Erlang/OTP distribution.
+		if p.HasTIPCWorkload {
+			return "TIPC workload detected — tipc module loaded, /proc/net/tipc, tipc tooling, or *tipc*.service installed"
+		}
+	case "modules.net.legacy.rxrpc":
+		// rxrpc is the AFS RPC transport. If anything on the host
+		// (kafs / openafs / a mounted /afs cell) is using it, skip
+		// the blacklist — same flavour as the bridge / llc gate.
+		if p.HasAFS {
+			return "AFS client detected — rxrpc / kafs / openafs loaded, /afs mounted, or OpenAFS tooling installed"
+		}
+	case "modules.net.legacy.l2tp":
+		// l2tp_* covers the kernel data path for L2TPv2 + L2TPv3.
+		// Userspace can still terminate L2TP via xl2tpd / kl2tpd /
+		// accel-ppp — if any of that is present, the operator has
+		// L2TP plans and we should not silently disable the kernel
+		// transport.
+		if p.HasL2TPWorkload {
+			return "L2TP workload detected — l2tp_* module loaded, /proc/net/l2tp*, or xl2tpd / kl2tpd / accel-ppp installed"
+		}
+	case "modules.net.legacy.pptp":
+		if p.HasPPTPWorkload {
+			return "PPTP workload detected — pptp module loaded, /proc/net/pptp, or pptpd / accel-ppp installed"
+		}
+	case "modules.net.legacy.rds":
+		// rds is Oracle's RAC interconnect. False-positive risk is
+		// essentially zero — almost nothing else uses RDS.
+		if p.HasRDSWorkload {
+			return "Oracle / RDS workload detected — rds module loaded, /proc/net/rds*, or Oracle DB indicators (oratab, lsnrctl, /u01/app/oracle) present"
+		}
+	case "modules.fs.unused":
+		// One hit in /proc/mounts or /etc/fstab covers the whole
+		// group: the cost of keeping cramfs / hfs+ / etc. loadable is
+		// trivial compared to breaking a backup pipeline that mounts
+		// UDF, or a legacy JFS partition nobody migrated. Same
+		// flavour as the llc / Docker bridge gate.
+		if p.HasMountedDeadFS {
+			detail := p.MountedDeadFSDetail
+			if detail == "" {
+				detail = "filesystem from modules.fs.unused is in use"
+			}
+			return "dead-FS in use — " + detail
+		}
+	case "modules.bus.firewire":
+		// Symmetric with modules.bus.thunderbolt — if the host has
+		// FireWire hardware, blacklisting firewire-* breaks the
+		// transport. Rare on servers but real on older bare-metal
+		// audio / video workstations occasionally repurposed.
+		if p.HasFirewireHardware {
+			return "host has FireWire hardware (/sys/bus/firewire/devices non-empty)"
 		}
 	case "modules.net.legacy.sctp":
 		// sctp / sctp_diag are blacklisted by default — no LPE-class

@@ -103,22 +103,22 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "None.",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-003", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-003", Group: "modules.net.legacy.tipc", Tier: Tier1,
 		Name:        "tipc",
-		Description: "Cluster IPC; has had LPEs.",
-		Affects:     "None.",
+		Description: "Transparent Inter-Process Communication; cluster IPC stack with a long LPE history. No use on web hosting; legitimate users are Pacemaker / Corosync HA clusters and Erlang/OTP distribution.",
+		Affects:     "Auto-skipped on hosts with TIPC workload evidence (host-profile gated via HasTIPCWorkload).",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-004", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-004", Group: "modules.net.legacy.rds", Tier: Tier1,
 		Name:        "rds",
-		Description: "Reliable Datagram Sockets; Oracle-internal.",
-		Affects:     "None.",
+		Description: "Reliable Datagram Sockets; Oracle RAC interconnect transport. Has had LPEs and no use outside Oracle Database.",
+		Affects:     "Auto-skipped on hosts with Oracle / RDS indicators (host-profile gated via HasRDSWorkload: oratab, lsnrctl, /u01/app/oracle, rds module loaded).",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-005", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-005", Group: "modules.net.legacy.rxrpc", Tier: Tier1,
 		Name:        "rxrpc",
-		Description: "AFS RPC; never used on hosting.",
-		Affects:     "None.",
+		Description: "AFS RPC transport; entry point for CVE-2026-31635 (DirtyDecrypt / DirtyCBC) and the broader rxgk class. No use on standard hosting; legitimate users are AFS clients (kafs / openafs).",
+		Affects:     "Auto-skipped on hosts with AFS evidence (host-profile gated via HasAFS: rxrpc / kafs / openafs loaded, /afs mounted, OpenAFS tooling).",
 	},
 	{
 		ID: "KSEC-MOD-net.legacy-006", Group: "modules.net.legacy", Tier: Tier1,
@@ -199,46 +199,46 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "Same as llc (KSEC-MOD-net.legacy-017): paired blacklist breaks any in-kernel bridge user. Same auto-skip gate.",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-019", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-019", Group: "modules.net.legacy.pptp", Tier: Tier1,
 		Name:        "pptp",
-		Description: "PPTP VPN protocol.",
-		Affects:     "Breaks PPTP if anyone is still using it (don't).",
+		Description: "PPTP VPN protocol; obsolete, weak crypto, and a long LPE history. Still in use on Mikrotik fleets and some legacy site-to-site VPN deployments.",
+		Affects:     "Auto-skipped on hosts with PPTP workload evidence (host-profile gated via HasPPTPWorkload: pptp module loaded, /etc/pptpd.conf, pptpd / accel-ppp installed).",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-028", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-028", Group: "modules.net.legacy.l2tp", Tier: Tier1,
 		Name:        "l2tp_core",
-		Description: "L2TP VPN core; multiple LPE CVEs over the years and no hosting use case.",
-		Affects:     "Breaks L2TP VPN if in use; override per-rule if the host actually terminates L2TP.",
+		Description: "L2TP VPN core; multiple LPE CVEs over the years and no hosting use case outside L2TP termination.",
+		Affects:     "Auto-skipped on hosts with L2TP workload evidence (host-profile gated via HasL2TPWorkload: l2tp_* loaded, /proc/net/l2tp*, xl2tpd / kl2tpd / accel-ppp installed).",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-029", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-029", Group: "modules.net.legacy.l2tp", Tier: Tier1,
 		Name:        "l2tp_ip",
 		Description: "L2TPv3 IP encapsulation (IPv4).",
-		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
+		Affects:     "Same gate as l2tp_core (HasL2TPWorkload).",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-030", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-030", Group: "modules.net.legacy.l2tp", Tier: Tier1,
 		Name:        "l2tp_ip6",
 		Description: "L2TPv3 IP encapsulation (IPv6).",
-		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
+		Affects:     "Same gate as l2tp_core (HasL2TPWorkload).",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-031", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-031", Group: "modules.net.legacy.l2tp", Tier: Tier1,
 		Name:        "l2tp_eth",
 		Description: "L2TP Ethernet pseudowires.",
-		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
+		Affects:     "Same gate as l2tp_core (HasL2TPWorkload).",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-032", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-032", Group: "modules.net.legacy.l2tp", Tier: Tier1,
 		Name:        "l2tp_netlink",
 		Description: "Netlink configuration interface for L2TP.",
-		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
+		Affects:     "Same gate as l2tp_core (HasL2TPWorkload).",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-033", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-033", Group: "modules.net.legacy.l2tp", Tier: Tier1,
 		Name:        "l2tp_ppp",
 		Description: "PPP over L2TP transport.",
-		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
+		Affects:     "Same gate as l2tp_core (HasL2TPWorkload).",
 	},
 	{
 		ID: "KSEC-MOD-net.legacy-034", Group: "modules.net.legacy.sctp", Tier: Tier1,
@@ -439,6 +439,15 @@ var Tier1Modules = []ModuleRule{
 	},
 
 	// --- modules.fs.unused: filesystems no hosting box mounts --------
+	//
+	// Single-group blacklist gated by HasMountedDeadFS: if any of the
+	// filesystems shipped under this group appears in /proc/mounts or
+	// /etc/fstab, the whole group is skipped and the kernsec audit
+	// row reports which FS triggered it. Same defensive flavour as
+	// the llc/llc2 bridge gate — one hit (e.g. a UDF mount for
+	// archive recovery, or a legacy JFS partition nobody migrated)
+	// preserves the entire group rather than silently breaking a
+	// hand-rolled mount.
 
 	{
 		ID: "KSEC-MOD-fs.unused-001", Group: "modules.fs.unused", Tier: Tier1,
@@ -635,25 +644,25 @@ var Tier1Modules = []ModuleRule{
 		ID: "KSEC-MOD-bus-005", Group: "modules.bus.firewire", Tier: Tier1,
 		Name:        "firewire-core",
 		Description: "FireWire stack — DMA attack surface.",
-		Affects:     "None on servers; override per-rule if you actually use FireWire.",
+		Affects:     "Skipped on hosts with FireWire hardware (host-profile gated via HasFirewireHardware).",
 	},
 	{
 		ID: "KSEC-MOD-bus-006", Group: "modules.bus.firewire", Tier: Tier1,
 		Name:        "firewire-ohci",
 		Description: "FireWire OHCI driver.",
-		Affects:     "None on servers; override per-rule if you actually use FireWire.",
+		Affects:     "Skipped on hosts with FireWire hardware (host-profile gated via HasFirewireHardware).",
 	},
 	{
 		ID: "KSEC-MOD-bus-007", Group: "modules.bus.firewire", Tier: Tier1,
 		Name:        "firewire-net",
 		Description: "FireWire networking.",
-		Affects:     "None on servers; override per-rule if you actually use FireWire.",
+		Affects:     "Skipped on hosts with FireWire hardware (host-profile gated via HasFirewireHardware).",
 	},
 	{
 		ID: "KSEC-MOD-bus-008", Group: "modules.bus.firewire", Tier: Tier1,
 		Name:        "firewire-sbp2",
 		Description: "FireWire storage transport.",
-		Affects:     "None on servers; override per-rule if you actually use FireWire.",
+		Affects:     "Skipped on hosts with FireWire hardware (host-profile gated via HasFirewireHardware).",
 	},
 	{
 		ID: "KSEC-MOD-bus-009", Group: "modules.bus.thunderbolt", Tier: Tier1,
