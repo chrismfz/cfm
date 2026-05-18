@@ -2589,6 +2589,15 @@ static __always_inline void cfm_obs004_emit(struct task_struct *child,
 SEC("lsm/ptrace_access_check")
 int BPF_PROG(cfm_obs004, struct task_struct *child, unsigned int mode, int ret)
 {
+    /* Honour earlier LSM decisions on the shared ptrace_access_check
+     * chain (yama / SELinux / AppArmor). yama.ptrace_scope=2 is the
+     * common pre-empter — when yama denies the ptrace, the kernel's
+     * own audit AVC records the deny, so an additional OBS-004 row
+     * adds only noise and confuses attribution. Same shape as
+     * cfm_revshell and the cfm_fs006/008/net002 bails added in PR B. */
+    if (ret != 0)
+        return ret;
+
     /* Fast path: watched-uid gate. Root / system daemons / container
      * runtimes generate the bulk of ptrace_access_check traffic; we
      * want none of it. cfm_uid_watched is a hash lookup over the
