@@ -270,9 +270,19 @@ the most common evasion of PD (using the launcher binary directly,
 without going through `exec`/`system`/`shell_exec` in PHP first).
 
 **Exemptions.** uid 0 (root reverse shells are an administrative
-choice, not an attack vector to enforce against). An explicit per-host
-list for any legitimate inetd-style services that genuinely dup socket
-fds onto 0/1/2 — these are rare on hosting boxes.
+choice, not an attack vector to enforce against). Implemented as a
+`current->cred->euid == 0` early-return BEFORE the fd walk — so for
+root callers (interactive SSH session running as root, inetd-style
+root daemon spawning a child with TCP stdio, incident-response
+rescue session) the program emits NO event and never blocks,
+regardless of mode. The watched-uid gate that other rules use does
+not apply here: any non-root caller reaching the rule with stdio on
+remote TCP is the threat we want to catch, watched-list membership
+or not. An explicit per-host list for any legitimate inetd-style
+services that genuinely dup socket fds onto 0/1/2 — these are rare
+on hosting boxes — can additionally suppress events on the
+non-root path via the Go-side `allow_exe` / `allow_comm` filter
+(monitor-mode event suppression only; not a BPF-side gate).
 
 **Notes.** The fd walk is the implementation cost driver and the
 verifier-complexity risk on older RHEL 9 kernels. The hot loop must be

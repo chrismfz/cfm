@@ -1900,6 +1900,23 @@ static __always_inline int cfm_fs007_check_setattr(struct dentry *dentry,
         return 0;
 
     cfm_fs007_emit(dentry, CFM_FS_OP_SETATTR, flags);
+
+    /* Setuid-root context skip — same shape and rationale as FS-005's
+     * carve-out above. The watched-uid gate keyed on REAL uid, so a
+     * watched user running a setuid-root install wrapper that
+     * legitimately sets the suid/sgid bit on a helper (custom panel-
+     * side installers, sysadmin tooling that invokes `chmod u+s` via
+     * a setuid-root helper) has real_uid=watched but euid=0. Enforce
+     * mode without this skip would block those workflows. Audit
+     * emit fires unconditionally above; only the -EPERM is suppressed
+     * when the kernel itself granted root privs through a trusted
+     * setuid binary. */
+    struct task_struct *task = bpf_get_current_task_btf();
+    if (task) {
+        __u32 euid = BPF_CORE_READ(task, cred, euid.val);
+        if (euid == 0)
+            return 0;
+    }
     return cfm_enforce_priv_install ? CFM_LSM_DENY : 0;
 }
 
@@ -1959,6 +1976,20 @@ static __always_inline int cfm_fs007_check_setxattr(struct dentry *dentry,
         return 0;
 
     cfm_fs007_emit(dentry, CFM_FS_OP_SETXATTR, CFM_LSM_F_PRIV_FILECAP);
+
+    /* Setuid-root context skip — see the matching block in
+     * cfm_fs007_check_setattr above. A watched user invoking a
+     * setuid-root helper that legitimately calls `setcap` (e.g. a
+     * custom panel-side installer running through sudo / a setuid
+     * wrapper) reaches this hook with real_uid=watched, euid=0.
+     * Audit emit fires unconditionally; only the -EPERM is
+     * suppressed when the kernel itself granted root privs. */
+    struct task_struct *task = bpf_get_current_task_btf();
+    if (task) {
+        __u32 euid = BPF_CORE_READ(task, cred, euid.val);
+        if (euid == 0)
+            return 0;
+    }
     return cfm_enforce_priv_install ? CFM_LSM_DENY : 0;
 }
 
