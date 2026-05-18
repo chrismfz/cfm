@@ -815,37 +815,53 @@ int BPF_PROG(cfm_deleted_file_exec, struct linux_binprm *bprm, int ret)
  *
  * The walk is unrolled to 16 levels — long enough for any realistic
  * exec path, short enough that the verifier accepts it without
- * complexity-budget churn. */
-static __always_inline void cfm_walk_to_top(struct dentry *d,
+ * complexity-budget churn.
+ *
+ * Returns true iff the walk actually reached the filesystem root
+ * (the inner loop exited via `parent == cur`). When the unroll
+ * budget is exhausted on a deeper-than-16-level path, returns false
+ * and the caller must NOT treat *top_out / *second_out as
+ * top-of-path — they are only the deepest dentries the walk could
+ * reach in 16 hops. Without this signal a deeply-nested path with
+ * a `tmp` directory at the 15-hop boundary (e.g.
+ * `/home/user/build-cache/tmp/X1/X2/.../X12/foo`) would be
+ * mis-classified as exec-under-/tmp, producing FPs in monitor mode
+ * and false denials in enforce mode. */
+static __always_inline bool cfm_walk_to_top(struct dentry *d,
                                             struct dentry **top_out,
                                             struct dentry **second_out)
 {
     struct dentry *prev = NULL;
     struct dentry *prev_prev = NULL;
     struct dentry *cur = d;
+    bool reached_root = false;
 
     *top_out = NULL;
     *second_out = NULL;
     if (!cur)
-        return;
+        return false;
 
 #pragma unroll
     for (int i = 0; i < 16; i++) {
         struct dentry *parent = BPF_CORE_READ(cur, d_parent);
-        if (!parent || parent == cur)
+        if (!parent || parent == cur) {
+            reached_root = true;
             break;
+        }
         prev_prev = prev;
         prev = cur;
         cur = parent;
     }
 
     /* After the loop, `cur` is either the filesystem root (parent ==
-     * cur) or the topmost dentry we could reach within the unroll
-     * budget. `prev` is the immediate child of `cur` — i.e. the
-     * top-level directory in the path. `prev_prev` is the level below
-     * that. */
+     * cur, reached_root=true) or the topmost dentry we could reach
+     * within the unroll budget (reached_root=false). When real root
+     * was reached, `prev` is the immediate child of `cur` — i.e. the
+     * top-level directory in the path, and `prev_prev` is the level
+     * below that. */
     *top_out = prev;
     *second_out = prev_prev;
+    return reached_root;
 }
 
 /* Compare the dentry's d_name to a literal of up to 7 chars. Reads
@@ -892,7 +908,20 @@ static __always_inline bool cfm_dentry_under_ephemeral_root(struct dentry *d)
 {
     struct dentry *top = NULL;
     struct dentry *second = NULL;
-    cfm_walk_to_top(d, &top, &second);
+    /* Match only when the walk actually reached the filesystem root.
+     * On a path deeper than 16 hops the unroll budget runs out and
+     * top/second are just the topmost dentries we could reach — they
+     * may happen to be named "tmp" / "var" without the file actually
+     * being under /tmp or /var/tmp. Failing closed on depth exhaustion
+     * trades one well-defined failure mode (false negatives on >16-
+     * level execs from /tmp — rare in practice) for the elimination
+     * of the false-positive class entirely. EXEC-006 also has the
+     * tmpfs-superblock-magic signal (CFM_LSM_F_TMPFS_BACKED) which
+     * still matches anywhere on tmpfs regardless of dentry depth, so
+     * the realistic /tmp-on-tmpfs / /dev/shm / /run-user execs that
+     * are the bulk of the rule's hits still trip via that path. */
+    if (!cfm_walk_to_top(d, &top, &second))
+        return false;
     if (!top)
         return false;
 
@@ -1747,6 +1776,15 @@ int BPF_PROG(cfm_fs006, struct file *file, int mask, int ret)
     /* `mask` is intentionally unused — see header comment. */
     (void)mask;
 
+    /* Honour earlier LSM decisions: file_permission runs the full
+     * LSM hook chain, so a prior hook may have returned a specific
+     * errno (e.g. SELinux returning -EACCES). Bail before any work
+     * so we never emit a misleading FS-006 event for an access
+     * another LSM already blocked. Pattern matches cfm_revshell at
+     * the top of the file. */
+    if (ret != 0)
+        return ret;
+
     if (!file)
         return ret;
 
@@ -2411,6 +2449,17 @@ static __always_inline void cfm_fs008_emit(struct file *file, const char *comm)
 SEC("lsm/file_permission")
 int BPF_PROG(cfm_fs008, struct file *file, int mask, int ret)
 {
+    /* Honour earlier LSM decisions. file_permission is on the shared
+     * LSM hook chain; a prior hook (SELinux, AppArmor, Smack) may
+     * have already returned a specific errno. Without this early
+     * bail FS-008 could:
+     *  - emit a misleading event for an access another LSM blocked;
+     *  - in enforce mode, replace the prior LSM's specific errno
+     *    with -EPERM, making audit attribution harder.
+     * Same shape used by cfm_revshell at the top of the file. */
+    if (ret != 0)
+        return ret;
+
     if (!file)
         return ret;
 
@@ -2702,6 +2751,15 @@ static __always_inline void cfm_net002_emit(__u8 op, int protocol)
 SEC("lsm/socket_create")
 int BPF_PROG(cfm_net002, int family, int type, int protocol, int kern, int ret)
 {
+    /* Honour earlier LSM decisions in the socket_create chain
+     * (SELinux's socket-class enforcement, AppArmor's network
+     * rules). Without this early bail, NET-002 enforce mode could
+     * replace a more specific prior errno with -EPERM and
+     * mis-attribute the denial to cfm-lsm in audit. Same pattern
+     * as cfm_revshell. */
+    if (ret != 0)
+        return ret;
+
     /* Kernel-internal socket (sock_create_kern) — not user-initiated,
      * not in our threat model. */
     if (kern)
