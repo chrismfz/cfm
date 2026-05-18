@@ -223,6 +223,14 @@ struct task_struct {
     struct mm_struct      *mm;
     struct files_struct   *files;
     const struct cred     *cred;
+    /* comm is an inline TASK_COMM_LEN-byte char buffer holding the
+     * task's command name. CO-RE resolves the offset from kernel BTF
+     * at load time, so the in-source size is just a shape hint;
+     * the live kernel may carry the same field at a different offset
+     * and the verifier handles the relocation. Used by CFML-OBS-004
+     * to read the ptrace-target task's identity (current task's comm
+     * is available cheaply via bpf_get_current_comm). */
+    char comm[16];
 } ___NCO;
 
 /* Used by CFML-FS-005 (opaque — only the type matters for BPF_PROG

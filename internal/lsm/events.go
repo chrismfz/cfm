@@ -24,6 +24,7 @@ const (
 	bpfPolicyKernelModuleLoad    uint32 = 14
 	bpfPolicyKernelKnobWrite     uint32 = 15
 	bpfPolicyKexecLoad           uint32 = 16
+	bpfPolicyPtraceAccess        uint32 = 17
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
@@ -134,6 +135,17 @@ const (
 	EventFlagPrivSUID    uint8 = 1 << 4
 	EventFlagPrivSGID    uint8 = 1 << 5
 	EventFlagPrivFileCap uint8 = 1 << 6
+
+	// CFML-OBS-004 — ptrace access mode + same-uid hint. Bits 4-6 are
+	// reused from the EXEC-006 / FS-007 / stdio-strict bits at the
+	// same numeric positions; PolicyID disambiguates per event.
+	// PTRACE_READ and PTRACE_ATTACH may coexist on a single
+	// ptrace_access_check call (kernel mode is a bitmask).
+	// SAMEUID is the "caller and target share effective uid" hint;
+	// absence means a cross-uid introspection attempt.
+	EventFlagPtraceRead    uint8 = 1 << 4
+	EventFlagPtraceAttach  uint8 = 1 << 5
+	EventFlagPtraceSameUid uint8 = 1 << 6
 )
 
 // Event is the Go-side projection of struct cfm_lsm_event emitted by
@@ -209,6 +221,48 @@ func (e Event) PrivInstallPrimitive() string {
 		return "sgid"
 	}
 	return ""
+}
+
+// PtraceMode renders the CFML-OBS-004 ptrace-mode bits encoded in
+// Event.Flags as a short token suitable for log lines. Returns empty
+// for events from other policies (the same numeric bits belong to
+// other detectors' flag fields — PolicyID disambiguates).
+//
+// Tokens:
+//   - "attach"      — PTRACE_MODE_ATTACH only (the dangerous case:
+//                     attacker wants to modify the target's state).
+//   - "read"        — PTRACE_MODE_READ only (read-only introspection,
+//                     e.g. /proc/<pid>/mem read).
+//   - "attach+read" — both bits set on the same call (common — the
+//                     attach helpers in glibc request both).
+//   - ""            — neither bit set (unusual, but defensively
+//                     handled).
+func (e Event) PtraceMode() string {
+	if e.PolicyID != PolicyPtraceAccess {
+		return ""
+	}
+	attach := e.Flags&EventFlagPtraceAttach != 0
+	read := e.Flags&EventFlagPtraceRead != 0
+	switch {
+	case attach && read:
+		return "attach+read"
+	case attach:
+		return "attach"
+	case read:
+		return "read"
+	}
+	return ""
+}
+
+// PtraceSameUid reports whether the CFML-OBS-004 caller and target
+// share effective uid (the same-uid sibling-worker credential-theft
+// case). False for events from other policies and for cross-uid
+// ptrace attempts.
+func (e Event) PtraceSameUid() bool {
+	if e.PolicyID != PolicyPtraceAccess {
+		return false
+	}
+	return e.Flags&EventFlagPtraceSameUid != 0
 }
 
 // ExecStdioSignal renders the EXEC-003/EXEC-005 stdio signal encoded in
@@ -306,6 +360,8 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicyKernelKnobWrite
 	case bpfPolicyKexecLoad:
 		e.PolicyID = PolicyKexecLoad
+	case bpfPolicyPtraceAccess:
+		e.PolicyID = PolicyPtraceAccess
 	default:
 		return Event{}, fmt.Errorf("unknown BPF policy_id %d", policyID)
 	}

@@ -30,6 +30,7 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_KMOD_LOAD         = 14, /* CFML-EXEC-007 */
     CFM_LSM_POLICY_KERNEL_KNOB_WRITE = 15, /* CFML-FS-008   */
     CFM_LSM_POLICY_KEXEC_LOAD        = 16, /* CFML-EXEC-008 */
+    CFM_LSM_POLICY_PTRACE_ACCESS     = 17, /* CFML-OBS-004  */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the
@@ -90,6 +91,22 @@ enum cfm_event_op {
 #define CFM_LSM_F_PRIV_SUID           (1U << 4)
 #define CFM_LSM_F_PRIV_SGID           (1U << 5)
 #define CFM_LSM_F_PRIV_FILECAP        (1U << 6)
+
+/* CFML-OBS-004 — ptrace access mode bits + same-uid hint. PolicyID
+ * disambiguates from the EXEC-006 / FS-007 / stdio-strict bits at
+ * the same numeric positions; renderer keys off ev.PolicyID.
+ *
+ *   F_PTRACE_READ   : caller requested PTRACE_MODE_READ — read-only
+ *                     access to child state (e.g. /proc/<pid>/mem read).
+ *   F_PTRACE_ATTACH : caller requested PTRACE_MODE_ATTACH — full
+ *                     attach (modify registers, inject code).
+ *   F_PTRACE_SAMEUID: caller and target share the same effective uid
+ *                     (the same-uid sibling-worker credential-theft
+ *                     pattern; without this bit, the event is a
+ *                     cross-uid introspection attempt). */
+#define CFM_LSM_F_PTRACE_READ         (1U << 4)
+#define CFM_LSM_F_PTRACE_ATTACH       (1U << 5)
+#define CFM_LSM_F_PTRACE_SAMEUID      (1U << 6)
 
 /* Compound inode map key shared by the watched-inode and setuid-inode
  * maps. `dev` is the target inode's stat-compatible filesystem

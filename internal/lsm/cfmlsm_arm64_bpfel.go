@@ -99,6 +99,7 @@ type cfmlsmProgramSpecs struct {
 	CfmFs008                *ebpf.ProgramSpec `ebpf:"cfm_fs008"`
 	CfmInterpNetStdio       *ebpf.ProgramSpec `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec            *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
+	CfmObs004               *ebpf.ProgramSpec `ebpf:"cfm_obs004"`
 	CfmRevshell             *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
 }
 
@@ -216,6 +217,7 @@ type cfmlsmPrograms struct {
 	CfmFs008                *ebpf.Program `ebpf:"cfm_fs008"`
 	CfmInterpNetStdio       *ebpf.Program `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec            *ebpf.Program `ebpf:"cfm_memfd_exec"`
+	CfmObs004               *ebpf.Program `ebpf:"cfm_obs004"`
 	CfmRevshell             *ebpf.Program `ebpf:"cfm_revshell"`
 }
 
@@ -249,6 +251,7 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmFs008,
 		p.CfmInterpNetStdio,
 		p.CfmMemfdExec,
+		p.CfmObs004,
 		p.CfmRevshell,
 	)
 }

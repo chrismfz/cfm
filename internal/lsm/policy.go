@@ -199,6 +199,37 @@ const (
 	// telemetry that surfaces both legitimate kexec-tools calls and
 	// any unexpected callers.
 	PolicyKexecLoad PolicyID = "CFML-EXEC-008"
+
+	// PolicyPtraceAccess — CFML-OBS-004: detect a ptrace attempt by a
+	// watched (web-class) uid. Threat: process introspection /
+	// code injection. A compromised vhost user PTRACE_ATTACHes to a
+	// sibling process they own (PHP-FPM worker, long-running cron)
+	// and uses PTRACE_POKETEXT to inject shellcode or PTRACE_GETREGS
+	// to steal in-memory secrets. Same-uid ptrace is allowed by
+	// kernel.yama.ptrace_scope=1 (the default), so any of the user's
+	// own running processes is a credential-theft target.
+	//
+	// Hook: lsm/ptrace_access_check
+	//
+	// Watched-uid gate first — root callers (gdb / strace by the
+	// admin, systemd, container runtimes) generate the bulk of
+	// ptrace_access_check traffic and we never want to flag any of
+	// it. Self-ptrace (child == current task) is skipped.
+	//
+	// Companion telemetry to kernsec's kernel.yama.ptrace_scope=2
+	// (KSEC-SCT-kspp.kernel-007 / similar). yama=2 blocks all ptrace
+	// except through PR_SET_PTRACER negotiation; this rule gives the
+	// forensic trail — every blocked attempt AND every allowed
+	// parent→child attach by a watched uid surfaces. On hosts where
+	// the operator forced yama back down via `state = force`,
+	// OBS-004 stays in effect.
+	//
+	// Mode: monitor ONLY by design. The kernsec yama sysctl is the
+	// block layer; making OBS-004 enforce-capable would break
+	// legitimate developer workflows (operator su'ing to a vhost
+	// user to debug a worker via gdb) without adding security the
+	// yama sysctl doesn't already provide.
+	PolicyPtraceAccess PolicyID = "CFML-OBS-004"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -344,6 +375,13 @@ func AllPolicies() []Policy {
 			DefaultMode: ModeDisabled,
 			Description: "Detect a kexec_load(2) or kexec_file_load(2) call from outside the small trusted set (kexec / systemctl). Catches rootkit-persistence-via-replacement-kernel primitives. Monitor-only by design — tracepoint hooks are observation-only; pair with kernel.kexec_load_disabled=1 (kernsec) for actual block on non-kdump hosts.",
 		},
+		{
+			ID:          PolicyPtraceAccess,
+			Title:       "ptrace from web-class user",
+			Hook:        "ptrace_access_check",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a watched-uid task attempting ptrace (PTRACE_MODE_READ / PTRACE_MODE_ATTACH) against another task. Catches sibling-worker credential theft and cross-tenant introspection. Same-uid same-uid sibling-worker attacks are tagged with the SAMEUID flag; cross-uid attempts are the higher-severity signal. Monitor-only by design — kernel.yama.ptrace_scope=2 (kernsec) is the actual block layer; OBS-004 is the always-on forensic trail alongside.",
+		},
 	}
 }
 
@@ -380,7 +418,8 @@ func isEnforceCapable(id PolicyID) bool {
 		PolicyUnexpectedBPF,
 		PolicyFdCredMismatch,
 		PolicyKernelModuleLoad,
-		PolicyKexecLoad:
+		PolicyKexecLoad,
+		PolicyPtraceAccess:
 		return false
 	}
 	return true

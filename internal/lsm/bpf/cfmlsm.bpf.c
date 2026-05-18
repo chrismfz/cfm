@@ -2374,4 +2374,130 @@ int BPF_PROG(cfm_fs008, struct file *file, int mask, int ret)
     return ret;
 }
 
+/* ------------------------------------------------------------------- *
+ * CFML-OBS-004 — ptrace from a watched (web-class) uid.
+ *
+ * Hook: lsm/ptrace_access_check
+ *
+ * Threat: process introspection / code injection. A compromised
+ * vhost user PTRACE_ATTACHes to another process they own (sibling
+ * PHP-FPM worker, long-running cron job) and uses PTRACE_POKETEXT to
+ * inject shellcode, or PTRACE_GETREGS / PEEKTEXT to steal in-memory
+ * secrets. Even with kernel.yama.ptrace_scope=1 (the default), the
+ * kernel allows same-uid ptrace — so any of the user's own running
+ * processes is a credential-theft target. With yama=0 (legacy hosts),
+ * cross-uid ptrace is open within the kernel's normal cred checks.
+ *
+ * Companion to kernsec's kernel.yama.ptrace_scope=2 sysctl: yama=2
+ * blocks all ptrace except through PR_SET_PTRACER negotiation; this
+ * rule gives the forensic trail (every blocked attempt AND every
+ * allowed parent→child attach by a watched uid surfaces). On hosts
+ * where the operator forced yama back down with `state = force` for
+ * debugging convenience, OBS-004 stays in effect.
+ *
+ * Watched-uid gate first — root callers (gdb / strace by the admin,
+ * systemd's signal-on-fork uses, every container runtime) generate
+ * huge ptrace_access_check traffic and we don't want to flag any of
+ * it. The rule only fires when a watched-uid task is the caller.
+ *
+ * Mode flags: bit 4 = PTRACE_MODE_READ requested, bit 5 =
+ * PTRACE_MODE_ATTACH requested (kernel ptrace mode is a bitmask;
+ * a single call can request both). Bit 6 = caller and target share
+ * effective uid (the same-uid sibling-worker credential-theft case;
+ * absence of the bit means a cross-uid introspection attempt).
+ *
+ * Mode: monitor ONLY by design. The kernsec yama sysctl is the
+ * actual block layer; making OBS-004 enforce-capable would break
+ * legitimate developer workflows (operator su'ing to a vhost user
+ * to debug a crashed worker via gdb, etc.) without adding security
+ * the yama sysctl doesn't already provide. Enforce is downgraded to
+ * monitor at enable time.
+ * ------------------------------------------------------------------- */
+
+/* PTRACE_MODE_* from include/linux/ptrace.h. The mode arg is a
+ * bitmask; we care about the READ and ATTACH bits. NOAUDIT /
+ * FSCREDS / REALCREDS bits exist but don't change the security
+ * decision and we don't surface them. */
+#define CFM_PTRACE_MODE_READ    0x01
+#define CFM_PTRACE_MODE_ATTACH  0x02
+
+static __always_inline void cfm_obs004_emit(struct task_struct *child,
+                                            __u8 flags)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_PTRACE_ACCESS;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = CFM_OP_NONE;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    /* Target task identity. The most useful context for an operator
+     * triaging an OBS-004 event is "what was the target?" — comm is
+     * the cheapest stable identifier and fits in filename's 64 bytes
+     * with room to spare. `comm` is an inline TASK_COMM_LEN-byte
+     * char buffer; BPF_CORE_READ_STR_INTO performs a CO-RE-relocated
+     * read of the inline array into our event buffer. */
+    if (child) {
+        BPF_CORE_READ_STR_INTO(&e->filename, child, comm);
+    } else {
+        e->filename[0] = '\0';
+    }
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+SEC("lsm/ptrace_access_check")
+int BPF_PROG(cfm_obs004, struct task_struct *child, unsigned int mode, int ret)
+{
+    /* Fast path: watched-uid gate. Root / system daemons / container
+     * runtimes generate the bulk of ptrace_access_check traffic; we
+     * want none of it. cfm_uid_watched is a hash lookup over the
+     * cfm_watched_uids map populated at adoption time. */
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    if (!cfm_uid_watched(uid))
+        return ret;
+
+    if (!child)
+        return ret;
+
+    /* Self-ptrace skip. A task can ptrace itself via PR_SET_PTRACER
+     * arrangements that funnel back through ptrace_access_check with
+     * child == current. That isn't credential theft — skip. */
+    struct task_struct *self = bpf_get_current_task_btf();
+    if (self == child)
+        return ret;
+
+    __u8 flags = CFM_LSM_F_WEB_ORIGIN;
+    if (mode & CFM_PTRACE_MODE_READ)
+        flags |= CFM_LSM_F_PTRACE_READ;
+    if (mode & CFM_PTRACE_MODE_ATTACH)
+        flags |= CFM_LSM_F_PTRACE_ATTACH;
+
+    /* Same-uid hint: the kernel allows same-uid ptrace at yama=1
+     * (default) so the same-uid sibling-worker case is the most
+     * frequent in-the-wild post-exploit pattern. Tagged so the
+     * operator can filter cross-uid (attacker reaching across
+     * tenants) from same-uid (attacker walking their own process
+     * tree). */
+    __u32 child_euid = BPF_CORE_READ(child, cred, euid.val);
+    if (child_euid == uid)
+        flags |= CFM_LSM_F_PTRACE_SAMEUID;
+
+    cfm_obs004_emit(child, flags);
+    return ret;  /* monitor-only — never deny */
+}
+
 char LICENSE[] SEC("license") = "GPL";
