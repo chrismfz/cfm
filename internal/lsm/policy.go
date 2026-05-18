@@ -104,10 +104,16 @@ const (
 	// or bypassed, the kernel still sees the execve and EXEC-006 fires.
 	//
 	// Hook: bprm_check_security. Monitor-first; enforce returns -EPERM.
-	// Enforce on a host with operator-installed software that legitimately
-	// extracts-and-execs from /tmp (package installers mid-transaction,
-	// cPanel easyapache builds) needs allowlist tuning first — see
-	// docs/cfm-lsm.md and the lsm.conf allow_exe / allow_path keys.
+	// Enforce is unsafe on hosts with legitimate ephemeral-fs execs
+	// (package installers mid-transaction, cPanel easyapache builds,
+	// distro ldconfig re-runs). The lsm.conf allow_exe / allow_comm /
+	// allow_path keys are NOT a safe carve-out: they are a userspace
+	// post-filter that suppresses monitor-mode events only, and do
+	// NOT gate the kernel-side enforce decision — an allowlisted
+	// binary is still denied by the BPF program. See docs/cfm-lsm.md
+	// → "Allowlist semantics" for the full coverage matrix. Safe
+	// enforce rollout is monitor-mode telemetry that confirms zero
+	// legitimate ephemeral-fs execs on the host.
 	PolicyEphemeralExec PolicyID = "CFML-EXEC-006"
 
 	// PolicyPrivInstall — CFML-FS-007: detect a watched (web-class)

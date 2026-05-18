@@ -447,8 +447,8 @@ mode = monitor   # start here; promote to enforce only after telemetry
 |---|---|
 | Hook | `bprm_check_security` |
 | Shipped default | `disabled` (operator opts in to `monitor` or `enforce`) |
-| Enforce | Available after monitor-mode telemetry and allowlist tuning |
-| FP risk | Medium until allowlist tuned (package installers, easyapache mid-build steps, distro ldconfig helpers) |
+| Enforce | Available after monitor-mode telemetry confirms zero legitimate ephemeral-fs execs (allowlists do NOT gate enforce; see Allowlist semantics) |
+| FP risk | Medium on any host with legitimate ephemeral-fs execs (package installers, easyapache mid-build steps, distro ldconfig helpers) — those events surface in monitor mode but allowlists suppress events only, not enforce-mode denials |
 | Perf impact | Negligible (exec is not a hot path; a single super-block magic read plus a bounded dentry walk on the non-tmpfs branch) |
 
 **Description.** At `bprm_check_security`, if the calling uid is in
@@ -491,10 +491,17 @@ Distinct from the other exec detectors:
 **Enforcement.** `mode = enforce` returns `-EPERM` from
 `bprm_check_security`, failing the calling task's `execve()`.
 Operators should run in monitor for at least a week on a
-representative host and review the resulting FPs before promoting:
+representative host and review the resulting events:
 package-manager extractions, cPanel `easyapache` build steps, distro
 `ldconfig` re-runs, container runtime helpers, and similar legitimate
-ephemeral-fs execs surface here.
+ephemeral-fs execs surface here. **Read the Allowlist surface
+subsection immediately below before promoting** — allowlists
+suppress monitor-mode events but DO NOT prevent enforce-mode
+denials, so any legitimate ephemeral-fs exec observed during the
+monitor window will be blocked once enforce is enabled, regardless
+of whether it's allowlisted. The safe enforce path is "monitor
+confirmed zero legitimate triggers," not "allowlisted everything
+suspicious."
 
 **Allowlist surface — important semantic.** The policy honours
 per-policy `allow_exe`, `allow_comm`, and `allow_path` plus the
