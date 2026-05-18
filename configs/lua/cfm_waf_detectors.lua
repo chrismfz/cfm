@@ -2513,5 +2513,61 @@ function _M.detect_polyglot_upload(body, headers)
   return nil
 end
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DDoS / SLOW-HTTP HARDENING — Range / Request-Range header abuse
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Apache Killer (CVE-2011-3192) and follow-on tools (slowhttptest range
+-- mode, RangeAmp variants) abuse the Range header by stuffing dozens or
+-- hundreds of byte-ranges into a single request to force the upstream to
+-- buffer/compute many overlapping body slices. Real clients send one Range
+-- header with one byte-range (resume / video chunk); two ranges is already
+-- rare. Double-digit ranges have no legitimate web use.
+--
+-- The legacy `Request-Range:` header is a Netscape-era variant deprecated
+-- in HTTP/1.1; modern UAs do not emit it but some exploit kits / scanners
+-- still set it to bypass naive Range:-only filters.
+--
+-- Logonly rollout per the standard playbook — we want a week of production
+-- data to confirm that no upload accelerator, video player or CDN edge in
+-- our footprint sends >= 8 ranges before we promote.
+function _M.detect_range_abuse(headers)
+  headers = headers or {}
+
+  -- 1) Legacy Request-Range header. Deprecated for decades; not emitted
+  --    by any modern browser, fetch library, CDN or media player. Presence
+  --    alone is sufficient.
+  if headers["request-range"] or headers["Request-Range"] then
+    return "REQUEST_RANGE_HEADER"
+  end
+
+  local r = headers["range"] or headers["Range"]
+  if not r then return nil end
+
+  -- 2) Multiple Range: headers in one request. RFC 7233 expects a single
+  --    Range header; duplicate Range: lines are an HTTP-level oddity used
+  --    by some smuggling / WAF-bypass probes.
+  if type(r) == "table" then
+    return "MULTI_RANGE_HEADER"
+  end
+
+  if type(r) ~= "string" or r == "" then return nil end
+
+  -- 3) Oversized Range value. Apache Killer payloads run into kilobytes;
+  --    legitimate Range values are under ~64 bytes. 512 is a generous cap.
+  if #r > 512 then
+    return "RANGE_OVERSIZED:" .. tostring(#r)
+  end
+
+  -- 4) Many byte-ranges in a single header (Apache Killer signature).
+  --    Count commas; the range count is commas + 1. Flag at >= 8 ranges
+  --    (7 commas) — real clients send 1, occasionally 2.
+  local commas = count_occurs(r, ",")
+  if commas >= 7 then
+    return "MANY_RANGES:" .. tostring(commas + 1)
+  end
+
+  return nil
+end
+
 
 return _M

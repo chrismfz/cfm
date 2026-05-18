@@ -96,6 +96,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 607, Name: "rule_exploit_methods", ReasonFamily: "WAF_EXPLOIT_METHOD", DefaultMode: "challenge"},
 	{ID: 608, Name: "rule_smuggling_cl", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "logonly"},
 	{ID: 609, Name: "rule_header_flood", ReasonFamily: "WAF_HEADER_FLOOD", DefaultMode: "challenge"},
+	{ID: 610, Name: "rule_range_abuse", ReasonFamily: "WAF_RANGE_ABUSE", DefaultMode: "logonly"},
 
 	// 7xx SSRF
 	{ID: 701, Name: "rule_ssrf", ReasonFamily: "WAF_SSRF", DefaultMode: "logonly"},
