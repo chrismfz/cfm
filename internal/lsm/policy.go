@@ -221,10 +221,12 @@ const (
 	// Ubuntu), OBS-004 has full coverage: every PTRACE_ATTACH /
 	// PTRACE_READ by a watched uid surfaces. On yama=2 hosts the
 	// kernel iterates LSM hooks via call_int_hook which short-
-	// circuits on the first non-zero return, and BPF LSM is
-	// conventionally last in the `lsm=` chain — yama's -EPERM
-	// pre-empts the BPF hook entirely, so OBS-004 does NOT see the
-	// denied-by-yama attempts. The host's kernel block IS the
+	// circuits on the first non-zero return. On cfm-managed hosts
+	// BPF LSM is the LAST hook in the chain — kernsec's
+	// MergeLSMBPF appends `bpf` to the end of any operator-set
+	// `lsm=` token — so yama's -EPERM pre-empts the BPF hook
+	// entirely, and OBS-004 does NOT see the denied-by-yama
+	// attempts. The host's kernel block IS the
 	// protection in that case; OBS-004 remains the always-on
 	// visibility on the much larger yama≤1 population (and on
 	// hosts where the operator forced yama back down via

@@ -2394,9 +2394,11 @@ int BPF_PROG(cfm_fs008, struct file *file, int mask, int ret)
  * has full coverage: every PTRACE_ATTACH / PTRACE_READ by a watched
  * uid surfaces in the audit trail. On yama=2 hosts the picture is
  * coarser — the kernel iterates LSM hooks via call_int_hook which
- * short-circuits on the first non-zero return, and BPF LSM is
- * conventionally last in the `lsm=` chain (`...,yama,bpf`), so
- * yama's -EPERM pre-empts the BPF hook entirely. OBS-004 still
+ * short-circuits on the first non-zero return. On cfm-managed
+ * hosts BPF LSM is the LAST hook in the chain because kernsec's
+ * MergeLSMBPF (internal/kernsec/lsm_merge.go) appends `bpf` to the
+ * end of any operator-set `lsm=` token. So yama's -EPERM pre-empts
+ * the BPF hook entirely. OBS-004 still
  * records every attempt yama would have ALLOWED on yama=2 (rare —
  * only PR_SET_PTRACER-negotiated traces) but does NOT see the
  * denied-by-yama attempts that constitute most attacker probes.

@@ -33,6 +33,22 @@ ensure_test_user
 ensure_scratch_dir
 require_test_user_watched CFML-OBS-004
 
+# yama=2 guard. The kernel iterates LSM hooks via call_int_hook
+# which short-circuits on the first non-zero return; BPF LSM is
+# last in the cfm-managed `lsm=` order (kernsec lsm_merge.go
+# appends `bpf` to the chain). On yama=2 hosts yama's -EPERM
+# pre-empts the BPF hook entirely, so OBS-004 records nothing —
+# the kernel block IS the protection. SKIP the scenario rather
+# than failing confusingly.
+yama_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)
+if [ "$yama_scope" = "2" ] || [ "$yama_scope" = "3" ]; then
+    warn "OBS-004 SKIP: kernel.yama.ptrace_scope=$yama_scope pre-empts the BPF hook"
+    warn "  on yama=2/3 hosts the kernel blocks ptrace before BPF LSM runs;"
+    warn "  drop ptrace_scope to 1 temporarily to exercise this scenario:"
+    warn "    sysctl -w kernel.yama.ptrace_scope=1"
+    exit 0
+fi
+
 helper=$(stage_helper ptracer) || exit 1
 
 start_pos=$(mark_log_position)
