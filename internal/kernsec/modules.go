@@ -22,10 +22,10 @@ var Tier1Modules = []ModuleRule{
 	// --- modules.recent_cves: recently exploited, no hosting use -----
 
 	{
-		ID: "KSEC-MOD-recent_cves-001", Group: "modules.recent_cves", Tier: Tier1,
+		ID: "KSEC-MOD-recent_cves-001", Group: "modules.recent_cves.ksmbd", Tier: Tier1,
 		Name:        "ksmbd",
-		Description: "In-kernel SMB server with multiple LPE CVEs 2023-2025.",
-		Affects:     "None on hosting (NFS-over-VPN preferred over SMB).",
+		Description: "In-kernel SMB server with multiple LPE CVEs 2023-2025. Default-blacklist on hosting (NFS-over-VPN preferred over SMB), but a handful of operators run ksmbd deliberately as a kernel-fast Samba replacement.",
+		Affects:     "Auto-skipped on hosts running ksmbd (host-profile gated via HasKSMBDServer: module loaded, /sys/class/ksmbd populated, or ksmbd-tools installed).",
 	},
 	{
 		ID: "KSEC-MOD-recent_cves-002", Group: "modules.recent_cves", Tier: Tier1,

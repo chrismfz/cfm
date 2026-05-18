@@ -222,6 +222,44 @@ func TestDetectSCTPWorkload_NoSCTP(t *testing.T) {
 	}
 }
 
+func TestSkipReason_KSMBDGate(t *testing.T) {
+	if r := (HostProfile{HasKSMBDServer: true}).SkipReason("modules.recent_cves.ksmbd"); r == "" {
+		t.Error("HasKSMBDServer=true should produce a SkipReason for modules.recent_cves.ksmbd")
+	}
+	if r := (HostProfile{}).SkipReason("modules.recent_cves.ksmbd"); r != "" {
+		t.Errorf("clean host should not skip modules.recent_cves.ksmbd; got %q", r)
+	}
+	// The KSMBD gate must not bleed into the bare modules.recent_cves
+	// group (other recent-CVE modules like n_hdlc / vivid / watch_queue
+	// should keep applying on hosts that happen to run ksmbd).
+	if r := (HostProfile{HasKSMBDServer: true}).SkipReason("modules.recent_cves"); r != "" {
+		t.Errorf("HasKSMBDServer=true must not skip the bare modules.recent_cves group: got %q", r)
+	}
+}
+
+func TestDetectKSMBDServer_ModuleLoaded(t *testing.T) {
+	root := withHostProfileRoot(t)
+	writeHostModules(t, root, "ksmbd")
+	if !detectKSMBDServer() {
+		t.Error("ksmbd loaded in /proc/modules should signal ksmbd server use")
+	}
+}
+
+func TestDetectKSMBDServer_Userspace(t *testing.T) {
+	root := withHostProfileRoot(t)
+	touchHostPath(t, root, "/usr/sbin/ksmbd.mountd")
+	if !detectKSMBDServer() {
+		t.Error("ksmbd.mountd binary should signal ksmbd server use")
+	}
+}
+
+func TestDetectKSMBDServer_None(t *testing.T) {
+	withHostProfileRoot(t)
+	if detectKSMBDServer() {
+		t.Error("empty fakeroot must not signal ksmbd server use")
+	}
+}
+
 func TestSkipReason_TIPCGate(t *testing.T) {
 	if r := (HostProfile{HasTIPCWorkload: true}).SkipReason("modules.net.legacy.tipc"); r == "" {
 		t.Error("HasTIPCWorkload=true should produce a SkipReason for modules.net.legacy.tipc")
@@ -835,6 +873,12 @@ func TestSkipReason_Tier2OopsGatesMultiTenant(t *testing.T) {
 		{"HasLibvirt", HostProfile{HasLibvirt: true}, "libvirt host"},
 		{"IsProxmox", HostProfile{IsProxmox: true}, "Proxmox host"},
 		{"HasContainers", HostProfile{HasContainers: true}, "container runtime"},
+		{"HasLivePatchingModules", HostProfile{HasLivePatchingModules: true}, "live-patching"},
+		{"HasKernelCare", HostProfile{HasKernelCare: true}, "live-patching"},
+		{"HasKsplice", HostProfile{HasKsplice: true}, "live-patching"},
+		{"IsCPanel", HostProfile{IsCPanel: true, HasHostingPanelWorkload: true}, "multi-tenant hosting panel"},
+		{"IsDirectAdmin", HostProfile{IsDirectAdmin: true, HasHostingPanelWorkload: true}, "multi-tenant hosting panel"},
+		{"HasCloudLinuxLVE", HostProfile{HasCloudLinuxLVE: true, HasHostingPanelWorkload: true}, "multi-tenant hosting panel"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.profile.SkipReason("tier2.oops")

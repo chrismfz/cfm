@@ -327,7 +327,8 @@ status without dropping back to the shell.
 
 | Group | Tier | Modules | Notes |
 |---|---:|---|---|
-| `modules.recent_cves` | 1 | `ksmbd`, `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb`, `kcm`, `n_gsm`, `n_r3964` | Recently exploited or no normal server use. |
+| `modules.recent_cves` | 1 | `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb`, `kcm`, `n_gsm`, `n_r3964` | Recently exploited or no normal server use. |
+| `modules.recent_cves.ksmbd` | 1 | `ksmbd` | Kernel SMB server with multiple LPE CVEs 2023-2025. Auto-skipped on hosts running ksmbd deliberately (host-profile gated on `HasKSMBDServer`: module loaded, `/sys/class/ksmbd` populated, or ksmbd-tools / `/etc/ksmbd` installed). |
 | `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, `phonet`, `caif`, `caif_socket`, `hsr`, `smc`, `smc_diag`, `slip`, `slhc`, and similar dead network stacks | Intended to be safe on normal hosting servers. Override per-rule if the host actually uses SMC / PPP. |
 | `modules.net.legacy.sctp` | 1 | `sctp`, `sctp_diag` | Telecom signalling (SS7 / Diameter / M3UA), K8s Services with `protocol: SCTP`, and lksctp-tools-based monitoring. Auto-skipped on hosts with any SCTP workload evidence (host-profile gated on `HasSCTPWorkload`: sctp module loaded, `/proc/net/sctp` present, `sctp_darn` / Nagios `check_sctp` / `*sctp*.service` installed). WebRTC's usrsctp runs in userspace and is **not** a gate signal. |
 | `modules.net.legacy.tipc` | 1 | `tipc` | Cluster IPC; legitimate users are Pacemaker / Corosync HA clusters and Erlang/OTP distribution. Auto-skipped on hosts with TIPC workload evidence (host-profile gated on `HasTIPCWorkload`: tipc loaded, `/proc/net/tipc`, tipc tooling, or any `*tipc*.service`). |
@@ -576,6 +577,7 @@ the operator can force a rule only after accepting the workload impact.
 | Oracle / RDS workload | `rds` loaded, `/proc/net/rds*`, or Oracle indicators (`/etc/oratab`, `lsnrctl`, `/u01/app/oracle`, `/opt/oracle`). | Skips `modules.net.legacy.rds` so Oracle RAC interconnect keeps working. |
 | Dead-FS in use | Any module from `modules.fs.unused` listed in `/proc/mounts` or `/etc/fstab`. | Skips the entire `modules.fs.unused` group; the audit row names the matching FS. Same defensive flavour as the `llc` / Docker bridge gate. |
 | FireWire | Non-empty `/sys/bus/firewire/devices`. | Skips `modules.bus.firewire` so bare-metal hosts with FireWire hardware keep the transport. |
+| ksmbd in use | `ksmbd` loaded, `/sys/class/ksmbd` non-empty, `ksmbd.mountd` binary or `/etc/ksmbd` present, or `ksmbd.service` installed. | Skips `modules.recent_cves.ksmbd` so operators deliberately running the kernel SMB server keep it. |
 | NFS | Active `nfs` or `nfs4` mounts in `/proc/mounts`. | Recorded as host context; shipped NFS modules are intentionally not blacklisted. |
 | EFI boot | `/sys/firmware/efi`. | Allows EFI-specific DMA boot hardening; non-EFI hosts skip `efi=disable_early_pci_dma` as a no-op. |
 
@@ -584,6 +586,7 @@ Current risky Tier 2 skip reasons:
 | Tier 2 group | Current skip reason |
 |---|---|
 | Namespace rules (`tier2.namespace`) | Skip hosting/container workloads because disabling unprivileged user namespaces breaks rootless containers, container sandboxes, cPanel jails, CloudLinux/CageFS isolation, and similar hosting isolation. |
+| Panic-on-oops rules (`tier2.oops`) | Skip multi-tenant and uptime-priority hosts because `oops=panic` + `kernel.panic_on_oops=1` + `kernel.panic=10` turn any kernel oops into a reboot. Auto-skipped on KVM hypervisors, libvirt hosts, Proxmox, container runtimes, hosts with live-patching modules (KernelCare / Ksplice / kpatch / kgraft), and hosts running a hosting panel (cPanel / DirectAdmin / CloudLinux LVE / CageFS / Imunify360). |
 | Coredump suppression (`sysctl.kernel.coredump`) | Skip hosting, backup, and monitoring diagnostics because `kernel.core_pattern=|/bin/false` suppresses userspace coredumps globally and can break vendor troubleshooting. kdump (kexec/vmcore) is independent of `core_pattern` and is not a gate reason. |
 
 Mutating commands also run a pre-flight safety summary before risky applies.

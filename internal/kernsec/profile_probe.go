@@ -63,6 +63,7 @@ type HostProfile struct {
 	HasMountedDeadFS         bool   `json:"has_mounted_dead_fs"`                   // any modules.fs.unused FS actually mounted (/proc/mounts) or in /etc/fstab → don't blacklist the group
 	MountedDeadFSDetail      string `json:"mounted_dead_fs_detail,omitempty"`      // which FS triggered HasMountedDeadFS — surfaced in the skip reason
 	HasFirewireHardware      bool   `json:"has_firewire_hardware"`                 // /sys/bus/firewire/devices non-empty → don't blacklist firewire-* modules
+	HasKSMBDServer           bool   `json:"has_ksmbd_server"`                      // kernel SMB server in use: /sys/class/ksmbd, ksmbd.mountd process, ksmbd-tools installed → don't blacklist ksmbd
 	HasNFS                   bool   `json:"has_nfs"`                               // active NFS mounts → keep NFS untouched (already excluded by policy)
 	IsEFIBoot                bool   `json:"is_efi_boot"`                           // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
 	IsCPanel                 bool   `json:"is_cpanel"`                             // /usr/local/cpanel exists → cPanel/WHM host
@@ -102,6 +103,7 @@ func DetectHostProfile() HostProfile {
 		HasPPTPWorkload:        detectPPTPWorkload(),
 		HasRDSWorkload:         detectRDSWorkload(),
 		HasFirewireHardware:    dirHasEntries("/sys/bus/firewire/devices"),
+		HasKSMBDServer:         detectKSMBDServer(),
 		HasNFS:                 procMountsHasFS("nfs", "nfs4"),
 		IsEFIBoot:              isEFIBoot(),
 		IsCPanel:               detectCPanel(),
@@ -406,6 +408,34 @@ func detectSCTPWorkload() bool {
 		"/etc/systemd/system/*sctp*.service",
 		"/usr/lib/systemd/system/*sctp*.service",
 		"/lib/systemd/system/*sctp*.service",
+	)
+}
+
+// detectKSMBDServer reports whether the host is deliberately running
+// the kernel SMB server (ksmbd). cPanel / DirectAdmin / Virtualmin /
+// stock hosting boxes never use it — but a handful of operators run
+// ksmbd as a faster Samba replacement for internal file shares, and
+// blacklisting the module there would silently break those shares the
+// next reboot. Layered probe: the loaded-module check fires while
+// shares are active; the binary / package / unit-file checks catch the
+// installed-but-not-yet-started window.
+func detectKSMBDServer() bool {
+	if anyModuleLoaded("ksmbd") {
+		return true
+	}
+	if dirHasEntries("/sys/class/ksmbd") {
+		return true
+	}
+	return anyPathExists(
+		"/usr/sbin/ksmbd.mountd",
+		"/usr/sbin/ksmbd.addshare",
+		"/usr/sbin/ksmbd.adduser",
+		"/usr/sbin/ksmbd.control",
+		"/usr/bin/ksmbd.mountd",
+		"/etc/ksmbd",
+		"/etc/ksmbd/ksmbd.conf",
+		"/usr/lib/systemd/system/ksmbd.service",
+		"/lib/systemd/system/ksmbd.service",
 	)
 }
 
@@ -854,6 +884,16 @@ func (p HostProfile) SkipReason(group string) string {
 		if p.HasMCTPInBand {
 			return "host has in-band MCTP endpoints (OpenBMC / NVMe-MI / PCIe VDM) — /sys/bus/mctp or /sys/class/mctp non-empty"
 		}
+	case "modules.recent_cves.ksmbd":
+		// ksmbd is shipped in modules.recent_cves because of its 2023-25
+		// LPE history, but a handful of operators run it deliberately as
+		// a kernel-fast Samba replacement for internal file shares.
+		// Blacklisting it on those hosts would silently break the
+		// shares; skip when the userspace tooling, sysfs class, or
+		// loaded module says it's in use.
+		if p.HasKSMBDServer {
+			return "ksmbd in use — kernel module loaded, /sys/class/ksmbd populated, or ksmbd-tools (ksmbd.mountd / /etc/ksmbd) installed"
+		}
 	case "modules.net.legacy.tipc":
 		// TIPC has had LPEs and zero use on web hosting, but it's the
 		// transport some HA-cluster stacks ride on. Skip when there's
@@ -989,8 +1029,13 @@ func (p HostProfile) SkipReason(group string) string {
 	case "tier2.oops":
 		// kernel.panic_on_oops=1 + kernel.panic=10 + oops=panic turn
 		// any kernel oops/WARN into a reboot. On a multi-tenant host
-		// (KVM hypervisor, libvirt, Docker / container engine) that
-		// single oops can take down every guest / container at once.
+		// (KVM hypervisor, libvirt, Docker / container engine, cPanel /
+		// DA / Virtualmin / CloudLinux box) that single oops can take
+		// down every guest / container / tenant at once. Live-patching
+		// hosts are also out: KernelCare / Ksplice are explicit
+		// uptime-priority signals and reboot-on-oops is antithetical to
+		// what live-patching is for.
+		//
 		// Tier 2 still applies on single-tenant boxes where the
 		// fail-closed-on-oops trade is defensible.
 		if p.IsKVMHost {
@@ -1004,6 +1049,12 @@ func (p HostProfile) SkipReason(group string) string {
 		}
 		if p.HasContainers {
 			return "container runtime active — a kernel oops here would reboot every running container at once"
+		}
+		if p.HasLivePatchingModules || p.HasKernelCare || p.HasKsplice {
+			return "live-patching active (KernelCare / Ksplice / kpatch / kgraft) — operator priority is uptime; reboot-on-oops is antithetical"
+		}
+		if reason := p.hostingPanelReason(); reason != "" {
+			return "multi-tenant hosting panel — a kernel oops here would reboot every tenant at once: " + reason
 		}
 	}
 	return ""
