@@ -2,14 +2,16 @@
 
 ## Status
 
-**Policies shipping. Disabled by default in `lsm.conf`; monitor is
-the safe first enabled mode. Enforce is opt-in for EXEC-001 / EXEC-003 /
-EXEC-004 / EXEC-006 / FS-005 / FS-007 / FS-008 / NET-002. The full
-monitor-only set is EXEC-005, FS-006, CRED-002, CRED-003, BPF-001,
-EXEC-007, EXEC-008, OBS-004, CRED-004 — see
-`isEnforceCapable` in `internal/lsm/policy.go` for the canonical list
-(tracepoint hooks where the kernel ignores BPF return; credential /
-fd-mismatch hooks where -EPERM would break legitimate userspace).**
+**Seventeen policies shipping (10 listed in the Catalog below plus
+FS-007, FS-008, EXEC-007, EXEC-008, OBS-004, NET-002, CRED-004).
+Disabled by default in `lsm.conf`; monitor is the safe first enabled
+mode. Enforce is opt-in for EXEC-001 / EXEC-003 / EXEC-004 / EXEC-006 /
+FS-005 / FS-007 / FS-008 / NET-002. The full monitor-only set is
+EXEC-005, FS-006, CRED-002, CRED-003, BPF-001, EXEC-007, EXEC-008,
+OBS-004, CRED-004 — see `isEnforceCapable` in
+`internal/lsm/policy.go` for the canonical list (tracepoint hooks
+where the kernel ignores BPF return; credential / fd-mismatch hooks
+where -EPERM would break legitimate userspace).**
 
 Catalog:
 
@@ -634,21 +636,36 @@ enforcement boundary.
 **Auth-helper enforce-mode exemption.** The watched-uid gate
 (`cfm_uid_watched`) keys on the REAL uid via
 `bpf_get_current_uid_gid()`, so a watched user running a setuid-root
-auth-database helper — `passwd`, `chage`, `gpasswd`, `chsh`, `chfn`,
-`pkexec`, `unix_chkpwd`, `newgrp` — still matches
-`current_uid_watched=true`. Without a further check, enforce mode
-would block password changes for every regular user with
-UID ≥ `watched_uid_fallback_min` (default 1000). The BPF program
-therefore reads `current->cred->euid` and `bpf_get_current_comm`, and
-skips the enforce decision only when BOTH `euid == 0` AND the comm
-is in the fixed auth-helper allowlist (`cfm_comm_is_trusted_auth_helper`
-in `cfmlsm.bpf.c`). The audit event still fires (forensic record of
-who touched the sensitive file); only the `-EPERM` return is
-suppressed. `euid == 0` ALONE is not exempted — that is exactly the
-post-privesc state (Dirty Pipe / pwnkit / commit_creds() cash-in
-running `php-fpm` / `bash` / a dropper) that FS-005 exists to catch,
-and is denied in enforce mode regardless of euid. The allowlist is
-hard-coded in BPF; there is no operator-facing knob to widen it.
+auth-database helper or admin wrapper — `sudo`, `sudoedit`, `visudo`,
+`vipw`, `vigr`, `passwd`, `chage`, `gpasswd`, `chsh`, `chfn`,
+`newgrp`, `pkexec`, `unix_chkpwd`, `usermod`, `useradd`, `userdel`,
+`groupadd`, `groupmod`, `groupdel`, `pwconv`, `grpconv`, `pwck`,
+`grpck` — still matches `current_uid_watched=true`. Without a further
+check, enforce mode would block ordinary password changes and
+`sudo visudo` workflows for every admin sshed in as a UID ≥
+`watched_uid_fallback_min` (default 1000). The BPF program therefore
+reads `current->cred->euid` and `bpf_get_current_comm`, and skips the
+enforce decision only when BOTH `euid == 0` AND the comm is in the
+fixed auth-helper allowlist (`cfm_comm_is_trusted_auth_helper` in
+`cfmlsm.bpf.c`). The audit event still fires (forensic record of who
+touched the sensitive file); only the `-EPERM` return is suppressed.
+A non-allowlisted comm under `euid == 0` (e.g. `php-fpm`, `bash`, a
+dropper) is denied.
+
+**Limitation — comm-based gating is spoofable.** `bpf_get_current_comm`
+reads `task->comm`, which any task can rewrite via
+`prctl(PR_SET_NAME, ...)` or `argv[0]` on `execve`. An attacker who
+has already reached `euid == 0` post-privesc (the canonical Dirty
+Pipe / pwnkit / `commit_creds()` cash-in state) can therefore set
+its comm to `"passwd"` with one syscall and bypass the deny. FS-005
+enforce raises the cost of in-kernel privesc cash-in from zero to
+"one extra syscall plus prior policy awareness"; it is defense in
+depth against opportunistic exploit code that targets the sensitive
+files directly, not a wall against a targeted attacker who knows
+about the policy. The audit emit fires unconditionally and is the
+real forensic signal. A future revision may move to an `exe_file`
+inode-identity check (see the plan file referenced in the
+`narrow-setuid-enforcement` branch history) for a stronger gate.
 
 **Host-persistence paths.** The default monitor-only persistence set includes
 common distro and panel locations used for durable post-exploit hooks:
