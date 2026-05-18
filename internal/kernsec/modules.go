@@ -241,6 +241,30 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
 	},
 	{
+		ID: "KSEC-MOD-net.legacy-036", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "smc",
+		Description: "IBM Shared Memory Communications over RDMA / IUCV — z/Linux mainframe socket family; recent LPE class (CVE-2024-46695 and siblings).",
+		Affects:     "None on x86_64 hosting.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-037", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "smc_diag",
+		Description: "Netlink socket diag for SMC; same exposure class as smc.",
+		Affects:     "None on x86_64 hosting.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-038", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "slip",
+		Description: "Serial Line IP — dead dial-up era protocol, TTY line-discipline class (same family as n_hdlc / n_gsm already blacklisted).",
+		Affects:     "None on servers; only matters if the host runs a serial-line IP link.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-039", Group: "modules.net.legacy", Tier: Tier1,
+		Name:        "slhc",
+		Description: "Van Jacobson header compression for SLIP / PPP — pulled in by slip and by PPP CCP. No hosting use case outside legacy PPP links.",
+		Affects:     "Breaks VJ-compressed PPP if the host actually terminates PPP — override per-rule on PPP gateways.",
+	},
+	{
 		ID: "KSEC-MOD-net.legacy-020", Group: "modules.net.legacy", Tier: Tier1,
 		Name:        "gtp",
 		Description: "GPRS Tunneling Protocol.",
@@ -348,6 +372,12 @@ var Tier1Modules = []ModuleRule{
 		ID: "KSEC-MOD-ipsec-007", Group: "modules.ipsec", Tier: Tier1,
 		Name:        "xfrm_interface",
 		Description: "Routing-based XFRM virtual interface — net-new XFRM attack surface with no hosting use outside IPsec.",
+		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
+	},
+	{
+		ID: "KSEC-MOD-ipsec-008", Group: "modules.ipsec", Tier: Tier1,
+		Name:        "af_key",
+		Description: "PF_KEYv2 IPsec keying socket family — the SA/SP management channel libreswan/strongSwan/iked uses to talk to the kernel XFRM SADB. Same gate as esp4/6: not loaded means no PF_KEY attack surface.",
 		Affects:     "Skipped automatically on hosts with active IPsec policies (host-profile gated via HasIPsec).",
 	},
 
@@ -506,6 +536,30 @@ var Tier1Modules = []ModuleRule{
 		Description: "Officially deprecated filesystem; removed from upstream defaults.",
 		Affects:     "None on modern hosting; legacy installs override with `state = skip`.",
 	},
+	{
+		ID: "KSEC-MOD-fs.unused-019", Group: "modules.fs.unused", Tier: Tier1,
+		Name:        "adfs",
+		Description: "Acorn Disc Filing System — dead, fuzzer-popular surface.",
+		Affects:     "None.",
+	},
+	{
+		ID: "KSEC-MOD-fs.unused-020", Group: "modules.fs.unused", Tier: Tier1,
+		Name:        "hpfs",
+		Description: "OS/2 High Performance File System — dead.",
+		Affects:     "None.",
+	},
+	{
+		ID: "KSEC-MOD-fs.unused-021", Group: "modules.fs.unused", Tier: Tier1,
+		Name:        "minix",
+		Description: "Minix filesystem driver — same syzkaller-fuzz class as the other dead-FS entries in this group.",
+		Affects:     "None on hosting.",
+	},
+	{
+		ID: "KSEC-MOD-fs.unused-022", Group: "modules.fs.unused", Tier: Tier1,
+		Name:        "bfs",
+		Description: "UnixWare boot filesystem — dead.",
+		Affects:     "None.",
+	},
 
 	// --- modules.fs.container: container-image filesystems ----------
 	//
@@ -612,6 +666,36 @@ var Tier1Modules = []ModuleRule{
 		Name:        "floppy",
 		Description: "Floppy controller driver.",
 		Affects:     "None.",
+	},
+
+	// --- modules.mctp: in-band Management Component Transport Protocol -
+	//
+	// In-band MCTP (over PCIe VDM, SMBus/I2C, serial) is the OpenBMC /
+	// NVMe-MI / firmware-update sideband. Classic Supermicro IPMI and
+	// Dell iDRAC live on their own NIC and never touch this stack, so
+	// the default on hosting boxes is blacklist. The host-profile
+	// HasMCTPInBand probe auto-skips when /sys/bus/mctp or /sys/class/mctp
+	// has registered endpoints, or when a netdev advertises ARPHRD_MCTP
+	// — covering OpenBMC platforms like the Supermicro H13SRD-F
+	// MicroCloud nodes.
+
+	{
+		ID: "KSEC-MOD-mctp-001", Group: "modules.mctp", Tier: Tier1,
+		Name:        "mctp",
+		Description: "Kernel MCTP core (AF_MCTP socket family). In-band only — out-of-band BMC NICs do not use it.",
+		Affects:     "Skipped automatically on hosts with in-band MCTP endpoints (host-profile gated via HasMCTPInBand).",
+	},
+	{
+		ID: "KSEC-MOD-mctp-002", Group: "modules.mctp", Tier: Tier1,
+		Name:        "mctp-i2c",
+		Description: "MCTP-over-I2C/SMBus transport — sideband path used by OpenBMC.",
+		Affects:     "Skipped automatically on hosts with in-band MCTP endpoints (host-profile gated via HasMCTPInBand).",
+	},
+	{
+		ID: "KSEC-MOD-mctp-003", Group: "modules.mctp", Tier: Tier1,
+		Name:        "mctp-serial",
+		Description: "MCTP-over-serial transport — debug/console sideband.",
+		Affects:     "Skipped automatically on hosts with in-band MCTP endpoints (host-profile gated via HasMCTPInBand).",
 	},
 
 	// --- modules.input.userspace: userspace virtual input devices ---

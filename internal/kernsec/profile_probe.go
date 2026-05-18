@@ -53,6 +53,7 @@ type HostProfile struct {
 	HasDKMS                  bool   `json:"has_dkms"`                              // out-of-tree module evidence detected
 	HasBluetoothHardware     bool   `json:"has_bluetooth_hardware"`                // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
 	HasThunderbolt           bool   `json:"has_thunderbolt"`                       // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
+	HasMCTPInBand            bool   `json:"has_mctp_in_band"`                      // in-band MCTP endpoint registered (OpenBMC, NVMe-MI) → don't blacklist mctp modules
 	HasNFS                   bool   `json:"has_nfs"`                               // active NFS mounts → keep NFS untouched (already excluded by policy)
 	IsEFIBoot                bool   `json:"is_efi_boot"`                           // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
 	IsCPanel                 bool   `json:"is_cpanel"`                             // /usr/local/cpanel exists → cPanel/WHM host
@@ -84,6 +85,7 @@ func DetectHostProfile() HostProfile {
 		HasIPsec:               hasIPsecPolicies(),
 		HasBluetoothHardware:   dirHasEntries("/sys/class/bluetooth"),
 		HasThunderbolt:         dirHasEntries("/sys/bus/thunderbolt/devices"),
+		HasMCTPInBand:          detectMCTPInBand(),
 		HasNFS:                 procMountsHasFS("nfs", "nfs4"),
 		IsEFIBoot:              isEFIBoot(),
 		IsCPanel:               detectCPanel(),
@@ -340,6 +342,51 @@ func unitFilePresentAndNotMasked(unitPath string) bool {
 	return true
 }
 
+// detectMCTPInBand reports whether the kernel's in-band MCTP stack has
+// at least one registered endpoint. Out-of-band BMC paths used by
+// Supermicro IPMI and Dell iDRAC ride their own NIC and do not touch
+// this stack; the in-band MCTP modules are only relevant on OpenBMC
+// platforms (Supermicro H13SRD-F MicroCloud, AMI MegaRAC OpenBMC nodes)
+// and on hosts using NVMe-MI / PCIe VDM MCTP transports.
+//
+// Three layered signals — any one is sufficient evidence to skip the
+// modules.mctp blacklist on this host:
+//
+//   - /sys/bus/mctp/devices/ non-empty: the kernel mctp bus has
+//     registered endpoints right now.
+//   - /sys/class/mctp/ non-empty: older kernels expose endpoints via
+//     the class device tree before the bus directory existed.
+//   - Any netdev under /sys/class/net/<iface>/type reading "290"
+//     (ARPHRD_MCTP). Catches platforms where the mctp transport
+//     drivers register a netdev but the bus directory is empty.
+//
+// Bias toward false-positive ("MCTP present") rather than
+// false-negative — incorrectly skipping the blacklist on a hosting box
+// is a no-op (the modules just stay loadable); incorrectly applying it
+// on an OpenBMC node would break IPMI/sensor sideband.
+func detectMCTPInBand() bool {
+	if dirHasEntries("/sys/bus/mctp/devices") {
+		return true
+	}
+	if dirHasEntries("/sys/class/mctp") {
+		return true
+	}
+	entries, err := os.ReadDir(hostProfilePath("/sys/class/net"))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		b, err := os.ReadFile(filepath.Join(hostProfilePath("/sys/class/net"), e.Name(), "type"))
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(b)) == "290" {
+			return true
+		}
+	}
+	return false
+}
+
 // detectLibvirt reports whether libvirt is installed/running on this
 // host. libvirt drives QEMU/KVM via its own virbr* bridges and depends
 // on the in-kernel bridge module the same way Docker / Proxmox / LXC
@@ -529,6 +576,16 @@ func (p HostProfile) SkipReason(group string) string {
 		// never have it; bare-metal workstations / laptops do.
 		if p.HasThunderbolt {
 			return "host has Thunderbolt hardware (/sys/bus/thunderbolt/devices non-empty)"
+		}
+	case "modules.mctp":
+		// In-band MCTP is relevant only on OpenBMC platforms (e.g.
+		// Supermicro H13SRD-F MicroCloud nodes), NVMe-MI hosts, and
+		// PCIe VDM sideband. Classic Supermicro IPMI / Dell iDRAC use
+		// their own dedicated NIC and never touch this stack, so the
+		// default on hosting is blacklist. The probe auto-skips when
+		// the kernel mctp bus or class has registered endpoints.
+		if p.HasMCTPInBand {
+			return "host has in-band MCTP endpoints (OpenBMC / NVMe-MI / PCIe VDM) — /sys/bus/mctp or /sys/class/mctp non-empty"
 		}
 	case "tier2.namespace":
 		// user.max_user_namespaces=0 / kernel.unprivileged_userns_clone=0

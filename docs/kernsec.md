@@ -328,16 +328,17 @@ status without dropping back to the shell.
 | Group | Tier | Modules | Notes |
 |---|---:|---|---|
 | `modules.recent_cves` | 1 | `ksmbd`, `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb`, `kcm`, `n_gsm`, `n_r3964` | Recently exploited or no normal server use. |
-| `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `tipc`, `rds`, `rxrpc`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, `phonet`, `caif`, `caif_socket`, `hsr`, `pptp`, the `l2tp_*` family (`l2tp_core`, `l2tp_ip`, `l2tp_ip6`, `l2tp_eth`, `l2tp_netlink`, `l2tp_ppp`), and similar dead network stacks | Intended to be safe on normal hosting servers. Override per-rule if the host actually terminates L2TP/PPTP. |
-| `modules.ipsec` | 1 | `esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface` | Kernel XFRM/ESP transforms and the routing-based XFRM virtual interface. Mitigates the XFRM/ESP LPE class (CVE-2026-46300 "Fragnesia" and the related "Dirty Frag") and pre-empts future bugs in adjacent transforms. Skipped on hosts with active IPsec policies (host-profile gated on `HasIPsec`). |
+| `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `tipc`, `rds`, `rxrpc`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, `phonet`, `caif`, `caif_socket`, `hsr`, `pptp`, the `l2tp_*` family (`l2tp_core`, `l2tp_ip`, `l2tp_ip6`, `l2tp_eth`, `l2tp_netlink`, `l2tp_ppp`), `smc`, `smc_diag`, `slip`, `slhc`, and similar dead network stacks | Intended to be safe on normal hosting servers. Override per-rule if the host actually terminates L2TP / PPTP / PPP / SMC. |
+| `modules.ipsec` | 1 | `esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface`, `af_key` | Kernel XFRM/ESP transforms, the routing-based XFRM virtual interface, and the PF_KEYv2 keying socket family. Mitigates the XFRM/ESP LPE class (CVE-2026-46300 "Fragnesia" and the related "Dirty Frag") and pre-empts future bugs in adjacent transforms. Skipped on hosts with active IPsec policies (host-profile gated on `HasIPsec`). |
 | `modules.net.virt` | 1 | `vsock` | Skipped on KVM hypervisors (host-profile gated on `IsKVMHost`) so `vhost_vsock` remains available for guest↔host comms. |
 | `modules.net.iot` | 1 | `ieee802154`, `mac802154`, `6lowpan` | IEEE 802.15.4 / low-power wireless PAN stack — no 802.15.4 radios on hosting boxes. |
-| `modules.fs.unused` | 1 | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda`, `reiserfs` | Override if the host genuinely mounts one of these filesystems. |
+| `modules.fs.unused` | 1 | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda`, `reiserfs`, `adfs`, `hpfs`, `minix`, `bfs` | Override if the host genuinely mounts one of these filesystems. |
 | `modules.fs.container` | 1 | `erofs` | Skipped on hosts running containers (host-profile gated on `HasContainers`) since some container image layers use it. |
 | `modules.bus.bluetooth` | 1 | `bluetooth`, `btusb`, `bnep`, `hci_uart` | Host-profile gated when Bluetooth hardware is detected. |
 | `modules.bus.firewire` | 1 | `firewire-core`, `firewire-ohci`, `firewire-net`, `firewire-sbp2` | No typical server use. |
 | `modules.bus.thunderbolt` | 1 | `thunderbolt` | Skipped when Thunderbolt devices are detected. |
 | `modules.bus.misc` | 1 | `joydev`, `pcspkr`, `floppy` | No typical server use. |
+| `modules.mctp` | 1 | `mctp`, `mctp-i2c`, `mctp-serial` | In-band MCTP (OpenBMC / NVMe-MI / PCIe VDM sideband). Classic Supermicro IPMI and Dell iDRAC ride their own NIC and do not use this stack. Skipped automatically when in-band MCTP endpoints are registered (host-profile gated on `HasMCTPInBand`), so OpenBMC platforms like the Supermicro H13SRD-F MicroCloud keep the sideband intact. |
 | `modules.input.userspace` | 1 | `uinput`, `uhid` | Userspace virtual input / HID devices — no use case on servers, non-trivial historical exploit surface. |
 | `modules.sidechannel` | 1 | `intel_rapl_common`, `intel_rapl_msr` | Removes RAPL power telemetry to avoid power side-channel surface. |
 | `modules.crypto_userapi` | 1 | `algif_hash`, `algif_skcipher`, `algif_rng`, `algif_akcipher`, `algif_aead` | Extends the AF_ALG hardening; `algif_aead` is also covered at boot via `initcall_blacklist=algif_aead_init`. |
@@ -557,9 +558,10 @@ the operator can force a rule only after accepting the workload impact.
 | Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or Proxmox EFI path. | Recorded as host context. |
 | Backup workloads | Common backup agents or backup-named systemd services, including Veeam, Acronis, JetBackup, Bareos, Bacula, and UrBackup indicators. | Skips global coredump suppression to preserve vendor diagnostics. |
 | Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips global coredump suppression. |
-| IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Skips the `modules.ipsec` blacklist (`esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface`) so the kernel XFRM data path stays available on hosts that actually use it. |
+| IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Skips the `modules.ipsec` blacklist (`esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface`, `af_key`) so the kernel XFRM data path stays available on hosts that actually use it. |
 | Bluetooth | Non-empty `/sys/class/bluetooth`. | Skips Bluetooth bus module blacklists. |
 | Thunderbolt | Non-empty `/sys/bus/thunderbolt/devices`. | Skips Thunderbolt module blacklist. |
+| In-band MCTP | Non-empty `/sys/bus/mctp/devices` or `/sys/class/mctp`, or any netdev with `type=290` (ARPHRD_MCTP). | Skips `modules.mctp` (`mctp`, `mctp-i2c`, `mctp-serial`) so OpenBMC platforms (e.g. Supermicro H13SRD-F MicroCloud) and NVMe-MI / PCIe VDM sideband users keep the kernel mctp stack. Classic Supermicro IPMI and Dell iDRAC are out-of-band and not affected. |
 | NFS | Active `nfs` or `nfs4` mounts in `/proc/mounts`. | Recorded as host context; shipped NFS modules are intentionally not blacklisted. |
 | EFI boot | `/sys/firmware/efi`. | Allows EFI-specific DMA boot hardening; non-EFI hosts skip `efi=disable_early_pci_dma` as a no-op. |
 

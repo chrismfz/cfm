@@ -167,6 +167,66 @@ func TestSkipReason_ThunderboltBusGroup(t *testing.T) {
 	}
 }
 
+func TestSkipReason_MCTPGate(t *testing.T) {
+	// HasMCTPInBand=true → modules.mctp must skip (OpenBMC / NVMe-MI /
+	// PCIe VDM host where the kernel mctp stack is actually used).
+	if r := (HostProfile{HasMCTPInBand: true}).SkipReason("modules.mctp"); r == "" {
+		t.Error("HasMCTPInBand=true should produce a SkipReason for modules.mctp")
+	}
+	// HasMCTPInBand=false → modules.mctp must apply (classic
+	// Supermicro IPMI / Dell iDRAC: out-of-band, kernel mctp stack
+	// unused).
+	if r := (HostProfile{}).SkipReason("modules.mctp"); r != "" {
+		t.Errorf("clean host should not skip modules.mctp; got %q", r)
+	}
+	// And the MCTP gate must not bleed into unrelated groups.
+	for _, g := range []string{"modules.bus.bluetooth", "modules.bus.firewire", "modules.bus.misc", "modules.ipsec"} {
+		if r := (HostProfile{HasMCTPInBand: true}).SkipReason(g); r != "" {
+			t.Errorf("HasMCTPInBand=true must not skip unrelated group %s: got %q", g, r)
+		}
+	}
+}
+
+func TestDetectMCTPInBand_BusDevices(t *testing.T) {
+	root := withHostProfileRoot(t)
+	// One registered MCTP endpoint on the bus → probe must fire.
+	mkdirHostPath(t, root, "/sys/bus/mctp/devices/mctp0")
+	if !detectMCTPInBand() {
+		t.Error("/sys/bus/mctp/devices non-empty should signal in-band MCTP")
+	}
+}
+
+func TestDetectMCTPInBand_NetdevARPHRD(t *testing.T) {
+	root := withHostProfileRoot(t)
+	// Older kernel layout: no /sys/bus/mctp, no /sys/class/mctp, but
+	// the netdev type announces ARPHRD_MCTP (290).
+	netDir := filepath.Join(root, "sys/class/net/mctpi2c0")
+	if err := os.MkdirAll(netDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(netDir, "type"), []byte("290\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !detectMCTPInBand() {
+		t.Error("netdev with type=290 (ARPHRD_MCTP) should signal in-band MCTP")
+	}
+}
+
+func TestDetectMCTPInBand_NoMCTP(t *testing.T) {
+	root := withHostProfileRoot(t)
+	// Stock hosting box: regular netdev with Ethernet type (1).
+	netDir := filepath.Join(root, "sys/class/net/eth0")
+	if err := os.MkdirAll(netDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(netDir, "type"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if detectMCTPInBand() {
+		t.Error("plain Ethernet host must not signal in-band MCTP")
+	}
+}
+
 func TestSkipReason_BusGroupsApplyOnCleanHost(t *testing.T) {
 	// No hardware → all four bus groups apply (no skip).
 	p := HostProfile{}
