@@ -256,10 +256,17 @@ const (
 	// program's euid==0 fast-path skip suppresses the legacy
 	// setuid /bin/ping case. The modern file-cap'd /bin/ping
 	// (cap_net_raw+ep on Debian / Ubuntu / EL9+) runs at
-	// euid=watched and WILL fire the rule; operators on hosts where
-	// vhost users routinely run ping should add
-	// `allow_exe = /usr/bin/ping` under [allow] in lsm.conf to
-	// suppress, or stay in monitor mode and ignore the events.
+	// euid=watched and WILL fire the rule. There is no
+	// allow_exe-based suppression for NET-002: PolicyRawSocket is
+	// not registered in allowExePolicy(), and even if it were the
+	// event filename payload is `proto=NN` (a stringified protocol
+	// integer) rather than a binary path so basename matching
+	// could not succeed. Realistic operator mitigation on hosts
+	// with cap_net_raw'd ping is to keep the rule in monitor mode
+	// and triage those events out manually, or open
+	// net.ipv4.ping_group_range so iputils uses the SOCK_DGRAM
+	// path. A future BPF-side allow map keyed on exe inode would
+	// give NET-002 a real allowlist surface.
 	//
 	// Hook: lsm/socket_create
 	//
@@ -467,7 +474,7 @@ func AllPolicies() []Policy {
 			Title:       "raw / packet socket from web-class user",
 			Hook:        "socket_create",
 			DefaultMode: ModeDisabled,
-			Description: "Detect a watched-uid task opening a raw (AF_INET/INET6 + SOCK_RAW) or packet (AF_PACKET) socket. Catches scanner / sniffer / spoofing toolkit drops by a compromised vhost user. Modern unprivileged ping (SOCK_DGRAM + IPPROTO_ICMP) does NOT trigger. The SOCK_RAW ping fallback by a watched uid IS suppressed when the task runs at euid=0 (legacy setuid /bin/ping), but NOT when the binary holds CAP_NET_RAW via file capabilities (modern /bin/ping on Debian / Ubuntu / EL9+) — those events surface in monitor mode and can be suppressed via allow_exe under [allow] in lsm.conf. Monitor by default; enforce-capable (returns -EPERM out of socket(2)) — promote to enforce only after monitor confirms vhost users on this host don't routinely run cap_net_raw binaries (ping / traceroute / mtr).",
+			Description: "Detect a watched-uid task opening a raw (AF_INET/INET6 + SOCK_RAW) or packet (AF_PACKET) socket. Catches scanner / sniffer / spoofing toolkit drops by a compromised vhost user. Modern unprivileged ping (SOCK_DGRAM + IPPROTO_ICMP) does NOT trigger. The SOCK_RAW ping fallback by a watched uid IS suppressed when the task runs at euid=0 (legacy setuid /bin/ping), but NOT when the binary holds CAP_NET_RAW via file capabilities (modern /bin/ping on Debian / Ubuntu / EL9+) — those events surface in monitor mode and cannot be suppressed via the lsm.conf allowlist surface (NET-002 does not consult allow_exe / allow_comm / allow_path). Realistic operator-side mitigation is to keep the rule in monitor mode and triage the cap_net_raw'd ping / traceroute / mtr events out, or open net.ipv4.ping_group_range so iputils uses the SOCK_DGRAM path. Monitor by default; enforce-capable (returns -EPERM out of socket(2)) — promote to enforce only on hosts where vhost users do NOT routinely run cap_net_raw binaries (otherwise ping will be broken for them with no userspace allowlist escape valve).",
 		},
 		{
 			ID:          PolicyCapRaise,

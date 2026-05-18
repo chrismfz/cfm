@@ -2673,11 +2673,24 @@ int BPF_PROG(cfm_obs004, struct task_struct *child, unsigned int mode, int ret)
  *     the program's euid==0 fast-path skip below. The modern
  *     cap_net_raw+ep /bin/ping (Ubuntu / Debian / EL9+) runs at
  *     euid=watched even though it holds CAP_NET_RAW, so a watched
- *     uid invoking it WILL fire the rule. Operators on hosts where
- *     vhost users routinely run `ping` should add
- *     `allow_exe = /usr/bin/ping` (or `/bin/ping`) under [allow] in
- *     lsm.conf to suppress, OR keep the rule in monitor mode and
- *     ignore the events.
+ *     uid invoking it WILL fire the rule. There is NO operator-
+ *     side suppression mechanism for this case in the current
+ *     build — see "Allowlist coverage" below. The realistic
+ *     mitigations are (a) keep the rule in monitor mode and
+ *     ignore the events for cap_net_raw'd ping/traceroute/mtr,
+ *     or (b) leave net.ipv4.ping_group_range open so iputils
+ *     uses the SOCK_DGRAM path and never trips the rule.
+ *
+ * Allowlist coverage: NET-002 does NOT consult the lsm.conf
+ * allowlist surface. PolicyRawSocket is absent from
+ * conf.go::allowExePolicy() / allowCommPolicy() / allowPathPolicy(),
+ * so per-policy and global [allow] entries are not even checked
+ * for this rule. Even if PolicyRawSocket were added, the event's
+ * filename payload carries `proto=NN` (a stringified protocol
+ * integer), not a binary path — so basename matching against
+ * `ping` could not succeed. A future BPF-side allow map keyed on
+ * exe inode would be the right fix; until then, monitor-mode
+ * triage is the answer on hosts with cap_net_raw'd ping.
  *
  * No kernsec sysctl pairing — there's no equivalent kernel-side knob
  * (CAP_NET_RAW is per-process and per-binary, not a global toggle).
@@ -2806,9 +2819,12 @@ int BPF_PROG(cfm_net002, int family, int type, int protocol, int kern, int ret)
      * rule. Note: this does NOT cover file-capability-granted
      * raw-socket binaries (modern /bin/ping with cap_net_raw+ep
      * runs at euid=watched even though it holds CAP_NET_RAW); those
-     * still fire and the operator-side mitigation is to add
-     * allow_exe=/bin/ping (or similar) under [allow] in lsm.conf if
-     * vhost users routinely run ping on this host. */
+     * still fire. The allow_exe/allow_path lsm.conf surface does
+     * not apply to NET-002 (PolicyRawSocket is not registered in
+     * allowExePolicy), and even if it were, the event filename is
+     * `proto=NN` not a path. Mitigations are monitor-only triage
+     * or keeping ping_group_range open — see the rule's header
+     * comment above. */
     struct task_struct *task = bpf_get_current_task_btf();
     if (task) {
         __u32 euid = BPF_CORE_READ(task, cred, euid.val);
