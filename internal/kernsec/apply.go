@@ -198,6 +198,7 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	}
 
 	drift := computeDrift(sysctlContent, desiredCmdline, backend)
+	drift.BootReconcileReason = bootReconcileReason
 	drift.ModprobeDiffers, drift.ModprobeReadErr = modprobeDriftCheck(modprobeContent)
 	loadedManaged := loadedAndManaged(modules)
 
@@ -515,6 +516,10 @@ type driftResult struct {
 	BootDiffers     bool
 	ModprobeDiffers bool
 	CurrentCmdline  string
+	// BootReconcileReason is non-empty when BLS entries could be read but
+	// disagree on kernsec-managed arguments. That is actionable drift for
+	// --check/monitor even if the first entry already matches desired state.
+	BootReconcileReason string
 	// BootReadErr is non-nil when the next-boot cmdline could not be
 	// read from the bootloader. The drift compare then defaults to
 	// "differs" (apply will refuse) but the error is surfaced to the
@@ -547,7 +552,7 @@ func classifyCheckResult(d driftResult) int {
 	switch {
 	case d.SysctlReadErr != nil, d.BootReadErr != nil, d.ModprobeReadErr != nil:
 		return 2
-	case d.SysctlDiffers, d.BootDiffers, d.ModprobeDiffers:
+	case d.SysctlDiffers, d.BootDiffers, d.ModprobeDiffers, d.BootReconcileReason != "":
 		return 1
 	}
 	return 0
