@@ -68,6 +68,13 @@ type AuditRow struct {
 	// rows that are in compliance (the State alone is enough).
 	Reason string `json:"reason,omitempty"`
 
+	// Advisories are soft-warning notes attached to an Apply decision:
+	// the rule still applies, but the operator should know about a
+	// workload-specific side-effect (e.g. "developer tooling will need
+	// sudo afterward"). Surfaces in audit/preview/TUI as "Note:" lines
+	// distinct from Reason / SkipByHostProfile.
+	Advisories []string `json:"advisories,omitempty"`
+
 	// Sysctl-only.
 	LiveValue     string `json:"live_value,omitempty"`     // /proc/sys reading; "" if missing
 	ExpectedValue string `json:"expected_value,omitempty"` // expected value as configured
@@ -160,6 +167,7 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 			Affects:       r.Affects,
 			Decision:      rr.Decision,
 			Reason:        rr.Reason,
+			Advisories:    rr.Advisories,
 			LiveValue:     found,
 			ExpectedValue: r.Value,
 		}
@@ -185,6 +193,7 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 			Affects:       a.Affects,
 			Decision:      rr.Decision,
 			Reason:        rr.Reason,
+			Advisories:    rr.Advisories,
 			InCurrent:     curState == ArgOK,
 			InNextBoot:    nxtState == ArgOK,
 			NextBootKnown: nextErr == nil,
@@ -206,6 +215,7 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 			Affects:         m.Affects,
 			Decision:        rr.Decision,
 			Reason:          rr.Reason,
+			Advisories:      rr.Advisories,
 			ModuleName:      m.Name,
 			PresentOnKernel: ModulePresentOnKernel(m.Name),
 		}
@@ -228,6 +238,7 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 			Affects:            m.Affects,
 			Decision:           rr.Decision,
 			Reason:             rr.Reason,
+			Advisories:         rr.Advisories,
 			MountPoint:         m.MountPoint,
 			RecommendedOptions: m.Recommended,
 			CurrentOptions:     d.CurrentOptions,

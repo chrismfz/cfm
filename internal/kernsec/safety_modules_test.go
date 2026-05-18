@@ -33,17 +33,6 @@ func TestNoDangerousModulesInRegistry(t *testing.T) {
 	}
 }
 
-func TestRemovedModulesAbsentFromRegistry(t *testing.T) {
-	removed := map[string]bool{
-		"sc" + "tp": true,
-	}
-	for _, rule := range AllModules() {
-		if removed[rule.Name] {
-			t.Fatalf("removed module %q is still registered as %s", rule.Name, rule.ID)
-		}
-	}
-}
-
 func TestIsDangerousModule(t *testing.T) {
 	tests := []struct {
 		desc string

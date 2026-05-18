@@ -327,17 +327,26 @@ status without dropping back to the shell.
 
 | Group | Tier | Modules | Notes |
 |---|---:|---|---|
-| `modules.recent_cves` | 1 | `ksmbd`, `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb`, `kcm`, `n_gsm`, `n_r3964` | Recently exploited or no normal server use. |
-| `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `tipc`, `rds`, `rxrpc`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, `phonet`, `caif`, `caif_socket`, `hsr`, `pptp`, the `l2tp_*` family (`l2tp_core`, `l2tp_ip`, `l2tp_ip6`, `l2tp_eth`, `l2tp_netlink`, `l2tp_ppp`), and similar dead network stacks | Intended to be safe on normal hosting servers. Override per-rule if the host actually terminates L2TP/PPTP. |
-| `modules.ipsec` | 1 | `esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface` | Kernel XFRM/ESP transforms and the routing-based XFRM virtual interface. Mitigates the XFRM/ESP LPE class (CVE-2026-46300 "Fragnesia" and the related "Dirty Frag") and pre-empts future bugs in adjacent transforms. Skipped on hosts with active IPsec policies (host-profile gated on `HasIPsec`). |
+| `modules.recent_cves` | 1 | `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb`, `kcm`, `n_gsm`, `n_r3964` | Recently exploited or no normal server use. |
+| `modules.recent_cves.ksmbd` | 1 | `ksmbd` | Kernel SMB server with multiple LPE CVEs 2023-2025. Auto-skipped on hosts running ksmbd deliberately (host-profile gated on `HasKSMBDServer`: module loaded, `/sys/class/ksmbd` populated, or ksmbd-tools / `/etc/ksmbd` installed). |
+| `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, `phonet`, `caif`, `caif_socket`, `hsr`, `smc`, `smc_diag`, `slip`, and similar dead network stacks | Intended to be safe on normal hosting servers. Override per-rule if the host actually uses SMC. |
+| `modules.net.legacy.ppp` | 1 | `slhc` | Van Jacobson header compression — pulled in by `ppp_async`, `pptp`, and `l2tp_ppp`. Auto-skipped on hosts terminating L2TP or PPTP (host-profile gated on `HasL2TPWorkload` or `HasPPTPWorkload`). |
+| `modules.net.legacy.sctp` | 1 | `sctp`, `sctp_diag` | Telecom signalling (SS7 / Diameter / M3UA), K8s Services with `protocol: SCTP`, and lksctp-tools-based monitoring. Auto-skipped on hosts with any SCTP workload evidence (host-profile gated on `HasSCTPWorkload`: sctp module loaded, `/proc/net/sctp` present, `sctp_darn` / Nagios `check_sctp` / `*sctp*.service` installed). WebRTC's usrsctp runs in userspace and is **not** a gate signal. |
+| `modules.net.legacy.tipc` | 1 | `tipc` | Cluster IPC; legitimate users are Pacemaker / Corosync HA clusters and Erlang/OTP distribution. Auto-skipped on hosts with TIPC workload evidence (host-profile gated on `HasTIPCWorkload`: tipc loaded, `/proc/net/tipc`, tipc tooling, or any `*tipc*.service`). |
+| `modules.net.legacy.rxrpc` | 1 | `rxrpc` | AFS RPC transport; entry point for CVE-2026-31635 (DirtyDecrypt). Auto-skipped on hosts running AFS clients (host-profile gated on `HasAFS`: rxrpc / kafs / openafs loaded, `/afs` mounted, or OpenAFS tooling). |
+| `modules.net.legacy.l2tp` | 1 | `l2tp_core`, `l2tp_ip`, `l2tp_ip6`, `l2tp_eth`, `l2tp_netlink`, `l2tp_ppp` | L2TP VPN kernel data path. Auto-skipped on hosts terminating L2TP (host-profile gated on `HasL2TPWorkload`: l2tp_* loaded, `/proc/net/l2tp*`, or xl2tpd / kl2tpd / accel-ppp installed). |
+| `modules.net.legacy.pptp` | 1 | `pptp` | PPTP VPN protocol. Auto-skipped on hosts terminating PPTP (host-profile gated on `HasPPTPWorkload`: pptp loaded, `/etc/pptpd.conf`, or pptpd / accel-ppp installed). |
+| `modules.net.legacy.rds` | 1 | `rds` | Oracle RAC interconnect transport. Auto-skipped on hosts running Oracle Database (host-profile gated on `HasRDSWorkload`: rds loaded, `/proc/net/rds*`, or Oracle indicators — `oratab`, `lsnrctl`, `/u01/app/oracle`). |
+| `modules.ipsec` | 1 | `esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface`, `af_key` | Kernel XFRM/ESP transforms, the routing-based XFRM virtual interface, and the PF_KEYv2 keying socket family. Mitigates the XFRM/ESP LPE class (CVE-2026-46300 "Fragnesia" and the related "Dirty Frag") and pre-empts future bugs in adjacent transforms. Skipped on hosts with active IPsec policies (host-profile gated on `HasIPsec`). |
 | `modules.net.virt` | 1 | `vsock` | Skipped on KVM hypervisors (host-profile gated on `IsKVMHost`) so `vhost_vsock` remains available for guest↔host comms. |
 | `modules.net.iot` | 1 | `ieee802154`, `mac802154`, `6lowpan` | IEEE 802.15.4 / low-power wireless PAN stack — no 802.15.4 radios on hosting boxes. |
-| `modules.fs.unused` | 1 | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda`, `reiserfs` | Override if the host genuinely mounts one of these filesystems. |
+| `modules.fs.unused` | 1 | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda`, `reiserfs`, `adfs`, `hpfs`, `minix`, `bfs` | Auto-skipped on hosts where any of these filesystems is currently mounted (`/proc/mounts`) or declared in `/etc/fstab` (host-profile gated on `HasMountedDeadFS`). The skip reason names the matching FS so the audit row identifies the trigger. |
 | `modules.fs.container` | 1 | `erofs` | Skipped on hosts running containers (host-profile gated on `HasContainers`) since some container image layers use it. |
 | `modules.bus.bluetooth` | 1 | `bluetooth`, `btusb`, `bnep`, `hci_uart` | Host-profile gated when Bluetooth hardware is detected. |
-| `modules.bus.firewire` | 1 | `firewire-core`, `firewire-ohci`, `firewire-net`, `firewire-sbp2` | No typical server use. |
+| `modules.bus.firewire` | 1 | `firewire-core`, `firewire-ohci`, `firewire-net`, `firewire-sbp2` | Auto-skipped on hosts with FireWire hardware (host-profile gated on `HasFirewireHardware`: `/sys/bus/firewire/devices` non-empty). |
 | `modules.bus.thunderbolt` | 1 | `thunderbolt` | Skipped when Thunderbolt devices are detected. |
 | `modules.bus.misc` | 1 | `joydev`, `pcspkr`, `floppy` | No typical server use. |
+| `modules.mctp` | 1 | `mctp`, `mctp-i2c`, `mctp-serial` | In-band MCTP (OpenBMC / NVMe-MI / PCIe VDM sideband). Classic Supermicro IPMI and Dell iDRAC ride their own NIC and do not use this stack. Skipped automatically when in-band MCTP endpoints are registered (host-profile gated on `HasMCTPInBand`), so OpenBMC platforms like the Supermicro H13SRD-F MicroCloud keep the sideband intact. |
 | `modules.input.userspace` | 1 | `uinput`, `uhid` | Userspace virtual input / HID devices — no use case on servers, non-trivial historical exploit surface. |
 | `modules.sidechannel` | 1 | `intel_rapl_common`, `intel_rapl_msr` | Removes RAPL power telemetry to avoid power side-channel surface. |
 | `modules.crypto_userapi` | 1 | `algif_hash`, `algif_skcipher`, `algif_rng`, `algif_akcipher`, `algif_aead` | Extends the AF_ALG hardening; `algif_aead` is also covered at boot via `initcall_blacklist=algif_aead_init`. |
@@ -557,9 +566,19 @@ the operator can force a rule only after accepting the workload impact.
 | Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or Proxmox EFI path. | Recorded as host context. |
 | Backup workloads | Common backup agents or backup-named systemd services, including Veeam, Acronis, JetBackup, Bareos, Bacula, and UrBackup indicators. | Skips global coredump suppression to preserve vendor diagnostics. |
 | Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips global coredump suppression. |
-| IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Skips the `modules.ipsec` blacklist (`esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface`) so the kernel XFRM data path stays available on hosts that actually use it. |
+| IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Skips the `modules.ipsec` blacklist (`esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface`, `af_key`) so the kernel XFRM data path stays available on hosts that actually use it. |
 | Bluetooth | Non-empty `/sys/class/bluetooth`. | Skips Bluetooth bus module blacklists. |
 | Thunderbolt | Non-empty `/sys/bus/thunderbolt/devices`. | Skips Thunderbolt module blacklist. |
+| In-band MCTP | Non-empty `/sys/bus/mctp/devices` or `/sys/class/mctp`, or any netdev with `type=290` (ARPHRD_MCTP). | Skips `modules.mctp` (`mctp`, `mctp-i2c`, `mctp-serial`) so OpenBMC platforms (e.g. Supermicro H13SRD-F MicroCloud) and NVMe-MI / PCIe VDM sideband users keep the kernel mctp stack. Classic Supermicro IPMI and Dell iDRAC are out-of-band and not affected. |
+| SCTP workload | `sctp` module loaded in `/proc/modules`, `/proc/net/sctp` present, `sctp.service` / `sctp_darn` binary / Nagios `check_sctp` plugin / any `*sctp*.service` unit installed. | Skips `modules.net.legacy.sctp` (`sctp`, `sctp_diag`) so telecom signalling, K8s `protocol: SCTP` Services, and lksctp-tools-based monitoring keep the kernel SCTP data path. WebRTC's usrsctp is userspace and is intentionally not a gate signal. |
+| TIPC workload | `tipc` loaded, `/proc/net/tipc`, `tipc` / `tipc-config` tooling, or any `*tipc*.service`. | Skips `modules.net.legacy.tipc` so Pacemaker / Corosync HA clusters and Erlang/OTP distribution keep the kernel transport. |
+| AFS | `rxrpc` / `kafs` / `openafs` loaded, `/proc/net/rxrpc`, `/afs` mount, or OpenAFS tooling (`/etc/openafs`, `fs`, `pts`, `vos`). | Skips `modules.net.legacy.rxrpc` so AFS clients keep working. |
+| L2TP workload | `l2tp_*` loaded, `/proc/net/l2tp*`, `xl2tpd` / `kl2tpd` / accel-ppp installed. | Skips `modules.net.legacy.l2tp` so hosts terminating L2TP tunnels keep the kernel data path. |
+| PPTP workload | `pptp` loaded, `/etc/pptpd.conf`, or pptpd / accel-ppp installed. | Skips `modules.net.legacy.pptp` so hosts terminating PPTP tunnels keep the kernel data path. |
+| Oracle / RDS workload | `rds` loaded, `/proc/net/rds*`, or Oracle indicators (`/etc/oratab`, `lsnrctl`, `/u01/app/oracle`, `/opt/oracle`). | Skips `modules.net.legacy.rds` so Oracle RAC interconnect keeps working. |
+| Dead-FS in use | Any module from `modules.fs.unused` listed in `/proc/mounts` or `/etc/fstab`. | Skips the entire `modules.fs.unused` group; the audit row names the matching FS. Same defensive flavour as the `llc` / Docker bridge gate. |
+| FireWire | Non-empty `/sys/bus/firewire/devices`. | Skips `modules.bus.firewire` so bare-metal hosts with FireWire hardware keep the transport. |
+| ksmbd in use | `ksmbd` loaded, `/sys/class/ksmbd` non-empty, `ksmbd.mountd` binary or `/etc/ksmbd` present, or `ksmbd.service` installed. | Skips `modules.recent_cves.ksmbd` so operators deliberately running the kernel SMB server keep it. |
 | NFS | Active `nfs` or `nfs4` mounts in `/proc/mounts`. | Recorded as host context; shipped NFS modules are intentionally not blacklisted. |
 | EFI boot | `/sys/firmware/efi`. | Allows EFI-specific DMA boot hardening; non-EFI hosts skip `efi=disable_early_pci_dma` as a no-op. |
 
@@ -568,11 +587,33 @@ Current risky Tier 2 skip reasons:
 | Tier 2 group | Current skip reason |
 |---|---|
 | Namespace rules (`tier2.namespace`) | Skip hosting/container workloads because disabling unprivileged user namespaces breaks rootless containers, container sandboxes, cPanel jails, CloudLinux/CageFS isolation, and similar hosting isolation. |
+| Panic-on-oops rules (`tier2.oops`) | Skip multi-tenant and uptime-priority hosts because `oops=panic` + `kernel.panic_on_oops=1` + `kernel.panic=10` turn any kernel oops into a reboot. Auto-skipped on KVM hypervisors, libvirt hosts, Proxmox, container runtimes, hosts with live-patching modules (KernelCare / Ksplice / kpatch / kgraft), and hosts running a hosting panel (cPanel / DirectAdmin / CloudLinux LVE / CageFS / Imunify360). |
 | Coredump suppression (`sysctl.kernel.coredump`) | Skip hosting, backup, and monitoring diagnostics because `kernel.core_pattern=|/bin/false` suppresses userspace coredumps globally and can break vendor troubleshooting. kdump (kexec/vmcore) is independent of `core_pattern` and is not a gate reason. |
 
 Mutating commands also run a pre-flight safety summary before risky applies.
 Use `--yes` only for unattended runs where that preview has already been
 reviewed operationally.
+
+### Advisories — soft warnings on Apply decisions
+
+In addition to the hard-skip `HostProfile.SkipReason` mechanism above,
+kernsec surfaces soft advisories via `HostProfile.Advisories(id, group)`.
+These do NOT change the rule's decision — the rule still applies — but
+they print in `cfm kernsec preview` (`note:` lines) and in the TUI
+detail pane (`Note:` lines) so the operator knows about workload-specific
+side-effects.
+
+Shipped advisories:
+
+| Rule ID | Triggers when | Advisory |
+|---|---|---|
+| `KSEC-SCT-kspp.kernel-003` (`unprivileged_bpf_disabled=2`) | `HasDevTools` (gdb / strace / py-spy / bpftrace / bcc-tools / perf installed) | Developer tooling detected — it runs as root and remains functional; unprivileged eBPF and non-root `bpftool` are blocked. |
+| `KSEC-SCT-kspp.kernel-006` (`yama.ptrace_scope=2`) | `HasDevTools` | Developer tooling detected — `gdb --attach`, `strace -p`, `py-spy`, `bpftrace -p` against your own processes will need sudo. |
+| `KSEC-SCT-kspp.kexec-001` (`kexec_load_disabled=1`) | `HasLivePatchingModules` or `HasKernelCare` or `HasKsplice` | Live-patching active — `kexec_load_disabled` is compatible (live-patches don't use kexec) but doesn't add to live-patching's protection. |
+| `KSEC-BOOT-tier3.mempaint-001` (`init_on_free=1`) | `HasZFS` or `HasNVIDIA` | ZFS / NVIDIA detected — `init_on_free` stacks ~1-3% alloc cost on those subsystems; benchmark before production. |
+
+Advisories appear in the `cfm kernsec status --json` output under the
+per-rule `advisories` field (omitted when empty).
 
 ## Bootloader backends
 

@@ -334,6 +334,9 @@ func RunTUI() (switchToText bool, err error) {
 		if r.Reason != "" {
 			fmt.Fprintf(&b, "[Reason:](fg:cyan) %s\n", r.Reason)
 		}
+		for _, note := range r.Advisories {
+			fmt.Fprintf(&b, "[Note:](fg:yellow,mod:bold) %s\n", note)
+		}
 		fmt.Fprintf(&b, "\n[Description:](fg:cyan)\n  %s\n\n", r.Description)
 		fmt.Fprintf(&b, "[Affects:](fg:cyan)\n  %s\n\n", r.Affects)
 		fmt.Fprintf(&b, "[Live state:](fg:cyan)\n")

@@ -103,6 +103,9 @@ func printResolvedSection(w io.Writer, label string, rs []ResolvedRule, opts Pre
 			line += "    (" + r.Reason + ")"
 		}
 		fmt.Fprintln(w, line)
+		for _, note := range r.Advisories {
+			fmt.Fprintf(w, "        note: %s\n", note)
+		}
 	}
 	fmt.Fprintln(w)
 }
