@@ -54,6 +54,7 @@ type HostProfile struct {
 	HasBluetoothHardware     bool   `json:"has_bluetooth_hardware"`                // /sys/class/bluetooth non-empty → don't blacklist Bluetooth modules
 	HasThunderbolt           bool   `json:"has_thunderbolt"`                       // /sys/bus/thunderbolt/devices non-empty → don't blacklist thunderbolt
 	HasMCTPInBand            bool   `json:"has_mctp_in_band"`                      // in-band MCTP endpoint registered (OpenBMC, NVMe-MI) → don't blacklist mctp modules
+	HasSCTPWorkload          bool   `json:"has_sctp_workload"`                     // sctp module loaded / /proc/net/sctp populated / sctp_darn / Nagios check_sctp / *sctp*.service → don't blacklist sctp modules
 	HasNFS                   bool   `json:"has_nfs"`                               // active NFS mounts → keep NFS untouched (already excluded by policy)
 	IsEFIBoot                bool   `json:"is_efi_boot"`                           // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
 	IsCPanel                 bool   `json:"is_cpanel"`                             // /usr/local/cpanel exists → cPanel/WHM host
@@ -86,6 +87,7 @@ func DetectHostProfile() HostProfile {
 		HasBluetoothHardware:   dirHasEntries("/sys/class/bluetooth"),
 		HasThunderbolt:         dirHasEntries("/sys/bus/thunderbolt/devices"),
 		HasMCTPInBand:          detectMCTPInBand(),
+		HasSCTPWorkload:        detectSCTPWorkload(),
 		HasNFS:                 procMountsHasFS("nfs", "nfs4"),
 		IsEFIBoot:              isEFIBoot(),
 		IsCPanel:               detectCPanel(),
@@ -342,6 +344,56 @@ func unitFilePresentAndNotMasked(unitPath string) bool {
 	return true
 }
 
+// detectSCTPWorkload reports whether the host has any evidence of SCTP
+// being used right now. The kernel sctp module is essentially only
+// needed by telecom signalling stacks (SS7 / Diameter / M3UA — Asterisk
+// chan_ss7, Kamailio sctp, FreeSWITCH SIGTRAN, freeDiameter, MME / HSS),
+// by Kubernetes Services explicitly using protocol: SCTP, and by
+// lksctp-tools-based health probes. Standard hosting (Apache / Nginx /
+// Exim / Postfix / Dovecot / BIND / mail filters / cPanel / DA /
+// Virtualmin / Imunify360) does not.
+//
+// Notably this does NOT include WebRTC data channels: usrsctp runs in
+// userspace inside Chromium / Firefox / libwebrtc / pion / Jitsi /
+// Janus / mediasoup and never touches the kernel module.
+//
+// Six layered signals — any one is sufficient to skip the modules.sctp
+// blacklist on this host:
+//
+//   - sctp loaded in /proc/modules.
+//   - /proc/net/sctp present (sctp procfs is created when the module
+//     loads; presence alone signals the kernel is in the SCTP business).
+//   - /sys/module/sctp present (belt-and-suspenders).
+//   - sctp.service / sctp_darn.service / sctp_darn binary present.
+//   - Nagios check_sctp plugin present (RHEL / Debian paths).
+//   - Any *sctp*.service unit file installed.
+//
+// Bias toward false-positive: incorrectly skipping the blacklist on a
+// hosting box is a no-op (the module simply stays loadable); incorrectly
+// applying it on a Diameter / SS7 / K8s-SCTP host would break signalling.
+func detectSCTPWorkload() bool {
+	if anyModuleLoaded("sctp") || anyPathExists("/proc/net/sctp", "/sys/module/sctp") {
+		return true
+	}
+	if anyPathExists(
+		"/usr/lib/systemd/system/sctp.service",
+		"/usr/lib/systemd/system/sctp_darn.service",
+		"/lib/systemd/system/sctp.service",
+		"/lib/systemd/system/sctp_darn.service",
+		"/usr/bin/sctp_darn",
+		"/usr/bin/check_sctp",
+		"/usr/lib/nagios/plugins/check_sctp",
+		"/usr/lib64/nagios/plugins/check_sctp",
+	) {
+		return true
+	}
+	return anyGlobMatches(
+		"/etc/systemd/system/*sctp*.service",
+		"/usr/lib/systemd/system/*sctp*.service",
+		"/lib/systemd/system/*sctp*.service",
+	)
+}
+
 // detectMCTPInBand reports whether the kernel's in-band MCTP stack has
 // at least one registered endpoint. Out-of-band BMC paths used by
 // Supermicro IPMI and Dell iDRAC ride their own NIC and do not touch
@@ -586,6 +638,19 @@ func (p HostProfile) SkipReason(group string) string {
 		// the kernel mctp bus or class has registered endpoints.
 		if p.HasMCTPInBand {
 			return "host has in-band MCTP endpoints (OpenBMC / NVMe-MI / PCIe VDM) — /sys/bus/mctp or /sys/class/mctp non-empty"
+		}
+	case "modules.net.legacy.sctp":
+		// sctp / sctp_diag are blacklisted by default — no LPE-class
+		// CVE-prone protocol with zero use on standard hosting (httpd /
+		// nginx / lshttpd / exim / postfix / dovecot / bind / cPanel /
+		// DA / Virtualmin / CloudLinux) should stay loaded. But
+		// telecom signalling stacks (SS7 / Diameter / M3UA), K8s
+		// Services with protocol: SCTP, and lksctp-tools-based
+		// monitoring DO need it — auto-skip on any host that shows
+		// signs of those workloads. WebRTC's usrsctp lives in
+		// userspace and is intentionally NOT a gate signal.
+		if p.HasSCTPWorkload {
+			return "SCTP workload detected — sctp module loaded, /proc/net/sctp present, or SCTP-aware service/binary installed"
 		}
 	case "tier2.namespace":
 		// user.max_user_namespaces=0 / kernel.unprivileged_userns_clone=0

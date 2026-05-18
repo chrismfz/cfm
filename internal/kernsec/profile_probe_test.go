@@ -167,6 +167,61 @@ func TestSkipReason_ThunderboltBusGroup(t *testing.T) {
 	}
 }
 
+func TestSkipReason_SCTPGate(t *testing.T) {
+	// HasSCTPWorkload=true → modules.net.legacy.sctp must skip
+	// (telecom signalling host, K8s with SCTP services, monitoring
+	// running check_sctp, etc.).
+	if r := (HostProfile{HasSCTPWorkload: true}).SkipReason("modules.net.legacy.sctp"); r == "" {
+		t.Error("HasSCTPWorkload=true should produce a SkipReason for modules.net.legacy.sctp")
+	}
+	// Clean hosting box → apply.
+	if r := (HostProfile{}).SkipReason("modules.net.legacy.sctp"); r != "" {
+		t.Errorf("clean host should not skip modules.net.legacy.sctp; got %q", r)
+	}
+	// The SCTP gate must not bleed into the bare modules.net.legacy
+	// group (smc / smc_diag / slip / slhc / l2tp_* etc. should keep
+	// applying on hosts that only have SCTP).
+	if r := (HostProfile{HasSCTPWorkload: true}).SkipReason("modules.net.legacy"); r != "" {
+		t.Errorf("HasSCTPWorkload=true must not skip the bare modules.net.legacy group: got %q", r)
+	}
+}
+
+func TestDetectSCTPWorkload_ProcNetSCTP(t *testing.T) {
+	root := withHostProfileRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "proc/net"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc/net/sctp"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !detectSCTPWorkload() {
+		t.Error("/proc/net/sctp presence should signal SCTP workload")
+	}
+}
+
+func TestDetectSCTPWorkload_ModuleLoaded(t *testing.T) {
+	root := withHostProfileRoot(t)
+	writeHostModules(t, root, "sctp")
+	if !detectSCTPWorkload() {
+		t.Error("sctp loaded in /proc/modules should signal SCTP workload")
+	}
+}
+
+func TestDetectSCTPWorkload_NagiosPlugin(t *testing.T) {
+	root := withHostProfileRoot(t)
+	touchHostPath(t, root, "/usr/lib64/nagios/plugins/check_sctp")
+	if !detectSCTPWorkload() {
+		t.Error("Nagios check_sctp plugin presence should signal SCTP workload")
+	}
+}
+
+func TestDetectSCTPWorkload_NoSCTP(t *testing.T) {
+	withHostProfileRoot(t)
+	if detectSCTPWorkload() {
+		t.Error("empty fakeroot must not signal SCTP workload")
+	}
+}
+
 func TestSkipReason_MCTPGate(t *testing.T) {
 	// HasMCTPInBand=true → modules.mctp must skip (OpenBMC / NVMe-MI /
 	// PCIe VDM host where the kernel mctp stack is actually used).

@@ -34,9 +34,13 @@ func TestNoDangerousModulesInRegistry(t *testing.T) {
 }
 
 func TestRemovedModulesAbsentFromRegistry(t *testing.T) {
-	removed := map[string]bool{
-		"sc" + "tp": true,
-	}
+	// Reserved for future re-removal regressions. sctp was previously
+	// listed here (removed in May 2026 PR #825) but has been reinstated
+	// as Tier1 in `modules.net.legacy.sctp` with a HasSCTPWorkload gate
+	// covering SS7 / Diameter / K8s-SCTP / lksctp-tools monitoring
+	// workloads. Empty by design — populate when a new module is
+	// genuinely removed from the registry.
+	removed := map[string]bool{}
 	for _, rule := range AllModules() {
 		if removed[rule.Name] {
 			t.Fatalf("removed module %q is still registered as %s", rule.Name, rule.ID)

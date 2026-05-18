@@ -241,6 +241,18 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "Same as l2tp_core; only matters if the host terminates L2TP.",
 	},
 	{
+		ID: "KSEC-MOD-net.legacy-034", Group: "modules.net.legacy.sctp", Tier: Tier1,
+		Name:        "sctp",
+		Description: "Stream Control Transmission Protocol — telecom signalling (SS7 / Diameter / M3UA), K8s Services with protocol: SCTP, and lksctp-tools-based monitoring only. Long LPE history (CVE-2018-5803, CVE-2019-8956, CVE-2021-23133, ...). WebRTC data channels run usrsctp in userspace and do NOT use this module.",
+		Affects:     "Auto-skipped on hosts with any SCTP workload evidence (host-profile gated via HasSCTPWorkload): sctp module loaded, /proc/net/sctp present, sctp.service / sctp_darn / Nagios check_sctp / any *sctp*.service unit installed.",
+	},
+	{
+		ID: "KSEC-MOD-net.legacy-035", Group: "modules.net.legacy.sctp", Tier: Tier1,
+		Name:        "sctp_diag",
+		Description: "Netlink socket diag for SCTP (ss -S). Loaded on-demand only when SCTP introspection is requested; same exposure family as sctp.",
+		Affects:     "Auto-skipped on hosts with SCTP workload evidence (same gate as sctp).",
+	},
+	{
 		ID: "KSEC-MOD-net.legacy-036", Group: "modules.net.legacy", Tier: Tier1,
 		Name:        "smc",
 		Description: "IBM Shared Memory Communications over RDMA / IUCV — z/Linux mainframe socket family; recent LPE class (CVE-2024-46695 and siblings).",
