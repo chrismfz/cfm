@@ -2,12 +2,14 @@
 
 ## Status
 
-**Ten policies shipping. Disabled by default in `lsm.conf`; monitor is
+**Policies shipping. Disabled by default in `lsm.conf`; monitor is
 the safe first enabled mode. Enforce is opt-in for EXEC-001 / EXEC-003 /
-EXEC-004 / EXEC-006 / FS-005. EXEC-005, FS-006, CRED-002,
-CRED-003, and BPF-001 are monitor-only by design (weak stdio
-telemetry, credential telemetry, and syscall tracepoints are not safe
-blocking points).**
+EXEC-004 / EXEC-006 / FS-005 / FS-007 / FS-008 / NET-002. The full
+monitor-only set is EXEC-005, FS-006, CRED-002, CRED-003, BPF-001,
+EXEC-007, EXEC-008, OBS-004, CRED-004 — see
+`isEnforceCapable` in `internal/lsm/policy.go` for the canonical list
+(tracepoint hooks where the kernel ignores BPF return; credential /
+fd-mismatch hooks where -EPERM would break legitimate userspace).**
 
 Catalog:
 
@@ -63,19 +65,22 @@ auto-enable re-establishes protection on the way back up. Event
 and forwards events into the notify pipeline); event *detection*
 does not.
 
-All ten policies default to `mode = disabled` in the shipped
+Every policy defaults to `mode = disabled` in the shipped
 `lsm.conf`; the operator opts in per policy by setting `monitor`
 or `enforce`. Enforce mode (return `-EPERM` on a match, failing the
 calling process's syscall) is **available** for `CFML-EXEC-001`,
-`CFML-EXEC-003`, `CFML-EXEC-004`, `CFML-EXEC-006`, and `CFML-FS-005`.
-`CFML-EXEC-005`, `CFML-CRED-002`, `CFML-CRED-003`, and
-`CFML-BPF-001` are monitor-only by design (returning -EPERM from
-credential hooks can deadlock systemd helpers and pkexec
-mid-transition; CRED-003 is `fentry` telemetry and BPF-001 is a
-syscall tracepoint, neither of which is an LSM decision point; and
-EXEC-005 is a deliberately lower-confidence companion to EXEC-003
-that is unsafe to block on). `enable.go` and `lifecycle.go` downgrade
-an enforce setting on those four to monitor with a warning. Set
+`CFML-EXEC-003`, `CFML-EXEC-004`, `CFML-EXEC-006`, `CFML-FS-005`,
+`CFML-FS-007`, `CFML-FS-008`, and `CFML-NET-002`. The monitor-only
+set — `CFML-EXEC-005`, `CFML-FS-006`, `CFML-CRED-002`,
+`CFML-CRED-003`, `CFML-BPF-001`, `CFML-EXEC-007`, `CFML-EXEC-008`,
+`CFML-OBS-004`, `CFML-CRED-004` — is the single source of truth in
+`isEnforceCapable` (`internal/lsm/policy.go`). The reasons fall into
+two buckets: tracepoint hooks where the kernel ignores BPF return
+(EXEC-005, BPF-001, EXEC-007, EXEC-008), and LSM hooks where -EPERM
+would deadlock systemd helpers, break pkexec mid-transition, or
+break legitimate setuid-helper fd handling (CRED-002, CRED-003,
+FS-006, OBS-004, CRED-004). `enable.go` and `lifecycle.go` downgrade
+an enforce setting on those nine to monitor with a warning. Set
 `mode = enforce` in `/etc/cfm/lsm.conf` and restart cfm (or run
 `cfm lsm disable` then re-enable). The mechanism is a
 `volatile const` global in the BPF program rewritten at load time
@@ -626,22 +631,24 @@ build a baseline. This keeps the new persistence coverage inside `CFML-FS-005`
 rather than creating `CFML-FS-006`, while preserving the original low-risk
 enforcement boundary.
 
-**Setuid-root context skip.** The watched-uid gate (`cfm_uid_watched`)
-keys on the REAL uid via `bpf_get_current_uid_gid()`, so a watched
-user running a setuid-root helper — `passwd`, `chage`, `pkexec`,
-`sudo` writing `/etc/shadow` / `/etc/sudoers` legitimately — still
-matches `current_uid_watched=true` at the watched-set lookup. Without
-a further check, enforce mode would block password changes for every
-regular user with UID ≥ `watched_uid_fallback_min` (default 1000).
-The BPF program therefore reads `current->cred->euid` and skips the
-enforce decision when `euid == 0`: the kernel already granted root
-privs through a trusted setuid binary, and overriding that decision
-would break the password-database workflow. The audit event still
-fires (forensic record of who touched the sensitive file); only the
-`-EPERM` return is suppressed. Attackers cannot reach this skip
-without first passing through a setuid binary the kernel itself
-approved — which is CFML-FS-007's (install) and CFML-CRED-002's
-(use) territory, not FS-005's.
+**Auth-helper enforce-mode exemption.** The watched-uid gate
+(`cfm_uid_watched`) keys on the REAL uid via
+`bpf_get_current_uid_gid()`, so a watched user running a setuid-root
+auth-database helper — `passwd`, `chage`, `gpasswd`, `chsh`, `chfn`,
+`pkexec`, `unix_chkpwd`, `newgrp` — still matches
+`current_uid_watched=true`. Without a further check, enforce mode
+would block password changes for every regular user with
+UID ≥ `watched_uid_fallback_min` (default 1000). The BPF program
+therefore reads `current->cred->euid` and `bpf_get_current_comm`, and
+skips the enforce decision only when BOTH `euid == 0` AND the comm
+is in the fixed auth-helper allowlist (`cfm_comm_is_trusted_auth_helper`
+in `cfmlsm.bpf.c`). The audit event still fires (forensic record of
+who touched the sensitive file); only the `-EPERM` return is
+suppressed. `euid == 0` ALONE is not exempted — that is exactly the
+post-privesc state (Dirty Pipe / pwnkit / commit_creds() cash-in
+running `php-fpm` / `bash` / a dropper) that FS-005 exists to catch,
+and is denied in enforce mode regardless of euid. The allowlist is
+hard-coded in BPF; there is no operator-facing knob to widen it.
 
 **Host-persistence paths.** The default monitor-only persistence set includes
 common distro and panel locations used for durable post-exploit hooks:
