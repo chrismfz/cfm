@@ -659,6 +659,16 @@ func pinLinkFiles(id PolicyID) []string {
 	return nil
 }
 
+// pinPartialAdoptable reports whether AdoptPinned should tolerate one or
+// more of a policy's listed pin files being absent. The default contract
+// is all-or-nothing (matching the enable-time rollback). EXEC-008 is the
+// exception: its two tracepoints come from independently CONFIG-gated
+// syscalls, so a kernel that exposes only one of them produces a
+// single-pin "live" state that AdoptPinned should accept.
+func pinPartialAdoptable(id PolicyID) bool {
+	return id == PolicyKexecLoad
+}
+
 // AdoptPinned opens previously-pinned cfm-lsm state at pinDir and
 // returns a Loader whose Start/Events/Errors/Close work the same
 // as an unpinned Loader, except that Close does not detach — the
@@ -749,10 +759,27 @@ func AdoptPinned(pinDir string, opts LoaderOptions) (*Loader, error) {
 		}
 		// Second pass: open each link. Track them in a temp slice so
 		// we can roll back if any one fails.
+		//
+		// Policies whose sub-programs can be independently CONFIG-gated
+		// out (currently only CFML-EXEC-008 — kexec_load vs
+		// kexec_file_load) may legitimately have only some of their
+		// pin files present. Skip a missing pin in that case rather
+		// than failing the whole adoption; the anyExists gate above
+		// guarantees we still adopted at least one sub-link.
+		tolerateMissing := pinPartialAdoptable(p.ID)
 		adopted := make([]link.Link, 0, len(names))
 		var adoptErr error
 		for _, name := range names {
 			path := filepath.Join(linksDir, name)
+			if tolerateMissing {
+				if _, err := os.Stat(path); err != nil {
+					if os.IsNotExist(err) {
+						continue
+					}
+					adoptErr = fmt.Errorf("stat pinned link %s: %w", path, err)
+					break
+				}
+			}
 			lk, err := link.LoadPinnedLink(path, nil)
 			if err != nil {
 				adoptErr = fmt.Errorf("open pinned link %s: %w", path, err)
@@ -943,6 +970,44 @@ func tracepointProgramEntry(prog *ebpf.Program, pinName, category, name string) 
 	}
 }
 
+// tracepointProgramEntryIfAvailable is the tracepoint variant for syscall
+// tracepoints that can be CONFIG-gated out independently of other tracepoints
+// in the same policy. CFML-EXEC-008 attaches two tracepoints
+// (sys_enter_kexec_load, sys_enter_kexec_file_load) but RHEL 10 ships with
+// CONFIG_KEXEC=n and CONFIG_KEXEC_FILE=y, so only kexec_file_load is
+// exposed in tracefs. Returning an empty programEntry when the tracepoint
+// is absent makes compact() drop it; the rest of the policy still attaches.
+// If none of a policy's tracepoints are available the per-policy attach
+// loop in NewLoader fails the policy with a clear "no programs" error.
+func tracepointProgramEntryIfAvailable(prog *ebpf.Program, pinName, category, name string) programEntry {
+	if !tracepointAvailable(category, name) {
+		return programEntry{}
+	}
+	return tracepointProgramEntry(prog, pinName, category, name)
+}
+
+// tracefsTracepointEventDirs is the search list for tracefs's per-tracepoint
+// metadata directory. The kernel exposes the same directory under both paths
+// depending on how tracefs is mounted; we accept whichever is present.
+// Declared as a var so tests can redirect to a fixture under t.TempDir().
+var tracefsTracepointEventDirs = []string{
+	"/sys/kernel/tracing/events",
+	"/sys/kernel/debug/tracing/events",
+}
+
+// tracepointAvailable reports whether the given syscall tracepoint exists on
+// the running kernel. Probed via the tracefs `id` file, which is present
+// only when the tracepoint was compiled in. See
+// tracepointProgramEntryIfAvailable for why this matters.
+func tracepointAvailable(category, name string) bool {
+	for _, base := range tracefsTracepointEventDirs {
+		if _, err := os.Stat(filepath.Join(base, category, name, "id")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // DriftPicks returns a snapshot of the BPF program variant chosen for
 // each drifting LSM hook (currently inode_setattr / inode_setxattr).
 // Keyed by kernel BTF symbol (e.g. "bpf_lsm_inode_setattr"), value is
@@ -1070,9 +1135,14 @@ func (l *Loader) programsFor(id PolicyID) []programEntry {
 	case PolicyKernelKnobWrite:
 		return compact(lsmProgramEntry(generatedProgramByName(&progs, "cfm_fs008"), pinFileLinkFs008))
 	case PolicyKexecLoad:
+		// CONFIG_KEXEC (legacy kexec_load) and CONFIG_KEXEC_FILE
+		// (kexec_file_load) are independent kernel knobs — RHEL 10
+		// ships CONFIG_KEXEC=n, CONFIG_KEXEC_FILE=y. Use the
+		// availability-aware helper so a missing tracepoint drops the
+		// individual sub-program instead of failing the whole policy.
 		return compact(
-			tracepointProgramEntry(generatedProgramByName(&progs, "cfm_exec008_kexec"), pinFileLinkExec008Kexec, "syscalls", "sys_enter_kexec_load"),
-			tracepointProgramEntry(generatedProgramByName(&progs, "cfm_exec008_kexec_file"), pinFileLinkExec008KexecFile, "syscalls", "sys_enter_kexec_file_load"),
+			tracepointProgramEntryIfAvailable(generatedProgramByName(&progs, "cfm_exec008_kexec"), pinFileLinkExec008Kexec, "syscalls", "sys_enter_kexec_load"),
+			tracepointProgramEntryIfAvailable(generatedProgramByName(&progs, "cfm_exec008_kexec_file"), pinFileLinkExec008KexecFile, "syscalls", "sys_enter_kexec_file_load"),
 		)
 	case PolicyPtraceAccess:
 		return compact(lsmProgramEntry(generatedProgramByName(&progs, "cfm_obs004"), pinFileLinkObs004))

@@ -143,7 +143,41 @@ func RunPreflight() Preflight {
 }
 
 func checkPolicyAvailability() []PolicyAvailability {
-	return []PolicyAvailability{checkDirectCredInstallAvailability()}
+	return []PolicyAvailability{
+		checkDirectCredInstallAvailability(),
+		checkKexecLoadAvailability(),
+	}
+}
+
+// checkKexecLoadAvailability reports whether the kexec syscall tracepoints
+// are exposed by the running kernel. Both kexec_load (CONFIG_KEXEC) and
+// kexec_file_load (CONFIG_KEXEC_FILE) are independent build-time options;
+// RHEL 10 ships CONFIG_KEXEC=n. CFML-EXEC-008 attaches to whichever subset
+// is present and is unavailable only when both are missing.
+func checkKexecLoadAvailability() PolicyAvailability {
+	pa := PolicyAvailability{PolicyID: PolicyKexecLoad, Available: true}
+	have := []string{}
+	missing := []string{}
+	if tracepointAvailable("syscalls", "sys_enter_kexec_load") {
+		have = append(have, "kexec_load")
+	} else {
+		missing = append(missing, "kexec_load")
+	}
+	if tracepointAvailable("syscalls", "sys_enter_kexec_file_load") {
+		have = append(have, "kexec_file_load")
+	} else {
+		missing = append(missing, "kexec_file_load")
+	}
+	switch {
+	case len(have) == 0:
+		pa.Available = false
+		pa.Reason = "neither sys_enter_kexec_load nor sys_enter_kexec_file_load exposed in tracefs (kernel built without CONFIG_KEXEC and CONFIG_KEXEC_FILE)"
+	case len(missing) == 0:
+		pa.Reason = "both kexec_load and kexec_file_load tracepoints present"
+	default:
+		pa.Reason = fmt.Sprintf("partial coverage — present: %s; missing: %s (kernel-config-gated)", strings.Join(have, ","), strings.Join(missing, ","))
+	}
+	return pa
 }
 
 func checkDirectCredInstallAvailability() PolicyAvailability {
