@@ -8,6 +8,13 @@ import (
 	"os"
 )
 
+// CLIBuild identifies the cfm binary driving the CLI subcommands. Set
+// by cmd/cfm/main.go before dispatch so RunEnable / RunInit can stamp
+// the on-disk version marker. Zero value is harmless — the daemon's
+// adopt path then treats every pin as marker-absent and refreshes
+// once on first start after upgrade.
+var CLIBuild BuildMarker
+
 // RunCLI is the entry point invoked from cmd/cfm/main.go for `cfm lsm`.
 //
 // Subcommands:
@@ -68,7 +75,7 @@ func runEnableCmd(args []string, w io.Writer) int {
 	if rc, done := handleFlagErr("lsm enable", fs.Parse(args), w); done {
 		return rc
 	}
-	return RunEnable(w, EnableOptions{AssumeYes: *yes})
+	return RunEnable(w, EnableOptions{AssumeYes: *yes, Build: CLIBuild})
 }
 
 func runDisableCmd(args []string, w io.Writer) int {
@@ -106,7 +113,7 @@ func runRestartCmd(args []string, w io.Writer) int {
 		return rc
 	}
 	fmt.Fprintln(w)
-	return RunEnable(w, EnableOptions{AssumeYes: *yes || *short})
+	return RunEnable(w, EnableOptions{AssumeYes: *yes || *short, Build: CLIBuild})
 }
 
 func runStatusCmd(args []string, w io.Writer) int {

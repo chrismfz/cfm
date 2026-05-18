@@ -22,6 +22,13 @@ type EnableOptions struct {
 	// In is the stream the prompt reads from. Defaults to os.Stdin
 	// when nil. Tests inject a strings.Reader to drive the prompt.
 	In io.Reader
+
+	// Build identifies the cfm binary doing the enable. Stamped into
+	// DefaultBuildVersionMarker on success so a future daemon start
+	// can detect a package upgrade since the pins were created.
+	// Zero value is allowed (the next daemon start then treats the
+	// marker as absent and refreshes once on first adopt).
+	Build BuildMarker
 }
 
 // RunEnable is the operator-facing `cfm lsm enable` entry point.
@@ -201,6 +208,15 @@ func RunEnable(w io.Writer, opts EnableOptions) int {
 	fmt.Fprintln(w, "These attachments survive cfm daemon restarts and crashes.")
 	fmt.Fprintln(w, "Run `cfm lsm disable` to detach.")
 	fmt.Fprintln(w, "Run `cfm lsm status` to inspect live state.")
+
+	// Stamp the build marker so a future daemon start can spot a
+	// package upgrade and refresh the pins. Best-effort: a write
+	// failure here just means the next start treats the marker as
+	// absent and refreshes once (harmless, idempotent).
+	if werr := WriteBuildMarker(DefaultBuildVersionMarker, opts.Build); werr != nil {
+		fmt.Fprintf(w, "Warning: version marker write failed at %s: %v\n", DefaultBuildVersionMarker, werr)
+		fmt.Fprintln(w, "         (next daemon start will refresh pins once; harmless)")
+	}
 
 	// Emit a one-line ALIVE record to dmesg so the activation shows
 	// up in /var/log/messages / journalctl alongside other kernel-

@@ -41,6 +41,16 @@ type Lifecycle struct {
 	mu      sync.Mutex
 	started bool
 
+	// build identifies the cfm binary that owns this Lifecycle. Stamped
+	// into DefaultBuildVersionMarker at every successful enable (fresh
+	// or CLI-driven) and compared against the marker at every adopt-
+	// path entry — when they differ (package upgrade since the pins
+	// were created), the adopt path tears the old pins down and the
+	// fresh path re-pins with this binary's BPF. Empty BuildMarker is
+	// allowed; the adopt path then treats every existing pin as stale
+	// (one-time refresh on first upgrade to a marker-aware build).
+	build BuildMarker
+
 	// loader is the live AdoptPinned-or-NewLoader result. Held so
 	// Stop can close it cleanly. Nil before ApplyConfig has activated.
 	loader *Loader
@@ -73,8 +83,14 @@ type Lifecycle struct {
 }
 
 // NewLifecycle returns a fresh lifecycle. Safe to call before any
-// config has loaded.
-func NewLifecycle() *Lifecycle { return &Lifecycle{} }
+// config has loaded. build identifies the cfm binary so the adopt
+// path can detect stale pins from a prior build (package-upgrade
+// case). The zero BuildMarker is accepted — older callers that
+// haven't been updated still work; the adopt path then treats every
+// existing pin as stale (one-time refresh per startup).
+func NewLifecycle(build BuildMarker) *Lifecycle {
+	return &Lifecycle{build: build}
+}
 
 // ApplyConfig checks whether cfm-lsm should be active and, if so,
 // either adopts the existing pinned state or creates fresh pins
@@ -199,7 +215,7 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 		return
 	}
 
-	loader, fresh, err := openOrCreateLoader(conf)
+	loader, fresh, err := l.openOrCreateLoader(conf)
 	if err != nil {
 		l.mu.Unlock()
 		return // openOrCreateLoader already logged + emitted to kmsg
@@ -263,16 +279,52 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 // bpffs is RAM-only, so on every boot the daemon comes up to find
 // no pins, runs the same load+attach+pin work `cfm lsm enable` would
 // have done, and resumes protection without operator intervention.
-func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
+func (l *Lifecycle) openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 	pinned := InspectPinned(DefaultPinDir)
 	if pinned.Exists && len(pinned.Links) > 0 {
-		l, err := AdoptPinned(DefaultPinDir, LoaderOptions{EventBufferSize: 1024})
-		if err != nil {
-			logging.LogfLSM("[lsm] adopt pinned state at %s failed: %v", DefaultPinDir, err)
-			KmsgStatef("ISSUE", "adopt pinned state at %s failed: %v", DefaultPinDir, err)
-			return nil, false, err
+		// Version-marker gate: compare the build that stamped the pins
+		// against this binary. Mismatch (or absent marker on a host
+		// that pinned with an older marker-unaware build) → tear down
+		// and fall through to the fresh path so the new BPF gets
+		// loaded. Preflight inside the fresh path is the safety net:
+		// if it FAILs (kernel mismatch, missing BTF), the fresh path
+		// returns an error and the host is left without LSM coverage
+		// — that's the documented trade-off and matches what the
+		// operator would see if they ran `cfm lsm restart` by hand.
+		pinnedBuild, present, rerr := ReadBuildMarker(DefaultBuildVersionMarker)
+		if rerr != nil {
+			logging.LogfLSM("[lsm] startup version check: marker at %s unreadable (%v); treating as stale and refreshing",
+				DefaultBuildVersionMarker, rerr)
 		}
-		return l, false, nil
+		switch {
+		case !present:
+			logging.LogfLSM("[lsm] startup version check: no marker at %s — pinned BPF was loaded by a pre-marker build; refreshing to running=%q",
+				DefaultBuildVersionMarker, l.build.String())
+		case !pinnedBuild.Equal(l.build):
+			logging.LogfLSM("[lsm] startup version check: pinned=%q running=%q — build changed since pins were created; refreshing",
+				pinnedBuild.String(), l.build.String())
+		default:
+			logging.LogfLSM("[lsm] startup version check: pinned=%q matches running build; adopting existing pins",
+				pinnedBuild.String())
+			lr, err := AdoptPinned(DefaultPinDir, LoaderOptions{EventBufferSize: 1024})
+			if err != nil {
+				logging.LogfLSM("[lsm] adopt pinned state at %s failed: %v", DefaultPinDir, err)
+				KmsgStatef("ISSUE", "adopt pinned state at %s failed: %v", DefaultPinDir, err)
+				return nil, false, err
+			}
+			return lr, false, nil
+		}
+		// Stale pin → unpin so the fresh path below has a clean slate.
+		// UnpinAll is best-effort; if it leaves residue the fresh path
+		// will likely fail to attach (EBUSY on link create) and log a
+		// loud error rather than silently load nothing.
+		if uerr := UnpinAll(DefaultPinDir); uerr != nil {
+			logging.LogfLSM("[lsm] refresh: failed to remove stale pins at %s: %v (continuing — fresh attach may fail)",
+				DefaultPinDir, uerr)
+			KmsgStatef("ISSUE", "refresh: stale pin removal failed: %v", uerr)
+		} else {
+			logging.LogfLSM("[lsm] refresh: stale pins removed at %s; entering fresh-enable path", DefaultPinDir)
+		}
 	}
 
 	// No pinned state — auto-enable. Run preflight first; if it
@@ -319,7 +371,7 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 		return nil, false, errors.New("no configured policies available")
 	}
 
-	l, lerr := NewLoader(LoaderOptions{
+	lr, lerr := NewLoader(LoaderOptions{
 		EventBufferSize:       1024,
 		Policies:              policies,
 		Modes:                 modes,
@@ -334,7 +386,18 @@ func openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, err error) {
 		_ = UnpinAll(DefaultPinDir)
 		return nil, false, lerr
 	}
-	return l, true, nil
+	// Stamp the marker so the NEXT daemon start can detect a stale
+	// pin after a package upgrade. Best-effort — a write failure here
+	// just means the next start treats the pin as marker-absent and
+	// refreshes once (harmless, idempotent).
+	if werr := WriteBuildMarker(DefaultBuildVersionMarker, l.build); werr != nil {
+		logging.LogfLSM("[lsm] version marker write failed at %s: %v (continuing — next start will refresh once)",
+			DefaultBuildVersionMarker, werr)
+	} else {
+		logging.LogfLSM("[lsm] version marker stamped: %q at %s",
+			l.build.String(), DefaultBuildVersionMarker)
+	}
+	return lr, true, nil
 }
 
 // Stop tears down the activation goroutine and releases the userspace

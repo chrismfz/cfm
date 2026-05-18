@@ -330,6 +330,7 @@ func main() {
 		os.Exit(kernsec.RunCLI(os.Args[2:]))
 
 	case "lsm":
+		lsm.CLIBuild = lsm.BuildMarker{Version: Version, BuildTime: BuildTime}
 		os.Exit(lsm.RunCLI(os.Args[2:]))
 
 	default:
@@ -988,7 +989,7 @@ func runDaemon(args []string) {
 	// and the operator's pre-pinned BPF state at /sys/fs/bpf/cfm/
 	// (created by `cfm lsm enable`) and drains events into the
 	// notify pipeline. Does not auto-pin — explicit operator action.
-	lsmLc := lsm.NewLifecycle()
+	lsmLc := lsm.NewLifecycle(lsm.BuildMarker{Version: Version, BuildTime: BuildTime})
 	defer lsmLc.Stop()
 
 	// (state-dir mkdir+chown moved to the top of runDaemon — see the
