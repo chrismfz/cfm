@@ -379,3 +379,70 @@ allow_exe = /usr/local/bin/some_weak_helper.sh
 		t.Errorf("EXEC-005 allow_exe: got %v", got)
 	}
 }
+
+// TestEventFilter_Defaults_CRED004 covers the per-user systemd-user
+// session-setup noise. Modern systemd spawns a `systemd --user`
+// instance under every login uid; on cPanel / DA / Plesk hosts that's
+// hundreds of instances, and each one fires CRED-004 on minute-cadence
+// timer setup (cap_ambient raise for CAP_WAKE_ALARM=cap=35) plus an
+// every-fork ptrace fanout that hits OBS-004. The kernel exposes the
+// task's comm as either `systemd` (steady state) or `(systemd)`
+// (mid-exec transition); both must suppress.
+func TestEventFilter_Defaults_CRED004(t *testing.T) {
+	f := BuildEventFilter(DefaultConf())
+	for _, comm := range []string{"systemd", "(systemd)"} {
+		ev := Event{PolicyID: PolicyCapRaise, Comm: comm, Filename: "cap=35"}
+		if !f.Match(ev) {
+			t.Errorf("expected default conf to suppress CRED-004 comm=%q", comm)
+		}
+	}
+	// bwrap (bubblewrap) legitimately raises caps on sandbox setup.
+	ev := Event{PolicyID: PolicyCapRaise, Comm: "bwrap", Filename: "cap=21"}
+	if !f.Match(ev) {
+		t.Error("expected default conf to suppress CRED-004 comm=bwrap")
+	}
+	// An unknown comm raising caps must still fire — that's the
+	// post-exploit capability-hoarding signal the rule exists for.
+	ev = Event{PolicyID: PolicyCapRaise, Comm: "webshell.php", Filename: "cap=7"}
+	if f.Match(ev) {
+		t.Errorf("default conf incorrectly suppressed CRED-004 comm=%q", ev.Comm)
+	}
+}
+
+// TestEventFilter_Defaults_OBS004 covers three documented noise
+// classes for the same-uid ptrace_access_check hook:
+//
+//  1. systemd-user ptracing its own forked children during session
+//     setup — comm=systemd / comm=(systemd).
+//  2. bwrap (bubblewrap) ptracing its own sandboxed children at
+//     sandbox-init time.
+//  3. /proc/PID/exe readlink-resolution by anyone — the kernel
+//     routes the symlink lookup through ptrace_may_access(), so
+//     comm=readlink fires OBS-004 without an actual ptrace(2).
+func TestEventFilter_Defaults_OBS004(t *testing.T) {
+	f := BuildEventFilter(DefaultConf())
+	for _, comm := range []string{"systemd", "(systemd)", "bwrap", "readlink"} {
+		ev := Event{PolicyID: PolicyPtraceAccess, Comm: comm, Filename: "child-comm"}
+		if !f.Match(ev) {
+			t.Errorf("expected default conf to suppress OBS-004 comm=%q", comm)
+		}
+	}
+	// A genuine attacker-controlled comm doing PTRACE_ATTACH against
+	// a sibling worker must still surface.
+	ev := Event{PolicyID: PolicyPtraceAccess, Comm: "php-fpm", Filename: "victim-worker"}
+	if f.Match(ev) {
+		t.Errorf("default conf incorrectly suppressed OBS-004 comm=%q", ev.Comm)
+	}
+}
+
+// TestAllowCommPolicy_CRED004_OBS004 asserts the policy-allowlist
+// surface stays open for the two new policies. A future refactor
+// that drops them from the allowCommPolicy switch would silently
+// break the default-suppression path; this guard catches it at CI.
+func TestAllowCommPolicy_CRED004_OBS004(t *testing.T) {
+	for _, id := range []PolicyID{PolicyCapRaise, PolicyPtraceAccess} {
+		if !allowCommPolicy(id) {
+			t.Errorf("allowCommPolicy(%s) = false; expected true", id)
+		}
+	}
+}

@@ -581,6 +581,40 @@ var DefaultGlobalAllowComm = []string{
 	"bpftool",
 	"auditd",
 
+	// Per-user systemd's transitional-exec comm form. The kernel
+	// briefly sets a forked task's comm to `(name)` between
+	// copy_process and the new exec landing — see
+	// fs/proc/array.c:get_task_comm and the SIGCHLD-with-CLD_TRAPPED
+	// formatting in kernel/exit.c. cfm-lsm hooks fire during this
+	// window (commit_creds / ptrace_access_check both run before
+	// the new comm is finalised), so the calling task's `current->comm`
+	// is literally "(systemd)" not "systemd" — the userspace filter
+	// needs both spellings to suppress the noise cleanly.
+	"(systemd)",
+
+	// Bubblewrap sandbox runtime. Used by flatpak, snap's namespace
+	// shim, and various distro-portable apps to set up user
+	// namespaces. bwrap legitimately does ptrace + setuid + ambient
+	// cap-raise on its sandboxed children during sandbox setup —
+	// that's the entire job of the program. CRED-002 / CRED-004 /
+	// OBS-004 all fire on the same legitimate sequence; allowlist
+	// here because the alternative (per-policy entries) would
+	// duplicate the rationale four times.
+	"bwrap",
+
+	// /bin/readlink. The kernel routes /proc/PID/exe symlink
+	// resolution through ptrace_may_access(), which fires our
+	// OBS-004 ptrace_access_check hook even though no actual
+	// ptrace(2) syscall was issued. Every status-page health
+	// check, supervisor probe, lsphp respawn detector, or
+	// post-fork bash launcher that reads /proc/N/exe of a sibling
+	// process triggers this. Allowlisting `readlink` for the
+	// monitor-only ptrace + cred rules is harmless: /bin/readlink
+	// has no credential-escalation primitive and no bpf() call
+	// path, so the other policies that consume allow_comm can't
+	// be evaded by a process pretending to be readlink.
+	"readlink",
+
 	// CloudLinux CageFS — cagefsctl is a Python script run by root
 	// during account lifecycle ops; its task comm is "cagefsctl" but
 	// the exe the kernel sees is "python3.11" (or similar). Allow_exe
@@ -1426,9 +1460,25 @@ func allowExePolicy(id PolicyID) bool {
 // without a BPF rebuild. EXEC-006 follows the same pattern so
 // operators can allowlist a known-good tooling comm without pinning
 // its (possibly versioned) exe path.
+//
+// CRED-004 / OBS-004 use allow_comm to suppress the per-user
+// `systemd --user` session-setup fanout. Modern systemd spawns a
+// systemd-user instance under every login uid; on cPanel / DA /
+// Plesk hosts that's hundreds of instances, each doing legitimate
+// session-init work (cap_ambient raise for CAP_WAKE_ALARM on every
+// minute-boundary timer tick, ptrace-during-fork-setup against
+// freshly-cloned children) that matches the threat patterns these
+// two rules detect. The same applies to `bwrap` (bubblewrap sandbox
+// runtime used by flatpak / portable apps, which ptraces its own
+// sandboxed children at startup). `readlink` on /proc/PID/exe is
+// the third case — the kernel routes /proc/PID/exe symlink
+// resolution through ptrace_may_access, so `readlink /proc/N/exe`
+// from a webshell uid (status pages, supervisor health checks,
+// LiteSpeed lsphp respawn detection) fires OBS-004 even though
+// no actual ptrace syscall was issued.
 func allowCommPolicy(id PolicyID) bool {
 	switch id {
-	case PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec:
+	case PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec, PolicyCapRaise, PolicyPtraceAccess:
 		return true
 	}
 	return false
