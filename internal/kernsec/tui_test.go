@@ -1,6 +1,7 @@
 package kernsec
 
 import (
+	"strings"
 	"testing"
 
 	ui "github.com/gizak/termui/v3"
@@ -51,6 +52,76 @@ func TestStateColorName(t *testing.T) {
 	for _, tc := range tests {
 		if got := StateColorName(tc.state); got != tc.want {
 			t.Errorf("StateColorName(%q) = %q, want %q", tc.state, got, tc.want)
+		}
+	}
+}
+
+func TestStateExplanation(t *testing.T) {
+	// Spot-check the (state, kind) combinations the operator hits most
+	// often and the ones whose name doesn't self-explain (DRIFT, SKIP,
+	// LOADED). Every entry must produce a non-empty plain-English line
+	// that names the remediation where one exists.
+	tests := []struct {
+		name        string
+		state       RuleState
+		kind        RuleKind
+		mustContain []string
+	}{
+		{"boot DRIFT names reboot risk + apply", StateDRIFT, KindBoot,
+			[]string{"lost on reboot", "cfm kernsec apply"}},
+		{"boot WARN tells operator to reboot", StateWARN, KindBoot,
+			[]string{"reboot"}},
+		{"module MISSING names apply remediation", StateMISSING, KindModule,
+			[]string{"cfm kernsec apply"}},
+		{"module SKIP says not applicable", StateSKIP, KindModule,
+			[]string{"not present", "nothing to enforce"}},
+		{"sysctl SKIP says not exposed", StateSKIP, KindSysctl,
+			[]string{"not exposed"}},
+		{"module LOADED says reboot or rmmod", StateLOADED, KindModule,
+			[]string{"rmmod"}},
+		{"OFF explains tier/operator", StateOFF, KindBoot,
+			[]string{"operator", "tier"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stateExplanation(tc.state, tc.kind)
+			if got == "" {
+				t.Fatalf("stateExplanation(%v,%v) returned empty; expected a plain-English line", tc.state, tc.kind)
+			}
+			for _, want := range tc.mustContain {
+				if !strings.Contains(got, want) {
+					t.Errorf("stateExplanation(%v,%v) = %q; should mention %q", tc.state, tc.kind, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestStateExplanation_CoversEveryState(t *testing.T) {
+	// Every state the audit can emit for an Apply-decision rule must
+	// have at least one non-empty explanation across the kinds it can
+	// appear in. Catches future RuleState additions that forget to
+	// extend stateExplanation.
+	cases := []struct {
+		state RuleState
+		kinds []RuleKind
+	}{
+		{StateOK, []RuleKind{KindSysctl, KindBoot, KindModule, KindMount}},
+		{StateWARN, []RuleKind{KindBoot}},
+		{StateDIFF, []RuleKind{KindSysctl, KindMount}},
+		{StateMISSING, []RuleKind{KindSysctl, KindBoot, KindModule, KindMount}},
+		{StateDRIFT, []RuleKind{KindBoot}},
+		{StateLOADED, []RuleKind{KindModule}},
+		{StatePEND, []RuleKind{KindMount}},
+		{StateSKIP, []RuleKind{KindSysctl, KindBoot, KindModule, KindMount}},
+		{StateOFF, []RuleKind{KindSysctl, KindBoot, KindModule, KindMount}},
+		{StateEXT, []RuleKind{KindSysctl}},
+	}
+	for _, c := range cases {
+		for _, k := range c.kinds {
+			if stateExplanation(c.state, k) == "" {
+				t.Errorf("stateExplanation(%v,%v) is empty — every emitted (state, kind) needs operator-readable text", c.state, k)
+			}
 		}
 	}
 }

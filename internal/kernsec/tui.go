@@ -323,6 +323,10 @@ func RunTUI() (switchToText bool, err error) {
 	}
 
 	renderDetail := func() {
+		if showHelp {
+			detail.Text = legendText()
+			return
+		}
 		if ruleCursor < 0 || ruleCursor >= len(rulesInGroup) {
 			detail.Text = ""
 			return
@@ -331,6 +335,9 @@ func RunTUI() (switchToText bool, err error) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "[Selected:](fg:cyan,mod:bold) %s\n\n", r.Display)
 		fmt.Fprintf(&b, "[State:](fg:cyan)  [%s](fg:%s,mod:bold)\n", r.State, StateColorName(r.State))
+		if explanation := stateExplanation(r.State, r.Kind); explanation != "" {
+			fmt.Fprintf(&b, "        %s\n", explanation)
+		}
 		if r.Reason != "" {
 			fmt.Fprintf(&b, "[Reason:](fg:cyan) %s\n", r.Reason)
 		}
@@ -431,7 +438,7 @@ func RunTUI() (switchToText bool, err error) {
 			return
 		}
 		if showHelp {
-			footer.Text = "[help](fg:cyan,mod:bold)  Audit-only TUI. Run [cfm kernsec apply](fg:cyan)/[disable](fg:cyan) from the shell to mutate state. Press [?](fg:cyan) to dismiss."
+			footer.Text = "[legend](fg:cyan,mod:bold)  State meanings shown in the right pane. Audit-only TUI — run [cfm kernsec apply](fg:cyan)/[disable](fg:cyan) from the shell to mutate state. Press [?](fg:cyan) to dismiss."
 			return
 		}
 		if statusMsg != "" && time.Now().Before(statusUntil) {
@@ -733,6 +740,95 @@ func StateColorName(s RuleState) string {
 		return "red"
 	}
 	return "white"
+}
+
+// stateExplanation returns a short plain-English line explaining what a
+// given (state, kind) combination means in operator-actionable terms.
+// Surfaces in the detail panel directly under the State badge so the
+// operator doesn't have to memorise the state vocabulary or infer
+// meaning from Live state. Returns "" when the State is self-evident
+// for the kind (no extra text adds value).
+func stateExplanation(state RuleState, kind RuleKind) string {
+	switch state {
+	case StateOK:
+		switch kind {
+		case KindSysctl:
+			return "live value matches the recommendation"
+		case KindBoot:
+			return "configured for next boot and active in current cmdline"
+		case KindModule:
+			return "blacklisted in modprobe.d and not loaded"
+		case KindMount:
+			return "mount options match the recommendation"
+		}
+	case StateWARN:
+		return "configured for next boot but not yet active — reboot to activate"
+	case StateDIFF:
+		if kind == KindSysctl {
+			return "live value differs from the recommendation"
+		}
+		return "current state differs from the recommendation"
+	case StateMISSING:
+		switch kind {
+		case KindSysctl:
+			return "expected entry absent from the managed sysctl file — run `cfm kernsec apply`"
+		case KindBoot:
+			return "not present in current cmdline or next-boot config — run `cfm kernsec apply`"
+		case KindModule:
+			return "module exists on this kernel but no blacklist entry is configured — run `cfm kernsec apply`"
+		case KindMount:
+			return "recommended mount option(s) not applied — edit /etc/fstab and remount to persist"
+		}
+	case StateDRIFT:
+		return "active in /proc/cmdline now, but next-boot config doesn't have it — will be lost on reboot. Run `cfm kernsec apply` to align all kernel entries"
+	case StateLOADED:
+		return "blacklist applied but module is still loaded — reboot or `rmmod` for the blacklist to take effect"
+	case StatePEND:
+		return "persisted (e.g. in /etc/fstab) — live remount pending reboot or `mount -o remount`"
+	case StateSKIP:
+		switch kind {
+		case KindSysctl:
+			return "key is not exposed by this kernel — nothing to enforce"
+		case KindModule:
+			return "module is not present on this kernel — nothing to enforce"
+		case KindMount:
+			return "not a separately-mounted filesystem (or bind/symlink) — recommendation not applicable"
+		case KindBoot:
+			return "blocked by host profile — would break host workloads"
+		}
+	case StateOFF:
+		return "disabled — operator opted out, or rule tier is above the configured tier"
+	case StateEXT:
+		return "managed by another cfm component — kernsec audits but does not enforce"
+	}
+	return ""
+}
+
+// legendText returns the multi-line state legend rendered in the detail
+// pane when the operator presses `?`. Co-located with stateExplanation
+// so updates stay in sync.
+func legendText() string {
+	return strings.Join([]string{
+		"[State legend](fg:cyan,mod:bold)",
+		"",
+		"[OK](fg:green,mod:bold)        compliant — live state matches the recommendation",
+		"[WARN](fg:yellow,mod:bold)      configured for next boot, not yet active — reboot to activate",
+		"[DIFF](fg:yellow,mod:bold)      sysctl present with the wrong value",
+		"[MISSING](fg:yellow,mod:bold)   expected configuration absent — run `cfm kernsec apply`",
+		"[DRIFT](fg:red,mod:bold)     active in cmdline now but missing from next-boot config — will be lost on reboot",
+		"[LOADED](fg:yellow,mod:bold)    module blacklisted but still loaded — reboot or `rmmod`",
+		"[PEND](fg:yellow,mod:bold)      persisted (e.g. fstab) — live remount pending",
+		"[SKIP](fg:white,mod:bold)      not applicable on this host (kernel doesn't expose it, or host profile blocks it)",
+		"[OFF](fg:white,mod:bold)       operator-disabled, or rule tier above the configured tier",
+		"[EXT](fg:white,mod:bold)       managed by another cfm component — kernsec audits but does not enforce",
+		"",
+		"[Queued changes (commit with `a`):](fg:cyan,mod:bold)",
+		"[PEND-ON](fg:magenta,mod:bold)   enable queued — will be forced on the next apply",
+		"[PEND-OFF](fg:magenta,mod:bold)  disable queued — will be skipped on the next apply",
+		"[PEND-DEF](fg:magenta,mod:bold)  override removed — will follow the tier default",
+		"",
+		"Press [?](fg:cyan) to return to the rule view.",
+	}, "\n")
 }
 
 // buildAuditRowsForTUI is the wrapper TUI / status callers use when they
