@@ -126,6 +126,7 @@ func TestClassifyCheckResult(t *testing.T) {
 		{name: "in sync", d: driftResult{}, want: 0},
 		{name: "sysctl drift only", d: driftResult{SysctlDiffers: true}, want: 1},
 		{name: "boot drift only", d: driftResult{BootDiffers: true}, want: 1},
+		{name: "BLS reconcile drift only", d: driftResult{BootReconcileReason: "stale managed args on /boot/vmlinuz-old"}, want: 1},
 		{name: "modprobe drift only", d: driftResult{ModprobeDiffers: true}, want: 1},
 		{name: "all three drift", d: driftResult{SysctlDiffers: true, BootDiffers: true, ModprobeDiffers: true}, want: 1},
 		{
