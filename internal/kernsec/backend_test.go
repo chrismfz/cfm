@@ -370,6 +370,88 @@ func TestBLSBackend_NextBootCmdline_NoKernels(t *testing.T) {
 	}
 }
 
+// Default kernel is the SECOND entry in --info=ALL output. We must
+// return its args (not entries[0]) and treat entries[0] as a stale
+// divergent kernel — the operator's real next boot lands on the
+// `grubby --default-kernel` choice.
+func TestBLSBackend_NextBootCmdline_PinsToDefaultKernel(t *testing.T) {
+	out := `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge"
+
+index=1
+kernel="/boot/vmlinuz-6.2.0"
+args="ro slab_nomerge init_on_alloc=1"
+`
+	fs := newFakeFS().
+		withCmd("grubby --info=ALL", out).
+		withCmd("grubby --default-kernel", "/boot/vmlinuz-6.2.0\n")
+	b := &BLSBackend{FS: fs}
+	got, err := b.NextBootCmdline()
+	if err == nil {
+		t.Fatal("expected divergence error, got nil")
+	}
+	if !errors.Is(err, ErrBLSDivergence) {
+		t.Errorf("divergence error must satisfy errors.Is(_, ErrBLSDivergence): %v", err)
+	}
+	if !strings.Contains(err.Error(), "from /boot/vmlinuz-6.2.0") {
+		t.Errorf("error should name the default kernel as baseline: %v", err)
+	}
+	if !strings.Contains(err.Error(), "stale on: /boot/vmlinuz-6.1.0") {
+		t.Errorf("error should name the stale (non-default) kernel: %v", err)
+	}
+	if got != "ro slab_nomerge init_on_alloc=1" {
+		t.Errorf("returned args should match the default kernel's: got %q", got)
+	}
+}
+
+// grubby --default-kernel unavailable (e.g. trimmed environment, older
+// grubby) — fall back to entries[0] silently, preserving legacy behaviour.
+func TestBLSBackend_NextBootCmdline_DefaultKernelFallback(t *testing.T) {
+	out := `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge init_on_alloc=1"
+
+index=1
+kernel="/boot/vmlinuz-5.14.0"
+args="ro slab_nomerge"
+`
+	// No "grubby --default-kernel" registered → fakeFS returns error.
+	fs := newFakeFS().withCmd("grubby --info=ALL", out)
+	b := &BLSBackend{FS: fs}
+	got, err := b.NextBootCmdline()
+	if err == nil {
+		t.Fatal("expected divergence error, got nil")
+	}
+	if !strings.Contains(err.Error(), "from /boot/vmlinuz-6.1.0") {
+		t.Errorf("fallback baseline should be entries[0]: %v", err)
+	}
+	if got != "ro slab_nomerge init_on_alloc=1" {
+		t.Errorf("fallback args should be entries[0].Args: got %q", got)
+	}
+}
+
+// grubby --default-kernel names a path absent from --info=ALL (rare:
+// stale grubenv referencing a removed kernel). Fall back to entries[0]
+// rather than panic or return empty args.
+func TestBLSBackend_NextBootCmdline_DefaultKernelMissingFromInfo(t *testing.T) {
+	out := `index=0
+kernel="/boot/vmlinuz-6.1.0"
+args="ro slab_nomerge init_on_alloc=1"
+`
+	fs := newFakeFS().
+		withCmd("grubby --info=ALL", out).
+		withCmd("grubby --default-kernel", "/boot/vmlinuz-removed\n")
+	b := &BLSBackend{FS: fs}
+	got, err := b.NextBootCmdline()
+	if err != nil {
+		t.Fatalf("expected no error (single matching entry), got %v", err)
+	}
+	if got != "ro slab_nomerge init_on_alloc=1" {
+		t.Errorf("fallback args should be entries[0].Args: got %q", got)
+	}
+}
+
 // blsInfoAllSingleNonRescue is a one-kernel grubby --info=ALL output
 // fixture with no rescue / debug entries, used by the
 // rescue-filtering tests as the "everything is targetable" baseline.

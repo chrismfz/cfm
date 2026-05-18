@@ -145,10 +145,20 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[Configured default kernel cmdline — next boot]")
-	if nextErr != nil {
+	nextDiverged := errors.Is(nextErr, ErrBLSDivergence)
+	switch {
+	case nextDiverged:
+		// NextBootCmdline still returns the default (entries[0]) args
+		// alongside ErrBLSDivergence; print them so the operator can
+		// see what will boot next, and surface the divergence as a
+		// reconcilable WARN (apply auto-aligns all entries).
+		fmt.Fprintln(w, nextCmdline)
+		fmt.Fprintf(w, "WARN  %s — run `cfm kernsec apply` to align all kernel entries\n", nextErr)
+		res.warn()
+	case nextErr != nil:
 		fmt.Fprintf(w, "ERROR unable to read next-boot cmdline from %s: %v\n", be.Label(), nextErr)
 		res.indeterminate(fmt.Sprintf("next-boot cmdline read failed: %v", nextErr))
-	} else {
+	default:
 		fmt.Fprintln(w, nextCmdline)
 	}
 	fmt.Fprintln(w)
@@ -226,7 +236,16 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	fmt.Fprintln(w)
 
 	res.printArgState(w, "Managed boot args in current running kernel", currentTokens, resolved, nil)
-	res.printArgState(w, "Managed boot args configured for next boot", nextTokens, resolved, nextErr)
+	// On BLS divergence the cmdline IS known (default entry's args);
+	// render per-arg state against it and let the operator see which
+	// managed args will be lost on the next boot. The divergence WARN
+	// printed under "[Configured default kernel cmdline — next boot]"
+	// names the stale kernel entries.
+	nextArgErr := nextErr
+	if nextDiverged {
+		nextArgErr = nil
+	}
+	res.printArgState(w, "Managed boot args configured for next boot", nextTokens, resolved, nextArgErr)
 
 	res.printModuleState(w, resolved)
 
@@ -456,6 +475,13 @@ func auditRowErrors(rows []AuditRow) []string {
 	var errs []string
 	for _, r := range rows {
 		if r.Error == "" || seen[r.Error] {
+			continue
+		}
+		// BLS divergence is recoverable (auto-reconciled by
+		// `cfm kernsec apply`) and surfaces via the per-row Error
+		// field for TUI header rendering. It's a warning, not an
+		// indeterminate read failure.
+		if strings.Contains(r.Error, ErrBLSDivergence.Error()) {
 			continue
 		}
 		seen[r.Error] = true

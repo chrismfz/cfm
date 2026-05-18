@@ -1,5 +1,7 @@
 package kernsec
 
+import "errors"
+
 // RuleKind classifies an audit row by where it lives.
 type RuleKind string
 
@@ -175,14 +177,22 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 		rows = append(rows, row)
 	}
 
+	// BLS divergence is a soft condition: NextBootCmdline still returns
+	// the default (entries[0]) kernel's args, so the cmdline IS known
+	// and per-row state (OK / WARN / DRIFT / MISSING) is meaningful.
+	// `cfm kernsec apply` auto-reconciles. Keep Error populated for
+	// bootDivergenceMsg / TUI header surfacing, but treat the cmdline as
+	// readable for row-state computation.
+	nextDiverged := errors.Is(nextErr, ErrBLSDivergence)
+	nextKnown := nextErr == nil || nextDiverged
+	readErr := ""
+	if nextErr != nil {
+		readErr = nextErr.Error()
+	}
 	for i, a := range allBootArgs {
 		rr := rs.BootArgs[i]
 		curState, _ := CheckBootArg(curTokens, a)
 		nxtState, _ := CheckBootArg(nxtTokens, a)
-		readErr := ""
-		if nextErr != nil {
-			readErr = nextErr.Error()
-		}
 		row := AuditRow{
 			ID:            a.ID,
 			Kind:          KindBoot,
@@ -196,10 +206,10 @@ func BuildAuditRows(conf *Conf, profile HostProfile) []AuditRow {
 			Advisories:    rr.Advisories,
 			InCurrent:     curState == ArgOK,
 			InNextBoot:    nxtState == ArgOK,
-			NextBootKnown: nextErr == nil,
+			NextBootKnown: nextKnown,
 			Error:         readErr,
 		}
-		row.State = bootRowStateForDecision(rr.Decision, curState, nxtState, nextErr == nil)
+		row.State = bootRowStateForDecision(rr.Decision, curState, nxtState, nextKnown)
 		rows = append(rows, row)
 	}
 
