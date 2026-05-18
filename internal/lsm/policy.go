@@ -249,10 +249,17 @@ const (
 	//   AF_INET  + SOCK_RAW           — arbitrary L3 IPv4 send / recv.
 	//   AF_INET6 + SOCK_RAW           — same for IPv6.
 	//
-	// Modern Linux's unprivileged-ping mechanism uses SOCK_DGRAM +
-	// IPPROTO_ICMP and does NOT trip the rule. The setuid /bin/ping
-	// that's still on most distros DOES use SOCK_RAW but runs
-	// effective-uid 0, so the watched-uid gate filters it out.
+	// `ping` handling: modern Linux's ping_group_range / SOCK_DGRAM
+	// path does not use SOCK_RAW at all and never trips the rule.
+	// The SOCK_RAW fallback (used on hosts with closed
+	// ping_group_range) IS triggered by iputils-ping, but the BPF
+	// program's euid==0 fast-path skip suppresses the legacy
+	// setuid /bin/ping case. The modern file-cap'd /bin/ping
+	// (cap_net_raw+ep on Debian / Ubuntu / EL9+) runs at
+	// euid=watched and WILL fire the rule; operators on hosts where
+	// vhost users routinely run ping should add
+	// `allow_exe = /usr/bin/ping` under [allow] in lsm.conf to
+	// suppress, or stay in monitor mode and ignore the events.
 	//
 	// Hook: lsm/socket_create
 	//
@@ -425,7 +432,7 @@ func AllPolicies() []Policy {
 			Title:       "raw / packet socket from web-class user",
 			Hook:        "socket_create",
 			DefaultMode: ModeDisabled,
-			Description: "Detect a watched-uid task opening a raw (AF_INET/INET6 + SOCK_RAW) or packet (AF_PACKET) socket. Catches scanner / sniffer / spoofing toolkit drops by a compromised vhost user. Modern unprivileged ping (SOCK_DGRAM + IPPROTO_ICMP) does NOT trigger; setuid /bin/ping runs as euid=0 and is filtered by the watched-uid gate. Monitor by default; enforce-capable — returns -EPERM out of socket(2) so the dropper sees the failure and the primitive never lands.",
+			Description: "Detect a watched-uid task opening a raw (AF_INET/INET6 + SOCK_RAW) or packet (AF_PACKET) socket. Catches scanner / sniffer / spoofing toolkit drops by a compromised vhost user. Modern unprivileged ping (SOCK_DGRAM + IPPROTO_ICMP) does NOT trigger. The SOCK_RAW ping fallback by a watched uid IS suppressed when the task runs at euid=0 (legacy setuid /bin/ping), but NOT when the binary holds CAP_NET_RAW via file capabilities (modern /bin/ping on Debian / Ubuntu / EL9+) — those events surface in monitor mode and can be suppressed via allow_exe under [allow] in lsm.conf. Monitor by default; enforce-capable (returns -EPERM out of socket(2)) — promote to enforce only after monitor confirms vhost users on this host don't routinely run cap_net_raw binaries (ping / traceroute / mtr).",
 		},
 	}
 }

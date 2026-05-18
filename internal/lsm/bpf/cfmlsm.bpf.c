@@ -2524,8 +2524,8 @@ int BPF_PROG(cfm_obs004, struct task_struct *child, unsigned int mode, int ret)
  * Threat: post-exploit scanner / sniffer / spoofing toolkit. Legitimate
  * vhost-user workloads (PHP / Python / MySQL clients) have zero use
  * for raw sockets; root daemons that genuinely need them (named for
- * DNS, ping, dhclient, NetworkManager) all run as uid 0 with
- * CAP_NET_RAW and are filtered by the watched-uid gate.
+ * DNS, dhclient, NetworkManager) all run as uid 0 and are filtered
+ * out by the watched-uid gate at the top of the program.
  *
  * Coverage:
  *   - AF_PACKET sockets             — full L2 frame sniff / inject.
@@ -2536,11 +2536,22 @@ int BPF_PROG(cfm_obs004, struct task_struct *child, unsigned int mode, int ret)
  *                                     injection / scan toolkits.
  *   - AF_INET6 + SOCK_RAW           — same for IPv6.
  *
- * Modern Linux's "ping group" mechanism uses SOCK_DGRAM + IPPROTO_ICMP
- * (NOT SOCK_RAW), so unprivileged `ping` does NOT trip the rule. The
- * setuid /bin/ping that's still on most distros DOES use SOCK_RAW but
- * runs effective-uid 0, so cfm_uid_watched returns false and the rule
- * stays quiet there too.
+ * `ping` behaviour by host configuration:
+ *   - Modern Linux's "ping group" mechanism uses SOCK_DGRAM +
+ *     IPPROTO_ICMP (NOT SOCK_RAW), so unprivileged `ping` on hosts
+ *     with open net.ipv4.ping_group_range does NOT trip the rule
+ *     regardless of who calls it.
+ *   - On hosts where ping_group_range is closed (the default on
+ *     most distros) iputils falls back to SOCK_RAW. The legacy
+ *     setuid /bin/ping path runs at euid=0 and is suppressed by
+ *     the program's euid==0 fast-path skip below. The modern
+ *     cap_net_raw+ep /bin/ping (Ubuntu / Debian / EL9+) runs at
+ *     euid=watched even though it holds CAP_NET_RAW, so a watched
+ *     uid invoking it WILL fire the rule. Operators on hosts where
+ *     vhost users routinely run `ping` should add
+ *     `allow_exe = /usr/bin/ping` (or `/bin/ping`) under [allow] in
+ *     lsm.conf to suppress, OR keep the rule in monitor mode and
+ *     ignore the events.
  *
  * No kernsec sysctl pairing — there's no equivalent kernel-side knob
  * (CAP_NET_RAW is per-process and per-binary, not a global toggle).
@@ -2644,12 +2655,31 @@ int BPF_PROG(cfm_net002, int family, int type, int protocol, int kern, int ret)
         return ret;
     }
 
-    /* Watched-uid gate. Root daemons (named, dhclient, NetworkManager,
-     * setuid /bin/ping) all open raw sockets legitimately and we
-     * filter them out cheaply via the watched-uids hash map. */
+    /* Watched-uid gate. bpf_get_current_uid_gid() returns the REAL
+     * uid (current_cred()->uid), not the effective one — so root
+     * daemons running as uid 0 (named, dhclient, NetworkManager)
+     * are filtered out here. */
     __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
     if (!cfm_uid_watched(uid))
         return ret;
+
+    /* Effective-uid 0 fast-path skip. A watched-uid task that exec'd
+     * a setuid-root binary (/bin/ping on older distros, /usr/sbin/
+     * traceroute, /usr/bin/mtr) has real_uid=watched but euid=0;
+     * those are legitimate raw-socket callers that walked through a
+     * trusted privilege-escalation channel and should not fire the
+     * rule. Note: this does NOT cover file-capability-granted
+     * raw-socket binaries (modern /bin/ping with cap_net_raw+ep
+     * runs at euid=watched even though it holds CAP_NET_RAW); those
+     * still fire and the operator-side mitigation is to add
+     * allow_exe=/bin/ping (or similar) under [allow] in lsm.conf if
+     * vhost users routinely run ping on this host. */
+    struct task_struct *task = bpf_get_current_task_btf();
+    if (task) {
+        __u32 euid = BPF_CORE_READ(task, cred, euid.val);
+        if (euid == 0)
+            return ret;
+    }
 
     cfm_net002_emit(op, protocol);
 
