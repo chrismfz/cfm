@@ -98,10 +98,19 @@ for the trade-offs and how to choose.
     - [CLI Reference — cfm mysqltop](#cli-reference--cfm-mysqltop)
     - [HTTP API](#http-api)
     - [Full detectors.conf Example](#full-detectorsconf-example)
-11. [CLI Reference – `cfm webtop`](#11-cli-reference--cfm-webtop)
-12. [Web Detector HTTP API](#12-web-detector-http-api)
-13. [Appendix: cfm.conf Snippets](#13-appendix-cfmconf-snippets)
-14. [Security Notes](#14-security-notes)
+11. [Kernel Hardening — `cfm kernsec`](#11-kernel-hardening--cfm-kernsec)
+    - [What it manages](#what-it-manages)
+    - [Tier model](#tier-model)
+    - [How rules reinforce each other](#how-rules-reinforce-each-other)
+12. [BPF LSM — `cfm-lsm`](#12-bpf-lsm--cfm-lsm)
+    - [What it catches](#what-it-catches)
+    - [Modes and the two-process model](#modes-and-the-two-process-model)
+    - [Watched-uid model](#watched-uid-model)
+    - [How policies stack](#how-policies-stack)
+    - [How kernsec and cfm-lsm complement each other](#how-kernsec-and-cfm-lsm-complement-each-other)
+13. [CLI Reference – `cfm webtop`](#13-cli-reference--cfm-webtop)
+14. [Web Detector HTTP API](#14-web-detector-http-api)
+15. [Security Notes](#15-security-notes)
 
 ---
 
@@ -1223,7 +1232,258 @@ The governor registers on the cfm debug server (`LISTEN_ADDRESS:PORT`, default `
 
 ---
 
-## 11. CLI Reference – `cfm webtop`
+## 11. Kernel Hardening — `cfm kernsec`
+
+`cfm kernsec` is the preemptive surface-reduction layer — it shapes
+the host *before* an attack arrives so that even a successful
+userspace foothold has less to pivot through. Instead of waiting
+for a CVE and chasing patched kernels across the fleet, kernsec
+disables surface that has no business being reachable on a hosting
+box in the first place: dead network protocols, recently-exploited
+modules with no use case, userspace crypto APIs nobody calls,
+unprivileged BPF, and risky boot-time defaults.
+
+Full design and per-rule rationale live in
+[`docs/kernsec.md`](docs/kernsec.md). This section is the
+operator-facing summary.
+
+### What it manages
+
+| Mechanism | File / surface kernsec writes | Reversible via |
+|---|---|---|
+| **Sysctls** | `/etc/sysctl.d/99-cfm-kernsec.conf` + runtime `sysctl -w` | `cfm kernsec rollback` |
+| **Boot arguments** | Bootloader entries (GRUB2 / systemd-boot / extlinux), detected automatically | `cfm kernsec rollback` (next reboot) |
+| **Module blacklists** | `/etc/modprobe.d/cfm-kernsec.conf` | `cfm kernsec rollback` |
+| **Mount audit** | Reports `noexec` / `nosuid` / `nodev` gaps on `/tmp`, `/var/tmp`, `/dev/shm`, plus `hidepid=2` on `/proc`. **Audit-only** — fstab is never auto-edited (one option can break real hosting workflows) | `cfm kernsec secure-tmp` for the assisted recipe |
+| **Drift monitor** | `cfm-kernsec-check.timer` / `.service` re-audits live state on a schedule and alerts on diff | `cfm kernsec monitor disable` |
+
+Sample concrete coverage: `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1`,
+`kernel.yama.ptrace_scope=2`, `kernel.unprivileged_bpf_disabled=2`,
+`kernel.kexec_load_disabled=1`, `vm.mmap_min_addr=65536`, ASLR /
+mmap-randomization knobs, `slab_nomerge`, `init_on_alloc=1`,
+`page_alloc.shuffle=1`, `randomize_kstack_offset=on`, `tsx=off`,
+plus module blacklists for `ksmbd`, `dccp`, `sctp`, `rds`, `tipc`,
+`af_802154`, `ax25`, `netrom`, `n-hdlc`, `ppp-generic` and the
+`algif_*` userspace-crypto family.
+
+### Tier model
+
+Each rule has a tier; the operator picks per-host how aggressive to
+get. Rules are also gated by **host-profile probes** so the same
+ruleset behaves correctly across cPanel, DirectAdmin, KVM
+hypervisors, KernelCare-patched kernels, ZFS, and bare-metal hosting.
+
+| Tier | Meaning | Operator expectation |
+|---|---|---|
+| **1** | Default hardening | Safe across typical hosting / KVM / cPanel / EL / Debian hosts. Apply broadly. |
+| **2** | Server-aggressive | Opt-in; may affect availability, diagnostics, containers, or hosting panels. Host-profile gates skip known-risk hosts unless forced. |
+| **0** | Audit-only | Not applied; status reports drift if the live value diverges from the recommendation. |
+
+Quick start:
+
+```bash
+cfm kernsec status              # audit current host against the catalogue
+cfm kernsec preview             # show what `apply` would change
+cfm kernsec apply               # write sysctls + boot args, refresh bootloader
+cfm kernsec monitor enable      # periodic drift-check systemd timer
+cfm kernsec rollback            # restore the pre-cfm baseline
+```
+
+### How rules reinforce each other
+
+The catalogue isn't a flat list — groups of rules deliberately
+stack so removing one knob still leaves the surface closed by
+another. Three examples:
+
+1. **Unprivileged BPF is sealed by three rules in sequence.**
+   `kernel.unprivileged_bpf_disabled=2` (sysctl) plus the matching
+   `unprivileged_bpf_disabled=2` boot argument (the only way to
+   land the sticky `=2` value on `CONFIG_BPF_UNPRIV_DEFAULT_OFF=y`
+   kernels) plus `net.core.bpf_jit_harden=2`. Even on a kernel that
+   would let the sysctl drift back to `=1`, the boot arg pins it,
+   and JIT hardening removes the spray primitive a partial bypass
+   would otherwise leave behind.
+
+2. **Memory-disclosure exploits cross multiple closed doors.**
+   `kernel.kptr_restrict=2` hides kernel pointers from
+   `/proc/kallsyms`/dmesg, `kernel.dmesg_restrict=1` restricts the
+   log to root, `vm.mmap_rnd_bits=32` widens ASLR entropy,
+   `vm.mmap_min_addr=65536` kills the NULL-deref-to-userspace
+   primitive, and the `slab_nomerge` + `init_on_alloc=1` +
+   `page_alloc.shuffle=1` + `randomize_kstack_offset=on` boot args
+   close the heap-grooming and uninitialised-memory paths most
+   public exploits route through.
+
+3. **Rootkit persistence is closed at three layers.**
+   `kernel.kexec_load_disabled=1` locks out post-boot kernel
+   replacement (auto-skipped on kdump hosts via the `HasKdump`
+   probe). The `modules.recent_cves` group blacklists `ksmbd`,
+   `dccp`, `sctp`, `rds`, `tipc`, and the `algif_*` family so a
+   `modprobe`-driven rootkit has fewer module names to autoload
+   through. `initcall_blacklist=algif_aead_init` (Copy Fail /
+   CVE-2026-31431 mitigation) hardens the AF_ALG path even when
+   the module *is* compiled in.
+
+Each group has a short audit row in `cfm kernsec status` showing
+which knobs are live, which are pending a reboot to converge,
+which were skipped by host profile, and which the operator
+explicitly forced.
+
+
+---
+
+## 12. BPF LSM — `cfm-lsm`
+
+`cfm-lsm` is the runtime layer that catches the **post-exploit
+consequences** of a successful userspace compromise — the things
+that happen *after* a webshell already runs code on the host. It
+hooks the kernel via **BPF LSM** programs (CO-RE; no kernel
+module; no DKMS) and observes userspace behaviour at the syscall
+and credential-transition boundaries. Where `kernsec` shapes the
+ground in advance, `cfm-lsm` watches what crosses it.
+
+Full design, per-policy rationale, and operations details live in
+[`docs/cfm-lsm.md`](docs/cfm-lsm.md). This section is the
+operator-facing summary.
+
+### What it catches
+
+cfm-lsm rules are grouped by what aspect of post-exploit
+behaviour they detect. Each rule has a stable ID of the shape
+`CFML-<DOMAIN>-NNN`.
+
+| Domain | What the rules in this group detect | Example rules |
+|---|---|---|
+| **EXEC-*** | Suspicious `execve()` patterns — what's running and from where | Exec from `memfd_create` (fileless ELF loader); reverse-shell pattern (stdio dup'd to remote TCP socket); deleted-file exec (write→unlink→fexecve staging); web-class exec from `/tmp` or `/dev/shm`; kernel-module load by non-trusted comm; `kexec_load(2)` watch |
+| **FS-*** | Filesystem actions by web-class uids on host-sensitive state | Sensitive-file writes (`/etc/shadow`, `/etc/sudoers*`, `/root/.ssh/`); fd-cred mismatch (root-owned fd read by non-root task — the setuid-helper fd-leak class); privilege-primitive install (`chmod 4755`, `setcap` xattr); write to sensitive kernel knobs (`core_pattern`, `modprobe_path`, `sysrq-trigger`, `uevent_helper`) |
+| **CRED-*** | Credential transitions that mark privilege escalation | `uid → 0` via setuid path; direct `commit_creds()` install (kernel-exploit fingerprint); capability-set raise via `prctl(PR_CAP_AMBIENT_RAISE)` |
+| **OBS-*** | Process-introspection patterns used for credential theft | `ptrace_access_check` from a watched uid (sibling-worker credential-theft pattern) |
+| **NET-*** | Network-layer primitives that don't belong in a web workload | Raw / AF_PACKET socket creation by a watched uid (scanner / sniffer / spoofing toolkit) |
+| **BPF-*** | Unexpected `bpf()` syscall use outside CFM and trusted distro agents | `BPF_MAP_CREATE` / `BPF_PROG_LOAD` from non-trusted comm |
+
+The catalogue grows over time — new rules ship with stable IDs and
+monitor-mode-first defaults so adding a rule does not block on an
+existing host's enforce-mode promotion clock.
+
+### Modes and the two-process model
+
+Each rule is in one of three states: **disabled** (program not
+loaded), **monitor** (program loads, fires events, never blocks),
+**enforce** (program loads, blocks the underlying syscall with
+`-EPERM` where the hook supports it). Some hooks are tracepoints
+(`bpf()`, `init_module`, `kexec_load`) and are structurally
+**monitor-only** because tracepoints ignore BPF return values —
+those rules pair with a `kernsec` sysctl for the actual block.
+
+cfm-lsm separates **protection** from **event collection**:
+
+```
+   cfm lsm enable
+        ↓
+   BPF programs load + pin to /sys/fs/bpf/cfm/   ← protection lives here
+        ↓
+   cfm daemon starts → AdoptPinned → drains ringbuf into notify
+```
+
+After `cfm lsm enable`, the BPF programs stay attached **even with
+`systemctl stop cfm`** — block decisions happen inside the kernel,
+not in userspace. The daemon's role is to ship events out; the
+pinned state survives daemon restarts and crashes. On the next
+boot, the daemon's lifecycle code self-heals by re-running the
+preflight and adopting (or re-creating) the pins.
+
+### Watched-uid model
+
+Several rules gate on whether the calling task's uid is in the
+daemon-populated `cfm_watched_uids` BPF map. The set is built at
+adoption time from three additive layers:
+
+1. **Static web-user names + prefixes** — `apache`, `nginx`,
+   `www-data`, `http`, `httpd`, `lighttpd`, `caddy`, `tomcat`,
+   `php`, `lsphp`, `proxy`, `nobody`, plus `alt-php-*` /
+   `alt-php-fpm-*` for CloudLinux per-version FPM workers.
+2. **Panel manifest contributions** — every uid that owns a vhost
+   in `/etc/userdomains` (cPanel) or DirectAdmin's domain-owners
+   file.
+3. **`watched_uid_fallback_min` uid-range sweep** — every uid in
+   `/etc/passwd` at or above this threshold (shipped default
+   `1000`). Set to `0` to disable; configurable per-host with
+   `exclude_user` / `exclude_uid` / `exclude_gid` for trusted
+   admin accounts.
+
+### How policies stack
+
+Within cfm-lsm, individual rules deliberately tile related
+threat-model phases so a single attack pattern triggers multiple
+events at different stages. Three examples:
+
+1. **Drop-and-reuse privilege primitives.** `CFML-FS-007` catches
+   the *install* of a privilege primitive (`chmod 4755` or `setcap
+   cap_setuid+ep` on a binary by a watched uid); `CFML-CRED-002`
+   catches the *use* of that primitive later (the dropper running
+   from an unprivileged shell and going `uid → 0` through a
+   non-allowlisted setuid binary). Both events from the same
+   compromise narrate the persistence story end to end.
+
+2. **The three credential-escalation primitives.** `CFML-CRED-002`,
+   `CFML-CRED-003`, and `CFML-CRED-004` tile the credential-state
+   space without overlap: CRED-002 catches `uid → 0` via the
+   setuid syscall path; CRED-003 catches direct `commit_creds()`
+   installs that bypass the setuid syscall entirely (kernel-exploit
+   fingerprint); CRED-004 catches capability-set raises that
+   happen *without* a uid change (the `prctl(PR_CAP_AMBIENT_RAISE)`
+   pattern). Together they cover every realistic primitive an
+   attacker uses to make their compromise persist past the
+   exploit.
+
+3. **Stage and cash in from `/tmp`.** `CFML-EXEC-004` catches the
+   open-unlink-exec sequence by a web user (writing a binary,
+   unlinking it, exec'ing the still-open fd to break forensics);
+   `CFML-EXEC-006` catches exec from `/tmp`, `/var/tmp`, or
+   tmpfs-backed paths by a watched uid (the execution-phase
+   companion to Imunify Proactive Defense's write-phase guard).
+   Either fires the post-exploit staging pattern; both together
+   give the operator the full payload-lifecycle.
+
+### How kernsec and cfm-lsm complement each other
+
+The two layers are designed to **not overlap on managed surface**.
+`kernsec` writes sysctls / boot args / modules / mounts;
+`cfm-lsm` attaches BPF LSM hooks. But several threat models live
+in the seam between them — what kernsec blocks at the kernel
+layer, cfm-lsm records as forensic context, and vice versa.
+
+| Threat | `kernsec` (preemptive) | `cfm-lsm` (runtime) | How they pair |
+|---|---|---|---|
+| **Rootkit persistence via `kexec_load(2)`** | `kernel.kexec_load_disabled=1` makes the syscall return `-EPERM`. | `CFML-EXEC-008` tracepoint records every attempt (entry-side, fires before the sysctl check). | kernsec blocks; cfm-lsm gives the forensic trail of attackers probing the lockout. |
+| **Cross-tenant `/proc` snooping** | `/proc hidepid=2,gid=<group>` mount option (audit-only; operator opts in via the documented recipe). | (deferred — `CFML-OBS-003` design pending benchmark of `file_permission` hot path) | When OBS-003 ships, it will record open-attempts even on hosts that haven't applied hidepid; until then, kernsec is the only layer. |
+| **Sibling-worker credential theft via `ptrace`** | `kernel.yama.ptrace_scope=2` rejects all but `PR_SET_PTRACER`-negotiated traces. | `CFML-OBS-004` records every `ptrace_access_check` by a watched uid. | Full cfm-lsm coverage on `yama≤1` hosts (the distro default). On `yama=2` the BPF hook is pre-empted by yama's earlier `-EPERM` in the LSM chain — kernsec is the block, cfm-lsm sees only `PR_SET_PTRACER`-allowed traces. |
+| **Unprivileged BPF abuse** | `kernel.unprivileged_bpf_disabled=2` + matching boot arg + `bpf_jit_harden=2`. | `CFML-BPF-001` records `bpf()` syscall use outside the trusted-agent set. | kernsec eliminates the surface; cfm-lsm watches the residual call paths (e.g. root daemons making unexpected `bpf()` calls). |
+| **Kernel module load as rootkit installer** | `modules.recent_cves` blacklist family blocks specific risky module names. | `CFML-EXEC-007` records `init_module(2)` / `finit_module(2)` from non-trusted comm. | Belt-and-braces: the blacklist names what's blocked, EXEC-007 catches anything else that tries to load. |
+| **Sensitive `/proc/sys` knob writes** | (no equivalent sysctl) | `CFML-FS-008` records writes to `core_pattern`, `modprobe_path`, `sysrq-trigger`, `uevent_helper` from non-trusted comm. | cfm-lsm-only — kernsec already restricts dmesg / kptr, but the knob-write primitive is a post-exploit pivot a sysctl can't express. |
+| **Setuid-helper fd-leak race** | `kernel.yama.ptrace_scope=2` kills the modern `pidfd_getfd()` primitive. | `CFML-FS-006` records non-root reads of sensitive files via root-owned fd (the kernel-side fingerprint of the leak class). | If the operator `state = skip`s the kernsec rule for same-uid debuggability, FS-006 is the belt-and-braces layer. |
+| **Raw / packet socket from web user** | (no equivalent sysctl — CAP_NET_RAW is per-binary, not global) | `CFML-NET-002` records `socket(AF_PACKET, …)` / `socket(AF_INET[6], SOCK_RAW, …)` from a watched uid. | cfm-lsm-only. |
+| **Capability hoarding via `prctl`** | (no global sysctl to disable `PR_CAP_AMBIENT_RAISE`) | `CFML-CRED-004` records cap-set raises in `cap_ambient` / `cap_inheritable` by watched uids. | cfm-lsm-only — operator-side mitigation is capability-management hygiene (`getcap -r /home /var`). |
+
+Quick start for the runtime layer:
+
+```bash
+cfm lsm status                  # kernel preflight + per-rule state
+cfm lsm probe                   # verify the kernel accepts attach (detaches afterwards)
+cfm lsm enable                  # load + pin (persists past daemon restart and reboot)
+systemctl restart cfm           # daemon adopts pinned state, drains events into notify
+cfm lsm disable                 # turn off + unpin
+```
+
+PoC scenarios that exercise every rule live under
+[`tests/lsm-poc/`](tests/lsm-poc/) — one short shell script per
+rule, each emitting a verifiable `CFML-*-NNN` line into the LSM
+log within a timeout.
+
+
+---
+
+## 13. CLI Reference – `cfm webtop`
 
 ```bash
 cfm webtop                       # summary (short + suspicious)
@@ -1311,7 +1571,7 @@ Expected output semantics:
 
 ---
 
-## 12. Web Detector HTTP API
+## 14. Web Detector HTTP API
 
 The Web Detector exposes a local API used by the CLI and integrations (`API_LISTEN`).
 
@@ -1366,7 +1626,7 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 
 ---
 
-## 13. Security Notes
+## 15. Security Notes
 
 - In **DNAT mode**, keep the challenge listeners local-only (`127.0.0.1`). Do not expose them directly to the internet.
 - In **in-path mode** (OpenResty or Angie), treat the unix socket as sensitive — enforce tight file permissions and always use the token.
