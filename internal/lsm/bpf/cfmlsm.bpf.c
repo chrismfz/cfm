@@ -2843,11 +2843,16 @@ int BPF_PROG(cfm_cred004, struct cred *new)
     __u8 base;
     __u32 raised_lo = (__u32)(raised & 0xffffffffu);
     if (raised_lo) {
-        v = raised_lo & (__u32)(-(__s32)raised_lo);
+        /* Isolate lowest set bit via `x & -x`. Phrased as
+         * (0u - raised_lo) — well-defined unsigned negation for
+         * every u32 value including 0x80000000 (where the more
+         * compact `-(__s32)raised_lo` would be signed-integer
+         * overflow / UB even though LLVM happens to wrap). */
+        v = raised_lo & (0u - raised_lo);
         base = 0;
     } else {
         __u32 raised_hi = (__u32)(raised >> 32);
-        v = raised_hi & (__u32)(-(__s32)raised_hi);
+        v = raised_hi & (0u - raised_hi);
         base = 32;
     }
     __u8 r = 0;
