@@ -87,7 +87,7 @@ func RunInit(w io.Writer) int {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "===== cfm lsm init: enable =====")
 	fmt.Fprintln(w)
-	if rc := RunEnable(w, EnableOptions{AssumeYes: true}); rc != 0 {
+	if rc := RunEnable(w, EnableOptions{AssumeYes: true, Build: CLIBuild}); rc != 0 {
 		return rc
 	}
 

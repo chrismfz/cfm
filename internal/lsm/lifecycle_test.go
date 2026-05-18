@@ -62,7 +62,7 @@ func TestAnyEnabled(t *testing.T) {
 }
 
 func TestNewLifecycle_IsDormantUntilApplyConfig(t *testing.T) {
-	lc := NewLifecycle()
+	lc := NewLifecycle(BuildMarker{})
 	if lc == nil {
 		t.Fatal("NewLifecycle returned nil")
 	}
@@ -126,7 +126,7 @@ func TestLifecycle_DriftDetected_TearsDownStaleState(t *testing.T) {
 		t.Skip("pinned ringbuf exists on this host; drift branch needs an absent pin to exercise")
 	}
 
-	lc := NewLifecycle()
+	lc := NewLifecycle(BuildMarker{})
 	lc.started = true
 	lc.pinnedRingbufIno = 0xDEADBEEF // sentinel non-zero, definitely won't match anything
 
