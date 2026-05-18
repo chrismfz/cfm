@@ -421,6 +421,13 @@ func detectSCTPWorkload() bool {
 // knows their interactive workflows (gdb --attach, strace -p,
 // bpftrace -p) will need sudo afterward.
 func detectDevTools() bool {
+	// /usr/bin/perf is intentionally NOT in this list: it ships in
+	// linux-tools-* / perf packages that are installed by default on
+	// many cloud-vendor base images (AWS Linux 2, Ubuntu cloud-init,
+	// OpenShift workers). Including it would fire the advisory on a
+	// large fraction of fleets and defeat the "no noise on clean
+	// fleets" goal. The remaining signals are interactive debuggers
+	// the operator deliberately installed.
 	return anyPathExists(
 		"/usr/bin/gdb",
 		"/usr/bin/strace",
@@ -431,7 +438,6 @@ func detectDevTools() bool {
 		"/usr/sbin/bpftrace",
 		"/usr/share/bcc/tools",
 		"/usr/share/bcc-tools",
-		"/usr/bin/perf",
 	)
 }
 
@@ -457,7 +463,6 @@ func detectKSMBDServer() bool {
 		"/usr/sbin/ksmbd.control",
 		"/usr/bin/ksmbd.mountd",
 		"/etc/ksmbd",
-		"/etc/ksmbd/ksmbd.conf",
 		"/usr/lib/systemd/system/ksmbd.service",
 		"/lib/systemd/system/ksmbd.service",
 	)
@@ -499,8 +504,12 @@ func detectAFS() bool {
 	if procMountsHasFS("afs") {
 		return true
 	}
+	// /afs is intentionally NOT in this list: the Debian openafs-client
+	// package creates an empty /afs stub directory at install time, so
+	// mere existence is a false-positive signal. procMountsHasFS("afs")
+	// above already catches the only case that matters — a real AFS
+	// cell mounted there.
 	return anyPathExists(
-		"/afs",
 		"/etc/openafs",
 		"/usr/vice/etc",
 		"/usr/afs",
@@ -656,9 +665,27 @@ func firstMatchingFSFromFstab(watch map[string]struct{}) string {
 		if len(fields) < 3 {
 			continue
 		}
-		if _, ok := watch[fields[2]]; ok {
-			return fields[2]
+		if _, ok := watch[fields[2]]; !ok {
+			continue
 		}
+		// Skip entries the operator keeps for documentation but isn't
+		// actually mounting at boot — `noauto` means systemd / mount -a
+		// don't pick it up, so blacklisting the FS doesn't break
+		// anything in practice. The options column is fstab field 4.
+		if len(fields) >= 4 {
+			opts := strings.Split(fields[3], ",")
+			hasNoauto := false
+			for _, opt := range opts {
+				if strings.TrimSpace(opt) == "noauto" {
+					hasNoauto = true
+					break
+				}
+			}
+			if hasNoauto {
+				continue
+			}
+		}
+		return fields[2]
 	}
 	return ""
 }
@@ -866,7 +893,7 @@ func (p HostProfile) Advisories(id, _ string) []string {
 		// init_on_free=1 — stacks alloc cost on subsystems that
 		// already have heavy memory traffic.
 		if p.HasZFS {
-			out = append(out, "ZFS detected — init_on_free=1 adds ~1-3% alloc cost stacked on top of ZFS ARC overhead; benchmark before production")
+			out = append(out, "ZFS detected — init_on_free=1 may add measurable alloc cost stacked on top of ZFS ARC overhead; benchmark before production")
 		}
 		if p.HasNVIDIA {
 			out = append(out, "NVIDIA driver detected — init_on_free=1 may add measurable alloc cost on GPU memory hot paths; benchmark if the workload is GPU-intensive")
@@ -991,6 +1018,17 @@ func (p HostProfile) SkipReason(group string) string {
 	case "modules.net.legacy.pptp":
 		if p.HasPPTPWorkload {
 			return "PPTP workload detected — pptp module loaded, /proc/net/pptp, or pptpd / accel-ppp installed"
+		}
+	case "modules.net.legacy.ppp":
+		// slhc (VJ header compression) is pulled in by ppp_async,
+		// pptp, and l2tp_ppp. Skip the blacklist whenever PPP-family
+		// VPN termination is detected, since slhc is on that data
+		// path even if generic PPP itself isn't blacklisted.
+		if p.HasL2TPWorkload {
+			return "L2TP workload detected — slhc is pulled in by l2tp_ppp's PPP CCP path"
+		}
+		if p.HasPPTPWorkload {
+			return "PPTP workload detected — slhc is pulled in by pptp's PPP CCP path"
 		}
 	case "modules.net.legacy.rds":
 		// rds is Oracle's RAC interconnect. False-positive risk is

@@ -362,6 +362,33 @@ func TestSkipReason_L2TPGate(t *testing.T) {
 	}
 }
 
+func TestSkipReason_PPPSlhcGate(t *testing.T) {
+	// slhc is in modules.net.legacy.ppp and must skip when either
+	// L2TP or PPTP workloads are detected (it sits on both data paths
+	// via PPP CCP).
+	if r := (HostProfile{HasL2TPWorkload: true}).SkipReason("modules.net.legacy.ppp"); r == "" {
+		t.Error("HasL2TPWorkload=true should produce a SkipReason for modules.net.legacy.ppp")
+	}
+	if r := (HostProfile{HasPPTPWorkload: true}).SkipReason("modules.net.legacy.ppp"); r == "" {
+		t.Error("HasPPTPWorkload=true should produce a SkipReason for modules.net.legacy.ppp")
+	}
+	if r := (HostProfile{}).SkipReason("modules.net.legacy.ppp"); r != "" {
+		t.Errorf("clean host should not skip modules.net.legacy.ppp; got %q", r)
+	}
+}
+
+func TestDetectAFS_StubDirectoryDoesNotFire(t *testing.T) {
+	// Debian openafs-client creates /afs as an empty stub even when no
+	// AFS cell is mounted. Mere existence must NOT trigger HasAFS —
+	// only a real `afs` mount in /proc/mounts or actual openafs/kafs
+	// tooling installed.
+	root := withHostProfileRoot(t)
+	mkdirHostPath(t, root, "/afs")
+	if detectAFS() {
+		t.Error("empty /afs stub directory must not signal AFS workload")
+	}
+}
+
 func TestSkipReason_PPTPGate(t *testing.T) {
 	if r := (HostProfile{HasPPTPWorkload: true}).SkipReason("modules.net.legacy.pptp"); r == "" {
 		t.Error("HasPPTPWorkload=true should produce a SkipReason for modules.net.legacy.pptp")
@@ -464,22 +491,19 @@ func TestDetectMountedDeadFS_ProcMounts(t *testing.T) {
 
 func TestDetectMountedDeadFS_Fstab(t *testing.T) {
 	root := withHostProfileRoot(t)
-	// Empty mounts, JFS-like entry in fstab — wait, jfs isn't in
-	// modules.fs.unused (deliberately). Use hpfs instead, which is.
 	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "proc/mounts"),
-		[]byte(""), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "proc/mounts"), []byte(""), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// hpfs in modules.fs.unused, mounted automatically (no `noauto`).
 	if err := os.WriteFile(filepath.Join(root, "etc/fstab"),
-		[]byte("# legacy partition kept for migration\n/dev/sdb1 /mnt/legacy hpfs noauto 0 0\n"), 0o644); err != nil {
-		_ = os.MkdirAll(filepath.Join(root, "etc"), 0o755)
-		if err := os.WriteFile(filepath.Join(root, "etc/fstab"),
-			[]byte("# legacy partition kept for migration\n/dev/sdb1 /mnt/legacy hpfs noauto 0 0\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		[]byte("/dev/sdb1 /mnt/legacy hpfs defaults 0 0\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	got, detail := detectMountedDeadFS()
 	if !got {
@@ -487,6 +511,29 @@ func TestDetectMountedDeadFS_Fstab(t *testing.T) {
 	}
 	if !strings.Contains(detail, "hpfs") {
 		t.Errorf("detail should name the fstab match; got %q", detail)
+	}
+}
+
+// TestDetectMountedDeadFS_FstabNoauto proves the `noauto` filter — an
+// entry the operator keeps for documentation but doesn't auto-mount
+// must NOT trigger the gate.
+func TestDetectMountedDeadFS_FstabNoauto(t *testing.T) {
+	root := withHostProfileRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc/mounts"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc/fstab"),
+		[]byte("# legacy partition kept for documentation only\n/dev/sdb1 /mnt/legacy hpfs noauto,ro 0 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, detail := detectMountedDeadFS(); got {
+		t.Errorf("noauto fstab entry must not trigger HasMountedDeadFS; got detail %q", detail)
 	}
 }
 

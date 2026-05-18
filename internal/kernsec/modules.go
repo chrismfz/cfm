@@ -111,8 +111,8 @@ var Tier1Modules = []ModuleRule{
 	{
 		ID: "KSEC-MOD-net.legacy-004", Group: "modules.net.legacy.rds", Tier: Tier1,
 		Name:        "rds",
-		Description: "Reliable Datagram Sockets; Oracle RAC interconnect transport. Has had LPEs and no use outside Oracle Database.",
-		Affects:     "Auto-skipped on hosts with Oracle / RDS indicators (host-profile gated via HasRDSWorkload: oratab, lsnrctl, /u01/app/oracle, rds module loaded).",
+		Description: "Reliable Datagram Sockets; Oracle RAC interconnect transport. Has had LPEs and no use outside Oracle Database. Blacklisting `rds` also stops `rds_tcp` and `rds_rdma` from loading because both depend on `rds` for symbol resolution.",
+		Affects:     "Auto-skipped on hosts with Oracle / RDS indicators (host-profile gated via HasRDSWorkload: oratab, lsnrctl, /u01/app/oracle, rds / rds_tcp / rds_rdma module loaded).",
 	},
 	{
 		ID: "KSEC-MOD-net.legacy-005", Group: "modules.net.legacy.rxrpc", Tier: Tier1,
@@ -271,10 +271,10 @@ var Tier1Modules = []ModuleRule{
 		Affects:     "None on servers; only matters if the host runs a serial-line IP link.",
 	},
 	{
-		ID: "KSEC-MOD-net.legacy-039", Group: "modules.net.legacy", Tier: Tier1,
+		ID: "KSEC-MOD-net.legacy-039", Group: "modules.net.legacy.ppp", Tier: Tier1,
 		Name:        "slhc",
-		Description: "Van Jacobson header compression for SLIP / PPP — pulled in by slip and by PPP CCP. No hosting use case outside legacy PPP links.",
-		Affects:     "Breaks VJ-compressed PPP if the host actually terminates PPP — override per-rule on PPP gateways.",
+		Description: "Van Jacobson header compression for SLIP / PPP — pulled in by slip and by PPP CCP (ppp_async, pptp, l2tp_ppp). No hosting use case outside legacy PPP links.",
+		Affects:     "Auto-skipped on hosts terminating L2TP or PPTP (host-profile gated via HasL2TPWorkload or HasPPTPWorkload). Override per-rule on hosts running other PPP transports.",
 	},
 	{
 		ID: "KSEC-MOD-net.legacy-020", Group: "modules.net.legacy", Tier: Tier1,
