@@ -74,6 +74,7 @@ type cfmlsmProgramSpecs struct {
 	CfmBpf001               *ebpf.ProgramSpec `ebpf:"cfm_bpf001"`
 	CfmCred002              *ebpf.ProgramSpec `ebpf:"cfm_cred002"`
 	CfmCred003              *ebpf.ProgramSpec `ebpf:"cfm_cred003"`
+	CfmCred004              *ebpf.ProgramSpec `ebpf:"cfm_cred004"`
 	CfmDeletedFileExec      *ebpf.ProgramSpec `ebpf:"cfm_deleted_file_exec"`
 	CfmEphemeralExec        *ebpf.ProgramSpec `ebpf:"cfm_ephemeral_exec"`
 	CfmExec007Finit         *ebpf.ProgramSpec `ebpf:"cfm_exec007_finit"`
@@ -195,6 +196,7 @@ type cfmlsmPrograms struct {
 	CfmBpf001               *ebpf.Program `ebpf:"cfm_bpf001"`
 	CfmCred002              *ebpf.Program `ebpf:"cfm_cred002"`
 	CfmCred003              *ebpf.Program `ebpf:"cfm_cred003"`
+	CfmCred004              *ebpf.Program `ebpf:"cfm_cred004"`
 	CfmDeletedFileExec      *ebpf.Program `ebpf:"cfm_deleted_file_exec"`
 	CfmEphemeralExec        *ebpf.Program `ebpf:"cfm_ephemeral_exec"`
 	CfmExec007Finit         *ebpf.Program `ebpf:"cfm_exec007_finit"`
@@ -230,6 +232,7 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmBpf001,
 		p.CfmCred002,
 		p.CfmCred003,
+		p.CfmCred004,
 		p.CfmDeletedFileExec,
 		p.CfmEphemeralExec,
 		p.CfmExec007Finit,

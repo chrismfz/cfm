@@ -21,7 +21,8 @@ HELPERS = \
 	$(BINDIR)/knob-writer \
 	$(BINDIR)/kexec-loader \
 	$(BINDIR)/ptracer \
-	$(BINDIR)/raw-socketer
+	$(BINDIR)/raw-socketer \
+	$(BINDIR)/cap-raiser
 
 .PHONY: all clean
 all: $(BINDIR) $(HELPERS)

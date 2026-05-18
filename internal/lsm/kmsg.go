@@ -161,7 +161,7 @@ func KmsgDetect(ev Event) {
 	if ev.Op != FSOpNone {
 		msg += " op=" + ev.Op.String()
 	}
-	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess || ev.PolicyID == PolicyRawSocket) && ev.Flags&EventFlagWebOrigin != 0 {
+	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess || ev.PolicyID == PolicyRawSocket || ev.PolicyID == PolicyCapRaise) && ev.Flags&EventFlagWebOrigin != 0 {
 		msg += " origin=web"
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
@@ -175,6 +175,9 @@ func KmsgDetect(ev Event) {
 		if ev.PtraceSameUid() {
 			msg += " sameuid=1"
 		}
+	}
+	if sets := ev.CapRaiseSets(); sets != "" {
+		msg += " cap_raise=" + sets
 	}
 	defaultKmsg.writeLine(kmsgPriWarning, "DETECT", msg)
 }

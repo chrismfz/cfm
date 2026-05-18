@@ -213,6 +213,21 @@ struct cred {
     struct kgid_t          egid;
     struct kuid_t          fsuid;
     struct kgid_t          fsgid;
+    /* Capability sets. The kernel field type is kernel_cap_t, which
+     * changed layout in 6.3 (commit f7d7a8e2cf02):
+     *   pre-6.3: struct kernel_cap_struct { __u32 cap[2]; }
+     *   6.3+:    typedef struct { __u64 val; } kernel_cap_t
+     * Both forms are 8 bytes total. Declaring each field as __u64
+     * here lets CO-RE resolve the field offset from kernel BTF and
+     * read 8 bytes as a single u64; on pre-6.3 the read returns
+     * cap[0] | (cap[1] << 32), which is bit-for-bit identical to
+     * the 6.3+ val representation. CO-RE field access is by name,
+     * so the in-source order does not need to match the kernel
+     * struct layout — only field names matter. Used by CFML-CRED-004
+     * to detect cap_ambient / cap_inheritable raises by watched
+     * uids. */
+    __u64                  cap_inheritable;
+    __u64                  cap_ambient;
 } ___NCO;
 
 struct mm_struct {

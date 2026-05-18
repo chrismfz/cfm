@@ -26,6 +26,7 @@ const (
 	bpfPolicyKexecLoad           uint32 = 16
 	bpfPolicyPtraceAccess        uint32 = 17
 	bpfPolicyRawSocket           uint32 = 18
+	bpfPolicyCapRaise            uint32 = 19
 )
 
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
@@ -159,6 +160,14 @@ const (
 	EventFlagPtraceRead    uint8 = 1 << 4
 	EventFlagPtraceAttach  uint8 = 1 << 5
 	EventFlagPtraceSameUid uint8 = 1 << 6
+
+	// CFML-CRED-004 — which capability-set gained the new bit(s).
+	// Bits 4-5 are reused from EXEC-006 / FS-007 / OBS-004 at the
+	// same numeric positions; PolicyID disambiguates per event.
+	// AMBIENT and INHERITABLE may coexist on a single event if both
+	// sets gained bits in the same prctl call.
+	EventFlagCapRaiseAmbient     uint8 = 1 << 4
+	EventFlagCapRaiseInheritable uint8 = 1 << 5
 )
 
 // Event is the Go-side projection of struct cfm_lsm_event emitted by
@@ -263,6 +272,36 @@ func (e Event) PtraceMode() string {
 		return "attach"
 	case read:
 		return "read"
+	}
+	return ""
+}
+
+// CapRaiseSets renders the CFML-CRED-004 capability-set bits encoded
+// in Event.Flags as a short token. Returns empty for events from
+// other policies (the same numeric bits belong to other detectors'
+// flag fields — PolicyID disambiguates).
+//
+// Tokens:
+//   - "ambient"              — only cap_ambient gained bits
+//   - "inheritable"          — only cap_inheritable gained bits
+//   - "ambient+inheritable"  — both sets gained bits (common when
+//                              prctl(PR_CAP_AMBIENT_RAISE) is preceded
+//                              by an inheritable-set update in the
+//                              same commit_creds)
+//   - ""                     — defensive default; shouldn't fire
+func (e Event) CapRaiseSets() string {
+	if e.PolicyID != PolicyCapRaise {
+		return ""
+	}
+	ambient := e.Flags&EventFlagCapRaiseAmbient != 0
+	inherit := e.Flags&EventFlagCapRaiseInheritable != 0
+	switch {
+	case ambient && inherit:
+		return "ambient+inheritable"
+	case ambient:
+		return "ambient"
+	case inherit:
+		return "inheritable"
 	}
 	return ""
 }
@@ -377,6 +416,8 @@ func parseEvent(raw []byte) (Event, error) {
 		e.PolicyID = PolicyPtraceAccess
 	case bpfPolicyRawSocket:
 		e.PolicyID = PolicyRawSocket
+	case bpfPolicyCapRaise:
+		e.PolicyID = PolicyCapRaise
 	default:
 		return Event{}, fmt.Errorf("unknown BPF policy_id %d", policyID)
 	}
