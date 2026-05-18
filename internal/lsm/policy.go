@@ -275,6 +275,41 @@ const (
 	// CAP_NET_RAW to a vhost user can opt the rule out via
 	// `state = skip`).
 	PolicyRawSocket PolicyID = "CFML-NET-002"
+
+	// PolicyCapRaise — CFML-CRED-004: detect a watched (web-class)
+	// uid's task gaining bits in cap_ambient or cap_inheritable.
+	// Threat: post-exploit capability hoarding. The attacker holds
+	// CAP_X in inheritable (granted via file-cap or previous
+	// commit_creds), calls prctl(PR_CAP_AMBIENT_RAISE) to push the
+	// cap into the ambient set, and the cap then survives every
+	// subsequent execve() — the canonical cred-survives-process-
+	// boundary pattern.
+	//
+	// Hook: fentry/commit_creds
+	//
+	// Compares old cred vs new cred for cap_ambient and
+	// cap_inheritable. cap_effective changes are NOT in scope —
+	// every setuid binary bumps effective and we'd drown in noise.
+	// uid→0 transitions are also excluded (they're CFML-CRED-002 /
+	// CFML-CRED-003's domain).
+	//
+	// Triangulates with the other two cred-detection policies:
+	//   CFML-CRED-002: catches uid→0 (privilege escalation by uid)
+	//   CFML-CRED-003: catches direct commit_creds installs (kernel
+	//                  exploit fingerprint)
+	//   CFML-CRED-004: catches cap-set raises without uid change
+	//                  (capability hoarding via prctl)
+	//
+	// No kernsec sysctl pairing — there is no global "disable
+	// prctl(PR_CAP_AMBIENT_RAISE)" knob.
+	//
+	// Mode: monitor ONLY. fentry/commit_creds is a trace probe, not
+	// an LSM decision point — the kernel ignores any return value
+	// (same constraint as CRED-003). Enforce is downgraded at
+	// enable time. The operator-side block is capability-management
+	// hygiene: audit `getcap -r /home /var` for unexpected file
+	// capabilities on watched-uid paths.
+	PolicyCapRaise PolicyID = "CFML-CRED-004"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -434,6 +469,13 @@ func AllPolicies() []Policy {
 			DefaultMode: ModeDisabled,
 			Description: "Detect a watched-uid task opening a raw (AF_INET/INET6 + SOCK_RAW) or packet (AF_PACKET) socket. Catches scanner / sniffer / spoofing toolkit drops by a compromised vhost user. Modern unprivileged ping (SOCK_DGRAM + IPPROTO_ICMP) does NOT trigger. The SOCK_RAW ping fallback by a watched uid IS suppressed when the task runs at euid=0 (legacy setuid /bin/ping), but NOT when the binary holds CAP_NET_RAW via file capabilities (modern /bin/ping on Debian / Ubuntu / EL9+) — those events surface in monitor mode and can be suppressed via allow_exe under [allow] in lsm.conf. Monitor by default; enforce-capable (returns -EPERM out of socket(2)) — promote to enforce only after monitor confirms vhost users on this host don't routinely run cap_net_raw binaries (ping / traceroute / mtr).",
 		},
+		{
+			ID:          PolicyCapRaise,
+			Title:       "capability-set raise by web-class user",
+			Hook:        "fentry/commit_creds",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a watched-uid task gaining new bits in cap_ambient or cap_inheritable — the canonical post-exploit capability-hoarding pattern (prctl(PR_CAP_AMBIENT_RAISE) moves a cap from inheritable into ambient, where it survives every subsequent execve). cap_effective changes are NOT compared (legitimate setuid binaries bump effective routinely). uid→0 transitions are excluded — those are CFML-CRED-002's / CFML-CRED-003's domain. Event flags carry AMBIENT/INHERITABLE/both; filename payload carries the bit index of the lowest newly-raised capability (cap=NN, e.g. cap=7 = CAP_SETUID). Monitor-only by design — fentry/commit_creds is a trace probe, not an LSM decision point. Operator-side mitigation is capability-management hygiene: audit `getcap -r /home /var` for unexpected file capabilities on watched-uid paths.",
+		},
 	}
 }
 
@@ -471,7 +513,8 @@ func isEnforceCapable(id PolicyID) bool {
 		PolicyFdCredMismatch,
 		PolicyKernelModuleLoad,
 		PolicyKexecLoad,
-		PolicyPtraceAccess:
+		PolicyPtraceAccess,
+		PolicyCapRaise:
 		return false
 	}
 	return true

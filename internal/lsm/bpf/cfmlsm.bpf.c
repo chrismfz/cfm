@@ -2688,4 +2688,178 @@ int BPF_PROG(cfm_net002, int family, int type, int protocol, int kern, int ret)
     return ret;
 }
 
+/* ------------------------------------------------------------------- *
+ * CFML-CRED-004 — capability-set raise by a watched (web-class) uid.
+ *
+ * Hook: fentry/commit_creds
+ *
+ * Threat: post-exploit capability hoarding. A watched-uid task that
+ * already holds CAP_X in its inheritable set (rare but happens when
+ * a hosting customer is granted CAP_NET_BIND_SERVICE / CAP_NET_RAW
+ * / similar via file capabilities) calls
+ * prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_X, 0, 0) to move
+ * the cap into the ambient set. Ambient capabilities survive
+ * execve(), so the attacker can drop into a shell or call another
+ * binary and keep the elevated privilege — the canonical
+ * cred-survives-process-boundary pattern.
+ *
+ * CFML-CRED-002 catches uid→0 transitions (the easy privilege
+ * escalation). CFML-CRED-003 catches direct commit_creds installs
+ * (kernel-exploit fingerprint). CRED-004 catches the third class:
+ * the watched uid never changes, but the capability set DOES, and
+ * the new bits will outlive every subsequent exec.
+ *
+ * What we compare: cap_ambient and cap_inheritable. NOT cap_effective —
+ * legitimate setuid binaries change effective routinely (every su,
+ * sudo, passwd call), and we'd be drowning in noise. Ambient raises
+ * are rare and almost always intentional credential persistence.
+ * Inheritable raises set up a future ambient raise, so they're
+ * caught here as the earlier signal.
+ *
+ * Hook ordering vs CRED-002: commit_creds fires AFTER task_fix_setuid
+ * for setuid-family syscalls. CRED-002 already handles uid→0 (which
+ * also bumps cap_permitted/effective). To avoid duplicate telemetry
+ * on those paths, we exclude uid→0 transitions here — they belong
+ * to CRED-002.
+ *
+ * No kernsec sysctl pairing — there is no global "disable
+ * prctl(PR_CAP_AMBIENT_RAISE)" knob. kernel.cap_last_cap is fixed
+ * and unprivileged-userns toggles don't affect ambient. CRED-004
+ * stands alone.
+ *
+ * Mode: monitor ONLY. commit_creds is a fentry trace probe, not an
+ * LSM decision point — the kernel ignores any return value, so
+ * enforce is structurally impossible (same reason as CRED-003).
+ * Pair with the operator's choice of capability-management hygiene
+ * (audit `getcap -r /` for unexpected file caps on watched-uid
+ * homedirs) for actual blocking.
+ * ------------------------------------------------------------------- */
+
+static __always_inline void cfm_cred004_emit(__u8 flags, __u8 cap_bit, struct task_struct *task)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_CAP_RAISE;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = CFM_OP_NONE;
+    e->flags     = flags;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    /* Filename payload: "cap=NN" where NN is the bit index of the
+     * lowest newly-raised capability. Userspace can map the bit
+     * back to a CAP_* name (CAP_NET_RAW=13, CAP_SETUID=7, ...).
+     * Multiple raised bits in one event → only the lowest is
+     * surfaced here; the operator-facing alert is "task X raised
+     * at least cap N" which is enough to triage. */
+    e->filename[0] = 'c';
+    e->filename[1] = 'a';
+    e->filename[2] = 'p';
+    e->filename[3] = '=';
+    if (cap_bit >= 10) {
+        e->filename[4] = '0' + (cap_bit / 10);
+        e->filename[5] = '0' + (cap_bit % 10);
+        e->filename[6] = '\0';
+    } else {
+        e->filename[4] = '0' + cap_bit;
+        e->filename[5] = '\0';
+    }
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+SEC("fentry/commit_creds")
+int BPF_PROG(cfm_cred004, struct cred *new)
+{
+    if (!new)
+        return 0;
+
+    struct task_struct *task = bpf_get_current_task_btf();
+    if (!task)
+        return 0;
+
+    const struct cred *old = BPF_CORE_READ(task, cred);
+    if (!old)
+        return 0;
+
+    /* Watched-uid gate. bpf_get_current_uid_gid() returns real uid;
+     * that's what we want — cap-raise on a watched uid is the
+     * signal regardless of euid context. */
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    if (!cfm_uid_watched(uid))
+        return 0;
+
+    /* Skip uid→0 transitions. Those are the CRED-002 / CRED-003
+     * domain (setuid root install). They also incidentally bump
+     * cap_effective; comparing here would generate noisy duplicate
+     * telemetry on every setuid binary execution. */
+    __u32 new_uid = BPF_CORE_READ(new, uid.val);
+    __u32 new_euid = BPF_CORE_READ(new, euid.val);
+    if (new_uid == 0 || new_euid == 0)
+        return 0;
+
+    /* The core check: ambient or inheritable gained any bit. */
+    __u64 old_ambient = BPF_CORE_READ(old, cap_ambient);
+    __u64 new_ambient = BPF_CORE_READ(new, cap_ambient);
+    __u64 old_inherit = BPF_CORE_READ(old, cap_inheritable);
+    __u64 new_inherit = BPF_CORE_READ(new, cap_inheritable);
+
+    __u64 raised_ambient = new_ambient & ~old_ambient;
+    __u64 raised_inherit = new_inherit & ~old_inherit;
+    __u64 raised         = raised_ambient | raised_inherit;
+    if (!raised)
+        return 0;
+
+    __u8 flags = CFM_LSM_F_WEB_ORIGIN;
+    if (raised_ambient)
+        flags |= CFM_LSM_F_CAP_RAISE_AMBIENT;
+    if (raised_inherit)
+        flags |= CFM_LSM_F_CAP_RAISE_INHERITABLE;
+
+    /* Lowest set bit index. The BPF v1 LLVM target doesn't implement
+     * __builtin_ctz / __builtin_ctzll (LLVM opcode 191), so we
+     * compute log2 of (raised & -raised) via the classic branchless
+     * 5-step reduction:
+     *   v = isolated lowest bit (a power of two)
+     *   r = sum of bit positions where v lands in the half-masks
+     * Five conditional-OR ops cover bits 0..31; we split the 64-bit
+     * value into low/high halves and pick whichever half has a bit.
+     * Low half covers the realistic targets (CAP_NET_RAW=13,
+     * CAP_SETUID=7, CAP_SYS_ADMIN=21, CAP_SETFCAP=31); high half
+     * covers CAP_BPF=39 / CAP_PERFMON=38 / CAP_CHECKPOINT_RESTORE=40.
+     * Verifier-clean: no loops, no helper calls. */
+    __u32 v;
+    __u8 base;
+    __u32 raised_lo = (__u32)(raised & 0xffffffffu);
+    if (raised_lo) {
+        v = raised_lo & (__u32)(-(__s32)raised_lo);
+        base = 0;
+    } else {
+        __u32 raised_hi = (__u32)(raised >> 32);
+        v = raised_hi & (__u32)(-(__s32)raised_hi);
+        base = 32;
+    }
+    __u8 r = 0;
+    if (v & 0xFFFF0000u) r |= 16;
+    if (v & 0xFF00FF00u) r |= 8;
+    if (v & 0xF0F0F0F0u) r |= 4;
+    if (v & 0xCCCCCCCCu) r |= 2;
+    if (v & 0xAAAAAAAAu) r |= 1;
+    __u8 cap_bit = base + r;
+
+    cfm_cred004_emit(flags, cap_bit, task);
+    return 0;  /* monitor-only — commit_creds is not an LSM decision point */
+}
+
 char LICENSE[] SEC("license") = "GPL";

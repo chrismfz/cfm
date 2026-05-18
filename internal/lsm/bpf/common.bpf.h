@@ -32,6 +32,7 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_KEXEC_LOAD        = 16, /* CFML-EXEC-008 */
     CFM_LSM_POLICY_PTRACE_ACCESS     = 17, /* CFML-OBS-004  */
     CFM_LSM_POLICY_RAW_SOCKET        = 18, /* CFML-NET-002  */
+    CFM_LSM_POLICY_CAP_RAISE         = 19, /* CFML-CRED-004 */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the
@@ -102,6 +103,19 @@ enum cfm_event_op {
 #define CFM_LSM_F_PRIV_SUID           (1U << 4)
 #define CFM_LSM_F_PRIV_SGID           (1U << 5)
 #define CFM_LSM_F_PRIV_FILECAP        (1U << 6)
+
+/* CFML-CRED-004 — capability-set raise. PolicyID disambiguates from
+ * the EXEC-006 / FS-007 / stdio-strict / OBS-004 bits at the same
+ * numeric positions. AMBIENT and INHERITABLE may coexist on a single
+ * commit_creds when both sets gain bits in the same prctl call.
+ *   F_CAP_RAISE_AMBIENT     : new cred has bit(s) in cap_ambient
+ *                             not present in old cred. The canonical
+ *                             credential-survives-execve pattern.
+ *   F_CAP_RAISE_INHERITABLE : new cred has bit(s) in cap_inheritable
+ *                             not present in old cred. Sets up a
+ *                             future ambient raise. */
+#define CFM_LSM_F_CAP_RAISE_AMBIENT     (1U << 4)
+#define CFM_LSM_F_CAP_RAISE_INHERITABLE (1U << 5)
 
 /* CFML-OBS-004 — ptrace access mode bits + same-uid hint. PolicyID
  * disambiguates from the EXEC-006 / FS-007 / stdio-strict bits at

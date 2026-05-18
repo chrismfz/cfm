@@ -435,7 +435,7 @@ func emitNotify(ev Event) {
 	if ev.Op != FSOpNone {
 		reason += " op=" + ev.Op.String()
 	}
-	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess || ev.PolicyID == PolicyRawSocket) && ev.Flags&EventFlagWebOrigin != 0 {
+	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess || ev.PolicyID == PolicyRawSocket || ev.PolicyID == PolicyCapRaise) && ev.Flags&EventFlagWebOrigin != 0 {
 		reason += " origin=web"
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
@@ -449,6 +449,9 @@ func emitNotify(ev Event) {
 		if ev.PtraceSameUid() {
 			reason += " sameuid=1"
 		}
+	}
+	if sets := ev.CapRaiseSets(); sets != "" {
+		reason += " cap_raise=" + sets
 	}
 
 	extra := map[string]string{
@@ -466,7 +469,7 @@ func emitNotify(ev Event) {
 	if ev.Op != FSOpNone {
 		extra["op"] = ev.Op.String()
 	}
-	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess || ev.PolicyID == PolicyRawSocket) && ev.Flags&EventFlagWebOrigin != 0 {
+	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess || ev.PolicyID == PolicyRawSocket || ev.PolicyID == PolicyCapRaise) && ev.Flags&EventFlagWebOrigin != 0 {
 		extra["origin"] = "web"
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
@@ -480,6 +483,9 @@ func emitNotify(ev Event) {
 		if ev.PtraceSameUid() {
 			extra["ptrace_sameuid"] = "1"
 		}
+	}
+	if sets := ev.CapRaiseSets(); sets != "" {
+		extra["cap_raise_sets"] = sets
 	}
 
 	// Userspace sinks (cfm.log + notify) and the kmsg sink have
