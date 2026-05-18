@@ -208,6 +208,74 @@ EXEC-001 + FS-005 + CRED-002/003 and leave EXEC-003 disabled because
 the legitimate baseline of remote-stdio shells (admin SSH consoles) is
 wider on a hypervisor than on a web host.
 
+## Allowlist semantics — read before enabling enforce on any rule
+
+cfm-lsm honours three operator-supplied allowlist primitives in
+`lsm.conf`:
+
+  - `allow_exe`   — basename match against the event's filename.
+  - `allow_comm`  — exact match against `task->comm` (kernel
+                    truncates to TASK_COMM_LEN-1 = 15 chars).
+  - `allow_path`  — directory-prefix match against any argv
+                    element of `/proc/<pid>/cmdline` at event time.
+
+**Semantic — what they actually gate.** With one exception
+(CFML-CRED-002, see below), allowlists are a **userspace
+post-filter only**. They consult `BuildEventFilter()` (see
+`internal/lsm/filter.go`) inside the daemon's drain goroutine,
+dropping matched events from the cfm.log + notify pipeline
+AFTER the BPF program has already emitted them. They DO NOT gate
+the kernel-side enforce decision: an enforce-capable BPF program
+returns `CFM_LSM_DENY` from inside the LSM hook before the
+userspace drain even sees the event, so an allowlisted binary is
+still denied by the kernel in enforce mode. The same allowlist
+entry that silences a noisy `easyapache` build under monitor
+mode will NOT prevent that build from being blocked in enforce
+mode — the kernel never consulted it.
+
+This is a real footgun if operators read older versions of these
+docs (or earlier per-policy `lsm.conf` comments) that framed
+allowlisting as a prerequisite for safe enforce rollout. It is
+not. Allowlisting is monitor-mode noise reduction; the safe
+enforce rollout is monitor-mode telemetry that confirms zero
+legitimate triggers on the host.
+
+**Per-policy coverage.** Each rule independently registers
+whether it accepts each allowlist primitive. The current
+registrations (from `internal/lsm/conf.go::allowExePolicy()` /
+`allowCommPolicy()` / `allowPathPolicy()`):
+
+| Rule | allow_exe | allow_comm | allow_path |
+|---|:-:|:-:|:-:|
+| `CFML-EXEC-003`  (reverse shell) | ✓ | ✓ | — |
+| `CFML-EXEC-005`  (interpreter net stdio) | ✓ | ✓ | — |
+| `CFML-EXEC-006`  (ephemeral exec) | ✓ | ✓ | — |
+| `CFML-CRED-002`  (privesc no setuid) | ✓ | ✓ | ✓ |
+| `CFML-BPF-001`   (unexpected BPF) | — | ✓ | — |
+
+Rules absent from this table (`CFML-EXEC-001` / `004` / `007` /
+`008`, `CFML-FS-005` / `006` / `007` / `008`, `CFML-CRED-003` /
+`004`, `CFML-OBS-004`, `CFML-NET-002`) **do not consult the
+allowlist surface at all** — per-policy and global `[allow]`
+entries are ignored for those rules. NET-002 is the notable case
+because its filename payload is `proto=NN` (a stringified
+protocol integer) and would not match an `allow_exe = ping`
+basename even if PolicyRawSocket were added to the policy list.
+
+**The CRED-002 exception.** `allow_exe` paths for CFML-CRED-002
+are ALSO stat()'d into the BPF-side `cfm_setuid_inodes` map at
+adoption time. For that rule, allowlisted paths gate the BPF
+decision (presence in the map is the trusted-setuid-binary
+signal the rule consults to skip legitimate setuid transitions).
+This is the one place where allow_exe actually does what
+operators naively expect.
+
+**Future direction.** BPF-side allow maps keyed on exe inode are
+the right fix for the enforce-mode coverage gap on EXEC-006,
+NET-002, and similar rules. The map population would mirror what
+CRED-002 already does. Until that lands, the safe enforce
+rollout is the monitor-mode-telemetry path described above.
+
 ## Policy catalogue
 
 ### `CFML-EXEC-001` — Block exec from memfd
@@ -379,8 +447,8 @@ mode = monitor   # start here; promote to enforce only after telemetry
 |---|---|
 | Hook | `bprm_check_security` |
 | Shipped default | `disabled` (operator opts in to `monitor` or `enforce`) |
-| Enforce | Available after monitor-mode telemetry and allowlist tuning |
-| FP risk | Medium until allowlist tuned (package installers, easyapache mid-build steps, distro ldconfig helpers) |
+| Enforce | Available after monitor-mode telemetry confirms zero legitimate ephemeral-fs execs (allowlists do NOT gate enforce; see Allowlist semantics) |
+| FP risk | Medium on any host with legitimate ephemeral-fs execs (package installers, easyapache mid-build steps, distro ldconfig helpers) — those events surface in monitor mode but allowlists suppress events only, not enforce-mode denials |
 | Perf impact | Negligible (exec is not a hot path; a single super-block magic read plus a bounded dentry walk on the non-tmpfs branch) |
 
 **Description.** At `bprm_check_security`, if the calling uid is in
@@ -423,14 +491,42 @@ Distinct from the other exec detectors:
 **Enforcement.** `mode = enforce` returns `-EPERM` from
 `bprm_check_security`, failing the calling task's `execve()`.
 Operators should run in monitor for at least a week on a
-representative host and review the resulting FPs before promoting:
+representative host and review the resulting events:
 package-manager extractions, cPanel `easyapache` build steps, distro
 `ldconfig` re-runs, container runtime helpers, and similar legitimate
-ephemeral-fs execs need explicit allowlisting first.
+ephemeral-fs execs surface here. **Read the Allowlist surface
+subsection immediately below before promoting** — allowlists
+suppress monitor-mode events but DO NOT prevent enforce-mode
+denials, so any legitimate ephemeral-fs exec observed during the
+monitor window will be blocked once enforce is enabled, regardless
+of whether it's allowlisted. The safe enforce path is "monitor
+confirmed zero legitimate triggers," not "allowlisted everything
+suspicious."
 
-**Allowlist surface.** The policy honours per-policy `allow_exe`,
-`allow_comm`, and `allow_path` plus the global `[allow]` section.
-Match shape:
+**Allowlist surface — important semantic.** The policy honours
+per-policy `allow_exe`, `allow_comm`, and `allow_path` plus the
+global `[allow]` section, **but only as a userspace post-filter
+that drops events from the cfm.log + notify pipeline**. The
+allowlist is NOT consulted in the BPF program: in enforce mode,
+`cfm_ephemeral_exec` returns `CFM_LSM_DENY` from inside the LSM
+hook before the userspace drain even sees the event, so an
+allowlisted binary is still denied by the kernel. Treat the
+allowlist as a monitor-mode noise suppression mechanism, not a
+safe carve-out for legitimate workflows under enforce.
+
+For EXEC-006 specifically this matters: package installer
+extractions, `easyapache` build steps, distro `ldconfig` re-runs,
+and similar legitimate ephemeral-fs execs that are currently
+"allowlisted" will be **blocked by the kernel in enforce mode**
+even with the allowlist entry present. Before promoting EXEC-006
+to enforce, operators must either (a) confirm via monitor-mode
+telemetry that no legitimate ephemeral-fs execs happen on the
+host, or (b) accept that those workflows will break. A planned
+follow-up — a BPF-side allow map keyed on exe inode — would
+give EXEC-006 a real BPF-gated allowlist; until then,
+monitor-mode triage is the safe rollout.
+
+Match shape (userspace post-filter, monitor mode only):
 
   - `allow_exe = /tmp/easyapache/build-helper` — basename match against
     the event's emitted filename in the userspace filter.
@@ -446,9 +542,10 @@ Match shape:
 ```ini
 [policy "CFML-EXEC-006"]
 mode = monitor   # start here; review FPs for ~1 week
-# allow_exe = /tmp/easyapache/build-helper
+# allow_exe = /tmp/easyapache/build-helper   # monitor-noise suppression only
 
-# Later, on hosts with a clean baseline:
+# Later, on hosts where monitor confirms zero legitimate ephemeral-fs
+# execs (or operator accepts the blast radius for hosts that have some):
 # mode = enforce
 ```
 
