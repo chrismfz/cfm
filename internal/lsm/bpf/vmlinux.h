@@ -226,7 +226,14 @@ struct cred {
      * check returns 0 and that branch becomes dead code at the
      * verifier's eyes via libbpf's CO-RE relocation rewrite. Used
      * by CFML-CRED-004 to detect cap_ambient / cap_inheritable
-     * raises by watched uids. */
+     * raises by watched uids.
+     *
+     * No explicit ___NCO on the inner unions: clang propagates the
+     * outer struct's __attribute__((preserve_access_index)) into
+     * nested anonymous unions automatically. Same precedent as
+     * `struct qstr` further down in this file, whose anonymous
+     * union is read via CO-RE without each leaf carrying its own
+     * attribute. */
     union {
         __u64 val;        /* 6.3+ accessor */
         __u32 cap[2];     /* pre-6.3 accessor */

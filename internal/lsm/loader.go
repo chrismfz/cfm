@@ -284,13 +284,22 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 	// u64) via bpf_core_field_exists; this call neutralises the program
 	// only if the kernel exposes a third unknown shape, in which case
 	// the whole LoadAndAssign would otherwise fail with "invalid func
-	// unknown#NNN" from a poisoned CO-RE relocation. Any error here
-	// (e.g. BTF unavailable) is non-fatal — cred004 will fail in the
-	// same way as today, which is no worse than the current behaviour.
+	// unknown#NNN" from a poisoned CO-RE relocation. If the BTF probe
+	// itself fails (kernel BTF unavailable on some minimal builds), we
+	// also neutralise: a kernel without BTF cannot satisfy CO-RE
+	// relocations regardless, and pre-emptively dropping cred004
+	// preserves the other thirteen policies. The full-load error path
+	// at LoadAndAssign would otherwise take the whole LSM down for an
+	// unrelated reason.
 	if shape, err := selectCredCapVariant(spec); err == nil {
 		l.credCapShape = shape
 	} else {
 		l.credCapShape = "probe-failed"
+		if nerr := neutraliseProgramSpec(spec, "cfm_cred004"); nerr != nil &&
+			!errors.Is(nerr, errProgramNotInSpec) {
+			return nil, fmt.Errorf("%w: neutralise cfm_cred004 after BTF probe failure: %v",
+				ErrBPFLSMUnavailable, nerr)
+		}
 	}
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)

@@ -3087,9 +3087,9 @@ int BPF_PROG(cfm_cred004, struct cred *new)
         if (bpf_core_field_exists(((struct cred *)0)->field.val)) {            \
             out = BPF_CORE_READ(src, field.val);                               \
         } else {                                                               \
-            __u32 _lo = BPF_CORE_READ(src, field.cap[0]);                      \
-            __u32 _hi = BPF_CORE_READ(src, field.cap[1]);                      \
-            out = ((__u64)_hi << 32) | _lo;                                    \
+            __u32 __cfm_lo = BPF_CORE_READ(src, field.cap[0]);                 \
+            __u32 __cfm_hi = BPF_CORE_READ(src, field.cap[1]);                 \
+            out = ((__u64)__cfm_hi << 32) | __cfm_lo;                          \
         }                                                                      \
     } while (0)
     CFM_READ_CAP(old_ambient, old, cap_ambient);

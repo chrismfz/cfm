@@ -257,6 +257,10 @@ func emitProbeText(w io.Writer, r ProbeResult, verbose bool) {
 	if verbose {
 		emitProbeDriftPicks(w, r.DriftPicks)
 		emitProbeCredCapShape(w, r.CredCapShape)
+	} else if r.CredCapShape == "unknown" || r.CredCapShape == "probe-failed" {
+		// Diagnostic the operator most needs to see — surface it
+		// even without --verbose so they don't have to retry.
+		emitProbeCredCapShape(w, r.CredCapShape)
 	}
 
 	fmt.Fprintln(w)
