@@ -1127,6 +1127,123 @@ static __always_inline __u8 cfm_fs005_inode_watch_mode(struct dentry *d)
  * Two map lookups is well under any verifier complexity budget; both
  * legs short-circuit via the uid pre-check (most calls return 0
  * without touching the inode set at all). */
+
+/* Auth-database helpers and admin tooling that legitimately run
+ * setuid-root on behalf of a watched user to write /etc/shadow /
+ * /etc/passwd / /etc/gshadow / /etc/sudoers. Same hand-unrolled
+ * byte-compare pattern as the other comm allowlists in this file
+ * (cfm_comm_is_trusted_bpf_agent / _modprobe / _kexec / _sysctl).
+ *
+ * Consulted from FS-005's enforce path: a watched uid with euid==0 is
+ * exempt only when its comm is in this set. The gate is BEST-EFFORT
+ * and SPOOFABLE: any task can rename itself via prctl(PR_SET_NAME) or
+ * argv[0] on execve, so a post-privesc attacker who has reached
+ * euid==0 can trivially set its comm to "passwd" and bypass the deny.
+ * The right shape for a hard barrier is task->mm->exe_file inode
+ * identity, which is on file for a future revision; the comm check
+ * here exists to keep ordinary auth-database workflows working for
+ * watched-uid admins (sudo visudo, sudoedit /etc/sudoers, passwd) so
+ * that enabling FS-005 enforce on a busy host does not produce a
+ * flood of legitimate denials. Treat enforce mode as defense-in-depth
+ * against opportunistic exploit code, not as a wall against a
+ * targeted in-kernel privesc that knows about the policy.
+ *
+ * Audit emits fire BEFORE the comm check unconditionally, so forensic
+ * visibility is independent of any spoofing the attacker does. */
+static __always_inline bool cfm_comm_is_trusted_auth_helper(const char *comm)
+{
+    if (!comm)
+        return false;
+
+    /* shadow-utils: password / aging / group / shell / gecos / newgrp */
+    if (comm[0] == 'p' && comm[1] == 'a' && comm[2] == 's' && comm[3] == 's' &&
+        comm[4] == 'w' && comm[5] == 'd' && comm[6] == '\0')
+        return true;
+    if (comm[0] == 'c' && comm[1] == 'h' && comm[2] == 'a' && comm[3] == 'g' &&
+        comm[4] == 'e' && comm[5] == '\0')
+        return true;
+    if (comm[0] == 'g' && comm[1] == 'p' && comm[2] == 'a' && comm[3] == 's' &&
+        comm[4] == 's' && comm[5] == 'w' && comm[6] == 'd' && comm[7] == '\0')
+        return true;
+    if (comm[0] == 'c' && comm[1] == 'h' && comm[2] == 's' && comm[3] == 'h' &&
+        comm[4] == '\0')
+        return true;
+    if (comm[0] == 'c' && comm[1] == 'h' && comm[2] == 'f' && comm[3] == 'n' &&
+        comm[4] == '\0')
+        return true;
+    if (comm[0] == 'n' && comm[1] == 'e' && comm[2] == 'w' && comm[3] == 'g' &&
+        comm[4] == 'r' && comm[5] == 'p' && comm[6] == '\0')
+        return true;
+
+    /* PAM / polkit helpers */
+    if (comm[0] == 'p' && comm[1] == 'k' && comm[2] == 'e' && comm[3] == 'x' &&
+        comm[4] == 'e' && comm[5] == 'c' && comm[6] == '\0')
+        return true;
+    if (comm[0] == 'u' && comm[1] == 'n' && comm[2] == 'i' && comm[3] == 'x' &&
+        comm[4] == '_' && comm[5] == 'c' && comm[6] == 'h' && comm[7] == 'k' &&
+        comm[8] == 'p' && comm[9] == 'w' && comm[10] == 'd' && comm[11] == '\0')
+        return true;
+
+    /* sudo + sudoedit (admin workflows on UID >= 1000 ops accounts) */
+    if (comm[0] == 's' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'o' &&
+        comm[4] == '\0')
+        return true;
+    if (comm[0] == 's' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'o' &&
+        comm[4] == 'e' && comm[5] == 'd' && comm[6] == 'i' && comm[7] == 't' &&
+        comm[8] == '\0')
+        return true;
+
+    /* visudo / vipw / vigr (sudoers and passwd-db edit wrappers) */
+    if (comm[0] == 'v' && comm[1] == 'i' && comm[2] == 's' && comm[3] == 'u' &&
+        comm[4] == 'd' && comm[5] == 'o' && comm[6] == '\0')
+        return true;
+    if (comm[0] == 'v' && comm[1] == 'i' && comm[2] == 'p' && comm[3] == 'w' &&
+        comm[4] == '\0')
+        return true;
+    if (comm[0] == 'v' && comm[1] == 'i' && comm[2] == 'g' && comm[3] == 'r' &&
+        comm[4] == '\0')
+        return true;
+
+    /* shadow-utils account/group provisioning (panel + sudo workflows) */
+    if (comm[0] == 'u' && comm[1] == 's' && comm[2] == 'e' && comm[3] == 'r' &&
+        comm[4] == 'm' && comm[5] == 'o' && comm[6] == 'd' && comm[7] == '\0')
+        return true;
+    if (comm[0] == 'u' && comm[1] == 's' && comm[2] == 'e' && comm[3] == 'r' &&
+        comm[4] == 'a' && comm[5] == 'd' && comm[6] == 'd' && comm[7] == '\0')
+        return true;
+    if (comm[0] == 'u' && comm[1] == 's' && comm[2] == 'e' && comm[3] == 'r' &&
+        comm[4] == 'd' && comm[5] == 'e' && comm[6] == 'l' && comm[7] == '\0')
+        return true;
+    if (comm[0] == 'g' && comm[1] == 'r' && comm[2] == 'o' && comm[3] == 'u' &&
+        comm[4] == 'p' && comm[5] == 'a' && comm[6] == 'd' && comm[7] == 'd' &&
+        comm[8] == '\0')
+        return true;
+    if (comm[0] == 'g' && comm[1] == 'r' && comm[2] == 'o' && comm[3] == 'u' &&
+        comm[4] == 'p' && comm[5] == 'm' && comm[6] == 'o' && comm[7] == 'd' &&
+        comm[8] == '\0')
+        return true;
+    if (comm[0] == 'g' && comm[1] == 'r' && comm[2] == 'o' && comm[3] == 'u' &&
+        comm[4] == 'p' && comm[5] == 'd' && comm[6] == 'e' && comm[7] == 'l' &&
+        comm[8] == '\0')
+        return true;
+
+    /* shadow-utils consistency tooling */
+    if (comm[0] == 'p' && comm[1] == 'w' && comm[2] == 'c' && comm[3] == 'o' &&
+        comm[4] == 'n' && comm[5] == 'v' && comm[6] == '\0')
+        return true;
+    if (comm[0] == 'g' && comm[1] == 'r' && comm[2] == 'p' && comm[3] == 'c' &&
+        comm[4] == 'o' && comm[5] == 'n' && comm[6] == 'v' && comm[7] == '\0')
+        return true;
+    if (comm[0] == 'p' && comm[1] == 'w' && comm[2] == 'c' && comm[3] == 'k' &&
+        comm[4] == '\0')
+        return true;
+    if (comm[0] == 'g' && comm[1] == 'r' && comm[2] == 'p' && comm[3] == 'c' &&
+        comm[4] == 'k' && comm[5] == '\0')
+        return true;
+
+    return false;
+}
+
 static __always_inline int cfm_fs005_check2(struct dentry *primary,
                                             struct dentry *secondary,
                                             struct dentry *event_dentry,
@@ -1163,26 +1280,33 @@ static __always_inline int cfm_fs005_check2(struct dentry *primary,
      * production telemetry. Current-uid matches preserve the historical
      * FS-005 enforcement semantics.
      *
-     * Setuid-root context skip: cfm_uid_watched(uid) above keyed on
-     * the REAL uid (low 32 of bpf_get_current_uid_gid()). When a
-     * watched user runs a setuid-root helper — passwd / chage /
-     * pkexec / sudo writing /etc/shadow / /etc/sudoers / /etc/passwd
-     * legitimately — real_uid stays watched but euid is 0 because
-     * the kernel granted root privs through a trusted setuid binary.
-     * Denying that write would break password changes and other
-     * password-database workflows for every regular user.
+     * Auth-helper exemption (best-effort, see helper definition for
+     * the spoof caveat): when a watched user runs a setuid-root
+     * auth-database helper (sudo / sudoedit / visudo / vipw / vigr /
+     * passwd / chage / gpasswd / chsh / chfn / newgrp / pkexec /
+     * unix_chkpwd / usermod / useradd / userdel / groupadd /
+     * groupmod / groupdel / pwconv / grpconv / pwck / grpck), the
+     * kernel grants root and the helper writes /etc/shadow,
+     * /etc/sudoers, or /etc/passwd legitimately. real_uid stays
+     * watched, euid is 0. We require BOTH euid==0 AND the comm to be
+     * in the auth-helper set before suppressing the deny.
      *
-     * The event still fires above (forensic record of who touched
-     * the sensitive file); we just don't override the kernel's own
-     * cred decision in enforce mode. Attackers can't reach this
-     * skip without already passing through a setuid-root binary
-     * the kernel itself approved — which is FS-007 + CRED-002's
-     * territory, not FS-005's. */
+     * This gate is comm-based and therefore spoofable by any task
+     * that has reached euid==0 (one prctl(PR_SET_NAME) call). The
+     * intent is to keep legitimate workflows working on hosts where
+     * ops accounts live at UID >= watched_uid_fallback_min, NOT to
+     * block a targeted attacker who knows about the policy. The
+     * audit emit above fires unconditionally regardless of the
+     * exemption, so forensic visibility is preserved. */
     struct task_struct *task = bpf_get_current_task_btf();
     if (task) {
         __u32 euid = BPF_CORE_READ(task, cred, euid.val);
-        if (euid == 0)
-            return 0;
+        if (euid == 0) {
+            char comm[16] = {};
+            bpf_get_current_comm(&comm, sizeof(comm));
+            if (cfm_comm_is_trusted_auth_helper(comm))
+                return 0;
+        }
     }
     if (current_uid_watched && cfm_enforce_sensitive_write &&
         watch_mode == CFM_FS005_WATCH_ENFORCEABLE)
@@ -1939,22 +2063,13 @@ static __always_inline int cfm_fs007_check_setattr(struct dentry *dentry,
 
     cfm_fs007_emit(dentry, CFM_FS_OP_SETATTR, flags);
 
-    /* Setuid-root context skip — same shape and rationale as FS-005's
-     * carve-out above. The watched-uid gate keyed on REAL uid, so a
-     * watched user running a setuid-root install wrapper that
-     * legitimately sets the suid/sgid bit on a helper (custom panel-
-     * side installers, sysadmin tooling that invokes `chmod u+s` via
-     * a setuid-root helper) has real_uid=watched but euid=0. Enforce
-     * mode without this skip would block those workflows. Audit
-     * emit fires unconditionally above; only the -EPERM is suppressed
-     * when the kernel itself granted root privs through a trusted
-     * setuid binary. */
-    struct task_struct *task = bpf_get_current_task_btf();
-    if (task) {
-        __u32 euid = BPF_CORE_READ(task, cred, euid.val);
-        if (euid == 0)
-            return 0;
-    }
+    /* No setuid-root exemption. The threat model assumes no legitimate
+     * watched-uid workflow installs a suid/sgid bit — operators with a
+     * custom panel-side installer that legitimately calls chmod u+s
+     * leave this policy in monitor (the default). Skipping enforce on
+     * euid==0 would suppress the canonical post-privesc persistence
+     * primitive (commit_creds() cash-in writing chmod 4755 /tmp/.bd),
+     * which is exactly what FS-007 exists to catch. */
     return cfm_enforce_priv_install ? CFM_LSM_DENY : 0;
 }
 
@@ -2015,19 +2130,9 @@ static __always_inline int cfm_fs007_check_setxattr(struct dentry *dentry,
 
     cfm_fs007_emit(dentry, CFM_FS_OP_SETXATTR, CFM_LSM_F_PRIV_FILECAP);
 
-    /* Setuid-root context skip — see the matching block in
-     * cfm_fs007_check_setattr above. A watched user invoking a
-     * setuid-root helper that legitimately calls `setcap` (e.g. a
-     * custom panel-side installer running through sudo / a setuid
-     * wrapper) reaches this hook with real_uid=watched, euid=0.
-     * Audit emit fires unconditionally; only the -EPERM is
-     * suppressed when the kernel itself granted root privs. */
-    struct task_struct *task = bpf_get_current_task_btf();
-    if (task) {
-        __u32 euid = BPF_CORE_READ(task, cred, euid.val);
-        if (euid == 0)
-            return 0;
-    }
+    /* No setuid-root exemption — see cfm_fs007_check_setattr above for
+     * the rationale. setcap by a watched uid is the same persistence-
+     * install pattern as chmod u+s and gets the same treatment. */
     return cfm_enforce_priv_install ? CFM_LSM_DENY : 0;
 }
 
