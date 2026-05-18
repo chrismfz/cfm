@@ -19,7 +19,8 @@ HELPERS = \
 	$(BINDIR)/setcapper \
 	$(BINDIR)/kmod-loader \
 	$(BINDIR)/knob-writer \
-	$(BINDIR)/kexec-loader
+	$(BINDIR)/kexec-loader \
+	$(BINDIR)/ptracer
 
 .PHONY: all clean
 all: $(BINDIR) $(HELPERS)

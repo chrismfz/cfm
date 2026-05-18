@@ -199,6 +199,46 @@ const (
 	// telemetry that surfaces both legitimate kexec-tools calls and
 	// any unexpected callers.
 	PolicyKexecLoad PolicyID = "CFML-EXEC-008"
+
+	// PolicyPtraceAccess — CFML-OBS-004: detect a ptrace attempt by a
+	// watched (web-class) uid. Threat: process introspection /
+	// code injection. A compromised vhost user PTRACE_ATTACHes to a
+	// sibling process they own (PHP-FPM worker, long-running cron)
+	// and uses PTRACE_POKETEXT to inject shellcode or PTRACE_GETREGS
+	// to steal in-memory secrets. Same-uid ptrace is allowed by
+	// kernel.yama.ptrace_scope=1 (the default), so any of the user's
+	// own running processes is a credential-theft target.
+	//
+	// Hook: lsm/ptrace_access_check
+	//
+	// Watched-uid gate first — root callers (gdb / strace by the
+	// admin, systemd, container runtimes) generate the bulk of
+	// ptrace_access_check traffic and we never want to flag any of
+	// it. Self-ptrace (child == current task) is skipped.
+	//
+	// Companion telemetry to kernsec's kernel.yama.ptrace_scope=2.
+	// On yama≤1 hosts (the distro default across EL / Debian /
+	// Ubuntu), OBS-004 has full coverage: every PTRACE_ATTACH /
+	// PTRACE_READ by a watched uid surfaces. On yama=2 hosts the
+	// kernel iterates LSM hooks via call_int_hook which short-
+	// circuits on the first non-zero return. On cfm-managed hosts
+	// BPF LSM is the LAST hook in the chain — kernsec's
+	// MergeLSMBPF appends `bpf` to the end of any operator-set
+	// `lsm=` token — so yama's -EPERM pre-empts the BPF hook
+	// entirely, and OBS-004 does NOT see the denied-by-yama
+	// attempts. The host's kernel block IS the
+	// protection in that case; OBS-004 remains the always-on
+	// visibility on the much larger yama≤1 population (and on
+	// hosts where the operator forced yama back down via
+	// `state = force` for same-uid debuggability, which moves the
+	// host back into the yama≤1 coverage regime).
+	//
+	// Mode: monitor ONLY by design. The kernsec yama sysctl is the
+	// block layer; making OBS-004 enforce-capable would break
+	// legitimate developer workflows (operator su'ing to a vhost
+	// user to debug a worker via gdb) without adding security the
+	// yama sysctl doesn't already provide.
+	PolicyPtraceAccess PolicyID = "CFML-OBS-004"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -344,6 +384,13 @@ func AllPolicies() []Policy {
 			DefaultMode: ModeDisabled,
 			Description: "Detect a kexec_load(2) or kexec_file_load(2) call from outside the small trusted set (kexec / systemctl). Catches rootkit-persistence-via-replacement-kernel primitives. Monitor-only by design — tracepoint hooks are observation-only; pair with kernel.kexec_load_disabled=1 (kernsec) for actual block on non-kdump hosts.",
 		},
+		{
+			ID:          PolicyPtraceAccess,
+			Title:       "ptrace from web-class user",
+			Hook:        "ptrace_access_check",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a watched-uid task attempting ptrace (PTRACE_MODE_READ / PTRACE_MODE_ATTACH) against another task. Catches sibling-worker credential theft and cross-tenant introspection. Same-uid sibling-worker attacks are tagged with the SAMEUID flag; cross-uid attempts are the higher-severity signal. Monitor-only by design — kernel.yama.ptrace_scope=2 (kernsec) is the actual block layer for hosts that apply it. Full coverage on yama≤1 hosts (the distro default); on yama=2 hosts the BPF hook is pre-empted by yama's earlier -EPERM in the LSM chain, so OBS-004 does not see denied-by-yama attempts — the kernel block IS the protection there.",
+		},
 	}
 }
 
@@ -380,7 +427,8 @@ func isEnforceCapable(id PolicyID) bool {
 		PolicyUnexpectedBPF,
 		PolicyFdCredMismatch,
 		PolicyKernelModuleLoad,
-		PolicyKexecLoad:
+		PolicyKexecLoad,
+		PolicyPtraceAccess:
 		return false
 	}
 	return true
