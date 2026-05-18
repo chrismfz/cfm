@@ -51,7 +51,18 @@ type statusJSON struct {
 	Pinned             pinnedJSON               `json:"pinned"`
 	Preflight          []preflightJSONCheck     `json:"preflight"`
 	PolicyAvailability []policyAvailabilityJSON `json:"policy_availability,omitempty"`
+	BTFDriftPicks      []btfDriftPickJSON       `json:"btf_drift_picks,omitempty"`
+	BTFCredCapShape    string                   `json:"btf_cred_cap_shape,omitempty"`
+	BTFCredCapError    string                   `json:"btf_cred_cap_error,omitempty"`
 	Policies           []policyJSON             `json:"policies"`
+}
+
+type btfDriftPickJSON struct {
+	Hook    string `json:"hook"`
+	PickKey string `json:"pick_key,omitempty"`
+	Arity   int    `json:"arity"`
+	Picked  string `json:"picked,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 type pinnedJSON struct {
@@ -173,6 +184,8 @@ func emitText(w io.Writer, pf Preflight, conf *Conf, res StatusResult) {
 	}
 	fmt.Fprintln(w)
 
+	emitBTFDiagnostics(w, RunBTFDiagnostics())
+
 	fmt.Fprintln(w, "[Pinned BPF state]")
 	if !res.Pinned.Exists {
 		fmt.Fprintf(w, "  %s: not present (cfm-lsm has not been enabled)\n", res.Pinned.PinDir)
@@ -211,6 +224,56 @@ func emitText(w io.Writer, pf Preflight, conf *Conf, res StatusResult) {
 		fmt.Fprintln(w, "Note: cfm-lsm is active. The pinned attachments survive cfm daemon")
 		fmt.Fprintln(w, "      restarts and crashes. Run `cfm lsm disable` to detach.")
 	}
+}
+
+// emitBTFDiagnostics prints the BTF-only probes the loader would run.
+// Read-only (no BPF load required), so it appears in status / init
+// output regardless of whether cfm-lsm is enabled. The point is to
+// give operators a single command (`cfm lsm status` or `cfm lsm
+// init`) that explains both what the loader CAN do on this kernel
+// and what it WILL pick if enabled.
+func emitBTFDiagnostics(w io.Writer, diag BTFDiagnostics) {
+	fmt.Fprintln(w, "[Kernel BTF probes]")
+	if len(diag.DriftPicks) == 0 {
+		fmt.Fprintln(w, "  (no drifting LSM hooks in scope)")
+	} else {
+		fmt.Fprintln(w, "  LSM hook variant picks (see internal/lsm/btfprobe.go):")
+		for _, p := range diag.DriftPicks {
+			label := p.PickKey
+			if label == "" {
+				label = p.Hook
+			}
+			switch {
+			case p.Picked != "":
+				fmt.Fprintf(w, "    %s: arity=%d → %s\n", label, p.Arity, p.Picked)
+			case p.Reason != "":
+				fmt.Fprintf(w, "    %s: UNKNOWN — %s\n", label, p.Reason)
+			default:
+				fmt.Fprintf(w, "    %s: UNKNOWN (no diagnostic)\n", label)
+			}
+		}
+	}
+	fmt.Fprintln(w, "  struct cred cap_ambient layout (CFML-CRED-004):")
+	switch diag.CredCapShape {
+	case "modern":
+		fmt.Fprintln(w, "    modern (6.3+) — kernel_cap_t = struct { u64 val; }; cfm_cred004 uses .val accessor")
+	case "legacy":
+		fmt.Fprintln(w, "    legacy (pre-6.3 / EL9 5.14) — kernel_cap_struct = { u32 cap[2]; }; cfm_cred004 uses .cap accessor")
+	case "unknown":
+		fmt.Fprintln(w, "    UNKNOWN — neither known layout matches; cfm_cred004 will be neutralised at load time")
+		fmt.Fprintln(w, "    (other policies load normally; report kernel version upstream)")
+		if diag.CredCapShapeError != "" {
+			fmt.Fprintf(w, "    detail: %s\n", diag.CredCapShapeError)
+		}
+	case "btf-unavailable":
+		fmt.Fprintln(w, "    btf-unavailable — kernel BTF could not be loaded; cfm_cred004 will be neutralised at load time")
+		if diag.CredCapShapeError != "" {
+			fmt.Fprintf(w, "    detail: %s\n", diag.CredCapShapeError)
+		}
+	default:
+		fmt.Fprintf(w, "    %s\n", diag.CredCapShape)
+	}
+	fmt.Fprintln(w)
 }
 
 func presentLabel(present bool) string {
@@ -252,6 +315,18 @@ func emitJSON(w io.Writer, pf Preflight, conf *Conf, res StatusResult) {
 			Reason:    pa.Reason,
 		})
 	}
+	diag := RunBTFDiagnostics()
+	for _, p := range diag.DriftPicks {
+		out.BTFDriftPicks = append(out.BTFDriftPicks, btfDriftPickJSON{
+			Hook:    p.Hook,
+			PickKey: p.PickKey,
+			Arity:   p.Arity,
+			Picked:  p.Picked,
+			Reason:  p.Reason,
+		})
+	}
+	out.BTFCredCapShape = diag.CredCapShape
+	out.BTFCredCapError = diag.CredCapShapeError
 	for _, p := range AllPolicies() {
 		mode := conf.ModeFor(p.ID)
 		out.Policies = append(out.Policies, policyJSON{

@@ -217,3 +217,170 @@ func neutraliseProgramSpec(spec *ebpf.CollectionSpec, name string) error {
 	}
 	return nil
 }
+
+// credCapAmbientShape reports the layout of struct cred's
+// `cap_ambient` field in the live kernel's BTF. CFML-CRED-004's BPF
+// program copes with both known shapes via bpf_core_field_exists, so
+// this helper exists only as a defensive net: if the kernel exposes
+// some THIRD layout we haven't seen, the BPF program would emit a
+// poisoned CO-RE relocation and the kernel verifier would reject the
+// whole load with "invalid func unknown#NNN". Neutralising
+// cfm_cred004 in that case keeps the other thirteen policies
+// loadable.
+//
+// Returns one of:
+//   - "modern":  kernel_cap_t = struct { __u64 val; }     — Linux 6.3+
+//   - "legacy":  kernel_cap_t = struct kernel_cap_struct { __u32 cap[2]; }
+//     — pre-6.3 (EL9 5.14)
+//   - "unknown": neither shape matches; caller should neutralise.
+func credCapAmbientShape() (string, error) {
+	spec, err := btf.LoadKernelSpec()
+	if err != nil {
+		return "", fmt.Errorf("load kernel BTF: %w", err)
+	}
+	var credT *btf.Struct
+	if err := spec.TypeByName("cred", &credT); err != nil {
+		return "", fmt.Errorf("look up struct cred in kernel BTF: %w", err)
+	}
+	var capAmbient *btf.Member
+	for i := range credT.Members {
+		if credT.Members[i].Name == "cap_ambient" {
+			capAmbient = &credT.Members[i]
+			break
+		}
+	}
+	if capAmbient == nil {
+		return "", fmt.Errorf("struct cred has no cap_ambient member in kernel BTF")
+	}
+	// Walk through any typedef wrappers (kernel_cap_t) to the
+	// underlying struct.
+	t := btf.UnderlyingType(capAmbient.Type)
+	st, ok := t.(*btf.Struct)
+	if !ok {
+		return "unknown", nil
+	}
+	hasVal, hasCap := false, false
+	for i := range st.Members {
+		switch st.Members[i].Name {
+		case "val":
+			hasVal = true
+		case "cap":
+			hasCap = true
+		}
+	}
+	switch {
+	case hasVal:
+		return "modern", nil
+	case hasCap:
+		return "legacy", nil
+	default:
+		return "unknown", nil
+	}
+}
+
+// selectCredCapVariant neutralises cfm_cred004 if the kernel exposes
+// neither the modern nor the legacy cap_ambient layout. The BPF
+// program already handles both known shapes at load time via
+// bpf_core_field_exists; this is the third-layout safety net.
+//
+// Returns the detected shape ("modern", "legacy", "unknown",
+// "no-program") for logging.
+func selectCredCapVariant(spec *ebpf.CollectionSpec) (string, error) {
+	if _, ok := spec.Programs["cfm_cred004"]; !ok {
+		return "no-program", nil
+	}
+	shape, err := credCapAmbientShape()
+	if err != nil {
+		return "", fmt.Errorf("probe struct cred.cap_ambient shape: %w", err)
+	}
+	if shape == "unknown" {
+		if err := neutraliseProgramSpec(spec, "cfm_cred004"); err != nil &&
+			!errors.Is(err, errProgramNotInSpec) {
+			return "", fmt.Errorf("neutralise cfm_cred004: %w", err)
+		}
+	}
+	return shape, nil
+}
+
+// BTFDriftPick reports the variant the loader will pick for a single
+// drifting LSM hook, based on the kernel BTF arity. Diagnostic only —
+// does not load any BPF program. Surfaced by `cfm lsm status`,
+// `cfm lsm init`, and `cfm lsm probe`.
+type BTFDriftPick struct {
+	// Hook is the kernel BTF symbol probed, e.g. "bpf_lsm_inode_setattr".
+	Hook string
+	// Arity is the kernel's hook arg count (0 on probe failure).
+	Arity int
+	// Picked is the BPF program variant name the loader would
+	// select. Empty when the arity does not match any known variant
+	// (in which case the loader would fail; surfaced as Reason).
+	Picked string
+	// PickKey is the policy-specific drift key (e.g.
+	// "bpf_lsm_inode_setattr_fs007"), so the operator can tell apart
+	// FS-005 and FS-007 picks on the same hook.
+	PickKey string
+	// Reason is set on failure / unknown-arity.
+	Reason string
+}
+
+// BTFDiagnostics is the BTF-only snapshot used by status / init /
+// probe surfaces. All probes are read-only (no BPF load required).
+type BTFDiagnostics struct {
+	// DriftPicks reports the picked variant for each drifting LSM
+	// hook, one entry per (hook, pickKey) pair.
+	DriftPicks []BTFDriftPick
+
+	// CredCapShape is "modern" (6.3+), "legacy" (pre-6.3),
+	// "unknown" (third layout — cfm_cred004 would be neutralised at
+	// load time), or "btf-unavailable" (kernel BTF could not be
+	// loaded; the loader would also neutralise cfm_cred004 in that
+	// case — see loader.go).
+	CredCapShape string
+
+	// CredCapShapeError, when non-empty, is the BTF-lookup error
+	// behind a CredCapShape of "btf-unavailable" or "unknown".
+	CredCapShapeError string
+}
+
+// RunBTFDiagnostics runs every BTF probe the loader would run, but
+// without loading any BPF programs. Intended for status / init /
+// probe display: an operator can see what the loader will pick
+// before deciding to enable.
+//
+// Errors are folded into individual fields (DriftPicks[i].Reason,
+// CredCapShapeError) so a partial result is still useful — e.g. if
+// one hook is missing from BTF but the others resolve fine.
+func RunBTFDiagnostics() BTFDiagnostics {
+	var diag BTFDiagnostics
+
+	for _, v := range lsmDriftVariants {
+		pick := BTFDriftPick{Hook: v.hook, PickKey: v.keyFor()}
+		n, err := lsmHookParamCount(v.hook)
+		if err != nil {
+			pick.Reason = err.Error()
+			diag.DriftPicks = append(diag.DriftPicks, pick)
+			continue
+		}
+		pick.Arity = n
+		switch n {
+		case v.noidmapHookArgs:
+			pick.Picked = v.noidmap
+		case v.idmapHookArgs:
+			pick.Picked = v.idmap
+		default:
+			pick.Reason = fmt.Sprintf("kernel exposes %s with %d hook args; expected %d or %d",
+				v.hook, n, v.noidmapHookArgs, v.idmapHookArgs)
+		}
+		diag.DriftPicks = append(diag.DriftPicks, pick)
+	}
+
+	shape, err := credCapAmbientShape()
+	if err != nil {
+		diag.CredCapShape = "btf-unavailable"
+		diag.CredCapShapeError = err.Error()
+	} else {
+		diag.CredCapShape = shape
+	}
+
+	return diag
+}

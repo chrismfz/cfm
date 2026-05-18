@@ -3065,11 +3065,38 @@ int BPF_PROG(cfm_cred004, struct cred *new)
     if (new_uid == 0 || new_euid == 0)
         return 0;
 
-    /* The core check: ambient or inheritable gained any bit. */
-    __u64 old_ambient = BPF_CORE_READ(old, cap_ambient);
-    __u64 new_ambient = BPF_CORE_READ(new, cap_ambient);
-    __u64 old_inherit = BPF_CORE_READ(old, cap_inheritable);
-    __u64 new_inherit = BPF_CORE_READ(new, cap_inheritable);
+    /* The core check: ambient or inheritable gained any bit.
+     *
+     * kernel_cap_t layout drift (Linux 6.3, commit f7d7a8e2cf02):
+     *   pre-6.3 / EL9 5.14:  struct kernel_cap_struct { __u32 cap[2]; }
+     *   6.3+   / EL10 6.12:  typedef struct { __u64 val; } kernel_cap_t
+     *
+     * Both shapes are 8 bytes at the same offset within struct cred,
+     * but cilium/ebpf's CO-RE type-kind check refuses to relocate a
+     * scalar-typed BPF-source field against a struct-typed kernel
+     * BTF field, which is what caused the "invalid func unknown#"
+     * verifier failure on EL10 6.12. Solution: declare cap_ambient /
+     * cap_inheritable as a union of both possible accessors in
+     * vmlinux.h and probe the live kernel BTF at load time via
+     * bpf_core_field_exists. libbpf rewrites the test to a constant,
+     * the unreachable branch becomes dead code, and the verifier
+     * sees only the layout that matches the running kernel. */
+    __u64 old_ambient, new_ambient, old_inherit, new_inherit;
+#define CFM_READ_CAP(out, src, field)                                          \
+    do {                                                                       \
+        if (bpf_core_field_exists(((struct cred *)0)->field.val)) {            \
+            out = BPF_CORE_READ(src, field.val);                               \
+        } else {                                                               \
+            __u32 __cfm_lo = BPF_CORE_READ(src, field.cap[0]);                 \
+            __u32 __cfm_hi = BPF_CORE_READ(src, field.cap[1]);                 \
+            out = ((__u64)__cfm_hi << 32) | __cfm_lo;                          \
+        }                                                                      \
+    } while (0)
+    CFM_READ_CAP(old_ambient, old, cap_ambient);
+    CFM_READ_CAP(new_ambient, new, cap_ambient);
+    CFM_READ_CAP(old_inherit, old, cap_inheritable);
+    CFM_READ_CAP(new_inherit, new, cap_inheritable);
+#undef CFM_READ_CAP
 
     __u64 raised_ambient = new_ambient & ~old_ambient;
     __u64 raised_inherit = new_inherit & ~old_inherit;

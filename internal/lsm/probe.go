@@ -62,6 +62,10 @@ type ProbeResult struct {
 	// the load failed before the BTF probe ran. Surfaced by
 	// `cfm lsm probe --verbose`.
 	DriftPicks map[string]string
+
+	// CredCapShape records the detected layout of struct cred's
+	// cap_ambient field. See loader.go for the value set.
+	CredCapShape string
 }
 
 // RunProbe attempts to actually load + attach the cfm-lsm BPF
@@ -142,6 +146,7 @@ func RunProbeOnce(observe time.Duration) ProbeResult {
 	defer l.Close()
 
 	res.DriftPicks = l.DriftPicks()
+	res.CredCapShape = l.CredCapShape()
 	attach := l.Attach()
 	res.Attached = append(res.Attached, attach.Attached...)
 	for id, e := range attach.Failed {
@@ -251,6 +256,11 @@ func emitProbeText(w io.Writer, r ProbeResult, verbose bool) {
 
 	if verbose {
 		emitProbeDriftPicks(w, r.DriftPicks)
+		emitProbeCredCapShape(w, r.CredCapShape)
+	} else if r.CredCapShape == "unknown" || r.CredCapShape == "probe-failed" {
+		// Diagnostic the operator most needs to see — surface it
+		// even without --verbose so they don't have to retry.
+		emitProbeCredCapShape(w, r.CredCapShape)
 	}
 
 	fmt.Fprintln(w)
@@ -279,6 +289,30 @@ func emitProbeDriftPicks(w io.Writer, picks map[string]string) {
 		fmt.Fprintf(w, "  %s → %s\n", hook, picks[hook])
 	}
 	fmt.Fprintln(w, "  (one per hook whose kernel signature varies across distros — see internal/lsm/btfprobe.go)")
+}
+
+// emitProbeCredCapShape reports the detected struct cred cap_ambient
+// layout — relevant to CFML-CRED-004's CO-RE relocation. See
+// btfprobe.go credCapAmbientShape for the mapping.
+func emitProbeCredCapShape(w io.Writer, shape string) {
+	if shape == "" {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "[BTF probe — struct cred cap_ambient layout]")
+	switch shape {
+	case "modern":
+		fmt.Fprintln(w, "  modern (6.3+) — kernel_cap_t = struct { u64 val; }; cfm_cred004 uses .val accessor")
+	case "legacy":
+		fmt.Fprintln(w, "  legacy (pre-6.3 / EL9 5.14) — kernel_cap_struct = { u32 cap[2]; }; cfm_cred004 uses .cap accessor")
+	case "unknown":
+		fmt.Fprintln(w, "  unknown — neither known layout matches; cfm_cred004 neutralised to a no-op")
+		fmt.Fprintln(w, "  (other policies load normally; report kernel version upstream)")
+	case "probe-failed":
+		fmt.Fprintln(w, "  probe-failed — kernel BTF unavailable for struct cred; cfm_cred004 will attempt load anyway")
+	case "no-program":
+		fmt.Fprintln(w, "  no-program — cfm_cred004 not in this build (run make bpf)")
+	}
 }
 
 func emitProbeUnavailable(w io.Writer, unavailable map[PolicyID]string) {

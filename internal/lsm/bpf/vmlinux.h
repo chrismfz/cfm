@@ -217,17 +217,31 @@ struct cred {
      * changed layout in 6.3 (commit f7d7a8e2cf02):
      *   pre-6.3: struct kernel_cap_struct { __u32 cap[2]; }
      *   6.3+:    typedef struct { __u64 val; } kernel_cap_t
-     * Both forms are 8 bytes total. Declaring each field as __u64
-     * here lets CO-RE resolve the field offset from kernel BTF and
-     * read 8 bytes as a single u64; on pre-6.3 the read returns
-     * cap[0] | (cap[1] << 32), which is bit-for-bit identical to
-     * the 6.3+ val representation. CO-RE field access is by name,
-     * so the in-source order does not need to match the kernel
-     * struct layout — only field names matter. Used by CFML-CRED-004
-     * to detect cap_ambient / cap_inheritable raises by watched
-     * uids. */
-    __u64                  cap_inheritable;
-    __u64                  cap_ambient;
+     * Both forms are 8 bytes total; both retain the same field
+     * offset within `struct cred`. We expose BOTH possible member
+     * names via a union so the BPF source can probe the live kernel
+     * BTF at load time (via bpf_core_field_exists) and pick the
+     * correct accessor. Only ONE of the union's leaves resolves on
+     * any given kernel; the other one's bpf_core_field_exists
+     * check returns 0 and that branch becomes dead code at the
+     * verifier's eyes via libbpf's CO-RE relocation rewrite. Used
+     * by CFML-CRED-004 to detect cap_ambient / cap_inheritable
+     * raises by watched uids.
+     *
+     * No explicit ___NCO on the inner unions: clang propagates the
+     * outer struct's __attribute__((preserve_access_index)) into
+     * nested anonymous unions automatically. Same precedent as
+     * `struct qstr` further down in this file, whose anonymous
+     * union is read via CO-RE without each leaf carrying its own
+     * attribute. */
+    union {
+        __u64 val;        /* 6.3+ accessor */
+        __u32 cap[2];     /* pre-6.3 accessor */
+    } cap_inheritable;
+    union {
+        __u64 val;
+        __u32 cap[2];
+    } cap_ambient;
 } ___NCO;
 
 struct mm_struct {
