@@ -216,13 +216,20 @@ const (
 	// ptrace_access_check traffic and we never want to flag any of
 	// it. Self-ptrace (child == current task) is skipped.
 	//
-	// Companion telemetry to kernsec's kernel.yama.ptrace_scope=2
-	// (KSEC-SCT-kspp.kernel-007 / similar). yama=2 blocks all ptrace
-	// except through PR_SET_PTRACER negotiation; this rule gives the
-	// forensic trail — every blocked attempt AND every allowed
-	// parent→child attach by a watched uid surfaces. On hosts where
-	// the operator forced yama back down via `state = force`,
-	// OBS-004 stays in effect.
+	// Companion telemetry to kernsec's kernel.yama.ptrace_scope=2.
+	// On yama≤1 hosts (the distro default across EL / Debian /
+	// Ubuntu), OBS-004 has full coverage: every PTRACE_ATTACH /
+	// PTRACE_READ by a watched uid surfaces. On yama=2 hosts the
+	// kernel iterates LSM hooks via call_int_hook which short-
+	// circuits on the first non-zero return, and BPF LSM is
+	// conventionally last in the `lsm=` chain — yama's -EPERM
+	// pre-empts the BPF hook entirely, so OBS-004 does NOT see the
+	// denied-by-yama attempts. The host's kernel block IS the
+	// protection in that case; OBS-004 remains the always-on
+	// visibility on the much larger yama≤1 population (and on
+	// hosts where the operator forced yama back down via
+	// `state = force` for same-uid debuggability, which moves the
+	// host back into the yama≤1 coverage regime).
 	//
 	// Mode: monitor ONLY by design. The kernsec yama sysctl is the
 	// block layer; making OBS-004 enforce-capable would break
@@ -380,7 +387,7 @@ func AllPolicies() []Policy {
 			Title:       "ptrace from web-class user",
 			Hook:        "ptrace_access_check",
 			DefaultMode: ModeDisabled,
-			Description: "Detect a watched-uid task attempting ptrace (PTRACE_MODE_READ / PTRACE_MODE_ATTACH) against another task. Catches sibling-worker credential theft and cross-tenant introspection. Same-uid same-uid sibling-worker attacks are tagged with the SAMEUID flag; cross-uid attempts are the higher-severity signal. Monitor-only by design — kernel.yama.ptrace_scope=2 (kernsec) is the actual block layer; OBS-004 is the always-on forensic trail alongside.",
+			Description: "Detect a watched-uid task attempting ptrace (PTRACE_MODE_READ / PTRACE_MODE_ATTACH) against another task. Catches sibling-worker credential theft and cross-tenant introspection. Same-uid sibling-worker attacks are tagged with the SAMEUID flag; cross-uid attempts are the higher-severity signal. Monitor-only by design — kernel.yama.ptrace_scope=2 (kernsec) is the actual block layer for hosts that apply it. Full coverage on yama≤1 hosts (the distro default); on yama=2 hosts the BPF hook is pre-empted by yama's earlier -EPERM in the LSM chain, so OBS-004 does not see denied-by-yama attempts — the kernel block IS the protection there.",
 		},
 	}
 }

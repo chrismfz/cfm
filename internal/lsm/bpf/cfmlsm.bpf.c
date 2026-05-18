@@ -2389,11 +2389,19 @@ int BPF_PROG(cfm_fs008, struct file *file, int mask, int ret)
  * cross-uid ptrace is open within the kernel's normal cred checks.
  *
  * Companion to kernsec's kernel.yama.ptrace_scope=2 sysctl: yama=2
- * blocks all ptrace except through PR_SET_PTRACER negotiation; this
- * rule gives the forensic trail (every blocked attempt AND every
- * allowed parent→child attach by a watched uid surfaces). On hosts
- * where the operator forced yama back down with `state = force` for
- * debugging convenience, OBS-004 stays in effect.
+ * blocks all ptrace except through PR_SET_PTRACER negotiation. On
+ * yama≤1 hosts (the distro default across EL/Debian/Ubuntu), OBS-004
+ * has full coverage: every PTRACE_ATTACH / PTRACE_READ by a watched
+ * uid surfaces in the audit trail. On yama=2 hosts the picture is
+ * coarser — the kernel iterates LSM hooks via call_int_hook which
+ * short-circuits on the first non-zero return, and BPF LSM is
+ * conventionally last in the `lsm=` chain (`...,yama,bpf`), so
+ * yama's -EPERM pre-empts the BPF hook entirely. OBS-004 still
+ * records every attempt yama would have ALLOWED on yama=2 (rare —
+ * only PR_SET_PTRACER-negotiated traces) but does NOT see the
+ * denied-by-yama attempts that constitute most attacker probes.
+ * The host's kernel block IS the protection in that case; OBS-004
+ * is the always-on visibility on the much larger yama≤1 population.
  *
  * Watched-uid gate first — root callers (gdb / strace by the admin,
  * systemd's signal-on-fork uses, every container runtime) generate
@@ -2491,9 +2499,15 @@ int BPF_PROG(cfm_obs004, struct task_struct *child, unsigned int mode, int ret)
      * frequent in-the-wild post-exploit pattern. Tagged so the
      * operator can filter cross-uid (attacker reaching across
      * tenants) from same-uid (attacker walking their own process
-     * tree). */
+     * tree). Read EFFECTIVE uid on both sides — that's what the
+     * kernel's own ptrace_may_access cred check compares (see
+     * security/yama/yama_pl.c and kernel/ptrace.c::__ptrace_may_access).
+     * Reading caller's real uid (cheap via bpf_get_current_uid_gid)
+     * vs target's euid would flip the flag in the setuid-wrapper
+     * edge case where caller's real != euid. */
+    __u32 self_euid  = BPF_CORE_READ(self, cred, euid.val);
     __u32 child_euid = BPF_CORE_READ(child, cred, euid.val);
-    if (child_euid == uid)
+    if (child_euid == self_euid)
         flags |= CFM_LSM_F_PTRACE_SAMEUID;
 
     cfm_obs004_emit(child, flags);
