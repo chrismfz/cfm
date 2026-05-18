@@ -99,6 +99,7 @@ type cfmlsmProgramSpecs struct {
 	CfmFs008                *ebpf.ProgramSpec `ebpf:"cfm_fs008"`
 	CfmInterpNetStdio       *ebpf.ProgramSpec `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec            *ebpf.ProgramSpec `ebpf:"cfm_memfd_exec"`
+	CfmNet002               *ebpf.ProgramSpec `ebpf:"cfm_net002"`
 	CfmObs004               *ebpf.ProgramSpec `ebpf:"cfm_obs004"`
 	CfmRevshell             *ebpf.ProgramSpec `ebpf:"cfm_revshell"`
 }
@@ -125,6 +126,7 @@ type cfmlsmVariableSpecs struct {
 	CfmEnforceKernelKnobWrite *ebpf.VariableSpec `ebpf:"cfm_enforce_kernel_knob_write"`
 	CfmEnforceMemfdExec       *ebpf.VariableSpec `ebpf:"cfm_enforce_memfd_exec"`
 	CfmEnforcePrivInstall     *ebpf.VariableSpec `ebpf:"cfm_enforce_priv_install"`
+	CfmEnforceRawSocket       *ebpf.VariableSpec `ebpf:"cfm_enforce_raw_socket"`
 	CfmEnforceRevshell        *ebpf.VariableSpec `ebpf:"cfm_enforce_revshell"`
 	CfmEnforceSensitiveWrite  *ebpf.VariableSpec `ebpf:"cfm_enforce_sensitive_write"`
 	CfmFs005WebOriginMonitor  *ebpf.VariableSpec `ebpf:"cfm_fs005_web_origin_monitor"`
@@ -180,6 +182,7 @@ type cfmlsmVariables struct {
 	CfmEnforceKernelKnobWrite *ebpf.Variable `ebpf:"cfm_enforce_kernel_knob_write"`
 	CfmEnforceMemfdExec       *ebpf.Variable `ebpf:"cfm_enforce_memfd_exec"`
 	CfmEnforcePrivInstall     *ebpf.Variable `ebpf:"cfm_enforce_priv_install"`
+	CfmEnforceRawSocket       *ebpf.Variable `ebpf:"cfm_enforce_raw_socket"`
 	CfmEnforceRevshell        *ebpf.Variable `ebpf:"cfm_enforce_revshell"`
 	CfmEnforceSensitiveWrite  *ebpf.Variable `ebpf:"cfm_enforce_sensitive_write"`
 	CfmFs005WebOriginMonitor  *ebpf.Variable `ebpf:"cfm_fs005_web_origin_monitor"`
@@ -217,6 +220,7 @@ type cfmlsmPrograms struct {
 	CfmFs008                *ebpf.Program `ebpf:"cfm_fs008"`
 	CfmInterpNetStdio       *ebpf.Program `ebpf:"cfm_interp_net_stdio"`
 	CfmMemfdExec            *ebpf.Program `ebpf:"cfm_memfd_exec"`
+	CfmNet002               *ebpf.Program `ebpf:"cfm_net002"`
 	CfmObs004               *ebpf.Program `ebpf:"cfm_obs004"`
 	CfmRevshell             *ebpf.Program `ebpf:"cfm_revshell"`
 }
@@ -251,6 +255,7 @@ func (p *cfmlsmPrograms) Close() error {
 		p.CfmFs008,
 		p.CfmInterpNetStdio,
 		p.CfmMemfdExec,
+		p.CfmNet002,
 		p.CfmObs004,
 		p.CfmRevshell,
 	)

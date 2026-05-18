@@ -239,6 +239,42 @@ const (
 	// user to debug a worker via gdb) without adding security the
 	// yama sysctl doesn't already provide.
 	PolicyPtraceAccess PolicyID = "CFML-OBS-004"
+
+	// PolicyRawSocket — CFML-NET-002: detect a raw / packet socket
+	// being opened by a watched (web-class) uid. Threat: scanner /
+	// sniffer / spoofing toolkit dropped by a compromised vhost
+	// user.
+	//
+	//   AF_PACKET sockets             — full L2 frame sniff / inject.
+	//   AF_INET  + SOCK_RAW           — arbitrary L3 IPv4 send / recv.
+	//   AF_INET6 + SOCK_RAW           — same for IPv6.
+	//
+	// `ping` handling: modern Linux's ping_group_range / SOCK_DGRAM
+	// path does not use SOCK_RAW at all and never trips the rule.
+	// The SOCK_RAW fallback (used on hosts with closed
+	// ping_group_range) IS triggered by iputils-ping, but the BPF
+	// program's euid==0 fast-path skip suppresses the legacy
+	// setuid /bin/ping case. The modern file-cap'd /bin/ping
+	// (cap_net_raw+ep on Debian / Ubuntu / EL9+) runs at
+	// euid=watched and WILL fire the rule; operators on hosts where
+	// vhost users routinely run ping should add
+	// `allow_exe = /usr/bin/ping` under [allow] in lsm.conf to
+	// suppress, or stay in monitor mode and ignore the events.
+	//
+	// Hook: lsm/socket_create
+	//
+	// No kernsec sysctl pairing — CAP_NET_RAW is per-process /
+	// per-binary, not a global toggle. NET-002 is the standalone
+	// telemetry / enforcement layer.
+	//
+	// Mode: monitor by default. Enforce-capable — there is no
+	// legitimate workflow for a web-class uid to open a raw socket,
+	// so returning -EPERM out of socket(2) is safe. Promote to
+	// enforce after a monitor window confirms no in-the-wild
+	// legitimate caller (operator-specific scripts that grant
+	// CAP_NET_RAW to a vhost user can opt the rule out via
+	// `state = skip`).
+	PolicyRawSocket PolicyID = "CFML-NET-002"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -390,6 +426,13 @@ func AllPolicies() []Policy {
 			Hook:        "ptrace_access_check",
 			DefaultMode: ModeDisabled,
 			Description: "Detect a watched-uid task attempting ptrace (PTRACE_MODE_READ / PTRACE_MODE_ATTACH) against another task. Catches sibling-worker credential theft and cross-tenant introspection. Same-uid sibling-worker attacks are tagged with the SAMEUID flag; cross-uid attempts are the higher-severity signal. Monitor-only by design — kernel.yama.ptrace_scope=2 (kernsec) is the actual block layer for hosts that apply it. Full coverage on yama≤1 hosts (the distro default); on yama=2 hosts the BPF hook is pre-empted by yama's earlier -EPERM in the LSM chain, so OBS-004 does not see denied-by-yama attempts — the kernel block IS the protection there.",
+		},
+		{
+			ID:          PolicyRawSocket,
+			Title:       "raw / packet socket from web-class user",
+			Hook:        "socket_create",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a watched-uid task opening a raw (AF_INET/INET6 + SOCK_RAW) or packet (AF_PACKET) socket. Catches scanner / sniffer / spoofing toolkit drops by a compromised vhost user. Modern unprivileged ping (SOCK_DGRAM + IPPROTO_ICMP) does NOT trigger. The SOCK_RAW ping fallback by a watched uid IS suppressed when the task runs at euid=0 (legacy setuid /bin/ping), but NOT when the binary holds CAP_NET_RAW via file capabilities (modern /bin/ping on Debian / Ubuntu / EL9+) — those events surface in monitor mode and can be suppressed via allow_exe under [allow] in lsm.conf. Monitor by default; enforce-capable (returns -EPERM out of socket(2)) — promote to enforce only after monitor confirms vhost users on this host don't routinely run cap_net_raw binaries (ping / traceroute / mtr).",
 		},
 	}
 }

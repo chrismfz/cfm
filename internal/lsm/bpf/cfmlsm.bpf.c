@@ -2516,4 +2516,176 @@ int BPF_PROG(cfm_obs004, struct task_struct *child, unsigned int mode, int ret)
     return ret;  /* monitor-only — never deny */
 }
 
+/* ------------------------------------------------------------------- *
+ * CFML-NET-002 — raw / packet socket from a watched (web-class) uid.
+ *
+ * Hook: lsm/socket_create
+ *
+ * Threat: post-exploit scanner / sniffer / spoofing toolkit. Legitimate
+ * vhost-user workloads (PHP / Python / MySQL clients) have zero use
+ * for raw sockets; root daemons that genuinely need them (named for
+ * DNS, dhclient, NetworkManager) all run as uid 0 and are filtered
+ * out by the watched-uid gate at the top of the program.
+ *
+ * Coverage:
+ *   - AF_PACKET sockets             — full L2 frame sniff / inject.
+ *                                     Wireshark / tcpdump / arpspoof /
+ *                                     ettercap / custom rootkit sniffers.
+ *   - AF_INET  + SOCK_RAW           — arbitrary L3 IPv4 send / recv.
+ *                                     hping / ICMP spoofing / TCP-RST
+ *                                     injection / scan toolkits.
+ *   - AF_INET6 + SOCK_RAW           — same for IPv6.
+ *
+ * `ping` behaviour by host configuration:
+ *   - Modern Linux's "ping group" mechanism uses SOCK_DGRAM +
+ *     IPPROTO_ICMP (NOT SOCK_RAW), so unprivileged `ping` on hosts
+ *     with open net.ipv4.ping_group_range does NOT trip the rule
+ *     regardless of who calls it.
+ *   - On hosts where ping_group_range is closed (the default on
+ *     most distros) iputils falls back to SOCK_RAW. The legacy
+ *     setuid /bin/ping path runs at euid=0 and is suppressed by
+ *     the program's euid==0 fast-path skip below. The modern
+ *     cap_net_raw+ep /bin/ping (Ubuntu / Debian / EL9+) runs at
+ *     euid=watched even though it holds CAP_NET_RAW, so a watched
+ *     uid invoking it WILL fire the rule. Operators on hosts where
+ *     vhost users routinely run `ping` should add
+ *     `allow_exe = /usr/bin/ping` (or `/bin/ping`) under [allow] in
+ *     lsm.conf to suppress, OR keep the rule in monitor mode and
+ *     ignore the events.
+ *
+ * No kernsec sysctl pairing — there's no equivalent kernel-side knob
+ * (CAP_NET_RAW is per-process and per-binary, not a global toggle).
+ * NET-002 is the standalone telemetry layer.
+ *
+ * Mode: monitor by default. Enforce-capable — there is no legitimate
+ * workflow for a web-class uid to open a raw / packet socket, so
+ * returning -EPERM out of socket(2) is safe (the dropper sees the
+ * syscall fail and the primitive never lands). Promoted to enforce
+ * via the cfm_enforce_raw_socket variable wired through the loader.
+ * ------------------------------------------------------------------- */
+
+/* Stable Linux ABI constants. Values are fixed by the syscall
+ * interface and uniform across architectures, so literals are safe
+ * (matching the AF_ / SOCK_ / PF_ definitions in
+ * include/linux/socket.h and include/linux/net.h). */
+#define CFM_AF_INET    2
+#define CFM_AF_INET6   10
+#define CFM_AF_PACKET  17
+#define CFM_SOCK_RAW   3
+
+volatile const __u8 cfm_enforce_raw_socket = 0;
+
+static __always_inline void cfm_net002_emit(__u8 op, int protocol)
+{
+    struct cfm_lsm_event *e = bpf_ringbuf_reserve(&cfm_events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u64 uid_gid  = bpf_get_current_uid_gid();
+
+    e->ts_ns     = bpf_ktime_get_ns();
+    e->policy_id = CFM_LSM_POLICY_RAW_SOCKET;
+    e->pid       = (__u32)(pid_tgid & 0xffffffffu);
+    e->tgid      = (__u32)(pid_tgid >> 32);
+    e->uid       = (__u32)(uid_gid & 0xffffffffu);
+    e->gid       = (__u32)(uid_gid >> 32);
+    e->op        = op;
+    e->flags     = CFM_LSM_F_WEB_ORIGIN;
+    e->_pad1     = 0;
+    e->_pad2     = 0;
+
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    /* Protocol arg as a short token in filename. Most callers pass
+     * either 0 (default) or a small int — we write a tiny ASCII
+     * representation so the audit row is human-readable without an
+     * extra lookup table in userspace. The 64-byte filename buffer
+     * is overkill for a single integer; userspace renders it as-is. */
+    e->filename[0] = 'p';
+    e->filename[1] = 'r';
+    e->filename[2] = 'o';
+    e->filename[3] = 't';
+    e->filename[4] = 'o';
+    e->filename[5] = '=';
+    /* Stringify protocol (0..255) as up to 3 decimal digits + NUL.
+     * Open-coded because BPF lacks a stable strprintf and we want
+     * deterministic verifier behaviour. */
+    __u32 p = (__u32)protocol;
+    if (p > 999)
+        p = 999;
+    if (p >= 100) {
+        e->filename[6] = '0' + (p / 100);
+        e->filename[7] = '0' + ((p / 10) % 10);
+        e->filename[8] = '0' + (p % 10);
+        e->filename[9] = '\0';
+    } else if (p >= 10) {
+        e->filename[6] = '0' + (p / 10);
+        e->filename[7] = '0' + (p % 10);
+        e->filename[8] = '\0';
+    } else {
+        e->filename[6] = '0' + p;
+        e->filename[7] = '\0';
+    }
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+SEC("lsm/socket_create")
+int BPF_PROG(cfm_net002, int family, int type, int protocol, int kern, int ret)
+{
+    /* Kernel-internal socket (sock_create_kern) — not user-initiated,
+     * not in our threat model. */
+    if (kern)
+        return ret;
+
+    /* Family / type filter first. socket_create is called for every
+     * socket(2) on the host (apache → AF_UNIX, mysql → AF_UNIX,
+     * nginx → AF_INET/SOCK_STREAM, …) — the bulk of traffic is
+     * AF_UNIX which we don't care about. Two int compares are
+     * cheaper than the hash lookup. */
+    __u8 op;
+    if (family == CFM_AF_PACKET) {
+        op = CFM_NET_OP_PACKET;
+    } else if (family == CFM_AF_INET && type == CFM_SOCK_RAW) {
+        op = CFM_NET_OP_RAW_INET;
+    } else if (family == CFM_AF_INET6 && type == CFM_SOCK_RAW) {
+        op = CFM_NET_OP_RAW_INET6;
+    } else {
+        return ret;
+    }
+
+    /* Watched-uid gate. bpf_get_current_uid_gid() returns the REAL
+     * uid (current_cred()->uid), not the effective one — so root
+     * daemons running as uid 0 (named, dhclient, NetworkManager)
+     * are filtered out here. */
+    __u32 uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffffu);
+    if (!cfm_uid_watched(uid))
+        return ret;
+
+    /* Effective-uid 0 fast-path skip. A watched-uid task that exec'd
+     * a setuid-root binary (/bin/ping on older distros, /usr/sbin/
+     * traceroute, /usr/bin/mtr) has real_uid=watched but euid=0;
+     * those are legitimate raw-socket callers that walked through a
+     * trusted privilege-escalation channel and should not fire the
+     * rule. Note: this does NOT cover file-capability-granted
+     * raw-socket binaries (modern /bin/ping with cap_net_raw+ep
+     * runs at euid=watched even though it holds CAP_NET_RAW); those
+     * still fire and the operator-side mitigation is to add
+     * allow_exe=/bin/ping (or similar) under [allow] in lsm.conf if
+     * vhost users routinely run ping on this host. */
+    struct task_struct *task = bpf_get_current_task_btf();
+    if (task) {
+        __u32 euid = BPF_CORE_READ(task, cred, euid.val);
+        if (euid == 0)
+            return ret;
+    }
+
+    cfm_net002_emit(op, protocol);
+
+    if (cfm_enforce_raw_socket)
+        return CFM_LSM_DENY;
+    return ret;
+}
+
 char LICENSE[] SEC("license") = "GPL";

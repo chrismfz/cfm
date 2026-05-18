@@ -435,7 +435,7 @@ func emitNotify(ev Event) {
 	if ev.Op != FSOpNone {
 		reason += " op=" + ev.Op.String()
 	}
-	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess) && ev.Flags&EventFlagWebOrigin != 0 {
+	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess || ev.PolicyID == PolicyRawSocket) && ev.Flags&EventFlagWebOrigin != 0 {
 		reason += " origin=web"
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
@@ -466,7 +466,7 @@ func emitNotify(ev Event) {
 	if ev.Op != FSOpNone {
 		extra["op"] = ev.Op.String()
 	}
-	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess) && ev.Flags&EventFlagWebOrigin != 0 {
+	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess || ev.PolicyID == PolicyRawSocket) && ev.Flags&EventFlagWebOrigin != 0 {
 		extra["origin"] = "web"
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
