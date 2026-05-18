@@ -270,9 +270,19 @@ the most common evasion of PD (using the launcher binary directly,
 without going through `exec`/`system`/`shell_exec` in PHP first).
 
 **Exemptions.** uid 0 (root reverse shells are an administrative
-choice, not an attack vector to enforce against). An explicit per-host
-list for any legitimate inetd-style services that genuinely dup socket
-fds onto 0/1/2 — these are rare on hosting boxes.
+choice, not an attack vector to enforce against). Implemented as a
+`current->cred->euid == 0` early-return BEFORE the fd walk — so for
+root callers (interactive SSH session running as root, inetd-style
+root daemon spawning a child with TCP stdio, incident-response
+rescue session) the program emits NO event and never blocks,
+regardless of mode. The watched-uid gate that other rules use does
+not apply here: any non-root caller reaching the rule with stdio on
+remote TCP is the threat we want to catch, watched-list membership
+or not. An explicit per-host list for any legitimate inetd-style
+services that genuinely dup socket fds onto 0/1/2 — these are rare
+on hosting boxes — can additionally suppress events on the
+non-root path via the Go-side `allow_exe` / `allow_comm` filter
+(monitor-mode event suppression only; not a BPF-side gate).
 
 **Notes.** The fd walk is the implementation cost driver and the
 verifier-complexity risk on older RHEL 9 kernels. The hot loop must be
@@ -502,6 +512,23 @@ host-persistence path matches deliberately stay monitor-only while operators
 build a baseline. This keeps the new persistence coverage inside `CFML-FS-005`
 rather than creating `CFML-FS-006`, while preserving the original low-risk
 enforcement boundary.
+
+**Setuid-root context skip.** The watched-uid gate (`cfm_uid_watched`)
+keys on the REAL uid via `bpf_get_current_uid_gid()`, so a watched
+user running a setuid-root helper — `passwd`, `chage`, `pkexec`,
+`sudo` writing `/etc/shadow` / `/etc/sudoers` legitimately — still
+matches `current_uid_watched=true` at the watched-set lookup. Without
+a further check, enforce mode would block password changes for every
+regular user with UID ≥ `watched_uid_fallback_min` (default 1000).
+The BPF program therefore reads `current->cred->euid` and skips the
+enforce decision when `euid == 0`: the kernel already granted root
+privs through a trusted setuid binary, and overriding that decision
+would break the password-database workflow. The audit event still
+fires (forensic record of who touched the sensitive file); only the
+`-EPERM` return is suppressed. Attackers cannot reach this skip
+without first passing through a setuid binary the kernel itself
+approved — which is CFML-FS-007's (install) and CFML-CRED-002's
+(use) territory, not FS-005's.
 
 **Host-persistence paths.** The default monitor-only persistence set includes
 common distro and panel locations used for durable post-exploit hooks:
