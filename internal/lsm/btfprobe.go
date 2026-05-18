@@ -301,3 +301,86 @@ func selectCredCapVariant(spec *ebpf.CollectionSpec) (string, error) {
 	}
 	return shape, nil
 }
+
+// BTFDriftPick reports the variant the loader will pick for a single
+// drifting LSM hook, based on the kernel BTF arity. Diagnostic only —
+// does not load any BPF program. Surfaced by `cfm lsm status`,
+// `cfm lsm init`, and `cfm lsm probe`.
+type BTFDriftPick struct {
+	// Hook is the kernel BTF symbol probed, e.g. "bpf_lsm_inode_setattr".
+	Hook string
+	// Arity is the kernel's hook arg count (0 on probe failure).
+	Arity int
+	// Picked is the BPF program variant name the loader would
+	// select. Empty when the arity does not match any known variant
+	// (in which case the loader would fail; surfaced as Reason).
+	Picked string
+	// PickKey is the policy-specific drift key (e.g.
+	// "bpf_lsm_inode_setattr_fs007"), so the operator can tell apart
+	// FS-005 and FS-007 picks on the same hook.
+	PickKey string
+	// Reason is set on failure / unknown-arity.
+	Reason string
+}
+
+// BTFDiagnostics is the BTF-only snapshot used by status / init /
+// probe surfaces. All probes are read-only (no BPF load required).
+type BTFDiagnostics struct {
+	// DriftPicks reports the picked variant for each drifting LSM
+	// hook, one entry per (hook, pickKey) pair.
+	DriftPicks []BTFDriftPick
+
+	// CredCapShape is "modern" (6.3+), "legacy" (pre-6.3),
+	// "unknown" (third layout — cfm_cred004 would be neutralised at
+	// load time), or "btf-unavailable" (kernel BTF could not be
+	// loaded; the loader would also neutralise cfm_cred004 in that
+	// case — see loader.go).
+	CredCapShape string
+
+	// CredCapShapeError, when non-empty, is the BTF-lookup error
+	// behind a CredCapShape of "btf-unavailable" or "unknown".
+	CredCapShapeError string
+}
+
+// RunBTFDiagnostics runs every BTF probe the loader would run, but
+// without loading any BPF programs. Intended for status / init /
+// probe display: an operator can see what the loader will pick
+// before deciding to enable.
+//
+// Errors are folded into individual fields (DriftPicks[i].Reason,
+// CredCapShapeError) so a partial result is still useful — e.g. if
+// one hook is missing from BTF but the others resolve fine.
+func RunBTFDiagnostics() BTFDiagnostics {
+	var diag BTFDiagnostics
+
+	for _, v := range lsmDriftVariants {
+		pick := BTFDriftPick{Hook: v.hook, PickKey: v.keyFor()}
+		n, err := lsmHookParamCount(v.hook)
+		if err != nil {
+			pick.Reason = err.Error()
+			diag.DriftPicks = append(diag.DriftPicks, pick)
+			continue
+		}
+		pick.Arity = n
+		switch n {
+		case v.noidmapHookArgs:
+			pick.Picked = v.noidmap
+		case v.idmapHookArgs:
+			pick.Picked = v.idmap
+		default:
+			pick.Reason = fmt.Sprintf("kernel exposes %s with %d hook args; expected %d or %d",
+				v.hook, n, v.noidmapHookArgs, v.idmapHookArgs)
+		}
+		diag.DriftPicks = append(diag.DriftPicks, pick)
+	}
+
+	shape, err := credCapAmbientShape()
+	if err != nil {
+		diag.CredCapShape = "btf-unavailable"
+		diag.CredCapShapeError = err.Error()
+	} else {
+		diag.CredCapShape = shape
+	}
+
+	return diag
+}
