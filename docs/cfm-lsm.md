@@ -459,6 +459,22 @@ catches it). RPM/dpkg-database signed-binary checking is left out by
 design — operators who want fmpath-style exception lists add them via
 `allow_exe` / `allow_path`.
 
+**Depth-walk failure mode.** The dentry-walk branch unrolls 16
+levels (BPF verifier complexity ceiling). On paths deeper than 16
+hops the walk runs out of budget before reaching the filesystem
+root and `cfm_walk_to_top` returns `reached_root=false`;
+`cfm_dentry_under_ephemeral_root` then fails closed (returns false)
+rather than treating the deepest reached dentry as top-of-path. The
+trade-off is **false-negative on >16-level execs from `/tmp`**
+(rare in practice — typical exec paths are well under that depth)
+in exchange for eliminating an entire false-positive class where a
+mid-path `tmp` directory at exactly the boundary would otherwise be
+mis-classified as exec-from-/tmp. The tmpfs-superblock-magic
+signal (`CFM_LSM_F_TMPFS_BACKED`) is independent of dentry depth
+and still matches anywhere on tmpfs, so the realistic
+/tmp-on-tmpfs / `/dev/shm` / `/run/user` execs that account for
+the bulk of legitimate rule hits still trip via that path.
+
 ### `CFML-FS-005` — Sensitive-file modification by web user
 
 | | |
