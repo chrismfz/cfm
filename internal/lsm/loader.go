@@ -150,6 +150,15 @@ type Loader struct {
 	// — kernel-side selection already happened at enable time.
 	driftPicks map[string]string
 
+	// credCapShape records the detected layout of struct cred's
+	// cap_ambient field in the live kernel's BTF. One of "modern"
+	// (6.3+ u64 val), "legacy" (pre-6.3 u32 cap[2]), "unknown" (third
+	// shape — cfm_cred004 was neutralised), "no-program" (cfm_cred004
+	// not embedded in the .o), or "probe-failed" (BTF lookup failed —
+	// load proceeds, cfm_cred004 may still fail). Empty in AdoptPinned
+	// mode.
+	credCapShape string
+
 	// pinned is true when the loader is in pinned-load or
 	// pinned-adopt mode. Close() then skips link/map detach so the
 	// kernel-side state survives the loader's lifetime.
@@ -270,6 +279,19 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 		return nil, fmt.Errorf("%w: probe LSM hook signatures: %v", ErrBPFLSMUnavailable, err)
 	}
 	l.driftPicks = picks
+	// BTF-probe struct cred's cap_ambient layout. The BPF program for
+	// CFML-CRED-004 handles both known shapes (pre-6.3 u32[2] and 6.3+
+	// u64) via bpf_core_field_exists; this call neutralises the program
+	// only if the kernel exposes a third unknown shape, in which case
+	// the whole LoadAndAssign would otherwise fail with "invalid func
+	// unknown#NNN" from a poisoned CO-RE relocation. Any error here
+	// (e.g. BTF unavailable) is non-fatal — cred004 will fail in the
+	// same way as today, which is no worse than the current behaviour.
+	if shape, err := selectCredCapVariant(spec); err == nil {
+		l.credCapShape = shape
+	} else {
+		l.credCapShape = "probe-failed"
+	}
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)
 	}
@@ -931,6 +953,13 @@ func (l *Loader) DriftPicks() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// CredCapShape returns the detected layout of struct cred's
+// cap_ambient field — "modern", "legacy", "unknown", "no-program",
+// "probe-failed", or "" (AdoptPinned mode). See loader.go field doc.
+func (l *Loader) CredCapShape() string {
+	return l.credCapShape
 }
 
 // pickedDriftProgram returns the *ebpf.Program for the variant of a
