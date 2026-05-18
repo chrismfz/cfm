@@ -46,10 +46,20 @@ type blsKernelEntry struct {
 // divergence check therefore projects each entry's args through
 // KeepManagedArgs first and compares only the managed subset.
 //
-// If the managed subset diverges between kernels, the args from the
-// first entry are returned together with a non-nil error naming the
-// divergent kernels — `computeDrift` surfaces this to the operator
-// as drift so the next boot doesn't land on a stale entry.
+// The baseline entry — the one whose args we return and against which
+// other entries are compared — is the actual default kernel reported
+// by `grubby --default-kernel`. That's what the firmware will boot
+// next absent operator intervention, so divergence on managed args
+// means "if you fall back to one of the named entries, kernsec's
+// managed args won't carry". If `--default-kernel` is unavailable or
+// names a path that isn't in `--info=ALL`, we fall back to the first
+// non-recovery entry (typically index=0, the newest installed kernel
+// on RHEL-family).
+//
+// If the managed subset diverges across kernels, the default entry's
+// args are returned together with a non-nil error naming the divergent
+// kernels — `computeDrift` surfaces this to the operator as drift so
+// the next boot doesn't land on a stale entry.
 //
 // Empty grubby output (no kernels) → ("", nil), matching the previous
 // DEFAULT-only behaviour.
@@ -62,20 +72,48 @@ func (b *BLSBackend) NextBootCmdline() (string, error) {
 	if len(entries) == 0 {
 		return "", nil
 	}
-	first := entries[0].Args
-	firstManaged := KeepManagedArgs(ParseCmdline(first))
+	baseline := pickDefaultEntry(entries, b.defaultKernelPath())
+	baselineManaged := KeepManagedArgs(ParseCmdline(baseline.Args))
 	var diverged []string
-	for _, e := range entries[1:] {
+	for _, e := range entries {
+		if e.Kernel == baseline.Kernel {
+			continue
+		}
 		entryManaged := KeepManagedArgs(ParseCmdline(e.Args))
-		if !sameTokens(entryManaged, firstManaged) {
+		if !sameTokens(entryManaged, baselineManaged) {
 			diverged = append(diverged, e.Kernel)
 		}
 	}
 	if len(diverged) > 0 {
-		return first, fmt.Errorf("%w from %s — stale on: %s",
-			ErrBLSDivergence, entries[0].Kernel, strings.Join(diverged, ", "))
+		return baseline.Args, fmt.Errorf("%w from %s — stale on: %s",
+			ErrBLSDivergence, baseline.Kernel, strings.Join(diverged, ", "))
 	}
-	return first, nil
+	return baseline.Args, nil
+}
+
+// defaultKernelPath asks grubby which kernel is the default. Returns
+// "" if grubby refuses or emits an empty path — the caller falls back
+// to entries[0] in that case, preserving the legacy behaviour.
+func (b *BLSBackend) defaultKernelPath() string {
+	out, err := b.FS.RunCapture("grubby", "--default-kernel")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// pickDefaultEntry returns the entry whose Kernel matches defaultPath,
+// or entries[0] if defaultPath is empty or not found among entries.
+// Callers must guarantee len(entries) > 0.
+func pickDefaultEntry(entries []blsKernelEntry, defaultPath string) blsKernelEntry {
+	if defaultPath != "" {
+		for _, e := range entries {
+			if e.Kernel == defaultPath {
+				return e
+			}
+		}
+	}
+	return entries[0]
 }
 
 // parseGrubbyAll parses the multi-block output of `grubby --info=ALL`.
