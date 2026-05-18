@@ -446,3 +446,33 @@ func TestAllowCommPolicy_CRED004_OBS004(t *testing.T) {
 		}
 	}
 }
+
+// TestAllowCommError_MentionsAllConsumers asserts the parser error
+// for "allow_comm on a policy that doesn't accept it" enumerates
+// every policy that DOES accept it — not a hardcoded subset that
+// drifts when a new policy is added to allowCommPolicy(). Same
+// rationale for allow_exe via the joinPolicyIDs path. Regression
+// guard for the bug PR #944's review caught: pre-fix, the error
+// listed five policies even after CRED-004 / OBS-004 were added
+// to the gate.
+func TestAllowCommError_MentionsAllConsumers(t *testing.T) {
+	// Drive the parser into the allow_comm error path by attaching
+	// allow_comm to a policy that doesn't consume it. CFML-FS-008
+	// (kernel-knob write) is a stable choice — it's never going to
+	// gain allow_comm semantically.
+	body := `
+[policy "CFML-FS-008"]
+mode = monitor
+allow_comm = something
+`
+	_, err := ParseConf(strings.NewReader(body))
+	if err == nil {
+		t.Fatal("expected parse error for allow_comm on a non-consumer policy")
+	}
+	msg := err.Error()
+	for _, id := range []PolicyID{PolicyCapRaise, PolicyPtraceAccess} {
+		if !strings.Contains(msg, string(id)) {
+			t.Errorf("error message missing %s: %q", id, msg)
+		}
+	}
+}
