@@ -239,6 +239,35 @@ const (
 	// user to debug a worker via gdb) without adding security the
 	// yama sysctl doesn't already provide.
 	PolicyPtraceAccess PolicyID = "CFML-OBS-004"
+
+	// PolicyRawSocket — CFML-NET-002: detect a raw / packet socket
+	// being opened by a watched (web-class) uid. Threat: scanner /
+	// sniffer / spoofing toolkit dropped by a compromised vhost
+	// user.
+	//
+	//   AF_PACKET sockets             — full L2 frame sniff / inject.
+	//   AF_INET  + SOCK_RAW           — arbitrary L3 IPv4 send / recv.
+	//   AF_INET6 + SOCK_RAW           — same for IPv6.
+	//
+	// Modern Linux's unprivileged-ping mechanism uses SOCK_DGRAM +
+	// IPPROTO_ICMP and does NOT trip the rule. The setuid /bin/ping
+	// that's still on most distros DOES use SOCK_RAW but runs
+	// effective-uid 0, so the watched-uid gate filters it out.
+	//
+	// Hook: lsm/socket_create
+	//
+	// No kernsec sysctl pairing — CAP_NET_RAW is per-process /
+	// per-binary, not a global toggle. NET-002 is the standalone
+	// telemetry / enforcement layer.
+	//
+	// Mode: monitor by default. Enforce-capable — there is no
+	// legitimate workflow for a web-class uid to open a raw socket,
+	// so returning -EPERM out of socket(2) is safe. Promote to
+	// enforce after a monitor window confirms no in-the-wild
+	// legitimate caller (operator-specific scripts that grant
+	// CAP_NET_RAW to a vhost user can opt the rule out via
+	// `state = skip`).
+	PolicyRawSocket PolicyID = "CFML-NET-002"
 )
 
 // Mode is the per-policy enforcement mode.
@@ -390,6 +419,13 @@ func AllPolicies() []Policy {
 			Hook:        "ptrace_access_check",
 			DefaultMode: ModeDisabled,
 			Description: "Detect a watched-uid task attempting ptrace (PTRACE_MODE_READ / PTRACE_MODE_ATTACH) against another task. Catches sibling-worker credential theft and cross-tenant introspection. Same-uid sibling-worker attacks are tagged with the SAMEUID flag; cross-uid attempts are the higher-severity signal. Monitor-only by design — kernel.yama.ptrace_scope=2 (kernsec) is the actual block layer for hosts that apply it. Full coverage on yama≤1 hosts (the distro default); on yama=2 hosts the BPF hook is pre-empted by yama's earlier -EPERM in the LSM chain, so OBS-004 does not see denied-by-yama attempts — the kernel block IS the protection there.",
+		},
+		{
+			ID:          PolicyRawSocket,
+			Title:       "raw / packet socket from web-class user",
+			Hook:        "socket_create",
+			DefaultMode: ModeDisabled,
+			Description: "Detect a watched-uid task opening a raw (AF_INET/INET6 + SOCK_RAW) or packet (AF_PACKET) socket. Catches scanner / sniffer / spoofing toolkit drops by a compromised vhost user. Modern unprivileged ping (SOCK_DGRAM + IPPROTO_ICMP) does NOT trigger; setuid /bin/ping runs as euid=0 and is filtered by the watched-uid gate. Monitor by default; enforce-capable — returns -EPERM out of socket(2) so the dropper sees the failure and the primitive never lands.",
 		},
 	}
 }

@@ -31,6 +31,7 @@ enum cfm_lsm_policy_id {
     CFM_LSM_POLICY_KERNEL_KNOB_WRITE = 15, /* CFML-FS-008   */
     CFM_LSM_POLICY_KEXEC_LOAD        = 16, /* CFML-EXEC-008 */
     CFM_LSM_POLICY_PTRACE_ACCESS     = 17, /* CFML-OBS-004  */
+    CFM_LSM_POLICY_RAW_SOCKET        = 18, /* CFML-NET-002  */
 };
 
 /* File-system operation kind for CFML-FS-005 events. Carried in the
@@ -58,6 +59,16 @@ enum cfm_event_op {
      * persistence vector the rule watches for. */
     CFM_KEXEC_OP_LOAD      = 32,
     CFM_KEXEC_OP_FILE_LOAD = 33,
+    /* CFML-NET-002 raw-socket primitives. Differentiates the three
+     * "raw L3/L2 access" socket-create shapes the rule fires on:
+     *   RAW_INET  : socket(AF_INET,  SOCK_RAW, …)
+     *   RAW_INET6 : socket(AF_INET6, SOCK_RAW, …)
+     *   PACKET    : socket(AF_PACKET, *, …)
+     * The protocol arg (e.g. IPPROTO_RAW=255, IPPROTO_ICMP=1) goes
+     * into the filename payload as a short token. */
+    CFM_NET_OP_RAW_INET    = 40,
+    CFM_NET_OP_RAW_INET6   = 41,
+    CFM_NET_OP_PACKET      = 42,
 };
 
 #define CFM_TASK_COMM_LEN 16
