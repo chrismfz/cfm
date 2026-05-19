@@ -2601,12 +2601,24 @@ end
 -- plus every header value (Log4j-vulnerable apps logged UA / Referer /
 -- X-Forwarded-For / Authorization). Cheap precheck: skip the header walk
 -- when no "${" appears anywhere.
--- FP-risk note: the NESTED ("${${") and ENV/SYS/MAIN/DATE tags can collide
--- with legitimate template-engine syntax (Velocity, Spring SpEL, certain
--- JS templating libraries). Rolling out at logonly so the operator can
--- grep cfm.waf.log for "WAF_CVE:LOG4SHELL:NESTED" / ":ENV" / ":SYS" /
--- ":MAIN" / ":DATE" before promotion and add per-vhost exclusions if a
--- legitimate app needs them.
+-- FP-risk note: the NESTED ("${${") and ENV/SYS/MAIN/DATE/BASE64 tags can
+-- collide with legitimate template-engine syntax. The biggest concrete
+-- offender is **Apache Commons Configuration2** (widely deployed under
+-- Spring Boot / Apache Camel), which ships EnvironmentLookup, Systems-
+-- PropertiesLookup, DateLookup, Base64DecoderLookup and exposes them
+-- with EXACTLY the same `${env:VAR}` / `${sys:user.home}` / `${date:yyyy}`
+-- / `${base64:...}` prefix syntax as Log4j JNDI lookups. Java apps that
+-- render their own pages via Commons Configuration WILL emit these strings
+-- in form posts.
+--
+-- ${${ is also rare-but-non-zero in legitimate output: AngularJS `ng-bind`
+-- attribute strings, some Vue SFCs, and Prettier-formatted JavaScript
+-- template literals can produce `${${expr}.field}`-shaped tokens.
+--
+-- Rolling out at logonly so the operator can grep cfm.waf.log for
+-- "WAF_CVE:LOG4SHELL:NESTED" / ":ENV" / ":SYS" / ":MAIN" / ":DATE" /
+-- ":BASE64" before promotion and add per-vhost exclusions for affected
+-- apps. See docs/waf.md "Operating the WAF" for the playbook.
 function _M.detect_log4shell(args, body, headers, _norm_ab)
   local s = _norm_ab or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
 
@@ -2672,6 +2684,14 @@ end
 --   * UTF8_OVERLONG     — codepoint encoded in more bytes than its value needs
 --   * UTF8_SURROGATE    — codepoint in the U+D800..U+DFFF surrogate range
 --   * UTF8_OUT_OF_RANGE — codepoint > U+10FFFF
+--
+-- FP-risk note: legitimate Latin-1 / ISO-8859-1 form posts (still used by
+-- older PHP/Perl forms) carry raw 0xA0..0xFF bytes — a "é" sent as the
+-- raw 0xE9 byte will trip UTF8_BAD_LEAD (0xE9 expects 2 continuations,
+-- next byte is usually ASCII). Acceptable at logonly. If/when this rule
+-- is promoted to challenge, gate on the request's declared charset:
+-- skip when Content-Type contains "iso-8859" / "windows-125" / "latin1"
+-- (and apply only when charset is "utf-8" or omitted — HTTP default).
 function _M.detect_bad_utf8(args, body, _norm_ab)
   local s = _norm_ab or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
   local n = #s

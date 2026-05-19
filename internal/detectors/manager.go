@@ -262,7 +262,7 @@ func (m *manager) maybeReload(parent context.Context) {
 	// a valid-but-empty table — Lua side then degenerates to the existing
 	// self-IPs-only behaviour. The path is the canonical /var/lib/cfm/lua
 	// location used for all Lua-side caches.
-	if err := ig.WriteLuaCache("/var/lib/cfm/lua/cfm_ignore_nets.lua"); err != nil {
+	if err := ig.WriteLuaCache(IgnoreNetsLuaPath); err != nil {
 		logging.Logf("[detectors] ignore-nets lua cache write failed: %v", err)
 	}
 	// --------------------------------------------

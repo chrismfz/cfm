@@ -1474,23 +1474,25 @@ do
   check(waf_rule_id == 611,                         "75: bad_utf8 — rule_id=611")
 end
 
--- ── Test 76: rule_bad_utf8 — truncated multibyte sequence ───────────────────
--- 0xE2 announces 3 bytes (need=2 continuations); we send it as the final
--- byte of args so the scan buffer ends mid-sequence — the canonical
--- "truncated multibyte" case. (Continuation followed by a non-continuation
--- byte like "&" would trip UTF8_BAD_CONT instead, which is its own tag.)
+-- ── Test 76: rule_bad_utf8 — bad continuation byte ─────────────────────────
+-- 0xE2 announces a 3-byte sequence (need=2 continuations). We follow it with
+-- one valid continuation (0x82) and then the args/body separator '&' (0x26)
+-- which is NOT a continuation byte (0x80..0xBF). The detector walks past
+-- the lead byte, accepts the first continuation, then rejects '&' on the
+-- second — emits UTF8_BAD_CONT specifically.
+--
+-- Note: the cap-boundary skip at detect_bad_utf8 (`if i > n - 3 then return
+-- nil`) does NOT fire here — the lead byte sits at position 4 in a 6-byte
+-- buffer (`"x=a\xE2\x82&"`), well inside `n - 3`. UTF8_TRUNC would only
+-- fire if the lead landed in the last 3 bytes of the buffer.
 do
   disable_all_rules()
   waf.set_rule("rule_bad_utf8", "logonly")
 
-  -- args is concatenated as `args .. "&" .. body` so the trailing 0xE2 here
-  -- becomes the final byte of the scan buffer — followed by "&" with no
-  -- second continuation byte. i+need exceeds n → UTF8_TRUNC.
   local hit, reason = waf.check(fresh_ctx({ args = "x=a\xE2\x82" }))
-  check(hit == true, "76: bad_utf8 trunc — hit=true")
-  check(reason and (reason:find("UTF8_TRUNC", 1, true)
-                    or reason:find("UTF8_BAD_CONT", 1, true)),
-        "76: bad_utf8 trunc — tag in {UTF8_TRUNC, UTF8_BAD_CONT} (got " .. tostring(reason) .. ")")
+  check(hit == true, "76: bad_utf8 bad_cont — hit=true")
+  check(reason == "WAF_BAD_UTF8:UTF8_BAD_CONT",
+        "76: bad_utf8 bad_cont — exact tag (got " .. tostring(reason) .. ")")
 end
 
 -- ── Test 77: rule_bad_utf8 — clean ASCII + valid UTF-8 must not fire ────────

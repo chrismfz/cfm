@@ -399,6 +399,14 @@ local function load_self_ip_cache(force)
   return map
 end
 
+-- Short TTL applied when the cache file is missing on disk. The Go side
+-- writes /var/lib/cfm/lua/cfm_ignore_nets.lua on engine startup and on
+-- every config reload, but on a freshly-booted host there's a window
+-- where the file doesn't exist yet. Falling all the way back to the
+-- 30s SELF_IPS_TTL during that window means IGNORE_NETS is silently
+-- ignored for the first half-minute. Re-poll every 2s instead.
+local _IGNORE_NETS_MISSING_TTL_SEC = 2
+
 local function load_ignore_cache(force)
   local now = ngx.now()
   if not force and now < (_ignore_cache.expires_at or 0) then
@@ -407,10 +415,12 @@ local function load_ignore_cache(force)
 
   local ips, v4_ranges = {}, {}
   local generated_at = ""
+  local file_present = false
   local ok_load, chunk_or_err = pcall(loadfile, _IGNORE_NETS_FILE)
   if not ok_load then
     ngx.log(ngx.WARN, "[cfm] ignore-nets loadfile panic ", _IGNORE_NETS_FILE, ": ", tostring(chunk_or_err))
   elseif chunk_or_err then
+    file_present = true
     local ok_run, val = pcall(chunk_or_err)
     if ok_run and type(val) == "table" then
       generated_at = tostring(val.generated_at or "")
@@ -438,7 +448,12 @@ local function load_ignore_cache(force)
   _ignore_cache.ips = ips
   _ignore_cache.v4_ranges = v4_ranges
   _ignore_cache.generated_at = generated_at
-  _ignore_cache.expires_at = now + _SELF_IPS_TTL_SEC
+  -- File missing → re-poll quickly so first-boot convergence isn't 30s.
+  if file_present then
+    _ignore_cache.expires_at = now + _SELF_IPS_TTL_SEC
+  else
+    _ignore_cache.expires_at = now + _IGNORE_NETS_MISSING_TTL_SEC
+  end
   return _ignore_cache
 end
 

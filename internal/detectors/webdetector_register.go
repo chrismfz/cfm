@@ -932,7 +932,7 @@ func init() {
 		// is_self_origin() bypass honours the same allowlist as the engine.
 		// Called unconditionally (nil receiver writes an empty table) so the
 		// Lua side always has a valid cache to consult.
-		if err := ipIgnore.WriteLuaCache("/var/lib/cfm/lua/cfm_ignore_nets.lua"); err != nil {
+		if err := ipIgnore.WriteLuaCache(IgnoreNetsLuaPath); err != nil {
 			logging.Logf("[webdetector] ignore-nets lua cache write failed: %v", err)
 		}
 
