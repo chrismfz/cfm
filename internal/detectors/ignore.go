@@ -6,8 +6,10 @@ import (
     "fmt"
     "net"
     "os"
+    "os/user"
     "path/filepath"
     "sort"
+    "strconv"
     "strings"
     "time"
 )
@@ -195,9 +197,32 @@ func (ig *IPIgnore) WriteLuaCache(path string) error {
     if err := os.WriteFile(tmp, buf.Bytes(), 0o640); err != nil {
         return fmt.Errorf("ignore-nets lua cache write: %w", err)
     }
+    // Match the existing cfm_self_ips.lua chown pattern: the openresty worker
+    // runs in the `cfm` group and needs group-read on this file. WriteFile
+    // respects the mode arg, but file ownership defaults to whatever's running
+    // this code (typically root) — without this chown the worker silently
+    // fails to load the cache and IGNORE_NETS bypass is dead in production.
+    ensureCFMGroupRead(tmp)
     if err := os.Rename(tmp, path); err != nil {
         _ = os.Remove(tmp)
         return fmt.Errorf("ignore-nets lua cache rename: %w", err)
     }
+    ensureCFMGroupRead(path)
     return nil
+}
+
+// ensureCFMGroupRead chowns path to the `cfm` group (uid unchanged). Twin of
+// the nft.Backend.ensureCFMGroupRead helper — duplicated here to avoid a
+// cross-package import (nft depends on detectors via the registration path,
+// not the other way around). Silent no-op if the cfm group doesn't exist.
+func ensureCFMGroupRead(path string) {
+    g, err := user.LookupGroup("cfm")
+    if err != nil || g == nil {
+        return
+    }
+    gid, err := strconv.Atoi(g.Gid)
+    if err != nil {
+        return
+    }
+    _ = os.Chown(path, -1, gid)
 }
