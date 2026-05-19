@@ -218,6 +218,11 @@ Current assignments:
   402  rule_upload_content             410  rule_webshell_path
   403  rule_upload_obfuscation         411  rule_webshell_ping
   404  rule_php_webshell_body          412  rule_polyglot_upload
+                                       421  rule_php_split_string_canary
+                                       422  rule_php_dropper_wget_curl
+                                       423  rule_php_dropper_markers
+                                       424  rule_php_filesize_recon
+                                       425  rule_php_touch_antiforensic
 
 5xx — Auth abuse
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
@@ -533,6 +538,7 @@ WAF_B64_INJECT
 WAF_SHELLSHOCK
 WAF_WEBSHELL
 WAF_CVE
+WAF_DROPPER
 ```
 
 A reason in this list, when fired with `challenge` action under valid clearance, gets converted to `block` instead of `logonly`. Matched against the prefix before the first `:` so `WAF_RCE:REVERSE_SHELL:BASH_TCP` still hits.
