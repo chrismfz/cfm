@@ -79,6 +79,11 @@ var wafRuleIDs = []WAFRule{
 	{ID: 410, Name: "rule_webshell_path", ReasonFamily: "WAF_WEBSHELL", DefaultMode: "logonly"},
 	{ID: 411, Name: "rule_webshell_ping", ReasonFamily: "WAF_WEBSHELL", DefaultMode: "logonly"},
 	{ID: 412, Name: "rule_polyglot_upload", ReasonFamily: "WAF_UPLOAD_CONTENT", DefaultMode: "logonly"},
+	{ID: 421, Name: "rule_php_split_string_canary", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
+	{ID: 422, Name: "rule_php_dropper_wget_curl", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
+	{ID: 423, Name: "rule_php_dropper_markers", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
+	{ID: 424, Name: "rule_php_filesize_recon", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
+	{ID: 425, Name: "rule_php_touch_antiforensic", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 
 	// 5xx auth abuse
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},

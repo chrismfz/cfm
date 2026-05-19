@@ -212,6 +212,16 @@ local CFG = {
   rule_polyglot_upload   = "challenge", -- image CT/ext + <?php/<%/<jsp:/<script in first 64 bytes
                                         -- (polyglot image upload; legit images never contain these openers)
 
+  -- ── PHP dropper / canary family (421-425) ────────────────────────────────
+  -- Source: 2026-05-19 production /tmp dump from a compromised shared host.
+  -- All five start at logonly per the playbook; promote to challenge/block
+  -- after one week of clean cfm.waf.log data.
+  rule_php_split_string_canary = "logonly", -- <?php print "A"."B";exit; exec-test probe
+  rule_php_dropper_wget_curl   = "logonly", -- wget -O + curl -o + filesize() fallback dropper
+  rule_php_dropper_markers     = "logonly", -- `!success!` + `!ended!` automation framing
+  rule_php_filesize_recon      = "logonly", -- <fs>…</fs> + filesize() + SCRIPT_FILENAME recon
+  rule_php_touch_antiforensic  = "logonly", -- @touch($p, <literal-unix-ts>) mtime backdating
+
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
 
@@ -369,6 +379,11 @@ local RULE_IDS = {
   rule_webshell_path           = 410,
   rule_webshell_ping           = 411,
   rule_polyglot_upload         = 412,
+  rule_php_split_string_canary = 421,
+  rule_php_dropper_wget_curl   = 422,
+  rule_php_dropper_markers     = 423,
+  rule_php_filesize_recon      = 424,
+  rule_php_touch_antiforensic  = 425,
 
   -- 5xx auth abuse
   rule_auth_burst              = 501,
@@ -1219,6 +1234,66 @@ function _M.check(ctx)
     end
   end
 
+  -- ── 47) PHP split-string canary (421) ────────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_split_string_canary, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_split_string_canary(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_DROPPER:" .. tag, ttl, mode, RULE_IDS.rule_php_split_string_canary) then goto done end
+      end
+    end
+  end
+
+  -- ── 48) PHP wget+curl fallback dropper (422) ─────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_dropper_wget_curl, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_dropper_wget_curl(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_DROPPER:" .. tag, ttl, mode, RULE_IDS.rule_php_dropper_wget_curl) then goto done end
+      end
+    end
+  end
+
+  -- ── 49) PHP dropper success/ended markers (423) ──────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_dropper_markers, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_dropper_markers(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_DROPPER:" .. tag, ttl, mode, RULE_IDS.rule_php_dropper_markers) then goto done end
+      end
+    end
+  end
+
+  -- ── 50) PHP filesize / <fs>-tag recon (424) ──────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_filesize_recon, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_filesize_recon(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_DROPPER:" .. tag, ttl, mode, RULE_IDS.rule_php_filesize_recon) then goto done end
+      end
+    end
+  end
+
+  -- ── 51) PHP @touch() mtime backdating (425) ──────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_touch_antiforensic, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_touch_antiforensic(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_DROPPER:" .. tag, ttl, mode, RULE_IDS.rule_php_touch_antiforensic) then goto done end
+      end
+    end
+  end
+
   ::done::
   if final_sev == 0 then
     return false, nil, nil, nil
@@ -1250,6 +1325,7 @@ _M.WAF_HIGH_RISK_REASONS = {
   WAF_TRAVERSAL          = true,
   WAF_XXE                = true,
   WAF_CVE                = true,
+  WAF_DROPPER            = true,
 }
 
 function _M.is_high_risk_reason(reason)

@@ -2747,5 +2747,136 @@ function _M.detect_bad_utf8(args, body, _norm_ab)
   return nil
 end
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PHP dropper / canary family (rules 421-425)
+--
+-- Source: production /tmp artefacts captured 2026-05-19 — a shared-hosting
+-- compromise that left behind both first-stage exec-probes ("does this
+-- server run PHP?") and second-stage wget/curl droppers with size-and-mtime
+-- integrity verification. The five rules below split that observed workflow
+-- into independent detectors so per-vhost exclusions stay surgical.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- 421 — split-string PHP canary.
+-- Shape: `<?php print "AAA"."BBB"; exit;` (or echo/die, single quotes, etc.)
+-- The `.`-concat is the attacker's anti-substring trick: each random half is
+-- meaningless alone, only the runtime-concatenated whole is a known token in
+-- their response parser. We catch on the canary's negative shape — PHP opener
+-- + print/echo/die immediately followed by quoted-string concat + no control
+-- flow constructs. Real PHP code always has at least one of `function`,
+-- `class`, `if`, `for`, `while`, `foreach`, or `{`.
+function _M.detect_php_split_string_canary(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = cap(body, cap_len)
+
+  if not s:find("<%?php") and not s:find("<%?=") then return nil end
+
+  local ls = lower(s)
+  if ls:find("function%s*[%(%w_]") or ls:find("class%s+[%w_]")
+     or ls:find("if%s*%(") or ls:find("else%s")
+     or ls:find("for%s*%(") or ls:find("while%s*%(") or ls:find("foreach")
+     or ls:find("{") then
+    return nil
+  end
+
+  if s:find('print%s+%b""%s*%.%s*%b""')       then return "PRINT_CONCAT" end
+  if s:find("print%s+%b''%s*%.%s*%b''")       then return "PRINT_CONCAT" end
+  if s:find('echo%s+%b""%s*%.%s*%b""')        then return "ECHO_CONCAT"  end
+  if s:find("echo%s+%b''%s*%.%s*%b''")        then return "ECHO_CONCAT"  end
+  if s:find('die%s*%(?%s*%b""%s*%.%s*%b""')   then return "DIE_CONCAT"   end
+  if s:find("die%s*%(?%s*%b''%s*%.%s*%b''")   then return "DIE_CONCAT"   end
+
+  return nil
+end
+
+-- 422 — wget+curl fallback dropper.
+-- The dropper-as-a-service shape: try `wget -O <path> <url>`, then try
+-- `curl -o <path> <url>` as a redundant fallback, with a `filesize()`
+-- integrity check between the two. The pair is the giveaway — almost no
+-- legitimate PHP body invokes both downloaders for the same target.
+function _M.detect_php_dropper_wget_curl(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = lower(cap(body, cap_len))
+
+  if not (has(s, "wget -o") or has(s, "wget --output")) then return nil end
+  if not (has(s, "curl -o") or has(s, "curl --output")) then return nil end
+
+  if not has(s, "filesize(") then return nil end
+  if not (has(s, "@touch(") or has(s, "file_exists(")) then return nil end
+
+  return "WGET_CURL_FALLBACK"
+end
+
+-- 423 — distinctive dropper exit markers `!success!` / `!ended!`.
+-- The samples wrap their success/failure path with `die('!success!')` and
+-- `die('!ended!')` — framing strings the attacker's automation greps for in
+-- the HTTP response. Both literals in the same body is bespoke enough that
+-- a generic dictionary of leetspeak markers will not collide.
+function _M.detect_php_dropper_markers(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = cap(body, cap_len)
+
+  local has_success = s:find("['\"]!success!['\"]") ~= nil
+  local has_ended   = s:find("['\"]!ended!['\"]")   ~= nil
+  if not (has_success and has_ended) then return nil end
+
+  local ls = lower(s)
+  if not (has(ls, "die(") or has(ls, "die ") or has(ls, "exit(") or has(ls, "exit;")) then
+    return nil
+  end
+  return "SUCCESS_ENDED_PAIR"
+end
+
+-- 424 — `<fs>`-tagged filesize recon stub.
+-- `<?php $p=$_SERVER['SCRIPT_FILENAME']; die("<fs>".filesize($p)."</fs>...");`
+-- The literal `<fs>` tag plus `filesize(` plus a SCRIPT_FILENAME reference is
+-- distinctive: it is the attacker's "where am I and how big is the script I
+-- got dropped at?" probe, used to pick the right second-stage payload.
+function _M.detect_php_filesize_recon(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = lower(cap(body, cap_len))
+
+  if not has(s, "<fs>") then return nil end
+  if not has(s, "filesize(") then return nil end
+  if not has(s, "script_filename") then return nil end
+  return "FS_TAG_RECON"
+end
+
+-- 425 — `@touch()` with a forged literal unix timestamp (mtime backdating).
+-- Anti-forensic primitive: after a successful drop, the attacker matches the
+-- new file's mtime to a surrounding-directory timestamp so `find -newer` and
+-- audit walks miss it. Legit code uses bare `touch()` with `time()` — the
+-- `@` error-suppression plus a 10-digit literal timestamp is malware-only.
+function _M.detect_php_touch_antiforensic(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = lower(cap(body, cap_len))
+
+  if not has(s, "@touch(") then return nil end
+
+  -- Literal unix-timestamp second arg covering 2017-08 → 2038-01.
+  if not s:find("@touch%s*%([^,)]+,%s*1[5-9]%d%d%d%d%d%d%d%d")
+     and not s:find("@touch%s*%([^,)]+,%s*20%d%d%d%d%d%d%d%d")
+     and not s:find("@touch%s*%([^,)]+,%s*21[0-3]%d%d%d%d%d%d%d") then
+    return nil
+  end
+
+  if not (has(s, "file_put_contents") or has(s, "fwrite")
+          or has(s, "wget ") or has(s, "curl ")
+          or has(s, "file_exists(") or has(s, "filesize(")) then
+    return nil
+  end
+  return "FORGED_MTIME_TOUCH"
+end
+
 
 return _M
