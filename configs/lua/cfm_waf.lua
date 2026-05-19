@@ -164,10 +164,13 @@ local CFG = {
   -- ── Phase 3 — known-CVE fingerprints (logonly rollout) ───────────────────
   -- Java deserialization (CVE-2015-7501 / -2017-9805 / -2017-12149 / -2019-2725
   -- pattern). Family WAF_RCE so it shares high-risk post-clearance routing.
-  -- C1 Log4Shell is NOT a separate rule — already in detect_rce (rule 320).
-  -- C3 (CVE signature file) is deferred to its own infra PR.
+  -- rule_rce (320) already catches the bare "${jndi:" Log4Shell marker;
+  -- rule_log4shell (328) extends C1 with evasion variants (${lower:j}…,
+  -- ${env:X:-j}…, ${${::-j}…) that defeat substring matching on rule 320.
   rule_java_deserialize  = "challenge", -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
                                         -- (Java-serialization-specific marker; not in legit web traffic)
+  rule_log4shell         = "logonly",   -- ${lower:j}…, ${env:X:-j}…, ${${::-j}${::-n}…, ${base64:…}
+                                        -- (Log4Shell JNDI-lookup evasion forms not caught by rule 320)
 
   -- ── Phase 4 — C2 / exfiltration (logonly rollout) ────────────────────────
   -- Sources: docs/waf.md "Detector phases" §Phase 4. X1 covers tunnel/paste
@@ -194,6 +197,10 @@ local CFG = {
   rule_range_abuse       = "logonly",   -- Apache Killer (CVE-2011-3192) style multi-range floods,
                                         -- oversized Range: values, legacy Request-Range: header,
                                         -- duplicate Range: headers (slowhttp / smuggling fingerprints)
+  rule_bad_utf8          = "logonly",   -- malformed UTF-8 in args+body (overlong / surrogate /
+                                        -- truncated multibyte). Encoding-bypass primitive — overlong
+                                        -- sequences encode "." / "/" / "<" in extra bytes that
+                                        -- substring matchers miss. Port of Coraza validateUtf8Encoding.
 
   -- ── Phase 1 — W4 polyglot upload (logonly rollout) ───────────────────────
   -- Source: docs/waf.md "Detector phases" §Phase 1 (W4). Distinct from rule
@@ -351,6 +358,7 @@ local RULE_IDS = {
   rule_lolbin                  = 325,
   rule_java_deserialize        = 326,
   rule_coinminer               = 327,
+  rule_log4shell               = 328,
 
   -- 4xx upload / malware
   rule_upload_filename         = 401,
@@ -380,6 +388,7 @@ local RULE_IDS = {
   rule_smuggling_cl            = 608,
   rule_header_flood            = 609,
   rule_range_abuse             = 610,
+  rule_bad_utf8                = 611,
 
   -- 7xx SSRF
   rule_ssrf                    = 701,
@@ -637,6 +646,20 @@ function _M.check(ctx)
     end
   end
 
+  -- ── 6a) Log4Shell evasion variants (C1 extension; rule_rce 320 catches  ──
+  --       the bare "${jndi:" forms — this rule covers the lookup-syntax
+  --       tricks: ${${::-j}…, ${lower:j}…, ${env:X:-j}…, ${base64:…}).
+  do
+    local mode = rule_mode(CFG.rule_log4shell, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_log4shell(args, body, headers, get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:LOG4SHELL:" .. tag, ttl, mode, RULE_IDS.rule_log4shell) then goto done end
+      end
+    end
+  end
+
   -- ── 7) Shellshock (CVE-2014-6271) ────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_shellshock, "logonly")
@@ -698,6 +721,18 @@ function _M.check(ctx)
     if mode ~= "disabled" and det.detect_ctrl_chars(args, body, headers, uri) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       if record("WAF_CTRL_CHARS", ttl, mode, RULE_IDS.rule_ctrl_chars) then goto done end
+    end
+  end
+
+  -- ── 12a) Bad UTF-8 encoding (Coraza validateUtf8Encoding port) ───────────
+  do
+    local mode = rule_mode(CFG.rule_bad_utf8, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_bad_utf8(args, body, get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BAD_UTF8:" .. tag, ttl, mode, RULE_IDS.rule_bad_utf8) then goto done end
+      end
     end
   end
 
@@ -1214,6 +1249,7 @@ _M.WAF_HIGH_RISK_REASONS = {
   WAF_WEBSHELL           = true,
   WAF_TRAVERSAL          = true,
   WAF_XXE                = true,
+  WAF_CVE                = true,
 }
 
 function _M.is_high_risk_reason(reason)

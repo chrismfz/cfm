@@ -2,7 +2,7 @@
 
 ## Status
 
-The WAF rebuild is complete. **51 detectors across 9 rule-ID groups** (1xx-9xx)
+The WAF rebuild is complete. **53 detectors across 9 rule-ID groups** (1xx-9xx)
 inspect every dynamic request before it reaches origin. Severity-aggregation
 returns the strongest rule's action; per-vhost exclusions let operators
 whitelist specific rules on noisy hosts; hit-rate counters and the per-
@@ -11,8 +11,6 @@ before promoting any rule from `logonly` to `challenge` to `block`.
 
 Open follow-ups (none blocking):
 
-- **C3 — CVE signature file infrastructure** (`/etc/cfm/cve_signatures.txt` with
-  hot-reload). Deferred until there's a concrete CVE pipeline to feed it.
 - **Promotion review** — most of the new detectors (Phase 1-5 + extensions)
   ship at `logonly`. Walk `cfm webtop waf hit-rates --hours 168` after a week
   of production data and promote well-behaved rules per the playbook below.
@@ -213,6 +211,7 @@ Current assignments:
                                        325  rule_lolbin
                                        326  rule_java_deserialize
                                        327  rule_coinminer
+                                       328  rule_log4shell
 
 4xx — Upload / malware
   401  rule_upload_filename            405  rule_script_obfuscation
@@ -232,6 +231,7 @@ Current assignments:
   604  rule_content_type_anomaly       608  rule_smuggling_cl
                                        609  rule_header_flood
                                        610  rule_range_abuse
+                                       611  rule_bad_utf8
 
 7xx — SSRF / external interaction
   701  rule_ssrf
@@ -532,6 +532,7 @@ WAF_CMD_PAYLOAD
 WAF_B64_INJECT
 WAF_SHELLSHOCK
 WAF_WEBSHELL
+WAF_CVE
 ```
 
 A reason in this list, when fired with `challenge` action under valid clearance, gets converted to `block` instead of `logonly`. Matched against the prefix before the first `:` so `WAF_RCE:REVERSE_SHELL:BASH_TCP` still hits.
@@ -598,7 +599,6 @@ Highest-value items first. S/M/L = ½–1 day / 2–3 days / multi-day.
 | 3 | **R1 (Reverse shell payloads)** | Exact literal match, near-zero FP, instant block-class. | S |
 | 4 | **W1 (Known webshell paths)** as a hash-lookup table loaded from a data file. | Foundation for all path-based detectors. | S |
 | 5 | **W4 (Polyglot upload detection)** | Highest-value upload defense. Needs a tiny multipart parser (also unblocks W2/W3 in upload context). | M |
-| 6 | **CVE signature file** at `/etc/cfm/cve_signatures.txt` with hot-reload. | Needed before Phase 3 grows; ship updates without redeploying. | M |
 | 7 | **B5 (POST + empty UA + CL:0 + .php)** combo fingerprint | Cheap, high-confidence webshell ping detector. | S |
 | 8 | **Panel DNAT WAF profile** for cPanel/DirectAdmin file managers, backup restore, plugin/theme editors. | Hijacked panel sessions uploading webshells. | L |
 | 9 | ~~**Hit-rate counter + sampled hit log**~~ DONE — see "Hit-rate measurement" section. | — | — |
@@ -613,22 +613,21 @@ Format: short ID, what it detects, target reason family, indicative score. Full 
 ### Phase 1 — webshell delivery
 
 - **W1** known-bad webshell path names (`/c99.php`, `/r57.php`, …) → `WAF_WEBSHELL:PATH:<basename>` — **shipped at `logonly` (rule 410)**.
-- **W2** webshell magic strings in body (`b374k`, `WSO 2.5`, `@eval(`, …) → `WAF_PHP_WEBSHELL_BODY:tag`, scored.
-- **W3** PHP function obfuscation (`\x65val`, `chr().chr()…`, `hex2bin($_POST[`) → `WAF_SCRIPT_OBFUSCATION:tag`, `+5`.
-- **W4** polyglot upload (image extension/CT + `<?php`/`<?=`/`<%`/`<script` in first 64 bytes) → `WAF_UPLOAD_CONTENT:POLYGLOT`, `+6`.
+- **W2** webshell magic strings in body (`b374k`, `WSO 2.5`, `@eval(`, …) → `WAF_PHP_WEBSHELL_BODY:tag`, scored — **shipped inside rule 404 (`detect_php_webshell_body`)**, covers `b374k` / `c99shell` / `r57shell` / `wso 2./4./5.` / `weevelyshell` / `filesman`.
+- **W3** PHP function obfuscation (`\x65val`, `chr().chr()…`, `hex2bin($_POST[`) → `WAF_SCRIPT_OBFUSCATION:tag`, `+5` — **shipped (rule 405)**.
+- **W4** polyglot upload (image extension/CT + `<?php`/`<?=`/`<%`/`<script` in first 64 bytes) → `WAF_UPLOAD_CONTENT:POLYGLOT`, `+6` — **shipped at `logonly` (rule 412)**.
 
 ### Phase 2 — post-exploitation / RCE
 
 - **R1** reverse shell strings (`bash -i >& /dev/tcp/`, `python -c 'import socket'`, `socat tcp-connect`) → `WAF_RCE:REVERSE_SHELL:<tag>` — **shipped at `logonly` (rule 322)**; planned promotion to `block` after one week of clean hit-rate evidence per the rollout playbook.
-- **R2** cron/systemd persistence (`crontab -e`, `/etc/cron.d/`, `[Unit]…ExecStart=/`) → `WAF_RCE:PERSISTENCE`, `+6`.
-- **R3** LD_PRELOAD / userspace rootkit artifacts → `WAF_RCE:ROOTKIT_ARTIFACT`, `+6`.
-- **R4** LOLbins (`certutil -urlcache -split`, `iex(iwr`, `-EncodedCommand <b64>`) → `WAF_RCE:LOLBIN` / score combo with base64 detector.
+- **R2** cron/systemd persistence (`crontab -e`, `/etc/cron.d/`, `[Unit]…ExecStart=/`) → `WAF_RCE:PERSISTENCE`, `+6` — **shipped (rule 323)**.
+- **R3** LD_PRELOAD / userspace rootkit artifacts → `WAF_RCE:ROOTKIT_ARTIFACT`, `+6` — **shipped (rule 324)**.
+- **R4** LOLbins (`certutil -urlcache -split`, `iex(iwr`, `-EncodedCommand <b64>`) → `WAF_RCE:LOLBIN` / score combo with base64 detector — **shipped (rule 325)**.
 
 ### Phase 3 — known-CVE fingerprints
 
-- **C1** Log4Shell (`${jndi:ldap://`, `${${::-j}…`, `${lower:j}…`, `${env:`) inspect headers/query/body → `WAF_CVE:LOG4SHELL`, instant block.
-- **C2** Java deserialization (`rO0ABXNyAB`, `\xac\xed\x00\x05`) → `WAF_CVE:JAVA_DESERIALIZATION`.
-- **C3** signature file `/etc/cfm/cve_signatures.txt` (`reason<TAB>score<TAB>literal`), hot-reload via `refresh_*_if_needed` pattern.
+- **C1** Log4Shell — **split across two rules**: the bare `${jndi:` / `${j{n{d{i` / URL-encoded forms are caught by `detect_rce` (rule 320, default `block`); the lookup-syntax evasion variants (`${${::-j}…`, `${lower:j}…`, `${upper:j}…`, `${env:`, `${sys:`, `${main:`, `${date:`, `${base64:`, generic `${${` nesting) are **shipped at `logonly` as rule 328 (`rule_log4shell`)** with family `WAF_CVE:LOG4SHELL:<tag>`. Inspects normalized args+body plus every header value (UA / Referer / X-Forwarded-For / Authorization).
+- **C2** Java deserialization (`rO0ABXNyAB`, `\xac\xed\x00\x05`) → `WAF_CVE:JAVA_DESERIALIZATION` — **shipped (rule 326)**.
 
 ### Phase 4 — C2 / exfiltration
 
@@ -671,7 +670,7 @@ Follow the existing patterns; new code should look like the rules already in the
 | Layer | What | Where |
 |---|---|---|
 | Engine | Severity-aggregation `_M.check`, post-clearance conversion, kill-switches, `ctx.skip_rule_ids` gate | `configs/lua/cfm_waf.lua` |
-| Detectors | 42 detector functions invoked from `_M.check` (39 base + W1/R1/B5) | `configs/lua/cfm_waf_detectors.lua` |
+| Detectors | 48 detector functions invoked from `_M.check` (39 base + W1/R1/B5 + W4 polyglot + range/header_flood/long_path + log4shell + bad_utf8) | `configs/lua/cfm_waf_detectors.lua` |
 | Util | `scan_str`, `normalize` (no-`%` fast path), `url_decode_once`, `header_string`, `body_budget` (Content-Type-keyed scan cap), IP literal helpers | `configs/lua/cfm_waf_util.lua` |
 | Rule IDs | Stable 3-digit IDs, log-line plumbing, `/api/v1/waf/rules`, CLI | `configs/lua/cfm_waf.lua` (`RULE_IDS`), `internal/webdetector/waf_rule_ids.go` |
 | Hit-rate | Per-rule rate gating, `/api/v1/waf/hit-rates`, JSON hit log; flush runs in `ngx.timer.at` so the request path never pays RPC latency | `configs/lua/cfm.lua` (`waf_insp_incr` + `maybe_flush_waf_insp`), `internal/webdetector/waf_hit_rates_api_handler.go` |
@@ -847,6 +846,8 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 44 | Polyglot upload | Multipart parser → first 64 B of image-claimed parts checked vs PHP/ASP/JSP/script openers | `cfm_waf_detectors.lua:2423` |
 | 45 | Range abuse | `Request-Range`, multi `Range`, oversized, ≥ 8 ranges | `cfm_waf_detectors.lua:2533` |
 | 46 | IP host | Host header is bare IPv4 / IPv6 literal | `cfm_waf_detectors.lua:162` |
+| 47 | Log4Shell evasion | `${${::-j}…`, `${lower:j}…`, `${env:` / `sys:` / `main:` / `date:` / `base64:` in args+body+headers | `cfm_waf_detectors.lua` (`detect_log4shell`) |
+| 48 | Bad UTF-8 | Overlong / surrogate / truncated multibyte in normalized args+body (Coraza `validateUtf8Encoding` port) | `cfm_waf_detectors.lua` (`detect_bad_utf8`) |
 | — | Body budget by CT | json=32K / multipart=16K / xml=16K / urlencoded=8K / other=2K | `cfm_waf_util.lua:249` |
 | — | Normalize | `url_decode_once × 2` + `lower`, with no-`%` fast path. **No UTF-8 / unicode normalization.** | `cfm_waf_util.lua:211` |
 
@@ -1197,7 +1198,7 @@ ctrl-chars block (~ line 695):
 2. [ ] **Action 2 — XSS:** ship behind `rule_xss_libinjection = "logonly"`. Compare against rule 302 for ≥ 7 days. Promote.
 3. [ ] **Action 3 — Proxy header SQLi:** new tag `PROXY_HDR_SQLI_LIBI:*`. Compare against `PROXY_HDR_SQLI:*` for ≥ 7 days. Drop fallback.
 4. [ ] **Action 4 — Base64 decoded buffer:** new tags `B64_SQLI_LIBI` / `B64_XSS_LIBI`. Keep existing tags indefinitely; libinjection augments them, doesn't replace them.
-5. [ ] **Action 5 — Bad UTF-8:** new rule 611, `logonly` for ≥ 14 days. Promotion requires `cfm webtop waf hit-rates --hours 336` `ok_to_promote`.
+5. [x] **Action 5 — Bad UTF-8:** **DONE** — `detect_bad_utf8` shipped as rule 611 at `logonly`. Coraza `validateUtf8Encoding` port; flags overlong / surrogate / truncated multibyte sequences in args+body. Promotion requires `cfm webtop waf hit-rates --hours 336` `ok_to_promote`.
 
 ## Audit — out of scope
 
