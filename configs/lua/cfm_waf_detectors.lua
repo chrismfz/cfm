@@ -3066,5 +3066,73 @@ function _M.detect_php_eval_loader_b64(body, _headers)
   return nil
 end
 
+-- 434 — superglobal-fed callable (modern minimalist webshell).
+-- The PHP-webshell shape that defeats every literal `eval(`/`system(`
+-- substring scanner because the dangerous primitive is *invoked* via a
+-- superglobal, not named:
+--   <?php $_GET['c']($_GET['p']);
+--   <?php $_REQUEST['f']();
+--   <?php $f = $_POST['x']; $f();           ← assigned form, not in this rule
+-- We catch the direct form (no assignment required): a superglobal
+-- subscript immediately followed by a `(` is the function-call grammar
+-- in PHP, and no legitimate framework uses an unfiltered superglobal as
+-- the callable. Also covers $_SERVER['HTTP_X_*']( — the header-named
+-- callable variant used by stealthier shells.
+function _M.detect_php_superglobal_callable(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = cap(body, cap_len)
+
+  if s:find("%$_GET%s*%[[^%]]+%]%s*%(")     then return "SG_GET_CALL"     end
+  if s:find("%$_POST%s*%[[^%]]+%]%s*%(")    then return "SG_POST_CALL"    end
+  if s:find("%$_REQUEST%s*%[[^%]]+%]%s*%(") then return "SG_REQUEST_CALL" end
+  if s:find("%$_COOKIE%s*%[[^%]]+%]%s*%(")  then return "SG_COOKIE_CALL"  end
+
+  -- $_SERVER['HTTP_X_*']( — header-named callable, common in
+  -- magic-header-triggered shells.
+  if s:find("%$_SERVER%s*%[[^%]]-HTTP_[^%]]-%]%s*%(") then
+    return "SG_SERVER_HTTP_CALL"
+  end
+  return nil
+end
+
+-- 435 — concatenated function-name eval.
+-- The function-name version of canary 421's split-string trick:
+--   $a = "sys" . "tem"; $a($_GET['c']);
+--   $f = "ev" . "al";   $f($payload);
+-- A short quoted-string concatenation (each piece ≤ 6 chars, lowercase
+-- alpha+underscore only) is assigned to a variable that is then invoked
+-- with `()`. Tight character class disqualifies path concats like
+-- "/var" . "/log" and template-engine method-name builds, both of which
+-- would otherwise have the same grammar.
+function _M.detect_php_concat_funcname_eval(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = cap(body, cap_len)
+
+  -- Match $var = "p1"."p2" with both pieces alpha+underscore, len 1-6.
+  -- gmatch lets us check every assignment in the body, not just the first.
+  for var, p1, p2 in s:gmatch("%$([%w_]+)%s*=%s*['\"]([%a_][%a_]?[%a_]?[%a_]?[%a_]?[%a_]?)['\"]%s*%.%s*['\"]([%a_][%a_]?[%a_]?[%a_]?[%a_]?[%a_]?)['\"]") do
+    if var and p1 and p2 then
+      -- The combined string must look like a function name (no /, no
+      -- digits, no spaces). The %a/%_ char class already enforces this
+      -- per piece; this is a paranoia check.
+      local joined = p1 .. p2
+      if joined:match("^[%a_]+$") then
+        -- Variable invocation later in body: `$var(` not preceded by `>`
+        -- (so we don't match method calls $obj->$var()).
+        local call_pat = "[^>]%$" .. var .. "%s*%("
+        if s:find(call_pat) or s:find("^%$" .. var .. "%s*%(") then
+          return "CONCAT_FUNCNAME_CALL"
+        end
+      end
+    end
+  end
+  return nil
+end
+
+
 
 return _M

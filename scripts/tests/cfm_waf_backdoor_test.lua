@@ -1,4 +1,4 @@
--- Tests for the WAF_BACKDOOR detector family (rules 430-433, Tier 1).
+-- Tests for the WAF_BACKDOOR detector family (rules 430-435, Tiers 1+2).
 -- Source workload: captured 2026-05-19 PHP webshell deployed as
 -- /home/<user>/public_html/wp-content/themes/bridge/includes/radio.php —
 -- char-pool obfuscator output with %PDF- polyglot prefix and a 5KB
@@ -326,6 +326,107 @@ do
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- 434 — superglobal-fed callable (modern minimalist webshell)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_superglobal_callable", "block")
+
+  local hit, reason, _ttl, action = waf.check(ctx([[<?php $_GET['c']($_GET['p']);]]))
+  check(hit == true,                          "434 $_GET[c]() — hit=true")
+  check(reason == "WAF_BACKDOOR:SG_GET_CALL", "434 $_GET[c]() — reason")
+  check(action == "block",                    "434 $_GET[c]() — action=block")
+end
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_superglobal_callable", "challenge")
+
+  local hit, reason = waf.check(ctx([[<?php $_REQUEST['x']();]]))
+  check(hit == true,                              "434 $_REQUEST[x]() — hit=true")
+  check(reason == "WAF_BACKDOOR:SG_REQUEST_CALL", "434 $_REQUEST[x]() — reason")
+end
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_superglobal_callable", "challenge")
+
+  -- $_SERVER['HTTP_X_FOO']() — magic-header-triggered shell
+  local hit, reason = waf.check(ctx([[<?php $_SERVER['HTTP_X_CMD']();]]))
+  check(hit == true,                                "434 $_SERVER[HTTP_*]() — hit=true")
+  check(reason == "WAF_BACKDOOR:SG_SERVER_HTTP_CALL", "434 $_SERVER[HTTP_*]() — reason")
+end
+
+-- Negative: superglobal access without call (just reading the value)
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_superglobal_callable", "challenge")
+
+  local hit = waf.check(ctx([[<?php echo $_GET['name']; ?>]]))
+  check(hit ~= true, "434 negative — superglobal read without call does not fire")
+end
+
+-- Negative: superglobal as ARRAY index of something else (not call)
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_superglobal_callable", "challenge")
+
+  local hit = waf.check(ctx([==[<?php $config[$_GET['key']] = "value";]==]))
+  check(hit ~= true, "434 negative — superglobal as array key does not fire")
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 435 — concatenated function-name eval
+-- ─────────────────────────────────────────────────────────────────────────────
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_concat_funcname_eval", "block")
+
+  local hit, reason, _ttl, action = waf.check(ctx([[<?php $a = "sys" . "tem"; $a($_GET['c']);]]))
+  check(hit == true,                                "435 sys+tem — hit=true")
+  check(reason == "WAF_BACKDOOR:CONCAT_FUNCNAME_CALL", "435 sys+tem — reason")
+  check(action == "block",                          "435 sys+tem — action=block")
+end
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_concat_funcname_eval", "challenge")
+
+  local hit, reason = waf.check(ctx([[<?php $f = 'ev' . 'al'; $f($payload);]]))
+  check(hit == true,                                "435 ev+al — hit=true")
+  check(reason == "WAF_BACKDOOR:CONCAT_FUNCNAME_CALL", "435 ev+al — reason")
+end
+
+-- Negative: short string concat but variable NEVER invoked
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_concat_funcname_eval", "challenge")
+
+  local hit = waf.check(ctx([[<?php $name = "John" . "Doe"; echo $name; ?>]]))
+  check(hit ~= true, "435 negative — concat with no invocation does not fire")
+end
+
+-- Negative: path concat with `/` — disqualified by alpha-only character class
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_concat_funcname_eval", "challenge")
+
+  local hit = waf.check(ctx([[<?php $base = "/var" . "/log"; $base("foo");]]))
+  check(hit ~= true, "435 negative — path concat does not fire (has '/')")
+end
+
+-- Negative: legit dynamic method invocation (template-engine method dispatch)
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_concat_funcname_eval", "challenge")
+
+  local hit = waf.check(ctx([[<?php $method = "render" . "Page"; $obj->$method();]]))
+  check(hit ~= true, "435 negative — method call $obj->$var() does not fire")
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Integration: the captured radio.php sample triggers all three of 431, 432, 433.
 -- Severity aggregation picks the strongest action; multiple rule_ids in `hits`.
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -353,4 +454,4 @@ if fails > 0 then
   io.stderr:write(string.format("FAILED %d tests\n", fails))
   os.exit(1)
 end
-print("ok: cfm_waf backdoor tier-1 tests (430-433)")
+print("ok: cfm_waf backdoor tests (430-435)")

@@ -227,6 +227,8 @@ Current assignments:
                                        431  rule_php_char_pool_obfuscation
                                        432  rule_php_polyglot_full_body
                                        433  rule_php_eval_loader_b64
+                                       434  rule_php_superglobal_callable
+                                       435  rule_php_concat_funcname_eval
 
 5xx — Auth abuse
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
@@ -335,6 +337,44 @@ call_user_func($f, $payload);
 
 **FP notes:** `eval(base64_decode("..."))` with a *literal* function name does not match — this rule targets the variable-fed shape that is the hallmark of obfuscator output. A simple `eval(base64_decode(...))` without variable indirection is the older, less-evasive form already caught by other rules.
 
+### Rule 434 — `rule_php_superglobal_callable`
+
+**Catches:** the modern minimalist webshell that invokes a superglobal as a callable, e.g.
+
+```php
+<?php $_GET['c']($_GET['p']);
+<?php $_REQUEST['x']();
+<?php $_SERVER['HTTP_X_CMD']();   // magic-header-triggered shell
+```
+
+**Why it matters:** the dangerous primitive is **invoked** via the superglobal, not named — so every `eval(`/`system(`/`exec(` substring scanner misses it. This is the dominant shape for backdoors written post-2020 because it defeats CRS / Coraza / our own 404 scoring at once.
+
+**How:** body substring scan for `$_GET[…](`, `$_POST[…](`, `$_REQUEST[…](`, `$_COOKIE[…](`, or `$_SERVER[…HTTP_…](` — a superglobal subscript immediately followed by the PHP function-call grammar `(`.
+
+**Tags:** `SG_GET_CALL`, `SG_POST_CALL`, `SG_REQUEST_CALL`, `SG_COOKIE_CALL`, `SG_SERVER_HTTP_CALL`.
+
+**FP notes:** legitimate code reads superglobals as values (`echo $_GET['name']`) or uses them as array keys (`$config[$_GET['key']]`), never as the callable itself. The pattern requires the `(` immediately after the subscript — array-key use disqualifies because the next char is `]`, not `(`.
+
+### Rule 435 — `rule_php_concat_funcname_eval`
+
+**Catches:** the function-name version of canary 421's split-string trick — assemble a dangerous function name from short literal pieces, then invoke:
+
+```php
+<?php $a = "sys" . "tem"; $a($_GET['c']);
+<?php $f = "ev" . "al";   $f($payload);
+```
+
+**Why it matters:** complementary to 431 (char-pool extraction). 431 catches `$pool[N].$pool[N].$pool[N]…`; 435 catches the simpler `"piece"."piece"` form that older / hand-rolled obfuscators favour. Substring sets looking for `system` / `eval` / `assert` miss both.
+
+**How:** capture `$<varname> = "<piece1>" . "<piece2>"` where:
+- each piece is 1-6 chars of `[a-zA-Z_]` only (alpha+underscore, no digits, no slashes — disqualifies path concats `"/var"."/log"` and version-number assemblies)
+- the same `$<varname>` is then invoked with `(` later in the body
+- the invocation is **not** preceded by `->` (excludes legitimate dynamic method dispatch `$obj->$method()`)
+
+**Tag:** `CONCAT_FUNCNAME_CALL`.
+
+**FP notes:** the tight alpha+underscore character class plus the method-dispatch exclusion handles the common legit shapes. Template engines that build method names this way use `$obj->$method()`, not `$method()` directly.
+
 ### How they compose
 
 | Sample shape | Fires |
@@ -343,9 +383,11 @@ call_user_func($f, $payload);
 | Obfuscator output with `$pool[N].$pool[N].$pool[N]…` | 431 |
 | Image / PDF upload with `<?php` past byte 64 | 432 |
 | Eval loader: `eval($a($b("LONG_B64")));` | 433 |
+| Minimalist webshell: `$_GET['c']($_GET['p']);` | 434 |
+| Concat funcname: `$a = "sys"."tem"; $a();` | 435 |
 | Captured radio.php (PDF magic + char-pool + eval-loader) | **431 + 432 + 433** simultaneously |
 
-All four default to `logonly`. Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
+All six default to `logonly`. Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
 
 ---
 
