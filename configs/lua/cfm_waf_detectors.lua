@@ -2569,5 +2569,117 @@ function _M.detect_range_abuse(headers)
   return nil
 end
 
+-- Log4Shell (CVE-2021-44228) evasion-variant detector. rule_rce (320) already
+-- catches the bare "${jndi:" / "${j{n{d{i" / URL-encoded forms. This rule
+-- covers the JNDI-lookup syntax tricks that defeat naive substring matching:
+--
+--   * Default-value evasion:  ${${::-j}${::-n}${::-d}${::-i}:ldap://...}
+--   * Case-conversion:        ${lower:jndi}, ${upper:J}ndi
+--   * Property expansion:     ${env:FOO:-j}ndi, ${sys:X}, ${main:Y}, ${date:Z}
+--   * Base64 wrap:            ${base64:...}
+--   * Generic nesting marker: "${${" — multi-layer lookups never appear in
+--                             legitimate request data
+--
+-- Scans the same normalized args+body buffer the other body-aware rules use,
+-- plus every header value (Log4j-vulnerable apps logged UA / Referer /
+-- X-Forwarded-For / Authorization). Cheap precheck: skip the header walk
+-- when no "${" appears anywhere.
+function _M.detect_log4shell(args, body, headers, _norm_ab)
+  local s = _norm_ab or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+
+  if has(s, "${jndi:")     then return "JNDI"        end
+  if has(s, "${${")        then return "NESTED"      end
+  if has(s, "${::-")       then return "DEFAULT_VAL" end
+  if has(s, "${lower:")    then return "LOWER"       end
+  if has(s, "${upper:")    then return "UPPER"       end
+  if has(s, "${env:")      then return "ENV"         end
+  if has(s, "${sys:")      then return "SYS"         end
+  if has(s, "${main:")     then return "MAIN"        end
+  if has(s, "${date:")     then return "DATE"        end
+  if has(s, "${base64:")   then return "BASE64"      end
+
+  -- Header walk: Log4Shell historically arrived in User-Agent, X-Forwarded-
+  -- For, Referer, Authorization, X-Api-Version, Cookie, etc. Precheck with
+  -- the plain "${" needle on the raw value before allocating a url_decode.
+  if type(headers) == "table" then
+    for hname, hval in pairs(headers) do
+      local raw = header_string(hval)
+      if raw ~= "" and (raw:find("${", 1, true) or raw:find("%24%7b", 1, true)) then
+        local h = lower(url_decode_once(raw))
+        if     has(h, "${jndi:")   then return "JNDI:HDR:"   .. tostring(hname):sub(1, 32)
+        elseif has(h, "${${")      then return "NESTED:HDR:" .. tostring(hname):sub(1, 32)
+        elseif has(h, "${::-")     then return "DEFAULT_VAL:HDR:" .. tostring(hname):sub(1, 32)
+        elseif has(h, "${lower:")  then return "LOWER:HDR:"  .. tostring(hname):sub(1, 32)
+        elseif has(h, "${upper:")  then return "UPPER:HDR:"  .. tostring(hname):sub(1, 32)
+        elseif has(h, "${env:")    then return "ENV:HDR:"    .. tostring(hname):sub(1, 32)
+        elseif has(h, "${sys:")    then return "SYS:HDR:"    .. tostring(hname):sub(1, 32)
+        elseif has(h, "${main:")   then return "MAIN:HDR:"   .. tostring(hname):sub(1, 32)
+        elseif has(h, "${date:")   then return "DATE:HDR:"   .. tostring(hname):sub(1, 32)
+        elseif has(h, "${base64:") then return "BASE64:HDR:" .. tostring(hname):sub(1, 32)
+        end
+      end
+    end
+  end
+
+  return nil
+end
+
+-- Bad UTF-8 encoding detector. Port of Coraza's validateUtf8Encoding operator
+-- (corazawaf/coraza internal/operators/validate_utf8_encoding.go). Malformed
+-- UTF-8 that survives the normalize() pipeline is an encoding-bypass primitive:
+-- overlong sequences encode ASCII (".", "/") in 2-4 bytes that the WAF's
+-- substring matchers miss but the downstream app may decode back to ASCII.
+--
+-- Flags on the first invalid sequence:
+--   * UTF8_BAD_LEAD     — high-bit byte that isn't a valid leading byte
+--   * UTF8_TRUNC        — leading byte indicating N continuations but < N follow
+--   * UTF8_BAD_CONT     — non-continuation byte (not 0x80..0xBF) where one's required
+--   * UTF8_OVERLONG     — codepoint encoded in more bytes than its value needs
+--   * UTF8_SURROGATE    — codepoint in the U+D800..U+DFFF surrogate range
+--   * UTF8_OUT_OF_RANGE — codepoint > U+10FFFF
+function _M.detect_bad_utf8(args, body, _norm_ab)
+  local s = _norm_ab or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  local n = #s
+  if n == 0 then return nil end
+
+  local i = 1
+  while i <= n do
+    local b = s:byte(i)
+    if b < 0x80 then
+      i = i + 1
+    else
+      local need, min_cp
+      if     b >= 0xF0 and b <= 0xF4 then need, min_cp = 3, 0x10000
+      elseif b >= 0xE0 and b <= 0xEF then need, min_cp = 2, 0x800
+      elseif b >= 0xC2 and b <= 0xDF then need, min_cp = 1, 0x80
+      else
+        return "UTF8_BAD_LEAD"
+      end
+
+      if i + need > n then return "UTF8_TRUNC" end
+
+      local cp
+      if     need == 1 then cp = (b - 0xC0) * 64
+      elseif need == 2 then cp = (b - 0xE0) * 4096
+      else                  cp = (b - 0xF0) * 262144
+      end
+
+      for k = 1, need do
+        local c = s:byte(i + k)
+        if not c or c < 0x80 or c > 0xBF then return "UTF8_BAD_CONT" end
+        cp = cp + (c - 0x80) * (64 ^ (need - k))
+      end
+
+      if cp < min_cp                       then return "UTF8_OVERLONG"     end
+      if cp >= 0xD800 and cp <= 0xDFFF     then return "UTF8_SURROGATE"    end
+      if cp > 0x10FFFF                     then return "UTF8_OUT_OF_RANGE" end
+
+      i = i + need + 1
+    end
+  end
+
+  return nil
+end
+
 
 return _M
