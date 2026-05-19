@@ -256,6 +256,15 @@ func (m *manager) maybeReload(parent context.Context) {
 			kvStrClean(secs.Global, "IGNORE_NETS", ""),
 		)
 	}
+	// Mirror the parsed ignore-list to a Lua-readable file so cfm.lua's
+	// is_self_origin() bypass honours the same allowlist as the challenge
+	// engine. Always call (including on nil ig) so an empty config produces
+	// a valid-but-empty table — Lua side then degenerates to the existing
+	// self-IPs-only behaviour. The path is the canonical /var/lib/cfm/lua
+	// location used for all Lua-side caches.
+	if err := ig.WriteLuaCache(IgnoreNetsLuaPath); err != nil {
+		logging.Logf("[detectors] ignore-nets lua cache write failed: %v", err)
+	}
 	// --------------------------------------------
 
 	// Build a shared enricher from [global], if enabled

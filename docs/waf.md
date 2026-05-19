@@ -537,6 +537,30 @@ WAF_CVE
 
 A reason in this list, when fired with `challenge` action under valid clearance, gets converted to `block` instead of `logonly`. Matched against the prefix before the first `:` so `WAF_RCE:REVERSE_SHELL:BASH_TCP` still hits.
 
+### `IGNORE_IPS` / `IGNORE_NETS` (global allowlist for the Lua self-bypass)
+
+`cfm.lua`'s `is_self_origin(ip)` short-circuits the WAF (and the rest of `cfm.lua`) before any rule runs. It honours three sources:
+
+1. **Loopback / link-local** (`127.0.0.0/8`, `::1`, `169.254.0.0/16`, `fe80::/10`) — hard-coded.
+2. **Local interface IPs** of this box, written by `nft.go:writeSelfIPsLua()` to `/var/lib/cfm/lua/cfm_self_ips.lua`.
+3. **`[global] IGNORE_IPS` / `IGNORE_NETS`** from `cfm.cfg`, written by `detectors.IPIgnore.WriteLuaCache()` to `/var/lib/cfm/lua/cfm_ignore_nets.lua`. Same allowlist the Go challenge engine uses via `SetBypassFunc(ipIgnore.ShouldIgnore)` — wiring them through to the Lua WAF closes the operator-expectation gap where "WAF runs on traffic from my own subnet."
+
+File format (precomputed for fast Lua matching, refresh TTL 30s):
+
+```lua
+return {
+  generated_at = "2026-05-19T...",
+  ips = { ["1.2.3.4"] = true, ["::1"] = true },
+  v4_ranges = {
+    { 1412837632, 1412837887 },  -- 84.54.49.0/24 as uint32 [first, last]
+  },
+}
+```
+
+**IPv6 limitation:** `IGNORE_NETS` entries that are IPv6 CIDRs are silently skipped in `v4_ranges`. IPv6 *exact* IPs in `IGNORE_IPS` still work (they land in `ips`). Operators wanting IPv6 CIDR support need to list the specific addresses for now.
+
+**Trigger:** the file is rewritten on every config reload that touches `[global]` (the same path that rebuilds `IPIgnore`), plus once on engine startup.
+
 ---
 
 ## Public API (cfm_waf module)
