@@ -137,10 +137,11 @@ func TestEventFilter_NilSafe(t *testing.T) {
 	}
 }
 
-// TestParseConf_AllowComm exercises the new top-level allow_comm
-// key. It is rejected on policies that do not consume comm-based
-// allowlists (FS-005 has no need; future detectors can opt in via
-// allowCommPolicy).
+// TestParseConf_AllowComm exercises operator-supplied allow_comm
+// values under a per-policy stanza. AllowCommFor merges compile-in
+// DefaultGlobalAllowComm with operator entries (see "merge-at-lookup"
+// in conf.go) so the count assertion is relative; presence and
+// operator-relative ordering are the contract.
 func TestParseConf_AllowComm(t *testing.T) {
 	body := `
 [policy "CFML-BPF-001"]
@@ -153,14 +154,16 @@ allow_comm = vendor-agent
 		t.Fatalf("ParseConf: %v", err)
 	}
 	got := c.AllowCommFor(PolicyUnexpectedBPF)
-	want := []string{"my-orchestrator", "vendor-agent"}
-	if len(got) != len(want) {
-		t.Fatalf("allow_comm count: got %d (%v), want %d (%v)", len(got), got, len(want), want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("allow_comm[%d]: got %q, want %q", i, got[i], want[i])
+	for _, want := range []string{"my-orchestrator", "vendor-agent"} {
+		if indexOf(got, want) < 0 {
+			t.Errorf("allow_comm missing operator entry %q (got %v)", want, got)
 		}
+	}
+	if len(DefaultGlobalAllowComm) > 0 && indexOf(got, DefaultGlobalAllowComm[0]) < 0 {
+		t.Errorf("allow_comm missing default %q (merge-at-lookup regression)", DefaultGlobalAllowComm[0])
+	}
+	if i, j := indexOf(got, "my-orchestrator"), indexOf(got, "vendor-agent"); i >= 0 && j >= 0 && i > j {
+		t.Errorf("operator allow_comm order: my-orchestrator at %d, vendor-agent at %d", i, j)
 	}
 }
 
@@ -171,8 +174,15 @@ func TestParseConf_AllowCommErrors(t *testing.T) {
 		want string
 	}{
 		{
+			// FS-005 used to be the canonical "doesn't accept
+			// allow_comm" target; PR adding crontab/at extended
+			// the surface to it. Use FS-008 (kernel-knob writes)
+			// instead — that policy will never gain allow_comm
+			// semantically (any non-trusted comm writing
+			// core_pattern / modprobe_path / sysrq-trigger IS
+			// the threat).
 			name: "wrong policy",
-			body: "[policy \"CFML-FS-005\"]\nallow_comm = whatever\n",
+			body: "[policy \"CFML-FS-008\"]\nallow_comm = whatever\n",
 			want: "allow_comm is only valid",
 		},
 		{
@@ -199,10 +209,14 @@ func TestParseConf_AllowCommErrors(t *testing.T) {
 	}
 }
 
-// TestParseConf_GlobalAllow exercises the new [allow] section which
-// fans out to every policy that consumes an exe / comm allowlist.
-// Operators get a single place to maintain the universal allowlist
-// instead of duplicating it under each policy header.
+// TestParseConf_GlobalAllow exercises the [allow] section which
+// fans out to every policy that consumes an exe / comm / path
+// allowlist. The struct fields (GlobalAllowExe / GlobalAllowComm)
+// hold exactly what was parsed from the file. The accessors
+// (AllowExeFor / AllowCommFor) merge compile-in defaults with
+// operator entries at lookup time, so the per-policy effective
+// list always includes both — that's what closes the
+// %config(noreplace) upgrade gap.
 func TestParseConf_GlobalAllow(t *testing.T) {
 	body := `
 [allow]
@@ -215,36 +229,56 @@ allow_comm = containerd-shim
 	if err != nil {
 		t.Fatalf("ParseConf: %v", err)
 	}
+	// Conf struct mirrors the file exactly — operator entries only,
+	// no defaults merged into the parsed value.
 	wantExe := []string{"/usr/sbin/sshd", "/usr/lib/postfix/sbin/master"}
 	if got := c.GlobalAllowExe; len(got) != len(wantExe) {
-		t.Fatalf("GlobalAllowExe: got %v, want %v", got, wantExe)
+		t.Fatalf("GlobalAllowExe (parsed): got %v, want %v", got, wantExe)
 	}
 	wantComm := []string{"runc", "containerd-shim"}
 	if got := c.GlobalAllowComm; len(got) != len(wantComm) {
-		t.Fatalf("GlobalAllowComm: got %v, want %v", got, wantComm)
+		t.Fatalf("GlobalAllowComm (parsed): got %v, want %v", got, wantComm)
 	}
 
-	// Fanout: every policy that consumes the allowlist sees the
-	// global entries via the accessor.
+	// Fanout via the accessor: every consuming policy sees the
+	// merged (defaults + operator) effective list. Assert by
+	// presence rather than count so a future default addition
+	// doesn't churn this test.
 	for _, id := range []PolicyID{PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio} {
 		eff := c.AllowExeFor(id)
-		if len(eff) != len(wantExe) {
-			t.Errorf("AllowExeFor(%s): got %d entries (%v), want %d (%v)", id, len(eff), eff, len(wantExe), wantExe)
+		for _, w := range wantExe {
+			if indexOf(eff, w) < 0 {
+				t.Errorf("AllowExeFor(%s) missing operator entry %q (got %v)", id, w, eff)
+			}
+		}
+		if len(DefaultGlobalAllowExe) > 0 && indexOf(eff, DefaultGlobalAllowExe[0]) < 0 {
+			t.Errorf("AllowExeFor(%s) missing default %q", id, DefaultGlobalAllowExe[0])
 		}
 	}
 	for _, id := range []PolicyID{PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio} {
 		eff := c.AllowCommFor(id)
-		if len(eff) != len(wantComm) {
-			t.Errorf("AllowCommFor(%s): got %d (%v), want %d (%v)", id, len(eff), eff, len(wantComm), wantComm)
+		for _, w := range wantComm {
+			if indexOf(eff, w) < 0 {
+				t.Errorf("AllowCommFor(%s) missing operator entry %q (got %v)", id, w, eff)
+			}
+		}
+		if len(DefaultGlobalAllowComm) > 0 && indexOf(eff, DefaultGlobalAllowComm[0]) < 0 {
+			t.Errorf("AllowCommFor(%s) missing default %q", id, DefaultGlobalAllowComm[0])
 		}
 	}
-	// FS-005 should NOT see them — it doesn't consume an exe/comm
-	// allowlist today, and silent fanout there would be surprising.
+	// FS-005 now CONSUMES allow_comm (crontab / at suppression added
+	// in this PR), so its merged effective list includes the
+	// operator's runc / containerd-shim entries via global fanout.
+	for _, w := range wantComm {
+		if indexOf(c.AllowCommFor(PolicySensitiveWrite), w) < 0 {
+			t.Errorf("AllowCommFor(FS-005) missing operator entry %q via global fanout", w)
+		}
+	}
+	// allow_exe is still NOT in FS-005's consumed surface — that
+	// would be a stronger threat-model relaxation than the
+	// monitor-mode noise reduction this PR is aiming for.
 	if got := c.AllowExeFor(PolicySensitiveWrite); len(got) != 0 {
 		t.Errorf("AllowExeFor(FS-005) should be empty, got %v", got)
-	}
-	if got := c.AllowCommFor(PolicySensitiveWrite); len(got) != 0 {
-		t.Errorf("AllowCommFor(FS-005) should be empty, got %v", got)
 	}
 }
 
@@ -358,6 +392,8 @@ func TestEventFilter_DefaultConfSuppression(t *testing.T) {
 
 // TestParseConf_AllowExe_EXEC003 ensures that allow_exe is now
 // accepted under EXEC-003 / EXEC-005 in addition to CRED-002.
+// AllowExeFor merges defaults at lookup, so the assertion is on
+// presence of the operator's per-policy entry (not exact length).
 func TestParseConf_AllowExe_EXEC003(t *testing.T) {
 	body := `
 [policy "CFML-EXEC-003"]
@@ -372,10 +408,10 @@ allow_exe = /usr/local/bin/some_weak_helper.sh
 	if err != nil {
 		t.Fatalf("ParseConf: %v", err)
 	}
-	if got := c.AllowExeFor(PolicyReverseShell); len(got) != 1 || got[0] != "/usr/local/bin/whitelist_forwardinghosts.sh" {
+	if got := c.AllowExeFor(PolicyReverseShell); indexOf(got, "/usr/local/bin/whitelist_forwardinghosts.sh") < 0 {
 		t.Errorf("EXEC-003 allow_exe: got %v", got)
 	}
-	if got := c.AllowExeFor(PolicyInterpreterNetStdio); len(got) != 1 || got[0] != "/usr/local/bin/some_weak_helper.sh" {
+	if got := c.AllowExeFor(PolicyInterpreterNetStdio); indexOf(got, "/usr/local/bin/some_weak_helper.sh") < 0 {
 		t.Errorf("EXEC-005 allow_exe: got %v", got)
 	}
 }
@@ -474,5 +510,92 @@ allow_comm = something
 		if !strings.Contains(msg, string(id)) {
 			t.Errorf("error message missing %s: %q", id, msg)
 		}
+	}
+}
+
+// TestEventFilter_Defaults_FS005_crontab covers the per-user
+// crontab / at workflow. On a panel host, every "Cron Jobs" UI
+// edit by a watched uid runs setuid /usr/bin/crontab, which
+// creates a temp file and renames it into /var/spool/cron/<user>
+// — three FS-005 events per edit. Allowlisting `crontab` /
+// `(crontab)` / `at` / `(at)` silences the userspace notify
+// pipeline; the matching BPF-side trusted-comm allowlist
+// (cfm_comm_is_trusted_auth_helper) gates the enforce path.
+func TestEventFilter_Defaults_FS005_crontab(t *testing.T) {
+	f := BuildEventFilter(DefaultConf())
+	for _, comm := range []string{"crontab", "(crontab)", "at", "(at)"} {
+		ev := Event{PolicyID: PolicySensitiveWrite, Comm: comm, Filename: "webmategr"}
+		if !f.Match(ev) {
+			t.Errorf("expected default conf to suppress FS-005 comm=%q", comm)
+		}
+	}
+	// An unknown comm modifying the same sensitive paths must still
+	// fire — that's the post-exploit persistence-drop signal the
+	// rule exists for.
+	ev := Event{PolicyID: PolicySensitiveWrite, Comm: "webshell.php", Filename: "webmategr"}
+	if f.Match(ev) {
+		t.Errorf("default conf incorrectly suppressed FS-005 comm=%q", ev.Comm)
+	}
+}
+
+// TestAllowCommFor_MergesDefaults_OnParsedConf documents the
+// fix for the %config(noreplace) upgrade gap: an operator
+// /etc/cfm/lsm.conf that pre-dates a defaults addition must
+// still pick up the new entries on the next daemon start.
+// Before this PR a parsed Conf with no [allow] allow_comm = X
+// for the new default returned an effective list without X;
+// after this PR the lookup-time merge ensures X is always
+// present in the effective list regardless of what the file
+// contains.
+func TestAllowCommFor_MergesDefaults_OnParsedConf(t *testing.T) {
+	// File with no [allow] at all — simulates the upgrade case
+	// where the operator's lsm.conf was generated by an older
+	// build that didn't know about the new default entries.
+	c, err := ParseConf(strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("ParseConf: %v", err)
+	}
+	if len(c.GlobalAllowComm) != 0 {
+		t.Fatalf("parsed Conf should have empty GlobalAllowComm (parse fidelity); got %v", c.GlobalAllowComm)
+	}
+	// But AllowCommFor MUST return the compile-in defaults via
+	// the merge — that's how operators on upgraded installs see
+	// new entries without editing the file.
+	eff := c.AllowCommFor(PolicyUnexpectedBPF)
+	if indexOf(eff, "systemd") < 0 {
+		t.Errorf("AllowCommFor merge gap: missing %q in effective list for upgrade-installed operator", "systemd")
+	}
+	if indexOf(eff, "crontab") < 0 {
+		t.Errorf("AllowCommFor merge gap: missing %q in effective list", "crontab")
+	}
+}
+
+// TestAllowCommFor_OperatorOverlapDedupes asserts that an
+// operator who explicitly re-lists a compile-in default (e.g.
+// because their file was generated by an older FormatConf that
+// emitted the full list) doesn't produce duplicate entries in
+// the effective list. Same dedup contract for AllowExeFor.
+func TestAllowCommFor_OperatorOverlapDedupes(t *testing.T) {
+	body := `
+[allow]
+allow_comm = systemd
+allow_comm = my-runtime
+`
+	c, err := ParseConf(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("ParseConf: %v", err)
+	}
+	eff := c.AllowCommFor(PolicyUnexpectedBPF)
+	count := 0
+	for _, e := range eff {
+		if e == "systemd" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("systemd appears %d times in effective list; want exactly 1 (dedup contract)", count)
+	}
+	if indexOf(eff, "my-runtime") < 0 {
+		t.Error("operator-supplied custom entry missing from effective list")
 	}
 }

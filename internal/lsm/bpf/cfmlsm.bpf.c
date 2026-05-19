@@ -1241,6 +1241,24 @@ static __always_inline bool cfm_comm_is_trusted_auth_helper(const char *comm)
         comm[4] == 'k' && comm[5] == '\0')
         return true;
 
+    /* crontab / at — per-user persistence editors. Both are setuid-root
+     * binaries that legitimately rename a temp file into
+     * /var/spool/cron/<user> (crontab) or /var/spool/at/<jobid> (at)
+     * on behalf of an unprivileged caller. /var/spool/cron and
+     * /var/spool/at are in DefaultPersistencePaths (legitimate
+     * attacker target for persistence drops), so FS-005 fires every
+     * time a panel user adds or edits a cron entry via the panel UI.
+     * The threat-model trade-off is identical to the shadow-utils
+     * carve-out above: these are small audited setuid binaries that
+     * only modify their own well-defined slice of /var/spool, so a
+     * legitimate invocation by a watched uid is not the credential-
+     * escalation signal the rule is trying to catch. */
+    if (comm[0] == 'c' && comm[1] == 'r' && comm[2] == 'o' && comm[3] == 'n' &&
+        comm[4] == 't' && comm[5] == 'a' && comm[6] == 'b' && comm[7] == '\0')
+        return true;
+    if (comm[0] == 'a' && comm[1] == 't' && comm[2] == '\0')
+        return true;
+
     return false;
 }
 
