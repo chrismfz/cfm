@@ -82,8 +82,14 @@ for the trade-offs and how to choose.
    - [OpenResty vs Angie — choosing a backend](#openresty-vs-angie--choosing-a-backend)
    - [Smart Lua WAF Layer](#smart-lua-waf-layer)
    - [Advanced Challenge Rules](#advanced-challenge-rules)
-9. [SSLCollector](#9-sslcollector)
-10. [MySQL Governor](#10-mysql-governor)
+   - [Full WAF rule pipeline → §9](#9-web-application-firewall-waf)
+9. [Web Application Firewall (WAF)](#9-web-application-firewall-waf)
+    - [What it catches](#what-it-catches)
+    - [Operator features](#operator-features)
+    - [Strengths and trade-offs](#strengths-and-trade-offs)
+    - [Tuning workflow](#tuning-workflow)
+10. [SSLCollector](#10-sslcollector)
+11. [MySQL Governor](#11-mysql-governor)
     - [Overview](#overview)
     - [MySQL Grants](#mysql-grants)
     - [Operating Modes](#operating-modes)
@@ -98,19 +104,19 @@ for the trade-offs and how to choose.
     - [CLI Reference — cfm mysqltop](#cli-reference--cfm-mysqltop)
     - [HTTP API](#http-api)
     - [Full detectors.conf Example](#full-detectorsconf-example)
-11. [Kernel Hardening — `cfm kernsec`](#11-kernel-hardening--cfm-kernsec)
+12. [Kernel Hardening — `cfm kernsec`](#12-kernel-hardening--cfm-kernsec)
     - [What it manages](#what-it-manages)
     - [Tier model](#tier-model)
     - [How rules reinforce each other](#how-rules-reinforce-each-other)
-12. [BPF LSM — `cfm-lsm`](#12-bpf-lsm--cfm-lsm)
+13. [BPF LSM — `cfm-lsm`](#13-bpf-lsm--cfm-lsm)
     - [What it catches](#what-it-catches)
     - [Modes and the two-process model](#modes-and-the-two-process-model)
     - [Watched-uid model](#watched-uid-model)
     - [How policies stack](#how-policies-stack)
     - [How kernsec and cfm-lsm complement each other](#how-kernsec-and-cfm-lsm-complement-each-other)
-13. [CLI Reference – `cfm webtop`](#13-cli-reference--cfm-webtop)
-14. [Web Detector HTTP API](#14-web-detector-http-api)
-15. [Security Notes](#15-security-notes)
+14. [CLI Reference – `cfm webtop`](#14-cli-reference--cfm-webtop)
+15. [Web Detector HTTP API](#15-web-detector-http-api)
+16. [Security Notes](#16-security-notes)
 
 ---
 
@@ -194,16 +200,22 @@ liveable on real hosting traffic.
 
 #### [2] **WAF** — *block known attack signatures before they reach the app*
 
-The OpenResty / Angie in-path layer runs a fast Lua rule pipeline
-plus an optional ModSecurity engine. Inspects URLs, query
-strings, request bodies (up to a configurable budget) and headers
-for OWASP-style patterns — SQLi, XSS, RFI, command injection,
-shell-upload paths, malicious user-agents, scanner fingerprints.
-Decisions feed back into the daemon's allow/block sets and into
-the challenge layer (suspicious requests get challenged instead
-of hard-blocked, where appropriate). See
-[Section 8](#8-in-path-mode-openresty--angie) for the Lua / Angie
-trade-off.
+The OpenResty / Angie in-path layer runs a fast Lua rule pipeline —
+**53 detectors across 9 rule-ID groups (1xx-9xx)** with severity
+aggregation and per-rule modes (`disabled / logonly / challenge /
+block`). Inspects URI, query, body (per-Content-Type budget up to
+32K JSON) and headers for SQLi, XSS, RFI, command injection,
+PHP wrappers, **Log4Shell + evasion variants**, Java
+deserialization, shell-upload paths, polyglot uploads, reverse
+shells, persistence markers, LOLbins, C2 paste tunnels, coinminer
+URLs, **bad UTF-8 encoding**, plus bad-UA scoring. Decisions feed
+back into the daemon's allow/block sets and into the challenge
+layer (suspicious requests get challenged instead of hard-blocked,
+where appropriate). Per-vhost rule exclusions and a `cfm webtop
+waf hit-rates` operator workflow let you tune from production
+traffic instead of guessing. See [Section 9](#9-web-application-firewall-waf)
+for the full pipeline; [Section 8](#8-in-path-mode-openresty--angie)
+for the OpenResty / Angie deploy choices.
 
 #### [3] **Detectors + webdetector** — *post-fact log intelligence*
 
@@ -595,7 +607,7 @@ Detectors parse logs/metrics to spot abuse:
 - MySQL denied / scanner attempts
 - ModSecurity alerts
 - Health detector (CPU / RAM / disk / SMART / RAID / ZFS / conntrack spikes)
-- **MySQL Governor** (processlist monitor, runaway query kill, connection-limit enforcement — see [§10](#10-mysql-governor))
+- **MySQL Governor** (processlist monitor, runaway query kill, connection-limit enforcement — see [§11](#11-mysql-governor))
 - **Web Detector** (see [§6](#6-web-detector))
 
 ### 🚨 Autoblock Engine
@@ -907,44 +919,16 @@ existing install of the other.
 
 ### Smart Lua WAF Layer
 
-The shipped `openresty.conf` / `angie.conf` Lua block implements:
-- IP block set lookup (cfm nft sets)
+The shipped `openresty.conf` / `angie.conf` Lua block ties the request path into the WAF and challenge engine:
+- IP block-set lookup (cfm nft sets)
 - Challenge cookie validation
 - Real-time cfm decision socket query
 - Optional cache via `shared_dict`
+- Per-request WAF dispatch (53 detectors, severity aggregation, per-vhost exclusions)
 
-#### Self-IP bypass semantics (shared nft + Lua source)
+The shared self-IP snapshot (`/var/lib/cfm/lua/cfm_self_ips.lua` — atomic `.tmp` + rename) keeps nft and Lua aligned on what counts as "self traffic", so step 0a local-origin bypass behaves identically across layers. `cfm.lua` also consumes `[global] IGNORE_IPS / IGNORE_NETS` via `/var/lib/cfm/lua/cfm_ignore_nets.lua`, so an operator's "ignore my own subnet" config applies to the WAF too — not just the post-fact challenge engine.
 
-CFM now keeps a single authoritative self-IP snapshot for both layers:
-
-- During nft refresh, cfm rebuilds `self_v4` / `self_v6` and also writes
-  `/var/lib/cfm/lua/cfm_self_ips.lua` with:
-  - exact local interface IP entries, and
-  - a `generated_at` timestamp.
-- The Lua file is written atomically (`.tmp` + rename), so OpenResty/Angie workers
-  never read a partially-written snapshot.
-- `configs/lua/cfm.lua` loads the file safely (`pcall(loadfile(...))`) and fails open
-  if the file is missing or malformed (logs warning, continues with loopback/link-local checks).
-- Step **0a** local-origin bypass consumes this shared map, so nft and Lua stay aligned
-  on what is considered “self traffic”.
-- The same computed self-origin flag is also passed into WAF check context for optional
-  rule tagging/telemetry.
-
-`configs/lua/cfm_waf.lua` also includes staged payload detectors with per-rule modes
-(`disabled|logonly|challenge|block`). Two body-focused rules are designed to be
-deployed conservatively:
-
-- `rule_b64_injection` (default `logonly`): scans base64-looking POST values,
-  decodes them, then checks decoded content for webshell / XSS / SQLi markers.
-- `rule_php_webshell_body` (default `logonly`): scored raw-PHP body detector
-  for snippets such as `<?php system($_GET['cmd']); ?>`,
-  `<?php @eval($_POST['x']); ?>`, and `<?php passthru($_REQUEST['c']); ?>`.
-  It only evaluates textual body types and requires multiple signals
-  (PHP tag + dangerous callable + superglobal/statement shape) to reduce false positives.
-
-Recommended rollout: keep both in `logonly`, review emitted
-`WAF_B64_INJECT:*` and `WAF_PHP_WEBSHELL_BODY:*` tags for your traffic, then
-promote to `challenge` or `block` once clean.
+> **WAF rule pipeline, detector list, tuning playbook, hit-rate measurement, per-vhost exclusions, audit findings** all live in their own section now — see [§ 9. Web Application Firewall (WAF)](#9-web-application-firewall-waf) and the full reference [`docs/waf.md`](docs/waf.md).
 
 ### Advanced Challenge Rules
 
@@ -952,7 +936,64 @@ The `webdetector_challenge_rules.conf` system supports per-IP, per-vhost, per-UA
 
 ---
 
-## 9. SSLCollector
+## 9. Web Application Firewall (WAF)
+
+CFM ships a fast in-path Lua WAF that inspects every dynamic request before it reaches origin — URI, query, body, and headers. **53 detectors across 9 rule-ID groups (1xx-9xx)** with stable IDs, severity aggregation (all rules run, strongest action wins, order-independent), and per-rule modes (`disabled | logonly | challenge | block`). Detectors are FP-tested against actual production traffic, not generic CRS lists.
+
+> Full reference: [`docs/waf.md`](docs/waf.md) — every rule, the operator playbook, per-vhost exclusions, hit-rate measurement pipeline, external-reference audit (libinjection / Coraza / CRS comparison), and the 2026-05 production-data triage.
+
+### What it catches
+
+| Group | Range | Family | Examples |
+|---|---|---|---|
+| 1xx | 100-199 | Path / traversal | `../etc/passwd`, double-encoded LFI, oversized URL segments |
+| 2xx | 200-299 | Client identity | Bad-UA scoring (sqlmap, zgrab, fake legacy IE/Trident), empty-UA + sensitive-URI combos |
+| 3xx | 300-399 | Injection | SQLi, XSS, RCE / shell command params, PHP wrappers (`php://`, `phar://`, `data://`), base64-encoded payloads, XXE, Shellshock, Java deserialization, **Log4Shell + evasion variants** (`${jndi:`, `${${::-j}…`, `${lower:j}…`, `${env:` / `sys:` / `main:` / `date:` / `base64:`) |
+| 4xx | 400-499 | Upload / malware | Upload filename + content rules, PHP webshell body scoring, script obfuscation (eval / atob / chr-storm / hex2bin), polyglot uploads, known webshell paths (`/c99.php`, `/r57.php`, `/wso.php`, etc.) |
+| 5xx | 500-599 | Auth abuse | WordPress login bursts, XML-RPC multicall / pingback / POST flood, distributed credential-stuffing |
+| 6xx | 600-699 | Header / protocol anomaly | Control chars, IP-as-Host, CRLF injection, HTTP smuggling (CL+TE coexist, multi-CL), Range abuse (Apache Killer CVE-2011-3192), header flood, content-type anomaly, **bad UTF-8 encoding** (overlong / surrogate / truncated multibyte) |
+| 7xx | 700-799 | SSRF / C2 | `file://`, `gopher://`, `dict://`, octal-IP-in-URL, paste-site exfil hostnames (pastebin, webhook.site, ngrok, transfer.sh) |
+| 8xx | 800-899 | Info disclosure | Debug toggles (`xdebug`, `debug=1`, `trace=1`) |
+| 9xx | 900-999 | Reserved | Future detectors |
+
+Beyond the OWASP-style fundamentals, the WAF also covers post-exploitation patterns most rule sets miss: reverse-shell one-liners, cron / systemd persistence markers, rootkit artifacts, Windows LOLbins (`certutil -urlcache`, `bitsadmin /transfer`, `-EncodedCommand`), and coinminer pool URLs.
+
+### Operator features
+
+- **Stable rule IDs** — every detector has a 3-digit ID (e.g. `320 rule_rce`); referenced in tickets, dashboards, and per-vhost exclusion specs. Never renumbered.
+- **Per-vhost rule exclusions** — `cfm webtop waf exclude add /path/here --rule 201` suppresses one rule on one host/path without disabling the whole WAF. Solves the "legit scraper trips one rule on one site" pattern cleanly.
+- **Hit-rate measurement** — `cfm webtop waf hit-rates --hours 168` shows per-rule fire-rate with promotion hints (`ok_to_promote` / `silent` / `review` / `noisy`). Data-driven promotion, not eyeballing.
+- **Per-rule kill-switch** — `cfm webtop waf set-rule rule_persistence challenge` for live mode tuning (per-worker, doesn't survive reload).
+- **Forensic logging** — every trigger writes one JSON line to `/var/log/cfm/cfm.waf.log` with UA / Referer / Content-Type / ASN / country attached. Tail / grep for FP investigation.
+- **Self-bypass for own traffic** — `[global] IGNORE_IPS / IGNORE_NETS` in `cfm.cfg` propagates to the Lua WAF, not just the post-fact challenge engine. Same allowlist throughout the stack.
+
+### Strengths and trade-offs
+
+**Strengths**
+- Severity aggregation across all rules, so detector order is irrelevant.
+- Body-aware with per-Content-Type budget (JSON 32K, multipart 16K, XML 16K, urlencoded 8K) — JSON-heavy APIs aren't artificially capped at 2K.
+- Workload-tuned literals: webshell names, C2 hostnames, coinminer pool URLs, reverse-shell one-liners are all FP-tested against real production traffic (Greek / EU shared-hosting workload).
+- Detector inventory covers categories no other open WAF flags: bad-UA scoring, polyglot uploads, C2 paste-site tunnels, coinminer URLs, Java deserialization wire-format, Log4Shell evasion variants.
+
+**Trade-offs**
+- Substring-based SQLi/XSS detection covers common patterns but misses tokenizer-level evasions (`UN/**/ION SE/**/LECT`, HTML5 mutation XSS). The [external-reference audit](docs/waf.md#external-reference-audit-2026-05) in `docs/waf.md` recommends optional libinjection FFI integration; not yet shipped.
+- IPv6 CIDR not yet supported in `IGNORE_NETS` (IPv6 exact IPs in `IGNORE_IPS` work fine).
+- Upstream body cap `CFM_WAF_BODY_MAX_LEN=8192` bottlenecks effective JSON inspection below the 32K per-CT budget — raise both in lockstep on upload-heavy hosts.
+
+### Tuning workflow
+
+Every new detector ships at `logonly`. The standard rollout cycle:
+
+1. **Land** at `logonly` → wait one full week of production traffic.
+2. `cfm webtop waf hit-rates --hours 168 --hint ok_to_promote` → promote `logonly → challenge`.
+3. **Wait** one more week with no operator complaints → promote `challenge → block`.
+4. **False positives become tuning data**: per-vhost exclusion first, then tighten the detector, last resort disable globally. Never go `logonly → block` directly.
+
+Full playbook with examples, the `cfm.waf.log` triage workflow, and the offline test harness for verifying a rule fires lives in [`docs/waf.md` § Operating the WAF](docs/waf.md#operating-the-waf).
+
+---
+
+## 10. SSLCollector
 
 SSLCollector discovers TLS certificates from the filesystem (cPanel, Plesk, DirectAdmin layouts) and exposes them via a unix socket for dynamic loading in OpenResty or Angie (`ssl_certificate_by_lua*`).
 
@@ -972,7 +1013,7 @@ The companion `sslcollector.lua` populates an `ngx.shared.sslcache` dict in the 
 
 ---
 
-## 10. MySQL Governor
+## 11. MySQL Governor
 
 The MySQL Governor is a processlist monitor and enforcement engine that runs inside cfm. It polls `information_schema.PROCESSLIST` every few seconds and can: notify on slow queries, kill runaway queries, enforce per-user connection caps, reap idle sleeping connections, and track per-user CPU usage.
 
@@ -1232,7 +1273,7 @@ The governor registers on the cfm debug server (`LISTEN_ADDRESS:PORT`, default `
 
 ---
 
-## 11. Kernel Hardening — `cfm kernsec`
+## 12. Kernel Hardening — `cfm kernsec`
 
 `cfm kernsec` is the preemptive surface-reduction layer — it shapes
 the host *before* an attack arrives so that even a successful
@@ -1332,7 +1373,7 @@ explicitly forced.
 
 ---
 
-## 12. BPF LSM — `cfm-lsm`
+## 13. BPF LSM — `cfm-lsm`
 
 `cfm-lsm` is the runtime layer that catches the **post-exploit
 consequences** of a successful userspace compromise — the things
@@ -1483,7 +1524,7 @@ log within a timeout.
 
 ---
 
-## 13. CLI Reference – `cfm webtop`
+## 14. CLI Reference – `cfm webtop`
 
 ```bash
 cfm webtop                       # summary (short + suspicious)
@@ -1571,7 +1612,7 @@ Expected output semantics:
 
 ---
 
-## 14. Web Detector HTTP API
+## 15. Web Detector HTTP API
 
 The Web Detector exposes a local API used by the CLI and integrations (`API_LISTEN`).
 
@@ -1626,7 +1667,7 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 
 ---
 
-## 15. Security Notes
+## 16. Security Notes
 
 - In **DNAT mode**, keep the challenge listeners local-only (`127.0.0.1`). Do not expose them directly to the internet.
 - In **in-path mode** (OpenResty or Angie), treat the unix socket as sensitive — enforce tight file permissions and always use the token.
