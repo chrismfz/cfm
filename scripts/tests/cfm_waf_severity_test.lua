@@ -1505,6 +1505,80 @@ do
   check(hit == false, "77: bad_utf8 — clean Greek UTF-8 does not fire")
 end
 
+-- ── Test 78: rule_content_type_anomaly — quoted WebKit boundary must NOT fire
+-- RFC 2045 allows the boundary parameter to be a quoted-string. Production
+-- log review (2026-05) found cPanel webmail emitting
+-- `Content-Type: multipart/form-data; boundary="----WebKitFormBoundary..."`
+-- with literal surrounding quotes (35 confirmed FPs). The detector must
+-- strip the quotes before validating the boundary value.
+do
+  disable_all_rules()
+  waf.set_rule("rule_content_type_anomaly", "logonly")
+
+  local hit = waf.check(fresh_ctx({
+    headers = {
+      ["Content-Type"] = 'multipart/form-data; boundary="----WebKitFormBoundaryx8jO2oVc6SWP3Sad"',
+    },
+  }))
+  check(hit == false, "78: quoted WebKit boundary — must not fire CT_BAD_BOUNDARY")
+end
+
+-- ── Test 79: rule_content_type_anomaly — a real malformed boundary still fires
+-- Negative-of-the-negative: confirm the bad-boundary check still works on a
+-- value that genuinely contains forbidden characters (`<` is outside the
+-- allowed [-_.0-9A-Za-z] set; the value capture stops at space/comma/
+-- semicolon, so embedding `<` mid-token forces the validator to reject it).
+do
+  disable_all_rules()
+  waf.set_rule("rule_content_type_anomaly", "challenge")
+
+  local hit, reason = waf.check(fresh_ctx({
+    headers = {
+      ["Content-Type"] = "multipart/form-data; boundary=foo<bar>baz",
+    },
+  }))
+  check(hit == true,
+        "79: malformed boundary 'foo<bar>' — fires (reason=" .. tostring(reason) .. ")")
+end
+
+-- ── Test 80: rule_serialize — Office namespace + Koha CCL must NOT fire ─────
+-- Production log review (2026-05) found two FPs in 41K events that share a
+-- common pattern: `o:` + `:"` appearing in unrelated positions in a URL.
+-- Office HTML namespace (`<o:p class="">`) pasted from Word, and Koha OPAC
+-- CCL search syntax (`q=ccl=an:"167" and au: Haese`). The detector must
+-- require a digit length-marker between the colons (real format is
+-- `O:N:"ClassName"`).
+do
+  disable_all_rules()
+  waf.set_rule("rule_serialize", "challenge")
+
+  -- Microsoft Office HTML namespace — Italian-paste-from-Word pattern
+  local hit1 = waf.check(fresh_ctx({
+    args = 'q=%3Co%3Ap+class%3D%22%22%3E%3C%2Fo%3Ap%3E',
+  }))
+  check(hit1 == false, "80a: Office <o:p class=''> — must not fire SER_O")
+
+  -- Koha CCL OPAC search (e.g. www.gamestop.ca FP)
+  local hit2 = waf.check(fresh_ctx({
+    args = 'q=ccl%3Dan%3A%22167%22+and+au%3A+Haese',
+  }))
+  check(hit2 == false, "80b: Koha CCL 'au: Haese' — must not fire SER_C")
+end
+
+-- ── Test 81: rule_serialize — real PHP serialized object still fires ─────────
+do
+  disable_all_rules()
+  waf.set_rule("rule_serialize", "challenge")
+
+  -- O:8:"stdClass":1:{s:1:"a";i:1;}
+  local hit, reason, _ttl, _action, _hits, waf_rule_id = waf.check(fresh_ctx({
+    args = 'data=O%3A8%3A%22stdClass%22%3A1%3A%7Bs%3A1%3A%22a%22%3Bi%3A1%3B%7D',
+  }))
+  check(hit == true,                                      "81: real PHP serialize — hit=true")
+  check(reason and reason:sub(1, 13) == "WAF_SERIALIZE", "81: real PHP serialize — reason prefix")
+  check(waf_rule_id == 306,                              "81: real PHP serialize — rule_id=306")
+end
+
 if fails > 0 then
   io.stderr:write(string.format("\n%d severity test(s) failed\n", fails))
   os.exit(1)

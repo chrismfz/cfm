@@ -1091,10 +1091,19 @@ function _M.detect_php_serialize(args)
   local a = normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
-  if has(a, "o:") and has(a, ":\"") then return "SER_O_PLAIN" end
-  if has(a, "c:") and has(a, ":\"") then return "SER_C_PLAIN" end
-  if has(a, "o%3a") and has(a, "%22") then return "SER_O_URL" end
-  if has(a, "c%3a") and has(a, "%22") then return "SER_C_URL" end
+  -- PHP's serialize() emits objects as `O:<N>:"<ClassName>":<M>:{...}` where
+  -- N is the decimal class-name length. The previous form (`o:` anywhere AND
+  -- `:"` anywhere) produced FPs on any URL containing both substrings in
+  -- unrelated positions — e.g. `<o:p class="">` (Microsoft Office HTML
+  -- namespace pasted from Word) and Koha OPAC CCL search (`q=ccl=an:"167"
+  -- and au: Haese`). Anchor on the digit-length marker between the colons
+  -- so only real serialized payloads match. The URL-encoded branch catches
+  -- triple-or-higher-encoded payloads that survive normalize()'s two
+  -- url_decode_once passes.
+  if string.find(a, "o:%d+:\"",                1, false) then return "SER_O_PLAIN" end
+  if string.find(a, "c:%d+:\"",                1, false) then return "SER_C_PLAIN" end
+  if string.find(a, "o%%3a%d+%%3a%%22",        1, false) then return "SER_O_URL"   end
+  if string.find(a, "c%%3a%d+%%3a%%22",        1, false) then return "SER_C_URL"   end
 
   return nil
 end
@@ -1421,7 +1430,15 @@ function _M.detect_content_type_anomaly(headers)
     -- Boundary value: allow leading dashes (RFC 2046 permits up to 70 chars
     -- of printable ASCII; browsers use long dash prefixes by convention).
     local bval = ctl:match("boundary%s*=%s*([^%s;,]+)")
-    if bval and not bval:match("^%-*[0-9A-Za-z%-%_%.]+$") then
+    -- RFC 2045 allows the parameter value to be a quoted-string. cPanel
+    -- webmail (and other server-internal multipart producers) emit
+    -- `boundary="----WebKitFormBoundary..."` with literal surrounding
+    -- quotes. Strip them before validating, mirroring the helper at
+    -- detect_polyglot_upload.
+    if bval then
+      bval = bval:gsub('^"', ''):gsub('"$', '')
+    end
+    if bval and bval ~= "" and not bval:match("^%-*[0-9A-Za-z%-%_%.]+$") then
       return "CT_BAD_BOUNDARY"
     end
   end
