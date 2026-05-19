@@ -3133,6 +3133,74 @@ function _M.detect_php_concat_funcname_eval(body, _headers)
   return nil
 end
 
+-- 436 — multi-decode chain (3+ decoder primitives in proximity).
+-- The classic obfuscator-loader pattern when the decoder names ARE
+-- substrings of the source (older obfuscators, hand-rolled droppers):
+--   eval(gzinflate(base64_decode(strrev($payload))))   ← 4 decoders, ≤80 chars
+-- Counts distinct decoder primitives within a 300-byte window; 3+
+-- → fire. Window-gated to suppress FPs from legit code that uses
+-- several decoders across hundreds of lines of unrelated logic.
+local DECODE_PRIMITIVES = {
+  "base64_decode", "gzinflate", "gzuncompress", "gzdecode",
+  "str_rot13", "strrev", "hex2bin", "convert_uudecode",
+  "bzdecompress", "pack",
+}
+function _M.detect_php_decode_chain(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = lower(cap(body, cap_len))
+
+  -- Collect first-occurrence positions of each decoder primitive,
+  -- gated on `(` so prose / variable-name false hits (`my_strrev_helper`)
+  -- don't count.
+  local positions = {}
+  for _, name in ipairs(DECODE_PRIMITIVES) do
+    local pos = s:find(name .. "%s*%(")
+    if pos then positions[#positions + 1] = pos end
+  end
+  if #positions < 3 then return nil end
+
+  table.sort(positions)
+  -- Window check: any three of the collected positions within 300 bytes.
+  for i = 1, #positions - 2 do
+    if positions[i + 2] - positions[i] <= 300 then
+      return "DECODE_CHAIN"
+    end
+  end
+  return nil
+end
+
+-- 437 — encoded `<?php` opener in body / upload content.
+-- Legit data flows never carry an encoded PHP opener — seeing one is a
+-- signal of payload smuggling through a filter that strips/blocks the
+-- literal `<?php` bytes. We catch the common encodings:
+--   PD9waHA       — base64("<?php")
+--   PD89          — base64("<?=")  (short-tag opener)
+--   %3C%3Fphp     — URL-encoded
+--   &#60;&#63;php — HTML numeric entities
+--   &lt;?php      — HTML named-entity for `<`
+--   <?php — JS unicode escape
+--   \x3c\x3fphp     — JS hex escape
+function _M.detect_php_encoded_opener(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = lower(cap(body, cap_len))
+
+  if has(s, "pd9waha")               then return "B64_PHP_OPENER"     end
+  if has(s, "pd9wahag")              then return "B64_PHP_OPENER"     end
+  if has(s, "pd89")                  then return "B64_SHORT_OPENER"   end
+  if has(s, "%3c%3fphp")             then return "URL_PHP_OPENER"     end
+  if has(s, "%3c%3f=")               then return "URL_SHORT_OPENER"   end
+  if has(s, "&#60;&#63;php")         then return "HTML_ENTITY_OPENER" end
+  if has(s, "&lt;?php")              then return "HTML_ENTITY_OPENER" end
+  if has(s, "\\u003c\\u003fphp")     then return "JS_UNICODE_OPENER"  end
+  if has(s, "\\x3c\\x3fphp")         then return "JS_HEX_OPENER"      end
+  return nil
+end
+
+
 
 
 return _M

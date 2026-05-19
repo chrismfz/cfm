@@ -1,4 +1,4 @@
--- Tests for the WAF_BACKDOOR detector family (rules 430-435, Tiers 1+2).
+-- Tests for the WAF_BACKDOOR detector family (rules 430-437, all three tiers).
 -- Source workload: captured 2026-05-19 PHP webshell deployed as
 -- /home/<user>/public_html/wp-content/themes/bridge/includes/radio.php —
 -- char-pool obfuscator output with %PDF- polyglot prefix and a 5KB
@@ -427,6 +427,119 @@ do
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- 436 — multi-decode chain (3+ decoder primitives within 300 bytes)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_decode_chain", "block")
+
+  -- Classic chain: 4 decoders in <100 chars
+  local hit, reason, _ttl, action = waf.check(ctx(
+    [[<?php eval(gzinflate(base64_decode(strrev($payload))));]]))
+  check(hit == true,                            "436 4-decoder chain — hit=true")
+  check(reason == "WAF_BACKDOOR:DECODE_CHAIN",  "436 4-decoder chain — reason")
+  check(action == "block",                      "436 4-decoder chain — action=block")
+end
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_decode_chain", "challenge")
+
+  -- Exactly 3 decoders, comfortable spacing
+  local hit, reason = waf.check(ctx(
+    [[<?php $a = base64_decode($x); $b = gzuncompress($a); $c = hex2bin($b);]]))
+  check(hit == true,                            "436 3-decoder chain — hit=true")
+  check(reason == "WAF_BACKDOOR:DECODE_CHAIN",  "436 3-decoder chain — reason")
+end
+
+-- Negative: only 2 decoders (under threshold)
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_decode_chain", "challenge")
+
+  local hit = waf.check(ctx([[<?php $a = base64_decode($x); $b = gzinflate($a);]]))
+  check(hit ~= true, "436 negative — 2 decoders does not fire")
+end
+
+-- Negative: 3 decoders but spread far apart (legit code in different functions)
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_decode_chain", "challenge")
+
+  local body = "<?php function a() { base64_decode($x); }\n"
+    .. string.rep("// padding comment to push the decoders apart\n", 20)
+    .. "function b() { gzinflate($x); }\n"
+    .. string.rep("// padding comment to push the decoders apart\n", 20)
+    .. "function c() { strrev($x); }"
+  local hit = waf.check(ctx(body))
+  check(hit ~= true, "436 negative — decoders > 300 bytes apart do not fire")
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 437 — encoded `<?php` opener
+-- ─────────────────────────────────────────────────────────────────────────────
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "block")
+
+  -- Base64 of "<?php" = "PD9waHA"
+  local hit, reason, _ttl, action = waf.check(ctx(
+    [[payload=PD9waHAgZWNobyAiaGVsbG8iOyA/Pg==]]))
+  check(hit == true,                              "437 b64 PD9waHA — hit=true")
+  check(reason == "WAF_BACKDOOR:B64_PHP_OPENER",  "437 b64 PD9waHA — reason")
+  check(action == "block",                        "437 b64 PD9waHA — action=block")
+end
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "challenge")
+
+  local hit, reason = waf.check(ctx([[code=%3C%3Fphp%20echo%20'x'%3B%20%3F%3E]]))
+  check(hit == true,                              "437 URL-encoded — hit=true")
+  check(reason == "WAF_BACKDOOR:URL_PHP_OPENER",  "437 URL-encoded — reason")
+end
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "challenge")
+
+  local hit, reason = waf.check(ctx([[body=&#60;&#63;php echo 'x'; &#63;&#62;]]))
+  check(hit == true,                                "437 HTML entity — hit=true")
+  check(reason == "WAF_BACKDOOR:HTML_ENTITY_OPENER", "437 HTML entity — reason")
+end
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "challenge")
+
+  -- JS unicode escape — `<?php` (escapes preserved as literal bytes)
+  local body = 'var c = "' .. "\\u003c\\u003fphp" .. ' eval($_POST[\'x\']);";'
+  local hit, reason = waf.check(ctx(body))
+  check(hit == true,                              "437 JS unicode — hit=true")
+  check(reason == "WAF_BACKDOOR:JS_UNICODE_OPENER", "437 JS unicode — reason")
+end
+
+-- Negative: legit base64 payload that doesn't decode to <?php
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "challenge")
+
+  local hit = waf.check(ctx([[token=SGVsbG8gV29ybGQ=]]))  -- "Hello World"
+  check(hit ~= true, "437 negative — random base64 does not fire")
+end
+
+-- Negative: plain text mentioning PHP without encoded opener
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "challenge")
+
+  local hit = waf.check(ctx([[message=I love PHP programming language]]))
+  check(hit ~= true, "437 negative — prose mention of PHP does not fire")
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Integration: the captured radio.php sample triggers all three of 431, 432, 433.
 -- Severity aggregation picks the strongest action; multiple rule_ids in `hits`.
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -454,4 +567,4 @@ if fails > 0 then
   io.stderr:write(string.format("FAILED %d tests\n", fails))
   os.exit(1)
 end
-print("ok: cfm_waf backdoor tests (430-435)")
+print("ok: cfm_waf backdoor tests (430-437)")

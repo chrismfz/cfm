@@ -232,6 +232,8 @@ local CFG = {
   rule_php_eval_loader_b64        = "logonly", -- variable-fed eval/assert/call_user_func + >=200-char b64 literal
   rule_php_superglobal_callable   = "logonly", -- $_GET[c]( / $_POST[c]( / $_SERVER[HTTP_X_…]( minimalist webshell
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
+  rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
+  rule_php_encoded_opener         = "logonly", -- encoded `<?php` opener (b64 PD9waHA / URL %3C%3Fphp / HTML entity / JS escape)
 
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
@@ -401,6 +403,8 @@ local RULE_IDS = {
   rule_php_eval_loader_b64        = 433,
   rule_php_superglobal_callable   = 434,
   rule_php_concat_funcname_eval   = 435,
+  rule_php_decode_chain           = 436,
+  rule_php_encoded_opener         = 437,
 
   -- 5xx auth abuse
   rule_auth_burst              = 501,
@@ -1379,6 +1383,30 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_concat_funcname_eval) then goto done end
+      end
+    end
+  end
+
+  -- ── 58) PHP multi-decode-chain proximity scorer (436) ────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_decode_chain, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_decode_chain(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_decode_chain) then goto done end
+      end
+    end
+  end
+
+  -- ── 59) PHP encoded `<?php` opener (437) ─────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_encoded_opener, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_encoded_opener(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_encoded_opener) then goto done end
       end
     end
   end

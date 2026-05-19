@@ -229,6 +229,8 @@ Current assignments:
                                        433  rule_php_eval_loader_b64
                                        434  rule_php_superglobal_callable
                                        435  rule_php_concat_funcname_eval
+                                       436  rule_php_decode_chain
+                                       437  rule_php_encoded_opener
 
 5xx — Auth abuse
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
@@ -375,6 +377,48 @@ call_user_func($f, $payload);
 
 **FP notes:** the tight alpha+underscore character class plus the method-dispatch exclusion handles the common legit shapes. Template engines that build method names this way use `$obj->$method()`, not `$method()` directly.
 
+### Rule 436 — `rule_php_decode_chain`
+
+**Catches:** the classic obfuscator-loader pattern when the decoder names *are* substrings of the source (older obfuscators, hand-rolled droppers):
+
+```php
+eval(gzinflate(base64_decode(strrev($payload))));   // 4 decoders, < 80 chars
+```
+
+**Why it matters:** complementary to rules 431 (char-pool extraction) and 433 (variable-fed eval loader). Those two catch the modern obfuscators that hide the decoder names; 436 catches the older / lazier shape where the names are literal. Together they cover both "named decoders" and "hidden decoders".
+
+**How:** scan body for occurrences of any decoder primitive (followed by `(` to disqualify substring-of-identifier matches):
+
+> `base64_decode`, `gzinflate`, `gzuncompress`, `gzdecode`, `str_rot13`, `strrev`, `hex2bin`, `convert_uudecode`, `bzdecompress`, `pack`
+
+Collect their positions in the body. Fire if **any three** occurrences fall within a 300-byte window. The proximity gate is the FP-mitigation: legit code that uses these primitives in separate functions across hundreds of lines doesn't trip; nested-call-chain obfuscators always do.
+
+**Tag:** `DECODE_CHAIN`.
+
+**FP notes:** some WordPress plugins (security loggers, translation files, packaged archives via `pack`) do use multiple decoders — but in separate functions / methods, easily > 300 bytes apart. WP core itself uses `base64_decode` and `pack` in `wp-includes/pomo` but never three in proximity. Production data over a logonly week will confirm.
+
+### Rule 437 — `rule_php_encoded_opener`
+
+**Catches:** an encoded `<?php` opener in body / upload content — a strong signal of payload smuggling through a filter that strips/blocks the literal opener:
+
+| Encoding | Bytes detected |
+|---|---|
+| Base64 of `<?php` | `PD9waHA` |
+| Base64 of `<?=` (short-tag) | `PD89` |
+| URL-encoded | `%3C%3Fphp`, `%3C%3F=` |
+| HTML numeric entity | `&#60;&#63;php` |
+| HTML named entity (partial) | `&lt;?php` |
+| JS unicode escape | `<?php` |
+| JS hex escape | `\x3c\x3fphp` |
+
+**Why it matters:** legit data flows never carry an encoded PHP opener — neither prose, nor JSON, nor form data, nor uploaded media. Seeing one is high-confidence evidence of payload-smuggling-through-filter, and the detection cost is essentially zero (8 substring checks).
+
+**How:** lowercased body substring scan for each of the encoded forms.
+
+**Tags:** `B64_PHP_OPENER`, `B64_SHORT_OPENER`, `URL_PHP_OPENER`, `URL_SHORT_OPENER`, `HTML_ENTITY_OPENER`, `JS_UNICODE_OPENER`, `JS_HEX_OPENER`.
+
+**FP notes:** narrow detector — the encoded openers literally do not appear in normal traffic. The only real-world FP risk is documentation / security-research traffic where someone POSTs an encoded `<?php` as research data; per-vhost exclusion handles cleanly.
+
 ### How they compose
 
 | Sample shape | Fires |
@@ -385,9 +429,11 @@ call_user_func($f, $payload);
 | Eval loader: `eval($a($b("LONG_B64")));` | 433 |
 | Minimalist webshell: `$_GET['c']($_GET['p']);` | 434 |
 | Concat funcname: `$a = "sys"."tem"; $a();` | 435 |
+| 3+ literal decoder primitives in close proximity | 436 |
+| `PD9waHA…` / `%3C%3Fphp…` in body | 437 |
 | Captured radio.php (PDF magic + char-pool + eval-loader) | **431 + 432 + 433** simultaneously |
 
-All six default to `logonly`. Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
+All eight default to `logonly`. Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
 
 ---
 
