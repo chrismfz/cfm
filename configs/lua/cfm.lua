@@ -330,6 +330,13 @@ local _SELF_IPS_FILE = "/var/lib/cfm/lua/cfm_self_ips.lua"
 local _SELF_IPS_TTL_SEC = tonumber(os.getenv("CFM_SELF_IPS_TTL_SEC") or "30")
 local _self_ip_cache = { expires_at = 0, map = {}, generated_at = "" }
 
+-- Mirror of [global] IGNORE_IPS / IGNORE_NETS from cfm.cfg, written by Go
+-- (detectors.IPIgnore.WriteLuaCache) so the Lua self-bypass honours the
+-- same allowlist as the challenge-engine bypass predicate. The same TTL
+-- as self-ips so config edits propagate within ~30s without nginx reload.
+local _IGNORE_NETS_FILE = "/var/lib/cfm/lua/cfm_ignore_nets.lua"
+local _ignore_cache = { expires_at = 0, ips = {}, v4_ranges = {}, generated_at = "" }
+
 local function normalize_ip(raw)
   local ip = tostring(raw or "")
   if ip == "" then return "" end
@@ -392,12 +399,83 @@ local function load_self_ip_cache(force)
   return map
 end
 
+local function load_ignore_cache(force)
+  local now = ngx.now()
+  if not force and now < (_ignore_cache.expires_at or 0) then
+    return _ignore_cache
+  end
+
+  local ips, v4_ranges = {}, {}
+  local generated_at = ""
+  local ok_load, chunk_or_err = pcall(loadfile, _IGNORE_NETS_FILE)
+  if not ok_load then
+    ngx.log(ngx.WARN, "[cfm] ignore-nets loadfile panic ", _IGNORE_NETS_FILE, ": ", tostring(chunk_or_err))
+  elseif chunk_or_err then
+    local ok_run, val = pcall(chunk_or_err)
+    if ok_run and type(val) == "table" then
+      generated_at = tostring(val.generated_at or "")
+      if type(val.ips) == "table" then
+        for k, v in pairs(val.ips) do
+          if v then
+            local nk = normalize_ip(k)
+            if nk ~= "" then ips[nk] = true end
+          end
+        end
+      end
+      if type(val.v4_ranges) == "table" then
+        for i = 1, #val.v4_ranges do
+          local r = val.v4_ranges[i]
+          if type(r) == "table" and type(r[1]) == "number" and type(r[2]) == "number" then
+            v4_ranges[#v4_ranges + 1] = { r[1], r[2] }
+          end
+        end
+      end
+    else
+      ngx.log(ngx.WARN, "[cfm] invalid ignore-nets cache file ", _IGNORE_NETS_FILE)
+    end
+  end
+
+  _ignore_cache.ips = ips
+  _ignore_cache.v4_ranges = v4_ranges
+  _ignore_cache.generated_at = generated_at
+  _ignore_cache.expires_at = now + _SELF_IPS_TTL_SEC
+  return _ignore_cache
+end
+
+local function ipv4_to_uint32(ip)
+  local a, b, c, d = ip:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  if not a then return nil end
+  a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+  if not (a and b and c and d) then return nil end
+  if a > 255 or b > 255 or c > 255 or d > 255 then return nil end
+  return a * 16777216 + b * 65536 + c * 256 + d
+end
+
+local function is_in_ignore_nets(ip)
+  local cache = load_ignore_cache(false)
+  if cache.ips[ip] then return true end
+  local n = ipv4_to_uint32(ip)
+  if n then
+    local ranges = cache.v4_ranges
+    for i = 1, #ranges do
+      if n >= ranges[i][1] and n <= ranges[i][2] then return true end
+    end
+  end
+  return false
+end
+
 local function is_self_origin(ip)
   local nip = normalize_ip(ip)
   if nip == "" then return false end
   if is_loopback_or_linklocal(nip) then return true end
   local map = load_self_ip_cache(false)
-  return map[nip] == true
+  if map[nip] == true then return true end
+  -- [global] IGNORE_IPS / IGNORE_NETS from cfm.cfg — same allowlist the
+  -- Go challenge-engine bypass uses. Mirrors operator expectation that a
+  -- network listed as ignored bypasses the whole CFM stack, not just the
+  -- challenge step.
+  if is_in_ignore_nets(nip) then return true end
+  return false
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────

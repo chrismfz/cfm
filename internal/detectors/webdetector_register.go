@@ -928,6 +928,14 @@ func init() {
 		// and by the wrapped struct (challenge server + bridge wiring in startOnce).
 		ipIgnore := newIPIgnoreFromGlobal(global)
 
+		// Mirror the parsed ignore-list to a Lua-readable file so cfm.lua's
+		// is_self_origin() bypass honours the same allowlist as the engine.
+		// Called unconditionally (nil receiver writes an empty table) so the
+		// Lua side always has a valid cache to consult.
+		if err := ipIgnore.WriteLuaCache("/var/lib/cfm/lua/cfm_ignore_nets.lua"); err != nil {
+			logging.Logf("[webdetector] ignore-nets lua cache write failed: %v", err)
+		}
+
 		engine := webdet.NewEngine(cfg)
 
 		// Wire the Unix ingest socket (log_by_lua_block path). Attached
