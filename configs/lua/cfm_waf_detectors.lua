@@ -2979,7 +2979,9 @@ end
 function _M.detect_php_polyglot_full_body(body, headers)
   if not body or body == "" or #body < 4 then return nil end
 
-  -- Magic byte prefix check — first 16 bytes only, no whitespace tolerance.
+  -- Magic byte prefix check — first 16 bytes only. Raw bytes, NEVER
+  -- lowercased: image / PDF / ZIP magic is case-sensitive (a real PDF
+  -- starts with `%PDF-` not `%pdf-`, JPEG with `\xff\xd8\xff` literally).
   local head = body:sub(1, 16)
   local magic_tag
   if     head:sub(1, 5) == "%PDF-"                 then magic_tag = "PDF"
@@ -2994,10 +2996,18 @@ function _M.detect_php_polyglot_full_body(body, headers)
   if not magic_tag then return nil end
 
   local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
-  local s = cap(body, cap_len)
+  -- Lowercase the scan buffer for opener search: PHP openers are
+  -- case-insensitive per spec (`<?PHP`, `<?Php` are valid). Mirrors
+  -- detect_polyglot_upload (rule 412) which also lowers before opener
+  -- match. The magic-byte check above already happened on the raw bytes,
+  -- so lowering here is safe — it doesn't affect the gating decision.
+  local s = lower(cap(body, cap_len))
 
-  if s:find("<%?php") or s:find("<%?=")
-     or s:find("<jsp:") or s:find("<%%@%s*[Pp][Aa][Gg][Ee]")
+  -- has() over literal openers — faster and clearer than pattern matching
+  -- when no metacharacter semantics are needed.
+  if has(s, "<?php") or has(s, "<?=")
+     or has(s, "<jsp:")
+     or s:find("<%%@%s*page")
      or s:find("<script%s+language%s*=%s*['\"]?php") then
     return "POLYGLOT_DEEP_" .. magic_tag
   end

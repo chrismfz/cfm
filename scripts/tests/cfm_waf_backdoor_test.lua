@@ -236,6 +236,17 @@ do
   check(reason == "WAF_BACKDOOR:POLYGLOT_DEEP_ZIP", "432 ZIP polyglot — reason")
 end
 
+-- Case-insensitive: `<?PHP` (uppercase) is valid PHP per spec and must match
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_polyglot_full_body", "challenge")
+
+  local body = "%PDF-\n%PDF-\n<?PHP system($_GET['c']); ?>"
+  local hit, reason = waf.check(ctx(body, "application/pdf"))
+  check(hit == true,                          "432 case-insensitive <?PHP — hit=true")
+  check(reason == "WAF_BACKDOOR:POLYGLOT_DEEP_PDF", "432 case-insensitive <?PHP — reason")
+end
+
 -- Negative: PHP in body but NO magic byte prefix
 do
   disable_all_rules()
@@ -397,6 +408,18 @@ do
   local hit, reason = waf.check(ctx([[<?php $f = 'ev' . 'al'; $f($payload);]]))
   check(hit == true,                                "435 ev+al — hit=true")
   check(reason == "WAF_BACKDOOR:CONCAT_FUNCNAME_CALL", "435 ev+al — reason")
+end
+
+-- Case-insensitive: %a in Lua patterns matches BOTH upper and lower case,
+-- so an uppercase / mixed-case obfuscator output ("SYS" . "TEM") must still fire.
+-- Captured here as an executable assertion of that semantic.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_concat_funcname_eval", "challenge")
+
+  local hit, reason = waf.check(ctx([[<?php $X = "SYS" . "TEM"; $X("/usr/bin/id");]]))
+  check(hit == true,                                "435 uppercase — hit=true")
+  check(reason == "WAF_BACKDOOR:CONCAT_FUNCNAME_CALL", "435 uppercase — reason")
 end
 
 -- Negative: short string concat but variable NEVER invoked
