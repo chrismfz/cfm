@@ -332,16 +332,27 @@ allow_exe = /usr/local/cpanel/cpanel
 		t.Fatalf("ParseConf: %v", err)
 	}
 	got := c.AllowExeFor(PolicyCredEscal)
-	want := []string{
+	// After the merge-at-lookup change, AllowExeFor returns
+	// compile-in DefaultGlobalAllowExe entries plus the operator's
+	// per-policy additions. Assert presence of the operator entries
+	// (the original test's contract), presence of at least one
+	// default (the new merge contract), and the operator-relative
+	// ordering.
+	wantOperator := []string{
 		"/usr/local/directadmin/directadmin",
 		"/usr/local/cpanel/cpanel",
 	}
-	if len(got) != len(want) {
-		t.Fatalf("allow_exe count: got %d (%v), want %d (%v)", len(got), got, len(want), want)
+	for _, w := range wantOperator {
+		if indexOf(got, w) < 0 {
+			t.Errorf("allow_exe missing operator entry %q (got %v)", w, got)
+		}
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("allow_exe[%d]: got %q, want %q", i, got[i], want[i])
+	if len(DefaultGlobalAllowExe) > 0 && indexOf(got, DefaultGlobalAllowExe[0]) < 0 {
+		t.Errorf("allow_exe missing default entry %q (merge-at-lookup regression)", DefaultGlobalAllowExe[0])
+	}
+	if indexOf(got, wantOperator[0]) >= 0 && indexOf(got, wantOperator[1]) >= 0 {
+		if indexOf(got, wantOperator[0]) > indexOf(got, wantOperator[1]) {
+			t.Errorf("operator allow_exe order: %q appeared after %q", wantOperator[0], wantOperator[1])
 		}
 	}
 }
@@ -552,4 +563,18 @@ func TestFormatConf_KmsgRoundTrip(t *testing.T) {
 	if roundtrip.Kmsg != original.Kmsg {
 		t.Errorf("kmsg round-trip drift: got %+v, want %+v", roundtrip.Kmsg, original.Kmsg)
 	}
+}
+
+// indexOf returns the first position of s in xs, or -1 if absent.
+// Test helper for the merge-at-lookup contract assertions on
+// AllowExeFor / AllowCommFor / AllowPathFor — those return
+// defaults+operator entries deduped, so per-position assertions
+// are no longer stable but presence + relative ordering still are.
+func indexOf(xs []string, s string) int {
+	for i, x := range xs {
+		if x == s {
+			return i
+		}
+	}
+	return -1
 }

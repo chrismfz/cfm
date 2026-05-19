@@ -615,6 +615,31 @@ var DefaultGlobalAllowComm = []string{
 	// be evaded by a process pretending to be readlink.
 	"readlink",
 
+	// /usr/bin/crontab and its mid-exec transitional comm. Setuid-
+	// root binary that renames a temp file (#tmp.HOST.XXXXXX) into
+	// /var/spool/cron/<user> on every panel-UI "Cron Jobs" edit by
+	// a watched uid — three FS-005 events per edit (create + rename
+	// + setattr). The BPF-side cfm_comm_is_trusted_auth_helper
+	// gates the enforce decision; this entry is the matching
+	// userspace silencer for monitor mode. Threat model: a webshell
+	// could exec `crontab evil.txt` to drop a persistence cron, so
+	// the rule's intent is real — but the kernel can't tell that
+	// from a user opening their cron in the panel UI, and the
+	// false-positive volume on a panel host is dominated by the
+	// legitimate case. Operators who want CFML-FS-005 to catch
+	// crontab-based persistence drops can remove this entry and
+	// the (crontab) sibling below.
+	"crontab",
+	"(crontab)",
+
+	// `at` and `(at)` are NOT in the static default list — they're
+	// added at AllowCommFor lookup time only when /usr/bin/at (or
+	// the Debian /usr/sbin/at variant) is actually installed. See
+	// presenceGatedAllowComm() below for the rationale: `at` is a
+	// 2-char comm, the easiest possible prctl(PR_SET_NAME) spoof
+	// target across the entire allow_comm surface, so on hosts that
+	// don't ship the at(1) package we leave that surface closed.
+
 	// CloudLinux CageFS — cagefsctl is a Python script run by root
 	// during account lifecycle ops; its task comm is "cagefsctl" but
 	// the exe the kernel sees is "python3.11" (or similar). Allow_exe
@@ -762,50 +787,94 @@ func (c *Conf) PersistencePathsFor(id PolicyID) []string {
 	return c.PersistencePaths[id]
 }
 
-// AllowExeFor returns the merged allow_exe paths for id — global
-// `[allow]` entries plus the per-policy section's entries. Returns
-// nil when id does not consume an exe allowlist or when nothing has
-// been configured. Safe on a nil receiver.
+// AllowExeFor returns the merged allow_exe paths for id — the
+// compile-in default global list (DefaultGlobalAllowExe) plus the
+// operator's [allow] block plus the per-policy section. Returns
+// nil when id does not consume an exe allowlist.
 //
-// The global slice is prepended in declaration order so per-policy
-// overrides land last and operators can read the final effective
-// allowlist by scanning top-to-bottom.
+// Nil-receiver contract: a nil *Conf returns the compile-in
+// defaults (still filtered through allowExePolicy(id)). This is
+// a behaviour change from pre-merge-at-lookup, where a nil
+// receiver short-circuited to nil — kept intentionally so
+// callers in early-startup paths that don't yet have a parsed
+// Conf still see the baseline allowlist instead of an empty
+// one. BuildEventFilter explicitly handles nil before reaching
+// here, so the new semantics are not currently exercised in
+// production but matter for future callers (e.g. a `cfm lsm
+// allowlist --effective` dump command).
+//
+// Merging defaults at lookup time (rather than at parse time)
+// closes the upgrade gap that bit PR #944 in the field: an
+// operator's existing /etc/cfm/lsm.conf is preserved by rpm
+// `%config(noreplace)` across upgrades, so a newer build's
+// additions to DefaultGlobalAllowExe / DefaultGlobalAllowComm
+// were silently ignored until the operator hand-edited the file.
+// With the merge here, a fresh daemon start on an upgraded build
+// picks up new defaults transparently; the operator file retains
+// its role as "what's been customised on top of the defaults".
+//
+// Upgrade asymmetry — removals do not propagate. The merge only
+// adds. If a future build REMOVES an entry from
+// DefaultGlobalAllowExe (e.g. because it turned out to be too
+// broad), an upgraded host whose existing lsm.conf has that
+// entry rendered into the [allow] block will keep the entry in
+// the effective list, because ParseConf re-reads it from the
+// file. Closing this side of the gap requires either a
+// "deprecated_default" list the merge filters out, or a
+// `[allow] disable_default = X` syntax. Not implemented today;
+// the current trade-off matches the existing static
+// WebUserNames carve-out (apache / nginx / nobody / etc., which
+// also can't be excluded via lsm.conf).
+//
+// Order in the returned slice: defaults first, then operator
+// global, then per-policy. dedupePreservingOrder collapses
+// duplicates so an operator file that explicitly re-lists a
+// default doesn't produce a doubled entry.
 func (c *Conf) AllowExeFor(id PolicyID) []string {
-	if c == nil {
-		return nil
-	}
 	if !allowExePolicy(id) {
 		return nil
 	}
 	var out []string
-	if len(c.GlobalAllowExe) > 0 {
-		out = append(out, c.GlobalAllowExe...)
+	out = append(out, DefaultGlobalAllowExe...)
+	if c != nil {
+		if len(c.GlobalAllowExe) > 0 {
+			out = append(out, c.GlobalAllowExe...)
+		}
+		if c.AllowExe != nil {
+			out = append(out, c.AllowExe[id]...)
+		}
 	}
-	if c.AllowExe != nil {
-		out = append(out, c.AllowExe[id]...)
-	}
-	return out
+	return dedupePreservingOrder(out)
 }
 
-// AllowCommFor returns the merged allow_comm names for id — global
-// `[allow]` entries plus the per-policy section's entries. Returns
-// nil when id does not consume a comm allowlist or when nothing has
-// been configured. Safe on a nil receiver.
+// AllowCommFor returns the merged allow_comm names for id — the
+// compile-in default global list (DefaultGlobalAllowComm) plus the
+// operator's [allow] block plus the per-policy section. Returns nil
+// when id does not consume a comm allowlist. See AllowExeFor for
+// the upgrade-gap rationale; this function mirrors that shape so
+// the merge semantics are consistent across all three allow_*
+// surfaces.
 func (c *Conf) AllowCommFor(id PolicyID) []string {
-	if c == nil {
-		return nil
-	}
 	if !allowCommPolicy(id) {
 		return nil
 	}
 	var out []string
-	if len(c.GlobalAllowComm) > 0 {
-		out = append(out, c.GlobalAllowComm...)
+	out = append(out, DefaultGlobalAllowComm...)
+	// Presence-gated extras (today: `at` only when /usr/bin/at is
+	// installed). See presenceGatedAllowComm() for the threat-model
+	// rationale — short comms like `at` are easy spoof targets so
+	// we keep their allow_comm surface closed on hosts that don't
+	// actually run the underlying binary.
+	out = append(out, presenceGatedAllowComm()...)
+	if c != nil {
+		if len(c.GlobalAllowComm) > 0 {
+			out = append(out, c.GlobalAllowComm...)
+		}
+		if c.AllowComm != nil {
+			out = append(out, c.AllowComm[id]...)
+		}
 	}
-	if c.AllowComm != nil {
-		out = append(out, c.AllowComm[id]...)
-	}
-	return out
+	return dedupePreservingOrder(out)
 }
 
 // AllowPathFor returns the configured script-path-prefix
@@ -814,16 +883,18 @@ func (c *Conf) AllowCommFor(id PolicyID) []string {
 // further. Returns nil when id does not consume the script-prefix
 // allowlist or when nothing has been configured.
 func (c *Conf) AllowPathFor(id PolicyID) []string {
-	if c == nil {
-		return nil
-	}
 	if !allowPathPolicy(id) {
 		return nil
 	}
-	if len(c.GlobalAllowPath) == 0 {
+	var out []string
+	out = append(out, DefaultGlobalAllowPath...)
+	if c != nil && len(c.GlobalAllowPath) > 0 {
+		out = append(out, c.GlobalAllowPath...)
+	}
+	if len(out) == 0 {
 		return nil
 	}
-	return append([]string{}, c.GlobalAllowPath...)
+	return dedupePreservingOrder(out)
 }
 
 // ModeFor returns the configured mode for id, falling back to the
@@ -1450,6 +1521,78 @@ func parseAllowComm(s string) (string, error) {
 	return v, nil
 }
 
+// atBinaryPaths is the set of paths where /usr/bin/at lives across
+// supported distros. Probed once at first AllowCommFor call (see
+// presenceGatedAllowComm) to decide whether to allowlist the `at`
+// comm; cached via the var below so the 17-policy BuildEventFilter
+// sweep doesn't stat() repeatedly.
+var atBinaryPaths = []string{"/usr/bin/at", "/usr/sbin/at", "/bin/at"}
+
+// hostHasAtBinary is the package-level hook tests stub to control
+// the at-presence outcome deterministically. Production uses
+// statAnyExists; tests override the var to force true/false without
+// touching the host filesystem. Reset to statAnyExists in test
+// teardown if needed.
+var hostHasAtBinary = func() bool { return statAnyExists(atBinaryPaths) }
+
+// statAnyExists reports whether any of paths can be stat'd. Used to
+// gate presence-conditional allowlist entries without coupling the
+// caller to os.Stat directly (so tests can override the parent hook).
+func statAnyExists(paths []string) bool {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// presenceGatedAllowComm returns the runtime-conditional extras
+// to merge into AllowCommFor's effective list. Today: `at` /
+// `(at)` only when the at(1) binary is actually installed on the
+// host.
+//
+// Rationale: `at` is a 2-character comm — the easiest possible
+// prctl(PR_SET_NAME) spoof target on the entire allow_comm
+// surface. On hosts that ship and use at(1), the FP suppression
+// is worth the comm-spoof attack-surface cost (same trade-off as
+// every other allowlist entry). On hosts where at(1) isn't
+// installed at all, there's no legitimate `at` comm to suppress,
+// so allowlisting it is pure attack surface — we omit it.
+//
+// Symmetric gating for `crontab` was considered and rejected:
+// /usr/bin/crontab is on essentially every Linux host that runs
+// cfm-lsm, and the 7-character comm is enough harder to spoof
+// than `at` that the asymmetry is justified.
+func presenceGatedAllowComm() []string {
+	if hostHasAtBinary() {
+		return []string{"at", "(at)"}
+	}
+	return nil
+}
+
+// dedupePreservingOrder returns a copy of in with later duplicates
+// removed; the first occurrence of each string is kept. Used by
+// AllowExeFor / AllowCommFor / AllowPathFor when merging compile-in
+// defaults with operator-supplied entries — an operator who
+// explicitly re-lists a default value (or a future FormatConf round-
+// trip that re-emits both) must produce a single effective entry.
+func dedupePreservingOrder(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
 // joinPolicyIDs renders ids as a comma-separated string. Used by the
 // parser error paths to enumerate the set of policies that accept a
 // given allow_* key — the alternative is hardcoded lists in fmt.Errorf
@@ -1539,9 +1682,20 @@ func allowExePolicy(id PolicyID) bool {
 // from a webshell uid (status pages, supervisor health checks,
 // LiteSpeed lsphp respawn detection) fires OBS-004 even though
 // no actual ptrace syscall was issued.
+//
+// FS-005 uses allow_comm for the per-user crontab / at workflow.
+// /usr/bin/crontab and /usr/bin/at are setuid-root binaries that
+// legitimately rename a temp file into /var/spool/cron/<user> or
+// /var/spool/at/<jobid> on behalf of an unprivileged caller.
+// /var/spool/cron and /var/spool/at are in DefaultPersistencePaths,
+// so every panel-UI "Cron Jobs" edit by a watched uid trips FS-005
+// (create + rename + setattr on the spool directory). The BPF-side
+// trusted-comm allowlist (cfm_comm_is_trusted_auth_helper) was
+// extended to cover the enforce path; this knob is the userspace
+// half that silences the monitor-mode noise.
 func allowCommPolicy(id PolicyID) bool {
 	switch id {
-	case PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec, PolicyCapRaise, PolicyPtraceAccess:
+	case PolicyUnexpectedBPF, PolicyCredEscal, PolicyReverseShell, PolicyInterpreterNetStdio, PolicyEphemeralExec, PolicyCapRaise, PolicyPtraceAccess, PolicySensitiveWrite:
 		return true
 	}
 	return false
