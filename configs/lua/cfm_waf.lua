@@ -167,7 +167,6 @@ local CFG = {
   -- rule_rce (320) already catches the bare "${jndi:" Log4Shell marker;
   -- rule_log4shell (328) extends C1 with evasion variants (${lower:j}…,
   -- ${env:X:-j}…, ${${::-j}…) that defeat substring matching on rule 320.
-  -- C3 (CVE signature file) is deferred to its own infra PR.
   rule_java_deserialize  = "challenge", -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
                                         -- (Java-serialization-specific marker; not in legit web traffic)
   rule_log4shell         = "logonly",   -- ${lower:j}…, ${env:X:-j}…, ${${::-j}${::-n}…, ${base64:…}

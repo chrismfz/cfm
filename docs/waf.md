@@ -11,8 +11,6 @@ before promoting any rule from `logonly` to `challenge` to `block`.
 
 Open follow-ups (none blocking):
 
-- **C3 — CVE signature file infrastructure** (`/etc/cfm/cve_signatures.txt` with
-  hot-reload). Deferred until there's a concrete CVE pipeline to feed it.
 - **Promotion review** — most of the new detectors (Phase 1-5 + extensions)
   ship at `logonly`. Walk `cfm webtop waf hit-rates --hours 168` after a week
   of production data and promote well-behaved rules per the playbook below.
@@ -601,7 +599,6 @@ Highest-value items first. S/M/L = ½–1 day / 2–3 days / multi-day.
 | 3 | **R1 (Reverse shell payloads)** | Exact literal match, near-zero FP, instant block-class. | S |
 | 4 | **W1 (Known webshell paths)** as a hash-lookup table loaded from a data file. | Foundation for all path-based detectors. | S |
 | 5 | **W4 (Polyglot upload detection)** | Highest-value upload defense. Needs a tiny multipart parser (also unblocks W2/W3 in upload context). | M |
-| 6 | **CVE signature file** at `/etc/cfm/cve_signatures.txt` with hot-reload. | Needed before Phase 3 grows; ship updates without redeploying. | M |
 | 7 | **B5 (POST + empty UA + CL:0 + .php)** combo fingerprint | Cheap, high-confidence webshell ping detector. | S |
 | 8 | **Panel DNAT WAF profile** for cPanel/DirectAdmin file managers, backup restore, plugin/theme editors. | Hijacked panel sessions uploading webshells. | L |
 | 9 | ~~**Hit-rate counter + sampled hit log**~~ DONE — see "Hit-rate measurement" section. | — | — |
@@ -631,7 +628,6 @@ Format: short ID, what it detects, target reason family, indicative score. Full 
 
 - **C1** Log4Shell — **split across two rules**: the bare `${jndi:` / `${j{n{d{i` / URL-encoded forms are caught by `detect_rce` (rule 320, default `block`); the lookup-syntax evasion variants (`${${::-j}…`, `${lower:j}…`, `${upper:j}…`, `${env:`, `${sys:`, `${main:`, `${date:`, `${base64:`, generic `${${` nesting) are **shipped at `logonly` as rule 328 (`rule_log4shell`)** with family `WAF_CVE:LOG4SHELL:<tag>`. Inspects normalized args+body plus every header value (UA / Referer / X-Forwarded-For / Authorization).
 - **C2** Java deserialization (`rO0ABXNyAB`, `\xac\xed\x00\x05`) → `WAF_CVE:JAVA_DESERIALIZATION` — **shipped (rule 326)**.
-- **C3** signature file `/etc/cfm/cve_signatures.txt` (`reason<TAB>score<TAB>literal`), hot-reload via `refresh_*_if_needed` pattern — **not shipped** (deferred until there's a concrete CVE pipeline to feed it).
 
 ### Phase 4 — C2 / exfiltration
 

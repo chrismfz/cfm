@@ -2584,23 +2584,41 @@ end
 -- plus every header value (Log4j-vulnerable apps logged UA / Referer /
 -- X-Forwarded-For / Authorization). Cheap precheck: skip the header walk
 -- when no "${" appears anywhere.
+-- FP-risk note: the NESTED ("${${") and ENV/SYS/MAIN/DATE tags can collide
+-- with legitimate template-engine syntax (Velocity, Spring SpEL, certain
+-- JS templating libraries). Rolling out at logonly so the operator can
+-- grep cfm.waf.log for "WAF_CVE:LOG4SHELL:NESTED" / ":ENV" / ":SYS" /
+-- ":MAIN" / ":DATE" before promotion and add per-vhost exclusions if a
+-- legitimate app needs them.
 function _M.detect_log4shell(args, body, headers, _norm_ab)
   local s = _norm_ab or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
 
-  if has(s, "${jndi:")     then return "JNDI"        end
-  if has(s, "${${")        then return "NESTED"      end
-  if has(s, "${::-")       then return "DEFAULT_VAL" end
-  if has(s, "${lower:")    then return "LOWER"       end
-  if has(s, "${upper:")    then return "UPPER"       end
-  if has(s, "${env:")      then return "ENV"         end
-  if has(s, "${sys:")      then return "SYS"         end
-  if has(s, "${main:")     then return "MAIN"        end
-  if has(s, "${date:")     then return "DATE"        end
-  if has(s, "${base64:")   then return "BASE64"      end
+  -- Single cheap precheck on the (potentially 32 KB) scan buffer. The
+  -- dominant case is "no '${' anywhere" → one find() returns nil and we
+  -- fall through to the header walk. Without this gate we'd run 10
+  -- linear scans on every request.
+  if has(s, "${") then
+    if has(s, "${jndi:")     then return "JNDI"        end
+    if has(s, "${${")        then return "NESTED"      end
+    if has(s, "${::-")       then return "DEFAULT_VAL" end
+    if has(s, "${lower:")    then return "LOWER"       end
+    if has(s, "${upper:")    then return "UPPER"       end
+    if has(s, "${env:")      then return "ENV"         end
+    if has(s, "${sys:")      then return "SYS"         end
+    if has(s, "${main:")     then return "MAIN"        end
+    if has(s, "${date:")     then return "DATE"        end
+    if has(s, "${base64:")   then return "BASE64"      end
+  end
 
   -- Header walk: Log4Shell historically arrived in User-Agent, X-Forwarded-
   -- For, Referer, Authorization, X-Api-Version, Cookie, etc. Precheck with
   -- the plain "${" needle on the raw value before allocating a url_decode.
+  --
+  -- Note: this path runs ONE url_decode_once pass vs. normalize()'s two.
+  -- A doubly-encoded payload in a header (%2524%257bjndi:) slips past
+  -- here but is caught by the body/args path above (normalize double-
+  -- decodes). Real-world Log4Shell campaigns didn't double-encode
+  -- headers, so the asymmetry is acceptable.
   if type(headers) == "table" then
     for hname, hval in pairs(headers) do
       local raw = header_string(hval)
@@ -2656,7 +2674,18 @@ function _M.detect_bad_utf8(args, body, _norm_ab)
         return "UTF8_BAD_LEAD"
       end
 
-      if i + need > n then return "UTF8_TRUNC" end
+      if i + need > n then
+        -- Distinguish "buffer truncated mid-codepoint by cap()" (lead byte
+        -- in the last 3 positions of the buffer) from a real malformed
+        -- packet. A cap-induced cut isn't an encoding-bypass attempt; a
+        -- 35 KB Greek WordPress comment that straddles the JSON body
+        -- budget would otherwise trip this every request. Worst case
+        -- skipped: an attacker who places exactly one overlong-lead byte
+        -- in the last 3 bytes of the buffer — that payload can't decode
+        -- at the app layer either, so no bypass.
+        if i > n - 3 then return nil end
+        return "UTF8_TRUNC"
+      end
 
       local cp
       if     need == 1 then cp = (b - 0xC0) * 64
