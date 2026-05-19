@@ -305,6 +305,18 @@ do
   check(reason == "WAF_BACKDOOR:EVAL_LOADER_B64", "433 call_user_func — reason")
 end
 
+-- Underscore-containing variable name — `[%w_]+` fix pin.
+-- `eval($my_decode($payload))` must fire; `%w+` would truncate at `_` and miss it.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_eval_loader_b64", "challenge")
+
+  local body = [[<?php eval($my_decode("]] .. long_b64(220) .. [[")); ]]
+  local hit, reason = waf.check(ctx(body))
+  check(hit == true,                          "433 underscore-var eval — hit=true")
+  check(reason == "WAF_BACKDOOR:EVAL_LOADER_B64", "433 underscore-var eval — reason")
+end
+
 -- Negative: eval() with LITERAL function name (not variable)
 do
   disable_all_rules()
@@ -483,6 +495,19 @@ do
 
   local hit = waf.check(ctx([[<?php $a = base64_decode($x); $b = gzinflate($a);]]))
   check(hit ~= true, "436 negative — 2 decoders does not fire")
+end
+
+-- Negative: unpack() + two real decoders should NOT fire.
+-- `pack` was removed from DECODE_PRIMITIVES because it is a substring of
+-- `unpack`, which is common in legit binary-parsing code. This test pins
+-- that `unpack` alone does not count toward the threshold.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_decode_chain", "challenge")
+
+  local hit = waf.check(ctx(
+    [[<?php $a = unpack("V*", $data); $b = base64_decode($x); $c = gzinflate($b);]]))
+  check(hit ~= true, "436 negative — unpack + 2 decoders does not fire (pack removed from primitives)")
 end
 
 -- Negative: 3 decoders but spread far apart (legit code in different functions)

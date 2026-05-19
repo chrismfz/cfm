@@ -3033,10 +3033,10 @@ function _M.detect_php_eval_loader_b64(body, _headers)
   -- $varname( within ~32 characters. The %s* allows whitespace between the
   -- opener and the variable call.
   local has_var_eval =
-       ls:find("eval%s*%(%s*@?%$%w+%s*%(")
-    or ls:find("assert%s*%(%s*@?%$%w+%s*%(")
-    or ls:find("call_user_func%s*%(%s*@?%$%w+")
-    or ls:find("call_user_func_array%s*%(%s*@?%$%w+")
+       ls:find("eval%s*%(%s*@?%$[%w_]+%s*%(")
+    or ls:find("assert%s*%(%s*@?%$[%w_]+%s*%(")
+    or ls:find("call_user_func%s*%(%s*@?%$[%w_]+")
+    or ls:find("call_user_func_array%s*%(%s*@?%$[%w_]+")
   if not has_var_eval then return nil end
 
   -- Find a quoted base64-shaped literal ≥ 200 chars. Iterate balanced
@@ -3150,10 +3150,13 @@ end
 -- Counts distinct decoder primitives within a 300-byte window; 3+
 -- → fire. Window-gated to suppress FPs from legit code that uses
 -- several decoders across hundreds of lines of unrelated logic.
+-- "pack" omitted: it is a substring of "unpack", which is common in legit
+-- binary-parsing code. The three-in-300 threshold doesn't protect against
+-- unpack + two real decoders triggering a false positive.
 local DECODE_PRIMITIVES = {
   "base64_decode", "gzinflate", "gzuncompress", "gzdecode",
   "str_rot13", "strrev", "hex2bin", "convert_uudecode",
-  "bzdecompress", "pack",
+  "bzdecompress",
 }
 function _M.detect_php_decode_chain(body, _headers)
   if not body or body == "" then return nil end
