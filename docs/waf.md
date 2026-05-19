@@ -769,3 +769,439 @@ Follow the existing patterns; new code should look like the rules already in the
 ## Expected invariant
 
 A solved `cfm_clearance` means: "do not repeatedly challenge this client for the same gate." It never means: "trust this request payload" or "skip WAF inspection before origin."
+
+---
+
+# External reference audit (2026-05)
+
+Audit of every CFM WAF detector against six reference projects, with
+keep/borrow/integrate classification and ready-to-apply patches.
+
+**Scope:** `configs/lua/cfm_waf.lua`, `cfm_waf_detectors.lua`,
+`cfm_waf_util.lua`.
+
+**Constraint:** LuaJIT FFI is acceptable in the hot path; cgo is not.
+Anything requiring a Go-in-request boundary is out of scope today.
+
+## Reference projects compared
+
+| Tag | Project | Why it's here |
+|-----|---------|---------------|
+| **A** | [`corazawaf/libinjection-go`](https://github.com/corazawaf/libinjection-go) | Pure-Go libinjection port (used by Coraza). |
+| **B** | [`wasilibs/go-libinjection`](https://github.com/wasilibs/go-libinjection) | WASM-wrapped libinjection via wazero. |
+| **C** | [`corazawaf/coraza`](https://github.com/corazawaf/coraza) | Full Go WAF. Reference for operator set + CRS integration. |
+| **D** | [`p0pr0ck5/lua-resty-libinjection`](https://github.com/p0pr0ck5/lua-resty-libinjection) | LuaJIT FFI binding with context-specific variants. **Most relevant to CFM.** |
+| **E** | [`bungle/lua-resty-injection`](https://github.com/bungle/lua-resty-injection) | Minimal LuaJIT FFI binding (Kong author). |
+| **F** | OWASP CRS | Rule-family comparison, not per-rule. |
+
+## Detector inventory
+
+Implementation locations and techniques. For the operator-facing Rule IDs
+table, see [§ Rule IDs](#rule-ids) above.
+
+| # | Category | Technique | File:line |
+|---|----------|-----------|-----------|
+| 1 | Traversal | `../` + null + double-encode + sensitive-sink whitelist | `cfm_waf_detectors.lua:64` |
+| 2 | RCE | Substring list (JNDI, `;wget`, `\|bash`, backticks, `base64,`) | `cfm_waf_detectors.lua:102` |
+| 3 | Exploit methods | TRACE / TRACK / CONNECT | `cfm_waf_detectors.lua:127` |
+| 4 | PHP wrappers | `php://`, `phar://`, `data://`, `zip://`, `expect://`, `glob://` | `cfm_waf_detectors.lua:148` |
+| 5 | Control chars | `[\x01-\x08\x0b\x0c\x0e-\x1f]` in args/body with CT gating | `cfm_waf_detectors.lua:192` |
+| 6 | PHP webshell body | Scored: `<?php`+superglobals+exec-family+dyn-include+webshell-names | `cfm_waf_detectors.lua:241` |
+| 7 | Base64 body scan | Greedy `=([A-Za-z0-9+/]+=*)`, decode, scan decoded for shells/SQL/PHP | `cfm_waf_detectors.lua:401` |
+| 8 | XSS | Substring: `<script`, `=javascript:`, `onerror=`/`onload=`/… with `%f[%w]` anchor | `cfm_waf_detectors.lua:457` |
+| 9 | SQLi | Substring: `union select`, `information_schema`, `or 1=1`, `' or '1'='1` (post comment-strip) | `cfm_waf_detectors.lua:486` |
+| 10 | Auth burst | Endpoint-tagged shdict counter window | `cfm_waf_detectors.lua:547` |
+| 11 | WP login probe | HEAD-burst window + no-UA/Referer POST | `cfm_waf_detectors.lua:581` |
+| 12 | XMLRPC multicall/pingback | Body substring | `cfm_waf_detectors.lua:726` |
+| 13 | XMLRPC POST burst | shdict counter | `cfm_waf_detectors.lua:749` |
+| 14 | cmd param key | `exec=`, `passthru=`, …; `cmd/system/command` value-aware shelly check | `cfm_waf_detectors.lua:880` |
+| 15 | cmd payload | `;wget`, `\|bash`, backtick-cmd, with search-field / `filters=` carve-outs | `cfm_waf_detectors.lua:920` |
+| 16 | Debug toggles | `xdebug` / `debug=1` / `trace=1` by key+value | `cfm_waf_detectors.lua:1045` |
+| 17 | PHP serialize | `O:N:"`/`C:N:"` plain & URL-encoded | `cfm_waf_detectors.lua:1090` |
+| 18 | Bad UA (scored) | INSTANT tool UAs + 6-signal score (UA / method / headers / URI risk) | `cfm_waf_detectors.lua:1123` |
+| 19 | Shellshock | `() {` in any header value (URL-decode once) | `cfm_waf_detectors.lua:1315` |
+| 20 | Header vulns | `Proxy`, `Lock-Token`, `If`, CVE-2025-24813 | `cfm_waf_detectors.lua:1342` |
+| 21 | CT anomaly | Charset bypass (IBM037 etc.), boundary count, non-string CT | `cfm_waf_detectors.lua:1384` |
+| 22 | Proxy header SQLi | `'` in XFF / X-Real-IP / Client-IP | `cfm_waf_detectors.lua:1445` |
+| 23 | SSRF proto | `file://`, `gopher://`, `dict://`, `ldap[s]://`, `tftp://`, `stratum+*://`, `sftp/ftp://` + octal/hex/dword IP in `://` ctx | `cfm_waf_detectors.lua:1476` |
+| 24 | JS proto pollution | `__proto__`, `constructor` + `.prototype` / `[prototype` | `cfm_waf_detectors.lua:1517` |
+| 25 | XXE | DOCTYPE / ENTITY + SYSTEM / PUBLIC | `cfm_waf_detectors.lua:1537` |
+| 26 | CRLF | Raw and URL-encoded CRLF + header-keyword | `cfm_waf_detectors.lua:1567` |
+| 27 | HTTP smuggling (body) | VERB SP PATH SP HTTP/N | `cfm_waf_detectors.lua:1598` |
+| 28 | Upload filename | Quoted/single/unquoted multipart `filename=` + ext patterns + special names | `cfm_waf_detectors.lua:1632` |
+| 29 | Upload content | Body substring `<?php`, `<?=`, `<jsp:`, `$_*` superglobals, ImageMagick MVG | `cfm_waf_detectors.lua:1700` |
+| 30 | Script obfuscation | Shared scorer (long-b64 / decode-helpers / eval / atob / XOR / chr-storm) | `cfm_waf_detectors.lua:1730` + `cfm_waf_util.lua:115` |
+| 31 | Upload obfuscation | Same scorer on multipart | `cfm_waf_detectors.lua:1753` |
+| 32 | Webshell path | URI basename ∈ 28-name set | `cfm_waf_detectors.lua:1817` |
+| 33 | Reverse shell | 24 literal one-liner needles | `cfm_waf_detectors.lua:1897` |
+| 34 | Persistence | crontab / cron.d / systemd / bashrc / authorized_keys with `>>`/`>` | `cfm_waf_detectors.lua:1981` |
+| 35 | Rootkit | `LD_PRELOAD=/`, `/etc/ld.so.preload`, `insmod /tmp/`, `/dev/mem` | `cfm_waf_detectors.lua:2013` |
+| 36 | LOLbin | certutil / bitsadmin, `-EncodedCommand`, IEX, `wget -o /tmp/` | `cfm_waf_detectors.lua:2049` |
+| 37 | Java deserialize | `\xac\xed\x00\x05` raw + `rO0AB` b64 + `aced0005` hex (body/cookie/auth/xff) | `cfm_waf_detectors.lua:2073` |
+| 38 | Webshell ping | POST + empty UA + CL:0 + `.php` / `.phtml` / `.phar` URI | `cfm_waf_detectors.lua:2124` |
+| 39 | C2 tunnel | 21 hostnames (pastebin, ngrok, webhook.site, discord cdn, telegram) | `cfm_waf_detectors.lua:2168` |
+| 40 | Coinminer | xmrig / xmr-stak flags + pool hostnames + monerod / ethminer | `cfm_waf_detectors.lua:2218` |
+| 41 | Smuggling CL/TE | CL+TE coexist / multi-CL / malformed CL / multi-TE | `cfm_waf_detectors.lua:2267` |
+| 42 | Long path segment | ≥ 800 B segment with `data:` URI artifact carve-out | `cfm_waf_detectors.lua:2347` |
+| 43 | Header flood | > 16 KB excluding Cookie / Authorization | `cfm_waf_detectors.lua:2374` |
+| 44 | Polyglot upload | Multipart parser → first 64 B of image-claimed parts checked vs PHP/ASP/JSP/script openers | `cfm_waf_detectors.lua:2423` |
+| 45 | Range abuse | `Request-Range`, multi `Range`, oversized, ≥ 8 ranges | `cfm_waf_detectors.lua:2533` |
+| 46 | IP host | Host header is bare IPv4 / IPv6 literal | `cfm_waf_detectors.lua:162` |
+| — | Body budget by CT | json=32K / multipart=16K / xml=16K / urlencoded=8K / other=2K | `cfm_waf_util.lua:249` |
+| — | Normalize | `url_decode_once × 2` + `lower`, with no-`%` fast path. **No UTF-8 / unicode normalization.** | `cfm_waf_util.lua:211` |
+
+## Coverage matrix vs external projects
+
+Cell values: **stronger** / **equivalent** / **weaker** / **none** / **different-scope**.
+
+| Category | A — libinjection-go | B — wasilibs | C — Coraza | D — p0pr0ck5 | E — bungle | F — CRS |
+|----------|---------------------|--------------|------------|--------------|------------|---------|
+| SQLi | stronger (tokenizer + fingerprint) | stronger (same via WASM) | stronger (wraps A + CRS regex) | **stronger (FFI tokenizer + context variants)** | stronger (FFI, minimal API) | stronger (REQUEST-942) |
+| XSS | stronger (HTML5 state machine) | stronger | stronger | **stronger (context-aware variants)** | stronger | stronger (REQUEST-941) |
+| Traversal | none | none | equivalent (CRS-930 + `validateUrlEncoding`) | none | none | stronger |
+| RCE | none | none | equivalent | none | none | stronger (CRS-932) |
+| PHP wrappers | none | none | equivalent | none | none | equivalent (CRS-933) |
+| Bad UA scoring | none | none | none | none | none | weaker (flat UA lists) |
+| Header vulns | none | none | none | none | none | equivalent (CRS-921 / 944) |
+| CT anomaly | none | none | different-scope (`validateByteRange`, `validateUtf8Encoding`) | none | none | equivalent (CRS-920) |
+| Upload filename/content | none | none | different-scope | none | none | equivalent (CRS-953 / 954) |
+| Polyglot upload | none | none | none | none | none | weaker |
+| Webshell path / ping | none | none | none | none | none | weaker |
+| Reverse shell / persistence / rootkit / lolbin | none | none | none | none | none | equivalent (CRS-932 unix tokens) |
+| Java deserialize | none | none | none | none | none | equivalent (CRS-944) |
+| C2 tunnel / coinminer | none | none | none | none | none | none |
+| HTTP smuggling (CL/TE + body) | none | none | weaker | none | none | weaker |
+| CRLF | none | none | weaker | none | none | equivalent (CRS-921) |
+| Auth / XMLRPC bursts | different-scope | different-scope | different-scope (Coraza has no rate logic) | none | none | different-scope (CRS-DoS plugin) |
+| Long path / header flood / range | none | none | equivalent (partial) | none | none | equivalent (CRS-920) |
+| Normalize / decoding | none | none | **stronger** (`validateUtf8Encoding`, `t:normalizePath`, `t:cmdLine`, `t:cssDecode`, `t:jsDecode`) | none | none | stronger |
+| SSRF proto | none | none | weaker | none | none | weaker (CRS-934) |
+| JS proto pollution | none | none | none | none | none | equivalent (CRS-934) |
+| XXE | none | none | equivalent | none | none | equivalent (CRS-934) |
+| Proxy header SQLi | none | none | none | none | none | none |
+
+**Net read:** the only two columns where any reference is meaningfully
+stronger across CFM's workloads are libinjection (D / E) for SQLi + XSS
+and Coraza's normalization operators (C) for encoding anomalies. The
+rest of CFM's surface is either at parity with CRS or covers categories
+no reference project covers at all (bad-UA scoring, webshell-name set,
+auth / XMLRPC burst logic, C2 tunnel / coinminer fingerprints).
+
+## Classification
+
+### Integrate (wrap)
+
+| Detector | Library | Reason |
+|----------|---------|--------|
+| `detect_sqli` | libinjection via D or E | Tokenizer covers bypasses (`UN/**/ION`, encoded comparators, stacked) that no substring list can keep up with. |
+| `detect_xss` | libinjection via D | HTML5 state machine covers attribute / SVG / data-URI / mutation XSS contexts. |
+
+### Borrow logic
+
+| Detector | Source | What to borrow |
+|----------|--------|----------------|
+| `detect_proxy_header_sqli` | libinjection | Replace bare-`'` heuristic with `libinjection.sqli(header_value)`. |
+| `detect_b64_injection` decoded buffer | libinjection | Run decoded base64 through `libinjection.sqli` / `libinjection.xss` instead of 30 substring tags. |
+| New `detect_bad_utf8` | Coraza `validateUtf8Encoding` | Port the ~40-line algorithm. No FFI, no dependency. Closes an encoding-bypass gap nothing in CFM flags today. |
+
+### Replace category
+
+*None.* No category in CFM is so weak that a wholesale replacement beats
+the current implementation plus targeted borrows.
+
+### Keep as-is
+
+All other categories are at parity or better than every reference
+project for the workloads CFM targets, **or** cover a category no
+reference project covers:
+
+> traversal · rce · php_wrappers · ctrl_chars · php_webshell_body ·
+> script_obfuscation · upload_obfuscation · upload_filename · upload_content
+> · polyglot_upload · xxe · crlf · http_smuggling · smuggling_cl ·
+> header_vulns · ct_anomaly · ssrf_proto · js_proto · ip_host ·
+> php_serialize · java_deserialize · webshell_path · webshell_ping ·
+> reverse_shell · persistence · rootkit · lolbin · c2_tunnel · coinminer ·
+> exploit_method · shellshock · bad_ua_scored · debug_toggles ·
+> cmd_params · cmd_payload · auth_burst · wp_login_probe ·
+> xmlrpc_probe · xmlrpc_post_burst · long_path_segment · header_flood ·
+> range_abuse
+
+## Recommended actions (impact-ordered)
+
+Every action ships in `logonly` first per the
+[rollout playbook](#rollout-playbook) above.
+
+### Action 1 — Integrate libinjection for SQLi
+
+**Impact: highest.** `detect_sqli` is 7 substrings against an attack
+surface (`UN/**/ION SE/**/LECT`, hex comparators, stacked queries,
+encoded `OR/**/0x31=0x31`, MySQL `#` comments) that no substring set
+can keep up with. libinjection's tokenizer reduces all of those to a
+canonical fingerprint.
+
+| Field | Value |
+|-------|-------|
+| **Target** | `p0pr0ck5/lua-resty-libinjection` (`libinjection.lua`) or `bungle/lua-resty-injection` (`resty.injection`) |
+| **API used** | `libinjection.sqli(buf)` → `(bool, fingerprint_string)` |
+| **Effort** | +20 LOC in `cfm_waf_detectors.lua`, +1 `require`, 0 LOC in engine |
+| **Runtime cost** | One FFI call per request on the same `scan_str()` buffer; ~1–3 µs on 1–4 KB inputs vs. ~7 `string.find`s today. Net cost ≈ unchanged. |
+| **Allocations** | Returns one Lua string fingerprint (~10 bytes). |
+| **Migration** | Add `CFG.rule_sqli_libinjection = "logonly"`; run both for one week; compare hit-rates per rule ID 301; drop the legacy branch once parity confirmed. |
+
+**Patch** — top of `cfm_waf_detectors.lua`, after `local _M = {}`:
+
+```lua
+-- libinjection FFI binding (p0pr0ck5 or bungle). Optional dependency:
+-- if the module isn't installed the WAF falls back to the substring path.
+local libinjection_ok, libinjection = pcall(require, "resty.libinjection")
+if not libinjection_ok then
+  libinjection_ok, libinjection = pcall(require, "libinjection")
+end
+if not libinjection_ok then
+  libinjection_ok, libinjection = pcall(require, "resty.injection")
+end
+if not libinjection_ok then libinjection = nil end
+```
+
+Replace `detect_sqli` at `cfm_waf_detectors.lua:486`:
+
+```lua
+function _M.detect_sqli(uri, args, _s)
+  local s = _s or scan_str(uri, args)
+  if s == "" then return false end
+
+  if libinjection then
+    local sqli_fn = libinjection.sqli or libinjection.sql
+    if sqli_fn then
+      local is_sqli, fp = sqli_fn(s)
+      if is_sqli then
+        if type(fp) == "string" and #fp > 0 then
+          _M._last_sqli_fp = string.sub(fp, 1, 32)
+        end
+        return true
+      end
+    end
+  end
+
+  -- Fallback / belt-and-braces: catches second-order injections that
+  -- arrive already-decoded inside JSON values and libinjection abstains on.
+  local sc = strip_sql_comments(s)
+  if has(sc, "union select")              then return true end
+  if has(sc, "union%20select")            then return true end
+  if has(sc, "information_schema")        then return true end
+  if has(sc, " or 1=1")                   then return true end
+  if has(sc, " or%201=1")                 then return true end
+  if has(sc, "' or '1'='1")               then return true end
+  if has(sc, "%27%20or%20%271%27%3d%271") then return true end
+
+  return false
+end
+```
+
+### Action 2 — Integrate libinjection for XSS
+
+**Impact: high.** `detect_xss` has 7 substrings; the HTML5 attack
+surface has hundreds of evasions (attribute states, SVG, data-URI,
+polyglots, mutation XSS).
+
+| Field | Value |
+|-------|-------|
+| **Target** | Same module as Action 1 |
+| **API used** | `libinjection.xss(buf)` → `bool`. Context variants (`xss_data_state`, `xss_noquote`, `xss_singlequote`, `xss_doublequote`, `xss_backquote`) available for later per-context tuning. |
+| **Effort** | +12 LOC |
+| **Runtime cost** | One FFI call, sharing Action 1's buffer. |
+| **Migration** | `CFG.rule_xss_libinjection = "logonly"` for one week. |
+
+**Patch** — replace `detect_xss` at `cfm_waf_detectors.lua:457`:
+
+```lua
+function _M.detect_xss(uri, args, _s)
+  local s = _s or scan_str(uri, args)
+  if s == "" then return false end
+
+  if libinjection then
+    local xss_fn = libinjection.xss
+    if xss_fn and xss_fn(s) then return true end
+  end
+
+  if has(s, "<script")        or has(s, "%3cscript")  then return true end
+  if has(s, "=javascript:")                            then return true end
+  if has(s, "=\"javascript:")                          then return true end
+  if has(s, "='javascript:")                           then return true end
+  if has(s, "onerror=")     and string.find(s, "%f[%w]onerror=",     1, false) then return true end
+  if has(s, "onload=")      and string.find(s, "%f[%w]onload=",      1, false) then return true end
+  if has(s, "onmouseover=") and string.find(s, "%f[%w]onmouseover=", 1, false) then return true end
+  if has(s, "onfocus=")     and string.find(s, "%f[%w]onfocus=",     1, false) then return true end
+
+  return false
+end
+```
+
+### Action 3 — Borrow libinjection for `detect_proxy_header_sqli`
+
+**Impact: medium.** The current `'`-in-XFF heuristic produces FPs on
+legit Cyrillic vendor names in proxy headers and misses real header
+SQLi that doesn't use a literal quote.
+
+| Field | Value |
+|-------|-------|
+| **Target** | Same `libinjection.sqli` call as Action 1 |
+| **Effort** | +6 LOC |
+| **Runtime cost** | ≤ 4 FFI calls per request (one per proxy header present), each on a < 128-byte string — sub-microsecond. |
+| **Migration** | New tag `PROXY_HDR_SQLI_LIBI:<hname>` for one week, then drop the bare-`'` fallback. |
+
+**Patch** — replace `detect_proxy_header_sqli` body at `cfm_waf_detectors.lua:1445`:
+
+```lua
+function _M.detect_proxy_header_sqli(headers)
+  headers = headers or {}
+  local suspects = {
+    ["x-forwarded-for"] = headers["x-forwarded-for"] or headers["X-Forwarded-For"],
+    ["x-real-ip"]       = headers["x-real-ip"]       or headers["X-Real-IP"],
+    ["client-ip"]       = headers["client-ip"]        or headers["Client-IP"],
+    ["x-client-ip"]     = headers["x-client-ip"]      or headers["X-Client-IP"],
+  }
+  local sqli_fn = libinjection and (libinjection.sqli or libinjection.sql)
+  for hname, hval in pairs(suspects) do
+    if hval ~= nil then
+      local s = header_string(hval)
+      if s ~= "" then
+        if sqli_fn then
+          if sqli_fn(s) then return "PROXY_HDR_SQLI:" .. hname end
+        else
+          if has(s, "'") then return "PROXY_HDR_SQLI:" .. hname end
+        end
+      end
+    end
+  end
+  return nil
+end
+```
+
+### Action 4 — Borrow libinjection for `detect_b64_injection`
+
+**Impact: medium.** Three existing tags (`B64_SQLI_UNION`,
+`B64_SQLI_INSERT`, `B64_SQLI_SCHEMA`) reimplement what libinjection
+does, while missing obfuscated-then-base64'd SQLi like `UN/**/ION`
+inside the decoded buffer.
+
+| Field | Value |
+|-------|-------|
+| **Target** | `libinjection.sqli` / `libinjection.xss` from Action 1 |
+| **Effort** | +8 LOC; retains all PHP-callable branches (libinjection has no PHP semantics). |
+| **Runtime cost** | Zero net — replaces three existing `has()` calls per decoded candidate. |
+| **Migration** | New tags `B64_SQLI_LIBI` / `B64_XSS_LIBI`; keep existing tags as belt-and-braces; one-week observation. |
+
+**Patch** — inside the loop at `cfm_waf_detectors.lua:409`, insert after
+`local d = string.lower(decoded)` and before the existing SQL/XSS
+substring branches:
+
+```lua
+        if libinjection then
+          local sqli_fn = libinjection.sqli or libinjection.sql
+          if sqli_fn and sqli_fn(d) then return "B64_SQLI_LIBI" end
+          if libinjection.xss and libinjection.xss(d) then return "B64_XSS_LIBI" end
+        end
+```
+
+Leave every other branch in place — they cover PHP-semantic markers
+libinjection cannot judge.
+
+### Action 5 — Port Coraza's `validateUtf8Encoding` as a new detector
+
+**Impact: medium-low** (additive coverage, not improving an existing
+detector). Malformed UTF-8 surviving `normalize()` (overlong sequences,
+lone surrogates, truncated multibyte starters) is a classic encoding-
+bypass primitive that no CFM rule flags today.
+
+| Field | Value |
+|-------|-------|
+| **Target** | `corazawaf/coraza` → `internal/operators/validate_utf8_encoding.go` |
+| **Effort** | New detector ≈ 35 LOC; new rule ID `rule_bad_utf8 = 611`; 1 callsite in engine. No FFI. |
+| **Runtime cost** | One byte-walk over the normalized scan buffer — cheaper than `string.lower`. Allocates nothing. |
+| **Migration** | `logonly` for ≥ 2 weeks (legacy ISO-8859-1 form encodings need to be observed first). |
+
+**Patch — new function** in `cfm_waf_detectors.lua`:
+
+```lua
+-- Port of Coraza's validateUtf8Encoding operator (internal/operators/
+-- validate_utf8_encoding.go). Returns tag on first invalid sequence,
+-- nil if the buffer is clean UTF-8 (or pure ASCII).
+--
+-- Flags:
+--   * Overlong 2/3/4-byte encoding of a codepoint that fits in fewer bytes
+--   * Truncated multibyte sequence (high bit set, missing continuation)
+--   * Lone or out-of-order continuation byte
+--   * Codepoint > U+10FFFF or in the U+D800–U+DFFF surrogate range
+function _M.detect_bad_utf8(args, body, _ns)
+  local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  local n = #s
+  local i = 1
+  while i <= n do
+    local b = s:byte(i)
+    if b < 0x80 then
+      i = i + 1
+    else
+      local need, min_cp
+      if     b >= 0xF0 and b <= 0xF4 then need, min_cp = 3, 0x10000
+      elseif b >= 0xE0 and b <= 0xEF then need, min_cp = 2, 0x800
+      elseif b >= 0xC2 and b <= 0xDF then need, min_cp = 1, 0x80
+      else
+        return "UTF8_BAD_LEAD"
+      end
+      if i + need > n then return "UTF8_TRUNC" end
+      local cp
+      if need == 1 then
+        cp = (b - 0xC0) * 64
+      elseif need == 2 then
+        cp = (b - 0xE0) * 4096
+      else
+        cp = (b - 0xF0) * 262144
+      end
+      for k = 1, need do
+        local c = s:byte(i + k)
+        if not c or c < 0x80 or c > 0xBF then return "UTF8_BAD_CONT" end
+        cp = cp + (c - 0x80) * (64 ^ (need - k))
+      end
+      if cp < min_cp then return "UTF8_OVERLONG" end
+      if cp >= 0xD800 and cp <= 0xDFFF then return "UTF8_SURROGATE" end
+      if cp > 0x10FFFF then return "UTF8_OUT_OF_RANGE" end
+      i = i + need + 1
+    end
+  end
+  return nil
+end
+```
+
+**Engine wire-up** (`cfm_waf.lua`): add `rule_bad_utf8 = "logonly"` to
+CFG, `rule_bad_utf8 = 611` to RULE_IDS, and insert after the existing
+ctrl-chars block (~ line 695):
+
+```lua
+  -- ── 12a) Bad UTF-8 encoding (Coraza validateUtf8Encoding port) ───────────
+  do
+    local mode = rule_mode(CFG.rule_bad_utf8, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_bad_utf8(args, body, get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BAD_UTF8:" .. tag, ttl, mode, RULE_IDS.rule_bad_utf8) then goto done end
+      end
+    end
+  end
+```
+
+## Audit rollout checklist
+
+1. [ ] **Action 1 — SQLi:** ship behind `rule_sqli_libinjection = "logonly"`. Compare hit-rates against rule 301 for ≥ 7 days. Promote and drop fallback once parity confirmed.
+2. [ ] **Action 2 — XSS:** ship behind `rule_xss_libinjection = "logonly"`. Compare against rule 302 for ≥ 7 days. Promote.
+3. [ ] **Action 3 — Proxy header SQLi:** new tag `PROXY_HDR_SQLI_LIBI:*`. Compare against `PROXY_HDR_SQLI:*` for ≥ 7 days. Drop fallback.
+4. [ ] **Action 4 — Base64 decoded buffer:** new tags `B64_SQLI_LIBI` / `B64_XSS_LIBI`. Keep existing tags indefinitely; libinjection augments them, doesn't replace them.
+5. [ ] **Action 5 — Bad UTF-8:** new rule 611, `logonly` for ≥ 14 days. Promotion requires `cfm webtop waf hit-rates --hours 336` `ok_to_promote`.
+
+## Audit — out of scope
+
+- **Coraza as a runtime layer:** Go process + thousands of CRS regexes, large surface overlap with existing CFM detectors. Cost > benefit for CFM's workloads.
+- **CRS rule import:** every category where CRS is "stronger" in the matrix is one where CFM already has a workload-tuned equivalent. Importing CRS rules would add FP load without closing a real gap.
+- **`wasilibs/go-libinjection`:** WASM via wazero implies a Go boundary; CFM has no Go in the request path today.
+- **Replacing curated lists** (webshell names, C2 hostnames, coinminer pools, reverse-shell one-liners) with CRS PM lists: CFM's lists are smaller, signal-confirmed, and FP-tested against actual mars / virgo / orion traffic samples.
