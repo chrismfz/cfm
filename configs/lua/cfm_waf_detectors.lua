@@ -2781,6 +2781,16 @@ function _M.detect_php_split_string_canary(body, _headers)
     return nil
   end
 
+  -- Every captured canary in the source workload ends with `;exit;` (or a
+  -- `die(...)`). Requiring an exit/die keyword as a *whole word* (frontier
+  -- pattern, so `died` / `exiting` / `exited` don't satisfy it) suppresses
+  -- the legit "code snippet plugin save" FP shape:
+  --   <?php print "Hello, " . "World";
+  -- which has the print+concat signature but no termination call.
+  if not (ls:find("%f[%w_]exit%f[^%w_]") or ls:find("%f[%w_]die%f[^%w_]")) then
+    return nil
+  end
+
   if s:find('print%s+%b""%s*%.%s*%b""')       then return "PRINT_CONCAT" end
   if s:find("print%s+%b''%s*%.%s*%b''")       then return "PRINT_CONCAT" end
   if s:find('echo%s+%b""%s*%.%s*%b""')        then return "ECHO_CONCAT"  end

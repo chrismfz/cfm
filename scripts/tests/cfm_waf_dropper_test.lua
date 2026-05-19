@@ -103,6 +103,25 @@ do
   check(hit ~= true, "421 negative — plain form post does not fire")
 end
 
+-- Negative: short legit code-snippet save (FP shape) — print+concat but no
+-- exit/die terminator. This is the "Code Snippets" / "Insert PHP Snippet"
+-- wp-admin POST shape that has no control flow but is not a canary either.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_split_string_canary", "challenge")
+  local hit = waf.check(ctx([[<?php print "Hello, " . "World!";]]))
+  check(hit ~= true, "421 negative — print+concat without exit/die does not fire")
+end
+
+-- Negative: `die` and `exit` as substrings of other identifiers must not
+-- satisfy the exit/die requirement. `died` / `exiting` should not match.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_split_string_canary", "challenge")
+  local hit = waf.check(ctx([[<?php print "process died at " . $time;]]))
+  check(hit ~= true, "421 negative — 'died' substring does not satisfy exit/die")
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 422 — wget+curl fallback dropper
 -- ─────────────────────────────────────────────────────────────────────────────
