@@ -84,6 +84,10 @@ var wafRuleIDs = []WAFRule{
 	{ID: 423, Name: "rule_php_dropper_markers", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 424, Name: "rule_php_filesize_recon", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 425, Name: "rule_php_touch_antiforensic", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
+	{ID: 430, Name: "rule_htaccess_poisoning", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
+	{ID: 431, Name: "rule_php_char_pool_obfuscation", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
+	{ID: 432, Name: "rule_php_polyglot_full_body", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
+	{ID: 433, Name: "rule_php_eval_loader_b64", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 
 	// 5xx auth abuse
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},

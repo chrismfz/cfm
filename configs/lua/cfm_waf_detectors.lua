@@ -2888,5 +2888,183 @@ function _M.detect_php_touch_antiforensic(body, _headers)
   return "FORGED_MTIME_TOUCH"
 end
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Backdoor / obfuscation family (rules 430-437)
+--
+-- Defensive coverage against the modern PHP-backdoor surface: config-file
+-- poisoning of upload sandboxes, obfuscator output where function names are
+-- never substrings of the source, deep polyglots (magic-byte prefix + PHP
+-- code further in than rule 412's 64-byte window), and generic "decode then
+-- eval" loader shapes.
+--
+-- Reason family WAF_BACKDOOR (added to _M.WAF_HIGH_RISK_REASONS in cfm_waf
+-- so post-clearance escalation behaves correctly when promoted past
+-- logonly). Each rule emits its own tag for forensic granularity but shares
+-- the family for hit-rate dashboarding and per-vhost exclusion grouping.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- 430 — `.htaccess` / `.user.ini` poisoning.
+-- Uploaded webserver-config files that turn benign uploads into PHP
+-- executors. The canonical shape after a successful file-upload bypass:
+--   AddType application/x-httpd-php .jpg .gif .png
+--   SetHandler application/x-httpd-php
+--   php_value auto_prepend_file /tmp/shell.php
+-- Legit plugins write rewrite / cache headers, never `x-httpd-php` and
+-- never `auto_prepend_file` — that's enough to anchor on with near-zero FP.
+function _M.detect_htaccess_poisoning(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = lower(cap(body, cap_len))
+
+  -- Handler-flip primitives — these are the high-confidence kill shots.
+  if s:find("addtype%s+[%w/.%-_]*x%-httpd%-php") then return "HTACCESS_ADDTYPE_PHP"   end
+  if s:find("sethandler%s+[%w/.%-_]*x%-httpd%-php") then return "HTACCESS_SETHANDLER_PHP" end
+  if s:find("addhandler%s+[%w/.%-_]*x%-httpd%-php") then return "HTACCESS_ADDHANDLER_PHP" end
+
+  -- auto_prepend_file / auto_append_file via php_value or .user.ini —
+  -- malicious upload pattern. Real php.ini config never travels in a
+  -- request body.
+  if s:find("php_value%s+auto_prepend_file")       then return "HTACCESS_AUTO_PREPEND"  end
+  if s:find("php_value%s+auto_append_file")        then return "HTACCESS_AUTO_APPEND"   end
+  if s:find("php_admin_value%s+auto_prepend_file") then return "HTACCESS_AUTO_PREPEND"  end
+  if s:find("php_admin_value%s+auto_append_file")  then return "HTACCESS_AUTO_APPEND"   end
+
+  -- .user.ini shape — same primitives without the Apache wrappers.
+  -- Gated on an `=` to distinguish from the same tokens appearing in prose.
+  if s:find("auto_prepend_file%s*=%s*[%w/.%-_]") then return "USER_INI_AUTO_PREPEND" end
+  if s:find("auto_append_file%s*=%s*[%w/.%-_]")  then return "USER_INI_AUTO_APPEND"  end
+
+  -- Forced ExecCGI in a request body is server-admin territory only.
+  if s:find("options%s+[+%-]?execcgi") then return "HTACCESS_EXEC_CGI" end
+
+  return nil
+end
+
+-- 431 — character-pool function-name builder.
+-- The signature obfuscator pattern observed in 2026-05-19 wp-themes/bridge
+-- compromise sample: a variable holds a random alphanumeric pool, then
+-- function names ("gzinflate", "base64_decode", "eval") are assembled by
+-- character-index extraction from that pool:
+--   $t = "8Njlp26zFZ1PYvUsn…";
+--   $f = $t[61].$t[7].$t[34]…;   // ← three+ indexed accesses, concat'd
+-- The grammar `$VAR[N].$VAR[N].$VAR[N]` (same variable, 3+ accesses, dot-
+-- concatenated) appears in no legitimate PHP idiom — loops are the legit
+-- way to read sequential array elements. This catches the entire
+-- FOPO / PHP-Obfuscator / Code-Eater class regardless of pool content.
+function _M.detect_php_char_pool_obfuscation(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = cap(body, cap_len)
+
+  -- Lua's %1 backreference enforces same-variable across all three accesses.
+  -- %s* around the dots lets the obfuscator pretty-print without bypassing.
+  -- [%w_] (not %w) because PHP var names contain underscores — `%w` in Lua
+  -- patterns is `[A-Za-z0-9]` only, so the captured sample's `$t_Ohw` would
+  -- otherwise truncate at the underscore and the backreference would fail.
+  if s:find("%$([%w_]+)%[%d+%]%s*%.%s*%$%1%[%d+%]%s*%.%s*%$%1%[%d+%]") then
+    return "CHAR_POOL_BUILDER"
+  end
+  return nil
+end
+
+-- 432 — full-body polyglot (image/PDF/ZIP magic + PHP opener anywhere).
+-- Rule 412 covers the first 64 bytes of multipart parts; this rule covers
+-- the case where `<?php` sits further in than 64 bytes after a magic-byte
+-- prefix. The 2026-05-19 sample had `%PDF-\n%PDF-\n<?php` (opener at byte
+-- 13 — within 412's window) but the class generalises: a JPEG / PNG / GIF
+-- / PDF / ZIP that contains `<?php` anywhere in body is malicious. Legit
+-- binary files never contain `<?php`.
+function _M.detect_php_polyglot_full_body(body, headers)
+  if not body or body == "" or #body < 4 then return nil end
+
+  -- Magic byte prefix check — first 16 bytes only, no whitespace tolerance.
+  local head = body:sub(1, 16)
+  local magic_tag
+  if     head:sub(1, 5) == "%PDF-"                 then magic_tag = "PDF"
+  elseif head:sub(1, 3) == "\xff\xd8\xff"          then magic_tag = "JPEG"
+  elseif head:sub(1, 8) == "\x89PNG\r\n\x1a\n"     then magic_tag = "PNG"
+  elseif head:sub(1, 6) == "GIF87a"                then magic_tag = "GIF"
+  elseif head:sub(1, 6) == "GIF89a"                then magic_tag = "GIF"
+  elseif head:sub(1, 4) == "PK\x03\x04"            then magic_tag = "ZIP"
+  elseif head:sub(1, 2) == "BM"                    then magic_tag = "BMP"
+  elseif head:sub(1, 4) == "RIFF"                  then magic_tag = "RIFF"
+  end
+  if not magic_tag then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = cap(body, cap_len)
+
+  if s:find("<%?php") or s:find("<%?=")
+     or s:find("<jsp:") or s:find("<%%@%s*[Pp][Aa][Gg][Ee]")
+     or s:find("<script%s+language%s*=%s*['\"]?php") then
+    return "POLYGLOT_DEEP_" .. magic_tag
+  end
+  return nil
+end
+
+-- 433 — variable-fed eval-loader with a large base64 literal.
+-- The loader-shape fingerprint shared by every PHP obfuscator output:
+--   eval($a($b("BASE64_PAYLOAD…")));
+-- where $a and $b are variables (the decoder names are hidden by some
+-- mechanism — char-pool, concat, string-reverse, gzinflate-of-gzinflate).
+-- We don't peer into the payload, just recognise the loader: an `eval`/
+-- `assert`/`call_user_func` whose argument starts with `$<var>(`, plus a
+-- quoted base64-shaped string of ≥ 200 chars in the same body.
+function _M.detect_php_eval_loader_b64(body, _headers)
+  if not body or body == "" then return nil end
+
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = cap(body, cap_len)
+  local ls = lower(s)
+
+  -- Variable-fed terminal call: eval(/assert(/call_user_func( followed by
+  -- $varname( within ~32 characters. The %s* allows whitespace between the
+  -- opener and the variable call.
+  local has_var_eval =
+       ls:find("eval%s*%(%s*@?%$%w+%s*%(")
+    or ls:find("assert%s*%(%s*@?%$%w+%s*%(")
+    or ls:find("call_user_func%s*%(%s*@?%$%w+")
+    or ls:find("call_user_func_array%s*%(%s*@?%$%w+")
+  if not has_var_eval then return nil end
+
+  -- Find a quoted base64-shaped literal ≥ 200 chars. Iterate balanced
+  -- quotes and length-check the inner content.
+  local min_len = 200
+  local function looks_b64(inner)
+    if #inner < min_len then return false end
+    -- Allow newlines / whitespace inside; require ≥ 90% base64 alphabet
+    -- to tolerate the occasional decorator char.
+    local b64_chars = 0
+    local total = 0
+    for i = 1, #inner do
+      local c = inner:byte(i)
+      total = total + 1
+      if (c >= 0x30 and c <= 0x39)   -- 0-9
+         or (c >= 0x41 and c <= 0x5a) -- A-Z
+         or (c >= 0x61 and c <= 0x7a) -- a-z
+         or c == 0x2b or c == 0x2f or c == 0x3d then -- + / =
+        b64_chars = b64_chars + 1
+      end
+    end
+    return b64_chars * 10 >= total * 9
+  end
+
+  -- Scan for both " and '-quoted literals.
+  for blob in s:gmatch('%b""') do
+    if #blob >= min_len + 2 and looks_b64(blob:sub(2, -2)) then
+      return "EVAL_LOADER_B64"
+    end
+  end
+  for blob in s:gmatch("%b''") do
+    if #blob >= min_len + 2 and looks_b64(blob:sub(2, -2)) then
+      return "EVAL_LOADER_B64"
+    end
+  end
+
+  return nil
+end
+
 
 return _M

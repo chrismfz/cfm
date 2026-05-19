@@ -223,6 +223,10 @@ Current assignments:
                                        423  rule_php_dropper_markers
                                        424  rule_php_filesize_recon
                                        425  rule_php_touch_antiforensic
+                                       430  rule_htaccess_poisoning
+                                       431  rule_php_char_pool_obfuscation
+                                       432  rule_php_polyglot_full_body
+                                       433  rule_php_eval_loader_b64
 
 5xx — Auth abuse
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
@@ -255,6 +259,93 @@ Current assignments:
 - **Public Lua API** — `_M.get_rule_ids()` returns a copy of the `RULE_IDS` table; `_M.rule_id_for("rule_traversal")` looks up a single ID.
 
 The `rule_id` field returned by the bridge's `/nginx/decision` endpoint is a **separate** namespace (decision-engine traffic-rule IDs, not WAF rule IDs). The WAF path uses `waf_rule_id` everywhere to avoid collision.
+
+---
+
+## Backdoor / obfuscation family (430-437)
+
+Reason family **`WAF_BACKDOOR`** (added to `_M.WAF_HIGH_RISK_REASONS` so post-clearance challenges still escalate to block when these rules are promoted past `logonly`). Source workload for the initial set: a 2026-05-19 captured PHP webshell deployed as `wp-content/themes/bridge/includes/radio.php` — char-pool-obfuscated PDF-polyglot loader.
+
+The rules are split deliberately so each catches a different *class* of evasion. The captured radio.php sample trips 431 + 432 + 433 together (severity aggregation picks the strongest action; all three rule IDs appear in `hits`).
+
+### Rule 430 — `rule_htaccess_poisoning`
+
+**Catches:** `.htaccess` / `.user.ini` uploads that turn benign files into PHP executors.
+
+**Why it matters:** the standard escape from a successful "no .php upload" filter is to upload a `.htaccess` (or `.user.ini`) that flips the handler for `.jpg`/`.gif`/`.png` to PHP, then upload a `shell.jpg` that's now executable. CFM had zero coverage for this before.
+
+**How:** body substring scan for handler-flip primitives anchored on `x-httpd-php` to avoid colliding with legit AddType for fonts / media. Also flags `auto_prepend_file` / `auto_append_file` (Apache `php_value` or `.user.ini` `key = value` forms) and `Options +ExecCGI`.
+
+**Tags:** `HTACCESS_ADDTYPE_PHP`, `HTACCESS_SETHANDLER_PHP`, `HTACCESS_ADDHANDLER_PHP`, `HTACCESS_AUTO_PREPEND`, `HTACCESS_AUTO_APPEND`, `USER_INI_AUTO_PREPEND`, `USER_INI_AUTO_APPEND`, `HTACCESS_EXEC_CGI`.
+
+**FP notes:** legitimate plugin `.htaccess` content (`RewriteRule`, `ExpiresByType`, `AddType image/svg+xml`) does not contain `x-httpd-php` or `auto_prepend_file` — anchor terms are malware-only in upload bodies.
+
+### Rule 431 — `rule_php_char_pool_obfuscation`
+
+**Catches:** PHP obfuscator output where function names are assembled by indexing into a random-character pool, e.g.
+
+```php
+$t_Ohw = "8Njlp26zFZ1PYvUsnckDOX5JdhCwMSRafLi0bqeQo4WxtBrTAu3IEm7VHG_K9gy";
+$IDC3B = $t_Ohw[61].$t_Ohw[7].$t_Ohw[34]…;  // builds "gzinflate"
+```
+
+**Why it matters:** every static substring detector — ours, CRS, libinjection — looks for literal `gzinflate` / `base64_decode` / `eval` tokens. Char-pool extraction defeats them by construction: the function name never appears as a substring of the source. This catches the entire FOPO / PHP-Obfuscator / Code-Eater output class.
+
+**How:** Lua pattern with a backreference (`%1`) requiring 3+ indexed accesses against the *same* variable, dot-concatenated:
+
+```
+%$([%w_]+)%[%d+%]%s*%.%s*%$%1%[%d+%]%s*%.%s*%$%1%[%d+%]
+```
+
+**Tag:** `CHAR_POOL_BUILDER`.
+
+**FP notes:** legitimate PHP reads sequential array elements with a loop or `implode`, never with three unrolled `$v[N].$v[N].$v[N]` accesses. The pattern grammar appears in no legit idiom.
+
+### Rule 432 — `rule_php_polyglot_full_body`
+
+**Catches:** uploaded files whose first 16 bytes are image/PDF/ZIP magic but which contain `<?php` (or `<?=`, `<jsp:`, `<% page`, `<script language="php"`) **anywhere** in body — not just within rule 412's first-64-byte window.
+
+**Why it matters:** rule 412 covers the leading-64-bytes polyglot case (which still fires on the captured sample because its `<?php` opener sits at byte 13). The general class is broader: an attacker can pad the magic prefix with arbitrary bytes and slip the PHP opener anywhere — at byte 500, byte 5000. Legit binary files never contain `<?php` at any offset.
+
+**How:**
+1. First 16 bytes match one of: `%PDF-`, `\xff\xd8\xff` (JPEG), `\x89PNG\r\n\x1a\n` (PNG), `GIF87a` / `GIF89a`, `PK\x03\x04` (ZIP/JAR/DOCX), `BM` (BMP), `RIFF` (WebP/WAV).
+2. Body within scan budget contains a PHP/JSP/script opener.
+
+**Tags:** `POLYGLOT_DEEP_PDF`, `POLYGLOT_DEEP_JPEG`, `POLYGLOT_DEEP_PNG`, `POLYGLOT_DEEP_GIF`, `POLYGLOT_DEEP_ZIP`, `POLYGLOT_DEEP_BMP`, `POLYGLOT_DEEP_RIFF`.
+
+**FP notes:** image / PDF / ZIP files do not legitimately contain `<?php` tokens — the magic-byte gate plus the PHP-opener gate together are malware-only.
+
+### Rule 433 — `rule_php_eval_loader_b64`
+
+**Catches:** the obfuscator-output loader shape, *independent* of which obfuscator built the function-name strings:
+
+```php
+eval($a($b("BASE64_PAYLOAD…")));    // variable-fed call chain + large base64 literal
+assert($d("LONG_BASE64_STRING"));
+call_user_func($f, $payload);
+```
+
+**Why it matters:** we don't peer into the encoded payload (could be gzdeflate-of-gzdeflate, str_rot13, XOR, anything). We recognise the *transport*: a terminal `eval` / `assert` / `call_user_func` / `call_user_func_array` whose first argument is a variable-fed call (`$<name>(`), with a base64-shaped string ≥ 200 chars in the same body. Resilient across obfuscator versions — works whether the decoders are built by char-pool, string-concat, string-reverse, or any other mechanism.
+
+**How:**
+1. Body contains `eval(` / `assert(` / `call_user_func(` / `call_user_func_array(` followed (with optional `@` and whitespace) by `$<varname>(` — the variable-fed shape.
+2. Body contains a quoted literal whose inner content is ≥ 200 chars and ≥ 90% base64-alphabet (`A-Za-z0-9+/=`).
+
+**Tag:** `EVAL_LOADER_B64`.
+
+**FP notes:** `eval(base64_decode("..."))` with a *literal* function name does not match — this rule targets the variable-fed shape that is the hallmark of obfuscator output. A simple `eval(base64_decode(...))` without variable indirection is the older, less-evasive form already caught by other rules.
+
+### How they compose
+
+| Sample shape | Fires |
+|---|---|
+| `.htaccess` upload with `AddType … x-httpd-php` | 430 |
+| Obfuscator output with `$pool[N].$pool[N].$pool[N]…` | 431 |
+| Image / PDF upload with `<?php` past byte 64 | 432 |
+| Eval loader: `eval($a($b("LONG_B64")));` | 433 |
+| Captured radio.php (PDF magic + char-pool + eval-loader) | **431 + 432 + 433** simultaneously |
+
+All four default to `logonly`. Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
 
 ---
 
