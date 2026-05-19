@@ -522,6 +522,14 @@ allow_comm = something
 // pipeline; the matching BPF-side trusted-comm allowlist
 // (cfm_comm_is_trusted_auth_helper) gates the enforce path.
 func TestEventFilter_Defaults_FS005_crontab(t *testing.T) {
+	// Stub the at-presence hook on so the test passes both on
+	// hosts that ship at(1) and on minimal CI sandboxes that
+	// don't. The at-gating behaviour itself is covered by
+	// TestPresenceGatedAllowComm_AtPresent below.
+	origHasAt := hostHasAtBinary
+	hostHasAtBinary = func() bool { return true }
+	t.Cleanup(func() { hostHasAtBinary = origHasAt })
+
 	f := BuildEventFilter(DefaultConf())
 	for _, comm := range []string{"crontab", "(crontab)", "at", "(at)"} {
 		ev := Event{PolicyID: PolicySensitiveWrite, Comm: comm, Filename: "webmategr"}
@@ -597,5 +605,60 @@ allow_comm = my-runtime
 	}
 	if indexOf(eff, "my-runtime") < 0 {
 		t.Error("operator-supplied custom entry missing from effective list")
+	}
+}
+
+// TestAllowPathFor_MergesDefaults_OnParsedConf is the AllowPathFor
+// half of the upgrade-gap regression guard. Same shape as
+// TestAllowCommFor_MergesDefaults_OnParsedConf — a parsed Conf
+// with no [allow] section must still surface DefaultGlobalAllowPath
+// entries via the merge-at-lookup, so upgraded hosts pick up new
+// path-prefix defaults transparently.
+func TestAllowPathFor_MergesDefaults_OnParsedConf(t *testing.T) {
+	c, err := ParseConf(strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("ParseConf: %v", err)
+	}
+	if len(c.GlobalAllowPath) != 0 {
+		t.Fatalf("parsed empty conf should have empty GlobalAllowPath; got %v", c.GlobalAllowPath)
+	}
+	if len(DefaultGlobalAllowPath) == 0 {
+		t.Skip("DefaultGlobalAllowPath is empty; merge contract is vacuous")
+	}
+	// Pick any policy that consumes the path allowlist — CRED-002 is
+	// the canonical one (Python / Perl daemon allowlist by script
+	// prefix).
+	eff := c.AllowPathFor(PolicyCredEscal)
+	want := DefaultGlobalAllowPath[0]
+	if indexOf(eff, want) < 0 {
+		t.Errorf("AllowPathFor merge gap: missing default %q in effective list", want)
+	}
+}
+
+// TestPresenceGatedAllowComm_AtPresent asserts that AllowCommFor
+// includes `at` / `(at)` when the host has the at(1) binary,
+// and excludes them when it doesn't. Stubs the hostHasAtBinary
+// hook so the test runs deterministically regardless of whether
+// the build host has at(1) installed.
+func TestPresenceGatedAllowComm_AtPresent(t *testing.T) {
+	origHasAt := hostHasAtBinary
+	t.Cleanup(func() { hostHasAtBinary = origHasAt })
+
+	c := DefaultConf()
+
+	hostHasAtBinary = func() bool { return true }
+	eff := c.AllowCommFor(PolicySensitiveWrite)
+	if indexOf(eff, "at") < 0 || indexOf(eff, "(at)") < 0 {
+		t.Errorf("with at(1) present: AllowCommFor missing at / (at) (got %v)", eff)
+	}
+
+	hostHasAtBinary = func() bool { return false }
+	eff = c.AllowCommFor(PolicySensitiveWrite)
+	if indexOf(eff, "at") >= 0 || indexOf(eff, "(at)") >= 0 {
+		t.Errorf("with at(1) absent: AllowCommFor should not include at / (at) (got %v)", eff)
+	}
+	// crontab is NOT presence-gated — should be present in both cases.
+	if indexOf(eff, "crontab") < 0 {
+		t.Errorf("crontab missing when at(1) absent (should not be presence-gated): got %v", eff)
 	}
 }

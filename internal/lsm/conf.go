@@ -632,12 +632,13 @@ var DefaultGlobalAllowComm = []string{
 	"crontab",
 	"(crontab)",
 
-	// /usr/bin/at — sibling to crontab for the at-job persistence
-	// path. Same setuid-root pattern, writes a single job file
-	// under /var/spool/at/. Less common on panel hosts than
-	// crontab but in the same FS-005 false-positive class.
-	"at",
-	"(at)",
+	// `at` and `(at)` are NOT in the static default list — they're
+	// added at AllowCommFor lookup time only when /usr/bin/at (or
+	// the Debian /usr/sbin/at variant) is actually installed. See
+	// presenceGatedAllowComm() below for the rationale: `at` is a
+	// 2-char comm, the easiest possible prctl(PR_SET_NAME) spoof
+	// target across the entire allow_comm surface, so on hosts that
+	// don't ship the at(1) package we leave that surface closed.
 
 	// CloudLinux CageFS — cagefsctl is a Python script run by root
 	// during account lifecycle ops; its task comm is "cagefsctl" but
@@ -789,8 +790,18 @@ func (c *Conf) PersistencePathsFor(id PolicyID) []string {
 // AllowExeFor returns the merged allow_exe paths for id — the
 // compile-in default global list (DefaultGlobalAllowExe) plus the
 // operator's [allow] block plus the per-policy section. Returns
-// nil when id does not consume an exe allowlist. Safe on a nil
-// receiver.
+// nil when id does not consume an exe allowlist.
+//
+// Nil-receiver contract: a nil *Conf returns the compile-in
+// defaults (still filtered through allowExePolicy(id)). This is
+// a behaviour change from pre-merge-at-lookup, where a nil
+// receiver short-circuited to nil — kept intentionally so
+// callers in early-startup paths that don't yet have a parsed
+// Conf still see the baseline allowlist instead of an empty
+// one. BuildEventFilter explicitly handles nil before reaching
+// here, so the new semantics are not currently exercised in
+// production but matter for future callers (e.g. a `cfm lsm
+// allowlist --effective` dump command).
 //
 // Merging defaults at lookup time (rather than at parse time)
 // closes the upgrade gap that bit PR #944 in the field: an
@@ -801,6 +812,19 @@ func (c *Conf) PersistencePathsFor(id PolicyID) []string {
 // With the merge here, a fresh daemon start on an upgraded build
 // picks up new defaults transparently; the operator file retains
 // its role as "what's been customised on top of the defaults".
+//
+// Upgrade asymmetry — removals do not propagate. The merge only
+// adds. If a future build REMOVES an entry from
+// DefaultGlobalAllowExe (e.g. because it turned out to be too
+// broad), an upgraded host whose existing lsm.conf has that
+// entry rendered into the [allow] block will keep the entry in
+// the effective list, because ParseConf re-reads it from the
+// file. Closing this side of the gap requires either a
+// "deprecated_default" list the merge filters out, or a
+// `[allow] disable_default = X` syntax. Not implemented today;
+// the current trade-off matches the existing static
+// WebUserNames carve-out (apache / nginx / nobody / etc., which
+// also can't be excluded via lsm.conf).
 //
 // Order in the returned slice: defaults first, then operator
 // global, then per-policy. dedupePreservingOrder collapses
@@ -836,6 +860,12 @@ func (c *Conf) AllowCommFor(id PolicyID) []string {
 	}
 	var out []string
 	out = append(out, DefaultGlobalAllowComm...)
+	// Presence-gated extras (today: `at` only when /usr/bin/at is
+	// installed). See presenceGatedAllowComm() for the threat-model
+	// rationale — short comms like `at` are easy spoof targets so
+	// we keep their allow_comm surface closed on hosts that don't
+	// actually run the underlying binary.
+	out = append(out, presenceGatedAllowComm()...)
 	if c != nil {
 		if len(c.GlobalAllowComm) > 0 {
 			out = append(out, c.GlobalAllowComm...)
@@ -1489,6 +1519,56 @@ func parseAllowComm(s string) (string, error) {
 		return "", fmt.Errorf("allow_comm %q exceeds 15 chars (kernel truncates comm to TASK_COMM_LEN-1)", v)
 	}
 	return v, nil
+}
+
+// atBinaryPaths is the set of paths where /usr/bin/at lives across
+// supported distros. Probed once at first AllowCommFor call (see
+// presenceGatedAllowComm) to decide whether to allowlist the `at`
+// comm; cached via the var below so the 17-policy BuildEventFilter
+// sweep doesn't stat() repeatedly.
+var atBinaryPaths = []string{"/usr/bin/at", "/usr/sbin/at", "/bin/at"}
+
+// hostHasAtBinary is the package-level hook tests stub to control
+// the at-presence outcome deterministically. Production uses
+// statAnyExists; tests override the var to force true/false without
+// touching the host filesystem. Reset to statAnyExists in test
+// teardown if needed.
+var hostHasAtBinary = func() bool { return statAnyExists(atBinaryPaths) }
+
+// statAnyExists reports whether any of paths can be stat'd. Used to
+// gate presence-conditional allowlist entries without coupling the
+// caller to os.Stat directly (so tests can override the parent hook).
+func statAnyExists(paths []string) bool {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// presenceGatedAllowComm returns the runtime-conditional extras
+// to merge into AllowCommFor's effective list. Today: `at` /
+// `(at)` only when the at(1) binary is actually installed on the
+// host.
+//
+// Rationale: `at` is a 2-character comm — the easiest possible
+// prctl(PR_SET_NAME) spoof target on the entire allow_comm
+// surface. On hosts that ship and use at(1), the FP suppression
+// is worth the comm-spoof attack-surface cost (same trade-off as
+// every other allowlist entry). On hosts where at(1) isn't
+// installed at all, there's no legitimate `at` comm to suppress,
+// so allowlisting it is pure attack surface — we omit it.
+//
+// Symmetric gating for `crontab` was considered and rejected:
+// /usr/bin/crontab is on essentially every Linux host that runs
+// cfm-lsm, and the 7-character comm is enough harder to spoof
+// than `at` that the asymmetry is justified.
+func presenceGatedAllowComm() []string {
+	if hostHasAtBinary() {
+		return []string{"at", "(at)"}
+	}
+	return nil
 }
 
 // dedupePreservingOrder returns a copy of in with later duplicates
