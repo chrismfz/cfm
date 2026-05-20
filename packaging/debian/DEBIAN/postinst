@@ -24,8 +24,11 @@ if ! getent passwd cfm >/dev/null 2>&1; then
         cfm
 fi
 
-# ensure config dir
-[ -d /etc/cfm ] || mkdir -p /etc/cfm
+# ensure config dir, force 0700 on both new and upgrade installs.
+# /etc/cfm holds bypass lists, kernsec.conf, lsm.conf and other root-only
+# config; anything needing non-root read access lives in /var/lib/cfm/.
+mkdir -p /etc/cfm
+chmod 0700 /etc/cfm
 
 
 # kernsec.conf may reveal host hardening exceptions. Tighten only by

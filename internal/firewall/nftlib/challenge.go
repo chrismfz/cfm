@@ -794,22 +794,28 @@ func (b *Backend) installEdgeDNATRules(t *nftables.Table, ch *nftables.Chain, wa
 	//    accept is edge-owned (cf. dnatRuleInNamespace at line ~156
 	//    which only reports "edge" for it). Bypass rules carry the
 	//    cfm_dnat_bypass UserData prefix and are also edge-owned.
+	//
+	//    DelRule errors are discarded: per github.com/google/nftables the
+	//    only failure mode here is r.Handle == 0, which can't happen
+	//    because every r came from GetRules which populates Handle. Real
+	//    netlink failures surface at Flush() below and bubble up to the
+	//    caller. The explicit `_ =` is required to satisfy gosec.
 	for _, r := range existing {
 		if dnatBypassIsManaged(r.UserData) {
-			b.conn.DelRule(r)
+			_ = b.conn.DelRule(r)
 			continue
 		}
 		if !managedDNATRule(r.UserData) {
 			continue
 		}
 		if string(r.UserData) == dnatLoopbackAcceptTag {
-			b.conn.DelRule(r)
+			_ = b.conn.DelRule(r)
 			continue
 		}
 		if !dnatRuleInNamespace(r, dnatRuleNamespaceEdge) {
 			continue
 		}
-		b.conn.DelRule(r)
+		_ = b.conn.DelRule(r)
 	}
 
 	// 2. Re-add in deterministic order.

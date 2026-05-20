@@ -178,8 +178,10 @@ func bypassRemove(scope firewall.DNATBypassScope, target string, backend firewal
 func appendBypassUnique(path, value string) (bool, error) {
 	clean := filepath.Clean(path)
 	// Best-effort ensure parent dir; /etc/cfm always exists on a real install.
+	// 0o700 matches the packaged directory permission — /etc/cfm holds bypass
+	// lists, kernsec.conf and lsm.conf which are root-only by policy.
 	if dir := filepath.Dir(clean); dir != "." && dir != "/" {
-		_ = os.MkdirAll(dir, 0o755)
+		_ = os.MkdirAll(dir, 0o700)
 	}
 	existing, err := os.ReadFile(clean) // #nosec G304
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
