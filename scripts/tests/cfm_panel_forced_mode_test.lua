@@ -64,7 +64,7 @@ end
 
 local function assert_eq(a,b,m) if a~=b then error((m or "assert")..": got="..tostring(a).." expected="..tostring(b),2) end end
 
-for _,u in ipairs({"/json-api/create_user_session","/json-api/listaccts","/json-api/batch","/execute/SomeModule/function","/xml-api/listaccts","/cpanelwebcall","/openid_connect/cpanelid","/cpsess1234567890/login/abc","/cpsess1234567890/json-api/listaccts","/api","/api/"}) do
+for _,u in ipairs({"/json-api/create_user_session","/json-api/listaccts","/json-api/batch","/execute/SomeModule/function","/xml-api/listaccts","/cpanelwebcall","/openid_connect/cpanelid","/cpsess1234567890/login/abc","/cpsess1234567890/json-api/listaccts","/api","/api/","/acctxfer","/acctxferstream","/acctxfer//home2/cpmove-foo/cpmove-foo.tar.gz.part00001","/acctxferrsync/foo","/cgi/transferinfo.cgi","/cgi/transferversion.cgi","/cgi/live_tail_log.cgi"}) do
   local ngx = run_case({uri=u, ua="-"})
   assert_eq(ngx.var.cfm_upstream, "cfm_panel_passthrough", "API/SSO should passthrough: "..u)
 end
