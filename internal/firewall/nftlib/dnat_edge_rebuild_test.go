@@ -53,11 +53,13 @@ func TestEdgeRebuild_ClassifiesLoopbackForDeletion(t *testing.T) {
 }
 
 func TestEdgeRebuild_PreservesChallengeNamespaceRules(t *testing.T) {
-	// Pick a UserData that managedDNATRule recognises (starts with
-	// dnatRuleTag) but that dnatRuleInNamespace will say is NOT edge.
-	// Looking at the existing namespace decode, the discriminator is
-	// in the suffix. We use a synthetic id with the challenge marker.
-	ch := dnatRuleTag + ":v2:f2:p6:d80:t9080:s:a-:" + dnatRuleNamespaceChallenge
+	// A challenge-namespace rule has a non-empty sourceSet field (the
+	// "s<name>" segment). dnatRuleInNamespace uses `spec.sourceSet != ""`
+	// as the discriminator for the challenge namespace, so we need a
+	// parseable UserData with a real sourceSet to actually exercise that
+	// code path. A rule with an empty sourceSet would be classified as
+	// edge-namespace and deleted — exactly the opposite of what we want.
+	ch := dnatRuleTag + ":v2:f2:p6:d80:t9080:schal_v4:a-"
 	del, reason := edgeDeleteClassification([]byte(ch))
 	if del {
 		t.Fatalf("challenge namespace rule must survive edge rebuild, reason=%s", reason)

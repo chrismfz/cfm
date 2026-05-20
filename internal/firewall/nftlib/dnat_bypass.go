@@ -128,26 +128,6 @@ func dnatBypassRuleExprs(entry firewall.DNATBypassEntry) ([]expr.Any, error) {
 	return exprs, nil
 }
 
-// dnatBypassDeleteExisting walks the given chain and deletes all rules
-// tagged as bypass rules. Called before adding the fresh bypass set so
-// the new rules land in the correct position (immediately after the
-// loopback accept, before the dport DNAT rules) and any removed entries
-// from the bypass file actually disappear from the chain.
-//
-// Caller MUST hold b.mu and is responsible for calling Flush() afterwards.
-func (b *Backend) dnatBypassDeleteExisting(t *nftables.Table, ch *nftables.Chain) error {
-	rules, err := b.conn.GetRules(t, ch)
-	if err != nil {
-		return err
-	}
-	for _, r := range rules {
-		if dnatBypassIsManaged(r.UserData) {
-			b.conn.DelRule(r)
-		}
-	}
-	return nil
-}
-
 // dnatBypassAddRules emits AddRule calls for every bypass entry in the
 // given scope's file. Returns the number of rules added and any per-entry
 // parse errors (the caller surfaces these as log warnings so an operator

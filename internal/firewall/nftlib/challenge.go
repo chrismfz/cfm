@@ -787,9 +787,8 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 // runs in block 3. Challenge-namespace rules elsewhere in the chain
 // are untouched.
 //
-// b.mu MUST be held by the caller. The caller is responsible for
-// calling Flush() after this returns (we only stage AddRule/DelRule
-// onto the connection).
+// b.mu MUST be held by the caller. This function calls Flush() itself
+// and returns its error.
 func (b *Backend) installEdgeDNATRules(t *nftables.Table, ch *nftables.Chain, wanted []dnatRuleSpec, existing []*nftables.Rule, includeLoopbackAccept bool) error {
 	// 1. Delete every edge-owned rule currently in the chain. Loopback
 	//    accept is edge-owned (cf. dnatRuleInNamespace at line ~156

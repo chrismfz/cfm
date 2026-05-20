@@ -170,10 +170,11 @@ func bypassRemove(scope firewall.DNATBypassScope, target string, backend firewal
 // symlink at the bypass path tricking the CLI into appending to an
 // unrelated file. There is a small TOCTOU window between the dedup
 // read and the append — two concurrent `cfm dnat bypass add X` runs
-// can each pass the dedup check and produce a duplicate line. The
-// duplicate is harmless because the parser is idempotent and produces
-// a single rule per canonical value, but operators who script bulk
-// adds should serialise their CLI calls.
+// can each pass the dedup check and produce a duplicate line. Each
+// duplicate produces an extra nftables accept rule for the same IP;
+// this is functionally harmless (first-match-wins) and the dead
+// second rule is cleaned on the next full rebuild, but operators who
+// script bulk adds should serialise their CLI calls.
 func appendBypassUnique(path, value string) (bool, error) {
 	clean := filepath.Clean(path)
 	// Best-effort ensure parent dir; /etc/cfm always exists on a real install.
