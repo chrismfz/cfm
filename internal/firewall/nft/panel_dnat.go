@@ -23,6 +23,20 @@ func panelDNATScript(priority int) string {
 	fmt.Fprintf(&b, "add table %s %s\n", panelDNATFamily, panelDNATTable)
 	fmt.Fprintf(&b, "add chain %s %s prerouting { type nat hook prerouting priority %d; policy accept; }\n", panelDNATFamily, panelDNATTable, priority)
 	b.WriteString("add rule inet cfm_panel_redirect prerouting iif \"lo\" accept\n")
+	// Source-IP bypass: peers listed in /etc/cfm/cfm.dnat_cpanel_bypass
+	// skip the panel DNAT redirect entirely. Use case: cluster nodes and
+	// migration sources (e.g. cPanel-to-cPanel WHM Transfer Tool source
+	// hosts) whose traffic needs to reach cpsrvd directly without the
+	// challenge / WAF intermediation. Loaded from disk on every script
+	// render so add/remove via CLI takes effect on the next reload.
+	entries, skipped, _ := firewall.LoadDNATBypass(firewall.DNATBypassCpanelPath)
+	for _, line := range firewall.DNATBypassRuleExprs(entries, panelDNATFamily, panelDNATTable, "prerouting") {
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	for _, warn := range skipped {
+		fmt.Fprintf(&b, "# WARNING: cfm.dnat_cpanel_bypass skipped entry: %s\n", warn)
+	}
 	for _, m := range firewall.PanelDNATMappings() {
 		fmt.Fprintf(&b, "add rule inet cfm_panel_redirect prerouting tcp dport %d dnat to :%d\n", m.From, m.To)
 	}

@@ -338,6 +338,9 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	if sub == "cpanel" {
 		return runPanelCLI(fs.Args(), backend)
 	}
+	if sub == "bypass" {
+		return runBypassCLI(fs.Args(), firewall.DNATBypassScopeWeb, backend)
+	}
 	switch sub {
 	case "on":
 		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(*priority)); err != nil {
@@ -559,6 +562,13 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			panelHelp()
 			return 2
 		}
+	}
+	// `cfm dnat cpanel bypass …` is a peer subcommand to on/off/status; it
+	// edits /etc/cfm/cfm.dnat_cpanel_bypass and (when cpanel DNAT is on)
+	// re-renders the panel DNAT table. Handled before the on/off arg
+	// normalisation since the bypass mini-CLI has its own positional layout.
+	if len(args) > 0 && args[0] == "bypass" {
+		return runBypassCLI(args[1:], firewall.DNATBypassScopeCpanel, backend)
 	}
 	args, err := normalizePanelArgs(args)
 	if err != nil {

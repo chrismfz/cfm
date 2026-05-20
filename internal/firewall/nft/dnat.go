@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/firewall"
 )
 
 // Defaults: keep same as your script expectations.
@@ -42,19 +44,38 @@ func (b *Backend) DNATShow(fam, tbl string) (string, error) {
 }
 
 func dnatScript(fam, tbl string, httpPort, httpsPort int, priority int) string {
-	// 1:1 with your dnatALL.sh heredoc
+	// 1:1 with your dnatALL.sh heredoc, plus optional bypass rules.
+	//
+	// Source-IP bypass: peers listed in /etc/cfm/cfm.dnat_bypass skip the
+	// web DNAT redirect entirely. Inserted between the `iif "lo" accept`
+	// line and the dport DNAT rules so the source-IP match short-circuits
+	// before NAT translation runs. First-match-wins in nftables prerouting
+	// guarantees a single hit clears the chain. See LoadDNATBypass docs
+	// for the file format.
+	var bypassBlock strings.Builder
+	entries, skipped, _ := firewall.LoadDNATBypass(firewall.DNATBypassWebPath)
+	for _, e := range entries {
+		matcher := "ip saddr"
+		if e.IsV6 {
+			matcher = "ip6 saddr"
+		}
+		fmt.Fprintf(&bypassBlock, "    %s %s accept comment \"cfm_dnat_bypass\"\n", matcher, e.Value)
+	}
+	for _, warn := range skipped {
+		fmt.Fprintf(&bypassBlock, "    # WARNING: cfm.dnat_bypass skipped entry: %s\n", warn)
+	}
 	return fmt.Sprintf(`table %s %s {
   chain prerouting {
     type nat hook prerouting priority %d; policy accept;
 
     iif "lo" accept
 
-    tcp dport 80  dnat to :%d
+%s    tcp dport 80  dnat to :%d
     tcp dport 443 dnat to :%d
     udp dport 443 dnat to :%d
   }
 }
-`, fam, tbl, priority, httpPort, httpsPort, httpsPort)
+`, fam, tbl, priority, bypassBlock.String(), httpPort, httpsPort, httpsPort)
 }
 
 type dnatAcceptRuleSpec struct {
