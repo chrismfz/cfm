@@ -112,6 +112,19 @@
 --     the URL, not the client IP — but it's a behavioral difference
 --     from the regular HTTP-proxied panel paths.
 
+-- Loopback hosts we are willing to talk to with TLS verification skipped.
+-- Anything else must fail closed (see sslhandshake() below). The parser
+-- below extracts whatever the operator put in $cfm_panel_origin; this
+-- table is the post-parse allowlist that locks the security claim down,
+-- so trailing-dot ("127.0.0.1."), trailing-whitespace, userinfo
+-- ("user@127.0.0.1"), or any other normalization weirdness that slips
+-- through the regex is rejected.
+local LOOPBACK_HOSTS = {
+    ["127.0.0.1"] = true,
+    ["localhost"] = true,
+    ["::1"]       = true,
+}
+
 local origin = ngx.var.cfm_panel_origin or ""
 local scheme, host, port_str = origin:match("^(https?)://([^:/]+):?(%d*)$")
 if scheme == nil then
@@ -162,8 +175,10 @@ if is_ssl then
     -- Defence-in-depth: verify=false is only safe when the upstream is
     -- loopback. If a future template change ever points $cfm_panel_origin
     -- at a non-loopback host, refuse to proceed rather than silently
-    -- accept any cert.
-    if host ~= "127.0.0.1" and host ~= "localhost" and host ~= "::1" then
+    -- accept any cert. Check the *parsed* host against a strict allowlist
+    -- so trailing dots, whitespace, userinfo, or other regex quirks that
+    -- slip through the origin parser cannot bypass the assertion.
+    if not LOOPBACK_HOSTS[host] then
         ngx.log(ngx.ERR, "[cfm_panel_tunnel] refusing to skip TLS verification for non-loopback origin: ", origin)
         pcall(function() up_sock:close() end)
         return ngx.exit(500)
@@ -221,14 +236,32 @@ local function pump(src, dst, label)
     end
 end
 
-local co_up   = ngx.thread.spawn(pump, client_sock, up_sock,   "client->upstream")
-local co_down = ngx.thread.spawn(pump, up_sock,     client_sock, "upstream->client")
+local co_up = ngx.thread.spawn(pump, client_sock, up_sock, "client->upstream")
+if not co_up then
+    ngx.log(ngx.ERR, "[cfm_panel_tunnel] ngx.thread.spawn client->upstream failed")
+    pcall(function() up_sock:close() end)
+    return ngx.exit(500)
+end
+local co_down = ngx.thread.spawn(pump, up_sock, client_sock, "upstream->client")
+if not co_down then
+    ngx.log(ngx.ERR, "[cfm_panel_tunnel] ngx.thread.spawn upstream->client failed")
+    -- co_up is already running; closing up_sock surfaces a "closed" error
+    -- to its receive and lets it exit cleanly before we leave the handler.
+    pcall(function() up_sock:close() end)
+    ngx.thread.wait(co_up)
+    return ngx.exit(500)
+end
 
 -- Wait for the FIRST direction to finish. rsync sender mode is mostly
 -- one-way (upstream → client carries the file data; client → upstream
 -- carries small acks), so the two pumps don't necessarily finish at the
--- same instant.
-ngx.thread.wait(co_up, co_down)
+-- same instant. ngx.thread.wait returns (false, err) if the awaited
+-- thread errored — we log but do not abort, because we still need to
+-- drain the other direction.
+local ok, wait_err = ngx.thread.wait(co_up, co_down)
+if not ok then
+    ngx.log(ngx.NOTICE, "[cfm_panel_tunnel] first pump terminated with error: ", wait_err)
+end
 
 -- Now wait for the OTHER direction to drain. Closing up_sock here
 -- immediately (as an earlier version did) was unsafe: if the lighter
@@ -241,8 +274,14 @@ ngx.thread.wait(co_up, co_down)
 -- immediately, so it's safe to call on whichever finished first.
 pcall(function() client_sock:settimeouts(CONNECT_TIMEOUT_MS, DRAIN_TIMEOUT_MS, DRAIN_TIMEOUT_MS) end)
 pcall(function() up_sock:settimeouts(CONNECT_TIMEOUT_MS, DRAIN_TIMEOUT_MS, DRAIN_TIMEOUT_MS) end)
-ngx.thread.wait(co_up)
-ngx.thread.wait(co_down)
+local ok_up, err_up = ngx.thread.wait(co_up)
+if not ok_up then
+    ngx.log(ngx.NOTICE, "[cfm_panel_tunnel] client->upstream pump exited with error: ", err_up)
+end
+local ok_down, err_down = ngx.thread.wait(co_down)
+if not ok_down then
+    ngx.log(ngx.NOTICE, "[cfm_panel_tunnel] upstream->client pump exited with error: ", err_down)
+end
 
 -- Best-effort cleanup. The client socket is closed by nginx when the
 -- content phase returns.
