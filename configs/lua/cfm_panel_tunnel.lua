@@ -199,13 +199,70 @@ if is_ssl then
     end
 end
 
--- Step 3: replay the original HTTP request line + headers to upstream.
--- ngx.req.raw_header() returns the bytes nginx received from the client
--- up to and including the final CRLF CRLF, which is exactly what cpsrvd
--- needs to know which endpoint we're targeting (URL has the account name
--- and the rsync_command JSON array).
+-- Step 3: replay the original HTTP request to upstream.
+--
+-- We DO NOT simply forward ngx.req.raw_header() verbatim. cpsrvd uses
+-- X-Forwarded-For (set by the regular nginx proxy_set_header on every
+-- other panel location) to attach an incoming request to its transfer-
+-- session bookkeeping. Without it, cpsrvd sees the request as coming
+-- from the loopback nginx (127.0.0.1), processes the rsync stream
+-- correctly but skips the post-completion handshake — and the cPanel
+-- client (whm_xfer_download-ssl) on the destination sits in poll()
+-- forever waiting for a session-end marker that never arrives, which
+-- shows up as "Restore stuck at 20% Homedir" with the connection
+-- visibly ESTAB on both sides and zero bytes flowing.
+--
+-- So splice an X-Forwarded-For / X-Real-IP / X-Forwarded-Proto /
+-- X-Forwarded-Host / X-Forwarded-Port set into the original headers,
+-- matching what the sibling `location ~ ^/(acctxfer|...)` block does
+-- via proxy_set_header. If the client already sent any of these we
+-- preserve them (don't double-inject).
 local raw_headers = ngx.req.raw_header()
-local _, send_err = up_sock:send(raw_headers)
+
+local client_ip      = ngx.var.remote_addr  or "127.0.0.1"
+local client_host    = ngx.var.host         or "localhost"
+local listener_port  = ngx.var.server_port  or ""
+local listener_proto = ngx.var.scheme       or "https"
+
+-- Lowercase header-name index of what the client already sent, so we
+-- can avoid re-injecting headers they already provided.
+local got = {}
+for line in raw_headers:gmatch("[^\r\n]+") do
+    local name = line:match("^([%w%-]+)%s*:")
+    if name then got[name:lower()] = true end
+end
+
+local function maybe_add(name, value)
+    if not got[name:lower()] and value and value ~= "" then
+        return name .. ": " .. value .. "\r\n"
+    end
+    return ""
+end
+
+local injected =
+    maybe_add("X-Real-IP",          client_ip) ..
+    maybe_add("X-Forwarded-For",    client_ip) ..
+    maybe_add("X-Forwarded-Host",   client_host) ..
+    maybe_add("X-Forwarded-Port",   listener_port) ..
+    maybe_add("X-Forwarded-Proto",  listener_proto) ..
+    maybe_add("X-Forwarded-Server", client_host) ..
+    maybe_add("CF-Connecting-IP",   client_ip)
+
+-- raw_headers ends with "\r\n\r\n". Strip the final "\r\n" so we get
+-- the headers ending in a single "\r\n", append our injected lines
+-- (each already ending in "\r\n"), then append the final "\r\n" that
+-- terminates the header block.
+local request_to_upstream
+if raw_headers:sub(-4) == "\r\n\r\n" then
+    request_to_upstream = raw_headers:sub(1, -3) .. injected .. "\r\n"
+else
+    -- Defensive: header block didn't terminate as expected; just
+    -- append and hope for the best (cpsrvd will reject malformed
+    -- requests, which is the safe failure mode).
+    request_to_upstream = raw_headers .. injected .. "\r\n"
+end
+
+local _, send_err = up_sock:send(request_to_upstream)
 if send_err then
     ngx.log(ngx.ERR, "[cfm_panel_tunnel] forward request headers: ", send_err)
     pcall(function() up_sock:close() end)
