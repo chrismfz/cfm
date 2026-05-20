@@ -142,6 +142,7 @@ if is_ssl then
     local session, hs_err = up_sock:sslhandshake(nil, host, false)
     if not session then
         ngx.log(ngx.ERR, "[cfm_panel_tunnel] upstream sslhandshake failed: ", hs_err)
+        pcall(function() up_sock:close() end)
         return ngx.exit(502)
     end
 end
