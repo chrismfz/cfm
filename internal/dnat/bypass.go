@@ -43,6 +43,9 @@ func runBypassCLI(args []string, scope firewall.DNATBypassScope, backend firewal
 	sub := args[0]
 	rest := args[1:]
 	switch sub {
+	case "help", "-h", "--help":
+		printBypassUsage(scope)
+		return 0
 	case "list", "ls", "show":
 		return bypassList(scope)
 	case "add":

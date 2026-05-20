@@ -15,6 +15,8 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
+
+	"cfm/internal/firewall"
 )
 
 const (
@@ -748,6 +750,25 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 
 	if includeLoopbackAccept && !loopbackSeen {
 		b.conn.AddRule(&nftables.Rule{Table: t, Chain: ch, UserData: []byte(dnatLoopbackAcceptTag), Exprs: dnatLoopbackAcceptExprs()})
+	}
+
+	// Reconcile source-IP bypass rules. We delete any existing ones and
+	// re-add the current set so changes to /etc/cfm/cfm.dnat_bypass take
+	// effect on the next DNATOn call. The delete-and-readd cycle also
+	// guarantees the bypass rules end up immediately after the loopback
+	// accept and BEFORE the dport DNAT rules added below — first-match-
+	// wins evaluation then short-circuits the NAT translation before it
+	// runs for any source IP in the bypass list. Edge-namespace only;
+	// the cPanel panel DNAT chain has its own equivalent in PanelDNATOn.
+	if namespace == dnatRuleNamespaceEdge {
+		if err := b.dnatBypassDeleteExisting(t, ch); err != nil {
+			return err
+		}
+		if _, warnings := b.dnatBypassAddRules(t, ch, firewall.DNATBypassScopeWeb); len(warnings) > 0 {
+			for _, w := range warnings {
+				b.logPhase("DNATOn", "warn", 0, nil, fmt.Sprintf("bypass entry: %s", w))
+			}
+		}
 	}
 
 	for _, spec := range wanted {
