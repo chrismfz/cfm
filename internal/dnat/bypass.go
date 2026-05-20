@@ -266,11 +266,11 @@ func writeFileAtomic(target string, data []byte, perm os.FileMode) error {
 		cleanup()
 		return err
 	}
-	if err := tmp.Chmod(perm); err != nil {
+	if err := tmp.Sync(); err != nil {
 		cleanup()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := tmp.Chmod(perm); err != nil {
 		cleanup()
 		return err
 	}

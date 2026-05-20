@@ -48,6 +48,9 @@ func TestPanelDNATScript_BypassRulesPrecedeDNAT(t *testing.T) {
 	if !strings.Contains(script, "ip6 saddr 2001:db8::1 accept") {
 		t.Fatalf("expected ipv6 bypass rule in script:\n%s", script)
 	}
+	if !strings.Contains(script, `comment "cfm_dnat_bypass"`) {
+		t.Fatalf("bypass rule must carry cfm_dnat_bypass comment for operator diagnosis:\n%s", script)
+	}
 	firstDNATIdx := strings.Index(script, "tcp dport 2082 dnat to :12082")
 	if firstDNATIdx < 0 {
 		t.Fatalf("expected first DNAT mapping in script:\n%s", script)
