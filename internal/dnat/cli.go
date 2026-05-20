@@ -338,6 +338,13 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	if sub == "cpanel" {
 		return runPanelCLI(fs.Args(), backend)
 	}
+	if sub == "bypass" {
+		return runBypassCLI(fs.Args(), firewall.DNATBypassScopeWeb, backend)
+	}
+	if sub == "help" || sub == "-h" || sub == "--help" {
+		help()
+		return 0
+	}
 	switch sub {
 	case "on":
 		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(*priority)); err != nil {
@@ -537,9 +544,18 @@ func normalizeEdgeService(s string) string {
 
 func help() {
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  cfm dnat        (show ON/OFF + rules + explanation)")
-	fmt.Fprintln(os.Stderr, "  cfm dnat on     (enable DNAT)")
-	fmt.Fprintln(os.Stderr, "  cfm dnat off    (disable DNAT)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat                  (show ON/OFF + rules + explanation)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat on               (enable web DNAT: 80/443 -> openresty)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat off              (disable web DNAT)")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel ...       (manage the cPanel panel DNAT chain; see `cfm dnat cpanel help`)")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  cfm dnat bypass list             (show source IPs exempted from web DNAT)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat bypass add    <IP|CIDR> (exempt this source from web DNAT)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat bypass remove <IP|CIDR> (re-subject this source to web DNAT)")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Bypass list file: /etc/cfm/cfm.dnat_bypass")
+	fmt.Fprintln(os.Stderr, "Bypass changes take effect immediately if DNAT is on; otherwise on next `cfm dnat on`.")
 }
 
 func runPanelCLI(args []string, backend firewall.Backend) int {
@@ -559,6 +575,13 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			panelHelp()
 			return 2
 		}
+	}
+	// `cfm dnat cpanel bypass …` is a peer subcommand to on/off/status; it
+	// edits /etc/cfm/cfm.dnat_cpanel_bypass and (when cpanel DNAT is on)
+	// re-renders the panel DNAT table. Handled before the on/off arg
+	// normalisation since the bypass mini-CLI has its own positional layout.
+	if len(args) > 0 && args[0] == "bypass" {
+		return runBypassCLI(args[1:], firewall.DNATBypassScopeCpanel, backend)
 	}
 	args, err := normalizePanelArgs(args)
 	if err != nil {
@@ -835,10 +858,17 @@ func panelHelp() {
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel off")
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel help")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Commands: status, on, off")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel bypass list             (show source IPs exempted from cPanel panel DNAT)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel bypass add    <IP|CIDR> (exempt this source from cPanel panel DNAT)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel bypass remove <IP|CIDR> (re-subject this source to cPanel panel DNAT)")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Commands: status, on, off, bypass")
 	fmt.Fprintln(os.Stderr, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
 	fmt.Fprintln(os.Stderr, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
 	fmt.Fprintln(os.Stderr, "Challenge behavior: cfm dnat cpanel on always enables forced challenge mode.")
+	fmt.Fprintln(os.Stderr, "Bypass list file: /etc/cfm/cfm.dnat_cpanel_bypass")
+	fmt.Fprintln(os.Stderr, "Bypass use case: cluster nodes and cPanel-to-cPanel WHM Transfer Tool source hosts whose")
+	fmt.Fprintln(os.Stderr, "  rsync stream (whm_xfer_download-ssl) needs direct cpsrvd access without panel filtering.")
 	fmt.Fprintln(os.Stderr, "Migration: deprecated `cfm dnat cpanel challenge on|off` and `--challenge` are accepted for one release cycle with warnings.")
 	fmt.Fprintln(os.Stderr, "Argument formats: --mode direct-cpsrvd or mode=direct-cpsrvd (same for priority)")
 }

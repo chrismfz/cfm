@@ -1731,3 +1731,69 @@ Notes:
 - In forced mode, only CFM-owned clearance proof (`cfm_ok` / `cfm_clearance`) is treated as direct pass state. Third-party cookies (for example `cf_clearance` or `cp_security_token`) do not count as challenge completion by themselves and should only be considered after explicit backend/API validation.
 - Scope and host-bound clearance model (including migration guidance and replay verification checklist): `docs/security/challenge-scope-mapping.md`.
 - cPanel/WHM must still be patched; CFM is defense-in-depth.
+
+### Source-IP bypass
+
+Some trusted peers — cluster members, backup servers, cPanel-to-cPanel
+WHM Transfer Tool source hosts — need to reach `cpsrvd` / Apache
+**directly**, without going through CFM's panel listener / challenge
+layer. The classic case is the WHM Transfer Tool's
+`whm_xfer_download-ssl` rsync stream on port 2087: it's a custom
+non-standard HTTP variant that breaks when wrapped by *any* HTTP-aware
+proxy, but works fine when DNAT is off.
+
+Rather than turn the whole DNAT off, list the trusted peers in a bypass
+file. Their packets are accepted by the prerouting chain BEFORE the
+dport DNAT redirect runs, so they land on `cpsrvd` / Apache exactly as
+they would with `cfm dnat off` — while everyone else still goes through
+the panel filter.
+
+Two scopes, one file each:
+
+| Scope | File | Affects |
+|---|---|---|
+| Web | `/etc/cfm/cfm.dnat_bypass` | `cfm dnat on`: 80/443 → openresty |
+| cPanel | `/etc/cfm/cfm.dnat_cpanel_bypass` | `cfm dnat cpanel on`: 2082-2096/2222 → 12082-12222 |
+
+File format mirrors `cfm.allow` / `cfm.deny` — one IP or CIDR per line,
+`#` comments, IPv4 and IPv6 both supported.
+
+```bash
+# inspect
+cfm dnat bypass list
+cfm dnat cpanel bypass list
+
+# add (one of)
+cfm dnat cpanel bypass add 84.54.49.205          # single IPv4
+cfm dnat cpanel bypass add 192.0.2.0/24          # IPv4 CIDR
+cfm dnat cpanel bypass add 2001:db8::1           # single IPv6
+cfm dnat cpanel bypass add 2001:db8::/64         # IPv6 CIDR
+
+# remove
+cfm dnat cpanel bypass remove 84.54.49.205
+```
+
+Add / remove triggers an immediate reload of the matching nftables table
+when the relevant DNAT is currently on; when it's off the file is
+persisted and the bypass takes effect on the next `cfm dnat [cpanel]
+on`. Adds are deduplicated against the canonical form of the entry, so
+`84.54.49.5/24` and `84.54.49.0/24` are recognised as the same network.
+
+Under the hood each bypass entry becomes an `ip saddr <X> accept` (or
+`ip6 saddr <X> accept`) rule inserted between the prerouting chain's
+existing `iif "lo" accept` and the dport DNAT rules. nftables
+first-match-wins evaluation means a hit clears the chain before NAT
+translation runs. Both the `nft` (shell-out, default) and `nftlib`
+(netlink-direct) backends emit the same logical rule. For the inet-
+family chain the nftlib path also emits a leading `meta nfproto ipv4|
+ipv6` guard so source-IP payload reads don't see IPv6 packets at IPv4
+offsets (and vice versa).
+
+Tradeoff: a bypassed peer is **completely** un-mediated by CFM at
+layers 4–7 for the matching ports. Don't list anything you don't fully
+control. Bypass also doesn't affect outbound CFM accept rules, the
+allow set, or input-chain filtering — it only short-circuits the
+prerouting DNAT redirect for matching source IPs.
+
+Detailed file format, common workflows, and an nftables rendering
+walkthrough live in [`docs/dnat-bypass.md`](docs/dnat-bypass.md).

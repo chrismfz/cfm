@@ -15,6 +15,8 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
+
+	"cfm/internal/firewall"
 )
 
 const (
@@ -719,25 +721,41 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 		b.conn.AddChain(ch)
 	}
 	rules, _ := b.conn.GetRules(t, ch)
+
+	// Strategy depends on namespace:
+	//
+	//   * EDGE namespace owns the loopback accept and the source-IP
+	//     bypass rules in this chain. To guarantee the bypass rules
+	//     land between loopback and the dport DNAT rules — required
+	//     for first-match-wins to short-circuit NAT before it runs —
+	//     we delete every edge-managed rule (loopback + bypass + edge
+	//     dport rules) and rebuild in deterministic order. An earlier
+	//     version preserved unchanged dport rules in place and then
+	//     re-added bypass at the chain tail; that worked on the first
+	//     install but on the second install (e.g. `cfm dnat bypass
+	//     add`, which calls DNATOn again) the bypass rules ended up
+	//     AFTER the surviving dport rules, silently breaking the
+	//     bypass.
+	//
+	//   * CHALLENGE namespace does not own loopback or bypass rules;
+	//     it only manages its own scoped dport entries. Use the
+	//     original survive-in-place reconcile to avoid disturbing
+	//     edge state when challenge mode is also active.
+	if namespace == dnatRuleNamespaceEdge {
+		return b.installEdgeDNATRules(t, ch, wanted, rules, includeLoopbackAccept)
+	}
+
 	wantedByID := make(map[string]dnatRuleSpec, len(wanted))
 	for _, spec := range wanted {
 		wantedByID[spec.id()] = spec
 	}
 
 	seen := make(map[string]struct{}, len(wanted))
-	loopbackSeen := false
 	for _, r := range rules {
 		if !managedDNATRule(r.UserData) || !dnatRuleInNamespace(r, namespace) {
 			continue
 		}
-		if string(r.UserData) == dnatLoopbackAcceptTag {
-			if includeLoopbackAccept && dnatLoopbackAcceptMatches(r) {
-				loopbackSeen = true
-				continue
-			}
-			b.conn.DelRule(r)
-			continue
-		}
+		// Challenge namespace doesn't own loopback accept.
 		spec, ok := wantedByID[string(r.UserData)]
 		if !ok || !dnatRuleMatches(r, spec) {
 			b.conn.DelRule(r)
@@ -746,14 +764,64 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 		seen[string(r.UserData)] = struct{}{}
 	}
 
-	if includeLoopbackAccept && !loopbackSeen {
-		b.conn.AddRule(&nftables.Rule{Table: t, Chain: ch, UserData: []byte(dnatLoopbackAcceptTag), Exprs: dnatLoopbackAcceptExprs()})
-	}
-
 	for _, spec := range wanted {
 		if _, ok := seen[spec.id()]; ok {
 			continue
 		}
+		b.conn.AddRule(&nftables.Rule{Table: t, Chain: ch, UserData: []byte(spec.id()), Exprs: dnatRuleExprs(spec)})
+	}
+	return b.conn.Flush()
+}
+
+// installEdgeDNATRules rebuilds the edge-namespace contents of the
+// prerouting chain from scratch. Called by installDNATRules when the
+// caller's namespace is edge. The chain is rebuilt in three positional
+// blocks, in this order:
+//
+//  1. `iif "lo" accept`                         (loopback exemption)
+//  2. `ip[6] saddr <X> accept`                  (one rule per bypass entry)
+//  3. `tcp dport N dnat to :M` (and udp)        (per spec in `wanted`)
+//
+// This guarantees first-match-wins evaluation: a packet from a bypass
+// source matches block 2 and is accepted before any NAT translation
+// runs in block 3. Challenge-namespace rules elsewhere in the chain
+// are untouched.
+//
+// b.mu MUST be held by the caller. This function calls Flush() itself
+// and returns its error.
+func (b *Backend) installEdgeDNATRules(t *nftables.Table, ch *nftables.Chain, wanted []dnatRuleSpec, existing []*nftables.Rule, includeLoopbackAccept bool) error {
+	// 1. Delete every edge-owned rule currently in the chain. Loopback
+	//    accept is edge-owned (cf. dnatRuleInNamespace at line ~156
+	//    which only reports "edge" for it). Bypass rules carry the
+	//    cfm_dnat_bypass UserData prefix and are also edge-owned.
+	for _, r := range existing {
+		if dnatBypassIsManaged(r.UserData) {
+			b.conn.DelRule(r)
+			continue
+		}
+		if !managedDNATRule(r.UserData) {
+			continue
+		}
+		if string(r.UserData) == dnatLoopbackAcceptTag {
+			b.conn.DelRule(r)
+			continue
+		}
+		if !dnatRuleInNamespace(r, dnatRuleNamespaceEdge) {
+			continue
+		}
+		b.conn.DelRule(r)
+	}
+
+	// 2. Re-add in deterministic order.
+	if includeLoopbackAccept {
+		b.conn.AddRule(&nftables.Rule{Table: t, Chain: ch, UserData: []byte(dnatLoopbackAcceptTag), Exprs: dnatLoopbackAcceptExprs()})
+	}
+	if _, warnings := b.dnatBypassAddRules(t, ch, firewall.DNATBypassScopeWeb); len(warnings) > 0 {
+		for _, w := range warnings {
+			b.logPhase("DNATOn", "warn", 0, nil, fmt.Sprintf("bypass entry: %s", w))
+		}
+	}
+	for _, spec := range wanted {
 		b.conn.AddRule(&nftables.Rule{Table: t, Chain: ch, UserData: []byte(spec.id()), Exprs: dnatRuleExprs(spec)})
 	}
 	return b.conn.Flush()
@@ -772,6 +840,16 @@ func (b *Backend) dnatOffUnlocked(family, table, namespace string) error {
 	}
 	for _, r := range rules {
 		if managedDNATRule(r.UserData) && dnatRuleInNamespace(r, namespace) {
+			b.conn.DelRule(r)
+			continue
+		}
+		// Bypass rules carry their own UserData prefix (not the
+		// dnatRuleTag namespace) so the managedDNATRule check above
+		// skips them. Edge namespace owns them, however; when we
+		// tear down the edge DNAT we must remove its bypass rules
+		// too or they'll dangle in the chain as orphans and confuse
+		// the next DNATOn / DNATShow.
+		if namespace == dnatRuleNamespaceEdge && dnatBypassIsManaged(r.UserData) {
 			b.conn.DelRule(r)
 		}
 	}

@@ -1,0 +1,34 @@
+# /etc/cfm/cfm.dnat_cpanel_bypass
+#
+# Source-IP bypass list for the cPanel PANEL DNAT chain installed by
+# `cfm dnat cpanel on` (TCP 2082/2083/2086/2087/2095/2096/2222 ->
+# 12082-12222). Packets arriving from any IP / CIDR listed here SKIP the
+# DNAT redirect and reach cpsrvd / DirectAdmin directly, bypassing CFM's
+# panel-side challenge + WAF + tunnel logic.
+#
+# Primary use case: cPanel-to-cPanel WHM Transfer Tool source hosts. The
+# transport that whm_xfer_download-ssl uses for live rsync streams is a
+# non-standard HTTP variant that breaks when wrapped by ANY HTTP-aware
+# proxy. Adding the source server's IP here makes its inbound 2087 (etc.)
+# connections land on cpsrvd directly, exactly as they would with
+# `cfm dnat cpanel off`, while leaving panel filtering on for everyone
+# else.
+#
+# Format (same as cfm.allow / cfm.deny):
+#   - one IP or CIDR per line
+#   - blank lines and `#`-prefixed lines ignored
+#   - trailing `# comment` on data lines also ignored
+#   - both IPv4 and IPv6 are supported
+#
+# Manage with the CLI rather than editing this file by hand:
+#   cfm dnat cpanel bypass list
+#   cfm dnat cpanel bypass add    84.54.49.205
+#   cfm dnat cpanel bypass add    2001:db8::/64
+#   cfm dnat cpanel bypass remove 84.54.49.205
+#
+# Changes take effect immediately if cpanel DNAT is currently on;
+# otherwise they apply on the next `cfm dnat cpanel on`.
+
+# Examples (uncomment to use):
+#84.54.49.205         # peer-cpanel-01 (transfer source)
+#192.0.2.0/24         # cluster management subnet

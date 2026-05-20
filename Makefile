@@ -240,6 +240,8 @@ deb: build
 	@install -m0640 "$(CONFIG_DIR)/cfm.deny"      "$(PKGROOT)/etc/cfm/cfm.deny"
 	@install -m0640 "$(CONFIG_DIR)/cfm.blocklists" "$(PKGROOT)/etc/cfm/cfm.blocklists"
 	@install -m0640 "$(CONFIG_DIR)/cfm.ignore" "$(PKGROOT)/etc/cfm/cfm.ignore"
+	@install -m0600 "$(CONFIG_DIR)/cfm.dnat_bypass" "$(PKGROOT)/etc/cfm/cfm.dnat_bypass"
+	@install -m0600 "$(CONFIG_DIR)/cfm.dnat_cpanel_bypass" "$(PKGROOT)/etc/cfm/cfm.dnat_cpanel_bypass"
 	@install -m0640 "$(CONFIG_DIR)/cfm.dyndns"    "$(PKGROOT)/etc/cfm/cfm.dyndns"
 	@install -m0640 "$(CONFIG_DIR)/cfm-admin.htpasswd" "$(PKGROOT)/etc/cfm/cfm-admin.htpasswd"
 	@install -m0640 "$(CONFIG_DIR)/webdetector_malpaths.txt"      "$(PKGROOT)/etc/cfm/webdetector_malpaths.txt"
@@ -281,6 +283,8 @@ stage-pkgroot: build
 	@[ -f $(PKGROOT)/etc/cfm/cfm.deny ]       || cp -f $(CONFIG_DIR)/cfm.deny       $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.blocklists ] || cp -f $(CONFIG_DIR)/cfm.blocklists $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.ignore ] || cp -f $(CONFIG_DIR)/cfm.ignore $(PKGROOT)/etc/cfm/
+	@[ -f $(PKGROOT)/etc/cfm/cfm.dnat_bypass ] || cp -f $(CONFIG_DIR)/cfm.dnat_bypass $(PKGROOT)/etc/cfm/
+	@[ -f $(PKGROOT)/etc/cfm/cfm.dnat_cpanel_bypass ] || cp -f $(CONFIG_DIR)/cfm.dnat_cpanel_bypass $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm.dyndns ]     || cp -f $(CONFIG_DIR)/cfm.dyndns     $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm-admin.htpasswd ] || cp -f $(CONFIG_DIR)/cfm-admin.htpasswd $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/webdetector_malpaths.txt ]       || cp -f $(CONFIG_DIR)/webdetector_malpaths.txt       $(PKGROOT)/etc/cfm/

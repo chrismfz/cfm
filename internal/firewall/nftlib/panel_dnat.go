@@ -66,6 +66,17 @@ func (b *Backend) PanelDNATOn(priority int) (err error) {
 	b.conn.AddTable(t)
 	b.conn.AddChain(ch)
 	b.conn.AddRule(&nftables.Rule{Table: t, Chain: ch, UserData: []byte(dnatLoopbackAcceptTag), Exprs: dnatLoopbackAcceptExprs()})
+	// Source-IP bypass: peers in /etc/cfm/cfm.dnat_cpanel_bypass skip the
+	// cPanel panel DNAT entirely. Added BETWEEN the loopback accept rule
+	// and the dport DNAT rules so nftables first-match-wins guarantees
+	// the bypass short-circuits before NAT translation runs. Since
+	// PanelDNATOn rebuilds the table from scratch on every call, the
+	// fresh add-order here is also the eval-order in the running chain.
+	if _, warnings := b.dnatBypassAddRules(t, ch, firewall.DNATBypassScopeCpanel); len(warnings) > 0 {
+		for _, w := range warnings {
+			b.logPhase("PanelDNATOn", "warn", 0, nil, fmt.Sprintf("bypass entry: %s", w))
+		}
+	}
 	for _, spec := range panelDNATSpecs() {
 		b.conn.AddRule(&nftables.Rule{Table: t, Chain: ch, UserData: []byte(spec.id()), Exprs: dnatRuleExprs(spec)})
 	}

@@ -1,0 +1,32 @@
+# /etc/cfm/cfm.dnat_bypass
+#
+# Source-IP bypass list for the WEB DNAT chain installed by `cfm dnat on`
+# (TCP 80 -> HTTP_PORT, TCP+UDP 443 -> HTTPS_PORT). Packets arriving from
+# any IP / CIDR listed here SKIP the DNAT redirect and reach Apache /
+# LiteSpeed directly, bypassing CFM's openresty/angie challenge + WAF
+# layer.
+#
+# Use sparingly. Typical entries:
+#   - cluster peers running the same panel software
+#   - backup / monitoring hosts that need raw upstream access
+#   - migration source hosts whose transport doesn't tolerate HTTP-aware
+#     intermediation
+#
+# Format (same as cfm.allow / cfm.deny):
+#   - one IP or CIDR per line
+#   - blank lines and `#`-prefixed lines ignored
+#   - trailing `# comment` on data lines also ignored
+#   - both IPv4 and IPv6 are supported
+#
+# Manage with the CLI rather than editing this file by hand:
+#   cfm dnat bypass list
+#   cfm dnat bypass add    84.54.49.205
+#   cfm dnat bypass add    2001:db8::/64
+#   cfm dnat bypass remove 84.54.49.205
+#
+# Changes take effect immediately if web DNAT is currently on; otherwise
+# they apply on the next `cfm dnat on`.
+
+# Examples (uncomment to use):
+#84.54.49.205         # peer-srv-01
+#192.0.2.0/24         # internal management subnet

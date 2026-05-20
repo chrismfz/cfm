@@ -100,6 +100,8 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %config(noreplace) /etc/cfm/cfm.deny
 %config(noreplace) /etc/cfm/cfm.blocklists
 %config(noreplace) /etc/cfm/cfm.ignore
+%attr(0600,root,root) %config(noreplace) /etc/cfm/cfm.dnat_bypass
+%attr(0600,root,root) %config(noreplace) /etc/cfm/cfm.dnat_cpanel_bypass
 %config(noreplace) /etc/cfm/cfm.dyndns
 %config(noreplace) /etc/cfm/cfm-admin.htpasswd
 
