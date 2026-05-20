@@ -223,6 +223,7 @@ deb: build
 		"$(PKGROOT)/var/lib/cfm/lua" \
 		"$(PKGROOT)/etc/cfm" \
 		"$(OUTDIR)"
+	@chmod 0700 "$(PKGROOT)/etc/cfm"
 
 	# copy DEBIAN metadata/scripts
 	@cp -a "$(DEB_SRC)/." "$(PKGROOT)/DEBIAN/"

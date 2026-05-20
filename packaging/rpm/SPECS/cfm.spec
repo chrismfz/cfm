@@ -88,6 +88,7 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %license /usr/share/licenses/cfm/LICENSE
 %{_bindir}/cfm
 %{_unitdir}/cfm.service
+%attr(0700,root,root) %dir /etc/cfm
 %config(noreplace) /etc/cfm/cfm.conf
 %config(noreplace) /etc/cfm/detectors.conf
 %attr(0600,root,root) %config(noreplace) /etc/cfm/kernsec.conf
@@ -120,6 +121,11 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 
 
 %post
+
+# /etc/cfm holds bypass lists, kernsec.conf, lsm.conf and other root-only
+# config. Force 0700 on upgrade so existing 0755 installs get tightened.
+# Files needing non-root read access live in /var/lib/cfm/ instead.
+[ -d /etc/cfm ] && chmod 0700 /etc/cfm || true
 
 # kernsec.conf may reveal host hardening exceptions. Tighten only by
 # removing group/other bits so upgrades do not loosen operator-chosen owner
