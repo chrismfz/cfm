@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"cfm/internal/firewall"
 )
@@ -157,9 +158,22 @@ func bypassRemove(scope firewall.DNATBypassScope, target string, backend firewal
 	return reloadDNATScope(scope, backend)
 }
 
-// appendBypassUnique appends the entry to the bypass file (creating it as
-// 0644 if missing) iff the same canonical value is not already present.
-// Returns true if a new line was written.
+// appendBypassUnique appends the entry to the bypass file (creating it
+// as 0600 if missing) iff the same canonical value is not already
+// present. Returns true if a new line was written.
+//
+// File permissions match the cfm.allow / cfm.deny convention (0600,
+// root-owned) — the bypass list is read by the cfm daemon and the CLI,
+// both running as root; no other process needs visibility.
+//
+// O_NOFOLLOW guards against the (root-only, low-risk) case of a
+// symlink at the bypass path tricking the CLI into appending to an
+// unrelated file. There is a small TOCTOU window between the dedup
+// read and the append — two concurrent `cfm dnat bypass add X` runs
+// can each pass the dedup check and produce a duplicate line. The
+// duplicate is harmless because the parser is idempotent and produces
+// a single rule per canonical value, but operators who script bulk
+// adds should serialise their CLI calls.
 func appendBypassUnique(path, value string) (bool, error) {
 	clean := filepath.Clean(path)
 	// Best-effort ensure parent dir; /etc/cfm always exists on a real install.
@@ -173,10 +187,7 @@ func appendBypassUnique(path, value string) (bool, error) {
 	if entryAlreadyPresent(existing, value) {
 		return false, nil
 	}
-	// Append with a trailing newline; we don't care if the file ended
-	// without one because os.OpenFile with O_APPEND doesn't touch existing
-	// bytes.
-	f, err := os.OpenFile(clean, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640) // #nosec G304
+	f, err := os.OpenFile(clean, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600) // #nosec G304
 	if err != nil {
 		return false, err
 	}
@@ -231,7 +242,42 @@ func removeBypassEntry(path, value string) (bool, error) {
 	if !removed {
 		return false, nil
 	}
-	return true, os.WriteFile(clean, out.Bytes(), 0o640)
+	// Atomic replace via temp + rename so a crash mid-write can never
+	// leave a half-written file (an empty or truncated bypass file
+	// would silently disable the bypass on the next reload).
+	return true, writeFileAtomic(clean, out.Bytes(), 0o600)
+}
+
+// writeFileAtomic writes content to a sibling temp file in the same
+// directory, then renames into place. Atomic on POSIX filesystems.
+func writeFileAtomic(target string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(target)
+	tmp, err := os.CreateTemp(dir, ".dnat_bypass.tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, target)
 }
 
 // entryAlreadyPresent reports whether a canonical bypass value already

@@ -3,7 +3,6 @@
 package nftlib
 
 import (
-	"encoding/binary"
 	"fmt"
 	"net"
 
@@ -26,13 +25,12 @@ func dnatBypassRuleID(entry firewall.DNATBypassEntry) string {
 	return dnatBypassUserDataPrefix + entry.Value
 }
 
-// dnatBypassIsManaged reports whether a rule was installed by this module.
-// Used by the reconciler to find existing bypass rules so they can be
-// deleted before re-adding the fresh set (the simplest way to keep them
-// in the correct position relative to the dport DNAT rules — they always
-// land immediately after the loopback accept, BEFORE the DNAT rules,
-// because nftlib's AddRule appends and we add them before the dport
-// rules in the calling code).
+// dnatBypassIsManaged reports whether a rule was installed by this
+// module. Used by the reconciler to find existing bypass rules so they
+// can be deleted as part of the edge-namespace clean rebuild in
+// installEdgeDNATRules; correct ordering relative to the dport DNAT
+// rules is enforced by that rebuild, not by the bypass code in
+// isolation.
 func dnatBypassIsManaged(userData []byte) bool {
 	if len(userData) < len(dnatBypassUserDataPrefix) {
 		return false
@@ -179,8 +177,3 @@ func (b *Backend) dnatBypassAddRules(t *nftables.Table, ch *nftables.Chain, scop
 	return added, warnings
 }
 
-// Quiet the unused-import warning when binary is not referenced elsewhere
-// in this file (kept here so future expressions that need network-byte-
-// order port encoding can rely on the same import path used by sibling
-// expression builders).
-var _ = binary.BigEndian
