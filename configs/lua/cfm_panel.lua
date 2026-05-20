@@ -709,6 +709,15 @@ local function is_panel_api_or_sso(uri)
         or uri == "/xfercpsess"
         or uri == "/api"
         or starts_with(uri, "/api/")
+        -- WHM live-transfer file / rsync streams. cPanel's transfer tool
+        -- pulls account archives and tunnels rsync over these endpoints
+        -- on port 2087; routing them through the challenge layer breaks
+        -- the binary stream with a 300s upstream timeout, which the
+        -- receiving side reports as `failed to read up to 64 KB from a
+        -- file handle ... Is a directory`.
+        or starts_with(uri, "/acctxfer")
+        or starts_with(uri, "/cgi/transfer")
+        or starts_with(uri, "/cgi/live_tail_log")
 end
 
 local function is_human_entry_uri(uri)
