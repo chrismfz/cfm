@@ -48,10 +48,13 @@ func TestRunBypassCLI_AddPersistsEvenWhenBackendNil(t *testing.T) {
 	t.Cleanup(func() { firewall.DNATBypassWebPath = prev })
 
 	code := runBypassCLI([]string{"add", "84.54.49.205"}, firewall.DNATBypassScopeWeb, nil)
-	// reload step warns + exits non-zero because backend is nil, but the
-	// add itself must have persisted before that.
+	// reload step warns + exits 1 because backend is nil, but the add
+	// itself must have persisted before that.
 	if code == 2 {
 		t.Fatalf("unexpected validation failure: got %d", code)
+	}
+	if code != 1 {
+		t.Errorf("expected exit code 1 (no backend warning), got %d", code)
 	}
 	entries, _, err := firewall.LoadDNATBypass(firewall.DNATBypassWebPath)
 	if err != nil {

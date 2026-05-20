@@ -249,8 +249,8 @@ Fix the malformed line and re-run `cfm dnat [cpanel] on` to reload.
   the matching ports. The challenge layer, the WAF, the open-redirect
   guard, the panel-token transport, and any per-vhost policy do not
   apply to it. Treat the bypass file as a security-critical asset.
-- File permissions are `0640 root:root` (matching `cfm.allow`). Don't
-  loosen them.
+- File permissions are `0600 root:root`. Files created by the CLI are
+  `0600`; packaged template files are staged at `0640`. Don't loosen them.
 - Each entry should be a specific IP or a small CIDR. Avoid catch-all
   ranges like `0.0.0.0/0` or `::/0`; those would defeat the entire
   DNAT.

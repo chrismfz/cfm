@@ -52,18 +52,8 @@ func dnatScript(fam, tbl string, httpPort, httpsPort int, priority int) string {
 	// before NAT translation runs. First-match-wins in nftables prerouting
 	// guarantees a single hit clears the chain. See LoadDNATBypass docs
 	// for the file format.
-	var bypassBlock strings.Builder
 	entries, skipped, _ := firewall.LoadDNATBypass(firewall.DNATBypassWebPath)
-	for _, e := range entries {
-		matcher := "ip saddr"
-		if e.IsV6 {
-			matcher = "ip6 saddr"
-		}
-		fmt.Fprintf(&bypassBlock, "    %s %s accept comment \"cfm_dnat_bypass\"\n", matcher, e.Value)
-	}
-	for _, warn := range skipped {
-		fmt.Fprintf(&bypassBlock, "    # WARNING: cfm.dnat_bypass skipped entry: %s\n", warn)
-	}
+	bypassBlock := firewall.DNATBypassChainBlock(entries, skipped, "cfm.dnat_bypass")
 	return fmt.Sprintf(`table %s %s {
   chain prerouting {
     type nat hook prerouting priority %d; policy accept;
@@ -75,7 +65,7 @@ func dnatScript(fam, tbl string, httpPort, httpsPort int, priority int) string {
     udp dport 443 dnat to :%d
   }
 }
-`, fam, tbl, priority, bypassBlock.String(), httpPort, httpsPort, httpsPort)
+`, fam, tbl, priority, bypassBlock, httpPort, httpsPort, httpsPort)
 }
 
 type dnatAcceptRuleSpec struct {

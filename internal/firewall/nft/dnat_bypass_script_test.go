@@ -91,6 +91,9 @@ func TestDnatScript_BypassRulesPrecedeDNAT(t *testing.T) {
 	if bypassIdx < 0 {
 		t.Fatalf("expected bypass rule in web DNAT script:\n%s", script)
 	}
+	if !strings.Contains(script, `comment "cfm_dnat_bypass"`) {
+		t.Fatalf("bypass rule must carry cfm_dnat_bypass comment for operator diagnosis:\n%s", script)
+	}
 	if firstDNATIdx < 0 {
 		t.Fatalf("expected dport 80 DNAT in script:\n%s", script)
 	}

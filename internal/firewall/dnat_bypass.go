@@ -149,6 +149,12 @@ func parseBypassToken(token string) (DNATBypassEntry, error) {
 	}, nil
 }
 
+// DNATBypassComment is the nft rule comment attached to every bypass accept
+// rule so operators and the nftlib reconciler can identify them. It is a
+// single source of truth shared by both the nft (shell-out) and nftlib
+// (netlink-direct) backends.
+const DNATBypassComment = "cfm_dnat_bypass"
+
 // DNATBypassRuleExprs returns the nftables `add rule ... accept` lines that
 // implement the bypass for a given prerouting chain. The caller is expected
 // to inject these between the existing `iif "lo" accept` line and the dport
@@ -164,14 +170,35 @@ func DNATBypassRuleExprs(entries []DNATBypassEntry, family, tableName, chainName
 	}
 	rules := make([]string, 0, len(entries))
 	for _, e := range entries {
-		matcher := "ip saddr"
-		if e.IsV6 {
-			matcher = "ip6 saddr"
-		}
 		rules = append(rules, fmt.Sprintf(
-			"add rule %s %s %s %s %s accept comment \"cfm_dnat_bypass\"",
-			family, tableName, chainName, matcher, e.Value,
+			"add rule %s %s %s %s %s accept comment %q",
+			family, tableName, chainName, dnatBypassMatcherStr(e), e.Value, DNATBypassComment,
 		))
 	}
 	return rules
+}
+
+// DNATBypassChainBlock returns nft inline rule text for embedding inside a
+// `chain { ... }` table-block script (used by the nft shell-out backend's
+// dnatScript). Each bypass entry becomes an indented accept rule; skipped
+// entries become inline WARNING comments tagged with fileHint (the filename
+// fragment used in the warning, e.g. "cfm.dnat_bypass").
+func DNATBypassChainBlock(entries []DNATBypassEntry, skipped []string, fileHint string) string {
+	var b strings.Builder
+	for _, e := range entries {
+		fmt.Fprintf(&b, "    %s %s accept comment %q\n", dnatBypassMatcherStr(e), e.Value, DNATBypassComment)
+	}
+	for _, warn := range skipped {
+		fmt.Fprintf(&b, "    # WARNING: %s skipped entry: %s\n", fileHint, warn)
+	}
+	return b.String()
+}
+
+// dnatBypassMatcherStr returns the nft payload matcher prefix for an entry:
+// "ip saddr" for IPv4, "ip6 saddr" for IPv6.
+func dnatBypassMatcherStr(e DNATBypassEntry) string {
+	if e.IsV6 {
+		return "ip6 saddr"
+	}
+	return "ip saddr"
 }

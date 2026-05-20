@@ -43,10 +43,9 @@ func TestAppendBypassUnique_NormalisesCIDRBeforeDedupCheck(t *testing.T) {
 	if _, err := appendBypassUnique(path, "84.54.49.0/24"); err != nil {
 		t.Fatalf("first append: %v", err)
 	}
-	// 84.54.49.5/24 normalises to 84.54.49.0/24 so the dedupe layer
-	// should treat it as already present. But appendBypassUnique itself
-	// takes the canonical form from the caller — the CLI canonicalises
-	// before calling, so simulate that here.
+	// appendBypassUnique receives the already-canonical value (the CLI
+	// normalises CIDR host bits before calling). This tests that an exact
+	// canonical duplicate is rejected.
 	added, err := appendBypassUnique(path, "84.54.49.0/24")
 	if err != nil {
 		t.Fatalf("dup append: %v", err)
