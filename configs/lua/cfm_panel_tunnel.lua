@@ -141,15 +141,21 @@ end
 --   * 30s to establish the upstream TCP+TLS handshake.
 --   * 1h gap-between-bytes during the transfer (read AND send). Real
 --     rsync streams transmit data continuously when healthy; gaps of
---     hours indicate something is broken end-to-end, and pinning a
---     worker + an upstream cpsrvd fd for 24h to be sure was overkill.
---   * 60s "drain" window once one direction has finished: the other
---     thread still needs to flush in-flight TCP data and observe the
---     peer's FIN. In normal closure that takes milliseconds; we cap it
---     so a hung half-channel can't keep a worker pinned for an hour.
+--     hours indicate something is broken end-to-end. 1h also bounds
+--     worst-case worker pinning if one direction hangs while the
+--     other has already exited.
+--
+-- Note on bidirectional shutdown: we do NOT impose a separate shorter
+-- "drain" timeout once one direction has finished. An earlier version
+-- did, but it killed real rsync transfers — when the rsync ack stream
+-- from the receiver finishes quickly, the sender side can legitimately
+-- pause for minutes while it walks the file tree on the source disk
+-- building the incremental file list. The dominant direction
+-- (upstream → client carrying file data) must remain on the full
+-- IO_TIMEOUT_MS so a slow enumerator doesn't get truncated. The 1h
+-- IO timeout itself is the bound on hung-channel exposure.
 local CONNECT_TIMEOUT_MS = 30 * 1000
 local IO_TIMEOUT_MS      = 60 * 60 * 1000
-local DRAIN_TIMEOUT_MS   = 60 * 1000
 
 -- Step 1: hijack the raw client socket. After this point, nginx will not
 -- touch the request body or response on this connection; we own it.
@@ -211,30 +217,36 @@ end
 -- least one byte is available and returns up to N bytes — this is the
 -- right primitive for streaming, unlike receive(N) which insists on the
 -- full N bytes before returning.
+--
+-- Per-direction byte counter is logged at exit so operators can
+-- correlate "transfer stuck after X MB" in the rsync output with
+-- "pump <direction> exited after N bytes <reason>" in error.log. Log
+-- level WARN so the message lands in the default openresty/angie
+-- error_log (which ships at "warn"); NOTICE would be silently dropped.
 local function pump(src, dst, label)
+    local bytes = 0
     while true do
         local data, recv_err = src:receiveany(16384)
         if data and #data > 0 then
+            bytes = bytes + #data
             local _, snd_err = dst:send(data)
             if snd_err then
-                -- "closed" and "broken pipe" are expected at end of
-                -- session; don't pollute the error log with them.
-                if snd_err ~= "closed" and snd_err ~= "broken pipe" then
-                    ngx.log(ngx.NOTICE, "[cfm_panel_tunnel] ", label,
-                            " send: ", snd_err)
-                end
-                return
+                ngx.log(ngx.WARN, "[cfm_panel_tunnel] ", label,
+                        " send error after ", bytes, " bytes: ", snd_err)
+                return bytes
             end
         end
         if recv_err then
-            if recv_err ~= "closed" then
-                ngx.log(ngx.NOTICE, "[cfm_panel_tunnel] ", label,
-                        " recv: ", recv_err)
-            end
-            return
+            local reason = (recv_err == "closed") and "peer closed" or recv_err
+            ngx.log(ngx.WARN, "[cfm_panel_tunnel] ", label,
+                    " ended after ", bytes, " bytes: ", reason)
+            return bytes
         end
     end
 end
+
+ngx.log(ngx.WARN, "[cfm_panel_tunnel] start uri=", ngx.var.request_uri or "-",
+        " upstream=", host, ":", port, " ssl=", tostring(is_ssl))
 
 local co_up = ngx.thread.spawn(pump, client_sock, up_sock, "client->upstream")
 if not co_up then
@@ -252,37 +264,35 @@ if not co_down then
     return ngx.exit(500)
 end
 
--- Wait for the FIRST direction to finish. rsync sender mode is mostly
--- one-way (upstream → client carries the file data; client → upstream
--- carries small acks), so the two pumps don't necessarily finish at the
--- same instant. ngx.thread.wait returns (false, err) if the awaited
--- thread errored — we log but do not abort, because we still need to
--- drain the other direction.
+-- Wait for the first direction to finish. ngx.thread.wait returns
+-- (false, err) on Lua runtime error in the awaited thread; we log but
+-- keep going because the other direction still needs to drain.
 local ok, wait_err = ngx.thread.wait(co_up, co_down)
 if not ok then
-    ngx.log(ngx.NOTICE, "[cfm_panel_tunnel] first pump terminated with error: ", wait_err)
+    ngx.log(ngx.WARN, "[cfm_panel_tunnel] first pump aborted with lua error: ", tostring(wait_err))
 end
 
--- Now wait for the OTHER direction to drain. Closing up_sock here
--- immediately (as an earlier version did) was unsafe: if the lighter
--- ack stream finished first, we would have dropped in-flight file-data
--- bytes still being pumped from upstream to client. Instead, cap both
--- sockets at DRAIN_TIMEOUT_MS so a hung half-channel can't pin a worker
--- for IO_TIMEOUT_MS, then wait for both threads explicitly.
+-- Then wait for the OTHER direction to finish on its own. Earlier
+-- iterations of this code applied a shorter DRAIN_TIMEOUT here so a
+-- hung half-channel couldn't pin a worker for IO_TIMEOUT_MS — but that
+-- broke real rsync transfers, because the dominant data direction
+-- (upstream → client) can legitimately pause for minutes while the
+-- source side enumerates files. Leave both sockets on the original
+-- IO_TIMEOUT_MS (1h) — that's the bound on hung-channel exposure and
+-- it's well above any legitimate rsync gap-between-bytes.
 --
 -- ngx.thread.wait on an already-finished thread returns its result
--- immediately, so it's safe to call on whichever finished first.
-pcall(function() client_sock:settimeouts(CONNECT_TIMEOUT_MS, DRAIN_TIMEOUT_MS, DRAIN_TIMEOUT_MS) end)
-pcall(function() up_sock:settimeouts(CONNECT_TIMEOUT_MS, DRAIN_TIMEOUT_MS, DRAIN_TIMEOUT_MS) end)
+-- immediately, so calling it on whichever finished first is a no-op.
 local ok_up, err_up = ngx.thread.wait(co_up)
 if not ok_up then
-    ngx.log(ngx.NOTICE, "[cfm_panel_tunnel] client->upstream pump exited with error: ", err_up)
+    ngx.log(ngx.WARN, "[cfm_panel_tunnel] client->upstream pump aborted with lua error: ", tostring(err_up))
 end
 local ok_down, err_down = ngx.thread.wait(co_down)
 if not ok_down then
-    ngx.log(ngx.NOTICE, "[cfm_panel_tunnel] upstream->client pump exited with error: ", err_down)
+    ngx.log(ngx.WARN, "[cfm_panel_tunnel] upstream->client pump aborted with lua error: ", tostring(err_down))
 end
 
 -- Best-effort cleanup. The client socket is closed by nginx when the
 -- content phase returns.
 pcall(function() up_sock:close() end)
+ngx.log(ngx.WARN, "[cfm_panel_tunnel] done uri=", ngx.var.request_uri or "-")
