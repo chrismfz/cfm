@@ -208,6 +208,45 @@ nft 'insert rule inet cfm_panel_redirect prerouting ip saddr 84.54.49.205 counte
 nft list table inet cfm_panel_redirect    # watch packets/bytes increment
 ```
 
+### cPanel transfer still stuck at ~20% even with tunnel changes
+
+If `/acctxferrsync` still hangs after long-running tunnel fixes, the
+most common miss is not request buffering but **close propagation** on
+the return path:
+
+1. `cpsrvd` finishes streaming and sends FIN.
+2. proxy path does not propagate FIN/RST promptly to the WHM transfer
+   client.
+3. `whm_xfer_download-ssl` keeps polling an ESTAB socket waiting for
+   the terminal close marker, and WHM UI sits at "20% Homedir".
+
+Quick checks:
+
+- Confirm the source IP really hits the intended path (bypassed direct
+  `:2087` *or* tunneled `:12087`) with packet counters/logs.
+- Capture both ends during reproduction:
+
+```bash
+tcpdump -ni any host <peer_ip> and tcp port 2087
+tcpdump -ni any host <peer_ip> and tcp port 12087
+```
+
+You should see upstream FIN mirrored to the client side quickly. If
+not, the data pump can be correct while the session still appears hung.
+
+- Check for lingering-close behavior on the tunnel location. For these
+  transfer endpoints use `lingering_close off` so nginx/OpenResty
+  doesn't hold the connection open waiting for additional client bytes
+  after response completion.
+- If your environment has intermediate L4 devices (cloud LB, NAT GW,
+  IDS middleboxes), verify they are not normalizing away half-close
+  behavior on long-lived flows.
+
+When time-to-recovery matters, a source-IP DNAT bypass is a safe
+operational fallback for trusted transfer peers because it restores the
+exact direct-to-cpsrvd behavior while keeping mediation for all other
+sources.
+
 ### Skipped (unparseable) entries
 
 If the CLI's `add` won't accept an entry it's not in the file. If you
