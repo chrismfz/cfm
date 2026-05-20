@@ -264,35 +264,34 @@ if not co_down then
     return ngx.exit(500)
 end
 
--- Wait for the first direction to finish. ngx.thread.wait returns
--- (false, err) on Lua runtime error in the awaited thread; we log but
--- keep going because the other direction still needs to drain.
+-- Wait for the FIRST direction to finish. Once either side EOFs the tunnel
+-- is semantically complete — the HTTP/1.0 transport the client used keys
+-- on a TCP close to signal "response complete", so we must propagate that
+-- close in the opposite direction or the client (e.g. cPanel's
+-- whm_xfer_download-ssl) sits forever waiting for an HTTP response that
+-- has already finished at the byte level. Empirically observed: after
+-- cpsrvd sent the full 99 GB rsync stream and closed its end, the WHM
+-- UI hung at "20% restore" because our tunnel was still blocked waiting
+-- for rigel to close its (already-idle) write half.
+--
+-- Force-close BOTH sockets the moment one direction is done:
+--   * the surviving pump's next receiveany/send returns "closed" /
+--     "broken pipe" and the thread exits and logs its own byte count
+--     for diagnostics;
+--   * the close on the still-open peer's socket sends FIN, unblocking
+--     whatever HTTP state machine is on the other end.
+--
+-- OpenResty automatically kills any sub-threads still alive when the
+-- entry thread (this one) returns, so we do NOT call ngx.thread.wait on
+-- the second thread explicitly — that pattern would also crash with
+-- "already waited or killed" because ngx.thread.wait(a, b) consumes
+-- whichever thread finished first and a follow-up wait on the same
+-- thread is undefined behaviour in lua-nginx-module.
 local ok, wait_err = ngx.thread.wait(co_up, co_down)
 if not ok then
     ngx.log(ngx.WARN, "[cfm_panel_tunnel] first pump aborted with lua error: ", tostring(wait_err))
 end
 
--- Then wait for the OTHER direction to finish on its own. Earlier
--- iterations of this code applied a shorter DRAIN_TIMEOUT here so a
--- hung half-channel couldn't pin a worker for IO_TIMEOUT_MS — but that
--- broke real rsync transfers, because the dominant data direction
--- (upstream → client) can legitimately pause for minutes while the
--- source side enumerates files. Leave both sockets on the original
--- IO_TIMEOUT_MS (1h) — that's the bound on hung-channel exposure and
--- it's well above any legitimate rsync gap-between-bytes.
---
--- ngx.thread.wait on an already-finished thread returns its result
--- immediately, so calling it on whichever finished first is a no-op.
-local ok_up, err_up = ngx.thread.wait(co_up)
-if not ok_up then
-    ngx.log(ngx.WARN, "[cfm_panel_tunnel] client->upstream pump aborted with lua error: ", tostring(err_up))
-end
-local ok_down, err_down = ngx.thread.wait(co_down)
-if not ok_down then
-    ngx.log(ngx.WARN, "[cfm_panel_tunnel] upstream->client pump aborted with lua error: ", tostring(err_down))
-end
-
--- Best-effort cleanup. The client socket is closed by nginx when the
--- content phase returns.
 pcall(function() up_sock:close() end)
+pcall(function() client_sock:close() end)
 ngx.log(ngx.WARN, "[cfm_panel_tunnel] done uri=", ngx.var.request_uri or "-")
