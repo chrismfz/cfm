@@ -200,7 +200,7 @@ func TestPanelListenerConfig_TunnelEndpointPrecedesStreamingLocation(t *testing.
 	}
 	s := string(b)
 
-	tunnel := "location ~ ^/acctxferrsync { access_by_lua_block { return; } content_by_lua_file /var/lib/cfm/lua/cfm_panel_tunnel.lua; }"
+	tunnel := "location ~ ^/acctxferrsync(/|$) { access_by_lua_block { return; } content_by_lua_file /var/lib/cfm/lua/cfm_panel_tunnel.lua; }"
 	streaming := "location ~ ^/(acctxfer|cgi/live_tail_log|cgi/transfer) {"
 
 	const expectedCPanelListenerCount = 6

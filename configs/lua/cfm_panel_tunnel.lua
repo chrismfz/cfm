@@ -95,7 +95,22 @@
 -- The upstream we connect to is whatever $cfm_panel_origin resolves to
 -- — by construction in the listener template this is always 127.0.0.1
 -- on a panel port. The sslhandshake() call below skips cert verification
--- (third arg = false) because the target is loopback.
+-- (third arg = false) because the target is loopback; we assert that
+-- precondition explicitly below so a future template change that points
+-- $cfm_panel_origin off-host cannot silently become a MITM hole.
+--
+-- Limitations worth knowing about:
+--   * ngx.req.socket(true) does not work for HTTP/2 streams. These panel
+--     listeners use HTTP/1.1 (no `http2` on `listen`); if h2 is ever
+--     enabled, this handler will return 500 and we'll need a separate
+--     fix path (probably an h2-aware upstream module or stream-level
+--     SNI routing).
+--   * We forward the client's headers as-is and do NOT inject
+--     X-Forwarded-For / X-Real-IP. cpsrvd will see the request as
+--     originating from 127.0.0.1 in its audit log. For /acctxferrsync
+--     this is fine — cpsrvd authenticates via the WHM access-hash in
+--     the URL, not the client IP — but it's a behavioral difference
+--     from the regular HTTP-proxied panel paths.
 
 local origin = ngx.var.cfm_panel_origin or ""
 local scheme, host, port_str = origin:match("^(https?)://([^:/]+):?(%d*)$")
@@ -109,12 +124,19 @@ if port == nil or port == 0 then
     port = is_ssl and 443 or 80
 end
 
--- Timeouts: 30s to establish the upstream TCP+TLS handshake, 24h once
--- bytes are flowing. The transfer of a multi-GB home directory over a
--- saturated 100 Mb link can legitimately take several hours, and we
--- don't want to chop it off mid-rsync.
+-- Timeouts:
+--   * 30s to establish the upstream TCP+TLS handshake.
+--   * 1h gap-between-bytes during the transfer (read AND send). Real
+--     rsync streams transmit data continuously when healthy; gaps of
+--     hours indicate something is broken end-to-end, and pinning a
+--     worker + an upstream cpsrvd fd for 24h to be sure was overkill.
+--   * 60s "drain" window once one direction has finished: the other
+--     thread still needs to flush in-flight TCP data and observe the
+--     peer's FIN. In normal closure that takes milliseconds; we cap it
+--     so a hung half-channel can't keep a worker pinned for an hour.
 local CONNECT_TIMEOUT_MS = 30 * 1000
-local IO_TIMEOUT_MS      = 24 * 60 * 60 * 1000
+local IO_TIMEOUT_MS      = 60 * 60 * 1000
+local DRAIN_TIMEOUT_MS   = 60 * 1000
 
 -- Step 1: hijack the raw client socket. After this point, nginx will not
 -- touch the request body or response on this connection; we own it.
@@ -137,8 +159,17 @@ if not ok then
 end
 
 if is_ssl then
+    -- Defence-in-depth: verify=false is only safe when the upstream is
+    -- loopback. If a future template change ever points $cfm_panel_origin
+    -- at a non-loopback host, refuse to proceed rather than silently
+    -- accept any cert.
+    if host ~= "127.0.0.1" and host ~= "localhost" and host ~= "::1" then
+        ngx.log(ngx.ERR, "[cfm_panel_tunnel] refusing to skip TLS verification for non-loopback origin: ", origin)
+        pcall(function() up_sock:close() end)
+        return ngx.exit(500)
+    end
     -- Args: reused_session (nil = always do a fresh handshake), server_name
-    -- for SNI, verify (false because target is loopback).
+    -- for SNI, verify (false because target is loopback per the guard above).
     local session, hs_err = up_sock:sslhandshake(nil, host, false)
     if not session then
         ngx.log(ngx.ERR, "[cfm_panel_tunnel] upstream sslhandshake failed: ", hs_err)
@@ -193,13 +224,26 @@ end
 local co_up   = ngx.thread.spawn(pump, client_sock, up_sock,   "client->upstream")
 local co_down = ngx.thread.spawn(pump, up_sock,     client_sock, "upstream->client")
 
--- ngx.thread.wait returns as soon as ANY of the spawned threads finishes.
--- That's the right behaviour here: rsync's protocol cleanly closes one
--- direction at end-of-session, and once that happens we want to tear the
--- other half down too rather than wait IO_TIMEOUT_MS for it to notice.
+-- Wait for the FIRST direction to finish. rsync sender mode is mostly
+-- one-way (upstream → client carries the file data; client → upstream
+-- carries small acks), so the two pumps don't necessarily finish at the
+-- same instant.
 ngx.thread.wait(co_up, co_down)
 
--- Best-effort cleanup. Closing the upstream socket also unblocks any
--- still-pending receive in the partner thread by surfacing a "closed"
--- error to it.
+-- Now wait for the OTHER direction to drain. Closing up_sock here
+-- immediately (as an earlier version did) was unsafe: if the lighter
+-- ack stream finished first, we would have dropped in-flight file-data
+-- bytes still being pumped from upstream to client. Instead, cap both
+-- sockets at DRAIN_TIMEOUT_MS so a hung half-channel can't pin a worker
+-- for IO_TIMEOUT_MS, then wait for both threads explicitly.
+--
+-- ngx.thread.wait on an already-finished thread returns its result
+-- immediately, so it's safe to call on whichever finished first.
+pcall(function() client_sock:settimeouts(CONNECT_TIMEOUT_MS, DRAIN_TIMEOUT_MS, DRAIN_TIMEOUT_MS) end)
+pcall(function() up_sock:settimeouts(CONNECT_TIMEOUT_MS, DRAIN_TIMEOUT_MS, DRAIN_TIMEOUT_MS) end)
+ngx.thread.wait(co_up)
+ngx.thread.wait(co_down)
+
+-- Best-effort cleanup. The client socket is closed by nginx when the
+-- content phase returns.
 pcall(function() up_sock:close() end)
