@@ -201,7 +201,7 @@ liveable on real hosting traffic.
 #### [2] **WAF** — *block known attack signatures before they reach the app*
 
 The OpenResty / Angie in-path layer runs a fast Lua rule pipeline —
-**58 detectors across 9 rule-ID groups (1xx-9xx)** with severity
+**66 detectors across 9 rule-ID groups (1xx-9xx)** with severity
 aggregation and per-rule modes (`disabled / logonly / challenge /
 block`). Inspects URI, query, body (per-Content-Type budget up to
 32K JSON) and headers for SQLi, XSS, RFI, command injection,
@@ -924,7 +924,7 @@ The shipped `openresty.conf` / `angie.conf` Lua block ties the request path into
 - Challenge cookie validation
 - Real-time cfm decision socket query
 - Optional cache via `shared_dict`
-- Per-request WAF dispatch (58 detectors, severity aggregation, per-vhost exclusions)
+- Per-request WAF dispatch (66 detectors, severity aggregation, per-vhost exclusions)
 
 The shared self-IP snapshot (`/var/lib/cfm/lua/cfm_self_ips.lua` — atomic `.tmp` + rename) keeps nft and Lua aligned on what counts as "self traffic", so step 0a local-origin bypass behaves identically across layers. `cfm.lua` also consumes `[global] IGNORE_IPS / IGNORE_NETS` via `/var/lib/cfm/lua/cfm_ignore_nets.lua`, so an operator's "ignore my own subnet" config applies to the WAF too — not just the post-fact challenge engine.
 
@@ -938,7 +938,7 @@ The `webdetector_challenge_rules.conf` system supports per-IP, per-vhost, per-UA
 
 ## 9. Web Application Firewall (WAF)
 
-CFM ships a fast in-path Lua WAF that inspects every dynamic request before it reaches origin — URI, query, body, and headers. **58 detectors across 9 rule-ID groups (1xx-9xx)** with stable IDs, severity aggregation (all rules run, strongest action wins, order-independent), and per-rule modes (`disabled | logonly | challenge | block`). Detectors are FP-tested against actual production traffic, not generic CRS lists.
+CFM ships a fast in-path Lua WAF that inspects every dynamic request before it reaches origin — URI, query, body, and headers. **66 detectors across 9 rule-ID groups (1xx-9xx)** with stable IDs, severity aggregation (all rules run, strongest action wins, order-independent), and per-rule modes (`disabled | logonly | challenge | block`). Detectors are FP-tested against actual production traffic, not generic CRS lists.
 
 > Full reference: [`docs/waf.md`](docs/waf.md) — every rule, the operator playbook, per-vhost exclusions, hit-rate measurement pipeline, external-reference audit (libinjection / Coraza / CRS comparison), and the 2026-05 production-data triage.
 
@@ -949,7 +949,7 @@ CFM ships a fast in-path Lua WAF that inspects every dynamic request before it r
 | 1xx | 100-199 | Path / traversal | `../etc/passwd`, double-encoded LFI, oversized URL segments |
 | 2xx | 200-299 | Client identity | Bad-UA scoring (sqlmap, zgrab, fake legacy IE/Trident), empty-UA + sensitive-URI combos |
 | 3xx | 300-399 | Injection | SQLi, XSS, RCE / shell command params, PHP wrappers (`php://`, `phar://`, `data://`), base64-encoded payloads, XXE, Shellshock, Java deserialization, **Log4Shell + evasion variants** (`${jndi:`, `${${::-j}…`, `${lower:j}…`, `${env:` / `sys:` / `main:` / `date:` / `base64:`) |
-| 4xx | 400-499 | Upload / malware | Upload filename + content rules, PHP webshell body scoring, script obfuscation (eval / atob / chr-storm / hex2bin), polyglot uploads, known webshell paths (`/c99.php`, `/r57.php`, `/wso.php`, etc.), **PHP dropper / canary family** (split-string exec-test probes, wget+curl fallback droppers with `filesize()` integrity check, `!success!`/`!ended!` automation markers, `<fs>` filesize recon, `@touch()` mtime backdating) |
+| 4xx | 400-499 | Upload / malware | Upload filename + content rules, PHP webshell body scoring, script obfuscation (eval / atob / chr-storm / hex2bin), polyglot uploads, known webshell paths (`/c99.php`, `/r57.php`, `/wso.php`, etc.), **PHP dropper / canary family** (split-string exec-test probes, wget+curl fallback droppers with `filesize()` integrity check, `!success!`/`!ended!` automation markers, `<fs>` filesize recon, `@touch()` mtime backdating), **backdoor / obfuscation family** (`.htaccess` poisoning, char-pool function-name builders, full-body image/PDF polyglots, variable-fed eval loaders with large base64 literals, superglobal-as-callable webshells, concat-funcname eval, multi-decode chains, encoded `<?php` openers) |
 | 5xx | 500-599 | Auth abuse | WordPress login bursts, XML-RPC multicall / pingback / POST flood, distributed credential-stuffing |
 | 6xx | 600-699 | Header / protocol anomaly | Control chars, IP-as-Host, CRLF injection, HTTP smuggling (CL+TE coexist, multi-CL), Range abuse (Apache Killer CVE-2011-3192), header flood, content-type anomaly, **bad UTF-8 encoding** (overlong / surrogate / truncated multibyte) |
 | 7xx | 700-799 | SSRF / C2 | `file://`, `gopher://`, `dict://`, octal-IP-in-URL, paste-site exfil hostnames (pastebin, webhook.site, ngrok, transfer.sh) |

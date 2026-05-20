@@ -222,6 +222,19 @@ local CFG = {
   rule_php_filesize_recon      = "logonly", -- <fs>…</fs> + filesize() + SCRIPT_FILENAME recon
   rule_php_touch_antiforensic  = "logonly", -- @touch($p, <literal-unix-ts>) mtime backdating
 
+  -- ── Backdoor / obfuscation family (430-437) ──────────────────────────────
+  -- Tier 1 (this batch) covers the highest-yield gaps observed in production:
+  -- .htaccess poisoning, char-pool obfuscator output, deep polyglots, and the
+  -- generic eval-loader shape. All ship at logonly per the playbook.
+  rule_htaccess_poisoning         = "logonly", -- .htaccess / .user.ini directive injection in upload bodies
+  rule_php_char_pool_obfuscation  = "logonly", -- $pool[N].$pool[N].$pool[N] function-name extraction
+  rule_php_polyglot_full_body     = "logonly", -- image/PDF/ZIP magic + <?php anywhere in body
+  rule_php_eval_loader_b64        = "logonly", -- variable-fed eval/assert/call_user_func + >=200-char b64 literal
+  rule_php_superglobal_callable   = "logonly", -- $_GET[c]( / $_POST[c]( / $_SERVER[HTTP_X_…]( minimalist webshell
+  rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
+  rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
+  rule_php_encoded_opener         = "logonly", -- encoded `<?php` opener (b64 PD9waHA / URL %3C%3Fphp / HTML entity / JS escape)
+
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
 
@@ -384,6 +397,14 @@ local RULE_IDS = {
   rule_php_dropper_markers     = 423,
   rule_php_filesize_recon      = 424,
   rule_php_touch_antiforensic  = 425,
+  rule_htaccess_poisoning         = 430,
+  rule_php_char_pool_obfuscation  = 431,
+  rule_php_polyglot_full_body     = 432,
+  rule_php_eval_loader_b64        = 433,
+  rule_php_superglobal_callable   = 434,
+  rule_php_concat_funcname_eval   = 435,
+  rule_php_decode_chain           = 436,
+  rule_php_encoded_opener         = 437,
 
   -- 5xx auth abuse
   rule_auth_burst              = 501,
@@ -1294,6 +1315,102 @@ function _M.check(ctx)
     end
   end
 
+  -- ── 52) .htaccess / .user.ini poisoning (430) ────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_htaccess_poisoning, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_htaccess_poisoning(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_htaccess_poisoning) then goto done end
+      end
+    end
+  end
+
+  -- ── 53) PHP char-pool function-name builder (431) ────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_char_pool_obfuscation, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_char_pool_obfuscation(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_char_pool_obfuscation) then goto done end
+      end
+    end
+  end
+
+  -- ── 54) PHP polyglot full-body (432) ─────────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_polyglot_full_body, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_polyglot_full_body(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_polyglot_full_body) then goto done end
+      end
+    end
+  end
+
+  -- ── 55) PHP eval-loader with large b64 literal (433) ─────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_eval_loader_b64, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_eval_loader_b64(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_eval_loader_b64) then goto done end
+      end
+    end
+  end
+
+  -- ── 56) PHP superglobal-fed callable (434) ───────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_superglobal_callable, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_superglobal_callable(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_superglobal_callable) then goto done end
+      end
+    end
+  end
+
+  -- ── 57) PHP concat function-name eval (435) ──────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_concat_funcname_eval, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_concat_funcname_eval(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_concat_funcname_eval) then goto done end
+      end
+    end
+  end
+
+  -- ── 58) PHP multi-decode-chain proximity scorer (436) ────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_decode_chain, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_decode_chain(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_decode_chain) then goto done end
+      end
+    end
+  end
+
+  -- ── 59) PHP encoded `<?php` opener (437) ─────────────────────────────────
+  do
+    local mode = rule_mode(CFG.rule_php_encoded_opener, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_php_encoded_opener(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_encoded_opener) then goto done end
+      end
+    end
+  end
+
   ::done::
   if final_sev == 0 then
     return false, nil, nil, nil
@@ -1326,6 +1443,7 @@ _M.WAF_HIGH_RISK_REASONS = {
   WAF_XXE                = true,
   WAF_CVE                = true,
   WAF_DROPPER            = true,
+  WAF_BACKDOOR           = true,
 }
 
 function _M.is_high_risk_reason(reason)
