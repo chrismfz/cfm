@@ -185,3 +185,60 @@ func TestPanelListenerConfig_DirectAdminListenerUsesTLSOriginAndHeaders(t *testi
 		t.Fatalf("expected https forwarded proto in decide/challenge/verify/root locations for directadmin block")
 	}
 }
+
+// TestPanelListenerConfig_TunnelEndpointPrecedesStreamingLocation verifies
+// that the /acctxferrsync bidirectional-tunnel location is wired into every
+// cPanel-facing server block AND placed before the broader /acctxfer
+// streaming-location regex, so nginx's first-match-wins regex semantics
+// route /acctxferrsync to the Lua tunnel (cfm_panel_tunnel.lua) instead of
+// the HTTP proxy fallback. The DirectAdmin listener (12222) intentionally
+// does not get the tunnel because DA does not expose /acctxferrsync.
+func TestPanelListenerConfig_TunnelEndpointPrecedesStreamingLocation(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm-panel-listeners.conf.in")
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	s := string(b)
+
+	tunnel := "location ~ ^/acctxferrsync(/|$) { access_by_lua_block { return; } content_by_lua_file /var/lib/cfm/lua/cfm_panel_tunnel.lua; }"
+	streaming := "location ~ ^/(acctxfer|cgi/live_tail_log|cgi/transfer) {"
+
+	const expectedCPanelListenerCount = 6
+	if got := strings.Count(s, tunnel); got != expectedCPanelListenerCount {
+		t.Fatalf("expected tunnel location on %d cPanel listeners, got %d", expectedCPanelListenerCount, got)
+	}
+	if got := strings.Count(s, streaming); got != expectedCPanelListenerCount {
+		t.Fatalf("expected streaming-fallback location on %d cPanel listeners, got %d", expectedCPanelListenerCount, got)
+	}
+
+	// In each server block tunnel must appear BEFORE the streaming regex,
+	// otherwise nginx will match the broader pattern first and route
+	// /acctxferrsync through the HTTP proxy (which deadlocks).
+	searchFrom := 0
+	for i := 0; i < expectedCPanelListenerCount; i++ {
+		tunnelAt := strings.Index(s[searchFrom:], tunnel)
+		if tunnelAt < 0 {
+			t.Fatalf("could not locate tunnel occurrence %d", i+1)
+		}
+		tunnelAt += searchFrom
+		streamingAt := strings.Index(s[tunnelAt:], streaming)
+		if streamingAt < 0 {
+			t.Fatalf("missing streaming-fallback location after tunnel occurrence %d", i+1)
+		}
+		streamingAt += tunnelAt
+		searchFrom = streamingAt + len(streaming)
+	}
+
+	// DA block must NOT have the tunnel — DA doesn't use this endpoint.
+	daIdx := strings.Index(s, "listen 12222 ssl;")
+	if daIdx < 0 {
+		t.Fatalf("directadmin listener start not found")
+	}
+	daBlock := s[daIdx:]
+	if nextServer := strings.Index(daBlock[len("listen 12222 ssl;"):], "server {"); nextServer > 0 {
+		daBlock = daBlock[:len("listen 12222 ssl;")+nextServer]
+	}
+	if strings.Contains(daBlock, tunnel) {
+		t.Fatalf("directadmin listener should not have the cpanel rsync tunnel location")
+	}
+}
