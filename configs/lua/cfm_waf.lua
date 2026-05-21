@@ -764,7 +764,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_bad_utf8, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_bad_utf8(args, body, get_norm_ab())
+      local tag = det.detect_bad_utf8(args, body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_BAD_UTF8:" .. tag, ttl, mode, RULE_IDS.rule_bad_utf8) then goto done end
@@ -777,6 +777,18 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_ssrf, "logonly")
     if mode ~= "disabled" then
       local tag = det.detect_ssrf_proto(args, body, get_norm_ab())
+      -- WP All Import (`pmxi-*`), WPvivid, UpdraftPlus, BackWPup, and
+      -- similar plugins legitimately store `ftp://` URLs as plugin
+      -- configuration. The admin then revisits those settings pages and
+      -- the saved URL is echoed in query strings / hidden form fields,
+      -- which trips SSRF_FTP — but the FTP URL is plugin state, not an
+      -- attacker-controlled fetch target. Suppress that one tag on
+      -- /wp-admin/ paths; the other SSRF tags (FILE, GOPHER, DICT,
+      -- LDAP, TFTP, STRATUM, SFTP, IP-obfuscation flavours) still fire
+      -- because no benign WP plugin stores those.
+      if tag == "SSRF_FTP" and uri:find("^/wp%-admin/", 1, false) then
+        tag = nil
+      end
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_SSRF:" .. tag, ttl, mode, RULE_IDS.rule_ssrf) then goto done end
@@ -1402,7 +1414,19 @@ function _M.check(ctx)
   -- ── 59) PHP encoded `<?php` opener (437) ─────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_php_encoded_opener, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
+    -- WPCode, Code Snippets, Insert PHP Code Snippet, and similar
+    -- "save a PHP snippet" plugins POST encoded `<?php` bodies to
+    -- /wp-admin/admin-ajax.php or /wp-admin/admin.php on every save.
+    -- That's legitimate plugin behavior, not a backdoor upload —
+    -- production data showed real Greek WP admins on Chrome 148
+    -- residential IPs being challenged here. /wp-admin/ requests
+    -- have already passed WP's cookie-auth gate before reaching us,
+    -- so we suppress this detector on that path. Web shells delivered
+    -- via theme/plugin file editors, upload exploits, or vulnerable
+    -- public endpoints still arrive on non-/wp-admin/ paths where
+    -- this rule remains active.
+    local wp_admin = uri:find("^/wp%-admin/", 1, false) ~= nil
+    if mode ~= "disabled" and body_inspect_ok and not wp_admin then
       local tag = det.detect_php_encoded_opener(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec

@@ -1456,11 +1456,12 @@ do
   end
 end
 
--- ── Test 75: rule_bad_utf8 — invalid lead byte (overlong dot attempt) ───────
--- "." is U+002E (1 byte). The 2-byte overlong form is 0xC0 0xAE — but 0xC0
--- itself is never a valid UTF-8 lead byte (RFC 3629 restricts 2-byte leads
--- to 0xC2..0xDF precisely to forbid this overlong class). detect_bad_utf8
--- flags it as UTF8_BAD_LEAD, the canonical answer for this attack pattern.
+-- ── Test 75: rule_bad_utf8 — 2-byte overlong (0xC0 lead) ───────────────────
+-- "." is U+002E (1 byte). The 2-byte overlong form is 0xC0 0xAE — RFC 3629
+-- reserves 0xC0/0xC1 specifically because they can ONLY produce overlong
+-- encodings of ASCII. detect_bad_utf8 has an explicit catch for that lead
+-- range: if followed by a valid continuation (0x80..0xBF), it's always
+-- an encoding-bypass primitive and returns UTF8_OVERLONG.
 do
   disable_all_rules()
   waf.set_rule("rule_bad_utf8", "logonly")
@@ -1468,31 +1469,30 @@ do
   local hit, reason, _ttl, action, _hits, waf_rule_id = waf.check(fresh_ctx({
     args = "q=\xC0\xAE\xC0\xAE/etc/passwd",
   }))
-  check(hit == true,                                "75: bad_utf8 overlong — hit=true")
-  check(reason and reason:sub(1, 12) == "WAF_BAD_UTF8", "75: bad_utf8 — reason prefix")
+  check(hit == true,                                "75: bad_utf8 2-byte overlong — hit=true")
+  check(reason == "WAF_BAD_UTF8:UTF8_OVERLONG",     "75: bad_utf8 — exact tag UTF8_OVERLONG (got " .. tostring(reason) .. ")")
   check(action == "logonly",                        "75: bad_utf8 — action=logonly")
   check(waf_rule_id == 611,                         "75: bad_utf8 — rule_id=611")
 end
 
--- ── Test 76: rule_bad_utf8 — bad continuation byte ─────────────────────────
--- 0xE2 announces a 3-byte sequence (need=2 continuations). We follow it with
--- one valid continuation (0x82) and then the args/body separator '&' (0x26)
--- which is NOT a continuation byte (0x80..0xBF). The detector walks past
--- the lead byte, accepts the first continuation, then rejects '&' on the
--- second — emits UTF8_BAD_CONT specifically.
---
--- Note: the cap-boundary skip at detect_bad_utf8 (`if i > n - 3 then return
--- nil`) does NOT fire here — the lead byte sits at position 4 in a 6-byte
--- buffer (`"x=a\xE2\x82&"`), well inside `n - 3`. UTF8_TRUNC would only
--- fire if the lead landed in the last 3 bytes of the buffer.
+-- ── Test 76: rule_bad_utf8 — bad continuation byte in args must NOT fire ──
+-- 0xE2 announces a 3-byte sequence with one valid continuation (0x82)
+-- and then '&' (0x26, not a continuation). In the original strict design
+-- this returned UTF8_BAD_CONT — but real-world data showed this exact
+-- shape coming from Facebook's facebookexternalhit crawler when ad
+-- landing-page URLs were truncated mid-percent-encoded-UTF-8 by FB's
+-- link-preview infrastructure (47 FPs on mformama.gr in a 4-day window,
+-- all from AS32934). BAD_CONT no longer signals an attack; the rule
+-- only fires on the three encoding-bypass primitives (OVERLONG /
+-- SURROGATE / OUT_OF_RANGE). The walker still advances past stray
+-- continuation bytes — see the cont_bad path in utf8_walk.
 do
   disable_all_rules()
   waf.set_rule("rule_bad_utf8", "logonly")
 
-  local hit, reason = waf.check(fresh_ctx({ args = "x=a\xE2\x82" }))
-  check(hit == true, "76: bad_utf8 bad_cont — hit=true")
-  check(reason == "WAF_BAD_UTF8:UTF8_BAD_CONT",
-        "76: bad_utf8 bad_cont — exact tag (got " .. tostring(reason) .. ")")
+  local hit, reason = waf.check(fresh_ctx({ args = "x=a\xE2\x82&y" }))
+  check(hit == false,
+        "76: bad_utf8 — stray bad-cont in args must NOT fire (got reason=" .. tostring(reason) .. ")")
 end
 
 -- ── Test 77: rule_bad_utf8 — clean ASCII + valid UTF-8 must not fire ────────
@@ -1505,6 +1505,132 @@ do
     args = "name=" .. "\xCE\x9A\xCE\xB1\xCE\xBB\xCE\xB7\xCE\xBC\xCE\xAD\xCF\x81\xCE\xB1",
   }))
   check(hit == false, "77: bad_utf8 — clean Greek UTF-8 does not fire")
+end
+
+-- ── Test 77a: rule_bad_utf8 — legacy single-byte form encoding in body -----
+-- Production data: 770+ FPs in a 4-day window because pre-charset form
+-- posts carry single-byte ISO-8859-7 bytes (Π → %D0 → 0xD0). The raw
+-- 0xD0 looks like a UTF-8 2-byte lead expecting a continuation; the
+-- next byte is `&` (form separator). The relaxed walker now skips
+-- past that stray sequence — only the three attack-specific tags
+-- ever fire.
+do
+  disable_all_rules()
+  waf.set_rule("rule_bad_utf8", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    body   = "field=\xD0&x=1",
+    method = "POST",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
+  }))
+  check(hit == false, "77a: bad_utf8 — ISO-8859-7 single-byte body must NOT fire (got reason=" .. tostring(reason) .. ")")
+end
+
+-- ── Test 77b: rule_bad_utf8 — multipart binary body must NOT fire ----------
+-- WP media library uploads, plugin/theme installer zips, CF7 attachments
+-- all carry raw binary bytes inside multipart/form-data. Those bytes are
+-- never UTF-8. Production data: 377 FPs on /wp-admin/async-upload.php
+-- alone in a 4-day window. Body-pass relaxed mode silences these.
+do
+  disable_all_rules()
+  waf.set_rule("rule_bad_utf8", "logonly")
+
+  -- A few raw bytes from a JPEG header (0xFF 0xD8 0xFF 0xE0 …).
+  local jpeg = "------boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xFF\xDB\x00\x43\x00\xFF\xFF\xFF\r\n------boundary--\r\n"
+  local hit, reason = waf.check(fresh_ctx({
+    body   = jpeg,
+    method = "POST",
+    headers = { ["content-type"] = 'multipart/form-data; boundary="----boundary"' },
+  }))
+  check(hit == false, "77b: bad_utf8 — multipart JPEG body must NOT fire (got reason=" .. tostring(reason) .. ")")
+end
+
+-- ── Test 77c: rule_bad_utf8 — OVERLONG in BODY still fires (attack) --------
+-- The whole point of rule 611 is catching overlong-encoding bypass
+-- primitives (e.g. `%C0%AF` for `/` to defeat substring path-traversal
+-- matchers). The body-relaxed pass MUST still return UTF8_OVERLONG when
+-- it sees an attack-specific tag, even though it suppresses the noisy
+-- BAD_LEAD/BAD_CONT/TRUNC tags.
+--
+-- 0xE0 0x80 0xAF is a 3-byte sequence whose codepoint is 0x2F ("/") —
+-- overlong because "/" only needs 1 byte. The walker reads 0xE0 (3-byte
+-- lead, need=2), 0x80 (valid continuation), 0xAF (valid continuation),
+-- computes cp=0x2F, sees cp < min_cp (0x800) → returns UTF8_OVERLONG.
+do
+  disable_all_rules()
+  waf.set_rule("rule_bad_utf8", "logonly")
+
+  local hit, reason = waf.check(fresh_ctx({
+    body   = "redir=\xE0\x80\xAFetc/passwd",
+    method = "POST",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
+  }))
+  check(hit == true,                              "77c: bad_utf8 — overlong-slash in body must still fire")
+  check(reason == "WAF_BAD_UTF8:UTF8_OVERLONG",   "77c: bad_utf8 — exact tag UTF8_OVERLONG (got " .. tostring(reason) .. ")")
+end
+
+-- ── Test 77d: rule_ssrf — SSRF_FTP suppressed on /wp-admin/ ---------------
+-- Real Greek admins using WP All Import (pmxi-*) plugins were challenged
+-- because the plugin stores ftp:// URLs in its options table. The carve
+-- suppresses only the SSRF_FTP tag on /wp-admin/* paths; other SSRF tags
+-- (FILE, GOPHER, DICT, LDAP, etc.) still fire because no benign WP plugin
+-- stores those schemes as plugin state.
+do
+  disable_all_rules()
+  waf.set_rule("rule_ssrf", "logonly")
+
+  -- SSRF_FTP on /wp-admin/ — must NOT fire.
+  local hit = waf.check(fresh_ctx({
+    uri  = "/wp-admin/admin.php",
+    args = "page=pmxi-admin-manage&id=11&action=options&import_from=ftp://example.com/data.csv",
+  }))
+  check(hit == false, "77d: ssrf — SSRF_FTP on /wp-admin/ must NOT fire")
+
+  -- SSRF_FTP on a public path — must still fire.
+  local hit2, reason2 = waf.check(fresh_ctx({
+    uri  = "/page",
+    args = "url=ftp://attacker.com/x",
+  }))
+  check(hit2 == true,                            "77d: ssrf — SSRF_FTP on public path must still fire")
+  check(reason2 == "WAF_SSRF:SSRF_FTP",          "77d: ssrf — exact tag SSRF_FTP (got " .. tostring(reason2) .. ")")
+
+  -- SSRF_FILE on /wp-admin/ — must still fire (only SSRF_FTP is carved out).
+  local hit3, reason3 = waf.check(fresh_ctx({
+    uri  = "/wp-admin/admin.php",
+    args = "page=foo&path=file:///etc/passwd",
+  }))
+  check(hit3 == true,                            "77d: ssrf — SSRF_FILE on /wp-admin/ must still fire")
+  check(reason3 == "WAF_SSRF:SSRF_FILE",         "77d: ssrf — exact tag SSRF_FILE (got " .. tostring(reason3) .. ")")
+end
+
+-- ── Test 77e: rule_php_encoded_opener — suppressed on /wp-admin/ ----------
+-- WPCode / Code Snippets / Insert PHP Code Snippet plugins save admin-
+-- authored PHP snippets via /wp-admin/admin-ajax.php and /wp-admin/admin.php.
+-- The save body legitimately carries the encoded `<?php` opener; the rule
+-- can't tell that from a webshell upload without context, so we skip it
+-- on /wp-admin/* where WP cookie-auth has already gated the request.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "logonly")
+
+  -- Encoded `<?php` in body of /wp-admin/ POST — must NOT fire.
+  local hit = waf.check(fresh_ctx({
+    uri    = "/wp-admin/admin-ajax.php",
+    method = "POST",
+    body   = "action=wpcode_save&snippet=PD9waHAgZWNobyAnaGVsbG8nOw==",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
+  }))
+  check(hit == false, "77e: php_encoded_opener on /wp-admin/ must NOT fire")
+
+  -- Encoded `<?php` in body of a public upload endpoint — must still fire.
+  local hit2, reason2 = waf.check(fresh_ctx({
+    uri    = "/uploads/process.php",
+    method = "POST",
+    body   = "file=PD9waHAgZWNobyAnaGVsbG8nOw==",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
+  }))
+  check(hit2 == true,                                "77e: php_encoded_opener on public path must still fire")
+  check(reason2 == "WAF_BACKDOOR:B64_PHP_OPENER",    "77e: php_encoded_opener — exact tag (got " .. tostring(reason2) .. ")")
 end
 
 -- ── Test 78: rule_content_type_anomaly — quoted WebKit boundary must NOT fire
