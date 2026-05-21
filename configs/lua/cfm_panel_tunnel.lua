@@ -69,7 +69,14 @@
 --   }
 --
 -- Currently tunneled:
---   /acctxferrsync     — cPanel WHM live-transfer rsync stream
+--   /acctxferrsync     — cPanel WHM live-transfer rsync stream (homedir)
+--   /acctxferdsync     — cPanel WHM live-transfer doveadm sync stream
+--                        (mail accounts via dsync_cpsrvd_client). Same
+--                        protocol shape as rsync — GET with binary body
+--                        on the same socket — so it hits the same
+--                        "nginx parses GET as bodyless, never reads
+--                        client protocol bytes" pathology if proxied
+--                        through the normal HTTP path.
 --
 -- Candidates if you ever hit the same symptom on other panels:
 --   - DirectAdmin admin-area transfer endpoints that do bidirectional
