@@ -140,6 +140,22 @@ start_capture() {
 
   : "${PANEL_PORTS:=$( [[ $ROLE == source ]] && echo '2087 12087' || echo '2087' )}"
 
+  # Pcap rotation: cap each pcap at PCAP_FILESIZE_MB (default 100), keep
+  # PCAP_FILES (default 6) most recent. Long transfers can easily push
+  # multi-GB through a single capture; without rotation the box runs out
+  # of disk before the bug shows up, and we ship monsters that no one
+  # wants to upload. With rotation the directory ends up with files
+  # ${role}-ext.pcap0..5 (latest is whichever has the newest mtime).
+  : "${PCAP_FILESIZE_MB:=100}"
+  : "${PCAP_FILES:=6}"
+
+  # Strace verbosity. A 28-second strace of a busy whm_xfer_download-ssl
+  # produced a 1.5 GB log last time because -s 256 dumped the contents
+  # of every TLS record. We only need enough to see syscall flow and
+  # blocked syscalls — knock the string-cap down hard and let the user
+  # bump it via env if they need byte-level forensic.
+  : "${STRACE_STRSIZE:=32}"
+
   # Build BPF and ss filter expressions from PANEL_PORTS
   local bpf_ports=""
   local ss_filter=""
@@ -155,8 +171,13 @@ start_capture() {
   # ---- Layer 1: wire ----
   # External-NIC pcap. -i any catches packets on every interface; we filter
   # to peer + panel ports to keep noise out. -U flushes per-packet so a
-  # `stop` mid-flight still gets a clean trailing block.
-  tcpdump -ni any -s0 -U -w "$session_dir/${ROLE}-ext.pcap" \
+  # `stop` mid-flight still gets a clean trailing block. -C and -W rotate
+  # at PCAP_FILESIZE_MB megabytes and keep PCAP_FILES files, so a long
+  # capture stays bounded; the latest rotation is always the file with
+  # the highest mtime under ${role}-ext.pcap*.
+  tcpdump -ni any -s0 -U \
+    -C "$PCAP_FILESIZE_MB" -W "$PCAP_FILES" \
+    -w "$session_dir/${ROLE}-ext.pcap" \
     "host $PEER and ($bpf_ports)" \
     > "$session_dir/${ROLE}-ext.tcpdump.log" 2>&1 &
   echo $! > "$session_dir/pid.ext"
@@ -164,7 +185,9 @@ start_capture() {
   if [[ $ROLE == source ]]; then
     # Loopback pcap for openresty <-> cpsrvd. No peer filter — both legs
     # are 127.0.0.1 conversations on panel ports.
-    tcpdump -ni lo -s0 -U -w "$session_dir/source-lo.pcap" "$bpf_ports" \
+    tcpdump -ni lo -s0 -U \
+      -C "$PCAP_FILESIZE_MB" -W "$PCAP_FILES" \
+      -w "$session_dir/source-lo.pcap" "$bpf_ports" \
       > "$session_dir/source-lo.tcpdump.log" 2>&1 &
     echo $! > "$session_dir/pid.lo"
   fi
@@ -230,7 +253,7 @@ start_capture() {
         pid=$(pgrep -fn whm_xfer_download-ssl 2>/dev/null || true)
         if [[ -n "$pid" ]]; then
           printf '\n##### attached at %s pid=%s #####\n' "$(date -Is)" "$pid"
-          strace -ttT -f -s 256 \
+          strace -ttT -f -s "$STRACE_STRSIZE" \
             -e trace=network,read,write,close,poll,select,ppoll,epoll_wait,epoll_pwait \
             -p "$pid" 2>&1 || true
         else
