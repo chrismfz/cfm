@@ -193,10 +193,21 @@ start_capture() {
 
   # ---- Layer 3: process / log ----
   if [[ $ROLE == source ]]; then
+    # The CFM panel listener (where cfm_panel_tunnel.lua runs) writes to
+    # openresty's or angie's error log — NOT cpanel's bundled ea-nginx
+    # at /var/log/nginx/error.log. Check the openresty/angie locations
+    # first; only fall back to /var/log/nginx if neither exists. This
+    # ordering matters: if we pick the wrong file we get pages of WP
+    # cron noise and zero [cfm_panel_tunnel] pump lines.
     : "${ERROR_LOGS:=}"
     if [[ -z "$ERROR_LOGS" ]]; then
       local detected=()
-      for c in /var/log/openresty/error.log /var/log/angie/error.log /var/log/nginx/error.log; do
+      for c in \
+        /usr/local/openresty/nginx/logs/error.log \
+        /var/log/openresty/error.log \
+        /var/log/angie/error.log \
+        /usr/local/angie/logs/error.log \
+        /var/log/nginx/error.log; do
         [[ -f $c ]] && detected+=("$c")
       done
       ERROR_LOGS="${detected[*]:-}"
