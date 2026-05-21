@@ -1334,6 +1334,14 @@
         }
         return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
       },
+      historyForensicsTitle(row) {
+        const p = (row && row.payload) || {};
+        const lines = [];
+        if (p.ua) lines.push(`UA: ${p.ua}`);
+        if (p.referer) lines.push(`Referer: ${p.referer}`);
+        if (p.ct) lines.push(`Content-Type: ${p.ct}`);
+        return lines.length ? lines.join('\n') : '-';
+      },
       jumpToHistory() {
         const el = document.getElementById('history-card');
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });

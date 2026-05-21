@@ -388,7 +388,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 						logging.LogfWAF("%s", string(buf))
 					}
 
-					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country, wafRuleID)
+					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country, wafRuleID, ua, referer, contentType)
 				})
 
 				// NEW: Hook per-request observations (e.g. OpenResty WAF returned 403)
