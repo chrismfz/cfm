@@ -326,29 +326,52 @@ end
 -- on a TCP close to signal "response complete", so we must propagate that
 -- close in the opposite direction or the client (e.g. cPanel's
 -- whm_xfer_download-ssl) sits forever waiting for an HTTP response that
--- has already finished at the byte level. Empirically observed: after
--- cpsrvd sent the full 99 GB rsync stream and closed its end, the WHM
--- UI hung at "20% restore" because our tunnel was still blocked waiting
--- for rigel to close its (already-idle) write half.
+-- has already finished at the byte level.
 --
--- Force-close BOTH sockets the moment one direction is done:
---   * the surviving pump's next receiveany/send returns "closed" /
---     "broken pipe" and the thread exits and logs its own byte count
---     for diagnostics;
---   * the close on the still-open peer's socket sends FIN, unblocking
---     whatever HTTP state machine is on the other end.
+-- Empirically observed (paired-host packet+socket capture, run B):
+-- after cpsrvd FINed its loopback half, both lo:openresty<->cpsrvd
+-- sockets walked all the way through CLOSED within ~2s, but the
+-- external rigel <-> earth:12087 socket stayed ESTABLISHED with
+-- Recv-Q=0/Send-Q=0 for the full 2+ minutes until the capture was
+-- stopped — i.e. nginx never sent FIN downstream even though the
+-- handler called client_sock:close(). On the destination side
+-- whm_xfer_download-ssl was blocked in read(fd=4) on that idle
+-- socket, which is the "16% / 20% Homedir" hang fingerprint.
 --
--- OpenResty automatically kills any sub-threads still alive when the
--- entry thread (this one) returns, so we do NOT call ngx.thread.wait on
--- the second thread explicitly — that pattern would also crash with
--- "already waited or killed" because ngx.thread.wait(a, b) consumes
--- whichever thread finished first and a follow-up wait on the same
--- thread is undefined behaviour in lua-nginx-module.
+-- Root cause: client_sock and up_sock are each touched by BOTH pump
+-- coroutines (one reads, one writes). lua-nginx-module's cosocket
+-- contract is "one cosocket per thread at a time"; in practice the
+-- pump itself works because the two ops are independent, but the
+-- cleanup path is undefined. With one pump dead and the other still
+-- inside client_sock:receiveany(), calling :close() on that same
+-- cosocket from the entry thread is not enough to release nginx's
+-- underlying connection — the TCP socket stays open until a
+-- keepalive timeout, which is hours.
+--
+-- Fix: tear down in an order that's defined.
+--   1. Close up_sock first. The dead pump is already gone, and the
+--      surviving pump is blocked on client_sock (not up_sock), so
+--      this close has no thread-collision issue.
+--   2. Explicitly ngx.thread.kill() any still-alive sub-thread. This
+--      is the cosocket-safe way to break out of receiveany() before
+--      we touch the shared client cosocket. It is a no-op on the
+--      already-exited pump.
+--   3. THEN close client_sock and finalize with ngx.exit(444). 444
+--      is nginx's "close connection without response" status; after
+--      a socket(true) hijack the normal handler-exit close path is
+--      what's been leaving the downstream socket pinned, so we
+--      force the connection teardown explicitly instead of relying
+--      on it.
 local ok, wait_err = ngx.thread.wait(co_up, co_down)
 if not ok then
     ngx.log(ngx.WARN, "[cfm_panel_tunnel] first pump aborted with lua error: ", tostring(wait_err))
 end
 
 pcall(function() up_sock:close() end)
+
+pcall(function() ngx.thread.kill(co_up)   end)
+pcall(function() ngx.thread.kill(co_down) end)
+
 pcall(function() client_sock:close() end)
 ngx.log(ngx.WARN, "[cfm_panel_tunnel] done uri=", ngx.var.request_uri or "-")
+return ngx.exit(444)
