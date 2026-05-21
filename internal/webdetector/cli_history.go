@@ -101,15 +101,34 @@ func runHistoryEvents(baseURL string, args []string) error {
 		return err
 	}
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "TS\tTYPE\tHOST\tIP\tREASON")
+	fmt.Fprintln(w, "TS\tTYPE\tHOST\tIP\tREASON\tUA")
 	for _, ev := range payload.Rows {
 		ts := strconv.FormatInt(ev.TsUnix, 10)
 		if strings.TrimSpace(ev.TsUTC) != "" {
 			ts = ev.TsUTC
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", ts, ev.Type, ev.Host, ev.IP, ev.Reason)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", ts, ev.Type, ev.Host, ev.IP, ev.Reason, truncate(payloadString(ev.Payload, "ua"), 60))
 	}
 	return w.Flush()
+}
+
+func payloadString(p map[string]interface{}, key string) string {
+	if p == nil {
+		return ""
+	}
+	v, ok := p[key]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+func truncate(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
 
 func runHistorySummary(baseURL string, args []string) error {

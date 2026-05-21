@@ -295,7 +295,7 @@
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>TS</th><th>Type</th><th>Host</th><th>IP</th><th>Reason</th></tr>
+              <tr><th>TS</th><th>Type</th><th>Host</th><th>IP</th><th>Reason</th><th>UA</th></tr>
             </thead>
             <tbody>
               <tr v-for="row in historyEvents" :key="`h-${row.id}-${row.ts_unix}`">
@@ -304,8 +304,9 @@
                 <td>{{ row.host || '-' }}</td>
                 <td><code>{{ row.ip || '-' }}</code></td>
                 <td class="truncate" :title="row.reason || '-'">{{ row.reason || '-' }}</td>
+                <td class="truncate" :title="historyForensicsTitle(row)">{{ (row.payload && row.payload.ua) || '-' }}</td>
               </tr>
-              <tr v-if="!historyEvents.length"><td colspan="5" class="muted">No history rows yet.</td></tr>
+              <tr v-if="!historyEvents.length"><td colspan="6" class="muted">No history rows yet.</td></tr>
             </tbody>
           </table>
         </div>
