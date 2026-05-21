@@ -30,9 +30,15 @@ local function disable_all_rules()
   end
 end
 
+-- Detector tests use a public, non-/wp-admin/ upload path. rule_437
+-- explicitly suppresses the encoded-`<?php` opener check on /wp-admin/*
+-- paths (legitimate plugin save bodies, e.g. WPCode, carry exactly
+-- this byte pattern). The detector's own pattern matching is what
+-- this suite exercises, so we exercise it at a public endpoint where
+-- the carve-out doesn't fire.
 local function ctx(body, ct)
   return {
-    uri     = "/wp-admin/theme-editor.php",
+    uri     = "/upload/process.php",
     args    = "",
     method  = "POST",
     ip      = "203.0.113.7",

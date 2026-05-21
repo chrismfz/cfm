@@ -2685,15 +2685,45 @@ end
 --   * UTF8_SURROGATE    — codepoint in the U+D800..U+DFFF surrogate range
 --   * UTF8_OUT_OF_RANGE — codepoint > U+10FFFF
 --
--- FP-risk note: legitimate Latin-1 / ISO-8859-1 form posts (still used by
--- older PHP/Perl forms) carry raw 0xA0..0xFF bytes — a "é" sent as the
--- raw 0xE9 byte will trip UTF8_BAD_LEAD (0xE9 expects 2 continuations,
--- next byte is usually ASCII). Acceptable at logonly. If/when this rule
--- is promoted to challenge, gate on the request's declared charset:
--- skip when Content-Type contains "iso-8859" / "windows-125" / "latin1"
--- (and apply only when charset is "utf-8" or omitted — HTTP default).
-function _M.detect_bad_utf8(args, body, _norm_ab)
-  local s = _norm_ab or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+-- FP-risk note: legitimate Latin-1 / ISO-8859-x form posts, multipart
+-- file-upload bodies (raw JPEG / PDF / ZIP bytes), and URLs truncated
+-- mid-percent-encoded-UTF-8 by upstream ad redirectors (Facebook /
+-- Instagram link-preview crawlers do this) all carry byte sequences
+-- that the strict Coraza-style walker would flag as BAD_LEAD /
+-- BAD_CONT / TRUNC — but none of those tags are an actual encoding-
+-- bypass attack. They just mean "not UTF-8 right now".
+--
+-- The only attack-specific tags this rule was added for are:
+--   * UTF8_OVERLONG     — multi-byte encoding of a codepoint that
+--                         fits in fewer bytes. The classic bypass
+--                         primitive: `%C0%AF` for `/`, `%C0%AE` for
+--                         `.`, `%E0%80%AE` for `.`, etc. — bypasses
+--                         substring-based path-traversal checks.
+--   * UTF8_SURROGATE    — codepoint U+D800..U+DFFF encoded in UTF-8.
+--                         RFC 3629 forbids; only attackers produce.
+--   * UTF8_OUT_OF_RANGE — codepoint > U+10FFFF. Same as above.
+--
+-- The walker therefore runs in a single "relaxed" mode: it still
+-- has to detect BAD_LEAD / BAD_CONT / TRUNC internally to advance
+-- the cursor correctly, but only the three attack-specific tags
+-- are RETURNED. Stray bytes are skipped silently and the walk keeps
+-- going.
+--
+-- 2-byte overlongs (lead 0xC0 or 0xC1) are caught explicitly: RFC
+-- 3629 reserves 0xC0..0xC1 specifically because they can ONLY
+-- produce overlong encodings of ASCII. So any 0xC0/0xC1 followed
+-- by a valid continuation byte IS the attack signature, regardless
+-- of mode.
+--
+-- Production data backing this design (4-day Greek-WP shop sample,
+-- 2026-05): 770+ BAD_LEAD/BAD_CONT events on /wp-admin/async-upload.php,
+-- /wp-admin/admin-ajax.php, /wp-admin/post.php, CF7 feedback, and
+-- 47 BAD_CONT events on a mformama.gr Facebook ad landing page where
+-- AS32934 Facebook's `facebookexternalhit` crawler hit URLs whose
+-- double-percent-encoded UTF-8 was truncated mid-sequence. All 817
+-- were legitimate traffic; zero were encoding-bypass primitives.
+
+local function utf8_walk(s)
   local n = #s
   if n == 0 then return nil end
 
@@ -2702,49 +2732,66 @@ function _M.detect_bad_utf8(args, body, _norm_ab)
     local b = s:byte(i)
     if b < 0x80 then
       i = i + 1
+    elseif b == 0xC0 or b == 0xC1 then
+      -- RFC-3629-forbidden lead. If followed by a valid continuation,
+      -- this is an explicit 2-byte overlong encoding of ASCII —
+      -- always an encoding-bypass primitive.
+      local c = s:byte(i + 1)
+      if c and c >= 0x80 and c <= 0xBF then
+        return "UTF8_OVERLONG"
+      end
+      i = i + 1   -- stray bad byte, keep walking
     else
       local need, min_cp
       if     b >= 0xF0 and b <= 0xF4 then need, min_cp = 3, 0x10000
       elseif b >= 0xE0 and b <= 0xEF then need, min_cp = 2, 0x800
       elseif b >= 0xC2 and b <= 0xDF then need, min_cp = 1, 0x80
       else
-        return "UTF8_BAD_LEAD"
+        i = i + 1   -- stray byte (0xC2-0xC1 already handled, 0xF5-0xFF land here)
       end
 
-      if i + need > n then
-        -- Distinguish "buffer truncated mid-codepoint by cap()" (lead byte
-        -- in the last 3 positions of the buffer) from a real malformed
-        -- packet. A cap-induced cut isn't an encoding-bypass attempt; a
-        -- 35 KB Greek WordPress comment that straddles the JSON body
-        -- budget would otherwise trip this every request. Worst case
-        -- skipped: an attacker who places exactly one overlong-lead byte
-        -- in the last 3 bytes of the buffer — that payload can't decode
-        -- at the app layer either, so no bypass.
-        if i > n - 3 then return nil end
-        return "UTF8_TRUNC"
+      if need then
+        if i + need > n then
+          -- Buffer truncated mid-sequence (our cap() or upstream cut).
+          -- Never an attack — overlong/surrogate/out-of-range all need
+          -- a fully-formed sequence to decode into a codepoint.
+          return nil
+        end
+
+        local cp
+        if     need == 1 then cp = (b - 0xC0) * 64
+        elseif need == 2 then cp = (b - 0xE0) * 4096
+        else                  cp = (b - 0xF0) * 262144
+        end
+
+        local cont_bad = false
+        for k = 1, need do
+          local c = s:byte(i + k)
+          if not c or c < 0x80 or c > 0xBF then
+            cont_bad = true
+            break
+          end
+          cp = cp + (c - 0x80) * (64 ^ (need - k))
+        end
+
+        if cont_bad then
+          i = i + 1   -- stray lead, keep walking
+        else
+          if cp < min_cp                   then return "UTF8_OVERLONG"     end
+          if cp >= 0xD800 and cp <= 0xDFFF then return "UTF8_SURROGATE"    end
+          if cp > 0x10FFFF                 then return "UTF8_OUT_OF_RANGE" end
+          i = i + need + 1
+        end
       end
-
-      local cp
-      if     need == 1 then cp = (b - 0xC0) * 64
-      elseif need == 2 then cp = (b - 0xE0) * 4096
-      else                  cp = (b - 0xF0) * 262144
-      end
-
-      for k = 1, need do
-        local c = s:byte(i + k)
-        if not c or c < 0x80 or c > 0xBF then return "UTF8_BAD_CONT" end
-        cp = cp + (c - 0x80) * (64 ^ (need - k))
-      end
-
-      if cp < min_cp                       then return "UTF8_OVERLONG"     end
-      if cp >= 0xD800 and cp <= 0xDFFF     then return "UTF8_SURROGATE"    end
-      if cp > 0x10FFFF                     then return "UTF8_OUT_OF_RANGE" end
-
-      i = i + need + 1
     end
   end
-
   return nil
+end
+
+function _M.detect_bad_utf8(args, body)
+  local tag = utf8_walk(normalize(cap(args or "", CFG.max_scan_len)))
+  if tag then return tag end
+  return utf8_walk(normalize(cap(body or "", CFG.max_scan_len)))
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
