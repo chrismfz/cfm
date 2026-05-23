@@ -166,6 +166,301 @@ grep '"host":"example.com"' /var/log/cfm/cfm.waf.log | jq
 
 ---
 
+## False-positive case studies
+
+A live record of FP shapes seen in production, what surfaced them, the
+structural mistake the original rule made, and the fix. Treat this as
+the **anti-pattern catalogue for new detectors** — every one of these
+shipped through the existing tests and the rollout playbook, and was
+only caught by reviewing real traffic. Add to this list when a new FP
+shape surfaces and a rule is changed to suppress it.
+
+### Catching methodology (what the repeats look like)
+
+The pattern that keeps working:
+
+1. **Collect a representative window** (a few days, all servers) of raw
+   `cfm.waf.log` JSON. The forensic fields (`ua`, `referer`, `ct`,
+   `asn_name`, `country`) are what let you tell "scraper using
+   residential proxy" from "real user on Greek ISP". The fleet-history
+   API endpoint strips those fields and truncates per agent — useful for
+   dashboards, not for FP hunting.
+2. **Aggregate by `(reason, host, ASN, UA family)`**. Anything where
+   one (host, ASN) combination dominates a single rule's hits is a
+   candidate. Anything from a residential ISP in your home country
+   (we use Greek ASNs as the litmus) with a modern realistic UA is a
+   stronger candidate.
+3. **Read the URI and Content-Type**. Look for:
+    - `data:` URIs or `;base64,` in the path (template artifacts)
+    - `/wp-admin/` paths (admin tooling)
+    - WordPress REST API paths (`/wp-json/…`)
+    - `multipart/form-data` content type (binary file uploads)
+    - `application/x-www-form-urlencoded` without `charset=UTF-8`
+      (legacy ISO-8859-x / windows-125x form posts)
+    - Bare-IP `host` headers
+4. **Replay the patched detector against the original log**. A short
+   harness reading `cfm.waf.log` and re-running the rule's Lua logic
+   against the captured URI + body tells you the before/after FP count
+   without waiting for a production window. Examples of this harness
+   live in the test plans of PR #912 and PR #969.
+5. **Stage the fix at the rule's current mode**, never tighter. If the
+   rule was `logonly`, fix and re-soak at `logonly`. Promotion is a
+   separate decision gated on `cfm webtop waf hit-rates`.
+
+### FP case 1 — `WAF_LONG_PATH` on `data:` URI / base64 template artifacts
+
+**Shape:** 84 events in a 4-day window, dominated by 52 hits on
+`mobian.eu` and 11 on `www.ezbeauty.gr`, all from AS32934 Facebook IPs.
+Path looked like `/data:text/javascript,setTimeout(function () { … }`
+or `/templates/.../slick_carousel/assets/css/data:image/svg+xml;base64,…`.
+Same trigger on `tehni.eu/claim-requests/image/jpeg;base64,…` from a
+single Greek OTEnet user over a working session (10 hits).
+
+**Root cause:** Bricks Builder (WP) injects inline scripts as
+`<script src="data:text/javascript,…">`. Facebook's
+`facebookexternalhit` OG-preview crawler dereferences the `src` as if
+it were a relative URL. The SP Page Builder Joomla template emits an
+unquoted `url(data:image/svg+xml;base64,…)` in a CSS rule, so the
+browser resolves it relative to the stylesheet. A broken `<img>` tag
+puts `image/jpeg;base64,…` directly into the path. None of those bytes
+were ever produced by an attacker — they're template emissions
+followed as URLs.
+
+**Why we missed it:** the rule was designed for "single URL path
+segment ≥ 800 bytes = base64-stuffed scanner payload". The threshold
+was correct; the path classifier had no concept of "this segment is a
+template artifact, not a payload".
+
+**Fix:** in `detect_long_path_segment` skip the rule entirely when the
+path contains `;base64,` (anywhere) or `data:<type>/<subtype>[,;]`.
+Path-wide check, not per-segment, because base64 payloads contain `/`
+and the segmenter splits them into many short segments followed by one
+extremely long trailing chunk. Documented loophole: an attacker who
+prepends `;base64,` to a long payload suppresses **only** this rule —
+RCE, traversal, SQLi, and the base64 obfuscation scorer still inspect
+the content. Shipped in **PR #912**. Effect: 84 → 3 (all 3 real).
+
+**Lesson for new path-based rules:** before any length-based or
+substring-based path check, ask "what artifacts can a CMS template
+inject into the rendered HTML that a crawler might follow as a URL?"
+Inline `data:` URIs, inline `srcset=` strings, and unquoted `url(…)`
+in CSS are the three most common.
+
+### FP case 2 — `WAF_XSS` matching `onerror=` inside `creationError=`
+
+**Shape:** 1 event, but on `/wp-admin/edit.php` of `new.sikia-apartments.gr`
+from a real Greek OTEnet IP (109.178.22.113) — a WordPress admin
+working with WPML's Advanced Translation Editor. URL:
+`/wp-admin/edit.php?post_type=appartments&lang=en&referer=ate&wpml_version=4.9.3&ateJobCreationError=101&jobId=63`.
+
+**Root cause:** `detect_xss` used `string.find(s, "onerror=", 1, true)`
+— a plain substring search. The literal bytes `onerror=` appear inside
+`creationError=` (`…creati**onerror**=…`), so the substring matches
+even though no real XSS attribute is present. The detector had no
+concept of HTML attribute syntax — every `on*=` token in an HTML
+attribute must be preceded by a delimiter (space, quote, `<`, `;`,
+`/`), but the substring check didn't enforce that.
+
+**Why we missed it:** plain-substring matching was chosen for speed,
+and the unit tests for `detect_xss` used realistic XSS payloads which
+all started with a delimiter. No test exercised the "keyword embedded
+in a longer identifier" case.
+
+**Fix:** anchor each event-handler check on a non-word boundary using
+the Lua frontier pattern `%f[%w]`. Kept the cheap plain `has()`
+precheck so non-XSS requests pay zero pattern-engine cost. Shipped in
+**PR #912**. Effect: 7 WAF_XSS events → 6 (the 6 remaining are real
+attacks, the one cleared was the WPML FP).
+
+**Lesson for new substring-based rules:** if the substring you're
+matching is an English word or a code-token that could legitimately
+appear inside a longer identifier, anchor on a word boundary.
+`onerror=`, `onload=`, `eval(`, `system(` are the obvious traps;
+others surface when you actually look.
+
+### FP case 3 — `WAF_BAD_UTF8` on legitimate non-UTF-8 traffic
+
+**Shape:** 772 events in 4 days across titan + rigel. Almost entirely
+on Greek WordPress shops. Top URI paths:
+
+```
+377  POST /wp-admin/async-upload.php                ← media library uploads
+135  POST /wp-admin/admin-ajax.php                  ← Greek post saves, plugin AJAX
+ 83  POST /wp-admin/post.php                        ← Greek post editor saves
+ 59  POST /flexboard/controller.php
+ 47  POST /landing-mama-ypnos/                      ← Facebook ad landing page
+  9  POST /wp-admin/update.php                      ← plugin/theme installer
+  7  POST /wp-json/contact-form-7/.../feedback
+```
+
+By Content-Type: 236 `application/x-www-form-urlencoded[; charset=UTF-8]`,
+59 empty, 15 `multipart/form-data`. By source: 100% Greek-residential
+ASNs hitting Greek hosts.
+
+**Root cause:** three legitimate non-UTF-8 input shapes that the
+strict Coraza-style walker flagged as BAD_LEAD / BAD_CONT / TRUNC:
+
+1. **Multipart bodies carry raw binary file content** (JPEG/PNG/ZIP/PDF
+   bytes). Never UTF-8 by design.
+2. **Form posts from pre-charset themes carry single-byte legacy
+   encodings.** A Greek "Π" sent as `%D0` (ISO-8859-7) decodes to byte
+   0xD0, which looks like a UTF-8 2-byte lead expecting a continuation
+   — the next byte is `&` (form separator), not 0x80–0xBF, so the
+   walker fires `UTF8_BAD_CONT`. Perfectly legitimate Greek form data.
+3. **URLs truncated mid-percent-encoded-UTF-8 by upstream
+   redirectors.** Facebook's `facebookexternalhit` crawler chops ad
+   landing-page URLs at character boundaries it thinks are safe; the
+   resulting URL ends with `%CE%B` (incomplete escape) which
+   double-decodes to a stray lead byte. 47 of the 772 events were this
+   shape — every one of them came from AS32934 Facebook.
+
+**Why we missed it:** the detector was a faithful port of Coraza's
+`validateUtf8Encoding` operator. Coraza ships the operator scoped to
+specific variables (`ARGS_NAMES`, `ARGS_VALUES`) for exactly this
+reason; we initially applied it to the combined args+body buffer with
+all six tags returning. The detector's own commit message flagged
+"acceptable at logonly" but underestimated how many legacy WP
+deployments still emit non-UTF-8 form data.
+
+**Fix:** the walker returns **only the three encoding-bypass-specific
+tags** — `UTF8_OVERLONG`, `UTF8_SURROGATE`, `UTF8_OUT_OF_RANGE`. The
+other three tags (BAD_LEAD / BAD_CONT / TRUNC) still drive the cursor
+forward internally but never fire as a trigger. RFC-3629-forbidden
+2-byte leads (`0xC0` / `0xC1`) followed by a valid continuation are
+caught explicitly as `UTF8_OVERLONG` since those leads can only
+produce overlong encodings of ASCII. Shipped in **PR #969**. Effect:
+772 → 0 FPs cleared, real-attack coverage preserved (replay against
+test cases for `%C0%AF` overlong-`/`, surrogate codepoints in UTF-8,
+and out-of-range codepoints all still fire).
+
+**Lesson for new encoding-validity rules:** "not UTF-8" is not the
+same as "attack". A web property that has been running long enough to
+accumulate legacy WP plugins, pre-charset forms, or file-upload
+endpoints will produce non-UTF-8 traffic on every benign request.
+Before shipping a UTF-8 / charset / encoding validator, enumerate
+exactly which malformations are encoding-bypass primitives (overlong,
+surrogate, out-of-range, RFC-3629-forbidden leads) and report only
+those. Generic "this string is not well-formed UTF-8" is a noise
+generator.
+
+### FP case 4 — `WAF_SSRF:SSRF_FTP` on WP All Import admin pages
+
+**Shape:** 4 events, all from one real Greek admin (89.210.235.252,
+AS3329 Vodafone-panafon, Chrome 148) on `xml.e-vafeiadis.gr`. URLs
+like `/wp-admin/admin.php?page=pmxi-admin-manage&id=11&action=options`.
+The admin was managing their WP All Import imports.
+
+**Root cause:** WP All Import (and similar plugins — WPvivid,
+UpdraftPlus, BackWPup) legitimately store `ftp://` URLs as plugin
+configuration. The admin revisiting the settings page sends GET
+requests whose query strings (and form state) echo the saved FTP URL.
+`detect_ssrf_proto` saw `ftp://` in args and fired `SSRF_FTP`. The
+URL was plugin state, not an attacker-controlled fetch target.
+
+**Why we missed it:** SSRF detection was based on "no benign form
+field should carry a `ftp://` value". That assumption held for most
+endpoints — but not for WordPress plugin admin pages where the field
+value is itself a stored configuration URL.
+
+**Fix:** in the rule call site, when `tag == "SSRF_FTP"` and `uri`
+matches `^/wp-admin/`, suppress that tag only. All other SSRF tags
+(FILE, GOPHER, DICT, LDAP, TFTP, STRATUM, SFTP, IP-obfuscation
+flavours) keep firing on /wp-admin/ because no benign WP plugin
+legitimately stores those schemes as state. Shipped in **PR #969**.
+Effect: 4 → 0.
+
+**Lesson for new SSRF/protocol-scheme rules:** before adding a scheme
+to the scanner list, search the top 200 WordPress plugins (and the
+analogous lists for Joomla, Drupal, Magento) for plugins that
+legitimately accept that scheme as a config value. `ftp://`,
+`sftp://`, and `s3://` are likely; `gopher://`, `dict://`, `file://`
+are very unlikely. The narrower the scheme's legitimate use, the
+safer the rule.
+
+### FP case 5 — `WAF_PHP_ENCODED_OPENER` on WPCode snippet saves
+
+**Shape:** 4 events, two real Greek admins (193.92.137.123 and
+89.210.235.252, Chrome 148, Vodafone + Nova residential IPs). URLs:
+`/wp-admin/admin.php?page=wpcode-snippet-manager` and
+`/wp-admin/admin-ajax.php`. The admins were saving PHP snippets via
+the WPCode plugin's editor.
+
+**Root cause:** `detect_php_encoded_opener` looks for base64 / URL-
+encoded / HTML-entity / JS-escape forms of `<?php` in request bodies
+— an encoding bypass primitive for upload-vetting WAFs that look for
+literal `<?php`. WPCode (and Code Snippets, Insert PHP Code Snippet,
+…) lets admins author PHP snippets through the WP admin UI. When the
+admin saves, the plugin POSTs the snippet body to admin-ajax.php; the
+plugin serialises the snippet contents in base64. The body literally
+contains `PD9waHA…` (base64 of `<?php …`), so the rule fires.
+
+**Why we missed it:** the rule was designed to catch attackers
+smuggling PHP through endpoints that decode body data on the server
+side. The detector had no concept of "this body legitimately contains
+encoded PHP because the admin is authoring it".
+
+**Fix:** suppress the rule entirely on `/wp-admin/*` paths. WP
+cookie-auth has already gated those requests before they reach the
+WAF, so we don't try to second-guess admin tooling. Webshells
+delivered via theme/plugin file editors, upload exploits, or
+vulnerable public endpoints still arrive on non-/wp-admin/ paths
+where this rule remains active. Shipped in **PR #969**. Effect:
+4 → 0.
+
+**Lesson for new body-content rules:** any rule that scans POST bodies
+for code-shaped strings (PHP openers, SQL keywords, JS function
+calls) needs an answer for "what legitimate admin tooling writes this
+shape of content?" before going to production. WP admin (`/wp-admin/`),
+phpMyAdmin, Adminer, Joomla administrator, cPanel file manager,
+DirectAdmin, and the various theme/plugin code editors are the usual
+suspects.
+
+### Structural anti-patterns to check during rule review
+
+A short list. Every one of these surfaced as a real FP above; reading
+new detector PRs with these in hand catches most of the next batch
+before they ship.
+
+| Anti-pattern | What to check | Affected case above |
+|---|---|---|
+| Plain-substring match on a token that's a common English word fragment (`onerror`, `onload`, `eval`, `system`) | Anchor on `%f[%w]` frontier or equivalent | XSS (#2) |
+| Length-based rule on the URI path | Does any CMS template inject `data:` URIs, `srcset=` strings, or unquoted `url(…)` that a crawler might follow? | LONG_PATH (#1) |
+| Generic "this isn't UTF-8" validator | Does the rule actually fire only on encoding-bypass primitives (overlong/surrogate/out-of-range), or does it flag all non-UTF-8? | BAD_UTF8 (#3) |
+| Protocol-scheme scanner over args/body | What schemes are legitimately stored as config by top WP / Joomla / Magento plugins? | SSRF_FTP (#4) |
+| Body-content scanner (code shapes, PHP openers, SQL keywords) | What admin tooling writes this content shape legitimately? Does the rule belong off `/wp-admin/` paths? | PHP_OPENER (#5) |
+| Per-byte walker on body | Does it assume the body is text? Multipart file uploads carry arbitrary binary. | BAD_UTF8 (#3) |
+| Rule that depends on a specific buffer composition (e.g. `args + "&" + body`) | Tests that exercise the rule should pass complete, self-contained inputs — not rely on implementation details of how the WAF concatenates args and body | BAD_UTF8 (#3, test 76) |
+
+### Pre-merge checklist for a new detector
+
+1. **Run on a captured production log.** Replay the rule's Lua logic
+   against `cfm.waf.log` (or `access.log` if pre-WAF). Expect zero
+   FPs at logonly, in a >24h window, before promoting.
+2. **Check `/wp-admin/` and `/wp-json/` traffic specifically.** Almost
+   all of the FPs above arrived via WP admin / REST endpoints. Carve
+   out at the call site (cleanest) or per-vhost exclusion (operator-
+   driven) rather than tightening the detector itself.
+3. **Check bare-IP `host` traffic separately.** `WAF_IP_HOST` already
+   catches it, but rules that also fire on the same requests can
+   double-challenge legitimate research scanners (Palo Alto Cortex
+   Xpanse, Censys, etc.) at well-known IP-only endpoints.
+4. **Check Facebook + Instagram traffic.** AS32934 has its own ad
+   crawler shapes (`facebookexternalhit`, in-app browser UAs) that hit
+   ad landing pages with URLs sometimes mangled by FB's link-preview
+   infrastructure.
+5. **For length/encoding/protocol-scheme rules, write the
+   anti-pattern test before the positive test.** Pick the most
+   realistic legitimate input that could trip the rule (a multipart
+   POST, a `data:` URI in path, a `;base64,` body, a legacy ISO-8859-x
+   form post) and assert the rule does not fire. Then write the
+   positive case.
+6. **Start at `logonly`.** Promote only after `cfm webtop waf hit-rates`
+   shows `ok_to_promote` (rate < 0.01%) over a representative window
+   and you've grep'd the JSON log for any host whose hit-count is
+   disproportionate.
+
+---
+
 ## Rule IDs
 
 Every WAF rule has a stable numeric ID grouped by first digit:
