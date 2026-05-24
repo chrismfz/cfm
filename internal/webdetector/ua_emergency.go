@@ -73,6 +73,13 @@ type UAEmergencyStore struct {
 	rules      map[string]*UAEmergencyRule // key: normalized UA
 	saveSerial uint64                      // bumped on every disk write
 
+	// activeCount mirrors len(rules) and is read on the ingest hot path
+	// (without acquiring mu) to lazily skip UA aggregation when no rules
+	// are installed. Updated atomically by Set/Delete/PruneExpired/load.
+	// On an idle box (no rules) HasActive() is a single atomic load and
+	// the entire UA-aggregation code path in engine.ingest is skipped.
+	activeCount int32
+
 	// saveMu serialises the snapshot+write+rename cycle so two concurrent
 	// callers (e.g. Set and PruneExpired) can't collide on the temp file
 	// path and can't reorder the on-disk state vs the in-memory state.
@@ -134,6 +141,14 @@ func (s *UAEmergencyStore) sweepStaleTmp() {
 	if removed > 0 {
 		logging.Logf("[ua_emergency] swept %d orphan tmp file(s) in %s", removed, dir)
 	}
+}
+
+// HasActive returns true if at least one emergency rule is currently
+// installed. Cheap (one atomic load) — designed to be called on the
+// per-event ingest hot path so UA aggregation can be skipped entirely
+// when nothing is enforcing.
+func (s *UAEmergencyStore) HasActive() bool {
+	return atomic.LoadInt32(&s.activeCount) > 0
 }
 
 // snapshotCopy returns a value copy of r with Hits read via atomic.LoadInt64.
@@ -205,6 +220,8 @@ func (s *UAEmergencyStore) load() {
 		s.rules[r.UA] = &r
 	}
 	s.mu.Unlock()
+	// Sync the hot-path active counter to the loaded ruleset.
+	atomic.StoreInt32(&s.activeCount, int32(len(s.rules)))
 	// Intentionally NOT calling s.save() here even if `dropped > 0`. Saving
 	// would erase those rules from disk too, which is a forward-compat
 	// hazard: a future version that introduces a new action would lose
@@ -390,8 +407,12 @@ func (s *UAEmergencyStore) Set(ua, action, createdBy, reason string, ttl time.Du
 	// PruneExpired follows the same pattern (see its comment).
 	s.saveMu.Lock()
 	s.mu.Lock()
+	_, existed := s.rules[ua]
 	s.rules[ua] = r
 	s.mu.Unlock()
+	if !existed {
+		atomic.AddInt32(&s.activeCount, 1)
+	}
 
 	line := s.auditLine("create", r, "")
 	s.saveLocked()
@@ -416,6 +437,7 @@ func (s *UAEmergencyStore) Delete(ua, by string) (UAEmergencyRule, bool) {
 		s.saveMu.Unlock()
 		return UAEmergencyRule{}, false
 	}
+	atomic.AddInt32(&s.activeCount, -1)
 	snap := r.snapshotCopy()
 	line := s.auditLine("undo", &snap, fmt.Sprintf(" undo_by=%q", by))
 	s.saveLocked()
@@ -503,6 +525,7 @@ func (s *UAEmergencyStore) PruneExpired(now time.Time) int {
 		s.saveMu.Unlock()
 		return 0
 	}
+	atomic.AddInt32(&s.activeCount, -int32(len(expired)))
 
 	// Render lines while holding saveMu so any concurrent IncHits (RLock
 	// only) sees a consistent view of Hits, then save the snapshot, then

@@ -14,6 +14,14 @@ func TestUATop_AggregatesAcrossVhosts(t *testing.T) {
 		TrafficRulesStorePath: t.TempDir() + "/tr.json",
 	})
 
+	// UA aggregation is gated on UAEmergency().HasActive() — the lazy-
+	// activation design means an idle box pays zero ingest cost. Install
+	// a no-op rule to enable aggregation for this test.
+	if _, err := e.UAEmergency().Set("_test_enable_aggregation",
+		UAActionThrottle, "test", "", 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
 	now := float64(time.Now().Unix())
 
 	// facebookexternalhit hits 3 vhosts from 2 IPs.
@@ -105,6 +113,12 @@ func TestUADrill_BreakdownsPresent(t *testing.T) {
 		UAEmergencyAuditLog:   t.TempDir() + "/a.log",
 		TrafficRulesStorePath: t.TempDir() + "/tr.json",
 	})
+	// UA aggregation is gated on UAEmergency().HasActive() — install a
+	// dummy rule so the ingest path populates the per-UA maps.
+	if _, err := e.UAEmergency().Set("_test_enable_aggregation",
+		UAActionThrottle, "test", "", 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
 	now := float64(time.Now().Unix())
 	// Same normalized UA, three raw variants — should be collapsed.
 	variants := []string{

@@ -203,8 +203,16 @@ end
 -- check returns { action = "block"|"throttle", expires_at = unix, ... }
 -- if an emergency rule matches the given raw UA, or nil otherwise. Callers
 -- should pass ngx.var.http_user_agent directly.
+--
+-- Fast path on idle boxes: if _rules is empty after refresh, we skip
+-- normalize_ua() entirely. This makes the per-request cost a single
+-- next(_rules) call (a C builtin returning nil immediately) when no
+-- emergency rules are installed — paired with the Go-side HasActive()
+-- gate in the ingest path, the feature has effectively zero overhead
+-- when not in use.
 function _M.check(ua_raw)
   refresh_if_needed()
+  if next(_rules) == nil then return nil end
   local nu = _M.normalize_ua(ua_raw)
   if nu == "" or nu == "-" then return nil end
   local r = _rules[nu]

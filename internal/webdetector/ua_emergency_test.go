@@ -98,6 +98,69 @@ func TestUAEmergency_Persistence(t *testing.T) {
 	}
 }
 
+// HasActive must mirror len(rules) exactly across the lifecycle. The
+// engine ingest path consults it on every event to skip UA aggregation
+// when no rules are installed, so a drift here would either re-enable
+// aggregation phantom-style or silently disable it when rules exist.
+func TestUAEmergency_HasActive(t *testing.T) {
+	dir := t.TempDir()
+	s := NewUAEmergencyStore(filepath.Join(dir, "r.json"), filepath.Join(dir, "a.log"))
+
+	if s.HasActive() {
+		t.Fatal("empty store: HasActive should be false")
+	}
+
+	// Add two rules.
+	if _, err := s.Set("a", UAActionBlock, "admin", "", 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if !s.HasActive() {
+		t.Error("HasActive false after one Set")
+	}
+	if _, err := s.Set("b", UAActionThrottle, "admin", "", 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if !s.HasActive() {
+		t.Error("HasActive false after two Sets")
+	}
+
+	// Replacing an existing rule must NOT change the counter.
+	if _, err := s.Set("a", UAActionThrottle, "admin", "", 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if !s.HasActive() {
+		t.Error("HasActive false after Set-replace")
+	}
+
+	// Delete one.
+	if _, ok := s.Delete("a", "admin"); !ok {
+		t.Fatal("Delete a missed")
+	}
+	if !s.HasActive() {
+		t.Error("HasActive false with one rule remaining")
+	}
+
+	// Delete the last one.
+	if _, ok := s.Delete("b", "admin"); !ok {
+		t.Fatal("Delete b missed")
+	}
+	if s.HasActive() {
+		t.Error("HasActive true after deleting all rules")
+	}
+
+	// PruneExpired path — install a sub-min TTL and force the expiry.
+	r, _ := s.Set("c", UAActionBlock, "admin", "", UAEmergencyMinTTL)
+	if !s.HasActive() {
+		t.Error("HasActive false after Set for prune test")
+	}
+	if n := s.PruneExpired(r.ExpiresAt.Add(1 * time.Second)); n != 1 {
+		t.Errorf("PruneExpired removed %d, want 1", n)
+	}
+	if s.HasActive() {
+		t.Error("HasActive true after PruneExpired drained all rules")
+	}
+}
+
 func TestUAEmergency_PruneExpired(t *testing.T) {
 	dir := t.TempDir()
 	s := NewUAEmergencyStore(filepath.Join(dir, "r.json"), filepath.Join(dir, "a.log"))

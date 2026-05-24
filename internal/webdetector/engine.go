@@ -1132,9 +1132,14 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		b.uas[rec.UA]++
 	}
 
-	// Normalized-UA aggregation. Keep separate from b.uas so the existing
-	// host-drilldown "Top UAs" view continues to show raw UA strings.
-	{
+	// Normalized-UA aggregation feeds the bot-top view. We only do this
+	// work when at least one emergency rule is currently installed —
+	// HasActive() is a single atomic load. On an idle box (no rules)
+	// this whole block costs ~1ns and we avoid both the NormalizeUA
+	// CPU and the UA→IP-set memory growth. When the operator installs
+	// the first rule, aggregation activates starting with the next
+	// bucket; the bot-top view shows data from that point forward.
+	if e.uaEmergency != nil && e.uaEmergency.HasActive() {
 		nu := NormalizeUA(rec.UA)
 		if nu != "" && nu != "-" {
 			if b.uasNormReqs == nil {

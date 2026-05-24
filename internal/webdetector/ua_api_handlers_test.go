@@ -178,6 +178,14 @@ func TestUAEmergencyAPI_ScopedTokenForbidden(t *testing.T) {
 
 func TestUAAPI_TopAndDrill(t *testing.T) {
 	e, mux := newTestEngineUA(t)
+
+	// UA aggregation is gated on UAEmergency().HasActive() — install a
+	// dummy rule so the ingest path actually populates the bot-top maps.
+	if _, err := e.UAEmergency().Set("_test_enable_aggregation",
+		UAActionThrottle, "test", "", 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
 	now := float64(time.Now().Unix())
 	for i := 0; i < 5; i++ {
 		e.ingest(LogRec{
