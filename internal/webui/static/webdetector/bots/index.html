@@ -40,6 +40,12 @@
           intentionally not supported (trivially spoofable WAF gap) — use
           per-vhost rules with IP/ASN verification for crawler exemptions.
         </p>
+        <p class="muted" style="font-size: 0.9em;">
+          <strong>Note:</strong> the <em>Unique IPs</em> column shows 0 until at
+          least one emergency rule is installed — unique-IP tracking is gated
+          to keep memory bounded on idle boxes. RPS / Reqs / Vhosts are always
+          aggregated.
+        </p>
         <div class="toolbar">
           <label for="ttlSelect">TTL</label>
           <select id="ttlSelect" class="input">
