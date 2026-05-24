@@ -5,6 +5,7 @@ const MENU_ITEMS = [
   { label: "Forensics", href: "/cfm-admin/webdetector/forensics/", match: "/cfm-admin/webdetector/forensics/" },
   { label: "WAF engine", href: "/cfm-admin/webdetector/waf/", match: "/cfm-admin/webdetector/waf/" },
   { label: "Vhost controls", href: "/cfm-admin/webdetector/controls/", match: "/cfm-admin/webdetector/controls/" },
+  { label: "Web Bots", href: "/cfm-admin/webdetector/bots/", match: "/cfm-admin/webdetector/bots/" },
   { label: "MySQL governor", href: "/cfm-admin/governor/", match: "/cfm-admin/governor/" },
   { label: "Notifier", href: "/cfm-admin/notifier/", match: "/cfm-admin/notifier/" },
   { label: "Detectors", href: "/cfm-admin/detectors/", match: "/cfm-admin/detectors/" },
