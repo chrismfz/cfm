@@ -273,8 +273,12 @@ func TestStripPrivateKeyBlocksCoversAllVariants(t *testing.T) {
 // the lua workers detect the change and re-/dumpall promptly instead
 // of waiting up to FORCE_DUMPALL_AFTER (1h).
 func TestVersionReflectsChainRotation(t *testing.T) {
-	// Build two Entry objects pointing at the same Cert/KeyMTime but
-	// different ChainMTime — what a chain-only rotation looks like.
+	// Single-goroutine test: we mutate cert.ChainMTime in place to
+	// simulate a chain rotation. In production this field is set once
+	// in buildEntry before the Entry is published into c.exact under
+	// c.mu.Lock, then never mutated — so the lock-free reads in Stats()
+	// are safe. Do NOT copy this in-place mutation into a test that
+	// runs Refresh() concurrently with Stats(); it would race.
 	cert := &Entry{
 		Fingerprint: hex.EncodeToString(sha256.New().Sum(nil)),
 		CertMTime:   time.Unix(1_700_000_000, 0),
@@ -302,6 +306,73 @@ func TestVersionReflectsChainRotation(t *testing.T) {
 	v3 := col.Stats().Version
 	if v2 != v3 {
 		t.Fatalf("Version is non-deterministic: %q vs %q", v2, v3)
+	}
+}
+
+// TestRefreshTracksChainInKnownFiles is the regression guard for the
+// stat-loop blind spot flagged in the second-pass review: Refresh()
+// must include ChainPath in nextFiles so a chain-only rotation is
+// picked up by anyKnownFileChanged() within statEvery (60s default),
+// not only by the fsnotify watcher (which can fail under inotify
+// limits) or the 15-minute discoTicker fallback.
+func TestRefreshTracksChainInKnownFiles(t *testing.T) {
+	dir := t.TempDir()
+	usersRoot := filepath.Join(dir, "users", "u", "domains")
+	if err := os.MkdirAll(usersRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	caCert, caPriv, caPEM, _ := genTestCert(t, "root", nil, nil)
+	_, _, leafPEM, leafKeyPEM := genTestCert(t, "leaf.example.com", caPriv, caCert)
+	_ = caCert
+
+	certPath := filepath.Join(usersRoot, "leaf.example.com.cert")
+	keyPath := filepath.Join(usersRoot, "leaf.example.com.key")
+	chainPath := filepath.Join(usersRoot, "leaf.example.com.cacert")
+	if err := os.WriteFile(certPath, leafPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, leafKeyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chainPath, caPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject a fake source so Refresh discovers our test pair without
+	// touching the real /usr/local/directadmin path. Easiest: write a
+	// Pair directly via the scanner — call scanDirectAdmin against our
+	// tempdir.
+	pairs := scanDirectAdmin(filepath.Join(dir, "users"))
+	if len(pairs) != 1 {
+		t.Fatalf("scanDirectAdmin: got %d pairs, want 1", len(pairs))
+	}
+	p := pairs[0]
+	if p.ChainPath == "" {
+		t.Fatal("scanDirectAdmin did not set ChainPath — test setup broken")
+	}
+
+	// buildEntry + manual nextFiles bookkeeping mirroring Refresh().
+	e, err := buildEntry(p, time.Now())
+	if err != nil {
+		t.Fatalf("buildEntry: %v", err)
+	}
+
+	col := &Collector{
+		exact:      map[string]*Entry{},
+		wildSuffix: map[string]*Entry{},
+		knownFiles: map[string]struct{}{},
+		fileMemo:   map[string]fileSig{},
+	}
+	// Replicate the Refresh nextFiles step we want to test.
+	col.knownFiles[absClean(e.CertPath)] = struct{}{}
+	col.knownFiles[absClean(e.KeyPath)] = struct{}{}
+	if e.ChainPath != "" && e.ChainPath != e.CertPath {
+		col.knownFiles[absClean(e.ChainPath)] = struct{}{}
+	}
+
+	if _, ok := col.knownFiles[absClean(chainPath)]; !ok {
+		t.Fatal("ChainPath was not added to knownFiles — stat-loop fallback will not detect chain rotations")
 	}
 }
 

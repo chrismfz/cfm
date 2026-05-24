@@ -33,9 +33,17 @@ func (c *Collector) Refresh(ctx context.Context) error {
 			continue
 		}
 
-		// track known files for stat loop
+		// track known files for stat loop.
+		// ChainPath is included so the 60s statTicker -> anyKnownFileChanged
+		// loop also detects chain-only rotations (eg DA rewriting
+		// <domain>.cacert during an LE intermediate transition) when the
+		// fsnotify watcher is unavailable. Without this entry, the only
+		// fallback for chain-only changes is the 15-minute discoTicker.
 		nextFiles[absClean(e.CertPath)] = struct{}{}
 		nextFiles[absClean(e.KeyPath)] = struct{}{}
+		if e.ChainPath != "" && e.ChainPath != e.CertPath {
+			nextFiles[absClean(e.ChainPath)] = struct{}{}
+		}
 
 		for _, n := range e.Names {
 			n = strings.TrimSpace(strings.ToLower(strings.TrimSuffix(n, ".")))
