@@ -1132,21 +1132,31 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		b.uas[rec.UA]++
 	}
 
-	// Normalized-UA aggregation feeds the bot-top view. We only do this
-	// work when at least one emergency rule is currently installed —
-	// HasActive() is a single atomic load. On an idle box (no rules)
-	// this whole block costs ~1ns and we avoid both the NormalizeUA
-	// CPU and the UA→IP-set memory growth. When the operator installs
-	// the first rule, aggregation activates starting with the next
-	// bucket; the bot-top view shows data from that point forward.
-	if e.uaEmergency != nil && e.uaEmergency.HasActive() {
+	// Normalized-UA aggregation feeds the bot-top view. Two-tier cost
+	// model so operators don't see an empty `cfm bots top` on a fresh
+	// install:
+	//
+	//   - Request counts per normalized UA are ALWAYS aggregated (small
+	//     map keyed on ~tens of UAs per window; ~KB memory; one
+	//     NormalizeUA + one map increment per event, ~1µs). This gives
+	//     the bot-top view real RPS / Reqs / Vhosts numbers without
+	//     requiring a rule to be installed first.
+	//
+	//   - Unique-IP sets per UA are the dominant memory cost (capped
+	//     at 2000 IPs per UA per bucket × N buckets in window). We only
+	//     populate them when at least one emergency rule is installed
+	//     (HasActive() — one atomic load). Until then the UniqueIPs
+	//     column in `cfm bots top` shows 0; the operator's signal is
+	//     RPS + Reqs + Vhosts which is enough to decide whether to
+	//     install a rule.
+	{
 		nu := NormalizeUA(rec.UA)
 		if nu != "" && nu != "-" {
 			if b.uasNormReqs == nil {
 				b.uasNormReqs = make(map[string]int)
 			}
 			b.uasNormReqs[nu]++
-			if rec.IP != "" {
+			if rec.IP != "" && e.uaEmergency != nil && e.uaEmergency.HasActive() {
 				if b.uasNormIPs == nil {
 					b.uasNormIPs = make(map[string]map[string]struct{})
 				}

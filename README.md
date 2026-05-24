@@ -1596,14 +1596,18 @@ cfm bots remove   <ua>
   it). For verified-crawler exemptions use per-vhost rules with IP/ASN
   verification instead.
 
-**Lazy activation — zero overhead when idle**
+**Hybrid aggregation — counts always, IPs lazy**
 
-The bot-top aggregation only runs while at least one emergency rule is
-installed. On a fresh box (no rules ever installed) the cost is one
-atomic load per request in Go and one C-builtin per request in Lua;
-the rest of the bot-top machinery is skipped. The `top` / `drill` /
-live TUI views are **empty until the first rule exists** — install a
-short observation rule to wake up sampling:
+Per-UA request counts (RPS / Reqs / Vhosts) are always aggregated so
+`cfm bots top` works on a fresh box. The heavier work — tracking the
+unique-IP set per UA, which dominates memory under crawler load — only
+activates while at least one emergency rule is installed (a single
+atomic load per event keeps the gate cheap). The Lua per-request check
+also early-exits when no rules exist, avoiding the UA-normalize cost on
+idle workers.
+
+In the bot-top output, the `IPS` column shows 0 until a rule is in
+place. Install any short observation rule to enable IP detail:
 
 ```bash
 cfm bots throttle observer --ttl 5m --reason "observing"

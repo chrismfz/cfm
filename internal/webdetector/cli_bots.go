@@ -144,10 +144,12 @@ func printBotsHelp() {
 	fmt.Println("  --reason <text>    free-form, captured in /var/log/cfm/ua_emergency.log")
 	fmt.Println("  --confirm          required for verified Google crawlers")
 	fmt.Println()
-	fmt.Println("Note: bot-top aggregation activates only while at least one")
-	fmt.Println("emergency rule is installed (lazy activation — keeps idle boxes")
-	fmt.Println("at zero overhead). The `top` / `drill` / live TUI views are empty")
-	fmt.Println("until the first `block` or `throttle` rule is in place.")
+	fmt.Println("Note: per-UA request counts (RPS / Reqs / Vhosts) are always")
+	fmt.Println("aggregated and visible. Unique-IP tracking is the heavier path,")
+	fmt.Println("so it only activates while at least one emergency rule is")
+	fmt.Println("installed — the IPS column shows 0 until then. Install any")
+	fmt.Println("throttle or block rule (or a short throwaway observer rule) to")
+	fmt.Println("see IP detail.")
 }
 
 // ── opts parsing ────────────────────────────────────────────────────────────
@@ -213,14 +215,14 @@ func runBotsTopStatic(baseURL string, limit int) error {
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	// Bot-top uses lazy activation: aggregation only runs while at least
-	// one emergency rule is installed. When the table is empty and there
-	// are no rules, surface that explicitly so operators don't read
-	// "empty table" as "no bot traffic."
-	if len(rows) == 0 && len(rules) == 0 {
+	// Hint: when rules aren't installed, the IPS column is always 0
+	// (unique-IP tracking is gated to keep memory down on idle boxes).
+	// Surface that so operators understand why IPS is 0 in a row that
+	// shows RPS > 0.
+	if len(rows) > 0 && len(rules) == 0 {
 		fmt.Println()
-		fmt.Println("  (no data) — bot-top aggregation is idle.")
-		fmt.Println("  Install any emergency rule to activate sampling, e.g.:")
+		fmt.Println("  Note: IPS column is 0 — install any emergency rule to enable")
+		fmt.Println("  unique-IP tracking, e.g.:")
 		fmt.Println("    cfm bots throttle <ua> --ttl 5m --reason observing")
 	}
 	return nil
