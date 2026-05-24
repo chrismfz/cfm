@@ -115,6 +115,7 @@ for the trade-offs and how to choose.
     - [How policies stack](#how-policies-stack)
     - [How kernsec and cfm-lsm complement each other](#how-kernsec-and-cfm-lsm-complement-each-other)
 14. [CLI Reference – `cfm webtop`](#14-cli-reference--cfm-webtop)
+    - [CLI Reference – `cfm bots`](#cli-reference--cfm-bots)
 15. [Web Detector HTTP API](#15-web-detector-http-api)
 16. [Security Notes](#16-security-notes)
 
@@ -1553,6 +1554,74 @@ cfm webtop rules simulate --host example.com --ua "facebookexternalhit/1.1" --pa
 The `--last` / `-last` duration uses Go-style duration strings, such as `30m`, `1h`, or `2h30m`.
 
 **Sort keys:** `rps`, `2xx`, `3xx`, `4xx`, `5xx`, `uniq`, `err`, `rt`, `bot`, `ua_div`, `score`
+
+### CLI Reference – `cfm bots`
+
+Box-wide UA emergency control surface. Where `cfm webtop` is keyed on
+vhost/IP, `cfm bots` is keyed on the **normalized User-Agent across all
+vhosts** — useful when one bot family (Facebook OG fetcher, SemrushBot,
+AhrefsBot, …) hammers many vhosts at once and per-vhost throttles don't
+catch the aggregate.
+
+```bash
+cfm bots                          # live two-pane TUI (top + active rules)
+cfm bots top [N]                  # static top-N snapshot
+cfm bots list                     # active emergency rules + countdown / hits
+cfm bots drill <ua>               # drilldown: top IPs, vhosts, raw UA variants
+
+# Install / undo rules (only "throttle" and "block" — no "allow" by design)
+cfm bots throttle <ua> [--ttl 30m] [--reason ...]
+cfm bots block    <ua> [--ttl 30m] [--reason ...]
+cfm bots remove   <ua>
+```
+
+**Options for install commands**
+
+- `--ttl <duration>` — Go-style duration (e.g. `5m`, `30m`, `1h`); default
+  `30m`, hard-capped at 60m, floored at 1m
+- `--reason <text>` — free-form, captured in
+  `/var/log/cfm/ua_emergency.log` for post-mortem
+- `--confirm` — required to act on verified Google crawlers
+  (`googlebot`, `adsbot-google`, `mediapartners-google`, …); the API
+  returns `409 google_verified_bot_requires_confirm` without it
+
+**Action semantics**
+
+- `throttle` — box-wide token bucket (rate 10 r/s, burst 20) keyed on
+  the normalized UA. Bot continues but at a bounded aggregate rate.
+- `block` — `ngx.exit(444)` (TCP close, no body) — cheapest possible
+  emergency relief; bot sees the connection drop.
+- No `allow` action: a UA-only allow rule would be a trivially spoofable
+  WAF bypass (anyone sending `User-Agent: Googlebot/...` would inherit
+  it). For verified-crawler exemptions use per-vhost rules with IP/ASN
+  verification instead.
+
+**Lazy activation — zero overhead when idle**
+
+The bot-top aggregation only runs while at least one emergency rule is
+installed. On a fresh box (no rules ever installed) the cost is one
+atomic load per request in Go and one C-builtin per request in Lua;
+the rest of the bot-top machinery is skipped. The `top` / `drill` /
+live TUI views are **empty until the first rule exists** — install a
+short observation rule to wake up sampling:
+
+```bash
+cfm bots throttle observer --ttl 5m --reason "observing"
+cfm bots top
+cfm bots remove observer
+```
+
+**Where rules go**
+
+- In-memory store on the cfm daemon
+- JSON snapshot at `/var/lib/cfm/ua_emergency.json` (consumed by nginx
+  workers via 3s lazy refresh)
+- Audit log at `/var/log/cfm/ua_emergency.log` — one line per
+  create / undo / TTL-expire event
+
+**Web UI:** the same surface is exposed at
+`/cfm-admin/webdetector/bots/` (admin-only — box-wide rules cross
+tenant boundaries).
 
 ### `cfm firewall status` (firewall diagnostics)
 
