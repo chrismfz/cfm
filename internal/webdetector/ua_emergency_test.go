@@ -127,6 +127,41 @@ func TestUAEmergency_IncHits(t *testing.T) {
 	s.IncHits("doesnotexist", 5)
 }
 
+// Verifies that the pruner channel is reusable across Stop→Start→Stop —
+// the previous sync.Once-based fix silently dropped the second close, so
+// the second pruner goroutine leaked. With the closed-bool design, every
+// Stop is paired with its own Start.
+func TestEngine_UAEmergencyPruner_StopStartStopCycle(t *testing.T) {
+	dir := t.TempDir()
+	e := NewEngine(Config{
+		Every:                 5 * time.Second,
+		Window:                2 * time.Minute,
+		TrafficRulesStorePath: filepath.Join(dir, "tr.json"),
+		UAEmergencyStorePath:  filepath.Join(dir, "ua.json"),
+		UAEmergencyAuditLog:   filepath.Join(dir, "ua.log"),
+	})
+
+	// First cycle.
+	e.StartUAEmergencyPruner(50 * time.Millisecond)
+	e.StopUAEmergencyPruner()
+
+	// Second cycle — would leak with sync.Once.
+	e.StartUAEmergencyPruner(50 * time.Millisecond)
+	e.StopUAEmergencyPruner()
+
+	// Idempotent on extra Stop.
+	e.StopUAEmergencyPruner()
+
+	// Reach into the engine state — under the mutex — to confirm the
+	// channel field is nil after the final stop.
+	e.uaEmergencyMu.Lock()
+	ch := e.uaEmergencyStop
+	e.uaEmergencyMu.Unlock()
+	if ch != nil {
+		t.Errorf("uaEmergencyStop = %v after final Stop, want nil", ch)
+	}
+}
+
 func TestUAEmergency_List(t *testing.T) {
 	dir := t.TempDir()
 	s := NewUAEmergencyStore(filepath.Join(dir, "r.json"), filepath.Join(dir, "a.log"))
@@ -140,6 +175,40 @@ func TestUAEmergency_List(t *testing.T) {
 	if list[0].UA != "b" || list[2].UA != "a" {
 		t.Errorf("expected expiry-ascending order, got %q, %q, %q",
 			list[0].UA, list[1].UA, list[2].UA)
+	}
+}
+
+// Legacy on-disk rules with the removed "allow" action must be dropped at
+// load time so they don't surface as ghost rules in the API/UI.
+func TestUAEmergency_LoadDropsLegacyAllow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ua_emergency.json")
+	audit := filepath.Join(dir, "ua_emergency.log")
+
+	// Hand-write a snapshot containing a legacy "allow" rule alongside a
+	// valid "block" rule.
+	legacy := `[
+		{"ua":"googlebot","action":"allow","created_at":"2099-01-01T00:00:00Z","expires_at":"2099-01-01T01:00:00Z","created_at_unix":4070908800,"expires_at_unix":4070912400,"created_by":"admin","hits":0},
+		{"ua":"badbot","action":"block","created_at":"2099-01-01T00:00:00Z","expires_at":"2099-01-01T01:00:00Z","created_at_unix":4070908800,"expires_at_unix":4070912400,"created_by":"admin","hits":0}
+	]`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewUAEmergencyStore(path, audit)
+
+	if _, ok := s.Get("googlebot"); ok {
+		t.Error("legacy allow rule for googlebot was not dropped")
+	}
+	if _, ok := s.Get("badbot"); !ok {
+		t.Error("valid block rule for badbot was dropped")
+	}
+
+	// The store should have persisted the cleaned snapshot back to disk
+	// (so the next boot is a no-op).
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), `"action":"allow"`) {
+		t.Errorf("legacy allow rule still present in on-disk snapshot:\n%s", string(data))
 	}
 }
 

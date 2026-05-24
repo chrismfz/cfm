@@ -36,18 +36,27 @@ import (
 	clihttp "cfm/internal/clihttp"
 )
 
-// drainClose drains any unread bytes from a response body and then
-// closes it. Required for HTTP/1.1 keep-alive reuse — Go's net/http
-// only returns the underlying TCP connection to the idle pool when
-// the body is read to EOF. Partial reads (e.g. json.Decoder stopping
-// at the closing brace, or httpStatusErr reading only the first 512
-// bytes) would otherwise leak a connection per request and starve
-// the local ephemeral port pool over long TUI sessions.
+// drainClose drains any unread bytes from a response body (up to a sane
+// cap) and then closes it. Required for HTTP/1.1 keep-alive reuse —
+// Go's net/http only returns the underlying TCP connection to the idle
+// pool when the body is read to EOF. Partial reads (e.g. json.Decoder
+// stopping at the closing brace, or httpStatusErr reading only the
+// first 512 bytes) would otherwise leak a connection per request and
+// starve the local ephemeral port pool over long TUI sessions.
+//
+// The drain is bounded by io.CopyN with drainCap so a stalled server
+// (chunked response that never sends its terminator) can't hang the
+// TUI inside drainClose — clihttp uses http.DefaultClient which has no
+// body-read deadline, so an unbounded io.Copy would wait forever. If
+// the body exceeds drainCap we accept losing keep-alive for that conn
+// rather than blocking the caller.
+const drainCap = 256 * 1024
+
 func drainClose(b io.ReadCloser) {
 	if b == nil {
 		return
 	}
-	_, _ = io.Copy(io.Discard, b)
+	_, _ = io.CopyN(io.Discard, b, drainCap)
 	_ = b.Close()
 }
 

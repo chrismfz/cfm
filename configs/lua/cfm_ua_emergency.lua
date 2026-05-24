@@ -25,6 +25,13 @@ local cjson = require "cjson.safe"
 local PATH = "/var/lib/cfm/ua_emergency.json"
 local REFRESH_INTERVAL_SEC = 3
 
+-- Optional fail-closed knob for the throttle pcall error path. Default is
+-- fail-open (return false, 0 — admit the request) so a transient internal
+-- error doesn't black out legitimate traffic. Operators who would rather
+-- 429 than risk silent under-enforcement can set CFM_UA_EMERGENCY_FAIL_CLOSED=1
+-- in the cfm environment.
+local FAIL_CLOSED = (os.getenv("CFM_UA_EMERGENCY_FAIL_CLOSED") == "1")
+
 local _last_refresh_at = 0
 local _last_content = ""
 local _rules = {}  -- normalized UA → { action, expires_at_unix, reason, created_by }
@@ -119,13 +126,22 @@ local function refresh_if_needed()
   end
 
   local parsed = cjson.decode(content)
+  if parsed == nil then
+    -- Either a parse error or a literal "null" payload. Do NOT cache
+    -- _last_content — that would short-circuit the next refresh and
+    -- prevent recovery once the operator fixes the file. Leave _rules
+    -- in place (previous good snapshot, fail-static).
+    ngx.log(ngx.WARN, "[cfm_ua_emergency] decode returned nil for ", PATH, " — keeping previous rules")
+    return
+  end
   if type(parsed) ~= "table" then
-    -- Parse failure: do NOT cache _last_content yet. If we did, a
-    -- subsequent refresh would short-circuit on the equality check and
-    -- the worker would never retry the same bytes — and would never
-    -- recover if the operator immediately re-saves a good file with
-    -- identical-looking content after a transient corruption. Leave
-    -- _rules in place (previous good snapshot).
+    -- Structurally valid JSON but not the expected array (number,
+    -- string, boolean). Treat as empty ruleset and cache the content
+    -- so we don't reparse the same junk every 3s. The operator can
+    -- recover by writing a valid array.
+    ngx.log(ngx.ERR, "[cfm_ua_emergency] non-array content in ", PATH, " (type=", type(parsed), ") — treating as empty")
+    _last_content = content
+    _rules = {}
     return
   end
 
@@ -229,7 +245,19 @@ local function _throttle_inner(key, now)
   end
 
   local ttl = math.max(2, math.floor((BOX_BURST / BOX_RATE) * 2))
-  _SH:set(key, tostring(tokens) .. ":" .. tostring(now), ttl)
+  local ok_set, err_set, forcible = _SH:set(key, tostring(tokens) .. ":" .. tostring(now), ttl)
+  if not ok_set then
+    -- shdict is full and even forcible eviction failed; we couldn't
+    -- persist the bucket state. Next request will read nil and reset
+    -- the bucket to full, effectively disabling the throttle. Log
+    -- loudly so operators see the underlying capacity problem.
+    ngx.log(ngx.ERR, "[cfm_ua_emergency] shdict :set failed for key=", key,
+      " err=", tostring(err_set), " — throttle may be ineffective")
+  elseif forcible then
+    -- Stored, but evicted some other key. Cheap to log; operators
+    -- monitor this for shdict sizing pressure.
+    ngx.log(ngx.WARN, "[cfm_ua_emergency] shdict :set forced eviction for key=", key)
+  end
   return allow, retry_after
 end
 
@@ -260,8 +288,15 @@ function _M.throttle(normalized_ua)
   _SH:delete(lock_key)
 
   if not ok then
-    -- Internal error: fail open. Logging via ngx.log so operators see it.
-    ngx.log(ngx.ERR, "[cfm_ua_emergency] throttle inner error: ", tostring(allow_or_err))
+    -- Internal error. Default policy is fail-open (return false, 0 ->
+    -- admit the request) so a transient bug can't black out legitimate
+    -- traffic. Operators who would rather 429 than risk silent
+    -- under-enforcement can set CFM_UA_EMERGENCY_FAIL_CLOSED=1.
+    ngx.log(ngx.ERR, "[cfm_ua_emergency] throttle inner error: ", tostring(allow_or_err),
+      " fail_closed=", tostring(FAIL_CLOSED))
+    if FAIL_CLOSED then
+      return true, 0.1
+    end
     return false, 0
   end
   return (not allow_or_err), (retry_after or 0)

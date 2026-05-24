@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -134,6 +135,25 @@ func TestUAEmergencyAPI_TTLCap(t *testing.T) {
 	json.Unmarshal(rr.Body.Bytes(), &added)
 	if got := added.ExpiresAt.Sub(added.CreatedAt); got != UAEmergencyMaxTTL {
 		t.Errorf("TTL = %v, want capped %v", got, UAEmergencyMaxTTL)
+	}
+}
+
+// An oversize POST body should return 413, not the generic 400 "invalid
+// json body" — that distinction matters for operator tooling diagnosing
+// "is my request too big" vs "is my JSON malformed".
+func TestUAEmergencyAPI_OversizeBody(t *testing.T) {
+	_, mux := newTestEngineUA(t)
+
+	// 70 KiB payload, well over the 64 KiB cap. JSON-shaped so the only
+	// failure mode is the body cap (not malformed-json).
+	pad := strings.Repeat("a", 70*1024)
+	body := []byte(`{"ua":"badbot","action":"block","ttl_seconds":600,"reason":"` + pad + `"}`)
+	rr := uaDo(mux, adminCtx(), http.MethodPost, "/api/v1/webdet/ua-emergency", body)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "too large") {
+		t.Errorf("body missing 'too large' hint: %s", rr.Body.String())
 	}
 }
 

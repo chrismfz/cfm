@@ -14,6 +14,7 @@ package webdetector
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -95,9 +96,19 @@ func (e *Engine) uaEmergencyAdd(w http.ResponseWriter, r *http.Request) {
 	// Cap the request body so a single authenticated POST can't OOM the
 	// daemon. The schema is tiny (ua + action + ttl + reason); 64 KiB
 	// gives generous headroom for a long reason string.
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	const maxBody = 64 * 1024
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 	var body uaEmergencyPostBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		// Distinguish "body too large" from "malformed JSON" so the
+		// operator's tooling doesn't chase a syntax bug that isn't there.
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+				"error": "request body too large (limit 64 KiB)",
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
 		return
 	}

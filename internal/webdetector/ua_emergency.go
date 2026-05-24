@@ -88,11 +88,55 @@ func NewUAEmergencyStore(path, auditPath string) *UAEmergencyStore {
 		auditPath: auditPath,
 		rules:     make(map[string]*UAEmergencyRule),
 	}
+	// Sweep any orphan temp files left by a previous daemon crash between
+	// CreateTemp and Rename. They have unique random suffixes so each crash
+	// would otherwise leak one file indefinitely.
+	s.sweepStaleTmp()
 	s.load()
 	// Drop anything already expired at startup so a long-stopped daemon
 	// doesn't reincarnate stale rules.
 	s.PruneExpired(time.Now())
 	return s
+}
+
+// sweepStaleTmp removes any orphan temp files matching the save() pattern
+// in the store's directory. Called once at startup.
+func (s *UAEmergencyStore) sweepStaleTmp() {
+	if s.path == "" {
+		return
+	}
+	dir := filepath.Dir(s.path)
+	matches, err := filepath.Glob(filepath.Join(dir, ".ua_emergency-*.json.tmp"))
+	if err != nil {
+		return
+	}
+	removed := 0
+	for _, m := range matches {
+		if err := os.Remove(m); err == nil {
+			removed++
+		}
+	}
+	if removed > 0 {
+		logging.Logf("[ua_emergency] swept %d orphan tmp file(s) in %s", removed, dir)
+	}
+}
+
+// snapshotCopy returns a value copy of r with Hits read via atomic.LoadInt64.
+// Use this anywhere we'd otherwise do `*r` while another goroutine might be
+// running IncHits — the plain struct copy reads Hits as a non-atomic int64,
+// which the race detector flags and which can tear on 32-bit architectures.
+func (r *UAEmergencyRule) snapshotCopy() UAEmergencyRule {
+	return UAEmergencyRule{
+		UA:            r.UA,
+		Action:        r.Action,
+		CreatedAt:     r.CreatedAt,
+		ExpiresAt:     r.ExpiresAt,
+		CreatedAtUnix: r.CreatedAtUnix,
+		ExpiresAtUnix: r.ExpiresAtUnix,
+		CreatedBy:     r.CreatedBy,
+		Reason:        r.Reason,
+		Hits:          atomic.LoadInt64(&r.Hits),
+	}
 }
 
 // load reads the JSON snapshot from disk into memory. Errors are logged but
@@ -116,10 +160,21 @@ func (s *UAEmergencyStore) load() {
 		logging.Logf("[ua_emergency] parse %s failed: %v (treating as empty)", s.path, err)
 		return
 	}
+	dropped := 0
 	s.mu.Lock()
 	for i := range rules {
 		r := rules[i]
 		if r.UA == "" {
+			continue
+		}
+		// Drop rules whose action is no longer in the supported vocabulary.
+		// This is the migration path for any on-disk snapshot that still
+		// contains legacy "allow" entries from before that action was
+		// removed — without this guard those rules would resurface in the
+		// API and UI as ghost rules that don't enforce anything.
+		if r.Action != UAActionThrottle && r.Action != UAActionBlock {
+			logging.Logf("[ua_emergency] dropping legacy rule on load: ua=%q action=%q", r.UA, r.Action)
+			dropped++
 			continue
 		}
 		// Backfill unix mirrors if the snapshot predates that field.
@@ -132,26 +187,40 @@ func (s *UAEmergencyStore) load() {
 		s.rules[r.UA] = &r
 	}
 	s.mu.Unlock()
+	// If we dropped anything, persist a clean snapshot back to disk so the
+	// next startup is a no-op. Done outside the lock above (save takes its
+	// own locks).
+	if dropped > 0 {
+		s.save()
+	}
 }
 
 // save writes the current rule set to disk atomically (write-temp + rename).
 //
 // The saveMu serialises the entire snapshot+write+rename cycle. Without
-// it, two concurrent saves would collide on the fixed ".tmp" filename
-// (truncating each other's writes) and the rename(2) order would not
-// match the in-memory mutation order — a stale snapshot could win.
+// it, two concurrent saves would collide on the temp filename and the
+// rename(2) order would not match the in-memory mutation order — a stale
+// snapshot could win. Set/Delete/PruneExpired call saveLocked() directly
+// because they already hold saveMu for the duration of mutation+audit.
 func (s *UAEmergencyStore) save() {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	s.saveLocked()
+}
+
+// saveLocked is the body of save() with the saveMu precondition. Callers
+// that need to bracket mutation, save, and audit under a single saveMu
+// hold (so the audit log line cannot reorder against another save) call
+// this directly after taking saveMu themselves.
+func (s *UAEmergencyStore) saveLocked() {
 	if s.path == "" {
 		return
 	}
 
-	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
-
 	s.mu.RLock()
 	rules := make([]UAEmergencyRule, 0, len(s.rules))
 	for _, r := range s.rules {
-		rules = append(rules, *r)
+		rules = append(rules, r.snapshotCopy())
 	}
 	s.mu.RUnlock()
 
@@ -273,18 +342,29 @@ func (s *UAEmergencyStore) Set(ua, action, createdBy, reason string, ttl time.Du
 		Reason:        reason,
 	}
 
+	// saveMu brackets the whole mutation + save + audit so a concurrent
+	// Delete or PruneExpired cannot interleave and produce an audit-vs-disk
+	// inconsistency (e.g. "undo X" logged for a rule that's currently
+	// active on disk because a parallel Set already replaced it).
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.Lock()
 	s.rules[ua] = r
 	s.mu.Unlock()
 
-	s.save()
+	s.saveLocked()
 	s.audit("create", r, "")
-	return *r, nil
+	return r.snapshotCopy(), nil
 }
 
 // Delete removes an emergency rule by normalized UA. Returns the removed
 // rule (if any) and a bool indicating whether it existed.
 func (s *UAEmergencyStore) Delete(ua, by string) (UAEmergencyRule, bool) {
+	// saveMu brackets mutation + save + audit (see Set for the rationale).
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.Lock()
 	r, ok := s.rules[ua]
 	if ok {
@@ -294,14 +374,15 @@ func (s *UAEmergencyStore) Delete(ua, by string) (UAEmergencyRule, bool) {
 	if !ok {
 		return UAEmergencyRule{}, false
 	}
-	copy := *r
-	s.save()
-	s.audit("undo", &copy, fmt.Sprintf(" undo_by=%q", by))
-	return copy, true
+	snap := r.snapshotCopy()
+	s.saveLocked()
+	s.audit("undo", &snap, fmt.Sprintf(" undo_by=%q", by))
+	return snap, true
 }
 
 // Get returns the rule for the given normalized UA (copy + true) or
-// (zero, false) if no rule is active.
+// (zero, false) if no rule is active. The copy is a snapshot that reads
+// Hits via atomic.LoadInt64.
 func (s *UAEmergencyStore) Get(ua string) (UAEmergencyRule, bool) {
 	s.mu.RLock()
 	r, ok := s.rules[ua]
@@ -309,11 +390,12 @@ func (s *UAEmergencyStore) Get(ua string) (UAEmergencyRule, bool) {
 	if !ok {
 		return UAEmergencyRule{}, false
 	}
-	return *r, true
+	return r.snapshotCopy(), true
 }
 
 // List returns a snapshot of all active rules, sorted by expiry ascending
-// (soonest-to-expire first). Expired rules are excluded.
+// (soonest-to-expire first). Expired rules are excluded. Each rule's Hits
+// field is read via atomic.LoadInt64 to avoid a data race with IncHits.
 func (s *UAEmergencyStore) List() []UAEmergencyRule {
 	now := time.Now()
 	s.mu.RLock()
@@ -322,7 +404,7 @@ func (s *UAEmergencyStore) List() []UAEmergencyRule {
 		if r.ExpiresAt.Before(now) {
 			continue
 		}
-		out = append(out, *r)
+		out = append(out, r.snapshotCopy())
 	}
 	s.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].ExpiresAt.Before(out[j].ExpiresAt) })
@@ -354,6 +436,10 @@ func (s *UAEmergencyStore) IncHits(ua string, delta int64) {
 // PruneExpired removes rules whose ExpiresAt is before `now`. Returns the
 // number of rules removed. Caller is responsible for scheduling.
 func (s *UAEmergencyStore) PruneExpired(now time.Time) int {
+	// saveMu brackets mutation + save + audit (see Set for the rationale).
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.Lock()
 	expired := make([]*UAEmergencyRule, 0)
 	for ua, r := range s.rules {
@@ -369,7 +455,7 @@ func (s *UAEmergencyStore) PruneExpired(now time.Time) int {
 	for _, r := range expired {
 		s.audit("expire", r, "")
 	}
-	s.save()
+	s.saveLocked()
 	return len(expired)
 }
 
