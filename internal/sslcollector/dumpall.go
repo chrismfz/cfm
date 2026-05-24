@@ -3,11 +3,71 @@ package sslcollector
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
+
+// assembleCertPEM reads CertPath and, when ChainPath is set and points
+// to a different file, appends the chain bytes (with any PRIVATE KEY
+// block scrubbed first) so the result is a leaf+chain PEM blob suitable
+// for either ngx.ssl.parse_pem_cert (lua workers) or tls.X509KeyPair
+// (Go TLS path in Collector.GetCertificate).
+//
+// A failure to read the chain file is non-fatal: the leaf bytes are
+// returned and the caller continues with leaf-only behaviour. Only a
+// failure to read CertPath itself is propagated as an error, because
+// without the leaf there is nothing to serve.
+func assembleCertPEM(certPath, chainPath string) ([]byte, error) {
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, err
+	}
+	if chainPath == "" || chainPath == certPath {
+		return certPEM, nil
+	}
+	chainPEM, cerr := os.ReadFile(chainPath)
+	if cerr != nil || len(chainPEM) == 0 {
+		return certPEM, nil
+	}
+	scrubbed := stripPrivateKeyBlocks(chainPEM)
+	if len(scrubbed) == 0 {
+		return certPEM, nil
+	}
+	if len(certPEM) > 0 && certPEM[len(certPEM)-1] != '\n' {
+		certPEM = append(certPEM, '\n')
+	}
+	certPEM = append(certPEM, scrubbed...)
+	return certPEM, nil
+}
+
+// stripPrivateKeyBlocks returns pemData with any PEM block whose Type
+// contains "PRIVATE KEY" removed. Used to defensively scrub chain files
+// that some panels (eg older DA "<domain>.combined") write as
+// key+leaf+chain bundles — we never want a private key inside the
+// cert_pem field shipped to workers or persisted to disk snapshots.
+func stripPrivateKeyBlocks(pemData []byte) []byte {
+	rest := pemData
+	var out bytes.Buffer
+	for {
+		var blk *pem.Block
+		blk, rest = pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		if strings.Contains(blk.Type, "PRIVATE KEY") {
+			continue
+		}
+		_ = pem.Encode(&out, blk)
+	}
+	if out.Len() == 0 {
+		return nil
+	}
+	return out.Bytes()
+}
 
 // dumpAllPayload is the JSON envelope returned by /dumpall AND written
 // to disk by WriteSnapshot. Keeping a single source of truth for the
@@ -62,7 +122,12 @@ func (c *Collector) BuildDumpAllPayload() ([]byte, int, int, error) {
 		if pp, ok := pemByFP[e.Fingerprint]; ok {
 			return pp.cert, pp.key, true
 		}
-		certPEM, err := os.ReadFile(e.CertPath)
+		// assembleCertPEM reads CertPath and, when present, appends the
+		// scrubbed ChainPath bytes so DA-style leaf-only certs reach
+		// workers with their intermediate chain. LE (fullchain.pem) and
+		// cPanel (apache_tls/<dir>/certificates) already embed the chain
+		// in CertPath, so this is a no-op for them.
+		certPEM, err := assembleCertPEM(e.CertPath, e.ChainPath)
 		if err != nil {
 			return "", "", false
 		}

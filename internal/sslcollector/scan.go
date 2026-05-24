@@ -33,9 +33,17 @@ func (c *Collector) Refresh(ctx context.Context) error {
 			continue
 		}
 
-		// track known files for stat loop
+		// track known files for stat loop.
+		// ChainPath is included so the 60s statTicker -> anyKnownFileChanged
+		// loop also detects chain-only rotations (eg DA rewriting
+		// <domain>.cacert during an LE intermediate transition) when the
+		// fsnotify watcher is unavailable. Without this entry, the only
+		// fallback for chain-only changes is the 15-minute discoTicker.
 		nextFiles[absClean(e.CertPath)] = struct{}{}
 		nextFiles[absClean(e.KeyPath)] = struct{}{}
+		if e.ChainPath != "" && e.ChainPath != e.CertPath {
+			nextFiles[absClean(e.ChainPath)] = struct{}{}
+		}
 
 		for _, n := range e.Names {
 			n = strings.TrimSpace(strings.ToLower(strings.TrimSuffix(n, ".")))
@@ -110,6 +118,10 @@ func buildEntry(p Pair, now time.Time) (*Entry, error) {
 
 	stC, _ := os.Stat(p.CertPath)
 	stK, _ := os.Stat(p.KeyPath)
+	var stChain os.FileInfo
+	if p.ChainPath != "" && p.ChainPath != p.CertPath {
+		stChain, _ = os.Stat(p.ChainPath)
+	}
 
 	fp := sha256.Sum256(cert.Raw)
 
@@ -132,6 +144,10 @@ func buildEntry(p Pair, now time.Time) (*Entry, error) {
 	if stK != nil {
 		e.KeyMTime = stK.ModTime()
 		e.KeySize = stK.Size()
+	}
+	if stChain != nil {
+		e.ChainMTime = stChain.ModTime()
+		e.ChainSize = stChain.Size()
 	}
 	return e, nil
 }

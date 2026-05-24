@@ -225,22 +225,35 @@ func scanDirectAdmin(usersRoot string) []Pair {
 			if f.IsDir() {
 				continue
 			}
-			if !strings.HasSuffix(f.Name(), ".cert") {
+			name := f.Name()
+			// Match only "<domain>.cert", not "<domain>.cert.combined"
+			// or "<domain>.cert.creation_time".
+			if !strings.HasSuffix(name, ".cert") || strings.Contains(name, ".cert.") {
 				continue
 			}
-			base := filepath.Join(domainsDir, strings.TrimSuffix(f.Name(), ".cert"))
+			base := filepath.Join(domainsDir, strings.TrimSuffix(name, ".cert"))
 			cert := base + ".cert"
 			key := base + ".key"
-			ca := base + ".ca"
-			combined := base + ".combined"
+
+			// DirectAdmin's actual layout (current as of DA 1.6x):
+			//   <domain>.cert           leaf only
+			//   <domain>.cacert         intermediate chain
+			//   <domain>.cert.combined  leaf + chain (no key)
+			//   <domain>.key            private key
+			//
+			// Older / forked / future DA builds have shipped a few
+			// other names. We probe a known list in preference order
+			// (chain-only first, combined-with-possible-key last —
+			// dumpall.go strips PRIVATE KEY blocks defensively, so even
+			// if a combined file is picked the worker never sees the
+			// key), then fall back to a glob-based scan that catches
+			// anything new with "ca", "chain", or "intermediate" in
+			// its extension so a DA renaming in v1.7+ doesn't break us
+			// silently.
+			chain := findDirectAdminChain(base)
 
 			if fileOK(cert) && fileOK(key) {
-				p := Pair{Source: SrcDirectAdmin, CertPath: cert, KeyPath: key}
-				if fileOK(combined) {
-					p.ChainPath = combined
-				} else if fileOK(ca) {
-					p.ChainPath = ca
-				}
+				p := Pair{Source: SrcDirectAdmin, CertPath: cert, KeyPath: key, ChainPath: chain}
 				out = append(out, p)
 			}
 		}
@@ -248,6 +261,74 @@ func scanDirectAdmin(usersRoot string) []Pair {
 	return out
 }
 
+
+// findDirectAdminChain locates the intermediate-chain file that pairs
+// with a DA per-domain cert at `<base>.cert`. Returns "" when nothing
+// suitable is found (worker then ships leaf-only, current behaviour).
+//
+// Lookup order:
+//  1. Explicit, ordered candidate list — covers known DA naming
+//     conventions across versions. Chain-only files are preferred over
+//     combined files; combined files (which may carry the private key)
+//     are accepted but PRIVATE KEY blocks are stripped in dumpall.go
+//     before the bytes leave the daemon.
+//  2. Glob fallback — any sibling `<base>.*` whose extension contains
+//     "ca", "chain", "bundle", "intermediate", or "fullchain". This
+//     catches future renames without requiring a code change.
+//     `.cert`, `.csr`, `.key`, `.conf`, and other obvious non-chain
+//     extensions are excluded.
+func findDirectAdminChain(base string) string {
+	// Known names, most-specific / safest first.
+	for _, suf := range []string{
+		".cacert",        // modern DA — chain only
+		".ca",            // legacy DA
+		".chain",         // some forks
+		".chain.pem",
+		".ca-bundle",     // commercial CA distributions imported into DA
+		".cabundle",
+		".intermediate",
+		".intermediate.pem",
+		".fullchain",     // rare in DA but harmless to probe
+		".fullchain.pem",
+		".cert.combined", // leaf+chain (no key) — modern DA
+		".combined",      // legacy combined (may include key; scrubbed in dumpall.go)
+	} {
+		if fileOK(base + suf) {
+			return base + suf
+		}
+	}
+
+	// Glob fallback: catch future renames. Same directory only.
+	matches, _ := filepath.Glob(base + ".*")
+	for _, m := range matches {
+		if !fileOK(m) {
+			continue
+		}
+		ext := strings.ToLower(strings.TrimPrefix(m, base+"."))
+		// Reject things we definitely don't want as the chain source.
+		switch ext {
+		case "cert", "key", "csr", "conf", "ftp", "ip_list",
+			"subdomains", "usage", "handlers", "locations.json",
+			"csr_info", "cust_nginx", "ssl.bkup", "ssl.next_retry.bkup",
+			"cert.creation_time":
+			continue
+		}
+		if strings.Contains(ext, "private") ||
+			strings.HasSuffix(ext, ".tmp") ||
+			strings.HasSuffix(ext, ".swp") ||
+			strings.HasSuffix(ext, ".bak") {
+			continue
+		}
+		if strings.Contains(ext, "ca") ||
+			strings.Contains(ext, "chain") ||
+			strings.Contains(ext, "bundle") ||
+			strings.Contains(ext, "intermediate") ||
+			strings.Contains(ext, "fullchain") {
+			return m
+		}
+	}
+	return ""
+}
 
 // DirectAdmin hostname / panel certs:
 // /usr/local/directadmin/data/admin/ssl.cert + ssl.key (+ optional ssl.ca)
