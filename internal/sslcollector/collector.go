@@ -97,15 +97,39 @@ func (c *Collector) GetCertificate(chi *tls.ClientHelloInfo) (*tls.Certificate, 
 	}
 
 	// fast cache hit
+	// ChainMTime is compared in addition to leaf+key mtimes so a
+	// chain-only rotation (eg DA rewrites <domain>.cacert during an LE
+	// intermediate transition) correctly invalidates this cache. Without
+	// it, the Go TLS path keeps serving the cached *tls.Certificate
+	// with the stale chain even after the next Refresh.
 	c.cacheMu.Lock()
 	cc, ok := c.certCache[host]
 	c.cacheMu.Unlock()
-	if ok && cc.fp == e.Fingerprint && cc.certMTime.Equal(e.CertMTime) && cc.keyMTime.Equal(e.KeyMTime) {
+	if ok && cc.fp == e.Fingerprint &&
+		cc.certMTime.Equal(e.CertMTime) &&
+		cc.keyMTime.Equal(e.KeyMTime) &&
+		cc.chainMTime.Equal(e.ChainMTime) {
 		return cc.cert, nil
 	}
 
-	// load once
-	cert, err := tls.LoadX509KeyPair(e.CertPath, e.KeyPath)
+	// Load leaf+chain into a single PEM blob so tls.X509KeyPair builds
+	// a Certificate with the intermediate chain attached. Bare
+	// tls.LoadX509KeyPair(CertPath, KeyPath) would attach only the leaf
+	// (DA's <domain>.cert is leaf-only) — browsers would see no path
+	// to the trusted root.
+	certPEM, err := assembleCertPEM(e.CertPath, e.ChainPath)
+	if err != nil {
+		e.lastErr.Store(err.Error())
+		e.negativeUntil.Store(time.Now().Add(c.cfg.NegativeTTL).Unix())
+		return nil, err
+	}
+	keyPEM, err := os.ReadFile(e.KeyPath)
+	if err != nil {
+		e.lastErr.Store(err.Error())
+		e.negativeUntil.Store(time.Now().Add(c.cfg.NegativeTTL).Unix())
+		return nil, err
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		e.lastErr.Store(err.Error())
 		e.negativeUntil.Store(time.Now().Add(c.cfg.NegativeTTL).Unix())
@@ -115,11 +139,12 @@ func (c *Collector) GetCertificate(chi *tls.ClientHelloInfo) (*tls.Certificate, 
 	e.negativeUntil.Store(0)
 
 	cc2 := cachedCert{
-		cert:      &cert,
-		certMTime: e.CertMTime,
-		keyMTime:  e.KeyMTime,
-		fp:        e.Fingerprint,
-		loadedAt:  time.Now(),
+		cert:       &cert,
+		certMTime:  e.CertMTime,
+		keyMTime:   e.KeyMTime,
+		chainMTime: e.ChainMTime,
+		fp:         e.Fingerprint,
+		loadedAt:   time.Now(),
 	}
 
 	c.cacheMu.Lock()

@@ -30,10 +30,12 @@ type Entry struct {
 	Fingerprint string // sha256 of leaf cert raw
 
 	// file change tracking
-	CertMTime time.Time
-	KeyMTime  time.Time
-	CertSize  int64
-	KeySize   int64
+	CertMTime  time.Time
+	KeyMTime   time.Time
+	ChainMTime time.Time // zero when ChainPath == ""
+	CertSize   int64
+	KeySize    int64
+	ChainSize  int64
 
 	LastSeen time.Time
 
@@ -43,11 +45,12 @@ type Entry struct {
 }
 
 type cachedCert struct {
-	cert      *tls.Certificate
-	certMTime time.Time
-	keyMTime  time.Time
-	fp        string
-	loadedAt  time.Time
+	cert       *tls.Certificate
+	certMTime  time.Time
+	keyMTime   time.Time
+	chainMTime time.Time
+	fp         string
+	loadedAt   time.Time
 }
 
 type fileSig struct {

@@ -51,12 +51,20 @@ func (c *Collector) Stats() Stats {
 
     // Build a deterministic "version" hash over unique entries
     // (fingerprint + mtimes) so OpenResty can detect renewals/changes.
+    //
+    // ChainMTime is folded in (zero when ChainPath is empty) so a
+    // chain-only rotation — eg DA rewrites <domain>.cacert during a
+    // Let's Encrypt intermediate transition without touching the leaf
+    // or key — produces a new version and wakes the lua workers.
+    // Without this, chain-only changes would only be picked up by
+    // FORCE_DUMPALL_AFTER (1h), serving the stale chain in between.
     keys := make([]string, 0, len(uniq))
     for e := range uniq {
         keys = append(keys,
             e.Fingerprint+"|"+
             e.CertMTime.UTC().Format(time.RFC3339Nano)+"|"+
-            e.KeyMTime.UTC().Format(time.RFC3339Nano))
+            e.KeyMTime.UTC().Format(time.RFC3339Nano)+"|"+
+            e.ChainMTime.UTC().Format(time.RFC3339Nano))
     }
     sort.Strings(keys)
     h := sha256.New()

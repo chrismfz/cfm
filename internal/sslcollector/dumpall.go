@@ -11,6 +11,39 @@ import (
 	"time"
 )
 
+// assembleCertPEM reads CertPath and, when ChainPath is set and points
+// to a different file, appends the chain bytes (with any PRIVATE KEY
+// block scrubbed first) so the result is a leaf+chain PEM blob suitable
+// for either ngx.ssl.parse_pem_cert (lua workers) or tls.X509KeyPair
+// (Go TLS path in Collector.GetCertificate).
+//
+// A failure to read the chain file is non-fatal: the leaf bytes are
+// returned and the caller continues with leaf-only behaviour. Only a
+// failure to read CertPath itself is propagated as an error, because
+// without the leaf there is nothing to serve.
+func assembleCertPEM(certPath, chainPath string) ([]byte, error) {
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, err
+	}
+	if chainPath == "" || chainPath == certPath {
+		return certPEM, nil
+	}
+	chainPEM, cerr := os.ReadFile(chainPath)
+	if cerr != nil || len(chainPEM) == 0 {
+		return certPEM, nil
+	}
+	scrubbed := stripPrivateKeyBlocks(chainPEM)
+	if len(scrubbed) == 0 {
+		return certPEM, nil
+	}
+	if len(certPEM) > 0 && certPEM[len(certPEM)-1] != '\n' {
+		certPEM = append(certPEM, '\n')
+	}
+	certPEM = append(certPEM, scrubbed...)
+	return certPEM, nil
+}
+
 // stripPrivateKeyBlocks returns pemData with any PEM block whose Type
 // contains "PRIVATE KEY" removed. Used to defensively scrub chain files
 // that some panels (eg older DA "<domain>.combined") write as
@@ -89,40 +122,18 @@ func (c *Collector) BuildDumpAllPayload() ([]byte, int, int, error) {
 		if pp, ok := pemByFP[e.Fingerprint]; ok {
 			return pp.cert, pp.key, true
 		}
-		certPEM, err := os.ReadFile(e.CertPath)
+		// assembleCertPEM reads CertPath and, when present, appends the
+		// scrubbed ChainPath bytes so DA-style leaf-only certs reach
+		// workers with their intermediate chain. LE (fullchain.pem) and
+		// cPanel (apache_tls/<dir>/certificates) already embed the chain
+		// in CertPath, so this is a no-op for them.
+		certPEM, err := assembleCertPEM(e.CertPath, e.ChainPath)
 		if err != nil {
 			return "", "", false
 		}
 		keyPEM, err := os.ReadFile(e.KeyPath)
 		if err != nil {
 			return "", "", false
-		}
-		// Append the chain (intermediate certificates) when the source
-		// provided one and it isn't the same file we already loaded as
-		// the leaf. ngx.ssl.parse_pem_cert accepts a single PEM blob
-		// containing leaf + intermediates, so concatenating is enough —
-		// no Lua changes required.
-		//
-		// DA's <domain>.cert is leaf-only; the intermediate lives in
-		// <domain>.cacert. Without this append the worker hands the
-		// browser a leaf with no path to the trusted root and SSL
-		// checkers report "not trusted / install intermediate". LE
-		// (fullchain.pem) and cPanel (apache_tls/<dir>/certificates)
-		// already embed the chain in CertPath, so this is a no-op for
-		// them.
-		if e.ChainPath != "" && e.ChainPath != e.CertPath {
-			if chainPEM, cerr := os.ReadFile(e.ChainPath); cerr == nil && len(chainPEM) > 0 {
-				// Defensive: combined-style files can contain the
-				// private key. Strip any PRIVATE KEY blocks before
-				// concatenating so key material never leaks into
-				// cert_pem.
-				if scrubbed := stripPrivateKeyBlocks(chainPEM); len(scrubbed) > 0 {
-					if len(certPEM) > 0 && certPEM[len(certPEM)-1] != '\n' {
-						certPEM = append(certPEM, '\n')
-					}
-					certPEM = append(certPEM, scrubbed...)
-				}
-			}
 		}
 		cert, key := string(certPEM), string(keyPEM)
 		pemByFP[e.Fingerprint] = pemPair{cert: cert, key: key}

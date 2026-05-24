@@ -110,6 +110,10 @@ func buildEntry(p Pair, now time.Time) (*Entry, error) {
 
 	stC, _ := os.Stat(p.CertPath)
 	stK, _ := os.Stat(p.KeyPath)
+	var stChain os.FileInfo
+	if p.ChainPath != "" && p.ChainPath != p.CertPath {
+		stChain, _ = os.Stat(p.ChainPath)
+	}
 
 	fp := sha256.Sum256(cert.Raw)
 
@@ -132,6 +136,10 @@ func buildEntry(p Pair, now time.Time) (*Entry, error) {
 	if stK != nil {
 		e.KeyMTime = stK.ModTime()
 		e.KeySize = stK.Size()
+	}
+	if stChain != nil {
+		e.ChainMTime = stChain.ModTime()
+		e.ChainSize = stChain.Size()
 	}
 	return e, nil
 }
