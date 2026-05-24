@@ -400,8 +400,12 @@ type Engine struct {
 	// uaEmergency holds box-wide emergency rules keyed by normalized UA.
 	// Populated even when no rules are active; the API and Lua reader
 	// pull from it. Pruner goroutine started by StartUAEmergencyPruner.
-	uaEmergency      *UAEmergencyStore
-	uaEmergencyStop  chan struct{}
+	// The mutex protects both fields below from concurrent Start/Stop
+	// callers; sync.Once ensures Stop never double-closes the channel.
+	uaEmergency     *UAEmergencyStore
+	uaEmergencyStop chan struct{}
+	uaEmergencyMu   sync.Mutex
+	uaEmergencyOnce sync.Once
 
 	// Log ingest arbiter state (see ingest_socket.go).
 	// ingestSock is set via SetIngestSocket after NewEngine; nil when the
@@ -556,7 +560,12 @@ func (e *Engine) UAEmergency() *UAEmergencyStore {
 // multiple times — only the first call starts a goroutine. Stop the loop
 // via StopUAEmergencyPruner.
 func (e *Engine) StartUAEmergencyPruner(every time.Duration) {
-	if e.uaEmergency == nil || e.uaEmergencyStop != nil {
+	if e.uaEmergency == nil {
+		return
+	}
+	e.uaEmergencyMu.Lock()
+	defer e.uaEmergencyMu.Unlock()
+	if e.uaEmergencyStop != nil {
 		return
 	}
 	e.uaEmergencyStop = make(chan struct{})
@@ -564,13 +573,22 @@ func (e *Engine) StartUAEmergencyPruner(every time.Duration) {
 }
 
 // StopUAEmergencyPruner shuts down the expiry sweep started by
-// StartUAEmergencyPruner. Idempotent.
+// StartUAEmergencyPruner. Safe to call from multiple goroutines (signal
+// handler + apiserver graceful-stop) — sync.Once guarantees the channel
+// is closed at most once.
 func (e *Engine) StopUAEmergencyPruner() {
-	if e.uaEmergencyStop == nil {
+	e.uaEmergencyMu.Lock()
+	ch := e.uaEmergencyStop
+	e.uaEmergencyMu.Unlock()
+	if ch == nil {
 		return
 	}
-	close(e.uaEmergencyStop)
-	e.uaEmergencyStop = nil
+	e.uaEmergencyOnce.Do(func() {
+		close(ch)
+		e.uaEmergencyMu.Lock()
+		e.uaEmergencyStop = nil
+		e.uaEmergencyMu.Unlock()
+	})
 }
 
 // RecordChallengeSolved updates the store when a challenge is solved.

@@ -152,7 +152,6 @@
           <td class="actions-cell">
             <button class="btn-sm" data-act="throttle" data-ua="${escapeHTML(ua)}">throttle</button>
             <button class="btn-sm btn-danger" data-act="block" data-ua="${escapeHTML(ua)}">block</button>
-            <button class="btn-sm" data-act="allow" data-ua="${escapeHTML(ua)}">allow</button>
           </td>
         </tr>`;
     });

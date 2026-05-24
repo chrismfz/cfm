@@ -49,6 +49,14 @@ local cases = {
   { "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36", "mozilla" },
   { "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605",                    "mozilla" },
   { "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36 [FB_IAB/FB4A;FBAV/444]", "mozilla" },
+
+  -- Whitespace parity: Go firstUAToken breaks ONLY on space/tab. Lua used
+  -- to break on %s (which includes \n \r \v \f) and silently desynced the
+  -- two normalizers. These cases lock parity in.
+  { "FooBot\nextra/1.0", "foobot\nextra" },     -- LF inside token
+  { "SemBot\v/1.0",      "sembot\v" },          -- vertical tab
+  { "DotBot\f/2.0",      "dotbot\f" },          -- form feed
+  { "GooBot\r/3.0",      "goobot\r" },          -- carriage return
 }
 
 local pass, fail = 0, 0

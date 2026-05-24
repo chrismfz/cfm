@@ -8,13 +8,17 @@
 //
 //   ↑/↓        navigate top pane (UA rows)
 //   j/k        navigate bottom pane (active rules)
-//   t/b/a      throttle / block / allow the selected UA in the top pane
+//   t/b        throttle / block the selected UA in the top pane
 //   T          (shift-T) force-confirm a Google verified crawler
 //   u          undo the rule selected in the bottom pane
 //   d          drill into the selected UA (drops out, runs cfm bots drill)
 //   1/2/3/4    cycle TTL preset (5m / 15m / 30m / 60m). Default 30m.
 //   r          refresh now (otherwise auto-tick 2s)
 //   q          quit
+//
+// "allow" is intentionally not exposed: UA-keyed bypass would be a
+// trivially spoofable WAF gap. Use per-vhost rules with IP/ASN
+// verification for verified-crawler exemptions.
 package webdetector
 
 import (
@@ -47,7 +51,7 @@ func runBotsLive(baseURL string) error {
 	header.BorderStyle = ui.NewStyle(ui.ColorCyan)
 
 	topTable := widgets.NewTable()
-	topTable.Title = " ◈ Live UA Top — ↑↓ navigate  t=throttle  b=block  a=allow  d=drill  q=quit "
+	topTable.Title = " ◈ Live UA Top — ↑↓ navigate  t=throttle  b=block  d=drill  q=quit "
 	topTable.RowSeparator = false
 	topTable.FillRow = true
 	topTable.BorderStyle = ui.NewStyle(ui.ColorWhite)
@@ -168,7 +172,7 @@ func runBotsLive(baseURL string) error {
 		}
 
 		statusBar.Text = fmt.Sprintf(
-			" [t]throttle  [b]block  [a]allow  [T]google-confirm  [d]drill  [u]undo  [1-4]ttl  [r]refresh  [q]quit",
+			" [t]throttle  [b]block  [T]google-confirm  [d]drill  [u]undo  [1-4]ttl  [r]refresh  [q]quit",
 		)
 
 		ui.Clear()
@@ -200,7 +204,7 @@ func runBotsLive(baseURL string) error {
 			lastMsg = "✖ " + err.Error()
 			return
 		}
-		defer resp.Body.Close()
+		defer drainClose(resp.Body)
 		if resp.StatusCode == http.StatusConflict {
 			var errBody map[string]any
 			_ = json.NewDecoder(resp.Body).Decode(&errBody)
@@ -232,7 +236,7 @@ func runBotsLive(baseURL string) error {
 			lastMsg = "✖ " + err.Error()
 			return
 		}
-		resp.Body.Close()
+		drainClose(resp.Body)
 		if resp.StatusCode/100 != 2 {
 			lastMsg = fmt.Sprintf("✖ http %s", resp.Status)
 			return
@@ -241,12 +245,16 @@ func runBotsLive(baseURL string) error {
 		refresh()
 	}
 
-	drill := func() {
+	// drill returns true on success (UI re-initialized cleanly), or false
+	// if ui.Init failed after the runBotsDrill detour. The main loop must
+	// exit on false — without doing so the next renderAll would call
+	// ui.Render against a torn-down termui (panic or garbled terminal).
+	drill := func() bool {
 		ua := selectedUA()
 		if ua == "" {
 			lastMsg = "select a UA row first"
 			renderAll()
-			return
+			return true
 		}
 		ui.Close()
 		_ = runBotsDrill(baseURL, ua)
@@ -255,9 +263,10 @@ func runBotsLive(baseURL string) error {
 		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 		if initErr := ui.Init(); initErr != nil {
 			lastErr = initErr
-			return
+			return false
 		}
 		doLayout()
+		return true
 	}
 
 	refresh()
@@ -299,9 +308,6 @@ func runBotsLive(baseURL string) error {
 			case "b":
 				apply("block", false)
 				renderAll()
-			case "a":
-				apply("allow", false)
-				renderAll()
 			case "T":
 				// Shift-T: confirm Google verified — applies the last attempted
 				// action again with confirm=true. For simplicity we re-issue a
@@ -313,7 +319,11 @@ func runBotsLive(baseURL string) error {
 				undo()
 				renderAll()
 			case "d":
-				drill()
+				if !drill() {
+					// ui.Init failed after the drill detour; the UI is
+					// torn down and we can't render anything safely. Bail.
+					return lastErr
+				}
 				refresh()
 				renderAll()
 			case "1":

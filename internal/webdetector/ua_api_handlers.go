@@ -92,6 +92,10 @@ func (e *Engine) uaEmergencyAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ua emergency store unavailable"})
 		return
 	}
+	// Cap the request body so a single authenticated POST can't OOM the
+	// daemon. The schema is tiny (ua + action + ttl + reason); 64 KiB
+	// gives generous headroom for a long reason string.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var body uaEmergencyPostBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})

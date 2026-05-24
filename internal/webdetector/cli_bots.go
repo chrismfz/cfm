@@ -9,7 +9,6 @@
 //   cfm bots drill <ua>              drilldown for one normalized UA
 //   cfm bots block    <ua> [opts]    install block rule
 //   cfm bots throttle <ua> [opts]    install throttle rule
-//   cfm bots allow    <ua> [opts]    install allow (bypass) rule
 //   cfm bots remove   <ua>           undo an active rule
 //
 // Options for install commands:
@@ -25,6 +24,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,6 +35,21 @@ import (
 
 	clihttp "cfm/internal/clihttp"
 )
+
+// drainClose drains any unread bytes from a response body and then
+// closes it. Required for HTTP/1.1 keep-alive reuse — Go's net/http
+// only returns the underlying TCP connection to the idle pool when
+// the body is read to EOF. Partial reads (e.g. json.Decoder stopping
+// at the closing brace, or httpStatusErr reading only the first 512
+// bytes) would otherwise leak a connection per request and starve
+// the local ephemeral port pool over long TUI sessions.
+func drainClose(b io.ReadCloser) {
+	if b == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, b)
+	_ = b.Close()
+}
 
 // RunBots is the entry point used by cmd/cfm/main.go.
 func RunBots(baseURL string, args []string) error {
@@ -65,7 +80,7 @@ func RunBots(baseURL string, args []string) error {
 		}
 		return runBotsDrill(baseURL, args[1])
 
-	case "block", "throttle", "allow":
+	case "block", "throttle":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: cfm bots %s <ua> [--ttl 30m] [--reason ...] [--confirm]", args[0])
 		}
@@ -97,7 +112,6 @@ func printBotsHelp() {
 	fmt.Println("  cfm bots drill <ua>               # drilldown for one normalized UA")
 	fmt.Println("  cfm bots block    <ua> [opts]     # install block rule")
 	fmt.Println("  cfm bots throttle <ua> [opts]     # install throttle rule")
-	fmt.Println("  cfm bots allow    <ua> [opts]     # install allow (bypass) rule")
 	fmt.Println("  cfm bots remove   <ua>            # undo an active rule")
 	fmt.Println()
 	fmt.Println("Options (install commands):")
@@ -193,7 +207,7 @@ func runBotsDrill(baseURL, ua string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 {
 		return httpStatusErr(resp)
 	}
@@ -243,7 +257,7 @@ func runBotsInstall(baseURL, ua, action string, opts botsActionOpts) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer drainClose(resp.Body)
 
 	if resp.StatusCode == http.StatusConflict {
 		var errBody map[string]any
@@ -281,7 +295,7 @@ func runBotsRemove(baseURL, ua string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer drainClose(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
 		fmt.Printf("(no active rule for %q)\n", NormalizeUA(ua))
 		return nil
@@ -308,7 +322,7 @@ func fetchUATop(baseURL string, limit int) ([]UATopRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 {
 		return nil, httpStatusErr(resp)
 	}
@@ -324,7 +338,7 @@ func fetchUAEmergencyList(baseURL string) ([]UAEmergencyRule, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 {
 		return nil, httpStatusErr(resp)
 	}

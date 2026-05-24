@@ -45,10 +45,18 @@ func TestUAEmergency_TTLBounds(t *testing.T) {
 	dir := t.TempDir()
 	s := NewUAEmergencyStore(filepath.Join(dir, "r.json"), filepath.Join(dir, "a.log"))
 
-	// Below floor → default.
+	// Positive-but-below floor → clamped to MinTTL (NOT silently promoted
+	// to DefaultTTL — that would surprise the operator with a 30× larger
+	// blast radius than they asked for).
 	r, _ := s.Set("a", UAActionBlock, "admin", "", 5*time.Second)
+	if got := r.ExpiresAt.Sub(r.CreatedAt); got != UAEmergencyMinTTL {
+		t.Errorf("sub-floor ttl = %v, want min %v", got, UAEmergencyMinTTL)
+	}
+
+	// Zero / negative TTL → default (caller didn't specify).
+	r, _ = s.Set("z", UAActionBlock, "admin", "", 0)
 	if got := r.ExpiresAt.Sub(r.CreatedAt); got != UAEmergencyDefaultTTL {
-		t.Errorf("sub-floor ttl = %v, want default %v", got, UAEmergencyDefaultTTL)
+		t.Errorf("zero ttl = %v, want default %v", got, UAEmergencyDefaultTTL)
 	}
 
 	// Above cap → cap.

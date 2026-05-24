@@ -84,7 +84,15 @@ func NormalizeUA(ua string) string {
 }
 
 // firstUAToken returns the substring of `in` up to the first '/', ';',
-// whitespace or '('. Used for splitting "name/version" style tokens.
+// space, tab or '('. Used for splitting "name/version" style tokens.
+//
+// IMPORTANT: only space and tab are treated as token boundaries. We do
+// NOT call strings.TrimSpace on the result — that would silently strip
+// \n \r \v \f from the tail, desyncing this from configs/lua/cfm_ua_emergency.lua
+// whose pattern uses a literal space-and-tab character class. Callers
+// that need leading/trailing whitespace trimmed pass the input through
+// strings.TrimSpace before calling here (NormalizeUA does this at the
+// top, and again on each inner-envelope part).
 func firstUAToken(in string) string {
 	end := len(in)
 	for i, r := range in {
@@ -93,7 +101,7 @@ func firstUAToken(in string) string {
 			break
 		}
 	}
-	return strings.TrimSpace(in[:end])
+	return in[:end]
 }
 
 func hasAnySubstring(s string, subs []string) bool {

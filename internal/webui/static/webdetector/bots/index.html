@@ -33,10 +33,12 @@
         <h2>Web Bots — box-wide UA emergency control</h2>
         <p class="muted">
           Aggregates incoming traffic by normalized User-Agent across all vhosts.
-          Install <strong>throttle</strong>, <strong>block</strong>, or
-          <strong>allow</strong> rules with a bounded TTL; rules apply box-wide
-          and short-circuit per-vhost throttles. Verified Google crawlers
-          require explicit confirmation before any action takes effect.
+          Install <strong>throttle</strong> or <strong>block</strong> rules with
+          a bounded TTL; rules apply box-wide and short-circuit per-vhost
+          throttles. Verified Google crawlers require explicit confirmation
+          before any action takes effect. UA-keyed <em>allow</em> rules are
+          intentionally not supported (trivially spoofable WAF gap) — use
+          per-vhost rules with IP/ASN verification for crawler exemptions.
         </p>
         <div class="toolbar">
           <label for="ttlSelect">TTL</label>

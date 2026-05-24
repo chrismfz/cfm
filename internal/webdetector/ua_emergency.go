@@ -29,10 +29,15 @@ import (
 )
 
 // UA emergency action vocabulary.
+//
+// We intentionally do NOT expose an "allow" action. A UA-keyed allow would
+// be a WAF bypass keyed on a spoofable header — any attacker could send
+// "User-Agent: Googlebot/..." and inherit the bypass. If you need to
+// exempt a verified crawler box-wide, use per-vhost rules driven by
+// IP/ASN/rDNS verification instead.
 const (
 	UAActionThrottle = "throttle"
 	UAActionBlock    = "block"
-	UAActionAllow    = "allow"
 )
 
 // TTL bounds — server-side guards applied in the API layer.
@@ -49,7 +54,7 @@ const (
 // mirrors are populated automatically by Set() and on reload from disk.
 type UAEmergencyRule struct {
 	UA             string    `json:"ua"`              // normalized UA key
-	Action         string    `json:"action"`          // throttle | block | allow
+	Action         string    `json:"action"`          // throttle | block
 	CreatedAt      time.Time `json:"created_at"`      // wall clock
 	ExpiresAt      time.Time `json:"expires_at"`      // wall clock
 	CreatedAtUnix  int64     `json:"created_at_unix"` // for Lua consumers
@@ -67,6 +72,11 @@ type UAEmergencyStore struct {
 	mu         sync.RWMutex
 	rules      map[string]*UAEmergencyRule // key: normalized UA
 	saveSerial uint64                      // bumped on every disk write
+
+	// saveMu serialises the snapshot+write+rename cycle so two concurrent
+	// callers (e.g. Set and PruneExpired) can't collide on the temp file
+	// path and can't reorder the on-disk state vs the in-memory state.
+	saveMu sync.Mutex
 }
 
 // NewUAEmergencyStore loads any existing rules from `path` and returns a
@@ -125,10 +135,19 @@ func (s *UAEmergencyStore) load() {
 }
 
 // save writes the current rule set to disk atomically (write-temp + rename).
+//
+// The saveMu serialises the entire snapshot+write+rename cycle. Without
+// it, two concurrent saves would collide on the fixed ".tmp" filename
+// (truncating each other's writes) and the rename(2) order would not
+// match the in-memory mutation order — a stale snapshot could win.
 func (s *UAEmergencyStore) save() {
 	if s.path == "" {
 		return
 	}
+
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.RLock()
 	rules := make([]UAEmergencyRule, 0, len(s.rules))
 	for _, r := range s.rules {
@@ -144,18 +163,41 @@ func (s *UAEmergencyStore) save() {
 		return
 	}
 
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		logging.Logf("[ua_emergency] mkdir %s failed: %v", filepath.Dir(s.path), err)
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		logging.Logf("[ua_emergency] mkdir %s failed: %v", dir, err)
 		return
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		logging.Logf("[ua_emergency] write %s failed: %v", tmp, err)
+
+	// os.CreateTemp picks a unique name; cleanup on any failure so we
+	// don't leave orphan tmp files behind.
+	tmp, err := os.CreateTemp(dir, ".ua_emergency-*.json.tmp")
+	if err != nil {
+		logging.Logf("[ua_emergency] create temp in %s failed: %v", dir, err)
 		return
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		cleanup()
+		logging.Logf("[ua_emergency] write %s failed: %v", tmpPath, err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		logging.Logf("[ua_emergency] close %s failed: %v", tmpPath, err)
+		return
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		cleanup()
+		logging.Logf("[ua_emergency] chmod %s failed: %v", tmpPath, err)
+		return
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		cleanup()
 		logging.Logf("[ua_emergency] rename %s failed: %v", s.path, err)
-		_ = os.Remove(tmp)
 		return
 	}
 	atomic.AddUint64(&s.saveSerial, 1)
@@ -199,12 +241,20 @@ func (s *UAEmergencyStore) Set(ua, action, createdBy, reason string, ttl time.Du
 		return UAEmergencyRule{}, fmt.Errorf("ua is required")
 	}
 	switch action {
-	case UAActionThrottle, UAActionBlock, UAActionAllow:
+	case UAActionThrottle, UAActionBlock:
 	default:
-		return UAEmergencyRule{}, fmt.Errorf("invalid action %q", action)
+		return UAEmergencyRule{}, fmt.Errorf("invalid action %q (must be throttle or block)", action)
+	}
+	// Clamp TTL into [MinTTL, MaxTTL]. We intentionally clamp the floor
+	// (instead of replacing with DefaultTTL) so a 30-second test rule
+	// becomes a 1-minute rule, not a 30-minute rule — preserving the
+	// operator's intent of "short". A zero/negative TTL still falls back
+	// to DefaultTTL since the caller clearly didn't specify one.
+	if ttl <= 0 {
+		ttl = UAEmergencyDefaultTTL
 	}
 	if ttl < UAEmergencyMinTTL {
-		ttl = UAEmergencyDefaultTTL
+		ttl = UAEmergencyMinTTL
 	}
 	if ttl > UAEmergencyMaxTTL {
 		ttl = UAEmergencyMaxTTL
@@ -281,14 +331,20 @@ func (s *UAEmergencyStore) List() []UAEmergencyRule {
 
 // IncHits bumps the hit counter for a rule. Intended for the enforcement
 // layer to call once per (throttled/blocked) request. No-op if the rule no
-// longer exists. Hot path: takes only an RLock + atomic increment.
+// longer exists.
+//
+// We hold the RLock across the atomic.AddInt64 so PruneExpired (which
+// takes the write lock) cannot remove the rule between our pointer read
+// and the increment — without this hold the increment lands on an
+// orphaned struct that audit/save have already snapshotted, and the hit
+// is silently dropped.
 func (s *UAEmergencyStore) IncHits(ua string, delta int64) {
 	if delta <= 0 {
 		return
 	}
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	r, ok := s.rules[ua]
-	s.mu.RUnlock()
 	if !ok {
 		return
 	}

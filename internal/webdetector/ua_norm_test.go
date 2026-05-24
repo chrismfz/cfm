@@ -35,6 +35,14 @@ func TestNormalizeUA(t *testing.T) {
 
 		// FB in-app browser — should not collapse to facebookexternalhit.
 		{"Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36 [FB_IAB/FB4A;FBAV/444]", "mozilla"},
+
+		// Whitespace parity with Lua: firstUAToken must NOT treat \n \r
+		// \v \f as token separators (Lua's %s would; Go's must not).
+		// These cases lock the parity in.
+		{"FooBot\nextra/1.0", "foobot\nextra"},
+		{"SemBot\v/1.0", "sembot\v"},
+		{"DotBot\f/2.0", "dotbot\f"},
+		{"GooBot\r/3.0", "goobot\r"},
 	}
 
 	for _, c := range cases {

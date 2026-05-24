@@ -1247,20 +1247,16 @@ end
 -- Operators install these via the bot-top control surface. Matches happen
 -- on the normalized User-Agent only (one bucket per UA across all vhosts).
 -- Empty UA / unknown UA → falls through to the normal pipeline.
+--
+-- Only "throttle" and "block" are supported. An "allow" action keyed on
+-- the UA string would be a trivially spoofable WAF bypass.
 if ua_emerg_ok and ua_emerg then
   local emerg = ua_emerg.check(ngx.var.http_user_agent)
   if emerg then
     if emerg.action == "block" then
-      ngx.header["X-CFM-UA-Emergency"] = "block"
       log_route(ngx.WARN, "ua_emerg=block ua=" .. tostring(emerg.ua) ..
         " ip=" .. tostring(ip) .. " host=" .. host)
       return ngx.exit(444)
-    elseif emerg.action == "allow" then
-      ngx.header["X-CFM-UA-Emergency"] = "allow"
-      log_route(ngx.INFO, "ua_emerg=allow ua=" .. tostring(emerg.ua) ..
-        " ip=" .. tostring(ip) .. " host=" .. host)
-      ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
-      return
     elseif emerg.action == "throttle" then
       local hit, retry = ua_emerg.throttle(emerg.ua)
       if hit then

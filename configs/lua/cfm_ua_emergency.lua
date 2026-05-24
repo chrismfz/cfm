@@ -45,10 +45,14 @@ local function has_bot_marker(tok)
 end
 
 -- first_token returns the substring of `s` up to the first /, ;, space,
--- tab or '('. Mirrors firstUAToken in ua_norm.go.
+-- tab or '('. Mirrors firstUAToken in ua_norm.go *exactly* — note the
+-- character class uses a literal space and tab, NOT %s, because Lua's
+-- %s also matches \n \r \v \f while Go's firstUAToken breaks only on
+-- space/tab. A UA like "Foo\nBot/1.0" must normalize to the same key on
+-- both sides; using %s here would silently desync the two normalizers.
 local function first_token(s)
   if not s or s == "" then return "" end
-  local m = string.match(s, "^([^/;%s%(]+)")
+  local m = string.match(s, "^([^/;%( \t]+)")
   return m or ""
 end
 
@@ -107,16 +111,22 @@ local function refresh_if_needed()
   if content == _last_content then
     return  -- unchanged, keep parsed table
   end
-  _last_content = content
 
   if content == "" then
+    _last_content = content
     _rules = {}
     return
   end
 
   local parsed = cjson.decode(content)
   if type(parsed) ~= "table" then
-    return  -- leave previous rules in place on parse error
+    -- Parse failure: do NOT cache _last_content yet. If we did, a
+    -- subsequent refresh would short-circuit on the equality check and
+    -- the worker would never retry the same bytes — and would never
+    -- recover if the operator immediately re-saves a good file with
+    -- identical-looking content after a transient corruption. Leave
+    -- _rules in place (previous good snapshot).
+    return
   end
 
   local new_rules = {}
@@ -136,9 +146,10 @@ local function refresh_if_needed()
     end
   end
   _rules = new_rules
+  _last_content = content  -- commit cache only after successful parse
 end
 
--- check returns { action = "block"|"throttle"|"allow", expires_at = unix, ... }
+-- check returns { action = "block"|"throttle", expires_at = unix, ... }
 -- if an emergency rule matches the given raw UA, or nil otherwise. Callers
 -- should pass ngx.var.http_user_agent directly.
 function _M.check(ua_raw)
@@ -188,28 +199,12 @@ local _SH = ngx.shared.cfm_decisions
 -- throttle returns (hit, retry_after_seconds). When hit==true the caller
 -- should reject the request (typically with 429). When hit==false the
 -- request consumed a token and should proceed normally.
-function _M.throttle(normalized_ua)
-  if not _SH or not normalized_ua or normalized_ua == "" or normalized_ua == "-" then
-    return false, 0
-  end
-
-  local key      = "ua_emerg|" .. normalized_ua
-  local lock_key = key .. ":lock"
-  local now      = ngx.now()
-
-  -- Brief lock to avoid two workers racing the same token bucket.
-  local locked = false
-  for _ = 1, 10 do
-    if _SH:add(lock_key, true, 0.05) then
-      locked = true
-      break
-    end
-    ngx.sleep(0.001)
-  end
-  if not locked then
-    return true, 0.05
-  end
-
+--
+-- The token-bucket update is wrapped in pcall so any runtime error
+-- between acquiring and releasing the shdict lock still drops the lock,
+-- otherwise the 50ms TTL would stall every other worker hitting the same
+-- UA. Lua has no defer; pcall is the canonical pattern.
+local function _throttle_inner(key, now)
   local state = _SH:get(key)
   local tokens, last
   if state then
@@ -235,9 +230,41 @@ function _M.throttle(normalized_ua)
 
   local ttl = math.max(2, math.floor((BOX_BURST / BOX_RATE) * 2))
   _SH:set(key, tostring(tokens) .. ":" .. tostring(now), ttl)
+  return allow, retry_after
+end
+
+function _M.throttle(normalized_ua)
+  if not _SH or not normalized_ua or normalized_ua == "" or normalized_ua == "-" then
+    return false, 0
+  end
+
+  local key      = "ua_emerg|" .. normalized_ua
+  local lock_key = key .. ":lock"
+  local now      = ngx.now()
+
+  -- Brief lock to avoid two workers racing the same token bucket.
+  local locked = false
+  for _ = 1, 10 do
+    if _SH:add(lock_key, true, 0.05) then
+      locked = true
+      break
+    end
+    ngx.sleep(0.001)
+  end
+  if not locked then
+    return true, 0.05
+  end
+
+  -- pcall ensures _SH:delete runs even if _throttle_inner raises.
+  local ok, allow_or_err, retry_after = pcall(_throttle_inner, key, now)
   _SH:delete(lock_key)
 
-  return (not allow), retry_after
+  if not ok then
+    -- Internal error: fail open. Logging via ngx.log so operators see it.
+    ngx.log(ngx.ERR, "[cfm_ua_emergency] throttle inner error: ", tostring(allow_or_err))
+    return false, 0
+  end
+  return (not allow_or_err), (retry_after or 0)
 end
 
 return _M
