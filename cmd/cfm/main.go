@@ -299,6 +299,14 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "bots", "bot-top":
+		addr := apiBaseURL()
+		clihttp.SetToken(apiAuthToken())
+		if err := webdet.RunBots(addr, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "bots error:", err)
+			os.Exit(1)
+		}
+
 	case "mysqltop", "mysql-top", "mysql":
 		addr := apiBaseURL()
 		clihttp.SetToken(apiAuthToken())
