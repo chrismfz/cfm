@@ -143,6 +143,11 @@ func printBotsHelp() {
 	fmt.Println("  --ttl <duration>   default 30m, hard-capped at 60m")
 	fmt.Println("  --reason <text>    free-form, captured in /var/log/cfm/ua_emergency.log")
 	fmt.Println("  --confirm          required for verified Google crawlers")
+	fmt.Println()
+	fmt.Println("Note: bot-top aggregation activates only while at least one")
+	fmt.Println("emergency rule is installed (lazy activation — keeps idle boxes")
+	fmt.Println("at zero overhead). The `top` / `drill` / live TUI views are empty")
+	fmt.Println("until the first `block` or `throttle` rule is in place.")
 }
 
 // ── opts parsing ────────────────────────────────────────────────────────────
@@ -205,7 +210,20 @@ func runBotsTopStatic(baseURL string, limit int) error {
 		fmt.Fprintf(w, "%d\t%s\t%.2f\t%d\t%d\t%d\t%s\n",
 			i+1, r.UA, r.RPS, r.Reqs, r.UniqueIPs, r.Vhosts, active)
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	// Bot-top uses lazy activation: aggregation only runs while at least
+	// one emergency rule is installed. When the table is empty and there
+	// are no rules, surface that explicitly so operators don't read
+	// "empty table" as "no bot traffic."
+	if len(rows) == 0 && len(rules) == 0 {
+		fmt.Println()
+		fmt.Println("  (no data) — bot-top aggregation is idle.")
+		fmt.Println("  Install any emergency rule to activate sampling, e.g.:")
+		fmt.Println("    cfm bots throttle <ua> --ttl 5m --reason observing")
+	}
+	return nil
 }
 
 func runBotsList(baseURL string) error {

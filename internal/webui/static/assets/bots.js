@@ -127,7 +127,14 @@
   function renderTop() {
     if (!el.uaTopBody) return;
     if (!st.topRows.length) {
-      el.uaTopBody.innerHTML = `<tr><td colspan="8" class="muted">no UA traffic in window</td></tr>`;
+      // Lazy activation: bot-top aggregation only runs while at least one
+      // emergency rule is installed. Distinguish "no rules, so aggregation
+      // is idle" from "rules exist, but no traffic matched this window."
+      const hasAnyRules = Object.keys(st.rulesByUA).length > 0;
+      const msg = hasAnyRules
+        ? 'no UA traffic in window'
+        : 'aggregation is idle — install any emergency rule (block or throttle) to activate sampling';
+      el.uaTopBody.innerHTML = `<tr><td colspan="8" class="muted">${escapeHTML(msg)}</td></tr>`;
       return;
     }
     const rows = st.topRows.map((r, i) => {
