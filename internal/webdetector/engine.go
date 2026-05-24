@@ -160,6 +160,12 @@ type bucketSW struct {
 	refs  map[string]int
 	paths map[string]int
 
+	// Normalized-UA aggregation for the bot-top / UA emergency surface.
+	// Keys are NormalizeUA(rawUA). uasNormReqs is the per-bucket request
+	// count; uasNormIPs is a capped IP set per normalized UA.
+	uasNormReqs map[string]int
+	uasNormIPs  map[string]map[string]struct{}
+
 	// subnet behavioral aggregation (IPv4 /24 etc)
 	subnetReqs      map[string]int                 // subnet -> req count
 	subnetIPs       map[string]map[string]struct{} // subnet -> distinct IPs
@@ -391,6 +397,12 @@ type Engine struct {
 	trafficRules      *trafficRuleStore
 	history           *HistoryStore
 
+	// uaEmergency holds box-wide emergency rules keyed by normalized UA.
+	// Populated even when no rules are active; the API and Lua reader
+	// pull from it. Pruner goroutine started by StartUAEmergencyPruner.
+	uaEmergency      *UAEmergencyStore
+	uaEmergencyStop  chan struct{}
+
 	// Log ingest arbiter state (see ingest_socket.go).
 	// ingestSock is set via SetIngestSocket after NewEngine; nil when the
 	// socket listener is disabled (e.g. in tests).
@@ -428,6 +440,7 @@ func NewEngine(cfg Config) *Engine {
 	e.challengeExcludes = newExcludeStore(cfg.ChallengeExcludeStorePath)
 	e.wafExcludes = newExcludeStore(cfg.WAFExcludeStorePath)
 	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
+	e.uaEmergency = NewUAEmergencyStore(cfg.UAEmergencyStorePath, cfg.UAEmergencyAuditLog)
 	// manual from api webtop challenge add//
 	e.manualChal.init()
 
@@ -531,6 +544,33 @@ func addStringToSetWithCap(m map[string]map[string]struct{}, key, val string, ca
 // ChallengeAPI returns the in-memory store used by the challenge JSON API.
 func (e *Engine) ChallengeAPI() *ChallengeAPIStore {
 	return e.chalAPI
+}
+
+// UAEmergency returns the box-wide UA emergency rule store. Used by the
+// HTTP API handlers and the Lua-feed file writer.
+func (e *Engine) UAEmergency() *UAEmergencyStore {
+	return e.uaEmergency
+}
+
+// StartUAEmergencyPruner launches the background expiry sweep. Safe to call
+// multiple times — only the first call starts a goroutine. Stop the loop
+// via StopUAEmergencyPruner.
+func (e *Engine) StartUAEmergencyPruner(every time.Duration) {
+	if e.uaEmergency == nil || e.uaEmergencyStop != nil {
+		return
+	}
+	e.uaEmergencyStop = make(chan struct{})
+	go e.uaEmergency.RunPruneLoop(e.uaEmergencyStop, every)
+}
+
+// StopUAEmergencyPruner shuts down the expiry sweep started by
+// StartUAEmergencyPruner. Idempotent.
+func (e *Engine) StopUAEmergencyPruner() {
+	if e.uaEmergencyStop == nil {
+		return
+	}
+	close(e.uaEmergencyStop)
+	e.uaEmergencyStop = nil
 }
 
 // RecordChallengeSolved updates the store when a challenge is solved.
@@ -1059,6 +1099,32 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	}
 	if rec.UA != "" {
 		b.uas[rec.UA]++
+	}
+
+	// Normalized-UA aggregation. Keep separate from b.uas so the existing
+	// host-drilldown "Top UAs" view continues to show raw UA strings.
+	{
+		nu := NormalizeUA(rec.UA)
+		if nu != "" && nu != "-" {
+			if b.uasNormReqs == nil {
+				b.uasNormReqs = make(map[string]int)
+			}
+			b.uasNormReqs[nu]++
+			if rec.IP != "" {
+				if b.uasNormIPs == nil {
+					b.uasNormIPs = make(map[string]map[string]struct{})
+				}
+				ipSet := b.uasNormIPs[nu]
+				if ipSet == nil {
+					ipSet = make(map[string]struct{})
+					b.uasNormIPs[nu] = ipSet
+				}
+				// Cap per UA per bucket so a misbehaving UA can't explode memory.
+				if len(ipSet) < 2000 {
+					ipSet[rec.IP] = struct{}{}
+				}
+			}
+		}
 	}
 
 	if b.refs == nil {
