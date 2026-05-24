@@ -43,14 +43,20 @@ const (
 )
 
 // UAEmergencyRule is one active emergency rule.
+//
+// The duplicate *_unix fields exist so the Lua enforcement reader can
+// avoid RFC3339 parsing. Go callers use the time.Time fields; the unix
+// mirrors are populated automatically by Set() and on reload from disk.
 type UAEmergencyRule struct {
-	UA        string    `json:"ua"`         // normalized UA key
-	Action    string    `json:"action"`     // throttle | block | allow
-	CreatedAt time.Time `json:"created_at"` // wall clock
-	ExpiresAt time.Time `json:"expires_at"` // wall clock
-	CreatedBy string    `json:"created_by"` // token name / "admin" / "scoped:foo"
-	Reason    string    `json:"reason,omitempty"`
-	Hits      int64     `json:"hits"` // incremented by enforcement layer via IncHits
+	UA             string    `json:"ua"`              // normalized UA key
+	Action         string    `json:"action"`          // throttle | block | allow
+	CreatedAt      time.Time `json:"created_at"`      // wall clock
+	ExpiresAt      time.Time `json:"expires_at"`      // wall clock
+	CreatedAtUnix  int64     `json:"created_at_unix"` // for Lua consumers
+	ExpiresAtUnix  int64     `json:"expires_at_unix"` // for Lua consumers
+	CreatedBy      string    `json:"created_by"`      // token name / "admin" / "scoped:foo"
+	Reason         string    `json:"reason,omitempty"`
+	Hits           int64     `json:"hits"` // incremented by enforcement layer via IncHits
 }
 
 // UAEmergencyStore holds the active rules and writes them to disk so the
@@ -105,6 +111,13 @@ func (s *UAEmergencyStore) load() {
 		r := rules[i]
 		if r.UA == "" {
 			continue
+		}
+		// Backfill unix mirrors if the snapshot predates that field.
+		if r.CreatedAtUnix == 0 && !r.CreatedAt.IsZero() {
+			r.CreatedAtUnix = r.CreatedAt.Unix()
+		}
+		if r.ExpiresAtUnix == 0 && !r.ExpiresAt.IsZero() {
+			r.ExpiresAtUnix = r.ExpiresAt.Unix()
 		}
 		s.rules[r.UA] = &r
 	}
@@ -198,13 +211,16 @@ func (s *UAEmergencyStore) Set(ua, action, createdBy, reason string, ttl time.Du
 	}
 
 	now := time.Now()
+	exp := now.Add(ttl)
 	r := &UAEmergencyRule{
-		UA:        ua,
-		Action:    action,
-		CreatedAt: now,
-		ExpiresAt: now.Add(ttl),
-		CreatedBy: createdBy,
-		Reason:    reason,
+		UA:            ua,
+		Action:        action,
+		CreatedAt:     now,
+		ExpiresAt:     exp,
+		CreatedAtUnix: now.Unix(),
+		ExpiresAtUnix: exp.Unix(),
+		CreatedBy:     createdBy,
+		Reason:        reason,
 	}
 
 	s.mu.Lock()
