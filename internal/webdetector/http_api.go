@@ -40,6 +40,11 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/webdet/rules/remove", e.handleWebdetRulesRemove)
 	mux.HandleFunc("/api/v1/webdet/rules/simulate", e.handleWebdetRulesSimulate)
 
+	// Bot-top control surface (box-wide, UA-keyed).
+	mux.HandleFunc("/api/v1/webdet/ua-top", e.handleUATop)
+	mux.HandleFunc("/api/v1/webdet/ua-drill", e.handleUADrill)
+	mux.HandleFunc("/api/v1/webdet/ua-emergency", e.handleUAEmergency)
+
 	// History API
 	mux.HandleFunc("/api/v1/webdet/history/events", e.handleHistoryEvents)
 	mux.HandleFunc("/api/v1/webdet/history/summary", e.handleHistorySummary)

@@ -215,6 +215,11 @@ type Config struct {
 	TrafficRulesStorePath     string        // TRAFFIC_RULES_STORE_PATH
 	IPScoreRules              []IPScoreRule // IP_SCORE_RULES = block:0.90,challenge:0.75
 
+	// UA emergency control surface (bot-top).
+	// JSON snapshot consumed by the Lua enforcement layer, plus an
+	// append-only lifecycle audit log.
+	UAEmergencyStorePath string // UA_EMERGENCY_STORE_PATH
+	UAEmergencyAuditLog  string // UA_EMERGENCY_AUDIT_LOG
 }
 
 // FillDefaults ensures sane defaults if some fields are zero.
@@ -248,6 +253,12 @@ func (c *Config) FillDefaults() {
 	}
 	if c.TrafficRulesStorePath == "" {
 		c.TrafficRulesStorePath = "/var/lib/cfm/webdetector_traffic_rules.json"
+	}
+	if c.UAEmergencyStorePath == "" {
+		c.UAEmergencyStorePath = "/var/lib/cfm/ua_emergency.json"
+	}
+	if c.UAEmergencyAuditLog == "" {
+		c.UAEmergencyAuditLog = "/var/log/cfm/ua_emergency.log"
 	}
 	if c.HistoryDBPath == "" {
 		c.HistoryDBPath = "/var/lib/cfm/webdetector-history.db"

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM Admin · Web Bots</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <script type="module">
+    import "../../assets/shared/constants.js";
+    import "../../assets/shared/auth-context.js";
+    import "../../assets/shared/auth-mode.js";
+    import "../../assets/shared/api-client.js";
+    import "../../assets/shared/controller-bootstrap.js";
+    import "../../assets/shared/ui-scope.js";
+    import "../../assets/bots.js";
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <h1>CFM Admin</h1>
+      <nav class="top-nav" data-shared-nav></nav>
+      <div class="meta">
+        <span class="muted">Auto-refresh: <strong id="autoState">ON</strong></span>
+        <button id="refreshBtn" class="btn-quiet">Refresh now</button>
+        <button id="toggleAutoBtn" class="btn-quiet">Stop</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>Web Bots — box-wide UA emergency control</h2>
+        <p class="muted">
+          Aggregates incoming traffic by normalized User-Agent across all vhosts.
+          Install <strong>throttle</strong> or <strong>block</strong> rules with
+          a bounded TTL; rules apply box-wide and short-circuit per-vhost
+          throttles. Verified Google crawlers require explicit confirmation
+          before any action takes effect. UA-keyed <em>allow</em> rules are
+          intentionally not supported (trivially spoofable WAF gap) — use
+          per-vhost rules with IP/ASN verification for crawler exemptions.
+        </p>
+        <div class="toolbar">
+          <label for="ttlSelect">TTL</label>
+          <select id="ttlSelect" class="input">
+            <option value="300">5 min</option>
+            <option value="900">15 min</option>
+            <option value="1800" selected>30 min</option>
+            <option value="3600">60 min</option>
+          </select>
+          <label for="reasonInput" class="muted">Reason</label>
+          <input id="reasonInput" class="input input-wide" type="text" placeholder="optional (audit log)" />
+          <span id="actionMsg" class="pill" style="display:none"></span>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Live UA Top</h2>
+        <p class="muted">Window: short (live). Click an action to install a rule on that UA.</p>
+        <div class="table-wrap stable-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>UA</th>
+                <th>RPS</th>
+                <th>Reqs</th>
+                <th>Unique IPs</th>
+                <th>Vhosts</th>
+                <th>Active rule</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="uaTopBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Active emergency rules</h2>
+        <p class="muted">Rules expire automatically; the audit log lives at <code>/var/log/cfm/ua_emergency.log</code>.</p>
+        <div class="table-wrap stable-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>UA</th>
+                <th>Action</th>
+                <th>Expires in</th>
+                <th>Hits</th>
+                <th>By</th>
+                <th>Reason</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="activeRulesBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

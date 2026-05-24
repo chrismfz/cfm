@@ -244,6 +244,11 @@ end
 local rules_ok, rules = pcall(require, "cfm_rules")
 if rules_ok and rules and rules.init then rules.init(CFG) end
 
+-- Box-wide UA emergency rules. The module reads /var/lib/cfm/ua_emergency.json
+-- lazily (per-worker, 3s refresh interval). When pcall fails, the check is
+-- silently disabled and traffic flows through the normal pipeline.
+local ua_emerg_ok, ua_emerg = pcall(require, "cfm_ua_emergency")
+
 -- WAF module loaded once at worker init, not on every request.
 -- pcall here behaves identically to the previous per-request pcall:
 -- a load failure sets waf_ok=false and disables inline WAF checks.
@@ -1235,6 +1240,33 @@ do
   if has_cf and srv ~= "" and normalize_ip(ip) == normalize_ip(srv) then
     ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
     return
+  end
+end
+
+-- ── Step 0b: Box-wide UA emergency rules ─────────────────────────────────────
+-- Operators install these via the bot-top control surface. Matches happen
+-- on the normalized User-Agent only (one bucket per UA across all vhosts).
+-- Empty UA / unknown UA → falls through to the normal pipeline.
+--
+-- Only "throttle" and "block" are supported. An "allow" action keyed on
+-- the UA string would be a trivially spoofable WAF bypass.
+if ua_emerg_ok and ua_emerg then
+  local emerg = ua_emerg.check(ngx.var.http_user_agent)
+  if emerg then
+    if emerg.action == "block" then
+      log_route(ngx.WARN, "ua_emerg=block ua=" .. tostring(emerg.ua) ..
+        " ip=" .. tostring(ip) .. " host=" .. host)
+      return ngx.exit(444)
+    elseif emerg.action == "throttle" then
+      local hit, retry = ua_emerg.throttle(emerg.ua)
+      if hit then
+        ngx.header["X-CFM-UA-Emergency"] = "throttle"
+        ngx.header["Retry-After"] = tostring(math.max(1, math.floor(retry + 0.5)))
+        log_route(ngx.WARN, "ua_emerg=throttle ua=" .. tostring(emerg.ua) ..
+          " retry=" .. tostring(retry) .. " ip=" .. tostring(ip))
+        return ngx.exit(429)
+      end
+    end
   end
 end
 
