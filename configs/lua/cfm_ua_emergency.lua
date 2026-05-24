@@ -25,12 +25,32 @@ local cjson = require "cjson.safe"
 local PATH = "/var/lib/cfm/ua_emergency.json"
 local REFRESH_INTERVAL_SEC = 3
 
--- Optional fail-closed knob for the throttle pcall error path. Default is
--- fail-open (return false, 0 — admit the request) so a transient internal
--- error doesn't black out legitimate traffic. Operators who would rather
--- 429 than risk silent under-enforcement can set CFM_UA_EMERGENCY_FAIL_CLOSED=1
--- in the cfm environment.
-local FAIL_CLOSED = (os.getenv("CFM_UA_EMERGENCY_FAIL_CLOSED") == "1")
+-- Optional config file. Operators ship this to flip behavior knobs
+-- without editing the module. Matches the cfm_bridge_config.lua pattern
+-- (see cfm.lua). The file must return a table; missing file = defaults.
+--
+-- Supported keys:
+--   fail_closed = true|false   when an inner error or lock-contention
+--                              edge fires, fail-closed returns 429 with
+--                              an integer Retry-After. Default false
+--                              (fail-open) so transient cfm bugs can't
+--                              black out legitimate traffic.
+local _CFG_FILE = "/var/lib/cfm/lua/cfm_ua_emergency_config.lua"
+local _cfg = { fail_closed = false }
+do
+  local chunk = loadfile(_CFG_FILE)
+  if chunk then
+    local ok, val = pcall(chunk)
+    if ok and type(val) == "table" then
+      if val.fail_closed ~= nil then
+        _cfg.fail_closed = (val.fail_closed == true)
+      end
+    else
+      ngx.log(ngx.WARN, "[cfm_ua_emergency] config file did not return a table: ", _CFG_FILE)
+    end
+  end
+end
+local FAIL_CLOSED = _cfg.fail_closed
 
 local _last_refresh_at = 0
 local _last_content = ""
@@ -135,13 +155,14 @@ local function refresh_if_needed()
     return
   end
   if type(parsed) ~= "table" then
-    -- Structurally valid JSON but not the expected array (number,
-    -- string, boolean). Treat as empty ruleset and cache the content
-    -- so we don't reparse the same junk every 3s. The operator can
-    -- recover by writing a valid array.
-    ngx.log(ngx.ERR, "[cfm_ua_emergency] non-array content in ", PATH, " (type=", type(parsed), ") — treating as empty")
-    _last_content = content
-    _rules = {}
+    -- Structurally valid JSON but not the expected array shape (number,
+    -- string, boolean). Keep the previous in-memory ruleset (fail-static)
+    -- and do NOT cache content — that way the next refresh re-parses
+    -- and recovery is automatic the moment the operator fixes the file.
+    -- A typo like `echo 42 > /var/lib/cfm/ua_emergency.json` must not
+    -- wipe live emergency rules out from under operators.
+    ngx.log(ngx.ERR, "[cfm_ua_emergency] non-array content in ", PATH,
+      " (type=", type(parsed), ") — keeping previous rules")
     return
   end
 
@@ -247,16 +268,20 @@ local function _throttle_inner(key, now)
   local ttl = math.max(2, math.floor((BOX_BURST / BOX_RATE) * 2))
   local ok_set, err_set, forcible = _SH:set(key, tostring(tokens) .. ":" .. tostring(now), ttl)
   if not ok_set then
-    -- shdict is full and even forcible eviction failed; we couldn't
-    -- persist the bucket state. Next request will read nil and reset
-    -- the bucket to full, effectively disabling the throttle. Log
-    -- loudly so operators see the underlying capacity problem.
-    ngx.log(ngx.ERR, "[cfm_ua_emergency] shdict :set failed for key=", key,
-      " err=", tostring(err_set), " — throttle may be ineffective")
+    -- shdict full and forcible eviction failed; bucket state isn't
+    -- persisted. Next request will read nil and reset to a full bucket,
+    -- effectively disabling the throttle. Rate-limit the log so a
+    -- saturated shdict can't turn into a logging outage.
+    if _SH:add("ua_emerg|_set_fail_logged", true, 60) then
+      ngx.log(ngx.ERR, "[cfm_ua_emergency] shdict :set failed (rate-limited 60s) key=", key,
+        " err=", tostring(err_set), " — throttle may be ineffective")
+    end
   elseif forcible then
-    -- Stored, but evicted some other key. Cheap to log; operators
-    -- monitor this for shdict sizing pressure.
-    ngx.log(ngx.WARN, "[cfm_ua_emergency] shdict :set forced eviction for key=", key)
+    -- Stored, but evicted some other key. Rate-limit identically —
+    -- forcible is normal under LRU pressure and should not page.
+    if _SH:add("ua_emerg|_set_forcible_logged", true, 60) then
+      ngx.log(ngx.WARN, "[cfm_ua_emergency] shdict :set forced eviction (rate-limited 60s) key=", key)
+    end
   end
   return allow, retry_after
 end
@@ -280,7 +305,13 @@ function _M.throttle(normalized_ua)
     ngx.sleep(0.001)
   end
   if not locked then
-    return true, 0.05
+    -- Lock contention. Respect the configured fail policy so this edge
+    -- doesn't silently override the operator's intent. Fail-open admits
+    -- the request; fail-closed sends a 1-second 429.
+    if FAIL_CLOSED then
+      return true, 1
+    end
+    return false, 0
   end
 
   -- pcall ensures _SH:delete runs even if _throttle_inner raises.
@@ -291,11 +322,17 @@ function _M.throttle(normalized_ua)
     -- Internal error. Default policy is fail-open (return false, 0 ->
     -- admit the request) so a transient bug can't black out legitimate
     -- traffic. Operators who would rather 429 than risk silent
-    -- under-enforcement can set CFM_UA_EMERGENCY_FAIL_CLOSED=1.
+    -- under-enforcement can set fail_closed=true in
+    -- /var/lib/cfm/lua/cfm_ua_emergency_config.lua (see top of file).
+    --
+    -- Return an INTEGER retry_after: the caller serialises it into an
+    -- HTTP Retry-After header, which is integer-seconds per RFC 7231 —
+    -- a fractional value floors to 0 and tells the client to retry
+    -- immediately, defeating the fail-closed intent entirely.
     ngx.log(ngx.ERR, "[cfm_ua_emergency] throttle inner error: ", tostring(allow_or_err),
       " fail_closed=", tostring(FAIL_CLOSED))
     if FAIL_CLOSED then
-      return true, 0.1
+      return true, 1
     end
     return false, 0
   end

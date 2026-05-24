@@ -178,15 +178,17 @@ func TestUAEmergency_List(t *testing.T) {
 	}
 }
 
-// Legacy on-disk rules with the removed "allow" action must be dropped at
-// load time so they don't surface as ghost rules in the API/UI.
-func TestUAEmergency_LoadDropsLegacyAllow(t *testing.T) {
+// On-disk rules with unsupported actions (legacy "allow", future
+// vocabulary additions) must be dropped from memory at load time so
+// they don't surface as ghost rules in the API/UI — but they must NOT
+// be erased from disk. Preserving on disk lets a downgrade-rollback
+// across a future "new action" vocabulary boundary keep those rules
+// recoverable when the operator rolls forward again.
+func TestUAEmergency_LoadKeepsUnsupportedActionOnDisk(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ua_emergency.json")
 	audit := filepath.Join(dir, "ua_emergency.log")
 
-	// Hand-write a snapshot containing a legacy "allow" rule alongside a
-	// valid "block" rule.
 	legacy := `[
 		{"ua":"googlebot","action":"allow","created_at":"2099-01-01T00:00:00Z","expires_at":"2099-01-01T01:00:00Z","created_at_unix":4070908800,"expires_at_unix":4070912400,"created_by":"admin","hits":0},
 		{"ua":"badbot","action":"block","created_at":"2099-01-01T00:00:00Z","expires_at":"2099-01-01T01:00:00Z","created_at_unix":4070908800,"expires_at_unix":4070912400,"created_by":"admin","hits":0}
@@ -198,17 +200,18 @@ func TestUAEmergency_LoadDropsLegacyAllow(t *testing.T) {
 	s := NewUAEmergencyStore(path, audit)
 
 	if _, ok := s.Get("googlebot"); ok {
-		t.Error("legacy allow rule for googlebot was not dropped")
+		t.Error("unsupported-action rule for googlebot leaked into memory")
 	}
 	if _, ok := s.Get("badbot"); !ok {
 		t.Error("valid block rule for badbot was dropped")
 	}
 
-	// The store should have persisted the cleaned snapshot back to disk
-	// (so the next boot is a no-op).
+	// The on-disk snapshot must STILL contain the legacy rule —
+	// preserving it lets a roll-forward across a future-action boundary
+	// recover it.
 	data, _ := os.ReadFile(path)
-	if strings.Contains(string(data), `"action":"allow"`) {
-		t.Errorf("legacy allow rule still present in on-disk snapshot:\n%s", string(data))
+	if !strings.Contains(string(data), `"action":"allow"`) {
+		t.Errorf("legacy allow rule was erased from disk (forward-compat hazard):\n%s", string(data))
 	}
 }
 

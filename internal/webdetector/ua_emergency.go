@@ -99,19 +99,34 @@ func NewUAEmergencyStore(path, auditPath string) *UAEmergencyStore {
 	return s
 }
 
-// sweepStaleTmp removes any orphan temp files matching the save() pattern
-// in the store's directory. Called once at startup.
+// sweepStaleTmp removes orphan temp files matching the save() pattern in
+// the store's directory. Called once at startup.
+//
+// We only delete files whose mtime is older than `staleCutoff` ago — that
+// way a sibling daemon's in-flight save (created milliseconds ago, not yet
+// renamed) survives this sweep. A graceful-restart sequence where the old
+// process is mid-save while the new process boots is rare but realistic;
+// without the cutoff we'd race with it and silently lose the mutation.
 func (s *UAEmergencyStore) sweepStaleTmp() {
 	if s.path == "" {
 		return
 	}
+	const staleCutoff = 30 * time.Second
 	dir := filepath.Dir(s.path)
 	matches, err := filepath.Glob(filepath.Join(dir, ".ua_emergency-*.json.tmp"))
 	if err != nil {
 		return
 	}
+	now := time.Now()
 	removed := 0
 	for _, m := range matches {
+		st, err := os.Stat(m)
+		if err != nil {
+			continue
+		}
+		if now.Sub(st.ModTime()) < staleCutoff {
+			continue
+		}
 		if err := os.Remove(m); err == nil {
 			removed++
 		}
@@ -167,13 +182,16 @@ func (s *UAEmergencyStore) load() {
 		if r.UA == "" {
 			continue
 		}
-		// Drop rules whose action is no longer in the supported vocabulary.
-		// This is the migration path for any on-disk snapshot that still
-		// contains legacy "allow" entries from before that action was
-		// removed — without this guard those rules would resurface in the
-		// API and UI as ghost rules that don't enforce anything.
+		// Drop rules whose action is not in the supported vocabulary from
+		// the in-memory map so they can't surface as ghost rules in the
+		// API/UI. We do NOT rewrite the file: if a future cfm version
+		// adds a new action and an operator rolls back to this one,
+		// preserving the unknown-action rules on disk means rolling
+		// forward restores them. The legacy "allow" cleanup just lives
+		// on disk until the next legitimate Set/Delete naturally
+		// overwrites the snapshot.
 		if r.Action != UAActionThrottle && r.Action != UAActionBlock {
-			logging.Logf("[ua_emergency] dropping legacy rule on load: ua=%q action=%q", r.UA, r.Action)
+			logging.Logf("[ua_emergency] skipping rule with unsupported action on load: ua=%q action=%q (kept on disk)", r.UA, r.Action)
 			dropped++
 			continue
 		}
@@ -187,12 +205,11 @@ func (s *UAEmergencyStore) load() {
 		s.rules[r.UA] = &r
 	}
 	s.mu.Unlock()
-	// If we dropped anything, persist a clean snapshot back to disk so the
-	// next startup is a no-op. Done outside the lock above (save takes its
-	// own locks).
-	if dropped > 0 {
-		s.save()
-	}
+	// Intentionally NOT calling s.save() here even if `dropped > 0`. Saving
+	// would erase those rules from disk too, which is a forward-compat
+	// hazard: a future version that introduces a new action would lose
+	// every such rule if anyone ever downgraded across the boundary. The
+	// next legitimate Set/Delete naturally rewrites the snapshot.
 }
 
 // save writes the current rule set to disk atomically (write-temp + rename).
@@ -272,21 +289,14 @@ func (s *UAEmergencyStore) saveLocked() {
 	atomic.AddUint64(&s.saveSerial, 1)
 }
 
-// audit appends a single-line event to the lifecycle audit log. Format is
-// stable across versions for easy grep/awk parsing.
-func (s *UAEmergencyStore) audit(event string, r *UAEmergencyRule, extra string) {
-	if s.auditPath == "" || r == nil {
-		return
+// auditLine renders one lifecycle event into the stable single-line
+// format. Callers either pass it to audit() (single-event) or batch
+// many lines through auditBatch() (mass expiry).
+func (s *UAEmergencyStore) auditLine(event string, r *UAEmergencyRule, extra string) string {
+	if r == nil {
+		return ""
 	}
-	if err := os.MkdirAll(filepath.Dir(s.auditPath), 0o755); err != nil {
-		return
-	}
-	f, err := os.OpenFile(s.auditPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	line := fmt.Sprintf(
+	return fmt.Sprintf(
 		"ts=%s event=%s ua=%q action=%s ttl=%s expires=%s by=%q reason=%q hits=%d%s\n",
 		time.Now().UTC().Format(time.RFC3339),
 		event,
@@ -299,7 +309,37 @@ func (s *UAEmergencyStore) audit(event string, r *UAEmergencyRule, extra string)
 		atomic.LoadInt64(&r.Hits),
 		extra,
 	)
-	_, _ = f.WriteString(line)
+}
+
+// audit appends a single-line event to the lifecycle audit log.
+func (s *UAEmergencyStore) audit(event string, r *UAEmergencyRule, extra string) {
+	line := s.auditLine(event, r, extra)
+	if line == "" {
+		return
+	}
+	s.auditBatch([]string{line})
+}
+
+// auditBatch writes N pre-rendered lines to the audit log with a single
+// open/write/close. Used by PruneExpired to avoid holding saveMu across
+// N separate file syscalls when a mass expiry hits.
+func (s *UAEmergencyStore) auditBatch(lines []string) {
+	if s.auditPath == "" || len(lines) == 0 {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.auditPath), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(s.auditPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	for _, line := range lines {
+		if line != "" {
+			_, _ = f.WriteString(line)
+		}
+	}
 }
 
 // Set installs or replaces an emergency rule. The caller is responsible
@@ -436,9 +476,14 @@ func (s *UAEmergencyStore) IncHits(ua string, delta int64) {
 // PruneExpired removes rules whose ExpiresAt is before `now`. Returns the
 // number of rules removed. Caller is responsible for scheduling.
 func (s *UAEmergencyStore) PruneExpired(now time.Time) int {
-	// saveMu brackets mutation + save + audit (see Set for the rationale).
+	// Hold saveMu only for the mutation + snapshot write. Render audit
+	// lines under the lock (so they observe the same state save() did)
+	// but defer the actual file open/write/close until after we release
+	// saveMu — for a mass expiry that batch can be N file operations
+	// long, and holding saveMu across them would stall every concurrent
+	// Set/Delete on the API. Prune is the only writer of "expire" lines
+	// so there's no risk of two prune ticks reordering against each other.
 	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
 
 	s.mu.Lock()
 	expired := make([]*UAEmergencyRule, 0)
@@ -450,23 +495,37 @@ func (s *UAEmergencyStore) PruneExpired(now time.Time) int {
 	}
 	s.mu.Unlock()
 	if len(expired) == 0 {
+		s.saveMu.Unlock()
 		return 0
 	}
+
+	// Render lines while holding saveMu so any concurrent IncHits (RLock
+	// only) sees a consistent view of Hits, then save the snapshot, then
+	// release saveMu before doing the audit I/O.
+	lines := make([]string, 0, len(expired))
 	for _, r := range expired {
-		s.audit("expire", r, "")
+		lines = append(lines, s.auditLine("expire", r, ""))
 	}
 	s.saveLocked()
+	s.saveMu.Unlock()
+
+	s.auditBatch(lines)
 	return len(expired)
 }
 
-// RunPruneLoop drives PruneExpired on a fixed interval until ctx is done.
-// Designed to be launched as a goroutine from the engine bootstrap.
-func (s *UAEmergencyStore) RunPruneLoop(stop <-chan struct{}, every time.Duration) {
+// RunPruneLoop drives PruneExpired on a fixed interval until `stop` is
+// closed. If `done` is non-nil it is closed when the loop exits so the
+// caller can join on goroutine quiescence — used by Engine.StopUAEmergencyPruner
+// to guarantee no overlap with a subsequent Start.
+func (s *UAEmergencyStore) RunPruneLoop(stop <-chan struct{}, every time.Duration, done chan<- struct{}) {
 	if every <= 0 {
 		every = 10 * time.Second
 	}
 	t := time.NewTicker(every)
 	defer t.Stop()
+	if done != nil {
+		defer close(done)
+	}
 	for {
 		select {
 		case <-stop:

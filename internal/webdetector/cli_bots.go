@@ -36,27 +36,43 @@ import (
 	clihttp "cfm/internal/clihttp"
 )
 
-// drainClose drains any unread bytes from a response body (up to a sane
-// cap) and then closes it. Required for HTTP/1.1 keep-alive reuse —
-// Go's net/http only returns the underlying TCP connection to the idle
-// pool when the body is read to EOF. Partial reads (e.g. json.Decoder
-// stopping at the closing brace, or httpStatusErr reading only the
-// first 512 bytes) would otherwise leak a connection per request and
-// starve the local ephemeral port pool over long TUI sessions.
+// drainClose drains any unread bytes from a response body (bounded by
+// BYTES and TIME) and then closes it. Required for HTTP/1.1 keep-alive
+// reuse — Go's net/http only returns the underlying TCP connection to
+// the idle pool when the body is read to EOF.
 //
-// The drain is bounded by io.CopyN with drainCap so a stalled server
-// (chunked response that never sends its terminator) can't hang the
-// TUI inside drainClose — clihttp uses http.DefaultClient which has no
-// body-read deadline, so an unbounded io.Copy would wait forever. If
-// the body exceeds drainCap we accept losing keep-alive for that conn
-// rather than blocking the caller.
-const drainCap = 256 * 1024
+// Two bounds, both required:
+//   - drainCap (256 KiB) caps memory if a misbehaving server sends a
+//     massive body. Bodies larger than this lose keep-alive.
+//   - drainTimeout (2s) caps wall time so a slowloris server trickling
+//     bytes (below the cap, but indefinitely) can't hang the TUI.
+//     clihttp uses http.DefaultClient with no body-read deadline, so
+//     without this we'd block until the kernel TCP timeout fires.
+//
+// The drain runs in a goroutine so the timeout actually fires; Close()
+// from the caller aborts the in-flight Read on the underlying conn.
+const (
+	drainCap     = 256 * 1024
+	drainTimeout = 2 * time.Second
+)
 
 func drainClose(b io.ReadCloser) {
 	if b == nil {
 		return
 	}
-	_, _ = io.CopyN(io.Discard, b, drainCap)
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.CopyN(io.Discard, b, drainCap)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(drainTimeout):
+		// Timeout. Close() below will abort the in-flight Read in the
+		// drain goroutine, which then exits via the done channel that
+		// nobody reads from. No leak — the goroutine returns once Close
+		// unblocks the Read.
+	}
 	_ = b.Close()
 }
 

@@ -400,12 +400,13 @@ type Engine struct {
 	// uaEmergency holds box-wide emergency rules keyed by normalized UA.
 	// Populated even when no rules are active; the API and Lua reader
 	// pull from it. Pruner goroutine started by StartUAEmergencyPruner.
-	// uaEmergencyMu serialises Start/Stop pairs; uaEmergencyStop is the
-	// channel handed to the running goroutine. sync.Once would be wrong
-	// here — it fires once per Engine lifetime, so a Stop-Start-Stop
-	// cycle would skip the second close and leak the new goroutine.
+	// uaEmergencyMu serialises Start/Stop pairs; uaEmergencyStop signals
+	// the goroutine; uaEmergencyDone is closed by the goroutine on exit
+	// so Stop can synchronously join it (no overlap with a subsequent
+	// Start).
 	uaEmergency     *UAEmergencyStore
 	uaEmergencyStop chan struct{}
+	uaEmergencyDone chan struct{}
 	uaEmergencyMu   sync.Mutex
 
 	// Log ingest arbiter state (see ingest_socket.go).
@@ -570,7 +571,8 @@ func (e *Engine) StartUAEmergencyPruner(every time.Duration) {
 		return
 	}
 	e.uaEmergencyStop = make(chan struct{})
-	go e.uaEmergency.RunPruneLoop(e.uaEmergencyStop, every)
+	e.uaEmergencyDone = make(chan struct{})
+	go e.uaEmergency.RunPruneLoop(e.uaEmergencyStop, every, e.uaEmergencyDone)
 }
 
 // StopUAEmergencyPruner shuts down the expiry sweep started by
@@ -579,14 +581,27 @@ func (e *Engine) StartUAEmergencyPruner(every time.Duration) {
 // nil-guard under uaEmergencyMu prevents a double close, and a fresh
 // Start after a Stop installs a new channel that the next Stop can
 // close just like the first.
+//
+// Synchronous: waits for the prune goroutine to actually exit before
+// returning, so a subsequent Start cannot overlap with the previous
+// goroutine. The wait is bounded only by the running PruneExpired call
+// (microseconds in steady state; tens of ms on a slow disk during mass
+// expiry).
 func (e *Engine) StopUAEmergencyPruner() {
 	e.uaEmergencyMu.Lock()
-	defer e.uaEmergencyMu.Unlock()
-	if e.uaEmergencyStop == nil {
+	stopCh := e.uaEmergencyStop
+	doneCh := e.uaEmergencyDone
+	e.uaEmergencyStop = nil
+	e.uaEmergencyDone = nil
+	e.uaEmergencyMu.Unlock()
+
+	if stopCh == nil {
 		return
 	}
-	close(e.uaEmergencyStop)
-	e.uaEmergencyStop = nil
+	close(stopCh)
+	if doneCh != nil {
+		<-doneCh
+	}
 }
 
 // RecordChallengeSolved updates the store when a challenge is solved.
