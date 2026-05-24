@@ -378,6 +378,7 @@ Usage:
   cfm firewall status [--verbose] [--json] [--strict]
 
   cfm webtop  <vhost> -- Live stats for specific vhost
+  cfm bots             -- Webtop for bots only (UA-keyed, box-wide throttle/block); see "cfm bots help"
   cfm mysqltop -- MySQL Live stats
   cfm health                      -- local-node health summary (federation view planned)
   cfm health json                 -- machine-readable local snapshot
