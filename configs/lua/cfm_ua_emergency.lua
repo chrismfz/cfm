@@ -54,6 +54,7 @@ local FAIL_CLOSED = _cfg.fail_closed
 
 local _last_refresh_at = 0
 local _last_content = ""
+local _last_bad_content = ""  -- last content that failed to parse/validate (log de-spam)
 local _rules = {}  -- normalized UA → { action, expires_at_unix, reason, created_by }
 
 -- Bot markers — keep aligned with internal/webdetector/ua_norm.go.
@@ -145,26 +146,39 @@ local function refresh_if_needed()
     return
   end
 
+  -- Helper: log once per distinct bad-content snapshot, then suppress.
+  -- We don't cache into _last_content because that would short-circuit
+  -- recovery once the operator fixes the file. Instead, _last_bad_content
+  -- gates the log line so a single typo doesn't spam ERR every 3 seconds
+  -- across every worker forever.
+  local function note_bad_content(level, msg)
+    if content ~= _last_bad_content then
+      ngx.log(level, msg)
+      _last_bad_content = content
+    end
+  end
+
   local parsed = cjson.decode(content)
   if parsed == nil then
-    -- Either a parse error or a literal "null" payload. Do NOT cache
-    -- _last_content — that would short-circuit the next refresh and
-    -- prevent recovery once the operator fixes the file. Leave _rules
-    -- in place (previous good snapshot, fail-static).
-    ngx.log(ngx.WARN, "[cfm_ua_emergency] decode returned nil for ", PATH, " — keeping previous rules")
+    -- Parse error or literal "null". Keep previous rules (fail-static);
+    -- log only on first observation of this bad snapshot.
+    note_bad_content(ngx.WARN,
+      "[cfm_ua_emergency] decode returned nil for " .. PATH .. " — keeping previous rules")
     return
   end
   if type(parsed) ~= "table" then
     -- Structurally valid JSON but not the expected array shape (number,
-    -- string, boolean). Keep the previous in-memory ruleset (fail-static)
-    -- and do NOT cache content — that way the next refresh re-parses
-    -- and recovery is automatic the moment the operator fixes the file.
+    -- string, boolean). Keep the previous in-memory ruleset (fail-static).
     -- A typo like `echo 42 > /var/lib/cfm/ua_emergency.json` must not
     -- wipe live emergency rules out from under operators.
-    ngx.log(ngx.ERR, "[cfm_ua_emergency] non-array content in ", PATH,
-      " (type=", type(parsed), ") — keeping previous rules")
+    note_bad_content(ngx.ERR,
+      "[cfm_ua_emergency] non-array content in " .. PATH ..
+      " (type=" .. type(parsed) .. ") — keeping previous rules")
     return
   end
+  -- Reaching here means we have a valid parse. Any prior bad-content
+  -- guard is now stale; reset so a future bad write logs once again.
+  _last_bad_content = ""
 
   local new_rules = {}
   local now_unix = ngx.time()
@@ -305,13 +319,15 @@ function _M.throttle(normalized_ua)
     ngx.sleep(0.001)
   end
   if not locked then
-    -- Lock contention. Respect the configured fail policy so this edge
-    -- doesn't silently override the operator's intent. Fail-open admits
-    -- the request; fail-closed sends a 1-second 429.
-    if FAIL_CLOSED then
-      return true, 1
-    end
-    return false, 0
+    -- Lock contention is a workload signal (many workers hitting the same
+    -- UA at once), not an internal error. The right response is brief
+    -- backpressure — give the lock a moment to clear — regardless of the
+    -- FAIL_CLOSED knob, which governs internal-error policy. Admitting
+    -- unconditionally here would defeat the throttle on exactly the
+    -- bot-wave conditions it exists for; closing for a full second is too
+    -- aggressive for a routine contention edge. 50ms is enough to let the
+    -- previous lock holder finish (the lock itself has a 50ms TTL).
+    return true, 0.05
   end
 
   -- pcall ensures _SH:delete runs even if _throttle_inner raises.

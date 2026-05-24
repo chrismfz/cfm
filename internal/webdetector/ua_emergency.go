@@ -382,29 +382,30 @@ func (s *UAEmergencyStore) Set(ua, action, createdBy, reason string, ttl time.Du
 		Reason:        reason,
 	}
 
-	// saveMu brackets the whole mutation + save + audit so a concurrent
-	// Delete or PruneExpired cannot interleave and produce an audit-vs-disk
-	// inconsistency (e.g. "undo X" logged for a rule that's currently
-	// active on disk because a parallel Set already replaced it).
+	// Hold saveMu for the mutation + audit-line render + snapshot write,
+	// but release it BEFORE the audit file I/O. Holding it across the
+	// audit open/write/close would stall every concurrent Set/Delete on
+	// a slow audit-log filesystem. The audit line is rendered while
+	// holding saveMu so its Hits read sees the same state save() did;
+	// PruneExpired follows the same pattern (see its comment).
 	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
-
 	s.mu.Lock()
 	s.rules[ua] = r
 	s.mu.Unlock()
 
+	line := s.auditLine("create", r, "")
 	s.saveLocked()
-	s.audit("create", r, "")
+	s.saveMu.Unlock()
+
+	s.auditBatch([]string{line})
 	return r.snapshotCopy(), nil
 }
 
 // Delete removes an emergency rule by normalized UA. Returns the removed
 // rule (if any) and a bool indicating whether it existed.
 func (s *UAEmergencyStore) Delete(ua, by string) (UAEmergencyRule, bool) {
-	// saveMu brackets mutation + save + audit (see Set for the rationale).
+	// saveMu released before audit I/O — see Set's comment.
 	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
-
 	s.mu.Lock()
 	r, ok := s.rules[ua]
 	if ok {
@@ -412,11 +413,15 @@ func (s *UAEmergencyStore) Delete(ua, by string) (UAEmergencyRule, bool) {
 	}
 	s.mu.Unlock()
 	if !ok {
+		s.saveMu.Unlock()
 		return UAEmergencyRule{}, false
 	}
 	snap := r.snapshotCopy()
+	line := s.auditLine("undo", &snap, fmt.Sprintf(" undo_by=%q", by))
 	s.saveLocked()
-	s.audit("undo", &snap, fmt.Sprintf(" undo_by=%q", by))
+	s.saveMu.Unlock()
+
+	s.auditBatch([]string{line})
 	return snap, true
 }
 
