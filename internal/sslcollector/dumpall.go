@@ -3,11 +3,38 @@ package sslcollector
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
+
+// stripPrivateKeyBlocks returns pemData with any PEM block whose Type
+// contains "PRIVATE KEY" removed. Used to defensively scrub chain files
+// that some panels (eg older DA "<domain>.combined") write as
+// key+leaf+chain bundles — we never want a private key inside the
+// cert_pem field shipped to workers or persisted to disk snapshots.
+func stripPrivateKeyBlocks(pemData []byte) []byte {
+	rest := pemData
+	var out bytes.Buffer
+	for {
+		var blk *pem.Block
+		blk, rest = pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		if strings.Contains(blk.Type, "PRIVATE KEY") {
+			continue
+		}
+		_ = pem.Encode(&out, blk)
+	}
+	if out.Len() == 0 {
+		return nil
+	}
+	return out.Bytes()
+}
 
 // dumpAllPayload is the JSON envelope returned by /dumpall AND written
 // to disk by WriteSnapshot. Keeping a single source of truth for the
@@ -69,6 +96,33 @@ func (c *Collector) BuildDumpAllPayload() ([]byte, int, int, error) {
 		keyPEM, err := os.ReadFile(e.KeyPath)
 		if err != nil {
 			return "", "", false
+		}
+		// Append the chain (intermediate certificates) when the source
+		// provided one and it isn't the same file we already loaded as
+		// the leaf. ngx.ssl.parse_pem_cert accepts a single PEM blob
+		// containing leaf + intermediates, so concatenating is enough —
+		// no Lua changes required.
+		//
+		// DA's <domain>.cert is leaf-only; the intermediate lives in
+		// <domain>.cacert. Without this append the worker hands the
+		// browser a leaf with no path to the trusted root and SSL
+		// checkers report "not trusted / install intermediate". LE
+		// (fullchain.pem) and cPanel (apache_tls/<dir>/certificates)
+		// already embed the chain in CertPath, so this is a no-op for
+		// them.
+		if e.ChainPath != "" && e.ChainPath != e.CertPath {
+			if chainPEM, cerr := os.ReadFile(e.ChainPath); cerr == nil && len(chainPEM) > 0 {
+				// Defensive: combined-style files can contain the
+				// private key. Strip any PRIVATE KEY blocks before
+				// concatenating so key material never leaks into
+				// cert_pem.
+				if scrubbed := stripPrivateKeyBlocks(chainPEM); len(scrubbed) > 0 {
+					if len(certPEM) > 0 && certPEM[len(certPEM)-1] != '\n' {
+						certPEM = append(certPEM, '\n')
+					}
+					certPEM = append(certPEM, scrubbed...)
+				}
+			}
 		}
 		cert, key := string(certPEM), string(keyPEM)
 		pemByFP[e.Fingerprint] = pemPair{cert: cert, key: key}
