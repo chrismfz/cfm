@@ -25,11 +25,13 @@
 15. [Out of scope](#15-out-of-scope)
 16. [CSP composition packs for common third-party integrations](#16-csp-composition-packs-for-common-third-party-integrations)
     - [16a. Composition model](#16a-composition-model)
-    - [16b. Built-in packs — international](#16b-built-in-packs--international)
-    - [16c. Built-in packs — Greek banks (vPOS)](#16c-built-in-packs--greek-banks-vpos)
-    - [16d. Bundled templates — common stacks](#16d-bundled-templates--common-stacks)
-    - [16e. Honest note on `'unsafe-inline'` and `'unsafe-eval'`](#16e-honest-note-on-unsafe-inline-and-unsafe-eval)
-    - [16f. Open questions for packs](#16f-open-questions-for-packs)
+    - [16b. Built-in packs — international (by category)](#16b-built-in-packs--international-by-category)
+    - [16c. Built-in packs — Greek banks (vPOS) + IRIS](#16c-built-in-packs--greek-banks-vpos--iris)
+    - [16d. Built-in packs — Greek shipping & last-mile](#16d-built-in-packs--greek-shipping--last-mile)
+    - [16e. Built-in packs — Greek marketplaces & comparison](#16e-built-in-packs--greek-marketplaces--comparison)
+    - [16f. Bundled templates — common stacks](#16f-bundled-templates--common-stacks)
+    - [16g. Honest note on `'unsafe-inline'` and `'unsafe-eval'`](#16g-honest-note-on-unsafe-inline-and-unsafe-eval)
+    - [16h. Open questions for packs](#16h-open-questions-for-packs)
 
 ---
 
@@ -478,7 +480,7 @@ Enabled packs:
   [x] csp-pack-google-fonts            (style-src, font-src)
   [x] csp-pack-google-analytics        (script-src, img-src, connect-src)
   [x] csp-pack-recaptcha               (script-src, frame-src)
-  [x] csp-pack-cardlink                (form-action, frame-src)
+  [x] csp-pack-gr-vpos-cardlink        (form-action, frame-src)
   [ ] csp-pack-stripe                  (script-src, frame-src, connect-src)
 
 Effective CSP (report-only):
@@ -493,24 +495,196 @@ Effective CSP (report-only):
 
 > **Critical for vPOS:** Greek bank gateways redirect via HTML form `POST`. The directive that gates this is **`form-action`**, not `connect-src` and not `frame-src`. Forget `form-action` and the browser silently blocks checkout submission. Every bank pack below sets it.
 
-### 16b. Built-in packs — international
+### 16b. Built-in packs — international (by category)
 
-Wildcard host forms (`*.example.com`) are used throughout to survive vendor CDN-hostname drift, matching the convention in the example you pasted.
+Wildcard host forms (`*.example.com`) are used throughout to survive vendor CDN-hostname drift, matching the convention in the example you pasted. This catalog is a **starter set** — packs are versioned and shipped via the same channel as WAF signatures (see §16h).
 
-#### `csp-pack-google-fonts`
+#### Fonts & icon CDNs
+
+**`csp-pack-google-fonts`**
 ```
 style-src   https://fonts.googleapis.com
 font-src    https://fonts.gstatic.com
 ```
 
-#### `csp-pack-google-analytics` (GA4 + GTM)
+**`csp-pack-bunny-fonts`** *(GDPR-friendly Google Fonts mirror, hosted in EU)*
+```
+style-src   https://fonts.bunny.net
+font-src    https://fonts.bunny.net
+```
+
+**`csp-pack-adobe-fonts`** *(Typekit)*
+```
+script-src  https://use.typekit.net
+style-src   https://use.typekit.net
+font-src    https://use.typekit.net https://p.typekit.net
+img-src     https://p.typekit.net
+```
+
+**`csp-pack-font-awesome`** *(Kit-hosted)*
+```
+script-src  https://kit.fontawesome.com
+style-src   https://*.fontawesome.com
+font-src    https://*.fontawesome.com
+connect-src https://ka-f.fontawesome.com
+```
+
+#### Generic script/style CDNs
+
+**`csp-pack-jsdelivr`**
+```
+script-src  https://cdn.jsdelivr.net
+style-src   https://cdn.jsdelivr.net
+font-src    https://cdn.jsdelivr.net
+```
+
+**`csp-pack-unpkg`**
+```
+script-src  https://unpkg.com
+style-src   https://unpkg.com
+```
+
+**`csp-pack-cdnjs`** *(Cloudflare CDNJS)*
+```
+script-src  https://cdnjs.cloudflare.com
+style-src   https://cdnjs.cloudflare.com
+font-src    https://cdnjs.cloudflare.com
+```
+
+**`csp-pack-bunnycdn`** *(generic *.b-cdn.net hosting — site-specific, often disabled by default)*
+```
+script-src  https://*.b-cdn.net
+style-src   https://*.b-cdn.net
+img-src     https://*.b-cdn.net
+font-src    https://*.b-cdn.net
+media-src   https://*.b-cdn.net
+```
+
+#### Image CDNs / optimizers
+
+**`csp-pack-cloudinary`**
+```
+img-src     https://*.cloudinary.com
+script-src  https://*.cloudinary.com
+```
+
+**`csp-pack-imgix`**
+```
+img-src     https://*.imgix.net
+```
+
+#### Analytics, RUM, session replay
+
+**`csp-pack-google-analytics`** *(GA4 + GTM)*
 ```
 script-src  https://*.googletagmanager.com https://*.google-analytics.com
 img-src     https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com
 connect-src https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com
 ```
 
-#### `csp-pack-google-maps`
+**`csp-pack-microsoft-clarity`**
+```
+script-src  https://*.clarity.ms
+connect-src https://*.clarity.ms
+```
+
+**`csp-pack-hotjar`**
+```
+script-src  https://*.hotjar.com https://*.hotjar.io
+connect-src https://*.hotjar.com https://*.hotjar.io wss://*.hotjar.com
+img-src     https://*.hotjar.com
+font-src    https://*.hotjar.com
+frame-src   https://*.hotjar.com
+```
+
+**`csp-pack-fullstory`**
+```
+script-src  https://*.fullstory.com
+connect-src https://*.fullstory.com
+img-src     https://*.fullstory.com
+```
+
+**`csp-pack-matomo-cloud`** *(InnoCraft hosted)*
+```
+script-src  https://*.matomo.cloud
+connect-src https://*.matomo.cloud
+img-src     https://*.matomo.cloud
+```
+
+**`csp-pack-plausible-cloud`**
+```
+script-src  https://plausible.io
+connect-src https://plausible.io
+```
+
+#### Error & performance monitoring
+
+**`csp-pack-sentry`**
+```
+script-src  https://*.sentry.io
+connect-src https://*.sentry.io https://*.ingest.sentry.io
+```
+
+**`csp-pack-datadog-rum`**
+```
+script-src  https://www.datadoghq-browser-agent.com
+connect-src https://*.browser-intake-datadoghq.com https://*.datadoghq.com https://*.datadoghq.eu
+```
+
+**`csp-pack-new-relic-browser`**
+```
+script-src  https://js-agent.newrelic.com
+connect-src https://bam.nr-data.net https://*.nr-data.net
+```
+
+**`csp-pack-logrocket`**
+```
+script-src  https://*.logrocket.com https://*.lr-ingest.io
+connect-src https://*.lr-ingest.io https://*.logr-ingest.com
+img-src     https://*.logrocket.com
+```
+
+#### A/B testing & personalization
+
+**`csp-pack-optimizely`**
+```
+script-src  https://cdn.optimizely.com
+connect-src https://*.optimizely.com
+```
+
+**`csp-pack-vwo`** *(Visual Website Optimizer / Wingify)*
+```
+script-src  https://dev.visualwebsiteoptimizer.com https://*.visualwebsiteoptimizer.com https://*.wingify.com
+connect-src https://*.visualwebsiteoptimizer.com https://*.wingify.com
+img-src     https://*.visualwebsiteoptimizer.com
+```
+
+#### Cookie consent (GDPR)
+
+**`csp-pack-cookiebot`**
+```
+script-src  https://consent.cookiebot.com https://consentcdn.cookiebot.com
+img-src     https://imgsct.cookiebot.com
+connect-src https://consent.cookiebot.com https://consentcdn.cookiebot.com
+```
+
+**`csp-pack-onetrust`**
+```
+script-src  https://*.onetrust.com https://cdn.cookielaw.org
+connect-src https://*.onetrust.com https://geolocation.onetrust.com
+img-src     https://*.onetrust.com
+```
+
+**`csp-pack-iubenda`**
+```
+script-src  https://*.iubenda.com https://cdn.iubenda.com
+connect-src https://*.iubenda.com
+img-src     https://*.iubenda.com
+```
+
+#### Maps
+
+**`csp-pack-google-maps`**
 ```
 script-src  https://maps.googleapis.com https://maps.gstatic.com
 img-src     https://maps.googleapis.com https://maps.gstatic.com https://*.googleusercontent.com
@@ -519,13 +693,31 @@ font-src    https://fonts.gstatic.com
 frame-src   https://www.google.com
 ```
 
-#### `csp-pack-recaptcha` (v2 / v3 / Enterprise)
+**`csp-pack-mapbox`**
+```
+script-src  https://api.mapbox.com
+style-src   https://api.mapbox.com
+img-src     https://*.tiles.mapbox.com https://api.mapbox.com
+connect-src https://*.tiles.mapbox.com https://api.mapbox.com https://events.mapbox.com
+worker-src  blob:
+```
+
+**`csp-pack-openstreetmap`** *(Leaflet + OSM tile servers)*
+```
+img-src     https://*.tile.openstreetmap.org https://*.openstreetmap.org
+script-src  https://unpkg.com
+style-src   https://unpkg.com
+```
+
+#### CAPTCHA & bot challenges
+
+**`csp-pack-recaptcha`** *(v2 / v3 / Enterprise)*
 ```
 script-src  https://www.google.com https://www.gstatic.com https://www.recaptcha.net
 frame-src   https://www.google.com https://www.recaptcha.net
 ```
 
-#### `csp-pack-hcaptcha`
+**`csp-pack-hcaptcha`**
 ```
 script-src  https://*.hcaptcha.com
 style-src   https://*.hcaptcha.com
@@ -533,25 +725,42 @@ frame-src   https://*.hcaptcha.com
 connect-src https://*.hcaptcha.com
 ```
 
-#### `csp-pack-cloudflare-turnstile`
+**`csp-pack-cloudflare-turnstile`**
 ```
 script-src  https://challenges.cloudflare.com
 frame-src   https://challenges.cloudflare.com
 ```
 
-#### `csp-pack-cloudflare-insights` (RUM beacon)
+**`csp-pack-cloudflare-insights`** *(RUM beacon)*
 ```
 script-src  https://static.cloudflareinsights.com
 connect-src https://cloudflareinsights.com
 ```
 
-#### `csp-pack-youtube`
+#### Video & audio embeds
+
+**`csp-pack-youtube`**
 ```
 frame-src   https://*.youtube.com https://*.youtube-nocookie.com https://*.youtu.be
 img-src     https://*.ytimg.com
 ```
 
-#### `csp-pack-facebook-pixel` (FB Pixel + SDK)
+**`csp-pack-vimeo`**
+```
+frame-src   https://player.vimeo.com https://*.vimeo.com
+img-src     https://*.vimeocdn.com
+script-src  https://player.vimeo.com
+```
+
+**`csp-pack-spotify`** *(embedded player)*
+```
+frame-src   https://open.spotify.com
+img-src     https://*.scdn.co
+```
+
+#### Social pixels & embeds
+
+**`csp-pack-facebook-pixel`** *(FB Pixel + SDK)*
 ```
 script-src  https://*.facebook.net
 img-src     https://*.facebook.com
@@ -559,23 +768,62 @@ connect-src https://*.facebook.com
 frame-src   https://*.facebook.com
 ```
 
-#### `csp-pack-stripe`
+**`csp-pack-instagram-embed`**
 ```
-script-src  https://js.stripe.com https://*.stripe.com
-frame-src   https://js.stripe.com https://hooks.stripe.com https://*.stripe.com
-connect-src https://api.stripe.com https://*.stripe.com
-```
-
-#### `csp-pack-paypal`
-```
-script-src  https://*.paypal.com https://*.paypalobjects.com
-frame-src   https://*.paypal.com
-img-src     https://*.paypal.com https://*.paypalobjects.com
-connect-src https://*.paypal.com
-form-action https://www.paypal.com
+script-src  https://*.instagram.com
+frame-src   https://*.instagram.com
+img-src     https://*.cdninstagram.com
 ```
 
-#### `csp-pack-tawk` (Tawk.to chat widget)
+**`csp-pack-twitter-x`** *(formerly Twitter widgets/embeds)*
+```
+script-src  https://platform.twitter.com https://*.twimg.com
+frame-src   https://platform.twitter.com https://*.twitter.com https://*.x.com
+img-src     https://*.twimg.com
+```
+
+**`csp-pack-tiktok-pixel`**
+```
+script-src  https://*.tiktok.com
+connect-src https://*.tiktok.com
+img-src     https://*.tiktokcdn.com
+```
+
+**`csp-pack-linkedin-insight`**
+```
+script-src  https://snap.licdn.com
+img-src     https://px.ads.linkedin.com
+connect-src https://px.ads.linkedin.com
+```
+
+**`csp-pack-pinterest-tag`**
+```
+script-src  https://*.pinimg.com
+img-src     https://*.pinimg.com
+```
+
+**`csp-pack-snap-pixel`**
+```
+script-src  https://sc-static.net
+img-src     https://tr.snapchat.com
+connect-src https://tr.snapchat.com
+```
+
+**`csp-pack-reddit-pixel`**
+```
+script-src  https://www.redditstatic.com
+img-src     https://www.redditstatic.com
+```
+
+**`csp-pack-bing-uet`** *(Microsoft Ads UET)*
+```
+script-src  https://bat.bing.com
+img-src     https://bat.bing.com
+```
+
+#### Live chat & support widgets
+
+**`csp-pack-tawk`**
 ```
 script-src  https://*.tawk.to
 style-src   https://*.tawk.to
@@ -585,14 +833,239 @@ connect-src https://*.tawk.to wss://*.tawk.to
 frame-src   https://*.tawk.to
 ```
 
-#### `csp-pack-wp-jetpack` (WordPress.com services + Gravatar)
+**`csp-pack-intercom`**
+```
+script-src  https://*.intercomcdn.com https://*.intercom.io https://js.intercomcdn.com
+style-src   https://*.intercomcdn.com
+img-src     https://*.intercomcdn.com https://*.intercom-mail.com
+font-src    https://*.intercomcdn.com
+connect-src https://*.intercom.io https://*.intercom.com wss://*.intercom.io
+frame-src   https://*.intercom.io https://*.intercom.com
+```
+
+**`csp-pack-crisp`**
+```
+script-src  https://client.crisp.chat
+style-src   https://client.crisp.chat
+img-src     https://image.crisp.chat https://client.crisp.chat
+font-src    https://client.crisp.chat
+connect-src https://client.crisp.chat wss://client.relay.crisp.chat
+frame-src   https://game.crisp.chat
+```
+
+**`csp-pack-livechat`** *(LiveChat Inc.)*
+```
+script-src  https://*.livechatinc.com
+style-src   https://*.livechatinc.com
+img-src     https://*.livechatinc.com
+connect-src https://*.livechatinc.com wss://*.livechatinc.com
+frame-src   https://*.livechatinc.com
+```
+
+**`csp-pack-zendesk-widget`**
+```
+script-src  https://*.zendesk.com https://*.zdassets.com https://static.zdassets.com
+style-src   https://*.zendesk.com https://*.zdassets.com
+img-src     https://*.zendesk.com https://*.zdassets.com
+font-src    https://*.zdassets.com
+connect-src https://*.zendesk.com https://*.zdassets.com wss://*.zendesk.com
+frame-src   https://*.zendesk.com
+```
+
+**`csp-pack-drift`**
+```
+script-src  https://js.driftt.com https://widget.drift.com
+style-src   https://js.driftt.com
+img-src     https://*.drift.com
+connect-src https://*.drift.com wss://*.drift.com
+frame-src   https://js.driftt.com
+```
+
+**`csp-pack-hubspot-chat`**
+```
+script-src  https://js.hs-scripts.com https://js.hs-banner.com https://js.usemessages.com
+style-src   https://*.hubspot.com
+img-src     https://*.hubspot.com
+connect-src https://*.hubspot.com wss://*.hubspot.com
+frame-src   https://*.hubspot.com
+```
+
+#### Email marketing & CRM
+
+**`csp-pack-mailchimp`**
+```
+script-src  https://*.list-manage.com https://*.mailchimp.com https://chimpstatic.com
+img-src     https://*.list-manage.com https://*.mailchimp.com
+connect-src https://*.list-manage.com
+form-action https://*.list-manage.com
+```
+
+**`csp-pack-klaviyo`**
+```
+script-src  https://*.klaviyo.com https://static.klaviyo.com
+connect-src https://*.klaviyo.com
+img-src     https://*.klaviyo.com
+```
+
+**`csp-pack-brevo`** *(formerly Sendinblue)*
+```
+script-src  https://*.brevo.com https://sibautomation.com
+img-src     https://*.brevo.com
+connect-src https://*.brevo.com
+```
+
+**`csp-pack-hubspot-tracking`**
+```
+script-src  https://js.hs-analytics.net https://js.hs-scripts.com
+img-src     https://track.hubspot.com
+connect-src https://*.hubspot.com
+```
+
+**`csp-pack-activecampaign`**
+```
+script-src  https://*.activehosted.com https://*.activecampaign.com
+connect-src https://*.activehosted.com https://*.activecampaign.com
+```
+
+#### Reviews, loyalty, on-site search
+
+**`csp-pack-trustpilot`**
+```
+script-src  https://*.trustpilot.com
+img-src     https://*.trustpilot.com
+frame-src   https://*.trustpilot.com
+connect-src https://*.trustpilot.com
+```
+
+**`csp-pack-yotpo`**
+```
+script-src  https://*.yotpo.com
+img-src     https://*.yotpo.com
+connect-src https://*.yotpo.com
+```
+
+**`csp-pack-stamped`**
+```
+script-src  https://*.stamped.io
+img-src     https://*.stamped.io
+connect-src https://*.stamped.io
+```
+
+**`csp-pack-algolia`** *(InstantSearch / autocomplete)*
+```
+script-src  https://cdn.jsdelivr.net
+connect-src https://*.algolia.net https://*.algolianet.com https://*.algolia.io
+```
+
+#### Forms & scheduling
+
+**`csp-pack-typeform`**
+```
+script-src  https://embed.typeform.com
+frame-src   https://*.typeform.com
+```
+
+**`csp-pack-calendly`**
+```
+script-src  https://assets.calendly.com
+style-src   https://assets.calendly.com
+frame-src   https://calendly.com https://*.calendly.com
+```
+
+#### SSO / social login
+
+**`csp-pack-google-signin`** *(Google Identity Services)*
+```
+script-src  https://accounts.google.com https://apis.google.com
+frame-src   https://accounts.google.com
+connect-src https://accounts.google.com
+```
+
+**`csp-pack-apple-signin`**
+```
+script-src  https://appleid.cdn-apple.com
+frame-src   https://appleid.apple.com
+connect-src https://appleid.apple.com
+form-action https://appleid.apple.com
+```
+
+**`csp-pack-microsoft-signin`** *(MSAL.js / Entra ID)*
+```
+script-src  https://alcdn.msauth.net
+frame-src   https://login.microsoftonline.com
+connect-src https://login.microsoftonline.com https://*.b2clogin.com
+form-action https://login.microsoftonline.com
+```
+
+#### Payments — international
+
+**`csp-pack-stripe`**
+```
+script-src  https://js.stripe.com https://*.stripe.com
+frame-src   https://js.stripe.com https://hooks.stripe.com https://*.stripe.com
+connect-src https://api.stripe.com https://*.stripe.com
+```
+
+**`csp-pack-paypal`**
+```
+script-src  https://*.paypal.com https://*.paypalobjects.com
+frame-src   https://*.paypal.com
+img-src     https://*.paypal.com https://*.paypalobjects.com
+connect-src https://*.paypal.com
+form-action https://www.paypal.com
+```
+
+**`csp-pack-klarna`**
+```
+script-src  https://*.klarna.com https://*.klarnacdn.net
+frame-src   https://*.klarna.com
+img-src     https://*.klarnacdn.net
+connect-src https://*.klarna.com
+form-action https://*.klarna.com
+```
+
+**`csp-pack-adyen`**
+```
+script-src  https://*.adyen.com
+frame-src   https://*.adyen.com
+img-src     https://*.adyen.com
+connect-src https://*.adyen.com
+form-action https://*.adyen.com
+```
+
+**`csp-pack-mollie`**
+```
+script-src  https://js.mollie.com
+frame-src   https://*.mollie.com
+connect-src https://api.mollie.com
+form-action https://*.mollie.com
+```
+
+**`csp-pack-applepay`** *(only when used as native ApplePayJS, not via Stripe/Adyen)*
+```
+connect-src https://apple-pay-gateway.apple.com
+frame-src   https://apple-pay-gateway.apple.com
+```
+
+#### WordPress ecosystem
+
+**`csp-pack-wp-jetpack`** *(WordPress.com services + Gravatar)*
 ```
 script-src  https://*.wp.com
 img-src     https://*.wp.com https://*.gravatar.com https://secure.gravatar.com
 style-src   https://*.wp.com
 ```
 
-### 16c. Built-in packs — Greek banks (vPOS)
+**`csp-pack-disqus`** *(comment widget)*
+```
+script-src  https://*.disqus.com https://*.disquscdn.com
+img-src     https://*.disquscdn.com
+style-src   https://*.disquscdn.com
+frame-src   https://disqus.com
+connect-src https://*.disqus.com
+```
+
+### 16c. Built-in packs — Greek banks (vPOS) + IRIS
 
 Each pack below sets **`form-action`** in addition to `frame-src` (the latter only matters when the bank's hosted form is iframed instead of redirected — most are redirect-flow, but a few support both).
 
@@ -641,6 +1114,16 @@ form-action https://*.everypay.gr
 frame-src   https://*.everypay.gr
 ```
 
+#### `csp-pack-gr-iris` (IRIS Online Payments — DIAS account-to-account)
+
+State-pushed alternative to card payments; integrated either via the customer's bank vPOS (in which case the relevant bank pack covers it) or directly via the IRIS gateway. Direct-integration domains:
+```
+script-src  https://*.iris.gr
+form-action https://*.iris.gr https://*.dias.com.gr
+frame-src   https://*.iris.gr https://*.dias.com.gr
+connect-src https://*.iris.gr
+```
+
 #### `csp-pack-gr-myip` (myip.gr utility — CFM-internal customer convenience)
 ```
 script-src  https://*.myip.gr
@@ -648,13 +1131,98 @@ connect-src https://*.myip.gr
 img-src     https://*.myip.gr
 ```
 
-### 16d. Bundled templates — common stacks
+### 16d. Built-in packs — Greek shipping & last-mile
+
+These widgets typically embed a JS picker on checkout (locker selection, address autocomplete) and/or a tracking iframe on the order-status page. For most carriers `script-src` + `frame-src` + `connect-src` is enough; `form-action` rarely applies because shipping selection is client-side state, not a redirect.
+
+#### `csp-pack-gr-shipping-boxnow` (BoxNow lockers — the dominant locker network in GR)
+
+Embedded locker map/picker on checkout. Increasingly mandatory for shops competing on delivery options.
+```
+script-src  https://*.boxnow.gr
+style-src   https://*.boxnow.gr
+img-src     https://*.boxnow.gr
+connect-src https://*.boxnow.gr
+frame-src   https://*.boxnow.gr
+```
+
+#### `csp-pack-gr-shipping-skroutz-last-mile` (Skroutz Last Mile / SLM — locker + courier)
+```
+script-src  https://*.skroutz.gr
+style-src   https://*.skroutz.gr
+img-src     https://*.skroutz.gr
+connect-src https://*.skroutz.gr
+frame-src   https://*.skroutz.gr
+```
+
+#### `csp-pack-gr-shipping-acs` (ACS Courier — tracking widget / address validation)
+```
+script-src  https://*.acscourier.net https://*.acscourier.gr
+connect-src https://*.acscourier.net https://*.acscourier.gr
+frame-src   https://*.acscourier.net https://*.acscourier.gr
+img-src     https://*.acscourier.net https://*.acscourier.gr
+```
+
+#### `csp-pack-gr-shipping-geniki-taxydromiki` (Geniki Taxydromiki / General Post)
+```
+script-src  https://*.taxydromiki.com
+connect-src https://*.taxydromiki.com
+frame-src   https://*.taxydromiki.com
+```
+
+#### `csp-pack-gr-shipping-speedex`
+```
+script-src  https://*.speedex.gr
+connect-src https://*.speedex.gr
+frame-src   https://*.speedex.gr
+img-src     https://*.speedex.gr
+```
+
+#### `csp-pack-gr-shipping-elta-courier` (ELTA Courier — ΕΛΤΑ Courier)
+```
+script-src  https://*.elta-courier.gr https://*.elta.gr
+connect-src https://*.elta-courier.gr https://*.elta.gr
+frame-src   https://*.elta-courier.gr https://*.elta.gr
+img-src     https://*.elta-courier.gr https://*.elta.gr
+```
+
+#### `csp-pack-gr-shipping-sendx` (SendX — third-party fulfillment, used by many small GR shops)
+```
+script-src  https://*.sendx.gr
+connect-src https://*.sendx.gr
+frame-src   https://*.sendx.gr
+```
+
+### 16e. Built-in packs — Greek marketplaces & comparison
+
+#### `csp-pack-gr-skroutz` (Skroutz Analytics + Smart Cart + reviews + affiliate)
+
+Skroutz embeds appear on most GR e-commerce sites for at least one of: analytics conversion tracking, Smart Cart unified checkout, product reviews import, affiliate link tracking. One wildcard pack covers all of them.
+```
+script-src  https://*.skroutz.gr
+style-src   https://*.skroutz.gr
+img-src     https://*.skroutz.gr
+connect-src https://*.skroutz.gr
+frame-src   https://*.skroutz.gr
+form-action https://*.skroutz.gr
+```
+
+> Note: `csp-pack-gr-skroutz` and `csp-pack-gr-shipping-skroutz-last-mile` overlap entirely (`*.skroutz.gr` covers both). They're kept as separate packs so the UI can show *intent* — "this site uses Skroutz comparison/analytics" vs "this site uses Skroutz Last Mile shipping" — even though the merged directive list is identical. The composition step dedupes.
+
+#### `csp-pack-gr-bestprice` (BestPrice price comparison — analytics + affiliate)
+```
+script-src  https://*.bestprice.gr
+img-src     https://*.bestprice.gr
+connect-src https://*.bestprice.gr
+```
+
+### 16f. Bundled templates — common stacks
 
 Pre-composed templates for "I just want it to work" customers. Each bundle is a regular template whose `options_json` carries `enabled_packs: [...]`. Operators can clone and customize.
 
 #### `csp-bundle-gr-ecommerce-typical`
 
-The typical Greek shop: GA + reCAPTCHA + at least one bank gateway + at least one international processor.
+The typical Greek shop: GA + reCAPTCHA + at least one bank gateway + at least one international processor + Skroutz + BoxNow.
 
 ```
 base:           csp-report-only
@@ -662,11 +1230,14 @@ enabled_packs:
   - csp-pack-google-fonts
   - csp-pack-google-analytics
   - csp-pack-recaptcha
-  - csp-pack-cardlink
-  - csp-pack-eurocommerce
+  - csp-pack-gr-vpos-cardlink
+  - csp-pack-gr-vpos-eurocommerce
   - csp-pack-stripe
   - csp-pack-paypal
   - csp-pack-youtube
+  - csp-pack-gr-skroutz
+  - csp-pack-gr-shipping-boxnow
+  - csp-pack-cookiebot
 extra_directives:
   default-src     'self'
   object-src      'none'
@@ -684,9 +1255,64 @@ enabled_packs:
   - csp-pack-google-fonts
   - csp-pack-google-analytics
   - csp-pack-recaptcha
-  - csp-pack-viva
-  - csp-pack-everypay
+  - csp-pack-gr-vpos-viva
+  - csp-pack-gr-vpos-everypay
   - csp-pack-stripe
+  - csp-pack-gr-skroutz
+  - csp-pack-gr-shipping-boxnow
+  - csp-pack-cookiebot
+extra_directives:
+  default-src     'self'
+  object-src      'none'
+  base-uri        'self'
+  frame-ancestors 'self'
+```
+
+#### `csp-bundle-gr-ecommerce-skroutz-stack`
+
+For shops fully on the Skroutz ecosystem (Smart Cart checkout + Skroutz Pay + SLM shipping).
+
+```
+base:           csp-report-only
+enabled_packs:
+  - csp-pack-google-fonts
+  - csp-pack-google-analytics
+  - csp-pack-recaptcha
+  - csp-pack-gr-skroutz
+  - csp-pack-gr-shipping-skroutz-last-mile
+  - csp-pack-gr-vpos-cardlink
+  - csp-pack-stripe
+  - csp-pack-cookiebot
+extra_directives:
+  default-src     'self'
+  object-src      'none'
+  base-uri        'self'
+  frame-ancestors 'self'
+```
+
+#### `csp-bundle-gr-ecommerce-full-shipping`
+
+Maximal shipping coverage — useful for shops that let the customer pick *any* carrier at checkout.
+
+```
+base:           csp-report-only
+enabled_packs:
+  - csp-pack-google-fonts
+  - csp-pack-google-analytics
+  - csp-pack-recaptcha
+  - csp-pack-gr-vpos-cardlink
+  - csp-pack-gr-vpos-eurocommerce
+  - csp-pack-stripe
+  - csp-pack-paypal
+  - csp-pack-gr-shipping-boxnow
+  - csp-pack-gr-shipping-skroutz-last-mile
+  - csp-pack-gr-shipping-acs
+  - csp-pack-gr-shipping-geniki-taxydromiki
+  - csp-pack-gr-shipping-speedex
+  - csp-pack-gr-shipping-elta-courier
+  - csp-pack-cookiebot
+  - csp-pack-gr-skroutz
+  - csp-pack-trustpilot
 extra_directives:
   default-src     'self'
   object-src      'none'
@@ -735,7 +1361,7 @@ extra_directives:
   frame-ancestors 'self'
 ```
 
-### 16e. Honest note on `'unsafe-inline'` and `'unsafe-eval'`
+### 16g. Honest note on `'unsafe-inline'` and `'unsafe-eval'`
 
 WordPress (core, most themes, most plugins), WHMCS, and many legacy panels rely on inline `<script>`/`<style>` and inline event handlers. Removing `'unsafe-inline'` and `'unsafe-eval'` from `script-src` will break them, and the only standards-compliant alternative — per-script nonces or hashes — requires response-body rewriting, which is **out of scope** (see §15).
 
@@ -747,7 +1373,7 @@ Realistic positions for these stacks:
 
 The UI must label both modes clearly so an operator picking `csp-bundle-wp-typical` doesn't believe the CSP is fully blocking XSS — it isn't. Mark `'unsafe-*'` directives with a warning icon and a hover-tooltip explaining the trade.
 
-### 16f. Open questions for packs
+### 16h. Open questions for packs
 
 - **Pack-URL drift.** Vendors quietly add CDN hostnames (Facebook split into `facebook.net` / `fbcdn.net` / `connect.facebook.net` over the years; Google moves analytics endpoints; banks add new gateway domains). Treat packs like WAF signatures — version them, ship updates via the same channel — or treat them as user-editable config from day one?
 - **`cfm policy test` per pack.** Should the test command probe each enabled pack's primary host (`HEAD https://js.stripe.com/v3/`, etc.) and confirm it's reachable from the server? Useful sanity check before enabling, especially for vPOS hosts that some upstream networks block.
