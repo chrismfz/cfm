@@ -23,6 +23,13 @@
 13. [Phase plan](#13-phase-plan)
 14. [Open questions](#14-open-questions)
 15. [Out of scope](#15-out-of-scope)
+16. [CSP composition packs for common third-party integrations](#16-csp-composition-packs-for-common-third-party-integrations)
+    - [16a. Composition model](#16a-composition-model)
+    - [16b. Built-in packs — international](#16b-built-in-packs--international)
+    - [16c. Built-in packs — Greek banks (vPOS)](#16c-built-in-packs--greek-banks-vpos)
+    - [16d. Bundled templates — common stacks](#16d-bundled-templates--common-stacks)
+    - [16e. Honest note on `'unsafe-inline'` and `'unsafe-eval'`](#16e-honest-note-on-unsafe-inline-and-unsafe-eval)
+    - [16f. Open questions for packs](#16f-open-questions-for-packs)
 
 ---
 
@@ -445,3 +452,305 @@ Explicitly **not** part of this roadmap, to keep v1 shippable:
 - **Origin-suggested policies.** No "scan a site, propose a CSP" automation in v1.
 - **Cookie policies (`Secure`, `SameSite`, `HttpOnly`).** Cookies are set by the origin; CFM rewriting them risks breaking session state. Out of scope unless a future ticket really demands it.
 - **CSP nonces / hashes.** Requires per-response body inspection and is app-specific. Not a fit for a generic proxy.
+
+---
+
+## 16. CSP composition packs for common third-party integrations
+
+The single CSP directive list a real customer needs is the **union of every external service their site loads**. Hand-writing that string is the #1 reason CSP rollouts get abandoned. Rather than ship one monolithic permissive template, v1 ships **composition packs**: small, named bundles, one per integration. The vhost's effective CSP is the union of the base template + every enabled pack, deduped and emitted as a single header.
+
+### 16a. Composition model
+
+Each pack contributes a small set of `(directive, source)` entries, e.g.:
+
+```
+script-src   https://js.stripe.com
+frame-src    https://js.stripe.com https://hooks.stripe.com
+connect-src  https://api.stripe.com
+```
+
+At apply time, `cfm_policies.lua` merges every enabled pack by directive name, dedupes sources, and emits one `Content-Security-Policy[-Report-Only]` header. Keywords (`'self'`, `'unsafe-inline'`, `'unsafe-eval'`, `'none'`, `data:`, `blob:`) are preserved verbatim and ordered first within each directive.
+
+**UI shape:** per vhost, the operator sees a checklist of packs and a live preview of the effective header:
+
+```
+Enabled packs:
+  [x] csp-pack-google-fonts            (style-src, font-src)
+  [x] csp-pack-google-analytics        (script-src, img-src, connect-src)
+  [x] csp-pack-recaptcha               (script-src, frame-src)
+  [x] csp-pack-cardlink                (form-action, frame-src)
+  [ ] csp-pack-stripe                  (script-src, frame-src, connect-src)
+
+Effective CSP (report-only):
+  default-src 'self';
+  script-src  'self' 'unsafe-inline' https://www.googletagmanager.com ...
+  form-action 'self' https://*.cardlink.gr;
+  frame-ancestors 'self';
+  ...
+```
+
+**Storage:** packs live in their own table `policy_csp_packs(name, version, source, directives_json)`. `vhost_policies.overrides_json` gains an `enabled_packs: [...]` array. The composition step happens at cache-build time, not per request.
+
+> **Critical for vPOS:** Greek bank gateways redirect via HTML form `POST`. The directive that gates this is **`form-action`**, not `connect-src` and not `frame-src`. Forget `form-action` and the browser silently blocks checkout submission. Every bank pack below sets it.
+
+### 16b. Built-in packs — international
+
+Wildcard host forms (`*.example.com`) are used throughout to survive vendor CDN-hostname drift, matching the convention in the example you pasted.
+
+#### `csp-pack-google-fonts`
+```
+style-src   https://fonts.googleapis.com
+font-src    https://fonts.gstatic.com
+```
+
+#### `csp-pack-google-analytics` (GA4 + GTM)
+```
+script-src  https://*.googletagmanager.com https://*.google-analytics.com
+img-src     https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com
+connect-src https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com
+```
+
+#### `csp-pack-google-maps`
+```
+script-src  https://maps.googleapis.com https://maps.gstatic.com
+img-src     https://maps.googleapis.com https://maps.gstatic.com https://*.googleusercontent.com
+style-src   https://fonts.googleapis.com
+font-src    https://fonts.gstatic.com
+frame-src   https://www.google.com
+```
+
+#### `csp-pack-recaptcha` (v2 / v3 / Enterprise)
+```
+script-src  https://www.google.com https://www.gstatic.com https://www.recaptcha.net
+frame-src   https://www.google.com https://www.recaptcha.net
+```
+
+#### `csp-pack-hcaptcha`
+```
+script-src  https://*.hcaptcha.com
+style-src   https://*.hcaptcha.com
+frame-src   https://*.hcaptcha.com
+connect-src https://*.hcaptcha.com
+```
+
+#### `csp-pack-cloudflare-turnstile`
+```
+script-src  https://challenges.cloudflare.com
+frame-src   https://challenges.cloudflare.com
+```
+
+#### `csp-pack-cloudflare-insights` (RUM beacon)
+```
+script-src  https://static.cloudflareinsights.com
+connect-src https://cloudflareinsights.com
+```
+
+#### `csp-pack-youtube`
+```
+frame-src   https://*.youtube.com https://*.youtube-nocookie.com https://*.youtu.be
+img-src     https://*.ytimg.com
+```
+
+#### `csp-pack-facebook-pixel` (FB Pixel + SDK)
+```
+script-src  https://*.facebook.net
+img-src     https://*.facebook.com
+connect-src https://*.facebook.com
+frame-src   https://*.facebook.com
+```
+
+#### `csp-pack-stripe`
+```
+script-src  https://js.stripe.com https://*.stripe.com
+frame-src   https://js.stripe.com https://hooks.stripe.com https://*.stripe.com
+connect-src https://api.stripe.com https://*.stripe.com
+```
+
+#### `csp-pack-paypal`
+```
+script-src  https://*.paypal.com https://*.paypalobjects.com
+frame-src   https://*.paypal.com
+img-src     https://*.paypal.com https://*.paypalobjects.com
+connect-src https://*.paypal.com
+form-action https://www.paypal.com
+```
+
+#### `csp-pack-tawk` (Tawk.to chat widget)
+```
+script-src  https://*.tawk.to
+style-src   https://*.tawk.to
+img-src     https://*.tawk.to
+font-src    https://*.tawk.to
+connect-src https://*.tawk.to wss://*.tawk.to
+frame-src   https://*.tawk.to
+```
+
+#### `csp-pack-wp-jetpack` (WordPress.com services + Gravatar)
+```
+script-src  https://*.wp.com
+img-src     https://*.wp.com https://*.gravatar.com https://secure.gravatar.com
+style-src   https://*.wp.com
+```
+
+### 16c. Built-in packs — Greek banks (vPOS)
+
+Each pack below sets **`form-action`** in addition to `frame-src` (the latter only matters when the bank's hosted form is iframed instead of redirected — most are redirect-flow, but a few support both).
+
+#### `csp-pack-gr-vpos-cardlink` (Alpha Bank + Eurobank Cards + NBG cards via Cardlink)
+```
+form-action https://*.cardlink.gr
+frame-src   https://*.cardlink.gr
+```
+
+#### `csp-pack-gr-vpos-eurocommerce` (Eurobank direct vPOS)
+```
+form-action https://*.eurocommerce.gr
+frame-src   https://*.eurocommerce.gr
+```
+
+#### `csp-pack-gr-vpos-alpha` (Alpha Bank direct, when not via Cardlink)
+```
+form-action https://*.alphae-commerce.gr https://*.alpha-bank.gr
+frame-src   https://*.alphae-commerce.gr
+```
+
+#### `csp-pack-gr-vpos-piraeus` (Piraeus PayCenter)
+```
+form-action https://paycenter.piraeusbank.gr
+frame-src   https://paycenter.piraeusbank.gr
+```
+
+#### `csp-pack-gr-vpos-nbg` (Εθνική Τράπεζα PayCenter)
+```
+form-action https://paycenter.nbg.gr
+frame-src   https://paycenter.nbg.gr
+```
+
+#### `csp-pack-gr-vpos-viva` (Viva Wallet / Viva.com)
+```
+script-src  https://*.vivapayments.com https://*.vivawallet.com https://*.viva.com
+form-action https://*.vivapayments.com https://*.vivawallet.com https://*.viva.com
+frame-src   https://*.vivapayments.com https://*.vivawallet.com https://*.viva.com
+connect-src https://*.vivapayments.com https://*.vivawallet.com
+```
+
+#### `csp-pack-gr-vpos-everypay`
+```
+script-src  https://*.everypay.gr
+form-action https://*.everypay.gr
+frame-src   https://*.everypay.gr
+```
+
+#### `csp-pack-gr-myip` (myip.gr utility — CFM-internal customer convenience)
+```
+script-src  https://*.myip.gr
+connect-src https://*.myip.gr
+img-src     https://*.myip.gr
+```
+
+### 16d. Bundled templates — common stacks
+
+Pre-composed templates for "I just want it to work" customers. Each bundle is a regular template whose `options_json` carries `enabled_packs: [...]`. Operators can clone and customize.
+
+#### `csp-bundle-gr-ecommerce-typical`
+
+The typical Greek shop: GA + reCAPTCHA + at least one bank gateway + at least one international processor.
+
+```
+base:           csp-report-only
+enabled_packs:
+  - csp-pack-google-fonts
+  - csp-pack-google-analytics
+  - csp-pack-recaptcha
+  - csp-pack-cardlink
+  - csp-pack-eurocommerce
+  - csp-pack-stripe
+  - csp-pack-paypal
+  - csp-pack-youtube
+extra_directives:
+  default-src     'self'
+  object-src      'none'
+  base-uri        'self'
+  frame-ancestors 'self'
+```
+
+#### `csp-bundle-gr-ecommerce-viva-everypay`
+
+The same shape but for shops using Viva + Everypay instead of Cardlink/Eurocommerce.
+
+```
+base:           csp-report-only
+enabled_packs:
+  - csp-pack-google-fonts
+  - csp-pack-google-analytics
+  - csp-pack-recaptcha
+  - csp-pack-viva
+  - csp-pack-everypay
+  - csp-pack-stripe
+extra_directives:
+  default-src     'self'
+  object-src      'none'
+  base-uri        'self'
+  frame-ancestors 'self'
+```
+
+#### `csp-bundle-wp-typical`
+
+WordPress site with Jetpack, fonts, analytics, embedded YouTube.
+
+```
+base:           csp-report-only
+enabled_packs:
+  - csp-pack-google-fonts
+  - csp-pack-google-analytics
+  - csp-pack-wp-jetpack
+  - csp-pack-youtube
+extra_directives:
+  default-src     'self'
+  script-src      'self' 'unsafe-inline' 'unsafe-eval'
+  style-src       'self' 'unsafe-inline'
+  object-src      'none'
+  base-uri        'self'
+  frame-ancestors 'self'
+```
+
+Includes `'unsafe-inline'` and `'unsafe-eval'` as a documented compromise — see §16e.
+
+#### `csp-bundle-whmcs-typical`
+
+Same `'unsafe-inline' / 'unsafe-eval'` compromise as WP, plus payment packs WHMCS shops typically wire up.
+
+```
+base:           csp-report-only
+enabled_packs:
+  - csp-pack-stripe
+  - csp-pack-paypal
+  - csp-pack-recaptcha
+extra_directives:
+  default-src     'self'
+  script-src      'self' 'unsafe-inline' 'unsafe-eval'
+  style-src       'self' 'unsafe-inline'
+  object-src      'none'
+  base-uri        'self'
+  frame-ancestors 'self'
+```
+
+### 16e. Honest note on `'unsafe-inline'` and `'unsafe-eval'`
+
+WordPress (core, most themes, most plugins), WHMCS, and many legacy panels rely on inline `<script>`/`<style>` and inline event handlers. Removing `'unsafe-inline'` and `'unsafe-eval'` from `script-src` will break them, and the only standards-compliant alternative — per-script nonces or hashes — requires response-body rewriting, which is **out of scope** (see §15).
+
+Realistic positions for these stacks:
+
+1. **CSP enforce with `'unsafe-inline' 'unsafe-eval'` permitted.** Reduced XSS protection on `script-src`, but **still real value from the other directives**: `form-action 'self' <vpos>` (anti-phishing-redirect), `frame-ancestors 'self'` (clickjacking), `object-src 'none'` (no Flash/embed exploits), `base-uri 'self'` (anti-base-tag injection). Audit auditors get their "yes we send a CSP" checkbox; site keeps working.
+
+2. **CSP report-only with `'unsafe-inline' 'unsafe-eval'` permitted.** Zero blocking, observability only. Useful as a pre-flight: leave it on for a week, look at violation reports, see what the site actually loads, then decide if a stricter enforce policy is feasible.
+
+The UI must label both modes clearly so an operator picking `csp-bundle-wp-typical` doesn't believe the CSP is fully blocking XSS — it isn't. Mark `'unsafe-*'` directives with a warning icon and a hover-tooltip explaining the trade.
+
+### 16f. Open questions for packs
+
+- **Pack-URL drift.** Vendors quietly add CDN hostnames (Facebook split into `facebook.net` / `fbcdn.net` / `connect.facebook.net` over the years; Google moves analytics endpoints; banks add new gateway domains). Treat packs like WAF signatures — version them, ship updates via the same channel — or treat them as user-editable config from day one?
+- **`cfm policy test` per pack.** Should the test command probe each enabled pack's primary host (`HEAD https://js.stripe.com/v3/`, etc.) and confirm it's reachable from the server? Useful sanity check before enabling, especially for vPOS hosts that some upstream networks block.
+- **"Suggest packs" tool.** Given a vhost, fetch the homepage + a sample checkout page from the proxy host itself, parse `<script src>`, `<iframe src>`, `<link href>`, `<form action>`, and propose matching packs. v2 feature, but worth designing the pack catalog now with this in mind (every pack should declare a `signature_hosts` list used for detection).
+- **Per-pack `report-uri` override.** Does a customer ever want different report endpoints per integration? Probably no — keep one report-uri at the bundle level.
+- **Packs for non-CSP headers.** Same composition pattern could apply to `Permissions-Policy` (e.g. "allow geolocation for Google Maps pack"). Out of v1 scope but the table shape should accommodate `directive_family: 'csp' | 'permissions-policy'` from day one to avoid a v2 migration.
