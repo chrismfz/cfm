@@ -32,6 +32,16 @@
     - [16f. Bundled templates — common stacks](#16f-bundled-templates--common-stacks)
     - [16g. Honest note on `'unsafe-inline'` and `'unsafe-eval'`](#16g-honest-note-on-unsafe-inline-and-unsafe-eval)
     - [16h. Open questions for packs](#16h-open-questions-for-packs)
+17. [Policy probing & auto-suggest](#17-policy-probing--auto-suggest)
+    - [17a. Why this exists](#17a-why-this-exists)
+    - [17b. Two probe modes — passive body scan + CSP report-only](#17b-two-probe-modes--passive-body-scan--csp-report-only)
+    - [17c. CLI surface](#17c-cli-surface)
+    - [17d. Data model](#17d-data-model)
+    - [17e. CSP report receiver](#17e-csp-report-receiver)
+    - [17f. Body scanner](#17f-body-scanner)
+    - [17g. Suggestion engine](#17g-suggestion-engine)
+    - [17h. Privacy & performance bounds](#17h-privacy--performance-bounds)
+    - [17i. Open questions for probing](#17i-open-questions-for-probing)
 
 ---
 
@@ -1380,3 +1390,239 @@ The UI must label both modes clearly so an operator picking `csp-bundle-wp-typic
 - **"Suggest packs" tool.** Given a vhost, fetch the homepage + a sample checkout page from the proxy host itself, parse `<script src>`, `<iframe src>`, `<link href>`, `<form action>`, and propose matching packs. v2 feature, but worth designing the pack catalog now with this in mind (every pack should declare a `signature_hosts` list used for detection).
 - **Per-pack `report-uri` override.** Does a customer ever want different report endpoints per integration? Probably no — keep one report-uri at the bundle level.
 - **Packs for non-CSP headers.** Same composition pattern could apply to `Permissions-Policy` (e.g. "allow geolocation for Google Maps pack"). Out of v1 scope but the table shape should accommodate `directive_family: 'csp' | 'permissions-policy'` from day one to avoid a v2 migration.
+- **Auto-suggest from observed traffic.** Picked up properly in §17 — every pack declares a `signature_hosts: [...]` list so the probe/suggest engine can map observed external hostnames back to packs.
+
+---
+
+## 17. Policy probing & auto-suggest
+
+> **Note:** purely design-phase exploration. This section is captured to clarify what *would* be needed if/when CFM grows a "tell me what packs this site needs" feature. It is not part of the v1 commitment in §13.
+
+### 17a. Why this exists
+
+Picking packs by hand is fine when the operator knows the site. For:
+- migrated customers whose site config the operator has never seen,
+- WordPress sites with 30+ plugins each pulling its own CDN,
+- legacy shops where nobody remembers what's wired up,
+
+…it's a guessing game, and a wrong guess means either a broken site (over-strict CSP) or a useless CSP (everything permitted). Since CFM sits transparently in front of all of these, it can **observe what the site actually loads** for 24–48 hours and propose the matching packs.
+
+This is the §16h "suggest packs" open question, designed out.
+
+The operator workflow is:
+
+```
+$ cfm policy probe shop.example.gr --hours 48
+[ok] probe started for shop.example.gr
+     mode:      passive + csp-report-only
+     started:   2026-05-25T14:00:00Z
+     expires:   2026-05-27T14:00:00Z
+     token:     b3f1a9c2  (CSP report path: /__cfm_csp_report/b3f1a9c2)
+
+# … 48h later, or any time during the window …
+
+$ cfm policy probe-status shop.example.gr
+     observations: 1,847 requests sampled, 142 CSP reports received
+     unique hosts seen: 27
+     known packs matched: 9
+     unmatched hosts:    3
+
+$ cfm policy probe-suggest shop.example.gr
+Suggested packs (would set csp-report-only):
+  csp-pack-google-fonts          ← seen: fonts.googleapis.com, fonts.gstatic.com
+  csp-pack-google-analytics      ← seen: googletagmanager.com, www.google-analytics.com
+  csp-pack-recaptcha             ← seen: www.google.com/recaptcha, gstatic.com
+  csp-pack-gr-vpos-cardlink      ← seen (form-action!): ecommerce.cardlink.gr
+  csp-pack-stripe                ← seen: js.stripe.com, api.stripe.com (connect-src)
+  csp-pack-gr-skroutz            ← seen: analytics.skroutz.gr
+  csp-pack-gr-shipping-boxnow    ← seen: locker-map.boxnow.gr
+  csp-pack-cookiebot             ← seen: consent.cookiebot.com
+  csp-pack-youtube               ← seen (frame-src): www.youtube.com
+
+Unmatched hosts (not in pack catalog — operator review):
+  cdn.shop-internal.example.gr   ← seen 1,247x as script-src
+  static.partner-tool.io         ← seen 14x as script-src
+  s3.eu-central-1.amazonaws.com  ← seen 89x as img-src
+
+To apply:
+  $ cfm policy apply csp-bundle-suggested shop.example.gr   # auto-built from above
+```
+
+### 17b. Two probe modes — passive body scan + CSP report-only
+
+Both run concurrently when a probe is active. They are complementary:
+
+| | Passive body scan | CSP report-only |
+|---|---|---|
+| What it sees | External hosts in HTML/CSS sources (`<script src>`, `<link href>`, `<iframe src>`, `<form action>`, `@import`) | Anything the browser actually blocked / would have blocked |
+| Catches dynamic JS loads? | No | **Yes** — `fetch()`, dynamic `<script>` injection, `import()` |
+| Catches `<form action>` for vPOS? | **Yes** — directly | Yes, via `form-action` violation |
+| Cost | Per-response, sampled, ~tens of µs | Per-violation report, ingress only |
+| Privacy surface | Reads response body | Receives client-reported URLs (subject to browser sanitisation) |
+| Coverage of low-traffic vhosts | Slow (need traffic) | Slow (need traffic) |
+
+**Run both** — single observations table feeds the same suggestion engine.
+
+### 17c. CLI surface
+
+```
+cfm policy probe <vhost> [--hours N=24] [--mode passive|csp-ro|both=both] [--sample 1/N=100]
+cfm policy probe-status <vhost>
+cfm policy probe-suggest <vhost> [--accept-unmatched]
+cfm policy probe-stop <vhost>
+cfm policy probe-clear <vhost>           # discard observations
+cfm policy probe-list                    # all active probes
+```
+
+`probe-suggest --accept-unmatched` writes the unmatched hostnames into a per-vhost `csp-custom-additions` override so the operator can ship "everything observed" without manual edits — useful for one-off legacy sites where the operator just wants something working.
+
+### 17d. Data model
+
+Two new tables, both auto-trim by `expires_at`.
+
+#### `policy_probes`
+
+| column | type | notes |
+|---|---|---|
+| `vhost` | TEXT PK | |
+| `token` | TEXT | random 8-char hex, used in CSP `report-uri` path |
+| `mode` | TEXT | `passive` \| `csp-ro` \| `both` |
+| `sample_rate` | INTEGER | 1-in-N for body scanner |
+| `started_at` | INTEGER | unix epoch |
+| `expires_at` | INTEGER | unix epoch — workers stop collecting at this point |
+| `status` | TEXT | `active` \| `expired` \| `stopped` |
+| `csp_template_was` | TEXT | nullable — captures the policy that was active before probe started, so we can restore |
+
+#### `policy_observations`
+
+Aggregated, never per-request. Keyed `(vhost, host, directive)` to bound table size.
+
+| column | type | notes |
+|---|---|---|
+| `vhost` | TEXT | |
+| `host` | TEXT | observed external hostname (no path, no query) |
+| `directive` | TEXT | `script-src` \| `style-src` \| `img-src` \| `font-src` \| `connect-src` \| `frame-src` \| `form-action` \| `media-src` |
+| `source` | TEXT | `body-scan` \| `csp-report` |
+| `count` | INTEGER | bumped per observation |
+| `first_seen` | INTEGER | unix epoch |
+| `last_seen` | INTEGER | unix epoch |
+
+PK: `(vhost, host, directive)`. A single `UPSERT ... ON CONFLICT(...) DO UPDATE SET count = count+1, last_seen = ?` per observation.
+
+Bound: cap at ~10k rows per vhost; if exceeded, drop low-count entries.
+
+### 17e. CSP report receiver
+
+A new endpoint mounted in the proxy:
+
+```nginx
+location ~ ^/__cfm_csp_report/([a-f0-9]{8})$ {
+    access_by_lua_block { return; }            # bypass WAF/clearance/etc.
+    content_by_lua_block {
+        require("cfm_policies_probe").ingest_csp_report(ngx.var[1])
+    }
+}
+```
+
+**Implementation notes:**
+
+- Accepts both `Content-Type: application/csp-report` (legacy) and `application/reports+json` (Reporting API). Body parse must tolerate both.
+- **Rate limits per token**: 100 req/s, 8 KB body max. Excess silently dropped — one bad page can flood the receiver with thousands of identical reports.
+- **Aggregate at ingest, not at query.** Extract `blocked-uri`, parse its host, find the directive, `UPSERT` into `policy_observations`. Don't store the raw report.
+- **Noise filters** (drop without recording):
+  - `blocked-uri` schemes `chrome-extension://`, `moz-extension://`, `safari-extension://`, `ms-browser-extension://` — browser extensions injecting scripts. **This is by far the biggest source of CSP report noise; without this filter the dashboard is unusable.**
+  - `blocked-uri` values `inline`, `eval`, `data` (these tell you about `'unsafe-inline'`/`'unsafe-eval'` needs but don't map to packs — record under a separate counter, surface in suggest output as "site uses inline scripts/eval — pick a `*-typical` bundle").
+  - `blocked-uri` of `about`, `null`, empty — meaningless.
+  - User-agent regex for in-app browsers / Translate proxies if it becomes a problem.
+- **Token validation**: token must exist in `policy_probes` with `status='active'` and `expires_at > now`. Otherwise 410 Gone.
+
+### 17f. Body scanner
+
+A `body_filter_by_lua_block` on the proxy `location /`, gated by:
+
+1. `policy_probes[vhost].status == 'active'` (per-worker cached).
+2. `ngx.header["Content-Type"]` starts with `text/html` or `text/css`.
+3. `math.random(sample_rate) == 1` (1-in-N sampling — default 1-in-100).
+4. Response size < 256 KB (don't buffer huge pages — most CDN-listing happens in the `<head>`).
+
+**Extraction** uses cheap pattern matches, not a real HTML parser:
+
+```lua
+-- script src
+for url in body:gmatch('<script[^>]+src=["\']([^"\']+)["\']') do ... end
+-- iframe src
+for url in body:gmatch('<iframe[^>]+src=["\']([^"\']+)["\']') do ... end
+-- link href
+for url in body:gmatch('<link[^>]+href=["\']([^"\']+)["\']') do ... end
+-- form action (vPOS!)
+for url in body:gmatch('<form[^>]+action=["\']([^"\']+)["\']') do ... end
+-- img src
+for url in body:gmatch('<img[^>]+src=["\']([^"\']+)["\']') do ... end
+-- CSS @import
+for url in body:gmatch('@import[^;]+["\']([^"\']+)["\']') do ... end
+```
+
+For each match: parse `host`, skip if same as vhost (`'self'`), skip if scheme is `data:` / `blob:` / `javascript:`, dedupe via per-worker LRU keyed `(vhost, host, directive)`. Insert via batched UPSERT every N seconds, not per-request.
+
+**Per-response cost target:** ~10 µs in the steady-state cache-hit path (LRU says "already recorded"), ~100 µs on cold miss.
+
+**Limitations to document:** body scanner sees only what's in the initial HTML/CSS. It will not see:
+- Scripts loaded by other scripts (need CSP-RO)
+- Resources behind login (sampled traffic might not include logged-in pages)
+- Resources fetched via `fetch()` / `XHR` (need CSP-RO via `connect-src` violations)
+
+That's why both modes run together.
+
+### 17g. Suggestion engine
+
+Pack catalog gains a per-pack `signature_hosts` field:
+
+```yaml
+csp-pack-stripe:
+  signature_hosts:
+    - js.stripe.com
+    - api.stripe.com
+    - "*.stripe.com"
+  directives:
+    script-src:  ["https://js.stripe.com", "https://*.stripe.com"]
+    frame-src:   ["https://js.stripe.com", "https://hooks.stripe.com", "https://*.stripe.com"]
+    connect-src: ["https://api.stripe.com", "https://*.stripe.com"]
+```
+
+`probe-suggest` algorithm:
+
+1. Read all rows from `policy_observations` for the vhost.
+2. For each unique observed host: look up matching packs via `signature_hosts` (suffix/wildcard match).
+3. For each matched pack: count the directives it covers vs. directives the host was observed under. Score = (directives matched) / (directives observed).
+4. Emit a ranked list. Default threshold: include pack if it covers ≥1 observed directive for its host.
+5. Unmatched hosts: report separately with their observed directive + count.
+6. Detect inline/eval needs: if `inline`/`eval` counters > N, recommend a `*-typical` bundle (the WP/WHMCS-flavored ones that permit `'unsafe-inline' 'unsafe-eval'`).
+
+Output is human-readable (the CLI example in §17a) and machine-readable (`--json` flag) so cfm-admin can render it as a checklist.
+
+### 17h. Privacy & performance bounds
+
+Body scanning means CFM is now reading response bodies on a vhost-by-vhost opt-in basis. Defensive defaults:
+
+- **Opt-in per vhost.** No global "scan everything" mode. The operator runs `cfm policy probe <vhost>` for each vhost they want analysed.
+- **Time-boxed.** Probes auto-expire at `expires_at`. No accumulation past 48h by default. CLI hard-caps at `--hours 168` (one week).
+- **No content captured.** Only external host names are stored. Never paths, never query strings, never response bodies. Audit-log the fact that scanning is active but not what was scanned.
+- **No request bodies.** Only response bodies. POST payloads from the client are never read.
+- **No logged-in detection magic.** Don't try to be clever about "scan logged-in pages too" — just sample.
+- **Sample rate bounded.** Default 1-in-100. Below 1-in-10 requires `--unsafe-high-sampling` flag (rate-limit on operator slowdown more than privacy).
+- **CSP report receiver rate-limited** per §17e.
+
+Performance bounds:
+
+- Body scan adds ~10 µs P99 on sampled responses (cache-hit), ~100 µs on cold miss. Sampled at 1%, so amortised ~0.1–1 µs per response.
+- CSP report ingest is off the proxy hot path (separate location). Capped at 100 req/s/token.
+- `policy_observations` capped per vhost (see §17d).
+
+### 17i. Open questions for probing
+
+- **Persistent vs. session probes.** Should the operator's "auto-suggest" survive across CFM restarts and pack-catalog updates? Probably yes — observations are valuable data, don't lose them. But document the staleness risk (a host seen 60 days ago may no longer be live).
+- **Re-probe diff.** When the operator re-runs `probe` on a vhost that already has a policy applied, should the suggestion show only *new* hosts (those not covered by the current policy)? This is the natural maintenance loop — apply, leave it on, re-probe periodically to catch drift.
+- **Cross-vhost rollup.** "Show me which packs are most-applied across all my probed vhosts" — useful for operators with hundreds of customers, lets them spot the long tail (e.g. "5 customers are using a payment processor we don't have a pack for, time to write one").
+- **Active probe vs. live policy.** While a probe is active, do we also enforce the current policy (if any)? Default: yes, current policy still enforces; probe-RO is added on top in report-only mode. Operator can override with `--detach-policy` to probe a blank slate.
+- **Headless-browser warm-up.** Optional `--warm-up` flag fires a headless Chromium against a few canonical paths (`/`, `/checkout`, `/wp-admin` if accessible) to bootstrap observations without waiting for organic traffic. Adds a chromium dependency; defer until v2 of probing.
+- **Signature drift.** When a vendor adds a new CDN host (e.g. Facebook starts using `fbcdn-static.net` alongside `fbcdn.net`), suggest output flags it as "unmatched" until the pack catalog is updated. Worth a dashboard view: "unmatched hosts seen across multiple vhosts — candidates for new packs or pack-host additions".
