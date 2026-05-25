@@ -42,6 +42,27 @@
     - [17g. Suggestion engine](#17g-suggestion-engine)
     - [17h. Privacy & performance bounds](#17h-privacy--performance-bounds)
     - [17i. Open questions for probing](#17i-open-questions-for-probing)
+18. [Permissions-Policy packs](#18-permissions-policy-packs)
+    - [18a. Why Permissions-Policy](#18a-why-permissions-policy)
+    - [18b. Syntax and composition model](#18b-syntax-and-composition-model)
+    - [18c. Baseline & built-in packs](#18c-baseline--built-in-packs)
+    - [18d. Bundled Permissions-Policy templates](#18d-bundled-permissions-policy-templates)
+    - [18e. Cross-Origin policies (COOP, COEP, CORP)](#18e-cross-origin-policies-coop-coep-corp)
+19. [Reporting-Endpoints — the modern reporting API](#19-reporting-endpoints--the-modern-reporting-api)
+    - [19a. Why this replaces `report-uri`](#19a-why-this-replaces-report-uri)
+    - [19b. Dual-shipping strategy](#19b-dual-shipping-strategy)
+    - [19c. Generalised receiver `/__cfm_reports/<token>`](#19c-generalised-receiver-__cfm_reportstoken)
+    - [19d. Report types CFM ingests](#19d-report-types-cfm-ingests)
+20. [Network Error Logging (NEL)](#20-network-error-logging-nel)
+21. [Rollout playbook for operators](#21-rollout-playbook-for-operators)
+    - [21a. CSP migration timeline (RO → enforce, ~4 weeks)](#21a-csp-migration-timeline-ro--enforce-4-weeks)
+    - [21b. HSTS rollout (4-step ramp)](#21b-hsts-rollout-4-step-ramp)
+    - [21c. CORS rollout](#21c-cors-rollout)
+    - [21d. Rollback procedure](#21d-rollback-procedure)
+22. [Metrics & observability](#22-metrics--observability)
+    - [22a. Per-vhost counters](#22a-per-vhost-counters)
+    - [22b. Global counters](#22b-global-counters)
+    - [22c. Dashboard & alerts](#22c-dashboard--alerts)
 
 ---
 
@@ -1626,3 +1647,514 @@ Performance bounds:
 - **Active probe vs. live policy.** While a probe is active, do we also enforce the current policy (if any)? Default: yes, current policy still enforces; probe-RO is added on top in report-only mode. Operator can override with `--detach-policy` to probe a blank slate.
 - **Headless-browser warm-up.** Optional `--warm-up` flag fires a headless Chromium against a few canonical paths (`/`, `/checkout`, `/wp-admin` if accessible) to bootstrap observations without waiting for organic traffic. Adds a chromium dependency; defer until v2 of probing.
 - **Signature drift.** When a vendor adds a new CDN host (e.g. Facebook starts using `fbcdn-static.net` alongside `fbcdn.net`), suggest output flags it as "unmatched" until the pack catalog is updated. Worth a dashboard view: "unmatched hosts seen across multiple vhosts — candidates for new packs or pack-host additions".
+
+---
+
+## 18. Permissions-Policy packs
+
+> Design-phase. Same composition pattern as §16, applied to the `Permissions-Policy` header (formerly `Feature-Policy`). Foreshadowed in §16h ("Packs for non-CSP headers").
+
+### 18a. Why Permissions-Policy
+
+`Permissions-Policy` controls browser feature gating: which features (camera, microphone, geolocation, payment, fullscreen, autoplay, clipboard, USB, MIDI, etc.) the page and its iframes are allowed to use. Two reasons it matters:
+
+1. **Audit checkbox.** Modern security scanners (Mozilla Observatory, securityheaders.com, PCI tooling) check for its presence and complain if absent or too permissive (`*`).
+2. **Real defence.** A locked-down `Permissions-Policy` blocks a compromised third-party iframe from silently requesting camera/microphone/geolocation. CSP doesn't cover this — different header, different attack surface.
+
+The default browser behaviour is *not* "deny everything" — it's mostly "allow same-origin". So the policy matters even on sites that "don't use" these features.
+
+### 18b. Syntax and composition model
+
+Syntax differs from CSP. Per-feature allowlist with explicit `()` form:
+
+```
+Permissions-Policy: camera=(), microphone=(), geolocation=(self "https://maps.example.com"),
+                    payment=(self), fullscreen=(self), autoplay=(self "https://*.youtube.com")
+```
+
+Each feature gets one allowlist:
+- `()` — deny entirely (no origin can use this feature, including the page itself)
+- `(self)` — allow same-origin only
+- `(self "https://x.com")` — same-origin + named third parties
+- `(*)` — allow everywhere (avoid)
+
+**Composition shape** mirrors §16a:
+
+Each `pp-pack-*` contributes feature entries like:
+```yaml
+pp-pack-google-maps:
+  features:
+    geolocation: ["self", "https://maps.googleapis.com"]
+```
+
+At apply time, `cfm_policies.lua` per-feature-merges every enabled pack, deduplicates, and emits a single `Permissions-Policy` header. Features not mentioned by any pack inherit from the **baseline** (default deny — see §18c).
+
+Storage: same `policy_csp_packs` table with `directive_family='permissions-policy'` column (the foresight from §16h).
+
+UI: the cfm-admin "Security Headers" tab gains a second sub-section "Permissions" with the same checkbox UX as CSP packs.
+
+### 18c. Baseline & built-in packs
+
+#### Baseline templates
+
+**`pp-template-baseline-strict`** — denies everything except the bare minimum same-origin features. Recommended default for almost all sites.
+
+```
+accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(),
+camera=(), clipboard-read=(), clipboard-write=(self), display-capture=(),
+document-domain=(), encrypted-media=(), execution-while-not-rendered=(),
+execution-while-out-of-viewport=(), fullscreen=(self), gamepad=(),
+geolocation=(), gyroscope=(), hid=(), idle-detection=(),
+keyboard-map=(), local-fonts=(), magnetometer=(), microphone=(),
+midi=(), navigation-override=(), payment=(), picture-in-picture=(),
+publickey-credentials-get=(), screen-wake-lock=(), serial=(),
+speaker-selection=(), storage-access=(), usb=(), web-share=(),
+window-management=(), xr-spatial-tracking=()
+```
+
+**`pp-template-baseline-permissive`** — allows `self` for features a generic CMS might need (fullscreen, clipboard-write, autoplay for embedded media). Compromise for WordPress-flavoured sites.
+
+#### Feature-enabling packs (additive)
+
+**`pp-pack-payments`** *(any payment processor — Stripe, PayPal, Apple Pay, Google Pay)*
+```yaml
+features:
+  payment:                     [self]
+  publickey-credentials-get:   [self]  # WebAuthn / passkeys, used by 3DS2
+```
+
+**`pp-pack-google-maps`**
+```yaml
+features:
+  geolocation: [self, "https://*.googleapis.com"]
+```
+
+**`pp-pack-mapbox`**
+```yaml
+features:
+  geolocation: [self]
+```
+
+**`pp-pack-video-embed`** *(YouTube/Vimeo/Spotify embeds)*
+```yaml
+features:
+  fullscreen:           [self, "https://*.youtube.com", "https://*.vimeo.com", "https://open.spotify.com"]
+  autoplay:             [self, "https://*.youtube.com", "https://*.vimeo.com"]
+  encrypted-media:      [self, "https://*.youtube.com", "https://*.vimeo.com"]
+  picture-in-picture:   [self, "https://*.youtube.com", "https://*.vimeo.com"]
+```
+
+**`pp-pack-video-conferencing`** *(in-app calls, support widgets with video)*
+```yaml
+features:
+  camera:          [self]
+  microphone:      [self]
+  display-capture: [self]
+  speaker-selection: [self]
+```
+
+**`pp-pack-clipboard-rw`** *(sites with "copy code" buttons, share helpers)*
+```yaml
+features:
+  clipboard-read:  [self]
+  clipboard-write: [self]
+```
+
+**`pp-pack-webauthn`** *(passkey/security-key login)*
+```yaml
+features:
+  publickey-credentials-get:    [self]
+  publickey-credentials-create: [self]
+```
+
+**`pp-pack-pwa-install-prompts`**
+```yaml
+features:
+  web-share:        [self]
+  screen-wake-lock: [self]
+```
+
+**`pp-pack-recaptcha-pp`** *(reCAPTCHA needs ambient-light/gyro/accel access on some platforms — well-documented Google requirement)*
+```yaml
+features:
+  accelerometer: [self, "https://www.google.com"]
+  gyroscope:     [self, "https://www.google.com"]
+  magnetometer:  [self, "https://www.google.com"]
+```
+
+**`pp-pack-google-signin-pp`** *(Google Identity Services needs FedCM for newer flows)*
+```yaml
+features:
+  identity-credentials-get: [self, "https://accounts.google.com"]
+```
+
+> **Note on naming:** `pp-pack-*` not `csp-pack-*`. They're distinct namespaces so an operator (or the suggest engine) can enable a CSP pack without also enabling a Permissions-Policy pack of the same name. Where the two overlap conceptually (e.g. Stripe needs `csp-pack-stripe` *and* `pp-pack-payments`), the bundles in §18d enable both together.
+
+### 18d. Bundled Permissions-Policy templates
+
+#### `pp-bundle-strict-with-payments`
+
+Baseline strict + payment + WebAuthn. Recommended for any e-commerce site that doesn't embed video.
+
+```
+base:           pp-template-baseline-strict
+enabled_packs:
+  - pp-pack-payments
+  - pp-pack-webauthn
+```
+
+#### `pp-bundle-ecommerce-typical`
+
+What the Greek e-commerce bundle in §16f needs on the Permissions-Policy side.
+
+```
+base:           pp-template-baseline-strict
+enabled_packs:
+  - pp-pack-payments
+  - pp-pack-webauthn
+  - pp-pack-google-maps
+  - pp-pack-recaptcha-pp
+  - pp-pack-clipboard-rw
+  - pp-pack-video-embed       # for product video tours
+```
+
+#### `pp-bundle-wp-typical`
+
+Baseline permissive + extras most WP sites need.
+
+```
+base:           pp-template-baseline-permissive
+enabled_packs:
+  - pp-pack-video-embed
+  - pp-pack-clipboard-rw
+  - pp-pack-pwa-install-prompts
+```
+
+#### `pp-bundle-content-only-locked-down`
+
+Maximum lockdown for static/content sites. Nothing extra enabled.
+
+```
+base:           pp-template-baseline-strict
+enabled_packs: []
+```
+
+### 18e. Cross-Origin policies (COOP, COEP, CORP)
+
+The three Cross-Origin-* headers fit the same pack/bundle shape but **must be deferred to v2** because they break embeds in subtle ways.
+
+- `Cross-Origin-Opener-Policy: same-origin` — protects against `window.opener` cross-origin attacks. Breaks popup-based OAuth (Stripe checkout popup, PayPal popup, Google Sign-In popup) → must use `same-origin-allow-popups` or omit.
+- `Cross-Origin-Embedder-Policy: require-corp` — required for `SharedArrayBuffer` (only relevant if the site uses high-perf wasm). Breaks every iframe/image that doesn't send `CORP` headers — most third-party content.
+- `Cross-Origin-Resource-Policy: same-origin` — only relevant on assets the site itself emits. Not a per-vhost browser-side gate.
+
+CFM should ship `coop-coep-corp` packs **off by default**, with very loud UI warnings:
+
+- `pp-pack-coop-popup-friendly` — `Cross-Origin-Opener-Policy: same-origin-allow-popups` (the only safe COOP value for any site doing third-party auth/payments)
+- `pp-pack-coep-credentialless` — `Cross-Origin-Embedder-Policy: credentialless` (less breakage than `require-corp` but still risky)
+
+Both deferred to v2-of-v2. Document existence so operators asking "where's my COOP?" find the answer.
+
+---
+
+## 19. Reporting-Endpoints — the modern reporting API
+
+> Design-phase. Replaces the `report-uri` design in §17e with the modern `Reporting-Endpoints` header + `report-to` directive (Reporting API). CFM ships both for browser-compat.
+
+### 19a. Why this replaces `report-uri`
+
+`report-uri` (used in §17e) is **deprecated** in the CSP spec. It has been gradually superseded by the Reporting API since ~2019, and modern browsers ship a unified path:
+
+```
+Reporting-Endpoints: csp-endpoint="https://example.com/__cfm_reports/abc123",
+                     default="https://example.com/__cfm_reports/abc123"
+
+Content-Security-Policy-Report-Only: default-src 'self'; report-to csp-endpoint
+```
+
+Advantages over `report-uri`:
+- One receiver for **all** report types — CSP, COEP, COOP, Document-Policy, deprecation, intervention, NEL, crash. No need to write five endpoints.
+- Reports are **batched** by the browser (`application/reports+json` is an array, not a single report). Lower request volume.
+- Includes report metadata (`age` ms, `type`, `url`, `user_agent`) that `report-uri` doesn't carry.
+- Browsers retry delivery on transient failures.
+
+### 19b. Dual-shipping strategy
+
+Real-world CSP deployments **send both** during the transition years, because:
+- Safari has been laggy on Reporting API adoption (some versions ignore `report-to`).
+- A meaningful share of in-the-wild Chromiums (in-app browsers, embedded WebViews) still favour `report-uri`.
+- Coverage matters when probing — you don't want to miss the iOS Safari users.
+
+CFM emits both directives when a probe is active or a vhost has `report-to` configured:
+
+```
+Reporting-Endpoints: csp-endpoint="https://shop.example.gr/__cfm_reports/abc123"
+
+Content-Security-Policy-Report-Only:
+  default-src 'self';
+  ... pack contributions ...;
+  report-uri /__cfm_reports/abc123;
+  report-to  csp-endpoint
+```
+
+The path is the **same** for both — the receiver in §19c handles both request shapes.
+
+### 19c. Generalised receiver `/__cfm_reports/<token>`
+
+Generalisation of §17e. Same nginx location, same token-validates-against-`policy_probes` rule, but parses both ingest formats:
+
+| `Content-Type` | Body shape | Source |
+|---|---|---|
+| `application/csp-report` | `{"csp-report": {...}}` (one report) | legacy `report-uri` |
+| `application/reports+json` | `[{...}, {...}, ...]` (array of reports, may mix types) | modern `report-to` |
+
+**Parser dispatch (Lua sketch):**
+
+```lua
+local ct = ngx.req.get_headers()["content-type"] or ""
+local body = ngx.req.get_body_data()
+if ct:find("application/reports+json") then
+    -- modern: array of {type, age, url, user_agent, body}
+    local reports = cjson.decode(body)
+    for _, r in ipairs(reports) do dispatch_by_type(r.type, r) end
+elseif ct:find("application/csp-report") then
+    -- legacy: single CSP report
+    local r = cjson.decode(body)
+    dispatch_csp(r["csp-report"])
+end
+```
+
+`dispatch_by_type` routes:
+- `csp-violation` → existing §17e CSP logic
+- `coep`, `coop` → §18e violation logging (no aggregation yet, just count)
+- `network-error` → §20 NEL ingestion
+- `deprecation`, `intervention`, `crash` → log + count, surface in UI ("your site uses N deprecated APIs across M reports last 7d")
+
+### 19d. Report types CFM ingests
+
+Single receiver, multiple aggregation tables (or a single `report_observations` with a `type` column). Recommended split because the keying is different:
+
+| Report type | Aggregation key | Purpose |
+|---|---|---|
+| `csp-violation` | `(vhost, host, directive)` | suggest engine (§17g) |
+| `coep`, `coop` | `(vhost, blocked-url, type)` | "what cross-origin embeds are you blocking?" |
+| `deprecation` | `(vhost, feature-id)` | "this site uses N deprecated browser APIs" |
+| `intervention` | `(vhost, feature-id, reason)` | browser-applied interventions (e.g. slow-iframe-throttle) |
+| `network-error` | per §20 | DNS/TCP/TLS/HTTP errors clients hit |
+| `crash` | `(vhost, reason)` | very rare; renderer crashes |
+
+All inherit the per-vhost rate limit and noise-filter logic from §17e.
+
+---
+
+## 20. Network Error Logging (NEL)
+
+> Design-phase. Adjacent to CSP/Reporting — different goal: tell the operator when *clients* can't reach the site.
+
+NEL is a client-side reporting mechanism: when a browser fails to fetch a resource (DNS failure, TCP RST, TLS handshake error, HTTP 5xx, abandoned navigation), it queues a network-error report and POSTs it to the configured Reporting endpoint when it next can. The operator gets observability into failures that **never reached** the server logs.
+
+**Header shape:**
+
+```
+NEL: {"report_to":"default","max_age":2592000,"include_subdomains":false,
+       "success_fraction":0.001,"failure_fraction":1.0}
+```
+
+Reads as: send 100% of failure reports and 0.1% of successes (for baseline calibration) to the `default` endpoint named in `Reporting-Endpoints`, with a 30-day client-side memory.
+
+**CFM template:**
+
+`nel-template-default`:
+```
+max_age:          2592000      # 30d
+include_subdomains: false
+success_fraction: 0.0001       # 0.01% — keep volume sane
+failure_fraction: 1.0
+```
+
+Aggregated into `network_error_observations(vhost, error_type, host, count, last_seen)` where `error_type` is one of NEL's enum (`dns.unreachable`, `tcp.refused`, `tls.protocol.error`, `http.error`, etc.). Surfaced in the cfm-admin "Security Headers" tab as a small panel: "Last 7d client-side failures".
+
+**Why it matters in CFM's context:**
+- The operator gets early warning of upstream cert problems before customers complain.
+- Geographic outages become visible ("0.4% of EU clients are TLS-failing — your cert chain may be broken on some path").
+- DNS issues at the *client's* resolver show up here.
+
+**Scope note:** ship as an opt-in template, not a default. Volume from a busy site can be non-trivial; rate-limit aggressively on the receiver (same path/token as §19).
+
+---
+
+## 21. Rollout playbook for operators
+
+> Operational guide — the recommended way to migrate a real customer site without breaking it. This belongs in the doc because the technology is only half the story; getting the rollout sequence wrong is the most common cause of CSP/HSTS regret.
+
+### 21a. CSP migration timeline (RO → enforce, ~4 weeks)
+
+A safe rollout is gradual. Each step has a "this should be true before moving on" gate.
+
+**Day 0 — Baseline-safe.**
+```
+$ cfm policy apply baseline-safe shop.example.gr
+$ cfm policy test shop.example.gr     # verify X-Content-Type-Options, Referrer-Policy, X-Frame-Options visible
+```
+Zero risk. If anything breaks, it wasn't this.
+
+**Days 0–2 — Start CSP probe.**
+```
+$ cfm policy probe shop.example.gr --hours 48
+```
+Probe runs both modes (§17b). Browser CSP-RO sends violations; passive scan extracts static resources.
+
+**Day 2 — Review and apply suggested packs in report-only.**
+```
+$ cfm policy probe-suggest shop.example.gr
+[suggestion list as in §17a]
+
+$ cfm policy apply csp-bundle-suggested shop.example.gr --report-only
+```
+At this point the site is in **CSP-report-only** mode. Browsers report violations but don't block. The operator's job for the next 2 weeks: watch the receiver, fix unmatched hosts.
+
+**Days 2–14 — Soak period.**
+- Re-run `probe-status` every couple of days.
+- Look for new unmatched hosts. Add to overrides or wait for organic pack updates.
+- Visit edge flows manually (checkout, account page, password reset) — these may load resources not seen in normal traffic.
+- Have the customer place at least one test order using each enabled payment method (this is where `form-action` violations show up for vPOS!).
+
+**Gate to move forward:** zero unmatched non-extension hosts for 7 consecutive days. If a real new host appears, restart the gate clock.
+
+**Day 14+ — Switch to enforce.**
+```
+$ cfm policy apply csp-bundle-suggested shop.example.gr --enforce
+```
+Same effective directives, but now CSP blocks instead of reporting. Tell the customer: "watch the site for 24h; ping us if anything looks off."
+
+**Day 14+ — Watch first 24h.**
+Keep the report endpoint live (`report-to` still sends violations even in enforce mode for the directives that violate). Aggregated violations in the first 24h tell you what you missed.
+
+**Ongoing — periodic re-probe.**
+Every 90 days: `cfm policy probe --hours 24` again. If the site added a new integration, you'll see it in the diff. The §17i "re-probe diff" feature surfaces *only the new* hosts so the operator isn't re-reviewing the whole list.
+
+### 21b. HSTS rollout (4-step ramp)
+
+HSTS is one-way (§10). Never auto-upgrade.
+
+| Day | Action | What it means |
+|---|---|---|
+| 0 | `cfm policy apply hsts-ramp-5m shop.example.gr` | Browser remembers HTTPS for 5 minutes. Mistakes are reversible. |
+| 1 | Verify HTTPS works on every entry-point. Then `cfm policy apply hsts-ramp-1d`. | 1-day commitment. Still recoverable in worst case. |
+| 8 | `cfm policy apply hsts-ramp-1y` | 1-year commitment. Browsers will refuse HTTP for a year. **Do not do this if any subdomain still serves HTTP only.** |
+| 38+ | `cfm policy apply hsts-ramp-preload` (optional) | Bake into the HSTS preload list. **Permanent.** Operator must also submit to https://hstspreload.org/. |
+
+The CLI must require typing the vhost name to confirm for `hsts-ramp-1y` and `hsts-ramp-preload`. The cfm-admin UI shows the current effective `max-age` and date the policy was applied, so the operator can see "we've been at 1d for 30 days, safe to go to 1y."
+
+### 21c. CORS rollout
+
+CORS is the most ticket-prone of the headers because it interacts with browser caching and credentials.
+
+**Step 1: enumerate current origins.**
+If the operator has a logs source for `Origin:` headers on the vhost, dump distinct values:
+
+```
+$ awk '/^Origin:/ {print $2}' /var/log/cfm/access.log | sort -u
+https://app.example.gr
+https://admin.example.gr
+https://mobile-app.example.gr
+```
+
+If no logs are available, ask the customer for the list of allowed origins.
+
+**Step 2: configure allowlist.**
+```
+$ cfm policy apply cors-allowlist shop.example.gr \
+    --origins https://app.example.gr,https://admin.example.gr,https://mobile-app.example.gr \
+    --methods GET,POST,PUT,DELETE \
+    --credentials true \
+    --max-age 600
+```
+
+**Step 3: verify preflight.**
+```
+$ curl -X OPTIONS -H "Origin: https://app.example.gr" \
+       -H "Access-Control-Request-Method: POST" \
+       -H "Access-Control-Request-Headers: content-type,authorization" \
+       -i https://shop.example.gr/api/whatever
+```
+Expect 204 with `Access-Control-Allow-Origin`, `-Methods`, `-Headers`, `-Max-Age`, `Vary: Origin`. Verify a *non-allowlisted* origin produces no CORS headers (browser would block).
+
+**Step 4: roll out to one path first.**
+If the schema supports per-path (v2), enable CORS on `/api/*` only initially. v1 = whole vhost, so the rollout is binary — verify with a real client app before flipping.
+
+### 21d. Rollback procedure
+
+For all policy types, the rollback is `cfm policy clear <vhost>`. It removes the row from `vhost_policies`, the cache invalidates within 5s (§14h), and CFM stops emitting CFM-managed headers on that vhost — origin's headers (if any) pass through untouched.
+
+**Exception: HSTS is not rolled back.** Browsers remember the previous `max-age`. To genuinely undo:
+
+1. `cfm policy clear` removes CFM's HSTS header.
+2. To accelerate browser forgetting, the operator can apply `hsts-ramp-5m` (which actively sends `max-age=300`, overwriting the browser memory with a short TTL).
+3. After 5 minutes, `cfm policy clear` again.
+
+This is the only safe HSTS rollback. Document loudly.
+
+---
+
+## 22. Metrics & observability
+
+> Design-phase. What counters and dashboards the policy subsystem exposes via existing `cfm_stats`/Prometheus paths.
+
+### 22a. Per-vhost counters
+
+All counters are labelled `vhost=<host>`. Cardinality bounded by the number of vhosts × number of header types.
+
+```
+cfm_policies_header_set_total{vhost, header, mode}
+    # incremented in header_filter_by_lua for each header CFM emits.
+    # mode = add_if_missing | replace | append | strip
+cfm_policies_header_kept_origin_total{vhost, header}
+    # incremented when add_if_missing skipped because origin already sent the header.
+cfm_policies_preflight_total{vhost, result}
+    # result = match | miss | error
+cfm_policies_preflight_duration_seconds{vhost} (histogram)
+cfm_policies_apply_duration_seconds{vhost}    (histogram)
+    # cost of the header_filter step per response
+cfm_policies_cache_total{vhost, result}
+    # result = hit | miss | reload (LRU per worker)
+cfm_policies_csp_reports_total{vhost, type, source}
+    # type = csp-violation | coep | coop | deprecation | network-error | ...
+    # source = report-uri | report-to
+cfm_policies_csp_reports_dropped_total{vhost, reason}
+    # reason = rate-limit | extension-noise | invalid-token | body-too-large | malformed
+cfm_policies_observations_recorded_total{vhost, source}
+    # source = body-scan | csp-report
+cfm_policies_observations_skipped_total{vhost, reason}
+    # reason = lru-hit | wrong-content-type | sampled-out | size-cap
+```
+
+### 22b. Global counters
+
+```
+cfm_policies_probes_active                  (gauge)
+cfm_policies_probes_expired_total           (counter)
+cfm_policies_templates_loaded               (gauge)
+cfm_policies_packs_loaded{family}           (gauge, family=csp|permissions-policy|cross-origin)
+cfm_policies_db_writes_total{table}         (counter)
+cfm_policies_db_write_errors_total{table}   (counter)
+```
+
+### 22c. Dashboard & alerts
+
+**cfm-admin "Security Headers" tab gains a metrics sub-panel per vhost showing:**
+
+- Last 24h: headers set, reports received, observations recorded.
+- Top 5 unmatched hosts seen this week (link to suggest engine).
+- Apply-duration p99 (alert if > 1ms — something is wrong with the cache).
+- Preflight match rate (low = misconfigured allowlist).
+
+**Recommended alerts** (operator-configurable; opt-in):
+
+- **`policies-apply-duration-high`** — apply step taking > 1ms p99 for > 5 min. Indicates cache thrash or pack-catalog corruption.
+- **`policies-csp-reports-flood`** — single vhost receiving > 1000 reports/min for > 5 min. Either an attacker probing or a bad pack causing legitimate violations.
+- **`policies-cors-preflight-miss-spike`** — preflight miss rate > 50% for > 10 min. Likely a frontend deploy with a new origin that wasn't added to the allowlist.
+- **`policies-nel-failure-spike`** — NEL failure-report rate suddenly tripled. Possible cert / DNS / network issue.
+
+**What we explicitly don't do:**
+- No per-report exporting to external sinks (Splunk, Loki, etc.) in v1 — bounded counters only. Heavy log forwarding is its own feature.
+- No real-time stream of CSP violations. Aggregated only. Operator who needs raw stream points `report-to` at their own collector.
