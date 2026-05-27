@@ -197,6 +197,10 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 				m.HandleFunc("/api/v1/challenge/", webdetRoutesProxy)
 				m.HandleFunc("/api/v1/waf/", webdetRoutesProxy)
 				m.HandleFunc("/api/v1/cpanel/", webdetRoutesProxy)
+				// HTTP/3 per-vhost opt-in lives under /api/v1/http3/. Without
+				// this prefix the apiserver falls through to the dashboard
+				// catch-all and CLI gets HTML back instead of JSON.
+				m.HandleFunc("/api/v1/http3/", webdetRoutesProxy)
 			})
 			logging.Logf("[webdetector] routes registered on shared apiserver")
 		})
