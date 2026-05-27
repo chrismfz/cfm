@@ -1,65 +1,120 @@
+# =============================================================================
+# CFM WebDetector — Challenge Exclude Rules
+# =============================================================================
+#
+# Purpose
+#   Suppress *challenge enforcement* for known-good / verified crawlers so they
+#   don't get caught in challenge loops by accident.
+#
+# Activation
+#   This file is loaded automatically when it exists at the path configured by
+#   CHALLENGE_EXCLUDE_FILE in detectors.conf (default
+#   /etc/cfm/webdetector_challenge_exclude.txt). There is no on/off knob —
+#   delete the file (or empty it) to disable, edit it to update. Changes are
+#   picked up on the next detectors reload.
+#
+# File format
+#   One rule per line:    key=value; key=value; ...
+#   Blank lines and lines starting with '#' or ';' are ignored.
+#   Keys/values are case-insensitive.
+#
+# Keys
+#   ua=PATTERN        User-Agent glob (matches against the request's UA)
+#   asn=AS12345       ASN glob (numeric form auto-prefixed with "as"; e.g.
+#                     asn=15169 == asn=as15169). Globs allowed: asn=as1516?
+#   ptr=PATTERN       Reverse-DNS hostname glob (e.g. *.googlebot.com)
+#   host=PATTERN      Request vhost glob (e.g. *.example.com)
+#   verify_fcrdns=1   After PTR matches, require forward-confirmed rDNS — the
+#                     PTR hostname must resolve back to the request IP. This is
+#                     the spoof-proof check; recommended for all PTR rules.
+#   mode=all|any      Combination mode (default: all).
+#                       all → every specified field must match (safer)
+#                       any → at least one field matching is enough (riskier)
+#   action=skip | skip_vhost_only
+#                       skip            → suppress ALL challenges for this hit
+#                       skip_vhost_only → only suppress vhost-wide rules
+#                                          (CHALLENGE_VHOST, CHALLENGE_SUSPICIOUS_VHOST_SCORE)
+#
+# Glob semantics
+#   '*' matches any run of characters (including the empty string). It is NOT
+#       a path separator — it freely crosses '/' inside UA strings.
+#   '?' matches exactly one character.
+#   A pattern with no '*' or '?' is treated as a substring match.
+#
+# Safety guidance
+#   - UA alone is trivially spoofable. Anyone can set User-Agent: AhrefsBot.
+#     For verified crawlers, always combine with ptr=...; verify_fcrdns=1.
+#   - ASN alone is broad (clouds host attackers too). Prefer asn + ua, or PTR.
+#   - "mode=any" is rarely what you want; default "all" is safer.
+#   - Test new rules with a small action first (skip_vhost_only) before
+#     promoting to action=skip.
+#
+# Worked examples
+#   # Verified crawler — PTR + FCrDNS (gold standard).
+#   ptr=*.googlebot.com; verify_fcrdns=1; action=skip
+#
+#   # UA + PTR + FCrDNS — narrows match to the bot you expect on that PTR.
+#   ua=*ahrefs*; ptr=*.ahrefs.com; verify_fcrdns=1; action=skip
+#
+#   # ASN + UA combo (no FCrDNS available) — semi-strict.
+#   asn=as32934; ua=*facebookexternalhit*; action=skip
+#
+#   # Trust a partner ASN, but ONLY for vhost-wide panic rules.
+#   asn=as64500; action=skip_vhost_only
+#
+#   # Free pass for a specific vhost (e.g. status page).
+#   host=status.example.com; action=skip
+#
+# Operator workflow
+#   tail -f /var/log/cfm/detectors.log | grep "challenge exclude"
+#       → confirms parsed rules at load and matches at request time.
+# =============================================================================
+
 # -----------------------------------------------------------------------------
-# CFM WebDetector - Challenge Exclude Rules
-#
-# Purpose:
-#   Suppress *challenge enforcement* for known-good / verified crawlers,
-#   so they don't get stuck in challenge loops by accident.
-#
-# Format:
-#   key=value; key=value; ...   (one rule per line)
-#
-# Keys:
-#   ua=PATTERN      User-Agent glob (case-insensitive), supports * and ?
-#   asn=AS12345     ASN glob/prefix match (e.g. asn=as15169, asn=as*)
-#   ptr=PATTERN     Reverse DNS (PTR) glob (e.g. *.googlebot.com)
-#   host=PATTERN    Vhost glob (e.g. api.example.com, *.example.com)
-#   mode=all|any    Matching mode:
-#                    - all (default): all specified fields must match (safer)
-#                    - any: any one field match is enough (riskier)
-#   verify_fcrdns=1 Forward-confirm rDNS (PTR must resolve back to same IP)
-#                   Recommended for "verified crawlers" like Google/Bing.
-#   action=skip|skip_vhost_only
-#                    - skip: suppress ALL challenges for this request/IP/rule
-#                    - skip_vhost_only: suppress only vhost-wide challenge rules
-#                      (CHALLENGE_VHOST, CHALLENGE_SUSPICIOUS_VHOST_SCORE)
-#
-# Notes / Safety:
-#   - UA alone is spoofable. For major crawlers use ptr + verify_fcrdns=1.
-#   - ASN alone is too broad (cloud abuse). Prefer "asn + ua" or ptr verification.
-#   - Keep these rules strict. "any" mode is rarely recommended.
+# 1) Googlebot — verified via FCrDNS.
+#    Fake "Googlebot" UAs from random IPs do NOT pass.
 # -----------------------------------------------------------------------------
+ptr=*.googlebot.com; verify_fcrdns=1; action=skip
+ptr=*.google.com;    verify_fcrdns=1; action=skip
 
-# 1) Googlebot
-#    Requires PTR suffix + forward-confirmed rDNS.
-#    This blocks fake "Googlebot" UAs from random IPs.
-ua=*; ptr=*.googlebot.com; verify_fcrdns=1; action=skip
-ua=*; ptr=*.google.com;    verify_fcrdns=1; action=skip
+# -----------------------------------------------------------------------------
+# 2) Bingbot — verified via FCrDNS (PTRs under search.msn.com).
+# -----------------------------------------------------------------------------
+ptr=*.search.msn.com; verify_fcrdns=1; action=skip
 
-# 2) Bingbot
-#    Same verification idea as Googlebot.
-ua=*; ptr=*.search.msn.com; verify_fcrdns=1; action=skip
+# -----------------------------------------------------------------------------
+# 3) Meta / Facebook crawler.
+#    Meta doesn't publish a stable FCrDNS scheme for all crawlers, so we
+#    combine their ASN with a UA substring. Adjust the UA glob to match what
+#    you actually see in your logs (meta*, facebookexternalhit*, etc).
+# -----------------------------------------------------------------------------
+asn=as32934; ua=*facebookexternalhit*; action=skip
+asn=as32934; ua=*meta*;                action=skip
 
-# 3) Meta/Facebook crawler (SEMI-STRICT example):
-#    ASN + UA combo. Safer than UA-only, but not as strong as FCrDNS.
-#    Adjust UA pattern to what you actually see in logs (meta*, facebook*, etc).
-asn=as32934; ua=*; action=skip
-
-# 4) Only suppress vhost-wide panic/auto rules for a trusted ASN:
-#    Useful for partners/monitors where you still want per-IP/path rules to work,
-#    but you never want them to trigger (or be affected by) "challenge everyone on vhost".
-#    Example (replace ASxxxx with the partner ASN you trust):
+# -----------------------------------------------------------------------------
+# 4) Trusted partner ASNs — suppress only vhost-wide panic rules.
+#    Per-IP / per-path rules still apply. Replace ASxxxx with your partner ASN.
+# -----------------------------------------------------------------------------
 #asn=asXXXX; action=skip_vhost_only
-# skroutz
-asn=as202042; ua=*; action=skip
-# apple
-asn=as714; ua=*; action=skip
 
-# 5) AhrefsBot — verified via FCrDNS (PTR ends in .ahrefs.com)
-#    Spoofed "AhrefsBot" UAs from random IPs are still challenged.
-ua=*ahrefs*; ptr=*.ahrefs.com; verify_fcrdns=1; action=skip
+# -----------------------------------------------------------------------------
+# 5) Skroutz crawler (ASN-only).
+# -----------------------------------------------------------------------------
+asn=as202042; action=skip
 
-# 6) SemrushBot — verified via FCrDNS
-#    Semrush publishes PTRs under .semrush.com / .semrushbot.com.
-ua=*semrush*; ptr=*.semrush.com;    verify_fcrdns=1; action=skip
-ua=*semrush*; ptr=*.semrushbot.com; verify_fcrdns=1; action=skip
+# -----------------------------------------------------------------------------
+# 6) Apple (e.g. WKWebView / Apple Bot ASN).
+# -----------------------------------------------------------------------------
+asn=as714; action=skip
 
+# -----------------------------------------------------------------------------
+# 7) AhrefsBot — verified via FCrDNS (PTR ends in .ahrefs.com).
+#    Spoofed "AhrefsBot" UAs from non-Ahrefs IPs are still challenged.
+# -----------------------------------------------------------------------------
+ptr=*.ahrefs.com; verify_fcrdns=1; action=skip
+
+# -----------------------------------------------------------------------------
+# 8) SemrushBot — verified via FCrDNS.
+#    Semrush publishes PTRs under .semrush.com.
+# -----------------------------------------------------------------------------
+ptr=*.semrush.com; verify_fcrdns=1; action=skip

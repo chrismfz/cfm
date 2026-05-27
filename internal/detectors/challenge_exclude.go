@@ -6,7 +6,6 @@ import (
     "context"
     "net"
     "os"
-    "path/filepath"
     "strings"
     "time"
 )
@@ -189,16 +188,49 @@ func (ce *ChallengeExclude) Match(ip, host, ua, asn, ptr, ruleName string) (stri
 }
 
 // globMatch is a small, case-insensitive glob matcher for '*' and '?'.
+// '*' matches any sequence (including empty) of ANY characters — '/' is not
+// a separator here, since values are UA strings / hostnames, not paths.
+// '?' matches exactly one character. If the pattern contains no wildcards,
+// falls back to substring containment for convenience.
 func globMatch(pattern, value string) bool {
     pattern = strings.TrimSpace(strings.ToLower(pattern))
     value = strings.TrimSpace(strings.ToLower(value))
     if pattern == "" { return false }
-    ok, err := filepath.Match(pattern, value)
-    if err == nil && ok { return true }
     if !strings.ContainsAny(pattern, "*?") {
         return strings.Contains(value, pattern)
     }
-    return false
+    return wildcardMatch(pattern, value)
+}
+
+// wildcardMatch is the classic iterative '*'/'?' matcher with backtracking.
+// O(len(pattern) * len(value)) worst case; both inputs are short here.
+func wildcardMatch(pattern, value string) bool {
+    pi, vi := 0, 0
+    star, mark := -1, 0
+    for vi < len(value) {
+        if pi < len(pattern) && (pattern[pi] == '?' || pattern[pi] == value[vi]) {
+            pi++
+            vi++
+            continue
+        }
+        if pi < len(pattern) && pattern[pi] == '*' {
+            star = pi
+            mark = vi
+            pi++
+            continue
+        }
+        if star != -1 {
+            pi = star + 1
+            mark++
+            vi = mark
+            continue
+        }
+        return false
+    }
+    for pi < len(pattern) && pattern[pi] == '*' {
+        pi++
+    }
+    return pi == len(pattern)
 }
 
 // forwardConfirmPTR verifies FCrDNS: resolve PTR hostname and ensure it maps back to ip.
