@@ -3355,6 +3355,16 @@ func (e *Engine) HTTP3OverrideIsEnabled(host string) bool {
 	return e.http3Overrides.IsEnabled(host)
 }
 
+// HTTP3OverrideMatchInfo is the variant used by the cfm-admin per-vhost
+// controls UI. It returns the matching pattern and whether the hit was
+// exact, so the UI can render "toggleable" vs "matched-by-wildcard".
+func (e *Engine) HTTP3OverrideMatchInfo(host string) (matched bool, pattern string, exact bool) {
+	if e == nil || e.http3Overrides == nil {
+		return false, "", false
+	}
+	return e.http3Overrides.MatchInfo(host)
+}
+
 func (e *Engine) HTTP3OverrideHasAny() bool {
 	if e == nil || e.http3Overrides == nil {
 		return false

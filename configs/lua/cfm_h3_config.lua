@@ -1,18 +1,21 @@
 -- configs/lua/cfm_h3_config.lua
 --
--- HTTP/3 per-vhost opt-in for the Alt-Svc response header.
+-- HTTP/3 (QUIC) per-vhost opt-in for the Alt-Svc response header.
 --
 -- WHAT THIS DOES
 -- --------------
--- For each request that reaches a successful allow, decide whether to
--- emit `Alt-Svc: h3=":443"; ma=300` in the response. The decision is
--- per-vhost and driven by an opt-in list maintained by the cfm daemon.
+-- For each response, decide whether to emit `Alt-Svc: h3=":443"; ma=300`.
+-- Per-vhost, driven by an opt-in list maintained by the cfm daemon. The
+-- module is consumed from a server-level `header_filter_by_lua_block` (see
+-- angie.conf / openresty.conf) so EVERY served response is covered,
+-- regardless of which cfm.lua Step decided to allow the request — that
+-- includes the clearance-cookie fast-path which is the bulk of real
+-- production traffic.
 --
 -- The list lives in JSON on disk (managed by Go side via CLI/apiserver
 -- and cfm-admin's "Per-vhost controls" UI). Workers fetch it lazily via
 -- the cfm_nginx.sock bridge at GET /nginx/h3/config every REFRESH_SEC
--- seconds. Each worker keeps its own in-memory cache; no shared dict is
--- needed because the data set is small (typically <100 hosts).
+-- seconds. Each worker keeps its own in-memory cache.
 --
 -- WHY OPT-IN (default OFF)
 -- ------------------------
@@ -24,23 +27,35 @@
 --
 -- COST PER REQUEST
 -- ----------------
--- * One ngx.now() vs cached timestamp comparison (~50 ns).
--- * Possibly one shdict access (REFRESH_SEC interval, ~1 µs).
--- * One Lua table hash lookup on the host (~0.5 µs).
--- * Wildcard fallback (linear over the small list of "*.example" entries).
--- Total: ~1-3 µs per response. Negligible vs the rest of the request.
+-- * has_any short-circuit (~10 ns) — common case when no opt-ins exist.
+-- * Otherwise: one normalize_host + one table hash lookup (~0.5-2 µs).
+-- * Wildcard fallback: linear over hosts_wild (typically <10 entries).
+-- Total p99: <5 µs per response. Negligible.
+--
+-- REFRESH MODEL
+-- -------------
+-- Each request that finds the cache stale schedules an ASYNC refresh via
+-- ngx.timer.at(0, ...) and continues serving with whatever cache it has
+-- (even if empty). The actual bridge fetch never blocks the request
+-- path. A per-worker boolean prevents stacking multiple in-flight
+-- refreshes from the same worker.
+--
+-- We deliberately do NOT serialize refreshes across workers via
+-- ngx.shared dicts. The previous attempt had a starvation bug: workers
+-- that lost the lock advanced their own _last_refresh_at and never
+-- updated their cache, so after enabling H3 only ~1/N of responses got
+-- Alt-Svc for the entire REFRESH_SEC window. N workers polling once per
+-- 60s over a localhost unix socket is trivial (~1ms each, ~8 calls/min
+-- per nginx for an 8-worker box).
 --
 -- OPERATIONAL NOTES
 -- -----------------
 -- * Toggle changes propagate within REFRESH_SEC (default 60s).
---   No nginx reload required.
+-- * No nginx reload required.
 -- * Tunable via env: CFM_H3_REFRESH_SEC.
 -- * If the bridge is unreachable, the worker keeps the LAST KNOWN list
---   indefinitely and retries every REFRESH_SEC. Failure stays in the
+--   and retries on the next interval. Failure stays in the
 --   "do not advertise" direction (fail-safe).
--- * Refresh is serialized across workers via a 1s lock entry in the
---   ngx.shared.cfm_decisions dict — at most one worker hits the bridge
---   per refresh window. Other workers reuse their last cached list.
 
 local cjson = require "cjson.safe"
 
@@ -55,38 +70,45 @@ local _cache = {
     hosts_wild  = {},  -- array of "*.example.com" patterns
     has_any     = false,
 }
-local _last_refresh_at = 0
-local _refresh_sec     = tonumber(os.getenv("CFM_H3_REFRESH_SEC") or "60") or 60
+local _last_refresh_at  = 0
+local _refresh_in_progress = false
+local _refresh_sec      = tonumber(os.getenv("CFM_H3_REFRESH_SEC") or "60") or 60
 if _refresh_sec < 1 then _refresh_sec = 1 end
 
 -- ---------------------------------------------------------------------------
 -- Helpers
 
-local function lower(s)
-    if not s then return "" end
-    return string.lower(s)
-end
-
--- normalize_host: lowercase, strip trailing dot, strip optional port.
--- Mirrors the Go-side normalizeControlHost so the two ends agree on keys.
+-- normalize_host: lowercase, strip trailing dot, strip optional port. Mirrors
+-- the Go-side normalizeControlHost so the two ends agree on keys.
+-- IPv6-aware: `[::1]:443` and `[2001:db8::1]` keep their brackets and inner
+-- colons; only a trailing `:port` outside the brackets is stripped.
 local function normalize_host(raw)
-    local h = lower(tostring(raw or ""))
+    local h = string.lower(tostring(raw or ""))
     if h == "" then return "" end
-    -- strip trailing dot
     if h:sub(-1) == "." then h = h:sub(1, -2) end
-    -- strip ":port" (we don't need it for matching)
+    if h:sub(1, 1) == "[" then
+        -- IPv6 literal. Keep everything up to the closing bracket; strip a
+        -- trailing ":port" after it if present.
+        local close = h:find("]", 1, true)
+        if close then
+            return h:sub(1, close)
+        end
+        return h
+    end
+    -- IPv4 / hostname. Strip ":port" if present.
     local colon = h:find(":", 1, true)
     if colon then h = h:sub(1, colon - 1) end
     return h
 end
 
--- glob_match: very small subset of shell glob for trailing "*" segments
--- and "*.example.com" forms. The Go side uses path/filepath.Match which
--- supports more, but in practice the only useful patterns for vhosts
--- are "*.suffix" and exact hosts. Keep it cheap.
+-- glob_match: minimal subset of shell glob covering the only patterns the
+-- UI/CLI actually let an operator add for vhosts: exact host and
+-- "*.suffix.tld". The Go store accepts richer patterns via filepath.Match
+-- (`?`, `[abc]`, mid-pattern `*`), so rebuild_cache below tags any unknown
+-- wildcard as "unsupported" and logs a one-shot warning rather than
+-- silently routing it where glob_match cannot find it.
 local function glob_match(pattern, host)
     if pattern == host then return true end
-    -- "*.example.com" => match anything ending with ".example.com"
     if pattern:sub(1, 2) == "*." then
         local suffix = pattern:sub(2)  -- ".example.com"
         if #host >= #suffix and host:sub(-#suffix) == suffix then
@@ -99,18 +121,16 @@ end
 -- ---------------------------------------------------------------------------
 -- Bridge fetch. Uses a private cosocket so it does not depend on cfm.lua's
 -- internal http_unix function. Mirrors the same wire format (HTTP/1.1 over
--- unix socket with X-CFM-Token header).
+-- unix socket with X-CFM-Token header). Runs in a timer context — never
+-- blocks the request path.
 
 local SOCK_PATH      = "/var/run/cfm/cfm_nginx.sock"
 local BRIDGE_PATH    = "/nginx/h3/config"
 local TOKEN_HEADER   = "X-CFM-Token"
-local IO_TIMEOUT_MS  = 1000
+local IO_TIMEOUT_MS  = 200  -- localhost unix socket; 200ms is 200x headroom.
 
--- _bridge_token is loaded lazily on first refresh attempt. We cannot do it
--- at module init because the cfm daemon may not have written the token
--- file yet at worker boot.
-local _bridge_token        = nil
-local _BRIDGE_TOKEN_FILE   = "/var/lib/cfm/lua/cfm_bridge_token.lua"
+local _bridge_token  = nil
+local _BRIDGE_TOKEN_FILE = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 
 local function load_bridge_token()
     if _bridge_token then return _bridge_token end
@@ -144,7 +164,6 @@ local function bridge_fetch()
     local code = tonumber(status_line:match("%s(%d%d%d)%s"))
     if code ~= 200 then s:close(); return nil, "http " .. tostring(code) end
 
-    -- drain headers
     while true do
         local line, _ = s:receive("*l")
         if not line or line == "" then break end
@@ -155,9 +174,28 @@ local function bridge_fetch()
 end
 
 -- ---------------------------------------------------------------------------
--- Refresh logic. Called at most once per REFRESH_SEC per worker, with a
--- shared-dict lock to deduplicate across workers (best-effort; if the
--- lock fails another worker is already fetching).
+-- Cache rebuild.
+--
+-- Hosts that contain glob characters the local matcher does not handle
+-- (`?`, `[`, mid-pattern `*`) would silently never match if we routed them
+-- into hosts_wild — that was a real bug. We now drop them and log a
+-- one-shot warning per pattern so the operator knows. The Go store will
+-- still hold them, the API will still list them, and a future shared
+-- glob_to_lua_pattern helper (cfm.lua already has one) can lift this
+-- restriction without re-introducing the silent-drop bug.
+
+local _warned_unsupported = {}
+
+local function is_supported_pattern(p)
+    if not p:find("*", 1, true) and not p:find("?", 1, true) and not p:find("[", 1, true) then
+        return true  -- exact host
+    end
+    if p:sub(1, 2) == "*." and not p:sub(3):find("*", 1, true)
+       and not p:find("?", 1, true) and not p:find("[", 1, true) then
+        return true  -- "*.suffix" only
+    end
+    return false
+end
 
 local function rebuild_cache(hosts)
     local exact, wild = {}, {}
@@ -165,11 +203,18 @@ local function rebuild_cache(hosts)
     for _, h in ipairs(hosts or {}) do
         local norm = normalize_host(h)
         if norm ~= "" then
-            n = n + 1
-            if norm:find("*", 1, true) or norm:find("?", 1, true) then
-                wild[#wild + 1] = norm
-            else
-                exact[norm] = true
+            if is_supported_pattern(norm) then
+                n = n + 1
+                if norm:sub(1, 2) == "*." then
+                    wild[#wild + 1] = norm
+                else
+                    exact[norm] = true
+                end
+            elseif not _warned_unsupported[norm] then
+                _warned_unsupported[norm] = true
+                ngx.log(ngx.WARN,
+                    "[cfm_h3] dropping unsupported pattern (only exact and '*.suffix' are supported by the Lua matcher): ",
+                    norm)
             end
         end
     end
@@ -178,52 +223,60 @@ local function rebuild_cache(hosts)
     _cache.has_any     = n > 0
 end
 
-local function refresh_if_needed()
-    local now = ngx.now()
-    if (now - _last_refresh_at) < _refresh_sec then
+-- ---------------------------------------------------------------------------
+-- Async refresh. Each request that finds the cache stale schedules a timer
+-- and returns immediately. The timer runs out-of-band, updates the cache,
+-- and clears the in-progress flag. Concurrent requests within the same
+-- worker do not stack timers (the _refresh_in_progress flag dedupes).
+
+local function async_refresh_handler(premature)
+    if premature then
+        _refresh_in_progress = false
         return
     end
-
-    -- Cross-worker dedupe via shdict lock. cfm_decisions is created in the
-    -- nginx http {} block (lua_shared_dict cfm_decisions ...). The lock
-    -- entry is short-lived (1s) so a crashed worker doesn't block the
-    -- next refresh for long.
-    local SH = ngx.shared.cfm_decisions
-    if SH then
-        local locked = SH:add("h3cfg_lock", "1", 1)
-        if not locked then
-            -- Another worker is fetching right now. Reset our timer so we
-            -- don't keep retrying inside this same second.
-            _last_refresh_at = now
-            return
-        end
-    end
-
     local body, err = bridge_fetch()
-    _last_refresh_at = now  -- always advance even on error (fail-safe)
-    if SH then SH:delete("h3cfg_lock") end
-
-    if not body then
+    _last_refresh_at = ngx.now()
+    if body then
+        local decoded = cjson.decode(body)
+        if type(decoded) == "table" then
+            rebuild_cache(decoded.hosts)
+        else
+            ngx.log(ngx.WARN, "[cfm_h3] bad bridge response (not JSON)")
+        end
+    else
         ngx.log(ngx.WARN, "[cfm_h3] refresh failed: ", tostring(err),
                 " (keeping last cached list)")
-        return
     end
-    local decoded = cjson.decode(body)
-    if type(decoded) ~= "table" then
-        ngx.log(ngx.WARN, "[cfm_h3] bad bridge response (not JSON)")
-        return
+    _refresh_in_progress = false
+end
+
+local function schedule_refresh_if_needed()
+    if _refresh_in_progress then return end
+    local now = ngx.now()
+    if (now - _last_refresh_at) < _refresh_sec then return end
+    _refresh_in_progress = true
+    local ok, err = ngx.timer.at(0, async_refresh_handler)
+    if not ok then
+        _refresh_in_progress = false
+        ngx.log(ngx.WARN, "[cfm_h3] could not schedule refresh timer: ", tostring(err))
     end
-    rebuild_cache(decoded.hosts)
 end
 
 -- ---------------------------------------------------------------------------
 -- Public API
 
 -- enabled_for: returns true if the given host should get Alt-Svc.
--- Cheap path when no vhosts are opted-in: short-circuits to false.
+-- Cheap path when no vhosts are opted-in: short-circuits to false BEFORE
+-- doing any string work or scheduling work.
 function _M.enabled_for(host)
-    refresh_if_needed()
-    if not _cache.has_any then return false end
+    if not _cache.has_any then
+        -- Still schedule the periodic refresh so a fresh opt-in eventually
+        -- arrives even on a quiet worker. Refresh is bounded by REFRESH_SEC
+        -- and runs out-of-band.
+        schedule_refresh_if_needed()
+        return false
+    end
+    schedule_refresh_if_needed()
     local h = normalize_host(host)
     if h == "" then return false end
     if _cache.hosts_exact[h] then return true end
@@ -233,13 +286,16 @@ function _M.enabled_for(host)
     return false
 end
 
--- maybe_set_alt_svc: convenience helper for callers that want the full
--- behavior in one line. Sets ngx.header["Alt-Svc"] if the current request's
--- host is opted in. Safe to call from any phase where ngx.header is
--- writable (rewrite, access, header_filter, content).
+-- maybe_set_alt_svc: convenience helper. Sets ngx.header["Alt-Svc"] if the
+-- current request's host is opted in. Safe to call from any phase where
+-- ngx.header is writable (header_filter is the recommended phase — see the
+-- nginx config blocks in angie.conf / openresty.conf).
 function _M.maybe_set_alt_svc()
-    local host = ngx.var.host
-    if _M.enabled_for(host) then
+    if not _cache.has_any then
+        schedule_refresh_if_needed()
+        return
+    end
+    if _M.enabled_for(ngx.var.host) then
         ngx.header["Alt-Svc"] = 'h3=":443"; ma=300'
     end
 end

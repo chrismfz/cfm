@@ -17,6 +17,7 @@ import (
 	"cfm/internal/clihttp"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 )
@@ -55,8 +56,18 @@ func runHTTP3WebTop(baseURL string, args []string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// Read body once so we can fall back to raw text when JSON decoding
+	// fails (e.g. a reverse proxy returning HTML 502, or a plain-text
+	// `forbidden\n` from http.Error). Prior versions printed "✓" on
+	// non-JSON 4xx/5xx because the decode error was swallowed.
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("http3 %s HTTP %d: %s", action, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 	var result map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("http3 %s: server returned non-JSON 2xx (%d bytes): %q", action, len(body), strings.TrimSpace(string(body)))
+	}
 	if errMsg, ok := result["error"].(string); ok {
 		return fmt.Errorf("http3 %s error: %s", action, errMsg)
 	}
@@ -71,9 +82,13 @@ func runHTTP3List(baseURL string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("http3 list HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 	var rows []http3CLIEntry
-	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
-		return err
+	if err := json.Unmarshal(body, &rows); err != nil {
+		return fmt.Errorf("http3 list: server returned non-JSON (%d bytes): %q", len(body), strings.TrimSpace(string(body)))
 	}
 	if len(rows) == 0 {
 		fmt.Println("No vhosts opted in to HTTP/3. Default is OFF (HTTP/2 only).")

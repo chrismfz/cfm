@@ -43,6 +43,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/logging"
 )
 
 // http3OverrideEntry is one opt-in row. A host with a wildcard ("*",
@@ -81,6 +83,11 @@ func (s *http3OverrideStore) normalize(host string) (string, bool) {
 // Add records an opt-in for host (admin or scoped). scope is the token's
 // allowed-vhost set; nil/empty means admin. Returns true on a real insert,
 // false if the host was already present.
+//
+// Persistence: if saveLocked fails (disk full, permission, read-only mount)
+// the in-memory entry is rolled back so the daemon's view matches what's on
+// disk — otherwise a restart would silently lose the opt-in while the API
+// reported success. The error is also logged loudly via logging.Logf.
 func (s *http3OverrideStore) Add(host string, scope map[string]struct{}) bool {
 	h, ok := s.normalize(host)
 	if !ok {
@@ -97,13 +104,20 @@ func (s *http3OverrideStore) Add(host string, scope map[string]struct{}) bool {
 		ScopeHosts: scopeHosts,
 		CreatedAt:  time.Now(),
 	}
-	_ = s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		delete(s.entries, h)
+		logging.Logf("[webdetector][http3] failed to persist opt-in for %q (rollback): %v (path=%s)", h, err, s.path)
+		return false
+	}
 	return true
 }
 
 // Remove deletes an opt-in. Returns true if a row was actually removed.
-// scope is ignored at the store layer — the API layer enforces that scoped
-// tokens can only target hosts inside their scope.
+// scope is enforced at the API layer (scoped tokens can only target hosts
+// inside their scope); the store does not re-validate.
+//
+// Persistence: on save failure the in-memory entry is restored so the
+// daemon's view matches disk. Error logged loudly via logging.Logf.
 func (s *http3OverrideStore) Remove(host string, _ map[string]struct{}) bool {
 	h, ok := s.normalize(host)
 	if !ok {
@@ -111,11 +125,16 @@ func (s *http3OverrideStore) Remove(host string, _ map[string]struct{}) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.entries[h]; !exists {
+	prev, exists := s.entries[h]
+	if !exists {
 		return false
 	}
 	delete(s.entries, h)
-	_ = s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.entries[h] = prev
+		logging.Logf("[webdetector][http3] failed to persist removal of %q (rollback): %v (path=%s)", h, err, s.path)
+		return false
+	}
 	return true
 }
 
@@ -150,24 +169,44 @@ func (s *http3OverrideStore) Hosts() []string {
 // Used only by Go-side callers (Lua does its own lookup against the
 // cached config file).
 func (s *http3OverrideStore) IsEnabled(host string) bool {
+	matched, _, _ := s.MatchInfo(host)
+	return matched
+}
+
+// MatchInfo returns the same decision as IsEnabled plus the matching
+// pattern and whether it was an exact match (vs. wildcard). Used by the
+// cfm-admin UI to render the toggle row correctly:
+//
+//   * exact match  → row is toggleable (operator can flip it off here)
+//   * wildcard hit → row is enabled but NOT toggleable (the wildcard
+//                    must be edited via CLI; flipping this single host
+//                    would be confusing).
+//
+// CRITICAL: this is the ONLY function the UI should use for deciding
+// "is this host opted in?". Earlier versions reused matchHostExclude
+// which expanded `cdn.example.com` into a suffix match against every
+// subdomain — the Lua data path never honored that, so the UI lied. The
+// matching rules here (exact + filepath.Match wildcards) MUST stay in
+// step with the Lua glob_match in cfm_h3_config.lua.
+func (s *http3OverrideStore) MatchInfo(host string) (matched bool, pattern string, exact bool) {
 	h, ok := s.normalize(host)
 	if !ok {
-		return false
+		return false, "", false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if _, exact := s.entries[h]; exact {
-		return true
+	if _, ex := s.entries[h]; ex {
+		return true, h, true
 	}
-	for pattern := range s.entries {
-		if !strings.ContainsAny(pattern, "*?[") {
+	for p := range s.entries {
+		if !strings.ContainsAny(p, "*?[") {
 			continue
 		}
-		if matched, err := filepath.Match(pattern, h); err == nil && matched {
-			return true
+		if m, err := filepath.Match(p, h); err == nil && m {
+			return true, p, false
 		}
 	}
-	return false
+	return false, "", false
 }
 
 // HasAny is a fast "is any vhost opted in?" check the Lua side can use to

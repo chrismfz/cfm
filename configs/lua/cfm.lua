@@ -254,11 +254,12 @@ local ua_emerg_ok, ua_emerg = pcall(require, "cfm_ua_emergency")
 -- a load failure sets waf_ok=false and disables inline WAF checks.
 local waf_ok, waf = pcall(require, "cfm_waf")
 
--- HTTP/3 per-vhost opt-in. Default is "no Alt-Svc" → browsers stay on
--- HTTP/2. cfm-admin / `cfm webtop http3 enable <host>` adds entries.
--- See configs/lua/cfm_h3_config.lua for the full design notes. pcall so
--- a load failure silently degrades to "no H3 advertised" (fail-safe).
-local h3_ok, h3 = pcall(require, "cfm_h3_config")
+-- HTTP/3 Alt-Svc emission is intentionally NOT hooked here. It lives in a
+-- server-level header_filter_by_lua_block (see angie.conf / openresty.conf)
+-- so every served response is covered regardless of which allow path fires
+-- (Step 4, clearance-cookie fast-path, panel/self-IP bypass, ...). Wiring
+-- it into the access phase would silently miss the clearance-cookie path
+-- — which is the bulk of real production traffic on logged-in vhosts.
 
 local SH = ngx.shared.cfm_decisions
 
@@ -1516,17 +1517,6 @@ ngx.header["X-CFM-Action"] = "allow"
 ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
 if CFG.log_allows or CFG.debug then
   log_route(ngx.INFO, "allow ip=" .. ip .. " host=" .. host .. " pass=" .. ngx.var.cfm_pass .. cache_flag)
-end
-
--- HTTP/3 Alt-Svc advertisement (per-vhost opt-in). Default is OFF for all
--- vhosts; cfm_h3_config.lua maintains a TTL-cached opt-in list refreshed
--- every ~60s from /nginx/h3/config. When the host is in the list, this
--- adds the response header so capable browsers will try QUIC on the next
--- request. When not in the list, no header is set and browsers stay on H2.
--- Negligible per-request cost (~1-3 µs); fail-safe (silently skipped if
--- the module failed to load at worker init).
-if h3_ok and h3 and h3.maybe_set_alt_svc then
-  h3.maybe_set_alt_svc()
 end
 
 end -- cfm_enforce()

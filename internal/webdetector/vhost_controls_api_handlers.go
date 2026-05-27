@@ -54,17 +54,22 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// HTTP/3 opt-in list. Opposite semantics: presence = enabled. Hosts in
-	// here that we don't see elsewhere should still surface in the UI so the
-	// owner can toggle them off.
-	http3Hosts := make([]string, 0)
+	// HTTP/3 opt-in list. Opposite semantics from WAF/Challenge:
+	// presence in the store = host is enabled. We still surface every
+	// opt-in host as a UI row so the owner can toggle it off, even if
+	// the host doesn't appear in cPanel userdata or recent traffic.
+	//
+	// NOTE: we deliberately do NOT use matchHostExclude here. That
+	// helper's suffix-expansion semantics (treat "cdn.example.com" as
+	// matching every "*.cdn.example.com") would lie about the runtime
+	// behavior — the Lua data path in cfm_h3_config.lua matches only
+	// exact hosts and explicit "*.suffix" wildcards. Use the store's
+	// MatchInfo, which mirrors the Lua matcher exactly.
 	for _, h := range e.HTTP3OverrideHosts() {
 		hn := normalizeControlHost(h)
-		if hn == "" {
-			continue
+		if hn != "" {
+			hosts[hn] = struct{}{}
 		}
-		http3Hosts = append(http3Hosts, hn)
-		hosts[hn] = struct{}{}
 	}
 
 	list := make([]string, 0, len(hosts))
@@ -79,10 +84,7 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 	for _, host := range list {
 		challengeMatched, challengeValue, challengeExact := matchHostExclude(challengeEntries, host)
 		wafMatched, wafValue, wafExact := matchHostExclude(wafEntries, host)
-		// For HTTP/3 we reuse matchHostExclude because the matching rules
-		// (exact + wildcard + suffix) are identical; the boolean meaning is
-		// just inverted (matched == enabled instead of matched == disabled).
-		http3Matched, http3Value, http3Exact := matchHostExclude(http3Hosts, host)
+		http3Matched, http3Pattern, http3Exact := e.HTTP3OverrideMatchInfo(host)
 
 		rows = append(rows, webdetVhostControlRow{
 			Host:                    host,
@@ -94,7 +96,7 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 			HTTP3Toggleable:         !http3Matched || http3Exact,
 			ChallengeMatchedExclude: challengeValue,
 			WAFMatchedExclude:       wafValue,
-			HTTP3MatchedOptIn:       http3Value,
+			HTTP3MatchedOptIn:       http3Pattern,
 		})
 	}
 
