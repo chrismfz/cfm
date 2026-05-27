@@ -54,3 +54,12 @@ asn=as202042; ua=*; action=skip
 # apple
 asn=as714; ua=*; action=skip
 
+# 5) AhrefsBot — verified via FCrDNS (PTR ends in .ahrefs.com)
+#    Spoofed "AhrefsBot" UAs from random IPs are still challenged.
+ua=*ahrefs*; ptr=*.ahrefs.com; verify_fcrdns=1; action=skip
+
+# 6) SemrushBot — verified via FCrDNS
+#    Semrush publishes PTRs under .semrush.com / .semrushbot.com.
+ua=*semrush*; ptr=*.semrush.com;    verify_fcrdns=1; action=skip
+ua=*semrush*; ptr=*.semrushbot.com; verify_fcrdns=1; action=skip
+

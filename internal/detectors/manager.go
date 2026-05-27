@@ -286,39 +286,37 @@ func (m *manager) maybeReload(parent context.Context) {
 		}
 	}
 
-	// --- NEW: Challenge exclude rules (whitelist for verified crawlers etc.) ---
+	// --- Challenge exclude rules (whitelist for verified crawlers etc.) ---
+	// File-presence based: if CHALLENGE_EXCLUDE_FILE exists, its rules are
+	// loaded. No on/off knob — drop the file (or delete it) to toggle.
 	// [global]
-	//   CHALLENGE_EXCLUDE=1
-	//   CHALLENGE_EXCLUDE_FILE=/etc/cfm/webdetector_challenge_exclude.txt
+	//   CHALLENGE_EXCLUDE_FILE=/etc/cfm/webdetector_challenge_exclude.txt   (optional override)
 	var chalExclude *ChallengeExclude
-	if kvBool(secs.Global, "CHALLENGE_EXCLUDE", false) {
+	{
 		p := kvStrClean(secs.Global, "CHALLENGE_EXCLUDE_FILE", "/etc/cfm/webdetector_challenge_exclude.txt")
-		if ce, err := LoadChallengeExclude(p); err == nil {
+		ce, err := LoadChallengeExclude(p)
+		switch {
+		case err != nil && os.IsNotExist(err):
+			logging.Logf("[detectors] challenge exclude inactive: file not present: %q", p)
+		case err != nil:
+			logging.Logf("[detectors] challenge exclude load failed: file=%q err=%v", p, err)
+		case ce == nil:
+			logging.Logf("[detectors] challenge exclude file has no valid rules: %q", p)
+		default:
 			chalExclude = ce
-			if chalExclude != nil {
-				logging.Logf("[detectors] challenge exclude enabled: file=%q", p)
-				// Best-effort visibility: print parsed rules.
-				for i, r := range chalExclude.rules {
-					logging.Logf("[detectors] challenge exclude rule[%d]: host=%q ua=%q asn=%q ptr=%q verify_fcrdns=%t action=%q",
-						i,
-						strings.TrimSpace(r.host),
-						strings.TrimSpace(r.ua),
-						strings.TrimSpace(r.asn),
-						strings.TrimSpace(r.ptr),
-						r.verifyFcrdns,
-						strings.TrimSpace(r.action),
-					)
-				}
-				logging.Logf("[detectors] challenge exclude loaded: %d rules", len(chalExclude.rules))
-
-			} else {
-				logging.Logf("[detectors] challenge exclude enabled but no valid rules: file=%q", p)
+			for i, r := range chalExclude.rules {
+				logging.Logf("[detectors] challenge exclude rule[%d]: host=%q ua=%q asn=%q ptr=%q verify_fcrdns=%t action=%q",
+					i,
+					strings.TrimSpace(r.host),
+					strings.TrimSpace(r.ua),
+					strings.TrimSpace(r.asn),
+					strings.TrimSpace(r.ptr),
+					r.verifyFcrdns,
+					strings.TrimSpace(r.action),
+				)
 			}
-		} else {
-			logging.Logf("[detectors] challenge exclude disabled (failed to load %q): %v", p, err)
+			logging.Logf("[detectors] challenge exclude loaded: file=%q rules=%d", p, len(chalExclude.rules))
 		}
-	} else {
-		logging.Logf("[detectors] challenge exclude disabled: CHALLENGE_EXCLUDE is off")
 	}
 
 	// stop all on any change (baby steps, clean & robust)
@@ -537,23 +535,10 @@ func (m *manager) maybeReload(parent context.Context) {
 		defChalCooldown := kvDur(secs.Global, "CHALLENGE_COOLDOWN", 30*time.Minute)
 		chalCooldown := kvDur(kv, "CHALLENGE_COOLDOWN", defChalCooldown)
 
-		// Allow per-section override for challenge exclude (useful if only webdetector should apply it).
+		// Challenge-exclude rules are global (file-presence based, loaded above).
 		secExclude := m.chalExclude
-		rawEx := strings.TrimSpace(kvStrClean(kv, "CHALLENGE_EXCLUDE", ""))
-		if rawEx != "" {
-			if kvBool(kv, "CHALLENGE_EXCLUDE", false) {
-				p := kvStrClean(kv, "CHALLENGE_EXCLUDE_FILE",
-					kvStrClean(secs.Global, "CHALLENGE_EXCLUDE_FILE", "/etc/cfm/webdetector_challenge_exclude.txt"))
-				if ce, err := LoadChallengeExclude(p); err == nil {
-					secExclude = ce
-				}
-			} else {
-				secExclude = nil
-			}
-		}
 
-		// Wire challenge-exclude func using the EFFECTIVE per-section exclude config.
-		// This lets [webdetector] CHALLENGE_EXCLUDE=1 work even when [global] leaves it off.
+		// Wire challenge-exclude func when rules are present.
 		type chalExcludeSetter interface {
 			SetChalExcludeFunc(func(string, string, string, string, string, string) (string, bool))
 		}
