@@ -26,9 +26,14 @@ func runHTTP3WebTop(baseURL string, args []string) error {
 	if len(args) == 0 || args[0] == "list" {
 		return runHTTP3List(baseURL)
 	}
+	if a := args[0]; a == "help" || a == "-h" || a == "--help" {
+		printHTTP3Help()
+		return nil
+	}
 
 	if len(args) < 2 {
-		return fmt.Errorf("usage: cfm webtop http3 [list|enable <vhost>|disable <vhost>]")
+		printHTTP3Help()
+		return fmt.Errorf("missing vhost for action %q", args[0])
 	}
 
 	action := args[0]
@@ -44,7 +49,8 @@ func runHTTP3WebTop(baseURL string, args []string) error {
 	case "disable", "off", "opt-out", "remove", "rm":
 		endpoint = "disable"
 	default:
-		return fmt.Errorf("unknown http3 action %q (use list/enable/disable)", action)
+		printHTTP3Help()
+		return fmt.Errorf("unknown http3 action %q", action)
 	}
 
 	q := url.Values{}
@@ -73,6 +79,41 @@ func runHTTP3WebTop(baseURL string, args []string) error {
 	}
 	fmt.Printf("✓ HTTP/3 %s for vhost %s\n", action, host)
 	return nil
+}
+
+func printHTTP3Help() {
+	fmt.Println(`
+cfm webtop http3 — per-vhost HTTP/3 (Alt-Svc) opt-in
+
+  Default for every vhost is OFF: nginx does NOT advertise Alt-Svc and
+  browsers stay on HTTP/2 over TCP. Listed vhosts get an Alt-Svc header
+  on every response, so capable browsers will try QUIC.
+
+Usage:
+  cfm webtop http3                            list opted-in vhosts (same as 'list')
+  cfm webtop http3 list                       list opted-in vhosts
+  cfm webtop http3 enable  <vhost>            advertise Alt-Svc for vhost
+  cfm webtop http3 disable <vhost>            stop advertising Alt-Svc for vhost
+  cfm webtop http3 help                       this text
+
+Aliases:
+  enable:  on, opt-in
+  disable: off, opt-out, remove, rm
+
+Supported vhost patterns:
+  example.com                                 exact host
+  *.cdn.example.com                           wildcard one-level suffix
+
+Anything else (` + "`?`, `[abc]`, `cdn.*.example.com`" + `, multiple '*') is
+rejected — the Lua matcher cannot honor those patterns and we refuse to
+hold any pattern the Lua data path cannot match.
+
+Propagation: changes take effect within ~CFM_H3_REFRESH_SEC seconds
+(default 60s) without an nginx reload.
+
+Same scope rules as WAF/Challenge: admin tokens can manage any host,
+scoped tokens only their own. The cfm-admin web UI exposes the same
+toggles in Per-vhost controls.`)
 }
 
 func runHTTP3List(baseURL string) error {
