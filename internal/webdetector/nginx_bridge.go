@@ -114,6 +114,12 @@ type NginxBridge struct {
 	// ListWAFExcludes returns current dynamic WAF exclude entries.
 	ListWAFExcludes func() []excludeEntry
 
+	// ListHTTP3Hosts returns the per-vhost HTTP/3 opt-in list. The Lua
+	// worker polls this every ~60s to refresh its per-worker cache and
+	// decide whether to emit the Alt-Svc header on responses. See
+	// configs/lua/cfm_h3_config.lua and http3_overrides_store.go.
+	ListHTTP3Hosts func() []string
+
 	// RuleDecision evaluates dynamic traffic rules for the current request
 	// shape (host/ip/ua/path/method/country) and returns the matched action.
 	RuleDecision func(TrafficRuleEvalInput) TrafficRuleEvalResult
@@ -1372,6 +1378,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/waf/excluded", b.instrument("/nginx/waf/excluded", b.handleWAFExcluded))
 	mux.HandleFunc("/nginx/waf/excluded/meta", b.instrument("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta))
 	mux.HandleFunc("/nginx/waf/excludes", b.instrument("/nginx/waf/excludes", b.handleWAFExcludes))
+	mux.HandleFunc("/nginx/h3/config", b.instrument("/nginx/h3/config", b.handleHTTP3Config))
 	mux.HandleFunc("/nginx/waf/stats", b.instrument("/nginx/waf/stats", b.handleWAFStats))
 	mux.HandleFunc("/nginx/snapshot", b.instrument("/nginx/snapshot", b.handleSnapshot))
 	mux.HandleFunc("/nginx/status", b.instrument("/nginx/status", b.handleStatus))
@@ -2036,6 +2043,33 @@ func (b *NginxBridge) handleWAFExcludes(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"entries": items})
+}
+
+// handleHTTP3Config returns the per-vhost HTTP/3 opt-in list. Polled by
+// every nginx worker every ~60s via configs/lua/cfm_h3_config.lua. The
+// payload is intentionally minimal — just the list of hosts (exact and
+// wildcard) that should have Alt-Svc advertised. Default for every other
+// vhost is "no Alt-Svc" → browsers stay on HTTP/2.
+func (b *NginxBridge) handleHTTP3Config(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	hosts := make([]string, 0)
+	if b.ListHTTP3Hosts != nil {
+		for _, h := range b.ListHTTP3Hosts() {
+			h = strings.TrimSpace(h)
+			if h != "" {
+				hosts = append(hosts, h)
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"hosts": hosts})
 }
 
 // handleWAFStats accepts the periodic snapshot pushed by Lua's

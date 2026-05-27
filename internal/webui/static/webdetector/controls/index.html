@@ -319,6 +319,7 @@
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('host')">Vhost {{ controlsSortArrow('host') }}</button></th>
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('challenge')">Challenge {{ controlsSortArrow('challenge') }}</button></th>
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('waf')">WAF {{ controlsSortArrow('waf') }}</button></th>
+                <th><button class="btn-quiet btn-sm" @click="setControlsSort('http3')">HTTP/3 {{ controlsSortArrow('http3') }}</button></th>
               </tr>
             </thead>
             <tbody>
@@ -330,8 +331,11 @@
                 <td>
                   <button :class="vhostControlEnabled(row, 'waf') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')">{{ vhostControlButtonLabel(row, 'waf') }}</button>
                 </td>
+                <td>
+                  <button :class="vhostControlEnabled(row, 'http3') ? 'btn-quiet' : 'btn-muted'" @click="toggleVhostProtection(row, 'http3')" :disabled="loading || !vhostControlToggleable(row, 'http3')" :title="vhostControlButtonTitle(row, 'http3')">{{ vhostControlButtonLabel(row, 'http3') }}</button>
+                </td>
               </tr>
-              <tr v-if="!vhostControlsFiltered.length"><td colspan="3" class="muted">No vhosts matched current scope/filter.</td></tr>
+              <tr v-if="!vhostControlsFiltered.length"><td colspan="4" class="muted">No vhosts matched current scope/filter.</td></tr>
             </tbody>
           </table>
         </div>

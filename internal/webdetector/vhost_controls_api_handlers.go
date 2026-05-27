@@ -13,10 +13,13 @@ type webdetVhostControlRow struct {
 	Host                    string `json:"host"`
 	ChallengeEnabled        bool   `json:"challenge_enabled"`
 	WAFEnabled              bool   `json:"waf_enabled"`
+	HTTP3Enabled            bool   `json:"http3_enabled"`
 	ChallengeToggleable     bool   `json:"challenge_toggleable"`
 	WAFToggleable           bool   `json:"waf_toggleable"`
+	HTTP3Toggleable         bool   `json:"http3_toggleable"`
 	ChallengeMatchedExclude string `json:"challenge_matched_exclude,omitempty"`
 	WAFMatchedExclude       string `json:"waf_matched_exclude,omitempty"`
+	HTTP3MatchedOptIn       string `json:"http3_matched_optin,omitempty"`
 }
 
 type webdetVhostControlResponse struct {
@@ -51,6 +54,19 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// HTTP/3 opt-in list. Opposite semantics: presence = enabled. Hosts in
+	// here that we don't see elsewhere should still surface in the UI so the
+	// owner can toggle them off.
+	http3Hosts := make([]string, 0)
+	for _, h := range e.HTTP3OverrideHosts() {
+		hn := normalizeControlHost(h)
+		if hn == "" {
+			continue
+		}
+		http3Hosts = append(http3Hosts, hn)
+		hosts[hn] = struct{}{}
+	}
+
 	list := make([]string, 0, len(hosts))
 	for host := range hosts {
 		if vhostAllowed(host, filter) {
@@ -63,15 +79,22 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 	for _, host := range list {
 		challengeMatched, challengeValue, challengeExact := matchHostExclude(challengeEntries, host)
 		wafMatched, wafValue, wafExact := matchHostExclude(wafEntries, host)
+		// For HTTP/3 we reuse matchHostExclude because the matching rules
+		// (exact + wildcard + suffix) are identical; the boolean meaning is
+		// just inverted (matched == enabled instead of matched == disabled).
+		http3Matched, http3Value, http3Exact := matchHostExclude(http3Hosts, host)
 
 		rows = append(rows, webdetVhostControlRow{
 			Host:                    host,
 			ChallengeEnabled:        !challengeMatched,
 			WAFEnabled:              !wafMatched,
+			HTTP3Enabled:            http3Matched,
 			ChallengeToggleable:     !challengeMatched || challengeExact,
 			WAFToggleable:           !wafMatched || wafExact,
+			HTTP3Toggleable:         !http3Matched || http3Exact,
 			ChallengeMatchedExclude: challengeValue,
 			WAFMatchedExclude:       wafValue,
+			HTTP3MatchedOptIn:       http3Value,
 		})
 	}
 
