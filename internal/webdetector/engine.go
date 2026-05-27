@@ -394,6 +394,7 @@ type Engine struct {
 
 	challengeExcludes *excludeStore
 	wafExcludes       *excludeStore
+	http3Overrides    *http3OverrideStore
 	trafficRules      *trafficRuleStore
 	history           *HistoryStore
 
@@ -445,6 +446,7 @@ func NewEngine(cfg Config) *Engine {
 	e.chalExpiredSeen = make(map[string]time.Time)
 	e.challengeExcludes = newExcludeStore(cfg.ChallengeExcludeStorePath)
 	e.wafExcludes = newExcludeStore(cfg.WAFExcludeStorePath)
+	e.http3Overrides = newHTTP3OverrideStore(cfg.HTTP3OverridesStorePath)
 	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
 	e.uaEmergency = NewUAEmergencyStore(cfg.UAEmergencyStorePath, cfg.UAEmergencyAuditLog)
 	// manual from api webtop challenge add//
@@ -457,6 +459,7 @@ func NewEngine(cfg Config) *Engine {
 		e.nginxBridge.IsWAFExcluded = e.isWAFExcluded
 		e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
 		e.nginxBridge.ListWAFExcludes = e.WAFExcludeList
+		e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
 		e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 		e.nginxBridge.ListTrafficRules = e.TrafficRuleList
 	}
@@ -3307,6 +3310,66 @@ func (e *Engine) WAFExcludeHasAny() bool {
 		return false
 	}
 	return len(e.wafExcludes.List()) > 0
+}
+
+// ---------------------------------------------------------------------------
+// HTTP/3 per-vhost opt-in. Default for every vhost is "H3 disabled" (no
+// Alt-Svc header advertised). Entries here are the OPT-IN list — opposite
+// of WAF/Challenge "exclude" semantics. See http3_overrides_store.go.
+
+func (e *Engine) HTTP3OverrideAdd(host string, scope map[string]struct{}) bool {
+	if e == nil || e.http3Overrides == nil {
+		return false
+	}
+	return e.http3Overrides.Add(host, scope)
+}
+
+func (e *Engine) HTTP3OverrideRemove(host string, scope map[string]struct{}) bool {
+	if e == nil || e.http3Overrides == nil {
+		return false
+	}
+	return e.http3Overrides.Remove(host, scope)
+}
+
+func (e *Engine) HTTP3OverrideList() []http3OverrideEntry {
+	if e == nil || e.http3Overrides == nil {
+		return nil
+	}
+	return e.http3Overrides.List()
+}
+
+// HTTP3OverrideHosts returns just the host strings, sorted. Used by the
+// /nginx/h3/config bridge endpoint so Lua workers can refresh their cache
+// without parsing entry metadata.
+func (e *Engine) HTTP3OverrideHosts() []string {
+	if e == nil || e.http3Overrides == nil {
+		return nil
+	}
+	return e.http3Overrides.Hosts()
+}
+
+func (e *Engine) HTTP3OverrideIsEnabled(host string) bool {
+	if e == nil || e.http3Overrides == nil {
+		return false
+	}
+	return e.http3Overrides.IsEnabled(host)
+}
+
+// HTTP3OverrideMatchInfo is the variant used by the cfm-admin per-vhost
+// controls UI. It returns the matching pattern and whether the hit was
+// exact, so the UI can render "toggleable" vs "matched-by-wildcard".
+func (e *Engine) HTTP3OverrideMatchInfo(host string) (matched bool, pattern string, exact bool) {
+	if e == nil || e.http3Overrides == nil {
+		return false, "", false
+	}
+	return e.http3Overrides.MatchInfo(host)
+}
+
+func (e *Engine) HTTP3OverrideHasAny() bool {
+	if e == nil || e.http3Overrides == nil {
+		return false
+	}
+	return e.http3Overrides.HasAny()
 }
 
 func (e *Engine) TrafficRuleAdd(rule TrafficRule) (TrafficRule, error) {

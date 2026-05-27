@@ -254,6 +254,13 @@ local ua_emerg_ok, ua_emerg = pcall(require, "cfm_ua_emergency")
 -- a load failure sets waf_ok=false and disables inline WAF checks.
 local waf_ok, waf = pcall(require, "cfm_waf")
 
+-- HTTP/3 Alt-Svc emission is intentionally NOT hooked here. It lives in a
+-- server-level header_filter_by_lua_block (see angie.conf / openresty.conf)
+-- so every served response is covered regardless of which allow path fires
+-- (Step 4, clearance-cookie fast-path, panel/self-IP bypass, ...). Wiring
+-- it into the access phase would silently miss the clearance-cookie path
+-- — which is the bulk of real production traffic on logged-in vhosts.
+
 local SH = ngx.shared.cfm_decisions
 
 -- ─────────────────────────────────────────────────────────────────────────────

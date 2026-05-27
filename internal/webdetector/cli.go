@@ -101,6 +101,9 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop waf exclude list")
 	fmt.Println("  cfm webtop waf exclude add <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop waf exclude remove <host|path> [--type host|path]")
+	fmt.Println("  cfm webtop http3 list                     # vhosts opted-in to HTTP/3")
+	fmt.Println("  cfm webtop http3 enable <vhost>           # advertise Alt-Svc for vhost")
+	fmt.Println("  cfm webtop http3 disable <vhost>          # stop advertising Alt-Svc")
 	fmt.Println("  cfm webtop source               # show active log ingest source (socket/file)")
 	fmt.Println("  cfm webtop rules list")
 	fmt.Println("  cfm webtop rules get <id>")
@@ -205,6 +208,8 @@ func RunWebTop(baseURL string, args []string) error {
 			return runChallengeWebTop(baseURL, args[1:])
 		case "waf":
 			return runWafWebTop(baseURL, args[1:])
+		case "http3", "h3":
+			return runHTTP3WebTop(baseURL, args[1:])
 		case "rules":
 			return runRulesWebTop(baseURL, args[1:])
 		case "history":

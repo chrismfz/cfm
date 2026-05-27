@@ -294,6 +294,9 @@
           } else if (key === 'waf') {
             const cmp = boolOrder(Boolean(a?.waf_enabled)) - boolOrder(Boolean(b?.waf_enabled));
             if (cmp !== 0) return cmp * dir;
+          } else if (key === 'http3') {
+            const cmp = boolOrder(Boolean(a?.http3_enabled)) - boolOrder(Boolean(b?.http3_enabled));
+            if (cmp !== 0) return cmp * dir;
           } else {
             const cmpHost = String(a?.host || '').localeCompare(String(b?.host || ''), undefined, { sensitivity: 'base' });
             if (cmpHost !== 0) return cmpHost * dir;
@@ -944,28 +947,54 @@
         }
       },
       vhostControlEnabled(row, kind) {
-        const key = kind === 'challenge' ? 'challenge_enabled' : 'waf_enabled';
+        let key;
+        if (kind === 'challenge') key = 'challenge_enabled';
+        else if (kind === 'waf') key = 'waf_enabled';
+        else if (kind === 'http3') key = 'http3_enabled';
+        else return false;
         return Boolean(row?.[key]);
       },
       vhostControlToggleable(row, kind) {
-        const key = kind === 'challenge' ? 'challenge_toggleable' : 'waf_toggleable';
+        let key;
+        if (kind === 'challenge') key = 'challenge_toggleable';
+        else if (kind === 'waf') key = 'waf_toggleable';
+        else if (kind === 'http3') key = 'http3_toggleable';
+        else return false;
         return Boolean(row?.[key]);
       },
       vhostControlMatchedExclude(row, kind) {
-        const key = kind === 'challenge' ? 'challenge_matched_exclude' : 'waf_matched_exclude';
+        let key;
+        if (kind === 'challenge') key = 'challenge_matched_exclude';
+        else if (kind === 'waf') key = 'waf_matched_exclude';
+        else if (kind === 'http3') key = 'http3_matched_optin';
+        else return '';
         return String(row?.[key] || '').trim();
       },
       vhostControlButtonLabel(row, kind) {
         const enabled = this.vhostControlEnabled(row, kind);
-        if (enabled) return 'ON / ENABLED';
         const toggleable = this.vhostControlToggleable(row, kind);
+        // HTTP/3 uses opt-in semantics: default is OFF, presence = ON.
+        // The labels reflect the actual state — same wording as WAF/Challenge.
+        if (kind === 'http3') {
+          if (enabled) return 'ON / ENABLED';
+          return toggleable ? 'OFF / DEFAULT' : 'ON / MATCHED BY PATTERN';
+        }
+        if (enabled) return 'ON / ENABLED';
         return toggleable ? 'OFF / DISABLED' : 'OFF / MATCHED BY PATTERN';
       },
       vhostControlButtonTitle(row, kind) {
         const enabled = this.vhostControlEnabled(row, kind);
-        if (enabled) return '';
         const matched = this.vhostControlMatchedExclude(row, kind);
         const toggleable = this.vhostControlToggleable(row, kind);
+        if (kind === 'http3') {
+          if (!enabled) {
+            return 'HTTP/3 (Alt-Svc) is OFF by default. Click to enable for this vhost.';
+          }
+          if (!matched) return 'HTTP/3 (Alt-Svc) enabled for this vhost.';
+          if (toggleable) return `HTTP/3 enabled via host opt-in: ${matched}`;
+          return `HTTP/3 enabled via wildcard opt-in: ${matched}. Remove/edit that wildcard via CLI to change.`;
+        }
+        if (enabled) return '';
         if (!matched) return '';
         if (toggleable) return `Excluded by host rule: ${matched}`;
         return `Excluded by non-exact host rule: ${matched}. Remove/edit that rule in Dynamic excludes first.`;
@@ -999,11 +1028,21 @@
         const toggleable = this.vhostControlToggleable(row, kind);
         if (!toggleable) {
           const matched = this.vhostControlMatchedExclude(row, kind);
-          this.actionMsg = `${kind.toUpperCase()} for ${host} is disabled by non-exact exclude (${matched || 'pattern'}). Remove/edit it in Dynamic excludes first.`;
+          if (kind === 'http3') {
+            this.actionMsg = `HTTP/3 for ${host} is enabled by wildcard opt-in (${matched || 'pattern'}). Remove/edit it via CLI to change.`;
+          } else {
+            this.actionMsg = `${kind.toUpperCase()} for ${host} is disabled by non-exact exclude (${matched || 'pattern'}). Remove/edit it in Dynamic excludes first.`;
+          }
           return;
         }
         try {
-          if (currentlyEnabled) {
+          if (kind === 'http3') {
+            // HTTP/3 uses an opt-in API: enable adds the host, disable removes it.
+            // Opposite of WAF/Challenge which add to an exclude list to disable.
+            const endpoint = currentlyEnabled ? 'disable' : 'enable';
+            await this.postJSON(`v1/http3/${endpoint}?host=${encodeURIComponent(host)}`, {});
+            this.actionMsg = `HTTP/3 ${currentlyEnabled ? 'disabled' : 'enabled'} for ${host}`;
+          } else if (currentlyEnabled) {
             await this.postJSON(`v1/${kind}/exclude/add?type=host&value=${encodeURIComponent(host)}`, {});
             this.actionMsg = `${kind.toUpperCase()} disabled for ${host}`;
           } else {

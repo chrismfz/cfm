@@ -13,10 +13,13 @@ type webdetVhostControlRow struct {
 	Host                    string `json:"host"`
 	ChallengeEnabled        bool   `json:"challenge_enabled"`
 	WAFEnabled              bool   `json:"waf_enabled"`
+	HTTP3Enabled            bool   `json:"http3_enabled"`
 	ChallengeToggleable     bool   `json:"challenge_toggleable"`
 	WAFToggleable           bool   `json:"waf_toggleable"`
+	HTTP3Toggleable         bool   `json:"http3_toggleable"`
 	ChallengeMatchedExclude string `json:"challenge_matched_exclude,omitempty"`
 	WAFMatchedExclude       string `json:"waf_matched_exclude,omitempty"`
+	HTTP3MatchedOptIn       string `json:"http3_matched_optin,omitempty"`
 }
 
 type webdetVhostControlResponse struct {
@@ -51,6 +54,24 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// HTTP/3 opt-in list. Opposite semantics from WAF/Challenge:
+	// presence in the store = host is enabled. We still surface every
+	// opt-in host as a UI row so the owner can toggle it off, even if
+	// the host doesn't appear in cPanel userdata or recent traffic.
+	//
+	// NOTE: we deliberately do NOT use matchHostExclude here. That
+	// helper's suffix-expansion semantics (treat "cdn.example.com" as
+	// matching every "*.cdn.example.com") would lie about the runtime
+	// behavior — the Lua data path in cfm_h3_config.lua matches only
+	// exact hosts and explicit "*.suffix" wildcards. Use the store's
+	// MatchInfo, which mirrors the Lua matcher exactly.
+	for _, h := range e.HTTP3OverrideHosts() {
+		hn := normalizeControlHost(h)
+		if hn != "" {
+			hosts[hn] = struct{}{}
+		}
+	}
+
 	list := make([]string, 0, len(hosts))
 	for host := range hosts {
 		if vhostAllowed(host, filter) {
@@ -63,15 +84,19 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 	for _, host := range list {
 		challengeMatched, challengeValue, challengeExact := matchHostExclude(challengeEntries, host)
 		wafMatched, wafValue, wafExact := matchHostExclude(wafEntries, host)
+		http3Matched, http3Pattern, http3Exact := e.HTTP3OverrideMatchInfo(host)
 
 		rows = append(rows, webdetVhostControlRow{
 			Host:                    host,
 			ChallengeEnabled:        !challengeMatched,
 			WAFEnabled:              !wafMatched,
+			HTTP3Enabled:            http3Matched,
 			ChallengeToggleable:     !challengeMatched || challengeExact,
 			WAFToggleable:           !wafMatched || wafExact,
+			HTTP3Toggleable:         !http3Matched || http3Exact,
 			ChallengeMatchedExclude: challengeValue,
 			WAFMatchedExclude:       wafValue,
+			HTTP3MatchedOptIn:       http3Pattern,
 		})
 	}
 
