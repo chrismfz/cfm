@@ -115,6 +115,43 @@ func TestHTTP3OverrideStore_NormalizationRejectsEmpty(t *testing.T) {
 	}
 }
 
+// TestHTTP3OverrideStore_RejectsUnsupportedPatterns ensures the Go store
+// never accepts patterns the Lua data path cannot match. Without this
+// guard, the UI (which uses filepath.Match) and the Lua matcher
+// disagreed on `[abc]`, `?`, and mid-pattern `*` — operator saw "ON"
+// for hosts that got no Alt-Svc.
+func TestHTTP3OverrideStore_RejectsUnsupportedPatterns(t *testing.T) {
+	dir := t.TempDir()
+	s := newHTTP3OverrideStore(filepath.Join(dir, "http3.json"))
+
+	rejected := []string{
+		"[abc].example.com",     // bracket class
+		"api?.example.com",      // single-char wildcard
+		"cdn.*.example.com",     // mid-pattern asterisk
+		"*foo.example.com",      // bare leading asterisk (no dot)
+		"foo.*",                 // bare trailing asterisk
+		"*.*.example.com",       // multiple asterisks
+		"sub.[01].example.com",  // bracket inside otherwise plain host
+	}
+	for _, p := range rejected {
+		if s.Add(p, nil) {
+			t.Errorf("pattern %q should be rejected (unsupported by Lua matcher)", p)
+		}
+	}
+
+	accepted := []string{
+		"example.com",
+		"sub.example.com",
+		"*.example.com",
+		"*.cdn.example.com",
+	}
+	for _, p := range accepted {
+		if !s.Add(p, nil) {
+			t.Errorf("pattern %q should be accepted", p)
+		}
+	}
+}
+
 func TestHTTP3OverrideStore_MatchInfo(t *testing.T) {
 	dir := t.TempDir()
 	s := newHTTP3OverrideStore(filepath.Join(dir, "http3.json"))

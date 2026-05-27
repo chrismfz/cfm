@@ -230,24 +230,29 @@ end
 -- worker do not stack timers (the _refresh_in_progress flag dedupes).
 
 local function async_refresh_handler(premature)
-    if premature then
-        _refresh_in_progress = false
-        return
-    end
-    local body, err = bridge_fetch()
-    _last_refresh_at = ngx.now()
-    if body then
-        local decoded = cjson.decode(body)
-        if type(decoded) == "table" then
-            rebuild_cache(decoded.hosts)
+    -- The flag MUST be cleared even if anything below raises, otherwise
+    -- the worker never schedules another refresh until restart. Wrap the
+    -- body in pcall and clear the flag in a finally-style block.
+    local ok, err = pcall(function()
+        if premature then return end
+        local body, ferr = bridge_fetch()
+        _last_refresh_at = ngx.now()
+        if body then
+            local decoded = cjson.decode(body)
+            if type(decoded) == "table" then
+                rebuild_cache(decoded.hosts)
+            else
+                ngx.log(ngx.WARN, "[cfm_h3] bad bridge response (not JSON)")
+            end
         else
-            ngx.log(ngx.WARN, "[cfm_h3] bad bridge response (not JSON)")
+            ngx.log(ngx.WARN, "[cfm_h3] refresh failed: ", tostring(ferr),
+                    " (keeping last cached list)")
         end
-    else
-        ngx.log(ngx.WARN, "[cfm_h3] refresh failed: ", tostring(err),
-                " (keeping last cached list)")
-    end
+    end)
     _refresh_in_progress = false
+    if not ok then
+        ngx.log(ngx.ERR, "[cfm_h3] refresh handler raised: ", tostring(err))
+    end
 end
 
 local function schedule_refresh_if_needed()

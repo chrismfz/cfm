@@ -70,12 +70,35 @@ func newHTTP3OverrideStore(path string) *http3OverrideStore {
 	return s
 }
 
-// normalize lowercases the host, strips trailing dot, rejects empties.
+// normalize lowercases the host, strips trailing dot, rejects empties,
+// and rejects glob patterns the Lua data path cannot match.
+//
+// Supported patterns: exact hosts (e.g. `example.com`) and `*.suffix`
+// wildcards (e.g. `*.cdn.example.com`). Anything else — `?`, `[abc]`,
+// mid-pattern `*` like `cdn.*.example.com` — is rejected here so the
+// store can never hold a pattern that the Lua glob_match in
+// cfm_h3_config.lua would silently skip. This guarantees UI / API /
+// CLI / Lua all agree on which hosts get Alt-Svc.
+//
+// Keep these rules in step with is_supported_pattern() in
+// configs/lua/cfm_h3_config.lua. If you lift the restriction (e.g. by
+// adopting cfm.lua's glob_to_lua_pattern), update both ends together.
 func (s *http3OverrideStore) normalize(host string) (string, bool) {
 	h := strings.ToLower(strings.TrimSpace(host))
 	h = strings.TrimSuffix(h, ".")
 	if h == "" {
 		return "", false
+	}
+	// Reject unsupported pattern classes. Exact (no glob chars) and
+	// `*.suffix` only.
+	if strings.ContainsAny(h, "?[") {
+		return "", false
+	}
+	if strings.Contains(h, "*") {
+		// Must be exactly "*." followed by a literal suffix.
+		if !strings.HasPrefix(h, "*.") || strings.Contains(h[2:], "*") {
+			return "", false
+		}
 	}
 	return h, true
 }
