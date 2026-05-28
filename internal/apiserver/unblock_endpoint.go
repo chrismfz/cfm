@@ -148,6 +148,7 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":          true,
 			"ip":          ip.String(),
+			"hostname":    localNodeID(),
 			"was_blocked": wasBlocked,
 			"duration_ms": time.Since(start).Milliseconds(),
 			"bg_cleanup":  true,
