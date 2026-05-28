@@ -599,13 +599,13 @@ func (s *sectionSink) Publish(a core.Alert) {
 	// --- Leniency override: softer treatment for known-good origins ---
 	effectivePol := s.pol
 	sendToAPI := true
-	lenientList := "" // SEND_TO_BLOCKLIST override: "" | "lenient" | "blacklist"
+	lenientReport := false // SEND_TO_BLOCKLIST=lenient: record centrally, never propagate
 
 	if s.leniency != nil && ipStr != "" && s.enr != nil {
 		if matched, reason := s.leniency.matchesIP(ipStr, s.enr); matched {
 			effectivePol = s.leniency.Pol
 			sendToAPI = s.leniency.SendToAPI
-			lenientList = s.leniency.SendToBlocklist
+			lenientReport = s.leniency.SendToBlocklist == "lenient"
 			out.Extra["leniency"] = "yes"
 			out.Extra["leniency_reason"] = reason
 			logLeniencyMatch(s.section, ipStr, reason, s.leniency)
@@ -726,19 +726,23 @@ func (s *sectionSink) Publish(a core.Alert) {
 		// Report to API. SEND_TO_API gates whether we report at all; when we do,
 		// SEND_TO_BLOCKLIST (leniency) selects the destination list: "lenient"
 		// records centrally for visibility without propagating to the farm,
-		// anything else goes to the global blocklist.
+		// otherwise the global blocklist.
 		if !sendToAPI {
 			out.Extra["send_to_api"] = "no"
 			if logging.DebugEnabled() {
 				logging.LogfDETECTOR("[leniency] skipping ReportBlock for %s (section=%s)", ipStr, s.section)
 			}
-		} else if lenientList == "lenient" {
-			out.Extra["send_to_api"] = "lenient"
+		} else if lenientReport {
 			if lr, ok := s.fw.(lenientReporter); ok {
+				out.Extra["send_to_api"] = "lenient"
 				if err := lr.ReportLenient(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
 					logging.Logf("[detectors] ReportLenient(detector) failed for %s: %v (mode=%s ttl=%ds)",
 						ipStr, err, out.Extra["block_mode"], ttlSec)
 				}
+			} else {
+				// Backend can't record lenient blocks: don't claim it was sent.
+				out.Extra["send_to_api"] = "no"
+				logging.Logf("[detectors] lenient report unsupported by firewall backend for %s (section=%s)", ipStr, s.section)
 			}
 		} else {
 			if err := s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {

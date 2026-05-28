@@ -114,12 +114,13 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 		"LOG_IGNORED":       allowedBool,
 		"DRY_RUN":           allowedBool,
 		"MODE":              {"journal": {}, "file": {}, "docker": {}},
-		"SEND_TO_BLOCKLIST": {"lenient": {}, "blacklist": {}, "no": {}, "off": {}, "0": {}},
+		"SEND_TO_BLOCKLIST": {"lenient": {}, "blacklist": {}},
 	}
 	isDurationKey := func(key string) bool {
 		u := strings.ToUpper(strings.TrimSpace(key))
-		// SEND_TO_BLOCKLIST contains "BLOCK" but is an enum, not a duration.
-		if u == "SEND_TO_BLOCKLIST" {
+		// Enum keys are validated by value, never as durations — even when the
+		// name contains a token like BLOCK/TTL/WINDOW (e.g. SEND_TO_BLOCKLIST).
+		if _, ok := enumByKey[u]; ok {
 			return false
 		}
 		return strings.Contains(u, "TIMEOUT") || strings.Contains(u, "COOLDOWN") || strings.Contains(u, "EVERY") || strings.Contains(u, "WINDOW") || strings.Contains(u, "TTL") || strings.Contains(u, "BLOCK")
@@ -139,6 +140,11 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 	validateKnownEnum := func(path, key, raw string) {
 		normalized := strings.ToLower(strings.Trim(strings.TrimSpace(raw), `"`))
 		if normalized == "" {
+			// SEND_TO_BLOCKLIST is optional; an empty value means "unset"
+			// (destination defers to SEND_TO_API / the global blocklist).
+			if strings.EqualFold(key, "SEND_TO_BLOCKLIST") {
+				return
+			}
 			push(path, "empty value for required enum key", "required", "one of the allowed enum values")
 			return
 		}

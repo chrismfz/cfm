@@ -50,11 +50,16 @@ func (b *Backend) ReportBlock(ip, comment, source, mode string, ttlSeconds int) 
 	return b.reporter.ReportBlock(ip, comment, source, mode, ttlSeconds)
 }
 
-// ReportLenient forwards a lenient (per-server) block record. The leniency
-// policy is the explicit gate here, so the global ShouldReportBlock per-source
-// switches do not apply.
+// ReportLenient forwards a lenient (per-server) block record. It honours the
+// same global per-source report switches as ReportBlock — a server with API
+// reporting disabled stays silent on both paths; the lenient vs blacklist
+// choice only affects which list the record lands on once reporting is on.
 func (b *Backend) ReportLenient(ip, comment, source, mode string, ttlSeconds int) error {
 	if b == nil || b.reporter == nil {
+		return nil
+	}
+	cfg := b.loadConfig()
+	if !firewall.ShouldReportBlock(cfg, source) {
 		return nil
 	}
 	return b.reporter.ReportLenient(ip, comment, source, mode, ttlSeconds)
