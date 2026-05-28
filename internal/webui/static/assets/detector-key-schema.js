@@ -57,9 +57,9 @@ export const detectorKeySchema = {
   },
   SEND_TO_BLOCKLIST: {
     type: 'enum',
-    allowed: ['lenient', 'blacklist', 'no'],
+    allowed: ['lenient', 'blacklist'],
     examples: ['lenient'],
-    help: 'Leniency only: destination list when SEND_TO_API=yes. "lenient" records matched blocks centrally for visibility (never propagated to the farm); blacklist/no use the global blocklist. No effect when SEND_TO_API=no.',
+    help: 'Leniency only: destination list when SEND_TO_API=yes. "lenient" records matched blocks centrally for visibility (never propagated to the farm); "blacklist" (the default when unset) uses the global blocklist. Use SEND_TO_API=no to not report at all.',
   },
   MODE: {
     type: 'enum',
