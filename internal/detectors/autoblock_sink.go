@@ -723,11 +723,16 @@ func (s *sectionSink) Publish(a core.Alert) {
 
 		notify.Enqueue(ev)
 
-		// Report to API. SEND_TO_BLOCKLIST (leniency) can redirect a lenient
-		// match to the central "lenient" list (visible, never propagated) or
-		// force the blacklist; otherwise honour SEND_TO_API.
-		switch lenientList {
-		case "lenient":
+		// Report to API. SEND_TO_API gates whether we report at all; when we do,
+		// SEND_TO_BLOCKLIST (leniency) selects the destination list: "lenient"
+		// records centrally for visibility without propagating to the farm,
+		// anything else goes to the global blocklist.
+		if !sendToAPI {
+			out.Extra["send_to_api"] = "no"
+			if logging.DebugEnabled() {
+				logging.LogfDETECTOR("[leniency] skipping ReportBlock for %s (section=%s)", ipStr, s.section)
+			}
+		} else if lenientList == "lenient" {
 			out.Extra["send_to_api"] = "lenient"
 			if lr, ok := s.fw.(lenientReporter); ok {
 				if err := lr.ReportLenient(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
@@ -735,22 +740,10 @@ func (s *sectionSink) Publish(a core.Alert) {
 						ipStr, err, out.Extra["block_mode"], ttlSec)
 				}
 			}
-		case "blacklist":
+		} else {
 			if err := s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
 				logging.Logf("[detectors] ReportBlock(detector) failed for %s: %v (mode=%s ttl=%ds)",
 					ipStr, err, out.Extra["block_mode"], ttlSec)
-			}
-		default:
-			if sendToAPI {
-				if err := s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
-					logging.Logf("[detectors] ReportBlock(detector) failed for %s: %v (mode=%s ttl=%ds)",
-						ipStr, err, out.Extra["block_mode"], ttlSec)
-				}
-			} else {
-				out.Extra["send_to_api"] = "no"
-				if logging.DebugEnabled() {
-					logging.LogfDETECTOR("[leniency] skipping ReportBlock for %s (section=%s)", ipStr, s.section)
-				}
 			}
 		}
 

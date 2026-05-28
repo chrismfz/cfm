@@ -13,9 +13,9 @@
 //   ; MATCH_ASN   = "AS6799,AS6866"
 //   BLOCK          = "1h"
 //   BLOCK_COOLDOWN = "30m"
-//   SEND_TO_API    = NO
-//   ; SEND_TO_BLOCKLIST = lenient   ; record centrally for visibility,
-//   ;                               ; but never propagate to the farm
+//   SEND_TO_API       = YES        ; report the block...
+//   SEND_TO_BLOCKLIST = lenient    ; ...but only to the "lenient" list:
+//                                  ; visible centrally, never propagated
 
 package detectors
 
@@ -39,12 +39,12 @@ type leniencyPolicy struct {
 	// Whether to report the block to the central API / global blocklist.
 	SendToAPI bool
 
-	// SendToBlocklist optionally redirects where a lenient-matched block is
-	// reported, overriding SendToAPI for recording purposes:
-	//   "lenient"   → record centrally for visibility only; NOT served to the
-	//                 farm (so a known-good origin is not propagated).
-	//   "blacklist" → report to the global blocklist (same as SEND_TO_API=YES).
-	//   ""          → defer to SendToAPI (legacy behaviour).
+	// SendToBlocklist selects the destination list when SendToAPI is true
+	// (it has no effect when SendToAPI is false — nothing is reported then):
+	//   "lenient"            → record centrally for visibility only; NOT served
+	//                          to the farm (so a known-good origin is not
+	//                          propagated).
+	//   "blacklist"/"no"/""  → report to the global blocklist (default).
 	SendToBlocklist string
 }
 
