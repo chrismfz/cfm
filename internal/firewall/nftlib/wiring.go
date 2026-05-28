@@ -50,6 +50,16 @@ func (b *Backend) ReportBlock(ip, comment, source, mode string, ttlSeconds int) 
 	return b.reporter.ReportBlock(ip, comment, source, mode, ttlSeconds)
 }
 
+// ReportLenient forwards a lenient (per-server) block record. The leniency
+// policy is the explicit gate here, so the global ShouldReportBlock per-source
+// switches do not apply.
+func (b *Backend) ReportLenient(ip, comment, source, mode string, ttlSeconds int) error {
+	if b == nil || b.reporter == nil {
+		return nil
+	}
+	return b.reporter.ReportLenient(ip, comment, source, mode, ttlSeconds)
+}
+
 func (b *Backend) loadConfig() *cfgpkg.Config {
 	dir := strings.TrimSpace(b.cfgDir)
 	if dir == "" {

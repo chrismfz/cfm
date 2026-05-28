@@ -18,6 +18,13 @@ import (
 	"strings"
 )
 
+// lenientReporter is the optional capability used for SEND_TO_BLOCKLIST=lenient.
+// Real firewall backends implement it; it is kept off the firewall.Backend
+// interface so test stubs and other implementers need not change.
+type lenientReporter interface {
+	ReportLenient(ip, comment, source, mode string, ttlSeconds int) error
+}
+
 type sectionSink struct {
 	section string
 	pol     blockPolicy
@@ -592,11 +599,13 @@ func (s *sectionSink) Publish(a core.Alert) {
 	// --- Leniency override: softer treatment for known-good origins ---
 	effectivePol := s.pol
 	sendToAPI := true
+	lenientList := "" // SEND_TO_BLOCKLIST override: "" | "lenient" | "blacklist"
 
 	if s.leniency != nil && ipStr != "" && s.enr != nil {
 		if matched, reason := s.leniency.matchesIP(ipStr, s.enr); matched {
 			effectivePol = s.leniency.Pol
 			sendToAPI = s.leniency.SendToAPI
+			lenientList = s.leniency.SendToBlocklist
 			out.Extra["leniency"] = "yes"
 			out.Extra["leniency_reason"] = reason
 			logLeniencyMatch(s.section, ipStr, reason, s.leniency)
@@ -714,16 +723,34 @@ func (s *sectionSink) Publish(a core.Alert) {
 
 		notify.Enqueue(ev)
 
-		// Report to API (unless leniency says no)
-		if sendToAPI {
+		// Report to API. SEND_TO_BLOCKLIST (leniency) can redirect a lenient
+		// match to the central "lenient" list (visible, never propagated) or
+		// force the blacklist; otherwise honour SEND_TO_API.
+		switch lenientList {
+		case "lenient":
+			out.Extra["send_to_api"] = "lenient"
+			if lr, ok := s.fw.(lenientReporter); ok {
+				if err := lr.ReportLenient(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
+					logging.Logf("[detectors] ReportLenient(detector) failed for %s: %v (mode=%s ttl=%ds)",
+						ipStr, err, out.Extra["block_mode"], ttlSec)
+				}
+			}
+		case "blacklist":
 			if err := s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
 				logging.Logf("[detectors] ReportBlock(detector) failed for %s: %v (mode=%s ttl=%ds)",
 					ipStr, err, out.Extra["block_mode"], ttlSec)
 			}
-		} else {
-			out.Extra["send_to_api"] = "no"
-			if logging.DebugEnabled() {
-				logging.LogfDETECTOR("[leniency] skipping ReportBlock for %s (section=%s)", ipStr, s.section)
+		default:
+			if sendToAPI {
+				if err := s.fw.ReportBlock(ipStr, comment, "detector", out.Extra["block_mode"], ttlSec); err != nil {
+					logging.Logf("[detectors] ReportBlock(detector) failed for %s: %v (mode=%s ttl=%ds)",
+						ipStr, err, out.Extra["block_mode"], ttlSec)
+				}
+			} else {
+				out.Extra["send_to_api"] = "no"
+				if logging.DebugEnabled() {
+					logging.LogfDETECTOR("[leniency] skipping ReportBlock for %s (section=%s)", ipStr, s.section)
+				}
 			}
 		}
 

@@ -111,12 +111,17 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 		"SEND_TO_API": allowedBool,
 		"ENRICH":      allowedBool,
 		"PTR":         allowedBool,
-		"LOG_IGNORED": allowedBool,
-		"DRY_RUN":     allowedBool,
-		"MODE":        {"journal": {}, "file": {}, "docker": {}},
+		"LOG_IGNORED":       allowedBool,
+		"DRY_RUN":           allowedBool,
+		"MODE":              {"journal": {}, "file": {}, "docker": {}},
+		"SEND_TO_BLOCKLIST": {"lenient": {}, "blacklist": {}, "no": {}, "off": {}, "0": {}},
 	}
 	isDurationKey := func(key string) bool {
 		u := strings.ToUpper(strings.TrimSpace(key))
+		// SEND_TO_BLOCKLIST contains "BLOCK" but is an enum, not a duration.
+		if u == "SEND_TO_BLOCKLIST" {
+			return false
+		}
 		return strings.Contains(u, "TIMEOUT") || strings.Contains(u, "COOLDOWN") || strings.Contains(u, "EVERY") || strings.Contains(u, "WINDOW") || strings.Contains(u, "TTL") || strings.Contains(u, "BLOCK")
 	}
 	isIntegerKey := func(key string) bool {

@@ -55,6 +55,12 @@ export const detectorKeySchema = {
     examples: ['0', '1', 'no'],
     help: 'Whether this detector should send events to the API.',
   },
+  SEND_TO_BLOCKLIST: {
+    type: 'enum',
+    allowed: ['lenient', 'blacklist', 'no'],
+    examples: ['lenient'],
+    help: 'Leniency only: record matched blocks centrally as "lenient" (visible, never propagated to the farm) or force "blacklist". Empty/no defers to SEND_TO_API.',
+  },
   MODE: {
     type: 'enum',
     allowed: ['journal', 'file', 'docker'],
