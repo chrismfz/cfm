@@ -13,7 +13,9 @@
 //   ; MATCH_ASN   = "AS6799,AS6866"
 //   BLOCK          = "1h"
 //   BLOCK_COOLDOWN = "30m"
-//   SEND_TO_API    = NO
+//   SEND_TO_API       = YES        ; report the block...
+//   SEND_TO_BLOCKLIST = lenient    ; ...but only to the "lenient" list:
+//                                  ; visible centrally, never propagated
 
 package detectors
 
@@ -36,6 +38,14 @@ type leniencyPolicy struct {
 
 	// Whether to report the block to the central API / global blocklist.
 	SendToAPI bool
+
+	// SendToBlocklist selects the destination list when SendToAPI is true
+	// (it has no effect when SendToAPI is false — nothing is reported then):
+	//   "lenient"            → record centrally for visibility only; NOT served
+	//                          to the farm (so a known-good origin is not
+	//                          propagated).
+	//   "blacklist"/"no"/""  → report to the global blocklist (default).
+	SendToBlocklist string
 }
 
 // parseLeniencyPolicy reads the KV map from a [section.leniency] block.
@@ -81,6 +91,16 @@ func parseLeniencyPolicy(kv KV) *leniencyPolicy {
 
 	// --- SEND_TO_API (default: YES) ---
 	lp.SendToAPI = kvBool(kv, "SEND_TO_API", true)
+
+	// --- SEND_TO_BLOCKLIST (optional list-type override) ---
+	switch strings.ToLower(kvStrClean(kv, "SEND_TO_BLOCKLIST", "")) {
+	case "lenient":
+		lp.SendToBlocklist = "lenient"
+	case "blacklist":
+		lp.SendToBlocklist = "blacklist"
+	default:
+		lp.SendToBlocklist = "" // defer to SEND_TO_API
+	}
 
 	return lp
 }
@@ -192,6 +212,10 @@ func logLeniencyMatch(section, ipStr, reason string, lp *leniencyPolicy) {
 	if mode == "ttl" {
 		mode = lp.Pol.TTL.String()
 	}
-	logging.Logf("[leniency][%s] ip=%s matched (%s) → block=%s cooldown=%s send_to_api=%t",
-		section, ipStr, reason, mode, lp.Pol.Cooldown, lp.SendToAPI)
+	dest := lp.SendToBlocklist
+	if dest == "" {
+		dest = "default"
+	}
+	logging.Logf("[leniency][%s] ip=%s matched (%s) → block=%s cooldown=%s send_to_api=%t send_to_blocklist=%s",
+		section, ipStr, reason, mode, lp.Pol.Cooldown, lp.SendToAPI, dest)
 }

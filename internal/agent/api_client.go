@@ -76,6 +76,26 @@ func (c *APIClient) ReportBlock(ip, reason, source, mode string, ttlSec int) err
 	return nil
 }
 
+func (c *APIClient) ReportLenient(ip, reason, source, mode string, ttlSec int) error {
+	p := url.Values{
+		"ip":          {ip},
+		"comment":     {reason},
+		"description": {reason},
+		"timestamp":   {time.Now().Format(time.RFC3339)},
+	}
+	if ttlSec > 0 {
+		p.Set("ttl", strconv.Itoa(ttlSec))
+	}
+	logging.LogfAPI("[api] → /api/blocklist/report-lenient ip=%s ttl=%d", ip, ttlSec)
+	_, err := c.doPOST("/api/blocklist/report-lenient", p)
+	if err != nil {
+		logging.LogfAPI("[api] report lenient FAILED ip=%s err=%v", ip, err)
+		return err
+	}
+	logging.LogfAPI("[api] ← report lenient OK ip=%s ttl=%d", ip, ttlSec)
+	return nil
+}
+
 func (c *APIClient) ReportUnblock(ip, source, why string) error {
 	p := url.Values{
 		"ip":     {ip},

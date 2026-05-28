@@ -42,7 +42,12 @@ MATCH_COUNTRY  = "GR,CY"           ; ISO or full name, OR logic
 ; MATCH_ASN   = "AS6799,AS6866"    ; optional, OR with country
 BLOCK          = "1h"              ; no | dryrun | permanent | <duration>
 BLOCK_COOLDOWN = "30m"
-SEND_TO_API    = NO                ; YES (default) | NO
+SEND_TO_API       = YES            ; YES (default) | NO — report the block at all
+SEND_TO_BLOCKLIST = lenient        ; lenient | blacklist (default) — destination
+                                   ; list when SEND_TO_API=YES. "lenient" records
+                                   ; the block centrally for visibility (support /
+                                   ; unblock lookups) but is NEVER served to the
+                                   ; farm, so a known-good origin is not propagated.
 ```
 
 ## Log Output
