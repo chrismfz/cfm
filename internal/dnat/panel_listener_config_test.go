@@ -187,12 +187,13 @@ func TestPanelListenerConfig_DirectAdminListenerUsesTLSOriginAndHeaders(t *testi
 }
 
 // TestPanelListenerConfig_TunnelEndpointPrecedesStreamingLocation verifies
-// that the /acctxferrsync bidirectional-tunnel location is wired into every
-// cPanel-facing server block AND placed before the broader /acctxfer
+// that the /acctxfer(rsync|dsync) bidirectional-tunnel location is wired into
+// every cPanel-facing server block AND placed before the broader /acctxfer
 // streaming-location regex, so nginx's first-match-wins regex semantics
-// route /acctxferrsync to the Lua tunnel (cfm_panel_tunnel.lua) instead of
-// the HTTP proxy fallback. The DirectAdmin listener (12222) intentionally
-// does not get the tunnel because DA does not expose /acctxferrsync.
+// route /acctxferrsync and /acctxferdsync to the Lua tunnel
+// (cfm_panel_tunnel.lua) instead of the HTTP proxy fallback. The DirectAdmin
+// listener (12222) intentionally does not get the tunnel because DA does not
+// expose these endpoints.
 func TestPanelListenerConfig_TunnelEndpointPrecedesStreamingLocation(t *testing.T) {
 	b, err := os.ReadFile("../../configs/cfm-panel-listeners.conf.in")
 	if err != nil {
@@ -200,7 +201,7 @@ func TestPanelListenerConfig_TunnelEndpointPrecedesStreamingLocation(t *testing.
 	}
 	s := string(b)
 
-	tunnel := "location ~ ^/acctxferrsync(/|$) { access_by_lua_block { return; } lingering_close off; content_by_lua_file /var/lib/cfm/lua/cfm_panel_tunnel.lua; }"
+	tunnel := "location ~ ^/acctxfer(rsync|dsync)(/|$) { access_by_lua_block { return; } lingering_close off; content_by_lua_file /var/lib/cfm/lua/cfm_panel_tunnel.lua; }"
 	streaming := "location ~ ^/(acctxfer|cgi/live_tail_log|cgi/transfer) {"
 
 	const expectedCPanelListenerCount = 6

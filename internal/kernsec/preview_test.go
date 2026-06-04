@@ -70,14 +70,23 @@ func TestRunPreview_DryRunPlanDoesNotWriteAndShowsExactMutations(t *testing.T) {
 	origDefaultGrub := PathDefaultGrub
 	origPreviewFS := previewFSFactory
 	origGrubSnap, origPVESnap := GRUBManagedBackupPath, ProxmoxManagedBackupPath
+	// Pin the host-profile probe to an empty root so host-specific boot args
+	// don't perturb the exact desired-cmdline assertion. In particular
+	// efi=disable_early_pci_dma (KSEC-BOOT-dma-001) is emitted only when
+	// /sys/firmware/efi exists, so on an EFI-booted CI runner it lands
+	// between kfence.sample_interval=100 and tsx=off and breaks the
+	// substring match. An empty probe root => IsEFIBoot=false everywhere.
+	origProbeRoot := hostProfileProbeRoot
 	PathDefaultGrub = grubFile
 	GRUBManagedBackupPath = t.TempDir() + "/grub-managed.json"
 	ProxmoxManagedBackupPath = t.TempDir() + "/pve-managed.json"
+	hostProfileProbeRoot = t.TempDir()
 	defer func() {
 		PathDefaultGrub = origDefaultGrub
 		previewFSFactory = origPreviewFS
 		GRUBManagedBackupPath = origGrubSnap
 		ProxmoxManagedBackupPath = origPVESnap
+		hostProfileProbeRoot = origProbeRoot
 	}()
 
 	conf := &Conf{Tier: Tier1, Overrides: map[string]RuleOverride{}}
