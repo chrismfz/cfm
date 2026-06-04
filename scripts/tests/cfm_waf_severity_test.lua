@@ -571,6 +571,35 @@ do
   check(rule_id == 326,                                             "34: java_deserialize — rule id 326")
 end
 
+-- ── Test 34b: java_deserialize — fbclid mid-token "rO0AB" must NOT fire ─────
+-- The base64 magic "rO0AB" (base64 of AC ED 00 05) is only meaningful at a
+-- value boundary. A Facebook click id is a long base64url token that can
+-- carry the five chars in its middle by chance, e.g.
+--   fbclid=...VrO0ABr5eDDx...   (captured 2026-05-31, axidwear.com, a real
+-- shopper arriving from m.facebook.com). It was challenged before the
+-- boundary+case-sensitive fix. It must NOT match now.
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "challenge")
+
+  local hit, reason = waf.check(fresh_ctx({
+    args = "attribute_pa_size=9-12m&utm_source=fb&fbclid=IwZXh0bgNhZW0BMABhZGlkAasx5Aqevu5zcnRjVrO0ABr5eDDx-RiNJOZm96EjXRsCv8205Etw&koino=new_aud",
+  }))
+  check(hit == false, "34b: java_deserialize — fbclid mid-token rO0AB must NOT fire (got " .. tostring(reason) .. ")")
+end
+
+-- ── Test 34c: java_deserialize — lowercased "ro0ab" must NOT fire ──────────
+-- Real Java base64 is always exactly "rO0AB"; a lowercased form never
+-- decodes to the stream magic, so case-insensitive matching only added FP
+-- surface. Verify the case-sensitive guard.
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "challenge")
+
+  local hit = waf.check(fresh_ctx({ args = "token=xyzro0abxnyab" }))
+  check(hit == false, "34c: java_deserialize — lowercased ro0ab must NOT fire")
+end
+
 -- ── Test 35: C2 java_deserialize — raw magic bytes in body ──────────────────
 do
   disable_all_rules()
@@ -1527,22 +1556,28 @@ do
 end
 
 -- ── Test 77b: rule_bad_utf8 — multipart binary body must NOT fire ----------
--- WP media library uploads, plugin/theme installer zips, CF7 attachments
--- all carry raw binary bytes inside multipart/form-data. Those bytes are
--- never UTF-8. Production data: 377 FPs on /wp-admin/async-upload.php
--- alone in a 4-day window. Body-pass relaxed mode silences these.
+-- WP media library uploads, plugin/theme installer zips, CF7 attachments,
+-- e-shop product photos (WebP/JPEG) all carry raw binary bytes inside
+-- multipart/form-data. Those bytes are never UTF-8 and routinely contain
+-- 0xC0/0xC1+continuation pairs and E0/F0 leads decoding to overlong /
+-- surrogate codepoints. Production data: 377 FPs on /wp-admin/async-upload.php
+-- in a 4-day window, plus every Greek-admin product-image save on
+-- e-vafeiadis.gr (2026-06-04). detect_bad_utf8 skips the body walk entirely
+-- for multipart/form-data — the args walk still covers URL traversal.
 do
   disable_all_rules()
   waf.set_rule("rule_bad_utf8", "logonly")
 
-  -- A few raw bytes from a JPEG header (0xFF 0xD8 0xFF 0xE0 …).
-  local jpeg = "------boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xFF\xDB\x00\x43\x00\xFF\xFF\xFF\r\n------boundary--\r\n"
+  -- Real JPEG bytes including an SOF0 marker (0xFF 0xC0) and a 0xC0 lead
+  -- immediately followed by a 0x80-0xBF continuation — i.e. an *explicit*
+  -- 2-byte overlong signature that WOULD fire if the body were walked.
+  local jpeg = "------boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xFF\xC0\x00\x11\x08\xC0\xAF\x02\x00\xFF\xDB\x00\x43\x00\r\n------boundary--\r\n"
   local hit, reason = waf.check(fresh_ctx({
     body   = jpeg,
     method = "POST",
     headers = { ["content-type"] = 'multipart/form-data; boundary="----boundary"' },
   }))
-  check(hit == false, "77b: bad_utf8 — multipart JPEG body must NOT fire (got reason=" .. tostring(reason) .. ")")
+  check(hit == false, "77b: bad_utf8 — multipart JPEG body (with 0xC0 overlong bytes) must NOT fire (got reason=" .. tostring(reason) .. ")")
 end
 
 -- ── Test 77c: rule_bad_utf8 — OVERLONG in BODY still fires (attack) --------

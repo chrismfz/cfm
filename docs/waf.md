@@ -333,6 +333,19 @@ produce overlong encodings of ASCII. Shipped in **PR #969**. Effect:
 test cases for `%C0%AF` overlong-`/`, surrogate codepoints in UTF-8,
 and out-of-range codepoints all still fire).
 
+**Follow-up (2026-06-04):** PR #969 suppressed BAD_LEAD/BAD_CONT/TRUNC but
+the three *attack* tags still fired on multipart uploads — a binary file
+part is exactly the place where `0xC0`/`0xC1` + continuation pairs (JPEG
+SOF markers `0xFFC0`/`0xFFC1`) and `E0`/`F0` leads decoding to overlong /
+surrogate codepoints occur by chance. e-vafeiadis.gr logged
+`UTF8_OVERLONG` on **every** Greek-admin product-photo save. `detect_bad_utf8`
+now **skips the body walk entirely when Content-Type is
+`multipart/form-data`** — the encoding-bypass primitive (`%C0%AF` for `/`)
+lives in the URL/args, which are still walked, and non-multipart text bodies
+(urlencoded / JSON / XML) are still walked so the overlong-slash body bypass
+(test 77c) keeps firing. Test 77b now carries real `0xC0`-overlong bytes so
+it actually guards the skip.
+
 **Lesson for new encoding-validity rules:** "not UTF-8" is not the
 same as "attack". A web property that has been running long enough to
 accumulate legacy WP plugins, pre-charset forms, or file-upload
@@ -612,7 +625,7 @@ $IDC3B = $t_Ohw[61].$t_Ohw[7].$t_Ohw[34]…;  // builds "gzinflate"
 
 **Tags:** `POLYGLOT_DEEP_PDF`, `POLYGLOT_DEEP_JPEG`, `POLYGLOT_DEEP_PNG`, `POLYGLOT_DEEP_GIF`, `POLYGLOT_DEEP_ZIP`, `POLYGLOT_DEEP_BMP`, `POLYGLOT_DEEP_RIFF`.
 
-**FP notes:** image / PDF / ZIP files do not legitimately contain `<?php` tokens — the magic-byte gate plus the PHP-opener gate together are malware-only.
+**FP notes:** image / PDF / ZIP files do not legitimately contain `<?php` tokens — the magic-byte gate plus the PHP-opener gate together are malware-only. **Caveat (fixed 2026-06-04):** the 5-byte `<?php` opener is binary-safe, but the 3-byte `<?=` short-echo opener (`3C 3F 3D`) collides with high-entropy binary roughly once per ~16 MB of image data — it fired `POLYGLOT_DEEP_*` (and rule 402 `UPLOAD_PHP_TAG`) on innocent WebP/JPEG product-photo uploads (e-vafeiadis.gr: the same product save alternated 200/403 across retries, proving a content-dependent collision). `<?=` is now matched only when followed by an actual PHP expression — an optional `@`, then a variable/superglobal (`$`), backtick exec, quoted string, `(`, or a function call `name(` whose name may contain digits (`base64_decode(`, `md5(`, `str_rot13(`) — via `has_php_short_echo`. This keeps the input-driven short-tag webshell shapes (including superglobal-free ones like `<?=base64_decode(file_get_contents('php://input'))`) while removing the binary-collision FP. The remaining unmatched forms (e.g. a numeric echo `<?=1`) are not exploitable webshell openers.
 
 ### Rule 433 — `rule_php_eval_loader_b64`
 
@@ -708,11 +721,11 @@ Collect their positions in the body. Fire if **any three** occurrences fall with
 
 **Why it matters:** legit data flows never carry an encoded PHP opener — neither prose, nor JSON, nor form data, nor uploaded media. Seeing one is high-confidence evidence of payload-smuggling-through-filter, and the detection cost is essentially zero (8 substring checks).
 
-**How:** lowercased body substring scan for each of the encoded forms.
+**How:** the URL / HTML-entity / JS-escape forms are matched as substrings on the lowercased body (those encodings are legitimately case-insensitive and structured, so collision-free). The **base64** forms (`PD9waHA`, `PD89`) are matched **case-sensitively** (base64 is a case-sensitive alphabet) and **only at a base64 value boundary** — string start or right after a non-base64 separator.
 
 **Tags:** `B64_PHP_OPENER`, `B64_SHORT_OPENER`, `URL_PHP_OPENER`, `URL_SHORT_OPENER`, `HTML_ENTITY_OPENER`, `JS_UNICODE_OPENER`, `JS_HEX_OPENER`.
 
-**FP notes:** narrow detector — the encoded openers literally do not appear in normal traffic. The only real-world FP risk is documentation / security-research traffic where someone POSTs an encoded `<?php` as research data; per-vhost exclusion handles cleanly.
+**FP notes:** **Fixed 2026-06-04.** The base64 checks were originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive this rule caught) — while dropping the mid-blob / case-variant collisions. With those resolved the rule is safe to promote past logonly. The remaining FP risk is documentation / security-research traffic POSTing an encoded `<?php`; per-vhost exclusion handles that cleanly.
 
 ### How they compose
 
@@ -1190,7 +1203,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 26 | CRLF | Raw and URL-encoded CRLF + header-keyword | `cfm_waf_detectors.lua:1567` |
 | 27 | HTTP smuggling (body) | VERB SP PATH SP HTTP/N | `cfm_waf_detectors.lua:1598` |
 | 28 | Upload filename | Quoted/single/unquoted multipart `filename=` + ext patterns + special names | `cfm_waf_detectors.lua:1632` |
-| 29 | Upload content | Body substring `<?php`, `<?=`, `<jsp:`, `$_*` superglobals, ImageMagick MVG | `cfm_waf_detectors.lua:1700` |
+| 29 | Upload content | Body substring `<?php`, `<?=` (PHP-context-gated, see `has_php_short_echo`), `<jsp:`, `$_*` superglobals, ImageMagick MVG | `cfm_waf_detectors.lua:1700` |
 | 30 | Script obfuscation | Shared scorer (long-b64 / decode-helpers / eval / atob / XOR / chr-storm) | `cfm_waf_detectors.lua:1730` + `cfm_waf_util.lua:115` |
 | 31 | Upload obfuscation | Same scorer on multipart | `cfm_waf_detectors.lua:1753` |
 | 32 | Webshell path | URI basename ∈ 28-name set | `cfm_waf_detectors.lua:1817` |

@@ -271,6 +271,103 @@ do
   check(hit ~= true, "432 negative — clean JPEG does not fire")
 end
 
+-- FP regression: a bare 3-byte `<?=` collision inside legit binary must NOT
+-- fire. WebP/JPEG product photos statistically contain the sequence
+-- 3C 3F 3D; before the has_php_short_echo guard this tripped POLYGLOT_DEEP_*
+-- (and rule 402 UPLOAD_PHP_TAG — the 2026-06-04 e-vafeiadis.gr report).
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_polyglot_full_body", "block")
+
+  -- RIFF/WebP magic + binary with a bare `<?=` followed by non-PHP bytes
+  local body = "RIFF" .. string.rep("\x9c", 60) .. "<?=" .. "\xff\x00\x9a\xe1"
+  local hit = waf.check(ctx(body, "image/webp"))
+  check(hit ~= true, "432 FP — bare <?= in WebP binary (no PHP context) does not fire")
+
+  -- JPEG variant: `<?=` followed by high bytes (not an expression start)
+  local body2 = "\xff\xd8\xff\xe0" .. string.rep("\x00", 80) .. "<?=\x80\x81"
+  local hit2 = waf.check(ctx(body2, "image/jpeg"))
+  check(hit2 ~= true, "432 FP — <?= + high-byte in JPEG does not fire")
+end
+
+-- Positive: a real short-echo webshell appended after image magic still fires
+-- (the `<?=` short tag must survive the guard when followed by a superglobal).
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_polyglot_full_body", "challenge")
+
+  local body = "\xff\xd8\xff\xe0" .. string.rep("A", 100) .. "<?=$_GET['c'];?>"
+  local hit, reason = waf.check(ctx(body, "image/jpeg"))
+  check(hit == true,                               "432 short-echo superglobal — hit=true")
+  check(reason == "WAF_BACKDOOR:POLYGLOT_DEEP_JPEG", "432 short-echo superglobal — reason")
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 402 — upload content scan: `<?=` short-echo must require PHP context
+-- (regression for the 2026-06-04 e-vafeiadis.gr image-upload false positive,
+-- where an admin saving WebP product photos got intermittent 403s)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local MP = "multipart/form-data; boundary=----x"
+
+-- FP: a WebP product photo whose binary contains a stray `<?=` followed by
+-- non-PHP bytes must NOT be flagged UPLOAD_PHP_TAG.
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+
+  local part = "RIFF" .. string.rep("\x9c", 64) .. "<?=" .. "\xff\x12\x9a"
+  local body = "------x\r\nContent-Disposition: form-data; name=\"products_image\"; "
+            .. "filename=\"photo.webp\"\r\nContent-Type: image/webp\r\n\r\n"
+            .. part .. "\r\n------x--\r\n"
+  local hit = waf.check(ctx(body, MP))
+  check(hit ~= true, "402 FP — bare <?= in WebP upload does not fire")
+end
+
+-- Positive: a real short-tag webshell uploaded as a fake image still fires.
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+
+  local part = "GIF89a" .. "<?=$_GET[0]($_GET[1]);"
+  local body = "------x\r\nContent-Disposition: form-data; name=\"f\"; "
+            .. "filename=\"a.gif\"\r\nContent-Type: image/gif\r\n\r\n"
+            .. part .. "\r\n------x--\r\n"
+  local hit, reason, _ttl, action = waf.check(ctx(body, MP))
+  check(hit == true,                                  "402 short-tag shell — hit=true")
+  check(reason == "WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG", "402 short-tag shell — reason")
+  check(action == "block",                            "402 short-tag shell — action=block")
+end
+
+-- Positive: classic `<?php` opener still matched bare (binary-safe).
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+
+  local body = "------x\r\nContent-Disposition: form-data; name=\"f\"; "
+            .. "filename=\"a.php\"\r\n\r\n<?php system($_GET['c']); ?>\r\n------x--\r\n"
+  local hit, reason = waf.check(ctx(body, MP))
+  check(hit == true,                                  "402 <?php opener — hit=true")
+  check(reason == "WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG", "402 <?php opener — reason")
+end
+
+-- Positive: short-echo with a DIGIT-containing function name and NO
+-- superglobal must still fire. `<?=base64_decode(file_get_contents('php://input'))`
+-- is a complete input-driven webshell; the function-name class must be
+-- [%w_] (not [%a_]) or this slips the short-echo guard entirely.
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+
+  local part = "GIF89a<?=base64_decode(file_get_contents('php://input'))"
+  local body = "------x\r\nContent-Disposition: form-data; name=\"f\"; "
+            .. "filename=\"a.gif\"\r\nContent-Type: image/gif\r\n\r\n"
+            .. part .. "\r\n------x--\r\n"
+  local hit, reason = waf.check(ctx(body, MP))
+  check(hit == true,                                  "402 short-echo digit-name shell — hit=true")
+  check(reason == "WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG", "402 short-echo digit-name shell — reason")
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 433 — variable-fed eval-loader with >=200-char base64 literal
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -591,6 +688,41 @@ do
 
   local hit = waf.check(ctx([[message=I love PHP programming language]]))
   check(hit ~= true, "437 negative — prose mention of PHP does not fire")
+end
+
+-- FP regression: base64 of "<?php" (PD9waHA) appearing MID-BLOB — preceded
+-- by base64 chars, not at a value boundary — must NOT fire. This is the
+-- techking.gr OpenCart google-feed shape (2026-05): legit base64 product
+-- data carrying the chars by chance / inside a larger blob.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "block")
+
+  -- ...XYZ + PD9waHA + ... : the opener is preceded by base64 char 'Z'
+  local hit = waf.check(ctx([[data=c29tZXByb2R1Y3RkYXRhWFlaPD9waHAgbW9yZQ==]]))
+  check(hit ~= true, "437 FP — PD9waHA mid-base64-blob (no boundary) does not fire")
+end
+
+-- FP regression: case-variant of the opener must NOT fire. base64 is
+-- case-sensitive; only the exact `PD9waHA` is a real <?php opener.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "block")
+
+  local hit = waf.check(ctx([[data=pd9wahalowercasevariant]]))
+  check(hit ~= true, "437 FP — lowercased pd9waha must NOT fire (case-sensitive)")
+end
+
+-- Positive (boundary preserved): a real smuggled opener at a value boundary
+-- still fires — this is the flow.gr webshell-feed shape (/wp-content/
+-- <rand>default.php?p=PD9waHA...). Confirms the fix keeps the true positive.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "block")
+
+  local hit, reason = waf.check(ctx([[p=PD9waHAgc3lzdGVtKCRfR0VUWydjJ10pOw==]]))
+  check(hit == true,                             "437 TP — boundary PD9waHA still fires")
+  check(reason == "WAF_BACKDOOR:B64_PHP_OPENER", "437 TP — reason")
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────

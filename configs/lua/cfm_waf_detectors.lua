@@ -1708,6 +1708,39 @@ function _M.detect_upload_filename(body, headers)
   return nil
 end
 
+-- A bare `<?=` PHP short-echo opener is only three bytes (`3C 3F 3D`) and
+-- collides with the high-entropy byte stream of legitimate binary uploads.
+-- A product photo (JPEG / WebP / PNG) statistically contains that sequence
+-- roughly once per ~16 MB of image data, which fired UPLOAD_PHP_TAG (rule
+-- 402) and POLYGLOT_DEEP_* (rule 432) on innocent e-shop image uploads.
+-- (2026-06-04 e-vafeiadis.gr report: the same product save alternated 200 /
+-- 403 across retries — proof the trigger was image *content*, not the
+-- request shape; the admin was uploading WebP product photos.)
+--
+-- A real short-echo tag is always immediately followed by a PHP expression:
+-- a variable / superglobal (`$`), a backtick exec, a quoted string, a
+-- parenthesised expression, or a function call (`name(`). Requiring that
+-- context keeps every short-tag webshell shape while making the opener
+-- binary-safe. The 5-byte `<?php` opener needs no such guard — it is rare
+-- enough in binary that the codebase already treats it as a safe marker
+-- (see rule 432: "Legit binary files never contain `<?php`").
+--
+-- `s` MUST already be lowercased (matches both detector call sites).
+local function has_php_short_echo(s)
+  if not s or s == "" then return false end
+  -- An optional `@` error-suppression operator may sit between the opener
+  -- and the expression (`<?=@eval(...)`). PHP function names may contain
+  -- digits (`base64_decode`, `md5`, `sha1`, `str_rot13`), so the name class
+  -- is `[%w_]` (NOT `[%a_]` — excluding digits was a real bypass for
+  -- input-driven shells like `<?=base64_decode(file_get_contents(...))`).
+  return (s:find("<%?=%s*@?%s*%$")            -- <?=$_GET / <?= $x / <?=@$x
+       or s:find("<%?=%s*@?%s*`")             -- <?=`id`
+       or s:find("<%?=%s*@?%s*['\"]")         -- <?='cmd' / <?="cmd"
+       or s:find("<%?=%s*@?%s*%(")            -- <?=(expr)
+       or s:find("<%?=%s*@?%s*%a[%w_]*%s*%(") -- <?=base64_decode( / <?=md5( / <?=system(
+       ) ~= nil
+end
+
 -- [top-4b] Webshell / malicious content in uploaded file bytes.
 -- Sources: uusec upload-file-content-filtering.lua + imagemagick-vulnerability.lua.
 -- Scans the raw multipart body for PHP tags, JSP tags, and ImageMagick MVG
@@ -1723,8 +1756,10 @@ function _M.detect_upload_content(body, headers)
 
   local b = lower(cap(body, CFG.max_scan_len))
 
-  if has(b, "<?php") or has(b, "<?=") then return "UPLOAD_PHP_TAG" end
-  if has(b, "<jsp:")                   then return "UPLOAD_JSP_TAG" end
+  -- `<?php` matched bare (binary-safe); `<?=` requires PHP-expression context
+  -- so it can't fire on a stray 3-byte collision inside a real image upload.
+  if has(b, "<?php") or has_php_short_echo(b) then return "UPLOAD_PHP_TAG" end
+  if has(b, "<jsp:")                          then return "UPLOAD_JSP_TAG" end
 
   -- PHP superglobals inside file content = almost certainly a webshell
   if has(b, "$_get")    or has(b, "$_post")   or has(b, "$_request")
@@ -2088,17 +2123,35 @@ end
 -- markers; the two formats share zero bytes so neither rule shadows the
 -- other. Family WAF_RCE so the rule shares post-clearance escalation.
 function _M.detect_java_deserialize(headers, args, body)
+  -- Java-serialization markers are whole VALUES — a query/body parameter
+  -- value, or a Cookie/Authorization/XFF token — so the magic sits at the
+  -- start of the scanned string or right after a non-base64 separator
+  -- (`=`, `"`, `'`, `:`, `,`, `[`, `{`, `;`, whitespace, ...). A long
+  -- base64url token can contain the prefix mid-string by chance; the
+  -- canonical case is a Facebook click id on e-shop ad traffic
+  -- (`fbclid=...VrO0ABr5e...`), which challenged a real shopper arriving
+  -- from a paid ad. Anchoring to a value boundary kills that false positive
+  -- while keeping every real gadget delivery (the blob IS the value).
+  -- base64/base64url continuation chars are A-Za-z0-9 + / - _  — note `=`
+  -- is padding/separator, NOT a continuation, so it counts as a boundary.
+  local function at_boundary(s, needle)
+    if s:sub(1, #needle) == needle then return true end       -- value start
+    return s:find("[^%w+/_-]" .. needle) ~= nil               -- after a separator
+  end
   local function check_text(s)
     if not s or s == "" then return nil end
-    local sl = lower(s)
-    if has(sl, "ro0ab")    then return "B64_PREFIX" end
-    if has(sl, "aced0005") then return "HEX_PREFIX" end
+    -- B64 prefix matched case-SENSITIVELY: base64 of AC ED 00 05 is always
+    -- exactly "rO0AB"; a case-insensitive substring match was the other half
+    -- of the fbclid FP. Hex prefix stays case-insensitive (hex literals vary).
+    if at_boundary(s, "rO0AB")           then return "B64_PREFIX" end
+    if at_boundary(lower(s), "aced0005") then return "HEX_PREFIX" end
     return nil
   end
 
-  -- args is normalised on the way in by scan_str's callers, but we lower
-  -- it here defensively in case detect_java_deserialize is called from a
-  -- future code path that bypasses normalisation.
+  -- args arrives raw (ngx.var.args — URL-encoded, original case); check_text
+  -- handles case per-branch (case-sensitive base64, lowered hex). The base64
+  -- magic is offset-0 in a real serialized value, so it survives URL-encoding
+  -- of the surrounding query without needing a decode pass here.
   local t = check_text(args)
   if t then return t end
 
@@ -2788,9 +2841,24 @@ local function utf8_walk(s)
   return nil
 end
 
-function _M.detect_bad_utf8(args, body)
+function _M.detect_bad_utf8(args, body, headers)
   local tag = utf8_walk(normalize(cap(args or "", CFG.max_scan_len)))
   if tag then return tag end
+
+  -- Skip the body walk for multipart/form-data. File parts carry raw binary
+  -- (JPEG / WebP / PNG / ZIP) whose bytes routinely form 0xC0/0xC1 +
+  -- continuation pairs (JPEG SOF markers 0xFFC0/0xFFC1 etc.) and E0/F0 leads
+  -- that decode to overlong / surrogate / out-of-range codepoints — none of
+  -- which are encoding-bypass primitives, just binary that isn't UTF-8 text.
+  -- The args walk above still covers the URL/path-traversal vector, and the
+  -- non-multipart body walk below still covers urlencoded / JSON / XML text
+  -- bodies (so the overlong-slash bypass in test 77c keeps firing).
+  -- Production FP this removes: every Greek-admin product-image save on
+  -- e-vafeiadis.gr was logging WAF_BAD_UTF8:UTF8_OVERLONG (2026-06-04).
+  headers = headers or {}
+  local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
+  if has(ct, "multipart/form-data") then return nil end
+
   return utf8_walk(normalize(cap(body or "", CFG.max_scan_len)))
 end
 
@@ -3052,7 +3120,10 @@ function _M.detect_php_polyglot_full_body(body, headers)
 
   -- has() over literal openers — faster and clearer than pattern matching
   -- when no metacharacter semantics are needed.
-  if has(s, "<?php") or has(s, "<?=")
+  -- `<?php` matched bare (binary-safe); `<?=` requires PHP-expression context
+  -- (has_php_short_echo) so a stray 3-byte `<?=` in the magic-prefixed binary
+  -- of a legit image / PDF / ZIP can't trip POLYGLOT_DEEP_*.
+  if has(s, "<?php") or has_php_short_echo(s)
      or has(s, "<jsp:")
      or s:find("<%%@%s*page")
      or s:find("<script%s+language%s*=%s*['\"]?php") then
@@ -3246,11 +3317,23 @@ function _M.detect_php_encoded_opener(body, _headers)
   if not body or body == "" then return nil end
 
   local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
-  local s = lower(cap(body, cap_len))
+  local raw = cap(body, cap_len)   -- original case — base64 is case-sensitive
+  local s   = lower(raw)           -- lowercased — for the URL/entity/JS forms
 
-  if has(s, "pd9waha")               then return "B64_PHP_OPENER"     end
-  if has(s, "pd9wahag")              then return "B64_PHP_OPENER"     end
-  if has(s, "pd89")                  then return "B64_SHORT_OPENER"   end
+  -- Base64 openers are matched case-SENSITIVELY and only at a base64 value
+  -- boundary (string start, or right after a non-base64 separator). base64
+  -- uses a case-sensitive alphabet and a real smuggled opener is the START
+  -- of a base64 payload value (`p=PD9waHA0...`). Lowercasing + mid-blob
+  -- substring matching collided with legitimate base64 data — a Google
+  -- product-feed module whose product text contained code samples
+  -- (techking.gr OpenCart, 2026-05). Same FP class as rule 326's `rO0AB`.
+  -- base64/base64url continuation chars: A-Za-z0-9 + / - _  (NOT `=` padding).
+  local function b64_opener(needle)
+    if raw:sub(1, #needle) == needle then return true end
+    return raw:find("[^%w+/_-]" .. needle) ~= nil
+  end
+  if b64_opener("PD9waHA")            then return "B64_PHP_OPENER"     end  -- base64("<?php")
+  if b64_opener("PD89")               then return "B64_SHORT_OPENER"   end  -- base64("<?=")
   if has(s, "%3c%3fphp")             then return "URL_PHP_OPENER"     end
   if has(s, "%3c%3f=")               then return "URL_SHORT_OPENER"   end
   if has(s, "&#60;&#63;php")         then return "HTML_ENTITY_OPENER" end
