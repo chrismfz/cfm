@@ -571,6 +571,35 @@ do
   check(rule_id == 326,                                             "34: java_deserialize — rule id 326")
 end
 
+-- ── Test 34b: java_deserialize — fbclid mid-token "rO0AB" must NOT fire ─────
+-- The base64 magic "rO0AB" (base64 of AC ED 00 05) is only meaningful at a
+-- value boundary. A Facebook click id is a long base64url token that can
+-- carry the five chars in its middle by chance, e.g.
+--   fbclid=...VrO0ABr5eDDx...   (captured 2026-05-31, axidwear.com, a real
+-- shopper arriving from m.facebook.com). It was challenged before the
+-- boundary+case-sensitive fix. It must NOT match now.
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "challenge")
+
+  local hit, reason = waf.check(fresh_ctx({
+    args = "attribute_pa_size=9-12m&utm_source=fb&fbclid=IwZXh0bgNhZW0BMABhZGlkAasx5Aqevu5zcnRjVrO0ABr5eDDx-RiNJOZm96EjXRsCv8205Etw&koino=new_aud",
+  }))
+  check(hit == false, "34b: java_deserialize — fbclid mid-token rO0AB must NOT fire (got " .. tostring(reason) .. ")")
+end
+
+-- ── Test 34c: java_deserialize — lowercased "ro0ab" must NOT fire ──────────
+-- Real Java base64 is always exactly "rO0AB"; a lowercased form never
+-- decodes to the stream magic, so case-insensitive matching only added FP
+-- surface. Verify the case-sensitive guard.
+do
+  disable_all_rules()
+  waf.set_rule("rule_java_deserialize", "challenge")
+
+  local hit = waf.check(fresh_ctx({ args = "token=xyzro0abxnyab" }))
+  check(hit == false, "34c: java_deserialize — lowercased ro0ab must NOT fire")
+end
+
 -- ── Test 35: C2 java_deserialize — raw magic bytes in body ──────────────────
 do
   disable_all_rules()

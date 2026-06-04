@@ -351,6 +351,23 @@ do
   check(reason == "WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG", "402 <?php opener — reason")
 end
 
+-- Positive: short-echo with a DIGIT-containing function name and NO
+-- superglobal must still fire. `<?=base64_decode(file_get_contents('php://input'))`
+-- is a complete input-driven webshell; the function-name class must be
+-- [%w_] (not [%a_]) or this slips the short-echo guard entirely.
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+
+  local part = "GIF89a<?=base64_decode(file_get_contents('php://input'))"
+  local body = "------x\r\nContent-Disposition: form-data; name=\"f\"; "
+            .. "filename=\"a.gif\"\r\nContent-Type: image/gif\r\n\r\n"
+            .. part .. "\r\n------x--\r\n"
+  local hit, reason = waf.check(ctx(body, MP))
+  check(hit == true,                                  "402 short-echo digit-name shell — hit=true")
+  check(reason == "WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG", "402 short-echo digit-name shell — reason")
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 433 — variable-fed eval-loader with >=200-char base64 literal
 -- ─────────────────────────────────────────────────────────────────────────────

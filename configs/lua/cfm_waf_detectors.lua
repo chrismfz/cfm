@@ -1728,11 +1728,16 @@ end
 -- `s` MUST already be lowercased (matches both detector call sites).
 local function has_php_short_echo(s)
   if not s or s == "" then return false end
-  return (s:find("<%?=%s*%$")            -- <?=$_GET / <?= $x
-       or s:find("<%?=%s*`")             -- <?=`id`
-       or s:find("<%?=%s*['\"]")         -- <?='cmd' / <?="cmd"
-       or s:find("<%?=%s*%(")            -- <?=(expr)
-       or s:find("<%?=%s*%a[%a_]+%s*%(") -- <?=system( / <?=phpinfo(
+  -- An optional `@` error-suppression operator may sit between the opener
+  -- and the expression (`<?=@eval(...)`). PHP function names may contain
+  -- digits (`base64_decode`, `md5`, `sha1`, `str_rot13`), so the name class
+  -- is `[%w_]` (NOT `[%a_]` — excluding digits was a real bypass for
+  -- input-driven shells like `<?=base64_decode(file_get_contents(...))`).
+  return (s:find("<%?=%s*@?%s*%$")            -- <?=$_GET / <?= $x / <?=@$x
+       or s:find("<%?=%s*@?%s*`")             -- <?=`id`
+       or s:find("<%?=%s*@?%s*['\"]")         -- <?='cmd' / <?="cmd"
+       or s:find("<%?=%s*@?%s*%(")            -- <?=(expr)
+       or s:find("<%?=%s*@?%s*%a[%w_]*%s*%(") -- <?=base64_decode( / <?=md5( / <?=system(
        ) ~= nil
 end
 
@@ -2118,11 +2123,28 @@ end
 -- markers; the two formats share zero bytes so neither rule shadows the
 -- other. Family WAF_RCE so the rule shares post-clearance escalation.
 function _M.detect_java_deserialize(headers, args, body)
+  -- Java-serialization markers are whole VALUES — a query/body parameter
+  -- value, or a Cookie/Authorization/XFF token — so the magic sits at the
+  -- start of the scanned string or right after a non-base64 separator
+  -- (`=`, `"`, `'`, `:`, `,`, `[`, `{`, `;`, whitespace, ...). A long
+  -- base64url token can contain the prefix mid-string by chance; the
+  -- canonical case is a Facebook click id on e-shop ad traffic
+  -- (`fbclid=...VrO0ABr5e...`), which challenged a real shopper arriving
+  -- from a paid ad. Anchoring to a value boundary kills that false positive
+  -- while keeping every real gadget delivery (the blob IS the value).
+  -- base64/base64url continuation chars are A-Za-z0-9 + / - _  — note `=`
+  -- is padding/separator, NOT a continuation, so it counts as a boundary.
+  local function at_boundary(s, needle)
+    if s:sub(1, #needle) == needle then return true end       -- value start
+    return s:find("[^%w+/_-]" .. needle) ~= nil               -- after a separator
+  end
   local function check_text(s)
     if not s or s == "" then return nil end
-    local sl = lower(s)
-    if has(sl, "ro0ab")    then return "B64_PREFIX" end
-    if has(sl, "aced0005") then return "HEX_PREFIX" end
+    -- B64 prefix matched case-SENSITIVELY: base64 of AC ED 00 05 is always
+    -- exactly "rO0AB"; a case-insensitive substring match was the other half
+    -- of the fbclid FP. Hex prefix stays case-insensitive (hex literals vary).
+    if at_boundary(s, "rO0AB")           then return "B64_PREFIX" end
+    if at_boundary(lower(s), "aced0005") then return "HEX_PREFIX" end
     return nil
   end
 
