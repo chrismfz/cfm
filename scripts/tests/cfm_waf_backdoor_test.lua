@@ -690,6 +690,41 @@ do
   check(hit ~= true, "437 negative — prose mention of PHP does not fire")
 end
 
+-- FP regression: base64 of "<?php" (PD9waHA) appearing MID-BLOB — preceded
+-- by base64 chars, not at a value boundary — must NOT fire. This is the
+-- techking.gr OpenCart google-feed shape (2026-05): legit base64 product
+-- data carrying the chars by chance / inside a larger blob.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "block")
+
+  -- ...XYZ + PD9waHA + ... : the opener is preceded by base64 char 'Z'
+  local hit = waf.check(ctx([[data=c29tZXByb2R1Y3RkYXRhWFlaPD9waHAgbW9yZQ==]]))
+  check(hit ~= true, "437 FP — PD9waHA mid-base64-blob (no boundary) does not fire")
+end
+
+-- FP regression: case-variant of the opener must NOT fire. base64 is
+-- case-sensitive; only the exact `PD9waHA` is a real <?php opener.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "block")
+
+  local hit = waf.check(ctx([[data=pd9wahalowercasevariant]]))
+  check(hit ~= true, "437 FP — lowercased pd9waha must NOT fire (case-sensitive)")
+end
+
+-- Positive (boundary preserved): a real smuggled opener at a value boundary
+-- still fires — this is the flow.gr webshell-feed shape (/wp-content/
+-- <rand>default.php?p=PD9waHA...). Confirms the fix keeps the true positive.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "block")
+
+  local hit, reason = waf.check(ctx([[p=PD9waHAgc3lzdGVtKCRfR0VUWydjJ10pOw==]]))
+  check(hit == true,                             "437 TP — boundary PD9waHA still fires")
+  check(reason == "WAF_BACKDOOR:B64_PHP_OPENER", "437 TP — reason")
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Integration: the captured radio.php sample triggers all three of 431, 432, 433.
 -- Severity aggregation picks the strongest action; multiple rule_ids in `hits`.

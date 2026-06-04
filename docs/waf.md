@@ -721,11 +721,11 @@ Collect their positions in the body. Fire if **any three** occurrences fall with
 
 **Why it matters:** legit data flows never carry an encoded PHP opener — neither prose, nor JSON, nor form data, nor uploaded media. Seeing one is high-confidence evidence of payload-smuggling-through-filter, and the detection cost is essentially zero (8 substring checks).
 
-**How:** lowercased body substring scan for each of the encoded forms.
+**How:** the URL / HTML-entity / JS-escape forms are matched as substrings on the lowercased body (those encodings are legitimately case-insensitive and structured, so collision-free). The **base64** forms (`PD9waHA`, `PD89`) are matched **case-sensitively** (base64 is a case-sensitive alphabet) and **only at a base64 value boundary** — string start or right after a non-base64 separator.
 
 **Tags:** `B64_PHP_OPENER`, `B64_SHORT_OPENER`, `URL_PHP_OPENER`, `URL_SHORT_OPENER`, `HTML_ENTITY_OPENER`, `JS_UNICODE_OPENER`, `JS_HEX_OPENER`.
 
-**FP notes:** narrow detector — the encoded openers literally do not appear in normal traffic. The only real-world FP risk is documentation / security-research traffic where someone POSTs an encoded `<?php` as research data; per-vhost exclusion handles cleanly.
+**FP notes:** **Fixed 2026-06-04.** The base64 checks were originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive this rule caught) — while dropping the mid-blob / case-variant collisions. With those resolved the rule is safe to promote past logonly. The remaining FP risk is documentation / security-research traffic POSTing an encoded `<?php`; per-vhost exclusion handles that cleanly.
 
 ### How they compose
 

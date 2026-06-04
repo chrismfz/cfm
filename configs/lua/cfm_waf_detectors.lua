@@ -3316,11 +3316,23 @@ function _M.detect_php_encoded_opener(body, _headers)
   if not body or body == "" then return nil end
 
   local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
-  local s = lower(cap(body, cap_len))
+  local raw = cap(body, cap_len)   -- original case — base64 is case-sensitive
+  local s   = lower(raw)           -- lowercased — for the URL/entity/JS forms
 
-  if has(s, "pd9waha")               then return "B64_PHP_OPENER"     end
-  if has(s, "pd9wahag")              then return "B64_PHP_OPENER"     end
-  if has(s, "pd89")                  then return "B64_SHORT_OPENER"   end
+  -- Base64 openers are matched case-SENSITIVELY and only at a base64 value
+  -- boundary (string start, or right after a non-base64 separator). base64
+  -- uses a case-sensitive alphabet and a real smuggled opener is the START
+  -- of a base64 payload value (`p=PD9waHA0...`). Lowercasing + mid-blob
+  -- substring matching collided with legitimate base64 data — a Google
+  -- product-feed module whose product text contained code samples
+  -- (techking.gr OpenCart, 2026-05). Same FP class as rule 326's `rO0AB`.
+  -- base64/base64url continuation chars: A-Za-z0-9 + / - _  (NOT `=` padding).
+  local function b64_opener(needle)
+    if raw:sub(1, #needle) == needle then return true end
+    return raw:find("[^%w+/_-]" .. needle) ~= nil
+  end
+  if b64_opener("PD9waHA")            then return "B64_PHP_OPENER"     end  -- base64("<?php")
+  if b64_opener("PD89")               then return "B64_SHORT_OPENER"   end  -- base64("<?=")
   if has(s, "%3c%3fphp")             then return "URL_PHP_OPENER"     end
   if has(s, "%3c%3f=")               then return "URL_SHORT_OPENER"   end
   if has(s, "&#60;&#63;php")         then return "HTML_ENTITY_OPENER" end
