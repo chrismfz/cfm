@@ -2148,9 +2148,10 @@ function _M.detect_java_deserialize(headers, args, body)
     return nil
   end
 
-  -- args is normalised on the way in by scan_str's callers, but we lower
-  -- it here defensively in case detect_java_deserialize is called from a
-  -- future code path that bypasses normalisation.
+  -- args arrives raw (ngx.var.args — URL-encoded, original case); check_text
+  -- handles case per-branch (case-sensitive base64, lowered hex). The base64
+  -- magic is offset-0 in a real serialized value, so it survives URL-encoding
+  -- of the surrounding query without needing a decode pass here.
   local t = check_text(args)
   if t then return t end
 
