@@ -333,6 +333,19 @@ produce overlong encodings of ASCII. Shipped in **PR #969**. Effect:
 test cases for `%C0%AF` overlong-`/`, surrogate codepoints in UTF-8,
 and out-of-range codepoints all still fire).
 
+**Follow-up (2026-06-04):** PR #969 suppressed BAD_LEAD/BAD_CONT/TRUNC but
+the three *attack* tags still fired on multipart uploads — a binary file
+part is exactly the place where `0xC0`/`0xC1` + continuation pairs (JPEG
+SOF markers `0xFFC0`/`0xFFC1`) and `E0`/`F0` leads decoding to overlong /
+surrogate codepoints occur by chance. e-vafeiadis.gr logged
+`UTF8_OVERLONG` on **every** Greek-admin product-photo save. `detect_bad_utf8`
+now **skips the body walk entirely when Content-Type is
+`multipart/form-data`** — the encoding-bypass primitive (`%C0%AF` for `/`)
+lives in the URL/args, which are still walked, and non-multipart text bodies
+(urlencoded / JSON / XML) are still walked so the overlong-slash body bypass
+(test 77c) keeps firing. Test 77b now carries real `0xC0`-overlong bytes so
+it actually guards the skip.
+
 **Lesson for new encoding-validity rules:** "not UTF-8" is not the
 same as "attack". A web property that has been running long enough to
 accumulate legacy WP plugins, pre-charset forms, or file-upload

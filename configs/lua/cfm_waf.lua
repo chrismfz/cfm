@@ -764,7 +764,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_bad_utf8, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_bad_utf8(args, body)
+      local tag = det.detect_bad_utf8(args, body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_BAD_UTF8:" .. tag, ttl, mode, RULE_IDS.rule_bad_utf8) then goto done end
