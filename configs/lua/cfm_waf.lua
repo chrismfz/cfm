@@ -260,7 +260,16 @@ local CFG = {
 
   -- Generic defaults
   default_ttl_sec   = 600,
-  block_ttl_sec     = 3600,
+  -- Short IP-ban window after a hard `block` verdict. Deliberately small:
+  -- the WAF inspects EVERY request independently, so each malicious payload
+  -- is still blocked per-request regardless of any ban — the IP ban is only
+  -- defense-in-depth, not the primary control. A long ban (was 3600s) does
+  -- more harm than good on shared egress IPs (CGNAT / mobile carriers /
+  -- Cloudflare WARP `104.28.154.x`), where it locks out many innocent users
+  -- and turns a single false positive into an hour-long lockout for the
+  -- whole IP. 10s lets a legitimate client recover almost immediately while
+  -- still collapsing rapid multi-vector bursts from a true attacker.
+  block_ttl_sec     = 10,
   push_cooldown_sec = 60,
 
   -- Body scan budget, keyed by request Content-Type. The merged args+body
