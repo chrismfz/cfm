@@ -271,6 +271,86 @@ do
   check(hit ~= true, "432 negative — clean JPEG does not fire")
 end
 
+-- FP regression: a bare 3-byte `<?=` collision inside legit binary must NOT
+-- fire. WebP/JPEG product photos statistically contain the sequence
+-- 3C 3F 3D; before the has_php_short_echo guard this tripped POLYGLOT_DEEP_*
+-- (and rule 402 UPLOAD_PHP_TAG — the 2026-06-04 e-vafeiadis.gr report).
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_polyglot_full_body", "block")
+
+  -- RIFF/WebP magic + binary with a bare `<?=` followed by non-PHP bytes
+  local body = "RIFF" .. string.rep("\x9c", 60) .. "<?=" .. "\xff\x00\x9a\xe1"
+  local hit = waf.check(ctx(body, "image/webp"))
+  check(hit ~= true, "432 FP — bare <?= in WebP binary (no PHP context) does not fire")
+
+  -- JPEG variant: `<?=` followed by high bytes (not an expression start)
+  local body2 = "\xff\xd8\xff\xe0" .. string.rep("\x00", 80) .. "<?=\x80\x81"
+  local hit2 = waf.check(ctx(body2, "image/jpeg"))
+  check(hit2 ~= true, "432 FP — <?= + high-byte in JPEG does not fire")
+end
+
+-- Positive: a real short-echo webshell appended after image magic still fires
+-- (the `<?=` short tag must survive the guard when followed by a superglobal).
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_polyglot_full_body", "challenge")
+
+  local body = "\xff\xd8\xff\xe0" .. string.rep("A", 100) .. "<?=$_GET['c'];?>"
+  local hit, reason = waf.check(ctx(body, "image/jpeg"))
+  check(hit == true,                               "432 short-echo superglobal — hit=true")
+  check(reason == "WAF_BACKDOOR:POLYGLOT_DEEP_JPEG", "432 short-echo superglobal — reason")
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 402 — upload content scan: `<?=` short-echo must require PHP context
+-- (regression for the 2026-06-04 e-vafeiadis.gr image-upload false positive,
+-- where an admin saving WebP product photos got intermittent 403s)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local MP = "multipart/form-data; boundary=----x"
+
+-- FP: a WebP product photo whose binary contains a stray `<?=` followed by
+-- non-PHP bytes must NOT be flagged UPLOAD_PHP_TAG.
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+
+  local part = "RIFF" .. string.rep("\x9c", 64) .. "<?=" .. "\xff\x12\x9a"
+  local body = "------x\r\nContent-Disposition: form-data; name=\"products_image\"; "
+            .. "filename=\"photo.webp\"\r\nContent-Type: image/webp\r\n\r\n"
+            .. part .. "\r\n------x--\r\n"
+  local hit = waf.check(ctx(body, MP))
+  check(hit ~= true, "402 FP — bare <?= in WebP upload does not fire")
+end
+
+-- Positive: a real short-tag webshell uploaded as a fake image still fires.
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+
+  local part = "GIF89a" .. "<?=$_GET[0]($_GET[1]);"
+  local body = "------x\r\nContent-Disposition: form-data; name=\"f\"; "
+            .. "filename=\"a.gif\"\r\nContent-Type: image/gif\r\n\r\n"
+            .. part .. "\r\n------x--\r\n"
+  local hit, reason, _ttl, action = waf.check(ctx(body, MP))
+  check(hit == true,                                  "402 short-tag shell — hit=true")
+  check(reason == "WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG", "402 short-tag shell — reason")
+  check(action == "block",                            "402 short-tag shell — action=block")
+end
+
+-- Positive: classic `<?php` opener still matched bare (binary-safe).
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+
+  local body = "------x\r\nContent-Disposition: form-data; name=\"f\"; "
+            .. "filename=\"a.php\"\r\n\r\n<?php system($_GET['c']); ?>\r\n------x--\r\n"
+  local hit, reason = waf.check(ctx(body, MP))
+  check(hit == true,                                  "402 <?php opener — hit=true")
+  check(reason == "WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG", "402 <?php opener — reason")
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 433 — variable-fed eval-loader with >=200-char base64 literal
 -- ─────────────────────────────────────────────────────────────────────────────

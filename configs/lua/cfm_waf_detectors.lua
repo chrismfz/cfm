@@ -1708,6 +1708,34 @@ function _M.detect_upload_filename(body, headers)
   return nil
 end
 
+-- A bare `<?=` PHP short-echo opener is only three bytes (`3C 3F 3D`) and
+-- collides with the high-entropy byte stream of legitimate binary uploads.
+-- A product photo (JPEG / WebP / PNG) statistically contains that sequence
+-- roughly once per ~16 MB of image data, which fired UPLOAD_PHP_TAG (rule
+-- 402) and POLYGLOT_DEEP_* (rule 432) on innocent e-shop image uploads.
+-- (2026-06-04 e-vafeiadis.gr report: the same product save alternated 200 /
+-- 403 across retries — proof the trigger was image *content*, not the
+-- request shape; the admin was uploading WebP product photos.)
+--
+-- A real short-echo tag is always immediately followed by a PHP expression:
+-- a variable / superglobal (`$`), a backtick exec, a quoted string, a
+-- parenthesised expression, or a function call (`name(`). Requiring that
+-- context keeps every short-tag webshell shape while making the opener
+-- binary-safe. The 5-byte `<?php` opener needs no such guard — it is rare
+-- enough in binary that the codebase already treats it as a safe marker
+-- (see rule 432: "Legit binary files never contain `<?php`").
+--
+-- `s` MUST already be lowercased (matches both detector call sites).
+local function has_php_short_echo(s)
+  if not s or s == "" then return false end
+  return (s:find("<%?=%s*%$")            -- <?=$_GET / <?= $x
+       or s:find("<%?=%s*`")             -- <?=`id`
+       or s:find("<%?=%s*['\"]")         -- <?='cmd' / <?="cmd"
+       or s:find("<%?=%s*%(")            -- <?=(expr)
+       or s:find("<%?=%s*%a[%a_]+%s*%(") -- <?=system( / <?=phpinfo(
+       ) ~= nil
+end
+
 -- [top-4b] Webshell / malicious content in uploaded file bytes.
 -- Sources: uusec upload-file-content-filtering.lua + imagemagick-vulnerability.lua.
 -- Scans the raw multipart body for PHP tags, JSP tags, and ImageMagick MVG
@@ -1723,8 +1751,10 @@ function _M.detect_upload_content(body, headers)
 
   local b = lower(cap(body, CFG.max_scan_len))
 
-  if has(b, "<?php") or has(b, "<?=") then return "UPLOAD_PHP_TAG" end
-  if has(b, "<jsp:")                   then return "UPLOAD_JSP_TAG" end
+  -- `<?php` matched bare (binary-safe); `<?=` requires PHP-expression context
+  -- so it can't fire on a stray 3-byte collision inside a real image upload.
+  if has(b, "<?php") or has_php_short_echo(b) then return "UPLOAD_PHP_TAG" end
+  if has(b, "<jsp:")                          then return "UPLOAD_JSP_TAG" end
 
   -- PHP superglobals inside file content = almost certainly a webshell
   if has(b, "$_get")    or has(b, "$_post")   or has(b, "$_request")
@@ -3052,7 +3082,10 @@ function _M.detect_php_polyglot_full_body(body, headers)
 
   -- has() over literal openers — faster and clearer than pattern matching
   -- when no metacharacter semantics are needed.
-  if has(s, "<?php") or has(s, "<?=")
+  -- `<?php` matched bare (binary-safe); `<?=` requires PHP-expression context
+  -- (has_php_short_echo) so a stray 3-byte `<?=` in the magic-prefixed binary
+  -- of a legit image / PDF / ZIP can't trip POLYGLOT_DEEP_*.
+  if has(s, "<?php") or has_php_short_echo(s)
      or has(s, "<jsp:")
      or s:find("<%%@%s*page")
      or s:find("<script%s+language%s*=%s*['\"]?php") then

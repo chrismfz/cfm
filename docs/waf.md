@@ -612,7 +612,7 @@ $IDC3B = $t_Ohw[61].$t_Ohw[7].$t_Ohw[34]…;  // builds "gzinflate"
 
 **Tags:** `POLYGLOT_DEEP_PDF`, `POLYGLOT_DEEP_JPEG`, `POLYGLOT_DEEP_PNG`, `POLYGLOT_DEEP_GIF`, `POLYGLOT_DEEP_ZIP`, `POLYGLOT_DEEP_BMP`, `POLYGLOT_DEEP_RIFF`.
 
-**FP notes:** image / PDF / ZIP files do not legitimately contain `<?php` tokens — the magic-byte gate plus the PHP-opener gate together are malware-only.
+**FP notes:** image / PDF / ZIP files do not legitimately contain `<?php` tokens — the magic-byte gate plus the PHP-opener gate together are malware-only. **Caveat (fixed 2026-06-04):** the 5-byte `<?php` opener is binary-safe, but the 3-byte `<?=` short-echo opener (`3C 3F 3D`) collides with high-entropy binary roughly once per ~16 MB of image data — it fired `POLYGLOT_DEEP_*` (and rule 402 `UPLOAD_PHP_TAG`) on innocent WebP/JPEG product-photo uploads (e-vafeiadis.gr: the same product save alternated 200/403 across retries, proving a content-dependent collision). `<?=` is now matched only when followed by an actual PHP expression — a variable/superglobal (`$`), backtick exec, quoted string, `(`, or function call `name(` — via `has_php_short_echo`, which preserves every short-tag webshell shape while removing the binary-collision FP.
 
 ### Rule 433 — `rule_php_eval_loader_b64`
 
@@ -1190,7 +1190,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 26 | CRLF | Raw and URL-encoded CRLF + header-keyword | `cfm_waf_detectors.lua:1567` |
 | 27 | HTTP smuggling (body) | VERB SP PATH SP HTTP/N | `cfm_waf_detectors.lua:1598` |
 | 28 | Upload filename | Quoted/single/unquoted multipart `filename=` + ext patterns + special names | `cfm_waf_detectors.lua:1632` |
-| 29 | Upload content | Body substring `<?php`, `<?=`, `<jsp:`, `$_*` superglobals, ImageMagick MVG | `cfm_waf_detectors.lua:1700` |
+| 29 | Upload content | Body substring `<?php`, `<?=` (PHP-context-gated, see `has_php_short_echo`), `<jsp:`, `$_*` superglobals, ImageMagick MVG | `cfm_waf_detectors.lua:1700` |
 | 30 | Script obfuscation | Shared scorer (long-b64 / decode-helpers / eval / atob / XOR / chr-storm) | `cfm_waf_detectors.lua:1730` + `cfm_waf_util.lua:115` |
 | 31 | Upload obfuscation | Same scorer on multipart | `cfm_waf_detectors.lua:1753` |
 | 32 | Webshell path | URI basename ∈ 28-name set | `cfm_waf_detectors.lua:1817` |
