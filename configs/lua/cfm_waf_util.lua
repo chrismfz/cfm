@@ -119,9 +119,17 @@ local function is_known_legit_php_upload_endpoint(uri, args)
   -- exempted: a PHP opener inside a claimed image there is still a polyglot.
   if u == "/wp-admin/update.php" then
     local a = lower(args or "")
-    if a:find("action=upload-plugin", 1, true)
-       or a:find("action=upload-theme", 1, true) then
-      return true
+    -- Match action=upload-plugin / upload-theme as a *whole query parameter*
+    -- (at the start or right after '&', value terminated by '&' or end), not
+    -- as a loose substring of some other param's name or value (so
+    -- `upload-plugins`, `xaction=...`, `foo=action=upload-plugin` don't slip
+    -- through). The endpoint is already exempt to anyone who sends the exact
+    -- canonical action, so this is precision/clarity, not a security gate.
+    for _, act in ipairs({ "upload%-plugin", "upload%-theme" }) do
+      if a:match("^action=" .. act .. "%f[%W]")
+         or a:match("&action=" .. act .. "%f[%W]") then
+        return true
+      end
     end
   end
 
