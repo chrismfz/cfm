@@ -368,6 +368,83 @@ do
   check(reason == "WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG", "402 short-echo digit-name shell — reason")
 end
 
+-- WP plugin/theme installer carve-out (2026-06-05): a plugin/theme .zip
+-- legitimately contains PHP, so uploads to update.php?action=upload-plugin|
+-- upload-theme must NOT trip 401 (filename) or 402 (content). The same
+-- content on any other path still fires. (antigoni.com / vrettosmed.gr
+-- plugin installs were blocked.)
+local function installer_ctx(body, action)
+  return {
+    uri = "/wp-admin/update.php", args = "action=" .. action,
+    method = "POST", ip = "203.0.113.9",
+    headers = { ["Content-Type"] = MP }, body = body,
+  }
+end
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_content", "block")
+  local body = "------x\r\nContent-Disposition: form-data; name=\"pluginzip\"; "
+            .. "filename=\"acs-voucher-for-woocommerce.zip\"\r\n\r\n"
+            .. "PK\x03\x04 woocommerce plugin <?php eval($_POST['x']); ?>\r\n------x--\r\n"
+  check(waf.check(installer_ctx(body, "upload-plugin")) ~= true,
+        "carve-out 402 — upload-plugin install does not fire")
+  check(waf.check(installer_ctx(body, "upload-theme")) ~= true,
+        "carve-out 402 — upload-theme install does not fire")
+  -- non-installer action on the same path is NOT exempt
+  check(waf.check(installer_ctx(body, "do-core-upgrade")) == true,
+        "carve-out 402 — update.php without upload action still fires")
+  -- same content on a public path still fires
+  local hit, reason = waf.check(ctx(body, MP))
+  check(hit == true and reason == "WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG",
+        "carve-out 402 — same zip on public path still fires")
+end
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_upload_filename", "block")
+  local body = "------x\r\nContent-Disposition: form-data; name=\"pluginzip\"; "
+            .. "filename=\"vrettos-antikatavoli-block.php.zip\"\r\n\r\nPK\x03\x04 data\r\n------x--\r\n"
+  check(waf.check(installer_ctx(body, "upload-plugin")) ~= true,
+        "carve-out 401 — plugin .php.zip on installer does not fire")
+  -- async-upload (media) is NOT exempt: .php.zip there still fires
+  local hit = waf.check({
+    uri = "/wp-admin/async-upload.php", args = "", method = "POST", ip = "203.0.113.9",
+    headers = { ["Content-Type"] = MP }, body = body,
+  })
+  check(hit == true, "carve-out 401 — .php.zip on async-upload still fires")
+end
+
+-- All-rules-on guard: with the FULL upload/backdoor body family enabled, a
+-- realistic plugin-zip install must still pass clean — i.e. no UNexempted
+-- rule (404 webshell-body, 412 polyglot, 421-425 droppers, 437 opener, …)
+-- re-introduces the FP. The same upload on a public path stays blocked.
+do
+  disable_all_rules()
+  for _, r in ipairs({
+    "rule_upload_filename", "rule_upload_content", "rule_upload_obfuscation",
+    "rule_php_webshell_body", "rule_polyglot_upload",
+    "rule_php_split_string_canary", "rule_php_dropper_wget_curl",
+    "rule_php_dropper_markers", "rule_php_filesize_recon",
+    "rule_php_touch_antiforensic", "rule_htaccess_poisoning",
+    "rule_php_char_pool_obfuscation", "rule_php_polyglot_full_body",
+    "rule_php_eval_loader_b64", "rule_php_superglobal_callable",
+    "rule_php_concat_funcname_eval", "rule_php_decode_chain",
+    "rule_php_encoded_opener",
+  }) do waf.set_rule(r, "block") end
+
+  local zip = "PK\x03\x04 acs-voucher <?php /* Plugin Name: ACS Voucher */ "
+           .. "function acs_init(){} add_action('init', 'acs_init'); ?>"
+  local body = "------x\r\nContent-Disposition: form-data; name=\"pluginzip\"; "
+            .. "filename=\"acs-voucher.php.zip\"\r\n\r\n" .. zip .. "\r\n------x--\r\n"
+
+  check(waf.check(installer_ctx(body, "upload-plugin")) ~= true,
+        "carve-out all-on — plugin install passes clean with full family enabled")
+  -- sanity: the same upload on a public path IS blocked (family is live)
+  check(waf.check(ctx(body, MP)) == true,
+        "carve-out all-on — same upload on a public path is blocked")
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 433 — variable-fed eval-loader with >=200-char base64 literal
 -- ─────────────────────────────────────────────────────────────────────────────
