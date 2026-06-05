@@ -95,14 +95,34 @@ local function has_long_b64_blob(s, min_len)
   return false, 0
 end
 
--- is_known_legit_php_upload_endpoint helper
-local function is_known_legit_php_upload_endpoint(uri)
+-- is_known_legit_php_upload_endpoint reports whether the request targets an
+-- endpoint that legitimately receives PHP-bearing uploads, so the upload
+-- malware / webshell-content scanners (which would otherwise flag the PHP
+-- that is the upload's whole point) must stand down. Takes args because the
+-- WordPress plugin/theme installer is keyed on the query action.
+local function is_known_legit_php_upload_endpoint(uri, args)
   local u = lower(uri or "")
   if u == "" then return false end
 
-  -- Code Snippets plugin REST API import/parse flow
+  -- Code Snippets plugin REST API import/parse flow.
   if u:match("^/wp%-json/code%-snippets/") then
     return true
+  end
+
+  -- WordPress plugin/theme installer. The uploaded .zip legitimately
+  -- contains PHP source — a plugin/theme *is* PHP code, frequently
+  -- obfuscated in commercial products — and the POST is behind WP's admin
+  -- cookie-auth. update.php?action=upload-plugin / upload-theme is the only
+  -- path where uploading a PHP-bearing archive is the intended function.
+  -- (A plugin named e.g. "foo-block.php.zip" also trips the double-extension
+  -- filename rule.) Media uploads (async-upload.php) are deliberately NOT
+  -- exempted: a PHP opener inside a claimed image there is still a polyglot.
+  if u == "/wp-admin/update.php" then
+    local a = lower(args or "")
+    if a:find("action=upload-plugin", 1, true)
+       or a:find("action=upload-theme", 1, true) then
+      return true
+    end
   end
 
   return false

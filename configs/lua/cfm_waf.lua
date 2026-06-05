@@ -560,6 +560,14 @@ function _M.check(ctx)
   -- body_inspect_ok is the existing "POST + non-empty body" gate, hoisted.
   local m_lower         = lower(method)
   local body_inspect_ok = (m_lower == "post" and body ~= "")
+  -- Authenticated WP plugin/theme installer (and Code Snippets REST) carry
+  -- PHP-bearing uploads by design — a plugin/theme archive *is* PHP, often
+  -- obfuscated. Reused below to exempt the upload-malware / webshell-content
+  -- scanners (401/402/403 and the 431-436 backdoor family) so they don't
+  -- flag the PHP that is the upload's whole point. Declared up here (before
+  -- any `goto done`) so those jumps don't cross its scope. (437 keeps its
+  -- own broader /wp-admin/ carve-out.)
+  local legit_archive_upload = is_known_legit_php_upload_endpoint(uri, args)
 
   -- Pre-computed normalized scan strings, lazily initialised on first use.
   -- scan_str(uri,args) is shared by traversal/rce/xss/sqli (4 rules).
@@ -844,7 +852,7 @@ function _M.check(ctx)
   -- ── 17) Upload filename extension blacklist ───────────────────────────────
   do
     local mode = rule_mode(CFG.rule_upload_filename, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
+    if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_upload_filename(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -858,7 +866,7 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_upload_content, "logonly")
     if mode ~= "disabled"
        and body_inspect_ok
-       and not is_known_legit_php_upload_endpoint(uri) then
+       and not legit_archive_upload then
       local tag = det.detect_upload_content(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -870,7 +878,7 @@ function _M.check(ctx)
   -- ── 19) Upload obfuscation scorer (multipart file content) ───────────────
   do
     local mode = rule_mode(CFG.rule_upload_obfuscation, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
+    if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_upload_obfuscation(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -1351,7 +1359,7 @@ function _M.check(ctx)
   -- ── 53) PHP char-pool function-name builder (431) ────────────────────────
   do
     local mode = rule_mode(CFG.rule_php_char_pool_obfuscation, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
+    if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_char_pool_obfuscation(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -1363,7 +1371,7 @@ function _M.check(ctx)
   -- ── 54) PHP polyglot full-body (432) ─────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_php_polyglot_full_body, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
+    if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_polyglot_full_body(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -1375,7 +1383,7 @@ function _M.check(ctx)
   -- ── 55) PHP eval-loader with large b64 literal (433) ─────────────────────
   do
     local mode = rule_mode(CFG.rule_php_eval_loader_b64, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
+    if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_eval_loader_b64(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -1387,7 +1395,7 @@ function _M.check(ctx)
   -- ── 56) PHP superglobal-fed callable (434) ───────────────────────────────
   do
     local mode = rule_mode(CFG.rule_php_superglobal_callable, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
+    if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_superglobal_callable(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -1399,7 +1407,7 @@ function _M.check(ctx)
   -- ── 57) PHP concat function-name eval (435) ──────────────────────────────
   do
     local mode = rule_mode(CFG.rule_php_concat_funcname_eval, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
+    if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_concat_funcname_eval(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -1411,7 +1419,7 @@ function _M.check(ctx)
   -- ── 58) PHP multi-decode-chain proximity scorer (436) ────────────────────
   do
     local mode = rule_mode(CFG.rule_php_decode_chain, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
+    if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_decode_chain(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
