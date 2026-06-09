@@ -1345,6 +1345,19 @@ do
     {"command=viewres&target=inf&fon=ffffff",  "auto-parts visualiser"},
     {"cmd=login",                              "generic dispatcher: cmd=login"},
     {"system=us-east-1",                       "generic dispatcher: system=region"},
+    -- Joomla K2 media manager / elFinder: cmd=<verb> where the verb (rm /
+    -- ls / mkdir / chmod) collides with a shell-command name. With
+    -- task=connector present and a pristine verb, must NOT challenge — else
+    -- the elFinder XHR gets the challenge redirect and the admin sees
+    -- "Invalid backend response. Data is not JSON." (eydamth.gr, 2026-06).
+    {"option=com_k2&view=media&task=connector&cmd=mkdir&name=ArticleID_0787&target=l1_c3Rvcmllcw&reqid=19ea605c",
+                                               "K2 elFinder cmd=mkdir"},
+    {"task=connector&cmd=rm&targets[]=l1_c3Rvcmllcy9B&reqid=19ea6b6f",
+                                               "K2 elFinder cmd=rm"},
+    {"task=connector&cmd=ls&target=l1_c3Rvcmllcw&intersect[]=4.jpg",
+                                               "K2 elFinder cmd=ls"},
+    {"task=connector&cmd=chmod&target=l1_x&mode=0755",
+                                               "K2 elFinder cmd=chmod"},
   }
   for _, c in ipairs(fp_cases) do
     local hit = waf.check(fresh_ctx({ uri = "/wp-admin/admin-ajax.php", args = c[1] }))
@@ -1363,6 +1376,16 @@ do
     {"system=id",                              "CMD_SYSTEM",    "system=id"},
     {"command=/bin/sh",                        "CMD_COMMAND",   "command=/bin/sh"},
     {"command=curl+http://attacker",           "CMD_COMMAND",   "command=curl+url"},
+    -- The elFinder carve-out is gated on task=connector AND a pristine verb,
+    -- so a bare verb without the connector marker, or an injection that adds
+    -- metacharacters / a path / a non-verb word, still fires even with
+    -- task=connector appended as evasion.
+    {"action=mk_file_folder_manager&cmd=ls",   "CMD_CMD",       "bare cmd=ls, no connector"},
+    {"task=connector&cmd=rm;cat+/etc/passwd",  "CMD_CMD",       "connector evasion + metachar"},
+    {"task=connector&cmd=cat+/etc/passwd",     "CMD_CMD",       "connector evasion + path"},
+    -- `task` must be a real key == connector; the marker buried in another
+    -- param's value must NOT enable the carve-out (key-precise check).
+    {"foo=task=connector&cmd=rm",              "CMD_CMD",       "task=connector as other param's value"},
   }
   for _, c in ipairs(tp_cases) do
     local hit, reason = waf.check(fresh_ctx({ uri = "/", args = c[1] }))

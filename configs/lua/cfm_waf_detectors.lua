@@ -877,6 +877,33 @@ local function arg_value(a, k)
   return rest
 end
 
+-- elFinder (the file-manager library behind Joomla's K2 media manager,
+-- com_media, and similar `task=connector` endpoints) drives every operation
+-- through `cmd=<verb>`. A few of its verbs — ls / rm / mkdir / chmod — are
+-- also shell-command names, so a *bare* elFinder verb trips
+-- value_looks_shelly's word match and gets the admin challenged mid-upload
+-- ("Invalid backend response. Data is not JSON." because the elFinder XHR
+-- receives the challenge redirect instead of JSON). Suppress that single
+-- collision: only when the request is a Joomla elFinder connector call
+-- (task=connector) AND the cmd value is a pristine, single elFinder verb.
+-- A real injection through cmd= still carries a metacharacter, a path, or a
+-- non-verb shell word, none of which match here, so it is still flagged.
+local ELFINDER_VERBS = {
+  open = true, file = true, tree = true, parents = true, ls = true,
+  tmb = true, size = true, dim = true, mkdir = true, mkfile = true,
+  rm = true, rename = true, duplicate = true, paste = true, upload = true,
+  get = true, put = true, archive = true, extract = true, search = true,
+  info = true, resize = true, netmount = true, url = true, callback = true,
+  chmod = true, zipdl = true, abort = true, editor = true,
+}
+local function is_elfinder_verb(a, v)
+  -- Require the verb to be exact AND `task` to be a real query parameter
+  -- equal to "connector" (not the substring "task=connector" buried inside
+  -- another param's value — a key-precise check, per review).
+  if not v or ELFINDER_VERBS[v] ~= true then return false end
+  return arg_value(a, "task") == "connector"
+end
+
 function _M.detect_cmd_param_key(args)
   local a = normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
@@ -907,7 +934,7 @@ function _M.detect_cmd_param_key(args)
   end
   if key("cmd") then
     local v = arg_value(a, "cmd")
-    if value_looks_shelly(v) then return "CMD_CMD" end
+    if value_looks_shelly(v) and not is_elfinder_verb(a, v) then return "CMD_CMD" end
   end
   if key("command") then
     local v = arg_value(a, "command")
