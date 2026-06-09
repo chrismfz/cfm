@@ -897,8 +897,11 @@ local ELFINDER_VERBS = {
   chmod = true, zipdl = true, abort = true, editor = true,
 }
 local function is_elfinder_verb(a, v)
-  if not v or not has(a, "task=connector") then return false end
-  return ELFINDER_VERBS[v] == true
+  -- Require the verb to be exact AND `task` to be a real query parameter
+  -- equal to "connector" (not the substring "task=connector" buried inside
+  -- another param's value — a key-precise check, per review).
+  if not v or ELFINDER_VERBS[v] ~= true then return false end
+  return arg_value(a, "task") == "connector"
 end
 
 function _M.detect_cmd_param_key(args)

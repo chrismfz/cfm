@@ -1383,6 +1383,9 @@ do
     {"action=mk_file_folder_manager&cmd=ls",   "CMD_CMD",       "bare cmd=ls, no connector"},
     {"task=connector&cmd=rm;cat+/etc/passwd",  "CMD_CMD",       "connector evasion + metachar"},
     {"task=connector&cmd=cat+/etc/passwd",     "CMD_CMD",       "connector evasion + path"},
+    -- `task` must be a real key == connector; the marker buried in another
+    -- param's value must NOT enable the carve-out (key-precise check).
+    {"foo=task=connector&cmd=rm",              "CMD_CMD",       "task=connector as other param's value"},
   }
   for _, c in ipairs(tp_cases) do
     local hit, reason = waf.check(fresh_ctx({ uri = "/", args = c[1] }))
