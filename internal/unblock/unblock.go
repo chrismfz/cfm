@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -155,7 +156,14 @@ func Do(ctx context.Context, ip net.IP, opts Options) (*Result, error) {
 			runCmd(ctx, r, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", "captcha", ip.String())
 			// Προαιρετικά: να μπει white όταν προέρχεται από feeds
 			if len(r.FromFeeds) > 0 {
-				runCmd(ctx, r, SrcImunify, "imunify360-agent", "ip-list", "local", "add", "--purpose", "white", "--comment", "CFM auto-unblock", ip.String())
+				whiteArgs := []string{"ip-list", "local", "add", "--purpose", "white", "--comment", "CFM auto-unblock", ip.String()}
+				// imunify defaults to a PERMANENT entry; bound it to the
+				// same TTL as the nft allow override (--expiration wants
+				// an absolute unix timestamp, not a duration).
+				if opts.AllowTTL != nil && *opts.AllowTTL > 0 {
+					whiteArgs = append(whiteArgs, "--expiration", strconv.FormatInt(time.Now().Add(*opts.AllowTTL).Unix(), 10))
+				}
+				runCmd(ctx, r, SrcImunify, "imunify360-agent", whiteArgs...)
 			}
 		}()
 	} else {

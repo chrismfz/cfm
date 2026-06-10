@@ -44,7 +44,7 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
         Reporter:       c,          // θα στείλει reason "feeds:..." ή "manual"
         ReportWhy:      "agent",
         SendAPI:        false,
-        Fail2BanUnban:  true,      // baby-step: OFF στον agent για να αποφύγουμε loops
+        Fail2BanUnban:  true,      // clear fail2ban bans too on agent-driven unblocks
     })
     if err != nil {
         logging.LogfAPI("[unblock] unified unblock failed for %s: %v", ipStr, err)

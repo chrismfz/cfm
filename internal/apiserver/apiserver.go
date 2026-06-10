@@ -6,6 +6,7 @@
 //   /login, /logout, /login/verify  — public auth routes
 //   /debug/pprof/                   — profiling
 //   /unblock                        — manual IP unblock
+//   /search                         — read-only multi-source IP lookup
 //   /api/v1/firewall/block          — manual IP block
 //   /api/v1/system/                 — system status
 //   /api/v1/auth/token              — scoped token issuance (admin token required)
@@ -197,6 +198,7 @@ func Start(
 	// ── Firewall action endpoints ─────────────────────────────────────────────
 	RegisterUnblock(m, be, cfgDir)
 	RegisterBlock(m, be)
+	RegisterSearch(m, be, cfgDir) // read-only multi-source IP lookup
 
 	// ── System status ─────────────────────────────────────────────────────────
 	RegisterSystemStatus(m, be)
