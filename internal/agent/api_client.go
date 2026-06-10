@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"cfm/internal/locate"
 	"cfm/internal/logging"
 	"cfm/internal/reporting"
 
@@ -154,10 +156,21 @@ func (c *APIClient) FetchPendingUnblocks() ([]PendingUnblock, error) {
 	return out.Pending, nil
 }
 
-func (c *APIClient) ConfirmUnblock(id int, ip string, success bool) error {
+// ConfirmUnblock reports completion to cfm-web. When found is non-nil and
+// has locations, they ride along as "found_on" so the central unblock table
+// and notifications can show WHERE the IP was actually blocked on this
+// server (nft set, csf file, fail2ban jail, imunify list) and why.
+func (c *APIClient) ConfirmUnblock(id int, ip string, success bool, found *locate.Result) error {
 	u := strings.TrimRight(c.BaseURL, "/") + "/api/blocklist/unblock-confirm"
 
-	bodyBytes, _ := json.Marshal(map[string]any{"id": id, "ip": ip, "success": success})
+	body := map[string]any{"id": id, "ip": ip, "success": success}
+	if host, err := os.Hostname(); err == nil && host != "" {
+		body["hostname"] = host
+	}
+	if found != nil && len(found.Locations) > 0 {
+		body["found_on"] = found.Locations
+	}
+	bodyBytes, _ := json.Marshal(body)
 	req, err := http.NewRequest("POST", u, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("confirm unblock build request: %w", err)

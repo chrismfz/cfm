@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/locate"
 	"cfm/internal/logging"
 	"cfm/internal/unblock"
 )
@@ -155,12 +156,35 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 		})
 
 		// ── 5. Fire-and-forget cleanup ─────────────────────────────────────
-		go func(ip net.IP, requester string) {
+		go func(ip net.IP, requester string, wasBlocked bool) {
 			bgStart := time.Now()
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
+			// Where-&-why search before the cross-layer cleanup. The nft
+			// entry was already removed in the fast path above, so when
+			// wasBlocked we reinstate it in the report synthetically.
+			lctx, lcancel := context.WithTimeout(ctx, 10*time.Second)
+			locRes, lerr := locateFind(lctx, ip.String(), locate.Options{BE: be, ConfigDir: cfgDir})
+			lcancel()
+			if lerr == nil && locRes != nil {
+				if wasBlocked {
+					set := "block_v4"
+					if ip.To4() == nil {
+						set = "block_v6"
+					}
+					locRes.Locations = append([]locate.Location{
+						{Source: "nft", List: set, Action: locate.ActionBlock, Match: ip.String()},
+					}, locRes.Locations...)
+				}
+				for _, l := range locRes.Locations {
+					logging.LogfAPI("[unblock.found] ip=%s source=%s list=%s action=%s match=%s reason=%q",
+						ip.String(), l.Source, l.List, l.Action, l.Match, l.Reason)
+				}
+			}
+
 			ttl := 24 * time.Hour
+			whiteTTL := time.Hour // imunify grace window, mirrors cfm-web's 1h greylist
 			res, _ := unblockDo(ctx, ip, unblock.Options{
 				BE:            be,
 				ConfigDir:     cfgDir,
@@ -171,6 +195,7 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 				SendAPI:       false,
 				Fail2BanUnban: true,
 				// RemoveFromFeeds: true,
+				ImunifyWhiteTTL: &whiteTTL,
 			})
 
 			elapsed := time.Since(bgStart)
@@ -191,6 +216,6 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 					ip.String(), s.Source, s.Action, s.Dur, s.Feeds, s.Err, detail,
 				)
 			}
-		}(ip, requester)
+		}(ip, requester, wasBlocked)
 	}
 }
