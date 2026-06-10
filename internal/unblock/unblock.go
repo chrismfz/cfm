@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,11 +63,17 @@ type Options struct {
 	BE            firewall.Backend   // nft backend
 	ConfigDir     string             // για cfm.deny
 	TempWhitelist bool               // αν είναι από feeds -> κάνε allow override
-	AllowTTL      *time.Duration     // TTL whitelist (nil = permanent)
+	AllowTTL      *time.Duration     // TTL whitelist (nil/0 = PERMANENT — also governs the imunify white expiration; always set it)
 	Reporter      reporting.Reporter // optional: για ReportUnblock/Block
 	ReportWhy     string             // π.χ. "cli" ή "agent"
 	SendAPI       bool               // αν θέλουμε να γίνει report/unblock
 	Fail2BanUnban bool
+	// ImunifyWhiteTTL, when set, adds an imunify white entry on EVERY
+	// unblock (not just feeds-origin ones) with this TTL. This is the
+	// grace window that stops imunify's own engine from re-greylisting
+	// the visitor seconds after we cleared them — without it, a user
+	// bounced by imunify GRAY can loop: unblock → re-greylist → unblock.
+	ImunifyWhiteTTL *time.Duration
 }
 
 // ----------------------------------------------
@@ -153,9 +160,20 @@ func Do(ctx context.Context, ip net.IP, opts Options) (*Result, error) {
 			defer wg.Done()
 			runCmd(ctx, r, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", "drop", ip.String())
 			runCmd(ctx, r, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", "captcha", ip.String())
-			// Προαιρετικά: να μπει white όταν προέρχεται από feeds
-			if len(r.FromFeeds) > 0 {
-				runCmd(ctx, r, SrcImunify, "imunify360-agent", "ip-list", "local", "add", "--purpose", "white", "--comment", "CFM auto-unblock", ip.String())
+			// White entry: always when ImunifyWhiteTTL is set (manual-unblock
+			// grace window), otherwise only for feeds-origin blocks.
+			whiteTTL := opts.AllowTTL
+			if opts.ImunifyWhiteTTL != nil && *opts.ImunifyWhiteTTL > 0 {
+				whiteTTL = opts.ImunifyWhiteTTL
+			}
+			if len(r.FromFeeds) > 0 || (opts.ImunifyWhiteTTL != nil && *opts.ImunifyWhiteTTL > 0) {
+				whiteArgs := []string{"ip-list", "local", "add", "--purpose", "white", "--comment", "CFM auto-unblock", ip.String()}
+				// imunify defaults to a PERMANENT entry; bound it
+				// (--expiration wants an absolute unix timestamp).
+				if whiteTTL != nil && *whiteTTL > 0 {
+					whiteArgs = append(whiteArgs, "--expiration", strconv.FormatInt(time.Now().Add(*whiteTTL).Unix(), 10))
+				}
+				runCmd(ctx, r, SrcImunify, "imunify360-agent", whiteArgs...)
 			}
 		}()
 	} else {

@@ -13,6 +13,7 @@ import (
 	agentpkg "cfm/internal/agent"
 	"cfm/internal/firewall"
 	ipquery "cfm/internal/ipquery"
+	"cfm/internal/locate"
 	"cfm/internal/reporting"
 	"cfm/internal/unblock"
 )
@@ -54,15 +55,23 @@ func RunUnblock(args []string, be firewall.Backend, cfgDir string, tableExists f
 		}
 	}
 
+	// Where-&-why search before anything is removed.
+	var foundOn []locate.Location
+	if lres, lerr := locate.FindWithTimeout(ip.String(), locate.Options{BE: be, ConfigDir: cfgDir}, 15*time.Second); lerr == nil {
+		foundOn = lres.Locations
+	}
+
 	ttl := 1 * time.Hour
+	whiteTTL := 1 * time.Hour // imunify grace window
 	res, err := unblock.Do(context.Background(), ip, unblock.Options{
-		BE:            be,
-		ConfigDir:     cfgDir,
-		TempWhitelist: true,
-		AllowTTL:      &ttl,
-		Reporter:      reporter,
-		ReportWhy:     "cli",
-		SendAPI:       sendAPI,
+		BE:              be,
+		ConfigDir:       cfgDir,
+		TempWhitelist:   true,
+		AllowTTL:        &ttl,
+		Reporter:        reporter,
+		ReportWhy:       "cli",
+		SendAPI:         sendAPI,
+		ImunifyWhiteTTL: &whiteTTL,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "unblock error:", err)
@@ -71,6 +80,13 @@ func RunUnblock(args []string, be firewall.Backend, cfgDir string, tableExists f
 
 	suffix := ipquery.EnrichSuffix(cfgDir, ip.String())
 	fmt.Printf("Unblock report for %s%s\n", ip, suffix)
+	for _, l := range foundOn {
+		reason := ""
+		if l.Reason != "" {
+			reason = " — " + l.Reason
+		}
+		fmt.Printf(" * was %s via %s %s [%s]%s\n", l.Action, l.Source, l.List, l.Match, reason)
+	}
 	for _, s := range res.Steps {
 		feeds := ""
 		if len(s.Feeds) > 0 {

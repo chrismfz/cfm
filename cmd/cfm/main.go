@@ -362,7 +362,7 @@ Usage:
   cfm auth ... -- authentication/user-session management for cfm-admin UI (OpenResty proxy and direct UI ports like 6060/6061 /cfm-admin)
   cfm daemon [--interval 20s]
   cfm flush
-  cfm which <IP> [--json]   -- search <IP>
+  cfm which <IP|CIDR> [--json]   -- search <IP|CIDR> across nft, cfm.deny, csf, fail2ban, imunify360
   cfm asn <AS12345> [--json] -- list announced prefixes for ASN
   cfm htpasswd <username> [password] -- legacy quick helper: generate OpenResty/htpasswd-compatible bcrypt ($2y$) entry
   cfm status [--json] [--timings] [--ttl-summary] [--cache-ttl 5s]

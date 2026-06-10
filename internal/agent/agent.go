@@ -14,6 +14,7 @@ import (
 
 	"cfm/internal/dnat"
 	"cfm/internal/firewall"
+	"cfm/internal/locate"
 	"cfm/internal/logging"
 	"net"
 )
@@ -91,6 +92,24 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
 		return
 	}
 
+	// Where-&-why search BEFORE any removal, so the nft state is still
+	// intact when we capture it. Results ride back on unblock-confirm.
+	found := make(map[int]*locate.Result, len(reqs))
+	for _, it := range reqs {
+		lctx, lcancel := context.WithTimeout(ctx, 15*time.Second)
+		res, lerr := locate.Find(lctx, it.IP, locate.Options{BE: r.backend, ConfigDir: r.cfgDir})
+		lcancel()
+		if lerr != nil {
+			logging.LogfAPI("[unblock] locate failed ip=%s: %v", it.IP, lerr)
+			continue
+		}
+		found[it.ID] = res
+		for _, l := range res.Locations {
+			logging.LogfAPI("[unblock.found] ip=%s source=%s list=%s action=%s match=%s reason=%q",
+				it.IP, l.Source, l.List, l.Action, l.Match, l.Reason)
+		}
+	}
+
 	// batch-remove all IPs from nft in ONE process call
 	ips := make([]net.IP, 0, len(reqs))
 	for _, it := range reqs {
@@ -119,7 +138,7 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
 	// confirm each sequentially (API calls, not nft)
 	for _, it := range reqs {
 		logging.LogfAPI("[unblock] pending ip=%s (id=%d) — processing", it.IP, it.ID)
-		api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP)
+		api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP, found[it.ID])
 	}
 }
 
