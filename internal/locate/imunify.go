@@ -46,6 +46,9 @@ func searchImunify(ctx context.Context, q *query) ([]Location, string) {
 
 	// Miss: a plain-IP query might still be covered by a subnet entry
 	// --by-ip didn't surface. Pull the list (bounded) and match locally.
+	// NOTE: entries beyond the 10k cap are not examined — on lists that
+	// large a covering subnet entry past the cap would be missed. The cap
+	// keeps the miss-path cost bounded; raise it if real lists approach it.
 	if q.ip != nil {
 		out, err = runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--limit", "10000", "--json")
 		if err == nil {
@@ -87,26 +90,23 @@ func parseImunifyList(raw []byte) []imunifyItem {
 	}
 	items := make([]imunifyItem, 0, len(arr))
 	for _, e := range arr {
-		m, ok := e.(map[string]any)
+		raw, ok := e.(map[string]any)
 		if !ok {
 			continue
 		}
-		get := func(key string) any {
-			for k, v := range m {
-				if strings.EqualFold(k, key) {
-					return v
-				}
-			}
-			return nil
+		// Normalize keys once: docs show uppercase, agents emit lowercase.
+		m := make(map[string]any, len(raw))
+		for k, v := range raw {
+			m[strings.ToLower(k)] = v
 		}
 		str := func(key string) string {
-			if s, ok := get(key).(string); ok {
+			if s, ok := m[key].(string); ok {
 				return s
 			}
 			return ""
 		}
 		num := func(key string) int64 {
-			switch n := get(key).(type) {
+			switch n := m[key].(type) {
 			case float64:
 				return int64(n)
 			case string:

@@ -179,6 +179,34 @@ func TestParseF2BBannedDump(t *testing.T) {
 	if _, ok := parseF2BBannedDump("Usage: fail2ban-client ..."); ok {
 		t.Error("usage text should not parse as a dump")
 	}
+
+	// unquoted range entries keep their dash
+	jails, ok = parseF2BBannedDump(`[{'sshd': [1.2.3.4-1.2.3.10]}]`)
+	if !ok || len(jails["sshd"]) != 1 || jails["sshd"][0] != "1.2.3.4-1.2.3.10" {
+		t.Errorf("unquoted range: %v", jails["sshd"])
+	}
+
+	// a dict missing its ':' must not leak entries into the previous jail
+	jails, ok = parseF2BBannedDump(`[{'sshd': ['1.2.3.4']}, {'broken' ['5.6.7.8']}]`)
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	for _, e := range jails["sshd"] {
+		if e == "5.6.7.8" {
+			t.Errorf("entry leaked across dict boundary into sshd: %v", jails["sshd"])
+		}
+	}
+}
+
+func TestScanListFileLongLine(t *testing.T) {
+	// one >64KB junk line must not abort scanning of later entries
+	long := strings.Repeat("x", 80*1024)
+	content := long + "\n1.2.3.4 # after the long line\n"
+	q := mustQuery(t, "1.2.3.4")
+	locs := scanListFile(strings.NewReader(content), "csf", "csf.deny", ActionBlock, q)
+	if len(locs) != 1 {
+		t.Fatalf("entry after long line was lost: %+v", locs)
+	}
 }
 
 func TestParseF2BStatusFallback(t *testing.T) {

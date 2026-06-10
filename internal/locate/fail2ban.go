@@ -105,17 +105,23 @@ func parseF2BBannedDump(s string) (map[string][]string, bool) {
 				}
 				continue
 			}
-		case ',', ']', '}', '[', '{':
+		case ',', ']', '[':
 			if !inStr {
 				flush()
+				continue
+			}
+		case '}', '{':
+			if !inStr {
+				flush()
+				cur = "" // dict boundary: never attribute later tokens to a previous jail
 				continue
 			}
 		}
 		if inStr {
 			tok.WriteRune(r)
-		} else if r == ':' || r == '.' || r == '/' || (r >= '0' && r <= '9') ||
+		} else if r == ':' || r == '.' || r == '-' || r == '/' || (r >= '0' && r <= '9') ||
 			(r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
-			// bare tokens (unquoted IPs) — hex chars cover IPv6
+			// bare tokens (unquoted IPs/ranges) — hex chars cover IPv6
 			tok.WriteRune(r)
 		}
 	}

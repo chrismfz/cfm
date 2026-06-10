@@ -63,7 +63,7 @@ type Options struct {
 	BE            firewall.Backend   // nft backend
 	ConfigDir     string             // για cfm.deny
 	TempWhitelist bool               // αν είναι από feeds -> κάνε allow override
-	AllowTTL      *time.Duration     // TTL whitelist (nil = permanent)
+	AllowTTL      *time.Duration     // TTL whitelist (nil/0 = PERMANENT — also governs the imunify white expiration; always set it)
 	Reporter      reporting.Reporter // optional: για ReportUnblock/Block
 	ReportWhy     string             // π.χ. "cli" ή "agent"
 	SendAPI       bool               // αν θέλουμε να γίνει report/unblock

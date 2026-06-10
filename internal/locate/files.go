@@ -40,11 +40,20 @@ func searchCFMDeny(cfgDir string, q *query) ([]Location, error) {
 	return scanListFile(f, "cfm.deny", "cfm.deny", ActionBlock, q), nil
 }
 
+// listScanner returns a line scanner with a 1MB token limit: the default
+// 64KB cap would make Scan() abort on one pathological line and silently
+// skip every entry after it.
+func listScanner(r io.Reader) *bufio.Scanner {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	return sc
+}
+
 // scanListFile handles the common "<ip-or-cidr> [# comment]" format used
 // by cfm.deny, csf.deny and csf.allow.
 func scanListFile(r io.Reader, source, list, action string, q *query) []Location {
 	var out []Location
-	sc := bufio.NewScanner(r)
+	sc := listScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -159,7 +168,7 @@ func searchCSF(opts Options, q *query) ([]Location, string) {
 // take the last field as the comment.
 func scanCSFTempFile(r io.Reader, list, action string, q *query) []Location {
 	var out []Location
-	sc := bufio.NewScanner(r)
+	sc := listScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {

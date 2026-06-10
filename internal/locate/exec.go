@@ -7,6 +7,7 @@ package locate
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 )
 
@@ -55,8 +56,4 @@ func runOut(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
-type blockedBinaryError struct{}
-
-func (blockedBinaryError) Error() string { return "binary not in allowlist" }
-
-var errBlockedBinary = blockedBinaryError{}
+var errBlockedBinary = errors.New("binary not in allowlist")
