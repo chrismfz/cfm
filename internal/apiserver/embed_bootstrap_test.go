@@ -374,6 +374,101 @@ func TestTokenMiddlewareAllowsEmbeddedScopedBootstrapCookieForCfmAdminPath(t *te
 	}
 }
 
+// In production the OpenResty/angie proxy rewrites /cfm-admin/(.*) -> /$1 before
+// forwarding, so the daemon sees /api/... with the original prefix only in the
+// trusted X-CFM-Base / X-Forwarded-Prefix headers from the loopback peer. This
+// is the cPanel-plugin iframe topology that the literal-path guard regressed:
+// the embed bootstrap cookie was set correctly but ignored on every API call,
+// leaving the iframe with "authorization required". Exercise the stripped-path
+// case directly.
+func TestEmbedScopedContextFromCookieProxiedStrippedPath(t *testing.T) {
+	useTestEmbedCookieSigningKey(t)
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+
+	// Path as the daemon sees it after the proxy strips /cfm-admin.
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/challenge/exclude/list", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-CFM-Base", "/cfm-admin")
+	cookieValue, err := encodeEmbedCookie(req, st.ID, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("encode cookie: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: embedBootstrapCookieName, Value: cookieValue})
+
+	rr := httptest.NewRecorder()
+	ctx, ok := embedScopedContextFromCookie(rr, req, store)
+	if !ok || ctx == nil {
+		t.Fatalf("expected proxied (prefix-stripped) request to authenticate via bootstrap cookie")
+	}
+	if scope, _ := ctx.Value(webdet.CtxScopeKey{}).(map[string]struct{}); scope == nil {
+		t.Fatalf("expected scoped context from bootstrap cookie")
+	}
+}
+
+// The bootstrap cookie is path-scoped to /cfm-admin/ and must not authorize
+// arbitrary /api requests that do not resolve to the CFM admin base — e.g. a
+// non-loopback caller (no trusted prefix header) hitting /api directly.
+func TestEmbedScopedContextFromCookieRejectsNonAdminBase(t *testing.T) {
+	useTestEmbedCookieSigningKey(t)
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/challenge/exclude/list", nil)
+	req.RemoteAddr = "203.0.113.9:54321" // not loopback: X-CFM-Base is untrusted
+	req.Header.Set("X-CFM-Base", "/cfm-admin")
+	cookieValue, err := encodeEmbedCookie(req, st.ID, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("encode cookie: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: embedBootstrapCookieName, Value: cookieValue})
+
+	rr := httptest.NewRecorder()
+	if _, ok := embedScopedContextFromCookie(rr, req, store); ok {
+		t.Fatalf("expected cookie to be ignored for non-admin-base request")
+	}
+}
+
+// End-to-end through TokenMiddleware: the exact production request that was
+// returning "authorization required" for the cPanel-plugin iframe — an XHR to
+// /api/v1/challenge/exclude/list arriving from the loopback proxy with the
+// /cfm-admin prefix stripped and carried in X-CFM-Base, bearing only the embed
+// bootstrap cookie (no Authorization header).
+func TestTokenMiddlewareAllowsProxiedEmbedCookieForStrippedAPIPath(t *testing.T) {
+	useTestEmbedCookieSigningKey(t)
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.com"}, nil, nil, "viewer", "embed", time.Hour)
+
+	called := false
+	h := TokenMiddleware("admin-secret", store)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{}); scope == nil {
+			t.Fatalf("expected scoped context from bootstrap cookie")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/challenge/exclude/list", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-CFM-Base", "/cfm-admin")
+	req.Header.Set("Accept", "application/json")
+	cookieValue, err := encodeEmbedCookie(req, st.ID, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("encode cookie: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: embedBootstrapCookieName, Value: cookieValue})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if !called {
+		t.Fatalf("expected handler to be reached, got status %d body=%q", rr.Code, rr.Body.String())
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d got %d", http.StatusOK, rr.Code)
+	}
+}
+
 func TestDecodeEmbedCookieRejectsTamperedSignature(t *testing.T) {
 	useTestEmbedCookieSigningKey(t)
 	req := httptest.NewRequest(http.MethodGet, "https://host/cfm-admin/", nil)

@@ -320,7 +320,14 @@ func embedScopedContextFromCookie(w http.ResponseWriter, r *http.Request, store 
 	if r == nil || store == nil {
 		return nil, false
 	}
-	if !strings.HasPrefix(r.URL.Path, "/cfm-admin/") && r.URL.Path != "/cfm-admin" {
+	// The embed bootstrap cookie is scoped (Path=/cfm-admin/) and must only be
+	// honored for requests under the CFM admin base. Behind the OpenResty/angie
+	// proxy the /cfm-admin/ prefix is rewritten away before the request reaches
+	// us (r.URL.Path becomes /api/...), with the original prefix carried in the
+	// trusted X-CFM-Base / X-Forwarded-Prefix headers. cfmBase() collapses both
+	// topologies (direct :6061 access and proxied) to the effective base, so the
+	// cookie auth path works in production and not just direct-access tests.
+	if cfmBase(r) != "/cfm-admin" {
 		return nil, false
 	}
 	c, err := r.Cookie(embedBootstrapCookieName)
@@ -511,7 +518,7 @@ func decodeSignedEmbedCookie(r *http.Request, v string) (bool, string, bool, tim
 	if time.Now().After(expiry) {
 		return false, "", false, time.Time{}
 	}
-	if pfx := strings.TrimSpace(claims.Get("pfx")); pfx != "" && r != nil && !strings.HasPrefix(r.URL.Path, pfx) {
+	if pfx := strings.TrimSpace(claims.Get("pfx")); pfx != "" && r != nil && !requestWithinEmbedPrefix(r, pfx) {
 		return false, "", false, time.Time{}
 	}
 	if hostClaim := strings.TrimSpace(claims.Get("hst")); hostClaim != "" && r != nil {
@@ -525,6 +532,28 @@ func decodeSignedEmbedCookie(r *http.Request, v string) (bool, string, bool, tim
 		}
 	}
 	return true, tokenRef, false, expiry
+}
+
+// requestWithinEmbedPrefix reports whether r targets a path under the embed
+// cookie's bound prefix (pfx claim, e.g. "/cfm-admin/"). For direct :6061
+// access the literal request path still carries the prefix. Behind the
+// OpenResty/angie proxy the prefix is rewritten away before the request reaches
+// us (the path becomes /api/...), with the original prefix carried in the
+// trusted X-CFM-Base / X-Forwarded-Prefix headers — so fall back to the
+// effective base. A non-loopback caller cannot spoof the base header, so a bare
+// /api request without the prefix is still correctly rejected.
+func requestWithinEmbedPrefix(r *http.Request, pfx string) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if strings.HasPrefix(r.URL.Path, pfx) {
+		return true
+	}
+	base := cfmBase(r)
+	if base == "" {
+		return false
+	}
+	return strings.TrimRight(base, "/") == strings.TrimRight(pfx, "/")
 }
 
 func buildEmbedCookiePayload(r *http.Request, tokenRef string, expiry time.Time) string {
