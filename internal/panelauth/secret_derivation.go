@@ -49,14 +49,7 @@ func loadAuthTokenFromRuntimeConfig() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	token := strings.TrimSpace(cfg.API.AuthToken)
-	// AUTH_TOKEN is conventionally set in the cfm.api.conf overlay, not the base
-	// cfm.conf the daemon/CLI honor that precedence (cli.LoadConfigWithAPIOverride),
-	// so mirror it here or the derived key won't match the token in use.
-	if overlay := cfgpkg.OverlayAPIAuthToken(filepath.Dir(cfgPath)); overlay != "" {
-		token = overlay
-	}
-	return token, nil
+	return strings.TrimSpace(cfg.API.AuthToken), nil
 }
 
 func loadConfigFromPath(cfgPath string) (*cfgpkg.Config, error) {
@@ -67,6 +60,15 @@ func loadConfigFromPath(cfgPath string) (*cfgpkg.Config, error) {
 	cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(b))
 	if err != nil {
 		return nil, fmt.Errorf("auth_token_parse_error: %w", err)
+	}
+	// AUTH_TOKEN (and other per-server API secrets) are conventionally stored in
+	// the cfm.api.conf overlay so the base cfm.conf can be regenerated without
+	// clobbering them. Apply that overlay here — matching the precedence the
+	// daemon/CLI use via cli.LoadConfigWithAPIOverride — so every panelauth
+	// consumer (assertion-key derivation, scoped-token mint, UI base URL) sees
+	// the effective token instead of an empty one.
+	if overlay := cfgpkg.OverlayAPIAuthToken(filepath.Dir(cfgPath)); overlay != "" {
+		cfg.API.AuthToken = overlay
 	}
 	return cfg, nil
 }
