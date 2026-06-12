@@ -49,7 +49,14 @@ func loadAuthTokenFromRuntimeConfig() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(cfg.API.AuthToken), nil
+	token := strings.TrimSpace(cfg.API.AuthToken)
+	// AUTH_TOKEN is conventionally set in the cfm.api.conf overlay, not the base
+	// cfm.conf the daemon/CLI honor that precedence (cli.LoadConfigWithAPIOverride),
+	// so mirror it here or the derived key won't match the token in use.
+	if overlay := cfgpkg.OverlayAPIAuthToken(filepath.Dir(cfgPath)); overlay != "" {
+		token = overlay
+	}
+	return token, nil
 }
 
 func loadConfigFromPath(cfgPath string) (*cfgpkg.Config, error) {

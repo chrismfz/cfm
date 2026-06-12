@@ -621,7 +621,14 @@ func loadAuthTokenFromRuntimeConfig() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(cfg.API.AuthToken), nil
+	token := strings.TrimSpace(cfg.API.AuthToken)
+	// AUTH_TOKEN is conventionally set in the cfm.api.conf overlay, not the base
+	// cfm.conf; mirror the daemon/CLI precedence (cli.LoadConfigWithAPIOverride)
+	// so the embed cookie signing key matches the token actually in use.
+	if overlay := cfgpkg.OverlayAPIAuthToken(filepath.Dir(cfgPath)); overlay != "" {
+		token = overlay
+	}
+	return token, nil
 }
 
 func resolveRuntimeCFMConfPath() (string, error) {
