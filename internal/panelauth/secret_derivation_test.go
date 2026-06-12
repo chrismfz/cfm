@@ -76,9 +76,38 @@ func TestDerivePluginAssertionKeyHonorsAPIOverlay(t *testing.T) {
 	}
 }
 
-// When both files set AUTH_TOKEN, the overlay wins (matching
-// cli.LoadConfigWithAPIOverride precedence).
-func TestDerivePluginAssertionKeyOverlayOverridesBase(t *testing.T) {
+// The overlay is applied centrally in loadConfigFromPath, so the scoped-token
+// mint config (which authenticates to the local apiserver with the admin token)
+// must also see the overlay token rather than failing with auth_token_missing.
+func TestLoadRuntimeAPIAuthConfigHonorsAPIOverlay(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cfm.conf"), []byte("API_URL=https://example.test\n"), 0o600); err != nil {
+		t.Fatalf("write cfm.conf: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cfm.api.conf"), []byte("AUTH_TOKEN = \"overlay-token\"\n"), 0o600); err != nil {
+		t.Fatalf("write cfm.api.conf: %v", err)
+	}
+	prev := os.Getenv("CFM_CONFIG_DIR")
+	if err := os.Setenv("CFM_CONFIG_DIR", dir); err != nil {
+		t.Fatalf("setenv: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Setenv("CFM_CONFIG_DIR", prev) })
+
+	apiURL, token, err := loadRuntimeAPIAuthConfig()
+	if err != nil {
+		t.Fatalf("expected overlay token to satisfy mint config, got error: %v", err)
+	}
+	if token != "overlay-token" {
+		t.Fatalf("expected overlay-token, got %q", token)
+	}
+	if apiURL == "" {
+		t.Fatalf("expected non-empty api url")
+	}
+}
+
+// Overlay AUTH_TOKEN wins over a value in the base cfm.conf (matching
+// cli.LoadConfigWithAPIOverride precedence), enforced once in loadConfigFromPath.
+func TestLoadRuntimeAPIAuthConfigOverlayOverridesBase(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "cfm.conf"), []byte("AUTH_TOKEN=base-token\n"), 0o600); err != nil {
 		t.Fatalf("write cfm.conf: %v", err)
@@ -92,16 +121,12 @@ func TestDerivePluginAssertionKeyOverlayOverridesBase(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Setenv("CFM_CONFIG_DIR", prev) })
 
-	got, err := DerivePluginAssertionKey()
+	_, token, err := loadRuntimeAPIAuthConfig()
 	if err != nil {
-		t.Fatalf("derive: %v", err)
+		t.Fatalf("loadRuntimeAPIAuthConfig: %v", err)
 	}
-	want, err := hkdf.Key(sha256.New, []byte("overlay-token"), []byte(pluginAssertionHKDFSalt), pluginAssertionHKDFInfo, 32)
-	if err != nil {
-		t.Fatalf("reference derive: %v", err)
-	}
-	if string(got) != string(want) {
-		t.Fatalf("expected overlay AUTH_TOKEN to take precedence over base cfm.conf")
+	if token != "overlay-token" {
+		t.Fatalf("expected overlay AUTH_TOKEN to take precedence over base, got %q", token)
 	}
 }
 
