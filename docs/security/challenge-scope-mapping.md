@@ -58,11 +58,20 @@ Invalid response from http://cpanel.<domain>/__cfm_challenge?next=%2F.well-known
 ```
 
 The carve-out is `/.well-known/`-wide on purpose: it is the RFC 8615 reserved
-namespace for static validation/metadata (also `security.txt`, `mta-sts.txt`,
-`apple-app-site-association`, …), has no application attack surface, and
-matches what cPanel / Imunify / ModSecurity-CRS do. The ordering invariant is
-enforced by `scripts/tests/cfm_well_known_carveout_test.lua` (run via
-`make test-lua`).
+namespace for validation/metadata (also `security.txt`, `mta-sts.txt`,
+`apple-app-site-association`, …) and matches what cPanel / Imunify /
+ModSecurity-CRS and `cfm_panel.lua` do. The ordering invariant is enforced by
+`scripts/tests/cfm_well_known_carveout_test.lua` (run via `make test-lua`).
+
+**Accepted trade-off:** the carve-out routes to the origin *before* the WAF
+rule engine, so it skips WAF for the whole prefix, not only the challenge. A
+few `/.well-known/` endpoints can be application-routed
+(`/.well-known/webfinger`, `/.well-known/openid-configuration`) and therefore
+lose WAF inspection. This is bounded — `uri` is decoded and dot-normalized so
+there is no traversal-out-of-prefix evasion, and the request still reaches the
+normal origin (a WAF-skip, not an auth bypass). If WAF coverage on app-routed
+`.well-known` endpoints is needed, scope the carve-out to `acme-challenge/` +
+`pki-validation/` only.
 
 Verify:
 
