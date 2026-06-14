@@ -28,7 +28,19 @@ type Watcher struct {
 	lastWild  int
 	haveLast  bool
 
+	// shallowRoots are watched one level deep only (a single fs.Add per
+	// path, no recursion). Used for /home* mount tops and per-user home
+	// dirs so that the creation of a NEW user or a NEW ssl/ dir fires a
+	// Create event without recursively watching entire home/web trees.
+	shallowRoots []string
+
 	fs *fsnotify.Watcher
+}
+
+// SetShallowRoots registers directories to be watched one level deep
+// (non-recursive). Call before Start. See the Watcher.shallowRoots field.
+func (w *Watcher) SetShallowRoots(dirs []string) {
+	w.shallowRoots = dirs
 }
 
 func NewWatcher(col *Collector, delay time.Duration) (*Watcher, error) {
@@ -60,6 +72,27 @@ func (w *Watcher) Start(ctx context.Context, roots []string) error {
 	// add all roots recursively
 	for _, root := range roots {
 		_ = w.addRecursive(root)
+	}
+
+	// Shallow watch points (single fs.Add, no recursion): /home* mount
+	// tops and existing per-user home dirs. Watching these one level deep
+	// lets us see the creation of a NEW user (under /home*) or a NEW
+	// ssl/certs/letsencrypt dir / per-domain dir (under a user's home)
+	// and react via handleNewDir — WITHOUT recursively watching entire
+	// home trees (public_html, mail, wp-content, ...), which would add an
+	// inotify watch per file across every customer site.
+	addFail := 0
+	for _, d := range w.shallowRoots {
+		if err := w.fs.Add(d); err != nil {
+			addFail++
+		}
+	}
+	if addFail > 0 {
+		// Most likely fs.inotify.max_user_watches exhaustion. Surface it
+		// once (not per-path) so a silent degrade to the DiscoveryEvery
+		// fallback is diagnosable rather than invisible.
+		logging.Logf("[sslcollector] watcher: %d/%d shallow watch adds failed (inotify limit?); affected paths rely on the discovery rescan fallback — consider raising fs.inotify.max_user_watches",
+			addFail, len(w.shallowRoots))
 	}
 
 	go w.loop(ctx)
@@ -114,17 +147,29 @@ func (w *Watcher) loop(ctx context.Context) {
 				return
 			}
 
-			// only care about meaningful events
-			if !w.isRelevant(ev) {
-				continue
+			// New-directory creation MUST be handled before the
+			// isRelevant() name filter. Panels create per-domain and
+			// per-user directories named after the domain/user (e.g.
+			// /etc/letsencrypt/live/<domain>, /var/cpanel/ssl/apache_tls/
+			// <domain>, /home/<user>) whose paths contain none of the
+			// cert/key/pem substrings isRelevant() looks for. Dropping
+			// them here meant the directory was never added to the watch,
+			// the cert files written inside generated no events (fsnotify
+			// is not recursive), and the new domain stayed invisible until
+			// the next full DiscoveryEvery rescan — up to hours. See
+			// handleNewDir for the per-directory watch/rescan decision.
+			if ev.Op&fsnotify.Create != 0 {
+				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() {
+					w.handleNewDir(ev.Name)
+					continue
+				}
 			}
 
-			// if new dir created → watch it too
-			if ev.Op&fsnotify.Create != 0 {
-				fi, err := os.Stat(ev.Name)
-				if err == nil && fi.IsDir() {
-					_ = w.addRecursive(ev.Name)
-				}
+			// File events: keep the cheap name filter so unrelated write
+			// churn (locks, caches, wp-content, ...) does not trigger a
+			// rescan on every tick.
+			if !w.isRelevant(ev) {
+				continue
 			}
 
 			w.trigger("fsnotify:" + ev.Name)
@@ -191,12 +236,123 @@ func (w *Watcher) isRelevant(ev fsnotify.Event) bool {
 		strings.Contains(name, "key") ||
 		strings.Contains(name, "pem") ||
 		strings.Contains(name, "privkey") ||
-		strings.Contains(name, "fullchain") {
+		strings.Contains(name, "fullchain") ||
+		// Intermediate-chain rotations. DA writes <domain>.cacert (already
+		// caught by "cert") but also legacy ".ca"/".ca-bundle"; Virtualmin
+		// writes ssl.ca. A bare "ca" substring is intentionally NOT used —
+		// it would match "cache"/"location"/"scan" and defeat the filter —
+		// so we anchor on a ".ca" suffix and the longer chain vocabulary.
+		strings.HasSuffix(name, ".ca") ||
+		strings.Contains(name, "bundle") ||
+		strings.Contains(name, "chain") ||
+		strings.Contains(name, "intermediate") {
 		return true
 	}
 
 	// Ignore unrelated file churn (locks, caches, journals, wp-content noise, etc).
 	return false
+}
+
+// certRootPrefixes are the non-home roots that only ever hold certificate
+// material, so any newly-created subdirectory under them is safe to watch
+// recursively and to rescan on.
+var certRootPrefixes = []string{
+	"/etc/letsencrypt",
+	"/var/cpanel/ssl",
+	"/usr/local/directadmin",
+	"/etc/ssl",
+}
+
+// homeMountTopRE matches a home mount top: /home, /home2, /home3, ...
+// Single source of truth for "is this an absolute path to a /home* mount
+// top" — used by both the watcher (handleNewDir) and the collector
+// (homeMounts / homeShallowWatchDirs) so the policy cannot drift.
+var homeMountTopRE = regexp.MustCompile(`^/home[0-9]*$`)
+
+func underCertRoot(path string) bool {
+	for _, r := range certRootPrefixes {
+		if path == r || strings.HasPrefix(path, r+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// newDirAction is the watch/rescan decision for a newly-created directory.
+type newDirAction int
+
+const (
+	actionIgnore    newDirAction = iota // not cert material — don't watch or rescan
+	actionRecursive                     // pure cert tree / per-user cert dir — watch fully + rescan
+	actionShallow                       // home-layout container — watch one level + rescan
+)
+
+// classifyNewDir is the pure decision function for a newly-created
+// directory. Kept side-effect-free so it can be unit-tested directly
+// (handleNewDir performs the fs.Add/trigger side effects). See the case
+// comments for the rationale behind each bucket.
+//
+//   - actionRecursive: pure cert trees that ONLY hold cert material and
+//     are read by discoverPairs (LE /etc/letsencrypt, cPanel
+//     /var/cpanel/ssl, DA /usr/local/directadmin, /etc/ssl) — safe and
+//     desirable to watch fully.
+//   - actionShallow: home-layout containers one level above per-domain
+//     cert material — a brand-new user home (under a /home* mount), a
+//     user's "domains" container, or an individual domain dir. Watched
+//     shallowly so the eventual ssl.key/ssl.cert file creation fires an
+//     event, WITHOUT recursing whole home/web trees (public_html,
+//     wp-content, mail, ...) and exploding inotify watch counts.
+//   - actionIgnore: anything else under a watched home — not cert material.
+//
+// Note: a per-user ~/ssl, ~/certs or ~/letsencrypt dir is intentionally
+// NOT escalated here — no scanner in discoverPairs reads those paths, so
+// watching them recursively would only burn inotify watches and fire
+// no-op rescans. The supported home layout is Virtualmin's
+// <home>/<user>/domains/<domain>/ssl.{key,cert}, covered by actionShallow.
+func classifyNewDir(path string) newDirAction {
+	base := filepath.Base(path)
+	parentBase := filepath.Base(filepath.Dir(path))
+
+	switch {
+	case underCertRoot(path):
+		return actionRecursive
+	case homeMountTopRE.MatchString(filepath.Dir(path)), // new user home
+		base == "domains",       // user's domains container
+		parentBase == "domains": // an individual domain dir
+		return actionShallow
+	default:
+		return actionIgnore
+	}
+}
+
+// handleNewDir applies classifyNewDir's decision to a newly-created
+// directory. It is the counterpart to the dir-create fix in loop(): every
+// new directory gets an explicit decision instead of being silently
+// dropped by the isRelevant() name filter.
+//
+// The trigger()ed Refresh runs a full discoverPairs() ~delay later, which
+// also closes the race where cert files are written into the directory
+// between os.Stat and fs.Add.
+//
+// Residual gap (acknowledged, covered by DiscoveryEvery): an *already
+// existing* intermediate dir — e.g. a Virtualmin user whose
+// domains/<domain>/ dir predates daemon start but has no cert yet — never
+// fires a Create event, so its first-ever cert is picked up by the rescan
+// fallback rather than instantly. Renewals (file already known) and
+// brand-new users/domains (event chain fires) are both covered here.
+func (w *Watcher) handleNewDir(path string) {
+	switch classifyNewDir(path) {
+	case actionRecursive:
+		_ = w.addRecursive(path)
+		w.trigger("fsnotify:newdir:" + path)
+	case actionShallow:
+		if err := w.fs.Add(path); err != nil {
+			logging.Logf("[sslcollector] watcher: shallow add failed path=%s: %v", path, err)
+		}
+		w.trigger("fsnotify:newhome:" + path)
+	default:
+		// actionIgnore: nothing to do.
+	}
 }
 
 func (w *Watcher) addRecursive(root string) error {

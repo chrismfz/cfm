@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -158,28 +157,71 @@ func (c *Collector) GetCertificate(chi *tls.ClientHelloInfo) (*tls.Certificate, 
 	return cc2.cert, nil
 }
 
-func expandGlob(pattern string) []string {
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil
-	}
-	return matches
-}
-
-var homeMountRe = regexp.MustCompile(`^home[0-9]*$`)
-
-func expandHomeUserDirs(subdir string) []string {
+// homeMounts returns the absolute /home[0-9]* mount tops present on the
+// host (/home, /home2, /home3, ...). This is the single source of truth
+// for "which home mounts exist", shared by the watcher (homeShallowWatchDirs)
+// and the scanner (discoverPairs -> scanHomeVirtualmin) so the watch set and
+// the scan set can never disagree about which mounts to cover. A host that
+// adds /home2 when /home fills must not become a discovery blind spot.
+func homeMounts() []string {
 	mounts, err := os.ReadDir("/")
 	if err != nil {
 		return nil
 	}
-
 	out := []string{}
 	for _, m := range mounts {
-		if !m.IsDir() || !homeMountRe.MatchString(m.Name()) {
+		if !m.IsDir() {
 			continue
 		}
-		out = append(out, expandGlob(filepath.Join("/", m.Name(), "*", subdir))...)
+		top := filepath.Join("/", m.Name())
+		if homeMountTopRE.MatchString(top) {
+			out = append(out, top)
+		}
+	}
+	return out
+}
+
+// homeShallowWatchDirs returns the directories the watcher should watch
+// one level deep (non-recursive), backing exactly the home layout the
+// scanner reads (Virtualmin: <home>/<user>/domains/<domain>/ssl.{key,cert}):
+//
+//   - every /home* mount top        → a brand-new user account (reseller-
+//     created) fires a Create event the moment its home dir appears;
+//   - every /home*/<user> dir        → a newly-created "domains" container
+//     (first domain for that user) fires an event;
+//   - every /home*/<user>/domains dir → a newly-created per-domain dir
+//     fires an event, after which the ssl.key/ssl.cert file write inside it
+//     is caught by the file-level isRelevant() filter.
+//
+// Recursive watches on entire home/web trees (public_html, wp-content,
+// mail, ...) are deliberately avoided — they would add an inotify watch
+// per file across every customer site. Renewals of already-discovered
+// certs are covered by the 60s stat loop (knownFiles); the first-ever cert
+// in a domain dir that predated startup is covered by the DiscoveryEvery
+// rescan (now correct for all home mounts).
+func homeShallowWatchDirs() []string {
+	out := []string{}
+	for _, mountTop := range homeMounts() {
+		out = append(out, mountTop)
+
+		users, err := os.ReadDir(mountTop)
+		if err != nil {
+			continue
+		}
+		for _, u := range users {
+			if !u.IsDir() {
+				continue
+			}
+			userDir := filepath.Join(mountTop, u.Name())
+			out = append(out, userDir)
+
+			// Watch the Virtualmin "domains" container so a NEW per-domain
+			// dir (where ssl.key/ssl.cert live) fires a Create event.
+			domainsDir := filepath.Join(userDir, "domains")
+			if fi, err := os.Stat(domainsDir); err == nil && fi.IsDir() {
+				out = append(out, domainsDir)
+			}
+		}
 	}
 	return out
 }
@@ -209,13 +251,20 @@ func (c *Collector) Run(ctx context.Context) error {
 		"/etc/ssl",
 	}
 
-	// targeted home scanning
-	roots = append(roots, expandHomeUserDirs("ssl")...)
-	roots = append(roots, expandHomeUserDirs("certs")...)
-	roots = append(roots, expandHomeUserDirs("letsencrypt")...)
+	// Per-user home cert material (Virtualmin: <home>/<user>/domains/
+	// <domain>/ssl.{key,cert}) is covered by the SHALLOW watch points in
+	// homeShallowWatchDirs() below, not by recursive roots here — watching
+	// whole home trees would add an inotify watch per file across every
+	// site. The previously-listed ~/ssl, ~/certs, ~/letsencrypt recursive
+	// roots were removed: no scanner reads those paths (see discoverPairs),
+	// so they only burned watches and fired no-op rescans.
 
 	w, err := NewWatcher(c, 2*time.Second)
 	if err == nil {
+		// Shallow (non-recursive) watch points so brand-new reseller
+		// accounts and newly-created per-user ssl dirs are detected in
+		// seconds instead of waiting for the DiscoveryEvery fallback.
+		w.SetShallowRoots(homeShallowWatchDirs())
 		_ = w.Start(ctx, roots)
 	} else {
 		logging.Logf("[sslcollector] watcher disabled: %v", err)

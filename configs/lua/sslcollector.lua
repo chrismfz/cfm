@@ -107,9 +107,9 @@ local OFFLINE_CACHE = (_cfg.offline_cache ~= false)
 -- climbing exponentially, to handle the brief cfm-not-up-yet window
 -- after a reboot).
 -- Resets to POLL_SECS_MIN on any successful /stats response.
--- 90s baseline: a new cert added on the cfm host is visible to running
--- workers within ~90s of the daemon's Refresh() picking it up (fsnotify
--- watcher fires within ~2s, so end-to-end is typically <2 minutes). The
+-- 60s baseline: a new cert added on the cfm host is visible to running
+-- workers within ~60s of the daemon's Refresh() picking it up (fsnotify
+-- watcher fires within ~2s, so end-to-end is typically ~1 minute). The
 -- /stats roundtrip is a few hundred bytes — cost is trivial.
 local POLL_SECS_MIN = 60    -- 60s base (healthy)
 local POLL_SECS_MAX = 600  -- 10m ceiling (sustained failures)
@@ -716,14 +716,22 @@ function M.set_cert()
 
   -- 2) Wildcard: longest-suffix match
   --    foo.bar.example.com -> bar.example.com -> example.com
+  --
+  -- Only zones with >=2 labels (tmp still contains a dot) are matched,
+  -- mirroring the daemon's getEntryLocked guard (len(labels) >= 3 for the
+  -- host) so the Go /cert path and this worker path can never select
+  -- differently. A single-label zone (e.g. "com") is never a valid
+  -- wildcard parent and is skipped on both sides.
   if not entry then
     local tmp = sni
     while true do
       local dot = string.find(tmp, "%.")
       if not dot then break end
       tmp = string.sub(tmp, dot + 1)
-      entry = _store["w:" .. tmp]
-      if entry then break end
+      if string.find(tmp, "%.") then
+        entry = _store["w:" .. tmp]
+        if entry then break end
+      end
     end
   end
 

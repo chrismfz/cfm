@@ -578,10 +578,16 @@ func runDaemon(args []string) {
 	// tripping HSTS in browsers (the original bug PR #883 began
 	// addressing).
 	sslcol := sslcollector.New(sslcollector.Config{
-		Enabled:        true,
-		CacheDir:       "/var/lib/cfm/sslcollector",
-		StatEvery:      60 * time.Second,
-		DiscoveryEvery: 6 * time.Hour,
+		Enabled:   true,
+		CacheDir:  "/var/lib/cfm/sslcollector",
+		StatEvery: 60 * time.Second,
+		// Full filesystem rescan fallback. The fsnotify watcher now picks
+		// up new domains/users within seconds (see internal/sslcollector/
+		// watcher.go handleNewDir), so this is only a safety net for the
+		// rare event the watcher misses (e.g. a brand-new /home* mount).
+		// Kept at 1h — short enough to bound any miss, cheap enough to not
+		// matter given the dynamic path carries steady-state discovery.
+		DiscoveryEvery: 1 * time.Hour,
 		NegativeTTL:    30 * time.Second,
 		MaxCertCache:   20000,
 	})

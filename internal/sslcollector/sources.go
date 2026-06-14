@@ -23,7 +23,14 @@ func (c *Collector) discoverPairs() []Pair {
 
 	// Virtualmin
 	out = append(out, scanVirtualmin("/etc/ssl/virtualmin")...)
-	out = append(out, scanHomeVirtualmin("/home")...)
+	// Scan EVERY /home[0-9]* mount, not just /home. Hosts add /home2,
+	// /home3, ... as /home fills; hardcoding /home left those users'
+	// certs undiscovered forever (the watcher fires for them, but the
+	// rescan it triggers — and the DiscoveryEvery fallback — only looked
+	// at /home). homeMounts() is the same source of truth the watcher uses.
+	for _, h := range homeMounts() {
+		out = append(out, scanHomeVirtualmin(h)...)
+	}
         out = append(out, scanWebminMiniserv("/etc/webmin/miniserv.pem")...)
 
         // System/service hostname certs (Exim etc)
@@ -378,10 +385,28 @@ func scanHomeVirtualmin(home string) []Pair {
 	out := []Pair{}
 	keys, _ := filepath.Glob(filepath.Join(home, "*", "domains", "*", "ssl.key"))
 	for _, k := range keys {
-		cert := filepath.Join(filepath.Dir(k), "ssl.cert")
-		if fileOK(cert) {
-			out = append(out, Pair{Source: SrcVirtualmin, CertPath: cert, KeyPath: k})
+		dir := filepath.Dir(k)
+		cert := filepath.Join(dir, "ssl.cert")
+		if !fileOK(cert) {
+			continue
 		}
+		p := Pair{Source: SrcVirtualmin, CertPath: cert, KeyPath: k}
+		// Attach the intermediate chain when present. Virtualmin writes
+		// ssl.ca (intermediate-only) and ssl.combined (leaf+chain) next to
+		// ssl.cert. Without this the worker ships a leaf-only chain, which
+		// fails for clients that don't cache intermediates (Android, some
+		// Java/OCSP stacks). PRIVATE KEY blocks in a combined file are
+		// scrubbed in dumpall.go before the bytes leave the daemon.
+		for _, chain := range []string{
+			filepath.Join(dir, "ssl.ca"),
+			filepath.Join(dir, "ssl.combined"),
+		} {
+			if fileOK(chain) {
+				p.ChainPath = chain
+				break
+			}
+		}
+		out = append(out, p)
 	}
 	return out
 }
