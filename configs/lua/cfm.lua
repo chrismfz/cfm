@@ -1250,6 +1250,34 @@ do
   end
 end
 
+-- ── Step 0a1: /.well-known/ carve-out (ACME + CA HTTP DCV + RFC 8615) ─────────
+-- /.well-known/ is the IETF-reserved namespace (RFC 8615) for site-wide
+-- validation and metadata. The load-bearing case is domain-control validation,
+-- fetched by the CA over plain HTTP and which MUST reach the origin
+-- (Apache/cPanel serves the file from the docroot):
+--   - Let's Encrypt / AutoSSL HTTP-01:  /.well-known/acme-challenge/<token>
+--   - commercial CAs (Sectigo/DigiCert) HTTP DCV: /.well-known/pki-validation/<file>
+-- If a forced/auto vhost challenge — e.g.
+--   detectors.conf: CHALLENGE_VHOST = cpanel.*, whm.*, webmail.*
+-- — or any per-IP challenge intercepts these, the CA receives the CFM
+-- interstitial HTML instead of the token and validation fails with
+--   403 urn:ietf:params:acme:error:unauthorized
+-- on exactly the cpanel./webmail./whm. service subdomains.
+--
+-- The whole prefix is exempted (not just acme-challenge): it also covers
+-- pki-validation, security.txt, mta-sts, apple-app-site-association, etc.; it
+-- is a standardized static/metadata namespace with no app attack surface; and
+-- it matches what the HTTPS panel listeners already do
+-- (cfm_panel.lua is_exempt_path) and what cPanel/Imunify/ModSecurity-CRS do.
+do
+  if lower(uri):find("/.well-known/", 1, true) == 1 then
+    ngx.header["X-CFM-Bypass"] = "well-known"
+    log_route(ngx.INFO, "bypass=well-known host=" .. host .. " uri=" .. uri)
+    ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+    return
+  end
+end
+
 -- ── Step 0b: Box-wide UA emergency rules ─────────────────────────────────────
 -- Operators install these via the bot-top control surface. Matches happen
 -- on the normalized User-Agent only (one bucket per UA across all vhosts).

@@ -25,6 +25,54 @@ CFM now uses one canonical model across challenge token issuance (Go) and Lua va
 - Prefer validating behavior with `cfm_clearance` only.
 - During rollout, monitor challenge logs for `host_mismatch` and `scope_mismatch` to identify stale or replayed cookies.
 
+## Validation-path carve-out (`/.well-known/`)
+
+Certificate domain-control validation is fetched by the CA over **plain HTTP**
+and must always reach the origin, never the challenge interstitial:
+
+- Let's Encrypt / cPanel AutoSSL HTTP-01 → `/.well-known/acme-challenge/<token>`
+- commercial CAs (Sectigo / DigiCert) HTTP DCV → `/.well-known/pki-validation/<file>`
+
+Both Lua listeners exempt the whole `/.well-known/` prefix **before** any
+challenge decision:
+
+- main web listener — `cfm.lua` Step 0a1 routes `/.well-known/` to the origin
+  (`X-CFM-Bypass: well-known`) ahead of the WAF, forced-challenge, and bridge
+  vhost/per-IP challenge steps;
+- panel listeners (2083/2087) — `cfm_panel.lua` `is_exempt_path`.
+
+**Why this matters:** a forced/auto vhost challenge such as
+
+```ini
+# detectors.conf
+CHALLENGE_VHOST = victim.com, cpanel.*, whm.*, webmail.*
+```
+
+would otherwise intercept the validation request on the very service
+subdomains it targets (`cpanel.<domain>`, `webmail.<domain>`, …). The CA then
+receives the CFM interstitial HTML instead of the token and AutoSSL reports:
+
+```
+403 urn:ietf:params:acme:error:unauthorized
+Invalid response from http://cpanel.<domain>/__cfm_challenge?next=%2F.well-known%2Facme-challenge%2F...
+```
+
+The carve-out is `/.well-known/`-wide on purpose: it is the RFC 8615 reserved
+namespace for static validation/metadata (also `security.txt`, `mta-sts.txt`,
+`apple-app-site-association`, …), has no application attack surface, and
+matches what cPanel / Imunify / ModSecurity-CRS do. The ordering invariant is
+enforced by `scripts/tests/cfm_well_known_carveout_test.lua` (run via
+`make test-lua`).
+
+Verify:
+
+```bash
+# Must return the token (or 404 from the origin), never the CFM interstitial,
+# even while the host is under a forced vhost challenge.
+curl -is "http://cpanel.<domain>/.well-known/acme-challenge/test-token" | head -n1
+curl -is "http://cpanel.<domain>/.well-known/acme-challenge/test-token" | grep -i '^X-CFM-Bypass:'
+```
+
 ## Manual verification checklist
 
 Use these commands from a test host (replace hostnames/ports):
