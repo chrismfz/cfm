@@ -1250,6 +1250,45 @@ do
   end
 end
 
+-- ── Step 0a1: /.well-known/ carve-out (ACME + CA HTTP DCV + RFC 8615) ─────────
+-- /.well-known/ is the IETF-reserved namespace (RFC 8615) for site-wide
+-- validation and metadata. The load-bearing case is domain-control validation,
+-- fetched by the CA over plain HTTP and which MUST reach the origin
+-- (Apache/cPanel serves the file from the docroot):
+--   - Let's Encrypt / AutoSSL HTTP-01:  /.well-known/acme-challenge/<token>
+--   - commercial CAs (Sectigo/DigiCert) HTTP DCV: /.well-known/pki-validation/<file>
+-- If a forced/auto vhost challenge — e.g.
+--   detectors.conf: CHALLENGE_VHOST = cpanel.*, whm.*, webmail.*
+-- — or any per-IP challenge intercepts these, the CA receives the CFM
+-- interstitial HTML instead of the token and validation fails with
+--   403 urn:ietf:params:acme:error:unauthorized
+-- on exactly the cpanel./webmail./whm. service subdomains.
+--
+-- The whole prefix is exempted (not just acme-challenge): it also covers
+-- pki-validation, security.txt, mta-sts, apple-app-site-association, etc.; it
+-- is a standardized static/metadata namespace; and it matches what the HTTPS
+-- panel listeners already do (cfm_panel.lua is_exempt_path) and what
+-- cPanel/Imunify/ModSecurity-CRS do.
+--
+-- TRADE-OFF (accepted): this skips the WAF rule engine for the whole prefix,
+-- not only the challenge. A few /.well-known/ endpoints can be app-routed
+-- (e.g. /.well-known/webfinger, /.well-known/openid-configuration) and thus
+-- lose WAF inspection. This is bounded: `uri` is nginx-decoded and
+-- dot-segment-normalized, so /.well-known/acme-challenge/../../x collapses out
+-- of the prefix and is NOT exempted (no traversal-out evasion); the request
+-- still reaches the normal origin (this is a WAF-skip, not an auth bypass);
+-- and the same pattern is already used for static-asset classes. If you ever
+-- need WAF on app-routed .well-known endpoints, scope this to
+-- acme-challenge/ + pki-validation/ instead.
+do
+  if lower(uri):find("/.well-known/", 1, true) == 1 then
+    ngx.header["X-CFM-Bypass"] = "well-known"
+    log_route(ngx.INFO, "bypass=well-known host=" .. host .. " uri=" .. uri)
+    ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+    return
+  end
+end
+
 -- ── Step 0b: Box-wide UA emergency rules ─────────────────────────────────────
 -- Operators install these via the bot-top control surface. Matches happen
 -- on the normalized User-Agent only (one bucket per UA across all vhosts).
@@ -1433,6 +1472,10 @@ end
 -- (e.g. /cfm-admin/login). Runs AFTER WAF so rules still inspect the request,
 -- and is skipped entirely when a valid cfm_clearance cookie is present
 -- (Step 2b above returns before we reach this block).
+-- NOTE: /.well-known/ never reaches here — Step 0a1 routes the whole prefix
+-- to the origin upstream before WAF/forced/bridge challenge, so neither the
+-- WAF rule engine nor a forced challenge inspects it (see Step 0a1 for the
+-- ACME/CA-DCV rationale and the accepted WAF-coverage trade-off).
 if ngx.var.cfm_force_challenge == "1" then
   ngx.header["X-CFM-Action"]  = "challenge_forced"
   ngx.header["Cache-Control"] = "no-store"
