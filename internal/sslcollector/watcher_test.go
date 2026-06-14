@@ -29,21 +29,6 @@ func TestUnderCertRoot(t *testing.T) {
 	}
 }
 
-// TestIsCertDirName pins the set of per-user directory basenames that hold
-// cert material and should escalate to a recursive watch.
-func TestIsCertDirName(t *testing.T) {
-	for _, base := range []string{"ssl", "certs", "letsencrypt"} {
-		if !isCertDirName(base) {
-			t.Errorf("isCertDirName(%q) = false, want true", base)
-		}
-	}
-	for _, base := range []string{"public_html", "mail", "domains", "example.com", ""} {
-		if isCertDirName(base) {
-			t.Errorf("isCertDirName(%q) = true, want false", base)
-		}
-	}
-}
-
 // TestClassifyNewDir exercises the REAL classifyNewDir decision function
 // (not a copy of its switch) so a future refactor that re-introduces the
 // dir-create blind spot — a per-domain dir named after the domain being
@@ -60,14 +45,18 @@ func TestClassifyNewDir(t *testing.T) {
 		{"/etc/letsencrypt/archive/luxurybowscrowns.com", actionRecursive},
 		{"/var/cpanel/ssl/apache_tls/mokascandles.gr", actionRecursive},
 		{"/usr/local/directadmin/data/users/bob/domains/site.gr", actionRecursive},
-		// Per-user cert dirs anywhere.
-		{"/home/bob/ssl", actionRecursive},
-		{"/home2/alice/letsencrypt", actionRecursive},
-		// Brand-new reseller account home + virtualmin-style containers.
+		// Brand-new reseller account home + virtualmin-style containers
+		// (the only supported home cert layout: domains/<domain>/ssl.*).
 		{"/home/newreseller", actionShallow},
 		{"/home5/newreseller", actionShallow},
 		{"/home/bob/domains", actionShallow},
 		{"/home/bob/domains/site.gr", actionShallow},
+		// Per-user ~/ssl, ~/certs, ~/letsencrypt are NOT escalated: no
+		// scanner reads them, so watching them would only burn inotify
+		// watches and fire no-op rescans.
+		{"/home/bob/ssl", actionIgnore},
+		{"/home2/alice/letsencrypt", actionIgnore},
+		{"/home/bob/certs", actionIgnore},
 		// Noise that must NOT be watched/rescanned.
 		{"/home/bob/public_html", actionIgnore},
 		{"/home/bob/mail", actionIgnore},

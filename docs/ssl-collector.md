@@ -103,11 +103,31 @@ per-user directories named after the domain/user (`/etc/letsencrypt/live/
 which contain `cert`/`key`/`pem` in their path. Without this, a brand-new
 domain stayed invisible to fsnotify until the next `DiscoveryEvery` rescan.
 
-Home trees are watched **shallowly** (one level) at the `/home*` mount tops
-and per-user dirs, escalating to a recursive watch only when an actual
-`ssl`/`certs`/`letsencrypt` directory appears — so a new reseller account is
-detected in seconds without adding an inotify watch per file across every
-customer site.
+Home trees are watched **shallowly** (one level) at the `/home*` mount
+tops, per-user dirs, and each user's `domains/` container — backing exactly
+the home layout the scanner reads (Virtualmin
+`<home>/<user>/domains/<domain>/ssl.{key,cert}`). This detects a new
+reseller account in seconds without adding an inotify watch per file across
+every customer site. Per-user `~/ssl`/`~/certs`/`~/letsencrypt` dirs are
+deliberately **not** watched: no scanner reads them, so watching would only
+burn watches and fire no-op rescans.
+
+### Watch set == scan set (all home mounts)
+
+The watcher and the scanner share one source of truth for which home mounts
+exist (`homeMounts()` → every `/home[0-9]*`). This matters on hosts that add
+`/home2`, `/home3`, … as `/home` fills: previously the scan hardcoded
+`/home`, so a cert under `/home2/<user>/domains/<domain>/` was watched but
+**never scanned** — discovered neither by the event nor by the rescan
+fallback, serving the self-signed fallback indefinitely. Both sides now
+cover all mounts. The Virtualmin scanner also attaches the intermediate
+chain (`ssl.ca` / `ssl.combined`) so workers ship a complete chain.
+
+Non-home cert sources are unchanged and fully covered: Let's Encrypt
+(`/etc/letsencrypt`), cPanel (`/var/cpanel/ssl`, incl. hostname/service
+bundles), DirectAdmin (`/usr/local/directadmin`), Virtualmin/Webmin
+(`/etc/ssl/virtualmin`, `/etc/webmin/miniserv.pem`), and system/service
+hostname certs such as Exim (`/etc/exim.*`).
 
 **2. Workers pull the new cert (`configs/lua/sslcollector.lua`):**
 

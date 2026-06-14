@@ -236,7 +236,16 @@ func (w *Watcher) isRelevant(ev fsnotify.Event) bool {
 		strings.Contains(name, "key") ||
 		strings.Contains(name, "pem") ||
 		strings.Contains(name, "privkey") ||
-		strings.Contains(name, "fullchain") {
+		strings.Contains(name, "fullchain") ||
+		// Intermediate-chain rotations. DA writes <domain>.cacert (already
+		// caught by "cert") but also legacy ".ca"/".ca-bundle"; Virtualmin
+		// writes ssl.ca. A bare "ca" substring is intentionally NOT used —
+		// it would match "cache"/"location"/"scan" and defeat the filter —
+		// so we anchor on a ".ca" suffix and the longer chain vocabulary.
+		strings.HasSuffix(name, ".ca") ||
+		strings.Contains(name, "bundle") ||
+		strings.Contains(name, "chain") ||
+		strings.Contains(name, "intermediate") {
 		return true
 	}
 
@@ -257,7 +266,7 @@ var certRootPrefixes = []string{
 // homeMountTopRE matches a home mount top: /home, /home2, /home3, ...
 // Single source of truth for "is this an absolute path to a /home* mount
 // top" — used by both the watcher (handleNewDir) and the collector
-// (homeShallowWatchDirs / expandHomeUserDirs) so the policy cannot drift.
+// (homeMounts / homeShallowWatchDirs) so the policy cannot drift.
 var homeMountTopRE = regexp.MustCompile(`^/home[0-9]*$`)
 
 func underCertRoot(path string) bool {
@@ -265,17 +274,6 @@ func underCertRoot(path string) bool {
 		if path == r || strings.HasPrefix(path, r+"/") {
 			return true
 		}
-	}
-	return false
-}
-
-// isCertDirName reports whether base is a per-user directory that holds
-// certificate material across the panels we support
-// (cPanel/DirectAdmin/Virtualmin/LE home layouts).
-func isCertDirName(base string) bool {
-	switch base {
-	case "ssl", "certs", "letsencrypt":
-		return true
 	}
 	return false
 }
@@ -294,21 +292,29 @@ const (
 // (handleNewDir performs the fs.Add/trigger side effects). See the case
 // comments for the rationale behind each bucket.
 //
-//   - actionRecursive: pure cert trees (LE/cPanel/DA/...) and per-user
-//     ssl/certs/letsencrypt dirs — safe and desirable to watch fully.
+//   - actionRecursive: pure cert trees that ONLY hold cert material and
+//     are read by discoverPairs (LE /etc/letsencrypt, cPanel
+//     /var/cpanel/ssl, DA /usr/local/directadmin, /etc/ssl) — safe and
+//     desirable to watch fully.
 //   - actionShallow: home-layout containers one level above per-domain
 //     cert material — a brand-new user home (under a /home* mount), a
 //     user's "domains" container, or an individual domain dir. Watched
-//     shallowly so the eventual ssl/ dir or ssl.key/ssl.cert file creation
-//     fires an event, WITHOUT recursing whole home/web trees (public_html,
+//     shallowly so the eventual ssl.key/ssl.cert file creation fires an
+//     event, WITHOUT recursing whole home/web trees (public_html,
 //     wp-content, mail, ...) and exploding inotify watch counts.
 //   - actionIgnore: anything else under a watched home — not cert material.
+//
+// Note: a per-user ~/ssl, ~/certs or ~/letsencrypt dir is intentionally
+// NOT escalated here — no scanner in discoverPairs reads those paths, so
+// watching them recursively would only burn inotify watches and fire
+// no-op rescans. The supported home layout is Virtualmin's
+// <home>/<user>/domains/<domain>/ssl.{key,cert}, covered by actionShallow.
 func classifyNewDir(path string) newDirAction {
 	base := filepath.Base(path)
 	parentBase := filepath.Base(filepath.Dir(path))
 
 	switch {
-	case underCertRoot(path) || isCertDirName(base):
+	case underCertRoot(path):
 		return actionRecursive
 	case homeMountTopRE.MatchString(filepath.Dir(path)), // new user home
 		base == "domains",       // user's domains container

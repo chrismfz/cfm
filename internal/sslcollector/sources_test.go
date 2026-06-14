@@ -19,6 +19,58 @@ import (
 	"time"
 )
 
+// TestScanHomeVirtualmin verifies the Virtualmin home scanner finds the
+// leaf+key pair and attaches the intermediate chain (ssl.ca / ssl.combined)
+// when present, for users under an arbitrary /home* mount (passed as the
+// home arg — discoverPairs iterates homeMounts() to cover /home2+).
+func TestScanHomeVirtualmin(t *testing.T) {
+	home := t.TempDir()
+	mk := func(user, domain string, files map[string]string) string {
+		dir := filepath.Join(home, user, "domains", domain)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		for name, body := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+				t.Fatalf("write %s: %v", name, err)
+			}
+		}
+		return dir
+	}
+
+	// domain with ssl.ca chain
+	dCA := mk("alice", "withca.gr", map[string]string{"ssl.key": "k", "ssl.cert": "c", "ssl.ca": "ca"})
+	// domain with ssl.combined (and no ssl.ca) — combined is the fallback
+	dComb := mk("alice", "withcombined.gr", map[string]string{"ssl.key": "k", "ssl.cert": "c", "ssl.combined": "lc"})
+	// domain with no chain at all
+	dNone := mk("bob", "nochain.gr", map[string]string{"ssl.key": "k", "ssl.cert": "c"})
+	// domain missing the cert — must be skipped entirely
+	_ = mk("bob", "keyonly.gr", map[string]string{"ssl.key": "k"})
+
+	pairs := scanHomeVirtualmin(home)
+
+	byKey := map[string]Pair{}
+	for _, p := range pairs {
+		byKey[p.KeyPath] = p
+	}
+
+	if len(byKey) != 3 {
+		t.Fatalf("expected 3 pairs (keyonly skipped), got %d: %+v", len(byKey), pairs)
+	}
+	if p := byKey[filepath.Join(dCA, "ssl.key")]; p.ChainPath != filepath.Join(dCA, "ssl.ca") {
+		t.Errorf("withca: ChainPath = %q, want ssl.ca", p.ChainPath)
+	}
+	if p := byKey[filepath.Join(dComb, "ssl.key")]; p.ChainPath != filepath.Join(dComb, "ssl.combined") {
+		t.Errorf("withcombined: ChainPath = %q, want ssl.combined", p.ChainPath)
+	}
+	if p := byKey[filepath.Join(dNone, "ssl.key")]; p.ChainPath != "" {
+		t.Errorf("nochain: ChainPath = %q, want empty", p.ChainPath)
+	}
+	if _, ok := byKey[filepath.Join(home, "bob", "domains", "keyonly.gr", "ssl.key")]; ok {
+		t.Errorf("keyonly.gr should have been skipped (no ssl.cert)")
+	}
+}
+
 // Verify findDirectAdminChain picks the right file across the DA
 // naming variants we've seen — and that the glob fallback catches
 // names not in the explicit list.
