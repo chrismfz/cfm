@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -166,8 +165,6 @@ func expandGlob(pattern string) []string {
 	return matches
 }
 
-var homeMountRe = regexp.MustCompile(`^home[0-9]*$`)
-
 func expandHomeUserDirs(subdir string) []string {
 	mounts, err := os.ReadDir("/")
 	if err != nil {
@@ -176,10 +173,11 @@ func expandHomeUserDirs(subdir string) []string {
 
 	out := []string{}
 	for _, m := range mounts {
-		if !m.IsDir() || !homeMountRe.MatchString(m.Name()) {
+		mountTop := filepath.Join("/", m.Name())
+		if !m.IsDir() || !homeMountTopRE.MatchString(mountTop) {
 			continue
 		}
-		out = append(out, expandGlob(filepath.Join("/", m.Name(), "*", subdir))...)
+		out = append(out, expandGlob(filepath.Join(mountTop, "*", subdir))...)
 	}
 	return out
 }
@@ -201,10 +199,10 @@ func homeShallowWatchDirs() []string {
 		return out
 	}
 	for _, m := range mounts {
-		if !m.IsDir() || !homeMountRe.MatchString(m.Name()) {
+		mountTop := filepath.Join("/", m.Name())
+		if !m.IsDir() || !homeMountTopRE.MatchString(mountTop) {
 			continue
 		}
-		mountTop := filepath.Join("/", m.Name())
 		out = append(out, mountTop)
 
 		users, err := os.ReadDir(mountTop)

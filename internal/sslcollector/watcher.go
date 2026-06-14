@@ -81,8 +81,18 @@ func (w *Watcher) Start(ctx context.Context, roots []string) error {
 	// and react via handleNewDir — WITHOUT recursively watching entire
 	// home trees (public_html, mail, wp-content, ...), which would add an
 	// inotify watch per file across every customer site.
+	addFail := 0
 	for _, d := range w.shallowRoots {
-		_ = w.fs.Add(d)
+		if err := w.fs.Add(d); err != nil {
+			addFail++
+		}
+	}
+	if addFail > 0 {
+		// Most likely fs.inotify.max_user_watches exhaustion. Surface it
+		// once (not per-path) so a silent degrade to the DiscoveryEvery
+		// fallback is diagnosable rather than invisible.
+		logging.Logf("[sslcollector] watcher: %d/%d shallow watch adds failed (inotify limit?); affected paths rely on the discovery rescan fallback — consider raising fs.inotify.max_user_watches",
+			addFail, len(w.shallowRoots))
 	}
 
 	go w.loop(ctx)
@@ -245,6 +255,9 @@ var certRootPrefixes = []string{
 }
 
 // homeMountTopRE matches a home mount top: /home, /home2, /home3, ...
+// Single source of truth for "is this an absolute path to a /home* mount
+// top" — used by both the watcher (handleNewDir) and the collector
+// (homeShallowWatchDirs / expandHomeUserDirs) so the policy cannot drift.
 var homeMountTopRE = regexp.MustCompile(`^/home[0-9]*$`)
 
 func underCertRoot(path string) bool {
@@ -267,42 +280,72 @@ func isCertDirName(base string) bool {
 	return false
 }
 
-// handleNewDir decides how to watch a newly-created directory and whether
-// to schedule a rescan. It is the counterpart to the dir-create fix in
-// loop(): every new directory gets an explicit decision here instead of
-// being silently dropped by the isRelevant() name filter.
+// newDirAction is the watch/rescan decision for a newly-created directory.
+type newDirAction int
+
+const (
+	actionIgnore    newDirAction = iota // not cert material — don't watch or rescan
+	actionRecursive                     // pure cert tree / per-user cert dir — watch fully + rescan
+	actionShallow                       // home-layout container — watch one level + rescan
+)
+
+// classifyNewDir is the pure decision function for a newly-created
+// directory. Kept side-effect-free so it can be unit-tested directly
+// (handleNewDir performs the fs.Add/trigger side effects). See the case
+// comments for the rationale behind each bucket.
 //
-// The trigger()ed Refresh runs a full discoverPairs() ~delay later, which
-// also closes the race where cert files are written into the directory
-// between os.Stat and fs.Add.
-func (w *Watcher) handleNewDir(path string) {
+//   - actionRecursive: pure cert trees (LE/cPanel/DA/...) and per-user
+//     ssl/certs/letsencrypt dirs — safe and desirable to watch fully.
+//   - actionShallow: home-layout containers one level above per-domain
+//     cert material — a brand-new user home (under a /home* mount), a
+//     user's "domains" container, or an individual domain dir. Watched
+//     shallowly so the eventual ssl/ dir or ssl.key/ssl.cert file creation
+//     fires an event, WITHOUT recursing whole home/web trees (public_html,
+//     wp-content, mail, ...) and exploding inotify watch counts.
+//   - actionIgnore: anything else under a watched home — not cert material.
+func classifyNewDir(path string) newDirAction {
 	base := filepath.Base(path)
 	parentBase := filepath.Base(filepath.Dir(path))
 
 	switch {
-	// 1) Pure cert trees (LE/cPanel/DA/...) and per-user cert dirs:
-	//    watch fully and rescan.
 	case underCertRoot(path) || isCertDirName(base):
-		_ = w.addRecursive(path)
-		w.trigger("fsnotify:newdir:" + path)
-
-	// 2) Home-layout containers that sit one level above per-domain cert
-	//    material: a brand-new user home (under a /home* mount), a user's
-	//    "domains" container, or an individual domain dir. Watch SHALLOWLY
-	//    so the eventual ssl/ dir or ssl.key/ssl.cert file creation fires
-	//    an event, without recursing whole home/web trees (public_html,
-	//    wp-content, mail, ...). Rescan too, in case the cert already
-	//    landed before we got here.
+		return actionRecursive
 	case homeMountTopRE.MatchString(filepath.Dir(path)), // new user home
 		base == "domains",       // user's domains container
 		parentBase == "domains": // an individual domain dir
-		_ = w.fs.Add(path)
-		w.trigger("fsnotify:newhome:" + path)
-
+		return actionShallow
 	default:
-		// Unrelated new dir under a watched home (public_html, mail, ...).
-		// Not cert material — do not watch or rescan; doing so would only
-		// add inotify pressure and refresh churn.
+		return actionIgnore
+	}
+}
+
+// handleNewDir applies classifyNewDir's decision to a newly-created
+// directory. It is the counterpart to the dir-create fix in loop(): every
+// new directory gets an explicit decision instead of being silently
+// dropped by the isRelevant() name filter.
+//
+// The trigger()ed Refresh runs a full discoverPairs() ~delay later, which
+// also closes the race where cert files are written into the directory
+// between os.Stat and fs.Add.
+//
+// Residual gap (acknowledged, covered by DiscoveryEvery): an *already
+// existing* intermediate dir — e.g. a Virtualmin user whose
+// domains/<domain>/ dir predates daemon start but has no cert yet — never
+// fires a Create event, so its first-ever cert is picked up by the rescan
+// fallback rather than instantly. Renewals (file already known) and
+// brand-new users/domains (event chain fires) are both covered here.
+func (w *Watcher) handleNewDir(path string) {
+	switch classifyNewDir(path) {
+	case actionRecursive:
+		_ = w.addRecursive(path)
+		w.trigger("fsnotify:newdir:" + path)
+	case actionShallow:
+		if err := w.fs.Add(path); err != nil {
+			logging.Logf("[sslcollector] watcher: shallow add failed path=%s: %v", path, err)
+		}
+		w.trigger("fsnotify:newhome:" + path)
+	default:
+		// actionIgnore: nothing to do.
 	}
 }
 

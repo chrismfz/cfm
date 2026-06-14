@@ -1,7 +1,6 @@
 package sslcollector
 
 import (
-	"path/filepath"
 	"testing"
 )
 
@@ -45,59 +44,38 @@ func TestIsCertDirName(t *testing.T) {
 	}
 }
 
-// TestHandleNewDirClassification documents, via the same predicates
-// handleNewDir switches on, which new directories get a recursive watch,
-// a shallow watch, or are ignored. Keeping this as a table guards against
-// a future refactor accidentally re-introducing the dir-create blind spot
-// (a per-domain dir named after the domain being dropped) or the inverse
-// regression (recursively watching whole home trees).
-func TestHandleNewDirClassification(t *testing.T) {
-	const (
-		recursive = "recursive"
-		shallow   = "shallow"
-		ignore    = "ignore"
-	)
-	classify := func(path string) string {
-		base := filepath.Base(path)
-		parentBase := filepath.Base(filepath.Dir(path))
-		switch {
-		case underCertRoot(path) || isCertDirName(base):
-			return recursive
-		case homeMountTopRE.MatchString(filepath.Dir(path)),
-			base == "domains",
-			parentBase == "domains":
-			return shallow
-		default:
-			return ignore
-		}
-	}
-
+// TestClassifyNewDir exercises the REAL classifyNewDir decision function
+// (not a copy of its switch) so a future refactor that re-introduces the
+// dir-create blind spot — a per-domain dir named after the domain being
+// dropped — or the inverse regression — recursively watching whole home
+// trees — is caught here.
+func TestClassifyNewDir(t *testing.T) {
 	cases := []struct {
 		path string
-		want string
+		want newDirAction
 	}{
 		// The original bug: a per-domain dir named after the domain, with
 		// no cert/key/pem substring, under an already-watched cert root.
-		{"/etc/letsencrypt/live/nantiavs-handmade.gr", recursive},
-		{"/etc/letsencrypt/archive/luxurybowscrowns.com", recursive},
-		{"/var/cpanel/ssl/apache_tls/mokascandles.gr", recursive},
-		{"/usr/local/directadmin/data/users/bob/domains/site.gr", recursive},
+		{"/etc/letsencrypt/live/nantiavs-handmade.gr", actionRecursive},
+		{"/etc/letsencrypt/archive/luxurybowscrowns.com", actionRecursive},
+		{"/var/cpanel/ssl/apache_tls/mokascandles.gr", actionRecursive},
+		{"/usr/local/directadmin/data/users/bob/domains/site.gr", actionRecursive},
 		// Per-user cert dirs anywhere.
-		{"/home/bob/ssl", recursive},
-		{"/home2/alice/letsencrypt", recursive},
+		{"/home/bob/ssl", actionRecursive},
+		{"/home2/alice/letsencrypt", actionRecursive},
 		// Brand-new reseller account home + virtualmin-style containers.
-		{"/home/newreseller", shallow},
-		{"/home5/newreseller", shallow},
-		{"/home/bob/domains", shallow},
-		{"/home/bob/domains/site.gr", shallow},
+		{"/home/newreseller", actionShallow},
+		{"/home5/newreseller", actionShallow},
+		{"/home/bob/domains", actionShallow},
+		{"/home/bob/domains/site.gr", actionShallow},
 		// Noise that must NOT be watched/rescanned.
-		{"/home/bob/public_html", ignore},
-		{"/home/bob/mail", ignore},
-		{"/home/bob/public_html/wp-content", ignore},
+		{"/home/bob/public_html", actionIgnore},
+		{"/home/bob/mail", actionIgnore},
+		{"/home/bob/public_html/wp-content", actionIgnore},
 	}
 	for _, c := range cases {
-		if got := classify(c.path); got != c.want {
-			t.Errorf("classify(%q) = %s, want %s", c.path, got, c.want)
+		if got := classifyNewDir(c.path); got != c.want {
+			t.Errorf("classifyNewDir(%q) = %d, want %d", c.path, got, c.want)
 		}
 	}
 }
