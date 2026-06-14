@@ -107,9 +107,9 @@ local OFFLINE_CACHE = (_cfg.offline_cache ~= false)
 -- climbing exponentially, to handle the brief cfm-not-up-yet window
 -- after a reboot).
 -- Resets to POLL_SECS_MIN on any successful /stats response.
--- 90s baseline: a new cert added on the cfm host is visible to running
--- workers within ~90s of the daemon's Refresh() picking it up (fsnotify
--- watcher fires within ~2s, so end-to-end is typically <2 minutes). The
+-- 60s baseline: a new cert added on the cfm host is visible to running
+-- workers within ~60s of the daemon's Refresh() picking it up (fsnotify
+-- watcher fires within ~2s, so end-to-end is typically ~1 minute). The
 -- /stats roundtrip is a few hundred bytes — cost is trivial.
 local POLL_SECS_MIN = 60    -- 60s base (healthy)
 local POLL_SECS_MAX = 600  -- 10m ceiling (sustained failures)

@@ -184,6 +184,42 @@ func expandHomeUserDirs(subdir string) []string {
 	return out
 }
 
+// homeShallowWatchDirs returns the directories the watcher should watch
+// one level deep (non-recursive): every /home* mount top (so brand-new
+// user accounts — e.g. reseller-created — are detected the moment the
+// home dir appears) and every existing /home*/<user> dir (so a later
+// ssl/ dir or domains/<domain>/ssl.key for an existing user is detected).
+//
+// Recursive watches on entire home trees are deliberately avoided here:
+// they would add an inotify watch per file/dir across every customer
+// site. The watcher only escalates to a recursive watch when an actual
+// cert directory (ssl/certs/letsencrypt) appears — see handleNewDir.
+func homeShallowWatchDirs() []string {
+	out := []string{}
+	mounts, err := os.ReadDir("/")
+	if err != nil {
+		return out
+	}
+	for _, m := range mounts {
+		if !m.IsDir() || !homeMountRe.MatchString(m.Name()) {
+			continue
+		}
+		mountTop := filepath.Join("/", m.Name())
+		out = append(out, mountTop)
+
+		users, err := os.ReadDir(mountTop)
+		if err != nil {
+			continue
+		}
+		for _, u := range users {
+			if u.IsDir() {
+				out = append(out, filepath.Join(mountTop, u.Name()))
+			}
+		}
+	}
+	return out
+}
+
 func (c *Collector) Run(ctx context.Context) error {
 	if !c.cfg.Enabled {
 		return nil
@@ -216,6 +252,10 @@ func (c *Collector) Run(ctx context.Context) error {
 
 	w, err := NewWatcher(c, 2*time.Second)
 	if err == nil {
+		// Shallow (non-recursive) watch points so brand-new reseller
+		// accounts and newly-created per-user ssl dirs are detected in
+		// seconds instead of waiting for the DiscoveryEvery fallback.
+		w.SetShallowRoots(homeShallowWatchDirs())
 		_ = w.Start(ctx, roots)
 	} else {
 		logging.Logf("[sslcollector] watcher disabled: %v", err)

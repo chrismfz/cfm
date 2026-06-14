@@ -81,6 +81,45 @@ The socket is authenticated with a bearer token carried in the
 
 ---
 
+## Discovery & freshness (how fast a new cert goes live)
+
+The daemon discovers certificates from disk and the workers pull them over
+the socket. End-to-end latency for a freshly-issued certificate is bounded
+by two stages:
+
+**1. Daemon picks up the cert (`internal/sslcollector`):**
+
+| Mechanism | Cadence | Catches |
+|-----------|---------|---------|
+| fsnotify watcher (`watcher.go`) | ~2s debounce | New domains/users + renewals under any watched tree (event-driven, primary path) |
+| Stat loop (`StatEvery`) | 60s | mtime/size changes to **already-known** cert files |
+| Discovery rescan (`DiscoveryEvery`) | 1h | Full filesystem re-glob — safety net for anything the watcher missed |
+
+The watcher is the primary path. On a `Create` event for a **directory**
+(`watcher.go:handleNewDir`) it watches the new tree and schedules a rescan
+*before* the cert/key filename filter runs — panels create per-domain and
+per-user directories named after the domain/user (`/etc/letsencrypt/live/
+<domain>`, `/var/cpanel/ssl/apache_tls/<domain>`, `/home/<user>`), none of
+which contain `cert`/`key`/`pem` in their path. Without this, a brand-new
+domain stayed invisible to fsnotify until the next `DiscoveryEvery` rescan.
+
+Home trees are watched **shallowly** (one level) at the `/home*` mount tops
+and per-user dirs, escalating to a recursive watch only when an actual
+`ssl`/`certs`/`letsencrypt` directory appears — so a new reseller account is
+detected in seconds without adding an inotify watch per file across every
+customer site.
+
+**2. Workers pull the new cert (`configs/lua/sslcollector.lua`):**
+
+Workers poll `/stats` every `POLL_SECS_MIN` (60s). When the daemon's
+`Version` hash changes (any fingerprint/mtime change), the next poll
+triggers a `/dumpall` and the new cert is served. A `FORCE_DUMPALL_AFTER`
+(1h) safety net re-pulls even if a version change was missed.
+
+**Net result:** a new domain is typically live within ~1 minute (≈2s
+watcher debounce + ≤60s worker poll); the 1h fallbacks bound the worst case
+if the event-driven path ever misses.
+
 ## Socket endpoints
 
 | Endpoint | Method | Purpose |

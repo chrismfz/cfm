@@ -28,7 +28,19 @@ type Watcher struct {
 	lastWild  int
 	haveLast  bool
 
+	// shallowRoots are watched one level deep only (a single fs.Add per
+	// path, no recursion). Used for /home* mount tops and per-user home
+	// dirs so that the creation of a NEW user or a NEW ssl/ dir fires a
+	// Create event without recursively watching entire home/web trees.
+	shallowRoots []string
+
 	fs *fsnotify.Watcher
+}
+
+// SetShallowRoots registers directories to be watched one level deep
+// (non-recursive). Call before Start. See the Watcher.shallowRoots field.
+func (w *Watcher) SetShallowRoots(dirs []string) {
+	w.shallowRoots = dirs
 }
 
 func NewWatcher(col *Collector, delay time.Duration) (*Watcher, error) {
@@ -60,6 +72,17 @@ func (w *Watcher) Start(ctx context.Context, roots []string) error {
 	// add all roots recursively
 	for _, root := range roots {
 		_ = w.addRecursive(root)
+	}
+
+	// Shallow watch points (single fs.Add, no recursion): /home* mount
+	// tops and existing per-user home dirs. Watching these one level deep
+	// lets us see the creation of a NEW user (under /home*) or a NEW
+	// ssl/certs/letsencrypt dir / per-domain dir (under a user's home)
+	// and react via handleNewDir — WITHOUT recursively watching entire
+	// home trees (public_html, mail, wp-content, ...), which would add an
+	// inotify watch per file across every customer site.
+	for _, d := range w.shallowRoots {
+		_ = w.fs.Add(d)
 	}
 
 	go w.loop(ctx)
@@ -114,17 +137,29 @@ func (w *Watcher) loop(ctx context.Context) {
 				return
 			}
 
-			// only care about meaningful events
-			if !w.isRelevant(ev) {
-				continue
+			// New-directory creation MUST be handled before the
+			// isRelevant() name filter. Panels create per-domain and
+			// per-user directories named after the domain/user (e.g.
+			// /etc/letsencrypt/live/<domain>, /var/cpanel/ssl/apache_tls/
+			// <domain>, /home/<user>) whose paths contain none of the
+			// cert/key/pem substrings isRelevant() looks for. Dropping
+			// them here meant the directory was never added to the watch,
+			// the cert files written inside generated no events (fsnotify
+			// is not recursive), and the new domain stayed invisible until
+			// the next full DiscoveryEvery rescan — up to hours. See
+			// handleNewDir for the per-directory watch/rescan decision.
+			if ev.Op&fsnotify.Create != 0 {
+				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() {
+					w.handleNewDir(ev.Name)
+					continue
+				}
 			}
 
-			// if new dir created → watch it too
-			if ev.Op&fsnotify.Create != 0 {
-				fi, err := os.Stat(ev.Name)
-				if err == nil && fi.IsDir() {
-					_ = w.addRecursive(ev.Name)
-				}
+			// File events: keep the cheap name filter so unrelated write
+			// churn (locks, caches, wp-content, ...) does not trigger a
+			// rescan on every tick.
+			if !w.isRelevant(ev) {
+				continue
 			}
 
 			w.trigger("fsnotify:" + ev.Name)
@@ -197,6 +232,78 @@ func (w *Watcher) isRelevant(ev fsnotify.Event) bool {
 
 	// Ignore unrelated file churn (locks, caches, journals, wp-content noise, etc).
 	return false
+}
+
+// certRootPrefixes are the non-home roots that only ever hold certificate
+// material, so any newly-created subdirectory under them is safe to watch
+// recursively and to rescan on.
+var certRootPrefixes = []string{
+	"/etc/letsencrypt",
+	"/var/cpanel/ssl",
+	"/usr/local/directadmin",
+	"/etc/ssl",
+}
+
+// homeMountTopRE matches a home mount top: /home, /home2, /home3, ...
+var homeMountTopRE = regexp.MustCompile(`^/home[0-9]*$`)
+
+func underCertRoot(path string) bool {
+	for _, r := range certRootPrefixes {
+		if path == r || strings.HasPrefix(path, r+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// isCertDirName reports whether base is a per-user directory that holds
+// certificate material across the panels we support
+// (cPanel/DirectAdmin/Virtualmin/LE home layouts).
+func isCertDirName(base string) bool {
+	switch base {
+	case "ssl", "certs", "letsencrypt":
+		return true
+	}
+	return false
+}
+
+// handleNewDir decides how to watch a newly-created directory and whether
+// to schedule a rescan. It is the counterpart to the dir-create fix in
+// loop(): every new directory gets an explicit decision here instead of
+// being silently dropped by the isRelevant() name filter.
+//
+// The trigger()ed Refresh runs a full discoverPairs() ~delay later, which
+// also closes the race where cert files are written into the directory
+// between os.Stat and fs.Add.
+func (w *Watcher) handleNewDir(path string) {
+	base := filepath.Base(path)
+	parentBase := filepath.Base(filepath.Dir(path))
+
+	switch {
+	// 1) Pure cert trees (LE/cPanel/DA/...) and per-user cert dirs:
+	//    watch fully and rescan.
+	case underCertRoot(path) || isCertDirName(base):
+		_ = w.addRecursive(path)
+		w.trigger("fsnotify:newdir:" + path)
+
+	// 2) Home-layout containers that sit one level above per-domain cert
+	//    material: a brand-new user home (under a /home* mount), a user's
+	//    "domains" container, or an individual domain dir. Watch SHALLOWLY
+	//    so the eventual ssl/ dir or ssl.key/ssl.cert file creation fires
+	//    an event, without recursing whole home/web trees (public_html,
+	//    wp-content, mail, ...). Rescan too, in case the cert already
+	//    landed before we got here.
+	case homeMountTopRE.MatchString(filepath.Dir(path)), // new user home
+		base == "domains",       // user's domains container
+		parentBase == "domains": // an individual domain dir
+		_ = w.fs.Add(path)
+		w.trigger("fsnotify:newhome:" + path)
+
+	default:
+		// Unrelated new dir under a watched home (public_html, mail, ...).
+		// Not cert material — do not watch or rescan; doing so would only
+		// add inotify pressure and refresh churn.
+	}
 }
 
 func (w *Watcher) addRecursive(root string) error {
