@@ -20,8 +20,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -92,13 +92,22 @@ type purgeSharedResponse struct {
 // the per-IP keys from the cfm_decisions shared dict and returns per-plane
 // counts. Authenticated with the same bridge token nginx already trusts.
 func (b *NginxBridge) purgeShared(ip string) ([]unblock.WAFFinding, error) {
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d/cfm-admin/purge-ip?ip=%s",
-		nginxAdminHTTPPort(), url.QueryEscape(ip))
+	// Validate and canonicalise the IP up front. Besides rejecting junk, this
+	// is a deliberate taint barrier: the value only ever leaves this function
+	// as a request HEADER, never as part of the request URL/destination, and
+	// the URL is a fixed loopback address — so there is no request-forgery
+	// (SSRF) surface even though `ip` originates from request input.
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return nil, fmt.Errorf("purge: invalid ip %q", ip)
+	}
 
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d/cfm-admin/purge-ip", nginxAdminHTTPPort())
 	req, err := http.NewRequest(http.MethodPost, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("purge build request: %w", err)
 	}
+	req.Header.Set("X-CFM-Purge-IP", parsed.String())
 	if b.cfg.Token != "" {
 		req.Header.Set("X-CFM-Token", b.cfg.Token)
 	}
