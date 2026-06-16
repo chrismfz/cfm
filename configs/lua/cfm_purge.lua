@@ -11,7 +11,10 @@
 --   ds|<ip>|<host>|<scope>                     static-asset decision cache
 --   geo|<ip>                                   country-code cache
 --   ok_touch|<ip>|<host>|<scope>               solved-IP touch gate
---   wafpush|<ip>|<reason>                      WAF push cooldown
+--   wafpush|<reason>|<ip>                      WAF push cooldown (IP is the LAST field)
+--   panel_cooldown|<ip>|<host>                 panel challenge cooldown (cfm_panel)
+--   panel_ok|<ip>|<host>                       panel challenge passed/bypass
+--   panel_loop|<ip>|<host>                     panel challenge loop counter
 --
 -- Invoked from the `= /cfm-admin/purge-ip` location, which the cfm daemon
 -- (internal/webdetector NginxBridge.purgeShared) calls over loopback during a
@@ -35,13 +38,31 @@ local function load_token()
 end
 
 -- check_token returns true iff the request carries the matching bridge token.
--- The endpoint is also locked to loopback at the nginx layer; this is the
--- second factor so a compromised local user without the token cannot purge.
+-- The endpoint is also locked to loopback (see check_loopback); this token is
+-- the second factor so a compromised host without the secret cannot purge.
 function _M.check_token()
   local want = load_token()
   if not want then return false end
   local got = ngx.req.get_headers()["X-CFM-Token"]
   return type(got) == "string" and got == want
+end
+
+-- check_loopback returns true iff the *real* TCP peer is loopback.
+--
+-- It must read $realip_remote_addr (the original peer), NOT $remote_addr:
+-- the real_ip module rewrites $remote_addr to the client-supplied
+-- CF-Connecting-IP for trusted proxies, so a request arriving via Cloudflare
+-- with header "CF-Connecting-IP: 127.0.0.1" would otherwise forge a loopback
+-- origin and defeat an `allow 127.0.0.1` rule. $realip_remote_addr is the
+-- pre-rewrite peer and cannot be spoofed by a header. Falls back to
+-- $remote_addr when realip is not in play (e.g. a direct loopback call with
+-- no CF header, where the two are identical anyway).
+function _M.check_loopback()
+  local peer = ngx.var.realip_remote_addr
+  if peer == nil or peer == "" then
+    peer = ngx.var.remote_addr or ""
+  end
+  return peer == "127.0.0.1" or peer == "::1"
 end
 
 -- split_pipe splits on the literal '|'. IPv6 addresses contain ':' but never
@@ -73,7 +94,7 @@ end
 
 -- purge_ip deletes all per-IP keys for `ip` and returns per-plane counts.
 function _M.purge_ip(ip)
-  local deleted = { throttle = 0, decision_cache = 0, geo = 0, ok_touch = 0, wafpush = 0 }
+  local deleted = { throttle = 0, decision_cache = 0, geo = 0, ok_touch = 0, wafpush = 0, panel = 0 }
   local sh = ngx.shared[SHNAME]
   if not sh then
     return { ip = ip or "", deleted = deleted, scanned = 0, error = "shdict unavailable" }
@@ -82,9 +103,12 @@ function _M.purge_ip(ip)
     return { ip = "", deleted = deleted, scanned = 0, error = "bad ip" }
   end
 
-  -- 0 = all keys; a purge is a rare admin action so scanning the whole dict
-  -- is acceptable. The dict is shared across all workers, so one pass clears
-  -- every worker.
+  -- 0 = all keys. This holds the dict lock for the duration of the scan, so
+  -- it is deliberately reserved for this rare, loopback+token-gated admin
+  -- action (a force unblock) rather than the request hot path. We scan ALL
+  -- keys on purpose: a bounded get_keys(N) could skip the very key that is
+  -- keeping a visitor stuck, which would defeat the whole point. The dict is
+  -- shared across all workers, so a single pass clears every worker.
   local keys = sh:get_keys(0)
   local scanned = #keys
 
@@ -99,8 +123,14 @@ function _M.purge_ip(ip)
       if parts[2] == ip then plane = "geo" end
     elseif prefix == "ok_touch" then
       if parts[2] == ip then plane = "ok_touch" end
+    elseif prefix == "panel_ok" or prefix == "panel_cooldown" or prefix == "panel_loop" then
+      -- cfm_panel.lua: panel_*|<ip>|<host>. panel_cooldown is active
+      -- "stuck behind a challenge" state, so it must be cleared on unblock.
+      if parts[2] == ip then plane = "panel" end
     elseif prefix == "wafpush" then
-      if parts[2] == ip then plane = "wafpush" end
+      -- cfm_waf.lua writes wafpush|<reason>|<ip>: the IP is the LAST field,
+      -- not field 2 (reason can itself be arbitrary text).
+      if parts[#parts] == ip then plane = "wafpush" end
     elseif prefix == "tr" then
       if strip_tr_suffix(parts[#parts]) == ip then plane = "throttle" end
     end

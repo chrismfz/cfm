@@ -22,21 +22,22 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
+	"cfm/internal/dnat"
 	"cfm/internal/unblock"
 )
 
 // nginxAdminHTTPPort returns the port the local nginx (angie/openresty) serves
-// the /cfm-admin/* endpoints on. Matches the DNAT convention (HTTP_PORT, 9080).
+// the /cfm-admin/* endpoints on. This is the web DNAT target, so we resolve it
+// through the same canonical helper the rest of the codebase uses
+// (CHALLENGE_HTTP_LISTEN takes precedence over the legacy HTTP_PORT, default
+// 9080) instead of reading HTTP_PORT directly — otherwise purge would POST to
+// the wrong port on deployments that set a custom challenge listener.
 func nginxAdminHTTPPort() int {
-	if v := strings.TrimSpace(os.Getenv("HTTP_PORT")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n < 65536 {
-			return n
-		}
+	if httpPort, _ := dnat.EffectiveTargetPorts(); httpPort > 0 && httpPort < 65536 {
+		return httpPort
 	}
 	return 9080
 }
@@ -61,8 +62,11 @@ func (b *NginxBridge) ForceUnblock(ip string) unblock.WAFResult {
 		res.Cleared = append(res.Cleared, unblock.WAFFinding{Plane: action, Detail: reason})
 	}
 
-	// 2) Drop the Go-side challenge/block state (also clears any solved-ok
-	//    bypass for the IP and notifies the bridge socket).
+	// 2) Drop the Go-side challenge/block state and notify the bridge socket.
+	//    (The shared-dict ok-touch gate is cleared by purgeShared below. The
+	//    in-memory okState bypass is only cleared by ClearIP when OkIPTTL==0;
+	//    leaving it is harmless — it suppresses re-challenging, it never
+	//    blocks.)
 	b.ClearIP(ip)
 
 	// 3) Purge the per-IP shared-dict caches inside nginx.
@@ -124,7 +128,7 @@ func (b *NginxBridge) purgeShared(ip string) ([]unblock.WAFFinding, error) {
 	// Map non-zero per-plane counts to findings. The plane names mirror the
 	// shared-dict key namespaces in configs/lua/cfm_purge.lua.
 	findings := make([]unblock.WAFFinding, 0, len(pr.Deleted))
-	for _, plane := range []string{"throttle", "decision_cache", "geo", "ok_touch", "wafpush"} {
+	for _, plane := range []string{"throttle", "decision_cache", "geo", "ok_touch", "wafpush", "panel"} {
 		if n := pr.Deleted[plane]; n > 0 {
 			detail := fmt.Sprintf("%d key", n)
 			if n != 1 {
