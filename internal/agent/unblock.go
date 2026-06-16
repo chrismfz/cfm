@@ -50,6 +50,7 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
         SendAPI:        false,
         Fail2BanUnban:  true,      // clear fail2ban bans too on agent-driven unblocks
         ImunifyWhiteTTL: &whiteTTL,
+        WAF:             unblock.WAFCleanerHook(), // clear OpenResty/Lua WAF planes too (nil in DNAT mode)
     })
     if err != nil {
         logging.LogfAPI("[unblock] unified unblock failed for %s: %v", ipStr, err)
@@ -63,6 +64,32 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
         }
     }
 
+
+    // 1a) Fold any WAF-plane findings into the locate result so they ride back
+    // on the unblock-confirm call. This is how the OpenResty/Lua enforcement
+    // planes (challenge/block/throttle) surface in cfm-web's fleet-wide
+    // "Blocked On" summary — they never appear in a blocklist search.
+    if res.WAF != nil && len(res.WAF.Cleared) > 0 {
+        if found == nil {
+            found = &locate.Result{Query: ipStr}
+        }
+        for _, f := range res.WAF.Cleared {
+            action := locate.ActionMatch
+            switch f.Plane {
+            case "block":
+                action = locate.ActionBlock
+            case "challenge":
+                action = locate.ActionChallenge
+            }
+            found.Locations = append(found.Locations, locate.Location{
+                Source: string(unblock.SrcWAF),
+                List:   f.Plane,
+                Action: action,
+                Match:  ipStr,
+                Reason: f.Detail,
+            })
+        }
+    }
 
     // 2) Confirm back to API (always success=true, to avoid stuck queue)
     logging.LogfAPI("[unblock] Confirming unblock to API id=%d ip=%s ...", id, ipStr)

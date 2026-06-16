@@ -72,6 +72,7 @@ func RunUnblock(args []string, be firewall.Backend, cfgDir string, tableExists f
 		ReportWhy:       "cli",
 		SendAPI:         sendAPI,
 		ImunifyWhiteTTL: &whiteTTL,
+		WAF:             unblock.WAFCleanerHook(), // clear OpenResty/Lua WAF planes via the local daemon
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "unblock error:", err)
@@ -102,6 +103,14 @@ func RunUnblock(args []string, be firewall.Backend, cfgDir string, tableExists f
 		}
 		fmt.Printf(" - %-9s via %-10s %s%s%s\n",
 			s.Action, s.Source, strings.TrimSpace(extra), feeds, dur)
+	}
+	if res.WAF != nil {
+		switch {
+		case res.WAF.Err != "" && len(res.WAF.Cleared) == 0:
+			fmt.Printf(" - %-9s via %-10s WAF clear error: %s\n", "error", unblock.SrcWAF, res.WAF.Err)
+		case res.WAF.Found:
+			fmt.Printf(" - %-9s via %-10s %s\n", "removed", unblock.SrcWAF, res.WAF.Summary())
+		}
 	}
 	if res.Whitelisted {
 		fmt.Println("✔ applied local whitelist override (due to feeds)")

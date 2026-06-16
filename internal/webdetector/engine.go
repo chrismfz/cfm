@@ -19,6 +19,7 @@ import (
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
 	"cfm/internal/telemetry"
+	"cfm/internal/unblock"
 )
 
 // LogRec is one TSV log line parsed.
@@ -462,6 +463,11 @@ func NewEngine(cfg Config) *Engine {
 		e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
 		e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 		e.nginxBridge.ListTrafficRules = e.TrafficRuleList
+
+		// Register the bridge as the process-wide WAF cleaner so in-daemon
+		// unblock paths (the /unblock endpoint and the agent's pending-unblock
+		// queue) clear the OpenResty WAF planes as part of a force unblock.
+		unblock.SetWAFCleaner(e.nginxBridge)
 	}
 	// Compile MALPATH rules. Supports "N:substring" override syntax.
 	e.malRules = compileMalRules(cfg.MalPathList, cfg.MalPathCount)
