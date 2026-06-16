@@ -39,6 +39,11 @@ const (
 	SrcImunify  Source = "imunify360"
 	SrcFeeds    Source = "feeds"
 	SrcFail2Ban Source = "fail2ban"
+	// SrcWAF covers the OpenResty/Lua WAF enforcement planes that live
+	// outside the firewall/blocklist: webdetector challenge/block state and
+	// the per-IP shared-dict caches (throttle buckets, decision cache, geo,
+	// ok-touch, waf-push cooldown). These never appear in a blocklist search.
+	SrcWAF Source = "waf"
 )
 
 type Step struct {
@@ -56,7 +61,11 @@ type Result struct {
 	FromFeeds   []string
 	WasBlocked  bool
 	Whitelisted bool
-	mu          sync.Mutex // protects Steps during concurrent goroutine appends
+	// WAF holds the result of clearing the OpenResty/Lua WAF planes for this
+	// IP (challenge/block + shared-dict per-IP caches). nil when no WAFCleaner
+	// was wired (e.g. DNAT mode, or a process with no in-daemon bridge).
+	WAF *WAFResult
+	mu  sync.Mutex // protects Steps during concurrent goroutine appends
 }
 
 type Options struct {
@@ -74,6 +83,15 @@ type Options struct {
 	// the visitor seconds after we cleared them — without it, a user
 	// bounced by imunify GRAY can loop: unblock → re-greylist → unblock.
 	ImunifyWhiteTTL *time.Duration
+	// WAF, when set, also clears the OpenResty/Lua WAF planes for the IP
+	// (webdetector challenge/block + per-IP shared-dict caches) as part of a
+	// "force unblock". Best-effort: failures are recorded as a step, never
+	// fatal. Do clears the WAF plane iff this is non-nil — there is no
+	// implicit fallback, so a caller that already cleared the WAF plane
+	// synchronously (e.g. the /unblock handler, which needs the findings in
+	// its immediate response) can leave this nil to avoid a double clear.
+	// Callers that want it should set it to unblock.WAFCleanerHook().
+	WAF WAFCleaner
 }
 
 // ----------------------------------------------
@@ -190,6 +208,30 @@ func Do(ctx context.Context, ip net.IP, opts Options) (*Result, error) {
 			r.Steps = append(r.Steps, Step{Source: SrcFeeds, Action: ActionWhitelisted, Feeds: r.FromFeeds})
 			r.Whitelisted = true
 		}
+	}
+
+	// 4a) WAF planes (OpenResty/Lua): webdetector challenge/block + per-IP
+	// shared-dict caches (throttle, decision cache, geo, ok-touch, waf-push).
+	// These live entirely outside the firewall/blocklist, so a "force unblock"
+	// that ignores them can leave a user stuck behind a challenge/throttle even
+	// though every blocklist search comes back empty. Best-effort by design.
+	if opts.WAF != nil {
+		tw := time.Now()
+		wr := opts.WAF.ForceUnblock(ip.String())
+		r.WAF = &wr
+		step := Step{Source: SrcWAF, Dur: time.Since(tw)}
+		switch {
+		case wr.Err != "":
+			step.Action = ActionError
+			step.Err = wr.Err
+			step.Detail = wr.Summary()
+		case len(wr.Cleared) > 0:
+			step.Action = ActionRemoved
+			step.Detail = wr.Summary()
+		default:
+			step.Action = ActionNotFound
+		}
+		r.Steps = append(r.Steps, step)
 	}
 
 	// 5) Optional API report (ενοποιημένα — π.χ. να στείλουμε reason = "feeds: a,b" ή "manual")

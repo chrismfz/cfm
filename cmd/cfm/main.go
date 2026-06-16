@@ -47,6 +47,7 @@ import (
 	"cfm/internal/healthcli"
 	"cfm/internal/kernsec"
 	"cfm/internal/lsm"
+	"cfm/internal/unblock"
 )
 
 var (
@@ -243,6 +244,10 @@ func main() {
 		os.Exit(cli.RunBlock(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "unblock":
 		be := mustBackend()
+		// Wire a WAF cleaner that reaches the running daemon's admin API so a
+		// CLI unblock also clears the OpenResty/Lua WAF planes (challenge/block
+		// + per-IP shared-dict caches), not just the firewall/blocklist.
+		unblock.SetWAFCleaner(unblock.NewHTTPWAFCleaner(apiBaseURL(), apiAuthToken()))
 		os.Exit(cli.RunUnblock(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "list":
 		be := mustBackend()

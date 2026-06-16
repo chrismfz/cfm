@@ -145,12 +145,37 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 			return host
 		}()
 
+		// ── 3a. WAF planes (OpenResty/Lua) ────────────────────────────────
+		// Clear the per-IP WAF enforcement state (challenge/block + shared-dict
+		// throttle/decision caches) on this node. These live outside the
+		// firewall/blocklist, so without this a user can stay stuck behind a
+		// challenge/throttle while every blocklist search comes back empty.
+		//
+		// The clear always runs to completion in its own goroutine; we wait up
+		// to a tight budget to fold the findings into this response (the
+		// caller — cfm-web — has its own ~1.2s deadline). The findings double
+		// as the "was this IP actually being enforced, and why" signal.
+		var wafResult *unblock.WAFResult
+		if c := unblock.WAFCleanerHook(); c != nil {
+			done := make(chan unblock.WAFResult, 1)
+			go func() { done <- c.ForceUnblock(ip.String()) }()
+			select {
+			case wr := <-done:
+				wafResult = &wr
+				logging.LogfAPI("[unblock.waf] ip=%s found=%t cleared=%q err=%q",
+					ip.String(), wr.Found, wr.Summary(), wr.Err)
+			case <-time.After(700 * time.Millisecond):
+				logging.LogfAPI("[unblock.waf] ip=%s clear still running after 700ms; responding without findings", ip.String())
+			}
+		}
+
 		// ── 4. Immediate JSON response ─────────────────────────────────────
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":          true,
 			"ip":          ip.String(),
 			"hostname":    localNodeID(),
 			"was_blocked": wasBlocked,
+			"waf":         wafResult,
 			"duration_ms": time.Since(start).Milliseconds(),
 			"bg_cleanup":  true,
 		})

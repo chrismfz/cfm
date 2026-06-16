@@ -29,6 +29,7 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/webdet/ip-short", e.handleIPShort)
 	mux.HandleFunc("/api/v1/webdet/ip-drilldown", e.handleIPDrilldown)
 	mux.HandleFunc("/api/v1/webdet/analyze-ip", e.handleAnalyzeIP)
+	mux.HandleFunc("/api/v1/webdet/force-unblock-ip", e.handleForceUnblockIP)
 	mux.HandleFunc("/api/v1/webdet/analyze-host", e.handleAnalyzeHost)
 	mux.HandleFunc("/api/v1/webdet/summary", e.handleWebdetSummary)
 	mux.HandleFunc("/api/v1/webdet/ingest-source", e.handleIngestSource)
