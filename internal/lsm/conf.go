@@ -375,6 +375,42 @@ var DefaultGlobalAllowExe = []string{
 	"/usr/libexec/dovecot/indexer-worker",
 	"/usr/libexec/dovecot/auth",
 
+	// Exim MTA. Setuid-root mail binary that completes the mail stack
+	// alongside postfix + dovecot above. The receiving / delivery
+	// processes drop to the per-account uid (to run .forward pipes,
+	// write to a user mailbox, evaluate per-user filters) and then
+	// setuid back to root for the next delivery — every message that
+	// touches an unprivileged uid round-trips through root and trips
+	// CFML-CRED-002. Covers RHEL / cPanel ("exim") and Debian/Ubuntu
+	// ("exim4") binary names; the companion comm entries in
+	// DefaultGlobalAllowComm catch forked delivery children whose exe
+	// d_name lookup races the userspace post-filter.
+	"/usr/sbin/exim",
+	"/usr/sbin/exim4",
+
+	// sudo / su — the canonical setuid-root privilege tools. sudo
+	// lowers its euid to the invoking user to safely stat files in
+	// that user's home and read per-user config, then seteuid(0) to
+	// restore root before exec'ing the target command; su performs
+	// the equivalent drop/restore during PAM authentication. Both are
+	// setuid-on-disk so the inode walk normally short-circuits them,
+	// but the walk is a one-shot snapshot taken at daemon start: when
+	// the package manager upgrades sudo/su between cfm restarts the
+	// rename-into-place gives the path a NEW inode the cached map
+	// doesn't hold, so every subsequent invocation misses and fires
+	// CRED-002 — and on a busy panel host sudo runs constantly (cron,
+	// monitoring, panel helpers), which is the reported FP burst.
+	// Where these paths exist the inode is re-pinned here on the next
+	// start, giving an exact short-circuit for the REAL binary; for an
+	// attacker-dropped /tmp/sudo there is no inode pin, only the
+	// basename layer, which is spoofable — acceptable because CRED-002
+	// is monitor-only and a dropper at that point has already reached
+	// root, so this is post-privesc telemetry, not a boundary.
+	"/usr/bin/sudo",
+	"/bin/sudo",
+	"/usr/bin/su",
+	"/bin/su",
+
 	// Postfix spawn(8) descendant — universal
 	"/usr/bin/logger",
 	"/bin/logger",
@@ -429,6 +465,23 @@ var DefaultGlobalAllowExe = []string{
 	// kernel-side match (script name).
 	"/usr/sbin/clean_user_php_sessions",
 	"/usr/share/cagefs/clean_user_php_sessions",
+
+	// CloudLinux LVE Stats v4 — the Rust rewrite of lvestats-server.
+	// Polls per-user LVE resource counters and transitions uid into
+	// each watched account and back to root, tripping CFML-CRED-002 on
+	// every cycle. The legacy Python daemon (lvestats-server.py) is
+	// covered by the allow_path = /usr/share/lve-stats/ prefix in
+	// DefaultGlobalAllowPath, but the Rust binary's tokio worker
+	// threads report comm "tokio-runtime-worker" (truncated to
+	// "tokio-runtime-w") and its argv often doesn't carry the
+	// /usr/share/lve-stats/ prefix the cmdline matcher needs, so the
+	// path prefix alone doesn't suppress it. The exe d_name is the
+	// stable handle: matching basename "lvestats-server.rust" silences
+	// the worker-thread events regardless of install path. Listed as a
+	// concrete path so the BPF inode short-circuit also fires where the
+	// binary is installed here; the basename post-filter covers other
+	// layouts.
+	"/usr/share/lve-stats/lvestats-server.rust",
 
 	// cPanel server daemon and its variant entry points. cPanel ships
 	// cpsrvd / webmaild / whostmgrd / cpdavd as the same Perl daemon
@@ -661,6 +714,16 @@ var DefaultGlobalAllowComm = []string{
 	// comm match is the handle.
 	"spamd",
 	"spamd child",
+
+	// Exim MTA master + forked delivery children. The allow_exe
+	// entries above (/usr/sbin/exim, /usr/sbin/exim4) pin the inode
+	// for the BPF-side short-circuit; this comm handle catches the
+	// per-delivery children whose exe d_name lookup races the
+	// userspace post-filter, same rationale as the proftpd / httpd
+	// entries below. RHEL/cPanel report comm "exim"; Debian/Ubuntu
+	// report "exim4".
+	"exim",
+	"exim4",
 
 	// CloudLinux Smart Advice agent. Runs python3.11 as the exe and
 	// trips CFML-CRED-002 each time it transitions uids while

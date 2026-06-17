@@ -331,6 +331,12 @@ func TestDefaultConf_GlobalAllowSeeded(t *testing.T) {
 		"/usr/local/cpanel/cpsrvd",
 		"/usr/local/cpanel/xml-api",
 		"/usr/bin/dccproc",
+		// Base-system setuid-root privilege tools + mail stack
+		// completion (exim alongside postfix/dovecot) + CloudLinux
+		// LVE Stats v4 (Rust). See DefaultGlobalAllowExe.
+		"/usr/sbin/exim",
+		"/usr/bin/sudo",
+		"/usr/share/lve-stats/lvestats-server.rust",
 	}
 	for _, w := range wantExe {
 		found := false
@@ -348,6 +354,7 @@ func TestDefaultConf_GlobalAllowSeeded(t *testing.T) {
 		"runc", "containerd-shim", "dockerd",
 		"cagefsctl", "clean_user_php_", "update_quota_ca",
 		"spamd", "spamd child",
+		"exim", "exim4",
 	}
 	for _, w := range wantComm {
 		found := false
@@ -379,6 +386,13 @@ func TestEventFilter_DefaultConfSuppression(t *testing.T) {
 		{"CRED-002 systemd-executor", Event{PolicyID: PolicyCredEscal, Filename: "systemd-executor"}},
 		{"CRED-002 postfix master", Event{PolicyID: PolicyCredEscal, Filename: "master"}},
 		{"CRED-002 dovecot indexer-worker", Event{PolicyID: PolicyCredEscal, Filename: "indexer-worker"}},
+		// Field-reported FPs: setuid-root sudo / exim and the
+		// CloudLinux LVE Stats v4 (Rust) worker. The event filename is
+		// the exe d_name basename; comm for the Rust daemon is the
+		// generic tokio worker thread, so basename is the handle.
+		{"CRED-002 sudo", Event{PolicyID: PolicyCredEscal, Comm: "sudo", Filename: "sudo"}},
+		{"CRED-002 exim", Event{PolicyID: PolicyCredEscal, Comm: "exim", Filename: "exim"}},
+		{"CRED-002 lvestats-rust", Event{PolicyID: PolicyCredEscal, Comm: "tokio-runtime-w", Filename: "lvestats-server.rust"}},
 		{"EXEC-003 logger", Event{PolicyID: PolicyReverseShell, Filename: "/usr/bin/logger", Flags: EventFlagRevshellStrict}},
 	}
 	for _, tc := range cases {
