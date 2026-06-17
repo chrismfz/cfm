@@ -196,6 +196,14 @@ If you write your own CRED-002 PoC: the rule fires on
 inside `main()` sees `old_euid == 0` already (set by execve), so
 CRED-002 returns early on the "already root" check.
 
+There is now a SECOND reason a setuid-bit binary stays quiet: the hook
+reads `exe_file`'s inode mode live and short-circuits when `S_ISUID` is
+set, so even a hypothetical suid-bit binary that somehow reached the
+hook with `old_euid != 0` is treated as a legitimate setuid path. This
+is why the shipped scenario chmod's the dropper **0755** and relies on
+`cap_setuid+ep` — a suid bit on the dropper would (correctly) suppress
+the event under the live check. Keep PoC droppers free of the suid bit.
+
 The right trigger is `cap_setuid+ep` file capabilities:
 
 ```sh

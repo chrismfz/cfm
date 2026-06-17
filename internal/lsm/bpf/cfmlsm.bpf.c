@@ -1499,9 +1499,18 @@ int BPF_PROG(cfm_fs005_setxattr_idmap, void *idmap_or_ns, struct dentry *dentry,
  * Mechanism: on every setuid-family syscall, compare:
  *   - new cred's euid is 0
  *   - old cred's euid is not 0
- *   - current task's mm->exe_file's filesystem+inode key is NOT in
- *     `cfm_setuid_inodes` (populated by the daemon walking the host
- *     for files with S_ISUID set).
+ *   - current task's mm->exe_file does NOT carry the suid bit. This is
+ *     decided in two steps: first a LIVE read of exe_file's inode mode
+ *     (i_mode & S_ISUID) — self-maintaining and never stale — and only
+ *     if that is clear, a lookup of the exe's filesystem+inode key in
+ *     `cfm_setuid_inodes`. The map is a one-shot snapshot the daemon
+ *     builds by walking the host for S_ISUID files at start time; it
+ *     also carries the operator's allow_exe entries for daemons that
+ *     reach euid 0 without a suid bit (directadmin / cpanel /
+ *     lvestats). The live mode read was added because a package upgrade
+ *     of a setuid binary (sudo / exim) rename()s a new inode into place
+ *     that the snapshot no longer holds, FPing every invocation until
+ *     the next `cfm lsm restart`.
  *
  * If all three hold, the task is gaining root via a setuid()-family
  * call from a binary that is not on disk with the suid bit set.
@@ -1633,11 +1642,39 @@ int BPF_PROG(cfm_cred002, struct cred *new, const struct cred *old,
     struct inode *exe_ino = BPF_CORE_READ(exe, f_inode);
     if (!exe_ino)
         return 0;
+
+    /* Live setuid-bit check — self-maintaining, never stale.
+     *
+     * cfm_setuid_inodes is a one-shot snapshot the daemon builds by
+     * walking the host at start time. When the package manager upgrades
+     * a setuid binary (sudo / su / exim) it rename()s a NEW inode into
+     * place, so the cached snapshot no longer holds the live inode and
+     * every legitimate uid→0 transition FPs until the next
+     * `cfm lsm restart`. Reading the exe inode's mode here instead asks
+     * the semantically correct question — "does the binary on disk
+     * carry the suid bit right now?" — which is exactly what makes a
+     * transition a *setuid path*. It costs one CO-RE field read and
+     * cannot go stale across upgrades.
+     *
+     * This does not weaken detection: a post-exploit dropper that
+     * setresuid(0,0,0) after a kernel privesc has no suid bit (that is
+     * the entire premise of the rule), so it still falls through to the
+     * emit below. An attacker who could chmod u+s their own payload to
+     * dodge this would trip CFML-FS-007 at write time. */
+    __u16 exe_mode = BPF_CORE_READ(exe_ino, i_mode);
+    if (exe_mode & 04000) /* S_ISUID */
+        return 0;
+
     struct cfm_inode_key key = {};
     if (!cfm_inode_key_from_inode(exe_ino, &key))
         return 0;
 
-    /* Whitelist hit — legitimate setuid binary path. */
+    /* Snapshot/allowlist hit. Still consulted after the live check
+     * because it also carries the operator's allow_exe entries for
+     * binaries that legitimately reach euid 0 *without* a suid bit on
+     * disk (directadmin / cpanel / lvestats-server.rust) — those are
+     * stat()'d into the map by the daemon and have no S_ISUID to match
+     * above. */
     if (bpf_map_lookup_elem(&cfm_setuid_inodes, &key))
         return 0;
 
