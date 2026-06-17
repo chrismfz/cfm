@@ -394,13 +394,18 @@ var DefaultGlobalAllowExe = []string{
 	// restore root before exec'ing the target command; su performs
 	// the equivalent drop/restore during PAM authentication. Both are
 	// setuid-on-disk so the inode walk normally short-circuits them,
-	// but hosts where the on-disk inode isn't matched (merged-/usr
-	// symlink layouts, post-upgrade inode churn before a daemon
-	// restart) emit a CRED-002 per invocation — and on a busy panel
-	// host sudo runs constantly (cron, monitoring, panel helpers).
-	// Pinning the inode here makes the suppression robust; the
-	// basename fallback is acceptable given sudo/su are exactly the
-	// legitimate-setuid case this policy is designed to ignore.
+	// but the walk is a one-shot snapshot taken at daemon start: when
+	// the package manager upgrades sudo/su between cfm restarts the
+	// rename-into-place gives the path a NEW inode the cached map
+	// doesn't hold, so every subsequent invocation misses and fires
+	// CRED-002 — and on a busy panel host sudo runs constantly (cron,
+	// monitoring, panel helpers), which is the reported FP burst.
+	// Where these paths exist the inode is re-pinned here on the next
+	// start, giving an exact short-circuit for the REAL binary; for an
+	// attacker-dropped /tmp/sudo there is no inode pin, only the
+	// basename layer, which is spoofable — acceptable because CRED-002
+	// is monitor-only and a dropper at that point has already reached
+	// root, so this is post-privesc telemetry, not a boundary.
 	"/usr/bin/sudo",
 	"/bin/sudo",
 	"/usr/bin/su",
