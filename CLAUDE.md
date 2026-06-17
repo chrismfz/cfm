@@ -196,11 +196,45 @@ rather than advancing heartbeats on failure.
 
 ---
 
-## 8. Workflow
+## 8. Releasing & CHANGELOG
+
+**The version IS the date.** The Makefile sets `VERSION ?= $(date +%Y.%m.%d)`
+(the `.deb` adds an `-HHMMSS` suffix; the git tag is `vYYYY.MM.DD`). There is
+no separate semver to bump — building on a given day produces that day's
+version. The normal release is just:
+
+```bash
+make release    # builds bin/cfm, then the .deb and .rpm stamped with today's date
+make sync       # rsyncs today's .deb/.rpm (+ checksums) to the remote repo
+```
+
+`make release` runs `bpf deb rpm`, so it also regenerates BPF objects — needs
+`clang` + `libbpf-dev` on the build host.
+
+### CHANGELOG discipline (do this — it's not automated)
+
+`CHANGELOG.md` is maintained **by hand** (no Makefile hook). Because version ==
+date, every released package should be reflected by a dated section.
+
+1. **While working:** add a bullet under `## [Unreleased]`, grouped by
+   **Added / Changed / Fixed / Security / Removed**. Keep entries
+   operator-facing (what changed, why it matters) — not "fixed typo".
+2. **On release day**, before/with `make release`: rename `## [Unreleased]`
+   to `## YYYY.MM.DD` using **today's date — the same date `make release`
+   stamps** (`date +%Y.%m.%d`). Then add a fresh empty
+   `## [Unreleased]\n\n_Nothing yet._` block at the top for the next cycle.
+3. If you ship more than one build in a single day, keep one dated section for
+   that day and keep appending — the date is the unit of release.
+
+So the steady-state release ritual is: _move Unreleased → today's date in
+`CHANGELOG.md`_, then `make release ; make sync`.
+
+## 9. Workflow
 
 - Develop on the feature branch you were assigned; create it from `main` if
   missing. Don't push to `main` directly.
 - Keep PRs focused — this repo favours many small, single-concern PRs.
 - After edge-affecting changes, run the relevant runbook/checklist in `docs/`
   before considering the change done.
+- Update `CHANGELOG.md` (`[Unreleased]`) as part of the change, per §8.
 - Don't create a PR unless explicitly asked.
