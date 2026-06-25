@@ -33,6 +33,7 @@ import (
 //	  /api/v1/mysql/user-summary  — filtered snapshot (user= / db= params)
 //	  /api/v1/mysql/user-kills    — filtered kill history
 //	  /api/v1/mysql/user-history  — filtered long-window history
+//	  /api/v1/mysql/user-kill     — POST: KILL one in-scope connection/query
 func (g *Governor) RegisterHTTP(mux *http.ServeMux) {
 	g.RegisterHTTPAdmin(mux)
 	g.RegisterHTTPScoped(mux)
@@ -70,9 +71,14 @@ func (g *Governor) RegisterHTTPScoped(mux *http.ServeMux) {
 	// apiserver wraps them in scopedMySQLFilterHandler, which derives and
 	// validates the user/db filter from the token's vhost/db scope (admin
 	// tokens pass through unfiltered). There is no handler-level admin check.
+	//
+	// user-kill is the one WRITE here: a scoped caller may KILL only a process
+	// whose (user, db) is within their scope (enforced in handleUserKill via
+	// userDBMatch); admin callers may kill any process.
 	mux.HandleFunc("/api/v1/mysql/user-summary", g.handleUserSummary)
 	mux.HandleFunc("/api/v1/mysql/user-kills", g.handleUserKills)
 	mux.HandleFunc("/api/v1/mysql/user-history", g.handleUserHistory)
+	mux.HandleFunc("/api/v1/mysql/user-kill", g.handleUserKill)
 }
 
 // ── existing admin handlers (unchanged) ──────────────────────────────────────
@@ -423,6 +429,95 @@ func (g *Governor) handleUserHistory(w http.ResponseWriter, r *http.Request) {
 // Both params accept comma-separated values and/or repeated keys.
 // Returns (users, dbs, ok); writes a JSON error and returns ok=false on
 // any validation failure so callers can just `if !ok { return }`.
+// handleUserKill terminates a single MySQL connection/query by id, restricted
+// to the caller's own users/databases.
+//
+//	POST /api/v1/mysql/user-kill?id=<pid>&type=query|connection
+//
+// Guard level: Guard 2 (scoped or admin) — registered behind
+// scopedMySQLFilterHandler, which injects/validates the caller's user/db
+// filter. A scoped caller may only kill a process whose (user, db) is within
+// their scope; an admin caller (no filter present) may kill any process.
+//
+// type=query (default) issues KILL QUERY (statement dies, connection survives);
+// type=connection issues KILL (drops the connection).
+func (g *Governor) handleUserKill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeGovernorJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed (use POST)"})
+		return
+	}
+
+	idStr := strings.TrimSpace(r.URL.Query().Get("id"))
+	pid, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || pid <= 0 {
+		writeGovernorJSON(w, http.StatusBadRequest, map[string]string{"error": "missing or invalid ?id= (connection id)"})
+		return
+	}
+
+	killQuery := true // default: KILL QUERY (statement only, connection survives)
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type"))) {
+	case "", "query":
+		killQuery = true
+	case "connection", "conn":
+		killQuery = false
+	default:
+		writeGovernorJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ?type= (use query|connection)"})
+		return
+	}
+
+	// Scope: a scoped caller has user=/db= injected by scopedMySQLFilterHandler;
+	// an admin caller has neither and may target any process.
+	users := parseMultiParam(r, "user")
+	dbs := parseMultiParam(r, "db")
+	scoped := len(users) > 0 || len(dbs) > 0
+
+	// Resolve the target. Prefer a LIVE processlist lookup (authoritative) so
+	// the scope check below and the KILL act on the same row — no TOCTOU window
+	// where a pid is reused between the periodic snapshot and the kill. Fall
+	// back to the snapshot only when there is no DB handle (e.g. unit tests).
+	var target Process
+	var found bool
+	if g.db != nil {
+		var lookupErr error
+		target, found, lookupErr = g.liveProcess(r.Context(), pid)
+		if lookupErr != nil {
+			writeGovernorJSON(w, http.StatusInternalServerError, map[string]string{"error": "processlist lookup failed: " + lookupErr.Error()})
+			return
+		}
+	} else {
+		for _, p := range g.State().Processes {
+			if p.ID == pid {
+				target, found = p, true
+				break
+			}
+		}
+	}
+	if !found {
+		writeGovernorJSON(w, http.StatusNotFound, map[string]string{"error": "connection not found (it may have already ended)"})
+		return
+	}
+
+	if scoped && !userDBMatch(target.User, target.DB, users, dbs) {
+		writeGovernorJSON(w, http.StatusForbidden, map[string]string{"error": "connection is outside your scope"})
+		return
+	}
+
+	kr := g.ManualKill(r.Context(), target, killQuery, "manual kill via API")
+
+	status := http.StatusOK
+	if kr.Result != "OK" {
+		status = http.StatusInternalServerError
+	}
+	writeGovernorJSON(w, status, map[string]any{
+		"ok":     kr.Result == "OK",
+		"id":     kr.PID,
+		"action": kr.Action,
+		"user":   kr.User,
+		"db":     kr.DB,
+		"result": kr.Result,
+	})
+}
+
 func parseUserDBParams(w http.ResponseWriter, r *http.Request) (users, dbs []string, ok bool) {
 	users = parseMultiParam(r, "user")
 	dbs = parseMultiParam(r, "db")

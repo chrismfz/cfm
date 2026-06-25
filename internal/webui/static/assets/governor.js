@@ -79,6 +79,7 @@
     eventRows: [],
     isScopedMode: false,
     identityConfirmedAdmin: false,
+    canWrite: false,
   };
   const ADMIN_ONLY_API_PATHS = new Set([
     '/v1/mysql/state',
@@ -375,6 +376,10 @@
         <td><button class="btn-quiet btn-sm" data-user="${esc(u.user)}" data-db="">History</button></td>
       </tr>`).join('') : '<tr><td colspan="8" class="muted">No users.</td></tr>';
 
+    // Scoped users (the running rows are already filtered to their own
+    // connections) and admins may kill a running query. The daemon re-checks
+    // scope on /v1/mysql/user-kill, so showing it to scoped viewers is safe.
+    const showKill = st.isScopedMode || st.canWrite;
     el.runningBody.innerHTML = running.length ? running.slice(0, 120).map((r) => `
       <tr>
         <td>${esc(r.id)}</td>
@@ -383,7 +388,7 @@
         <td>${esc(r.time_sec)}s</td>
         <td>${esc(r.state)}</td>
         <td class="truncate" title="${esc(r.info)}">${esc(r.info)}</td>
-        <td><button class="btn-quiet btn-sm" data-user="${esc(r.user)}" data-db="${esc(r.db)}">History</button></td>
+        <td>${showKill ? `<button class="btn-quiet btn-sm" data-kill="${esc(r.id)}" title="KILL QUERY this connection">Kill</button> ` : ''}<button class="btn-quiet btn-sm" data-user="${esc(r.user)}" data-db="${esc(r.db)}">History</button></td>
       </tr>`).join('') : '<tr><td colspan="7" class="muted">No running queries.</td></tr>';
 
     pushSeriesPoint(st.connLabels, st.connPctSeries, safeChartLabel(state?.ts), chartValue);
@@ -409,6 +414,29 @@
     el.runningBody.querySelectorAll('button[data-user],button[data-db]').forEach((btn) => {
       btn.addEventListener('click', () => openHistoryFilter(btn.dataset.user || '', btn.dataset.db || ''));
     });
+    el.runningBody.querySelectorAll('button[data-kill]').forEach((btn) => {
+      btn.addEventListener('click', () => killProcess(btn.dataset.kill));
+    });
+  }
+
+  // killProcess issues KILL QUERY for one connection via the scope-checked
+  // /v1/mysql/user-kill endpoint. In scoped mode it goes through scopedApi (the
+  // daemon limits it to the caller's own user/db); in admin mode through api.
+  async function killProcess(id) {
+    const pid = String(id || '').trim();
+    if (!pid) return;
+    if (!window.confirm(`Kill the running query on connection ${pid}?\n\nThis issues KILL QUERY — your statement is terminated; the connection itself stays open.`)) {
+      return;
+    }
+    try {
+      const client = st.isScopedMode ? scopedApi : api;
+      const r = await client(`/v1/mysql/user-kill?id=${encodeURIComponent(pid)}&type=query`, { method: 'POST' });
+      showMsg(`Connection ${pid}: ${r?.action || 'KILL QUERY'} -> ${r?.result || 'OK'}`);
+    } catch (err) {
+      const body = err?.data?.error || err?.message || String(err);
+      showMsg(`Kill failed for connection ${pid}: ${body}`);
+    }
+    await refresh().catch(() => {});
   }
 
   function renderCPU(payload) {
@@ -860,6 +888,7 @@
   function applyViewerContext(ctx) {
     setScopedUI(ctx.isScopedMode);
     st.identityConfirmedAdmin = Boolean(ctx.isAdminConfirmed);
+    st.canWrite = Boolean(ctx.canWrite);
     if (!ctx.canWrite) {
       [el.pruneBtn, el.truncateBtn].forEach((n) => { if (n) n.style.display = 'none'; });
     }

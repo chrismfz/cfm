@@ -717,6 +717,32 @@ func (g *Governor) fetchProcesslist(ctx context.Context) ([]Process, error) {
 	return procs, rows.Err()
 }
 
+// liveProcess fetches a single connection straight from
+// information_schema.PROCESSLIST by id (authoritative, unlike the periodic
+// snapshot). Used right before a manual KILL so the scope check and the kill
+// see the same live row — closing the TOCTOU window where a pid could be
+// reused between the snapshot and the kill. Returns found=false if the
+// connection no longer exists. With no DB handle (tests) it returns found=false.
+func (g *Governor) liveProcess(ctx context.Context, pid int64) (Process, bool, error) {
+	var p Process
+	if g.db == nil {
+		return p, false, nil
+	}
+	row := g.db.QueryRowContext(ctx,
+		`SELECT ID, USER, HOST, COALESCE(DB,''), COMMAND, TIME,
+		        COALESCE(STATE,''), COALESCE(INFO,'')
+		 FROM information_schema.PROCESSLIST
+		 WHERE ID = ?`, pid)
+	if err := row.Scan(&p.ID, &p.User, &p.Host, &p.DB,
+		&p.Command, &p.TimeSec, &p.State, &p.Info); err != nil {
+		if err == sql.ErrNoRows {
+			return p, false, nil
+		}
+		return p, false, err
+	}
+	return p, true, nil
+}
+
 // hasOpenTxn checks information_schema.INNODB_TRX to protect sleeping connections
 // that are mid-transaction (committing would be incorrect if we kill them).
 func (g *Governor) hasOpenTxn(ctx context.Context, pid int64) bool {
@@ -860,6 +886,45 @@ func (g *Governor) appendKills(state GovernorState, kr []KillRecord) {
 			Payload:   g.buildSnapshotForUser(state, k.User, k.DB),
 		})
 	}
+}
+
+// ManualKill executes an operator- or tenant-initiated KILL for a single
+// process and records it in the audit ring + history. killQuery selects
+// "KILL QUERY id" (statement only, connection survives) over "KILL id" (drops
+// the whole connection). Authorization/scoping is the caller's responsibility
+// (see handleUserKill). Query text is intentionally NOT stored on the audit
+// record (privacy), matching the auto-kill paths.
+func (g *Governor) ManualKill(ctx context.Context, p Process, killQuery bool, reason string) KillRecord {
+	action := "KILL CONNECTION"
+	sql := fmt.Sprintf("KILL %d", p.ID)
+	if killQuery {
+		action = "KILL QUERY"
+		sql = fmt.Sprintf("KILL QUERY %d", p.ID)
+	}
+
+	result := "OK"
+	if g.db == nil {
+		result = "no database handle"
+	} else if _, err := g.db.ExecContext(ctx, sql); err != nil {
+		result = err.Error()
+	} else {
+		g.recordKill(p.DB)
+	}
+
+	kr := KillRecord{
+		Ts:      time.Now(),
+		PID:     p.ID,
+		User:    p.User,
+		Host:    p.Host,
+		DB:      p.DB,
+		Runtime: time.Duration(p.TimeSec) * time.Second,
+		State:   p.State,
+		Action:  action,
+		Reason:  reason,
+		Result:  result,
+	}
+	g.appendKills(g.State(), []KillRecord{kr})
+	return kr
 }
 
 func (g *Governor) recentKills() []KillRecord {

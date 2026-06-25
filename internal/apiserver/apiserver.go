@@ -240,6 +240,7 @@ func Start(
 		m.Handle("/api/v1/mysql/user-summary", scopedMySQLFilterHandler(mysqlScopedMux))
 		m.Handle("/api/v1/mysql/user-kills", scopedMySQLFilterHandler(mysqlScopedMux))
 		m.Handle("/api/v1/mysql/user-history", scopedMySQLFilterHandler(mysqlScopedMux))
+		m.Handle("/api/v1/mysql/user-kill", scopedMySQLFilterHandler(mysqlScopedMux))
 
 		logging.LogfAPI("[apiserver] mysql governor routes registered (admin global + scoped filtered)")
 	}
@@ -612,10 +613,12 @@ func adminOnlyHandler(next http.Handler) http.Handler {
 // defaults from scoped token vhost ownership mapping.
 func scopedMySQLFilterHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
-		if len(scope) == 0 {
-			// Admin token / authenticated UI session: keep existing handler
-			// semantics (user= or db= validation remains in governor handlers).
+		// Only a confirmed ADMIN runs these unfiltered. Detecting "admin" by an
+		// empty scope map is unsafe: a scoped token whose vhost scope is somehow
+		// empty (malformed/legacy) would otherwise be treated as admin and, on
+		// the WRITE endpoint /api/v1/mysql/user-kill, could kill ANY connection.
+		// Key off the authenticated role and fail closed for everyone else.
+		if webdet.IsAdminRequest(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

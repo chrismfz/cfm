@@ -17,7 +17,38 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- MySQL governor: scoped (cPanel) users can now **kill their own stuck
+  query/connection** — `POST /api/v1/mysql/user-kill?id=<pid>&type=query|connection`
+  (default `query` = KILL QUERY, statement only). The target connection's
+  `(user, db)` must be within the token's scope (admin tokens may target any);
+  every kill is recorded in the governor audit ring/history. Scoped governor
+  reads (`user-summary`/`user-kills`/`user-history`) were already live.
+
+### Fixed
+- Admin UI: scoped (cPanel) users no longer see admin-only nav items. The nav
+  filter only hid the Dashboard; **Web Bots, Notifier, Detectors, Settings and
+  Debug stayed visible** to scoped users and 403'd on click. The authoritative
+  admin-only nav list now covers all of them (backends were already
+  fail-closed; this removes the dead/broken links). Also removed a stale
+  divergent matcher copy in `ui-scope.js` and corrected
+  `docs/endpoint_scope_inventory.md` (which wrongly listed the scope-validated
+  `waf/engine/summary` and `{challenge,waf}/exclude/*` endpoints as admin-only).
+
 ### Security
+- MySQL governor `user-kill` now resolves the target from a **live** processlist
+  lookup (`information_schema.PROCESSLIST WHERE ID=?`) and scope-checks that live
+  row immediately before issuing the KILL, closing the TOCTOU window where a pid
+  could be reused between the periodic snapshot and the kill.
+- `TokenStore.Issue` **fails closed**: it refuses to mint a scoped (non-admin)
+  token with no scope at all (no vhosts, db-users, or databases); the issue API
+  returns 400. Defense-in-depth behind the role-based gate below.
+- MySQL governor scoped routes now **fail closed by authenticated role**, not by
+  an empty scope map. `scopedMySQLFilterHandler` previously treated any caller
+  with an empty vhost scope as admin (unfiltered); a scoped token whose scope
+  was somehow empty (malformed/legacy) would have been mis-handled as admin —
+  and on the new `user-kill` **write** that meant killing any connection. It now
+  passes through only for a confirmed admin role and fails closed otherwise.
 - `POST /api/v1/firewall/block` is now **admin-only server-side** (wrapped in
   `adminOnlyHandler`, like the MySQL/detectors/system-status routes).
   Previously the route had no role/scope check, so a scoped (cPanel/DA) token

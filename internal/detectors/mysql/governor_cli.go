@@ -60,6 +60,8 @@ func RunMySQLTop(baseURL string, args []string) error {
 		return runMySQLUserKills(baseURL, args[1:])
 	case "user-history", "userhistory":
 		return runMySQLUserHistory(baseURL, args[1:])
+	case "user-kill", "userkill":
+		return runMySQLUserKill(baseURL, args[1:])
 
 	case "history":
 		if len(args) > 1 {
@@ -150,6 +152,11 @@ func printMySQLTopHelp() {
 	fmt.Println()
 	fmt.Println("  cfm mysqltop user-history --user=chris*")
 	fmt.Println("  cfm mysqltop user-history --user=chris_wp --window=6h --top=5")
+	fmt.Println()
+	fmt.Println("  cfm mysqltop user-kill --id=<pid> [--type=query|connection]")
+	fmt.Println("    KILL one connection/query. Scoped tokens may only kill their own")
+	fmt.Println("    (user, db); admin may target any pid. --type=query (default) =")
+	fmt.Println("    KILL QUERY (statement only); --type=connection drops the connection.")
 	fmt.Println()
 	fmt.Println("  Flags accepted by all user-* subcommands:")
 	fmt.Println("    --user=<pattern>[,<pattern>...]   MySQL username(s); * wildcard OK")
@@ -1095,6 +1102,88 @@ func runMySQLUserKills(baseURL string, args []string) error {
 			truncate(k.Reason, 60))
 	}
 	w.Flush()
+	return nil
+}
+
+// runMySQLUserKill implements `cfm mysqltop user-kill --id=<pid> [--type=query|connection] [--user=X] [--db=Y]`.
+//
+// POSTs /api/v1/mysql/user-kill. Admin tokens may target any pid; scoped tokens
+// are restricted server-side to a connection within their own (user, db). The
+// server's structured error body is surfaced verbatim (e.g. "connection is
+// outside your scope") instead of a bare HTTP status.
+func runMySQLUserKill(baseURL string, args []string) error {
+	users, dbs, _, _, err := parseUserDBFlags(args)
+	if err != nil {
+		return err
+	}
+
+	id := ""
+	typ := ""
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--id="):
+			id = strings.TrimSpace(a[len("--id="):])
+		case strings.HasPrefix(a, "--type="):
+			typ = strings.ToLower(strings.TrimSpace(a[len("--type="):]))
+		}
+	}
+
+	if id == "" {
+		return fmt.Errorf("user-kill: --id=<connection id> is required\n" +
+			"  example: cfm mysqltop user-kill --id=12345 --type=query")
+	}
+	switch typ {
+	case "", "query", "connection", "conn":
+	default:
+		return fmt.Errorf("user-kill: --type must be query or connection")
+	}
+
+	path := "/api/v1/mysql/user-kill?id=" + url.QueryEscape(id)
+	if typ != "" {
+		path += "&type=" + url.QueryEscape(typ)
+	}
+	for _, u := range users {
+		path += "&user=" + url.QueryEscape(u)
+	}
+	for _, d := range dbs {
+		path += "&db=" + url.QueryEscape(d)
+	}
+
+	target := strings.TrimRight(baseURL, "/") + path
+	req, err := http.NewRequest(http.MethodPost, target, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := clihttp.Do(req)
+	if err != nil {
+		return fmt.Errorf("mysqltop: cannot reach daemon: %w\n(is cfm running?)", err)
+	}
+	defer resp.Body.Close()
+
+	var r struct {
+		OK     bool   `json:"ok"`
+		ID     int64  `json:"id"`
+		Action string `json:"action"`
+		User   string `json:"user"`
+		DB     string `json:"db"`
+		Result string `json:"result"`
+		Error  string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&r)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := r.Error
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		}
+		return fmt.Errorf("user-kill failed: %s", msg)
+	}
+	if !r.OK {
+		return fmt.Errorf("user-kill: %s pid=%s -> %s", r.Action, id, r.Result)
+	}
+
+	fmt.Printf("[mysqltop user-kill] %s pid=%d user=%s db=%s -> OK\n", r.Action, r.ID, r.User, r.DB)
 	return nil
 }
 

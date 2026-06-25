@@ -99,6 +99,15 @@ func (s *TokenStore) Issue(vhosts, dbUsers, databases []string, role, label stri
 		ttl = 2 * time.Hour
 	}
 
+	// Fail closed: a non-admin (scoped) token MUST carry some scope. A scoped
+	// token with no vhosts, db-users, or databases has no meaningful boundary
+	// and must never be minted — otherwise scope-derivation downstream has
+	// nothing to constrain it. Admin-role tokens are intentionally unscoped.
+	if role != "admin" && len(vhostSet) == 0 && len(dbUserSet) == 0 && len(databaseSet) == 0 {
+		logging.Logf("[token_store] refused to issue scoped token with empty scope (label=%q role=%s)", label, role)
+		return nil
+	}
+
 	st := &ScopedToken{
 		ID:        newTokenID(),
 		Token:     tok,
@@ -424,6 +433,11 @@ func RegisterTokenEndpoint(m *http.ServeMux, store *TokenStore) {
 			return
 		}
 		st := store.Issue(req.Vhosts, req.DBUsers, req.Databases, req.Role, req.Label, ttl)
+		if st == nil {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"a scoped token requires a non-empty scope (vhosts, db_users, or databases)"}`, http.StatusBadRequest)
+			return
+		}
 		vhostList := make([]string, 0, len(st.Vhosts))
 		for v := range st.Vhosts {
 			vhostList = append(vhostList, v)
