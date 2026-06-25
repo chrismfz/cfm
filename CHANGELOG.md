@@ -35,6 +35,12 @@ back-filled here — see the git/PR history for that period.
   longer silently exempt from the viewer guard. When identity resolution falls
   back (token present but `/me` unresolved) the scoped exclude-management
   capability now fails closed instead of defaulting open.
+- Admin UI: scoped users can now create/edit/delete/simulate **throttle &
+  traffic rules** (`v1/webdet/rules/*`) for their own in-scope vhosts. The
+  controls page already showed the rule form to scoped users and the daemon
+  already scope-checks these writes (`scopeAllowsVhosts`), but the client guard
+  classified them as admin-only, so saving failed with `read-only scoped viewer
+  token`.
 
 ## 2026-06-17
 

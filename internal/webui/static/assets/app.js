@@ -697,7 +697,11 @@
       isScopedSelfServiceWrite(path) {
         if (!this.isScoped) return false;
         const p = String(path);
-        const vhostSelfService = ['v1/challenge/vhost/', 'v1/http3/'];
+        // Per-vhost / scope-checked self-service: manual challenge, HTTP/3
+        // opt-in, and throttle/traffic rules. The daemon scope-checks each one
+        // against the token's vhost(s) (vhostAllowed / scopeAllowsVhosts), so a
+        // scoped user may manage these for their own domains.
+        const vhostSelfService = ['v1/challenge/vhost/', 'v1/http3/', 'v1/webdet/rules/'];
         if (vhostSelfService.some((prefix) => p.startsWith(prefix))) return true;
         // Per-vhost Challenge/WAF toggles add/remove a host exclude; gate them
         // on the same flag that surfaces the Excludes UI to scoped users.
