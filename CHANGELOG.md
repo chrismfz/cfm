@@ -17,6 +17,14 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- WAF: promoted rule **437** (`php_encoded_opener`, `WAF_BACKDOOR` encoded
+  `<?php` opener) from `logonly` to **challenge**. A 7-day log review found it
+  catching real backdoor-upload attempts (`additional_webservices.php`,
+  `com_acym`, `com_templates` edit) with zero false positives; its base64 FP was
+  already fixed and the WP-plugin-installer carve-out is in place. Rule 436
+  (`php_decode_chain`) stays `logonly` (no hits yet).
+
 ### Added
 - MySQL governor: scoped (cPanel) users can now **kill their own stuck
   query/connection** — `POST /api/v1/mysql/user-kill?id=<pid>&type=query|connection`

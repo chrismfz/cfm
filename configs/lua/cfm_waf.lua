@@ -233,7 +233,10 @@ local CFG = {
   rule_php_superglobal_callable   = "logonly", -- $_GET[c]( / $_POST[c]( / $_SERVER[HTTP_X_…]( minimalist webshell
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
   rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
-  rule_php_encoded_opener         = "logonly", -- encoded `<?php` opener (b64 PD9waHA / URL %3C%3Fphp / HTML entity / JS escape)
+  rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener (b64 PD9waHA / URL %3C%3Fphp / HTML entity / JS escape)
+                                                 -- (promoted from logonly: 2026-06-25 log review — 7/7 real backdoor-upload
+                                                 --  hits (additional_webservices.php, com_acym, com_templates) and 0 FP;
+                                                 --  base64 opener FP fixed in d5dedc6 + WP-plugin-installer carve-out below)
 
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
