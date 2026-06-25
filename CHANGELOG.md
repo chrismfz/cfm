@@ -17,6 +17,13 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- `POST /api/v1/firewall/block` is now **admin-only server-side** (wrapped in
+  `adminOnlyHandler`, like the MySQL/detectors/system-status routes).
+  Previously the route had no role/scope check, so a scoped (cPanel/DA) token
+  could call it directly and block any IP host-wide — bypassing the UI, which
+  already hid the action. The customer-facing unblock endpoint is unchanged.
+
 ### Fixed
 - Admin UI: scoped (cPanel) viewer tokens can now toggle **Challenge/WAF and
   HTTP/3 for their own in-scope vhosts** from the per-vhost controls. The

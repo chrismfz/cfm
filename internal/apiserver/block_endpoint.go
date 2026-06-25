@@ -17,11 +17,16 @@ type firewallBlockRequest struct {
 }
 
 // RegisterBlock adds POST /api/v1/firewall/block.
+//
+// Manual global IP block is admin-only: it blocks an IP across the whole host
+// and is meaningless to a per-vhost scoped (cPanel/DA) token, so it must never
+// be reachable with one. Guard it like the other global routes (MySQL,
+// detectors, system status) rather than relying on the UI to hide it.
 func RegisterBlock(m *http.ServeMux, be firewall.Backend) {
 	if m == nil {
 		return
 	}
-	m.HandleFunc("/api/v1/firewall/block", makeBlockHandler(be))
+	m.Handle("/api/v1/firewall/block", adminOnlyHandler(makeBlockHandler(be)))
 }
 
 func makeBlockHandler(be firewall.Backend) http.HandlerFunc {
