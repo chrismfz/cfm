@@ -1862,6 +1862,13 @@
             const fallbackScoped = Boolean(controller.getToken());
             this.isScopedMode = fallbackScoped;
             this.isAdmin = !fallbackScoped;
+            // Identity never resolved here, so we couldn't confirm scoped
+            // capabilities. Fail closed: keep scope-gated self-service excludes
+            // disabled until a real identity loads (mirrors the !isScopedMode
+            // clause used on the resolved path). Admin fallback (no token) is
+            // unaffected — canWrite is already true via isAdmin.
+            this.scopedExcludeManagementAllowed = !fallbackScoped;
+            this.scopedPathExcludeAllowed = false;
             this.applyScopedChrome();
             this.setAuthState('ready');
             controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode });

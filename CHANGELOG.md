@@ -25,7 +25,9 @@ back-filled here — see the git/PR history for that period.
   these mutations by host scope. Self-service writes are re-allowed client-side
   (the server still enforces the vhost allowlist); genuinely admin-only writes
   stay blocked. Also classifies `v1/waf/`+`v1/http3/` as writes so they are no
-  longer silently exempt from the viewer guard.
+  longer silently exempt from the viewer guard. When identity resolution falls
+  back (token present but `/me` unresolved) the scoped exclude-management
+  capability now fails closed instead of defaulting open.
 
 ## 2026-06-17
 
