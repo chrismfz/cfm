@@ -862,6 +862,45 @@ func (g *Governor) appendKills(state GovernorState, kr []KillRecord) {
 	}
 }
 
+// ManualKill executes an operator- or tenant-initiated KILL for a single
+// process and records it in the audit ring + history. killQuery selects
+// "KILL QUERY id" (statement only, connection survives) over "KILL id" (drops
+// the whole connection). Authorization/scoping is the caller's responsibility
+// (see handleUserKill). Query text is intentionally NOT stored on the audit
+// record (privacy), matching the auto-kill paths.
+func (g *Governor) ManualKill(ctx context.Context, p Process, killQuery bool, reason string) KillRecord {
+	action := "KILL CONNECTION"
+	sql := fmt.Sprintf("KILL %d", p.ID)
+	if killQuery {
+		action = "KILL QUERY"
+		sql = fmt.Sprintf("KILL QUERY %d", p.ID)
+	}
+
+	result := "OK"
+	if g.db == nil {
+		result = "no database handle"
+	} else if _, err := g.db.ExecContext(ctx, sql); err != nil {
+		result = err.Error()
+	} else {
+		g.recordKill(p.DB)
+	}
+
+	kr := KillRecord{
+		Ts:      time.Now(),
+		PID:     p.ID,
+		User:    p.User,
+		Host:    p.Host,
+		DB:      p.DB,
+		Runtime: time.Duration(p.TimeSec) * time.Second,
+		State:   p.State,
+		Action:  action,
+		Reason:  reason,
+		Result:  result,
+	}
+	g.appendKills(g.State(), []KillRecord{kr})
+	return kr
+}
+
 func (g *Governor) recentKills() []KillRecord {
 	g.killRingMu.Lock()
 	defer g.killRingMu.Unlock()

@@ -17,6 +17,14 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- MySQL governor: scoped (cPanel) users can now **kill their own stuck
+  query/connection** — `POST /api/v1/mysql/user-kill?id=<pid>&type=query|connection`
+  (default `query` = KILL QUERY, statement only). The target connection's
+  `(user, db)` must be within the token's scope (admin tokens may target any);
+  every kill is recorded in the governor audit ring/history. Scoped governor
+  reads (`user-summary`/`user-kills`/`user-history`) were already live.
+
 ### Fixed
 - Admin UI: scoped (cPanel) users no longer see admin-only nav items. The nav
   filter only hid the Dashboard; **Web Bots, Notifier, Detectors, Settings and

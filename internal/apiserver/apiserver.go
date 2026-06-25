@@ -240,6 +240,7 @@ func Start(
 		m.Handle("/api/v1/mysql/user-summary", scopedMySQLFilterHandler(mysqlScopedMux))
 		m.Handle("/api/v1/mysql/user-kills", scopedMySQLFilterHandler(mysqlScopedMux))
 		m.Handle("/api/v1/mysql/user-history", scopedMySQLFilterHandler(mysqlScopedMux))
+		m.Handle("/api/v1/mysql/user-kill", scopedMySQLFilterHandler(mysqlScopedMux))
 
 		logging.LogfAPI("[apiserver] mysql governor routes registered (admin global + scoped filtered)")
 	}

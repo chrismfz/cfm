@@ -35,6 +35,7 @@ This inventory documents the effective authz classification enforced by the back
 ### Scoped-allowed
 
 - `/api/v1/mysql/user-summary|user-kills|user-history` via `scopedMySQLFilterHandler` (explicit `?user=` or derived scoped owners).
+- `/api/v1/mysql/user-kill` (POST) via `scopedMySQLFilterHandler` — kills one connection/query; `handleUserKill` enforces the target `(user, db)` is within scope (`userDBMatch`); admin (no filter) may target any pid.
 - `/api/v1/tokens/me` (self descriptor only; scoped callers only see their own token metadata).
 
 ### Admin-only
