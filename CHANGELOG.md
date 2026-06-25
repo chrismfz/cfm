@@ -17,7 +17,30 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- `POST /api/v1/firewall/block` is now **admin-only server-side** (wrapped in
+  `adminOnlyHandler`, like the MySQL/detectors/system-status routes).
+  Previously the route had no role/scope check, so a scoped (cPanel/DA) token
+  could call it directly and block any IP host-wide — bypassing the UI, which
+  already hid the action. The customer-facing unblock endpoint is unchanged.
+
+### Fixed
+- Admin UI: scoped (cPanel) viewer tokens can now toggle **Challenge/WAF and
+  HTTP/3 for their own in-scope vhosts** from the per-vhost controls. The
+  client-side write guard was blanket-blocking all writes for `viewer` tokens
+  (`read-only scoped viewer token`) even though the daemon already authorises
+  these mutations by host scope. Self-service writes are re-allowed client-side
+  (the server still enforces the vhost allowlist); genuinely admin-only writes
+  stay blocked. Also classifies `v1/waf/`+`v1/http3/` as writes so they are no
+  longer silently exempt from the viewer guard. When identity resolution falls
+  back (token present but `/me` unresolved) the scoped exclude-management
+  capability now fails closed instead of defaulting open.
+- Admin UI: scoped users can now create/edit/delete/simulate **throttle &
+  traffic rules** (`v1/webdet/rules/*`) for their own in-scope vhosts. The
+  controls page already showed the rule form to scoped users and the daemon
+  already scope-checks these writes (`scopeAllowsVhosts`), but the client guard
+  classified them as admin-only, so saving failed with `read-only scoped viewer
+  token`.
 
 ## 2026-06-17
 

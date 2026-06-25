@@ -82,6 +82,50 @@ func TestScopedToken_CannotListOrRevokeOtherUsersTokens(t *testing.T) {
 	}
 }
 
+func TestScopedToken_CanMutateInScopeVhost(t *testing.T) {
+	store, h := newScopeTestServer(t)
+	scoped := store.Issue([]string{"mysite.com"}, nil, nil, "viewer", "scoped", time.Hour)
+
+	// In-scope host exclude add is the per-vhost Challenge/WAF self-service the
+	// embedded cPanel UI performs. It must NOT be blocked by scope enforcement
+	// (regression guard for the client self-service fix — the existing tests
+	// only assert that OUT-of-scope mutation is forbidden).
+	rr := doAuthReq(h, http.MethodPost, "/api/v1/waf/exclude/add?type=host&value=mysite.com", scoped.Token, nil, false)
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("expected scoped token to manage its own in-scope vhost, got 403 body=%s", rr.Body.String())
+	}
+
+	// The same caller must still be rejected for a host outside its scope.
+	rr = doAuthReq(h, http.MethodPost, "/api/v1/waf/exclude/add?type=host&value=other.com", scoped.Token, nil, false)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for out-of-scope exclude, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestScopedToken_CannotBlockIPGlobally(t *testing.T) {
+	store := NewTokenStore()
+	scoped := store.Issue([]string{"mysite.com"}, nil, nil, "viewer", "scoped", time.Hour)
+
+	mux := http.NewServeMux()
+	// nil backend: a scoped caller is rejected by the admin guard before the
+	// backend is ever consulted; an admin caller passes the guard and then
+	// gets 503 (no backend), which still proves the guard let it through.
+	RegisterBlock(mux, nil)
+	h := TokenMiddleware("admin-secret", store)(mux)
+
+	body := []byte(`{"ip":"203.0.113.7","ttl":"30m","reason":"manual"}`)
+
+	rr := doAuthReq(h, http.MethodPost, "/api/v1/firewall/block", scoped.Token, body, false)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for scoped global IP block, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = doAuthReq(h, http.MethodPost, "/api/v1/firewall/block", "admin-secret", body, false)
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("admin token must pass the admin guard for firewall/block, got 403 body=%s", rr.Body.String())
+	}
+}
+
 func TestScopedToken_BeatsCookieWhenBothPresent(t *testing.T) {
 	store, h := newScopeTestServer(t)
 	scoped := store.Issue([]string{"mysite.com"}, nil, nil, "viewer", "scoped", time.Hour)

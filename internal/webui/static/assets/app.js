@@ -687,10 +687,35 @@
           return fallback;
         }
       },
+      // Self-service writes a scoped (e.g. cPanel) token may perform on its OWN
+      // vhost(s). The daemon scope-checks every one of these endpoints
+      // server-side (403 "host not in scope" / "exclude value outside token
+      // scope"), so allowing them client-side is safe — the token's vhost
+      // allowlist stays the real boundary. Admin-only writes (global firewall,
+      // WAF rule edits, token/auth/history management) are NOT listed here and
+      // stay blocked for viewers.
+      isScopedSelfServiceWrite(path) {
+        if (!this.isScoped) return false;
+        const p = String(path);
+        // Per-vhost / scope-checked self-service: manual challenge, HTTP/3
+        // opt-in, and throttle/traffic rules. The daemon scope-checks each one
+        // against the token's vhost(s) (vhostAllowed / scopeAllowsVhosts), so a
+        // scoped user may manage these for their own domains.
+        const vhostSelfService = ['v1/challenge/vhost/', 'v1/http3/', 'v1/webdet/rules/'];
+        if (vhostSelfService.some((prefix) => p.startsWith(prefix))) return true;
+        // Per-vhost Challenge/WAF toggles add/remove a host exclude; gate them
+        // on the same flag that surfaces the Excludes UI to scoped users.
+        const excludeSelfService = ['v1/challenge/exclude/', 'v1/waf/exclude/'];
+        if (this.scopedExcludeManagementAllowed && excludeSelfService.some((prefix) => p.startsWith(prefix))) return true;
+        return false;
+      },
       async postJSON(path, body) {
         if (!this.canWrite) {
-          const writePrefixes = ['v1/challenge/', 'v1/firewall/', 'v1/webdet/rules/', 'v1/tokens/revoke', 'v1/auth/token', 'v1/webdet/history/prune', 'v1/webdet/history/truncate', 'v1/webdet/vhost-controls/'];
-          if (writePrefixes.some((prefix) => String(path).startsWith(prefix))) {
+          // v1/waf/ and v1/http3/ are included so viewer WAF/HTTP3 writes are
+          // classified as writes too (v1/waf/ previously slipped through the
+          // guard entirely); scoped self-service is re-allowed just below.
+          const writePrefixes = ['v1/challenge/', 'v1/waf/', 'v1/http3/', 'v1/firewall/', 'v1/webdet/rules/', 'v1/tokens/revoke', 'v1/auth/token', 'v1/webdet/history/prune', 'v1/webdet/history/truncate'];
+          if (writePrefixes.some((prefix) => String(path).startsWith(prefix)) && !this.isScopedSelfServiceWrite(path)) {
             throw new Error('read-only scoped viewer token');
           }
         }
@@ -1841,6 +1866,13 @@
             const fallbackScoped = Boolean(controller.getToken());
             this.isScopedMode = fallbackScoped;
             this.isAdmin = !fallbackScoped;
+            // Identity never resolved here, so we couldn't confirm scoped
+            // capabilities. Fail closed: keep scope-gated self-service excludes
+            // disabled until a real identity loads (mirrors the !isScopedMode
+            // clause used on the resolved path). Admin fallback (no token) is
+            // unaffected — canWrite is already true via isAdmin.
+            this.scopedExcludeManagementAllowed = !fallbackScoped;
+            this.scopedPathExcludeAllowed = false;
             this.applyScopedChrome();
             this.setAuthState('ready');
             controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode });

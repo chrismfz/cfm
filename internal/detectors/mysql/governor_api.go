@@ -29,7 +29,7 @@ import (
 //	  /api/v1/mysql/history/timeline  — timeline-style event stream
 //	  /api/v1/mysql/cpu          — per-user CPU / query deltas
 //
-//	Scoped-token ready (Guard 3 for now, demote to Guard 2 when plugin auth lands):
+//	Scoped-token endpoints (Guard 2: scoped or admin, via scopedMySQLFilterHandler):
 //	  /api/v1/mysql/user-summary  — filtered snapshot (user= / db= params)
 //	  /api/v1/mysql/user-kills    — filtered kill history
 //	  /api/v1/mysql/user-history  — filtered long-window history
@@ -61,18 +61,15 @@ func (g *Governor) RegisterHTTPAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/mysql/cpu", g.handleCPU)
 }
 
-// RegisterHTTPScoped registers user/db-filtered MySQL governor routes that can
-// be safely exposed to scoped tokens when query constraints are enforced.
+// RegisterHTTPScoped registers user/db-filtered MySQL governor routes that are
+// safe for scoped tokens because the query is always constrained to the
+// caller's own users/databases.
 func (g *Governor) RegisterHTTPScoped(mux *http.ServeMux) {
 	// ── per-user/per-db filtered endpoints ──────────────────────────────────
-	// These are designed to be safe for scoped (per-cPanel-user) tokens once
-	// the plugin auth layer lands (Step 3 of auth hardening).
-	//
-	// Until then they sit behind the same Guard 3 admin token.  When the plugin
-	// work starts, the middleware just needs to be told these three paths are
-	// Guard 2 — no handler changes required.
-	//
-	// TODO(plugin): demote to Guard 2 once goauth scoped tokens are wired in.
+	// These are exposed to scoped (per-cPanel-user) tokens at Guard 2: the
+	// apiserver wraps them in scopedMySQLFilterHandler, which derives and
+	// validates the user/db filter from the token's vhost/db scope (admin
+	// tokens pass through unfiltered). There is no handler-level admin check.
 	mux.HandleFunc("/api/v1/mysql/user-summary", g.handleUserSummary)
 	mux.HandleFunc("/api/v1/mysql/user-kills", g.handleUserKills)
 	mux.HandleFunc("/api/v1/mysql/user-history", g.handleUserHistory)
@@ -289,8 +286,9 @@ func (g *Governor) handleHistoryTimeline(w http.ResponseWriter, r *http.Request)
 // handleUserSummary returns a scoped snapshot of the governor state filtered
 // to the requested MySQL users and/or database names.
 //
-// Guard level: Guard 3 (admin-only) for now.
-// TODO(plugin): demote to Guard 2 once scoped token auth is live.
+// Guard level: Guard 2 (scoped or admin) — enforced at registration by
+// scopedMySQLFilterHandler, which derives/validates the user/db filter from
+// the token's vhost/db scope.
 //
 // Example:
 //
@@ -331,8 +329,9 @@ func (g *Governor) handleUserSummary(w http.ResponseWriter, r *http.Request) {
 // handleUserKills returns the recent kill ring filtered to the requested
 // MySQL users and/or database names.  Query text is stripped.
 //
-// Guard level: Guard 3 (admin-only) for now.
-// TODO(plugin): demote to Guard 2 once scoped token auth is live.
+// Guard level: Guard 2 (scoped or admin) — enforced at registration by
+// scopedMySQLFilterHandler, which derives/validates the user/db filter from
+// the token's vhost/db scope.
 //
 // Example:
 //
@@ -363,8 +362,9 @@ func (g *Governor) handleUserKills(w http.ResponseWriter, r *http.Request) {
 //	window — duration string: 1h (default), 6h, 24h, 30m, etc. (max 24h)
 //	top    — max results per filter match (default 0 = all)
 //
-// Guard level: Guard 3 (admin-only) for now.
-// TODO(plugin): demote to Guard 2 once scoped token auth is live.
+// Guard level: Guard 2 (scoped or admin) — enforced at registration by
+// scopedMySQLFilterHandler, which derives/validates the user/db filter from
+// the token's vhost/db scope.
 //
 // Example:
 //
