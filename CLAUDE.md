@@ -119,6 +119,18 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
 - **Scoped vs admin auth is a hard security boundary** (cPanel users get
   scoped viewer tokens, never admin tokens). Validators live centrally;
   out-of-scope access must fail-closed (403). See §6.
+- **Code is the source of truth — keep doc-comments and docs in sync.**
+  Stale comments/docs have bitten us repeatedly: `governor_api.go` said
+  "Guard 3 (admin-only) for now" long after the endpoints were wired scoped;
+  `docs/endpoint_scope_inventory.md` listed scope-validated endpoints
+  (`waf/engine/summary`, `{challenge,waf}/exclude/*`) as admin-only and misled
+  a scope audit; a divergent fallback list in `ui-scope.js` disagreed with the
+  real nav matcher. So: when you change an endpoint's auth/scope (or any
+  behaviour a comment/doc describes), update the handler doc-comment **and**
+  `docs/endpoint_scope_inventory.md` **in the same change**, delete "for now /
+  TODO" guard comments once the work lands, and never keep a second copy of a
+  list/matcher that can drift. When a comment and the code disagree, trust the
+  code and fix the comment.
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
 

@@ -33,19 +33,12 @@
   function applyScopedNavFiltering({ navSelector, adminOnlyMatcher, scoped = false } = {}) {
     const nav = resolveElement(navSelector);
     if (!nav) return null;
-    const matcher = typeof adminOnlyMatcher === 'function'
-      ? adminOnlyMatcher
-      : (href) => {
-          const path = String(href || '').split(/[?#]/, 1)[0];
-          return (
-            path === '/cfm-admin' ||
-            path === '/cfm-admin/' ||
-            path === '/cfm-admin/settings' ||
-            path === '/cfm-admin/settings/' ||
-            path === '/cfm-admin/debug' ||
-            path === '/cfm-admin/debug/'
-          );
-        };
+    // The authoritative admin-only nav list lives in controller-bootstrap.js
+    // (defaultAdminOnlyMatcher) and is always passed in by applyScopedChrome.
+    // Do NOT keep a divergent copy here: a stale duplicate previously disagreed
+    // with the real list and misled a scope audit. If no matcher is supplied,
+    // hide nothing — backends still fail-closed (403) on admin-only paths.
+    const matcher = typeof adminOnlyMatcher === 'function' ? adminOnlyMatcher : () => false;
 
     nav.querySelectorAll('a[href]').forEach((anchor) => {
       const href = anchor.getAttribute('href') || '';

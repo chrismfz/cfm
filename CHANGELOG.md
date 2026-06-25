@@ -17,6 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- Admin UI: scoped (cPanel) users no longer see admin-only nav items. The nav
+  filter only hid the Dashboard; **Web Bots, Notifier, Detectors, Settings and
+  Debug stayed visible** to scoped users and 403'd on click. The authoritative
+  admin-only nav list now covers all of them (backends were already
+  fail-closed; this removes the dead/broken links). Also removed a stale
+  divergent matcher copy in `ui-scope.js` and corrected
+  `docs/endpoint_scope_inventory.md` (which wrongly listed the scope-validated
+  `waf/engine/summary` and `{challenge,waf}/exclude/*` endpoints as admin-only).
+
 ### Security
 - `POST /api/v1/firewall/block` is now **admin-only server-side** (wrapped in
   `adminOnlyHandler`, like the MySQL/detectors/system-status routes).
