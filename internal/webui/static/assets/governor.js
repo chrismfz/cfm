@@ -79,6 +79,7 @@
     eventRows: [],
     isScopedMode: false,
     identityConfirmedAdmin: false,
+    canWrite: false,
   };
   const ADMIN_ONLY_API_PATHS = new Set([
     '/v1/mysql/state',

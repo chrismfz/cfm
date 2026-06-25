@@ -175,6 +175,52 @@ func TestScopedMySQLFilterHandler_EndpointFamilyInjectionRejected(t *testing.T) 
 	}
 }
 
+func TestScopedMySQLFilterHandler_AdminRolePassesThroughUnfiltered(t *testing.T) {
+	nextCalled := false
+	h := scopedMySQLFilterHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mysql/user-summary", nil)
+	ctx := context.WithValue(req.Context(), webdet.CtxAuthnKey{}, true)
+	ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req.WithContext(ctx))
+
+	if !nextCalled {
+		t.Fatalf("admin role must pass through unfiltered")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin passthrough, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestScopedMySQLFilterHandler_ScopedEmptyScopeFailsClosed(t *testing.T) {
+	// A scoped (non-admin) caller whose vhost scope is somehow empty must NOT be
+	// mistaken for an admin (which would let user-kill target ANY connection).
+	// It must fail closed: no derivable filter -> 400, next never called.
+	nextCalled := false
+	h := scopedMySQLFilterHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mysql/user-kill?id=1", nil)
+	ctx := context.WithValue(req.Context(), webdet.CtxAuthnKey{}, true)
+	ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleScoped)
+	ctx = context.WithValue(ctx, webdet.CtxScopeKey{}, map[string]struct{}{})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req.WithContext(ctx))
+
+	if nextCalled {
+		t.Fatalf("scoped token with empty scope must not pass through (would act as admin)")
+	}
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 fail-closed for empty scoped scope, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func writeScopedMySQLOwnerFixture(t *testing.T) {
 	t.Helper()
 	tmp := t.TempDir()

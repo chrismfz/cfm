@@ -36,6 +36,12 @@ back-filled here — see the git/PR history for that period.
   `waf/engine/summary` and `{challenge,waf}/exclude/*` endpoints as admin-only).
 
 ### Security
+- MySQL governor scoped routes now **fail closed by authenticated role**, not by
+  an empty scope map. `scopedMySQLFilterHandler` previously treated any caller
+  with an empty vhost scope as admin (unfiltered); a scoped token whose scope
+  was somehow empty (malformed/legacy) would have been mis-handled as admin —
+  and on the new `user-kill` **write** that meant killing any connection. It now
+  passes through only for a confirmed admin role and fails closed otherwise.
 - `POST /api/v1/firewall/block` is now **admin-only server-side** (wrapped in
   `adminOnlyHandler`, like the MySQL/detectors/system-status routes).
   Previously the route had no role/scope check, so a scoped (cPanel/DA) token
