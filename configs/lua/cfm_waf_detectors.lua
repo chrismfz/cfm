@@ -175,14 +175,24 @@ end
 --   * always inspect args
 --   * inspect body only for textual payloads
 --   * skip multipart/form-data bodies (binary uploads are noisy by design)
-local function is_known_binaryish_telemetry_uri(uri)
+-- Known legitimate endpoints whose body/args routinely carry binary or packed
+-- bytes that are not UTF-8 text and are not an encoding-bypass attempt. The
+-- ctrl-chars (601) and bad-UTF8 (611) detectors skip these to avoid logonly FP
+-- noise — observed heavily fleet-wide on Greek e-commerce admins + mobile
+-- visitors (2026-06-25 five-server log review):
+--   * WP Optimization Detective web-vitals store (packed metric payloads)
+--   * WP media upload async-upload.php (raw image/file bytes)
+local function is_known_binaryish_uri(uri)
   local u = lower(uri or "")
   if u == "" then return false end
 
-  -- WordPress Optimization Detective web-vitals endpoint.
-  -- This endpoint can legitimately carry compressed/packed metric payloads.
   if u:match("^/wp%-json/optimization%-detective/")
      and has(u, "/url-metrics:store") then
+    return true
+  end
+
+  local path = u:match("^[^?]*") or u
+  if path:match("/wp%-admin/async%-upload%.php$") then
     return true
   end
 
@@ -190,7 +200,7 @@ local function is_known_binaryish_telemetry_uri(uri)
 end
 
 function _M.detect_ctrl_chars(args, body, headers, uri)
-  if is_known_binaryish_telemetry_uri(uri) then
+  if is_known_binaryish_uri(uri) then
     return false
   end
 
@@ -2868,7 +2878,13 @@ local function utf8_walk(s)
   return nil
 end
 
-function _M.detect_bad_utf8(args, body, headers)
+function _M.detect_bad_utf8(args, body, headers, uri)
+  -- Skip known legitimate binary-ish endpoints (WP optimization-detective
+  -- metrics, async-upload media) — same carve-out the ctrl-chars detector uses.
+  -- These produced the bulk of the WAF_BAD_UTF8 logonly FP noise on real Greek
+  -- traffic (mobile web-vitals POSTs + admin image uploads).
+  if is_known_binaryish_uri(uri) then return nil end
+
   local tag = utf8_walk(normalize(cap(args or "", CFG.max_scan_len)))
   if tag then return tag end
 

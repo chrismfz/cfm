@@ -38,6 +38,12 @@ back-filled here — see the git/PR history for that period.
   reads (`user-summary`/`user-kills`/`user-history`) were already live.
 
 ### Fixed
+- WAF: `WAF_BAD_UTF8` (rule 611, `logonly`) now skips known binary-ish legit
+  endpoints — WordPress optimization-detective web-vitals and `async-upload.php`
+  media uploads — reusing (and generalising) the carve-out the ctrl-chars rule
+  already had. A five-server / 264k-event log review found these were the bulk
+  of its `logonly` false-positive noise on real Greek WP traffic (mobile
+  web-vitals POSTs + admin image uploads). Rule stays `logonly`.
 - Admin UI: scoped (cPanel) users no longer see admin-only nav items. The nav
   filter only hid the Dashboard; **Web Bots, Notifier, Detectors, Settings and
   Debug stayed visible** to scoped users and 403'd on click. The authoritative
