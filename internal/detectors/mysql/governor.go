@@ -717,6 +717,32 @@ func (g *Governor) fetchProcesslist(ctx context.Context) ([]Process, error) {
 	return procs, rows.Err()
 }
 
+// liveProcess fetches a single connection straight from
+// information_schema.PROCESSLIST by id (authoritative, unlike the periodic
+// snapshot). Used right before a manual KILL so the scope check and the kill
+// see the same live row — closing the TOCTOU window where a pid could be
+// reused between the snapshot and the kill. Returns found=false if the
+// connection no longer exists. With no DB handle (tests) it returns found=false.
+func (g *Governor) liveProcess(ctx context.Context, pid int64) (Process, bool, error) {
+	var p Process
+	if g.db == nil {
+		return p, false, nil
+	}
+	row := g.db.QueryRowContext(ctx,
+		`SELECT ID, USER, HOST, COALESCE(DB,''), COMMAND, TIME,
+		        COALESCE(STATE,''), COALESCE(INFO,'')
+		 FROM information_schema.PROCESSLIST
+		 WHERE ID = ?`, pid)
+	if err := row.Scan(&p.ID, &p.User, &p.Host, &p.DB,
+		&p.Command, &p.TimeSec, &p.State, &p.Info); err != nil {
+		if err == sql.ErrNoRows {
+			return p, false, nil
+		}
+		return p, false, err
+	}
+	return p, true, nil
+}
+
 // hasOpenTxn checks information_schema.INNODB_TRX to protect sleeping connections
 // that are mid-transaction (committing would be incorrect if we kill them).
 func (g *Governor) hasOpenTxn(ctx context.Context, pid int64) bool {

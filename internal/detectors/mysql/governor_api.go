@@ -471,15 +471,25 @@ func (g *Governor) handleUserKill(w http.ResponseWriter, r *http.Request) {
 	dbs := parseMultiParam(r, "db")
 	scoped := len(users) > 0 || len(dbs) > 0
 
-	// Locate the target process in the current snapshot.
-	s := g.State()
+	// Resolve the target. Prefer a LIVE processlist lookup (authoritative) so
+	// the scope check below and the KILL act on the same row — no TOCTOU window
+	// where a pid is reused between the periodic snapshot and the kill. Fall
+	// back to the snapshot only when there is no DB handle (e.g. unit tests).
 	var target Process
-	found := false
-	for _, p := range s.Processes {
-		if p.ID == pid {
-			target = p
-			found = true
-			break
+	var found bool
+	if g.db != nil {
+		var lookupErr error
+		target, found, lookupErr = g.liveProcess(r.Context(), pid)
+		if lookupErr != nil {
+			writeGovernorJSON(w, http.StatusInternalServerError, map[string]string{"error": "processlist lookup failed: " + lookupErr.Error()})
+			return
+		}
+	} else {
+		for _, p := range g.State().Processes {
+			if p.ID == pid {
+				target, found = p, true
+				break
+			}
 		}
 	}
 	if !found {

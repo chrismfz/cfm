@@ -36,6 +36,13 @@ back-filled here — see the git/PR history for that period.
   `waf/engine/summary` and `{challenge,waf}/exclude/*` endpoints as admin-only).
 
 ### Security
+- MySQL governor `user-kill` now resolves the target from a **live** processlist
+  lookup (`information_schema.PROCESSLIST WHERE ID=?`) and scope-checks that live
+  row immediately before issuing the KILL, closing the TOCTOU window where a pid
+  could be reused between the periodic snapshot and the kill.
+- `TokenStore.Issue` **fails closed**: it refuses to mint a scoped (non-admin)
+  token with no scope at all (no vhosts, db-users, or databases); the issue API
+  returns 400. Defense-in-depth behind the role-based gate below.
 - MySQL governor scoped routes now **fail closed by authenticated role**, not by
   an empty scope map. `scopedMySQLFilterHandler` previously treated any caller
   with an empty vhost scope as admin (unfiltered); a scoped token whose scope
