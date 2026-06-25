@@ -3334,7 +3334,6 @@ end
 -- signal of payload smuggling through a filter that strips/blocks the
 -- literal `<?php` bytes. We catch the common encodings:
 --   PD9waHA       — base64("<?php")
---   PD89          — base64("<?=")  (short-tag opener)
 --   %3C%3Fphp     — URL-encoded
 --   &#60;&#63;php — HTML numeric entities
 --   &lt;?php      — HTML named-entity for `<`
@@ -3360,7 +3359,11 @@ function _M.detect_php_encoded_opener(body, _headers)
     return raw:find("[^%w+/_-]" .. needle) ~= nil
   end
   if b64_opener("PD9waHA")            then return "B64_PHP_OPENER"     end  -- base64("<?php")
-  if b64_opener("PD89")               then return "B64_SHORT_OPENER"   end  -- base64("<?=")
+  -- base64("<?=") = "PD89" (4 chars) intentionally NOT matched: a 4-char base64
+  -- prefix is too short to be reliable — it collides with legitimate base64
+  -- values (Jetpack / WordPress.com xmlrpc sync, Contact Form 7 submissions).
+  -- A 2026-06-25 five-server log review found "PD89" 6/6 false positives and 0
+  -- real hits, so removing it lets rule 437 run at `challenge` without FPs.
   if has(s, "%3c%3fphp")             then return "URL_PHP_OPENER"     end
   if has(s, "%3c%3f=")               then return "URL_SHORT_OPENER"   end
   if has(s, "&#60;&#63;php")         then return "HTML_ENTITY_OPENER" end

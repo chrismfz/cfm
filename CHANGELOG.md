@@ -19,11 +19,15 @@ back-filled here — see the git/PR history for that period.
 
 ### Security
 - WAF: promoted rule **437** (`php_encoded_opener`, `WAF_BACKDOOR` encoded
-  `<?php` opener) from `logonly` to **challenge**. A 7-day log review found it
-  catching real backdoor-upload attempts (`additional_webservices.php`,
-  `com_acym`, `com_templates` edit) with zero false positives; its base64 FP was
-  already fixed and the WP-plugin-installer carve-out is in place. Rule 436
-  (`php_decode_chain`) stays `logonly` (no hits yet).
+  `<?php` opener) from `logonly` to **challenge**, and **removed** its FP-prone
+  `<?=` short-opener variant. A five-server / 264k-event log review found the
+  strong `<?php` openers (`B64_PHP_OPENER`, `URL_PHP_OPENER`) catching only real
+  attacks (Bricks RCE `render_element`, `additional_webservices.php`, Amasty
+  `uploadFile`) with **0 FP**, while the `<?=` short-opener (base64 `"PD89"`, a
+  4-char prefix) was **6/6 false positives** on legitimate traffic
+  (Jetpack/WordPress.com xmlrpc sync, Contact Form 7 submissions) — so the
+  `PD89` detection was dropped rather than kept as logonly noise. Rule 436
+  (`php_decode_chain`) stays `logonly` (0 hits across all five servers).
 
 ### Added
 - MySQL governor: scoped (cPanel) users can now **kill their own stuck

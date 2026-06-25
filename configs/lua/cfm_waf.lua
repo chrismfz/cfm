@@ -234,9 +234,11 @@ local CFG = {
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
   rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
   rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener (b64 PD9waHA / URL %3C%3Fphp / HTML entity / JS escape)
-                                                 -- (promoted from logonly: 2026-06-25 log review — 7/7 real backdoor-upload
-                                                 --  hits (additional_webservices.php, com_acym, com_templates) and 0 FP;
-                                                 --  base64 opener FP fixed in d5dedc6 + WP-plugin-installer carve-out below)
+                                                 -- (promoted from logonly: 2026-06-25 five-server log review — strong `<?php`
+                                                 --  openers were all real attacks (Bricks RCE render_element,
+                                                 --  additional_webservices.php, Amasty uploadFile) with 0 FP. The weak `<?=`
+                                                 --  short-opener variant (base64 "PD89") was 6/6 FP and has been REMOVED from
+                                                 --  the detector, so this rule is safe at challenge.)
 
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
