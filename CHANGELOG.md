@@ -38,6 +38,17 @@ back-filled here — see the git/PR history for that period.
   reads (`user-summary`/`user-kills`/`user-history`) were already live.
 
 ### Fixed
+- kernsec: **TIPC-workload detection no longer false-positives on the iproute2
+  `tipc` binary.** `HasTIPCWorkload` keyed on `/usr/{bin,sbin}/tipc`, but that
+  binary ships with iproute2 — installed on essentially every modern host — so
+  the gate read every box (cPanel/CloudLinux/Debian/EL) as a TIPC user. Effect:
+  the `tipc` module blacklist was **silently skipped fleet-wide**, and any
+  operator who deliberately set `state = force` for it hit an **UNSAFE FORCE**
+  refusal on `cfm kernsec apply`. Detection now keys only on real-use signals:
+  the `tipc` module loaded, `/proc/net/tipc`, `tipc-config` (the deliberate
+  `tipcutils` package), or a `*tipc*.service` unit. Genuine TIPC/HA-cluster
+  hosts are still skipped. (Same class of false positive the AFS detector
+  already guards against with the openafs `/afs` stub.)
 - kernsec: **KVM-host detection no longer false-positives on bare-metal
   hosting boxes.** `IsKVMHost` keyed purely on `kvm_intel`/`kvm_amd` being
   loaded, but the kernel auto-loads those on any VT-x/AMD-V CPU — so every

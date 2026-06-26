@@ -476,9 +476,17 @@ func detectTIPCWorkload() bool {
 	if anyModuleLoaded("tipc") || anyPathExists("/proc/net/tipc", "/sys/module/tipc") {
 		return true
 	}
+	// NOTE: /usr/{bin,sbin}/tipc is intentionally NOT a signal. That
+	// binary ships with iproute2 (the `tipc` config utility), which is
+	// installed on essentially every modern Linux host, so its mere
+	// presence says nothing about TIPC actually being used — same trap
+	// as the openafs /afs stub documented in detectAFS below. Keying on
+	// it false-positived every box (e.g. cPanel/CloudLinux), silently
+	// skipping the tipc blacklist fleet-wide and tripping UNSAFE FORCE
+	// for operators who deliberately forced it. tipc-config is the
+	// legacy tipcutils tool (a deliberate install, not base), so it
+	// stays a valid signal.
 	if anyPathExists(
-		"/usr/bin/tipc",
-		"/usr/sbin/tipc",
 		"/usr/bin/tipc-config",
 		"/usr/sbin/tipc-config",
 		"/usr/lib/systemd/system/tipc.service",
@@ -1069,7 +1077,7 @@ func (p HostProfile) SkipReason(group string) string {
 		// any sign of TIPC use so we don't break Pacemaker/Corosync
 		// fabrics or Erlang/OTP distribution.
 		if p.HasTIPCWorkload {
-			return "TIPC workload detected — tipc module loaded, /proc/net/tipc, tipc tooling, or *tipc*.service installed"
+			return "TIPC workload detected — tipc module loaded, /proc/net/tipc, tipc-config (tipcutils), or *tipc*.service installed"
 		}
 	case "modules.net.legacy.rxrpc":
 		// rxrpc is the AFS RPC transport. If anything on the host
