@@ -73,8 +73,25 @@ func readGrubCmdlineLinux(content string) (string, error) {
 }
 
 // readGrubCmdlineLinuxDefault returns only GRUB_CMDLINE_LINUX_DEFAULT.
+//
+// _DEFAULT is operator/distro-owned — kernsec WRITES only _LINUX (see
+// WriteCmdline), it never rewrites _DEFAULT. On EL/CloudLinux the tuned
+// profile owns this line and ships shell expansions there, e.g.
+//
+//	GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+$GRUB_CMDLINE_LINUX_DEFAULT }\$tuned_params"
+//
+// which is perfectly valid in /etc/default/grub but which kernsec's
+// round-trip-safe writer cannot encode. Because this value is only ever
+// READ (for the next-boot union surfaced by NextBootCmdline / drift),
+// decode it leniently: strip quotes and unescape what we can, but keep
+// shell-meta tokens (${...}, $(...), $tuned_params) verbatim instead of
+// failing the whole read. Those opaque tokens never match a managed
+// kernsec key, so drift detection is unaffected. The strict decoder
+// still guards the _LINUX read (which kernsec round-trips) and the write
+// path, so an unencodable expansion an operator put in _LINUX is still
+// reported rather than silently mangled.
 func readGrubCmdlineLinuxDefault(content string) (string, error) {
-	return readGrubCmdlineVar(content, "GRUB_CMDLINE_LINUX_DEFAULT")
+	return readGrubCmdlineVarWith(content, "GRUB_CMDLINE_LINUX_DEFAULT", decodeGrubCmdlineValueLenient)
 }
 
 // readGrubEffectiveCmdline returns the union that GRUB will use on the next
@@ -108,6 +125,14 @@ func readGrubEffectiveCmdline(content string) (string, error) {
 // "" + nil if the variable is absent (some distros don't ship a
 // _DEFAULT line).
 func readGrubCmdlineVar(content, varName string) (string, error) {
+	return readGrubCmdlineVarWith(content, varName, decodeGrubCmdlineValue)
+}
+
+// readGrubCmdlineVarWith locates the named GRUB_CMDLINE_LINUX* variable
+// and decodes its value with the supplied decoder (strict for the
+// kernsec-owned _LINUX read/write path, lenient for the read-only
+// _DEFAULT union — see readGrubCmdlineLinuxDefault).
+func readGrubCmdlineVarWith(content, varName string, decode func(string) (string, error)) (string, error) {
 	prefix := varName + "="
 	for _, line := range strings.Split(content, "\n") {
 		t := strings.TrimSpace(line)
@@ -115,7 +140,7 @@ func readGrubCmdlineVar(content, varName string) (string, error) {
 			continue
 		}
 		val := strings.TrimPrefix(t, prefix)
-		decoded, err := decodeGrubCmdlineValue(val)
+		decoded, err := decode(val)
 		if err != nil {
 			return "", fmt.Errorf("%s: %s: %w", PathDefaultGrub, varName, err)
 		}
@@ -201,6 +226,52 @@ func decodeDoubleQuoted(s string) (string, error) {
 		}
 	}
 	return b.String(), nil
+}
+
+// decodeGrubCmdlineValueLenient is the tolerant counterpart of
+// decodeGrubCmdlineValue, used only for operator/distro-owned values
+// kernsec reads but never rewrites (GRUB_CMDLINE_LINUX_DEFAULT). It
+// strips one layer of outer quotes and unescapes \" \\ \$ inside double
+// quotes on a best-effort basis, but never rejects shell metacharacters
+// or unsupported escapes — those are returned verbatim. The result feeds
+// the read-only next-boot / drift view, where opaque shell tokens (e.g.
+// $tuned_params, ${VAR:+...}, $(cmd)) simply never match a managed
+// kernsec key. Never returns an error; the signature matches
+// decodeGrubCmdlineValue so both can be passed to readGrubCmdlineVarWith.
+func decodeGrubCmdlineValueLenient(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return decodeDoubleQuotedLenient(s[1 : len(s)-1]), nil
+	}
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		// Single-quoted in shell: literal body, no expansion or escapes.
+		return s[1 : len(s)-1], nil
+	}
+	// Unquoted, empty, or unbalanced quotes: return as-is, best effort.
+	return s, nil
+}
+
+// decodeDoubleQuotedLenient unescapes \" \\ \$ and leaves every other
+// backslash sequence (and a trailing backslash) untouched. Never errors —
+// the lenient sibling of decodeDoubleQuoted.
+func decodeDoubleQuotedLenient(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '\\' || i+1 >= len(s) {
+			b.WriteByte(c)
+			continue
+		}
+		switch s[i+1] {
+		case '"', '\\', '$':
+			b.WriteByte(s[i+1])
+			i++
+		default:
+			b.WriteByte(c) // keep the backslash literally
+		}
+	}
+	return b.String()
 }
 
 // rejectUnsafeShellMeta returns an error if s contains any character

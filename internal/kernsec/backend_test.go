@@ -1230,6 +1230,93 @@ func TestGRUBBackend_NextBootCmdline_OnlyLinuxNoDefaultLine(t *testing.T) {
 	}
 }
 
+func TestGRUBBackend_NextBootCmdline_TolerantOfTunedDefault(t *testing.T) {
+	// Regression (titan, CloudLinux 9): the tuned profile owns
+	// GRUB_CMDLINE_LINUX_DEFAULT and fills it with shell expansions
+	// (${...} self-reference + the literal \$tuned_params). kernsec
+	// never writes _DEFAULT, so reading it for the next-boot union must
+	// NOT choke on those metacharacters — it previously failed the whole
+	// `cfm kernsec apply` drift read with a "shell metacharacter" error.
+	// _LINUX (kernsec-owned, clean) must still surface its managed args.
+	fs := newFakeFS().withFile("/etc/default/grub",
+		`GRUB_CMDLINE_LINUX="crashkernel=no slab_nomerge init_on_alloc=1 initcall_blacklist=algif_aead_init"
+GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+$GRUB_CMDLINE_LINUX_DEFAULT }\$tuned_params"
+`)
+	g := &GRUBBackend{FS: fs}
+	got, err := g.NextBootCmdline()
+	if err != nil {
+		t.Fatalf("tuned-managed _DEFAULT must not error: %v", err)
+	}
+	// The kernsec-managed args from _LINUX must be present for drift.
+	for _, want := range []string{"slab_nomerge", "init_on_alloc=1", "initcall_blacklist=algif_aead_init"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("managed arg %q missing from next-boot cmdline %q", want, got)
+		}
+	}
+	// The opaque tuned token rides along verbatim (never matches a
+	// managed key, so harmless for drift).
+	if !strings.Contains(got, "$tuned_params") {
+		t.Errorf("expected the literal $tuned_params to survive the lenient read: %q", got)
+	}
+}
+
+func TestGRUBBackend_WriteCmdline_PreservesTunedDefault(t *testing.T) {
+	// The same titan grub: a write to _LINUX must succeed and leave the
+	// tuned-managed _DEFAULT line byte-for-byte intact.
+	grub := redirectGrubPath(t)
+	defaultLine := `GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+$GRUB_CMDLINE_LINUX_DEFAULT }\$tuned_params"`
+	content := `GRUB_CMDLINE_LINUX="crashkernel=no"
+` + defaultLine + "\n"
+	if err := os.WriteFile(grub, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFakeFS().withFile(grub, content)
+	g := &GRUBBackend{FS: fs}
+	if err := g.WriteCmdline([]BootArg{{Key: "slab_nomerge"}}); err != nil {
+		t.Fatalf("WriteCmdline: %v", err)
+	}
+	data, err := os.ReadFile(grub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, defaultLine) {
+		t.Fatalf("tuned-managed _DEFAULT line was altered:\n%s", out)
+	}
+	if !strings.Contains(out, `GRUB_CMDLINE_LINUX="crashkernel=no slab_nomerge"`) {
+		t.Fatalf("managed _LINUX rewrite missing:\n%s", out)
+	}
+}
+
+func TestDecodeGrubCmdlineValueLenient(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"tuned default", `"${GRUB_CMDLINE_LINUX_DEFAULT:+$GRUB_CMDLINE_LINUX_DEFAULT }\$tuned_params"`,
+			`${GRUB_CMDLINE_LINUX_DEFAULT:+$GRUB_CMDLINE_LINUX_DEFAULT }$tuned_params`},
+		{"command substitution", `"$(sed 's, .*,,g' /etc/x)"`, `$(sed 's, .*,,g' /etc/x)`},
+		{"plain quoted", `"quiet splash"`, `quiet splash`},
+		{"single quoted literal", `'ro $extra'`, `ro $extra`},
+		{"escaped quote survives", `"a=\"x y\""`, `a="x y"`},
+		{"unknown escape kept", `"a\b"`, `a\b`},
+		{"empty", `""`, ``},
+		{"absent", ``, ``},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := decodeGrubCmdlineValueLenient(tc.in)
+			if err != nil {
+				t.Fatalf("lenient decode must not error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("decodeGrubCmdlineValueLenient(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGrubVarMatches(t *testing.T) {
 	content := `GRUB_TIMEOUT=5
 GRUB_ENABLE_BLSCFG="true"
