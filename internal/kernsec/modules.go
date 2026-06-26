@@ -400,9 +400,11 @@ var Tier1Modules = []ModuleRule{
 	// a named killswitch candidate — useless on bare-metal hosting,
 	// but the host-side transport (vhost_vsock) is a legitimate
 	// hypervisor surface for guest comms. We skip the blacklist when
-	// the host runs KVM (kvm_intel/kvm_amd loaded → IsKVMHost) so
-	// hypervisors retain it; everywhere else it's blacklisted by
-	// default.
+	// the host is actually a KVM hypervisor (kvm module loaded AND
+	// vhost/libvirt/QEMU/Proxmox evidence → IsKVMHost; see
+	// detectKVMHost) so hypervisors retain it. A bare-metal hosting box
+	// where kvm_intel merely auto-loaded on VT-x is NOT skipped —
+	// vsock stays blacklisted there.
 
 	{
 		ID: "KSEC-MOD-net.virt-001", Group: "modules.net.virt", Tier: Tier1,

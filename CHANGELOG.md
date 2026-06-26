@@ -38,6 +38,18 @@ back-filled here — see the git/PR history for that period.
   reads (`user-summary`/`user-kills`/`user-history`) were already live.
 
 ### Fixed
+- kernsec: **KVM-host detection no longer false-positives on bare-metal
+  hosting boxes.** `IsKVMHost` keyed purely on `kvm_intel`/`kvm_amd` being
+  loaded, but the kernel auto-loads those on any VT-x/AMD-V CPU — so every
+  modern cPanel/CloudLinux/DirectAdmin server was mislabeled a KVM hypervisor.
+  That wrongly skipped the `vsock`/`llc`/`llc2` blacklists and the
+  oops-reboot / coredump rules, and (because those rules then resolved to
+  `skip`) made `cfm kernsec apply` refuse force-blacklisted modules with an
+  UNSAFE FORCE error. `IsKVMHost` now requires the kvm module **and**
+  corroborating hypervisor evidence — a `vhost*` backend module loaded
+  (`vhost`/`vhost_net`/`vhost_vsock`, which only load once a guest starts),
+  libvirt, a running QEMU process, or Proxmox. Genuine hypervisors are still
+  detected; bare-metal hosting boxes are not.
 - kernsec: **`cfm kernsec apply` no longer chokes on a tuned-managed
   `GRUB_CMDLINE_LINUX_DEFAULT`.** On EL/CloudLinux the `tuned` profile owns
   that line and fills it with shell expansions
