@@ -1303,6 +1303,14 @@ func TestDecodeGrubCmdlineValueLenient(t *testing.T) {
 		{"unknown escape kept", `"a\b"`, `a\b`},
 		{"empty", `""`, ``},
 		{"absent", ``, ``},
+		// Boundary / no-panic cases locking in the "never errors, never
+		// slices OOB" contract: lone quotes, unbalanced quotes, and a
+		// trailing backslash inside double quotes.
+		{"lone double quote", `"`, `"`},
+		{"lone single quote", `'`, `'`},
+		{"unbalanced leading double quote", `"abc`, `"abc`},
+		{"unbalanced trailing double quote", `abc"`, `abc"`},
+		{"trailing backslash inside quotes", `"a\"`, `a\`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
