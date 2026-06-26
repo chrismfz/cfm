@@ -38,6 +38,12 @@ back-filled here — see the git/PR history for that period.
   reads (`user-summary`/`user-kills`/`user-history`) were already live.
 
 ### Fixed
+- kernsec: `fs.protected_regular` lowered from **2 to 1** (`kspp.fs`, Tier 1).
+  Value 2 also covers group-writable sticky dirs, which **breaks cPanel's DNS
+  Zone Editor**; 1 still protects the real attack surface (non-owned regular
+  files in world-writable sticky dirs like `/tmp`). kernsec is declarative, so
+  the next `cfm kernsec apply` reconciles any host currently at `=2` down to
+  `=1` live (`sysctl -w`) and in the managed file — no manual step.
 - WAF: `WAF_BAD_UTF8` (rule 611, `logonly`) now skips known binary-ish legit
   endpoints — WordPress optimization-detective web-vitals and `async-upload.php`
   media uploads — reusing (and generalising) the carve-out the ctrl-chars rule
