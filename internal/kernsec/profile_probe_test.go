@@ -1253,6 +1253,15 @@ func TestDetectKVMHost(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "kvm_amd + legacy qemu-kvm process",
+			setup: func(t *testing.T, root string) HostProfile {
+				writeHostModules(t, root, "kvm_amd", "kvm")
+				writeHostProcComm(t, root, "5050", "qemu-kvm")
+				return HostProfile{}
+			},
+			want: true,
+		},
+		{
 			// libvirt tooling installed but the box is not a hypervisor
 			// (no kvm module loaded) → must not be classified as KVM host.
 			name: "libvirt present but no kvm module",
