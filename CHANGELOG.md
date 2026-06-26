@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- WAF: rule **301** (`rule_sqli`, `WAF_SQLI`) now catches the **time-based /
+  boolean / error-based blind SQLi family** and **inspects the POST body**.
+  Previously it scanned only `uri+args` with four narrow signatures
+  (`union select`, `information_schema`, `or 1=1`, `' or '1'='1`), so a
+  sqlmap scan against a form (a WHMCS ticket-submission flood was the trigger)
+  sailed through — both because the payloads were body-borne and because the
+  signatures missed `SLEEP`/`PG_SLEEP`/`WAITFOR DELAY`/`DBMS_PIPE` /
+  `now()=sysdate()` / `=0+0+0+1`. Detection now covers those families across
+  MySQL/PostgreSQL/MSSQL/Oracle/SQLite (whitespace/`+`-tolerant so
+  form-urlencoded payloads still match) and runs over the body on POST.
+  Stays at **`challenge`** (stops the bot; real browsers pass); a 2-week FP
+  review then decides promotion to `block` — see `docs/waf.md` →
+  "SQLi blind-family expansion".
 - WAF: promoted rule **437** (`php_encoded_opener`, `WAF_BACKDOOR` encoded
   `<?php` opener) from `logonly` to **challenge**, and **removed** its FP-prone
   `<?=` short-opener variant. A five-server / 264k-event log review found the

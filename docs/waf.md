@@ -1090,6 +1090,50 @@ return {
 
 ---
 
+## SQLi blind-family expansion + body scan (rule 301, 2026-06-26)
+
+Source workload: a sqlmap scan against the **WHMCS ticket form** (myip.gr
+support) — hundreds of tickets, one per payload, all submitted in the
+`application/x-www-form-urlencoded` **body**.
+
+Two changes shipped together:
+
+1. **`rule_sqli` is now body-aware.** It previously scanned only `uri+args`
+   (`get_scan_ua()`); form-field SQLi in the POST body was invisible. It now
+   *also* runs `detect_sqli` over the budgeted `args+body` string
+   (`get_norm_ab()`) on POST requests (`cfm_waf.lua` §21).
+2. **`detect_sqli` now covers the time-based / boolean / error-based blind
+   family** (`SQLI_BLIND_TOKENS` in `cfm_waf_detectors.lua`), grouped by
+   engine: MSSQL `waitfor delay|time`; PostgreSQL `pg_sleep`; Oracle
+   `dbms_pipe.receive_message` / `dbms_lock.sleep`; SQLite `randomblob(`;
+   MySQL `now()=sysdate()` / `benchmark(` / `rlike sleep(` / anchored
+   `…sleep(` forms; generic error-based `extractvalue(` / `updatexml(` /
+   `exp(~` / `floor(rand(`; plus the sqlmap boolean tail `=0+0+0+1`. Tokens
+   match a whitespace/`+`-collapsed scan string so a form-urlencoded space
+   (`+` or `%20`) still hits the spaced tokens.
+
+**Mode: `challenge`** (the existing `rule_sqli` default). A sqlmap bot does
+not solve the JS/PoW challenge, so this stops the scan while a real browser
+submitting a ticket passes. Tests: `scripts/tests/cfm_waf_sqli_test.lua`
+(verbatim captured payloads + per-DBMS family + FP negatives).
+
+> **FP review — due ~2026-07-10 (≈2 weeks).** Pull `WAF_SQLI` hits and
+> confirm none are legitimate ticket/form traffic:
+> ```
+> grep '"reason":"WAF_SQLI"' /var/log/.../cfm.waf.log | jq -r '[.ip,.uri,.ua]|@tsv' | sort | uniq -c | sort -rn
+> ```
+> Highest FP risk (a support desk pasting DB code): `benchmark(`,
+> `extractvalue(`, `updatexml(`, `floor(rand(`, `randomblob(`. If a token is
+> noisy, trim it from `SQLI_BLIND_TOKENS`; the per-vhost exclusion mechanism
+> can also drop rule 301 for a specific app.
+>
+> **If clean: promote to `block`.** Either flip `rule_sqli` to `block`
+> wholesale, or — cleaner — split the unambiguous time-based subset
+> (`waitfor delay`, `pg_sleep`, `dbms_pipe.receive_message`, `dbms_lock.sleep`,
+> `now()=sysdate()`) into a dedicated `block` rule and keep the boolean /
+> error-based tokens at `challenge`. Decide based on what the 2-week hit log
+> shows.
+
 ## Known gaps
 
 These are real and worth addressing, but not blocking:
