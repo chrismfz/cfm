@@ -91,6 +91,7 @@ fires(post("subject=1'||DBMS_PIPE.RECEIVE_MESSAGE(CHR(98)||CHR(98)||CHR(98),15)|
 -- Wider family coverage (other DBMS / techniques sqlmap rotates through).
 -- ─────────────────────────────────────────────────────────────────────────────
 fires(post("q=1 AND SLEEP(5)"),                          "MySQL bare AND SLEEP")
+fires(post("q=1 OR SLEEP(5)"),                           "MySQL bare OR SLEEP")
 fires(post("q=1) OR BENCHMARK(5000000,MD5(0x41))-- -"),  "MySQL BENCHMARK CPU time")
 fires(post("q=1 AND 1=DBMS_LOCK.SLEEP(5)"),              "Oracle DBMS_LOCK.SLEEP")
 fires(post("q=1 OR 1=randomblob(1000000000)"),           "SQLite randomblob")
@@ -135,6 +136,8 @@ clean(post("subject=Slow query&message=My report page runs SELECT * FROM orders 
       "FP: legit SELECT mention (no blind primitive)")
 clean(post("subject=Cron&message=My backup script calls sleep(5) between rsync runs in bash."),
       "FP: bash sleep(5) (no SQL-anchored token)")
+clean(post("subject=Power&message=My monitor sleep mode and disk sleep settings won't stick."),
+      "FP: 'monitor sleep' prose — 'or sleep' without a '(' anchor stays clean")
 clean(post("subject=Invoice math&message=The total is 2+2=4 but the panel shows 5."),
       "FP: arithmetic in prose")
 clean(post("subject=Greek&message=Δεν μπορώ να συνδεθώ στο email μου, βοήθεια."),

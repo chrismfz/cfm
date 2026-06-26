@@ -501,8 +501,13 @@ end
 -- space may arrive as '+' or '%20' — still hit the spaced tokens.
 --
 -- FP-watch (the entries most likely to need tuning if a support desk
--- pastes DB code): benchmark(, extractvalue(, updatexml(, floor(rand(,
--- randomblob(. Promote/trim per the WAF FP review (see docs/waf.md).
+-- pastes DB code or scripts): benchmark(, extractvalue(, updatexml(,
+-- floor(rand(, randomblob( (DB functions also valid in app code, and
+-- extractValue/updateXml collide case-insensitively with camelCase JS);
+-- "or sleep(" / "and sleep(" (fire on shell/retry-loop prose like
+-- "x or sleep(3)"); exp(~ (matches math.exp(~x)). The anchored sleep
+-- forms deliberately avoid a bare "sleep(" to dodge "calls sleep(5)"
+-- prose. Promote/trim per the WAF FP review (see docs/waf.md).
 local SQLI_BLIND_TOKENS = {
   -- MSSQL (time-based)
   "waitfor delay", "waitfor time",

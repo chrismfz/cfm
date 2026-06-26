@@ -1122,10 +1122,14 @@ submitting a ticket passes. Tests: `scripts/tests/cfm_waf_sqli_test.lua`
 > ```
 > grep '"reason":"WAF_SQLI"' /var/log/.../cfm.waf.log | jq -r '[.ip,.uri,.ua]|@tsv' | sort | uniq -c | sort -rn
 > ```
-> Highest FP risk (a support desk pasting DB code): `benchmark(`,
-> `extractvalue(`, `updatexml(`, `floor(rand(`, `randomblob(`. If a token is
-> noisy, trim it from `SQLI_BLIND_TOKENS`; the per-vhost exclusion mechanism
-> can also drop rule 301 for a specific app.
+> Highest FP risk (a support desk pasting DB code or scripts): `benchmark(`,
+> `extractvalue(`, `updatexml(`, `floor(rand(`, `randomblob(` (DB functions
+> that are also valid app code — and `extractvalue`/`updatexml` collide
+> case-insensitively with camelCase JS `extractValue(`/`updateXml(`);
+> `or sleep(` / `and sleep(` (fire on shell/retry-loop prose, e.g.
+> "x or sleep(3)"); `exp(~` (matches `math.exp(~x)`). If a token is noisy,
+> trim it from `SQLI_BLIND_TOKENS`; the per-vhost exclusion mechanism can also
+> drop rule 301 for a specific app.
 >
 > **If clean: promote to `block`.** Either flip `rule_sqli` to `block`
 > wholesale, or — cleaner — split the unambiguous time-based subset
