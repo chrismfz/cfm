@@ -493,6 +493,37 @@ function _M.detect_xss(uri, args, _s)
   return false
 end
 
+-- sqlmap-class time-based / error-based blind SQLi primitives. These
+-- DBMS-specific function & keyword tokens do not occur in legitimate form
+-- input, so they are safe high-confidence signatures. Grouped by engine
+-- for auditability. Matched against the whitespace/'+'-collapsed scan
+-- string (`scw`, see detect_sqli) so form-urlencoded payloads — where a
+-- space may arrive as '+' or '%20' — still hit the spaced tokens.
+--
+-- FP-watch (the entries most likely to need tuning if a support desk
+-- pastes DB code or scripts): benchmark(, extractvalue(, updatexml(,
+-- floor(rand(, randomblob( (DB functions also valid in app code, and
+-- extractValue/updateXml collide case-insensitively with camelCase JS);
+-- "or sleep(" / "and sleep(" (fire on shell/retry-loop prose like
+-- "x or sleep(3)"); exp(~ (matches math.exp(~x)). The anchored sleep
+-- forms deliberately avoid a bare "sleep(" to dodge "calls sleep(5)"
+-- prose. Promote/trim per the WAF FP review (see docs/waf.md).
+local SQLI_BLIND_TOKENS = {
+  -- MSSQL (time-based)
+  "waitfor delay", "waitfor time",
+  -- PostgreSQL (time-based)
+  "pg_sleep",
+  -- Oracle (time-based / heavy query)
+  "dbms_pipe.receive_message", "dbms_lock.sleep",
+  -- SQLite (time-based)
+  "randomblob(",
+  -- MySQL (time-based / CPU)
+  "now()=sysdate()", "rlike sleep(", "benchmark(",
+  "select sleep(", "select(sleep(", ",sleep(", "(sleep(", "or sleep(", "and sleep(",
+  -- MySQL / generic (error-based inference)
+  "extractvalue(", "updatexml(", "exp(~", "floor(rand(",
+}
+
 function _M.detect_sqli(uri, args, _s)
   -- Use comment-stripped version to catch UN/**/ION SE/**/LECT bypass patterns.
   -- Double URL-decode is already applied by normalize() / scan_str().
@@ -506,6 +537,20 @@ function _M.detect_sqli(uri, args, _s)
   if has(sc, " or%201=1")           then return true end
   if has(sc, "' or '1'='1")        then return true end
   if has(sc, "%27%20or%20%271%27%3d%271") then return true end
+
+  -- Time-based / error-based blind family (sqlmap). Collapse runs of '+'
+  -- and whitespace to a single space so a form-urlencoded payload whose
+  -- spaces arrived as '+' (e.g. "waitfor+delay") still matches the spaced
+  -- tokens; the boolean tail below keeps '+' literal and matches `sc`.
+  local scw = sc:gsub("[+%s]+", " ")
+  for i = 1, #SQLI_BLIND_TOKENS do
+    if has(scw, SQLI_BLIND_TOKENS[i]) then return true end
+  end
+
+  -- sqlmap boolean-blind arithmetic inference tail, e.g.
+  -- "-1 OR 2+481-481-1=0+0+0+1". The "=0+0+0+1" constant is stable across
+  -- the randomised operands; keep '+' literal so it matches `sc`.
+  if has(sc, "=0+0+0+1") then return true end
 
   return false
 end

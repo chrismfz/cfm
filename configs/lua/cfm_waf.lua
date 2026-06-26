@@ -904,9 +904,20 @@ function _M.check(ctx)
   -- ── 21) SQLi (+ SQL comment bypass) ──────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_sqli, "challenge")
-    if mode ~= "disabled" and det.detect_sqli(uri, args, get_scan_ua()) then
-      local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      if record("WAF_SQLI", ttl, mode, RULE_IDS.rule_sqli) then goto done end
+    if mode ~= "disabled" then
+      -- URI + query args (cheap, every request).
+      local hit = det.detect_sqli(uri, args, get_scan_ua())
+      -- Plus the POST body: form-field SQLi (e.g. a WHMCS ticket subject/
+      -- message submitted as application/x-www-form-urlencoded) lands in
+      -- the body, which uri+args does not cover. Reuse the already-budgeted
+      -- args+body scan string so we don't re-normalize the body.
+      if not hit and body_inspect_ok then
+        hit = det.detect_sqli(uri, args, get_norm_ab())
+      end
+      if hit then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_SQLI", ttl, mode, RULE_IDS.rule_sqli) then goto done end
+      end
     end
   end
 
