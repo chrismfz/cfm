@@ -432,6 +432,45 @@ func TestDetectTIPCWorkload_ModuleLoaded(t *testing.T) {
 	}
 }
 
+func TestDetectTIPCWorkload_Iproute2BinaryIsNotASignal(t *testing.T) {
+	// Regression (titan): /usr/sbin/tipc ships with iproute2 on
+	// essentially every modern host. Its presence must NOT be read as a
+	// TIPC workload — otherwise the gate false-positives everywhere,
+	// silently skips the tipc blacklist, and trips UNSAFE FORCE when an
+	// operator deliberately forces it.
+	root := withHostProfileRoot(t)
+	touchHostPath(t, root, "/usr/sbin/tipc")
+	touchHostPath(t, root, "/usr/bin/tipc")
+	if detectTIPCWorkload() {
+		t.Error("the iproute2 /usr/{bin,sbin}/tipc binary must not signal a TIPC workload")
+	}
+}
+
+func TestDetectTIPCWorkload_TipcConfigIsASignal(t *testing.T) {
+	// tipc-config is the legacy tipcutils tool — a deliberate install,
+	// so it remains a valid signal.
+	root := withHostProfileRoot(t)
+	touchHostPath(t, root, "/usr/sbin/tipc-config")
+	if !detectTIPCWorkload() {
+		t.Error("tipc-config (tipcutils) should signal a TIPC workload")
+	}
+}
+
+func TestDetectTIPCWorkload_ServiceUnitIsASignal(t *testing.T) {
+	root := withHostProfileRoot(t)
+	touchHostPath(t, root, "/usr/lib/systemd/system/tipc.service")
+	if !detectTIPCWorkload() {
+		t.Error("a tipc.service unit should signal a TIPC workload")
+	}
+}
+
+func TestDetectTIPCWorkload_CleanHost(t *testing.T) {
+	withHostProfileRoot(t)
+	if detectTIPCWorkload() {
+		t.Error("clean host (no module, no tipcutils, no service) must not signal TIPC")
+	}
+}
+
 func TestDetectAFS_AFSMount(t *testing.T) {
 	root := withHostProfileRoot(t)
 	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
