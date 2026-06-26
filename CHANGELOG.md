@@ -50,6 +50,16 @@ back-filled here — see the git/PR history for that period.
   (`vhost`/`vhost_net`/`vhost_vsock`, which only load once a guest starts),
   libvirt, a running QEMU process, or Proxmox. Genuine hypervisors are still
   detected; bare-metal hosting boxes are not.
+- kernsec: **`cfm kernsec apply` no longer chokes on a tuned-managed
+  `GRUB_CMDLINE_LINUX_DEFAULT`.** On EL/CloudLinux the `tuned` profile owns
+  that line and fills it with shell expansions
+  (`${GRUB_CMDLINE_LINUX_DEFAULT:+…}\$tuned_params`). kernsec reads `_DEFAULT`
+  (for the next-boot drift view) but never writes it, yet it was decoding it
+  with the strict round-trip-safe parser and aborting the whole apply with a
+  "kernel cmdline contains shell metacharacter" error. `_DEFAULT` is now read
+  **leniently** — shell tokens are kept verbatim (they never match a managed
+  key, so drift is unaffected). The strict decoder still guards
+  `GRUB_CMDLINE_LINUX`, the line kernsec actually rewrites.
 - kernsec: `fs.protected_regular` lowered from **2 to 1** (`kspp.fs`, Tier 1).
   Value 2 also covers group-writable sticky dirs, which **breaks cPanel's DNS
   Zone Editor**; 1 still protects the real attack surface (non-owned regular

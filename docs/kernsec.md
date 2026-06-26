@@ -635,7 +635,13 @@ Behavior that matters during operations:
 - Only managed keys are removed/replaced by kernsec.
 - `GRUB_CMDLINE_LINUX_DEFAULT` is read for status/drift, but kernsec does not
   write it; managed args found there are reported as drift because kernsec only
-  remediates `GRUB_CMDLINE_LINUX`.
+  remediates `GRUB_CMDLINE_LINUX`. Because `_DEFAULT` is operator/distro-owned,
+  it is read **leniently**: EL/CloudLinux `tuned` ships shell expansions there
+  (`${GRUB_CMDLINE_LINUX_DEFAULT:+…}\$tuned_params`), and those tokens are kept
+  verbatim in the next-boot view rather than rejected. The strict
+  round-trip-safe decoder still guards `GRUB_CMDLINE_LINUX` (which kernsec
+  rewrites), so an unencodable shell expansion an operator places *there* is
+  still reported instead of silently mangled.
 - Backends take a pre-change backup/snapshot so `rollback` can restore the
   previous managed-argument state. These snapshots are scoped to kernsec-managed
   boot args, not full kernel command lines.
