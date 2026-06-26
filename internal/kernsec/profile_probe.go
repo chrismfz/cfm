@@ -843,7 +843,11 @@ func detectRunningQEMU() bool {
 		if _, err := strconvAtoi(e.Name()); err != nil {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(procDir, e.Name(), "comm"))
+		// Path is a fixed root (/proc) + an all-digit-validated pid
+		// (strconvAtoi gate above) + the literal "comm" — no
+		// attacker-controlled component, so the G304 file-inclusion
+		// warning is a false positive here.
+		b, err := os.ReadFile(filepath.Join(procDir, e.Name(), "comm")) // #nosec G304 -- /proc/<numeric-pid>/comm under a fixed root
 		if err != nil {
 			continue
 		}
