@@ -194,9 +194,18 @@ var KSPPSysctls = []SysctlRule{
 	},
 	{
 		ID: "KSEC-SCT-kspp.fs-004", Group: "kspp.fs", Tier: Tier1,
-		Key: "fs.protected_regular", Value: "2",
-		Description: "Same protection family applied to regular files.",
-		Affects:     "Nothing in normal use.",
+		Key: "fs.protected_regular", Value: "1",
+		// Value 1 (not the stricter 2): "1" still blocks O_CREAT of non-owned
+		// regular files in WORLD-writable sticky dirs (/tmp, /var/tmp — the real
+		// attack surface). "2" additionally covers GROUP-writable sticky dirs,
+		// which breaks cPanel's DNS Zone Editor (it writes zone data through a
+		// group-writable sticky path where the file owner differs from the dir
+		// owner). The marginal extra coverage of "2" is not worth that breakage
+		// on cPanel fleets. kernsec is declarative, so on the next `apply` any
+		// host currently at fs.protected_regular=2 is reconciled down to 1 (live
+		// `sysctl -w` + managed file rewrite).
+		Description: "Protect non-owned regular files in world-writable sticky dirs (1, not 2 — 2 breaks cPanel Zone Editor on group-writable sticky dirs).",
+		Affects:     "cPanel DNS Zone Editor works at 1; value 2 blocks it.",
 	},
 	{
 		ID: "KSEC-SCT-kspp.net-001", Group: "kspp.net", Tier: Tier1,
