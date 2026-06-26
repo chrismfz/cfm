@@ -43,7 +43,7 @@ func anyGlobMatches(patterns ...string) bool {
 // as `SKIP (host profile: <reason>)` in audit output. Operators
 // override per-rule with `state = force` in kernsec.conf.
 type HostProfile struct {
-	IsKVMHost                bool   `json:"is_kvm_host"`                           // kvm_intel / kvm_amd loaded → KVM hypervisor host
+	IsKVMHost                bool   `json:"is_kvm_host"`                           // actually a KVM hypervisor hosting guests (kvm module loaded AND vhost/libvirt/QEMU/Proxmox evidence) — NOT just kvm_intel/kvm_amd auto-loaded on a VT-x/AMD-V bare-metal box; see detectKVMHost
 	HasLibvirt               bool   `json:"has_libvirt"`                           // libvirtd socket / unit present → libvirt-managed KVM/QEMU host
 	HasContainers            bool   `json:"has_containers"`                        // runc / containerd / lxc / podman process running → don't kill userns
 	HasActiveUserNamespaces  bool   `json:"has_active_user_namespaces"`            // at least one process lives in a non-init user namespace right now (Chromium sandbox, bwrap, rootless podman, …) → don't kill userns
@@ -89,7 +89,6 @@ type HostProfile struct {
 // Pure: returns a value, no side effects on disk or kernel state.
 func DetectHostProfile() HostProfile {
 	p := HostProfile{
-		IsKVMHost:              anyModuleLoaded("kvm_intel", "kvm_amd"),
 		HasLibvirt:             detectLibvirt(),
 		HasContainers:          defaultContainerProbe().detect(),
 		UsesBridge:             detectInKernelBridge(),
@@ -123,6 +122,7 @@ func DetectHostProfile() HostProfile {
 		HasMonitoringWorkload:  detectMonitoringWorkload(),
 		HasKdump:               detectKdump(),
 	}
+	p.IsKVMHost = detectKVMHost(p)
 	p.HasHostingPanelWorkload = p.IsCPanel || p.IsDirectAdmin || p.HasCloudLinuxLVE || p.HasCageFS || p.HasImunify360
 	p.HasDKMS = hasOutOfTreeModuleEvidence(p)
 	p.HasActiveUserNamespaces, p.ActiveUserNamespacesNote = defaultUsernsProbe().detect()
@@ -785,6 +785,74 @@ func detectProxmox() bool {
 		"/usr/bin/proxmox-boot-tool",
 		"/boot/efi/EFI/proxmox",
 	)
+}
+
+// detectKVMHost reports whether this host is actually acting as a KVM
+// hypervisor running or managing guests — not merely a bare-metal box
+// where kvm_intel/kvm_amd auto-loaded because the CPU exposes VT-x/AMD-V.
+//
+// The kernel autoloads kvm_intel/kvm_amd on any host whose CPU supports
+// hardware virtualization, so cPanel/CloudLinux/DirectAdmin hosting
+// servers on modern Intel/AMD silicon carry those modules with zero
+// guests ever running. Keying the KVM host-profile on bare module
+// presence mislabels every such box as a hypervisor and wrongly skips
+// the vsock/llc blacklists and the oops-reboot / coredump rules (see
+// SkipReason) — and, because those gated modules then resolve to
+// `skip`, an operator who has force-blacklisted them hits the UNSAFE
+// FORCE refusal. Require corroborating evidence that guests are actually
+// hosted:
+//
+//   - a vhost backend module loaded — vhost / vhost_net / vhost_vsock
+//     load only once a VM with virtio devices starts (kvm_intel alone
+//     never pulls them in);
+//   - a libvirt management plane (detectLibvirt) or Proxmox;
+//   - a running QEMU process.
+//
+// No single signal is sufficient on its own without the kvm module also
+// being loaded, so a box that merely has libvirt-client tooling
+// installed but is not a hypervisor is not misclassified either.
+func detectKVMHost(p HostProfile) bool {
+	if !anyModuleLoaded("kvm_intel", "kvm_amd") {
+		return false
+	}
+	if anyModuleLoaded("vhost", "vhost_net", "vhost_vsock") {
+		return true
+	}
+	if p.HasLibvirt || p.IsProxmox {
+		return true
+	}
+	return detectRunningQEMU()
+}
+
+// detectRunningQEMU walks /proc/<pid>/comm for a live QEMU system
+// emulator. comm is truncated to 15 bytes by the kernel, so
+// "qemu-system-x86_64" surfaces as "qemu-system-x86" — match the
+// "qemu-system-" prefix and the legacy "qemu-kvm" name exactly. Same
+// cheap /proc scan the container probe uses; read errors (pids the
+// kernel is reaping) are skipped silently.
+func detectRunningQEMU() bool {
+	procDir := hostProfilePath("/proc")
+	entries, err := os.ReadDir(procDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := strconvAtoi(e.Name()); err != nil {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(procDir, e.Name(), "comm"))
+		if err != nil {
+			continue
+		}
+		comm := strings.TrimSpace(string(b))
+		if comm == "qemu-kvm" || strings.HasPrefix(comm, "qemu-system-") {
+			return true
+		}
+	}
+	return false
 }
 
 func detectZFS() bool {

@@ -55,7 +55,11 @@ kernsec already ships rules:
 - **ksmbd** → blacklisted (`modules.recent_cves`).
 - **vsock** → blacklisted on bare-metal hosts, skipped on KVM hypervisors so
   `vhost_vsock` stays available for guest↔host comms (`modules.net.virt`,
-  host-profile gated on `IsKVMHost`).
+  host-profile gated on `IsKVMHost`). `IsKVMHost` requires the kvm module to
+  be loaded **and** real hypervisor evidence (a `vhost*` backend module
+  loaded, libvirt, a running QEMU process, or Proxmox) — a bare-metal hosting
+  box where `kvm_intel`/`kvm_amd` merely auto-loaded on VT-x/AMD-V is **not**
+  treated as a KVM host, so vsock stays blacklisted there.
 - **ax25** → blacklisted (`modules.net.legacy`).
 - **AF_ALG** → boot-time `initcall_blacklist=algif_aead_init` plus
   modprobe-blacklisted `algif_hash` / `algif_skcipher` / `algif_rng` /

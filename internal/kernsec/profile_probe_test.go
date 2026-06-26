@@ -1180,3 +1180,96 @@ func TestDefaultUsernsProbe_ShapeOnly(t *testing.T) {
 		t.Errorf("default initPID = %q, want 1", p.initPID)
 	}
 }
+
+// writeHostProcComm fakes a running process at /proc/<pid>/comm under the
+// host-profile probe root.
+func writeHostProcComm(t *testing.T, root, pid, comm string) {
+	t.Helper()
+	dir := filepath.Join(root, "proc", pid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "comm"), []byte(comm+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDetectKVMHost(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, root string) HostProfile
+		want  bool
+	}{
+		{
+			// The titan regression: a bare-metal cPanel/CloudLinux box on
+			// VT-x silicon where kvm_intel auto-loaded but no guests run.
+			name: "kvm_intel auto-loaded, no virt evidence",
+			setup: func(t *testing.T, root string) HostProfile {
+				writeHostModules(t, root, "kvm_intel", "kvm")
+				return HostProfile{}
+			},
+			want: false,
+		},
+		{
+			name: "no kvm module at all",
+			setup: func(t *testing.T, root string) HostProfile {
+				writeHostModules(t, root, "ext4", "nf_tables")
+				return HostProfile{}
+			},
+			want: false,
+		},
+		{
+			name: "kvm_intel + vhost_net loaded (live guest)",
+			setup: func(t *testing.T, root string) HostProfile {
+				writeHostModules(t, root, "kvm_intel", "kvm", "vhost_net", "vhost")
+				return HostProfile{}
+			},
+			want: true,
+		},
+		{
+			name: "kvm_amd + libvirt management plane",
+			setup: func(t *testing.T, root string) HostProfile {
+				writeHostModules(t, root, "kvm_amd", "kvm")
+				return HostProfile{HasLibvirt: true}
+			},
+			want: true,
+		},
+		{
+			name: "kvm_intel + Proxmox",
+			setup: func(t *testing.T, root string) HostProfile {
+				writeHostModules(t, root, "kvm_intel", "kvm")
+				return HostProfile{IsProxmox: true}
+			},
+			want: true,
+		},
+		{
+			name: "kvm_intel + running qemu-system process",
+			setup: func(t *testing.T, root string) HostProfile {
+				writeHostModules(t, root, "kvm_intel", "kvm")
+				// kernel truncates comm to 15 bytes: qemu-system-x86
+				writeHostProcComm(t, root, "4242", "qemu-system-x86")
+				return HostProfile{}
+			},
+			want: true,
+		},
+		{
+			// libvirt tooling installed but the box is not a hypervisor
+			// (no kvm module loaded) → must not be classified as KVM host.
+			name: "libvirt present but no kvm module",
+			setup: func(t *testing.T, root string) HostProfile {
+				writeHostModules(t, root, "ext4")
+				return HostProfile{HasLibvirt: true}
+			},
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := withHostProfileRoot(t)
+			p := tc.setup(t, root)
+			if got := detectKVMHost(p); got != tc.want {
+				t.Errorf("detectKVMHost() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
