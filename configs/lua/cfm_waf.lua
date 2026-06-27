@@ -50,7 +50,8 @@ local CFG = {
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
-  rule_sqli            = "challenge",  -- cheap SQLi signatures (+ SQL comment bypass)
+  rule_sqli            = "challenge",  -- cheap SQLi signatures + DBMS-unique blind primitives
+  rule_sqli_blind_lexical = "logonly", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); observe-only pending FP review (docs/waf.md)
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
   rule_php_wrappers      = "challenge",  -- php:// phar:// data:// zip:// expect:// glob://
@@ -372,6 +373,7 @@ local RULE_IDS = {
 
   -- 3xx injection
   rule_sqli                    = 301,
+  rule_sqli_blind_lexical      = 309,
   rule_xss                     = 302,
   rule_js_proto                = 303,
   rule_b64_injection           = 304,
@@ -917,6 +919,27 @@ function _M.check(ctx)
       if hit then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_SQLI", ttl, mode, RULE_IDS.rule_sqli) then goto done end
+      end
+    end
+  end
+
+  -- ── 21b) SQLi blind-family lexical tokens (separate rule, logonly) ────────
+  -- benchmark( / extractvalue( / updatexml( / floor(rand( / randomblob( and
+  -- "or sleep(" / "and sleep(" are valid SQLi primitives but also collide
+  -- case-insensitively with legitimate code/content (XML parsers, PHP,
+  -- minified JS, shell prose). They ride this distinct rule at `logonly` —
+  -- observed, never challenged — so a weird app can't be broken; the WAF FP
+  -- review (docs/waf.md) decides promotion. Same uri+args then POST-body scan.
+  do
+    local mode = rule_mode(CFG.rule_sqli_blind_lexical, "logonly")
+    if mode ~= "disabled" then
+      local hit = det.detect_sqli_blind_lexical(uri, args, get_scan_ua())
+      if not hit and body_inspect_ok then
+        hit = det.detect_sqli_blind_lexical(uri, args, get_norm_ab())
+      end
+      if hit then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_SQLI_LEXICAL", ttl, mode, RULE_IDS.rule_sqli_blind_lexical) then goto done end
       end
     end
   end

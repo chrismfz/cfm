@@ -1,13 +1,15 @@
--- Tests for the WAF_SQLI detector (rule 301): the sqlmap-class time-based /
--- boolean / error-based blind family, plus the POST-body inspection that lets
--- it see form-field SQLi.
+-- Tests for the WAF SQLi detectors: the sqlmap-class time-based / boolean /
+-- error-based blind family, the POST-body inspection that lets it see
+-- form-field SQLi, and the two-tier split:
+--   * rule 301 (WAF_SQLI, challenge)         — DBMS-unique blind primitives
+--   * rule 309 (WAF_SQLI_LEXICAL, logonly)   — word/method-colliding tokens
+--     (extractvalue(/updatexml(/benchmark(/floor(rand(/randomblob(/…sleep()
+--     kept observe-only so a legit XML parser / updater / custom script
+--     can't be broken (split decided 2026-06-26; see docs/waf.md FP review).
 --
--- Source workload: captured 2026-06-26 sqlmap scan against the WHMCS ticket
--- submission form (myip.gr support). Hundreds of tickets, one per payload —
--- time-based (SLEEP / PG_SLEEP / WAITFOR DELAY / DBMS_PIPE.RECEIVE_MESSAGE /
--- now()=sysdate()) and boolean (2+N-N-1=0+0+0+1) blind injections submitted in
--- the body (application/x-www-form-urlencoded), which the old uri+args-only
--- SQLi scan never inspected.
+-- Source workload: captured 2026-06-26 sqlmap scan of the WHMCS ticket form
+-- (myip.gr support) — every captured payload carries a DBMS-unique token, so
+-- the scan stays fully covered at `challenge` after the split.
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -26,12 +28,13 @@ local function check(cond, msg)
   io.stderr:write("FAIL: " .. msg .. "\n")
 end
 
-local function only_sqli(mode)
+-- Disable every rule, then enable the given { name = mode } set.
+local function set_only(map)
   local snap = waf.get_config()
   for k, _ in pairs(snap) do
     if k:sub(1, 5) == "rule_" then waf.set_rule(k, "disabled") end
   end
-  waf.set_rule("rule_sqli", mode or "challenge")
+  for k, m in pairs(map) do waf.set_rule(k, m) end
 end
 
 -- WHMCS-style ticket submission: payload in the urlencoded POST body.
@@ -46,22 +49,18 @@ local function post(body)
   }
 end
 
--- Payload in the query string (GET).
 local function get(qs)
   return {
-    uri     = "/index.php",
-    args    = qs,
-    method  = "GET",
-    ip      = "203.0.113.51",
-    headers = {},
-    body    = "",
+    uri = "/index.php", args = qs, method = "GET",
+    ip = "203.0.113.51", headers = {}, body = "",
   }
 end
 
-local function fires(ctx, label)
+local function fires(ctx, label, want_reason)
+  want_reason = want_reason or "WAF_SQLI"
   local hit, reason = waf.check(ctx)
-  check(hit == true,            label .. " — hit=true")
-  check(reason == "WAF_SQLI",   label .. " — reason=WAF_SQLI (got " .. tostring(reason) .. ")")
+  check(hit == true,             label .. " — hit=true")
+  check(reason == want_reason,   label .. " — reason=" .. want_reason .. " (got " .. tostring(reason) .. ")")
 end
 
 local function clean(ctx, label)
@@ -70,10 +69,12 @@ local function clean(ctx, label)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Verbatim payloads from the captured WHMCS scan (body-borne).
+-- Tier 1 (rule 301, WAF_SQLI, challenge): DBMS-unique blind primitives + the
+-- pre-existing cheap signatures. Every captured WHMCS payload lives here.
 -- ─────────────────────────────────────────────────────────────────────────────
-only_sqli("challenge")
+set_only({ rule_sqli = "challenge" })
 
+-- Verbatim captured WHMCS payloads (body-borne).
 fires(post("subject=-1 OR 2+77-77-1=0+0+0+1"),                         "boolean 2+77-77-1=0+0+0+1")
 fires(post("subject=-1' OR 2+481-481-1=0+0+0+1 -- "),                  "boolean with -- comment tail")
 fires(post("subject=-1\" OR 2+38-38-1=0+0+0+1 -- "),                   "boolean double-quote variant")
@@ -87,48 +88,58 @@ fires(post("subject=1-1 OR 947=(SELECT 947 FROM PG_SLEEP(15))"),      "PostgreSQ
 fires(post("subject=1*DBMS_PIPE.RECEIVE_MESSAGE(CHR(99)||CHR(99)||CHR(99),15)"), "Oracle DBMS_PIPE")
 fires(post("subject=1'||DBMS_PIPE.RECEIVE_MESSAGE(CHR(98)||CHR(98)||CHR(98),15)||'"), "Oracle DBMS_PIPE concat")
 
--- ─────────────────────────────────────────────────────────────────────────────
--- Wider family coverage (other DBMS / techniques sqlmap rotates through).
--- ─────────────────────────────────────────────────────────────────────────────
-fires(post("q=1 AND SLEEP(5)"),                          "MySQL bare AND SLEEP")
-fires(post("q=1 OR SLEEP(5)"),                           "MySQL bare OR SLEEP")
-fires(post("q=1) OR BENCHMARK(5000000,MD5(0x41))-- -"),  "MySQL BENCHMARK CPU time")
-fires(post("q=1 AND 1=DBMS_LOCK.SLEEP(5)"),              "Oracle DBMS_LOCK.SLEEP")
-fires(post("q=1 OR 1=randomblob(1000000000)"),           "SQLite randomblob")
-fires(post("q=1 AND extractvalue(1,concat(0x7e,version()))"), "MySQL error-based extractvalue")
-fires(post("q=1 AND updatexml(1,concat(0x7e,user()),1)"),     "MySQL error-based updatexml")
-fires(post("q=1 AND (SELECT 1 FROM(SELECT COUNT(*),concat(version(),floor(rand(0)*2))x FROM information_schema.tables GROUP BY x)a)"), "MySQL floor(rand()) error-based")
+-- Other DBMS-unique family members.
+fires(post("q=1 AND 1=DBMS_LOCK.SLEEP(5)"),       "Oracle DBMS_LOCK.SLEEP")
+fires(post("q=1 RLIKE SLEEP(5)"),                 "MySQL rlike sleep")
+fires(post("q=1;SELECT SLEEP(5)"),                "MySQL SELECT SLEEP")
+fires(post("q=1 AND exp(~(select user()))"),      "MySQL error-based exp(~")
 
--- ─────────────────────────────────────────────────────────────────────────────
--- form-urlencoded reality: a space may arrive as '+' or '%20'; the detector
--- collapses both so spaced tokens still match.
--- ─────────────────────────────────────────────────────────────────────────────
-fires(post("subject=1;waitfor+delay+'0:0:15'"),          "waitfor delay with '+' as space")
-fires(post("subject=-1+OR+2%2B9-9-1=0%2B0%2B0%2B1"),     "boolean tail with %2B-encoded plus")
-fires(get("id=1+AND+SLEEP(5)"),                          "GET query-arg AND SLEEP with '+'")
-
--- ─────────────────────────────────────────────────────────────────────────────
--- The pre-existing cheap signatures still fire (regression guard).
--- ─────────────────────────────────────────────────────────────────────────────
+-- Pre-existing cheap signatures (regression guard).
 fires(get("id=1 UNION SELECT username,password FROM users"), "classic UNION SELECT")
 fires(get("id=1' OR '1'='1"),                                "classic ' OR '1'='1")
 fires(post("filter=1 AND 1=1 UNION SELECT * FROM information_schema.tables"), "information_schema")
 
--- ─────────────────────────────────────────────────────────────────────────────
--- Body-aware wiring: the exact same payload must be caught in the BODY (the
--- regression this change fixes), not only in the query string.
--- ─────────────────────────────────────────────────────────────────────────────
-do
-  only_sqli("challenge")
-  -- query string clean, payload only in the POST body
-  local ctx = post("name=John&email=a@b.com&message=1 OR 1=1 UNION SELECT 1,2,3")
-  fires(ctx, "body-only UNION SELECT (the WHMCS-form fix)")
-end
+-- form-urlencoded space as '+' / '%2B' still matches.
+fires(post("subject=1;waitfor+delay+'0:0:15'"),      "waitfor delay with '+' as space")
+fires(post("subject=-1+OR+2%2B9-9-1=0%2B0%2B0%2B1"), "boolean tail with %2B-encoded plus")
+
+-- Body-only detection (the regression the body-scan wiring fixes): payload in
+-- the body, query string clean.
+fires(post("name=John&email=a@b.com&message=1 OR 1=1 UNION SELECT 1,2,3"),
+      "body-only UNION SELECT (the WHMCS-form fix)")
+
+-- The lexical (word-colliding) tokens must NOT fire rule 301.
+clean(post("q=1) OR BENCHMARK(5000000,MD5(0x41))-- -"),  "lexical benchmark( not on rule 301")
+clean(post("q=1 AND extractvalue(1,concat(0x7e,version()))"), "lexical extractvalue( not on rule 301")
+clean(get("id=1 AND SLEEP(5)"),                          "lexical 'and sleep(' not on rule 301")
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- False-positive guards: ordinary support-ticket traffic must stay clean.
+-- Tier 2 (rule 309, WAF_SQLI_LEXICAL): word/method-colliding tokens. Tested at
+-- `block` for crisp assertions; ships at `logonly` (observe-only) in prod.
 -- ─────────────────────────────────────────────────────────────────────────────
-only_sqli("challenge")
+set_only({ rule_sqli_blind_lexical = "block" })
+
+fires(post("q=1) OR BENCHMARK(5000000,MD5(0x41))-- -"),       "BENCHMARK", "WAF_SQLI_LEXICAL")
+fires(post("q=1 AND extractvalue(1,concat(0x7e,version()))"), "extractvalue", "WAF_SQLI_LEXICAL")
+fires(post("q=1 AND updatexml(1,concat(0x7e,user()),1)"),     "updatexml", "WAF_SQLI_LEXICAL")
+fires(post("q=1 OR 1=randomblob(1000000000)"),                "randomblob", "WAF_SQLI_LEXICAL")
+fires(post("q=1 AND (SELECT 1 FROM(SELECT COUNT(*),concat(version(),floor(rand(0)*2))x FROM t GROUP BY x)a)"),
+      "floor(rand", "WAF_SQLI_LEXICAL")
+fires(get("id=1+AND+SLEEP(5)"),                               "and sleep( with '+'", "WAF_SQLI_LEXICAL")
+fires(post("q=1 OR SLEEP(5)"),                                "or sleep(", "WAF_SQLI_LEXICAL")
+
+-- DBMS-unique tokens must NOT fire rule 309.
+clean(post("subject=1-1; waitfor delay '0:0:15'"),           "DBMS-unique waitfor not on rule 309")
+clean(post("subject=1-1 OR 947=(SELECT 947 FROM PG_SLEEP(15))"), "DBMS-unique pg_sleep not on rule 309")
+clean(post("subject=-1 OR 2+77-77-1=0+0+0+1"),               "DBMS-unique boolean tail not on rule 309")
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Production-like (301 challenge + 309 logonly) — the captured scan still
+-- gets challenged via its DBMS-unique tokens, and ordinary traffic is clean.
+-- ─────────────────────────────────────────────────────────────────────────────
+set_only({ rule_sqli = "challenge", rule_sqli_blind_lexical = "logonly" })
+
+fires(post("subject=1-1 OR 947=(SELECT 947 FROM PG_SLEEP(15))"), "prod: captured pg_sleep still challenged")
 
 clean(post("subject=Cannot login&message=I get a 500 error when I open my website, please help."),
       "FP: ordinary ticket prose")
@@ -149,4 +160,4 @@ if fails > 0 then
   io.stderr:write(string.format("FAILED %d tests\n", fails))
   os.exit(1)
 end
-print("ok: cfm_waf SQLi blind-family + body-scan tests (rule 301)")
+print("ok: cfm_waf SQLi blind-family split + body-scan tests (rules 301/309)")
