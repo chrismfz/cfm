@@ -28,9 +28,18 @@ back-filled here — see the git/PR history for that period.
   `now()=sysdate()` / `=0+0+0+1`. Detection now covers those families across
   MySQL/PostgreSQL/MSSQL/Oracle/SQLite (whitespace/`+`-tolerant so
   form-urlencoded payloads still match) and runs over the body on POST.
-  Stays at **`challenge`** (stops the bot; real browsers pass); a 2-week FP
-  review then decides promotion to `block` — see `docs/waf.md` →
-  "SQLi blind-family expansion".
+  Detection is **split by false-positive risk**: DBMS-unique primitives
+  (`pg_sleep`, `waitfor delay`, `dbms_pipe.receive_message`, `now()=sysdate()`,
+  the `=0+0+0+1` boolean tail, …) stay on rule 301 at **`challenge`** (stops
+  the bot; real browsers pass), while tokens that also collide with legitimate
+  code/content (`benchmark(`, `extractvalue(`/`updatexml(` ≈ camelCase
+  `extractValue(`/`updateXml(`, `floor(rand(`, `randomblob(`, `or sleep(` /
+  `and sleep(`) ride a new rule **309** (`rule_sqli_blind_lexical`,
+  `WAF_SQLI_LEXICAL`) at **`logonly`** — observed-only so a legitimate XML
+  parser / updater / custom script can't be broken. Every captured WHMCS
+  payload carries a tier-1 token, so the scan is fully challenged regardless.
+  A 2-week FP review (before 2026-07-10) then decides promotion per tier — see
+  `docs/waf.md` → "SQLi blind-family expansion".
 - WAF: promoted rule **437** (`php_encoded_opener`, `WAF_BACKDOOR` encoded
   `<?php` opener) from `logonly` to **challenge**, and **removed** its FP-prone
   `<?=` short-opener variant. A five-server / 264k-event log review found the

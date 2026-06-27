@@ -493,21 +493,13 @@ function _M.detect_xss(uri, args, _s)
   return false
 end
 
--- sqlmap-class time-based / error-based blind SQLi primitives. These
--- DBMS-specific function & keyword tokens do not occur in legitimate form
--- input, so they are safe high-confidence signatures. Grouped by engine
--- for auditability. Matched against the whitespace/'+'-collapsed scan
--- string (`scw`, see detect_sqli) so form-urlencoded payloads — where a
--- space may arrive as '+' or '%20' — still hit the spaced tokens.
+-- sqlmap-class blind-SQLi primitives, split into two confidence tiers.
 --
--- FP-watch (the entries most likely to need tuning if a support desk
--- pastes DB code or scripts): benchmark(, extractvalue(, updatexml(,
--- floor(rand(, randomblob( (DB functions also valid in app code, and
--- extractValue/updateXml collide case-insensitively with camelCase JS);
--- "or sleep(" / "and sleep(" (fire on shell/retry-loop prose like
--- "x or sleep(3)"); exp(~ (matches math.exp(~x)). The anchored sleep
--- forms deliberately avoid a bare "sleep(" to dodge "calls sleep(5)"
--- prose. Promote/trim per the WAF FP review (see docs/waf.md).
+-- SQLI_BLIND_TOKENS: DBMS-unique time-based primitives that do NOT collide
+-- with any ordinary word or method name, so they are safe at `challenge`
+-- (rule 301, WAF_SQLI). "waitfor delay" never matches the English "wait
+-- for" (no space in the token); pg_sleep / dbms_* / now()=sysdate() /
+-- rlike / the select(sleep( structural forms are SQL-only.
 local SQLI_BLIND_TOKENS = {
   -- MSSQL (time-based)
   "waitfor delay", "waitfor time",
@@ -515,20 +507,42 @@ local SQLI_BLIND_TOKENS = {
   "pg_sleep",
   -- Oracle (time-based / heavy query)
   "dbms_pipe.receive_message", "dbms_lock.sleep",
-  -- SQLite (time-based)
-  "randomblob(",
-  -- MySQL (time-based / CPU)
-  "now()=sysdate()", "rlike sleep(", "benchmark(",
-  "select sleep(", "select(sleep(", ",sleep(", "(sleep(", "or sleep(", "and sleep(",
-  -- MySQL / generic (error-based inference)
-  "extractvalue(", "updatexml(", "exp(~", "floor(rand(",
+  -- MySQL (time-based, SQL-anchored)
+  "now()=sysdate()", "rlike sleep(", "select sleep(", "select(sleep(",
+  -- MySQL error-based (exp + bitwise NOT; rare in normal code)
+  "exp(~",
 }
+
+-- SQLI_LEXICAL_TOKENS: real SQLi primitives that ALSO collide
+-- case-insensitively with legitimate code/content, so they ride a SEPARATE
+-- rule (309, WAF_SQLI_LEXICAL) kept at `logonly` — observed, never
+-- challenged — until the WAF FP review (docs/waf.md) clears them:
+--   benchmark(      — the word "benchmark(" in perf/dev content
+--   extractvalue(   — camelCase extractValue( in XML parsers / JS / Java
+--   updatexml(      — camelCase updateXml( / updateXML(
+--   floor(rand(     — valid PHP floor(rand(...))
+--   randomblob(     — JS randomBlob(
+--   or sleep( / and sleep( / ,sleep( / (sleep(  — shell/code prose and
+--                     minified/nested calls ("x or sleep(3)")
+local SQLI_LEXICAL_TOKENS = {
+  "benchmark(", "extractvalue(", "updatexml(", "floor(rand(", "randomblob(",
+  "or sleep(", "and sleep(", ",sleep(", "(sleep(",
+}
+
+-- sqli_scan_strings returns (sc, scw): the comment-stripped scan string and
+-- a copy with runs of '+'/whitespace collapsed to a single space (so a
+-- form-urlencoded space arriving as '+' or '%20' still matches the spaced
+-- tokens). Shared by detect_sqli and detect_sqli_blind_lexical.
+local function sqli_scan_strings(uri, args, _s)
+  local s  = _s or scan_str(uri, args)
+  local sc = strip_sql_comments(s)
+  return sc, (sc:gsub("[+%s]+", " "))
+end
 
 function _M.detect_sqli(uri, args, _s)
   -- Use comment-stripped version to catch UN/**/ION SE/**/LECT bypass patterns.
   -- Double URL-decode is already applied by normalize() / scan_str().
-  local s  = _s or scan_str(uri, args)
-  local sc = strip_sql_comments(s)
+  local sc, scw = sqli_scan_strings(uri, args, _s)
 
   if has(sc, "union select")        then return true end
   if has(sc, "union%20select")      then return true end
@@ -538,11 +552,7 @@ function _M.detect_sqli(uri, args, _s)
   if has(sc, "' or '1'='1")        then return true end
   if has(sc, "%27%20or%20%271%27%3d%271") then return true end
 
-  -- Time-based / error-based blind family (sqlmap). Collapse runs of '+'
-  -- and whitespace to a single space so a form-urlencoded payload whose
-  -- spaces arrived as '+' (e.g. "waitfor+delay") still matches the spaced
-  -- tokens; the boolean tail below keeps '+' literal and matches `sc`.
-  local scw = sc:gsub("[+%s]+", " ")
+  -- DBMS-unique time-based blind family (sqlmap).
   for i = 1, #SQLI_BLIND_TOKENS do
     if has(scw, SQLI_BLIND_TOKENS[i]) then return true end
   end
@@ -552,6 +562,17 @@ function _M.detect_sqli(uri, args, _s)
   -- the randomised operands; keep '+' literal so it matches `sc`.
   if has(sc, "=0+0+0+1") then return true end
 
+  return false
+end
+
+-- detect_sqli_blind_lexical matches the word/method-colliding blind tokens
+-- (SQLI_LEXICAL_TOKENS). Wired to rule 309 at `logonly` so it cannot break
+-- a legitimate app (XML parser / updater / custom script) during the trial.
+function _M.detect_sqli_blind_lexical(uri, args, _s)
+  local _, scw = sqli_scan_strings(uri, args, _s)
+  for i = 1, #SQLI_LEXICAL_TOKENS do
+    if has(scw, SQLI_LEXICAL_TOKENS[i]) then return true end
+  end
   return false
 end
 
