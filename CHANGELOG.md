@@ -18,6 +18,15 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- WAF: new rule **318** (`rule_superglobal_override`, `WAF_SUPERGLOBAL`,
+  **`logonly`**) flags a request parameter whose **key** is a PHP superglobal /
+  reserved name (`?_SERVER[x]=`, `&GLOBALS[x]=`, `_GET[x]=` in the body) — a
+  PHP variable-poisoning attempt (`extract()` / `import_request_variables()` /
+  register_globals patterns). Delimiter-anchored so ordinary fields like
+  `db_server=` / `mail_server=` and superglobal-as-value (`?x=_SERVER`) do not
+  match. First of the clean-room WAF additions from the NinjaFirewall gap
+  analysis (`docs/waf-gap-analysis-ninjafirewall.md`); ships observe-only and
+  is reviewed in the same WAF FP pass as the SQLi families.
 - WAF: rule **301** (`rule_sqli`, `WAF_SQLI`) now catches the **time-based /
   boolean / error-based blind SQLi family** and **inspects the POST body**.
   Previously it scanned only `uri+args` with four narrow signatures

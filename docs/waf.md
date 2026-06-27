@@ -511,7 +511,7 @@ Current assignments:
   306  rule_serialize                  315  rule_cmd_payload_pipe_bash
   307  rule_xxe                        316  rule_cmd_payload_pipe_sh
   308  rule_shellshock                 317  rule_cmd_payload_backtick
-  309  rule_sqli_blind_lexical
+  309  rule_sqli_blind_lexical         318  rule_superglobal_override
                                        320  rule_rce
                                        321  rule_proxy_header_sqli
                                        322  rule_reverse_shell
@@ -1135,12 +1135,15 @@ per-rule isolation, FP negatives).
 > families — `WAF_SQLI` (tier 1, already challenging) and `WAF_SQLI_LEXICAL`
 > (tier 2, observe-only, the one most likely to surface a weird app):
 > ```
-> for r in WAF_SQLI WAF_SQLI_LEXICAL; do
+> for r in WAF_SQLI WAF_SQLI_LEXICAL WAF_SUPERGLOBAL; do
 >   echo "== $r =="
->   grep "\"reason\":\"$r\"" /var/log/.../cfm.waf.log \
+>   grep "\"reason\":\"$r" /var/log/.../cfm.waf.log \
 >     | jq -r '[.host,.uri,.ip,.ua]|@tsv' | sort | uniq -c | sort -rn | head -40
 > done
 > ```
+> (`WAF_SUPERGLOBAL` and the other clean-room `logonly` additions from
+> `docs/waf-gap-analysis-ninjafirewall.md` are reviewed in this same pass —
+> grep is prefix-anchored since `WAF_SUPERGLOBAL` carries a `:<key>` suffix.)
 > A hit is a **false positive** if the `host`/`uri` is a legitimate app and the
 > matched string is benign code/content (XML parser, updater, page builder,
 > phpMyAdmin/Adminer, a security/dev blog post). Group by `host`+`uri` to spot
@@ -1297,6 +1300,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 51 | PHP dropper markers (423) | `'!success!'` + `'!ended!'` literals + `die(`/`exit(` framing | `cfm_waf_detectors.lua` (`detect_php_dropper_markers`) |
 | 52 | PHP filesize recon (424) | `<fs>` literal tag + `filesize(` + `SCRIPT_FILENAME` reference | `cfm_waf_detectors.lua` (`detect_php_filesize_recon`) |
 | 53 | PHP touch anti-forensic (425) | `@touch(<path>, <literal-unix-ts>)` mtime backdating + paired file-write primitive | `cfm_waf_detectors.lua` (`detect_php_touch_antiforensic`) |
+| 54 | Superglobal override (318) | param KEY = PHP superglobal name (`_GET`/`_SERVER`/`GLOBALS`/…), delimiter-anchored so `db_server=` / value-position do not match; clean-room (NinjaFirewall gap analysis), `logonly` | `cfm_waf_detectors.lua` (`detect_superglobal_override`) |
 | — | Body budget by CT | json=32K / multipart=16K / xml=16K / urlencoded=8K / other=2K | `cfm_waf_util.lua:249` |
 | — | Normalize | `url_decode_once × 2` + `lower`, with no-`%` fast path. **No UTF-8 / unicode normalization.** | `cfm_waf_util.lua:211` |
 

@@ -576,6 +576,44 @@ function _M.detect_sqli_blind_lexical(uri, args, _s)
   return false
 end
 
+-- Superglobal / variable-override probe. A request parameter whose KEY is a
+-- PHP superglobal / reserved name (e.g. `?_SERVER[x]=`, `&GLOBALS[x]=`, or
+-- `_GET[x]=` in the body) is a PHP variable-poisoning attempt against code
+-- using extract() / import_request_variables() / register_globals-style
+-- patterns — the value gets injected as the named PHP variable.
+--
+-- Anchored to a parameter boundary so it matches the param NAME, not the
+-- value: each pattern requires a `?`/`&`/`;` delimiter immediately before the
+-- name and a `=` or `[` immediately after. Ordinary fields whose name merely
+-- ENDS in one of these (`db_server=`, `mail_server=`, `name_server=`) are
+-- preceded by a non-delimiter byte and do NOT match; a superglobal appearing
+-- as a value (`?x=_server`) is preceded by `=` and does NOT match either.
+-- An edge proxy can only flag this (it can't unset the key the way an
+-- in-process PHP WAF does), so this ships at `logonly` (rule 318).
+local SUPERGLOBAL_PATTERNS = {}
+do
+  local names = {
+    "_get", "_post", "_request", "_cookie", "_server",
+    "_env", "_files", "_session", "globals",
+  }
+  for i = 1, #names do
+    SUPERGLOBAL_PATTERNS[i] = { name = names[i], pat = "[?&;]" .. names[i] .. "[=%[]" }
+  end
+end
+
+function _M.detect_superglobal_override(uri, args, _s)
+  -- Prefix a delimiter so a name at the very start of the scan string is
+  -- still preceded by a boundary; normalize() has already lowercased and
+  -- url-decoded, so an uppercase `_SERVER` / encoded `%5B` is covered.
+  local s = "&" .. (_s or scan_str(uri, args))
+  for i = 1, #SUPERGLOBAL_PATTERNS do
+    if string.find(s, SUPERGLOBAL_PATTERNS[i].pat) then
+      return SUPERGLOBAL_PATTERNS[i].name
+    end
+  end
+  return nil
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- AUTH / BRUTE / XML-RPC HELPERS
 -- ─────────────────────────────────────────────────────────────────────────────
