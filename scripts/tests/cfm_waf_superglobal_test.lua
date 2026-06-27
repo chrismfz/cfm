@@ -80,6 +80,12 @@ clean(get("serverid=5&cookies=accept"), "FP: serverid / cookies (not _server / _
 clean(post("subject=Help&message=please check my _SERVER config in php"),
       "FP: '_SERVER' as prose in a value")
 clean(get("page=home&lang=el&sort=date"), "FP: ordinary browsing")
+-- Common framework params that begin with '_' but are NOT superglobals —
+-- locked in so nobody widens the table into them by accident.
+clean(post("_method=PUT&_token=abc123"),  "FP: Laravel/Rails _method + _token")
+clean(get("action=heartbeat&_wpnonce=ab12cd&_ajax_nonce=ef34"), "FP: WordPress nonces")
+clean(get("v=2&_ga=GA1.2.x&_gid=GA1.2.y"), "FP: Google Analytics _ga/_gid")
+clean(get("q=test&_=1719500000"),          "FP: jQuery cachebuster _=")
 
 if fails > 0 then
   io.stderr:write(string.format("FAILED %d tests\n", fails))
