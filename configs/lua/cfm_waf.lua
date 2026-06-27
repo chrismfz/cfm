@@ -52,6 +52,7 @@ local CFG = {
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
   rule_sqli            = "challenge",  -- cheap SQLi signatures + DBMS-unique blind primitives
   rule_sqli_blind_lexical = "logonly", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); observe-only pending FP review (docs/waf.md)
+  rule_superglobal_override = "logonly", -- request param KEY named like a PHP superglobal (_GET/_SERVER/GLOBALS/…) = variable poisoning; observe-only pending FP review
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
   rule_php_wrappers      = "challenge",  -- php:// phar:// data:// zip:// expect:// glob://
@@ -374,6 +375,7 @@ local RULE_IDS = {
   -- 3xx injection
   rule_sqli                    = 301,
   rule_sqli_blind_lexical      = 309,
+  rule_superglobal_override    = 318,
   rule_xss                     = 302,
   rule_js_proto                = 303,
   rule_b64_injection           = 304,
@@ -940,6 +942,25 @@ function _M.check(ctx)
       if hit then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_SQLI_LEXICAL", ttl, mode, RULE_IDS.rule_sqli_blind_lexical) then goto done end
+      end
+    end
+  end
+
+  -- ── 21c) Superglobal / variable-override probe (logonly) ──────────────────
+  -- A request param KEY named like a PHP superglobal (_GET/_POST/_SERVER/
+  -- GLOBALS/…) is a PHP variable-poisoning attempt (extract()/register_globals
+  -- patterns). Clean-room addition from the NinjaFirewall gap analysis; ships
+  -- `logonly` so it surfaces in the WAF FP review before any enforcement.
+  do
+    local mode = rule_mode(CFG.rule_superglobal_override, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_superglobal_override(uri, args, get_scan_ua())
+      if not tag and body_inspect_ok then
+        tag = det.detect_superglobal_override(uri, args, get_norm_ab())
+      end
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_SUPERGLOBAL:" .. tag, ttl, mode, RULE_IDS.rule_superglobal_override) then goto done end
       end
     end
   end
