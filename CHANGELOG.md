@@ -17,6 +17,28 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- WAF: **split the encoded-`<?php` backdoor opener (rule 437) into two rule ids**
+  — `rule_php_encoded_opener` (437, the URL/HTML-entity/JS-escape forms) and the
+  new `rule_php_encoded_opener_b64` (438, the base64 `PD9waHA` form). One
+  detector, routed by encoding. **Both stay at `challenge`; no behaviour change
+  today** — this is an observability split so the two encodings can be tuned and
+  measured independently. Rationale: the URL form is FP-prone (a browser
+  url-encodes a user-typed `<?php` in any form field to `%3C%3Fphp`, so a legit
+  blog comment / contact-form / paste POST fires it — `challenge` preserves and
+  replays the POST, a hard `block` would 403 and drop it), whereas the base64
+  form is attack-only (a browser never base64-encodes a form field; a 2026-07
+  six-server review found 16/16 base64 openers were botnet POSTs of base64
+  `<?php` to `/xmlrpc.php`, 0 FP). Rule 438 is the candidate for `block` after a
+  1-2 week burn-in of the per-rule-id telemetry. **Operator note:** if you had
+  customised `rule_php_encoded_opener` in `/etc/cfm/*` (a mode override, or a
+  `--rule 437` per-vhost exclusion), it now covers only the URL/HTML/JS form —
+  apply the same setting to `rule_php_encoded_opener_b64` / `--rule 438` for the
+  base64 form. Also fixes a stale `DefaultMode` in `waf_rule_ids.go` (437 read
+  `logonly` while the live Lua CFG had been `challenge` since 2026-06-25) and
+  syncs `docs/waf.md` (the base64 `<?=`/`PD89` variant is intentionally *not*
+  matched — the doc still listed it).
+
 ### Security
 - WAF: **promoted the SQLi families after a clean 6-server FP review** (2026-07,
   titan/virgo/orion/rigel/earth/mars): `rule_sqli` (301, `WAF_SQLI`)
