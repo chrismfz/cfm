@@ -84,6 +84,12 @@ back-filled here — see the git/PR history for that period.
   inline-commented values were unaffected because the written value already
   equalled the default. If you do **not** want a given activation, set that key
   explicitly (e.g. `TMP_PCT = 0` to keep `/tmp` cleanup off). See CLAUDE.md §5.
+  **Before rolling out**, grep your live `/etc/cfm/detectors.conf` for scalar
+  lines carrying an inline `;`/`#` comment (`grep -nE '= *[^;#]*[^ ] +[;#]'`):
+  those were silently using the default and will now take the written value.
+  In particular a `mysql_governor` kill threshold written *below* its default
+  with an inline comment (e.g. `LOCK_FANOUT_KILL = 5 ; aggressive`) would begin
+  enforcing the tighter value — intended, but verify it's what you want.
 
 ### Security
 - WAF: **promoted the SQLi families after a clean 6-server FP review** (2026-07,
