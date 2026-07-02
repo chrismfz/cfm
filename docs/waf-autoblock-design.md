@@ -1,9 +1,18 @@
 # WAF → autoblock via the detector framework — design
 
-> **Status: DESIGN PROPOSAL — not yet implemented.** This document is for
-> review before any code. Nothing here describes current behaviour; the WAF
-> today enforces per-request (`logonly`/`challenge`/`block`) at the edge and
-> does not feed a persistent IP block. When Phase 1 lands, update this banner.
+> **Status: PHASE 1 IMPLEMENTED.** The `waf_security` detector, the
+> `SubscribeWAFHitEvents` hook (published from `Engine.RecordWAFTrigger`), and
+> the `[waf_security]` + `[waf_security.leniency]` config all exist. Phase 1 is
+> scoped to **edge-`block` hits only** — the subscribe callback drops any hit
+> whose edge action isn't `block`, so only what the WAF already blocked feeds
+> the counter ("block at WAF → nft candidate"). Among those, the opted-in
+> families `SQLI`/`RCE`/`BACKDOOR`/`UPLOAD_EXPLOIT` are ON at threshold 1; all
+> challenge-tier families ship at `0`. It ships enforcing a **soft TTL block**
+> (`BLOCK = "6h"`, self-healing) rather than `permanent`; `DRY_RUN = 1` remains
+> available for a pure watch-first burn-in, and GR/CY get a 15m lenient tier.
+> Phase 2 (relax the action gate + turn on challenge-tier families from live
+> data) and Phase 3 (per-/24 escalation) are still design-only, as is the
+> Phase-2 edge-ban-dict retirement below.
 
 ## Motivation
 
@@ -173,16 +182,23 @@ COOLDOWN = "20m"
 ; 0 = never autoblock (family stays edge-only: logonly/challenge as configured).
 ; Defaults justified by the 6-server 2026-07 review (0 FP on the injection set).
 ;
-; --- PHASE 1 (SHIPPED ON): only edge-`block` families feed the counter. ---
-; Rationale: if the WAF was already confident enough to 403 the request, it is
-; confident enough to count it toward an nft ban. These are the 0-FP families.
-; The challenge-tier families stay EXACTLY as today (edge-only) until live
-; cfm.detectors.log data justifies turning them on — see PHASE 2 below. This is
-; a config decision, not code: the hook + detector already handle every family.
-SQLI            = 1      ; WAF_SQLI + WAF_SQLI_LEXICAL — 0-FP by design
-RCE             = 1      ; WAF_RCE (320)
-BACKDOOR        = 1      ; WAF_BACKDOOR (430-438)
-UPLOAD_EXPLOIT  = 1      ; WAF_UPLOAD_FNAME/_CONTENT (401/402) — Joomla JCE etc.
+; --- PHASE 1 (SHIPPED ON): only edge-`block` HITS feed the counter. ---
+; AS IMPLEMENTED: the subscribe callback drops any hit whose edge action isn't
+; `block`, and the config key for a family is its name minus WAF_ (so the
+; grouped `UPLOAD_EXPLOIT` below is really two keys, UPLOAD_FNAME + UPLOAD_
+; CONTENT). Because only edge-`block` hits feed, only families that HAVE a
+; block-tier rule can ever fire in Phase 1 — today exactly four: WAF_SQLI (301),
+; WAF_RCE (320), WAF_UPLOAD_FNAME (401), WAF_UPLOAD_CONTENT (402). They default
+; to 1. BACKDOOR has no block rule yet (430-438 are logonly/challenge) so it is
+; inert, but is armed to 1 so it fires the moment one (e.g. 438) is promoted.
+; Every family is a knob and the full registry is covered automatically
+; (TestWAFSecurityFamilyCoverage); families without a block rule are inert until
+; Phase 2 relaxes the action gate.
+SQLI            = 1      ; WAF_SQLI (301, block). Separate key SQLI_LEXICAL (309)
+                        ;   is challenge-tier → inert in Phase 1.
+RCE             = 1      ; WAF_RCE (has block rule 320)
+BACKDOOR        = 1      ; WAF_BACKDOOR (430-438) — armed; no block rule yet
+UPLOAD_EXPLOIT  = 1      ; = UPLOAD_FNAME (401) + UPLOAD_CONTENT (402), both block
 ;
 ; --- PHASE 2 (SHIP AT 0; raise per-family once live data confirms): ---
 ; edge-`challenge` families. They keep triaging humans vs bots at the edge; we

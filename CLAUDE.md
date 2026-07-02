@@ -133,6 +133,16 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   code and fix the comment.
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
+- **`detectors.conf` scalar values take NO inline `;`/`#` comment on the same
+  line.** `kvInt`/`kvBool`/`kvDur` (`internal/detectors/registry.go`) do **not**
+  strip inline comments — only the string/float readers (`kvStrClean`/`kvFlt`)
+  do. So `KEY = 5 ; note` parses as the string `"5 ; note"`, fails, and
+  **silently falls back to the built-in default** (invisible when the default
+  happens to equal the intended value). Put comments on their own line. ~36
+  existing lines have this latent bug; `waf_security` hit it (a `DRY_RUN = 0 ;
+  enable` that never disabled dry-run) — see §6. A proper fix (strip inline
+  comments in the numeric readers) is a fleet-wide behaviour change and wants
+  its own PR + sweep.
 
 ---
 
@@ -182,6 +192,31 @@ Also: BPF bytecode can go stale — `make build` runs `verify-bpf-bindings`
 and `make release` regenerates objects; don't bypass these.
 Reference: `docs/cfm-lsm.md`, `docs/kernsec.md`.
 
+### WAF → autoblock (`waf_security`) — new Jul 2026, move carefully
+Turns in-path WAF hits into a persistent nft block via the detector framework
+(`internal/detectors/wafsec/` + `waf_security_register.go`, published from
+`webdetector.RecordWAFTrigger` via `SubscribeWAFHitEvents`). Design:
+`docs/waf-autoblock-design.md`. Hard-won points:
+- **Phase 1 feeds edge-`block` hits ONLY** (the subscribe callback drops any
+  hit whose action != `block`). Do **not** key autoblock on reason-family
+  alone: a family spans edge tiers — `WAF_BACKDOOR` (430-438) has **no**
+  block-tier rule, and `WAF_RCE` mixes block 320 with logonly 322-327, so
+  family-only keying autoblocks logonly recon. Only 4 families have an edge-
+  `block` rule today (`WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME`/`WAF_UPLOAD_CONTENT`)
+  — those are the only ones that can fire in Phase 1.
+- **The Lua edge de-dups pushes per `(ip, reason)`** within `push_cooldown`
+  (`cfm_waf.lua should_push`). Harmless at threshold 1 (first hit is what
+  counts), but an accumulate threshold (e.g. 40) counts distinct cooldown
+  windows, not raw hits — retune when Phase 2 turns on challenge-tier families.
+- **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
+  API reporting and email are the section sink's job (`autoblock_sink.go`) —
+  don't reimplement them. A plain alert blocks per the section `BLOCK` policy;
+  `Extra["enforcement"]="dryrun"` logs-without-blocking.
+- Ships a **soft TTL block** (`BLOCK = "6h"`, self-healing), not `permanent`;
+  `DRY_RUN = 1` is available for a watch-first burn-in. Every WAF family is a
+  config knob (key = family minus `WAF_`); coverage of the full registry is
+  asserted by `TestWAFSecurityFamilyCoverage`.
+
 ### Concurrency / process lifecycle
 Early bugs included zombie/unreaped detector tailer subprocesses, panics,
 and snapshot-refresh races. When spawning subprocesses or background
@@ -202,6 +237,7 @@ rather than advancing heartbeats on failure.
 | BPF LSM | `docs/cfm-lsm.md` · Kernel hardening: `docs/kernsec.md` |
 | Detectors | `docs/DETECTORS.md`, `docs/Detectors.Leniency.md` |
 | Web detector history design | `docs/webdetector-history-design.md` |
+| WAF → autoblock (`waf_security`) | `docs/waf-autoblock-design.md` |
 | Admin/WebUI API | `docs/webui-api-curl-recipes.md`, `docs/webui-api-sample-responses.md` |
 | DNAT bypass | `docs/dnat-bypass.md` · Debug capture: `docs/debug-capture-runbook.md` |
 | Endpoint scope inventory | `docs/endpoint_scope_inventory.md` |

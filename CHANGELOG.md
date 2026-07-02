@@ -17,6 +17,34 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- WAF → autoblock (**Phase 1**, ships DRY_RUN): a new **`waf_security`** detector
+  turns the in-path WAF's per-hit stream into a persistent, cross-request
+  **nftables** block via the shared detector framework — so a source that keeps
+  tripping high-confidence WAF rules gets an L3/L4 ban that is queryable
+  (`cfm which <ip>`), logged to `cfm.detectors.log`, reported to cfm-web, and
+  emailed, instead of only being handled per-request at the edge. Wiring: a new
+  `SubscribeWAFHitEvents` hook published from `Engine.RecordWAFTrigger` (the
+  single per-hit choke point) feeding a per-IP-per-reason-family sliding-window
+  counter. **Scoped to edge-`block` hits only** ("block at WAF → nft candidate"):
+  the subscribe callback drops any hit whose edge action isn't `block`, so
+  challenge/logonly hits never feed — this keys autoblock to what the WAF
+  already blocked, rather than to a whole reason-family (a family such as
+  `WAF_RCE` spans block rule 320 and logonly 322-327, and `WAF_BACKDOOR` has no
+  block-tier rule at all). **Every WAF reason-family is a config knob** (key =
+  family minus `WAF_`; the full ~40-family registry is covered automatically and
+  guarded by a coverage test), but only the four families with an edge-`block`
+  rule — `SQLI`, `RCE`, `UPLOAD_FNAME`, `UPLOAD_CONTENT` — can actually autoblock
+  in Phase 1 and default to threshold 1; `BACKDOOR` is armed to 1 for when one
+  of its rules is promoted to block. Every challenge/logonly family defaults to
+  `0` and is inert until Phase 2. Per-rule-id overrides (`RULE_<id>`) win over
+  the family threshold.
+  Ships enforcing a **soft TTL block** (`BLOCK = "6h"`, self-healing) rather
+  than a permanent ban; `DRY_RUN = 1` is available for a watch-first burn-in.
+  `[waf_security.leniency]` gives GR/CY a 15m temp-ban + API + lenient blocklist
+  instead of a farm-wide ban. Config in `configs/detectors.conf`; design in
+  `docs/waf-autoblock-design.md`.
+
 ### Changed
 - WAF: **split the encoded-`<?php` backdoor opener (rule 437) into two rule ids**
   — `rule_php_encoded_opener` (437, the URL/HTML-entity/JS-escape forms) and the
