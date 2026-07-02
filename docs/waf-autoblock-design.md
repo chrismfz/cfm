@@ -172,23 +172,36 @@ COOLDOWN = "20m"
 ; Confirmed-malicious families = instant (1); noisy/probe = accumulate;
 ; 0 = never autoblock (family stays edge-only: logonly/challenge as configured).
 ; Defaults justified by the 6-server 2026-07 review (0 FP on the injection set).
+;
+; --- PHASE 1 (SHIPPED ON): only edge-`block` families feed the counter. ---
+; Rationale: if the WAF was already confident enough to 403 the request, it is
+; confident enough to count it toward an nft ban. These are the 0-FP families.
+; The challenge-tier families stay EXACTLY as today (edge-only) until live
+; cfm.detectors.log data justifies turning them on — see PHASE 2 below. This is
+; a config decision, not code: the hook + detector already handle every family.
 SQLI            = 1      ; WAF_SQLI + WAF_SQLI_LEXICAL — 0-FP by design
 RCE             = 1      ; WAF_RCE (320)
 BACKDOOR        = 1      ; WAF_BACKDOOR (430-437)
 UPLOAD_EXPLOIT  = 1      ; WAF_UPLOAD_FNAME/_CONTENT (401/402) — Joomla JCE etc.
-WEBSHELL        = 2      ; WAF_WEBSHELL probe scans (410/411)
-XXE             = 2      ; WAF_XXE (307)
-SSRF            = 2      ; WAF_SSRF (7xx)
-BAD_UA          = 40     ; WAF_BAD_UA (201) — scanner floods, accumulate
-IP_HOST         = 25     ; WAF_IP_HOST (602) — bare-IP-Host scanners
-; AUTH_BURST deliberately does NOT feed autoblock — a legitimate admin/dev
-; doing bulk WordPress logins across many sites once tripped an auth-burst
-; *block* (real incident). It stays edge-`challenge` (rule 501, a human solves
-; it in the browser); it must never become a persistent nft ban here.
+;
+; --- PHASE 2 (SHIP AT 0; raise per-family once live data confirms): ---
+; edge-`challenge` families. They keep triaging humans vs bots at the edge; we
+; only start feeding the persistent counter after observing real accrual rates.
+; Intended (not-yet-active) values kept here as guidance:
+WEBSHELL        = 0      ; (intended 2) WAF_WEBSHELL probe scans (410/411)
+XXE             = 0      ; (intended 2) WAF_XXE (307)
+SSRF            = 0      ; (intended 2) WAF_SSRF (7xx)
+BAD_UA          = 0      ; (intended 40) WAF_BAD_UA (201) — scanner floods
+IP_HOST         = 0      ; (intended 25) WAF_IP_HOST (602) — bare-IP-Host scanners
+;
+; --- NEVER feed autoblock (stay 0 permanently): ---
+; AUTH_BURST: a legitimate admin/dev doing bulk WordPress logins across many
+; sites once tripped an auth-burst *block* (real incident). It stays
+; edge-`challenge` (rule 501, a human solves it in the browser); it must never
+; become a persistent nft ban here.
 AUTH_BURST      = 0      ; WAF_AUTH_BURST (501/502/510-512) — edge-challenge only
-; observe-only families NEVER feed autoblock:
-SUPERGLOBAL     = 0      ; WAF_SUPERGLOBAL (318, logonly)
-BAD_UTF8        = 0      ; WAF_BAD_UTF8 (611, logonly)
+SUPERGLOBAL     = 0      ; WAF_SUPERGLOBAL (318, logonly) — observe-only
+BAD_UTF8        = 0      ; WAF_BAD_UTF8 (611, logonly) — observe-only
 
 ; Per-RULE overrides (by numeric rule id) win over the family default above.
 ; For rules that behave differently from their family — tighten the ones that
@@ -275,25 +288,34 @@ global ignore, nft block, `cfm.detectors.log`, cfm-web unblock API + "where &
 why" findings, email notifications, per-IP counters/windows, the periodic
 `RunOnce → core.Alert` pipeline.
 
-**Phase 1 (new):**
+**Phase 1 (new) — block-tier only, the conservative first slice.** The hook and
+detector are built once and handle every family, but the *shipped default
+config* only turns on the edge-`block` (0-FP) families; every challenge-tier
+family ships at `0` (edge-only, exactly as today). So Phase 1 changes behaviour
+for `SQLI`/`RCE`/`BACKDOOR`/`UPLOAD_EXPLOIT` and nothing else — no risk to the
+challenge-tier FP-prone families (auth-burst, bad-UA) until we have live data.
 1. `webdetector.SubscribeWAFHitEvents(func(WAFHitEvent))` — the WAF engine
    already calls `record()` on every hit; emit a per-hit event carrying
    `ip / reason / rule_id / host / uri / method / status / ua`. (Today only
    per-host hit-rate *counters* cross to Go; this adds the per-IP event.)
+   The hook emits all hits; the *detector* is what discards families whose
+   threshold is `0`, so Phase 2 is pure config — no change to the emit path.
 2. `internal/detectors/wafsec/` — a near-copy of `internal/detectors/apiabuse`
    (per-IP counters keyed by reason-family, thresholds, allow-lists,
    `RunOnce → core.Alert`).
 3. `internal/detectors/waf_security_register.go` — a near-copy of
    `api_abuse_register.go` (`meta.Register` + `Register("waf_security", …)` +
    `SubscribeWAFHitEvents`).
-4. `[waf_security]` + `[waf_security.leniency]` in `configs/detectors.conf`.
-5. **Retire the edge in-RAM ban shared-dict** for block-state (keep it only for
-   hit-rate counting). The per-request WAF rule still 403s during the
-   ≤`EVERY` window before nft takes over, so there is no coverage gap.
+4. `[waf_security]` + `[waf_security.leniency]` in `configs/detectors.conf`,
+   with challenge-tier families at `0` (see the config schema above).
 
-**Phase 2:** tune per-family thresholds from live `cfm.detectors.log` data
-(e.g. does `BAD_UA=40` over `WINDOW=30m` block real scanners without catching
-a busy legit crawler?).
+**Phase 2:** turn on challenge-tier families one at a time (`BAD_UA`, `IP_HOST`,
+…) by raising their threshold above `0`, tuned from live `cfm.detectors.log`
+data (e.g. does `BAD_UA=40` over `WINDOW=30m` block real scanners without
+catching a busy legit crawler?). Pure config — no code change. **Also here:**
+retire the edge in-RAM ban shared-dict for block-state (keep it for hit-rate
+counting) once the nft path is trusted; until then the two coexist harmlessly
+(edge 403 *and* nft ban is redundant defence, no coverage gap).
 
 **Phase 3:** distributed-campaign escalation — per-`/24` or per-ASN counters,
 so a rotating swarm (the lexima.de pattern: ~180 IPs, each 1-2 hits) escalates
