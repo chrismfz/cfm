@@ -30,10 +30,14 @@ back-filled here — see the git/PR history for that period.
   form is attack-only (a browser never base64-encodes a form field; a 2026-07
   six-server review found 16/16 base64 openers were botnet POSTs of base64
   `<?php` to `/xmlrpc.php`, 0 FP). Rule 438 is the candidate for `block` after a
-  1-2 week burn-in of the per-rule-id telemetry. Also fixes a stale `DefaultMode`
-  in `waf_rule_ids.go` (437 read `logonly` while the live Lua CFG had been
-  `challenge` since 2026-06-25) and syncs `docs/waf.md` (the base64 `<?=`/`PD89`
-  variant is intentionally *not* matched — the doc still listed it).
+  1-2 week burn-in of the per-rule-id telemetry. **Operator note:** if you had
+  customised `rule_php_encoded_opener` in `/etc/cfm/*` (a mode override, or a
+  `--rule 437` per-vhost exclusion), it now covers only the URL/HTML/JS form —
+  apply the same setting to `rule_php_encoded_opener_b64` / `--rule 438` for the
+  base64 form. Also fixes a stale `DefaultMode` in `waf_rule_ids.go` (437 read
+  `logonly` while the live Lua CFG had been `challenge` since 2026-06-25) and
+  syncs `docs/waf.md` (the base64 `<?=`/`PD89` variant is intentionally *not*
+  matched — the doc still listed it).
 
 ### Security
 - WAF: **promoted the SQLi families after a clean 6-server FP review** (2026-07,
