@@ -1122,43 +1122,34 @@ Three changes shipped together:
 3. Tokens match a whitespace/`+`-collapsed scan string so a form-urlencoded
    space (`+` or `%20`) still hits the spaced tokens.
 
-**Every captured WHMCS payload carries a DBMS-unique (tier-1) token**, so the
-scan is fully covered at `challenge` despite tier-2 being observe-only. A
-sqlmap bot does not solve the JS/PoW challenge, so this stops the scan while a
-real browser submitting a ticket passes. Tests:
-`scripts/tests/cfm_waf_sqli_test.lua` (captured payloads, per-DBMS family,
-per-rule isolation, FP negatives).
+Tests: `scripts/tests/cfm_waf_sqli_test.lua` (captured payloads, per-DBMS
+family, per-rule isolation, FP negatives).
 
-> ### ⏰ FP review — DO THIS BEFORE 2026-07-10
-> Pull the hit log **a couple of days early (~2026-07-08)** so there's time to
-> act before the promotion decision on the 10th. Check **both** reason
-> families — `WAF_SQLI` (tier 1, already challenging) and `WAF_SQLI_LEXICAL`
-> (tier 2, observe-only, the one most likely to surface a weird app):
-> ```
-> for r in WAF_SQLI WAF_SQLI_LEXICAL WAF_SUPERGLOBAL; do
->   echo "== $r =="
->   grep "\"reason\":\"$r" /var/log/.../cfm.waf.log \
->     | jq -r '[.host,.uri,.ip,.ua]|@tsv' | sort | uniq -c | sort -rn | head -40
-> done
-> ```
-> (`WAF_SUPERGLOBAL` and the other clean-room `logonly` additions from
-> `docs/waf-gap-analysis-ninjafirewall.md` are reviewed in this same pass —
-> grep is prefix-anchored since `WAF_SUPERGLOBAL` carries a `:<key>` suffix.)
-> A hit is a **false positive** if the `host`/`uri` is a legitimate app and the
-> matched string is benign code/content (XML parser, updater, page builder,
-> phpMyAdmin/Adminer, a security/dev blog post). Group by `host`+`uri` to spot
-> a single app emitting one token repeatedly.
+> ### ✅ FP review — DONE 2026-07 (promoted)
+> A 6-server `cfm.waf.log` review (titan, virgo, orion, rigel, earth, mars)
+> found the two SQLi families **100% clean**:
+> - `WAF_SQLI` (301): **24 hits, 24/24 true positives, 0 FP** — time-based
+>   (`SLEEP`), union, and error-based SQLi against WP plugins (ays_sccp),
+>   PrestaShop CommentGrade, Fuel CMS, and a custom login, from repeat-offender
+>   scanners. **Promoted `challenge` → `block`.**
+> - `WAF_SQLI_LEXICAL` (309): **188 hits, 188/188 true positives, 0 FP** —
+>   dominated by a **distributed error-based sqlmap campaign** against one host
+>   (`extractvalue(…CONCAT(0x7e…ELT…FLOOR(RAND()))` with case-randomization +
+>   `/**/` evasion) that the DBMS-unique tier-1 would have missed entirely.
+>   No legitimate app tripped a word-colliding token. **Promoted `logonly` →
+>   `challenge`.**
+> - `WAF_SUPERGLOBAL` (318): **0 hits** on all six — no data either way, **kept
+>   `logonly`.**
 >
-> **Then decide:**
-> - **Tier 1 (`WAF_SQLI`) clean** → promote `rule_sqli` to `block` (or split
->   the unambiguous time-based subset `waitfor delay`/`pg_sleep`/`dbms_pipe.
->   receive_message`/`dbms_lock.sleep`/`now()=sysdate()` into a dedicated
->   `block` rule, keep boolean at `challenge`).
-> - **Tier 2 (`WAF_SQLI_LEXICAL`) clean** → promote `rule_sqli_blind_lexical`
->   from `logonly` to `challenge` (only then does it actually stop anything).
-> - **A token is noisy** → trim it from its token table, or drop the rule for
->   that one app via the per-vhost exclusion mechanism (the rule IDs are 301 /
->   309). Don't promote a noisy token.
+> **Residual risk noted:** `WAF_SQLI_LEXICAL` at `challenge` on an `admin-ajax`
+> **POST** could break a legit plugin whose XHR body carries a word-colliding
+> token (a `fetch()` can't solve the challenge). Zero such cases in the review;
+> if one ever appears, drop rule 309 for that vhost via the per-vhost exclusion
+> mechanism, or trim the offending token from `SQLI_LEXICAL_TOKENS`.
+>
+> **Re-run this pass** (still the way to review any WAF family): grep
+> `cfm.waf.log` per reason, group by `host`+`uri`, classify each as a
+> legitimate app (FP) vs an attack (TP); promote only on a clean window.
 
 ## Known gaps
 

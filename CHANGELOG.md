@@ -18,6 +18,15 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- WAF: **promoted the SQLi families after a clean 6-server FP review** (2026-07,
+  titan/virgo/orion/rigel/earth/mars): `rule_sqli` (301, `WAF_SQLI`)
+  `challenge` → **`block`** (24/24 true positives, 0 FP — time-based/union/
+  error-based sqlmap traffic against WP/PrestaShop/Fuel CMS), and
+  `rule_sqli_blind_lexical` (309, `WAF_SQLI_LEXICAL`) `logonly` → **`challenge`**
+  (188/188 TP, 0 FP — caught a distributed error-based `extractvalue()`/
+  `floor(rand())` campaign the tier-1 tokens would have missed). Operators who
+  pinned these in `/etc/cfm/*` keep their setting; only the shipped defaults
+  change. `rule_superglobal_override` (318) stays `logonly` (0 hits observed).
 - WAF: new rule **318** (`rule_superglobal_override`, `WAF_SUPERGLOBAL`,
   **`logonly`**) flags a request parameter whose **key** is a PHP superglobal /
   reserved name (`?_SERVER[x]=`, `&GLOBALS[x]=`, `_GET[x]=` in the body) — a
