@@ -40,6 +40,31 @@ into a new detector and reuse everything downstream. This matches the layering
 in `CLAUDE.md` (WAF detects in-path; web-detector does behavioural scoring →
 block).
 
+## Two orthogonal decisions (read this first)
+
+There are **two independent knobs**, and conflating them is the easy mistake:
+
+1. **Edge WAF action** — what happens to *this* request, right now (in Lua):
+   `logonly` (log) / `challenge` (interstitial) / `block` (**403 now**).
+2. **`[waf_security]` threshold** — how fast this **IP** accrues toward a
+   **persistent nft block** (in the detector). This is fed by **every WAF hit
+   whose family threshold is > 0**, *independent of the edge action*.
+
+They are orthogonal, and often diverge:
+
+| Family | Edge action (now) | `[waf_security]` | Result |
+|---|---|---|---|
+| `WAF_SQLI` | `block` = 403 now | `SQLI=1` | 403 now **+** instant nft ban |
+| `WAF_BAD_UA` | `challenge` now | `BAD_UA=40` | challenge now **+** nft after 40 in WINDOW |
+| `WAF_AUTH_BURST` | `challenge` now | `AUTH_BURST=0` | challenge now **+** NEVER nft |
+| `WAF_SUPERGLOBAL` | `logonly` | `=0` | log only, nothing else |
+
+The counter is **not** "only fed by `block` hits": a `challenge`-mode family
+(`WAF_BAD_UA`) still accumulates toward nft — otherwise a forever-challenged
+scanner flood would never get an L3/L4 ban. Once the nft ban lands, the IP is
+dropped **before** it reaches the edge; during the ≤`EVERY` window before that,
+the edge action (403 / challenge) covers the requests.
+
 ## Flow
 
 ```
