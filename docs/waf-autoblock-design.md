@@ -1,9 +1,14 @@
 # WAF → autoblock via the detector framework — design
 
-> **Status: DESIGN PROPOSAL — not yet implemented.** This document is for
-> review before any code. Nothing here describes current behaviour; the WAF
-> today enforces per-request (`logonly`/`challenge`/`block`) at the edge and
-> does not feed a persistent IP block. When Phase 1 lands, update this banner.
+> **Status: PHASE 1 IMPLEMENTED (ships DRY_RUN).** The `waf_security` detector,
+> the `SubscribeWAFHitEvents` hook (published from `Engine.RecordWAFTrigger`),
+> and the `[waf_security]` + `[waf_security.leniency]` config all exist. It
+> ships **`DRY_RUN = 1`**: it logs "would block" to `cfm.detectors.log` and
+> reports, but raises no real nft ban until an operator flips `DRY_RUN = 0`.
+> Only the edge-`block` families (`SQLI`/`RCE`/`BACKDOOR`/`UPLOAD_EXPLOIT`) are
+> ON at threshold 1; all challenge-tier families ship at `0`. Phase 2 (turn on
+> challenge-tier families from live data) and Phase 3 (per-/24 escalation) are
+> still design-only, as is the Phase-2 edge-ban-dict retirement below.
 
 ## Motivation
 

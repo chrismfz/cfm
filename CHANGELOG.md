@@ -17,6 +17,25 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- WAF → autoblock (**Phase 1**, ships DRY_RUN): a new **`waf_security`** detector
+  turns the in-path WAF's per-hit stream into a persistent, cross-request
+  **nftables** block via the shared detector framework — so a source that keeps
+  tripping high-confidence WAF rules gets an L3/L4 ban that is queryable
+  (`cfm which <ip>`), logged to `cfm.detectors.log`, reported to cfm-web, and
+  emailed, instead of only being handled per-request at the edge. Wiring: a new
+  `SubscribeWAFHitEvents` hook published from `Engine.RecordWAFTrigger` (the
+  single per-hit choke point — logonly/challenge/block all flow through it),
+  feeding a per-IP-per-reason-family sliding-window counter. **Ships
+  `DRY_RUN = 1`**: it logs "would block" and reports but raises no real nft ban
+  until an operator sets `DRY_RUN = 0` after a burn-in. Only the edge-`block`,
+  0-FP families feed it at threshold 1 (`SQLI`, `RCE`, `BACKDOOR`,
+  `UPLOAD_EXPLOIT`); every challenge-tier family (`BAD_UA`, `WEBSHELL`, …) ships
+  at `0` (edge-only) pending Phase 2. Per-rule-id overrides (`RULE_<id>`) win
+  over the family threshold. `[waf_security.leniency]` gives GR/CY a soft tier
+  (15m temp-ban + API + lenient blocklist) instead of a permanent farm-wide ban.
+  Config in `configs/detectors.conf`; design in `docs/waf-autoblock-design.md`.
+
 ### Changed
 - WAF: **split the encoded-`<?php` backdoor opener (rule 437) into two rule ids**
   — `rule_php_encoded_opener` (437, the URL/HTML-entity/JS-escape forms) and the

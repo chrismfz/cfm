@@ -700,6 +700,27 @@ func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, 
 		TTLSec:  int(ttl / time.Second),
 		Payload: payload,
 	})
+
+	// Fan the per-hit event out to detector subscribers (e.g. waf_security,
+	// which scores per-IP-per-family and can raise a persistent nft block).
+	// This is the only per-hit choke point, so every edge trigger — logonly,
+	// challenge, or block — reaches subscribers exactly once.
+	signal := ""
+	if wafRuleID > 0 {
+		signal = strconv.Itoa(wafRuleID)
+	}
+	publishWAFHitEvent(WAFHitEvent{
+		When:      time.Now(),
+		Source:    "waf",
+		Reason:    strings.TrimSpace(reason),
+		Signal:    signal,
+		Scope:     host,
+		SrcIP:     strings.TrimSpace(ip),
+		Method:    method,
+		Path:      uri,
+		Action:    action,
+		UserAgent: ua,
+	})
 }
 
 // RecordWAFInspected forwards a single (hour_unix, host, count) bucket from
