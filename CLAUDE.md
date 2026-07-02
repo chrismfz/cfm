@@ -133,16 +133,18 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   code and fix the comment.
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
-- **`detectors.conf` scalar values take NO inline `;`/`#` comment on the same
-  line.** `kvInt`/`kvBool`/`kvDur` (`internal/detectors/registry.go`) do **not**
-  strip inline comments — only the string/float readers (`kvStrClean`/`kvFlt`)
-  do. So `KEY = 5 ; note` parses as the string `"5 ; note"`, fails, and
-  **silently falls back to the built-in default** (invisible when the default
-  happens to equal the intended value). Put comments on their own line. ~36
-  existing lines have this latent bug; `waf_security` hit it (a `DRY_RUN = 0 ;
-  enable` that never disabled dry-run) — see §6. A proper fix (strip inline
-  comments in the numeric readers) is a fleet-wide behaviour change and wants
-  its own PR + sweep.
+- **`detectors.conf` scalar readers now tolerate an inline `;`/`#` comment.**
+  `kvInt`/`kvBool`/`kvDur` (`internal/detectors/registry.go`) strip inline
+  comments via `cleanScalar` (as the string/float readers already did). Before
+  that fix they parsed the raw stored value, so `KEY = 5 ; note` became `"5 ;
+  note"`, failed, and **silently fell back to the built-in default** — a
+  fleet-wide latent trap that masked configured values (`waf_security`'s
+  `DRY_RUN`, the `/tmp` cleanup gate, the suspicious-vhost challenge thresholds).
+  Fixing it was itself a behaviour change (those values finally apply), so it
+  shipped as its own reviewed PR. Note `cleanScalar` cuts at the first `;`/`#`
+  and does NOT do quote-aware scanning (the section parser leaves an embedded
+  quote on a quoted value with an inline comment). Prefer comments on their own
+  line anyway; scalars must never legitimately contain `;`/`#`.
 
 ---
 

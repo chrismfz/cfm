@@ -175,12 +175,33 @@ func kvStrClean(kv KV, key, def string) string {
 }
 
 // other Config helpers
+// cleanScalar prepares a raw config value for numeric / bool / duration
+// parsing. It drops any inline "; comment" / "# comment" (a scalar value never
+// contains ';' or '#' legitimately) and strips surrounding quotes/space.
+//
+// It deliberately does NOT use stripInlineComment's quote-aware scan: the
+// section parser leaves an embedded quote when a *quoted* value carries an
+// inline comment (`EVERY = "20s" ; note` is stored as `20s" ; note`), and a
+// quote-aware scan would treat that stray quote as opening a string and never
+// find the ';'. Cutting at the first ';'/'#' then trimming quotes yields `20s`.
+//
+// Without this, kvInt/kvBool/kvDur parsed the raw string, failed, and silently
+// fell back to the default — so `SQLI = 1 ; note` (and, historically, the
+// suspicious-vhost challenge thresholds and the /tmp cleanup gate) never took
+// the configured value. See CLAUDE.md §5.
+func cleanScalar(v string) string {
+	if i := strings.IndexAny(v, ";#"); i >= 0 {
+		v = v[:i]
+	}
+	return strings.Trim(strings.TrimSpace(v), `"'`)
+}
+
 func kvBool(kv KV, key string, def bool) bool {
 	v, ok := kv[strings.ToUpper(key)]
 	if !ok {
 		return def
 	}
-	switch strings.ToLower(v) {
+	switch strings.ToLower(cleanScalar(v)) {
 	case "1", "true", "yes", "on":
 		return true
 	case "0", "false", "no", "off":
@@ -193,17 +214,21 @@ func kvInt(kv KV, key string, def int) int {
 	if !ok {
 		return def
 	}
-	if n, err := strconv.Atoi(v); err == nil {
+	if n, err := strconv.Atoi(cleanScalar(v)); err == nil {
 		return n
 	}
 	return def
 }
 func kvDur(kv KV, key string, def time.Duration) time.Duration {
 	v, ok := kv[strings.ToUpper(key)]
-	if !ok || v == "" {
+	if !ok {
 		return def
 	}
-	if d, err := time.ParseDuration(v); err == nil {
+	s := cleanScalar(v)
+	if s == "" {
+		return def
+	}
+	if d, err := time.ParseDuration(s); err == nil {
 		return d
 	}
 	return def
