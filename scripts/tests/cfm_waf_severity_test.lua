@@ -1669,7 +1669,10 @@ end
 -- on /wp-admin/* where WP cookie-auth has already gated the request.
 do
   disable_all_rules()
-  waf.set_rule("rule_php_encoded_opener", "logonly")
+  -- The test bodies use the base64 opener (PD9waHA…), which routes to rule 438
+  -- (rule_php_encoded_opener_b64) after the 2026-07-02 split. The /wp-admin/
+  -- carve-out is shared by both 437 and 438.
+  waf.set_rule("rule_php_encoded_opener_b64", "logonly")
 
   -- Encoded `<?php` in body of /wp-admin/ POST — must NOT fire.
   local hit = waf.check(fresh_ctx({

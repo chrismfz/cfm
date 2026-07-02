@@ -235,12 +235,25 @@ local CFG = {
   rule_php_superglobal_callable   = "logonly", -- $_GET[c]( / $_POST[c]( / $_SERVER[HTTP_X_…]( minimalist webshell
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
   rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
-  rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener (b64 PD9waHA / URL %3C%3Fphp / HTML entity / JS escape)
-                                                 -- (promoted from logonly: 2026-06-25 five-server log review — strong `<?php`
-                                                 --  openers were all real attacks (Bricks RCE render_element,
-                                                 --  additional_webservices.php, Amasty uploadFile) with 0 FP. The weak `<?=`
-                                                 --  short-opener variant (base64 "PD89") was 6/6 FP and has been REMOVED from
-                                                 --  the detector, so this rule is safe at challenge.)
+  rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener — URL / HTML-entity / JS-escape forms
+                                                 -- (%3C%3Fphp, &#60;&#63;php, <?php, \x3c\x3fphp).
+                                                 -- Kept at challenge DELIBERATELY: a browser url-encodes a user-typed
+                                                 --  `<?php` in ANY application/x-www-form-urlencoded field to `%3C%3Fphp`,
+                                                 --  so a blog comment / contact-form / paste-tool POST that legitimately
+                                                 --  contains a PHP snippet fires this rule. `challenge` preserves + replays
+                                                 --  the POST after the interstitial; `block` would 403 and drop it. Do not
+                                                 --  promote this variant without a front-end/comment carve-out.
+                                                 --  (promoted logonly→challenge 2026-06-25.)
+  rule_php_encoded_opener_b64     = "challenge", -- encoded `<?php` opener — base64 form (`PD9waHA` at a base64 value boundary).
+                                                 -- Split out of rule 437 into its own id (438) on 2026-07-02 so its hit
+                                                 --  stream is observable separately from the FP-prone URL form above. Unlike
+                                                 --  URL-encoding, a browser NEVER base64-encodes a form field, and the match
+                                                 --  is boundary-anchored + case-sensitive, so `PD9waHA` at a value boundary
+                                                 --  (`p=PD9waHA…`) is payload-smuggling only (2026-07 six-server review:
+                                                 --  16/16 base64 openers POSTed to /xmlrpc.php, botnet-distributed, 0 FP).
+                                                 --  Candidate for `block` after a 1-2 week burn-in of this split telemetry.
+                                                 --  The weak `<?=` base64 variant (PD89) was 6/6 FP and stays REMOVED from
+                                                 --  the detector.
 
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
@@ -423,6 +436,7 @@ local RULE_IDS = {
   rule_php_concat_funcname_eval   = 435,
   rule_php_decode_chain           = 436,
   rule_php_encoded_opener         = 437,
+  rule_php_encoded_opener_b64     = 438,
 
   -- 5xx auth abuse
   rule_auth_burst              = 501,
@@ -1488,9 +1502,19 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 59) PHP encoded `<?php` opener (437) ─────────────────────────────────
+  -- ── 59) PHP encoded `<?php` opener (437 URL/HTML/JS forms · 438 base64) ───
   do
-    local mode = rule_mode(CFG.rule_php_encoded_opener, "logonly")
+    -- Two rule ids share one detector and the /wp-admin/ carve-out, differing
+    -- only in id + mode. 437 = URL / HTML-entity / JS-escape forms, which are
+    -- FP-prone: a browser url-encodes a user-typed `<?php` in a form field to
+    -- `%3C%3Fphp`, so a legit comment / contact-form / paste-tool POST fires
+    -- it — kept at `challenge`, which preserves+replays the POST. 438 = the
+    -- base64 form (`PD9waHA` at a value boundary), which a browser never emits
+    -- for a form field → payload-smuggling only, tuned/observed independently
+    -- (the block candidate). The detector checks base64 first, so a base64
+    -- opener is attributed to 438 and everything else to 437.
+    local mode_enc = rule_mode(CFG.rule_php_encoded_opener, "logonly")
+    local mode_b64 = rule_mode(CFG.rule_php_encoded_opener_b64, "logonly")
     -- WPCode, Code Snippets, Insert PHP Code Snippet, and similar
     -- "save a PHP snippet" plugins POST encoded `<?php` bodies to
     -- /wp-admin/admin-ajax.php or /wp-admin/admin.php on every save.
@@ -1501,13 +1525,18 @@ function _M.check(ctx)
     -- so we suppress this detector on that path. Web shells delivered
     -- via theme/plugin file editors, upload exploits, or vulnerable
     -- public endpoints still arrive on non-/wp-admin/ paths where
-    -- this rule remains active.
+    -- these rules remain active.
     local wp_admin = uri:find("^/wp%-admin/", 1, false) ~= nil
-    if mode ~= "disabled" and body_inspect_ok and not wp_admin then
+    if (mode_enc ~= "disabled" or mode_b64 ~= "disabled") and body_inspect_ok and not wp_admin then
       local tag = det.detect_php_encoded_opener(body, headers)
       if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_encoded_opener) then goto done end
+        local is_b64 = (tag == "B64_PHP_OPENER")
+        local mode = is_b64 and mode_b64 or mode_enc
+        local rid  = is_b64 and RULE_IDS.rule_php_encoded_opener_b64 or RULE_IDS.rule_php_encoded_opener
+        if mode ~= "disabled" then
+          local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+          if record("WAF_BACKDOOR:" .. tag, ttl, mode, rid) then goto done end
+        end
       end
     end
   end

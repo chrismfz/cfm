@@ -61,6 +61,22 @@ local function long_b64(n)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Shipped-default mode regression. rule 437 was split into 437 (URL/HTML/JS
+-- forms) + 438 (base64 opener) on 2026-07-02; BOTH ship at `challenge` (438 is
+-- a candidate for `block` after a burn-in, but starts at challenge). Assert the
+-- built-in CFG defaults before any set_rule() mutation, so a later promotion is
+-- a deliberate edit here rather than silent drift.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+do
+  local snap = waf.get_config()
+  check(snap.rule_php_encoded_opener == "challenge",
+        "437 shipped default mode is challenge")
+  check(snap.rule_php_encoded_opener_b64 == "challenge",
+        "438 shipped default mode is challenge")
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- 430 — .htaccess / .user.ini poisoning
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -430,7 +446,7 @@ do
     "rule_php_char_pool_obfuscation", "rule_php_polyglot_full_body",
     "rule_php_eval_loader_b64", "rule_php_superglobal_callable",
     "rule_php_concat_funcname_eval", "rule_php_decode_chain",
-    "rule_php_encoded_opener",
+    "rule_php_encoded_opener", "rule_php_encoded_opener_b64",
   }) do waf.set_rule(r, "block") end
 
   local zip = "PK\x03\x04 acs-voucher <?php /* Plugin Name: ACS Voucher */ "
@@ -710,14 +726,35 @@ end
 
 do
   disable_all_rules()
-  waf.set_rule("rule_php_encoded_opener", "block")
+  waf.set_rule("rule_php_encoded_opener_b64", "block")
 
-  -- Base64 of "<?php" = "PD9waHA"
-  local hit, reason, _ttl, action = waf.check(ctx(
+  -- Base64 of "<?php" = "PD9waHA". Routes to rule 438 (base64 variant).
+  local hit, reason, _ttl, action, hits = waf.check(ctx(
     [[payload=PD9waHAgZWNobyAiaGVsbG8iOyA/Pg==]]))
-  check(hit == true,                              "437 b64 PD9waHA — hit=true")
-  check(reason == "WAF_BACKDOOR:B64_PHP_OPENER",  "437 b64 PD9waHA — reason")
-  check(action == "block",                        "437 b64 PD9waHA — action=block")
+  check(hit == true,                              "438 b64 PD9waHA — hit=true")
+  check(reason == "WAF_BACKDOOR:B64_PHP_OPENER",  "438 b64 PD9waHA — reason")
+  check(action == "block",                        "438 b64 PD9waHA — action=block")
+  check(type(hits) == "table" and hits[1] and hits[1].waf_rule_id == 438,
+        "438 b64 PD9waHA — routed to rule id 438")
+end
+
+-- Routing split: with only rule 437 (URL/HTML/JS) enabled and 438 disabled,
+-- a base64 opener must NOT fire (it belongs to 438); with only 438 enabled,
+-- a URL opener must NOT fire (it belongs to 437). Proves the two variants are
+-- independently controllable.
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener", "block")   -- 437 (non-base64) only
+  local hit = waf.check(ctx([[payload=PD9waHAgZWNobyAieCI7ID8+]]))
+  check(hit ~= true, "split — base64 opener does not fire when only 437 is enabled")
+end
+
+do
+  disable_all_rules()
+  waf.set_rule("rule_php_encoded_opener_b64", "block")  -- 438 (base64) only
+  local hit, reason = waf.check(ctx([[code=%3C%3Fphp%20echo%20'x'%3B%20%3F%3E]]))
+  check(hit ~= true, "split — URL opener does not fire when only 438 is enabled")
+  local _ = reason
 end
 
 do
@@ -733,9 +770,11 @@ do
   disable_all_rules()
   waf.set_rule("rule_php_encoded_opener", "challenge")
 
-  local hit, reason = waf.check(ctx([[body=&#60;&#63;php echo 'x'; &#63;&#62;]]))
+  local hit, reason, _ttl, _action, hits = waf.check(ctx([[body=&#60;&#63;php echo 'x'; &#63;&#62;]]))
   check(hit == true,                                "437 HTML entity — hit=true")
   check(reason == "WAF_BACKDOOR:HTML_ENTITY_OPENER", "437 HTML entity — reason")
+  check(type(hits) == "table" and hits[1] and hits[1].waf_rule_id == 437,
+        "437 HTML entity — routed to rule id 437")
 end
 
 do
@@ -752,10 +791,10 @@ end
 -- Negative: legit base64 payload that doesn't decode to <?php
 do
   disable_all_rules()
-  waf.set_rule("rule_php_encoded_opener", "challenge")
+  waf.set_rule("rule_php_encoded_opener_b64", "challenge")
 
   local hit = waf.check(ctx([[token=SGVsbG8gV29ybGQ=]]))  -- "Hello World"
-  check(hit ~= true, "437 negative — random base64 does not fire")
+  check(hit ~= true, "438 negative — random base64 does not fire")
 end
 
 -- Negative: plain text mentioning PHP without encoded opener
@@ -773,21 +812,21 @@ end
 -- data carrying the chars by chance / inside a larger blob.
 do
   disable_all_rules()
-  waf.set_rule("rule_php_encoded_opener", "block")
+  waf.set_rule("rule_php_encoded_opener_b64", "block")
 
   -- ...XYZ + PD9waHA + ... : the opener is preceded by base64 char 'Z'
   local hit = waf.check(ctx([[data=c29tZXByb2R1Y3RkYXRhWFlaPD9waHAgbW9yZQ==]]))
-  check(hit ~= true, "437 FP — PD9waHA mid-base64-blob (no boundary) does not fire")
+  check(hit ~= true, "438 FP — PD9waHA mid-base64-blob (no boundary) does not fire")
 end
 
 -- FP regression: case-variant of the opener must NOT fire. base64 is
 -- case-sensitive; only the exact `PD9waHA` is a real <?php opener.
 do
   disable_all_rules()
-  waf.set_rule("rule_php_encoded_opener", "block")
+  waf.set_rule("rule_php_encoded_opener_b64", "block")
 
   local hit = waf.check(ctx([[data=pd9wahalowercasevariant]]))
-  check(hit ~= true, "437 FP — lowercased pd9waha must NOT fire (case-sensitive)")
+  check(hit ~= true, "438 FP — lowercased pd9waha must NOT fire (case-sensitive)")
 end
 
 -- Positive (boundary preserved): a real smuggled opener at a value boundary
@@ -795,11 +834,11 @@ end
 -- <rand>default.php?p=PD9waHA...). Confirms the fix keeps the true positive.
 do
   disable_all_rules()
-  waf.set_rule("rule_php_encoded_opener", "block")
+  waf.set_rule("rule_php_encoded_opener_b64", "block")
 
   local hit, reason = waf.check(ctx([[p=PD9waHAgc3lzdGVtKCRfR0VUWydjJ10pOw==]]))
-  check(hit == true,                             "437 TP — boundary PD9waHA still fires")
-  check(reason == "WAF_BACKDOOR:B64_PHP_OPENER", "437 TP — reason")
+  check(hit == true,                             "438 TP — boundary PD9waHA still fires")
+  check(reason == "WAF_BACKDOOR:B64_PHP_OPENER", "438 TP — reason")
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────

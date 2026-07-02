@@ -539,7 +539,8 @@ Current assignments:
                                        434  rule_php_superglobal_callable
                                        435  rule_php_concat_funcname_eval
                                        436  rule_php_decode_chain
-                                       437  rule_php_encoded_opener
+                                       437  rule_php_encoded_opener       (URL/HTML/JS forms)
+                                       438  rule_php_encoded_opener_b64   (base64 form)
 
 5xx — Auth abuse
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
@@ -706,27 +707,30 @@ Collect their positions in the body. Fire if **any three** occurrences fall with
 
 **FP notes:** some WordPress plugins (security loggers, translation files, packaged archives via `pack`) do use multiple decoders — but in separate functions / methods, easily > 300 bytes apart. WP core itself uses `base64_decode` and `pack` in `wp-includes/pomo` but never three in proximity. Production data over a logonly week will confirm.
 
-### Rule 437 — `rule_php_encoded_opener`
+### Rules 437 / 438 — `rule_php_encoded_opener` (URL/HTML/JS) · `rule_php_encoded_opener_b64` (base64)
 
-**Catches:** an encoded `<?php` opener in body / upload content — a strong signal of payload smuggling through a filter that strips/blocks the literal opener:
+**Catches:** an encoded `<?php` opener in body / upload content — a strong signal of payload smuggling through a filter that strips/blocks the literal opener. **Split into two rule ids on 2026-07-02** (one detector, routed by encoding) so the FP-prone URL/entity/JS forms and the attack-only base64 form can be tuned and observed independently:
 
-| Encoding | Bytes detected |
-|---|---|
-| Base64 of `<?php` | `PD9waHA` |
-| Base64 of `<?=` (short-tag) | `PD89` |
-| URL-encoded | `%3C%3Fphp`, `%3C%3F=` |
-| HTML numeric entity | `&#60;&#63;php` |
-| HTML named entity (partial) | `&lt;?php` |
-| JS unicode escape | `<?php` |
-| JS hex escape | `\x3c\x3fphp` |
+| Rule | Encoding | Bytes detected | Tag |
+|---|---|---|---|
+| **438** | Base64 of `<?php` | `PD9waHA` (boundary-anchored, case-sensitive) | `B64_PHP_OPENER` |
+| **437** | URL-encoded | `%3C%3Fphp`, `%3C%3F=` | `URL_PHP_OPENER`, `URL_SHORT_OPENER` |
+| **437** | HTML numeric entity | `&#60;&#63;php` | `HTML_ENTITY_OPENER` |
+| **437** | HTML named entity (partial) | `&lt;?php` | `HTML_ENTITY_OPENER` |
+| **437** | JS unicode escape | `<?php` | `JS_UNICODE_OPENER` |
+| **437** | JS hex escape | `\x3c\x3fphp` | `JS_HEX_OPENER` |
 
-**Why it matters:** legit data flows never carry an encoded PHP opener — neither prose, nor JSON, nor form data, nor uploaded media. Seeing one is high-confidence evidence of payload-smuggling-through-filter, and the detection cost is essentially zero (8 substring checks).
+The detector checks base64 first, so a base64 opener is attributed to **438** and every other encoded form to **437**.
 
-**How:** the URL / HTML-entity / JS-escape forms are matched as substrings on the lowercased body (those encodings are legitimately case-insensitive and structured, so collision-free). The **base64** forms (`PD9waHA`, `PD89`) are matched **case-sensitively** (base64 is a case-sensitive alphabet) and **only at a base64 value boundary** — string start or right after a non-base64 separator.
+**Why the split:** the two encodings have opposite FP profiles.
+- **URL/HTML/JS (437)** is FP-prone: a browser **url-encodes a user-typed `<?php`** in any `application/x-www-form-urlencoded` field to exactly `%3C%3Fphp`, so a legitimate blog comment (`/wp-comments-post.php`), contact-form, or code-paste POST that contains a PHP snippet fires the rule. It must stay at `challenge` (which preserves + replays the POST after the interstitial) unless a front-end/comment carve-out is added first — a hard `block` would 403 and drop the submission.
+- **base64 (438)** is attack-only: a browser never base64-encodes a form field, and the match is boundary-anchored + case-sensitive, so `PD9waHA` at a value boundary (`p=PD9waHA…`) only appears in deliberate payload smuggling. A 2026-07 six-server review found 16/16 base64 openers were botnet POSTs of base64 `<?php` to `/xmlrpc.php`, 0 FP. This is the promotion candidate (see FP notes).
 
-**Tags:** `B64_PHP_OPENER`, `B64_SHORT_OPENER`, `URL_PHP_OPENER`, `URL_SHORT_OPENER`, `HTML_ENTITY_OPENER`, `JS_UNICODE_OPENER`, `JS_HEX_OPENER`.
+**Why it matters:** an encoded PHP opener where the encoding is not something a browser produces for form input is high-confidence payload-smuggling-through-filter, at essentially zero detection cost (a handful of substring checks).
 
-**FP notes:** **Fixed 2026-06-04.** The base64 checks were originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive this rule caught) — while dropping the mid-blob / case-variant collisions. With those resolved the rule is safe to promote past logonly. The remaining FP risk is documentation / security-research traffic POSTing an encoded `<?php`; per-vhost exclusion handles that cleanly.
+**How:** the URL / HTML-entity / JS-escape forms are matched as substrings on the lowercased body (those encodings are legitimately case-insensitive and structured). The **base64** form (`PD9waHA`) is matched **case-sensitively** (base64 is a case-sensitive alphabet) and **only at a base64 value boundary** — string start or right after a non-base64 separator. The base64 `<?=` short-tag form (`PD89`) is **intentionally not matched**: a 4-char base64 token collides with legitimate base64 data (a 2026-06-25 review found it 6/6 FP), so it was removed. The URL-encoded short-tag `%3C%3F=` is still matched (structured, collision-free).
+
+**FP notes:** **base64 boundary fix 2026-06-04.** The base64 check was originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive) — while dropping mid-blob / case-variant collisions. **Both rules ship at `challenge` (promoted `logonly` → `challenge` 2026-06-25; split 2026-07-02).** 438 (base64) is the candidate for `block` after a 1-2 week burn-in of the per-rule-id split telemetry; 437 (URL/HTML/JS) stays at `challenge` because of the form-encoded FP class above. `/wp-admin/*` paths are suppressed for both (WPCode / Code Snippets legitimately POST encoded `<?php` bodies there, already gated by WP cookie-auth); any residual doc / security-research edge case is handled by per-vhost exclusion.
 
 ### How they compose
 
@@ -739,10 +743,11 @@ Collect their positions in the body. Fire if **any three** occurrences fall with
 | Minimalist webshell: `$_GET['c']($_GET['p']);` | 434 |
 | Concat funcname: `$a = "sys"."tem"; $a();` | 435 |
 | 3+ literal decoder primitives in close proximity | 436 |
-| `PD9waHA…` / `%3C%3Fphp…` in body | 437 |
+| `%3C%3Fphp…` (URL/HTML/JS encoded opener) in body | 437 |
+| `PD9waHA…` (base64 opener at a value boundary) in body | 438 |
 | Captured radio.php (PDF magic + char-pool + eval-loader) | **431 + 432 + 433** simultaneously |
 
-All eight default to `logonly`. Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
+Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see their FP notes above). Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
 
 ---
 
@@ -1266,7 +1271,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 28 | Upload filename | Quoted/single/unquoted multipart `filename=` + ext patterns + special names | `cfm_waf_detectors.lua:1632` |
 | 29 | Upload content | Body substring `<?php`, `<?=` (PHP-context-gated, see `has_php_short_echo`), `<jsp:`, `$_*` superglobals, ImageMagick MVG | `cfm_waf_detectors.lua:1700` |
 
-> **Legit PHP-archive upload carve-out (fixed 2026-06-05).** Rules 401/402/403 and the 431–436 backdoor-content family stand down when `is_known_legit_php_upload_endpoint(uri, args)` matches — the Code Snippets REST flow and, added here, the **WordPress plugin/theme installer** (`/wp-admin/update.php?action=upload-plugin` / `upload-theme`). A plugin/theme `.zip` legitimately contains PHP (often obfuscated in commercial products), so on that authenticated, cookie-auth-gated path the PHP that is the payload must not be flagged — a plugin named e.g. `foo-block.php.zip` also tripped the double-extension filename rule. Media uploads (`async-upload.php`) are **not** exempted: a PHP opener inside a claimed image there is still a polyglot. (437 keeps its own broader `/wp-admin/` carve-out for snippet-save plugins.)
+> **Legit PHP-archive upload carve-out (fixed 2026-06-05).** Rules 401/402/403 and the 431–436 backdoor-content family stand down when `is_known_legit_php_upload_endpoint(uri, args)` matches — the Code Snippets REST flow and, added here, the **WordPress plugin/theme installer** (`/wp-admin/update.php?action=upload-plugin` / `upload-theme`). A plugin/theme `.zip` legitimately contains PHP (often obfuscated in commercial products), so on that authenticated, cookie-auth-gated path the PHP that is the payload must not be flagged — a plugin named e.g. `foo-block.php.zip` also tripped the double-extension filename rule. Media uploads (`async-upload.php`) are **not** exempted: a PHP opener inside a claimed image there is still a polyglot. (437/438 keep their own broader `/wp-admin/` carve-out for snippet-save plugins.)
 | 30 | Script obfuscation | Shared scorer (long-b64 / decode-helpers / eval / atob / XOR / chr-storm) | `cfm_waf_detectors.lua:1730` + `cfm_waf_util.lua:115` |
 | 31 | Upload obfuscation | Same scorer on multipart | `cfm_waf_detectors.lua:1753` |
 | 32 | Webshell path | URI basename ∈ 28-name set | `cfm_waf_detectors.lua:1817` |
