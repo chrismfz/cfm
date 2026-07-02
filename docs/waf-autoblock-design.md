@@ -65,6 +65,20 @@ scanner flood would never get an L3/L4 ban. Once the nft ban lands, the IP is
 dropped **before** it reaches the edge; during the ≤`EVERY` window before that,
 the edge action (403 / challenge) covers the requests.
 
+**Why feeding the counter from `challenge` hits is safe — clearance self-cleans
+it.** A `challenge` isn't only a gate; passing it mints a **clearance** for a
+TTL (~1h). During that window the WAF's challenge-tier rules don't re-fire for
+that IP, so **a human who solves the challenge emits zero further challenge
+events** and never approaches the threshold — while also getting a reassuring
+"you're protected" interstitial and ~1h of frictionless browsing. The only IPs
+that keep generating `challenge`-tier hits are the ones that *never clear it*,
+i.e. bots ignoring the interstitial. So the nft counter, when fed by a
+challenge-tier family, is effectively a **bot-persistence** counter: it rises
+for clients that repeatedly trip the rule *without* proving human, and stays
+flat for anyone who solved it once. That is the whole point of the split —
+"show the challenge" and "count it as an nft candidate" are different acts, and
+clearance is what keeps the second from ever touching a real customer.
+
 ## Flow
 
 ```
@@ -205,6 +219,52 @@ SEND_TO_API       = YES         ; report → support/unblock lookup
 SEND_TO_BLOCKLIST = lenient     ; local-only, NEVER served to the farm
 ```
 
+### Challenge is the human/bot filter — leniency only ever meets block-tier hits
+
+An important consequence of the *two orthogonal decisions* above: **challenge
+already does the "is this a human or a bot?" triage at the edge**, per request,
+for free. A leniency tier only has to worry about hits that would feed a
+persistent nft ban — i.e. families with a threshold `> 0` — and in practice
+those are the unambiguous block-tier ones (`SQLI`/`RCE`/`BACKDOOR`/…), not the
+ambiguous challenge-tier ones.
+
+This is not a hypothesis; it is what the fleet actually does. Re-scanning the
+six production `cfm.waf.log` files (85,797 WAF events, 2026-06/07):
+
+| bucket | count | families seen |
+|---|---|---|
+| **GR — block** | **0** | — |
+| **CY — block** | **0** | — |
+| GR — challenge | 129 | `BAD_UA` (108), `AUTH_BURST` (11), `IP_HOST` (8), `XSS` (2) |
+| CY — challenge | 19 | `BAD_UA` (19) |
+| GR — logonly | 108 | `BAD_UTF8` (108) |
+
+**Not one GR or CY IP hit a block-tier rule.** Every GR/CY hit landed in a
+challenge- or logonly-tier family, and every one, on inspection, is either
+benign infra (`IP_HOST` = someone reaching a farm box by bare IP; `AUTH_BURST`
+= a farm-local host and Jetpack/pingback hammering `xmlrpc.php`) or the exact
+"human-or-bot?" grey zone (`BAD_UA`, `XSS`-looking crawler URLs) where the
+challenge is the correct discriminator — a human solves it, a bot doesn't.
+
+So the leniency design lands as:
+
+1. **Challenge-tier families never feed the nft counter for GR/CY** anyway,
+   because the challenge already exonerated the humans among them. (They accrue
+   for *other* countries via their family threshold; for GR/CY the family
+   threshold path simply doesn't get exercised, because those hits stay at
+   challenge and never escalate.) Nothing special to code — it falls out of
+   "challenge is edge-only unless the family threshold is crossed", and GR/CY
+   traffic doesn't cross it.
+2. **Only a block-tier hit from GR/CY reaches the leniency tier at all** — and
+   that population is empirically *empty*, so the conservative
+   `15m + API + lenient-blocklist` tier costs us nothing on real Greek
+   customers while still catching the rare compromised-.gr-host case.
+3. Leniency is **geo-only, and must stay conservative**, because GeoIP is
+   game-able: `148.135.200.x` in the sample geolocates to Greece but is a cheap
+   reseller VPS range brute-forcing `xmlrpc.php`. A permanent-skip for "GR" would
+   hand attackers a bypass by renting GR-geolocated space; a temp-ban + surface
+   does not.
+
 `meta.Register(... LeniencySupported: true)` (as `api_abuse` does) is what
 activates the `[waf_security.leniency]` section — no extra code.
 
@@ -253,6 +313,11 @@ already handles each swarm IP on its first hit; this is an optimisation.
   persistent ban). Known legit sources are handled even more sharply by
   `ALLOW_IPS` / the global ignore list.
 - **`Kind` granularity:** `WAF/<family>` (proposed) vs `WAF/<family>/<rule_id>`.
-- **Leniency for unambiguous SQLi:** even GR/CY — temp-ban (proposed, softer)
-  vs no leniency (SQLi is 0-FP, so arguably block GR/CY too). The temp-ban +
-  API-surface path is safer for the rare compromised-local-host case.
+- **Leniency for unambiguous SQLi (GR/CY):** *resolved — temp-ban + API,* on the
+  data. A re-scan of the six production logs (85,797 events) found **zero** GR/CY
+  hits at any block-tier family; every GR/CY hit was challenge/logonly-tier and
+  benign or challenge-triageable (see "Challenge is the human/bot filter" above).
+  So `15m + API + lenient-blocklist` for GR/CY costs nothing on real customers
+  yet still surfaces the rare compromised-.gr-host, and — because GeoIP is
+  game-able (a GR-geolocated VPS was brute-forcing xmlrpc in the sample) —
+  leniency must stay a *temp-ban*, never a skip.
