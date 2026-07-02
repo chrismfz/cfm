@@ -67,6 +67,24 @@ back-filled here — see the git/PR history for that period.
   syncs `docs/waf.md` (the base64 `<?=`/`PD89` variant is intentionally *not*
   matched — the doc still listed it).
 
+### Fixed
+- detectors config: **`detectors.conf` scalar settings with an inline
+  `; comment` on the value line now take effect.** `kvInt`/`kvBool`/`kvDur`
+  parsed the raw stored value, so `KEY = 5 ; note` became the string `"5 ; note"`,
+  failed to parse, and silently fell back to the built-in default (only the
+  string/float readers stripped inline comments). This masked several configured
+  values. **Behaviour changes on deploy** (the configured values were written
+  deliberately and now apply): the **health `/tmp` auto-cleanup activates**
+  (`TMP_PCT = 85`, delete files older than `TMP_CLEAN_OLDER = 12h` when `/tmp`
+  is ≥ 85% full — previously off because `TMP_PCT` read as 0); the
+  **suspicious-vhost auto-challenge uses its configured thresholds** (fires at
+  `UNIQIP_ON = 150` unique IPs instead of the code default 300, `MIN_UNIQIP`
+  60 vs 80, `HOLDDOWN` 25m vs 10m — i.e. the intended, more aggressive tuning);
+  and the `health` detector's `EVERY` is 20s (was falling back to 60s). Other
+  inline-commented values were unaffected because the written value already
+  equalled the default. If you do **not** want a given activation, set that key
+  explicitly (e.g. `TMP_PCT = 0` to keep `/tmp` cleanup off). See CLAUDE.md §5.
+
 ### Security
 - WAF: **promoted the SQLi families after a clean 6-server FP review** (2026-07,
   titan/virgo/orion/rigel/earth/mars): `rule_sqli` (301, `WAF_SQLI`)
