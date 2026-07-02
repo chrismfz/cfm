@@ -50,8 +50,8 @@ local CFG = {
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
-  rule_sqli            = "challenge",  -- cheap SQLi signatures + DBMS-unique blind primitives
-  rule_sqli_blind_lexical = "logonly", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); observe-only pending FP review (docs/waf.md)
+  rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
+  rule_sqli_blind_lexical = "challenge", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted logonly→challenge 2026-07 after 188/188 TP, 0 FP across 6 servers (docs/waf.md)
   rule_superglobal_override = "logonly", -- request param KEY named like a PHP superglobal (_GET/_SERVER/GLOBALS/…) = variable poisoning; observe-only pending FP review
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
