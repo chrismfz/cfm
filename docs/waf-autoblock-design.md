@@ -181,7 +181,7 @@ COOLDOWN = "20m"
 ; a config decision, not code: the hook + detector already handle every family.
 SQLI            = 1      ; WAF_SQLI + WAF_SQLI_LEXICAL — 0-FP by design
 RCE             = 1      ; WAF_RCE (320)
-BACKDOOR        = 1      ; WAF_BACKDOOR (430-437)
+BACKDOOR        = 1      ; WAF_BACKDOOR (430-438)
 UPLOAD_EXPLOIT  = 1      ; WAF_UPLOAD_FNAME/_CONTENT (401/402) — Joomla JCE etc.
 ;
 ; --- PHASE 2 (SHIP AT 0; raise per-family once live data confirms): ---
