@@ -11,14 +11,40 @@ import (
 	"cfm/internal/webdetector"
 )
 
+// wafSecurityFamilies builds the per-family threshold map, covering EVERY WAF
+// reason-family from the authoritative registry so none is silently
+// unconfigurable and new families are picked up automatically
+// (TestWAFSecurityFamilyCoverage guards this). The config key for a family is
+// its name minus the "WAF_" prefix (WAF_SQLI → SQLI).
+//
+// Default: a family ships ON (threshold 1) iff it has an edge-`block` rule
+// today — because Phase 1 only feeds edge-`block` hits, those are the only
+// families that can actually autoblock. Everything else defaults to 0
+// (edge-only). WAF_BACKDOOR is armed to 1 as well even though it has no block
+// rule yet, so it autoblocks the moment one of its rules (e.g. 438) is promoted
+// to block after that rule's own burn-in.
+func wafSecurityFamilies(kv KV) map[string]int {
+	families := map[string]int{}
+	for _, fam := range webdetector.WAFReasonFamilies() {
+		def := 0
+		if webdetector.WAFFamilyHasBlockRule(fam) || fam == "WAF_BACKDOOR" {
+			def = 1
+		}
+		key := strings.TrimPrefix(fam, "WAF_")
+		families[fam] = kvInt(kv, key, def)
+	}
+	return families
+}
+
 func init() {
 	meta.Register(meta.DetectorMeta{
 		TypeKey:     "waf_security",
 		Title:       "WAF security",
 		Description: "Persistent cross-request nft block from in-path WAF hits, scored per reason-family.",
 		DefaultsTemplate: map[string]string{
-			"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "1",
-			"SQLI": "1", "RCE": "1", "BACKDOOR": "1", "UPLOAD_EXPLOIT": "1",
+			"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0",
+			"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BACKDOOR": "1",
+			"BLOCK": "6h",
 		},
 		LeniencySupported:   true,
 		LeniencyRecommended: true,
@@ -27,29 +53,7 @@ func init() {
 	Register("waf_security", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		defEvery := kvDur(global, "DEFAULT_EVERY", 20*time.Second)
 
-		// Config short-names expand to the underlying WAF reason-families the
-		// edge actually emits. Phase 1 ships the edge-`block` (0-FP) families
-		// ON at threshold 1; every challenge-tier family ships at 0 (edge-only)
-		// until live cfm.detectors.log data justifies turning it on — see
-		// docs/waf-autoblock-design.md.
-		sqli := kvInt(kv, "SQLI", 1)     // WAF_SQLI + WAF_SQLI_LEXICAL
-		upload := kvInt(kv, "UPLOAD_EXPLOIT", 1) // WAF_UPLOAD_FNAME + WAF_UPLOAD_CONTENT
-		families := map[string]int{
-			"WAF_SQLI":           sqli,
-			"WAF_SQLI_LEXICAL":   sqli,
-			"WAF_RCE":            kvInt(kv, "RCE", 1),
-			"WAF_BACKDOOR":       kvInt(kv, "BACKDOOR", 1),
-			"WAF_UPLOAD_FNAME":   upload,
-			"WAF_UPLOAD_CONTENT": upload,
-			"WAF_WEBSHELL":       kvInt(kv, "WEBSHELL", 0),
-			"WAF_XXE":            kvInt(kv, "XXE", 0),
-			"WAF_SSRF":           kvInt(kv, "SSRF", 0),
-			"WAF_BAD_UA":         kvInt(kv, "BAD_UA", 0),
-			"WAF_IP_HOST":        kvInt(kv, "IP_HOST", 0),
-			"WAF_AUTH_BURST":     kvInt(kv, "AUTH_BURST", 0),
-			"WAF_SUPERGLOBAL":    kvInt(kv, "SUPERGLOBAL", 0),
-			"WAF_BAD_UTF8":       kvInt(kv, "BAD_UTF8", 0),
-		}
+		families := wafSecurityFamilies(kv)
 
 		// Per-rule-id overrides: any RULE_<id> = N key (parser keeps arbitrary
 		// keys, uppercased) wins over the family default for that rule id.

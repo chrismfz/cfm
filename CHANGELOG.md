@@ -30,10 +30,15 @@ back-filled here — see the git/PR history for that period.
   the subscribe callback drops any hit whose edge action isn't `block`, so
   challenge/logonly hits never feed — this keys autoblock to what the WAF
   already blocked, rather than to a whole reason-family (a family such as
-  `WAF_RCE` spans block rule 320 and logonly 322-327). The opted-in 0-FP
-  families feed at threshold 1 (`SQLI`, `RCE`, `BACKDOOR`, `UPLOAD_EXPLOIT`);
-  every challenge-tier family (`BAD_UA`, `WEBSHELL`, …) ships at `0` pending
-  Phase 2. Per-rule-id overrides (`RULE_<id>`) win over the family threshold.
+  `WAF_RCE` spans block rule 320 and logonly 322-327, and `WAF_BACKDOOR` has no
+  block-tier rule at all). **Every WAF reason-family is a config knob** (key =
+  family minus `WAF_`; the full ~40-family registry is covered automatically and
+  guarded by a coverage test), but only the four families with an edge-`block`
+  rule — `SQLI`, `RCE`, `UPLOAD_FNAME`, `UPLOAD_CONTENT` — can actually autoblock
+  in Phase 1 and default to threshold 1; `BACKDOOR` is armed to 1 for when one
+  of its rules is promoted to block. Every challenge/logonly family defaults to
+  `0` and is inert until Phase 2. Per-rule-id overrides (`RULE_<id>`) win over
+  the family threshold.
   Ships enforcing a **soft TTL block** (`BLOCK = "6h"`, self-healing) rather
   than a permanent ban; `DRY_RUN = 1` is available for a watch-first burn-in.
   `[waf_security.leniency]` gives GR/CY a 15m temp-ban + API + lenient blocklist

@@ -29,11 +29,12 @@ func TestWAFSecurityConfigParses(t *testing.T) {
 		t.Fatal("[waf_security] section missing from detectors.conf")
 	}
 
-	// Numeric families: absurd fallback (999) proves the real value parsed.
+	// Numeric keys the config lists explicitly: absurd fallback (999) proves the
+	// real value parsed rather than silently falling back (which would happen if
+	// an inline comment sneaked onto the value line).
 	ints := map[string]int{
-		"SQLI": 1, "RCE": 1, "BACKDOOR": 1, "UPLOAD_EXPLOIT": 1,
-		"WEBSHELL": 0, "XXE": 0, "SSRF": 0, "BAD_UA": 0, "IP_HOST": 0,
-		"AUTH_BURST": 0, "SUPERGLOBAL": 0, "BAD_UTF8": 0, "SAMPLE_LIMIT": 10,
+		"SQLI": 1, "RCE": 1, "UPLOAD_FNAME": 1, "UPLOAD_CONTENT": 1,
+		"BACKDOOR": 1, "SAMPLE_LIMIT": 10,
 	}
 	for key, want := range ints {
 		if got := kvInt(kv, key, 999); got != want {

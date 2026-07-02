@@ -175,3 +175,38 @@ func WAFRuleByName(name string) (WAFRule, bool) {
 	}
 	return WAFRule{}, false
 }
+
+// WAFReasonFamilies returns the sorted, distinct set of WAF reason-families
+// (the `WAF_*` prefix a rule emits, e.g. "WAF_SQLI"). It is the authoritative
+// family list — the waf_security detector maps every one of these to a per-IP
+// autoblock threshold, so a family added to the registry is automatically a
+// configurable knob (and a coverage test asserts none is silently dropped).
+func WAFReasonFamilies() []string {
+	seen := make(map[string]struct{}, len(wafRuleIDs))
+	out := make([]string, 0, len(wafRuleIDs))
+	for _, r := range wafRuleIDs {
+		if r.ReasonFamily == "" {
+			continue
+		}
+		if _, ok := seen[r.ReasonFamily]; ok {
+			continue
+		}
+		seen[r.ReasonFamily] = struct{}{}
+		out = append(out, r.ReasonFamily)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// WAFFamilyHasBlockRule reports whether any rule in the given reason-family
+// ships at edge action `block`. Only these families can feed the Phase-1
+// waf_security autoblock (which is scoped to edge-block hits); the rest are
+// challenge/logonly and stay edge-only until a later phase.
+func WAFFamilyHasBlockRule(family string) bool {
+	for _, r := range wafRuleIDs {
+		if r.ReasonFamily == family && r.DefaultMode == "block" {
+			return true
+		}
+	}
+	return false
+}
