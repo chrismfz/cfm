@@ -1,14 +1,18 @@
 # WAF → autoblock via the detector framework — design
 
-> **Status: PHASE 1 IMPLEMENTED (ships DRY_RUN).** The `waf_security` detector,
-> the `SubscribeWAFHitEvents` hook (published from `Engine.RecordWAFTrigger`),
-> and the `[waf_security]` + `[waf_security.leniency]` config all exist. It
-> ships **`DRY_RUN = 1`**: it logs "would block" to `cfm.detectors.log` and
-> reports, but raises no real nft ban until an operator flips `DRY_RUN = 0`.
-> Only the edge-`block` families (`SQLI`/`RCE`/`BACKDOOR`/`UPLOAD_EXPLOIT`) are
-> ON at threshold 1; all challenge-tier families ship at `0`. Phase 2 (turn on
-> challenge-tier families from live data) and Phase 3 (per-/24 escalation) are
-> still design-only, as is the Phase-2 edge-ban-dict retirement below.
+> **Status: PHASE 1 IMPLEMENTED.** The `waf_security` detector, the
+> `SubscribeWAFHitEvents` hook (published from `Engine.RecordWAFTrigger`), and
+> the `[waf_security]` + `[waf_security.leniency]` config all exist. Phase 1 is
+> scoped to **edge-`block` hits only** — the subscribe callback drops any hit
+> whose edge action isn't `block`, so only what the WAF already blocked feeds
+> the counter ("block at WAF → nft candidate"). Among those, the opted-in
+> families `SQLI`/`RCE`/`BACKDOOR`/`UPLOAD_EXPLOIT` are ON at threshold 1; all
+> challenge-tier families ship at `0`. It ships enforcing a **soft TTL block**
+> (`BLOCK = "6h"`, self-healing) rather than `permanent`; `DRY_RUN = 1` remains
+> available for a pure watch-first burn-in, and GR/CY get a 15m lenient tier.
+> Phase 2 (relax the action gate + turn on challenge-tier families from live
+> data) and Phase 3 (per-/24 escalation) are still design-only, as is the
+> Phase-2 edge-ban-dict retirement below.
 
 ## Motivation
 

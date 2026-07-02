@@ -25,16 +25,20 @@ back-filled here — see the git/PR history for that period.
   (`cfm which <ip>`), logged to `cfm.detectors.log`, reported to cfm-web, and
   emailed, instead of only being handled per-request at the edge. Wiring: a new
   `SubscribeWAFHitEvents` hook published from `Engine.RecordWAFTrigger` (the
-  single per-hit choke point — logonly/challenge/block all flow through it),
-  feeding a per-IP-per-reason-family sliding-window counter. **Ships
-  `DRY_RUN = 1`**: it logs "would block" and reports but raises no real nft ban
-  until an operator sets `DRY_RUN = 0` after a burn-in. Only the edge-`block`,
-  0-FP families feed it at threshold 1 (`SQLI`, `RCE`, `BACKDOOR`,
-  `UPLOAD_EXPLOIT`); every challenge-tier family (`BAD_UA`, `WEBSHELL`, …) ships
-  at `0` (edge-only) pending Phase 2. Per-rule-id overrides (`RULE_<id>`) win
-  over the family threshold. `[waf_security.leniency]` gives GR/CY a soft tier
-  (15m temp-ban + API + lenient blocklist) instead of a permanent farm-wide ban.
-  Config in `configs/detectors.conf`; design in `docs/waf-autoblock-design.md`.
+  single per-hit choke point) feeding a per-IP-per-reason-family sliding-window
+  counter. **Scoped to edge-`block` hits only** ("block at WAF → nft candidate"):
+  the subscribe callback drops any hit whose edge action isn't `block`, so
+  challenge/logonly hits never feed — this keys autoblock to what the WAF
+  already blocked, rather than to a whole reason-family (a family such as
+  `WAF_RCE` spans block rule 320 and logonly 322-327). The opted-in 0-FP
+  families feed at threshold 1 (`SQLI`, `RCE`, `BACKDOOR`, `UPLOAD_EXPLOIT`);
+  every challenge-tier family (`BAD_UA`, `WEBSHELL`, …) ships at `0` pending
+  Phase 2. Per-rule-id overrides (`RULE_<id>`) win over the family threshold.
+  Ships enforcing a **soft TTL block** (`BLOCK = "6h"`, self-healing) rather
+  than a permanent ban; `DRY_RUN = 1` is available for a watch-first burn-in.
+  `[waf_security.leniency]` gives GR/CY a 15m temp-ban + API + lenient blocklist
+  instead of a farm-wide ban. Config in `configs/detectors.conf`; design in
+  `docs/waf-autoblock-design.md`.
 
 ### Changed
 - WAF: **split the encoded-`<?php` backdoor opener (rule 437) into two rule ids**

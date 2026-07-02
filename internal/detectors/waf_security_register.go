@@ -73,7 +73,7 @@ func init() {
 			SampleLimit:     kvInt(kv, "SAMPLE_LIMIT", 10),
 			Families:        families,
 			RuleOverrides:   overrides,
-			DryRun:          kvBool(kv, "DRY_RUN", true), // safe default: log, don't block, until an operator flips it
+			DryRun:          kvBool(kv, "DRY_RUN", false), // observe-only override; the shipped config uses a soft TTL block instead
 			AllowIPs:        csvKV(kv, "ALLOW_IPS"),
 			AllowNets:       csvKV(kv, "ALLOW_NETS"),
 			AllowUAContains: csvKV(kv, "ALLOW_UA_CONTAINS"),
@@ -81,7 +81,17 @@ func init() {
 		}
 		d := wafsec.New(cfg)
 		d.SetName(section)
+		// Phase 1: only edge-BLOCK hits feed the counter ("block at WAF → nft
+		// candidate"). This scopes autoblock to what the edge itself already
+		// blocks — the high-confidence, rule-accurate set — rather than every
+		// rule in a family: a family like WAF_RCE spans block rule 320 AND
+		// logonly 322-327, and WAF_BACKDOOR has no block-tier rules at all, so
+		// family-only keying would pull in logonly/challenge recon. Phase 2 will
+		// relax this to also feed challenge-tier families (bot-persistence).
 		webdetector.SubscribeWAFHitEvents(func(ev webdetector.WAFHitEvent) {
+			if ev.Action != "block" {
+				return
+			}
 			d.Enqueue(ev.InputEvent())
 		})
 		return d, nil
