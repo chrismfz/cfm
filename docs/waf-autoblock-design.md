@@ -129,8 +129,9 @@ WINDOW  = "30m"          ; rolling per-IP counter window
 SAMPLE_LIMIT = 10
 COOLDOWN = "20m"
 
-; Per-IP thresholds by WAF reason family (hits in WINDOW → block).
-; Confirmed-malicious families = instant (1); noisy/probe = accumulate.
+; Per-IP thresholds by WAF reason FAMILY (hits in WINDOW → block).
+; Confirmed-malicious families = instant (1); noisy/probe = accumulate;
+; 0 = never autoblock (family stays edge-only: logonly/challenge as configured).
 ; Defaults justified by the 6-server 2026-07 review (0 FP on the injection set).
 SQLI            = 1      ; WAF_SQLI + WAF_SQLI_LEXICAL — 0-FP by design
 RCE             = 1      ; WAF_RCE (320)
@@ -141,11 +142,26 @@ XXE             = 2      ; WAF_XXE (307)
 SSRF            = 2      ; WAF_SSRF (7xx)
 BAD_UA          = 40     ; WAF_BAD_UA (201) — scanner floods, accumulate
 IP_HOST         = 25     ; WAF_IP_HOST (602) — bare-IP-Host scanners
-; observe-only families NEVER feed autoblock (0 = ignore):
+; AUTH_BURST deliberately does NOT feed autoblock — a legitimate admin/dev
+; doing bulk WordPress logins across many sites once tripped an auth-burst
+; *block* (real incident). It stays edge-`challenge` (rule 501, a human solves
+; it in the browser); it must never become a persistent nft ban here.
+AUTH_BURST      = 0      ; WAF_AUTH_BURST (501/502/510-512) — edge-challenge only
+; observe-only families NEVER feed autoblock:
 SUPERGLOBAL     = 0      ; WAF_SUPERGLOBAL (318, logonly)
 BAD_UTF8        = 0      ; WAF_BAD_UTF8 (611, logonly)
 
-; False-positive escape hatch (same keys api_abuse uses):
+; Per-RULE overrides (by numeric rule id) win over the family default above.
+; For rules that behave differently from their family — tighten the ones that
+; are almost-always-attack, loosen the noisy ones — same idea as
+; exim_security's core-rule + per-signal "specials".
+;RULE_511 = 2           ; xmlrpc pingback: near-always attack → strict
+;RULE_501 = 25          ; generic auth-burst: extra-lenient (bulk-admin devs)
+;RULE_411 = 1           ; webshell-ping fingerprint: instant
+
+; False-positive escape hatch (same keys api_abuse uses). For a KNOWN legit
+; source (e.g. that bulk-update developer's box) this is the sharpest tool —
+; allow the IP and skip scoring entirely.
 ALLOW_IPS  = ""         ; never block these IPs (+ the GLOBAL NET/IP ignore list)
 ALLOW_NETS = ""
 
@@ -204,8 +220,13 @@ already handles each swarm IP on its first hit; this is an optimisation.
 - **Detector name:** `waf_security` (sibling of `exim_security`,
   `postfix_security`) vs folding into `[webdetector]`. Proposal: standalone
   `waf_security` — clean per-family config + it is a distinct signal source.
-- **Counter key granularity:** per-IP-per-family (proposed) vs per-IP-total.
-  Per-family lets `BAD_UA` accumulate while `SQLI` is instant.
+- **Counter key granularity:** per-IP-per-family thresholds (`SQLI`, `BAD_UA`, …)
+  with **per-rule (`RULE_<id>`) overrides** on top — resolved. Per-family keeps
+  config simple; the ID override handles rules that behave unlike their family
+  (a real driver: an admin doing bulk WP logins tripped an auth-burst *block*
+  once, hence `AUTH_BURST = 0` here — it stays edge-challenge and never feeds a
+  persistent ban). Known legit sources are handled even more sharply by
+  `ALLOW_IPS` / the global ignore list.
 - **`Kind` granularity:** `WAF/<family>` (proposed) vs `WAF/<family>/<rule_id>`.
 - **Leniency for unambiguous SQLi:** even GR/CY — temp-ban (proposed, softer)
   vs no leniency (SQLi is 0-FP, so arguably block GR/CY too). The temp-ban +
