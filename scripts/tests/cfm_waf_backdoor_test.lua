@@ -1,4 +1,4 @@
--- Tests for the WAF_BACKDOOR detector family (rules 430-437, all three tiers).
+-- Tests for the WAF_BACKDOOR detector family (rules 430-438, all three tiers).
 -- Source workload: captured 2026-05-19 PHP webshell deployed as
 -- /home/<user>/public_html/wp-content/themes/bridge/includes/radio.php —
 -- char-pool obfuscator output with %PDF- polyglot prefix and a 5KB
@@ -869,4 +869,4 @@ if fails > 0 then
   io.stderr:write(string.format("FAILED %d tests\n", fails))
   os.exit(1)
 end
-print("ok: cfm_waf backdoor tests (430-437)")
+print("ok: cfm_waf backdoor tests (430-438)")
