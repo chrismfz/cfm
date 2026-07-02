@@ -235,12 +235,17 @@ local CFG = {
   rule_php_superglobal_callable   = "logonly", -- $_GET[c]( / $_POST[c]( / $_SERVER[HTTP_X_…]( minimalist webshell
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
   rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
-  rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener (b64 PD9waHA / URL %3C%3Fphp / HTML entity / JS escape)
-                                                 -- (promoted from logonly: 2026-06-25 five-server log review — strong `<?php`
-                                                 --  openers were all real attacks (Bricks RCE render_element,
-                                                 --  additional_webservices.php, Amasty uploadFile) with 0 FP. The weak `<?=`
-                                                 --  short-opener variant (base64 "PD89") was 6/6 FP and has been REMOVED from
-                                                 --  the detector, so this rule is safe at challenge.)
+  rule_php_encoded_opener         = "block", -- encoded `<?php` opener (b64 PD9waHA / URL %3C%3Fphp / HTML entity / JS escape)
+                                                 -- (promoted logonly→challenge 2026-06-25, then challenge→block 2026-07-02.
+                                                 --  Two independent 0-FP log reviews: the 2026-06-25 five-server sweep (strong
+                                                 --  `<?php` openers = all real attacks: Bricks RCE render_element,
+                                                 --  additional_webservices.php, Amasty uploadFile) and a 2026-07 six-server
+                                                 --  sweep (16/16 base64 `<?php` POSTed to /xmlrpc.php, botnet-distributed
+                                                 --  across 16 countries). The FP-prone weak `<?=` short-opener variant
+                                                 --  (base64 "PD89", 6/6 FP) was REMOVED from the detector, and legit snippet
+                                                 --  plugins (WPCode etc.) are already carved out via the /wp-admin/ suppression
+                                                 --  below — so the only traffic reaching this rule is an encoded `<?php` body
+                                                 --  on a non-/wp-admin/ path, which is never legitimate. Safe to block.)
 
 
   -- ── Tuning ────────────────────────────────────────────────────────────────

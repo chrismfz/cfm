@@ -18,6 +18,18 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- WAF: **promoted the encoded-`<?php` backdoor opener (rule 437,
+  `WAF_BACKDOOR:*_PHP_OPENER`) `challenge` → `block`** after a second clean
+  6-server FP review (2026-07). Two independent 0-FP reviews now agree: the
+  2026-06-25 five-server sweep (Bricks RCE / Amasty upload real attacks) and a
+  2026-07 six-server sweep (16/16 base64 `<?php` POSTed to `/xmlrpc.php`,
+  botnet-distributed across 16 countries). The FP-prone weak `<?=` variant was
+  already removed from the detector and legit snippet plugins (WPCode etc.) are
+  carved out via the `/wp-admin/` suppression, so a non-`/wp-admin` encoded
+  `<?php` body — which is never legitimate — is now 403'd in-path. Also fixes a
+  stale `DefaultMode` in `waf_rule_ids.go` (437 read `logonly` while the live
+  Lua CFG had been `challenge` since 2026-06-25). Operators who pinned this in
+  `/etc/cfm/*` keep their setting; only the shipped default changes.
 - WAF: **promoted the SQLi families after a clean 6-server FP review** (2026-07,
   titan/virgo/orion/rigel/earth/mars): `rule_sqli` (301, `WAF_SQLI`)
   `challenge` → **`block`** (24/24 true positives, 0 FP — time-based/union/

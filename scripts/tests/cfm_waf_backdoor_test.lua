@@ -61,6 +61,19 @@ local function long_b64(n)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Shipped-default mode regression. rule 437 was promoted challenge→block on
+-- 2026-07-02 (two independent 0-FP log reviews; non-/wp-admin encoded `<?php`
+-- body is never legitimate). Assert the built-in CFG default before any
+-- set_rule() mutation so a future accidental demotion is caught here.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+do
+  local snap = waf.get_config()
+  check(snap.rule_php_encoded_opener == "block",
+        "437 shipped default mode is block")
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- 430 — .htaccess / .user.ini poisoning
 -- ─────────────────────────────────────────────────────────────────────────────
 

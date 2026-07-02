@@ -713,7 +713,6 @@ Collect their positions in the body. Fire if **any three** occurrences fall with
 | Encoding | Bytes detected |
 |---|---|
 | Base64 of `<?php` | `PD9waHA` |
-| Base64 of `<?=` (short-tag) | `PD89` |
 | URL-encoded | `%3C%3Fphp`, `%3C%3F=` |
 | HTML numeric entity | `&#60;&#63;php` |
 | HTML named entity (partial) | `&lt;?php` |
@@ -722,11 +721,11 @@ Collect their positions in the body. Fire if **any three** occurrences fall with
 
 **Why it matters:** legit data flows never carry an encoded PHP opener — neither prose, nor JSON, nor form data, nor uploaded media. Seeing one is high-confidence evidence of payload-smuggling-through-filter, and the detection cost is essentially zero (8 substring checks).
 
-**How:** the URL / HTML-entity / JS-escape forms are matched as substrings on the lowercased body (those encodings are legitimately case-insensitive and structured, so collision-free). The **base64** forms (`PD9waHA`, `PD89`) are matched **case-sensitively** (base64 is a case-sensitive alphabet) and **only at a base64 value boundary** — string start or right after a non-base64 separator.
+**How:** the URL / HTML-entity / JS-escape forms are matched as substrings on the lowercased body (those encodings are legitimately case-insensitive and structured, so collision-free). The **base64** form (`PD9waHA`) is matched **case-sensitively** (base64 is a case-sensitive alphabet) and **only at a base64 value boundary** — string start or right after a non-base64 separator. The base64 `<?=` short-tag form (`PD89`) is **intentionally not matched** (a 4-char base64 token collides with high-entropy data — a 2026-06-25 review found it 6/6 FP, so it was removed); the URL-encoded short-tag `%3C%3F=` is still matched (structured, collision-free).
 
-**Tags:** `B64_PHP_OPENER`, `B64_SHORT_OPENER`, `URL_PHP_OPENER`, `URL_SHORT_OPENER`, `HTML_ENTITY_OPENER`, `JS_UNICODE_OPENER`, `JS_HEX_OPENER`.
+**Tags:** `B64_PHP_OPENER`, `URL_PHP_OPENER`, `URL_SHORT_OPENER`, `HTML_ENTITY_OPENER`, `JS_UNICODE_OPENER`, `JS_HEX_OPENER`.
 
-**FP notes:** **Fixed 2026-06-04.** The base64 checks were originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive this rule caught) — while dropping the mid-blob / case-variant collisions. With those resolved the rule is safe to promote past logonly. The remaining FP risk is documentation / security-research traffic POSTing an encoded `<?php`; per-vhost exclusion handles that cleanly.
+**FP notes:** **Fixed 2026-06-04.** The base64 checks were originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive this rule caught) — while dropping the mid-blob / case-variant collisions. **Promoted `logonly` → `challenge` (2026-06-25) → `block` (2026-07-02)** on two independent 0-FP log reviews (the 2026-06-25 five-server sweep and a 2026-07 six-server sweep: 16/16 base64 `<?php` POSTed to `/xmlrpc.php`, botnet-distributed across 16 countries). Legit snippet plugins (WPCode, Code Snippets) POST encoded `<?php` bodies only to `/wp-admin/*`, which this rule suppresses (those requests have already passed WP cookie-auth), so the only traffic reaching the rule is an encoded `<?php` body on a non-`/wp-admin/` path — never legitimate. Any residual documentation / security-research edge case is handled by per-vhost exclusion.
 
 ### How they compose
 
@@ -742,7 +741,7 @@ Collect their positions in the body. Fire if **any three** occurrences fall with
 | `PD9waHA…` / `%3C%3Fphp…` in body | 437 |
 | Captured radio.php (PDF magic + char-pool + eval-loader) | **431 + 432 + 433** simultaneously |
 
-All eight default to `logonly`. Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
+Rules 430-436 default to `logonly`; **rule 437 defaults to `block`** (promoted 2026-07-02, see its FP notes above). Operators tune the rest per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
 
 ---
 

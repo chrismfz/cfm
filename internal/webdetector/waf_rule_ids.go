@@ -93,7 +93,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 434, Name: "rule_php_superglobal_callable", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 	{ID: 435, Name: "rule_php_concat_funcname_eval", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 	{ID: 436, Name: "rule_php_decode_chain", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
-	{ID: 437, Name: "rule_php_encoded_opener", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
+	{ID: 437, Name: "rule_php_encoded_opener", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "block"},
 
 	// 5xx auth abuse
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},
