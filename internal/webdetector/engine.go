@@ -1004,6 +1004,18 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		return
 	}
 
+	// /.well-known/ (ACME HTTP-01, CA DCV, RFC 8615 metadata) is fully excluded
+	// from the challenge engine — before ANY per-host/per-IP accounting — so a
+	// CA validator that legitimately hits many domains and many one-time token
+	// paths never inflates a challenge signal (unique-hosts/paths, vhost
+	// unique-IP, RPS, 40x, …) and never gets challenge-flagged. Otherwise SSL
+	// issuance breaks: fatal in DNAT mode (the flagged IP is redirected to the
+	// challenge server before cfm.lua's in-path carve-out can serve the token).
+	// Decision-side mirror of the in-path carve-out (cfm.lua Step 0a1).
+	if isWellKnownChallengeExempt(rec.URI) {
+		return
+	}
+
 	t := tsToTime(rec.TS)
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -3162,6 +3174,46 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 		}
 	}
 	return false
+}
+
+// isWellKnownChallengeExempt reports whether a request path is in the reserved
+// /.well-known/ namespace (RFC 8615) and must NOT feed the log-driven per-IP
+// challenge heuristics.
+//
+// This mirrors the in-path serving carve-out in cfm.lua (Step 0a1) on the
+// decision side. A CA's ACME HTTP-01 / DCV validator legitimately hits many
+// vhosts and many one-time token paths (e.g. Let's Encrypt / AutoSSL validating
+// a whole shared server), which otherwise trips the scanner heuristics —
+// CHALLENGE_UNIQHOSTS_IP / CHALLENGE_UNIQPATHS_IP — and challenge-flags the
+// validator IP. In OpenResty mode the in-path carve-out still serves the token,
+// but the flag pollutes per-IP state; in DNAT mode the flagged IP is redirected
+// to the challenge server before cfm.lua runs, so ACME validation fails
+// (403 urn:ietf:params:acme:error:unauthorized) and certificate issuance breaks.
+//
+// Whole prefix, to match the in-path carve-out. Query string is stripped first.
+// Unlike the in-path guard — which runs on nginx-decoded, dot-segment-normalized
+// input — this sees the RAW request target (rec.URI is lowercased but not
+// percent-decoded). So we refuse to exempt any /.well-known/ path containing a
+// literal `..` OR a `%` (percent-encoding): legitimate ACME/DCV/RFC-8615 names
+// are unreserved (`[A-Za-z0-9._~-]`) and never percent-encoded, whereas
+// `/.well-known/%2e%2e/x` would otherwise slip past a literal `..` check yet
+// resolve to the real target on a backend that collapses it — blinding the
+// behavioural challenge layer. Anything encoded/traversing is scored normally.
+func isWellKnownChallengeExempt(p string) bool {
+	if p == "" {
+		return false
+	}
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		p = p[:i]
+	}
+	lp := strings.ToLower(p)
+	if !strings.HasPrefix(lp, "/.well-known/") {
+		return false
+	}
+	if strings.Contains(lp, "..") || strings.Contains(lp, "%") {
+		return false
+	}
+	return true
 }
 
 // isStaticAssetPath returns true for common static asset URLs that should not
