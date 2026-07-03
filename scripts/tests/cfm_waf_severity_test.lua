@@ -372,6 +372,14 @@ do
   check(reason == "WAF_WEBSHELL:PATH:shell.php", "19b: webshell_path amb — reason")
   check(action == "challenge",                  "19b: webshell_path amb — challenge")
   check(rule_id == 410,                         "19b: webshell_path amb — rule id 410")
+
+  -- alfa.php (ALFA TEaM shell) is a real-word/brand collision, so it lives in
+  -- the challenge tier (410), NOT the block tier — a legit /alfa.php page gets a
+  -- recoverable one-time challenge, not a hard 403 for every visitor.
+  local _h, ar, _t, aact, _hh, arid = waf.check(fresh_ctx({ uri = "/alfa.php" }))
+  check(ar == "WAF_WEBSHELL:PATH:alfa.php", "19b: alfa.php — reason")
+  check(aact == "challenge",                "19b: alfa.php — challenge (not block)")
+  check(arid == 410,                        "19b: alfa.php — rule id 410")
 end
 
 -- ── Test 20: W1 webshell_path — case-insensitive basename match (known/413) ──

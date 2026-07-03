@@ -1813,13 +1813,18 @@ function _M.detect_upload_filename(body, headers)
 
     -- Extension checks: match anywhere in filename to catch double-extensions
     if fname:match("%.php[%d]?[^%w]") or fname:match("%.php[%d]?$") then return "php" end
-    -- PHP alt-handlers Apache/LiteSpeed commonly map to the engine, and SSI
-    -- pages. These slip past the .php[%d] matcher above: .phtml/.phtm, the bare
-    -- .pht, and .shtml/.shtm (Server-Side Includes can run #exec/#include).
-    -- Same webshell class as the extensions below — 401 is a block-tier rule.
+    -- PHP alt-handlers Apache/LiteSpeed commonly map to the engine: .phtml/.phtm
+    -- and the bare .pht slip past the .php[%d] matcher above and have no
+    -- legitimate upload use, so they join the block-tier set.
+    -- NOTE: SSI pages (.shtml/.shtm) are deliberately NOT blocked here. They are
+    -- a first-class *static* file type on cPanel (`AddHandler server-parsed`),
+    -- so a customer uploading legit .shtml pages through a web file manager would
+    -- be blocked AND (rule 401 being autoblock-armed) earn a 6h nft IP ban — an
+    -- FP that outweighs the SSI-exec risk (usually off via IncludesNOEXEC, and
+    -- no .shtml appeared in any captured upload sample). Revisit with a
+    -- content-based SSI-exec check if that threat ever shows up in the wild.
     if fname:match("%.phtm")    then return "phtml" end  -- .phtm and .phtml
     if fname:match("%.pht[^%w]") or fname:match("%.pht$") then return "pht" end
-    if fname:match("%.shtm")    then return "shtml" end  -- .shtm and .shtml (SSI)
     if fname:match("%.phar")    then return "phar" end
     if fname:match("%.asp[x]?") then return "asp" end
     if fname:match("%.asa[x]?") then return "asa" end
@@ -2001,8 +2006,7 @@ local WEBSHELL_NAMES_KNOWN = {
   ["minishell.php"]      = true,
   ["p0wny.php"]          = true,
   ["p0wny-shell.php"]    = true,
-  ["alfa.php"]           = true,
-  ["alfashell.php"]      = true,
+  ["alfashell.php"]      = true,  -- unambiguous; bare alfa.php is challenge-tier (below)
   ["indoxploit.php"]     = true,
   ["aspxspy.aspx"]       = true,
   ["aspxshell.aspx"]     = true,
@@ -2012,6 +2016,7 @@ local WEBSHELL_NAMES_KNOWN = {
 
 local WEBSHELL_NAMES = {
   ["adminer.php"]        = true,  -- legit DB tool; challenge, never hard-block
+  ["alfa.php"]           = true,  -- ALFA TEaM shell, but "alfa" is a real word/brand (Alfa Romeo/Insurance, alpha) → challenge, not block
   ["shell.php"]          = true,
   ["mini.php"]           = true,
   ["ws.php"]             = true,

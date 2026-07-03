@@ -37,8 +37,6 @@ end
 check(hit("shell.pht"),    ".pht must be flagged")
 check(hit("shell.phtm"),   ".phtm must be flagged")
 check(hit("shell.phtml"),  ".phtml must be flagged")
-check(hit("page.shtml"),   ".shtml must be flagged")
-check(hit("page.shtm"),    ".shtm must be flagged")
 check(hit("evil.pht.jpg"), ".pht double-extension must be flagged")
 
 -- Positives: pre-existing coverage must still fire.
@@ -52,6 +50,10 @@ check(not hit("photo.jpg"),   ".jpg must pass")
 check(not hit("archive.zip"), ".zip must pass")
 check(not hit("notes.txt"),   ".txt must pass")
 check(not hit("readme.phps"), ".phps is deliberately excluded (source viewer)")
+-- SSI pages are a legit static file type on cPanel and are deliberately NOT
+-- blocked (see bad_fname note) — blocking would FP + autoblock a customer's IP.
+check(not hit("home.shtml"),  ".shtml is legit static SSI — must pass")
+check(not hit("frag.shtm"),   ".shtm is legit static SSI — must pass")
 -- The 'pht' substring mid-word (no preceding literal dot) must NOT match:
 -- the matcher requires '%.pht' (dot + pht), so these benign names pass.
 check(not hit("graphite.zip"), "'graphite' must not false-match .pht")
@@ -63,4 +65,4 @@ if fails > 0 then
   io.stderr:write(("cfm_waf upload-fname tests: %d failure(s)\n"):format(fails))
   os.exit(1)
 end
-print("ok: cfm_waf upload-fname extension tests (rule 401: .pht/.phtm/.shtml/.shtm)")
+print("ok: cfm_waf upload-fname extension tests (rule 401: .pht/.phtm block; .shtml/.shtm allowed)")

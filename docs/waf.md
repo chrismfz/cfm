@@ -1191,8 +1191,8 @@ The original detector / engine roadmap is shipped end-to-end. Every item is now 
 | **R2** Persistence (cron / systemd / bashrc / authorized_keys) | 323 | |
 | **R3** Rootkit artifacts (`LD_PRELOAD`, `/etc/ld.so.preload`, `/dev/mem`) | 324 | |
 | **R4** LOLbins (`certutil -urlcache`, `bitsadmin /transfer`, `-EncodedCommand`, `iex(iwr`) | 325 | scores with base64 detector when combined |
-| **W1** Ambiguous webshell path names (`/shell.php`, `/x.php`, `/adminer.php`, …) | 410 | challenge-tier; URI basename match, residual-FP names (generic/short + `adminer.php`) |
-| **W1k** Proper-noun webshell path names (`/c99.php`, `/r57.php`, `/wso.php`, `/alfa.php`, …) | 413 | block-tier split of W1 (2026-07-03); near-zero legit use, so hard-blocked |
+| **W1** Ambiguous webshell path names (`/shell.php`, `/x.php`, `/adminer.php`, `/alfa.php`, …) | 410 | challenge-tier; URI basename match, residual-FP names (generic/short + real-word/brand: `adminer.php`, `alfa.php`) |
+| **W1k** Proper-noun webshell path names (`/c99.php`, `/r57.php`, `/wso.php`, `/b374k.php`, …) | 413 | block-tier split of W1 (2026-07-03); near-zero legit use, so hard-blocked |
 | **W2** Webshell magic strings in body (`b374k`, `WSO 2.5`, `@eval(`, …) | 404 | scored; covers `b374k` / `c99shell` / `r57shell` / `wso 2./4./5.` / `weevelyshell` / `filesman` |
 | **W3** PHP function obfuscation (`\x65val`, `chr().chr()…`, `hex2bin($_POST[`) | 405 | shared scorer across body and upload paths |
 | **W4** Polyglot upload (image CT/ext + `<?php`/`<?=`/`<%`/`<script` in first 64 B) | 412 | required a multipart parser; also unblocked W2/W3 in upload context |

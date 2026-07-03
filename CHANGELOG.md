@@ -112,12 +112,14 @@ back-filled here — see the git/PR history for that period.
   showed 6522 challenge-tier hits on this rule, almost all GET probes for known
   webshell drop-names. The proper-noun names with essentially zero legitimate
   use — `c99`/`c99shell`/`r57`/`r57shell`/`b374k`/`wso`/`wsoshell`/`ws0`/
-  `webshell`/`minishell`/`p0wny`/`alfa`/`alfashell`/`indoxploit`/`aspxspy`/
+  `webshell`/`minishell`/`p0wny`/`alfashell`/`indoxploit`/`aspxspy`/
   `aspxshell`/`jspspy`/`jshell` — now route to a **new block-tier rule 413
   (`rule_webshell_path_known`)**. The generic/ambiguous names that carry a
-  residual false-positive tail — `adminer.php` (a real DB tool), and short
+  residual false-positive tail — `adminer.php` (a real DB tool), `alfa.php`
+  (the ALFA TEaM shell, but "alfa" is also a real word/brand), and short
   scratch-file names like `shell.php`/`x.php`/`1.php`/`cmd.jsp` — **stay at
-  `challenge` on rule 410** (an admin solves it once; a dropper is stopped).
+  `challenge` on rule 410** (a legit page's visitors get a recoverable one-time
+  challenge; a dropper is stopped).
   This mirrors the 437/438 split philosophy: never blanket-promote a family
   whose members span "always malicious" and "occasionally legitimate." Note
   `WAF_WEBSHELL` now has an edge-`block` rule (413), making it the **fifth**
@@ -150,15 +152,18 @@ back-filled here — see the git/PR history for that period.
   metadata only, no runtime behaviour change.
 - WAF: **closed a webshell-upload bypass in the block-tier upload-filename rule
   (401, `WAF_UPLOAD_FNAME`).** `detect_upload_filename` blocked `.php`/`.php5`/
-  `.phtml`/`.phar` (and `.jsp`/`.asp`/`.exe`/`.sh`/…) but missed three
-  PHP/SSI alt-handlers that shared hosts commonly map to an interpreter, so a
-  malicious multipart upload named `shell.pht`, `shell.phtm`, or `page.shtml`
-  reached origin: **`.pht`, `.phtm`, and `.shtml`/`.shtm`** (SSI can run
-  `#exec`/`#include`) are now matched — including double-extension forms
-  (`x.pht.jpg`). Same block-tier enforcement as the existing dangerous
-  extensions; the narrow legit-PHP-upload endpoint carve-outs still apply.
-  `.phps` (PHP source viewer, lower execution risk) is **deliberately left out**
-  to limit false-positive surface. New coverage test:
+  `.phtml`/`.phar` (and `.jsp`/`.asp`/`.exe`/`.sh`/…) but missed the PHP
+  alt-handlers `.pht` and `.phtm` that shared hosts commonly map to an
+  interpreter, so a malicious multipart upload named `shell.pht` or `shell.phtm`
+  reached origin. Those are **now matched** (including double-extension forms
+  like `x.pht.jpg`), with the same block-tier enforcement and the narrow
+  legit-PHP-upload endpoint carve-outs. **SSI pages (`.shtml`/`.shtm`) are
+  deliberately NOT blocked** — they are a legitimate *static* file type on
+  cPanel, and blocking them would false-positive on a customer uploading legit
+  `.shtml` pages through a web file manager (and, since 401 is autoblock-armed,
+  earn that customer a 6h IP ban); the SSI-exec risk is low (usually off via
+  `IncludesNOEXEC`) and no `.shtml` appeared in captured upload samples.
+  `.phps` (PHP source viewer) is likewise left out. New coverage test:
   `scripts/tests/cfm_waf_upload_fname_test.lua`.
 - WAF: **promoted the SQLi families after a clean 6-server FP review** (2026-07,
   titan/virgo/orion/rigel/earth/mars): `rule_sqli` (301, `WAF_SQLI`)
