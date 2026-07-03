@@ -16,7 +16,10 @@ func TestIsWellKnownChallengeExempt(t *testing.T) {
 		"/index.php":                           false,
 		"/well-known/x":                        false, // missing the leading dot
 		"/app/.well-known/x":                   false, // not at the start
-		"/.well-known/../../etc/passwd":        false, // traversal escapes the exemption
+		"/.well-known/../../etc/passwd":        false, // literal traversal escapes the exemption
+		"/.well-known/%2e%2e/wp-login.php":     false, // encoded traversal (raw URI) — must NOT exempt
+		"/.well-known/%2E%2E/x":                false, // encoded traversal, upper hex
+		"/.well-known/acme-challenge/%2f":      false, // any percent-encoding in the path → score it
 		"":                                     false,
 	}
 	for in, want := range cases {
