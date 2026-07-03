@@ -68,6 +68,20 @@ back-filled here — see the git/PR history for that period.
   matched — the doc still listed it).
 
 ### Fixed
+- Challenge: **`/.well-known/` requests no longer feed the log-driven per-IP
+  challenge heuristics**, so a CA's ACME/DCV validator can't be mistaken for a
+  scanner. A validator (e.g. Let's Encrypt / AutoSSL) legitimately hits many
+  domains and many one-time token paths on a shared server, which tripped
+  `CHALLENGE_UNIQHOSTS_IP` / `CHALLENGE_UNIQPATHS_IP` and challenge-flagged the
+  validator IP. In OpenResty mode the in-path `/.well-known/` carve-out
+  (`cfm.lua` Step 0a1) still served the token, but the flag polluted per-IP
+  state; **in DNAT mode the flagged IP was redirected to the challenge server
+  before the carve-out ran, so validation failed (`403 …acme:error:unauthorized`)
+  and certificate issuance broke.** The webdetector now excludes the whole
+  `/.well-known/` prefix from all challenge accounting (unique-hosts/paths,
+  vhost unique-IP, RPS, 40x, …) — the decision-side mirror of the in-path
+  carve-out. A `..` guard prevents `/.well-known/../` from escaping the
+  exemption; normal-path scanners are unaffected.
 - detectors config: **`detectors.conf` scalar settings with an inline
   `; comment` on the value line now take effect.** `kvInt`/`kvBool`/`kvDur`
   parsed the raw stored value, so `KEY = 5 ; note` became the string `"5 ; note"`,
