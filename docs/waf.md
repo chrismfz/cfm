@@ -752,7 +752,7 @@ The detector checks base64 first, so a base64 opener is attributed to **438** an
 | `PD9waHA…` (base64 opener at a value boundary) in body | 438 |
 | Captured radio.php (PDF magic + char-pool + eval-loader) | **431 + 432 + 433** simultaneously |
 
-Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see their FP notes above). Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
+Rules 430, 431, 433-436 default to `logonly`; **432, 437 and 438 default to `challenge`** (see their FP notes above). Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
 
 ---
 

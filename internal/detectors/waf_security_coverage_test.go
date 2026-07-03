@@ -52,7 +52,8 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 		t.Errorf("expected WAF_WEBSHELL to have an edge-block rule (413)")
 	}
 
-	// Sanity: the four block-tier families are exactly what we expect today.
+	// Sanity: the four armed block-tier families are exactly what we expect today
+	// (WAF_WEBSHELL also has a block rule but is intentionally held un-armed).
 	for _, f := range []string{"WAF_SQLI", "WAF_RCE", "WAF_UPLOAD_FNAME", "WAF_UPLOAD_CONTENT"} {
 		if !webdetector.WAFFamilyHasBlockRule(f) {
 			t.Errorf("expected %s to have an edge-block rule", f)
