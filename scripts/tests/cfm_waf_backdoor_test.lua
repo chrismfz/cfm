@@ -74,6 +74,14 @@ do
         "437 shipped default mode is challenge")
   check(snap.rule_php_encoded_opener_b64 == "challenge",
         "438 shipped default mode is challenge")
+  -- 432 promoted logonly → challenge on 2026-07-03 (magic-byte + <?php, gated by
+  -- legit_archive_upload). 430 stays logonly: hand-written `AddType x-httpd-php`
+  -- is a legit shared-hosting directive, so its Apache-directive branches need
+  -- prose-gating before promotion. Pin both so a later change is deliberate.
+  check(snap.rule_php_polyglot_full_body == "challenge",
+        "432 shipped default mode is challenge")
+  check(snap.rule_htaccess_poisoning == "logonly",
+        "430 stays logonly (AddType FP surface in shared hosting)")
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────

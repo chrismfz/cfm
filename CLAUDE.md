@@ -211,9 +211,20 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   hit whose action != `block`). Do **not** key autoblock on reason-family
   alone: a family spans edge tiers — `WAF_BACKDOOR` (430-438) has **no**
   block-tier rule, and `WAF_RCE` mixes block 320 with logonly 322-327, so
-  family-only keying autoblocks logonly recon. Only 4 families have an edge-
-  `block` rule today (`WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME`/`WAF_UPLOAD_CONTENT`)
-  — those are the only ones that can fire in Phase 1.
+  family-only keying autoblocks logonly recon. Families with an edge-`block`
+  rule today: `WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME`/`WAF_UPLOAD_CONTENT` (armed
+  to 1), plus `WAF_WEBSHELL` since 2026-07-03 (rule 413, the proper-noun
+  drop-path subset) — those are the only ones that can fire in Phase 1.
+- **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
+  default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and
+  existing `/etc/cfm/detectors.conf` files don't list the family, so they inherit
+  the armed default on the next binary upgrade. When you promote a rule to
+  `block`, decide the autoblock intent in the SAME change: `WAF_WEBSHELL` is held
+  at `0` in both the code default and the reference config precisely because
+  auto-arming it would nft-ban benign internet scanners (Shodan, Censys, uptime
+  monitors, researchers) that GET `/c99.php` — the edge still 403s that one
+  request (harmless), but a full IP ban of a scanner is not what we want. Arming
+  is a deliberate opt-in per family, after its own burn-in.
 - **The Lua edge de-dups pushes per `(ip, reason)`** within `push_cooldown`
   (`cfm_waf.lua should_push`). Harmless at threshold 1 (first hit is what
   counts), but an accumulate threshold (e.g. 40) counts distinct cooldown

@@ -26,11 +26,17 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	}
 
 	// Every family with an edge-block rule must default ON; a family without one
-	// (except the armed WAF_BACKDOOR) must default 0.
+	// (except the armed WAF_BACKDOOR) must default 0. WAF_WEBSHELL is the one
+	// deliberate exception: it has an edge-block rule (413) but is intentionally
+	// left un-armed (default 0) pending a burn-in — see wafSecurityFamilies.
 	for _, f := range fams {
 		def := cov[f]
 		block := webdetector.WAFFamilyHasBlockRule(f)
 		switch {
+		case f == "WAF_WEBSHELL":
+			if def != 0 {
+				t.Errorf("WAF_WEBSHELL is intentionally un-armed but defaults to %d, want 0", def)
+			}
 		case block && def != 1:
 			t.Errorf("%s has an edge-block rule but defaults to %d, want 1", f, def)
 		case !block && f != "WAF_BACKDOOR" && def != 0:
@@ -39,6 +45,11 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	}
 	if cov["WAF_BACKDOOR"] != 1 {
 		t.Errorf("WAF_BACKDOOR should be armed to 1, got %d", cov["WAF_BACKDOOR"])
+	}
+	// WAF_WEBSHELL now has an edge-block rule (413) — assert it, so if someone
+	// later removes 413 this test's premise is rechecked.
+	if !webdetector.WAFFamilyHasBlockRule("WAF_WEBSHELL") {
+		t.Errorf("expected WAF_WEBSHELL to have an edge-block rule (413)")
 	}
 
 	// Sanity: the four block-tier families are exactly what we expect today.

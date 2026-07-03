@@ -1963,19 +1963,32 @@ end
 -- ─────────────────────────────────────────────────────────────────────────────
 -- PHASE 1 — webshell delivery + reverse shell + webshell ping (W1 / R1 / B5)
 --
--- All three start at logonly per the rollout playbook in docs/waf.md.
--- Promotion happens individually after `cfm webtop waf hit-rates` shows
--- ok_to_promote on a one-week sample.
+-- Landed at logonly per the rollout playbook in docs/waf.md, then promoted on a
+-- one-week `cfm webtop waf hit-rates` sample: the webshell drop-path (W1) and
+-- ping (B5) rules now ship at `challenge`, and the proper-noun subset of drop
+-- names ships at `block` (rule 413). Promote further only on fresh evidence.
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- WEBSHELL_NAMES is a hash-set of literal lowered URI basenames seen in
--- attack samples and uusec/ZhongKui payload corpora. Match is on the URI's
--- final path segment (after the last "/", before "?"), so legitimate paths
--- like `/help/r57.php-explained.html` don't trigger.
---
--- New entries: append the lowered basename. Don't include path prefixes
+-- Webshell drop-name basenames are matched on the URI's final path segment
+-- (after the last "/", before "?"), so legitimate paths like
+-- `/help/r57.php-explained.html` don't trigger. New entries: append the
+-- lowered basename to the appropriate set. Don't include path prefixes
 -- (e.g. `/uploads/c99.php` would never match — `c99.php` is what we test).
-local WEBSHELL_NAMES = {
+--
+-- The list is split by confidence into two tiers (mirrors the 437/438 split):
+--
+--   WEBSHELL_NAMES_KNOWN — proper-noun webshell/tool names with essentially
+--   zero legitimate use (c99, r57, wso, alfa, b374k, indoxploit, p0wny,
+--   aspxspy, jspspy, …). A request for one of these at any path is a drop
+--   probe. Routed to rule 413 (`rule_webshell_path_known`), block-tier.
+--
+--   WEBSHELL_NAMES — generic / ambiguous names that are OVERWHELMINGLY attack
+--   probes but carry a residual false-positive tail: `adminer.php` is a real
+--   DB tool admins deploy, and short numeric/single-letter names (`1.php`,
+--   `x.php`, `a.php`, `shell.php`, `cmd.jsp`) can be a developer's scratch
+--   file. Routed to rule 410 (`rule_webshell_path`), challenge-tier — an
+--   admin solves the challenge once; an automated dropper is stopped cold.
+local WEBSHELL_NAMES_KNOWN = {
   ["c99.php"]            = true,
   ["c99shell.php"]       = true,
   ["r57.php"]            = true,
@@ -1983,17 +1996,24 @@ local WEBSHELL_NAMES = {
   ["b374k.php"]          = true,
   ["wso.php"]            = true,
   ["wsoshell.php"]       = true,
+  ["ws0.php"]            = true,  -- wso/wso-shell variant, not generic "ws"
   ["webshell.php"]       = true,
-  ["shell.php"]          = true,
-  ["mini.php"]           = true,
   ["minishell.php"]      = true,
   ["p0wny.php"]          = true,
   ["p0wny-shell.php"]    = true,
-  ["adminer.php"]        = true,  -- legit DB tool, but operators rarely deploy at site root
   ["alfa.php"]           = true,
   ["alfashell.php"]      = true,
   ["indoxploit.php"]     = true,
-  ["ws0.php"]            = true,
+  ["aspxspy.aspx"]       = true,
+  ["aspxshell.aspx"]     = true,
+  ["jspspy.jsp"]         = true,
+  ["jshell.jsp"]         = true,
+}
+
+local WEBSHELL_NAMES = {
+  ["adminer.php"]        = true,  -- legit DB tool; challenge, never hard-block
+  ["shell.php"]          = true,
+  ["mini.php"]           = true,
   ["ws.php"]             = true,
   ["x.php"]              = true,
   ["xx.php"]             = true,
@@ -2002,17 +2022,15 @@ local WEBSHELL_NAMES = {
   ["2.php"]              = true,
   ["3.php"]              = true,
   ["a.php"]              = true,
-  ["aspxspy.aspx"]       = true,
-  ["aspxshell.aspx"]     = true,
   ["cmd.aspx"]           = true,
   ["cmd.jsp"]            = true,
-  ["jspspy.jsp"]         = true,
-  ["jshell.jsp"]         = true,
 }
 
--- [W1] Webshell drop path. Returns "PATH:<basename>" tag on hit, nil on miss.
+-- [W1] Webshell drop path. Returns "PATH:<basename>", is_known on hit; nil on
+-- miss. `is_known` is true for the block-tier proper-noun set, false for the
+-- ambiguous challenge-tier set — the caller picks the rule id / mode from it.
 -- Pure URI inspection — no body, headers, or normalisation beyond lower().
--- Cost: one lower() + a single string.match for the basename + one set lookup.
+-- Cost: one lower() + a single string.match for the basename + set lookups.
 function _M.detect_webshell_path(uri)
   if not uri or uri == "" then return nil end
 
@@ -2023,8 +2041,11 @@ function _M.detect_webshell_path(uri)
   if not base or base == "" then return nil end
   base = lower(base)
 
+  if WEBSHELL_NAMES_KNOWN[base] then
+    return "PATH:" .. base, true
+  end
   if WEBSHELL_NAMES[base] then
-    return "PATH:" .. base
+    return "PATH:" .. base, false
   end
   return nil
 end
@@ -3177,8 +3198,11 @@ end
 --   AddType application/x-httpd-php .jpg .gif .png
 --   SetHandler application/x-httpd-php
 --   php_value auto_prepend_file /tmp/shell.php
--- Legit plugins write rewrite / cache headers, never `x-httpd-php` and
--- never `auto_prepend_file` — that's enough to anchor on with near-zero FP.
+-- Legit plugins write rewrite / cache headers, not these handler-flip anchors.
+-- NOTE: kept at `logonly` — `AddType application/x-httpd-php` is also a legit
+-- hand-written shared-hosting directive, and the addtype/sethandler/addhandler
+-- branches below are NOT prose-gated (the `.user.ini` branch is), so a body that
+-- merely discusses the directive matches. Add that gating before promoting.
 function _M.detect_htaccess_poisoning(body, _headers)
   if not body or body == "" then return nil end
 

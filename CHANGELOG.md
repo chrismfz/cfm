@@ -106,6 +106,48 @@ back-filled here — see the git/PR history for that period.
   enforcing the tighter value — intended, but verify it's what you want.
 
 ### Security
+- WAF: **split the webshell drop-path rule (410, `WAF_WEBSHELL`) into two
+  confidence tiers and promoted the high-confidence half to `block`.** A
+  6-server log review (mars/earth/titan/virgo/orion/rigel, ~256k WAF records)
+  showed 6522 challenge-tier hits on this rule, almost all GET probes for known
+  webshell drop-names. The proper-noun names with essentially zero legitimate
+  use — `c99`/`c99shell`/`r57`/`r57shell`/`b374k`/`wso`/`wsoshell`/`ws0`/
+  `webshell`/`minishell`/`p0wny`/`alfa`/`alfashell`/`indoxploit`/`aspxspy`/
+  `aspxshell`/`jspspy`/`jshell` — now route to a **new block-tier rule 413
+  (`rule_webshell_path_known`)**. The generic/ambiguous names that carry a
+  residual false-positive tail — `adminer.php` (a real DB tool), and short
+  scratch-file names like `shell.php`/`x.php`/`1.php`/`cmd.jsp` — **stay at
+  `challenge` on rule 410** (an admin solves it once; a dropper is stopped).
+  This mirrors the 437/438 split philosophy: never blanket-promote a family
+  whose members span "always malicious" and "occasionally legitimate." Note
+  `WAF_WEBSHELL` now has an edge-`block` rule (413), making it the **fifth**
+  family eligible to drive `waf_security` autoblock in Phase 1 — but it is held
+  at threshold **0** in **both the code default and the reference
+  `detectors.conf`** (a deliberate exception to the "block-tier family arms to 1"
+  rule), so the split adds **no** autoblock behaviour. This is intentional: a
+  webshell GET-probe (`/c99.php`) is exactly what benign internet scanners
+  (Shodan, Censys, uptime monitors, researchers) do, so auto-arming would nft-ban
+  them fleet-wide. The edge still 403s the individual probe (harmless); an nft IP
+  ban is a separate, deliberate opt-in (`WEBSHELL = 1`) after its own burn-in.
+- WAF: **promoted `WAF_BACKDOOR` rule 432 (`rule_php_polyglot_full_body`)
+  `logonly` → `challenge`** after the same review — image/PDF/ZIP magic + `<?php`
+  anywhere in the body; gated by `not legit_archive_upload`, so a genuine
+  plugin/theme ZIP uploaded via the WordPress installer is carved out. Stays
+  recoverable at `challenge` rather than hard-blocking. **Rule 430
+  (`rule_htaccess_poisoning`) intentionally stays at `logonly`:** an adversarial
+  review flagged that `AddType application/x-httpd-php` is also a legitimate
+  hand-written shared-hosting directive, and the rule's `addtype`/`sethandler`/
+  `addhandler` branches are not prose-gated (only the `.user.ini` branch is), so
+  a forum/ticket/CMS post discussing the directive — or a File-Manager `.htaccess`
+  edit — would trip it. Promotion waits until those branches get the same
+  directive-shaped context gate.
+- WAF: **fixed silent `DefaultMode` drift in the Go rule mirror
+  (`waf_rule_ids.go`).** Rules **410/411/412** (`rule_webshell_path`,
+  `rule_webshell_ping`, `rule_polyglot_upload`) read `logonly` in the Go glossary
+  while the live Lua CFG has run them at `challenge` — the same stale-metadata
+  class as the 437 fix (the parity test checks id↔name, not mode, so it drifted
+  unnoticed). The Go mirror now matches the live modes; this is glossary/CLI
+  metadata only, no runtime behaviour change.
 - WAF: **closed a webshell-upload bypass in the block-tier upload-filename rule
   (401, `WAF_UPLOAD_FNAME`).** `detect_upload_filename` blocked `.php`/`.php5`/
   `.phtml`/`.phar` (and `.jsp`/`.asp`/`.exe`/`.sh`/…) but missed three

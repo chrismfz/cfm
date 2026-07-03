@@ -341,37 +341,70 @@ do
   check(hits[1].waf_rule_id == 320, "18: skip_rule_ids — hits[1] is RCE not traversal")
 end
 
--- ── Test 19: W1 webshell_path — known drop name fires (rule 410) ─────────────
+-- ── Test 19: W1 webshell_path — proper-noun name routes to rule 413 (block) ──
+-- c99.php is in the KNOWN (block-tier) set, so it fires rule 413 regardless of
+-- the ambiguous rule 410's mode.
 do
   disable_all_rules()
-  waf.set_rule("rule_webshell_path", "logonly")
+  waf.set_rule("rule_webshell_path_known", "block")
 
   local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
     uri = "/wp-content/uploads/c99.php",
   }))
-  check(hit == true,                          "19: webshell_path — hit")
-  check(reason == "WAF_WEBSHELL:PATH:c99.php", "19: webshell_path — reason")
-  check(action == "logonly",                   "19: webshell_path — logonly")
-  check(rule_id == 410,                        "19: webshell_path — rule id 410")
+  check(hit == true,                          "19: webshell_path known — hit")
+  check(reason == "WAF_WEBSHELL:PATH:c99.php", "19: webshell_path known — reason")
+  check(action == "block",                     "19: webshell_path known — block")
+  check(rule_id == 413,                        "19: webshell_path known — rule id 413")
 end
 
--- ── Test 20: W1 webshell_path — case-insensitive basename match ──────────────
+-- ── Test 19b: W1 webshell_path — ambiguous name routes to rule 410 (challenge) ─
+-- shell.php is in the ambiguous set (residual FP tail), so it stays at the
+-- challenge-tier rule 410 even when the known/block rule is enabled.
 do
   disable_all_rules()
-  waf.set_rule("rule_webshell_path", "logonly")
+  waf.set_rule("rule_webshell_path", "challenge")
+  waf.set_rule("rule_webshell_path_known", "block")
 
-  local hit, reason = waf.check(fresh_ctx({ uri = "/UPLOADS/R57.PHP?cmd=id" }))
+  local hit, reason, _ttl, action, _hits, rule_id = waf.check(fresh_ctx({
+    uri = "/uploads/shell.php",
+  }))
+  check(hit == true,                            "19b: webshell_path amb — hit")
+  check(reason == "WAF_WEBSHELL:PATH:shell.php", "19b: webshell_path amb — reason")
+  check(action == "challenge",                  "19b: webshell_path amb — challenge")
+  check(rule_id == 410,                         "19b: webshell_path amb — rule id 410")
+end
+
+-- ── Test 20: W1 webshell_path — case-insensitive basename match (known/413) ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_webshell_path_known", "block")
+
+  local hit, reason, _ttl, _action, _hits, rule_id = waf.check(fresh_ctx({ uri = "/UPLOADS/R57.PHP?cmd=id" }))
   check(hit == true,                          "20: webshell_path — case-insensitive hit")
   check(reason == "WAF_WEBSHELL:PATH:r57.php", "20: webshell_path — basename lowered")
+  check(rule_id == 413,                        "20: webshell_path — routes to 413")
 end
 
 -- ── Test 21: W1 webshell_path — non-matching path doesn't fire ───────────────
 do
   disable_all_rules()
-  waf.set_rule("rule_webshell_path", "logonly")
+  waf.set_rule("rule_webshell_path", "challenge")
+  waf.set_rule("rule_webshell_path_known", "block")
 
   local hit = waf.check(fresh_ctx({ uri = "/help/r57.php-explained.html" }))
   check(hit == false, "21: webshell_path — basename mismatch, no hit")
+end
+
+-- ── Test 21b: W1 webshell_path — a known name does NOT fall back to rule 410 ──
+-- If the block-tier rule 413 is disabled, a proper-noun name must go silent,
+-- not degrade to the ambiguous challenge rule.
+do
+  disable_all_rules()
+  waf.set_rule("rule_webshell_path", "challenge")  -- ambiguous rule enabled
+  -- rule_webshell_path_known stays disabled
+
+  local hit = waf.check(fresh_ctx({ uri = "/uploads/c99.php" }))
+  check(hit == false, "21b: known name does not fall back to ambiguous rule 410")
 end
 
 -- ── Test 22: R1 reverse_shell — bash /dev/tcp in args (rule 322) ─────────────
