@@ -106,6 +106,18 @@ back-filled here — see the git/PR history for that period.
   enforcing the tighter value — intended, but verify it's what you want.
 
 ### Security
+- WAF: **closed a webshell-upload bypass in the block-tier upload-filename rule
+  (401, `WAF_UPLOAD_FNAME`).** `detect_upload_filename` blocked `.php`/`.php5`/
+  `.phtml`/`.phar` (and `.jsp`/`.asp`/`.exe`/`.sh`/…) but missed three
+  PHP/SSI alt-handlers that shared hosts commonly map to an interpreter, so a
+  malicious multipart upload named `shell.pht`, `shell.phtm`, or `page.shtml`
+  reached origin: **`.pht`, `.phtm`, and `.shtml`/`.shtm`** (SSI can run
+  `#exec`/`#include`) are now matched — including double-extension forms
+  (`x.pht.jpg`). Same block-tier enforcement as the existing dangerous
+  extensions; the narrow legit-PHP-upload endpoint carve-outs still apply.
+  `.phps` (PHP source viewer, lower execution risk) is **deliberately left out**
+  to limit false-positive surface. New coverage test:
+  `scripts/tests/cfm_waf_upload_fname_test.lua`.
 - WAF: **promoted the SQLi families after a clean 6-server FP review** (2026-07,
   titan/virgo/orion/rigel/earth/mars): `rule_sqli` (301, `WAF_SQLI`)
   `challenge` → **`block`** (24/24 true positives, 0 FP — time-based/union/

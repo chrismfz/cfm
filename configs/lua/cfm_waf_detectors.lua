@@ -1813,7 +1813,13 @@ function _M.detect_upload_filename(body, headers)
 
     -- Extension checks: match anywhere in filename to catch double-extensions
     if fname:match("%.php[%d]?[^%w]") or fname:match("%.php[%d]?$") then return "php" end
-    if fname:match("%.phtml")   then return "phtml" end
+    -- PHP alt-handlers Apache/LiteSpeed commonly map to the engine, and SSI
+    -- pages. These slip past the .php[%d] matcher above: .phtml/.phtm, the bare
+    -- .pht, and .shtml/.shtm (Server-Side Includes can run #exec/#include).
+    -- Same webshell class as the extensions below — 401 is a block-tier rule.
+    if fname:match("%.phtm")    then return "phtml" end  -- .phtm and .phtml
+    if fname:match("%.pht[^%w]") or fname:match("%.pht$") then return "pht" end
+    if fname:match("%.shtm")    then return "shtml" end  -- .shtm and .shtml (SSI)
     if fname:match("%.phar")    then return "phar" end
     if fname:match("%.asp[x]?") then return "asp" end
     if fname:match("%.asa[x]?") then return "asa" end
