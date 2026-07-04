@@ -82,6 +82,15 @@ back-filled here — see the git/PR history for that period.
   matched — the doc still listed it).
 
 ### Fixed
+- ClamAV upload scan: **narrowed the resumed-POST scan exclusion to the
+  challenge action only.** The replayed-POST follow-up excluded *every* resumed
+  POST from `clamav.notify`, but only the `challenge` re-hit is force-blocked
+  (`block_replayed`); a resumed POST whose hit degrades to `logonly` on replay
+  (e.g. the original challenge came from a burst-window rule that is quiet by
+  replay time while a logonly rule still matches) reaches origin and was
+  slipping through **unscanned**. The gate now skips the scan only for
+  `challenge`-action resumed POSTs, restoring the "scan everything the WAF lets
+  through" invariant.
 - Challenge: **`/.well-known/` requests no longer feed the log-driven per-IP
   challenge heuristics**, so a CA's ACME/DCV validator can't be mistaken for a
   scanner. A validator (e.g. Let's Encrypt / AutoSSL) legitimately hits many
