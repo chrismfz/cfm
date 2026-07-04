@@ -1668,6 +1668,29 @@ do
   check(reason == "WAF_BAD_UTF8:UTF8_OVERLONG",   "77c: bad_utf8 — exact tag UTF8_OVERLONG (got " .. tostring(reason) .. ")")
 end
 
+-- ── Test 77c-bin: rule_bad_utf8 — RAW image/jpeg body (non-multipart) --------
+-- The WP REST media endpoint (POST /wp-json/wp/v2/media) uploads a raw image
+-- with `Content-Type: image/jpeg` — NOT multipart/form-data. Those raw JPEG
+-- bytes contain 0xC0/0xC1+continuation and E0/F0 overlong sequences that WOULD
+-- trip the body walk. Rule 611 must skip ANY non-textual body CT, not just
+-- multipart (production FP: a legit Greek admin on mygreecetours.org logged
+-- WAF_BAD_UTF8:UTF8_OVERLONG on every media upload, 2026-07-04).
+do
+  disable_all_rules()
+  waf.set_rule("rule_bad_utf8", "logonly")
+
+  -- Raw JPEG: SOI + APP0/JFIF + an explicit 2-byte overlong 0xC0 0xAF that
+  -- would return UTF8_OVERLONG if the body were walked.
+  local jpeg = "\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xFF\xC0\x00\x11\x08\xC0\xAF\x02\x00\xFF\xDB\x00\x43\x00"
+  local hit, reason = waf.check(fresh_ctx({
+    body   = jpeg,
+    method = "POST",
+    uri    = "/wp-json/wp/v2/media",
+    headers = { ["content-type"] = "image/jpeg" },
+  }))
+  check(hit == false, "77c-bin: bad_utf8 — raw image/jpeg body must NOT fire (got reason=" .. tostring(reason) .. ")")
+end
+
 -- ── Test 77d: rule_ssrf — SSRF_FTP suppressed on /wp-admin/ ---------------
 -- Real Greek admins using WP All Import (pmxi-*) plugins were challenged
 -- because the plugin stores ftp:// URLs in its options table. The carve

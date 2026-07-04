@@ -3030,19 +3030,23 @@ function _M.detect_bad_utf8(args, body, headers, uri)
   local tag = utf8_walk(normalize(cap(args or "", CFG.max_scan_len)))
   if tag then return tag end
 
-  -- Skip the body walk for multipart/form-data. File parts carry raw binary
-  -- (JPEG / WebP / PNG / ZIP) whose bytes routinely form 0xC0/0xC1 +
-  -- continuation pairs (JPEG SOF markers 0xFFC0/0xFFC1 etc.) and E0/F0 leads
-  -- that decode to overlong / surrogate / out-of-range codepoints — none of
-  -- which are encoding-bypass primitives, just binary that isn't UTF-8 text.
-  -- The args walk above still covers the URL/path-traversal vector, and the
-  -- non-multipart body walk below still covers urlencoded / JSON / XML text
-  -- bodies (so the overlong-slash bypass in test 77c keeps firing).
-  -- Production FP this removes: every Greek-admin product-image save on
-  -- e-vafeiadis.gr was logging WAF_BAD_UTF8:UTF8_OVERLONG (2026-06-04).
+  -- Walk the body only for TEXTUAL content types (urlencoded / JSON / XML /
+  -- text, or an empty CT). Binary uploads carry raw bytes (JPEG / WebP / PNG /
+  -- ZIP) that routinely form 0xC0/0xC1 + continuation pairs (JPEG SOF markers
+  -- 0xFFC0/0xFFC1 etc.) and E0/F0 leads decoding to overlong / surrogate /
+  -- out-of-range codepoints — none of which are encoding-bypass primitives,
+  -- just binary that isn't UTF-8 text. This mirrors the ctrl-chars (601) and
+  -- webshell-body (404) gating, which already skip any non-textual CT. Rule 611
+  -- previously skipped only `multipart/form-data`, so a RAW binary upload on a
+  -- non-multipart endpoint still FP'd — e.g. the WP REST media route POSTs a
+  -- raw JPEG to /wp-json/wp/v2/media with `Content-Type: image/jpeg` (a legit
+  -- Greek admin on mygreecetours.org logged WAF_BAD_UTF8:UTF8_OVERLONG on every
+  -- image upload, 2026-07-04). The args walk above still covers the URL /
+  -- path-traversal vector, and the textual-body walk below still covers the
+  -- urlencoded / JSON / XML overlong-slash bypass (test 77c keeps firing).
   headers = headers or {}
   local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
-  if has(ct, "multipart/form-data") then return nil end
+  if not is_textual_body_content_type(ct) then return nil end
 
   return utf8_walk(normalize(cap(body or "", CFG.max_scan_len)))
 end

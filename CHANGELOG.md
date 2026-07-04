@@ -82,6 +82,18 @@ back-filled here — see the git/PR history for that period.
   matched — the doc still listed it).
 
 ### Fixed
+- WAF: **rule 611 (`WAF_BAD_UTF8`) no longer false-positives on raw binary
+  uploads.** The detector already skipped `multipart/form-data` bodies, but the
+  WordPress REST media endpoint (`POST /wp-json/wp/v2/media`) uploads a raw image
+  with `Content-Type: image/jpeg` — not multipart — so the JPEG's bytes walked
+  into the UTF-8 check and logged `UTF8_OVERLONG` on every legit media upload (a
+  Greek admin on `mygreecetours.org` was hitting it repeatedly). The body walk is
+  now gated on a *textual* content-type (`is_textual_body_content_type`), matching
+  the sibling ctrl-chars (601) and webshell-body (404) detectors — so raw
+  `image/*` / `application/octet-stream` / etc. bodies are skipped via any
+  endpoint, while the urlencoded/JSON/XML overlong-slash bypass detection is
+  unchanged. Rule 611 is `logonly`, so this was log noise, not a block. New test
+  covers the raw `image/jpeg` case.
 - ClamAV upload scan: **narrowed the resumed-POST scan exclusion to the
   challenge action only.** The replayed-POST follow-up excluded *every* resumed
   POST from `clamav.notify`, but only the `challenge` re-hit is force-blocked
