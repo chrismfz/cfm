@@ -3,8 +3,8 @@ module cfm
 go 1.25.0
 
 require (
-	github.com/chrismfz/goauth v0.0.0-20260418131111-bb92ffe218a5
-	github.com/cilium/ebpf v0.21.0
+	github.com/chrismfz/goauth v0.0.0-20260617232651-98a54bb7486b
+	github.com/cilium/ebpf v0.22.0
 	github.com/florianl/go-nflog/v2 v2.3.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gizak/termui/v3 v3.1.0
@@ -15,12 +15,12 @@ require (
 	github.com/miekg/dns v1.1.72
 	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/crypto v0.52.0
-	golang.org/x/sync v0.20.0
-	golang.org/x/sys v0.45.0
-	golang.org/x/term v0.43.0
-	golang.org/x/text v0.37.0
-	modernc.org/sqlite v1.51.0
+	golang.org/x/crypto v0.53.0
+	golang.org/x/sync v0.21.0
+	golang.org/x/sys v0.46.0
+	golang.org/x/term v0.44.0
+	golang.org/x/text v0.38.0
+	modernc.org/sqlite v1.53.0
 )
 
 require (
@@ -52,10 +52,10 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/mod v0.36.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/tools v0.45.0 // indirect
-	modernc.org/libc v1.72.5 // indirect
+	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
+	modernc.org/libc v1.73.5 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
