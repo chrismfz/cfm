@@ -46,6 +46,20 @@ back-filled here — see the git/PR history for that period.
   `docs/waf-autoblock-design.md`.
 
 ### Changed
+- ClamAV upload scan: **only scan uploads the WAF let through** — the edge
+  (`cfm.lua`) no longer fires `clamav.notify` on a request the WAF is about to
+  **block** (`waf_action == "block"`). A WAF block already stops the malware at
+  the edge, so scanning the same payload wasted ClamAV resources and produced a
+  redundant infected-upload notification; the scan's value is the **rule-gap
+  insight** (and alert) when a malicious upload slips *past* the WAF. Uploads
+  that pass clean, or hit only a `logonly`/`challenge` rule, or arrive with the
+  WAF failing to load (not-run, the module-load fallback), are still scanned
+  exactly as before. No config change. **Deliberate tradeoff:** skipping the
+  scan on WAF-blocked uploads also drops, for those requests, the infected-upload
+  email as a compromised-account signal and the ClamAV-clean "second opinion"
+  used to exonerate a WAF false-positive block — accepted, since a WAF block
+  already stopped the payload and the scan's value is the pass-through rule-gap
+  case.
 - WAF: **split the encoded-`<?php` backdoor opener (rule 437) into two rule ids**
   — `rule_php_encoded_opener` (437, the URL/HTML-entity/JS-escape forms) and the
   new `rule_php_encoded_opener_b64` (438, the base64 `PD9waHA` form). One

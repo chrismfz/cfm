@@ -1372,7 +1372,6 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
     -- to push the snapshot to Go without needing an init_worker timer.
     waf_insp_incr(host)
     maybe_flush_waf_insp()
-    if clamav_ok then clamav.notify(ip, hit and reason or nil) end
     if hit then
       waf_action = waf_action or "challenge"
       local p_host = ngx.var.host or host
@@ -1397,6 +1396,21 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
           converted_from_challenge = true
           if CFG.debug_headers then ngx.header["X-CFM-WAF-Converted"] = converted end
         end
+      end
+
+      -- ClamAV upload scan (notify-only): spend it only when the WAF did NOT
+      -- block this request. A `block` already stops the malware at the edge,
+      -- so rescanning the same payload wastes ClamAV resources and produces a
+      -- redundant infected-upload notification. For everything else — a clean
+      -- pass, a logonly hit, or a challenge — the payload either reaches origin
+      -- or is a rule-gap signal worth an alert, which is exactly what the scan
+      -- is for. (Gated on the routing action, taken after the post-clearance
+      -- challenge→block promotion so a promoted block is correctly skipped.)
+      -- A resumed POST that re-hits a rule is force-blocked below
+      -- (block_replayed) while waf_action is still "challenge", so exclude it
+      -- too — otherwise we'd scan a payload we're about to 403.
+      if clamav_ok and waf_action ~= "block" and not ngx.ctx.cfm_resumed_post then
+        clamav.notify(ip, reason)
       end
 
       if waf_action == "logonly" then
@@ -1448,6 +1462,9 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         (waf_rule_id and (" waf_rule_id=" .. tostring(waf_rule_id)) or ""))
       if waf_action == "block" then return ngx.exit(CFG.block_code) end
       return
+    else
+      -- No WAF rule fired: the upload passed the WAF cleanly, so scan it.
+      if clamav_ok then clamav.notify(ip, nil) end
     end
   end
 end
