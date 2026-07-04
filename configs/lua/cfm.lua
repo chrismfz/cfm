@@ -1406,7 +1406,12 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- or is a rule-gap signal worth an alert, which is exactly what the scan
       -- is for. (Gated on the routing action, taken after the post-clearance
       -- challenge→block promotion so a promoted block is correctly skipped.)
-      if clamav_ok and waf_action ~= "block" then clamav.notify(ip, reason) end
+      -- A resumed POST that re-hits a rule is force-blocked below
+      -- (block_replayed) while waf_action is still "challenge", so exclude it
+      -- too — otherwise we'd scan a payload we're about to 403.
+      if clamav_ok and waf_action ~= "block" and not ngx.ctx.cfm_resumed_post then
+        clamav.notify(ip, reason)
+      end
 
       if waf_action == "logonly" then
         ngx.header["X-CFM-Action"] = converted_from_challenge and "logonly_pc" or "logonly"
