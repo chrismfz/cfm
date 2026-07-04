@@ -54,14 +54,10 @@ type Config struct {
 
 	SmartAlert, MdadmAlert, ZfsAlert bool
 
-	PortWatch  []int
-	PortSpikeX float64
-
 	// Minimum absolute counts required for spike-style alerts to fire
 	ConnTotalMin   int // default 50
 	EstablishedMin int // default 30
 	SynRecvMin     int // default 50
-	PortConnMin    int // default 50
 	// Optional: require a minimum absolute jump vs baseline for spike alerts
 	SpikeMinDelta int // default 10
 
@@ -117,9 +113,6 @@ func New(cfg Config) *Detector {
 	if cfg.SynRecvMin == 0 {
 		cfg.SynRecvMin = 50
 	}
-	if cfg.PortConnMin == 0 {
-		cfg.PortConnMin = 50
-	} // aligns with your current hardcoded 50
 	if cfg.SpikeMinDelta == 0 {
 		cfg.SpikeMinDelta = 10
 	}
@@ -223,8 +216,7 @@ type Snapshot struct {
 	DiskTmpPct  float64
 	DiskStats   []DiskStat
 
-	TCP      map[string]int // state counts incl total
-	PortConn map[int]int    // approx per-local-port active conns
+	TCP map[string]int // state counts incl total
 
 	RxMbps, TxMbps float64
 
@@ -348,8 +340,8 @@ func (d *Detector) snapshot() Snapshot {
 		}
 	}
 
-	// TCP states + per-port
-	s.TCP, s.PortConn = readTCPandPorts()
+	// TCP states
+	s.TCP = readTCPStates()
 
 	// Throughput (deltas since previous RunOnce)
 	s.RxMbps, s.TxMbps = d.readThroughput()
@@ -372,7 +364,7 @@ func (d *Detector) snapshot() Snapshot {
 		"cpu_cores": s.CPUCores, "load1": s.Load1,
 		"ram_used_pct": s.RamUsedPct, "disk_root_pct": s.DiskRootPct, "disk_tmp_pct": s.DiskTmpPct,
 		"disk_stats": s.DiskStats,
-		"tcp":        s.TCP, "port_conn": s.PortConn,
+		"tcp":        s.TCP,
 		"rx_mbps": s.RxMbps, "tx_mbps": s.TxMbps,
 		"temp_max_c": s.TempMaxC, "mdadm": s.Mdadm, "zfs": s.Zfs, "smart": s.Smart,
 	}
@@ -548,13 +540,12 @@ func isPseudoFSType(fsType string) bool {
 }
 
 // Parse /proc/net/tcp and /proc/net/tcp6
-// Return (stateCounts, perPortConn)
-func readTCPandPorts() (map[string]int, map[int]int) {
+// Return stateCounts (incl "total").
+func readTCPStates() map[string]int {
 	states := map[string]int{
 		"ESTABLISHED": 0, "SYN_SENT": 0, "SYN_RECV": 0, "FIN_WAIT1": 0, "FIN_WAIT2": 0,
 		"TIME_WAIT": 0, "CLOSE": 0, "CLOSE_WAIT": 0, "LAST_ACK": 0, "LISTEN": 0, "CLOSING": 0,
 	}
-	perPort := map[int]int{}
 	read := func(path string) {
 		f, err := os.Open(path)
 		if err != nil {
@@ -575,16 +566,9 @@ func readTCPandPorts() (map[string]int, map[int]int) {
 			if len(fields) < 4 {
 				continue
 			}
-			// local_address: "HHHHHHHH:PPPP"
-			lp := fields[1]
 			stateHex := fields[3]
-			// state
 			if st := tcpStateName(stateHex); st != "" {
 				states[st]++
-			}
-			// per-port (LISTEN/EST/..)
-			if p := parseHexPort(lp); p > 0 {
-				perPort[p]++
 			}
 		}
 	}
@@ -595,7 +579,7 @@ func readTCPandPorts() (map[string]int, map[int]int) {
 		total += v
 	}
 	states["total"] = total
-	return states, perPort
+	return states
 }
 
 func tcpStateName(hexcode string) string {
@@ -626,17 +610,6 @@ func tcpStateName(hexcode string) string {
 	default:
 		return ""
 	}
-}
-
-func parseHexPort(local string) int {
-	// local like "0100007F:1F90"
-	col := strings.IndexByte(local, ':')
-	if col < 0 {
-		return 0
-	}
-	phex := local[col+1:]
-	p, _ := strconv.ParseInt(phex, 16, 32)
-	return int(p)
 }
 
 // Throughput from /proc/net/dev deltas (excluding "lo")
@@ -1380,30 +1353,6 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 		emitS("HEALTH/SYN_RECV_SPIKE", "net.syn", samples)
 	}
 
-	// --- Per-port spikes (watchlist) ---
-	for p, c := range s.PortConn {
-		if !containsInt(d.cfg.PortWatch, p) {
-			continue
-		}
-		key := "port." + strconv.Itoa(p)
-		b := upd(key, float64(c))
-		if c >= d.cfg.PortConnMin &&
-			float64(c) > d.cfg.PortSpikeX*b &&
-			c-int(b) >= d.cfg.SpikeMinDelta {
-			samples := []string{
-				fmt.Sprintf("Spike on tcp/%d  conns=%d  baseline≈%.0f  x=%.2f", p, c, b, float64(c)/maxf(b, 1)),
-			}
-			if d.cfg.SpikeProbeTopN > 0 {
-				top := d.probeTopTalkers(p, []string{"SYN_RECV", "ESTABLISHED"}, d.cfg.SpikeProbeTopN)
-				if len(top) > 0 {
-					samples = append(samples, "Top talkers:")
-					samples = append(samples, top...)
-				}
-			}
-			emitS("HEALTH/PORT_CONN_SPIKE", key, samples)
-		}
-	}
-
 	// throughput spikes (now with samples)
 	bRx := upd("rx", s.RxMbps)
 	bTx := upd("tx", s.TxMbps)
@@ -1505,15 +1454,6 @@ func (d *Detector) cool(key string, now time.Time) bool {
 	}
 	d.last[key] = now
 	return true
-}
-
-func containsInt(slice []int, v int) bool {
-	for _, x := range slice {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 func maxf(a, b float64) float64 {

@@ -509,7 +509,7 @@ func matchOverride(c *config, ev Event) (detectorOverride, bool) {
 	root := kind
 	if i := strings.Index(kind, "/"); i > 0 {
 		root = kind[:i]
-	} // e.g., "health" from "HEALTH/PORT_CONN_SPIKE"
+	} // e.g., "health" from "HEALTH/CONN_EST_SPIKE"
 
 	// priority: exact section → exact kind → kind root → "*" default
 	if ov, ok := c.Detectors[sec]; ok && sec != "" {
