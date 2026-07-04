@@ -23,11 +23,18 @@ import (
 // (edge-only). WAF_BACKDOOR is armed to 1 as well even though it has no block
 // rule yet, so it autoblocks the moment one of its rules (e.g. 438) is promoted
 // to block after that rule's own burn-in.
+//
+// WAF_WEBSHELL is the deliberate EXCEPTION: it gained an edge-`block` rule (413,
+// the proper-noun webshell drop-path subset) on 2026-07-03, but is left at 0
+// (not auto-armed) so the split doesn't silently turn a webshell GET-probe into
+// a 6h nft ban on every deployment — existing /etc/cfm/detectors.conf files
+// that don't list WEBSHELL would otherwise inherit the armed default. Arming it
+// is a one-line opt-in (WEBSHELL = 1) after its own burn-in.
 func wafSecurityFamilies(kv KV) map[string]int {
 	families := map[string]int{}
 	for _, fam := range webdetector.WAFReasonFamilies() {
 		def := 0
-		if webdetector.WAFFamilyHasBlockRule(fam) || fam == "WAF_BACKDOOR" {
+		if (webdetector.WAFFamilyHasBlockRule(fam) && fam != "WAF_WEBSHELL") || fam == "WAF_BACKDOOR" {
 			def = 1
 		}
 		key := strings.TrimPrefix(fam, "WAF_")
@@ -44,6 +51,7 @@ func init() {
 		DefaultsTemplate: map[string]string{
 			"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0",
 			"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BACKDOOR": "1",
+			"WEBSHELL": "0", // has an edge-block rule (413) but held un-armed; opt in with 1
 			"BLOCK": "6h",
 		},
 		LeniencySupported:   true,

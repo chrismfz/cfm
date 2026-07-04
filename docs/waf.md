@@ -527,6 +527,7 @@ Current assignments:
   402  rule_upload_content             410  rule_webshell_path
   403  rule_upload_obfuscation         411  rule_webshell_ping
   404  rule_php_webshell_body          412  rule_polyglot_upload
+                                       413  rule_webshell_path_known
                                        421  rule_php_split_string_canary
                                        422  rule_php_dropper_wget_curl
                                        423  rule_php_dropper_markers
@@ -576,7 +577,7 @@ The `rule_id` field returned by the bridge's `/nginx/decision` endpoint is a **s
 
 ---
 
-## Backdoor / obfuscation family (430-437)
+## Backdoor / obfuscation family (430-438)
 
 Reason family **`WAF_BACKDOOR`** (added to `_M.WAF_HIGH_RISK_REASONS` so post-clearance challenges still escalate to block when these rules are promoted past `logonly`). Source workload for the initial set: a 2026-05-19 captured PHP webshell deployed as `wp-content/themes/bridge/includes/radio.php` — char-pool-obfuscated PDF-polyglot loader.
 
@@ -592,7 +593,9 @@ The rules are split deliberately so each catches a different *class* of evasion.
 
 **Tags:** `HTACCESS_ADDTYPE_PHP`, `HTACCESS_SETHANDLER_PHP`, `HTACCESS_ADDHANDLER_PHP`, `HTACCESS_AUTO_PREPEND`, `HTACCESS_AUTO_APPEND`, `USER_INI_AUTO_PREPEND`, `USER_INI_AUTO_APPEND`, `HTACCESS_EXEC_CGI`.
 
-**FP notes:** legitimate plugin `.htaccess` content (`RewriteRule`, `ExpiresByType`, `AddType image/svg+xml`) does not contain `x-httpd-php` or `auto_prepend_file` — anchor terms are malware-only in upload bodies.
+**FP notes:** legitimate plugin `.htaccess` content (`RewriteRule`, `ExpiresByType`, `AddType image/svg+xml`) does not contain the handler-flip anchors. **Caveat for shared hosting:** `AddType application/x-httpd-php .php` is also a *legitimate* hand-written directive an admin/host uses to force PHP in a directory, and the three Apache-directive branches (`addtype`/`sethandler`/`addhandler`) are **not** prose-gated the way the `.user.ini` branch is — so a forum/ticket/CMS POST that merely *discusses* the directive, or a File-Manager `.htaccess` edit, matches. Unlike rule 432, this rule is **not** gated by `legit_archive_upload` either.
+
+**Tier:** stays at `logonly` (observe-only). Promotion to `challenge` is deferred until the three Apache-directive branches get the same prose-gate (require a directive-shaped context, not the bare token) that the `.user.ini` branch already has; until then the shared-hosting FP surface above rules out interrupting.
 
 ### Rule 431 — `rule_php_char_pool_obfuscation`
 
@@ -628,6 +631,8 @@ $IDC3B = $t_Ohw[61].$t_Ohw[7].$t_Ohw[34]…;  // builds "gzinflate"
 **Tags:** `POLYGLOT_DEEP_PDF`, `POLYGLOT_DEEP_JPEG`, `POLYGLOT_DEEP_PNG`, `POLYGLOT_DEEP_GIF`, `POLYGLOT_DEEP_ZIP`, `POLYGLOT_DEEP_BMP`, `POLYGLOT_DEEP_RIFF`.
 
 **FP notes:** image / PDF / ZIP files do not legitimately contain `<?php` tokens — the magic-byte gate plus the PHP-opener gate together are malware-only. **Caveat (fixed 2026-06-04):** the 5-byte `<?php` opener is binary-safe, but the 3-byte `<?=` short-echo opener (`3C 3F 3D`) collides with high-entropy binary roughly once per ~16 MB of image data — it fired `POLYGLOT_DEEP_*` (and rule 402 `UPLOAD_PHP_TAG`) on innocent WebP/JPEG product-photo uploads (e-vafeiadis.gr: the same product save alternated 200/403 across retries, proving a content-dependent collision). `<?=` is now matched only when followed by an actual PHP expression — an optional `@`, then a variable/superglobal (`$`), backtick exec, quoted string, `(`, or a function call `name(` whose name may contain digits (`base64_decode(`, `md5(`, `str_rot13(`) — via `has_php_short_echo`. This keeps the input-driven short-tag webshell shapes (including superglobal-free ones like `<?=base64_decode(file_get_contents('php://input'))`) while removing the binary-collision FP. The remaining unmatched forms (e.g. a numeric echo `<?=1`) are not exploitable webshell openers.
+
+**Tier:** stays at `logonly`. It was briefly promoted to `challenge`, but `WAF_BACKDOOR` is a high-risk reason, so for a client holding a valid clearance cookie the challenge is converted to a **block** (`post_clearance_action`) — and because the `BACKDOOR` family is autoblock-armed (`detectors.conf`), that converted block can earn a **6h nft ban** of a logged-in customer who uploads e.g. a PDF containing the literal string `<?php` via a raw-body endpoint. (Multipart uploads never trip 432 — the body starts with the boundary, not the file magic — so the risk is raw-body uploads.) Promote only after post-clearance-converted hits are excluded from the Phase-1 autoblock feed.
 
 ### Rule 433 — `rule_php_eval_loader_b64`
 
@@ -1186,7 +1191,8 @@ The original detector / engine roadmap is shipped end-to-end. Every item is now 
 | **R2** Persistence (cron / systemd / bashrc / authorized_keys) | 323 | |
 | **R3** Rootkit artifacts (`LD_PRELOAD`, `/etc/ld.so.preload`, `/dev/mem`) | 324 | |
 | **R4** LOLbins (`certutil -urlcache`, `bitsadmin /transfer`, `-EncodedCommand`, `iex(iwr`) | 325 | scores with base64 detector when combined |
-| **W1** Known webshell path names (`/c99.php`, `/r57.php`, …) | 410 | 28-name set, URI basename match |
+| **W1** Ambiguous webshell path names (`/shell.php`, `/x.php`, `/adminer.php`, `/alfa.php`, …) | 410 | challenge-tier; URI basename match, residual-FP names (generic/short + real-word/brand: `adminer.php`, `alfa.php`) |
+| **W1k** Proper-noun webshell path names (`/c99.php`, `/r57.php`, `/wso.php`, `/b374k.php`, …) | 413 | block-tier split of W1 (2026-07-03); near-zero legit use, so hard-blocked |
 | **W2** Webshell magic strings in body (`b374k`, `WSO 2.5`, `@eval(`, …) | 404 | scored; covers `b374k` / `c99shell` / `r57shell` / `wso 2./4./5.` / `weevelyshell` / `filesman` |
 | **W3** PHP function obfuscation (`\x65val`, `chr().chr()…`, `hex2bin($_POST[`) | 405 | shared scorer across body and upload paths |
 | **W4** Polyglot upload (image CT/ext + `<?php`/`<?=`/`<%`/`<script` in first 64 B) | 412 | required a multipart parser; also unblocked W2/W3 in upload context |
@@ -1274,7 +1280,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 > **Legit PHP-archive upload carve-out (fixed 2026-06-05).** Rules 401/402/403 and the 431–436 backdoor-content family stand down when `is_known_legit_php_upload_endpoint(uri, args)` matches — the Code Snippets REST flow and, added here, the **WordPress plugin/theme installer** (`/wp-admin/update.php?action=upload-plugin` / `upload-theme`). A plugin/theme `.zip` legitimately contains PHP (often obfuscated in commercial products), so on that authenticated, cookie-auth-gated path the PHP that is the payload must not be flagged — a plugin named e.g. `foo-block.php.zip` also tripped the double-extension filename rule. Media uploads (`async-upload.php`) are **not** exempted: a PHP opener inside a claimed image there is still a polyglot. (437/438 keep their own broader `/wp-admin/` carve-out for snippet-save plugins.)
 | 30 | Script obfuscation | Shared scorer (long-b64 / decode-helpers / eval / atob / XOR / chr-storm) | `cfm_waf_detectors.lua:1730` + `cfm_waf_util.lua:115` |
 | 31 | Upload obfuscation | Same scorer on multipart | `cfm_waf_detectors.lua:1753` |
-| 32 | Webshell path | URI basename ∈ 28-name set | `cfm_waf_detectors.lua:1817` |
+| 32 | Webshell path | URI basename ∈ 32-name set, split by confidence: proper-noun names → rule 413 (block), ambiguous/generic → rule 410 (challenge) | `cfm_waf_detectors.lua` `detect_webshell_path` |
 | 33 | Reverse shell | 24 literal one-liner needles | `cfm_waf_detectors.lua:1897` |
 | 34 | Persistence | crontab / cron.d / systemd / bashrc / authorized_keys with `>>`/`>` | `cfm_waf_detectors.lua:1981` |
 | 35 | Rootkit | `LD_PRELOAD=/`, `/etc/ld.so.preload`, `insmod /tmp/`, `/dev/mem` | `cfm_waf_detectors.lua:2013` |
