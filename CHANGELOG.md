@@ -241,6 +241,18 @@ back-filled here — see the git/PR history for that period.
   `PD89` detection was dropped rather than kept as logonly noise. Rule 436
   (`php_decode_chain`) stays `logonly` (0 hits across all five servers).
 
+### Removed
+- health detector: **removed the `HEALTH/PORT_CONN_SPIKE` per-port connection
+  spike alert entirely.** The approximate per-local-port connection count (split
+  out of `/proc/net/tcp{,6}`) was too noisy to be actionable and generated
+  months of false positives / false alerts. The related config knobs
+  (`PORT_WATCH`, `PORT_SPIKE_X`, `PORT_CONN_MIN`) are gone from
+  `configs/detectors.conf` and are now silently ignored if left in an existing
+  `/etc/cfm/detectors.conf`; the `port_conn` map is also dropped from the health
+  snapshot JSON body. The aggregate connection-state spikes
+  (`HEALTH/CONN_TOTAL_SPIKE`, **`HEALTH/CONN_EST_SPIKE`**, `HEALTH/SYN_RECV_SPIKE`)
+  and the SYN_RECV / all-port talker probes are unchanged.
+
 ### Added
 - MySQL governor: scoped (cPanel) users can now **kill their own stuck
   query/connection** — `POST /api/v1/mysql/user-kill?id=<pid>&type=query|connection`

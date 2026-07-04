@@ -1,7 +1,6 @@
 package detectors
 
 import (
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,20 +21,6 @@ func init() {
 		defEvery := kvDur(global, "DEFAULT_EVERY", 10*time.Second)
 		defWindow := kvDur(global, "DEFAULT_WINDOW", 2*time.Minute)
 		defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 15*time.Minute)
-
-		var ports []int
-
-		if p := kvStrClean(kv, "PORT_WATCH", ""); p != "" {
-			for _, s := range strings.Split(p, ",") {
-				s = strings.TrimSpace(s)
-				if s == "" {
-					continue
-				}
-				if n, err := strconv.Atoi(s); err == nil && n > 0 {
-					ports = append(ports, n)
-				}
-			}
-		}
 
 		// --- Enrichment options ---
 		enrichOn := kvBool(kv, "ENRICH", true)
@@ -74,7 +59,6 @@ func init() {
 			ConnTotalMin:   kvInt(kv, "CONN_TOTAL_MIN", 50),
 			EstablishedMin: kvInt(kv, "ESTABLISHED_MIN", 30),
 			SynRecvMin:     kvInt(kv, "SYN_RECV_MIN", 50),
-			PortConnMin:    kvInt(kv, "PORT_CONN_MIN", 50),
 			SpikeMinDelta:  kvInt(kv, "SPIKE_MIN_DELTA", 10),
 
 			ThruSpikeX:  kvFlt(kv, "THROUGHPUT_SPIKE_X", 4.0),
@@ -88,9 +72,6 @@ func init() {
 			SmartAlert: kvBool(kv, "SMART_FAIL_ALERT", true),
 			MdadmAlert: kvBool(kv, "MDADM_ALERT", true),
 			ZfsAlert:   kvBool(kv, "ZFS_ALERT", true),
-
-			PortWatch:  ports,
-			PortSpikeX: kvFlt(kv, "PORT_SPIKE_X", 3.0),
 
 			// enrichment
 			SpikeProbeTopN: spikeTopN,
