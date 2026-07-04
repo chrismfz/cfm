@@ -187,24 +187,28 @@ COOLDOWN = "20m"
 ; `block`, and the config key for a family is its name minus WAF_ (so the
 ; grouped `UPLOAD_EXPLOIT` below is really two keys, UPLOAD_FNAME + UPLOAD_
 ; CONTENT). Because only edge-`block` hits feed, only families that HAVE a
-; block-tier rule can ever fire in Phase 1 — today exactly four: WAF_SQLI (301),
-; WAF_RCE (320), WAF_UPLOAD_FNAME (401), WAF_UPLOAD_CONTENT (402). They default
-; to 1. BACKDOOR has no block rule yet (430-438 are logonly/challenge) so it is
-; inert, but is armed to 1 so it fires the moment one (e.g. 438) is promoted.
-; Every family is a knob and the full registry is covered automatically
-; (TestWAFSecurityFamilyCoverage); families without a block rule are inert until
-; Phase 2 relaxes the action gate.
+; block-tier rule can ever fire in Phase 1 — today five: WAF_SQLI (301),
+; WAF_RCE (320), WAF_UPLOAD_FNAME (401), WAF_UPLOAD_CONTENT (402), and
+; WAF_WEBSHELL (413, the proper-noun drop-path subset, added 2026-07-03). The
+; first four default to 1. WAF_WEBSHELL is the deliberate EXCEPTION: it has a
+; block rule but is held at 0 (in both the code default and detectors.conf),
+; because a webshell GET-probe (`/c99.php`) is exactly what benign scanners
+; (Shodan/Censys/monitors) do — auto-arming would nft-ban them. BACKDOOR has no
+; block rule yet (430-438 are logonly/challenge) so it is inert, but is armed to
+; 1 so it fires the moment one (e.g. 438) is promoted. Every family is a knob and
+; the full registry is covered automatically (TestWAFSecurityFamilyCoverage).
 SQLI            = 1      ; WAF_SQLI (301, block). Separate key SQLI_LEXICAL (309)
                         ;   is challenge-tier → inert in Phase 1.
 RCE             = 1      ; WAF_RCE (has block rule 320)
 BACKDOOR        = 1      ; WAF_BACKDOOR (430-438) — armed; no block rule yet
 UPLOAD_EXPLOIT  = 1      ; = UPLOAD_FNAME (401) + UPLOAD_CONTENT (402), both block
+WEBSHELL        = 0      ; WAF_WEBSHELL (413, block) — HELD at 0 on purpose; do NOT
+                        ;   raise: it would nft-ban benign scanners probing /c99.php
 ;
 ; --- PHASE 2 (SHIP AT 0; raise per-family once live data confirms): ---
 ; edge-`challenge` families. They keep triaging humans vs bots at the edge; we
 ; only start feeding the persistent counter after observing real accrual rates.
 ; Intended (not-yet-active) values kept here as guidance:
-WEBSHELL        = 0      ; (intended 2) WAF_WEBSHELL probe scans (410/411)
 XXE             = 0      ; (intended 2) WAF_XXE (307)
 SSRF            = 0      ; (intended 2) WAF_SSRF (7xx)
 BAD_UA          = 0      ; (intended 40) WAF_BAD_UA (201) — scanner floods

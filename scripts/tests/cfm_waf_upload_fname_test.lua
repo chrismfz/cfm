@@ -1,9 +1,9 @@
 -- Tests for rule 401 (WAF_UPLOAD_FNAME) dangerous-extension matching in
--- detect_upload_filename. Focus: the .pht/.phtm/.shtml/.shtm alt-handler
--- extensions added 2026-07 (they previously slipped past the .php[%d] matcher
--- and reached origin), plus regression coverage that benign uploads — and the
--- deliberately-excluded .phps source-viewer extension — do NOT trip this
--- block-tier rule.
+-- detect_upload_filename. Focus: the .pht/.phtm PHP alt-handlers added 2026-07
+-- (they previously slipped past the .php[%d] matcher and reached origin), plus
+-- regression coverage that benign uploads — the deliberately-excluded .phps
+-- source-viewer extension, the legit SSI static types .shtml/.shtm, and the
+-- .phtm-overmatch guard (x.phtmz) — do NOT trip this block-tier rule.
 
 package.path = "configs/lua/?.lua;" .. package.path
 local det = require("cfm_waf_detectors")
@@ -60,6 +60,8 @@ check(not hit("graphite.zip"), "'graphite' must not false-match .pht")
 check(not hit("alphtest.doc"), "'alphtest' must not false-match .pht")
 check(not hit("naphtha.txt"),  "'naphtha' must not false-match .pht")
 check(not hit("report.phtx"),  ".phtx is not a handler and must pass")
+check(not hit("x.phtmz"),      ".phtm matcher must be anchored — x.phtmz must pass")
+check(not hit("bibliophtml.doc"), "'phtml' mid-word (no dot) must pass")
 
 if fails > 0 then
   io.stderr:write(("cfm_waf upload-fname tests: %d failure(s)\n"):format(fails))

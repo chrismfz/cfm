@@ -1814,8 +1814,10 @@ function _M.detect_upload_filename(body, headers)
     -- Extension checks: match anywhere in filename to catch double-extensions
     if fname:match("%.php[%d]?[^%w]") or fname:match("%.php[%d]?$") then return "php" end
     -- PHP alt-handlers Apache/LiteSpeed commonly map to the engine: .phtml/.phtm
-    -- and the bare .pht slip past the .php[%d] matcher above and have no
-    -- legitimate upload use, so they join the block-tier set.
+    -- and the bare .pht slip past the .php[%d] matcher above, so they join the
+    -- block-tier set. (.phtml is also Magento's server-side template extension,
+    -- but templates ship via code/FTP, not a web-form upload, so a multipart
+    -- .phtml upload is still overwhelmingly an attack.)
     -- NOTE: SSI pages (.shtml/.shtm) are deliberately NOT blocked here. They are
     -- a first-class *static* file type on cPanel (`AddHandler server-parsed`),
     -- so a customer uploading legit .shtml pages through a web file manager would
@@ -1823,7 +1825,7 @@ function _M.detect_upload_filename(body, headers)
     -- FP that outweighs the SSI-exec risk (usually off via IncludesNOEXEC, and
     -- no .shtml appeared in any captured upload sample). Revisit with a
     -- content-based SSI-exec check if that threat ever shows up in the wild.
-    if fname:match("%.phtm")    then return "phtml" end  -- .phtm and .phtml
+    if fname:match("%.phtml?[^%w]") or fname:match("%.phtml?$") then return "phtml" end  -- .phtm/.phtml, anchored (no x.phtmz overmatch)
     if fname:match("%.pht[^%w]") or fname:match("%.pht$") then return "pht" end
     if fname:match("%.phar")    then return "phar" end
     if fname:match("%.asp[x]?") then return "asp" end
@@ -1983,16 +1985,20 @@ end
 -- The list is split by confidence into two tiers (mirrors the 437/438 split):
 --
 --   WEBSHELL_NAMES_KNOWN — proper-noun webshell/tool names with essentially
---   zero legitimate use (c99, r57, wso, alfa, b374k, indoxploit, p0wny,
---   aspxspy, jspspy, …). A request for one of these at any path is a drop
---   probe. Routed to rule 413 (`rule_webshell_path_known`), block-tier.
+--   zero legitimate use (c99, r57, wso, b374k, indoxploit, p0wny, aspxspy,
+--   jspspy, …). A request for one of these at any path is a drop probe.
+--   Routed to rule 413 (`rule_webshell_path_known`), block-tier.
 --
 --   WEBSHELL_NAMES — generic / ambiguous names that are OVERWHELMINGLY attack
---   probes but carry a residual false-positive tail: `adminer.php` is a real
---   DB tool admins deploy, and short numeric/single-letter names (`1.php`,
---   `x.php`, `a.php`, `shell.php`, `cmd.jsp`) can be a developer's scratch
---   file. Routed to rule 410 (`rule_webshell_path`), challenge-tier — an
---   admin solves the challenge once; an automated dropper is stopped cold.
+--   probes but carry a residual false-positive tail: `adminer.php` (a real DB
+--   tool), `alfa.php` (the ALFA shell, but "alfa" is a real word/brand), and
+--   short numeric/single-letter names (`1.php`, `x.php`, `a.php`, `shell.php`,
+--   `cmd.jsp`) that can be a developer's scratch file. Routed to rule 410
+--   (`rule_webshell_path`), challenge-tier. NOTE: WAF_WEBSHELL is a high-risk
+--   reason, so this challenge is only recoverable for an as-yet-uncleared
+--   client — a client already holding a clearance cookie has its 410 challenge
+--   converted to block (post_clearance_action). An automated dropper is stopped
+--   either way.
 local WEBSHELL_NAMES_KNOWN = {
   ["c99.php"]            = true,
   ["c99shell.php"]       = true,

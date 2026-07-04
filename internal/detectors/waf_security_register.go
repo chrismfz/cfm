@@ -51,6 +51,7 @@ func init() {
 		DefaultsTemplate: map[string]string{
 			"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0",
 			"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BACKDOOR": "1",
+			"WEBSHELL": "0", // has an edge-block rule (413) but held un-armed; opt in with 1
 			"BLOCK": "6h",
 		},
 		LeniencySupported:   true,

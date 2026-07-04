@@ -142,12 +142,14 @@ local CFG = {
 
   -- ── Phase 1 — webshell delivery + reverse shell (logonly rollout) ─────────
   -- Sources: docs/waf.md "Detector phases" §Phase 1 / §Phase 2 / §Phase 5 (B5).
-  -- All three start at logonly per the rollout playbook; promote individually
-  -- only after `cfm webtop waf hit-rates --hours 168` produces ok_to_promote.
-  rule_webshell_path    = "challenge", -- URI basename matches a generic/ambiguous webshell name (shell.php, x.php, adminer.php, …)
-  rule_webshell_path_known = "block",  -- URI basename matches a proper-noun webshell (c99.php, r57.php, wso.php, alfa.php, …) — near-zero legit use
-                                       -- (scanner-only paths: /shell.php, /webshell.php, /x.php,
-                                       --  /adminer.php — zero legitimate traffic observed)
+  -- Landed at logonly per the rollout playbook, then promoted on hit-rate data:
+  -- the webshell drop-path split (410 ambiguous / 413 proper-noun) and ping now
+  -- ship at challenge/block. NOTE: WAF_WEBSHELL is a high-risk reason, so for a
+  -- client already holding a valid clearance cookie a rule-410 challenge is
+  -- converted to block (post_clearance_action) — the challenge tier is only
+  -- "recoverable" for as-yet-uncleared clients.
+  rule_webshell_path    = "challenge", -- URI basename matches a generic/ambiguous webshell name (shell.php, x.php, adminer.php, alfa.php, …)
+  rule_webshell_path_known = "block",  -- URI basename matches a proper-noun webshell (c99.php, r57.php, wso.php, b374k.php, …) — near-zero legit use
   rule_reverse_shell    = "challenge", -- bash -i >& /dev/tcp/, python -c 'import socket', socat tcp-connect …
                                        -- (post-exploit primitive; no legitimate request shape)
   rule_webshell_ping    = "challenge", -- POST + empty UA + CL:0 + URI ends in .php — webshell C2 fingerprint
@@ -225,13 +227,14 @@ local CFG = {
   rule_php_filesize_recon      = "logonly", -- <fs>…</fs> + filesize() + SCRIPT_FILENAME recon
   rule_php_touch_antiforensic  = "logonly", -- @touch($p, <literal-unix-ts>) mtime backdating
 
-  -- ── Backdoor / obfuscation family (430-437) ──────────────────────────────
-  -- Tier 1 (this batch) covers the highest-yield gaps observed in production:
-  -- .htaccess poisoning, char-pool obfuscator output, deep polyglots, and the
-  -- generic eval-loader shape. All ship at logonly per the playbook.
+  -- ── Backdoor / obfuscation family (430-438) ──────────────────────────────
+  -- Tier 1 covers the highest-yield gaps observed in production: .htaccess
+  -- poisoning, char-pool obfuscator output, deep polyglots, and the generic
+  -- eval-loader shape. The content-heuristic rules (430-436) ship at logonly;
+  -- only the encoded-<?php openers 437/438 are at challenge (see their notes).
   rule_htaccess_poisoning         = "logonly", -- .htaccess / .user.ini directive injection in upload bodies (stays logonly: hand-written `AddType … x-httpd-php` is legit in shared hosting; needs prose-gating on the Apache-directive branches before promotion)
   rule_php_char_pool_obfuscation  = "logonly", -- $pool[N].$pool[N].$pool[N] function-name extraction
-  rule_php_polyglot_full_body     = "challenge", -- image/PDF/ZIP magic + <?php anywhere in body (legit plugin/archive uploads excluded by legit_archive_upload gate)
+  rule_php_polyglot_full_body     = "logonly", -- image/PDF/ZIP magic + <?php anywhere in body. Stays logonly: WAF_BACKDOOR is high-risk, so a challenge here converts to block for cleared clients and (BACKDOOR being autoblock-armed) can 6h-ban a logged-in customer who uploads e.g. a PDF containing literal <?php via a raw-body endpoint. Promote only once post-clearance-converted hits are excluded from the autoblock feed.
   rule_php_eval_loader_b64        = "logonly", -- variable-fed eval/assert/call_user_func + >=200-char b64 literal
   rule_php_superglobal_callable   = "logonly", -- $_GET[c]( / $_POST[c]( / $_SERVER[HTTP_X_…]( minimalist webshell
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
@@ -1148,13 +1151,15 @@ function _M.check(ctx)
 
   -- ── 34) Webshell drop path (W1) ──────────────────────────────────────────
   -- URI basename matches a known webshell name. Two confidence tiers share one
-  -- detector: proper-noun names (c99.php, r57.php, wso.php, alfa.php …) route to
+  -- detector: proper-noun names (c99.php, r57.php, wso.php, b374k.php …) route to
   -- rule 413 (block, near-zero legit use); generic/ambiguous names (shell.php,
-  -- x.php, adminer.php …) route to rule 410 (challenge — a legit admin solves it
-  -- once, a dropper is stopped). Cheap: one lower(uri) + up to two set lookups.
+  -- x.php, adminer.php, alfa.php …) route to rule 410 (challenge for uncleared
+  -- clients; a dropper is stopped). The rule_mode legacy-boolean fallback MUST
+  -- match each rule's real default (block / challenge), or a `= true` config
+  -- would silently downgrade the rule.
   do
-    local mode_known = rule_mode(CFG.rule_webshell_path_known, "logonly")
-    local mode_amb   = rule_mode(CFG.rule_webshell_path, "logonly")
+    local mode_known = rule_mode(CFG.rule_webshell_path_known, "block")
+    local mode_amb   = rule_mode(CFG.rule_webshell_path, "challenge")
     if mode_known ~= "disabled" or mode_amb ~= "disabled" then
       local tag, is_known = det.detect_webshell_path(uri)
       if tag then

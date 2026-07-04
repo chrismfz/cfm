@@ -89,7 +89,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 425, Name: "rule_php_touch_antiforensic", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 430, Name: "rule_htaccess_poisoning", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 	{ID: 431, Name: "rule_php_char_pool_obfuscation", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
-	{ID: 432, Name: "rule_php_polyglot_full_body", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "challenge"},
+	{ID: 432, Name: "rule_php_polyglot_full_body", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 	{ID: 433, Name: "rule_php_eval_loader_b64", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 	{ID: 434, Name: "rule_php_superglobal_callable", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 	{ID: 435, Name: "rule_php_concat_funcname_eval", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},

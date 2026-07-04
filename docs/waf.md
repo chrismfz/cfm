@@ -632,7 +632,7 @@ $IDC3B = $t_Ohw[61].$t_Ohw[7].$t_Ohw[34]…;  // builds "gzinflate"
 
 **FP notes:** image / PDF / ZIP files do not legitimately contain `<?php` tokens — the magic-byte gate plus the PHP-opener gate together are malware-only. **Caveat (fixed 2026-06-04):** the 5-byte `<?php` opener is binary-safe, but the 3-byte `<?=` short-echo opener (`3C 3F 3D`) collides with high-entropy binary roughly once per ~16 MB of image data — it fired `POLYGLOT_DEEP_*` (and rule 402 `UPLOAD_PHP_TAG`) on innocent WebP/JPEG product-photo uploads (e-vafeiadis.gr: the same product save alternated 200/403 across retries, proving a content-dependent collision). `<?=` is now matched only when followed by an actual PHP expression — an optional `@`, then a variable/superglobal (`$`), backtick exec, quoted string, `(`, or a function call `name(` whose name may contain digits (`base64_decode(`, `md5(`, `str_rot13(`) — via `has_php_short_echo`. This keeps the input-driven short-tag webshell shapes (including superglobal-free ones like `<?=base64_decode(file_get_contents('php://input'))`) while removing the binary-collision FP. The remaining unmatched forms (e.g. a numeric echo `<?=1`) are not exploitable webshell openers.
 
-**Tier:** ships at `challenge` (promoted from `logonly` 2026-07-03). Safe to interrupt because the rule is gated by `not legit_archive_upload`, so a genuine plugin/theme ZIP uploaded through the WordPress plugin/theme installer (`PK\x03\x04` magic + `<?php` inside) is carved out and never reaches this check — only a ZIP-magic-plus-`<?php` body sent to a non-installer endpoint fires it.
+**Tier:** stays at `logonly`. It was briefly promoted to `challenge`, but `WAF_BACKDOOR` is a high-risk reason, so for a client holding a valid clearance cookie the challenge is converted to a **block** (`post_clearance_action`) — and because the `BACKDOOR` family is autoblock-armed (`detectors.conf`), that converted block can earn a **6h nft ban** of a logged-in customer who uploads e.g. a PDF containing the literal string `<?php` via a raw-body endpoint. (Multipart uploads never trip 432 — the body starts with the boundary, not the file magic — so the risk is raw-body uploads.) Promote only after post-clearance-converted hits are excluded from the Phase-1 autoblock feed.
 
 ### Rule 433 — `rule_php_eval_loader_b64`
 
@@ -752,7 +752,7 @@ The detector checks base64 first, so a base64 opener is attributed to **438** an
 | `PD9waHA…` (base64 opener at a value boundary) in body | 438 |
 | Captured radio.php (PDF magic + char-pool + eval-loader) | **431 + 432 + 433** simultaneously |
 
-Rules 430, 431, 433-436 default to `logonly`; **432, 437 and 438 default to `challenge`** (see their FP notes above). Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
+Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see their FP notes above). Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
 
 ---
 

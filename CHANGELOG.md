@@ -131,18 +131,20 @@ back-filled here — see the git/PR history for that period.
   (Shodan, Censys, uptime monitors, researchers) do, so auto-arming would nft-ban
   them fleet-wide. The edge still 403s the individual probe (harmless); an nft IP
   ban is a separate, deliberate opt-in (`WEBSHELL = 1`) after its own burn-in.
-- WAF: **promoted `WAF_BACKDOOR` rule 432 (`rule_php_polyglot_full_body`)
-  `logonly` → `challenge`** after the same review — image/PDF/ZIP magic + `<?php`
-  anywhere in the body; gated by `not legit_archive_upload`, so a genuine
-  plugin/theme ZIP uploaded via the WordPress installer is carved out. Stays
-  recoverable at `challenge` rather than hard-blocking. **Rule 430
-  (`rule_htaccess_poisoning`) intentionally stays at `logonly`:** an adversarial
-  review flagged that `AddType application/x-httpd-php` is also a legitimate
-  hand-written shared-hosting directive, and the rule's `addtype`/`sethandler`/
-  `addhandler` branches are not prose-gated (only the `.user.ini` branch is), so
-  a forum/ticket/CMS post discussing the directive — or a File-Manager `.htaccess`
-  edit — would trip it. Promotion waits until those branches get the same
-  directive-shaped context gate.
+- WAF: the `WAF_BACKDOOR` content-heuristic rules **430 and 432 both stay at
+  `logonly`** (neither is promoted). A promotion to `challenge` was considered
+  and rejected after review: **432 (`rule_php_polyglot_full_body`)** — because
+  `WAF_BACKDOOR` is a high-risk reason, a `challenge` here is converted to a
+  **block** for a client holding a valid clearance cookie (`post_clearance_action`),
+  and since the `BACKDOOR` family is autoblock-armed that converted block can earn
+  a **6h nft ban of a logged-in customer** who uploads e.g. a PDF containing the
+  literal string `<?php` via a raw-body endpoint — an unacceptable FP. **430
+  (`rule_htaccess_poisoning`)** — because `AddType application/x-httpd-php` is a
+  legitimate hand-written shared-hosting directive and the `addtype`/`sethandler`/
+  `addhandler` branches are not prose-gated (only `.user.ini` is), so a
+  forum/CMS post discussing it or a File-Manager `.htaccess` edit would trip it.
+  Both promotions wait on their respective fixes (excluding post-clearance-
+  converted hits from the autoblock feed; prose-gating the directive branches).
 - WAF: **fixed silent `DefaultMode` drift in the Go rule mirror
   (`waf_rule_ids.go`).** Rules **410/411/412** (`rule_webshell_path`,
   `rule_webshell_ping`, `rule_polyglot_upload`) read `logonly` in the Go glossary
