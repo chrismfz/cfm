@@ -82,6 +82,16 @@ back-filled here — see the git/PR history for that period.
   matched — the doc still listed it).
 
 ### Fixed
+- Web detector: **the per-IP 403 flood counter (`IP403_COUNT` → `WEB/403`) now
+  ignores static assets**, matching the sibling 404 and 40x-combo counters. It
+  was the only 40x counter still counting `.jpg/.png/.gif/.css/.js/...` responses,
+  so a customer legitimately browsing their **own** image-heavy WordPress/
+  WooCommerce site self-blocked (`WEB/403`, TTL) when the **origin** (Apache/
+  WordPress — hotlink protection, an origin security plugin, or broken Elementor
+  thumbnails) returned 403 on many images: a single Elementor page fans out to
+  dozens of asset requests, so hundreds of static-asset 403s crossed
+  `IP403_COUNT` in minutes. Real 403-floods hit forbidden **non-static** paths
+  (`wp-login`, `/.git`, config files), which still count. Regression tests added.
 - WAF: **rule 611 (`WAF_BAD_UTF8`) no longer false-positives on raw binary
   uploads.** The detector already skipped `multipart/form-data` bodies, but the
   WordPress REST media endpoint (`POST /wp-json/wp/v2/media`) uploads a raw image
