@@ -82,6 +82,20 @@ back-filled here — see the git/PR history for that period.
   matched — the doc still listed it).
 
 ### Fixed
+- Detectors: **`IGNORE_IPS`/`IGNORE_NETS` edge bypass no longer dies silently
+  under a hardened daemon umask.** The Go mirror `WriteLuaCache` wrote
+  `/var/lib/cfm/lua/cfm_ignore_nets.lua` with `os.WriteFile(…, 0640)`, whose
+  perm arg is umask-filtered — so under a systemd `UMask=0077` service the file
+  landed `0600`. The `cfm`-group OpenResty/Angie worker then could not read it,
+  `loadfile()` returned nil (no panic, nothing logged), the ignore-nets ranges
+  loaded empty, and `cfm.lua`'s `is_self_origin()` → Step 0a hard-bypass went
+  **silently inert**: a request from the server's own `IGNORE_NETS` subnet was
+  run through the full WAF/challenge instead of bypassing (operator hit it —
+  own-subnet WordPress xmlrpc pingbacks got challenged despite `84.54.49.0/24`
+  being in `IGNORE_NETS`). Now forces the mode with an explicit `os.Chmod(0640)`
+  (umask-immune), matching `nft.writeSelfIPsLua` and the sslcollector snapshot
+  writer, which already carried this guard. Regression test flips the process
+  umask to `0077` and asserts the on-disk mode is still `0640`.
 - Web detector: **the per-IP 403 flood counter (`IP403_COUNT` → `WEB/403`) now
   ignores static assets**, matching the sibling 404 and 40x-combo counters. It
   was the only 40x counter still counting `.jpg/.png/.gif/.css/.js/...` responses,

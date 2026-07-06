@@ -209,15 +209,30 @@ func (ig *IPIgnore) WriteLuaCache(path string) error {
     if err := os.WriteFile(tmp, buf.Bytes(), 0o640); err != nil {
         return fmt.Errorf("ignore-nets lua cache write: %w", err)
     }
-    // Match the existing cfm_self_ips.lua chown pattern: the openresty worker
-    // runs in the `cfm` group and needs group-read on this file. WriteFile
-    // respects the mode arg, but file ownership defaults to whatever's running
-    // this code (typically root) — without this chown the worker silently
-    // fails to load the cache and IGNORE_NETS bypass is dead in production.
+    // Force the on-disk mode to 0640 independently of the daemon's umask.
+    // os.WriteFile's perm arg is umask-filtered, so under a hardened service
+    // umask of 0077 the file lands 0600 — the `cfm`-group openresty worker
+    // then can't read it, loadfile() returns nil (no panic, nothing logged),
+    // the ignore-nets ranges load empty, and the entire IGNORE_IPS/NETS edge
+    // bypass (cfm.lua is_self_origin → Step 0a hard-bypass) goes SILENTLY dead
+    // in production. os.Chmod is NOT umask-filtered. Twin of nft.writeSelfIPsLua
+    // and the sslcollector snapshot writer, which already carry this guard;
+    // this writer had missed it (operator hit it: own-subnet WordPress
+    // pingbacks got WAF-challenged because is_self_origin read an empty cache).
+    if err := os.Chmod(tmp, 0o640); err != nil { // #nosec G302 -- 0640 group-read is intentional and the whole point of this fix: the cfm-group edge worker must read the cache. 0600 (what gosec wants / what a hardened umask produces) is the bug.
+        _ = os.Remove(tmp)
+        return fmt.Errorf("ignore-nets lua cache chmod: %w", err)
+    }
+    // root:cfm ownership so the group-read bit above actually reaches the worker.
     ensureCFMGroupRead(tmp)
     if err := os.Rename(tmp, path); err != nil {
         _ = os.Remove(tmp)
         return fmt.Errorf("ignore-nets lua cache rename: %w", err)
+    }
+    // Defensive re-assert: rename carries tmp's mode, but force it again in case
+    // `path` pre-existed with a tighter mode on some filesystem.
+    if err := os.Chmod(path, 0o640); err != nil { // #nosec G302 -- 0640 group-read intentional (same rationale as the tmp chmod above): cfm group == edge worker.
+        return fmt.Errorf("ignore-nets lua cache chmod (post-rename): %w", err)
     }
     ensureCFMGroupRead(path)
     return nil
