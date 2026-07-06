@@ -1138,10 +1138,20 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	// Per-IP error thresholds (optional)
 	if rec.IP != "" {
 		if rec.Status == 403 && e.cfg.IP403Count > 0 {
-			if b.ips403 == nil {
-				b.ips403 = make(map[string]int)
+			// Static asset paths are excluded (as with the 404 and 40x-combo
+			// counters below). Origin-emitted 403s on images/css/js — hotlink
+			// protection, an origin security plugin, broken Elementor/theme
+			// thumbnails — are not a scanner signal: a single image-heavy
+			// WordPress/WooCommerce page fans out to dozens of asset requests,
+			// so counting them let a customer browsing their OWN site cross
+			// IP403_COUNT and self-block (WEB/403). Real 403-floods hit
+			// forbidden non-static paths (wp-login, /.git, config files).
+			if !isStaticAssetPath(p) {
+				if b.ips403 == nil {
+					b.ips403 = make(map[string]int)
+				}
+				b.ips403[rec.IP]++
 			}
-			b.ips403[rec.IP]++
 		}
 		if rec.Status == 404 && e.cfg.IP404Count > 0 {
 			if !isStaticAssetPath(p) {
