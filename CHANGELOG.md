@@ -165,6 +165,33 @@ back-filled here — see the git/PR history for that period.
   enforcing the tighter value — intended, but verify it's what you want.
 
 ### Security
+- WAF: **new rule 414 (`rule_upload_archive_php`) blocks a PHP webshell hidden
+  inside an uploaded `.zip`.** Traced to a 2026-07 Joomla mass-defacement
+  ("ANTONKILL") that landed shells via `com_sppagebuilder&task=asset.uploadCustomIcon`
+  uploading `ico*.zip`: the existing upload rules missed it because the outer
+  multipart filename is `.zip` (401 allows it) and the `<?php` bytes are
+  DEFLATE-compressed inside the archive (402's literal-tag scan can't see them);
+  ClamAV extracted and scanned but the payload was obfuscated (`result=clean`).
+  The new detector scans the multipart body for ZIP **local file headers**
+  (`PK\3\4`) **and central-directory headers** (`PK\1\2` — the name PHP's
+  `ZipArchive::extractTo` actually writes, defeating a benign-local/malicious-central
+  name mismatch) and flags any entry whose cleartext name is PHP-executable
+  (`.php`/`.php[3-8]`/`.phtml`/`.pht`/`.phar`/`.phps`) or a handler-override
+  (`.htaccess`/`.user.ini`). Obfuscation-proof: it keys on the archive **entry
+  name**, never the (compressed) content. Emitted under the **`WAF_UPLOAD_FNAME`
+  family** (rule 414) so it inherits that family's `block` enforcement and
+  `waf_security` autoblock intent — a php-in-zip on an asset endpoint is a
+  webshell upload. **Scoped, provably, to Joomla** (`is_php_hostile_asset_upload`):
+  a match requires BOTH `option=com_<component>` AND `task=asset.upload*`, each
+  anchored to a query-param boundary. `option=com_` is a Joomla-only routing
+  param, so WordPress (`action=`), OpenCart (`route=`), Magento, PrestaShop
+  (`controller=`) and Drupal never match — which is what makes `block` safe with
+  no cross-platform false positives. The whole plugin/theme/extension/backup
+  ecosystem ships PHP-bearing `.zip` archives to installer/plugin endpoints, which
+  are never matched; firing only on a Joomla asset (icon/image/font) upload, where
+  a PHP-bearing archive is never legitimate, keeps them safe. Extend with a
+  second, separately scoped clause as new non-Joomla vectors are confirmed. New
+  test: `scripts/tests/cfm_waf_upload_archive_test.lua`.
 - WAF: **split the webshell drop-path rule (410, `WAF_WEBSHELL`) into two
   confidence tiers and promoted the high-confidence half to `block`.** A
   6-server log review (mars/earth/titan/virgo/orion/rigel, ~256k WAF records)

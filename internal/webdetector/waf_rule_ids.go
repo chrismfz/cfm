@@ -82,6 +82,12 @@ var wafRuleIDs = []WAFRule{
 	{ID: 411, Name: "rule_webshell_ping", ReasonFamily: "WAF_WEBSHELL", DefaultMode: "challenge"},
 	{ID: 412, Name: "rule_polyglot_upload", ReasonFamily: "WAF_UPLOAD_CONTENT", DefaultMode: "challenge"},
 	{ID: 413, Name: "rule_webshell_path_known", ReasonFamily: "WAF_WEBSHELL", DefaultMode: "block"},
+	// 414: PHP webshell hidden inside an uploaded .zip (ZIP entry-name scan).
+	// Shares the WAF_UPLOAD_FNAME family with 401 so it inherits that family's
+	// block + waf_security autoblock intent. Scoped to Joomla asset uploads
+	// (option=com_ + task=asset.upload*), where a php-bearing zip is never
+	// legitimate — so it ships at `block`.
+	{ID: 414, Name: "rule_upload_archive_php", ReasonFamily: "WAF_UPLOAD_FNAME", DefaultMode: "block"},
 	{ID: 421, Name: "rule_php_split_string_canary", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 422, Name: "rule_php_dropper_wget_curl", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 423, Name: "rule_php_dropper_markers", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},

@@ -1862,6 +1862,78 @@ function _M.detect_upload_filename(body, headers)
   return nil
 end
 
+-- [top-4c] Webshell PHP file hidden INSIDE an uploaded ZIP archive.
+-- Vector (2026-07 Joomla mass-defacement "ANTONKILL"): com_sppagebuilder
+-- `asset.uploadCustomIcon` (and sibling asset/media endpoints) accept a .zip and
+-- extract it server-side. A webshell `.php` compressed inside that zip is
+-- invisible to every existing upload check:
+--   * detect_upload_filename (401) sees only the OUTER multipart filename
+--     (`ico*.zip` — an allowed extension);
+--   * detect_upload_content  (402) scans for a literal `<?php`, but the PHP
+--     bytes are DEFLATE-compressed inside the zip, so the tag never appears;
+--   * ClamAV extracts and scans, but the payload is obfuscated → signature miss.
+-- The one thing the attacker cannot hide is the archive DIRECTORY: a ZIP stores
+-- every entry's filename in CLEARTEXT (only the file *data* is compressed). We
+-- scan the multipart body for local file headers (`PK\3\4`, name at +30) AND
+-- central-directory headers (`PK\1\2`, name at +46 — this is the name PHP's
+-- ZipArchive::extractTo actually writes, so a benign-local / malicious-central
+-- name mismatch is caught too), and flag PHP-executable / handler-override
+-- entries. Obfuscation-proof: it keys on the entry NAME, never the content.
+-- The detector itself is endpoint-agnostic (it just answers "does this upload
+-- body carry a PHP-named zip entry?"). Callers MUST gate it on a POSITIVE
+-- media-asset allowlist (is_php_hostile_asset_upload) — a php-bearing zip is
+-- legitimate for the whole plugin/theme/extension/backup ecosystem, so it may
+-- only be treated as malicious on endpoints that exist to receive media assets.
+local function _zip_entry_bad_ext(name)
+  -- `name` must already be lowercased. Kept intentionally tight (no
+  -- .asp/.jsp/.exe): the threat is a PHP webshell / handler dropped into a
+  -- Joomla/WP tree, plus the two config files that make a dir execute PHP.
+  if name == "" then return nil end
+  if name:match("%.php%d?$")  or name:match("%.php%d?[^%w]")  then return "PHP" end
+  if name:match("%.phtml?$")  or name:match("%.phtml?[^%w]")  then return "PHTML" end
+  if name:match("%.pht$")     or name:match("%.pht[^%w]")     then return "PHT" end
+  if name:match("%.phar$")    or name:match("%.phar[^%w]")    then return "PHAR" end
+  if name:match("%.phps$")    or name:match("%.phps[^%w]")    then return "PHPS" end
+  if name:match("%.htaccess$")   or name:match("%.htaccess[^%w]")   then return "HTACCESS" end
+  if name:match("%.user%.ini$")  or name:match("%.user%.ini[^%w]")  then return "USERINI" end
+  return nil
+end
+
+function _M.detect_upload_archive_php(body, headers)
+  if not body or body == "" then return nil end
+  headers = headers or {}
+  local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
+  if not has(ct, "multipart/form-data") then return nil end
+
+  local blen = #body
+
+  -- sig: 4-byte ZIP header magic. len_off/name_off: byte offsets (from the 'P')
+  -- of the 2-byte LE filename length and the filename itself.
+  local function scan(sig, len_off, name_off)
+    local pos = body:find(sig, 1, true)
+    local iters = 0
+    while pos and iters < 512 do
+      iters = iters + 1
+      local a, b = body:byte(pos + len_off), body:byte(pos + len_off + 1)
+      if a and b then
+        local nlen = a + b * 256
+        if nlen > 0 and nlen <= 512 and (pos + name_off + nlen - 1) <= blen then
+          local raw = body:sub(pos + name_off, pos + name_off + nlen - 1)
+          local hit = _zip_entry_bad_ext(lower(raw))
+          if hit then return hit, raw end
+        end
+      end
+      pos = body:find(sig, pos + 4, true)
+    end
+    return nil
+  end
+
+  local hit, name = scan("PK\3\4", 26, 30)   -- local file header
+  if not hit then hit, name = scan("PK\1\2", 28, 46) end  -- central directory
+  if hit then return "ZIP_" .. hit .. ":" .. lower(name):sub(1, 64) end
+  return nil
+end
+
 -- A bare `<?=` PHP short-echo opener is only three bytes (`3C 3F 3D`) and
 -- collides with the high-entropy byte stream of legitimate binary uploads.
 -- A product photo (JPEG / WebP / PNG) statistically contains that sequence

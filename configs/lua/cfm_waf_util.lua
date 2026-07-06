@@ -136,6 +136,40 @@ local function is_known_legit_php_upload_endpoint(uri, args)
   return false
 end
 
+-- Upload endpoints whose declared purpose is a MEDIA ASSET (icon / image /
+-- font) — a PHP-bearing archive is NEVER a legitimate payload here. Rule 414
+-- (php-inside-an-uploaded-zip) fires ONLY on these. This is a deliberate
+-- POSITIVE allowlist, not a global scan: the entire plugin / theme / extension
+-- / backup / migration ecosystem ships `.zip` archives that legitimately
+-- contain PHP, and those go to installer or plugin-specific endpoints — none of
+-- which match here, so a legit plugin/backup upload is never touched. A webshell
+-- zip is only unambiguously malicious when it lands on a media-asset endpoint.
+--
+-- SCOPED TO JOOMLA on purpose, and provably so: a match REQUIRES both
+-- `option=com_<component>` AND `task=asset.upload*`, each anchored to a real
+-- query-param boundary. `option=com_` is a Joomla-only routing param —
+-- WordPress (`action=`), OpenCart (`route=`), Magento (path-based / `key=`),
+-- PrestaShop (`controller=`) and Drupal (path / `q=`) never emit it — so this
+-- rule cannot fire on those platforms, which is what lets it run at `block`
+-- without risking cross-platform false positives. Extend (a second, separately
+-- scoped clause) as new non-Joomla asset-upload vectors are confirmed.
+local function is_php_hostile_asset_upload(uri, args)
+  local a = lower(args or "")
+  local u = lower(uri or "")
+  -- Leading separator so the FIRST query param is also boundary-anchored.
+  local hay = "&" .. a .. "&" .. u
+
+  -- Joomla SP Page Builder asset.uploadCustomIcon / uploadImage / uploadFont
+  -- (the confirmed 2026-07 ANTONKILL vector) and any Joomla component using the
+  -- same media-asset upload task. Both params required + boundary-anchored so a
+  -- coincidental substring in some other value can't trip it.
+  if hay:match("[?&]option=com_[%w_]") and hay:match("[?&]task=asset%.upload") then
+    return true
+  end
+
+  return false
+end
+
 
 -- Scored obfuscation detector shared by detect_script_obfuscation and
 -- detect_upload_obfuscation.  s must already be lowercased + capped by caller.
@@ -353,6 +387,7 @@ _M.cap                                = cap
 _M.count_occurs                       = count_occurs
 _M.has_long_b64_blob                  = has_long_b64_blob
 _M.is_known_legit_php_upload_endpoint = is_known_legit_php_upload_endpoint
+_M.is_php_hostile_asset_upload = is_php_hostile_asset_upload
 _M.score_obfuscation_blob             = score_obfuscation_blob
 _M.begins                             = begins
 _M.url_decode_once                    = url_decode_once

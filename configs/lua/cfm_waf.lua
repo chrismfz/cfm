@@ -29,6 +29,7 @@ local normalize     = util.normalize
 local scan_str      = util.scan_str
 local header_string = util.header_string
 local is_known_legit_php_upload_endpoint = util.is_known_legit_php_upload_endpoint
+local is_php_hostile_asset_upload = util.is_php_hostile_asset_upload
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- CONFIG
@@ -137,6 +138,7 @@ local CFG = {
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
   rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
+  rule_upload_archive_php = "block",  -- PHP webshell compressed inside an uploaded .zip (ZIP entry name scan). Scoped to Joomla asset uploads (option=com_ + task=asset.upload), where a php-bearing zip is never legitimate → safe to block.
   rule_script_obfuscation = "challenge",  -- raw POST-body PHP/JS obfuscation scorer
   rule_upload_obfuscation = "challenge",  -- multipart uploaded file content obfuscation scorer
 
@@ -421,6 +423,7 @@ local RULE_IDS = {
   -- 4xx upload / malware
   rule_upload_filename         = 401,
   rule_upload_content          = 402,
+  rule_upload_archive_php      = 414,
   rule_upload_obfuscation      = 403,
   rule_php_webshell_body       = 404,
   rule_script_obfuscation      = 405,
@@ -596,6 +599,11 @@ function _M.check(ctx)
   -- any `goto done`) so those jumps don't cross its scope. (437 keeps its
   -- own broader /wp-admin/ carve-out.)
   local legit_archive_upload = is_known_legit_php_upload_endpoint(uri, args)
+  -- Rule 414 (php-inside-zip) fires ONLY on media-asset upload endpoints (see
+  -- is_php_hostile_asset_upload) — a positive allowlist, so legit plugin / theme
+  -- / extension / backup `.zip` uploads (which contain PHP by design) are never
+  -- matched. Computed once here alongside the other upload gates.
+  local php_hostile_asset_upload = is_php_hostile_asset_upload(uri, args)
 
   -- Pre-computed normalized scan strings, lazily initialised on first use.
   -- scan_str(uri,args) is shared by traversal/rce/xss/sqli (4 rules).
@@ -885,6 +893,26 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_UPLOAD_FNAME:" .. tag, ttl, mode, RULE_IDS.rule_upload_filename) then goto done end
+      end
+    end
+  end
+
+  -- ── 17b) Webshell PHP compressed inside an uploaded ZIP ───────────────────
+  -- Same WAF_UPLOAD_FNAME family as rule 401 ("the upload's effective filename
+  -- is a webshell"), but reads names out of the ZIP directory so a `.php` hidden
+  -- inside an `ico*.zip` is caught. Scoped by a POSITIVE allowlist to JOOMLA
+  -- media-asset uploads (option=com_ + task=asset.upload*): plugin/theme/
+  -- extension/backup archives legitimately contain PHP and go elsewhere, and the
+  -- option=com_ requirement means WordPress/OpenCart/Magento/PrestaShop/Drupal
+  -- can't match. See is_php_hostile_asset_upload. Runs at `block` (CFG): on these
+  -- endpoints a PHP-bearing zip is unambiguously a webshell drop.
+  do
+    local mode = rule_mode(CFG.rule_upload_archive_php, "logonly")
+    if mode ~= "disabled" and body_inspect_ok and php_hostile_asset_upload then
+      local tag = det.detect_upload_archive_php(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_UPLOAD_FNAME:" .. tag, ttl, mode, RULE_IDS.rule_upload_archive_php) then goto done end
       end
     end
   end
