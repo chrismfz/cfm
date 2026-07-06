@@ -144,6 +144,39 @@ func TestIPIgnore_WriteLuaCache_AtomicAndDeterministic(t *testing.T) {
 	}
 }
 
+// TestIPIgnore_WriteLuaCache_OverridesRestrictiveUmask is the regression test
+// for the operator-reported bug: under a hardened daemon umask of 0077
+// (systemd's default for locked-down services) os.WriteFile(..., 0o640)
+// produced 0600 on disk, so the cfm-group openresty worker could not read
+// /var/lib/cfm/lua/cfm_ignore_nets.lua. cfm.lua's loadfile() then returned nil
+// (no panic, nothing logged), the ignore-nets ranges loaded empty, and the
+// whole IGNORE_IPS/NETS edge bypass went silently dead — a customer browsing
+// from the server's OWN subnet (84.54.49.0/24) got WAF-challenged because
+// is_self_origin() saw an empty cache. The fix is the explicit os.Chmod calls
+// in WriteLuaCache; this flips the process umask in-test and asserts the mode
+// still ends up 0640.
+func TestIPIgnore_WriteLuaCache_OverridesRestrictiveUmask(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfm_ignore_nets.lua")
+
+	_, n1, _ := net.ParseCIDR("84.54.49.0/24")
+	ig := &IPIgnore{nets: []*net.IPNet{n1}}
+
+	prevMask := syscallUmask(0o077)
+	defer syscallUmask(prevMask)
+
+	if err := ig.WriteLuaCache(path); err != nil {
+		t.Fatalf("WriteLuaCache: %v", err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o640 {
+		t.Fatalf("under umask 0077 the explicit chmod did not stick: mode=%o want 640", perm)
+	}
+}
+
 func fmtRange(first, last uint32) string {
 	return "{ " + uint32Dec(first) + ", " + uint32Dec(last) + " }"
 }
