@@ -8,6 +8,7 @@
 //   /unblock                        — manual IP unblock
 //   /search                         — read-only multi-source IP lookup
 //   /api/v1/firewall/block          — manual IP block
+//   /api/v1/firewall/block/batch    — manual bulk IP block (selfip/caller guarded)
 //   /api/v1/system/                 — system status
 //   /api/v1/auth/token              — scoped token issuance (admin token required)
 //   /api/v1/webdet/                 — web detector (registered by webdetector package)

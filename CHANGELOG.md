@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- API: **bulk IP block endpoint with self-lockout guard** — admin-only
+  `POST /api/v1/firewall/block/batch` (`{ips: […], ttl, reason}`, ≤256 IPs per
+  request, same TTL semantics as the single endpoint: empty = permanent). Each
+  IP is reported individually (`blocked` / `skipped` / `failed`) and the batch
+  **skips — never blocks — the server's own IPs** (loopback, link-local, any
+  interface-bound address, re-enumerated per request) **and the calling
+  admin's own IP** (first `X-Forwarded-For` hop when the daemon sits behind
+  the edge proxy on loopback, else the connection address), so a bulk
+  select-all can't firewall you out of your own box. Audit-logged to `api.log`
+  (`[block.batch]` summary + one line per self/caller skip). The web UI's
+  "Block selected (N)" now sends one batch request per 256-IP chunk instead
+  of a client-side loop of single blocks: skipped IPs are named in the result
+  toast and unselected, transient failures stay selected for retry.
 - WebUI (`/cfm-admin` webdetector pages): **bulk IP selection + bulk block.**
   The Global Top IPs and vhost-drilldown Top IPs tables now have a checkbox per
   row plus a select-all header checkbox, and clicking a row's **CC / ASN /
@@ -25,13 +38,9 @@ back-filled here — see the git/PR history for that period.
   all the same datacenter" in one click). A sticky action bar appears while
   anything is selected: **Block selected (N)** applies the page's Block TTL
   (including `permanent`, with a count-explicit confirmation) to all selected
-  IPs — sequential requests to the existing admin-only `firewall/block`
-  endpoint (one in-flight call at a time, not a burst), with live progress;
-  failed IPs stay selected for retry and are named in the result toast.
-  Selection deliberately survives auto-refresh and top-N rotation, so IPs
-  picked during a bot storm stay picked while the list churns. Frontend-only —
-  no API change. (A server-side batch endpoint with a selfip guard is the
-  planned follow-up.)
+  IPs, with live progress; failed IPs stay selected for retry and are named in
+  the result toast. Selection deliberately survives auto-refresh and top-N
+  rotation, so IPs picked during a bot storm stay picked while the list churns.
 - WebUI (`/cfm-admin` webdetector pages): **selectable TTLs for the Block and
   Challenge actions** instead of the hardcoded 1h/30m. A **Block TTL** selector
   (`1h / 6h / 24h / 7d / permanent`) now drives every Block button on the page

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/firewall/selfip"
+	"cfm/internal/logging"
 )
 
 type firewallBlockRequest struct {
@@ -16,7 +18,30 @@ type firewallBlockRequest struct {
 	Reason string `json:"reason"`
 }
 
-// RegisterBlock adds POST /api/v1/firewall/block.
+type firewallBlockBatchRequest struct {
+	IPs    []string `json:"ips"`
+	TTL    string   `json:"ttl"`
+	Reason string   `json:"reason"`
+}
+
+// blockBatchMaxIPs caps one batch request. The web UI chunks larger
+// selections; the cap bounds worst-case work per request.
+const blockBatchMaxIPs = 256
+
+// selfIPChecker is the slice of selfip.Resolver the batch guard needs,
+// injected so tests can stub the local-IP set.
+type selfIPChecker interface {
+	Contains(string) bool
+	Refresh()
+}
+
+// blockBatchSelfIPs answers "is this one of the server's own IPs?" for the
+// batch guard. The firewall backends keep their own (unexported) resolvers,
+// so the endpoint owns one too rather than plumbing theirs out.
+var blockBatchSelfIPs selfIPChecker = selfip.New()
+
+// RegisterBlock adds POST /api/v1/firewall/block and its bulk sibling
+// POST /api/v1/firewall/block/batch.
 //
 // Manual global IP block is admin-only: it blocks an IP across the whole host
 // and is meaningless to a per-vhost scoped (cPanel/DA) token, so it must never
@@ -27,6 +52,7 @@ func RegisterBlock(m *http.ServeMux, be firewall.Backend) {
 		return
 	}
 	m.Handle("/api/v1/firewall/block", adminOnlyHandler(makeBlockHandler(be)))
+	m.Handle("/api/v1/firewall/block/batch", adminOnlyHandler(makeBlockBatchHandler(be, blockBatchSelfIPs)))
 }
 
 func makeBlockHandler(be firewall.Backend) http.HandlerFunc {
@@ -79,6 +105,125 @@ func makeBlockHandler(be firewall.Backend) http.HandlerFunc {
 			"ip":     ip.String(),
 			"ttl":    strings.TrimSpace(req.TTL),
 			"reason": strings.TrimSpace(req.Reason),
+		})
+	}
+}
+
+// makeBlockBatchHandler blocks a list of IPs in one request (the web UI's
+// "Block selected"). Same TTL semantics as the single endpoint (empty TTL =
+// permanent). Unlike the client-side loop it replaces, it guards against
+// self-lockout — an IP is skipped (never failed-hard, the rest of the batch
+// proceeds) when it is one of the server's own IPs or the calling admin's
+// own IP. Per-IP outcomes are reported so the UI can keep failed IPs
+// selected for retry.
+func makeBlockBatchHandler(be firewall.Backend, selfIPs selfIPChecker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if be == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no firewall backend"})
+			return
+		}
+
+		var req firewallBlockBatchRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid json"})
+			return
+		}
+		if len(req.IPs) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no ips"})
+			return
+		}
+		if len(req.IPs) > blockBatchMaxIPs {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": false, "error": "too many ips", "max": blockBatchMaxIPs,
+			})
+			return
+		}
+
+		var ttlPtr *time.Duration
+		if strings.TrimSpace(req.TTL) != "" {
+			ttl, err := time.ParseDuration(strings.TrimSpace(req.TTL))
+			if err != nil || ttl <= 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid ttl"})
+				return
+			}
+			ttlPtr = &ttl
+		}
+
+		// The calling admin's IP, canonicalised. realIPFromRequest trusts
+		// X-Forwarded-For only when RemoteAddr is loopback (the daemon behind
+		// the edge proxy); XFF can carry a hop list, keep the first entry.
+		caller := ""
+		if raw := realIPFromRequest(r); raw != "" {
+			first := strings.TrimSpace(strings.SplitN(raw, ",", 2)[0])
+			if ip := net.ParseIP(first); ip != nil {
+				caller = ip.String()
+			}
+		}
+
+		// Interfaces change rarely and batches are operator-triggered, so a
+		// refresh per request is cheap and keeps the self-IP set current.
+		if selfIPs != nil {
+			selfIPs.Refresh()
+		}
+
+		blocked := make([]string, 0, len(req.IPs))
+		skipped := make([]map[string]string, 0)
+		failed := make([]map[string]string, 0)
+		seen := make(map[string]struct{}, len(req.IPs))
+		for _, raw := range req.IPs {
+			ip := net.ParseIP(strings.TrimSpace(raw))
+			if ip == nil {
+				skipped = append(skipped, map[string]string{"ip": raw, "reason": "invalid"})
+				continue
+			}
+			canon := ip.String()
+			if _, dup := seen[canon]; dup {
+				skipped = append(skipped, map[string]string{"ip": canon, "reason": "duplicate"})
+				continue
+			}
+			seen[canon] = struct{}{}
+			if selfIPs != nil && selfIPs.Contains(canon) {
+				skipped = append(skipped, map[string]string{"ip": canon, "reason": "self_ip"})
+				continue
+			}
+			if caller != "" && canon == caller {
+				skipped = append(skipped, map[string]string{"ip": canon, "reason": "caller_ip"})
+				continue
+			}
+			if err := be.AddBlock(ip, req.Reason, ttlPtr); err != nil {
+				failed = append(failed, map[string]string{"ip": canon, "error": err.Error()})
+				continue
+			}
+			blocked = append(blocked, canon)
+		}
+
+		logging.LogfAPI("[block.batch] requester=%s n=%d blocked=%d skipped=%d failed=%d ttl=%q reason=%q",
+			caller, len(req.IPs), len(blocked), len(skipped), len(failed),
+			strings.TrimSpace(req.TTL), strings.TrimSpace(req.Reason))
+		for _, s := range skipped {
+			if s["reason"] == "self_ip" || s["reason"] == "caller_ip" {
+				logging.LogfAPI("[block.batch.skip] ip=%s reason=%s requester=%s", s["ip"], s["reason"], caller)
+			}
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":      len(failed) == 0,
+			"blocked": blocked,
+			"skipped": skipped,
+			"failed":  failed,
+			"ttl":     strings.TrimSpace(req.TTL),
+			"reason":  strings.TrimSpace(req.Reason),
 		})
 	}
 }
