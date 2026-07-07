@@ -43,4 +43,5 @@ This inventory documents the effective authz classification enforced by the back
 - `/api/v1/mysql/state|processlist|top|locks|kills|history|history/events|history/summary|history/prune|history/truncate|history/timeline|cpu` via `adminOnlyHandler`.
 - `/api/v1/auth/token` (issue token), `/api/v1/tokens/list`, `/api/v1/tokens/revoke`.
 - `/api/v1/firewall/block` via `adminOnlyHandler` (global IP block; the customer-facing unblock flow is separate and intentionally not admin-gated).
+- `/api/v1/firewall/block/batch` via `adminOnlyHandler` (bulk global IP block, ≤256 IPs/request; skips the server's own IPs and the calling admin's IP with per-IP `skipped` reasons).
 

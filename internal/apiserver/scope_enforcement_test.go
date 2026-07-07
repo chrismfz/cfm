@@ -124,6 +124,17 @@ func TestScopedToken_CannotBlockIPGlobally(t *testing.T) {
 	if rr.Code == http.StatusForbidden {
 		t.Fatalf("admin token must pass the admin guard for firewall/block, got 403 body=%s", rr.Body.String())
 	}
+
+	// The bulk sibling must sit behind the same admin guard.
+	batchBody := []byte(`{"ips":["203.0.113.7","203.0.113.8"],"ttl":"30m","reason":"manual"}`)
+	rr = doAuthReq(h, http.MethodPost, "/api/v1/firewall/block/batch", scoped.Token, batchBody, false)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for scoped batch IP block, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = doAuthReq(h, http.MethodPost, "/api/v1/firewall/block/batch", "admin-secret", batchBody, false)
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("admin token must pass the admin guard for firewall/block/batch, got 403 body=%s", rr.Body.String())
+	}
 }
 
 func TestScopedToken_BeatsCookieWhenBothPresent(t *testing.T) {

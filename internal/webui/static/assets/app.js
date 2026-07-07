@@ -946,35 +946,48 @@
             + 'Remove them later from the Firewall dashboard or with: cfm unblock <ip>';
         if (!window.confirm(confirmMsg)) return;
         this.bulkBusy = true;
-        let okCount = 0;
+        const blocked = [];
+        const skipped = [];
         const failed = [];
         try {
-          // Sequential on purpose: one in-flight request against the daemon
-          // instead of a 100-wide burst; ~50 IPs still completes in seconds.
-          for (let i = 0; i < ips.length; i++) {
-            const ip = ips[i];
-            this.bulkProgress = `Blocking ${i + 1}/${ips.length} (${ip})…`;
-            try {
-              await this.postJSON('v1/firewall/block', {
-                ip,
-                ttl,
-                reason: `cfm-admin-ui-bulk host=${this.activeHost || '-'}`,
-              });
-              okCount++;
-              delete this.selectedIPs[ip]; // failed IPs stay selected for retry
-            } catch (err) {
-              failed.push(ip);
-              console.error('[cfm-admin] bulk block failed for', ip, err);
-            }
+          // One request per 256-IP chunk (the server-side cap). The batch
+          // endpoint guards against self-lockout: the server's own IPs and
+          // the calling admin's IP come back as skipped, never blocked.
+          const CHUNK = 256;
+          for (let i = 0; i < ips.length; i += CHUNK) {
+            const chunk = ips.slice(i, i + CHUNK);
+            this.bulkProgress = `Blocking ${Math.min(i + chunk.length, ips.length)}/${ips.length}…`;
+            const res = await this.postJSON('v1/firewall/block/batch', {
+              ips: chunk,
+              ttl,
+              reason: `cfm-admin-ui-bulk host=${this.activeHost || '-'}`,
+            });
+            blocked.push(...(Array.isArray(res?.blocked) ? res.blocked : []));
+            skipped.push(...(Array.isArray(res?.skipped) ? res.skipped : []));
+            failed.push(...(Array.isArray(res?.failed) ? res.failed : []));
           }
-        } finally {
+        } catch (err) {
           this.bulkBusy = false;
           this.bulkProgress = '';
+          this.actionMsg = `Bulk block request failed: ${err} — selection kept, retry`;
+          console.error('[cfm-admin] bulk block failed', err);
+          return;
         }
+        this.bulkBusy = false;
+        this.bulkProgress = '';
+        // Unselect what was blocked and what can never succeed (self/caller/
+        // invalid/duplicate); transient failures stay selected for retry.
+        for (const ip of blocked) delete this.selectedIPs[ip];
+        for (const s of skipped) { if (s && s.ip) delete this.selectedIPs[s.ip]; }
         const ttlText = ttl ? `for ${this.blockTTLLabel}` : 'permanently';
-        this.actionMsg = failed.length
-          ? `Bulk block: ${okCount} blocked ${ttlText}, ${failed.length} FAILED (${failed.join(', ')}) — failures kept selected, retry`
-          : `Bulk block: blocked ${okCount} IP(s) ${ttlText}`;
+        const parts = [`Bulk block: ${blocked.length} blocked ${ttlText}`];
+        if (skipped.length) {
+          parts.push(`${skipped.length} skipped (${skipped.map((s) => `${s.ip}: ${s.reason}`).join(', ')})`);
+        }
+        if (failed.length) {
+          parts.push(`${failed.length} FAILED (${failed.map((f) => f.ip).join(', ')}) — kept selected, retry`);
+        }
+        this.actionMsg = parts.join(' · ');
       },
 
       async loadIP(ip) {
