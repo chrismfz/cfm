@@ -375,6 +375,10 @@ type Engine struct {
 	vhostMu          sync.Mutex
 	vhostUnderAttack map[string]bool
 	vhostLastChange  map[string]time.Time
+	// Throttle for the "suppressed_by_exclude" audit line (once per holddown
+	// window per host), so a sustained excluded-under-attack vhost doesn't spam
+	// the challenge log every reconcile cycle. Guarded by vhostMu.
+	vhostSuppressLoggedAt map[string]time.Time
 
 	// NEW: vhost uniqpaths state (phase 1) to avoid log spam + hysteresis
 	vhostUniqPathsActive     map[string]bool
@@ -483,6 +487,7 @@ func NewEngine(cfg Config) *Engine {
 
 	e.vhostUnderAttack = make(map[string]bool)
 	e.vhostLastChange = make(map[string]time.Time)
+	e.vhostSuppressLoggedAt = make(map[string]time.Time)
 
 	e.vhostUniqPathsActive = make(map[string]bool)
 	e.vhostUniqPathsLastChange = make(map[string]time.Time)
