@@ -117,6 +117,12 @@
 
       <section class="card" v-if="shouldShow('suspicious')">
         <h2>Suspicious + challenged vhosts</h2>
+        <div class="toolbar">
+          <label for="challenge-ttl">Challenge TTL</label>
+          <select id="challenge-ttl" class="input" v-model="challengeTTL" title="TTL used by the Challenge / Manual challenge buttons on this page">
+            <option v-for="c in challengeTTLChoices" :key="c.value" :value="c.value">{{ c.label }}</option>
+          </select>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -163,7 +169,7 @@
                   <button class="btn-quiet" @click.stop="toggleChallenge(row.host)">{{ challengeState(row.host) ? 'Unchallenge' : 'Challenge' }}</button>
                   <button class="btn-quiet" @click.stop="openVhostLive(row.host)">Live</button>
                   <button class="btn-quiet" @click.stop="historyForHost(row.host)">History</button>
-                  <button class="btn-quiet" @click.stop="manualChallenge(row.host)">Manual challenge</button>
+                  <button class="btn-quiet" @click.stop="manualChallenge(row.host)" :title="'Enable manual challenge for ' + challengeTTLLabel">Manual challenge</button>
                   <button class="btn-quiet" @click.stop="manualUnchallenge(row.host)">Manual unchallenge</button>
                 </td>
               </tr>
@@ -229,6 +235,10 @@
             @change="refreshAll"
           />
           <span class="muted">IPs</span>
+          <label for="block-ttl">Block TTL</label>
+          <select id="block-ttl" class="input" v-model="blockTTL" title="TTL used by the Block buttons on this page ('permanent' asks for confirmation)">
+            <option v-for="c in blockTTLChoices" :key="c.label" :value="c.value">{{ c.label }}</option>
+          </select>
         </div>
         <div class="table-wrap">
           <table>
@@ -245,8 +255,8 @@
                 <td>{{ row.country || '-' }}</td>
                 <td class="truncate" :title="row.asn_name || row.asn">{{ row.asn ? `AS${String(row.asn).replace(/^AS/i, '')}` : '-' }} {{ row.asn_name || '' }}</td>
                 <td class="actions-cell">
-                  <button class="btn-quiet" @click.stop="challengeIPTopHost(row.ip)">Challenge</button>
-                  <button class="btn-danger" @click.stop="blockIP(row.ip)">Block 1h</button>
+                  <button class="btn-quiet" @click.stop="challengeIPTopHost(row.ip)" :title="'Manual-challenge the top host of this IP for ' + challengeTTLLabel">Challenge</button>
+                  <button class="btn-danger" @click.stop="blockIP(row.ip)">Block {{ blockTTLLabel }}</button>
                   <button class="btn-quiet" @click.stop="analyzeIP(row.ip)">Analyze</button>
                   <button class="btn-quiet" @click.stop="historyForIP(row.ip)">History</button>
                 </td>
@@ -387,18 +397,30 @@
           </section>
 
           <section class="mini-card ips-card" v-if="topIPRows.length">
-            <h3>Top IPs</h3>
+            <h3>Top IPs ({{ vhostTopIPLimit }})</h3>
+            <div class="toolbar">
+              <label>Show</label>
+              <select class="input" v-model.number="vhostTopIPLimit" title="How many top IPs to list">
+                <option :value="25">25</option>
+                <option :value="50">50</option>
+                <option :value="100">100</option>
+              </select>
+              <label>Block TTL</label>
+              <select class="input" v-model="blockTTL" title="TTL used by the Block buttons ('permanent' asks for confirmation)">
+                <option v-for="c in blockTTLChoices" :key="c.label" :value="c.value">{{ c.label }}</option>
+              </select>
+            </div>
             <table class="mini-table">
               <thead><tr><th>IP</th><th>Count</th><th>CC</th><th>ASN</th><th>Company</th><th>Action</th></tr></thead>
               <tbody>
-                <tr v-for="ipRow in topIPRows.slice(0, 12)" :key="ipRow.key">
+                <tr v-for="ipRow in topIPRows.slice(0, vhostTopIPLimit)" :key="ipRow.key">
                   <td><code>{{ ipRow.key }}</code></td>
                   <td>{{ ipRow.count }}</td>
                   <td>{{ ipRow.country }}</td>
                   <td>{{ ipRow.asn }}</td>
                   <td class="truncate" :title="ipRow.company">{{ ipRow.company }}</td>
                   <td>
-                    <button class="btn-danger" @click="blockIP(ipRow.key)">Block 1h</button>
+                    <button class="btn-danger" @click="blockIP(ipRow.key)">Block {{ blockTTLLabel }}</button>
                     <button class="btn-quiet" @click="historyForIP(ipRow.key)">History</button>
                   </td>
                 </tr>

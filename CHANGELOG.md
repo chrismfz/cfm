@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- WebUI (`/cfm-admin` webdetector pages): **selectable TTLs for the Block and
+  Challenge actions** instead of the hardcoded 1h/30m. A **Block TTL** selector
+  (`1h / 6h / 24h / 7d / permanent`) now drives every Block button on the page
+  (Global Top IPs + vhost-drilldown Top IPs); **permanent** sends an empty TTL —
+  an nft entry with no timeout, exactly like `cfm block <ip>` — and asks for
+  confirmation first. A **Challenge TTL** selector (`30m / 1h / 2h / 6h / 24h`)
+  drives the Challenge / Manual challenge buttons (`challenge/vhost/add`).
+  Button labels and tooltips show the TTL that will be applied, and the action
+  toast names it. No API change — both endpoints already accepted arbitrary
+  TTLs; the UI just never exposed them.
+- WebUI: the vhost-drilldown **Top IPs list is size-selectable (25 / 50 / 100)**
+  — more rows to act on during a bot storm. The drilldown fetch now asks the
+  server for its maximum (`top=100`) up front, so switching the selector never
+  refetches. The waf/forensics/main pages previously hard-capped this list at
+  12 rows; they now share the same selector (default 25).
 - WAF → autoblock (**Phase 1**, ships DRY_RUN): a new **`waf_security`** detector
   turns the in-path WAF's per-hit stream into a persistent, cross-request
   **nftables** block via the shared detector framework — so a source that keeps
