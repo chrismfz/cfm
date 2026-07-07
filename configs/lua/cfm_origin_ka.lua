@@ -14,9 +14,12 @@
 -- the single largest avoidable per-request cost of the in-path edge
 -- (typically several ms of pure CPU per request on loopback).
 --
--- When the operator sets CFM_ORIGIN_KEEPALIVE=1 (env, master process),
--- cfm.lua's origin_pass_for() routes through the cfm_origin_* upstream
--- blocks instead, and this module pools backend connections:
+-- When the operator enables it — detectors.conf [webdetector]
+-- ORIGIN_KEEPALIVE = 1 (published via cfm_bridge_config.lua; the
+-- CFM_ORIGIN_KEEPALIVE=1 master-env var remains a fallback for daemon
+-- upgrade lag) — cfm.lua's origin_pass_for() routes through the
+-- cfm_origin_* upstream blocks instead, and this module pools backend
+-- connections:
 --
 --   * port 80  — always pooled. HTTP/1.1 keepalive + Host-header vhost
 --     routing is standard; Apache serves different vhosts on one
@@ -58,14 +61,44 @@ end
 -- default: 5s) so nginx retires pooled connections before Apache closes
 -- them under us; nginx retries a request that dies on a cached connection
 -- on a fresh one, but not racing the backend keeps that path rare.
-local IDLE_SEC  = tonumber(os.getenv("CFM_ORIGIN_KA_IDLE_SEC") or "3") or 3
-local MAX_REQS  = tonumber(os.getenv("CFM_ORIGIN_KA_MAX_REQS") or "1000") or 1000
+--
+-- Tuning precedence: detectors.conf [webdetector] ORIGIN_KEEPALIVE_IDLE_SEC /
+-- ORIGIN_KEEPALIVE_MAX_REQS (published via cfm_bridge_config.lua, re-read
+-- within ~10s) → CFM_ORIGIN_KA_* env fallback → built-in defaults.
+local bridge_cfg = require "cfm_bridge_cfg"
+local ENV_IDLE_SEC = tonumber(os.getenv("CFM_ORIGIN_KA_IDLE_SEC") or "3") or 3
+local ENV_MAX_REQS = tonumber(os.getenv("CFM_ORIGIN_KA_MAX_REQS") or "1000") or 1000
+
+local function pool_knobs()
+  local cfg = bridge_cfg.get()
+  local idle = cfg.origin_ka_idle_sec or ENV_IDLE_SEC
+  local reqs = cfg.origin_ka_max_reqs or ENV_MAX_REQS
+  if idle <= 0 then idle = 3 end
+  if reqs <= 0 then reqs = 1000 end
+  return idle, reqs
+end
 
 local warned_no_sni_pool = false
 
+-- Set when enable_keepalive throws (e.g. an engine build whose
+-- lua-nginx-module C side lacks the balancer keepalive FFI shims — possible
+-- on Angie depending on the packaged module version). One WARN, then the
+-- worker permanently degrades to per-request connections instead of
+-- erroring every request.
+local keepalive_broken = false
+
 local function enable_pool()
+  if keepalive_broken then return end
   if type(balancer.enable_keepalive) ~= "function" then return end
-  local ok, err = balancer.enable_keepalive(IDLE_SEC, MAX_REQS)
+  local idle, reqs = pool_knobs()
+  local pok, ok, err = pcall(balancer.enable_keepalive, idle, reqs)
+  if not pok then
+    keepalive_broken = true
+    ngx.log(ngx.WARN, "[cfm_origin_ka] enable_keepalive raised (", tostring(ok),
+            ") — engine lacks balancer keepalive support; ",
+            "degrading to per-request connections for this worker")
+    return
+  end
   if not ok then
     ngx.log(ngx.WARN, "[cfm_origin_ka] enable_keepalive failed: ", tostring(err))
   end

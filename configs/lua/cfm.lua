@@ -132,15 +132,19 @@ end
 -- Webdetector → Lua runtime knobs (sibling file to the bridge token).
 -- Optional: if the file is missing or unloadable we fall back to safe defaults
 -- so an upgrade lag (cfm daemon old, Lua new) doesn't break the request path.
--- Operator edits propagate within the 10s cache TTL.
-local _BRIDGE_CONFIG_FILE = "/var/lib/cfm/lua/cfm_bridge_config.lua"
-local _bridge_cfg = fc.get(_BRIDGE_CONFIG_FILE, {
-  ttl = 10,
-  transform = function(val)
-    if type(val) ~= "table" then error("did not return a table") end
-    return { clearance_refresh = (val.clearance_refresh ~= false) }
-  end,
-}) or { clearance_refresh = true }
+-- Operator edits propagate within the 10s cache TTL (see cfm_bridge_cfg.lua).
+local _bridge_cfg = require("cfm_bridge_cfg").get()
+
+-- Origin keepalive on/off. The detectors.conf knob ([webdetector]
+-- ORIGIN_KEEPALIVE, published via cfm_bridge_config.lua) is authoritative
+-- when the daemon writes it; the CFM_ORIGIN_KEEPALIVE env var is only a
+-- fallback for daemon-upgrade lag (old daemon that doesn't emit the field).
+local _origin_keepalive
+if _bridge_cfg.origin_keepalive ~= nil then
+  _origin_keepalive = (_bridge_cfg.origin_keepalive == true)
+else
+  _origin_keepalive = (os.getenv("CFM_ORIGIN_KEEPALIVE") or "0") == "1"
+end
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -211,10 +215,11 @@ local CFG = {
   -- Opt-in origin keepalive: route allow-traffic through the
   -- cfm_origin_http/cfm_origin_https upstream blocks (balancer_by_lua +
   -- pooled backend connections) instead of a fresh proxy_pass connection
-  -- per request. Requires the upstream blocks from current
-  -- openresty.conf/angie.conf; default OFF. See cfm_origin_ka.lua and
-  -- docs/proxy-performance.md.
-  origin_keepalive = (os.getenv("CFM_ORIGIN_KEEPALIVE") or "0") == "1",
+  -- per request. Config knob: detectors.conf [webdetector] ORIGIN_KEEPALIVE
+  -- (resolved above, env fallback). Requires the upstream blocks from
+  -- current openresty.conf/angie.conf; default OFF. See cfm_origin_ka.lua
+  -- and docs/proxy-performance.md.
+  origin_keepalive = _origin_keepalive,
 
 }
 

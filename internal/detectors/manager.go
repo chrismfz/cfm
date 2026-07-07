@@ -364,11 +364,31 @@ func (m *manager) maybeReload(parent context.Context) {
 			// cfm_panel.lua need at request time). Sibling to the bridge
 			// token so it inherits the same parent dir + permissions.
 			const bridgeConfigPath = "/var/lib/cfm/lua/cfm_bridge_config.lua"
-			clearanceRefresh := kvBool(wdKV, "CHALLENGE_COOKIE_REFRESH", true)
-			if err := sslcollector.WriteWebdetectorBridgeConfig(bridgeConfigPath, clearanceRefresh, cfmGID); err != nil {
+			bridgeCfg := sslcollector.WebdetectorBridgeConfig{
+				ClearanceRefresh: kvBool(wdKV, "CHALLENGE_COOKIE_REFRESH", true),
+				// Origin keepalive (edge → Apache backend connection pooling).
+				// Default off; see docs/proxy-performance.md before arming.
+				OriginKeepalive: kvBool(wdKV, "ORIGIN_KEEPALIVE", false),
+				OriginKAIdleSec: kvInt(wdKV, "ORIGIN_KEEPALIVE_IDLE_SEC", 3),
+				OriginKAMaxReqs: kvInt(wdKV, "ORIGIN_KEEPALIVE_MAX_REQS", 1000),
+			}
+			// Guard nonsense values; the Lua side re-guards but keep the
+			// published file sane. Idle must stay below Apache's
+			// KeepAliveTimeout (EA4 default 5s) — capped at 60s for
+			// operators who raised Apache's too.
+			if bridgeCfg.OriginKAIdleSec < 1 {
+				bridgeCfg.OriginKAIdleSec = 1
+			} else if bridgeCfg.OriginKAIdleSec > 60 {
+				bridgeCfg.OriginKAIdleSec = 60
+			}
+			if bridgeCfg.OriginKAMaxReqs < 1 {
+				bridgeCfg.OriginKAMaxReqs = 1000
+			}
+			if err := sslcollector.WriteWebdetectorBridgeConfig(bridgeConfigPath, bridgeCfg, cfmGID); err != nil {
 				logging.Logf("[detectors] cfm_bridge_config.lua write failed path=%s err=%v", bridgeConfigPath, err)
 			} else {
-				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v", bridgeConfigPath, clearanceRefresh)
+				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v",
+					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive)
 			}
 		}
 	}
