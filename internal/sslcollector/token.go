@@ -359,9 +359,10 @@ type WebdetectorBridgeConfig struct {
 // WriteWebdetectorBridgeConfig atomically writes a Lua module exposing
 // webdetector → OpenResty/Angie runtime knobs (typically
 // /var/lib/cfm/lua/cfm_bridge_config.lua). The file is created 0640 (root:cfm)
-// so OpenResty workers can read it. The edge Lua re-reads it within ~10s
-// (cfm_bridge_cfg.lua TTL cache), so knob changes apply without a proxy
-// reload — only a cfm daemon reload to rewrite this file.
+// so OpenResty workers can read it. Both edge entrypoints (cfm.lua and
+// cfm_panel.lua) consume it through configs/lua/cfm_bridge_cfg.lua, whose
+// 10s TTL cache means knob changes apply without a proxy reload — only a
+// cfm daemon reload to rewrite this file.
 func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, cfmGID int) error {
 	if !filepath.IsAbs(luaPath) {
 		return fmt.Errorf("sslcollector: luaPath must be absolute, got %q", luaPath)

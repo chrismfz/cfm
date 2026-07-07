@@ -30,24 +30,29 @@ local PATH = "/var/lib/cfm/lua/cfm_bridge_config.lua"
 
 -- Served when the file is missing or unloadable (fresh install, upgrade
 -- lag). clearance_refresh=true mirrors the historical fail-safe default;
--- the origin_* fields stay nil so callers fall back to env/defaults.
+-- the origin_* fields stay nil so callers fall back to their defaults.
 local FALLBACK = { clearance_refresh = true }
 
+-- Hoisted to module scope: this module's state persists across requests
+-- (unlike cfm.lua's chunk), and fc.get only consults opts on a cache
+-- miss — building the table + closure per call would be pure garbage on
+-- the ~10s-TTL hit path, which runs at least once per request.
+local OPTS = {
+  ttl = 10,
+  transform = function(val)
+    if type(val) ~= "table" then error("did not return a table") end
+    local out = { clearance_refresh = (val.clearance_refresh ~= false) }
+    if val.origin_keepalive ~= nil then
+      out.origin_keepalive = (val.origin_keepalive == true)
+    end
+    out.origin_ka_idle_sec = tonumber(val.origin_ka_idle_sec)
+    out.origin_ka_max_reqs = tonumber(val.origin_ka_max_reqs)
+    return out
+  end,
+}
+
 function _M.get()
-  local cfg = fc.get(PATH, {
-    ttl = 10,
-    transform = function(val)
-      if type(val) ~= "table" then error("did not return a table") end
-      local out = { clearance_refresh = (val.clearance_refresh ~= false) }
-      if val.origin_keepalive ~= nil then
-        out.origin_keepalive = (val.origin_keepalive == true)
-      end
-      out.origin_ka_idle_sec = tonumber(val.origin_ka_idle_sec)
-      out.origin_ka_max_reqs = tonumber(val.origin_ka_max_reqs)
-      return out
-    end,
-  })
-  return cfg or FALLBACK
+  return fc.get(PATH, OPTS) or FALLBACK
 end
 
 return _M

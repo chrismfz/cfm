@@ -118,12 +118,25 @@ func assertPanelLuaBridgeContract(t *testing.T) {
 	for _, tok := range []string{
 		`local _BRIDGE_TOKEN_FILE = "/var/lib/cfm/lua/cfm_bridge_token.lua"`,
 		`local panel_bridge_token = load_token(_BRIDGE_TOKEN_FILE, "bridge token file")`,
-		`local _BRIDGE_CONFIG_FILE = "/var/lib/cfm/lua/cfm_bridge_config.lua"`,
-		`local chunk = loadfile(_BRIDGE_CONFIG_FILE)`,
+		// Bridge config is read via the canonical cached accessor (which
+		// owns the /var/lib/cfm/lua/cfm_bridge_config.lua path), not an
+		// inline per-request loadfile — see configs/lua/cfm_bridge_cfg.lua.
+		`pcall(require, "cfm_bridge_cfg")`,
+		`panel_bridge_cfg = bc.get()`,
 	} {
 		if !strings.Contains(s, tok) {
 			t.Fatalf("missing bridge-file contract token %q", tok)
 		}
+	}
+
+	// The accessor module must keep owning the canonical path the daemon
+	// writes (internal/detectors/manager.go bridgeConfigPath).
+	bc, err := os.ReadFile("../../configs/lua/cfm_bridge_cfg.lua")
+	if err != nil {
+		t.Fatalf("read cfm_bridge_cfg.lua: %v", err)
+	}
+	if !strings.Contains(string(bc), `local PATH = "/var/lib/cfm/lua/cfm_bridge_config.lua"`) {
+		t.Fatalf("cfm_bridge_cfg.lua no longer reads the canonical bridge-config path")
 	}
 }
 

@@ -15,11 +15,11 @@
 -- (typically several ms of pure CPU per request on loopback).
 --
 -- When the operator enables it — detectors.conf [webdetector]
--- ORIGIN_KEEPALIVE = 1 (published via cfm_bridge_config.lua; the
--- CFM_ORIGIN_KEEPALIVE=1 master-env var remains a fallback for daemon
--- upgrade lag) — cfm.lua's origin_pass_for() routes through the
--- cfm_origin_* upstream blocks instead, and this module pools backend
--- connections:
+-- ORIGIN_KEEPALIVE = 1, published via cfm_bridge_config.lua — cfm.lua's
+-- origin_pass_for() routes through the cfm_origin_* upstream blocks
+-- instead (guarded by the $cfm_origin_ka_conf sentinel so an older live
+-- proxy conf without the upstreams safely stays on direct proxying), and
+-- this module pools backend connections:
 --
 --   * port 80  — always pooled. HTTP/1.1 keepalive + Host-header vhost
 --     routing is standard; Apache serves different vhosts on one
@@ -36,10 +36,14 @@
 --
 -- FAIL-SAFETY
 --
--- A hard failure here (balancer API missing, set_current_peer refusing
--- the peer) surfaces as a 502 on the affected request — same blast radius
--- as any upstream connect failure — and is logged. The knob defaults to
--- OFF; nothing in this file runs unless the operator opts in.
+-- Capability gaps degrade, they don't error: no SNI-keyed pools → HTTPS
+-- stays per-request (one NOTICE per worker); enable_keepalive missing or
+-- its FFI shim absent from the engine's lua module build (possible on
+-- some Angie angie-module-lua versions) → per-request connections with
+-- one WARN per worker. A hard failure to even set the peer surfaces as a
+-- 502 on the affected request — same blast radius as any upstream connect
+-- failure — and is logged. The knob defaults to OFF; nothing in this file
+-- runs unless the operator opts in.
 
 local ok_bal, balancer = pcall(require, "ngx.balancer")
 
@@ -48,7 +52,10 @@ local _M = {}
 -- Capability probe, once per worker: does set_current_peer take a third
 -- `host` argument? Older lua-resty-core silently IGNORES extra arguments
 -- (plain Lua varargs), so a pcall probe cannot detect support — inspect
--- the function's declared parameter count instead.
+-- the function's declared parameter count instead. A vararg
+-- implementation reads as nparams=0 and is treated as unsupported (safe).
+-- Also demoted at runtime (with one WARN) if the 3-arg call ever fails —
+-- e.g. a future core that expects an opts table instead of a string.
 local sni_pool_ok = false
 if ok_bal and type(balancer.set_current_peer) == "function" then
   local ok_info, info = pcall(debug.getinfo, balancer.set_current_peer, "u")
@@ -57,32 +64,35 @@ if ok_bal and type(balancer.set_current_peer) == "function" then
   end
 end
 
--- Idle timeout MUST stay below Apache's KeepAliveTimeout (EA4/cPanel
--- default: 5s) so nginx retires pooled connections before Apache closes
--- them under us; nginx retries a request that dies on a cached connection
--- on a fresh one, but not racing the backend keeps that path rare.
+-- Pool tuning: detectors.conf [webdetector] ORIGIN_KEEPALIVE_IDLE_SEC /
+-- ORIGIN_KEEPALIVE_MAX_REQS via the bridge config; built-in defaults when
+-- the fields are absent (older daemon). The idle timeout MUST stay below
+-- Apache's KeepAliveTimeout (EA4/cPanel default: 5s) so nginx retires
+-- pooled connections before Apache closes them under us.
 --
--- Tuning precedence: detectors.conf [webdetector] ORIGIN_KEEPALIVE_IDLE_SEC /
--- ORIGIN_KEEPALIVE_MAX_REQS (published via cfm_bridge_config.lua, re-read
--- within ~10s) → CFM_ORIGIN_KA_* env fallback → built-in defaults.
+-- bridge_cfg.get() returns the SAME cached table between bridge-config
+-- reloads (cfm_filecache), so knob resolution is memoised on table
+-- identity — the steady-state cost is one call + one pointer compare.
 local bridge_cfg = require "cfm_bridge_cfg"
-local ENV_IDLE_SEC = tonumber(os.getenv("CFM_ORIGIN_KA_IDLE_SEC") or "3") or 3
-local ENV_MAX_REQS = tonumber(os.getenv("CFM_ORIGIN_KA_MAX_REQS") or "1000") or 1000
+local DEFAULT_IDLE_SEC = 3
+local DEFAULT_MAX_REQS = 1000
+local last_cfg, cur_idle, cur_reqs
 
 local function pool_knobs()
   local cfg = bridge_cfg.get()
-  local idle = cfg.origin_ka_idle_sec or ENV_IDLE_SEC
-  local reqs = cfg.origin_ka_max_reqs or ENV_MAX_REQS
-  if idle <= 0 then idle = 3 end
-  if reqs <= 0 then reqs = 1000 end
-  return idle, reqs
+  if cfg ~= last_cfg then
+    last_cfg = cfg
+    cur_idle = cfg.origin_ka_idle_sec or DEFAULT_IDLE_SEC
+    cur_reqs = cfg.origin_ka_max_reqs or DEFAULT_MAX_REQS
+    if cur_idle <= 0 then cur_idle = DEFAULT_IDLE_SEC end
+    if cur_reqs <= 0 then cur_reqs = DEFAULT_MAX_REQS end
+  end
+  return cur_idle, cur_reqs
 end
 
 local warned_no_sni_pool = false
 
--- Set when enable_keepalive throws (e.g. an engine build whose
--- lua-nginx-module C side lacks the balancer keepalive FFI shims — possible
--- on Angie depending on the packaged module version). One WARN, then the
+-- Set when enable_keepalive throws (missing FFI shim). One WARN, then the
 -- worker permanently degrades to per-request connections instead of
 -- erroring every request.
 local keepalive_broken = false
@@ -104,12 +114,37 @@ local function enable_pool()
   end
 end
 
+local function set_peer(addr, port)
+  local ok, err = balancer.set_current_peer(addr, port)
+  if not ok then
+    ngx.log(ngx.ERR, "[cfm_origin_ka] set_current_peer(", addr, ":", port,
+            ") failed: ", tostring(err))
+    return false
+  end
+  return true
+end
+
 -- balance(port) — entry point called from the balancer_by_lua_block of
 -- the cfm_origin_http (80) / cfm_origin_https (443) upstreams.
 function _M.balance(port)
   if not ok_bal or type(balancer.set_current_peer) ~= "function" then
     ngx.log(ngx.ERR, "[cfm_origin_ka] ngx.balancer unavailable: ", tostring(balancer))
     return ngx.exit(ngx.ERROR)
+  end
+
+  -- Keepalive-race retry. balancer_by_lua disables nginx's default
+  -- upstream retries — without set_more_tries a pooled connection that
+  -- Apache closed in the idle window turns into a client-facing 502.
+  -- Allow exactly ONE retry (a fresh connection) on the first failure;
+  -- get_last_failure() is nil only on the initial attempt, so retries
+  -- never stack more tries.
+  if type(balancer.get_last_failure) == "function"
+     and type(balancer.set_more_tries) == "function"
+     and balancer.get_last_failure() == nil then
+    local ok, err = balancer.set_more_tries(1)
+    if not ok then
+      ngx.log(ngx.WARN, "[cfm_origin_ka] set_more_tries failed: ", tostring(err))
+    end
   end
 
   local addr = ngx.var.server_addr
@@ -125,8 +160,14 @@ function _M.balance(port)
         enable_pool()
         return
       end
+      -- Latch off: the failure is deterministic for this core build
+      -- (argument shape / peer handling), so retrying — and re-warning —
+      -- per request would spam error.log at request rate under load.
+      sni_pool_ok = false
       ngx.log(ngx.WARN, "[cfm_origin_ka] SNI-keyed set_current_peer failed (",
-              tostring(pok and err or ok), ") — falling back to per-request connection")
+              tostring(pok and err or ok),
+              ") — disabling HTTPS pooling for this worker, ",
+              "falling back to per-request connections")
       -- fall through to the unpooled 2-arg path below
     elseif not warned_no_sni_pool then
       warned_no_sni_pool = true
@@ -138,10 +179,7 @@ function _M.balance(port)
     -- SNI still comes from proxy_ssl_name $host at the location level,
     -- and each request gets its own connection — identical to the
     -- pre-keepalive behaviour.
-    local ok, err = balancer.set_current_peer(addr, port)
-    if not ok then
-      ngx.log(ngx.ERR, "[cfm_origin_ka] set_current_peer(", addr, ":", port,
-              ") failed: ", tostring(err))
+    if not set_peer(addr, port) then
       return ngx.exit(ngx.ERROR)
     end
     return
@@ -149,16 +187,14 @@ function _M.balance(port)
 
   -- Plain-HTTP origin (port 80): Host-header vhost routing, always safe
   -- to pool per (addr, port).
-  local ok, err = balancer.set_current_peer(addr, port)
-  if not ok then
-    ngx.log(ngx.ERR, "[cfm_origin_ka] set_current_peer(", addr, ":", port,
-            ") failed: ", tostring(err))
+  if not set_peer(addr, port) then
     return ngx.exit(ngx.ERROR)
   end
   enable_pool()
 end
 
--- Exposed for tests / debugging (`/cfm-admin/lua-stats` style probes).
+-- Exposed for the host-side smoke test (scripts/tests/cfm_origin_ka_test.lua)
+-- and ad-hoc debugging.
 function _M.sni_pool_supported()
   return sni_pool_ok
 end

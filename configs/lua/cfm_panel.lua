@@ -61,22 +61,21 @@ end
 
 local panel_bridge_token = load_token(_BRIDGE_TOKEN_FILE, "bridge token file")
 
--- Webdetector → Lua runtime knobs (sibling file to the bridge token).
--- Missing/unparseable file falls back to safe defaults so a daemon-vs-Lua
--- upgrade lag doesn't break the panel request path.
-local _BRIDGE_CONFIG_FILE = "/var/lib/cfm/lua/cfm_bridge_config.lua"
-local panel_bridge_cfg = { clearance_refresh = true }
+-- Webdetector → Lua runtime knobs (sibling file to the bridge token), read
+-- through the canonical cached accessor (cfm_bridge_cfg → cfm_filecache,
+-- 10s TTL). The previous inline loadfile here ran once per panel request —
+-- this file is loaded via access_by_lua_file, so its top level re-executes
+-- per request (see the PITFALL block in cfm.lua) — and was a second,
+-- drift-prone copy of the bridge-config parse. pcall keeps the panel path
+-- alive through an upgrade lag where the module set is older than this file.
+local panel_bridge_cfg
 do
-    local chunk = loadfile(_BRIDGE_CONFIG_FILE)
-    if chunk then
-        local ok, val = pcall(chunk)
-        if ok and type(val) == "table" then
-            if val.clearance_refresh ~= nil then
-                panel_bridge_cfg.clearance_refresh = (val.clearance_refresh ~= false)
-            end
-        else
-            ngx.log(ngx.WARN, "[cfm_panel] bridge config file did not return a table: ", _BRIDGE_CONFIG_FILE)
-        end
+    local ok, bc = pcall(require, "cfm_bridge_cfg")
+    if ok and type(bc) == "table" and bc.get then
+        panel_bridge_cfg = bc.get()
+    else
+        ngx.log(ngx.WARN, "[cfm_panel] cfm_bridge_cfg unavailable, using defaults: ", tostring(bc))
+        panel_bridge_cfg = { clearance_refresh = true }
     end
 end
 

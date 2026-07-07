@@ -135,17 +135,6 @@ end
 -- Operator edits propagate within the 10s cache TTL (see cfm_bridge_cfg.lua).
 local _bridge_cfg = require("cfm_bridge_cfg").get()
 
--- Origin keepalive on/off. The detectors.conf knob ([webdetector]
--- ORIGIN_KEEPALIVE, published via cfm_bridge_config.lua) is authoritative
--- when the daemon writes it; the CFM_ORIGIN_KEEPALIVE env var is only a
--- fallback for daemon-upgrade lag (old daemon that doesn't emit the field).
-local _origin_keepalive
-if _bridge_cfg.origin_keepalive ~= nil then
-  _origin_keepalive = (_bridge_cfg.origin_keepalive == true)
-else
-  _origin_keepalive = (os.getenv("CFM_ORIGIN_KEEPALIVE") or "0") == "1"
-end
-
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- CONFIG
@@ -215,11 +204,13 @@ local CFG = {
   -- Opt-in origin keepalive: route allow-traffic through the
   -- cfm_origin_http/cfm_origin_https upstream blocks (balancer_by_lua +
   -- pooled backend connections) instead of a fresh proxy_pass connection
-  -- per request. Config knob: detectors.conf [webdetector] ORIGIN_KEEPALIVE
-  -- (resolved above, env fallback). Requires the upstream blocks from
-  -- current openresty.conf/angie.conf; default OFF. See cfm_origin_ka.lua
-  -- and docs/proxy-performance.md.
-  origin_keepalive = _origin_keepalive,
+  -- per request. Single knob: detectors.conf [webdetector] ORIGIN_KEEPALIVE,
+  -- published via cfm_bridge_config.lua (field absent on older daemons =
+  -- off). Routing additionally requires the live proxy conf to declare the
+  -- cfm_origin_* upstreams — see the $cfm_origin_ka_conf sentinel check in
+  -- origin_pass_for(). Default OFF. See cfm_origin_ka.lua and
+  -- docs/proxy-performance.md.
+  origin_keepalive = (_bridge_cfg.origin_keepalive == true),
 
 }
 
@@ -238,11 +229,11 @@ if clamav_ok then
       ttl = 10,
       transform = function(v)
         if type(v) ~= "table" then error("did not return a table") end
-        return { enabled = (v.enabled ~= false) }
+        return (v.enabled ~= false)
       end,
     })
-    if val and val.enabled ~= nil then
-      clamav_hook_enabled = val.enabled
+    if val ~= nil then
+      clamav_hook_enabled = val
     end
   end
   clamav.init({
@@ -1155,11 +1146,18 @@ local function origin_pass_for(s_in)
   if ngx.var.cfm_lua_ms ~= nil then
     ngx.var.cfm_lua_ms = string.format("%.1f", (ngx.now() - ngx.req.start_time()) * 1000)
   end
-  -- Opt-in origin keepalive (CFM_ORIGIN_KEEPALIVE=1): route through the
-  -- cfm_origin_* upstream blocks so backend connections are pooled instead
-  -- of opening a fresh TCP (+TLS on 443) connection to Apache per request.
-  -- See cfm_origin_ka.lua for the SNI-safety rules.
-  if CFG.origin_keepalive then
+  -- Opt-in origin keepalive (detectors.conf [webdetector] ORIGIN_KEEPALIVE):
+  -- route through the cfm_origin_* upstream blocks so backend connections
+  -- are pooled instead of opening a fresh TCP (+TLS on 443) connection to
+  -- Apache per request. See cfm_origin_ka.lua for the SNI-safety rules.
+  --
+  -- $cfm_origin_ka_conf is a sentinel set ONLY by proxy confs that declare
+  -- the cfm_origin_* upstream blocks. The knob travels the fast channel
+  -- (bridge-config file, ~10s) but the upstreams travel the slow one (live
+  -- proxy conf + reload); without this guard, arming the knob against an
+  -- older live conf would proxy_pass to a nonexistent upstream and 502
+  -- every allowed request. With the guard it degrades to direct proxying.
+  if CFG.origin_keepalive and ngx.var.cfm_origin_ka_conf == "1" then
     return (s_in == "https") and "https://cfm_origin_https" or "http://cfm_origin_http"
   end
   local dst = ngx.var.server_addr or "127.0.0.1"

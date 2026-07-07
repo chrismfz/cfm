@@ -64,10 +64,14 @@ ORIGIN_KEEPALIVE = 1
 and reload the cfm daemon. The daemon publishes the knob to the edge via
 `/var/lib/cfm/lua/cfm_bridge_config.lua`; every worker re-reads it within
 ~10 s (`cfm_bridge_cfg.lua` TTL cache) — **no proxy reload needed**, and
-turning it back to `0` rolls back the same way. (The
-`CFM_ORIGIN_KEEPALIVE=1` proxy-master env var still works, but only as a
-fallback when the daemon is older and doesn't write the field; when the
-config key is present it is authoritative.)
+turning it back to `0` rolls back the same way. This is the only switch.
+
+Safety interlock: cfm.lua routes to the pools only when the live proxy
+conf also declares them — current `openresty.conf`/`angie.conf` set the
+`$cfm_origin_ka_conf` sentinel next to the other `set $cfm_*` vars. On a
+box whose live conf predates the upstream blocks, arming the knob is a
+no-op (direct proxying continues) instead of a fleet-wide 502 from
+`proxy_pass` resolving a nonexistent upstream.
 
 Once on, cfm.lua's `origin_pass_for()` routes allow-traffic through the
 `cfm_origin_http` / `cfm_origin_https` upstream blocks, where
@@ -85,14 +89,20 @@ per request — dedicated-IP routing is preserved — and pools connections:
   off) — never risking Apache `421 Misdirected Request` on shared-vhost
   boxes.
 
-Tuning — all in `[webdetector]` (env fallbacks in parentheses apply only
-when the daemon predates the key):
+Tuning — all in `[webdetector]`; fields absent (older daemon) fall back to
+the built-in defaults below:
 
 | detectors.conf key | Default | Meaning |
 |---|---|---|
-| `ORIGIN_KEEPALIVE` (`CFM_ORIGIN_KEEPALIVE`) | `0` | `1` routes allow-traffic through the pooled upstreams |
-| `ORIGIN_KEEPALIVE_IDLE_SEC` (`CFM_ORIGIN_KA_IDLE_SEC`) | `3` | Idle seconds before a pooled connection is retired. **Keep below Apache's `KeepAliveTimeout`** (EA4/cPanel default 5 s) so Apache never closes a connection nginx still considers fresh. Clamped to 1–60. |
-| `ORIGIN_KEEPALIVE_MAX_REQS` (`CFM_ORIGIN_KA_MAX_REQS`) | `1000` | Requests served per pooled connection before recycling |
+| `ORIGIN_KEEPALIVE` | `0` | `1` routes allow-traffic through the pooled upstreams |
+| `ORIGIN_KEEPALIVE_IDLE_SEC` | `3` | Idle seconds before a pooled connection is retired. **Keep below Apache's `KeepAliveTimeout`** (EA4/cPanel default 5 s) so Apache never closes a connection nginx still considers fresh. Clamped to 1–60. |
+| `ORIGIN_KEEPALIVE_MAX_REQS` | `1000` | Requests served per pooled connection before recycling |
+
+Keepalive races are handled: `balancer_by_lua` disables nginx's default
+upstream retries, so `cfm_origin_ka.lua` arms exactly one retry
+(`set_more_tries(1)`) on each request's first attempt — a pooled
+connection that Apache closed in the idle window is transparently retried
+on a fresh connection instead of surfacing a 502.
 
 Engine support (OpenResty vs Angie): the code path is identical — both
 load the same lua-nginx-module + lua-resty-core stack, and

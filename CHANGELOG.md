@@ -19,24 +19,28 @@ back-filled here — see the git/PR history for that period.
 
 ### Added
 - Edge proxy: **opt-in origin keepalive** (`detectors.conf [webdetector]
-  ORIGIN_KEEPALIVE = 1`, published to the edge via `cfm_bridge_config.lua`
-  and picked up within ~10s — no proxy reload; the `CFM_ORIGIN_KEEPALIVE=1`
-  master-env var remains a fallback for daemon-upgrade lag) — allow-traffic
-  routes through new `cfm_origin_http`/`cfm_origin_https` upstream pools
-  (`configs/lua/cfm_origin_ka.lua`, balancer_by_lua) instead of opening a
-  fresh TCP connection — plus a full upstream TLS handshake on 443 — to
-  Apache for every request. Port 80 is always pooled (Host-header vhost
-  routing); port 443 is pooled only when lua-resty-core supports SNI-keyed
-  pools (OpenResty 1.27.1.1+), otherwise it falls back to per-request
-  connections so a connection handshaked for one SNI is never reused for
-  another vhost (no Apache 421s on shared boxes); an engine build without
-  balancer-keepalive FFI support (possible on some Angie module builds)
-  degrades once-per-worker to per-request connections with a WARN instead
-  of erroring. Tunables: `ORIGIN_KEEPALIVE_IDLE_SEC` (default 3, keep below
-  Apache `KeepAliveTimeout`, clamped 1-60), `ORIGIN_KEEPALIVE_MAX_REQS`
-  (default 1000). Default OFF — zero behaviour change until an operator
-  opts in. See `docs/proxy-performance.md` for the measurement + rollout
-  recipe.
+  ORIGIN_KEEPALIVE = 1` — the single switch, published to the edge via
+  `cfm_bridge_config.lua` and picked up within ~10s, no proxy reload) —
+  allow-traffic routes through new `cfm_origin_http`/`cfm_origin_https`
+  upstream pools (`configs/lua/cfm_origin_ka.lua`, balancer_by_lua) instead
+  of opening a fresh TCP connection — plus a full upstream TLS handshake on
+  443 — to Apache for every request. Safety: routing engages only when the
+  live proxy conf declares the pools (`$cfm_origin_ka_conf` sentinel in the
+  current `openresty.conf`/`angie.conf`), so arming the knob against an
+  older live conf is a no-op rather than a 502 storm. Port 80 is always
+  pooled (Host-header vhost routing); port 443 is pooled only when
+  lua-resty-core supports SNI-keyed pools (OpenResty 1.27.1.1+), otherwise
+  it falls back to per-request connections so a connection handshaked for
+  one SNI is never reused for another vhost (no Apache 421s on shared
+  boxes); an engine build without balancer-keepalive FFI support (possible
+  on some Angie module builds) degrades once-per-worker to per-request
+  connections with a WARN instead of erroring. Keepalive races are covered:
+  one `set_more_tries(1)` retry per request replaces the default upstream
+  retry that balancer_by_lua disables. Tunables: `ORIGIN_KEEPALIVE_IDLE_SEC`
+  (default 3, keep below Apache `KeepAliveTimeout`, clamped 1-60),
+  `ORIGIN_KEEPALIVE_MAX_REQS` (default 1000). Default OFF — zero behaviour
+  change until an operator opts in. See `docs/proxy-performance.md` for the
+  measurement + rollout recipe.
 - Edge proxy: **client TLS session resumption** — `ssl_session_cache
   shared:cfm_ssl:20m` + `ssl_session_timeout 4h` at the `http {}` level of
   both engine configs (panel listeners inherit). Reconnecting clients
@@ -62,6 +66,11 @@ back-filled here — see the git/PR history for that period.
   2s-when-missing TTLs — now actually honoured). Behaviour is unchanged
   apart from the disk probes happening once per TTL window instead of once
   per request.
+- Edge proxy (cfm_panel.lua): the panel listeners' bridge-config read had
+  the same per-request `loadfile()` bug **and** was a second, drift-prone
+  copy of the parse; it now goes through the canonical
+  `cfm_bridge_cfg.lua` accessor (same 10s TTL as the main edge), so panel
+  ports pick up daemon knob changes identically to web listeners.
 - API: **bulk IP block endpoint with self-lockout guard** — admin-only
   `POST /api/v1/firewall/block/batch` (`{ips: […], ttl, reason}`, ≤256 IPs per
   request, same TTL semantics as the single endpoint: empty = permanent). Each
