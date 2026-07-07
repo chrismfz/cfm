@@ -46,6 +46,21 @@ back-filled here — see the git/PR history for that period.
   `docs/waf-autoblock-design.md`.
 
 ### Changed
+- Challenge: **audit trail when an exclude suppresses a vhost challenge.** When
+  the suspicious-vhost scorer WOULD flag a host but it is in the Challenge
+  excludes, CFM now logs `[challenge][vhost] action=suppressed_by_exclude
+  host=… would_reason=… uniqIP=… reasons=… note=host_in_challenge_excludes`
+  (throttled to once per holddown window). This is the deliberate paper trail:
+  an operator who excludes a host — or turns Challenge/WAF off for it at a
+  customer's request — can show exactly what protection was declined ("we would
+  have challenged N unique IPs on this vhost, but it's excluded") if that host
+  later gets crawled/scraped. Also **relabelled the `CHALLENGE_VHOST` config-list
+  push reason `manual` → `vhost_config`** in the challenge log: those pushes come
+  from the config list every reconcile, not a human, and the `manual` label read
+  as an operator having clicked it. A **genuine** operator/API manual challenge
+  (from the `manualChal` store) still emits `reason=manual` — only the config-list
+  push was relabelled — and the separate per-request manual/auto classification
+  (`manual_active`) is unaffected.
 - ClamAV upload scan: **only scan uploads the WAF let through** — the edge
   (`cfm.lua`) no longer fires `clamav.notify` on a request the WAF is about to
   **block** (`waf_action == "block"`). A WAF block already stops the malware at
@@ -82,6 +97,19 @@ back-filled here — see the git/PR history for that period.
   matched — the doc still listed it).
 
 ### Fixed
+- Challenge: **dynamic "Challenge excludes" are now honoured by the vhost-wide
+  challenge decision**, not only per-IP. The auto-suspicious-vhost scorer (and
+  the `CHALLENGE_VHOST` list) previously consulted only the *static*
+  `CHALLENGE_HOST_BYPASS` (`hostBypassed`), never the runtime UI/CLI/API exclude
+  store (`MatchChallenge`, which is used only in the per-IP `isExcluded` path).
+  So a host an operator explicitly excluded still got the **whole vhost**
+  challenged the moment its suspicious score tripped, and adding the exclude did
+  not clear an already-active auto-challenge (operator report: `www.gokids.gr`
+  was excluded yet `auto_on reason=uniqip_on` challenged its visitors until the
+  holddown expired). The dynamic exclude now wins over both the auto-suspicious
+  path and the `CHALLENGE_VHOST` list, and clears any active vhost challenge on
+  the next reconcile. Workaround on older builds: add the host to the static
+  `CHALLENGE_HOST_BYPASS` (which the vhost path already honoured).
 - Detectors: **`IGNORE_IPS`/`IGNORE_NETS` edge bypass no longer dies silently
   under a hardened daemon umask.** The Go mirror `WriteLuaCache` wrote
   `/var/lib/cfm/lua/cfm_ignore_nets.lua` with `os.WriteFile(…, 0640)`, whose

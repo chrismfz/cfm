@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,6 +31,12 @@ type excludeStore struct {
 	challengeEntries []compiledExcludeEntry
 	wafEntries       []compiledExcludeEntry
 	pathEntries      []compiledExcludeEntry
+	// Lock-free count of challengeEntries, so the hot MatchChallenge path (called
+	// for every host every reconcile) can short-circuit the common zero-excludes
+	// case without taking mu / normalising the host. Written under mu in
+	// rebuildCompiledLocked, read atomically. Int64 so the len(int)->count store
+	// is a safe widening conversion (no gosec G115 narrowing); the count is tiny.
+	challengeCount atomic.Int64
 }
 
 type compiledExcludeEntry struct {
@@ -264,6 +271,11 @@ func (m compiledValueMatcher) Match(value string) bool {
 }
 
 func (s *excludeStore) MatchChallenge(host string) bool {
+	// Fast path: no challenge excludes configured (the common case) — skip the
+	// profiler, host normalisation, and RLock entirely.
+	if s.challengeCount.Load() == 0 {
+		return false
+	}
 	start, profEnabled := globalExcludeProfiler.start()
 	defer globalExcludeProfiler.end("match_challenge", start, profEnabled)
 	host = strings.ToLower(strings.TrimSpace(host))
@@ -420,6 +432,7 @@ func (s *excludeStore) rebuildCompiledLocked() {
 	s.challengeEntries = challenge
 	s.wafEntries = waf
 	s.pathEntries = pathEntries
+	s.challengeCount.Store(int64(len(challenge)))
 }
 
 func compileGlob(pattern string) *regexp.Regexp {

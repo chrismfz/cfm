@@ -134,6 +134,64 @@ func (e *Engine) hostBypassed(host string) bool {
     return hostMatchAny(host, e.cfg.ChallengeHostBypass)
 }
 
+// hostChallengeExcluded reports whether host matches the dynamic "Challenge
+// excludes" store (the runtime, UI/CLI/API-managed list — MatchChallenge, incl.
+// its glob/subdomain patterns). Distinct from hostBypassed (static
+// CHALLENGE_HOST_BYPASS config). Until this was wired, the vhost-wide challenge
+// paths (auto-suspicious + the CHALLENGE_VHOST list) only consulted
+// hostBypassed, never the dynamic excludes — so a host an operator explicitly
+// excluded still got vhost-challenged when its suspicious score tripped. The
+// dynamic excludes were honoured ONLY per-IP (isExcluded), not at the vhost
+// decision. This closes that gap.
+func (e *Engine) hostChallengeExcluded(host string) bool {
+    // MatchChallenge already rejects the empty host (and short-circuits when no
+    // challenge excludes are configured), so no host!="" guard is needed here.
+    return e.challengeExcludes != nil && e.challengeExcludes.MatchChallenge(host)
+}
+
+// tripReason is the SINGLE source of the auto-suspicious-vhost trip decision:
+// the reason the long-window scorer would flag this host now
+// ("uniqip_max"/"uniqip_on"/"score_on"), or "" if it would not. It is used by
+// BOTH the scorer's `if !cur` branch (which applies + logs the challenge) AND
+// the suppressed_by_exclude audit path (which reports the protection an exclude
+// declined). One copy — so the audit line can never disagree with the real
+// decision (CLAUDE.md §5: never keep a second copy of a matcher that can drift).
+// The conditions here MUST equal the scorer's; callers pass e.cfg fields, which
+// FillDefaults has already normalised (ScoreOn=0.70/MinUniqIP=80 when enabled).
+func (e *Engine) tripReason(row SuspiciousRow) string {
+    if e.cfg.ChallengeSuspiciousUniqIP {
+        if e.cfg.ChallengeSuspiciousUniqIPMax > 0 && row.UniqueIPs >= e.cfg.ChallengeSuspiciousUniqIPMax {
+            return "uniqip_max"
+        }
+        if e.cfg.ChallengeSuspiciousUniqIPOn > 0 && row.UniqueIPs >= e.cfg.ChallengeSuspiciousUniqIPOn {
+            return "uniqip_on"
+        }
+    }
+    if row.Score >= e.cfg.ChallengeSuspiciousScoreOn && row.UniqueIPs >= e.cfg.ChallengeSuspiciousMinUniqIP {
+        return "score_on"
+    }
+    return ""
+}
+
+// shouldLogVhostSuppress throttles the suppressed_by_exclude audit line to at
+// most once per holddown window per host.
+func (e *Engine) shouldLogVhostSuppress(host string, now time.Time) bool {
+    win := e.cfg.ChallengeSuspiciousHolddown
+    if win <= 0 {
+        win = 15 * time.Minute
+    }
+    e.vhostMu.Lock()
+    defer e.vhostMu.Unlock()
+    if e.vhostSuppressLoggedAt == nil {
+        e.vhostSuppressLoggedAt = make(map[string]time.Time)
+    }
+    if last, ok := e.vhostSuppressLoggedAt[host]; ok && now.Sub(last) < win {
+        return false
+    }
+    e.vhostSuppressLoggedAt[host] = now
+    return true
+}
+
 
 func compileChalRules(list []string, defCount int) []chalRule {
 	if defCount <= 0 {
@@ -1029,7 +1087,22 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                     e.nginxBridge.ClearVhost(pat)
                     continue
                 }
-                e.nginxBridge.ChallengeVhostWithReason(pat, vttl, "manual")
+                // Dynamic Challenge-exclude wins over the CHALLENGE_VHOST list too.
+                if e.hostChallengeExcluded(pat) {
+                    // Throttle key is prefixed "cfg:" so this low-detail line does
+                    // NOT share a slot with — and starve — the richer auto-suspicious
+                    // suppressed_by_exclude line (keyed by bare host) for a host that
+                    // is both in CHALLENGE_VHOST and an auto candidate.
+                    if e.cfg.ChallengeLog && e.shouldLogVhostSuppress("cfg:"+pat, now) {
+                        logging.LogfCHALLENGES("[challenge][vhost] action=suppressed_by_exclude host=%s would_reason=vhost_config note=host_in_challenge_excludes", pat)
+                    }
+                    e.nginxBridge.ClearVhost(pat)
+                    continue
+                }
+                // reason "vhost_config": pushed from the CHALLENGE_VHOST config
+                // list every reconcile — NOT a human action. (Was mislabelled
+                // "manual", which read as an operator having clicked it.)
+                e.nginxBridge.ChallengeVhostWithReason(pat, vttl, "vhost_config")
             }
         }
 
@@ -1124,6 +1197,62 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                         Key:   host,
                         Count: 0,
                         Extra: map[string]string{"host": host, "action": "auto_off", "reason": "host_bypass"},
+                    }
+                    select { case out <- a: default: }
+                }
+            }
+        }
+        if e.nginxBridge != nil {
+            e.nginxBridge.ClearVhost(host)
+        }
+        continue
+    }
+
+    // Dynamic Challenge-exclude wins over vhost-wide challenge (auto-suspicious
+    // AND the CHALLENGE_VHOST list). Unlike host_bypass/ignore, it leaves a
+    // paper trail: if the suspicious scorer WOULD flag this host now, log
+    // suppressed_by_exclude with the trigger + scale, so an operator who chose
+    // to exclude a host has proof of exactly what protection they opted out of
+    // ("we would have challenged N unique IPs on this vhost — you excluded it").
+    if e.hostChallengeExcluded(host) {
+        if haveVhostAuto {
+            if e.cfg.ChallengeLog && e.longwin != nil {
+                row := SuspiciousRow{Host: host}
+                if r, ok := e.longwin.OneFromCache(longSums, host); ok {
+                    row = r
+                }
+                if why := e.tripReason(row); why != "" && e.shouldLogVhostSuppress(host, now) {
+                    logging.LogfCHALLENGES(
+                        "[challenge][vhost] action=suppressed_by_exclude host=%s would_reason=%s score=%.2f uniqIP=%d rps=%.2f reasons=%s note=host_in_challenge_excludes",
+                        host, why, row.Score, row.UniqueIPs, row.RPS, strings.Join(row.Reasons, ","),
+                    )
+                }
+            }
+            // Turn off any active auto state so the display + bridge agree.
+            wasOn := false
+            func() {
+                e.vhostMu.Lock()
+                defer e.vhostMu.Unlock()
+                if e.vhostUnderAttack[host] {
+                    wasOn = true
+                    e.vhostUnderAttack[host] = false
+                    e.vhostLastChange[host] = now
+                }
+            }()
+            if wasOn {
+                if e.cfg.ChallengeLog {
+                    logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=excluded", host)
+                }
+                // Emit the OFF alert to the sink, same as the host_bypass/ignored
+                // paths — otherwise excluding an active vhost silently drops the
+                // notification that the challenge lifted.
+                if e.cfg.ChallengeNotify {
+                    a := core.Alert{
+                        When:  now,
+                        Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
+                        Key:   host,
+                        Count: 0,
+                        Extra: map[string]string{"host": host, "action": "auto_off", "reason": "excluded"},
                     }
                     select { case out <- a: default: }
                 }
@@ -1334,11 +1463,15 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
                     }
 
                     if !cur {
+			// Single-sourced trip decision: tripReason() is the SAME function the
+			// suppressed_by_exclude audit path uses, so the audit log can never
+			// disagree with the real decision (CLAUDE.md §5). The three branches
+			// below just apply + log the outcome tripReason already chose.
+			autoWhy = e.tripReason(row)
 			// 1) hard cap (if set): challenge immediately
-			if uniqEn && uniqMax > 0 && row.UniqueIPs >= uniqMax {
+			if autoWhy == "uniqip_max" {
                             e.vhostUnderAttack[host] = true
                             e.vhostLastChange[host] = now
-        			autoWhy = "uniqip_max"
 
                             if e.cfg.ChallengeLog {
                                 logging.LogfCHALLENGES(
@@ -1382,10 +1515,9 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
 
 
                         // 2) uniqIP hysteresis ON threshold
-                        if uniqEn && uniqOn > 0 && row.UniqueIPs >= uniqOn {
+                        if autoWhy == "uniqip_on" {
                             e.vhostUnderAttack[host] = true
                             e.vhostLastChange[host] = now
-                            autoWhy = "uniqip_on"
 
                             if e.cfg.ChallengeLog {
                                 logging.LogfCHALLENGES(
@@ -1424,10 +1556,9 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
                         }
 
                         // 3) legacy score ON threshold (+ min uniq gate)
-                        if row.Score >= on && row.UniqueIPs >= minUniq {
+                        if autoWhy == "score_on" {
                             e.vhostUnderAttack[host] = true
                             e.vhostLastChange[host] = now
-                            autoWhy = "score_on"
 
                             if e.cfg.ChallengeLog {
                                 logging.LogfCHALLENGES(
@@ -1584,9 +1715,17 @@ if ha := short[host]; ha != nil {
 }
 
 
-                vReason := "manual"
-                if !manual {
-                    vReason = "suspicious_vhost"
+                // `manual` (defined above) is TRUE for a CHALLENGE_VHOST config-list
+                // match OR a genuine operator/API manual challenge (manualChal).
+                // Label them distinctly: only the config list is "not a human
+                // action" — a real manual challenge must stay reason=manual.
+                vReason := "suspicious_vhost"
+                if manual {
+                    if ok, _, _ := e.manualChal.active(host); ok {
+                        vReason = "manual"
+                    } else {
+                        vReason = "vhost_config"
+                    }
                 }
                 e.nginxBridge.ChallengeVhostWithReason(host, vttl, vReason)
                 continue
