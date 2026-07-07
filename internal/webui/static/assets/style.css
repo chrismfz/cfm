@@ -166,6 +166,27 @@ table {
 th, td { padding: .45rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
 tr.clickable:hover { background: #19253a; cursor: pointer; }
 .actions-cell { white-space: normal; display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+tr.bulk-selected { background: rgba(217, 81, 111, .12); }
+tr.bulk-selected:hover { background: rgba(217, 81, 111, .2); }
+.checkbox-cell { width: 1.6rem; text-align: center; cursor: default; }
+.checkbox-cell input[type="checkbox"] { cursor: pointer; accent-color: var(--danger); }
+/* Enrichment values (CC/ASN/company) that quick-select all matching rows. */
+.quick-select { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.quick-select:hover { color: var(--accent); }
+.bulkbar {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex-wrap: wrap;
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin-top: .5rem;
+  padding: .5rem .65rem;
+  border: 1px solid #9a3b4f;
+  border-radius: 10px;
+  background: #1c1220;
+}
 .muted { color: var(--muted); }
 .pill {
   display: inline-block;

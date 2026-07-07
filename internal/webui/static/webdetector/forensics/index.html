@@ -243,17 +243,20 @@
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>IP</th><th>Req</th><th>Vhosts</th><th>RPS</th><th>Score</th><th>CC</th><th>ASN</th><th>Actions</th></tr>
+              <tr><th class="checkbox-cell"><input type="checkbox" :checked="allRowsSelected(ipShort, 'ip')" @change="toggleSelectAllRows(ipShort, 'ip')" title="Select/unselect all listed IPs" /></th><th>IP</th><th>Req</th><th>Vhosts</th><th>RPS</th><th>Score</th><th>CC</th><th>ASN</th><th>Actions</th></tr>
             </thead>
             <tbody>
-              <tr v-for="row in ipShort" :key="row.ip" class="clickable" @click="loadIP(row.ip)">
+              <tr v-for="row in ipShort" :key="row.ip" class="clickable" :class="{ 'bulk-selected': isIPSelected(row.ip) }" @click="loadIP(row.ip)">
+                <td class="checkbox-cell" @click.stop>
+                  <input type="checkbox" :checked="isIPSelected(row.ip)" @change="toggleIPSelected(row.ip)" />
+                </td>
                 <td><code>{{ row.ip }}</code></td>
                 <td>{{ row.req }}</td>
                 <td>{{ row.vhosts }}</td>
                 <td>{{ num(row.rps) }}</td>
                 <td>{{ num(row.score) }}</td>
-                <td>{{ row.country || '-' }}</td>
-                <td class="truncate" :title="row.asn_name || row.asn">{{ row.asn ? `AS${String(row.asn).replace(/^AS/i, '')}` : '-' }} {{ row.asn_name || '' }}</td>
+                <td><span class="quick-select" v-if="row.country" @click.stop="selectRowsMatching(ipShort, 'ip', 'country', row.country)" :title="'Select all listed IPs from ' + row.country">{{ row.country }}</span><span v-else>-</span></td>
+                <td class="truncate" :title="row.asn_name || row.asn"><span class="quick-select" v-if="row.asn" @click.stop="selectRowsMatching(ipShort, 'ip', 'asn', row.asn)" :title="'Select all listed IPs of AS' + String(row.asn).replace(/^AS/i, '') + (row.asn_name ? ' — ' + row.asn_name : '')">AS{{ String(row.asn).replace(/^AS/i, '') }} {{ row.asn_name || '' }}</span><span v-else>-</span></td>
                 <td class="actions-cell">
                   <button class="btn-quiet" @click.stop="challengeIPTopHost(row.ip)" :title="'Manual-challenge the top host of this IP for ' + challengeTTLLabel">Challenge</button>
                   <button class="btn-danger" @click.stop="blockIP(row.ip)">Block {{ blockTTLLabel }}</button>
@@ -261,9 +264,15 @@
                   <button class="btn-quiet" @click.stop="historyForIP(row.ip)">History</button>
                 </td>
               </tr>
-              <tr v-if="!ipShort.length"><td colspan="8" class="muted">No IP rows.</td></tr>
+              <tr v-if="!ipShort.length"><td colspan="9" class="muted">No IP rows.</td></tr>
             </tbody>
           </table>
+        </div>
+        <div class="bulkbar" v-if="selectedIPCount">
+          <strong>{{ selectedIPCount }} IP(s) selected</strong>
+          <button class="btn-danger" :disabled="bulkBusy" @click="bulkBlockSelected">Block selected ({{ blockTTLLabel }})</button>
+          <button class="btn-quiet" :disabled="bulkBusy" @click="clearIPSelection">Clear selection</button>
+          <span class="muted" v-if="bulkProgress">{{ bulkProgress }}</span>
         </div>
       </section>
 
@@ -411,14 +420,15 @@
               </select>
             </div>
             <table class="mini-table">
-              <thead><tr><th>IP</th><th>Count</th><th>CC</th><th>ASN</th><th>Company</th><th>Action</th></tr></thead>
+              <thead><tr><th class="checkbox-cell"><input type="checkbox" :checked="allRowsSelected(visibleTopIPRows, 'key')" @change="toggleSelectAllRows(visibleTopIPRows, 'key')" title="Select/unselect all listed IPs" /></th><th>IP</th><th>Count</th><th>CC</th><th>ASN</th><th>Company</th><th>Action</th></tr></thead>
               <tbody>
-                <tr v-for="ipRow in topIPRows.slice(0, vhostTopIPLimit)" :key="ipRow.key">
+                <tr v-for="ipRow in visibleTopIPRows" :key="ipRow.key" :class="{ 'bulk-selected': isIPSelected(ipRow.key) }">
+                  <td class="checkbox-cell"><input type="checkbox" :checked="isIPSelected(ipRow.key)" @change="toggleIPSelected(ipRow.key)" /></td>
                   <td><code>{{ ipRow.key }}</code></td>
                   <td>{{ ipRow.count }}</td>
-                  <td>{{ ipRow.country }}</td>
-                  <td>{{ ipRow.asn }}</td>
-                  <td class="truncate" :title="ipRow.company">{{ ipRow.company }}</td>
+                  <td><span class="quick-select" v-if="ipRow.country && ipRow.country !== '-'" @click="selectRowsMatching(visibleTopIPRows, 'key', 'country', ipRow.country)" :title="'Select all listed IPs from ' + ipRow.country">{{ ipRow.country }}</span><span v-else>{{ ipRow.country }}</span></td>
+                  <td><span class="quick-select" v-if="ipRow.asn && ipRow.asn !== '-'" @click="selectRowsMatching(visibleTopIPRows, 'key', 'asn', ipRow.asn)" :title="'Select all listed IPs of ' + ipRow.asn">{{ ipRow.asn }}</span><span v-else>{{ ipRow.asn }}</span></td>
+                  <td class="truncate" :title="ipRow.company"><span class="quick-select" v-if="ipRow.company && ipRow.company !== '-'" @click="selectRowsMatching(visibleTopIPRows, 'key', 'company', ipRow.company)">{{ ipRow.company }}</span><span v-else>{{ ipRow.company }}</span></td>
                   <td>
                     <button class="btn-danger" @click="blockIP(ipRow.key)">Block {{ blockTTLLabel }}</button>
                     <button class="btn-quiet" @click="historyForIP(ipRow.key)">History</button>
@@ -426,6 +436,12 @@
                 </tr>
               </tbody>
             </table>
+            <div class="bulkbar" v-if="selectedIPCount">
+              <strong>{{ selectedIPCount }} IP(s) selected</strong>
+              <button class="btn-danger" :disabled="bulkBusy" @click="bulkBlockSelected">Block selected ({{ blockTTLLabel }})</button>
+              <button class="btn-quiet" :disabled="bulkBusy" @click="clearIPSelection">Clear selection</button>
+              <span class="muted" v-if="bulkProgress">{{ bulkProgress }}</span>
+            </div>
           </section>
 
           <section class="mini-card path-card" v-if="topPaths.length">
