@@ -544,13 +544,68 @@ function _M.detect_sqli(uri, args, _s)
   -- Double URL-decode is already applied by normalize() / scan_str().
   local sc, scw = sqli_scan_strings(uri, args, _s)
 
-  if has(sc, "union select")        then return true end
-  if has(sc, "union%20select")      then return true end
-  if has(sc, "information_schema")  then return true end
-  if has(sc, " or 1=1")             then return true end
-  if has(sc, " or%201=1")           then return true end
-  if has(sc, "' or '1'='1")        then return true end
-  if has(sc, "%27%20or%20%271%27%3d%271") then return true end
+  -- Space-bearing tautology tokens are matched against `scw` (runs of
+  -- '+'/whitespace collapsed to one space), NOT `sc`. A form/query space
+  -- arrives as '+', and PHP (parse_str/$_GET/$_POST) et al. decode '+'
+  -- ->space before the SQL runs, so the backend sees `union select` while
+  -- `sc` (which preserves '+') still reads `union+select`. Checking these
+  -- against `sc` let `1+union+select+…`, `1+or+1=1`, `'+or+'1'='1` evade
+  -- rule 301 (block) even though the `%20`/space forms were caught — a
+  -- first-try bypass. `scw` also folds double separators
+  -- (`union%20%20select`, `union++select`) that a single-space substring
+  -- test on `sc` misses. The `%`-encoded fallbacks stay on `sc` for the
+  -- rare partial-decode case; `information_schema` has no separator so the
+  -- two strings are equivalent for it.
+  -- UNION SELECT: matched on scw (so `union+select` / `union%20%20select`
+  -- collapse to `union select`) BUT gated on a value-terminator right before
+  -- `union` — a digit, quote, or close-paren — or string start. Real UNION
+  -- injection breaks out of an existing value first, and the common form
+  -- `?id=1+union+select+…` lands the terminator as the trailing DIGIT of the
+  -- value (`1 union`), not the `=`. Legit English keeps "union" as a NOUN
+  -- after a word (`credit union select account`, `trade union selection`,
+  -- `reunion selected`), which must NOT hit this BLOCK rule — a bare
+  -- `has(scw,"union select")` would 403 them, because the '+'→space collapse
+  -- turns the signature into a plain two-word substring (the '+' form the
+  -- block-tier FP burn-in never saw, since pre-fix '+' wasn't collapsed).
+  --
+  -- Deliberately EXCLUDED from the terminator class, all to avoid real FPs
+  -- where the collapse would otherwise create `<sep> union select<word>`:
+  --   `=` — `?q=union+select+board` ("Union Select Board" municipal search,
+  --         `?q=union+selectmen`) begins the value with the noun "union";
+  --         the bare-value `?id=union+select` injection (no leading digit) is
+  --         the rare form and is given up here rather than block those.
+  --   `/` `,` — legit paths (`/union+selected+news`) and CSV values
+  --         (`a,union+select,b`); negligible UNION-injection signal.
+  -- Known residual GAPS (pre-existing, NOT closed here — they need the
+  -- keyword/separator-tolerant rewrite tracked in docs/roadmaps, with its own
+  -- FP burn-in per CLAUDE.md §6): `union all select`, `union distinct select`,
+  -- `union(select`, and `union/**/select` (strip_sql_comments collapses the
+  -- last to `unionselect`). This fix closes only the '+'-encoding bypass of
+  -- the existing adjacent-`union select` signature.
+  -- A SQL literal/keyword operand also breaks out of an unquoted value with
+  -- NO digit/quote/paren before `union`: `?id=null union select`,
+  -- `?enabled=true union select`, `1 is null union select`. `null`/`true`/
+  -- `false` are complete valid operands, so the UNION executes; they end in a
+  -- letter, so the char-class gate above misses them — match them explicitly.
+  -- (The pre-fix plain-substring check caught these; dropping them would
+  -- REGRESS vs the shipped rule. `true union select` / `null union select` as
+  -- legit prose is SQL-speak, not natural language — negligible FP.)
+  if scw:find("[%d'\"%)] ?union select")
+     or scw:find("null ?union select")
+     or scw:find("true ?union select")
+     or scw:find("false ?union select")
+     or scw:sub(1, 12) == "union select" then
+    return true
+  end
+  if has(sc,  "union%20select")     then return true end
+  if has(sc,  "information_schema") then return true end
+  -- `' or '1'='1` needs quotes and ` or 1=1` keeps its leading space (so
+  -- "operator 1=1" / "for 1=1" don't hit) — both stay FP-safe on scw, where
+  -- the '+' form (`1+or+1=1`) now collapses to the space form we match.
+  if has(scw, " or 1=1")            then return true end
+  if has(sc,  " or%201=1")          then return true end
+  if has(scw, "' or '1'='1")       then return true end
+  if has(sc,  "%27%20or%20%271%27%3d%271") then return true end
 
   -- DBMS-unique time-based blind family (sqlmap).
   for i = 1, #SQLI_BLIND_TOKENS do

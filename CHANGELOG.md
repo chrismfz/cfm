@@ -17,6 +17,42 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- WAF (rule 301, `WAF_SQLI`, block): **closed a first-try block-tier SQLi
+  bypass via `+`-encoded spaces.** The tautology signatures (`union select`,
+  ` or 1=1`, `' or '1'='1`) were matched against the scan string with `+`
+  preserved (`sc`), while a browser/form sends a space as `+` and PHP
+  (`parse_str`/`$_GET`/`$_POST`) decodes `+`→space before the SQL runs — so
+  `?id=1+union+select+…` reached the database as `1 union select` yet evaded
+  the WAF, even though the `%20`/literal-space forms were caught. These
+  tokens now match against the `+`/whitespace-collapsed scan string (`scw`),
+  which also folds double separators (`union%20%20select`, `union++select`)
+  that a single-space substring test missed. `UNION SELECT` additionally
+  gained a value-terminator guard — a **digit, quote, or close-paren** (or
+  string start) immediately before `union` — so that collapsing `+`→space
+  does not turn the signature into a bare two-word substring that would block
+  legitimate English where "union" is a noun (`credit union select account`,
+  `trade union selection`, `european union select committee`) at block tier;
+  real UNION injection breaks out of an existing value first and the common
+  `?id=1+union+select` form carries the value's trailing **digit** as that
+  terminator. `=`, `/` and `,` are deliberately excluded from the class to
+  avoid FPs on value-leading nouns (`?q=union+select+board` "Union Select
+  Board", `?q=union+selectmen`), legit paths (`/union+selected+news`) and CSV
+  values — at the cost of the rare bare-value `?id=union+select` form. SQL
+  keyword-literal operands (`null`/`true`/`false`) also break out of an
+  unquoted value without a digit/quote/paren (`?id=null+union+select`,
+  `?enabled=true+union+select`, `1 is null union select`) and end in a letter,
+  so they are matched explicitly — the shipped substring check caught these, so
+  the terminator gate would have regressed on them. `' or '1'='1` (quoted) and
+  ` or 1=1` (leading space) are FP-safe on the collapsed string as-is; the
+  `%`-encoded fallbacks and the `+`-literal `=0+0+0+1` tail are untouched. Regression + FP-negative tests added to
+  `cfm_waf_sqli_test.lua`, each verified to fail on the pre-fix/pre-guard
+  forms. Scope note: this closes the `+`-encoding bypass of the existing
+  adjacent-`union select` signature only; the pre-existing keyword/separator
+  evasions (`union all select`, `union distinct select`, `union(select`,
+  `union/**/select`) remain and are tracked for a dedicated,
+  FP-burn-in'd rewrite. Found by the 2026-07 edge Lua audit.
+
 ### Added
 - Edge proxy: **opt-in origin keepalive** (`detectors.conf [webdetector]
   ORIGIN_KEEPALIVE = 1` — the single switch, published to the edge via
