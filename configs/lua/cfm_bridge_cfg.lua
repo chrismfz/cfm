@@ -1,0 +1,102 @@
+-- /var/lib/cfm/lua/cfm_bridge_cfg.lua
+--
+-- Canonical accessor for the webdetector → edge-Lua runtime knobs published
+-- by the cfm daemon in /var/lib/cfm/lua/cfm_bridge_config.lua (written by
+-- sslcollector.WriteWebdetectorBridgeConfig on daemon start / config reload,
+-- sourced from detectors.conf [webdetector]).
+--
+-- WHY A MODULE: both cfm.lua (origin_keepalive on/off, clearance_refresh)
+-- and cfm_origin_ka.lua (pool idle/max-requests tuning) need this file, and
+-- cfm_filecache keys its cache by path — two call sites with different
+-- transforms on the same path would fight over the cached shape. This module
+-- owns the one canonical transform; everyone else calls get().
+--
+-- Freshness: 10s TTL via cfm_filecache — a `cfm` daemon reload (which
+-- rewrites the file) propagates to every worker within ~10s, no proxy
+-- reload needed.
+--
+-- Returned table (fields absent when the daemon predates them — callers
+-- must keep their own defaults/env fallbacks):
+--   clearance_refresh   boolean (default true when file missing/invalid)
+--   origin_keepalive    boolean or nil
+--   origin_ka_idle_sec  number  or nil
+--   origin_ka_max_reqs  number  or nil
+
+local fc = require "cfm_filecache"
+
+local _M = {}
+
+local PATH = "/var/lib/cfm/lua/cfm_bridge_config.lua"
+
+-- Served when the file is missing or unloadable (fresh install, upgrade
+-- lag). clearance_refresh=true mirrors the historical fail-safe default;
+-- the origin_* fields stay nil so callers fall back to their defaults.
+local FALLBACK = { clearance_refresh = true }
+
+-- Hoisted to module scope: this module's state persists across requests
+-- (unlike cfm.lua's chunk), and fc.get only consults opts on a cache
+-- miss — building the table + closure per call would be pure garbage on
+-- the ~10s-TTL hit path, which runs at least once per request.
+local OPTS = {
+  ttl = 10,
+  transform = function(val)
+    if type(val) ~= "table" then error("did not return a table") end
+    local out = { clearance_refresh = (val.clearance_refresh ~= false) }
+    if val.origin_keepalive ~= nil then
+      out.origin_keepalive = (val.origin_keepalive == true)
+    end
+    out.origin_ka_idle_sec = tonumber(val.origin_ka_idle_sec)
+    out.origin_ka_max_reqs = tonumber(val.origin_ka_max_reqs)
+    return out
+  end,
+}
+
+function _M.get()
+  return fc.get(PATH, OPTS) or FALLBACK
+end
+
+-- ── Bridge token ─────────────────────────────────────────────────────────────
+-- Canonical accessor for the bridge auth token (sibling file to the bridge
+-- config, written by the daemon on start — internal/detectors/manager.go).
+-- One load+validate implementation for every edge consumer (cfm.lua,
+-- cfm_panel.lua, cfm_purge.lua, cfm_h3_config.lua) so the validity rule
+-- (string, ≥32 chars) and the freshness policy live in exactly one place.
+-- 10s TTL: a daemon-side token rotation converges everywhere within 10s
+-- without an nginx reload; a missing file (daemon not started yet) is
+-- retried every 2s. Returns (token) or (nil, err).
+
+local TOKEN_PATH = "/var/lib/cfm/lua/cfm_bridge_token.lua"
+
+local TOKEN_OPTS = {
+  ttl = 10,
+  missing_ttl = 2,
+  transform = function(val)
+    if type(val) ~= "string" or #val < 32 then
+      error("invalid or too short token")
+    end
+    return val
+  end,
+}
+
+function _M.token()
+  return fc.get(TOKEN_PATH, TOKEN_OPTS)
+end
+
+-- Exported so consumers can name the canonical file in operator-facing
+-- error messages without keeping their own copy of the path.
+_M.TOKEN_PATH = TOKEN_PATH
+
+-- refresh_token drops the cached entry and re-reads the file NOW.
+-- For inbound-credential validators only (cfm_purge.check_token): they
+-- compare a caller-presented token against ours, and the daemon may purge
+-- immediately after rotating a weak token at startup — serving the 10s-old
+-- cached value there would 403 a perfectly fresh credential. Outbound
+-- consumers (cfm.lua, cfm_panel, cfm_h3_config) must keep using token();
+-- calling this per request would reintroduce the loadfile-per-request cost
+-- the cache exists to remove.
+function _M.refresh_token()
+  fc.entries[TOKEN_PATH] = nil
+  return _M.token()
+end
+
+return _M

@@ -43,41 +43,47 @@ if not ok_clearance then
 end
 
 
+-- Referenced by the selftest hook below, which deliberately probes the RAW
+-- file (install preflight: "is the token file present and valid on disk?")
+-- rather than the cached accessor.
 local _BRIDGE_TOKEN_FILE = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 
-local function load_token(path, tag)
-    local chunk, load_err = loadfile(path)
-    if not chunk then
-        ngx.log(ngx.ERR, "[cfm_panel] cannot load ", tag, " ", path, ": ", tostring(load_err))
-        return nil
-    end
-    local ok, val = pcall(chunk)
-    if not ok or type(val) ~= "string" or #val < 32 then
-        ngx.log(ngx.ERR, "[cfm_panel] ", tag, " invalid or too short: ", path)
-        return nil
-    end
-    return val
-end
-
-local panel_bridge_token = load_token(_BRIDGE_TOKEN_FILE, "bridge token file")
-
--- Webdetector → Lua runtime knobs (sibling file to the bridge token).
--- Missing/unparseable file falls back to safe defaults so a daemon-vs-Lua
--- upgrade lag doesn't break the panel request path.
-local _BRIDGE_CONFIG_FILE = "/var/lib/cfm/lua/cfm_bridge_config.lua"
-local panel_bridge_cfg = { clearance_refresh = true }
+-- Bridge token + webdetector runtime knobs, both read through the canonical
+-- cached accessor (cfm_bridge_cfg → cfm_filecache, 10s TTL / 2s
+-- missing-retry). The previous inline load_token/loadfile here ran once per
+-- panel request — this file is loaded via access_by_lua_file, so its top
+-- level re-executes per request (see the PITFALL block in cfm.lua) — and
+-- duplicated the token-validity rule and the bridge-config parse. pcall
+-- keeps the panel path alive through an upgrade lag where the module set is
+-- older than this file; a nil token means "bridge unavailable", same as the
+-- old loader's failure mode (panel decide then follows panel_fail_mode).
+local panel_bridge_token
+local panel_bridge_cfg
 do
-    local chunk = loadfile(_BRIDGE_CONFIG_FILE)
-    if chunk then
-        local ok, val = pcall(chunk)
-        if ok and type(val) == "table" then
-            if val.clearance_refresh ~= nil then
-                panel_bridge_cfg.clearance_refresh = (val.clearance_refresh ~= false)
+    local ok, bc = pcall(require, "cfm_bridge_cfg")
+    if ok and type(bc) == "table" and bc.get then
+        panel_bridge_cfg = bc.get()
+        if bc.token then
+            local tok, terr = bc.token()
+            panel_bridge_token = tok
+            if not tok then
+                ngx.log(ngx.ERR, "[cfm_panel] bridge token unavailable (",
+                    tostring(bc.TOKEN_PATH or "/var/lib/cfm/lua/cfm_bridge_token.lua"),
+                    "): ", tostring(terr))
             end
         else
-            ngx.log(ngx.WARN, "[cfm_panel] bridge config file did not return a table: ", _BRIDGE_CONFIG_FILE)
+            -- Old cfm_bridge_cfg without token() (partial file copy /
+            -- stale package.loaded): the token doubles as the clearance
+            -- secret, so a silent nil here surfaces only as per-request
+            -- missing_clearance_secret churn — name the real cause loudly.
+            ngx.log(ngx.ERR, "[cfm_panel] cfm_bridge_cfg has no token() — ",
+                "module set older than cfm_panel.lua; redeploy /var/lib/cfm/lua ",
+                "and reload the proxy; panel bridge auth disabled until then")
         end
+    else
+        ngx.log(ngx.WARN, "[cfm_panel] cfm_bridge_cfg unavailable, using defaults: ", tostring(bc))
     end
+    panel_bridge_cfg = panel_bridge_cfg or { clearance_refresh = true }
 end
 
 local function starts_with(s, p)

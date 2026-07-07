@@ -100,9 +100,48 @@ ngx_var.realip_remote_addr = "203.0.113.7"; ngx_var.remote_addr = "127.0.0.1"
 check(purge.check_loopback() == false, "CF-spoofed loopback must be rejected (real peer is non-loopback)")
 
 -- ── check_token ──────────────────────────────────────────────────────────────
--- No token file in the test env, so load_token() returns nil → always false.
+-- cfm_purge reads the token through the cfm_bridge_cfg accessor; control it
+-- with a fake in package.loaded so these tests exercise cfm_purge's actual
+-- comparison + refresh-on-mismatch logic (not an incidental require failure).
+
+-- (a) Accessor present but token unavailable (daemon not started) → fail closed.
+package.loaded["cfm_bridge_cfg"] = {
+  token = function() return nil, "missing or unreadable" end,
+  refresh_token = function() return nil, "missing or unreadable" end,
+}
 hdrs = { ["X-CFM-Token"] = "whatever" }
-check(purge.check_token() == false, "check_token must fail closed when the token file is unavailable")
+check(purge.check_token() == false, "check_token must fail closed when the token is unavailable")
+
+-- (b) Matching token → pass; wrong/missing header → fail.
+package.loaded["cfm_bridge_cfg"] = {
+  token = function() return "tok-current" end,
+  refresh_token = function() return "tok-current" end,
+}
+hdrs = { ["X-CFM-Token"] = "tok-current" }
+check(purge.check_token() == true, "matching token must pass")
+hdrs = { ["X-CFM-Token"] = "tok-wrong" }
+check(purge.check_token() == false, "wrong token must fail")
+hdrs = {}
+check(purge.check_token() == false, "missing token header must fail")
+
+-- (c) Rotation race: cache still serves the OLD token, the daemon presents
+-- the NEW one — check_token must force one fresh read and accept it, so a
+-- force-unblock issued right after a startup token rotation never 403s.
+local refreshed = 0
+package.loaded["cfm_bridge_cfg"] = {
+  token = function() return "tok-old" end,
+  refresh_token = function() refreshed = refreshed + 1; return "tok-new" end,
+}
+hdrs = { ["X-CFM-Token"] = "tok-new" }
+check(purge.check_token() == true, "just-rotated token must pass via refresh-on-mismatch")
+check(refreshed == 1, "mismatch triggers exactly one forced fresh read")
+
+-- (d) Old accessor module without refresh_token (upgrade lag) → fail closed
+-- on mismatch instead of erroring.
+package.loaded["cfm_bridge_cfg"] = { token = function() return "tok-old" end }
+hdrs = { ["X-CFM-Token"] = "tok-new" }
+check(purge.check_token() == false, "mismatch without refresh_token fails closed")
+package.loaded["cfm_bridge_cfg"] = nil
 
 if failures > 0 then
   error(failures .. " cfm_purge test assertion(s) failed")

@@ -18,6 +18,80 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- Edge proxy: **opt-in origin keepalive** (`detectors.conf [webdetector]
+  ORIGIN_KEEPALIVE = 1` — the single switch, published to the edge via
+  `cfm_bridge_config.lua` and picked up within ~10s, no proxy reload) —
+  allow-traffic routes through new `cfm_origin_http`/`cfm_origin_https`
+  upstream pools (`configs/lua/cfm_origin_ka.lua`, balancer_by_lua) instead
+  of opening a fresh TCP connection — plus a full upstream TLS handshake on
+  443 — to Apache for every request. Safety: routing engages only when the
+  live proxy conf declares the pools (`$cfm_origin_ka_conf` sentinel in the
+  current `openresty.conf`/`angie.conf`), so arming the knob against an
+  older live conf is a no-op rather than a 502 storm. Port 80 is always
+  pooled (Host-header vhost routing); port 443 is pooled only when
+  lua-resty-core supports SNI-keyed pools (OpenResty 1.27.1.1+), otherwise
+  it falls back to per-request connections so a connection handshaked for
+  one SNI is never reused for another vhost (no Apache 421s on shared
+  boxes); an engine build without balancer-keepalive FFI support (possible
+  on some Angie module builds) degrades once-per-worker to per-request
+  connections with a WARN instead of erroring. Keepalive races are covered:
+  one `set_more_tries(1)` retry per request replaces the default upstream
+  retry that balancer_by_lua disables. Tunables: `ORIGIN_KEEPALIVE_IDLE_SEC`
+  (default 3, keep below Apache `KeepAliveTimeout`, clamped 1-60),
+  `ORIGIN_KEEPALIVE_MAX_REQS` (default 1000). Default OFF — zero behaviour
+  change until an operator opts in. See `docs/proxy-performance.md` for the
+  measurement + rollout recipe.
+- Edge proxy: **client TLS session resumption** — `ssl_session_cache
+  shared:cfm_ssl:20m` + `ssl_session_timeout 4h` at the `http {}` level of
+  both engine configs (panel listeners inherit). Reconnecting clients
+  (mobile especially) skip the full TLS handshake; previously no session
+  cache was configured at all.
+- Edge proxy: **latency-split instrumentation** in the `cfm` access-log
+  format: `uct=` (`$upstream_connect_time` — TCP+TLS to Apache, the number
+  origin keepalive collapses), `uht=` (`$upstream_header_time`), `sslr=`
+  (`$ssl_session_reused` — client resumption ratio), and `luams=`
+  (`$cfm_lua_ms`, new per-request variable stamped by cfm.lua with the
+  access-phase wall-clock ms on origin-allow paths). Lets operators split
+  the CFM hop into handshake / Lua / backend without guesswork.
+
+### Fixed
+- Edge proxy (cfm.lua): **eliminated 4–5 `loadfile()` disk reads per
+  request.** The self-ips and ignore-nets caches carried 30s TTLs but their
+  state lived in top-level locals, which re-initialise on every request
+  under `access_by_lua_file` (the documented PITFALL), so the TTL check was
+  a permanent miss; the bridge token, bridge config and clamav-toggle files
+  were additionally `loadfile()`'d unconditionally per request. All five now
+  go through `configs/lua/cfm_filecache.lua`, a require'd per-worker TTL
+  cache (token/configs: 10s TTL; self-ips/ignore-nets: their existing 30s /
+  2s-when-missing TTLs — now actually honoured). Behaviour is unchanged
+  apart from the disk probes happening once per TTL window instead of once
+  per request.
+- Edge proxy (cfm_panel.lua): the panel listeners' bridge-config read had
+  the same per-request `loadfile()` bug **and** was a second, drift-prone
+  copy of the parse; it now goes through the canonical
+  `cfm_bridge_cfg.lua` accessor (same 10s TTL as the main edge), so panel
+  ports pick up daemon knob changes identically to web listeners.
+- Edge proxy: **one bridge-token loader for the whole edge.**
+  `cfm_bridge_cfg.token()` (cfm_filecache-backed, 10s TTL / 2s
+  missing-retry) replaces four private load+validate copies: cfm.lua,
+  cfm_panel.lua (which also re-read the file once per panel request),
+  cfm_purge.lua, and cfm_h3_config.lua — the latter cached the token
+  **forever** per worker, so a daemon-side token rotation left the HTTP/3
+  config fetch 403-ing against the bridge until an nginx reload; it now
+  converges within 10s like every other consumer. The validity rule
+  (string, ≥32 chars) lives in one place. cfm_purge — the one INBOUND
+  validator (it checks the token the daemon presents) — refreshes-on-
+  mismatch so a force-unblock issued right after a startup token rotation
+  is never 403'd by the 10s cache. (cfm_panel's install-preflight selftest
+  still probes the raw token file on purpose — it validates the file
+  itself.)
+- internal/sslcollector: the four generated-Lua writers (token,
+  sslcollector config, clamav config, webdetector bridge config) now share
+  one `writeLuaFileAtomic` implementation of the tmp-write → 0640 →
+  root:cfm chown → rename sequence, so a future fix to the enforced
+  ownership/mode path lands in all writers at once. Error strings and log
+  tags are preserved per writer; the two config writers additionally gained
+  the final-chmod hardening the token writer already had.
 - API: **bulk IP block endpoint with self-lockout guard** — admin-only
   `POST /api/v1/firewall/block/batch` (`{ips: […], ttl, reason}`, ≤256 IPs per
   request, same TTL semantics as the single endpoint: empty = permanent). Each

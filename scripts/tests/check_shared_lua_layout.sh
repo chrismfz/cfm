@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-manifest='cfm.lua cfm_panel.lua cfm_rules.lua cfm_stats.lua cfm_waf.lua cfm_waf_util.lua cfm_waf_detectors.lua cfm_waf_excl.lua cfm_clamav.lua cfm_cache_log.lua cfm_clearance.lua cfm_geo.lua cfm_purge.lua log-cfm.lua sslcollector.lua'
+manifest='cfm.lua cfm_panel.lua cfm_rules.lua cfm_stats.lua cfm_waf.lua cfm_waf_util.lua cfm_waf_detectors.lua cfm_waf_excl.lua cfm_clamav.lua cfm_cache_log.lua cfm_clearance.lua cfm_geo.lua cfm_purge.lua cfm_filecache.lua cfm_origin_ka.lua cfm_bridge_cfg.lua log-cfm.lua sslcollector.lua'
 
 for conf in configs/angie.conf configs/openresty.conf configs/cfm-panel-listeners.conf.in; do
   if rg -n '/etc/angie/lua/(cfm|log-cfm|sslcollector)|/usr/local/openresty/nginx/lua/(cfm|log-cfm|sslcollector)' "$conf" >/dev/null; then

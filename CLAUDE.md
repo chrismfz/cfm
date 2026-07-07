@@ -261,6 +261,7 @@ rather than advancing heartbeats on failure.
 | WAF → autoblock (`waf_security`) | `docs/waf-autoblock-design.md` |
 | Admin/WebUI API | `docs/webui-api-curl-recipes.md`, `docs/webui-api-sample-responses.md` |
 | DNAT bypass | `docs/dnat-bypass.md` · Debug capture: `docs/debug-capture-runbook.md` |
+| Proxy latency: measuring & origin keepalive | `docs/proxy-performance.md` |
 | Endpoint scope inventory | `docs/endpoint_scope_inventory.md` |
 
 ---
