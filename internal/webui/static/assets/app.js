@@ -164,6 +164,13 @@
           { value: '6h', label: '6h' },
           { value: '24h', label: '24h' },
         ],
+        // Bulk IP selection, shared by the Global Top IPs and the
+        // vhost-drilldown Top IPs tables (ip -> true). Selection deliberately
+        // survives auto-refresh and list rotation, so IPs picked during a bot
+        // storm stay picked even when they drop out of the visible top-N.
+        selectedIPs: {},
+        bulkBusy: false,
+        bulkProgress: '',
         vhostCharts: {
           rps: null,
           bot: null,
@@ -192,6 +199,11 @@
         const c = this.challengeTTLChoices.find((x) => x.value === this.challengeTTL);
         return c ? c.label : this.challengeTTL;
       },
+      selectedIPList() { return Object.keys(this.selectedIPs); },
+      selectedIPCount() { return this.selectedIPList.length; },
+      // The drilldown Top IPs rows actually rendered (Show-N applied) —
+      // the unit "select all listed" and value-quick-select operate on.
+      visibleTopIPRows() { return this.topIPRows.slice(0, this.vhostTopIPLimit); },
       hasScopedVhosts() { return this.isScoped && this.allowedVhosts.length > 0; },
       shortDetail() {
         if (!this.drilldown) return null;
@@ -884,6 +896,87 @@
           console.error('[cfm-admin] block action failed', err);
         }
       },
+
+      // ── Bulk IP selection / bulk block ──────────────────────────────────
+      isIPSelected(ip) { return Boolean(this.selectedIPs[ip]); },
+      toggleIPSelected(ip) {
+        if (!ip) return;
+        if (this.selectedIPs[ip]) delete this.selectedIPs[ip];
+        else this.selectedIPs[ip] = true;
+      },
+      clearIPSelection() { this.selectedIPs = {}; },
+      ipsFromRows(rows, key) {
+        return (Array.isArray(rows) ? rows : []).map((r) => r && r[key]).filter(Boolean);
+      },
+      allRowsSelected(rows, key) {
+        const ips = this.ipsFromRows(rows, key);
+        return ips.length > 0 && ips.every((ip) => this.isIPSelected(ip));
+      },
+      toggleSelectAllRows(rows, key) {
+        const ips = this.ipsFromRows(rows, key);
+        if (ips.length && ips.every((ip) => this.isIPSelected(ip))) {
+          for (const ip of ips) delete this.selectedIPs[ip];
+        } else {
+          for (const ip of ips) this.selectedIPs[ip] = true;
+        }
+      },
+      // Quick-select every listed row sharing an enrichment value (CC, ASN,
+      // company) — "these 20 bots are all the same datacenter" in one click.
+      selectRowsMatching(rows, key, field, value) {
+        if (!value || value === '-') return;
+        let n = 0;
+        for (const r of (Array.isArray(rows) ? rows : [])) {
+          if (r && r[field] === value && r[key] && !this.selectedIPs[r[key]]) {
+            this.selectedIPs[r[key]] = true;
+            n++;
+          }
+        }
+        this.actionMsg = n
+          ? `Selected ${n} more IPs matching ${value} (${this.selectedIPCount} total)`
+          : `No new IPs matching ${value}`;
+      },
+      async bulkBlockSelected() {
+        if (this.bulkBusy) return;
+        const ips = [...this.selectedIPList];
+        if (!ips.length) return;
+        const ttl = this.blockTTL;
+        const confirmMsg = ttl
+          ? `Block ${ips.length} selected IP(s) for ${this.blockTTLLabel}?`
+          : `PERMANENTLY block ${ips.length} selected IP(s)?\n\nPermanent blocks never expire (they survive restarts). `
+            + 'Remove them later from the Firewall dashboard or with: cfm unblock <ip>';
+        if (!window.confirm(confirmMsg)) return;
+        this.bulkBusy = true;
+        let okCount = 0;
+        const failed = [];
+        try {
+          // Sequential on purpose: one in-flight request against the daemon
+          // instead of a 100-wide burst; ~50 IPs still completes in seconds.
+          for (let i = 0; i < ips.length; i++) {
+            const ip = ips[i];
+            this.bulkProgress = `Blocking ${i + 1}/${ips.length} (${ip})…`;
+            try {
+              await this.postJSON('v1/firewall/block', {
+                ip,
+                ttl,
+                reason: `cfm-admin-ui-bulk host=${this.activeHost || '-'}`,
+              });
+              okCount++;
+              delete this.selectedIPs[ip]; // failed IPs stay selected for retry
+            } catch (err) {
+              failed.push(ip);
+              console.error('[cfm-admin] bulk block failed for', ip, err);
+            }
+          }
+        } finally {
+          this.bulkBusy = false;
+          this.bulkProgress = '';
+        }
+        const ttlText = ttl ? `for ${this.blockTTLLabel}` : 'permanently';
+        this.actionMsg = failed.length
+          ? `Bulk block: ${okCount} blocked ${ttlText}, ${failed.length} FAILED (${failed.join(', ')}) — failures kept selected, retry`
+          : `Bulk block: blocked ${okCount} IP(s) ${ttlText}`;
+      },
+
       async loadIP(ip) {
         if (!ip) return;
         this.activeIP = ip;
