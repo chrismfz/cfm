@@ -18,6 +18,44 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- Edge proxy: **opt-in origin keepalive** (`CFM_ORIGIN_KEEPALIVE=1` in the
+  proxy master env) — allow-traffic routes through new `cfm_origin_http`/
+  `cfm_origin_https` upstream pools (`configs/lua/cfm_origin_ka.lua`,
+  balancer_by_lua) instead of opening a fresh TCP connection — plus a full
+  upstream TLS handshake on 443 — to Apache for every request. Port 80 is
+  always pooled (Host-header vhost routing); port 443 is pooled only when
+  lua-resty-core supports SNI-keyed pools (OpenResty 1.27.1.1+), otherwise it
+  falls back to per-request connections so a connection handshaked for one
+  SNI is never reused for another vhost (no Apache 421s on shared boxes).
+  Tunables: `CFM_ORIGIN_KA_IDLE_SEC` (default 3, keep below Apache
+  `KeepAliveTimeout`), `CFM_ORIGIN_KA_MAX_REQS` (default 1000). Default OFF —
+  zero behaviour change until an operator opts in. See
+  `docs/proxy-performance.md` for the measurement + rollout recipe.
+- Edge proxy: **client TLS session resumption** — `ssl_session_cache
+  shared:cfm_ssl:20m` + `ssl_session_timeout 4h` at the `http {}` level of
+  both engine configs (panel listeners inherit). Reconnecting clients
+  (mobile especially) skip the full TLS handshake; previously no session
+  cache was configured at all.
+- Edge proxy: **latency-split instrumentation** in the `cfm` access-log
+  format: `uct=` (`$upstream_connect_time` — TCP+TLS to Apache, the number
+  origin keepalive collapses), `uht=` (`$upstream_header_time`), `sslr=`
+  (`$ssl_session_reused` — client resumption ratio), and `luams=`
+  (`$cfm_lua_ms`, new per-request variable stamped by cfm.lua with the
+  access-phase wall-clock ms on origin-allow paths). Lets operators split
+  the CFM hop into handshake / Lua / backend without guesswork.
+
+### Fixed
+- Edge proxy (cfm.lua): **eliminated 4–5 `loadfile()` disk reads per
+  request.** The self-ips and ignore-nets caches carried 30s TTLs but their
+  state lived in top-level locals, which re-initialise on every request
+  under `access_by_lua_file` (the documented PITFALL), so the TTL check was
+  a permanent miss; the bridge token, bridge config and clamav-toggle files
+  were additionally `loadfile()`'d unconditionally per request. All five now
+  go through `configs/lua/cfm_filecache.lua`, a require'd per-worker TTL
+  cache (token/configs: 10s TTL; self-ips/ignore-nets: their existing 30s /
+  2s-when-missing TTLs — now actually honoured). Behaviour is unchanged
+  apart from the disk probes happening once per TTL window instead of once
+  per request.
 - API: **bulk IP block endpoint with self-lockout guard** — admin-only
   `POST /api/v1/firewall/block/batch` (`{ips: […], ttl, reason}`, ≤256 IPs per
   request, same TTL semantics as the single endpoint: empty = permanent). Each

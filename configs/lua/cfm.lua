@@ -70,6 +70,11 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local cjson = require "cjson.safe"
+-- Per-worker TTL cache for the small Lua data files read on the hot path
+-- (bridge token/config, self-ips, ignore-nets, clamav config). Lives in a
+-- require'd module because top-level locals here reset every request —
+-- see the PITFALL block above and cfm_filecache.lua for the full story.
+local fc = require "cfm_filecache"
 local function fallback_normalize_host(raw)
   local h = string.lower(tostring(raw or "")):gsub("%.$", "")
   if h == "" then return "" end
@@ -105,21 +110,19 @@ local bit = require "bit"
 -- ─────────────────────────────────────────────────────────────────────────────
 local _BRIDGE_TOKEN_FILE = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 
-local function load_token(path, tag)
-  local chunk, load_err = loadfile(path)
-  if not chunk then
-    ngx.log(ngx.ERR, "[cfm] cannot load ", tag, " ", path, ": ", tostring(load_err))
-    return nil, "load: " .. tostring(load_err)
-  end
-  local ok, val = pcall(chunk)
-  if not ok or type(val) ~= "string" or #val < 32 then
-    ngx.log(ngx.ERR, "[cfm] ", tag, " invalid or too short: ", path)
-    return nil, "invalid/short token"
-  end
-  return val
-end
-
-local _bridge_token, _bridge_token_err = load_token(_BRIDGE_TOKEN_FILE, "bridge token file")
+-- Cached via cfm_filecache: the token persists in detectors.conf and only
+-- rotates when weak (internal/detectors/manager.go), so a 10s TTL is safe
+-- and removes a loadfile() syscall+compile from every request. A missing
+-- file is retried every 2s so daemon startup converges quickly.
+local _bridge_token, _bridge_token_err = fc.get(_BRIDGE_TOKEN_FILE, {
+  ttl = 10, missing_ttl = 2,
+  transform = function(val)
+    if type(val) ~= "string" or #val < 32 then
+      error("invalid or too short token")
+    end
+    return val
+  end,
+})
 if not _bridge_token then
   error("[cfm] missing bridge token file — ensure cfm daemon has started; path: "
         .. _BRIDGE_TOKEN_FILE
@@ -129,21 +132,15 @@ end
 -- Webdetector → Lua runtime knobs (sibling file to the bridge token).
 -- Optional: if the file is missing or unloadable we fall back to safe defaults
 -- so an upgrade lag (cfm daemon old, Lua new) doesn't break the request path.
+-- Operator edits propagate within the 10s cache TTL.
 local _BRIDGE_CONFIG_FILE = "/var/lib/cfm/lua/cfm_bridge_config.lua"
-local _bridge_cfg = { clearance_refresh = true }
-do
-  local chunk = loadfile(_BRIDGE_CONFIG_FILE)
-  if chunk then
-    local ok, val = pcall(chunk)
-    if ok and type(val) == "table" then
-      if val.clearance_refresh ~= nil then
-        _bridge_cfg.clearance_refresh = (val.clearance_refresh ~= false)
-      end
-    else
-      ngx.log(ngx.WARN, "[cfm] bridge config file did not return a table: ", _BRIDGE_CONFIG_FILE)
-    end
-  end
-end
+local _bridge_cfg = fc.get(_BRIDGE_CONFIG_FILE, {
+  ttl = 10,
+  transform = function(val)
+    if type(val) ~= "table" then error("did not return a table") end
+    return { clearance_refresh = (val.clearance_refresh ~= false) }
+  end,
+}) or { clearance_refresh = true }
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -211,6 +208,14 @@ local CFG = {
   waf_stats_enable    = (os.getenv("CFM_WAF_STATS_ENABLE") or "1") == "1",
   waf_stats_flush_sec = tonumber(os.getenv("CFM_WAF_STATS_FLUSH_SEC") or "60"),
 
+  -- Opt-in origin keepalive: route allow-traffic through the
+  -- cfm_origin_http/cfm_origin_https upstream blocks (balancer_by_lua +
+  -- pooled backend connections) instead of a fresh proxy_pass connection
+  -- per request. Requires the upstream blocks from current
+  -- openresty.conf/angie.conf; default OFF. See cfm_origin_ka.lua and
+  -- docs/proxy-performance.md.
+  origin_keepalive = (os.getenv("CFM_ORIGIN_KEEPALIVE") or "0") == "1",
+
 }
 
 local clamav_ok, clamav = pcall(require, "cfm_clamav")
@@ -219,18 +224,20 @@ if clamav_ok then
   -- by the cfm daemon on every cfm.conf reload (CLAMD_ENABLED &&
   -- CLAMD_NGINX_HOOK_ENABLED). Missing/unloadable file falls back to
   -- enabled=true so an upgrade lag (cfm daemon old, Lua new) does not
-  -- silently turn the hook off.
+  -- silently turn the hook off. Cached (10s TTL) via cfm_filecache so the
+  -- toggle no longer costs a loadfile() on every request.
   local _CLAMAV_CONFIG_FILE = "/var/lib/cfm/lua/cfm_clamav_config.lua"
   local clamav_hook_enabled = true
   do
-    local chunk = loadfile(_CLAMAV_CONFIG_FILE)
-    if chunk then
-      local ok, val = pcall(chunk)
-      if ok and type(val) == "table" and val.enabled ~= nil then
-        clamav_hook_enabled = (val.enabled ~= false)
-      else
-        ngx.log(ngx.WARN, "[cfm] clamav config file did not return a table: ", _CLAMAV_CONFIG_FILE)
-      end
+    local val = fc.get(_CLAMAV_CONFIG_FILE, {
+      ttl = 10,
+      transform = function(v)
+        if type(v) ~= "table" then error("did not return a table") end
+        return { enabled = (v.enabled ~= false) }
+      end,
+    })
+    if val and val.enabled ~= nil then
+      clamav_hook_enabled = val.enabled
     end
   end
   clamav.init({
@@ -340,14 +347,18 @@ end
 
 local _SELF_IPS_FILE = "/var/lib/cfm/lua/cfm_self_ips.lua"
 local _SELF_IPS_TTL_SEC = tonumber(os.getenv("CFM_SELF_IPS_TTL_SEC") or "30")
-local _self_ip_cache = { expires_at = 0, map = {}, generated_at = "" }
 
 -- Mirror of [global] IGNORE_IPS / IGNORE_NETS from cfm.cfg, written by Go
 -- (detectors.IPIgnore.WriteLuaCache) so the Lua self-bypass honours the
 -- same allowlist as the challenge-engine bypass predicate. The same TTL
 -- as self-ips so config edits propagate within ~30s without nginx reload.
+--
+-- Both caches live in cfm_filecache (require'd module state) — the old
+-- in-file `_self_ip_cache`/`_ignore_cache` locals re-initialised their
+-- `expires_at = 0` on every request (the access_by_lua_file PITFALL
+-- above), so the intended 30s TTL was a permanent miss and both files
+-- were loadfile()'d + re-parsed on every single request.
 local _IGNORE_NETS_FILE = "/var/lib/cfm/lua/cfm_ignore_nets.lua"
-local _ignore_cache = { expires_at = 0, ips = {}, v4_ranges = {}, generated_at = "" }
 
 local function normalize_ip(raw)
   local ip = tostring(raw or "")
@@ -371,71 +382,42 @@ local function is_loopback_or_linklocal(ip)
   return false
 end
 
-local function load_self_ip_cache(force)
-  local now = ngx.now()
-  if not force and now < (_self_ip_cache.expires_at or 0) then
-    return _self_ip_cache.map or {}
-  end
-
-  local map = {}
-  local generated_at = ""
-  local ok_load, chunk_or_err = pcall(loadfile, _SELF_IPS_FILE)
-  if not ok_load then
-    ngx.log(ngx.WARN, "[cfm] self-ip loadfile panic ", _SELF_IPS_FILE, ": ", tostring(chunk_or_err))
-  elseif not chunk_or_err then
-    if CFG.debug then
-      log_route(ngx.NOTICE, "self-ip cache unavailable file=" .. _SELF_IPS_FILE)
-    end
-  else
-    local ok_run, val = pcall(chunk_or_err)
-    if ok_run and type(val) == "table" then
-      generated_at = tostring(val.generated_at or "")
-      if type(val.ips) == "table" then
-        for k, v in pairs(val.ips) do
-          if v then
-            local nk = normalize_ip(k)
-            if nk ~= "" then map[nk] = true end
-          end
+local function load_self_ip_cache()
+  local map = fc.get(_SELF_IPS_FILE, {
+    ttl = _SELF_IPS_TTL_SEC,
+    transform = function(val)
+      if type(val) ~= "table" then error("non-table value") end
+      if type(val.ips) ~= "table" then error("missing ips table") end
+      local m = {}
+      for k, v in pairs(val.ips) do
+        if v then
+          local nk = normalize_ip(k)
+          if nk ~= "" then m[nk] = true end
         end
-      else
-        ngx.log(ngx.WARN, "[cfm] invalid self-ip cache payload (missing ips table): ", _SELF_IPS_FILE)
       end
-    else
-      ngx.log(ngx.WARN, "[cfm] invalid self-ip cache file ", _SELF_IPS_FILE, ": ", tostring(ok_run and "non-table value" or val))
-    end
-  end
-
-  _self_ip_cache.map = map
-  _self_ip_cache.generated_at = generated_at
-  _self_ip_cache.expires_at = now + _SELF_IPS_TTL_SEC
-  return map
+      return m
+    end,
+  })
+  return map or {}
 end
 
--- Short TTL applied when the cache file is missing on disk. The Go side
--- writes /var/lib/cfm/lua/cfm_ignore_nets.lua on engine startup and on
+-- Short TTL applied when the cache file is missing/broken on disk. The Go
+-- side writes /var/lib/cfm/lua/cfm_ignore_nets.lua on engine startup and on
 -- every config reload, but on a freshly-booted host there's a window
 -- where the file doesn't exist yet. Falling all the way back to the
 -- 30s SELF_IPS_TTL during that window means IGNORE_NETS is silently
 -- ignored for the first half-minute. Re-poll every 2s instead.
 local _IGNORE_NETS_MISSING_TTL_SEC = 2
 
-local function load_ignore_cache(force)
-  local now = ngx.now()
-  if not force and now < (_ignore_cache.expires_at or 0) then
-    return _ignore_cache
-  end
+local _EMPTY_IGNORE = { ips = {}, v4_ranges = {} }
 
-  local ips, v4_ranges = {}, {}
-  local generated_at = ""
-  local file_present = false
-  local ok_load, chunk_or_err = pcall(loadfile, _IGNORE_NETS_FILE)
-  if not ok_load then
-    ngx.log(ngx.WARN, "[cfm] ignore-nets loadfile panic ", _IGNORE_NETS_FILE, ": ", tostring(chunk_or_err))
-  elseif chunk_or_err then
-    file_present = true
-    local ok_run, val = pcall(chunk_or_err)
-    if ok_run and type(val) == "table" then
-      generated_at = tostring(val.generated_at or "")
+local function load_ignore_cache()
+  local cache = fc.get(_IGNORE_NETS_FILE, {
+    ttl = _SELF_IPS_TTL_SEC,
+    missing_ttl = _IGNORE_NETS_MISSING_TTL_SEC,
+    transform = function(val)
+      if type(val) ~= "table" then error("non-table value") end
+      local ips, v4_ranges = {}, {}
       if type(val.ips) == "table" then
         for k, v in pairs(val.ips) do
           if v then
@@ -452,21 +434,10 @@ local function load_ignore_cache(force)
           end
         end
       end
-    else
-      ngx.log(ngx.WARN, "[cfm] invalid ignore-nets cache file ", _IGNORE_NETS_FILE)
-    end
-  end
-
-  _ignore_cache.ips = ips
-  _ignore_cache.v4_ranges = v4_ranges
-  _ignore_cache.generated_at = generated_at
-  -- File missing → re-poll quickly so first-boot convergence isn't 30s.
-  if file_present then
-    _ignore_cache.expires_at = now + _SELF_IPS_TTL_SEC
-  else
-    _ignore_cache.expires_at = now + _IGNORE_NETS_MISSING_TTL_SEC
-  end
-  return _ignore_cache
+      return { ips = ips, v4_ranges = v4_ranges }
+    end,
+  })
+  return cache or _EMPTY_IGNORE
 end
 
 local function ipv4_to_uint32(ip)
@@ -479,7 +450,7 @@ local function ipv4_to_uint32(ip)
 end
 
 local function is_in_ignore_nets(ip)
-  local cache = load_ignore_cache(false)
+  local cache = load_ignore_cache()
   if cache.ips[ip] then return true end
   local n = ipv4_to_uint32(ip)
   if n then
@@ -495,7 +466,7 @@ local function is_self_origin(ip)
   local nip = normalize_ip(ip)
   if nip == "" then return false end
   if is_loopback_or_linklocal(nip) then return true end
-  local map = load_self_ip_cache(false)
+  local map = load_self_ip_cache()
   if map[nip] == true then return true end
   -- [global] IGNORE_IPS / IGNORE_NETS from cfm.cfg — same allowlist the
   -- Go challenge-engine bypass uses. Mirrors operator expectation that a
@@ -1170,6 +1141,22 @@ local method  = ngx.req.get_method() or "-"
 local scheme  = ngx.var.scheme or "http"
 
 local function origin_pass_for(s_in)
+  -- Instrumentation: total access-phase time (header read + all Lua above
+  -- + this routing decision) in ms, logged as luams= in the cfm access-log
+  -- format. Only stamped on origin-allow paths — challenge/block responses
+  -- keep the "-" default. Reading an undeclared nginx var returns nil
+  -- (writes would throw), so this degrades cleanly under an older conf
+  -- that lacks `set $cfm_lua_ms`.
+  if ngx.var.cfm_lua_ms ~= nil then
+    ngx.var.cfm_lua_ms = string.format("%.1f", (ngx.now() - ngx.req.start_time()) * 1000)
+  end
+  -- Opt-in origin keepalive (CFM_ORIGIN_KEEPALIVE=1): route through the
+  -- cfm_origin_* upstream blocks so backend connections are pooled instead
+  -- of opening a fresh TCP (+TLS on 443) connection to Apache per request.
+  -- See cfm_origin_ka.lua for the SNI-safety rules.
+  if CFG.origin_keepalive then
+    return (s_in == "https") and "https://cfm_origin_https" or "http://cfm_origin_http"
+  end
   local dst = ngx.var.server_addr or "127.0.0.1"
   return (s_in == "https" and "https://" or "http://") .. dst ..
          (s_in == "https" and ":443" or ":80")
