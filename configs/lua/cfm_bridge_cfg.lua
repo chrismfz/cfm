@@ -82,4 +82,21 @@ function _M.token()
   return fc.get(TOKEN_PATH, TOKEN_OPTS)
 end
 
+-- Exported so consumers can name the canonical file in operator-facing
+-- error messages without keeping their own copy of the path.
+_M.TOKEN_PATH = TOKEN_PATH
+
+-- refresh_token drops the cached entry and re-reads the file NOW.
+-- For inbound-credential validators only (cfm_purge.check_token): they
+-- compare a caller-presented token against ours, and the daemon may purge
+-- immediately after rotating a weak token at startup — serving the 10s-old
+-- cached value there would 403 a perfectly fresh credential. Outbound
+-- consumers (cfm.lua, cfm_panel, cfm_h3_config) must keep using token();
+-- calling this per request would reintroduce the loadfile-per-request cost
+-- the cache exists to remove.
+function _M.refresh_token()
+  fc.entries[TOKEN_PATH] = nil
+  return _M.token()
+end
+
 return _M

@@ -79,9 +79,12 @@ back-filled here — see the git/PR history for that period.
   **forever** per worker, so a daemon-side token rotation left the HTTP/3
   config fetch 403-ing against the bridge until an nginx reload; it now
   converges within 10s like every other consumer. The validity rule
-  (string, ≥32 chars) lives in one place. (cfm_panel's install-preflight
-  selftest still probes the raw token file on purpose — it validates the
-  file itself.)
+  (string, ≥32 chars) lives in one place. cfm_purge — the one INBOUND
+  validator (it checks the token the daemon presents) — refreshes-on-
+  mismatch so a force-unblock issued right after a startup token rotation
+  is never 403'd by the 10s cache. (cfm_panel's install-preflight selftest
+  still probes the raw token file on purpose — it validates the file
+  itself.)
 - internal/sslcollector: the four generated-Lua writers (token,
   sslcollector config, clamav config, webdetector bridge config) now share
   one `writeLuaFileAtomic` implementation of the tmp-write → 0640 →

@@ -133,6 +133,17 @@ expire_token()
 check(bc.token() == "ffffffffffffffffffffffffffffffffffffffffffffffff",
       "rotated token picked up after TTL expiry")
 
+-- 8b) refresh_token() bypasses the TTL: an inbound-credential validator
+-- (cfm_purge) must be able to see a just-rotated token immediately.
+token_fixture = 'return "1111111111111111111111111111111111111111111111ff"'
+fake_now = fake_now + 1 -- still inside the fresh TTL window
+check(bc.token() == "ffffffffffffffffffffffffffffffffffffffffffffffff",
+      "cached token still served inside TTL before refresh")
+check(bc.refresh_token() == "1111111111111111111111111111111111111111111111ff",
+      "refresh_token() re-reads the file immediately, ignoring the TTL")
+check(bc.token() == "1111111111111111111111111111111111111111111111ff",
+      "refresh_token() repopulates the cache for subsequent token() calls")
+
 -- 9) Too-short / non-string tokens are rejected, not served.
 expire_token()
 token_fixture = 'return "short"'

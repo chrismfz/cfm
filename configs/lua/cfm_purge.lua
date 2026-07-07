@@ -27,9 +27,10 @@ local SHNAME     = "cfm_decisions"
 
 -- load_token returns the canonical bridge token (the same one cfm.lua
 -- trusts) via the shared cached accessor (cfm_bridge_cfg → cfm_filecache,
--- 10s TTL) — a daemon-side rotation is picked up within 10s without an
--- nginx reload, and the validity rule lives in one place. pcall guards an
--- upgrade lag where the module set is older than this file.
+-- 10s TTL) — the validity rule lives in one place. Rotation freshness is
+-- handled by check_token's refresh-on-mismatch below, so the cache TTL
+-- never rejects a just-rotated token. pcall guards an upgrade lag where
+-- the module set is older than this file.
 local function load_token()
   local ok, bc = pcall(require, "cfm_bridge_cfg")
   if ok and type(bc) == "table" and bc.token then
@@ -41,11 +42,25 @@ end
 -- check_token returns true iff the request carries the matching bridge token.
 -- The endpoint is also locked to loopback (see check_loopback); this token is
 -- the second factor so a compromised host without the secret cannot purge.
+--
+-- Freshness: unlike every other consumer, this validates an INBOUND
+-- credential — the daemon may force-unblock (and therefore purge) right
+-- after rotating a weak token at startup, and rejecting its brand-new token
+-- because our cache is up to 10s old would leave the "unblocked" IP with
+-- stale edge state. On a mismatch, force one fresh read and re-compare:
+-- restores the old read-fresh-per-call guarantee at purge cost only
+-- (purges are rare; the hot path never pays it).
 function _M.check_token()
-  local want = load_token()
-  if not want then return false end
   local got = ngx.req.get_headers()["X-CFM-Token"]
-  return type(got) == "string" and got == want
+  if type(got) ~= "string" or got == "" then return false end
+  local want = load_token()
+  if want and got == want then return true end
+  local ok, bc = pcall(require, "cfm_bridge_cfg")
+  if ok and type(bc) == "table" and bc.refresh_token then
+    want = bc.refresh_token()
+    return type(want) == "string" and got == want
+  end
+  return false
 end
 
 -- check_loopback returns true iff the *real* TCP peer is loopback.

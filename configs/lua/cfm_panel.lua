@@ -67,8 +67,18 @@ do
             local tok, terr = bc.token()
             panel_bridge_token = tok
             if not tok then
-                ngx.log(ngx.ERR, "[cfm_panel] bridge token unavailable: ", tostring(terr))
+                ngx.log(ngx.ERR, "[cfm_panel] bridge token unavailable (",
+                    tostring(bc.TOKEN_PATH or "/var/lib/cfm/lua/cfm_bridge_token.lua"),
+                    "): ", tostring(terr))
             end
+        else
+            -- Old cfm_bridge_cfg without token() (partial file copy /
+            -- stale package.loaded): the token doubles as the clearance
+            -- secret, so a silent nil here surfaces only as per-request
+            -- missing_clearance_secret churn — name the real cause loudly.
+            ngx.log(ngx.ERR, "[cfm_panel] cfm_bridge_cfg has no token() — ",
+                "module set older than cfm_panel.lua; redeploy /var/lib/cfm/lua ",
+                "and reload the proxy; panel bridge auth disabled until then")
         end
     else
         ngx.log(ngx.WARN, "[cfm_panel] cfm_bridge_cfg unavailable, using defaults: ", tostring(bc))

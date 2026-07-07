@@ -115,9 +115,19 @@ local bit = require "bit"
 -- weak (internal/detectors/manager.go), so 10s staleness is safe.
 local _bridge = require "cfm_bridge_cfg"
 
-local _bridge_token, _bridge_token_err = _bridge.token()
+local _bridge_token, _bridge_token_err
+if type(_bridge.token) == "function" then
+  _bridge_token, _bridge_token_err = _bridge.token()
+else
+  -- Version skew (this file newer than the cfm_bridge_cfg.lua on disk, or
+  -- the old module still cached in package.loaded): fail with a
+  -- self-describing message instead of an "attempt to call field 'token'
+  -- (a nil value)" traceback.
+  _bridge_token_err = "cfm_bridge_cfg has no token() — module set older than cfm.lua; redeploy /var/lib/cfm/lua and reload the proxy"
+end
 if not _bridge_token then
-  error("[cfm] missing bridge token file — ensure cfm daemon has started"
+  error("[cfm] bridge token unavailable — ensure cfm daemon has started; path: "
+        .. tostring(_bridge.TOKEN_PATH or "/var/lib/cfm/lua/cfm_bridge_token.lua")
         .. "; details: " .. tostring(_bridge_token_err))
 end
 
