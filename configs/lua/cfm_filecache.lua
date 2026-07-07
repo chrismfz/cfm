@@ -44,6 +44,16 @@
 -- caller keeps its existing fallback. The only change is that the disk
 -- probe happens at most once per TTL window instead of once per request.
 --
+-- ACCEPTED TRADE-OFF: callers living in access_by_lua_file chunks
+-- (cfm.lua) re-build their opts table + transform closure on every
+-- request, even on cache hits, because chunk top-levels re-execute per
+-- request. That is a few hundred bytes of LuaJIT nursery garbage per
+-- request — noise next to the WAF/shdict work on the same path. Callers
+-- in real modules (cfm_bridge_cfg) hoist their opts to module scope
+-- instead. Don't restructure cfm.lua's call sites around this without a
+-- measurement showing access-phase GC pressure; see
+-- docs/roadmaps/edge-shared-loaders.md ("Explicitly NOT planned").
+--
 -- NOT for files that must be re-read with sub-second freshness. Every
 -- current consumer tolerates seconds of staleness: the bridge token is
 -- persisted in detectors.conf and only rotates when weak (see
