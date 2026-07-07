@@ -55,4 +55,31 @@ function _M.get()
   return fc.get(PATH, OPTS) or FALLBACK
 end
 
+-- ── Bridge token ─────────────────────────────────────────────────────────────
+-- Canonical accessor for the bridge auth token (sibling file to the bridge
+-- config, written by the daemon on start — internal/detectors/manager.go).
+-- One load+validate implementation for every edge consumer (cfm.lua,
+-- cfm_panel.lua, cfm_purge.lua, cfm_h3_config.lua) so the validity rule
+-- (string, ≥32 chars) and the freshness policy live in exactly one place.
+-- 10s TTL: a daemon-side token rotation converges everywhere within 10s
+-- without an nginx reload; a missing file (daemon not started yet) is
+-- retried every 2s. Returns (token) or (nil, err).
+
+local TOKEN_PATH = "/var/lib/cfm/lua/cfm_bridge_token.lua"
+
+local TOKEN_OPTS = {
+  ttl = 10,
+  missing_ttl = 2,
+  transform = function(val)
+    if type(val) ~= "string" or #val < 32 then
+      error("invalid or too short token")
+    end
+    return val
+  end,
+}
+
+function _M.token()
+  return fc.get(TOKEN_PATH, TOKEN_OPTS)
+end
+
 return _M

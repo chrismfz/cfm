@@ -24,17 +24,18 @@
 local _M = {}
 
 local SHNAME     = "cfm_decisions"
-local TOKEN_FILE = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 
--- load_token reads the canonical bridge token (the same file cfm.lua trusts).
--- Read fresh on each call so a daemon-side token rotation is picked up without
--- an nginx reload; the file is tiny and purges are rare.
+-- load_token returns the canonical bridge token (the same one cfm.lua
+-- trusts) via the shared cached accessor (cfm_bridge_cfg → cfm_filecache,
+-- 10s TTL) — a daemon-side rotation is picked up within 10s without an
+-- nginx reload, and the validity rule lives in one place. pcall guards an
+-- upgrade lag where the module set is older than this file.
 local function load_token()
-  local chunk = loadfile(TOKEN_FILE)
-  if not chunk then return nil end
-  local ok, val = pcall(chunk)
-  if not ok or type(val) ~= "string" or #val < 32 then return nil end
-  return val
+  local ok, bc = pcall(require, "cfm_bridge_cfg")
+  if ok and type(bc) == "table" and bc.token then
+    return (bc.token())
+  end
+  return nil
 end
 
 -- check_token returns true iff the request carries the matching bridge token.

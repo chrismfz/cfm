@@ -1,8 +1,12 @@
 # CFM — Edge Shared Loaders Roadmap (follow-up unification)
 
-**Status:** Backlog — surfaced by the pre-merge review of the 2026-07 edge
-performance PR (origin keepalive + cfm_filecache); deliberately deferred to
-keep that PR single-concern.
+**Status:** Complete (2026-07, same PR as the review that surfaced it) —
+`cfm_bridge_cfg.token()` is the single edge token accessor (cfm.lua,
+cfm_panel, cfm_purge, cfm_h3_config all migrated; the cfm_panel selftest
+hook intentionally still probes the raw file — it is an install preflight
+of the file itself); `writeLuaFileAtomic` is the single Go writer behind
+all four `Write*Lua*` functions in `internal/sslcollector/token.go`. Only
+the "Explicitly NOT planned" decision below remains standing guidance.
 **Scope:** `configs/lua/` bridge-token loading · `internal/sslcollector/token.go`
 atomic Lua-file writers
 **Goal:** One implementation each for (a) reading/validating the bridge token

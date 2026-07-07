@@ -43,40 +43,37 @@ if not ok_clearance then
 end
 
 
+-- Referenced by the selftest hook below, which deliberately probes the RAW
+-- file (install preflight: "is the token file present and valid on disk?")
+-- rather than the cached accessor.
 local _BRIDGE_TOKEN_FILE = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 
-local function load_token(path, tag)
-    local chunk, load_err = loadfile(path)
-    if not chunk then
-        ngx.log(ngx.ERR, "[cfm_panel] cannot load ", tag, " ", path, ": ", tostring(load_err))
-        return nil
-    end
-    local ok, val = pcall(chunk)
-    if not ok or type(val) ~= "string" or #val < 32 then
-        ngx.log(ngx.ERR, "[cfm_panel] ", tag, " invalid or too short: ", path)
-        return nil
-    end
-    return val
-end
-
-local panel_bridge_token = load_token(_BRIDGE_TOKEN_FILE, "bridge token file")
-
--- Webdetector → Lua runtime knobs (sibling file to the bridge token), read
--- through the canonical cached accessor (cfm_bridge_cfg → cfm_filecache,
--- 10s TTL). The previous inline loadfile here ran once per panel request —
--- this file is loaded via access_by_lua_file, so its top level re-executes
--- per request (see the PITFALL block in cfm.lua) — and was a second,
--- drift-prone copy of the bridge-config parse. pcall keeps the panel path
--- alive through an upgrade lag where the module set is older than this file.
+-- Bridge token + webdetector runtime knobs, both read through the canonical
+-- cached accessor (cfm_bridge_cfg → cfm_filecache, 10s TTL / 2s
+-- missing-retry). The previous inline load_token/loadfile here ran once per
+-- panel request — this file is loaded via access_by_lua_file, so its top
+-- level re-executes per request (see the PITFALL block in cfm.lua) — and
+-- duplicated the token-validity rule and the bridge-config parse. pcall
+-- keeps the panel path alive through an upgrade lag where the module set is
+-- older than this file; a nil token means "bridge unavailable", same as the
+-- old loader's failure mode (panel decide then follows panel_fail_mode).
+local panel_bridge_token
 local panel_bridge_cfg
 do
     local ok, bc = pcall(require, "cfm_bridge_cfg")
     if ok and type(bc) == "table" and bc.get then
         panel_bridge_cfg = bc.get()
+        if bc.token then
+            local tok, terr = bc.token()
+            panel_bridge_token = tok
+            if not tok then
+                ngx.log(ngx.ERR, "[cfm_panel] bridge token unavailable: ", tostring(terr))
+            end
+        end
     else
         ngx.log(ngx.WARN, "[cfm_panel] cfm_bridge_cfg unavailable, using defaults: ", tostring(bc))
-        panel_bridge_cfg = { clearance_refresh = true }
     end
+    panel_bridge_cfg = panel_bridge_cfg or { clearance_refresh = true }
 end
 
 local function starts_with(s, p)

@@ -108,24 +108,16 @@ local bit = require "bit"
 -- Deliberately loaded from one canonical path so stale legacy copies cannot
 -- shadow the current token.
 -- ─────────────────────────────────────────────────────────────────────────────
-local _BRIDGE_TOKEN_FILE = "/var/lib/cfm/lua/cfm_bridge_token.lua"
+-- Both the token and the runtime knobs come through the canonical cached
+-- accessor (cfm_bridge_cfg → cfm_filecache, 10s TTL / 2s missing-retry):
+-- the validity rule and freshness policy live in one module shared by every
+-- edge consumer. The token persists in detectors.conf and only rotates when
+-- weak (internal/detectors/manager.go), so 10s staleness is safe.
+local _bridge = require "cfm_bridge_cfg"
 
--- Cached via cfm_filecache: the token persists in detectors.conf and only
--- rotates when weak (internal/detectors/manager.go), so a 10s TTL is safe
--- and removes a loadfile() syscall+compile from every request. A missing
--- file is retried every 2s so daemon startup converges quickly.
-local _bridge_token, _bridge_token_err = fc.get(_BRIDGE_TOKEN_FILE, {
-  ttl = 10, missing_ttl = 2,
-  transform = function(val)
-    if type(val) ~= "string" or #val < 32 then
-      error("invalid or too short token")
-    end
-    return val
-  end,
-})
+local _bridge_token, _bridge_token_err = _bridge.token()
 if not _bridge_token then
-  error("[cfm] missing bridge token file — ensure cfm daemon has started; path: "
-        .. _BRIDGE_TOKEN_FILE
+  error("[cfm] missing bridge token file — ensure cfm daemon has started"
         .. "; details: " .. tostring(_bridge_token_err))
 end
 
@@ -133,7 +125,7 @@ end
 -- Optional: if the file is missing or unloadable we fall back to safe defaults
 -- so an upgrade lag (cfm daemon old, Lua new) doesn't break the request path.
 -- Operator edits propagate within the 10s cache TTL (see cfm_bridge_cfg.lua).
-local _bridge_cfg = require("cfm_bridge_cfg").get()
+local _bridge_cfg = _bridge.get()
 
 
 -- ─────────────────────────────────────────────────────────────────────────────

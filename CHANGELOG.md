@@ -71,6 +71,24 @@ back-filled here — see the git/PR history for that period.
   copy of the parse; it now goes through the canonical
   `cfm_bridge_cfg.lua` accessor (same 10s TTL as the main edge), so panel
   ports pick up daemon knob changes identically to web listeners.
+- Edge proxy: **one bridge-token loader for the whole edge.**
+  `cfm_bridge_cfg.token()` (cfm_filecache-backed, 10s TTL / 2s
+  missing-retry) replaces four private load+validate copies: cfm.lua,
+  cfm_panel.lua (which also re-read the file once per panel request),
+  cfm_purge.lua, and cfm_h3_config.lua — the latter cached the token
+  **forever** per worker, so a daemon-side token rotation left the HTTP/3
+  config fetch 403-ing against the bridge until an nginx reload; it now
+  converges within 10s like every other consumer. The validity rule
+  (string, ≥32 chars) lives in one place. (cfm_panel's install-preflight
+  selftest still probes the raw token file on purpose — it validates the
+  file itself.)
+- internal/sslcollector: the four generated-Lua writers (token,
+  sslcollector config, clamav config, webdetector bridge config) now share
+  one `writeLuaFileAtomic` implementation of the tmp-write → 0640 →
+  root:cfm chown → rename sequence, so a future fix to the enforced
+  ownership/mode path lands in all writers at once. Error strings and log
+  tags are preserved per writer; the two config writers additionally gained
+  the final-chmod hardening the token writer already had.
 - API: **bulk IP block endpoint with self-lockout guard** — admin-only
   `POST /api/v1/firewall/block/batch` (`{ips: […], ttl, reason}`, ≤256 IPs per
   request, same TTL semantics as the single endpoint: empty = permanent). Each

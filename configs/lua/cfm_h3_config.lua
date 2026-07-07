@@ -129,17 +129,18 @@ local BRIDGE_PATH    = "/nginx/h3/config"
 local TOKEN_HEADER   = "X-CFM-Token"
 local IO_TIMEOUT_MS  = 200  -- localhost unix socket; 200ms is 200x headroom.
 
-local _bridge_token  = nil
-local _BRIDGE_TOKEN_FILE = "/var/lib/cfm/lua/cfm_bridge_token.lua"
-
+-- Bridge token via the shared cached accessor (cfm_bridge_cfg →
+-- cfm_filecache, 10s TTL). The old private copy here cached the token
+-- FOREVER per worker, so a daemon-side rotation left this module 403-ing
+-- against the bridge until an nginx reload; now it converges within 10s
+-- like every other consumer. pcall guards an upgrade lag where the module
+-- set is older than this file.
 local function load_bridge_token()
-    if _bridge_token then return _bridge_token end
-    local chunk = loadfile(_BRIDGE_TOKEN_FILE)
-    if not chunk then return nil end
-    local ok, val = pcall(chunk)
-    if not ok or type(val) ~= "string" or #val < 32 then return nil end
-    _bridge_token = val
-    return _bridge_token
+    local ok, bc = pcall(require, "cfm_bridge_cfg")
+    if ok and type(bc) == "table" and bc.token then
+        return (bc.token())
+    end
+    return nil
 end
 
 local function bridge_fetch()
