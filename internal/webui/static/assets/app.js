@@ -140,7 +140,30 @@
         vhostSeriesMaxPoints: 120,
         vhostTopIPLimit: 25,
         vhostTopPathLimit: 25,
-        drilldownTopN: 50,
+        // Fetch the server max so the Top IPs "show N" selector (25/50/100)
+        // never needs a refetch — the drilldown endpoint caps top at 100.
+        drilldownTopN: 100,
+        // TTL applied by every Block button on the page. '' = permanent
+        // (the block API skips the nft timeout when ttl is empty, same as
+        // `cfm block <ip>`); guarded by a confirm() in blockIP().
+        blockTTL: '1h',
+        blockTTLChoices: [
+          { value: '1h', label: '1h' },
+          { value: '6h', label: '6h' },
+          { value: '24h', label: '24h' },
+          { value: '168h', label: '7d' }, // Go ParseDuration has no 'd' unit
+          { value: '', label: 'permanent' },
+        ],
+        // TTL applied by the Challenge / Manual challenge buttons
+        // (v1/challenge/vhost/add; server default is 30m).
+        challengeTTL: '30m',
+        challengeTTLChoices: [
+          { value: '30m', label: '30m' },
+          { value: '1h', label: '1h' },
+          { value: '2h', label: '2h' },
+          { value: '6h', label: '6h' },
+          { value: '24h', label: '24h' },
+        ],
         vhostCharts: {
           rps: null,
           bot: null,
@@ -161,6 +184,14 @@
     computed: {
       isScoped() { return this.isScopedMode; },
       canWrite() { return this.isAdmin || this.tokenRole !== 'viewer'; },
+      blockTTLLabel() {
+        const c = this.blockTTLChoices.find((x) => x.value === this.blockTTL);
+        return c ? c.label : this.blockTTL;
+      },
+      challengeTTLLabel() {
+        const c = this.challengeTTLChoices.find((x) => x.value === this.challengeTTL);
+        return c ? c.label : this.challengeTTL;
+      },
       hasScopedVhosts() { return this.isScoped && this.allowedVhosts.length > 0; },
       shortDetail() {
         if (!this.drilldown) return null;
@@ -774,8 +805,8 @@
             await this.postJSON('v1/challenge/vhost/remove', { host });
             this.actionMsg = `Challenge removed for ${host}`;
           } else {
-            await this.postJSON('v1/challenge/vhost/add', { host, ttl: '30m', reason: 'cfm-admin-ui' });
-            this.actionMsg = `Challenge enabled for ${host}`;
+            await this.postJSON('v1/challenge/vhost/add', { host, ttl: this.challengeTTL, reason: 'cfm-admin-ui' });
+            this.actionMsg = `Challenge enabled for ${host} (${this.challengeTTLLabel})`;
           }
           const fresh = await this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []);
           this.activeChallengeVhosts = this.extractRows(fresh, 'rows');
@@ -787,8 +818,8 @@
       async manualChallenge(host) {
         if (!host) return;
         try {
-          await this.postJSON('v1/challenge/vhost/add', { host, ttl: '30m', reason: 'cfm-admin-ui-manual' });
-          this.actionMsg = `Manual challenge enabled for ${host}`;
+          await this.postJSON('v1/challenge/vhost/add', { host, ttl: this.challengeTTL, reason: 'cfm-admin-ui-manual' });
+          this.actionMsg = `Manual challenge enabled for ${host} (${this.challengeTTLLabel})`;
           const fresh = await this.fetchJSONSafe('v1/challenge/vhosts?status=active&mode=all&limit=500', []);
           this.activeChallengeVhosts = this.extractRows(fresh, 'rows');
         } catch (err) {
@@ -824,7 +855,7 @@
             return;
           }
           await this.manualChallenge(topHost);
-          this.actionMsg = `Manual challenge enabled for top host ${topHost} (IP ${ip})`;
+          this.actionMsg = `Manual challenge enabled for top host ${topHost} (IP ${ip}, ${this.challengeTTLLabel})`;
         } catch (err) {
           this.actionMsg = `Challenge failed for IP ${ip}: ${err}`;
           console.error('[cfm-admin] challenge from IP failed', err);
@@ -832,13 +863,22 @@
       },
       async blockIP(ip) {
         if (!ip) return;
+        const ttl = this.blockTTL;
+        if (ttl === '' && !window.confirm(
+          `PERMANENTLY block ${ip}?\n\nA permanent block never expires (it survives restarts). `
+          + `Remove it later from the Firewall dashboard or with: cfm unblock ${ip}`,
+        )) {
+          return;
+        }
         try {
           await this.postJSON('v1/firewall/block', {
             ip,
-            ttl: '1h',
+            ttl,
             reason: `cfm-admin-ui host=${this.activeHost || '-'}`,
           });
-          this.actionMsg = `Blocked IP ${ip} for 1h`;
+          this.actionMsg = ttl
+            ? `Blocked IP ${ip} for ${this.blockTTLLabel}`
+            : `Blocked IP ${ip} permanently`;
         } catch (err) {
           this.actionMsg = `IP block failed for ${ip}: ${err}`;
           console.error('[cfm-admin] block action failed', err);
