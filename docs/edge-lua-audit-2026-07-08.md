@@ -144,7 +144,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Mirror handleWAFEngineSummary: validateScopedVhostQuery(r,'host') and force scoped callers to their vhost set when host is empty, or make endpoint admin-only.
 
-**Fix landed:** `handleWAFHitRates` now enforces token scope: for a scoped token (`vhostScopeFromContext != nil`) an empty host (fleet-wide aggregate) or an out-of-scope host is `403` via `vhostAllowed`; admin/loopback unchanged. Mirrors `handleChallengeVhost`. Test `TestHandleWAFHitRates_ScopeEnforced` (in-scope 200, mixed-case 200, out-of-scope 403, empty 403, admin fleet-wide 200). Scope inventory updated. Branch `claude/lua-openresty-audit-cdmcc4`.
+**Fix landed:** `handleWAFHitRates` now enforces token scope, keyed on **role** (`!IsAdminRequest`, not `scope != nil`) so a vhost-less scoped token can't be misread as admin: a non-admin caller must target a single host inside a **non-empty** allowlist; empty host, empty/nil scope, or out-of-scope host → `403` via `vhostAllowed`. Host is lowercased once so authz and the case-sensitive history read agree. Admin/loopback unchanged. Mirrors `scopedMySQLFilterHandler`/`handleChallengeVhost`. Test `TestHandleWAFHitRates_ScopeEnforced` (in-scope 200, mixed-case 200 + body-data check, out-of-scope 403, empty 403, nil-scope 403, admin fleet-wide 200). Scope inventory updated. Branch `claude/lua-openresty-audit-cdmcc4`. Hardening from the branch code-review (F02 nil-scope fail-open + mixed-case data quirk).
 
 ---
 

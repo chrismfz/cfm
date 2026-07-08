@@ -34,11 +34,15 @@ back-filled here — see the git/PR history for that period.
   gated scoped-OR-admin but read the `?host=` query verbatim with no scope check,
   so a scoped cPanel user could read **any** vhost's per-rule WAF hit rates — and
   an empty host aggregated **every** tenant — revealing which rules are logonly
-  vs block and where they fire. `handleWAFHitRates` now enforces the token scope:
-  a scoped caller must target a single host inside its own allowlist; an empty or
-  out-of-scope host is `403`. Admin/loopback (the CLI) is unchanged. Mirrors the
-  `vhostAllowed` guard the challenge endpoints already use; added to
-  `docs/endpoint_scope_inventory.md`. Found by the 2026-07 edge Lua audit.
+  vs block and where they fire. `handleWAFHitRates` now enforces the token scope,
+  keyed on **role** (not on the presence of a scope map — so a vhost-less scoped
+  token can never be misread as admin): a non-admin caller must target a single
+  host inside a **non-empty** allowlist; an empty host, an empty scope, or an
+  out-of-scope host is `403`. The host is normalized (lowercased) once so the
+  scope check and the case-sensitive history read agree. Admin/loopback (the CLI)
+  is unchanged. Mirrors the role-keyed `scopedMySQLFilterHandler` / `vhostAllowed`
+  guards; added to `docs/endpoint_scope_inventory.md`. Found by the 2026-07 edge
+  Lua audit.
 
 ### Added
 - **Web detector observability:** per-IP / subnet challenge **issuance** is now
@@ -55,8 +59,10 @@ back-filled here — see the git/PR history for that period.
 ### Fixed
 - **Edge → bridge RPC (`cfm.lua`):** removed a ~300 ms stall on every edge→daemon
   call that returns an empty body (`Content-Length: 0`) — the WAF autoblock
-  **push**, the block/clear calls, and the **observe** RPC. `http_unix` read the
-  response body with a fall-through `receive("*a")`, which on the keep-alive
+  **push** and the block/clear calls (`/nginx/ip`, `/nginx/vhost`). (`observe`
+  and `ok-touch` return a small JSON body, so they were never affected.)
+  `http_unix` read the response body with a fall-through `receive("*a")`, which
+  on the keep-alive
   bridge socket blocks until the read timeout (`CFM_DECISION_TIMEOUT_MS`, default
   300 ms) because the daemon never closes the connection; an explicit
   `Content-Length: 0` is now short-circuited to an empty body. Under a

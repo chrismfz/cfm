@@ -18,7 +18,8 @@ import (
 	webdet "cfm/internal/webdetector"
 )
 
-// RegisterTokenManagementEndpoints adds list/revoke/me to the mux.
+// RegisterTokenManagementEndpoints adds list/revoke/me and the admin
+// authcheck probe to the mux.
 func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 	// ── GET /api/v1/tokens/list ───────────────────────────────────────────────
 	m.HandleFunc("/api/v1/tokens/list", func(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +129,10 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 	// scoped-vs-admin boundary break (audit F01). This gate is admin-only.
 	m.HandleFunc("/api/v1/admin/authcheck", func(w http.ResponseWriter, r *http.Request) {
 		setAuthIdentityNoCacheHeaders(w)
+		if r.Method != http.MethodGet {
+			apiJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		if !webdet.RequireAdmin(w, r) {
 			return
 		}

@@ -686,12 +686,14 @@ local function http_unix(method, path, body)
   end
   local resp = ""
   if method == "HEAD" or code == 204 or code == 304 then resp = ""
-  -- Explicit empty body (Content-Length: 0). The bridge's ip/vhost push,
-  -- clear and observe handlers all reply 200 with Content-Length: 0, so this
-  -- MUST be handled before the fall-through "*a" read below: on a keep-alive
-  -- connection the server never closes, so "*a" would block until
-  -- decision_timeout_ms (~300ms) on every such call — a per-push worker
-  -- stall that amplifies under a WAF-tripping flood. [audit F04]
+  -- Explicit empty body (Content-Length: 0). The bridge's ip/vhost push and
+  -- clear handlers (/nginx/ip, /nginx/vhost) reply 200 with Content-Length: 0.
+  -- (observe and ok-touch instead return a small JSON body, so they take the
+  -- content_length > 0 branch — they were never "*a" victims.) This MUST be
+  -- handled before the fall-through "*a" read below: on a keep-alive connection
+  -- the server never closes, so "*a" would block until decision_timeout_ms
+  -- (~300ms) on every such call — a per-push worker stall that amplifies under
+  -- a WAF-tripping flood. The hot-path victim is the WAF autoblock push. [F04]
   elseif content_length == 0 then resp = ""
   elseif content_length and content_length > 0 then resp = s:receive(content_length)
   elseif is_chunked then

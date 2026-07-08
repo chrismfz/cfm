@@ -226,50 +226,75 @@ func TestHitRatePromotionHint(t *testing.T) {
 	}
 }
 
-// TestHandleWAFHitRates_ScopeEnforced verifies the audit-F02 scope guard: a
-// scoped token may only read hit-rates for a host inside its allowlist, an
-// empty host (which would aggregate every tenant) is refused, and admin stays
-// unrestricted.
+// TestHandleWAFHitRates_ScopeEnforced verifies the audit-F02 scope guard: it is
+// keyed on role (not scope != nil), so a scoped token may only read hit-rates
+// for a host inside a non-empty allowlist; an empty host (fleet-wide), an
+// out-of-scope host, and a scoped token with a nil/empty scope are all refused,
+// while admin stays unrestricted. Also checks that a mixed-case host is
+// normalized for the history read, not just the authz check.
 func TestHandleWAFHitRates_ScopeEnforced(t *testing.T) {
 	hs := newTestHistoryStore(t)
 	e := &Engine{history: hs}
 
-	scoped := func(host string) int {
+	// Seed inspected data for the in-scope host (stored canonical-lowercase) so
+	// the case-normalization assertion below is meaningful.
+	now := time.Now().Unix()
+	hr := (now / 3600) * 3600
+	_ = hs.RecordWAFInspected(hr, "mine.com", 100)
+
+	// call issues a GET with an explicit role and optional vhost scope (nil scope
+	// = CtxScopeKey never set, which is how a vhost-less scoped token presents).
+	call := func(role, host string, scope map[string]struct{}) *httptest.ResponseRecorder {
 		q := "/api/v1/waf/hit-rates?hours=24"
 		if host != "" {
 			q += "&host=" + host
 		}
 		req := httptest.NewRequest("GET", q, nil)
 		ctx := context.WithValue(req.Context(), CtxAuthnKey{}, true)
-		ctx = context.WithValue(ctx, CtxRoleKey{}, CtxRoleScoped)
-		ctx = context.WithValue(ctx, CtxScopeKey{}, map[string]struct{}{"mine.com": {}})
+		ctx = context.WithValue(ctx, CtxRoleKey{}, role)
+		if scope != nil {
+			ctx = context.WithValue(ctx, CtxScopeKey{}, scope)
+		}
 		req = req.WithContext(ctx)
 		rr := httptest.NewRecorder()
 		e.handleWAFHitRates(rr, req)
-		return rr.Code
+		return rr
 	}
+	inScope := map[string]struct{}{"mine.com": {}}
 
-	if code := scoped("mine.com"); code != 200 {
-		t.Errorf("scoped in-scope host: got %d, want 200", code)
+	if rr := call(CtxRoleScoped, "mine.com", inScope); rr.Code != 200 {
+		t.Errorf("scoped in-scope host: got %d, want 200 (body=%s)", rr.Code, rr.Body.String())
 	}
-	if code := scoped("MINE.com"); code != 200 {
-		t.Errorf("scoped in-scope host (mixed case): got %d, want 200", code)
+	// Mixed-case in-scope host → 200 AND returns the in-scope host's data, proving
+	// the host is lowercased before the history read (not only for authz).
+	if rr := call(CtxRoleScoped, "MINE.com", inScope); rr.Code != 200 {
+		t.Errorf("scoped mixed-case host: got %d, want 200", rr.Code)
+	} else {
+		var out HitRatesResult
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if out.InspectedTotal != 100 {
+			t.Errorf("mixed-case host inspected_total: got %d, want 100 (case not normalized for history read)", out.InspectedTotal)
+		}
 	}
-	if code := scoped("other.com"); code != 403 {
-		t.Errorf("scoped out-of-scope host: got %d, want 403", code)
+	if rr := call(CtxRoleScoped, "other.com", inScope); rr.Code != 403 {
+		t.Errorf("scoped out-of-scope host: got %d, want 403", rr.Code)
 	}
-	if code := scoped(""); code != 403 {
-		t.Errorf("scoped empty host (fleet-wide): got %d, want 403", code)
+	if rr := call(CtxRoleScoped, "", inScope); rr.Code != 403 {
+		t.Errorf("scoped empty host (fleet-wide): got %d, want 403", rr.Code)
+	}
+	// A scoped token with a nil/empty vhost scope (e.g. db-only) must NOT be
+	// treated as admin — every request is refused (audit F02 hardening).
+	if rr := call(CtxRoleScoped, "mine.com", nil); rr.Code != 403 {
+		t.Errorf("scoped nil-scope host: got %d, want 403 (nil scope wrongly treated as admin)", rr.Code)
+	}
+	if rr := call(CtxRoleScoped, "", nil); rr.Code != 403 {
+		t.Errorf("scoped nil-scope empty host: got %d, want 403", rr.Code)
 	}
 
 	// Admin with no host (fleet-wide aggregate) stays unrestricted.
-	req := httptest.NewRequest("GET", "/api/v1/waf/hit-rates?hours=24", nil)
-	ctx := context.WithValue(req.Context(), CtxAuthnKey{}, true)
-	ctx = context.WithValue(ctx, CtxRoleKey{}, CtxRoleAdmin)
-	req = req.WithContext(ctx)
-	rr := httptest.NewRecorder()
-	e.handleWAFHitRates(rr, req)
-	if rr.Code != 200 {
+	if rr := call(CtxRoleAdmin, "", nil); rr.Code != 200 {
 		t.Errorf("admin fleet-wide: got %d, want 200 (body=%s)", rr.Code, rr.Body.String())
 	}
 }
