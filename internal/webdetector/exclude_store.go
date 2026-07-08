@@ -13,9 +13,9 @@ import (
 )
 
 type excludeEntry struct {
-	Type       string    `json:"type"` // host | path
-	Value      string    `json:"value"`
-	ScopeHosts []string  `json:"scope_hosts,omitempty"` // nil/empty => admin-global
+	Type       string   `json:"type"` // host | path
+	Value      string   `json:"value"`
+	ScopeHosts []string `json:"scope_hosts,omitempty"` // nil/empty => admin-global
 	// RuleIDs limits this exclude to specific WAF rule IDs. nil/empty means
 	// "whole-WAF skip" (back-compat). When set, the WAF still runs but any
 	// hit whose waf_rule_id is in this set is suppressed. Two entries with
@@ -52,8 +52,9 @@ type compiledScopeMatcher struct {
 }
 
 type compiledValueMatcher struct {
-	exactContains string
-	wild          *regexp.Regexp
+	literal string // non-glob literal, matched at a domain/path boundary (NOT substring)
+	kind    string // "host" or "path" — boundary semantics for a literal
+	wild    *regexp.Regexp
 }
 
 var hostScopeMatcherCache sync.Map // key(string) -> compiledScopeMatcher
@@ -249,25 +250,55 @@ func (m compiledScopeMatcher) Match(host string) bool {
 	return false
 }
 
-func matchExcludeValue(value, rule string) bool {
-	return compileValueMatcher(rule).Match(value)
-}
-
-func compileValueMatcher(rule string) compiledValueMatcher {
+// compileValueMatcher builds a matcher for one exclude value. kind is the
+// entry Type ("host"/"path") and selects the boundary semantics for a non-glob
+// (literal) value:
+//
+//   - host: exact host, or a dot-boundary subdomain suffix — `shop.gr` matches
+//     `shop.gr` and `www.shop.gr`, NOT `myshop.gr` / `shop.gr.evil.com`. This
+//     mirrors matchHostExclude (the reporting-side matcher), which the old
+//     enforcement matcher silently disagreed with.
+//   - path: exact path, or a path-segment prefix — `/admin` matches `/admin`
+//     and `/admin/x`, NOT `/administrator`. Path values carry a leading `/`
+//     (added at store time by normalize).
+//
+// A glob value (`* ? [ ]`) keeps anchored wildcard matching for both kinds.
+// Previously a non-glob value was matched with strings.Contains — a plain
+// SUBSTRING — so a `shop.gr` host exclude also disabled the WAF (or challenge)
+// on `myshop.gr` / `shop.gr.evil.com`, and a `/api` path exclude on `/therapy`:
+// an unbounded, silent widening of an exclude across unintended vhosts/paths.
+func compileValueMatcher(kind, rule string) compiledValueMatcher {
 	if strings.ContainsAny(rule, "*?[]") {
-		return compiledValueMatcher{wild: compileGlob(rule)}
+		return compiledValueMatcher{kind: kind, wild: compileGlob(rule)}
 	}
-	return compiledValueMatcher{exactContains: rule}
+	return compiledValueMatcher{kind: kind, literal: rule}
 }
 
 func (m compiledValueMatcher) Match(value string) bool {
 	if m.wild != nil && m.wild.MatchString(value) {
 		return true
 	}
-	if m.exactContains != "" && strings.Contains(value, m.exactContains) {
+	if m.literal == "" {
+		return false
+	}
+	if value == m.literal {
 		return true
 	}
-	return false
+	switch m.kind {
+	case "host":
+		// exact (above) or dot-boundary subdomain suffix.
+		return strings.HasSuffix(value, "."+m.literal)
+	case "path":
+		// exact (above) or path-segment prefix. A literal ending in `/` is a
+		// pure prefix; otherwise require the next byte to be a `/` boundary.
+		if strings.HasSuffix(m.literal, "/") {
+			return strings.HasPrefix(value, m.literal)
+		}
+		return strings.HasPrefix(value, m.literal+"/")
+	default:
+		// Unknown kind: exact-only (already handled above).
+		return false
+	}
 }
 
 func (s *excludeStore) MatchChallenge(host string) bool {
@@ -417,7 +448,7 @@ func (s *excludeStore) rebuildCompiledLocked() {
 		compiled := compiledExcludeEntry{
 			Type:    e.Type,
 			Scope:   compileScopeMatcher(e.ScopeHosts),
-			Value:   compileValueMatcher(e.Value),
+			Value:   compileValueMatcher(e.Type, e.Value),
 			RuleIDs: append([]int(nil), e.RuleIDs...),
 		}
 		switch e.Type {

@@ -1009,22 +1009,11 @@ end
 -- module restores the cache.
 local wx = require "cfm_waf_excl"
 
-local function glob_to_lua_pattern(glob)
-  local p = tostring(glob or "")
-  p = p:gsub("([%^%$%(%)%%%.%[%]%+%-%*%?])", "%%%1")
-  p = p:gsub("%%%*", ".*"); p = p:gsub("%%%?", ".")
-  return "^" .. p .. "$"
-end
-
-local function matches_rule(value, rule)
-  value = lower(tostring(value or "")); rule = lower(tostring(rule or ""))
-  if value == "" or rule == "" then return false end
-  if rule:find("*", 1, true) or rule:find("?", 1, true) then
-    local ok, res = pcall(function() return value:match(glob_to_lua_pattern(rule)) ~= nil end)
-    return ok and res or false
-  end
-  return value:find(rule, 1, true) ~= nil
-end
+-- Exclude value matching lives in cfm_waf_excl (the excludes module) so it is
+-- unit-testable and has one canonical Lua home; it mirrors the Go enforcement
+-- matcher (internal/webdetector/exclude_store.go compiledValueMatcher). See
+-- that module for the host/path boundary semantics.
+local matches_rule = wx.matches_rule
 
 local function load_waf_excludes_local_cache()
   if not SH then wx.ts = 0; wx.hosts = {}; wx.paths = {}; return end
@@ -1052,14 +1041,14 @@ local function waf_skip_for(host, uri)
   refresh_waf_excludes_if_needed(); load_waf_excludes_local_cache()
   host = lower(host or ""); uri = lower(tostring(uri or "/"))
   local skip_ids = nil
-  local function consider(target, row)
+  local function consider(target, row, kind)
     -- Back-compat: previous Lua versions cached this list as bare strings.
     -- A graceful nginx reload during upgrade can briefly hand the new code
     -- the old cache shape (≤ waf_excl_refresh_sec until the next refresh
     -- overwrites). Treat a string entry as a whole-WAF exclude — its old
     -- meaning — so excludes don't silently lapse during the upgrade window.
     if type(row) == "string" then row = { v = row } end
-    if not matches_rule(target, row.v) then return false end
+    if not matches_rule(target, row.v, kind) then return false end
     if not row.rule_ids or #row.rule_ids == 0 then
       return true -- whole-WAF skip; signal caller to short-circuit
     end
@@ -1071,10 +1060,10 @@ local function waf_skip_for(host, uri)
     return false
   end
   for _, r in ipairs(wx.hosts) do
-    if consider(host, r) then return true, nil end
+    if consider(host, r, "host") then return true, nil end
   end
   for _, r in ipairs(wx.paths) do
-    if consider(uri, r) then return true, nil end
+    if consider(uri, r, "path") then return true, nil end
   end
   return false, skip_ids
 end

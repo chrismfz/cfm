@@ -17,6 +17,28 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- WAF / challenge excludes: **a non-glob host or path exclude no longer matches
+  by plain substring**, which silently disabled protection on unintended
+  vhosts/paths. Both the log-driven Go matcher
+  (`internal/webdetector/exclude_store.go` `compiledValueMatcher`, which used
+  `strings.Contains`) and the in-path Lua matcher (`cfm_waf_excl.lua`
+  `matches_rule`, which used `value:find`) meant a `shop.gr` **host** exclude
+  also switched the WAF/challenge off for `myshop.gr`, `shop.gr.evil.com`,
+  `evil-shop.gr`, and a `/api` **path** exclude covered `/therapy`. Non-glob
+  values now match at a boundary, identically in Go and Lua: a host matches
+  **exactly or as a dot-boundary subdomain** (`shop.gr` → `shop.gr`,
+  `www.shop.gr`; NOT `myshop.gr` / `shop.gr.evil.com`) and a path **exactly or
+  as a path-segment prefix** (`/admin` → `/admin`, `/admin/x`; NOT
+  `/administrator`). Globs (`*`/`?`) are unchanged. The host semantics now agree
+  with `matchHostExclude` (the reporting-side matcher the enforcement path had
+  silently diverged from). **Behaviour change for existing excludes**: a
+  substring-reliant entry (e.g. `shop` to cover `shop.gr`+`myshop.gr`, or
+  `/admin` to cover `/administrator`) must be re-expressed as a glob (`*shop*`,
+  `/admin*`) or listed explicitly. The Lua matcher moved to `cfm_waf_excl.lua`
+  for unit-testability; Go and Lua are cross-checked to agree. Found by the
+  2026-07 edge Lua audit.
+
 ### Fixed
 - WAF (rule 604, `WAF_CT_ANOMALY:CT_CHARSET_BYPASS`, challenge): **stopped
   challenging legitimate non-Latin form/API POSTs.** The Content-Type charset

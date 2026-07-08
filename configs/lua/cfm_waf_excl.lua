@@ -56,4 +56,58 @@ _M.ts = 0
 _M.hosts = {}
 _M.paths = {}
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- EXCLUDE VALUE MATCHING
+--
+-- Lives here (not inline in cfm.lua) so it is unit-testable and so the boundary
+-- semantics have one canonical home on the Lua side. It must stay consistent
+-- with the Go enforcement matcher — internal/webdetector/exclude_store.go
+-- `compiledValueMatcher` (the log-driven path) — or the in-path (Lua) and
+-- log-driven (Go) engines would disagree about which requests an exclude covers.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local function lower(s)
+  if type(s) ~= "string" then return "" end
+  return string.lower(s)
+end
+
+-- Convert an operator glob (`*` = any run, `?` = one char) to an ANCHORED Lua
+-- pattern, escaping every magic char first.
+local function glob_to_lua_pattern(glob)
+  local p = tostring(glob or "")
+  p = p:gsub("([%^%$%(%)%%%.%[%]%+%-%*%?])", "%%%1")
+  p = p:gsub("%%%*", ".*"); p = p:gsub("%%%?", ".")
+  return "^" .. p .. "$"
+end
+_M.glob_to_lua_pattern = glob_to_lua_pattern
+
+-- matches_rule(value, rule, kind): does the request's host/uri `value` match the
+-- exclude `rule`? `kind` ("host"/"path") selects the non-glob boundary
+-- semantics:
+--   * host: exact, or a dot-boundary subdomain suffix — `shop.gr` matches
+--     `shop.gr` and `www.shop.gr`, NOT `myshop.gr` / `shop.gr.evil.com`;
+--   * path: exact, or a path-segment prefix — `/admin` matches `/admin` and
+--     `/admin/x`, NOT `/administrator`. (Path rules carry a leading `/`.)
+-- A glob rule (`*`/`?`) keeps anchored matching. The previous plain substring
+-- (`value:find(rule)`) silently disabled the WAF on unintended vhosts/paths —
+-- a `shop.gr` exclude also covered every `*shop.gr*` host. Mirrors the Go
+-- compiledValueMatcher in internal/webdetector/exclude_store.go.
+function _M.matches_rule(value, rule, kind)
+  value = lower(tostring(value or "")); rule = lower(tostring(rule or ""))
+  if value == "" or rule == "" then return false end
+  if rule:find("*", 1, true) or rule:find("?", 1, true) then
+    local ok, res = pcall(function() return value:match(glob_to_lua_pattern(rule)) ~= nil end)
+    return ok and res or false
+  end
+  if value == rule then return true end
+  if kind == "path" then
+    if rule:sub(-1) == "/" then
+      return value:sub(1, #rule) == rule
+    end
+    return value:sub(1, #rule + 1) == rule .. "/"
+  end
+  -- host (default): exact handled above, else a dot-boundary subdomain suffix.
+  return value:sub(-(#rule + 1)) == "." .. rule
+end
+
 return _M
