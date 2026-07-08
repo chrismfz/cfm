@@ -6,6 +6,50 @@ import (
 	"testing"
 )
 
+// TestCompiledValueMatcher_BoundarySemantics locks the host/path boundary
+// matching that replaced a plain strings.Contains (which silently disabled the
+// WAF/challenge on unintended vhosts/paths). It MUST stay in lock-step with the
+// Lua matcher (configs/lua/cfm_waf_excl.lua matches_rule; the mirror cases live
+// in scripts/tests/cfm_waf_excl_test.lua) — the in-path (Lua) and log-driven
+// (Go) engines must agree on which requests an exclude covers.
+func TestCompiledValueMatcher_BoundarySemantics(t *testing.T) {
+	cases := []struct {
+		kind, rule, value string
+		want              bool
+	}{
+		// host: exact or dot-boundary subdomain suffix
+		{"host", "shop.gr", "shop.gr", true},
+		{"host", "shop.gr", "www.shop.gr", true},
+		{"host", "shop.gr", "cpanel.shop.gr", true},
+		{"host", "shop.gr", "a.b.shop.gr", true},
+		{"host", "shop.gr", "myshop.gr", false},        // the substring bug
+		{"host", "shop.gr", "shop.gr.evil.com", false}, // suffix-embedded
+		{"host", "shop.gr", "evil-shop.gr", false},     // prefix-glued label
+		{"host", "www.shop.gr", "shop.gr", false},      // parent ≠ child rule
+		// path: exact or path-segment prefix
+		{"path", "/admin", "/admin", true},
+		{"path", "/admin", "/admin/users", true},
+		{"path", "/admin", "/admin/", true},
+		{"path", "/admin", "/administrator", false}, // the substring bug
+		{"path", "/admin", "/admin-panel", false},
+		{"path", "/api", "/therapy", false}, // mid-string substring
+		{"path", "/.well-known/", "/.well-known/acme/x", true},
+		{"path", "/.well-known/", "/.well-known", false}, // trailing-slash rule needs the slash
+		// glob: anchored wildcard matching, unchanged
+		{"host", "*.shop.gr", "www.shop.gr", true},
+		{"host", "*.shop.gr", "shop.gr", false},
+		{"host", "*shop.gr", "myshop.gr", true}, // explicit operator glob
+		{"path", "/wp-admin/*", "/wp-admin/setup", true},
+		{"path", "/wp-admin/*", "/wp-adminx", false},
+	}
+	for _, c := range cases {
+		got := compileValueMatcher(c.kind, c.rule).Match(c.value)
+		if got != c.want {
+			t.Errorf("Match(kind=%s rule=%q value=%q) = %v, want %v", c.kind, c.rule, c.value, got, c.want)
+		}
+	}
+}
+
 func TestExcludeStore_ScopedHostMatch(t *testing.T) {
 	s := newExcludeStore(filepath.Join(t.TempDir(), "excludes.json"))
 	scope := map[string]struct{}{"app.example.com": {}}
