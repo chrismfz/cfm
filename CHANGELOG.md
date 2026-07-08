@@ -30,6 +30,18 @@ back-filled here — see the git/PR history for that period.
   it's greppable without being noisy.
 
 ### Fixed
+- **Edge → bridge RPC (`cfm.lua`):** removed a ~300 ms stall on every edge→daemon
+  call that returns an empty body (`Content-Length: 0`) — the WAF autoblock
+  **push**, the block/clear calls, and the **observe** RPC. `http_unix` read the
+  response body with a fall-through `receive("*a")`, which on the keep-alive
+  bridge socket blocks until the read timeout (`CFM_DECISION_TIMEOUT_MS`, default
+  300 ms) because the daemon never closes the connection; an explicit
+  `Content-Length: 0` is now short-circuited to an empty body. Under a
+  WAF-tripping flood each distinct `(ip, reason)` push tied up an nginx worker
+  light-thread for ~300 ms of blocked time — the source of the intermittent "lua
+  tcp socket read timed out" seen under only modest load. No behaviour change for
+  non-empty responses (decision JSON, chunked). Found by the 2026-07 edge Lua
+  audit (F04).
 - **Web detector:** machine-to-machine API endpoints are no longer caught by a
   *vhost-wide* challenge. When a vhost trips the auto-suspicious-vhost score
   (`CHALLENGE_SUSPICIOUS_VHOST_SCORE` / `CHALLENGE_VHOST`), **every** request to

@@ -39,14 +39,14 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**0 / 55 fixed.** Grouped by severity; each links to its detail section.
+**1 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
 - [ ] **[F01](#f01)** · `configs/openresty.conf:880` · _security_ (axis c) — lua-stats endpoint is scope-blind: scoped cPanel viewer tokens receive fleet-wide WAF config and excludes
 - [ ] **[F02](#f02)** · `internal/webdetector/waf_hit_rates_api_handler.go:63` · _security_ (axis c) — WAF hit-rates API leaks cross-tenant / fleet-wide data to scoped cPanel users
 - [ ] **[F03](#f03)** · `configs/lua/cfm_panel_tunnel.lua:243` · _security_ (axis c) — Account-transfer tunnel forwards client-supplied X-Forwarded-For/X-Real-IP/CF-Connecting-IP verbatim to cpsrvd (source-IP spoofing)
-- [ ] **[F04](#f04)** · `configs/lua/cfm.lua:692` · _perf_ (axis b) — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
+- [x] **[F04](#f04)** · `configs/lua/cfm.lua:692` · _perf_ (axis b) — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
 - [ ] **[F05](#f05)** · `configs/lua/cfm_waf_detectors.lua:1262` · _waf-bypass_ (axis a/c) — Backtick command-substitution detector is dead code: Lua patterns have no `|` alternation, so most backtick RCE payloads bypass PAY_BACKTICK (rule 317)
 - [ ] **[F06](#f06)** · `configs/openresty.conf:674` · _waf-bypass_ (axis a/c) — Static-asset location bypasses cfm.lua (WAF/challenge) for any path ending in an asset extension, enabling PHP path-info WAF bypass
 - [ ] **[F09](#f09)** · `configs/lua/cfm_waf.lua:633` · _waf-bypass_ (axis a/c) — args consumes the shared body scan budget in get_norm_ab, so a padded query string truncates the POST body out of all body-aware WAF rules
@@ -168,7 +168,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f04"></a>
 ### F04 — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `Content-Length: 0` fast-path in `http_unix`
 - **Severity:** high · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm.lua:692`
 
@@ -178,7 +178,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Short-circuit known-zero bodies: `if method=='HEAD' or code==204 or code==304 or content_length==0 then resp=''`; never fall to a blocking '*a' read on a keep-alive connection.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `cfm.lua` `http_unix` now returns `""` immediately on an explicit `Content-Length: 0` (added `elseif content_length == 0 then resp = ""` before the fall-through `receive("*a")`), so the bridge push/clear/observe replies no longer stall the worker for `decision_timeout_ms`. Lua gates pass (`make lua`, `make test-lua`). CHANGELOG `[Unreleased] → Fixed`. Branch `claude/lua-openresty-audit-cdmcc4`.
 
 ---
 
