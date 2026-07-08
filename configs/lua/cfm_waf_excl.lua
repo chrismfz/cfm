@@ -71,12 +71,30 @@ local function lower(s)
   return string.lower(s)
 end
 
--- Convert an operator glob (`*` = any run, `?` = one char) to an ANCHORED Lua
--- pattern, escaping every magic char first.
+-- Convert an operator glob to an ANCHORED Lua pattern, escaping every magic
+-- char first, then re-expanding the two wildcards to their Go equivalents:
+--   `*` -> `[^/]*`  (a run of non-'/' chars)
+--   `?` -> `[^/]`   (exactly one non-'/' char)
+-- The wildcards MUST NOT cross a path-segment separator, to match the Go
+-- enforcement matcher globToRegex (internal/webdetector/exclude_store.go),
+-- which uses `[^/]*`/`[^/]`. The old `*`->`.*` / `?`->`.` crossed `/`, so an
+-- exclude like `/wp-admin/*` switched the WAF off for `/wp-admin/a/b/c` in-path
+-- while the Go log-driven matcher did not — a silent, one-sided widening of the
+-- WAF-off region. (For hosts there is no `/`, so this is a no-op there.)
+--
+-- NOTE (audit F10 residual, tracked as F10b): `[...]` bracket-class globs are
+-- NOT yet ported. Go treats a rule containing `[`/`]` as a character class;
+-- this matcher does not glob-detect brackets, so such a rule is matched
+-- LITERALLY (exact / path-segment-prefix / host-suffix). For the intended class
+-- meaning Lua is narrower (more protective in-path). The one case where Lua is
+-- WIDER than Go: a request whose value literally contains the bracket text
+-- (rule `/foo[abc]`, request `/foo[abc]`) matches here but not Go's anchored
+-- class regex — contrived (needs literal, usually percent-encoded, brackets in
+-- both the rule and the live URL). A full port closes both directions.
 local function glob_to_lua_pattern(glob)
   local p = tostring(glob or "")
   p = p:gsub("([%^%$%(%)%%%.%[%]%+%-%*%?])", "%%%1")
-  p = p:gsub("%%%*", ".*"); p = p:gsub("%%%?", ".")
+  p = p:gsub("%%%*", "[^/]*"); p = p:gsub("%%%?", "[^/]")
   return "^" .. p .. "$"
 end
 _M.glob_to_lua_pattern = glob_to_lua_pattern

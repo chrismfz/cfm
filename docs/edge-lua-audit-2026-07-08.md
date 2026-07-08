@@ -39,15 +39,15 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**0 / 55 fixed.** Grouped by severity; each links to its detail section.
+**6 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
-- [ ] **[F01](#f01)** · `configs/openresty.conf:880` · _security_ (axis c) — lua-stats endpoint is scope-blind: scoped cPanel viewer tokens receive fleet-wide WAF config and excludes
-- [ ] **[F02](#f02)** · `internal/webdetector/waf_hit_rates_api_handler.go:63` · _security_ (axis c) — WAF hit-rates API leaks cross-tenant / fleet-wide data to scoped cPanel users
+- [x] **[F01](#f01)** · `configs/openresty.conf:880` · _security_ (axis c) — lua-stats endpoint is scope-blind: scoped cPanel viewer tokens receive fleet-wide WAF config and excludes
+- [x] **[F02](#f02)** · `internal/webdetector/waf_hit_rates_api_handler.go:63` · _security_ (axis c) — WAF hit-rates API leaks cross-tenant / fleet-wide data to scoped cPanel users
 - [ ] **[F03](#f03)** · `configs/lua/cfm_panel_tunnel.lua:243` · _security_ (axis c) — Account-transfer tunnel forwards client-supplied X-Forwarded-For/X-Real-IP/CF-Connecting-IP verbatim to cpsrvd (source-IP spoofing)
-- [ ] **[F04](#f04)** · `configs/lua/cfm.lua:692` · _perf_ (axis b) — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
-- [ ] **[F05](#f05)** · `configs/lua/cfm_waf_detectors.lua:1262` · _waf-bypass_ (axis a/c) — Backtick command-substitution detector is dead code: Lua patterns have no `|` alternation, so most backtick RCE payloads bypass PAY_BACKTICK (rule 317)
+- [x] **[F04](#f04)** · `configs/lua/cfm.lua:692` · _perf_ (axis b) — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
+- [x] **[F05](#f05)** · `configs/lua/cfm_waf_detectors.lua:1262` · _waf-bypass_ (axis a/c) — Backtick command-substitution detector is dead code: Lua patterns have no `|` alternation, so most backtick RCE payloads bypass PAY_BACKTICK (rule 317)
 - [ ] **[F06](#f06)** · `configs/openresty.conf:674` · _waf-bypass_ (axis a/c) — Static-asset location bypasses cfm.lua (WAF/challenge) for any path ending in an asset extension, enabling PHP path-info WAF bypass
 - [ ] **[F09](#f09)** · `configs/lua/cfm_waf.lua:633` · _waf-bypass_ (axis a/c) — args consumes the shared body scan budget in get_norm_ab, so a padded query string truncates the POST body out of all body-aware WAF rules
 
@@ -55,9 +55,9 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 - [ ] **[F07](#f07)** · `configs/lua/cfm.lua:488` · _waf-bypass_ (axis a/c) — WAF body inspection gated by a URI allowlist: POST bodies to any non-listed path (/, /search, /checkout, clean-URL routes) are never read
 - [ ] **[F08](#f08)** · `configs/lua/cfm.lua:550` · _waf-bypass_ (axis a/c) — WAF body reader hard-caps at 8192 bytes, defeating larger per-type scan budgets and letting payloads past byte 8192 escape all body rules
-- [ ] **[F10](#f10)** · `configs/lua/cfm_waf_excl.lua:79` · _regression_ (axis b) — Exclude glob compiler diverges from Go: Lua `*`->`.*`/`?`->`.` cross `/` (Go uses `[^/]*`), and Lua ignores `[]` globs Go honours — silently widening the in-path WAF-off region
+- [x] **[F10](#f10)** · `configs/lua/cfm_waf_excl.lua:79` · _regression_ (axis b) — Exclude glob compiler diverges from Go: Lua `*`->`.*`/`?`->`.` cross `/` (Go uses `[^/]*`), and Lua ignores `[]` globs Go honours — silently widening the in-path WAF-off region _(security half fixed; `[]` parity tracked below)_
 - [ ] **[F11](#f11)** · `configs/lua/cfm_waf.lua:1597` · _waf-bypass_ (axis a/c) — /wp-admin/ carve-out disables encoded/base64 <?php backdoor rules 437/438 on pre-auth admin-ajax.php
-- [ ] **[F12](#f12)** · `configs/lua/cfm_waf_detectors.lua:1904` · _waf-bypass_ (axis a/c) — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
+- [x] **[F12](#f12)** · `configs/lua/cfm_waf_detectors.lua:1904` · _waf-bypass_ (axis a/c) — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
 - [ ] **[F13](#f13)** · `configs/lua/cfm_waf_detectors.lua:449` · _correctness_ (axis c) — Base64 PHP-object-injection check uses malformed `%bo%:` pattern that never matches serialized objects (B64_OBJ_INJECT dead, rule 304)
 - [ ] **[F14](#f14)** · `configs/lua/cfm_waf_detectors.lua:1062` · _fp_ (axis a) — value_looks_shelly word list contains common tokens (host, id, ping, more, less, head, tail, env, cat, ls, w) that FP-challenge legit system=/command= dispatcher values
 - [ ] **[F15](#f15)** · `configs/lua/cfm_waf_detectors.lua:1722` · _fp_ (axis a) — CT_BAD_BOUNDARY false-positives on RFC-legal multipart boundaries (`=`,`+`,`/`) used by JavaMail/SOAP/Python email clients (rule 604)
@@ -117,7 +117,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f01"></a>
 ### F01 — lua-stats endpoint is scope-blind: scoped cPanel viewer tokens receive fleet-wide WAF config and excludes
 
-- **Status:** ☐ open
+- **Status:** ☑ done — admin-only `auth_request` gate (`/api/v1/admin/authcheck`)
 - **Severity:** high · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/openresty.conf:880`
 
@@ -127,14 +127,14 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Gate on admin only (point auth_request at an admin-only endpoint or assert IsAdminRequest before serving).
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Added admin-only auth probe `GET /api/v1/admin/authcheck` (`RequireAdmin`, 403 for scoped) in `token_api.go`; repointed the `__cfm_admin_auth_check` `auth_request` gate from `/api/v1/tokens/me` to it in **both** `openresty.conf` and `angie.conf` (2 server blocks each). Tests `TestAdminAuthCheck_{AdminAllowed,ScopedForbidden}`. Scope inventory updated. Branch `claude/lua-openresty-audit-cdmcc4`.
 
 ---
 
 <a id="f02"></a>
 ### F02 — WAF hit-rates API leaks cross-tenant / fleet-wide data to scoped cPanel users
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `vhostAllowed` host-scope guard in `handleWAFHitRates`
 - **Severity:** high · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `internal/webdetector/waf_hit_rates_api_handler.go:63`
 
@@ -144,7 +144,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Mirror handleWAFEngineSummary: validateScopedVhostQuery(r,'host') and force scoped callers to their vhost set when host is empty, or make endpoint admin-only.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `handleWAFHitRates` now enforces token scope, keyed on **role** (`!IsAdminRequest`, not `scope != nil`) so a vhost-less scoped token can't be misread as admin: a non-admin caller must target a single host inside a **non-empty** allowlist; empty host, empty/nil scope, or out-of-scope host → `403` via `vhostAllowed`. Host is lowercased once so authz and the case-sensitive history read agree. Admin/loopback unchanged. Mirrors `scopedMySQLFilterHandler`/`handleChallengeVhost`. Test `TestHandleWAFHitRates_ScopeEnforced` (in-scope 200, mixed-case 200 + body-data check, out-of-scope 403, empty 403, nil-scope 403, admin fleet-wide 200). Scope inventory updated. Branch `claude/lua-openresty-audit-cdmcc4`. Hardening from the branch code-review (F02 nil-scope fail-open + mixed-case data quirk).
 
 ---
 
@@ -168,7 +168,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f04"></a>
 ### F04 — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `Content-Length: 0` fast-path in `http_unix`
 - **Severity:** high · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm.lua:692`
 
@@ -178,7 +178,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Short-circuit known-zero bodies: `if method=='HEAD' or code==204 or code==304 or content_length==0 then resp=''`; never fall to a blocking '*a' read on a keep-alive connection.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `cfm.lua` `http_unix` now returns `""` immediately on an explicit `Content-Length: 0` (added `elseif content_length == 0 then resp = ""` before the fall-through `receive("*a")`), so the bridge push/clear/observe replies no longer stall the worker for `decision_timeout_ms`. Lua gates pass (`make lua`, `make test-lua`). CHANGELOG `[Unreleased] → Fixed`. Branch `claude/lua-openresty-audit-cdmcc4`.
 
 ---
 
@@ -195,7 +195,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Replace the alternation with a loop over a command table testing inner:match('^%s*'..cmd..'%f[^%a]') per word (style used by CMD_PARAM_SHELL_WORDS).
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `has_backtick_cmd` now captures the leading token (`inner:match("^%s*(%a+)")`) and tests membership in a module-scope `BACKTICK_CMDS` set (word must match a command exactly — `` `category` `` ≠ `cat`). Metachar branch unchanged. Tier kept at **challenge** (rule 317, not block — confirmed acceptable). Search-field carve-out (`ignore_backtick_only`) preserved. Test `cfm_waf_backtick_smuggling_test.lua` (7 TP commands + metachar regression + FP negatives incl. word-boundary and search-field suppression). Branch `claude/lua-openresty-audit-cdmcc4`. **Code-review hardening:** the search-field suppression was request-global (a throwaway benign `q=\`x\`` masked a command in another param) — the final check now re-tests with search-field values stripped so a hit elsewhere still fires (test added). **Residual (accepted, monitored):** the newly-live command-word branch can FP-challenge backtick code in a NON-search GET query param — kept at challenge per operator call; watch rule 317 via `/api/v1/waf/hit-rates`. Known non-regressions left out of scope: whitelist evasions (`/bin/sh`, `env`, `sudo`, unlisted binaries) — bare-command allowlist matches the original intent.
 
 ---
 
@@ -282,7 +282,9 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Make Lua mirror Go: translate '*'->'[^/]*', '?'->'[^/]', detect '['/']' in the glob trigger and port class handling; add a multi-segment and bracket cross-engine test case.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed (security half):** `glob_to_lua_pattern` now emits `[^/]*` for `*` and `[^/]` for `?`, so in-path wildcards no longer cross a path segment — matching Go's `globToRegex`. This closes the one-sided WAF-off **widening** (the security-relevant direction: Lua was matching MORE than Go on deep paths). Hosts unaffected (no `/`). Tests added to `cfm_waf_excl_test.lua` (`/wp-admin/*` !~ `/wp-admin/a/b`, `/?/b` !~ `///b`, `/*/b` one-segment). Branch `claude/lua-openresty-audit-cdmcc4`.
+
+**Residual (tracked → F10b in the gaps list):** `[...]` bracket-class globs are still matched **literally** in Lua while Go treats them as a character class. For the intended class meaning this is the *narrower* direction (more protective in-path). One contrived exception is *wider* than Go: a request whose value literally contains the bracket text (rule `/foo[abc]`, request `/foo[abc]`) matches in Lua but not Go's anchored class regex — needs literal (usually percent-encoded) brackets in both rule and URL, so risk is minimal. Porting Go's bracket-class handling to Lua (incl. `[!`/`[^` negation and Lua set-escaping) is deferred — needs its own careful pass + cross-engine tests.
 
 ---
 
@@ -316,7 +318,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Lowercase before precheck and replace the alternation with a verb table walked in a loop.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `smug_check` now lowercases FIRST (fixes the uppercase-`HTTP/` precheck miss), then walks a module-scope `SMUG_VERBS` list testing each at a word boundary (`%f[%a]verb%s+[^%s]+%s+http/%d`). Tier kept at **logonly** (rule 606, observe-only for burn-in). Test `cfm_waf_backtick_smuggling_test.lua` (GET/post/PUT/DELETE incl. uppercase + body + FP negatives; tested at block for a crisp assertion per the rule-319 convention). Known gap left as-is (out of audit scope): a `%20`-encoded separator isn't matched by `%s+` — acceptable at logonly. Branch `claude/lua-openresty-audit-cdmcc4`. **Code-review hardening:** the request-target is now anchored to start with `/` (origin-form), so English prose like `connect to http/2` / `options for http/2` no longer trips the rule (FP negatives added).
 
 ---
 
@@ -1060,6 +1062,8 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 Surfaces the completeness critic flagged as under-covered. Treat the three **high**
 gaps as their own audit tasks.
 
+- [ ] **[low] F10b — port `[...]` bracket-class globs into the Lua exclude matcher** (`cfm_waf_excl.lua` `glob_to_lua_pattern` + the `matches_rule` glob trigger)
+  - Follow-up to F10. The security-critical `*`/`?` cross-`/` widening is fixed; what remains is that Go treats a value containing `[`/`]` as a glob character class (`compileValueMatcher`: `ContainsAny(rule, "*?[]")`) while Lua only glob-detects `*`/`?` and matches `[`/`]` literally. Mostly Lua-**narrower** (more protective in-path), except one contrived *wider* case — a request literally containing the bracket text (rule `/foo[abc]`, request `/foo[abc]`) matches in Lua but not Go (needs literal, usually percent-encoded, brackets in both rule and URL). Port Go's `globToRegex` bracket handling (incl. `[!`/`[^`→`[^…]` negation, `]`-as-first-char literal, Lua set-escaping of `%`/`]`) and add cross-engine tests. Low priority (bracket-class excludes are rare).
 - [ ] **[high]** configs/angie.conf (whole file, 62KB, edited 2026-07-08) — no dedicated finder
   - Every edge-config finding cites openresty.conf; angie.conf was never audited as a first-class proxy. A quick diff already shows real drift (renamed error locations @cfm_admin_upstream_error vs _https, a different ssl_certificate_by_lua require-recovery comment, real_ip block layout). Any fix landed in openresty.conf (static-asset WAF bypass location, __ssl_debug loopback gate, server_tokens, $cf_xfp XFP forwarding) may be absent or differently-shaped in angie.conf, and vice-versa. Angie is a supported production edge, so a one-sided fix leaves half the fleet exposed. Needs a line-by-line openresty↔angie parity diff of location blocks, access/header/ssl_certificate_by_lua wiring, real_ip, and the static-asset location.
 - [ ] **[high]** Verified-bot geo bypass: cfm.lua:1168 `if ngx.var.cfm_bypass_ip == "1" then return` + trusted_proxies.conf + real_ip_header CF-Connecting-IP/real_ip_recursive

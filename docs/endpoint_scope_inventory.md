@@ -21,6 +21,7 @@ This inventory documents the effective authz classification enforced by the back
 - `/api/v1/challenge/exclude/*`, `/api/v1/waf/exclude/*` (`validateScopedExcludeWrite`: scoped tokens limited to `type=host` within their vhost allowlist; list reads are scope-filtered)
 - `/api/v1/waf/engine/summary` (`vhostAllowed` filter — scoped callers see only their own vhosts' WAF-engine stats; verified by `authz_integration_test.go`)
 - `/api/v1/http3/enable|disable` (`validateScopedHTTP3Write` host-scope check)
+- `/api/v1/waf/hit-rates` (`vhostAllowed` host-scope guard in `handleWAFHitRates`: a scoped caller must target one in-scope host — an empty host, which aggregates every tenant, and any out-of-scope host are `403`; admin/loopback may pass any host or none. Audit F02.)
 
 ### Admin-only
 
@@ -44,4 +45,20 @@ This inventory documents the effective authz classification enforced by the back
 - `/api/v1/auth/token` (issue token), `/api/v1/tokens/list`, `/api/v1/tokens/revoke`.
 - `/api/v1/firewall/block` via `adminOnlyHandler` (global IP block; the customer-facing unblock flow is separate and intentionally not admin-gated).
 - `/api/v1/firewall/block/batch` via `adminOnlyHandler` (bulk global IP block, ≤256 IPs/request; skips the server's own IPs and the calling admin's IP with per-IP `skipped` reasons).
+- `/api/v1/admin/authcheck` (admin-only auth probe for the edge `auth_request`; `RequireAdmin` → 200 for admin, 403 for scoped/anonymous; returns no data).
+
+## Edge-served admin endpoints (OpenResty / Angie)
+
+Rendered entirely inside the edge proxy (Go cannot read nginx shdicts), so their
+admin gate is delegated to Go via `auth_request` → `/api/v1/admin/authcheck`
+(`RequireAdmin`). Present in **both** `configs/openresty.conf` and
+`configs/angie.conf` (two server blocks each).
+
+### Admin-only
+
+- `/cfm-admin/lua-stats` (fleet-wide decision-cache / sslcache / WAF-exclude /
+  WAF-rule-mode stats). The `auth_request` gate previously pointed at
+  `/api/v1/tokens/me`, which is scoped-OR-admin, so a scoped cPanel viewer passed
+  it and received the whole fleet's WAF excludes + rule tiers — a scoped-vs-admin
+  boundary break. Repointed to the admin-only `/api/v1/admin/authcheck`. Audit F01.
 

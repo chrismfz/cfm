@@ -107,3 +107,29 @@ func TestTokensMe_MethodNotAllowedStillSendsUncachedHeaders(t *testing.T) {
 	}
 	assertIdentityNoCacheHeaders(t, rr.Header())
 }
+
+// TestAdminAuthCheck_AdminAllowed / _ScopedForbidden cover the audit-F01 gate:
+// /api/v1/admin/authcheck is the admin-only auth probe the edge proxy's
+// auth_request delegates the lua-stats gate to. An admin passes (200); a scoped
+// cPanel viewer token is refused (403) — the whole point being that pointing
+// auth_request here (instead of the scoped-OR-admin /tokens/me) stops a scoped
+// tenant from reaching the fleet-wide lua-stats blob.
+func TestAdminAuthCheck_AdminAllowed(t *testing.T) {
+	withSessionAllowedStub(t, true)
+	_, h := newScopeTestServer(t)
+
+	rr := doAuthReq(h, http.MethodGet, "/api/v1/admin/authcheck", "", nil, false)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected admin 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAdminAuthCheck_ScopedForbidden(t *testing.T) {
+	store, h := newScopeTestServer(t)
+	scoped := store.Issue([]string{"mysite.com"}, nil, nil, "viewer", "scoped", time.Hour)
+
+	rr := doAuthReq(h, http.MethodGet, "/api/v1/admin/authcheck", scoped.Token, nil, false)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected scoped 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}

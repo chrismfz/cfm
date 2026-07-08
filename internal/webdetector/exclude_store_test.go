@@ -41,6 +41,16 @@ func TestCompiledValueMatcher_BoundarySemantics(t *testing.T) {
 		{"host", "*shop.gr", "myshop.gr", true}, // explicit operator glob
 		{"path", "/wp-admin/*", "/wp-admin/setup", true},
 		{"path", "/wp-admin/*", "/wp-adminx", false},
+		// glob wildcards are SEGMENT-scoped ([^/]* / [^/], not .* / .) — they
+		// do NOT cross a '/'. These MUST stay in lock-step with the in-path Lua
+		// matcher (scripts/tests/cfm_waf_excl_test.lua): a regression to '.*'
+		// here would silently re-open the one-sided WAF-off widening (audit F10).
+		{"path", "/wp-admin/*", "/wp-admin/a/b", false}, // '*' stops at one segment
+		{"path", "/assets/*", "/assets/app.js", true},
+		{"path", "/?/b", "/a/b", true},
+		{"path", "/?/b", "///b", false}, // '?' is [^/], not '.'
+		{"path", "/*/b", "/a/b", true},
+		{"path", "/*/b", "/a/b/c", false}, // leading /*/ is exactly one segment
 	}
 	for _, c := range cases {
 		got := compileValueMatcher(c.kind, c.rule).Match(c.value)

@@ -3,6 +3,7 @@ package webdetector
 import (
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // RuleHitRate is one row of /api/v1/waf/hit-rates response — per-rule hit
@@ -60,6 +61,11 @@ func hitRatePromotionHint(ratePct float64, hits, inspected int) string {
 // WAFInspected denominator. Returns one row per registered rule even when
 // hits=0, so operators can see "this rule is silent" alongside "this rule
 // is noisy".
+//
+// Scoped-allowed with a vhost-scope guard: admin/loopback callers may pass any
+// host (or none for the fleet-wide aggregate); a scoped token must target a
+// single host within its allowlist, and an empty or out-of-scope host is 403
+// (see the scope block below — audit F02).
 func (e *Engine) handleWAFHitRates(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
@@ -75,7 +81,27 @@ func (e *Engine) handleWAFHitRates(w http.ResponseWriter, r *http.Request) {
 			hours = n
 		}
 	}
-	host := r.URL.Query().Get("host")
+	// Normalize once. Hosts are stored canonical-lowercase in history and the
+	// scope allowlist keys are lowercased at token issue, so lowercasing here
+	// keeps the scope check, the history reads, and the echoed Host in agreement
+	// (a mixed-case ?host=Foo.COM must not authorize and then read empty).
+	host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
+
+	// Scope enforcement (audit F02), keyed on ROLE — not on `scope != nil`.
+	// Admin/loopback may read any host, or the fleet-wide aggregate when host is
+	// empty. Any non-admin (scoped) caller MUST target a single host inside a
+	// NON-EMPTY vhost allowlist: an empty host (which would aggregate every
+	// tenant), an empty/nil scope (e.g. a db-only scoped token whose Vhosts map
+	// is nil), and any out-of-scope host are all refused. Keying on
+	// IsAdminRequest (like scopedMySQLFilterHandler) means a vhost-less scoped
+	// token can never be misclassified as admin through a nil scope map.
+	if !IsAdminRequest(r) {
+		scope := vhostScopeFromContext(r.Context())
+		if host == "" || len(scope) == 0 || !vhostAllowed(host, scope) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": errForbidden})
+			return
+		}
+	}
 
 	inspected := 0
 	if e != nil && e.history != nil {

