@@ -161,6 +161,71 @@ func TestParseConf_EventsSection_Default(t *testing.T) {
 	}
 }
 
+func TestParseConf_EventsSection_EnrichKnobs(t *testing.T) {
+	body := `[events]
+enrich = false
+enrich_hash = false
+enrich_peers = false
+enrich_capture = false
+capture_dir = /srv/quarantine
+`
+	c, err := ParseConf(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if c.EventSink.Enrich || c.EventSink.EnrichHash || c.EventSink.EnrichPeers || c.EventSink.EnrichCapture {
+		t.Errorf("enrich knobs should all be false, got %+v", c.EventSink)
+	}
+	if c.EventSink.CaptureDir != "/srv/quarantine" {
+		t.Errorf("capture_dir = %q, want /srv/quarantine", c.EventSink.CaptureDir)
+	}
+}
+
+func TestParseConf_EventsSection_EnrichDefaultsOn(t *testing.T) {
+	// A conf with no enrich lines (e.g. one that pre-dates the feature)
+	// must inherit the ON defaults so operators get enrichment after a
+	// binary upgrade without editing the file.
+	c, err := ParseConf(strings.NewReader("enabled = true\n[events]\ndetect_rate_per_min = 30\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !c.EventSink.Enrich || !c.EventSink.EnrichHash || !c.EventSink.EnrichPeers || !c.EventSink.EnrichCapture {
+		t.Errorf("enrich knobs should default ON, got %+v", c.EventSink)
+	}
+	if c.EventSink.CaptureDir != DefaultCaptureDir {
+		t.Errorf("capture_dir default = %q, want %q", c.EventSink.CaptureDir, DefaultCaptureDir)
+	}
+}
+
+func TestParseConf_EventsSection_RejectsRelativeCaptureDir(t *testing.T) {
+	_, err := ParseConf(strings.NewReader("[events]\ncapture_dir = relative/path\n"))
+	if err == nil {
+		t.Fatal("expected parse error for relative capture_dir")
+	}
+}
+
+func TestFormatConf_EnrichRoundTrip(t *testing.T) {
+	original := DefaultConf()
+	original.EventSink.Enrich = true
+	original.EventSink.EnrichHash = false
+	original.EventSink.EnrichPeers = true
+	original.EventSink.EnrichCapture = false
+	original.EventSink.CaptureDir = "/srv/q"
+
+	rendered := FormatConf(original)
+	parsed, err := ParseConf(strings.NewReader(rendered))
+	if err != nil {
+		t.Fatalf("ParseConf(FormatConf): %v\n--- rendered ---\n%s", err, rendered)
+	}
+	got := parsed.EventSink
+	if got.Enrich != true || got.EnrichHash != false || got.EnrichPeers != true || got.EnrichCapture != false {
+		t.Errorf("round-trip enrich flags = %+v", got)
+	}
+	if got.CaptureDir != "/srv/q" {
+		t.Errorf("round-trip capture_dir = %q, want /srv/q", got.CaptureDir)
+	}
+}
+
 func TestParseConf_EventsSection_RejectsNegative(t *testing.T) {
 	body := `[events]
 detect_rate_per_min = -1
@@ -206,4 +271,3 @@ func TestFormatConf_EventsRoundTrip(t *testing.T) {
 		t.Errorf("after round-trip: %d, want %d\n--- rendered ---\n%s", got, want, rendered)
 	}
 }
-

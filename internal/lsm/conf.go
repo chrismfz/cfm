@@ -1046,11 +1046,11 @@ func ParseConf(r io.Reader) (*Conf, error) {
 	scanner.Buffer(make([]byte, 0, 4*1024), 1<<20)
 
 	var (
-		current       sectionKind // which section we are inside
-		currentPolicy PolicyID    // valid when current == sectionPolicy
-		lineno        int
-		seenPolicies  = map[PolicyID]int{}
-		seenTopLevel  = map[string]int{}
+		current        sectionKind // which section we are inside
+		currentPolicy  PolicyID    // valid when current == sectionPolicy
+		lineno         int
+		seenPolicies   = map[PolicyID]int{}
+		seenTopLevel   = map[string]int{}
 		seenKmsgKeys   = map[string]int{}
 		seenEventsKeys = map[string]int{}
 		kmsgSeen       int
@@ -1278,8 +1278,38 @@ func ParseConf(r io.Reader) (*Conf, error) {
 					return nil, fmt.Errorf("line %d: detect_rate_per_min must be a non-negative integer (got %q)", lineno, val)
 				}
 				c.EventSink.DetectRatePerMin = n
+			case "enrich":
+				b, err := parseBool(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: enrich must be true|false|1|0|on|off (got %q)", lineno, val)
+				}
+				c.EventSink.Enrich = b
+			case "enrich_hash":
+				b, err := parseBool(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: enrich_hash must be true|false|1|0|on|off (got %q)", lineno, val)
+				}
+				c.EventSink.EnrichHash = b
+			case "enrich_peers":
+				b, err := parseBool(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: enrich_peers must be true|false|1|0|on|off (got %q)", lineno, val)
+				}
+				c.EventSink.EnrichPeers = b
+			case "enrich_capture":
+				b, err := parseBool(val)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: enrich_capture must be true|false|1|0|on|off (got %q)", lineno, val)
+				}
+				c.EventSink.EnrichCapture = b
+			case "capture_dir":
+				dir := strings.TrimSpace(val)
+				if dir != "" && !filepath.IsAbs(dir) {
+					return nil, fmt.Errorf("line %d: capture_dir must be an absolute path (got %q)", lineno, val)
+				}
+				c.EventSink.CaptureDir = dir
 			default:
-				return nil, fmt.Errorf("line %d: unknown [events] key %q (detect_rate_per_min)", lineno, key)
+				return nil, fmt.Errorf("line %d: unknown [events] key %q (detect_rate_per_min | enrich | enrich_hash | enrich_peers | enrich_capture | capture_dir)", lineno, key)
 			}
 		}
 	}
@@ -1481,6 +1511,31 @@ func FormatConf(c *Conf) string {
 	b.WriteString("# the operator sees the burst happened without being buried in detail.\n")
 	b.WriteString("[events]\n")
 	fmt.Fprintf(&b, "detect_rate_per_min = %d   # cap cfm.log + notify emissions per policy per minute; 0 disables cap\n", c.EventSink.DetectRatePerMin)
+	b.WriteString("\n")
+	b.WriteString("# Forensic enrichment. When a detection fires the daemon snapshots\n")
+	b.WriteString("# the caller's /proc (user, real exe path + deleted flag, cwd,\n")
+	b.WriteString("# cmdline, parent pid/exe, loginuid) and folds it into the cfm.log\n")
+	b.WriteString("# line and the notify email — the BPF event alone carries only the\n")
+	b.WriteString("# spoofable comm. Best-effort against a short-lived caller: parent\n")
+	b.WriteString("# context resolves only while the caller is still alive at drain (the\n")
+	b.WriteString("# common case); a fully-exited caller shows `proc=gone`.\n")
+	fmt.Fprintf(&b, "enrich              = %t   # snapshot /proc for the caller into log + email\n", c.EventSink.Enrich)
+	fmt.Fprintf(&b, "enrich_hash         = %t   # include exe SHA-256 (IDs the binary, incl. deleted; VirusTotal-ready)\n", c.EventSink.EnrichHash)
+	b.WriteString("# enrich_peers: list every process sharing the caller's real uid\n")
+	b.WriteString("# (pid/comm/real-exe) — the whole swarm, whose pids are gone by the\n")
+	b.WriteString("# time a 3am alert is read. enrich_capture: copy the offending binary\n")
+	b.WriteString("# out of /proc/<pid>/exe (readable even after it is unlinked) into\n")
+	b.WriteString("# capture_dir, but only for suspicious images (deleted, or on an\n")
+	b.WriteString("# ephemeral fs: /tmp,/var/tmp,/dev/shm,/run/user); NOT /home, to avoid\n")
+	b.WriteString("# copying benign per-user binaries on shared hosting. Saved\n")
+	b.WriteString("# <sha256>.bin, root-only, never executed, deduplicated, and bounded.\n")
+	fmt.Fprintf(&b, "enrich_peers        = %t   # append the uid swarm roster to log + email\n", c.EventSink.EnrichPeers)
+	fmt.Fprintf(&b, "enrich_capture      = %t   # preserve suspicious caller/peer binaries before they self-delete\n", c.EventSink.EnrichCapture)
+	captureDir := c.EventSink.CaptureDir
+	if captureDir == "" {
+		captureDir = DefaultCaptureDir
+	}
+	fmt.Fprintf(&b, "capture_dir         = %s   # where preserved binaries land (<sha256>.bin)\n", captureDir)
 	return b.String()
 }
 

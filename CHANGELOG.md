@@ -74,6 +74,39 @@ back-filled here — see the git/PR history for that period.
   `scripts/tests/cfm_waf_excl_test.lua`. Found by the 2026-07 edge Lua audit (F10).
 
 ### Added
+- **cfm-lsm event enrichment — actionable alerts + a self-preserving forensic
+  trail.** Every LSM detection now carries a best-effort `/proc` snapshot of the
+  offending process, gathered in the drain path within milliseconds of the event
+  (before a short-lived caller exits), folded into the `cfm.log` line and the
+  notify email: `user` (uid→name), the **real** `exe` path (+ `(deleted)` flag —
+  `comm` is spoofable, the exe inode is not), **SHA-256** of the exe (VirusTotal-
+  ready, works on unlinked binaries), `cwd`, `cmdline`, `ppid`+parent `comm`/`exe`,
+  and `loginuid`. Two further layers: **`enrich_peers`** appends the *uid swarm
+  roster* — every process sharing the caller's real uid with its pid/comm/real-exe,
+  so a compromised account's whole set of spoofed-comm processes (all typically
+  pointing at one dropped binary) is captured while those pids still exist; and
+  **`enrich_capture`** copies suspicious binaries (already-deleted, or under
+  `/tmp`,`/var/tmp`,`/dev/shm`,`/run`,`/home`) out of `/proc/<pid>/exe` into
+  `capture_dir` (default `/var/lib/cfm/lsm/capture`, `<sha256>.bin`, root-only,
+  never executed, deduplicated, bounded) so a self-deleting dropper is preserved
+  for analysis. All four knobs live under `[events]` in `lsm.conf` and **default
+  ON** (a pre-existing conf inherits them on upgrade — no edit needed). Snapshots
+  are cached per caller pid and rosters per uid, so a burst does the `/proc` work
+  (incl. hashing and the full scan) once.
+- **cfm-lsm alert-flood fix (fold into the above).** For the ptrace sweep policy
+  `CFML-OBS-004` — which fires once per (caller, target) pair as a `pgrep`-style
+  tool walks `/proc` — the notify email *reason* is now caller-identity-stable
+  (uid + comm + exe, no pid, no per-target `ptrace`/`sameuid` tag), so the existing
+  notify deduper collapses a whole sweep into a **single email** instead of one
+  per target (previously the target + pid were in the dedup key, so a sweep
+  produced up to the per-policy cap in emails). The collapse is scoped to that
+  sweep policy: discrete-action policies (`FS-005`, `CRED-002`, `EXEC-*`) keep one
+  email per target and keep the target/pid in the notify JSONL audit. The
+  per-target detail, swarm roster, and captured-binary references ride in the
+  email's **Sample lines** and the `Extra` map; `cfm.log` keeps the full
+  per-event line. Enrichment is also gated behind the per-policy rate cap (a
+  rate-dropped event does no `/proc` work) and all emitted fields are sanitised
+  against log/email injection.
 - **Web detector observability:** per-IP / subnet challenge **issuance** is now
   logged to `cfm.challenges.log` as `[challenge_issued] ip=… host=… rule=… ttl=…`
   (gated by `ChallengeLog`, like every other `[challenge]*` line). Previously an

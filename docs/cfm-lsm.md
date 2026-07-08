@@ -917,6 +917,76 @@ and related sysctls), then enable `CFML-BPF-001` only where
 advanced-threat telemetry is desired.
 
 
+## Event enrichment — making an alert actionable
+
+The BPF ring-buffer event (`internal/lsm/events.go`) is deliberately
+tiny: pid/tgid/uid/gid, the 16-byte `comm`, and a 64-byte policy-specific
+`filename`. That is enough to know THAT something fired, but `comm` is
+spoofable (`prctl(PR_SET_NAME)` / `argv[0]`), so on its own an event
+cannot answer *who / what / where*. Worse, the offending process is
+frequently short-lived (an OBS-004 sweep's `pgrep`, an EXEC-006 dropper)
+and gone by the time an operator reads a 3am email.
+
+The daemon closes that gap in the drain goroutine (`emitNotify` →
+`gatherEnrichment` in `internal/lsm/procsnap.go`), reading the caller's
+`/proc` within milliseconds of the event — far faster than a human, but
+still a best-effort race against process exit. Three layers, all
+best-effort, bounded, and controlled from `[events]` in `lsm.conf`
+(every knob defaults ON; an operator's pre-existing conf inherits the
+defaults on upgrade without editing, because `ParseConf` seeds
+`DefaultEventSinkConf()` and only overrides keys the file actually
+lists):
+
+| Knob | Default | What it adds |
+|---|---|---|
+| `enrich` | on | Caller `/proc` snapshot: `user` (uid→name), real `exe` (+ `(deleted)` flag), `cwd`, `cmdline`, `ppid`+parent `comm`/`exe`, `loginuid`. |
+| `enrich_hash` | on | SHA-256 of the caller's exe bytes (read through `/proc/<pid>/exe`, so it works even for an unlinked binary). VirusTotal / YARA-ready. |
+| `enrich_peers` | on | The **uid swarm roster**: every process sharing the caller's real uid, with pid/comm/real-exe. A compromised account typically runs many processes under one uid with spoofed comms all pointing at one dropped binary — this captures that roster while the pids still exist. Skipped for uid 0. |
+| `enrich_capture` | on | Copies the offending binary out of `/proc/<pid>/exe` into `capture_dir` (default `/var/lib/cfm/lsm/capture`) **before it can self-delete**. Only for suspicious images — already unlinked, or on an ephemeral fs (`/tmp`,`/var/tmp`,`/dev/shm`,`/run/user`); `/home` is deliberately excluded (on shared hosting every legitimate per-user binary lives there, and a homedir dropper that unlinks itself is still caught by the deleted flag). Saved `<sha256>.bin`, content-deduplicated, root-only `0600`, never executed, bounded per event and by a directory file cap (surfaced once in `cfm.log`+dmesg when hit). Captures the caller AND suspicious roster peers. |
+
+**Where the fields land.** The full per-event detail (caller snapshot +
+this specific target + swarm summary + captured paths) goes to the
+`cfm.log` line. For the **sweep-class policy `CFML-OBS-004`** — the one
+that fires once per (caller, target) pair as a `pgrep`-style tool walks
+`/proc` — the notify **email reason is caller-identity-stable** (title +
+uid + `comm` + `exe`/short-sha, but **not** the pid, the target, or the
+per-target `ptrace`/`sameuid` tags), so the notify deduper (keyed on
+`Reason`) collapses a whole sweep into a **single email** instead of
+one-per-target. This is what fixed the "thousands of emails from one
+OBS-004 sweep" report: the flood was structural — the old reason embedded
+the target and pid, so every target was a unique dedup key. Discrete-
+action policies (`FS-005` write, `CRED-002` escalation, `EXEC-*`) keep the
+full per-event reason, so distinct targets stay distinct emails and the
+notify JSONL audit keeps the target/pid — the collapse is scoped, not
+global (`collapsesToCallerIdentity` in `lifecycle.go`). The per-target
+line, the multi-line swarm roster, and captured-binary references ride in
+the email's **Sample lines** and the structured `Extra` map.
+
+**Injection-safe.** Every enriched field (exe path, cwd, comm, parent
+exe, roster peer paths) is attacker-controlled, and a Linux path may
+contain any byte but NUL and `/` — including newlines. The composed log
+and email strings are run through `stripCtl` before emission so a crafted
+path cannot forge a `cfm.log` line or break the email body.
+
+**Cost control.** The rate decision is made **before** any `/proc` work,
+so a rate-dropped event pays no enrichment cost (the cap bounds a flood's
+work, not just its output). Snapshots are cached per caller pid (keyed
+also on process start time, so a recycled pid is never served a stale
+snapshot), rosters per uid, and captures per exe path, so a burst does the
+`/proc` work — including the exe hash and the full `/proc` scan — once.
+Hashing and capture read at most 32 MiB synchronously on the drain
+goroutine; the cap bounds how long the drain can block before the kernel
+ring buffer risks overflow. A fully-exited caller yields `proc=gone`;
+parent context is available only while the caller is still alive at drain
+(carrying `ppid` in the BPF event — a future wire change — would resolve
+the launcher for an already-exited caller).
+
+**Not a security boundary.** Enrichment is forensics. An attacker who
+controls the process can spoof `comm`/`argv`, but cannot fake the `exe`
+symlink's inode target or the SHA-256 of the bytes actually mapped as
+the program — which is exactly why `exe` + `sha256` + the captured image
+are the high-value fields.
+
 ## Out of scope (with rationale)
 
 For each excluded policy ID, one short paragraph on what already covers
