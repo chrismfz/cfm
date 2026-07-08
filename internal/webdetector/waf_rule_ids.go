@@ -46,6 +46,7 @@ var wafRuleIDs = []WAFRule{
 	// 3xx injection
 	{ID: 301, Name: "rule_sqli", ReasonFamily: "WAF_SQLI", DefaultMode: "block"},
 	{ID: 309, Name: "rule_sqli_blind_lexical", ReasonFamily: "WAF_SQLI_LEXICAL", DefaultMode: "challenge"},
+	{ID: 319, Name: "rule_sqli_union_variant", ReasonFamily: "WAF_SQLI_UNION_VARIANT", DefaultMode: "logonly"},
 	{ID: 318, Name: "rule_superglobal_override", ReasonFamily: "WAF_SUPERGLOBAL", DefaultMode: "logonly"},
 	{ID: 302, Name: "rule_xss", ReasonFamily: "WAF_XSS", DefaultMode: "challenge"},
 	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge"},

@@ -148,6 +148,39 @@ clean(post("subject=1-1 OR 947=(SELECT 947 FROM PG_SLEEP(15))"), "DBMS-unique pg
 clean(post("subject=-1 OR 2+77-77-1=0+0+0+1"),               "DBMS-unique boolean tail not on rule 309")
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Tier 3 (rule 319, WAF_SQLI_UNION_VARIANT): obfuscated UNION that rule 301's
+-- ADJACENT `union select` signature misses — keyword (union all/distinct
+-- select), paren (union(select), comment (union/**/select → unionselect).
+-- Ships at `logonly` (burn-in); tested at `block` for crisp assertions.
+-- ─────────────────────────────────────────────────────────────────────────────
+set_only({ rule_sqli_union_variant = "block" })
+
+fires(get("id=1+union+all+select+1,2,3"),                    "union all select", "WAF_SQLI_UNION_VARIANT")
+fires(get("id=-1'+union+all+select+null,version()"),         "union all select (quote)", "WAF_SQLI_UNION_VARIANT")
+fires(get("id=1+union+distinct+select+1"),                   "union distinct select", "WAF_SQLI_UNION_VARIANT")
+fires(get("id=1+union(select+1,2)"),                         "union(select (paren)", "WAF_SQLI_UNION_VARIANT")
+fires(get("id=1)union(select+1"),                            "union(select (paren terminator)", "WAF_SQLI_UNION_VARIANT")
+fires(get("id=1/**/union/**/select+1,2,3"),                  "union/**/select (comment-collapsed)", "WAF_SQLI_UNION_VARIANT")
+fires(get("id=1/**/union/**/all/**/select+1,2,3"),           "union/**/all/**/select → unionallselect", "WAF_SQLI_UNION_VARIANT")
+fires(get("id=1/**/union/**/distinct/**/select+1"),          "union/**/distinct/**/select → uniondistinctselect", "WAF_SQLI_UNION_VARIANT")
+fires(post("subject=null+union+all+select+card_no+from+cards"), "null operand union all select", "WAF_SQLI_UNION_VARIANT")
+
+-- FP: "union" as a noun with the obfuscation words must NOT fire (same
+-- value-terminator guard as rule 301: a WORD before "union" excludes it).
+clean(get("q=credit+union+all+selected+members"),            "FP: 'credit union all selected'")
+clean(get("q=trade+union+distinct+selection"),               "FP: 'trade union distinct selection'")
+clean(get("q=european+union+all+select+committee"),          "FP: 'european union all select committee'")
+clean(get("q=reunion+selected+tracks"),                      "FP: 'reunion selected'")
+
+-- Rule 319 must NOT double-fire on a plain adjacent `union select` (that is
+-- rule 301's job); and rule 301 must NOT fire on the obfuscated variants.
+clean(get("id=1+union+select+1,2,3"),                        "319 does not claim plain 'union select'")
+set_only({ rule_sqli = "block" })
+clean(get("id=1+union+all+select+1"),                        "301 does not catch 'union all select'")
+clean(get("id=1+union(select+1"),                            "301 does not catch 'union(select'")
+clean(get("id=1/**/union/**/select+1"),                      "301 does not catch 'union/**/select'")
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Production-like (301 challenge + 309 logonly) — the captured scan still
 -- gets challenged via its DBMS-unique tokens, and ordinary traffic is clean.
 -- ─────────────────────────────────────────────────────────────────────────────
