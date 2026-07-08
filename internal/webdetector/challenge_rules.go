@@ -122,7 +122,68 @@ func isMachineStyleEndpointGo(uri string) bool {
 	return false
 }
 
-
+// isChallengeExemptEndpoint reports whether uri is a machine-to-machine API
+// endpoint that must NOT receive an interactive JS challenge even when its
+// vhost is under a *vhost-wide* challenge (auto-suspicious score / CHALLENGE_VHOST).
+//
+// This is a DELIBERATELY NARROW, high-confidence subset of
+// isMachineStyleEndpointGo — the two lists serve different purposes and must
+// not be merged. isMachineStyleEndpointGo only stops these paths from
+// *inflating* the suspicious-vhost score (broad is harmless there); this list
+// *suppresses enforcement*, so a too-broad entry (/api, /rest/, /upload, …)
+// would be a challenge-bypass hole during a real attack. Keep it tight: only
+// endpoints consumed by non-browser server-to-server clients that cannot solve
+// a challenge and that are low-value as browser-scanner crawl targets.
+//
+// Enforcement stays in force elsewhere: the caller applies this only to the
+// vhost-wide challenge and only for IPs not individually challenged/blocked;
+// the WAF rule engine and per-IP autoblock still inspect these paths.
+//
+// uri is the path only (the caller has already stripped the query string), so
+// query-arg APIs (OpenCart index.php?route=api/…, ?wc-api=) are intentionally
+// not matched — add them via their path form, not by widening this set.
+//
+// Matching is substring (Contains), not prefix — deliberately, so it tolerates
+// WordPress/Woo installed under a path prefix (/shop/wp-json/wc/…) and the
+// double-slash form the edge sometimes forwards. The residual is that a token
+// can appear mid-path (/wp-login.php/stripe/webhook on PATH_INFO apps); that is
+// an accepted, low-value tradeoff since this only relaxes the challenge (WAF and
+// per-IP autoblock still apply). The high-value vector — decorating a token to
+// reach a *different* origin target via dot-segments — is closed by the
+// traversal guard below (uri is NOT dot-normalised here: Lua forwards
+// request_uri verbatim, '//' is preserved in our logs).
+func isChallengeExemptEndpoint(uri string) bool {
+	u := strings.ToLower(strings.TrimSpace(uri))
+	if u == "" {
+		return false
+	}
+	// Fail closed on anything that smells of path traversal (raw or
+	// percent-encoded): a magic token must not be usable to slip a request that
+	// resolves elsewhere at the origin past the vhost-wide challenge.
+	if strings.Contains(u, "..") || strings.Contains(u, "%2e") {
+		return false
+	}
+	switch {
+	// WooCommerce REST — server-to-server order/stock sync (e.g. v-track).
+	case strings.Contains(u, "/wp-json/wc/"),
+		strings.Contains(u, "/wp-json/wc-"),
+		strings.Contains(u, "/wp-json/wc_"),
+		strings.Contains(u, "/wc-api/"): // legacy WooCommerce API
+		return true
+	// Payment-gateway webhooks / IPN — non-browser callbacks.
+	case strings.Contains(u, "/stripe/webhook"),
+		strings.Contains(u, "/paypal/ipn"),
+		strings.Contains(u, "/adyen/"),
+		strings.Contains(u, "/checkout/webhook"),
+		strings.Contains(u, "/payment/callback"):
+		return true
+	// Known non-browser plugin integrations (fixed vendor paths). Narrow and
+	// explicit on purpose; add new entries only for verified machine clients.
+	case strings.Contains(u, "/ws_vtrack/"): // v-track.gr courier/tracking plugin
+		return true
+	}
+	return false
+}
 
 func (e *Engine) hostBypassed(host string) bool {
     if host == "" {

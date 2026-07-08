@@ -118,3 +118,27 @@ ptr=*.ahrefs.com; verify_fcrdns=1; action=skip
 #    Semrush publishes PTRs under .semrush.com.
 # -----------------------------------------------------------------------------
 ptr=*.semrush.com; verify_fcrdns=1; action=skip
+
+# -----------------------------------------------------------------------------
+# 9) VPN by Google / Chrome private prefetch-proxy egress.
+#    Why: this is SHARED egress. One /24 (e.g. 162.120.188.0/24, PTRs under
+#    *.fetch.tunnel.googlezip.net, AS15169) carries MANY real users, so the
+#    per-subnet behavioural heuristic CHALLENGE_SUBNET reads "many IPs + many
+#    unique paths from one /24" as a scanner and challenges the whole subnet.
+#    The prefetch proxy fetches on behalf of users and does NOT run JS, so it
+#    can never solve the challenge — it just loops (issued-but-never-solved),
+#    and the request UA is the end-user's own browser (no bot-UA to match on).
+#    This is challenge-suppression ONLY: the WAF rule engine (SQLi/RCE/upload/
+#    webshell -> 403) stays fully armed for these IPs, so a real exploit is
+#    still blocked; we only stop the pointless behavioural challenge loop.
+#    Two rules, belt-and-suspenders:
+#      - PTR + FCrDNS (gold standard): matches only if the googlezip PTR
+#        forward-confirms back to the request IP. Harmless if it doesn't — it
+#        simply won't match and the second rule carries it.
+#      - ASN + PTR (robust): the ASN comes from BGP routing (not client-
+#        spoofable) and a *.googlezip.net PTR needs Google's reverse DNS, so the
+#        pair means "a real Google IP" even without FCrDNS. mode=all (default)
+#        requires BOTH to match.
+# -----------------------------------------------------------------------------
+ptr=*.googlezip.net; verify_fcrdns=1; action=skip
+asn=as15169; ptr=*.googlezip.net;     action=skip

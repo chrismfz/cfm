@@ -18,6 +18,50 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Web detector observability:** per-IP / subnet challenge **issuance** is now
+  logged to `cfm.challenges.log` as `[challenge_issued] ip=… host=… rule=… ttl=…`
+  (gated by `ChallengeLog`, like every other `[challenge]*` line). Previously an
+  *issued-but-unsolved* challenge left no greppable trace — that log only records
+  **solves** (keyed by the solver), and vhost-wide trips log under `host=`, not
+  the client IP — so `grep <ip> cfm.challenges.log` for a challenged-but-non-JS
+  client (API integrations, prefetch proxies, scanners) came back empty and the
+  reason lived only in the webdetector history. De-duplicated to one line per
+  `(ip, rule)` window (refreshes while a challenge stays active don't re-log), so
+  it's greppable without being noisy.
+
+### Fixed
+- **Web detector:** machine-to-machine API endpoints are no longer caught by a
+  *vhost-wide* challenge. When a vhost trips the auto-suspicious-vhost score
+  (`CHALLENGE_SUSPICIOUS_VHOST_SCORE` / `CHALLENGE_VHOST`), **every** request to
+  the host was challenged regardless of path — silently breaking non-browser
+  integrations that cannot solve the JS challenge (e.g. the v-track WooCommerce
+  order sync: `/wp-json/wc/v3/orders/` got the HTML challenge instead of JSON
+  during each ~35-min auto-on window, so orders stopped syncing intermittently).
+  The `/nginx/decision` handler now exempts a **narrow, high-confidence** set
+  from the vhost-wide challenge — WooCommerce REST (`/wp-json/wc*`, `/wc-api/`),
+  payment-gateway webhooks/IPN, and the `/ws_vtrack/` plugin path. Deliberately
+  much tighter than the score-exemption list (`isMachineStyleEndpointGo`), and
+  applied **only** when the IP itself is not individually challenged/blocked —
+  per-IP autoblock and the WAF rule engine still inspect these paths, so an
+  attacker on them is still caught. Matching is substring (tolerates WP/Woo
+  installed under a path prefix and the `//` form the edge forwards) with a
+  path-traversal guard (`..` / `%2e` fail closed), so a token can't be decorated
+  to slip a request that resolves to a different origin target past the challenge. (The reason was only visible via the
+  `[challenge][vhost] action=auto_on host=…` line — keyed by host, not client
+  IP — which is why a `grep <ip>` of the CFM logs came back empty.)
+
+### Added
+- Reference **challenge-exclude** ships a *VPN by Google / Chrome prefetch-proxy*
+  entry (`configs/webdetector_challenge_exclude.txt`, section 9). Shared-egress
+  `/24`s under `*.googlezip.net` (AS15169) were tripping the behavioural
+  `CHALLENGE_SUBNET` heuristic — many real users behind one `/24` read as a
+  scanner — and the non-JS prefetch proxy can never solve the interactive
+  challenge, so it looped invisibly: an *issued-but-unsolved* challenge writes
+  no `cfm.challenges.log` line (that log only records solves), and the reason
+  lived only in the webdetector history as `challenge_issued reason=CHALLENGE_SUBNET`.
+  Ships as two belt-and-suspenders rules (PTR+FCrDNS gold-standard, plus an
+  ASN+PTR robust fallback). **Challenge-suppression only** — the WAF rule engine
+  (SQLi/RCE/upload/webshell → 403) stays fully armed for these IPs.
 - WAF rule **319 `rule_sqli_union_variant`** (`WAF_SQLI_UNION_VARIANT`) at
   **`logonly`** — observe-only detection of obfuscated UNION injection that
   rule 301's *adjacent* `union select` match misses: `union all select`,

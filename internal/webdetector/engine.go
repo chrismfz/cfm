@@ -632,8 +632,28 @@ func (e *Engine) RecordIPChallenge(ip, host, rule, uri, method string, status in
 	if e == nil || e.chalAPI == nil {
 		return
 	}
-	e.chalAPI.RecordIPChallenge(ip, host, rule, uri, method, status, ttl)
+	isNew := e.chalAPI.RecordIPChallenge(ip, host, rule, uri, method, status, ttl)
 	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_issued", Host: host, IP: ip, Reason: rule, TTLSec: int(ttl / time.Second), Status: status, Payload: map[string]interface{}{"uri": uri, "method": method, "expires_at": time.Now().Add(ttl).Unix()}})
+
+	// Observability: a per-IP/subnet challenge that is issued but never solved
+	// (non-JS API clients, prefetch proxies, scanners) otherwise left NO
+	// greppable trace in cfm.challenges.log — only *solves* are logged there
+	// (keyed by the solver), and vhost-wide trips log under host=, not the
+	// client IP. The reason lived only in the webdetector history. Emit one
+	// line per (ip,rule) window (isNew dedups refreshes) so `grep <ip>
+	// /var/log/cfm/cfm.challenges.log` shows why an IP is being challenged.
+	// Gated by ChallengeLog, like every other [challenge]* line.
+	if isNew && e.cfg.ChallengeLog {
+		luri, lmethod := uri, method
+		if luri == "" {
+			luri = "-"
+		}
+		if lmethod == "" {
+			lmethod = "-"
+		}
+		logging.LogfCHALLENGES("[challenge_issued] ip=%s host=%s rule=%s uri=%s method=%s status=%d ttl=%s",
+			ip, host, rule, luri, lmethod, status, ttl)
+	}
 }
 
 // RecordVhostAuto records auto_on/auto_off for vhosts (and current metrics).

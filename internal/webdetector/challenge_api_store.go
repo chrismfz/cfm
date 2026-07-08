@@ -168,12 +168,22 @@ func (s *ChallengeAPIStore) RecordVhostManual(host string, active bool, ttl time
 	})
 }
 
-func (s *ChallengeAPIStore) RecordIPChallenge(ip, host, rule, uri, method string, status int, ttl time.Duration) {
+// RecordIPChallenge records/refreshes an active challenge for ip and reports
+// whether this is a NEW issuance (isNew). "New" = the IP was not already sitting
+// in an active (unexpired) challenge for the same rule. The subnet/path emitters
+// re-fire every detector cycle while a host stays flagged, so refreshes of a
+// live challenge return false — letting callers log the issuance once per window
+// instead of once per tick.
+func (s *ChallengeAPIStore) RecordIPChallenge(ip, host, rule, uri, method string, status int, ttl time.Duration) bool {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	st, ok := s.ips[ip]
+	// Capture prior liveness BEFORE we overwrite st below. A zero ExpiresAt with
+	// State=="challenge" means "no expiry set" → still active.
+	wasActive := ok && st.State == "challenge" && st.Rule == rule &&
+		(st.ExpiresAt.IsZero() || st.ExpiresAt.After(now))
 	if !ok {
 		st = &ChallengeIPState{IP: ip, FirstSeen: now}
 		s.ips[ip] = st
@@ -202,6 +212,7 @@ func (s *ChallengeAPIStore) RecordIPChallenge(ip, host, rule, uri, method string
 		IP:   ip,
 		Rule: rule,
 	})
+	return !wasActive
 }
 
 func (s *ChallengeAPIStore) RecordSolved(ip, host, uri string, diff int, ms int64) {
