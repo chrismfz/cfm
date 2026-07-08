@@ -103,6 +103,20 @@ fires(post("filter=1 AND 1=1 UNION SELECT * FROM information_schema.tables"), "i
 fires(post("subject=1;waitfor+delay+'0:0:15'"),      "waitfor delay with '+' as space")
 fires(post("subject=-1+OR+2%2B9-9-1=0%2B0%2B0%2B1"), "boolean tail with %2B-encoded plus")
 
+-- '+'-encoded spaces must NOT evade the TAUTOLOGY signatures (union select /
+-- or 1=1 / ' or '1'='1). A browser/form sends a space as '+', and PHP decodes
+-- '+'->space before the SQL runs, so `1+union+select` reaches the DB as
+-- `1 union select`. These checks previously ran against `sc` ('+' preserved),
+-- so the '+' form was a first-try block-tier bypass while the space/%20 form
+-- was caught (audit 2026-07; now matched against the '+/space'-collapsed scw).
+fires(get("id=1+union+select+username,password+from+users"), "'+'-encoded UNION SELECT")
+fires(get("id=1+or+1=1"),                                     "'+'-encoded OR 1=1")
+fires(get("id=1'+or+'1'='1"),                                 "'+'-encoded ' OR '1'='1")
+-- Double separators collapse too (a single-space substring test on sc missed
+-- these even without '+').
+fires(get("id=1+union++select+1,2,3"),                        "double '+' between UNION/SELECT")
+fires(get("id=1%20union%20%20select%201"),                    "double '%20' between UNION/SELECT")
+
 -- Body-only detection (the regression the body-scan wiring fixes): payload in
 -- the body, query string clean.
 fires(post("name=John&email=a@b.com&message=1 OR 1=1 UNION SELECT 1,2,3"),
@@ -155,6 +169,44 @@ clean(post("subject=Greek&message=Δεν μπορώ να συνδεθώ στο e
       "FP: normal Greek prose")
 clean(get("page=products&category=laptops&sort=price"),
       "FP: ordinary GET browsing")
+
+-- "union" as an English NOUN followed by "select…" must NOT hit rule 301.
+-- Browsers send a space as '+', so after the '+'->space fix these collapse to
+-- "… union select …" — a bare substring test would 403 them at block tier.
+-- The value-terminator guard keeps them clean while still catching `1 union`,
+-- `' union`, `)union`, `=union` injections.
+clean(get("q=credit+union+select+account"),      "FP: 'credit union select account'")
+clean(get("q=trade+union+selection"),            "FP: 'trade union selection'")
+clean(get("q=student+union+selected+works"),     "FP: 'student union selected works'")
+clean(get("q=reunion+selected+tracks"),          "FP: 'reunion selected' (union mid-word)")
+clean(get("q=european+union+select+committee"),  "FP: 'european union select committee'")
+clean(post("subject=Membership&message=Our credit union selected a new bank last month."),
+      "FP: 'credit union selected' in ticket prose")
+-- '/' and ',' are excluded from the value-terminator class so legit paths and
+-- CSV-ish values with a noun "union" next to "select…" stay clean.
+clean(get("next=/union+selected+news"),          "FP: path '/union selected news' (slash before union)")
+clean(get("tags=jazz,union+select,rock"),        "FP: CSV 'jazz,union select,rock' (comma before union)")
+-- "union" as a noun starting a VALUE ("Union Select Board" / "Union Selectmen"
+-- municipal searches) must NOT block: '=' is deliberately not a terminator, so
+-- the bare-value `?id=union+select+1,2` injection is given up rather than 403
+-- these. The common `?id=1+union+select` form is still caught via its DIGIT
+-- terminator (the '1' of the value), below.
+clean(get("q=union+select+board"),               "FP: 'Union Select Board' (municipal, value starts 'union')")
+clean(get("q=union+selectmen"),                  "FP: 'Union Selectmen'")
+-- The real value-terminators (digit / paren / quote) still catch injection:
+fires(get("id=1)union+select+1,2"),              "')union select' (paren terminator)")
+fires(get("name='+union+select+password+from+users"), "quote terminator ' union select")
+-- SQL keyword-literal operands (null/true/false) also break out of an unquoted
+-- value with no digit/quote/paren — they end in a letter, so they need explicit
+-- matching (the pre-fix substring check caught them; missing them would regress).
+fires(get("id=null+union+select+username,password+from+users"), "null operand union select")
+fires(get("id=1+is+null+union+select+1,2,3"),    "'is null' boolean-expr union select")
+fires(get("enabled=true+union+select+card_no,cvv+from+cards"),  "true operand union select")
+fires(get("id=false+union+select+1"),            "false operand union select")
+-- …but the keyword must be adjacent: 'annul' (one 'l') and non-adjacent 'true …
+-- union' are not operand-breaks, so they stay clean.
+clean(get("q=annul+union+selection"),            "FP: 'annul union selection' (not 'null')")
+clean(get("q=is+that+true+for+the+union+selection"), "FP: 'true' not adjacent to 'union select'")
 
 if fails > 0 then
   io.stderr:write(string.format("FAILED %d tests\n", fails))
