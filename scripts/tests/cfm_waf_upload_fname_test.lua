@@ -33,6 +33,14 @@ local function hit(fname)
   return det.detect_upload_filename(upload_body(fname), { ["content-type"] = CT })
 end
 
+-- Flexible builder: pass a raw Content-Disposition parameter tail so tests can
+-- exercise the parameter-name casing and the RFC 5987 `filename*=` form.
+local function hit_cd(cd_tail)
+  local body = '--X\r\nContent-Disposition: form-data; ' .. cd_tail
+      .. '\r\nContent-Type: application/octet-stream\r\n\r\ndata\r\n--X--\r\n'
+  return det.detect_upload_filename(body, { ["content-type"] = CT })
+end
+
 -- Positives: newly-covered PHP alt-handlers + SSI pages.
 check(hit("shell.pht"),    ".pht must be flagged")
 check(hit("shell.phtm"),   ".phtm must be flagged")
@@ -84,6 +92,34 @@ check(hit("shell.asp::$DATA"),  "Windows ADS ::$DATA after .asp must be flagged"
 check(hit("SHELL.ASP"),         "uppercase .ASP must be flagged (lowercased)")
 check(hit("shell.asp\0.jpg"),   "embedded NUL after .asp must be flagged")
 check(hit("shell.phar\t"),      "trailing tab after .phar must be flagged")
+
+-- Filename EXTRACTION robustness: the Content-Disposition parameter name is
+-- case-insensitive (PHP rfc1867 strcasecmp), so a capitalised `FileName`/
+-- `FILENAME` must not skip extraction and let a webshell through.
+check(hit_cd('name="f"; FileName="shell.php"'),  "capital-N FileName must be extracted + flagged")
+check(hit_cd('name="f"; FILENAME="shell.php"'),  "all-caps FILENAME must be extracted + flagged")
+check(hit_cd('name="f"; fileName="c99.phtml"'),  "mixed-case fileName must be extracted + flagged")
+-- RFC 5987 / 6266 extended parameter `filename*=charset'lang'pct-value`
+-- (honoured by ASP.NET/IIS) must be extracted, percent-decoded, and checked.
+check(hit_cd("name=\"f\"; filename*=UTF-8''shell.aspx"),       "filename*= (.aspx) must be flagged")
+check(hit_cd("name=\"f\"; filename*=UTF-8''shell%2Easpx"),     "filename*= with %2E-encoded dot must be flagged")
+check(hit_cd("name=\"f\"; filename*=utf-8''webshell%2Ephar"),  "filename*= (.phar, pct-encoded) must be flagged")
+check(hit_cd("name=\"f\"; filename*=shell.jsp"),               "filename*= without charset prefix must be flagged")
+-- PHP's rfc1867 (php_ap_getword_conf) honours a `\"` escaped quote and an
+-- UNTERMINATED opening quote, so these deliver a real `.php`/handler file that
+-- the precise quote patterns under-read; the end-of-line backstop must catch
+-- them.
+check(hit_cd('name="f"; filename="shell\\".php"'),  "escaped-quote filename must be flagged")
+check(hit_cd('name="f"; filename="shell.php'),      "unterminated double-quote filename must be flagged")
+check(hit_cd("name=\"f\"; filename='shell.php"),    "unterminated single-quote filename must be flagged")
+check(hit_cd('name="f"; filename=shell.pht.jpg'),   "unquoted double-extension must be flagged")
+
+-- Extraction FPs: a field literally named "filename", a benign RFC 5987 upload,
+-- and benign names that the greedy end-of-line backstop must NOT over-match.
+check(not hit_cd('name="filename"'),                           "a field NAMED filename (no ext value) must pass")
+check(not hit_cd("name=\"f\"; filename*=UTF-8''holiday%20photo.jpg"), "benign filename*= (.jpg) must pass")
+check(not hit_cd('name="f"; filename="company.pharma.pdf"'),   "backstop must not over-match 'pharma' as .phar")
+check(not hit_cd('name="f"; filename="vendor.jspdf.min.js"'),  "backstop must not over-match 'jspdf' as .jsp")
 
 -- Negatives: benign uploads pass, and .phps (source viewer, lower execution
 -- risk) is deliberately kept OUT of the block-tier set to limit FP surface.
