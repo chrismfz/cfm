@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- Reference **challenge-exclude** ships a *VPN by Google / Chrome prefetch-proxy*
+  entry (`configs/webdetector_challenge_exclude.txt`, section 9). Shared-egress
+  `/24`s under `*.googlezip.net` (AS15169) were tripping the behavioural
+  `CHALLENGE_SUBNET` heuristic — many real users behind one `/24` read as a
+  scanner — and the non-JS prefetch proxy can never solve the interactive
+  challenge, so it looped invisibly: an *issued-but-unsolved* challenge writes
+  no `cfm.challenges.log` line (that log only records solves), and the reason
+  lived only in the webdetector history as `challenge_issued reason=CHALLENGE_SUBNET`.
+  Ships as two belt-and-suspenders rules (PTR+FCrDNS gold-standard, plus an
+  ASN+PTR robust fallback). **Challenge-suppression only** — the WAF rule engine
+  (SQLi/RCE/upload/webshell → 403) stays fully armed for these IPs.
 - WAF rule **319 `rule_sqli_union_variant`** (`WAF_SQLI_UNION_VARIANT`) at
   **`logonly`** — observe-only detection of obfuscated UNION injection that
   rule 301's *adjacent* `union select` match misses: `union all select`,
