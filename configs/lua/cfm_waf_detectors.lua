@@ -1882,14 +1882,25 @@ function _M.detect_upload_filename(body, headers)
     -- content-based SSI-exec check if that threat ever shows up in the wild.
     if fname:match("%.phtml?[^%w]") or fname:match("%.phtml?$") then return "phtml" end  -- .phtm/.phtml, anchored (no x.phtmz overmatch)
     if fname:match("%.pht[^%w]") or fname:match("%.pht$") then return "pht" end
-    if fname:match("%.phar")    then return "phar" end
-    if fname:match("%.asp[x]?") then return "asp" end
-    if fname:match("%.asa[x]?") then return "asa" end
-    if fname:match("%.asmx")    then return "asmx" end
-    if fname:match("%.ascx")    then return "ascx" end
-    if fname:match("%.jsp[x]?") then return "jsp" end
-    if fname:match("%.cer[^t]") or fname:match("%.cer$") then return "cer" end
-    if fname:match("%.cdx")     then return "cdx" end
+    -- Anchored exactly like the .php/.phtml/.pht matchers above: the extension
+    -- must be followed by a non-word char (a further ".ext", a separator) or
+    -- end-of-string, so `shell.phar` and the `shell.phar.jpg` double-extension
+    -- are caught while the extension appearing as a mid-word SUBSTRING is not.
+    -- These were previously unanchored (`fname:match("%.phar")` etc.), and rule
+    -- 401 is block + autoblock-armed (6h nft ban) — so a mid-word match banned a
+    -- legitimate uploader's IP: `.phar`⊂`company.pharma.pdf`,
+    -- `.asp`⊂`trip.aspen.jpg`, `.asa`⊂`team.asana.csv`,
+    -- `.jsp`⊂`vendor.jspdf.min.js`, `.cer`⊂`vase.ceramic.jpg`. The `.cer[^t]`
+    -- guard (kept `.cert` certificates out) is subsumed by `[^%w]`, since 't' is
+    -- a word char.
+    if fname:match("%.phar[^%w]")  or fname:match("%.phar$")  then return "phar" end
+    if fname:match("%.aspx?[^%w]") or fname:match("%.aspx?$") then return "asp" end
+    if fname:match("%.asax?[^%w]") or fname:match("%.asax?$") then return "asa" end
+    if fname:match("%.asmx[^%w]")  or fname:match("%.asmx$")  then return "asmx" end
+    if fname:match("%.ascx[^%w]")  or fname:match("%.ascx$")  then return "ascx" end
+    if fname:match("%.jspx?[^%w]") or fname:match("%.jspx?$") then return "jsp" end
+    if fname:match("%.cer[^%w]")   or fname:match("%.cer$")   then return "cer" end
+    if fname:match("%.cdx[^%w]")   or fname:match("%.cdx$")   then return "cdx" end
     if fname:match("%.war$")    then return "war" end
     if fname:match("%.class$")  then return "class" end
     if fname:match("%.exe$")    then return "exe" end
