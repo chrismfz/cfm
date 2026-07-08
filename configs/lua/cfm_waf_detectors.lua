@@ -1287,8 +1287,24 @@ function _M.detect_cmd_payload(args)
     return false
   end
 
-  if not ignore_backtick_only and has_backtick_cmd(a) then
-    return "PAY_BACKTICK"
+  if has_backtick_cmd(a) then
+    if not ignore_backtick_only then
+      return "PAY_BACKTICK"
+    end
+    -- ignore_backtick_only was set because a SEARCH field (q/s/term/search/
+    -- query) carried a benign backtick snippet. Honour that suppression ONLY
+    -- if no backtick command survives once the search-field VALUES are
+    -- stripped — otherwise a throwaway benign `q=\`x\`` would mask a real
+    -- backtick command in another param (the flag used to be request-global).
+    -- The leading "&" lets the fixed `(&key=)[^&]*` patterns also blank a
+    -- search value that is the first arg. [review of audit F05]
+    local ns = ("&" .. a)
+      :gsub("(&q=)[^&]*", "%1"):gsub("(&s=)[^&]*", "%1")
+      :gsub("(&term=)[^&]*", "%1"):gsub("(&search=)[^&]*", "%1")
+      :gsub("(&query=)[^&]*", "%1")
+    if has_backtick_cmd(ns) then
+      return "PAY_BACKTICK"
+    end
   end
 
   return nil
@@ -1933,7 +1949,11 @@ function _M.detect_http_smuggling(args, body)
     -- Only runs on the rare strings that passed the http/ gate above, so the
     -- per-verb find loop is negligible.
     for _, verb in ipairs(SMUG_VERBS) do
-      if sl:find("%f[%a]" .. verb .. "%s+[^%s]+%s+http/%d") then
+      -- Require the request-target to start with "/" (origin-form, the form a
+      -- smuggled line takes inside a param). This rejects English prose such
+      -- as "connect to http/2" / "options for http/2" where the middle token
+      -- is a word, not a path — a genuine FP source at logonly. [review F12]
+      if sl:find("%f[%a]" .. verb .. "%s+/[^%s]*%s+http/%d") then
         return "SMUG_" .. verb:upper()
       end
     end
