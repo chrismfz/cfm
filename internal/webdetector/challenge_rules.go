@@ -142,9 +142,25 @@ func isMachineStyleEndpointGo(uri string) bool {
 // uri is the path only (the caller has already stripped the query string), so
 // query-arg APIs (OpenCart index.php?route=api/…, ?wc-api=) are intentionally
 // not matched — add them via their path form, not by widening this set.
+//
+// Matching is substring (Contains), not prefix — deliberately, so it tolerates
+// WordPress/Woo installed under a path prefix (/shop/wp-json/wc/…) and the
+// double-slash form the edge sometimes forwards. The residual is that a token
+// can appear mid-path (/wp-login.php/stripe/webhook on PATH_INFO apps); that is
+// an accepted, low-value tradeoff since this only relaxes the challenge (WAF and
+// per-IP autoblock still apply). The high-value vector — decorating a token to
+// reach a *different* origin target via dot-segments — is closed by the
+// traversal guard below (uri is NOT dot-normalised here: Lua forwards
+// request_uri verbatim, '//' is preserved in our logs).
 func isChallengeExemptEndpoint(uri string) bool {
 	u := strings.ToLower(strings.TrimSpace(uri))
 	if u == "" {
+		return false
+	}
+	// Fail closed on anything that smells of path traversal (raw or
+	// percent-encoded): a magic token must not be usable to slip a request that
+	// resolves elsewhere at the origin past the vhost-wide challenge.
+	if strings.Contains(u, "..") || strings.Contains(u, "%2e") {
 		return false
 	}
 	switch {

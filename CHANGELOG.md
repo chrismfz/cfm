@@ -43,7 +43,10 @@ back-filled here — see the git/PR history for that period.
   much tighter than the score-exemption list (`isMachineStyleEndpointGo`), and
   applied **only** when the IP itself is not individually challenged/blocked —
   per-IP autoblock and the WAF rule engine still inspect these paths, so an
-  attacker on them is still caught. (The reason was only visible via the
+  attacker on them is still caught. Matching is substring (tolerates WP/Woo
+  installed under a path prefix and the `//` form the edge forwards) with a
+  path-traversal guard (`..` / `%2e` fail closed), so a token can't be decorated
+  to slip a request that resolves to a different origin target past the challenge. (The reason was only visible via the
   `[challenge][vhost] action=auto_on host=…` line — keyed by host, not client
   IP — which is why a `grep <ip>` of the CFM logs came back empty.)
 

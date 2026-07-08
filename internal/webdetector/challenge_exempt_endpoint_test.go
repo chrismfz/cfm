@@ -40,6 +40,10 @@ func TestIsChallengeExemptEndpoint(t *testing.T) {
 		"/graphql",              // too broad
 		"/checkout/",            // not the webhook subpath
 		"/index.php?route=api/", // query-arg API (query is stripped upstream anyway)
+		// Traversal-decorated tokens must NOT be exempt (fail-closed guard):
+		"/wp-json/wc/../../wp-login.php",  // raw dot-segment traversal
+		"/wp-json/wc/%2e%2e/wp-login.php", // percent-encoded traversal
+		"/stripe/webhook/../evil",
 	}
 	for _, u := range notExempt {
 		if isChallengeExemptEndpoint(u) {
