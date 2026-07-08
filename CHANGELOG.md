@@ -37,14 +37,20 @@ back-filled here — see the git/PR history for that period.
   ON** (a pre-existing conf inherits them on upgrade — no edit needed). Snapshots
   are cached per caller pid and rosters per uid, so a burst does the `/proc` work
   (incl. hashing and the full scan) once.
-- **cfm-lsm alert-flood fix (fold into the above).** The notify email *reason* is
-  now caller-identity-stable (no pid, no per-event target), so the existing notify
-  deduper collapses a whole `/proc`-sweep burst — e.g. an `CFML-OBS-004` `pgrep`
-  scan touching dozens of targets — into a **single email** instead of one email
-  per target (previously the target was in the dedup key, so a sweep produced up
-  to the per-policy cap in emails). The per-target detail, the swarm roster, and
-  captured-binary references now ride in the email's **Sample lines** and the
-  structured `Extra` map; `cfm.log` keeps the full per-event line.
+- **cfm-lsm alert-flood fix (fold into the above).** For the ptrace sweep policy
+  `CFML-OBS-004` — which fires once per (caller, target) pair as a `pgrep`-style
+  tool walks `/proc` — the notify email *reason* is now caller-identity-stable
+  (uid + comm + exe, no pid, no per-target `ptrace`/`sameuid` tag), so the existing
+  notify deduper collapses a whole sweep into a **single email** instead of one
+  per target (previously the target + pid were in the dedup key, so a sweep
+  produced up to the per-policy cap in emails). The collapse is scoped to that
+  sweep policy: discrete-action policies (`FS-005`, `CRED-002`, `EXEC-*`) keep one
+  email per target and keep the target/pid in the notify JSONL audit. The
+  per-target detail, swarm roster, and captured-binary references ride in the
+  email's **Sample lines** and the `Extra` map; `cfm.log` keeps the full
+  per-event line. Enrichment is also gated behind the per-policy rate cap (a
+  rate-dropped event does no `/proc` work) and all emitted fields are sanitised
+  against log/email injection.
 - **Web detector observability:** per-IP / subnet challenge **issuance** is now
   logged to `cfm.challenges.log` as `[challenge_issued] ip=… host=… rule=… ttl=…`
   (gated by `ChallengeLog`, like every other `[challenge]*` line). Previously an

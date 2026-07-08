@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -17,6 +16,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"cfm/internal/logging"
+	"cfm/internal/syslookup"
 )
 
 // procsnap.go — best-effort forensic snapshot of the task behind a
@@ -29,10 +31,16 @@ import (
 // parent, the login origin. This file fills that gap by reading the
 // caller's /proc entries as soon as the daemon drains the event — far
 // faster than any human could, but still a best-effort race against
-// process exit. When the caller has already gone (ENOENT) the snapshot
-// marks itself not-alive; the caller's PARENT is usually still around
-// (a cron/launcher outlives the short-lived tool it spawned), so a
-// missed caller still frequently yields ParentExe / ParentComm.
+// process exit.
+//
+// Parent context (ppid / parent exe / parent comm) is resolved from the
+// caller's own /proc/<pid>/status, so it is available only while the
+// caller is STILL ALIVE at drain time (the common case — the drain runs
+// within milliseconds). A caller that has already fully exited yields
+// `proc=gone` with no parent: the BPF event carries no ppid, so there is
+// no seed to walk up from. Carrying ppid in the event (a future BPF wire
+// change) is what would let us resolve the launcher for an already-exited
+// caller.
 //
 // Everything here is defence-oriented forensics, not a security
 // boundary. An attacker who controls the process can spoof comm and
@@ -40,6 +48,13 @@ import (
 // of the bytes actually mapped as the program — which is exactly why
 // exe + sha256 are the high-value fields for "what IS this". The
 // SHA-256 also feeds straight into a VirusTotal / YARA lookup.
+//
+// SECURITY: every field read here (exe, cwd, comm, parent exe, roster
+// peer paths) is attacker-controlled — a user picks their binary's path,
+// working directory, and comm. Linux paths may contain any byte except
+// NUL and '/', including newlines. Callers MUST run the composed log /
+// email strings through stripCtl (lifecycle.go) before emitting so a
+// crafted path cannot forge log lines or break the email body.
 
 // procRoot is the procfs mount. Declared as a var so tests can point it
 // at a synthetic tree without needing a live /proc.
@@ -49,15 +64,19 @@ const (
 	// maxCmdlineBytes bounds the /proc/<pid>/cmdline read so one hostile
 	// argv can never dominate a log line or an email body.
 	maxCmdlineBytes = 512
-	// maxExeHashBytes skips hashing pathologically large exe blobs; real
-	// dropper binaries are far smaller.
-	maxExeHashBytes = 64 << 20 // 64 MiB
+	// maxExeHashBytes bounds the exe read for both hashing and capture.
+	// This work runs synchronously on the single ringbuf-drain goroutine,
+	// so the cap doubles as a bound on how long the drain can block on a
+	// slow/large read before the kernel ring buffer risks overflow; real
+	// dropper binaries are far smaller than this.
+	maxExeHashBytes = 32 << 20 // 32 MiB
 	// snapCacheTTL keeps a snapshot reusable across the burst of events a
-	// single caller pid emits (an OBS-004 sweep fires dozens per second
-	// from one pid), so the exe is hashed once, not per event. Short
-	// enough that a later burst from a reused pid re-snapshots.
+	// single caller emits (an OBS-004 sweep fires dozens per second), so
+	// the exe is hashed once, not per event. The cache key also carries
+	// the process start time, so a recycled pid is never served a stale
+	// snapshot regardless of TTL.
 	snapCacheTTL = 10 * time.Second
-	// snapCacheMaxEntry bounds the cache; exceeding it drops the whole
+	// snapCacheMaxEntry bounds each cache; exceeding it drops the whole
 	// map (cheap, and the working set is tiny — a handful of live
 	// callers at a time).
 	snapCacheMaxEntry = 512
@@ -73,6 +92,7 @@ const (
 type procSnapshot struct {
 	Alive      bool
 	PID        uint32
+	StartTime  uint64 // /proc/<pid>/stat field 22; disambiguates a recycled pid
 	UID        uint32
 	User       string
 	Exe        string
@@ -95,6 +115,7 @@ func snapshotProc(pid, uid uint32, hash bool) procSnapshot {
 	s := procSnapshot{PID: pid, UID: uid, User: lookupUser(uid), LoginUID: -1}
 
 	base := filepath.Join(procRoot, strconv.FormatUint(uint64(pid), 10))
+	s.StartTime = readStartTime(filepath.Join(base, "stat"))
 	if _, err := os.Stat(base); err != nil {
 		// Caller already exited — the race was lost. Leave Alive=false.
 		return s
@@ -114,9 +135,10 @@ func snapshotProc(pid, uid uint32, hash bool) procSnapshot {
 		s.SHA256 = hashExe(filepath.Join(base, "exe"))
 	}
 
-	// The parent is the persistent launcher (cron entry, shell script,
-	// malware controller) that usually outlives the short-lived caller —
-	// often the more actionable "where do I look" pointer.
+	// Parent context resolves only while the caller is still alive (we
+	// read ppid from its own status). It is the persistent launcher
+	// (cron entry, shell script, malware controller) and usually the more
+	// actionable "where do I look" pointer than the short-lived caller.
 	if s.PPid != 0 {
 		pbase := filepath.Join(procRoot, strconv.FormatUint(uint64(s.PPid), 10))
 		if pexe, _ := procReadlink(filepath.Join(pbase, "exe")); pexe != "" {
@@ -142,11 +164,17 @@ var (
 )
 
 // cachedSnapshotProc returns a snapshot for pid, reusing a recent one
-// when the same (pid, uid) was snapshotted within snapCacheTTL. now is
-// injected so tests stay deterministic.
+// only when the pid's uid AND start time still match — so a recycled pid
+// (a new process reusing pid P under the same uid within the TTL, common
+// under fork churn) is never served the prior process's exe/sha/cmdline.
+// The current start time is a single small read; on a hit it saves the
+// expensive exe hash + readlinks. now is injected so tests stay
+// deterministic.
 func cachedSnapshotProc(pid, uid uint32, hash bool, now time.Time) procSnapshot {
+	st := readStartTime(filepath.Join(procRoot, strconv.FormatUint(uint64(pid), 10), "stat"))
+
 	snapCacheMu.Lock()
-	if c, ok := snapCache[pid]; ok && c.snap.UID == uid && now.Sub(c.at) < snapCacheTTL {
+	if c, ok := snapCache[pid]; ok && c.snap.UID == uid && c.snap.StartTime == st && st != 0 && now.Sub(c.at) < snapCacheTTL {
 		snapCacheMu.Unlock()
 		return c.snap
 	}
@@ -284,6 +312,11 @@ func shortHash(h string) string {
 	return h
 }
 
+// All the readers below take a path built as
+// filepath.Join(procRoot, <numeric-pid>, <fixed-basename>), a structurally
+// constrained /proc path — the gosec G304 (file-inclusion-via-variable)
+// annotations mirror the same-reasoning ones in internal/outbound/forensics.go.
+
 // procReadlink resolves a /proc magic symlink, splitting off the
 // kernel's " (deleted)" suffix that marks an unlinked target — the
 // classic dropper fingerprint (stage a binary, unlink it, keep
@@ -302,6 +335,7 @@ func procReadlink(path string) (target string, deleted bool) {
 // readCmdline reads /proc/<pid>/cmdline (NUL-separated argv) and joins
 // it into a single space-separated string, bounded to maxCmdlineBytes.
 func readCmdline(path string) string {
+	// #nosec G304 -- path is procRoot/<pid>/cmdline, structurally constrained.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -316,6 +350,7 @@ func readCmdline(path string) string {
 // readProcFile reads up to max bytes from a small /proc file (comm,
 // etc.) without pulling in a full ReadFile for a one-line value.
 func readProcFile(path string, max int) string {
+	// #nosec G304 -- path is procRoot/<pid>/<fixed basename>, structurally constrained.
 	f, err := os.Open(path)
 	if err != nil {
 		return ""
@@ -329,6 +364,7 @@ func readProcFile(path string, max int) string {
 // readPPid extracts the PPid field from /proc/<pid>/status. Returns 0
 // when the file is unreadable or the field is absent.
 func readPPid(statusPath string) uint32 {
+	// #nosec G304 -- statusPath is procRoot/<pid>/status, structurally constrained.
 	f, err := os.Open(statusPath)
 	if err != nil {
 		return 0
@@ -347,11 +383,38 @@ func readPPid(statusPath string) uint32 {
 	return 0
 }
 
+// readStartTime returns field 22 (starttime, in clock ticks since boot)
+// of /proc/<pid>/stat — the stable per-process identity that survives a
+// pid recycle. Field 2 (comm) may contain spaces and parentheses, so the
+// remaining space-separated fields are parsed after the FINAL ')'.
+// Returns 0 on any error.
+func readStartTime(statPath string) uint64 {
+	// #nosec G304 -- statPath is procRoot/<pid>/stat, structurally constrained.
+	b, err := os.ReadFile(statPath)
+	if err != nil {
+		return 0
+	}
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 || i+2 > len(s) {
+		return 0
+	}
+	// After ')' the fields start at field 3 (state); starttime is field 22,
+	// i.e. index 22-3 = 19 in the post-')' slice.
+	fields := strings.Fields(s[i+1:])
+	if len(fields) < 20 {
+		return 0
+	}
+	v, _ := strconv.ParseUint(fields[19], 10, 64)
+	return v
+}
+
 // readLoginUID reads /proc/<pid>/loginuid, the audit subsystem's record
 // of which login session owns the task (which sshd session / cron run
 // started the chain). Returns -1 when unset (the (uint32)-1 sentinel)
 // or unreadable.
 func readLoginUID(path string) int64 {
+	// #nosec G304 -- path is procRoot/<pid>/loginuid, structurally constrained.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return -1
@@ -369,6 +432,7 @@ func readLoginUID(path string) int64 {
 // lives), so this identifies a deleted dropper too. Bounded by
 // maxExeHashBytes; returns "" on any error or oversize image.
 func hashExe(path string) string {
+	// #nosec G304 -- path is procRoot/<pid>/exe, structurally constrained.
 	f, err := os.Open(path)
 	if err != nil {
 		return ""
@@ -384,32 +448,21 @@ func hashExe(path string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// lookupUser resolves a uid to its username, cached because a busy host
-// re-resolves the same handful of web/panel uids on every event. Best-
-// effort: returns "" when the uid is not in the password database.
+// userMap resolves uid→name CGO-free from /etc/passwd with a periodic
+// reload — the shared internal/syslookup resolver (also used by
+// internal/outbound), rather than os/user.LookupId (which can pull in
+// cgo/NSS and never refreshes). Lazily created on first use so package
+// init does no file I/O.
 var (
-	userCacheMu sync.Mutex
-	userCache   = map[uint32]string{}
+	userMapOnce sync.Once
+	userMap     *syslookup.Map
 )
 
+// lookupUser resolves a uid to its username, best-effort: returns "" when
+// the uid is not in /etc/passwd.
 func lookupUser(uid uint32) string {
-	userCacheMu.Lock()
-	if n, ok := userCache[uid]; ok {
-		userCacheMu.Unlock()
-		return n
-	}
-	userCacheMu.Unlock()
-
-	name := ""
-	if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
-		name = u.Username
-	}
-	userCacheMu.Lock()
-	if len(userCache) < 4096 {
-		userCache[uid] = name
-	}
-	userCacheMu.Unlock()
-	return name
+	userMapOnce.Do(func() { userMap = syslookup.New() })
+	return userMap.User(uid)
 }
 
 // ------------------------------------------------------------------ //
@@ -443,14 +496,25 @@ type uidRoster struct {
 	Total       int
 	Peers       []peerProc
 	DistinctExe []string
-	Suspicious  []string // distinct exe paths that are deleted or in ephemeral/home trees
+	Suspicious  []string // distinct exe paths that are deleted or on an ephemeral fs
 }
 
-// suspiciousExePath reports whether an exe path lives somewhere a
-// legitimate long-running daemon normally would not — the ephemeral /
-// user-writable trees a dropped payload runs from.
+// ephemeralExeRoots is the set of filesystems a legitimate long-running
+// daemon does not execute from — the same ephemeral / tmpfs trees the
+// EXEC-006 BPF policy treats as suspicious (docs/cfm-lsm.md). It is
+// deliberately NOT extended with /home or bare /run: on shared hosting
+// every legitimate per-user binary lives under /home, and /run holds
+// systemd per-user runtime dirs, so treating those as suspicious would
+// over-capture benign binaries — the exact hazard conf.go's allow_path
+// SECURITY TRADE-OFF note warns about. A dropper that hides in a homedir
+// is still caught: droppers almost always unlink themselves, and the
+// `(deleted)` flag triggers capture independent of path.
+var ephemeralExeRoots = []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/run/user/"}
+
+// suspiciousExePath reports whether an exe path lives on an ephemeral
+// filesystem a normal daemon does not exec from.
 func suspiciousExePath(p string) bool {
-	for _, pre := range []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/run/", "/home/"} {
+	for _, pre := range ephemeralExeRoots {
 		if strings.HasPrefix(p, pre) {
 			return true
 		}
@@ -630,6 +694,7 @@ type capturedFile struct {
 // is not rewritten. Files are root-only (0600) and never executed.
 func captureExe(pid uint32, dir string, maxBytes int64) (capturedFile, error) {
 	src := filepath.Join(procRoot, strconv.FormatUint(uint64(pid), 10), "exe")
+	// #nosec G304 -- src is procRoot/<pid>/exe, structurally constrained.
 	f, err := os.Open(src)
 	if err != nil {
 		return capturedFile{}, err
@@ -675,46 +740,33 @@ func dirFileCount(dir string) int {
 	return len(entries)
 }
 
-// capture cache — keyed by uid like the roster, so a swarm's event
-// burst re-hashes the offending binaries once per snapCacheTTL rather
-// than on every one of the thousands of events a sweep emits. On a clean
-// host captureThreat finds no suspicious exe and returns nil cheaply
-// (no hashing at all), so the cache only earns its keep on a compromised
-// host — which is exactly where the burst is.
-type cachedCapture struct {
-	files []capturedFile
-	at    time.Time
+// capture dedup cache — keyed by EXE PATH, not uid. A caller's event
+// burst re-reads/re-hashes each distinct path at most once per
+// snapCacheTTL, but a DISTINCT new dropper path under the same uid is
+// still captured (a per-uid cache would return the first dropper's files
+// and silently skip a second, different dropper run in the same window).
+// On a clean host captureThreat finds no suspicious exe and returns nil
+// cheaply, so this only earns its keep on a compromised host.
+type cachedPathCapture struct {
+	file capturedFile
+	ok   bool // a capture succeeded for this path
+	at   time.Time
 }
 
 var (
-	captureCacheMu sync.Mutex
-	captureCache   = map[uint32]cachedCapture{}
+	capturePathMu    sync.Mutex
+	capturePathCache = map[string]cachedPathCapture{}
+	captureFullOnce  sync.Once
 )
 
-func cachedCaptureThreat(uid uint32, dir string, snap procSnapshot, roster uidRoster, now time.Time) []capturedFile {
-	captureCacheMu.Lock()
-	if c, ok := captureCache[uid]; ok && now.Sub(c.at) < snapCacheTTL {
-		captureCacheMu.Unlock()
-		return c.files
-	}
-	captureCacheMu.Unlock()
-
-	files := captureThreat(dir, snap, roster)
-
-	captureCacheMu.Lock()
-	if len(captureCache) >= snapCacheMaxEntry {
-		captureCache = map[uint32]cachedCapture{}
-	}
-	captureCache[uid] = cachedCapture{files: files, at: now}
-	captureCacheMu.Unlock()
-	return files
-}
-
 // captureThreat preserves the suspicious binaries behind snap's caller
-// and its roster peers. "Suspicious" = exe unlinked, or under an
-// ephemeral/home tree — system binaries are never copied. Deduplicated
-// by exe path (then by content in captureExe) and bounded per event.
-func captureThreat(dir string, snap procSnapshot, roster uidRoster) []capturedFile {
+// and its roster peers. "Suspicious" = exe unlinked, or on an ephemeral
+// fs (see suspiciousExePath) — system and homedir binaries are never
+// copied. Path-keyed dedup avoids re-hashing within a burst; content is
+// additionally deduplicated on disk by captureExe. Bounded per event and
+// by a directory file cap (surfaced once when hit). now is injected so
+// tests stay deterministic.
+func captureThreat(dir string, snap procSnapshot, roster uidRoster, now time.Time) []capturedFile {
 	if dir == "" {
 		return nil
 	}
@@ -741,19 +793,45 @@ func captureThreat(dir string, snap procSnapshot, roster uidRoster) []capturedFi
 	if len(cands) == 0 {
 		return nil
 	}
-	if dirFileCount(dir) >= captureMaxFiles {
-		return nil
-	}
+
 	var out []capturedFile
 	for _, c := range cands {
 		if len(out) >= captureMaxPerEvent {
 			break
 		}
+		capturePathMu.Lock()
+		if pc, ok := capturePathCache[c.exe]; ok && now.Sub(pc.at) < snapCacheTTL {
+			capturePathMu.Unlock()
+			if pc.ok {
+				out = append(out, pc.file)
+			}
+			continue
+		}
+		capturePathMu.Unlock()
+
+		if dirFileCount(dir) >= captureMaxFiles {
+			// Surface once — a silent stop hides lost evidence exactly when
+			// it matters. Don't cache the miss so a cleared dir resumes.
+			captureFullOnce.Do(func() {
+				logging.LogfLSM("[lsm] capture dir %s at cap (%d files); pausing binary capture — clear old <sha>.bin files to resume", dir, captureMaxFiles)
+				KmsgStatef("ISSUE", "lsm capture dir at cap (%d files); binary capture paused", captureMaxFiles)
+			})
+			continue
+		}
+
 		cf, err := captureExe(c.pid, dir, maxExeHashBytes)
+		if err == nil {
+			cf.Exe = c.exe
+		}
+		capturePathMu.Lock()
+		if len(capturePathCache) >= snapCacheMaxEntry {
+			capturePathCache = map[string]cachedPathCapture{}
+		}
+		capturePathCache[c.exe] = cachedPathCapture{file: cf, ok: err == nil, at: now}
+		capturePathMu.Unlock()
 		if err != nil {
 			continue
 		}
-		cf.Exe = c.exe
 		out = append(out, cf)
 	}
 	return out
@@ -786,7 +864,7 @@ func gatherEnrichment(pid, uid uint32, cfg enrichConf, now time.Time) eventEnric
 		e.roster = cachedUIDRoster(uid, now)
 	}
 	if cfg.Capture {
-		e.captured = cachedCaptureThreat(uid, cfg.CaptureDir, e.snap, e.roster, now)
+		e.captured = captureThreat(cfg.CaptureDir, e.snap, e.roster, now)
 	}
 	return e
 }

@@ -7,14 +7,33 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// resetProcCaches clears the package-global enrichment caches so a test
+// that drives the cached paths cannot read another test's state (the
+// caches are keyed by pid/uid/path and tests reuse those with a fixed
+// injected `now`).
+func resetProcCaches() {
+	snapCacheMu.Lock()
+	snapCache = map[uint32]cachedSnap{}
+	snapCacheMu.Unlock()
+	rosterCacheMu.Lock()
+	rosterCache = map[uint32]cachedRoster{}
+	rosterCacheMu.Unlock()
+	capturePathMu.Lock()
+	capturePathCache = map[string]cachedPathCapture{}
+	capturePathMu.Unlock()
+	captureFullOnce = sync.Once{}
+}
 
 // fakeProc builds a synthetic /proc tree under t.TempDir() and points
 // procRoot at it for the duration of the test.
 func fakeProc(t *testing.T) string {
 	t.Helper()
+	resetProcCaches()
 	root := t.TempDir()
 	old := procRoot
 	procRoot = root
@@ -224,6 +243,80 @@ func TestCaptureExe_PreservesAndDedupes(t *testing.T) {
 	}
 	if n := dirFileCount(capDir); n != 1 {
 		t.Errorf("capture dir has %d files, want 1 (deduped)", n)
+	}
+}
+
+// TestCaptureThreat_CapturesDistinctDroppers is the regression guard for
+// the per-uid capture cache that silently skipped a SECOND, different
+// dropper run under the same uid within the TTL. Path-keyed dedup must
+// capture every distinct binary while still not re-hashing a repeat.
+func TestCaptureThreat_CapturesDistinctDroppers(t *testing.T) {
+	root := fakeProc(t)
+	capDir := filepath.Join(t.TempDir(), "cap")
+	now := time.Unix(1_700_000_000, 0)
+
+	fileA := filepath.Join(root, "a")
+	writeProcFile(t, fileA, "dropper-A-bytes")
+	fileB := filepath.Join(root, "b")
+	writeProcFile(t, fileB, "dropper-B-bytes")
+	mkProc(t, root, 800, fileA, "/", "a\x00", "a", 1, "0")
+	mkProc(t, root, 801, fileB, "/", "b\x00", "b", 1, "0")
+
+	// Mark both as deleted so capture triggers regardless of the temp path
+	// (deleted droppers are the flagship case anyway).
+	snap := procSnapshot{PID: 800, Exe: "/dropper/a", ExeDeleted: true}
+	roster := uidRoster{UID: 1234, Total: 2, Peers: []peerProc{{PID: 801, Exe: "/dropper/b", Deleted: true}}}
+
+	files := captureThreat(capDir, snap, roster, now)
+	if len(files) != 2 {
+		t.Fatalf("expected 2 distinct captures, got %d: %+v", len(files), files)
+	}
+	if files[0].SHA256 == files[1].SHA256 {
+		t.Errorf("distinct droppers must have distinct sha: %+v", files)
+	}
+	if n := dirFileCount(capDir); n != 2 {
+		t.Fatalf("capture dir has %d files, want 2", n)
+	}
+
+	// Re-run within TTL: path cache hit, no new files, still reports both.
+	again := captureThreat(capDir, snap, roster, now)
+	if len(again) != 2 || dirFileCount(capDir) != 2 {
+		t.Errorf("repeat within TTL should reuse, not re-capture: len=%d files=%d", len(again), dirFileCount(capDir))
+	}
+
+	// A THIRD, brand-new dropper under the same uid must still be captured.
+	fileC := filepath.Join(root, "c")
+	writeProcFile(t, fileC, "dropper-C-bytes")
+	mkProc(t, root, 802, fileC, "/", "c\x00", "c", 1, "0")
+	snap3 := procSnapshot{PID: 802, Exe: "/dropper/c", ExeDeleted: true}
+	files3 := captureThreat(capDir, snap3, uidRoster{}, now)
+	if len(files3) != 1 || dirFileCount(capDir) != 3 {
+		t.Errorf("a distinct new dropper must be captured: len=%d dir=%d", len(files3), dirFileCount(capDir))
+	}
+}
+
+func TestReadStartTime(t *testing.T) {
+	dir := t.TempDir()
+	// comm field (2) deliberately contains spaces AND parentheses so the
+	// parser must split after the FINAL ')'. starttime is field 22.
+	// After ')': fields 3..22 → 20 tokens, index 19 is starttime.
+	stat := "1234 (pgrep (x)) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 998877 rest1 rest2\n"
+	p := filepath.Join(dir, "stat")
+	if err := os.WriteFile(p, []byte(stat), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := readStartTime(p); got != 998877 {
+		t.Errorf("readStartTime = %d, want 998877", got)
+	}
+	// Missing / malformed files return 0, not a panic.
+	if got := readStartTime(filepath.Join(dir, "nope")); got != 0 {
+		t.Errorf("missing stat should be 0, got %d", got)
+	}
+	if err := os.WriteFile(p, []byte("garbage no paren"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := readStartTime(p); got != 0 {
+		t.Errorf("malformed stat should be 0, got %d", got)
 	}
 }
 

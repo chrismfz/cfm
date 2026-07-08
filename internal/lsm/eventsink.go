@@ -163,40 +163,45 @@ func ConfigureEventSink(c EventSinkConf) {
 	defaultEventSink.cfgMu.Unlock()
 }
 
-// emitDetectEvent routes an event through cfm.log + notify under the
-// per-policy cap. The kmsg path is independent and the caller is
-// expected to invoke KmsgDetect alongside. When the cap rolls a
-// window with suppressed events, a summary line is logged + emitted
-// before the current event.
-//
-// logReason and notifyReason are deliberately distinct. logReason is
-// the full per-event forensic line (caller + this specific target)
-// written to cfm.log. notifyReason is caller-identity-stable — no pid,
-// no target — so the notify deduper (keyed on Reason) collapses a whole
-// caller burst (e.g. an OBS-004 /proc sweep hitting dozens of targets)
-// into a single email rather than one per target. The per-target detail
-// rides along in samples, rendered under "Sample lines:" in the email
-// body, so the first email of the burst still shows a concrete target.
-func emitDetectEvent(ev Event, logReason, notifyReason string, extra map[string]string, samples []string) {
+// admitDetect consumes one token from the per-policy cfm.log + notify
+// rate bucket and reports whether this event may emit. A non-empty
+// summary is a window-roll line the caller must emit first (at most once
+// per minute per policy, so it cannot itself flood). The caller checks
+// this BEFORE building the (expensive) /proc enrichment, so a
+// rate-dropped event pays none of that cost — the rate cap bounds a
+// flood's work, not just its output. The kmsg path has its own
+// independent cap (KmsgDetect).
+func admitDetect(policyID PolicyID) (allow bool, summary string) {
 	defaultEventSink.cfgMu.Lock()
 	rate := defaultEventSink.cfg.DetectRatePerMin
 	defaultEventSink.cfgMu.Unlock()
-	allow, summary := defaultEventSink.rateAllow(ev.PolicyID, rate, time.Now())
-	if summary != "" {
-		// Window-roll summary. Emitted at most once per minute per
-		// policy regardless of cap, so it cannot itself flood.
-		logging.LogfLSM("[lsm] %s", summary)
-		_ = notify.Emit(notify.Event{
-			Kind:     "lsm_detect_summary",
-			Section:  "lsm",
-			When:     time.Now(),
-			Reason:   summary,
-			Severity: "notice",
-		})
-	}
-	if !allow {
-		return
-	}
+	return defaultEventSink.rateAllow(policyID, rate, time.Now())
+}
+
+// emitDetectSummary logs + notifies a window-roll suppression summary.
+func emitDetectSummary(summary string) {
+	logging.LogfLSM("[lsm] %s", summary)
+	_ = notify.Emit(notify.Event{
+		Kind:     "lsm_detect_summary",
+		Section:  "lsm",
+		When:     time.Now(),
+		Reason:   summary,
+		Severity: "notice",
+	})
+}
+
+// emitDetect writes one admitted detection to cfm.log + notify.
+//
+// logReason and notifyReason are deliberately distinct. logReason is the
+// full per-event forensic line (caller + this specific target + full
+// enrichment) written to cfm.log. notifyReason is what the notify deduper
+// (keyed on Reason) sees: for the sweep-class policies it is
+// caller-identity-stable so a whole /proc sweep collapses into one email;
+// for discrete-action policies it keeps the per-event target so distinct
+// targets stay distinct emails. The per-event/target detail, swarm
+// roster, and captured-binary references ride in samples, rendered under
+// "Sample lines:" in the email body.
+func emitDetect(logReason, notifyReason string, extra map[string]string, samples []string) {
 	logging.LogfLSM("[lsm] %s", logReason)
 	_ = notify.Emit(notify.Event{
 		Kind:     "lsm_detect",

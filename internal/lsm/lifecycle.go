@@ -496,16 +496,24 @@ func webOriginPolicy(id PolicyID) bool {
 	return false
 }
 
-// eventCallerTags renders the caller-behaviour tags that are stable
-// across a single caller's event burst (origin / stdio / primitive /
-// ptrace mode / cap-raise). Deliberately excludes the per-event target
-// (path/op) so the notify reason built from it stays constant across a
-// sweep and the deduper can collapse it.
+// originTag returns " origin=web" for a web-origin-flagged event on a
+// web-origin policy, else "". Single origin-check consulted by both the
+// per-event and the caller-stable reason builders.
+func originTag(ev Event) string {
+	if webOriginPolicy(ev.PolicyID) && ev.Flags&EventFlagWebOrigin != 0 {
+		return " origin=web"
+	}
+	return ""
+}
+
+// eventCallerTags renders the per-event behaviour tags (origin / stdio /
+// primitive / ptrace mode+sameuid / cap-raise). Some of these vary per
+// target within one caller's burst — ptrace mode and sameuid especially
+// (a sweep touches same-uid AND cross-uid targets) — so this belongs in
+// the per-event log line and samples, NOT in the collapsed notify reason.
 func eventCallerTags(ev Event) string {
 	var b strings.Builder
-	if webOriginPolicy(ev.PolicyID) && ev.Flags&EventFlagWebOrigin != 0 {
-		b.WriteString(" origin=web")
-	}
+	b.WriteString(originTag(ev))
 	if signal := ev.ExecStdioSignal(); signal != "" {
 		b.WriteString(" stdio=" + signal)
 	}
@@ -538,18 +546,50 @@ func eventDetailTail(ev Event) string {
 	return b.String()
 }
 
+// collapsesToCallerIdentity reports whether a policy's events should use
+// a caller-identity-stable notify reason so one caller's /proc sweep
+// becomes a SINGLE email (the notify deduper keys on Reason) instead of
+// one per target. Only the introspection-sweep policy needs this today:
+// CFML-OBS-004 fires once per (caller,target) pair as pgrep-style tools
+// walk /proc, dozens of events per second from one caller. Discrete-
+// action policies (FS-005 write, CRED-002 escalation, EXEC-*) keep the
+// full per-event reason so distinct targets remain distinct emails and
+// the notify JSONL audit keeps the target/pid. Add a policy here only
+// after confirming its events are genuinely a per-caller sweep.
+func collapsesToCallerIdentity(id PolicyID) bool {
+	return id == PolicyPtraceAccess
+}
+
+// stripCtl replaces control characters (newlines, CR, etc.) with '?' so
+// an attacker-chosen exe path / cwd / comm — all of which may legally
+// contain any byte but NUL and '/' — cannot forge a cfm.log line or
+// break the email body. cmdline is already strconv.Quote'd upstream; this
+// is the belt-and-braces pass over the fully composed line.
+func stripCtl(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
 // composeReasons builds the three strings emitNotify hands to the sink:
 //
-//   - logReason: full per-event forensic line for cfm.log (caller +
-//     this specific target + enrichment: snapshot, swarm summary,
-//     captured-binary paths).
-//   - notifyReason: caller-identity-stable line for the email — no pid,
-//     no target — so the notify deduper collapses a caller's whole
-//     burst into one email.
-//   - samples: the per-event target detail plus the multi-line swarm
-//     roster and captured-binary references, surfaced in the email body.
+//   - logReason: full per-event forensic line for cfm.log (caller + this
+//     specific target + enrichment: snapshot, swarm summary, captured
+//     paths).
+//   - notifyReason: the notify (email) dedup key. For a sweep-class policy
+//     it is caller-identity-stable (title + uid + comm + identity, no pid
+//     and no per-target/relationship tags) so the whole burst collapses to
+//     one email; uid is always present so distinct accounts stay distinct
+//     even with enrichment off. For discrete-action policies it keeps the
+//     full per-event reason (distinct targets → distinct emails, JSONL
+//     keeps the target).
+//   - samples: per-event target detail + the multi-line swarm roster +
+//     captured-binary references, for the email body.
 //
-// enr is only consulted when it is on.
+// All three are stripCtl'd because they embed attacker-controlled fields.
 func composeReasons(ev Event, enr eventEnrichment) (logReason, notifyReason string, samples []string) {
 	p, _ := PolicyByID(ev.PolicyID)
 	title := string(ev.PolicyID)
@@ -558,33 +598,31 @@ func composeReasons(ev Event, enr eventEnrichment) (logReason, notifyReason stri
 	}
 	detail := eventDetailTail(ev)
 
-	logReason = fmt.Sprintf("%s: pid=%d (%s) policy=%s%s", title, ev.PID, ev.Comm, ev.PolicyID, detail)
-	notifyReason = fmt.Sprintf("%s: comm=%s policy=%s%s", title, ev.Comm, ev.PolicyID, eventCallerTags(ev))
-	logReason += enr.logSuffix()
-	notifyReason += enr.identitySuffix()
+	base := fmt.Sprintf("%s: pid=%d (%s) policy=%s%s", title, ev.PID, ev.Comm, ev.PolicyID, detail)
+	logReason = stripCtl(base + enr.logSuffix())
 
-	samples = []string{fmt.Sprintf("pid=%d comm=%s%s", ev.PID, ev.Comm, detail)}
-	samples = append(samples, enr.samples()...)
+	if collapsesToCallerIdentity(ev.PolicyID) {
+		// Caller-identity-stable: exclude pid and the per-target
+		// relationship tags (ptrace mode / sameuid) that vary across a
+		// sweep. uid keeps distinct accounts distinct even when
+		// enrichment (and thus identitySuffix) is off.
+		notifyReason = stripCtl(fmt.Sprintf("%s: uid=%d comm=%s policy=%s%s%s",
+			title, ev.UID, ev.Comm, ev.PolicyID, originTag(ev), enr.identitySuffix()))
+	} else {
+		notifyReason = stripCtl(base + enr.identitySuffix())
+	}
+
+	samples = []string{stripCtl(fmt.Sprintf("pid=%d comm=%s%s", ev.PID, ev.Comm, detail))}
+	for _, s := range enr.samples() {
+		samples = append(samples, stripCtl(s))
+	}
 	return
 }
 
-// emitNotify converts an Event into a notify.Event and dispatches
-// via the existing CFM notify pipeline. Shape mirrors
-// internal/outbound's emission so downstream subscribers can treat
-// outbound and lsm events symmetrically.
-func emitNotify(ev Event) {
+// buildExtra assembles the structured Extra map (notify JSONL audit +
+// downstream consumers) for an event.
+func buildExtra(ev Event, enr eventEnrichment) map[string]string {
 	p, _ := PolicyByID(ev.PolicyID)
-
-	// Gather the caller's /proc context as early as possible — the
-	// caller may be short-lived (an OBS-004 sweep's pgrep, an EXEC-006
-	// dropper) and racing its own exit. This snapshots identity, the uid
-	// swarm roster, and preserves any suspicious binary before it can be
-	// unlinked. Cached so a burst does the work once; a no-op when
-	// enrichment is disabled.
-	enr := gatherEnrichment(ev.PID, ev.UID, eventSinkEnrichCfg(), time.Now())
-
-	logReason, notifyReason, samples := composeReasons(ev, enr)
-
 	extra := map[string]string{
 		"policy_id": string(ev.PolicyID),
 		"pid":       strconv.FormatUint(uint64(ev.PID), 10),
@@ -600,7 +638,7 @@ func emitNotify(ev Event) {
 	if ev.Op != FSOpNone {
 		extra["op"] = ev.Op.String()
 	}
-	if webOriginPolicy(ev.PolicyID) && ev.Flags&EventFlagWebOrigin != 0 {
+	if originTag(ev) != "" {
 		extra["origin"] = "web"
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
@@ -619,12 +657,33 @@ func emitNotify(ev Event) {
 		extra["cap_raise_sets"] = sets
 	}
 	enr.addExtra(extra)
+	return extra
+}
 
-	// Userspace sinks (cfm.log + notify) and the kmsg sink have
-	// independent per-policy rate caps so a chatty trigger cannot
-	// flood any one of them. See eventsink.go and kmsg.go.
-	emitDetectEvent(ev, logReason, notifyReason, extra, samples)
+// emitNotify converts an Event into a notify.Event and dispatches via the
+// existing CFM notify pipeline. The rate decision is made FIRST so a
+// rate-dropped event skips the expensive /proc enrichment entirely (the
+// cap bounds a flood's work, not just its output). kmsg has its own
+// independent cap.
+func emitNotify(ev Event) {
 	KmsgDetect(ev)
+
+	allow, summary := admitDetect(ev.PolicyID)
+	if summary != "" {
+		emitDetectSummary(summary)
+	}
+	if !allow {
+		return
+	}
+
+	// Gather the caller's /proc context — the caller may be short-lived
+	// (an OBS-004 sweep's pgrep, an EXEC-006 dropper) and racing its own
+	// exit, so this snapshots identity, the uid swarm roster, and
+	// preserves any suspicious binary before it can be unlinked. Cached so
+	// a burst does the work once; a no-op when enrichment is disabled.
+	enr := gatherEnrichment(ev.PID, ev.UID, eventSinkEnrichCfg(), time.Now())
+	logReason, notifyReason, samples := composeReasons(ev, enr)
+	emitDetect(logReason, notifyReason, buildExtra(ev, enr), samples)
 }
 
 // pinnedRingbufIno returns the bpffs inode of the pinned ringbuf

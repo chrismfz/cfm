@@ -22,20 +22,27 @@ func TestComposeReasons_NotifyStableAcrossTargets(t *testing.T) {
 		},
 	}
 	ev1 := Event{
-		PolicyID: PolicyPtraceAccess, PID: 100, Comm: "pgrep", Filename: "systemd",
+		PolicyID: PolicyPtraceAccess, PID: 100, UID: 1234, Comm: "pgrep", Filename: "systemd",
 		Flags: EventFlagWebOrigin | EventFlagPtraceRead | EventFlagPtraceSameUid,
 	}
 	ev2 := ev1
 	ev2.Filename = "sshd"
 
+	// ev2 differs in BOTH the target AND the sameuid relationship — a real
+	// sweep touches same-uid and cross-uid targets — to prove neither the
+	// target nor the per-target ptrace/sameuid tags leak into the dedup key.
+	ev2.Flags = EventFlagWebOrigin | EventFlagPtraceRead // sameuid cleared
+
 	l1, n1, s1 := composeReasons(ev1, enr)
 	l2, n2, s2 := composeReasons(ev2, enr)
 
 	if n1 != n2 {
-		t.Errorf("notifyReason must be stable across targets:\n  %q\n  %q", n1, n2)
+		t.Errorf("notifyReason must be stable across targets AND sameuid relationship:\n  %q\n  %q", n1, n2)
 	}
-	if strings.Contains(n1, "path=") || strings.Contains(n1, "pid=") {
-		t.Errorf("notifyReason must exclude per-event target/pid (breaks dedup): %q", n1)
+	for _, bad := range []string{"path=", "pid=", "ptrace=", "sameuid="} {
+		if strings.Contains(n1, bad) {
+			t.Errorf("notifyReason must exclude per-target/relationship field %q (breaks dedup): %q", bad, n1)
+		}
 	}
 	if l1 == l2 {
 		t.Error("logReason must differ per target")
@@ -43,17 +50,55 @@ func TestComposeReasons_NotifyStableAcrossTargets(t *testing.T) {
 	if s1[0] == s2[0] {
 		t.Error("sample line must differ per target")
 	}
-	if !strings.Contains(l1, "path=systemd") {
-		t.Errorf("logReason missing target: %q", l1)
+	if !strings.Contains(l1, "path=systemd") || !strings.Contains(l1, "sameuid=1") {
+		t.Errorf("logReason missing per-event detail: %q", l1)
 	}
-	for _, want := range []string{"exe=/tmp/.x/pgrep", "user=bob", "ptrace=read", "sameuid=1"} {
+	// notifyReason carries caller IDENTITY (uid always, plus enrichment).
+	for _, want := range []string{"uid=1234", "comm=pgrep", "exe=/tmp/.x/pgrep", "user=bob"} {
 		if !strings.Contains(n1, want) {
 			t.Errorf("notifyReason %q missing %q", n1, want)
 		}
 	}
-	// The full exe path and caller tags belong in the cfm.log line too.
+	// The per-target ptrace detail lives in the sample line, not the reason.
+	if !strings.Contains(s1[0], "ptrace=read") || !strings.Contains(s1[0], "sameuid=1") {
+		t.Errorf("sample line missing per-target ptrace detail: %q", s1[0])
+	}
 	if !strings.Contains(l1, "sha256=abcdef0123456789aa") {
 		t.Errorf("logReason missing full sha256: %q", l1)
+	}
+}
+
+// TestComposeReasons_DiscretePolicyKeepsTarget verifies that a non-sweep
+// policy (FS-005) keeps the target in the notify reason, so distinct
+// sensitive-file writes remain distinct emails and the notify JSONL audit
+// keeps the target — i.e. the collapse is scoped to sweep-class policies.
+func TestComposeReasons_DiscretePolicyKeepsTarget(t *testing.T) {
+	enr := eventEnrichment{on: true, snap: procSnapshot{Alive: true, PID: 50, UID: 1234, User: "bob", Exe: "/usr/bin/php"}}
+	ev1 := Event{PolicyID: PolicySensitiveWrite, PID: 50, Comm: "php-fpm", Filename: "/etc/shadow", Op: FSOpSetattr, Flags: EventFlagWebOrigin}
+	ev2 := ev1
+	ev2.Filename = "/etc/passwd"
+
+	_, n1, _ := composeReasons(ev1, enr)
+	_, n2, _ := composeReasons(ev2, enr)
+
+	if n1 == n2 {
+		t.Errorf("discrete-policy notifyReason must differ per target (distinct emails):\n  %q\n  %q", n1, n2)
+	}
+	if !strings.Contains(n1, "path=/etc/shadow") {
+		t.Errorf("discrete-policy notifyReason must keep the target: %q", n1)
+	}
+}
+
+// TestComposeReasons_StripsControlChars guards against log/email injection
+// via an attacker-chosen exe path containing a newline.
+func TestComposeReasons_StripsControlChars(t *testing.T) {
+	enr := eventEnrichment{on: true, snap: procSnapshot{Alive: true, PID: 7, UID: 1234, Exe: "/tmp/x\n[lsm] FORGED policy=CFML-CRED-002"}}
+	ev := Event{PolicyID: PolicyPtraceAccess, PID: 7, Comm: "x\nFORGED", Filename: "sys\ntemd", Flags: EventFlagWebOrigin}
+	logReason, notifyReason, samples := composeReasons(ev, enr)
+	for _, s := range append([]string{logReason, notifyReason}, samples...) {
+		if strings.ContainsAny(s, "\n\r") {
+			t.Errorf("control char survived sanitization: %q", s)
+		}
 	}
 }
 
