@@ -17,6 +17,25 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- WAF (rule 604, `WAF_CT_ANOMALY:CT_CHARSET_BYPASS`, challenge): **stopped
+  challenging legitimate non-Latin form/API POSTs.** The Content-Type charset
+  allowlist — which exists to flag a charset the WAF can't decode but the
+  backend can (EBCDIC/IBM037, UTF-7, UTF-16), a real evasion vector — held only
+  Latin + Chinese, so a Greek (`iso-8859-7`, `windows-1253`) or any other
+  national-charset POST was challenged (rule 604). The allowlist now admits any
+  **ASCII-superset** charset — the only property that matters here, since the
+  exploit metacharacters `< > ' " ( ) ;` live in 0x00–0x7F and map to ASCII
+  unchanged, so the WAF and the backend see identical bytes: every `iso-8859-*`
+  and `windows-125x` national charset (Greek, Cyrillic, Hebrew, Arabic, Turkish,
+  Baltic, Vietnamese), KOI8, TIS-620, and the ASCII-compatible CJK multibyte
+  encodings (shift_jis/big5/euc-*). EBCDIC, UTF-7 and UTF-16/32 stay flagged, as
+  do unknown charsets (fail-safe allowlist) — verified old-vs-current. The
+  charset value is now also read from a **quoted** form (`charset="ibm037"`), so
+  a dangerous charset can no longer dodge the check by quoting, and the capture
+  accepts `_` so `shift_jis`/`ks_c_5601-1987` are recognised. Found by the
+  2026-07 edge Lua audit.
+
 ### Security
 - WAF (rule 401, `WAF_UPLOAD_FNAME`, block + autoblock): **closed four upload
   webshell bypasses in Content-Disposition filename extraction.** (1) The

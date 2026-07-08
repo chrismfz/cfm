@@ -1794,6 +1794,54 @@ do
         "79: malformed boundary 'foo<bar>' — fires (reason=" .. tostring(reason) .. ")")
 end
 
+-- ── Test 79b: rule_content_type_anomaly — charset allowlist (Greek + national)
+-- The charset check exists to stop a WAF-evasion where a charset the WAF can't
+-- decode but the backend can (EBCDIC/UTF-7/UTF-16) smuggles an exploit past the
+-- raw-byte scan. The allowlist previously held only Latin + Chinese, so a legit
+-- Greek / national-charset form or API POST was challenged (rule 604). Safe =
+-- ASCII-superset (exploit metachars stay at their ASCII bytes); dangerous =
+-- EBCDIC / UTF-7 / UTF-16.
+do
+  disable_all_rules()
+  waf.set_rule("rule_content_type_anomaly", "challenge")
+
+  local function ct_charset(cs)
+    local _, reason = waf.check(fresh_ctx({
+      headers = { ["Content-Type"] = "application/x-www-form-urlencoded; charset=" .. cs },
+    }))
+    -- Coerce to a real boolean (a nil reason must compare == false, not nil).
+    return (reason and tostring(reason):find("CT_CHARSET", 1, true) ~= nil) and true or false
+  end
+
+  -- Legit ASCII-superset charsets must NOT be challenged.
+  for _, cs in ipairs({
+    "iso-8859-7", "windows-1253", "iso8859-7", "greek",   -- Greek (ISO, Windows, no-dash, alias)
+    "utf-8", "windows-1251", "koi8-r",                     -- Cyrillic
+    "iso-8859-9", "windows-1254",                          -- Turkish
+    "windows-1255", "windows-1256",                        -- Hebrew, Arabic
+    "shift_jis", "euc-kr", "big5", "tis-620",              -- CJK / Thai
+  }) do
+    check(ct_charset(cs) == false, "79b: legit charset '" .. cs .. "' must NOT fire CT_CHARSET_BYPASS")
+  end
+
+  -- Real evasion charsets must STAY flagged.
+  for _, cs in ipairs({ "ibm037", "cp500", "cp875", "utf-7", "utf-16", "utf-16le", "utf-32" }) do
+    check(ct_charset(cs) == true, "79b: evasion charset '" .. cs .. "' must fire CT_CHARSET_BYPASS")
+  end
+
+  -- Quoted value must not dodge the check: `charset="ibm037"` still fires,
+  -- while a quoted legit charset still passes.
+  local _, qreason = waf.check(fresh_ctx({
+    headers = { ["Content-Type"] = 'application/x-www-form-urlencoded; charset="ibm037"' },
+  }))
+  check(qreason and tostring(qreason):find("CT_CHARSET", 1, true) ~= nil,
+        "79b: quoted evasion charset must still fire CT_CHARSET_BYPASS")
+  local qok = waf.check(fresh_ctx({
+    headers = { ["Content-Type"] = 'text/html; charset="windows-1253"' },
+  }))
+  check(qok == false, "79b: quoted legit Greek charset must NOT fire")
+end
+
 -- ── Test 80: rule_serialize — Office namespace + Koha CCL must NOT fire ─────
 -- Production log review (2026-05) found two FPs in 41K events that share a
 -- common pattern: `o:` + `:"` appearing in unrelated positions in a URL.

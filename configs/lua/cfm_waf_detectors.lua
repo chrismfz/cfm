@@ -1586,6 +1586,56 @@ end
 --
 -- Boundary bypass: PHP's non-RFC-compliant multipart boundary parsing can be
 --   exploited by sending a malformed boundary= value to confuse content scanners.
+
+-- Content-Type charset allowlist for detect_content_type_anomaly.
+--
+-- Threat: a charset the WAF cannot decode but the backend can (EBCDIC/IBM037,
+-- UTF-7, UTF-16) lets an exploit's metacharacters (< > ' " ( ) ;) be smuggled
+-- past the raw-byte scan and reconstituted server-side. A charset is SAFE here
+-- iff it is an ASCII SUPERSET — the 0x00-0x7F range, which holds every exploit
+-- metacharacter, maps to ASCII unchanged — so the WAF and the backend see the
+-- same bytes and no evasion is possible. That covers UTF-8, every ISO-8859-*
+-- and Windows-125x NATIONAL charset (incl. Greek `iso-8859-7`/`windows-1253`,
+-- Cyrillic, Hebrew, Arabic, Turkish, Baltic, Vietnamese), KOI8, TIS-620, and
+-- the ASCII-compatible CJK multibyte encodings. It excludes EBCDIC
+-- (IBM0xx/cp5xx/cp875/cp1026 — a wholly different byte map), UTF-7 (`+ADw-`=`<`)
+-- and UTF-16/UTF-32 (NUL-interleaved) — the real evasion vectors — which stay
+-- flagged, as do unknown charsets (fail-safe allowlist).
+--
+-- Before this list only Latin + Chinese were allowed, so a legitimate Greek (or
+-- any non-Latin) form/API POST declaring its charset was challenged (rule 604).
+local CHARSET_SAFE = {
+  ["utf-8"]=true, ["utf8"]=true, ["us-ascii"]=true, ["ascii"]=true,
+  -- CJK multibyte (ASCII-compatible low range)
+  ["gbk"]=true, ["gb2312"]=true, ["gb-2312"]=true, ["gb18030"]=true,
+  ["big5"]=true, ["big5-hkscs"]=true,
+  ["shift_jis"]=true, ["shift-jis"]=true, ["sjis"]=true, ["x-sjis"]=true,
+  ["cp932"]=true, ["ms932"]=true, ["windows-31j"]=true,
+  ["euc-jp"]=true, ["eucjp"]=true, ["euc-kr"]=true, ["euckr"]=true,
+  ["ks_c_5601-1987"]=true, ["ksc5601"]=true, ["ksc_5601"]=true,
+  ["windows-936"]=true, ["windows-949"]=true, ["windows-950"]=true,
+  -- Thai / Cyrillic / national-charset aliases
+  ["tis-620"]=true, ["windows-874"]=true, ["cp874"]=true,
+  ["koi8-r"]=true, ["koi8-u"]=true,
+  ["latin1"]=true, ["latin-1"]=true, ["latin2"]=true, ["latin5"]=true,
+  ["greek"]=true, ["iso-ir-126"]=true, ["ecma-118"]=true,
+  ["cyrillic"]=true, ["hebrew"]=true, ["arabic"]=true,
+}
+
+local function charset_is_safe(cs)
+  if CHARSET_SAFE[cs] then return true end
+  -- ISO-8859-N single-byte national charsets (Latin-1..Latin-10, Greek=7,
+  -- Cyrillic=5, Hebrew=8, Arabic=6, Turkish=9, Baltic=13, ...) — all ASCII
+  -- supersets. `iso8859-7` (no dash) and `iso-8859-7` both accepted.
+  if cs:match("^iso%-?8859%-%d%d?$") then return true end
+  -- Windows-125x (and the `cp125x` alias): 1250 Central-Euro, 1251 Cyrillic,
+  -- 1252 Western, 1253 GREEK, 1254 Turkish, 1255 Hebrew, 1256 Arabic,
+  -- 1257 Baltic, 1258 Vietnamese. NOT cp5xx/cp0xx/cp875/cp1026 (EBCDIC).
+  if cs:match("^windows%-125%d$") then return true end
+  if cs:match("^cp125%d$") then return true end
+  return false
+end
+
 function _M.detect_content_type_anomaly(headers)
   headers = headers or {}
   local ct = headers["content-type"] or headers["Content-Type"] or ""
@@ -1597,18 +1647,13 @@ function _M.detect_content_type_anomaly(headers)
   local ctl = lower(ct)
 
   if has(ctl, "charset") then
-    local charset_val = ctl:match("charset%s*=%s*([%w%-]+)")
-    if charset_val then
-      local safe_charsets = {
-        ["utf-8"]=true, ["utf8"]=true,
-        ["gbk"]=true, ["gb2312"]=true, ["gb18030"]=true,
-        ["iso-8859-1"]=true, ["iso-8859-15"]=true,
-        ["windows-1252"]=true, ["latin1"]=true,
-        ["us-ascii"]=true, ["ascii"]=true,
-      }
-      if not safe_charsets[charset_val] then
-        return "CT_CHARSET_BYPASS:" .. charset_val:sub(1, 32)
-      end
+    -- Accept a quoted value too (RFC 2045 quoted-string) so a dangerous charset
+    -- can't dodge the check by quoting: `charset="ibm037"`. `_` is allowed so
+    -- `shift_jis`/`ks_c_5601-1987` capture whole.
+    local charset_val = ctl:match('charset%s*=%s*"([^"]+)"')
+                     or ctl:match("charset%s*=%s*([%w%-_]+)")
+    if charset_val and not charset_is_safe(charset_val) then
+      return "CT_CHARSET_BYPASS:" .. charset_val:sub(1, 32)
     end
     -- Multiple charset= declarations in one Content-Type
     local _, n = ctl:gsub("charset", "charset")
