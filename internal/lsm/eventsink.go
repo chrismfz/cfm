@@ -41,14 +41,98 @@ type EventSinkConf struct {
 	// window roll. 0 disables the cap (not recommended on shared
 	// hosts where one chatty FP can fill the log). Default 30.
 	DetectRatePerMin int
+
+	// Enrich turns on the /proc forensic snapshot of the event's caller
+	// (user, real exe path + deleted flag, cwd, cmdline, parent, login
+	// uid) folded into the cfm.log line and the notify email. Default
+	// true. The BPF event only carries the spoofable comm; this is what
+	// makes an alert actionable ("who / what / where"). Best-effort:
+	// a caller that already exited yields `proc=gone`.
+	Enrich bool
+
+	// EnrichHash includes the SHA-256 of the caller's exe in the
+	// enrichment. Default true. The hash identifies the binary even when
+	// its on-disk path was unlinked, and feeds a VirusTotal / YARA
+	// lookup directly. Costs one bounded read+hash per new caller pid
+	// (cached for the pid's event burst); set false to skip it on hosts
+	// where the extra I/O per novel pid is unwelcome. Ignored when
+	// Enrich is false.
+	EnrichHash bool
+
+	// EnrichPeers adds the "uid swarm roster" — every other process
+	// sharing the caller's real uid, with its pid, comm, and real exe
+	// path — into the email + log. Default true. This is the evidence a
+	// 3am alert needs by morning: a malware swarm typically runs many
+	// processes under one hosting account with spoofed comms (all
+	// pointing at one dropped binary), and those pids are gone by the
+	// time an operator reads the mail. Bounded and cached per uid.
+	// Skipped for uid 0 (would enumerate every root process). Ignored
+	// when Enrich is false.
+	EnrichPeers bool
+
+	// EnrichCapture copies the offending binary out of /proc/<pid>/exe
+	// into CaptureDir at event time, so a dropper that unlinks itself
+	// after running can still be analysed. Default true. Only fires for
+	// SUSPICIOUS images (exe already unlinked, or living under
+	// /tmp,/var/tmp,/dev/shm,/run,/home) so system binaries are never
+	// copied; deduplicated by SHA-256; bounded per event and by a
+	// directory file cap. Files are written root-only (0600) and never
+	// executed. Ignored when Enrich is false.
+	EnrichCapture bool
+
+	// CaptureDir is where EnrichCapture writes preserved binaries
+	// (named <sha256>.bin). Default DefaultCaptureDir. Created 0700 on
+	// first capture.
+	CaptureDir string
 }
 
+// DefaultCaptureDir is where forensic binary captures land by default.
+// Under /var/lib/cfm (runtime/generated artifacts) per the repo's
+// config-model convention, not /var/log (human-readable logs).
+const DefaultCaptureDir = "/var/lib/cfm/lsm/capture"
+
 // DefaultEventSinkConf is the documented default: 30 per minute per
-// policy. Higher than kmsg's 10 because cfm.log is a rotated file
-// rather than a fixed-size kernel buffer, but tight enough that a
-// runaway trigger cannot bury real events under thousands of lines.
+// policy, with full /proc enrichment (exe hash + uid swarm roster +
+// suspicious-binary capture) on. Higher rate than kmsg's 10 because
+// cfm.log is a rotated file rather than a fixed-size kernel buffer, but
+// tight enough that a runaway trigger cannot bury real events under
+// thousands of lines.
 func DefaultEventSinkConf() EventSinkConf {
-	return EventSinkConf{DetectRatePerMin: 30}
+	return EventSinkConf{
+		DetectRatePerMin: 30,
+		Enrich:           true,
+		EnrichHash:       true,
+		EnrichPeers:      true,
+		EnrichCapture:    true,
+		CaptureDir:       DefaultCaptureDir,
+	}
+}
+
+// enrichConf is the immutable snapshot of the enrichment toggles the
+// drain path reads once per event before touching /proc.
+type enrichConf struct {
+	Enrich, Hash, Peers, Capture bool
+	CaptureDir                   string
+}
+
+// eventSinkEnrichCfg returns the current enrichment toggles under the
+// config lock. Read by the drain path (emitNotify) before snapshotting
+// /proc.
+func eventSinkEnrichCfg() enrichConf {
+	defaultEventSink.cfgMu.Lock()
+	defer defaultEventSink.cfgMu.Unlock()
+	c := defaultEventSink.cfg
+	dir := c.CaptureDir
+	if dir == "" {
+		dir = DefaultCaptureDir
+	}
+	return enrichConf{
+		Enrich:     c.Enrich,
+		Hash:       c.EnrichHash,
+		Peers:      c.EnrichPeers,
+		Capture:    c.EnrichCapture,
+		CaptureDir: dir,
+	}
 }
 
 type eventSink struct {
@@ -79,12 +163,21 @@ func ConfigureEventSink(c EventSinkConf) {
 	defaultEventSink.cfgMu.Unlock()
 }
 
-// emitDetectEvent routes ev through cfm.log + notify under the
+// emitDetectEvent routes an event through cfm.log + notify under the
 // per-policy cap. The kmsg path is independent and the caller is
 // expected to invoke KmsgDetect alongside. When the cap rolls a
 // window with suppressed events, a summary line is logged + emitted
 // before the current event.
-func emitDetectEvent(ev Event, reason string, extra map[string]string) {
+//
+// logReason and notifyReason are deliberately distinct. logReason is
+// the full per-event forensic line (caller + this specific target)
+// written to cfm.log. notifyReason is caller-identity-stable — no pid,
+// no target — so the notify deduper (keyed on Reason) collapses a whole
+// caller burst (e.g. an OBS-004 /proc sweep hitting dozens of targets)
+// into a single email rather than one per target. The per-target detail
+// rides along in samples, rendered under "Sample lines:" in the email
+// body, so the first email of the burst still shows a concrete target.
+func emitDetectEvent(ev Event, logReason, notifyReason string, extra map[string]string, samples []string) {
 	defaultEventSink.cfgMu.Lock()
 	rate := defaultEventSink.cfg.DetectRatePerMin
 	defaultEventSink.cfgMu.Unlock()
@@ -104,14 +197,15 @@ func emitDetectEvent(ev Event, reason string, extra map[string]string) {
 	if !allow {
 		return
 	}
-	logging.LogfLSM("[lsm] %s", reason)
+	logging.LogfLSM("[lsm] %s", logReason)
 	_ = notify.Emit(notify.Event{
 		Kind:     "lsm_detect",
 		Section:  "lsm",
 		When:     time.Now(),
-		Reason:   reason,
+		Reason:   notifyReason,
 		Severity: "warning",
 		Extra:    extra,
+		Samples:  samples,
 	})
 }
 

@@ -18,6 +18,33 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **cfm-lsm event enrichment — actionable alerts + a self-preserving forensic
+  trail.** Every LSM detection now carries a best-effort `/proc` snapshot of the
+  offending process, gathered in the drain path within milliseconds of the event
+  (before a short-lived caller exits), folded into the `cfm.log` line and the
+  notify email: `user` (uid→name), the **real** `exe` path (+ `(deleted)` flag —
+  `comm` is spoofable, the exe inode is not), **SHA-256** of the exe (VirusTotal-
+  ready, works on unlinked binaries), `cwd`, `cmdline`, `ppid`+parent `comm`/`exe`,
+  and `loginuid`. Two further layers: **`enrich_peers`** appends the *uid swarm
+  roster* — every process sharing the caller's real uid with its pid/comm/real-exe,
+  so a compromised account's whole set of spoofed-comm processes (all typically
+  pointing at one dropped binary) is captured while those pids still exist; and
+  **`enrich_capture`** copies suspicious binaries (already-deleted, or under
+  `/tmp`,`/var/tmp`,`/dev/shm`,`/run`,`/home`) out of `/proc/<pid>/exe` into
+  `capture_dir` (default `/var/lib/cfm/lsm/capture`, `<sha256>.bin`, root-only,
+  never executed, deduplicated, bounded) so a self-deleting dropper is preserved
+  for analysis. All four knobs live under `[events]` in `lsm.conf` and **default
+  ON** (a pre-existing conf inherits them on upgrade — no edit needed). Snapshots
+  are cached per caller pid and rosters per uid, so a burst does the `/proc` work
+  (incl. hashing and the full scan) once.
+- **cfm-lsm alert-flood fix (fold into the above).** The notify email *reason* is
+  now caller-identity-stable (no pid, no per-event target), so the existing notify
+  deduper collapses a whole `/proc`-sweep burst — e.g. an `CFML-OBS-004` `pgrep`
+  scan touching dozens of targets — into a **single email** instead of one email
+  per target (previously the target was in the dedup key, so a sweep produced up
+  to the per-policy cap in emails). The per-target detail, the swarm roster, and
+  captured-binary references now ride in the email's **Sample lines** and the
+  structured `Extra` map; `cfm.log` keeps the full per-event line.
 - **Web detector observability:** per-IP / subnet challenge **issuance** is now
   logged to `cfm.challenges.log` as `[challenge_issued] ip=… host=… rule=… ttl=…`
   (gated by `ChallengeLog`, like every other `[challenge]*` line). Previously an

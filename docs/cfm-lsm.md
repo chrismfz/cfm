@@ -917,6 +917,62 @@ and related sysctls), then enable `CFML-BPF-001` only where
 advanced-threat telemetry is desired.
 
 
+## Event enrichment — making an alert actionable
+
+The BPF ring-buffer event (`internal/lsm/events.go`) is deliberately
+tiny: pid/tgid/uid/gid, the 16-byte `comm`, and a 64-byte policy-specific
+`filename`. That is enough to know THAT something fired, but `comm` is
+spoofable (`prctl(PR_SET_NAME)` / `argv[0]`), so on its own an event
+cannot answer *who / what / where*. Worse, the offending process is
+frequently short-lived (an OBS-004 sweep's `pgrep`, an EXEC-006 dropper)
+and gone by the time an operator reads a 3am email.
+
+The daemon closes that gap in the drain goroutine (`emitNotify` →
+`gatherEnrichment` in `internal/lsm/procsnap.go`), reading the caller's
+`/proc` within milliseconds of the event — far faster than a human, but
+still a best-effort race against process exit. Three layers, all
+best-effort, bounded, and controlled from `[events]` in `lsm.conf`
+(every knob defaults ON; an operator's pre-existing conf inherits the
+defaults on upgrade without editing, because `ParseConf` seeds
+`DefaultEventSinkConf()` and only overrides keys the file actually
+lists):
+
+| Knob | Default | What it adds |
+|---|---|---|
+| `enrich` | on | Caller `/proc` snapshot: `user` (uid→name), real `exe` (+ `(deleted)` flag), `cwd`, `cmdline`, `ppid`+parent `comm`/`exe`, `loginuid`. |
+| `enrich_hash` | on | SHA-256 of the caller's exe bytes (read through `/proc/<pid>/exe`, so it works even for an unlinked binary). VirusTotal / YARA-ready. |
+| `enrich_peers` | on | The **uid swarm roster**: every process sharing the caller's real uid, with pid/comm/real-exe. A compromised account typically runs many processes under one uid with spoofed comms all pointing at one dropped binary — this captures that roster while the pids still exist. Skipped for uid 0. |
+| `enrich_capture` | on | Copies the offending binary out of `/proc/<pid>/exe` into `capture_dir` (default `/var/lib/cfm/lsm/capture`) **before it can self-delete**. Only for suspicious images (already unlinked, or under `/tmp`,`/var/tmp`,`/dev/shm`,`/run`,`/home`); saved `<sha256>.bin`, deduplicated, root-only `0600`, never executed, bounded per event and by a directory file cap. Captures the caller AND suspicious roster peers. |
+
+**Where the fields land.** The full per-event detail (caller snapshot +
+this specific target + swarm summary + captured paths) goes to the
+`cfm.log` line. The notify **email reason is deliberately
+caller-identity-stable** — it carries `comm`/`user`/`exe`/short-sha and
+the caller-behaviour tags, but **not** the pid or the per-event target —
+so the existing notify deduper (keyed on `Reason`) collapses a whole
+`/proc`-sweep burst into a **single email** instead of one-per-target.
+The per-target line, the multi-line swarm roster, and captured-binary
+references ride along in the email's **Sample lines** (rendered by the
+notify body template) and in the structured `Extra` map (audit JSONL).
+This is what fixed the "thousands of emails from one OBS-004 sweep"
+report: the flood was structural — the old reason embedded the target so
+every target was a unique dedup key.
+
+**Cost control.** Snapshots are cached per caller pid and rosters per
+uid (both `snapCacheTTL`), so a burst that spans dozens of events under
+one caller/uid does the `/proc` work — including the exe hash and the
+full `/proc` scan — once. Capture only touches disk for suspicious
+images, deduplicates by content hash, and stops at `captureMaxFiles`.
+A caller that already exited yields `proc=gone`; the parent is usually
+still resolvable and is the more durable "where do I look" pointer
+(cron/launcher outlives the tool it spawned).
+
+**Not a security boundary.** Enrichment is forensics. An attacker who
+controls the process can spoof `comm`/`argv`, but cannot fake the `exe`
+symlink's inode target or the SHA-256 of the bytes actually mapped as
+the program — which is exactly why `exe` + `sha256` + the captured image
+are the high-value fields.
+
 ## Out of scope (with rationale)
 
 For each excluded policy ID, one short paragraph on what already covers

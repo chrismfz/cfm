@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -479,43 +480,110 @@ func anyEnabled(c *Conf) bool {
 	return false
 }
 
+// webOriginPolicy reports whether a policy stamps the web-origin flag
+// (bit 0) with "this task started under, or is running as, a watched
+// web/panel uid" semantics — i.e. whether an `origin=web` tag is
+// meaningful for it. Single source of truth consulted by emitNotify and
+// KmsgDetect (kmsg.go); keeping it here avoids the divergent inline OR
+// lists that previously had to be edited in lockstep across sinks.
+func webOriginPolicy(id PolicyID) bool {
+	switch id {
+	case PolicySensitiveWrite, PolicyUnexpectedBPF, PolicyKernelModuleLoad,
+		PolicyKernelKnobWrite, PolicyKexecLoad, PolicyPtraceAccess,
+		PolicyRawSocket, PolicyCapRaise:
+		return true
+	}
+	return false
+}
+
+// eventCallerTags renders the caller-behaviour tags that are stable
+// across a single caller's event burst (origin / stdio / primitive /
+// ptrace mode / cap-raise). Deliberately excludes the per-event target
+// (path/op) so the notify reason built from it stays constant across a
+// sweep and the deduper can collapse it.
+func eventCallerTags(ev Event) string {
+	var b strings.Builder
+	if webOriginPolicy(ev.PolicyID) && ev.Flags&EventFlagWebOrigin != 0 {
+		b.WriteString(" origin=web")
+	}
+	if signal := ev.ExecStdioSignal(); signal != "" {
+		b.WriteString(" stdio=" + signal)
+	}
+	if prim := ev.PrivInstallPrimitive(); prim != "" {
+		b.WriteString(" primitive=" + prim)
+	}
+	if mode := ev.PtraceMode(); mode != "" {
+		b.WriteString(" ptrace=" + mode)
+		if ev.PtraceSameUid() {
+			b.WriteString(" sameuid=1")
+		}
+	}
+	if sets := ev.CapRaiseSets(); sets != "" {
+		b.WriteString(" cap_raise=" + sets)
+	}
+	return b.String()
+}
+
+// eventDetailTail is the full per-event tail (target path/op plus the
+// caller tags) shared by the cfm.log line and the notify sample line.
+func eventDetailTail(ev Event) string {
+	var b strings.Builder
+	if ev.Filename != "" {
+		b.WriteString(" path=" + ev.Filename)
+	}
+	if ev.Op != FSOpNone {
+		b.WriteString(" op=" + ev.Op.String())
+	}
+	b.WriteString(eventCallerTags(ev))
+	return b.String()
+}
+
+// composeReasons builds the three strings emitNotify hands to the sink:
+//
+//   - logReason: full per-event forensic line for cfm.log (caller +
+//     this specific target + enrichment: snapshot, swarm summary,
+//     captured-binary paths).
+//   - notifyReason: caller-identity-stable line for the email — no pid,
+//     no target — so the notify deduper collapses a caller's whole
+//     burst into one email.
+//   - samples: the per-event target detail plus the multi-line swarm
+//     roster and captured-binary references, surfaced in the email body.
+//
+// enr is only consulted when it is on.
+func composeReasons(ev Event, enr eventEnrichment) (logReason, notifyReason string, samples []string) {
+	p, _ := PolicyByID(ev.PolicyID)
+	title := string(ev.PolicyID)
+	if p.Title != "" {
+		title = p.Title
+	}
+	detail := eventDetailTail(ev)
+
+	logReason = fmt.Sprintf("%s: pid=%d (%s) policy=%s%s", title, ev.PID, ev.Comm, ev.PolicyID, detail)
+	notifyReason = fmt.Sprintf("%s: comm=%s policy=%s%s", title, ev.Comm, ev.PolicyID, eventCallerTags(ev))
+	logReason += enr.logSuffix()
+	notifyReason += enr.identitySuffix()
+
+	samples = []string{fmt.Sprintf("pid=%d comm=%s%s", ev.PID, ev.Comm, detail)}
+	samples = append(samples, enr.samples()...)
+	return
+}
+
 // emitNotify converts an Event into a notify.Event and dispatches
 // via the existing CFM notify pipeline. Shape mirrors
 // internal/outbound's emission so downstream subscribers can treat
 // outbound and lsm events symmetrically.
 func emitNotify(ev Event) {
 	p, _ := PolicyByID(ev.PolicyID)
-	title := string(ev.PolicyID)
-	if p.Title != "" {
-		title = p.Title
-	}
 
-	reason := fmt.Sprintf("%s: pid=%d (%s) policy=%s",
-		title, ev.PID, ev.Comm, ev.PolicyID)
-	if ev.Filename != "" {
-		reason += " path=" + ev.Filename
-	}
-	if ev.Op != FSOpNone {
-		reason += " op=" + ev.Op.String()
-	}
-	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess || ev.PolicyID == PolicyRawSocket || ev.PolicyID == PolicyCapRaise) && ev.Flags&EventFlagWebOrigin != 0 {
-		reason += " origin=web"
-	}
-	if signal := ev.ExecStdioSignal(); signal != "" {
-		reason += " stdio=" + signal
-	}
-	if prim := ev.PrivInstallPrimitive(); prim != "" {
-		reason += " primitive=" + prim
-	}
-	if mode := ev.PtraceMode(); mode != "" {
-		reason += " ptrace=" + mode
-		if ev.PtraceSameUid() {
-			reason += " sameuid=1"
-		}
-	}
-	if sets := ev.CapRaiseSets(); sets != "" {
-		reason += " cap_raise=" + sets
-	}
+	// Gather the caller's /proc context as early as possible — the
+	// caller may be short-lived (an OBS-004 sweep's pgrep, an EXEC-006
+	// dropper) and racing its own exit. This snapshots identity, the uid
+	// swarm roster, and preserves any suspicious binary before it can be
+	// unlinked. Cached so a burst does the work once; a no-op when
+	// enrichment is disabled.
+	enr := gatherEnrichment(ev.PID, ev.UID, eventSinkEnrichCfg(), time.Now())
+
+	logReason, notifyReason, samples := composeReasons(ev, enr)
 
 	extra := map[string]string{
 		"policy_id": string(ev.PolicyID),
@@ -532,7 +600,7 @@ func emitNotify(ev Event) {
 	if ev.Op != FSOpNone {
 		extra["op"] = ev.Op.String()
 	}
-	if (ev.PolicyID == PolicySensitiveWrite || ev.PolicyID == PolicyUnexpectedBPF || ev.PolicyID == PolicyKernelModuleLoad || ev.PolicyID == PolicyKernelKnobWrite || ev.PolicyID == PolicyKexecLoad || ev.PolicyID == PolicyPtraceAccess || ev.PolicyID == PolicyRawSocket || ev.PolicyID == PolicyCapRaise) && ev.Flags&EventFlagWebOrigin != 0 {
+	if webOriginPolicy(ev.PolicyID) && ev.Flags&EventFlagWebOrigin != 0 {
 		extra["origin"] = "web"
 	}
 	if signal := ev.ExecStdioSignal(); signal != "" {
@@ -550,11 +618,12 @@ func emitNotify(ev Event) {
 	if sets := ev.CapRaiseSets(); sets != "" {
 		extra["cap_raise_sets"] = sets
 	}
+	enr.addExtra(extra)
 
 	// Userspace sinks (cfm.log + notify) and the kmsg sink have
 	// independent per-policy rate caps so a chatty trigger cannot
 	// flood any one of them. See eventsink.go and kmsg.go.
-	emitDetectEvent(ev, reason, extra)
+	emitDetectEvent(ev, logReason, notifyReason, extra, samples)
 	KmsgDetect(ev)
 }
 
