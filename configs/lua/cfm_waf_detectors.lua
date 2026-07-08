@@ -1911,18 +1911,57 @@ function _M.detect_upload_filename(body, headers)
     return nil
   end
 
+  -- The Content-Disposition parameter name is case-INSENSITIVE per RFC
+  -- 2183/7578, and PHP's rfc1867 parser compares it with strcasecmp — so
+  -- `FileName`, `FILENAME`, `fileName` are all honoured by the backend. The
+  -- token must therefore be matched case-insensitively (Lua patterns have no
+  -- `i` flag), or a capitalised parameter name skips extraction entirely and
+  -- every matcher above with it (webshell delivered as `FileName="shell.php"`).
+  local FN = "[Ff][Ii][Ll][Ee][Nn][Aa][Mm][Ee]"
+
   -- Match double-quoted, single-quoted, and unquoted filename= values
-  for fname in body:gmatch('[Ff]ilename%s*=%s*"([^"]+)"') do
+  for fname in body:gmatch(FN .. '%s*=%s*"([^"]+)"') do
     local hit = bad_fname(fname)
     if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. fname:sub(1, 64) end
   end
-  for fname in body:gmatch("[Ff]ilename%s*=%s*'([^']+)'") do
+  for fname in body:gmatch(FN .. "%s*=%s*'([^']+)'") do
     local hit = bad_fname(fname)
     if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. fname:sub(1, 64) end
   end
-  for fname in body:gmatch("[Ff]ilename%s*=%s*([^%s;\"'][^%s;\"']*)") do
+  for fname in body:gmatch(FN .. "%s*=%s*([^%s;\"'][^%s;\"']*)") do
     local hit = bad_fname(fname)
     if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. fname:sub(1, 64) end
+  end
+
+  -- RFC 5987 / RFC 6266 extended parameter: `filename*=charset'lang'value`,
+  -- where value is percent-encoded. ASP.NET/IIS (ContentDispositionHeaderValue
+  -- FileNameStar) honour it, so `.aspx/.asmx/.ascx/.asa/.asax/.cer/.cdx` (or any
+  -- handler) can be delivered this way and skip the three matchers above — those
+  -- require `filename` directly before `=`, but here a `*` sits between. Strip
+  -- the optional charset'lang' prefix and percent-decode ('+' is literal in an
+  -- ext-value, NOT space) before checking. A double-decode is not needed: the
+  -- server decodes the ext-value exactly once, so a `%252e` never becomes a dot
+  -- on the backend either.
+  for raw in body:gmatch(FN .. "%s*%*%s*=%s*([^%s;\r\n\"]+)") do
+    local v = raw:match("^[^']*'[^']*'(.*)$") or raw
+    v = v:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+    local hit = bad_fname(v)
+    if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. v:sub(1, 64) end
+  end
+
+  -- Backstop for PHP's lenient quote parsing (php_ap_getword_conf, shared by
+  -- cPanel/LiteSpeed lsphp): it honours a `\"` escaped quote and even an
+  -- UNTERMINATED opening quote, so `filename="a\".php"` and `filename="a.php`
+  -- <CRLF> both deliver a `.php` file that the precise quote patterns above
+  -- under-read (they stop at the first inner `"` / need a closing `"`). Capture
+  -- the whole value to end-of-Content-Disposition-line and let bad_fname's
+  -- anchored matchers decide — the required leading dot plus the `[^%w]`/`$`
+  -- extension anchoring keeps benign values (a trailing quote, `;`, junk) from
+  -- tripping. Runs only after the precise patterns miss, so normal uploads keep
+  -- their clean forensic echo. `%*?` also covers a raw (un-decoded) `filename*=`.
+  for raw in body:gmatch(FN .. "%s*%*?%s*=%s*([^\r\n]+)") do
+    local hit = bad_fname(raw)
+    if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. raw:sub(1, 64) end
   end
 
   return nil

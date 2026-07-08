@@ -18,6 +18,28 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- WAF (rule 401, `WAF_UPLOAD_FNAME`, block + autoblock): **closed four upload
+  webshell bypasses in Content-Disposition filename extraction.** (1) The
+  filename was extracted with a case-SENSITIVE `[Ff]ilename` token, but the
+  parameter name is case-insensitive (PHP's rfc1867 parser uses `strcasecmp`) —
+  so `FileName="shell.php"` (capital `N`), `FILENAME=`, `fileName=` were honoured
+  by the backend yet matched none of the patterns, so `bad_fname` never ran and
+  **every** extension matcher was skipped. (2) The RFC 5987 / 6266 extended
+  parameter `filename*=charset'lang'pct-value` (honoured by ASP.NET/IIS
+  `FileNameStar`) was not matched at all. (3)/(4) PHP's `php_ap_getword_conf`
+  (shared by cPanel/LiteSpeed lsphp) honours a `\"` escaped quote and even an
+  UNTERMINATED opening quote, so `filename="shell\".php"` and `filename="shell.php`
+  <CRLF> delivered a `.php` the precise `"([^"]+)"` patterns under-read. Fixes:
+  the token is matched case-insensitively; a dedicated `filename*=` loop strips
+  the `charset'lang'` prefix and percent-decodes once (mirroring the server); and
+  an end-of-Content-Disposition-line backstop hands the whole value to the
+  anchored extension matchers when the precise quote patterns miss. Verified
+  old-vs-current: the shipped code missed all four bypass classes; the fix blocks
+  them while leaving benign uploads untouched — a legit `filename*=…holiday%20`
+  `photo.jpg`, a field literally named `filename`, and the anchoring FP fixes
+  (`vendor.jspdf.min.js`, `company.pharma.pdf`) still pass, since the backstop
+  relies on the same leading-dot + `[^%w]`/`$` anchoring. Found by two adversarial
+  review passes over the rule-401 extension-anchoring fix.
 - WAF (rule 401, `WAF_UPLOAD_FNAME`, block + autoblock): **fixed unanchored
   upload-extension matchers that banned legitimate uploaders.** The
   server-side-handler extensions `.phar` `.asp[x]` `.asa[x]` `.asmx` `.ascx`
