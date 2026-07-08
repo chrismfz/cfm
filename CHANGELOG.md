@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Web detector observability:** per-IP / subnet challenge **issuance** is now
+  logged to `cfm.challenges.log` as `[challenge_issued] ip=… host=… rule=… ttl=…`
+  (gated by `ChallengeLog`, like every other `[challenge]*` line). Previously an
+  *issued-but-unsolved* challenge left no greppable trace — that log only records
+  **solves** (keyed by the solver), and vhost-wide trips log under `host=`, not
+  the client IP — so `grep <ip> cfm.challenges.log` for a challenged-but-non-JS
+  client (API integrations, prefetch proxies, scanners) came back empty and the
+  reason lived only in the webdetector history. De-duplicated to one line per
+  `(ip, rule)` window (refreshes while a challenge stays active don't re-log), so
+  it's greppable without being noisy.
+
 ### Fixed
 - **Web detector:** machine-to-machine API endpoints are no longer caught by a
   *vhost-wide* challenge. When a vhost trips the auto-suspicious-vhost score
