@@ -56,6 +56,22 @@ back-filled here — see the git/PR history for that period.
   preserved, and the tier stays **challenge** (no block/ban). Covered by
   `scripts/tests/cfm_waf_backtick_smuggling_test.lua`. Found by the 2026-07 edge
   Lua audit (F05).
+- **WAF / challenge excludes: the in-path (Lua) glob matcher now scopes `*`/`?`
+  to a single path segment, matching the Go enforcement matcher.** The Lua
+  `glob_to_lua_pattern` (`cfm_waf_excl.lua`) expanded `*`→`.*` and `?`→`.`, both
+  of which cross a `/`, while the Go log-driven matcher (`globToRegex` in
+  `exclude_store.go`) uses `[^/]*`/`[^/]`. So an operator exclude like
+  `/wp-admin/*` switched the WAF (or challenge) **off in-path** for the entire
+  `/wp-admin/a/b/c…` subtree, while the log-driven side only excluded direct
+  children — a silent, one-sided widening of the WAF-off region onto unintended
+  deep paths. Lua now emits `[^/]*`/`[^/]` too, so both engines agree. Hosts are
+  unaffected (no `/`). To exclude a whole subtree, use a **non-glob path prefix**
+  (`/wp-admin`), which already matches the subtree at a segment boundary.
+  Behaviour change: an exclude relying on `*` to cross `/` in-path now stops at
+  one segment (as it always did on the log-driven side). `[...]` bracket-class
+  globs are still matched literally in Lua (Go treats them as a class) — a
+  rarer, narrower-in-Lua consistency gap tracked as a follow-up. Covered by
+  `scripts/tests/cfm_waf_excl_test.lua`. Found by the 2026-07 edge Lua audit (F10).
 
 ### Added
 - **Web detector observability:** per-IP / subnet challenge **issuance** is now

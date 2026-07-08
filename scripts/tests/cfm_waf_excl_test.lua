@@ -55,6 +55,15 @@ eq(m("/a/b", "/?/b", "path"), true, "glob ? matches exactly one char (a)")
 eq(m("/ab/b", "/?/b", "path"), false, "glob ? matches ONE char only (ab is two → no match)")
 eq(m("/x/b", "/x/?", "path"), true, "glob ? single-char segment")
 
+-- ── glob wildcards are SEGMENT-scoped (mirror Go [^/]* / [^/]): no '/'-cross ──
+-- These distinguish the correct `[^/]` mapping from the old `.*`/`.` that
+-- crossed '/' and silently widened the in-path WAF-off region (audit F10).
+eq(m("/wp-admin/a/b", "/wp-admin/*", "path"), false, "glob * does NOT cross '/' (Go [^/]*): /wp-admin/* !~ /wp-admin/a/b")
+eq(m("/assets/app.js", "/assets/*", "path"), true, "glob * still matches a single child segment")
+eq(m("///b", "/?/b", "path"), false, "glob ? does NOT match '/' (Go [^/]): /?/b !~ ///b")
+eq(m("/a/b/c", "/*/b", "path"), false, "leading /*/ is one segment: /*/b !~ /a/b/c")
+eq(m("/a/b", "/*/b", "path"), true, "leading /*/ matches exactly one segment: /*/b ~ /a/b")
+
 -- ── edge: empty inputs never match ───────────────────────────────────────────
 eq(m("", "shop.gr", "host"), false, "empty value")
 eq(m("shop.gr", "", "host"), false, "empty rule")

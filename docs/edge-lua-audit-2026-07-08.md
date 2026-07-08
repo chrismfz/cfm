@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**5 / 55 fixed.** Grouped by severity; each links to its detail section.
+**6 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -55,7 +55,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 - [ ] **[F07](#f07)** · `configs/lua/cfm.lua:488` · _waf-bypass_ (axis a/c) — WAF body inspection gated by a URI allowlist: POST bodies to any non-listed path (/, /search, /checkout, clean-URL routes) are never read
 - [ ] **[F08](#f08)** · `configs/lua/cfm.lua:550` · _waf-bypass_ (axis a/c) — WAF body reader hard-caps at 8192 bytes, defeating larger per-type scan budgets and letting payloads past byte 8192 escape all body rules
-- [ ] **[F10](#f10)** · `configs/lua/cfm_waf_excl.lua:79` · _regression_ (axis b) — Exclude glob compiler diverges from Go: Lua `*`->`.*`/`?`->`.` cross `/` (Go uses `[^/]*`), and Lua ignores `[]` globs Go honours — silently widening the in-path WAF-off region
+- [x] **[F10](#f10)** · `configs/lua/cfm_waf_excl.lua:79` · _regression_ (axis b) — Exclude glob compiler diverges from Go: Lua `*`->`.*`/`?`->`.` cross `/` (Go uses `[^/]*`), and Lua ignores `[]` globs Go honours — silently widening the in-path WAF-off region _(security half fixed; `[]` parity tracked below)_
 - [ ] **[F11](#f11)** · `configs/lua/cfm_waf.lua:1597` · _waf-bypass_ (axis a/c) — /wp-admin/ carve-out disables encoded/base64 <?php backdoor rules 437/438 on pre-auth admin-ajax.php
 - [x] **[F12](#f12)** · `configs/lua/cfm_waf_detectors.lua:1904` · _waf-bypass_ (axis a/c) — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
 - [ ] **[F13](#f13)** · `configs/lua/cfm_waf_detectors.lua:449` · _correctness_ (axis c) — Base64 PHP-object-injection check uses malformed `%bo%:` pattern that never matches serialized objects (B64_OBJ_INJECT dead, rule 304)
@@ -282,7 +282,9 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Make Lua mirror Go: translate '*'->'[^/]*', '?'->'[^/]', detect '['/']' in the glob trigger and port class handling; add a multi-segment and bracket cross-engine test case.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed (security half):** `glob_to_lua_pattern` now emits `[^/]*` for `*` and `[^/]` for `?`, so in-path wildcards no longer cross a path segment — matching Go's `globToRegex`. This closes the one-sided WAF-off **widening** (the security-relevant direction: Lua was matching MORE than Go on deep paths). Hosts unaffected (no `/`). Tests added to `cfm_waf_excl_test.lua` (`/wp-admin/*` !~ `/wp-admin/a/b`, `/?/b` !~ `///b`, `/*/b` one-segment). Branch `claude/lua-openresty-audit-cdmcc4`.
+
+**Residual (tracked → F10b in the gaps list):** `[...]` bracket-class globs are still matched **literally** in Lua while Go treats them as a character class. This is the *narrower* direction (Lua excludes fewer paths → more protective in-path), so it is a consistency gap, **not** a security widening. Porting Go's bracket-class handling to Lua (incl. `[!`/`[^` negation and Lua set-escaping) is deferred — needs its own careful pass + cross-engine tests.
 
 ---
 
@@ -1060,6 +1062,8 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 Surfaces the completeness critic flagged as under-covered. Treat the three **high**
 gaps as their own audit tasks.
 
+- [ ] **[low] F10b — port `[...]` bracket-class globs into the Lua exclude matcher** (`cfm_waf_excl.lua` `glob_to_lua_pattern` + the `matches_rule` glob trigger)
+  - Follow-up to F10. The security-critical `*`/`?` cross-`/` widening is fixed; what remains is that Go treats a value containing `[`/`]` as a glob character class (`compileValueMatcher`: `ContainsAny(rule, "*?[]")`) while Lua only glob-detects `*`/`?` and matches `[`/`]` literally. Direction is Lua-**narrower** (more protective in-path), so it's a consistency gap, not a security hole. Port Go's `globToRegex` bracket handling (incl. `[!`/`[^`→`[^…]` negation, `]`-as-first-char literal, Lua set-escaping of `%`/`]`) and add cross-engine tests. Low priority (bracket-class excludes are rare).
 - [ ] **[high]** configs/angie.conf (whole file, 62KB, edited 2026-07-08) — no dedicated finder
   - Every edge-config finding cites openresty.conf; angie.conf was never audited as a first-class proxy. A quick diff already shows real drift (renamed error locations @cfm_admin_upstream_error vs _https, a different ssl_certificate_by_lua require-recovery comment, real_ip block layout). Any fix landed in openresty.conf (static-asset WAF bypass location, __ssl_debug loopback gate, server_tokens, $cf_xfp XFP forwarding) may be absent or differently-shaped in angie.conf, and vice-versa. Angie is a supported production edge, so a one-sided fix leaves half the fleet exposed. Needs a line-by-line openresty↔angie parity diff of location blocks, access/header/ssl_certificate_by_lua wiring, real_ip, and the static-asset location.
 - [ ] **[high]** Verified-bot geo bypass: cfm.lua:1168 `if ngx.var.cfm_bypass_ip == "1" then return` + trusted_proxies.conf + real_ip_header CF-Connecting-IP/real_ip_recursive

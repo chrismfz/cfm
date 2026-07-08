@@ -71,12 +71,25 @@ local function lower(s)
   return string.lower(s)
 end
 
--- Convert an operator glob (`*` = any run, `?` = one char) to an ANCHORED Lua
--- pattern, escaping every magic char first.
+-- Convert an operator glob to an ANCHORED Lua pattern, escaping every magic
+-- char first, then re-expanding the two wildcards to their Go equivalents:
+--   `*` -> `[^/]*`  (a run of non-'/' chars)
+--   `?` -> `[^/]`   (exactly one non-'/' char)
+-- The wildcards MUST NOT cross a path-segment separator, to match the Go
+-- enforcement matcher globToRegex (internal/webdetector/exclude_store.go),
+-- which uses `[^/]*`/`[^/]`. The old `*`->`.*` / `?`->`.` crossed `/`, so an
+-- exclude like `/wp-admin/*` switched the WAF off for `/wp-admin/a/b/c` in-path
+-- while the Go log-driven matcher did not — a silent, one-sided widening of the
+-- WAF-off region. (For hosts there is no `/`, so this is a no-op there.)
+--
+-- NOTE (audit F10 residual): `[...]` bracket-class globs are NOT yet ported —
+-- Go treats them as a character class, this matcher still treats `[`/`]` as
+-- literals (Lua matches NARROWER, i.e. more protective in-path, so it is a
+-- consistency gap, not a security widening). Tracked for a follow-up port.
 local function glob_to_lua_pattern(glob)
   local p = tostring(glob or "")
   p = p:gsub("([%^%$%(%)%%%.%[%]%+%-%*%?])", "%%%1")
-  p = p:gsub("%%%*", ".*"); p = p:gsub("%%%?", ".")
+  p = p:gsub("%%%*", "[^/]*"); p = p:gsub("%%%?", "[^/]")
   return "^" .. p .. "$"
 end
 _M.glob_to_lua_pattern = glob_to_lua_pattern
