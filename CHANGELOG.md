@@ -18,6 +18,24 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- WAF (rule 401, `WAF_UPLOAD_FNAME`, block + autoblock): **fixed unanchored
+  upload-extension matchers that banned legitimate uploaders.** The
+  server-side-handler extensions `.phar` `.asp[x]` `.asa[x]` `.asmx` `.ascx`
+  `.jsp[x]` `.cer` `.cdx` were matched as bare substrings
+  (`fname:match("%.phar")` …), so a benign filename that merely *contained* one
+  mid-word tripped the rule — `.phar`⊂`company.pharma.pdf`,
+  `.asp`⊂`trip.aspen.jpg`, `.asa`⊂`team.asana.csv`, `.jsp`⊂`vendor.jspdf.min.js`
+  (a very common library bundle), `.cer`⊂`vase.ceramic.jpg`. Because rule 401 is
+  block **and** autoblock-armed, that was a hard 403 **plus a 6h nftables IP
+  ban** of a real customer. They are now anchored exactly like the adjacent
+  `.php`/`.phtml`/`.pht` matchers — `%.EXT[^%w]` (a further `.ext`/separator) or
+  `%.EXT$` (end) — so a real trailing extension and the `shell.asp.jpg`
+  double-extension are still caught while the mid-word substring is not. The
+  `.cer[^t]` guard (which kept `.cert` out) is subsumed by `[^%w]`. Verified by
+  an old-vs-current comparison: the anchored rule blocks the **identical** set
+  of malicious uploads (15/15, incl. trailing-space/dot/`::$DATA`/NUL/tab and
+  double-extension evasions) while no longer false-positive-banning five
+  classes of benign file. Found by the 2026-07 edge Lua audit.
 - WAF (rule 301, `WAF_SQLI`, block): **closed a first-try block-tier SQLi
   bypass via `+`-encoded spaces.** The tautology signatures (`union select`,
   ` or 1=1`, `' or '1'='1`) were matched against the scan string with `+`
