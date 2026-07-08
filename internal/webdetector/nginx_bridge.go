@@ -1579,6 +1579,20 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	b.mu.RUnlock()
 
+	// Machine-to-machine API endpoints (WooCommerce REST, payment webhooks,
+	// known plugin integrations) are hit by non-browser clients that cannot
+	// solve an interactive JS challenge. When a vhost is under a vhost-wide
+	// challenge (auto-suspicious score / CHALLENGE_VHOST) we would otherwise
+	// challenge EVERY request to the host regardless of path and silently break
+	// those integrations (e.g. the v-track order sync gets the HTML challenge
+	// instead of JSON). Exempt them — but ONLY the vhost-wide challenge, and
+	// ONLY when the IP itself is clean: a per-IP challenge/block (ipAction) and
+	// the WAF rule engine still apply, so an attacker on these paths is still
+	// caught. isChallengeExemptEndpoint is deliberately narrow (see there).
+	if vhAction == "challenge" && ipAction == "allow" && isChallengeExemptEndpoint(uri) {
+		vhAction = "allow"
+	}
+
 	resp := map[string]any{
 		"ip_action":    ipAction, // "allow" | "challenge" | "block"
 		"vhost_action": vhAction, // "allow" | "challenge"

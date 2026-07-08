@@ -17,6 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **Web detector:** machine-to-machine API endpoints are no longer caught by a
+  *vhost-wide* challenge. When a vhost trips the auto-suspicious-vhost score
+  (`CHALLENGE_SUSPICIOUS_VHOST_SCORE` / `CHALLENGE_VHOST`), **every** request to
+  the host was challenged regardless of path — silently breaking non-browser
+  integrations that cannot solve the JS challenge (e.g. the v-track WooCommerce
+  order sync: `/wp-json/wc/v3/orders/` got the HTML challenge instead of JSON
+  during each ~35-min auto-on window, so orders stopped syncing intermittently).
+  The `/nginx/decision` handler now exempts a **narrow, high-confidence** set
+  from the vhost-wide challenge — WooCommerce REST (`/wp-json/wc*`, `/wc-api/`),
+  payment-gateway webhooks/IPN, and the `/ws_vtrack/` plugin path. Deliberately
+  much tighter than the score-exemption list (`isMachineStyleEndpointGo`), and
+  applied **only** when the IP itself is not individually challenged/blocked —
+  per-IP autoblock and the WAF rule engine still inspect these paths, so an
+  attacker on them is still caught. (The reason was only visible via the
+  `[challenge][vhost] action=auto_on host=…` line — keyed by host, not client
+  IP — which is why a `grep <ip>` of the CFM logs came back empty.)
+
 ### Added
 - Reference **challenge-exclude** ships a *VPN by Google / Chrome prefetch-proxy*
   entry (`configs/webdetector_challenge_exclude.txt`, section 9). Shared-egress
