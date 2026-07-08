@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**3 / 55 fixed.** Grouped by severity; each links to its detail section.
+**5 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -47,7 +47,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F02](#f02)** · `internal/webdetector/waf_hit_rates_api_handler.go:63` · _security_ (axis c) — WAF hit-rates API leaks cross-tenant / fleet-wide data to scoped cPanel users
 - [ ] **[F03](#f03)** · `configs/lua/cfm_panel_tunnel.lua:243` · _security_ (axis c) — Account-transfer tunnel forwards client-supplied X-Forwarded-For/X-Real-IP/CF-Connecting-IP verbatim to cpsrvd (source-IP spoofing)
 - [x] **[F04](#f04)** · `configs/lua/cfm.lua:692` · _perf_ (axis b) — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
-- [ ] **[F05](#f05)** · `configs/lua/cfm_waf_detectors.lua:1262` · _waf-bypass_ (axis a/c) — Backtick command-substitution detector is dead code: Lua patterns have no `|` alternation, so most backtick RCE payloads bypass PAY_BACKTICK (rule 317)
+- [x] **[F05](#f05)** · `configs/lua/cfm_waf_detectors.lua:1262` · _waf-bypass_ (axis a/c) — Backtick command-substitution detector is dead code: Lua patterns have no `|` alternation, so most backtick RCE payloads bypass PAY_BACKTICK (rule 317)
 - [ ] **[F06](#f06)** · `configs/openresty.conf:674` · _waf-bypass_ (axis a/c) — Static-asset location bypasses cfm.lua (WAF/challenge) for any path ending in an asset extension, enabling PHP path-info WAF bypass
 - [ ] **[F09](#f09)** · `configs/lua/cfm_waf.lua:633` · _waf-bypass_ (axis a/c) — args consumes the shared body scan budget in get_norm_ab, so a padded query string truncates the POST body out of all body-aware WAF rules
 
@@ -57,7 +57,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F08](#f08)** · `configs/lua/cfm.lua:550` · _waf-bypass_ (axis a/c) — WAF body reader hard-caps at 8192 bytes, defeating larger per-type scan budgets and letting payloads past byte 8192 escape all body rules
 - [ ] **[F10](#f10)** · `configs/lua/cfm_waf_excl.lua:79` · _regression_ (axis b) — Exclude glob compiler diverges from Go: Lua `*`->`.*`/`?`->`.` cross `/` (Go uses `[^/]*`), and Lua ignores `[]` globs Go honours — silently widening the in-path WAF-off region
 - [ ] **[F11](#f11)** · `configs/lua/cfm_waf.lua:1597` · _waf-bypass_ (axis a/c) — /wp-admin/ carve-out disables encoded/base64 <?php backdoor rules 437/438 on pre-auth admin-ajax.php
-- [ ] **[F12](#f12)** · `configs/lua/cfm_waf_detectors.lua:1904` · _waf-bypass_ (axis a/c) — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
+- [x] **[F12](#f12)** · `configs/lua/cfm_waf_detectors.lua:1904` · _waf-bypass_ (axis a/c) — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
 - [ ] **[F13](#f13)** · `configs/lua/cfm_waf_detectors.lua:449` · _correctness_ (axis c) — Base64 PHP-object-injection check uses malformed `%bo%:` pattern that never matches serialized objects (B64_OBJ_INJECT dead, rule 304)
 - [ ] **[F14](#f14)** · `configs/lua/cfm_waf_detectors.lua:1062` · _fp_ (axis a) — value_looks_shelly word list contains common tokens (host, id, ping, more, less, head, tail, env, cat, ls, w) that FP-challenge legit system=/command= dispatcher values
 - [ ] **[F15](#f15)** · `configs/lua/cfm_waf_detectors.lua:1722` · _fp_ (axis a) — CT_BAD_BOUNDARY false-positives on RFC-legal multipart boundaries (`=`,`+`,`/`) used by JavaMail/SOAP/Python email clients (rule 604)
@@ -195,7 +195,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Replace the alternation with a loop over a command table testing inner:match('^%s*'..cmd..'%f[^%a]') per word (style used by CMD_PARAM_SHELL_WORDS).
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `has_backtick_cmd` now captures the leading token (`inner:match("^%s*(%a+)")`) and tests membership in a module-scope `BACKTICK_CMDS` set (word must match a command exactly — `` `category` `` ≠ `cat`). Metachar branch unchanged. Tier kept at **challenge** (rule 317, not block — confirmed acceptable). Search-field carve-out (`ignore_backtick_only`) preserved. Test `cfm_waf_backtick_smuggling_test.lua` (7 TP commands + metachar regression + FP negatives incl. word-boundary and search-field suppression). Branch `claude/lua-openresty-audit-cdmcc4`.
 
 ---
 
@@ -316,7 +316,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Lowercase before precheck and replace the alternation with a verb table walked in a loop.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `smug_check` now lowercases FIRST (fixes the uppercase-`HTTP/` precheck miss), then walks a module-scope `SMUG_VERBS` list testing each at a word boundary (`%f[%a]verb%s+[^%s]+%s+http/%d`). Tier kept at **logonly** (rule 606, observe-only for burn-in). Test `cfm_waf_backtick_smuggling_test.lua` (GET/post/PUT/DELETE incl. uppercase + body + FP negatives; tested at block for a crisp assertion per the rule-319 convention). Known gap left as-is (out of audit scope): a `%20`-encoded separator isn't matched by `%s+` — acceptable at logonly. Branch `claude/lua-openresty-audit-cdmcc4`.
 
 ---
 

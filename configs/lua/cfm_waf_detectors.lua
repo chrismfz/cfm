@@ -1153,6 +1153,15 @@ function _M.detect_cmd_param_key(args)
   return nil
 end
 
+-- Shell commands that, as the FIRST token inside a `backtick` command
+-- substitution, indicate RCE. Module-scope so it isn't rebuilt per request.
+-- (Lua patterns have no `(a|b|c)` alternation — see has_backtick_cmd. [F05])
+local BACKTICK_CMDS = {
+  wget = true, curl = true, bash = true, sh = true, nc = true, ncat = true,
+  perl = true, python = true, php = true, ruby = true, lua = true, id = true,
+  uname = true, whoami = true, cat = true, ls = true, ping = true,
+}
+
 function _M.detect_cmd_payload(args)
   local a = normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
@@ -1259,7 +1268,14 @@ function _M.detect_cmd_payload(args)
     -- flagging accidental trailing backticks in business app query params.
     -- Scan all backtick pairs so one benign pair cannot hide a later malicious one.
     for inner in s:gmatch("`([^`]+)`") do
-      if inner:match("^%s*(wget|curl|bash|sh|nc|ncat|perl|python|php|ruby|lua|id|uname|whoami|cat|ls|ping)%f[^%a]") then
+      -- Leading token inside the backticks is a known shell command. Lua
+      -- patterns have NO `(a|b|c)` alternation, so the old `(wget|curl|...)`
+      -- was a dead literal match — capture the first word and test set
+      -- membership instead. `a` is already lowercased by normalize(), and
+      -- `%a+` stops at the first non-alpha, so the word must match a command
+      -- exactly (e.g. `category` -> "category", never "cat"). [audit F05]
+      local word = inner:match("^%s*(%a+)")
+      if word and BACKTICK_CMDS[word] then
         return true
       end
 
@@ -1893,20 +1909,34 @@ end
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject
 -- a request past a frontend proxy.  Matches: VERB<space>PATH<space>HTTP/N
+-- HTTP methods whose "VERB <path> HTTP/n" shape inside a parameter value
+-- signals a smuggled request line. Module-scope (not rebuilt per call). Lua
+-- patterns have no `(a|b|c)` alternation, so each verb is tested at a word
+-- boundary rather than in a fake alternation group. [audit F12]
+local SMUG_VERBS = {
+  "get", "post", "head", "put", "delete", "options", "patch", "connect",
+  "trace", "track", "propfind", "proppatch", "mkcol", "copy", "move",
+  "lock", "unlock",
+}
+
 function _M.detect_http_smuggling(args, body)
   local function smug_check(s)
     if not s or s == "" then return nil end
-    -- Use plain string find for speed first, then confirm with pattern
-    if not (has(s, " http/") or has(s, "%20http/") or has(s, "+http/")) then
+    -- Lowercase FIRST. A smuggled request line is normally "GET /x HTTP/1.1"
+    -- (uppercase), so the old case-sensitive " http/" prefilter never matched
+    -- — the rule was doubly dead (case + the `|` alternation below). [F12]
+    local sl = lower(s)
+    if not (has(sl, " http/") or has(sl, "%20http/") or has(sl, "+http/")) then
       return nil
     end
-    local sl = lower(s)
-    local verb = sl:match(
-      "(get|post|head|put|delete|options|patch|connect|trace|track|"
-      .. "propfind|proppatch|mkcol|copy|move|lock|unlock)"
-      .. "%s+[^%s]+%s+http/%d"
-    )
-    if verb then return "SMUG_" .. string.upper(verb) end
+    -- "VERB <path> HTTP/n" where VERB is a known method at a word boundary.
+    -- Only runs on the rare strings that passed the http/ gate above, so the
+    -- per-verb find loop is negligible.
+    for _, verb in ipairs(SMUG_VERBS) do
+      if sl:find("%f[%a]" .. verb .. "%s+[^%s]+%s+http/%d") then
+        return "SMUG_" .. verb:upper()
+      end
+    end
     return nil
   end
 
