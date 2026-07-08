@@ -5,8 +5,9 @@
 //	GET  /api/v1/tokens/list    — list all tokens (admin only, no token values)
 //	POST /api/v1/tokens/revoke  — revoke by id (admin only)
 //	GET  /api/v1/tokens/me      — calling token's own scope info (any valid token)
+//	GET  /api/v1/admin/authcheck — admin-only auth probe for edge auth_request
 //
-// All three are mounted by RegisterTokenManagementEndpoints(), called from
+// All are mounted by RegisterTokenManagementEndpoints(), called from
 // apiserver.go alongside RegisterTokenEndpoint().
 package apiserver
 
@@ -112,6 +113,26 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 			"expires_at": st.Expiry,
 			"scoped":     true,
 		})
+	})
+
+	// ── GET /api/v1/admin/authcheck ───────────────────────────────────────────
+	// Admin-only auth probe for the edge proxy's `auth_request`. Admin endpoints
+	// that are rendered entirely inside OpenResty/Angie (lua-stats: Go cannot read
+	// nginx shdicts) delegate their admin gate to this endpoint — auth_request
+	// only cares about the status line: 200 for an authenticated admin, 403 for a
+	// scoped token or anonymous. Returns no data by design.
+	//
+	// Historically auth_request pointed at /api/v1/tokens/me, which is
+	// scoped-OR-admin, so a scoped cPanel viewer passed the gate and received the
+	// fleet-wide lua-stats blob (every tenant's WAF excludes + rule modes) — a
+	// scoped-vs-admin boundary break (audit F01). This gate is admin-only.
+	m.HandleFunc("/api/v1/admin/authcheck", func(w http.ResponseWriter, r *http.Request) {
+		setAuthIdentityNoCacheHeaders(w)
+		if !webdet.RequireAdmin(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
 }
 

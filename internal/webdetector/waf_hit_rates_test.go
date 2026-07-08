@@ -225,3 +225,51 @@ func TestHitRatePromotionHint(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleWAFHitRates_ScopeEnforced verifies the audit-F02 scope guard: a
+// scoped token may only read hit-rates for a host inside its allowlist, an
+// empty host (which would aggregate every tenant) is refused, and admin stays
+// unrestricted.
+func TestHandleWAFHitRates_ScopeEnforced(t *testing.T) {
+	hs := newTestHistoryStore(t)
+	e := &Engine{history: hs}
+
+	scoped := func(host string) int {
+		q := "/api/v1/waf/hit-rates?hours=24"
+		if host != "" {
+			q += "&host=" + host
+		}
+		req := httptest.NewRequest("GET", q, nil)
+		ctx := context.WithValue(req.Context(), CtxAuthnKey{}, true)
+		ctx = context.WithValue(ctx, CtxRoleKey{}, CtxRoleScoped)
+		ctx = context.WithValue(ctx, CtxScopeKey{}, map[string]struct{}{"mine.com": {}})
+		req = req.WithContext(ctx)
+		rr := httptest.NewRecorder()
+		e.handleWAFHitRates(rr, req)
+		return rr.Code
+	}
+
+	if code := scoped("mine.com"); code != 200 {
+		t.Errorf("scoped in-scope host: got %d, want 200", code)
+	}
+	if code := scoped("MINE.com"); code != 200 {
+		t.Errorf("scoped in-scope host (mixed case): got %d, want 200", code)
+	}
+	if code := scoped("other.com"); code != 403 {
+		t.Errorf("scoped out-of-scope host: got %d, want 403", code)
+	}
+	if code := scoped(""); code != 403 {
+		t.Errorf("scoped empty host (fleet-wide): got %d, want 403", code)
+	}
+
+	// Admin with no host (fleet-wide aggregate) stays unrestricted.
+	req := httptest.NewRequest("GET", "/api/v1/waf/hit-rates?hours=24", nil)
+	ctx := context.WithValue(req.Context(), CtxAuthnKey{}, true)
+	ctx = context.WithValue(ctx, CtxRoleKey{}, CtxRoleAdmin)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	e.handleWAFHitRates(rr, req)
+	if rr.Code != 200 {
+		t.Errorf("admin fleet-wide: got %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+	}
+}

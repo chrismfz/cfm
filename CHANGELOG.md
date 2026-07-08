@@ -17,6 +17,29 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **Scoped-vs-admin boundary — edge `lua-stats` (F01):** the `/cfm-admin/lua-stats`
+  dashboard endpoint (rendered inside OpenResty/Angie) gated access with an
+  `auth_request` pointed at `/api/v1/tokens/me` — a **scoped-OR-admin** endpoint
+  that returns 200 for *any* valid token. A scoped cPanel **viewer** token
+  therefore passed the gate and received the **fleet-wide** stats blob: every
+  tenant's WAF exclude host/path lists and per-rule modes (logonly vs block),
+  plus cert and decision-cache counters — enough to craft WAF bypasses against
+  the whole box. Added an admin-only auth probe `/api/v1/admin/authcheck`
+  (`RequireAdmin`; 403 for scoped/anonymous) and repointed the `auth_request`
+  gate to it in **both** `openresty.conf` and `angie.conf` (two server blocks
+  each). The admin WebUI dashboard — the only legitimate consumer — is
+  unaffected. Found by the 2026-07 edge Lua audit.
+- **WAF hit-rates cross-tenant leak (F02):** `GET /api/v1/waf/hit-rates` was
+  gated scoped-OR-admin but read the `?host=` query verbatim with no scope check,
+  so a scoped cPanel user could read **any** vhost's per-rule WAF hit rates — and
+  an empty host aggregated **every** tenant — revealing which rules are logonly
+  vs block and where they fire. `handleWAFHitRates` now enforces the token scope:
+  a scoped caller must target a single host inside its own allowlist; an empty or
+  out-of-scope host is `403`. Admin/loopback (the CLI) is unchanged. Mirrors the
+  `vhostAllowed` guard the challenge endpoints already use; added to
+  `docs/endpoint_scope_inventory.md`. Found by the 2026-07 edge Lua audit.
+
 ### Added
 - **Web detector observability:** per-IP / subnet challenge **issuance** is now
   logged to `cfm.challenges.log` as `[challenge_issued] ip=… host=… rule=… ttl=…`

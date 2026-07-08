@@ -39,12 +39,12 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**1 / 55 fixed.** Grouped by severity; each links to its detail section.
+**3 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
-- [ ] **[F01](#f01)** · `configs/openresty.conf:880` · _security_ (axis c) — lua-stats endpoint is scope-blind: scoped cPanel viewer tokens receive fleet-wide WAF config and excludes
-- [ ] **[F02](#f02)** · `internal/webdetector/waf_hit_rates_api_handler.go:63` · _security_ (axis c) — WAF hit-rates API leaks cross-tenant / fleet-wide data to scoped cPanel users
+- [x] **[F01](#f01)** · `configs/openresty.conf:880` · _security_ (axis c) — lua-stats endpoint is scope-blind: scoped cPanel viewer tokens receive fleet-wide WAF config and excludes
+- [x] **[F02](#f02)** · `internal/webdetector/waf_hit_rates_api_handler.go:63` · _security_ (axis c) — WAF hit-rates API leaks cross-tenant / fleet-wide data to scoped cPanel users
 - [ ] **[F03](#f03)** · `configs/lua/cfm_panel_tunnel.lua:243` · _security_ (axis c) — Account-transfer tunnel forwards client-supplied X-Forwarded-For/X-Real-IP/CF-Connecting-IP verbatim to cpsrvd (source-IP spoofing)
 - [x] **[F04](#f04)** · `configs/lua/cfm.lua:692` · _perf_ (axis b) — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
 - [ ] **[F05](#f05)** · `configs/lua/cfm_waf_detectors.lua:1262` · _waf-bypass_ (axis a/c) — Backtick command-substitution detector is dead code: Lua patterns have no `|` alternation, so most backtick RCE payloads bypass PAY_BACKTICK (rule 317)
@@ -117,7 +117,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f01"></a>
 ### F01 — lua-stats endpoint is scope-blind: scoped cPanel viewer tokens receive fleet-wide WAF config and excludes
 
-- **Status:** ☐ open
+- **Status:** ☑ done — admin-only `auth_request` gate (`/api/v1/admin/authcheck`)
 - **Severity:** high · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/openresty.conf:880`
 
@@ -127,14 +127,14 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Gate on admin only (point auth_request at an admin-only endpoint or assert IsAdminRequest before serving).
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Added admin-only auth probe `GET /api/v1/admin/authcheck` (`RequireAdmin`, 403 for scoped) in `token_api.go`; repointed the `__cfm_admin_auth_check` `auth_request` gate from `/api/v1/tokens/me` to it in **both** `openresty.conf` and `angie.conf` (2 server blocks each). Tests `TestAdminAuthCheck_{AdminAllowed,ScopedForbidden}`. Scope inventory updated. Branch `claude/lua-openresty-audit-cdmcc4`.
 
 ---
 
 <a id="f02"></a>
 ### F02 — WAF hit-rates API leaks cross-tenant / fleet-wide data to scoped cPanel users
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `vhostAllowed` host-scope guard in `handleWAFHitRates`
 - **Severity:** high · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `internal/webdetector/waf_hit_rates_api_handler.go:63`
 
@@ -144,7 +144,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Mirror handleWAFEngineSummary: validateScopedVhostQuery(r,'host') and force scoped callers to their vhost set when host is empty, or make endpoint admin-only.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `handleWAFHitRates` now enforces token scope: for a scoped token (`vhostScopeFromContext != nil`) an empty host (fleet-wide aggregate) or an out-of-scope host is `403` via `vhostAllowed`; admin/loopback unchanged. Mirrors `handleChallengeVhost`. Test `TestHandleWAFHitRates_ScopeEnforced` (in-scope 200, mixed-case 200, out-of-scope 403, empty 403, admin fleet-wide 200). Scope inventory updated. Branch `claude/lua-openresty-audit-cdmcc4`.
 
 ---
 

@@ -3,6 +3,7 @@ package webdetector
 import (
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // RuleHitRate is one row of /api/v1/waf/hit-rates response — per-rule hit
@@ -60,6 +61,11 @@ func hitRatePromotionHint(ratePct float64, hits, inspected int) string {
 // WAFInspected denominator. Returns one row per registered rule even when
 // hits=0, so operators can see "this rule is silent" alongside "this rule
 // is noisy".
+//
+// Scoped-allowed with a vhost-scope guard: admin/loopback callers may pass any
+// host (or none for the fleet-wide aggregate); a scoped token must target a
+// single host within its allowlist, and an empty or out-of-scope host is 403
+// (see the scope block below — audit F02).
 func (e *Engine) handleWAFHitRates(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
@@ -76,6 +82,20 @@ func (e *Engine) handleWAFHitRates(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	host := r.URL.Query().Get("host")
+
+	// Scope enforcement (audit F02). Admin/loopback (scope == nil) may read any
+	// host, or the fleet-wide aggregate when host is empty. A scoped token may
+	// ONLY read hit-rates for a single host inside its own vhost allowlist: an
+	// empty host (which would aggregate every tenant) and any out-of-scope host
+	// are refused — otherwise a scoped cPanel viewer could read the whole fleet's
+	// per-rule WAF hit rates (which rules are logonly vs block, and where they
+	// fire). Mirrors handleChallengeVhost's vhostAllowed guard.
+	if scope := vhostScopeFromContext(r.Context()); scope != nil {
+		if host == "" || !vhostAllowed(strings.ToLower(host), scope) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": errForbidden})
+			return
+		}
+	}
 
 	inspected := 0
 	if e != nil && e.history != nil {
