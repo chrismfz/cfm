@@ -7,7 +7,8 @@
 --   [R3] cfm_rules throttle module support (optional)
 --
 -- Design principles:
---   - Per-request bridge RPC with 9-second shared-dict cache for allows
+--   - Per-request bridge RPC with a 90-second shared-dict cache for allows
+--     (decision_cache_ttl_ms; see the CFG note there)
 --   - No timer callbacks, no event queues, no snapshot polling
 --   - Socket calls are best-effort with short timeouts and fail-open
 --   - Cache means 95%+ of requests never touch the socket
@@ -152,6 +153,12 @@ local CFG = {
   -- history, observations) is dispatched async on the Go side so this
   -- budget only needs to cover state mutation + JSON (sub-millisecond).
   decision_timeout_ms   = tonumber(os.getenv("CFM_DECISION_TIMEOUT_MS") or "300"),
+  -- Clean-allow verdicts are cached this long (90s) before the bridge is
+  -- re-consulted. This bounds enforcement lag: a newly flagged IP keeps a
+  -- cached allow for up to 90s. Deliberately NOT env-overridable (unlike its
+  -- neighbours) — a single hard-coded, reviewed value. Keep the doc-comments
+  -- that cite this window (header "Design principles", the static-asset and
+  -- geo-cache notes) in sync if you change it.
   decision_cache_ttl_ms = 90000,
   waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "6000"),
   waf_excl_meta_ttl_sec = tonumber(os.getenv("CFM_WAF_EXCL_META_TTL_SEC") or "15"),
@@ -884,7 +891,7 @@ end
 -- (ip, host, scope) — never CHALLENGE_PATHS-eligible (no .git/.env/wp-config
 -- has a .png/.css/.woff suffix), no SQLi/XSS surface in the URL itself.
 -- For these we share a single cache entry per (ip, host, scope) so a page
--- with 50 embedded assets makes 1 bridge call per visitor per 15s window
+-- with 50 embedded assets makes 1 bridge call per visitor per 90s window
 -- instead of 50. Massive reduction in cosocket scheduling pressure on the
 -- nginx worker — this is what was causing intermittent
 -- "lua tcp socket read timed out" under modest load even though the bridge
@@ -1099,7 +1106,7 @@ end
 
 -- geo_country() performs a MaxMind DB lookup on every call.  Cache the result
 -- per source IP in cfm_decisions with a 5-minute TTL.  This eliminates repeated
--- lookups for the same IP across concurrent requests and across the 12-second
+-- lookups for the same IP across concurrent requests and across the 90-second
 -- decision-cache window, which is especially important at high concurrency.
 -- SH:get returns nil for a missing key; "" is a valid cached value meaning
 -- "no country found", so we use nil as the cache-miss sentinel.
