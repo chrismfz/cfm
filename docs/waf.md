@@ -512,6 +512,7 @@ Current assignments:
   307  rule_xxe                        316  rule_cmd_payload_pipe_sh
   308  rule_shellshock                 317  rule_cmd_payload_backtick
   309  rule_sqli_blind_lexical         318  rule_superglobal_override
+                                       319  rule_sqli_union_variant
                                        320  rule_rce
                                        321  rule_proxy_header_sqli
                                        322  rule_reverse_shell
@@ -1134,6 +1135,62 @@ Three changes shipped together:
 
 Tests: `scripts/tests/cfm_waf_sqli_test.lua` (captured payloads, per-DBMS
 family, per-rule isolation, FP negatives).
+
+### Rule 319 `rule_sqli_union_variant` (`WAF_SQLI_UNION_VARIANT`, `logonly`) — 2026-07-08
+
+Rule 301 catches `union select` only when the two keywords are *adjacent*
+(after `+`/whitespace collapse). Four common obfuscations slip through that
+adjacency check because a word or punctuation sits **between** the keywords:
+
+| Variant | Example payload | Why 301 misses it |
+|---|---|---|
+| `union all select` | `1 union all select …` | `all` between the keywords |
+| `union distinct select` | `1 union distinct select …` | `distinct` between the keywords |
+| `union(select` | `1 union(select …` | `(` between the keywords |
+| `union/**/select` | `1 union/**/select …` | comment collapses to `unionselect`, not `union select` |
+| `union/**/all/**/select` | `1 union/**/all/**/select …` | collapses to `unionallselect` / `uniondistinctselect` |
+
+Rule 319 (`detect_sqli_union_variant` in `cfm_waf_detectors.lua`) matches
+`union<mid>select` for `mid` ∈ {` all `, ` distinct `, `(`, ``, `all`,
+`distinct`} on the same comment-stripped, `+`/whitespace-collapsed scan string
+301 uses. It carries the **same value-terminator guard** as the 301
+`+`-bypass fix — the `union` must be immediately preceded by a value break
+(`[%d'"%)]`) or a SQL operand keyword (`null`/`true`/`false`) — so legitimate
+prose like *"credit union all selected"* or *"european union distinct
+selection"* does **not** fire.
+
+**Tier: `logonly` (observe-only, never blocks).** Shipped 2026-07-08 for a
+**multi-day real-traffic burn-in**. Walk `cfm webtop waf hit-rates` (and grep
+`cfm.waf.log` for `WAF_SQLI_UNION_VARIANT`, grouping by `host`+`uri`) after
+2–4 days; if the window is clean, promote `logonly → challenge`, then after a
+further clean window `challenge → block` — never `logonly → block` directly.
+Because 301 already blocks the adjacent form and its family auto-arms
+`waf_security`, keep 319 un-armed for autoblock (default `0`, logonly) until
+it has earned a block-tier promotion of its own.
+
+**Expected FP sources to weigh during the burn-in** (from the 2026-07
+adversarial review — all are logonly *log lines*, never blocks): a camelCase
+identifier in a JSON/form body whose value quote is the terminator —
+`{"widget":"unionSelect"}` / `unionAllSelect` collapses to
+`unionselect`/`unionallselect`; SQL-tutorial or DBA-forum content *about* the
+keyword (`"UNION ALL SELECT vs plain UNION"`); relational-algebra notation
+(`(R1)union(select…)`); and a technical **search box** where a browser sends
+`?q=PostgreSQL 12 union all select …` with a digit terminator. If any of these
+show up materially in `cfm.waf.log`, tighten before promoting past `logonly`
+(e.g. drop the empty-/`all`-/`distinct`-collapsed camelCase branches, which are
+the FP-prone ones) rather than shipping the noise to `challenge`.
+
+**Known gaps (documented, not closed here):** a MySQL version-gated executable
+comment `/*!50000union*/select` is stripped whole (the `union` disappears) — it
+also bypasses **rule 301**, so it belongs to a shared `strip_sql_comments`
+follow-up, not this rule; a backtick identifier-break (`` `col`union all
+select ``) is rejected because `` ` `` is not in the shared terminator class
+(again shared with 301); asymmetric single-side comments (`union/**/all
+select` → `unionall select`) and the `all`+paren combo (`union all(select`)
+are rarer stacked obfuscations; and a **value-leading** `?p=union all select…`
+(only `=` before `union`) is a *deliberate* miss to avoid noun-phrase FPs
+(same trade-off as rule 301). These are burn-in-visibility gaps, not new
+block-path holes — 301 still blocks the adjacent form.
 
 > ### ✅ FP review — DONE 2026-07 (promoted)
 > A 6-server `cfm.waf.log` review (titan, virgo, orion, rigel, earth, mars)

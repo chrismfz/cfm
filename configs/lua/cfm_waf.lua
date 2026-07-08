@@ -53,6 +53,7 @@ local CFG = {
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
   rule_sqli_blind_lexical = "challenge", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted logonly→challenge 2026-07 after 188/188 TP, 0 FP across 6 servers (docs/waf.md)
+  rule_sqli_union_variant = "logonly",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; logonly for burn-in before any promotion (docs/waf.md)
   rule_superglobal_override = "logonly", -- request param KEY named like a PHP superglobal (_GET/_SERVER/GLOBALS/…) = variable poisoning; observe-only pending FP review
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
@@ -394,6 +395,7 @@ local RULE_IDS = {
   -- 3xx injection
   rule_sqli                    = 301,
   rule_sqli_blind_lexical      = 309,
+  rule_sqli_union_variant      = 319,
   rule_superglobal_override    = 318,
   rule_xss                     = 302,
   rule_js_proto                = 303,
@@ -989,6 +991,29 @@ function _M.check(ctx)
       if hit then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_SQLI_LEXICAL", ttl, mode, RULE_IDS.rule_sqli_blind_lexical) then goto done end
+      end
+    end
+  end
+
+  -- ── 21bb) Obfuscated UNION variants (separate rule, logonly burn-in) ──────
+  -- rule 301's `union select` signature requires the two keywords ADJACENT, so
+  -- it misses `union all select` / `union distinct select` (keyword between),
+  -- `union(select` (paren), and `union/**/select` (comment-collapsed to
+  -- `unionselect`) — `UNION ALL SELECT` is at least as common as plain UNION
+  -- SELECT. This distinct rule catches them under the SAME value-terminator FP
+  -- guard, at `logonly` — observed, never blocked — so a real-traffic burn-in
+  -- (hit-rate + FP review, docs/waf.md) precedes any promotion to
+  -- challenge/block. Same uri+args then POST-body scan as the SQLi rules above.
+  do
+    local mode = rule_mode(CFG.rule_sqli_union_variant, "logonly")
+    if mode ~= "disabled" then
+      local hit = det.detect_sqli_union_variant(uri, args, get_scan_ua())
+      if not hit and body_inspect_ok then
+        hit = det.detect_sqli_union_variant(uri, args, get_norm_ab())
+      end
+      if hit then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_SQLI_UNION_VARIANT", ttl, mode, RULE_IDS.rule_sqli_union_variant) then goto done end
       end
     end
   end

@@ -631,6 +631,46 @@ function _M.detect_sqli_blind_lexical(uri, args, _s)
   return false
 end
 
+-- union_mid_hit: is there `union<mid>select` in a VALUE-BREAK context on scw?
+-- `mid` is a Lua-pattern fragment for what sits between union and select — the
+-- SAME value-terminator guard as detect_sqli's `union select` (a digit / quote /
+-- close-paren, or a null/true/false operand, right before `union`) so a legit
+-- noun phrase ("credit union all selected") is not matched. No string-start
+-- branch here: like rule 301's final form, a bare value-leading `union` (only a
+-- `=` before it) is deliberately given up to avoid FPs, and the scan string is
+-- uri.."?"..args so `union` never sits at position 1 in practice.
+local function union_mid_hit(scw, mid)
+  local body = "union" .. mid .. "select"
+  return scw:find("[%d'\"%)] ?" .. body) ~= nil
+      or scw:find("null ?" .. body) ~= nil
+      or scw:find("true ?" .. body) ~= nil
+      or scw:find("false ?" .. body) ~= nil
+end
+
+-- detect_sqli_union_variant matches UNION-based injection whose UNION and SELECT
+-- are separated by an obfuscation that the adjacent-`union select` signature
+-- (detect_sqli, rule 301) misses:
+--   * a keyword — `union all select` / `union distinct select`;
+--   * a parenthesis — `union(select`;
+--   * an inline comment — `union/**/select`, which strip_sql_comments collapses
+--     to `unionselect` (the comment removes the very space the 301 signature
+--     needs); the same collapse applied to the keyword form yields
+--     `unionallselect` / `uniondistinctselect` (`union/**/all/**/select`).
+-- `UNION ALL SELECT` in particular is at least as common as plain UNION SELECT.
+-- Gated on the same value-terminator guard as rule 301 (see union_mid_hit), and
+-- ridden on a SEPARATE rule at `logonly` for a real-traffic burn-in before any
+-- promotion to challenge/block (CLAUDE.md §6; docs/waf.md). Returns true/false.
+function _M.detect_sqli_union_variant(uri, args, _s)
+  local _, scw = sqli_scan_strings(uri, args, _s)
+  if union_mid_hit(scw, " all ")      then return true end
+  if union_mid_hit(scw, " distinct ") then return true end
+  if union_mid_hit(scw, "%(")         then return true end -- union(select
+  if union_mid_hit(scw, "")           then return true end -- unionselect (union/**/select collapsed)
+  if union_mid_hit(scw, "all")        then return true end -- unionallselect (union/**/all/**/select)
+  if union_mid_hit(scw, "distinct")   then return true end -- uniondistinctselect (comment-collapsed)
+  return false
+end
+
 -- Superglobal / variable-override probe. A request parameter whose KEY is a
 -- PHP superglobal / reserved name (e.g. `?_SERVER[x]=`, `&GLOBALS[x]=`, or
 -- `_GET[x]=` in the body) is a PHP variable-poisoning attempt against code

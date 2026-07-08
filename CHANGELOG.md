@@ -17,6 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- WAF rule **319 `rule_sqli_union_variant`** (`WAF_SQLI_UNION_VARIANT`) at
+  **`logonly`** — observe-only detection of obfuscated UNION injection that
+  rule 301's *adjacent* `union select` match misses: `union all select`,
+  `union distinct select`, `union(select`, and comment-collapsed forms
+  `union/**/select` → `unionselect` and `union/**/all|distinct/**/select` →
+  `unionallselect`/`uniondistinctselect`. Runs on the same comment-stripped,
+  `+`/whitespace-collapsed scan string as 301 and carries the identical
+  value-terminator guard (the `union` must follow a value break `[%d'"%)]` or
+  a `null`/`true`/`false` operand), so legit prose like *"credit union all
+  selected"* / *"european union distinct selection"* does not fire. Shipped
+  `logonly` for a multi-day real-traffic burn-in before any promotion; the
+  `waf_security` autoblock family stays un-armed (default `0`) while logonly.
+  Go registry (`waf_rule_ids.go`) and Lua (`cfm_waf.lua`) mirror the new rule;
+  covered by `TestWAFSecurityFamilyCoverage` and
+  `scripts/tests/cfm_waf_sqli_test.lua` (7 TP obfuscated-UNION + FP prose
+  negatives). Found by the 2026-07 edge Lua audit.
+
 ### Security
 - WAF / challenge excludes: **a non-glob host or path exclude no longer matches
   by plain substring**, which silently disabled protection on unintended
