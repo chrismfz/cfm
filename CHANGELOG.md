@@ -74,6 +74,20 @@ back-filled here — see the git/PR history for that period.
   `scripts/tests/cfm_waf_excl_test.lua`. Found by the 2026-07 edge Lua audit (F10).
 
 ### Added
+- **cfm-lsm event enrichment, Tier B (BPF wire fields).** The LSM event now
+  carries the caller's parent tgid (`ppid`) read in-kernel at the instant it
+  fired, plus — for `CFML-OBS-004` — the ptrace target's pid and euid
+  (`aux_pid`/`aux_uid`). Two operator-visible wins: (1) the parent launcher
+  (cron/script/controller) is resolved from the event `ppid` even when the
+  short-lived caller has already exited by drain time (previously `proc=gone`
+  meant no parent, since userspace can't read a dead process's `/proc`); (2)
+  OBS-004 alerts show `target_pid=`/`target_uid=` alongside the target comm, so
+  an operator can tell exactly which process was introspected and whether a
+  cross-uid target was root or another tenant. The event struct grew from 112 to
+  124 bytes (fields appended after `filename`); `common.bpf.h`, `events.go`, and
+  the regenerated `.o` objects move in lockstep, and the Go parser accepts the
+  112-byte base as a floor so it stays correct against an older pinned build
+  during the version-marker refresh window.
 - **cfm-lsm event enrichment — actionable alerts + a self-preserving forensic
   trail.** Every LSM detection now carries a best-effort `/proc` snapshot of the
   offending process, gathered in the drain path within milliseconds of the event

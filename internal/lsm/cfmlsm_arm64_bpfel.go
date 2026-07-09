@@ -29,6 +29,60 @@ type cfmlsmCfmWebOriginState struct {
 	WebOrigin uint8
 }
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	cfmlsmMapCfmCredTransitionTasks    = "cfm_cred_transition_tasks"
+	cfmlsmMapCfmEvents                 = "cfm_events"
+	cfmlsmMapCfmKernelKnobInodes       = "cfm_kernel_knob_inodes"
+	cfmlsmMapCfmSetuidInodes           = "cfm_setuid_inodes"
+	cfmlsmMapCfmWatchedInodes          = "cfm_watched_inodes"
+	cfmlsmMapCfmWatchedUids            = "cfm_watched_uids"
+	cfmlsmMapCfmWebOriginTasks         = "cfm_web_origin_tasks"
+	cfmlsmProgCfmBpf001                = "cfm_bpf001"
+	cfmlsmProgCfmCred002               = "cfm_cred002"
+	cfmlsmProgCfmCred003               = "cfm_cred003"
+	cfmlsmProgCfmCred004               = "cfm_cred004"
+	cfmlsmProgCfmDeletedFileExec       = "cfm_deleted_file_exec"
+	cfmlsmProgCfmEphemeralExec         = "cfm_ephemeral_exec"
+	cfmlsmProgCfmExec007Finit          = "cfm_exec007_finit"
+	cfmlsmProgCfmExec007Init           = "cfm_exec007_init"
+	cfmlsmProgCfmExec008Kexec          = "cfm_exec008_kexec"
+	cfmlsmProgCfmExec008KexecFile      = "cfm_exec008_kexec_file"
+	cfmlsmProgCfmFs005Create           = "cfm_fs005_create"
+	cfmlsmProgCfmFs005Link             = "cfm_fs005_link"
+	cfmlsmProgCfmFs005MarkExec         = "cfm_fs005_mark_exec"
+	cfmlsmProgCfmFs005MarkSetuid       = "cfm_fs005_mark_setuid"
+	cfmlsmProgCfmFs005MarkTaskAlloc    = "cfm_fs005_mark_task_alloc"
+	cfmlsmProgCfmFs005Rename           = "cfm_fs005_rename"
+	cfmlsmProgCfmFs005SetattrIdmap     = "cfm_fs005_setattr_idmap"
+	cfmlsmProgCfmFs005SetattrNoidmap   = "cfm_fs005_setattr_noidmap"
+	cfmlsmProgCfmFs005SetxattrIdmap    = "cfm_fs005_setxattr_idmap"
+	cfmlsmProgCfmFs005SetxattrNoidmap  = "cfm_fs005_setxattr_noidmap"
+	cfmlsmProgCfmFs005Unlink           = "cfm_fs005_unlink"
+	cfmlsmProgCfmFs006                 = "cfm_fs006"
+	cfmlsmProgCfmFs007SetattrIdmap     = "cfm_fs007_setattr_idmap"
+	cfmlsmProgCfmFs007SetattrNoidmap   = "cfm_fs007_setattr_noidmap"
+	cfmlsmProgCfmFs007SetxattrIdmap    = "cfm_fs007_setxattr_idmap"
+	cfmlsmProgCfmFs007SetxattrNoidmap  = "cfm_fs007_setxattr_noidmap"
+	cfmlsmProgCfmFs008                 = "cfm_fs008"
+	cfmlsmProgCfmInterpNetStdio        = "cfm_interp_net_stdio"
+	cfmlsmProgCfmMemfdExec             = "cfm_memfd_exec"
+	cfmlsmProgCfmNet002                = "cfm_net002"
+	cfmlsmProgCfmObs004                = "cfm_obs004"
+	cfmlsmProgCfmRevshell              = "cfm_revshell"
+	cfmlsmVarCfmEnforceDeletedFileExec = "cfm_enforce_deleted_file_exec"
+	cfmlsmVarCfmEnforceEphemeralExec   = "cfm_enforce_ephemeral_exec"
+	cfmlsmVarCfmEnforceKernelKnobWrite = "cfm_enforce_kernel_knob_write"
+	cfmlsmVarCfmEnforceMemfdExec       = "cfm_enforce_memfd_exec"
+	cfmlsmVarCfmEnforcePrivInstall     = "cfm_enforce_priv_install"
+	cfmlsmVarCfmEnforceRawSocket       = "cfm_enforce_raw_socket"
+	cfmlsmVarCfmEnforceRevshell        = "cfm_enforce_revshell"
+	cfmlsmVarCfmEnforceSensitiveWrite  = "cfm_enforce_sensitive_write"
+	cfmlsmVarCfmFs005WebOriginMonitor  = "cfm_fs005_web_origin_monitor"
+)
+
 // loadCfmlsm returns the embedded CollectionSpec for cfmlsm.
 func loadCfmlsm() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_CfmlsmBytes)
@@ -49,7 +103,7 @@ func loadCfmlsm() (*ebpf.CollectionSpec, error) {
 //	*cfmlsmMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadCfmlsmObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadCfmlsmObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadCfmlsm()
 	if err != nil {
 		return err

@@ -539,6 +539,11 @@ func eventDetailTail(ev Event) string {
 	if ev.Filename != "" {
 		b.WriteString(" path=" + ev.Filename)
 	}
+	// OBS-004 ptrace target identity (per-target — kept out of the
+	// collapsed dedup key, which uses eventCallerTags).
+	if tpid, tuid, ok := ev.PtraceTarget(); ok {
+		fmt.Fprintf(&b, " target_pid=%d target_uid=%d", tpid, tuid)
+	}
 	if ev.Op != FSOpNone {
 		b.WriteString(" op=" + ev.Op.String())
 	}
@@ -653,6 +658,10 @@ func buildExtra(ev Event, enr eventEnrichment) map[string]string {
 			extra["ptrace_sameuid"] = "1"
 		}
 	}
+	if tpid, tuid, ok := ev.PtraceTarget(); ok {
+		extra["target_pid"] = strconv.FormatUint(uint64(tpid), 10)
+		extra["target_uid"] = strconv.FormatUint(uint64(tuid), 10)
+	}
 	if sets := ev.CapRaiseSets(); sets != "" {
 		extra["cap_raise_sets"] = sets
 	}
@@ -681,7 +690,7 @@ func emitNotify(ev Event) {
 	// exit, so this snapshots identity, the uid swarm roster, and
 	// preserves any suspicious binary before it can be unlinked. Cached so
 	// a burst does the work once; a no-op when enrichment is disabled.
-	enr := gatherEnrichment(ev.PID, ev.UID, eventSinkEnrichCfg(), time.Now())
+	enr := gatherEnrichment(ev.PID, ev.UID, ev.PPid, eventSinkEnrichCfg(), time.Now())
 	logReason, notifyReason, samples := composeReasons(ev, enr)
 	emitDetect(logReason, notifyReason, buildExtra(ev, enr), samples)
 }

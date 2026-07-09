@@ -54,6 +54,24 @@ struct {
     __uint(max_entries, 256 * 1024);
 } cfm_events SEC(".maps");
 
+/* Fill the "kin" fields common to every event: the caller's parent tgid
+ * (so userspace can resolve the launcher even after a short-lived caller
+ * exits and its /proc entry is gone), plus zeroed auxiliary secondary-
+ * subject pid/uid. A policy with a second subject — today only
+ * CFML-OBS-004's ptrace target — overwrites aux_* AFTER this call.
+ *
+ * MUST be called at every emit site: bpf_ringbuf_reserve does not zero
+ * the record, so leaving these unset would leak stale ringbuf bytes.
+ * Called right after the _pad zeroing via the shared anchor. Defined here,
+ * before the first program, so every emit site sees its declaration. */
+static __always_inline void cfm_event_fill_kin(struct cfm_lsm_event *e)
+{
+    struct task_struct *t = bpf_get_current_task_btf();
+    e->ppid    = t ? (__u32)BPF_CORE_READ(t, real_parent, tgid) : 0;
+    e->aux_pid = 0;
+    e->aux_uid = 0;
+}
+
 /* Per-policy enforcement mode. Rewritten by the Go loader at load
  * time via spec.RewriteConstants() — see internal/lsm/loader.go.
  *
@@ -178,6 +196,7 @@ int BPF_PROG(cfm_memfd_exec, struct linux_binprm *bprm, int ret)
     e->flags     = 0;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -335,6 +354,7 @@ int BPF_PROG(cfm_revshell, struct linux_binprm *bprm, int ret)
     e->flags     = CFM_LSM_F_REVSHELL_STRICT;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -457,6 +477,7 @@ static __always_inline void cfm_emit_exec_stdio_event(struct linux_binprm *bprm,
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -752,6 +773,7 @@ int BPF_PROG(cfm_deleted_file_exec, struct linux_binprm *bprm, int ret)
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -992,6 +1014,7 @@ int BPF_PROG(cfm_ephemeral_exec, struct linux_binprm *bprm, int ret)
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -1039,6 +1062,7 @@ static __always_inline void cfm_fs005_emit(struct dentry *target,
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -1594,6 +1618,7 @@ static __always_inline void cfm_cred_emit(__u32 policy_id, __u8 flags, struct fi
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -1826,6 +1851,7 @@ static __always_inline void cfm_bpf001_emit(__u8 op, __u8 flags, const char *com
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
     if (op == CFM_BPF_OP_MAP_CREATE)
@@ -1929,6 +1955,7 @@ static __always_inline void cfm_fs006_emit(struct file *file)
     e->flags     = 0;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -2072,6 +2099,7 @@ static __always_inline void cfm_fs007_emit(struct dentry *target,
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -2303,6 +2331,7 @@ static __always_inline void cfm_exec007_emit(__u8 op, __u8 flags, const char *co
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
     if (op == CFM_KMOD_OP_INIT)
@@ -2436,6 +2465,7 @@ static __always_inline void cfm_exec008_emit(__u8 op, __u8 flags, const char *co
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
     if (op == CFM_KEXEC_OP_LOAD)
@@ -2583,6 +2613,7 @@ static __always_inline void cfm_fs008_emit(struct file *file, const char *comm)
     e->flags     = 0;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     __builtin_memcpy(e->comm, comm, CFM_TASK_COMM_LEN);
 
@@ -2728,6 +2759,7 @@ static __always_inline void cfm_obs004_emit(struct task_struct *child,
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -2739,6 +2771,12 @@ static __always_inline void cfm_obs004_emit(struct task_struct *child,
      * read of the inline array into our event buffer. */
     if (child) {
         BPF_CORE_READ_STR_INTO(&e->filename, child, comm);
+        /* Target identity beyond comm: its tgid (process id) and euid.
+         * With comm alone an operator cannot tell WHICH systemd/sshd was
+         * read, nor whether a cross-uid target was root vs another tenant.
+         * aux_uid also disambiguates the sameuid flag's other side. */
+        e->aux_pid = (__u32)BPF_CORE_READ(child, tgid);
+        e->aux_uid = (__u32)BPF_CORE_READ(child, cred, euid.val);
     } else {
         e->filename[0] = '\0';
     }
@@ -2893,6 +2931,7 @@ static __always_inline void cfm_net002_emit(__u8 op, int protocol)
     e->flags     = CFM_LSM_F_WEB_ORIGIN;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
@@ -3065,6 +3104,7 @@ static __always_inline void cfm_cred004_emit(__u8 flags, __u8 cap_bit, struct ta
     e->flags     = flags;
     e->_pad1     = 0;
     e->_pad2     = 0;
+    cfm_event_fill_kin(e);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 

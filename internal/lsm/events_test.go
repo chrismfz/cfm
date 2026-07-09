@@ -114,10 +114,10 @@ func TestParseEvent_DirectCredInstall(t *testing.T) {
 
 func TestEventExecStdioSignal(t *testing.T) {
 	cases := []struct {
-		name    string
-		policy  PolicyID
-		flags   uint8
-		want    string
+		name   string
+		policy PolicyID
+		flags  uint8
+		want   string
 	}{
 		{"strict", PolicyReverseShell, EventFlagRevshellStrict, "strict_all_stdio_remote"},
 		{"weak two", PolicyInterpreterNetStdio, EventFlagInterpreterStdioWeak | EventFlagStdioTwoRemote, "weak_two_stdio_remote"},
@@ -230,13 +230,53 @@ func TestParseEvent_FdCredMismatch(t *testing.T) {
 }
 
 func TestParseEvent_Truncated(t *testing.T) {
-	raw := make([]byte, wireEventSize-1)
+	// Below the base record floor must error...
+	raw := make([]byte, wireEventBaseSize-1)
 	_, err := parseEvent(raw)
 	if err == nil {
 		t.Fatal("expected error on truncated event")
 	}
 	if !strings.Contains(err.Error(), "truncated") {
 		t.Errorf("error %q does not say truncated", err.Error())
+	}
+	// ...but a pre-Tier-B 112-byte record must parse (tail fields zero).
+	base := make([]byte, wireEventBaseSize)
+	binary.LittleEndian.PutUint32(base[8:12], bpfPolicyMemfdExec)
+	ev, err := parseEvent(base)
+	if err != nil {
+		t.Fatalf("base-size record must parse: %v", err)
+	}
+	if ev.PPid != 0 || ev.AuxPID != 0 || ev.AuxUID != 0 {
+		t.Errorf("pre-Tier-B record must leave tail zero, got ppid=%d aux=%d/%d", ev.PPid, ev.AuxPID, ev.AuxUID)
+	}
+}
+
+func TestParseEvent_TierBTail(t *testing.T) {
+	raw := make([]byte, wireEventSize)
+	le := binary.LittleEndian
+	le.PutUint32(raw[8:12], bpfPolicyPtraceAccess)
+	le.PutUint32(raw[12:16], 100) // caller pid
+	le.PutUint32(raw[112:116], 999)
+	le.PutUint32(raw[116:120], 4242) // target pid
+	le.PutUint32(raw[120:124], 0)    // target uid (root)
+	ev, err := parseEvent(raw)
+	if err != nil {
+		t.Fatalf("parseEvent: %v", err)
+	}
+	if ev.PPid != 999 {
+		t.Errorf("PPid = %d, want 999", ev.PPid)
+	}
+	tpid, tuid, ok := ev.PtraceTarget()
+	if !ok || tpid != 4242 || tuid != 0 {
+		t.Errorf("PtraceTarget = (%d,%d,%v), want (4242,0,true)", tpid, tuid, ok)
+	}
+	// A non-OBS-004 policy must not expose a ptrace target even if aux is set.
+	raw2 := make([]byte, wireEventSize)
+	le.PutUint32(raw2[8:12], bpfPolicySensitiveWrite)
+	le.PutUint32(raw2[116:120], 5)
+	ev2, _ := parseEvent(raw2)
+	if _, _, ok := ev2.PtraceTarget(); ok {
+		t.Error("non-OBS-004 event must not report a ptrace target")
 	}
 }
 
@@ -352,7 +392,9 @@ func TestWireEventSize_Stable(t *testing.T) {
 	// If this fires the BPF event struct changed shape; regenerate
 	// the .o objects (go generate ./internal/lsm/...) AND update
 	// parseEvent's offsets to match.
-	const expected = 8 + 4 + 4 + 4 + 4 + 4 + 4 + 16 + 64
+	// 112-byte base (ts/policy/pid/tgid/uid/gid + op/flags/_pad + comm +
+	// filename) plus the 12-byte Tier B tail: ppid + aux_pid + aux_uid.
+	const expected = 8 + 4 + 4 + 4 + 4 + 4 + 4 + 16 + 64 + 4 + 4 + 4
 	if wireEventSize != expected {
 		t.Errorf("wireEventSize drifted: got %d, want %d (BPF struct layout changed?)",
 			wireEventSize, expected)

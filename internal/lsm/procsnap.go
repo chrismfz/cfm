@@ -111,13 +111,29 @@ type procSnapshot struct {
 // Alive=false with whatever could still be resolved (the uid→user
 // mapping does not need /proc). hash controls whether the exe SHA-256
 // is computed.
-func snapshotProc(pid, uid uint32, hash bool) procSnapshot {
-	s := procSnapshot{PID: pid, UID: uid, User: lookupUser(uid), LoginUID: -1}
+//
+// ppidHint is the parent tgid carried by the BPF event (captured
+// in-kernel at event time). It is preferred over /proc/<pid>/status
+// because it is authoritative at the instant the event fired and is
+// available even after the caller has exited — which is what lets the
+// parent (the persistent launcher) still be resolved for a short-lived
+// dropper whose own /proc entry is already gone. 0 means "no hint".
+func snapshotProc(pid, uid, ppidHint uint32, hash bool) procSnapshot {
+	s := procSnapshot{PID: pid, UID: uid, User: lookupUser(uid), LoginUID: -1, PPid: ppidHint}
 
 	base := filepath.Join(procRoot, strconv.FormatUint(uint64(pid), 10))
 	s.StartTime = readStartTime(filepath.Join(base, "stat"))
 	if _, err := os.Stat(base); err != nil {
-		// Caller already exited — the race was lost. Leave Alive=false.
+		// Caller already exited — the race was lost for its own fields, but
+		// the event-provided ppid still lets us resolve the launcher. This
+		// is best-effort: the event carries the ppid NUMBER, not the
+		// parent's identity, so if the parent ALSO exited and its pid was
+		// recycled by drain time, /proc/<ppid> is an unrelated process and
+		// ParentExe/Comm mislabel the launcher. Narrow (both the caller and
+		// its parent must exit within the ~ms drain window and the ppid be
+		// reused), and the caller is already flagged proc=gone; usually the
+		// parent is the long-lived launcher and resolves correctly.
+		s.resolveParent()
 		return s
 	}
 	s.Alive = true
@@ -129,24 +145,37 @@ func snapshotProc(pid, uid uint32, hash bool) procSnapshot {
 		s.Cwd = cwd
 	}
 	s.Cmdline = readCmdline(filepath.Join(base, "cmdline"))
+	// Alive caller: the live status ppid is the ONLY self-consistent parent
+	// — it matches the exe/cwd/cmdline just read from the same /proc entry.
+	// Set it unconditionally (overriding the event hint): if the pid was
+	// recycled between the event firing and this read, os.Stat succeeds for
+	// the NEW occupant, and the event's ppidHint belongs to the OLD one, so
+	// pairing hint-parent with live-child would misattribute the launcher.
+	// If status can't be read we leave PPid 0 (parent unknown) rather than
+	// fall back to that possibly-wrong hint. The event ppid is used only for
+	// the gone-caller branch above, where it is the sole available source.
 	s.PPid = readPPid(filepath.Join(base, "status"))
 	s.LoginUID = readLoginUID(filepath.Join(base, "loginuid"))
 	if hash {
 		s.SHA256 = hashExe(filepath.Join(base, "exe"))
 	}
-
-	// Parent context resolves only while the caller is still alive (we
-	// read ppid from its own status). It is the persistent launcher
-	// (cron entry, shell script, malware controller) and usually the more
-	// actionable "where do I look" pointer than the short-lived caller.
-	if s.PPid != 0 {
-		pbase := filepath.Join(procRoot, strconv.FormatUint(uint64(s.PPid), 10))
-		if pexe, _ := procReadlink(filepath.Join(pbase, "exe")); pexe != "" {
-			s.ParentExe = pexe
-		}
-		s.ParentComm = strings.TrimSpace(readProcFile(filepath.Join(pbase, "comm"), 64))
-	}
+	s.resolveParent()
 	return s
+}
+
+// resolveParent fills ParentExe / ParentComm from /proc/<PPid> when a
+// ppid is known. The parent (cron entry, shell script, malware
+// controller) is the persistent launcher and usually the more actionable
+// "where do I look" pointer than the short-lived caller.
+func (s *procSnapshot) resolveParent() {
+	if s.PPid == 0 {
+		return
+	}
+	pbase := filepath.Join(procRoot, strconv.FormatUint(uint64(s.PPid), 10))
+	if pexe, _ := procReadlink(filepath.Join(pbase, "exe")); pexe != "" {
+		s.ParentExe = pexe
+	}
+	s.ParentComm = strings.TrimSpace(readProcFile(filepath.Join(pbase, "comm"), 64))
 }
 
 // snapshot cache — one entry per live caller pid, reused for the
@@ -170,7 +199,7 @@ var (
 // The current start time is a single small read; on a hit it saves the
 // expensive exe hash + readlinks. now is injected so tests stay
 // deterministic.
-func cachedSnapshotProc(pid, uid uint32, hash bool, now time.Time) procSnapshot {
+func cachedSnapshotProc(pid, uid, ppidHint uint32, hash bool, now time.Time) procSnapshot {
 	st := readStartTime(filepath.Join(procRoot, strconv.FormatUint(uint64(pid), 10), "stat"))
 
 	snapCacheMu.Lock()
@@ -180,7 +209,7 @@ func cachedSnapshotProc(pid, uid uint32, hash bool, now time.Time) procSnapshot 
 	}
 	snapCacheMu.Unlock()
 
-	snap := snapshotProc(pid, uid, hash)
+	snap := snapshotProc(pid, uid, ppidHint, hash)
 
 	snapCacheMu.Lock()
 	if len(snapCache) >= snapCacheMaxEntry {
@@ -853,13 +882,15 @@ type eventEnrichment struct {
 
 // gatherEnrichment performs all the /proc I/O for one event under cfg.
 // Ordered snapshot → roster → capture so capture can reuse the roster's
-// suspicious-peer discovery. Everything is best-effort and bounded.
-func gatherEnrichment(pid, uid uint32, cfg enrichConf, now time.Time) eventEnrichment {
+// suspicious-peer discovery. ppidHint is the event's BPF-provided parent
+// tgid, used to resolve the launcher even for an exited caller.
+// Everything is best-effort and bounded.
+func gatherEnrichment(pid, uid, ppidHint uint32, cfg enrichConf, now time.Time) eventEnrichment {
 	if !cfg.Enrich {
 		return eventEnrichment{}
 	}
 	e := eventEnrichment{on: true}
-	e.snap = cachedSnapshotProc(pid, uid, cfg.Hash, now)
+	e.snap = cachedSnapshotProc(pid, uid, ppidHint, cfg.Hash, now)
 	if cfg.Peers && uid != 0 {
 		e.roster = cachedUIDRoster(uid, now)
 	}

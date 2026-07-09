@@ -148,7 +148,7 @@ struct cfm_inode_key {
  * 256 KiB ringbuf budget) so a busy host can buffer many events
  * before the Go reader drains them.
  *
- * Wire layout (112 bytes, stable since EXEC-001):
+ * Wire layout (124 bytes):
  *   offset  size  field
  *        0     8  ts_ns
  *        8     4  policy_id
@@ -161,10 +161,16 @@ struct cfm_inode_key {
  *       30     2  _pad
  *       32    16  comm
  *       48    64  filename
+ *      112     4  ppid       (caller's parent tgid)
+ *      116     4  aux_pid    (policy-specific secondary subject pid)
+ *      120     4  aux_uid    (policy-specific secondary subject euid)
  *
- * Total size unchanged from the EXEC-001 release — `_pad` was 4
- * bytes; FS-005 splits it into op + flags + 2 trailing pad bytes so
- * the Go parser does not need a wire-version bump. */
+ * ppid / aux_pid / aux_uid were appended AFTER filename so every offset
+ * above stays stable. The Go parser (events.go) treats the 112-byte base
+ * as its floor and reads this tail only when present, so a new parser
+ * still reads correctly even if it drains a ringbuf pinned by an older
+ * 112-byte build before the version-marker refresh re-pins. The FS-005
+ * op+flags split (formerly a 4-byte `_pad`) predates this. */
 struct cfm_lsm_event {
     __u64 ts_ns;
     __u32 policy_id;
@@ -178,6 +184,14 @@ struct cfm_lsm_event {
     __u8  _pad2;
     char  comm[CFM_TASK_COMM_LEN];
     char  filename[CFM_FILENAME_LEN];
+    /* Appended after filename so no existing field offset shifts. Every
+     * emit site sets these via cfm_event_fill_kin() (ringbuf memory is
+     * not zeroed), so they never carry stale bytes. */
+    __u32 ppid;    /* caller's parent tgid — resolve the launcher even
+                      after a short-lived caller exits */
+    __u32 aux_pid; /* policy-specific secondary subject; CFML-OBS-004 =
+                      the ptrace target's tgid, otherwise 0 */
+    __u32 aux_uid; /* secondary subject euid; CFML-OBS-004 = target euid */
 } __attribute__((packed));
 
 #endif /* __CFM_LSM_COMMON_H__ */

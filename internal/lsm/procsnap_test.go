@@ -86,7 +86,7 @@ func TestSnapshotProc_FullForensics(t *testing.T) {
 	mkProc(t, root, 4242, payload, filepath.Join(root, "home", "bob"), "pgrep\x00-f\x00systemd\x00", "pgrep", 999, "1234")
 	mkProc(t, root, 999, cronBin, "/", "", "cron", 1, "4294967295")
 
-	s := snapshotProc(4242, 0, true)
+	s := snapshotProc(4242, 0, 0, true)
 	if !s.Alive {
 		t.Fatal("expected Alive")
 	}
@@ -122,7 +122,7 @@ func TestSnapshotProc_FullForensics(t *testing.T) {
 		}
 	}
 	// The parent's loginuid was the (uint32)-1 sentinel: unset -> -1.
-	ps := snapshotProc(999, 0, false)
+	ps := snapshotProc(999, 0, 0, false)
 	if ps.LoginUID != -1 {
 		t.Errorf("parent loginuid = %d, want -1 (unset sentinel)", ps.LoginUID)
 	}
@@ -130,12 +130,60 @@ func TestSnapshotProc_FullForensics(t *testing.T) {
 
 func TestSnapshotProc_ProcessGone(t *testing.T) {
 	fakeProc(t)
-	s := snapshotProc(12345, 4242, true)
+	s := snapshotProc(12345, 4242, 0, true)
 	if s.Alive {
 		t.Fatal("expected not-alive for a missing pid")
 	}
 	if !strings.Contains(s.logSuffix(), "proc=gone") {
 		t.Errorf("logSuffix %q missing proc=gone", s.logSuffix())
+	}
+}
+
+// TestSnapshotProc_GoneCallerResolvesParentViaPpidHint is the Tier B
+// payoff: a short-lived caller has already exited (no /proc/<pid>), but
+// the BPF-provided ppid still lets us resolve the persistent launcher.
+func TestSnapshotProc_GoneCallerResolvesParentViaPpidHint(t *testing.T) {
+	root := fakeProc(t)
+	cronBin := filepath.Join(root, "cronbin")
+	writeProcFile(t, cronBin, "cron")
+	// Only the PARENT exists in /proc; the caller (pid 55555) is gone.
+	mkProc(t, root, 999, cronBin, "/", "cron\x00", "cron", 1, "0")
+
+	s := snapshotProc(55555, 1234, 999 /* ppid hint from event */, true)
+	if s.Alive {
+		t.Fatal("caller should be gone")
+	}
+	if s.PPid != 999 {
+		t.Errorf("ppid = %d, want 999 (from hint)", s.PPid)
+	}
+	if s.ParentExe != cronBin || s.ParentComm != "cron" {
+		t.Errorf("parent not resolved from hint: exe=%q comm=%q", s.ParentExe, s.ParentComm)
+	}
+}
+
+// TestSnapshotProc_AliveCallerPrefersLiveStatusPpid guards the
+// anti-Franken-snapshot rule: when the caller is ALIVE its live /proc is
+// self-consistent, so the live status ppid wins over the event ppidHint.
+// (The hint could belong to a prior occupant if the pid was recycled;
+// attaching it to the live child's exe/cwd would misattribute the
+// launcher.) The event ppid is only used when the caller is gone — see
+// TestSnapshotProc_GoneCallerResolvesParentViaPpidHint.
+func TestSnapshotProc_AliveCallerPrefersLiveStatusPpid(t *testing.T) {
+	root := fakeProc(t)
+	// Live caller pid 700 whose status says PPid 900; the event carried a
+	// stale/other hint 4321. The live status must win.
+	realParent := filepath.Join(root, "realparent")
+	writeProcFile(t, realParent, "rp")
+	mkProc(t, root, 700, filepath.Join(root, "x"), "/", "sh\x00", "sh", 900, "0")
+	writeProcFile(t, filepath.Join(root, "x"), "x")
+	mkProc(t, root, 900, realParent, "/", "bash\x00", "bash", 1, "0")
+
+	s := snapshotProc(700, 0, 4321 /* stale hint, must be ignored while alive */, false)
+	if s.PPid != 900 {
+		t.Errorf("ppid = %d, want 900 (live status preferred over stale hint while alive)", s.PPid)
+	}
+	if s.ParentExe != realParent {
+		t.Errorf("parent exe = %q, want %q", s.ParentExe, realParent)
 	}
 }
 
@@ -322,7 +370,7 @@ func TestReadStartTime(t *testing.T) {
 
 func TestGatherEnrichment_DisabledIsNoOp(t *testing.T) {
 	fakeProc(t)
-	e := gatherEnrichment(1, 0, enrichConf{Enrich: false}, time.Unix(1_700_000_000, 0))
+	e := gatherEnrichment(1, 0, 0, enrichConf{Enrich: false}, time.Unix(1_700_000_000, 0))
 	if e.on {
 		t.Error("enrichment should be off")
 	}

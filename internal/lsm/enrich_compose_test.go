@@ -68,6 +68,29 @@ func TestComposeReasons_NotifyStableAcrossTargets(t *testing.T) {
 	}
 }
 
+// TestComposeReasons_ObsTargetInDetailNotDedupKey verifies the Tier B
+// OBS-004 target pid/uid appear in the log line and sample (per-target
+// forensic detail) but NOT in the collapsed notify reason (they vary per
+// target and must not split the dedup key).
+func TestComposeReasons_ObsTargetInDetailNotDedupKey(t *testing.T) {
+	enr := eventEnrichment{on: true, snap: procSnapshot{Alive: true, PID: 100, UID: 1234, Exe: "/tmp/.x/pgrep"}}
+	ev := Event{
+		PolicyID: PolicyPtraceAccess, PID: 100, UID: 1234, Comm: "pgrep", Filename: "sshd",
+		AuxPID: 4242, AuxUID: 0,
+		Flags: EventFlagWebOrigin | EventFlagPtraceRead,
+	}
+	logReason, notifyReason, samples := composeReasons(ev, enr)
+	if !strings.Contains(logReason, "target_pid=4242 target_uid=0") {
+		t.Errorf("logReason missing OBS-004 target: %q", logReason)
+	}
+	if !strings.Contains(samples[0], "target_pid=4242") {
+		t.Errorf("sample missing OBS-004 target: %q", samples[0])
+	}
+	if strings.Contains(notifyReason, "target_pid") {
+		t.Errorf("notifyReason must not carry per-target pid (breaks dedup): %q", notifyReason)
+	}
+}
+
 // TestComposeReasons_DiscretePolicyKeepsTarget verifies that a non-sweep
 // policy (FS-005) keeps the target in the notify reason, so distinct
 // sensitive-file writes remain distinct emails and the notify JSONL audit
