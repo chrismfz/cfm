@@ -116,7 +116,16 @@ func dnatAcceptRuleExpr(spec dnatAcceptRuleSpec, beforeHandle string) string {
 func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
 	_ = b.nftExpr("add table inet cfm")
 	_ = b.nftCmd("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
-	out, _ := b.nftOut("-a list chain inet cfm input")
+	// MUST list via ListChainText (argv mode). nftOut feeds its argument to
+	// `nft -f -` (script mode), where the `-a` handle flag is a syntax error —
+	// that made the listing fail silently, so firstInputDefaultDropHandle saw an
+	// error string, returned "", and the accepts were APPENDED after the default
+	// drop (never reached) instead of inserted before it. Fail closed on a list
+	// error rather than repeating that silent breakage.
+	out, err := b.ListChainText(family, tableName, "input")
+	if err != nil {
+		return fmt.Errorf("list %s %s input chain for dnat accepts: %w", family, tableName, err)
+	}
 	beforeHandle := firstInputDefaultDropHandle(out)
 	if err := b.cleanupScopedDNATAccepts(); err != nil {
 		return err
@@ -133,7 +142,9 @@ func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
 }
 
 func (b *Backend) cleanupScopedDNATAccepts() error {
-	out, err := b.nftOut("-a list chain inet cfm input")
+	// argv-mode listing (see ensureScopedDNATAccepts): a script-mode `-a` list
+	// errors out, which would leave stale accepts undeleted and duplicated.
+	out, err := b.ListChainText(family, tableName, "input")
 	if err != nil {
 		return nil
 	}

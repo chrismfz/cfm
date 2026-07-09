@@ -85,6 +85,26 @@ back-filled here — see the git/PR history for that period.
   `scripts/tests/cfm_waf_excl_test.lua`. Found by the 2026-07 edge Lua audit (F10).
 
 ### Fixed
+- **DNAT/panel scoped accepts were appended AFTER the default drop (and
+  duplicated) — DNAT'd web/panel traffic was dropped unless the listener ports
+  were in `TCP_IN`.** `ensureScopedDNATAccepts` / `EnsurePanelDNATAccepts` (nft
+  backend) listed the input chain with `nftOut("-a list chain inet cfm input")`,
+  but `nftOut` feeds its argument to `nft -f -` (script mode) where the `-a`
+  handle flag is a **syntax error**. The listing therefore failed and the error
+  was discarded, so: (1) the default-drop handle was never found and the scoped
+  `ct status dnat` accepts were **appended after** the drop (never matched), and
+  (2) the "does this accept already exist" cleanup matched nothing and **piled
+  up duplicate** accept rules on every reload. Net effect on cPanel/Imunify boxes
+  with `cfm dnat on` / `cfm dnat cpanel on`: only allowlisted (`allow_dyn`) IPs
+  could reach the site; everyone else was dropped — masked only by listing
+  `9080/9043/12082..` in `TCP_IN`. Fixed by listing via `ListChainText` (argv
+  mode) in all five affected call sites (`ensureScopedDNATAccepts`,
+  `cleanupScopedDNATAccepts`, `EnsurePanelDNATAccepts`, `RemovePanelDNATAccepts`,
+  `PanelDNATAcceptState`) and failing closed on a list error instead of silently
+  appending. You no longer need the DNAT listener ports in `TCP_IN`. Regression
+  tests: `TestDNATOnPlacesAcceptsBeforeDefaultDrop` (live-nft, gated by
+  `CFM_NFT_INTEGRATION=1`) and `TestNftOutIsNeverCalledWithCLIFlags` (source
+  guard).
 - **Socket-ingest-only boxes: forced-vhost challenge (and all webdetector
   challenge/block emission) never ran.** When the webdetector ingests via the
   Unix socket (`/run/cfm/ingest.sock`, fed by the OpenResty/Angie edge) and the

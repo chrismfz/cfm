@@ -125,7 +125,13 @@ func panelDNATAcceptRuleExpr(from, to int, beforeHandle string) string {
 func (b *Backend) EnsurePanelDNATAccepts() ([]string, error) {
 	_ = b.nftExpr("add table inet cfm")
 	_ = b.nftCmd("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
-	out, _ := b.nftOut("-a list chain inet cfm input")
+	// argv-mode listing (see ensureScopedDNATAccepts in dnat.go): a script-mode
+	// `-a` list is a syntax error, which made beforeHandle "" and the panel
+	// accepts land after the default drop (and duplicate). Fail closed instead.
+	out, err := b.ListChainText(family, tableName, "input")
+	if err != nil {
+		return nil, fmt.Errorf("list %s %s input chain for panel dnat accepts: %w", family, tableName, err)
+	}
 	beforeHandle := firstInputDefaultDropHandle(out)
 	changes := []string{}
 	for _, m := range firewall.PanelDNATMappings() {
@@ -149,7 +155,9 @@ func (b *Backend) EnsurePanelDNATAccepts() ([]string, error) {
 }
 
 func (b *Backend) RemovePanelDNATAccepts() ([]string, error) {
-	out, err := b.nftOut("-a list chain inet cfm input")
+	// argv-mode listing: a script-mode `-a` list errors, which would report
+	// every mapping as "not found" and leave the real accepts in place.
+	out, err := b.ListChainText(family, tableName, "input")
 	if err != nil {
 		return nil, nil
 	}
@@ -183,7 +191,9 @@ func (b *Backend) PanelDNATAcceptState() map[int]string {
 	for _, m := range firewall.PanelDNATMappings() {
 		state[m.To] = "unknown"
 	}
-	out, err := b.nftOut("-a list chain inet cfm input")
+	// argv-mode listing: a script-mode `-a` list errors, which previously made
+	// this report every panel port "blocked" even when the accepts were fine.
+	out, err := b.ListChainText(family, tableName, "input")
 	if err != nil {
 		return state
 	}
