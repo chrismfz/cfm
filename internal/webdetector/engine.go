@@ -868,68 +868,49 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		telemetry.RecordWebdetRunOnce(time.Since(runStart), runErr != nil && runErr != context.Canceled)
 	}()
 
-	if e.src == nil {
-		return nil
-	}
-
-	// resume pos
-	if e.state != nil && e.stateKey != "" {
-		if p, ok := e.state.Get(e.stateKey); ok {
-			e.ApplyPosition(p)
+	// Drain the attached file source, if any. In socket-ingest-only mode no
+	// LOG_PATH file is present, so webdetector_register never calls SetSource
+	// and e.src is nil here. We must NOT return early in that case: the Unix
+	// ingest socket feeds records on its own goroutine, and ALL challenge/block
+	// emission — per-IP challenges, autoblocks, AND the CHALLENGE_VHOST vhost
+	// push — happens in the periodic reconcile below, not in the read loop.
+	// Returning at `e.src == nil` (or on a transient Open failure, e.g. a log
+	// that hasn't been created yet) left socket-only boxes with the forced-vhost
+	// list loaded but never pushed to the edge (active_vhosts stayed empty), so
+	// cpanel.*/webmail.*/whm.* were never challenged even though the in-path WAF
+	// still fired.
+	// srcDrained is true only when a file source was opened AND drained cleanly
+	// this tick. It gates the resume-offset persistence below: on an Open
+	// failure e.Position() is a zeroed/stale {off:0,inode:0} (the tailer never
+	// seeked — ApplyResume sets only LastOffset/LastInode, which Position() does
+	// NOT read), and persisting that clobbers the saved offset, so on recovery
+	// the tailer seeks to end (START_AT_END) and silently skips every line
+	// written meanwhile. The old code's early return skipped the Put on any
+	// Open/read failure; preserve exactly that.
+	srcDrained := false
+	if e.src != nil {
+		// resume pos
+		if e.state != nil && e.stateKey != "" {
+			if p, ok := e.state.Get(e.stateKey); ok {
+				e.ApplyPosition(p)
+			}
 		}
-	}
 
-	if err := e.src.Open(); err != nil {
-		// This can happen during log rotation/atomic writes. We keep the periodic
-		// loop alive, but log enough context to diagnose "stuck" behavior.
-		logging.Logf("[webdetector] tail open failed: %v (mode=%s source=%q)",
-			err, e.cfg.Mode, e.sourceLabel())
-		runErr = fmt.Errorf("webdetector: tail open failed: %w", err)
-		return runErr
-
-	}
-	defer e.src.Close()
-
-	for {
-		line, err := e.src.ReadNext(ctx)
-		if err == io.EOF {
-			break
+		if err := e.src.Open(); err != nil {
+			// This can happen during log rotation/atomic writes. Keep the
+			// periodic reconcile alive (below) instead of returning, and log
+			// enough context to diagnose "stuck" behavior.
+			logging.Logf("[webdetector] tail open failed: %v (mode=%s source=%q)",
+				err, e.cfg.Mode, e.sourceLabel())
+			runErr = fmt.Errorf("webdetector: tail open failed: %w", err)
+		} else {
+			defer e.src.Close()
+			if err := e.drainSource(ctx); err != nil {
+				runErr = err
+			} else {
+				srcDrained = true
+			}
 		}
-		if err != nil {
-			off, ino, ts := e.src.Position()
-			logging.Logf("[webdetector] tail read failed: %v (off=%d ino=%d ts=%d mode=%s source=%q)",
-				err, off, ino, ts, e.cfg.Mode, e.sourceLabel())
-			runErr = fmt.Errorf("webdetector: tail read failed: %w", err)
-			return runErr
-		}
-		//chris//
-		//rec, ok := parseTSV(line)
-		rec, ok := e.adapter.Parse(line)
-		if !ok {
-			telemetry.RecordWebdetParseFailure()
-			continue
-		}
-		telemetry.RecordWebdetLineParsed()
-
-		// progress marker: we successfully parsed a record
-		e.progMu.Lock()
-		e.lastParsedAt = time.Now()
-		e.parsedSinceLog++
-		e.progMu.Unlock()
-
-		// Source arbiter: if the Unix ingest socket has been active within
-		// SocketActiveWindow, socket lines are authoritative — we keep the
-		// file tailer running (so its position stays current and it can
-		// take over instantly on silence) but suppress its output to avoid
-		// double-counting.
-		if e.ingestSock != nil && e.ingestSock.Active(time.Now()) {
-			continue
-		}
-		e.noteActiveSource("file")
-
-		ingestStart := time.Now()
-		e.ingest(rec, line)
-		telemetry.RecordWebdetIngestDuration(time.Since(ingestStart))
 	}
 
 	// Ensure buckets age out even when there are no new log lines.
@@ -963,8 +944,11 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	e.emitIPBlocks(now, out)
 	e.expireOldChallenges()
 
-	// save pos
-	if e.state != nil && e.stateKey != "" {
+	// save pos — only after a fully-drained file source this tick, so an Open or
+	// read failure never overwrites the saved resume offset with a zeroed/stale
+	// Position() (see srcDrained). Socket-only mode has no file source and no
+	// state, so this is a no-op there.
+	if srcDrained && e.state != nil && e.stateKey != "" {
 		e.state.Put(e.stateKey, e.Position())
 	}
 
@@ -973,7 +957,53 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// - stall: no parsed lines for >= long horizon
 	e.logIngestHeartbeat(now)
 
-	return nil
+	return runErr
+}
+
+// drainSource reads all currently-available lines from the attached file
+// source and ingests them (subject to the socket arbiter). Returns nil on a
+// clean EOF, or a wrapped error on a tail read failure. Split out of RunOnce so
+// the periodic reconcile can run even when there is no file source at all
+// (socket-only ingest) or the source failed to open — see RunOnce.
+func (e *Engine) drainSource(ctx context.Context) error {
+	for {
+		line, err := e.src.ReadNext(ctx)
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			off, ino, ts := e.src.Position()
+			logging.Logf("[webdetector] tail read failed: %v (off=%d ino=%d ts=%d mode=%s source=%q)",
+				err, off, ino, ts, e.cfg.Mode, e.sourceLabel())
+			return fmt.Errorf("webdetector: tail read failed: %w", err)
+		}
+		rec, ok := e.adapter.Parse(line)
+		if !ok {
+			telemetry.RecordWebdetParseFailure()
+			continue
+		}
+		telemetry.RecordWebdetLineParsed()
+
+		// progress marker: we successfully parsed a record
+		e.progMu.Lock()
+		e.lastParsedAt = time.Now()
+		e.parsedSinceLog++
+		e.progMu.Unlock()
+
+		// Source arbiter: if the Unix ingest socket has been active within
+		// SocketActiveWindow, socket lines are authoritative — we keep the
+		// file tailer running (so its position stays current and it can
+		// take over instantly on silence) but suppress its output to avoid
+		// double-counting.
+		if e.ingestSock != nil && e.ingestSock.Active(time.Now()) {
+			continue
+		}
+		e.noteActiveSource("file")
+
+		ingestStart := time.Now()
+		e.ingest(rec, line)
+		telemetry.RecordWebdetIngestDuration(time.Since(ingestStart))
+	}
 }
 
 // logIngestHeartbeat emits a low-noise progress/stall log line at long-window cadence.

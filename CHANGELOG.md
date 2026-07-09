@@ -73,7 +73,41 @@ back-filled here — see the git/PR history for that period.
   rarer, narrower-in-Lua consistency gap tracked as a follow-up. Covered by
   `scripts/tests/cfm_waf_excl_test.lua`. Found by the 2026-07 edge Lua audit (F10).
 
+### Fixed
+- **Socket-ingest-only boxes: forced-vhost challenge (and all webdetector
+  challenge/block emission) never ran.** When the webdetector ingests via the
+  Unix socket (`/run/cfm/ingest.sock`, fed by the OpenResty/Angie edge) and the
+  configured `LOG_PATH` file does not exist, `webdetector_register` never
+  attaches a file source, so `Engine.src` is nil. `RunOnce` returned at its
+  `if e.src == nil { return nil }` guard **before** the periodic reconcile —
+  and that reconcile (`emitIPChallenges` / `emitIPBlocks`) is the *only* place
+  the `CHALLENGE_VHOST` list, per-IP challenges, and autoblocks are pushed to
+  the edge. Net effect on a socket-only server: the forced list loaded fine but
+  `/nginx/status` showed `active_vhosts: []` and `cpanel.*`/`webmail.*`/`whm.*`
+  were never challenged, even though scoring/history (socket-fed) and the
+  in-path WAF (independent) both worked — so it looked like a config mistake.
+  `RunOnce` now drains the file source only when one is attached and **always**
+  runs the reconcile, so the socket is a first-class standalone source (as it
+  already is for `cfm webtop` and the WAF). A transient `Open()` failure (e.g. a
+  log mid-rotation) likewise no longer skips the reconcile — but the tail
+  resume-offset is now persisted **only after a clean drain** (`srcDrained`
+  guard), so an Open/read failure can't overwrite the saved offset with a
+  zeroed `Position()` and make recovery seek-to-end and skip lines. Regression
+  tests: `TestRunOnce_SocketOnlyStillPushesForcedVhosts`,
+  `TestRunOnce_OpenFailureDoesNotClobberSavedOffset`. Workaround on older
+  builds: `touch` the `LOG_PATH` file so a source attaches.
+
 ### Added
+- **Startup log line for the forced-challenge vhost list (`CHALLENGE_VHOST`).**
+  The webdetector now echoes the panic/bypass lists at config-load time —
+  `forced-challenge vhosts (CHALLENGE_VHOST) loaded: count=N list=…`, plus
+  companion lines for `CHALLENGE_VHOST_IGNORE` and `CHALLENGE_HOST_BYPASS` when
+  set — mirroring the existing `challenge exclude loaded` line. Previously the
+  forced list produced **no** startup output: the per-host bridge push is lazy
+  (a `[nginx_bridge] vhost_challenge host=… reason=vhost_config` line appears
+  only once a host matching the pattern actually receives traffic), so on a
+  freshly-restarted, idle server `grep vhost /var/log/cfm/*` came back empty and
+  read as a misconfiguration even though the list was loaded and active.
 - **cfm-lsm event enrichment, Tier B (BPF wire fields).** The LSM event now
   carries the caller's parent tgid (`ppid`) read in-kernel at the instant it
   fired, plus — for `CFML-OBS-004` — the ptrace target's pid and euid
