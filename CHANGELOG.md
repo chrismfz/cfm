@@ -89,9 +89,13 @@ back-filled here — see the git/PR history for that period.
   `RunOnce` now drains the file source only when one is attached and **always**
   runs the reconcile, so the socket is a first-class standalone source (as it
   already is for `cfm webtop` and the WAF). A transient `Open()` failure (e.g. a
-  log mid-rotation) likewise no longer skips the reconcile. Regression test:
-  `TestRunOnce_SocketOnlyStillPushesForcedVhosts`. Workaround on older builds:
-  `touch` the `LOG_PATH` file so a source attaches.
+  log mid-rotation) likewise no longer skips the reconcile — but the tail
+  resume-offset is now persisted **only after a clean drain** (`srcDrained`
+  guard), so an Open/read failure can't overwrite the saved offset with a
+  zeroed `Position()` and make recovery seek-to-end and skip lines. Regression
+  tests: `TestRunOnce_SocketOnlyStillPushesForcedVhosts`,
+  `TestRunOnce_OpenFailureDoesNotClobberSavedOffset`. Workaround on older
+  builds: `touch` the `LOG_PATH` file so a source attaches.
 
 ### Added
 - **Startup log line for the forced-challenge vhost list (`CHALLENGE_VHOST`).**

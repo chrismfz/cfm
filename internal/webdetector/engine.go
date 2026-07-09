@@ -879,6 +879,15 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// list loaded but never pushed to the edge (active_vhosts stayed empty), so
 	// cpanel.*/webmail.*/whm.* were never challenged even though the in-path WAF
 	// still fired.
+	// srcDrained is true only when a file source was opened AND drained cleanly
+	// this tick. It gates the resume-offset persistence below: on an Open
+	// failure e.Position() is a zeroed/stale {off:0,inode:0} (the tailer never
+	// seeked — ApplyResume sets only LastOffset/LastInode, which Position() does
+	// NOT read), and persisting that clobbers the saved offset, so on recovery
+	// the tailer seeks to end (START_AT_END) and silently skips every line
+	// written meanwhile. The old code's early return skipped the Put on any
+	// Open/read failure; preserve exactly that.
+	srcDrained := false
 	if e.src != nil {
 		// resume pos
 		if e.state != nil && e.stateKey != "" {
@@ -896,7 +905,11 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			runErr = fmt.Errorf("webdetector: tail open failed: %w", err)
 		} else {
 			defer e.src.Close()
-			runErr = e.drainSource(ctx)
+			if err := e.drainSource(ctx); err != nil {
+				runErr = err
+			} else {
+				srcDrained = true
+			}
 		}
 	}
 
@@ -931,8 +944,11 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	e.emitIPBlocks(now, out)
 	e.expireOldChallenges()
 
-	// save pos
-	if e.state != nil && e.stateKey != "" {
+	// save pos — only after a fully-drained file source this tick, so an Open or
+	// read failure never overwrites the saved resume offset with a zeroed/stale
+	// Position() (see srcDrained). Socket-only mode has no file source and no
+	// state, so this is a no-op there.
+	if srcDrained && e.state != nil && e.stateKey != "" {
 		e.state.Put(e.stateKey, e.Position())
 	}
 
