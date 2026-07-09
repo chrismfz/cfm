@@ -360,6 +360,11 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		}
 		LogTransition(ScopeWeb, "ON", "manual", "")
 		fmt.Printf("DNAT: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n", *priority, *httpPort, *httpsPort)
+		// DNATOn installs the scoped `ct status dnat` accepts internally; report
+		// them the way `cfm dnat cpanel on` reports its scoped accepts so the
+		// operator can confirm the listener ports were opened without needing
+		// them in TCP_IN (and gets a loud warning if they were not).
+		printWebDNATAcceptsOnEnable(backend, *httpPort, *httpsPort)
 		return 0
 
 	case "off":
@@ -401,6 +406,17 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		fmt.Print(s)
 		if !strings.HasSuffix(s, "\n") {
 			fmt.Println()
+		}
+		// Scoped input-chain accepts that make the DNAT redirect actually
+		// reachable. `cfm dnat on` opens the listener ports here (not in
+		// TCP_IN); surfacing their state lets an operator tell a missing CFM
+		// rule apart from an upstream drop when the site is unreachable.
+		if states, ok := webDNATAcceptStates(backend, *httpPort, *httpsPort); ok {
+			fmt.Println()
+			fmt.Println("Scoped DNAT accepts (inet cfm/input) — open the listener ports WITHOUT needing them in TCP_IN:")
+			for _, st := range states {
+				fmt.Printf("  %s: %s\n", st.mapping(), webDNATAcceptStateLabel(st.State))
+			}
 		}
 	} else {
 		fmt.Println("State: OFF")

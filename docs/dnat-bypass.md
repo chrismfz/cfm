@@ -282,6 +282,35 @@ Fix the malformed line and re-run `cfm dnat [cpanel] on` to reload.
   listening socket accepts them without needing the DNAT-tagged
   accept.
 
+## Do the DNAT listener ports need to be in `TCP_IN`?
+
+**No.** `cfm dnat on` DNATs `tcp/80 → :9080` and `tcp+udp/443 → :9043`
+in prerouting, then installs scoped `ct status dnat` accepts in
+`inet cfm/input` so the translated traffic reaches the edge listener.
+These accepts match on the *original* destination port
+(`ct original proto-dst 80/443`), so they open `9080/9043` **only** for
+packets CFM itself redirected — you do not (and should not) add
+`9080/9043` to `TCP_IN`. `cfm dnat cpanel on` does the same for the
+panel listener ports (`12082..`, `12222`).
+
+Because the install happens inside `DNATOn`, it used to be invisible.
+`cfm dnat on` now prints one `Firewall: opened scoped 80->9080
+(nft cfm/input)` line per mapping (mirroring `cfm dnat cpanel on`), and
+`cfm dnat` status prints a **Scoped DNAT accepts** block reporting each
+mapping as:
+
+- `open` — accept present and effective;
+- `BLOCKED` — accept present but sitting *after* the default drop (run
+  `cfm dnat off` then `cfm dnat on` to reinstall it before the drop);
+- `ABSENT` — no accept found.
+
+If every mapping reads `open` but a non-allowlisted client still can't
+reach the site, the drop is **upstream of CFM**, not a missing CFM
+rule — check for an external firewall filtering the listener ports
+(CSF/Imunify `INPUT` at priority `filter`/`0` runs *after* CFM's input
+chain and does not know about `9080/9043`), or an edge proxy that only
+listens on `127.0.0.1` instead of the public address DNAT preserves.
+
 ## Security considerations
 
 - A bypassed IP completely opts out of CFM's panel / web mediation on

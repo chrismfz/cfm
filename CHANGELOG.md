@@ -109,6 +109,20 @@ back-filled here — see the git/PR history for that period.
   builds: `touch` the `LOG_PATH` file so a source attaches.
 
 ### Changed
+- **`cfm dnat` now reports the scoped listener-port accepts (web scope).**
+  `cfm dnat on` DNATs `80→:9080` / `443→:9043` and installs scoped
+  `ct status dnat` accepts in `inet cfm/input` so the redirected traffic reaches
+  the edge **without** `9080/9043` in `TCP_IN` — but the web path did this
+  silently, so an operator whose site was unreachable after `cfm dnat on` had no
+  way to tell a missing CFM accept from an upstream drop. `cfm dnat on` now
+  prints a `Firewall: opened scoped 80->9080 (nft cfm/input)` line per mapping
+  (parity with `cfm dnat cpanel on`) and warns loudly when a mapping is absent or
+  landed after the default drop; `cfm dnat` status gains a **Scoped DNAT
+  accepts** block reporting each mapping as `open` / `BLOCKED` / `ABSENT`. When
+  all read `open` but a non-allowlisted client still can't connect, the drop is
+  upstream (external CSF/Imunify `INPUT` filtering the listener port, or an edge
+  bound to `127.0.0.1` only) — see `docs/dnat-bypass.md`. No change to the
+  firewall rules themselves.
 - **Reference `detectors.conf` ships a sane cPanel forced-challenge default and
   drops leaked customer hosts.** `CHALLENGE_VHOST` now defaults to
   `webmail.*, whm.*, cpanel.*` (force-challenge the cPanel/WHM/webmail service
