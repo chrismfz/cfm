@@ -125,6 +125,11 @@ back-filled here — see the git/PR history for that period.
     native `useIpInProxyHeader`, `set_real_ip_from` for nginx). Warns — with the
     concrete consequence ("access logs will record 127.0.0.1, not client IPs")
     — when the trust directive is missing. Purely diagnostic; changes nothing.
+    The stack is resolved from on-disk install markers, not blindly from the
+    collector's upstream hint, so an OpenResty box (the edge is nginx-based) is
+    no longer misreported as an "nginx" origin when the real origin is LiteSpeed
+    or Apache. The collector now also recognizes the current `litespeed` process
+    name (not just the older `lshttpd`).
 - **`cfm.api.conf` overlay now carries MaxMind credentials too, plus a shipped
   `cfm.api.conf.example`.** The per-server secrets overlay
   (`LoadConfigWithAPIOverride`) already overrode the cfm-web API `API_URL` /

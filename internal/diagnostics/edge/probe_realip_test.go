@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestProbeTSVLog(t *testing.T) {
@@ -43,7 +42,7 @@ func TestProbeOriginRealIP_Apache(t *testing.T) {
 	os.WriteFile(conf, []byte("RemoteIPHeader X-Forwarded-For\nRemoteIPTrustedProxy 127.0.0.1\nRemoteIPTrustedProxy 84.54.49.35\n"), 0o644)
 
 	apacheGlobs := []string{filepath.Join(dir, "*.conf")}
-	got := probeOriginRealIP("httpd", apacheGlobs, nil, nil)
+	got := probeOriginRealIPForStack("apache", apacheGlobs, nil, nil)
 	if got.Stack != "apache" || !got.Trusted {
 		t.Fatalf("expected apache trusted, got %+v", got)
 	}
@@ -58,7 +57,7 @@ func TestProbeOriginRealIP_Nginx(t *testing.T) {
 	os.WriteFile(ok, []byte("set_real_ip_from 127.0.0.1;\nset_real_ip_from ::1;\n"), 0o644)
 	nginxGlobs := []string{filepath.Join(dir, "*.conf")}
 
-	got := probeOriginRealIP("nginx", nil, nginxGlobs, nil)
+	got := probeOriginRealIPForStack("nginx", nil, nginxGlobs, nil)
 	if got.Stack != "nginx" || !got.Trusted {
 		t.Fatalf("expected nginx trusted, got %+v", got)
 	}
@@ -66,7 +65,7 @@ func TestProbeOriginRealIP_Nginx(t *testing.T) {
 	// Missing directive → not trusted, with the operator-facing note.
 	empty := t.TempDir()
 	os.WriteFile(filepath.Join(empty, "other.conf"), []byte("server_tokens off;\n"), 0o644)
-	miss := probeOriginRealIP("nginx", nil, []string{filepath.Join(empty, "*.conf")}, nil)
+	miss := probeOriginRealIPForStack("nginx", nil, []string{filepath.Join(empty, "*.conf")}, nil)
 	if miss.Trusted {
 		t.Fatalf("expected NOT trusted when set_real_ip_from absent, got %+v", miss)
 	}
@@ -80,7 +79,7 @@ func TestProbeOriginRealIP_LiteSpeedNative(t *testing.T) {
 	xml := filepath.Join(dir, "httpd_config.xml")
 	os.WriteFile(xml, []byte("<httpServerConfig>\n <useIpInProxyHeader>2</useIpInProxyHeader>\n</httpServerConfig>\n"), 0o644)
 
-	got := probeOriginRealIP("lshttpd", nil, nil, []string{xml})
+	got := probeOriginRealIPForStack("litespeed", nil, nil, []string{xml})
 	if got.Stack != "litespeed" || !got.Trusted {
 		t.Fatalf("expected litespeed trusted via useIpInProxyHeader, got %+v", got)
 	}
@@ -93,7 +92,7 @@ func TestProbeOriginRealIP_LiteSpeedCommentedNotTrusted(t *testing.T) {
 	xml := filepath.Join(dir, "httpd_config.xml")
 	os.WriteFile(xml, []byte("<httpServerConfig>\n <!-- <useIpInProxyHeader>2</useIpInProxyHeader> -->\n <useIpInProxyHeader>0</useIpInProxyHeader>\n</httpServerConfig>\n"), 0o644)
 
-	got := probeOriginRealIP("lshttpd", nil, nil, []string{xml})
+	got := probeOriginRealIPForStack("litespeed", nil, nil, []string{xml})
 	if got.Trusted {
 		t.Fatalf("commented-out useIpInProxyHeader must not be trusted, got %+v", got)
 	}
@@ -113,21 +112,21 @@ func TestOriginRealIP_LoopbackCIDRForms(t *testing.T) {
 
 	// nginx
 	for _, ok := range []string{"set_real_ip_from 127.0.0.1/32;\n", "set_real_ip_from 127.0.0.0/8;\n", "set_real_ip_from ::1;\n"} {
-		if p := probeOriginRealIP("nginx", nil, write(t, ok), nil); !p.Trusted {
+		if p := probeOriginRealIPForStack("nginx", nil, write(t, ok), nil); !p.Trusted {
 			t.Errorf("nginx: expected trusted for %q, got %+v", ok, p)
 		}
 	}
-	if p := probeOriginRealIP("nginx", nil, write(t, "set_real_ip_from 127.0.0.100;\n"), nil); p.Trusted {
+	if p := probeOriginRealIPForStack("nginx", nil, write(t, "set_real_ip_from 127.0.0.100;\n"), nil); p.Trusted {
 		t.Errorf("nginx: 127.0.0.100 must NOT be treated as loopback trust, got %+v", p)
 	}
 
 	// apache
 	for _, ok := range []string{"RemoteIPInternalProxy 127.0.0.1/32\n", "RemoteIPTrustedProxy 127.0.0.0/8\n"} {
-		if p := probeOriginRealIP("httpd", write(t, ok), nil, nil); !p.Trusted {
+		if p := probeOriginRealIPForStack("apache", write(t, ok), nil, nil); !p.Trusted {
 			t.Errorf("apache: expected trusted for %q, got %+v", ok, p)
 		}
 	}
-	if p := probeOriginRealIP("httpd", write(t, "RemoteIPInternalProxy 127.0.0.100\n"), nil, nil); p.Trusted {
+	if p := probeOriginRealIPForStack("apache", write(t, "RemoteIPInternalProxy 127.0.0.100\n"), nil, nil); p.Trusted {
 		t.Errorf("apache: 127.0.0.100 must NOT be treated as loopback trust, got %+v", p)
 	}
 }
@@ -146,16 +145,48 @@ func TestCleanConfValue(t *testing.T) {
 	}
 }
 
-// guard against a probe hanging on a huge file (size cap).
+// A file over the size cap must be skipped even when it would otherwise match.
 func TestGrepGlobs_SizeCap(t *testing.T) {
 	dir := t.TempDir()
-	big := filepath.Join(dir, "big.conf")
-	f, _ := os.Create(big)
-	_ = f.Truncate((1 << 20) + 1) // just over the 1 MiB cap
-	f.Close()
-	// mtime in the past so it's a normal file
-	_ = os.Chtimes(big, time.Now(), time.Now())
+	os.WriteFile(filepath.Join(dir, "big.conf"), []byte("set_real_ip_from 127.0.0.1;\n"), 0o644)
+
+	saved := grepMaxBytes
+	grepMaxBytes = 4 // smaller than the matching file
+	defer func() { grepMaxBytes = saved }()
+
 	if got := grepGlobs([]string{filepath.Join(dir, "*.conf")}, nginxRealIPRe); got != "" {
-		t.Errorf("oversized file should be skipped, matched %q", got)
+		t.Errorf("file over the size cap should be skipped, matched %q", got)
+	}
+}
+
+// TestResolveOriginStack covers the rigel FP: LiteSpeed is installed but the
+// collector reported the origin as "nginx" (the OpenResty edge is nginx-based).
+// LiteSpeed presence on disk must win over a bogus nginx hint.
+func TestResolveOriginStack(t *testing.T) {
+	mk := func(t *testing.T) string { return t.TempDir() } // an existing dir marker
+	none := []string{"/nonexistent/cfm-test-marker"}
+
+	ls := []string{mk(t)}
+	ap := []string{mk(t)}
+	ng := []string{mk(t)}
+
+	cases := []struct {
+		name          string
+		upstream      string
+		lsM, apM, ngM []string
+		want          string
+	}{
+		{"litespeed present beats nginx hint", "nginx", ls, none, ng, "litespeed"},
+		{"litespeed present beats apache hint", "apache", ls, ap, none, "litespeed"},
+		{"litespeed hint trusted w/o marker", "lshttpd", none, none, none, "litespeed"},
+		{"apache hint + apache present", "httpd", none, ap, none, "apache"},
+		{"nginx hint + nginx present", "nginx", none, none, ng, "nginx"},
+		{"nginx hint but only apache on disk", "nginx", none, ap, none, "apache"},
+		{"unknown + nothing present", "", none, none, none, "unknown"},
+	}
+	for _, c := range cases {
+		if got := resolveOriginStack(c.upstream, c.lsM, c.apM, c.ngM); got != c.want {
+			t.Errorf("%s: resolveOriginStack(%q) = %q, want %q", c.name, c.upstream, got, c.want)
+		}
 	}
 }

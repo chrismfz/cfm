@@ -508,6 +508,10 @@ var nginxRealIPGlobs = []string{
 }
 var lsNativeConfPaths = []string{"/usr/local/lsws/conf/httpd_config.xml"}
 
+// grepMaxBytes caps per-file reads in grepGlobsFunc (origin configs are far
+// smaller). A var so tests can shrink it.
+var grepMaxBytes int64 = 8 << 20 // 8 MiB
+
 func normalizeOriginStack(upstream string) string {
 	s := strings.ToLower(strings.TrimSpace(upstream))
 	switch {
@@ -522,18 +526,53 @@ func normalizeOriginStack(upstream string) string {
 	}
 }
 
+// Origin-server install markers (dirs). Used to resolve the true origin stack
+// when the collector's upstream hint is unreliable — notably on OpenResty boxes
+// (the edge is nginx-based), where a LiteSpeed/Apache origin gets misreported as
+// "nginx".
+var (
+	litespeedMarkers = []string{"/usr/local/lsws"}
+	apacheMarkers    = []string{"/etc/apache2", "/usr/local/apache", "/etc/httpd"}
+	nginxMarkers     = []string{"/etc/nginx"}
+)
+
 // ProbeOriginRealIP checks the origin real-IP trust for `upstream` (the origin
-// service the health collector detected: httpd/lshttpd/nginx). When unknown it
-// falls back to whichever stack is present on disk.
+// service the health collector detected: httpd/lshttpd/nginx).
 func ProbeOriginRealIP(upstream string) OriginRealIPProbe {
-	return probeOriginRealIP(upstream, apacheRealIPGlobs, nginxRealIPGlobs, lsNativeConfPaths)
+	stack := resolveOriginStack(upstream, litespeedMarkers, apacheMarkers, nginxMarkers)
+	return probeOriginRealIPForStack(stack, apacheRealIPGlobs, nginxRealIPGlobs, lsNativeConfPaths)
 }
 
-func probeOriginRealIP(upstream string, apacheGlobs, nginxGlobs, lsPaths []string) OriginRealIPProbe {
-	stack := normalizeOriginStack(upstream)
-	if stack == "unknown" {
-		stack = detectPresentOriginStack()
+// resolveOriginStack picks the origin web-server family. The collector's upstream
+// hint is only trusted when the corresponding stack is actually installed:
+// LiteSpeed being present wins outright (it is frequently misreported as "nginx"
+// because the OpenResty edge is nginx-based, and the collector's process/marker
+// detection doesn't recognize the "litespeed" process), and an nginx/apache hint
+// that matches nothing on disk falls back to whatever IS installed.
+func resolveOriginStack(upstream string, lsMarkers, apMarkers, ngMarkers []string) string {
+	hint := normalizeOriginStack(upstream)
+	lsPresent := anyDirExists(lsMarkers)
+	apPresent := anyDirExists(apMarkers)
+	ngPresent := anyDirExists(ngMarkers)
+	switch {
+	case lsPresent:
+		return "litespeed"
+	case hint == "litespeed":
+		return "litespeed" // confident hint even if the default marker path differs
+	case hint == "apache" && apPresent:
+		return "apache"
+	case hint == "nginx" && ngPresent:
+		return "nginx"
+	case apPresent:
+		return "apache"
+	case ngPresent:
+		return "nginx"
+	default:
+		return "unknown"
 	}
+}
+
+func probeOriginRealIPForStack(stack string, apacheGlobs, nginxGlobs, lsPaths []string) OriginRealIPProbe {
 	switch stack {
 	case "apache":
 		if f := grepGlobs(apacheGlobs, apacheRemoteIPRe); f != "" {
@@ -560,22 +599,13 @@ func probeOriginRealIP(upstream string, apacheGlobs, nginxGlobs, lsPaths []strin
 	}
 }
 
-func detectPresentOriginStack() string {
-	if dirExists("/usr/local/lsws") {
-		return "litespeed"
+func anyDirExists(dirs []string) bool {
+	for _, d := range dirs {
+		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+			return true
+		}
 	}
-	if dirExists("/etc/apache2") || dirExists("/usr/local/apache") || dirExists("/etc/httpd") {
-		return "apache"
-	}
-	if dirExists("/etc/nginx") {
-		return "nginx"
-	}
-	return "unknown"
-}
-
-func dirExists(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && fi.IsDir()
+	return false
 }
 
 // grepGlobs returns the first regular file (expanded from globs) whose contents
@@ -588,12 +618,11 @@ func grepGlobs(globs []string, re *regexp.Regexp) string {
 // LiteSpeed check, which must strip XML comments before matching). Each file
 // read is size-capped for safety.
 func grepGlobsFunc(globs []string, match func([]byte) bool) string {
-	const maxBytes = 8 << 20 // 8 MiB per file (origin configs are far smaller)
 	for _, g := range globs {
 		matches, _ := filepath.Glob(g)
 		for _, f := range matches {
 			fi, err := os.Stat(f)
-			if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxBytes {
+			if err != nil || !fi.Mode().IsRegular() || fi.Size() > grepMaxBytes {
 				continue
 			}
 			b, err := os.ReadFile(f) // #nosec G304 -- fixed system config globs
