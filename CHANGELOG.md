@@ -73,6 +73,26 @@ back-filled here — see the git/PR history for that period.
   rarer, narrower-in-Lua consistency gap tracked as a follow-up. Covered by
   `scripts/tests/cfm_waf_excl_test.lua`. Found by the 2026-07 edge Lua audit (F10).
 
+### Fixed
+- **Socket-ingest-only boxes: forced-vhost challenge (and all webdetector
+  challenge/block emission) never ran.** When the webdetector ingests via the
+  Unix socket (`/run/cfm/ingest.sock`, fed by the OpenResty/Angie edge) and the
+  configured `LOG_PATH` file does not exist, `webdetector_register` never
+  attaches a file source, so `Engine.src` is nil. `RunOnce` returned at its
+  `if e.src == nil { return nil }` guard **before** the periodic reconcile —
+  and that reconcile (`emitIPChallenges` / `emitIPBlocks`) is the *only* place
+  the `CHALLENGE_VHOST` list, per-IP challenges, and autoblocks are pushed to
+  the edge. Net effect on a socket-only server: the forced list loaded fine but
+  `/nginx/status` showed `active_vhosts: []` and `cpanel.*`/`webmail.*`/`whm.*`
+  were never challenged, even though scoring/history (socket-fed) and the
+  in-path WAF (independent) both worked — so it looked like a config mistake.
+  `RunOnce` now drains the file source only when one is attached and **always**
+  runs the reconcile, so the socket is a first-class standalone source (as it
+  already is for `cfm webtop` and the WAF). A transient `Open()` failure (e.g. a
+  log mid-rotation) likewise no longer skips the reconcile. Regression test:
+  `TestRunOnce_SocketOnlyStillPushesForcedVhosts`. Workaround on older builds:
+  `touch` the `LOG_PATH` file so a source attaches.
+
 ### Added
 - **Startup log line for the forced-challenge vhost list (`CHALLENGE_VHOST`).**
   The webdetector now echoes the panic/bypass lists at config-load time —
