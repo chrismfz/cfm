@@ -74,6 +74,16 @@ back-filled here — see the git/PR history for that period.
   `scripts/tests/cfm_waf_excl_test.lua`. Found by the 2026-07 edge Lua audit (F10).
 
 ### Added
+- **Startup log line for the forced-challenge vhost list (`CHALLENGE_VHOST`).**
+  The webdetector now echoes the panic/bypass lists at config-load time —
+  `forced-challenge vhosts (CHALLENGE_VHOST) loaded: count=N list=…`, plus
+  companion lines for `CHALLENGE_VHOST_IGNORE` and `CHALLENGE_HOST_BYPASS` when
+  set — mirroring the existing `challenge exclude loaded` line. Previously the
+  forced list produced **no** startup output: the per-host bridge push is lazy
+  (a `[nginx_bridge] vhost_challenge host=… reason=vhost_config` line appears
+  only once a host matching the pattern actually receives traffic), so on a
+  freshly-restarted, idle server `grep vhost /var/log/cfm/*` came back empty and
+  read as a misconfiguration even though the list was loaded and active.
 - **cfm-lsm event enrichment, Tier B (BPF wire fields).** The LSM event now
   carries the caller's parent tgid (`ppid`) read in-kernel at the instant it
   fired, plus — for `CFML-OBS-004` — the ptrace target's pid and euid

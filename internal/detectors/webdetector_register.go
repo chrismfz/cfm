@@ -839,6 +839,27 @@ func init() {
 			return nil, err
 		}
 
+		// Startup visibility for the panic/bypass lists (§10 of detectors.conf).
+		// Mirrors the "challenge exclude loaded" line so an operator gets an
+		// explicit config-load confirmation. Without it the CHALLENGE_VHOST
+		// forced-challenge list is invisible until a host matching it actually
+		// receives traffic (the per-host bridge push is lazy) — which, on a
+		// freshly-restarted, idle server, reads as "did I misconfigure it?".
+		if len(cfg.ChallengeVHost) > 0 {
+			logging.Logf("[detectors][webdetector] forced-challenge vhosts (CHALLENGE_VHOST) loaded: count=%d list=%s",
+				len(cfg.ChallengeVHost), strings.Join(cfg.ChallengeVHost, ", "))
+		} else {
+			logging.Logf("[detectors][webdetector] forced-challenge vhosts (CHALLENGE_VHOST): none configured")
+		}
+		if len(cfg.ChallengeVHostIgnore) > 0 {
+			logging.Logf("[detectors][webdetector] challenge vhost ignore (CHALLENGE_VHOST_IGNORE) loaded: count=%d list=%s",
+				len(cfg.ChallengeVHostIgnore), strings.Join(cfg.ChallengeVHostIgnore, ", "))
+		}
+		if len(cfg.ChallengeHostBypass) > 0 {
+			logging.Logf("[detectors][webdetector] challenge host bypass (CHALLENGE_HOST_BYPASS) loaded: count=%d list=%s",
+				len(cfg.ChallengeHostBypass), strings.Join(cfg.ChallengeHostBypass, ", "))
+		}
+
 		rawAgents := kvStrClean(kv, "AGENT_LIST", "")
 		if rawAgents != "" {
 			for _, a := range strings.FieldsFunc(rawAgents, func(r rune) bool {
