@@ -1,0 +1,43 @@
+# =============================================================================
+# /etc/cfm/cfm.api.conf  —  per-server SECRETS overlay
+# =============================================================================
+# This is the ONLY file you edit per server. Everything else (firewall, DNAT,
+# challenge, WAF, OpenResty/Angie, custom ports) ships ready in the base
+# cfm.conf / detectors.conf and is identical on every host.
+#
+# cfm loads cfm.conf first, then overlays the keys below from this file
+# (LoadConfigWithAPIOverride). Only these keys are read here — anything else in
+# this file is ignored. Keep it root-owned and mode 0600 (cfm re-chmods it to
+# 0600 on load if it finds looser perms).
+#
+# Apply changes:
+#   cp /usr/share/cfm/configs/cfm.api.conf.example /etc/cfm/cfm.api.conf
+#   chmod 600 /etc/cfm/cfm.api.conf
+#   $EDITOR   /etc/cfm/cfm.api.conf      # fill in the values below
+#   systemctl restart cfm               # this file is read at STARTUP — editing
+#                                         # it is NOT hot-reloaded, so restart to
+#                                         # apply (a plain config reload won't do)
+#
+# Tokens (CHALLENGE_TOKEN / OPENRESTY_TOKEN / SSLCOLLECTOR_SOCK_TOKEN) are NOT
+# set here — cfm auto-generates strong per-server values on first start and
+# writes them back, so leave the placeholders in the base configs alone.
+#
+# All values below are EMPTY by default, so an un-edited file is inert: no API
+# reporting is redirected to a real endpoint, and GeoIP falls back to the
+# IPLocate community mirror. Fill in only what you actually use.
+# -----------------------------------------------------------------------------
+
+# --- cfm-web API (block / detector reporting) -------------------------------
+# Your cfm-web instance URL + the token it issued for this server. Leave empty
+# to keep whatever the base cfm.conf carries (a non-routable placeholder by
+# default, i.e. reporting effectively off).
+#   API_URL    = "https://cfm.example.com"
+API_URL    =
+AUTH_TOKEN =
+
+# --- MaxMind GeoLite2 license (GeoIP / ASN enrichment) ----------------------
+# Optional. Leave BOTH empty to use the IPLocate community mirror (no account
+# needed). Set BOTH to use official MaxMind GeoLite2 downloads. The same MaxMind
+# account can be reused fleet-wide — copy this file to each host.
+MAXMIND_ACCOUNT_ID  =
+MAXMIND_LICENSE_KEY =

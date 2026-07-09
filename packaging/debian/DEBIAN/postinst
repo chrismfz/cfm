@@ -40,6 +40,17 @@ chmod 0700 /etc/cfm
 # same lock-down as kernsec.conf.
 [ -f /etc/cfm/lsm.conf ] && chmod go-rwx /etc/cfm/lsm.conf || true
 
+# Per-server API/MaxMind secrets overlay. Seed an editable 0600 template on
+# first install only; never overwrite an operator's existing file. It is
+# deliberately NOT a dpkg conffile, so upgrades leave it untouched.
+if [ ! -e /etc/cfm/cfm.api.conf ] && [ -f /usr/share/cfm/configs/cfm.api.conf.example ]; then
+    # Guard against set -e (line 2): seeding is a convenience, never fatal —
+    # a failure here must not abort the rest of postinst (Lua sync, proxy
+    # deploy, service restart). Matches the file's `|| true` convention.
+    cp -p /usr/share/cfm/configs/cfm.api.conf.example /etc/cfm/cfm.api.conf 2>/dev/null || true
+    chmod 0600 /etc/cfm/cfm.api.conf 2>/dev/null || true
+fi
+
 # shared Lua runtime dir (root writable, cfm readable)
 mkdir -p /var/lib/cfm/lua
 chown root:cfm /var/lib/cfm/lua

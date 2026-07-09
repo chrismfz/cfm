@@ -136,6 +136,16 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 # same lock-down as kernsec.conf.
 [ -f /etc/cfm/lsm.conf ] && chmod go-rwx /etc/cfm/lsm.conf || true
 
+# Per-server API/MaxMind secrets overlay. Seed an editable 0600 template on
+# first install only; never overwrite an operator's existing file. It is not
+# tracked by rpm (created here, not shipped in %files), so upgrades leave it be.
+if [ ! -e /etc/cfm/cfm.api.conf ] && [ -f /usr/share/cfm/configs/cfm.api.conf.example ]; then
+    # Seeding is a convenience, never fatal — keep %post going regardless
+    # (parity with the deb postinst, which runs under set -e).
+    cp -p /usr/share/cfm/configs/cfm.api.conf.example /etc/cfm/cfm.api.conf 2>/dev/null || true
+    chmod 0600 /etc/cfm/cfm.api.conf 2>/dev/null || true
+fi
+
 # shared Lua runtime dir (root writable, cfm readable)
 mkdir -p /var/lib/cfm/lua
 chown root:cfm /var/lib/cfm/lua
