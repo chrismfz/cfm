@@ -32,22 +32,22 @@ const (
 // On-wire FS operation byte for CFML-FS-005. Must stay in sync with
 // internal/lsm/bpf/common.bpf.h's enum cfm_fs_op.
 const (
-	bpfFSOpNone       uint8 = 0
-	bpfFSOpSetattr    uint8 = 1
-	bpfFSOpCreate     uint8 = 2
-	bpfFSOpUnlink     uint8 = 3
-	bpfFSOpLink       uint8 = 4
-	bpfFSOpRename     uint8 = 5
-	bpfFSOpSetxattr   uint8 = 6
-	bpfBPFOpMapCreate uint8 = 20
-	bpfBPFOpProgLoad  uint8 = 21
-	bpfKmodOpInit     uint8 = 30
-	bpfKmodOpFinit    uint8 = 31
-	bpfKexecOpLoad    uint8 = 32
-	bpfKexecOpFileLoad  uint8 = 33
-	bpfNetOpRawInet   uint8 = 40
-	bpfNetOpRawInet6  uint8 = 41
-	bpfNetOpPacket    uint8 = 42
+	bpfFSOpNone        uint8 = 0
+	bpfFSOpSetattr     uint8 = 1
+	bpfFSOpCreate      uint8 = 2
+	bpfFSOpUnlink      uint8 = 3
+	bpfFSOpLink        uint8 = 4
+	bpfFSOpRename      uint8 = 5
+	bpfFSOpSetxattr    uint8 = 6
+	bpfBPFOpMapCreate  uint8 = 20
+	bpfBPFOpProgLoad   uint8 = 21
+	bpfKmodOpInit      uint8 = 30
+	bpfKmodOpFinit     uint8 = 31
+	bpfKexecOpLoad     uint8 = 32
+	bpfKexecOpFileLoad uint8 = 33
+	bpfNetOpRawInet    uint8 = 40
+	bpfNetOpRawInet6   uint8 = 41
+	bpfNetOpPacket     uint8 = 42
 )
 
 // FSOp is the Go-side label for the file-system operation that
@@ -56,22 +56,22 @@ const (
 type FSOp uint8
 
 const (
-	FSOpNone       FSOp = 0
-	FSOpSetattr    FSOp = 1
-	FSOpCreate     FSOp = 2
-	FSOpUnlink     FSOp = 3
-	FSOpLink       FSOp = 4
-	FSOpRename     FSOp = 5
-	FSOpSetxattr   FSOp = 6
-	BPFOpMapCreate FSOp = 20
-	BPFOpProgLoad  FSOp = 21
-	KmodOpInit     FSOp = 30
-	KmodOpFinit    FSOp = 31
-	KexecOpLoad    FSOp = 32
-	KexecOpFileLoad  FSOp = 33
-	NetOpRawInet   FSOp = 40
-	NetOpRawInet6  FSOp = 41
-	NetOpPacket    FSOp = 42
+	FSOpNone        FSOp = 0
+	FSOpSetattr     FSOp = 1
+	FSOpCreate      FSOp = 2
+	FSOpUnlink      FSOp = 3
+	FSOpLink        FSOp = 4
+	FSOpRename      FSOp = 5
+	FSOpSetxattr    FSOp = 6
+	BPFOpMapCreate  FSOp = 20
+	BPFOpProgLoad   FSOp = 21
+	KmodOpInit      FSOp = 30
+	KmodOpFinit     FSOp = 31
+	KexecOpLoad     FSOp = 32
+	KexecOpFileLoad FSOp = 33
+	NetOpRawInet    FSOp = 40
+	NetOpRawInet6   FSOp = 41
+	NetOpPacket     FSOp = 42
 )
 
 // String renders the operation as a short token suitable for logs
@@ -212,6 +212,20 @@ type Event struct {
 	// watched file's name. For CFML-CRED-002 the offending executable's
 	// name. For CFML-BPF-001 this is the bpf() command label.
 	Filename string
+
+	// PPid is the caller's parent tgid, read in the BPF program from
+	// current->real_parent->tgid. Unlike a userspace /proc read it is
+	// captured at the instant the event fired, so it resolves the
+	// launcher even for a caller that has already exited by drain time.
+	// 0 when the parent could not be read.
+	PPid uint32
+
+	// AuxPID / AuxUID carry a policy-specific secondary subject. For
+	// CFML-OBS-004 they are the ptrace TARGET's tgid and effective uid
+	// (the process being introspected). 0 for policies with no second
+	// subject.
+	AuxPID uint32
+	AuxUID uint32
 }
 
 // Time returns the event's timestamp converted to wall time relative
@@ -252,13 +266,13 @@ func (e Event) PrivInstallPrimitive() string {
 //
 // Tokens:
 //   - "attach"      — PTRACE_MODE_ATTACH only (the dangerous case:
-//                     attacker wants to modify the target's state).
+//     attacker wants to modify the target's state).
 //   - "read"        — PTRACE_MODE_READ only (read-only introspection,
-//                     e.g. /proc/<pid>/mem read).
+//     e.g. /proc/<pid>/mem read).
 //   - "attach+read" — both bits set on the same call (common — the
-//                     attach helpers in glibc request both).
+//     attach helpers in glibc request both).
 //   - ""            — neither bit set (unusual, but defensively
-//                     handled).
+//     handled).
 func (e Event) PtraceMode() string {
 	if e.PolicyID != PolicyPtraceAccess {
 		return ""
@@ -285,9 +299,9 @@ func (e Event) PtraceMode() string {
 //   - "ambient"              — only cap_ambient gained bits
 //   - "inheritable"          — only cap_inheritable gained bits
 //   - "ambient+inheritable"  — both sets gained bits (common when
-//                              prctl(PR_CAP_AMBIENT_RAISE) is preceded
-//                              by an inheritable-set update in the
-//                              same commit_creds)
+//     prctl(PR_CAP_AMBIENT_RAISE) is preceded
+//     by an inheritable-set update in the
+//     same commit_creds)
 //   - ""                     — defensive default; shouldn't fire
 func (e Event) CapRaiseSets() string {
 	if e.PolicyID != PolicyCapRaise {
@@ -315,6 +329,19 @@ func (e Event) PtraceSameUid() bool {
 		return false
 	}
 	return e.Flags&EventFlagPtraceSameUid != 0
+}
+
+// PtraceTarget returns the CFML-OBS-004 ptrace target's pid (tgid) and
+// effective uid, carried in the event's aux fields (read in-kernel from
+// the target task). ok is false for other policies and when the target
+// pid was not captured. Together with the target comm (Filename) this
+// tells the operator exactly which process was introspected — and, via
+// target uid, whether a cross-uid target was root or another tenant.
+func (e Event) PtraceTarget() (pid, uid uint32, ok bool) {
+	if e.PolicyID != PolicyPtraceAccess {
+		return 0, 0, false
+	}
+	return e.AuxPID, e.AuxUID, e.AuxPID != 0
 }
 
 // ExecStdioSignal renders the EXEC-003/EXEC-005 stdio signal encoded in
@@ -361,13 +388,25 @@ func (e Event) ExecStdioSignal() string {
 //	    30     2  _pad
 //	    32    16  comm
 //	    48    64  filename
+//	   112     4  ppid      (Tier B; absent in pre-Tier-B 112-byte records)
+//	   116     4  aux_pid   (Tier B)
+//	   120     4  aux_uid   (Tier B)
 //	          --
-//	         112 bytes
-const wireEventSize = 8 + 4 + 4 + 4 + 4 + 4 + 1 + 1 + 2 + bpfTaskCommLen + bpfFilenameLen
+//	         124 bytes
+//
+// wireEventBaseSize is the pre-Tier-B record (through filename). The
+// ppid/aux tail was appended after it, so parseEvent accepts a record as
+// short as the base and reads the tail only when present — a new parser
+// stays correct even if it ever drains a ringbuf pinned by an older
+// (112-byte) build before the version-marker refresh re-pins.
+const (
+	wireEventBaseSize = 8 + 4 + 4 + 4 + 4 + 4 + 1 + 1 + 2 + bpfTaskCommLen + bpfFilenameLen // 112
+	wireEventSize     = wireEventBaseSize + 4 + 4 + 4                                       // 124
+)
 
 func parseEvent(raw []byte) (Event, error) {
-	if len(raw) < wireEventSize {
-		return Event{}, fmt.Errorf("event truncated: got %d bytes, want at least %d", len(raw), wireEventSize)
+	if len(raw) < wireEventBaseSize {
+		return Event{}, fmt.Errorf("event truncated: got %d bytes, want at least %d", len(raw), wireEventBaseSize)
 	}
 	var e Event
 	be := binary.LittleEndian
@@ -382,6 +421,13 @@ func parseEvent(raw []byte) (Event, error) {
 	// raw[30:32] is _pad
 	e.Comm = cstr(raw[32 : 32+bpfTaskCommLen])
 	e.Filename = cstr(raw[48 : 48+bpfFilenameLen])
+	// Tier B tail — present only in >= 124-byte records; a pre-Tier-B
+	// record leaves these zero.
+	if len(raw) >= wireEventSize {
+		e.PPid = be.Uint32(raw[112:116])
+		e.AuxPID = be.Uint32(raw[116:120])
+		e.AuxUID = be.Uint32(raw[120:124])
+	}
 
 	switch policyID {
 	case bpfPolicyMemfdExec:

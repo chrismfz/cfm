@@ -939,7 +939,7 @@ lists):
 
 | Knob | Default | What it adds |
 |---|---|---|
-| `enrich` | on | Caller `/proc` snapshot: `user` (uid→name), real `exe` (+ `(deleted)` flag), `cwd`, `cmdline`, `ppid`+parent `comm`/`exe`, `loginuid`. |
+| `enrich` | on | Caller `/proc` snapshot: `user` (uid→name), real `exe` (+ `(deleted)` flag), `cwd`, `cmdline`, `ppid`+parent `comm`/`exe`, `loginuid`. For an **alive** caller the `ppid` is read from its live `/proc` status (self-consistent with the exe/cwd just read from the same entry, and immune to a pid recycle). For a caller that has **already exited**, it comes from the BPF event (`current->real_parent->tgid`, captured in-kernel when the event fired) — which is what lets the launcher still resolve after the caller is gone (best-effort: if the parent *also* exited and its pid recycled, the resolved parent can be wrong). Applies to **every** policy, not just the examples. |
 | `enrich_hash` | on | SHA-256 of the caller's exe bytes (read through `/proc/<pid>/exe`, so it works even for an unlinked binary). VirusTotal / YARA-ready. |
 | `enrich_peers` | on | The **uid swarm roster**: every process sharing the caller's real uid, with pid/comm/real-exe. A compromised account typically runs many processes under one uid with spoofed comms all pointing at one dropped binary — this captures that roster while the pids still exist. Skipped for uid 0. |
 | `enrich_capture` | on | Copies the offending binary out of `/proc/<pid>/exe` into `capture_dir` (default `/var/lib/cfm/lsm/capture`) **before it can self-delete**. Only for suspicious images — already unlinked, or on an ephemeral fs (`/tmp`,`/var/tmp`,`/dev/shm`,`/run/user`); `/home` is deliberately excluded (on shared hosting every legitimate per-user binary lives there, and a homedir dropper that unlinks itself is still caught by the deleted flag). Saved `<sha256>.bin`, content-deduplicated, root-only `0600`, never executed, bounded per event and by a directory file cap (surfaced once in `cfm.log`+dmesg when hit). Captures the caller AND suspicious roster peers. |
@@ -976,10 +976,35 @@ snapshot), rosters per uid, and captures per exe path, so a burst does the
 `/proc` work — including the exe hash and the full `/proc` scan — once.
 Hashing and capture read at most 32 MiB synchronously on the drain
 goroutine; the cap bounds how long the drain can block before the kernel
-ring buffer risks overflow. A fully-exited caller yields `proc=gone`;
-parent context is available only while the caller is still alive at drain
-(carrying `ppid` in the BPF event — a future wire change — would resolve
-the launcher for an already-exited caller).
+ring buffer risks overflow. A fully-exited caller still yields `proc=gone`
+for its OWN fields, but its parent is resolved from the event's
+in-kernel-captured `ppid` — so the launcher (cron/script/controller),
+which is the actionable pointer, survives even when the caller does not.
+
+**OBS-004 target identity.** The event also carries the ptrace target's
+pid and euid (`aux_pid`/`aux_uid`, read in-kernel from the target task),
+rendered as `target_pid=` / `target_uid=` in the log line and email
+sample. With the target comm (`filename`) this tells the operator exactly
+which process was introspected, and whether a cross-uid target was root
+or another tenant. These are per-target values, so they stay out of the
+collapsed dedup key.
+
+**BPF wire format.** `ppid` / `aux_pid` / `aux_uid` were appended after
+`filename` (event 112 → 124 bytes); `common.bpf.h` and `events.go` carry
+the matching layout, and the `.o` objects are regenerated (`make bpf`).
+The Go parser accepts the 112-byte base as its floor and reads the tail
+only when present, so it stays correct even if it briefly drains a
+ringbuf pinned by an older build before the version-marker refresh
+re-pins. Two `go test` guardrails defend the contract that
+verify-bpf-bindings (name-only) cannot: `TestBPFEventStructMatchesWireSize`
+recomputes the C struct size from `common.bpf.h` and asserts it equals
+`wireEventSize`, and `TestBPFEmitSitesInitializeTail` asserts every
+`cfm_events` reserve site is paired with the `cfm_event_fill_kin()` that
+initialises the non-zeroed tail. CI does not run the BPF **verifier**
+(no BPF-LSM kernel in CI), so on the FIRST deploy of a build that changed
+the BPF programs, confirm the object still loads with `cfm lsm status`
+(a verifier rejection fails the whole cfmlsm object, not just the new
+fields).
 
 **Not a security boundary.** Enrichment is forensics. An attacker who
 controls the process can spoof `comm`/`argv`, but cannot fake the `exe`

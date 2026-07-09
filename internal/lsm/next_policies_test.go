@@ -119,13 +119,14 @@ func TestParseEvent_CredEscal(t *testing.T) {
 }
 
 func TestWireEventSize_StableAfterOpField(t *testing.T) {
-	// Splitting _pad into op + flags + 2 trailing pad bytes must
-	// NOT change the wire size. If this fires the BPF struct
-	// changed in an incompatible way and existing operators'
-	// pinned BPF objects will produce events that this Go parser
-	// misreads.
-	if wireEventSize != 112 {
-		t.Errorf("wireEventSize drifted: got %d, want 112", wireEventSize)
+	// The op + flags + 2-pad split of the original 4-byte _pad kept the
+	// base record at 112 bytes, and it must stay there: parseEvent uses
+	// wireEventBaseSize as its floor so it can still read a 112-byte
+	// record pinned by a pre-Tier-B build. The Tier B ppid/aux tail was
+	// APPENDED after the base (see wireEventSize == 124), not inserted, so
+	// every offset through filename is unchanged.
+	if wireEventBaseSize != 112 {
+		t.Errorf("wireEventBaseSize drifted: got %d, want 112 (offsets through filename changed?)", wireEventBaseSize)
 	}
 }
 

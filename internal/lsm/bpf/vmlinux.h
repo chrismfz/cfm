@@ -252,6 +252,14 @@ struct task_struct {
     struct mm_struct      *mm;
     struct files_struct   *files;
     const struct cred     *cred;
+    /* tgid is the thread-group id (== the process id userspace sees);
+     * real_parent points at the parent task, so real_parent->tgid is the
+     * ppid. Both are CO-RE-resolved from kernel BTF at load, so the
+     * in-source position here is only a shape hint. ppid is read for
+     * every event (cfm_event_fill_kin); tgid is read from the ptrace
+     * TARGET task by CFML-OBS-004. */
+    int                    tgid;
+    struct task_struct    *real_parent;
     /* comm is an inline TASK_COMM_LEN-byte char buffer holding the
      * task's command name. CO-RE resolves the offset from kernel BTF
      * at load time, so the in-source size is just a shape hint;
