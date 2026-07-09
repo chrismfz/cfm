@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -399,4 +400,210 @@ func gidText(gid uint32) string {
 		return fmt.Sprintf("%s(%s)", g.Name, s)
 	}
 	return s
+}
+
+// ── TSV access-log probe ─────────────────────────────────────────────────────
+
+// TSVLogProbe describes the webdetector TSV access log referenced by
+// detectors.conf [webdetector] LOG_PATH. Liveness ("is it filling?") is left to
+// the caller, which combines ModAgeSec with the ingest-socket arbiter state (a
+// missing/stale file is expected and harmless while the socket is the live
+// source — see the socket-only ingest design).
+type TSVLogProbe struct {
+	Path       string // cleaned LOG_PATH (empty when unset / folder mode)
+	Configured bool
+	Exists     bool
+	IsFile     bool
+	SizeBytes  int64
+	ModAgeSec  int64 // seconds since last write; -1 when unknown
+}
+
+// ProbeTSVLog stats the configured TSV access log. `raw` is the LOG_PATH value
+// straight from ReadDetectorSectionKV (surrounding quotes and a trailing inline
+// ;/# comment are tolerated).
+func ProbeTSVLog(raw string) TSVLogProbe {
+	p := cleanConfValue(raw)
+	out := TSVLogProbe{Path: p, ModAgeSec: -1}
+	if p == "" {
+		return out
+	}
+	out.Configured = true
+	fi, err := os.Stat(p)
+	if err != nil {
+		return out
+	}
+	out.Exists = true
+	out.IsFile = fi.Mode().IsRegular()
+	out.SizeBytes = fi.Size()
+	if age := time.Since(fi.ModTime()); age >= 0 {
+		out.ModAgeSec = int64(age.Seconds())
+	} else {
+		out.ModAgeSec = 0
+	}
+	return out
+}
+
+// cleanConfValue strips surrounding quotes and a trailing inline ;/# comment
+// from a detectors.conf scalar. Paths never legitimately contain ; or #.
+func cleanConfValue(v string) string {
+	s := strings.TrimSpace(v)
+	for _, c := range []string{";", "#"} {
+		if i := strings.Index(s, c); i >= 0 {
+			s = strings.TrimSpace(s[:i])
+		}
+	}
+	return strings.TrimSpace(strings.Trim(s, `"'`))
+}
+
+// ── Origin real-IP / trusted-proxy probe ─────────────────────────────────────
+
+// OriginRealIPProbe reports whether the origin web server (behind the edge)
+// trusts 127.0.0.1 as a real-IP proxy, so its access logs record the client IP
+// instead of the edge's loopback address.
+type OriginRealIPProbe struct {
+	Stack     string // normalized origin: "apache" | "litespeed" | "nginx" | "unknown"
+	Trusted   bool   // a 127.0.0.1 (or ::1) trust directive/marker was found
+	Directive string // what matched (e.g. "RemoteIP{Internal,Trusted}Proxy 127.0.0.1")
+	Source    string // file where it was found
+	Note      string // context when not trusted / unknown
+}
+
+// loopbackTrust matches the ways an operator trusts the edge's loopback address:
+// the bare host, its /32 (or /128 for v6), and the whole-loopback 127.0.0.0/8.
+// It deliberately does NOT match 127.0.0.100 etc. (127\.0\.0\.1 is anchored, not
+// a prefix). Shared by the Apache and nginx directives so they agree.
+const loopbackTrust = `(?:127\.0\.0\.1(?:/\d{1,2})?|127\.0\.0\.0/\d{1,2}|::1(?:/\d{1,3})?)`
+
+var (
+	// The `^\s*` anchor makes a `#`-commented directive line not match.
+	apacheRemoteIPRe = regexp.MustCompile(`(?im)^\s*RemoteIP(?:Internal|Trusted)Proxy\s+` + loopbackTrust + `\b`)
+	nginxRealIPRe    = regexp.MustCompile(`(?im)^\s*set_real_ip_from\s+` + loopbackTrust + `\s*;`)
+	// LiteSpeed's httpd_config.xml uses XML comments, not `#`, so the caller
+	// strips `<!-- ... -->` before matching (see lsNativeMatch) to avoid a
+	// false "trusted" on a commented-out directive.
+	lsNativeRealIPRe = regexp.MustCompile(`(?is)<useIpInProxyHeader>\s*[12]\s*</useIpInProxyHeader>`)
+	xmlCommentRe     = regexp.MustCompile(`(?s)<!--.*?-->`)
+)
+
+// lsNativeMatch reports whether an XML config enables useIpInProxyHeader (1|2)
+// outside of an XML comment.
+func lsNativeMatch(b []byte) bool {
+	return lsNativeRealIPRe.Match(xmlCommentRe.ReplaceAll(b, nil))
+}
+
+// Candidate config locations, cPanel + DirectAdmin/plain. Globbed; missing
+// paths are simply skipped.
+var apacheRealIPGlobs = []string{
+	"/etc/apache2/conf.d/includes/*.conf", // cPanel pre_main_*/post_* includes
+	"/etc/apache2/conf.d/httpd-cfm.conf",  // CFM's own drop-in
+	"/usr/local/apache/conf/includes/*.conf",
+	"/etc/httpd/conf.d/*.conf", // plain / DirectAdmin
+	"/etc/httpd/conf/extra/*.conf",
+	"/usr/local/directadmin/data/templates/custom/*.conf",
+}
+var nginxRealIPGlobs = []string{
+	"/etc/nginx/conf.d/*.conf",
+	"/etc/nginx/conf.d/server-includes/*.conf",
+	"/etc/nginx/nginx.conf",
+}
+var lsNativeConfPaths = []string{"/usr/local/lsws/conf/httpd_config.xml"}
+
+func normalizeOriginStack(upstream string) string {
+	s := strings.ToLower(strings.TrimSpace(upstream))
+	switch {
+	case strings.Contains(s, "lshttpd") || strings.Contains(s, "litespeed") || strings.Contains(s, "lsws"):
+		return "litespeed"
+	case strings.Contains(s, "httpd") || strings.Contains(s, "apache"):
+		return "apache"
+	case strings.Contains(s, "nginx"):
+		return "nginx"
+	default:
+		return "unknown"
+	}
+}
+
+// ProbeOriginRealIP checks the origin real-IP trust for `upstream` (the origin
+// service the health collector detected: httpd/lshttpd/nginx). When unknown it
+// falls back to whichever stack is present on disk.
+func ProbeOriginRealIP(upstream string) OriginRealIPProbe {
+	return probeOriginRealIP(upstream, apacheRealIPGlobs, nginxRealIPGlobs, lsNativeConfPaths)
+}
+
+func probeOriginRealIP(upstream string, apacheGlobs, nginxGlobs, lsPaths []string) OriginRealIPProbe {
+	stack := normalizeOriginStack(upstream)
+	if stack == "unknown" {
+		stack = detectPresentOriginStack()
+	}
+	switch stack {
+	case "apache":
+		if f := grepGlobs(apacheGlobs, apacheRemoteIPRe); f != "" {
+			return OriginRealIPProbe{Stack: "apache", Trusted: true, Directive: "RemoteIP{Internal,Trusted}Proxy 127.0.0.1", Source: f}
+		}
+		return OriginRealIPProbe{Stack: "apache", Note: "no RemoteIP{Internal,Trusted}Proxy 127.0.0.1 in Apache includes"}
+	case "litespeed":
+		// LiteSpeed resolves real IP either natively (useIpInProxyHeader) or via
+		// the Apache RemoteIP conf it loads (loadApacheConf=1).
+		if f := grepGlobsFunc(lsPaths, lsNativeMatch); f != "" {
+			return OriginRealIPProbe{Stack: "litespeed", Trusted: true, Directive: "useIpInProxyHeader", Source: f}
+		}
+		if f := grepGlobs(apacheGlobs, apacheRemoteIPRe); f != "" {
+			return OriginRealIPProbe{Stack: "litespeed", Trusted: true, Directive: "RemoteIP{Internal,Trusted}Proxy 127.0.0.1 (loadApacheConf)", Source: f}
+		}
+		return OriginRealIPProbe{Stack: "litespeed", Note: "no useIpInProxyHeader (1|2) and no Apache RemoteIP trust"}
+	case "nginx":
+		if f := grepGlobs(nginxGlobs, nginxRealIPRe); f != "" {
+			return OriginRealIPProbe{Stack: "nginx", Trusted: true, Directive: "set_real_ip_from 127.0.0.1", Source: f}
+		}
+		return OriginRealIPProbe{Stack: "nginx", Note: "no set_real_ip_from 127.0.0.1 in nginx conf.d"}
+	default:
+		return OriginRealIPProbe{Stack: "unknown", Note: "no apache/litespeed/nginx origin detected on disk"}
+	}
+}
+
+func detectPresentOriginStack() string {
+	if dirExists("/usr/local/lsws") {
+		return "litespeed"
+	}
+	if dirExists("/etc/apache2") || dirExists("/usr/local/apache") || dirExists("/etc/httpd") {
+		return "apache"
+	}
+	if dirExists("/etc/nginx") {
+		return "nginx"
+	}
+	return "unknown"
+}
+
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+// grepGlobs returns the first regular file (expanded from globs) whose contents
+// match re, or "" if none.
+func grepGlobs(globs []string, re *regexp.Regexp) string {
+	return grepGlobsFunc(globs, re.Match)
+}
+
+// grepGlobsFunc is grepGlobs with an arbitrary content matcher (used by the
+// LiteSpeed check, which must strip XML comments before matching). Each file
+// read is size-capped for safety.
+func grepGlobsFunc(globs []string, match func([]byte) bool) string {
+	const maxBytes = 8 << 20 // 8 MiB per file (origin configs are far smaller)
+	for _, g := range globs {
+		matches, _ := filepath.Glob(g)
+		for _, f := range matches {
+			fi, err := os.Stat(f)
+			if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxBytes {
+				continue
+			}
+			b, err := os.ReadFile(f) // #nosec G304 -- fixed system config globs
+			if err != nil {
+				continue
+			}
+			if match(b) {
+				return f
+			}
+		}
+	}
+	return ""
 }

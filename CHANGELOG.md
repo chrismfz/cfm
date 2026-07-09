@@ -120,6 +120,22 @@ back-filled here — see the git/PR history for that period.
   every install. These are operator-specific and must be set per host.
 
 ### Added
+- **`cfm health` edge section: TSV access-log and origin real-IP visibility.**
+  Two new read-only lines under "Web stack - Edge Interceptor", to make a fresh
+  edge setup self-diagnosing:
+  - **TSV access log** — reads `[webdetector] LOG_PATH`, then reports whether the
+    file exists and is *filling* (write-recency + size shown as context only —
+    the file's mtime is the producer's signal, not the ingest consumer's health,
+    so a quiet vhost that writes nothing is never flagged). It warns only on
+    unambiguous faults: the path is not a regular file, or it is absent while the
+    ingest socket is also not live (no ingest source wired at all). Never
+    false-alarms on socket-only or idle boxes.
+  - **Origin real-IP** — detects the origin stack (Apache / LiteSpeed / nginx,
+    cPanel + DirectAdmin/plain paths) and checks that 127.0.0.1 is trusted as a
+    real-IP proxy (`RemoteIP{Internal,Trusted}Proxy` for Apache, LiteSpeed's
+    native `useIpInProxyHeader`, `set_real_ip_from` for nginx). Warns — with the
+    concrete consequence ("access logs will record 127.0.0.1, not client IPs")
+    — when the trust directive is missing. Purely diagnostic; changes nothing.
 - **`cfm.api.conf` overlay now carries MaxMind credentials too, plus a shipped
   `cfm.api.conf.example`.** The per-server secrets overlay
   (`LoadConfigWithAPIOverride`) already overrode the cfm-web API `API_URL` /
