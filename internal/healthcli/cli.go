@@ -586,7 +586,7 @@ func printOriginRealIP(p edgediag.OriginRealIPProbe, opts cliOptions) {
 		return
 	}
 	if p.Trusted {
-		fmt.Printf("  %s  Origin real-IP: stack=%s trust=127.0.0.1 present (%s in %s)\n",
+		fmt.Printf("  %s  Origin real-IP: stack=%s trusted via %s (%s)\n",
 			badge(okLabel, opts), p.Stack, p.Directive, p.Source)
 		return
 	}

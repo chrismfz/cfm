@@ -730,7 +730,9 @@ func normalizeFrontendProcessToken(raw string) string {
 	if strings.HasPrefix(s, "httpd") || strings.HasPrefix(s, "apache2") || strings.Contains(s, "apache") {
 		return "httpd"
 	}
-	if strings.HasPrefix(s, "lshttpd") {
+	// LiteSpeed / OpenLiteSpeed present as "lshttpd" (older) or "litespeed"
+	// (current) in ps/comm; both are the LiteSpeed origin.
+	if strings.HasPrefix(s, "lshttpd") || strings.HasPrefix(s, "litespeed") || strings.HasPrefix(s, "openlitespeed") {
 		return "lshttpd"
 	}
 	if strings.HasPrefix(s, "caddy") {
@@ -1094,10 +1096,10 @@ func probeFrontendHTTP() (bool, string) {
 		Timeout: 1500 * time.Millisecond,
 		Transport: &http.Transport{
 			// Local liveness probe to https://127.0.0.1/hello — the only target
-		// of this client. MITM on loopback implies root-on-host already, so
-		// certificate validation is not in the threat model. CodeQL #677
-		// (2026-05-09 triage, accepted-risk).
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			// of this client. MITM on loopback implies root-on-host already, so
+			// certificate validation is not in the threat model. CodeQL #677
+			// (2026-05-09 triage, accepted-risk).
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
 	type probeTarget struct {
