@@ -86,6 +86,52 @@ func TestProbeOriginRealIP_LiteSpeedNative(t *testing.T) {
 	}
 }
 
+// A useIpInProxyHeader tag that is XML-commented out must NOT be read as trusted
+// (a false "trusted" hides a real client-IP logging break).
+func TestProbeOriginRealIP_LiteSpeedCommentedNotTrusted(t *testing.T) {
+	dir := t.TempDir()
+	xml := filepath.Join(dir, "httpd_config.xml")
+	os.WriteFile(xml, []byte("<httpServerConfig>\n <!-- <useIpInProxyHeader>2</useIpInProxyHeader> -->\n <useIpInProxyHeader>0</useIpInProxyHeader>\n</httpServerConfig>\n"), 0o644)
+
+	got := probeOriginRealIP("lshttpd", nil, nil, []string{xml})
+	if got.Trusted {
+		t.Fatalf("commented-out useIpInProxyHeader must not be trusted, got %+v", got)
+	}
+}
+
+// Loopback CIDR forms (/32, /8) and ::1 must be recognized; a non-loopback
+// 127.0.0.100 must not.
+func TestOriginRealIP_LoopbackCIDRForms(t *testing.T) {
+	write := func(t *testing.T, body string) []string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "x.conf"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return []string{filepath.Join(dir, "*.conf")}
+	}
+
+	// nginx
+	for _, ok := range []string{"set_real_ip_from 127.0.0.1/32;\n", "set_real_ip_from 127.0.0.0/8;\n", "set_real_ip_from ::1;\n"} {
+		if p := probeOriginRealIP("nginx", nil, write(t, ok), nil); !p.Trusted {
+			t.Errorf("nginx: expected trusted for %q, got %+v", ok, p)
+		}
+	}
+	if p := probeOriginRealIP("nginx", nil, write(t, "set_real_ip_from 127.0.0.100;\n"), nil); p.Trusted {
+		t.Errorf("nginx: 127.0.0.100 must NOT be treated as loopback trust, got %+v", p)
+	}
+
+	// apache
+	for _, ok := range []string{"RemoteIPInternalProxy 127.0.0.1/32\n", "RemoteIPTrustedProxy 127.0.0.0/8\n"} {
+		if p := probeOriginRealIP("httpd", write(t, ok), nil, nil); !p.Trusted {
+			t.Errorf("apache: expected trusted for %q, got %+v", ok, p)
+		}
+	}
+	if p := probeOriginRealIP("httpd", write(t, "RemoteIPInternalProxy 127.0.0.100\n"), nil, nil); p.Trusted {
+		t.Errorf("apache: 127.0.0.100 must NOT be treated as loopback trust, got %+v", p)
+	}
+}
+
 func TestCleanConfValue(t *testing.T) {
 	cases := map[string]string{
 		`"/var/log/apache2/access_cfm_tsv.log"`: "/var/log/apache2/access_cfm_tsv.log",

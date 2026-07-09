@@ -528,51 +528,49 @@ func printEdgeInterceptorDiagnostics(s parsedSnapshot, opts cliOptions) {
 }
 
 // printTSVLogHealth renders the configured webdetector TSV access log status.
-// It is deliberately arbiter-aware: a missing or stale file is expected and
-// harmless while the ingest socket is the live source (socket-only mode), and
-// only becomes a warning when neither the socket nor the file is live.
+// The file's mtime reflects the PRODUCER (Apache/nginx appends per request), not
+// the webdetector consumer's health — a quiet vhost writes nothing, so a stale
+// file is not a fault. mtime is therefore shown as context ("filling" / "last
+// write …"), never a warning. The only warnings are unambiguous config faults:
+// the path is not a regular file, or it is absent while the ingest socket is
+// also not live (no ingest source wired at all).
 func printTSVLogHealth(p edgediag.TSVLogProbe, ingestStatus string, opts cliOptions) {
 	if !p.Configured {
 		fmt.Printf("  %s  TSV access log: not configured (LOG_PATH unset / folder mode)\n", badge(okLabel, opts))
 		return
 	}
 	socketLive := strings.EqualFold(strings.TrimSpace(ingestStatus), "live")
-	const liveWindowSec = 60
-	live := p.Exists && p.IsFile && p.ModAgeSec >= 0 && p.ModAgeSec <= liveWindowSec
-	age := formatShortDuration(time.Duration(p.ModAgeSec) * time.Second)
-	size := bytesIEC(uint64(p.SizeBytes))
 
-	var label healthLabelRank
-	var detail string
-	switch {
-	case live:
-		label = okLabel
-		if socketLive {
-			detail = fmt.Sprintf("exists=yes live (updated %s ago, %s) — fallback; socket is the active source", age, size)
-		} else {
-			detail = fmt.Sprintf("exists=yes live (updated %s ago, %s) — active source", age, size)
-		}
-	case p.Exists && p.IsFile && !live:
-		if socketLive {
-			label = okLabel
-			detail = fmt.Sprintf("exists=yes stale (%s ago) — socket is the active source", age)
-		} else {
-			label = warnLabel
-			detail = fmt.Sprintf("exists=yes stale (%s ago) and socket not live — no live ingest", age)
-		}
-	case p.Exists && !p.IsFile:
-		label = warnLabel
-		detail = "path exists but is not a regular file"
-	default: // not present
-		if socketLive {
-			label = okLabel
-			detail = "exists=no — socket ingest active (file is fallback only)"
-		} else {
-			label = warnLabel
-			detail = "exists=no and socket not live — no ingest source"
-		}
+	// Present but not a regular file → misconfigured path.
+	if p.Exists && !p.IsFile {
+		fmt.Printf("  %s  TSV access log: %s  path exists but is not a regular file\n", badge(warnLabel, opts), p.Path)
+		return
 	}
-	fmt.Printf("  %s  TSV access log: %s  %s\n", badge(label, opts), p.Path, detail)
+
+	// Absent: fine when the socket is the live source; otherwise nothing feeds
+	// the webdetector at all.
+	if !p.Exists {
+		if socketLive {
+			fmt.Printf("  %s  TSV access log: %s  exists=no — socket ingest is active (file is a fallback only)\n", badge(okLabel, opts), p.Path)
+		} else {
+			fmt.Printf("  %s  TSV access log: %s  exists=no and socket not live — no ingest source configured\n", badge(warnLabel, opts), p.Path)
+		}
+		return
+	}
+
+	// Present regular file: OK. Report write-recency + size as context only.
+	const recentWindowSec = 60
+	age := formatShortDuration(time.Duration(p.ModAgeSec) * time.Second)
+	recency := fmt.Sprintf("last write %s ago", age)
+	if p.ModAgeSec >= 0 && p.ModAgeSec <= recentWindowSec {
+		recency = fmt.Sprintf("filling (last write %s ago)", age)
+	}
+	note := ""
+	if socketLive {
+		note = " — socket is the active source (file is a fallback)"
+	}
+	fmt.Printf("  %s  TSV access log: %s  exists=yes, %s, %s%s\n",
+		badge(okLabel, opts), p.Path, recency, bytesIEC(uint64(p.SizeBytes)), note)
 }
 
 // printOriginRealIP renders whether the origin web server trusts 127.0.0.1 as a

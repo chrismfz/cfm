@@ -468,11 +468,28 @@ type OriginRealIPProbe struct {
 	Note      string // context when not trusted / unknown
 }
 
+// loopbackTrust matches the ways an operator trusts the edge's loopback address:
+// the bare host, its /32 (or /128 for v6), and the whole-loopback 127.0.0.0/8.
+// It deliberately does NOT match 127.0.0.100 etc. (127\.0\.0\.1 is anchored, not
+// a prefix). Shared by the Apache and nginx directives so they agree.
+const loopbackTrust = `(?:127\.0\.0\.1(?:/\d{1,2})?|127\.0\.0\.0/\d{1,2}|::1(?:/\d{1,3})?)`
+
 var (
-	apacheRemoteIPRe = regexp.MustCompile(`(?im)^\s*RemoteIP(?:Internal|Trusted)Proxy\s+(?:127\.0\.0\.1|::1)\b`)
-	nginxRealIPRe    = regexp.MustCompile(`(?im)^\s*set_real_ip_from\s+(?:127\.0\.0\.1|::1)\s*;`)
+	// The `^\s*` anchor makes a `#`-commented directive line not match.
+	apacheRemoteIPRe = regexp.MustCompile(`(?im)^\s*RemoteIP(?:Internal|Trusted)Proxy\s+` + loopbackTrust + `\b`)
+	nginxRealIPRe    = regexp.MustCompile(`(?im)^\s*set_real_ip_from\s+` + loopbackTrust + `\s*;`)
+	// LiteSpeed's httpd_config.xml uses XML comments, not `#`, so the caller
+	// strips `<!-- ... -->` before matching (see lsNativeMatch) to avoid a
+	// false "trusted" on a commented-out directive.
 	lsNativeRealIPRe = regexp.MustCompile(`(?is)<useIpInProxyHeader>\s*[12]\s*</useIpInProxyHeader>`)
+	xmlCommentRe     = regexp.MustCompile(`(?s)<!--.*?-->`)
 )
+
+// lsNativeMatch reports whether an XML config enables useIpInProxyHeader (1|2)
+// outside of an XML comment.
+func lsNativeMatch(b []byte) bool {
+	return lsNativeRealIPRe.Match(xmlCommentRe.ReplaceAll(b, nil))
+}
 
 // Candidate config locations, cPanel + DirectAdmin/plain. Globbed; missing
 // paths are simply skipped.
@@ -526,7 +543,7 @@ func probeOriginRealIP(upstream string, apacheGlobs, nginxGlobs, lsPaths []strin
 	case "litespeed":
 		// LiteSpeed resolves real IP either natively (useIpInProxyHeader) or via
 		// the Apache RemoteIP conf it loads (loadApacheConf=1).
-		if f := grepGlobs(lsPaths, lsNativeRealIPRe); f != "" {
+		if f := grepGlobsFunc(lsPaths, lsNativeMatch); f != "" {
 			return OriginRealIPProbe{Stack: "litespeed", Trusted: true, Directive: "useIpInProxyHeader", Source: f}
 		}
 		if f := grepGlobs(apacheGlobs, apacheRemoteIPRe); f != "" {
@@ -562,9 +579,16 @@ func dirExists(p string) bool {
 }
 
 // grepGlobs returns the first regular file (expanded from globs) whose contents
-// match re, or "" if none. Each file read is size-capped for safety.
+// match re, or "" if none.
 func grepGlobs(globs []string, re *regexp.Regexp) string {
-	const maxBytes = 1 << 20 // 1 MiB per file
+	return grepGlobsFunc(globs, re.Match)
+}
+
+// grepGlobsFunc is grepGlobs with an arbitrary content matcher (used by the
+// LiteSpeed check, which must strip XML comments before matching). Each file
+// read is size-capped for safety.
+func grepGlobsFunc(globs []string, match func([]byte) bool) string {
+	const maxBytes = 8 << 20 // 8 MiB per file (origin configs are far smaller)
 	for _, g := range globs {
 		matches, _ := filepath.Glob(g)
 		for _, f := range matches {
@@ -576,7 +600,7 @@ func grepGlobs(globs []string, re *regexp.Regexp) string {
 			if err != nil {
 				continue
 			}
-			if re.Match(b) {
+			if match(b) {
 				return f
 			}
 		}
