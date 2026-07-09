@@ -104,7 +104,15 @@ back-filled here — see the git/PR history for that period.
   appending. You no longer need the DNAT listener ports in `TCP_IN`. Regression
   tests: `TestDNATOnPlacesAcceptsBeforeDefaultDrop` (live-nft, gated by
   `CFM_NFT_INTEGRATION=1`) and `TestNftOutIsNeverCalledWithCLIFlags` (source
-  guard).
+  guard). Review hardening on the same change: `nftOut` now rejects a
+  leading-dash arg at runtime (the flag-in-script-mode footgun that caused the
+  bug); the default-drop matcher and the redirect-port parser were consolidated
+  into `internal/firewall/dnat_accepts.go` (single source of truth for the nft
+  backend and the dnat CLI, previously copy-pasted in 3-4 spots); `cfm dnat`
+  status now resolves accepts against the ports actually installed in
+  `cfm_redirect` (not the CLI/env default) so a custom-port box no longer shows
+  false `ABSENT`; and `PanelDNATAcceptState` became placement-aware (an accept
+  stranded after the drop reports `blocked`, not `open`).
 - **Socket-ingest-only boxes: forced-vhost challenge (and all webdetector
   challenge/block emission) never ran.** When the webdetector ingests via the
   Unix socket (`/run/cfm/ingest.sock`, fed by the OpenResty/Angie edge) and the
@@ -135,7 +143,7 @@ back-filled here — see the git/PR history for that period.
   the edge **without** `9080/9043` in `TCP_IN` — but the web path did this
   silently, so an operator whose site was unreachable after `cfm dnat on` had no
   way to tell a missing CFM accept from an upstream drop. `cfm dnat on` now
-  prints a `Firewall: opened scoped 80->9080 (nft cfm/input)` line per mapping
+  prints a `Firewall: opened scoped 80->9080 tcp (nft cfm/input)` line per mapping
   (parity with `cfm dnat cpanel on`) and warns loudly when a mapping is absent or
   landed after the default drop; `cfm dnat` status gains a **Scoped DNAT
   accepts** block reporting each mapping as `open` / `BLOCKED` / `ABSENT`. When

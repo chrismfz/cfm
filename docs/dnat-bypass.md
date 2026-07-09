@@ -294,7 +294,7 @@ packets CFM itself redirected — you do not (and should not) add
 panel listener ports (`12082..`, `12222`).
 
 Because the install happens inside `DNATOn`, it used to be invisible.
-`cfm dnat on` now prints one `Firewall: opened scoped 80->9080
+`cfm dnat on` now prints one `Firewall: opened scoped 80->9080 tcp
 (nft cfm/input)` line per mapping (mirroring `cfm dnat cpanel on`), and
 `cfm dnat` status prints a **Scoped DNAT accepts** block reporting each
 mapping as:

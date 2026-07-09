@@ -32,6 +32,18 @@ func TestDNATOnPlacesAcceptsBeforeDefaultDrop(t *testing.T) {
 		t.Skip("nft not installed")
 	}
 
+	// Safety net: this test flush/delete-s the `inet cfm` table, which is the
+	// PRODUCTION table name. Netns isolation is the operator's job (see the doc
+	// comment), but if an inet cfm table with real content already exists we
+	// refuse rather than wipe a live firewall — CFM_NFT_INTEGRATION=1 set on the
+	// wrong host must not nuke production.
+	if out, err := exec.Command("nft", "list", "table", "inet", "cfm").CombinedOutput(); err == nil {
+		s := string(out)
+		if strings.Contains(s, "allow_v4") || strings.Contains(s, "block_v4") || strings.Contains(s, "hook input") {
+			t.Fatalf("refusing to run: a populated `inet cfm` table already exists (looks like a real firewall) — run this test inside an isolated netns (unshare -rn)")
+		}
+	}
+
 	nft := func(script string) {
 		t.Helper()
 		cmd := exec.Command("nft", "-f", "-")

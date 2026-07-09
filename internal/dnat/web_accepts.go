@@ -58,23 +58,15 @@ func (s webDNATAcceptStatus) mapping() string {
 // The per-IP challenge redirect emits accepts with labels like web_http_ip_tcp
 // and the panel accepts use the cfm_cpanel_dnat comment namespace; both share
 // the inet cfm/input chain, so matching on these exact labels keeps this
-// report scoped to the `cfm dnat on` accepts.
-var webDNATEdgeLabels = map[string]bool{
-	"web_http_tcp":  true,
-	"web_https_tcp": true,
-	"web_https_udp": true,
-}
-
-// webDNATIsDefaultDropLine reports whether a rendered chain line is the
-// catch-all NEW-state default drop that ApplyPortsPolicy installs. Kept in sync
-// with isInputDefaultDropLine in the nft backend.
-func webDNATIsDefaultDropLine(line string) bool {
-	norm := strings.ReplaceAll(line, `"`, "")
-	if !strings.Contains(norm, "ct state new") || !strings.Contains(norm, "dport 0-65535") || !strings.Contains(norm, " drop") {
-		return false
+// report scoped to the `cfm dnat on` accepts. Derived from webDNATAcceptSpecs
+// so adding a mapping there can't silently leave this filter stale.
+var webDNATEdgeLabels = func() map[string]bool {
+	m := map[string]bool{}
+	for _, s := range webDNATAcceptSpecs(0, 0) {
+		m[s.Label] = true
 	}
-	return strings.Contains(norm, "tcp dport 0-65535") || strings.Contains(norm, "udp dport 0-65535")
-}
+	return m
+}()
 
 // parseWebDNATAcceptComment extracts (label, from, to) from a scoped edge DNAT
 // accept comment token such as the nft backend's
@@ -114,7 +106,7 @@ func resolveWebDNATAcceptState(chainText string, httpPort, httpsPort int) []webD
 	present := map[string]found{}
 	seenDrop := false
 	for _, line := range strings.Split(chainText, "\n") {
-		if webDNATIsDefaultDropLine(line) {
+		if firewall.IsInputDefaultDropLine(line) {
 			seenDrop = true
 			continue
 		}

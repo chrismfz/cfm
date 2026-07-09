@@ -107,11 +107,8 @@ func panelManagedRulePlacement(out, key string) (handle string, beforeDefaultDro
 }
 
 func isInputDefaultDropLine(line string) bool {
-	norm := strings.ReplaceAll(line, `"`, "")
-	if !strings.Contains(norm, "ct state new") || !strings.Contains(norm, "dport 0-65535") || !strings.Contains(norm, " drop") {
-		return false
-	}
-	return strings.Contains(norm, "tcp dport 0-65535") || strings.Contains(norm, "udp dport 0-65535")
+	// Single source of truth shared with the dnat CLI reporter and dnat.go.
+	return firewall.IsInputDefaultDropLine(line)
 }
 
 func panelDNATAcceptRuleExpr(from, to int, beforeHandle string) string {
@@ -198,8 +195,16 @@ func (b *Backend) PanelDNATAcceptState() map[int]string {
 		return state
 	}
 	for _, m := range firewall.PanelDNATMappings() {
-		if strings.Contains(out, fmt.Sprintf("tcp dport %d", m.To)) && strings.Contains(out, panelDNATAcceptComment(m.From, m.To)) && strings.Contains(out, "ct status dnat") {
-			state[m.To] = "open"
+		// Placement-aware, matching the web-scope resolver: a managed accept
+		// only counts as "open" when it sits BEFORE the default drop. A
+		// substring match anywhere in the chain would report an accept
+		// stranded after the drop (the exact bug this file fixes) as open.
+		if _, beforeDrop, ok := panelManagedRulePlacement(out, panelDNATAcceptKey(m.From, m.To)); ok {
+			if beforeDrop {
+				state[m.To] = "open"
+			} else {
+				state[m.To] = "blocked"
+			}
 		} else if out != "" {
 			state[m.To] = "blocked"
 		}

@@ -28,43 +28,9 @@ func TestDNATAcceptRuleExprCanInsertBeforeDefaultDropHandle(t *testing.T) {
 	}
 }
 
-func TestParseDNATListenerPorts(t *testing.T) {
-	out := `table inet cfm_redirect {
-	chain prerouting {
-		type nat hook prerouting priority -99; policy accept;
-		iif "lo" accept
-		tcp dport 80 dnat to :9080
-		tcp dport 443 dnat to :9043
-		udp dport 443 dnat to :9043
-	}
-}`
-	httpPort, httpsPort, ok := parseDNATListenerPorts(out)
-	if !ok {
-		t.Fatalf("parseDNATListenerPorts ok=false on canonical listing")
-	}
-	if httpPort != 9080 || httpsPort != 9043 {
-		t.Fatalf("parseDNATListenerPorts = %d/%d, want 9080/9043", httpPort, httpsPort)
-	}
-}
-
-func TestParseDNATListenerPortsCustom(t *testing.T) {
-	out := `tcp dport 80 dnat to 127.0.0.1:9000
-tcp dport 443 dnat to :9001
-udp dport 443 dnat to :9001`
-	httpPort, httpsPort, ok := parseDNATListenerPorts(out)
-	if !ok || httpPort != 9000 || httpsPort != 9001 {
-		t.Fatalf("parseDNATListenerPorts = (%d,%d,%v), want (9000,9001,true)", httpPort, httpsPort, ok)
-	}
-}
-
-func TestParseDNATListenerPortsMissing(t *testing.T) {
-	if _, _, ok := parseDNATListenerPorts(""); ok {
-		t.Fatalf("expected ok=false on empty input")
-	}
-	if _, _, ok := parseDNATListenerPorts("tcp dport 80 dnat to :9080"); ok {
-		t.Fatalf("expected ok=false when only http listener is present (no https)")
-	}
-}
+// ParseDNATListenerPorts behaviour is covered in the firewall package
+// (internal/firewall/dnat_accepts_test.go); the nft-side parseDNATListenerPorts
+// is a thin delegator.
 
 func TestDNATAcceptRuleExprsCoverTCPAndUDPWithoutSourceSet(t *testing.T) {
 	specs := dnatAcceptRuleSpecs(9080, 9043)

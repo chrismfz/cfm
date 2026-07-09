@@ -1,6 +1,10 @@
 package dnat
 
-import "testing"
+import (
+	"testing"
+
+	"cfm/internal/firewall"
+)
 
 // chainWithAccepts mimics `nft -a list chain inet cfm input` output. nft
 // reorders `ct state new` to the front and appends `# handle N`; the parser
@@ -102,6 +106,47 @@ func TestResolveWebDNATAcceptStateNftlibComment(t *testing.T) {
 func TestResolveWebDNATAcceptStateCustomPorts(t *testing.T) {
 	if got := stateFor(t, resolveWebDNATAcceptState(chainWithAccepts, 9000, 9043), "tcp", 80, 9000); got != "absent" {
 		t.Errorf("80->9000 against a 9080 chain = %q, want absent", got)
+	}
+}
+
+// Regression for the status-report bug: when DNAT runs on custom listener
+// ports, the accept state must be resolved against the ports actually installed
+// in the redirect table (parsed from the DNATShow dump), not the CLI/env
+// defaults — otherwise the report screams false "absent".
+func TestStatusResolvesAgainstRedirectTablePorts(t *testing.T) {
+	redirectDump := `table inet cfm_redirect {
+	chain prerouting {
+		type nat hook prerouting priority -99; policy accept;
+		iif "lo" accept
+		tcp dport 80 dnat to :8080
+		tcp dport 443 dnat to :8443
+		udp dport 443 dnat to :8443
+	}
+}`
+	chain := `table inet cfm {
+	chain input {
+		type filter hook input priority -50; policy accept;
+		ct state new tcp dport 8080 ct status dnat ct original proto-dst 80 accept comment "cfm_dnat_accept:web_http_tcp:80:8080" # handle 3
+		ct state new tcp dport 8443 ct status dnat ct original proto-dst 443 accept comment "cfm_dnat_accept:web_https_tcp:443:8443" # handle 4
+		ct state new udp dport 8443 ct status dnat ct original proto-dst 443 accept comment "cfm_dnat_accept:web_https_udp:443:8443" # handle 5
+		ct state new tcp dport 0-65535 drop # handle 8
+	}
+}`
+	// Wrong (CLI default) ports → everything looks absent (the bug).
+	for _, st := range resolveWebDNATAcceptState(chain, 9080, 9043) {
+		if st.State != "absent" {
+			t.Fatalf("with default ports, %s = %q; test premise broken", st.mapping(), st.State)
+		}
+	}
+	// Correct ports parsed from the redirect dump → all open.
+	h, hs, ok := firewall.ParseDNATListenerPorts(redirectDump)
+	if !ok || h != 8080 || hs != 8443 {
+		t.Fatalf("ParseDNATListenerPorts = (%d,%d,%v), want (8080,8443,true)", h, hs, ok)
+	}
+	for _, st := range resolveWebDNATAcceptState(chain, h, hs) {
+		if st.State != "open" {
+			t.Errorf("with parsed ports, %s = %q, want open", st.mapping(), st.State)
+		}
 	}
 }
 

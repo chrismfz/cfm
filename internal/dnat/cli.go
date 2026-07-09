@@ -411,7 +411,14 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		// reachable. `cfm dnat on` opens the listener ports here (not in
 		// TCP_IN); surfacing their state lets an operator tell a missing CFM
 		// rule apart from an upstream drop when the site is unreachable.
-		if states, ok := webDNATAcceptStates(backend, *httpPort, *httpsPort); ok {
+		// Resolve against the ports ACTUALLY installed in the redirect table
+		// (`s`), not the CLI/env defaults — otherwise a box running DNAT on
+		// custom listener ports would see false ABSENT warnings.
+		accHTTP, accHTTPS := *httpPort, *httpsPort
+		if h, hs, ok := firewall.ParseDNATListenerPorts(s); ok {
+			accHTTP, accHTTPS = h, hs
+		}
+		if states, ok := webDNATAcceptStates(backend, accHTTP, accHTTPS); ok {
 			fmt.Println()
 			fmt.Println("Scoped DNAT accepts (inet cfm/input) — open the listener ports WITHOUT needing them in TCP_IN:")
 			for _, st := range states {

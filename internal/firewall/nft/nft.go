@@ -1336,6 +1336,15 @@ func (b *Backend) nftCmd(expr string) error {
 }
 func (b *Backend) nftOut(expr string) (string, error) {
 	expr = strings.TrimSpace(expr)
+	// nftOut runs `nft -f -` (script mode). A leading-dash token is a CLI flag
+	// (e.g. `-a`, `-n`, `-t`), which is a syntax error inside a script and makes
+	// the whole command fail — silently, if the caller discards the error. That
+	// is exactly how scoped DNAT accepts once landed after the default drop.
+	// Reject it at runtime (covers dynamically-built args the source-scan guard
+	// can't see); use runNFTCommand / ListChainText for flagged listings.
+	if strings.HasPrefix(expr, "-") {
+		return "", fmt.Errorf("nftOut: %q starts with a CLI flag but nftOut runs `nft -f -` (script mode); use runNFTCommand/ListChainText for flagged listings", expr)
+	}
 	if !strings.HasSuffix(expr, ";") {
 		expr += ";"
 	}
