@@ -115,9 +115,13 @@ back-filled here — see the git/PR history for that period.
   `AUTH_TOKEN`; it now also overlays `MAXMIND_ACCOUNT_ID` / `MAXMIND_LICENSE_KEY`
   (only when the overlay sets them), so the base `cfm.conf` can ship secret-free
   and identical on every host while a single `/etc/cfm/cfm.api.conf` holds the
-  API + MaxMind secrets. Ships `configs/cfm.api.conf.example`; the deb/rpm
-  post-install seeds `/etc/cfm/cfm.api.conf` (0600) from it on first install
-  only (never overwrites an existing file; it is not a tracked conffile).
+  API + MaxMind secrets. Ships `configs/cfm.api.conf.example` (all values empty,
+  so an un-edited file is inert — no reporting redirected to a real endpoint,
+  GeoIP falls back to IPLocate); the deb/rpm post-install seeds
+  `/etc/cfm/cfm.api.conf` (0600) from it on first install only (never overwrites
+  an existing file; it is not a tracked conffile). The overlay is read at daemon
+  **startup**, so edits need a `systemctl restart cfm` (documented in the file
+  header), not just a reload.
   Runtime tokens (`CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` / `SSLCOLLECTOR_SOCK_TOKEN`)
   still auto-generate on first boot, so they never need to be in the overlay.
   Covered by `TestLoadConfigWithAPIOverride_MaxMindAndAPI` /

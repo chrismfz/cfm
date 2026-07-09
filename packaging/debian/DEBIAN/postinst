@@ -44,8 +44,11 @@ chmod 0700 /etc/cfm
 # first install only; never overwrite an operator's existing file. It is
 # deliberately NOT a dpkg conffile, so upgrades leave it untouched.
 if [ ! -e /etc/cfm/cfm.api.conf ] && [ -f /usr/share/cfm/configs/cfm.api.conf.example ]; then
-    cp -p /usr/share/cfm/configs/cfm.api.conf.example /etc/cfm/cfm.api.conf
-    chmod 0600 /etc/cfm/cfm.api.conf
+    # Guard against set -e (line 2): seeding is a convenience, never fatal —
+    # a failure here must not abort the rest of postinst (Lua sync, proxy
+    # deploy, service restart). Matches the file's `|| true` convention.
+    cp -p /usr/share/cfm/configs/cfm.api.conf.example /etc/cfm/cfm.api.conf 2>/dev/null || true
+    chmod 0600 /etc/cfm/cfm.api.conf 2>/dev/null || true
 fi
 
 # shared Lua runtime dir (root writable, cfm readable)
