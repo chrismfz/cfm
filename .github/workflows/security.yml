@@ -90,8 +90,14 @@ jobs:
           sudo apt-get update && sudo apt-get install -y jq
           jq '.runs = (.runs | map(.results = (.results // [] | map(del(.fixes)))))' \
             gosec.sarif > gosec.cleaned.sarif
+      # Best-effort: gosec runs with -no-fail and produces SARIF regardless.
+      # The upload only works when GitHub code scanning is enabled on the repo;
+      # otherwise it returns "Resource not accessible by integration / Code
+      # scanning is not enabled" and must NOT fail the check. Once code scanning
+      # is enabled this becomes a real upload with no further change needed.
       - name: Upload SARIF (gosec)
         if: always()
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: gosec.cleaned.sarif
