@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **GhostLock (CVE-2026-43499) posture — design note.** Added
+  `docs/ghostlock-tenant-seccomp-design.md`: a design-only guide for the one
+  runtime control that could *prevent* (not just degrade/detect) the public
+  local-root exploit — a **per-tenant seccomp filter** denying the futex-PI
+  operations (`FUTEX_LOCK_PI`/`TRYLOCK_PI`/`WAIT_REQUEUE_PI`/`CMP_REQUEUE_PI`)
+  to the web-tier uid range (`cfm_watched_uids`). Documents why it cannot be a
+  BPF-LSM rule (no LSM hook on `futex()`), why it is scoped to **bare metal /
+  empty VM / custom installs** and explicitly *not* cPanel/DirectAdmin/CloudLinux
+  (CageFS/LVE owns tenant confinement there), and how it layers on the shipping
+  levers `kernsec randomize_kstack_offset=on` and `cfm-lsm CFML-FS-008`. No code
+  change — guide only.
 - **Scoped-vs-admin boundary — edge `lua-stats` (F01):** the `/cfm-admin/lua-stats`
   dashboard endpoint (rendered inside OpenResty/Angie) gated access with an
   `auth_request` pointed at `/api/v1/tokens/me` — a **scoped-OR-admin** endpoint
