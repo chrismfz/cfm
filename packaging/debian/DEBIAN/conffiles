@@ -8,3 +8,9 @@
 /etc/cfm/cfm.allow
 /etc/cfm/cfm.dyndns
 /etc/cfm/cfm-admin.htpasswd
+/etc/cfm/cfm.ignore
+/etc/cfm/cfm.dnat_bypass
+/etc/cfm/cfm.dnat_cpanel_bypass
+/etc/cfm/webdetector_malpaths.txt
+/etc/cfm/webdetector_challenge_paths.txt
+/etc/cfm/webdetector_challenge_exclude.txt

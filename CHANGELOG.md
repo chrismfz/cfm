@@ -133,6 +133,21 @@ back-filled here — see the git/PR history for that period.
   it's greppable without being noisy.
 
 ### Fixed
+- **Packaging (.deb): six `/etc/cfm` config files were not registered as
+  `conffiles`, so `dpkg` silently overwrote operator edits on every upgrade.**
+  The `.deb` ships 16 files under `/etc/cfm`, but `debian/DEBIAN/conffiles`
+  listed only 10 — a file under `/etc` that dpkg installs but that is *not* a
+  conffile is treated as a regular file and **replaced unconditionally on
+  upgrade** (no prompt, no `.dpkg-dist` backup). The six unprotected files were
+  `webdetector_challenge_exclude.txt`, `webdetector_challenge_paths.txt`,
+  `webdetector_malpaths.txt`, `cfm.ignore`, `cfm.dnat_bypass` and
+  `cfm.dnat_cpanel_bypass` — all operator-tuned lists, so a Debian/Ubuntu
+  upgrade wiped local customisations (e.g. a hand-edited challenge-exclude or
+  DNAT-bypass list). The RPM already protects all 16 with `%config(noreplace)`;
+  the six are now added to `conffiles` so the `.deb` matches — dpkg keeps the
+  operator's version and parks the new default as `.dpkg-dist`. RPM users were
+  never affected. (Verified: `conffiles` == the deb-staged `/etc/cfm` set ==
+  the RPM `%config` set — 16 each.)
 - **Edge → bridge RPC (`cfm.lua`):** removed a ~300 ms stall on every edge→daemon
   call that returns an empty body (`Content-Length: 0`) — the WAF autoblock
   **push** and the block/clear calls (`/nginx/ip`, `/nginx/vhost`). (`observe`
