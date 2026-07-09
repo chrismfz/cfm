@@ -97,7 +97,31 @@ back-filled here — see the git/PR history for that period.
   `TestRunOnce_OpenFailureDoesNotClobberSavedOffset`. Workaround on older
   builds: `touch` the `LOG_PATH` file so a source attaches.
 
+### Changed
+- **Reference `detectors.conf` ships a sane cPanel forced-challenge default and
+  drops leaked customer hosts.** `CHALLENGE_VHOST` now defaults to
+  `webmail.*, whm.*, cpanel.*` (force-challenge the cPanel/WHM/webmail service
+  subdomains — high-value on cPanel boxes, inert elsewhere) instead of the
+  `victim.com` placeholder. `CHALLENGE_VHOST_IGNORE` / `CHALLENGE_HOST_BYPASS`
+  are now **empty** — the shipped reference previously carried real
+  customer/operator hostnames (`api.mybank.gr`, `stereotiki.gr`, `ndnodo.com`,
+  `*.e-nautilia.gr`, …), which would apply one operator's exclusions/bypasses on
+  every install. These are operator-specific and must be set per host.
+
 ### Added
+- **`cfm.api.conf` overlay now carries MaxMind credentials too, plus a shipped
+  `cfm.api.conf.example`.** The per-server secrets overlay
+  (`LoadConfigWithAPIOverride`) already overrode the cfm-web API `API_URL` /
+  `AUTH_TOKEN`; it now also overlays `MAXMIND_ACCOUNT_ID` / `MAXMIND_LICENSE_KEY`
+  (only when the overlay sets them), so the base `cfm.conf` can ship secret-free
+  and identical on every host while a single `/etc/cfm/cfm.api.conf` holds the
+  API + MaxMind secrets. Ships `configs/cfm.api.conf.example`; the deb/rpm
+  post-install seeds `/etc/cfm/cfm.api.conf` (0600) from it on first install
+  only (never overwrites an existing file; it is not a tracked conffile).
+  Runtime tokens (`CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` / `SSLCOLLECTOR_SOCK_TOKEN`)
+  still auto-generate on first boot, so they never need to be in the overlay.
+  Covered by `TestLoadConfigWithAPIOverride_MaxMindAndAPI` /
+  `…_APIOnlyOverlayKeepsBaseMaxMind`.
 - **Startup log line for the forced-challenge vhost list (`CHALLENGE_VHOST`).**
   The webdetector now echoes the panic/bypass lists at config-load time —
   `forced-challenge vhosts (CHALLENGE_VHOST) loaded: count=N list=…`, plus

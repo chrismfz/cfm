@@ -1,0 +1,36 @@
+# =============================================================================
+# /etc/cfm/cfm.api.conf  —  per-server SECRETS overlay
+# =============================================================================
+# This is the ONLY file you edit per server. Everything else (firewall, DNAT,
+# challenge, WAF, OpenResty/Angie, custom ports) ships ready in the base
+# cfm.conf / detectors.conf and is identical on every host.
+#
+# cfm loads cfm.conf first, then overlays the keys below from this file
+# (LoadConfigWithAPIOverride). Only these keys are read here — anything else in
+# this file is ignored. Keep it root-owned and mode 0600 (cfm re-chmods it to
+# 0600 on load if it finds looser perms).
+#
+#   cp /usr/share/cfm/configs/cfm.api.conf.example /etc/cfm/cfm.api.conf
+#   chmod 600 /etc/cfm/cfm.api.conf
+#   $EDITOR /etc/cfm/cfm.api.conf     # fill in the values below
+#
+# Tokens (CHALLENGE_TOKEN / OPENRESTY_TOKEN / SSLCOLLECTOR_SOCK_TOKEN) are NOT
+# set here — cfm auto-generates strong per-server values on first start and
+# writes them back, so leave the placeholders in the base configs alone.
+# -----------------------------------------------------------------------------
+
+# --- cfm-web API (block/detector reporting) ---------------------------------
+API_URL    = "https://cfm.myip.gr"
+AUTH_TOKEN = "PASTE-YOUR-CFM-WEB-TOKEN-HERE"
+
+# Reporting toggles (optional; base cfm.conf already enables these). Listing
+# them here only ever turns them ON, never off.
+AUTOBLOCK_SEND_TO_API   = 1
+MANUAL_BLOCK_SEND_TO_API = 1
+UNBLOCK_SEND_TO_API      = 1
+DETECTORS_SEND_TO_API    = 1
+
+# --- MaxMind GeoLite2 license (GeoIP/ASN enrichment) ------------------------
+# Same account can be reused fleet-wide — copy this file to each host.
+MAXMIND_ACCOUNT_ID  = 0000000
+MAXMIND_LICENSE_KEY = PASTE-YOUR-MAXMIND-LICENSE-KEY-HERE

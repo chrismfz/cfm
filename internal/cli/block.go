@@ -17,8 +17,12 @@ import (
 )
 
 // LoadConfigWithAPIOverride parses cfm.conf then overlays cfm.api.conf when
-// present (only API fields are overwritten). Moved here from main.go so CLI
-// commands that need API reporting can share it without touching main.
+// present. Only per-server secret fields are overwritten: the cfm-web API
+// (URL / AuthToken / *_SEND_TO_API flags) and the MaxMind account credentials
+// (MAXMIND_ACCOUNT_ID / MAXMIND_LICENSE_KEY). This lets the base cfm.conf ship
+// secret-free and identical on every host, with only cfm.api.conf edited per
+// server. Moved here from main.go so CLI commands that need API reporting can
+// share it without touching main.
 func LoadConfigWithAPIOverride(cfgDir string, baseBytes []byte) (*cfgpkg.Config, error) {
 	cfg, err := cfgpkg.ParseCFMConf(bytes.NewReader(baseBytes))
 	if err != nil {
@@ -51,10 +55,29 @@ func LoadConfigWithAPIOverride(cfgDir string, baseBytes []byte) (*cfgpkg.Config,
 		if s := strings.TrimSpace(api.API.AuthToken); s != "" {
 			cfg.API.AuthToken = s
 		}
-		if api.API.AutoBlockSend  { cfg.API.AutoBlockSend  = true }
-		if api.API.ManualBlockSend { cfg.API.ManualBlockSend = true }
-		if api.API.UnblockSend    { cfg.API.UnblockSend    = true }
-		if api.API.DetectorsSend  { cfg.API.DetectorsSend  = true }
+		if api.API.AutoBlockSend {
+			cfg.API.AutoBlockSend = true
+		}
+		if api.API.ManualBlockSend {
+			cfg.API.ManualBlockSend = true
+		}
+		if api.API.UnblockSend {
+			cfg.API.UnblockSend = true
+		}
+		if api.API.DetectorsSend {
+			cfg.API.DetectorsSend = true
+		}
+
+		// MaxMind account credentials may also live in the overlay so the base
+		// cfm.conf stays secret-free. Only overwrite when the overlay sets them,
+		// so an overlay that carries only API keys leaves the base MaxMind config
+		// untouched.
+		if s := strings.TrimSpace(api.MaxMind.AccountID); s != "" {
+			cfg.MaxMind.AccountID = s
+		}
+		if s := strings.TrimSpace(api.MaxMind.LicenseKey); s != "" {
+			cfg.MaxMind.LicenseKey = s
+		}
 	}
 	return cfg, nil
 }
