@@ -517,6 +517,87 @@ func printEdgeInterceptorDiagnostics(s parsedSnapshot, opts cliOptions) {
 		return
 	}
 	printIngestSocketHealth(s.Modern.Runtime.IngestSocketPath, status, s.Modern.Runtime.IngestSocketReason, opts)
+
+	// Local, read-only visibility probes (same style as the token/socket checks
+	// above): (1) does the configured TSV access log exist and is it filling,
+	// and (2) does the origin web server trust 127.0.0.1 so logs record real
+	// client IPs, not the edge loopback. Neither touches any config.
+	logPath := edgediag.ReadDetectorSectionKV("/etc/cfm/detectors.conf", "webdetector")["LOG_PATH"]
+	printTSVLogHealth(edgediag.ProbeTSVLog(logPath), status, opts)
+	printOriginRealIP(edgediag.ProbeOriginRealIP(s.Modern.Runtime.UpstreamService), opts)
+}
+
+// printTSVLogHealth renders the configured webdetector TSV access log status.
+// It is deliberately arbiter-aware: a missing or stale file is expected and
+// harmless while the ingest socket is the live source (socket-only mode), and
+// only becomes a warning when neither the socket nor the file is live.
+func printTSVLogHealth(p edgediag.TSVLogProbe, ingestStatus string, opts cliOptions) {
+	if !p.Configured {
+		fmt.Printf("  %s  TSV access log: not configured (LOG_PATH unset / folder mode)\n", badge(okLabel, opts))
+		return
+	}
+	socketLive := strings.EqualFold(strings.TrimSpace(ingestStatus), "live")
+	const liveWindowSec = 60
+	live := p.Exists && p.IsFile && p.ModAgeSec >= 0 && p.ModAgeSec <= liveWindowSec
+	age := formatShortDuration(time.Duration(p.ModAgeSec) * time.Second)
+	size := bytesIEC(uint64(p.SizeBytes))
+
+	var label healthLabelRank
+	var detail string
+	switch {
+	case live:
+		label = okLabel
+		if socketLive {
+			detail = fmt.Sprintf("exists=yes live (updated %s ago, %s) — fallback; socket is the active source", age, size)
+		} else {
+			detail = fmt.Sprintf("exists=yes live (updated %s ago, %s) — active source", age, size)
+		}
+	case p.Exists && p.IsFile && !live:
+		if socketLive {
+			label = okLabel
+			detail = fmt.Sprintf("exists=yes stale (%s ago) — socket is the active source", age)
+		} else {
+			label = warnLabel
+			detail = fmt.Sprintf("exists=yes stale (%s ago) and socket not live — no live ingest", age)
+		}
+	case p.Exists && !p.IsFile:
+		label = warnLabel
+		detail = "path exists but is not a regular file"
+	default: // not present
+		if socketLive {
+			label = okLabel
+			detail = "exists=no — socket ingest active (file is fallback only)"
+		} else {
+			label = warnLabel
+			detail = "exists=no and socket not live — no ingest source"
+		}
+	}
+	fmt.Printf("  %s  TSV access log: %s  %s\n", badge(label, opts), p.Path, detail)
+}
+
+// printOriginRealIP renders whether the origin web server trusts 127.0.0.1 as a
+// real-IP proxy — the difference between access logs showing the client IP vs
+// the edge's loopback (127.0.0.1).
+func printOriginRealIP(p edgediag.OriginRealIPProbe, opts cliOptions) {
+	if p.Stack == "" || p.Stack == "unknown" {
+		note := strings.TrimSpace(p.Note)
+		if note == "" {
+			note = "no apache/litespeed/nginx origin detected"
+		}
+		fmt.Printf("  %s  Origin real-IP: stack=unknown — %s\n", badge(warnLabel, opts), note)
+		return
+	}
+	if p.Trusted {
+		fmt.Printf("  %s  Origin real-IP: stack=%s trust=127.0.0.1 present (%s in %s)\n",
+			badge(okLabel, opts), p.Stack, p.Directive, p.Source)
+		return
+	}
+	note := strings.TrimSpace(p.Note)
+	if note == "" {
+		note = "no 127.0.0.1 trust directive found"
+	}
+	fmt.Printf("  %s  Origin real-IP: stack=%s — %s → access logs will record 127.0.0.1, not client IPs\n",
+		badge(warnLabel, opts), p.Stack, note)
 }
 
 func missingRuntimeFields(s parsedSnapshot, fields ...string) []string {
