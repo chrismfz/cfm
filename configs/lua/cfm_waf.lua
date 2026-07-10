@@ -604,8 +604,9 @@ function _M.check(ctx)
   -- obfuscated. Reused below to exempt the upload-malware / webshell-content
   -- scanners (401/402/403 and the 431-436 backdoor family) so they don't
   -- flag the PHP that is the upload's whole point. Declared up here (before
-  -- any `goto done`) so those jumps don't cross its scope. (437 keeps its
-  -- own broader /wp-admin/ carve-out.)
+  -- any `goto done`) so those jumps don't cross its scope. (437/438 keep
+  -- their own broader /wp-admin/ carve-out, with 438's pre-auth admin-ajax/
+  -- admin-post logonly exception — see rule 59 / audit F11.)
   local legit_archive_upload = is_known_legit_php_upload_endpoint(uri, args)
   -- Rule 414 (php-inside-zip) fires ONLY on media-asset upload endpoints (see
   -- is_php_hostile_asset_upload) — a positive allowlist, so legit plugin / theme
@@ -1594,20 +1595,55 @@ function _M.check(ctx)
     -- /wp-admin/admin-ajax.php or /wp-admin/admin.php on every save.
     -- That's legitimate plugin behavior, not a backdoor upload —
     -- production data showed real Greek WP admins on Chrome 148
-    -- residential IPs being challenged here. /wp-admin/ requests
-    -- have already passed WP's cookie-auth gate before reaching us,
-    -- so we suppress this detector on that path. Web shells delivered
-    -- via theme/plugin file editors, upload exploits, or vulnerable
-    -- public endpoints still arrive on non-/wp-admin/ paths where
-    -- these rules remain active.
+    -- residential IPs being challenged here (docs/waf.md FP case 5).
+    -- IMPORTANT: those legit saves use the base64 form too — the plugin's
+    -- JS base64-encodes the snippet, so `PD9waHA…` (438) appears in a
+    -- LEGIT admin-ajax.php save, not just in an attack; base64 is NOT
+    -- "attack-only" on this path.
+    --
+    -- The old carve-out suppressed BOTH openers on ALL /wp-admin/ on the
+    -- assumption "these already passed WP's cookie-auth gate." That is
+    -- WRONG for admin-ajax.php / admin-post.php (audit F11): both serve
+    -- `wp_ajax_nopriv_*` / unauthenticated admin-post actions and are
+    -- reachable PRE-auth, so an unauthenticated attacker could smuggle a
+    -- base64 `<?php` body there completely unseen. But the edge can't tell
+    -- an authed WPCode save from a nopriv attack (both are base64 `<?php`
+    -- on admin-ajax; the WP cookie is spoofable), so ENFORCING 438 there
+    -- would re-run the FP-case-5 incident.
+    --
+    -- Compromise (F11, logonly-first): on the pre-auth admin-ajax.php /
+    -- admin-post.php surface, keep 437 (url/entity form) fully suppressed
+    -- and record the base64 opener (438) at LOGONLY only — visibility into
+    -- pre-auth base64 smuggling with ZERO enforcement (no challenge, no
+    -- block; and a logonly hit never reaches the autoblock feed — which
+    -- ingests only action="block" (waf_security_register.go), and no
+    -- WAF_BACKDOOR rule is block-tier — so no ban, even though the
+    -- WAF_BACKDOOR family itself is autoblock-armed). Watch that
+    -- logonly stream (rule 438 on an admin-ajax URI) to separate real
+    -- attacks from WPCode noise before any promotion — deliberately logonly
+    -- regardless of 438's global tier during this burn-in. The rest of
+    -- /wp-admin/ (authed editors) keeps both openers carved out as before;
+    -- non-/wp-admin/ paths are unaffected.
     local wp_admin = uri:find("^/wp%-admin/", 1, false) ~= nil
-    if (mode_enc ~= "disabled" or mode_b64 ~= "disabled") and body_inspect_ok and not wp_admin then
+    local wp_preauth = wp_admin
+      and (uri:find("admin%-ajax%.php", 1, false)
+           or uri:find("admin%-post%.php", 1, false)) ~= nil
+    if (mode_enc ~= "disabled" or mode_b64 ~= "disabled") and body_inspect_ok
+       and (not wp_admin or wp_preauth) then
       local tag = det.detect_php_encoded_opener(body, headers)
       if tag then
         local is_b64 = (tag == "B64_PHP_OPENER")
-        local mode = is_b64 and mode_b64 or mode_enc
-        local rid  = is_b64 and RULE_IDS.rule_php_encoded_opener_b64 or RULE_IDS.rule_php_encoded_opener
-        if mode ~= "disabled" then
+        local mode, rid
+        if wp_preauth then
+          -- 437 stays suppressed here; 438 is logonly-only (burn-in).
+          if is_b64 and mode_b64 ~= "disabled" then
+            mode, rid = "logonly", RULE_IDS.rule_php_encoded_opener_b64
+          end
+        else
+          mode = is_b64 and mode_b64 or mode_enc
+          rid  = is_b64 and RULE_IDS.rule_php_encoded_opener_b64 or RULE_IDS.rule_php_encoded_opener
+        end
+        if mode and mode ~= "disabled" then
           local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
           if record("WAF_BACKDOOR:" .. tag, ttl, mode, rid) then goto done end
         end

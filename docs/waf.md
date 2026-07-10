@@ -420,6 +420,24 @@ vulnerable public endpoints still arrive on non-/wp-admin/ paths
 where this rule remains active. Shipped in **PR #969**. Effect:
 4 → 0.
 
+**Refinement (audit F11):** the "cookie-auth has already gated it"
+assumption is *wrong* for `/wp-admin/admin-ajax.php` and
+`/wp-admin/admin-post.php` — both serve `wp_ajax_nopriv_*` /
+unauthenticated `admin-post` actions and are reachable PRE-auth, so a
+blanket suppression there is a pre-auth WAF blind spot for base64
+`<?php` smuggling. But the edge can't distinguish a legit WPCode save
+from a nopriv attack (both are base64 `<?php` on admin-ajax; the WP
+cookie is spoofable), so enforcing would just re-run this incident.
+The carve-out is therefore split: **437** (url/entity form) stays fully
+suppressed on all `/wp-admin/`; **438** (base64) is kept **`logonly`**
+on the two pre-auth endpoints (detect-and-watch, zero enforcement — a
+`logonly` hit is dropped by the autoblock feed, which ingests only
+`action=block`, and no `WAF_BACKDOOR` rule is block-tier, so no ban even
+though the family is autoblock-armed) and stays suppressed
+on the rest of `/wp-admin/` (authed editors). Watch the logonly stream
+(rule 438 on an admin-ajax URI) to separate real attacks from WPCode
+noise before considering any promotion.
+
 **Lesson for new body-content rules:** any rule that scans POST bodies
 for code-shaped strings (PHP openers, SQL keywords, JS function
 calls) needs an answer for "what legitimate admin tooling writes this
@@ -736,7 +754,7 @@ The detector checks base64 first, so a base64 opener is attributed to **438** an
 
 **How:** the URL / HTML-entity / JS-escape forms are matched as substrings on the lowercased body (those encodings are legitimately case-insensitive and structured). The **base64** form (`PD9waHA`) is matched **case-sensitively** (base64 is a case-sensitive alphabet) and **only at a base64 value boundary** — string start or right after a non-base64 separator. The base64 `<?=` short-tag form (`PD89`) is **intentionally not matched**: a 4-char base64 token collides with legitimate base64 data (a 2026-06-25 review found it 6/6 FP), so it was removed. The URL-encoded short-tag `%3C%3F=` is still matched (structured, collision-free).
 
-**FP notes:** **base64 boundary fix 2026-06-04.** The base64 check was originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive) — while dropping mid-blob / case-variant collisions. **Both rules ship at `challenge` (promoted `logonly` → `challenge` 2026-06-25; split 2026-07-02).** 438 (base64) is the candidate for `block` after a 1-2 week burn-in of the per-rule-id split telemetry; 437 (URL/HTML/JS) stays at `challenge` because of the form-encoded FP class above. `/wp-admin/*` paths are suppressed for both (WPCode / Code Snippets legitimately POST encoded `<?php` bodies there, already gated by WP cookie-auth); any residual doc / security-research edge case is handled by per-vhost exclusion.
+**FP notes:** **base64 boundary fix 2026-06-04.** The base64 check was originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive) — while dropping mid-blob / case-variant collisions. **Both rules ship at `challenge` (promoted `logonly` → `challenge` 2026-06-25; split 2026-07-02).** 438 (base64) is the candidate for `block` after a 1-2 week burn-in of the per-rule-id split telemetry; 437 (URL/HTML/JS) stays at `challenge` because of the form-encoded FP class above. `/wp-admin/*` paths are suppressed for both (WPCode / Code Snippets legitimately POST encoded `<?php` bodies there), with one **audit-F11 exception**: the pre-auth `admin-ajax.php` / `admin-post.php` endpoints keep 438 (base64) at `logonly` (detect-only, no enforcement) because they are reachable unauthenticated (`nopriv` actions) — the blanket "already gated by WP cookie-auth" assumption doesn't hold there. See FP case 5 for the full rationale. Any residual doc / security-research edge case is handled by per-vhost exclusion.
 
 ### How they compose
 
@@ -1334,7 +1352,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 28 | Upload filename | Quoted/single/unquoted multipart `filename=` + ext patterns + special names | `cfm_waf_detectors.lua:1632` |
 | 29 | Upload content | Body substring `<?php`, `<?=` (PHP-context-gated, see `has_php_short_echo`), `<jsp:`, `$_*` superglobals, ImageMagick MVG | `cfm_waf_detectors.lua:1700` |
 
-> **Legit PHP-archive upload carve-out (fixed 2026-06-05).** Rules 401/402/403 and the 431–436 backdoor-content family stand down when `is_known_legit_php_upload_endpoint(uri, args)` matches — the Code Snippets REST flow and, added here, the **WordPress plugin/theme installer** (`/wp-admin/update.php?action=upload-plugin` / `upload-theme`). A plugin/theme `.zip` legitimately contains PHP (often obfuscated in commercial products), so on that authenticated, cookie-auth-gated path the PHP that is the payload must not be flagged — a plugin named e.g. `foo-block.php.zip` also tripped the double-extension filename rule. Media uploads (`async-upload.php`) are **not** exempted: a PHP opener inside a claimed image there is still a polyglot. (437/438 keep their own broader `/wp-admin/` carve-out for snippet-save plugins.)
+> **Legit PHP-archive upload carve-out (fixed 2026-06-05).** Rules 401/402/403 and the 431–436 backdoor-content family stand down when `is_known_legit_php_upload_endpoint(uri, args)` matches — the Code Snippets REST flow and, added here, the **WordPress plugin/theme installer** (`/wp-admin/update.php?action=upload-plugin` / `upload-theme`). A plugin/theme `.zip` legitimately contains PHP (often obfuscated in commercial products), so on that authenticated, cookie-auth-gated path the PHP that is the payload must not be flagged — a plugin named e.g. `foo-block.php.zip` also tripped the double-extension filename rule. Media uploads (`async-upload.php`) are **not** exempted: a PHP opener inside a claimed image there is still a polyglot. (437/438 keep their own broader `/wp-admin/` carve-out for snippet-save plugins — with 438's audit-F11 pre-auth `admin-ajax.php`/`admin-post.php` `logonly` exception; see FP case 5.)
 | 30 | Script obfuscation | Shared scorer (long-b64 / decode-helpers / eval / atob / XOR / chr-storm) | `cfm_waf_detectors.lua:1730` + `cfm_waf_util.lua:115` |
 | 31 | Upload obfuscation | Same scorer on multipart | `cfm_waf_detectors.lua:1753` |
 | 32 | Webshell path | URI basename ∈ 32-name set, split by confidence: proper-noun names → rule 413 (block), ambiguous/generic → rule 410 (challenge) | `cfm_waf_detectors.lua` `detect_webshell_path` |
