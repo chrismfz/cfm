@@ -18,6 +18,29 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **WAF body inspection no longer truncated below the per-Content-Type scan
+  budget (F08).** The edge body reader (`get_req_body_for_waf` in `cfm.lua`)
+  handed the WAF at most `waf_body_max_len` = **8192** bytes, but the engine's
+  per-Content-Type budgets are larger (`json` 32768, `multipart`/`xml` 16384) —
+  so the reader truncated the body *before* the budget applied, and those
+  budgets were never realised. A classic body-size evasion (pad >8 KB of filler,
+  then the SQLi/RCE/webshell payload) escaped every body-aware rule while the
+  origin processed the full body. The reader cap is raised to **32768**
+  (= the largest budget), making the per-type budget the sole truncation
+  authority; same rules, same tiers, coverage only, and well within the
+  existing 65536-byte challenge-replay buffer. A cross-referenced invariant
+  (reader cap ≥ max `body_scan_budget`) is asserted by
+  `scripts/tests/cfm_waf_body_budget_test.lua` (verified to fail at the old
+  8192). **Operators:** this widens the *scanned window* of the already
+  block-tier + autoblock-armed families (`WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME`)
+  from 8 KB to 16–32 KB of body — their earlier block/FP burn-in predates this
+  window, so watch those hit-rates after upgrade; a legit 8–32 KB JSON/multipart
+  body matching a signature past byte 8192 now blocks (and can 6h-ban). As a
+  symmetric side effect the ClamAV upload lane (which reads the same capped
+  body) now routes multipart uploads whose `filename=` sits past byte 8192 to
+  the scanner (a coverage gain). Do **not** lower the `CFM_WAF_BODY_MAX_LEN`
+  override below the max budget or you reopen F08. Found by the 2026-07 edge Lua
+  audit (F08).
 - **Challenge/WAF bypass-list generator hardened against overbroad / poisoned
   feed prefixes.** `configs/challenge_waf_bypass.conf` is a geo include whose
   every prefix makes `cfm.lua` early-return straight to origin, disabling WAF

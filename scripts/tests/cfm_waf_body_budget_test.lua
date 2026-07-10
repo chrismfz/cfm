@@ -332,6 +332,39 @@ do
     "F09 (crlf): padded query must NOT evict a body-borne CRLF injection (got hit=" .. tostring(chit) .. " reason=" .. tostring(creason) .. ")")
 end
 
+-- ── Test 10 (F08): the cfm.lua body reader must not truncate below the WAF's
+-- largest per-Content-Type budget, or that budget is unreachable ──────────────
+-- cfm.lua reads at most `waf_body_max_len` body bytes and hands them to the WAF,
+-- which then applies `body_scan_budget[ct]`. If the reader cap is smaller than
+-- the biggest budget (json = 32768), a JSON/multipart/xml payload past the cap
+-- escapes every body-aware rule regardless of the budget. Assert the invariant
+-- against the LIVE budgets (via util.body_budget) and cfm.lua's actual default.
+do
+  local max_budget = 0
+  for _, ct in ipairs({
+    "application/json",
+    "application/x-www-form-urlencoded",
+    "multipart/form-data; boundary=x",
+    "text/xml",
+    "application/octet-stream",   -- -> "other"
+  }) do
+    local b = util.body_budget({ ["content-type"] = ct })
+    if type(b) == "number" and b > max_budget then max_budget = b end
+  end
+  check(max_budget == 32768,
+    "max body_scan_budget expected 32768 (json); got " .. tostring(max_budget) ..
+    " — if a budget was raised, raise cfm.lua waf_body_max_len to match")
+
+  local fh = assert(io.open("configs/lua/cfm.lua", "r"))
+  local src = fh:read("*a"); fh:close()
+  local cap = tonumber(src:match('CFM_WAF_BODY_MAX_LEN"%)%s*or%s*"(%d+)"'))
+  check(cap ~= nil, "could not read waf_body_max_len default from cfm.lua")
+  check(cap ~= nil and cap >= max_budget,
+    "F08: cfm.lua waf_body_max_len default (" .. tostring(cap) .. ") must be >= " ..
+    "max body_scan_budget (" .. tostring(max_budget) .. "), else the WAF budget " ..
+    "is never realised and a body payload past byte " .. tostring(cap) .. " escapes")
+end
+
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " test(s) failed in cfm_waf_body_budget_test.lua\n")
   os.exit(1)

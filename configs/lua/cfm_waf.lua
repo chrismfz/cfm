@@ -305,6 +305,12 @@ local CFG = {
   -- that matches the request's Content-Type. cap() enforces the byte
   -- ceiling per call, so a single huge body cannot starve the worker —
   -- work scales with the budget, not the request size.
+  --
+  -- INVARIANT (audit F08): cfm.lua's `waf_body_max_len` — the cap on how many
+  -- body bytes are read and handed to the WAF — must be >= the LARGEST value
+  -- here, or that reader truncates the body before these budgets ever apply.
+  -- If you raise any entry above 32768, raise waf_body_max_len to match.
+  -- scripts/tests/cfm_waf_body_budget_test.lua asserts the relationship.
   body_scan_budget = {
     urlencoded = 8192,
     json       = 32768,
