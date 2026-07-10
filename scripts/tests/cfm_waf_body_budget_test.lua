@@ -365,6 +365,71 @@ do
     "is never realised and a body payload past byte " .. tostring(cap) .. " escapes")
 end
 
+-- ── Test 11 (F07): ct_is_inspectable — the Content-Type gate for the body-read
+-- decision. Inspectable (structured/text) CTs -> read+scan; binary/media CTs ->
+-- skip (so large uploads keep streaming past the proxy_request_buffering=off
+-- media location instead of being buffered). ─────────────────────────────────
+do
+  local f = util.ct_is_inspectable
+  check(type(f) == "function", "ct_is_inspectable is exported")
+  local yes = {
+    "", "application/json", "application/json; charset=utf-8",
+    "application/x-www-form-urlencoded", "multipart/form-data; boundary=----x",
+    "text/xml", "application/xml", "application/soap+xml", "text/plain",
+    "TEXT/HTML", "Application/JSON",   -- case-insensitive
+  }
+  local no = {
+    "image/png", "image/jpeg", "video/mp4", "audio/mpeg",
+    "application/octet-stream", "application/zip", "application/gzip",
+    "application/pdf", "font/woff2",
+  }
+  for _, ct in ipairs(yes) do
+    check(f(ct) == true,  "ct_is_inspectable should accept " .. (ct == "" and "<empty>" or ct))
+  end
+  for _, ct in ipairs(no) do
+    check(f(ct) == false, "ct_is_inspectable should skip " .. ct)
+  end
+end
+
+-- ── Test 12 (F07): waf_body_gate — the pure read/skip truth table that cfm.lua's
+-- body-read gate delegates to. Given (Content-Type, numeric Content-Length, cap)
+-- it decides whether to read+buffer the body for WAF scanning. This is where the
+-- large-upload / chunked-body streaming protections live, unit-tested directly
+-- because cfm.lua itself is not loadable. ────────────────────────────────────
+do
+  local g = util.waf_body_gate
+  check(type(g) == "function", "waf_body_gate is exported")
+  local CAP = 1048576  -- 1 MiB, matches CFG.waf_body_read_max_cl default
+  local cases = {
+    -- inspectable CT, measured & within cap -> READ
+    { ct = "application/json",                  cl = 500,       want = true,  label = "json small" },
+    { ct = "application/x-www-form-urlencoded", cl = CAP,       want = true,  label = "urlencoded at cap" },
+    { ct = "text/plain",                        cl = 0,         want = true,  label = "text empty-body" },
+    { ct = "",                                  cl = 100,       want = true,  label = "empty CT, measured" },
+    -- inspectable CT but OVER the cap -> SKIP (keep streaming; #1 regression fix)
+    { ct = "application/json",                  cl = CAP + 1,   want = false, label = "json over cap" },
+    { ct = "multipart/form-data; boundary=x",   cl = 50000000,  want = false, label = "multipart 50MB over cap" },
+    { ct = "text/plain",                        cl = 3000000000, want = false, label = "text 3GB over cap" },
+    -- inspectable CT but UNMEASURABLE (chunked, no Content-Length) -> SKIP (#2 fix)
+    { ct = "application/json",                  cl = nil,       want = false, label = "json chunked" },
+    { ct = "text/plain",                        cl = nil,       want = false, label = "text chunked" },
+    { ct = "multipart/form-data; boundary=x",   cl = nil,       want = false, label = "multipart chunked" },
+    { ct = "",                                  cl = nil,       want = false, label = "empty CT chunked" },
+    -- non-inspectable CT -> SKIP regardless of size (binary/media stays streaming)
+    { ct = "application/octet-stream",          cl = 100,       want = false, label = "octet-stream small" },
+    { ct = "application/zip",                   cl = 100,       want = false, label = "zip small" },
+    { ct = "image/png",                         cl = nil,       want = false, label = "png chunked" },
+    { ct = "video/mp4",                         cl = CAP - 1,   want = false, label = "video within cap" },
+  }
+  for _, c in ipairs(cases) do
+    check(g(c.ct, c.cl, CAP) == c.want,
+      "waf_body_gate(" .. c.label .. ") should be " .. tostring(c.want))
+  end
+  -- default cap kicks in when max_cl arg omitted (falls back to 1 MiB)
+  check(g("application/json", 1048576, nil) == true,  "waf_body_gate default cap: 1MiB reads")
+  check(g("application/json", 1048577, nil) == false, "waf_body_gate default cap: >1MiB skips")
+end
+
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " test(s) failed in cfm_waf_body_budget_test.lua\n")
   os.exit(1)

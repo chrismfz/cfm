@@ -18,6 +18,31 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **WAF now inspects request bodies on clean-URL / REST endpoints (F07).** The
+  body-read gate `waf_should_read_body` was a **positive URI allowlist** (wp-*,
+  `/api/`, `/admin`, `*.php`, …) and **POST-only**, so a body-borne SQLi/RCE/
+  webshell POSTed to any non-listed extension-less route (`/checkout`, `/order`,
+  clean-URL app routers) — or sent via PUT/PATCH — was never read, and every
+  body-aware rule saw an empty body (the Go log engine scores access logs only,
+  so nothing compensated). The gate now also reads the body for **POST/PUT/PATCH**
+  on **any** path when the **Content-Type is inspectable** (`urlencoded`/`json`/
+  `multipart`/`xml`/`text`) and the **Content-Length is present and bounded**
+  (`waf_body_read_max_cl`, default 1 MiB, env `CFM_WAF_BODY_READ_MAX_CL`). To
+  guarantee **zero behavioural change for existing POST flows**, a **POST** on an
+  allowlisted URI still reads regardless of size (the pre-F07 fast-path); every
+  other case — POST on a clean URL, and **PUT/PATCH on any path including
+  allowlisted ones** (never body-inspected before F07, so bounding them is
+  strictly safer) — goes through the shared size/Content-Type gate. Binary/media
+  Content-Types, over-cap bodies, and **any chunked / unmeasurable-length** body
+  are skipped so large uploads keep **streaming** (the `proxy_request_buffering=off`
+  media location is never forced to buffer, even for a large `PUT /uploads/x.zip`).
+  On the main dynamic path
+  (`location /`) nginx already buffers the body (`proxy_request_buffering on`), so
+  the added cost is bounded scan CPU, not new I/O. Same rules/tiers, coverage
+  only — the block-tier `WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME` families now scan
+  bodies on more paths, so watch their hit-rates after upgrade (same posture as
+  F08; `waf_security` `DRY_RUN` is the lever if false positives appear). Found by
+  the 2026-07 edge Lua audit (F07).
 - **WAF: pre-auth base64 `<?php` on wp-admin AJAX is now visible (F11).** The
   encoded-`<?php` opener rules (437 url/entity form, 438 base64) were suppressed
   on the entire `/wp-admin/` prefix on the assumption those requests had already
