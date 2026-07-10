@@ -123,6 +123,30 @@ back-filled here — see the git/PR history for that period.
   nginx routing (incl. `%2f` encoded-slash, which nginx decodes into `$uri`
   before location matching, so it is not evadable), and an adversarial review.
   Found by the 2026-07 edge Lua audit (F06).
+- **Account-transfer tunnel: source-IP spoofing via client-supplied
+  X-Forwarded-For (F03).** The raw TCP tunnel that carries WHM live-transfer
+  rsync/dsync streams (`/acctxferrsync`, `/acctxferdsync`) replayed the client's
+  headers to loopback cpsrvd and only injected `X-Forwarded-For`/`X-Real-IP`/
+  `CF-Connecting-IP` **if the client hadn't already sent one** — so a
+  client-supplied value passed through verbatim. cpsrvd's Apache trusts
+  X-Forwarded-For from loopback (mod_remoteip), and the tunnel runs with the
+  challenge/WAF bypassed on an internet-facing panel port, so an attacker could
+  forge their apparent source IP into cpsrvd's audit log, cPhulk brute-force
+  tracking, and IP allow/deny logic (e.g. impersonate a cPhulk-allowlisted IP,
+  or frame an arbitrary one). Every other panel path already overwrites these
+  with `$remote_addr`; this tunnel was the gap. It now takes sole authority over
+  the forwarding/real-IP header set: it strips **every** client-supplied
+  `X-Real-IP`/`X-Forwarded-For`/`X-Forwarded-Host`/`X-Forwarded-Port`/
+  `X-Forwarded-Proto`/`X-Forwarded-Server`/`CF-Connecting-IP` (case-insensitively)
+  and re-injects trusted values from `$remote_addr`, exactly mirroring the
+  sibling `proxy_set_header … $remote_addr` blocks. Obsolete line folding
+  (RFC 7230 §3.2.4) is dropped wholesale so a spoofed header can't ride in as a
+  fold of a benign one. This is a no-op for legitimate transfers
+  (`whm_xfer_download-ssl` never sends these headers, nor folds any); only a
+  forged header/fold is dropped. Covered by
+  `scripts/tests/cfm_panel_tunnel_xff_test.lua` (runs the real tunnel over
+  stubbed cosockets and asserts on the exact upstream header block; verified to
+  fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
 - **DNAT/panel scoped accepts were appended AFTER the default drop (and

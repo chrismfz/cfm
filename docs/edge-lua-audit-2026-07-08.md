@@ -39,13 +39,13 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**8 / 55 fixed.** Grouped by severity; each links to its detail section.
+**9 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
 - [x] **[F01](#f01)** · `configs/openresty.conf:880` · _security_ (axis c) — lua-stats endpoint is scope-blind: scoped cPanel viewer tokens receive fleet-wide WAF config and excludes
 - [x] **[F02](#f02)** · `internal/webdetector/waf_hit_rates_api_handler.go:63` · _security_ (axis c) — WAF hit-rates API leaks cross-tenant / fleet-wide data to scoped cPanel users
-- [ ] **[F03](#f03)** · `configs/lua/cfm_panel_tunnel.lua:243` · _security_ (axis c) — Account-transfer tunnel forwards client-supplied X-Forwarded-For/X-Real-IP/CF-Connecting-IP verbatim to cpsrvd (source-IP spoofing)
+- [x] **[F03](#f03)** · `configs/lua/cfm_panel_tunnel.lua:243` · _security_ (axis c) — Account-transfer tunnel forwards client-supplied X-Forwarded-For/X-Real-IP/CF-Connecting-IP verbatim to cpsrvd (source-IP spoofing)
 - [x] **[F04](#f04)** · `configs/lua/cfm.lua:692` · _perf_ (axis b) — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
 - [x] **[F05](#f05)** · `configs/lua/cfm_waf_detectors.lua:1262` · _waf-bypass_ (axis a/c) — Backtick command-substitution detector is dead code: Lua patterns have no `|` alternation, so most backtick RCE payloads bypass PAY_BACKTICK (rule 317)
 - [x] **[F06](#f06)** · `configs/openresty.conf:674` · _waf-bypass_ (axis a/c) — Static-asset location bypasses cfm.lua (WAF/challenge) for any path ending in an asset extension, enabling PHP path-info WAF bypass
@@ -151,7 +151,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f03"></a>
 ### F03 — Account-transfer tunnel forwards client-supplied X-Forwarded-For/X-Real-IP/CF-Connecting-IP verbatim to cpsrvd (source-IP spoofing)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — strip-then-inject the forwarding/real-IP header set (overwrite, matching the sibling `$remote_addr`)
 - **Severity:** high · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_panel_tunnel.lua:243`
 
@@ -161,7 +161,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Strip any client X-Forwarded-*/X-Real-IP/CF-Connecting-IP from raw_headers before replay and unconditionally set them from ngx.var.remote_addr.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `cfm_panel_tunnel.lua` now takes sole authority over the forwarding/real-IP header set. It rebuilds the header block from `raw_header()`, **stripping every client-supplied** `X-Real-IP`/`X-Forwarded-For`/`X-Forwarded-Host`/`X-Forwarded-Port`/`X-Forwarded-Proto`/`X-Forwarded-Server`/`CF-Connecting-IP` (case-insensitively, incl. obsolete folded continuation lines so a spoof can't survive as an orphan fold), then injects the trusted values unconditionally from `ngx.var.remote_addr`/`host`/`server_port`/`scheme` — an **overwrite**, exactly mirroring the sibling `location ~ ^/(acctxfer|...)` block's `proxy_set_header … $remote_addr`. Scope: **all 7** headers (user-chosen, matches the sibling exactly and closes host/proto-confusion too), not just the 3 IP-bearing ones. Obsolete line folding (RFC 7230 §3.2.4) is dropped **wholesale** — any continuation line (leading SP/HT) is discarded, off a stripped *or* a surviving header — so a spoofed `\r\n X-Forwarded-For: …` cannot ride in as a fold of a benign header (the raw equivalent of nginx's parse/normalise on the sibling path). `$remote_addr` is authoritative here (these listeners carry no client-facing `set_real_ip_from`; transfers don't traverse Cloudflare) and not itself spoofable. **No-op for legitimate transfers** — `whm_xfer_download-ssl` is a direct client that never sends these headers (nor folds any), so it gets the same `$remote_addr`-derived values as before; only a *malicious* client's forged header/fold changes (it is dropped). Two stale/misleading comment blocks (the "we do NOT inject" SECURITY NOTE and the "preserve them (don't double-inject)" Step 3 note) rewritten to match. Test `scripts/tests/cfm_panel_tunnel_xff_test.lua` harnesses the real tunnel (stubbed cosockets/threads) and asserts on the exact bytes sent upstream: legit no-op (byte-identical, CRLFCRLF-terminated), spoofed XFF/X-Real-IP/CF-Connecting-IP overwritten, duplicate headers all stripped, fold-smuggle off a benign header AND off the request line dropped, benign fold dropped — **verified to FAIL against the pre-fix file** (spoofed `6.6.6.6` survived) and against the first-cut conditional-fold version (fold-smuggle survived), PASS after. **Follow-up (documented, not a regression):** `True-Client-IP`/`X-Client-IP`/`Client-IP`/`Forwarded:` (RFC 7239) are NOT stripped — cpsrvd keys on `X-Forwarded-For`, and the sibling `proxy_set_header` blocks pass these through too, so this matches the sibling exactly; revisit only if cpsrvd's trusted-header set is ever broadened (would be a product-wide change on both paths). Adversarially reviewed (verdict: ship; the wholesale-fold-drop and test fixes were folded in on the reviewer's recommendation). PR #1054.
 
 ---
 
