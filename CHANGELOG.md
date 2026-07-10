@@ -83,6 +83,20 @@ back-filled here — see the git/PR history for that period.
   globs are still matched literally in Lua (Go treats them as a class) — a
   rarer, narrower-in-Lua consistency gap tracked as a follow-up. Covered by
   `scripts/tests/cfm_waf_excl_test.lua`. Found by the 2026-07 edge Lua audit (F10).
+- **WAF (body-aware rules): a padded query string could evict the POST body from
+  inspection (F09).** The shared normalized scan surface `get_norm_ab` built
+  `cap(args .. "&" .. body, budget)` — with the attacker-controlled query string
+  **first** and a single cap over the merge — so a query padded to the
+  Content-Type body budget consumed the whole allowance and truncated the body
+  away. Every body-aware detector that reads this surface (SQLi, `php_wrappers`,
+  `ssrf`, `js_proto`, `log4shell`, `superglobal`, `c2_tunnel`) then missed a
+  body-borne payload: e.g. `POST /?<8 KB of padding>` with a urlencoded body
+  carrying `php://…` or a `UNION SELECT` was not inspected. `get_norm_ab` now
+  caps args and body **independently** (each to the body budget) before the
+  concat, so the body always gets its full allowance; the transient stays
+  bounded to ~2×budget. Covered by `scripts/tests/cfm_waf_body_budget_test.lua`
+  (Test 9, verified to fail on the old single-cap form). Found by the 2026-07
+  edge Lua audit (F09).
 
 ### Fixed
 - **DNAT/panel scoped accepts were appended AFTER the default drop (and

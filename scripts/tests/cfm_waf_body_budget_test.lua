@@ -261,6 +261,43 @@ do
   check(action2 == "block",  "pre-cap: action=block expected, got " .. tostring(action2))
 end
 
+-- ── Test 9: a padded query string must NOT evict the POST body (audit F09) ────
+-- get_norm_ab now caps args and body INDEPENDENTLY. Before the fix it did
+-- cap(args .. "&" .. body, budget) with args first, so a query string padded to
+-- the budget pushed the body — and any body-borne payload — out of every
+-- body-aware rule's scan surface (php_wrappers here, but also ssrf/sqli/…).
+do
+  local function disable_all_rules()
+    local snap = waf.get_config()
+    for k, _ in pairs(snap) do
+      if k:sub(1, 5) == "rule_" then waf.set_rule(k, "disabled") end
+    end
+  end
+
+  -- urlencoded budget = 8192; pad the query past it. The php:// marker lives in
+  -- the (short) body, so only a body that survives the cap can be seen.
+  local padded_args = string.rep("x=1&", 2500)   -- ~10 KB, well over 8192
+  local body        = "f=php://input"
+
+  -- Baseline: short args, marker in body → seen (works before and after the fix).
+  disable_all_rules(); waf.set_rule("rule_php_wrappers", "block")
+  local hit0 = waf.check({
+    uri = "/", args = "a=1", method = "POST", ip = "1.1.1.1",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" }, body = body,
+  })
+  check(hit0 == true, "F09 baseline: php:// in body with short args must hit")
+
+  -- The bug case: a query padded past the budget must NOT evict the body.
+  -- Pre-fix this returned hit=false (body truncated away); post-fix it hits.
+  disable_all_rules(); waf.set_rule("rule_php_wrappers", "block")
+  local hit1, _r9, _t9, action1 = waf.check({
+    uri = "/", args = padded_args, method = "POST", ip = "2.2.2.2",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" }, body = body,
+  })
+  check(hit1 == true,       "F09: padded query must NOT evict the body php:// (got hit=" .. tostring(hit1) .. ")")
+  check(action1 == "block", "F09: action=block expected with padded args, got " .. tostring(action1))
+end
+
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " test(s) failed in cfm_waf_body_budget_test.lua\n")
   os.exit(1)
