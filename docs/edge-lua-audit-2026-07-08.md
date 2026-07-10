@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**9 / 55 fixed.** Grouped by severity; each links to its detail section.
+**10 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -54,7 +54,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 ### Medium (19)
 
 - [ ] **[F07](#f07)** · `configs/lua/cfm.lua:488` · _waf-bypass_ (axis a/c) — WAF body inspection gated by a URI allowlist: POST bodies to any non-listed path (/, /search, /checkout, clean-URL routes) are never read
-- [ ] **[F08](#f08)** · `configs/lua/cfm.lua:550` · _waf-bypass_ (axis a/c) — WAF body reader hard-caps at 8192 bytes, defeating larger per-type scan budgets and letting payloads past byte 8192 escape all body rules
+- [x] **[F08](#f08)** · `configs/lua/cfm.lua:550` · _waf-bypass_ (axis a/c) — WAF body reader hard-caps at 8192 bytes, defeating larger per-type scan budgets and letting payloads past byte 8192 escape all body rules
 - [x] **[F10](#f10)** · `configs/lua/cfm_waf_excl.lua:79` · _regression_ (axis b) — Exclude glob compiler diverges from Go: Lua `*`->`.*`/`?`->`.` cross `/` (Go uses `[^/]*`), and Lua ignores `[]` globs Go honours — silently widening the in-path WAF-off region _(security half fixed; `[]` parity tracked below)_
 - [ ] **[F11](#f11)** · `configs/lua/cfm_waf.lua:1597` · _waf-bypass_ (axis a/c) — /wp-admin/ carve-out disables encoded/base64 <?php backdoor rules 437/438 on pre-auth admin-ajax.php
 - [x] **[F12](#f12)** · `configs/lua/cfm_waf_detectors.lua:1904` · _waf-bypass_ (axis a/c) — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
@@ -255,7 +255,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f08"></a>
 ### F08 — WAF body reader hard-caps at 8192 bytes, defeating larger per-type scan budgets and letting payloads past byte 8192 escape all body rules
 
-- **Status:** ☐ open
+- **Status:** ☑ done — reader cap raised to the max per-type budget (8192 → 32768)
 - **Severity:** medium · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm.lua:550`
 
@@ -265,7 +265,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Drive the read length from the Content-Type-selected budget (or set waf_body_max_len >= the largest per-type budget); optionally flag truncation so rules can fail-safe.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `waf_body_max_len` default raised **8192 → 32768** (`= max(body_scan_budget)`, the json budget) in `cfm.lua`, so the reader no longer truncates below the WAF's largest per-type budget — the per-type budget (`urlencoded 8192`, `json 32768`, `multipart/xml 16384`, verified via F09) is now the effective limit for the `get_norm_ab` rules, and a JSON/multipart/xml payload past byte 8192 is inspected. Same rules, same tiers — coverage only (blast radius = paths whose body is already read; F07 widens *which* paths, tracked separately). Well within `post_resume_max_len = 65536`, which already buffers the body for challenge replay, so no new buffering. Cross-referenced both sides (`cfm.lua` reader comment ↔ `cfm_waf.lua` `body_scan_budget` INVARIANT comment, §5). **Anti-drift guardrail** in `cfm_waf_body_budget_test.lua` (Test 10): computes the live max budget via `util.body_budget` and asserts `cfm.lua`'s actual `waf_body_max_len` default `>=` it — **verified to FAIL at the pre-fix 8192** and pass at 32768. If any budget is later raised above the cap (or the cap lowered), CI catches it. **Adversarially reviewed (ship with nits):** correctness/guardrail confirmed by trace + run; folded in a doc-precision fix (raw-body detectors like `detect_upload_filename` ignore `body_budget` and are truncated directly by this cap, above the nominal multipart budget) and an OPERATOR env-override warning (the guardrail checks only the source default, so `CFM_WAF_BODY_MAX_LEN` < max budget reopens F08). Two accepted side effects recorded for post-deploy monitoring: (1) the **scanned window** of already block+autoblock-armed families (`WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME`) grows 8 KB → 16–32 KB — their block/FP burn-in predated it, so a legit 8–32 KB body matching a signature past byte 8192 now blocks/6h-bans (watch hit-rates); (2) symmetric ClamAV coverage gain — `cfm_clamav.lua` reads the same capped body, so multipart uploads whose `filename=` sits past byte 8192 now reach the scanner (relates to F17). PR #1058.
 
 ---
 

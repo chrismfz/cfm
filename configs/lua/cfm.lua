@@ -183,7 +183,24 @@ local CFG = {
   keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "60000"),
   keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "512"),
 
-  waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "8192"),
+  -- Upper bound on the request-body bytes handed to the WAF (audit F08). This
+  -- must be >= the largest per-Content-Type budget in cfm_waf.lua's
+  -- `body_scan_budget` (json = 32768 today), otherwise this reader truncates
+  -- the body BEFORE the WAF applies its budget and the larger budgets are never
+  -- realised — a payload past byte 8192 in a JSON/multipart/xml body escaped
+  -- every body-aware rule. Kept at the max budget so the get_norm_ab rules'
+  -- per-type budget is the effective limit. (Raw-body detectors that ignore
+  -- body_budget — e.g. detect_upload_filename — are truncated directly by this
+  -- cap, so it also sets their scan window, now above the nominal multipart
+  -- budget.) The invariant is asserted by
+  -- scripts/tests/cfm_waf_body_budget_test.lua. Well within post_resume_max_len
+  -- = 65536, which already buffers the body for challenge replay.
+  --
+  -- OPERATORS: if you OVERRIDE CFM_WAF_BODY_MAX_LEN below the largest
+  -- body_scan_budget (e.g. to 8192 for memory) you REOPEN F08 — a JSON payload
+  -- past your value escapes the body rules. Keep it >= 32768. The CI guardrail
+  -- only checks this source default, not the runtime env override.
+  waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "32768"),
 
   post_resume_enable  = (os.getenv("CFM_POST_RESUME_ENABLE") or "1") == "1",
   post_resume_max_len = tonumber(os.getenv("CFM_POST_RESUME_MAX_LEN") or "65536"),
