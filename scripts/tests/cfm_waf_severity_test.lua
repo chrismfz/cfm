@@ -1725,37 +1725,53 @@ do
   check(reason3 == "WAF_SSRF:SSRF_FILE",         "77d: ssrf — exact tag SSRF_FILE (got " .. tostring(reason3) .. ")")
 end
 
--- ── Test 77e: rule_php_encoded_opener — suppressed on /wp-admin/ ----------
--- WPCode / Code Snippets / Insert PHP Code Snippet plugins save admin-
--- authored PHP snippets via /wp-admin/admin-ajax.php and /wp-admin/admin.php.
--- The save body legitimately carries the encoded `<?php` opener; the rule
--- can't tell that from a webshell upload without context, so we skip it
--- on /wp-admin/* where WP cookie-auth has already gated the request.
+-- ── Test 77e: rule_php_encoded_opener — /wp-admin/ carve-out (F11 split) ---
+-- WPCode / Code Snippets / Insert PHP Code Snippet plugins save admin-authored
+-- PHP snippets via /wp-admin/admin-ajax.php; the plugin JS base64-encodes the
+-- snippet, so a LEGIT save carries `PD9waHA…` (438). The old carve-out
+-- suppressed both openers on ALL /wp-admin/. But admin-ajax.php / admin-post.php
+-- are reachable PRE-auth (nopriv actions), so audit F11 keeps 438 VISIBLE there
+-- at LOGONLY (detect-only, no enforcement — the edge can't tell a WPCode save
+-- from a nopriv attack). 437 stays suppressed; authenticated /wp-admin/ keeps
+-- both carved out; non-/wp-admin/ still enforces at the configured tier.
+local function opener_ctx(uri, body)
+  return fresh_ctx({
+    uri = uri, method = "POST", body = body,
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
+  })
+end
+local B64 = "PD9waHAgZWNobyAnaGVsbG8nOw=="          -- base64 "<?php echo 'hello';" -> 438
+local URLENC = "code=%3C%3Fphp%20echo%20'x'%3B%20%3F%3E"  -- url-encoded "<?php" -> 437
 do
   disable_all_rules()
-  -- The test bodies use the base64 opener (PD9waHA…), which routes to rule 438
-  -- (rule_php_encoded_opener_b64) after the 2026-07-02 split. The /wp-admin/
-  -- carve-out is shared by both 437 and 438.
-  waf.set_rule("rule_php_encoded_opener_b64", "logonly")
+  waf.set_rule("rule_php_encoded_opener_b64", "challenge")  -- global tier for 438
+  waf.set_rule("rule_php_encoded_opener", "challenge")      -- global tier for 437
 
-  -- Encoded `<?php` in body of /wp-admin/ POST — must NOT fire.
-  local hit = waf.check(fresh_ctx({
-    uri    = "/wp-admin/admin-ajax.php",
-    method = "POST",
-    body   = "action=wpcode_save&snippet=PD9waHAgZWNobyAnaGVsbG8nOw==",
-    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
-  }))
-  check(hit == false, "77e: php_encoded_opener on /wp-admin/ must NOT fire")
+  -- 438 base64 on the PRE-AUTH admin-ajax.php / admin-post.php surface: recorded
+  -- but DOWNGRADED to logonly (no challenge/block) during the F11 burn-in.
+  for _, uri in ipairs({ "/wp-admin/admin-ajax.php", "/wp-admin/admin-post.php" }) do
+    local hit, reason, _ttl, action = waf.check(opener_ctx(uri, "snippet=" .. B64))
+    check(hit == true,                             "77e: 438 recorded on pre-auth " .. uri)
+    check(action == "logonly",                     "77e: 438 is logonly (not challenge) on pre-auth " .. uri)
+    check(reason == "WAF_BACKDOOR:B64_PHP_OPENER",  "77e: 438 tag on " .. uri)
+  end
 
-  -- Encoded `<?php` in body of a public upload endpoint — must still fire.
-  local hit2, reason2 = waf.check(fresh_ctx({
-    uri    = "/uploads/process.php",
-    method = "POST",
-    body   = "file=PD9waHAgZWNobyAnaGVsbG8nOw==",
-    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
-  }))
-  check(hit2 == true,                                "77e: php_encoded_opener on public path must still fire")
-  check(reason2 == "WAF_BACKDOOR:B64_PHP_OPENER",    "77e: php_encoded_opener — exact tag (got " .. tostring(reason2) .. ")")
+  -- 437 (FP-prone url/entity form) stays fully suppressed on /wp-admin/,
+  -- including the pre-auth endpoints — the legit WPCode-save FP fix holds.
+  for _, uri in ipairs({ "/wp-admin/admin-ajax.php", "/wp-admin/admin-post.php" }) do
+    check(waf.check(opener_ctx(uri, URLENC)) == false,
+          "77e: 437 stays suppressed on pre-auth " .. uri)
+  end
+
+  -- Authenticated /wp-admin/ (not a pre-auth endpoint) keeps 438 carved out.
+  check(waf.check(opener_ctx("/wp-admin/options.php", "x=" .. B64)) == false,
+        "77e: 438 suppressed on authenticated /wp-admin/options.php")
+
+  -- Public (non-/wp-admin/) path still ENFORCES 438 at the configured tier.
+  local hit2, reason2, _t2, action2 = waf.check(opener_ctx("/uploads/process.php", "file=" .. B64))
+  check(hit2 == true,                                "77e: 438 on public path still fires")
+  check(action2 == "challenge",                      "77e: 438 on public path enforces (challenge)")
+  check(reason2 == "WAF_BACKDOOR:B64_PHP_OPENER",    "77e: exact tag (got " .. tostring(reason2) .. ")")
 end
 
 -- ── Test 78: rule_content_type_anomaly — quoted WebKit boundary must NOT fire

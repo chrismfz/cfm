@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**10 / 55 fixed.** Grouped by severity; each links to its detail section.
+**11 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -56,7 +56,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F07](#f07)** · `configs/lua/cfm.lua:488` · _waf-bypass_ (axis a/c) — WAF body inspection gated by a URI allowlist: POST bodies to any non-listed path (/, /search, /checkout, clean-URL routes) are never read
 - [x] **[F08](#f08)** · `configs/lua/cfm.lua:550` · _waf-bypass_ (axis a/c) — WAF body reader hard-caps at 8192 bytes, defeating larger per-type scan budgets and letting payloads past byte 8192 escape all body rules
 - [x] **[F10](#f10)** · `configs/lua/cfm_waf_excl.lua:79` · _regression_ (axis b) — Exclude glob compiler diverges from Go: Lua `*`->`.*`/`?`->`.` cross `/` (Go uses `[^/]*`), and Lua ignores `[]` globs Go honours — silently widening the in-path WAF-off region _(security half fixed; `[]` parity tracked below)_
-- [ ] **[F11](#f11)** · `configs/lua/cfm_waf.lua:1597` · _waf-bypass_ (axis a/c) — /wp-admin/ carve-out disables encoded/base64 <?php backdoor rules 437/438 on pre-auth admin-ajax.php
+- [x] **[F11](#f11)** · `configs/lua/cfm_waf.lua:1597` · _waf-bypass_ (axis a/c) — /wp-admin/ carve-out disables encoded/base64 <?php backdoor rules 437/438 on pre-auth admin-ajax.php
 - [x] **[F12](#f12)** · `configs/lua/cfm_waf_detectors.lua:1904` · _waf-bypass_ (axis a/c) — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
 - [ ] **[F13](#f13)** · `configs/lua/cfm_waf_detectors.lua:449` · _correctness_ (axis c) — Base64 PHP-object-injection check uses malformed `%bo%:` pattern that never matches serialized objects (B64_OBJ_INJECT dead, rule 304)
 - [ ] **[F14](#f14)** · `configs/lua/cfm_waf_detectors.lua:1062` · _fp_ (axis a) — value_looks_shelly word list contains common tokens (host, id, ping, more, less, head, tail, env, cat, ls, w) that FP-challenge legit system=/command= dispatcher values
@@ -291,17 +291,17 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f11"></a>
 ### F11 — /wp-admin/ carve-out disables encoded/base64 <?php backdoor rules 437/438 on pre-auth admin-ajax.php
 
-- **Status:** ☐ open
+- **Status:** ☑ done — carve-out split; 438 kept at **logonly** on the pre-auth admin-ajax/admin-post surface (burn-in)
 - **Severity:** medium · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf.lua:1597`
 
-**What & why.** Rules 437/438 (encoded/base64 <?php opener in body) are skipped for the whole ^/wp-admin/ prefix on the false premise that such requests already passed WP cookie-auth. At the edge CFM inspects before WordPress authenticates, and /wp-admin/admin-ajax.php (and admin-post.php) serve unauthenticated wp_ajax_nopriv_* actions. So an unauthenticated attacker can POST a base64 <?php payload to admin-ajax.php and rule 438 (which has no browser-legitimate FP source) will not fire. Same prefix also suppresses SSRF_FTP (line 844).
+**What & why.** Rules 437/438 (encoded/base64 <?php opener in body) are skipped for the whole ^/wp-admin/ prefix on the false premise that such requests already passed WP cookie-auth. At the edge CFM inspects before WordPress authenticates, and /wp-admin/admin-ajax.php (and admin-post.php) serve unauthenticated wp_ajax_nopriv_* actions. So an unauthenticated attacker can POST a base64 <?php payload to admin-ajax.php and rule 438 will not fire. Same prefix also suppresses SSRF_FTP (line 844).
 
 **Repro / cost.** POST /wp-admin/admin-ajax.php (no auth cookie) body action=<nopriv>&p=PD9waHA... : uri matches ^/wp%-admin/ -> whole 437/438 block skipped -> base64 <?php passes.
 
 **Suggested fix.** Scope the carve-out to the actual FP endpoints and keep the base64 form (438) armed even there, or gate on a validated WP auth cookie.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** **The finding's own premise (and the inline comment) that "438 base64 has no browser-legitimate FP source" is WRONG** — `docs/waf.md` FP case 5 documents a real production incident where WPCode / Code-Snippet plugins legitimately base64-POST `<?php` (`PD9waHA…`) to admin-ajax.php on every snippet save (the plugin JS base64-encodes it; the *browser* doesn't, but the plugin does). admin-ajax.php serves BOTH those authed saves AND unauthenticated `nopriv` actions, and the edge can't tell them apart (the WP cookie is spoofable), so *enforcing* 438 there would re-run that FP incident (real admins challenged). Chosen compromise (**logonly-first**, user-approved): the carve-out is split per-rule/per-endpoint — **437** (url/entity, FP-prone) stays fully suppressed on all `/wp-admin/`; **438** (base64) is recorded at **`logonly`** on the pre-auth `admin-ajax.php`/`admin-post.php` endpoints (visibility into pre-auth base64 smuggling with **zero** enforcement — no challenge, no block, and a `logonly` hit never reaches the autoblock feed, which ingests only `action=block`; no `WAF_BACKDOOR` rule is block-tier, so no ban even though the family is autoblock-armed), deliberately logonly regardless of 438's global tier during burn-in; the rest of `/wp-admin/` (authed editors) keeps both carved out; non-`/wp-admin/` unaffected. Operator watches the logonly stream (rule 438 on an admin-ajax URI) to separate real attacks from WPCode noise before any promotion. Test `cfm_waf_severity_test.lua` 77e rewritten: 438 on pre-auth admin-ajax/admin-post → logonly (not challenge), 437 suppressed on pre-auth, 438 suppressed on authed `/wp-admin/options.php`, 438 enforces on public path — **verified to FAIL against the pre-fix (both suppressed)**. `docs/waf.md` FP case 5 + rules-437/438 notes updated (§5). PR #1059.
 
 ---
 

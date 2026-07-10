@@ -18,6 +18,25 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **WAF: pre-auth base64 `<?php` on wp-admin AJAX is now visible (F11).** The
+  encoded-`<?php` opener rules (437 url/entity form, 438 base64) were suppressed
+  on the entire `/wp-admin/` prefix on the assumption those requests had already
+  passed WordPress cookie-auth. That is wrong for `admin-ajax.php` and
+  `admin-post.php`, which serve `wp_ajax_nopriv_*` / unauthenticated `admin-post`
+  actions and are reachable pre-auth — so an unauthenticated attacker could
+  smuggle a base64 `<?php` body there completely unseen. The naive fix (arm 438
+  there) would re-run a documented false-positive incident: WPCode / Code-Snippet
+  plugins legitimately base64-POST `<?php` to `admin-ajax.php` on every snippet
+  save, and the edge can't tell an authed save from a nopriv attack. So the
+  carve-out is split: 437 (FP-prone) stays fully suppressed on `/wp-admin/`, and
+  438 (base64) is recorded at **`logonly`** on the two pre-auth endpoints —
+  detection with **zero enforcement** (no challenge, no block, no ban: a
+  `logonly` hit is dropped by the autoblock feed, which ingests only
+  `action=block`, and no `WAF_BACKDOOR` rule is block-tier) — so operators can
+  watch the pre-auth
+  base64 stream (rule 438 on an admin-ajax URI) and separate real attacks from
+  plugin noise before any promotion. The rest of `/wp-admin/` (authenticated
+  editors) is unchanged. Found by the 2026-07 edge Lua audit (F11).
 - **WAF body inspection no longer truncated below the per-Content-Type scan
   budget (F08).** The edge body reader (`get_req_body_for_waf` in `cfm.lua`)
   handed the WAF at most `waf_body_max_len` = **8192** bytes, but the engine's
