@@ -112,12 +112,14 @@
 --     enabled, this handler will return 500 and we'll need a separate
 --     fix path (probably an h2-aware upstream module or stream-level
 --     SNI routing).
---   * We forward the client's headers as-is and do NOT inject
---     X-Forwarded-For / X-Real-IP. cpsrvd will see the request as
---     originating from 127.0.0.1 in its audit log. For /acctxferrsync
---     this is fine — cpsrvd authenticates via the WHM access-hash in
---     the URL, not the client IP — but it's a behavioral difference
---     from the regular HTTP-proxied panel paths.
+--   * We OVERWRITE the client's forwarding / real-IP headers
+--     (X-Forwarded-For / X-Real-IP / CF-Connecting-IP and the
+--     X-Forwarded-Host/Port/Proto/Server set) with server-computed
+--     values keyed on $remote_addr — the same overwrite the sibling
+--     proxy_set_header block applies (the overwrite *semantics* match; the
+--     injected values are server-side, see Step 3). A client therefore
+--     cannot spoof its source IP into cpsrvd's audit log / cPhulk / IP-ACLs
+--     through the tunnel (audit F03) — see Step 3 for the full rationale.
 
 -- Loopback hosts we are willing to talk to with TLS verification skipped.
 -- Anything else must fail closed (see sslhandshake() below). The parser
@@ -208,7 +210,7 @@ end
 
 -- Step 3: replay the original HTTP request to upstream.
 --
--- We DO NOT simply forward ngx.req.raw_header() verbatim. cpsrvd uses
+-- We DO NOT forward ngx.req.raw_header() verbatim. cpsrvd uses
 -- X-Forwarded-For (set by the regular nginx proxy_set_header on every
 -- other panel location) to attach an incoming request to its transfer-
 -- session bookkeeping. Without it, cpsrvd sees the request as coming
@@ -219,11 +221,32 @@ end
 -- shows up as "Restore stuck at 20% Homedir" with the connection
 -- visibly ESTAB on both sides and zero bytes flowing.
 --
--- So splice an X-Forwarded-For / X-Real-IP / X-Forwarded-Proto /
--- X-Forwarded-Host / X-Forwarded-Port set into the original headers,
--- matching what the sibling `location ~ ^/(acctxfer|...)` block does
--- via proxy_set_header. If the client already sent any of these we
--- preserve them (don't double-inject).
+-- So we take sole authority over the forwarding / real-IP header set and
+-- inject our own values with the same overwrite semantics as the sibling
+-- `location ~ ^/(acctxfer|...)` block's `proxy_set_header X-Forwarded-For
+-- $remote_addr` (an OVERWRITE, not an append or an inject-if-absent). The
+-- injected values mirror the sibling for the IP headers; X-Forwarded-Port
+-- / -Proto are $server_port / $scheme here (the internal listener port),
+-- which is pre-existing and harmless for a byte-pipe transfer with no
+-- self-URL logic.
+--
+-- This is a security boundary, not just bookkeeping (audit F03): cpsrvd's
+-- Apache trusts X-Forwarded-For from loopback (mod_remoteip), so if we let
+-- a client-supplied X-Forwarded-For / X-Real-IP / CF-Connecting-IP survive
+-- it would spoof the client's source IP into cpsrvd's audit log, cPhulk
+-- brute-force tracking, and any IP allow/deny logic — letting an attacker
+-- frame or impersonate an arbitrary IP (e.g. a cPhulk-allowlisted one).
+-- The tunnel runs with the challenge/WAF bypassed and the panel port is
+-- internet-facing, so this header is fully attacker-controlled. Every
+-- other panel path already overwrites with $remote_addr; the earlier
+-- inject-if-absent logic here was the one gap.
+--
+-- $remote_addr is the true DNAT'd peer (these listeners carry no
+-- client-facing set_real_ip_from, only the Cloudflare ranges, and
+-- transfers don't traverse Cloudflare), so it is authoritative and not
+-- itself spoofable. Overwriting is a no-op for legitimate transfers:
+-- whm_xfer_download-ssl is a direct client and never sends these headers,
+-- so it gets the same $remote_addr-derived values it does today.
 local raw_headers = ngx.req.raw_header()
 
 local client_ip      = ngx.var.remote_addr  or "127.0.0.1"
@@ -231,43 +254,70 @@ local client_host    = ngx.var.host         or "localhost"
 local listener_port  = ngx.var.server_port  or ""
 local listener_proto = ngx.var.scheme       or "https"
 
--- Lowercase header-name index of what the client already sent, so we
--- can avoid re-injecting headers they already provided.
-local got = {}
+-- Header names we own: strip EVERY client-supplied occurrence
+-- (case-insensitively) and re-inject the trusted value below. Mirrors the
+-- sibling proxy_set_header set for these locations.
+local STRIP = {
+    ["x-real-ip"]          = true,
+    ["x-forwarded-for"]    = true,
+    ["x-forwarded-host"]   = true,
+    ["x-forwarded-port"]   = true,
+    ["x-forwarded-proto"]  = true,
+    ["x-forwarded-server"] = true,
+    ["cf-connecting-ip"]   = true,
+}
+
+-- Rebuild the header block, keeping the request line (first line) and
+-- every header except the STRIP set.
+--
+-- Obsolete line folding (RFC 7230 §3.2.4, deprecated) is dropped
+-- WHOLESALE: any continuation line (leading SP/HT) is discarded, whether
+-- it hangs off a stripped header or a surviving one. Otherwise a client
+-- could smuggle a spoofed `\r\n X-Forwarded-For: a.b.c.d` in as a fold of
+-- a benign header, and a lenient upstream parser that treats a
+-- leading-whitespace line as a standalone header would then see the
+-- spoofed value alongside our injected one. Legit transfer clients never
+-- fold headers, so this only ever discards attacker input. It is the raw
+-- equivalent of what nginx does for the sibling proxy_set_header path,
+-- which parses/normalises headers before proxying. Non-folded, non-STRIP
+-- headers pass through byte-for-byte.
+local kept, first = {}, true
 for line in raw_headers:gmatch("[^\r\n]+") do
-    local name = line:match("^([%w%-]+)%s*:")
-    if name then got[name:lower()] = true end
+    if first then
+        kept[#kept + 1] = line          -- request line: always keep
+        first = false
+    elseif line:sub(1, 1) == " " or line:sub(1, 1) == "\t" then
+        -- obs-fold continuation line: drop unconditionally (see above)
+    else
+        local name = line:match("^([%w%-]+)%s*:")
+        if not (name and STRIP[name:lower()]) then
+            kept[#kept + 1] = line
+        end
+    end
 end
 
-local function maybe_add(name, value)
-    if not got[name:lower()] and value and value ~= "" then
+local function inject(name, value)
+    if value and value ~= "" then
         return name .. ": " .. value .. "\r\n"
     end
     return ""
 end
 
 local injected =
-    maybe_add("X-Real-IP",          client_ip) ..
-    maybe_add("X-Forwarded-For",    client_ip) ..
-    maybe_add("X-Forwarded-Host",   client_host) ..
-    maybe_add("X-Forwarded-Port",   listener_port) ..
-    maybe_add("X-Forwarded-Proto",  listener_proto) ..
-    maybe_add("X-Forwarded-Server", client_host) ..
-    maybe_add("CF-Connecting-IP",   client_ip)
+    inject("X-Real-IP",          client_ip) ..
+    inject("X-Forwarded-For",    client_ip) ..
+    inject("X-Forwarded-Host",   client_host) ..
+    inject("X-Forwarded-Port",   listener_port) ..
+    inject("X-Forwarded-Proto",  listener_proto) ..
+    inject("X-Forwarded-Server", client_host) ..
+    inject("CF-Connecting-IP",   client_ip)
 
--- raw_headers ends with "\r\n\r\n". Strip the final "\r\n" so we get
--- the headers ending in a single "\r\n", append our injected lines
--- (each already ending in "\r\n"), then append the final "\r\n" that
--- terminates the header block.
-local request_to_upstream
-if raw_headers:sub(-4) == "\r\n\r\n" then
-    request_to_upstream = raw_headers:sub(1, -3) .. injected .. "\r\n"
-else
-    -- Defensive: header block didn't terminate as expected; just
-    -- append and hope for the best (cpsrvd will reject malformed
-    -- requests, which is the safe failure mode).
-    request_to_upstream = raw_headers .. injected .. "\r\n"
-end
+-- `kept` = request line + surviving headers, no trailing CRLF. Terminate
+-- the last kept line, append our injected headers (each already ending in
+-- CRLF), then the final CRLF that closes the header block. Rebuilding
+-- deterministically (rather than splicing onto raw_headers) means the
+-- terminator is always well-formed regardless of the client's framing.
+local request_to_upstream = table.concat(kept, "\r\n") .. "\r\n" .. injected .. "\r\n"
 
 local _, send_err = up_sock:send(request_to_upstream)
 if send_err then
