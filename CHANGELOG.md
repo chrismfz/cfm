@@ -101,6 +101,28 @@ back-filled here — see the git/PR history for that period.
   `scripts/tests/cfm_waf_body_budget_test.lua` (Test 9 — urlencoded/JSON budgets,
   `php_wrappers`/SQLi/CRLF paths, verified to fail on the old single-cap form).
   Found by the 2026-07 edge Lua audit (F09).
+- **WAF/challenge bypass via PHP path-info on the static-asset fast path (F06).**
+  The edge static-asset `location ~*` regex matched the URL *suffix*
+  (`\.(css|js|woff|…|map)$`), not the file Apache actually serves, and runs
+  `access_by_lua_block { return; }` — skipping `cfm.lua` (WAF **and** challenge)
+  entirely. So `GET /uploads/evil.php/x.css` matched the `.css` bypass yet, under
+  `cgi.fix_pathinfo`, executed `evil.php` at the origin with the edge inspection
+  disabled. All four bypass locations (OpenResty + Angie, HTTP + HTTPS) now anchor
+  the regex with a PHP-scoped negative-lookahead —
+  `^(?!.*\.(?:phtml|pht|php[0-9]|php|phar)/).*\.(?:css|js|…|map)$` — so any URL
+  with a `.php…/` (or `.phtml/`/`.pht/`/`.php5/`/`.phar/`) segment falls through to
+  `cfm.lua` and is inspected again. This closes the universal `cgi.fix_pathinfo`
+  `.php/` vector (which executes regardless of Apache handler style). Genuine
+  static is unaffected, including `?v=` cache-busters (nginx matches the location
+  against `$uri`, which excludes the query) and legitimately-named `foo.php.css`.
+  Scoped to the PHP suffix family by design: multi-extension names
+  (`/evil.php.jpg/…`, executable only under the legacy `AddHandler` form, not
+  modern EA4 `<FilesMatch \.php$>`) and non-PHP handlers (`.cgi`/`.pl`/`.py`/
+  `.shtml`) stay on the fast path — narrower residuals still covered by the
+  log-driven behavioural engine. Verified by PCRE case matrix, `nginx -t`, live
+  nginx routing (incl. `%2f` encoded-slash, which nginx decodes into `$uri`
+  before location matching, so it is not evadable), and an adversarial review.
+  Found by the 2026-07 edge Lua audit (F06).
 
 ### Fixed
 - **DNAT/panel scoped accepts were appended AFTER the default drop (and
