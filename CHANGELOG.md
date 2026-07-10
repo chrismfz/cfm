@@ -94,9 +94,13 @@ back-filled here — see the git/PR history for that period.
   carrying `php://…` or a `UNION SELECT` was not inspected. `get_norm_ab` now
   caps args and body **independently** (each to the body budget) before the
   concat, so the body always gets its full allowance; the transient stays
-  bounded to ~2×budget. Covered by `scripts/tests/cfm_waf_body_budget_test.lua`
-  (Test 9, verified to fail on the old single-cap form). Found by the 2026-07
-  edge Lua audit (F09).
+  bounded to ~2×budget. The same independent-cap was applied to
+  `detect_crlf_injection` (rule 605, which builds its own args+body scan
+  surface) and to the detector-internal fallback scan strings, so no divergent
+  copy of the pattern remains. Covered by
+  `scripts/tests/cfm_waf_body_budget_test.lua` (Test 9 — urlencoded/JSON budgets,
+  `php_wrappers`/SQLi/CRLF paths, verified to fail on the old single-cap form).
+  Found by the 2026-07 edge Lua audit (F09).
 
 ### Fixed
 - **DNAT/panel scoped accepts were appended AFTER the default drop (and

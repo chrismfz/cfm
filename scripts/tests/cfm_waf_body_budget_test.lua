@@ -296,6 +296,40 @@ do
   })
   check(hit1 == true,       "F09: padded query must NOT evict the body php:// (got hit=" .. tostring(hit1) .. ")")
   check(action1 == "block", "F09: action=block expected with padded args, got " .. tostring(action1))
+
+  -- Cross-budget: JSON budget (32768) — pad the query past it, php:// in the body.
+  disable_all_rules(); waf.set_rule("rule_php_wrappers", "block")
+  local json_pad = string.rep("x=1&", 8500)   -- ~34 KB, over the 32768 json budget
+  local jhit = waf.check({
+    uri = "/", args = json_pad, method = "POST", ip = "3.3.3.3",
+    headers = { ["content-type"] = "application/json" }, body = '{"f":"php://input"}',
+  })
+  check(jhit == true, "F09 (json budget): padded query must NOT evict the body php://")
+
+  -- Second detector: body-borne SQLi via get_norm_ab must survive a padded query.
+  disable_all_rules(); waf.set_rule("rule_sqli", "block")
+  local shit, sreason = waf.check({
+    uri = "/", args = padded_args, method = "POST", ip = "4.4.4.4",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
+    body = "q=1 UNION SELECT username,password FROM users",
+  })
+  check(shit == true and sreason == "WAF_SQLI",
+    "F09 (sqli): padded query must NOT evict a body-borne UNION SELECT (got hit=" .. tostring(shit) .. " reason=" .. tostring(sreason) .. ")")
+
+  -- Separate scan surface: detect_crlf_injection builds its own args&body string
+  -- (rule 605) and had the same args-first eviction — now capped independently.
+  disable_all_rules(); waf.set_rule("rule_crlf_injection", "block")
+  local crlf_pad = string.rep("x=1&", 600)   -- ~2.4 KB, over max_scan_len 2048
+  local chit, creason = waf.check({
+    uri = "/", args = crlf_pad, method = "POST", ip = "6.6.6.6",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
+    -- lowercase header name: detect_crlf_injection matches case-sensitively
+    -- (that case gap is a separate finding, F34); here we only assert the body
+    -- survives a padded query.
+    body = "u=x\r\nset-cookie: evil=1",
+  })
+  check(chit == true and creason == "WAF_CRLF:CRLF_SET_COOKIE",
+    "F09 (crlf): padded query must NOT evict a body-borne CRLF injection (got hit=" .. tostring(chit) .. " reason=" .. tostring(creason) .. ")")
 end
 
 if fails > 0 then

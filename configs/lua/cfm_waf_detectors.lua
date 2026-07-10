@@ -146,7 +146,7 @@ end
 -- ─────────────────────────────────────────────────────────────────────────────
 
 function _M.detect_php_wrappers(args, body, _ns)
-  local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  local s = _ns or normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
   if s == "" then return nil end
 
   if has(s, "php://")    then return "WRAP_PHP" end
@@ -1804,7 +1804,7 @@ end
 --   * IP obfuscation checks are narrow to avoid FP: octal, hex, and decimal
 --     longform IPs inside :// scheme context only.
 function _M.detect_ssrf_proto(args, body, _ns)
-  local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  local s = _ns or normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
   if s == "" then return nil end
 
   if has(s, "file://")        then return "SSRF_FILE" end
@@ -1845,7 +1845,7 @@ end
 -- __proto__ and constructor.prototype in JSON bodies or args are the two
 -- canonical pollution vectors in Node.js/JS backend frameworks.
 function _M.detect_js_proto(args, body, _ns)
-  local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  local s = _ns or normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
   if s == "" then return nil end
 
   if has(s, "__proto__") then return "JS_PROTO_PROTO" end
@@ -1895,7 +1895,10 @@ end
 -- Checks for CR or LF followed by a header name in args and body.
 -- Also checks for URL-encoded %0d%0a sequences.
 function _M.detect_crlf_injection(args, body)
-  local s = cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len)
+  -- Cap args and body independently so a padded query string can't evict the
+  -- body from CRLF-injection detection (audit F09; this detector builds its
+  -- own scan surface rather than taking the shared get_norm_ab string).
+  local s = cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len)
   if s == "" then return nil end
 
   -- Raw CR/LF followed by a header keyword
@@ -2760,7 +2763,7 @@ local C2_TUNNEL_HOSTS = {
 }
 
 function _M.detect_c2_tunnel(args, body, _ns)
-  local s = _ns or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  local s = _ns or normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
   if s == "" then return nil end
 
   for i = 1, #C2_TUNNEL_HOSTS do
@@ -3164,7 +3167,7 @@ end
 -- ":BASE64" before promotion and add per-vhost exclusions for affected
 -- apps. See docs/waf.md "Operating the WAF" for the playbook.
 function _M.detect_log4shell(args, body, headers, _norm_ab)
-  local s = _norm_ab or normalize(cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len))
+  local s = _norm_ab or normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
 
   -- Single cheap precheck on the (potentially 32 KB) scan buffer. The
   -- dominant case is "no '${' anywhere" → one find() returns nil and we
