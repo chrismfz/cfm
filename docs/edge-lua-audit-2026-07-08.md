@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**6 / 55 fixed.** Grouped by severity; each links to its detail section.
+**7 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -49,7 +49,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F04](#f04)** · `configs/lua/cfm.lua:692` · _perf_ (axis b) — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
 - [x] **[F05](#f05)** · `configs/lua/cfm_waf_detectors.lua:1262` · _waf-bypass_ (axis a/c) — Backtick command-substitution detector is dead code: Lua patterns have no `|` alternation, so most backtick RCE payloads bypass PAY_BACKTICK (rule 317)
 - [ ] **[F06](#f06)** · `configs/openresty.conf:674` · _waf-bypass_ (axis a/c) — Static-asset location bypasses cfm.lua (WAF/challenge) for any path ending in an asset extension, enabling PHP path-info WAF bypass
-- [ ] **[F09](#f09)** · `configs/lua/cfm_waf.lua:633` · _waf-bypass_ (axis a/c) — args consumes the shared body scan budget in get_norm_ab, so a padded query string truncates the POST body out of all body-aware WAF rules
+- [x] **[F09](#f09)** · `configs/lua/cfm_waf.lua:633` · _waf-bypass_ (axis a/c) — args consumes the shared body scan budget in get_norm_ab, so a padded query string truncates the POST body out of all body-aware WAF rules
 
 ### Medium (19)
 
@@ -219,7 +219,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f09"></a>
 ### F09 — args consumes the shared body scan budget in get_norm_ab, so a padded query string truncates the POST body out of all body-aware WAF rules
 
-- **Status:** ☐ open
+- **Status:** ☑ done — args and body capped independently in `get_norm_ab`
 - **Severity:** high · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf.lua:633`
 
@@ -229,7 +229,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Give the body its own budget: normalize(cap(args,args_budget)..'&'..cap(body,body_budget)).
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `get_norm_ab` now caps args and body **independently**, each to the body budget, before the concat: `normalize(cap(args,budget) .. "&" .. cap(body,budget))`. The body always gets its full budget, so a padded query can no longer evict it; transient bounded to ~2*budget with no large-body materialisation. Test `cfm_waf_body_budget_test.lua` Test 9 — verified to FAIL on the pre-fix single-cap form and PASS after. Existing over-budget truncation tests (Test 8) still hold. **Code-review follow-ups:** (1) a review sweep found the same args-first single-cap pattern in `detect_crlf_injection` (rule 605, **live** — builds its own scan surface) and in 5 detector-internal `_ns or …` fallbacks (dead today but a §5 divergent copy that would re-introduce F09 on a future refactor) — all mirrored to independent caps. (2) Test 9 expanded to cover the JSON budget (32768), a second detector (body-borne `UNION SELECT` via `WAF_SQLI`), and the separate CRLF scan surface — all four F09 cases verified to fail with the fixes reverted. PR #1052.
 
 ---
 

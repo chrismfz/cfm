@@ -621,16 +621,16 @@ function _M.check(ctx)
   local function get_norm_ab()
     if not _norm_ab then
       local budget = util.body_budget(headers)
-      local a = args or ""
-      local b = body or ""
-      -- Pre-cap body before concat: when body >> budget (e.g. 1MB body
-      -- against the 32K json budget) the merged "args & body" string would
-      -- materialise the full body in memory just to be truncated by cap()
-      -- below. Capping body to the budget first bounds the concat
-      -- transient at ~budget+#args+1 bytes. cap() still enforces the
-      -- final ceiling, so semantics are identical to a single-cap merge.
-      if #b > budget then b = string.sub(b, 1, budget) end
-      _norm_ab = normalize(cap(a .. "&" .. b, budget))
+      -- Cap args and body INDEPENDENTLY (each to the body budget) BEFORE the
+      -- concat. The old code did cap(args .. "&" .. body, budget) — args first —
+      -- so a query string padded to `budget` bytes evicted the POST body
+      -- entirely from this shared scan surface, and every body-aware rule that
+      -- reads it (php_wrappers, ssrf, js_proto, sqli, log4shell, superglobal,
+      -- c2) then missed a body-borne payload (audit F09). Capping each side
+      -- separately guarantees the body always gets its full budget; capping
+      -- before the concat also bounds the transient to ~2*budget without
+      -- materialising a large body first.
+      _norm_ab = normalize(cap(args or "", budget) .. "&" .. cap(body or "", budget))
     end
     return _norm_ab
   end

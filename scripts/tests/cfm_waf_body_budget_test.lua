@@ -261,6 +261,77 @@ do
   check(action2 == "block",  "pre-cap: action=block expected, got " .. tostring(action2))
 end
 
+-- ── Test 9: a padded query string must NOT evict the POST body (audit F09) ────
+-- get_norm_ab now caps args and body INDEPENDENTLY. Before the fix it did
+-- cap(args .. "&" .. body, budget) with args first, so a query string padded to
+-- the budget pushed the body — and any body-borne payload — out of every
+-- body-aware rule's scan surface (php_wrappers here, but also ssrf/sqli/…).
+do
+  local function disable_all_rules()
+    local snap = waf.get_config()
+    for k, _ in pairs(snap) do
+      if k:sub(1, 5) == "rule_" then waf.set_rule(k, "disabled") end
+    end
+  end
+
+  -- urlencoded budget = 8192; pad the query past it. The php:// marker lives in
+  -- the (short) body, so only a body that survives the cap can be seen.
+  local padded_args = string.rep("x=1&", 2500)   -- ~10 KB, well over 8192
+  local body        = "f=php://input"
+
+  -- Baseline: short args, marker in body → seen (works before and after the fix).
+  disable_all_rules(); waf.set_rule("rule_php_wrappers", "block")
+  local hit0 = waf.check({
+    uri = "/", args = "a=1", method = "POST", ip = "1.1.1.1",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" }, body = body,
+  })
+  check(hit0 == true, "F09 baseline: php:// in body with short args must hit")
+
+  -- The bug case: a query padded past the budget must NOT evict the body.
+  -- Pre-fix this returned hit=false (body truncated away); post-fix it hits.
+  disable_all_rules(); waf.set_rule("rule_php_wrappers", "block")
+  local hit1, _r9, _t9, action1 = waf.check({
+    uri = "/", args = padded_args, method = "POST", ip = "2.2.2.2",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" }, body = body,
+  })
+  check(hit1 == true,       "F09: padded query must NOT evict the body php:// (got hit=" .. tostring(hit1) .. ")")
+  check(action1 == "block", "F09: action=block expected with padded args, got " .. tostring(action1))
+
+  -- Cross-budget: JSON budget (32768) — pad the query past it, php:// in the body.
+  disable_all_rules(); waf.set_rule("rule_php_wrappers", "block")
+  local json_pad = string.rep("x=1&", 8500)   -- ~34 KB, over the 32768 json budget
+  local jhit = waf.check({
+    uri = "/", args = json_pad, method = "POST", ip = "3.3.3.3",
+    headers = { ["content-type"] = "application/json" }, body = '{"f":"php://input"}',
+  })
+  check(jhit == true, "F09 (json budget): padded query must NOT evict the body php://")
+
+  -- Second detector: body-borne SQLi via get_norm_ab must survive a padded query.
+  disable_all_rules(); waf.set_rule("rule_sqli", "block")
+  local shit, sreason = waf.check({
+    uri = "/", args = padded_args, method = "POST", ip = "4.4.4.4",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
+    body = "q=1 UNION SELECT username,password FROM users",
+  })
+  check(shit == true and sreason == "WAF_SQLI",
+    "F09 (sqli): padded query must NOT evict a body-borne UNION SELECT (got hit=" .. tostring(shit) .. " reason=" .. tostring(sreason) .. ")")
+
+  -- Separate scan surface: detect_crlf_injection builds its own args&body string
+  -- (rule 605) and had the same args-first eviction — now capped independently.
+  disable_all_rules(); waf.set_rule("rule_crlf_injection", "block")
+  local crlf_pad = string.rep("x=1&", 600)   -- ~2.4 KB, over max_scan_len 2048
+  local chit, creason = waf.check({
+    uri = "/", args = crlf_pad, method = "POST", ip = "6.6.6.6",
+    headers = { ["content-type"] = "application/x-www-form-urlencoded" },
+    -- lowercase header name: detect_crlf_injection matches case-sensitively
+    -- (that case gap is a separate finding, F34); here we only assert the body
+    -- survives a padded query.
+    body = "u=x\r\nset-cookie: evil=1",
+  })
+  check(chit == true and creason == "WAF_CRLF:CRLF_SET_COOKIE",
+    "F09 (crlf): padded query must NOT evict a body-borne CRLF injection (got hit=" .. tostring(chit) .. " reason=" .. tostring(creason) .. ")")
+end
+
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " test(s) failed in cfm_waf_body_budget_test.lua\n")
   os.exit(1)
