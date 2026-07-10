@@ -40,6 +40,8 @@ jobs:
         run: ./scripts/tests/check_cli_transport.sh
       - name: Enforce Lua clearance module load check
         run: ./scripts/tests/check_cfm_clearance_require.sh
+      - name: Validate challenge/WAF bypass list + generator safety bounds
+        run: ./scripts/tests/check_bypass_list.sh
       # Lua syntax check + unit tests. luajit was installed above; both
       # targets bail out with a clear message if it ever goes missing.
       - name: Lua syntax check (configs/lua)

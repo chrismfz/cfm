@@ -2,10 +2,16 @@
 """
 Build an nginx/OpenResty geo include file for static challenge/WAF bypasses.
 
-Just run it:   python3 build_bypass_list.py
-Or override:   python3 build_bypass_list.py /custom/path.conf
+Just run it:   python3 scripts/build_bypass_list.py       # writes configs/challenge_waf_bypass.conf
+Or override:   python3 scripts/build_bypass_list.py /custom/path.conf
 
 All sources are defined in SOURCES below — edit the list to add/remove.
+
+Safety: every prefix here disables WAF + challenge for that IP space, so feed
+input is bounded (public CIDRs only, no ranges broader than /16 v4 // /32 v6),
+metadata is sanitised against config-injection, the write is atomic, and a run
+that would shrink the list too far is refused (the existing file is kept).
+`scripts/tests/check_bypass_list.sh` re-validates the committed file in CI.
 """
 
 from __future__ import annotations
@@ -13,7 +19,9 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import os
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -22,7 +30,29 @@ from typing import Any, Iterable
 
 TIMEOUT = 30
 UA = "cfm-bypass-builder/3.0"
-DEFAULT_OUTPUT = "challenge_waf_bypass.conf"
+
+# Authoritative output: the packaged reference config the installers copy from
+# (/usr/share/cfm/configs/). Resolve it relative to THIS script so a manual
+# `python3 scripts/build_bypass_list.py` (from any cwd) rewrites the right file
+# instead of dropping a stray copy in the current directory.
+DEFAULT_OUTPUT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "configs", "challenge_waf_bypass.conf",
+)
+
+# ── Safety bounds (audit: challenge_waf_bypass.conf generator hardening) ──────
+# Every prefix in the output makes cfm.lua early-return straight to origin,
+# disabling WAF + challenge for that IP space. A single overbroad or poisoned
+# feed prefix would silently turn protection off for a huge range, so we bound
+# what any feed can contribute. The prefix-length floors keep every prefix
+# currently shipped (broadest are IPv4 /16 and IPv6 /32) while rejecting
+# anything wider.
+MIN_IPV4_PREFIXLEN = 16          # reject IPv4 broader than /16 (e.g. /8, 0.0.0.0/0)
+MIN_IPV6_PREFIXLEN = 32          # reject IPv6 broader than /32 (e.g. ::/0)
+MAX_PREFIXES_PER_SOURCE = 10000  # a single feed emitting more than this is suspect
+MAX_PREFIXES_TOTAL = 50000       # runaway-output backstop
+MIN_PREFIXES_TOTAL = 100         # sanity floor: a healthy run yields thousands
+MAX_SHRINK_FRACTION = 0.5        # abort if the new list is < 50% of the existing one
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SOURCES — edit this list to add/remove bypass sources.
@@ -94,6 +124,15 @@ def fetch_json(url: str) -> Any:
 
 
 def normalize_prefix(value: str) -> str | None:
+    """Canonicalize a feed value to a bounded, public CIDR, or None if unusable.
+
+    Validation is intentionally strict (see the safety-bounds block): a feed can
+    only ever ADD a range to the WAF/challenge bypass, so we reject anything that
+    is not a well-formed, public, sufficiently-specific prefix — no 0.0.0.0/0, no
+    RFC1918/loopback/link-local/multicast/reserved, nothing broader than the
+    MIN_*_PREFIXLEN floors. This is the single validator both the generator and
+    the CI check use, so their rules can't drift.
+    """
     raw = (value or "").strip()
     if not raw:
         return None
@@ -104,11 +143,24 @@ def normalize_prefix(value: str) -> str | None:
         return None
     try:
         if "/" in raw:
-            return str(ipaddress.ip_network(raw, strict=False))
-        ip = ipaddress.ip_address(raw)
-        return f"{ip}/32" if ip.version == 4 else f"{ip}/128"
+            net = ipaddress.ip_network(raw, strict=False)
+        else:
+            ip = ipaddress.ip_address(raw)
+            net = ipaddress.ip_network(f"{ip}/{32 if ip.version == 4 else 128}")
     except ValueError:
         return None
+    # Drop special-purpose / non-public ranges — none are legitimate bot space,
+    # and any of them in the bypass list would be a hole (0.0.0.0/0 a global
+    # kill-switch, RFC1918/loopback a per-host bypass for internal traffic).
+    if (net.is_unspecified or net.is_loopback or net.is_link_local
+            or net.is_multicast or net.is_reserved or net.is_private):
+        return None
+    # Drop over-broad prefixes: a wide block from any feed would bypass
+    # protection for far more space than a bot legitimately occupies.
+    min_len = MIN_IPV4_PREFIXLEN if net.version == 4 else MIN_IPV6_PREFIXLEN
+    if net.prefixlen < min_len:
+        return None
+    return str(net)
 
 
 KNOWN_PREFIX_KEYS = {"ipv4prefix", "ipv6prefix", "prefix", "cidr", "network", "netblock", "range"}
@@ -205,11 +257,46 @@ def load_source(spec: str) -> list[SourceResult]:
 
 # ── Output ───────────────────────────────────────────────────────────────────
 
-def render_output(results: list[SourceResult], output: str) -> None:
-    union: set[str] = set()
-    for res in results:
-        union.update(res.prefixes)
+def oneline(value: Any, maxlen: int = 200) -> str:
+    """Flatten a value to a single safe comment token: replace CR/LF and other
+    control characters with a space and clamp the length. Feed-controlled
+    metadata (e.g. a JSON ``creationTime``) is written into ``#`` comment lines,
+    so an embedded newline could otherwise break out of the comment and inject a
+    standalone nginx ``geo`` directive (e.g. ``0.0.0.0/0 1;``) into the file."""
+    s = str(value)
+    s = "".join(ch if (ch.isprintable() and ch not in "\r\n") else " " for ch in s)
+    return s[:maxlen]
 
+
+def count_existing_prefixes(path: str) -> int:
+    """Count ``<cidr> 1;`` data lines in an existing output file (0 if absent)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return sum(
+                1 for line in fh
+                if (s := line.strip()) and not s.startswith("#") and s.endswith(" 1;")
+            )
+    except OSError:
+        return 0
+
+
+def check_thresholds(new_count: int, existing_count: int) -> str | None:
+    """Return an abort reason if the new list is unsafe to write, else None.
+
+    Guards against a partial-feed run silently gutting the list (which for a
+    fail-closed geo include means fewer bypasses = more challenges, an
+    availability regression) and against a runaway/oversized result."""
+    if new_count < MIN_PREFIXES_TOTAL:
+        return f"only {new_count} prefixes (< MIN_PREFIXES_TOTAL={MIN_PREFIXES_TOTAL})"
+    if new_count > MAX_PREFIXES_TOTAL:
+        return f"{new_count} prefixes (> MAX_PREFIXES_TOTAL={MAX_PREFIXES_TOTAL})"
+    if existing_count > 0 and new_count < existing_count * (1.0 - MAX_SHRINK_FRACTION):
+        return (f"{new_count} prefixes is a >{int(MAX_SHRINK_FRACTION * 100)}% shrink "
+                f"vs the existing {existing_count} (partial-feed failure?)")
+    return None
+
+
+def render_output(results: list[SourceResult], output: str, union: set[str]) -> None:
     lines: list[str] = [
         "# Auto-generated nginx/OpenResty geo include for $cfm_bypass_ip",
         f"# Generated at: {datetime.now(timezone.utc).isoformat()}",
@@ -217,22 +304,41 @@ def render_output(results: list[SourceResult], output: str) -> None:
         "#",
         "#   geo $cfm_bypass_ip {",
         "#       default 0;",
-        f"#       include {output};",
+        f"#       include {oneline(os.path.basename(output))};",
         "#   }",
         "#",
     ]
     for res in results:
-        lines.append(f"# source: {res.name}  ({res.kind}, {len(res.prefixes)} prefixes)")
-        lines.append(f"#   {res.origin}")
+        lines.append(f"# source: {oneline(res.name)}  ({oneline(res.kind)}, {len(res.prefixes)} prefixes)")
+        lines.append(f"#   {oneline(res.origin)}")
         for k, v in sorted(res.meta.items()):
-            lines.append(f"#   {k}: {v}")
+            lines.append(f"#   {oneline(k)}: {oneline(v)}")
     lines.append("")
 
     for prefix in sorted(union, key=sort_key):
         lines.append(f"{prefix} 1;")
 
-    with open(output, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines).rstrip() + "\n")
+    data = "\n".join(lines).rstrip() + "\n"
+
+    # Atomic write: a crash / concurrent nginx reload mid-write must never see a
+    # truncated geo file. Write a sibling temp file, fsync, then rename in place.
+    directory = os.path.dirname(os.path.abspath(output)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".challenge_waf_bypass.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        # mkstemp creates 0600; restore the umask-default 0644 so an in-place
+        # regenerate against a live path stays world-readable for nginx.
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, output)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
     print(f"Wrote {output} with {len(union)} unique prefixes from {len(results)} source(s)")
 
@@ -249,13 +355,21 @@ def main() -> int:
 
     for spec in SOURCES:
         try:
-            results.extend(load_source(spec))
+            for res in load_source(spec):
+                if len(res.prefixes) > MAX_PREFIXES_PER_SOURCE:
+                    # A source suddenly emitting a huge set is a red flag (feed
+                    # compromise / format change). Refuse the whole run rather
+                    # than trust it; the existing file is kept untouched.
+                    eprint(f"ERROR: source {res.name} produced {len(res.prefixes)} prefixes "
+                           f"(> MAX_PREFIXES_PER_SOURCE={MAX_PREFIXES_PER_SOURCE}); aborting, keeping existing file")
+                    return 2
+                results.append(res)
         except Exception as exc:
             errors.append(f"{spec}: {exc}")
             eprint(f"ERROR [{spec}]: {exc}")
 
     if not results:
-        eprint("ERROR: no sources produced results")
+        eprint("ERROR: no sources produced results; keeping existing file")
         return 1
 
     empty = [r.name for r in results if not r.prefixes]
@@ -264,7 +378,17 @@ def main() -> int:
     if errors:
         eprint(f"WARNING: {len(errors)} source(s) failed, continuing with {len(results)} that succeeded")
 
-    render_output(results, args.output)
+    union: set[str] = set()
+    for res in results:
+        union.update(res.prefixes)
+
+    # Fail-safe: never replace a good list with a suspiciously small/large one.
+    reason = check_thresholds(len(union), count_existing_prefixes(args.output))
+    if reason is not None:
+        eprint(f"ERROR: refusing to write ({reason}); keeping existing file at {args.output}")
+        return 2
+
+    render_output(results, args.output, union)
     return 1 if errors else 0
 
 

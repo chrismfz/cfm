@@ -63,6 +63,7 @@ make lua
 make test-lua
 ./scripts/tests/check_cli_transport.sh          # CLI transport guardrail (see §5)
 ./scripts/tests/check_cfm_clearance_require.sh   # Lua clearance module load check
+./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf bounds + generator tests
 ```
 
 Additional scanners run in CI: **CodeQL** (`codeql.yml`), **Semgrep**
