@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**11 / 55 fixed.** Grouped by severity; each links to its detail section.
+**12 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -53,7 +53,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ### Medium (19)
 
-- [ ] **[F07](#f07)** · `configs/lua/cfm.lua:488` · _waf-bypass_ (axis a/c) — WAF body inspection gated by a URI allowlist: POST bodies to any non-listed path (/, /search, /checkout, clean-URL routes) are never read
+- [x] **[F07](#f07)** · `configs/lua/cfm.lua:488` · _waf-bypass_ (axis a/c) — WAF body inspection gated by a URI allowlist: POST bodies to any non-listed path (/, /search, /checkout, clean-URL routes) are never read
 - [x] **[F08](#f08)** · `configs/lua/cfm.lua:550` · _waf-bypass_ (axis a/c) — WAF body reader hard-caps at 8192 bytes, defeating larger per-type scan budgets and letting payloads past byte 8192 escape all body rules
 - [x] **[F10](#f10)** · `configs/lua/cfm_waf_excl.lua:79` · _regression_ (axis b) — Exclude glob compiler diverges from Go: Lua `*`->`.*`/`?`->`.` cross `/` (Go uses `[^/]*`), and Lua ignores `[]` globs Go honours — silently widening the in-path WAF-off region _(security half fixed; `[]` parity tracked below)_
 - [x] **[F11](#f11)** · `configs/lua/cfm_waf.lua:1597` · _waf-bypass_ (axis a/c) — /wp-admin/ carve-out disables encoded/base64 <?php backdoor rules 437/438 on pre-auth admin-ajax.php
@@ -238,17 +238,17 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f07"></a>
 ### F07 — WAF body inspection gated by a URI allowlist: POST bodies to any non-listed path (/, /search, /checkout, clean-URL routes) are never read
 
-- **Status:** ☐ open
+- **Status:** ☑ done — body read for all POST/PUT/PATCH with an inspectable Content-Type (POST allowlist kept as fast-path; PUT/PATCH always size-gated)
 - **Severity:** medium · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm.lua:488`
 
-**What & why.** waf_should_read_body() is a positive allowlist (wp-*, /api/, /admin, /login, *.php, /graphql, /rest/, etc.). For any other POST URI it returns false and get_req_body_for_waf() returns ''. All body-aware detectors (SQLi/RCE/XSS/traversal via get_norm_ab, upload/webshell scanners) then see an empty body. The Go log-driven engine only scores access logs (no body), so nothing compensates. An attacker picks any extension-less dynamic endpoint at a vulnerable co-tenant app to smuggle a body-borne exploit past the WAF entirely.
+**What & why.** waf_should_read_body() is a positive allowlist (wp-*, /api/, /admin, /login, *.php, /graphql, /rest/, etc.). For any other POST URI it returns false and get_req_body_for_waf() returns ''. All body-aware detectors (SQLi/RCE/XSS/traversal via get_norm_ab, upload/webshell scanners) then see an empty body. The Go log-driven engine only scores access logs (no body), so nothing compensates. An attacker picks any extension-less dynamic endpoint at a vulnerable co-tenant app to smuggle a body-borne exploit past the WAF entirely. Also POST-only (line 508): PUT/PATCH REST bodies were never read.
 
 **Repro / cost.** POST /process (or /, /v2/orders) with body q=' UNION SELECT ... : waf_should_read_body returns false -> body='' -> no body rule fires -> forwarded to origin. Same payload to /index.php would be inspected.
 
 **Suggested fix.** Read (bounded) the body for all POST/PUT/PATCH with an inspectable Content-Type; keep the allowlist only as a cost hint, not the gate.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `waf_should_read_body` now: (1) accepts **POST/PUT/PATCH** (was POST-only); (2) the read/skip decision is a shared pure helper `util.waf_body_gate(ct, cl, cap)` — read iff the **Content-Type is inspectable** (`urlencoded`/`json`/`multipart`/`xml`/`text`, via `util.ct_is_inspectable`) **and** a **measured** `Content-Length ≤ waf_body_read_max_cl` (default 1 MiB, env `CFM_WAF_BODY_READ_MAX_CL`); **any** body with no declared length (chunked / `Transfer-Encoding: chunked`) is skipped — we can't size-gate what we can't measure. (3) Method handling is asymmetric to keep **zero behavioural change for existing POST flows**: a **POST** on an allowlisted URI still reads regardless of size (pre-F07 fast-path, unchanged); a POST on any other path goes through the gate; **PUT/PATCH on ANY path (incl. allowlisted) go through the gate** — they were never body-inspected before F07, so there is no "read regardless of size" legacy to preserve, and routing them through the gate *before* the allowlist stops a large `PUT /uploads/x.zip` from being force-buffered on a `proxy_request_buffering=off` location just to scan 32 KB (the review's must-fix #1). **Perf/regression analysis (the key concern with F08's 32 KB):** the clean-URL gap is served by `location /`, which inherits the http-level `proxy_request_buffering on` — nginx buffers those bodies before proxying **regardless** of the WAF, so the new POST reads add only bounded **scan CPU** (≤ per-type budget), no new I/O. The buffering-off + WAF-inspected locations (media/archive block, openresty.conf:734, and the non-keyword `/sysadmin/…` PHP/admin regex) are protected by the shared gate: binary/media CTs skip, over-cap lengths skip, and chunked/unmeasurable bodies skip → large uploads keep streaming. **Residuals (documented):** a body-borne payload sent with a non-inspectable Content-Type to a path the origin parses anyway (CT-evasion), and bodies > the CL cap, are not read — narrower than the original all-paths gap. **FP surface:** same rules/tiers, but the block+autoblock-armed `WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME` now scan bodies on more paths — same watch-the-hit-rates posture as F08 (widest of the cluster; `waf_security` `DRY_RUN` is the lever if FPs appear). Verified: `ct_is_inspectable` unit test (Test 11) + a full `waf_body_gate` read/skip truth table (inspectable/over-cap/chunked/binary × present & absent Content-Length, Test 12 in `cfm_waf_body_budget_test.lua`), the chunked-skip row confirmed to FAIL against the pre-fix gate. Adversarially reviewed (needs-fix → must-fix #1 large-PUT buffering + should-fix #2 chunked-cap-bypass both folded in). PR #TBD.
 
 ---
 

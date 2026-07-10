@@ -376,10 +376,52 @@ local function is_ipv6_literal(h)
   return false
 end
 
+-- Content-Types whose request body the body-aware WAF rules can meaningfully
+-- parse (structured text). Used by cfm.lua's body-read gate (audit F07): a
+-- non-inspectable Content-Type — image/video/audio, application/octet-stream,
+-- archives (zip/gzip/…) — returns false so the caller SKIPS reading it, which
+-- (a) keeps large binary/media uploads STREAMING instead of buffered (esp. on
+-- the proxy_request_buffering=off media location) and (b) avoids wasting a scan
+-- on opaque bytes. An absent/blank Content-Type is treated as inspectable
+-- (text-ish); the caller still size-gates it.
+local function ct_is_inspectable(ct)
+  ct = lower(ct or "")
+  if ct == "" then return true end
+  if has(ct, "urlencoded") then return true end   -- application/x-www-form-urlencoded
+  if has(ct, "json")       then return true end   -- application/json, +json
+  if has(ct, "multipart")  then return true end   -- multipart/form-data
+  if has(ct, "xml")        then return true end    -- application/xml, text/xml, +xml
+  if has(ct, "text/")      then return true end    -- text/plain, text/html, …
+  return false
+end
+
+-- Pure body-read gate used by cfm.lua's clean-URL / REST body inspection (audit
+-- F07). Given a request's Content-Type and *numeric* Content-Length (nil when
+-- absent), decide whether the caller should read+buffer the body for WAF
+-- scanning. Skips (returns false) when:
+--   • the Content-Type is not inspectable (binary/media/archive) — keep it
+--     streaming, don't waste a scan on opaque bytes; or
+--   • the Content-Length is absent/unmeasurable (chunked / Transfer-Encoding:
+--     chunked) — we can't size-gate what we can't measure, so don't force-buffer
+--     a potentially unbounded upload on a proxy_request_buffering=off location; or
+--   • the declared length exceeds `cap` — reading only buys us the first ~32 KB
+--     of scan (F08 truncates), so buffering multi-MB/GB bodies has no upside.
+-- Pure (no upvalues beyond ct_is_inspectable / a default cap) so it is unit-
+-- tested directly; cfm.lua isn't loadable, this is where the read/skip truth
+-- table lives.
+local function waf_body_gate(ct, cl, max_cl)
+  if not ct_is_inspectable(ct) then return false end
+  if cl == nil then return false end                    -- chunked/unmeasurable → stream
+  if cl > (max_cl or 1048576) then return false end     -- too large → stream
+  return true
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- EXPORTS
 -- ─────────────────────────────────────────────────────────────────────────────
 
+_M.ct_is_inspectable                  = ct_is_inspectable
+_M.waf_body_gate                      = waf_body_gate
 _M.has                                = has
 _M.header_string                      = header_string
 _M.lower                              = lower

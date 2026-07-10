@@ -202,6 +202,15 @@ local CFG = {
   -- only checks this source default, not the runtime env override.
   waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "32768"),
 
+  -- F07: on non-allowlisted paths the WAF body-read gate skips (does not read,
+  -- and so does not buffer) request bodies whose Content-Length exceeds this.
+  -- We would only ever scan the first waf_body_max_len bytes anyway, so
+  -- buffering a large upload just to peek would regress streaming on the
+  -- proxy_request_buffering=off media location. 1 MiB comfortably covers form /
+  -- JSON / API bodies; larger uploads stream. Allowlisted paths are unaffected
+  -- (they read regardless of size, as before).
+  waf_body_read_max_cl = tonumber(os.getenv("CFM_WAF_BODY_READ_MAX_CL") or "1048576"),
+
   post_resume_enable  = (os.getenv("CFM_POST_RESUME_ENABLE") or "1") == "1",
   post_resume_max_len = tonumber(os.getenv("CFM_POST_RESUME_MAX_LEN") or "65536"),
   post_resume_ttl_sec = tonumber(os.getenv("CFM_POST_RESUME_TTL_SEC") or "90"),
@@ -282,6 +291,11 @@ local ua_emerg_ok, ua_emerg = pcall(require, "cfm_ua_emergency")
 -- pcall here behaves identically to the previous per-request pcall:
 -- a load failure sets waf_ok=false and disables inline WAF checks.
 local waf_ok, waf = pcall(require, "cfm_waf")
+
+-- cfm_waf_util is a dependency of cfm_waf (already loaded); require it directly
+-- for the pure ct_is_inspectable() classifier used by the body-read gate (F07).
+-- If it fails to load, the F07 Content-Type branch fails closed (skips the read).
+local wutil_ok, wutil = pcall(require, "cfm_waf_util")
 
 -- HTTP/3 Alt-Svc emission is intentionally NOT hooked here. It lives in a
 -- server-level header_filter_by_lua_block (see angie.conf / openresty.conf)
@@ -505,7 +519,25 @@ end
 local function waf_should_read_body(uri, method)
   uri    = lower(uri    or "")
   method = lower(method or "")
-  if method ~= "post" then return false end
+  if method ~= "post" and method ~= "put" and method ~= "patch" then return false end
+
+  local ct = lower(ngx.var.http_content_type or "")
+  local cl = tonumber(ngx.var.http_content_length or "")
+
+  -- F07: PUT/PATCH were NOT body-inspected before this change (the gate was
+  -- POST-only), so there is no legacy "read regardless of size" expectation for
+  -- them — bounding them now is strictly safer than the pre-F07 baseline. Route
+  -- them through the size/CT gate BEFORE the POST allowlist so a large REST
+  -- `PUT /uploads/x.zip` (which the allowlist would otherwise wave through)
+  -- keeps STREAMING on a proxy_request_buffering=off location instead of being
+  -- force-buffered just to scan its first waf_body_max_len bytes.
+  if method ~= "post" then
+    return wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl) or false
+  end
+
+  -- POST: known-dynamic endpoints are read regardless of size. This is the
+  -- pre-F07 status quo (these paths were already read+buffered), preserved
+  -- verbatim so F07 introduces ZERO behavioural change for existing POST flows.
   if has(uri, "/xmlrpc.php")      then return true end
   if has(uri, "/wp-login.php")    then return true end
   if has(uri, "/wp-signup.php")   then return true end
@@ -555,7 +587,16 @@ local function waf_should_read_body(uri, method)
   if uri:match("%.phtml[%?/].*") then return true end
   if uri:match("%.php$")         then return true end
   if uri:match("%.phtml$")       then return true end
-  return false
+  -- F07: the allowlist above is a fast-path for known-dynamic endpoints. Beyond
+  -- it, still inspect body-borne payloads on ANY other POST — extension-less /
+  -- clean-URL app routes (/checkout, /order, /cart, custom routers) — which the
+  -- old positive allowlist let smuggle a body-borne SQLi/RCE/webshell past the
+  -- WAF entirely (the Go log engine sees no body). Gate on an inspectable
+  -- Content-Type + a measured, bounded Content-Length so binary/media uploads
+  -- and chunked/streaming bodies keep STREAMING (never force-buffer the
+  -- proxy_request_buffering=off media location) and we don't buffer a large body
+  -- just to scan its first waf_body_max_len bytes.
+  return wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl) or false
 end
 
 local function get_req_body_for_waf(uri, method, max_len)
