@@ -3809,22 +3809,39 @@ function _M.detect_php_decode_chain(body, _headers)
   return nil
 end
 
--- 437 — encoded `<?php` opener in body / upload content.
--- Legit data flows never carry an encoded PHP opener — seeing one is a
--- signal of payload smuggling through a filter that strips/blocks the
--- literal `<?php` bytes. We catch the common encodings:
---   PD9waHA       — base64("<?php")
---   %3C%3Fphp     — URL-encoded
---   &#60;&#63;php — HTML numeric entities
---   &lt;?php      — HTML named-entity for `<`
---   <?php — JS unicode escape
---   \x3c\x3fphp     — JS hex escape
+-- 437/438 — encoded `<?php` opener in a body.
+-- An encoded PHP opener is a smuggling signal ONLY when the encoding is one a
+-- normal client does not emit for content. Audit F16 removed the URL, HTML-
+-- entity and JS-unicode forms because they are exactly how legit content is
+-- transported, not evasion — a challenge on them broke real comment/forum/API
+-- POSTs (the FP this rule kept generating):
+--   • %3c%3fphp / %3c%3f=  — an application/x-www-form-urlencoded body is
+--     url-encoded IN ITS ENTIRETY, so a user who types `<?php` into ANY form
+--     field (blog comment, contact form, forum, paste tool) yields `%3c%3fphp`:
+--     the normal on-wire encoding, indistinguishable from evasion. And the WAF
+--     already unwraps it — the PHP webshell-body scorer (rule 404,
+--     detect_php_webshell_body) normalize()-url-decodes the body, so a
+--     marker-bearing payload (`<?php system($_GET…`) is caught by it (scores
+--     <?php + exec-marker + superglobal, at challenge) regardless of this rule.
+--   • &lt;?php / &#60;&#63;php — rich-text editors HTML-escape pasted code.
+--   • the JS `\uXXXX` unicode-escape opener form — Go's encoding/json (and many
+--     JS encoders) escape a literal `<` to its `\u`-prefixed unicode form by
+--     DEFAULT, so a JSON API echoing user content that mentions `<?php` trips it.
+-- What remains are the two forms a normal browser/JSON client never produces,
+-- so they stay attack-shaped with ~zero FP:
+--   • 438 B64_PHP_OPENER — base64("<?php") = PD9waHA, matched case-sensitively
+--     at a base64 value boundary (see below).
+--   • 437 JS_HEX_OPENER — \x3c\x3fphp, a raw \xNN byte-escape. A url-encoded
+--     backslash is %5c (so a form body cannot carry a literal \x3c), and
+--     normalize() does NOT unwrap \xNN — so rule 404 never sees a bare hex
+--     opener; 437 is the only coverage for a MARKERLESS hex opener (a
+--     marker-bearing one is still caught by 404), worth keeping.
 function _M.detect_php_encoded_opener(body, _headers)
   if not body or body == "" then return nil end
 
   local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
   local raw = cap(body, cap_len)   -- original case — base64 is case-sensitive
-  local s   = lower(raw)           -- lowercased — for the URL/entity/JS forms
+  local s   = lower(raw)           -- lowercased — for the \x hex-escape form
 
   -- Base64 openers are matched case-SENSITIVELY and only at a base64 value
   -- boundary (string start, or right after a non-base64 separator). base64
@@ -3838,18 +3855,18 @@ function _M.detect_php_encoded_opener(body, _headers)
     if raw:sub(1, #needle) == needle then return true end
     return raw:find("[^%w+/_-]" .. needle) ~= nil
   end
-  if b64_opener("PD9waHA")            then return "B64_PHP_OPENER"     end  -- base64("<?php")
+  if b64_opener("PD9waHA")            then return "B64_PHP_OPENER" end  -- base64("<?php") → 438
   -- base64("<?=") = "PD89" (4 chars) intentionally NOT matched: a 4-char base64
   -- prefix is too short to be reliable — it collides with legitimate base64
   -- values (Jetpack / WordPress.com xmlrpc sync, Contact Form 7 submissions).
   -- A 2026-06-25 five-server log review found "PD89" 6/6 false positives and 0
-  -- real hits, so removing it lets rule 437 run at `challenge` without FPs.
-  if has(s, "%3c%3fphp")             then return "URL_PHP_OPENER"     end
-  if has(s, "%3c%3f=")               then return "URL_SHORT_OPENER"   end
-  if has(s, "&#60;&#63;php")         then return "HTML_ENTITY_OPENER" end
-  if has(s, "&lt;?php")              then return "HTML_ENTITY_OPENER" end
-  if has(s, "\\u003c\\u003fphp")     then return "JS_UNICODE_OPENER"  end
-  if has(s, "\\x3c\\x3fphp")         then return "JS_HEX_OPENER"      end
+  -- real hits, so removing it lets rule 438 run at `challenge` without FPs.
+  -- 437: JS `\x` hex-escape opener only. The URL (`%3c%3fphp`), HTML-entity
+  -- (`&lt;?php`) and JS-unicode (`<…`) forms were REMOVED (audit F16) —
+  -- they match the normal on-wire encoding of legit content and marker-bearing
+  -- payloads in them are already caught by rule 404 (detect_php_webshell_body)
+  -- on its url-decoded body (see header comment).
+  if has(s, "\\x3c\\x3fphp")          then return "JS_HEX_OPENER" end
   return nil
 end
 

@@ -62,6 +62,26 @@ back-filled here — see the git/PR history for that period.
   base64 stream (rule 438 on an admin-ajax URI) and separate real attacks from
   plugin noise before any promotion. The rest of `/wp-admin/` (authenticated
   editors) is unchanged. Found by the 2026-07 edge Lua audit (F11).
+- **WAF encoded-`<?php` opener (rule 437) no longer challenges legit content
+  POSTs (F16).** `detect_php_encoded_opener` flagged the URL-encoded
+  (`%3C%3Fphp`), HTML-entity (`&lt;?php`) and JS-unicode encoded forms of a PHP
+  opener in request bodies — but those are the *normal on-wire encoding of
+  legitimate content*, not evasion: an `application/x-www-form-urlencoded` body
+  is url-encoded in its entirety, so any comment/forum/contact-form/paste POST
+  that merely contains `<?php` produced `%3C%3Fphp` and was challenged at rule
+  437 (breaking non-browser API/mobile clients that can't solve the
+  interstitial); rich-text editors HTML-escape pasted code; and Go/JS JSON
+  encoders escape `<` by default. Those three forms are now **removed** from the
+  rule. What remains is attack-shaped with ~zero FP: the **base64** form (438,
+  unchanged — a browser never base64-encodes a field) and the **JS `\x`
+  hex-escape** form (`\x3c\x3fphp`) at 437 — kept because a url-encoded backslash
+  is `%5C` (a form body can't carry a literal `\x3c`) and `normalize()` never
+  unwraps `\xNN`, so 437 is the only coverage for a *markerless* hex opener.
+  Coverage of the removed forms is not lost: a *marker-bearing* payload (`<?php
+  system($_GET…`) is still caught by the PHP webshell-body scorer (rule 404,
+  `detect_php_webshell_body`), which url-decodes the body and scores `<?php` +
+  exec-marker + superglobal at the same `challenge` tier. Found by the 2026-07
+  edge Lua audit (F16).
 - **WAF body inspection no longer truncated below the per-Content-Type scan
   budget (F08).** The edge body reader (`get_req_body_for_waf` in `cfm.lua`)
   handed the WAF at most `waf_body_max_len` = **8192** bytes, but the engine's
