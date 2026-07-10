@@ -89,11 +89,14 @@ func dnatAcceptRuleComment(label string, from, to int) string {
 
 func firstInputDefaultDropHandle(out string) string {
 	for _, line := range strings.Split(out, "\n") {
-		norm := strings.ReplaceAll(line, `"`, "")
-		if !strings.Contains(norm, "ct state new") || !strings.Contains(norm, "dport 0-65535") || !strings.Contains(norm, " drop") || !strings.Contains(norm, " handle ") {
+		// Single source of truth for the default-drop predicate lives in
+		// firewall.IsInputDefaultDropLine so it can't drift from the dnat CLI
+		// reporter; here we additionally need the handle to insert before it.
+		if !firewall.IsInputDefaultDropLine(line) {
 			continue
 		}
-		if !strings.Contains(norm, "tcp dport 0-65535") && !strings.Contains(norm, "udp dport 0-65535") {
+		norm := strings.ReplaceAll(line, `"`, "")
+		if !strings.Contains(norm, " handle ") {
 			continue
 		}
 		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
@@ -116,7 +119,16 @@ func dnatAcceptRuleExpr(spec dnatAcceptRuleSpec, beforeHandle string) string {
 func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
 	_ = b.nftExpr("add table inet cfm")
 	_ = b.nftCmd("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
-	out, _ := b.nftOut("-a list chain inet cfm input")
+	// MUST list via ListChainText (argv mode). nftOut feeds its argument to
+	// `nft -f -` (script mode), where the `-a` handle flag is a syntax error —
+	// that made the listing fail silently, so firstInputDefaultDropHandle saw an
+	// error string, returned "", and the accepts were APPENDED after the default
+	// drop (never reached) instead of inserted before it. Fail closed on a list
+	// error rather than repeating that silent breakage.
+	out, err := b.ListChainText(family, tableName, "input")
+	if err != nil {
+		return fmt.Errorf("list %s %s input chain for dnat accepts: %w", family, tableName, err)
+	}
 	beforeHandle := firstInputDefaultDropHandle(out)
 	if err := b.cleanupScopedDNATAccepts(); err != nil {
 		return err
@@ -133,7 +145,9 @@ func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
 }
 
 func (b *Backend) cleanupScopedDNATAccepts() error {
-	out, err := b.nftOut("-a list chain inet cfm input")
+	// argv-mode listing (see ensureScopedDNATAccepts): a script-mode `-a` list
+	// errors out, which would leave stale accepts undeleted and duplicated.
+	out, err := b.ListChainText(family, tableName, "input")
 	if err != nil {
 		return nil
 	}
@@ -188,59 +202,10 @@ func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 
 // parseDNATListenerPorts scans the `list table inet cfm_redirect` output for
 // the unconditional listener rules created by dnatScript and returns the
-// post-DNAT http/https ports. Returns (0, 0, false) if either is missing.
+// post-DNAT http/https ports. Delegates to firewall.ParseDNATListenerPorts so
+// the dnat CLI status report resolves against the identical parse.
 func parseDNATListenerPorts(out string) (httpPort, httpsPort int, ok bool) {
-	for _, line := range strings.Split(out, "\n") {
-		norm := strings.TrimSpace(strings.ReplaceAll(line, `"`, ""))
-		if !strings.Contains(norm, "dnat to ") {
-			continue
-		}
-		fields := strings.Fields(norm)
-		// expected forms:
-		//   tcp dport 80  dnat to :9080
-		//   tcp dport 443 dnat to :9043
-		//   udp dport 443 dnat to :9043
-		if len(fields) < 6 {
-			continue
-		}
-		if fields[1] != "dport" {
-			continue
-		}
-		from, err := strconv.Atoi(fields[2])
-		if err != nil {
-			continue
-		}
-		var target string
-		for i := 3; i+1 < len(fields); i++ {
-			if fields[i] == "to" {
-				target = fields[i+1]
-				break
-			}
-		}
-		if target == "" {
-			continue
-		}
-		// drop leading host (e.g. ":9080", "127.0.0.1:9080")
-		if idx := strings.LastIndex(target, ":"); idx >= 0 {
-			target = target[idx+1:]
-		}
-		to, err := strconv.Atoi(target)
-		if err != nil || to <= 0 || to > 65535 {
-			continue
-		}
-		switch from {
-		case 80:
-			if fields[0] == "tcp" {
-				httpPort = to
-			}
-		case 443:
-			if fields[0] == "tcp" || fields[0] == "udp" {
-				// tcp+udp both target the same https listener; either is fine.
-				httpsPort = to
-			}
-		}
-	}
-	return httpPort, httpsPort, httpPort > 0 && httpsPort > 0
+	return firewall.ParseDNATListenerPorts(out)
 }
 
 // EnsureDNATAccepts re-asserts the scoped `ct status dnat` accepts in the

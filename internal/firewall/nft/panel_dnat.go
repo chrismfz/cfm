@@ -107,11 +107,8 @@ func panelManagedRulePlacement(out, key string) (handle string, beforeDefaultDro
 }
 
 func isInputDefaultDropLine(line string) bool {
-	norm := strings.ReplaceAll(line, `"`, "")
-	if !strings.Contains(norm, "ct state new") || !strings.Contains(norm, "dport 0-65535") || !strings.Contains(norm, " drop") {
-		return false
-	}
-	return strings.Contains(norm, "tcp dport 0-65535") || strings.Contains(norm, "udp dport 0-65535")
+	// Single source of truth shared with the dnat CLI reporter and dnat.go.
+	return firewall.IsInputDefaultDropLine(line)
 }
 
 func panelDNATAcceptRuleExpr(from, to int, beforeHandle string) string {
@@ -125,7 +122,13 @@ func panelDNATAcceptRuleExpr(from, to int, beforeHandle string) string {
 func (b *Backend) EnsurePanelDNATAccepts() ([]string, error) {
 	_ = b.nftExpr("add table inet cfm")
 	_ = b.nftCmd("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
-	out, _ := b.nftOut("-a list chain inet cfm input")
+	// argv-mode listing (see ensureScopedDNATAccepts in dnat.go): a script-mode
+	// `-a` list is a syntax error, which made beforeHandle "" and the panel
+	// accepts land after the default drop (and duplicate). Fail closed instead.
+	out, err := b.ListChainText(family, tableName, "input")
+	if err != nil {
+		return nil, fmt.Errorf("list %s %s input chain for panel dnat accepts: %w", family, tableName, err)
+	}
 	beforeHandle := firstInputDefaultDropHandle(out)
 	changes := []string{}
 	for _, m := range firewall.PanelDNATMappings() {
@@ -149,7 +152,9 @@ func (b *Backend) EnsurePanelDNATAccepts() ([]string, error) {
 }
 
 func (b *Backend) RemovePanelDNATAccepts() ([]string, error) {
-	out, err := b.nftOut("-a list chain inet cfm input")
+	// argv-mode listing: a script-mode `-a` list errors, which would report
+	// every mapping as "not found" and leave the real accepts in place.
+	out, err := b.ListChainText(family, tableName, "input")
 	if err != nil {
 		return nil, nil
 	}
@@ -183,13 +188,23 @@ func (b *Backend) PanelDNATAcceptState() map[int]string {
 	for _, m := range firewall.PanelDNATMappings() {
 		state[m.To] = "unknown"
 	}
-	out, err := b.nftOut("-a list chain inet cfm input")
+	// argv-mode listing: a script-mode `-a` list errors, which previously made
+	// this report every panel port "blocked" even when the accepts were fine.
+	out, err := b.ListChainText(family, tableName, "input")
 	if err != nil {
 		return state
 	}
 	for _, m := range firewall.PanelDNATMappings() {
-		if strings.Contains(out, fmt.Sprintf("tcp dport %d", m.To)) && strings.Contains(out, panelDNATAcceptComment(m.From, m.To)) && strings.Contains(out, "ct status dnat") {
-			state[m.To] = "open"
+		// Placement-aware, matching the web-scope resolver: a managed accept
+		// only counts as "open" when it sits BEFORE the default drop. A
+		// substring match anywhere in the chain would report an accept
+		// stranded after the drop (the exact bug this file fixes) as open.
+		if _, beforeDrop, ok := panelManagedRulePlacement(out, panelDNATAcceptKey(m.From, m.To)); ok {
+			if beforeDrop {
+				state[m.To] = "open"
+			} else {
+				state[m.To] = "blocked"
+			}
 		} else if out != "" {
 			state[m.To] = "blocked"
 		}
