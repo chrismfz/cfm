@@ -18,3 +18,7 @@ configs/*.mmdb
 # OS
 .DS_Store
 /cfm
+
+# Python bytecode (scripts/build_bypass_list.py + tests)
+__pycache__/
+*.pyc

@@ -12,6 +12,7 @@ relevant output and stop (don't keep going past a hard failure).
 5. `make test-lua`
 6. `./scripts/tests/check_cli_transport.sh`
 7. `./scripts/tests/check_cfm_clearance_require.sh`
+8. `./scripts/tests/check_bypass_list.sh`
 
 If everything passes, say so explicitly. If something fails, summarize what
 broke and the most likely fix. Do not commit or push.

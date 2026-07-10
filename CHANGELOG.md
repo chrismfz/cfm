@@ -18,6 +18,29 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Challenge/WAF bypass-list generator hardened against overbroad / poisoned
+  feed prefixes.** `configs/challenge_waf_bypass.conf` is a geo include whose
+  every prefix makes `cfm.lua` early-return straight to origin, disabling WAF
+  **and** challenge for that IP space. Its generator (`scripts/build_bypass_list.py`,
+  a manually-run Python script — there is no "Go generator" despite the audit
+  note) previously validated only CIDR *syntax*: an over-broad or poisoned feed
+  prefix (`0.0.0.0/0`, a `/8`, a whole hosting ASN) would have been emitted
+  verbatim and silently turned protection off for a huge range, and a
+  feed-controlled JSON `creationTime` written into a comment could inject a
+  standalone geo directive via an embedded newline. The generator now: rejects
+  non-public ranges (`0.0.0.0/0`/`::/0`, RFC1918/loopback/link-local/multicast/
+  reserved) and anything broader than the shipped floors (IPv4 `/16`, IPv6 `/32`
+  — no current prefix dropped), with per-source and total count caps that abort
+  the run; sanitises all metadata (strips CR/LF/control) before writing; writes
+  atomically (temp + fsync + rename); and refuses to replace the list with a
+  suspiciously small one (< floor or a >50% shrink), keeping the last-good file.
+  A new offline CI guardrail `scripts/tests/check_bypass_list.sh` (+
+  `bypass_list_test.py`) unit-tests these bounds and re-validates the committed
+  `challenge_waf_bypass.conf` with the generator's own `normalize_prefix` (no
+  network, no rule drift), wired into `security.yml` and `/preflight`. The unused
+  duplicate `scripts/challenge_waf_bypass.conf` was removed and the generator's
+  default output now resolves to the authoritative `configs/` copy. Found by the
+  2026-07 edge audit coverage-gap review.
 - **GhostLock (CVE-2026-43499) posture — design note.** Added
   `docs/ghostlock-tenant-seccomp-design.md`: a design-only guide for the one
   runtime control that could *prevent* (not just degrade/detect) the public
