@@ -61,11 +61,13 @@ local function long_b64(n)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Shipped-default mode regression. rule 437 was split into 437 (URL/HTML/JS
--- forms) + 438 (base64 opener) on 2026-07-02; BOTH ship at `challenge` (438 is
--- a candidate for `block` after a burn-in, but starts at challenge). Assert the
--- built-in CFG defaults before any set_rule() mutation, so a later promotion is
--- a deliberate edit here rather than silent drift.
+-- Shipped-default mode regression. rule 437 (encoded `<?php` opener) was split
+-- into 437 + 438 (base64) on 2026-07-02; audit F16 then NARROWED 437 to the JS
+-- `\x` hex-escape form only (the URL/HTML-entity/JS-unicode forms were removed
+-- as legit-content encodings). BOTH still ship at `challenge` (438 is a
+-- candidate for `block` after a burn-in). Assert the built-in CFG defaults
+-- before any set_rule() mutation, so a later promotion is a deliberate edit here
+-- rather than silent drift.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 do
@@ -748,13 +750,13 @@ do
         "438 b64 PD9waHA — routed to rule id 438")
 end
 
--- Routing split: with only rule 437 (URL/HTML/JS) enabled and 438 disabled,
--- a base64 opener must NOT fire (it belongs to 438); with only 438 enabled,
--- a URL opener must NOT fire (it belongs to 437). Proves the two variants are
--- independently controllable.
+-- Routing split: 437 = the JS `\x` hex-escape form, 438 = the base64 form; they
+-- are independently controllable. With only 437 enabled a base64 opener must NOT
+-- fire (it belongs to 438); with only 438 enabled a hex-escape opener must NOT
+-- fire (it belongs to 437).
 do
   disable_all_rules()
-  waf.set_rule("rule_php_encoded_opener", "block")   -- 437 (non-base64) only
+  waf.set_rule("rule_php_encoded_opener", "block")   -- 437 (hex-escape) only
   local hit = waf.check(ctx([[payload=PD9waHAgZWNobyAieCI7ID8+]]))
   check(hit ~= true, "split — base64 opener does not fire when only 437 is enabled")
 end
@@ -762,40 +764,49 @@ end
 do
   disable_all_rules()
   waf.set_rule("rule_php_encoded_opener_b64", "block")  -- 438 (base64) only
-  local hit, reason = waf.check(ctx([[code=%3C%3Fphp%20echo%20'x'%3B%20%3F%3E]]))
-  check(hit ~= true, "split — URL opener does not fire when only 438 is enabled")
-  local _ = reason
+  local body = 'x = "' .. "\\x3c\\x3fphp" .. '";'
+  local hit = waf.check(ctx(body))
+  check(hit ~= true, "split — hex-escape opener does not fire when only 438 is enabled")
 end
 
+-- 437 positive — JS `\x` hex-escape opener `\x3c\x3fphp` (the ONE encoded form
+-- kept after audit F16). A raw \xNN byte-escape is never produced by a
+-- url-encoded form body (backslash → %5c) or a JSON encoder, and normalize()
+-- does not unwrap it — so it is 437's unique, non-redundant coverage.
 do
   disable_all_rules()
   waf.set_rule("rule_php_encoded_opener", "challenge")
 
-  local hit, reason = waf.check(ctx([[code=%3C%3Fphp%20echo%20'x'%3B%20%3F%3E]]))
-  check(hit == true,                              "437 URL-encoded — hit=true")
-  check(reason == "WAF_BACKDOOR:URL_PHP_OPENER",  "437 URL-encoded — reason")
-end
-
-do
-  disable_all_rules()
-  waf.set_rule("rule_php_encoded_opener", "challenge")
-
-  local hit, reason, _ttl, _action, hits = waf.check(ctx([[body=&#60;&#63;php echo 'x'; &#63;&#62;]]))
-  check(hit == true,                                "437 HTML entity — hit=true")
-  check(reason == "WAF_BACKDOOR:HTML_ENTITY_OPENER", "437 HTML entity — reason")
+  local body = 'var c = "' .. "\\x3c\\x3fphp" .. ' eval($_POST[\'x\']);";'
+  local hit, reason, _ttl, _action, hits = waf.check(ctx(body))
+  check(hit == true,                            "437 JS hex — hit=true")
+  check(reason == "WAF_BACKDOOR:JS_HEX_OPENER", "437 JS hex — reason")
   check(type(hits) == "table" and hits[1] and hits[1].waf_rule_id == 437,
-        "437 HTML entity — routed to rule id 437")
+        "437 JS hex — routed to rule id 437")
 end
 
+-- audit F16 — the URL, HTML-entity and JS-unicode encoded-opener forms were
+-- REMOVED from rule 437: they are the normal on-wire encoding of legit content
+-- (a form body is url-encoded in its entirety; rich-text editors HTML-escape;
+-- Go/JS JSON escapes `<`), and marker-bearing payloads in them are already
+-- caught by rule 404 (detect_php_webshell_body) on its url-decoded body. With
+-- BOTH encoded-opener rules at challenge, none of these forms fire.
 do
   disable_all_rules()
   waf.set_rule("rule_php_encoded_opener", "challenge")
+  waf.set_rule("rule_php_encoded_opener_b64", "challenge")
 
-  -- JS unicode escape — `<?php` (escapes preserved as literal bytes)
+  check(waf.check(ctx([[code=%3C%3Fphp%20echo%20'x'%3B%20%3F%3E]])) ~= true,
+        "F16 — URL-encoded %3C%3Fphp no longer fires")
+  check(waf.check(ctx([[code=%3C%3F%3D%20$x%20%3F%3E]])) ~= true,
+        "F16 — URL-encoded short-tag %3C%3F= no longer fires")
+  check(waf.check(ctx([[body=&#60;&#63;php echo 'x'; &#63;&#62;]])) ~= true,
+        "F16 — HTML numeric-entity &#60;&#63;php no longer fires")
+  check(waf.check(ctx([[body=&lt;?php echo 'x';]])) ~= true,
+        "F16 — HTML named-entity &lt;?php no longer fires")
   local body = 'var c = "' .. "\\u003c\\u003fphp" .. ' eval($_POST[\'x\']);";'
-  local hit, reason = waf.check(ctx(body))
-  check(hit == true,                              "437 JS unicode — hit=true")
-  check(reason == "WAF_BACKDOOR:JS_UNICODE_OPENER", "437 JS unicode — reason")
+  check(waf.check(ctx(body)) ~= true,
+        "F16 — JS-unicode \\u003c\\u003fphp no longer fires")
 end
 
 -- Negative: legit base64 payload that doesn't decode to <?php

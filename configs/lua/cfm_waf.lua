@@ -242,15 +242,18 @@ local CFG = {
   rule_php_superglobal_callable   = "logonly", -- $_GET[c]( / $_POST[c]( / $_SERVER[HTTP_X_…]( minimalist webshell
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
   rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
-  rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener — URL / HTML-entity / JS-escape forms
-                                                 -- (%3C%3Fphp, &#60;&#63;php, <?php, \x3c\x3fphp).
-                                                 -- Kept at challenge DELIBERATELY: a browser url-encodes a user-typed
-                                                 --  `<?php` in ANY application/x-www-form-urlencoded field to `%3C%3Fphp`,
-                                                 --  so a blog comment / contact-form / paste-tool POST that legitimately
-                                                 --  contains a PHP snippet fires this rule. `challenge` preserves + replays
-                                                 --  the POST after the interstitial; `block` would 403 and drop it. Do not
-                                                 --  promote this variant without a front-end/comment carve-out.
-                                                 --  (promoted logonly→challenge 2026-06-25.)
+  rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener — JS `\x` hex-escape form only (`\x3c\x3fphp`).
+                                                 -- Audit F16 REMOVED the URL (`%3C%3Fphp`), HTML-entity (`&lt;?php`) and
+                                                 --  JS-unicode (`<…`) forms: they are the normal on-wire encodings of
+                                                 --  legit content (a form body is url-encoded in its entirety; editors
+                                                 --  HTML-escape; Go/JS JSON escapes `<`), so they FP-challenged real
+                                                 --  comment/forum/API POSTs, and marker-bearing payloads in them are already
+                                                 --  caught by the PHP webshell-body scorer (rule 404 detect_php_webshell_body),
+                                                 --  which normalize()-url-decodes the body and scores <?php+exec-marker+
+                                                 --  superglobal at challenge. `\x3c` is NOT a `%xx` escape so normalize() never
+                                                 --  unwraps it — so 404 never sees a bare hex opener; 437 is its only coverage
+                                                 --  for a MARKERLESS hex opener, attack-shaped with ~zero FP. `challenge`
+                                                 --  preserves+replays the POST. (logonly→challenge 2026-06-25; narrowed F16.)
   rule_php_encoded_opener_b64     = "challenge", -- encoded `<?php` opener — base64 form (`PD9waHA` at a base64 value boundary).
                                                  -- Split out of rule 437 into its own id (438) on 2026-07-02 so its hit
                                                  --  stream is observable separately from the FP-prone URL form above. Unlike
@@ -1577,17 +1580,19 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 59) PHP encoded `<?php` opener (437 URL/HTML/JS forms · 438 base64) ───
+  -- ── 59) PHP encoded `<?php` opener (437 JS `\x` hex-escape · 438 base64) ───
   do
     -- Two rule ids share one detector and the /wp-admin/ carve-out, differing
-    -- only in id + mode. 437 = URL / HTML-entity / JS-escape forms, which are
-    -- FP-prone: a browser url-encodes a user-typed `<?php` in a form field to
-    -- `%3C%3Fphp`, so a legit comment / contact-form / paste-tool POST fires
-    -- it — kept at `challenge`, which preserves+replays the POST. 438 = the
-    -- base64 form (`PD9waHA` at a value boundary), which a browser never emits
-    -- for a form field → payload-smuggling only, tuned/observed independently
-    -- (the block candidate). The detector checks base64 first, so a base64
-    -- opener is attributed to 438 and everything else to 437.
+    -- only in id + mode. 437 = the JS `\x` hex-escape form (`\x3c\x3fphp`) —
+    -- audit F16 REMOVED the FP-prone URL / HTML-entity / JS-unicode forms (they
+    -- match the normal on-wire encoding of legit content and marker-bearing
+    -- payloads in them are already caught by the PHP webshell-body scorer, rule
+    -- 404 detect_php_webshell_body, on its normalize()-url-decoded body), leaving
+    -- only this attack-shaped form; kept at `challenge`, which preserves+replays.
+    -- 438 = the base64 form (`PD9waHA` at a value boundary), which a browser
+    -- never emits for a form field → payload-smuggling only, tuned/observed
+    -- independently (the block candidate). The detector checks base64 first, so
+    -- a base64 opener is attributed to 438 and the hex-escape form to 437.
     local mode_enc = rule_mode(CFG.rule_php_encoded_opener, "logonly")
     local mode_b64 = rule_mode(CFG.rule_php_encoded_opener_b64, "logonly")
     -- WPCode, Code Snippets, Insert PHP Code Snippet, and similar

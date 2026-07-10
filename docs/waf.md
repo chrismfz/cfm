@@ -398,10 +398,13 @@ safer the rule.
 `/wp-admin/admin-ajax.php`. The admins were saving PHP snippets via
 the WPCode plugin's editor.
 
-**Root cause:** `detect_php_encoded_opener` looks for base64 / URL-
+**Root cause:** `detect_php_encoded_opener` looked for base64 / URL-
 encoded / HTML-entity / JS-escape forms of `<?php` in request bodies
 — an encoding bypass primitive for upload-vetting WAFs that look for
-literal `<?php`. WPCode (and Code Snippets, Insert PHP Code Snippet,
+literal `<?php`. (Audit **F16** later removed the URL / HTML-entity /
+JS-unicode forms as legit-content encodings, leaving base64 + JS `\x`
+hex-escape — but WPCode's own bodies are **base64**, so this case is
+unaffected by F16.) WPCode (and Code Snippets, Insert PHP Code Snippet,
 …) lets admins author PHP snippets through the WP admin UI. When the
 admin saves, the plugin POSTs the snippet body to admin-ajax.php; the
 plugin serialises the snippet contents in base64. The body literally
@@ -428,8 +431,8 @@ blanket suppression there is a pre-auth WAF blind spot for base64
 `<?php` smuggling. But the edge can't distinguish a legit WPCode save
 from a nopriv attack (both are base64 `<?php` on admin-ajax; the WP
 cookie is spoofable), so enforcing would just re-run this incident.
-The carve-out is therefore split: **437** (url/entity form) stays fully
-suppressed on all `/wp-admin/`; **438** (base64) is kept **`logonly`**
+The carve-out is therefore split: **437** (the JS `\x` hex-escape form
+after F16) stays fully suppressed on all `/wp-admin/`; **438** (base64) is kept **`logonly`**
 on the two pre-auth endpoints (detect-and-watch, zero enforcement — a
 `logonly` hit is dropped by the autoblock feed, which ingests only
 `action=block`, and no `WAF_BACKDOOR` rule is block-tier, so no ban even
@@ -559,7 +562,7 @@ Current assignments:
                                        434  rule_php_superglobal_callable
                                        435  rule_php_concat_funcname_eval
                                        436  rule_php_decode_chain
-                                       437  rule_php_encoded_opener       (URL/HTML/JS forms)
+                                       437  rule_php_encoded_opener       (JS \x hex-escape form)
                                        438  rule_php_encoded_opener_b64   (base64 form)
 
 5xx — Auth abuse
@@ -731,30 +734,29 @@ Collect their positions in the body. Fire if **any three** occurrences fall with
 
 **FP notes:** some WordPress plugins (security loggers, translation files, packaged archives via `pack`) do use multiple decoders — but in separate functions / methods, easily > 300 bytes apart. WP core itself uses `base64_decode` and `pack` in `wp-includes/pomo` but never three in proximity. Production data over a logonly week will confirm.
 
-### Rules 437 / 438 — `rule_php_encoded_opener` (URL/HTML/JS) · `rule_php_encoded_opener_b64` (base64)
+### Rules 437 / 438 — `rule_php_encoded_opener` (JS `\x` hex-escape) · `rule_php_encoded_opener_b64` (base64)
 
-**Catches:** an encoded `<?php` opener in body / upload content — a strong signal of payload smuggling through a filter that strips/blocks the literal opener. **Split into two rule ids on 2026-07-02** (one detector, routed by encoding) so the FP-prone URL/entity/JS forms and the attack-only base64 form can be tuned and observed independently:
+**Catches:** an encoded `<?php` opener in a body — a signal of payload smuggling through a filter that strips/blocks the literal opener, but *only* for encodings a normal client does not emit for content. **Split into two rule ids on 2026-07-02** (one detector, routed by encoding); **audit F16 (2026-07) then removed the URL / HTML-entity / JS-unicode forms** from 437 because they are the normal on-wire encoding of legitimate content, leaving only the two attack-shaped forms:
 
 | Rule | Encoding | Bytes detected | Tag |
 |---|---|---|---|
 | **438** | Base64 of `<?php` | `PD9waHA` (boundary-anchored, case-sensitive) | `B64_PHP_OPENER` |
-| **437** | URL-encoded | `%3C%3Fphp`, `%3C%3F=` | `URL_PHP_OPENER`, `URL_SHORT_OPENER` |
-| **437** | HTML numeric entity | `&#60;&#63;php` | `HTML_ENTITY_OPENER` |
-| **437** | HTML named entity (partial) | `&lt;?php` | `HTML_ENTITY_OPENER` |
-| **437** | JS unicode escape | `<?php` | `JS_UNICODE_OPENER` |
-| **437** | JS hex escape | `\x3c\x3fphp` | `JS_HEX_OPENER` |
+| **437** | JS `\x` hex escape | `\x3c\x3fphp` | `JS_HEX_OPENER` |
 
-The detector checks base64 first, so a base64 opener is attributed to **438** and every other encoded form to **437**.
+The detector checks base64 first, so a base64 opener is attributed to **438** and the hex-escape form to **437**.
 
-**Why the split:** the two encodings have opposite FP profiles.
-- **URL/HTML/JS (437)** is FP-prone: a browser **url-encodes a user-typed `<?php`** in any `application/x-www-form-urlencoded` field to exactly `%3C%3Fphp`, so a legitimate blog comment (`/wp-comments-post.php`), contact-form, or code-paste POST that contains a PHP snippet fires the rule. It must stay at `challenge` (which preserves + replays the POST after the interstitial) unless a front-end/comment carve-out is added first — a hard `block` would 403 and drop the submission.
-- **base64 (438)** is attack-only: a browser never base64-encodes a form field, and the match is boundary-anchored + case-sensitive, so `PD9waHA` at a value boundary (`p=PD9waHA…`) only appears in deliberate payload smuggling. A 2026-07 six-server review found 16/16 base64 openers were botnet POSTs of base64 `<?php` to `/xmlrpc.php`, 0 FP. This is the promotion candidate (see FP notes).
+**Why the removed forms were removed (F16):** the URL / HTML-entity / JS-unicode encodings are exactly how legit content is *transported*, not evasion, so they FP-challenged real comment / forum / API POSTs — and the traffic that *matters* is already covered elsewhere:
+- **`%3C%3Fphp` / `%3C%3F=` (URL):** an `application/x-www-form-urlencoded` body is url-encoded **in its entirety**, so a user who types `<?php` into any form field (blog comment, contact form, forum, paste tool) produces exactly `%3C%3Fphp` — indistinguishable from evasion. And the **PHP webshell-body scorer** (rule 404, `detect_php_webshell_body`) `normalize()`-url-decodes the body, so a **marker-bearing** payload (`<?php system($_GET…`) is caught by it (`<?php` + exec-marker + superglobal, at `challenge`) regardless of this rule.
+- **`&lt;?php` / `&#60;&#63;php` (HTML entity):** rich-text editors HTML-escape pasted code.
+- **JS-unicode `\uXXXX` opener:** Go's `encoding/json` (and many JS encoders) escape a literal `<` to its `\u`-prefixed form **by default**, so a JSON API echoing user content trips it.
 
-**Why it matters:** an encoded PHP opener where the encoding is not something a browser produces for form input is high-confidence payload-smuggling-through-filter, at essentially zero detection cost (a handful of substring checks).
+**What remains (both attack-shaped, ~zero FP):**
+- **438 (base64):** a browser never base64-encodes a form field; the match is boundary-anchored + case-sensitive, so `PD9waHA` at a value boundary (`p=PD9waHA…`) only appears in deliberate smuggling. A 2026-07 six-server review found 16/16 base64 openers were botnet POSTs of base64 `<?php` to `/xmlrpc.php`, 0 FP. The promotion candidate (see FP notes).
+- **437 (JS `\x` hex escape):** `\x3c\x3fphp` is a raw `\xNN` byte-escape. A url-encoded backslash is `%5C`, so a form body cannot carry a literal `\x3c`; and `normalize()` does **not** unwrap `\xNN` (it decodes only `%xx`) — so rule 404 never sees a bare hex opener, making 437 the **only** coverage for a *markerless* hex opener (a marker-bearing one is still caught by 404). That non-redundancy, plus near-zero FP, is why it was kept when the redundant-and-FP-prone forms were cut.
 
-**How:** the URL / HTML-entity / JS-escape forms are matched as substrings on the lowercased body (those encodings are legitimately case-insensitive and structured). The **base64** form (`PD9waHA`) is matched **case-sensitively** (base64 is a case-sensitive alphabet) and **only at a base64 value boundary** — string start or right after a non-base64 separator. The base64 `<?=` short-tag form (`PD89`) is **intentionally not matched**: a 4-char base64 token collides with legitimate base64 data (a 2026-06-25 review found it 6/6 FP), so it was removed. The URL-encoded short-tag `%3C%3F=` is still matched (structured, collision-free).
+**How:** the `\x` hex-escape form is matched as a substring on the lowercased body. The **base64** form (`PD9waHA`) is matched **case-sensitively** (base64 is a case-sensitive alphabet) and **only at a base64 value boundary** — string start or right after a non-base64 separator. The base64 `<?=` short-tag form (`PD89`) is **intentionally not matched**: a 4-char base64 token collides with legitimate base64 data (a 2026-06-25 review found it 6/6 FP), so it was removed.
 
-**FP notes:** **base64 boundary fix 2026-06-04.** The base64 check was originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive) — while dropping mid-blob / case-variant collisions. **Both rules ship at `challenge` (promoted `logonly` → `challenge` 2026-06-25; split 2026-07-02).** 438 (base64) is the candidate for `block` after a 1-2 week burn-in of the per-rule-id split telemetry; 437 (URL/HTML/JS) stays at `challenge` because of the form-encoded FP class above. `/wp-admin/*` paths are suppressed for both (WPCode / Code Snippets legitimately POST encoded `<?php` bodies there), with one **audit-F11 exception**: the pre-auth `admin-ajax.php` / `admin-post.php` endpoints keep 438 (base64) at `logonly` (detect-only, no enforcement) because they are reachable unauthenticated (`nopriv` actions) — the blanket "already gated by WP cookie-auth" assumption doesn't hold there. See FP case 5 for the full rationale. Any residual doc / security-research edge case is handled by per-vhost exclusion.
+**FP notes:** **base64 boundary fix 2026-06-04.** The base64 check was originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive) — while dropping mid-blob / case-variant collisions. **Both rules ship at `challenge` (promoted `logonly` → `challenge` 2026-06-25; split 2026-07-02; 437 narrowed to `\x` hex-escape by F16 2026-07).** 438 (base64) is the candidate for `block` after a 1-2 week burn-in of the per-rule-id split telemetry. `/wp-admin/*` paths are suppressed for both (WPCode / Code Snippets legitimately POST base64 `<?php` bodies there), with one **audit-F11 exception**: the pre-auth `admin-ajax.php` / `admin-post.php` endpoints keep 438 (base64) at `logonly` (detect-only, no enforcement) because they are reachable unauthenticated (`nopriv` actions) — the blanket "already gated by WP cookie-auth" assumption doesn't hold there. See FP case 5 for the full rationale. Any residual doc / security-research edge case is handled by per-vhost exclusion.
 
 ### How they compose
 
