@@ -68,7 +68,10 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
     // 1a) Fold any WAF-plane findings into the locate result so they ride back
     // on the unblock-confirm call. This is how the OpenResty/Lua enforcement
     // planes (challenge/block/throttle) surface in cfm-web's fleet-wide
-    // "Blocked On" summary — they never appear in a blocklist search.
+    // "Found On (where & why)" summary — they never appear in a blocklist
+    // search. Each Location carries an Action (ALLOW/BLOCK/CHALLENGE/MATCH) so
+    // cfm-web can label it correctly rather than assuming every finding is a
+    // block.
     if res.WAF != nil && len(res.WAF.Cleared) > 0 {
         if found == nil {
             found = &locate.Result{Query: ipStr}
