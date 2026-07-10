@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**7 / 55 fixed.** Grouped by severity; each links to its detail section.
+**8 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -48,7 +48,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F03](#f03)** · `configs/lua/cfm_panel_tunnel.lua:243` · _security_ (axis c) — Account-transfer tunnel forwards client-supplied X-Forwarded-For/X-Real-IP/CF-Connecting-IP verbatim to cpsrvd (source-IP spoofing)
 - [x] **[F04](#f04)** · `configs/lua/cfm.lua:692` · _perf_ (axis b) — http_unix blocks ~300ms per empty-body 200 (Content-Length:0), turning every synchronous WAF-autoblock push into a worker stall / DoS amplifier
 - [x] **[F05](#f05)** · `configs/lua/cfm_waf_detectors.lua:1262` · _waf-bypass_ (axis a/c) — Backtick command-substitution detector is dead code: Lua patterns have no `|` alternation, so most backtick RCE payloads bypass PAY_BACKTICK (rule 317)
-- [ ] **[F06](#f06)** · `configs/openresty.conf:674` · _waf-bypass_ (axis a/c) — Static-asset location bypasses cfm.lua (WAF/challenge) for any path ending in an asset extension, enabling PHP path-info WAF bypass
+- [x] **[F06](#f06)** · `configs/openresty.conf:674` · _waf-bypass_ (axis a/c) — Static-asset location bypasses cfm.lua (WAF/challenge) for any path ending in an asset extension, enabling PHP path-info WAF bypass
 - [x] **[F09](#f09)** · `configs/lua/cfm_waf.lua:633` · _waf-bypass_ (axis a/c) — args consumes the shared body scan budget in get_norm_ab, so a padded query string truncates the POST body out of all body-aware WAF rules
 
 ### Medium (19)
@@ -202,7 +202,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f06"></a>
 ### F06 — Static-asset location bypasses cfm.lua (WAF/challenge) for any path ending in an asset extension, enabling PHP path-info WAF bypass
 
-- **Status:** ☐ open
+- **Status:** ☑ done — static-bypass location regex now excludes `.php…/` path-info
 - **Severity:** high · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/openresty.conf:674`
 
@@ -212,7 +212,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Guard the static bypass to reject paths containing .php/.phtml earlier in the path, or require the whole path to match a safe static pattern.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** All 4 static-bypass locations (openresty.conf HTTP+HTTPS, angie.conf HTTP+HTTPS) now anchor the regex with a leading PHP-scoped negative-lookahead: `location ~* "^(?!.*\.(?:phtml|pht|php[0-9]|php|phar)/).*\.(?:css|js|…|map)$"`. Any URL containing a `.php…/` (also `.phtml/`, `.pht/`, `.php5/`, `.phar/`) segment no longer matches the bypass and falls through to the server-level cfm.lua, so path-info exec vectors are inspected again. **Option A (PHP-scoped)** was chosen over a whole-path allowlist: it closes the exec vector with **zero FP** on genuine static — including `?v=` cache-busters (nginx location matching runs against `$uri`, which excludes the query, so the old inert `(?:\?.*)?$` tail was dropped) and legitimately-named `foo.php.css`. **Residuals (accepted, documented in-config), narrower than the `.php/` case and still seen by the log-driven engine:** (1) a real `.css` that mod_rewrites to a front controller with a malicious query; (2) a multi-extension name like `/evil.php.jpg/x.css` — executes as PHP only under the legacy `AddHandler …/x-httpd-php .php` form, NOT modern EA4 `<FilesMatch \.php$>`; closing it would require a `[./]`-after-php lookahead that FPs on legit `foo.php.css` under EA4, so it is intentionally left; (3) non-PHP path-info handlers (`.cgi`/`.pl`/`.py`/`.shtml`), out of the deliberately PHP-scoped guard. The guard covers the universal fix_pathinfo `.php/` vector that executes regardless of handler style. Verified three ways: (1) PCRE logic — 14/14 cases incl. `/evil.php/x.css` & `/x.phar/y.css`→fall-through, uppercase `.PHP/`, `.php5/`/`.phtml/`/`.pht/`, `/a.php.css`→static, `/evil.php.jpg/x.css`→static (residual); (2) `nginx -t` parses the quoted negative-lookahead location; (3) **live nginx routing** — `/style.css`, `/app.js?v=123`, `/img/logo.PNG`, `/a.php.css` route to the static fast-path while `/evil.php/x.css`, `/x.phar/y.css`, `/uploads/shell.php/avatar.png`, `/wp-content/x.php/loader.js` fall through to WAF. Adversarially reviewed (verdict: ship; no encoded-slash `%2f` bypass — nginx decodes into `$uri` before location matching; `phar` added and residuals disclosed on the reviewer's recommendation). PR #1053.
 
 ---
 
