@@ -289,6 +289,29 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **ClamAV upload scan no longer blinded by a padded multipart body (F17).** The
+  Lua ClamAV lane decided whether a multipart POST carried a file to scan by
+  substring-matching `filename=` in `ngx.ctx.waf_body` — the WAF's first
+  `waf_body_max_len` bytes (32 KB), which is also **absent** when the WAF skipped
+  the body read (a body over its Content-Length gate). An attacker could prepend a
+  large non-file form field so the `filename=` landed **past the cap**, making
+  `has_file_part()` return false and the upload evade the AV scan entirely (the
+  Go bridge scans whatever body file it's handed, so the whole gate lived in Lua).
+  The decision (`wants_scan`) now **fails safe**: if the inspected view shows no
+  file part but the real body has bytes beyond it (nginx spooled it to disk),
+  scan anyway — the scan always covers the full spooled body, so a file part
+  beyond the cap is still caught. A genuinely small, fully-inspected multipart
+  with no `filename=` still stays in the WAF lane only (no wasted scan), so the
+  "scan only real uploads" resource posture is preserved for common
+  admin-ajax/FormData. Normal uploads (file field first, `filename=` in the first
+  bytes) already hit the fast path and are unchanged, but this **does** add new
+  scans on file-hosting boxes: the padding-evasion case, large non-file multipart,
+  and — a coverage gain — uploads the WAF skipped entirely (body over its 1 MB
+  Content-Length gate, or chunked) that were **never** scanned before. Each spooled
+  scan copies the full body first, so watch ClamAV load after upgrade; a body-size
+  cap before enqueue is a sensible follow-up (there is none today). The `filename=`
+  match is now fully case-insensitive (`FILENAME=`/`FileName=`), closing a small
+  in-memory evasion. Found by the 2026-07 edge Lua audit (F17).
 - **sslcollector socket now self-heals and no longer orphans itself on restart
   (F27/F28).** The unix socket that serves TLS cert+key material to the edge
   workers had two latent ways to go silently down for the daemon's life — on a

@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**21 / 55 fixed.** Grouped by severity; each links to its detail section.
+**22 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -62,7 +62,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F14](#f14)** · `configs/lua/cfm_waf_detectors.lua:1062` · _fp_ (axis a) — value_looks_shelly word list contains common tokens (host, id, ping, more, less, head, tail, env, cat, ls, w) that FP-challenge legit system=/command= dispatcher values
 - [x] **[F15](#f15)** · `configs/lua/cfm_waf_detectors.lua:1722` · _fp_ (axis a) — CT_BAD_BOUNDARY false-positives on RFC-legal multipart boundaries (`=`,`+`,`/`) used by JavaMail/SOAP/Python email clients (rule 604)
 - [x] **[F16](#f16)** · `configs/lua/cfm_waf_detectors.lua:3794` · _fp_ (axis a) — Encoded-<?php opener rule (437) false-positives on legit content POSTs (comments, forum posts, rich-text) at challenge tier
-- [ ] **[F17](#f17)** · `configs/lua/cfm_clamav.lua:82` · _security_ (axis c) — ClamAV upload scan silently skipped when multipart filename= sits beyond the 8KB WAF body cap
+- [x] **[F17](#f17)** · `configs/lua/cfm_clamav.lua:82` · _security_ (axis c) — ClamAV upload scan silently skipped when multipart filename= sits beyond the WAF body cap (32 KB; 8 KB when this was found, raised by F08)
 - [x] **[F19](#f19)** · `configs/lua/sslcollector.lua:743` · _perf_ (axis b) — sslcollector re-parses PEM cert+key to DER on every TLS handshake (parsed material never cached)
 - [ ] **[F20](#f20)** · `configs/lua/cfm_stats.lua:134` · _perf_ (axis b) — cfm_stats decisions_stats/sslcache_stats call get_keys() with large N, locking the hot cfm_decisions dict on every dashboard poll
 - [ ] **[F21](#f21)** · `configs/lua/cfm_rules.lua:58` · _fp_ (axis a) — cfm_rules throttle lock contention fails toward 429, over-throttling legit bursts from shared/NAT IPs
@@ -393,9 +393,9 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 ---
 
 <a id="f17"></a>
-### F17 — ClamAV upload scan silently skipped when multipart filename= sits beyond the 8KB WAF body cap
+### F17 — ClamAV upload scan silently skipped when multipart filename= sits beyond the WAF body cap (32 KB; 8 KB when this was found, raised by F08)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — file-part decision (`wants_scan`) fails safe when the WAF's body view was truncated/absent
 - **Severity:** medium · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_clamav.lua:82`
 
@@ -405,7 +405,38 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Detect multipart file presence from Content-Type boundary + a bounded scan of the spooled body_file (or always notify for multipart and let the Go side decide from the full body).
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** The file-part decision (renamed `has_file_part` → `wants_scan` in
+`cfm_clamav.lua`) now **fails safe** instead of trusting the WAF's truncated view.
+Verified against source: the Go bridge (`nginx_bridge.go handleUpload`) scans whatever
+`body_file` it is handed and does **not** re-check for a file part, so the entire scan
+gate lives in Lua — and it keyed on `ngx.ctx.waf_body`, the WAF's first
+`waf_body_max_len` (32 KB) bytes, which is also **nil** when the WAF skipped the body read
+(body over its CL gate). New logic: (1) fast path — `filename=` in the inspected view →
+scan (covers normal uploads, file field first); (2) fallback — inspected view shows no
+file part **but** the real body was spooled to disk (bytes beyond our view) → scan anyway,
+since a file part could hide past the cap and the scan itself always covers the full
+spooled body; (3) small fully-inspected multipart with no `filename=` → WAF-lane only
+(no scan), preserving the resource posture; (4) an in-memory body the WAF never populated
+is checked directly via `get_body_data`. **Design choice (documented):** fail-safe
+(scan-when-in-doubt) over trying to *prove* there is no file part — any finite bounded peek
+is evadable and an unbounded one would read the whole body on the hot path; a Go-side proper
+multipart parse was rejected because a Go/PHP parser differential would re-introduce a blind
+spot. `extract_filename` stays best-effort (empty label when the name is beyond the cap; the
+scan still runs on `body_file`). Test `scripts/tests/cfm_clamav_filepart_test.lua` drives the
+real `notify()` with a mocked bridge socket (fast-path scan; truncated-view+spooled →
+fail-safe scan; absent-view+spooled → scan; small no-file → no scan; absent-view in-memory
+file part → scan; in-memory no-file → no scan; non-multipart → no scan) — the three
+fail-safe rows **verified to FAIL** against the pre-fix view-only detector; the suite also
+covers the config-realistic in-memory-beyond-cap path (`client_body_buffer_size 1m` holds
+32 KB–1 MB bodies in memory, so `get_body_data` — not the spooled branch — is load-bearing
+there), PUT, and an excluded host. **Scan-load note (review B):** normal uploads already hit
+the fast path and are unchanged, but this adds new scans — the padding-evasion case, large
+non-file multipart, and (a coverage gain) uploads the WAF skipped entirely (body over its
+1 MB CL gate, or chunked) that were never scanned before — each incurring a full-body copy
+(`nginx_bridge.go handleUpload`, up to `client_max_body_size`); watch ClamAV load post-upgrade,
+and a body-size cap before `Enqueue` is a sensible follow-up (none today). Also made the
+`filename=` match fully case-insensitive (`FILENAME=`/`FileName=`), closing a small in-memory
+evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 
 ---
 
