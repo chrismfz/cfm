@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**17 / 55 fixed.** Grouped by severity; each links to its detail section.
+**19 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -96,8 +96,8 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F49](#f49)** · `internal/webdetector/nginx_bridge.go:1619` · _dos_ (axis b/c) — Five POST bridge handlers decode request bodies with no size limit (unbounded JSON read)
 - [ ] **[F51](#f51)** · `internal/webdetector/nginx_bridge.go:1388` · _dos_ (axis b/c) — Decision bridge server has no ReadTimeout/WriteTimeout/IdleTimeout and no goroutine cap on non-decision endpoints
 - [ ] **[F52](#f52)** · `internal/webdetector/ingest_socket.go:145` · _dos_ (axis b/c) — Ingest socket accept loop has no cap on concurrent connections/goroutines
-- [ ] **[F54](#f54)** · `internal/sslcollector/token.go:245` · _correctness_ (axis c) — Atomic Lua-token writer omits fsync before rename; a crash can expose an empty/truncated token to the edge
-- [ ] **[F55](#f55)** · `internal/sslcollector/token.go:214` · _correctness_ (axis c) — Operator-supplied token emitted into Lua via Go %q can produce invalid LuaJIT and break token loading
+- [x] **[F54](#f54)** · `internal/sslcollector/token.go:245` · _correctness_ (axis c) — Atomic Lua-token writer omits fsync before rename; a crash can expose an empty/truncated token to the edge
+- [x] **[F55](#f55)** · `internal/sslcollector/token.go:214` · _correctness_ (axis c) — Operator-supplied token emitted into Lua via Go %q can produce invalid LuaJIT and break token loading
 - [ ] **[F56](#f56)** · `configs/openresty.conf:623` · _security_ (axis c) — /__ssl_debug protected only by forgeable `allow 127.0.0.1`, unlike purge-ip's documented second loopback gate
 - [ ] **[F57](#f57)** · `configs/lua/cfm_purge.lua:128` · _perf_ (axis b) — purge_ip scans the entire cfm_decisions dict under lock (get_keys(0)) on a force-unblock
 - [ ] **[F58](#f58)** · `configs/lua/cfm_waf_detectors.lua:1117` · _perf_ (axis b) — args-only normalize(cap(args)) recomputed by ~6 detectors per request instead of being memoized once
@@ -924,7 +924,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f54"></a>
 ### F54 — Atomic Lua-token writer omits fsync before rename; a crash can expose an empty/truncated token to the edge
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `writeLuaFileAtomic` now `fsync`s the tmp file before rename (mirrors `writeSnapshotAtomic`)
 - **Severity:** low · **Category:** correctness (axis c) · **Verify:** CONFIRMED
 - **Location:** `internal/sslcollector/token.go:245`
 
@@ -934,14 +934,14 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Open tmp, Write, f.Sync(), Close, then Rename (mirror writeSnapshotAtomic); optionally fsync the parent dir.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** rewrote `writeLuaFileAtomic` (the SHARED writer for all four generated Lua files) from `os.WriteFile(tmp)`+`os.Rename` to `OpenFile → Write → f.Sync() → Close → chmod/chown → Rename`, exactly mirroring `writeSnapshotAtomic` (`snapshot.go`). The `f.Sync()` forces the tmp file's DATA to disk before the rename becomes durable, so a crash/power-loss can no longer surface a present-but-empty/truncated file. One fix covers **all four** writers (token, sslcollector-config, clamav-config, bridge-config) since they share this function. Mode/ownership (0640 root:cfm) and the atomic-overwrite semantics are unchanged — verified by the existing writer tests (content/mode/ownership/atomic-overwrite) plus a new `TestWriteLuaTokenLeavesNoTmp` (no orphaned `.tmp`). (fsync durability under power-loss is inherently not unit-testable without fault injection; correctness rests on matching the proven sibling pattern + the writer tests.) **Adversarially reviewed (ship-with-nits):** perms/chown tail confirmed byte-identical to origin/main; error paths clean; luajit-verified the sibling pattern. PR #TBD.
 
 ---
 
 <a id="f55"></a>
 ### F55 — Operator-supplied token emitted into Lua via Go %q can produce invalid LuaJIT and break token loading
 
-- **Status:** ☐ open
+- **Status:** ☑ done — accepted tokens constrained to graphical ASCII (0x21–0x7e); an unsafe operator token is regenerated. Applied to BOTH validators.
 - **Severity:** low · **Category:** correctness (axis c) · **Verify:** CONFIRMED
 - **Location:** `internal/sslcollector/token.go:214`
 
@@ -951,7 +951,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Restrict accepted tokens to [A-Za-z0-9._-], or emit with a Lua-safe escaper / long-bracket literal instead of Go %q.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** added `tokenIsLuaSafe(s)` — every byte must be graphical ASCII (`0x21..0x7e`: no whitespace, no control, no high byte; byte iteration deliberately rejects any multi-byte UTF-8 rune) — and required it in the acceptance check of **both** validators (`ValidateOrGenerateToken` for the sock token AND `ValidateOrGenerateTokenKey`, which the detector uses for `OPENRESTY_TOKEN`, itself emitted to `cfm_bridge_token.lua` via the same `%q` path — `manager.go:357`; so F55 was not sock-only). A token that fails is treated as weak → regenerated (the generated 48-hex token is always graphical-ASCII, so regeneration always yields a Lua-safe token). Chose the charset guard over a Lua-safe escaper because a bearer token with control/zero-width bytes is bad hygiene regardless, and it also protects the cfm.conf round-trip (no embedded whitespace). **Tests:** `TestTokenIsLuaSafe` (safe hex/base64/full-ASCII-punct vs unsafe space/tab/NUL/DEL/ZWSP/é/NBSP), `TestValidateOrGenerateToken{RegeneratesLuaUnsafe,KeepsStrongSafeToken}` (both validators), and `TestLuaEmissionOfUnsafeTokenProducesInvalidEscape` (documents that Go `%q` of a ZWSP emits the invalid-LuaJIT `​`). Regeneration **verified to FAIL against the pre-fix (no-guard) code** (non-vacuous). **Adversarially reviewed (ship-with-nits):** luajit-confirmed every in-range byte (incl. `\"`/`\\`) stays valid LuaJIT while `%q` of U+200B (`\u200b`) is rejected, and that regeneration can't loop (48-hex is always in-range). PR #TBD.
 
 ---
 
