@@ -416,6 +416,17 @@ function _M.detect_b64_injection(body)
   if #body < 25 then return nil end
   if not body:find("=", 1, true) then return nil end
 
+  -- B64_OBJ_INJECT (PHP object injection) is a LOW-PRIORITY FALLBACK: unlike every
+  -- other marker here it fires at a capped `logonly` tier (cfm_waf.lua §33 burn-in),
+  -- so it must never SHADOW a higher-tier hostile sibling. This detector returns on
+  -- the first match, so returning the object tag eagerly would let an attacker
+  -- prepend a serialized-object marker — in this candidate OR an earlier one — to
+  -- downgrade a base64'd eval/system/union-select from challenge/block to logonly.
+  -- Instead we REMEMBER an object hit and keep scanning; any hostile marker in this
+  -- or a later candidate returns immediately and wins. The deferred object tag is
+  -- returned only if no hostile marker is found anywhere. Audit F13.
+  local deferred_obj = nil
+
   for candidate in body:gmatch("=([A-Za-z0-9+/]+=*)") do
     if #candidate >= 24 then
       local decoded = ngx.decode_base64(candidate)
@@ -446,18 +457,29 @@ function _M.detect_b64_injection(body)
         if has(d, "<iframe") then return "B64_XSS_IFRAME" end
         if has(d, "<object") then return "B64_XSS_OBJECT" end
 
-        if d:match('%bo%:%d+%:"') or d:match('%bc%:%d+%:"') then
-          return "B64_OBJ_INJECT"
-        end
-
         if has(d, "union select")       then return "B64_SQLI_UNION" end
         if has(d, "insert into")        then return "B64_SQLI_INSERT" end
         if has(d, "information_schema") then return "B64_SQLI_SCHEMA" end
+
+        -- Lowest priority (deferred — see the fallback note above the loop). PHP
+        -- object-injection markers: a serialized object header O:<len>:"Class" or a
+        -- custom-serialized C:<len>:"Class" (the unserialize() POP-chain gadget
+        -- entry). `d` is lower()ed above, so match o:/c:. The %f[%a] frontier
+        -- requires the marker to START a token — a real serialized object sits at
+        -- string-start or after a structural delimiter (`;`, `{`) — so a word ending
+        -- in o/c like foo:12:"bar" can't false-match. Objects only (not a:<len>:{
+        -- arrays): only object unserialize triggers POP chains. (The old %bo%: used
+        -- Lua's %b balanced-match by mistake — it asked for a literal '%' delimiter
+        -- serialized data never contains, so this sub-rule matched nothing and was
+        -- dead. Audit F13.)
+        if not deferred_obj and (d:match('%f[%a]o:%d+:"') or d:match('%f[%a]c:%d+:"')) then
+          deferred_obj = "B64_OBJ_INJECT"
+        end
       end
     end
   end
 
-  return nil
+  return deferred_obj
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
