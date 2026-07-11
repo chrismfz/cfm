@@ -1766,7 +1766,21 @@ function _M.detect_content_type_anomaly(headers)
     if bval then
       bval = bval:gsub('^"', ''):gsub('"$', '')
     end
-    if bval and bval ~= "" and not bval:match("^%-*[0-9A-Za-z%-%_%.]+$") then
+    -- Validate against RFC 2046 `bcharsnospace` — the exact legal boundary
+    -- alphabet: DIGIT / ALPHA / ' ( ) + _ , - . / : = ?. (`,` is in the class
+    -- for completeness but never actually reaches here: the extraction above,
+    -- `[^%s;,]+`, truncates at any comma — `,` doubles as a Content-Type param
+    -- separator — so the effective accepted set is bcharsnospace minus `,`.)
+    -- The old class allowed
+    -- only [A-Za-z0-9._-], so legit server-to-server MIME producers that use the
+    -- RFC-legal `=` / `+` / `/` / `:` were flagged (audit F15): JavaMail
+    -- (`----=_Part_0_…`), Python email (`===============…==`), SOAP/Axis. Those
+    -- are non-browser clients that cannot solve a JS challenge, so rule 604 broke
+    -- the POST outright. Chars OUTSIDE bcharsnospace (space, control bytes, `<`
+    -- `>` `;` `"` `@` `$` `%` backtick …) — the ones that actually desync a
+    -- WAF-vs-PHP multipart split — are still rejected, so the anti-evasion value
+    -- is preserved; this only stops rejecting RFC-legal boundaries.
+    if bval and bval ~= "" and not bval:match("^%-*[0-9A-Za-z'()+_,./:=?%-]+$") then
       return "CT_BAD_BOUNDARY"
     end
   end

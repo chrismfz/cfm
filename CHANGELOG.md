@@ -100,6 +100,18 @@ back-filled here — see the git/PR history for that period.
   trade for eliminating the FP class. Unambiguous tool names (`whoami`,
   `uname`, `wget`, `curl`, `nc`, `bash`, `chmod`, `passthru`, …) still fire.
   Found by the 2026-07 edge Lua audit (F14).
+- **WAF multipart-boundary check (rule 604) no longer challenges RFC-legal
+  boundaries (F15).** `detect_content_type_anomaly`'s `CT_BAD_BOUNDARY` validated
+  the `boundary=` value against `[A-Za-z0-9._-]` only, but RFC 2046
+  `bcharsnospace` also permits `' ( ) + , / : = ?`. Real server-to-server MIME
+  producers use them — JavaMail (`----=_Part_0_123.456`), Python `email`
+  (`===============…==`), SOAP/Axis — so their multipart POST was challenged at
+  rule 604. These are non-browser clients that cannot solve a JS challenge, so
+  the request broke outright. The validator now matches `bcharsnospace` exactly;
+  characters *outside* it (space, control bytes, `<` `>` `;` `"` `@` `$` `%`
+  backtick — the ones that actually desync a WAF-vs-PHP multipart split) are
+  still rejected, so the anti-evasion value is preserved. Found by the 2026-07
+  edge Lua audit (F15).
 - **WAF body inspection no longer truncated below the per-Content-Type scan
   budget (F08).** The edge body reader (`get_req_body_for_waf` in `cfm.lua`)
   handed the WAF at most `waf_body_max_len` = **8192** bytes, but the engine's
