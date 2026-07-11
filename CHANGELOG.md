@@ -289,6 +289,26 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **sslcollector socket now self-heals and no longer orphans itself on restart
+  (F27/F28).** The unix socket that serves TLS cert+key material to the edge
+  workers had two latent ways to go silently down for the daemon's life — on a
+  DNAT'd edge that means workers fall back to stale-snapshot or self-signed
+  certs. **(F28, self-heal):** if `ServeSock` returned any error — most
+  realistically a **transient bind failure at startup** (a stale socket, a
+  not-yet-ready parent dir, `EADDRINUSE`) — the goroutine just logged and exited,
+  but the lifecycle's no-change guard still saw `cancel != nil` and early-returned
+  on every later tick, so the socket was **never respawned**. The guard now keys
+  on actual liveness, and an unexpected exit is respawned on a later tick with
+  bounded exponential backoff (5s→5m, reset on a healthy tick; a config change is
+  never throttled). **(F27, restart race):** `net.Listen("unix")` defaults
+  `UnlinkOnClose=true`, so during a config-change restart the *old* listener's
+  `Close()` could `unlink()` the **new** listener's socket by name (if the new
+  bind won the race), leaving the new server listening on an fd with no
+  filesystem entry — every worker dial got `ENOENT` until the next restart. The
+  listener now sets `SetUnlinkOnClose(false)` (the existing `os.Remove` owns
+  stale-file cleanup; disable/shutdown remove the name explicitly). The lifecycle
+  state machine is now mutex-guarded and race-clean under `go test -race`. Found
+  by the 2026-07 edge Lua/OpenResty audit (F27, F28).
 - **DNAT/panel scoped accepts were appended AFTER the default drop (and
   duplicated) — DNAT'd web/panel traffic was dropped unless the listener ports
   were in `TCP_IN`.** `ensureScopedDNATAccepts` / `EnsurePanelDNATAccepts` (nft

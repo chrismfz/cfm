@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**15 / 55 fixed.** Grouped by severity; each links to its detail section.
+**17 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -70,8 +70,8 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F24](#f24)** · `configs/lua/cfm_waf_detectors.lua:850` · _perf_ (axis b) — is_known_legit_xmlrpc normalizes args AND body on every request before the cheap /xmlrpc.php URI gate
 - [ ] **[F25](#f25)** · `configs/lua/cfm.lua:1121` · _perf_ (axis b) — Per-IP geo results and abuse counters share the high-churn cfm_decisions dict; geo uses a 3.3x-longer 300s TTL and negatively caches transient lookup failures
 - [ ] **[F26](#f26)** · `internal/webdetector/ingest_socket.go:155` · _dos_ (axis b/c) — Ingest socket bufio.ReadString does not bound line length — unbounded memory (comment falsely claims a 256KB bound)
-- [ ] **[F27](#f27)** · `internal/sslcollector/socketapi.go:312` · _regression_ (axis b) — sslcollector socket restart race: old listener's Close() unlinks the freshly-bound new socket, breaking cert delivery until next restart
-- [ ] **[F28](#f28)** · `internal/sslcollector/lifecycle.go:113` · _correctness_ (axis c) — sslcollector socket server that exits on its own (Serve error) is never restarted
+- [x] **[F27](#f27)** · `internal/sslcollector/socketapi.go:312` · _regression_ (axis b) — sslcollector socket restart race: old listener's Close() unlinks the freshly-bound new socket, breaking cert delivery until next restart
+- [x] **[F28](#f28)** · `internal/sslcollector/lifecycle.go:113` · _correctness_ (axis c) — sslcollector socket server that exits on its own (Serve error) is never restarted
 
 ### Low (28)
 
@@ -531,7 +531,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f27"></a>
 ### F27 — sslcollector socket restart race: old listener's Close() unlinks the freshly-bound new socket, breaking cert delivery until next restart
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `SetUnlinkOnClose(false)` so a restarting server's old Close can't unlink the new inode; disable/Stop remove the name explicitly
 - **Severity:** medium · **Category:** regression (axis b) · **Verify:** CONFIRMED
 - **Location:** `internal/sslcollector/socketapi.go:312`
 
@@ -541,24 +541,24 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Bind new server to a temp path and rename into place, or SetUnlinkOnClose(false) and manage the file lifetime, or make ApplyConfig wait (done chan) for the old goroutine before relaunch.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `ServeSock` now calls `ln.(*net.UnixListener).SetUnlinkOnClose(false)` right after `net.Listen`, so `Close()` only drops the fd and never `unlink()`s the path by name — a lagging old-generation Close can no longer delete a restart's new inode, regardless of who wins the bind race (no serialization needed). The existing `os.Remove(SockPath)` before `net.Listen` still owns stale-file cleanup, and the lifecycle's disable/Stop paths now `os.Remove` the name explicitly (previously the unlink-on-close did it) so a disabled daemon doesn't leave a live-looking socket (ENOENT, not ECONNREFUSED). **Design chosen over the alternatives** (temp-path+rename; wait-on-done serialized restart) because it is a one-liner with no added blocking on the daemon tick, and the design workflow confirmed serialized-wait is insufficient alone (ServeSock returns when srv.Close unblocks Serve, *before* the cleanup goroutine's ln.Close runs). **Test** `TestServeSock_RestartDoesNotUnlinkNewSocket` (`lifecycle_socket_test.go`) reproduces the exact ordering via inode tracking (start B on the same path, wait for the name to resolve to B's new inode, THEN close A) and asserts the name still resolves to B — **verified to FAIL with `SetUnlinkOnClose(true)`** (non-vacuous). PR #TBD.
 
 ---
 
 <a id="f28"></a>
 ### F28 — sslcollector socket server that exits on its own (Serve error) is never restarted
 
-- **Status:** ☐ open
+- **Status:** ☑ done — liveness-keyed no-change guard + generation-guarded goroutine respawn with bounded backoff, all mutex-guarded
 - **Severity:** medium · **Category:** correctness (axis c) · **Verify:** CONFIRMED
 - **Location:** `internal/sslcollector/lifecycle.go:113`
 
-**What & why.** When ServeSock's srv.Serve(ln) returns a non-nil error while ctx is NOT cancelled, the goroutine just logs and returns; l.cancel and l.cfgKey are left set. The next ApplyConfig tick hits the no-change guard `key==l.cfgKey && l.cancel!=nil` and returns early, so the server is never respawned. The socket stays down for the daemon's life (until a config change or full restart), degrading every edge worker to snapshot/self-signed.
+**What & why.** When ServeSock's srv.Serve(ln) returns a non-nil error while ctx is NOT cancelled, the goroutine just logs and returns; l.cancel and l.cfgKey are left set. The next ApplyConfig tick hits the no-change guard `key==l.cfgKey && l.cancel!=nil` and returns early, so the server is never respawned. The socket stays down for the daemon's life (until a config change or full restart), degrading every edge worker to snapshot/self-signed. **The realistic trigger is broader than the finding states:** ServeSock returns the same way on a **transient bind failure at startup** (`net.Listen` failing on a stale socket / not-yet-ready parent dir / EADDRINUSE), so a one-off boot-time hiccup wedges the socket permanently — not only a rare post-startup Serve error.
 
 **Repro / cost.** Serve returns an error post-startup with c.Err()==nil -> goroutine logs 'sock server stopped' and exits -> l.cancel non-nil, cfgKey unchanged -> every later ApplyConfig early-returns, no recovery.
 
 **Suggested fix.** On unexpected goroutine return (ctx not cancelled) reset l.cancel=nil/l.cfgKey='' under a mutex so the next tick re-establishes the server, or supervise with bounded-backoff restart.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `SockLifecycle` now carries a `sync.Mutex` guarding all lifecycle state plus a `running` flag, a monotonic `gen`, and `failCount`/`nextAttempt` backoff bookkeeping. The spawned goroutine, on exit, clears `running` **only if its `gen` is still current** (`if l.gen == myGen`) — a generation guard so a superseded goroutine (from a config-change restart) can never clobber the new generation's liveness. The no-change guard is now `key == l.cfgKey && l.running` (liveness, not the stale `cancel` handle), so a dead server no longer early-returns forever; a same-config dead server is respawned, **rate-bounded by exponential backoff** (`sockBackoff`: 5s→5m, doubling; reset on a healthy tick; a genuine config change bypasses backoff). `Stop()` sets a `stopped` flag that makes ApplyConfig a no-op (no respawn after shutdown). All goroutine inputs are passed **by value** (removing a latent capture of the `cfg` pointer). **Design via a 3-way design workflow** (minimal-mutex / serialized-supervisor / atomic-liveness → synthesis); took the mutex over the synthesis's lock-free single-atomic so `-race` *verifies* the synchronization and the goroutine uses the real error value rather than a subtle "ServeSock returns nil only after cancel" state-inference — robustness over minimalism for a TLS-critical path. **Tests** (`lifecycle_socket_test.go`, run under `-race`, clean over `-count=20`): `RespawnsAfterTransientBindFailure` (bind under a missing parent dir → later tick respawns and binds — **verified to FAIL against a simulated old never-respawn wedge**), `NoRespawnAfterStop`, `BackoffGatesRespawn`, plus (folded in from review) `ConfigChangeRestartStaysDialable` (drives ApplyConfig twice with a rotated token → the real production restart path → asserts a fresh inode, live+dialable) and `DisableThenReEnable`. **Adversarially reviewed via a 3-lens review workflow** (concurrency/race → *ship*: generation guard proven correct because ApplyConfig holds `l.mu` across the whole respawn critical section, no deadlock/race, `-race -count=10` clean; correctness; test-adequacy). Two review should-fixes folded in: **(a)** the lifecycle tests were writing the LIVE `/var/lib/cfm/lua/cfm_token.lua` (hardcoded const) — a `go test` on a root host that also runs the daemon would overwrite the live socket-auth token, the very outage class this fix prevents; made the shared-Lua paths injectable (`luaTokenPath`/`luaConfigPath`, default to the consts) and redirected the tests to `t.TempDir()` (verified hermetic); **(b)** added the ApplyConfig-level restart + disable/re-enable coverage above. PR #TBD.
 
 ---
 
