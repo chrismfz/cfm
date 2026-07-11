@@ -312,6 +312,27 @@ back-filled here — see the git/PR history for that period.
   cap before enqueue is a sensible follow-up (there is none today). The `filename=`
   match is now fully case-insensitive (`FILENAME=`/`FileName=`), closing a small
   in-memory evasion. Found by the 2026-07 edge Lua audit (F17).
+- **Revived the dead base64 PHP-object-injection WAF sub-rule (F13, rule 304).**
+  The `B64_OBJ_INJECT` check in the base64 POST-body scanner tested a Lua
+  `%bo%:%d+%:"` / `%bc%:%d+%:"` pattern. Lua's `%b` takes the **two bytes after
+  it** as balanced delimiters, so `%bo%` asked for a balanced `o`…`%` run — and a
+  decoded serialized object (`o:8:"stdclass"`) contains no `%`, so the sub-rule
+  matched nothing and was **effectively off**. It now matches frontier-anchored
+  serialized-object headers `o:<len>:"` / `c:<len>:"` (objects and custom-serialized
+  objects; **not** `a:<len>:{` arrays — legit payloads carry arrays and only object
+  `unserialize()` triggers POP chains). The `%f[%a]` frontier requires the marker
+  to **start a token**, so a word ending in o/c like `foo:12:"bar"` can't
+  false-match. Because this sub-rule was dead, reviving it straight into rule 304's
+  `challenge` tier could FP-challenge apps that `base64(serialize($obj))` into a
+  POST body, so `B64_OBJ_INJECT` **burns in at `logonly`** (visibility, no
+  enforcement) — a per-tag split mirroring the F11 rule-438 burn-in; promote to
+  `challenge` after watching the hit-rates. To keep that lower tier from being
+  abused, the object tag is a **deferred, lowest-priority fallback** in the
+  detector: a hostile sibling (`eval(`/`system(`/`union select`/…) anywhere in the
+  body — same candidate or a later one — always wins first and keeps rule 304's
+  configured tier, so an attacker cannot prepend a serialized-object marker to
+  downgrade a base64'd `system()`/`union select` from challenge/block to logonly.
+  Found by the 2026-07 edge Lua audit (F13).
 - **sslcollector socket now self-heals and no longer orphans itself on restart
   (F27/F28).** The unix socket that serves TLS cert+key material to the edge
   workers had two latent ways to go silently down for the daemon's life — on a

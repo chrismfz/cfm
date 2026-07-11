@@ -58,7 +58,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F10](#f10)** · `configs/lua/cfm_waf_excl.lua:79` · _regression_ (axis b) — Exclude glob compiler diverges from Go: Lua `*`->`.*`/`?`->`.` cross `/` (Go uses `[^/]*`), and Lua ignores `[]` globs Go honours — silently widening the in-path WAF-off region _(security half fixed; `[]` parity tracked below)_
 - [x] **[F11](#f11)** · `configs/lua/cfm_waf.lua:1597` · _waf-bypass_ (axis a/c) — /wp-admin/ carve-out disables encoded/base64 <?php backdoor rules 437/438 on pre-auth admin-ajax.php
 - [x] **[F12](#f12)** · `configs/lua/cfm_waf_detectors.lua:1904` · _waf-bypass_ (axis a/c) — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
-- [ ] **[F13](#f13)** · `configs/lua/cfm_waf_detectors.lua:449` · _correctness_ (axis c) — Base64 PHP-object-injection check uses malformed `%bo%:` pattern that never matches serialized objects (B64_OBJ_INJECT dead, rule 304)
+- [x] **[F13](#f13)** · `configs/lua/cfm_waf_detectors.lua:449` · _correctness_ (axis c) — Base64 PHP-object-injection check uses malformed `%bo%:` pattern that never matches serialized objects (B64_OBJ_INJECT dead, rule 304)
 - [x] **[F14](#f14)** · `configs/lua/cfm_waf_detectors.lua:1062` · _fp_ (axis a) — value_looks_shelly word list contains common tokens (host, id, ping, more, less, head, tail, env, cat, ls, w) that FP-challenge legit system=/command= dispatcher values
 - [x] **[F15](#f15)** · `configs/lua/cfm_waf_detectors.lua:1722` · _fp_ (axis a) — CT_BAD_BOUNDARY false-positives on RFC-legal multipart boundaries (`=`,`+`,`/`) used by JavaMail/SOAP/Python email clients (rule 604)
 - [x] **[F16](#f16)** · `configs/lua/cfm_waf_detectors.lua:3794` · _fp_ (axis a) — Encoded-<?php opener rule (437) false-positives on legit content POSTs (comments, forum posts, rich-text) at challenge tier
@@ -325,7 +325,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f13"></a>
 ### F13 — Base64 PHP-object-injection check uses malformed `%bo%:` pattern that never matches serialized objects (B64_OBJ_INJECT dead, rule 304)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — frontier-anchored `o:`/`c:` object headers; revived at **logonly** burn-in
 - **Severity:** medium · **Category:** correctness (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:449`
 
@@ -335,7 +335,35 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Use plain sequences o:%d+:" / c:%d+:" (and a:%d+:{ for arrays), dropping %b.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** The two `%b` patterns are replaced with frontier-anchored
+`d:match('%f[%a]o:%d+:"')` / `d:match('%f[%a]c:%d+:"')`. Verified against source with
+luajit: the old `%bo%:%d+%:"` returns nil on a real `O:8:"stdClass"` (the `%b`
+balanced-match wanted a literal `%` delimiter serialized data never contains — dead),
+while the new pattern matches top-level objects, custom-serialized `C:` objects, and an
+object nested inside a serialized array. **Objects only** — `a:%d+:{` arrays deliberately
+excluded (legit payloads routinely carry arrays; only object `unserialize()` drives POP
+chains, and `B64_OBJ_INJECT` is the object tag). The `%f[%a]` frontier requires the marker
+to start a token, so `foo:12:"bar"` (word ending in `o`) can't false-match — a plain
+`o:%d+:"` would. **Tier:** rule 304 ships at `challenge`; because this sub-rule was
+**dead**, reviving it straight to challenge could FP-challenge apps that
+`base64(serialize($obj))` a POST body (breaks XHR/JSON consumers), so `B64_OBJ_INJECT`
+alone is **capped to `logonly`** in `cfm_waf.lua` section 33 (a per-tag `eff_mode` split),
+a burn-in mirroring the F11 rule-438 split — promote to challenge after watching hit-rates.
+**Anti-downgrade (adversarial-review must-fix):** because `detect_b64_injection` returns on
+the first match, naively reviving the object tag at a *lower* per-tag tier let an attacker
+prepend a serialized-object marker — same candidate or an earlier one — to shadow a base64'd
+`eval`/`system`/`union select` and **downgrade** it from challenge/block to logonly (a
+regression vs the pre-change dead-rule behaviour, which kept scanning past the object). Fixed
+by making the object tag a **deferred, lowest-priority fallback**: it is remembered but the
+loop keeps scanning; any hostile sibling anywhere returns first and wins, and the object tag
+is returned only if no hostile marker is found. Test
+`scripts/tests/cfm_waf_b64_objinject_test.lua` (object/custom/nested detected + burned in at
+logonly; sibling `B64_EVAL` stays challenge; same-candidate `O:…;union select` → SQLi wins at
+challenge; cross-candidate `state=<obj>&payload=<system>` → sibling wins at challenge; block-arm
+no-downgrade; pure `a:` array negative; `foo:12:"` FP-negative; rule-disabled silences the tag)
+— **verified to FAIL** on a pattern revert (objects undetected), a burn-in-split revert (object
+action becomes challenge), and the pre-fix eager-return detector (the two shadowing cases
+downgrade to logonly). Branch `claude/edge-audit-b64-obj-inject`.
 
 ---
 

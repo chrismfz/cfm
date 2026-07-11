@@ -1206,8 +1206,24 @@ function _M.check(ctx)
     if mode ~= "disabled" and body_inspect_ok then
       local tag = det.detect_b64_injection(body)
       if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_B64_INJECT:" .. tag, ttl, mode, RULE_IDS.rule_b64_injection) then goto done end
+        -- F13: the B64_OBJ_INJECT sub-rule was dead (a Lua `%b` balanced-match
+        -- typo) until this release. Reviving a previously-silent sub-rule straight
+        -- into the scanner's challenge tier could FP-challenge legit apps that
+        -- base64(serialize($obj)) into a POST body, so this ONE tag burns in at
+        -- logonly first (cap the effective mode at logonly). Promote to challenge
+        -- after watching hit-rates. Mirrors the F11 rule-438 burn-in split.
+        -- `mode ~= "disabled"` already gates the outer block, so disabling rule 304
+        -- still silences this tag too. Safe against tier-downgrade: the detector
+        -- returns B64_OBJ_INJECT only as a DEFERRED fallback (see
+        -- detect_b64_injection), so a hostile sibling (eval/system/union-select)
+        -- anywhere in the body always wins first and keeps the rule's real tier —
+        -- an object marker can't be used to shadow it down to logonly.
+        local eff_mode = mode
+        if tag == "B64_OBJ_INJECT" then
+          eff_mode = "logonly"
+        end
+        local ttl = (eff_mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_B64_INJECT:" .. tag, ttl, eff_mode, RULE_IDS.rule_b64_injection) then goto done end
       end
     end
   end
