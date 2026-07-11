@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**14 / 55 fixed.** Grouped by severity; each links to its detail section.
+**15 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -60,7 +60,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F12](#f12)** · `configs/lua/cfm_waf_detectors.lua:1904` · _waf-bypass_ (axis a/c) — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
 - [ ] **[F13](#f13)** · `configs/lua/cfm_waf_detectors.lua:449` · _correctness_ (axis c) — Base64 PHP-object-injection check uses malformed `%bo%:` pattern that never matches serialized objects (B64_OBJ_INJECT dead, rule 304)
 - [x] **[F14](#f14)** · `configs/lua/cfm_waf_detectors.lua:1062` · _fp_ (axis a) — value_looks_shelly word list contains common tokens (host, id, ping, more, less, head, tail, env, cat, ls, w) that FP-challenge legit system=/command= dispatcher values
-- [ ] **[F15](#f15)** · `configs/lua/cfm_waf_detectors.lua:1722` · _fp_ (axis a) — CT_BAD_BOUNDARY false-positives on RFC-legal multipart boundaries (`=`,`+`,`/`) used by JavaMail/SOAP/Python email clients (rule 604)
+- [x] **[F15](#f15)** · `configs/lua/cfm_waf_detectors.lua:1722` · _fp_ (axis a) — CT_BAD_BOUNDARY false-positives on RFC-legal multipart boundaries (`=`,`+`,`/`) used by JavaMail/SOAP/Python email clients (rule 604)
 - [x] **[F16](#f16)** · `configs/lua/cfm_waf_detectors.lua:3794` · _fp_ (axis a) — Encoded-<?php opener rule (437) false-positives on legit content POSTs (comments, forum posts, rich-text) at challenge tier
 - [ ] **[F17](#f17)** · `configs/lua/cfm_clamav.lua:82` · _security_ (axis c) — ClamAV upload scan silently skipped when multipart filename= sits beyond the 8KB WAF body cap
 - [ ] **[F19](#f19)** · `configs/lua/sslcollector.lua:743` · _perf_ (axis b) — sslcollector re-parses PEM cert+key to DER on every TLS handshake (parsed material never cached)
@@ -369,7 +369,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Widen the boundary class to RFC 2046 bcharsnospace, or validate length<=70 + printable-ASCII.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** widened the `CT_BAD_BOUNDARY` validator's char class from `[A-Za-z0-9._-]` to the exact RFC 2046 `bcharsnospace` set — `[0-9A-Za-z'()+_,./:=?-]` — so a boundary using the RFC-legal `=`/`+`/`/`/`:`/`(`/`)` chars is accepted. Chars OUTSIDE `bcharsnospace` (space, control bytes, `<` `>` `;` `"` `@` `$` `%` backtick) — the ones that can actually desync a WAF-vs-PHP multipart split — are still rejected, so the anti-evasion purpose is preserved; the change only stops rejecting RFC-legal boundaries. Verified empirically (luajit): 6 legit producer boundaries (JavaMail `----=_Part_0_…`, Python `====…==`, SOAP `:`/`/`, `+`, `( )`, browser alnum) → nil; 4 malformed (`<`, `@`, `$`/backtick, `%00`) → still `CT_BAD_BOUNDARY`. Test 78b added (`cfm_waf_severity_test.lua`) covering both sides; **5 of the 6 RFC-legal cases FAIL against the pre-fix narrow class** (the 6th, browser-alnum `----WebKitFormBoundary…`, is a control that passes both) — real regression guards. **Adversarially reviewed (ship-with-nits):** char class proven correct (all 12 bcharsnospace specials accepted, 22 non-bcharsnospace incl. control bytes still fire), and **no evasion** — the boundary is validate-only here; the sole body-splitter (`detect_polyglot_upload`) does its own extraction + a literal `find`, invariant to the newly-allowed chars, so no WAF-vs-PHP desync. Folded in three doc/comment nits (`,` unreachable-via-extraction note, stale test comment, this phrasing). PR #TBD.
 
 ---
 

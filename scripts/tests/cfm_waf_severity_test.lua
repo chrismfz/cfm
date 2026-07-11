@@ -1820,11 +1820,51 @@ do
   check(hit == false, "78: quoted WebKit boundary — must not fire CT_BAD_BOUNDARY")
 end
 
+-- ── Test 78b (F15): RFC 2046 `bcharsnospace` boundaries must NOT fire.
+-- The validator previously allowed only [A-Za-z0-9._-], so server-to-server
+-- MIME producers that use the RFC-legal `=` / `+` / `/` / `:` / `(` / `)` chars
+-- were flagged — JavaMail (`----=_Part_0_…`), Python email (`====…==`),
+-- SOAP/Axis. Those non-browser clients cannot solve a JS challenge, so rule 604
+-- broke the POST. The class now matches bcharsnospace exactly; chars OUTSIDE it
+-- still fire (see Test 79).
+do
+  disable_all_rules()
+  waf.set_rule("rule_content_type_anomaly", "challenge")
+
+  local function fires_bad_boundary(ct)
+    local _, reason = waf.check(fresh_ctx({ headers = { ["Content-Type"] = ct } }))
+    return (reason and tostring(reason):find("CT_BAD_BOUNDARY", 1, true) ~= nil) and true or false
+  end
+
+  -- RFC-legal boundaries — must NOT fire.
+  for _, ct in ipairs({
+    'multipart/related; boundary="----=_Part_0_123.456"',        -- JavaMail (=)
+    'multipart/mixed; boundary="===============1234567890=="',   -- Python email (=)
+    'multipart/related; boundary="MIME_boundary:12/34"',         -- SOAP (: /)
+    'multipart/signed; boundary="aaa+bbb"',                      -- (+)
+    'multipart/mixed; boundary="(embed)bnd"',                    -- ( )
+    'multipart/form-data; boundary=----WebKitFormBoundary7MA4',  -- browser alnum
+  }) do
+    check(fires_bad_boundary(ct) == false,
+          "78b: RFC-legal boundary must NOT fire — " .. tostring(ct:match("boundary=(.*)$")))
+  end
+
+  -- Chars OUTSIDE bcharsnospace — must STILL fire (anti-evasion preserved).
+  for _, ct in ipairs({
+    "multipart/form-data; boundary=aaa@bbb",   -- @ outside bcharsnospace
+    "multipart/form-data; boundary=a$b~c",     -- $ ~ outside bcharsnospace
+  }) do
+    check(fires_bad_boundary(ct) == true,
+          "78b: non-RFC boundary must fire — " .. tostring(ct:match("boundary=(.*)$")))
+  end
+end
+
 -- ── Test 79: rule_content_type_anomaly — a real malformed boundary still fires
 -- Negative-of-the-negative: confirm the bad-boundary check still works on a
--- value that genuinely contains forbidden characters (`<` is outside the
--- allowed [-_.0-9A-Za-z] set; the value capture stops at space/comma/
--- semicolon, so embedding `<` mid-token forces the validator to reject it).
+-- value that genuinely contains forbidden characters (`<` is outside RFC 2046
+-- bcharsnospace, the allowed set after F15; the value capture stops at
+-- space/comma/semicolon, so embedding `<` mid-token forces the validator to
+-- reject it).
 do
   disable_all_rules()
   waf.set_rule("rule_content_type_anomaly", "challenge")
