@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**19 / 55 fixed.** Grouped by severity; each links to its detail section.
+**21 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -63,7 +63,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F15](#f15)** · `configs/lua/cfm_waf_detectors.lua:1722` · _fp_ (axis a) — CT_BAD_BOUNDARY false-positives on RFC-legal multipart boundaries (`=`,`+`,`/`) used by JavaMail/SOAP/Python email clients (rule 604)
 - [x] **[F16](#f16)** · `configs/lua/cfm_waf_detectors.lua:3794` · _fp_ (axis a) — Encoded-<?php opener rule (437) false-positives on legit content POSTs (comments, forum posts, rich-text) at challenge tier
 - [ ] **[F17](#f17)** · `configs/lua/cfm_clamav.lua:82` · _security_ (axis c) — ClamAV upload scan silently skipped when multipart filename= sits beyond the 8KB WAF body cap
-- [ ] **[F19](#f19)** · `configs/lua/sslcollector.lua:743` · _perf_ (axis b) — sslcollector re-parses PEM cert+key to DER on every TLS handshake (parsed material never cached)
+- [x] **[F19](#f19)** · `configs/lua/sslcollector.lua:743` · _perf_ (axis b) — sslcollector re-parses PEM cert+key to DER on every TLS handshake (parsed material never cached)
 - [ ] **[F20](#f20)** · `configs/lua/cfm_stats.lua:134` · _perf_ (axis b) — cfm_stats decisions_stats/sslcache_stats call get_keys() with large N, locking the hot cfm_decisions dict on every dashboard poll
 - [ ] **[F21](#f21)** · `configs/lua/cfm_rules.lua:58` · _fp_ (axis a) — cfm_rules throttle lock contention fails toward 429, over-throttling legit bursts from shared/NAT IPs
 - [ ] **[F22](#f22)** · `configs/lua/cfm_ua_emergency.lua:322` · _perf_ (axis b) — UA-emergency throttle churns the shared cfm_decisions dict (3 writes + spin-lock per request) under the bot wave it targets
@@ -87,7 +87,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F39](#f39)** · `configs/lua/cfm.lua:1274` · _security_ (axis c) — Decoded control characters in ngx.var.uri are written unescaped into error-log lines, enabling log forging
 - [ ] **[F40](#f40)** · `configs/lua/cfm_clearance.lua:17` · _correctness_ (axis c) — cfm_clearance normalize_host mangles IPv6-literal hosts, weakening clearance host-binding and diverging from the Go normalizer
 - [ ] **[F41](#f41)** · `configs/lua/cfm_panel.lua:851` · _security_ (axis c) — Challenge scope (panel_scope) is derived from client-controlled X-CFM-Panel-Port/X-Forwarded-Port, defeating per-port clearance isolation
-- [ ] **[F43](#f43)** · `configs/lua/sslcollector.lua:739` · _dos_ (axis b/c) — sslcollector emits an unbounded per-handshake WARN on every SNI cache-miss (attacker-driven log amplification)
+- [x] **[F43](#f43)** · `configs/lua/sslcollector.lua:739` · _dos_ (axis b/c) — sslcollector emits an unbounded per-handshake WARN on every SNI cache-miss (attacker-driven log amplification)
 - [ ] **[F44](#f44)** · `configs/openresty.conf:130` · _security_ (axis c) — Client-controlled X-Forwarded-Proto forwarded verbatim to origin ($cf_xfp) in DNAT-direct mode
 - [ ] **[F45](#f45)** · `configs/lua/cfm_bridge_cfg.lua:70` · _security_ (axis c) — Bridge token rotation opens a fail-open enforcement window of up to the 10s cache TTL
 - [ ] **[F46](#f46)** · `configs/lua/cfm_geo.lua:77` · _correctness_ (axis c) — cfm_geo disables geo permanently per worker on a transient init/open failure, with no retry until proxy reload
@@ -412,7 +412,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f19"></a>
 ### F19 — sslcollector re-parses PEM cert+key to DER on every TLS handshake (parsed material never cached)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — PEM parsed once at ingest (`store_pair`); the DER cdata is cached on the entry and reused by `set_cert`
 - **Severity:** medium · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/sslcollector.lua:743`
 
@@ -422,7 +422,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Parse cert+key once at ingest (store_pair/ingest_dumpall), cache the parsed cdata, and have set_cert reuse it; pcall-guard the parse and drop bad certs off the hot path.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `store_pair` — the single choke point every cert flows through (from `ingest_dumpall` and `load_from_snapshot`, both timer/init phases where `ssl.parse_pem_*` are phase-legal) — now parses the PEM to DER **once** and stores `{ cert_der, key_der }` (the PEM text is no longer retained — verified nothing post-ingest reads it: the two `pairs(_store)` iterators read only keys, and the disk snapshot is daemon-owned, not built from `_store`, so no per-cert PEM+DER memory duplication). `set_cert` reuses `entry.cert_der`/`entry.key_der` directly — **zero parses on the handshake hot path**. A cert/key that won't parse is **dropped at ingest** (the caller logs one WARN) rather than stored and re-failing with an ERR on every handshake, which also removes set_cert's two per-handshake parse-failure ERR logs. **Test** `scripts/tests/sslcollector_hotpath_test.lua` (new; mocks `ngx.ssl`/deps and reaches the module-local `_store` via a debug upvalue): asserts `set_cert` calls neither `parse_pem_cert` nor `parse_pem_priv_key` and passes the cached cdata to `ssl.set_cert`/`set_priv_key` — **verified to FAIL against a simulated per-handshake-parse revert**. PR #TBD.
 
 ---
 
@@ -771,7 +771,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f43"></a>
 ### F43 — sslcollector emits an unbounded per-handshake WARN on every SNI cache-miss (attacker-driven log amplification)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — cache-miss WARN worker-rate-limited (≤1/10s, coalesced count) + SNI sanitized; per-handshake parse-fail ERRs removed by F19
 - **Severity:** low · **Category:** dos (axis b/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/sslcollector.lua:739`
 
@@ -781,7 +781,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 **Suggested fix.** Rate-limit/aggregate miss and parse-fail logging (per-worker counter, one summary WARN per interval) or drop miss logging to debug; never log attacker SNI at WARN per handshake.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** the cache-miss WARN is now worker-rate-limited via module-local `MISS_LOG_INTERVAL` (10s) + `_miss_log_at`/`_miss_suppressed`: log the first miss immediately (operators see the problem promptly) then coalesce — at most one line per interval carrying the suppressed-since-last count. Per-miss cost is a counter bump + a cached-`ngx.now()` compare (no `ngx.time`/`os.time` syscall). The attacker-supplied SNI is **length-bounded (100) and sanitized** (`gsub("[^%w%.%-%*]", "?")`) only on the line actually written — `normalize_name` does not strip control chars, so this neutralizes newline/log-forging in the SNI. The parse-failure ERR spam is separately eliminated by **F19** (parsing moved off the handshake path). Cert selection still fails safe to the static default cert, so the throttle drops only diagnostics, never protection. **Test** (`sslcollector_hotpath_test.lua`): a flood of misses in one interval logs once with the coalesced count, a miss after the interval logs again, and a newline-bearing SNI never appears verbatim — **verified to FAIL against an unthrottled revert**. PR #TBD.
 
 ---
 

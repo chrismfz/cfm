@@ -328,6 +328,21 @@ back-filled here — see the git/PR history for that period.
   Applied to both the sock token and the generic key form (`OPENRESTY_TOKEN`,
   which is itself emitted to `cfm_bridge_token.lua`). Found by the 2026-07 edge
   Lua/OpenResty audit (F54, F55).
+- **sslcollector TLS handshake hot path: cache parsed certs + rate-limit the
+  cache-miss log (F19/F43).** `ssl_certificate_by_lua` runs on every full TLS
+  handshake. **(F19, perf):** the worker cert store held raw PEM, so `set_cert`
+  called `parse_pem_cert` + `parse_pem_priv_key` (PEM→DER + key parse — one of
+  the costliest per-handshake ops) on *every* connection, even though certs
+  change ~hourly. The PEM is now parsed once at ingest (`store_pair`) and the DER
+  cdata cached on the entry; the handshake path just reuses it. A cert that won't
+  parse is dropped at ingest (logged once) instead of re-failing per handshake.
+  **(F43, DoS):** every unmatched SNI logged one synchronous `error_log` WARN,
+  with no throttle — an attacker opening TLS connections with random SNIs could
+  fill the disk / contend I/O on the handshake path. The miss log is now
+  worker-rate-limited (≤1 line per 10s, with a coalesced suppressed count), and
+  the attacker-supplied SNI is length-bounded + sanitized on the logged line.
+  Cert selection still fails safe to the static default cert. Found by the 2026-07
+  edge Lua/OpenResty audit (F19, F43).
 - **DNAT/panel scoped accepts were appended AFTER the default drop (and
   duplicated) — DNAT'd web/panel traffic was dropped unless the listener ports
   were in `TCP_IN`.** `ensureScopedDNATAccepts` / `EnsurePanelDNATAccepts` (nft

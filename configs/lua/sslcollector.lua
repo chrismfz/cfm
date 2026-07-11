@@ -46,6 +46,16 @@ local dict = ngx.shared.sslcache
 -- module — significantly smaller attack surface for key material enumeration.
 local _store = {}
 
+-- F43: worker-local throttle for the per-handshake "cache miss" WARN. An attacker
+-- opening TLS connections with random SNIs (none in _store) would otherwise force
+-- one synchronous error_log write per connection on the handshake hot path
+-- (disk-fill + I/O contention). Log at most once per MISS_LOG_INTERVAL seconds,
+-- carrying a suppressed-since-last count. Cert selection always fails safe to the
+-- static default cert, so the throttle drops only diagnostics, never protection.
+local MISS_LOG_INTERVAL = 10 -- seconds
+local _miss_log_at      = 0
+local _miss_suppressed  = 0
+
 -- Socket(s) + token
 local SOCKS = {
   "/var/run/sslcollector.sock",
@@ -263,7 +273,25 @@ local function store_pair(prefix, name, cert_pem, key_pem)
     return false, "empty key_pem"
   end
 
-  _store[prefix .. name] = { cert = cert_pem, key = key_pem }
+  -- F19: parse PEM -> DER cdata ONCE here at ingest, not on every TLS handshake.
+  -- store_pair runs in the timer/init context (not ssl_certificate_by_lua), and
+  -- ssl.parse_pem_cert / parse_pem_priv_key are phase-agnostic, so this is safe.
+  -- The parsed cdata is cached on the entry and reused by set_cert, turning the
+  -- most expensive per-handshake step (PEM->DER + key parse) into a per-refresh
+  -- cost. A cert/key that won't parse is DROPPED here (the caller logs the
+  -- failure) rather than stored and re-failing — with a WARN — on every handshake.
+  local cert_der, cerr = ssl.parse_pem_cert(cert_pem)
+  if not cert_der then
+    return false, "parse cert: " .. (cerr or "?")
+  end
+  local key_der, kerr = ssl.parse_pem_priv_key(key_pem)
+  if not key_der then
+    return false, "parse key: " .. (kerr or "?")
+  end
+
+  -- Store only the parsed cdata: nothing after ingest reads the PEM text, so we
+  -- don't retain it (no per-cert PEM+DER memory duplication).
+  _store[prefix .. name] = { cert_der = cert_der, key_der = key_der }
   return true
 end
 
@@ -736,31 +764,33 @@ function M.set_cert()
   end
 
   if not entry then
-    ngx.log(ngx.WARN, "[sslcollector] cache miss sni=", sni, " -> nginx fallback cert")
+    -- F43: rate-limited miss log. Count every miss; emit at most one line per
+    -- MISS_LOG_INTERVAL with the suppressed count. Sanitize the attacker-supplied
+    -- SNI (bound length + drop anything not hostname-shaped) only on the line we
+    -- actually write, so the per-miss cost stays a counter bump + time compare.
+    _miss_suppressed = _miss_suppressed + 1
+    local now = ngx.now()
+    if now - _miss_log_at >= MISS_LOG_INTERVAL then
+      local safe = sni:gsub("[^%w%.%-%*]", "?"):sub(1, 100)
+      ngx.log(ngx.WARN, "[sslcollector] cache miss sni=", safe,
+              " (", _miss_suppressed, " miss(es) since last log) -> nginx fallback cert")
+      _miss_log_at     = now
+      _miss_suppressed = 0
+    end
     return
   end
 
-  local cert_der, cerr = ssl.parse_pem_cert(entry.cert)
-  if not cert_der then
-    ngx.log(ngx.ERR, "[sslcollector] parse cert failed sni=", sni, " err=", (cerr or "?"))
-    return
-  end
-
-  local key_der, kerr = ssl.parse_pem_priv_key(entry.key)
-  if not key_der then
-    ngx.log(ngx.ERR, "[sslcollector] parse key failed sni=", sni, " err=", (kerr or "?"))
-    return
-  end
-
+  -- F19: cert+key were parsed to DER once at ingest (store_pair); reuse the
+  -- cached cdata here instead of re-parsing the PEM on every handshake.
   ssl.clear_certs()
 
-  local ok1, err1 = ssl.set_cert(cert_der)
+  local ok1, err1 = ssl.set_cert(entry.cert_der)
   if not ok1 then
     ngx.log(ngx.ERR, "[sslcollector] ssl.set_cert failed sni=", sni, " err=", (err1 or "?"))
     return
   end
 
-  local ok2, err2 = ssl.set_priv_key(key_der)
+  local ok2, err2 = ssl.set_priv_key(entry.key_der)
   if not ok2 then
     ngx.log(ngx.ERR, "[sslcollector] ssl.set_priv_key failed sni=", sni, " err=", (err2 or "?"))
     return
