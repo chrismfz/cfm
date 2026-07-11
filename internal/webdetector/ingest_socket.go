@@ -37,8 +37,9 @@ const SocketActiveWindow = 30 * time.Second
 type IngestSocket struct {
 	sockPath string
 
-	lastReceived atomic.Int64 // unix seconds; 0 == never
-	listening    atomic.Bool
+	lastReceived     atomic.Int64 // unix seconds; 0 == never
+	listening        atomic.Bool
+	lastOversizedLog atomic.Int64 // unix seconds of the last "oversized line" WARN (throttle)
 }
 
 // NewIngestSocket creates a listener bound to the default socket path.
@@ -146,30 +147,88 @@ func (s *IngestSocket) Serve(ctx context.Context, e *Engine) error {
 	}
 }
 
+// serveConn reads newline-delimited TSV lines off one connection. Line length is
+// bounded: bufio.ReadString/ReadBytes accumulate an un-delimited stream WITHOUT
+// bound (the buffer size only limits a single fill, and collectFragments grows a
+// []byte until it finds the delimiter or EOF), so a sender that never writes '\n'
+// could OOM the daemon. ReadSlice instead returns ErrBufferFull once the line
+// exceeds the buffer, which lets us drop the oversized line and resync at the
+// next newline while keeping memory bounded to maxLine.
+//
+// Scope: this bounds per-line MEMORY (the OOM vector). It does not add a
+// per-connection or goroutine cap — a cfm-group peer can still hold a connection
+// and busy one goroutine (streaming valid lines, or repeated oversized+'\n'). That
+// is an accepted, pre-existing exposure: the socket is root:cfm 0660, so any caller
+// is already trusted at nginx-worker level.
 func (s *IngestSocket) serveConn(ctx context.Context, e *Engine, conn net.Conn) {
 	defer conn.Close()
 
-	// 256 KB matches the FileTailer buffer so a pathological oversized line
-	// doesn't hang this goroutine — bufio.Reader will return ErrBufferFull
-	// and we drop the fragment.
-	br := bufio.NewReaderSize(conn, 256*1024)
+	const (
+		maxLine  = 256 * 1024      // per-line memory bound (matches the FileTailer buffer)
+		maxDrain = 8 * 1024 * 1024 // give up + close if ONE oversized line runs past this
+		// readBudget is an ABSOLUTE deadline per ReadSlice call, not a pure idle
+		// timer: it caps how long one read may take, which is what bounds a
+		// slow-drip sender (a line that trickles in forever). A legit sender emits
+		// whole small lines, so it never pauses >readBudget mid-line.
+		readBudget = 60 * time.Second
+	)
+
+	br := bufio.NewReaderSize(conn, maxLine)
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		// Idle read deadline so abandoned keepalive connections release resources.
-		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(readBudget))
 
-		line, err := br.ReadString('\n')
+		line, err := br.ReadSlice('\n')
+
+		if err == bufio.ErrBufferFull {
+			// Oversized line: > maxLine with no newline yet. Drop it and resync at
+			// the next newline so the connection keeps ingesting; give up (close)
+			// if a single line floods past maxDrain. Memory stays bounded to maxLine.
+			s.noteOversizedLine()
+			dropped := len(line)
+			for err == bufio.ErrBufferFull {
+				if ctx.Err() != nil {
+					return
+				}
+				if dropped > maxDrain {
+					return // unbounded newline-free stream on one line → close
+				}
+				_ = conn.SetReadDeadline(time.Now().Add(readBudget))
+				line, err = br.ReadSlice('\n')
+				dropped += len(line)
+			}
+			if err != nil {
+				return // EOF or read error while draining
+			}
+			continue // resynced at a newline; the oversized line was dropped
+		}
+
 		if len(line) > 0 {
 			if line[len(line)-1] == '\n' {
 				line = line[:len(line)-1]
 			}
-			s.handleLine(e, line)
+			// ReadSlice returns a slice into br's buffer, invalidated by the next
+			// read — copy to a string before handing it downstream, which retains it.
+			s.handleLine(e, string(line))
 		}
 		if err != nil {
 			return
 		}
+	}
+}
+
+// noteOversizedLine records a dropped oversized ingest line: it counts as a
+// parse failure for telemetry and emits a throttled WARN (at most once per
+// minute) so an attack or a broken sender is visible without flooding the log.
+func (s *IngestSocket) noteOversizedLine() {
+	telemetry.RecordWebdetParseFailure()
+	now := time.Now().Unix()
+	last := s.lastOversizedLog.Load()
+	if now-last >= 60 && s.lastOversizedLog.CompareAndSwap(last, now) {
+		logging.Logf("[webdetector] ingest socket dropped a line exceeding the " +
+			"256 KB buffer (no newline); resyncing")
 	}
 }
 
