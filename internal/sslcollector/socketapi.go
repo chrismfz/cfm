@@ -19,20 +19,20 @@
 //
 // # Future hardening (tracked — not yet implemented)
 //
-//   1. SO_PEERCRED: replace the group-readable bearer token with kernel-verified
-//      process credentials (UID/GID/PID).  This would restrict callers to the
-//      exact nginx worker binary rather than any cfm-group process.  Note: it
-//      does NOT improve security against a compromised nginx worker — the worker
-//      already holds all cert+key pairs in memory — but it eliminates the
-//      "another process obtains the token" vector entirely.
-//      See: docs/ssl-collector.md
+//  1. SO_PEERCRED: replace the group-readable bearer token with kernel-verified
+//     process credentials (UID/GID/PID).  This would restrict callers to the
+//     exact nginx worker binary rather than any cfm-group process.  Note: it
+//     does NOT improve security against a compromised nginx worker — the worker
+//     already holds all cert+key pairs in memory — but it eliminates the
+//     "another process obtains the token" vector entirely.
+//     See: docs/ssl-collector.md
 //
-//   2. Encrypted offline snapshot: the on-disk snapshot
-//      (/var/lib/cfm/sslcollector/dump.json, mode 0640) contains cert+key pairs
-//      for all hosted domains.  Encrypting it with a key only available from the
-//      running cfm daemon would prevent exfiltration of the file in isolation.
-//      Controlled via SSLCOLLECTOR_OFFLINE_CACHE in cfm.conf.
-//      See: docs/ssl-collector.md
+//  2. Encrypted offline snapshot: the on-disk snapshot
+//     (/var/lib/cfm/sslcollector/dump.json, mode 0640) contains cert+key pairs
+//     for all hosted domains.  Encrypting it with a key only available from the
+//     running cfm daemon would prevent exfiltration of the file in isolation.
+//     Controlled via SSLCOLLECTOR_OFFLINE_CACHE in cfm.conf.
+//     See: docs/ssl-collector.md
 package sslcollector
 
 import (
@@ -51,8 +51,8 @@ import (
 type SockServerConfig struct {
 	Enabled  bool
 	SockPath string
-	Token    string        // required; empty disables auth (start is refused)
-	SockGID  int           // if > 0, socket is chowned to root:SockGID after creation
+	Token    string // required; empty disables auth (start is refused)
+	SockGID  int    // if > 0, socket is chowned to root:SockGID after creation
 	PEMTTL   time.Duration
 	PEMMax   int
 }
@@ -177,26 +177,24 @@ func (s *sockServer) writeCertJSON(w http.ResponseWriter, host string, e *Entry,
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-
 func (s *sockServer) handleDumpAll(w http.ResponseWriter, r *http.Request) {
-    if !s.authOK(r) {
-        http.Error(w, "forbidden", http.StatusForbidden)
-        return
-    }
-    if r.Method != http.MethodGet {
-        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-        return
-    }
+	if !s.authOK(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-    body, _, _, err := s.col.BuildDumpAllPayload()
-    if err != nil {
-        http.Error(w, "internal error", http.StatusInternalServerError)
-        return
-    }
-    w.Header().Set("Content-Type", "application/json")
-    _, _ = w.Write(body)
+	body, _, _, err := s.col.BuildDumpAllPayload()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
 }
-
 
 func (s *sockServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	if !s.authOK(r) {
@@ -252,7 +250,6 @@ func (s *sockServer) handleDump(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(e)
 }
 
-
 // ServeSock starts an HTTP API on a unix socket for OpenResty.
 // It stops when ctx is canceled.
 //
@@ -279,6 +276,16 @@ func ServeSock(ctx context.Context, col *Collector, cfg SockServerConfig) error 
 	ln, err := net.Listen("unix", cfg.SockPath)
 	if err != nil {
 		return err
+	}
+	// F27: net.Listen("unix") defaults UnlinkOnClose=true, so ln.Close() unlinks
+	// the path BY NAME. On a config-change restart the new server does
+	// os.Remove+net.Listen to create a fresh inode at the same path; if the old
+	// server's ctx-cancel Close() then runs, it unlink()s the NEW inode, leaving
+	// the new server listening on an fd with no filesystem name (every worker
+	// dial gets ENOENT). The os.Remove above already owns stale-file cleanup, and
+	// disable/Stop remove the name explicitly, so Close() must not unlink.
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
 	}
 	_ = os.Chmod(cfg.SockPath, 0660)
 	if cfg.SockGID > 0 {
@@ -317,6 +324,3 @@ func ServeSock(ctx context.Context, col *Collector, cfg SockServerConfig) error 
 	}
 	return nil
 }
-
-
-
