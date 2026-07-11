@@ -74,9 +74,9 @@ local function sslcache_stats(d)
   local total    = #all_keys
   local capped   = (total >= 8000)
 
-  -- Cert/key PEM strings are stored in the worker-local _store table inside
-  -- sslcollector.lua (not in shared dict) so other Lua code cannot enumerate
-  -- them via dict:get_keys(). Ask the module directly for counts.
+  -- Cert/key material (parsed DER cdata) is stored in the worker-local _store
+  -- table inside sslcollector.lua (not in shared dict) so other Lua code cannot
+  -- enumerate it via dict:get_keys(). Ask the module directly for counts.
   local sc_ok, sc = pcall(require, "sslcollector")
   local exact_hosts, wild_hosts = 0, 0
   if sc_ok and sc and sc.cert_counts then

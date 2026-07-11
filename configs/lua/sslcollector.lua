@@ -1,9 +1,11 @@
 -- /opt/openresty/nginx/lua/sslcollector.lua
 -- QUIC-safe SSL Collector (preload + refresh + disk snapshot):
 -- - Background poll /stats (version change) and fetches /dumpall over unix socket
--- - Stores PEM strings in worker-local table (not shared dict — see note below)
+-- - Parses each PEM to DER cdata ONCE at ingest, stores the cdata in a worker-local
+--   table (not shared dict — see note below); the PEM text is not retained
 -- - Writes disk snapshot atomically; loads it on startup so restarts survive CFM downtime
--- - ssl_certificate_by_lua_block ONLY does dict lookup + PEM parse + set_cert (no I/O, no yield)
+-- - ssl_certificate_by_lua_block ONLY does dict lookup + set_cert on the cached cdata
+--   (no PEM parse, no I/O, no yield)
 --
 -- Security model (see also docs/ssl-collector.md and internal/sslcollector/socketapi.go):
 --   The bearer token is written to /var/lib/cfm/lua/cfm_token.lua at mode 0640 (root:cfm).
@@ -38,7 +40,8 @@ local dict = ngx.shared.sslcache
 
 -- Worker-local cert store.
 -- Keys: "e:<host>" (exact) or "w:<suffix>" (wildcard)
--- Values: { cert = "<PEM>", key = "<PEM>" }
+-- Values: { cert_der = <cdata>, key_der = <cdata> }  (parsed once at ingest by
+--   store_pair; the hot path reuses this cdata, never re-parsing PEM — audit F19)
 --
 -- Intentionally NOT stored in ngx.shared dict: shared dicts are accessible to
 -- any Lua code in the same OpenResty process via dict:get_keys() + dict:get().

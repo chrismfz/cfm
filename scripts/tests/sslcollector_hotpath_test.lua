@@ -96,6 +96,23 @@ do
     check(parse_key_calls == 0, "F19: set_cert must NOT call parse_pem_priv_key (got " .. parse_key_calls .. ")")
     check(set_cert_arg == CD, "F19: ssl.set_cert got the cached cert_der cdata")
     check(set_key_arg == KD, "F19: ssl.set_priv_key got the cached key_der cdata")
+
+    -- Wildcard path: a longest-suffix "w:" entry must reuse cached cdata too
+    -- (host.wild.example.net -> miss "e:" -> match "w:wild.example.net").
+    -- Use a domain disjoint from the F43 block's example.com miss SNIs so this
+    -- injected wildcard can't accidentally satisfy one of those "guaranteed miss"
+    -- lookups below.
+    local WCD, WKD = { "wild_cert_der" }, { "wild_key_der" }
+    store["w:wild.example.net"] = { cert_der = WCD, key_der = WKD }
+    sslmock._sni = "host.wild.example.net"
+    parse_cert_calls, parse_key_calls = 0, 0
+    set_cert_arg, set_key_arg = nil, nil
+    M.set_cert()
+    check(parse_cert_calls == 0 and parse_key_calls == 0,
+          "F19: wildcard set_cert must NOT re-parse PEM (got cert=" .. parse_cert_calls ..
+          " key=" .. parse_key_calls .. ")")
+    check(set_cert_arg == WCD and set_key_arg == WKD,
+          "F19: wildcard path reuses the cached cdata for the w: entry")
   end
 end
 
@@ -123,14 +140,27 @@ do
   check(warn_lines[1]:find("50 miss", 1, true) ~= nil,
         "F43: the WARN reports the coalesced suppressed count (got: " .. tostring(warn_lines[1]) .. ")")
 
-  -- Attacker-controlled SNI with a newline/space is neutralized on the log line.
-  sslmock._sni = "evil\n injected=1 .example.com"
+  -- Attacker-controlled SNI with newline/CR/NUL/space is neutralized on the log
+  -- line (the log-forging bytes are the ones that must never survive verbatim).
+  sslmock._sni = "evil\r\n\0 injected=1 .example.com"
   warn_lines = {}
   _now = 5000
   M.set_cert()
   check(#warn_lines == 1, "F43: sanitized-SNI miss logs one WARN")
-  check(warn_lines[1]:find("\n injected", 1, true) == nil,
-        "F43: raw newline/space from the SNI must NOT appear verbatim in the log (got: " .. tostring(warn_lines[1]) .. ")")
+  for _, bad in ipairs({ "\n", "\r", "\0", " " }) do
+    check(warn_lines[1]:find(bad .. "injected", 1, true) == nil,
+          "F43: control/space byte from the SNI must NOT precede 'injected' verbatim (got: " ..
+          tostring(warn_lines[1]) .. ")")
+  end
+
+  -- The logged SNI is length-capped at 100 chars so a huge SNI can't bloat the line.
+  sslmock._sni = string.rep("a", 500) .. ".example.com"
+  warn_lines = {}
+  _now = 8000
+  M.set_cert()
+  check(#warn_lines == 1, "F43: oversized-SNI miss logs one WARN")
+  check(warn_lines[1]:find(string.rep("a", 101), 1, true) == nil,
+        "F43: the logged SNI must be capped at 100 chars (found a 101-char run)")
 end
 
 if fails > 0 then
