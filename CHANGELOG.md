@@ -82,6 +82,24 @@ back-filled here — see the git/PR history for that period.
   `detect_php_webshell_body`), which url-decodes the body and scores `<?php` +
   exec-marker + superglobal at the same `challenge` tier. Found by the 2026-07
   edge Lua audit (F16).
+- **WAF command-dispatcher detector (rule 310) no longer challenges legit
+  `system=`/`command=` values (F14).** `detect_cmd_param_key` fired
+  `CMD_SYSTEM`/`CMD_COMMAND` when a `system=`/`command=`/`cmd=` value tokenised
+  to a word in its shell-command list, but (a) the tokeniser split on `-`, so
+  compound identifiers shattered — `system=host-01` → `{host, 01}` → matched
+  `host`; and (b) the list held ubiquitous words (`id`, `host`, `more`, `less`,
+  `head`, `tail`, `env`, `cat`, `ls`, `ps`, `w`, `pwd`, `fetch`, `route`,
+  `ping`, `dig`, `arp`). Since `system=`/`command=` have no elFinder carve-out,
+  legit values (`command=more`, `system=host-01`, `command=fetch`, `env=prod`,
+  OpenCart `route=`) were challenged — breaking XHR/JSON consumers ("Data is
+  not JSON"). Fix: hyphen is no longer a token separator (real `cmd arg`
+  invocations use whitespace), and the ambiguous words were removed from the
+  list. Weaponized forms still fire via the existing metachar/path checks
+  (`cat /etc/passwd`, `id;`, `command=curl http://…`); only the bare,
+  un-metachar'd recon probe (`command=id`) is no longer flagged — an accepted
+  trade for eliminating the FP class. Unambiguous tool names (`whoami`,
+  `uname`, `wget`, `curl`, `nc`, `bash`, `chmod`, `passthru`, …) still fire.
+  Found by the 2026-07 edge Lua audit (F14).
 - **WAF body inspection no longer truncated below the per-Content-Type scan
   budget (F08).** The edge body reader (`get_req_body_for_waf` in `cfm.lua`)
   handed the WAF at most `waf_body_max_len` = **8192** bytes, but the engine's

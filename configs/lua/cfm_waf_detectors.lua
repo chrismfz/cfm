@@ -1007,19 +1007,30 @@ end
 -- of generic dispatcher keys like cmd=open / system=rewards / command=viewres
 -- found in WP plugins (elFinder, LWS WooRewards) and themes (WooCommerce
 -- mini-cart, auto-parts visualizers).
+-- Shell-command / tool names whose appearance as a generic dispatcher VALUE
+-- (system= / command= / cmd=) indicates an RCE probe. Kept deliberately NARROW
+-- after audit F14: only names that are essentially never a legitimate
+-- dispatcher verb or identifier fragment. The ubiquitous words that used to
+-- live here — id, w, ps, pwd, ls, env, cat, head, tail, less, more, host,
+-- fetch, route, ping, dig, arp — were REMOVED: they collide with real values
+-- (record `id`, `host` fields, `env=prod`, JS `fetch`, OpenCart `route`,
+-- pagination `more`, hostnames like `host-01`), and system=/command= have no
+-- elFinder carve-out, so a bare legit value FP-challenged comment/XHR/JSON
+-- traffic ("Data is not JSON"). Their *weaponized* forms still fire via the
+-- metachar / path checks in value_looks_shelly (`cat /etc/passwd`, `id;`,
+-- `env|nc …`); the accepted trade is that the bare, un-metachar'd recon probe
+-- (`command=id`, `system=ls`, `cmd=ping evil.com`) is no longer flagged.
 local CMD_PARAM_SHELL_WORDS = {
-  -- recon
-  id = true, whoami = true, uname = true, pwd = true, hostname = true,
-  ls = true, ps = true, w = true, env = true,
-  cat = true, head = true, tail = true, less = true, more = true,
-  -- file system / privilege
+  -- recon (unambiguous only; id/pwd/ls/ps/w/env/cat/head/tail/less/more/host
+  -- removed by F14 as legit-value collisions)
+  whoami = true, uname = true, hostname = true,
+  -- file system / privilege (mutation verbs — rarely a legit dispatcher value)
   rm = true, mv = true, cp = true, mkdir = true, touch = true, ln = true,
   chmod = true, chown = true,
-  -- network / fetch
-  wget = true, curl = true, fetch = true, nc = true, netcat = true,
+  -- network (ambiguous fetch/dig/ping/host/arp/route removed by F14)
+  wget = true, curl = true, nc = true, netcat = true,
   socat = true, telnet = true, ssh = true, scp = true,
-  nslookup = true, dig = true, ping = true, host = true,
-  ifconfig = true, netstat = true, iptables = true, arp = true, route = true,
+  nslookup = true, ifconfig = true, netstat = true, iptables = true,
   -- shells / interpreters
   bash = true, sh = true, dash = true, zsh = true, ksh = true, csh = true,
   python = true, python2 = true, python3 = true, perl = true, ruby = true,
@@ -1054,12 +1065,16 @@ local function value_looks_shelly(v)
     return true
   end
 
-  -- Word-tokenise on space / + (form-encoded space). Lua's %s matches
-  -- whitespace; we add "+" explicitly. The value is then split into
-  -- alphanumeric words; if any token (or the whole value) matches a
-  -- known shell-command name, this is a real RCE probe.
+  -- Word-tokenise on whitespace / + (form-encoded space) — the separators a
+  -- real command invocation uses between the verb and its args (`uname -a`,
+  -- `wget http://…`). Hyphen is DELIBERATELY part of a token, NOT a separator
+  -- (audit F14): legit compound identifiers use `-` (`host-01`, `item-id`,
+  -- `us-east-1`), so splitting on it shattered them into bare tokens (`host`,
+  -- `id`) that hit the word list and FP-challenged. A genuine `cmd - arg`
+  -- separates with whitespace, so keeping `-` inside the token loses no real
+  -- probe. If the whole value or any token matches a shell-command name, fire.
   if CMD_PARAM_SHELL_WORDS[v] then return true end
-  for word in v:gmatch("[%w_]+") do
+  for word in v:gmatch("[%w_%-]+") do
     if CMD_PARAM_SHELL_WORDS[word] then return true end
   end
 
