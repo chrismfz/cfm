@@ -597,11 +597,15 @@ func (b *Backend) cleanupScopedDNATAccepts(namespace string) error {
 
 func firstInputDefaultDropHandle(out string) string {
 	for _, line := range strings.Split(out, "\n") {
-		norm := strings.ReplaceAll(line, `"`, "")
-		if !strings.Contains(norm, "ct state new") || !strings.Contains(norm, "dport 0-65535") || !strings.Contains(norm, " drop") || !strings.Contains(norm, " handle ") {
+		// Shared default-drop predicate (firewall.IsInputDefaultDropLine) so the
+		// matcher can't drift between the nftlib backend, the nft backend and the
+		// dnat CLI reporter; here we additionally need the handle to insert
+		// before it.
+		if !firewall.IsInputDefaultDropLine(line) {
 			continue
 		}
-		if !strings.Contains(norm, "tcp dport 0-65535") && !strings.Contains(norm, "udp dport 0-65535") {
+		norm := strings.ReplaceAll(line, `"`, "")
+		if !strings.Contains(norm, " handle ") {
 			continue
 		}
 		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
