@@ -1,6 +1,7 @@
 package sslcollector
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -230,5 +231,137 @@ func TestWriteLuaTokenToExistingParents(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `return "tok-bridge"`) {
 		t.Fatalf("unexpected token content: %q", string(data))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F55 — token charset: an operator token that cannot be emitted as valid LuaJIT
+// (via Go %q) must be treated as weak and regenerated, so cfm_token.lua /
+// cfm_bridge_token.lua always compile.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// zwsp is U+200B (zero-width space). Go %q renders it as the ​ escape,
+// which LuaJIT cannot parse — the F55 trigger. Written as an interpreted string
+// literal so the source stays plain ASCII.
+const zwsp = "​"
+
+func TestTokenIsLuaSafe(t *testing.T) {
+	t.Parallel()
+	safe := []string{
+		"abcdef0123456789",                   // hex (the generated form)
+		"AbC-_.~+/=Xyz012345",                // base64url-ish + punctuation
+		strings.Repeat("a", 48),              // long alnum
+		"!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", // every graphical ASCII punct incl. \" and \\
+	}
+	for _, s := range safe {
+		if !tokenIsLuaSafe(s) {
+			t.Errorf("tokenIsLuaSafe(%q) = false, want true", s)
+		}
+	}
+	unsafe := []string{
+		"abc def",                            // space
+		"abc\tdef",                           // tab
+		"abc\ndef",                           // newline
+		"abc\x00def",                         // NUL
+		"abc\x1fdef",                         // control
+		"abc\x7fdef",                         // DEL
+		"abc" + zwsp + "def",                 // zero-width space (multibyte)
+		"abc" + string(rune(0x00e9)) + "def", // é, non-ASCII accented rune
+		"abc" + string(rune(0x00a0)) + "def", // non-breaking space
+	}
+	for _, s := range unsafe {
+		if tokenIsLuaSafe(s) {
+			t.Errorf("tokenIsLuaSafe(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestValidateOrGenerateTokenRegeneratesLuaUnsafe(t *testing.T) {
+	t.Parallel()
+	// Strong length (>=32) and not a placeholder, but contains a ZWSP → must be
+	// regenerated into a Lua-safe token.
+	bad := strings.Repeat("a", 40) + zwsp + strings.Repeat("b", 8)
+
+	got, err := ValidateOrGenerateToken("", bad)
+	if err != nil {
+		t.Fatalf("ValidateOrGenerateToken: %v", err)
+	}
+	if got == bad {
+		t.Fatalf("Lua-unsafe token returned unchanged; expected regeneration")
+	}
+	if len(got) < 32 || !tokenIsLuaSafe(got) {
+		t.Fatalf("regenerated token not strong+Lua-safe: %q", got)
+	}
+
+	// Same guard on the generic key variant (used for OPENRESTY_TOKEN, itself
+	// emitted to cfm_bridge_token.lua via %q — manager.go).
+	got2, err := ValidateOrGenerateTokenKey("", "OPENRESTY_TOKEN", bad)
+	if err != nil {
+		t.Fatalf("ValidateOrGenerateTokenKey: %v", err)
+	}
+	if got2 == bad || len(got2) < 32 || !tokenIsLuaSafe(got2) {
+		t.Fatalf("key variant did not regenerate a strong+Lua-safe token: %q", got2)
+	}
+}
+
+func TestValidateOrGenerateTokenKeepsStrongSafeToken(t *testing.T) {
+	t.Parallel()
+	strong := strings.Repeat("a1b2c3d4", 6) // 48 chars, Lua-safe, not a placeholder
+	got, err := ValidateOrGenerateToken("", strong)
+	if err != nil {
+		t.Fatalf("ValidateOrGenerateToken: %v", err)
+	}
+	if got != strong {
+		t.Fatalf("strong Lua-safe token was changed: %q -> %q", strong, got)
+	}
+}
+
+// Documents WHY the F55 guard exists: emitting an unvalidated ZWSP token yields
+// the Go %q ​ escape (invalid LuaJIT). The guard ensures the validators
+// never RETURN such a token, so what reaches WriteLuaToken always compiles.
+func TestLuaEmissionOfUnsafeTokenProducesInvalidEscape(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "lua")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	p := filepath.Join(dir, "cfm_token.lua")
+	tok := "tok" + zwsp + "end"
+	if err := WriteLuaToken(p, tok, 0); err != nil {
+		t.Fatalf("WriteLuaToken: %v", err)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// The file must contain exactly the Go %q rendering (the \uXXXX form), and
+	// NOT a literal ZWSP byte — proving the escape LuaJIT would reject.
+	want := fmt.Sprintf("return %q", tok)
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("emitted file missing %q, got: %q", want, string(data))
+	}
+	if strings.Contains(string(data), zwsp) {
+		t.Fatalf("literal ZWSP should have been %%q-escaped, got: %q", string(data))
+	}
+}
+
+// F54: a successful write leaves no .tmp sibling (the fsync rewrite must still
+// rename cleanly and not orphan the temp file).
+func TestWriteLuaTokenLeavesNoTmp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfm_token.lua")
+	if err := WriteLuaToken(p, "abc123def456", 0); err != nil {
+		t.Fatalf("WriteLuaToken: %v", err)
+	}
+	if _, err := os.Stat(p + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("expected no lingering .tmp, stat err=%v", err)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(data), `return "abc123def456"`) {
+		t.Fatalf("unexpected content: %q", string(data))
 	}
 }

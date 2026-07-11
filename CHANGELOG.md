@@ -309,6 +309,25 @@ back-filled here — see the git/PR history for that period.
   stale-file cleanup; disable/shutdown remove the name explicitly). The lifecycle
   state machine is now mutex-guarded and race-clean under `go test -race`. Found
   by the 2026-07 edge Lua/OpenResty audit (F27, F28).
+- **sslcollector generated-Lua token files are now crash-durable and always
+  valid LuaJIT (F54/F55).** The generated `cfm_token.lua` / `cfm_bridge_token.lua`
+  authenticate the edge workers to the collector and bridge sockets; a bad file
+  → 403 on every `/cert` and `/dumpall` → cert-delivery outage. **(F54,
+  durability):** the shared atomic Lua-file writer did `WriteFile(tmp)` + `rename`
+  with **no `fsync`**, so power loss between the rename becoming durable and the
+  data reaching disk could leave a present-but-empty/truncated token file after
+  reboot. It now `fsync`s the temp file before the rename (matching the snapshot
+  writer) — fixing durability for all four generated Lua files (token,
+  sslcollector-config, clamav-config, bridge-config) at once, since they share
+  this writer. **(F55, valid LuaJIT):** an operator-supplied token was accepted
+  verbatim if ≥32 chars and emitted via Go `%q`; a non-printable non-ASCII rune
+  (e.g. a pasted zero-width space) renders as `\uXXXX`, which LuaJIT cannot parse
+  → the token file fails to compile and edge↔collector/bridge auth breaks. Tokens
+  are now required to be graphical ASCII (`0x21–0x7e`); a token that isn't is
+  treated as weak and regenerated (the generated 48-hex token is always safe).
+  Applied to both the sock token and the generic key form (`OPENRESTY_TOKEN`,
+  which is itself emitted to `cfm_bridge_token.lua`). Found by the 2026-07 edge
+  Lua/OpenResty audit (F54, F55).
 - **DNAT/panel scoped accepts were appended AFTER the default drop (and
   duplicated) — DNAT'd web/panel traffic was dropped unless the listener ports
   were in `TCP_IN`.** `ensureScopedDNATAccepts` / `EnsurePanelDNATAccepts` (nft

@@ -19,6 +19,25 @@ var badTokens = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|d
 // confTokenLine patches the SSLCOLLECTOR_SOCK_TOKEN line in a cfm.conf file.
 var confTokenLine = regexp.MustCompile(`(?m)^(SSLCOLLECTOR_SOCK_TOKEN\s*=\s*).*$`)
 
+// tokenIsLuaSafe reports whether s can be emitted verbatim into a generated Lua
+// file via Go %q AND round-tripped through cfm.conf. It requires every byte to be
+// a graphical ASCII char (0x21..0x7e): no whitespace, no control bytes, and no
+// non-ASCII runes (audit F55). Go's %q renders a non-printable non-ASCII rune as
+// \uXXXX / \UXXXXXXXX, which LuaJIT cannot parse (it expects \xHH or \u{...}), so
+// a token containing e.g. a zero-width space would produce a cfm_token.lua /
+// cfm_bridge_token.lua that fails to compile — taking edge<->collector (and
+// edge<->bridge) auth down. An operator token that fails this is treated as weak
+// and regenerated (the generated 48-hex token is always safe). Byte iteration is
+// deliberate: any multi-byte UTF-8 rune has bytes >= 0x80 and is rejected.
+func tokenIsLuaSafe(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x21 || c > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // ValidateOrGenerateToken returns current unchanged if it is strong (≥32 chars,
 // not a known placeholder). Otherwise it generates a new 48-hex-char token,
 // patches the SSLCOLLECTOR_SOCK_TOKEN line in cfgPath in place, and returns the
@@ -28,7 +47,7 @@ var confTokenLine = regexp.MustCompile(`(?m)^(SSLCOLLECTOR_SOCK_TOKEN\s*=\s*).*$
 // and the new token is still returned so the caller can update in-memory config.
 func ValidateOrGenerateToken(cfgPath, current string) (string, error) {
 	cur := strings.TrimSpace(current)
-	if len(cur) >= 32 && !badTokens.MatchString(cur) {
+	if len(cur) >= 32 && !badTokens.MatchString(cur) && tokenIsLuaSafe(cur) {
 		return cur, nil
 	}
 
@@ -71,7 +90,7 @@ func ValidateOrGenerateToken(cfgPath, current string) (string, error) {
 // and the new token is still returned so the caller can update in-memory config.
 func ValidateOrGenerateTokenKey(cfgPath, keyName, current string) (string, error) {
 	cur := strings.TrimSpace(current)
-	if len(cur) >= 32 && !badTokens.MatchString(cur) {
+	if len(cur) >= 32 && !badTokens.MatchString(cur) && tokenIsLuaSafe(cur) {
 		return cur, nil
 	}
 
@@ -226,13 +245,36 @@ func writeLuaToken(luaPath, token string, cfmGID int, mkdirParent bool) error {
 // and miss the fourth. errPrefix/logTag/what preserve each caller's
 // historical error strings and log identity.
 //
+// Durability (audit F54): the tmp file's DATA is fsync'd BEFORE the rename, so a
+// crash or power loss can't make the rename durable while the bytes are still
+// only in the page cache — which would leave a present-but-empty/truncated file
+// (e.g. a zero-length cfm_token.lua that 403s every /cert and /dumpall). Mirrors
+// writeSnapshotAtomic in snapshot.go.
+//
 // 0640: root owns, cfm group reads (required for OpenResty/Angie workers).
 // World has no access. gosec G306 flags anything above 0600 but group-read
 // is intentional here — 0600 would prevent the workers from reading it.
 func writeLuaFileAtomic(luaPath, content string, cfmGID int, errPrefix, logTag, what string) error {
 	tmp := luaPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0640); err != nil { // #nosec G306 -- group-read intentional: cfm group = nginx workers only
-		return fmt.Errorf("%s: write %s tmp: %w", errPrefix, what, err)
+	// #nosec G302 G304 -- 0640 group-read intentional (cfm group = nginx workers
+	// only); tmp is derived from a daemon-internal, absolute luaPath.
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640)
+	if err != nil {
+		return fmt.Errorf("%s: open %s tmp: %w", errPrefix, what, err)
+	}
+	if _, werr := f.Write([]byte(content)); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("%s: write %s tmp: %w", errPrefix, what, werr)
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("%s: fsync %s tmp: %w", errPrefix, what, serr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("%s: close %s tmp: %w", errPrefix, what, cerr)
 	}
 	if err := os.Chmod(tmp, 0640); err != nil {
 		logging.Logf("%s WARNING: failed chmod on tmp %s %s: %v", logTag, what, tmp, err)
