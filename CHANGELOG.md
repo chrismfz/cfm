@@ -295,6 +295,20 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **Origin-keepalive no longer logs a false "OpenResty too old" NOTICE on a
+  hostless request (F60).** `cfm_origin_ka.balance(443)` conflated two conditions
+  in one `elseif`: genuinely lacking SNI-keyed pool support (`sni_pool_ok=false`)
+  vs. a fully-capable worker handling a request whose `$host` resolved to `""`
+  (e.g. `server_name '_'` with no Host). The empty-host case wrongly logged
+  `lua-resty-core lacks SNI-keyed connection pools (needs OpenResty 1.27.1.1+)`
+  and **burned the once-per-worker NOTICE latch** — so operators who grep
+  `[cfm_origin_ka]` after enabling keepalive (as the docs instruct) wrongly
+  concluded HTTPS origin pooling was disabled fleet-wide. The conditions are now
+  split: the "no support" NOTICE fires only when `sni_pool_ok` is false; a
+  hostless request on a capable worker is served unpooled **silently**, without
+  the NOTICE and without consuming the latch. Behaviour is otherwise unchanged
+  (still unpooled per-request for that hostless request). Found by the 2026-07
+  edge Lua audit (F60, low).
 - **Bounded line length in the core log readers too (F26 family).** The same
   unbounded `bufio.ReadString('\n')` fixed for the ingest socket (F26) also lived
   in **all three** `internal/detectors/core` log readers: the **file tailer**

@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**30 / 55 fixed.** Grouped by severity; each links to its detail section.
+**31 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -102,7 +102,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F57](#f57)** · `configs/lua/cfm_purge.lua:128` · _perf_ (axis b) — purge_ip scans the entire cfm_decisions dict under lock (get_keys(0)) on a force-unblock
 - [x] **[F58](#f58)** · `configs/lua/cfm_waf_detectors.lua:1117` · _perf_ (axis b) — args-only normalize(cap(args)) recomputed by ~6 detectors per request instead of being memoized once
 - [x] **[F59](#f59)** · `configs/lua/cfm_waf_detectors.lua:2423` · _perf_ (axis b) — Five RCE-marker detectors each rebuild lower(cap(body)) + concat on every POST body
-- [ ] **[F60](#f60)** · `configs/lua/cfm_origin_ka.lua:172` · _correctness_ (axis c) — cfm_origin_ka emits a false "OpenResty too old / HTTPS pooling off" NOTICE and burns the one-shot warn flag when $host is empty
+- [x] **[F60](#f60)** · `configs/lua/cfm_origin_ka.lua:172` · _correctness_ (axis c) — cfm_origin_ka emits a false "OpenResty too old / HTTPS pooling off" NOTICE and burns the one-shot warn flag when $host is empty
 
 ### Info (1)
 
@@ -1180,7 +1180,7 @@ FAIL** against the pre-fix (1 call). Branch `claude/edge-audit-waf-memo`.
 <a id="f60"></a>
 ### F60 — cfm_origin_ka emits a false "OpenResty too old / HTTPS pooling off" NOTICE and burns the one-shot warn flag when $host is empty
 
-- **Status:** ☐ open
+- **Status:** ☑ done — condition split; empty-host is now a silent unpooled case
 - **Severity:** low · **Category:** correctness (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_origin_ka.lua:172`
 
@@ -1190,7 +1190,21 @@ FAIL** against the pre-fix (1 call). Branch `claude/edge-audit-waf-memo`.
 
 **Suggested fix.** Split the conditions so the 'no SNI support' NOTICE fires only when sni_pool_ok is false; treat host=='' as its own silent/distinct case.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Restructured the `port == 443` branch in `_M.balance` into three explicit arms:
+`if not sni_pool_ok` (the ONLY case that logs the once-per-worker "needs OpenResty 1.27.1.1+"
+NOTICE — covers both an older core and a runtime latch-off) · `elseif host ~= ""` (the 3-arg
+SNI-keyed pooling path, unchanged, including its own WARN + `sni_pool_ok=false` latch-off on a
+deterministic runtime failure) · `else` (sni_pool_ok true but `$host==""` — pooling IS supported,
+we just can't key a pool for a hostless request, so serve it unpooled **silently**, no NOTICE and
+no latch burn). All other behaviour is byte-for-byte preserved: the empty-host request still gets
+an unpooled 2-arg `set_peer`, and the post-runtime-failure NOTICE still fires on the following
+request (that path sets `sni_pool_ok=false`, which the next request reads). Test `cfm_origin_ka_test.lua`
+scenario 5 (new): on an SNI-capable worker a hostless 443 request emits **no** "lacks SNI-keyed"
+NOTICE and serves unpooled (2-arg `set_peer`, no `enable_keepalive`); a subsequent Host-bearing
+request still pools; and — after a forced 3-arg runtime demotion — the *genuine* "no SNI support"
+NOTICE still fires, proving the one-shot latch was **not** consumed by the empty-host request. Two
+assertions (the false-NOTICE suppression and the latch-intact discriminator) **verified to FAIL**
+against the pre-fix `elseif`. Config-only Lua change. Branch `claude/edge-audit-origin-ka-host`.
 
 ---
 

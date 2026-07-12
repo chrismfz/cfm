@@ -168,6 +168,56 @@ check(ek_raises == 1, "enable_keepalive raise latches after first attempt")
 check(log_matching("degrading to per-request connections") == 1,
       "keepalive_broken warns exactly once")
 
+-- ── Scenario 5: modern core but empty $host → unpooled, no FALSE NOTICE ────
+-- A 443 request whose $host resolves to "" (e.g. server_name '_' didn't fill
+-- a Host) on an SNI-pool-capable worker must NOT log the "needs OpenResty
+-- 1.27.1.1+" NOTICE and must NOT burn the one-shot latch: pooling is supported,
+-- the request just can't key a pool without a host. Pre-F60 the `elseif`
+-- conflated this with a genuine lack of support (misled operators grepping
+-- [cfm_origin_ka]).
+package.loaded["cfm_origin_ka"] = nil
+local s5 = { set_peer = {}, keepalive = {} }
+local s5_fail_3arg = false   -- flip to force a 3-arg runtime failure (demotion)
+package.loaded["ngx.balancer"] = {
+  set_current_peer = function(addr, port, host)
+    s5.set_peer[#s5.set_peer + 1] = { addr = addr, port = port, host = host }
+    if host ~= nil and s5_fail_3arg then return nil, "forced 3-arg failure" end
+    return true
+  end,
+  enable_keepalive = function() s5.keepalive[#s5.keepalive + 1] = true; return true end,
+  set_more_tries = function() return true end,
+  get_last_failure = function() return nil end,
+}
+local ka5 = require "cfm_origin_ka"
+check(ka5.sni_pool_supported() == true, "scenario 5: modern 3-param core is SNI-pool capable")
+logs = {}
+ngx.var.host = ""            -- hostless 443 request
+ka5.balance(443)
+check(log_matching("lacks SNI-keyed") == 0,
+      "F60: empty $host does NOT emit the false 'no SNI support' NOTICE")
+check(#s5.keepalive == 0,
+      "F60: empty $host serves unpooled (cannot key a pool without a host)")
+check(#s5.set_peer == 1 and s5.set_peer[1].host == nil and s5.set_peer[1].port == 443,
+      "F60: empty $host falls through to the 2-arg unpooled set_peer")
+-- A later request WITH a Host is still SNI-pooled (empty-host didn't disable pooling).
+ngx.var.host = "example.com"
+ka5.balance(443)
+check(#s5.set_peer == 2 and s5.set_peer[2].host == "example.com",
+      "F60: a subsequent request with a Host is SNI-pooled (pooling not disabled)")
+check(#s5.keepalive == 1, "F60: pooling enabled once a Host is present again")
+-- Prove the one-shot NOTICE latch was NOT consumed by the empty-host request:
+-- demote the worker (force a 3-arg runtime failure), then the GENUINE 'no SNI
+-- support' NOTICE must still fire. Reset logs first so we count only
+-- post-demotion output. Pre-F60 the empty-host request already burned the latch,
+-- so this NOTICE was suppressed (count 0) — `== 1` is the real discriminator.
+s5_fail_3arg = true
+ka5.balance(443)             -- 3-arg fails → sni_pool_ok=false, WARN (no NOTICE yet)
+check(ka5.sni_pool_supported() == false, "F60: forced 3-arg runtime failure demotes the worker")
+logs = {}
+ka5.balance(443)             -- not sni_pool_ok → NOTICE iff the one-shot latch is intact
+check(log_matching("lacks SNI-keyed") == 1,
+      "F60: latch intact — genuine 'no SNI support' NOTICE fires after demotion (empty-host did not consume it)")
+
 if failures > 0 then
   print(string.format("%d failure(s)", failures))
   os.exit(1)
