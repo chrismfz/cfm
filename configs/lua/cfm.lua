@@ -1016,18 +1016,45 @@ local function is_static_asset_uri(uri)
   return STATIC_ASSET_EXT[ext:lower()] == true
 end
 
+-- Build the cfm_decisions cache key for a request.
+--   * Static assets share ONE coalesced entry per (ip, host, scope) — prefix
+--     "ds|", disjoint from the per-URL "d|" namespace.
+--   * The per-URL key hashes the FULL decoded path with ngx.md5. The old key
+--     used uri:sub(1, 64), so two paths sharing a 64-byte prefix mapped to one
+--     entry; since only clean allows are cached, an attacker could warm the
+--     cache with a benign same-prefix request and reuse the "allow" for a longer
+--     path whose per-path bridge rule would challenge/block — the bridge was
+--     never consulted for the second path (audit F38). md5 keeps the key bounded
+--     (a path can be kilobytes) while being per-path unique.
+--
+-- Verdict inputs vs key dimensions: get_decision's RPC also sends ua, country
+-- and scope. This key must not conflate two requests the bridge would decide
+-- differently, so:
+--   * scope IS keyed (both branches) — a scoped verdict is never reused
+--     cross-scope. (Today clearance_scope is the constant "web" at the call
+--     site, so this is defensive symmetry, not yet load-bearing.)
+--   * country is ip-derived (geo_country_cached(ip)) and ip is already keyed,
+--     so two key-colliding requests share a country — safe to omit.
+--   * the query string is NOT sent to the bridge (the RPC carries only the
+--     path), so the verdict cannot depend on it — excluded on purpose.
+--   * ua IS a verdict input (UAAny traffic rules can block/challenge) yet is
+--     deliberately omitted: it is client-controlled (a determined attacker sets
+--     any UA anyway), only clean allows are cached, and the TTL is short, so the
+--     residual exposure is a benign shared-IP client reusing a browser-warmed
+--     allow. Tightening this (fold ngx.md5(ua) in, or skip caching when
+--     UA-sensitive rules exist) is a tracked audit follow-up, separate from the
+--     F38 path-truncation fix — do not silently assume the key covers ua.
+local function decision_cache_key(ip, host, method, scheme, uri, scope)
+  if is_static_asset_uri(uri) then
+    return "ds|" .. ip .. "|" .. host .. "|" .. (scope or "web")
+  end
+  return "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" ..
+         ngx.md5(uri or "-") .. "|" .. (scope or "web")
+end
+
 -- [R1] Pass ua + country so Go evaluates traffic rules. Cache clean allows only.
 local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
-  local key
-  if is_static_asset_uri(uri) then
-    -- Coalesced cache entry: shared by every static asset from this
-    -- (ip, host, scope) combo. Prefix "ds|" keeps it disjoint from the
-    -- per-URL "d|" namespace below.
-    key = "ds|" .. ip .. "|" .. host .. "|" .. (scope or "web")
-  else
-    local uri_part = (uri or "-"):sub(1, 64)
-    key = "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" .. uri_part
-  end
+  local key = decision_cache_key(ip, host, method, scheme, uri, scope)
 
   if SH then
     local cached = SH:get(key)

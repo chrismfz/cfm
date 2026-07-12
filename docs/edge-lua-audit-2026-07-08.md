@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**41 / 55 fixed.** Grouped by severity; each links to its detail section.
+**42 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -83,7 +83,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F35](#f35)** · `configs/lua/cfm_waf_detectors.lua:3148` · _waf-bypass_ (axis a/c) — Log4Shell header precheck misses canonical uppercase %7B URL-encoding of ${
 - [x] **[F36](#f36)** · `configs/lua/cfm_waf_detectors.lua:2688` · _fp_ (axis a) — C2 tunnel host list uses unbounded substring match; ix.io/ matches matrix.io/
 - [x] **[F37](#f37)** · `configs/lua/cfm_waf_detectors.lua:2790` · _waf-bypass_ (axis a/c) — detect_smuggling_cl cannot see duplicate Content-Length/Transfer-Encoding headers (table collapsed by header_string)
-- [ ] **[F38](#f38)** · `configs/lua/cfm.lua:924` · _correctness_ (axis c) — Decision cache key truncates the URI to 64 bytes and omits the query string, so distinct URIs sharing a 64-char prefix share one cached verdict
+- [x] **[F38](#f38)** · `configs/lua/cfm.lua:924` · _correctness_ (axis c) — Decision cache key truncates the URI to 64 bytes and omits the query string, so distinct URIs sharing a 64-char prefix share one cached verdict
 - [x] **[F39](#f39)** · `configs/lua/cfm.lua:1274` · _security_ (axis c) — Decoded control characters in ngx.var.uri are written unescaped into error-log lines, enabling log forging
 - [x] **[F40](#f40)** · `configs/lua/cfm_clearance.lua:17` · _correctness_ (axis c) — cfm_clearance normalize_host mangles IPv6-literal hosts, weakening clearance host-binding and diverging from the Go normalizer
 - [ ] **[F41](#f41)** · `configs/lua/cfm_panel.lua:851` · _security_ (axis c) — Challenge scope (panel_scope) is derived from client-controlled X-CFM-Panel-Port/X-Forwarded-Port, defeating per-port clearance isolation
@@ -961,7 +961,7 @@ Lua change. Branch `claude/edge-audit-smuggling-dup-headers`.
 <a id="f38"></a>
 ### F38 — Decision cache key truncates the URI to 64 bytes and omits the query string, so distinct URIs sharing a 64-char prefix share one cached verdict
 
-- **Status:** ☐ open
+- **Status:** ☑ done — per-URL key now hashes the full path with `ngx.md5`
 - **Severity:** low · **Category:** correctness (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm.lua:924`
 
@@ -971,7 +971,38 @@ Lua change. Branch `claude/edge-audit-smuggling-dup-headers`.
 
 **Suggested fix.** Hash the full uri (ngx.md5) into the key and include an args hash if bridge verdicts can depend on args.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** The per-URL branch of the decision cache key now uses `ngx.md5(uri)` (the full decoded
+path) instead of `uri:sub(1, 64)`, so two paths sharing a 64-byte prefix no longer collide onto one
+`cfm_decisions` entry. `ngx.md5` keeps the key bounded (a request path can be kilobytes; a raw full-path
+key would bloat the shdict) — already the idiom in this file (`build_resume_token`). **No args hash
+added:** verified the decision RPC (`/nginx/decision?...`) carries only ip/host/**path**/method/scheme/ua/
+country/scope — NOT the query string (`uri` here is `ngx.var.uri`, the decoded path) — so a bridge
+verdict cannot depend on args, and the finding's conditional ("if bridge verdicts can depend on args")
+does not apply; adding args would only fragment the cache for no correctness gain. Extracted the key
+construction into a `decision_cache_key(ip, host, method, scheme, uri, scope)` helper so it's readable
+and unit-testable (the static-asset "ds|" coalesced branch is preserved unchanged). Test
+`cfm_decision_cache_key_test.lua` (new; **extracts and load()s the real `decision_cache_key` from
+cfm.lua** with `is_static_asset_uri`/`ngx.md5` as provided globals): two paths sharing a 64-byte prefix
+get distinct keys; a >64-byte divergence too; the key is deterministic and still varies by
+method/scheme/host/ip/**scope**; static assets from one (ip,host,scope) share one `ds|` key that varies
+by scope/host. **Verified to FAIL** (the 2 same-prefix assertions, and the new scope assertion) against
+the pre-fix / scope-less key. Config-only Lua change. Branch `claude/edge-audit-decision-cache-key`.
+
+**Review fold-in.** Adversarial review returned SHIP. Folded two NITs: (1) the non-static key now also
+includes `scope`, matching the static branch — behaviour-identical today (`clearance_scope` is the
+constant `"web"` at the sole call site) but removes an asymmetry and is defensive if scope ever becomes
+dynamic; (2) the helper comment now enumerates verdict-inputs-vs-key-dimensions so a future auditor
+isn't misled (CLAUDE.md §5): `country` is ip-derived (safe to omit), query string isn't sent to the
+bridge (safe to omit), `scope` is keyed, and `ua` is deliberately omitted.
+
+**Tracked follow-up (separate from F38, NOT a regression).** The bridge verdict genuinely varies by
+`ua` (`UAAny` traffic rules can emit block/challenge), yet the non-static key omits `ua` — same *class*
+as F38 (warm a benign allow, reuse where a rule should block) but along the UA axis. This gap predates
+F38 (the old `sub(1,64)` key omitted `ua` too), so it's out of scope for the path-truncation fix.
+Exposure is bounded: only clean allows are cached, TTL is short, and `ua` is client-controlled (a
+deliberate attacker sets any UA regardless), so the residual case is an honest bad client (scraper/bot)
+reusing a browser-warmed allow behind a shared/CGNAT IP. Options for the follow-up: fold `ngx.md5(ua)`
+into the key, skip caching when UA-sensitive traffic rules are configured, or document it as accepted.
 
 ---
 

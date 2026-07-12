@@ -391,6 +391,19 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **Decision cache key now hashes the full request path (F38).** `get_decision`
+  built the per-URL `cfm_decisions` cache key from `uri:sub(1, 64)`, so two paths
+  sharing a 64-byte prefix mapped to one entry — and since only clean allows are
+  cached, an attacker could warm the cache with a benign same-prefix request and
+  reuse the `allow` for a longer path whose per-path bridge rule would
+  challenge/block (the bridge is never consulted for the second path). The key now
+  hashes the **full decoded path** with `ngx.md5`, so distinct paths never
+  collide, while the key stays bounded (a path can be kilobytes). The query string
+  is intentionally excluded — it isn't sent to the decision bridge, so a verdict
+  can't depend on it. The per-URL key is now also keyed on `scope` (matching the
+  static-asset branch), so a scoped verdict is never reused cross-scope. The key
+  construction is extracted into a `decision_cache_key` helper (unit-tested).
+  Found by the 2026-07 edge Lua audit (F38, low).
 - **WAF-hit push cooldown now bounds scanner floods without masking autoblocks
   (F31).** `should_push` dedups the per-hit `cfm.waf.log` record + `ip_push` RPC
   using an shdict `:add`, but keyed on the **full reason** — and scored rules append
