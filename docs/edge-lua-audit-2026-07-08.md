@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**33 / 55 fixed.** Grouped by severity; each links to its detail section.
+**34 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -79,7 +79,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F31](#f31)** · `configs/lua/cfm_waf.lua:1621` · _perf_ (axis b) — should_push dedup key embeds the volatile score/tag suffix of the reason, defeating the (ip,reason) cooldown for scored/burst rules
 - [x] **[F32](#f32)** · `configs/lua/cfm_waf_excl.lua:99` · _perf_ (axis b) — matches_rule recompiles the glob Lua pattern per request per glob entry (no precompile like Go)
 - [ ] **[F33](#f33)** · `configs/lua/cfm_waf_detectors.lua:488` · _waf-bypass_ (axis a/c) — XSS event-handler checks require `=` immediately after the handler name, so whitespace (`onerror =`) evades onerror/onload/onmouseover/onfocus
-- [ ] **[F34](#f34)** · `configs/lua/cfm_waf_detectors.lua:1870` · _waf-bypass_ (axis a/c) — CRLF raw-newline branch matches header names case-sensitively, missing canonically-capitalized injections (rule 605)
+- [x] **[F34](#f34)** · `configs/lua/cfm_waf_detectors.lua:1870` · _waf-bypass_ (axis a/c) — CRLF raw-newline branch matches header names case-sensitively, missing canonically-capitalized injections (rule 605)
 - [ ] **[F35](#f35)** · `configs/lua/cfm_waf_detectors.lua:3148` · _waf-bypass_ (axis a/c) — Log4Shell header precheck misses canonical uppercase %7B URL-encoding of ${
 - [ ] **[F36](#f36)** · `configs/lua/cfm_waf_detectors.lua:2688` · _fp_ (axis a) — C2 tunnel host list uses unbounded substring match; ix.io/ matches matrix.io/
 - [ ] **[F37](#f37)** · `configs/lua/cfm_waf_detectors.lua:2790` · _waf-bypass_ (axis a/c) — detect_smuggling_cl cannot see duplicate Content-Length/Transfer-Encoding headers (table collapsed by header_string)
@@ -749,7 +749,7 @@ caches the rebuild, which is the finding's suggested fix.) Existing `cfm_waf_exc
 <a id="f34"></a>
 ### F34 — CRLF raw-newline branch matches header names case-sensitively, missing canonically-capitalized injections (rule 605)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — raw branch now matches the lowercased scan copy (mirrors the encoded branch)
 - **Severity:** low · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:1870`
 
@@ -759,7 +759,25 @@ caches the rebuild, which is the finding's suggested fix.) Existing `cfm_waf_exc
 
 **Suggested fix.** Lowercase a copy of s for the raw-branch header-name matches, mirroring the encoded branch.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Hoisted the existing `local sl = lower(s)` (previously computed only for the
+URL-encoded branch) above the raw-CR/LF branch and matched the four header-name patterns against
+`sl` instead of the un-lowered `s`. `lower()` leaves the CR/LF bytes untouched, so the `[\r\n]`
+anchor is unchanged — the fix only makes the header NAME case-insensitive, strictly widening
+detection of the same raw-newline+header attack. Adversarial review (SHIP) confirmed the fix is
+correct but flagged a real FP: the *capitalized* form is the natural human casing, so a benign
+multi-line body/field starting a line with `Location:`/`Content-Type:` (profile bios, calendar/event
+descriptions, webmail MIME paste on cPanel hosts) now matches — previously clean because the bug only
+caught the rare lowercase prose form. Per CLAUDE.md (strengthening a rule that trips legit panel/app
+traffic → prefer logonly→challenge→block), **rule 605 is stepped down from `challenge` to `logonly`
+for a burn-in** (`cfm_waf.lua`): the detection is now case-complete and LOGS the real FP rate without
+challenging anyone; promote back to `challenge` once the burn-in is clean. De-dups the `lower(s)` call
+(one copy now feeds both branches). Test
+`cfm_waf_crlf_case_test.lua` (new, full `waf.check` path at block for a crisp hit): capitalized
+`Set-Cookie`/`Location`/`Content-Type`/`Content-Length`, mixed-case, args-side, and bare-LF cases now
+fire; lowercase-raw and URL-encoded regressions still fire; FP-negatives (header name without a
+newline, prose) stay clean. **Verified to FAIL** against the pre-fix raw branch (all 7 capitalized/
+mixed-case cases, 14 assertions), while the regression + FP cases stayed green — isolating exactly
+the case-sensitivity gap. Config-only Lua change. Branch `claude/edge-audit-crlf-case`.
 
 ---
 

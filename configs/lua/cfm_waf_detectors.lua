@@ -1958,14 +1958,22 @@ function _M.detect_crlf_injection(args, body)
   local s = cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len)
   if s == "" then return nil end
 
+  -- Lowercase once and match the header names against the lowercased copy.
+  -- Response headers are conventionally capitalized (Set-Cookie:, Location:),
+  -- so a raw newline + capitalized header name must still trip the raw branch
+  -- (audit F34; the raw branch used to match the lowercase literals against the
+  -- unlowered `s` and missed canonical casing). lower() leaves CR/LF bytes
+  -- untouched, so the [\r\n] anchor is unaffected. `sl` is reused by the
+  -- URL-encoded branch below.
+  local sl = lower(s)
+
   -- Raw CR/LF followed by a header keyword
-  if s:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
-  if s:find("[\r\n]%W*content%-length%s*:", 1) then return "CRLF_CONTENT_LENGTH" end
-  if s:find("[\r\n]%W*set%-cookie%s*:",     1) then return "CRLF_SET_COOKIE" end
-  if s:find("[\r\n]%W*location%s*:",        1) then return "CRLF_LOCATION" end
+  if sl:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
+  if sl:find("[\r\n]%W*content%-length%s*:", 1) then return "CRLF_CONTENT_LENGTH" end
+  if sl:find("[\r\n]%W*set%-cookie%s*:",     1) then return "CRLF_SET_COOKIE" end
+  if sl:find("[\r\n]%W*location%s*:",        1) then return "CRLF_LOCATION" end
 
   -- URL-encoded CRLF sequences
-  local sl = lower(s)
   if has(sl, "%0d%0a") or has(sl, "%0a") then
     local decoded = sl
       :gsub("%%0d%%0a", "\r\n")

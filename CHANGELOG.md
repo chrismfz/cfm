@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **WAF CRLF detector now catches canonically-capitalized header injections
+  (F34).** The raw-CR/LF branch of `detect_crlf_injection` (rule 605 `WAF_CRLF`,
+  challenge tier) matched the lowercase header-name literals (`set-cookie`,
+  `location`, `content-type`/`-length`) against the **un-lowercased** scan
+  string, so a body/arg value injecting a raw newline followed by a
+  conventionally-capitalized response-header name (`Set-Cookie:`, `Location:`)
+  slipped past — only the URL-encoded branch lowercased. Now the scan string is
+  lowercased once and the raw branch matches against that copy too (CR/LF bytes
+  are unaffected by `lower()`, so the newline anchor still requires a real
+  CR/LF). Widening detection to the natural capitalized casing does trip some
+  legitimate multi-line panel/webmail traffic (a body/field line starting with
+  `Location:` or `Content-Type:`), so **rule 605 is stepped down from `challenge`
+  to `logonly` for a burn-in** — the fix logs the real FP rate without
+  challenging anyone; promote back to `challenge` after burn-in
+  (CLAUDE.md logonly→challenge→block). Found by the 2026-07 edge Lua audit
+  (F34, low).
 - **Edge decision logs are now proof against log forging (F39).** Several
   `[cfm]` log lines concatenate `ngx.var.uri` — which nginx serves
   **percent-decoded** — and the client `Host`, so a request path containing
