@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**44 / 56 fixed.** Grouped by severity; each links to its detail section.
+**45 / 56 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -88,7 +88,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F40](#f40)** · `configs/lua/cfm_clearance.lua:17` · _correctness_ (axis c) — cfm_clearance normalize_host mangles IPv6-literal hosts, weakening clearance host-binding and diverging from the Go normalizer
 - [ ] **[F41](#f41)** · `configs/lua/cfm_panel.lua:851` · _security_ (axis c) — Challenge scope (panel_scope) is derived from client-controlled X-CFM-Panel-Port/X-Forwarded-Port, defeating per-port clearance isolation
 - [x] **[F43](#f43)** · `configs/lua/sslcollector.lua:739` · _dos_ (axis b/c) — sslcollector emits an unbounded per-handshake WARN on every SNI cache-miss (attacker-driven log amplification)
-- [ ] **[F44](#f44)** · `configs/openresty.conf:130` · _security_ (axis c) — Client-controlled X-Forwarded-Proto forwarded verbatim to origin ($cf_xfp) in DNAT-direct mode
+- [x] **[F44](#f44)** · `configs/openresty.conf:130` · _security_ (axis c) — Client-controlled X-Forwarded-Proto forwarded verbatim to origin ($cf_xfp) in DNAT-direct mode
 - [ ] **[F45](#f45)** · `configs/lua/cfm_bridge_cfg.lua:70` · _security_ (axis c) — Bridge token rotation opens a fail-open enforcement window of up to the 10s cache TTL
 - [x] **[F46](#f46)** · `configs/lua/cfm_geo.lua:77` · _correctness_ (axis c) — cfm_geo disables geo permanently per worker on a transient init/open failure, with no retry until proxy reload
 - [ ] **[F47](#f47)** · `configs/lua/cfm.lua:129` · _correctness_ (axis c) — Missing bridge token 500s every request (fail-closed) while a present-but-unreachable daemon fails open — behavior flips on file presence, not reachability
@@ -1143,7 +1143,7 @@ reference). Branch `claude/edge-audit-clearance-ipv6-host`.
 <a id="f44"></a>
 ### F44 — Client-controlled X-Forwarded-Proto forwarded verbatim to origin ($cf_xfp) in DNAT-direct mode
 
-- **Status:** ☐ open
+- **Status:** ☑ done — XFP honored only from a realip-trusted peer, else `$scheme`
 - **Severity:** low · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/openresty.conf:130`
 
@@ -1153,7 +1153,29 @@ reference). Branch `claude/edge-audit-clearance-ipv6-host`.
 
 **Suggested fix.** Only honor inbound X-Forwarded-Proto when the peer is a trusted proxy; otherwise set $scheme.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** The `$cf_xfp` map now honors a client `X-Forwarded-Proto` **only when the request arrived
+through a trusted proxy**, else it forwards the real `$scheme`. Trust is derived from the realip module's
+OWN decision — no second copy of the Cloudflare range list (CLAUDE.md §5): realip rewrites `$remote_addr`
+from `CF-Connecting-IP` iff the peer (`$realip_remote_addr`) is in `set_real_ip_from` (trusted_proxies.conf),
+so **`$remote_addr != $realip_remote_addr` == "peer is a trusted proxy"**. Implemented as two `map`s: (1)
+`map "$remote_addr#$realip_remote_addr" $xfp_trusted_peer` — trusted(1) requires two DIFFERENT non-empty
+addresses: a PCRE equality backreference (`~^(?<ip>.+)#(?P=ip)$` → 0) plus explicit `~^#`/`~#$` guards so an
+empty/malformed key **fails safe to untrusted** rather than default-trusting (`#` never appears in an IP so the
+split is unambiguous, incl. IPv6); (2) `map "$xfp_trusted_peer:$http_x_forwarded_proto" $cf_xfp` → honor the
+captured proto only for a trusted peer AND only if it is `http|https` (`~^1:(?<proto>https?)$`), else `$scheme` —
+so a trusted-but-misconfigured upstream can't inject an odd proto value either. **Unforgeable:** a
+direct/untrusted attacker can never make the two addrs differ (realip won't rewrite for a peer outside the trusted
+set), so their forged XFP — even alongside a forged `CF-Connecting-IP`, an `X-Forwarded-For` chain, or a
+self-IP `CF-Connecting-IP` — is ignored. **Safe-degrading:** a trusted proxy that omits `CF-Connecting-IP` falls
+back to `$scheme`. Cloudflare Full-SSL is a no-op (already `https`); Flexible-SSL still gets the honored XFP. Mirrored in
+**both** `openresty.conf` and `angie.conf`; the `cfm` access log gained `xfp_trust=$xfp_trusted_peer` for
+post-deploy verification. **Validated with a real `nginx`** (v1.24): built configs with loopback trusted /
+untrusted and confirmed — trusted+XFP→honored, trusted+no-CF-IP→`$scheme` (safe), and the attack (untrusted peer
+forging BOTH `CF-Connecting-IP` and `X-Forwarded-Proto: https`)→`$scheme` (ignored); the **old** map passed the
+same forged `https` through (non-vacuous). Adversarial review (real-nginx attack matrix) confirmed no forge
+vector and no legit-traffic regression; the fail-safe hardening (empty→untrusted, `http|https`-only) was added
+after review and re-validated against the full matrix. Config-only change (no Lua/Go). Branch
+`claude/edge-audit-xfp-trust`.
 
 ---
 

@@ -18,6 +18,24 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **X-Forwarded-Proto is only honored from a trusted proxy now (F44).** The
+  `$cf_xfp` map forwarded a client-supplied `X-Forwarded-Proto` to origin
+  verbatim, with no trusted-proxy gate. In DNAT-direct deployments (no
+  Cloudflare) a direct attacker on the plaintext `:9080` listener could send
+  `X-Forwarded-Proto: https` and make the backend believe the request was
+  secure — bypassing app HTTP→HTTPS enforcement and enabling secure-cookie
+  issuance over cleartext. The header is now honored **only when the request
+  arrived through a trusted proxy**, else the origin gets the real `$scheme`.
+  Trust is derived from the realip module's own decision (`$remote_addr !=
+  $realip_remote_addr` ⇔ the peer is in `set_real_ip_from`/`trusted_proxies.conf`),
+  so there's no second copy of the Cloudflare range list to drift, and a direct
+  attacker cannot forge it (realip won't rewrite for an untrusted peer — a forged
+  `CF-Connecting-IP` doesn't help). The gate fails safe: a malformed/empty peer
+  address and any non-`http`/`https` value both fall back to `$scheme`.
+  Cloudflare Full-SSL is unaffected (already `https`); Flexible-SSL still gets the
+  honored header. Mirrored in both `openresty.conf` and `angie.conf`; the `cfm`
+  access log gained `xfp_trust=$xfp_trusted_peer`. Found by the 2026-07 edge Lua
+  audit (F44, low).
 - **WAF URI+query scan caps the path and query independently, closing a
   padding bypass (F30).** The traversal/RCE/XSS/SQLi scan surface was built with
   one combined cap — `normalize(cap(uri.."?"..args, 2048))` — so an attacker
