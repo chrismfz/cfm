@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Edge decision logs are now proof against log forging (F39).** Several
+  `[cfm]` log lines concatenate `ngx.var.uri` — which nginx serves
+  **percent-decoded** — and the client `Host`, so a request path containing
+  `%0A`/`%0D` decoded to a literal newline/CR inside the logged value and let an
+  unauthenticated client inject forged `[cfm] ...` lines into `error.log` (the
+  `/.well-known/` bypass logs at INFO on every pre-auth request, so no auth was
+  needed). All user-controlled log values now pass through a control-char
+  neutraliser (`log_sanitize`): the hot `log_route()` path sanitizes the whole
+  concatenated message, and a new `log_ev()` helper sanitizes every argument at
+  the three multi-arg `ngx.log` sites (clearance re-mint/validator errors and the
+  top-level request-failure handler). Control bytes (NUL, C0 incl. CR/LF, DEL)
+  are hex-escaped (`\x0A`) so they stay visible for forensics without breaking
+  one-line-per-event parsing; clean messages are byte-unchanged. Found by the
+  2026-07 edge Lua audit (F39, low).
 - **`/__ssl_debug` now enforces loopback with the un-forgeable real peer (F56).**
   The sslcollector debug endpoint (`ready`/`version` of the `sslcache` dict) was
   gated only by `allow 127.0.0.1; deny all;`, which the `ngx_http_access` module
