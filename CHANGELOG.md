@@ -467,6 +467,16 @@ back-filled here — see the git/PR history for that period.
   builds: `touch` the `LOG_PATH` file so a source attaches.
 
 ### Changed
+- **WAF: cache the exclude glob→pattern conversion per rule (F32).** For every
+  glob exclude row (`*`/`?`), `matches_rule` rebuilt the anchored Lua pattern (two
+  gsubs over the rule) on every WAF-eligible request — once per host row and once
+  per path row — where Go compiles its regexp once at rebuild. `glob_to_lua_pattern`
+  now caches the pattern in a module-scope table keyed by the rule string. The keys
+  are exclude **rules** (a bounded operator list), never request values, so the
+  cache can't grow with traffic; it persists per worker and is naturally superseded
+  when a rule changes (a changed rule is a new key). Behavior-neutral — the
+  conversion is a pure function of the rule, so a cache hit returns a byte-identical
+  pattern. Found by the 2026-07 edge Lua audit (F32).
 - **WAF: memoize the per-request args-normalize and body-lowercase once, shared
   across detectors (F58 + F59).** Each WAF request re-did the same string work in
   several detectors: `normalize(cap(args, max_scan_len))` (double-URL-decode +

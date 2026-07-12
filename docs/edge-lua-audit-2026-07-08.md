@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**27 / 55 fixed.** Grouped by severity; each links to its detail section.
+**28 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -77,7 +77,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 - [ ] **[F30](#f30)** · `configs/lua/cfm_waf.lua:617` · _waf-bypass_ (axis a/c) — URI+args scan capped at 2048 bytes lets query-string padding push a payload past traversal/RCE/XSS/SQLi URI inspection
 - [ ] **[F31](#f31)** · `configs/lua/cfm_waf.lua:1621` · _perf_ (axis b) — should_push dedup key embeds the volatile score/tag suffix of the reason, defeating the (ip,reason) cooldown for scored/burst rules
-- [ ] **[F32](#f32)** · `configs/lua/cfm_waf_excl.lua:99` · _perf_ (axis b) — matches_rule recompiles the glob Lua pattern per request per glob entry (no precompile like Go)
+- [x] **[F32](#f32)** · `configs/lua/cfm_waf_excl.lua:99` · _perf_ (axis b) — matches_rule recompiles the glob Lua pattern per request per glob entry (no precompile like Go)
 - [ ] **[F33](#f33)** · `configs/lua/cfm_waf_detectors.lua:488` · _waf-bypass_ (axis a/c) — XSS event-handler checks require `=` immediately after the handler name, so whitespace (`onerror =`) evades onerror/onload/onmouseover/onfocus
 - [ ] **[F34](#f34)** · `configs/lua/cfm_waf_detectors.lua:1870` · _waf-bypass_ (axis a/c) — CRLF raw-newline branch matches header names case-sensitively, missing canonically-capitalized injections (rule 605)
 - [ ] **[F35](#f35)** · `configs/lua/cfm_waf_detectors.lua:3148` · _waf-bypass_ (axis a/c) — Log4Shell header precheck misses canonical uppercase %7B URL-encoding of ${
@@ -701,7 +701,7 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 <a id="f32"></a>
 ### F32 — matches_rule recompiles the glob Lua pattern per request per glob entry (no precompile like Go)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — per-rule pattern cache in `glob_to_lua_pattern`
 - **Severity:** low · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_excl.lua:99`
 
@@ -711,7 +711,21 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 
 **Suggested fix.** Cache the anchored pattern per rule string in a module-scope table (persists per worker via package.loaded).
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `glob_to_lua_pattern` now memoizes the anchored pattern in a module-scope
+`_glob_pat_cache` keyed by the rule string, so the two gsubs run once per distinct rule
+instead of once per glob rule per request. The keys are exclude RULES (a bounded operator
+list) — matches_rule calls `glob_to_lua_pattern(rule)`, never on the request value — so the
+cache cannot grow with traffic; it persists per worker and is naturally superseded when a
+rule string changes (a changed rule is a new key), so no invalidation is needed. Behaviour is
+unchanged: the conversion is a pure function of the rule, so a cache hit returns a
+byte-identical pattern, and `value:match` is untouched. (Lua patterns can't be precompiled the
+way Go's `regexp` is; a full ngx.re/PCRE rewrite was rejected — it would change the matching
+engine and risk diverging from the Go `compiledValueMatcher` this file must mirror — so this
+caches the rebuild, which is the finding's suggested fix.) Existing `cfm_waf_excl_test.lua`
+(boundary + glob semantics through `matches_rule`) stays green → behavior parity; new
+`cfm_waf_excl_globcache_test.lua` poisons a cache entry and asserts the second call returns it
+(proving the cache hit) — **verified to FAIL** against the pre-fix (no cache upvalue). Branch
+`claude/edge-audit-glob-cache`.
 
 ---
 
