@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **WAF URI+query scan caps the path and query independently, closing a
+  padding bypass (F30).** The traversal/RCE/XSS/SQLi scan surface was built with
+  one combined cap — `normalize(cap(uri.."?"..args, 2048))` — so an attacker
+  could prepend ~2KB of benign query bytes to push `../`, a `${jndi:` marker, or
+  a UNION payload past byte 2048 before any detector ran, and a path ≥2048 bytes
+  evicted the query string from the scan entirely. `scan_str` now caps the URI
+  and the query **independently**, each to a new `uri_scan_len` budget (8192, the
+  urlencoded POST-body budget), so neither side can evict the other and each is
+  scanned to 8KB regardless of the other's length. These detectors already scan
+  POST bodies to this depth, so there's no new false-positive class, and a normal
+  short URI pays nothing (the cap only bounds; work scales with actual length).
+  The window is deliberately **not** raised to the full 64KB request-line ceiling
+  (`large_client_header_buffers 8 64k`): a >8KB query can still evade — an
+  anomalous, higher bar than the old 2KB — and `uri_scan_len` is a config knob if
+  fuller coverage is wanted. Safe to widen past 2048 only because F62 made the
+  SQL-comment stripper O(n). Found by the 2026-07 edge Lua audit (F30, low).
 - **WAF SQL-comment stripper is no longer a CPU-DoS amplifier (F62).**
   `strip_sql_comments` removed `/* … */` comments with a `/%*.-%*/` gsub whose
   lazy `.-` was **O(n²)** on crafted input with many `/*` starts and no closing

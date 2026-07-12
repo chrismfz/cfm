@@ -326,8 +326,26 @@ local function strip_sql_comments(s)
   return (s:gsub("%-%-[^\n]*", ""))
 end
 
+-- The URI+query scan surface shared by traversal/rce/xss/sqli. URI and query
+-- are capped INDEPENDENTLY (not cap(uri.."?"..args, N)) so a long path can't
+-- evict the query from the window and query padding can't evict the path —
+-- each side always gets its own full budget. The old single combined cap let
+-- an attacker prepend ~2KB of benign query bytes to push `../`, a jndi marker,
+-- a UNION payload, etc. past the cap before any detector ran (audit F30);
+-- capping each side is the same split get_norm_ab uses for args+body (F09).
+-- The per-side budget is CFG.uri_scan_len (the request-line scan budget, = the
+-- urlencoded POST-body budget), falling back to max_scan_len then 2048 for
+-- older configs. This window is wider than the legacy 2048, which is safe only
+-- because strip_sql_comments is now O(n) (F62) — a quadratic strip here would
+-- turn the bigger window into a CPU-DoS.
 local function scan_str(uri, args)
-  return normalize(cap((uri or "") .. "?" .. (args or ""), CFG.max_scan_len))
+  -- Defensive like body_budget(): an operator-authored cfm_waf_config.lua could
+  -- set uri_scan_len to a string / 0 / negative. tonumber + positivity floor
+  -- keeps cap()'s `#s <= n` from erroring (nil/string) or silently disabling
+  -- the scan (0), degrading to the legacy 2048 instead.
+  local n = tonumber(CFG and (CFG.uri_scan_len or CFG.max_scan_len))
+  if not n or n < 1 then n = 2048 end
+  return normalize(cap(uri or "", n) .. "?" .. cap(args or "", n))
 end
 
 -- Pick the body-scan byte budget for a request based on its Content-Type.

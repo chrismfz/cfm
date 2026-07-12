@@ -327,11 +327,25 @@ local CFG = {
     other      = 2048,
   },
 
-  -- Legacy fallback scan cap. Used by callsites without request-headers
-  -- context (URI+args scans in scan_str(), body-only detectors invoked
-  -- outside the engine's hot path). Body-aware rules in the engine prefer
-  -- body_scan_budget above via util.body_budget(headers).
+  -- Legacy fallback scan cap. Used by the args-only / body-only callsites
+  -- without request-headers context (get_norm_args, get_body_lc, and body
+  -- detectors invoked outside the engine's hot path). Body-aware rules in the
+  -- engine prefer body_scan_budget above via util.body_budget(headers); the
+  -- URI+query surface (scan_str) uses uri_scan_len below.
   max_scan_len      = 2048,
+
+  -- Request-line (URI + query string) scan budget for scan_str() — the surface
+  -- shared by traversal/rce/xss/sqli. Capped PER SIDE (uri and query each) so a
+  -- long path can't evict the query scan and query padding can't push a payload
+  -- past the cap before any detector runs (audit F30). Set to the urlencoded
+  -- POST-body budget: these same detectors already scan bodies to that depth, so
+  -- this introduces no new false-positive class, and a normal short URI pays
+  -- nothing (cap() only bounds; work scales with the actual length). Not raised
+  -- to the full large_client_header_buffers ceiling (64k) on purpose: the extra
+  -- coverage isn't worth the per-request CPU / FP surface on very large requests
+  -- for a low-severity defence-in-depth gap. Safe to widen past 2048 only
+  -- because strip_sql_comments is O(n) (F62).
+  uri_scan_len      = 8192,
 
   -- Raw PHP webshell body scanner tuning
   php_webshell_max_scan_len = 2048,
