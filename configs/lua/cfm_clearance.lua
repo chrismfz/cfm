@@ -11,11 +11,31 @@ local ngx = ngx
 
 local function lower(s) return string.lower(s or "") end
 
+-- normalize_host mirrors the Go normalizeClearanceHost() (challenge_server.go)
+-- so a clearance minted server-side and validated in Lua bind to the same host.
+-- The old `:%d+$` port strip corrupted IPv6-literal Hosts — it deleted the last
+-- hextet of an UNBRACKETED literal (2001:db8::1 -> "2001:db8:") and never
+-- unwrapped brackets, so distinct IPv6 hosts collapsed to one value and a
+-- clearance for one was accepted on an adjacent one (audit F40). Match Go: strip
+-- a trailing port ONLY for a bracketed literal or a single-colon host:port; an
+-- unbracketed literal (>=2 colons) is left intact.
 local function normalize_host(h)
   h = lower(h or "")
-  h = h:gsub("^%s+", ""):gsub("%s+$", "")
-  h = h:gsub(":%d+$", "")
-  h = h:gsub("%.+$", "")
+  h = h:gsub("^%s+", ""):gsub("%s+$", "")   -- TrimSpace
+  h = h:gsub("%.$", "")                       -- TrimSuffix(".")  [Go step 2]
+  if h:sub(1, 1) == "[" then
+    -- Bracketed IPv6 literal ([ipv6] or [ipv6]:port): unwrap to the ipv6,
+    -- dropping the brackets AND any :port.
+    local rb = h:find("]", 1, true)
+    if rb then h = h:sub(2, rb - 1) end
+  else
+    -- No brackets. Count colons: exactly one is a host:port → strip the port
+    -- (mirrors net.SplitHostPort's single-colon case); zero is portless; two or
+    -- more is an unbracketed IPv6 literal, left INTACT.
+    local _, ncolon = h:gsub(":", "")
+    if ncolon == 1 then h = h:match("^([^:]*)") end
+  end
+  h = h:gsub("%.$", "")                       -- TrimSuffix(".")  [Go step 6]
   return h
 end
 

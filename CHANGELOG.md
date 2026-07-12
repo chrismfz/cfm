@@ -391,6 +391,19 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **Clearance host-binding no longer mangles IPv6-literal Hosts (F40).**
+  `cfm_clearance`'s `normalize_host` stripped a trailing `:<digits>` as if always
+  a port (`h:gsub(":%d+$","")`), so an **unbracketed** IPv6 literal lost its final
+  hextet (`2001:db8::1` → `2001:db8:`) and brackets were never unwrapped — distinct
+  IPv6 hosts collapsed to one value, so a clearance minted for `2001:db8::1` was
+  accepted on the adjacent `2001:db8::2` (weakened host binding; not a full bypass
+  since both sides re-normalize, but it diverged from the Go normalizer). Rewrote
+  it to mirror Go's `normalizeClearanceHost`: unwrap `[ … ]`, strip a port only for
+  a bracketed literal or a single-colon `host:port`, and leave an unbracketed
+  literal (≥2 colons) intact. The Lua test mirrors the Go `TestNormalizeClearanceHost`
+  cases verbatim to keep the server-minted and Lua-validated host in lockstep.
+  IPv6-literal Host headers are rare on shared hosting, so real exposure was low.
+  Found by the 2026-07 edge Lua audit (F40, low).
 - **cfm_geo now self-heals after a transient MaxMind DB open failure (F46).**
   On the first per-worker lookup, an `mmdb.init`/`mmdb.new` failure set
   `_geo_api_mode = "disabled"` **permanently** for the worker's life — `country()`
