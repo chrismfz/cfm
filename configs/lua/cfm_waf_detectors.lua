@@ -2936,24 +2936,40 @@ end
 --   "CL_AND_TE"     — both Content-Length and Transfer-Encoding present.
 --                     RFC 7230 §3.3.3 forbids this combination; it's the
 --                     classic CL.TE smuggling primitive.
---   "MULTI_CL"      — Content-Length value contains a comma (nginx/angie
---                     joins duplicate headers with ", "). Two CL values
---                     means two parsers can disagree.
---   "MULTI_TE"      — Transfer-Encoding value contains a comma when it
---                     isn't a recognised RFC chained-encoding (e.g.
---                     "gzip, chunked" is fine; "chunked, identity" is
---                     usually not).
+--   "MULTI_CL"      — two Content-Length header lines. ngx.req.get_headers()
+--                     returns duplicate headers as a Lua ARRAY (it does NOT
+--                     comma-join them), so a table value trips this directly;
+--                     a single value that itself contains a comma ("5, 10")
+--                     also does. Two CL values means two parsers can disagree.
+--   "MULTI_TE"      — two Transfer-Encoding header lines (array value), OR a
+--                     single Transfer-Encoding value whose comma-list contains
+--                     "chunked" but does not END in it (e.g. "chunked, identity"
+--                     smuggles; "gzip, chunked" is a valid chained encoding).
 --   "CL_MALFORMED"  — Content-Length value isn't a non-negative integer.
 function _M.detect_smuggling_cl(headers)
   if not headers then return nil end
 
-  local cl = header_string(headers["content-length"] or headers["Content-Length"])
-  local te = header_string(headers["transfer-encoding"] or headers["Transfer-Encoding"])
+  -- Keep the RAW values: a DUPLICATE header line arrives from
+  -- ngx.req.get_headers() as a Lua array (e.g. {"5","10"}), NOT a comma-joined
+  -- string. header_string() collapses that to the first element, so the
+  -- comma-based MULTI_* checks below can never see the second value — genuine
+  -- duplicate CL/TE lines were silently missed. Guard on the table shape first,
+  -- mirroring detect_range_abuse's MULTI_RANGE_HEADER handling (audit F37).
+  local cl_raw = headers["content-length"] or headers["Content-Length"]
+  local te_raw = headers["transfer-encoding"] or headers["Transfer-Encoding"]
+  local cl = header_string(cl_raw)
+  local te = header_string(te_raw)
 
-  -- Both present → smuggling primitive regardless of values.
+  -- Both present → classic CL.TE smuggling primitive (RFC 7230 §3.3.3), the
+  -- strongest signal — check before the per-header duplicate/value shapes.
   if cl ~= "" and te ~= "" then
     return "CL_AND_TE"
   end
+
+  -- Two CL / two TE lines (array value) — a front/back-end parser disagreement
+  -- primitive that header_string() would otherwise hide.
+  if type(cl_raw) == "table" then return "MULTI_CL" end
+  if type(te_raw) == "table" then return "MULTI_TE" end
 
   if cl ~= "" then
     if has(cl, ",") then
