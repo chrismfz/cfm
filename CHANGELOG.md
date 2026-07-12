@@ -18,6 +18,12 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Edge proxy no longer leaks its version in the `Server` header / error pages
+  (F61).** Added `server_tokens off;` to the `http{}` block of both `openresty.conf`
+  and `angie.conf`. Previously unset (nginx defaults to `on`), so responses and
+  stock error pages advertised the exact proxy build — free reconnaissance for
+  matching version-specific exploits. `off` keeps the product name but drops the
+  version. Found by the 2026-07 edge Lua audit (F61, info).
 - **WAF now inspects request bodies on clean-URL / REST endpoints (F07).** The
   body-read gate `waf_should_read_body` was a **positive URI allowlist** (wp-*,
   `/api/`, `/admin`, `*.php`, …) and **POST-only**, so a body-borne SQLi/RCE/
