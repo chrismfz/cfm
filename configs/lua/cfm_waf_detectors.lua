@@ -585,20 +585,23 @@ local SQLI_LEXICAL_TOKENS = {
   "or sleep(", "and sleep(", ",sleep(", "(sleep(",
 }
 
--- sqli_scan_strings returns (sc, scw): the comment-stripped scan string and
+-- sqli_scan_strings(s) returns (sc, scw): the comment-stripped scan string and
 -- a copy with runs of '+'/whitespace collapsed to a single space (so a
 -- form-urlencoded space arriving as '+' or '%20' still matches the spaced
--- tokens). Shared by detect_sqli and detect_sqli_blind_lexical.
-local function sqli_scan_strings(uri, args, _s)
-  local s  = _s or scan_str(uri, args)
-  local sc = strip_sql_comments(s)
+-- tokens). The three SQLi detectors below take this (sc, scw) pair directly so
+-- the engine can compute it ONCE per scan surface (get_sqli_ua/get_sqli_ab,
+-- memoized) instead of each rule recomputing strip_sql_comments + the collapse
+-- on the same string — audit F30b. Exported for the engine's memoized getters.
+local function sqli_scan_strings(s)
+  local sc = strip_sql_comments(s or "")
   return sc, (sc:gsub("[+%s]+", " "))
 end
+_M.sqli_scan_strings = sqli_scan_strings
 
-function _M.detect_sqli(uri, args, _s)
-  -- Use comment-stripped version to catch UN/**/ION SE/**/LECT bypass patterns.
-  -- Double URL-decode is already applied by normalize() / scan_str().
-  local sc, scw = sqli_scan_strings(uri, args, _s)
+function _M.detect_sqli(sc, scw)
+  -- sc = comment-stripped scan string (catches UN/**/ION SE/**/LECT bypass);
+  -- scw = its '+'/whitespace-collapsed copy. Both are precomputed by the engine
+  -- (double URL-decode already applied upstream by normalize()/scan_str()).
 
   -- Space-bearing tautology tokens are matched against `scw` (runs of
   -- '+'/whitespace collapsed to one space), NOT `sc`. A form/query space
@@ -679,8 +682,7 @@ end
 -- detect_sqli_blind_lexical matches the word/method-colliding blind tokens
 -- (SQLI_LEXICAL_TOKENS). Wired to rule 309 at `logonly` so it cannot break
 -- a legitimate app (XML parser / updater / custom script) during the trial.
-function _M.detect_sqli_blind_lexical(uri, args, _s)
-  local _, scw = sqli_scan_strings(uri, args, _s)
+function _M.detect_sqli_blind_lexical(sc, scw)
   for i = 1, #SQLI_LEXICAL_TOKENS do
     if has(scw, SQLI_LEXICAL_TOKENS[i]) then return true end
   end
@@ -716,8 +718,7 @@ end
 -- Gated on the same value-terminator guard as rule 301 (see union_mid_hit), and
 -- ridden on a SEPARATE rule at `logonly` for a real-traffic burn-in before any
 -- promotion to challenge/block (CLAUDE.md §6; docs/waf.md). Returns true/false.
-function _M.detect_sqli_union_variant(uri, args, _s)
-  local _, scw = sqli_scan_strings(uri, args, _s)
+function _M.detect_sqli_union_variant(sc, scw)
   if union_mid_hit(scw, " all ")      then return true end
   if union_mid_hit(scw, " distinct ") then return true end
   if union_mid_hit(scw, "%(")         then return true end -- union(select

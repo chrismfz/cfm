@@ -91,7 +91,7 @@ do
   local sqli = "pad=" .. pad .. "&x=pg_sleep(5)"
   check(det.detect_rce("/a", rce,  scan_str("/a", rce))  == true, "F30: detect_rce fires on a ${jndi:} marker padded past 2048")
   check(det.detect_xss("/a", xss,  scan_str("/a", xss))  == true, "F30: detect_xss fires on an encoded <script> padded past 2048")
-  check(det.detect_sqli("/a", sqli, scan_str("/a", sqli)) == true, "F30: detect_sqli fires on a pg_sleep( token padded past 2048")
+  check(det.detect_sqli(det.sqli_scan_strings(scan_str("/a", sqli))) == true, "F30: detect_sqli fires on a pg_sleep( token padded past 2048")
 end
 
 -- ── Edge: a literal '?' inside ngx.var.uri is inert (just another byte) ───────
