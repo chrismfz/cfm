@@ -289,6 +289,19 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **Ingest socket now bounds line length (F26).** `webdetector`'s Unix ingest
+  socket (`/run/cfm/ingest.sock`, `root:cfm 0660`, fed by `log-cfm.lua`) read
+  lines with `bufio.ReadString('\n')`, whose comment wrongly claimed a 256 KB
+  bound. `ReadString`/`ReadBytes` accumulate an un-delimited stream **without
+  bound** (the reader buffer only limits a single fill), so any cfm-group sender —
+  a compromised or simply buggy worker — could stream newline-free data and OOM
+  the daemon. The reader now uses `ReadSlice`, which returns `ErrBufferFull` past
+  the 256 KB buffer; an oversized line is dropped and ingestion resyncs at the
+  next newline (memory bounded, connection kept alive), and a single line that
+  floods past 8 MB closes the connection. Dropped oversized lines are counted and
+  logged (throttled). Found by the 2026-07 edge Lua audit (F26). _(The file
+  tailer `internal/detectors/core/source.go` has the same latent `ReadString`
+  pattern with dead `ErrBufferFull` handling — tracked separately.)_
 - **ClamAV upload scan no longer blinded by a padded multipart body (F17).** The
   Lua ClamAV lane decided whether a multipart POST carried a file to scan by
   substring-matching `filename=` in `ngx.ctx.waf_body` — the WAF's first

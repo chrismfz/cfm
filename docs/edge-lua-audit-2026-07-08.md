@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**22 / 55 fixed.** Grouped by severity; each links to its detail section.
+**24 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -69,7 +69,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F22](#f22)** · `configs/lua/cfm_ua_emergency.lua:322` · _perf_ (axis b) — UA-emergency throttle churns the shared cfm_decisions dict (3 writes + spin-lock per request) under the bot wave it targets
 - [ ] **[F24](#f24)** · `configs/lua/cfm_waf_detectors.lua:850` · _perf_ (axis b) — is_known_legit_xmlrpc normalizes args AND body on every request before the cheap /xmlrpc.php URI gate
 - [ ] **[F25](#f25)** · `configs/lua/cfm.lua:1121` · _perf_ (axis b) — Per-IP geo results and abuse counters share the high-churn cfm_decisions dict; geo uses a 3.3x-longer 300s TTL and negatively caches transient lookup failures
-- [ ] **[F26](#f26)** · `internal/webdetector/ingest_socket.go:155` · _dos_ (axis b/c) — Ingest socket bufio.ReadString does not bound line length — unbounded memory (comment falsely claims a 256KB bound)
+- [x] **[F26](#f26)** · `internal/webdetector/ingest_socket.go:155` · _dos_ (axis b/c) — Ingest socket bufio.ReadString does not bound line length — unbounded memory (comment falsely claims a 256KB bound)
 - [x] **[F27](#f27)** · `internal/sslcollector/socketapi.go:312` · _regression_ (axis b) — sslcollector socket restart race: old listener's Close() unlinks the freshly-bound new socket, breaking cert delivery until next restart
 - [x] **[F28](#f28)** · `internal/sslcollector/lifecycle.go:113` · _correctness_ (axis c) — sslcollector socket server that exits on its own (Serve error) is never restarted
 
@@ -573,7 +573,7 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 <a id="f26"></a>
 ### F26 — Ingest socket bufio.ReadString does not bound line length — unbounded memory (comment falsely claims a 256KB bound)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `ReadSlice` + drop-oversized-and-resync (memory bounded to the 256 KB buffer)
 - **Severity:** medium · **Category:** dos (axis b/c) · **Verify:** CONFIRMED
 - **Location:** `internal/webdetector/ingest_socket.go:155`
 
@@ -583,7 +583,27 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 
 **Suggested fix.** Bound the line: use bufio.Scanner with a fixed max-token like FileTailer, or ReadSlice/ReadLine and drop-until-newline on overflow; fix the comment.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Verified the bug empirically (a `bufio.NewReaderSize(_, 64KB)` returns a
+1 MB no-newline line whole, err=nil — `ReadString`→`ReadBytes`→`collectFragments` grows a
+`[]byte` unbounded; the buffer size only limits a single fill). `serveConn` now reads with
+`br.ReadSlice('\n')`, which returns `bufio.ErrBufferFull` once a line exceeds the 256 KB
+buffer. On `ErrBufferFull` the oversized line is dropped and ingestion **resyncs at the next
+newline** (connection kept alive so surrounding lines still flow; memory bounded to the
+buffer), and a single line that floods past `maxDrain` (8 MB) closes the connection. Each
+`ReadSlice` slice is copied to a string before `handleLine` (it points into the reader
+buffer, invalidated by the next read). Dropped oversized lines count as a parse failure
+(`telemetry.RecordWebdetParseFailure`) and emit a throttled WARN. The false "bufio.Reader
+will return ErrBufferFull" comment is corrected. Test `ingest_socket_linebound_test.go`
+drives `serveConn` over a `net.Pipe` with a `recordingAdapter`: an oversized (300 KB) line is
+dropped while the lines around it ingest (resync), and a 10 MB never-terminated flood closes
+the connection without ingesting it — both **verified to FAIL** against the pre-fix
+`ReadString` (the 300 KB / 10 MB blobs reach the adapter). Note the **FileTailer**
+(`internal/detectors/core/source.go:269`) shares the identical latent bug — its
+`if err == bufio.ErrBufferFull` drain branch (`:282`) is **dead code** because `ReadString`
+never returns that error, so an oversized log line accumulates unbounded there too; a
+lower-severity, different-context case (a file can't be closed+reconnected, so it needs the
+resync variant) tracked as a **separate follow-up** rather than widening this PR. Branch
+`claude/edge-audit-ingest-line-bound`.
 
 ---
 
