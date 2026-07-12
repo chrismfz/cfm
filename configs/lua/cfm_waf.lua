@@ -641,6 +641,10 @@ function _M.check(ctx)
   -- norm_args_body is shared by php_wrappers/ssrf/js_proto (3 rules).
   -- Without this, each rule independently calls normalize()+url_decode twice.
   local _scan_ua, _norm_ab, _norm_args, _body_lc
+  -- Comment-stripped SQLi scan pair (sc, scw), memoized PER SURFACE so the
+  -- three SQLi rules share one strip_sql_comments + '+'-collapse pass instead
+  -- of recomputing it each (uri+args and args+body surfaces) — audit F30b.
+  local _sqli_ua_sc, _sqli_ua_scw, _sqli_ab_sc, _sqli_ab_scw
 
   local function get_scan_ua()
     if not _scan_ua then _scan_ua = scan_str(uri, args) end
@@ -678,6 +682,25 @@ function _M.check(ctx)
       _norm_ab = normalize(cap(args or "", budget) .. "&" .. cap(body or "", budget))
     end
     return _norm_ab
+  end
+
+  -- Comment-stripped SQLi scan pair for each surface, computed once and shared
+  -- by detect_sqli / detect_sqli_blind_lexical / detect_sqli_union_variant.
+  -- Each returns (sc, scw): the strip_sql_comments output and its '+'-collapsed
+  -- variant (see det.sqli_scan_strings). Previously every one of the three
+  -- rules recomputed this on the SAME string — 3x the strip + gsub per surface
+  -- per request. Called via the `det` table so it stays interceptable in tests.
+  local function get_sqli_ua()
+    if not _sqli_ua_sc then
+      _sqli_ua_sc, _sqli_ua_scw = det.sqli_scan_strings(get_scan_ua())
+    end
+    return _sqli_ua_sc, _sqli_ua_scw
+  end
+  local function get_sqli_ab()
+    if not _sqli_ab_sc then
+      _sqli_ab_sc, _sqli_ab_scw = det.sqli_scan_strings(get_norm_ab())
+    end
+    return _sqli_ab_sc, _sqli_ab_scw
   end
 
   -- ── Severity accumulator ───────────────────────────────────────────────
@@ -1004,13 +1027,14 @@ function _M.check(ctx)
     local mode = rule_mode(CFG.rule_sqli, "challenge")
     if mode ~= "disabled" then
       -- URI + query args (cheap, every request).
-      local hit = det.detect_sqli(uri, args, get_scan_ua())
+      local hit = det.detect_sqli(get_sqli_ua())
       -- Plus the POST body: form-field SQLi (e.g. a WHMCS ticket subject/
       -- message submitted as application/x-www-form-urlencoded) lands in
-      -- the body, which uri+args does not cover. Reuse the already-budgeted
-      -- args+body scan string so we don't re-normalize the body.
+      -- the body, which uri+args does not cover. get_sqli_ab reuses the
+      -- already-budgeted args+body scan string (get_norm_ab) and memoizes the
+      -- comment-strip so the three SQLi rules share it (F30b).
       if not hit and body_inspect_ok then
-        hit = det.detect_sqli(uri, args, get_norm_ab())
+        hit = det.detect_sqli(get_sqli_ab())
       end
       if hit then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -1029,9 +1053,9 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_sqli_blind_lexical, "logonly")
     if mode ~= "disabled" then
-      local hit = det.detect_sqli_blind_lexical(uri, args, get_scan_ua())
+      local hit = det.detect_sqli_blind_lexical(get_sqli_ua())
       if not hit and body_inspect_ok then
-        hit = det.detect_sqli_blind_lexical(uri, args, get_norm_ab())
+        hit = det.detect_sqli_blind_lexical(get_sqli_ab())
       end
       if hit then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -1052,9 +1076,9 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_sqli_union_variant, "logonly")
     if mode ~= "disabled" then
-      local hit = det.detect_sqli_union_variant(uri, args, get_scan_ua())
+      local hit = det.detect_sqli_union_variant(get_sqli_ua())
       if not hit and body_inspect_ok then
-        hit = det.detect_sqli_union_variant(uri, args, get_norm_ab())
+        hit = det.detect_sqli_union_variant(get_sqli_ab())
       end
       if hit then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec

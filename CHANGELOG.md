@@ -685,6 +685,20 @@ back-filled here — see the git/PR history for that period.
   builds: `touch` the `LOG_PATH` file so a source attaches.
 
 ### Changed
+- **WAF: the three SQLi rules share one SQL-comment strip per scan surface
+  (F30b).** `detect_sqli`, `detect_sqli_blind_lexical` and
+  `detect_sqli_union_variant` each independently recomputed `sqli_scan_strings`
+  (`strip_sql_comments` + a `+`/whitespace collapse) on the same scan string —
+  3× per surface, and the engine scans both the URI+query and args+body
+  surfaces, so **6× per request**. The comment-strip pair is now computed by two
+  memoized engine getters (`get_sqli_ua` / `get_sqli_ab`, mirroring the existing
+  `get_scan_ua`/`get_norm_ab` memoization) and passed into the detectors, which
+  take the `(sc, scw)` pair directly — **2 strips per request instead of 6**
+  (1 for a body-less GET). Saves ~1.1 ms/req (~8.5%) on a large ~8KB URI+body
+  SQLi surface; negligible on normal short requests. Detection is byte-identical
+  (the strings are the same, just computed once). Follow-up to F30, which
+  widened the scan surface and made the redundancy more visible. Found by the
+  2026-07 edge Lua audit (F30b, low).
 - **UA-emergency: move the periodic rule-file read off the request hot path (F48).**
   `cfm_ua_emergency.check()` runs on every request and called `refresh_if_needed()`,
   which every `REFRESH_INTERVAL_SEC` (3s) per worker did a blocking `io.open` +
