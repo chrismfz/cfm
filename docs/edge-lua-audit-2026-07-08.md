@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**29 / 55 fixed.** Grouped by severity; each links to its detail section.
+**30 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -106,7 +106,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ### Info (1)
 
-- [ ] **[F61](#f61)** · `configs/openresty.conf:80` · _security_ (axis c) — server_tokens not disabled — proxy version leaked in Server header and error pages
+- [x] **[F61](#f61)** · `configs/openresty.conf:80` · _security_ (axis c) — server_tokens not disabled — proxy version leaked in Server header and error pages
 
 ---
 
@@ -1199,7 +1199,7 @@ FAIL** against the pre-fix (1 call). Branch `claude/edge-audit-waf-memo`.
 <a id="f61"></a>
 ### F61 — server_tokens not disabled — proxy version leaked in Server header and error pages
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `server_tokens off;` added to `http{}` in both configs
 - **Severity:** info · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/openresty.conf:80`
 
@@ -1209,7 +1209,14 @@ FAIL** against the pre-fix (1 call). Branch `claude/edge-audit-waf-memo`.
 
 **Suggested fix.** Add server_tokens off; in the http{} block of both configs.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Added `server_tokens off;` to the `http{}` block of **both** `configs/openresty.conf`
+(after `default_type`) and `configs/angie.conf` — a single http-level directive inherits into every
+server/location block, and nothing overrides it (grep-confirmed the only `server_tokens` occurrences
+are these two lines; no `more_set_headers`/`more_clear_headers` Server-header handling exists to
+conflict). Verified with a stock `nginx` behavioral test: `server_tokens off` → `Server: nginx`
+(no version) vs the default `on` → `Server: nginx/1.24.0` — non-vacuous. Product name is retained
+(`openresty`/`Angie`), only the version is dropped. Config-only; no Lua/Go change. Branch
+`claude/edge-audit-server-tokens`.
 
 ---
 
