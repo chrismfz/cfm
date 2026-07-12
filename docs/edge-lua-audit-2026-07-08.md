@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**36 / 55 fixed.** Grouped by severity; each links to its detail section.
+**37 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -81,7 +81,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F33](#f33)** · `configs/lua/cfm_waf_detectors.lua:488` · _waf-bypass_ (axis a/c) — XSS event-handler checks require `=` immediately after the handler name, so whitespace (`onerror =`) evades onerror/onload/onmouseover/onfocus
 - [x] **[F34](#f34)** · `configs/lua/cfm_waf_detectors.lua:1870` · _waf-bypass_ (axis a/c) — CRLF raw-newline branch matches header names case-sensitively, missing canonically-capitalized injections (rule 605)
 - [x] **[F35](#f35)** · `configs/lua/cfm_waf_detectors.lua:3148` · _waf-bypass_ (axis a/c) — Log4Shell header precheck misses canonical uppercase %7B URL-encoding of ${
-- [ ] **[F36](#f36)** · `configs/lua/cfm_waf_detectors.lua:2688` · _fp_ (axis a) — C2 tunnel host list uses unbounded substring match; ix.io/ matches matrix.io/
+- [x] **[F36](#f36)** · `configs/lua/cfm_waf_detectors.lua:2688` · _fp_ (axis a) — C2 tunnel host list uses unbounded substring match; ix.io/ matches matrix.io/
 - [ ] **[F37](#f37)** · `configs/lua/cfm_waf_detectors.lua:2790` · _waf-bypass_ (axis a/c) — detect_smuggling_cl cannot see duplicate Content-Length/Transfer-Encoding headers (table collapsed by header_string)
 - [ ] **[F38](#f38)** · `configs/lua/cfm.lua:924` · _correctness_ (axis c) — Decision cache key truncates the URI to 64 bytes and omits the query string, so distinct URIs sharing a 64-char prefix share one cached verdict
 - [x] **[F39](#f39)** · `configs/lua/cfm.lua:1274` · _security_ (axis c) — Decoded control characters in ngx.var.uri are written unescaped into error-log lines, enabling log forging
@@ -860,7 +860,7 @@ partial cases). Config-only Lua change. Branch `claude/edge-audit-log4shell-hexc
 <a id="f36"></a>
 ### F36 — C2 tunnel host list uses unbounded substring match; ix.io/ matches matrix.io/
 
-- **Status:** ☐ open
+- **Status:** ☑ done — every host token anchored on a `%f[%w]` left boundary
 - **Severity:** low · **Category:** fp (axis a) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:2688`
 
@@ -870,7 +870,31 @@ partial cases). Config-only Lua change. Branch `claude/edge-audit-log4shell-hexc
 
 **Suggested fix.** Anchor host tokens at a boundary (require preceding scheme/'//'/non-host char) or drop short entries like 'ix.io/' before any promotion.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Took the general boundary-anchoring option (not the one-off ix.io drop) so any current or
+future short token is covered. At module load each `C2_TUNNEL_HOSTS` token gets a precomputed pattern
+`"%f[%w]" .. escaped-token` (Lua magic `.`/`-` escaped), and `detect_c2_tunnel` now does
+`has(s, p[1]) and string.find(s, p[3])` — the cheap plain-substring `has()` stays as the fast-path
+precheck (unchanged hot path for the common no-match case), and only when the token is present at all do
+we pay for the frontier match that rejects a longer-hostname suffix. `%f[%w]` requires the char before
+the host to be a non-word char; a URL host start is always preceded by `//`, `.`, `@`, `/`, a delimiter,
+or the string start (never an alphanumeric that would make the label part of a longer name), so no real
+C2 URL is lost. **Correction to the finding:** rule 702 is at **`challenge`**, not logonly — the
+`cfm_waf.lua` "Phase 4 (logonly rollout)" section was promoted at some point and the detector's
+"the rule ships at logonly" comment was **stale** (now fixed, per CLAUDE.md §5). So these were **live
+user-facing false-positive challenges** (e.g. any request body/arg referencing a Matrix homeserver
+`matrix.io/…`), not just hit-rate noise — which raises the value of the fix. Test
+`cfm_waf_c2_boundary_test.lua` (new, full `waf.check` at block): `matrix.io/`, `phoenix.io/`,
+`citrix.io/`, and the `X0x0.st/` prefix no longer fire; real hosts at a proper boundary still fire —
+`ix.io/` (scheme `//`, space-before, and subdomain), `pastebin.com/raw/`, `ngrok-free.app/` (hyphen
+escaped), `0x0.st/` (digit lead), `raw.githubusercontent.com/`, `webhook.site/`; benign hosts / prose
+stay clean. **Verified to FAIL** against the pre-fix plain-substring match (the 4 FP cases wrongly
+fired). Adversarial review: SHIP, no false negatives, escaping correct for every token (incl. the
+hyphen `ngrok-free.app/` and digit-lead `0x0.st/`). Two out-of-scope residuals the review noted and
+deliberately left: the anchor is LEFT-only, so `api.telegram.org/bot` still right-over-matches a
+hypothetical `…/botanist` (harmless — the Bot API host only serves `/bot<token>/`), and a `_`-preceded
+suffix (`my_ix.io/`) still matches since Lua `%w` excludes `_` (negligible — `_` is invalid in a
+hostname label). Both are separate from F36's left-boundary FP and not worth the added complexity now.
+Config-only Lua change. Branch `claude/edge-audit-c2-host-boundary`.
 
 ---
 

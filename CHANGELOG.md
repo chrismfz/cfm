@@ -377,6 +377,18 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **WAF C2-tunnel host matching no longer false-positives on longer hostnames
+  (F36).** `detect_c2_tunnel` (rule 702 `WAF_C2:TUNNEL`) matched its host tokens
+  with a plain substring, so the short token `ix.io/` matched any longer hostname
+  ending in it — `matrix.io/`, `phoenix.io/`, `citrix.io/` — tagging benign
+  traffic as C2. The rule is at **`challenge`** (the detector comment's "ships at
+  logonly" was stale — corrected), so these were **real user-facing challenges**
+  on anyone referencing e.g. a Matrix homeserver URL, not just log noise. Every
+  host token is now anchored on a `%f[%w]` left host boundary (a URL host start is
+  always preceded by `//`, `.`, `@`, a delimiter, or the string start — never an
+  alphanumeric), kept behind the existing cheap substring precheck so the hot path
+  is unchanged; no real C2 URL is lost. Found by the 2026-07 edge Lua audit
+  (F36, low).
 - **Origin-keepalive no longer logs a false "OpenResty too old" NOTICE on a
   hostless request (F60).** `cfm_origin_ka.balance(443)` conflated two conditions
   in one `elseif`: genuinely lacking SNI-keyed pool support (`sni_pool_ok=false`)

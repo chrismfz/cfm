@@ -2823,13 +2823,11 @@ end
 -- C2_TUNNEL_HOSTS — hostnames known to be popular for attacker exfil and
 -- payload-hosting (paste services with raw-content URLs, request-bin /
 -- webhook services, free tunnel/relay services, ephemeral file hosts).
--- Match is lower-cased substring against args+body (already normalised
--- by get_norm_ab in cfm_waf.lua).
+-- Matched against the lower-cased, normalised args+body (get_norm_ab in
+-- cfm_waf.lua), anchored on a LEFT host boundary — see detect_c2_tunnel.
 --
--- Operators on shared hosting may host pastebin clones legitimately —
--- the rule ships at logonly so the hit-rate sampler quantifies that
--- before any promotion. Specific noisy entries can be removed without
--- renumbering rule_id 702.
+-- Operators on shared hosting may host pastebin clones legitimately — hence
+-- specific noisy entries can be removed without renumbering rule_id 702.
 local C2_TUNNEL_HOSTS = {
   -- Paste services with raw-content endpoints
   { "pastebin.com/raw/",        "PASTEBIN_RAW" },
@@ -2863,13 +2861,30 @@ local C2_TUNNEL_HOSTS = {
   { "api.telegram.org/bot",     "TELEGRAM_BOT" },
 }
 
+-- Precompute a LEFT-boundary-anchored pattern for each host token. A plain
+-- substring match had no left edge, so a short token like "ix.io/" matched any
+-- longer hostname ending in it — "matrix.io/", "phoenix.io/" — tagging benign
+-- traffic as C2 (audit F36; rule 702 is at `challenge`, so those were real
+-- user-facing false positives, not just log noise). `%f[%w]` requires the char
+-- before the host to be a non-word char (URL host starts are always preceded by
+-- `//`, `.`, `@`, `/`, a delimiter, or the string start — never an alphanumeric
+-- that would make the label part of a longer name), so no real C2 URL is lost.
+-- Pattern magic in the tokens (`.`, `-`) is escaped.
+for i = 1, #C2_TUNNEL_HOSTS do
+  local esc = C2_TUNNEL_HOSTS[i][1]:gsub("[%(%)%.%%%+%-%*%?%[%]%^%$]", "%%%0")
+  C2_TUNNEL_HOSTS[i][3] = "%f[%w]" .. esc
+end
+
 function _M.detect_c2_tunnel(args, body, _ns)
   local s = _ns or normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
   if s == "" then return nil end
 
   for i = 1, #C2_TUNNEL_HOSTS do
     local p = C2_TUNNEL_HOSTS[i]
-    if has(s, p[1]) then
+    -- Cheap plain-substring precheck (fast path) before the boundary pattern:
+    -- the token must be present at all, and only then do we pay for the frontier
+    -- match that rejects longer-hostname suffixes (matrix.io/ vs ix.io/).
+    if has(s, p[1]) and string.find(s, p[3], 1, false) then
       return p[2]
     end
   end
