@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**43 / 56 fixed.** Grouped by severity; each links to its detail section.
+**44 / 56 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -75,7 +75,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ### Low (29)
 
-- [~] **[F30](#f30)** · `configs/lua/cfm_waf.lua:617` · _waf-bypass_ (axis a/c) — URI+args scan capped at 2048 bytes lets query-string padding push a payload past traversal/RCE/XSS/SQLi URI inspection _(PARKED: a safe window-raise is blocked on F62 — see F30 detail)_
+- [x] **[F30](#f30)** · `configs/lua/cfm_waf.lua:617` · _waf-bypass_ (axis a/c) — URI+args scan capped at 2048 bytes lets query-string padding push a payload past traversal/RCE/XSS/SQLi URI inspection
 - [x] **[F31](#f31)** · `configs/lua/cfm_waf.lua:1621` · _perf_ (axis b) — should_push dedup key embeds the volatile score/tag suffix of the reason, defeating the (ip,reason) cooldown for scored/burst rules
 - [x] **[F32](#f32)** · `configs/lua/cfm_waf_excl.lua:99` · _perf_ (axis b) — matches_rule recompiles the glob Lua pattern per request per glob entry (no precompile like Go)
 - [x] **[F33](#f33)** · `configs/lua/cfm_waf_detectors.lua:488` · _waf-bypass_ (axis a/c) — XSS event-handler checks require `=` immediately after the handler name, so whitespace (`onerror =`) evades onerror/onload/onmouseover/onfocus
@@ -668,7 +668,7 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 <a id="f30"></a>
 ### F30 — URI+args scan capped at 2048 bytes lets query-string padding push a payload past traversal/RCE/XSS/SQLi URI inspection
 
-- **Status:** ⧗ PARKED — a safe window-raise is blocked on F62 (SQL-comment-strip ReDoS)
+- **Status:** ☑ done — uri and query capped independently, each to `uri_scan_len` (8192)
 - **Severity:** low · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf.lua:617`
 
@@ -678,9 +678,32 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 
 **Suggested fix.** Raise max_scan_len to the realistic max URI length, or scan uri and args in separate windows.
 
-**PARKED — blocked on F62.** Verifying F30 showed both halves of the suggested fix are unsafe as-is: they trip a pre-existing **O(n²) ReDoS** in `strip_sql_comments` (now **F62**), which runs up to 3×/request on this same URI+args scan surface. Raising `max_scan_len` to the realistic request-line max is exactly what detonates it: `large_client_header_buffers 8 64k` (both `openresty.conf` and `angie.conf`) allows a 64KB request line, and the strip is ~5.4s/call at 64KB (measured). Even the "separate windows" variant roughly doubles the scanned bytes and so ~4×'s the quadratic. So a safe F30 fix must wait until F62 linearizes the strip; **then** the intended fix (cap uri and args independently + raise the request-line scan cap to cover the shipped header-buffer size) becomes safe. Note the padding attack is bounded defence-in-depth (the WAF is one layer; the payload still has to reach a vulnerable backend), so parking it behind the higher-severity ReDoS fix is the right order.
+**History — was parked behind F62.** Verifying F30 first showed both halves of the suggested fix were unsafe as-is: they tripped a pre-existing **O(n²) ReDoS** in `strip_sql_comments` (**F62**), which runs up to 3×/request on this same URI+args scan surface — raising the window to the realistic request-line max (`large_client_header_buffers 8 64k` → 64KB) detonated it (~5.4s/call at 64KB). F62 linearized the strip (merged), which unblocked this.
 
-**Fix landed:** _(pending — resumes after F62 lands)_
+**Fix landed:** `scan_str(uri, args)` now caps uri and query **independently** —
+`normalize(cap(uri, N) .. "?" .. cap(args, N))` with `N = CFG.uri_scan_len` — instead of the single
+`cap(uri.."?"..args, 2048)`. This closes **both** escape routes: a long path can no longer evict the
+query from the window (cross-field eviction, the same split `get_norm_ab` uses for args+body per F09),
+and each side gets its own full budget so query padding can't push a payload out below `N` bytes.
+`uri_scan_len = 8192` (new CFG knob in `cfm_waf.lua`) — deliberately the **urlencoded POST-body
+budget**, not the full 64KB header-buffer ceiling: these same detectors already scan bodies to 8KB, so
+it adds no new FP class, and a normal short URI pays nothing (`cap()` only bounds; work scales with the
+actual length). Cost is dominated by the **detector sweep**, not `normalize`: measured (LuaJIT, `%`-dense
+worst case) the 7-detector URI sweep is ~0.70ms/req at the old 2048 cap → ~2.74ms at 8KB/side, and it
+**plateaus** there — a 16KB (or 64KB) request line is capped to 8KB/side and costs the same ~2.74ms, so
+the wider window can't be driven past that bound. It stays within the system's existing envelope: the
+SQLi and superglobal detectors **already** run a second pass on the args+body surface capped at the body
+budget (up to ~32KB/side for JSON), a larger string than this 8KB URI window. Widening past 2048 is safe
+**only because F62 made `strip_sql_comments` O(n)** (a quadratic strip would make this unbounded). The args-only surface
+(`get_norm_args`, feeding cmd-injection/debug-toggle detectors) keeps its own 2048 cap — a separate
+detector family, out of F30's scope. **Documented residual:** a >8KB query can still push a payload past
+the per-side window; `uri_scan_len` is a config knob raisable toward the 64KB ceiling if a deployment
+wants fuller coverage at the cost of more CPU/FP surface on very large requests. Test
+`cfm_waf_scan_window_test.lua` (new) probes the effective window from `scan_str` and asserts, on the
+**real** `scan_str`/`detect_traversal`: short-request parity; a query traversal payload survives a path
+longer than the window (no eviction) and `detect_traversal` fires; a payload padded ~7KB into the query
+is now seen and fires; and the >N residual is truncated. Five assertions **verified to FAIL** against the
+pre-fix combined 2048 cap. Config-only Lua change. Branch `claude/edge-audit-scan-window`.
 
 ---
 
@@ -1548,6 +1571,8 @@ gaps as their own audit tasks.
 - [ ] **[low] F10b — port `[...]` bracket-class globs into the Lua exclude matcher** (`cfm_waf_excl.lua` `glob_to_lua_pattern` + the `matches_rule` glob trigger)
   - Follow-up to F10. The security-critical `*`/`?` cross-`/` widening is fixed; what remains is that Go treats a value containing `[`/`]` as a glob character class (`compileValueMatcher`: `ContainsAny(rule, "*?[]")`) while Lua only glob-detects `*`/`?` and matches `[`/`]` literally. Mostly Lua-**narrower** (more protective in-path), except one contrived *wider* case — a request literally containing the bracket text (rule `/foo[abc]`, request `/foo[abc]`) matches in Lua but not Go (needs literal, usually percent-encoded, brackets in both rule and URL). Port Go's `globToRegex` bracket handling (incl. `[!`/`[^`→`[^…]` negation, `]`-as-first-char literal, Lua set-escaping of `%`/`]`) and add cross-engine tests. Low priority (bracket-class excludes are rare).
   - **Investigated 2026-07-10:** confirmed **low, safe to defer** — no in-path WAF-off widening. For bracket rules Lua is strictly-or-mostly **narrower** (in-path WAF stays ON where Go would skip); the only Lua-wider corners (request literally containing the bracket text; a lone `]`) require operator-configured literal brackets and are negligible. A full char-by-char port plan for `glob_to_lua_pattern` (class state machine, `[!`/`[^` negation, leading-`]` literal, Lua set-escaping) + lock-step cross-engine test rows are scoped and ready to drop in whenever this is picked up; two Go quirks (`\\]`/`\\^` in `globToRegex`, lines ~501/521) should NOT be replicated — flag Go-side instead.
+- [ ] **[low] F30b — memoize `sqli_scan_strings` across the three SQLi detectors** (`cfm_waf_detectors.lua` `sqli_scan_strings`; called by `detect_sqli` + `detect_sqli_blind_lexical` + `detect_sqli_union_variant`)
+  - Surfaced by the F30 review. Each of the three SQLi rules independently calls `sqli_scan_strings` (which runs `strip_sql_comments` + a `[+%s]+`→" " gsub) on the SAME `get_scan_ua()` surface — 3× redundant passes per request. Pre-existing, but F30 widened that surface (2048→8192/side), so the redundancy is now ~3–4× costlier on large requests (a chunk of the measured ~2.7ms 8KB sweep). Fix: compute `(sc, scw)` once per surface (memoize in the engine like `_scan_ua`/`_norm_ab`, or cache on first call) and pass into all three detectors — cuts the SQLi share of the URI sweep ~3×. Not folded into F30 (single-concern); config-only Lua, own test + FP-neutral (same strings, fewer recomputes).
 - [x] **[high]** configs/angie.conf (whole file, 62KB, edited 2026-07-08) — no dedicated finder — **audited, at parity**
   - Every edge-config finding cites openresty.conf; angie.conf was never audited as a first-class proxy. Needed a line-by-line openresty↔angie parity diff.
   - **Investigated 2026-07-10:** **full parity, no exposure.** A path-normalized diff + landmark greps confirm every security-critical directive is byte-identical across both angie server blocks: F06 static-asset negative-lookahead (angie 673/1139), F01 admin `auth_request`→`/api/v1/admin/authcheck` (863/1314), the `map $http_x_forwarded_proto $cf_xfp` + all XFP-to-origin lines, `__ssl_debug` loopback gate, `real_ip_header`/`recursive`/`trusted_proxies` include, `geo $cfm_bypass_ip`, `access_by_lua_file cfm.lua` (×2), and the full set of 18 `access_by_lua_block { return; }` bypass locations. The only diffs are comments, install paths, required `load_module` lines, and a cosmetic `@cfm_admin_upstream_error_https` rename — no security-relevant DRIFT, no ABSENT item. It was a **process** gap, not an exposure. Optional follow-up: a CI guardrail asserting each edge fix is present in both configs so future one-sided fixes are caught. (The shared `$cf_xfp` = client-supplied XFP default is a property of both proxies = the separate F44 low finding, not a parity gap.)
