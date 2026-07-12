@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**40 / 55 fixed.** Grouped by severity; each links to its detail section.
+**41 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -76,7 +76,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 ### Low (28)
 
 - [ ] **[F30](#f30)** · `configs/lua/cfm_waf.lua:617` · _waf-bypass_ (axis a/c) — URI+args scan capped at 2048 bytes lets query-string padding push a payload past traversal/RCE/XSS/SQLi URI inspection
-- [ ] **[F31](#f31)** · `configs/lua/cfm_waf.lua:1621` · _perf_ (axis b) — should_push dedup key embeds the volatile score/tag suffix of the reason, defeating the (ip,reason) cooldown for scored/burst rules
+- [x] **[F31](#f31)** · `configs/lua/cfm_waf.lua:1621` · _perf_ (axis b) — should_push dedup key embeds the volatile score/tag suffix of the reason, defeating the (ip,reason) cooldown for scored/burst rules
 - [x] **[F32](#f32)** · `configs/lua/cfm_waf_excl.lua:99` · _perf_ (axis b) — matches_rule recompiles the glob Lua pattern per request per glob entry (no precompile like Go)
 - [x] **[F33](#f33)** · `configs/lua/cfm_waf_detectors.lua:488` · _waf-bypass_ (axis a/c) — XSS event-handler checks require `=` immediately after the handler name, so whitespace (`onerror =`) evades onerror/onload/onmouseover/onfocus
 - [x] **[F34](#f34)** · `configs/lua/cfm_waf_detectors.lua:1870` · _waf-bypass_ (axis a/c) — CRLF raw-newline branch matches header names case-sensitively, missing canonically-capitalized injections (rule 605)
@@ -684,7 +684,7 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 <a id="f31"></a>
 ### F31 — should_push dedup key embeds the volatile score/tag suffix of the reason, defeating the (ip,reason) cooldown for scored/burst rules
 
-- **Status:** ☐ open
+- **Status:** ☑ done — cooldown keyed on (ip, reason family, action tier)
 - **Severity:** low · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf.lua:1621`
 
@@ -694,7 +694,33 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 
 **Suggested fix.** Key the cooldown on a stable family (reason:match('^([^:]+)') or rule_id) plus ip, not the full reason with score/tag suffix.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `should_push(shdict, ip, reason, action)` now keys the cooldown shdict on
+`(ip, reason family, action tier)`: `"wafpush|" .. fam .. "|" .. (action or "na") .. "|" .. ip`, where
+`fam = (reason and reason:match("^([^:]+)")) or "WAF"`. The caller (`cfm.lua`) passes `waf_action`.
+- **Family** (before the first `:`, the identity `WAF_HIGH_RISK_REASONS` already keys on) drops the
+  volatile `:score=N` / per-hit tag, so a scanner's scored-hit flood collapses to one push per window —
+  the F31 fix — and it's robust to any suffix without enumerating them.
+- **Action tier — a MUST-FIX caught in adversarial review.** Family-only keying (the first cut) was too
+  coarse: WAF families mix enforcement tiers by default (`WAF_RCE` = block base rule 320 + logonly
+  sub-rules 322-327, and `WAF_RCE` is armed for autoblock in the stock `detectors.conf`), and Go's
+  `waf_security` subscribe callback feeds on `action=block` pushes ONLY. So a cheap logonly `WAF_RCE`
+  recon hit would `:add` the family window first (Go discards it — non-block), and a later real block
+  `WAF_RCE` hit in the same 60s would dedup against it → **no `ip_push`, no autoblock, no forensics** — a
+  security under-report AND an evasion primitive (send one logonly recon token per 60s to permanently
+  poison the window, take per-request 403s but never the persistent nft ban). The old full-reason key did
+  not have this (distinct reasons pushed separately). Dimensioning the key by `action` guarantees the
+  first block hit of a family always pushes, while same-tier score/tag floods still collapse. Chose the
+  raw action (block/challenge/logonly each its own tier) over the review's block/non-block so it also
+  future-proofs a Phase-2 challenge-tier accumulate threshold without a retune; volume stays bounded
+  (≤ one push per family per tier per window). The first push of each tier still carries the *full*
+  scored reason. Test `cfm_waf_should_push_test.lua` (new; mock shdict with real `:add` semantics): the
+  three `WAF_BAD_UA:*:score=N` hits collapse to one; the stored key is `wafpush|WAF_BAD_UA|logonly|<ip>`;
+  **the regression guard** — a logonly `WAF_RCE:LOLBIN` hit followed by a block `WAF_RCE` in the same
+  window BOTH push (the block is not masked); same-family+tier repeats dedup; distinct families and IPs
+  are independent; colon-less/nil reasons and the fail-open guards behave. **Verified to FAIL two ways**:
+  the F31 flood assertions fail against the pre-fix full-reason key, and the block-not-masked assertion
+  fails against the family-only key. Config-only Lua change (`cfm_waf.lua` + the one caller in `cfm.lua`).
+  Branch `claude/edge-audit-should-push-family`.
 
 ---
 

@@ -1094,7 +1094,7 @@ return {
 |----------|---------|
 | `_M.check(ctx)` | Run all rules, return highest severity. 6-tuple (hit, reason, ttl, action, hits, waf_rule_id). |
 | `_M.enabled()` | Module-level kill-switch. |
-| `_M.should_push(shdict, ip, reason)` | Per-(reason,ip) push rate limit. |
+| `_M.should_push(shdict, ip, reason, action)` | Push rate limit, keyed on `(ip, reason family, action tier)` — dedups scored-hit floods without letting a non-block hit mask a block hit's autoblock push (F31). |
 | `_M.get_config()` | Snapshot of CFG (read-only copy). |
 | `_M.set_rule(name, mode)` | Live rule-mode tuning. Per-worker. Used by tests and ops kill-switches. |
 | `_M.get_rule_ids()` | Snapshot of the RULE_IDS table. |

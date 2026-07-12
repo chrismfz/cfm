@@ -391,6 +391,22 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **WAF-hit push cooldown now bounds scanner floods without masking autoblocks
+  (F31).** `should_push` dedups the per-hit `cfm.waf.log` record + `ip_push` RPC
+  using an shdict `:add`, but keyed on the **full reason** — and scored rules append
+  a per-request `:score=N` (and a per-hit tag), e.g. `WAF_BAD_UA:<tag>:score=6`. So a
+  scanner sweeping many URIs from one IP produced a different key per hit, escaping
+  the 60s cooldown entirely and emitting one log record + one RPC **per hit** —
+  exactly under the flood the cooldown targets. The cooldown now keys on
+  `(ip, reason family, action tier)`: the **family** (before the first `:`, the same
+  identity `WAF_HIGH_RISK_REASONS` uses) drops the volatile score/tag suffix, and the
+  **action tier** is kept because WAF families mix enforcement tiers (e.g. `WAF_RCE`
+  = block rule 320 + logonly 322-327) and the Go autoblock feeds on `action=block`
+  pushes only — a family-only key would let a cheap logonly recon hit consume the
+  window and suppress a later block hit's push, so the IP would never be autoblocked
+  (an under-report / evasion primitive, caught in review). Same-tier score/tag floods
+  still collapse to one push; the first push of each tier carries the full reason.
+  Found by the 2026-07 edge Lua audit (F31, low).
 - **Clearance host-binding no longer mangles IPv6-literal Hosts (F40).**
   `cfm_clearance`'s `normalize_host` stripped a trailing `:<digits>` as if always
   a port (`h:gsub(":%d+$","")`), so an **unbracketed** IPv6 literal lost its final
