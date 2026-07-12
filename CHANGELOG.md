@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **WAF SQL-comment stripper is no longer a CPU-DoS amplifier (F62).**
+  `strip_sql_comments` removed `/* … */` comments with a `/%*.-%*/` gsub whose
+  lazy `.-` was **O(n²)** on crafted input with many `/*` starts and no closing
+  `*/` (e.g. a query string `?x=/*a/*a/*a…`). It runs on the attacker-controlled
+  URI+query scan surface and — with the stock `detectors.conf` — up to **3× per
+  request** (the SQLi, SQLi-blind-lexical and SQLi-union-variant rules), so any
+  client with a query string could burn Lua CPU on the WAF hot path: measured
+  ~5 ms/call at the 2048 scan cap and quadratic beyond it (~85 ms at 8 KB,
+  ~5.4 s at a 64 KB request line — and `large_client_header_buffers 8 64k` allows
+  that). Block-comment removal is now a single-pass **O(n)** scan (find `/*`, jump
+  to the next `*/`, repeat; an unterminated `/*` is kept verbatim), byte-for-byte
+  identical to the old stripper (fuzz-verified over 20 000 inputs against the
+  original). After: ~0.02 ms at 2 KB, ~0.6 ms at 64 KB (~230–8800× faster), and
+  the common no-comment request skips the pass entirely. Found while verifying the
+  F30 scan-window finding (whose fix is parked until this landed). Rule detection
+  behaviour is unchanged. Found by the 2026-07 edge Lua audit (F62, low).
 - **WAF smuggling detector now sees duplicate Content-Length / Transfer-Encoding
   header lines (F37).** `detect_smuggling_cl` (rule 608 `WAF_HTTP_SMUGGLING`,
   challenge) derived its `cl`/`te` values via `header_string()`, which collapses a

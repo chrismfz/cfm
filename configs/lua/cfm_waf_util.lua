@@ -289,8 +289,41 @@ end
 -- Catches keyword-splitting bypasses like UN/**/ION SE/**/LECT.
 -- Applied only in the SQLi path; not in normalize() to avoid
 -- altering the scan surface for other checks.
+--
+-- Block comments are removed with a manual single-pass scan, NOT a
+-- `/%*.-%*/` gsub. That gsub's lazy `.-` was O(n^2) on crafted input with many
+-- `/*` starts and no closing `*/` (e.g. `?x=/*a/*a/*a...`): every unmatched
+-- `/*` re-scanned to end-of-string, and gsub then advanced one byte and did it
+-- again. This runs on the attacker-controlled URI+args scan surface up to 3x
+-- per request (rule_sqli + rule_sqli_blind_lexical + rule_sqli_union_variant),
+-- so it was a CPU-DoS amplifier — measured ~5ms per call at the 2048 scan cap
+-- and quadratic beyond it (~85ms at 8KB, ~5.4s at a 64KB request line). The
+-- scan below is O(n): find the next `/*`, jump to its closing `*/`, repeat.
+-- It is byte-for-byte equivalent to the old gsub — removes each `/* ... */`
+-- (shortest close, exactly as the lazy `.-` did) and leaves an UNTERMINATED
+-- `/*` verbatim (the lazy pattern couldn't match without a `*/`, so it left it
+-- too). Parity is fuzz-verified against the original in
+-- scripts/tests/cfm_waf_sqlcomment_strip_test.lua. The `find("/*")` guard keeps
+-- the common no-comment case allocation-free (and skips a whole gsub pass).
 local function strip_sql_comments(s)
-  return (s:gsub("/%*.-%*/", ""):gsub("%-%-[^\n]*", ""))
+  if s:find("/*", 1, true) then
+    local out, i = {}, 1
+    local a = s:find("/*", i, true)
+    while a do
+      out[#out + 1] = s:sub(i, a - 1)      -- text before this /*
+      local b = s:find("*/", a + 2, true)  -- shortest closing */ after it
+      if not b then
+        out[#out + 1] = s:sub(a)           -- unterminated /* : keep verbatim
+        i = #s + 1
+        break
+      end
+      i = b + 2                            -- resume past the closing */
+      a = s:find("/*", i, true)
+    end
+    out[#out + 1] = s:sub(i)               -- tail after the last closing */
+    s = table.concat(out)
+  end
+  return (s:gsub("%-%-[^\n]*", ""))
 end
 
 local function scan_str(uri, args)
