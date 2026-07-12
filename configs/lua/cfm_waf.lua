@@ -132,7 +132,12 @@ local CFG = {
 
   -- [top-10] XXE + CRLF + HTTP request smuggling
   rule_xxe              = "challenge",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
-  rule_crlf_injection   = "challenge",  -- CRLF / HTTP response-splitting in args or body
+  rule_crlf_injection   = "logonly",    -- CRLF / HTTP response-splitting in args or body.
+                                        -- Burn-in: F34 made the raw-header match case-insensitive,
+                                        -- which trips legit multi-line panel/webmail traffic
+                                        -- (capitalized "Location:"/"Content-Type:" at line start).
+                                        -- Held at logonly to observe the FP rate; promote back to
+                                        -- challenge after burn-in (CLAUDE.md logonly->challenge->block).
   rule_http_smuggling   = "challenge", -- HTTP verb embedded in body / querystring (smuggling)
                                        -- (request-smuggling primitive; never benign)
 
