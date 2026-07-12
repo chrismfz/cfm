@@ -18,6 +18,27 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **WAF XSS detector now tolerates whitespace before `=` and covers many more
+  event handlers (F33).** `detect_xss` (rule 302 `WAF_XSS`, challenge) checked
+  only four handlers and required the name immediately followed by `=`
+  (`onload=`), so an HTML-legal `onload =` / `onload\t=` (attribute parsers accept
+  whitespace around `=`) evaded it — e.g. `<svg onload =alert(1)>`. Replaced the
+  four literal checks with a single frontier `gmatch` that captures each
+  `on<word>` followed by optional whitespace + `=` and checks it against an
+  explicit handler set (auto-firing handlers — animation/transition, SVG SMIL
+  begin/end, `<details ontoggle>`, popover `onbeforetoggle`, media autoplay —
+  plus the classic interaction handlers). The explicit set keeps benign `on…=`
+  params (`onboarding=`, `online=`) from matching, and the `%f[%w]` frontier
+  keeps the WPML `?…creationError=101` non-match; it's also one scan instead of
+  four. Tier unchanged (**challenge** — a solvable interstitial, not a block).
+  Known FP surface at challenge: a benign request param named exactly like a
+  handler, **or** a reflected GET value that contains a literal `handler=` code
+  snippet (e.g. searching a dev/tutorial site for `onclick=`). This already
+  applied to the original four handlers without reported incidents; the expansion
+  widens it to the more search-common `onclick`/`onchange`. Kept at challenge
+  because these are real reflected-XSS vectors and the hit is a solvable
+  challenge — flip rule 302 to `logonly` for a burn-in if the FP rate warrants.
+  Found by the 2026-07 edge Lua audit (F33, low).
 - **Log4Shell header detector now catches every single-encoded form of `${` (F35).**
   `detect_log4shell` (rule 328 `WAF_CVE:LOG4SHELL`, logonly) prechecks each
   request header for a `${` before decoding, but the gate was **narrower than its
