@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**35 / 55 fixed.** Grouped by severity; each links to its detail section.
+**36 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -78,7 +78,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F30](#f30)** · `configs/lua/cfm_waf.lua:617` · _waf-bypass_ (axis a/c) — URI+args scan capped at 2048 bytes lets query-string padding push a payload past traversal/RCE/XSS/SQLi URI inspection
 - [ ] **[F31](#f31)** · `configs/lua/cfm_waf.lua:1621` · _perf_ (axis b) — should_push dedup key embeds the volatile score/tag suffix of the reason, defeating the (ip,reason) cooldown for scored/burst rules
 - [x] **[F32](#f32)** · `configs/lua/cfm_waf_excl.lua:99` · _perf_ (axis b) — matches_rule recompiles the glob Lua pattern per request per glob entry (no precompile like Go)
-- [ ] **[F33](#f33)** · `configs/lua/cfm_waf_detectors.lua:488` · _waf-bypass_ (axis a/c) — XSS event-handler checks require `=` immediately after the handler name, so whitespace (`onerror =`) evades onerror/onload/onmouseover/onfocus
+- [x] **[F33](#f33)** · `configs/lua/cfm_waf_detectors.lua:488` · _waf-bypass_ (axis a/c) — XSS event-handler checks require `=` immediately after the handler name, so whitespace (`onerror =`) evades onerror/onload/onmouseover/onfocus
 - [x] **[F34](#f34)** · `configs/lua/cfm_waf_detectors.lua:1870` · _waf-bypass_ (axis a/c) — CRLF raw-newline branch matches header names case-sensitively, missing canonically-capitalized injections (rule 605)
 - [x] **[F35](#f35)** · `configs/lua/cfm_waf_detectors.lua:3148` · _waf-bypass_ (axis a/c) — Log4Shell header precheck misses canonical uppercase %7B URL-encoding of ${
 - [ ] **[F36](#f36)** · `configs/lua/cfm_waf_detectors.lua:2688` · _fp_ (axis a) — C2 tunnel host list uses unbounded substring match; ix.io/ matches matrix.io/
@@ -732,7 +732,7 @@ caches the rebuild, which is the finding's suggested fix.) Existing `cfm_waf_exc
 <a id="f33"></a>
 ### F33 — XSS event-handler checks require `=` immediately after the handler name, so whitespace (`onerror =`) evades onerror/onload/onmouseover/onfocus
 
-- **Status:** ☐ open
+- **Status:** ☑ done — frontier gmatch + handler set; whitespace-tolerant, expanded coverage
 - **Severity:** low · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:488`
 
@@ -742,7 +742,41 @@ caches the rebuild, which is the finding's suggested fix.) Existing `cfm_waf_exc
 
 **Suggested fix.** Allow optional whitespace before '=' (%f[%w]onload%s*=) and cover more handlers.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Replaced the four literal `has(s,"onX=") and find(s,"%f[%w]onX=")` checks with a single
+frontier `gmatch("%f[%w](on%a+)%s*=")` loop that captures each `on<word>` followed by optional
+whitespace + `=` and checks it against an explicit `XSS_EVENT_HANDLERS` set. This closes both halves
+of the finding at once: `%s*=` tolerates the HTML-legal whitespace before `=` (`onload =`, `onload\t=`),
+and the set expands coverage from 4 to ~45 handlers — curated toward the **auto-firing** ones (no user
+interaction: `onload`/`onerror`/`onfocus`, CSS `onanimation*`/`ontransition*`, SVG SMIL
+`onbegin`/`onend`/`onrepeat`, `<details ontoggle>`, popover `onbeforetoggle`, media autoplay
+`onplay`/`oncanplay`/`onloadstart…`, `onpageshow`) plus the classic interaction handlers
+(`onclick`/`onmouse*`/`onkey*`/`onpointer*`/`oninput`/`onchange`/`onsubmit`/`onblur`). Design choices:
+an **explicit set** (not a generic `on%a+=` match) so benign params that merely start with "on"
+(`onboarding=`, `online=`, `once=`) are captured but rejected — never flagged; the **`%f[%w]` frontier**
+preserves the WPML `?…creationError=101` non-match (the "onerror" inside "creationError" is mid-word,
+no frontier); and it is **one scan** over the shared scan string rather than four `has()` scans, so it's
+cheaper than the code it replaces while covering ~11× the handlers. Upstream `normalize()` lowercases +
+double-decodes, so case (`onLOAD=`) and `%xx`-encoded whitespace are handled before the matcher runs.
+**Tier: kept at `challenge` (existing).** Adversarial review returned SHIP (no bug/regression/
+exploitable residual; greedy `%a+` guarantees whole-token matching, so `onclickhandler=`/`onchanged=`
+are captured-then-rejected — it recommended dropping **no** handler). It did correct my initial FP
+framing, which understated the surface: because the frontier fires after *any* non-word boundary, an
+FP is a benign param named exactly like a handler **or** a reflected GET value carrying a literal
+`handler=` code snippet (searching a dev/tutorial site for `onclick=` / `onchange=` trips a challenge).
+This is milder than F34 (F34 tripped common benign prose "Location: Berlin"); crucially it **already
+applied to the original four handlers without reported incidents**, and the expansion only widens it to
+the more search-common `onclick`/`onchange`. Kept at challenge (solvable interstitial, real reflected-
+XSS vectors); flip rule 302 to `logonly` for a burn-in if the FP rate warrants. Also folded from the
+review: added the missing auto-firing handlers it named (`onstart`/`onbounce`/`onfinish` marquee,
+`onended` media, `onpointerdown`/`up`/`move`/`leave`). Test `cfm_waf_xss_handler_test.lua` (new, full
+`waf.check` at block): whitespace-before-`=` (space/tab/**LF/CR/FF**), uppercase, slash-separator, the
+existing four (regression), and a sample of new handlers (`onanimationstart`, `ontoggle`, `onbegin`,
+`onclick`, `onpageshow`, `onpointerover`, `onstart`, `onended`, `onpointerdown`) all fire;
+`<script>`/encoded-`<script`/`=javascript:` regressions fire; FP-negatives (WPML `creationError=101`,
+`onboarding=`/`online=`/`once=`, a handler name used as a *value*, `onclick_handler=` prefix, benign
+prose) stay clean; and the accepted reflected-search FP (`?q=…onclick=…`) is asserted **explicitly** so
+the tradeoff is intentional. **Verified to FAIL** against the pre-fix four-check body (18 assertions:
+the whitespace + new-handler cases). Config-only Lua change. Branch `claude/edge-audit-xss-handlers`.
 
 ---
 

@@ -486,6 +486,38 @@ end
 -- CHALLENGE-CLASS DETECTORS
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- Inline event-handler attribute names that carry reflected XSS. Kept as an
+-- explicit set (not a generic `on%a+=` match) so benign query params that just
+-- happen to start with "on" — onboarding, online, once, onsale, ontime — never
+-- match. Curated toward the AUTO-FIRING handlers (fire with no user
+-- interaction: load/error/focus+autofocus, CSS animation/transition, SVG SMIL
+-- begin/end, <details ontoggle>, popover onbeforetoggle, media autoplay) plus
+-- the classic interaction handlers, since those are what reflected-XSS payloads
+-- actually use. Add handlers here; the matcher and its cost are unchanged.
+local XSS_EVENT_HANDLERS = {
+  -- auto-firing (no interaction required)
+  onload = true, onerror = true, onfocus = true,
+  onanimationstart = true, onanimationend = true, onanimationiteration = true,
+  ontransitionstart = true, ontransitionrun = true, ontransitionend = true,
+  ontransitioncancel = true,
+  ontoggle = true, onbeforetoggle = true,
+  onbegin = true, onend = true, onrepeat = true,          -- SVG SMIL animate/set
+  onstart = true, onbounce = true, onfinish = true,       -- <marquee> auto-fire
+  onpointerrawupdate = true, onpointerenter = true, onpointerover = true,
+  onpointerdown = true, onpointerup = true, onpointermove = true,
+  onpointerleave = true,
+  onscroll = true, onscrollend = true,
+  onplay = true, onplaying = true, oncanplay = true, oncanplaythrough = true,
+  onended = true, onloadstart = true, onloadeddata = true, onloadedmetadata = true,
+  ondurationchange = true, onpageshow = true,
+  -- interaction handlers (classic reflected-XSS vectors)
+  onmouseover = true, onmouseenter = true, onmouseleave = true,
+  onmousemove = true, onmousedown = true, onmouseup = true, onmouseout = true,
+  onclick = true, ondblclick = true, onauxclick = true, oncontextmenu = true,
+  onwheel = true, onkeydown = true, onkeyup = true, onkeypress = true,
+  oninput = true, onchange = true, onblur = true, onsubmit = true,
+}
+
 function _M.detect_xss(uri, args, _s)
   local s = _s or scan_str(uri, args)
 
@@ -497,20 +529,22 @@ function _M.detect_xss(uri, args, _s)
   if has(s, "=\"javascript:") then return true end
   if has(s, "='javascript:")  then return true end
 
-  -- Event-handler attributes. Anchored on a non-word boundary so an
-  -- "on*=" token embedded inside a longer identifier is not flagged.
-  -- WPML's Advanced Translation Editor returns to wp-admin with
-  -- `?ateJobCreationError=101` — the substring "onerror=" literally
-  -- occurs inside "creationError=" (…creati**onerror**=…), which the
-  -- plain-substring check matched. Real reflected XSS always carries
-  -- a delimiter (space, quote, `<`, `=`, `&`, `;`, `/`) before the
-  -- handler name, so a frontier check loses no real-attack coverage.
-  -- Fast-path: keep the cheap plain-find as a precheck before the
-  -- pattern engine pays for backtracking.
-  if has(s, "onerror=")     and string.find(s, "%f[%w]onerror=",     1, false) then return true end
-  if has(s, "onload=")      and string.find(s, "%f[%w]onload=",      1, false) then return true end
-  if has(s, "onmouseover=") and string.find(s, "%f[%w]onmouseover=", 1, false) then return true end
-  if has(s, "onfocus=")     and string.find(s, "%f[%w]onfocus=",     1, false) then return true end
+  -- Event-handler attributes, e.g. `<svg onload=alert(1)>`. One frontier
+  -- gmatch pass captures each `on<word>` that is followed by optional
+  -- whitespace and `=`, then checks it against XSS_EVENT_HANDLERS:
+  --   * `%f[%w]` anchors on a non-word boundary, so an `on…=` embedded in a
+  --     longer identifier is not flagged. WPML's `?ateJobCreationError=101`
+  --     carries "onerror=" inside "creationError=" — mid-word, no frontier,
+  --     so it never matches. Real reflected XSS always has a delimiter
+  --     (space, quote, `<`, `=`, `&`, `;`, `/`) before the handler name.
+  --   * `%s*=` tolerates whitespace before the `=` — HTML attribute parsers
+  --     accept `onload =` / `onload\t=`, which the old `onload=` literal
+  --     missed entirely (audit F33).
+  --   * the set membership means only real handler names fire, so benign
+  --     `on…=` params (onboarding=, online=) are captured but rejected.
+  for handler in s:gmatch("%f[%w](on%a+)%s*=") do
+    if XSS_EVENT_HANDLERS[handler] then return true end
+  end
 
   return false
 end
