@@ -391,6 +391,22 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **cfm_geo now self-heals after a transient MaxMind DB open failure (F46).**
+  On the first per-worker lookup, an `mmdb.init`/`mmdb.new` failure set
+  `_geo_api_mode = "disabled"` **permanently** for the worker's life — `country()`
+  returned `""` for every later request with no retry until a proxy reload. A
+  GeoLite2 update replaces the `.mmdb` via atomic rename, so a worker running its
+  once-per-worker init during that swap window got a transient open error and
+  geo stayed off indefinitely (`""` is fail-open for country blocklists but
+  **fail-closed for allowlists**, so a worker could silently stop enforcing an
+  allowlist with no self-recovery). Now a transient open/init failure keeps the
+  backend mode and retries after a `GEO_INIT_RETRY_SEC` (30s) cooldown, so a later
+  good DB is picked up automatically. The retry only runs while init has failed
+  (a failed open creates no mapping) and stops permanently on first success, so it
+  can't reintroduce the mmap accumulation this module exists to prevent. Applies
+  to both the `init_lookup` and `new_object` backends. The load-time "unsupported
+  library" disabled state (a genuinely permanent condition) is unchanged. Found by
+  the 2026-07 edge Lua audit (F46, low).
 - **WAF C2-tunnel host matching no longer false-positives on longer hostnames
   (F36).** `detect_c2_tunnel` (rule 702 `WAF_C2:TUNNEL`) matched its host tokens
   with a plain substring, so the short token `ix.io/` matched any longer hostname

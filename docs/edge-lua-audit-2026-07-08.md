@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**38 / 55 fixed.** Grouped by severity; each links to its detail section.
+**39 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -90,7 +90,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F43](#f43)** · `configs/lua/sslcollector.lua:739` · _dos_ (axis b/c) — sslcollector emits an unbounded per-handshake WARN on every SNI cache-miss (attacker-driven log amplification)
 - [ ] **[F44](#f44)** · `configs/openresty.conf:130` · _security_ (axis c) — Client-controlled X-Forwarded-Proto forwarded verbatim to origin ($cf_xfp) in DNAT-direct mode
 - [ ] **[F45](#f45)** · `configs/lua/cfm_bridge_cfg.lua:70` · _security_ (axis c) — Bridge token rotation opens a fail-open enforcement window of up to the 10s cache TTL
-- [ ] **[F46](#f46)** · `configs/lua/cfm_geo.lua:77` · _correctness_ (axis c) — cfm_geo disables geo permanently per worker on a transient init/open failure, with no retry until proxy reload
+- [x] **[F46](#f46)** · `configs/lua/cfm_geo.lua:77` · _correctness_ (axis c) — cfm_geo disables geo permanently per worker on a transient init/open failure, with no retry until proxy reload
 - [ ] **[F47](#f47)** · `configs/lua/cfm.lua:129` · _correctness_ (axis c) — Missing bridge token 500s every request (fail-closed) while a present-but-unreachable daemon fails open — behavior flips on file presence, not reachability
 - [x] **[F48](#f48)** · `configs/lua/cfm_ua_emergency.lua:133` · _perf_ (axis b) — UA-emergency refresh reads the entire JSON file on the request path every 3s per worker (not mtime as the comment claims)
 - [ ] **[F49](#f49)** · `internal/webdetector/nginx_bridge.go:1619` · _dos_ (axis b/c) — Five POST bridge handlers decode request bodies with no size limit (unbounded JSON read)
@@ -1078,8 +1078,8 @@ unlike `log_route`, does not auto-prepend the `[cfm] ` prefix).
 <a id="f46"></a>
 ### F46 — cfm_geo disables geo permanently per worker on a transient init/open failure, with no retry until proxy reload
 
-- **Status:** ☐ open
-- **Severity:** low · **Category:** correctness (axis c) · **Verify:** PLAUSIBLE
+- **Status:** ☑ done — transient open failure now retries after a cooldown instead of permanently disabling
+- **Severity:** low · **Category:** correctness (axis c) · **Verify:** CONFIRMED (upgraded from PLAUSIBLE — the permanent-disable path is unambiguous in the code)
 - **Location:** `configs/lua/cfm_geo.lua:77`
 
 **What & why.** On the first lookup an init/open failure sets _geo_api_mode='disabled' permanently for the worker's lifetime with no retry; country() returns '' for every later request until reload. A MaxMind DB update replaces the .mmdb via rename; a worker running its once-per-worker init during the swap window gets a transient open error and geo stays off indefinitely. '' is fail-open for country blocklists but fail-CLOSED for allowlists, so a worker silently stops enforcing an allowlist with no self-recovery.
@@ -1088,7 +1088,26 @@ unlike `log_route`, does not auto-prepend the `[cfm] ` prefix).
 
 **Suggested fix.** Distinguish a transient open failure from an unsupported API: leave _geo_api_mode intact and clear only the init-done flag so a later request retries (bounded by a short cooldown).
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** On an `mmdb.init`/`mmdb.new` failure (pcall raise OR falsy return), `country()` no longer
+sets `_geo_api_mode = "disabled"`. It keeps the backend mode, logs once, and sets
+`_geo_init_retry_at = ngx.now() + GEO_INIT_RETRY_SEC` (30s); subsequent requests within the cooldown
+return `""` without re-attempting, and the first request past the cooldown retries the open — so a
+later good DB (after the atomic-rename window) is picked up automatically without a proxy reload.
+Applied to **both** the `init_lookup` and `new_object` branches (identical bug in each). **Preserved
+the mmap-leak protection** this module exists for (see its header): the retry only runs while init has
+FAILED (a failed open creates no ~60 MB mapping), and `_geo_init_retry_at` is cleared + `_geo_init_done`
+/`_geo_db` set on first success, after which init is never called again — so the retry cannot
+reintroduce the map accumulation. The **load-time** "unsupported library" disabled state (lib lacks
+`init`/`lookup`/`new` — a genuinely permanent condition needing a lib upgrade + reload) is left
+untouched; the fix distinguishes it from the runtime transient failure exactly as the finding asks.
+Can't tell a broken library from a transient open error at the call site, so both are retried — a
+genuinely broken lib just fails fast every 30s (a failed pcall, no cost). Test `cfm_geo_retry_test.lua`
+(new; mocks `resty.maxminddb` + `ngx.now`, reads `GEO_INIT_RETRY_SEC` from source): first lookup fails
+→ `""` but `mode()` stays `init_lookup` (NOT disabled); within cooldown init is not re-attempted; after
+the cooldown a now-healthy DB self-heals (`country()` returns the code) with exactly one more init;
+after success init is never called again (leak protection); a parallel `new_object` scenario covers the
+second branch. **Verified to FAIL** (9 assertions) against the pre-fix permanent-disable. Config-only
+Lua change. Branch `claude/edge-audit-geo-retry`.
 
 ---
 
