@@ -91,11 +91,23 @@ end
 -- (rule `/foo[abc]`, request `/foo[abc]`) matches here but not Go's anchored
 -- class regex — contrived (needs literal, usually percent-encoded, brackets in
 -- both the rule and the live URL). A full port closes both directions.
+-- Anchored-pattern cache, keyed by the rule string (F32). matches_rule ran the
+-- two gsubs below once per glob rule on every WAF-eligible request; Go compiles
+-- its regexp once at rebuild. The keys are exclude RULES (a bounded operator
+-- list), never request values, so this cannot grow with traffic; it persists per
+-- worker via package.loaded and is naturally superseded when a rule string
+-- changes (a changed rule is a new key). The conversion is a pure function of the
+-- rule, so a cache hit returns a byte-identical pattern.
+local _glob_pat_cache = {}
 local function glob_to_lua_pattern(glob)
-  local p = tostring(glob or "")
-  p = p:gsub("([%^%$%(%)%%%.%[%]%+%-%*%?])", "%%%1")
+  local key = tostring(glob or "")
+  local hit = _glob_pat_cache[key]
+  if hit then return hit end
+  local p = key:gsub("([%^%$%(%)%%%.%[%]%+%-%*%?])", "%%%1")
   p = p:gsub("%%%*", "[^/]*"); p = p:gsub("%%%?", "[^/]")
-  return "^" .. p .. "$"
+  p = "^" .. p .. "$"
+  _glob_pat_cache[key] = p
+  return p
 end
 _M.glob_to_lua_pattern = glob_to_lua_pattern
 
