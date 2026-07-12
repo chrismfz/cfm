@@ -125,7 +125,9 @@ func (j *JournalTailer) ReadNext(ctx context.Context) (string, error) {
 	}
 	ch := make(chan res, 1)
 	go func(r *bufio.Reader) {
-		line, err := r.ReadString('\n')
+		// readBoundedLine, not ReadString: ReadString accumulates an un-delimited
+		// stream without bound (a crafted journald record could OOM us).
+		line, err := readBoundedLine(r)
 		ch <- res{line, err}
 	}(j.reader)
 
@@ -134,6 +136,9 @@ func (j *JournalTailer) ReadNext(ctx context.Context) (string, error) {
 		return "", io.EOF
 	case out := <-ch:
 		if out.err != nil {
+			// errOversizedLine (a never-terminated record past the drain cap) ends
+			// this tick; the next tick respawns journalctl. Bounded to ~8 MB and
+			// tick-paced — far better than the pre-fix unbounded accumulation.
 			if out.err == io.EOF {
 				return "", io.EOF
 			}

@@ -126,7 +126,9 @@ func (d *DockerTailer) ReadNext(ctx context.Context) (string, error) {
 	}
 	ch := make(chan res, 1)
 	go func(r *bufio.Reader) {
-		line, err := r.ReadString('\n')
+		// readBoundedLine, not ReadString: ReadString accumulates an un-delimited
+		// stream without bound (a compromised container's stdout could OOM us).
+		line, err := readBoundedLine(r)
 		ch <- res{line, err}
 	}(d.reader)
 
@@ -135,11 +137,19 @@ func (d *DockerTailer) ReadNext(ctx context.Context) (string, error) {
 		return "", io.EOF
 	case out := <-ch:
 		if out.err != nil {
+			// errOversizedLine (a never-terminated line past the drain cap) ends
+			// this tick; Close() kills the process and the next tick respawns it.
+			// A container that keeps streaming newline-free data makes no forward
+			// progress but is tick-paced and bounded to ~8 MB — far better than the
+			// pre-fix unbounded accumulation (OOM).
 			if out.err == io.EOF {
 				return "", io.EOF
 			}
 			return "", out.err
 		}
+		// readBoundedLine already stripped the trailing '\n'; this now also strips a
+		// trailing '\r', so a CRLF docker line yields "foo" rather than the pre-fix
+		// "foo\r" (a latent dangling-CR fix, not a regression).
 		line := out.line
 		if len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
 			line = line[:len(line)-1]
