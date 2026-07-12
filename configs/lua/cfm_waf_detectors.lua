@@ -1156,8 +1156,8 @@ local function is_elfinder_verb(a, v)
   return arg_value(a, "task") == "connector"
 end
 
-function _M.detect_cmd_param_key(args)
-  local a = normalize(cap(args or "", CFG.max_scan_len))
+function _M.detect_cmd_param_key(args, _na)
+  local a = _na or normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
   local function key(k)
@@ -1205,8 +1205,8 @@ local BACKTICK_CMDS = {
   uname = true, whoami = true, cat = true, ls = true, ping = true,
 }
 
-function _M.detect_cmd_payload(args)
-  local a = normalize(cap(args or "", CFG.max_scan_len))
+function _M.detect_cmd_payload(args, _na)
+  local a = _na or normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
   local ignore_backtick_only = false
@@ -1353,8 +1353,8 @@ function _M.detect_cmd_payload(args)
   return nil
 end
 
-function _M.detect_debug_toggles(args)
-  local a = normalize(cap(args or "", CFG.max_scan_len))
+function _M.detect_debug_toggles(args, _na)
+  local a = _na or normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
   local function arg_has_key(keys, values)
@@ -1398,8 +1398,8 @@ function _M.detect_debug_toggles(args)
   return nil
 end
 
-function _M.detect_php_serialize(args)
-  local a = normalize(cap(args or "", CFG.max_scan_len))
+function _M.detect_php_serialize(args, _na)
+  local a = _na or normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
   -- PHP's serialize() emits objects as `O:<N>:"<ClassName>":<M>:{...}` where
@@ -2497,17 +2497,19 @@ local REVERSE_SHELL_PATTERNS = {
 -- ships at logonly so the hit-rate sampler quantifies that before any
 -- promotion; if a specific tag is noisy it can be removed from the table
 -- without renumbering rule_id 322.
-function _M.detect_reverse_shell(uri, args, body, _s)
+function _M.detect_reverse_shell(uri, args, body, _s, _bl)
   -- Combined args+body+uri scan string (already normalised + lowered for
   -- uri/args; body is added raw and lowered here).
   local scan_ua = _s or scan_str(uri, args)
 
   -- Body inspection: the engine doesn't gate this rule on body_inspect_ok
   -- because reverse-shell strings can also arrive in GET args. When body is
-  -- present, fold a capped+lowered slice into the search string.
+  -- present, fold a capped+lowered slice into the search string. _bl is the
+  -- per-request memoized lower(cap(body,max_scan_len)) (audit F59) — five RCE
+  -- detectors share it instead of each rebuilding it.
   local s
   if body and body ~= "" then
-    s = scan_ua .. " " .. lower(cap(body, CFG.max_scan_len))
+    s = scan_ua .. " " .. (_bl or lower(cap(body, CFG.max_scan_len)))
   else
     s = scan_ua
   end
@@ -2527,10 +2529,10 @@ end
 -- CFG.max_scan_len (same as detect_reverse_shell) rather than the larger
 -- per-detector limits other body scanners use, since the patterns we look
 -- for are shell one-liners that fit comfortably in 2 KB.
-local function search_rce_markers(uri, args, body, scan_ua, patterns)
+local function search_rce_markers(uri, args, body, scan_ua, patterns, _bl)
   local s
   if body and body ~= "" then
-    s = scan_ua .. " " .. lower(cap(body, CFG.max_scan_len))
+    s = scan_ua .. " " .. (_bl or lower(cap(body, CFG.max_scan_len)))
   else
     s = scan_ua
   end
@@ -2581,9 +2583,9 @@ local PERSISTENCE_PATTERNS = {
   { ">> /root/.ssh/authorized_keys", "ROOT_AUTHKEYS_APPEND" },
 }
 
-function _M.detect_persistence(uri, args, body, _s)
+function _M.detect_persistence(uri, args, body, _s, _bl)
   return search_rce_markers(uri, args, body,
-    _s or scan_str(uri, args), PERSISTENCE_PATTERNS)
+    _s or scan_str(uri, args), PERSISTENCE_PATTERNS, _bl)
 end
 
 -- [R3] Rootkit / LD_PRELOAD artifacts. LD_PRELOAD by itself appears in
@@ -2613,9 +2615,9 @@ local ROOTKIT_PATTERNS = {
   { "/dev/kmem",                 "DEV_KMEM_ACCESS" },
 }
 
-function _M.detect_rootkit_artifacts(uri, args, body, _s)
+function _M.detect_rootkit_artifacts(uri, args, body, _s, _bl)
   return search_rce_markers(uri, args, body,
-    _s or scan_str(uri, args), ROOTKIT_PATTERNS)
+    _s or scan_str(uri, args), ROOTKIT_PATTERNS, _bl)
 end
 
 -- [R4] Living-off-the-land binaries. Trimmed to avoid overlap with R1's
@@ -2649,9 +2651,9 @@ local LOLBIN_PATTERNS = {
   { "curl --output /tmp/",       "CURL_TMP_DROP" },
 }
 
-function _M.detect_lolbin(uri, args, body, _s)
+function _M.detect_lolbin(uri, args, body, _s, _bl)
   return search_rce_markers(uri, args, body,
-    _s or scan_str(uri, args), LOLBIN_PATTERNS)
+    _s or scan_str(uri, args), LOLBIN_PATTERNS, _bl)
 end
 
 -- [C2] Java ObjectOutputStream deserialization. Three wire-form variants:
@@ -2859,9 +2861,9 @@ local COINMINER_PATTERNS = {
   { "ethminer --pool",    "ETHMINER" },
 }
 
-function _M.detect_coinminer(uri, args, body, _s)
+function _M.detect_coinminer(uri, args, body, _s, _bl)
   return search_rce_markers(uri, args, body,
-    _s or scan_str(uri, args), COINMINER_PATTERNS)
+    _s or scan_str(uri, args), COINMINER_PATTERNS, _bl)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -3392,14 +3394,14 @@ local function utf8_walk(s)
   return nil
 end
 
-function _M.detect_bad_utf8(args, body, headers, uri)
+function _M.detect_bad_utf8(args, body, headers, uri, _na)
   -- Skip known legitimate binary-ish endpoints (WP optimization-detective
   -- metrics, async-upload media) — same carve-out the ctrl-chars detector uses.
   -- These produced the bulk of the WAF_BAD_UTF8 logonly FP noise on real Greek
   -- traffic (mobile web-vitals POSTs + admin image uploads).
   if is_known_binaryish_uri(uri) then return nil end
 
-  local tag = utf8_walk(normalize(cap(args or "", CFG.max_scan_len)))
+  local tag = utf8_walk(_na or normalize(cap(args or "", CFG.max_scan_len)))
   if tag then return tag end
 
   -- Walk the body only for TEXTUAL content types (urlencoded / JSON / XML /
