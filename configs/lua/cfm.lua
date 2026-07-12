@@ -1538,7 +1538,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         ngx.var.cfm_upstream = "cfm_challenge"; ngx.var.cfm_pass = "http://cfm_challenge"
       end
 
-      if waf.should_push and waf.should_push(SH, ip, reason) then
+      if waf.should_push and waf.should_push(SH, ip, reason, waf_action) then
         -- Forensic fields (UA / Referer / Content-Type) are always
         -- attached. The single cfm.waf.log now emits one JSON record
         -- per trigger carrying everything Go knows: timestamp, action,

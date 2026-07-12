@@ -11,7 +11,7 @@
 -- Public API:
 --   _M.enabled() -> bool
 --   _M.check(ctx) -> hit(bool), reason(string), ttl_sec(int), action(string)
---   _M.should_push(shdict, ip, reason) -> bool
+--   _M.should_push(shdict, ip, reason, action) -> bool
 --
 -- ctx fields expected from caller:
 --   uri, args, method, host, ip, peer, cf_ip, cookie, shdict, headers, body
@@ -1700,9 +1700,31 @@ function _M.check(ctx)
   return true, final_reason, final_ttl, final_action, hits, final_rule_id
 end
 
-function _M.should_push(shdict, ip, reason)
+function _M.should_push(shdict, ip, reason, action)
   if not shdict or not ip or ip == "" then return true end
-  local k  = "wafpush|" .. (reason or "WAF") .. "|" .. ip
+  -- Dedup on (ip, reason FAMILY, action tier).
+  --   * FAMILY (the part before the first ":", the same identity
+  --     WAF_HIGH_RISK_REASONS keys on) drops the volatile ":score=N" / per-hit
+  --     tag that scored rules append — e.g. "WAF_BAD_UA:<tag>:score=6". Keying
+  --     on the whole reason gave every hit a distinct key, so a scanner
+  --     sweeping many URIs from one IP escaped the 60s cooldown entirely and
+  --     emitted a cfm.waf.log record + ip_push RPC per hit (audit F31).
+  --   * ACTION tier is essential and must NOT be dropped: WAF families mix
+  --     enforcement tiers (e.g. WAF_RCE = block rule 320 + logonly 322-327),
+  --     and the Go waf_security autoblock feeds on `action=block` pushes only.
+  --     A family+ip-only key would let a cheap logonly recon hit consume the
+  --     window and SUPPRESS the later block hit's push, so the IP is never
+  --     autoblocked (a security under-report and an evasion primitive). Keying
+  --     the action guarantees the first block hit of a family always pushes,
+  --     while same-tier score/tag floods still collapse to one push per window.
+  -- Caveat for future maintainers: this collapses distinct BLOCK sub-reasons of a
+  -- family to one push/window, which is correct only while each armed family has a
+  -- SINGLE block rule (the Go autoblock is family-keyed at threshold 1). If a
+  -- family ever gains a 2nd block rule AND one is suppressed per-rule (RULE_<id>=0)
+  -- while the family stays armed, a block hit of the suppressed rule could consume
+  -- this window and mask the armed rule's push — revisit the key (add rule_id) then.
+  local fam = (reason and reason:match("^([^:]+)")) or "WAF"
+  local k  = "wafpush|" .. fam .. "|" .. (action or "na") .. "|" .. ip
   local ok = shdict:add(k, 1, CFG.push_cooldown_sec)
   return ok == true
 end
