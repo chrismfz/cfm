@@ -266,27 +266,50 @@ func (t *FileTailer) ReadNext(ctx context.Context) (string, error) {
 
 	// ── fast path: read one line ──────────────────────────────────────────────
 	// We deliberately skip Stat() on every read — it's done only at EOF.
-	line, err := t.r.ReadString('\n')
+	// ReadSlice (NOT ReadString/ReadBytes): those accumulate an un-delimited
+	// stream WITHOUT bound (collectFragments grows a []byte until the delimiter
+	// or EOF; the buffer size only limits a single fill), so a pathological
+	// oversized log line would OOM the detector — and the ErrBufferFull-drain
+	// below was DEAD CODE because ReadString never returns ErrBufferFull.
+	// ReadSlice caps each read at the buffer and returns ErrBufferFull, which
+	// makes that drain live. Same fix as the ingest socket (audit F26).
+	line, err := t.r.ReadSlice('\n')
 	if err == nil {
 		t.off += int64(len(line))
 		t.lastLineTS = time.Now().Unix()
 		if len(line) > 0 && line[len(line)-1] == '\n' {
 			line = line[:len(line)-1]
 		}
-		return line, nil
+		// ReadSlice returns a slice into t.r's buffer, invalidated by the next
+		// read — copy to a string before returning it to the retaining caller.
+		return string(line), nil
 	}
 
-	// ── oversized line (> 256 KB buffer) ─────────────────────────────────────
-	// ReadString returns a fragment + bufio.ErrBufferFull.  Without draining,
-	// we'd loop on the same fragment forever and freeze the detector.
+	// ── oversized line (content ≥ 256 KiB, fills the buffer) ─────────────────
+	// ReadSlice returned a full-buffer fragment + bufio.ErrBufferFull. Drain to
+	// the next newline (advancing the offset so resume skips the bad line);
+	// without draining we'd re-read the same fragment forever and freeze the
+	// detector. Memory stays bounded to the buffer.
 	if err == bufio.ErrBufferFull {
 		if len(line) > 0 {
 			t.off += int64(len(line))
 		}
+		dropped := len(line)
 		for {
-			frag, e2 := t.r.ReadString('\n')
+			// Bound the per-call drain. A regular access log hits EOF long before
+			// this, but a misconfigured LOG_PATH (a FIFO, or a huge newline-free
+			// blob) could otherwise drain gigabytes while holding t.mu in a single
+			// call. Cap it and resume on the next call — t.off already advanced, so
+			// this makes forward progress rather than erroring (unlike the shared
+			// readBoundedLine, which resets its subprocess source instead).
+			if dropped > maxLineDrain {
+				t.lastLineTS = time.Now().Unix()
+				return "", nil
+			}
+			frag, e2 := t.r.ReadSlice('\n')
 			if len(frag) > 0 {
 				t.off += int64(len(frag))
+				dropped += len(frag)
 			}
 			if e2 == nil {
 				t.lastLineTS = time.Now().Unix()

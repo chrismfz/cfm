@@ -289,6 +289,21 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **Bounded line length in the core log readers too (F26 family).** The same
+  unbounded `bufio.ReadString('\n')` fixed for the ingest socket (F26) also lived
+  in **all three** `internal/detectors/core` log readers: the **file tailer**
+  (`source.go`, reading the access log — its `ErrBufferFull` drain branch was
+  **dead code**, since `ReadString` never returns that error), the **docker-logs**
+  reader (`docker.go`) and the **journald** reader (`journal.go`). Each could OOM
+  the daemon on a single oversized line from its source (a crafted access-log
+  line, a compromised container's stdout, a journald record). All three now read
+  with `ReadSlice`, which caps each read at the 256 KB buffer and drops an
+  over-long line, resyncing at the next newline: `source.go` in place (making its
+  existing drain live, advancing the file offset past the dropped line so resume
+  skips it); `docker.go`/`journal.go` via a shared `readBoundedLine` helper that
+  errors past an 8 MB drain cap rather than reading a never-terminated line
+  forever. Discovered while fixing F26; the original finding wrongly assumed the
+  file tailer was already bounded.
 - **Ingest socket now bounds line length (F26).** `webdetector`'s Unix ingest
   socket (`/run/cfm/ingest.sock`, `root:cfm 0660`, fed by `log-cfm.lua`) read
   lines with `bufio.ReadString('\n')`, whose comment wrongly claimed a 256 KB

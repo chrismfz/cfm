@@ -577,7 +577,7 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 - **Severity:** medium · **Category:** dos (axis b/c) · **Verify:** CONFIRMED
 - **Location:** `internal/webdetector/ingest_socket.go:155`
 
-**What & why.** serveConn reads lines with br.ReadString('\n'); the inline comment claims an oversized line returns ErrBufferFull and is dropped. False: ReadString/ReadBytes uses collectFragments, which on ErrBufferFull copies the 256KB chunk into a growing [][]byte and keeps reading until '\n' or EOF. A cfm-group sender streaming newline-free data causes unbounded RSS growth in the per-connection goroutine (gigabytes fit within the 60s idle deadline over a local socket). The FileTailer path this mirrors uses bufio.Scanner which enforces a max token size; the socket path lost that bound.
+**What & why.** serveConn reads lines with br.ReadString('\n'); the inline comment claims an oversized line returns ErrBufferFull and is dropped. False: ReadString/ReadBytes uses collectFragments, which on ErrBufferFull copies the 256KB chunk into a growing [][]byte and keeps reading until '\n' or EOF. A cfm-group sender streaming newline-free data causes unbounded RSS growth in the per-connection goroutine (gigabytes fit within the 60s idle deadline over a local socket). _(Original finding assumed "the FileTailer path this mirrors uses bufio.Scanner which enforces a max token size" — **that was wrong**: remediation found the FileTailer and the docker/journal readers use the same unbounded `ReadString`. See the fix-landed note.)_
 
 **Repro / cost.** Connect to /run/cfm/ingest.sock and write >256KB with no '\n' -> collectFragments accumulates all of it -> sustained newline-free stream -> OOM.
 
@@ -597,13 +597,23 @@ will return ErrBufferFull" comment is corrected. Test `ingest_socket_linebound_t
 drives `serveConn` over a `net.Pipe` with a `recordingAdapter`: an oversized (300 KB) line is
 dropped while the lines around it ingest (resync), and a 10 MB never-terminated flood closes
 the connection without ingesting it — both **verified to FAIL** against the pre-fix
-`ReadString` (the 300 KB / 10 MB blobs reach the adapter). Note the **FileTailer**
-(`internal/detectors/core/source.go:269`) shares the identical latent bug — its
-`if err == bufio.ErrBufferFull` drain branch (`:282`) is **dead code** because `ReadString`
-never returns that error, so an oversized log line accumulates unbounded there too; a
-lower-severity, different-context case (a file can't be closed+reconnected, so it needs the
-resync variant) tracked as a **separate follow-up** rather than widening this PR. Branch
-`claude/edge-audit-ingest-line-bound`.
+`ReadString` (the 300 KB / 10 MB blobs reach the adapter). Branch
+`claude/edge-audit-ingest-line-bound` (merged, PR #1071).
+
+**Twin bugs in `internal/detectors/core` (F26 family — follow-up).** Remediation found
+the same unbounded `ReadString('\n')` in **all three** package-`core` log readers, not just
+the socket: the **FileTailer** (`source.go:269`, whose `ErrBufferFull` drain branch at `:282`
+was **dead code** since `ReadString` never returns that error), the **docker-logs** reader
+(`docker.go:129`) and the **journald** reader (`journal.go:128`) — each could OOM the daemon
+on an oversized line from its source (crafted access-log line, compromised container stdout,
+journald record). Fixed in a follow-up PR: `source.go` now reads with `ReadSlice` (making its
+existing drop-and-resync drain live, offset advanced past the dropped line so resume skips
+it); `docker.go`/`journal.go` route through a new shared `readBoundedLine` helper
+(`linereader.go`) that drops an over-long line and resyncs at the next newline (or errors past
+an 8 MB drain cap). Tests `source_linebound_test.go` (oversized line dropped, neighbours
+tailed, offset advanced) and `linereader_test.go` (normal / oversized-resync / flood-errors /
+EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
+`claude/edge-audit-core-log-readers`.
 
 ---
 
