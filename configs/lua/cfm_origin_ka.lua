@@ -152,7 +152,17 @@ function _M.balance(port)
 
   if port == 443 then
     local host = ngx.var.host or ""
-    if sni_pool_ok and host ~= "" then
+    if not sni_pool_ok then
+      -- The core genuinely lacks SNI-keyed pools — either older lua-resty-core
+      -- (nparams < 3) or latched off after a runtime 3-arg failure below. This
+      -- is the ONLY case that warrants the "needs OpenResty 1.27.1.1+" NOTICE.
+      if not warned_no_sni_pool then
+        warned_no_sni_pool = true
+        ngx.log(ngx.NOTICE, "[cfm_origin_ka] lua-resty-core lacks SNI-keyed ",
+                "connection pools (needs OpenResty 1.27.1.1+); HTTPS origin ",
+                "connections stay per-request. HTTP (port 80) pooling is active.")
+      end
+    elseif host ~= "" then
       -- 3-arg form: host sets the upstream SNI and is part of the
       -- keepalive pool key, so pooled connections never cross vhosts.
       local pok, ok, err = pcall(balancer.set_current_peer, addr, port, host)
@@ -169,13 +179,17 @@ function _M.balance(port)
               ") — disabling HTTPS pooling for this worker, ",
               "falling back to per-request connections")
       -- fall through to the unpooled 2-arg path below
-    elseif not warned_no_sni_pool then
-      warned_no_sni_pool = true
-      ngx.log(ngx.NOTICE, "[cfm_origin_ka] lua-resty-core lacks SNI-keyed ",
-              "connection pools (needs OpenResty 1.27.1.1+); HTTPS origin ",
-              "connections stay per-request. HTTP (port 80) pooling is active.")
+    else
+      -- sni_pool_ok is true but this request carries no $host (e.g. server_name
+      -- '_' didn't resolve a Host). Pooling IS supported — we simply can't
+      -- key/SNI a pool for a hostless request, so serve it unpooled WITHOUT the
+      -- "no support" NOTICE and WITHOUT burning the one-shot latch. The old
+      -- `elseif` conflated this empty-host case with a genuine lack of support,
+      -- emitting a misleading "needs OpenResty 1.27.1.1+" NOTICE and consuming
+      -- the once-per-worker latch — so operators grepping [cfm_origin_ka] after
+      -- enabling wrongly concluded pooling was off fleet-wide (F60).
     end
-    -- No SNI-keyed pooling available: set the peer but do NOT pool.
+    -- No SNI-keyed pooling for this request: set the peer but do NOT pool.
     -- SNI still comes from proxy_ssl_name $host at the location level,
     -- and each request gets its own connection — identical to the
     -- pre-keepalive behaviour.
