@@ -621,11 +621,27 @@ function _M.check(ctx)
   -- scan_str(uri,args) is shared by traversal/rce/xss/sqli (4 rules).
   -- norm_args_body is shared by php_wrappers/ssrf/js_proto (3 rules).
   -- Without this, each rule independently calls normalize()+url_decode twice.
-  local _scan_ua, _norm_ab
+  local _scan_ua, _norm_ab, _norm_args, _body_lc
 
   local function get_scan_ua()
     if not _scan_ua then _scan_ua = scan_str(uri, args) end
     return _scan_ua
+  end
+
+  -- args-only normalize, shared by cmd_param_key/cmd_payload/debug_toggles/
+  -- php_serialize/bad_utf8 (audit F58) — each used to recompute it per request.
+  -- Must use CFG.max_scan_len (the detectors' cap), which is the SAME CFG object
+  -- passed to det.init, so the memoized string is byte-identical to theirs.
+  local function get_norm_args()
+    if not _norm_args then _norm_args = normalize(cap(args or "", CFG.max_scan_len)) end
+    return _norm_args
+  end
+
+  -- lower(cap(body,max_scan_len)), shared by the five RCE-marker detectors
+  -- (reverse_shell/persistence/rootkit/lolbin/coinminer) (audit F59).
+  local function get_body_lc()
+    if not _body_lc then _body_lc = lower(cap(body or "", CFG.max_scan_len)) end
+    return _body_lc
   end
 
   local function get_norm_ab()
@@ -829,7 +845,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_bad_utf8, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_bad_utf8(args, body, headers, uri)
+      local tag = det.detect_bad_utf8(args, body, headers, uri, get_norm_args())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_BAD_UTF8:" .. tag, ttl, mode, RULE_IDS.rule_bad_utf8) then goto done end
@@ -1159,7 +1175,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_cmd_params, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_cmd_param_key(args)
+      local tag = det.detect_cmd_param_key(args, get_norm_args())
       if tag then
         if record("WAF_CMD_PARAM:" .. tag, CFG.default_ttl_sec, mode, RULE_IDS.rule_cmd_params) then goto done end
       end
@@ -1168,7 +1184,7 @@ function _M.check(ctx)
 
   -- ── 30) Suspicious payload markers ───────────────────────────────────────
   do
-    local tag = det.detect_cmd_payload(args)
+    local tag = det.detect_cmd_payload(args, get_norm_args())
     if tag then
       local mode = cmd_payload_mode(tag)
       if mode ~= "disabled" then
@@ -1182,7 +1198,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_debug_toggles, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_debug_toggles(args)
+      local tag = det.detect_debug_toggles(args, get_norm_args())
       if tag then
         if record("WAF_DEBUG_TOGGLE:" .. tag, CFG.default_ttl_sec, mode, RULE_IDS.rule_debug_toggles) then goto done end
       end
@@ -1193,7 +1209,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_serialize, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_php_serialize(args)
+      local tag = det.detect_php_serialize(args, get_norm_args())
       if tag then
         if record("WAF_SERIALIZE:" .. tag, CFG.default_ttl_sec, mode, RULE_IDS.rule_serialize) then goto done end
       end
@@ -1260,7 +1276,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_reverse_shell, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_reverse_shell(uri, args, body, get_scan_ua())
+      local tag = det.detect_reverse_shell(uri, args, body, get_scan_ua(), get_body_lc())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_RCE:REVERSE_SHELL:" .. tag, ttl, mode, RULE_IDS.rule_reverse_shell) then goto done end
@@ -1289,7 +1305,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_persistence, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_persistence(uri, args, body, get_scan_ua())
+      local tag = det.detect_persistence(uri, args, body, get_scan_ua(), get_body_lc())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_RCE:PERSISTENCE:" .. tag, ttl, mode, RULE_IDS.rule_persistence) then goto done end
@@ -1302,7 +1318,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_rootkit_artifacts, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_rootkit_artifacts(uri, args, body, get_scan_ua())
+      local tag = det.detect_rootkit_artifacts(uri, args, body, get_scan_ua(), get_body_lc())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_RCE:ROOTKIT:" .. tag, ttl, mode, RULE_IDS.rule_rootkit_artifacts) then goto done end
@@ -1318,7 +1334,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_lolbin, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_lolbin(uri, args, body, get_scan_ua())
+      local tag = det.detect_lolbin(uri, args, body, get_scan_ua(), get_body_lc())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_RCE:LOLBIN:" .. tag, ttl, mode, RULE_IDS.rule_lolbin) then goto done end
@@ -1366,7 +1382,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_coinminer, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_coinminer(uri, args, body, get_scan_ua())
+      local tag = det.detect_coinminer(uri, args, body, get_scan_ua(), get_body_lc())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_RCE:COINMINER:" .. tag, ttl, mode, RULE_IDS.rule_coinminer) then goto done end

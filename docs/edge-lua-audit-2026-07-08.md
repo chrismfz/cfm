@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**25 / 55 fixed.** Grouped by severity; each links to its detail section.
+**27 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -100,8 +100,8 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F55](#f55)** · `internal/sslcollector/token.go:214` · _correctness_ (axis c) — Operator-supplied token emitted into Lua via Go %q can produce invalid LuaJIT and break token loading
 - [ ] **[F56](#f56)** · `configs/openresty.conf:623` · _security_ (axis c) — /__ssl_debug protected only by forgeable `allow 127.0.0.1`, unlike purge-ip's documented second loopback gate
 - [ ] **[F57](#f57)** · `configs/lua/cfm_purge.lua:128` · _perf_ (axis b) — purge_ip scans the entire cfm_decisions dict under lock (get_keys(0)) on a force-unblock
-- [ ] **[F58](#f58)** · `configs/lua/cfm_waf_detectors.lua:1117` · _perf_ (axis b) — args-only normalize(cap(args)) recomputed by ~6 detectors per request instead of being memoized once
-- [ ] **[F59](#f59)** · `configs/lua/cfm_waf_detectors.lua:2423` · _perf_ (axis b) — Five RCE-marker detectors each rebuild lower(cap(body)) + concat on every POST body
+- [x] **[F58](#f58)** · `configs/lua/cfm_waf_detectors.lua:1117` · _perf_ (axis b) — args-only normalize(cap(args)) recomputed by ~6 detectors per request instead of being memoized once
+- [x] **[F59](#f59)** · `configs/lua/cfm_waf_detectors.lua:2423` · _perf_ (axis b) — Five RCE-marker detectors each rebuild lower(cap(body)) + concat on every POST body
 - [ ] **[F60](#f60)** · `configs/lua/cfm_origin_ka.lua:172` · _correctness_ (axis c) — cfm_origin_ka emits a false "OpenResty too old / HTTPS pooling off" NOTICE and burns the one-shot warn flag when $host is empty
 
 ### Info (1)
@@ -1092,7 +1092,7 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 <a id="f58"></a>
 ### F58 — args-only normalize(cap(args)) recomputed by ~6 detectors per request instead of being memoized once
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `get_norm_args()` memo in `check`, threaded via a `_na` param
 - **Severity:** low · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:1117`
 
@@ -1102,14 +1102,27 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 
 **Suggested fix.** Add a memoized get_norm_args() in _M.check and pass it as the precomputed _s/_ns arg these detectors already accept.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Added `get_norm_args()` — a lazy per-request memo of `normalize(cap(args or "",
+CFG.max_scan_len))` — alongside the existing `get_scan_ua()`/`get_norm_ab()` getters in
+`cfm_waf.lua` `check`. `detect_cmd_param_key`/`detect_cmd_payload`/`detect_debug_toggles`/
+`detect_php_serialize`/`detect_bad_utf8` gained an optional trailing `_na` param
+(`local a = _na or normalize(...)`) and are called with `get_norm_args()`. Behavior-neutral by
+construction: `det.init(CFG, util)` shares the SAME `CFG` object, so the memoized string is
+byte-identical to each detector's own `normalize(cap(args, CFG.max_scan_len))`; the fallback
+preserves internal/test callers. (is_known_legit_xmlrpc left as-is — F24 already gates its
+normalize behind the /xmlrpc.php check, so it no longer runs on the common path.) Test
+`scripts/tests/cfm_waf_memo_test.lua` uses a counting `normalize` spy: `detect_php_serialize`
+returns the identical `SER_O_PLAIN` with and without `_na`, but performs **0** normalize calls
+when `_na` is supplied — **verified to FAIL** against the pre-fix (1 call). The full WAF suite
+(which drives these detectors through `check` with the real util) stays green, confirming
+end-to-end behavior parity. Branch `claude/edge-audit-waf-memo`.
 
 ---
 
 <a id="f59"></a>
 ### F59 — Five RCE-marker detectors each rebuild lower(cap(body)) + concat on every POST body
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `get_body_lc()` memo in `check`, threaded via a `_bl` param
 - **Severity:** low · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:2423`
 
@@ -1119,7 +1132,17 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 
 **Suggested fix.** Compute body_lc = lower(cap(body,max_scan_len)) once in _M.check and pass it into search_rce_markers/detect_reverse_shell, collapsing 5 lower+concat passes into 1.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Added `get_body_lc()` — a lazy per-request memo of `lower(cap(body or "",
+CFG.max_scan_len))` — in `cfm_waf.lua` `check`. `detect_reverse_shell` and the shared
+`search_rce_markers` helper (used by `detect_persistence`/`detect_rootkit_artifacts`/
+`detect_lolbin`/`detect_coinminer`) gained an optional trailing `_bl` param
+(`s = scan_ua .. " " .. (_bl or lower(cap(body, CFG.max_scan_len)))`) and are called with
+`get_body_lc()`, collapsing five identical lower+concat passes into one. Byte-identical memo
+(same `CFG.max_scan_len`, `max_scan_len` cap — NOT the larger obfuscation caps other body
+scanners use), fallback preserved. Test `scripts/tests/cfm_waf_memo_test.lua`: both the inline
+`detect_reverse_shell` path and the `search_rce_markers` path (via `detect_persistence`) return
+the identical result and perform **0** body-lower calls when `_bl` is supplied — **verified to
+FAIL** against the pre-fix (1 call). Branch `claude/edge-audit-waf-memo`.
 
 ---
 

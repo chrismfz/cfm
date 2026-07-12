@@ -467,6 +467,22 @@ back-filled here — see the git/PR history for that period.
   builds: `touch` the `LOG_PATH` file so a source attaches.
 
 ### Changed
+- **WAF: memoize the per-request args-normalize and body-lowercase once, shared
+  across detectors (F58 + F59).** Each WAF request re-did the same string work in
+  several detectors: `normalize(cap(args, max_scan_len))` (double-URL-decode +
+  lowercase) was recomputed by `detect_cmd_param_key`/`cmd_payload`/
+  `debug_toggles`/`php_serialize`/`bad_utf8` (F58), and `lower(cap(body,
+  max_scan_len))` was rebuilt by the five RCE-marker detectors
+  (`reverse_shell`/`persistence`/`rootkit_artifacts`/`lolbin`/`coinminer`, F59) —
+  up to ~6× and 5× the necessary allocations over the same strings on every
+  request. `cfm_waf.lua`'s `check` now computes each once via lazy getters
+  (`get_norm_args()` / `get_body_lc()`, mirroring the existing
+  `get_scan_ua()`/`get_norm_ab()` memos) and passes them into those detectors,
+  which use the precomputed value when given and fall back to computing it
+  otherwise. Behavior-neutral by construction — the memo is byte-identical to
+  each detector's own computation (same `CFG.max_scan_len`), so results are
+  unchanged; only the redundant recomputation is removed. Found by the 2026-07
+  edge Lua audit (F58, F59).
 - **WAF: skip the xmlrpc legit-check normalize on non-xmlrpc requests (F24).**
   `is_known_legit_xmlrpc` (the Jetpack carve-out, called on the WAF hot path for
   every request via `cfm_waf.lua` sections 26 & 28) normalized both the args and
