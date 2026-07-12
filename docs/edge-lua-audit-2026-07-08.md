@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**37 / 55 fixed.** Grouped by severity; each links to its detail section.
+**38 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -82,7 +82,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F34](#f34)** · `configs/lua/cfm_waf_detectors.lua:1870` · _waf-bypass_ (axis a/c) — CRLF raw-newline branch matches header names case-sensitively, missing canonically-capitalized injections (rule 605)
 - [x] **[F35](#f35)** · `configs/lua/cfm_waf_detectors.lua:3148` · _waf-bypass_ (axis a/c) — Log4Shell header precheck misses canonical uppercase %7B URL-encoding of ${
 - [x] **[F36](#f36)** · `configs/lua/cfm_waf_detectors.lua:2688` · _fp_ (axis a) — C2 tunnel host list uses unbounded substring match; ix.io/ matches matrix.io/
-- [ ] **[F37](#f37)** · `configs/lua/cfm_waf_detectors.lua:2790` · _waf-bypass_ (axis a/c) — detect_smuggling_cl cannot see duplicate Content-Length/Transfer-Encoding headers (table collapsed by header_string)
+- [x] **[F37](#f37)** · `configs/lua/cfm_waf_detectors.lua:2790` · _waf-bypass_ (axis a/c) — detect_smuggling_cl cannot see duplicate Content-Length/Transfer-Encoding headers (table collapsed by header_string)
 - [ ] **[F38](#f38)** · `configs/lua/cfm.lua:924` · _correctness_ (axis c) — Decision cache key truncates the URI to 64 bytes and omits the query string, so distinct URIs sharing a 64-char prefix share one cached verdict
 - [x] **[F39](#f39)** · `configs/lua/cfm.lua:1274` · _security_ (axis c) — Decoded control characters in ngx.var.uri are written unescaped into error-log lines, enabling log forging
 - [ ] **[F40](#f40)** · `configs/lua/cfm_clearance.lua:17` · _correctness_ (axis c) — cfm_clearance normalize_host mangles IPv6-literal hosts, weakening clearance host-binding and diverging from the Go normalizer
@@ -901,7 +901,7 @@ Config-only Lua change. Branch `claude/edge-audit-c2-host-boundary`.
 <a id="f37"></a>
 ### F37 — detect_smuggling_cl cannot see duplicate Content-Length/Transfer-Encoding headers (table collapsed by header_string)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `type()=='table'` duplicate-header guard added (mirrors `detect_range_abuse`)
 - **Severity:** low · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:2790`
 
@@ -911,7 +911,24 @@ Config-only Lua change. Branch `claude/edge-audit-c2-host-boundary`.
 
 **Suggested fix.** Before header_string(), check type(headers[...])=='table' and return MULTI_CL/MULTI_TE directly (mirror detect_range_abuse); fix the comment.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Kept the RAW header values (`cl_raw`/`te_raw`) alongside the `header_string()`-collapsed
+`cl`/`te`, and added `if type(cl_raw)=='table' then return "MULTI_CL"` / `if type(te_raw)=='table' then
+return "MULTI_TE"` — exactly mirroring `detect_range_abuse`'s `type(r)=='table' → MULTI_RANGE_HEADER`
+guard. `ngx.req.get_headers()` returns duplicate header lines as a Lua array (not comma-joined), which
+`header_string()` collapses to the first element, so the comma-based `MULTI_*` checks could never see
+the second value. **Ordering preserved:** `CL_AND_TE` (both CL and TE present — the strongest signal)
+is still checked first, so a duplicated CL alongside a TE still returns `CL_AND_TE`, not `MULTI_CL`;
+the table guards sit just after it, ahead of the single-value comma/`CL_MALFORMED` checks. Corrected the
+header doc-comment's false "nginx/angie joins duplicate headers with ', '" claim (it does not — duplicates
+arrive as an array). Impact was blunted in practice because nginx often pre-rejects a duplicate
+Content-Length before Lua runs, but the two header detectors were inconsistent and the comment was wrong.
+Rule 608 is at `challenge`; no FP/tier concern — duplicate CL/TE lines are an unambiguous smuggling
+primitive (no legitimate client sends two `Content-Length` lines). Test `cfm_waf_smuggling_dup_test.lua`
+(new, full `waf.check` at block): duplicate-CL and duplicate-TE arrays now fire `MULTI_CL`/`MULTI_TE`;
+a duplicated CL + a TE still returns `CL_AND_TE` (priority); single-value regressions (`CL_AND_TE`,
+inline-comma `MULTI_CL`, `CL_MALFORMED`, chunked-not-last `MULTI_TE`) unchanged; valid single/chained
+values stay clean. **Verified to FAIL** against the pre-fix body (the 2 duplicate-array cases). Config-only
+Lua change. Branch `claude/edge-audit-smuggling-dup-headers`.
 
 ---
 

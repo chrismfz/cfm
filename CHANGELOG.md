@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **WAF smuggling detector now sees duplicate Content-Length / Transfer-Encoding
+  header lines (F37).** `detect_smuggling_cl` (rule 608 `WAF_HTTP_SMUGGLING`,
+  challenge) derived its `cl`/`te` values via `header_string()`, which collapses a
+  duplicate-header array to its first element. But `ngx.req.get_headers()` returns
+  duplicate header lines as a Lua **array** (`{"5","10"}`), not a comma-joined
+  string, so the comma-based `MULTI_CL`/`MULTI_TE` checks never saw the second
+  value — two `Content-Length` (or two `Transfer-Encoding`) lines were silently
+  missed. Added a `type(...)=='table'` guard that flags the duplicate directly
+  (mirroring `detect_range_abuse`'s `MULTI_RANGE_HEADER`), while keeping
+  `CL_AND_TE` as the top-priority signal. The misleading "nginx joins duplicates
+  with ', '" comment is corrected. (nginx often pre-rejects duplicate
+  Content-Length, so the practical exposure was limited, but the two detectors
+  were inconsistent and the comment was wrong.) Found by the 2026-07 edge Lua
+  audit (F37, low).
 - **WAF XSS detector now tolerates whitespace before `=` and covers many more
   event handlers (F33).** `detect_xss` (rule 302 `WAF_XSS`, challenge) checked
   only four handlers and required the name immediately followed by `=`
