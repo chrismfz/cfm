@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**42 / 55 fixed.** Grouped by severity; each links to its detail section.
+**43 / 56 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -73,9 +73,9 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F27](#f27)** · `internal/sslcollector/socketapi.go:312` · _regression_ (axis b) — sslcollector socket restart race: old listener's Close() unlinks the freshly-bound new socket, breaking cert delivery until next restart
 - [x] **[F28](#f28)** · `internal/sslcollector/lifecycle.go:113` · _correctness_ (axis c) — sslcollector socket server that exits on its own (Serve error) is never restarted
 
-### Low (28)
+### Low (29)
 
-- [ ] **[F30](#f30)** · `configs/lua/cfm_waf.lua:617` · _waf-bypass_ (axis a/c) — URI+args scan capped at 2048 bytes lets query-string padding push a payload past traversal/RCE/XSS/SQLi URI inspection
+- [~] **[F30](#f30)** · `configs/lua/cfm_waf.lua:617` · _waf-bypass_ (axis a/c) — URI+args scan capped at 2048 bytes lets query-string padding push a payload past traversal/RCE/XSS/SQLi URI inspection _(PARKED: a safe window-raise is blocked on F62 — see F30 detail)_
 - [x] **[F31](#f31)** · `configs/lua/cfm_waf.lua:1621` · _perf_ (axis b) — should_push dedup key embeds the volatile score/tag suffix of the reason, defeating the (ip,reason) cooldown for scored/burst rules
 - [x] **[F32](#f32)** · `configs/lua/cfm_waf_excl.lua:99` · _perf_ (axis b) — matches_rule recompiles the glob Lua pattern per request per glob entry (no precompile like Go)
 - [x] **[F33](#f33)** · `configs/lua/cfm_waf_detectors.lua:488` · _waf-bypass_ (axis a/c) — XSS event-handler checks require `=` immediately after the handler name, so whitespace (`onerror =`) evades onerror/onload/onmouseover/onfocus
@@ -103,6 +103,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F58](#f58)** · `configs/lua/cfm_waf_detectors.lua:1117` · _perf_ (axis b) — args-only normalize(cap(args)) recomputed by ~6 detectors per request instead of being memoized once
 - [x] **[F59](#f59)** · `configs/lua/cfm_waf_detectors.lua:2423` · _perf_ (axis b) — Five RCE-marker detectors each rebuild lower(cap(body)) + concat on every POST body
 - [x] **[F60](#f60)** · `configs/lua/cfm_origin_ka.lua:172` · _correctness_ (axis c) — cfm_origin_ka emits a false "OpenResty too old / HTTPS pooling off" NOTICE and burns the one-shot warn flag when $host is empty
+- [x] **[F62](#f62)** · `configs/lua/cfm_waf_util.lua:293` · _dos_ (axis b/c) — strip_sql_comments `/%*.-%*/` gsub is O(n²) on crafted `/*a/*a…` input; runs up to 3×/request on the attacker-controlled URI+args scan surface (found verifying F30)
 
 ### Info (1)
 
@@ -667,7 +668,7 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 <a id="f30"></a>
 ### F30 — URI+args scan capped at 2048 bytes lets query-string padding push a payload past traversal/RCE/XSS/SQLi URI inspection
 
-- **Status:** ☐ open
+- **Status:** ⧗ PARKED — a safe window-raise is blocked on F62 (SQL-comment-strip ReDoS)
 - **Severity:** low · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf.lua:617`
 
@@ -677,7 +678,9 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 
 **Suggested fix.** Raise max_scan_len to the realistic max URI length, or scan uri and args in separate windows.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**PARKED — blocked on F62.** Verifying F30 showed both halves of the suggested fix are unsafe as-is: they trip a pre-existing **O(n²) ReDoS** in `strip_sql_comments` (now **F62**), which runs up to 3×/request on this same URI+args scan surface. Raising `max_scan_len` to the realistic request-line max is exactly what detonates it: `large_client_header_buffers 8 64k` (both `openresty.conf` and `angie.conf`) allows a 64KB request line, and the strip is ~5.4s/call at 64KB (measured). Even the "separate windows" variant roughly doubles the scanned bytes and so ~4×'s the quadratic. So a safe F30 fix must wait until F62 linearizes the strip; **then** the intended fix (cap uri and args independently + raise the request-line scan cap to cover the shipped header-buffer size) becomes safe. Note the padding attack is bounded defence-in-depth (the WAF is one layer; the payload still has to reach a vulnerable backend), so parking it behind the higher-severity ReDoS fix is the right order.
+
+**Fix landed:** _(pending — resumes after F62 lands)_
 
 ---
 
@@ -1462,6 +1465,52 @@ request still pools; and — after a forced 3-arg runtime demotion — the *genu
 NOTICE still fires, proving the one-shot latch was **not** consumed by the empty-host request. Two
 assertions (the false-NOTICE suppression and the latch-intact discriminator) **verified to FAIL**
 against the pre-fix `elseif`. Config-only Lua change. Branch `claude/edge-audit-origin-ka-host`.
+
+---
+
+<a id="f62"></a>
+### F62 — strip_sql_comments block-comment gsub is O(n²) on crafted input; a CPU-DoS amplifier on the URI+args scan surface (found verifying F30)
+
+- **Status:** ☑ done — block-comment removal rewritten as a single-pass O(n) scan
+- **Severity:** low · **Category:** dos (axis b/c) · **Verify:** CONFIRMED (measured)
+- **Location:** `configs/lua/cfm_waf_util.lua:293`
+
+**What & why.** `strip_sql_comments(s)` did `s:gsub("/%*.-%*/", "")` to remove `/* … */` SQL block
+comments before the SQLi detectors scan. The lazy `.-` makes that gsub **O(n²)** on input with many
+`/*` starts and no closing `*/` (e.g. a query string `?x=/*a/*a/*a…`): every unmatched `/*` lazily
+re-scans to end-of-string, then gsub advances one byte and repeats. This runs on the
+**attacker-controlled** URI+args scan surface (`scan_str(uri,args)` → `sqli_scan_strings` →
+`strip_sql_comments`) and — at the stock `detectors.conf` — up to **3× per request**, because
+`rule_sqli` (challenge), `rule_sqli_blind_lexical` (logonly) and `rule_sqli_union_variant` (logonly)
+are all non-disabled and each recomputes it. So any client with a query string can burn pure Lua CPU
+on the WAF hot path. This was surfaced while verifying **F30** (whose suggested "raise the scan window"
+fix would have detonated the quadratic — see F30).
+
+**Repro / cost (measured, LuaJIT).** `strip_sql_comments(("/*a"):rep(n))` — pathological, no `*/`:
+2KB → **5.29 ms**, 8KB → **85 ms**, 16KB → **349 ms**, 32KB → **1.34 s**, 64KB → **5.44 s** per call
+(clean O(n²): each doubling ≈ ×4). At the current 2048 scan cap that is ~5 ms × 3 rules ≈ **15 ms of
+CPU per request** for a one-line query — a real amplifier behind the rate-limit/autoblock layers, and a
+hard blocker for raising the scan window (`large_client_header_buffers 8 64k` allows a 64KB request
+line → seconds/req).
+
+**Suggested fix.** Remove block comments with a linear scan (find `/*`, jump to the next `*/`, repeat)
+instead of the backtracking lazy gsub — Lua patterns can't express the linear "unrolled loop" C-comment
+regex (no group quantifiers), so a manual scan is the idiom.
+
+**Fix landed:** Replaced the `/%*.-%*/` gsub with a single-pass O(n) scan in `strip_sql_comments`
+(`cfm_waf_util.lua`): walk `/*` → next `*/` → resume past it; an **unterminated** `/*` (no `*/`) is kept
+verbatim, exactly as the lazy pattern left it (it couldn't match without a close). The `--` line-comment
+gsub (`%-%-[^\n]*`, already linear) is unchanged, and a `find("/*")` guard keeps the common no-comment
+case allocation-free (and now skips a whole gsub pass — a small win for normal traffic too). **Behaviour
+is byte-for-byte identical** to the old stripper — proven by `cfm_waf_sqlcomment_strip_test.lua`, which
+fuzzes **20 000** deterministic inputs over `{ / * - \n space a b c 1 }` against a verbatim copy of the
+original gsub, plus 20 hand-picked edge cases (nested `/*A/*B*/C*/` → `C*/`; `/*/`; adjacent
+`/*A*//*B*/`; `--` inside `/* */` and vice-versa; orphan `*/`; the `un/**/ion se/**/lect` bypass this
+exists for). **Measured after:** 2KB **0.023 ms**, 8KB **0.076 ms**, 64KB **0.617 ms** (linear;
+~230–8800× faster), realistic input 0.00066 ms. The test's O(n) guard (64KB strips in <2 s) is
+**verified to FAIL** (5.47 s) against a revert to the gsub. Config-only Lua change. Branch
+`claude/edge-audit-sqlcomment-redos`. **Unblocks F30** — a safe scan-window raise can follow now that
+the strip is linear.
 
 ---
 
