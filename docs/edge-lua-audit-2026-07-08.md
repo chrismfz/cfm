@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**34 / 55 fixed.** Grouped by severity; each links to its detail section.
+**35 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -80,7 +80,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F32](#f32)** · `configs/lua/cfm_waf_excl.lua:99` · _perf_ (axis b) — matches_rule recompiles the glob Lua pattern per request per glob entry (no precompile like Go)
 - [ ] **[F33](#f33)** · `configs/lua/cfm_waf_detectors.lua:488` · _waf-bypass_ (axis a/c) — XSS event-handler checks require `=` immediately after the handler name, so whitespace (`onerror =`) evades onerror/onload/onmouseover/onfocus
 - [x] **[F34](#f34)** · `configs/lua/cfm_waf_detectors.lua:1870` · _waf-bypass_ (axis a/c) — CRLF raw-newline branch matches header names case-sensitively, missing canonically-capitalized injections (rule 605)
-- [ ] **[F35](#f35)** · `configs/lua/cfm_waf_detectors.lua:3148` · _waf-bypass_ (axis a/c) — Log4Shell header precheck misses canonical uppercase %7B URL-encoding of ${
+- [x] **[F35](#f35)** · `configs/lua/cfm_waf_detectors.lua:3148` · _waf-bypass_ (axis a/c) — Log4Shell header precheck misses canonical uppercase %7B URL-encoding of ${
 - [ ] **[F36](#f36)** · `configs/lua/cfm_waf_detectors.lua:2688` · _fp_ (axis a) — C2 tunnel host list uses unbounded substring match; ix.io/ matches matrix.io/
 - [ ] **[F37](#f37)** · `configs/lua/cfm_waf_detectors.lua:2790` · _waf-bypass_ (axis a/c) — detect_smuggling_cl cannot see duplicate Content-Length/Transfer-Encoding headers (table collapsed by header_string)
 - [ ] **[F38](#f38)** · `configs/lua/cfm.lua:924` · _correctness_ (axis c) — Decision cache key truncates the URI to 64 bytes and omits the query string, so distinct URIs sharing a 64-char prefix share one cached verdict
@@ -784,7 +784,7 @@ the case-sensitivity gap. Config-only Lua change. Branch `claude/edge-audit-crlf
 <a id="f35"></a>
 ### F35 — Log4Shell header precheck misses canonical uppercase %7B URL-encoding of ${
 
-- **Status:** ☐ open
+- **Status:** ☑ done — uppercase `%24%7B` needle added to the per-header precheck
 - **Severity:** low · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:3148`
 
@@ -794,7 +794,32 @@ the case-sensitivity gap. Config-only Lua change. Branch `claude/edge-audit-crlf
 
 **Suggested fix.** Case-fold the raw value before the precheck, or drop the encoded precheck and url_decode_once whenever a '%' is present.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Made the per-header precheck gate consistent with its own decoder. The gate decides
+whether to run `lower(url_decode_once(raw))` + the `${…}`-lookup match; that match flags *anything*
+that one-pass-decodes to `${jndi:` (etc.), but the gate admitted only the fully-encoded `%24%7b`
+(lowercase-hex) — so it missed both the uppercase full form `%24%7B` (F35's confirmed repro, curl's
+default) **and** the partial single-encodings `%24{` (`$` enc, `{` literal), `$%7b`, `$%7B` that
+one-pass-decode to `${jndi:` just the same. (The adversarial review corrected an earlier, narrower
+"add the uppercase needle" cut of this fix: its "two literals cover the whole single-encoded surface"
+claim was inaccurate, and those partials carry the **identical** realism to the uppercase target —
+all need exactly one downstream url-decode before Log4j logs the header — so dismissing them while
+shipping the uppercase fix was inconsistent.) The gate now admits all six single-`%xx`-encoded
+adjacency forms of `${` via four plain substring needles: `${` (both literal), `%24%7` (both encoded;
+covers `%24%7b`/`%24%7B`), `%24{` (`$` enc, `{` literal), `$%7` (`$` literal, `{` enc; covers
+`$%7b`/`$%7B`). Kept as `find(...,1,true)` substring scans (no per-header lowercase allocation on the
+hot path, preserving the precheck's alloc-free design), and **FP-neutral**: the decode+match stays the
+sole hit-decider, so the intentionally-loose needles (`%24%7c…`, `$%70…`) that gate-pass but don't
+decode to a lookup add no false positive. `url_decode_once` (`cfm_waf_util.lua`) uses `%x` (either hex
+case), so decoding was never the bug — only the gate. No tier decision needed: the decoded payload is
+an unambiguous `${jndi:` lookup (not benign prose like F34), and rule 328 is already `logonly`.
+Genuinely out of scope (decoder can't reach them in one pass): double-encoded `%2524%257b…` and IIS
+`%u007b` — both remain the documented args/body-`normalize` asymmetry. Test
+`cfm_waf_log4shell_hexcase_test.lua` (new, full `waf.check` path at block): uppercase `%24%7Bjndi`,
+mixed-inner-case, and the three partial forms now fire; lowercase-hex and literal `${jndi` regressions
+still fire; FP-negatives (normal UA, encoded `${foo}` that isn't a lookup, stray `%24`/`7B`, and
+loose-needle `%24%7C…`/`$%70…` that gate-pass but decode to non-lookups) stay clean. **Verified to
+FAIL** against the pre-fix gate (2 uppercase cases) and against the narrower first-cut gate (the 3
+partial cases). Config-only Lua change. Branch `claude/edge-audit-log4shell-hexcase`.
 
 ---
 

@@ -3265,7 +3265,26 @@ function _M.detect_log4shell(args, body, headers, _norm_ab)
   if type(headers) == "table" then
     for hname, hval in pairs(headers) do
       local raw = header_string(hval)
-      if raw ~= "" and (raw:find("${", 1, true) or raw:find("%24%7b", 1, true)) then
+      -- Precheck for a "${" that url_decode_once could reveal, in EVERY
+      -- single-`%xx`-encoded adjacency form, so the gate stays consistent with
+      -- the decode+match below (which flags anything that one-pass-decodes to a
+      -- ${...} lookup). `$` is literal or %24; `{` is literal, %7b or %7B
+      -- (url_decode_once handles either hex case) — six raw forms, covered by
+      -- four plain needles (F35):
+      --   ${      both literal
+      --   %24%7   both encoded          (matches %24%7b / %24%7B)
+      --   %24{    $ encoded, { literal
+      --   $%7     $ literal, { encoded  (matches $%7b / $%7B)
+      -- Plain substring finds (no per-header lowercase allocation on the hot
+      -- path). The decode+match still decides the actual hit, so the loose
+      -- needles (%24%7c…, $%70…) that gate-pass but don't decode to a lookup add
+      -- NO false positive. Double-encoded (%2524%257b…) and %u007b forms don't
+      -- one-pass-decode to "${" and remain the documented args/body-normalize
+      -- asymmetry.
+      if raw ~= "" and (raw:find("${", 1, true)
+                        or raw:find("%24%7", 1, true)
+                        or raw:find("%24{", 1, true)
+                        or raw:find("$%7", 1, true)) then
         local h = lower(url_decode_once(raw))
         if     has(h, "${jndi:")   then return "JNDI:HDR:"   .. tostring(hname):sub(1, 32)
         elseif has(h, "${${")      then return "NESTED:HDR:" .. tostring(hname):sub(1, 32)
