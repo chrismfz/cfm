@@ -310,7 +310,44 @@ local SH = ngx.shared.cfm_decisions
 -- UTILS
 -- ─────────────────────────────────────────────────────────────────────────────
 
-local function log_route(level, msg) ngx.log(level or ngx.WARN, "[cfm] ", msg) end
+-- Neutralise ASCII control characters (NUL, C0 controls incl. CR/LF, DEL)
+-- before they reach a log line. The live vector is ngx.var.uri, which nginx
+-- serves percent-DECODED, so a request path with %0A/%0D decodes to a literal
+-- newline inside `uri`; ngx.log does not sanitize, so an unauthenticated client
+-- could otherwise forge extra "[cfm] ..." lines into error.log (F39).
+-- (Sanitising $host/scope too is defence-in-depth: nginx's validate_host
+-- already rejects control bytes in $host and scope is a controlled enum, but
+-- it's cheap and keeps every logged value safe if some future value isn't
+-- pre-validated.) Hex-escaping keeps the byte visible for forensics without
+-- breaking one-line-per-event parsing. The find-first guard keeps the hot
+-- path allocation-free for the normal (clean) case.
+local function log_sanitize(s)
+  if type(s) ~= "string" then return s end
+  if s:find("[%z\1-\31\127]") then
+    s = s:gsub("[%z\1-\31\127]", function(c) return string.format("\\x%02X", c:byte()) end)
+  end
+  return s
+end
+-- log_route is the hot path (one call per allow/challenge/block decision); the
+-- caller pre-concatenates `msg`, so a single sanitize of the whole string is
+-- the cheapest complete neutralisation (no per-arg table churn).
+local function log_route(level, msg) ngx.log(level or ngx.WARN, "[cfm] ", log_sanitize(msg)) end
+-- log_ev: ngx.log that neutralises control chars in EVERY argument, for the few
+-- multi-arg direct-ngx.log sites (cold error paths) that log user-controlled
+-- fields (host/uri/scope) without pre-concatenating — so those call sites can't
+-- forge a "[cfm] ..." line either (F39). Unlike log_route it does NOT prepend
+-- "[cfm] " — callers put the prefix in their first argument. ngx.log
+-- concatenates its varargs; pre-sanitising each keeps a clean message
+-- byte-identical.
+local function log_ev(level, ...)
+  local n = select("#", ...)
+  local parts = {}
+  for i = 1, n do
+    local v = select(i, ...)
+    parts[i] = log_sanitize(type(v) == "string" and v or tostring(v))
+  end
+  return ngx.log(level, table.concat(parts))
+end
 local function esc(s) return ngx.escape_uri(s or "") end
 
 local function with_query_arg(u, k, v)
@@ -915,7 +952,7 @@ local function refresh_clearance_cookie(cookie_val, ip, host, scope)
       out_val = fresh
     elseif mint_err and not ngx.ctx.cfm_clearance_mint_err_logged then
       ngx.ctx.cfm_clearance_mint_err_logged = true
-      ngx.log(ngx.WARN, "[cfm] clearance re-mint failed err=", tostring(mint_err),
+      log_ev(ngx.WARN, "[cfm] clearance re-mint failed err=", tostring(mint_err),
         " host=", tostring(host or "-"), " scope=", tostring(scope or "-"),
         "; falling back to original cookie value")
     end
@@ -932,7 +969,7 @@ local function validate_clearance_token(token, ip, host, scope)
     reason = "module_error"
     if not ngx.ctx.cfm_clearance_error_logged then
       ngx.ctx.cfm_clearance_error_logged = true
-      ngx.log(ngx.ERR,
+      log_ev(ngx.ERR,
         "[cfm] clearance validator runtime error",
         " module=cfm_clearance",
         " err=", tostring(validate_err),
@@ -1649,9 +1686,12 @@ local ok, err = xpcall(main, debug.traceback)
 if not ok then
   local req_id = ngx.var.request_id or "-"
   local client = ngx.var.remote_addr or "-"
+  -- host/uri are client-controlled and ngx.var.uri is percent-decoded (can
+  -- carry literal CR/LF); log_ev() neutralises control chars in every arg to
+  -- prevent log forging (F39).
   local host_v = ngx.var.host or "-"
   local uri_v = ngx.var.request_uri or ngx.var.uri or "-"
-  ngx.log(ngx.ERR, "[cfm] request_failure",
+  log_ev(ngx.ERR, "[cfm] request_failure",
     " request_id=", req_id,
     " client=", client,
     " host=", host_v,

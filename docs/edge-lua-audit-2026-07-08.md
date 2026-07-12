@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**32 / 55 fixed.** Grouped by severity; each links to its detail section.
+**33 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -84,7 +84,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F36](#f36)** · `configs/lua/cfm_waf_detectors.lua:2688` · _fp_ (axis a) — C2 tunnel host list uses unbounded substring match; ix.io/ matches matrix.io/
 - [ ] **[F37](#f37)** · `configs/lua/cfm_waf_detectors.lua:2790` · _waf-bypass_ (axis a/c) — detect_smuggling_cl cannot see duplicate Content-Length/Transfer-Encoding headers (table collapsed by header_string)
 - [ ] **[F38](#f38)** · `configs/lua/cfm.lua:924` · _correctness_ (axis c) — Decision cache key truncates the URI to 64 bytes and omits the query string, so distinct URIs sharing a 64-char prefix share one cached verdict
-- [ ] **[F39](#f39)** · `configs/lua/cfm.lua:1274` · _security_ (axis c) — Decoded control characters in ngx.var.uri are written unescaped into error-log lines, enabling log forging
+- [x] **[F39](#f39)** · `configs/lua/cfm.lua:1274` · _security_ (axis c) — Decoded control characters in ngx.var.uri are written unescaped into error-log lines, enabling log forging
 - [ ] **[F40](#f40)** · `configs/lua/cfm_clearance.lua:17` · _correctness_ (axis c) — cfm_clearance normalize_host mangles IPv6-literal hosts, weakening clearance host-binding and diverging from the Go normalizer
 - [ ] **[F41](#f41)** · `configs/lua/cfm_panel.lua:851` · _security_ (axis c) — Challenge scope (panel_scope) is derived from client-controlled X-CFM-Panel-Port/X-Forwarded-Port, defeating per-port clearance isolation
 - [x] **[F43](#f43)** · `configs/lua/sslcollector.lua:739` · _dos_ (axis b/c) — sslcollector emits an unbounded per-handshake WARN on every SNI cache-miss (attacker-driven log amplification)
@@ -834,7 +834,7 @@ caches the rebuild, which is the finding's suggested fix.) Existing `cfm_waf_exc
 <a id="f39"></a>
 ### F39 — Decoded control characters in ngx.var.uri are written unescaped into error-log lines, enabling log forging
 
-- **Status:** ☐ open
+- **Status:** ☑ done — control-char neutraliser applied to all user-controlled log values
 - **Severity:** low · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm.lua:1274`
 
@@ -844,7 +844,31 @@ caches the rebuild, which is the finding's suggested fix.) Existing `cfm_waf_exc
 
 **Suggested fix.** Sanitize control chars before logging user-controlled uri/values (or log the raw-encoded ngx.var.request_uri) at all call sites.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Added `log_sanitize(s)` (hex-escapes NUL, C0 controls incl. CR/LF, and DEL —
+`[%z\1-\31\127]` → `\xNN`; a `find`-first guard keeps the clean hot path allocation-free). The full
+call-site audit found the vulnerable values are the **decoded** `ngx.var.uri` local and the client
+`Host` (`ngx.var.request_uri` is percent-encoded and nginx rejects raw control chars in the request
+line, so the `cfm_panel_tunnel.lua` request_uri logs are not vulnerable — left untouched to stay
+focused). Coverage: the hot `log_route()` now sanitizes its whole pre-concatenated `msg` (covers the
+8 allow/challenge/block/throttle/bypass sites centrally, cheapest on the per-request path); a new
+`log_ev(level, ...)` sanitizes **every** argument for the three multi-arg direct-`ngx.log` sites that
+log user-controlled fields without pre-concatenating — clearance re-mint failure (`host`/`scope`),
+clearance validator runtime error (`host`/`uri`/`scope`), and the top-level `request_failure` handler
+(`host`/`uri`). The two remaining direct `ngx.log` calls (module-load / flush-schedule errors) log
+only internal error strings — no user input — and were left as-is. Test `cfm_log_sanitize_test.lua`
+(new) **extracts the real `log_sanitize` and `log_ev` out of cfm.lua and `load()`s them** (cfm.lua is
+an `access_by_lua_file` and runs `main()` on require, so it can't be required — extraction tests the
+production functions with zero hand-copy drift): a `%0A`-forged line is neutralised to `\x0A`, CR/NUL/
+DEL escaped, `log_ev` neutralises a newline in a middle argument, and clean messages are byte-unchanged.
+**Verified to FAIL** two ways against the real file — `log_sanitize` stubbed to a no-op, and `log_ev`
+stubbed to pass args through unsanitized. Config-only Lua change. Branch `claude/edge-audit-log-forge`.
+Adversarial review: SHIP, no MUST-FIX. Scope confirmed cfm.lua-only is correct — a repo-wide grep shows
+cfm.lua is the **only** file that logs the decoded `ngx.var.uri` (the sole live forge vector); sibling
+logs in `cfm_panel.lua`/`cfm_panel_tunnel.lua`/`sslcollector.lua` emit `ngx.var.request_uri` (percent-
+encoded, newline-safe) or the nginx-validated `$host`, not the decoded uri, so they are not vectors.
+_Forward watch:_ if any of those files ever starts logging `ngx.var.uri`, it needs the same treatment.
+Two review NITs folded (comment accuracy on the $host defence-in-depth framing; a note that `log_ev`,
+unlike `log_route`, does not auto-prepend the `[cfm] ` prefix).
 
 ---
 
