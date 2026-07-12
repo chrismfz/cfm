@@ -10,12 +10,21 @@
 -- Lazy refresh:
 --   * Per request we check ngx.now() against _last_refresh_at. If the
 --     delta is below REFRESH_INTERVAL_SEC, no work is done.
---   * Otherwise we stat the file (mtime via io.open + content read) and
---     re-parse only if the on-disk content differs. The file is small
---     (handful of rules); the read itself is cheap.
+--   * Otherwise we re-read the file and re-parse only if the on-disk CONTENT
+--     differs (a full read + string-compare — NOT an mtime stat; Lua has no
+--     stat without lfs). The file is small (a handful of rules).
+--   * The read is kept off the request's access phase: the first load per worker
+--     is synchronous (so the very first request sees any rules), and every later
+--     refresh runs in a background ngx.timer.at(0) (the cfm_h3 pattern) while we
+--     serve the current in-memory rules. The one request that crosses the interval
+--     boundary serves under the pre-refresh ruleset (that is the point of the
+--     fix) — safe here because rule propagation is operator-driven and already
+--     tolerated multi-second lag, and expiries are enforced per-request in check()
+--     independently of the refresh. Convergence latency is ~REFRESH_INTERVAL_SEC
+--     plus the timer's dispatch delay (bounded, self-healing — not an exact bound).
 --
 -- Per-worker state: each nginx worker has its own _rules table, populated
--- independently. Convergence latency = REFRESH_INTERVAL_SEC across the
+-- independently. Convergence latency is ~REFRESH_INTERVAL_SEC across the
 -- pool, which is acceptable for an operator-driven emergency surface.
 
 local _M = {}
@@ -56,6 +65,7 @@ local _last_refresh_at = 0
 local _last_content = ""
 local _last_bad_content = ""  -- last content that failed to parse/validate (log de-spam)
 local _rules = {}  -- normalized UA → { action, expires_at_unix, reason, created_by }
+local _refresh_in_progress = false  -- dedupes the async refresh timer (F48)
 
 -- Bot markers — keep aligned with internal/webdetector/ua_norm.go.
 local _BOT_MARKERS = {
@@ -114,13 +124,11 @@ function _M.normalize_ua(ua)
   return "mozilla"
 end
 
-local function refresh_if_needed()
-  local now = ngx.now()
-  if (now - _last_refresh_at) < REFRESH_INTERVAL_SEC then
-    return
-  end
-  _last_refresh_at = now
-
+-- Read + parse the rule file, updating _rules / _last_content. No timing logic:
+-- callers own _last_refresh_at. Runs synchronously on cold start, and inside the
+-- async refresh timer thereafter (F48). Content-compare (NOT mtime) short-circuits
+-- when the file is unchanged.
+local function do_refresh()
   local f = io.open(PATH, "r")
   if not f then
     -- File missing → treat as no rules. Drop our cache.
@@ -198,6 +206,50 @@ local function refresh_if_needed()
   end
   _rules = new_rules
   _last_content = content  -- commit cache only after successful parse
+end
+
+-- Called on every request from check(). The FIRST load per worker is synchronous
+-- so the very first request is checked against any emergency rules; every LATER
+-- refresh is scheduled off the request path via ngx.timer.at(0) (the cfm_h3
+-- pattern), so the periodic file read no longer blocks the access phase. We keep
+-- serving the current in-memory rules meanwhile (the boundary request serves the
+-- pre-refresh ruleset); convergence latency is ~REFRESH_INTERVAL_SEC plus timer
+-- dispatch delay across the worker pool. F48.
+local function refresh_if_needed()
+  local now = ngx.now()
+  if (now - _last_refresh_at) < REFRESH_INTERVAL_SEC then
+    return
+  end
+
+  if _last_refresh_at == 0 then
+    -- Cold start: load synchronously (a one-time per-worker cost).
+    _last_refresh_at = now
+    do_refresh()
+    return
+  end
+
+  -- Steady state: refresh in the background. The dedupe flag keeps concurrent
+  -- requests in this worker from stacking timers.
+  if _refresh_in_progress then return end
+  _refresh_in_progress = true
+  local ok, terr = ngx.timer.at(0, function(premature)
+    -- Clear the flag even if the body raises, or the worker would never refresh
+    -- again until restart. Advance _last_refresh_at BEFORE the read so a failing
+    -- read doesn't retry on every request.
+    local pok, perr = pcall(function()
+      if premature then return end
+      _last_refresh_at = ngx.now()
+      do_refresh()
+    end)
+    _refresh_in_progress = false
+    if not pok then
+      ngx.log(ngx.ERR, "[cfm_ua_emergency] refresh handler raised: ", tostring(perr))
+    end
+  end)
+  if not ok then
+    _refresh_in_progress = false
+    ngx.log(ngx.WARN, "[cfm_ua_emergency] could not schedule refresh timer: ", tostring(terr))
+  end
 end
 
 -- check returns { action = "block"|"throttle", expires_at = unix, ... }
