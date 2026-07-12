@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**39 / 55 fixed.** Grouped by severity; each links to its detail section.
+**40 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -85,7 +85,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F37](#f37)** · `configs/lua/cfm_waf_detectors.lua:2790` · _waf-bypass_ (axis a/c) — detect_smuggling_cl cannot see duplicate Content-Length/Transfer-Encoding headers (table collapsed by header_string)
 - [ ] **[F38](#f38)** · `configs/lua/cfm.lua:924` · _correctness_ (axis c) — Decision cache key truncates the URI to 64 bytes and omits the query string, so distinct URIs sharing a 64-char prefix share one cached verdict
 - [x] **[F39](#f39)** · `configs/lua/cfm.lua:1274` · _security_ (axis c) — Decoded control characters in ngx.var.uri are written unescaped into error-log lines, enabling log forging
-- [ ] **[F40](#f40)** · `configs/lua/cfm_clearance.lua:17` · _correctness_ (axis c) — cfm_clearance normalize_host mangles IPv6-literal hosts, weakening clearance host-binding and diverging from the Go normalizer
+- [x] **[F40](#f40)** · `configs/lua/cfm_clearance.lua:17` · _correctness_ (axis c) — cfm_clearance normalize_host mangles IPv6-literal hosts, weakening clearance host-binding and diverging from the Go normalizer
 - [ ] **[F41](#f41)** · `configs/lua/cfm_panel.lua:851` · _security_ (axis c) — Challenge scope (panel_scope) is derived from client-controlled X-CFM-Panel-Port/X-Forwarded-Port, defeating per-port clearance isolation
 - [x] **[F43](#f43)** · `configs/lua/sslcollector.lua:739` · _dos_ (axis b/c) — sslcollector emits an unbounded per-handshake WARN on every SNI cache-miss (attacker-driven log amplification)
 - [ ] **[F44](#f44)** · `configs/openresty.conf:130` · _security_ (axis c) — Client-controlled X-Forwarded-Proto forwarded verbatim to origin ($cf_xfp) in DNAT-direct mode
@@ -993,7 +993,7 @@ unlike `log_route`, does not auto-prepend the `[cfm] ` prefix).
 <a id="f40"></a>
 ### F40 — cfm_clearance normalize_host mangles IPv6-literal hosts, weakening clearance host-binding and diverging from the Go normalizer
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `normalize_host` rewritten to mirror Go's `normalizeClearanceHost`
 - **Severity:** low · **Category:** correctness (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_clearance.lua:17`
 
@@ -1003,7 +1003,23 @@ unlike `log_route`, does not auto-prepend the `[cfm] ` prefix).
 
 **Suggested fix.** Match Go semantics: unwrap [ ... ] for IPv6 literals and only strip a trailing port when the remainder is not an unbracketed IPv6 address.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Rewrote `normalize_host` to be a faithful Lua port of Go's `normalizeClearanceHost`
+(`internal/webdetector/challenge_server.go:1700`): lowercase + trim → `TrimSuffix(".")` → if the host
+starts with `[`, unwrap to the first `]` (drops brackets AND any `:port` — bracketed literal); else count
+colons — exactly one is `host:port` and the port is stripped (mirrors `net.SplitHostPort`'s single-colon
+case), while **≥2 colons is an unbracketed IPv6 literal and is left intact** → `TrimSuffix(".")` again.
+The old `h:gsub(":%d+$","")` deleted the last hextet of an unbracketed literal (`2001:db8::1`/`::2` →
+`2001:db8:`, colliding; `::1` → `:`) and never unwrapped brackets. Verified the Lua output equals Go on
+every case in Go's `TestNormalizeClearanceHost` (`Example.COM.`, `example.com:443`, `[2001:db8::1]:8443`,
+`[2001:DB8::1].`, `MiXeD.Example.com:80`), including the dot-strip-before-unwrap ordering. Not a full
+bypass (validate() re-normalizes both the token host and the request host with the same normalizer, so a
+mismatch fails closed) — the bug weakened host binding (adjacent IPv6 hosts share a clearance) and
+diverged Lua from Go, which could also cause a spurious `host_mismatch` for a legit IPv6 host once the two
+normalizers disagree. Test `cfm_clearance_host_test.lua` (new): the five Go cases copied **verbatim**
+(kept in sync so server-minted and Lua-validated hosts normalize identically), plus F40 collision checks
+(`2001:db8::1` ≠ `2001:db8::2`, bracketed and unbracketed) and ordinary-host regressions. **Verified to
+FAIL** (7 assertions) against the pre-fix normalizer. Config-only Lua change; Go side untouched (it is the
+reference). Branch `claude/edge-audit-clearance-ipv6-host`.
 
 ---
 
