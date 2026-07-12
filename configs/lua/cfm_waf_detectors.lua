@@ -869,13 +869,19 @@ end
 -- Goal: avoid challenging Jetpack while keeping generic XML-RPC protection.
 local function is_known_legit_xmlrpc(uri, args, headers, body)
   uri = lower(uri or "")
-  args = normalize(cap(args or "", CFG.max_scan_len))
-  body = normalize(cap(body or "", CFG.max_scan_len))
-  headers = headers or {}
 
+  -- F24: gate on the URI FIRST. This predicate runs on the WAF hot path for every
+  -- request (cfm_waf.lua sections 26 & 28), but only /xmlrpc.php traffic can ever
+  -- be "legit xmlrpc" — so short-circuit before the args/body normalize
+  -- (double-url-decode + lowercase + cap) below, which was pure waste on the
+  -- ~99% of requests that aren't xmlrpc.
   if not has(uri, "/xmlrpc.php") then
     return false
   end
+
+  args = normalize(cap(args or "", CFG.max_scan_len))
+  body = normalize(cap(body or "", CFG.max_scan_len))
+  headers = headers or {}
 
   local ua = lower(headers["user-agent"] or headers["User-Agent"] or "")
 

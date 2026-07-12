@@ -467,6 +467,14 @@ back-filled here — see the git/PR history for that period.
   builds: `touch` the `LOG_PATH` file so a source attaches.
 
 ### Changed
+- **WAF: skip the xmlrpc legit-check normalize on non-xmlrpc requests (F24).**
+  `is_known_legit_xmlrpc` (the Jetpack carve-out, called on the WAF hot path for
+  every request via `cfm_waf.lua` sections 26 & 28) normalized both the args and
+  the body — a double-URL-decode + lowercase + cap — **before** checking whether
+  the URI was even `/xmlrpc.php`, wasting that work on the ~99% of requests that
+  aren't xmlrpc. The `/xmlrpc.php` URI gate now runs first, short-circuiting
+  before the normalize. Pure reordering — identical result for every request,
+  just cheaper on the common path. Found by the 2026-07 edge Lua audit (F24).
 - **`cfm dnat` now reports the scoped listener-port accepts (web scope).**
   `cfm dnat on` DNATs `80→:9080` / `443→:9043` and installs scoped
   `ct status dnat` accepts in `inet cfm/input` so the redirected traffic reaches

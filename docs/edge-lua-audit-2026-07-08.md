@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**24 / 55 fixed.** Grouped by severity; each links to its detail section.
+**25 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -67,7 +67,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F20](#f20)** · `configs/lua/cfm_stats.lua:134` · _perf_ (axis b) — cfm_stats decisions_stats/sslcache_stats call get_keys() with large N, locking the hot cfm_decisions dict on every dashboard poll
 - [ ] **[F21](#f21)** · `configs/lua/cfm_rules.lua:58` · _fp_ (axis a) — cfm_rules throttle lock contention fails toward 429, over-throttling legit bursts from shared/NAT IPs
 - [ ] **[F22](#f22)** · `configs/lua/cfm_ua_emergency.lua:322` · _perf_ (axis b) — UA-emergency throttle churns the shared cfm_decisions dict (3 writes + spin-lock per request) under the bot wave it targets
-- [ ] **[F24](#f24)** · `configs/lua/cfm_waf_detectors.lua:850` · _perf_ (axis b) — is_known_legit_xmlrpc normalizes args AND body on every request before the cheap /xmlrpc.php URI gate
+- [x] **[F24](#f24)** · `configs/lua/cfm_waf_detectors.lua:850` · _perf_ (axis b) — is_known_legit_xmlrpc normalizes args AND body on every request before the cheap /xmlrpc.php URI gate
 - [ ] **[F25](#f25)** · `configs/lua/cfm.lua:1121` · _perf_ (axis b) — Per-IP geo results and abuse counters share the high-churn cfm_decisions dict; geo uses a 3.3x-longer 300s TTL and negatively caches transient lookup failures
 - [x] **[F26](#f26)** · `internal/webdetector/ingest_socket.go:155` · _dos_ (axis b/c) — Ingest socket bufio.ReadString does not bound line length — unbounded memory (comment falsely claims a 256KB bound)
 - [x] **[F27](#f27)** · `internal/sslcollector/socketapi.go:312` · _regression_ (axis b) — sslcollector socket restart race: old listener's Close() unlinks the freshly-bound new socket, breaking cert delivery until next restart
@@ -539,7 +539,7 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 <a id="f24"></a>
 ### F24 — is_known_legit_xmlrpc normalizes args AND body on every request before the cheap /xmlrpc.php URI gate
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `/xmlrpc.php` URI gate hoisted above the args/body normalize
 - **Severity:** medium · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:850`
 
@@ -549,7 +549,18 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 
 **Suggested fix.** Move the lower(uri)+has(uri,'/xmlrpc.php') check to the very top of the function before the args/body normalize calls.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** The `has(uri, "/xmlrpc.php")` gate is hoisted above the two
+`normalize(cap(...))` calls, so a non-xmlrpc request returns `false` without normalizing
+args or body. Pure reorder — the predicate has no side effects, so the return value is
+identical for every input; only the cost changes. Verified the callers are unaffected:
+`cfm_waf.lua:1105` (§26) and `:1145` (§28) plus the two internal callers
+(`detect_*` at `cfm_waf_detectors.lua:965,987`) use only the return value. Test
+`scripts/tests/cfm_waf_xmlrpc_gate_test.lua` injects a counting `normalize` spy and asserts
+a non-xmlrpc URI performs **zero** normalize calls (incl. the nil-args path) while Jetpack
+detection (args `for=jetpack`, body `jetpack`, UA `Jetpack`/`WordPress.com` incl. capitalized
+header key) and the xmlrpc-without-marker negative are unchanged — **verified to FAIL**
+against the pre-fix order (2 normalize calls on a non-xmlrpc request). Branch
+`claude/edge-audit-xmlrpc-gate`.
 
 ---
 
