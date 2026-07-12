@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **`/__ssl_debug` now enforces loopback with the un-forgeable real peer (F56).**
+  The sslcollector debug endpoint (`ready`/`version` of the `sslcache` dict) was
+  gated only by `allow 127.0.0.1; deny all;`, which the `ngx_http_access` module
+  evaluates against the **real_ip-rewritten** `$remote_addr` — so a
+  Cloudflare-fronted request carrying `CF-Connecting-IP: 127.0.0.1` (behind a
+  trusted proxy) could forge a loopback origin and read it. The four
+  `location = /__ssl_debug` blocks (`openresty.conf` + `angie.conf`, ×2 server
+  blocks each) now add the same `cfm_purge.check_loopback()` gate that
+  `/cfm-admin/purge-ip` uses — it reads the pre-rewrite `$realip_remote_addr`,
+  which a header cannot spoof — and 403 a non-loopback peer, plus `allow ::1;` to
+  match. **DNAT-safe:** this endpoint is also the canonical edge health probe
+  (the DNAT failsafe GETs it and treats non-200 as "edge down"); the genuine
+  loopback probe (no forwarded headers, real peer `127.0.0.1`) always passes, and
+  if `cfm_purge` can't load the gate **fails open** (still 200) so a broken module
+  can never trigger a false DNAT-off. Found by the 2026-07 edge Lua audit (F56, low).
 - **Edge proxy no longer leaks its version in the `Server` header / error pages
   (F61).** Added `server_tokens off;` to the `http{}` block of both `openresty.conf`
   and `angie.conf`. Previously unset (nginx defaults to `on`), so responses and

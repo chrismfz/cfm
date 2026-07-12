@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**31 / 55 fixed.** Grouped by severity; each links to its detail section.
+**32 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -98,7 +98,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F52](#f52)** · `internal/webdetector/ingest_socket.go:145` · _dos_ (axis b/c) — Ingest socket accept loop has no cap on concurrent connections/goroutines
 - [x] **[F54](#f54)** · `internal/sslcollector/token.go:245` · _correctness_ (axis c) — Atomic Lua-token writer omits fsync before rename; a crash can expose an empty/truncated token to the edge
 - [x] **[F55](#f55)** · `internal/sslcollector/token.go:214` · _correctness_ (axis c) — Operator-supplied token emitted into Lua via Go %q can produce invalid LuaJIT and break token loading
-- [ ] **[F56](#f56)** · `configs/openresty.conf:623` · _security_ (axis c) — /__ssl_debug protected only by forgeable `allow 127.0.0.1`, unlike purge-ip's documented second loopback gate
+- [x] **[F56](#f56)** · `configs/openresty.conf:623` · _security_ (axis c) — /__ssl_debug protected only by forgeable `allow 127.0.0.1`, unlike purge-ip's documented second loopback gate
 - [ ] **[F57](#f57)** · `configs/lua/cfm_purge.lua:128` · _perf_ (axis b) — purge_ip scans the entire cfm_decisions dict under lock (get_keys(0)) on a force-unblock
 - [x] **[F58](#f58)** · `configs/lua/cfm_waf_detectors.lua:1117` · _perf_ (axis b) — args-only normalize(cap(args)) recomputed by ~6 detectors per request instead of being memoized once
 - [x] **[F59](#f59)** · `configs/lua/cfm_waf_detectors.lua:2423` · _perf_ (axis b) — Five RCE-marker detectors each rebuild lower(cap(body)) + concat on every POST body
@@ -1089,7 +1089,7 @@ performs the read — **verified to FAIL** against the pre-fix synchronous refre
 <a id="f56"></a>
 ### F56 — /__ssl_debug protected only by forgeable `allow 127.0.0.1`, unlike purge-ip's documented second loopback gate
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `check_loopback()` gate added to all 4 blocks; fail-open to protect the DNAT health probe
 - **Severity:** low · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/openresty.conf:623`
 
@@ -1099,7 +1099,30 @@ performs the read — **verified to FAIL** against the pre-fix synchronous refre
 
 **Suggested fix.** Add the same check_loopback() on $realip_remote_addr used by purge-ip, or bind the endpoint to a value real_ip cannot rewrite.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** All **four** `location = /__ssl_debug` blocks (`openresty.conf` + `angie.conf`, ×2
+server blocks each) now call `cfm_purge.check_loopback()` — the SAME un-forgeable
+`$realip_remote_addr` matcher purge-ip uses (no second inline copy; the matcher itself is locked by
+`cfm_purge_test.lua`) — and `ngx.exit`-free `403 forbidden` a non-loopback peer before serving the
+`sslcache` meta. Added `allow ::1;` to the coarse first filter to match purge-ip and
+`check_loopback()`'s `::1` acceptance. **DNAT-safety was the design driver:** `/__ssl_debug` is the
+canonical edge health probe (`internal/dnat/state.go` → `probeEdgeHealthy` GETs it on
+`127.0.0.1:9080/9043` and treats non-200 as "edge down", auto-disabling DNAT). The genuine probe is
+a header-less loopback call, so `$realip_remote_addr == 127.0.0.1` → `check_loopback()` true → 200
+preserved; and the gate **fails OPEN** so a missing/broken/partial `cfm_purge` can never turn the
+probe into a false "edge down". The guard is layered: `require` is `pcall`'d, `purge`/`check_loopback`
+are `type`-checked, and `check_loopback` itself is `pcall`'d (`local okc, lb = pcall(purge.check_loopback);
+if okc and lb == false then 403 end`) so even a future `check_loopback` that *raises* fails open to
+200 rather than 500 (adversarial-review NIT N1). Verified the DNAT probe path end to end: it dials/GETs
+`127.0.0.1` with no `CF-Connecting-IP`/`XFF`, and `real_ip_header` is `CF-Connecting-IP` with
+`set_real_ip_from` = Cloudflare ranges only (loopback is not a trusted proxy; no `proxy_protocol`), so
+no real_ip substitution occurs and `$realip_remote_addr` stays `127.0.0.1`. Test
+`cfm_ssl_debug_gate_test.lua` (new): genuine loopback → 200 + body; spoofed (real peer non-loopback) →
+403; require-failure, partial-module, **and a raising check_loopback** → fail-open 200. The spoof→403
+assertion **verified to FAIL** against the pre-fix (no-gate) block; the raise-case was confirmed to
+crash (500) against the un-`pcall`'d call. `cfm_purge_test.lua` also gains the nil/empty-`realip`
+fallback cases (NIT N2). `check_loopback()` semantics stay locked
+by `cfm_purge_test.lua` (loopback/`::1` true, CF-spoof false). Config-only (inline Lua) change.
+Branch `claude/edge-audit-ssl-debug-loopback`.
 
 ---
 

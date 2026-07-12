@@ -98,6 +98,11 @@ check(purge.check_loopback() == true, "::1 peer should pass")
 -- CF-fronted spoof: header rewrote remote_addr to 127.0.0.1, real peer is CF edge.
 ngx_var.realip_remote_addr = "203.0.113.7"; ngx_var.remote_addr = "127.0.0.1"
 check(purge.check_loopback() == false, "CF-spoofed loopback must be rejected (real peer is non-loopback)")
+-- realip module absent ($realip_remote_addr nil/empty): fall back to $remote_addr.
+ngx_var.realip_remote_addr = nil; ngx_var.remote_addr = "127.0.0.1"
+check(purge.check_loopback() == true, "nil realip falls back to remote_addr (loopback → pass)")
+ngx_var.realip_remote_addr = ""; ngx_var.remote_addr = "203.0.113.7"
+check(purge.check_loopback() == false, "empty realip falls back to remote_addr (non-loopback → reject)")
 
 -- ── check_token ──────────────────────────────────────────────────────────────
 -- cfm_purge reads the token through the cfm_bridge_cfg accessor; control it
