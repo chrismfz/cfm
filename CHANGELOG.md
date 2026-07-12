@@ -467,6 +467,19 @@ back-filled here — see the git/PR history for that period.
   builds: `touch` the `LOG_PATH` file so a source attaches.
 
 ### Changed
+- **UA-emergency: move the periodic rule-file read off the request hot path (F48).**
+  `cfm_ua_emergency.check()` runs on every request and called `refresh_if_needed()`,
+  which every `REFRESH_INTERVAL_SEC` (3s) per worker did a blocking `io.open` +
+  full `read` + string-compare of `/var/lib/cfm/ua_emergency.json` **in the access
+  phase** — and the module header falsely claimed it stat'd mtime (it does a
+  content compare; Lua has no stat without `lfs`). The first load per worker is
+  still synchronous (so the very first request is checked against any emergency
+  rules — no cold-start bypass on this security surface), but every later refresh
+  now runs in a background `ngx.timer.at(0)` (the `cfm_h3_config` pattern) while the
+  request keeps serving the current in-memory rules; a dedupe flag stops concurrent
+  requests from stacking timers. Convergence latency is unchanged (≤ 3s across the
+  pool). The misleading comment is corrected. Found by the 2026-07 edge Lua audit
+  (F48).
 - **WAF: cache the exclude glob→pattern conversion per rule (F32).** For every
   glob exclude row (`*`/`?`), `matches_rule` rebuilt the anchored Lua pattern (two
   gsubs over the rule) on every WAF-eligible request — once per host row and once

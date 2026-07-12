@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**28 / 55 fixed.** Grouped by severity; each links to its detail section.
+**29 / 55 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -92,7 +92,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F45](#f45)** · `configs/lua/cfm_bridge_cfg.lua:70` · _security_ (axis c) — Bridge token rotation opens a fail-open enforcement window of up to the 10s cache TTL
 - [ ] **[F46](#f46)** · `configs/lua/cfm_geo.lua:77` · _correctness_ (axis c) — cfm_geo disables geo permanently per worker on a transient init/open failure, with no retry until proxy reload
 - [ ] **[F47](#f47)** · `configs/lua/cfm.lua:129` · _correctness_ (axis c) — Missing bridge token 500s every request (fail-closed) while a present-but-unreachable daemon fails open — behavior flips on file presence, not reachability
-- [ ] **[F48](#f48)** · `configs/lua/cfm_ua_emergency.lua:133` · _perf_ (axis b) — UA-emergency refresh reads the entire JSON file on the request path every 3s per worker (not mtime as the comment claims)
+- [x] **[F48](#f48)** · `configs/lua/cfm_ua_emergency.lua:133` · _perf_ (axis b) — UA-emergency refresh reads the entire JSON file on the request path every 3s per worker (not mtime as the comment claims)
 - [ ] **[F49](#f49)** · `internal/webdetector/nginx_bridge.go:1619` · _dos_ (axis b/c) — Five POST bridge handlers decode request bodies with no size limit (unbounded JSON read)
 - [ ] **[F51](#f51)** · `internal/webdetector/nginx_bridge.go:1388` · _dos_ (axis b/c) — Decision bridge server has no ReadTimeout/WriteTimeout/IdleTimeout and no goroutine cap on non-decision endpoints
 - [ ] **[F52](#f52)** · `internal/webdetector/ingest_socket.go:145` · _dos_ (axis b/c) — Ingest socket accept loop has no cap on concurrent connections/goroutines
@@ -970,7 +970,7 @@ caches the rebuild, which is the finding's suggested fix.) Existing `cfm_waf_exc
 <a id="f48"></a>
 ### F48 — UA-emergency refresh reads the entire JSON file on the request path every 3s per worker (not mtime as the comment claims)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — recurring refresh moved to `ngx.timer.at(0)`; sync first-load kept
 - **Severity:** low · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_ua_emergency.lua:133`
 
@@ -980,7 +980,24 @@ caches the rebuild, which is the finding's suggested fix.) Existing `cfm_waf_exc
 
 **Suggested fix.** stat mtime/size first and only read+decode on change, or move refresh to an ngx.timer like cfm_h3_config.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Chose the ngx.timer route (lfs/stat is not available — no LuaFileSystem in the
+tree, so the mtime option was out). The read/parse body is extracted into `do_refresh()`;
+`refresh_if_needed()` now loads **synchronously on the first call per worker** (cold start —
+so the very first request is still checked against emergency rules, no bypass on this security
+surface) and schedules every later refresh on a background `ngx.timer.at(0)` (the cfm_h3_config
+pattern), serving the current in-memory rules meanwhile. A `_refresh_in_progress` flag dedupes
+so concurrent requests in a worker don't stack timers; the timer handler clears the flag even
+on error and advances `_last_refresh_at` before the read (a failing read doesn't retry every
+request). Convergence latency unchanged (≤ REFRESH_INTERVAL_SEC). The header comment's false
+"stat mtime" claim is corrected to describe the actual content-compare + async-refresh model.
+(Honest scope: io.open is a blocking C call either way, so this moves the read off the
+triggering request's latency path rather than eliminating worker work — user-approved as the
+proper fix over a comment-only change.) Test `cfm_ua_emergency_refresh_test.lua` (ngx/io/cjson
+mocks): cold start reads synchronously + applies the rule to the first request; within the
+interval no read; after the interval the read is DEFERRED to a scheduled timer (not synchronous)
+and current rules keep serving; the dedupe flag prevents a second timer; running the timer
+performs the read — **verified to FAIL** against the pre-fix synchronous refresh. Branch
+`claude/edge-audit-ua-emergency-timer`.
 
 ---
 
