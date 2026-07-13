@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**47 / 56 fixed.** Grouped by severity; each links to its detail section.
+**48 / 56 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -86,7 +86,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F38](#f38)** · `configs/lua/cfm.lua:924` · _correctness_ (axis c) — Decision cache key truncates the URI to 64 bytes and omits the query string, so distinct URIs sharing a 64-char prefix share one cached verdict
 - [x] **[F39](#f39)** · `configs/lua/cfm.lua:1274` · _security_ (axis c) — Decoded control characters in ngx.var.uri are written unescaped into error-log lines, enabling log forging
 - [x] **[F40](#f40)** · `configs/lua/cfm_clearance.lua:17` · _correctness_ (axis c) — cfm_clearance normalize_host mangles IPv6-literal hosts, weakening clearance host-binding and diverging from the Go normalizer
-- [ ] **[F41](#f41)** · `configs/lua/cfm_panel.lua:851` · _security_ (axis c) — Challenge scope (panel_scope) is derived from client-controlled X-CFM-Panel-Port/X-Forwarded-Port, defeating per-port clearance isolation
+- [x] **[F41](#f41)** · `configs/lua/cfm_panel.lua:851` · _security_ (axis c) — Challenge scope (panel_scope) is derived from client-controlled X-CFM-Panel-Port/X-Forwarded-Port, defeating per-port clearance isolation
 - [x] **[F43](#f43)** · `configs/lua/sslcollector.lua:739` · _dos_ (axis b/c) — sslcollector emits an unbounded per-handshake WARN on every SNI cache-miss (attacker-driven log amplification)
 - [x] **[F44](#f44)** · `configs/openresty.conf:130` · _security_ (axis c) — Client-controlled X-Forwarded-Proto forwarded verbatim to origin ($cf_xfp) in DNAT-direct mode
 - [x] **[F45](#f45)** · `configs/lua/cfm_bridge_cfg.lua:70` · _security_ (axis c) — Bridge token rotation opens a fail-open enforcement window of up to the 10s cache TTL
@@ -1109,7 +1109,7 @@ reference). Branch `claude/edge-audit-clearance-ipv6-host`.
 <a id="f41"></a>
 ### F41 — Challenge scope (panel_scope) is derived from client-controlled X-CFM-Panel-Port/X-Forwarded-Port, defeating per-port clearance isolation
 
-- **Status:** ☐ open
+- **Status:** ☑ done — scope derived from the trusted per-listener `$cfm_panel_origin` port, client headers ignored
 - **Severity:** low · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_panel.lua:851`
 
@@ -1119,7 +1119,22 @@ reference). Branch `claude/edge-audit-clearance-ipv6-host`.
 
 **Suggested fix.** Derive scope from the trusted $server_port / config-set origin port only; ignore client X-CFM-Panel-Port/X-Forwarded-Port unless the connection is proven internal.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** The `panel_scope()` call at `cfm_panel.lua` now passes **nil** for the two client-header args —
+`panel_scope(nil, nil, origin, ngx.var.server_port)` — so the scope follows the trusted per-listener
+`$cfm_panel_origin` port, not `X-CFM-Panel-Port`/`X-Forwarded-Port`. **This is always the right source here:**
+cfm_panel.lua runs ONLY on the main external panel request — the `/__cfm_*` sub-locations that carry a
+listener-injected (trusted) `X-CFM-Panel-Port` return early via `access_by_lua_block { return; }`, so on the
+main request those headers are purely client input. **Mint/validate stay in agreement:** the Go challenge
+server mints the scope from the injected `X-CFM-Panel-Port` (`clearanceScope`, challenge_server.go), and every
+listener block sets `$cfm_panel_origin` to the SAME port it injects — verified across all 7 blocks
+(2083/2087/2096/2082/2086/2095/2222). A drift there would only over-challenge (fail-safe re-challenge), never
+under-challenge. Tests (`cfm_panel_scope_trust_test.lua`): a call-site guard that the client headers are no
+longer passed (**verified to FAIL** on revert to the old call); the behavioural repro that a forged
+`X-CFM-Panel-Port: 2083` can't reduce the 2087 listener's scope to `panel:2083` under the fixed (nil) pattern
+(while showing the old pattern WOULD have let it win); and a **guardrail** that re-asserts the
+origin-port == injected-`X-CFM-Panel-Port` invariant across the listener config so a future edit can't silently
+break panel clearance validation. Config-only Lua change (§6 cPanel area — no token-transport/iframe change).
+Branch `claude/edge-audit-panel-scope-trust`.
 
 ---
 
