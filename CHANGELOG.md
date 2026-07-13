@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Bridge token rotation no longer opens a fail-open window (F45).** The edge
+  serves the bridge auth token from a 10s cache, so after the daemon rotates it
+  (weak-token replacement at startup) the edge kept presenting the stale token
+  for up to 10s → the bridge 403'd every decision RPC → `get_decision` fell to
+  `fail_decision` (fail-open by default), bypassing IP/vhost/rule blocks and
+  challenges for that window. Now a bridge **403** on a token-bearing request
+  force-refreshes the token once (new `cfm_bridge_cfg.refresh_token_throttled`)
+  and — only if the token actually **changed** — retries the RPC with the fresh
+  token before failing open, so a rotation converges on the first 403 per worker
+  instead of after the TTL. A persistent 403 from a genuinely wrong token can't
+  amplify: the retry is skipped when the refreshed token is unchanged, and the
+  file re-read is throttled to once/2s per worker. No change to the Go token-auth
+  path. Found by the 2026-07 edge Lua audit (F45, low).
 - **X-Forwarded-Proto is only honored from a trusted proxy now (F44).** The
   `$cf_xfp` map forwarded a client-supplied `X-Forwarded-Proto` to origin
   verbatim, with no trusted-proxy gate. In DNAT-direct deployments (no
