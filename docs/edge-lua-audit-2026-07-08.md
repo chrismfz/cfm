@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**45 / 56 fixed.** Grouped by severity; each links to its detail section.
+**46 / 56 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -91,7 +91,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F44](#f44)** · `configs/openresty.conf:130` · _security_ (axis c) — Client-controlled X-Forwarded-Proto forwarded verbatim to origin ($cf_xfp) in DNAT-direct mode
 - [ ] **[F45](#f45)** · `configs/lua/cfm_bridge_cfg.lua:70` · _security_ (axis c) — Bridge token rotation opens a fail-open enforcement window of up to the 10s cache TTL
 - [x] **[F46](#f46)** · `configs/lua/cfm_geo.lua:77` · _correctness_ (axis c) — cfm_geo disables geo permanently per worker on a transient init/open failure, with no retry until proxy reload
-- [ ] **[F47](#f47)** · `configs/lua/cfm.lua:129` · _correctness_ (axis c) — Missing bridge token 500s every request (fail-closed) while a present-but-unreachable daemon fails open — behavior flips on file presence, not reachability
+- [x] **[F47](#f47)** · `configs/lua/cfm.lua:129` · _correctness_ (axis c) — Missing bridge token 500s every request (fail-closed) while a present-but-unreachable daemon fails open — behavior flips on file presence, not reachability
 - [x] **[F48](#f48)** · `configs/lua/cfm_ua_emergency.lua:133` · _perf_ (axis b) — UA-emergency refresh reads the entire JSON file on the request path every 3s per worker (not mtime as the comment claims)
 - [ ] **[F49](#f49)** · `internal/webdetector/nginx_bridge.go:1619` · _dos_ (axis b/c) — Five POST bridge handlers decode request bodies with no size limit (unbounded JSON read)
 - [ ] **[F51](#f51)** · `internal/webdetector/nginx_bridge.go:1388` · _dos_ (axis b/c) — Decision bridge server has no ReadTimeout/WriteTimeout/IdleTimeout and no goroutine cap on non-decision endpoints
@@ -1235,7 +1235,7 @@ Lua change. Branch `claude/edge-audit-geo-retry`.
 <a id="f47"></a>
 ### F47 — Missing bridge token 500s every request (fail-closed) while a present-but-unreachable daemon fails open — behavior flips on file presence, not reachability
 
-- **Status:** ☐ open
+- **Status:** ☑ done — missing token now fails through the same policy as a dead daemon (fail-open by default), logged
 - **Severity:** low · **Category:** correctness (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm.lua:129`
 
@@ -1245,7 +1245,43 @@ Lua change. Branch `claude/edge-audit-geo-retry`.
 
 **Suggested fix.** Apply one uniform 'daemon uncontactable' policy (gate the missing-token error behind fail_open, or enforce a startup readiness gate so nginx does not serve until the token exists).
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Operator decision.** The two suggested directions trade differently: a startup readiness gate keeps fail-CLOSED
+(still an outage until the daemon is ready — which the DNAT `__ssl_debug` health check can then detect and switch
+DNAT off), whereas gating behind `fail_open` keeps serving with bridge enforcement bypassed. The operator chose
+**never interrupt service** (uniform fail-open, logged) — the failure mode here is exactly the case the DNAT
+health check CANNOT see (edge up, answers `__ssl_debug`, but the daemon/token isn't ready), so blocking or
+stopping would be a self-inflicted outage during restarts/maintenance.
+
+**Fix landed:** Removed the fatal `error()` at chunk top level (it ran per request under `access_by_lua_file`, so
+a missing token returned HTTP 500 for **every** request). A missing/empty token now flows through the **same
+`fail_decision()` path as an unreachable daemon**: `get_decision()` checks the cache first (so cached clean-allows
+are still served, exactly like the dead-daemon path) and, on a miss with no token, returns `fail_decision(
+"bridge_token_missing")` — allow under the default `CFG.fail_open`, block if the operator set fail-closed —
+**without** the pointless auth-less RPC. It logs at **ERROR** (loud: "FAILING OPEN — requests pass WITHOUT bridge
+IP/vhost/rule enforcement", with the token path + details), **throttled to once/60s across workers** via an
+`shdict:add` cooldown so a prolonged outage can't flood the log while the first occurrence still logs immediately.
+`CFG.token` stays nil safely: `rpc_call()` already omits the auth header when the token is empty (other bridge
+RPCs just fail-and-degrade), and the clearance mint/validate paths already tolerate a nil secret (mint falls back
+to the original cookie; validate is `pcall`-guarded). Recovers on its own once the daemon writes the token (the
+chunk re-runs per request; `cfm_bridge_cfg` has a 2s missing-retry). Test `cfm_missing_token_failopen_test.lua`
+(new) asserts on the **real** extracted `get_decision`: missing token → allow + `err=bridge_token_missing` + **no
+RPC** + one throttled log; fail-closed → block; empty-string token == missing; present token → RPC runs; a cached
+clean-allow is served even with a missing token (cache-first); and two misses log once (throttle). Both halves
+**verified to FAIL** on revert (restoring the `error()` trips the source guard; removing the token-check makes
+`get_decision` RPC instead of fail-open).
+
+**Adversarial-review MUST-FIX folded (defense-in-depth this change makes reachable):** the token is ALSO the
+clearance HMAC secret, so failing open means `clearance_validator.validate()` now runs with a **nil secret**
+during the window — and `hmac_sha256_hex` coerces a nil secret to `key=""`, computing a real HMAC with an
+**empty key** (publicly computable). An attacker could forge a clearance that `validate` accepts, which
+short-circuits forced-challenge gates and downgrades challenge-tier WAF verdicts (block-tier still blocks; the
+in-path WAF is token-independent). `mint()` already refused a nil/empty secret; `validate()` now does too — a
+one-line `if not secret or secret == "" then return false, "missing_secret" end` mirroring `mint`
+(`cfm_clearance.lua`). This does NOT touch the operator's fail-open decision. Test
+`cfm_clearance_secret_guard_test.lua` (new) installs a deterministic `ngx.hmac_sha256`, **crafts an empty-key
+forged clearance**, and asserts `validate` rejects it (nil and empty secret) — **verified to FAIL** (the forged
+token validates `true`) when the guard is reverted, proving both the forgery and the fix. Config-only Lua change.
+Branch `claude/edge-audit-missing-token-failopen`.
 
 ---
 

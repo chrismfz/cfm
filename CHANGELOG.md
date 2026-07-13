@@ -441,6 +441,27 @@ back-filled here — see the git/PR history for that period.
   fail against the pre-fix file). Found by the 2026-07 edge Lua audit (F03).
 
 ### Fixed
+- **A missing bridge token no longer 500s every request (F47).** When the bridge
+  auth token file was absent (e.g. a reboot where nginx starts before the cfm
+  daemon writes it), `cfm.lua` raised `error()` at chunk top level — and because
+  `access_by_lua_file` re-runs the chunk per request, that returned **HTTP 500
+  for every request** until the daemon started. Yet a present-but-unreachable
+  daemon fails **open** — so identical "can't reach the daemon" conditions
+  produced opposite outcomes based only on token-file presence (and this is the
+  one failure mode the DNAT `__ssl_debug` health check can't detect, since the
+  edge is up). The missing-token case now flows through the **same policy as an
+  unreachable daemon**: `get_decision` serves cached clean-allows first, then
+  fails through `fail_decision` (allow under the default `CFG.fail_open`, block if
+  fail-closed) without the pointless auth-less RPC. It's logged loudly at ERROR
+  ("FAILING OPEN — requests pass without bridge enforcement", with the token
+  path), throttled to once/60s across workers so a prolonged outage can't flood
+  the log. Recovers on its own once the daemon writes the token. Chosen to never
+  interrupt service during restarts/maintenance. Because the bridge token is also
+  the clearance HMAC secret, `cfm_clearance.validate()` was hardened to fail
+  **closed** on a nil/empty secret (mirroring `mint`) — otherwise the now-reachable
+  empty-secret state computes a publicly-forgeable empty-key HMAC, letting an
+  attacker forge a clearance during the window (block-tier WAF still blocks
+  regardless). Found by the 2026-07 edge Lua audit (F47, low).
 - **Decision cache key now hashes the full request path (F38).** `get_decision`
   built the per-URL `cfm_decisions` cache key from `uri:sub(1, 64)`, so two paths
   sharing a 64-byte prefix mapped to one entry — and since only clean allows are

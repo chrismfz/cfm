@@ -192,6 +192,16 @@ end
 
 function _M.validate(token, ip, host, scope, secret)
   if not token or token == "" then return false, "missing" end
+  -- Fail CLOSED on a nil/empty secret, mirroring _M.mint's `missing_secret`
+  -- guard. Without this, hmac_sha256_hex coerces a nil secret to key="" and
+  -- computes a real HMAC with an EMPTY key — which is publicly computable, so an
+  -- attacker could forge a valid clearance. That state became reachable at
+  -- runtime with audit F47 (a missing bridge token no longer 500s; it fails open,
+  -- and the token is also the clearance HMAC secret, so validate now runs with
+  -- secret=nil during the token-missing window). A forged clearance would
+  -- short-circuit forced-challenge gates and downgrade challenge-tier WAF verdicts
+  -- (block-tier still blocks). No legitimate caller passes an empty secret.
+  if not secret or secret == "" then return false, "missing_secret" end
   local raw = b64url_decode(token)
   if not raw then return false, "bad_sig" end
   local obj = cjson.decode(raw)

@@ -126,11 +126,21 @@ else
   -- (a nil value)" traceback.
   _bridge_token_err = "cfm_bridge_cfg has no token() — module set older than cfm.lua; redeploy /var/lib/cfm/lua and reload the proxy"
 end
-if not _bridge_token then
-  error("[cfm] bridge token unavailable — ensure cfm daemon has started; path: "
-        .. tostring(_bridge.TOKEN_PATH or "/var/lib/cfm/lua/cfm_bridge_token.lua")
-        .. "; details: " .. tostring(_bridge_token_err))
-end
+-- A missing/unreadable bridge token is NOT fatal (audit F47). access_by_lua_file
+-- re-runs this whole chunk per request, so error()ing here returned HTTP 500 for
+-- EVERY request while the token was absent — e.g. on a reboot where nginx starts
+-- before the cfm daemon writes the token. That fail-CLOSED behaviour also diverged
+-- from the present-but-unreachable-daemon case (which fails OPEN under
+-- CFG.fail_open) purely on token-file presence. Operator decision (F47): keep the
+-- two uniform and NEVER interrupt service — a missing token now flows through the
+-- SAME fail_decision() path in get_decision() (fail-open by default), logged
+-- loudly but throttled so it is visible, and recovers on its own once the daemon
+-- writes the token (cfm_bridge_cfg missing-retry). CFG.token stays nil: rpc_call()
+-- omits the auth header (so other bridge RPCs just fail-and-degrade), and the
+-- clearance mint/validate paths fail CLOSED on the resulting nil secret (mint
+-- returns missing_secret and falls back to the original cookie; validate rejects
+-- with missing_secret so a forged empty-key clearance can't validate — see
+-- cfm_clearance.lua). `_bridge_token_err` is kept for the get_decision log line.
 
 -- Webdetector → Lua runtime knobs (sibling file to the bridge token).
 -- Optional: if the file is missing or unloadable we fall back to safe defaults
@@ -1062,6 +1072,25 @@ local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
       local obj = cjson.decode(cached)
       if obj then obj._cache = true; return obj end
     end
+  end
+
+  -- Missing bridge token (daemon not yet ready): fail through the SAME policy as
+  -- an unreachable daemon — fail_decision() honours CFG.fail_open (allow by
+  -- default) — instead of RPC'ing with no auth token (which the bridge would
+  -- 401/403 anyway). Uniform behaviour regardless of token-file presence (F47).
+  -- Loud but throttled to once/60s across workers so a prolonged outage can't
+  -- flood the error log; the first occurrence still logs immediately.
+  if not CFG.token or CFG.token == "" then
+    if (not SH) or SH:add("cfm_token_missing_log", "1", 60) then
+      ngx.log(ngx.ERR,
+        "[cfm] bridge token unavailable — FAILING ",
+        (CFG.fail_open and "OPEN (requests pass WITHOUT bridge IP/vhost/rule enforcement)"
+                        or "CLOSED (requests blocked)"),
+        "; ensure the cfm daemon has started. path: ",
+        tostring(_bridge.TOKEN_PATH or "/var/lib/cfm/lua/cfm_bridge_token.lua"),
+        " details: ", tostring(_bridge_token_err))
+    end
+    return fail_decision("bridge_token_missing")
   end
 
   local path = "/nginx/decision?ip=" .. esc(ip) ..
