@@ -30,6 +30,28 @@ const DefaultIngestSockPath = "/run/cfm/ingest.sock"
 // tailer resumes feeding the pipeline.
 const SocketActiveWindow = 30 * time.Second
 
+// defaultMaxIngestConns bounds the number of concurrent ingest connections
+// (audit F52). Each connection holds a goroutine and an eagerly-allocated 256 KB
+// read buffer, and the accept loop previously spawned one per connection with no
+// ceiling — a cfm-group peer could open many and pin memory/goroutines.
+//
+// Sizing: the Lua sender (configs/lua/log-cfm.lua) keeps a per-worker keepalive
+// POOL of up to 100 cosockets (setkeepalive(10s, 100)), and every idle pooled
+// cosocket is an OPEN server-side connection — so the realistic peak is roughly
+// workers × (peak overlapping log-sends), i.e. low-single-digits to low-tens per
+// worker under load and transiently ~2x across a reload (old + new workers briefly
+// coexist), NOT one connection per worker. 1024 covers that comfortably on typical
+// and large boxes while bounding worst-case ingest-buffer memory to
+// defaultMaxIngestConns * 256 KB (~256 MB).
+//
+// If the cap is ever reached (a very large, very busy box mid-reload, or a runaway
+// peer), the failure is graceful and self-healing: the server accepts-then-closes
+// the over-cap connection, so the sender's connect() still succeeds (no backoff)
+// and it simply loses that ONE log line before reconnecting on the next request —
+// proportional, transient line loss, never a crash, a wedge, or a lasting blind
+// spot. Hardcoded (no config knob): a safety ceiling, not a tuning knob.
+const defaultMaxIngestConns = 1024
+
 // IngestSocket listens on a Unix stream socket for TSV log lines and feeds
 // them into the webdetector Engine using the same parser as the file tailer.
 // It also tracks LastReceived so the arbiter (and the `cfm webtop source`
@@ -37,14 +59,21 @@ const SocketActiveWindow = 30 * time.Second
 type IngestSocket struct {
 	sockPath string
 
+	// maxConns caps concurrent connections (see defaultMaxIngestConns). Set once
+	// at construction; a value <= 0 falls back to the default. A field (not a
+	// bare const) only so tests can drive the refusal path with a small cap.
+	maxConns int
+
 	lastReceived     atomic.Int64 // unix seconds; 0 == never
 	listening        atomic.Bool
 	lastOversizedLog atomic.Int64 // unix seconds of the last "oversized line" WARN (throttle)
+	lastRefusedLog   atomic.Int64 // unix seconds of the last "connection refused" WARN (throttle)
+	connRefused      atomic.Int64 // cumulative connections refused at the maxConns cap
 }
 
 // NewIngestSocket creates a listener bound to the default socket path.
 func NewIngestSocket() *IngestSocket {
-	return &IngestSocket{sockPath: DefaultIngestSockPath}
+	return &IngestSocket{sockPath: DefaultIngestSockPath, maxConns: defaultMaxIngestConns}
 }
 
 // SockPath returns the filesystem path the listener is (or will be) bound to.
@@ -132,6 +161,16 @@ func (s *IngestSocket) Serve(ctx context.Context, e *Engine) error {
 
 	logging.Logf("[webdetector] ingest socket listening on unix:%s", s.sockPath)
 
+	// Bound concurrent connections (audit F52). A buffered channel of capacity
+	// maxConns is the ceiling: accept() acquires a slot before spawning serveConn
+	// (which releases on exit); if the cap is full the connection is refused
+	// (closed) instead of spawning an unbounded goroutine + 256 KB buffer.
+	maxConns := s.maxConns
+	if maxConns <= 0 {
+		maxConns = defaultMaxIngestConns
+	}
+	sem := make(chan struct{}, maxConns)
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -143,7 +182,21 @@ func (s *IngestSocket) Serve(ctx context.Context, e *Engine) error {
 			time.Sleep(250 * time.Millisecond)
 			continue
 		}
-		go s.serveConn(ctx, e, conn)
+		select {
+		case sem <- struct{}{}:
+			go func() {
+				defer func() { <-sem }()
+				s.serveConn(ctx, e, conn)
+			}()
+		default:
+			// At the concurrent-connection cap: refuse rather than pin another
+			// goroutine + 256 KB buffer. Reaching this needs a runaway peer or a
+			// very large, very busy box mid-reload (see defaultMaxIngestConns); the
+			// refused peer's connect() still succeeded, so it just loses this one
+			// line and reconnects on the next request. Throttled log.
+			s.noteConnRefused()
+			_ = conn.Close()
+		}
 	}
 }
 
@@ -230,6 +283,30 @@ func (s *IngestSocket) noteOversizedLine() {
 		logging.Logf("[webdetector] ingest socket dropped a line exceeding the " +
 			"256 KB buffer (no newline); resyncing")
 	}
+}
+
+// noteConnRefused records (and, at most once per 60s, logs) a connection refused
+// at the maxConns cap. A refusal on this local cfm-group socket means the open
+// connection count reached the ceiling (a runaway peer, or a very large box mid-
+// reload; see defaultMaxIngestConns) — worth surfacing, but throttled so a
+// persistent flood can't spam the log.
+func (s *IngestSocket) noteConnRefused() {
+	total := s.connRefused.Add(1)
+	now := time.Now().Unix()
+	last := s.lastRefusedLog.Load()
+	if now-last >= 60 && s.lastRefusedLog.CompareAndSwap(last, now) {
+		logging.Logf("[webdetector] ingest socket at the %d-connection cap; refusing "+
+			"new connections (%d refused so far)", s.maxConnsOrDefault(), total)
+	}
+}
+
+// maxConnsOrDefault mirrors the fallback used in Serve so log messages report the
+// cap actually in force.
+func (s *IngestSocket) maxConnsOrDefault() int {
+	if s.maxConns > 0 {
+		return s.maxConns
+	}
+	return defaultMaxIngestConns
 }
 
 // handleLine parses a single TSV line and feeds it through the same ingest
