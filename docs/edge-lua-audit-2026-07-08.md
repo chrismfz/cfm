@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**49 / 56 fixed.** Grouped by severity; each links to its detail section.
+**50 / 56 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -93,7 +93,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F46](#f46)** · `configs/lua/cfm_geo.lua:77` · _correctness_ (axis c) — cfm_geo disables geo permanently per worker on a transient init/open failure, with no retry until proxy reload
 - [x] **[F47](#f47)** · `configs/lua/cfm.lua:129` · _correctness_ (axis c) — Missing bridge token 500s every request (fail-closed) while a present-but-unreachable daemon fails open — behavior flips on file presence, not reachability
 - [x] **[F48](#f48)** · `configs/lua/cfm_ua_emergency.lua:133` · _perf_ (axis b) — UA-emergency refresh reads the entire JSON file on the request path every 3s per worker (not mtime as the comment claims)
-- [ ] **[F49](#f49)** · `internal/webdetector/nginx_bridge.go:1619` · _dos_ (axis b/c) — Five POST bridge handlers decode request bodies with no size limit (unbounded JSON read)
+- [x] **[F49](#f49)** · `internal/webdetector/nginx_bridge.go:1619` · _dos_ (axis b/c) — Five POST bridge handlers decode request bodies with no size limit (unbounded JSON read)
 - [ ] **[F51](#f51)** · `internal/webdetector/nginx_bridge.go:1388` · _dos_ (axis b/c) — Decision bridge server has no ReadTimeout/WriteTimeout/IdleTimeout and no goroutine cap on non-decision endpoints
 - [x] **[F52](#f52)** · `internal/webdetector/ingest_socket.go:145` · _dos_ (axis b/c) — Ingest socket accept loop has no cap on concurrent connections/goroutines
 - [x] **[F54](#f54)** · `internal/sslcollector/token.go:245` · _correctness_ (axis c) — Atomic Lua-token writer omits fsync before rename; a crash can expose an empty/truncated token to the edge
@@ -1364,7 +1364,7 @@ performs the read — **verified to FAIL** against the pre-fix synchronous refre
 <a id="f49"></a>
 ### F49 — Five POST bridge handlers decode request bodies with no size limit (unbounded JSON read)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — each handler now wraps the body in `http.MaxBytesReader`; `waf/stats` also caps its per-push fan-out
 - **Severity:** low · **Category:** dos (axis b/c) · **Verify:** CONFIRMED
 - **Location:** `internal/webdetector/nginx_bridge.go:1619`
 
@@ -1374,7 +1374,7 @@ performs the read — **verified to FAIL** against the pre-fix synchronous refre
 
 **Suggested fix.** Wrap each body in http.MaxBytesReader with a sane cap and bound the number of rows in handleWAFStats.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Each of the five handlers now sets `r.Body = http.MaxBytesReader(w, r.Body, cap)` before decoding, with generous hardcoded caps (no env/config knob, per operator preference): 256 KB for `handleIPPush` (carries untruncated per-request forensic fields uri/ua/referer/content-type — sized above any legit push, including a padded-URI attack we *want* to autoblock, and safe even if an operator raises nginx `large_client_header_buffers`); 4 KB each for the tiny `handleIPClear`/`handleVhostPush`/`handleVhostClear` messages; 2 MB for `handleWAFStats` (worst-case legit batch is the edge's `get_keys(2000)` snapshot ≈ 0.6 MB even with max-length hostnames). `handleWAFStats` additionally bounds its per-push fan-out with `const maxWAFStatsRows = 8192` (far above the 2000 the edge can snapshot), so a compromised/buggy edge can't fan out unbounded persistence hooks. Adversarial review caught a bite-back in the `waf/stats` cap: each row's `host` is taken **untruncated** from `ngx.var.host`, so on a catch-all/default vhost a client sending padded `Host:` headers could inflate a *legitimate* flush past 2 MB and get the whole batch (co-resident legit rows included) rejected by `MaxBytesReader` — plus blind WAF telemetry for the bucket's 25h TTL. Root-cause fix: `waf_insp_incr` (`cfm.lua`) now clamps the host used as the shdict bucket key to the DNS maximum (253 octets), bounding both the key memory and the flush-row size so a legit batch genuinely stays ≤~0.6 MB (no real FQDN exceeds 253, so it's a no-op for legit traffic); the 2 MB Go cap remains the defense-in-depth backstop against an edge that ignores the bound. NB: the slow-body / missing-`ReadTimeout` half of the DoS surface (a token-holding caller that trickles a body byte-by-byte) is **F51**, not fixed here — the body caps bound total bytes but not time-to-read. Tests: `nginx_bridge_bodycap_test.go` (oversized→400 and legit-large→200 for all five handlers; row-guard caps fan-out at exactly `maxWAFStatsRows` while a 2000-row batch is processed in full) and `cfm_waf_insp_host_clamp_test.lua` (oversized host clamped to 253 in the bucket key; legit ≤253 hosts byte-for-byte preserved).
 
 ---
 

@@ -18,6 +18,24 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Bridge POST handlers bound their request bodies (F49).** Five nginx-bridge
+  handlers (`ip` push/clear, `vhost` push/clear, `waf/stats`) decoded the request
+  body with no size limit, so a compromised or buggy edge worker holding the
+  socket token could stream a huge body and spike daemon RSS — worst on
+  `waf/stats`, which fanned out one persistence hook per decoded row. Each now
+  wraps the body in `http.MaxBytesReader` with a generous, hardcoded cap sized
+  above any legitimate push (256 KB for `ip` push, which carries untruncated
+  per-request forensic fields — uri/ua/referer/content-type — so even a
+  padded-URI attack we *want* to autoblock is never rejected; 4 KB for the tiny
+  clear/vhost messages; 2 MB for the `waf/stats` batch), and `waf/stats`
+  additionally caps its per-push fan-out at 8192 rows (far above the edge's own
+  `get_keys(2000)` snapshot). To keep the `waf/stats` cap from ever rejecting a
+  *legitimate* flush, the edge also clamps each row's host to the DNS maximum
+  (253 octets) at the bucket source — otherwise a client sending padded `Host:`
+  headers to a catch-all vhost could inflate a flush past 2 MB and get the whole
+  batch (including co-resident legitimate rows) dropped. Local, token-gated
+  socket, so a robustness gap rather than a remote DoS. Found by the 2026-07
+  edge Lua audit (F49, low).
 - **Ingest socket bounds concurrent connections (F52).** The webdetector ingest
   socket's accept loop spawned one goroutine (+ a 256 KB read buffer) per
   connection with no ceiling, so a cfm-group peer could open many and pin
