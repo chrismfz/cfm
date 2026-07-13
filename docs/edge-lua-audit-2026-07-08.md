@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**46 / 56 fixed.** Grouped by severity; each links to its detail section.
+**47 / 56 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -89,7 +89,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [ ] **[F41](#f41)** · `configs/lua/cfm_panel.lua:851` · _security_ (axis c) — Challenge scope (panel_scope) is derived from client-controlled X-CFM-Panel-Port/X-Forwarded-Port, defeating per-port clearance isolation
 - [x] **[F43](#f43)** · `configs/lua/sslcollector.lua:739` · _dos_ (axis b/c) — sslcollector emits an unbounded per-handshake WARN on every SNI cache-miss (attacker-driven log amplification)
 - [x] **[F44](#f44)** · `configs/openresty.conf:130` · _security_ (axis c) — Client-controlled X-Forwarded-Proto forwarded verbatim to origin ($cf_xfp) in DNAT-direct mode
-- [ ] **[F45](#f45)** · `configs/lua/cfm_bridge_cfg.lua:70` · _security_ (axis c) — Bridge token rotation opens a fail-open enforcement window of up to the 10s cache TTL
+- [x] **[F45](#f45)** · `configs/lua/cfm_bridge_cfg.lua:70` · _security_ (axis c) — Bridge token rotation opens a fail-open enforcement window of up to the 10s cache TTL
 - [x] **[F46](#f46)** · `configs/lua/cfm_geo.lua:77` · _correctness_ (axis c) — cfm_geo disables geo permanently per worker on a transient init/open failure, with no retry until proxy reload
 - [x] **[F47](#f47)** · `configs/lua/cfm.lua:129` · _correctness_ (axis c) — Missing bridge token 500s every request (fail-closed) while a present-but-unreachable daemon fails open — behavior flips on file presence, not reachability
 - [x] **[F48](#f48)** · `configs/lua/cfm_ua_emergency.lua:133` · _perf_ (axis b) — UA-emergency refresh reads the entire JSON file on the request path every 3s per worker (not mtime as the comment claims)
@@ -1182,7 +1182,7 @@ after review and re-validated against the full matrix. Config-only change (no Lu
 <a id="f45"></a>
 ### F45 — Bridge token rotation opens a fail-open enforcement window of up to the 10s cache TTL
 
-- **Status:** ☐ open
+- **Status:** ☑ done — a bridge 403 force-refreshes the token once and retries before failing open
 - **Severity:** low · **Category:** security (axis c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_bridge_cfg.lua:70`
 
@@ -1192,7 +1192,34 @@ after review and re-validated against the full matrix. Config-only change (no Lu
 
 **Suggested fix.** Have the daemon accept the previous token for a grace period spanning the edge TTL, or treat a bridge 401/403 as a distinct condition that force-refreshes token() once before falling to fail_open.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Approach.** The two directions trade "root-cause vs contained": a daemon-side grace period is graceful-by-design
+but modifies the Go token-auth comparison (`checkToken`) and the rotation lifecycle; the edge force-refresh is
+contained edge-Lua reusing the existing `refresh_token`. Chose the **edge force-refresh** (no change to the
+security-critical Go auth path). (The bridge returns **403** — `checkToken` compares against a single current
+`b.cfg.Token`, no previous-token concept.)
+
+**Fix landed:** `get_decision()` now treats a bridge **403/401** on a token-bearing request as "the daemon may
+have just rotated the token and our ~10s-cached copy is stale": it force-refreshes via a new
+`cfm_bridge_cfg.refresh_token_throttled()` and — **only if the token actually CHANGED** — retries the decision
+RPC once with the fresh token before falling to `fail_decision`, closing the up-to-10s rotation fail-open window
+(a legit rotation now converges on the FIRST 403 per worker, not after the TTL). Two guards keep a **persistent**
+403 (a genuinely wrong/misconfigured token, file unchanged) from amplifying: (1) the **changed-token** check —
+if the refreshed token equals the one that 403'd, don't retry (it would 403 again) and don't loop; (2) the
+**throttle** — `refresh_token_throttled` re-reads the token file at most once per 2s **per worker** (module-scope
+`_last_forced_refresh`), so a stuck 403 can't turn into a `loadfile` + double-RPC on every request. Updating
+`CFG.token` on success also switches the rest of that request's bridge RPCs to the fresh secret. The retry is safe
+to repeat: the bridge's `checkToken` rejects the stale token BEFORE the handler runs, so the 403'd request has no
+side effects (no double-count). Tests: `cfm_token_refresh_throttle_test.lua` (throttle window + rotation pickup,
+via the `loadfile`-stub + real `cfm_filecache`) and `cfm_token_rotation_retry_test.lua` (drives the **real**
+extracted `get_decision`: 403+changed→retry+`CFG.token` switched+real allow; 403+unchanged→no retry, fail open;
+throttled→no retry; non-403 error→no refresh; 200→no refresh). The rotation retry is **verified to FAIL** (no
+retry, fails open) when the retry is disabled.
+
+**Residual (bounded, by design).** During a rotation, requests ALREADY in flight on a worker holding the stale
+token still fail open for that ONE request unless they win the per-worker throttle race — only the first refreshes
+the cache. That's inherent to the anti-amplification throttle and is a large improvement over the original window
+(up-to-10s for *every* request → at most the handful of concurrently in-flight requests per worker, since the very
+next request reads the refreshed cache). Config-only Lua change. Branch `claude/edge-audit-token-rotation`.
 
 ---
 

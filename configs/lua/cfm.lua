@@ -1106,7 +1106,30 @@ local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
     ip = ip, host = host, uri = uri, method = method,
   })
   if not body then
-    return fail_decision(err)
+    -- A bridge 403 on a request that DID present a token usually means the daemon
+    -- just rotated the token (weak-token replacement at startup) and our ~10s
+    -- cached copy is stale. Force-refresh once (throttled per worker) and — only
+    -- if the token actually CHANGED — retry with the fresh token before failing
+    -- open. This closes the up-to-10s rotation fail-open window (audit F45). The
+    -- "changed" guard means a persistent 403 from a genuinely wrong token (file
+    -- unchanged) does NOT retry (it would 403 again) and does NOT loop; the
+    -- throttle bounds the re-read cost under that misconfig. Updating CFG.token
+    -- also switches this request's later bridge RPCs to the fresh secret.
+    local klass = classify_bridge_err(err)
+    if (klass == "http_403" or klass == "http_401") and CFG.token and CFG.token ~= "" then
+      local fresh = _bridge.refresh_token_throttled(2)
+      if fresh and fresh ~= "" and fresh ~= CFG.token then
+        log_route(ngx.WARN, "bridge token rotated (403 on stale token); refreshed + retrying ip=" ..
+          tostring(ip or "-") .. " host=" .. tostring(host or "-"))
+        CFG.token = fresh
+        body, err = rpc_call("decision", "GET", path, nil, {
+          ip = ip, host = host, uri = uri, method = method,
+        })
+      end
+    end
+    if not body then
+      return fail_decision(err)
+    end
   end
   local obj = cjson.decode(body)
   if not obj then

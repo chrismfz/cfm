@@ -99,4 +99,26 @@ function _M.refresh_token()
   return _M.token()
 end
 
+-- refresh_token_throttled re-reads the token file NOW, but at most once per
+-- `min_interval` seconds PER WORKER (module state persists across requests).
+-- For the OUTBOUND decision path (cfm.lua): when the bridge 403s an RPC the
+-- daemon may have just rotated the token and our ~10s-cached copy is stale, so
+-- refreshing lets the request retry with the fresh token instead of failing open
+-- (audit F45). A legit rotation converges the per-worker cache in ONE refresh, so
+-- the throttle only bites a PERSISTENT 403 (misconfigured/wrong token, file
+-- unchanged) — bounding the loadfile cost so it can't become a re-read on every
+-- request. Returns (token, nil) on a fresh read, or (nil, "throttled") when
+-- called again within the window (the caller must NOT retry — fail per policy).
+local _last_forced_refresh = -math.huge
+function _M.refresh_token_throttled(min_interval)
+  min_interval = tonumber(min_interval) or 2
+  local now = (ngx and ngx.now and ngx.now()) or 0
+  if (now - _last_forced_refresh) < min_interval then
+    return nil, "throttled"
+  end
+  _last_forced_refresh = now
+  fc.entries[TOKEN_PATH] = nil
+  return _M.token()
+end
+
 return _M
