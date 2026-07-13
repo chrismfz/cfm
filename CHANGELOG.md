@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Ingest socket bounds concurrent connections (F52).** The webdetector ingest
+  socket's accept loop spawned one goroutine (+ a 256 KB read buffer) per
+  connection with no ceiling, so a cfm-group peer could open many and pin
+  memory/goroutines. It now caps concurrent connections at 1024 (a generous,
+  hardcoded ceiling sized over the realistic peak — the Lua sender keeps a
+  per-worker keepalive pool, so the peak is workers × pool-depth, not one per
+  worker — bounding worst-case ingest-buffer memory to ~256 MB) and refuses the
+  excess with a throttled log. The refusal is graceful and self-healing: the
+  server accepts-then-closes, so the sender's connect still succeeds (no backoff)
+  and only that one log line is dropped before it retries. Found by the 2026-07
+  edge Lua audit (F52, low).
 - **Panel challenge scope is derived from the trusted listener port, not client
   headers (F41).** `cfm_panel.lua` computed the per-port challenge scope from
   `X-CFM-Panel-Port` / `X-Forwarded-Port` with priority over the trusted

@@ -39,7 +39,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**48 / 56 fixed.** Grouped by severity; each links to its detail section.
+**49 / 56 fixed.** Grouped by severity; each links to its detail section.
 
 ### High (7)
 
@@ -95,7 +95,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F48](#f48)** · `configs/lua/cfm_ua_emergency.lua:133` · _perf_ (axis b) — UA-emergency refresh reads the entire JSON file on the request path every 3s per worker (not mtime as the comment claims)
 - [ ] **[F49](#f49)** · `internal/webdetector/nginx_bridge.go:1619` · _dos_ (axis b/c) — Five POST bridge handlers decode request bodies with no size limit (unbounded JSON read)
 - [ ] **[F51](#f51)** · `internal/webdetector/nginx_bridge.go:1388` · _dos_ (axis b/c) — Decision bridge server has no ReadTimeout/WriteTimeout/IdleTimeout and no goroutine cap on non-decision endpoints
-- [ ] **[F52](#f52)** · `internal/webdetector/ingest_socket.go:145` · _dos_ (axis b/c) — Ingest socket accept loop has no cap on concurrent connections/goroutines
+- [x] **[F52](#f52)** · `internal/webdetector/ingest_socket.go:145` · _dos_ (axis b/c) — Ingest socket accept loop has no cap on concurrent connections/goroutines
 - [x] **[F54](#f54)** · `internal/sslcollector/token.go:245` · _correctness_ (axis c) — Atomic Lua-token writer omits fsync before rename; a crash can expose an empty/truncated token to the edge
 - [x] **[F55](#f55)** · `internal/sslcollector/token.go:214` · _correctness_ (axis c) — Operator-supplied token emitted into Lua via Go %q can produce invalid LuaJIT and break token loading
 - [x] **[F56](#f56)** · `configs/openresty.conf:623` · _security_ (axis c) — /__ssl_debug protected only by forgeable `allow 127.0.0.1`, unlike purge-ip's documented second loopback gate
@@ -1398,7 +1398,7 @@ performs the read — **verified to FAIL** against the pre-fix synchronous refre
 <a id="f52"></a>
 ### F52 — Ingest socket accept loop has no cap on concurrent connections/goroutines
 
-- **Status:** ☐ open
+- **Status:** ☑ done — bounded to `defaultMaxIngestConns` (1024); excess connections refused (graceful)
 - **Severity:** low · **Category:** dos (axis b/c) · **Verify:** CONFIRMED
 - **Location:** `internal/webdetector/ingest_socket.go:145`
 
@@ -1408,7 +1408,26 @@ performs the read — **verified to FAIL** against the pre-fix synchronous refre
 
 **Suggested fix.** Add a bounded semaphore / max in-flight connection count, refusing beyond the cap.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** The accept loop now guards `go serveConn` with a buffered-channel semaphore of capacity
+`defaultMaxIngestConns` (**1024**): it acquires a slot before spawning (the goroutine releases on exit — on
+every return path incl. panic unwind), and if the cap is full it **refuses** the connection (`conn.Close()`)
+instead of spawning an unbounded goroutine + eagerly-allocated 256 KB buffer, with a throttled (once/60s) WARN
+and a cumulative `connRefused` counter. **Sizing (corrected during review):** the finding's "one connection per
+worker" is wrong — the Lua sender (`log-cfm.lua`) keeps a per-worker keepalive POOL of up to 100 cosockets
+(`setkeepalive(10s, 100)`), and every idle pooled cosocket is an OPEN server-side connection, so the realistic
+peak is ~`workers × peak-overlapping-sends` (low-single-digits to low-tens per worker, transiently ~2× across a
+reload), which on a large busy box can approach ~512. **1024** covers that with margin while bounding worst-case
+ingest-buffer memory to 1024 × 256 KB (~256 MB); hardcoded (no config knob, per operator preference — a safety
+ceiling, not a tuning knob). **The failure mode is graceful/self-healing:** at the cap the server
+accepts-then-closes, so the sender's `connect()` still succeeds (no backoff) and only that ONE log line is
+dropped before it retries on the next request — proportional, transient line loss, never a crash, wedge, or
+lasting detector blind spot. Go tests (`ingest_socket_test.go`): with a small cap, the excess connections are
+refused (server-closed) while exactly `cap` are held, the counter matches, and slots free when connections close
+(a fresh connection is then accepted — not a permanent lockout); a second test pins the production default and a
+**≥512** generosity floor (the realistic large-box peak). The cap test is **verified to FAIL** (no refusals,
+times out) when the semaphore guard is reverted; `-race -count≥3` clean (non-flaky). Go change
+(`internal/webdetector/ingest_socket.go`); `go vet` / `go build` / `go test -race` clean. Branch
+`claude/edge-audit-ingest-conn-cap`.
 
 ---
 
