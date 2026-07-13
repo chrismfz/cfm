@@ -880,6 +880,14 @@ local function waf_insp_incr(host)
   if not SH or not CFG.waf_stats_enable then return end
   local hr = math.floor(ngx.time() / 3600) * 3600
   local h = host or ""
+  -- Bound the host used as a bucket key to the DNS maximum (253 octets).
+  -- $host is taken untruncated from the request, so on a catch-all/default
+  -- vhost a client can send multi-KB Host headers; unclamped, those inflate
+  -- both this shdict key and the /nginx/waf/stats flush batch (which the Go
+  -- MaxBytesReader would then reject wholesale, dropping co-resident legit
+  -- rows). No legitimate FQDN exceeds 253 octets, so this is a no-op for real
+  -- traffic.
+  if #h > 253 then h = h:sub(1, 253) end
   -- 25h TTL so an hourly bucket lives long enough for the post-rollover flush
   -- to push its final value before SQLite-side eviction.
   SH:incr("waf_insp:hr=" .. hr .. "|host=" .. h, 1, 0, 90000)

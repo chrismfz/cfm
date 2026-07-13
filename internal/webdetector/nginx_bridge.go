@@ -1629,6 +1629,13 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Defensive: cap the body. A single push carries per-request forensic
+	// fields (uri/ua/referer/content-type) that can each approach nginx's
+	// large_client_header_buffers size; size generously above any legit push
+	// — including a padded-URI attack we *want* to autoblock — while still
+	// bounding a compromised/buggy edge.
+	r.Body = http.MaxBytesReader(w, r.Body, 256*1024)
+
 	var msg nginxIPMsg
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
@@ -1688,6 +1695,9 @@ func (b *NginxBridge) handleIPClear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Defensive: cap the body (tiny message: just an IP).
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+
 	var msg nginxIPClearMsg
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
@@ -1706,6 +1716,9 @@ func (b *NginxBridge) handleVhostPush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+
+	// Defensive: cap the body (small message: host + optional reason).
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 
 	var msg nginxVhostMsg
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
@@ -1738,6 +1751,9 @@ func (b *NginxBridge) handleVhostClear(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+
+	// Defensive: cap the body (tiny message: just a host).
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 
 	var msg nginxVhostClearMsg
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
@@ -2086,6 +2102,13 @@ func (b *NginxBridge) handleHTTP3Config(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(map[string]any{"hosts": hosts})
 }
 
+// maxWAFStatsRows bounds how many (hour,host) rows a single /nginx/waf/stats
+// push may fan out into per-row persistence hooks. The edge flusher snapshots
+// at most get_keys(2000) buckets per push (cfm.lua maybe_flush_waf_insp), so
+// this ceiling sits far above any legitimate batch; excess rows from a
+// compromised/buggy edge are dropped rather than dispatched.
+const maxWAFStatsRows = 8192
+
 // handleWAFStats accepts the periodic snapshot pushed by Lua's
 // maybe_flush_waf_insp. The body is {"rows":[{hour_unix, host, count}, ...]}
 // with absolute counts per (hour, host); Go upserts each row idempotently.
@@ -2101,6 +2124,14 @@ func (b *NginxBridge) handleWAFStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
+	// Defensive: cap body size (and, below, row count). The edge flusher
+	// snapshots at most get_keys(2000) buckets per push and clamps each row's
+	// host to the DNS max (cfm.lua waf_insp_incr), so a legit batch is <=2000
+	// rows of <=~0.3KB each (<~0.6MB total). This ceiling sits well above that
+	// — no real flush is rejected — while a compromised/buggy edge that ignores
+	// those bounds can't spike RSS by streaming a hundreds-of-MB rows array.
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+
 	var msg nginxWAFStatsMsg
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
@@ -2108,9 +2139,13 @@ func (b *NginxBridge) handleWAFStats(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.OnWAFStats != nil && len(msg.Rows) > 0 {
 		// Copy fields out of the request-scope slice; dispatch one hook per
-		// row so each persistence call is independent.
-		for _, r := range msg.Rows {
-			hr, host, cnt := r.HourUnix, r.Host, r.Count
+		// row so each persistence call is independent. Cap the fan-out at
+		// maxWAFStatsRows (far above the edge's own get_keys(2000) snapshot).
+		for i := range msg.Rows {
+			if i >= maxWAFStatsRows {
+				break
+			}
+			hr, host, cnt := msg.Rows[i].HourUnix, msg.Rows[i].Host, msg.Rows[i].Count
 			b.dispatchHook(func() {
 				b.OnWAFStats(hr, host, cnt)
 			})
