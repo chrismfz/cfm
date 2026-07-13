@@ -39,7 +39,9 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**50 / 56 fixed.** Grouped by severity; each links to its detail section.
+**51 / 56 fixed.** Grouped by severity; each links to its detail section. The
+remaining 5 open findings are all **perf**/**fp** — the **dos**/security cluster
+is closed.
 
 ### High (7)
 
@@ -94,7 +96,7 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 - [x] **[F47](#f47)** · `configs/lua/cfm.lua:129` · _correctness_ (axis c) — Missing bridge token 500s every request (fail-closed) while a present-but-unreachable daemon fails open — behavior flips on file presence, not reachability
 - [x] **[F48](#f48)** · `configs/lua/cfm_ua_emergency.lua:133` · _perf_ (axis b) — UA-emergency refresh reads the entire JSON file on the request path every 3s per worker (not mtime as the comment claims)
 - [x] **[F49](#f49)** · `internal/webdetector/nginx_bridge.go:1619` · _dos_ (axis b/c) — Five POST bridge handlers decode request bodies with no size limit (unbounded JSON read)
-- [ ] **[F51](#f51)** · `internal/webdetector/nginx_bridge.go:1388` · _dos_ (axis b/c) — Decision bridge server has no ReadTimeout/WriteTimeout/IdleTimeout and no goroutine cap on non-decision endpoints
+- [x] **[F51](#f51)** · `internal/webdetector/nginx_bridge.go:1388` · _dos_ (axis b/c) — Decision bridge server has no ReadTimeout/WriteTimeout/IdleTimeout and no goroutine cap on non-decision endpoints
 - [x] **[F52](#f52)** · `internal/webdetector/ingest_socket.go:145` · _dos_ (axis b/c) — Ingest socket accept loop has no cap on concurrent connections/goroutines
 - [x] **[F54](#f54)** · `internal/sslcollector/token.go:245` · _correctness_ (axis c) — Atomic Lua-token writer omits fsync before rename; a crash can expose an empty/truncated token to the edge
 - [x] **[F55](#f55)** · `internal/sslcollector/token.go:214` · _correctness_ (axis c) — Operator-supplied token emitted into Lua via Go %q can produce invalid LuaJIT and break token loading
@@ -1381,7 +1383,7 @@ performs the read — **verified to FAIL** against the pre-fix synchronous refre
 <a id="f51"></a>
 ### F51 — Decision bridge server has no ReadTimeout/WriteTimeout/IdleTimeout and no goroutine cap on non-decision endpoints
 
-- **Status:** ☐ open
+- **Status:** ☑ done — bridge `http.Server` now sets ReadTimeout/WriteTimeout/IdleTimeout (the slow-body goroutine pin is closed; body-size caps landed with F49)
 - **Severity:** low · **Category:** dos (axis b/c) · **Verify:** CONFIRMED
 - **Location:** `internal/webdetector/nginx_bridge.go:1388`
 
@@ -1391,7 +1393,7 @@ performs the read — **verified to FAIL** against the pre-fix synchronous refre
 
 **Suggested fix.** Set ReadTimeout/WriteTimeout/IdleTimeout and extend a concurrency cap or body-size limits to the POST handlers.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** The bridge `http.Server` is now built by `newBridgeHTTPServer` with `ReadTimeout=15s`, `WriteTimeout=15s`, `IdleTimeout=75s` (plus the existing `ReadHeaderTimeout=2s`). The slow-body goroutine pin is closed: a trickled body now hits `ReadTimeout` and the connection is torn down. Sizing is deliberately generous so a server deadline can only ever fire on a misbehaving connection, never on the real edge — the edge times ITSELF out at `decision_timeout_ms` (~300ms) on every RPC (`cfm.lua` `http_unix`: `settimeouts(300,300,300)`), so it abandons any call ~50× sooner than these deadlines. `IdleTimeout` is set EXPLICITLY (Go otherwise reuses `ReadTimeout` as the idle timeout when it's 0) and sits above the edge's 60s keepalive idle (`setkeepalive(60000,…)`), so the server never reaps a connection the edge still holds pooled. All handlers are non-blocking (hooks dispatch async) and no endpoint streams, so `WriteTimeout` has no legitimate long response to cut off. The body-size half of the suggested fix landed with **F49** (`http.MaxBytesReader` on the five POST handlers), so a separate per-handler concurrency cap is not added: the edge is the only client, `IdleTimeout` reaps idle connections, `ReadTimeout` reaps slow ones, and the F49 caps bound memory. Tests: `nginx_bridge_timeouts_test.go` — `TestBridgeServerTimeouts` guards each deadline is set and the `IdleTimeout > edge-keepalive-idle` invariant; `TestBridgeReadTimeoutReapsStalledBody` demonstrates a stalled body is reaped. This was the last open **dos** finding; the DoS/security cluster of the audit is now closed (remaining open items are all **perf**/**fp**).
 
 ---
 

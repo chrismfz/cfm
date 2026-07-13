@@ -1385,10 +1385,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/upload", b.instrument("/nginx/upload", b.handleUpload))
 	mux.HandleFunc("/nginx/events/batch", b.instrument("/nginx/events/batch", b.handleEventsBatch))
 
-	srv := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 2 * time.Second,
-	}
+	srv := newBridgeHTTPServer(mux)
 
 	hookDone := b.startHookDispatcher()
 
@@ -1412,6 +1409,62 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// Bridge HTTP-server timeouts (F51). Without ReadTimeout/WriteTimeout/IdleTimeout
+// the server is goroutine-per-connection with no upper bound on how long a
+// connection may pin a goroutine: a token-holding caller that sends valid headers
+// then trickles the body pins one indefinitely. These are sized so they can only
+// ever fire on a misbehaving connection, never on the real edge.
+const (
+	// bridgeReadHeaderTimeout: the edge sends full request headers immediately.
+	bridgeReadHeaderTimeout = 2 * time.Second
+
+	// bridgeReadTimeout / bridgeWriteTimeout bound reading the whole request and
+	// writing the whole response. The edge times ITSELF out at decision_timeout_ms
+	// (~300ms) on every RPC (cfm.lua http_unix: settimeouts(300,300,300)), so it
+	// abandons any call long before these multi-second deadlines — they only bite
+	// a stalled/trickled body or an abandoned half-open connection. All handlers
+	// are non-blocking (hooks dispatch async) and no endpoint streams, so
+	// WriteTimeout has no legitimate long response to cut off.
+	bridgeReadTimeout  = 15 * time.Second
+	bridgeWriteTimeout = 15 * time.Second
+
+	// bridgeIdleTimeout bounds how long an idle keep-alive connection is held
+	// between requests. It MUST exceed the edge's keepalive idle so the server
+	// never reaps a connection the edge still has pooled (which would churn the
+	// edge's pool); 75s leaves margin over the shipped 60s default. It is also set
+	// EXPLICITLY because Go falls back to ReadTimeout as the idle timeout when
+	// IdleTimeout==0 — which would tear the pool down after ReadTimeout.
+	//
+	// Operator constraint: the edge idle is CFG.keepalive_idle_ms, tunable via
+	// CFM_BRIDGE_KA_IDLE_MS (default 60000). This value is hardcoded by design (no
+	// runtime knob), so if that override is ever raised to at/above 75000 this
+	// constant must be raised in lockstep — otherwise the server starts reaping
+	// pooled edge connections (pool churn + occasional fail-open RPC errors).
+	bridgeIdleTimeout = 75 * time.Second
+
+	// edgeBridgeKeepaliveIdle is the edge's DEFAULT keepalive idle — cfm.lua
+	// http_unix setkeepalive(CFG.keepalive_idle_ms, ...), default 60000.
+	// TestBridgeServerTimeouts asserts bridgeIdleTimeout > this shipped default, so
+	// a change to the Go-side timeouts can't silently drop below it. This mirrors
+	// the DEFAULT only: it can't observe a runtime CFM_BRIDGE_KA_IDLE_MS override
+	// on the edge, so the test guards the shipped-default relationship, not
+	// operator retunes (see the operator constraint on bridgeIdleTimeout).
+	edgeBridgeKeepaliveIdle = 60 * time.Second
+)
+
+// newBridgeHTTPServer builds the bridge's http.Server with the F51 timeouts.
+// Factored out so the timeout wiring is unit-testable without standing up the
+// full ServeDecisions() listener path (see TestBridgeServerTimeouts).
+func newBridgeHTTPServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: bridgeReadHeaderTimeout,
+		ReadTimeout:       bridgeReadTimeout,
+		WriteTimeout:      bridgeWriteTimeout,
+		IdleTimeout:       bridgeIdleTimeout,
+	}
 }
 
 // decisionConcurrencyCap returns the size of the per-bridge decision-handler

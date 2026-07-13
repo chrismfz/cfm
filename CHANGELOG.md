@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Bridge decision server sets read/write/idle timeouts (F51).** The
+  nginx-bridge `http.Server` had only `ReadHeaderTimeout` set, so a caller holding
+  the socket token could send valid headers and then trickle the body to pin a
+  goroutine indefinitely (goroutine-per-connection, no upper bound). It now sets
+  `ReadTimeout=15s`, `WriteTimeout=15s` and `IdleTimeout=75s`. The values are
+  deliberately generous so a deadline can only ever fire on a misbehaving
+  connection, never on the real edge — which times *itself* out at ~300 ms per
+  RPC, ~50× sooner. `IdleTimeout` is set explicitly (Go otherwise reuses
+  `ReadTimeout` as the idle timeout) and sits above the edge's 60 s keepalive
+  idle, so pooled connections are never reaped mid-pool. Together with the F49
+  body caps this closes the slow-body pin. Local, token-gated socket, so a
+  robustness gap rather than a remote DoS; this was the last DoS finding of the
+  2026-07 edge Lua audit (F51, low).
 - **Bridge POST handlers bound their request bodies (F49).** Five nginx-bridge
   handlers (`ip` push/clear, `vhost` push/clear, `waf/stats`) decoded the request
   body with no size limit, so a compromised or buggy edge worker holding the
