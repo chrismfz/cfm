@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Panel challenge scope is derived from the trusted listener port, not client
+  headers (F41).** `cfm_panel.lua` computed the per-port challenge scope from
+  `X-CFM-Panel-Port` / `X-Forwarded-Port` with priority over the trusted
+  `$cfm_panel_origin` port. On the main panel request those headers are client
+  input, so a clearance solved on one panel port could be **replayed on another
+  listener** — e.g. present a `panel:2083` clearance on the WHM 2087 listener with
+  `X-CFM-Panel-Port: 2083` and skip the 2087 challenge — voiding the per-port
+  isolation the scope exists for (not privilege escalation; the user already holds
+  a valid clearance). The scope now follows the trusted per-listener
+  `$cfm_panel_origin` port and the client headers are ignored. cfm_panel.lua only
+  runs on the main external request (the `/__cfm_*` sub-locations, which carry the
+  listener-injected trusted header, return early), and each listener's
+  `$cfm_panel_origin` port matches the `X-CFM-Panel-Port` the Go challenge server
+  mints the scope from — so mint and validate stay in agreement. Found by the
+  2026-07 edge Lua audit (F41, low).
 - **Bridge token rotation no longer opens a fail-open window (F45).** The edge
   serves the bridge auth token from a 10s cache, so after the daemon rotates it
   (weak-token replacement at startup) the edge kept presenting the stale token

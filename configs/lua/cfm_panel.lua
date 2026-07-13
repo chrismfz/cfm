@@ -848,7 +848,20 @@ local method = ngx.req.get_method()
 local ua = ngx.var.http_user_agent or "-"
 local origin = ngx.var.cfm_panel_origin or ""
 local mode = ngx.var.cfm_panel_challenge_mode or ngx.var.cfm_panel_policy or "human-entry-only"
-local panel_scope = clearance_validator.panel_scope(ngx.var.http_x_cfm_panel_port, ngx.var.http_x_forwarded_port, origin, ngx.var.server_port)
+-- Derive the panel scope from the TRUSTED per-listener $cfm_panel_origin port,
+-- NOT the client-suppliable X-CFM-Panel-Port / X-Forwarded-Port headers (audit
+-- F41). cfm_panel.lua runs only on the MAIN external panel request — the /__cfm_*
+-- sub-locations that carry a listener-injected (trusted) X-CFM-Panel-Port return
+-- early via `access_by_lua_block { return; }` — so here those headers are whatever
+-- the client sent. Honouring them let a clearance solved on one panel port be
+-- replayed on another (e.g. `X-CFM-Panel-Port: 2083` on the 2087 listener →
+-- scope panel:2083 → the 2087 challenge is skipped), voiding per-port isolation.
+-- $cfm_panel_origin is set per listener by the config, and its port equals the
+-- trusted X-CFM-Panel-Port the sub-locations inject — which is exactly what the
+-- Go challenge server mints the scope from (challenge_server.go clearanceScope) —
+-- so mint and validate agree per listener while ignoring client input.
+-- (server_port stays a last-resort fallback; origin always carries the port.)
+local panel_scope = clearance_validator.panel_scope(nil, nil, origin, ngx.var.server_port)
 local client_ip = ngx.var.remote_addr
 local normalized_host = clearance_validator.normalize_host(ngx.var.host or "")
 local req_id = ngx.var.request_id or ngx.var.http_x_request_id or ngx.var.http_x_cfm_request_id or "-"
