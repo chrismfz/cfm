@@ -1708,15 +1708,21 @@ conflict). Verified with a stock `nginx` behavioral test: `server_tokens off` �
 Surfaces the completeness critic flagged as under-covered. Treat the three **high**
 gaps as their own audit tasks.
 
-**Round-2 triage (2026-07-14):** the 9 remaining unreviewed targets were each
-verified against the code. Outcome — **7 NON-ISSUE** (several close open
+**Round-2 triage (2026-07-14) — CLOSED:** the 9 remaining unreviewed targets were
+each verified against the code. Outcome — **7 NON-ISSUE** (several close open
 hypotheses: SSRF-via-origin, realip drift, log-injection, filecache mtime
-staleness, TLS wrong-cert), and **2 PARTIAL/low**: (a) `log-cfm.lua`'s
-`cfm_metrics` backoff dict is never declared → dead code (trivial safe fix:
-declare the dict); (b) the decision cache can serve a behaviourally-flagged IP a
-stale allow for ≤90s on already-cached URLs (bounded — WAF/nft still enforce;
-needs a policy call). F10b (bracket-class globs) re-confirmed as the low,
-safe-to-defer WAF-FP residual it was already tracked as. Per-item verdicts below.
+staleness, TLS wrong-cert), and **2 PARTIAL/low**, both now resolved: (a)
+`log-cfm.lua`'s `cfm_metrics` backoff dict was never declared → dead code —
+**fixed** by declaring `lua_shared_dict cfm_metrics 1m` in both confs (no Lua
+change; branch `claude/edge-log-cfm-metrics-dict`); (b) the decision cache can
+serve a behaviourally-flagged IP a stale allow for ≤90s on already-cached URLs —
+**accepted residual, documented** inline at `cfm.lua` `get_decision` (bounded:
+WAF is uncached every request and nft bans are kernel-level; the block-generation
+marker to close it is a poor trade for a self-healing ≤90s soft window). F10b
+(bracket-class globs) re-confirmed as the low, safe-to-defer WAF-FP residual it
+was already tracked as. With this pass the edge Lua/OpenResty audit is **fully
+resolved**: every finding is fixed, or an accepted/documented residual, or a
+tracked low-priority defer (F10b, F57). Per-item verdicts below.
 
 - [ ] **[low] F10b — port `[...]` bracket-class globs into the Lua exclude matcher** (`cfm_waf_excl.lua` `glob_to_lua_pattern` + the `matches_rule` glob trigger)
   - Follow-up to F10. The security-critical `*`/`?` cross-`/` widening is fixed; what remains is that Go treats a value containing `[`/`]` as a glob character class (`compileValueMatcher`: `ContainsAny(rule, "*?[]")`) while Lua only glob-detects `*`/`?` and matches `[`/`]` literally. Mostly Lua-**narrower** (more protective in-path), except one contrived *wider* case — a request literally containing the bracket text (rule `/foo[abc]`, request `/foo[abc]`) matches in Lua but not Go (needs literal, usually percent-encoded, brackets in both rule and URL). Port Go's `globToRegex` bracket handling (incl. `[!`/`[^`→`[^…]` negation, `]`-as-first-char literal, Lua set-escaping of `%`/`]`) and add cross-engine tests. Low priority (bracket-class excludes are rare).
@@ -1738,7 +1744,7 @@ safe-to-defer WAF-FP residual it was already tracked as. Per-item verdicts below
   - **Triaged 2026-07-14: PARTIAL (low).** Send is correctly deferred off the log phase (no stall), fields are `\t\r\n`-sanitised (the log-injection hypothesis is NOT exploitable), and there is no cosocket leak / no unbounded timers. BUT the connect-backoff + error-log-throttle subsystem keys on `ngx.shared.cfm_metrics`, a dict **never declared** in either conf → it is dead code: when the ingest socket is degraded, every request spawns an unthrottled connect-attempt timer and connect failures are 100% silent. Trivial, zero-FP fix: declare `lua_shared_dict cfm_metrics` in both confs (no Lua change). **Actionable.**
   - The Lua producer of the log-ingest pipeline was not clearly assigned (go-ingest-wafhit covered ingest_socket.go, the consumer). log-cfm.lua builds a log line from request fields and ships it over the unix socket in an ngx.timer.at(0) callback. Unaudited: whether attacker-controlled fields (UA, URI, referer, host) are escaped before being concatenated into the delimited line the Go parser splits — a raw delimiter/newline in a header would forge or split ingest records feeding the detector scoring (log injection → false autoblocks or evasion). Also the timer-per-log-line cost and drop behaviour under load.
 - [x] **[medium]** Decision cache (decision_cache_ttl_ms=90000) vs. block/ban state changes
-  - **Triaged 2026-07-14: PARTIAL (low–medium).** Real but bounded: a cached clean-allow short-circuits with no post-cache block re-check, and `BlockIP`/`ChallengeIP` don't purge the edge cache, so a purely behaviourally-flagged IP keeps hitting **already-cached URLs** for ≤90s. Not a free pass — the WAF runs **uncached on every request** (payloads still caught), **nft autoblock is kernel-level** (severe bans drop pre-edge), and new/dynamic URLs miss the cache. Authors already comment on it as “90s degraded enforcement.” Fix has real F57 tension (naive purge-on-block hits the full-scan cost during a flood); options: accept+document, or a cheap per-IP block-generation marker checked before honoring a cached allow. **Needs a policy call.**
+  - **Triaged 2026-07-14: PARTIAL (low–medium).** Real but bounded: a cached clean-allow short-circuits with no post-cache block re-check, and `BlockIP`/`ChallengeIP` don't purge the edge cache, so a purely behaviourally-flagged IP keeps hitting **already-cached URLs** for ≤90s. Not a free pass — the WAF runs **uncached on every request** (payloads still caught), **nft autoblock is kernel-level** (severe bans drop pre-edge), and new/dynamic URLs miss the cache. Authors already comment on it as “90s degraded enforcement.” Fix has real F57 tension (naive purge-on-block hits the full-scan cost during a flood); options: accept+document, or a cheap per-IP block-generation marker checked before honoring a cached allow. **Decision (2026-07-14): accepted residual — documented, no code change.** The exposure is a self-healing ≤90s edge-behavioural-challenge evasion on already-warmed URLs, with WAF (uncached, every request) and nft (kernel-level bans) still enforcing; the block-generation marker would add a shdict read on every cache **hit** plus a Go→edge publish mechanism (the edge deliberately does no snapshot polling) — disproportionate. Recorded inline at `cfm.lua` `get_decision` (alongside the sibling ua-not-in-key residual). Re-open only if edge-only challenge/block evasion is observed.
   - cfm.lua caches clean-allow verdicts for 90s in cfm_decisions. The interaction the prompt flags — an IP that the daemon blocks/nft-bans/escalates-to-challenge WITHIN that 90s window — was never audited. If nothing invalidates the cached allow on a state change (autoblock fire, manual block, waf_security ban, clearance revocation), a just-banned attacker keeps getting served at the edge for up to 90s. Check whether the bridge/daemon pushes cache invalidation or version-bumps the dict, or whether block state is only consulted on cache-miss.
 - [x] **[medium]** balancer_by_lua upstream selection: openresty.conf:468/480, cfm.lua origin_pass_for/cfm_upstream, cfm_origin_ka.balance()
   - **Triaged 2026-07-14: NON-ISSUE.** Origin dial target is always `$server_addr` (kernel-derived local listener IP, unforgeable) + a literal port; `$host` only ever feeds upstream SNI / the keepalive pool key, never the IP:port. All error paths `ngx.exit(ERROR)`→502; the `server 0.0.0.1` placeholder is never dialed. Byte-identical in angie. **Closes the SSRF-via-origin-selection axis as safe.**
