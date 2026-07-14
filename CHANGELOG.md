@@ -18,6 +18,18 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Geo lookup failures are no longer cached as a country (F25, part 2).** The
+  edge GeoIP layer returned `""` both for a genuine "no country for this IP" and
+  for every failure mode (geo disabled, DB open/init failed, mid retry-cooldown,
+  per-lookup error), and cached that `""` — so a transient mmdb hiccup (e.g. the
+  `.mmdb` caught mid atomic-rename during a MaxMind update) pinned an IP's country
+  as empty for the whole cache TTL. Since `""` is fail-closed for country
+  *allowlists*, a poisoned IP could be wrongly challenged/blocked for that window.
+  `cfm_geo.country()` now reports whether the lookup actually resolved, and only
+  resolved answers (a real code, or a definitive "no country") are cached; a
+  transient failure still returns `""` fail-open but is retried on the next
+  request (the module's own retry cooldown bounds any lookup storm). Completes
+  F25 from the 2026-07 edge Lua audit (medium).
 - **Geo country cache moved to its own shared dict (F25, part 1).** The edge
   cached per-IP GeoIP country codes in `cfm_decisions` — the hot dict that also
   holds the decision cache and the abuse counters (throttle buckets, ua_emergency

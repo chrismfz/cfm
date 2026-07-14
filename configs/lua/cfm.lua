@@ -1284,9 +1284,13 @@ end
 -- on virgo 2026-05-09. The require'd module's state survives across
 -- requests via package.loaded so init runs exactly once per worker.
 local geo_ok, geo = pcall(require, "cfm_geo")
+-- Returns (country, resolved). `resolved` is true only when an mmdb lookup
+-- completed (a real code or a definitive ""); false when geo is unavailable or
+-- the lookup could not be performed. The module require failing is itself a
+-- not-resolved case. See cfm_geo.country.
 local function geo_country(ip_str)
   if not geo_ok or type(geo) ~= "table" or type(geo.country) ~= "function" then
-    return ""
+    return "", false
   end
   return geo.country(ip_str)
 end
@@ -1308,19 +1312,29 @@ end
 -- keeps that eviction pressure off the security state. TTL is aligned to the 90s
 -- decision-allow window (was 5 min); geo is stable per-IP, so the extra lookups
 -- are a cheap mmap FFI call. gsh:get returns nil for a missing key; "" is a valid
--- cached value meaning "no country found", so nil is the cache-miss sentinel. If
--- the dict is absent (a conf not yet reloaded to declare it) fall back to an
+-- cached value meaning "no country found", so nil is the cache-miss sentinel.
+--
+-- Only a RESOLVED lookup is cached (F25 part 2): geo_country returns a second
+-- value that is true only when an mmdb lookup completed (a real code, or ""
+-- meaning definitively no country). A not-resolved result — geo down, DB caught
+-- mid atomic-rename, or within the retry cooldown — still returns "" fail-open
+-- but is NOT cached, so a transient hiccup can't pin an IP's country as "" for
+-- the whole TTL; the next request retries (cfm_geo's cooldown bounds any storm).
+-- If the dict is absent (a conf not yet reloaded to declare it) fall back to an
 -- uncached lookup so geo still works.
 local function geo_country_cached(ip_str)
   local gsh = ngx.shared.cfm_geocache
   if not gsh or not ip_str or ip_str == "" or ip_str == "-" then
-    return geo_country(ip_str)
+    return (geo_country(ip_str))
   end
   local k      = "geo|" .. ip_str
   local cached = gsh:get(k)
   if cached ~= nil then return cached end
-  local cc = geo_country(ip_str) or ""
-  gsh:set(k, cc, 90)   -- aligned to the 90s decision-cache TTL
+  local cc, resolved = geo_country(ip_str)
+  cc = cc or ""
+  if resolved then
+    gsh:set(k, cc, 90)   -- cache definitive answers only; aligned to the 90s decision-cache TTL
+  end
   return cc
 end
 

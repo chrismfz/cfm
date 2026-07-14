@@ -63,9 +63,18 @@ local function geo_warn_once(...)
   ngx.log(ngx.WARN, ...)
 end
 
--- country returns the ISO country code for ip_str, or "" if the lookup
--- failed or geo is disabled. Safe to call concurrently — the underlying
--- mmdb handle is read-only after init.
+-- country returns (iso_code, resolved) for ip_str.
+--
+-- `resolved` is true ONLY when an mmdb lookup actually completed — the code is a
+-- real ISO country, or "" meaning this IP definitively has no country. It is
+-- false when the lookup could not be performed: geo disabled, DB open/init
+-- failed, within the post-failure retry cooldown, or a per-lookup error. In
+-- every not-resolved case the code is "" as a fail-open fallback. Callers cache
+-- only resolved answers (F25): a transient DB hiccup (e.g. the .mmdb caught mid
+-- atomic-rename during a MaxMind update) must NOT be cached as a sticky "".
+-- Legacy single-value callers (`local cc = geo.country(ip)`) still work — they
+-- just drop the second value. Safe to call concurrently — the underlying mmdb
+-- handle is read-only after init.
 function _M.country(ip_str)
   if _geo_api_mode == "disabled" then
     if not mmdb_ok then
@@ -73,14 +82,14 @@ function _M.country(ip_str)
     else
       geo_warn_once("[cfm_geo] lua-resty-maxminddb loaded but unsupported API — geo disabled")
     end
-    return ""
+    return "", false
   end
 
   if _geo_api_mode == "init_lookup" then
     if not _geo_init_done then
       -- Within the post-failure cooldown: don't re-attempt the open yet.
       if _geo_init_retry_at ~= 0 and ngx.now() < _geo_init_retry_at then
-        return ""
+        return "", false
       end
       -- pcall guards against FFI/library load errors (e.g. libmaxminddb.so missing).
       local call_ok, ok, err = pcall(mmdb.init, GEO_DB_PATH)
@@ -97,7 +106,7 @@ function _M.country(ip_str)
         geo_warn_once("[cfm_geo] mmdb init failed: ", tostring(call_ok and err or ok),
                       " path=", GEO_DB_PATH, " — retrying every ", GEO_INIT_RETRY_SEC, "s")
         _geo_init_retry_at = ngx.now() + GEO_INIT_RETRY_SEC
-        return ""
+        return "", false
       end
       _geo_init_done = true
       _geo_init_retry_at = 0
@@ -109,16 +118,16 @@ function _M.country(ip_str)
       elseif err then
         geo_warn_once("[cfm_geo] mmdb lookup failed: ", tostring(err))
       end
-      return ""
+      return "", false
     end
-    return (res.country and res.country.iso_code) or ""
+    return (res.country and res.country.iso_code) or "", true
   end
 
   if _geo_api_mode == "new_object" then
     if not _geo_db then
       -- Within the post-failure cooldown: don't re-attempt the open yet.
       if _geo_init_retry_at ~= 0 and ngx.now() < _geo_init_retry_at then
-        return ""
+        return "", false
       end
       -- pcall guards against FFI/library load errors.
       local call_ok, db, err = pcall(mmdb.new, GEO_DB_PATH)
@@ -128,7 +137,7 @@ function _M.country(ip_str)
         geo_warn_once("[cfm_geo] mmdb open failed: ", tostring(call_ok and err or db),
                       " path=", GEO_DB_PATH, " — retrying every ", GEO_INIT_RETRY_SEC, "s")
         _geo_init_retry_at = ngx.now() + GEO_INIT_RETRY_SEC
-        return ""
+        return "", false
       end
       _geo_db = db
       _geo_init_retry_at = 0
@@ -140,12 +149,12 @@ function _M.country(ip_str)
       elseif err then
         geo_warn_once("[cfm_geo] mmdb lookup failed: ", tostring(err))
       end
-      return ""
+      return "", false
     end
-    return (res.country and res.country.iso_code) or ""
+    return (res.country and res.country.iso_code) or "", true
   end
 
-  return ""
+  return "", false
 end
 
 -- mode returns the active backend ("init_lookup", "new_object",
