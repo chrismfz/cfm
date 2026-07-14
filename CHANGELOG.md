@@ -59,6 +59,22 @@ back-filled here — see the git/PR history for that period.
   `angie.conf`). Found by the 2026-07 edge Lua audit (F22, medium).
 
 ### Fixed
+- **sslcollector socket now actually self-heals (F28 wiring gap).** The F28 fix
+  gave the SSL-collector unix-socket server a generation-guarded respawn with
+  exponential backoff, but that machinery was only ever driven by
+  `SockLifecycle.ApplyConfig`, which the daemon re-invokes **only on a `cfm.conf`
+  content change** — never on the periodic tick (unlike `lsmLc.ApplyConfig`). So a
+  socket that died mid-life, or failed its **boot-time bind** (stale socket file,
+  parent dir not yet ready, `EADDRINUSE` after an unclean restart), stayed down
+  until an operator edited `cfm.conf` or restarted the daemon — degrading cert
+  delivery to the edge (SNI→cert) with no auto-recovery, i.e. the original F28 bug
+  largely surviving. Added a lightweight `SockLifecycle.Tick(ctx)` that drives only
+  the respawn state machine (no token re-validation or lua-token rewrite, so **no
+  new per-tick file I/O**) and wired it into the daemon tick loop next to
+  `lsmLc.ApplyConfig`. A dead server is now restarted within one tick, rate-bounded
+  by the existing backoff; healthy/disabled/stopped ticks are cheap no-ops. Not on
+  the request hot path (availability of TLS cert delivery, not request blocking).
+  Found by the multi-agent re-verification of the 2026-07 edge Lua audit.
 - **log-cfm ingest backoff is no longer dead code (declare `cfm_metrics`).** The
   edge's request-log shipper (`log-cfm.lua`) has connect-backoff + first-3-failures
   logging keyed on a `lua_shared_dict cfm_metrics` that was never declared in any

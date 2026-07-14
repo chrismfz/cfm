@@ -44,12 +44,16 @@ func sockBackoff(fail int) time.Duration {
 
 // SockLifecycle owns the start/stop/restart state of the SSLCollector
 // unix socket server. Create once with NewSockLifecycle (passing the shared
-// Collector), then call ApplyConfig on every daemon tick after config is
-// parsed. It is a no-op when nothing relevant has changed.
+// Collector), then call ApplyConfig when the parsed config changes and Tick on
+// every daemon tick. ApplyConfig is a no-op when nothing relevant has changed;
+// Tick is the cheap per-tick driver that autonomously respawns a server that
+// exited unexpectedly (the daemon only re-invokes ApplyConfig on a cfm.conf
+// change, so Tick — not ApplyConfig — is what makes the self-heal fire; F28).
 //
-// Concurrency: ApplyConfig and Stop are called only from the daemon's single
-// runDaemon goroutine, but the ServeSock goroutine spawned by ApplyConfig runs
-// concurrently and writes `running`/`failCount`/`nextAttempt` when it exits. The
+// Concurrency: ApplyConfig, Tick, and Stop are called only from the daemon's
+// single runDaemon goroutine, but the ServeSock goroutine spawned by
+// ApplyConfig/Tick runs concurrently and writes `running`/`failCount`/
+// `nextAttempt` when it exits. The
 // mutex guards every field below so the state machine is race-free regardless of
 // how many goroutines ever call in — audit F27/F28.
 type SockLifecycle struct {
@@ -71,6 +75,13 @@ type SockLifecycle struct {
 	failCount   int       // consecutive unexpected exits; drives sockBackoff
 	nextAttempt time.Time // earliest wall-clock time to respawn after a failure
 	stopped     bool      // Stop() called — ApplyConfig becomes a no-op (no respawn after shutdown)
+
+	// Last-applied server parameters, captured by ApplyConfig so an autonomous
+	// Tick respawn can restart ServeSock with the same token/ttl/max without
+	// re-validating or rewriting the token (that I/O belongs to ApplyConfig).
+	lastToken string
+	lastTTL   time.Duration
+	lastMax   int
 }
 
 // NewSockLifecycle returns a ready-to-use SockLifecycle.
@@ -208,15 +219,28 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 		l.nextAttempt = time.Time{}
 	}
 
-	// (Re)spawn. Cancel any prior generation (running, or already-dead-and-cancelled).
+	// (Re)spawn from the freshly-applied parameters. The goroutine spawn lives
+	// in spawnLocked so an autonomous Tick respawn reuses the exact same path.
+	l.cfgKey = key
+	l.sockPath = sp
+	l.lastToken = cfg.Token
+	l.lastTTL = ttl
+	l.lastMax = max
+	l.spawnLocked(ctx)
+}
+
+// spawnLocked cancels any prior generation and starts a fresh ServeSock
+// goroutine from the last-applied parameters (l.sockPath/lastToken/lastTTL/
+// lastMax). The caller MUST hold l.mu and MUST have populated those fields plus
+// l.cfgKey. Shared by ApplyConfig (config change / first start) and Tick
+// (autonomous respawn after an unexpected exit).
+func (l *SockLifecycle) spawnLocked(ctx context.Context) {
 	if l.cancel != nil {
 		l.cancel()
 		l.cancel = nil
 	}
 	c, cancel := context.WithCancel(ctx)
 	l.cancel = cancel
-	l.cfgKey = key
-	l.sockPath = sp
 	l.gen++
 	myGen := l.gen
 	l.running = true
@@ -226,7 +250,7 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 		logging.Logf("[sslcollector] WARNING: 'cfm' OS group not found — socket will be root:root 0660 and OpenResty workers will not be able to connect. Run install-openresty.sh to create the cfm user/group.")
 	}
 	// All inputs passed BY VALUE so the goroutine can never observe a later
-	// mutation of cfg. The goroutine touches only lifecycle state under l.mu.
+	// mutation. The goroutine touches only lifecycle state under l.mu.
 	go func(myGen uint64, sockPath, token string, gid int, ttl time.Duration, max int) {
 		err := ServeSock(c, l.col, SockServerConfig{
 			Enabled:  true,
@@ -249,9 +273,40 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 		if unexpected {
 			logging.Logf("[sslcollector] sock server stopped: %v", err)
 		}
-	}(myGen, sp, cfg.Token, gid, ttl, max)
+	}(myGen, l.sockPath, l.lastToken, gid, l.lastTTL, l.lastMax)
 
-	logging.Logf("[sslcollector] sock server enabled path=%s ttl=%s max=%d", sp, ttl, max)
+	logging.Logf("[sslcollector] sock server enabled path=%s ttl=%s max=%d", l.sockPath, l.lastTTL, l.lastMax)
+}
+
+// Tick drives the autonomous respawn state machine. Call it on EVERY daemon
+// tick. The daemon only re-invokes ApplyConfig when cfm.conf changes, so
+// without Tick a socket server that exited unexpectedly — a mid-life Serve
+// error, or a transient boot-time bind failure (stale socket, parent dir not
+// yet ready, EADDRINUSE) — would stay dead until an operator edited cfm.conf,
+// which is the original F28 bug the ApplyConfig-only respawn never actually
+// closed. Tick does NOT re-validate or rewrite the token (that I/O belongs to
+// ApplyConfig); it restarts ServeSock with the last-applied parameters and
+// honours the same backoff. It is a cheap, lock-guarded no-op when the server
+// is healthy, disabled, stopped, or never started.
+func (l *SockLifecycle) Tick(ctx context.Context) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stopped || l.cfgKey == "" {
+		// Stopped, disabled (cfgKey cleared), or never started — nothing to keep alive.
+		return
+	}
+	if l.running {
+		// Healthy — a good tick clears any accumulated backoff (mirrors ApplyConfig).
+		l.failCount = 0
+		l.nextAttempt = time.Time{}
+		return
+	}
+	// Enabled config but the goroutine is not running: it exited unexpectedly.
+	// Respawn once the backoff has elapsed.
+	if time.Now().Before(l.nextAttempt) {
+		return // cooling down; a later tick retries
+	}
+	l.spawnLocked(ctx)
 }
 
 // Stop cleanly shuts down the socket server. Call on daemon exit.

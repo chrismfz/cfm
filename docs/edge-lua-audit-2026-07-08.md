@@ -190,7 +190,7 @@ finding is closed.
 <a id="f05"></a>
 ### F05 — Backtick command-substitution detector is dead code: Lua patterns have no `|` alternation, so most backtick RCE payloads bypass PAY_BACKTICK (rule 317)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — `has_backtick_cmd` matches a leading token against a `BACKTICK_CMDS` set (word-exact); rule 317 kept at challenge (re-verified 2026-07-14)
 - **Severity:** high · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:1262`
 
@@ -277,7 +277,7 @@ finding is closed.
 <a id="f10"></a>
 ### F10 — Exclude glob compiler diverges from Go: Lua `*`->`.*`/`?`->`.` cross `/` (Go uses `[^/]*`), and Lua ignores `[]` globs Go honours — silently widening the in-path WAF-off region
 
-- **Status:** ☐ open
+- **Status:** ☑ done (security half) — glob emits `[^/]*`/`[^/]` so wildcards no longer cross a path segment (matches Go); `[]` bracket-class parity deferred as F10b (re-verified 2026-07-14)
 - **Severity:** medium · **Category:** regression (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_excl.lua:79`
 
@@ -313,7 +313,7 @@ finding is closed.
 <a id="f12"></a>
 ### F12 — detect_http_smuggling never fires: `|` alternation + case-sensitive precheck (rule 606)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — lowercase-first precheck + per-verb `%f[%a]` frontier loop over `SMUG_VERBS` (rule 606) (re-verified 2026-07-14)
 - **Severity:** medium · **Category:** waf-bypass (axis a/c) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:1904`
 
@@ -392,7 +392,7 @@ downgrade to logonly). Branch `claude/edge-audit-b64-obj-inject`.
 <a id="f15"></a>
 ### F15 — CT_BAD_BOUNDARY false-positives on RFC-legal multipart boundaries (`=`,`+`,`/`) used by JavaMail/SOAP/Python email clients (rule 604)
 
-- **Status:** ☐ open
+- **Status:** ☑ done — accept RFC 2046 `bcharsnospace` multipart boundaries (`=`,`+`,`/`, …), rule 604 (re-verified 2026-07-14)
 - **Severity:** medium · **Category:** fp (axis a) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_waf_detectors.lua:1722`
 
@@ -657,7 +657,7 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 <a id="f28"></a>
 ### F28 — sslcollector socket server that exits on its own (Serve error) is never restarted
 
-- **Status:** ☑ done — liveness-keyed no-change guard + generation-guarded goroutine respawn with bounded backoff, all mutex-guarded
+- **Status:** ☑ done — liveness-keyed no-change guard + generation-guarded goroutine respawn with bounded backoff, all mutex-guarded; per-tick `Tick()` driver wired into the daemon loop 2026-07-14 (re-verify) so the respawn actually fires
 - **Severity:** medium · **Category:** correctness (axis c) · **Verify:** CONFIRMED
 - **Location:** `internal/sslcollector/lifecycle.go:113`
 
@@ -668,6 +668,8 @@ EOF / CRLF), both **verified to FAIL** against the pre-fix `ReadString`. Branch
 **Suggested fix.** On unexpected goroutine return (ctx not cancelled) reset l.cancel=nil/l.cfgKey='' under a mutex so the next tick re-establishes the server, or supervise with bounded-backoff restart.
 
 **Fix landed:** `SockLifecycle` now carries a `sync.Mutex` guarding all lifecycle state plus a `running` flag, a monotonic `gen`, and `failCount`/`nextAttempt` backoff bookkeeping. The spawned goroutine, on exit, clears `running` **only if its `gen` is still current** (`if l.gen == myGen`) — a generation guard so a superseded goroutine (from a config-change restart) can never clobber the new generation's liveness. The no-change guard is now `key == l.cfgKey && l.running` (liveness, not the stale `cancel` handle), so a dead server no longer early-returns forever; a same-config dead server is respawned, **rate-bounded by exponential backoff** (`sockBackoff`: 5s→5m, doubling; reset on a healthy tick; a genuine config change bypasses backoff). `Stop()` sets a `stopped` flag that makes ApplyConfig a no-op (no respawn after shutdown). All goroutine inputs are passed **by value** (removing a latent capture of the `cfg` pointer). **Design via a 3-way design workflow** (minimal-mutex / serialized-supervisor / atomic-liveness → synthesis); took the mutex over the synthesis's lock-free single-atomic so `-race` *verifies* the synchronization and the goroutine uses the real error value rather than a subtle "ServeSock returns nil only after cancel" state-inference — robustness over minimalism for a TLS-critical path. **Tests** (`lifecycle_socket_test.go`, run under `-race`, clean over `-count=20`): `RespawnsAfterTransientBindFailure` (bind under a missing parent dir → later tick respawns and binds — **verified to FAIL against a simulated old never-respawn wedge**), `NoRespawnAfterStop`, `BackoffGatesRespawn`, plus (folded in from review) `ConfigChangeRestartStaysDialable` (drives ApplyConfig twice with a rotated token → the real production restart path → asserts a fresh inode, live+dialable) and `DisableThenReEnable`. **Adversarially reviewed via a 3-lens review workflow** (concurrency/race → *ship*: generation guard proven correct because ApplyConfig holds `l.mu` across the whole respawn critical section, no deadlock/race, `-race -count=10` clean; correctness; test-adequacy). Two review should-fixes folded in: **(a)** the lifecycle tests were writing the LIVE `/var/lib/cfm/lua/cfm_token.lua` (hardcoded const) — a `go test` on a root host that also runs the daemon would overwrite the live socket-auth token, the very outage class this fix prevents; made the shared-Lua paths injectable (`luaTokenPath`/`luaConfigPath`, default to the consts) and redirected the tests to `t.TempDir()` (verified hermetic); **(b)** added the ApplyConfig-level restart + disable/re-enable coverage above. PR #TBD.
+
+**Re-verify follow-up (2026-07-14) — wiring gap closed.** The multi-agent re-verify of the whole audit caught that the respawn machinery above, though correct, was **never driven**: the daemon re-invokes `sslSockLc.ApplyConfig` only from `onCFMConfChanged` (a `cfm.conf` content change), never on the periodic tick — unlike `lsmLc.ApplyConfig`, which the tick loop calls unconditionally. So a socket that died mid-life, or failed its **boot-time bind**, stayed dead until an operator edited `cfm.conf` or restarted the daemon — the original F28 bug substantially surviving, and contradicting this fix's own "self-heals on the next tick" claim. Fix: added a lightweight `SockLifecycle.Tick(ctx)` that drives only the respawn state machine (no token re-validation / lua-token rewrite — that I/O stays in `ApplyConfig`, so there is **no new per-tick file write**), extracted the spawn into a shared `spawnLocked`, and wired `sslSockLc.Tick(ctx)` into the daemon tick loop next to `lsmLc.ApplyConfig` (`cmd/cfm/main.go`). New test `TestSockLifecycle_TickRespawnsDeadServer` proves a bind-failed server is healed by **Tick alone** (no further `ApplyConfig`), does not thrash during backoff, and never respawns after `Stop()`. `go test -race ./internal/sslcollector/` clean.
 
 ---
 

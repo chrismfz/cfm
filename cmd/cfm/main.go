@@ -1340,6 +1340,15 @@ func runDaemon(args []string) {
 		// it every tick is safe.
 		lsmLc.ApplyConfig(ctx)
 
+		// Drive the sslcollector socket's autonomous respawn every tick. Unlike
+		// the subsystems above, sslSockLc.ApplyConfig runs only on a cfm.conf
+		// change (onCFMConfChanged), so a socket server that exited unexpectedly
+		// — a mid-life Serve error or a transient boot-time bind failure — would
+		// otherwise never self-heal until an operator touched cfm.conf. Tick is a
+		// cheap no-op when the socket is healthy/disabled and does no token I/O
+		// (that stays in ApplyConfig); it only restarts a dead server (F28).
+		sslSockLc.Tick(ctx)
+
 		// DumpFloodCounters and LoadPortScanner are internally non-blocking:
 		// each launches its own goroutine with an overlap guard (if a previous
 		// tick's work is still running, the new call is a no-op). No wrapper
