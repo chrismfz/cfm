@@ -294,125 +294,104 @@ end
 
 -- ── Box-wide UA throttle ────────────────────────────────────────────────────
 --
--- The throttle action is enforced via a token bucket keyed on the normalized
--- UA only (no host, no IP). One bucket per UA across the whole box, which is
--- what the operator wants: "FB hitting 100 vhosts at 5 r/s each = 500 r/s
--- aggregate; cap it at 10 r/s box-wide."
+-- The throttle action caps request rate per normalized UA (no host, no IP) —
+-- one budget per UA across the whole box, which is what the operator wants:
+-- "FB hitting 100 vhosts at 5 r/s each = 500 r/s aggregate; cap it at 10 r/s
+-- box-wide."
 --
--- We reuse the cfm_decisions shdict that cfm_rules already relies on, so no
--- new shared_dict declaration is needed in the nginx config.
-
-local BOX_RATE  = 10.0  -- tokens/sec
-local BOX_BURST = 20.0
-
-local _SH = ngx.shared.cfm_decisions
-
--- throttle returns (hit, retry_after_seconds). When hit==true the caller
--- should reject the request (typically with 429). When hit==false the
--- request consumed a token and should proceed normally.
+-- Implemented as a LOCK-FREE fixed-window counter (audit F22): each request does
+-- ONE atomic shdict:incr — no per-UA spin-lock, no read-modify-write, no
+-- get/set/delete. This matters precisely under the bot wave the throttle exists
+-- for: thousands of req/s of the SAME UA previously thundered on one per-UA 50ms
+-- lock (each loser spinning up to 10x ngx.sleep(1ms)) and did ~3-4 shdict writes
+-- per request. One incr replaces all of it.
 --
--- The token-bucket update is wrapped in pcall so any runtime error
--- between acquiring and releasing the shdict lock still drops the lock,
--- otherwise the 50ms TTL would stall every other worker hitting the same
--- UA. Lua has no defer; pcall is the canonical pattern.
-local function _throttle_inner(key, now)
-  local state = _SH:get(key)
-  local tokens, last
-  if state then
-    local t, ts = string.match(tostring(state), "^([^:]+):([^:]+)$")
-    tokens = tonumber(t)
-    last   = tonumber(ts)
-  end
-  if not tokens then tokens = BOX_BURST end
-  if not last   then last   = now end
+-- The counter lives in its OWN dict (cfm_ua_throttle), NOT cfm_decisions, so the
+-- throttle's writes never contend with the decision cache and abuse counters
+-- that share cfm_decisions — same isolation rationale as the geo cache (F25),
+-- and it means this hot-under-attack path can't slow unrelated lookups.
+--
+-- Window/limit preserve the old token bucket's intent: LIMIT requests per WINDOW
+-- seconds == BOX_RATE long-run (10/s) with a BOX_BURST head (20 in one window).
+-- A fixed window can admit up to ~2x LIMIT across a window boundary; for a coarse
+-- emergency cap that is acceptable. The key embeds the window index, so each
+-- window is a fresh key that self-expires via incr's init_ttl (no scan/delete),
+-- bounding live keys to ~2 per UA.
+local BOX_RATE  = 10.0                              -- requests/sec, long-run
+local BOX_BURST = 20                                -- requests allowed within one window
+-- WINDOW/LIMIT are DERIVED so LIMIT/WINDOW == BOX_RATE. NB: that invariant only
+-- holds while BOX_BURST is an integer multiple of BOX_RATE (true for 20/10 = 2s).
+-- If these ever become tunable, compute WINDOW to preserve the long-run rate
+-- rather than flooring the ratio (e.g. RATE=10,BURST=15 would floor to WINDOW=1
+-- and silently cap at 15/s).
+local WINDOW    = math.max(1, math.floor(BOX_BURST / BOX_RATE))  -- seconds (20/10 = 2)
+local LIMIT     = BOX_BURST                         -- max requests per window
 
-  local elapsed = now - last
-  if elapsed < 0 then elapsed = 0 end
-  tokens = math.min(BOX_BURST, tokens + elapsed * BOX_RATE)
+local _SH = ngx.shared.cfm_ua_throttle
+-- One-shot per-worker guard: a missing dict disables the throttle, so warn once
+-- (see the _SH-nil branch in throttle). _SH is bound at module load and never
+-- changes for the worker's life, so once is the right cadence.
+local _dict_missing_warned = false
 
-  local allow = tokens >= 1
-  local retry_after = 0
-  if allow then
-    tokens = tokens - 1
-  else
-    local need = 1 - tokens
-    retry_after = (need > 0) and (need / BOX_RATE) or 1
-  end
-
-  local ttl = math.max(2, math.floor((BOX_BURST / BOX_RATE) * 2))
-  local ok_set, err_set, forcible = _SH:set(key, tostring(tokens) .. ":" .. tostring(now), ttl)
-  if not ok_set then
-    -- shdict full and forcible eviction failed; bucket state isn't
-    -- persisted. Next request will read nil and reset to a full bucket,
-    -- effectively disabling the throttle. Rate-limit the log so a
-    -- saturated shdict can't turn into a logging outage.
-    if _SH:add("ua_emerg|_set_fail_logged", true, 60) then
-      ngx.log(ngx.ERR, "[cfm_ua_emergency] shdict :set failed (rate-limited 60s) key=", key,
-        " err=", tostring(err_set), " — throttle may be ineffective")
-    end
-  elseif forcible then
-    -- Stored, but evicted some other key. Rate-limit identically —
-    -- forcible is normal under LRU pressure and should not page.
-    if _SH:add("ua_emerg|_set_forcible_logged", true, 60) then
-      ngx.log(ngx.WARN, "[cfm_ua_emergency] shdict :set forced eviction (rate-limited 60s) key=", key)
-    end
-  end
-  return allow, retry_after
-end
-
+-- throttle returns (hit, retry_after_seconds). When hit==true the caller should
+-- reject the request (typically with 429). When hit==false the request is within
+-- the window budget and should proceed. retry_after is returned as an integer
+-- (>=1) on a hit: the caller serialises it into an HTTP Retry-After header, which
+-- is integer-seconds per RFC 7231 — a fractional value floors to 0 ("retry now")
+-- and defeats the throttle.
 function _M.throttle(normalized_ua)
-  if not _SH or not normalized_ua or normalized_ua == "" or normalized_ua == "-" then
+  if not _SH then
+    -- The dedicated dict is not declared — e.g. a hand-edited live /etc/cfm nginx
+    -- conf that didn't pick up the new `lua_shared_dict cfm_ua_throttle` line on
+    -- upgrade. Fail OPEN (a missing dict must never black out traffic), but this
+    -- silently DISABLES the emergency throttle while `block` rules keep working,
+    -- so surface it once per worker rather than no-op quietly.
+    if not _dict_missing_warned then
+      _dict_missing_warned = true
+      ngx.log(ngx.ERR, "[cfm_ua_emergency] shared dict 'cfm_ua_throttle' is not declared — ",
+        "UA emergency throttle is DISABLED; add `lua_shared_dict cfm_ua_throttle 4m;` to the nginx http block")
+    end
+    return false, 0
+  end
+  if not normalized_ua or normalized_ua == "" or normalized_ua == "-" then
     return false, 0
   end
 
-  local key      = "ua_emerg|" .. normalized_ua
-  local lock_key = key .. ":lock"
-  local now      = ngx.now()
+  local now = ngx.now()
+  local win = math.floor(now / WINDOW)
+  local key = "ua_emerg|" .. normalized_ua .. "|" .. win
 
-  -- Brief lock to avoid two workers racing the same token bucket.
-  local locked = false
-  for _ = 1, 10 do
-    if _SH:add(lock_key, true, 0.05) then
-      locked = true
-      break
+  -- One atomic increment: no lock, no read-modify-write. init=0 so a fresh
+  -- window key starts at 0 then +1; init_ttl (2x the window) is applied only
+  -- when the key is created, so the key ages out on its own once the window has
+  -- passed — no scan, no delete, ~2 live keys per UA (current + previous).
+  local count, err = _SH:incr(key, 1, 0, WINDOW * 2)
+  if not count then
+    -- incr failed (shdict full and forcible eviction failed): the counter can't
+    -- be maintained. Mirror the internal-error policy — fail-open by default so
+    -- a saturated dict can't black out legitimate traffic; operators who would
+    -- rather 429 can set fail_closed=true in
+    -- /var/lib/cfm/lua/cfm_ua_emergency_config.lua (see top of file). Rate-limit
+    -- the log so a saturated dict can't turn into a logging outage.
+    if _SH:add("ua_emerg|_incr_fail_logged", true, 60) then
+      ngx.log(ngx.ERR, "[cfm_ua_emergency] shdict :incr failed (rate-limited 60s) key=", key,
+        " err=", tostring(err), " — throttle may be ineffective")
     end
-    ngx.sleep(0.001)
-  end
-  if not locked then
-    -- Lock contention is a workload signal (many workers hitting the same
-    -- UA at once), not an internal error. The right response is brief
-    -- backpressure — give the lock a moment to clear — regardless of the
-    -- FAIL_CLOSED knob, which governs internal-error policy. Admitting
-    -- unconditionally here would defeat the throttle on exactly the
-    -- bot-wave conditions it exists for; closing for a full second is too
-    -- aggressive for a routine contention edge. 50ms is enough to let the
-    -- previous lock holder finish (the lock itself has a 50ms TTL).
-    return true, 0.05
-  end
-
-  -- pcall ensures _SH:delete runs even if _throttle_inner raises.
-  local ok, allow_or_err, retry_after = pcall(_throttle_inner, key, now)
-  _SH:delete(lock_key)
-
-  if not ok then
-    -- Internal error. Default policy is fail-open (return false, 0 ->
-    -- admit the request) so a transient bug can't black out legitimate
-    -- traffic. Operators who would rather 429 than risk silent
-    -- under-enforcement can set fail_closed=true in
-    -- /var/lib/cfm/lua/cfm_ua_emergency_config.lua (see top of file).
-    --
-    -- Return an INTEGER retry_after: the caller serialises it into an
-    -- HTTP Retry-After header, which is integer-seconds per RFC 7231 —
-    -- a fractional value floors to 0 and tells the client to retry
-    -- immediately, defeating the fail-closed intent entirely.
-    ngx.log(ngx.ERR, "[cfm_ua_emergency] throttle inner error: ", tostring(allow_or_err),
-      " fail_closed=", tostring(FAIL_CLOSED))
     if FAIL_CLOSED then
       return true, 1
     end
     return false, 0
   end
-  return (not allow_or_err), (retry_after or 0)
+
+  if count > LIMIT then
+    -- Over budget for this window. retry_after = whole seconds until the window
+    -- rolls (floored to >=1 so the integer Retry-After header stays meaningful).
+    local retry = WINDOW - (now - win * WINDOW)
+    if retry < 1 then retry = 1 end
+    return true, math.ceil(retry)
+  end
+
+  return false, 0
 end
 
 return _M
