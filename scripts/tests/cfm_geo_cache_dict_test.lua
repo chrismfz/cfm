@@ -44,16 +44,17 @@ _G.ngx = {
 }
 
 -- Controllable geo backend (the local upvalue geo_country resolves to this global
--- once the function is load()ed out of its chunk).
-local geo_ret, geo_calls = "US", 0
-_G.geo_country = function(_) geo_calls = geo_calls + 1; return geo_ret end
+-- once the function is load()ed out of its chunk). Returns (country, resolved) —
+-- resolved=false models a transient failure that must NOT be cached (F25 pt2).
+local geo_ret, geo_resolved, geo_calls = "US", true, 0
+_G.geo_country = function(_) geo_calls = geo_calls + 1; return geo_ret, geo_resolved end
 
 local geo_country_cached = assert(load(fnsrc .. "\nreturn geo_country_cached"))()
 assert(type(geo_country_cached) == "function", "extracted geo_country_cached is not a function")
 
--- ── miss → looks up, caches in cfm_geocache (TTL 90), returns value ───────────
+-- ── miss + RESOLVED → looks up, caches in cfm_geocache (TTL 90), returns value ─
 do
-  reset(); geo_ret = "US"; geo_calls = 0
+  reset(); geo_ret = "US"; geo_resolved = true; geo_calls = 0
   local cc = geo_country_cached("1.2.3.4")
   check(cc == "US", "returns the looked-up country")
   check(geo_calls == 1, "cache miss performs exactly one lookup")
@@ -62,6 +63,27 @@ do
   check(geo_writes[1] and geo_writes[1].v == "US", "value is the country code")
   check(geo_writes[1] and geo_writes[1].ttl == 90, "F25: TTL is 90s (was 300), got " .. tostring(geo_writes[1] and geo_writes[1].ttl))
   check(decisions_writes == 0, "F25: geo is NOT written to cfm_decisions")
+end
+
+-- ── miss + a definitive no-country ("" resolved) IS cached ───────────────────
+do
+  reset(); geo_ret = ""; geo_resolved = true; geo_calls = 0
+  local cc = geo_country_cached("3.3.3.3")
+  check(cc == "", "definitive no-country returns ''")
+  check(#geo_writes == 1 and geo_writes[1].v == "", "F25 pt2: a resolved '' (no country) IS cached")
+  geo_country_cached("3.3.3.3")   -- served from cache now
+  check(geo_calls == 1, "resolved '' is cached, so the next request is a hit")
+end
+
+-- ── miss + NOT resolved (geo down / mid-update) → '' fail-open, NOT cached ────
+do
+  reset(); geo_ret = ""; geo_resolved = false; geo_calls = 0
+  local cc = geo_country_cached("7.7.7.7")
+  check(cc == "", "F25 pt2: an unresolved lookup returns '' (fail-open)")
+  check(#geo_writes == 0, "F25 pt2: an unresolved lookup is NOT cached")
+  check(decisions_writes == 0, "unresolved lookup writes nothing anywhere")
+  geo_country_cached("7.7.7.7")   -- must re-look-up, not serve a pinned ''
+  check(geo_calls == 2, "F25 pt2: a not-cached failure is retried on the next request")
 end
 
 -- ── hit → returns cached, no lookup, no write ────────────────────────────────

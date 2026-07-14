@@ -39,8 +39,8 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**51 / 56 fixed.** Grouped by severity; each links to its detail section. The
-remaining 5 open findings are all **perf**/**fp** — the **dos**/security cluster
+**52 / 56 fixed.** Grouped by severity; each links to its detail section. The
+remaining 4 open findings are all **perf**/**fp** — the **dos**/security cluster
 is closed.
 
 ### High (7)
@@ -70,7 +70,7 @@ is closed.
 - [ ] **[F21](#f21)** · `configs/lua/cfm_rules.lua:58` · _fp_ (axis a) — cfm_rules throttle lock contention fails toward 429, over-throttling legit bursts from shared/NAT IPs
 - [ ] **[F22](#f22)** · `configs/lua/cfm_ua_emergency.lua:322` · _perf_ (axis b) — UA-emergency throttle churns the shared cfm_decisions dict (3 writes + spin-lock per request) under the bot wave it targets
 - [x] **[F24](#f24)** · `configs/lua/cfm_waf_detectors.lua:850` · _perf_ (axis b) — is_known_legit_xmlrpc normalizes args AND body on every request before the cheap /xmlrpc.php URI gate
-- [ ] **[F25](#f25)** · `configs/lua/cfm.lua:1121` · _perf_ (axis b) — Per-IP geo results and abuse counters share the high-churn cfm_decisions dict; geo uses a 3.3x-longer 300s TTL and negatively caches transient lookup failures
+- [x] **[F25](#f25)** · `configs/lua/cfm.lua:1121` · _perf_ (axis b) — Per-IP geo results and abuse counters share the high-churn cfm_decisions dict; geo uses a 3.3x-longer 300s TTL and negatively caches transient lookup failures
 - [x] **[F26](#f26)** · `internal/webdetector/ingest_socket.go:155` · _dos_ (axis b/c) — Ingest socket bufio.ReadString does not bound line length — unbounded memory (comment falsely claims a 256KB bound)
 - [x] **[F27](#f27)** · `internal/sslcollector/socketapi.go:312` · _regression_ (axis b) — sslcollector socket restart race: old listener's Close() unlinks the freshly-bound new socket, breaking cert delivery until next restart
 - [x] **[F28](#f28)** · `internal/sslcollector/lifecycle.go:113` · _correctness_ (axis c) — sslcollector socket server that exits on its own (Serve error) is never restarted
@@ -570,7 +570,7 @@ against the pre-fix order (2 normalize calls on a non-xmlrpc request). Branch
 <a id="f25"></a>
 ### F25 — Per-IP geo results and abuse counters share the high-churn cfm_decisions dict; geo uses a 3.3x-longer 300s TTL and negatively caches transient lookup failures
 
-- **Status:** ◑ part 1 landed (geo relocated to its own `cfm_geocache` dict at 90s TTL — the crowd-out is fixed); part 2 (don't cache transient lookup failures) is a follow-up
+- **Status:** ☑ done — geo relocated to its own `cfm_geocache` dict at 90s TTL (part 1, the crowd-out); transient lookup failures are no longer cached (part 2, the poisoning)
 - **Severity:** medium · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm.lua:1121`
 
@@ -584,7 +584,7 @@ against the pre-fix order (2 normalize calls on a non-xmlrpc request). Branch
 
 **Deliberately NOT done here.** The **geo-active gate** (suggested fix item 1) is intentionally skipped: once geo is isolated there is no crowd-out, so the gate is a pure CPU optimization, and a wrong/laggy gate would silently disable geo rules (a security false-negative) — not worth the risk. Moving the *abuse counters* is unnecessary: relocating geo (the aggressor) already protects them.
 
-**Fix landed (part 2 — failure caching):** _(follow-up — distinguish `cfm_geo.country()` lookup-failure from no-country so a transient mmdb hiccup isn't cached; part 1's 300s→90s TTL already shrank the poison window)_
+**Fix landed (part 2 — failure caching):** `cfm_geo.country()` now returns `(code, resolved)`; `resolved` is true only when an mmdb lookup completed (a real code, or `""` = definitively no country for the IP) and false for every failure path (geo disabled / DB open-init failed / within the retry cooldown / per-lookup error), which still return `""` fail-open. `geo_country_cached` caches only resolved answers, so a transient mmdb hiccup (e.g. the DB caught mid atomic-rename during a MaxMind update) is no longer pinned as a sticky `""` for the TTL — the next request retries, and `cfm_geo`'s own retry cooldown (`GEO_INIT_RETRY_SEC`) bounds any lookup storm during a sustained outage (a request in cooldown returns `""` via a cheap time-compare, no mmdb work). This closes the `""`-for-both-cases conflation (the correctness/FP half of the finding). Tests: `cfm_geo_retry_test.lua` asserts the `resolved` contract through the real module across every failure/success path — including a successful lookup with no country → `("", true)` (cacheable), distinct from a failure's `("", false)`; `cfm_geo_cache_dict_test.lua` asserts a not-resolved lookup returns `""` but is NOT cached and is retried next request.
 
 ---
 
