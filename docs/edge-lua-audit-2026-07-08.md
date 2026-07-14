@@ -1518,7 +1518,7 @@ Branch `claude/edge-audit-ssl-debug-loopback`.
 <a id="f57"></a>
 ### F57 — purge_ip scans the entire cfm_decisions dict under lock (get_keys(0)) on a force-unblock
 
-- **Status:** ☐ open — **deferred** pending F25/F22 (see Decision); no correct standalone fix is a good trade
+- **Status:** ☐ deferred (accepted, 2026-07-14) — F25 + F22 have since landed, shrinking `cfm_decisions`, so the force-unblock scan is materially cheaper; no standalone code change (see Decision)
 - **Severity:** low · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_purge.lua:128`
 
@@ -1537,7 +1537,9 @@ Branch `claude/edge-audit-ssl-debug-loopback`.
 
 The `get_keys(0)` cost scales with the `cfm_decisions` cardinality, and **F25** (per-IP geo at a 300s TTL — the biggest driver under an IP flood) and **F22** (UA-emergency churn) both move their high-cardinality tenants to dedicated dicts. Doing those first shrinks the dict that makes this scan expensive, so F57 largely dissolves. Revisit after they land. The `cfm_purge.lua` comment now records this reasoning inline.
 
-**Fix landed:** _(deferred — see Decision above; not counted as fixed)_
+**Update (2026-07-14): closed as accepted-deferral.** F25 (geo → `cfm_geocache`) and F22 (UA-emergency → `cfm_ua_throttle`) have both landed, moving the two highest-cardinality tenants out of `cfm_decisions`, so the force-unblock `get_keys(0)` scan is now materially cheaper on a large box. Combined with the rarity (loopback+token-gated admin action) and the fact that every correctness-preserving standalone fix remains a bad trade (above), the operator accepted this as a permanent deferral — no code change. Re-open only if force-unblock latency becomes an observed problem.
+
+**Fix landed:** _(deferred/accepted — see Decision + Update above; not a code change)_
 
 ---
 
