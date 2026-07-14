@@ -58,6 +58,18 @@ back-filled here — see the git/PR history for that period.
   unchanged. Adds one 4 MB shared dict (declared in both `openresty.conf` and
   `angie.conf`). Found by the 2026-07 edge Lua audit (F22, medium).
 
+### Fixed
+- **log-cfm ingest backoff is no longer dead code (declare `cfm_metrics`).** The
+  edge's request-log shipper (`log-cfm.lua`) has connect-backoff + first-3-failures
+  logging keyed on a `lua_shared_dict cfm_metrics` that was never declared in any
+  nginx config — so the whole subsystem silently no-op'd: when the ingest socket
+  was degraded, every request spawned an unthrottled connect attempt and the
+  failures were 100% silent. Declaring the dict (1 MB, in both `openresty.conf`
+  and `angie.conf`) re-enables the intended exponential backoff (0.1→5 s) and the
+  connect-failure warnings. Log shipping is deferred off the log phase either way,
+  so this never affected request latency. Found by the 2026-07 edge Lua audit
+  round-2 triage.
+
 ### Security
 - **Geo lookup failures are no longer cached as a country (F25, part 2).** The
   edge GeoIP layer returned `""` both for a genuine "no country for this IP" and
