@@ -36,6 +36,25 @@ local function profile_for(name)
   return PROFILES[k] or PROFILES.soft_bot
 end
 
+-- throttle_hit returns (hit, retry_after). hit==true means reject (429).
+--
+-- Lock-free fixed-window counter (audit F21): ONE atomic SH:incr per request,
+-- keyed on (profile, host, ip, window). The previous implementation took a
+-- per-(profile,host,ip) spin-lock (SH:add + up to 10x ngx.sleep(1ms)) around a
+-- read-modify-write token bucket, and on lock-acquisition TIMEOUT returned a 429
+-- regardless of token availability. Under carrier-grade NAT / a shared proxy,
+-- many legit users behind one IP contend on that single lock, so lock losers
+-- were 429'd with bucket capacity to spare — over-throttling legit bursts. A
+-- lock-free counter has no contention to mis-handle: every request is counted
+-- atomically, so the cap is exactly LIMIT/window with no false throttles (and no
+-- spin-lock churn on the shared cfm_decisions dict).
+--
+-- LIMIT requests per WINDOW seconds preserves each profile's rate/burst intent:
+-- WINDOW = burst/rate, LIMIT = burst (soft_bot 20/10s = 2/s burst 20; medium
+-- 10/10s; hard 5/10s). A fixed window can admit up to ~2x LIMIT across a window
+-- boundary — acceptable for a coarse bot throttle. (Deliberately NOT changed:
+-- keying purely on IP still shares one budget across a NAT/proxy's users; that
+-- is a deeper design question the finding raises separately.)
 local function throttle_hit(profileName, host, ip)
   if not SH then
     -- Intentional degraded mode: fail open and allow requests when cfm_decisions SHM is unavailable.
@@ -43,53 +62,43 @@ local function throttle_hit(profileName, host, ip)
   end
 
   local p = profile_for(profileName)
-  local key = "tr|" .. tostring(profileName or "soft_bot") .. "|" .. tostring(host or "-") .. "|" .. tostring(ip or "-")
-  local lock_key = key .. ":lock"
+  -- WINDOW = burst/rate reproduces the profile's long-run rate ONLY while burst is
+  -- an integer multiple of rate and rate <= burst (true for all 3 shipped
+  -- profiles → 10s). A future profile with rate > burst would collapse to
+  -- window=1 and enforce burst/s; compute WINDOW to preserve the rate if that
+  -- ever changes.
+  local window = math.max(1, math.floor(p.burst / p.rate))
+  local limit  = p.burst
   local now = ngx.now()
+  local win = math.floor(now / window)
+  -- IP is the LAST field on purpose: cfm_purge.purge_ip finds throttle keys by
+  -- matching the trailing IP on a force-unblock, so the window index goes BEFORE
+  -- it. (Format: tr|<profile>|<host>|<window>|<ip>.)
+  local key = "tr|" .. tostring(profileName or "soft_bot") .. "|" ..
+              tostring(host or "-") .. "|" .. win .. "|" .. tostring(ip or "-")
 
-  local locked = false
-  for _ = 1, 10 do
-    if SH:add(lock_key, true, 0.05) then
-      locked = true
-      break
+  -- init=0 so a fresh window key starts at 0 then +1; init_ttl (2x the window)
+  -- is applied on CREATE only, so the key ages out on its own after the window.
+  local count, err = SH:incr(key, 1, 0, window * 2)
+  if not count then
+    -- incr failed (shdict full and forcible eviction failed). Fail OPEN — a
+    -- saturated dict must not black out legitimate traffic (matches the SH-missing
+    -- policy above) — and rate-limit the log so it can't become a logging outage.
+    if SH:add("tr|_incr_fail_logged", true, 60) then
+      ngx.log(ngx.ERR, "[cfm_rules] shdict :incr failed (rate-limited 60s) key=", key,
+        " err=", tostring(err), " — throttle may be ineffective")
     end
-    ngx.sleep(0.001)
-  end
-  if not locked then
-    return true, 0.05
+    return false, 0
   end
 
-  local state = SH:get(key)
-  local tokens, last
-  if state then
-    local t, ts = string.match(tostring(state), "^([^:]+):([^:]+)$")
-    tokens = tonumber(t)
-    last = tonumber(ts)
+  if count > limit then
+    -- Over budget for this window. retry_after = whole seconds until it rolls
+    -- (>=1 so the integer Retry-After header the caller emits stays meaningful).
+    local retry = window - (now - win * window)
+    if retry < 1 then retry = 1 end
+    return true, math.ceil(retry)
   end
-
-  if not tokens then
-    -- rollout compatibility with old split keys
-    tokens = tonumber(SH:get(key .. ":tok")) or p.burst
-    last = tonumber(SH:get(key .. ":ts")) or now
-  end
-
-  local elapsed = math.max(0, now - (last or now))
-  tokens = math.min(p.burst, tokens + elapsed * p.rate)
-
-  local allow = tokens >= 1
-  local retry_after = 0
-  if allow then
-    tokens = tokens - 1
-  else
-    local need = 1 - tokens
-    retry_after = need > 0 and (need / p.rate) or 1
-  end
-
-  local ttl = math.max(2, math.floor((p.burst / p.rate) * 2))
-  SH:set(key, tostring(tokens) .. ":" .. tostring(now), ttl)
-  SH:delete(lock_key)
-
-  return (not allow), retry_after
+  return false, 0
 end
 
 -- apply executes rule action side effects and returns normalized result:

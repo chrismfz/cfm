@@ -39,9 +39,11 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**54 / 56 fixed.** Grouped by severity; each links to its detail section. The
-remaining 2 open findings are **F21** (fp) and **F57** (perf, deferred pending
-F25/F22 which have now landed) — the **dos**/security cluster is closed.
+**55 / 56 fixed.** Grouped by severity; each links to its detail section. The
+only remaining item is **F57** (perf) — deliberately deferred (documented), and
+now that its dependencies F25 + F22 have landed, `cfm_decisions` is materially
+smaller, so its force-unblock scan is much cheaper. Every **dos**/security/**fp**
+finding is closed.
 
 ### High (7)
 
@@ -67,7 +69,7 @@ F25/F22 which have now landed) — the **dos**/security cluster is closed.
 - [x] **[F17](#f17)** · `configs/lua/cfm_clamav.lua:82` · _security_ (axis c) — ClamAV upload scan silently skipped when multipart filename= sits beyond the WAF body cap (32 KB; 8 KB when this was found, raised by F08)
 - [x] **[F19](#f19)** · `configs/lua/sslcollector.lua:743` · _perf_ (axis b) — sslcollector re-parses PEM cert+key to DER on every TLS handshake (parsed material never cached)
 - [x] **[F20](#f20)** · `configs/lua/cfm_stats.lua:134` · _perf_ (axis b) — cfm_stats decisions_stats/sslcache_stats call get_keys() with large N, locking the hot cfm_decisions dict on every dashboard poll
-- [ ] **[F21](#f21)** · `configs/lua/cfm_rules.lua:58` · _fp_ (axis a) — cfm_rules throttle lock contention fails toward 429, over-throttling legit bursts from shared/NAT IPs
+- [x] **[F21](#f21)** · `configs/lua/cfm_rules.lua:58` · _fp_ (axis a) — cfm_rules throttle lock contention fails toward 429, over-throttling legit bursts from shared/NAT IPs
 - [x] **[F22](#f22)** · `configs/lua/cfm_ua_emergency.lua:322` · _perf_ (axis b) — UA-emergency throttle churns the shared cfm_decisions dict (3 writes + spin-lock per request) under the bot wave it targets
 - [x] **[F24](#f24)** · `configs/lua/cfm_waf_detectors.lua:850` · _perf_ (axis b) — is_known_legit_xmlrpc normalizes args AND body on every request before the cheap /xmlrpc.php URI gate
 - [x] **[F25](#f25)** · `configs/lua/cfm.lua:1121` · _perf_ (axis b) — Per-IP geo results and abuse counters share the high-churn cfm_decisions dict; geo uses a 3.3x-longer 300s TTL and negatively caches transient lookup failures
@@ -508,7 +510,7 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 <a id="f21"></a>
 ### F21 — cfm_rules throttle lock contention fails toward 429, over-throttling legit bursts from shared/NAT IPs
 
-- **Status:** ☐ open
+- **Status:** ☑ done — throttle is now a lock-free fixed-window counter, so there is no lock contention to over-429 on
 - **Severity:** medium · **Category:** fp (axis a) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_rules.lua:58`
 
@@ -518,7 +520,7 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 
 **Suggested fix.** On lock-acquisition timeout fail OPEN (match SH-missing policy) or do a best-effort lock-free token update; reconsider keying purely on IP for shared-NAT.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** Took the finding's second option (lock-free) over the first (fail-open on lock timeout), for the same reason F22 did: it fixes the FP at the ROOT — with no lock there is no contention to mis-handle — and avoids the under-throttle leak the fail-open flip would introduce (a bot bursting concurrently to force lock contention would otherwise slip requests through). `throttle_hit` is now a lock-free fixed-window counter: ONE atomic `SH:incr(key, 1, 0, WINDOW*2)` per request, keyed `tr|<profile>|<host>|<window>|<ip>`. `LIMIT = profile.burst` requests per `WINDOW = floor(profile.burst/profile.rate)` seconds preserves each profile's rate/burst intent (all three profiles have burst/rate = 10 → WINDOW = 10s; LIMIT = 20/10/5 for soft/medium/hard). The spin-lock (`add`-lock + up to 10×`ngx.sleep(1ms)`), the read-modify-write bucket, and the legacy split-key migration are gone; `incr` failure now fails OPEN (matching the SH-missing branch — the exact fail-open the finding asked for). The `tr|…` key keeps the IP as its LAST field, so `cfm_purge.purge_ip` still clears throttle state on a force-unblock (doc-comment updated; the matcher is unchanged). Bonus: removes another spin-lock tenant from `cfm_decisions` (~4 dict ops + a sleep-spin → 1 atomic incr). **Deliberately NOT done:** the finding's "reconsider keying purely on IP for shared-NAT" — a shared NAT/proxy IP still shares one budget across its users; splitting that is a deeper design question (would need a NAT-aware key or a separate limiter) left out of scope. Tests: `cfm_rules_race_test.lua` rewritten (exactly LIMIT pass then throttle with integer retry≥1; window reset; per-IP independence; incr-fail fails OPEN; IP-is-last-field for purge compat; SH-missing fails open; `ngx.sleep` stubbed to error to assert lock-freeness).
 
 ---
 

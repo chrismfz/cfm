@@ -7,7 +7,8 @@
 -- direct delete; see below). These keys are the WAF enforcement/cache state that
 -- lives entirely inside nginx and is invisible to any firewall/blocklist search:
 --
---   tr|<profile>|<host>|<ip>[:lock|:tok|:ts]   throttle token buckets (cfm_rules)
+--   tr|<profile>|<host>|<window>|<ip>          throttle window counters (cfm_rules)
+--     (legacy pre-F21: tr|<profile>|<host>|<ip>[:lock|:tok|:ts] — still matched)
 --   d|<ip>|<host>|<method>|<scheme>|<uri>      per-URL decision cache (cfm.lua)
 --   ds|<ip>|<host>|<scope>                     static-asset decision cache
 --   geo|<ip>                                   country-code cache (cfm_geocache dict; direct-deleted, F25)
@@ -99,8 +100,10 @@ local function split_pipe(s)
   return parts
 end
 
--- strip_tr_suffix removes the token-bucket sub-key suffixes (:lock/:tok/:ts).
--- IPv6 fields cannot end in these (they are not hex), so this is unambiguous.
+-- strip_tr_suffix removes the LEGACY token-bucket sub-key suffixes (:lock/:tok/
+-- :ts) from a pre-F21 tr| key. The lock-free window counter writes no such suffix,
+-- so this is a no-op for current keys and only matters for pre-upgrade keys still
+-- aging out. IPv6 fields cannot end in these (not hex), so this is unambiguous.
 local function strip_tr_suffix(s)
   for _, suf in ipairs({ ":lock", ":tok", ":ts" }) do
     if s:sub(-#suf) == suf then
