@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
+- **Traffic-rules throttle no longer over-429s shared/NAT IPs (F21).** The
+  `rule_action=throttle` limiter took a per-(profile,host,ip) spin-lock around a
+  token bucket, and on lock-acquisition timeout returned a 429 regardless of
+  remaining budget. Under carrier-grade NAT or a shared proxy, many legitimate
+  users behind one IP contend on that single lock, so lock-losers were 429'd with
+  budget to spare — a false positive. It is now a lock-free fixed-window counter
+  (one atomic `incr` per request, keyed per profile/host/window/IP): with no lock
+  there is no contention to mis-handle, so a legitimate burst is admitted up to
+  the profile's limit exactly. The per-profile rate/limit is preserved (soft_bot
+  20 per 10 s = 2/s + burst 20, medium 10/10 s, hard 5/10 s); a window boundary
+  can momentarily admit up to ~2×, fine for a coarse bot throttle. `incr` failure
+  now fails open (admit), matching the existing missing-dict policy. Force-unblock
+  still clears throttle state (the IP stays the key's last field). Not addressed:
+  a shared NAT IP still shares one budget across its users (a deeper keying
+  question the finding raises). Found by the 2026-07 edge Lua audit (F21, medium).
 - **Dashboard stats no longer scan the hot shared dicts on every poll (F20).**
   `/cfm-admin/lua-stats` computed its key-count breakdowns with `get_keys(25000)`
   on `cfm_decisions` and `get_keys(8000)` on `sslcache` on every poll. `get_keys`
