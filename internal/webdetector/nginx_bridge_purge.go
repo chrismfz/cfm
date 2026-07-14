@@ -3,11 +3,11 @@
 // Force-unblock support for the OpenResty/Lua WAF planes.
 //
 // A blocklist/firewall unblock does NOT touch the WAF enforcement state that
-// lives in the OpenResty layer: the Go-side per-IP challenge/block map, and the
+// lives in the OpenResty layer: the Go-side per-IP challenge/block map, the
 // per-IP entries in the `cfm_decisions` shared dict (throttle token buckets,
-// decision cache, geo cache, solved-ok touch, waf-push cooldown). A user can
-// therefore stay stuck behind a challenge/throttle while every blocklist search
-// for their IP comes back empty.
+// decision cache, solved-ok touch, waf-push cooldown), and the per-IP country
+// code in the `cfm_geocache` dict. A user can therefore stay stuck behind a
+// challenge/throttle while every blocklist search for their IP comes back empty.
 //
 // ForceUnblock clears both: ClearIP() drops the Go-side challenge/block state,
 // and purgeShared() calls the local nginx /cfm-admin/purge-ip endpoint (served
@@ -89,8 +89,9 @@ type purgeSharedResponse struct {
 }
 
 // purgeShared calls the local nginx /cfm-admin/purge-ip endpoint, which deletes
-// the per-IP keys from the cfm_decisions shared dict and returns per-plane
-// counts. Authenticated with the same bridge token nginx already trusts.
+// the per-IP keys from the cfm_decisions and cfm_geocache shared dicts and
+// returns per-plane counts. Authenticated with the same bridge token nginx
+// already trusts.
 func (b *NginxBridge) purgeShared(ip string) ([]unblock.WAFFinding, error) {
 	// Validate and canonicalise the IP up front. Besides rejecting junk, this
 	// is a deliberate taint barrier: the value only ever leaves this function

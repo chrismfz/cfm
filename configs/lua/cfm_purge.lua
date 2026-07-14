@@ -2,14 +2,15 @@
 --
 -- Force-unblock support for the OpenResty/Lua WAF planes.
 --
--- Deletes every per-IP key for a given IP from the `cfm_decisions` shared dict.
--- These keys are the WAF enforcement/cache state that lives entirely inside
--- nginx and is invisible to any firewall/blocklist search:
+-- Deletes every per-IP key for a given IP from the nginx shared dicts — the
+-- `cfm_decisions` dict (scanned), plus the `cfm_geocache` country cache (a
+-- direct delete; see below). These keys are the WAF enforcement/cache state that
+-- lives entirely inside nginx and is invisible to any firewall/blocklist search:
 --
 --   tr|<profile>|<host>|<ip>[:lock|:tok|:ts]   throttle token buckets (cfm_rules)
 --   d|<ip>|<host>|<method>|<scheme>|<uri>      per-URL decision cache (cfm.lua)
 --   ds|<ip>|<host>|<scope>                     static-asset decision cache
---   geo|<ip>                                   country-code cache
+--   geo|<ip>                                   country-code cache (cfm_geocache dict; direct-deleted, F25)
 --   ok_touch|<ip>|<host>|<scope>               solved-IP touch gate
 --   wafpush|<reason>|<ip>                      WAF push cooldown (IP is the LAST field)
 --   panel_cooldown|<ip>|<host>                 panel challenge cooldown (cfm_panel)
@@ -24,6 +25,7 @@
 local _M = {}
 
 local SHNAME     = "cfm_decisions"
+local GEONAME    = "cfm_geocache"   -- geo country-code cache lives in its own dict (F25)
 
 -- load_token returns the canonical bridge token (the same one cfm.lua
 -- trusts) via the shared cached accessor (cfm_bridge_cfg → cfm_filecache,
@@ -119,6 +121,20 @@ function _M.purge_ip(ip)
     return { ip = "", deleted = deleted, scanned = 0, error = "bad ip" }
   end
 
+  -- Geo country-code cache lives in its own dict (cfm_geocache, F25) and its key
+  -- is fully reconstructable, so clear it with a direct delete instead of the
+  -- full-keyspace scan below. Best-effort: the dict may be absent on a not-yet-
+  -- reloaded conf, and geo is a rule INPUT (not enforcement state), so a miss
+  -- never leaves a visitor stuck.
+  local gsh = ngx.shared[GEONAME]
+  if gsh then
+    local gk = "geo|" .. ip
+    if gsh:get(gk) ~= nil then
+      gsh:delete(gk)
+      deleted.geo = deleted.geo + 1
+    end
+  end
+
   -- 0 = all keys. This holds the dict lock (process-wide across all workers)
   -- for the duration of the scan, so it is deliberately reserved for this rare,
   -- loopback+token-gated admin action (a force unblock) rather than the request
@@ -149,8 +165,6 @@ function _M.purge_ip(ip)
 
     if prefix == "d" or prefix == "ds" then
       if parts[2] == ip then plane = "decision_cache" end
-    elseif prefix == "geo" then
-      if parts[2] == ip then plane = "geo" end
     elseif prefix == "ok_touch" then
       if parts[2] == ip then plane = "ok_touch" end
     elseif prefix == "panel_ok" or prefix == "panel_cooldown" or prefix == "panel_loop" then

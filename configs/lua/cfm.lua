@@ -1296,20 +1296,31 @@ end
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- geo_country() performs a MaxMind DB lookup on every call.  Cache the result
--- per source IP in cfm_decisions with a 5-minute TTL.  This eliminates repeated
--- lookups for the same IP across concurrent requests and across the 90-second
--- decision-cache window, which is especially important at high concurrency.
--- SH:get returns nil for a missing key; "" is a valid cached value meaning
--- "no country found", so we use nil as the cache-miss sentinel.
+-- per source IP so repeated lookups for the same IP (across concurrent requests
+-- and across the decision-cache window) are cheap.
+--
+-- The cache lives in its OWN shared dict (cfm_geocache), NOT cfm_decisions
+-- (audit F25): geo writes one entry per source IP, so under a high-distinct-IP
+-- flood they would dominate cfm_decisions and LRU-evict the 90s decision allows
+-- AND the abuse counters that also live there (cfm_rules throttle buckets,
+-- ua_emergency state, waf-push dedup) — silently weakening rate/abuse protection
+-- during exactly the flood the decision cache exists to shed. Isolating geo
+-- keeps that eviction pressure off the security state. TTL is aligned to the 90s
+-- decision-allow window (was 5 min); geo is stable per-IP, so the extra lookups
+-- are a cheap mmap FFI call. gsh:get returns nil for a missing key; "" is a valid
+-- cached value meaning "no country found", so nil is the cache-miss sentinel. If
+-- the dict is absent (a conf not yet reloaded to declare it) fall back to an
+-- uncached lookup so geo still works.
 local function geo_country_cached(ip_str)
-  if not SH or not ip_str or ip_str == "" or ip_str == "-" then
+  local gsh = ngx.shared.cfm_geocache
+  if not gsh or not ip_str or ip_str == "" or ip_str == "-" then
     return geo_country(ip_str)
   end
   local k      = "geo|" .. ip_str
-  local cached = SH:get(k)
+  local cached = gsh:get(k)
   if cached ~= nil then return cached end
   local cc = geo_country(ip_str) or ""
-  SH:set(k, cc, 300)   -- 5-minute TTL
+  gsh:set(k, cc, 90)   -- aligned to the 90s decision-cache TTL
   return cc
 end
 

@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Geo country cache moved to its own shared dict (F25, part 1).** The edge
+  cached per-IP GeoIP country codes in `cfm_decisions` — the hot dict that also
+  holds the decision cache and the abuse counters (throttle buckets, ua_emergency
+  state, waf-push dedup) — at a 300 s TTL. Under a high-distinct-IP flood the
+  one-entry-per-IP geo writes could LRU-evict the 90 s decision allows and those
+  counters, silently weakening rate/abuse protection during exactly the flood the
+  decision cache exists to shed. Geo now lives in a dedicated
+  `lua_shared_dict cfm_geocache 16m` at a 90 s TTL, so its eviction pressure no
+  longer touches the security state. Adds one 16 MB shared dict (declared in both
+  `openresty.conf` and `angie.conf`); force-unblock clears the geo key with a
+  direct delete from the new dict, and its `used_pct` is surfaced in the admin
+  stats alongside the decision dict. No change to the country value the rule
+  engine sees. Found by the 2026-07 edge Lua audit (F25, medium); the
+  transient-failure-caching half is a follow-up.
 - **Bridge decision server sets read/write/idle timeouts (F51).** The
   nginx-bridge `http.Server` had only `ReadHeaderTimeout` set, so a caller holding
   the socket token could send valid headers and then trickle the body to pin a

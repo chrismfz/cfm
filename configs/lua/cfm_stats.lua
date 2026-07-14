@@ -319,12 +319,33 @@ local function throttle_stats(d)
   }
 end
 
+-- geocache_stats reports capacity pressure on the dedicated geo dict (F25).
+-- It intentionally does NOT enumerate keys (no get_keys), so it never takes the
+-- geo dict lock on the hot geo path — capacity()/free_space() are cheap counters.
+-- Geo entries are a single namespace (geo|<ip>), so no per-plane breakdown is
+-- needed. Under a high-distinct-IP flood this is the dict now under eviction
+-- pressure (by design — see cfm.lua), so surfacing its used_pct alongside its
+-- sibling decision dict gives the operator that visibility.
+local function geocache_stats(d)
+  if not d then return { error = "dict_not_found" } end
+  local cap  = d:capacity()
+  local free = d:free_space()
+  local used = cap - free
+  return {
+    capacity_bytes = cap,
+    free_bytes     = free,
+    used_bytes     = used,
+    used_pct       = cap > 0 and math.floor(used / cap * 1000) / 10 or 0,
+  }
+end
+
 function _M.stats()
   return {
     ts        = ngx.now(),
     nginx     = nginx_worker_info(),
     sslcache  = sslcache_stats(ngx.shared.sslcache),
     decisions = decisions_stats(ngx.shared.cfm_decisions),
+    geocache  = geocache_stats(ngx.shared.cfm_geocache),
     cache     = cache_stats(ngx.shared.cfm_cache_stats),
     throttle  = throttle_stats(ngx.shared.cfm_cache_stats),
     waf       = waf_config(),
