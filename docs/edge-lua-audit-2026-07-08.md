@@ -570,7 +570,7 @@ against the pre-fix order (2 normalize calls on a non-xmlrpc request). Branch
 <a id="f25"></a>
 ### F25 — Per-IP geo results and abuse counters share the high-churn cfm_decisions dict; geo uses a 3.3x-longer 300s TTL and negatively caches transient lookup failures
 
-- **Status:** ☐ open
+- **Status:** ◑ part 1 landed (geo relocated to its own `cfm_geocache` dict at 90s TTL — the crowd-out is fixed); part 2 (don't cache transient lookup failures) is a follow-up
 - **Severity:** medium · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm.lua:1121`
 
@@ -580,7 +580,11 @@ against the pre-fix order (2 normalize calls on a non-xmlrpc request). Branch
 
 **Suggested fix.** Gate geo on a bridge-published 'geo rules active' flag and move geo (and eviction-sensitive abuse counters) to their own shared_dict with TTL<=90s; distinguish lookup-failure from no-country so failures are not cached 300s.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed (part 1 — relocation):** The geo cache moved out of `cfm_decisions` into a dedicated `lua_shared_dict cfm_geocache 16m` (declared byte-identically in `openresty.conf` + `angie.conf`), and its TTL dropped 300s→90s (aligned to the decision-allow window). `geo_country_cached` now reads/writes `cfm_geocache` with a nil-dict fallback to an uncached lookup (safe across a conf-not-yet-reloaded window). This removes geo's eviction pressure from the security state entirely — the crowd-out (the security half of the finding) is fixed. `cfm_purge.purge_ip` now clears the geo key with a direct `cfm_geocache:delete("geo|"..ip)` (the key is fully reconstructable) instead of matching it in the `get_keys(0)` scan; the geo scan case is removed (a stray pre-upgrade `geo|` entry left in `cfm_decisions` is inert and ages out ≤300s). Tests: `cfm_geo_cache_dict_test.lua` (writes go to `cfm_geocache` at TTL 90, never `cfm_decisions`; nil-dict fallback) and updated `cfm_purge_test.lua` (geo direct-deleted from `cfm_geocache`; stray `cfm_decisions` geo no longer scanned).
+
+**Deliberately NOT done here.** The **geo-active gate** (suggested fix item 1) is intentionally skipped: once geo is isolated there is no crowd-out, so the gate is a pure CPU optimization, and a wrong/laggy gate would silently disable geo rules (a security false-negative) — not worth the risk. Moving the *abuse counters* is unnecessary: relocating geo (the aggressor) already protects them.
+
+**Fix landed (part 2 — failure caching):** _(follow-up — distinguish `cfm_geo.country()` lookup-failure from no-country so a transient mmdb hiccup isn't cached; part 1's 300s→90s TTL already shrank the poison window)_
 
 ---
 

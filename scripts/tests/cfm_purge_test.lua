@@ -19,8 +19,9 @@ local function check(cond, msg)
   end
 end
 
--- Minimal ngx stub.
-local store, hdrs
+-- Minimal ngx stub. cfm_decisions is scanned (get_keys); cfm_geocache holds the
+-- geo cache and is cleared by a direct get/delete (F25).
+local store, geostore, hdrs
 local ngx_var = {}
 _G.ngx = {
   shared = {
@@ -31,6 +32,10 @@ _G.ngx = {
         return t
       end,
       delete = function(_, k) store[k] = nil end,
+    },
+    cfm_geocache = {
+      get    = function(_, k) return geostore[k] end,
+      delete = function(_, k) geostore[k] = nil end,
     },
   },
   req = { get_headers = function() return hdrs end },
@@ -48,7 +53,6 @@ local function fresh_store()
     ["tr|soft_bot|example.com|1.2.3.4:ts"]       = "x",
     ["d|1.2.3.4|example.com|GET|https|/"]        = "x",
     ["ds|1.2.3.4|example.com|web"]               = "x",
-    ["geo|1.2.3.4"]                              = "x",
     ["ok_touch|1.2.3.4|example.com|web"]         = "x",
     ["wafpush|WAF_RCE:REVERSE_SHELL|1.2.3.4"]    = "x", -- IP is LAST field
     ["panel_cooldown|1.2.3.4|panel.example.com"] = "x",
@@ -59,35 +63,50 @@ local function fresh_store()
     ["wafpush|403waf_flood|9.9.9.9"]             = "x",
     ["panel_cooldown|9.9.9.9|panel.example.com"] = "x",
     ["d|9.9.9.9|1.2.3.4|GET|https|/"]            = "x", -- victim IP as Host field
+    -- Geo now lives in cfm_geocache (F25): a stray geo key in cfm_decisions
+    -- (e.g. lingering from before an upgrade) is NO LONGER scanned/purged here.
+    ["geo|1.2.3.4"]                              = "x",
   }
 end
 
 store = fresh_store()
+geostore = { ["geo|1.2.3.4"] = "x" }
 local r = purge.purge_ip("1.2.3.4")
 check(r.deleted.throttle == 4,       "throttle should be 4, got " .. tostring(r.deleted.throttle))
 check(r.deleted.decision_cache == 2, "decision_cache should be 2, got " .. tostring(r.deleted.decision_cache))
-check(r.deleted.geo == 1,            "geo should be 1")
+check(r.deleted.geo == 1,            "geo should be 1 (deleted from cfm_geocache)")
 check(r.deleted.ok_touch == 1,       "ok_touch should be 1")
 check(r.deleted.wafpush == 1,        "wafpush should be 1 (IP is last field), got " .. tostring(r.deleted.wafpush))
 check(r.deleted.panel == 3,          "panel should be 3, got " .. tostring(r.deleted.panel))
 
+check(geostore["geo|1.2.3.4"] == nil,                          "geo key must be deleted from cfm_geocache")
+check(store["geo|1.2.3.4"] ~= nil,                             "stray geo in cfm_decisions is no longer scanned/purged (F25: geo moved to cfm_geocache)")
 check(store["tr|soft_bot|example.com|9.9.9.9"] ~= nil,          "other-IP throttle must survive")
 check(store["wafpush|403waf_flood|9.9.9.9"] ~= nil,             "other-IP wafpush must survive")
 check(store["panel_cooldown|9.9.9.9|panel.example.com"] ~= nil, "other-IP panel must survive")
 check(store["d|9.9.9.9|1.2.3.4|GET|https|/"] ~= nil,            "victim IP in Host field must NOT be purged")
 
--- ── IPv6: throttle :lock suffix stripping + geo ──────────────────────────────
+-- ── IPv6: throttle :lock suffix stripping + geo (direct-delete) ───────────────
 store = {
-  ["geo|2a02:587:dc1f::1"]              = "x",
   ["tr|soft_bot|h|2a02:587:dc1f::1"]    = "x",
   ["tr|soft_bot|h|2a02:587:dc1f::1:lock"] = "x",
 }
+geostore = { ["geo|2a02:587:dc1f::1"] = "x" }
 local r6 = purge.purge_ip("2a02:587:dc1f::1")
-check(r6.deleted.geo == 1,      "v6 geo should be 1")
+check(r6.deleted.geo == 1,      "v6 geo should be 1 (deleted from cfm_geocache)")
+check(geostore["geo|2a02:587:dc1f::1"] == nil, "v6 geo key must be deleted from cfm_geocache")
 check(r6.deleted.throttle == 2, "v6 throttle should be 2 (incl :lock), got " .. tostring(r6.deleted.throttle))
+
+-- ── geocache dict absent (conf not yet reloaded): geo delete is a no-op ───────
+_G.ngx.shared.cfm_geocache = nil
+store = {}
+local rno = purge.purge_ip("5.6.7.8")
+check(rno.deleted.geo == 0, "absent cfm_geocache dict → geo delete is a graceful no-op")
+_G.ngx.shared.cfm_geocache = { get = function(_, k) return geostore[k] end, delete = function(_, k) geostore[k] = nil end }
 
 -- ── bad input / missing dict ─────────────────────────────────────────────────
 store = {}
+geostore = {}
 check(purge.purge_ip("").error == "bad ip", "empty ip should error")
 
 -- ── check_loopback: trust real peer, not spoofable rewritten remote_addr ─────
