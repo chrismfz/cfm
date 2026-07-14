@@ -134,6 +134,73 @@ func TestSockLifecycle_RespawnsAfterTransientBindFailure(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// F28 (wiring) — the daemon re-invokes ApplyConfig only on a cfm.conf change,
+// so the autonomous respawn is driven by the per-tick Tick() call, NOT by
+// ApplyConfig. A server that failed its initial bind must be healed by Tick
+// alone (with no further ApplyConfig), must not thrash during the backoff
+// window, and must stay down after Stop. Reverting the main.go Tick wiring — or
+// Tick itself — wedges the socket exactly as the original F28 bug did.
+// ─────────────────────────────────────────────────────────────────────────────
+func TestSockLifecycle_TickRespawnsDeadServer(t *testing.T) {
+	col := newTestCollector(t)
+	dir := t.TempDir()
+	notyet := filepath.Join(dir, "notyet") // deliberately NOT created yet
+	sock := filepath.Join(notyet, "s.sock")
+
+	lc := newTestLifecycle(t, col)
+	cfg := &cfgpkg.SSLCollectorSockConfig{Enabled: true, SockPath: sock, Token: strongToken}
+	ctx := context.Background()
+
+	// Initial apply: parent dir missing → net.Listen ENOENT → the goroutine
+	// clears running and arms the backoff cooldown.
+	lc.ApplyConfig(ctx, cfg)
+	waitFor(t, "initial bind failure recorded", func() bool {
+		return !lc.testRunning() && lc.testFailCount() >= 1
+	})
+
+	// A Tick inside the backoff window must NOT respawn (no per-tick thrash on a
+	// permanently unbindable path): the generation counter must not advance.
+	genDuringBackoff := lc.testSeq()
+	lc.Tick(ctx)
+	if got := lc.testSeq(); got != genDuringBackoff {
+		t.Fatalf("Tick respawned during backoff cooldown: gen %d -> %d", genDuringBackoff, got)
+	}
+
+	// Heal the environment and clear the cooldown, then let Tick — NOT another
+	// ApplyConfig — drive the respawn. This is the exact path the daemon uses.
+	if err := os.MkdirAll(notyet, 0o755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	lc.testClearBackoff()
+	lc.Tick(ctx)
+	waitFor(t, "Tick to respawn a dialable server", func() bool {
+		return lc.testRunning() && dialOK(sock)
+	})
+
+	// Tick on a healthy server is a no-op: it clears backoff without churning gen.
+	genHealthy := lc.testSeq()
+	lc.Tick(ctx)
+	if got := lc.testSeq(); got != genHealthy {
+		t.Fatalf("Tick respawned a healthy server: gen %d -> %d", genHealthy, got)
+	}
+	if lc.testFailCount() != 0 {
+		t.Fatalf("healthy Tick did not clear failCount: got %d", lc.testFailCount())
+	}
+
+	// After Stop, Tick must never respawn.
+	lc.Stop()
+	waitFor(t, "server to stop", func() bool { return !lc.testRunning() })
+	genStopped := lc.testSeq()
+	lc.Tick(ctx)
+	if got := lc.testSeq(); got != genStopped {
+		t.Fatalf("Tick respawned after Stop: gen %d -> %d", genStopped, got)
+	}
+	if lc.testRunning() {
+		t.Fatalf("Tick respawned a stopped lifecycle")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // F27 — during a restart the OLD listener's Close() must not unlink the NEW
 // listener's socket by name. Reproduces the exact race deterministically:
 // bind B on the same path, THEN close A after B is live.
