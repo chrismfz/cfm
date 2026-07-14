@@ -39,8 +39,8 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**52 / 56 fixed.** Grouped by severity; each links to its detail section. The
-remaining 4 open findings are all **perf**/**fp** — the **dos**/security cluster
+**53 / 56 fixed.** Grouped by severity; each links to its detail section. The
+remaining 3 open findings are all **perf**/**fp** — the **dos**/security cluster
 is closed.
 
 ### High (7)
@@ -68,7 +68,7 @@ is closed.
 - [x] **[F19](#f19)** · `configs/lua/sslcollector.lua:743` · _perf_ (axis b) — sslcollector re-parses PEM cert+key to DER on every TLS handshake (parsed material never cached)
 - [ ] **[F20](#f20)** · `configs/lua/cfm_stats.lua:134` · _perf_ (axis b) — cfm_stats decisions_stats/sslcache_stats call get_keys() with large N, locking the hot cfm_decisions dict on every dashboard poll
 - [ ] **[F21](#f21)** · `configs/lua/cfm_rules.lua:58` · _fp_ (axis a) — cfm_rules throttle lock contention fails toward 429, over-throttling legit bursts from shared/NAT IPs
-- [ ] **[F22](#f22)** · `configs/lua/cfm_ua_emergency.lua:322` · _perf_ (axis b) — UA-emergency throttle churns the shared cfm_decisions dict (3 writes + spin-lock per request) under the bot wave it targets
+- [x] **[F22](#f22)** · `configs/lua/cfm_ua_emergency.lua:322` · _perf_ (axis b) — UA-emergency throttle churns the shared cfm_decisions dict (3 writes + spin-lock per request) under the bot wave it targets
 - [x] **[F24](#f24)** · `configs/lua/cfm_waf_detectors.lua:850` · _perf_ (axis b) — is_known_legit_xmlrpc normalizes args AND body on every request before the cheap /xmlrpc.php URI gate
 - [x] **[F25](#f25)** · `configs/lua/cfm.lua:1121` · _perf_ (axis b) — Per-IP geo results and abuse counters share the high-churn cfm_decisions dict; geo uses a 3.3x-longer 300s TTL and negatively caches transient lookup failures
 - [x] **[F26](#f26)** · `internal/webdetector/ingest_socket.go:155` · _dos_ (axis b/c) — Ingest socket bufio.ReadString does not bound line length — unbounded memory (comment falsely claims a 256KB bound)
@@ -525,7 +525,7 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 <a id="f22"></a>
 ### F22 — UA-emergency throttle churns the shared cfm_decisions dict (3 writes + spin-lock per request) under the bot wave it targets
 
-- **Status:** ☐ open
+- **Status:** ☑ done — throttle is now a lock-free fixed-window counter (one atomic `incr`) in its own dedicated dict
 - **Severity:** medium · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_ua_emergency.lua:322`
 
@@ -535,7 +535,7 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 
 **Suggested fix.** Use a dedicated shared_dict and an atomic incr-based token bucket (no per-request lock churn on the primary decision cache).
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** `_M.throttle` is now a lock-free fixed-window counter. Per request it does ONE atomic `ngx.shared.cfm_ua_throttle:incr(key, 1, 0, WINDOW*2)` — the per-UA spin-lock (`add` + up to 10×`ngx.sleep(1ms)`), the read-modify-write token bucket (`get`/`set`), and the lock `delete` are all gone, as is the use of `cfm_decisions`. The counter lives in a new `lua_shared_dict cfm_ua_throttle 4m` (declared byte-identically in `openresty.conf` + `angie.conf`), so the throttle's writes no longer contend with the hot decision cache, and thousands of same-UA req/s no longer thunder on one lock (1 atomic op vs ~4 dict ops + a sleep-spin). Rate-limit intent preserved: `LIMIT = BOX_BURST = 20` requests per `WINDOW = floor(BOX_BURST/BOX_RATE) = 2s` window = 10/s long-run with a 20 burst; a window boundary can momentarily admit up to ~2× (accepted for a coarse emergency cap). The `(hit, retry_after)` contract, integer `Retry-After`, and fail-open-by-default / `fail_closed` policy are unchanged; the old lock-contention→`(true,0.05)` path is gone because there is no lock. Also removes a per-UA tenant from `cfm_decisions` (an F57 lever). Tests: `cfm_ua_throttle_test.lua` (exactly LIMIT pass then throttle with integer retry≥1; next window resets; per-UA independence; incr-fail fails open; sentinel UAs skip the dict; `ngx.sleep` stubbed to error to assert lock-freeness).
 
 ---
 

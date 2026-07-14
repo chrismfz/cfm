@@ -17,6 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **UA-emergency throttle is now a lock-free fixed-window counter (F22).** The
+  operator-flagged-UA throttle was a per-UA spin-lock + token bucket on the shared
+  `cfm_decisions` dict (an `add`-lock + up to 10×`sleep(1ms)` + `get` + `set` +
+  `delete` per request). Under the bot wave it targets — thousands of req/s of one
+  UA — that thundered on a single lock and churned the hot decision dict, slowing
+  unrelated requests' decision lookups. It now does ONE atomic `incr` per request
+  in its own dedicated `cfm_ua_throttle` dict: no lock, no sleep, no
+  read-modify-write, and no contention with the decision cache. The cap is
+  unchanged in intent — 20 requests per 2 s window = 10/s box-wide per UA with a
+  burst of 20; the algorithm change means a window boundary can momentarily admit
+  up to ~2× before it resets, which is fine for a coarse emergency cap. The 429 +
+  `Retry-After` behavior and the fail-open-by-default / `fail_closed` policy are
+  unchanged. Adds one 4 MB shared dict (declared in both `openresty.conf` and
+  `angie.conf`). Found by the 2026-07 edge Lua audit (F22, medium).
+
 ### Security
 - **Geo lookup failures are no longer cached as a country (F25, part 2).** The
   edge GeoIP layer returned `""` both for a genuine "no country for this IP" and

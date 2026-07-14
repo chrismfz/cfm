@@ -15,8 +15,8 @@ _G.ngx = {
   timer = { at = function(_, fn) timer_fns[#timer_fns + 1] = fn; return true end },
   log   = function() end,
   WARN  = 1, ERR = 2, INFO = 3,
-  -- The throttle path (unused by these tests) reads ngx.shared.cfm_decisions at load.
-  shared = { cfm_decisions = setmetatable({}, { __index = function() return function() end end }) },
+  -- The throttle path (unused by these tests) reads ngx.shared.cfm_ua_throttle at load.
+  shared = { cfm_ua_throttle = setmetatable({}, { __index = function() return function() end end }) },
 }
 
 -- io.open spy over the rule file: returns _file_content (nil => file missing).
