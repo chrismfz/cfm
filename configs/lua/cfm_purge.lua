@@ -119,12 +119,26 @@ function _M.purge_ip(ip)
     return { ip = "", deleted = deleted, scanned = 0, error = "bad ip" }
   end
 
-  -- 0 = all keys. This holds the dict lock for the duration of the scan, so
-  -- it is deliberately reserved for this rare, loopback+token-gated admin
-  -- action (a force unblock) rather than the request hot path. We scan ALL
-  -- keys on purpose: a bounded get_keys(N) could skip the very key that is
-  -- keeping a visitor stuck, which would defeat the whole point. The dict is
-  -- shared across all workers, so a single pass clears every worker.
+  -- 0 = all keys. This holds the dict lock (process-wide across all workers)
+  -- for the duration of the scan, so it is deliberately reserved for this rare,
+  -- loopback+token-gated admin action (a force unblock) rather than the request
+  -- hot path. We scan ALL keys on purpose: a bounded get_keys(N) could skip the
+  -- very key that is keeping a visitor stuck — there is no cursor API, so a
+  -- bounded scan just re-returns the same first N keys, it can't paginate —
+  -- which would defeat the whole point. The dict is shared across all workers,
+  -- so a single pass clears every worker.
+  --
+  -- Accepted perf residual (audit F57): on a very large cfm_decisions keyspace a
+  -- burst of force-unblocks means repeated full-keyspace lock-walks, each
+  -- stalling access-phase decision lookups box-wide. There is no cheap standalone
+  -- fix that keeps this correctness: a per-IP secondary index would add a
+  -- shared-dict write to EVERY hot-path decision (trading a rare cold-path cost
+  -- for a constant hot-path one), and sharing one scan's result across a burst is
+  -- impractical (purgeShared uses a fresh client per call, so a burst spreads
+  -- across workers). The scan cost scales with what lives in this dict, so the
+  -- real mitigation is reducing that — see F25 (per-IP geo, 300s TTL) and F22
+  -- (UA-emergency churn), which move the highest-cardinality tenants to their own
+  -- dicts. Revisit F57 once they land.
   local keys = sh:get_keys(0)
   local scanned = #keys
 
