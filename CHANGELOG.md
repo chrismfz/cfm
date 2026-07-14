@@ -18,6 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
+- **Dashboard stats no longer scan the hot shared dicts on every poll (F20).**
+  `/cfm-admin/lua-stats` computed its key-count breakdowns with `get_keys(25000)`
+  on `cfm_decisions` and `get_keys(8000)` on `sslcache` on every poll. `get_keys`
+  locks the whole dict for the scan, so an auto-refreshing dashboard stalled
+  request processing (cfm_decisions is read on every request) and TLS handshakes
+  (sslcache) box-wide. Those scan-derived counts are now cached per worker for a
+  short TTL (~10 s), so the scan runs at most once per interval rather than once
+  per poll; all the live fields (capacity/used %, exclude lists, cert counts,
+  timestamps, ingest-lock state) are still computed fresh each request. The stats
+  output is unchanged. Found by the 2026-07 edge Lua audit (F20, medium).
 - **UA-emergency throttle is now a lock-free fixed-window counter (F22).** The
   operator-flagged-UA throttle was a per-UA spin-lock + token bucket on the shared
   `cfm_decisions` dict (an `add`-lock + up to 10×`sleep(1ms)` + `get` + `set` +

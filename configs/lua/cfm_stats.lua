@@ -2,7 +2,10 @@
 --
 -- CFM shared-dict introspection module.
 -- Called exclusively by the /cfm-admin/lua-stats endpoint.
--- No I/O, no yields, no side effects — read-only snapshots only.
+-- No I/O and no yields; read-only w.r.t. the shared dicts. The only side effect
+-- is an internal per-worker memo (_scan_cache) that caches the expensive
+-- get_keys() counts for SCAN_TTL so the dashboard poll doesn't lock the dicts on
+-- every request (F20); all live fields are still recomputed fresh each call.
 
 local cjson = require "cjson.safe"
 local math  = math
@@ -63,6 +66,46 @@ local function nginx_worker_info()
   }
 end
 
+-- ── scan cache (audit F20) ──────────────────────────────────────────────────
+-- decisions_stats and sslcache_stats each enumerate their dict with get_keys(N),
+-- which LOCKS THE WHOLE DICT for the scan. cfm_decisions is read on every request
+-- (decision cache) and sslcache on every TLS handshake, and /cfm-admin/lua-stats
+-- is a pollable/auto-refreshing dashboard — so scanning on every poll stalls
+-- request/handshake processing box-wide. Cache the scan-derived COUNTS per worker
+-- for a short TTL: at most one scan per SCAN_TTL per worker, while the cheap
+-- capacity/meta fields around it stay fresh (recomputed each call). Counts change
+-- slowly, so a few seconds' staleness on the dashboard is fine. (Worker-local, so
+-- with connection-churned polling each worker may scan once per TTL; the common
+-- keepalive'd dashboard reuses one worker's cache = one scan per TTL box-wide.)
+-- Consequence to expect: a FRESH field (used_pct) and a cached COUNT (total_keys)
+-- can briefly disagree during a rapid dict fill, and keys_capped can lag the real
+-- cap by up to SCAN_TTL. Cosmetic and intended — the point is to not lock the
+-- dict every poll, not to give perfectly synchronized numbers.
+local SCAN_TTL    = 10          -- seconds
+local _scan_cache = {}          -- slot -> { at = <ngx.now()>, val = <table> }
+
+local function cached_scan(slot, d, scan_fn)
+  local now = ngx.now()
+  local c = _scan_cache[slot]
+  if c and (now - c.at) < SCAN_TTL then
+    return c.val
+  end
+  local val = scan_fn(d)
+  _scan_cache[slot] = { at = now, val = val }
+  return val
+end
+
+-- _sslcache_scan holds the get_keys(8000) lock; wrapped by cached_scan.
+local function _sslcache_scan(d)
+  local all_keys = d:get_keys(8000)
+  local total    = #all_keys
+  local meta_count = 0
+  for _, k in ipairs(all_keys) do
+    if k:sub(1, 5) == "meta:" then meta_count = meta_count + 1 end
+  end
+  return { total_keys = total, keys_capped = (total >= 8000), meta_count = meta_count }
+end
+
 local function sslcache_stats(d)
   if not d then return { error = "dict_not_found" } end
 
@@ -70,9 +113,7 @@ local function sslcache_stats(d)
   local free = d:free_space()
   local used = cap - free
 
-  local all_keys = d:get_keys(8000)
-  local total    = #all_keys
-  local capped   = (total >= 8000)
+  local scan = cached_scan("sslcache", d, _sslcache_scan)
 
   -- Cert/key material (parsed DER cdata) is stored in the worker-local _store
   -- table inside sslcollector.lua (not in shared dict) so other Lua code cannot
@@ -83,14 +124,11 @@ local function sslcache_stats(d)
     exact_hosts, wild_hosts = sc.cert_counts()
   end
 
-  local meta_count, lock_count  = 0, 0
-  for _, k in ipairs(all_keys) do
-    if     k:sub(1, 5) == "meta:" then meta_count = meta_count + 1
-    elseif k == "lock:dumpall"    then lock_count  = lock_count  + 1
-    end
-  end
-
   local function g(k) return d:get(k) end
+
+  -- ingest_lock is read fresh (a single-key get, not part of the cached scan) so
+  -- an in-progress dumpall shows immediately rather than up to SCAN_TTL late.
+  local ingest_lock = g("lock:dumpall") ~= nil
 
   local last_dumpall_ts = tonumber(g("meta:last_dumpall_at"))
   local last_attempt_ts = tonumber(g("meta:last_dumpall_attempt_at"))
@@ -104,12 +142,12 @@ local function sslcache_stats(d)
     free_bytes        = free,
     used_bytes        = used,
     used_pct          = cap > 0 and math.floor(used / cap * 1000) / 10 or 0,
-    total_keys        = total,
-    keys_capped       = capped,
+    total_keys        = scan.total_keys,
+    keys_capped       = scan.keys_capped,
     exact_hosts       = exact_hosts,
     wild_hosts        = wild_hosts,
-    meta_count        = meta_count,
-    ingest_lock       = (lock_count > 0),
+    meta_count        = scan.meta_count,
+    ingest_lock       = ingest_lock,
     ready             = g("meta:ready"),
     version           = g("meta:version"),
     generated_at      = g("meta:generated_at"),
@@ -124,16 +162,10 @@ local function sslcache_stats(d)
   }
 end
 
-local function decisions_stats(d)
-  if not d then return { error = "dict_not_found" } end
-
-  local cap  = d:capacity()
-  local free = d:free_space()
-  local used = cap - free
-
+-- _decisions_scan holds the get_keys(25000) lock; wrapped by cached_scan.
+local function _decisions_scan(d)
   local all_keys = d:get_keys(25000)
   local total    = #all_keys
-  local capped   = (total >= 25000)
 
   local cnt_snap_ips  = 0
   local cnt_snap_vhosts = 0
@@ -160,6 +192,34 @@ local function decisions_stats(d)
     end
   end
 
+  return {
+    total_keys  = total,
+    keys_capped = (total >= 25000),
+    key_breakdown = {
+      snapshot_ips            = cnt_snap_ips,
+      snapshot_vhosts         = cnt_snap_vhosts,
+      snapshot_rules          = cnt_snap_rules,
+      snapshot_waf_excludes   = cnt_snap_waf_excludes,
+      snapshot_ts             = cnt_snap_ts,
+      snapshot_lock           = cnt_snap_lock,
+      post_resume_entries     = cnt_resume,
+      solved_ip_touch_entries = cnt_ok_touch,
+      waf_push_cooldowns      = cnt_waf_push,
+      other                   = cnt_other,
+    },
+  }
+end
+
+local function decisions_stats(d)
+  if not d then return { error = "dict_not_found" } end
+
+  local cap  = d:capacity()
+  local free = d:free_space()
+  local used = cap - free
+
+  local scan = cached_scan("decisions", d, _decisions_scan)
+
+  -- waf_excludes is cheap (one get + decode of a small list), so keep it fresh.
   local snap_ts = tonumber(d:get("snap_ts") or "0") or 0
   local snap_waf_excludes = cjson.decode(d:get("snap_waf_excludes") or "[]") or {}
   local wx_hosts, wx_paths = {}, {}
@@ -182,20 +242,9 @@ local function decisions_stats(d)
     free_bytes     = free,
     used_bytes     = used,
     used_pct       = cap > 0 and math.floor(used / cap * 1000) / 10 or 0,
-    total_keys     = total,
-    keys_capped    = capped,
-    key_breakdown = {
-      snapshot_ips            = cnt_snap_ips,
-      snapshot_vhosts         = cnt_snap_vhosts,
-      snapshot_rules          = cnt_snap_rules,
-      snapshot_waf_excludes   = cnt_snap_waf_excludes,
-      snapshot_ts             = cnt_snap_ts,
-      snapshot_lock           = cnt_snap_lock,
-      post_resume_entries     = cnt_resume,
-      solved_ip_touch_entries = cnt_ok_touch,
-      waf_push_cooldowns      = cnt_waf_push,
-      other                   = cnt_other,
-    },
+    total_keys     = scan.total_keys,
+    keys_capped    = scan.keys_capped,
+    key_breakdown = scan.key_breakdown,
     waf_excludes = {
       refresh_age_s = snap_ts > 0 and math.floor(ngx.time() - snap_ts) or nil,
       host_rules    = wx_hosts,

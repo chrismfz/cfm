@@ -39,9 +39,9 @@ Status key: `[ ]` open · `[~]` in progress · `[x]` done (edit the box, keep th
 
 ## Progress dashboard
 
-**53 / 56 fixed.** Grouped by severity; each links to its detail section. The
-remaining 3 open findings are all **perf**/**fp** — the **dos**/security cluster
-is closed.
+**54 / 56 fixed.** Grouped by severity; each links to its detail section. The
+remaining 2 open findings are **F21** (fp) and **F57** (perf, deferred pending
+F25/F22 which have now landed) — the **dos**/security cluster is closed.
 
 ### High (7)
 
@@ -66,7 +66,7 @@ is closed.
 - [x] **[F16](#f16)** · `configs/lua/cfm_waf_detectors.lua:3794` · _fp_ (axis a) — Encoded-<?php opener rule (437) false-positives on legit content POSTs (comments, forum posts, rich-text) at challenge tier
 - [x] **[F17](#f17)** · `configs/lua/cfm_clamav.lua:82` · _security_ (axis c) — ClamAV upload scan silently skipped when multipart filename= sits beyond the WAF body cap (32 KB; 8 KB when this was found, raised by F08)
 - [x] **[F19](#f19)** · `configs/lua/sslcollector.lua:743` · _perf_ (axis b) — sslcollector re-parses PEM cert+key to DER on every TLS handshake (parsed material never cached)
-- [ ] **[F20](#f20)** · `configs/lua/cfm_stats.lua:134` · _perf_ (axis b) — cfm_stats decisions_stats/sslcache_stats call get_keys() with large N, locking the hot cfm_decisions dict on every dashboard poll
+- [x] **[F20](#f20)** · `configs/lua/cfm_stats.lua:134` · _perf_ (axis b) — cfm_stats decisions_stats/sslcache_stats call get_keys() with large N, locking the hot cfm_decisions dict on every dashboard poll
 - [ ] **[F21](#f21)** · `configs/lua/cfm_rules.lua:58` · _fp_ (axis a) — cfm_rules throttle lock contention fails toward 429, over-throttling legit bursts from shared/NAT IPs
 - [x] **[F22](#f22)** · `configs/lua/cfm_ua_emergency.lua:322` · _perf_ (axis b) — UA-emergency throttle churns the shared cfm_decisions dict (3 writes + spin-lock per request) under the bot wave it targets
 - [x] **[F24](#f24)** · `configs/lua/cfm_waf_detectors.lua:850` · _perf_ (axis b) — is_known_legit_xmlrpc normalizes args AND body on every request before the cheap /xmlrpc.php URI gate
@@ -491,7 +491,7 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 <a id="f20"></a>
 ### F20 — cfm_stats decisions_stats/sslcache_stats call get_keys() with large N, locking the hot cfm_decisions dict on every dashboard poll
 
-- **Status:** ☐ open
+- **Status:** ☑ done — the `get_keys` scans are cached per worker for a short TTL instead of running on every poll
 - **Severity:** medium · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_stats.lua:134`
 
@@ -501,7 +501,7 @@ evasion the review surfaced. Branch `claude/edge-audit-clamav-bodycap`.
 
 **Suggested fix.** Maintain approximate counters via incr/decr, or cache the breakdown in a short-TTL worker-local entry; never scan cfm_decisions on every poll.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Fix landed:** The scan-derived counts are cached per worker instead of scanned on every poll. `decisions_stats`/`sslcache_stats` now call a `cached_scan(slot, d, scan_fn)` helper — the `get_keys(25000)` / `get_keys(8000)` + its count loop runs at most once per `SCAN_TTL` (10s) per worker; on the common keepalive'd dashboard (poller pinned to one worker) that's one scan per 10s box-wide. Everything cheap is recomputed FRESH each call — capacity/`used_pct`, `waf_excludes`, cert counts, meta timestamps, and (for sslcache) `ingest_lock`, which is now read fresh via `get("lock:dumpall")` rather than counted in the scan — so nothing an operator watches live goes stale; only the slowly-changing key COUNTS lag ≤10s. Output shape is byte-for-byte unchanged (same fields/types). Chose the finding's worker-local-cache option over incr/decr counters, which drift silently because shared-dict entries expire without a callback (the same trap flagged for F57). Also benefits `sslcache` (get_keys(8000) locked the cert dict on every poll, stalling TLS handshakes). Tests: `cfm_stats_scan_cache_test.lua` (scan runs once, reused within the TTL, re-runs past it; capacity stays fresh; breakdown counts correct for a known key set).
 
 ---
 
