@@ -1510,7 +1510,7 @@ Branch `claude/edge-audit-ssl-debug-loopback`.
 <a id="f57"></a>
 ### F57 — purge_ip scans the entire cfm_decisions dict under lock (get_keys(0)) on a force-unblock
 
-- **Status:** ☐ open
+- **Status:** ☐ open — **deferred** pending F25/F22 (see Decision); no correct standalone fix is a good trade
 - **Severity:** low · **Category:** perf (axis b) · **Verify:** CONFIRMED
 - **Location:** `configs/lua/cfm_purge.lua:128`
 
@@ -1520,7 +1520,16 @@ Branch `claude/edge-audit-ssl-debug-loopback`.
 
 **Suggested fix.** Cap/batch the scan or maintain a per-IP secondary index so a purge deletes a known key set instead of scanning all keys.
 
-**Fix landed:** _(pending — record commit/PR here)_
+**Decision (2026-07-14): deferred pending F25/F22.** On investigation, every correctness-preserving standalone fix is a bad trade for a low-severity, rare, loopback+token-gated admin path:
+
+- **Cap/bounded scan** — rejected. OpenResty's `get_keys(N)` has no cursor: repeated calls re-return the same first N keys, so a bounded scan can silently skip the very key keeping a visitor stuck (partial unblock). The existing code deliberately scans all keys for exactly this reason.
+- **Per-IP secondary index** — rejected. Keeping an index current would add a shared-dict write to *every hot-path decision write*, trading a rare cold-path cost for a constant hot-path one on a perf-sensitive proxy.
+- **Coalesce a burst into one scan** — impractical here. `purgeShared` (`internal/webdetector/nginx_bridge_purge.go`) builds a fresh `http.Client` per call, so a burst of force-unblocks spreads across workers; sharing one scan's key list across workers would mean stuffing it into the shared dict.
+- **Async coalescing queue** (enqueue + timer-drained single scan per burst) — possible, but turns a correct synchronous purge into an eventually-consistent one and makes the "cleared N keys" unblock report approximate: too much new failure surface for a low finding.
+
+The `get_keys(0)` cost scales with the `cfm_decisions` cardinality, and **F25** (per-IP geo at a 300s TTL — the biggest driver under an IP flood) and **F22** (UA-emergency churn) both move their high-cardinality tenants to dedicated dicts. Doing those first shrinks the dict that makes this scan expensive, so F57 largely dissolves. Revisit after they land. The `cfm_purge.lua` comment now records this reasoning inline.
+
+**Fix landed:** _(deferred — see Decision above; not counted as fixed)_
 
 ---
 
