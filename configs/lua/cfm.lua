@@ -1074,6 +1074,20 @@ end
 local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
   local key = decision_cache_key(ip, host, method, scheme, uri, scope)
 
+  -- Accepted residual (2026-07 audit round-2): a cache HIT serves the prior
+  -- clean-allow for up to decision_cache_ttl_ms (90s) WITHOUT re-consulting the
+  -- bridge, so an IP the daemon block/challenge-flags DURING that window keeps
+  -- being served on URLs it already warmed. Bounded and accepted, not closed:
+  --   * only clean allows are cached (see the cache write below), so a
+  --     currently-blocked IP hitting a NEW url misses and sees the block;
+  --   * the WAF runs uncached on EVERY request — payloads are always caught;
+  --   * nft autoblock is kernel-level — severe bans drop before the edge.
+  -- The residual is thus "evade an edge behavioural challenge/block for <=90s on
+  -- already-cached URLs", which is self-healing. Closing it would need a per-IP
+  -- block-generation marker checked on every hit + Go-side publishing — a poor
+  -- trade for a <=90s soft window, and this file deliberately does no snapshot
+  -- polling (see header). Revisit only if edge-only challenge/block evasion
+  -- becomes an observed problem.
   if SH then
     local cached = SH:get(key)
     if cached then
