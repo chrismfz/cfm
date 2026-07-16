@@ -17,6 +17,26 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **WAF CRLF rule (605) no longer flags legit multipart uploads.** A
+  `multipart/form-data` body carries a per-part `Content-Type:` (and sometimes
+  `Content-Length:`) MIME header on its own `\r\n`-terminated line for every
+  file/typed part, so the raw `[\r\n]…content-type:` match in
+  `detect_crlf_injection` tripped `WAF_CRLF:CRLF_CONTENT_TYPE` on essentially
+  every legitimate upload — webmail (roundcube attachment compose), WordPress
+  `wp-admin/async-upload.php` / Elementor, OpenCart filemanager, TYPO3 — a
+  structural false positive (rule 605 was held at `logonly` precisely because of
+  it). The content-type/content-length match — **both** the raw and the
+  URL-encoded branch, since the framing's `\r\nContent-Type:` survives
+  url-decoding — is now scoped to the ARGS surface when the request body is
+  `multipart/form-data` (those header names can appear legitimately in a
+  multipart body but never in the query string); Set-Cookie / Location stay
+  full-surface, so detection of the impactful response-splitting vectors is
+  unchanged. The request Content-Type is read via `header_string()` so a
+  duplicated header (delivered as a table) can't crash the detector. Kept at
+  `logonly` pending a fresh burn-in of the carve-out before promoting back to
+  `challenge`. Covered by `scripts/tests/cfm_waf_crlf_multipart_test.lua`.
+
 ### Changed
 - **Traffic-rules throttle no longer over-429s shared/NAT IPs (F21).** The
   `rule_action=throttle` limiter took a per-(profile,host,ip) spin-lock around a

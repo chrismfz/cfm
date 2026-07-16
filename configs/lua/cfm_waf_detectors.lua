@@ -1986,11 +1986,13 @@ end
 -- Source: uusec http-response-splitting.lua.
 -- Checks for CR or LF followed by a header name in args and body.
 -- Also checks for URL-encoded %0d%0a sequences.
-function _M.detect_crlf_injection(args, body)
+function _M.detect_crlf_injection(args, body, headers)
   -- Cap args and body independently so a padded query string can't evict the
   -- body from CRLF-injection detection (audit F09; this detector builds its
   -- own scan surface rather than taking the shared get_norm_ab string).
-  local s = cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len)
+  local a = cap(args or "", CFG.max_scan_len)
+  local b = cap(body or "", CFG.max_scan_len)
+  local s = a .. "&" .. b
   if s == "" then return nil end
 
   -- Lowercase once and match the header names against the lowercased copy.
@@ -2002,9 +2004,32 @@ function _M.detect_crlf_injection(args, body)
   -- URL-encoded branch below.
   local sl = lower(s)
 
+  -- multipart/form-data bodies legitimately carry a per-part `Content-Type:` (and
+  -- sometimes `Content-Length:`) MIME header on its own `\r\n`-terminated line for
+  -- every file/typed part, so the `[\r\n]…content-type:` match tripped every
+  -- webmail / wp-admin async-upload / OpenCart filemanager / TYPO3 / Elementor
+  -- upload — a structural false positive (rule 605 is held at logonly precisely
+  -- for this). Those two header names can legitimately appear in a multipart BODY
+  -- but never in the query string, so scope their match to the args surface when
+  -- the request body is multipart. Set-Cookie / Location never appear in a
+  -- multipart part header and stay full-surface, so response-splitting via the
+  -- impactful headers is unaffected. NOTE the SAME scoping is applied to the
+  -- URL-encoded branch below: the framing's `\r\nContent-Type:` survives
+  -- url-decoding untouched, so decoding a multipart body would re-flag it as
+  -- CRLF_URL_ENCODED unless the content-type match there is args-scoped too.
+  -- header_string() collapses a duplicated Content-Type header (ngx returns a
+  -- table) to a single string so lower() below can't crash (cfm_waf_util.lua).
+  -- The `or` picks the raw header value BEFORE header_string, since a missing
+  -- lowercase key must fall through to the canonical-cased one (header_string
+  -- returns a truthy "" that would swallow the fallback if placed after it).
+  local h = headers or {}
+  local req_ct = header_string(h["content-type"] or h["Content-Type"])
+  local is_multipart = has(lower(req_ct), "multipart/form-data")
+  local ct_surface = is_multipart and lower(a) or sl
+
   -- Raw CR/LF followed by a header keyword
-  if sl:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
-  if sl:find("[\r\n]%W*content%-length%s*:", 1) then return "CRLF_CONTENT_LENGTH" end
+  if ct_surface:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
+  if ct_surface:find("[\r\n]%W*content%-length%s*:", 1) then return "CRLF_CONTENT_LENGTH" end
   if sl:find("[\r\n]%W*set%-cookie%s*:",     1) then return "CRLF_SET_COOKIE" end
   if sl:find("[\r\n]%W*location%s*:",        1) then return "CRLF_LOCATION" end
 
@@ -2014,9 +2039,19 @@ function _M.detect_crlf_injection(args, body)
       :gsub("%%0d%%0a", "\r\n")
       :gsub("%%0d",     "\r")
       :gsub("%%0a",     "\n")
-    if decoded:find("[\r\n]%W*content%-type%s*:")   or
-       decoded:find("[\r\n]%W*set%-cookie%s*:")     or
-       decoded:find("[\r\n]%W*location%s*:")        then
+    -- content-type shares the multipart args-only scoping with the raw branch
+    -- (else a multipart upload carrying a literal `%0a` re-trips the same FP as
+    -- CRLF_URL_ENCODED); set-cookie / location stay full-surface.
+    local decoded_ct = decoded
+    if is_multipart then
+      decoded_ct = ct_surface
+        :gsub("%%0d%%0a", "\r\n")
+        :gsub("%%0d",     "\r")
+        :gsub("%%0a",     "\n")
+    end
+    if decoded_ct:find("[\r\n]%W*content%-type%s*:") or
+       decoded:find("[\r\n]%W*set%-cookie%s*:")      or
+       decoded:find("[\r\n]%W*location%s*:")         then
       return "CRLF_URL_ENCODED"
     end
   end
