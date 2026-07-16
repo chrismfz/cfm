@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **cfm-lsm: silence OBS-004 ptrace-telemetry noise from cPanel/CloudLinux
+  control-plane.** `CFML-OBS-004` (ptrace by a web-class uid, monitor-only)
+  fires whenever a watched uid reads its own process tree via /proc — reading
+  `/proc/<pid>/{stat,exe}` routes through `ptrace_may_access`, so cPanel's
+  jailshell/PHP `ps` calls and the cPanel/CloudLinux API machinery (`cpanel`
+  → `cpapi2`, `uapi`, `cloudlinux-cli-user.py`, `lve_suwrapper`) generate the
+  bulk of OBS-004 events. All are same-uid, not cross-tenant. Added those comms
+  to the `CFML-OBS-004` `allow_comm` list in the reference `configs/lsm.conf`
+  (scoped to this policy, NOT global: `allow_comm` matches the spoofable
+  `task->comm`, so a global entry would also exempt the names from CRED-002 /
+  CRED-004 / EXEC-003 — keeping them per-policy limits the blind spot to ptrace
+  telemetry). `lsphp` is deliberately excluded (a PHP worker ptracing a sibling
+  is the exact threat OBS-004 exists to surface). Noise reduction only; the
+  block layer remains kernsec `yama.ptrace_scope=2`.
 - **cfm-lsm: silence CRED-002 false positives from stock cPanel/cron daemons.**
   `CFML-CRED-002` (privilege escalation without a setuid path, monitor-only)
   fires when a task transitions uid→0 via a setuid-family syscall from a binary
