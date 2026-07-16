@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF CVE detector: Joomla JCE profile-import RCE (rule 10002,
+  CVE-2026-48907).** Detects the unauthenticated arbitrary-PHP-upload exploit in
+  Joomla's JCE extension (`< 2.9.99.5`) that the July-2026 ACSC CMS campaign
+  probes (CISA KEV): `POST /index.php?option=com_jce` with the `profiles.import`
+  action and a php-executable file in the multipart upload (double-extension
+  `.xml.php`). Keyed on the component (`com_jce`) + action value
+  (`profiles.import`) + a php-exec upload filename — matched as value substrings
+  so it survives the PoC's all-multipart encoding, and reusing the hardened
+  rule-401 filename matcher for the multipart-CT gate and double-extension
+  coverage. Near-zero FP (a legit profile import ships `.xml`/`.zip`, never
+  `.php`) → ships at `block`; runs before the generic upload rules so the
+  `WAF/CVE-2026-48907` reason wins attribution. `WAF_CVE` is armed, so a hit
+  6h-nft-bans + Slack/mails. Positive+negative Lua tests; Lua↔Go id parity kept.
 - **First WAF CVE detector: Simple File List upload→rename RCE (rule 10001,
   CVE-2025-34085 / CVE-2020-36847).** Detects the WordPress Simple File List
   exploit the July-2026 ACSC CMS campaign probes: a PHP payload uploaded as an

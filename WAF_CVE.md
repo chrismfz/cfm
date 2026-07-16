@@ -152,9 +152,9 @@ candidates awaiting a validated exact request shape:
 | Product / CVE | Status |
 | --- | --- |
 | Simple File List (`CVE-2025-34085` / `CVE-2020-36847`) | ✅ **implemented** (rule 10001) |
-| Joomla JCE (`CVE-2026-48907`) | candidate — upload vector, seen in prod logs + CISA KEV |
+| Joomla JCE (`CVE-2026-48907`) | ✅ **implemented** (rule 10002) — `option=com_jce` + `profiles.import` + php-exec upload |
+| Ninja Forms (`CVE-2026-0740`) | candidate next — PoC `0xgh057r3c0n/CVE-2026-0740`; must be action+payload exact, not bare `admin-ajax.php` |
 | Craft CMS (`CVE-2025-32432`) | candidate — SensePost has the RCE shape |
-| Ninja Forms (`CVE-2026-0740`) | candidate — must be action+payload exact, not bare `admin-ajax.php` |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk, MaxSite, MetInfo | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
 Keep the plan doc's candidate table as the backlog; update the ✅ column here

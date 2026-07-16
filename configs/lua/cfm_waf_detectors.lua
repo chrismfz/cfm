@@ -2115,6 +2115,49 @@ function _M.detect_cve_simple_file_list_upload(uri, method, args, body, headers)
   return nil
 end
 
+-- [CVE] Joomla JCE (< 2.9.99.5) unauthenticated arbitrary PHP file upload -> RCE.
+-- CVE-2026-48907 (ACSC July-2026 CMS campaign; CISA KEV). JCE's "profile
+-- import" admin action is reachable unauthenticated and accepts a multipart
+-- upload that is written under /tmp and served as PHP.
+--
+-- Exploit request (public PoC 0xgh057r3c0n/CVE-2026-48907):
+--   POST /index.php?option=com_jce   (multipart/form-data)
+--     task = profiles.import
+--     profile_file = <file>  filename "cve-....xml.php" (double-ext -> .php),
+--                            Content-Type application/xml, PHP payload inside.
+--
+-- Fingerprint keyed on the exact component (option=com_jce) + action
+-- (task=profiles.import) + a php-executable UPLOAD FILENAME — NOT on the
+-- volatile random filename or the CSRF field. Near-zero FP: a legitimate JCE
+-- profile import ships an .xml/.zip profile, never a php-executable file. Reuse
+-- the hardened rule-401 matcher (detect_upload_filename) so the
+-- double-extension / alt-handler coverage AND the multipart/form-data
+-- content-type gate come for free. `method` is m_lower from the caller.
+--
+-- Note: the generic rule 401 (WAF_UPLOAD_FNAME) would also catch this php
+-- upload; the check() call site runs this BEFORE 401 so the CVE reason wins
+-- attribution for the same request.
+function _M.detect_cve_joomla_jce_profile_import(uri, method, args, body, headers)
+  if method ~= "post" then return nil end
+  -- Match the distinctive VALUE substrings, not `key=value` — the PoC sends
+  -- both `files=` and `data=`, so requests encodes EVERYTHING as multipart and
+  -- `task` becomes a field part (`name="task"\r\n\r\nprofiles.import`), not a
+  -- `task=profiles.import` pair. `com_jce` is in the query string; `profiles.import`
+  -- is the JCE action value. Both substrings survive either encoding.
+  local scope = lower(uri or "") .. "&" ..
+                lower(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
+  if not has(scope, "com_jce") then return nil end
+  if not has(scope, "profiles.import") then return nil end
+  -- Exploit marker: a php-executable file in the multipart upload (also gates
+  -- on multipart/form-data internally). The com_jce + profiles.import + php-exec
+  -- upload triple is what makes this near-zero FP — a legitimate JCE profile
+  -- import ships an .xml/.zip profile, never a php file.
+  if _M.detect_upload_filename(body, headers) then
+    return "PROFILE_IMPORT"
+  end
+  return nil
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject
