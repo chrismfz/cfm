@@ -1986,11 +1986,13 @@ end
 -- Source: uusec http-response-splitting.lua.
 -- Checks for CR or LF followed by a header name in args and body.
 -- Also checks for URL-encoded %0d%0a sequences.
-function _M.detect_crlf_injection(args, body)
+function _M.detect_crlf_injection(args, body, headers)
   -- Cap args and body independently so a padded query string can't evict the
   -- body from CRLF-injection detection (audit F09; this detector builds its
   -- own scan surface rather than taking the shared get_norm_ab string).
-  local s = cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len)
+  local a = cap(args or "", CFG.max_scan_len)
+  local b = cap(body or "", CFG.max_scan_len)
+  local s = a .. "&" .. b
   if s == "" then return nil end
 
   -- Lowercase once and match the header names against the lowercased copy.
@@ -2002,9 +2004,26 @@ function _M.detect_crlf_injection(args, body)
   -- URL-encoded branch below.
   local sl = lower(s)
 
+  -- multipart/form-data bodies legitimately carry a per-part `Content-Type:` (and
+  -- sometimes `Content-Length:`) MIME header on its own `\r\n`-terminated line for
+  -- every file/typed part, so the raw `[\r\n]…content-type:` match tripped every
+  -- webmail / wp-admin async-upload / OpenCart filemanager / TYPO3 / Elementor
+  -- upload — a structural false positive (rule 605 is held at logonly precisely
+  -- for this). Those two header names can legitimately appear in a multipart BODY
+  -- but never in the query string, so scope their raw match to the args surface
+  -- when the request body is multipart. Set-Cookie / Location never appear in a
+  -- multipart part header, and the URL-encoded branch keys off a literal
+  -- `%0a`/`%0d%0a` that raw multipart framing does not contain — both stay
+  -- full-surface, so response-splitting via the impactful headers is unaffected.
+  local req_ct = lower((headers or {})["content-type"] or (headers or {})["Content-Type"] or "")
+  local ct_surface = sl
+  if has(req_ct, "multipart/form-data") then
+    ct_surface = lower(a)
+  end
+
   -- Raw CR/LF followed by a header keyword
-  if sl:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
-  if sl:find("[\r\n]%W*content%-length%s*:", 1) then return "CRLF_CONTENT_LENGTH" end
+  if ct_surface:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
+  if ct_surface:find("[\r\n]%W*content%-length%s*:", 1) then return "CRLF_CONTENT_LENGTH" end
   if sl:find("[\r\n]%W*set%-cookie%s*:",     1) then return "CRLF_SET_COOKIE" end
   if sl:find("[\r\n]%W*location%s*:",        1) then return "CRLF_LOCATION" end
 
