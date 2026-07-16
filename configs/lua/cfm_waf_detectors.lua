@@ -2139,15 +2139,21 @@ end
 -- attribution for the same request.
 function _M.detect_cve_joomla_jce_profile_import(uri, method, args, body, headers)
   if method ~= "post" then return nil end
-  -- Match the distinctive VALUE substrings, not `key=value` — the PoC sends
-  -- both `files=` and `data=`, so requests encodes EVERYTHING as multipart and
-  -- `task` becomes a field part (`name="task"\r\n\r\nprofiles.import`), not a
-  -- `task=profiles.import` pair. `com_jce` is in the query string; `profiles.import`
-  -- is the JCE action value. Both substrings survive either encoding.
-  local scope = lower(uri or "") .. "&" ..
-                lower(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
-  if not has(scope, "com_jce") then return nil end
-  if not has(scope, "profiles.import") then return nil end
+  -- Cheap gate FIRST: option=com_jce lives in the query string (uri/args), both
+  -- small — check it before touching the (capped) body, so the ~99.9% of POSTs
+  -- that aren't JCE traffic skip the body copy (mirrors the SFL detector, which
+  -- gates on its endpoint path first).
+  local qs = lower((uri or "") .. "&" .. (args or ""))
+  if not has(qs, "com_jce") then return nil end
+  -- Match the distinctive VALUE substring, not `key=value` — the PoC sends both
+  -- `files=` and `data=`, so requests encodes EVERYTHING as multipart and `task`
+  -- becomes a field part (`name="task"\r\n\r\nprofiles.import`), never a literal
+  -- `task=profiles.import` pair. `profiles.import` is the JCE action value; it
+  -- rides in the body (accept it from the query surface too).
+  if not (has(qs, "profiles.import")
+          or has(lower(cap(body or "", CFG.max_scan_len)), "profiles.import")) then
+    return nil
+  end
   -- Exploit marker: a php-executable file in the multipart upload (also gates
   -- on multipart/form-data internally). The com_jce + profiles.import + php-exec
   -- upload triple is what makes this near-zero FP — a legitimate JCE profile
