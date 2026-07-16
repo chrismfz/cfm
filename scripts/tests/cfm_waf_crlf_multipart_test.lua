@@ -91,6 +91,27 @@ clean(post_multipart("/wp-admin/async-upload.php", "",
       "Content-Length: 5\r\n\r\nPNG..\r\n------b--\r\n"),
       "multipart part with Content-Length header")
 
+-- The URL-encoded branch also decodes the full surface; the multipart part's
+-- `\r\nContent-Type:` survives url-decoding, so an upload that merely CONTAINS a
+-- literal `%0a` (in a field/filename/arg) must NOT re-trip the FP as
+-- CRLF_URL_ENCODED — the content-type match there is args-scoped too.
+clean(post_multipart("/wp-admin/async-upload.php", "",
+      "------b\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n" ..
+      "line one%0aline two\r\n" ..                    -- literal %0a in a field value
+      "------b\r\nContent-Disposition: form-data; name=f; filename=a.png\r\n" ..
+      "Content-Type: image/png\r\n\r\nPNG..\r\n------b--\r\n"),
+      "multipart body containing literal %0a (URL-encoded branch)")
+clean(post_multipart("/wp-admin/async-upload.php", "note=a%0ab", MULTIPART_UPLOAD),
+      "multipart with %0a in the query string")
+
+-- Duplicated Content-Type header (ngx delivers a table) must not crash the
+-- detector, and the multipart value must still be recognised.
+clean({
+  uri = "/wp-admin/async-upload.php", args = "", method = "POST", ip = "198.51.100.12",
+  headers = { ["Content-Type"] = { "multipart/form-data; boundary=----b", "text/plain" } },
+  body = MULTIPART_UPLOAD,
+}, "duplicated Content-Type header (table value) — no crash, multipart honoured")
+
 -- ── Still catches real attacks even under a multipart Content-Type ───────────
 -- An injected Set-Cookie / Location in the body is never part of multipart
 -- framing, so it must still fire regardless of the request Content-Type.
@@ -102,12 +123,18 @@ fires(post_multipart("/x.php", "", "field=foo\r\nLocation: http://evil/\r\n"),
 -- requests (the carve-out scopes to args, it does not disable the check).
 fires(post_multipart("/x.php", "r=/a\r\nContent-Type: text/html", MULTIPART_UPLOAD),
       "Content-Type injection in args under multipart CT", "WAF_CRLF:CRLF_CONTENT_TYPE")
+-- URL-encoded Content-Type injection in the QUERY STRING under multipart still
+-- fires (args-scoped decode still runs).
+fires(post_multipart("/x.php", "r=x%0aContent-Type:%20text/html", MULTIPART_UPLOAD),
+      "URL-encoded Content-Type in args under multipart CT", "WAF_CRLF:CRLF_URL_ENCODED")
 
 -- ── Regressions: non-multipart requests keep full-surface Content-Type match ─
 fires(post_urlenc("x=foo\r\nContent-Type: text/html"),
       "urlencoded body Content-Type still fires", "WAF_CRLF:CRLF_CONTENT_TYPE")
 fires(post_urlenc("x=foo\r\nContent-Length: 0"),
       "urlencoded body Content-Length still fires", "WAF_CRLF:CRLF_CONTENT_LENGTH")
+fires(post_urlenc("x=foo%0aContent-Type:%20text/html"),
+      "urlencoded body URL-encoded Content-Type still fires", "WAF_CRLF:CRLF_URL_ENCODED")
 
 if fails > 0 then
   io.stderr:write(("cfm_waf CRLF multipart carve-out tests: %d FAILED\n"):format(fails))

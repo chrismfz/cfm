@@ -2006,20 +2006,26 @@ function _M.detect_crlf_injection(args, body, headers)
 
   -- multipart/form-data bodies legitimately carry a per-part `Content-Type:` (and
   -- sometimes `Content-Length:`) MIME header on its own `\r\n`-terminated line for
-  -- every file/typed part, so the raw `[\r\n]…content-type:` match tripped every
+  -- every file/typed part, so the `[\r\n]…content-type:` match tripped every
   -- webmail / wp-admin async-upload / OpenCart filemanager / TYPO3 / Elementor
   -- upload — a structural false positive (rule 605 is held at logonly precisely
   -- for this). Those two header names can legitimately appear in a multipart BODY
-  -- but never in the query string, so scope their raw match to the args surface
-  -- when the request body is multipart. Set-Cookie / Location never appear in a
-  -- multipart part header, and the URL-encoded branch keys off a literal
-  -- `%0a`/`%0d%0a` that raw multipart framing does not contain — both stay
-  -- full-surface, so response-splitting via the impactful headers is unaffected.
-  local req_ct = lower((headers or {})["content-type"] or (headers or {})["Content-Type"] or "")
-  local ct_surface = sl
-  if has(req_ct, "multipart/form-data") then
-    ct_surface = lower(a)
-  end
+  -- but never in the query string, so scope their match to the args surface when
+  -- the request body is multipart. Set-Cookie / Location never appear in a
+  -- multipart part header and stay full-surface, so response-splitting via the
+  -- impactful headers is unaffected. NOTE the SAME scoping is applied to the
+  -- URL-encoded branch below: the framing's `\r\nContent-Type:` survives
+  -- url-decoding untouched, so decoding a multipart body would re-flag it as
+  -- CRLF_URL_ENCODED unless the content-type match there is args-scoped too.
+  -- header_string() collapses a duplicated Content-Type header (ngx returns a
+  -- table) to a single string so lower() below can't crash (cfm_waf_util.lua).
+  -- The `or` picks the raw header value BEFORE header_string, since a missing
+  -- lowercase key must fall through to the canonical-cased one (header_string
+  -- returns a truthy "" that would swallow the fallback if placed after it).
+  local h = headers or {}
+  local req_ct = header_string(h["content-type"] or h["Content-Type"])
+  local is_multipart = has(lower(req_ct), "multipart/form-data")
+  local ct_surface = is_multipart and lower(a) or sl
 
   -- Raw CR/LF followed by a header keyword
   if ct_surface:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
@@ -2033,9 +2039,19 @@ function _M.detect_crlf_injection(args, body, headers)
       :gsub("%%0d%%0a", "\r\n")
       :gsub("%%0d",     "\r")
       :gsub("%%0a",     "\n")
-    if decoded:find("[\r\n]%W*content%-type%s*:")   or
-       decoded:find("[\r\n]%W*set%-cookie%s*:")     or
-       decoded:find("[\r\n]%W*location%s*:")        then
+    -- content-type shares the multipart args-only scoping with the raw branch
+    -- (else a multipart upload carrying a literal `%0a` re-trips the same FP as
+    -- CRLF_URL_ENCODED); set-cookie / location stay full-surface.
+    local decoded_ct = decoded
+    if is_multipart then
+      decoded_ct = ct_surface
+        :gsub("%%0d%%0a", "\r\n")
+        :gsub("%%0d",     "\r")
+        :gsub("%%0a",     "\n")
+    end
+    if decoded_ct:find("[\r\n]%W*content%-type%s*:") or
+       decoded:find("[\r\n]%W*set%-cookie%s*:")      or
+       decoded:find("[\r\n]%W*location%s*:")         then
       return "CRLF_URL_ENCODED"
     end
   end

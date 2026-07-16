@@ -137,9 +137,9 @@ local CFG = {
                                         -- tripped every legit multipart upload (webmail/wp-admin/
                                         -- OpenCart/TYPO3/Elementor): a multipart body carries a per-part
                                         -- "Content-Type:" MIME header on its own line. detect_crlf_injection
-                                        -- now scopes the content-type/content-length raw match to the
-                                        -- ARGS surface when the request body is multipart/form-data
-                                        -- (Set-Cookie/Location/%0d%0a stay full-surface). Kept at logonly
+                                        -- now scopes the content-type/content-length match (raw AND
+                                        -- URL-encoded) to the ARGS surface when the request body is
+                                        -- multipart/form-data (Set-Cookie/Location stay full-surface). Kept at logonly
                                         -- pending a fresh burn-in of that carve-out before promoting back
                                         -- to challenge (CLAUDE.md logonly->challenge->block).
   rule_http_smuggling   = "challenge", -- HTTP verb embedded in body / querystring (smuggling)
