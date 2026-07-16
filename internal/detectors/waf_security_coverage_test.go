@@ -26,16 +26,16 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	}
 
 	// Every family with an edge-block rule must default ON; a family without one
-	// (except the armed WAF_BACKDOOR) must default 0. WAF_WEBSHELL and WAF_CVE are
-	// the deliberate exceptions: each has an edge-block rule (413 / 10001) but is
-	// intentionally left un-armed (default 0) — WEBSHELL pending burn-in, WAF_CVE
-	// because the family is heterogeneous and arms per CVE/rule — see
-	// wafSecurityFamilies.
+	// (except the armed WAF_BACKDOOR) must default 0. WAF_WEBSHELL is the sole
+	// deliberate exception: it has an edge-block rule (413) but is intentionally
+	// left un-armed (default 0) pending burn-in, because arming it would nft-ban
+	// benign scanners that GET /c99.php — see wafSecurityFamilies. WAF_CVE follows
+	// the normal rule (armed; rule 10001 is block).
 	for _, f := range fams {
 		def := cov[f]
 		block := webdetector.WAFFamilyHasBlockRule(f)
 		switch {
-		case f == "WAF_WEBSHELL" || f == "WAF_CVE":
+		case f == "WAF_WEBSHELL":
 			if def != 0 {
 				t.Errorf("%s is intentionally un-armed but defaults to %d, want 0", f, def)
 			}
@@ -48,7 +48,7 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	if cov["WAF_BACKDOOR"] != 1 {
 		t.Errorf("WAF_BACKDOOR should be armed to 1, got %d", cov["WAF_BACKDOOR"])
 	}
-	// WAF_WEBSHELL and WAF_CVE now have edge-block rules (413 / 10001) — assert it,
+	// WAF_WEBSHELL and WAF_CVE both have edge-block rules (413 / 10001) — assert it,
 	// so if someone later removes them this test's premise is rechecked.
 	if !webdetector.WAFFamilyHasBlockRule("WAF_WEBSHELL") {
 		t.Errorf("expected WAF_WEBSHELL to have an edge-block rule (413)")
@@ -56,13 +56,16 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	if !webdetector.WAFFamilyHasBlockRule("WAF_CVE") {
 		t.Errorf("expected WAF_CVE to have an edge-block rule (10001)")
 	}
-	if cov["WAF_CVE"] != 0 {
-		t.Errorf("WAF_CVE is intentionally un-armed but defaults to %d, want 0", cov["WAF_CVE"])
+	// WAF_CVE is armed by default (operator wants CVE hits to ban + notify); a
+	// low-confidence CVE rule is held per-rule with RULE_<id>=0, not by un-arming
+	// the family.
+	if cov["WAF_CVE"] != 1 {
+		t.Errorf("WAF_CVE has an edge-block rule (10001) but defaults to %d, want 1", cov["WAF_CVE"])
 	}
 
-	// Sanity: the four armed block-tier families are exactly what we expect today
+	// Sanity: the armed block-tier families are exactly what we expect today
 	// (WAF_WEBSHELL also has a block rule but is intentionally held un-armed).
-	for _, f := range []string{"WAF_SQLI", "WAF_RCE", "WAF_UPLOAD_FNAME", "WAF_UPLOAD_CONTENT"} {
+	for _, f := range []string{"WAF_SQLI", "WAF_RCE", "WAF_UPLOAD_FNAME", "WAF_UPLOAD_CONTENT", "WAF_CVE"} {
 		if !webdetector.WAFFamilyHasBlockRule(f) {
 			t.Errorf("expected %s to have an edge-block rule", f)
 		}

@@ -24,19 +24,25 @@ import (
 // rule yet, so it autoblocks the moment one of its rules (e.g. 438) is promoted
 // to block after that rule's own burn-in.
 //
-// WAF_WEBSHELL and WAF_CVE are the deliberate EXCEPTIONS: each has an
-// edge-`block` rule (WEBSHELL 413; WAF_CVE 10001, the Simple File List upload
-// RCE) but is left at 0 (not auto-armed), so adding those block rules does not
-// silently turn a probe into a 6h nft ban on every deployment — existing
-// /etc/cfm/detectors.conf files that don't list the family would otherwise
-// inherit the armed default. WAF_CVE additionally is HETEROGENEOUS (many CVE
-// rules of varying FP confidence), so family-wide arming is opt-in: set
-// `CVE = 1` (family) or `RULE_<id> = 1` (one detector) after burn-in.
+// WAF_CVE follows the normal block-rule rule: it has an edge-`block` rule
+// (10001, the Simple File List upload RCE) so it arms to 1 by default — the
+// operator explicitly wants CVE hits to nft-ban AND surface on Slack/mail (an
+// un-armed family is dropped by the detector, so it would notify nothing). The
+// family is HETEROGENEOUS (many CVE rules of varying FP confidence), so a
+// lower-confidence CVE rule must ship with a per-rule `RULE_<id> = 0` override
+// in the SAME change that adds it, holding just that rule while the family stays
+// armed. DRY_RUN = 1 gives a watch-first burn-in without real bans.
+//
+// WAF_WEBSHELL is the sole deliberate EXCEPTION: it has an edge-`block` rule
+// (413) but is left at 0 (not auto-armed), because arming it would nft-ban
+// benign internet scanners (Shodan/Censys/uptime monitors) that GET `/c99.php`
+// — the edge still 403s that one request, but a full IP ban of a scanner is not
+// wanted. Opt in with `WEBSHELL = 1` after burn-in.
 func wafSecurityFamilies(kv KV) map[string]int {
 	families := map[string]int{}
 	for _, fam := range webdetector.WAFReasonFamilies() {
 		def := 0
-		if (webdetector.WAFFamilyHasBlockRule(fam) && fam != "WAF_WEBSHELL" && fam != "WAF_CVE") || fam == "WAF_BACKDOOR" {
+		if (webdetector.WAFFamilyHasBlockRule(fam) && fam != "WAF_WEBSHELL") || fam == "WAF_BACKDOOR" {
 			def = 1
 		}
 		key := strings.TrimPrefix(fam, "WAF_")
@@ -54,6 +60,7 @@ func init() {
 			"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0",
 			"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BACKDOOR": "1",
 			"WEBSHELL": "0", // has an edge-block rule (413) but held un-armed; opt in with 1
+			"CVE": "1",      // named-vuln family; armed (rule 10001 is block). Hold a low-confidence CVE rule with RULE_<id>=0 when it lands.
 			"BLOCK": "6h",
 		},
 		LeniencySupported:   true,

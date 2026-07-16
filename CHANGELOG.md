@@ -29,11 +29,13 @@ back-filled here — see the git/PR history for that period.
   rules use the new `10000+` ID band (Lua↔Go parity + grouping tests updated), and
   the `waf_security` autoblock notification now surfaces the concrete CVE —
   `WAF/CVE-2025-34085` with the `rule_id` and a `cve` Extra field — instead of a
-  generic `WAF/CVE`. **Safety:** adding this block-tier rule does NOT auto-arm the
-  autoblock family — `WAF_CVE` is held un-armed by default (like `WAF_WEBSHELL`),
-  because the family is heterogeneous; operators opt in per host with `CVE = 1`
-  (family) or `RULE_10001 = 1` (this rule) in `[waf_security]`, and the GR/CY
-  leniency tier applies. `go test`/`vet`/`build`, `make lua`/`test-lua` green.
+  generic `WAF/CVE`. **Autoblock:** `WAF_CVE` is armed by default (`CVE = 1`, like
+  the other block-tier families) so a Simple File List hit gets a 6h nft ban AND a
+  `WAF/CVE-2025-34085` Slack/mail alert — an un-armed family notifies nothing. The
+  family is heterogeneous, so a lower-confidence CVE rule ships with a per-rule
+  `RULE_<id> = 0` (hold the rule, not the family); `DRY_RUN = 1` gives a
+  watch-first burn-in. GR/CY leniency applies. `go test`/`vet`/`build`,
+  `make lua`/`test-lua` green.
 - **`WAF_CVE.md` — as-built reference + "CVE hunting" workflow.** Documents the
   live CVE framework (10000+ id band, `WAF_CVE` family, CVE-named
   notifications, the un-armed-by-default autoblock safety, the Simple File List

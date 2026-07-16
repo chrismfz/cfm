@@ -66,36 +66,43 @@ notification whose `Kind` names the concrete CVE, not the generic family:
 So a Slack/mail line reads e.g. `WAF/CVE-2025-34085` — exactly the format the
 operator asked for when scoping this work.
 
-### 1.4 waf_security autoblock — **opt-in, never fleet-armed**
+### 1.4 waf_security autoblock — **armed by default, held per-rule**
 
-CVE rules can ship at `block` at the edge (a `403` on the single exploit
-request) **without** auto-arming the persistent nft ban. This is the critical
-safety property.
+`WAF_CVE` follows the normal block-rule rule: it has an edge-`block` rule
+(10001) so it **arms to 1 by default**, exactly like `WAF_SQLI`/`WAF_RCE`/etc.
+The reason is deliberate — the operator wants CVE hits to *both* nft-ban the
+source *and* surface on Slack/mail, and an **un-armed family notifies nothing**
+(`wafsec` drops a family whose threshold is `0` before it ever reaches the
+sink). So `CVE = 0` would silence the very alerts the `block` tier exists to
+produce.
 
 - `wafSecurityFamilies` (`internal/detectors/waf_security_register.go`) arms a
-  family by default *iff* it has an edge-`block` rule — **except**
-  `WAF_WEBSHELL` and `WAF_CVE`, which are held at `0`:
+  family by default *iff* it has an edge-`block` rule — the sole exception is
+  `WAF_WEBSHELL`:
 
   ```go
-  if (webdetector.WAFFamilyHasBlockRule(fam) && fam != "WAF_WEBSHELL" && fam != "WAF_CVE") || fam == "WAF_BACKDOOR" {
+  if (webdetector.WAFFamilyHasBlockRule(fam) && fam != "WAF_WEBSHELL") || fam == "WAF_BACKDOOR" {
       def = 1
   }
   ```
 
-  Without this, landing the first `block`-tier CVE rule would flip
-  `WAF_CVE` on for every existing `/etc/cfm/detectors.conf` that doesn't list
-  the family — silently converting an edge `403` into a 6-hour IP ban on
-  upgrade. `TestWAFSecurityFamilyCoverage` asserts `WAF_CVE` defaults to `0`.
+  (`WAF_WEBSHELL` is held at `0` because arming it would nft-ban benign
+  scanners that GET `/c99.php`. A CVE exploit is a POST of a PHP payload to a
+  product-specific endpoint — not something benign scanners do — so the same
+  concern doesn't apply.) `TestWAFSecurityFamilyCoverage` asserts `WAF_CVE`
+  defaults to `1`.
 
-- `WAF_CVE` is also **heterogeneous** on purpose: it collects many CVEs of
-  varying FP confidence under one family, so family-wide arming is a deliberate
-  opt-in, not a default.
+- **`WAF_CVE` is heterogeneous** — it collects many CVEs of varying FP
+  confidence under one family. Because the family is armed, a
+  **lower-confidence CVE rule must ship with a per-rule `RULE_<id> = 0`
+  override in the SAME change that adds it** (the per-rule override wins over
+  the family threshold), holding just that rule while the family stays armed
+  for the high-confidence ones. This is the inverse of the old "family opt-in"
+  stance: arm the family, hold the doubtful rules.
 
-- **Turning autoblock on** (after burn-in) is one of:
-  - `CVE = 1` in `[waf_security]` — arms the *whole* `WAF_CVE` family, or
-  - `RULE_10001 = 1` — arms **one** detector (per-rule override wins over the
-    family default, including `RULE_<id> = 0` to suppress one while the family
-    is armed).
+- **Watch-first burn-in without real bans:** `DRY_RUN = 1` in `[waf_security]`
+  still emits the Slack/mail alerts (`Extra["enforcement"]="dryrun"`) but skips
+  the nft ban. Flip it off once the stats look clean.
 
 - The edge action (`disabled`/`logonly`/`challenge`/`block`) is independent of
   autoblock arming and is controlled per rule via the CFG key
@@ -113,7 +120,7 @@ campaign-primary `CVE-2025-34085`.
 | Rule name | `rule_cve_simple_file_list_upload` |
 | Rule id | `10001` |
 | Edge default | `block` (both exploit legs are exact, near-zero FP) |
-| Autoblock | **un-armed** (`WAF_CVE` family default `0`) |
+| Autoblock | **armed** (`WAF_CVE` family default `1`) → 6h nft ban + `WAF/CVE-2025-34085` Slack/mail |
 | Detector | `_M.detect_cve_simple_file_list_upload(uri, method, args, body, headers)` in `configs/lua/cfm_waf_detectors.lua` |
 | Tests | `scripts/tests/cfm_waf_cve_simple_file_list_test.lua` |
 
@@ -237,13 +244,19 @@ Add the matching entry (parity test requires it):
 
 ### Step 5 — Decide autoblock intent **in the same change**
 
-- Default stays **un-armed** — `WAF_CVE` is held at `0`; do nothing to arm it
-  by default. That is the safe choice for a fresh detector.
-- Document the operator opt-in in the notes: `CVE = 1` (family) or
-  `RULE_10002 = 1` (this rule) after burn-in.
-- If (and only if) a specific CVE is exact enough to arm on day one, that is a
-  deliberate, separately-justified decision — and even then prefer letting the
-  operator opt in.
+`WAF_CVE` is **armed by default** (family threshold `1`), so a new `block`-tier
+CVE rule autoblocks the moment it lands. Decide, per new rule:
+
+- **High-confidence, exact shape** (like 10001) → leave it armed. Hits get a 6h
+  nft ban + `WAF/CVE-YYYY-NNNN` Slack/mail. This is the common case.
+- **Lower-confidence** → ship a per-rule `RULE_<id> = 0` in the reference
+  `configs/detectors.conf` in the SAME change (the per-rule override wins over
+  the family threshold), holding just that rule while the family stays armed for
+  the good ones. Note it in `[waf_security]`.
+- Operators can burn-in the whole family with `DRY_RUN = 1` (alerts, no bans).
+
+Do **not** un-arm the whole `WAF_CVE` family for one doubtful rule — that
+silences the alerts for every other CVE. Hold the rule, not the family.
 
 ### Step 6 — Tests
 
@@ -277,7 +290,8 @@ No code needed for the CVE name to appear — `cveFromReason` derives
 - [ ] Default edge mode justified in a comment.
 - [ ] Id stable and in the `10000+` band; Go mirrors Lua id + metadata.
 - [ ] Reason is `WAF_CVE:CVE_YYYY_NNNN:PRODUCT:TAG` so the notifier names it.
-- [ ] `waf_security` autoblock is explicit — **not** accidentally family-armed
-      (`WAF_CVE` stays `0` unless deliberately opted in).
+- [ ] `waf_security` autoblock is explicit: `WAF_CVE` is armed by default, so a
+      high-confidence rule stays armed and a lower-confidence one ships with a
+      per-rule `RULE_<id> = 0` (hold the rule, not the family).
 - [ ] `make lua`, `make test-lua`, and `go test ./internal/...` pass.
 - [ ] PoC/patch source link recorded; **no signatures written from memory**.

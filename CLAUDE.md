@@ -251,12 +251,15 @@ points:
   predates most target CVEs — get the exact method/endpoint/marker from a public
   PoC, the vendor patch, NVD references, or operator-supplied logs/captures. A
   param *name* legit traffic also sends is not exact enough.
-- **`WAF_CVE` is deliberately NOT auto-armed** even though it has an edge-`block`
-  rule (10001, Simple File List). Unlike the rule above, the auto-arm default
-  explicitly excludes it (`fam != "WAF_CVE"` in `wafSecurityFamilies`) because
-  the family is heterogeneous (many CVEs, varying FP confidence). Operators opt
-  in with `CVE = 1` (family) or `RULE_<id> = 1` (one detector) after burn-in.
-  Keep it at `0`; `TestWAFSecurityFamilyCoverage` asserts this.
+- **`WAF_CVE` is armed by default** (`CVE = 1`) because it has an edge-`block`
+  rule (10001, Simple File List) and the operator wants CVE hits to *both*
+  nft-ban *and* alert on Slack/mail — an un-armed family is dropped by `wafsec`
+  before the sink, so `CVE = 0` would notify nothing. The family is
+  heterogeneous (many CVEs, varying FP confidence), so a **lower-confidence CVE
+  rule ships with a per-rule `RULE_<id> = 0`** (hold the rule, not the family);
+  `DRY_RUN = 1` gives a watch-first burn-in. `TestWAFSecurityFamilyCoverage`
+  asserts `WAF_CVE` defaults to `1` (only `WAF_WEBSHELL` stays un-armed, to
+  avoid banning `/c99.php` scanners).
 - **Lua↔Go id parity is enforced.** A new `10xxx` id needs matching entries in
   `configs/lua/cfm_waf.lua` `RULE_IDS` **and** `internal/webdetector/waf_rule_ids.go`
   (`TestWAFRuleIDs_LuaParity`), plus positive+negative Lua tests. Key the
