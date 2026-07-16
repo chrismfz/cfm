@@ -2059,6 +2059,57 @@ function _M.detect_crlf_injection(args, body, headers)
   return nil
 end
 
+-- [CVE] Simple File List (WordPress) unauthenticated upload -> rename RCE.
+-- Covers CVE-2025-34085 and CVE-2020-36847 (same plugin, same endpoints, same
+-- png->php exploit; the ACSC July-2026 CMS campaign probes this).
+--
+-- Two vulnerable endpoints under /wp-content/plugins/simple-file-list/:
+--   ee-upload-engine.php — unauth multipart upload; the exploit uploads PHP code
+--                          disguised as an image (filename .png, image/png).
+--   ee-file-engine.php    — unauth rename; the exploit renames the uploaded file
+--                          to .php/.phtml/.php3/.php5 = code execution.
+--
+-- Fingerprint is keyed on ENDPOINT + exploit marker, NOT on parameter names:
+-- public PoCs use different field names for the rename (oldFile/newFile vs
+-- eeFileOld/eeFileAction/eeListFolder), so param-name matching would be fragile.
+-- Near-zero FP: no legitimate flow renames TO a php-executable extension through
+-- ee-file-engine.php, and no legitimate image upload carries a `<?php` open tag.
+-- `method` is expected already lowercased (m_lower from the caller).
+local function _cve_sfl_has_exec_ext(s)
+  -- .php .php3 .php5 .php7 .pht .phtml .phar at a value boundary
+  if s:find("%.pht%f[%W]")     then return true end
+  if s:find("%.phtml%f[%W]")   then return true end
+  if s:find("%.phar%f[%W]")    then return true end
+  if s:find("%.php[0-9]?%f[%W]") then return true end
+  return false
+end
+
+function _M.detect_cve_simple_file_list_upload(uri, method, args, body)
+  if method ~= "post" then return nil end
+  local u = lower(uri or "")
+
+  -- Rename leg (the RCE trigger): POST to ee-file-engine.php whose args/body
+  -- carries a php-executable rename target. Zero legitimate use.
+  if has(u, "/simple-file-list/ee-file-engine.php") then
+    local s = lower(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
+    if _cve_sfl_has_exec_ext(s) then
+      return "RENAME_TO_PHP"
+    end
+  end
+
+  -- Upload leg: POST to ee-upload-engine.php with a PHP open tag in the body
+  -- (image upload carrying executable PHP). Complements the generic 402 tag scan
+  -- but attributes the hit to the CVE.
+  if has(u, "/simple-file-list/ee-upload-engine.php") then
+    local b = lower(cap(body or "", CFG.max_scan_len))
+    if has(b, "<?php") or has(b, "<?=") then
+      return "UPLOAD_PHP"
+    end
+  end
+
+  return nil
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject

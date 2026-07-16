@@ -13,7 +13,10 @@
 //   6xx header / protocol anomaly
 //   7xx SSRF / external interaction
 //   8xx info disclosure / debug
-//   9xx reserved (future CVE detectors, behavioural rules)
+//   9xx reserved (behavioural rules)
+//   10xxx named-vulnerability (CVE) detectors — see WAF_CVE_PLAN.md (the 9xx
+//         band is too small for long-term CVE coverage). rule_log4shell keeps
+//         its historical 328; new CVE rules use 10000+.
 //
 // NEVER renumber an existing ID — operators reference these in per-vhost
 // exclusions, dashboards, and tickets.
@@ -130,6 +133,9 @@ var wafRuleIDs = []WAFRule{
 
 	// 8xx info disclosure / debug
 	{ID: 801, Name: "rule_debug_toggles", ReasonFamily: "WAF_DEBUG_TOGGLE", DefaultMode: "challenge"},
+
+	// 10xxx named-vulnerability (CVE) detectors — see WAF_CVE_PLAN.md.
+	{ID: 10001, Name: "rule_cve_simple_file_list_upload", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.
@@ -142,8 +148,9 @@ var wafRuleGroupNames = map[int]string{
 	5: "auth_abuse",
 	6: "header_protocol",
 	7: "ssrf",
-	8: "info_disclosure",
-	9: "reserved",
+	8:   "info_disclosure",
+	9:   "reserved",
+	100: "cve", // id/100 for the 10000+ named-vulnerability band
 }
 
 // WAFRules returns a copy of the rule registry with Group / GroupName filled

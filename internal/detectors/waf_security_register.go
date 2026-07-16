@@ -24,17 +24,19 @@ import (
 // rule yet, so it autoblocks the moment one of its rules (e.g. 438) is promoted
 // to block after that rule's own burn-in.
 //
-// WAF_WEBSHELL is the deliberate EXCEPTION: it gained an edge-`block` rule (413,
-// the proper-noun webshell drop-path subset) on 2026-07-03, but is left at 0
-// (not auto-armed) so the split doesn't silently turn a webshell GET-probe into
-// a 6h nft ban on every deployment — existing /etc/cfm/detectors.conf files
-// that don't list WEBSHELL would otherwise inherit the armed default. Arming it
-// is a one-line opt-in (WEBSHELL = 1) after its own burn-in.
+// WAF_WEBSHELL and WAF_CVE are the deliberate EXCEPTIONS: each has an
+// edge-`block` rule (WEBSHELL 413; WAF_CVE 10001, the Simple File List upload
+// RCE) but is left at 0 (not auto-armed), so adding those block rules does not
+// silently turn a probe into a 6h nft ban on every deployment — existing
+// /etc/cfm/detectors.conf files that don't list the family would otherwise
+// inherit the armed default. WAF_CVE additionally is HETEROGENEOUS (many CVE
+// rules of varying FP confidence), so family-wide arming is opt-in: set
+// `CVE = 1` (family) or `RULE_<id> = 1` (one detector) after burn-in.
 func wafSecurityFamilies(kv KV) map[string]int {
 	families := map[string]int{}
 	for _, fam := range webdetector.WAFReasonFamilies() {
 		def := 0
-		if (webdetector.WAFFamilyHasBlockRule(fam) && fam != "WAF_WEBSHELL") || fam == "WAF_BACKDOOR" {
+		if (webdetector.WAFFamilyHasBlockRule(fam) && fam != "WAF_WEBSHELL" && fam != "WAF_CVE") || fam == "WAF_BACKDOOR" {
 			def = 1
 		}
 		key := strings.TrimPrefix(fam, "WAF_")

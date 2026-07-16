@@ -17,6 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **First WAF CVE detector: Simple File List upload→rename RCE (rule 10001,
+  CVE-2025-34085 / CVE-2020-36847).** Detects the WordPress Simple File List
+  exploit the July-2026 ACSC CMS campaign probes: a PHP payload uploaded as an
+  image to `…/simple-file-list/ee-upload-engine.php`, then renamed to a
+  php-executable extension via `…/ee-file-engine.php`. Keyed on the endpoint plus
+  an exec-extension/`<?php` marker (not the volatile PoC parameter names), so one
+  detector covers both CVEs; near-zero FP → ships at `block`. This also lays the
+  reusable **WAF_CVE** framework foothold from WAF_CVE_PLAN.md: named-vulnerability
+  rules use the new `10000+` ID band (Lua↔Go parity + grouping tests updated), and
+  the `waf_security` autoblock notification now surfaces the concrete CVE —
+  `WAF/CVE-2025-34085` with the `rule_id` and a `cve` Extra field — instead of a
+  generic `WAF/CVE`. **Safety:** adding this block-tier rule does NOT auto-arm the
+  autoblock family — `WAF_CVE` is held un-armed by default (like `WAF_WEBSHELL`),
+  because the family is heterogeneous; operators opt in per host with `CVE = 1`
+  (family) or `RULE_10001 = 1` (this rule) in `[waf_security]`, and the GR/CY
+  leniency tier applies. `go test`/`vet`/`build`, `make lua`/`test-lua` green.
+
 ### Fixed
 - **cfm-lsm: silence OBS-004 ptrace-telemetry noise from cPanel/CloudLinux
   control-plane.** `CFML-OBS-004` (ptrace by a web-class uid, monitor-only)

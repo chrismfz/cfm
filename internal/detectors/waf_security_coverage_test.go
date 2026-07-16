@@ -26,16 +26,18 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	}
 
 	// Every family with an edge-block rule must default ON; a family without one
-	// (except the armed WAF_BACKDOOR) must default 0. WAF_WEBSHELL is the one
-	// deliberate exception: it has an edge-block rule (413) but is intentionally
-	// left un-armed (default 0) pending a burn-in — see wafSecurityFamilies.
+	// (except the armed WAF_BACKDOOR) must default 0. WAF_WEBSHELL and WAF_CVE are
+	// the deliberate exceptions: each has an edge-block rule (413 / 10001) but is
+	// intentionally left un-armed (default 0) — WEBSHELL pending burn-in, WAF_CVE
+	// because the family is heterogeneous and arms per CVE/rule — see
+	// wafSecurityFamilies.
 	for _, f := range fams {
 		def := cov[f]
 		block := webdetector.WAFFamilyHasBlockRule(f)
 		switch {
-		case f == "WAF_WEBSHELL":
+		case f == "WAF_WEBSHELL" || f == "WAF_CVE":
 			if def != 0 {
-				t.Errorf("WAF_WEBSHELL is intentionally un-armed but defaults to %d, want 0", def)
+				t.Errorf("%s is intentionally un-armed but defaults to %d, want 0", f, def)
 			}
 		case block && def != 1:
 			t.Errorf("%s has an edge-block rule but defaults to %d, want 1", f, def)
@@ -46,10 +48,16 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	if cov["WAF_BACKDOOR"] != 1 {
 		t.Errorf("WAF_BACKDOOR should be armed to 1, got %d", cov["WAF_BACKDOOR"])
 	}
-	// WAF_WEBSHELL now has an edge-block rule (413) — assert it, so if someone
-	// later removes 413 this test's premise is rechecked.
+	// WAF_WEBSHELL and WAF_CVE now have edge-block rules (413 / 10001) — assert it,
+	// so if someone later removes them this test's premise is rechecked.
 	if !webdetector.WAFFamilyHasBlockRule("WAF_WEBSHELL") {
 		t.Errorf("expected WAF_WEBSHELL to have an edge-block rule (413)")
+	}
+	if !webdetector.WAFFamilyHasBlockRule("WAF_CVE") {
+		t.Errorf("expected WAF_CVE to have an edge-block rule (10001)")
+	}
+	if cov["WAF_CVE"] != 0 {
+		t.Errorf("WAF_CVE is intentionally un-armed but defaults to %d, want 0", cov["WAF_CVE"])
 	}
 
 	// Sanity: the four armed block-tier families are exactly what we expect today
