@@ -239,6 +239,31 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   config knob (key = family minus `WAF_`); coverage of the full registry is
   asserted by `TestWAFSecurityFamilyCoverage`.
 
+### WAF CVE detectors (`WAF_CVE`) — named-vulnerability rules
+Per-CVE in-path detectors live in the `10000+` rule-id band and emit the
+`WAF_CVE` reason family (`WAF_CVE:CVE_<year>_<suffix>:PRODUCT:TAG`), which the
+autoblock notifier turns into a `WAF/CVE-YYYY-NNNN` alert automatically
+(`cveFromReason` in `wafsec/detector.go`). **Read `WAF_CVE.md` before adding
+one** — it carries the as-built reference and a step-by-step "CVE hunting"
+recipe; `WAF_CVE_PLAN.md` is the original design + candidate backlog. Hard-won
+points:
+- **Never write a CVE signature from memory.** The assistant's knowledge cutoff
+  predates most target CVEs — get the exact method/endpoint/marker from a public
+  PoC, the vendor patch, NVD references, or operator-supplied logs/captures. A
+  param *name* legit traffic also sends is not exact enough.
+- **`WAF_CVE` is deliberately NOT auto-armed** even though it has an edge-`block`
+  rule (10001, Simple File List). Unlike the rule above, the auto-arm default
+  explicitly excludes it (`fam != "WAF_CVE"` in `wafSecurityFamilies`) because
+  the family is heterogeneous (many CVEs, varying FP confidence). Operators opt
+  in with `CVE = 1` (family) or `RULE_<id> = 1` (one detector) after burn-in.
+  Keep it at `0`; `TestWAFSecurityFamilyCoverage` asserts this.
+- **Lua↔Go id parity is enforced.** A new `10xxx` id needs matching entries in
+  `configs/lua/cfm_waf.lua` `RULE_IDS` **and** `internal/webdetector/waf_rule_ids.go`
+  (`TestWAFRuleIDs_LuaParity`), plus positive+negative Lua tests. Key the
+  detector on the exact endpoint/marker, reuse hardened helpers
+  (`detect_upload_content`, not a raw `<?php` scan), and decide autoblock intent
+  in the same change.
+
 ### Concurrency / process lifecycle
 Early bugs included zombie/unreaped detector tailer subprocesses, panics,
 and snapshot-refresh races. When spawning subprocesses or background
@@ -260,6 +285,7 @@ rather than advancing heartbeats on failure.
 | Detectors | `docs/DETECTORS.md`, `docs/Detectors.Leniency.md` |
 | Web detector history design | `docs/webdetector-history-design.md` |
 | WAF → autoblock (`waf_security`) | `docs/waf-autoblock-design.md` |
+| WAF CVE detectors (`WAF_CVE`) | `WAF_CVE.md` (as-built + "CVE hunting" recipe) · `WAF_CVE_PLAN.md` (design + backlog) |
 | Admin/WebUI API | `docs/webui-api-curl-recipes.md`, `docs/webui-api-sample-responses.md` |
 | DNAT bypass | `docs/dnat-bypass.md` · Debug capture: `docs/debug-capture-runbook.md` |
 | Proxy latency: measuring & origin keepalive | `docs/proxy-performance.md` |

@@ -34,6 +34,13 @@ back-filled here — see the git/PR history for that period.
   because the family is heterogeneous; operators opt in per host with `CVE = 1`
   (family) or `RULE_10001 = 1` (this rule) in `[waf_security]`, and the GR/CY
   leniency tier applies. `go test`/`vet`/`build`, `make lua`/`test-lua` green.
+- **`WAF_CVE.md` — as-built reference + "CVE hunting" workflow.** Documents the
+  live CVE framework (10000+ id band, `WAF_CVE` family, CVE-named
+  notifications, the un-armed-by-default autoblock safety, the Simple File List
+  detector, and the ACSC candidate status) plus a step-by-step recipe for
+  adding the next CVE detector. CLAUDE.md §6 gets a `WAF_CVE` subsection and a
+  §7 docs-table pointer, so future CVE work starts from the checklist instead
+  of relearning it.
 
 ### Fixed
 - **cfm-lsm: silence OBS-004 ptrace-telemetry noise from cPanel/CloudLinux
