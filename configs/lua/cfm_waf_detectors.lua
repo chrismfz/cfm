@@ -2075,16 +2075,19 @@ end
 -- Near-zero FP: no legitimate flow renames TO a php-executable extension through
 -- ee-file-engine.php, and no legitimate image upload carries a `<?php` open tag.
 -- `method` is expected already lowercased (m_lower from the caller).
+-- php-executable extension at a value boundary. Kept in step with bad_fname()
+-- in detect_upload_filename (rule 401): .php[%d] / .phtm[l] / .pht / .phar. If
+-- that set grows, grow this too (they intentionally match the same engine-mapped
+-- extensions; bad_fname is a nested local, so this is a parallel matcher).
 local function _cve_sfl_has_exec_ext(s)
-  -- .php .php3 .php5 .php7 .pht .phtml .phar at a value boundary
-  if s:find("%.pht%f[%W]")     then return true end
-  if s:find("%.phtml%f[%W]")   then return true end
-  if s:find("%.phar%f[%W]")    then return true end
-  if s:find("%.php[0-9]?%f[%W]") then return true end
+  if s:find("%.pht%f[%W]")       then return true end  -- .pht
+  if s:find("%.phtml?%f[%W]")    then return true end  -- .phtm / .phtml
+  if s:find("%.phar%f[%W]")      then return true end  -- .phar
+  if s:find("%.php[0-9]?%f[%W]") then return true end  -- .php / .php3 / .php5 / .php7
   return false
 end
 
-function _M.detect_cve_simple_file_list_upload(uri, method, args, body)
+function _M.detect_cve_simple_file_list_upload(uri, method, args, body, headers)
   if method ~= "post" then return nil end
   local u = lower(uri or "")
 
@@ -2097,12 +2100,14 @@ function _M.detect_cve_simple_file_list_upload(uri, method, args, body)
     end
   end
 
-  -- Upload leg: POST to ee-upload-engine.php with a PHP open tag in the body
-  -- (image upload carrying executable PHP). Complements the generic 402 tag scan
-  -- but attributes the hit to the CVE.
+  -- Upload leg: POST to ee-upload-engine.php carrying PHP content. REUSE the
+  -- hardened rule-402 scanner (detect_upload_content) instead of a naive
+  -- `<?php` substring — 402 already mitigates the binary-image false positive
+  -- (a `<?php` byte run appearing by chance in a large uploaded image; see the
+  -- note above detect_upload_content). We only add CVE attribution when 402's
+  -- content check fires on THIS endpoint.
   if has(u, "/simple-file-list/ee-upload-engine.php") then
-    local b = lower(cap(body or "", CFG.max_scan_len))
-    if has(b, "<?php") or has(b, "<?=") then
+    if _M.detect_upload_content(body, headers) then
       return "UPLOAD_PHP"
     end
   end

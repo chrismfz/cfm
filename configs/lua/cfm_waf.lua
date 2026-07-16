@@ -978,9 +978,12 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_cve_simple_file_list_upload, "block")
     if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_cve_simple_file_list_upload(uri, m_lower, args, body)
+      local tag = det.detect_cve_simple_file_list_upload(uri, m_lower, args, body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        -- One detector covers CVE-2025-34085 AND CVE-2020-36847 (same plugin/
+        -- endpoints/exploit); the reason carries the campaign-primary CVE
+        -- (2025-34085). Per-CVE metadata (WAFRule.CVEs) can carry both later.
         if record("WAF_CVE:CVE_2025_34085:SIMPLE_FILE_LIST:" .. tag, ttl, mode, RULE_IDS.rule_cve_simple_file_list_upload) then goto done end
       end
     end
