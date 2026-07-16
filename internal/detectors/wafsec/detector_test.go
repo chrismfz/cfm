@@ -154,3 +154,20 @@ func TestEmptyReasonAndIPSkipped(t *testing.T) {
 		t.Fatalf("empty ip/reason should be skipped, got %d", len(got))
 	}
 }
+
+// TestCVEFromReason covers the WAF_CVE reason -> display-CVE mapping used to
+// label the autoblock notification (WAF/CVE-2025-34085) and the cve Extra field.
+func TestCVEFromReason(t *testing.T) {
+	cases := []struct{ reason, want string }{
+		{"WAF_CVE:CVE_2025_34085:SIMPLE_FILE_LIST:RENAME_TO_PHP", "CVE-2025-34085"},
+		{"WAF_CVE:CVE_2020_36847:SIMPLE_FILE_LIST:UPLOAD_PHP", "CVE-2020-36847"},
+		{"WAF_CVE:LOG4SHELL:NESTED", ""}, // no CVE_* token -> fall back to plain family
+		{"WAF_SQLI:UNION_SELECT", ""},    // non-CVE family
+		{"WAF_CVE", ""},                  // family only, no segments
+	}
+	for _, c := range cases {
+		if got := cveFromReason(c.reason); got != c.want {
+			t.Errorf("cveFromReason(%q) = %q, want %q", c.reason, got, c.want)
+		}
+	}
+}

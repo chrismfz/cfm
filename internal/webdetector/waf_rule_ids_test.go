@@ -119,8 +119,12 @@ func TestWAFRuleIDs_NoRenumber(t *testing.T) {
 // 100-block" mistakes).
 func TestWAFRuleIDs_GroupingDigits(t *testing.T) {
 	for _, r := range wafRuleIDs {
-		if r.ID < 100 || r.ID > 999 {
-			t.Errorf("rule %s has out-of-range ID %d (must be 100-999)", r.Name, r.ID)
+		// Legacy families live in 100-999 (grouped by leading digit); named-
+		// vulnerability (CVE) detectors use the 10000+ band (WAF_CVE_PLAN.md).
+		inLegacy := r.ID >= 100 && r.ID <= 999
+		inCVE := r.ID >= 10000 && r.ID <= 99999
+		if !inLegacy && !inCVE {
+			t.Errorf("rule %s has out-of-range ID %d (must be 100-999 or 10000-99999)", r.Name, r.ID)
 		}
 		group := r.ID / 100
 		if _, ok := wafRuleGroupNames[group]; !ok {

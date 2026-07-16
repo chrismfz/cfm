@@ -17,6 +17,33 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **First WAF CVE detector: Simple File List upload→rename RCE (rule 10001,
+  CVE-2025-34085 / CVE-2020-36847).** Detects the WordPress Simple File List
+  exploit the July-2026 ACSC CMS campaign probes: a PHP payload uploaded as an
+  image to `…/simple-file-list/ee-upload-engine.php`, then renamed to a
+  php-executable extension via `…/ee-file-engine.php`. Keyed on the endpoint plus
+  an exec-extension/`<?php` marker (not the volatile PoC parameter names), so one
+  detector covers both CVEs; near-zero FP → ships at `block`. This also lays the
+  reusable **WAF_CVE** framework foothold from WAF_CVE_PLAN.md: named-vulnerability
+  rules use the new `10000+` ID band (Lua↔Go parity + grouping tests updated), and
+  the `waf_security` autoblock notification now surfaces the concrete CVE —
+  `WAF/CVE-2025-34085` with the `rule_id` and a `cve` Extra field — instead of a
+  generic `WAF/CVE`. **Autoblock:** `WAF_CVE` is armed by default (`CVE = 1`, like
+  the other block-tier families) so a Simple File List hit gets a 6h nft ban AND a
+  `WAF/CVE-2025-34085` Slack/mail alert — an un-armed family notifies nothing. The
+  family is heterogeneous, so a lower-confidence CVE rule ships with a per-rule
+  `RULE_<id> = 0` (hold the rule, not the family); `DRY_RUN = 1` gives a
+  watch-first burn-in. GR/CY leniency applies. `go test`/`vet`/`build`,
+  `make lua`/`test-lua` green.
+- **`WAF_CVE.md` — as-built reference + "CVE hunting" workflow.** Documents the
+  live CVE framework (10000+ id band, `WAF_CVE` family, CVE-named
+  notifications, the un-armed-by-default autoblock safety, the Simple File List
+  detector, and the ACSC candidate status) plus a step-by-step recipe for
+  adding the next CVE detector. CLAUDE.md §6 gets a `WAF_CVE` subsection and a
+  §7 docs-table pointer, so future CVE work starts from the checklist instead
+  of relearning it.
+
 ### Fixed
 - **cfm-lsm: silence OBS-004 ptrace-telemetry noise from cPanel/CloudLinux
   control-plane.** `CFML-OBS-004` (ptrace by a web-class uid, monitor-only)

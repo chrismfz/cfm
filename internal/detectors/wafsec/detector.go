@@ -160,6 +160,23 @@ func familyOf(reason string) string {
 	return reason
 }
 
+// cveFromReason extracts a display CVE id from a WAF_CVE reason string. The
+// convention is WAF_CVE:CVE_<year>_<suffix>:<PRODUCT>:<TAG>, so the second
+// colon-segment carries the CVE with underscores: "CVE_2025_34085" ->
+// "CVE-2025-34085". Returns "" when the reason has no CVE_* token (e.g.
+// "WAF_CVE:LOG4SHELL:..."), so the caller falls back to the plain family.
+func cveFromReason(reason string) string {
+	parts := strings.Split(reason, ":")
+	if len(parts) < 2 {
+		return ""
+	}
+	seg := parts[1]
+	if !strings.HasPrefix(seg, "CVE_") {
+		return ""
+	}
+	return strings.ReplaceAll(seg, "_", "-")
+}
+
 // thresholdFor resolves the block threshold for a (family, ruleID). A per-rule
 // override wins over the family default — including an override of 0, which
 // suppresses autoblock for that rule while the family stays active. Returns
@@ -212,22 +229,36 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 		d.fired[key] = struct{}{}
 
+		// Notification identity. For the WAF_CVE family, surface the concrete
+		// CVE id (WAF_CVE:CVE_2025_34085:... -> "WAF/CVE-2025-34085") so the
+		// alert Kind / notifier line names the vulnerability instead of the
+		// generic "WAF/CVE"; rule_id stays in Extra for cross-referencing the
+		// Lua/Go registry. Falls back to the plain family for non-CVE hits (and
+		// for WAF_CVE reasons without a CVE_* token, e.g. log4shell).
+		kindStr := "WAF/" + strings.TrimPrefix(family, "WAF_")
+		extra := map[string]string{
+			"ip":      ev.SrcIP,
+			"source":  ev.Source,
+			"reason":  ev.Reason,
+			"family":  family,
+			"rule_id": ev.Signal,
+			"host":    ev.Scope,
+			"uri":     ev.Path,
+			"method":  ev.Method,
+		}
+		if family == "WAF_CVE" {
+			if cve := cveFromReason(ev.Reason); cve != "" {
+				kindStr = "WAF/" + cve
+				extra["cve"] = cve
+			}
+		}
 		alert := core.Alert{
 			When:    now,
-			Kind:    core.AlertKind("WAF/" + strings.TrimPrefix(family, "WAF_")),
+			Kind:    core.AlertKind(kindStr),
 			Key:     ev.SrcIP,
 			Count:   count,
 			Samples: d.samples.GetAndClear(key),
-			Extra: map[string]string{
-				"ip":      ev.SrcIP,
-				"source":  ev.Source,
-				"reason":  ev.Reason,
-				"family":  family,
-				"rule_id": ev.Signal,
-				"host":    ev.Scope,
-				"uri":     ev.Path,
-				"method":  ev.Method,
-			},
+			Extra:   extra,
 		}
 		if d.cfg.DryRun {
 			alert.Extra["enforcement"] = "dryrun"
