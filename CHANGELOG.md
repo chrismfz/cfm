@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **cfm-lsm: silence CRED-002 false positives from stock cPanel/cron daemons.**
+  `CFML-CRED-002` (privilege escalation without a setuid path, monitor-only)
+  fires when a task transitions uid→0 via a setuid-family syscall from a binary
+  that carries no `S_ISUID` bit and is not allowlisted. On stock cPanel hosts
+  three root-started system daemons legitimately do exactly that and were
+  generating recurring noise: `crond` (re-credentialing per-user cron jobs),
+  `pkgacct` (account backup/transfer), and `process_ssl_reissue` (AutoSSL). None
+  are web-origin. Added them to the `CFML-CRED-002` `allow_exe` list in the
+  reference `configs/lsm.conf` (these paths are also stat()'d into the BPF-side
+  `cfm_setuid_inodes` map, so they gate the kernel decision, not just the
+  userspace post-filter). The cPanel Perl taskqueue is deliberately left out —
+  its exe is the generic `perl` interpreter. Operators pull this in by syncing
+  the reference config (or adding the three `allow_exe` lines to
+  `/etc/cfm/lsm.conf`) and running `cfm lsm restart`.
 - **WAF CRLF rule (605) no longer flags legit multipart uploads.** A
   `multipart/form-data` body carries a per-part `Content-Type:` (and sometimes
   `Content-Length:`) MIME header on its own `\r\n`-terminated line for every
