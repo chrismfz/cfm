@@ -105,6 +105,20 @@ clean(post(nf_body("nf_fu_upload", "photo.jpg", "photo.jpg")),
       "legit nf_fu_upload: image, normal dest, no traversal, no php")
 clean(post(nf_body("nf_fu_upload", nil, "resume.pdf")),
       "legit nf_fu_upload: pdf upload, no traversal")
+-- Regression: a legit upload of a code/config file whose CONTENT contains ../
+-- (e.g. require('../../lib')) with a NORMAL image_jpg must NOT trip TRAVERSAL —
+-- the traversal check is scoped to the image_jpg value, not the whole buffer.
+clean(post(
+        "------X\r\n" ..
+        'Content-Disposition: form-data; name="action"\r\n\r\nnf_fu_upload\r\n' ..
+        "------X\r\n" ..
+        'Content-Disposition: form-data; name="image_jpg"\r\n\r\nphoto.jpg\r\n' ..
+        "------X\r\n" ..
+        'Content-Disposition: form-data; name="files-1234"; filename="config.js"\r\n' ..
+        "Content-Type: application/octet-stream\r\n\r\n" ..
+        "var p = require('../../lib/util');\r\n" ..
+        "------X--\r\n"),
+      "legit code-file upload: ../ in file CONTENT, normal image_jpg")
 clean({ uri = AJAX, args = "action=heartbeat", method = "POST",
         headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
         body = "action=heartbeat&data=1" },

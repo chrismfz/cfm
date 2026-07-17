@@ -2196,13 +2196,21 @@ function _M.detect_cve_ninja_forms_fu_upload(uri, method, args, body, headers)
   if _M.detect_upload_filename(body, headers) then
     return "UPLOAD_PHP"
   end
-  -- Marker B: path traversal in the dest-path param. Gated behind
-  -- nf_fu_upload + the presence of `image_jpg`, so a `../` from elsewhere in the
-  -- (capped, fields-only) buffer can't trip it on its own — and `image_jpg=../`
+  -- Marker B: path traversal in the image_jpg dest-path VALUE specifically —
+  -- NOT anywhere in the buffer. A whole-buffer `../` scan false-positives on a
+  -- legitimate upload of a code/config file whose CONTENT contains `../` (e.g.
+  -- `require('../../lib')`), which lands in the capped body after the fields.
+  -- Extract the value from both urlencoded (image_jpg=<v>) and multipart
+  -- (name="image_jpg"\r\n\r\n<v>) encodings and test only that. `image_jpg=../`
   -- is never a legitimate upload destination.
-  if has(scope, "image_jpg") and
-     (has(scope, "../") or has(scope, "..\\") or has(scope, "..%2f")
-      or has(scope, "..%5c") or has(scope, "%2e%2e")) then
+  local function _trav(v)
+    if not v or v == "" then return false end
+    return has(v, "../") or has(v, "..\\") or has(v, "..%2f")
+        or has(v, "..%5c") or has(v, "%2e%2e")
+  end
+  if _trav(scope:match("image_jpg=([^&\r\n]*)"))
+     or _trav(scope:match('name="image_jpg".-\r?\n\r?\n([^\r\n]*)'))
+     or _trav(scope:match("name='image_jpg'.-\r?\n\r?\n([^\r\n]*)")) then
     return "TRAVERSAL"
   end
   return nil
