@@ -3,19 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CFM Admin</title>
+  <title>CFM — Vhost controls</title>
   <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
   <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
   <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
   <script src="/cfm-admin/assets/vendor/vue-3.5.13.global.prod.js" defer></script>
   <script type="module">
-    import "../../assets/shared/constants.js";
-    import "../../assets/shared/auth-context.js";
-    import "../../assets/shared/auth-mode.js";
-    import "../../assets/shared/api-client.js";
-    import "../../assets/shared/controller-bootstrap.js";
-    import "../../assets/shared/ui-scope.js";
-    import "../../assets/app.js";
+    import "../../assets/webdet/pages/controls.js";
   </script>
 </head>
 <body>
@@ -23,19 +17,7 @@
 <aside class="sidebar" data-shared-nav></aside>
 <div class="main">
 <div id="app" v-cloak>
-    <header class="topbar">
-      <button class="nav-burger" type="button" data-nav-burger aria-label="Toggle navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-      <h1>CFM Admin</h1>
-      <div class="meta">
-        <span class="muted">Auto-refresh: <strong>{{ autoRefresh ? 'ON' : 'OFF' }}</strong></span>
-        <label for="refresh-interval" class="muted">Every</label>
-        <input id="refresh-interval" class="input input-small" type="number" min="1" max="300" step="1" v-model.number="refreshIntervalSec" @change="applyRefreshInterval" />
-        <span class="muted">sec</span>
-        <button class="btn-quiet" @click="refreshAll" :disabled="loading">{{ loading ? 'Refreshing...' : 'Refresh now' }}</button>
-        <button class="btn-quiet" v-if="autoRefresh" @click="stopAutoRefresh">Stop</button>
-        <button class="btn-quiet" v-else @click="startAutoRefresh">Start</button>
-      </div>
-    </header>
+    <div data-wd-section="topbar"></div>
 
     <main class="layout">
       <section class="card wide">
