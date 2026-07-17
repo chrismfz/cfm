@@ -153,7 +153,7 @@ entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
 (`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
 hosting mix changes.
 
-Four implemented; the rest are WordPress/Joomla candidates awaiting a
+Five implemented; the rest are WordPress/Joomla candidates awaiting a
 validated exact request shape:
 
 | Product / CVE | Status |
@@ -162,6 +162,7 @@ validated exact request shape:
 | Joomla JCE (`CVE-2026-48907`) | ✅ **implemented** (rule 10002) — `option=com_jce` + `profiles.import` + php-exec upload |
 | Ninja Forms (`CVE-2026-0740`) | ✅ **implemented** (rule 10003) — `action=nf_fu_upload` + (php-exec upload OR `image_jpg` traversal) |
 | LiteSpeed Cache (`CVE-2024-28000`) | ✅ **implemented** (rule 10004) — `litespeed_hash`/`litespeed_role` cookie (unauth privesc brute-force) |
+| Slider Revolution (`CVE-2015-1579` + classic upload RCE) | ✅ **implemented** (rule 10005) — behavioural virtual-patch: `revslider_show_image`+`../` LFI, `revslider_ajax_action`+`update_plugin` unauth upload |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
 Keep the plan doc's candidate table as the backlog; update the ✅ column here
@@ -175,6 +176,18 @@ critical-unauth installs across 495 sites) produced a ranked WAF-rule worklist
 **R4 Fusion Builder** (`fusion_*` nopriv ajax). R3 upload / R5 `wp-config`
 traversal / R2 object-injection / R8 jet SQLi are already largely covered by the
 generic rules (401 / 101 / 306 / 301).
+
+**Behavioural virtual-patch (a valid WAF_CVE flavour):** rule 10005
+(Slider Revolution) is not a version match — it keys on the known-malicious
+*request shapes* (`revslider_show_image` + `../`, and unauth
+`revslider_ajax_action` + `update_plugin`). Those shapes are malicious on **any**
+version, so this protects the whole fleet spread rather than only the one install
+a version check would flag, and it fills a real gap (a revslider `update_plugin`
+ZIP-with-PHP upload is not caught by the generic upload rules). Use this pattern
+when a plugin has a long history of the same abused endpoints and version-specific
+CVE matching would under-protect. Gate any leg whose action is also legitimate for
+an admin on UNAUTH (absence of a `wordpress_logged_in_*` cookie) — a forgeable
+FP-reduction heuristic, not a security control.
 
 ---
 

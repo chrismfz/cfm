@@ -156,6 +156,7 @@ local CFG = {
   rule_cve_joomla_jce_profile_import = "block", -- CVE-2026-48907: Joomla JCE (<2.9.99.5) unauth PHP upload->RCE. POST index.php?option=com_jce, JCE action value "profiles.import" (a multipart field, not a key=value pair), + php-executable multipart upload filename (double-ext .xml.php). Keyed on component+action-value+exec-ext, not the random filename/CSRF field.
   rule_cve_ninja_forms_fu_upload = "block", -- CVE-2026-0740: Ninja Forms File Uploads add-on unauth arbitrary file upload + path traversal. POST wp-admin/admin-ajax.php, action value "nf_fu_upload" + (php-executable upload filename OR image_jpg=../ traversal). Keyed on the specific action (NOT bare admin-ajax) + exploit marker.
   rule_cve_litespeed_hash_privesc = "block", -- CVE-2024-28000: LiteSpeed Cache (<6.4) unauth privesc. Request presents a litespeed_hash / litespeed_role COOKIE (weak 6-char crawler-simulation hash brute-forced to become admin). Cookie is internal-only; a real visitor never sets it (zero FP). Runs on all methods (cookie-based, not body-gated).
+  rule_cve_revslider = "block", -- CVE-2015-1579 (+ classic upload RCE): Slider Revolution virtual-patch. Leg A LFI = action=revslider_show_image + ../ traversal in img. Leg B RCE = action=revslider_ajax_action + client_action=update_plugin (unauth only). Behavioural (shape-based), protects all versions, not just the vulnerable one.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -526,6 +527,7 @@ local RULE_IDS = {
   rule_cve_joomla_jce_profile_import = 10002,
   rule_cve_ninja_forms_fu_upload = 10003,
   rule_cve_litespeed_hash_privesc = 10004,
+  rule_cve_revslider = 10005,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -808,6 +810,23 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2024_28000:LITESPEED_CACHE:" .. tag, ttl, mode, RULE_IDS.rule_cve_litespeed_hash_privesc) then goto done end
+      end
+    end
+  end
+
+  -- ── 3c) Slider Revolution virtual-patch (CVE-2015-1579 LFI + upload RCE) ────
+  -- Runs before rule 5 (traversal) so the REVSLIDER:LFI attribution wins over a
+  -- generic WAF_TRAVERSAL hit for the same request. Behavioural, all-methods.
+  do
+    local mode = rule_mode(CFG.rule_cve_revslider, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_revslider(uri, m_lower, args, body, cookie)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        local reason = (tag == "LFI")
+          and "WAF_CVE:CVE_2015_1579:REVSLIDER:LFI"
+          or  "WAF_CVE:REVSLIDER:PLUGIN_UPLOAD"
+        if record(reason, ttl, mode, RULE_IDS.rule_cve_revslider) then goto done end
       end
     end
   end
