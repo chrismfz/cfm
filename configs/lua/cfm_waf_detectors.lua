@@ -2380,15 +2380,23 @@ end
 -- the fleet spec, not a security control. All methods (get-log is a GET,
 -- connect-app a POST).
 function _M.detect_cve_post_smtp(uri, args, cookie)
-  if has(lower(cookie or ""), "wordpress_logged_in_") then return nil end
+  -- Cheap markers FIRST (this runs on every request): the REST path is in the
+  -- URI; the admin-log page is `page=postman_email_log` in args. WP registers
+  -- both slugs in exact lowercase, so a case-sensitive prefilter on args avoids
+  -- lowercasing it on the ~99.9% of requests that aren't post-smtp.
   local u = lower(uri or "")
+  local tag
   if has(u, "/wp-json/post-smtp/") then
-    return "REST"
+    tag = "REST"
+  elseif has(args or "", "postman")
+     and (u .. "&" .. lower(args or "")):find("postman_%a+_log") then
+    tag = "EMAIL_LOG"
   end
-  if (u .. "&" .. lower(args or "")):find("postman_%a+_log") then
-    return "EMAIL_LOG"
-  end
-  return nil
+  if not tag then return nil end
+  -- Only now pay for the cookie: exempt logged-in admins (and the plugin's own
+  -- admin-UI AJAX). Forgeable FP-reduction heuristic, not a security control.
+  if has(lower(cookie or ""), "wordpress_logged_in_") then return nil end
+  return tag
 end
 
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
