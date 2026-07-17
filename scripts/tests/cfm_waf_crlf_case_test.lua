@@ -61,8 +61,15 @@ set_only({ rule_crlf_injection = "block" })
 -- ── F34: raw newline + CANONICALLY-CAPITALIZED header name (was missed) ──────
 fires(post("x=foo\r\nSet-Cookie: sid=evil"),      "capitalized Set-Cookie (body)",   "WAF_CRLF:CRLF_SET_COOKIE")
 fires(post("x=foo\r\nLocation: http://evil/"),    "capitalized Location (body)",     "WAF_CRLF:CRLF_LOCATION")
-fires(post("x=foo\r\nContent-Type: text/html"),   "capitalized Content-Type (body)", "WAF_CRLF:CRLF_CONTENT_TYPE")
-fires(post("x=foo\r\nContent-Length: 0"),         "capitalized Content-Length",      "WAF_CRLF:CRLF_CONTENT_LENGTH")
+-- Content-Type / Content-Length in a BODY are now tolerated (args-scoped): a
+-- request body carrying `\r\nContent-Type:` is legit data (multipart part
+-- headers, page-builder save payloads), never reflected into a response header.
+clean(post("x=foo\r\nContent-Type: text/html"),   "Content-Type in BODY tolerated (FP fix)")
+clean(post("x=foo\r\nContent-Length: 0"),         "Content-Length in BODY tolerated (FP fix)")
+-- …but Content-Type / Content-Length in the ARGS (query string) still fire —
+-- query-string reflection into a response header is the real vector.
+fires(get("r=/x\r\nContent-Type: text/html"),     "Content-Type in ARGS still fires", "WAF_CRLF:CRLF_CONTENT_TYPE")
+fires(get("r=/x\r\nContent-Length: 0"),           "Content-Length in ARGS still fires", "WAF_CRLF:CRLF_CONTENT_LENGTH")
 fires(post("x=a\r\nSeT-cOOkIe: y"),               "mixed-case Set-Cookie",           "WAF_CRLF:CRLF_SET_COOKIE")
 fires(get("r=/x\r\nLocation: http://evil/"),      "capitalized Location (args)",     "WAF_CRLF:CRLF_LOCATION")
 -- Bare LF (no CR) with a capital header name also trips.
