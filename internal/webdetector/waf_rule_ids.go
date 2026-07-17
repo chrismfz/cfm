@@ -75,6 +75,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 326, Name: "rule_java_deserialize", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
 	{ID: 327, Name: "rule_coinminer", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
 	{ID: 328, Name: "rule_log4shell", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
+	{ID: 329, Name: "rule_php_object_injection", ReasonFamily: "WAF_RCE", DefaultMode: "block"},
 
 	// 4xx upload / malware
 	{ID: 401, Name: "rule_upload_filename", ReasonFamily: "WAF_UPLOAD_FNAME", DefaultMode: "block"},

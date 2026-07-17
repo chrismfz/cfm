@@ -93,6 +93,10 @@ local CFG = {
                                        -- (promoted from logonly: serialized blobs in URL args are
                                        --  insecure-deserialization probes; legit apps carry these
                                        --  in cookies/POST bodies, not URL args — 0 hits in 6 weeks)
+  rule_php_object_injection = "block", -- UNAUTH PHP object injection O:N:"…"/C:N:"…" (deserialization->RCE)
+                                       -- in args OR body, incl. base64 (Tzo/Qzo). Emits WAF_RCE (armed).
+                                       -- Unauth-gated: legit serialized blobs ride authenticated
+                                       -- admin-ajax; rule 306 keeps the auth'd case at challenge.
 
   -- Per-tag override modes for cmd payloads.
   -- Empty/nil means: fall back to rule_cmd_payload.
@@ -471,6 +475,7 @@ local RULE_IDS = {
   rule_java_deserialize        = 326,
   rule_coinminer               = 327,
   rule_log4shell               = 328,
+  rule_php_object_injection    = 329,
 
   -- 4xx upload / malware
   rule_upload_filename         = 401,
@@ -1406,6 +1411,24 @@ function _M.check(ctx)
       local tag = det.detect_debug_toggles(args, get_norm_args())
       if tag then
         if record("WAF_DEBUG_TOGGLE:" .. tag, CFG.default_ttl_sec, mode, RULE_IDS.rule_debug_toggles) then goto done end
+      end
+    end
+  end
+
+  -- ── 31b) Unauth PHP object injection → WAF_RCE (armed block) ───────────────
+  -- Runs BEFORE the serialize rule (32) so an UNAUTHENTICATED object marker gets
+  -- the hard WAF_RCE block+ban; an AUTHENTICATED one falls through to rule 32's
+  -- WAF_SERIALIZE challenge. Scans args AND body incl. base64 — wider than rule
+  -- 32 (args-only). The unauth gate is HERE (not in the detector) so an
+  -- authenticated request skips even the get_norm_ab() materialisation; legit
+  -- serialized blobs (WooCommerce/Elementor/WPML) ride authenticated admin-ajax.
+  do
+    local mode = rule_mode(CFG.rule_php_object_injection, "block")
+    if mode ~= "disabled" and not lower(cookie):find("wordpress_logged_in_", 1, true) then
+      local tag = det.detect_php_object_injection(get_norm_ab(), args, body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:PHP_OBJECT_INJECTION:" .. tag, ttl, mode, RULE_IDS.rule_php_object_injection) then goto done end
       end
     end
   end

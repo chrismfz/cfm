@@ -32,6 +32,20 @@ back-filled here — see the git/PR history for that period.
   Content-Type header inspection entirely (subsumes the multipart carve-out).
 
 ### Added
+- **WAF rule 329: unauthenticated PHP object injection → armed block
+  (`WAF_RCE:PHP_OBJECT_INJECTION`).** Closes the ~153-site deserialization-RCE
+  exposure (kirki/jet-engine/woodmart/better-search-replace/fusion …) without a
+  per-plugin endpoint list. Fires on a PHP serialized OBJECT marker
+  (`O:N:"…"`/`C:N:"…"` — not `a:N:` arrays, which are common/benign) in an
+  **unauthenticated** request, in **args OR body**, including **base64**-encoded
+  payloads. Emits `WAF_RCE` (already armed by default) so a hit 403s + nft-bans.
+  This is deliberately stronger than rule 306 (`WAF_SERIALIZE`, challenge,
+  **args-only**) and closes rule 304's logonly `B64_OBJ_INJECT` gap — but only
+  for unauthenticated requests: legit serialized blobs (WooCommerce/Elementor/
+  WPML) ride authenticated admin-ajax and carry the WP logged-in cookie, so the
+  unauth gate keeps FP near-zero, and rule 306 still handles the authenticated
+  case at challenge. Positive+negative Lua tests (authenticated marker,
+  serialized arrays, and benign `o:N`-looking text stay clean).
 - **WAF CVE detector: Kirki unauth account takeover (rule 10009,
   CVE-2026-8206).** Kirki (`<= 6.0.6`, CVSS 9.8, actively mass-exploited) exposes
   an unauthenticated REST endpoint

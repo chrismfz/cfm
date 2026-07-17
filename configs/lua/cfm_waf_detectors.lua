@@ -1454,6 +1454,51 @@ function _M.detect_php_serialize(args, _na)
   return nil
 end
 
+-- A PHP serialized OBJECT marker: O:<N>:"…" (object) or C:<N>:"…" (custom
+-- object). Deliberately NOT a:<N>:{ (arrays) — those are common and benign.
+-- Same digit-length anchoring as detect_php_serialize (avoids the `<o:p>` /
+-- CCL-search FPs). `s` is expected already lowercased.
+local function _has_php_object_marker(s)
+  return string.find(s, "o:%d+:\"", 1, false) or string.find(s, "c:%d+:\"", 1, false)
+      or string.find(s, "o%%3a%d+%%3a%%22", 1, false) or string.find(s, "c%%3a%d+%%3a%%22", 1, false)
+end
+
+-- [R2] Unauthenticated PHP object injection (deserialization -> RCE). Closes the
+-- 153-site object-injection exposure (kirki/jet-engine/woodmart/
+-- better-search-replace/fusion …) WITHOUT a per-plugin endpoint list: a PHP
+-- serialized OBJECT marker in an UNAUTHENTICATED request is near-zero FP, because
+-- legit serialized blobs (WooCommerce/Elementor/WPML) ride AUTHENTICATED
+-- admin-ajax and carry the WP logged-in cookie. Stronger than rule 306
+-- (WAF_SERIALIZE, challenge, ARGS-ONLY): scans args AND body, and decodes base64
+-- object blobs (closing rule 304's logonly B64_OBJ_INJECT gap). Emits WAF_RCE
+-- (already armed) at block.
+--
+-- The AUTHENTICATED case is deliberately left to rule 306 at `challenge` — an
+-- exploit tool can't solve the JS challenge, and a real admin passing a legit
+-- serialized blob is only challenged, never blocked/banned.
+--
+-- `nab` is the shared, memoized normalized+lowercased args+body (get_norm_ab()),
+-- so this rule adds NO extra normalization pass. The UNAUTH gate lives at the
+-- call site (so an authenticated request skips even nab materialisation). `args`
+-- and `body` are the RAW surfaces, used only for the case-sensitive base64 scan.
+function _M.detect_php_object_injection(nab, args, body)
+  if nab and nab ~= "" and _has_php_object_marker(nab) then return "PLAIN" end
+  -- base64'd object: a base64 PHP object starts "O:"->Tzo / "C:"->Qzo (base64 is
+  -- case-sensitive). Cheap prefix prefilter on the raw surfaces before building
+  -- the scan string; only decode candidates with that exact prefix, then confirm
+  -- the decoded bytes carry the object marker.
+  local ra, rb = args or "", body or ""
+  if has(ra, "Tzo") or has(rb, "Tzo") or has(ra, "Qzo") or has(rb, "Qzo") then
+    for cand in (ra .. "&" .. rb):gmatch("[TQ]zo[A-Za-z0-9+/]+=*") do
+      if #cand >= 12 then
+        local dec = ngx.decode_base64(cand)
+        if dec and _has_php_object_marker(lower(dec)) then return "BASE64" end
+      end
+    end
+  end
+  return nil
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- RESEARCH ADDITIONS – HEADER / PROTOCOL CHECKS
 -- ─────────────────────────────────────────────────────────────────────────────
