@@ -5,15 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CFM Admin · Detectors</title>
   <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
   <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
   <script type="module" src="/cfm-admin/assets/detectors.js"></script>
   <link rel="icon" href="data:," />
 </head>
 <body>
+<div class="shell">
+<aside class="sidebar" data-shared-nav></aside>
+<div class="main">
 <div class="landing-shell">
 <header class="topbar">
-  <h1>Detectors</h1>
-  <nav class="top-nav" data-shared-nav></nav>
+  <button class="nav-burger" type="button" data-nav-burger aria-label="Toggle navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <h1>Detectors</h1>
   <div class="meta">
     <span id="detectorsDirty" class="pill">Saved</span>
     <button id="detectorsSaveBtn">Save</button>
@@ -54,4 +58,6 @@
 <div id="detectorsValidationModal" class="modal-backdrop" style="display:none"><div class="modal-card"><h2>Validation errors</h2><ul id="detectorsValidationErrors" class="list-compact"></ul><div class="toolbar wrap"><button id="detectorsValidationClose" class="btn-quiet">Close</button></div></div></div>
 <div id="detectorsLeniencyModal" class="modal-backdrop" style="display:none"><div class="modal-card"><h2>Add leniency section</h2><p id="detectorsLeniencyModalFeedback" class="statusline" style="display:block"></p><div class="summary-grid"><div><label class="muted" for="detectorsLeniencyBase">Base detector</label><select id="detectorsLeniencyBase" class="input input-wide"></select></div><div><label class="muted" for="detectorsLeniencySectionName">Section name (optional)</label><input id="detectorsLeniencySectionName" class="input input-wide" placeholder="defaults to &lt;base&gt;.leniency" /></div><div><label class="muted" for="detectorsLeniencyMatchCountry">MATCH_COUNTRY</label><input id="detectorsLeniencyMatchCountry" class="input input-wide" placeholder="CN,RU" /></div><div><label class="muted" for="detectorsLeniencyMatchASN">MATCH_ASN</label><input id="detectorsLeniencyMatchASN" class="input input-wide" placeholder="AS1234,AS5678" /></div><div><label class="muted" for="detectorsLeniencyBlock">BLOCK</label><input id="detectorsLeniencyBlock" class="input input-wide" value="30m" /></div><div><label class="muted" for="detectorsLeniencyBlockCooldown">BLOCK_COOLDOWN</label><input id="detectorsLeniencyBlockCooldown" class="input input-wide" value="1h" /></div><div><label class="muted" for="detectorsLeniencySendToAPI">SEND_TO_API</label><input id="detectorsLeniencySendToAPI" class="input input-wide" value="0" /></div></div><div class="toolbar wrap"><button id="detectorsLeniencyConfirm">Add section</button><button id="detectorsLeniencyCancel" class="btn-quiet">Cancel</button></div></div></div>
 <div id="detectorsExamplesModal" class="modal-backdrop" style="display:none"><div class="modal-card"><h2 id="detectorsExamplesTitle">Insert from template/example</h2><p class="muted">Examples are loaded from metadata comments in <code>detectors.conf</code>. Inserted blocks start in safe mode (disabled and/or dryrun).</p><div id="detectorsExamplesList" class="summary-grid"></div><div class="toolbar wrap"><button id="detectorsExamplesClose" class="btn-quiet">Close</button></div></div></div>
+</div><!-- /.main -->
+</div><!-- /.shell -->
 </body></html>

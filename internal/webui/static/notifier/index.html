@@ -5,15 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CFM Admin · Notifier</title>
   <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
   <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
   <link rel="icon" href="data:," />
   <script type="module" src="/cfm-admin/assets/notifier.js"></script>
 </head>
 <body>
-  <div class="landing-shell">
+<div class="shell">
+<aside class="sidebar" data-shared-nav></aside>
+<div class="main">
+<div class="landing-shell">
     <header class="topbar">
+      <button class="nav-burger" type="button" data-nav-burger aria-label="Toggle navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
       <h1>Notifier</h1>
-      <nav class="top-nav" data-shared-nav></nav>
       <div class="meta">
         <details class="recent-actions">
           <summary class="btn-quiet">Recent actions</summary>
@@ -199,5 +203,7 @@
   <div id="notifierDisableConfirmModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Disable notifier?</h2><p class="muted">This saves the config and attempts a notifier reload immediately.</p><div class="toolbar wrap"><button id="notifierDisableConfirmBtn" class="btn-danger">Disable notifier</button><button id="notifierDisableConfirmCancelBtn" class="btn-quiet">Cancel</button></div></div></div>
   <div id="notifierSaveModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Save config</h2><h3>Semantic summary</h3><pre id="notifierSaveChannelsSummary" class="diff-preview"></pre><h3>Diff preview</h3><pre id="notifierSaveDiffPreview" class="diff-preview"></pre><label><input type="checkbox" id="notifierSaveBackup" checked /> create backup</label><br /><label><input type="checkbox" id="notifierSaveReload" checked /> reload after save</label><div class="toolbar wrap"><button id="notifierSaveConfirmBtn">Confirm save</button><button id="notifierSaveCancelBtn" class="btn-quiet">Cancel</button></div></div></div>
   <div id="notifierValidationErrorsModal" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true"><div class="modal-card"><h2>Validation errors</h2><ul id="notifierValidationErrorsList" class="list-compact"></ul><div class="toolbar wrap"><button id="notifierValidationErrorsCloseBtn" class="btn-quiet">Close</button></div></div></div>
+</div><!-- /.main -->
+</div><!-- /.shell -->
 </body>
 </html>
