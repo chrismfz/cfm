@@ -427,7 +427,14 @@ Each CVE candidate should be representable as structured data before it becomes 
 }
 ```
 
-## Initial ACSC CMS campaign candidates
+## Initial ACSC campaign candidates (WordPress/Joomla only)
+
+**Scope: WordPress and Joomla only.** The protected fleet hosts WordPress and
+Joomla sites, so CVEs for other/standalone CMSs are out of scope — a detector
+for software nobody runs is pure false-positive surface for zero protection.
+The ACSC shortlist's non-WP/Joomla entries are **dropped**: Craft CMS
+(`CVE-2025-32432`), MaxSite CMS (`CVE-2026-3395`), MetInfo CMS
+(`CVE-2026-29014`). Revisit only if the hosting mix changes.
 
 The following products/CVEs should be evaluated for concrete request fingerprints before any blocking mode is selected:
 
@@ -442,13 +449,10 @@ The following products/CVEs should be evaluated for concrete request fingerprint
 | Breeze Cache WordPress plugin | `CVE-2026-3844` | `logonly` | Cache/admin endpoints need careful FP review. |
 | pay-uz WordPress plugin | `CVE-2026-31843` | `logonly` | Require exact exploit route. |
 | ACF Extended WordPress plugin | `CVE-2025-13486` | `logonly` | ACF-related legitimate admin traffic is common. |
-| Sneeit Framework | `CVE-2025-6389` | `logonly` | Require exact framework endpoint. |
+| Sneeit Framework WordPress plugin | `CVE-2025-6389` | `logonly` | Require exact framework endpoint. |
 | WPvivid Backup WordPress plugin | `CVE-2026-1357` | `logonly` | Backup/restore endpoints are high FP risk unless exact exploit shape is known. |
 | Gravity Forms WordPress plugin | `CVE-2025-12352` | `logonly` | Form submissions are common; require exploit-specific payload. |
 | GutenKit / Hunk Companion WordPress plugin | likely `CVE-2024-9234` | `logonly` | Confirm CVE mapping before enabling. |
-| Craft CMS | `CVE-2025-32432` | `logonly` | Promote only for exact RCE/template exploit shape. |
-| MaxSite CMS | `CVE-2026-3395` | `logonly` | Require exact endpoint and payload. |
-| MetInfo CMS | `CVE-2026-29014` | `logonly` | Require exact endpoint and payload. |
 | Joomla JCE | `CVE-2026-48907` | `logonly` | Upload vectors may become block candidates if endpoint and PHP payload are exact. |
 
 ## Implementation phases

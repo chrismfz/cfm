@@ -143,19 +143,25 @@ from memory — see §3.
 
 ---
 
-## 2. Candidate status (the ACSC CMS campaign shortlist)
+## 2. Candidate status (the ACSC campaign shortlist — WordPress/Joomla only)
 
-`WAF_CVE_PLAN.md` lists ~18 candidate CVEs from the ACSC WordPress/CMS
-campaign. **Only Simple File List is implemented.** The rest are still
-candidates awaiting a validated exact request shape:
+**Scope: WordPress and Joomla only.** The fleet this WAF protects hosts
+WordPress and Joomla sites, so CVEs for other/standalone CMSs are **out of
+scope** — a detector for software nobody runs is pure FP surface and
+maintenance cost for zero protection. The ACSC shortlist's non-WP/Joomla
+entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
+(`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
+hosting mix changes.
+
+Three implemented; the rest are WordPress/Joomla candidates awaiting a
+validated exact request shape:
 
 | Product / CVE | Status |
 | --- | --- |
 | Simple File List (`CVE-2025-34085` / `CVE-2020-36847`) | ✅ **implemented** (rule 10001) |
 | Joomla JCE (`CVE-2026-48907`) | ✅ **implemented** (rule 10002) — `option=com_jce` + `profiles.import` + php-exec upload |
 | Ninja Forms (`CVE-2026-0740`) | ✅ **implemented** (rule 10003) — `action=nf_fu_upload` + (php-exec upload OR `image_jpg` traversal) |
-| Craft CMS (`CVE-2025-32432`) | candidate next — SensePost has the RCE shape |
-| WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk, MaxSite, MetInfo | candidate — need exact endpoint/action/payload before any mode above `logonly` |
+| WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
 Keep the plan doc's candidate table as the backlog; update the ✅ column here
 as detectors land.
