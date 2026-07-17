@@ -137,6 +137,7 @@ var wafRuleIDs = []WAFRule{
 	// 10xxx named-vulnerability (CVE) detectors — see WAF_CVE.md.
 	{ID: 10001, Name: "rule_cve_simple_file_list_upload", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10002, Name: "rule_cve_joomla_jce_profile_import", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	{ID: 10003, Name: "rule_cve_ninja_forms_fu_upload", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

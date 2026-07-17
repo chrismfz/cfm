@@ -18,6 +18,18 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF CVE detector: Ninja Forms File Uploads RCE (rule 10003,
+  CVE-2026-0740).** Detects the unauthenticated arbitrary-file-upload +
+  path-traversal exploit in the Ninja Forms "File Uploads" add-on that the
+  July-2026 ACSC CMS campaign probes: `POST /wp-admin/admin-ajax.php` with the
+  add-on action `nf_fu_upload` plus an exploit marker — a php-executable upload
+  filename, or path traversal in the `image_jpg` destination param
+  (`../../../`). Keyed on the SPECIFIC action (a bare `admin-ajax.php` match is
+  deliberately not enough — form submissions are common), so a legitimate
+  Ninja Forms upload (image/pdf, normal dest) does not fire. `WAF_CVE` is armed,
+  so a hit `403`s + 6h-nft-bans + Slack/mails as `WAF/CVE-2026-0740`. Runs
+  before the generic upload rules so the CVE reason wins attribution.
+  Positive+negative Lua tests (both exploit legs); Lua↔Go id parity kept.
 - **WAF CVE detector: Joomla JCE profile-import RCE (rule 10002,
   CVE-2026-48907).** Detects the unauthenticated arbitrary-PHP-upload exploit in
   Joomla's JCE extension (`< 2.9.99.5`) that the July-2026 ACSC CMS campaign

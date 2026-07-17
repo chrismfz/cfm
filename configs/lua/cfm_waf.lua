@@ -154,6 +154,7 @@ local CFG = {
   -- WAF_CVE (logonly).
   rule_cve_simple_file_list_upload = "block", -- CVE-2025-34085 / CVE-2020-36847: Simple File List (WP) unauth upload->rename RCE. Endpoints ee-upload-engine.php (PHP tag in upload) + ee-file-engine.php (rename target ->.php/.phtml/.php[0-9]); param names vary across PoCs so we key on endpoint + exec-ext/php-tag marker.
   rule_cve_joomla_jce_profile_import = "block", -- CVE-2026-48907: Joomla JCE (<2.9.99.5) unauth PHP upload->RCE. POST index.php?option=com_jce, JCE action value "profiles.import" (a multipart field, not a key=value pair), + php-executable multipart upload filename (double-ext .xml.php). Keyed on component+action-value+exec-ext, not the random filename/CSRF field.
+  rule_cve_ninja_forms_fu_upload = "block", -- CVE-2026-0740: Ninja Forms File Uploads add-on unauth arbitrary file upload + path traversal. POST wp-admin/admin-ajax.php, action value "nf_fu_upload" + (php-executable upload filename OR image_jpg=../ traversal). Keyed on the specific action (NOT bare admin-ajax) + exploit marker.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -522,6 +523,7 @@ local RULE_IDS = {
   -- (rule_log4shell keeps its historical 328; new CVE rules start here.)
   rule_cve_simple_file_list_upload = 10001,
   rule_cve_joomla_jce_profile_import = 10002,
+  rule_cve_ninja_forms_fu_upload = 10003,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -999,6 +1001,17 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_48907:JOOMLA_JCE:" .. tag, ttl, mode, RULE_IDS.rule_cve_joomla_jce_profile_import) then goto done end
+      end
+    end
+  end
+
+  do
+    local mode = rule_mode(CFG.rule_cve_ninja_forms_fu_upload, "block")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_ninja_forms_fu_upload(uri, m_lower, args, body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_0740:NINJA_FORMS:" .. tag, ttl, mode, RULE_IDS.rule_cve_ninja_forms_fu_upload) then goto done end
       end
     end
   end
