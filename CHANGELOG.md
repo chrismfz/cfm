@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF CVE detector: W3 Total Cache mfunc RCE surface (rule 10006,
+  CVE-2026-5032 + CVE-2025-9501).** Highest-exposure item on the fleet scan
+  (51 sites; rule group R1). Two unauth legs: (A) a `User-Agent` containing
+  `W3 Total Cache` — which bypasses W3TC's output buffering and leaks the
+  `W3TC_DYNAMIC_SECURITY` token needed to sign an mfunc payload (CVE-2026-5032;
+  nothing legitimate sends that UA, zero FP), all methods; and (B) a
+  `mfunc`/`mclude` dynamic-fragment marker in a POST to `wp-comments-post.php`
+  or `/wp-json/wp/v2/comments` — the tag W3TC `eval()`s on cached render
+  (CVE-2025-9501). Per the fleet spec, the marker is matched as a **substring**
+  (not the exact `<!--mfunc …-->` tag form — three vendor fixes were bypassed by
+  nesting), scoped to the comment endpoints; `dynamic_cache` is deliberately not
+  matched (higher FP, not the eval tag). `WAF_CVE` is armed → first probe 403s +
+  nft-bans. Reasons `WAF_CVE:CVE_2026_5032:W3TC:UA_TOKEN_LEAK` /
+  `WAF_CVE:CVE_2025_9501:W3TC:MFUNC`. Positive+negative Lua tests. Shapes
+  confirmed against WPScan / rcesecurity.com, not memory.
 - **WAF CVE detector: Slider Revolution virtual-patch (rule 10005,
   CVE-2015-1579 + classic upload RCE).** A behavioural (shape-based) rule, not a
   version match: blocks the two classic UNAUTH revslider exploit shapes on ANY

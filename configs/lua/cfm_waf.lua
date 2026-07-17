@@ -157,6 +157,7 @@ local CFG = {
   rule_cve_ninja_forms_fu_upload = "block", -- CVE-2026-0740: Ninja Forms File Uploads add-on unauth arbitrary file upload + path traversal. POST wp-admin/admin-ajax.php, action value "nf_fu_upload" + (php-executable upload filename OR image_jpg=../ traversal). Keyed on the specific action (NOT bare admin-ajax) + exploit marker.
   rule_cve_litespeed_hash_privesc = "block", -- CVE-2024-28000: LiteSpeed Cache (<6.4) unauth privesc. Request presents a litespeed_hash / litespeed_role COOKIE (weak 6-char crawler-simulation hash brute-forced to become admin). Cookie is internal-only; a real visitor never sets it (zero FP). Runs on all methods (cookie-based, not body-gated).
   rule_cve_revslider = "block", -- CVE-2015-1579 (+ classic upload RCE): Slider Revolution virtual-patch. Leg A LFI = action=revslider_show_image + ../ traversal in img. Leg B RCE = action=revslider_ajax_action + client_action=update_plugin (unauth only). Behavioural (shape-based), protects all versions, not just the vulnerable one.
+  rule_cve_w3tc = "block", -- CVE-2026-5032 + CVE-2025-9501: W3 Total Cache mfunc RCE surface. Leg A = User-Agent contains "W3 Total Cache" (token-leak bypass, zero FP). Leg B = mfunc/mclude marker in a POST to wp-comments-post.php / wp-json/wp/v2/comments (dynamic-fragment eval RCE; substring match, not exact tag form).
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -528,6 +529,7 @@ local RULE_IDS = {
   rule_cve_ninja_forms_fu_upload = 10003,
   rule_cve_litespeed_hash_privesc = 10004,
   rule_cve_revslider = 10005,
+  rule_cve_w3tc = 10006,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -827,6 +829,22 @@ function _M.check(ctx)
           and "WAF_CVE:CVE_2015_1579:REVSLIDER:LFI"
           or  "WAF_CVE:REVSLIDER:PLUGIN_UPLOAD"
         if record(reason, ttl, mode, RULE_IDS.rule_cve_revslider) then goto done end
+      end
+    end
+  end
+
+  -- ── 3d) W3 Total Cache mfunc RCE surface (CVE-2026-5032 UA + CVE-2025-9501) ─
+  -- UA leg is all-methods; the mfunc leg is a POST to the comment endpoints.
+  do
+    local mode = rule_mode(CFG.rule_cve_w3tc, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_w3tc(uri, m_lower, headers, body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        local reason = (tag == "UA_TOKEN_LEAK")
+          and "WAF_CVE:CVE_2026_5032:W3TC:UA_TOKEN_LEAK"
+          or  "WAF_CVE:CVE_2025_9501:W3TC:MFUNC"
+        if record(reason, ttl, mode, RULE_IDS.rule_cve_w3tc) then goto done end
       end
     end
   end
