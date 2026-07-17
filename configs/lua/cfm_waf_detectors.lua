@@ -2310,6 +2310,56 @@ function _M.detect_cve_revslider(method, args, body, cookie)
   return nil
 end
 
+-- [CVE] W3 Total Cache (W3TC) dynamic-fragment (mfunc) attack surface. Two
+-- UNAUTH legs of the same eval-via-cached-render bug class.
+--
+-- Leg A — CVE-2026-5032 (W3TC <= 2.9.3): a request whose User-Agent CONTAINS
+--   "W3 Total Cache" bypasses the output-buffering pipeline (can_ob()) and
+--   renders raw mfunc/mclude fragments — leaking the W3TC_DYNAMIC_SECURITY
+--   token into the page source, which the attacker then uses to sign a working
+--   mfunc RCE payload. Nothing legitimate sends that UA (WPScan/spec: zero FP).
+--   Ref: rcesecurity.com CVE-2025-9501 writeup, WPScan CVE-2026-5032.
+--
+-- Leg B — CVE-2025-9501 (pre-auth RCE): a `mfunc`/`mclude` dynamic-fragment tag
+--   is submitted as a blog COMMENT; once the page is cached, W3TC's
+--   _parse_dynamic_mfunc() passes the tag content to eval(). Delivery is a POST
+--   to the comment-submit endpoints. Per the fleet spec, match the marker
+--   SUBSTRING (not the exact `<!--mfunc ...-->` tag form) — three vendor fixes
+--   were bypassed by nesting the tag inside itself. `mfunc`/`mclude` are
+--   near-zero in real comment text; scoped to comment endpoints to keep it so.
+--   `dynamic_cache` is deliberately NOT matched (higher FP, and not the eval
+--   tag). `method` is m_lower from the caller.
+--
+-- Caller maps the returned tag:
+--   "UA_TOKEN_LEAK" -> WAF_CVE:CVE_2026_5032:W3TC:UA_TOKEN_LEAK
+--   "MFUNC"         -> WAF_CVE:CVE_2025_9501:W3TC:MFUNC
+function _M.detect_cve_w3tc(uri, method, headers, body)
+  -- Leg A — the W3TC User-Agent bypass. All methods / all URIs.
+  -- Safety: W3TC's OWN internal cache-priming loopback requests carry this UA,
+  -- but they never reach here — cfm.lua short-circuits self-origin requests
+  -- (loopback / self-IP set / IGNORE_NETS via is_self_origin) before the WAF
+  -- runs, and check() re-guards on ctx.self_origin. So this only ever fires on
+  -- EXTERNAL requests forging the UA. (A cross-server cache-priming peer, if any,
+  -- would need to be in the self-IP set / IGNORE_NETS — the same allowlist.)
+  local ua = lower(header_string((headers or {})["user-agent"]
+                              or (headers or {})["User-Agent"] or ""))
+  if has(ua, "w3 total cache") then
+    return "UA_TOKEN_LEAK"
+  end
+
+  -- Leg B — mfunc/mclude injected via a comment submission.
+  if method == "post" then
+    local u = lower(uri or "")
+    if has(u, "/wp-comments-post.php") or has(u, "/wp-json/wp/v2/comments") then
+      local b = lower(cap(body or "", CFG.max_scan_len))
+      if has(b, "mfunc") or has(b, "mclude") then
+        return "MFUNC"
+      end
+    end
+  end
+  return nil
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject
