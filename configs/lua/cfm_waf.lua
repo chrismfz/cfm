@@ -158,6 +158,7 @@ local CFG = {
   rule_cve_litespeed_hash_privesc = "block", -- CVE-2024-28000: LiteSpeed Cache (<6.4) unauth privesc. Request presents a litespeed_hash / litespeed_role COOKIE (weak 6-char crawler-simulation hash brute-forced to become admin). Cookie is internal-only; a real visitor never sets it (zero FP). Runs on all methods (cookie-based, not body-gated).
   rule_cve_revslider = "block", -- CVE-2015-1579 (+ classic upload RCE): Slider Revolution virtual-patch. Leg A LFI = action=revslider_show_image + ../ traversal in img. Leg B RCE = action=revslider_ajax_action + client_action=update_plugin (unauth only). Behavioural (shape-based), protects all versions, not just the vulnerable one.
   rule_cve_w3tc = "block", -- CVE-2026-5032 + CVE-2025-9501: W3 Total Cache mfunc RCE surface. Leg A = User-Agent contains "W3 Total Cache" (token-leak bypass, zero FP). Leg B = mfunc/mclude marker in a POST to wp-comments-post.php / wp-json/wp/v2/comments (dynamic-fragment eval RCE; substring match, not exact tag form).
+  rule_cve_post_smtp = "block", -- CVE-2025-11833 (+ CVE-2023-6875): Post SMTP unauth email-log disclosure -> account takeover. UNAUTH request to the /wp-json/post-smtp/ REST namespace (get-log/connect-app) or the postman_email_log admin page. Gated on absence of the WP logged-in cookie so real admin usage is exempt.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -530,6 +531,7 @@ local RULE_IDS = {
   rule_cve_litespeed_hash_privesc = 10004,
   rule_cve_revslider = 10005,
   rule_cve_w3tc = 10006,
+  rule_cve_post_smtp = 10007,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -845,6 +847,19 @@ function _M.check(ctx)
           and "WAF_CVE:CVE_2026_5032:W3TC:UA_TOKEN_LEAK"
           or  "WAF_CVE:CVE_2025_9501:W3TC:MFUNC"
         if record(reason, ttl, mode, RULE_IDS.rule_cve_w3tc) then goto done end
+      end
+    end
+  end
+
+  -- ── 3e) Post SMTP unauth email-log disclosure (CVE-2025-11833/CVE-2023-6875) ─
+  -- UNAUTH-gated (the detector reads the cookie); all-methods.
+  do
+    local mode = rule_mode(CFG.rule_cve_post_smtp, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_post_smtp(uri, args, cookie)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2025_11833:POST_SMTP:" .. tag, ttl, mode, RULE_IDS.rule_cve_post_smtp) then goto done end
       end
     end
   end

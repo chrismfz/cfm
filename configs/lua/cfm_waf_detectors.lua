@@ -2360,6 +2360,45 @@ function _M.detect_cve_w3tc(uri, method, headers, body)
   return nil
 end
 
+-- [CVE] Post SMTP — unauthenticated email-log disclosure -> account takeover.
+-- CVE-2025-11833 (<= 3.6.0, actively exploited) + CVE-2023-6875 (<= 2.8.7,
+-- connect-app auth bypass). A missing capability check lets an unauth caller
+-- read logged emails — including password-reset links — and take over admin.
+-- This is the fleet's "mass-mailer pivot": post-smtp is an SMTP relay, so
+-- takeover hands the attacker working outbound mail credentials.
+--
+-- Vulnerable surfaces (from WPScan / ZeroPath / the public exploit):
+--   Leg A: the plugin's REST namespace /wp-json/post-smtp/ — the v1/get-log,
+--          v1/get-logs and v1/connect-app endpoints expose the log / reset the
+--          mailer API key. Admin/internal only; never a public feature.
+--   Leg B: the Postman email-log admin page reached unauth
+--          (admin.php?page=postman_email_log).
+--
+-- UNAUTH gate: a legit admin — and the plugin's own admin-UI AJAX — carries the
+-- WP logged-in cookie, so gating on its absence exempts real usage and only
+-- fires on the unauthenticated exploit. Forgeable FP-reduction heuristic, per
+-- the fleet spec, not a security control. All methods (get-log is a GET,
+-- connect-app a POST).
+function _M.detect_cve_post_smtp(uri, args, cookie)
+  -- Cheap markers FIRST (this runs on every request): the REST path is in the
+  -- URI; the admin-log page is `page=postman_email_log` in args. WP registers
+  -- both slugs in exact lowercase, so a case-sensitive prefilter on args avoids
+  -- lowercasing it on the ~99.9% of requests that aren't post-smtp.
+  local u = lower(uri or "")
+  local tag
+  if has(u, "/wp-json/post-smtp/") then
+    tag = "REST"
+  elseif has(args or "", "postman")
+     and (u .. "&" .. lower(args or "")):find("postman_%a+_log") then
+    tag = "EMAIL_LOG"
+  end
+  if not tag then return nil end
+  -- Only now pay for the cookie: exempt logged-in admins (and the plugin's own
+  -- admin-UI AJAX). Forgeable FP-reduction heuristic, not a security control.
+  if has(lower(cookie or ""), "wordpress_logged_in_") then return nil end
+  return tag
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject

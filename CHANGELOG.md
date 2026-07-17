@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF CVE detector: Post SMTP unauth email-log disclosure (rule 10007,
+  CVE-2025-11833 + CVE-2023-6875).** Rule group R7 from the fleet scan. A
+  missing capability check lets an unauthenticated caller read the plugin's
+  email logs — including password-reset links — and take over admin (the fleet's
+  "mass-mailer pivot": post-smtp is an SMTP relay, so takeover yields working
+  outbound mail creds). Blocks UNAUTH requests to the plugin's REST namespace
+  `/wp-json/post-smtp/` (the `v1/get-log(s)` / `v1/connect-app` endpoints) or the
+  `postman_email_log` admin page. UNAUTH-gated on the absence of a
+  `wordpress_logged_in_*` cookie, so a real admin (and the plugin's own admin-UI
+  AJAX) is exempt while the exploit is blocked. `WAF_CVE` armed → first probe
+  403s + nft-bans. Reason `WAF_CVE:CVE_2025_11833:POST_SMTP:{REST,EMAIL_LOG}`.
+  Positive+negative Lua tests (logged-in admin, other REST namespaces, and
+  non-postman admin pages stay clean). Endpoints confirmed against WPScan /
+  ZeroPath / NVD, not memory.
 - **WAF CVE detector: W3 Total Cache mfunc RCE surface (rule 10006,
   CVE-2026-5032 + CVE-2025-9501).** Highest-exposure item on the fleet scan
   (51 sites; rule group R1). Two unauth legs: (A) a `User-Agent` containing

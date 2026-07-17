@@ -153,7 +153,7 @@ entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
 (`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
 hosting mix changes.
 
-Six implemented; the rest are WordPress/Joomla candidates awaiting a
+Seven implemented; the rest are WordPress/Joomla candidates awaiting a
 validated exact request shape:
 
 | Product / CVE | Status |
@@ -164,6 +164,7 @@ validated exact request shape:
 | LiteSpeed Cache (`CVE-2024-28000`) | ✅ **implemented** (rule 10004) — `litespeed_hash`/`litespeed_role` cookie (unauth privesc brute-force) |
 | Slider Revolution (`CVE-2015-1579` + classic upload RCE) | ✅ **implemented** (rule 10005) — behavioural virtual-patch: `revslider_show_image`+`../` LFI, `revslider_ajax_action`+`update_plugin` unauth upload |
 | W3 Total Cache (`CVE-2026-5032` + `CVE-2025-9501`) | ✅ **implemented** (rule 10006) — `User-Agent: W3 Total Cache` token-leak + `mfunc`/`mclude` in a comment POST (mfunc eval RCE) |
+| Post SMTP (`CVE-2025-11833` + `CVE-2023-6875`) | ✅ **implemented** (rule 10007) — unauth `/wp-json/post-smtp/` (get-log/connect-app) or `postman_email_log` page → email-log/reset-link disclosure |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
 Keep the plan doc's candidate table as the backlog; update the ✅ column here
@@ -172,9 +173,9 @@ as detectors land.
 **Fleet-driven priority (2026-07):** the operator's own plugin scan (1,473
 critical-unauth installs across 495 sites) produced a ranked WAF-rule worklist
 (rule groups R1–R9). Tier-1 net-new detectors from it, in rollout order:
-**R6 LiteSpeed** (✅ 10004) → **R1 W3TC** (✅ 10006 — `User-Agent: W3 Total Cache`
-+ `mfunc`/`mclude` in comment POST) → **R7 post-smtp** (unauth log endpoints) →
-**R4 Fusion Builder** (`fusion_*` nopriv ajax). R3 upload / R5 `wp-config`
+**R6 LiteSpeed** (✅ 10004) → **R1 W3TC** (✅ 10006) → **R7 post-smtp**
+(✅ 10007 — unauth log endpoints) → **R4 Fusion Builder** (`fusion_*` nopriv
+ajax). R3 upload / R5 `wp-config`
 traversal / R2 object-injection / R8 jet SQLi are already largely covered by the
 generic rules (401 / 101 / 306 / 301).
 
