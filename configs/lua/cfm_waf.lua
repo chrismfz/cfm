@@ -1418,12 +1418,14 @@ function _M.check(ctx)
   -- ── 31b) Unauth PHP object injection → WAF_RCE (armed block) ───────────────
   -- Runs BEFORE the serialize rule (32) so an UNAUTHENTICATED object marker gets
   -- the hard WAF_RCE block+ban; an AUTHENTICATED one falls through to rule 32's
-  -- WAF_SERIALIZE challenge (detector returns nil when the WP logged-in cookie is
-  -- present). Scans args AND body incl. base64 — wider than rule 32 (args-only).
+  -- WAF_SERIALIZE challenge. Scans args AND body incl. base64 — wider than rule
+  -- 32 (args-only). The unauth gate is HERE (not in the detector) so an
+  -- authenticated request skips even the get_norm_ab() materialisation; legit
+  -- serialized blobs (WooCommerce/Elementor/WPML) ride authenticated admin-ajax.
   do
     local mode = rule_mode(CFG.rule_php_object_injection, "block")
-    if mode ~= "disabled" then
-      local tag = det.detect_php_object_injection(args, body, cookie)
+    if mode ~= "disabled" and not lower(cookie):find("wordpress_logged_in_", 1, true) then
+      local tag = det.detect_php_object_injection(get_norm_ab(), args, body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_RCE:PHP_OBJECT_INJECTION:" .. tag, ttl, mode, RULE_IDS.rule_php_object_injection) then goto done end
