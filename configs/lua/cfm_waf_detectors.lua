@@ -1986,7 +1986,7 @@ end
 -- Source: uusec http-response-splitting.lua.
 -- Checks for CR or LF followed by a header name in args and body.
 -- Also checks for URL-encoded %0d%0a sequences.
-function _M.detect_crlf_injection(args, body, headers)
+function _M.detect_crlf_injection(args, body)
   -- Cap args and body independently so a padded query string can't evict the
   -- body from CRLF-injection detection (audit F09; this detector builds its
   -- own scan surface rather than taking the shared get_norm_ab string).
@@ -2000,56 +2000,40 @@ function _M.detect_crlf_injection(args, body, headers)
   -- so a raw newline + capitalized header name must still trip the raw branch
   -- (audit F34; the raw branch used to match the lowercase literals against the
   -- unlowered `s` and missed canonical casing). lower() leaves CR/LF bytes
-  -- untouched, so the [\r\n] anchor is unaffected. `sl` is reused by the
-  -- URL-encoded branch below.
+  -- untouched, so the [\r\n] anchor is unaffected. `sl` is the full surface
+  -- (args+body); `al` is the args-only surface used for the FP-prone headers.
   local sl = lower(s)
+  local al = lower(a)
 
-  -- multipart/form-data bodies legitimately carry a per-part `Content-Type:` (and
-  -- sometimes `Content-Length:`) MIME header on its own `\r\n`-terminated line for
-  -- every file/typed part, so the `[\r\n]…content-type:` match tripped every
-  -- webmail / wp-admin async-upload / OpenCart filemanager / TYPO3 / Elementor
-  -- upload — a structural false positive (rule 605 is held at logonly precisely
-  -- for this). Those two header names can legitimately appear in a multipart BODY
-  -- but never in the query string, so scope their match to the args surface when
-  -- the request body is multipart. Set-Cookie / Location never appear in a
-  -- multipart part header and stay full-surface, so response-splitting via the
-  -- impactful headers is unaffected. NOTE the SAME scoping is applied to the
-  -- URL-encoded branch below: the framing's `\r\nContent-Type:` survives
-  -- url-decoding untouched, so decoding a multipart body would re-flag it as
-  -- CRLF_URL_ENCODED unless the content-type match there is args-scoped too.
-  -- header_string() collapses a duplicated Content-Type header (ngx returns a
-  -- table) to a single string so lower() below can't crash (cfm_waf_util.lua).
-  -- The `or` picks the raw header value BEFORE header_string, since a missing
-  -- lowercase key must fall through to the canonical-cased one (header_string
-  -- returns a truthy "" that would swallow the fallback if placed after it).
-  local h = headers or {}
-  local req_ct = header_string(h["content-type"] or h["Content-Type"])
-  local is_multipart = has(lower(req_ct), "multipart/form-data")
-  local ct_surface = is_multipart and lower(a) or sl
+  -- Content-Type / Content-Length are LOW-IMPACT response-splitting targets and
+  -- the dominant FP source: they appear legitimately in request BODIES all the
+  -- time — every multipart/form-data part header, and page-builder / API / oEmbed
+  -- save payloads that embed HTTP header text (a wp-admin/admin-ajax page-builder
+  -- POST carrying `\r\nContent-Type:` in its data tripped CRLF_CONTENT_TYPE — a
+  -- confirmed FP against a logged-in admin, 2026-07). A request-BODY param is
+  -- essentially never reflected into a *response* Content-Type/Length header, so
+  -- scope these two to the ARGS surface only (query-string reflection is the real
+  -- vector). Set-Cookie / Location are HIGH-impact (session fixation / open
+  -- redirect) and CAN be reflected from a body, so they stay full-surface
+  -- (args+body). This GENERALISES — and subsumes — the earlier multipart-only
+  -- carve-out (#1109): a body Content-Type is now tolerated whether or not the
+  -- request is multipart, so no request Content-Type header inspection is needed.
 
   -- Raw CR/LF followed by a header keyword
-  if ct_surface:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
-  if ct_surface:find("[\r\n]%W*content%-length%s*:", 1) then return "CRLF_CONTENT_LENGTH" end
+  if al:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
+  if al:find("[\r\n]%W*content%-length%s*:", 1) then return "CRLF_CONTENT_LENGTH" end
   if sl:find("[\r\n]%W*set%-cookie%s*:",     1) then return "CRLF_SET_COOKIE" end
   if sl:find("[\r\n]%W*location%s*:",        1) then return "CRLF_LOCATION" end
 
-  -- URL-encoded CRLF sequences
+  -- URL-encoded CRLF sequences. Content-Type stays args-scoped here too (else a
+  -- body carrying a literal `%0a` before `Content-Type:` re-trips the same FP as
+  -- CRLF_URL_ENCODED); Set-Cookie / Location decode the full surface.
   if has(sl, "%0d%0a") or has(sl, "%0a") then
-    local decoded = sl
-      :gsub("%%0d%%0a", "\r\n")
-      :gsub("%%0d",     "\r")
-      :gsub("%%0a",     "\n")
-    -- content-type shares the multipart args-only scoping with the raw branch
-    -- (else a multipart upload carrying a literal `%0a` re-trips the same FP as
-    -- CRLF_URL_ENCODED); set-cookie / location stay full-surface.
-    local decoded_ct = decoded
-    if is_multipart then
-      decoded_ct = ct_surface
-        :gsub("%%0d%%0a", "\r\n")
-        :gsub("%%0d",     "\r")
-        :gsub("%%0a",     "\n")
+    local function decode(x)
+      return (x:gsub("%%0d%%0a", "\r\n"):gsub("%%0d", "\r"):gsub("%%0a", "\n"))
     end
-    if decoded_ct:find("[\r\n]%W*content%-type%s*:") or
+    local decoded = decode(sl)
+    if decode(al):find("[\r\n]%W*content%-type%s*:") or
        decoded:find("[\r\n]%W*set%-cookie%s*:")      or
        decoded:find("[\r\n]%W*location%s*:")         then
       return "CRLF_URL_ENCODED"

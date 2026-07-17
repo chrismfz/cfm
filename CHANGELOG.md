@@ -17,6 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **WAF CRLF (rule 605): stop flagging `Content-Type`/`Content-Length` in
+  request *bodies*.** A logged-in admin's page-builder `wp-admin/admin-ajax.php`
+  save POST — whose payload legitimately embeds a `\r\nContent-Type:` line
+  (oEmbed/email/template HTML) — tripped `WAF_CRLF:CRLF_CONTENT_TYPE` (logonly,
+  so only log noise, but a confirmed false positive). The #1109 fix only scoped
+  those two tags to the args surface for *multipart* requests; this generalises
+  it to **all** requests: `content-type`/`content-length` are matched in the
+  query string only (raw and URL-encoded), because a request-body value is
+  essentially never reflected into a *response* `Content-Type`/`Length` header.
+  The high-impact response-splitting headers `Set-Cookie`/`Location` stay
+  full-surface (args+body) and still fire from a body. Removes the request
+  Content-Type header inspection entirely (subsumes the multipart carve-out).
+
 ### Added
 - **WAF CVE detector: Avada / Fusion Builder unauth RCE + file delete (rule
   10008, CVE-2026-6279 + CVE-2026-8713).** Rule group R4 from the fleet scan;

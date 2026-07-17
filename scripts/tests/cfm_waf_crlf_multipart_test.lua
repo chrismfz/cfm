@@ -1,15 +1,15 @@
--- Tests for the CRLF detector's multipart/form-data carve-out
+-- Tests for the CRLF detector's Content-Type/Length args-scoping
 -- (rule 605 WAF_CRLF, production tier: logonly).
 --
--- A multipart/form-data body legitimately carries a per-part `Content-Type:`
--- (and sometimes `Content-Length:`) MIME header on its own `\r\n`-terminated
--- line for every file/typed part. The raw `[\r\n]…content-type:` branch matched
--- those, so EVERY legit upload (roundcube webmail, wp-admin async-upload,
--- OpenCart filemanager, TYPO3, Elementor) tripped CRLF_CONTENT_TYPE — a
--- structural false positive. Fix: when the request body is multipart/form-data,
--- scope the content-type/content-length raw match to the ARGS surface (those
--- header names can appear legitimately in a multipart body but never in the
--- query string). Set-Cookie / Location / URL-encoded branches stay full-surface.
+-- content-type/content-length appear legitimately in request BODIES: every
+-- multipart/form-data part header, and non-multipart page-builder/API/oEmbed
+-- save payloads that embed HTTP header text (a wp-admin/admin-ajax page-builder
+-- POST tripped CRLF_CONTENT_TYPE — a confirmed FP vs a logged-in admin). Since a
+-- request-body param is essentially never reflected into a *response*
+-- Content-Type/Length header, the detector scopes those two tags to the ARGS
+-- surface for ALL requests (this generalises the original multipart-only
+-- carve-out). Set-Cookie / Location stay full-surface (args+body) — those are
+-- the high-impact response-splitting vectors and CAN be reflected from a body.
 --
 -- Tested at "block" for a crisp hit=true/false assertion (rule-605/606 test
 -- convention); the production tier is unchanged (logonly).
@@ -104,13 +104,14 @@ clean(post_multipart("/wp-admin/async-upload.php", "",
 clean(post_multipart("/wp-admin/async-upload.php", "note=a%0ab", MULTIPART_UPLOAD),
       "multipart with %0a in the query string")
 
--- Duplicated Content-Type header (ngx delivers a table) must not crash the
--- detector, and the multipart value must still be recognised.
+-- The detector no longer inspects the request Content-Type header at all (the
+-- args-scoping is unconditional), so a duplicated Content-Type header (ngx
+-- delivers a table) can't crash it and the upload body stays clean regardless.
 clean({
   uri = "/wp-admin/async-upload.php", args = "", method = "POST", ip = "198.51.100.12",
   headers = { ["Content-Type"] = { "multipart/form-data; boundary=----b", "text/plain" } },
   body = MULTIPART_UPLOAD,
-}, "duplicated Content-Type header (table value) — no crash, multipart honoured")
+}, "duplicated Content-Type header (table value) — no crash, body still clean")
 
 -- ── Still catches real attacks even under a multipart Content-Type ───────────
 -- An injected Set-Cookie / Location in the body is never part of multipart
@@ -128,13 +129,25 @@ fires(post_multipart("/x.php", "r=/a\r\nContent-Type: text/html", MULTIPART_UPLO
 fires(post_multipart("/x.php", "r=x%0aContent-Type:%20text/html", MULTIPART_UPLOAD),
       "URL-encoded Content-Type in args under multipart CT", "WAF_CRLF:CRLF_URL_ENCODED")
 
--- ── Regressions: non-multipart requests keep full-surface Content-Type match ─
-fires(post_urlenc("x=foo\r\nContent-Type: text/html"),
-      "urlencoded body Content-Type still fires", "WAF_CRLF:CRLF_CONTENT_TYPE")
-fires(post_urlenc("x=foo\r\nContent-Length: 0"),
-      "urlencoded body Content-Length still fires", "WAF_CRLF:CRLF_CONTENT_LENGTH")
-fires(post_urlenc("x=foo%0aContent-Type:%20text/html"),
-      "urlencoded body URL-encoded Content-Type still fires", "WAF_CRLF:CRLF_URL_ENCODED")
+-- ── FP fix: non-multipart bodies with Content-Type/Length are tolerated too ──
+-- This is the confirmed real-world FP: a page builder's wp-admin/admin-ajax POST
+-- (application/x-www-form-urlencoded, NOT multipart) carrying `\r\nContent-Type:`
+-- in its save payload. Args-scoping now applies to all requests, so these are
+-- clean — not just multipart uploads.
+clean(post_urlenc("x=foo\r\nContent-Type: text/html"),
+      "urlencoded body Content-Type tolerated (the admin-ajax FP)")
+clean(post_urlenc("x=foo\r\nContent-Length: 0"),
+      "urlencoded body Content-Length tolerated")
+clean(post_urlenc("x=foo%0aContent-Type:%20text/html"),
+      "urlencoded body URL-encoded Content-Type tolerated")
+-- A realistic page-builder admin-ajax save payload with an embedded oEmbed/email
+-- Content-Type header line (real `\r\n`, so it WOULD trip the raw branch without
+-- the fix) stays clean; a Set-Cookie/Location injection in the same body still
+-- fires (high-impact, full-surface).
+clean(post_urlenc("action=save_builder&data=raw email:\r\nContent-Type: text/html; charset=utf-8\r\n\r\nbody"),
+      "page-builder save payload embedding a Content-Type header line")
+fires(post_urlenc("x=foo\r\nSet-Cookie: sid=evil"),
+      "Set-Cookie in a non-multipart body still fires", "WAF_CRLF:CRLF_SET_COOKIE")
 
 if fails > 0 then
   io.stderr:write(("cfm_waf CRLF multipart carve-out tests: %d FAILED\n"):format(fails))

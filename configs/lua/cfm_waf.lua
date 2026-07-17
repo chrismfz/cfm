@@ -133,15 +133,16 @@ local CFG = {
   -- [top-10] XXE + CRLF + HTTP request smuggling
   rule_xxe              = "challenge",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
   rule_crlf_injection   = "logonly",    -- CRLF / HTTP response-splitting in args or body.
-                                        -- F34 made the raw-header match case-insensitive, which then
-                                        -- tripped every legit multipart upload (webmail/wp-admin/
-                                        -- OpenCart/TYPO3/Elementor): a multipart body carries a per-part
-                                        -- "Content-Type:" MIME header on its own line. detect_crlf_injection
-                                        -- now scopes the content-type/content-length match (raw AND
-                                        -- URL-encoded) to the ARGS surface when the request body is
-                                        -- multipart/form-data (Set-Cookie/Location stay full-surface). Kept at logonly
-                                        -- pending a fresh burn-in of that carve-out before promoting back
-                                        -- to challenge (CLAUDE.md logonly->challenge->block).
+                                        -- content-type/content-length are the FP-prone, low-impact tags:
+                                        -- they appear legitimately in request BODIES (multipart part
+                                        -- headers; page-builder/API/oEmbed save payloads embedding HTTP
+                                        -- header text — a wp-admin/admin-ajax page-builder POST tripped
+                                        -- CRLF_CONTENT_TYPE, a confirmed FP vs a logged-in admin). So
+                                        -- detect_crlf_injection scopes content-type/content-length (raw AND
+                                        -- URL-encoded) to the ARGS surface for ALL requests (generalises the
+                                        -- old multipart-only carve-out); Set-Cookie/Location stay
+                                        -- full-surface. Kept at logonly pending a fresh burn-in before
+                                        -- promoting back to challenge (CLAUDE.md logonly->challenge->block).
   rule_http_smuggling   = "challenge", -- HTTP verb embedded in body / querystring (smuggling)
                                        -- (request-smuggling primitive; never benign)
 
@@ -1269,7 +1270,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_crlf_injection, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_crlf_injection(args, body, headers)
+      local tag = det.detect_crlf_injection(args, body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CRLF:" .. tag, ttl, mode, RULE_IDS.rule_crlf_injection) then goto done end
