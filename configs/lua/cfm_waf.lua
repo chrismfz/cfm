@@ -804,7 +804,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_cve_litespeed_hash_privesc, "block")
     if mode ~= "disabled" and cookie ~= "" then
-      local tag = det.detect_cve_litespeed_privesc(lower(cookie))
+      local tag = det.detect_cve_litespeed_privesc(cookie)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2024_28000:LITESPEED_CACHE:" .. tag, ttl, mode, RULE_IDS.rule_cve_litespeed_hash_privesc) then goto done end

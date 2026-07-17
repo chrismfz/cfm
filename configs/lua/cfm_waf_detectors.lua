@@ -2227,25 +2227,26 @@ end
 --
 -- Fingerprint: the request presents a `litespeed_hash` (or `litespeed_role`)
 -- COOKIE. These are an INTERNAL crawler-simulation mechanism — a real external
--- visitor NEVER sets them (Wordfence/Patchstack both note zero FP). Keyed on the
--- cookie NAME boundary (`name=`, optionally after `;`/space) so a value that
--- merely contains the string cannot trip it. `cookie` is the raw Cookie header,
--- already lowercased by the caller. Runs on ALL methods (the brute-force is a
--- GET to the REST API), so this is NOT gated on a POST body.
+-- visitor NEVER sets them (Wordfence/Patchstack both note zero FP). `cookie` is
+-- the raw Cookie header. Runs on ALL methods (the brute-force is a GET to the
+-- REST API), so this is NOT gated on a POST body.
 --
 -- Armed autoblock is ideal here: the FIRST guessed-hash request 403s AND trips
 -- the per-IP threshold, nft-banning the source and killing the ~1M-request
 -- brute-force after a single attempt.
 function _M.detect_cve_litespeed_privesc(cookie)
   if not cookie or cookie == "" then return nil end
-  -- Cookie header is "n1=v1; n2=v2"; a cookie named X appears as "x=" at the
-  -- start or right after "; ". Match both boundaries to avoid a value substring.
-  if begins(cookie, "litespeed_hash=") or has(cookie, ";litespeed_hash=")
-     or has(cookie, "; litespeed_hash=") then
+  -- Cookie NAMES are case-sensitive (PHP reads $_COOKIE['litespeed_hash']), so
+  -- the exploit always sends the exact lowercase name — match it exactly, no
+  -- lowercasing needed. Anchor at the header start OR a ';' delimiter, tolerating
+  -- ANY run of whitespace after the ';' (PHP explodes on ';' then trim()s each
+  -- pair, so `;\tlitespeed_hash=` and `;  litespeed_hash=` are still parsed as
+  -- the cookie — a fixed `; ` match would miss those padded evasions). Matching
+  -- the `name=` boundary also stops a value that merely contains the string.
+  if cookie:find("^litespeed_hash=") or cookie:find(";%s*litespeed_hash=") then
     return "HASH_COOKIE"
   end
-  if begins(cookie, "litespeed_role=") or has(cookie, ";litespeed_role=")
-     or has(cookie, "; litespeed_role=") then
+  if cookie:find("^litespeed_role=") or cookie:find(";%s*litespeed_role=") then
     return "ROLE_COOKIE"
   end
   return nil

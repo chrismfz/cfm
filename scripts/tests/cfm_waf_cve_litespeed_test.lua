@@ -63,8 +63,12 @@ fires(req("GET", "/", "wordpress_test_cookie=WP; litespeed_hash=deadbe"),
       "litespeed_hash after another cookie", HASH)
 fires(req("POST", "/wp-admin/admin-ajax.php", "litespeed_hash=abcd12"),
       "cookie marker on POST too (all-methods)", HASH)
-fires(req("GET", "/", "LiteSpeed_Hash=ABCD12"),
-      "case-insensitive cookie name (caller lowercases)", HASH)
+fires(req("GET", "/", "wp=1;litespeed_hash=abcd12"),
+      "no space after ';' delimiter", HASH)
+fires(req("GET", "/", "wp=1;\tlitespeed_hash=abcd12"),
+      "tab-padded delimiter (PHP still parses; must not evade)", HASH)
+fires(req("GET", "/", "wp=1;   litespeed_hash=abcd12"),
+      "multi-space-padded delimiter (must not evade)", HASH)
 
 -- ── Negatives: legit LiteSpeed + normal traffic must NOT fire ────────────────
 clean(req("GET", "/", ""),
