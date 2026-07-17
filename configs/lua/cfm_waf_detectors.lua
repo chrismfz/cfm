@@ -2252,6 +2252,64 @@ function _M.detect_cve_litespeed_privesc(cookie)
   return nil
 end
 
+-- [CVE] Slider Revolution (revslider) — behavioural virtual-patch for the two
+-- classic UNAUTH exploit shapes. This is deliberately NOT version-specific: the
+-- request shapes below are malicious on ANY version (nothing legitimate reads
+-- `../wp-config.php` through revslider_show_image, and no front-end visitor
+-- triggers the update_plugin admin action), so keying on the shape protects the
+-- fleet's whole revslider spread rather than only the one ancient install a
+-- version match would flag. `method` is m_lower from the caller.
+--
+-- Leg A — LFI, CVE-2015-1579 (revslider < 4.2): arbitrary file read via
+--   GET/POST admin-ajax.php?action=revslider_show_image&img=../wp-config.php
+--   Ref: exploit-db 36554. The `../` in img IS the marker; malicious regardless
+--   of auth, so no unauth gate.
+--
+-- Leg B — arbitrary plugin/zip upload -> RCE (Metasploit
+--   wp_revslider_upload_execute; revslider <= 3.0.95 / 4.1.4):
+--   POST admin-ajax.php action=revslider_ajax_action&client_action=update_plugin
+--   with a multipart ZIP containing a PHP shell. `update_plugin` is a real ADMIN
+--   client_action, so gate on UNAUTH (no wordpress_logged_in_* cookie) to avoid
+--   FPing a logged-in admin — an unauth caller hitting it is the exploit. The
+--   cookie gate is a forgeable FP-reduction heuristic, not a security control.
+--
+-- Reason attribution differs per leg, so the caller maps the returned tag:
+--   "LFI" -> WAF_CVE:CVE_2015_1579:REVSLIDER:LFI
+--   "UPDATE_PLUGIN" -> WAF_CVE:REVSLIDER:PLUGIN_UPLOAD (the 2014 upload has no
+--       clean single CVE id; no CVE_ token means it notifies as WAF/CVE).
+function _M.detect_cve_revslider(method, args, body, cookie)
+  -- Cheap prefilter WITHOUT lowercasing: WP routes AJAX on the exact action
+  -- string, so every exploit sends the lowercase `revslider_` prefix. The LFI
+  -- rides in the query; the upload action rides in the POST body.
+  local raw_args = args or ""
+  local is_post = (method == "post")
+  if not (has(raw_args, "revslider_")
+          or (is_post and has(body or "", "revslider_"))) then
+    return nil
+  end
+  local qs = lower(cap(raw_args, CFG.max_scan_len))
+
+  -- Leg A — LFI: revslider_show_image + a traversal sequence. Scoped to the
+  -- QUERY only (`?action=revslider_show_image&img=../` — both are URL params).
+  -- NOT the body: a legit upload of a file whose CONTENT mentions the action +
+  -- `../` (a log, a writeup) must not be blocked as an exploit.
+  if has(qs, "revslider_show_image")
+     and (has(qs, "../") or has(qs, "..%2f") or has(qs, "..%5c")
+          or has(qs, "%2e%2e")) then
+    return "LFI"
+  end
+
+  -- Leg B — plugin/zip upload -> RCE: revslider_ajax_action + update_plugin.
+  -- These ride as multipart FIELD values, so this leg must scan the body — but
+  -- it requires BOTH exploit-specific markers AND UNAUTH, keeping FP negligible.
+  local scope = is_post and (qs .. "&" .. lower(cap(body or "", CFG.max_scan_len))) or qs
+  if has(scope, "revslider_ajax_action") and has(scope, "update_plugin")
+     and not has(lower(cookie or ""), "wordpress_logged_in_") then
+    return "UPDATE_PLUGIN"
+  end
+  return nil
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject

@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF CVE detector: Slider Revolution virtual-patch (rule 10005,
+  CVE-2015-1579 + classic upload RCE).** A behavioural (shape-based) rule, not a
+  version match: blocks the two classic UNAUTH revslider exploit shapes on ANY
+  version — (A) `admin-ajax.php?action=revslider_show_image&img=../wp-config.php`
+  arbitrary file read (CVE-2015-1579), and (B) `action=revslider_ajax_action` +
+  `client_action=update_plugin` arbitrary plugin/ZIP upload → RCE (the Metasploit
+  `wp_revslider_upload_execute` vector). Leg B is gated on UNAUTH (no
+  `wordpress_logged_in_*` cookie) since `update_plugin` is a real admin action.
+  Fills a genuine gap — a revslider `update_plugin` ZIP-with-PHP upload is not
+  caught by the generic upload rules (401 sees only the outer `.zip`; 414 is
+  Joomla-scoped). Runs before the generic traversal rule so the CVE attribution
+  wins. `WAF_CVE` is armed → first probe 403s + nft-bans the scanner. Reasons:
+  `WAF_CVE:CVE_2015_1579:REVSLIDER:LFI` / `WAF_CVE:REVSLIDER:PLUGIN_UPLOAD`.
+  Positive+negative Lua tests (legit `get_slider_html`, authed-admin
+  `update_plugin`, and non-traversal `img` stay clean).
 - **WAF CVE detector: LiteSpeed Cache privilege escalation (rule 10004,
   CVE-2024-28000).** Detects the unauthenticated privesc in LiteSpeed Cache
   `< 6.4` (30 sites on the fleet): the crawler role-simulation validates a weak
