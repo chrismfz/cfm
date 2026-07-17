@@ -32,6 +32,23 @@ back-filled here — see the git/PR history for that period.
   Content-Type header inspection entirely (subsumes the multipart carve-out).
 
 ### Added
+- **WAF CVE detector: Multi Uploader for Gravity Forms unauth upload → RCE
+  (rule 10010, CVE-2025-23921).** The Multi Uploader for Gravity Forms plugin
+  (`<= 1.1.3`, CVSS 9.0, actively exploited since Aug 2024) has an
+  unauthenticated arbitrary file upload: a multipart POST to the `gf_page=upload`
+  endpoint whose `gform_unique_id` field — normally a UUID — is set to a
+  path-traversal destination ending in a php-executable extension
+  (`../../../…/shell.phtml`), writing a webshell outside the intended upload
+  dir. This is a **genuine gap over rule 401**: the php-exec extension rides in
+  the `gform_unique_id` *field value* (the traversal destination), not the
+  multipart `filename=`, so 401's filename matcher never sees it. The detector
+  extracts the `gform_unique_id` value and requires **both** traversal **and** a
+  php-exec extension in it, so a legit upload whose file *content* happens to
+  contain `../`/`.phtml` can't false-positive (a real `gform_unique_id` is a bare
+  UUID). `WAF_CVE` armed → first probe 403s + nft-bans. Reason
+  `WAF_CVE:CVE_2025_23921:GF_MULTI_UPLOADER:TRAVERSAL_PHTML`. Positive+negative
+  Lua tests. Shape confirmed against WPScan/Wordfence/Patchstack + operator
+  threat-intel, not memory.
 - **WAF rule 329: unauthenticated PHP object injection → armed block
   (`WAF_RCE:PHP_OBJECT_INJECTION`).** Closes the ~153-site deserialization-RCE
   exposure (kirki/jet-engine/woodmart/better-search-replace/fusion …) without a

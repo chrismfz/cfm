@@ -108,7 +108,7 @@ produce.
   autoblock arming and is controlled per rule via the CFG key
   (`rule_cve_… = "block"`) or a per-vhost override.
 
-### 1.5 The first (and currently only) live CVE detector
+### 1.5 Worked example — the Simple File List detector (rule 10001)
 
 **Simple File List (WordPress) — `CVE-2025-34085` / `CVE-2020-36847`**
 (unauthenticated upload → rename → RCE). One detector covers **both** CVEs
@@ -153,7 +153,7 @@ entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
 (`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
 hosting mix changes.
 
-Nine implemented; the rest are WordPress/Joomla candidates awaiting a
+Ten implemented; the rest are WordPress/Joomla candidates awaiting a
 validated exact request shape:
 
 | Product / CVE | Status |
@@ -167,6 +167,7 @@ validated exact request shape:
 | Post SMTP (`CVE-2025-11833` + `CVE-2023-6875`) | ✅ **implemented** (rule 10007) — unauth `/wp-json/post-smtp/` (get-log/connect-app) or `postman_email_log` page → email-log/reset-link disclosure |
 | Avada / Fusion Builder (`CVE-2026-6279` + `CVE-2026-8713`) | ✅ **implemented** (rule 10008) — `fusion_get_widget_markup` + `render_logics` base64→dangerous callable (RCE); `fusion_form_submit_ajax` + `privacy_expiration_action` (file delete) |
 | Kirki (`CVE-2026-8206`) | ✅ **implemented** (rule 10009) — unauth `POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password` + `username`&`email` → account takeover (reset link to attacker) |
+| Multi Uploader for Gravity Forms (`CVE-2025-23921`) | ✅ **implemented** (rule 10010) — `gf_page=upload` + `gform_unique_id` traversal→`.phtml` (php-exec in field value, not `filename=`, so rule 401 misses it) |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
 Keep the plan doc's candidate table as the backlog; update the ✅ column here

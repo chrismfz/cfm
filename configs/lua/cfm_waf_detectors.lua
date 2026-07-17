@@ -2511,6 +2511,38 @@ function _M.detect_cve_kirki_forgot_password(uri, method, args, body)
   return nil
 end
 
+-- [CVE] Multi Uploader for Gravity Forms (<= 1.1.3) unauthenticated arbitrary
+-- file upload -> RCE. CVE-2025-23921 (CVSS 9.0, actively exploited since Aug
+-- 2024). A multipart POST to the `gf_page=upload` endpoint whose
+-- `gform_unique_id` field — meant to be a UUID — is set to a PATH-TRAVERSAL
+-- destination ending in a php-executable extension (`../../../…/shell.phtml`),
+-- writing a webshell outside the intended upload dir. Ref: WPScan / Wordfence /
+-- Patchstack + operator threat-intel (Snort sigs on gf_page=upload +
+-- gform_unique_id + ../ + .phtml).
+--
+-- Genuine gap over rule 401: the php-exec extension rides in the gform_unique_id
+-- FIELD VALUE (the traversal destination), not the multipart `filename=`, so
+-- 401's filename matcher misses it. We EXTRACT the gform_unique_id value and
+-- require both traversal AND a php-exec extension in it — so a legit upload
+-- whose file CONTENT happens to contain `../`/`.phtml` can't false-positive it
+-- (a legit gform_unique_id is a bare UUID). `method` is m_lower from the caller.
+function _M.detect_cve_gf_multi_uploader(uri, method, args, body)
+  if method ~= "post" then return nil end
+  -- Cheap endpoint gate: gf_page=upload rides in the query string.
+  if not has(lower((uri or "") .. "&" .. (args or "")), "gf_page=upload") then return nil end
+  -- Extract the gform_unique_id value (multipart field part or urlencoded).
+  local b = body or ""
+  local val = b:match('[Nn]ame="gform_unique_id".-\r?\n\r?\n([^\r\n]*)')
+           or b:match("gform_unique_id=([^&\r\n]*)")
+  if not val then return nil end
+  local v = lower(val)
+  if (has(v, "../") or has(v, "..%2f") or has(v, "..%5c") or has(v, "%2e%2e"))
+     and _cve_sfl_has_exec_ext(v) then
+    return "TRAVERSAL_PHTML"
+  end
+  return nil
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject
