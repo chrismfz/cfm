@@ -32,6 +32,21 @@ back-filled here — see the git/PR history for that period.
   Content-Type header inspection entirely (subsumes the multipart carve-out).
 
 ### Added
+- **WAF CVE detector: Kirki unauth account takeover (rule 10009,
+  CVE-2026-8206).** Kirki (`<= 6.0.6`, CVSS 9.8, actively mass-exploited) exposes
+  an unauthenticated REST endpoint
+  `POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password` whose
+  `handle_forgot_password()` accepts a `username` and an `email` independently
+  without checking the email belongs to that user — so an attacker requests a
+  reset for any admin username, supplies their own email, and receives the reset
+  link → full account takeover. The detector keys on the endpoint + both
+  `username` and `email` (both are required for the exploit; a single-field
+  legitimate reset is let through — strictly fewer FPs than blocking the bare
+  endpoint, and Kirki is typically a bundled theme dependency so the endpoint
+  sees ~zero legit traffic anyway). `WAF_CVE` armed → first probe 403s +
+  nft-bans. Reason `WAF_CVE:CVE_2026_8206:KIRKI:FORGOT_PASSWORD`. Positive+negative
+  Lua tests. Endpoint/params confirmed against WPScan / the public PoC, not
+  memory.
 - **WAF CVE detector: Avada / Fusion Builder unauth RCE + file delete (rule
   10008, CVE-2026-6279 + CVE-2026-8713).** Rule group R4 from the fleet scan;
   completes the "block now" net-new set. Two unauth `admin-ajax.php` nopriv

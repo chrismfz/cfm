@@ -2441,6 +2441,31 @@ function _M.detect_cve_fusion_builder(uri, method, args, body)
   return nil
 end
 
+-- [CVE] Kirki (Freeform Page Builder / customizer framework) unauthenticated
+-- account takeover via password reset. CVE-2026-8206 (Kirki 6.0.0–6.0.6, CVSS
+-- 9.8, actively mass-exploited). The plugin exposes an UNAUTH REST endpoint
+-- `/wp-json/KirkiComponentLibrary/v1/kirki-forgot-password` whose
+-- handle_forgot_password() accepts a `username` and an `email` INDEPENDENTLY
+-- without checking the email belongs to that user — so an attacker requests a
+-- reset for any admin username, supplies their OWN email, and receives the
+-- reset link. Ref: WPScan / bleepingcomputer / Jenderal92 PoC.
+--
+-- Both `username` (target) and `email` (attacker) are REQUIRED for the exploit,
+-- so keying on the endpoint + both params catches every variant while letting a
+-- hypothetical single-field legitimate reset through — strictly fewer FPs than
+-- blocking the bare endpoint. On a typical fleet Kirki is a bundled theme
+-- dependency (not the site's reset mechanism), so this endpoint sees ~zero legit
+-- traffic anyway. `method` is m_lower from the caller.
+function _M.detect_cve_kirki_forgot_password(uri, method, args, body)
+  if method ~= "post" then return nil end
+  if not has(lower(uri or ""), "kirki-forgot-password") then return nil end
+  local scope = lower(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
+  if has(scope, "username") and has(scope, "email") then
+    return "FORGOT_PASSWORD"
+  end
+  return nil
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject
