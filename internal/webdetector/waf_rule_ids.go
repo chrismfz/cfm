@@ -134,8 +134,9 @@ var wafRuleIDs = []WAFRule{
 	// 8xx info disclosure / debug
 	{ID: 801, Name: "rule_debug_toggles", ReasonFamily: "WAF_DEBUG_TOGGLE", DefaultMode: "challenge"},
 
-	// 10xxx named-vulnerability (CVE) detectors — see WAF_CVE_PLAN.md.
+	// 10xxx named-vulnerability (CVE) detectors — see WAF_CVE.md.
 	{ID: 10001, Name: "rule_cve_simple_file_list_upload", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	{ID: 10002, Name: "rule_cve_joomla_jce_profile_import", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

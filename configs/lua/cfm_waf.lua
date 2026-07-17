@@ -146,12 +146,14 @@ local CFG = {
                                        -- (request-smuggling primitive; never benign)
 
   -- [CVE] Named-vulnerability detectors (family WAF_CVE, IDs 10000+; see
-  -- WAF_CVE_PLAN.md). Exact exploit shapes only. Shipping at `block` requires a
-  -- near-zero-FP fingerprint. Note: WAF_CVE is deliberately NOT auto-armed for
-  -- autoblock (held out in wafSecurityFamilies like WEBSHELL), so a block here
-  -- 403s the request but only nft-bans where the operator opts in with CVE=1 or
-  -- RULE_<id>=1 in [waf_security]. rule_log4shell (328) is also WAF_CVE.
+  -- WAF_CVE.md). Exact exploit shapes only. Shipping at `block` requires a
+  -- near-zero-FP fingerprint. WAF_CVE is armed for autoblock by default
+  -- (CVE=1), so a block here 403s the request AND nft-bans + Slack/mails as
+  -- WAF/CVE-YYYY-NNNN; hold a lower-confidence CVE rule with RULE_<id>=0 in
+  -- [waf_security] (not by un-arming the family). rule_log4shell (328) is also
+  -- WAF_CVE (logonly).
   rule_cve_simple_file_list_upload = "block", -- CVE-2025-34085 / CVE-2020-36847: Simple File List (WP) unauth upload->rename RCE. Endpoints ee-upload-engine.php (PHP tag in upload) + ee-file-engine.php (rename target ->.php/.phtml/.php[0-9]); param names vary across PoCs so we key on endpoint + exec-ext/php-tag marker.
+  rule_cve_joomla_jce_profile_import = "block", -- CVE-2026-48907: Joomla JCE (<2.9.99.5) unauth PHP upload->RCE. POST index.php?option=com_jce, JCE action value "profiles.import" (a multipart field, not a key=value pair), + php-executable multipart upload filename (double-ext .xml.php). Keyed on component+action-value+exec-ext, not the random filename/CSRF field.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -519,6 +521,7 @@ local RULE_IDS = {
   -- band is too small for long-term CVE coverage, so CVE rules use 10000+.
   -- (rule_log4shell keeps its historical 328; new CVE rules start here.)
   rule_cve_simple_file_list_upload = 10001,
+  rule_cve_joomla_jce_profile_import = 10002,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -985,6 +988,17 @@ function _M.check(ctx)
         -- endpoints/exploit); the reason carries the campaign-primary CVE
         -- (2025-34085). Per-CVE metadata (WAFRule.CVEs) can carry both later.
         if record("WAF_CVE:CVE_2025_34085:SIMPLE_FILE_LIST:" .. tag, ttl, mode, RULE_IDS.rule_cve_simple_file_list_upload) then goto done end
+      end
+    end
+  end
+
+  do
+    local mode = rule_mode(CFG.rule_cve_joomla_jce_profile_import, "block")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_joomla_jce_profile_import(uri, m_lower, args, body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_48907:JOOMLA_JCE:" .. tag, ttl, mode, RULE_IDS.rule_cve_joomla_jce_profile_import) then goto done end
       end
     end
   end
