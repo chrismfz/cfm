@@ -2164,6 +2164,50 @@ function _M.detect_cve_joomla_jce_profile_import(uri, method, args, body, header
   return nil
 end
 
+-- [CVE] Ninja Forms "File Uploads" add-on unauthenticated arbitrary file upload
+-- + path traversal -> RCE. CVE-2026-0740 (ACSC July-2026 CMS campaign).
+--
+-- Exploit request (public PoC 0xgh057r3c0n/CVE-2026-0740):
+--   POST /wp-admin/admin-ajax.php   (multipart/form-data)
+--     action  = nf_fu_upload                      (the vulnerable add-on action)
+--     nonce, form_id, field_id
+--     image_jpg = ../../../                        (path-traversal dest path)
+--     files-<field_id> = <file>                    (arbitrary upload; RCE if .php)
+--   (preceded by action=nf_fu_get_new_nonce to mint the nonce.)
+--
+-- Keyed on the SPECIFIC action `nf_fu_upload` — a bare admin-ajax.php match is
+-- deliberately NOT enough (WAF_CVE_PLAN.md: form submissions are common). The
+-- action alone is a legitimate upload handler, so we additionally require an
+-- exploit marker: (A) a php-executable upload filename (a contact form never
+-- accepts a .php), or (B) path traversal in the `image_jpg` dest-path param
+-- (../ is never a legitimate upload destination). `method` is m_lower.
+function _M.detect_cve_ninja_forms_fu_upload(uri, method, args, body, headers)
+  if method ~= "post" then return nil end
+  -- Cheap gate FIRST: the endpoint is admin-ajax.php (tiny), check it before
+  -- touching the (capped) body.
+  if not has(lower(uri or ""), "admin-ajax.php") then return nil end
+  -- The vulnerable action value. In the PoC it rides as a multipart field
+  -- (`name="action"\r\n\r\nnf_fu_upload`), so match the distinctive value
+  -- substring, not a `key=value` pair. `nf_fu_` is the add-on's action prefix.
+  local scope = lower(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
+  if not has(scope, "nf_fu_upload") then return nil end
+  -- Marker A: php-executable file in the multipart upload (RCE payload). Also
+  -- gates on multipart/form-data internally.
+  if _M.detect_upload_filename(body, headers) then
+    return "UPLOAD_PHP"
+  end
+  -- Marker B: path traversal in the dest-path param. Gated behind
+  -- nf_fu_upload + the presence of `image_jpg`, so a `../` from elsewhere in the
+  -- (capped, fields-only) buffer can't trip it on its own — and `image_jpg=../`
+  -- is never a legitimate upload destination.
+  if has(scope, "image_jpg") and
+     (has(scope, "../") or has(scope, "..\\") or has(scope, "..%2f")
+      or has(scope, "..%5c") or has(scope, "%2e%2e")) then
+    return "TRAVERSAL"
+  end
+  return nil
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject
