@@ -95,6 +95,16 @@ clean(get("action=heartbeat&data=1"),
       "unrelated admin-ajax action")
 clean(get(""),
       "no query at all")
+-- Regression: a legit upload of a file whose CONTENT mentions the LFI shape
+-- must NOT trip leg A (query-scoped, not body-scoped).
+clean({ uri = "/wp-comments-post.php", args = "", method = "POST",
+        headers = { ["Content-Type"] = "multipart/form-data; boundary=----X" }, cookie = "",
+        body = "------X\r\n" ..
+               'Content-Disposition: form-data; name="file"; filename="notes.txt"\r\n' ..
+               "Content-Type: text/plain\r\n\r\n" ..
+               "See action=revslider_show_image&img=../ for the old LFI writeup.\r\n" ..
+               "------X--\r\n" },
+      "file CONTENT mentions revslider_show_image + ../ (not a query) stays clean")
 
 if fails > 0 then
   io.stderr:write(("cfm_waf revslider CVE tests: %d FAILED\n"):format(fails))

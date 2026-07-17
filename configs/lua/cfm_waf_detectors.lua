@@ -2277,7 +2277,7 @@ end
 --   "LFI" -> WAF_CVE:CVE_2015_1579:REVSLIDER:LFI
 --   "UPDATE_PLUGIN" -> WAF_CVE:REVSLIDER:PLUGIN_UPLOAD (the 2014 upload has no
 --       clean single CVE id; no CVE_ token means it notifies as WAF/CVE).
-function _M.detect_cve_revslider(uri, method, args, body, cookie)
+function _M.detect_cve_revslider(method, args, body, cookie)
   -- Cheap prefilter WITHOUT lowercasing: WP routes AJAX on the exact action
   -- string, so every exploit sends the lowercase `revslider_` prefix. The LFI
   -- rides in the query; the upload action rides in the POST body.
@@ -2288,17 +2288,21 @@ function _M.detect_cve_revslider(uri, method, args, body, cookie)
     return nil
   end
   local qs = lower(cap(raw_args, CFG.max_scan_len))
-  local scope = is_post and (qs .. "&" .. lower(cap(body or "", CFG.max_scan_len))) or qs
 
-  -- Leg A — LFI: revslider_show_image + a traversal sequence in img.
-  if has(scope, "revslider_show_image")
-     and (has(scope, "../") or has(scope, "..%2f") or has(scope, "..%5c")
-          or has(scope, "%2e%2e")) then
+  -- Leg A — LFI: revslider_show_image + a traversal sequence. Scoped to the
+  -- QUERY only (`?action=revslider_show_image&img=../` — both are URL params).
+  -- NOT the body: a legit upload of a file whose CONTENT mentions the action +
+  -- `../` (a log, a writeup) must not be blocked as an exploit.
+  if has(qs, "revslider_show_image")
+     and (has(qs, "../") or has(qs, "..%2f") or has(qs, "..%5c")
+          or has(qs, "%2e%2e")) then
     return "LFI"
   end
 
-  -- Leg B — plugin/zip upload -> RCE: revslider_ajax_action + update_plugin,
-  -- UNAUTH only.
+  -- Leg B — plugin/zip upload -> RCE: revslider_ajax_action + update_plugin.
+  -- These ride as multipart FIELD values, so this leg must scan the body — but
+  -- it requires BOTH exploit-specific markers AND UNAUTH, keeping FP negligible.
+  local scope = is_post and (qs .. "&" .. lower(cap(body or "", CFG.max_scan_len))) or qs
   if has(scope, "revslider_ajax_action") and has(scope, "update_plugin")
      and not has(lower(cookie or ""), "wordpress_logged_in_") then
     return "UPDATE_PLUGIN"

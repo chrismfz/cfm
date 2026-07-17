@@ -820,7 +820,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_cve_revslider, "block")
     if mode ~= "disabled" then
-      local tag = det.detect_cve_revslider(uri, m_lower, args, body, cookie)
+      local tag = det.detect_cve_revslider(m_lower, args, body, cookie)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         local reason = (tag == "LFI")
