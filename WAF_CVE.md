@@ -153,7 +153,7 @@ entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
 (`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
 hosting mix changes.
 
-Eight implemented; the rest are WordPress/Joomla candidates awaiting a
+Nine implemented; the rest are WordPress/Joomla candidates awaiting a
 validated exact request shape:
 
 | Product / CVE | Status |
@@ -166,6 +166,7 @@ validated exact request shape:
 | W3 Total Cache (`CVE-2026-5032` + `CVE-2025-9501`) | ✅ **implemented** (rule 10006) — `User-Agent: W3 Total Cache` token-leak + `mfunc`/`mclude` in a comment POST (mfunc eval RCE) |
 | Post SMTP (`CVE-2025-11833` + `CVE-2023-6875`) | ✅ **implemented** (rule 10007) — unauth `/wp-json/post-smtp/` (get-log/connect-app) or `postman_email_log` page → email-log/reset-link disclosure |
 | Avada / Fusion Builder (`CVE-2026-6279` + `CVE-2026-8713`) | ✅ **implemented** (rule 10008) — `fusion_get_widget_markup` + `render_logics` base64→dangerous callable (RCE); `fusion_form_submit_ajax` + `privacy_expiration_action` (file delete) |
+| Kirki (`CVE-2026-8206`) | ✅ **implemented** (rule 10009) — unauth `POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password` + `username`&`email` → account takeover (reset link to attacker) |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
 Keep the plan doc's candidate table as the backlog; update the ✅ column here

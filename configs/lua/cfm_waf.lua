@@ -161,6 +161,7 @@ local CFG = {
   rule_cve_w3tc = "block", -- CVE-2026-5032 + CVE-2025-9501: W3 Total Cache mfunc RCE surface. Leg A = User-Agent contains "W3 Total Cache" (token-leak bypass, zero FP). Leg B = mfunc/mclude marker in a POST to wp-comments-post.php / wp-json/wp/v2/comments (dynamic-fragment eval RCE; substring match, not exact tag form).
   rule_cve_post_smtp = "block", -- CVE-2025-11833 (+ CVE-2023-6875): Post SMTP unauth email-log disclosure -> account takeover. UNAUTH request to the /wp-json/post-smtp/ REST namespace (get-log/connect-app) or the postman_email_log admin page. Gated on absence of the WP logged-in cookie so real admin usage is exempt.
   rule_cve_fusion_builder = "block", -- CVE-2026-6279 + CVE-2026-8713: Avada/Fusion Builder unauth admin-ajax. Leg A RCE = action=fusion_get_widget_markup + base64 render_logics decoding to a dangerous callable (call_user_func sink). Leg B file-delete = action=fusion_form_submit_ajax + privacy_expiration_action (server-only field).
+  rule_cve_kirki_forgot_password = "block", -- CVE-2026-8206: Kirki (<=6.0.6) unauth account takeover. POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password with a target username + attacker email (no email/username cross-check) -> reset link mailed to attacker. Keyed on endpoint + both params.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -535,6 +536,7 @@ local RULE_IDS = {
   rule_cve_w3tc = 10006,
   rule_cve_post_smtp = 10007,
   rule_cve_fusion_builder = 10008,
+  rule_cve_kirki_forgot_password = 10009,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -878,6 +880,18 @@ function _M.check(ctx)
           and "WAF_CVE:CVE_2026_6279:FUSION_BUILDER:RCE"
           or  "WAF_CVE:CVE_2026_8713:FUSION_BUILDER:FILE_DELETE"
         if record(reason, ttl, mode, RULE_IDS.rule_cve_fusion_builder) then goto done end
+      end
+    end
+  end
+
+  -- ── 3g) Kirki unauth account takeover via password reset (CVE-2026-8206) ────
+  do
+    local mode = rule_mode(CFG.rule_cve_kirki_forgot_password, "block")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_kirki_forgot_password(uri, m_lower, args, body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_8206:KIRKI:" .. tag, ttl, mode, RULE_IDS.rule_cve_kirki_forgot_password) then goto done end
       end
     end
   end
