@@ -178,10 +178,23 @@ critical-unauth installs across 495 sites) produced a ranked WAF-rule worklist
 **R6 LiteSpeed** (✅ 10004) → **R1 W3TC** (✅ 10006) → **R7 post-smtp**
 (✅ 10007) → **R4 Fusion Builder** (✅ 10008 — `fusion_*` nopriv ajax). That
 completes every "block now" net-new detector in the rollout. R3 upload / R5
-`wp-config` traversal / R2 object-injection / R8 jet SQLi are already largely
-covered by the generic rules (401 / 101 / 306 / 301); R2 and R8 (the
-"alert-7d-then-block, medium-FP" tier) would only add endpoint-scoped precision
-over the generics if a future pass wants it.
+`wp-config` traversal are covered by the generic rules (401 / 101).
+
+**R2 (object injection) → rule 329** (`WAF_RCE:PHP_OBJECT_INJECTION`, armed
+block): rather than promote the broad rule 306 (`WAF_SERIALIZE`, challenge,
+**args-only**) — which would block/ban legit *authenticated* serialized blobs
+(WooCommerce/Elementor/WPML) — a dedicated **unauth-gated** detector fires on an
+`O:N:"…"`/`C:N:"…"` object marker in args OR body (incl. base64, closing rule
+304's logonly gap) and emits `WAF_RCE` (already armed). Covers the ~153-site
+object-injection exposure in one detector; rule 306 keeps the authenticated case
+at challenge. It is **not** a `10xxx` WAF_CVE rule because it's a vuln *class*,
+not one named CVE.
+
+**R8 (jet SQLi) → skipped.** Generic rule 301 (`WAF_SQLI`, armed block) already
+catches+bans the keyword markers globally; JetEngine's novel injections are
+keyword-less operator/blind SQLi that can't be signatured without FPing legit
+filter traffic (the fleet spec's own note). Fix = upgrade JetEngine on the
+affected sites.
 
 **Behavioural virtual-patch (a valid WAF_CVE flavour):** rule 10005
 (Slider Revolution) is not a version match — it keys on the known-malicious
