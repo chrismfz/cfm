@@ -2335,6 +2335,12 @@ end
 --   "MFUNC"         -> WAF_CVE:CVE_2025_9501:W3TC:MFUNC
 function _M.detect_cve_w3tc(uri, method, headers, body)
   -- Leg A — the W3TC User-Agent bypass. All methods / all URIs.
+  -- Safety: W3TC's OWN internal cache-priming loopback requests carry this UA,
+  -- but they never reach here — cfm.lua short-circuits self-origin requests
+  -- (loopback / self-IP set / IGNORE_NETS via is_self_origin) before the WAF
+  -- runs, and check() re-guards on ctx.self_origin. So this only ever fires on
+  -- EXTERNAL requests forging the UA. (A cross-server cache-priming peer, if any,
+  -- would need to be in the self-IP set / IGNORE_NETS — the same allowlist.)
   local ua = lower(header_string((headers or {})["user-agent"]
                               or (headers or {})["User-Agent"] or ""))
   if has(ua, "w3 total cache") then
