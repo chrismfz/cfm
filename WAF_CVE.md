@@ -153,7 +153,7 @@ entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
 (`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
 hosting mix changes.
 
-Three implemented; the rest are WordPress/Joomla candidates awaiting a
+Four implemented; the rest are WordPress/Joomla candidates awaiting a
 validated exact request shape:
 
 | Product / CVE | Status |
@@ -161,10 +161,20 @@ validated exact request shape:
 | Simple File List (`CVE-2025-34085` / `CVE-2020-36847`) | ✅ **implemented** (rule 10001) |
 | Joomla JCE (`CVE-2026-48907`) | ✅ **implemented** (rule 10002) — `option=com_jce` + `profiles.import` + php-exec upload |
 | Ninja Forms (`CVE-2026-0740`) | ✅ **implemented** (rule 10003) — `action=nf_fu_upload` + (php-exec upload OR `image_jpg` traversal) |
+| LiteSpeed Cache (`CVE-2024-28000`) | ✅ **implemented** (rule 10004) — `litespeed_hash`/`litespeed_role` cookie (unauth privesc brute-force) |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
 Keep the plan doc's candidate table as the backlog; update the ✅ column here
 as detectors land.
+
+**Fleet-driven priority (2026-07):** the operator's own plugin scan (1,473
+critical-unauth installs across 495 sites) produced a ranked WAF-rule worklist
+(rule groups R1–R9). Tier-1 net-new detectors from it, in rollout order:
+**R6 LiteSpeed** (✅ 10004, this one) → **R1 W3TC** (`User-Agent: W3 Total Cache`
++ `mfunc`/`mclude` in comment POST) → **R7 post-smtp** (unauth log endpoints) →
+**R4 Fusion Builder** (`fusion_*` nopriv ajax). R3 upload / R5 `wp-config`
+traversal / R2 object-injection / R8 jet SQLi are already largely covered by the
+generic rules (401 / 101 / 306 / 301).
 
 ---
 

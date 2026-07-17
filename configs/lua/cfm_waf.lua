@@ -155,6 +155,7 @@ local CFG = {
   rule_cve_simple_file_list_upload = "block", -- CVE-2025-34085 / CVE-2020-36847: Simple File List (WP) unauth upload->rename RCE. Endpoints ee-upload-engine.php (PHP tag in upload) + ee-file-engine.php (rename target ->.php/.phtml/.php[0-9]); param names vary across PoCs so we key on endpoint + exec-ext/php-tag marker.
   rule_cve_joomla_jce_profile_import = "block", -- CVE-2026-48907: Joomla JCE (<2.9.99.5) unauth PHP upload->RCE. POST index.php?option=com_jce, JCE action value "profiles.import" (a multipart field, not a key=value pair), + php-executable multipart upload filename (double-ext .xml.php). Keyed on component+action-value+exec-ext, not the random filename/CSRF field.
   rule_cve_ninja_forms_fu_upload = "block", -- CVE-2026-0740: Ninja Forms File Uploads add-on unauth arbitrary file upload + path traversal. POST wp-admin/admin-ajax.php, action value "nf_fu_upload" + (php-executable upload filename OR image_jpg=../ traversal). Keyed on the specific action (NOT bare admin-ajax) + exploit marker.
+  rule_cve_litespeed_hash_privesc = "block", -- CVE-2024-28000: LiteSpeed Cache (<6.4) unauth privesc. Request presents a litespeed_hash / litespeed_role COOKIE (weak 6-char crawler-simulation hash brute-forced to become admin). Cookie is internal-only; a real visitor never sets it (zero FP). Runs on all methods (cookie-based, not body-gated).
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -524,6 +525,7 @@ local RULE_IDS = {
   rule_cve_simple_file_list_upload = 10001,
   rule_cve_joomla_jce_profile_import = 10002,
   rule_cve_ninja_forms_fu_upload = 10003,
+  rule_cve_litespeed_hash_privesc = 10004,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -630,6 +632,7 @@ function _M.check(ctx)
   local shdict  = ctx.shdict
   local headers = ctx.headers or {}
   local body    = ctx.body    or ""
+  local cookie  = ctx.cookie  or ""
   -- skip_rule_ids: optional set { [rule_id] = true } of IDs to suppress.
   -- Populated by cfm.lua from the per-vhost waf-excludes snapshot when the
   -- operator has marked specific rules as excluded for this host (e.g. to
@@ -791,6 +794,20 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_PROXY_HDR:" .. tag, ttl, mode, RULE_IDS.rule_proxy_header_sqli) then goto done end
+      end
+    end
+  end
+
+  -- ── 3b) LiteSpeed Cache privesc (CVE-2024-28000): litespeed_hash/role cookie ─
+  -- Cookie-based + all-methods (the brute-force is a GET to the REST API), so it
+  -- runs here in the early header region, NOT in the POST-gated body block below.
+  do
+    local mode = rule_mode(CFG.rule_cve_litespeed_hash_privesc, "block")
+    if mode ~= "disabled" and cookie ~= "" then
+      local tag = det.detect_cve_litespeed_privesc(cookie)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2024_28000:LITESPEED_CACHE:" .. tag, ttl, mode, RULE_IDS.rule_cve_litespeed_hash_privesc) then goto done end
       end
     end
   end

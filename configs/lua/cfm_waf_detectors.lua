@@ -2216,6 +2216,42 @@ function _M.detect_cve_ninja_forms_fu_upload(uri, method, args, body, headers)
   return nil
 end
 
+-- [CVE] LiteSpeed Cache (< 6.4) unauthenticated privilege escalation.
+-- CVE-2024-28000. The plugin's crawler "role simulation" validates a 6-char
+-- security hash (Str::rand(6) — only ~1M possible values) taken from the
+-- `litespeed_hash` cookie against the stored `litespeed.router.hash`. Because
+-- the space is tiny, an unauthenticated attacker brute-forces it (up to ~1M
+-- requests, each carrying a guessed `litespeed_hash` cookie, alongside a
+-- `litespeed_role` cookie set to the target user id) and gets simulated as
+-- user ID 1 = admin. Patched in 6.4.
+--
+-- Fingerprint: the request presents a `litespeed_hash` (or `litespeed_role`)
+-- COOKIE. These are an INTERNAL crawler-simulation mechanism — a real external
+-- visitor NEVER sets them (Wordfence/Patchstack both note zero FP). `cookie` is
+-- the raw Cookie header. Runs on ALL methods (the brute-force is a GET to the
+-- REST API), so this is NOT gated on a POST body.
+--
+-- Armed autoblock is ideal here: the FIRST guessed-hash request 403s AND trips
+-- the per-IP threshold, nft-banning the source and killing the ~1M-request
+-- brute-force after a single attempt.
+function _M.detect_cve_litespeed_privesc(cookie)
+  if not cookie or cookie == "" then return nil end
+  -- Cookie NAMES are case-sensitive (PHP reads $_COOKIE['litespeed_hash']), so
+  -- the exploit always sends the exact lowercase name — match it exactly, no
+  -- lowercasing needed. Anchor at the header start OR a ';' delimiter, tolerating
+  -- ANY run of whitespace after the ';' (PHP explodes on ';' then trim()s each
+  -- pair, so `;\tlitespeed_hash=` and `;  litespeed_hash=` are still parsed as
+  -- the cookie — a fixed `; ` match would miss those padded evasions). Matching
+  -- the `name=` boundary also stops a value that merely contains the string.
+  if cookie:find("^litespeed_hash=") or cookie:find(";%s*litespeed_hash=") then
+    return "HASH_COOKIE"
+  end
+  if cookie:find("^litespeed_role=") or cookie:find(";%s*litespeed_role=") then
+    return "ROLE_COOKIE"
+  end
+  return nil
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject

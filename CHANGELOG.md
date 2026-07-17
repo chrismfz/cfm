@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF CVE detector: LiteSpeed Cache privilege escalation (rule 10004,
+  CVE-2024-28000).** Detects the unauthenticated privesc in LiteSpeed Cache
+  `< 6.4` (30 sites on the fleet): the crawler role-simulation validates a weak
+  6-char hash (~1M values) from a `litespeed_hash` cookie, so an attacker
+  brute-forces it to be simulated as admin. Keyed on the presence of a
+  `litespeed_hash`/`litespeed_role` **cookie** — an internal mechanism a real
+  visitor never sets (zero FP per Wordfence/Patchstack), matched at the cookie
+  name boundary so a value substring can't trip it. Runs on **all methods**
+  (the brute-force is a GET to the REST API), not just POST. `WAF_CVE` is armed,
+  so the **first** guessed-hash request 403s AND nft-bans the source — killing
+  the ~1M-request brute-force after a single attempt, and alerting as
+  `WAF/CVE-2024-28000`. First detector from the operator's fleet-scan worklist
+  (rule group R6). Positive+negative Lua tests (incl. legit `_lscache_vary` and
+  WP session cookies stay clean); Lua↔Go id parity kept.
 - **WAF CVE detector: Ninja Forms File Uploads RCE (rule 10003,
   CVE-2026-0740).** Detects the unauthenticated arbitrary-file-upload +
   path-traversal exploit in the Ninja Forms "File Uploads" add-on that the
