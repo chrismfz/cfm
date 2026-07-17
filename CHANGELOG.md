@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF CVE detector: Avada / Fusion Builder unauth RCE + file delete (rule
+  10008, CVE-2026-6279 + CVE-2026-8713).** Rule group R4 from the fleet scan;
+  completes the "block now" net-new set. Two unauth `admin-ajax.php` nopriv
+  legs: (A) `action=fusion_get_widget_markup` with a base64 `render_logics`
+  param that decodes to `{"type":"wp_conditional_tags","value":{"function":
+  "system",…}}` — the `function` value reaches `call_user_func()` with no
+  allowlist (RCE, CVE-2026-6279). The detector decodes `render_logics` and flags
+  a dangerous callable (a legitimate `wp_conditional_tags` only calls `is_*` WP
+  conditional tags). (B) `action=fusion_form_submit_ajax` +
+  `privacy_expiration_action` — a server-side-only field a client never sends,
+  which triggers `maybe_delete_files()` on an attacker-controlled path (delete
+  `wp-config.php` → takeover; CVE-2026-8713). `WAF_CVE` armed → first probe
+  403s + nft-bans. Reasons `WAF_CVE:CVE_2026_6279:FUSION_BUILDER:RCE` /
+  `WAF_CVE:CVE_2026_8713:FUSION_BUILDER:FILE_DELETE`. Positive+negative Lua
+  tests (legit `is_front_page` render logic and a normal form submission stay
+  clean). Shapes confirmed against the CVE-2026-6279 PoC / WPScan, not memory.
 - **WAF CVE detector: Post SMTP unauth email-log disclosure (rule 10007,
   CVE-2025-11833 + CVE-2023-6875).** Rule group R7 from the fleet scan. A
   missing capability check lets an unauthenticated caller read the plugin's

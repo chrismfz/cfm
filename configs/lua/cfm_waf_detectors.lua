@@ -2399,6 +2399,64 @@ function _M.detect_cve_post_smtp(uri, args, cookie)
   return tag
 end
 
+-- Dangerous PHP callables that a CVE-2026-6279 render_logics payload injects
+-- into call_user_func. Legit wp_conditional_tags render logic only ever calls
+-- WP conditional tags (is_front_page, is_page, is_single, …) — none of these —
+-- so their presence in the decoded payload is the exploit marker. `exec` is
+-- omitted (substring of shell_exec / "execute"); shell_exec/proc_open cover it.
+local FUSION_RCE_FUNCS = {
+  "call_user_func", "shell_exec", "system", "passthru", "proc_open", "popen",
+  "assert", "create_function", "file_put_contents", "move_uploaded_file",
+  "base64_decode", "gzinflate", "phpinfo", "<?php", "<?=",
+}
+
+-- [CVE] Avada / Fusion Builder (fusion-builder) — two UNAUTH admin-ajax nopriv
+-- vulns. Both POST /wp-admin/admin-ajax.php.
+--
+-- Leg A — RCE, CVE-2026-6279 (<= 3.15.2): action=fusion_get_widget_markup with a
+--   base64 `render_logics` param that decodes to
+--   {"type":"wp_conditional_tags","value":{"function":"system","args":"id"}} —
+--   the `function` value reaches call_user_func() with no allowlist. Ref:
+--   github xxconi/CVE-2026-6279, WPScan. We decode render_logics and flag a
+--   dangerous callable (a legit wp_conditional_tags only calls is_* tags).
+--
+-- Leg B — arbitrary file delete, CVE-2026-8713 (<= 3.15.3): action=
+--   fusion_form_submit_ajax with `privacy_expiration_action` — a SERVER-side-only
+--   field a client never sends. The Fusion_Form_DB_Privacy shutdown hook then
+--   runs maybe_delete_files() on the attacker path (no realpath) -> delete
+--   wp-config.php -> takeover. `privacy_expiration_action` is the near-zero-FP
+--   anchor (per the fleet spec: never legitimate in a client request).
+--
+-- `method` is m_lower from the caller. Caller maps the returned tag:
+--   "RCE"         -> WAF_CVE:CVE_2026_6279:FUSION_BUILDER:RCE
+--   "FILE_DELETE" -> WAF_CVE:CVE_2026_8713:FUSION_BUILDER:FILE_DELETE
+function _M.detect_cve_fusion_builder(uri, method, args, body)
+  if method ~= "post" then return nil end
+  if not has(lower(uri or ""), "admin-ajax.php") then return nil end
+  local scope = lower(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
+
+  -- Leg B — file delete. Cheapest + cleanest, check first.
+  if has(scope, "fusion_form_submit_ajax") and has(scope, "privacy_expiration_action") then
+    return "FILE_DELETE"
+  end
+
+  -- Leg A — RCE via render_logics. Decode the base64 (case-sensitive, so use the
+  -- RAW body, not the lowercased scope) and scan the decoded blob.
+  if has(scope, "fusion_get_widget_markup") and has(scope, "render_logics") then
+    local src = cap((args or "") .. "&" .. (body or ""), CFG.max_scan_len)
+    for cand in src:gmatch("render_logics=([^&\r\n]+)") do
+      local dec = ngx.decode_base64(url_decode_once(cand))
+      if dec and #dec >= 8 then
+        local d = lower(dec)
+        for _, fn in ipairs(FUSION_RCE_FUNCS) do
+          if has(d, fn) then return "RCE" end
+        end
+      end
+    end
+  end
+  return nil
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject
