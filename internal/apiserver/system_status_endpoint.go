@@ -214,7 +214,9 @@ func handleSystemSSLStats(w http.ResponseWriter, r *http.Request) {
 	}
 	var parsed any
 	if json.Unmarshal(out, &parsed) != nil {
-		parsed = bytes.TrimSpace(out)
+		// String, not []byte: encoding/json would base64 a byte slice and the
+		// UI would render gibberish instead of the raw CLI output.
+		parsed = string(bytes.TrimSpace(out))
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "duration_ms": ms, "stats": parsed})
 }

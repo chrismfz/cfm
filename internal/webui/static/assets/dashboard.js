@@ -24,7 +24,14 @@ const el = {
   reason:            document.getElementById('reason'),
   actionMsg:         document.getElementById('actionMsg'),
   dnatText:          document.getElementById('dnatText'),
+  dnatSummary:       document.getElementById('dnatSummary'),
   sslText:           document.getElementById('sslText'),
+  sslGrid:           document.getElementById('sslGrid'),
+  securityCard:      document.getElementById('securityCard'),
+  securityGrid:      document.getElementById('securityGrid'),
+  lastUpdated:       document.getElementById('lastUpdated'),
+  autoState:         document.getElementById('autoState'),
+  toggleAutoBtn:     document.getElementById('toggleAutoBtn'),
   healthGrid:        document.getElementById('healthGrid'),
   nginxOverviewGrid: document.getElementById('nginxOverviewGrid'),
   cacheOverview:     document.getElementById('cacheOverview'),
@@ -472,12 +479,20 @@ const dictSection = `
 
     const rules = waf.rules || {};
     const ruleKeys = Object.keys(rules).sort();
+    const modeCounts = {};
+    for (const k of ruleKeys) {
+      const m = rules[k] || 'disabled';
+      modeCounts[m] = (modeCounts[m] || 0) + 1;
+    }
+    const modeSummary = Object.entries(modeCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([m, n]) => `${n} ${escapeHTML(m)}`)
+      .join(' · ');
     const wafRulesSection = ruleKeys.length ? `
       <div style="grid-column:1/-1">
-        <div class="muted" style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;margin:.6rem 0 .45rem">
-          WAF rule modes
-        </div>
-        <div class="table-wrap">
+        <details class="raw-json" style="margin-top:.6rem">
+        <summary>WAF rule modes — ${ruleKeys.length} rules (${modeSummary})</summary>
+        <div class="table-wrap" style="max-height:420px">
           <table class="compact-table" style="width:100%">
             <thead><tr><th>rule</th><th>mode</th></tr></thead>
             <tbody>
@@ -488,6 +503,7 @@ const dictSection = `
             </tbody>
           </table>
         </div>
+        </details>
       </div>` : (waf.note ? `<div style="grid-column:1/-1" class="muted">${escapeHTML(waf.note)}</div>` : '');
 
     const hasConn = [
@@ -580,6 +596,92 @@ async function refreshLuaStats() {
 }
 
 
+  function linkCard(href, label, value, sub, danger) {
+    return `<a class="mini-card" style="text-decoration:none;color:inherit;display:block" href="${href}">
+      <div class="muted">${label}</div>
+      <div><strong${danger ? ' style="color:var(--danger)"' : ''}>${value}</strong>${sub ? `<span class="muted"> ${sub}</span>` : ''}</div>
+    </a>`;
+  }
+
+  // Security at a glance: blocked IPs, active challenges, WAF activity,
+  // suspicious vhosts — each card deep-links into its page. Admin-only
+  // endpoints; the whole card row hides for scoped tokens.
+  async function refreshSecurityOverview() {
+    if (!el.securityGrid) return;
+    if (state.scoped) {
+      if (el.securityCard) el.securityCard.style.display = 'none';
+      return;
+    }
+    const safe = (p) => api(p).catch(() => null);
+    const [fw, ch, waf, susp] = await Promise.all([
+      safe('/v1/firewall/list'),
+      safe('/v1/challenge/vhosts?status=active&mode=all&limit=500'),
+      safe('/v1/waf/engine/summary?hours=24&limit=1&top=1'),
+      safe('/v1/webdet/suspicious?limit=100'),
+    ]);
+    const rows = (payload, key = 'rows') => (Array.isArray(payload) ? payload : (payload && Array.isArray(payload[key]) ? payload[key] : []));
+    const cards = [];
+    if (fw) {
+      cards.push(linkCard('/cfm-admin/firewall/', 'Blocked IPs', escapeHTML(String(fw.total ?? 0)),
+        `${escapeHTML(String(fw.permanent ?? 0))} permanent`, false));
+    }
+    if (ch) {
+      const n = rows(ch).length;
+      cards.push(linkCard('/cfm-admin/webdetector/', 'Active challenges', escapeHTML(String(n)), 'vhosts', n > 0));
+    }
+    if (waf) {
+      cards.push(linkCard('/cfm-admin/webdetector/waf/', 'WAF hits (24h)', escapeHTML(String(waf.total_events ?? 0)),
+        `${escapeHTML(String(waf.blocked_events ?? 0))} blocked`, Number(waf.blocked_events) > 0));
+    }
+    if (susp) {
+      const n = rows(susp).length;
+      cards.push(linkCard('/cfm-admin/webdetector/', 'Suspicious vhosts', escapeHTML(String(n)), 'short window', n > 0));
+    }
+    el.securityGrid.innerHTML = cards.length ? cards.join('') : '<p class="muted">No security data available.</p>';
+  }
+
+  function renderDNAT(dnat) {
+    const out = String(dnat?.output || '');
+    if (el.dnatText) el.dnatText.textContent = out || '(empty)';
+    if (!el.dnatSummary) return;
+    if (!out.trim()) {
+      el.dnatSummary.textContent = 'No DNAT output.';
+      return;
+    }
+    const lines = out.split('\n').filter((l) => l.trim());
+    const status = lines.find((l) => /state|status/i.test(l)) || lines[0] || '';
+    el.dnatSummary.textContent = `${status.trim()} · ${lines.length} line(s)`;
+  }
+
+  function renderSSLStats(payload) {
+    const st = payload?.stats;
+    if (el.sslText) el.sslText.textContent = typeof st === 'string' ? st : JSON.stringify(st || {}, null, 2);
+    if (!el.sslGrid) return;
+    if (!st || typeof st !== 'object') {
+      el.sslGrid.innerHTML = '<p class="muted">Collector stats unavailable.</p>';
+      return;
+    }
+    const g = (a, b) => st[a] ?? st[b];
+    const bySource = g('BySource', 'by_source') || {};
+    const srcSub = Object.keys(bySource).length
+      ? Object.entries(bySource).map(([k, v]) => `${escapeHTML(String(k))}:${escapeHTML(String(v))}`).join(' · ')
+      : '';
+    let genAge = '-';
+    const gen = g('GeneratedAt', 'generated_at');
+    if (gen) {
+      const t = new Date(gen).getTime();
+      if (Number.isFinite(t)) genAge = fmtAge(Math.max(0, Math.round((Date.now() - t) / 1000)));
+    }
+    el.sslGrid.innerHTML = [
+      miniCard('exact hosts', escapeHTML(String(g('ExactHosts', 'exact_hosts') ?? '-')), '', null),
+      miniCard('wildcard zones', escapeHTML(String(g('WildcardZones', 'wildcard_zones') ?? '-')), '', null),
+      miniCard('unique cert pairs', escapeHTML(String(g('UniquePairs', 'unique_pairs') ?? '-')), srcSub, null),
+      miniCard('known files', escapeHTML(String(g('KnownFiles', 'known_files') ?? '-')), '', null),
+      miniCard('cached TLS', escapeHTML(String(g('CachedTLS', 'cached_tls') ?? '-')), '', null),
+      miniCard('generated', escapeHTML(genAge), '', null),
+    ].join('');
+  }
+
   async function refreshAll() {
     setLoading(true);
     showMsg('');
@@ -593,14 +695,16 @@ async function refreshLuaStats() {
       renderNginxOverview();
       renderCacheOverview();
       renderThrottleOverview();
-      el.dnatText.textContent = dnat.output || '(empty)';
-      el.sslText.textContent = JSON.stringify(ssl.stats || {}, null, 2);
+      renderDNAT(dnat);
+      renderSSLStats(ssl);
+      if (el.lastUpdated) el.lastUpdated.textContent = 'Updated ' + new Date().toLocaleTimeString();
     } catch (e) {
       showMsg(`Refresh failed: ${e.message}`);
     } finally {
       setLoading(false);
     }
     refreshLuaStats();
+    refreshSecurityOverview();
   }
 
   async function blockIP() {
@@ -636,6 +740,16 @@ async function refreshLuaStats() {
   el.refreshBtn.addEventListener('click', refreshAll);
   el.blockBtn.addEventListener('click', blockIP);
   el.unblockBtn.addEventListener('click', unblockIP);
+
+  let autoTimer = null;
+  function setAuto(on) {
+    if (el.autoState) el.autoState.textContent = on ? 'ON' : 'OFF';
+    if (el.toggleAutoBtn) el.toggleAutoBtn.textContent = on ? 'Stop' : 'Start';
+    if (autoTimer) { window.clearInterval(autoTimer); autoTimer = null; }
+    if (on) autoTimer = window.setInterval(() => { if (!state.loading) refreshAll(); }, 10000);
+  }
+  el.toggleAutoBtn?.addEventListener('click', () => setAuto(!autoTimer));
+  setAuto(true);
 
   loadViewerContext({ resolveInitialMode: true }).then((ctx) => {
     state.scoped = ctx.scoped;
