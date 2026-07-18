@@ -39,6 +39,12 @@ type wafTopIPValue struct {
 	ASNName string `json:"asn_name,omitempty"`
 }
 
+type wafHistBucket struct {
+	TsUnix  int64 `json:"ts_unix"` // bucket start
+	Count   int   `json:"count"`
+	Blocked int   `json:"blocked"`
+}
+
 type wafEngineSummary struct {
 	FromUnix      int64            `json:"from_unix"`
 	ToUnix        int64            `json:"to_unix"`
@@ -52,7 +58,10 @@ type wafEngineSummary struct {
 	TopHosts      []wafTopValue    `json:"top_hosts"`
 	TopIPs        []wafTopIPValue  `json:"top_ips"`
 	TopCountries  []wafTopValue    `json:"top_countries,omitempty"`
-	Rows          []wafEngineEvent `json:"rows"`
+	// Histogram buckets the (filtered) events per hour across the window,
+	// oldest first — feeds the hits-over-time chart in the UI.
+	Histogram []wafHistBucket  `json:"histogram,omitempty"`
+	Rows      []wafEngineEvent `json:"rows"`
 	// Echo of the applied filters so the UI can show what the numbers cover.
 	CountryFilter []string `json:"country_filter,omitempty"`
 	RuleFilter    string   `json:"rule_filter,omitempty"`
@@ -132,6 +141,11 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	hostCount := map[string]int{}
 	ipCount := map[string]int{}
 	countryCount := map[string]int{}
+	// One bucket per hour across the window (hours is clamped to <=720).
+	hist := make([]wafHistBucket, hours)
+	for i := range hist {
+		hist[i].TsUnix = res.FromUnix + int64(i)*3600
+	}
 	rows := make([]wafEngineEvent, 0, limit) // limit is clamped to a maximum of 2000 above before this allocation.
 	enrichCache := map[string]wafEngineEvent{}
 
@@ -225,8 +239,20 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		res.TotalEvents++
 		// Counted after the filters so a filtered summary's blocked count
 		// matches the events it actually covers.
-		if ev.Status == http.StatusForbidden || strings.EqualFold(ev.Mode, "block") {
+		blocked := ev.Status == http.StatusForbidden || strings.EqualFold(ev.Mode, "block")
+		if blocked {
 			res.BlockedEvents++
+		}
+		if bi := int((ev.TsUnix - res.FromUnix) / 3600); bi >= 0 && len(hist) > 0 {
+			// An event at exactly ToUnix computes to index==len; it belongs
+			// to the last bucket.
+			if bi >= len(hist) {
+				bi = len(hist) - 1
+			}
+			hist[bi].Count++
+			if blocked {
+				hist[bi].Blocked++
+			}
 		}
 		if h := cleanHost(row.Host); h != "" {
 			hosts[h] = struct{}{}
@@ -254,6 +280,7 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	res.TopHosts = toSortedTop(hostCount, topN)
 	res.TopIPs = toSortedTopIPs(ipCount, topN, enrichEnabled, e)
 	res.TopCountries = toSortedTop(countryCount, topN)
+	res.Histogram = hist
 	res.Rows = rows
 
 	writeJSON(w, http.StatusOK, res)

@@ -59,6 +59,9 @@ export function createWebdetApp(config) {
         scopedExcludeManagementAllowed: true,
         scopedPathExcludeAllowed: false,
         meLoaded: false,
+        // Known vhost names for the host-input datalists (vhost live,
+        // forensics, controls). Loaded lazily by pages that render one.
+        knownVhosts: [],
         scopedSkipInfoLogged: false,
         tokenBootLogged: false,
         modeChangeLogged: false,
@@ -94,6 +97,17 @@ export function createWebdetApp(config) {
           if (hiddenForScoped.has(section)) return false;
         }
         return sections.has(section);
+      },
+      // Fills knownVhosts once (fire-and-forget) so host inputs offer
+      // type-ahead instead of blind typing. Scoped tokens get their own list.
+      async refreshKnownVhosts() {
+        if (this.knownVhosts.length) return;
+        const payload = await this.fetchJSONSafe("v1/webdet/vhosts", { rows: [] });
+        const hosts = this.extractRows(payload, "rows")
+          .map((r) => String(r?.host || "").trim())
+          .filter(Boolean)
+          .sort();
+        this.knownVhosts = hosts;
       },
       logScopedAdminSkipsOnce(paths) {
         if (!this.isScoped || this.scopedSkipInfoLogged) return;
@@ -321,6 +335,8 @@ export function createWebdetApp(config) {
         this.refreshInProgress = true;
         this.loading = true;
         try {
+          // Type-ahead host list: only pages that render a datalist need it.
+          if (document.getElementById("cfm-vhost-list")) this.refreshKnownVhosts();
           await this.refreshLists?.();
           if (this.shouldShow("excludes")) await this.refreshExcludeLists?.();
           if (this.shouldShow("history")) await this.refreshHistory?.();

@@ -10,6 +10,9 @@ export const controlsMixin = {
       controlsSortKey: "host",
       controlsSortDir: "asc",
       vhostControlsLimit: 50,
+      // Quick filter chips: "" (all) | challenge_off | waf_off | http3_on —
+      // the deviations-from-default an operator actually scans 690 vhosts for.
+      controlsQuickFilter: "",
       rules: [],
       rulesSearch: "",
       ruleEditID: "",
@@ -65,11 +68,26 @@ export const controlsMixin = {
   },
 
   computed: {
+    controlsCounts() {
+      let challengeOff = 0;
+      let wafOff = 0;
+      let http3On = 0;
+      for (const row of this.vhostControls) {
+        if (!row?.challenge_enabled) challengeOff++;
+        if (!row?.waf_enabled) wafOff++;
+        if (row?.http3_enabled) http3On++;
+      }
+      return { challengeOff, wafOff, http3On };
+    },
     vhostControlsFiltered() {
       const q = String(this.controlsSearch || "").trim().toLowerCase();
-      const filtered = !q
+      let filtered = !q
         ? this.vhostControls.slice()
         : this.vhostControls.filter((row) => String(row?.host || "").toLowerCase().includes(q));
+      const quick = this.controlsQuickFilter;
+      if (quick === "challenge_off") filtered = filtered.filter((row) => !row?.challenge_enabled);
+      else if (quick === "waf_off") filtered = filtered.filter((row) => !row?.waf_enabled);
+      else if (quick === "http3_on") filtered = filtered.filter((row) => row?.http3_enabled);
       const key = String(this.controlsSortKey || "host");
       const dir = this.controlsSortDir === "desc" ? -1 : 1;
       const boolOrder = (v) => (v ? 1 : 0);
@@ -160,6 +178,9 @@ export const controlsMixin = {
       if (!matched) return "";
       if (toggleable) return `Excluded by host rule: ${matched}`;
       return `Excluded by non-exact host rule: ${matched}. Remove/edit that rule in Dynamic excludes first.`;
+    },
+    setControlsQuickFilter(key) {
+      this.controlsQuickFilter = this.controlsQuickFilter === key ? "" : key;
     },
     setControlsSort(nextKey) {
       const key = String(nextKey || "").trim().toLowerCase();

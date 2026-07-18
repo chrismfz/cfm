@@ -98,7 +98,7 @@
             <p class="muted">Test a request shape against the rule set before enforcement.</p>
             <div class="form-grid">
               <label for="sim-host">Host</label>
-              <input id="sim-host" class="input" type="text" v-model.trim="simulateForm.host" placeholder="example.com" />
+              <input id="sim-host" class="input" type="text" v-model.trim="simulateForm.host" placeholder="example.com" list="cfm-vhost-list" />
               <label for="sim-ip">IP</label>
               <input id="sim-ip" class="input" type="text" v-model.trim="simulateForm.ip" placeholder="1.2.3.4" />
               <label for="sim-country">Country</label>
@@ -277,9 +277,13 @@
       <!-- 4. Per-vhost controls — at bottom, with limit dropdown -->
       <section class="card wide" v-if="shouldShow('controls')">
         <h2>Per-vhost controls</h2>
-        <div class="toolbar">
+        <div class="toolbar wrap">
           <label for="controls-search">Search</label>
-          <input id="controls-search" class="input input-wide" type="text" v-model.trim="controlsSearch" placeholder="Filter by vhost" />
+          <input id="controls-search" class="input input-wide" type="text" v-model.trim="controlsSearch" placeholder="Filter by vhost" list="cfm-vhost-list" />
+          <datalist id="cfm-vhost-list"><option v-for="h in knownVhosts" :key="h" :value="h"></option></datalist>
+          <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': controlsQuickFilter === 'challenge_off' }" @click="setControlsQuickFilter('challenge_off')" title="Vhosts with the challenge disabled (excluded)">Challenge OFF ({{ controlsCounts.challengeOff }})</button>
+          <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': controlsQuickFilter === 'waf_off' }" @click="setControlsQuickFilter('waf_off')" title="Vhosts with the WAF disabled (excluded)">WAF OFF ({{ controlsCounts.wafOff }})</button>
+          <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': controlsQuickFilter === 'http3_on' }" @click="setControlsQuickFilter('http3_on')" title="Vhosts that opted in to HTTP/3">HTTP/3 ON ({{ controlsCounts.http3On }})</button>
           <label>Show</label>
           <select class="input" v-model.number="vhostControlsLimit">
             <option :value="50">50</option>

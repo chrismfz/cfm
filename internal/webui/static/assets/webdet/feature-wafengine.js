@@ -1,5 +1,7 @@
 // WAF engine analytics: the structured summary card (top rules/hosts/IPs +
-// recent events) backed by v1/waf/engine/summary.
+// recent events + hits-per-hour chart) backed by v1/waf/engine/summary.
+
+import { initChart, chartColors, onThemeChange } from "../shared/chart-theme.js";
 
 export const wafEngineMixin = {
   data() {
@@ -29,6 +31,39 @@ export const wafEngineMixin = {
       if (country) url += `&country=${encodeURIComponent(country)}`;
       if (rule) url += `&rule=${encodeURIComponent(rule)}`;
       this.wafSummary = await this.fetchJSONSafe(url, null);
+      await this.$nextTick();
+      this.renderWAFHistogram();
+    },
+    // Hits-per-hour chart. The histogram is built server-side AFTER the
+    // country/rule filters, so the timeline always matches the numbers.
+    renderWAFHistogram() {
+      const buckets = this.wafSummary?.histogram || [];
+      const el = document.getElementById("waf-hist-chart");
+      if (!el || !window.echarts) return;
+      if (buckets.length < 2) {
+        this._wafHistChart?.dispose();
+        this._wafHistChart = null;
+        return;
+      }
+      if (!this._wafHistChart) this._wafHistChart = initChart(el);
+      const cc = chartColors();
+      const times = buckets.map((b) => {
+        const d = new Date(Number(b.ts_unix || 0) * 1000);
+        return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(undefined, { day: "2-digit", hour: "2-digit", minute: "2-digit" });
+      });
+      this._wafHistChart.setOption({
+        animation: true,
+        tooltip: { trigger: "axis" },
+        legend: { top: 2, right: 10, data: ["Hits", "Blocked"] },
+        grid: { left: 42, right: 14, top: 28, bottom: 24 },
+        xAxis: { type: "category", data: times, axisLabel: { hideOverlap: true } },
+        yAxis: { type: "value", minInterval: 1 },
+        series: [
+          { name: "Hits", type: "bar", barMaxWidth: 14, itemStyle: { color: cc.cyan }, data: buckets.map((b) => b.count) },
+          { name: "Blocked", type: "bar", barMaxWidth: 14, itemStyle: { color: cc.red }, data: buckets.map((b) => b.blocked) },
+        ],
+      }, true);
+      this._wafHistChart.resize();
     },
     setWAFRuleFilter(rule) {
       const r = String(rule || "").trim();
@@ -50,6 +85,7 @@ export const wafEngineMixin = {
     uriPath(uri) {
       return String(uri || "").split("?")[0] || "/";
     },
+    resizeWAFHistogram() { this._wafHistChart?.resize(); },
     // One-click false-positive fix from an event row: add a WAF exclude for
     // the host or the path without retyping it in the excludes card.
     async quickWAFExclude(type, value) {
@@ -65,5 +101,20 @@ export const wafEngineMixin = {
         console.error("[cfm-admin] quick waf exclude failed", err);
       }
     },
+  },
+
+  mounted() {
+    this._wafHistResize = () => this.resizeWAFHistogram();
+    window.addEventListener("resize", this._wafHistResize);
+    onThemeChange(() => {
+      this._wafHistChart?.dispose();
+      this._wafHistChart = null;
+      this.renderWAFHistogram();
+    });
+  },
+  beforeUnmount() {
+    if (this._wafHistResize) window.removeEventListener("resize", this._wafHistResize);
+    this._wafHistChart?.dispose();
+    this._wafHistChart = null;
   },
 };

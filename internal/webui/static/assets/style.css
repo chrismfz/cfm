@@ -418,6 +418,10 @@ tr.bulk-selected:hover { background: var(--danger-soft); }
 .grid.two ul { margin: 0; padding-left: 1.1rem; font-size: .85rem; }
 .grid.two li { margin-bottom: .15rem; }
 .top-hint { color: var(--muted); font-weight: 400; font-size: .72rem; }
+/* The scope badge doubles as a "focus a vhost" entry point (opens the
+ * quick-search palette). */
+.scoped-badge { cursor: pointer; }
+.scoped-badge:hover { border-color: var(--accent); color: var(--accent-strong); }
 .summary-card {
   border: 1px solid var(--border-soft);
   border-radius: 10px;

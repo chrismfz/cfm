@@ -78,12 +78,31 @@ func TestWAFEngineSummaryCountryAndRuleFilters(t *testing.T) {
 	if all.TotalEvents != 3 || all.BlockedEvents != 2 {
 		t.Fatalf("unfiltered: total=%d blocked=%d, want 3/2", all.TotalEvents, all.BlockedEvents)
 	}
+	if len(all.Histogram) != 24 {
+		t.Fatalf("histogram buckets = %d, want 24 (one per hour)", len(all.Histogram))
+	}
+	histTotal, histBlocked := 0, 0
+	for _, b := range all.Histogram {
+		histTotal += b.Count
+		histBlocked += b.Blocked
+	}
+	if histTotal != all.TotalEvents || histBlocked != all.BlockedEvents {
+		t.Fatalf("histogram sums %d/%d != totals %d/%d", histTotal, histBlocked, all.TotalEvents, all.BlockedEvents)
+	}
 	if len(all.TopCountries) != 2 {
 		t.Fatalf("unfiltered top_countries=%v, want CN+US", all.TopCountries)
 	}
 
-	// Country filter: only the CN event; blocked count follows.
+	// Country filter: only the CN event; blocked count follows, and so
+	// does the histogram (it is built after the filters).
 	cn := call("&country=cn")
+	cnHist := 0
+	for _, b := range cn.Histogram {
+		cnHist += b.Count
+	}
+	if cnHist != 1 {
+		t.Fatalf("filtered histogram sum = %d, want 1", cnHist)
+	}
 	if cn.TotalEvents != 1 || cn.BlockedEvents != 1 || len(cn.Rows) != 1 || cn.Rows[0].Host != "a.com" {
 		t.Fatalf("country=cn: %+v", cn)
 	}
