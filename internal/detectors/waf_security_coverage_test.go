@@ -26,19 +26,13 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	}
 
 	// Every family with an edge-block rule must default ON; a family without one
-	// (except the armed WAF_BACKDOOR) must default 0. WAF_WEBSHELL is the sole
-	// deliberate exception: it has an edge-block rule (413) but is intentionally
-	// left un-armed (default 0) pending burn-in, because arming it would nft-ban
-	// benign scanners that GET /c99.php — see wafSecurityFamilies. WAF_CVE follows
-	// the normal rule (armed; rule 10001 is block).
+	// (except the armed WAF_BACKDOOR) must default 0. WAF_WEBSHELL is armed by
+	// default as of 2026-07-18 (edge-block rule 413) — it follows the normal rule
+	// like WAF_CVE — after the operator confirmed it runs cleanly fleet-wide.
 	for _, f := range fams {
 		def := cov[f]
 		block := webdetector.WAFFamilyHasBlockRule(f)
 		switch {
-		case f == "WAF_WEBSHELL":
-			if def != 0 {
-				t.Errorf("%s is intentionally un-armed but defaults to %d, want 0", f, def)
-			}
 		case block && def != 1:
 			t.Errorf("%s has an edge-block rule but defaults to %d, want 1", f, def)
 		case !block && f != "WAF_BACKDOOR" && def != 0:
@@ -62,10 +56,13 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	if cov["WAF_CVE"] != 1 {
 		t.Errorf("WAF_CVE has an edge-block rule (10001) but defaults to %d, want 1", cov["WAF_CVE"])
 	}
+	// WAF_WEBSHELL is armed by default as of 2026-07-18 (edge-block rule 413).
+	if cov["WAF_WEBSHELL"] != 1 {
+		t.Errorf("WAF_WEBSHELL has an edge-block rule (413) but defaults to %d, want 1", cov["WAF_WEBSHELL"])
+	}
 
-	// Sanity: the armed block-tier families are exactly what we expect today
-	// (WAF_WEBSHELL also has a block rule but is intentionally held un-armed).
-	for _, f := range []string{"WAF_SQLI", "WAF_RCE", "WAF_UPLOAD_FNAME", "WAF_UPLOAD_CONTENT", "WAF_CVE"} {
+	// Sanity: the armed block-tier families are exactly what we expect today.
+	for _, f := range []string{"WAF_SQLI", "WAF_RCE", "WAF_UPLOAD_FNAME", "WAF_UPLOAD_CONTENT", "WAF_WEBSHELL", "WAF_CVE"} {
 		if !webdetector.WAFFamilyHasBlockRule(f) {
 			t.Errorf("expected %s to have an edge-block rule", f)
 		}

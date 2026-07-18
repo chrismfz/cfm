@@ -17,6 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **WAF → autoblock: `WAF_WEBSHELL` (rule 413) is now armed by default.** The
+  webshell drop-path family (proper-noun names: `c99`/`r57`/`wso`/`b374k`/…) has
+  an edge-`block` rule (413) but was held un-armed through burn-in, because a
+  webshell GET-probe (`/c99.php`) is also what benign internet scanners
+  (Shodan/Censys/uptime monitors) do, so auto-arming would nft-ban them. The
+  operator now runs it armed fleet-wide and confirms it reliably bans malicious
+  scanners/scrapers/bots with acceptable collateral, so it is armed by default
+  (`WEBSHELL = 1`) in both the code default (`wafSecurityFamilies`) and the
+  reference `detectors.conf`. Every WAF family with an edge-`block` rule now arms
+  to 1 with no exceptions. **Upgrade impact:** an existing `/etc/cfm/detectors.conf`
+  that doesn't list `WEBSHELL` inherits the new armed default — sources probing for
+  known webshells get a 6h soft nft ban (previously edge-403 only). To keep a
+  benign scanner out of it, exempt it with `ALLOW_UA_CONTAINS`/`ALLOW_NETS`, hold
+  the rule with `RULE_413 = 0`, or set `WEBSHELL = 0`.
+
 ### Fixed
 - **WAF object injection (rule 329): exclude Akeeba Restore endpoints.** A legit
   Joomla admin running a core update (`option=com_joomlaupdate&task=update.install`)
@@ -44,6 +60,24 @@ back-filled here — see the git/PR history for that period.
   Content-Type header inspection entirely (subsumes the multipart carve-out).
 
 ### Added
+- **WAF CVE detector: WordPress core "wp2shell" unauth RCE chain
+  (rule 10011, CVE-2026-63030 + CVE-2026-60137).** A WordPress **core** flaw — a
+  bare install with zero plugins is exploitable — that chains a REST batch-route
+  confusion (CVE-2026-63030) with a core SQL injection (CVE-2026-60137) to run
+  code from an anonymous HTTP request. Affects WP 6.9–6.9.4 and 7.0–7.0.1 (fixed
+  in 6.9.5 / 7.0.2 via forced auto-update); a working PoC is public and it is
+  actively exploited. The detector gates on the REST batch endpoint (`batch/v1`,
+  either `/wp-json/batch/v1` or `?rest_route=/batch/v1`) and fires on two
+  near-zero-FP markers in the normalized body: the `"///"` desync primer *path*
+  value (route confusion → `BATCH_DESYNC`, attributed to CVE-2026-63030), and an
+  `author_exclude` / `author_not_in` REST parameter whose **extracted value** is
+  not a clean integer list (core SQLi → `BATCH_SQLI`, attributed to
+  CVE-2026-60137). Both checks are scoped to the specific field value — not the
+  whole batch body — so a legit batch that merely mentions `author_exclude` or
+  `) or ` in post prose is not blocked; the SQLi check is technique-agnostic
+  (matches any non-integer value), so it can't be dodged with `/**/` or `#`
+  comment obfuscation. Signature taken from the public PoC, not from memory. Armed
+  at `block` (WAF_CVE family): nft-ban + CVE-named Slack/mail alert.
 - **WAF CVE detector: Multi Uploader for Gravity Forms unauth upload → RCE
   (rule 10010, CVE-2025-23921).** The Multi Uploader for Gravity Forms plugin
   (`<= 1.1.3`, CVSS 9.0, actively exploited since Aug 2024) has an

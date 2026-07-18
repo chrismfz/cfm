@@ -213,19 +213,23 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   alone: a family spans edge tiers — `WAF_BACKDOOR` (430-438) has **no**
   block-tier rule, and `WAF_RCE` mixes block 320 with logonly 322-327, so
   family-only keying autoblocks logonly recon. Families with an edge-`block`
-  rule today: `WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME`/`WAF_UPLOAD_CONTENT` (armed
-  to 1), plus `WAF_WEBSHELL` since 2026-07-03 (rule 413, the proper-noun
-  drop-path subset) — those are the only ones that can fire in Phase 1.
+  rule today: `WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME`/`WAF_UPLOAD_CONTENT`, plus
+  `WAF_WEBSHELL` since 2026-07-03 (rule 413, the proper-noun drop-path subset) and
+  `WAF_CVE` (rule 10001) — all armed to 1 — those are the only ones that can fire
+  in Phase 1.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
   default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and
   existing `/etc/cfm/detectors.conf` files don't list the family, so they inherit
   the armed default on the next binary upgrade. When you promote a rule to
-  `block`, decide the autoblock intent in the SAME change: `WAF_WEBSHELL` is held
-  at `0` in both the code default and the reference config precisely because
-  auto-arming it would nft-ban benign internet scanners (Shodan, Censys, uptime
-  monitors, researchers) that GET `/c99.php` — the edge still 403s that one
-  request (harmless), but a full IP ban of a scanner is not what we want. Arming
-  is a deliberate opt-in per family, after its own burn-in.
+  `block`, decide the autoblock intent in the SAME change. `WAF_WEBSHELL` was held
+  at `0` through burn-in — auto-arming nft-bans a source that GETs `/c99.php`,
+  which includes benign internet scanners (Shodan, Censys, uptime monitors,
+  researchers) — but as of **2026-07-18 it is armed by default** (code + reference
+  config): the operator runs it fleet-wide and confirms it cleanly bans malicious
+  scanners/scrapers/bots with acceptable collateral. Exempt a benign scanner with
+  `ALLOW_UA_CONTAINS`/`ALLOW_NETS` or hold rule 413 with `RULE_413 = 0` rather
+  than un-arming the family. Arming a *newly* block-promoted family is still a
+  deliberate opt-in decision, after its own burn-in.
 - **The Lua edge de-dups pushes per `(ip, reason)`** within `push_cooldown`
   (`cfm_waf.lua should_push`). Harmless at threshold 1 (first hit is what
   counts), but an accumulate threshold (e.g. 40) counts distinct cooldown
@@ -258,8 +262,10 @@ points:
   heterogeneous (many CVEs, varying FP confidence), so a **lower-confidence CVE
   rule ships with a per-rule `RULE_<id> = 0`** (hold the rule, not the family);
   `DRY_RUN = 1` gives a watch-first burn-in. `TestWAFSecurityFamilyCoverage`
-  asserts `WAF_CVE` defaults to `1` (only `WAF_WEBSHELL` stays un-armed, to
-  avoid banning `/c99.php` scanners).
+  asserts `WAF_CVE` defaults to `1`. (As of 2026-07-18 `WAF_WEBSHELL` is also
+  armed by default — every family with an edge-`block` rule now arms to `1`, no
+  exceptions; exempt a benign `/c99.php` scanner with `ALLOW_UA_CONTAINS`/
+  `ALLOW_NETS` or hold rule 413 with `RULE_413 = 0`.)
 - **Lua↔Go id parity is enforced.** A new `10xxx` id needs matching entries in
   `configs/lua/cfm_waf.lua` `RULE_IDS` **and** `internal/webdetector/waf_rule_ids.go`
   (`TestWAFRuleIDs_LuaParity`), plus positive+negative Lua tests. Key the

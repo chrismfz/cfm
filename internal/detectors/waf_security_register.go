@@ -33,16 +33,19 @@ import (
 // in the SAME change that adds it, holding just that rule while the family stays
 // armed. DRY_RUN = 1 gives a watch-first burn-in without real bans.
 //
-// WAF_WEBSHELL is the sole deliberate EXCEPTION: it has an edge-`block` rule
-// (413) but is left at 0 (not auto-armed), because arming it would nft-ban
-// benign internet scanners (Shodan/Censys/uptime monitors) that GET `/c99.php`
-// — the edge still 403s that one request, but a full IP ban of a scanner is not
-// wanted. Opt in with `WEBSHELL = 1` after burn-in.
+// WAF_WEBSHELL follows the normal rule too: it has an edge-`block` rule (413,
+// the proper-noun webshell drop-path subset) so it arms to 1. It was held at 0
+// through its burn-in — arming it nft-bans a source that GETs `/c99.php`, which
+// includes benign internet scanners (Shodan/Censys/uptime monitors) — but the
+// operator runs it armed fleet-wide and confirms it reliably blocks malicious
+// scanners/scrapers/bots with acceptable collateral, so it is now armed by
+// default (2026-07-18). Narrow the scope per-rule with `RULE_413 = 0` or
+// exempt sources with `ALLOW_UA_CONTAINS` / `ALLOW_NETS` if a scanner matters.
 func wafSecurityFamilies(kv KV) map[string]int {
 	families := map[string]int{}
 	for _, fam := range webdetector.WAFReasonFamilies() {
 		def := 0
-		if (webdetector.WAFFamilyHasBlockRule(fam) && fam != "WAF_WEBSHELL") || fam == "WAF_BACKDOOR" {
+		if webdetector.WAFFamilyHasBlockRule(fam) || fam == "WAF_BACKDOOR" {
 			def = 1
 		}
 		key := strings.TrimPrefix(fam, "WAF_")
@@ -59,7 +62,7 @@ func init() {
 		DefaultsTemplate: map[string]string{
 			"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0",
 			"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BACKDOOR": "1",
-			"WEBSHELL": "0", // has an edge-block rule (413) but held un-armed; opt in with 1
+			"WEBSHELL": "1", // edge-block rule 413; armed by default (blocks webshell-probing scanners/bots). Exempt a source with ALLOW_UA_CONTAINS/ALLOW_NETS or hold with RULE_413=0.
 			"CVE": "1",      // named-vuln family; armed (rule 10001 is block). Hold a low-confidence CVE rule with RULE_<id>=0 when it lands.
 			"BLOCK": "6h",
 		},

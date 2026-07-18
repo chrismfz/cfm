@@ -167,6 +167,7 @@ local CFG = {
   rule_cve_fusion_builder = "block", -- CVE-2026-6279 + CVE-2026-8713: Avada/Fusion Builder unauth admin-ajax. Leg A RCE = action=fusion_get_widget_markup + base64 render_logics decoding to a dangerous callable (call_user_func sink). Leg B file-delete = action=fusion_form_submit_ajax + privacy_expiration_action (server-only field).
   rule_cve_kirki_forgot_password = "block", -- CVE-2026-8206: Kirki (<=6.0.6) unauth account takeover. POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password with a target username + attacker email (no email/username cross-check) -> reset link mailed to attacker. Keyed on endpoint + both params.
   rule_cve_gf_multi_uploader = "block", -- CVE-2025-23921: Multi Uploader for Gravity Forms (<=1.1.3) unauth arbitrary upload->RCE. POST gf_page=upload with gform_unique_id set to a ../ traversal ending in .phtml/.php (webshell). php-exec is in the FIELD VALUE not filename=, so rule 401 misses it. Actively exploited.
+  rule_cve_wp2shell = "block", -- CVE-2026-63030 + CVE-2026-60137 ("wp2shell"): WordPress CORE unauth RCE chain (6.9–6.9.4 / 7.0–7.0.1; fixed 6.9.5/7.0.2), public PoC, actively exploited. Anon POST to the REST batch endpoint (/wp-json/batch/v1 or ?rest_route=/batch/v1); a nested-batch + "///" desync primer (63030 route confusion) smuggles a raw GET to /wp/v2/users?author_exclude=<SQLi> (60137 core SQLi, `0) OR SLEEP(n)-- -`). Gated on batch/v1; keyed on the "///" primer and SQL-breakout in the integer-only author_exclude param.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -544,6 +545,7 @@ local RULE_IDS = {
   rule_cve_fusion_builder = 10008,
   rule_cve_kirki_forgot_password = 10009,
   rule_cve_gf_multi_uploader = 10010,
+  rule_cve_wp2shell = 10011,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -911,6 +913,25 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2025_23921:GF_MULTI_UPLOADER:" .. tag, ttl, mode, RULE_IDS.rule_cve_gf_multi_uploader) then goto done end
+      end
+    end
+  end
+
+  -- ── 3i) WordPress core "wp2shell" unauth RCE chain (CVE-2026-63030 + -60137) ─
+  -- Two chained core bugs: a REST batch route-confusion (63030) that smuggles a
+  -- raw GET past sanitisation, carrying a core SQLi (60137) in author_exclude.
+  -- Cheap-gated on the batch endpoint before materialising the normalized body;
+  -- each leg attributes its own CVE id.
+  do
+    local mode = rule_mode(CFG.rule_cve_wp2shell, "block")
+    if mode ~= "disabled" and body_inspect_ok and det.wp2shell_is_batch_endpoint(uri, args) then
+      local tag = det.detect_cve_wp2shell(get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        local reason = (tag == "SQLI")
+          and "WAF_CVE:CVE_2026_60137:WP_CORE:BATCH_SQLI"
+          or  "WAF_CVE:CVE_2026_63030:WP_CORE:BATCH_DESYNC"
+        if record(reason, ttl, mode, RULE_IDS.rule_cve_wp2shell) then goto done end
       end
     end
   end
