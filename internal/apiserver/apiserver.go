@@ -199,6 +199,7 @@ func Start(
 	// ── Firewall action endpoints ─────────────────────────────────────────────
 	RegisterUnblock(m, be, cfgDir)
 	RegisterBlock(m, be)
+	RegisterFirewallList(m, be)
 	RegisterSearch(m, be, cfgDir) // read-only multi-source IP lookup
 
 	// ── System status ─────────────────────────────────────────────────────────

@@ -345,6 +345,13 @@ select.input { width: auto; }
 
 /* ── Tables ────────────────────────────────────────────────────────────── */
 .table-wrap { overflow: auto; }
+/* Headers stay visible while scrolling long tables (690-vhost lists…). */
+.table-wrap thead th {
+  position: sticky;
+  top: 0;
+  background: var(--card);
+  z-index: 2;
+}
 .stable-table-wrap { max-height: 420px; min-height: 420px; }
 .wide-table-wrap { max-height: 500px; }
 table {
@@ -422,6 +429,24 @@ tr.bulk-selected:hover { background: var(--danger-soft); }
  * quick-search palette). */
 .scoped-badge { cursor: pointer; }
 .scoped-badge:hover { border-color: var(--accent); color: var(--accent-strong); }
+
+/* Click-to-copy feedback chip (nav.js). */
+.copy-chip {
+  position: fixed;
+  z-index: 1300;
+  background: var(--card);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: .2rem .55rem;
+  font-size: .75rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s ease;
+  box-shadow: var(--shadow);
+}
+.copy-chip.show { opacity: 1; }
+code { cursor: copy; }
 .summary-card {
   border: 1px solid var(--border-soft);
   border-radius: 10px;
