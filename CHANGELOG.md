@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **WAF PHP stream-wrapper rule (305, `WAF_PHP_WRAPPER`) promoted to `block` and
+  armed for autoblock.** `php://`/`phar://`/`data://`/`zip://`/`expect://`/`glob://`
+  in request args or body is the primary sink for LFI→RCE and CVE-2024-4577-style
+  php-cgi injection, and no benign app sends those, so the rule moves from
+  `challenge` to edge-`block`. Because it now has an edge-block rule, `WAF_PHP_WRAPPER`
+  auto-arms in `waf_security` (`PHP_WRAPPER = 1`): a hit gets a 6h soft nft ban plus
+  a Slack/mail alert. The detector scans args/body only (not the URL path) and
+  matches `data://` (the stream wrapper), **not** `data:` image/JS URIs, so inline
+  data-URI page assets do not trip it. Opt back out per-vhost with
+  `rule_php_wrappers = "challenge"` or hold the ban with `PHP_WRAPPER = 0`.
+
 ### Added
 - **Webdetector history: hard row cap (`HISTORY_MAX_ROWS`, default 1M) +
   sane sqlite maintenance.** Retention was time-based only, so a busy box

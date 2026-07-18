@@ -57,7 +57,7 @@ local CFG = {
   rule_superglobal_override = "logonly", -- request param KEY named like a PHP superglobal (_GET/_SERVER/GLOBALS/…) = variable poisoning; observe-only pending FP review
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
-  rule_php_wrappers      = "challenge",  -- php:// phar:// data:// zip:// expect:// glob://
+  rule_php_wrappers      = "block",      -- php:// phar:// data:// zip:// expect:// glob:// (args/body only; edge-block + autoblock-armed since 2026-07-18)
   rule_ip_host           = "challenge",  -- Host header is bare IPv4/IPv6 literal
                                          -- (promoted from logonly: 2026-05 hit analysis showed
                                          --  100% scanner traffic against raw IPv4 hosts —
