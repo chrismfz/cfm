@@ -99,6 +99,24 @@ function _M.detect_traversal(uri, args, _s)
   return false
 end
 
+-- A data: URI in the request PATH is a client-side artifact, not an attack: a
+-- browser or link-preview crawler (e.g. facebookexternalhit) resolved an inline
+-- `data:...` URI as a RELATIVE url, so the whole data: payload — a base64 image/
+-- font, or inline JavaScript — arrives as the request path and 404s. Its content
+-- is never reflected or executed by the origin, so the reflected-XSS / code-exec
+-- URI heuristics must not scan it. Matches the `data:<type>/<subtype>` scheme
+-- shape on the raw (still %-encoded) path; the mime prefix is literal there
+-- (only the payload after the comma is %-encoded). Legit request paths do not
+-- carry it. Scoped to the PATH only, so a real `?x=data:text/html,<script>`
+-- attack in the QUERY STRING is unaffected.
+local function uri_is_data_uri_path(uri)
+  -- `%f[%a]` anchors `data:` at a scheme boundary (prev char not a letter), so a
+  -- path segment like `/metadata:image/…` or `/userdata:foo` is NOT mistaken for
+  -- a data: URI; `%a+/%a` requires the `<type>/<subtype>` mime shape.
+  return lower(uri or ""):find("%f[%a]data:%a+/%a", 1, false) ~= nil
+end
+_M.uri_is_data_uri_path = uri_is_data_uri_path
+
 function _M.detect_rce(uri, args, _s)
   local s = _s or scan_str(uri, args)
 
@@ -113,7 +131,20 @@ function _M.detect_rce(uri, args, _s)
   if has(s, "`wget")  then return true end
   if has(s, "`curl")  then return true end
 
-  if has(s, "base64,") and (has(s, "eval") or has(s, "exec") or has(s, "system")) then
+  -- Encoded-payload data URI paired with a code-exec CALL. Two FP guards, both
+  -- targeting the same incident class (legit `data:*;base64,…` / inline-JS data
+  -- URIs that a browser/crawler requested as a relative path — Facebook's
+  -- link-preview crawler, a real Greek customer on epiplosou.gr — which
+  -- false-positived this BLOCK-tier rule):
+  --   1. The call markers are PAREN-ANCHORED (`eval(`/`exec(`/`system(`): `(` is
+  --      not in the base64 alphabet, so it can never appear INSIDE a base64 blob,
+  --      whereas the bare words "eval"/"exec"/"system" occur there by chance.
+  --   2. Skipped entirely when the request PATH is a data: URI artifact — covers
+  --      a legit inline script that both embeds a base64 asset AND calls `eval(`.
+  -- The jndi/wget/curl/bash markers above stay FULL-surface (unguarded), so a
+  -- real `/data:x,${jndi:…}` can't use the data: prefix to evade them.
+  if not uri_is_data_uri_path(uri)
+     and has(s, "base64,") and (has(s, "eval(") or has(s, "exec(") or has(s, "system(")) then
     return true
   end
 
@@ -519,6 +550,14 @@ local XSS_EVENT_HANDLERS = {
 }
 
 function _M.detect_xss(uri, args, _s)
+  -- A data: URI in the request PATH is a client artifact (an inline data: URI a
+  -- browser/crawler resolved as a relative url): it 404s and is never reflected,
+  -- so its inline JavaScript (e.g. `el.onload = fn`, `.prototype`, a base64 font)
+  -- must not read as reflected XSS. This false-positived rule 302 on
+  -- facebookexternalhit crawling a `data:text/javascript,…` counter script on
+  -- mobian.eu (breaking that site's Facebook link previews). Scoped to the PATH,
+  -- so a real `?x=data:text/html,<script>` in the QUERY STRING still fires below.
+  if uri_is_data_uri_path(uri) then return false end
   local s = _s or scan_str(uri, args)
 
   if has(s, "<script")      or has(s, "%3cscript") then return true end
