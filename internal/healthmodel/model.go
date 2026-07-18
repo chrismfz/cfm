@@ -76,10 +76,34 @@ type HostSystem struct {
 	CPUPercent    float64   `json:"cpu_percent"`
 	MemUsedBytes  uint64    `json:"mem_used_bytes"`
 	MemTotalBytes uint64    `json:"mem_total_bytes"`
+
+	// CPUPercentSource says how CPUPercent was produced: "procstat"
+	// (real busy% from /proc/stat deltas, with the breakdown below
+	// populated) or "load_estimate" (load1/cores heuristic — the only
+	// source before 2026-07; breakdown fields are zero).
+	CPUPercentSource string  `json:"cpu_percent_source,omitempty"`
+	CPUUserPct       float64 `json:"cpu_user_pct,omitempty"`
+	CPUSystemPct     float64 `json:"cpu_system_pct,omitempty"`
+	CPUIOWaitPct     float64 `json:"cpu_iowait_pct,omitempty"`
+	CPUStealPct      float64 `json:"cpu_steal_pct,omitempty"`
+
+	MemAvailableBytes uint64 `json:"mem_available_bytes,omitempty"`
+	MemBuffersBytes   uint64 `json:"mem_buffers_bytes,omitempty"`
+	MemCachedBytes    uint64 `json:"mem_cached_bytes,omitempty"`
+	SwapTotalBytes    uint64 `json:"swap_total_bytes,omitempty"`
+	SwapUsedBytes     uint64 `json:"swap_used_bytes,omitempty"`
+
+	UptimeSeconds uint64  `json:"uptime_seconds,omitempty"`
+	CPUModel      string  `json:"cpu_model,omitempty"`
+	CPUThreads    int     `json:"cpu_threads,omitempty"`
+	CPUMHz        float64 `json:"cpu_mhz,omitempty"`
+	OSPrettyName  string  `json:"os_pretty_name,omitempty"`
+	KernelVersion string  `json:"kernel_version,omitempty"`
 }
 
 type DiskSnapshot struct {
 	Mounts       []DiskMount             `json:"mounts"`
+	IORates      []DiskIORate            `json:"io_rates,omitempty"`
 	DiskHealth   string                  `json:"disk_health"`
 	SmartHealth  string                  `json:"smart_health"`
 	DiskWearout  string                  `json:"disk_wearout"`
@@ -88,6 +112,14 @@ type DiskSnapshot struct {
 	MDADM        MDADMStatus             `json:"mdadm"`
 	ZFSHealth    string                  `json:"zfs_health"`
 	ZFSPools     map[string]ZFSPoolState `json:"zfs_pools,omitempty"`
+}
+
+// DiskIORate is bytes/sec read/written on one whole block device,
+// delta-based; absent on the collector's first (seeding) call.
+type DiskIORate struct {
+	Device   string `json:"device"`
+	ReadBps  uint64 `json:"read_bps"`
+	WriteBps uint64 `json:"write_bps"`
 }
 
 type DiskMount struct {
@@ -158,6 +190,15 @@ type NetworkThroughput struct {
 	ConntrackCount          int     `json:"conntrack_count,omitempty"`
 	ConntrackMax            int     `json:"conntrack_max,omitempty"`
 	ConntrackUsagePct       float64 `json:"conntrack_usage_pct,omitempty"`
+	NICs                    []NICThroughput `json:"nics,omitempty"`
+}
+
+// NICThroughput is per-interface throughput (loopback excluded),
+// busiest first, capped at the collector; delta-based like bandwidth.
+type NICThroughput struct {
+	Name   string `json:"name"`
+	RxBps  uint64 `json:"rx_bps"`
+	TxBps  uint64 `json:"tx_bps"`
 }
 
 type CounterSnapshot struct {

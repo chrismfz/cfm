@@ -1188,6 +1188,11 @@ func enrichHostMemoryAndLoad(host *HostSystem) {
 			}
 		}
 	}
+	if host.MemTotalBytes > 0 {
+		// Already populated from the detector snapshot's meminfo detail
+		// (FromDetectorSnapshot); don't re-read /proc/meminfo.
+		return
+	}
 	if b, err := os.ReadFile("/proc/meminfo"); err == nil {
 		var totalKB uint64
 		var availKB uint64

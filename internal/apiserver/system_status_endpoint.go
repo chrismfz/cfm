@@ -47,7 +47,9 @@ type healthTimeseriesResponse struct {
 type healthTimeseriesPointV1 struct {
 	CollectedAt time.Time `json:"collected_at"`
 	Load1       float64   `json:"load1"`
+	CPUPct      float64   `json:"cpu_pct"`
 	RamUsedPct  float64   `json:"ram_used_pct"`
+	SwapUsedPct float64   `json:"swap_used_pct"`
 	DiskRootPct float64   `json:"disk_root_pct"`
 	DiskTmpPct  float64   `json:"disk_tmp_pct"`
 	TempMaxC    float64   `json:"temp_max_c"`
@@ -298,10 +300,12 @@ func aggregateHealthSamples(samples []healthstore.Sample, step time.Duration) []
 	out := make([]healthTimeseriesPointV1, 0, len(keys))
 	for _, bucket := range keys {
 		sms := buckets[bucket]
-		var sumLoad, sumRAM, sumRoot, sumTmp, sumTemp, sumRx, sumTx float64
+		var sumLoad, sumCPU, sumRAM, sumSwap, sumRoot, sumTmp, sumTemp, sumRx, sumTx float64
 		for _, sm := range sms {
 			sumLoad += sm.Load1
+			sumCPU += sm.CPUPct
 			sumRAM += sm.RamUsedPct
+			sumSwap += sm.SwapUsedPct
 			sumRoot += sm.DiskRootPct
 			sumTmp += sm.DiskTmpPct
 			sumTemp += sm.TempMaxC
@@ -312,7 +316,9 @@ func aggregateHealthSamples(samples []healthstore.Sample, step time.Duration) []
 		out = append(out, healthTimeseriesPointV1{
 			CollectedAt: time.Unix(bucket*int64(step.Seconds()), 0).UTC(),
 			Load1:       sumLoad / n,
+			CPUPct:      sumCPU / n,
 			RamUsedPct:  sumRAM / n,
+			SwapUsedPct: sumSwap / n,
 			DiskRootPct: sumRoot / n,
 			DiskTmpPct:  sumTmp / n,
 			TempMaxC:    sumTemp / n,

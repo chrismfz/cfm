@@ -38,7 +38,9 @@ type Sample struct {
 	CollectedAt time.Time `json:"collected_at"`
 
 	Load1       float64 `json:"load1"`
+	CPUPct      float64 `json:"cpu_pct"` // real busy% from /proc/stat deltas; 0 on the seeding tick
 	RamUsedPct  float64 `json:"ram_used_pct"`
+	SwapUsedPct float64 `json:"swap_used_pct"`
 	DiskRootPct float64 `json:"disk_root_pct"`
 	DiskTmpPct  float64 `json:"disk_tmp_pct"`
 	TempMaxC    float64 `json:"temp_max_c"`

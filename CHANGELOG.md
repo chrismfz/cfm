@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Health snapshot: host detail round-out (fleet-monitoring Phase 0).** The
+  health pipeline (detector sampler → `/api/v1/health/snapshot` → `cfm
+  health`) now also collects: **swap** used/total, memory breakdown
+  (available/buffers/cached), **system uptime**, CPU identity (model, threads,
+  MHz), **real CPU utilization** from `/proc/stat` deltas with a
+  user/system/iowait/steal breakdown (`cpu_percent_source: "procstat"`;
+  previously `cpu_percent` was a load1/cores estimate, which remains only as
+  the seeding-call fallback, tagged `"load_estimate"`), per-whole-device
+  **disk I/O rates** from `/proc/diskstats`, **per-NIC throughput** (busiest
+  first, capped at 16), and OS/kernel identity (`/etc/os-release` +
+  `osrelease`). `cfm health` prints all of it (OS/uptime/CPU model lines,
+  load 1/5/15, CPU breakdown, RAM detail, Swap line, Disk `I/O:` line,
+  Network `Throughput:` + per-NIC). The in-memory health timeseries samples
+  and points gain `cpu_pct` and `swap_used_pct`. Rate fields are delta-based
+  (seed-then-diff, same pattern as bandwidth): the first sample in a process
+  reports no rates. Groundwork for the cfm-web per-agent health page.
 - **Heartbeat now reports the active edge proxy (`edge` + `edge_version`).**
   Alongside `dnat_enabled`, the agent heartbeat tells cfm-web which in-path
   edge is active right now — `openresty` or `angie` (via `systemctl is-active`,

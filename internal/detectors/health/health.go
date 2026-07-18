@@ -89,6 +89,15 @@ type Detector struct {
 	lastRxBytes uint64
 	lastTxBytes uint64
 	lastT       time.Time
+	lastNIC     map[string]nicCounters
+
+	// cpu utilization deltas (/proc/stat)
+	lastCPU      cpuTicks
+	lastCPUValid bool
+
+	// disk I/O deltas (/proc/diskstats)
+	lastDiskIO  map[string]diskIOCounters
+	lastDiskIOT time.Time
 }
 
 func New(cfg Config) *Detector {
@@ -185,7 +194,9 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		Hostname:    snap.Host,
 		CollectedAt: collectedAt,
 		Load1:       snap.Load1,
+		CPUPct:      snap.CPUUtil.BusyPct,
 		RamUsedPct:  snap.RamUsedPct,
+		SwapUsedPct: snap.Mem.SwapUsedPct,
 		DiskRootPct: snap.DiskRootPct,
 		DiskTmpPct:  snap.DiskTmpPct,
 		TempMaxC:    snap.TempMaxC,
@@ -224,6 +235,17 @@ type Snapshot struct {
 	Mdadm    MdstatSummary
 	Zfs      map[string]ZpoolStatus
 	Smart    map[string]SmartInfo
+
+	// Host detail (see host_detail.go). CPUUtil/DiskIO/NICRates are
+	// delta-based: zero/empty on the first (seeding) call in a process.
+	Mem           MemDetail
+	UptimeSeconds uint64
+	CPU           CPUIdentity
+	CPUUtil       CPUUtil
+	OSPrettyName  string
+	KernelVersion string
+	DiskIO        []DiskIORate
+	NICRates      []NICRate
 
 	RawJSON string // pretty JSON to embed in alert Extra["body"]
 }
@@ -344,7 +366,11 @@ func (d *Detector) snapshot() Snapshot {
 	s.TCP = readTCPStates()
 
 	// Throughput (deltas since previous RunOnce)
-	s.RxMbps, s.TxMbps = d.readThroughput()
+	s.RxMbps, s.TxMbps, s.NICRates = d.readThroughput()
+
+	// Host detail: swap/mem breakdown, uptime, CPU identity + real
+	// utilization, disk I/O rates, OS identity (host_detail.go).
+	d.collectHostDetail(&s)
 
 	// Temperature (lm-sensors, optional)
 	s.TempMaxC = readMaxTempSensors()
@@ -612,13 +638,16 @@ func tcpStateName(hexcode string) string {
 	}
 }
 
-// Throughput from /proc/net/dev deltas (excluding "lo")
-func (d *Detector) readThroughput() (rxMbps, txMbps float64) {
+// Throughput from /proc/net/dev deltas (excluding "lo"). Also returns
+// per-NIC rates computed against the same previous read (host_detail.go),
+// busiest interfaces first.
+func (d *Detector) readThroughput() (rxMbps, txMbps float64, perNIC []NICRate) {
 	now := throughputNow()
 	var rx, tx uint64
+	nics := map[string]nicCounters{}
 	f, err := openNetDev()
 	if err != nil {
-		return 0, 0
+		return 0, 0, nil
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -632,21 +661,25 @@ func (d *Detector) readThroughput() (rxMbps, txMbps float64) {
 			}
 			rx += rxb
 			tx += txb
+			nics[iface] = nicCounters{rxBytes: rxb, txBytes: txb}
 		}
 	}
 	if d.lastT.IsZero() {
 		// seed for next time
 		d.lastRxBytes, d.lastTxBytes, d.lastT = rx, tx, now
-		return 0, 0
+		d.lastNIC = nics
+		return 0, 0, nil
 	}
 	dt := now.Sub(d.lastT).Seconds()
 	if dt <= 0 {
-		return 0, 0
+		return 0, 0, nil
 	}
 	rxMbps = float64(rx-d.lastRxBytes) * 8.0 / 1e6 / dt
 	txMbps = float64(tx-d.lastTxBytes) * 8.0 / 1e6 / dt
+	perNIC = perNICRates(d.lastNIC, nics, dt)
 	d.lastRxBytes, d.lastTxBytes, d.lastT = rx, tx, now
-	return rxMbps, txMbps
+	d.lastNIC = nics
+	return rxMbps, txMbps, perNIC
 }
 
 func parseNetDevLine(line string) (iface string, rxBytes, txBytes uint64, ok bool) {
