@@ -9,8 +9,41 @@ package webdetector
 import (
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+// UAObserveTTL is how long one drilldown request arms detailed per-UA
+// tracking (unique IPs + top paths) without an emergency rule. Every
+// drilldown poll re-arms it, so tracking stays on while the operator is
+// looking and decays shortly after they leave.
+const UAObserveTTL = 10 * time.Minute
+
+// ArmUAObserve enables detailed per-UA tracking for ttl from now. The
+// window only ever extends (sliding); it never shortens an existing arm.
+func (e *Engine) ArmUAObserve(ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	until := time.Now().Add(ttl).Unix()
+	for {
+		cur := atomic.LoadInt64(&e.uaObserveUntilUnix)
+		if cur >= until || atomic.CompareAndSwapInt64(&e.uaObserveUntilUnix, cur, until) {
+			return
+		}
+	}
+}
+
+// uaDetailTrackingEnabled reports whether ingest should populate the
+// per-UA unique-IP and path maps: on while any emergency rule is active
+// (the historical gate) or while a drilldown observe window is armed.
+// Both checks are one atomic load — safe on the ingest hot path.
+func (e *Engine) uaDetailTrackingEnabled() bool {
+	if e.uaEmergency != nil && e.uaEmergency.HasActive() {
+		return true
+	}
+	return atomic.LoadInt64(&e.uaObserveUntilUnix) > time.Now().Unix()
+}
 
 // UATopRow is one row in the bot-top live view.
 type UATopRow struct {
@@ -30,10 +63,33 @@ type UADetail struct {
 	UniqueIPs int     `json:"unique_ips"`
 	Vhosts    int     `json:"vhosts"`
 
-	// Top breakdowns within the window.
+	// Top breakdowns within the window. TopIPs/TopPaths only accumulate
+	// while detail tracking is enabled (emergency rule active or a
+	// drilldown observe window armed).
 	TopIPs    []TopKV `json:"top_ips"`
 	TopHosts  []TopKV `json:"top_hosts"`
 	TopRawUAs []TopKV `json:"top_raw_uas"` // raw UA variants that collapsed to this normalized key
+	TopPaths  []TopKV `json:"top_paths,omitempty"`
+
+	// TopIPInfo mirrors TopIPs with geo/ASN enrichment attached (empty
+	// fields when the MaxMind databases are absent).
+	TopIPInfo []UAIPInfo `json:"top_ip_info,omitempty"`
+
+	// IPTrackingActive reports whether detail tracking was already on
+	// BEFORE this request (a drilldown request arms it as a side effect),
+	// so the UI can show a "collecting — data appears shortly" note on
+	// the first open.
+	IPTrackingActive bool `json:"ip_tracking_active"`
+}
+
+// UAIPInfo is one enriched source-IP row in the UA drilldown.
+type UAIPInfo struct {
+	IP      string `json:"ip"`
+	Count   int    `json:"count"`
+	Country string `json:"country,omitempty"` // ISO-2 when available
+	ASN     uint   `json:"asn,omitempty"`
+	ASNName string `json:"asn_name,omitempty"`
+	PTR     string `json:"ptr,omitempty"`
 }
 
 // UATop returns the top normalized-UA rows within the short window, sorted
@@ -144,6 +200,7 @@ func (e *Engine) UADrill(ua string) UADetail {
 	ipCounts := make(map[string]int)
 	hostCounts := make(map[string]int)
 	rawUACounts := make(map[string]int)
+	pathCounts := make(map[string]int)
 	var first, last time.Time
 	var seen bool
 
@@ -175,6 +232,12 @@ func (e *Engine) UADrill(ua string) UADetail {
 				}
 			}
 
+			if pm := b.uasNormPaths[norm]; pm != nil {
+				for path, c := range pm {
+					pathCounts[path] += c
+				}
+			}
+
 			// Collect raw UA variants that normalize to this key.
 			for rawUA, c := range b.uas {
 				if NormalizeUA(rawUA) == norm {
@@ -200,7 +263,35 @@ func (e *Engine) UADrill(ua string) UADetail {
 	d.TopIPs = topNFromMap(ipCounts, 20)
 	d.TopHosts = topNFromMap(hostCounts, 20)
 	d.TopRawUAs = topNFromMap(rawUACounts, 10)
+	d.TopPaths = topNFromMap(pathCounts, 15)
 	return d
+}
+
+// enrichTopIPs mirrors a TopIPs list into UAIPInfo rows with geo/ASN (and
+// cached PTR) attached. Uses the non-blocking enricher path: country/ASN
+// come from the local MMDBs inline; a PTR for a fresh IP is resolved
+// async and shows up on the next drilldown poll. Nil-safe when the
+// enricher has no databases loaded.
+func (e *Engine) enrichTopIPs(top []TopKV) []UAIPInfo {
+	if len(top) == 0 {
+		return nil
+	}
+	out := make([]UAIPInfo, 0, len(top))
+	for _, kv := range top {
+		info := UAIPInfo{IP: kv.Key, Count: kv.Count}
+		if e.enr != nil {
+			r := e.enr.LookupCachedOrAsync(kv.Key)
+			info.Country = r.CountryISO
+			if info.Country == "" {
+				info.Country = r.Country
+			}
+			info.ASN = r.ASN
+			info.ASNName = r.ASNName
+			info.PTR = r.PTR
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // topNFromMap returns the top-N entries from a string→int map, sorted by

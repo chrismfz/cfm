@@ -119,6 +119,23 @@ curl -sS -X POST \
 
 ---
 
+## 2b) Web Bots UA drilldown (Web Bots page "details" panel)
+
+Per-UA breakdown: vhosts hit, source IPs with geo/ASN (and cached PTR), top
+paths, raw UA variants. Admin-only.
+
+```bash
+curl -sS "$CFM_API/api/v1/webdet/ua-drill?ua=go-http-client" | jq .
+```
+
+Side effect: each drill request arms detailed per-UA tracking (unique IPs +
+top paths) for 10 minutes — without it, only Reqs/RPS/Vhosts accumulate
+(`ip_tracking_active: false` in the response means the data is still
+warming). Country/ASN come from the local MaxMind DBs; a PTR for a fresh IP
+resolves async and appears on the next call.
+
+---
+
 ## 3b) Node health snapshot (dashboard "Node health" card)
 
 Full `health.snapshot.v1` payload (host CPU/RAM/swap, disks + SMART/MDADM/ZFS,

@@ -18,6 +18,24 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Web Bots: per-UA drilldown panel (vhosts / IPs+geo/ASN / paths / raw
+  variants) with inline actions.** The Live UA Top table gains a **details**
+  button that opens a drilldown for that normalized UA on the same page:
+  which vhosts it hits (with a per-vhost **challenge** action), which source
+  IPs (hits, country, ASN, cached PTR, and a per-IP **block** action using the
+  toolbar TTL/reason), top request paths, and the raw UA variants that
+  collapsed into the normalized key. Vhost/IP cells deep-link into the
+  WebDetector drilldown. Backing it, `GET /api/v1/webdet/ua-drill` now
+  **arms detailed per-UA tracking (unique IPs + top paths) for 10 minutes as
+  a side effect** — previously the IP sets only accumulated while an
+  emergency rule was active, so the operator had to install a rule just to
+  see who a UA was; now opening the drilldown is enough
+  (`ip_tracking_active: false` in the response = data still warming; the
+  panel auto-refreshes and re-arms while open). Per-UA top-path tracking is
+  new, same gate, capped at 200 distinct paths per UA per bucket. IP rows are
+  enriched via the non-blocking enricher path (country/ASN inline from the
+  local MMDBs, PTR async). The old "Unique IPs shows 0 until a rule is
+  installed" note (UI + `cfm bots top` hint) is updated accordingly.
 - **Dashboard: "Node health" card fed by the health snapshot.** The
   `/cfm-admin` dashboard's "Health quick stats" card never received data (its
   fields stayed `-`); it is replaced by a wide **Node health** card driven by

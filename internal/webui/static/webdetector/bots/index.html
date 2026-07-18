@@ -46,10 +46,11 @@
           per-vhost rules with IP/ASN verification for crawler exemptions.
         </p>
         <p class="muted" style="font-size: 0.9em;">
-          <strong>Note:</strong> the <em>Unique IPs</em> column shows 0 until at
-          least one emergency rule is installed — unique-IP tracking is gated
-          to keep memory bounded on idle boxes. RPS / Reqs / Vhosts are always
-          aggregated.
+          <strong>Note:</strong> the <em>Unique IPs</em> column shows 0 until
+          an emergency rule is installed <em>or a UA drilldown is opened</em> —
+          opening a drilldown arms IP &amp; path tracking for 10 minutes
+          (gated to keep memory bounded on idle boxes). RPS / Reqs / Vhosts
+          are always aggregated.
         </p>
         <div class="toolbar">
           <label for="ttlSelect">TTL</label>
@@ -67,7 +68,7 @@
 
       <section class="card wide">
         <h2>Live UA Top</h2>
-        <p class="muted">Window: short (live). Click an action to install a rule on that UA.</p>
+        <p class="muted">Window: short (live). Click <strong>details</strong> for the per-UA drilldown (vhosts / IPs / paths), or an action to install a rule on that UA.</p>
         <div class="table-wrap stable-table-wrap">
           <table>
             <thead>
@@ -85,6 +86,16 @@
             <tbody id="uaTopBody"></tbody>
           </table>
         </div>
+      </section>
+
+      <section class="card wide" id="uaDrillCard" style="display:none">
+        <h2>
+          UA drilldown — <code id="uaDrillName"></code>
+          <span id="uaDrillSummary" class="top-hint" style="margin-left:.4rem"></span>
+          <button id="uaDrillClose" class="btn-quiet" style="float:right">Close</button>
+        </h2>
+        <p id="uaDrillNote" class="muted" style="display:none"></p>
+        <div id="uaDrillBody"><p class="muted">Loading…</p></div>
       </section>
 
       <section class="card wide">
