@@ -163,9 +163,11 @@ type bucketSW struct {
 
 	// Normalized-UA aggregation for the bot-top / UA emergency surface.
 	// Keys are NormalizeUA(rawUA). uasNormReqs is the per-bucket request
-	// count; uasNormIPs is a capped IP set per normalized UA.
-	uasNormReqs map[string]int
-	uasNormIPs  map[string]map[string]struct{}
+	// count; uasNormIPs is a capped IP set and uasNormPaths a capped
+	// path-count map per normalized UA (both gated — see ingest).
+	uasNormReqs  map[string]int
+	uasNormIPs   map[string]map[string]struct{}
+	uasNormPaths map[string]map[string]int
 
 	// subnet behavioral aggregation (IPv4 /24 etc)
 	subnetReqs      map[string]int                 // subnet -> req count
@@ -414,6 +416,12 @@ type Engine struct {
 	uaEmergencyStop chan struct{}
 	uaEmergencyDone chan struct{}
 	uaEmergencyMu   sync.Mutex
+
+	// uaObserveUntilUnix arms detailed per-UA tracking (unique IPs + top
+	// paths) without an emergency rule; bumped (sliding) every time an
+	// operator opens a UA drilldown. Read atomically on the ingest hot
+	// path — see uaDetailTrackingEnabled in ua_top.go.
+	uaObserveUntilUnix int64
 
 	// Log ingest arbiter state (see ingest_socket.go).
 	// ingestSock is set via SetIngestSocket after NewEngine; nil when the
@@ -1249,13 +1257,14 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	//     the bot-top view real RPS / Reqs / Vhosts numbers without
 	//     requiring a rule to be installed first.
 	//
-	//   - Unique-IP sets per UA are the dominant memory cost (capped
-	//     at 2000 IPs per UA per bucket × N buckets in window). We only
-	//     populate them when at least one emergency rule is installed
-	//     (HasActive() — one atomic load). Until then the UniqueIPs
-	//     column in `cfm bots top` shows 0; the operator's signal is
-	//     RPS + Reqs + Vhosts which is enough to decide whether to
-	//     install a rule.
+	//   - Unique-IP sets and top-path counts per UA are the dominant
+	//     memory cost (capped at 2000 IPs / 200 distinct paths per UA per
+	//     bucket × N buckets in window). We only populate them while
+	//     detail tracking is enabled: at least one emergency rule is
+	//     installed OR a drilldown observe window is armed (both one
+	//     atomic load — see uaDetailTrackingEnabled). Until then the
+	//     UniqueIPs column shows 0; the operator's signal is
+	//     RPS + Reqs + Vhosts, and opening a drilldown arms tracking.
 	{
 		nu := NormalizeUA(rec.UA)
 		if nu != "" && nu != "-" {
@@ -1263,18 +1272,36 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 				b.uasNormReqs = make(map[string]int)
 			}
 			b.uasNormReqs[nu]++
-			if rec.IP != "" && e.uaEmergency != nil && e.uaEmergency.HasActive() {
-				if b.uasNormIPs == nil {
-					b.uasNormIPs = make(map[string]map[string]struct{})
+
+			if e.uaDetailTrackingEnabled() {
+				if rec.IP != "" {
+					if b.uasNormIPs == nil {
+						b.uasNormIPs = make(map[string]map[string]struct{})
+					}
+					ipSet := b.uasNormIPs[nu]
+					if ipSet == nil {
+						ipSet = make(map[string]struct{})
+						b.uasNormIPs[nu] = ipSet
+					}
+					// Cap per UA per bucket so a misbehaving UA can't explode memory.
+					if len(ipSet) < 2000 {
+						ipSet[rec.IP] = struct{}{}
+					}
 				}
-				ipSet := b.uasNormIPs[nu]
-				if ipSet == nil {
-					ipSet = make(map[string]struct{})
-					b.uasNormIPs[nu] = ipSet
-				}
-				// Cap per UA per bucket so a misbehaving UA can't explode memory.
-				if len(ipSet) < 2000 {
-					ipSet[rec.IP] = struct{}{}
+				if p != "" {
+					if b.uasNormPaths == nil {
+						b.uasNormPaths = make(map[string]map[string]int)
+					}
+					pm := b.uasNormPaths[nu]
+					if pm == nil {
+						pm = make(map[string]int)
+						b.uasNormPaths[nu] = pm
+					}
+					// Same memory story as the IP set: count already-seen paths
+					// freely, admit new distinct paths only under the cap.
+					if _, seen := pm[p]; seen || len(pm) < 200 {
+						pm[p]++
+					}
 				}
 			}
 		}

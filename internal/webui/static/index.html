@@ -56,9 +56,16 @@
         <p id="actionMsg" class="statusline" style="display:none"></p>
       </section>
 
-      <section class="card">
-        <h2>Health quick stats</h2>
-        <div id="healthGrid" class="kpi-grid"></div>
+      <section class="card wide" id="nodeHealthCard">
+        <h2>
+          Node health
+          <span class="pill" style="margin-left:.4rem;vertical-align:middle;font-size:.7rem">snapshot · 1m</span>
+          <span id="healthStatusPill" style="margin-left:.3rem;vertical-align:middle"></span>
+          <span id="healthMeta" class="top-hint" style="margin-left:.4rem"></span>
+        </h2>
+        <div id="healthGrid">
+          <p class="muted">Loading…</p>
+        </div>
       </section>
 
       <section class="card">
@@ -70,10 +77,6 @@
         <h2>Cache overview</h2>
         <div id="cacheOverview" class="table-wrap"></div>
       </section>
-<section class="card">
-  <h2>Bot / throttle overview</h2>
-  <div id="throttleOverview" class="kpi-grid"></div>
-</section>
 
       <section class="card wide">
         <h2>

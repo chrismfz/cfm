@@ -119,6 +119,39 @@ curl -sS -X POST \
 
 ---
 
+## 2b) Web Bots UA drilldown (Web Bots page "details" panel)
+
+Per-UA breakdown: vhosts hit, source IPs with geo/ASN (and cached PTR), top
+paths, raw UA variants. Admin-only.
+
+```bash
+curl -sS "$CFM_API/api/v1/webdet/ua-drill?ua=go-http-client" | jq .
+```
+
+Side effect: each drill request arms detailed per-UA tracking (unique IPs +
+top paths) for 10 minutes — without it, only Reqs/RPS/Vhosts accumulate
+(`ip_tracking_active: false` in the response means the data is still
+warming). Country/ASN come from the local MaxMind DBs; a PTR for a fresh IP
+resolves async and appears on the next call.
+
+---
+
+## 3b) Node health snapshot (dashboard "Node health" card)
+
+Full `health.snapshot.v1` payload (host CPU/RAM/swap, disks + SMART/MDADM/ZFS,
+services, DNAT/edge/challenge-flow runtime, conntrack, throughput). Admin-only.
+
+```bash
+# fresh collection (~1-2s: smartctl/systemd/socket probes) — what `cfm health` uses
+curl -sS "$CFM_API/api/v1/health/snapshot" | jq .
+
+# cached, stale-while-revalidate — what the dashboard polls (recollects at most
+# once per TTL; TTL clamped to 1s..1m; check `collected_at` for the real age)
+curl -sS "$CFM_API/api/v1/health/snapshot?cache_ttl=60s" | jq .
+```
+
+---
+
 ## 4) Offline analysis (helpful for TSV validation)
 
 These endpoints are useful when you want to inspect behavior against real/sampled TSV logs.

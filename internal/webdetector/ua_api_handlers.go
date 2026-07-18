@@ -49,6 +49,12 @@ func (e *Engine) handleUATop(w http.ResponseWriter, r *http.Request) {
 // handleUADrill returns the drilldown for a single normalized UA. Query
 // param ?ua=<name>. The name is normalized server-side so callers can pass
 // either the canonical form or a raw UA string.
+//
+// Side effect: every drilldown request arms detailed per-UA tracking
+// (unique IPs + top paths) for UAObserveTTL, so the operator gets IP/path
+// visibility without installing an emergency rule first. The response's
+// ip_tracking_active reports whether tracking was already on BEFORE this
+// call — false means the data is still warming up.
 func (e *Engine) handleUADrill(w http.ResponseWriter, r *http.Request) {
 	if !RequireAdmin(w, r) {
 		return
@@ -58,7 +64,11 @@ func (e *Engine) handleUADrill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing ua"})
 		return
 	}
+	wasActive := e.uaDetailTrackingEnabled()
+	e.ArmUAObserve(UAObserveTTL)
 	d := e.UADrill(ua)
+	d.IPTrackingActive = wasActive
+	d.TopIPInfo = e.enrichTopIPs(d.TopIPs)
 	writeJSON(w, http.StatusOK, d)
 }
 

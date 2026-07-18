@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"cfm/internal/firewall"
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 )
@@ -163,6 +165,39 @@ func TestSystemStatusEndpoints_HealthEndpoints(t *testing.T) {
 		}
 		if got, ok := body["error"].(string); !ok || got == "" {
 			t.Fatalf("expected degraded error payload, got %v", body)
+		}
+	})
+
+	t.Run("snapshot cache_ttl reuses cached snapshot", func(t *testing.T) {
+		var calls int32
+		origCollect := collectHealthSnapshotFn
+		origCache := healthSnapCache
+		collectHealthSnapshotFn = func(nodeID string, _ firewall.Backend) healthmodel.HealthSnapshotV1 {
+			atomic.AddInt32(&calls, 1)
+			return healthmodel.HealthSnapshotV1{SchemaVersion: healthSnapshotSchemaV1, NodeID: nodeID, CollectedAt: time.Now().UTC()}
+		}
+		healthSnapCache = &healthSnapshotCache{}
+		t.Cleanup(func() {
+			collectHealthSnapshotFn = origCollect
+			healthSnapCache = origCache
+		})
+
+		for i := 0; i < 3; i++ {
+			rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/health/snapshot?cache_ttl=60s", "admin-secret", false)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("req %d status=%d body=%s", i, rr.Code, rr.Body.String())
+			}
+		}
+		if got := atomic.LoadInt32(&calls); got != 1 {
+			t.Fatalf("collector calls=%d want=1 (cache_ttl should reuse cached snapshot)", got)
+		}
+
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/health/snapshot", "admin-secret", false)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		if got := atomic.LoadInt32(&calls); got != 2 {
+			t.Fatalf("collector calls=%d want=2 (no cache_ttl must collect fresh)", got)
 		}
 	})
 

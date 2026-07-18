@@ -403,6 +403,19 @@ tr.bulk-selected:hover { background: var(--danger-soft); }
   font-size: .75rem;
   margin-right: .3rem;
 }
+/* Stat-tile trend sparkline (dashboard Node health). Distinct from .spark,
+   which is the full-size bordered chart container used by other pages. */
+.spark-mini { display: block; width: 100%; height: 26px; margin-top: .35rem; }
+.spark-mini .spark-area { fill: var(--accent-soft); stroke: none; }
+.spark-mini .spark-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.pill.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
 .pill.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
 .pill.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
 .statusline { margin: 0 0 .6rem; color: var(--accent-strong); }

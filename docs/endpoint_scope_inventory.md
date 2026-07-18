@@ -28,7 +28,7 @@ This inventory documents the effective authz classification enforced by the back
 - `/api/v1/webdet/summary`
 - `/api/v1/webdet/hot-ips`, `/api/v1/webdet/ip-short`, `/api/v1/webdet/ip-drilldown`, `/api/v1/webdet/analyze-ip`
 - `/api/v1/webdet/history/stats|prune|truncate`
-- `/api/v1/webdet/ua-top`, `/api/v1/webdet/ua-emergency` (global "Web Bots" UA controls — `RequireAdmin`)
+- `/api/v1/webdet/ua-top`, `/api/v1/webdet/ua-drill`, `/api/v1/webdet/ua-emergency` (global "Web Bots" UA controls — `RequireAdmin`)
 - `/api/v1/challenge/summary|vhosts|ips|ip`
 
 ## `internal/apiserver/apiserver.go` + token/mysql endpoints

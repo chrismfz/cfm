@@ -1,14 +1,19 @@
 // /cfm-admin/assets/bots.js
 //
 // Web Bots page — box-wide UA emergency control surface.
-// Mirrors the `cfm bots` CLI: live UA top + active emergency rules + the
-// throttle/block/allow/undo action buttons. Talks to the same five JSON
-// endpoints exposed by the webdetector apiserver:
+// Mirrors the `cfm bots` CLI: live UA top + per-UA drilldown (vhosts /
+// IPs+geo/ASN / paths / raw variants) + active emergency rules + the
+// throttle/block/undo action buttons. Talks to the webdetector apiserver:
 //
 //   GET    /api/v1/webdet/ua-top
+//   GET    /api/v1/webdet/ua-drill?ua=<name>   (arms IP/path tracking for 10m)
 //   GET    /api/v1/webdet/ua-emergency
 //   POST   /api/v1/webdet/ua-emergency        { ua, action, ttl_seconds, reason, confirm }
 //   DELETE /api/v1/webdet/ua-emergency?ua=<name>
+//
+// Drilldown row actions reuse the existing control endpoints:
+//   POST /api/v1/challenge/vhost/add           { host, ttl, reason }
+//   POST /api/v1/firewall/block                { ip, ttl, reason }
 //
 // Server-side enforces TTL cap (60m), normalizes the UA, and refuses to
 // touch verified Google crawlers unless { confirm: true } is in the body.
@@ -29,6 +34,12 @@
     actionMsg:       document.getElementById('actionMsg'),
     uaTopBody:       document.getElementById('uaTopBody'),
     activeRulesBody: document.getElementById('activeRulesBody'),
+    uaDrillCard:     document.getElementById('uaDrillCard'),
+    uaDrillName:     document.getElementById('uaDrillName'),
+    uaDrillSummary:  document.getElementById('uaDrillSummary'),
+    uaDrillNote:     document.getElementById('uaDrillNote'),
+    uaDrillBody:     document.getElementById('uaDrillBody'),
+    uaDrillClose:    document.getElementById('uaDrillClose'),
   };
 
   const st = {
@@ -36,6 +47,7 @@
     timer: null,
     topRows: [],
     rulesByUA: Object.create(null),
+    drillUA: null,      // normalized UA whose drilldown panel is open
   };
 
   // Mirrors IsGoogleVerifiedBot in internal/webdetector/ua_top.go. Used only
@@ -120,6 +132,8 @@
       console.error('[bots] load failed', err);
       flashMsg(`load failed: ${err.message || err}`, 'danger');
     }
+    // Keep the open drilldown live (also re-arms its observe window).
+    if (st.drillUA) loadDrill();
   }
 
   // ── render ────────────────────────────────────────────────────────────────
@@ -150,6 +164,7 @@
           <td>${escapeHTML(String(r.vhosts ?? 0))}</td>
           <td>${activeCell}</td>
           <td class="actions-cell">
+            <button class="btn-sm" data-act="drill" data-ua="${escapeHTML(ua)}">details</button>
             <button class="btn-sm" data-act="throttle" data-ua="${escapeHTML(ua)}">throttle</button>
             <button class="btn-sm btn-danger" data-act="block" data-ua="${escapeHTML(ua)}">block</button>
           </td>
@@ -174,6 +189,155 @@
         <td>${escapeHTML(r.reason || '')}</td>
         <td><button class="btn-sm" data-undo="${escapeHTML(r.ua)}">undo</button></td>
       </tr>`).join('');
+  }
+
+  // ── UA drilldown ──────────────────────────────────────────────────────────
+
+  function drillTable(title, headers, rowsHTML, emptyText) {
+    return `<div>
+      <div class="muted" style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;margin:.2rem 0 .4rem">${escapeHTML(title)}</div>
+      <div class="table-wrap" style="max-height:320px">
+        <table class="compact-table" style="width:100%">
+          <thead><tr>${headers.map((h) => `<th>${escapeHTML(h)}</th>`).join('')}</tr></thead>
+          <tbody>${rowsHTML || `<tr><td colspan="${headers.length}" class="muted">${escapeHTML(emptyText || 'no data yet')}</td></tr>`}</tbody>
+        </table>
+      </div>
+    </div>`;
+  }
+
+  function renderDrill(d) {
+    if (!el.uaDrillBody) return;
+    if (el.uaDrillName) el.uaDrillName.textContent = d.ua || st.drillUA || '';
+    if (el.uaDrillSummary) {
+      el.uaDrillSummary.textContent =
+        `${d.reqs ?? 0} reqs · ${fmtNum(d.rps)} rps · ${d.unique_ips ?? 0} IPs · ` +
+        `${d.vhosts ?? 0} vhosts · window ${Math.round(d.window_sec ?? 0)}s`;
+    }
+    if (el.uaDrillNote) {
+      const warming = !d.ip_tracking_active;
+      el.uaDrillNote.style.display = warming ? '' : 'none';
+      if (warming) {
+        el.uaDrillNote.textContent =
+          'IP & path tracking just armed (stays on for 10 min while this panel is open) — ' +
+          'source IPs and paths appear as new requests arrive; this panel auto-refreshes.';
+      }
+    }
+
+    const hosts = Array.isArray(d.top_hosts) ? d.top_hosts : [];
+    const hostRows = hosts.map((h) => `
+      <tr>
+        <td><a href="/cfm-admin/webdetector/?host=${encodeURIComponent(h.key)}">${escapeHTML(h.key)}</a></td>
+        <td>${escapeHTML(String(h.count ?? 0))}</td>
+        <td class="actions-cell">
+          <button class="btn-sm" data-drill-chal-host="${escapeHTML(h.key)}">challenge</button>
+        </td>
+      </tr>`).join('');
+
+    const ips = Array.isArray(d.top_ip_info) && d.top_ip_info.length
+      ? d.top_ip_info
+      : (Array.isArray(d.top_ips) ? d.top_ips.map((kv) => ({ ip: kv.key, count: kv.count })) : []);
+    const ipRows = ips.map((r) => {
+      const asn = r.asn ? `AS${r.asn}${r.asn_name ? ' ' + r.asn_name : ''}` : '-';
+      return `
+      <tr>
+        <td><a href="/cfm-admin/webdetector/?ip=${encodeURIComponent(r.ip)}"><code>${escapeHTML(r.ip)}</code></a></td>
+        <td>${escapeHTML(String(r.count ?? 0))}</td>
+        <td>${escapeHTML(r.country || '-')}</td>
+        <td title="${escapeHTML(r.ptr || '')}">${escapeHTML(asn)}</td>
+        <td class="actions-cell">
+          <button class="btn-sm btn-danger" data-drill-block-ip="${escapeHTML(r.ip)}">block</button>
+        </td>
+      </tr>`;
+    }).join('');
+
+    const paths = Array.isArray(d.top_paths) ? d.top_paths : [];
+    const pathRows = paths.map((p) => `
+      <tr>
+        <td style="word-break:break-all"><code>${escapeHTML(p.key)}</code></td>
+        <td>${escapeHTML(String(p.count ?? 0))}</td>
+      </tr>`).join('');
+
+    const raws = Array.isArray(d.top_raw_uas) ? d.top_raw_uas : [];
+    const rawRows = raws.map((r) => `
+      <tr>
+        <td style="word-break:break-all">${escapeHTML(r.key)}</td>
+        <td>${escapeHTML(String(r.count ?? 0))}</td>
+      </tr>`).join('');
+
+    el.uaDrillBody.innerHTML = `
+      <div style="display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(420px,1fr))">
+        ${drillTable('Vhosts hit', ['vhost', 'reqs', ''], hostRows, 'no vhost data in window')}
+        ${drillTable('Source IPs', ['ip', 'hits', 'country', 'ASN', ''], ipRows, 'collecting — appears as requests arrive')}
+        ${drillTable('Top paths', ['path', 'reqs'], pathRows, 'collecting — appears as requests arrive')}
+        ${drillTable('Raw UA variants', ['user-agent', 'reqs'], rawRows, 'no raw variants in window')}
+      </div>
+      <p class="muted" style="margin:.6rem 0 0;font-size:.8rem">
+        vhost/IP links open the WebDetector drilldown · challenge/block use the TTL and reason from the toolbar above
+        (challenge = per-vhost challenge, block = nft block on that IP).
+      </p>`;
+  }
+
+  async function loadDrill() {
+    if (!st.drillUA || !el.uaDrillBody) return;
+    try {
+      const d = await api(`/v1/webdet/ua-drill?ua=${encodeURIComponent(st.drillUA)}`);
+      renderDrill(d || {});
+    } catch (err) {
+      el.uaDrillBody.innerHTML = `<p class="muted">drilldown failed: ${escapeHTML(err.message || String(err))}</p>`;
+    }
+  }
+
+  function openDrill(ua) {
+    st.drillUA = ua;
+    if (el.uaDrillCard) el.uaDrillCard.style.display = '';
+    if (el.uaDrillName) el.uaDrillName.textContent = ua;
+    if (el.uaDrillBody) el.uaDrillBody.innerHTML = '<p class="muted">Loading…</p>';
+    loadDrill();
+    el.uaDrillCard?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function closeDrill() {
+    st.drillUA = null;
+    if (el.uaDrillCard) el.uaDrillCard.style.display = 'none';
+  }
+
+  function drillTTLString() {
+    return `${readTTLSec()}s`;
+  }
+
+  async function drillChallengeVhost(host) {
+    try {
+      const r = await api('/v1/challenge/vhost/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host,
+          ttl: drillTTLString(),
+          reason: readReason() || `webbots drilldown (${st.drillUA || 'ua'})`,
+        }),
+      });
+      flashMsg(`✓ challenge ${r.host} for ${r.ttl}`, 'success');
+    } catch (err) {
+      flashMsg(`✖ challenge failed: ${err.message || err}`, 'danger');
+    }
+  }
+
+  async function drillBlockIP(ip) {
+    try {
+      await api('/v1/firewall/block', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ip,
+          ttl: drillTTLString(),
+          reason: readReason() || `webbots drilldown (${st.drillUA || 'ua'})`,
+        }),
+      });
+      flashMsg(`✓ blocked ${ip} for ${drillTTLString()}`, 'success');
+      loadDrill();
+    } catch (err) {
+      flashMsg(`✖ block failed: ${err.message || err}`, 'danger');
+    }
   }
 
   // ── actions ───────────────────────────────────────────────────────────────
@@ -234,7 +398,25 @@
     const ua = btn.getAttribute('data-ua') || '';
     const act = btn.getAttribute('data-act') || '';
     if (!ua || !act) return;
+    if (act === 'drill') {
+      openDrill(ua);
+      return;
+    }
     applyAction(ua, act);
+  });
+
+  el.uaDrillClose?.addEventListener('click', closeDrill);
+
+  el.uaDrillBody?.addEventListener('click', (ev) => {
+    const chalBtn = ev.target.closest('button[data-drill-chal-host]');
+    if (chalBtn) {
+      drillChallengeVhost(chalBtn.getAttribute('data-drill-chal-host') || '');
+      return;
+    }
+    const blockBtn = ev.target.closest('button[data-drill-block-ip]');
+    if (blockBtn) {
+      drillBlockIP(blockBtn.getAttribute('data-drill-block-ip') || '');
+    }
   });
 
   el.activeRulesBody?.addEventListener('click', (ev) => {

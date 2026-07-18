@@ -215,14 +215,15 @@ func runBotsTopStatic(baseURL string, limit int) error {
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	// Hint: when rules aren't installed, the IPS column is always 0
-	// (unique-IP tracking is gated to keep memory down on idle boxes).
-	// Surface that so operators understand why IPS is 0 in a row that
-	// shows RPS > 0.
+	// Hint: when rules aren't installed and no drilldown observe window is
+	// armed, the IPS column is always 0 (unique-IP tracking is gated to
+	// keep memory down on idle boxes). Surface that so operators
+	// understand why IPS is 0 in a row that shows RPS > 0.
 	if len(rows) > 0 && len(rules) == 0 {
 		fmt.Println()
-		fmt.Println("  Note: IPS column is 0 — install any emergency rule to enable")
-		fmt.Println("  unique-IP tracking, e.g.:")
+		fmt.Println("  Note: IPS column may be 0 — IP tracking is armed by an active")
+		fmt.Println("  emergency rule or by opening a UA drilldown (WebUI Web Bots")
+		fmt.Println("  page, 10 min), e.g.:")
 		fmt.Println("    cfm bots throttle <ua> --ttl 5m --reason observing")
 	}
 	return nil

@@ -85,6 +85,54 @@ type healthIngestRequest struct {
 	Sample healthstore.Sample `json:"sample"`
 }
 
+// healthSnapshotCache backs the opt-in `?cache_ttl=` mode of
+// /api/v1/health/snapshot. Collection takes ~1-2s (smartctl, systemd,
+// listener/socket probes), so the dashboard asks for a cached snapshot
+// instead of recollecting on every poll: a fresh-enough snapshot is served
+// as-is, a stale one is served immediately while a single background
+// refresh recollects (stale-while-revalidate), and only a cold cache
+// collects synchronously.
+type healthSnapshotCache struct {
+	mu         sync.Mutex
+	snap       *healthmodel.HealthSnapshotV1
+	fetchedAt  time.Time
+	refreshing bool
+}
+
+var (
+	healthSnapCache         = &healthSnapshotCache{}
+	collectHealthSnapshotFn = healthmodel.CollectSnapshotNow
+)
+
+func (c *healthSnapshotCache) get(nodeID string, backend firewall.Backend, ttl time.Duration) healthmodel.HealthSnapshotV1 {
+	if ttl <= 0 {
+		return collectHealthSnapshotFn(nodeID, backend)
+	}
+	c.mu.Lock()
+	if c.snap != nil {
+		snap := *c.snap
+		if time.Since(c.fetchedAt) >= ttl && !c.refreshing {
+			c.refreshing = true
+			go func() {
+				fresh := collectHealthSnapshotFn(nodeID, backend)
+				c.mu.Lock()
+				c.snap, c.fetchedAt, c.refreshing = &fresh, time.Now(), false
+				c.mu.Unlock()
+			}()
+		}
+		c.mu.Unlock()
+		return snap
+	}
+	c.mu.Unlock()
+	// Cold cache: collect synchronously. Concurrent cold requests may each
+	// collect once (rare — first dashboard load only); last write wins.
+	fresh := collectHealthSnapshotFn(nodeID, backend)
+	c.mu.Lock()
+	c.snap, c.fetchedAt = &fresh, time.Now()
+	c.mu.Unlock()
+	return fresh
+}
+
 type healthAnomalyStore struct {
 	mu      sync.RWMutex
 	cap     int
@@ -223,6 +271,11 @@ func handleSystemSSLStats(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "duration_ms": ms, "stats": parsed})
 }
 
+// handleHealthSnapshot serves the canonical health snapshot (admin-only).
+// Default is a fresh collection (what `cfm health` expects); `?cache_ttl=60s`
+// (clamped to 1s..1m, same as the other system endpoints) opts into the
+// stale-while-revalidate cache the dashboard uses, so it recollects at most
+// once per TTL. `collected_at` in the payload tells the caller the real age.
 func handleHealthSnapshot(backend firewall.Backend) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireHealthAccess(w, r) {
@@ -235,7 +288,8 @@ func handleHealthSnapshot(backend firewall.Backend) http.HandlerFunc {
 		}
 
 		nodeID := localNodeID()
-		_ = json.NewEncoder(w).Encode(healthmodel.CollectSnapshotNow(nodeID, backend))
+		cacheTTL := parseCacheTTL(r.URL.Query().Get("cache_ttl"), 0)
+		_ = json.NewEncoder(w).Encode(healthSnapCache.get(nodeID, backend, cacheTTL))
 	}
 }
 

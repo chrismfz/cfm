@@ -18,6 +18,52 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Web Bots: per-UA drilldown panel (vhosts / IPs+geo/ASN / paths / raw
+  variants) with inline actions.** The Live UA Top table gains a **details**
+  button that opens a drilldown for that normalized UA on the same page:
+  which vhosts it hits (with a per-vhost **challenge** action), which source
+  IPs (hits, country, ASN, cached PTR, and a per-IP **block** action using the
+  toolbar TTL/reason), top request paths, and the raw UA variants that
+  collapsed into the normalized key. Vhost/IP cells deep-link into the
+  WebDetector drilldown. Backing it, `GET /api/v1/webdet/ua-drill` now
+  **arms detailed per-UA tracking (unique IPs + top paths) for 10 minutes as
+  a side effect** — previously the IP sets only accumulated while an
+  emergency rule was active, so the operator had to install a rule just to
+  see who a UA was; now opening the drilldown is enough
+  (`ip_tracking_active: false` in the response = data still warming; the
+  panel auto-refreshes and re-arms while open). Per-UA top-path tracking is
+  new, same gate, capped at 200 distinct paths per UA per bucket. IP rows are
+  enriched via the non-blocking enricher path (country/ASN inline from the
+  local MMDBs, PTR async). The old "Unique IPs shows 0 until a rule is
+  installed" note (UI + `cfm bots top` hint) is updated accordingly.
+- **Dashboard: "Node health" card fed by the health snapshot.** The
+  `/cfm-admin` dashboard's "Health quick stats" card never received data (its
+  fields stayed `-`); it is replaced by a wide **Node health** card driven by
+  the same `health.snapshot.v1` payload as `cfm health`: CPU (real busy% +
+  usr/sys/io breakdown), load 1/5/15, RAM/swap, conntrack, network throughput,
+  an **Edge / runtime** chip row (CFM daemon/service, web+panel DNAT,
+  active edge — openresty/angie — upstream, challenge-flow readiness, SSL
+  collector, ingest socket, systemd services), a per-mount **Disks** table
+  (use% + inode%) and **Storage health** (SMART/wearout/MDADM/ZFS summary +
+  per-device SMART table). A header pill rolls the snapshot up to
+  healthy / N issues, with the issue list shown as chips. The CPU, load, RAM,
+  swap and net in/out tiles carry a **1h trend sparkline** (12 × 5m-avg points
+  from the existing `/api/v1/health/timeseries` ring store; best-effort — the
+  card renders without them). The card is hidden for scoped viewers (the
+  endpoint is admin-only).
+- **`/api/v1/health/snapshot` opt-in cache (`?cache_ttl=`).** Default stays a
+  fresh collection (what `cfm health` expects). With `cache_ttl` (same 1s..1m
+  clamp as the other system endpoints) the daemon serves a cached snapshot and
+  recollects at most once per TTL in the background (stale-while-revalidate),
+  so the dashboard's 10s auto-refresh costs one ~1-2s collection per minute
+  instead of one per poll. `collected_at` reports the snapshot's real age.
+
+### Removed
+- **Dashboard: "Bot / throttle overview" card.** It rarely had data on the
+  dashboard ("No data.") while the dedicated Web Bots page covers the same
+  ground properly — dropped from the dashboard to reduce noise.
+
+### Added
 - **Health snapshot: host detail round-out (fleet-monitoring Phase 0).** The
   health pipeline (detector sampler → `/api/v1/health/snapshot` → `cfm
   health`) now also collects: **swap** used/total, memory breakdown
