@@ -18,6 +18,18 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **WAF object injection (rule 329): exclude Akeeba Restore endpoints.** A legit
+  Joomla admin running a core update (`option=com_joomlaupdate&task=update.install`)
+  was blocked **and ban-listed** on every extraction step (`WAF_RCE:PHP_OBJECT_INJECTION:BASE64`).
+  Akeeba Restore — which drives Joomla core updates *and* Akeeba Backup restores —
+  round-trips its engine state as a base64-encoded PHP-serialized object in the
+  `factory` POST field on **every** step; that blob is a genuine `O:N:"…"` object,
+  so the detector cannot tell it from an attack by shape. The WordPress-cookie
+  unauth gate also does not recognise a Joomla admin session, so the request
+  looked unauthenticated. Rule 329 now skips the known Akeeba Restore endpoints
+  (`com_joomlaupdate/{extract,restore,finalisation}.php` and `com_akeeba*/{restore,finalisation}.php`)
+  by URI context, the same both-sides carve-out pattern used for `/.well-known/`.
+  The generic serialize rule (306, args-only, challenge) still applies.
 - **WAF CRLF (rule 605): stop flagging `Content-Type`/`Content-Length` in
   request *bodies*.** A logged-in admin's page-builder `wp-admin/admin-ajax.php`
   save POST — whose payload legitimately embeds a `\r\nContent-Type:` line
