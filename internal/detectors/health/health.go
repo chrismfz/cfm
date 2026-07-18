@@ -1082,7 +1082,13 @@ func parseSmartInfo(dev string, out []byte) SmartInfo {
 	case bytes.Contains(l, []byte("fail")):
 		info.Health = "FAIL"
 	}
-	if m := regexp.MustCompile(`(?mi)^(?:194\s+Temperature_Celsius|190\s+Airflow_Temperature_Cel|Temperature:\s+)\D*([0-9]{1,3})`).FindSubmatch(out); len(m) == 2 {
+	// ATA temperature rows: take the RAW_VALUE column (last), not "the first
+	// number after the attribute name" — that used to capture the leading 0
+	// of the hex FLAG column ("0x0022") and report 0°C on SATA drives.
+	// RAW_VALUE may carry a suffix ("35 (Min/Max 20/46)"), so match the
+	// leading integer only. NVMe output uses the "Temperature: 37 Celsius"
+	// form handled by the fallback.
+	if m := regexp.MustCompile(`(?mi)^\s*(?:194\s+Temperature_Celsius|190\s+Airflow_Temperature_Cel)\s+\S+\s+\d{1,3}\s+\d{1,3}\s+\d{1,3}\s+\S+\s+\S+\s+\S+\s+([0-9]{1,3})`).FindSubmatch(out); len(m) == 2 {
 		info.TempC = string(m[1])
 	} else if m := regexp.MustCompile(`(?mi)^Temperature:\s+([0-9]{1,3})`).FindSubmatch(out); len(m) == 2 {
 		info.TempC = string(m[1])
@@ -1155,6 +1161,7 @@ func normalizeWear(infoRaw []byte) (pctUsed int, source string, raw map[string]s
 		"remaining_life":          true,
 		"life_remaining":          true,
 		"media_wearout_indicator": true, // common Intel/SATA style, VALUE is usually life remaining
+		"wear_leveling_count":     true, // Samsung SATA (attr 177): normalized VALUE declines from 100 (thresh 5)
 	}
 	usedStyle := map[string]bool{
 		"percent_lifetime_used":          true,

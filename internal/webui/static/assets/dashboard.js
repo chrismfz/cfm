@@ -38,7 +38,6 @@ const el = {
   healthGrid:        document.getElementById('healthGrid'),
   healthStatusPill:  document.getElementById('healthStatusPill'),
   healthMeta:        document.getElementById('healthMeta'),
-  nginxOverviewGrid: document.getElementById('nginxOverviewGrid'),
   cacheOverview:     document.getElementById('cacheOverview'),
   nginxStatsGrid:    document.getElementById('nginxStatsGrid'),
 };
@@ -407,6 +406,8 @@ const el = {
       healthPill(`ZFS: <strong>${escapeHTML(disk.zfs_health || 'unknown')}</strong>`, storageTone(disk.zfs_health)),
     ].join('');
 
+    // Always-visible table (was a <details> — the innerHTML rebuild on each
+    // auto-refresh reset it to collapsed, hiding the data every 10s).
     let devTable = '';
     if (devNames.length) {
       const rows = devNames.map((name) => {
@@ -422,15 +423,12 @@ const el = {
           <td>${escapeHTML(d.temperature_c ? `${d.temperature_c}°C` : '-')}</td>
         </tr>`;
       }).join('');
-      devTable = `<details class="raw-json" style="margin-top:.45rem">
-        <summary>SMART devices (${devNames.length})</summary>
-        <div class="table-wrap">
-          <table class="compact-table" style="width:100%">
-            <thead><tr><th>Device</th><th>Model</th><th>Type</th><th>Health</th><th>Wearout</th><th>Temp</th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
-      </details>`;
+      devTable = `<div class="table-wrap" style="margin-top:.45rem">
+        <table class="compact-table" style="width:100%">
+          <thead><tr><th>Device</th><th>Model</th><th>Type</th><th>Health</th><th>Wearout</th><th>Temp</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
     }
 
     return `${healthSectionHeading('Storage health')}
@@ -506,44 +504,6 @@ const el = {
       state.healthError = e.message;
     }
     renderHealth();
-  }
-
-  function renderNginxOverview() {
-    if (!el.nginxOverviewGrid) return;
-
-    const d = state.lua;
-    if (!d) {
-      el.nginxOverviewGrid.innerHTML = '<p class="muted">No data.</p>';
-      return;
-    }
-
-    const ng = d.nginx || {};
-    const wk = ng.worker || {};
-    const conn = ng.connections || {};
-    const ssl = d.sslcache || {};
-    const dec = d.decisions || {};
-    const cache = d.cache || {};
-
-    const sslReady = ssl.ready === '1' ? 'yes' : 'no';
-    const sslAge = ssl.last_dumpall_age_s != null ? fmtAge(ssl.last_dumpall_age_s) : '-';
-    const lastErr = ssl.last_error ? ssl.last_error : 'none';
-
-    el.nginxOverviewGrid.innerHTML = [
-      miniCard('nginx version', escapeHTML(ng.version_str || String(ng.version || '-')), '', null),
-      miniCard('workers', escapeHTML(String(wk.count ?? '-')), '', null),
-      miniCard('this worker PID', escapeHTML(String(wk.pid ?? '-')), '', null),
-      miniCard('worker id', escapeHTML(String(wk.id ?? '-')), '', null),
-      miniCard('active', escapeHTML(String(conn.active ?? '-')), '', null),
-      miniCard('reading', escapeHTML(String(conn.reading ?? '-')), '', null),
-      miniCard('writing', escapeHTML(String(conn.writing ?? '-')), '', null),
-      miniCard('waiting', escapeHTML(String(conn.waiting ?? '-')), '', null),
-      miniCard('sslcache used', escapeHTML(ssl.used_pct != null ? `${ssl.used_pct}%` : '-'), '', ssl.used_pct),
-      miniCard('cfm_decisions used', escapeHTML(dec.used_pct != null ? `${dec.used_pct}%` : '-'), '', dec.used_pct),
-      miniCard('cfm_cache_stats used', escapeHTML(cache.used_pct != null ? `${cache.used_pct}%` : '-'), '', cache.used_pct),
-      miniCard('sslcollector ready', escapeHTML(sslReady), '', null),
-      miniCard('last dumpall', escapeHTML(sslAge), '', null),
-      miniCard('last error', escapeHTML(lastErr), '', null),
-    ].join('');
   }
 
 function renderCacheOverview() {
@@ -679,7 +639,7 @@ const cache = d.cache || {};
 
 const dictSection = `
   <div style="grid-column:1/-1">
-    <div class="muted" style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.45rem">
+    <div class="muted" style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;margin:.6rem 0 .45rem">
       Shared dict memory
     </div>
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">
@@ -780,54 +740,38 @@ const dictSection = `
         </details>
       </div>` : (waf.note ? `<div style="grid-column:1/-1" class="muted">${escapeHTML(waf.note)}</div>` : '');
 
-    const hasConn = [
-      conn.active,
-      conn.reading,
-      conn.writing,
-      conn.waiting,
-      conn.accepted,
-      conn.handled,
-      conn.requests,
-    ].some((v) => Number.isFinite(Number(v)));
-
-    const connSection = hasConn ? `
-      <div style="grid-column:1/-1">
-        <div class="muted" style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;margin:.6rem 0 .45rem">
-          nginx connections
-        </div>
-        <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
-          ${miniCard('active', escapeHTML(String(conn.active ?? '-')), '', null)}
-          ${miniCard('reading', escapeHTML(String(conn.reading ?? '-')), '', null)}
-          ${miniCard('writing', escapeHTML(String(conn.writing ?? '-')), '', null)}
-          ${miniCard('waiting', escapeHTML(String(conn.waiting ?? '-')), '', null)}
-          ${miniCard('accepted (total)', escapeHTML(String(conn.accepted ?? '-')), '', null)}
-          ${miniCard('handled (total)', escapeHTML(String(conn.handled ?? '-')), '', null)}
-          ${miniCard('requests (total)', escapeHTML(String(conn.requests ?? '-')), '', null)}
-        </div>
-      </div>` : `
-      <div style="grid-column:1/-1">
-        <div class="muted" style="font-size:.78rem;margin-top:.4rem">
-          nginx connection counters unavailable (stub_status variables not exposed by this build)
-        </div>
-      </div>`;
+    // One merged nginx section (version/worker identity + live connection
+    // gauges). Counter cards whose value the build doesn't expose
+    // (accepted/handled/requests without stub_status) are omitted instead
+    // of rendering "-" tiles.
+    const optCard = (label, v, sub) =>
+      Number.isFinite(Number(v)) ? miniCard(label, escapeHTML(String(v)), sub || '', null) : '';
+    const hasConn = [conn.active, conn.reading, conn.writing, conn.waiting].some((v) => Number.isFinite(Number(v)));
 
     const nginxSection = `
       <div style="grid-column:1/-1">
-        <div class="muted" style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;margin:.6rem 0 .45rem">
-          nginx / worker
+        <div class="muted" style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.45rem">
+          nginx — worker &amp; connections
         </div>
         <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
-          ${miniCard('nginx version', escapeHTML(ng.version_str || String(ng.version || '-')), '', null)}
-          ${miniCard('prefix', escapeHTML(ng.prefix || '-'), '', null)}
-          ${miniCard('workers', escapeHTML(String(wk.count ?? '-')), '', null)}
-          ${miniCard('this worker PID', escapeHTML(String(wk.pid || '-')), '', null)}
-          ${miniCard('worker id', escapeHTML(String(wk.id ?? '-')), '', null)}
-          ${miniCard('worker exiting', wk.exiting ? '<span style="color:var(--danger)">yes</span>' : 'no', '', null)}
+          ${miniCard('version', escapeHTML(ng.version_str || String(ng.version || '-')), '', null)}
+          ${miniCard('workers', escapeHTML(String(wk.count ?? '-')), wk.pid ? escapeHTML(`this: pid ${wk.pid} · id ${wk.id ?? '-'}`) : '', null)}
+          ${wk.exiting ? miniCard('worker exiting', '<span style="color:var(--danger)">yes</span>', '', null) : ''}
+          ${optCard('active', conn.active)}
+          ${optCard('reading', conn.reading)}
+          ${optCard('writing', conn.writing)}
+          ${optCard('waiting', conn.waiting)}
+          ${optCard('accepted', conn.accepted, 'total')}
+          ${optCard('handled', conn.handled, 'total')}
+          ${optCard('requests', conn.requests, 'total')}
         </div>
+        ${hasConn ? '' : `<div class="muted" style="font-size:.78rem;margin-top:.4rem">
+          nginx connection counters unavailable (stub_status variables not exposed by this build)
+        </div>`}
       </div>`;
 
     el.nginxStatsGrid.innerHTML =
-      dictSection + sslHealthSection + decSection + (wafExclSection || '') + wafRulesSection + connSection + nginxSection;
+      nginxSection + dictSection + sslHealthSection + decSection + (wafExclSection || '') + wafRulesSection;
   }
 
   function dictCard(name, d) {
@@ -853,11 +797,9 @@ const dictSection = `
 async function refreshLuaStats() {
   try {
     state.lua = await fetchLuaStats();
-    renderNginxOverview();
     renderCacheOverview();
     renderNginxStats();
   } catch (e) {
-    renderNginxOverview();
     renderCacheOverview();
     if (el.nginxStatsGrid) {
       el.nginxStatsGrid.innerHTML = `<p class="muted" style="grid-column:1/-1">Lua stats unavailable: ${escapeHTML(e.message)}</p>`;
@@ -960,7 +902,6 @@ async function refreshLuaStats() {
         api('/v1/system/dnat'),
         api('/v1/system/ssl/stats'),
       ]);
-      renderNginxOverview();
       renderCacheOverview();
       renderDNAT(dnat);
       renderSSLStats(ssl);
