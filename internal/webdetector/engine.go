@@ -501,11 +501,11 @@ func NewEngine(cfg Config) *Engine {
 	e.vhostUniqPathsLastChange = make(map[string]time.Time)
 
 	if cfg.HistoryEnabled {
-		if hs, err := NewHistoryStore(cfg.HistoryDBPath, cfg.HistoryRetentionDays, cfg.HistoryPruneEvery); err != nil {
+		if hs, err := NewHistoryStore(cfg.HistoryDBPath, cfg.HistoryRetentionDays, cfg.HistoryPruneEvery, cfg.HistoryMaxRows); err != nil {
 			logging.Logf("[webdetector][history] disabled (init failed): %v", err)
 		} else {
 			e.history = hs
-			logging.Logf("[webdetector][history] enabled sqlite db=%s retention_days=%d prune_every=%s", cfg.HistoryDBPath, cfg.HistoryRetentionDays, cfg.HistoryPruneEvery)
+			logging.Logf("[webdetector][history] enabled sqlite db=%s retention_days=%d prune_every=%s max_rows=%d", cfg.HistoryDBPath, cfg.HistoryRetentionDays, cfg.HistoryPruneEvery, cfg.HistoryMaxRows)
 		}
 	}
 

@@ -14,7 +14,7 @@ import (
 func newTestHistoryStore(t *testing.T) *HistoryStore {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "history.db")
-	hs, err := NewHistoryStore(path, 1, time.Hour)
+	hs, err := NewHistoryStore(path, 1, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("NewHistoryStore: %v", err)
 	}

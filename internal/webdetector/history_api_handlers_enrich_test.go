@@ -13,7 +13,7 @@ import (
 // rows shape (enrichment itself is a no-op without a loaded enricher).
 func TestHistoryEventsEnrichParam(t *testing.T) {
 	dir := t.TempDir()
-	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour)
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("NewHistoryStore: %v", err)
 	}

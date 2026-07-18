@@ -208,6 +208,7 @@ type Config struct {
 	HistoryDBPath        string        // HISTORY_DB_PATH
 	HistoryRetentionDays int           // HISTORY_RETENTION_DAYS
 	HistoryPruneEvery    time.Duration // HISTORY_PRUNE_EVERY
+	HistoryMaxRows       int           // HISTORY_MAX_ROWS (row cap, newest kept; 0 = uncapped)
 
 	// Dynamic excludes persisted on disk (JSON) and editable via CLI/API.
 	ChallengeExcludeStorePath string        // CHALLENGE_EXCLUDE_STORE_PATH

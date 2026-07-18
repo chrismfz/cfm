@@ -11,7 +11,7 @@ import (
 
 func TestWAFEngineSummaryIncludesTriggerEvents(t *testing.T) {
 	dir := t.TempDir()
-	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour)
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("NewHistoryStore: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestWAFEngineSummaryIncludesTriggerEvents(t *testing.T) {
 // reflect only the matching events (the false-positive-hunting contract).
 func TestWAFEngineSummaryCountryAndRuleFilters(t *testing.T) {
 	dir := t.TempDir()
-	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour)
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("NewHistoryStore: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestWAFEngineSummaryCountryAndRuleFilters(t *testing.T) {
 // windowed and type-filtered in SQL.
 func TestWAFEngineSummary_WindowedTypeFilteredRead(t *testing.T) {
 	dir := t.TempDir()
-	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour)
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("NewHistoryStore: %v", err)
 	}

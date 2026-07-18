@@ -39,6 +39,7 @@ type HistoryStats struct {
 	SizeBytes     int64  `json:"size_bytes"`
 	RetentionDays int    `json:"retention_days"`
 	PruneEverySec int64  `json:"prune_every_sec"`
+	MaxRows       int    `json:"max_rows,omitempty"`
 }
 
 type HistorySummary struct {
@@ -86,6 +87,7 @@ type HistoryStore struct {
 	path          string
 	retentionDays int
 	pruneEvery    time.Duration
+	maxRows       int
 	lastPrune     time.Time
 	db            *sql.DB
 
@@ -97,7 +99,12 @@ type HistoryStore struct {
 	prunerDone chan struct{}
 }
 
-func NewHistoryStore(path string, retentionDays int, pruneEvery time.Duration) (*HistoryStore, error) {
+// NewHistoryStore opens (or creates) the sqlite history DB. maxRows is a
+// hard row cap enforced by the pruner in addition to the time retention
+// (newest rows kept; <=0 disables the cap) — sqlite handles millions of
+// rows fine, but an unbounded table on a busy box grows into hundreds of
+// MB that every maintenance pass (VACUUM, checkpoint) then has to chew.
+func NewHistoryStore(path string, retentionDays int, pruneEvery time.Duration, maxRows int) (*HistoryStore, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("history path required")
 	}
@@ -139,6 +146,13 @@ func NewHistoryStore(path string, retentionDays int, pruneEvery time.Duration) (
 		_ = db.Close()
 		return nil, fmt.Errorf("set sqlite busy_timeout: %w", err)
 	}
+	// Cap the WAL file: without a limit, a checkpoint reuses but never
+	// shrinks it — combined with VACUUM-through-WAL this once left a WAL
+	// as large as the DB itself (~400MB) sitting on disk permanently.
+	if _, err := db.Exec(`PRAGMA journal_size_limit=67108864;`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set sqlite journal_size_limit: %w", err)
+	}
 	if err := ensureHistorySchema(db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -148,6 +162,7 @@ func NewHistoryStore(path string, retentionDays int, pruneEvery time.Duration) (
 		path:          path,
 		retentionDays: retentionDays,
 		pruneEvery:    pruneEvery,
+		maxRows:       maxRows,
 		db:            db,
 		prunerStop:    make(chan struct{}),
 		prunerDone:    make(chan struct{}),
@@ -597,6 +612,13 @@ func (s *HistoryStore) VhostOverviewQuery(host string, hours int) (VhostOverview
 	return ov, nil
 }
 
+// pruneLocked enforces the time retention AND the row cap, then reclaims
+// space. Order matters: deletes first, VACUUM only when the freelist is
+// actually worth reclaiming (a full VACUUM rewrites the whole DB — running
+// it on every hourly prune of a ~400MB DB was most of the history I/O),
+// and the WAL checkpoint runs LAST so the WAL file is truncated after
+// VACUUM's writes (the old checkpoint-then-VACUUM order left a WAL as
+// large as the DB on disk).
 func (s *HistoryStore) pruneLocked(days int) (int64, error) {
 	if days <= 0 {
 		days = s.retentionDays
@@ -607,8 +629,31 @@ func (s *HistoryStore) pruneLocked(days int) (int64, error) {
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
+
+	// Hard row cap (newest kept), independent of the time window: a traffic
+	// burst must not balloon the DB while waiting out the retention days.
+	// The subquery finds the id of the maxRows-th newest row; with fewer
+	// rows than the cap it yields NULL and the DELETE is a no-op.
+	if s.maxRows > 0 {
+		if res2, err2 := s.db.Exec(`
+DELETE FROM history_events WHERE id < (
+  SELECT id FROM history_events ORDER BY id DESC LIMIT 1 OFFSET ?)`, s.maxRows-1); err2 == nil {
+			if trimmed, _ := res2.RowsAffected(); trimmed > 0 {
+				n += trimmed
+				logging.Logf("[webdetector][history] row cap %d: trimmed %d oldest rows", s.maxRows, trimmed)
+			}
+		}
+	}
+
+	// VACUUM only when >=20%% of pages AND >=8MB are on the freelist.
+	var pageCount, freeCount, pageSize int64
+	_ = s.db.QueryRow(`PRAGMA page_count`).Scan(&pageCount)
+	_ = s.db.QueryRow(`PRAGMA freelist_count`).Scan(&freeCount)
+	_ = s.db.QueryRow(`PRAGMA page_size`).Scan(&pageSize)
+	if pageCount > 0 && pageSize > 0 && freeCount*5 >= pageCount && freeCount*pageSize >= 8<<20 {
+		_, _ = s.db.Exec(`VACUUM`)
+	}
 	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
-	_, _ = s.db.Exec(`VACUUM`)
 	return n, nil
 }
 
@@ -627,8 +672,8 @@ func (s *HistoryStore) Truncate() (int64, error) {
 		return 0, err
 	}
 	_, _ = s.db.Exec(`DELETE FROM sqlite_sequence WHERE name='history_events'`)
-	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 	_, _ = s.db.Exec(`VACUUM`)
+	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 	return n, nil
 }
 
@@ -663,6 +708,7 @@ func (s *HistoryStore) Stats() (HistoryStats, error) {
 		Path: s.path, Events: events, UniqueHosts: uniqueHosts,
 		UniqueIPs: uniqueIPs, SizeBytes: sz, RetentionDays: s.retentionDays,
 		PruneEverySec: int64(s.pruneEvery.Seconds()),
+		MaxRows:       s.maxRows,
 	}, nil
 }
 

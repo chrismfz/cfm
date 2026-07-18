@@ -17,6 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Webdetector history: hard row cap (`HISTORY_MAX_ROWS`, default 1M) +
+  sane sqlite maintenance.** Retention was time-based only, so a busy box
+  grew the history DB into hundreds of MB (titan: 394 MB **plus a 396 MB
+  WAL**) even at 7 retention days. The hourly pruner now also enforces a
+  row cap (newest kept; `0` disables; ~1M rows ≈ 150-200 MB), and the
+  maintenance pass is fixed: VACUUM only runs when ≥20% of pages and ≥8 MB
+  are actually reclaimable (it used to rewrite the whole DB **every hour**),
+  the WAL checkpoint (TRUNCATE) runs *after* VACUUM instead of before (the
+  old order left a WAL as large as the DB sitting on disk permanently), and
+  `journal_size_limit=64MB` caps the WAL between checkpoints. `history/stats`
+  reports the cap (`max_rows`).
+
 ### Fixed
 - **Daemon pinned at ~40% CPU while a dashboard tab stayed open.** The
   dashboard's Security overview polls `/api/v1/waf/engine/summary` every 10s,
