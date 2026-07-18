@@ -1436,9 +1436,13 @@ function _M.check(ctx)
   -- 32 (args-only). The unauth gate is HERE (not in the detector) so an
   -- authenticated request skips even the get_norm_ab() materialisation; legit
   -- serialized blobs (WooCommerce/Elementor/WPML) ride authenticated admin-ajax.
+  -- Akeeba Restore endpoints (Joomla core update / Akeeba Backup restore) are
+  -- excluded: they legitimately POST a base64 serialized `factory` object every
+  -- extraction step, indistinguishable by shape from an attack (FP 2026-07-17).
   do
     local mode = rule_mode(CFG.rule_php_object_injection, "block")
-    if mode ~= "disabled" and not lower(cookie):find("wordpress_logged_in_", 1, true) then
+    if mode ~= "disabled" and not lower(cookie):find("wordpress_logged_in_", 1, true)
+       and not det.is_akeeba_restore_endpoint(uri) then
       local tag = det.detect_php_object_injection(get_norm_ab(), args, body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec

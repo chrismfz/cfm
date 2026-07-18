@@ -1463,6 +1463,31 @@ local function _has_php_object_marker(s)
       or string.find(s, "o%%3a%d+%%3a%%22", 1, false) or string.find(s, "c%%3a%d+%%3a%%22", 1, false)
 end
 
+-- Akeeba Restore endpoints round-trip the engine's own state as a base64-encoded
+-- PHP-serialized object in the `factory` POST field on EVERY extraction step. That
+-- blob IS a genuine O:N:"…" object, so the object-injection detector (rule 329)
+-- cannot tell it from an attack by shape — it must exclude these endpoints by
+-- context. Akeeba Restore drives Joomla core updates (com_joomlaupdate/extract.php,
+-- restore.php, finalisation.php) AND Akeeba Backup restores (com_akeeba* /
+-- restore.php, finalisation.php). FP seen 2026-07-17: a legit Joomla admin doing
+-- `option=com_joomlaupdate&task=update.install` was blocked+ban-listed on every
+-- extract.php step (the WordPress-cookie unauth gate does not recognise a Joomla
+-- admin session, so the request looked "unauth"). `has`/`lower` are plain-substring
+-- + lowercase; the check is uri-only and runs before any body normalisation.
+local function _is_akeeba_restore_endpoint(uri)
+  local u = lower(uri or "")
+  if has(u, "com_joomlaupdate/") and
+     (has(u, "extract.php") or has(u, "restore.php") or has(u, "finalisation.php")) then
+    return true
+  end
+  if has(u, "com_akeeba") and
+     (has(u, "restore.php") or has(u, "finalisation.php")) then
+    return true
+  end
+  return false
+end
+_M.is_akeeba_restore_endpoint = _is_akeeba_restore_endpoint
+
 -- [R2] Unauthenticated PHP object injection (deserialization -> RCE). Closes the
 -- 153-site object-injection exposure (kirki/jet-engine/woodmart/
 -- better-search-replace/fusion …) WITHOUT a per-plugin endpoint list: a PHP
@@ -1476,6 +1501,9 @@ end
 -- The AUTHENTICATED case is deliberately left to rule 306 at `challenge` — an
 -- exploit tool can't solve the JS challenge, and a real admin passing a legit
 -- serialized blob is only challenged, never blocked/banned.
+--
+-- The Akeeba Restore endpoints (see _is_akeeba_restore_endpoint) are excluded at
+-- the call site: they legitimately transport a base64 serialized object every step.
 --
 -- `nab` is the shared, memoized normalized+lowercased args+body (get_norm_ab()),
 -- so this rule adds NO extra normalization pass. The UNAUTH gate lives at the
