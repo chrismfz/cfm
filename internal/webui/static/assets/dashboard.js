@@ -29,6 +29,8 @@ const el = {
   dnatSummary:       document.getElementById('dnatSummary'),
   sslText:           document.getElementById('sslText'),
   sslGrid:           document.getElementById('sslGrid'),
+  sslRescanBtn:      document.getElementById('sslRescanBtn'),
+  sslRescanMsg:      document.getElementById('sslRescanMsg'),
   securityCard:      document.getElementById('securityCard'),
   securityGrid:      document.getElementById('securityGrid'),
   lastUpdated:       document.getElementById('lastUpdated'),
@@ -104,6 +106,7 @@ const el = {
     if (!ctx.canWrite) {
       if (el.blockBtn) el.blockBtn.style.display = 'none';
       if (el.unblockBtn) el.unblockBtn.style.display = 'none';
+      if (el.sslRescanBtn) el.sslRescanBtn.style.display = 'none';
     }
     await refreshAll();
   }
@@ -649,9 +652,15 @@ const dictSection = `
     </div>
   </div>`;
 
+    // Trimmed to the tiles an operator acts on; version hash / snapshot
+    // written / poll interval were noise. A recent error shows as ⚠ on the
+    // status tile with the message in the tooltip.
+    const errTitle = ssl.last_error
+      ? ` title="${escapeHTML(`${ssl.last_error} (${fmtAge(ssl.last_error_age_s)})`)}"`
+      : '';
     const readyBadge = ssl.ready === '1'
-      ? '<span style="color:#87d45b">✓ ready</span>'
-      : '<span style="color:#d9516f">✗ not ready</span>';
+      ? `<span style="color:#87d45b"${errTitle}>✓ ready${ssl.last_error ? ' <span style="color:#ffd27c">⚠</span>' : ''}</span>`
+      : `<span style="color:#d9516f"${errTitle}>✗ not ready</span>`;
 
     const sslHealthSection = `
       <div style="grid-column:1/-1">
@@ -660,17 +669,11 @@ const dictSection = `
         </div>
         <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))">
           ${miniCard('status', readyBadge, '', null)}
-          ${miniCard('version', escapeHTML(ssl.version || '-'), '', null)}
           ${miniCard('exact certs', escapeHTML(String(ssl.exact_hosts ?? '-')), 'hostnames', null)}
           ${miniCard('wildcard certs', escapeHTML(String(ssl.wild_hosts ?? '-')), 'suffixes', null)}
           ${miniCard('last dumpall', escapeHTML(fmtAge(ssl.last_dumpall_age_s)), escapeHTML(ssl.last_dumpall_src ? `(${ssl.last_dumpall_src})` : ''), null)}
           ${miniCard('last /stats poll', escapeHTML(fmtAge(ssl.last_stats_age_s)), '', null)}
-          ${miniCard('snapshot written', escapeHTML(fmtAge(ssl.snapshot_age_s)), '', null)}
-          ${miniCard('poll interval', escapeHTML(ssl.poll_interval_s != null ? `${ssl.poll_interval_s}s` : '-'), ssl.poll_interval_s > 300 ? '⚠ backed off' : '', null)}
           ${ssl.ingest_lock ? miniCard('ingest lock', '<span style="color:#ffd27c">active</span>', 'ingesting now', null) : ''}
-          ${ssl.last_error
-            ? miniCard('<span style="color:#d9516f">last error</span>', `<span style="color:#ffc9d3;font-size:.82rem">${escapeHTML(ssl.last_error)}</span>`, escapeHTML(fmtAge(ssl.last_error_age_s)), null)
-            : miniCard('last error', '<span style="color:#87d45b">none</span>', '', null)}
         </div>
       </div>`;
 
@@ -722,9 +725,12 @@ const dictSection = `
       .sort((a, b) => b[1] - a[1])
       .map(([m, n]) => `${n} ${escapeHTML(m)}`)
       .join(' · ');
+    // Preserve the operator's open/closed choice across the innerHTML
+    // rebuild each auto-refresh performs (a bare <details> resets closed).
+    const wafRulesOpen = Boolean(el.nginxStatsGrid.querySelector?.('details[data-waf-rules]')?.open);
     const wafRulesSection = ruleKeys.length ? `
       <div style="grid-column:1/-1">
-        <details class="raw-json" style="margin-top:.6rem">
+        <details class="raw-json" data-waf-rules${wafRulesOpen ? ' open' : ''} style="margin-top:.6rem">
         <summary>WAF rule modes — ${ruleKeys.length} rules (${modeSummary})</summary>
         <div class="table-wrap" style="max-height:420px">
           <table class="compact-table" style="width:100%">
@@ -946,9 +952,39 @@ async function refreshLuaStats() {
     }
   }
 
+  // "Rescan certs" — POST /v1/system/ssl/refresh (cfm ssl refresh: forces a
+  // cert-source rescan + collector refresh), then re-pull fresh stats.
+  async function rescanSSL() {
+    const setMsg = (text) => {
+      if (!el.sslRescanMsg) return;
+      el.sslRescanMsg.style.display = text ? '' : 'none';
+      el.sslRescanMsg.textContent = text || '';
+    };
+    if (el.sslRescanBtn) {
+      el.sslRescanBtn.disabled = true;
+      el.sslRescanBtn.textContent = 'Rescanning…';
+    }
+    setMsg('Running cfm ssl refresh — walks all certificate sources, can take a while…');
+    try {
+      const r = await api('/v1/system/ssl/refresh', { method: 'POST' });
+      setMsg(`✓ rescan done in ${Math.round((r.duration_ms ?? 0) / 1000)}s — refreshing stats…`);
+      const ssl = await api('/v1/system/ssl/stats?cache_ttl=0');
+      renderSSLStats(ssl);
+      setMsg(`✓ rescan done in ${Math.round((r.duration_ms ?? 0) / 1000)}s`);
+    } catch (e) {
+      setMsg(`✖ rescan failed: ${e.message}`);
+    } finally {
+      if (el.sslRescanBtn) {
+        el.sslRescanBtn.disabled = false;
+        el.sslRescanBtn.textContent = 'Rescan certs';
+      }
+    }
+  }
+
   el.refreshBtn.addEventListener('click', refreshAll);
   el.blockBtn.addEventListener('click', blockIP);
   el.unblockBtn.addEventListener('click', unblockIP);
+  el.sslRescanBtn?.addEventListener('click', rescanSSL);
 
   let autoTimer = null;
   function setAuto(on) {
@@ -966,6 +1002,7 @@ async function refreshLuaStats() {
     if (!ctx.canWrite) {
       if (el.blockBtn) el.blockBtn.style.display = 'none';
       if (el.unblockBtn) el.unblockBtn.style.display = 'none';
+      if (el.sslRescanBtn) el.sslRescanBtn.style.display = 'none';
     }
     refreshAll();
   });

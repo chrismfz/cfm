@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -88,6 +89,70 @@ func TestSystemStatusEndpoints_Authz(t *testing.T) {
 		}
 		if output, _ := body["output"].(string); output != "dnat-ok\n" {
 			t.Fatalf("unexpected output: %q", output)
+		}
+	})
+
+	t.Run("ssl stats recovers JSON after CLI log-line prefix", func(t *testing.T) {
+		origFn := runCachedCommandFn
+		runCachedCommandFn = func(key string, _ time.Duration, _ string, _ ...string) ([]byte, int64, error) {
+			return []byte("2026-07-18 16:51:59 [sslcollector] snapshot: wrote 2309 exact + 188 wild entries to /var/lib/cfm/sslcollector/dump.json\n{\"ExactHosts\": 2309}\n"), 3, nil
+		}
+		t.Cleanup(func() { runCachedCommandFn = origFn })
+
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/system/ssl/stats?cache_ttl=0", "admin-secret", false)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		stats, ok := body["stats"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected parsed stats object despite log prefix, got %T (%v)", body["stats"], body["stats"])
+		}
+		if n, _ := stats["ExactHosts"].(float64); n != 2309 {
+			t.Fatalf("unexpected stats payload: %v", stats)
+		}
+	})
+
+	t.Run("ssl refresh runs command and parses output", func(t *testing.T) {
+		origRefresh := runSSLRefreshFn
+		var calls int32
+		runSSLRefreshFn = func(_ context.Context) ([]byte, error) {
+			atomic.AddInt32(&calls, 1)
+			return []byte("noise line\n{\"disk\": {\"ExactHosts\": 5}}"), nil
+		}
+		t.Cleanup(func() { runSSLRefreshFn = origRefresh })
+
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/system/ssl/refresh", "admin-secret", false)
+		if rr.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("GET status=%d want=%d", rr.Code, http.StatusMethodNotAllowed)
+		}
+
+		rr = doSystemStatusReq(h, http.MethodPost, "/api/v1/system/ssl/refresh", "admin-secret", false)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("POST status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		if atomic.LoadInt32(&calls) != 1 {
+			t.Fatalf("refresh command calls=%d want=1", calls)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if ok, _ := body["ok"].(bool); !ok {
+			t.Fatalf("expected ok=true, got %v", body)
+		}
+		if _, isObj := body["stats"].(map[string]any); !isObj {
+			t.Fatalf("expected parsed stats object, got %T", body["stats"])
+		}
+	})
+
+	t.Run("scoped token forbidden ssl refresh", func(t *testing.T) {
+		rr := doSystemStatusReq(h, http.MethodPost, "/api/v1/system/ssl/refresh", scoped.Token, false)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
 		}
 	})
 

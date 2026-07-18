@@ -94,7 +94,11 @@
       </section>
 
       <section class="card">
-        <h2>SSL certificates</h2>
+        <h2>
+          SSL certificates
+          <button id="sslRescanBtn" class="btn-quiet" style="float:right" title="cfm ssl refresh — force certificate rescan + collector refresh">Rescan certs</button>
+        </h2>
+        <p id="sslRescanMsg" class="muted" style="display:none"></p>
         <div id="sslGrid" class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
           <p class="muted">Loading…</p>
         </div>

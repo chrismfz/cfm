@@ -136,6 +136,20 @@ resolves async and appears on the next call.
 
 ---
 
+## 3a) Force SSL certificate rescan (dashboard "Rescan certs" button)
+
+Runs `cfm ssl refresh --json` (cert-source rescan + collector refresh),
+bounded to 90s. Admin-only, POST-only.
+
+```bash
+curl -sS -X POST "$CFM_API/api/v1/system/ssl/refresh" | jq .
+```
+
+Both this and `/api/v1/system/ssl/stats` tolerate CLI log lines before the
+JSON body (the daemon extracts the first JSON object from the output).
+
+---
+
 ## 3b) Node health snapshot (dashboard "Node health" card)
 
 Full `health.snapshot.v1` payload (host CPU/RAM/swap, disks + SMART/MDADM/ZFS,

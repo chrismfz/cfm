@@ -46,6 +46,7 @@ This inventory documents the effective authz classification enforced by the back
 - `/api/v1/firewall/block` via `adminOnlyHandler` (global IP block; the customer-facing unblock flow is separate and intentionally not admin-gated).
 - `/api/v1/firewall/block/batch` via `adminOnlyHandler` (bulk global IP block, ≤256 IPs/request; skips the server's own IPs and the calling admin's IP with per-IP `skipped` reasons).
 - `/api/v1/admin/authcheck` (admin-only auth probe for the edge `auth_request`; `RequireAdmin` → 200 for admin, 403 for scoped/anonymous; returns no data).
+- `/api/v1/system/dnat`, `/api/v1/system/ssl/stats`, `/api/v1/system/ssl/refresh` (POST) and `/api/v1/health/{snapshot,timeseries,anomalies,ingest}` — all `RequireAdmin` (`system_status_endpoint.go`); back the dashboard's system/Node-health cards and the "Rescan certs" button.
 
 ## Edge-served admin endpoints (OpenResty / Angie)
 

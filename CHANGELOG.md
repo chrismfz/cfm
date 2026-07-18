@@ -17,7 +17,23 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Dashboard: "Rescan certs" button on the SSL certificates card.** Backed by
+  the new admin-only `POST /api/v1/system/ssl/refresh` (runs `cfm ssl refresh
+  --json`, bounded to 90s) — forces a certificate-source rescan + collector
+  refresh from the UI, then re-pulls fresh stats. Hidden for read-only viewers.
+
 ### Fixed
+- **Dashboard: SSL certificates card showed "Collector stats unavailable".**
+  `cfm ssl stats --json` emits a log line (`[sslcollector] snapshot: wrote …`,
+  the CLI process's `logging.Logf` goes to stdout) before the JSON body, so
+  the daemon's whole-output `json.Unmarshal` failed and the UI got an opaque
+  string. The system endpoints now recover the JSON object from mixed CLI
+  output (retry from the first `{`).
+- **Dashboard: "WAF rule modes" collapsed on every auto-refresh.** The
+  Nginx-internals rebuild now carries the `<details>` open state across
+  renders (the DNAT/SSL raw views never had the problem — only their inner
+  `<pre>` text is updated).
 - **SMART: Samsung SATA SSDs reported no wearout and 0°C.** Two parsing bugs
   in the health detector's `smartctl -a` reader (`parseSmartInfo`): (1) attr
   **177 Wear_Leveling_Count** — the Samsung SATA wear indicator, normalized
@@ -39,7 +55,10 @@ back-filled here — see the git/PR history for that period.
   format pass — version/worker/connection gauges merged into one leading
   "nginx — worker & connections" section, and counter tiles the build
   doesn't expose (accepted/handled/requests without `stub_status`) are
-  omitted instead of rendering "-".
+  omitted instead of rendering "-". The sslcollector-health row drops the
+  version-hash / snapshot-written / poll-interval / last-error tiles; a
+  recent collector error now shows as a ⚠ on the status tile with the
+  message in its tooltip.
 
 ### Added
 - **Web Bots: per-UA drilldown panel (vhosts / IPs+geo/ASN / paths / raw
