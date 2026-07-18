@@ -11,6 +11,7 @@
   const state = {
     loading: false,
     health: null,       // health.snapshot.v1 payload (admin-only, 1m server cache)
+    healthTs: null,     // health.timeseries.v1 payload (1h window, 5m buckets)
     healthError: null,
     lua: null,
     scoped: false,
@@ -167,12 +168,33 @@ const el = {
     return `<div class="progress"><span style="width:${p}%;${style}"></span></div>`;
   }
 
-  function miniCard(label, value, sub, pct) {
+  function miniCard(label, value, sub, pct, spark) {
     return `<div class="mini-card">
       <div class="muted">${label}</div>
       <div><strong>${value}</strong>${sub ? `<span class="muted"> ${sub}</span>` : ''}</div>
       ${pct != null ? progressBar(pct) : ''}
+      ${spark || ''}
     </div>`;
+  }
+
+  // Stat-tile trend sparkline: one series per tile (the tile label names it),
+  // zero baseline, accent line over a soft area fill. Values feed in from the
+  // health timeseries (1h window, 5m buckets ≈ 12 points).
+  function sparkline(values, title) {
+    const vals = (values || []).map(Number).filter(Number.isFinite);
+    if (vals.length < 2) return '';
+    const max = Math.max(...vals);
+    if (max <= 0) return '';
+    const W = 100, H = 26, P = 2;
+    const step = W / (vals.length - 1);
+    const pts = vals.map((v, i) =>
+      `${(i * step).toFixed(1)},${(H - P - (Math.max(0, v) / max) * (H - 2 * P)).toFixed(1)}`);
+    const line = `M${pts.join(' L')}`;
+    return `<svg class="spark-mini" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">
+      ${title ? `<title>${escapeHTML(title)}</title>` : ''}
+      <path class="spark-area" d="${line} L${W},${H} L0,${H} Z"></path>
+      <path class="spark-line" d="${line}"></path>
+    </svg>`;
   }
 
   const MODE_COLORS = {
@@ -255,6 +277,9 @@ const el = {
     const host = s.host || {};
     const net = s.network || {};
 
+    const tsPoints = Array.isArray(state.healthTs?.points) ? state.healthTs.points : [];
+    const trend = (key, title) => sparkline(tsPoints.map((p) => p[key]), `${title} — last 1h (5m avg)`);
+
     const pct1 = (v) => {
       const n = num(v);
       return n == null ? '-' : `${n.toFixed(1)}%`;
@@ -283,12 +308,13 @@ const el = {
     const ctPct = num(net.conntrack_usage_pct);
 
     return `<div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))">
-      ${miniCard('CPU', cpuPct != null ? escapeHTML(`${cpuPct.toFixed(1)}%`) : '-', escapeHTML(cpuSub), cpuPct)}
-      ${miniCard('Load avg (1m)', load1 != null ? escapeHTML(load1.toFixed(2)) : '-', escapeHTML(loadSub), loadPct)}
-      ${miniCard('RAM', memTotal > 0 ? escapeHTML(`${fmtBytes(memUsed)} / ${fmtBytes(memTotal)}`) : '-', memPct != null ? escapeHTML(`${memPct.toFixed(1)}%`) : '', memPct)}
-      ${miniCard('Swap', swapTotal > 0 ? escapeHTML(`${fmtBytes(swapUsed)} / ${fmtBytes(swapTotal)}`) : 'none', swapPct != null ? escapeHTML(`${swapPct.toFixed(1)}%`) : '', swapPct)}
+      ${miniCard('CPU', cpuPct != null ? escapeHTML(`${cpuPct.toFixed(1)}%`) : '-', escapeHTML(cpuSub), cpuPct, trend('cpu_pct', 'CPU busy %'))}
+      ${miniCard('Load avg (1m)', load1 != null ? escapeHTML(load1.toFixed(2)) : '-', escapeHTML(loadSub), loadPct, trend('load1', 'Load avg (1m)'))}
+      ${miniCard('RAM', memTotal > 0 ? escapeHTML(`${fmtBytes(memUsed)} / ${fmtBytes(memTotal)}`) : '-', memPct != null ? escapeHTML(`${memPct.toFixed(1)}%`) : '', memPct, trend('ram_used_pct', 'RAM used %'))}
+      ${miniCard('Swap', swapTotal > 0 ? escapeHTML(`${fmtBytes(swapUsed)} / ${fmtBytes(swapTotal)}`) : 'none', swapPct != null ? escapeHTML(`${swapPct.toFixed(1)}%`) : '', swapPct, swapTotal > 0 ? trend('swap_used_pct', 'Swap used %') : '')}
       ${miniCard('Conntrack', (ctCount != null && ctMax > 0) ? escapeHTML(`${ctCount} / ${ctMax}`) : '-', ctPct != null ? escapeHTML(`${ctPct.toFixed(1)}%`) : '', ctPct)}
-      ${miniCard('Network', `↓ ${escapeHTML(fmtBytes(net.bandwidth_in_bps))}/s`, `↑ ${escapeHTML(fmtBytes(net.bandwidth_out_bps))}/s`, null)}
+      ${miniCard('Net in', `↓ ${escapeHTML(fmtBytes(net.bandwidth_in_bps))}/s`, '', null, trend('rx_mbps', 'Inbound Mbps'))}
+      ${miniCard('Net out', `↑ ${escapeHTML(fmtBytes(net.bandwidth_out_bps))}/s`, '', null, trend('tx_mbps', 'Outbound Mbps'))}
     </div>`;
   }
 
@@ -465,10 +491,18 @@ const el = {
       return;
     }
     try {
-      state.health = await api('/v1/health/snapshot?cache_ttl=60s');
+      const [snap, ts] = await Promise.all([
+        api('/v1/health/snapshot?cache_ttl=60s'),
+        // Trend data for the tile sparklines; best-effort — the card renders
+        // fine without it (empty ring store, older daemon).
+        api('/v1/health/timeseries?window=1h&step=5m').catch(() => null),
+      ]);
+      state.health = snap;
+      state.healthTs = ts;
       state.healthError = null;
     } catch (e) {
       state.health = null;
+      state.healthTs = null;
       state.healthError = e.message;
     }
     renderHealth();

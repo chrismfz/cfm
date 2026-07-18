@@ -28,8 +28,11 @@ back-filled here — see the git/PR history for that period.
   collector, ingest socket, systemd services), a per-mount **Disks** table
   (use% + inode%) and **Storage health** (SMART/wearout/MDADM/ZFS summary +
   per-device SMART table). A header pill rolls the snapshot up to
-  healthy / N issues, with the issue list shown as chips. The card is hidden
-  for scoped viewers (the endpoint is admin-only).
+  healthy / N issues, with the issue list shown as chips. The CPU, load, RAM,
+  swap and net in/out tiles carry a **1h trend sparkline** (12 × 5m-avg points
+  from the existing `/api/v1/health/timeseries` ring store; best-effort — the
+  card renders without them). The card is hidden for scoped viewers (the
+  endpoint is admin-only).
 - **`/api/v1/health/snapshot` opt-in cache (`?cache_ttl=`).** Default stays a
   fresh collection (what `cfm health` expects). With `cache_ttl` (same 1s..1m
   clamp as the other system endpoints) the daemon serves a cached snapshot and
