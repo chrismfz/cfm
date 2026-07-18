@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Heartbeat now reports the active edge proxy (`edge` + `edge_version`).**
+  Alongside `dnat_enabled`, the agent heartbeat tells cfm-web which in-path
+  edge is active right now — `openresty` or `angie` (via `systemctl is-active`,
+  the same probe the sslcollector reload path uses) — plus the edge binary's
+  version token (e.g. `openresty/1.25.3.2`, `Angie/1.12.1`, best-effort via
+  `-v`). An empty `edge` is a real "no edge running" observation and clears the
+  central record; the keys are omitted entirely when detection cannot run (no
+  systemd), so cfm-web keeps its last known value. Pairs with the cfm-web
+  "Edge" column on the Agents table, giving the operator a fleet-wide view of
+  the OpenResty/Angie mix and of servers whose edge dropped.
+
 ### Changed
 - **WAF → autoblock: `WAF_WEBSHELL` (rule 413) is now armed by default.** The
   webshell drop-path family (proper-noun names: `c99`/`r57`/`wso`/`b374k`/…) has
