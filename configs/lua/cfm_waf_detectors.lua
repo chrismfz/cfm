@@ -2605,10 +2605,15 @@ _M.wp2shell_is_batch_endpoint = _wp2shell_is_batch_endpoint
 -- Extract every author_exclude / author_not_in value out of nab (the param rides
 -- inside a JSON path string like `/wp/v2/users?author_exclude=<v>`, value ending at
 -- the JSON quote, next query param, or JSON escape) and flag any that is not a
--- clean integer list. A legit REST value is digits, commas and spaces ONLY
--- (wp_parse_id_list): ANY other byte — a ")" breakout, a SQL keyword, an inline
--- /**/ or # comment, a quote — means the route confusion smuggled a raw value past
--- the sanitiser. Scoping to the extracted VALUE (not the whole body) is what keeps
+-- clean integer list. A legit REST value is digits, commas and whitespace ONLY
+-- (wp_parse_id_list splits on both `,` and spaces) — plus a literal `+`, which is
+-- the form-urlencoded spelling of a separator space (normalize() only decodes
+-- %xx, not `+`, so a legit `author_exclude=5,+6` reaches here with the `+` intact).
+-- ANY other byte — a ")" breakout, a SQL keyword, an inline /**/ or # comment, a
+-- quote — means the route confusion smuggled a raw value past the sanitiser.
+-- Allowing `+` can't weaken this: a SQL breakout always needs a paren, a keyword
+-- letter, a quote or a comment marker, none of which live in `[0-9,%s+]`.
+-- Scoping to the extracted VALUE (not the whole body) is what keeps
 -- a legit batch that merely mentions ") or " in post prose from tripping, AND it
 -- catches injection shapes a fixed keyword list misses (e.g. `0)/**/or/**/(1=1)#`).
 -- The `[%[%]0-9]*=` between key and value tolerates the array forms
@@ -2617,9 +2622,9 @@ _M.wp2shell_is_batch_endpoint = _wp2shell_is_batch_endpoint
 local function _wp2shell_sqli_in_author_param(s)
   for _, key in ipairs({ "author_exclude", "author_not_in" }) do
     for val in s:gmatch(key .. "[%[%]0-9]*=([^\"&\\]*)") do
-      -- legit value = integers separated by commas/whitespace (wp_parse_id_list);
-      -- any other byte is a smuggled injection.
-      if val ~= "" and val:find("[^0-9,%s]") then
+      -- legit value = integers separated by commas/whitespace (wp_parse_id_list),
+      -- incl. a form-encoded `+` space; any other byte is a smuggled injection.
+      if val ~= "" and val:find("[^0-9,%s+]") then
         return true
       end
     end
@@ -2637,8 +2642,10 @@ function _M.detect_cve_wp2shell(nab)
   -- Leg B — CVE-2026-63030: the batch route-confusion desync primer, a sub-request
   -- whose PATH is "///". Keyed on the `path` key (not a bare "///") so a post/slug
   -- whose value happens to be `///` can't trip it. Tolerant of the colon spacing
-  -- of both compact and pretty-printed JSON.
-  if s:find('path"%s*:%s*"///"') then
+  -- of both compact and pretty-printed JSON, and of a JSON-escaped slash (`\/`,
+  -- a valid JSON spelling of `/` that WordPress's parser still routes to `///`) so
+  -- the primer can't be hidden as "\/\/\/". `%\?` = an optional literal backslash.
+  if s:find('path"%s*:%s*"%\\?/%\\?/%\\?/"') then
     return "DESYNC"
   end
   return nil

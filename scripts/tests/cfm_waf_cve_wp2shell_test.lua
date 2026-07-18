@@ -85,6 +85,13 @@ fires(post("/wp-json/batch/v1", "",
       '{"requests": [{"method": "POST", "path": "///"}]}'),
       "wp2shell desync primer, pretty-printed JSON", DESYNC)
 
+-- Escape evasion: "\/\/\/" is a valid JSON spelling of "///" that WordPress still
+-- routes to the primer path; normalize() does not JSON-unescape, so the primer
+-- match must tolerate the optional backslash before each slash.
+fires(post("/wp-json/batch/v1", "",
+      '{"requests":[{"method":"POST","path":"\\/\\/\\/"}]}'),
+      "wp2shell desync primer, JSON-escaped slashes (\\/\\/\\/)", DESYNC)
+
 -- Comment-obfuscated SQLi (MySQL # comment, /**/ around OR) must NOT be dodgeable:
 -- author_exclude=0)/**/OR/**/(1=1)#  — no sleep/union/`) or `/`-- -` keyword present,
 -- but the extracted value has non-integer bytes, so the value-scoped check fires.
@@ -108,6 +115,13 @@ clean(post("/wp-json/batch/v1", "",
 clean(post("/wp-json/batch/v1", "",
       '{"requests":[{"method":"GET","path":"/wp/v2/posts?author_exclude=5%2C%206"}]}'),
       "legit batch: author_exclude=5, 6 (spaced list)")
+
+-- Legit list whose separator space is form-encoded as `+` (normalize() decodes
+-- %xx but NOT `+`, so the `+` reaches the value check literally). wp_parse_id_list
+-- treats it as a space, so it must stay clean — `+` alone can't form an injection.
+clean(post("/wp-json/batch/v1", "",
+      '{"requests":[{"method":"GET","path":"/wp/v2/posts?author_exclude=5,+6"}]}'),
+      "legit batch: author_exclude=5,+6 (plus-encoded space)")
 
 -- FP GUARD: a legit batch that filters by integer author_exclude AND creates a post
 -- whose PROSE contains ") or " / ") and " — the old whole-body keyword match blocked
