@@ -46,82 +46,74 @@
 
         <div class="exclude-grid">
           <section class="mini-card">
-            <h3>{{ ruleEditID ? 'Edit rule' : 'Create rule' }}</h3>
-            <div class="toolbar">
-              <label class="muted"><input type="checkbox" v-model="ruleForm.enabled" /> Enabled</label>
-              <label for="rule-priority" title="Lower number runs first.">Priority</label>
-              <input id="rule-priority" class="input input-small" type="number" min="1" max="100000" step="1" v-model.number="ruleForm.priority" />
-              <select class="input" v-model="ruleForm.actionType" title="Action when rule matches.">
+            <h3>{{ ruleEditID ? 'Edit rule ' + ruleEditID : 'Create rule' }}</h3>
+            <div class="form-grid">
+              <div class="form-section-title">Scope</div>
+              <label for="rule-vhosts">Vhosts</label>
+              <input id="rule-vhosts" class="input" type="text" v-model.trim="ruleForm.vhosts" placeholder="example.com, *.example.com" />
+
+              <div class="form-section-title">Match — empty fields match everything</div>
+              <label for="rule-countries">Countries</label>
+              <input id="rule-countries" class="input" type="text" v-model.trim="ruleForm.countries" placeholder="US, CA" />
+              <label for="rule-methods">Methods</label>
+              <input id="rule-methods" class="input" type="text" v-model.trim="ruleForm.methods" placeholder="GET, POST" />
+              <label for="rule-uas">UA patterns</label>
+              <input id="rule-uas" class="input" type="text" v-model.trim="ruleForm.uas" placeholder="*facebookexternalhit*, *meta-externalagent*" />
+              <label for="rule-paths">Path patterns</label>
+              <input id="rule-paths" class="input" type="text" v-model.trim="ruleForm.paths" placeholder="/wp-login.php, /xmlrpc.php" />
+              <label for="rule-hasqs">Query string</label>
+              <label class="muted" style="font-size:.84rem"><input id="rule-hasqs" type="checkbox" v-model="ruleForm.hasQS" /> only match requests that HAVE a query string</label>
+              <label for="rule-qsnotrx" title="Requests whose query string matches this regex are NOT matched by the rule.">QS pass-through</label>
+              <input id="rule-qsnotrx" class="input" type="text" v-model.trim="ruleForm.qsNotRx"
+                placeholder="(?:fbclid|export|xml)(?:=|[&amp;;]|$)" :disabled="!ruleForm.hasQS" />
+
+              <div class="form-section-title">Action</div>
+              <label for="rule-action">Action</label>
+              <select id="rule-action" class="input" v-model="ruleForm.actionType" title="Action when rule matches.">
                 <option value="allow">allow</option>
                 <option value="block">block</option>
                 <option value="challenge">challenge</option>
                 <option value="throttle">throttle</option>
               </select>
-              <input v-if="ruleForm.actionType === 'throttle'" class="input input-wide" type="text" v-model.trim="ruleForm.throttleProfile" placeholder="Throttle profile (soft_bot)" />
+              <template v-if="ruleForm.actionType === 'throttle'">
+                <label for="rule-profile">Throttle profile</label>
+                <input id="rule-profile" class="input" type="text" v-model.trim="ruleForm.throttleProfile" placeholder="soft_bot / medium_bot / hard_bot" />
+              </template>
+              <label for="rule-priority" title="Lower number runs first.">Priority</label>
+              <input id="rule-priority" class="input input-small" type="number" min="1" max="100000" step="1" v-model.number="ruleForm.priority" />
+              <label for="rule-enabled">Enabled</label>
+              <label class="muted" style="font-size:.84rem"><input id="rule-enabled" type="checkbox" v-model="ruleForm.enabled" /> rule is active immediately after save</label>
+
+              <label for="rule-note">Note</label>
+              <input id="rule-note" class="input" type="text" v-model.trim="ruleForm.note" placeholder="Short rule description" />
             </div>
             <div class="toolbar">
-              <label>Vhosts</label>
-              <input class="input input-wide" type="text" v-model.trim="ruleForm.vhosts" placeholder="example.com, *.example.com" />
-            </div>
-            <div class="toolbar">
-              <label>Countries</label>
-              <input class="input input-wide" type="text" v-model.trim="ruleForm.countries" placeholder="US, CA" />
-              <label>Methods</label>
-              <input class="input input-wide" type="text" v-model.trim="ruleForm.methods" placeholder="GET, POST" />
-            </div>
-            <div class="toolbar">
-              <label>UA patterns</label>
-              <input class="input input-wide" type="text" v-model.trim="ruleForm.uas" placeholder="*facebookexternalhit*, *meta-externalagent*" />
-            </div>
-            <div class="toolbar">
-              <label>Path patterns</label>
-              <input class="input input-wide" type="text" v-model.trim="ruleForm.paths" placeholder="/wp-login.php, /xmlrpc.php" />
-            </div>
-            <div class="toolbar">
-              <label><input type="checkbox" v-model="ruleForm.hasQS" title="Only match when request has a query string" /> Has QS</label>
-              <label>QS pass-through</label>
-              <input class="input input-wide" type="text" v-model.trim="ruleForm.qsNotRx"
-                placeholder="(?:fbclid|export|xml)(?:=|[&amp;;]|$)" :disabled="!ruleForm.hasQS" />
-            </div>
-            <div class="toolbar">
-              <label>Note</label>
-              <input class="input input-wide" type="text" v-model.trim="ruleForm.note" placeholder="Short rule description" />
-            </div>
-            <div class="toolbar">
-              <button class="btn-quiet" @click="saveRule">{{ ruleEditID ? 'Update rule' : 'Add rule' }}</button>
+              <button @click="saveRule">{{ ruleEditID ? 'Update rule' : 'Add rule' }}</button>
               <button class="btn-quiet" @click="resetRuleForm">Clear</button>
             </div>
           </section>
 
           <section class="mini-card">
             <h3>Rule simulation</h3>
-            <p class="muted">Test request shape before enforcement.</p>
-            <div class="toolbar">
-              <label>Host</label>
-              <input class="input input-wide" type="text" v-model.trim="simulateForm.host" placeholder="example.com" />
+            <p class="muted">Test a request shape against the rule set before enforcement.</p>
+            <div class="form-grid">
+              <label for="sim-host">Host</label>
+              <input id="sim-host" class="input" type="text" v-model.trim="simulateForm.host" placeholder="example.com" />
+              <label for="sim-ip">IP</label>
+              <input id="sim-ip" class="input" type="text" v-model.trim="simulateForm.ip" placeholder="1.2.3.4" />
+              <label for="sim-country">Country</label>
+              <input id="sim-country" class="input input-small" type="text" v-model.trim="simulateForm.country" placeholder="US" />
+              <label for="sim-method">Method</label>
+              <input id="sim-method" class="input input-small" type="text" v-model.trim="simulateForm.method" placeholder="GET" />
+              <label for="sim-path">Path</label>
+              <input id="sim-path" class="input" type="text" v-model.trim="simulateForm.path" placeholder="/" />
+              <label for="sim-ua">UA</label>
+              <input id="sim-ua" class="input" type="text" v-model.trim="simulateForm.ua" placeholder="facebookexternalhit/1.1" />
+              <label for="sim-qs">QS</label>
+              <input id="sim-qs" class="input" type="text" v-model.trim="simulateForm.qs" placeholder="page=2&amp;sort=title" />
             </div>
             <div class="toolbar">
-              <label>IP</label>
-              <input class="input input-wide" type="text" v-model.trim="simulateForm.ip" placeholder="1.2.3.4" />
-              <label>Country</label>
-              <input class="input input-small" type="text" v-model.trim="simulateForm.country" placeholder="US" />
-            </div>
-            <div class="toolbar">
-              <label>Method</label>
-              <input class="input input-small" type="text" v-model.trim="simulateForm.method" placeholder="GET" />
-              <label>Path</label>
-              <input class="input input-wide" type="text" v-model.trim="simulateForm.path" placeholder="/" />
-            </div>
-            <div class="toolbar">
-              <label>UA</label>
-              <input class="input input-wide" type="text" v-model.trim="simulateForm.ua" placeholder="facebookexternalhit/1.1" />
-            </div>
-            <div class="toolbar">
-              <label>QS</label>
-              <input class="input input-wide" type="text" v-model.trim="simulateForm.qs" placeholder="page=2&amp;sort=title" />
-            </div>
-            <div class="toolbar">
-              <button class="btn-quiet" @click="runRuleSimulation">Run simulation</button>
+              <button @click="runRuleSimulation">Run simulation</button>
             </div>
             <p v-if="simulateResult" class="muted">
               matched={{ simulateResult.matched ? 'yes' : 'no' }}

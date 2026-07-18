@@ -2,6 +2,8 @@
 // per-vhost drilldown with the live ECharts series, and IP drilldown.
 // Used by the overview and vhost-live pages.
 
+import { initChart, chartColors, onThemeChange } from "../shared/chart-theme.js";
+
 export const liveMixin = {
   data() {
     return {
@@ -173,10 +175,7 @@ export const liveMixin = {
   },
 
   methods: {
-    // ── Charts ─────────────────────────────────────────────────────────
-    chartTextColor() { return "#dbe7f7"; },
-    chartAxisColor() { return "#7f93ad"; },
-    chartSplitColor() { return "rgba(159,176,195,0.18)"; },
+    // ── Charts (styling comes from the shared cfm ECharts theme) ───────
     vhostChartTimes() {
       return this.activeVhostSeries.map((p) => {
         const d = new Date(Number(p.at || 0));
@@ -185,32 +184,17 @@ export const liveMixin = {
     },
     baseLineOption({ yName = "", min = null, max = null } = {}) {
       return {
-        backgroundColor: "transparent",
         animation: true,
         tooltip: { trigger: "axis", axisPointer: { type: "cross" } },
-        legend: {
-          top: 6,
-          right: 10,
-          textStyle: { color: this.chartTextColor() },
-        },
+        legend: { top: 6, right: 10 },
         grid: { left: 52, right: 18, top: 34, bottom: 28 },
         xAxis: {
           type: "category",
           boundaryGap: false,
           data: this.vhostChartTimes(),
-          axisLine: { lineStyle: { color: this.chartAxisColor() } },
-          axisLabel: { color: this.chartAxisColor(), hideOverlap: true },
+          axisLabel: { hideOverlap: true },
         },
-        yAxis: {
-          type: "value",
-          name: yName,
-          min,
-          max,
-          axisLine: { lineStyle: { color: this.chartAxisColor() } },
-          axisLabel: { color: this.chartAxisColor() },
-          splitLine: { lineStyle: { color: this.chartSplitColor() } },
-          nameTextStyle: { color: this.chartAxisColor() },
-        },
+        yAxis: { type: "value", name: yName, min, max },
       };
     },
     ensureVhostCharts() {
@@ -219,7 +203,7 @@ export const liveMixin = {
         const el = document.getElementById(elId);
         if (!el) return null;
         if (this.vhostCharts[key]) return this.vhostCharts[key];
-        this.vhostCharts[key] = window.echarts.init(el);
+        this.vhostCharts[key] = initChart(el);
         return this.vhostCharts[key];
       };
       initOne("rps", "vhost-rps-chart");
@@ -261,57 +245,45 @@ export const liveMixin = {
         type: "category",
         boundaryGap: false,
         data: times,
-        axisLine: { lineStyle: { color: this.chartAxisColor() } },
-        axisLabel: { color: this.chartAxisColor(), hideOverlap: true },
+        axisLabel: { hideOverlap: true },
       };
-      const legend = (data) => ({
-        top: 6,
-        right: 10,
-        textStyle: { color: this.chartTextColor() },
-        data,
-      });
+      const legend = (data) => ({ top: 6, right: 10, data });
+      const cc = chartColors();
+      const line = (name, color, data) => ({ name, type: "line", smooth: true, showSymbol: false, lineStyle: { color, width: 2 }, itemStyle: { color }, data });
 
       this.vhostCharts.rps?.setOption({
         ...this.baseLineOption({ yName: "RPS", min: 0 }),
         xAxis: commonXAxis,
         legend: legend(["2xx", "4xx", "5xx"]),
         series: [
-          { name: "2xx", type: "line", smooth: true, showSymbol: false, lineStyle: { color: "#2ec9d7", width: 2 }, data: r2xx },
-          { name: "4xx", type: "line", smooth: true, showSymbol: false, lineStyle: { color: "#f1d64a", width: 2 }, data: r4xx },
-          { name: "5xx", type: "line", smooth: true, showSymbol: false, lineStyle: { color: "#db6178", width: 2 }, data: r5xx },
+          line("2xx", cc.cyan, r2xx),
+          line("4xx", cc.yellow, r4xx),
+          line("5xx", cc.red, r5xx),
         ],
       }, true);
       this.vhostCharts.bot?.setOption({
         ...this.baseLineOption({ yName: "%", min: 0, max: 100 }),
         xAxis: commonXAxis,
         legend: legend(["Bot %"]),
-        series: [
-          { name: "Bot %", type: "line", smooth: true, showSymbol: false, lineStyle: { color: "#2ec9d7", width: 2 }, data: bot },
-        ],
+        series: [line("Bot %", cc.cyan, bot)],
       }, true);
       this.vhostCharts.err?.setOption({
         ...this.baseLineOption({ yName: "%", min: 0, max: 100 }),
         xAxis: commonXAxis,
         legend: legend(["Error %"]),
-        series: [
-          { name: "Error %", type: "line", smooth: true, showSymbol: false, lineStyle: { color: "#f1d64a", width: 2 }, data: err },
-        ],
+        series: [line("Error %", cc.yellow, err)],
       }, true);
       this.vhostCharts.score?.setOption({
         ...this.baseLineOption({ yName: "Score", min: 0, max: 1 }),
         xAxis: commonXAxis,
         legend: legend(["Threat score"]),
-        series: [
-          { name: "Threat score", type: "line", smooth: true, showSymbol: false, lineStyle: { color: "#87d45b", width: 2 }, data: score },
-        ],
+        series: [line("Threat score", cc.green, score)],
       }, true);
       this.vhostCharts.rt?.setOption({
         ...this.baseLineOption({ yName: "ms", min: 0 }),
         xAxis: commonXAxis,
         legend: legend(["Response ms"]),
-        series: [
-          { name: "Response ms", type: "line", smooth: true, showSymbol: false, lineStyle: { color: "#db62e6", width: 2 }, data: rt },
-        ],
+        series: [line("Response ms", cc.purple, rt)],
       }, true);
 
       this.$nextTick(() => this.resizeVhostCharts());
@@ -477,6 +449,11 @@ export const liveMixin = {
     this.resizeHandler = () => this.resizeVhostCharts();
     window.addEventListener("resize", this.resizeHandler);
     this.$nextTick(() => this.resizeVhostCharts());
+    // A registered ECharts theme is fixed at init time — rebuild on toggle.
+    onThemeChange(() => {
+      this.disposeVhostCharts();
+      this.renderVhostCharts();
+    });
   },
   beforeUnmount() {
     if (this.resizeHandler) window.removeEventListener("resize", this.resizeHandler);
