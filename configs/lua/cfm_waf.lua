@@ -169,6 +169,8 @@ local CFG = {
   rule_cve_kirki_forgot_password = "block", -- CVE-2026-8206: Kirki (<=6.0.6) unauth account takeover. POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password with a target username + attacker email (no email/username cross-check) -> reset link mailed to attacker. Keyed on endpoint + both params.
   rule_cve_gf_multi_uploader = "block", -- CVE-2025-23921: Multi Uploader for Gravity Forms (<=1.1.3) unauth arbitrary upload->RCE. POST gf_page=upload with gform_unique_id set to a ../ traversal ending in .phtml/.php (webshell). php-exec is in the FIELD VALUE not filename=, so rule 401 misses it. Actively exploited.
   rule_cve_wp2shell = "block", -- CVE-2026-63030 + CVE-2026-60137 ("wp2shell"): WordPress CORE unauth RCE chain (6.9–6.9.4 / 7.0–7.0.1; fixed 6.9.5/7.0.2), public PoC, actively exploited. Anon POST to the REST batch endpoint (/wp-json/batch/v1 or ?rest_route=/batch/v1); a nested-batch + "///" desync primer (63030 route confusion) smuggles a raw GET to /wp/v2/users?author_exclude=<SQLi> (60137 core SQLi, `0) OR SLEEP(n)-- -`). Gated on batch/v1; keyed on the "///" primer and SQL-breakout in the integer-only author_exclude param.
+  rule_cve_woocommerce_payments = "block", -- CVE-2023-28121: WooCommerce Payments (4.8.0–5.6.1) unauth auth-bypass->privesc. The X-WCPAY-Platform-Checkout-User request header is trusted as the current user id with no validation; an attacker sets it to 1 and mints an admin (POST /wp-json/wp/v2/users roles=administrator). Header is server-set by WooPay only — a client never sends it (near-zero FP); keyed on header presence, all methods. Exempt genuine WooPay source nets via waf_security ALLOW_NETS.
+  rule_cve_gravity_smtp = "block", -- CVE-2026-4020: Gravity SMTP (<=2.1.4) unauth sensitive-info exposure. REST route /gravitysmtp/v1/tests/mock-data has permission_callback=true and dumps the full System Report (PHP/DB/server versions, paths, plugins, API keys/tokens). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate — the only legit caller is the wp-admin settings screen, which carries the logged-in cookie.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -547,6 +549,8 @@ local RULE_IDS = {
   rule_cve_kirki_forgot_password = 10009,
   rule_cve_gf_multi_uploader = 10010,
   rule_cve_wp2shell = 10011,
+  rule_cve_woocommerce_payments = 10012,
+  rule_cve_gravity_smtp = 10013,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -954,6 +958,33 @@ function _M.check(ctx)
           and "WAF_CVE:CVE_2026_60137:WP_CORE:BATCH_SQLI"
           or  "WAF_CVE:CVE_2026_63030:WP_CORE:BATCH_DESYNC"
         if record(reason, ttl, mode, RULE_IDS.rule_cve_wp2shell) then goto done end
+      end
+    end
+  end
+
+  -- ── 3j) WooCommerce Payments unauth auth-bypass -> privesc (CVE-2023-28121) ──
+  -- Header-based (X-WCPAY-Platform-Checkout-User is trusted as the user id); all
+  -- methods / all paths, so it runs here in the early header region.
+  do
+    local mode = rule_mode(CFG.rule_cve_woocommerce_payments, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_woocommerce_payments(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2023_28121:WOOCOMMERCE_PAYMENTS:" .. tag, ttl, mode, RULE_IDS.rule_cve_woocommerce_payments) then goto done end
+      end
+    end
+  end
+
+  -- ── 3k) Gravity SMTP unauth sensitive-info exposure (CVE-2026-4020) ──────────
+  -- REST route + UNAUTH-gated (the detector reads the cookie); all methods.
+  do
+    local mode = rule_mode(CFG.rule_cve_gravity_smtp, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_gravity_smtp(uri, args, cookie)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_4020:GRAVITY_SMTP:" .. tag, ttl, mode, RULE_IDS.rule_cve_gravity_smtp) then goto done end
       end
     end
   end

@@ -30,6 +30,24 @@ back-filled here — see the git/PR history for that period.
   `rule_php_wrappers = "challenge"` or hold the ban with `PHP_WRAPPER = 0`.
 
 ### Added
+- **Two new WAF CVE detectors (family `WAF_CVE`), both edge-`block` + armed
+  autoblock.** Each nft-bans the source for 6h and raises a `WAF/CVE-YYYY-NNNN`
+  Slack/mail alert on a hit:
+  - **WooCommerce Payments auth-bypass → privesc, `CVE-2023-28121`** (rule 10012,
+    plugin 4.8.0–5.6.1). The plugin trusts the `X-WCPAY-Platform-Checkout-User`
+    request header as the current user id with no validation, so an
+    unauthenticated attacker sets it to `1` and mints an admin. Keyed on header
+    presence (all methods / all paths) — the header is server-set by WooPay only,
+    so a real client never sends it (near-zero FP). A site that genuinely runs
+    WooPay should exempt WooPay's source nets with `waf_security` `ALLOW_NETS`.
+  - **Gravity SMTP unauthenticated sensitive-info exposure, `CVE-2026-4020`**
+    (rule 10013, plugin ≤ 2.1.4). The REST route
+    `/gravitysmtp/v1/tests/mock-data` ships `permission_callback=true` and dumps
+    the full System Report (PHP/DB/server versions, absolute paths, active
+    plugins/theme, DB table names, connector API keys/tokens). Keyed on the
+    plugin-unique route (pretty and `?rest_route=` permalink forms) plus an
+    UNAUTH gate — the only legit caller is the wp-admin settings screen, which
+    carries the WP logged-in cookie.
 - **Webdetector history: hard row cap (`HISTORY_MAX_ROWS`, default 1M) +
   sane sqlite maintenance.** Retention was time-based only, so a busy box
   grew the history DB into hundreds of MB (titan: 394 MB **plus a 396 MB
