@@ -348,6 +348,40 @@ local function scan_str(uri, args)
   return normalize(cap(uri or "", n) .. "?" .. cap(args or "", n))
 end
 
+-- Truncate the request PATH at an embedded `data:` URI scheme. A data: URI in the
+-- path (e.g. `/page/data:image/png;base64,AAAA…` or `/data:text/javascript,<code>`)
+-- is a client-side artifact: a browser or link-preview crawler (facebookexternalhit)
+-- resolved an inline `<img src="data:…">` / `<script src="data:…">` as a RELATIVE
+-- link, so the origin receives the data: payload as a path. That payload — base64
+-- image bytes or inline JS — is inert server-side (it 404s, is never executed or
+-- reflected), but its content trips the content-injection detectors: XSS on the
+-- inline `on…=`/`<script`, RCE on `base64,` plus a coincidental eval/exec/system
+-- substring inside the base64. Feed the content rules the path BEFORE the data:
+-- scheme so they don't scan the payload. STRUCTURAL rules (traversal, long-path)
+-- keep the RAW uri, so a `data:`-prefixed `../` cannot bypass them. The data:
+-- scheme is matched only in the URI path here — a data: URI in a query ARG (e.g.
+-- an open-redirect `?next=data:text/html,<script>`) is a real attack and stays
+-- fully scanned. Match is anchored on a short mediatype followed by `,` so an
+-- unrelated path segment that merely contains "data:" is not truncated.
+local function strip_data_uri(uri)
+  if not uri or uri == "" then return uri end
+  -- data: scheme is conventionally lowercase; a plain find keeps this cheap and
+  -- skips the whole scan for the overwhelming majority of requests.
+  local p = uri:find("data:", 1, true)
+  if not p then return uri end
+  repeat
+    local comma = uri:find(",", p + 5, true)
+    -- `data:` + a short mediatype ([mime][;base64]) + `,` confirms a data: URI;
+    -- base64/JS payloads never put a `,` inside the mediatype, and the 64-char
+    -- window rules out a far-away comma in unrelated path text.
+    if comma and comma - p <= 64 and uri:sub(p + 5, comma - 1):match("^[%w%-%+%./;= ]*$") then
+      return uri:sub(1, p - 1)
+    end
+    p = uri:find("data:", p + 1, true)
+  until not p
+  return uri
+end
+
 -- Pick the body-scan byte budget for a request based on its Content-Type.
 -- Falls back to body_scan_budget.other when the header is missing/empty/
 -- unrecognised, and to CFG.max_scan_len when the table itself is absent
@@ -487,6 +521,7 @@ _M.url_decode_once                    = url_decode_once
 _M.normalize                          = normalize
 _M.strip_sql_comments                 = strip_sql_comments
 _M.scan_str                           = scan_str
+_M.strip_data_uri                     = strip_data_uri
 _M.body_budget                        = body_budget
 _M.strip_host_port                    = strip_host_port
 _M.is_ipv4_literal                    = is_ipv4_literal

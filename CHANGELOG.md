@@ -43,6 +43,22 @@ back-filled here — see the git/PR history for that period.
   reports the cap (`max_rows`).
 
 ### Fixed
+- **WAF XSS/RCE (rules 302/320): stop false-positiving on `data:` URIs in the
+  request path.** A browser or link-preview crawler that resolves an inline
+  `<img src="data:…">` / `<script src="data:…">` as a *relative* link makes the
+  origin receive the data: payload as a URL path. That payload is inert
+  server-side (it 404s, is never executed or reflected), but its content tripped
+  the content-injection rules: **RCE (320, block-tier)** on `base64,` plus a
+  coincidental `eval`/`exec`/`system` substring inside the base64 (all valid
+  base64 chars — so it hit **any** `data:*;base64` type: png/jpg/webp/gif/svg/woff2),
+  and **XSS (302)** on inline `on…=`/`<script` in a `data:text/javascript,` body.
+  Confirmed in production: a Greek Vodafone user was **blocked + ban-listed** on a
+  WooCommerce product page (rule 320), and `facebookexternalhit` was repeatedly
+  challenged on a site (rule 302), breaking Facebook link previews. Fix: the
+  content-pattern rules now scan the path truncated at the `data:` scheme
+  (`strip_data_uri`); **structural** rules (traversal/long-path) keep the raw URI,
+  so a `data:`-prefixed `../` is still caught, and a data: URI in a query **arg**
+  (a real open-redirect/XSS vector) stays fully scanned.
 - **Daemon pinned at ~40% CPU while a dashboard tab stayed open.** The
   dashboard's Security overview polls `/api/v1/waf/engine/summary` every 10s,
   and the handler read the **entire** `history_events` table (every event
