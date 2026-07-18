@@ -813,9 +813,13 @@ async function refreshLuaStats() {
     setLoading(true);
     showMsg('');
     try {
+      // Generous cache TTLs: these back "state" cards that change rarely,
+      // and each cache miss spawns a `cfm` CLI subprocess (ssl/stats also
+      // triggers a daemon-side cert refresh + dumpall). With the default
+      // TTLs (5s/10s) a 10s auto-refresh re-ran them nearly every poll.
       const [dnat, ssl] = await Promise.all([
-        api('/v1/system/dnat'),
-        api('/v1/system/ssl/stats'),
+        api('/v1/system/dnat?cache_ttl=30s'),
+        api('/v1/system/ssl/stats?cache_ttl=60s'),
       ]);
         renderDNAT(dnat);
       renderSSLStats(ssl);

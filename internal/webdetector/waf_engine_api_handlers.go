@@ -124,14 +124,16 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	res.ToUnix = to.Unix()
 	res.Hours = hours
 
+	// Windowed + type-filtered in SQL (already ordered ts DESC) — see
+	// readWAFEventsSinceLocked for why this must never become a full-table
+	// read again.
 	e.history.mu.Lock()
-	all, err := e.history.readAllLocked()
+	all, err := e.history.readWAFEventsSinceLocked(res.FromUnix)
 	e.history.mu.Unlock()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].TsUnix > all[j].TsUnix })
 	scope := vhostScopeFromContext(r.Context())
 
 	hosts := map[string]struct{}{}

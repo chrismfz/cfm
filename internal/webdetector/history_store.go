@@ -289,13 +289,22 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	// Prune runs on its own ticker (see prunerLoop); Append never blocks on it.
 }
 
-// readAllLocked returns all events ordered by ts desc.
+// readWAFEventsSinceLocked returns waf_observe/waf_trigger events with
+// ts_unix >= fromUnix, newest first (idx_history_events_type_ts).
 // Caller must hold s.mu before calling.
-func (s *HistoryStore) readAllLocked() ([]HistoryEvent, error) {
+//
+// This MUST stay windowed and type-filtered in SQL: the WAF engine summary
+// endpoint is polled every 10s by the dashboard's Security overview, and
+// its predecessor (readAllLocked) read the WHOLE table — every event type,
+// unbounded time. On a busy box (millions of rows) that was ~1.4 GB of
+// allocations per call and pinned the daemon near 40% CPU for as long as a
+// dashboard tab stayed open.
+func (s *HistoryStore) readWAFEventsSinceLocked(fromUnix int64) ([]HistoryEvent, error) {
 	rows, err := s.db.Query(`
 SELECT id, ts_unix, event_type, host, ip, mode, reason, score, uniq_ip, rps, status_code, ttl_sec, payload_json
 FROM history_events
-ORDER BY ts_unix DESC, id DESC`)
+WHERE event_type IN ('waf_observe', 'waf_trigger') AND ts_unix >= ?
+ORDER BY ts_unix DESC, id DESC`, fromUnix)
 	if err != nil {
 		return nil, err
 	}
