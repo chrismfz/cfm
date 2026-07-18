@@ -25,14 +25,24 @@
 <div id="app" class="landing-shell" v-cloak>
     <header class="topbar">
       <button class="nav-burger" type="button" data-nav-burger aria-label="Toggle navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-      <h1>CFM Admin Dashboard</h1>
+      <h1>Dashboard</h1>
       <div class="meta">
+        <span id="lastUpdated" class="muted"></span>
+        <span class="muted">Auto-refresh: <strong id="autoState">ON</strong></span>
         <button id="refreshBtn" class="btn-quiet">Refresh now</button>
+        <button id="toggleAutoBtn" class="btn-quiet">Stop</button>
       </div>
     </header>
     <noscript><p class="statusline" style="padding:0 1rem;">JavaScript is required for live dashboard data.</p></noscript>
 
     <main class="layout">
+      <section class="card wide" id="securityCard">
+        <h2>Security overview <span class="top-hint">last 24h where noted — click a card to drill in</span></h2>
+        <div id="securityGrid" class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))">
+          <p class="muted">Loading…</p>
+        </div>
+      </section>
+
       <section class="card wide">
         <h2>Quick controls</h2>
         <div class="toolbar">
@@ -41,6 +51,7 @@
           <input id="reason" class="input input-wide" type="text" placeholder="reason" value="webui manual block" />
           <button id="blockBtn">Block</button>
           <button id="unblockBtn" class="btn-quiet">Unblock</button>
+          <a class="btn-quiet" href="/cfm-admin/firewall/">Open Firewall page</a>
         </div>
         <p id="actionMsg" class="statusline" style="display:none"></p>
       </section>
@@ -77,12 +88,22 @@
 
       <section class="card">
         <h2>DNAT status</h2>
-        <pre id="dnatText">Loading...</pre>
+        <p id="dnatSummary" class="muted">Loading…</p>
+        <details class="raw-json">
+          <summary>Raw nft ruleset</summary>
+          <pre id="dnatText">Loading...</pre>
+        </details>
       </section>
 
       <section class="card">
-        <h2>SSL stats</h2>
-        <pre id="sslText">Loading...</pre>
+        <h2>SSL certificates</h2>
+        <div id="sslGrid" class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
+          <p class="muted">Loading…</p>
+        </div>
+        <details class="raw-json" style="margin-top:.6rem">
+          <summary>Raw stats</summary>
+          <pre id="sslText">Loading...</pre>
+        </details>
       </section>
     </main>
   </div>
