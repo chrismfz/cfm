@@ -17,6 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **WAF → autoblock: `WAF_WEBSHELL` (rule 413) is now armed by default.** The
+  webshell drop-path family (proper-noun names: `c99`/`r57`/`wso`/`b374k`/…) has
+  an edge-`block` rule (413) but was held un-armed through burn-in, because a
+  webshell GET-probe (`/c99.php`) is also what benign internet scanners
+  (Shodan/Censys/uptime monitors) do, so auto-arming would nft-ban them. The
+  operator now runs it armed fleet-wide and confirms it reliably bans malicious
+  scanners/scrapers/bots with acceptable collateral, so it is armed by default
+  (`WEBSHELL = 1`) in both the code default (`wafSecurityFamilies`) and the
+  reference `detectors.conf`. Every WAF family with an edge-`block` rule now arms
+  to 1 with no exceptions. **Upgrade impact:** an existing `/etc/cfm/detectors.conf`
+  that doesn't list `WEBSHELL` inherits the new armed default — sources probing for
+  known webshells get a 6h soft nft ban (previously edge-403 only). To keep a
+  benign scanner out of it, exempt it with `ALLOW_UA_CONTAINS`/`ALLOW_NETS`, hold
+  the rule with `RULE_413 = 0`, or set `WEBSHELL = 0`.
+
 ### Fixed
 - **WAF object injection (rule 329): exclude Akeeba Restore endpoints.** A legit
   Joomla admin running a core update (`option=com_joomlaupdate&task=update.install`)

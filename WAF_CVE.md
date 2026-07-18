@@ -77,20 +77,22 @@ sink). So `CVE = 0` would silence the very alerts the `block` tier exists to
 produce.
 
 - `wafSecurityFamilies` (`internal/detectors/waf_security_register.go`) arms a
-  family by default *iff* it has an edge-`block` rule — the sole exception is
-  `WAF_WEBSHELL`:
+  family by default *iff* it has an edge-`block` rule (plus `WAF_BACKDOOR`,
+  armed ahead of its first block rule):
 
   ```go
-  if (webdetector.WAFFamilyHasBlockRule(fam) && fam != "WAF_WEBSHELL") || fam == "WAF_BACKDOOR" {
+  if webdetector.WAFFamilyHasBlockRule(fam) || fam == "WAF_BACKDOOR" {
       def = 1
   }
   ```
 
-  (`WAF_WEBSHELL` is held at `0` because arming it would nft-ban benign
-  scanners that GET `/c99.php`. A CVE exploit is a POST of a PHP payload to a
-  product-specific endpoint — not something benign scanners do — so the same
-  concern doesn't apply.) `TestWAFSecurityFamilyCoverage` asserts `WAF_CVE`
-  defaults to `1`.
+  (`WAF_WEBSHELL` was held at `0` through burn-in — arming it nft-bans a source
+  that GETs `/c99.php`, which includes benign scanners — but as of 2026-07-18 the
+  operator runs it armed fleet-wide with acceptable collateral, so it now arms to
+  `1` like the rest; exempt a scanner with `ALLOW_UA_CONTAINS`/`ALLOW_NETS` or
+  hold rule 413 with `RULE_413 = 0` if needed.)
+  `TestWAFSecurityFamilyCoverage` asserts `WAF_CVE` **and** `WAF_WEBSHELL`
+  default to `1`.
 
 - **`WAF_CVE` is heterogeneous** — it collects many CVEs of varying FP
   confidence under one family. Because the family is armed, a
