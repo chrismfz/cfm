@@ -7,6 +7,7 @@
   // (403) on these paths; this just hides the dead links from scoped users.
   const ADMIN_ONLY_NAV_PATHS = new Set([
     '/cfm-admin',                    // Dashboard (global stats + global block/unblock)
+    '/cfm-admin/health',             // Health history — box-wide metrics (admin-only endpoints)
     '/cfm-admin/webdetector/bots',   // Web Bots — global UA emergency controls
     '/cfm-admin/notifier',
     '/cfm-admin/detectors',

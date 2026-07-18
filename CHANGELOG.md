@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WebUI: Health page (`/cfm-admin/health/`) — metric history + anomaly
+  feed.** New sidebar entry (Overview → Health, admin-only) rendering the
+  daemon's existing in-memory health timeseries as proper ECharts line
+  charts with a 1h/3h/6h/24h window selector: Utilization (CPU/RAM/swap/
+  disk-/ %, one 0-100 axis), Load average, Network throughput (in/out
+  Mbps), and Temperature (shown only when sensors report). Below them, the
+  previously UI-less `/api/v1/health/anomalies` feed (auth-fail bursts,
+  scope probes, …) as a table with per-IP deep links into WebDetector. The
+  dashboard's Node health card links over ("History →"). To make the 24h
+  window real, the health ring store's default capacity grows from 720
+  samples (2-4h at the detector's 10-20s cadence) to 8640 (~1 MB per node).
 - **Heartbeat now carries quick-glance vitals (fleet-monitoring Phase 1).**
   Alongside `dnat_enabled`/`edge`, the agent heartbeat sends a `vitals` block
   — load1, real CPU%, RAM%, swap%, disk-root%, uptime, and the mail-queue

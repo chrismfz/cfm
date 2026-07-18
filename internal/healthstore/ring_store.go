@@ -6,7 +6,12 @@ import (
 	"time"
 )
 
-const DefaultCapacity = 720
+// DefaultCapacity sizes the per-node ring for a full day of history: the
+// health detector samples every 10-20s, so 8640 slots cover 24h at 10s
+// (48h at 20s). Sample is ~120 bytes → ~1 MB per node; the WebUI Health
+// page's 24h window reads the whole ring. Was 720 (only 2-4h) before the
+// Health page shipped.
+const DefaultCapacity = 8640
 
 type NodeMeta struct {
 	NodeID     string    `json:"node_id"`
