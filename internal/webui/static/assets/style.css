@@ -403,6 +403,7 @@ tr.bulk-selected:hover { background: var(--danger-soft); }
   font-size: .75rem;
   margin-right: .3rem;
 }
+.pill.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
 .pill.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
 .pill.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
 .statusline { margin: 0 0 .6rem; color: var(--accent-strong); }

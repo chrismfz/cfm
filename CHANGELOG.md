@@ -18,6 +18,31 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Dashboard: "Node health" card fed by the health snapshot.** The
+  `/cfm-admin` dashboard's "Health quick stats" card never received data (its
+  fields stayed `-`); it is replaced by a wide **Node health** card driven by
+  the same `health.snapshot.v1` payload as `cfm health`: CPU (real busy% +
+  usr/sys/io breakdown), load 1/5/15, RAM/swap, conntrack, network throughput,
+  an **Edge / runtime** chip row (CFM daemon/service, web+panel DNAT,
+  active edge — openresty/angie — upstream, challenge-flow readiness, SSL
+  collector, ingest socket, systemd services), a per-mount **Disks** table
+  (use% + inode%) and **Storage health** (SMART/wearout/MDADM/ZFS summary +
+  per-device SMART table). A header pill rolls the snapshot up to
+  healthy / N issues, with the issue list shown as chips. The card is hidden
+  for scoped viewers (the endpoint is admin-only).
+- **`/api/v1/health/snapshot` opt-in cache (`?cache_ttl=`).** Default stays a
+  fresh collection (what `cfm health` expects). With `cache_ttl` (same 1s..1m
+  clamp as the other system endpoints) the daemon serves a cached snapshot and
+  recollects at most once per TTL in the background (stale-while-revalidate),
+  so the dashboard's 10s auto-refresh costs one ~1-2s collection per minute
+  instead of one per poll. `collected_at` reports the snapshot's real age.
+
+### Removed
+- **Dashboard: "Bot / throttle overview" card.** It rarely had data on the
+  dashboard ("No data.") while the dedicated Web Bots page covers the same
+  ground properly — dropped from the dashboard to reduce noise.
+
+### Added
 - **Health snapshot: host detail round-out (fleet-monitoring Phase 0).** The
   health pipeline (detector sampler → `/api/v1/health/snapshot` → `cfm
   health`) now also collects: **swap** used/total, memory breakdown

@@ -119,6 +119,22 @@ curl -sS -X POST \
 
 ---
 
+## 3b) Node health snapshot (dashboard "Node health" card)
+
+Full `health.snapshot.v1` payload (host CPU/RAM/swap, disks + SMART/MDADM/ZFS,
+services, DNAT/edge/challenge-flow runtime, conntrack, throughput). Admin-only.
+
+```bash
+# fresh collection (~1-2s: smartctl/systemd/socket probes) — what `cfm health` uses
+curl -sS "$CFM_API/api/v1/health/snapshot" | jq .
+
+# cached, stale-while-revalidate — what the dashboard polls (recollects at most
+# once per TTL; TTL clamped to 1s..1m; check `collected_at` for the real age)
+curl -sS "$CFM_API/api/v1/health/snapshot?cache_ttl=60s" | jq .
+```
+
+---
+
 ## 4) Offline analysis (helpful for TSV validation)
 
 These endpoints are useful when you want to inspect behavior against real/sampled TSV logs.

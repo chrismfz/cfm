@@ -10,7 +10,8 @@
 
   const state = {
     loading: false,
-    health: {},
+    health: null,       // health.snapshot.v1 payload (admin-only, 1m server cache)
+    healthError: null,
     lua: null,
     scoped: false,
   };
@@ -32,10 +33,12 @@ const el = {
   lastUpdated:       document.getElementById('lastUpdated'),
   autoState:         document.getElementById('autoState'),
   toggleAutoBtn:     document.getElementById('toggleAutoBtn'),
+  nodeHealthCard:    document.getElementById('nodeHealthCard'),
   healthGrid:        document.getElementById('healthGrid'),
+  healthStatusPill:  document.getElementById('healthStatusPill'),
+  healthMeta:        document.getElementById('healthMeta'),
   nginxOverviewGrid: document.getElementById('nginxOverviewGrid'),
   cacheOverview:     document.getElementById('cacheOverview'),
-  throttleOverview:  document.getElementById('throttleOverview'),
   nginxStatsGrid:    document.getElementById('nginxStatsGrid'),
 };
 
@@ -121,13 +124,24 @@ const el = {
   function fmtBytes(n) {
     const v = Number(n);
     if (!Number.isFinite(v) || v <= 0) return '0 B';
-    const u = ['B', 'KB', 'MB', 'GB'];
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
     let x = v, i = 0;
     while (x >= 1024 && i < u.length - 1) {
       x /= 1024;
       i++;
     }
     return `${(x >= 10 || i === 0) ? x.toFixed(0) : x.toFixed(1)} ${u[i]}`;
+  }
+
+  function fmtDur(secs) {
+    const n = Number(secs);
+    if (!Number.isFinite(n) || n <= 0) return '-';
+    const d = Math.floor(n / 86400);
+    const h = Math.floor((n % 86400) / 3600);
+    const m = Math.floor((n % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
   }
 
   function fmtAge(s) {
@@ -173,43 +187,291 @@ const el = {
     return `<span class="pill" style="${s}">${escapeHTML(mode || 'disabled')}</span>`;
   }
 
-  function parseHealth(text) {
-    const get = (re) => {
-      const m = text.match(re);
-      return m ? m[1] : null;
+  // ---- Node health (health.snapshot.v1 from /v1/health/snapshot) ----
+
+  function healthPill(text, tone, title) {
+    const cls = tone ? ` ${tone}` : '';
+    const t = title ? ` title="${escapeHTML(title)}"` : '';
+    return `<span class="pill${cls}"${t}>${text}</span>`;
+  }
+
+  function pctTone(p) {
+    const v = Number(p);
+    if (!Number.isFinite(v)) return '';
+    if (v >= 90) return 'danger';
+    if (v >= 75) return 'warn';
+    return 'ok';
+  }
+
+  // Normalized good/neutral vocabularies of the snapshot's summary strings
+  // (smart_health, mdadm_health, zfs_health, disk_wearout, mdadm.status).
+  function storageTone(v) {
+    const s = String(v || '').trim().toLowerCase();
+    if (!s) return '';
+    if (['ok', 'normal', 'healthy', 'pass', 'online', 'clean'].includes(s)) return 'ok';
+    if (['unknown', 'n/a', 'none', 'no raid', 'no active raid'].includes(s)) return '';
+    return 'danger';
+  }
+
+  function healthSectionHeading(text, extra) {
+    return `<div class="muted" style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;margin:.7rem 0 .45rem">
+      ${escapeHTML(text)}${extra ? `<span class="muted" style="font-size:.72rem;text-transform:none;margin-left:.4rem">${extra}</span>` : ''}
+    </div>`;
+  }
+
+  function collectHealthIssues(s) {
+    const issues = [];
+    const push = (tone, text) => issues.push({ tone, text });
+    const rt = s.runtime || {};
+    const disk = s.disk || {};
+    const net = s.network || {};
+
+    if (rt.cfm_daemon_live === false) push('danger', 'CFM daemon not running');
+    if (rt.edge_status === 'inactive') push('danger', `edge ${rt.edge_service || '?'} inactive`);
+    else if (rt.edge_status === 'degraded') push('warn', `edge ${rt.edge_service || '?'} degraded`);
+    const flow = String(rt.challenge_flow_state || '').toUpperCase();
+    if (flow === 'FAIL') push('danger', `challenge flow: ${rt.challenge_flow_reason || 'FAIL'}`);
+    else if (flow === 'WARN') push('warn', `challenge flow: ${rt.challenge_flow_reason || 'WARN'}`);
+    if (rt.ingest_socket_status === 'down') push('warn', 'ingest socket down');
+    if (storageTone(disk.smart_health) === 'danger') push('danger', `SMART: ${disk.smart_health}`);
+    if (storageTone(disk.disk_wearout) === 'danger') push('warn', `disk wearout: ${disk.disk_wearout}`);
+    if (storageTone(disk.mdadm_health) === 'danger') push('danger', `MDADM: ${disk.mdadm_health}`);
+    if (storageTone(disk.zfs_health) === 'danger') push('danger', `ZFS: ${disk.zfs_health}`);
+    for (const m of (Array.isArray(disk.mounts) ? disk.mounts : [])) {
+      const used = num(m.used_pct);
+      const inode = num(m.inode_used_pct);
+      if (used != null && used >= 90) push('danger', `${m.mount} at ${used.toFixed(1)}%`);
+      else if (used != null && used >= 80) push('warn', `${m.mount} at ${used.toFixed(1)}%`);
+      if (inode != null && inode >= 90) push('danger', `${m.mount} inodes at ${inode.toFixed(1)}%`);
+    }
+    const ctPct = num(net.conntrack_usage_pct);
+    if (ctPct != null && ctPct >= 90) push('danger', `conntrack at ${ctPct.toFixed(0)}%`);
+    else if (ctPct != null && ctPct >= 75) push('warn', `conntrack at ${ctPct.toFixed(0)}%`);
+    if (s.error) push('warn', `collector: ${s.error}`);
+    return issues;
+  }
+
+  function renderHealthHostTiles(s) {
+    const host = s.host || {};
+    const net = s.network || {};
+
+    const pct1 = (v) => {
+      const n = num(v);
+      return n == null ? '-' : `${n.toFixed(1)}%`;
     };
-    return {
-      cpuLoad: get(/CPU load:\s*([^\n]+)/),
-      ramPct: num(get(/RAM:\s*([0-9.]+)%/)),
-      diskPct: num(get(/Disk \/:\s*([0-9.]+)%/)),
-      connections: get(/Connections:\s*([^\n]+)/),
-      conntrack: get(/Conntrack:\s*([^\n]+)/),
-      conntrackPct: num(get(/Conntrack:\s*\d+\s*\/\s*\d+\s*\(([0-9.]+)%\)/)),
+
+    const cpuPct = num(host.cpu_percent);
+    const cpuSub = host.cpu_percent_source === 'procstat'
+      ? `usr ${pct1(host.cpu_user_pct)} · sys ${pct1(host.cpu_system_pct)} · io ${pct1(host.cpu_iowait_pct)}`
+      : 'load estimate';
+
+    const load1 = num(host.load_avg_1);
+    const threads = num(host.cpu_threads);
+    const loadPct = (load1 != null && threads > 0) ? (load1 / threads) * 100 : null;
+    const loadSub = `5m ${num(host.load_avg_5)?.toFixed(2) ?? '-'} · 15m ${num(host.load_avg_15)?.toFixed(2) ?? '-'}${threads > 0 ? ` · ${threads} threads` : ''}`;
+
+    const memUsed = num(host.mem_used_bytes);
+    const memTotal = num(host.mem_total_bytes);
+    const memPct = (memUsed != null && memTotal > 0) ? (memUsed / memTotal) * 100 : null;
+
+    const swapTotal = num(host.swap_total_bytes);
+    const swapUsed = num(host.swap_used_bytes);
+    const swapPct = (swapTotal > 0 && swapUsed != null) ? (swapUsed / swapTotal) * 100 : null;
+
+    const ctCount = num(net.conntrack_count);
+    const ctMax = num(net.conntrack_max);
+    const ctPct = num(net.conntrack_usage_pct);
+
+    return `<div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))">
+      ${miniCard('CPU', cpuPct != null ? escapeHTML(`${cpuPct.toFixed(1)}%`) : '-', escapeHTML(cpuSub), cpuPct)}
+      ${miniCard('Load avg (1m)', load1 != null ? escapeHTML(load1.toFixed(2)) : '-', escapeHTML(loadSub), loadPct)}
+      ${miniCard('RAM', memTotal > 0 ? escapeHTML(`${fmtBytes(memUsed)} / ${fmtBytes(memTotal)}`) : '-', memPct != null ? escapeHTML(`${memPct.toFixed(1)}%`) : '', memPct)}
+      ${miniCard('Swap', swapTotal > 0 ? escapeHTML(`${fmtBytes(swapUsed)} / ${fmtBytes(swapTotal)}`) : 'none', swapPct != null ? escapeHTML(`${swapPct.toFixed(1)}%`) : '', swapPct)}
+      ${miniCard('Conntrack', (ctCount != null && ctMax > 0) ? escapeHTML(`${ctCount} / ${ctMax}`) : '-', ctPct != null ? escapeHTML(`${ctPct.toFixed(1)}%`) : '', ctPct)}
+      ${miniCard('Network', `↓ ${escapeHTML(fmtBytes(net.bandwidth_in_bps))}/s`, `↑ ${escapeHTML(fmtBytes(net.bandwidth_out_bps))}/s`, null)}
+    </div>`;
+  }
+
+  function renderHealthRuntimeChips(s) {
+    const rt = s.runtime || {};
+    const chips = [];
+    const chip = (label, value, tone, title) =>
+      chips.push(healthPill(`${escapeHTML(label)}: <strong>${escapeHTML(value)}</strong>`, tone, title));
+
+    chip('CFM daemon',
+      rt.cfm_daemon_live ? `live${rt.cfm_daemon_pid ? ` · pid ${rt.cfm_daemon_pid}` : ''}` : 'down',
+      rt.cfm_daemon_live ? 'ok' : 'danger');
+
+    const onOff = (v) => {
+      const val = String(v || 'unknown');
+      return { val, tone: val === 'on' ? 'ok' : (val === 'off' ? '' : 'warn') };
     };
+    const webDnat = onOff(rt.dnat_enabled);
+    chip('Web DNAT', webDnat.val, webDnat.tone, rt.dnat_warning || '');
+    const panelDnat = onOff(rt.panel_dnat_enabled);
+    chip('Panel DNAT', panelDnat.val, panelDnat.tone);
+
+    const edgeTone = rt.edge_status === 'active' ? 'ok' : (rt.edge_status === 'degraded' ? 'warn' : 'danger');
+    chip('Edge', `${rt.edge_service || 'unknown'} · ${rt.edge_status || 'unknown'}`, edgeTone, rt.edge_reason_code || '');
+    chip('Upstream', `${rt.upstream_service || 'unknown'} · ${rt.upstream_status || 'unknown'}`,
+      rt.upstream_status === 'active' ? 'ok' : '', rt.upstream_reason_code || '');
+
+    const flow = String(rt.challenge_flow_state || 'unknown').toUpperCase();
+    chip('Challenge flow', flow,
+      flow === 'OK' ? 'ok' : (flow === 'WARN' ? 'warn' : (flow === 'FAIL' ? 'danger' : '')),
+      rt.challenge_flow_reason || '');
+
+    const ssl = String(rt.sslcollector_status || '');
+    chip('SSL collector', ssl === 'transport' ? 'OK' : (ssl || 'unknown'),
+      ssl === 'transport' ? 'ok' : 'danger');
+
+    const ingest = String(rt.ingest_socket_status || 'unknown');
+    chip('Ingest', ingest,
+      ingest === 'live' ? 'ok' : (ingest === 'listening' ? 'warn' : (ingest === 'down' ? 'danger' : '')),
+      rt.ingest_socket_reason || rt.ingest_socket_path || '');
+
+    for (const svc of (Array.isArray(s.services) ? s.services : [])) {
+      const tone = svc.active ? 'ok'
+        : (svc.name === 'cfm' || svc.enabled) ? 'danger'
+        : '';
+      chip(svc.name, `${svc.state || 'unknown'}${svc.enabled ? '' : ' · disabled'}`, tone);
+    }
+
+    return `<div style="display:flex;flex-wrap:wrap;gap:.3rem .1rem">${chips.join('')}</div>`;
+  }
+
+  function renderHealthDisks(s) {
+    const disk = s.disk || {};
+    const mounts = Array.isArray(disk.mounts) ? disk.mounts : [];
+    if (!mounts.length) return '';
+
+    const rows = mounts.map((m) => {
+      const used = num(m.used_pct);
+      const inode = num(m.inode_used_pct);
+      const tone = pctTone(used);
+      const usedStyle = tone === 'danger' ? 'color:var(--danger)' : (tone === 'warn' ? 'color:var(--warn)' : '');
+      return `<tr>
+        <td><code>${escapeHTML(m.mount || '-')}</code></td>
+        <td>${escapeHTML(fmtBytes(m.used_bytes))} / ${escapeHTML(fmtBytes(m.total_bytes))}</td>
+        <td style="min-width:140px">
+          <span style="${usedStyle}">${used != null ? `${used.toFixed(1)}%` : '-'}</span>
+          ${used != null ? progressBar(used) : ''}
+        </td>
+        <td>${inode != null && num(m.total_inodes) > 0 ? `${inode.toFixed(1)}%` : 'n/a'}</td>
+      </tr>`;
+    }).join('');
+
+    return `${healthSectionHeading('Disks')}
+      <div class="table-wrap">
+        <table class="compact-table" style="width:100%">
+          <thead><tr><th>Mount</th><th>Used / Total</th><th>Use %</th><th>Inodes %</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  function renderHealthStorage(s) {
+    const disk = s.disk || {};
+    const devs = disk.smart_devices || {};
+    const devNames = Object.keys(devs).sort();
+    const chips = [
+      healthPill(`SMART: <strong>${escapeHTML(disk.smart_health || 'unknown')}</strong>`, storageTone(disk.smart_health)),
+      healthPill(`Wearout: <strong>${escapeHTML(disk.disk_wearout || 'unknown')}</strong>`, storageTone(disk.disk_wearout)),
+      healthPill(`MDADM: <strong>${escapeHTML(disk.mdadm_health || disk.mdadm?.status || 'unknown')}</strong>`, storageTone(disk.mdadm_health || disk.mdadm?.status)),
+      healthPill(`ZFS: <strong>${escapeHTML(disk.zfs_health || 'unknown')}</strong>`, storageTone(disk.zfs_health)),
+    ].join('');
+
+    let devTable = '';
+    if (devNames.length) {
+      const rows = devNames.map((name) => {
+        const d = devs[name] || {};
+        const wear = d.wearout_pct_used != null ? `${d.wearout_pct_used}% used` : 'n/a';
+        const health = d.normalized_health || d.health || (d.error ? 'error' : 'unknown');
+        return `<tr>
+          <td><code>${escapeHTML(name)}</code></td>
+          <td>${escapeHTML(d.model || '-')}</td>
+          <td>${escapeHTML(d.device_type || '-')}</td>
+          <td>${healthPill(escapeHTML(health), storageTone(health), d.error || '')}</td>
+          <td>${escapeHTML(wear)}</td>
+          <td>${escapeHTML(d.temperature_c ? `${d.temperature_c}°C` : '-')}</td>
+        </tr>`;
+      }).join('');
+      devTable = `<details class="raw-json" style="margin-top:.45rem">
+        <summary>SMART devices (${devNames.length})</summary>
+        <div class="table-wrap">
+          <table class="compact-table" style="width:100%">
+            <thead><tr><th>Device</th><th>Model</th><th>Type</th><th>Health</th><th>Wearout</th><th>Temp</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </details>`;
+    }
+
+    return `${healthSectionHeading('Storage health')}
+      <div style="display:flex;flex-wrap:wrap;gap:.3rem .1rem">${chips}</div>
+      ${devTable}`;
   }
 
   function renderHealth() {
-    const h = state.health || {};
-    const ng = state.lua?.nginx || {};
-    const wk = ng.worker || {};
-    const conn = ng.connections || {};
+    if (!el.healthGrid) return;
+    const s = state.health;
 
-    const items = [
-      { label: 'CPU load (1m)', value: h.cpuLoad || '-', pct: null },
-      { label: 'RAM', value: h.ramPct != null ? `${h.ramPct}%` : '-', pct: h.ramPct },
-      { label: 'Disk /', value: h.diskPct != null ? `${h.diskPct}%` : '-', pct: h.diskPct },
-      { label: 'System connections', value: h.connections || '-', pct: null },
-      { label: 'Conntrack', value: h.conntrack || '-', pct: h.conntrackPct },
-      { label: 'Nginx active', value: conn.active != null ? String(conn.active) : '-', pct: null },
-      { label: 'Nginx reading', value: conn.reading != null ? String(conn.reading) : '-', pct: null },
-      { label: 'Nginx writing', value: conn.writing != null ? String(conn.writing) : '-', pct: null },
-      { label: 'Nginx waiting', value: conn.waiting != null ? String(conn.waiting) : '-', pct: null },
-      { label: 'Nginx workers', value: wk.count != null ? String(wk.count) : '-', pct: null },
-    ];
+    if (!s) {
+      if (state.healthError) {
+        el.healthGrid.innerHTML = `<p class="muted">Health snapshot unavailable: ${escapeHTML(state.healthError)}</p>`;
+        if (el.healthStatusPill) el.healthStatusPill.innerHTML = healthPill('unavailable', 'warn');
+      }
+      return;
+    }
 
-    el.healthGrid.innerHTML = items
-      .map((k) => miniCard(escapeHTML(k.label), escapeHTML(String(k.value)), '', k.pct))
-      .join('');
+    const issues = collectHealthIssues(s);
+    const worst = issues.some((i) => i.tone === 'danger') ? 'danger' : (issues.length ? 'warn' : 'ok');
+    if (el.healthStatusPill) {
+      el.healthStatusPill.innerHTML = worst === 'ok'
+        ? healthPill('healthy', 'ok')
+        : healthPill(`${issues.length} issue${issues.length > 1 ? 's' : ''}`, worst, issues.map((i) => i.text).join(' · '));
+    }
+    if (el.healthMeta) {
+      const host = s.host || {};
+      let age = '-';
+      const t = new Date(s.collected_at).getTime();
+      if (Number.isFinite(t)) age = fmtAge(Math.max(0, Math.round((Date.now() - t) / 1000)));
+      const parts = [s.node_id || host.hostname || '', `collected ${age}`];
+      if (num(host.uptime_seconds) > 0) parts.push(`up ${fmtDur(host.uptime_seconds)}`);
+      if (host.os_pretty_name) parts.push(host.os_pretty_name);
+      el.healthMeta.textContent = parts.filter(Boolean).join(' · ');
+    }
+
+    const issueBanner = issues.length
+      ? `<div style="display:flex;flex-wrap:wrap;gap:.3rem .1rem;margin-bottom:.55rem">
+          ${issues.map((i) => healthPill(escapeHTML(i.text), i.tone)).join('')}
+        </div>`
+      : '';
+
+    el.healthGrid.innerHTML =
+      issueBanner +
+      renderHealthHostTiles(s) +
+      healthSectionHeading('Edge / runtime') +
+      renderHealthRuntimeChips(s) +
+      renderHealthDisks(s) +
+      renderHealthStorage(s);
+  }
+
+  async function refreshHealthSnapshot() {
+    if (!el.healthGrid) return;
+    if (state.scoped) {
+      // /v1/health/snapshot is admin-only; hide the card for scoped viewers.
+      if (el.nodeHealthCard) el.nodeHealthCard.style.display = 'none';
+      return;
+    }
+    try {
+      state.health = await api('/v1/health/snapshot?cache_ttl=60s');
+      state.healthError = null;
+    } catch (e) {
+      state.health = null;
+      state.healthError = e.message;
+    }
+    renderHealth();
   }
 
   function renderNginxOverview() {
@@ -360,28 +622,6 @@ function renderCacheOverview() {
     </p>
   `;
 }
-
-
-function renderThrottleOverview() {
-  if (!el.throttleOverview) return;
-
-  const t = state.lua?.throttle?.meta || null;
-
-  if (!t) {
-    el.throttleOverview.innerHTML = '<p class="muted">No data.</p>';
-    return;
-  }
-
-  el.throttleOverview.innerHTML = [
-    miniCard('Meta crawler total', escapeHTML(String(t.total ?? 0)), '', null),
-    miniCard('Throttled', escapeHTML(String(t.throttled ?? 0)), escapeHTML(`(${t.throttled_pct ?? 0}%)`), t.throttled_pct),
-    miniCard('Rejected', escapeHTML(String(t.rejected ?? 0)), escapeHTML(`(${t.rejected_pct ?? 0}%)`), t.rejected_pct),
-    miniCard('Delayed', escapeHTML(String(t.delayed ?? 0)), escapeHTML(`(${t.delayed_pct ?? 0}%)`), t.delayed_pct),
-    miniCard('HTTP 429', escapeHTML(String(t.http_429 ?? 0)), escapeHTML(`(${t.http_429_pct ?? 0}%)`), t.http_429_pct),
-  ].join('');
-}
-
-
 
 
   function renderNginxStats() {
@@ -579,16 +819,12 @@ const dictSection = `
 async function refreshLuaStats() {
   try {
     state.lua = await fetchLuaStats();
-    renderHealth();
     renderNginxOverview();
     renderCacheOverview();
-    renderThrottleOverview();
     renderNginxStats();
   } catch (e) {
-    renderHealth();
     renderNginxOverview();
     renderCacheOverview();
-    renderThrottleOverview();
     if (el.nginxStatsGrid) {
       el.nginxStatsGrid.innerHTML = `<p class="muted" style="grid-column:1/-1">Lua stats unavailable: ${escapeHTML(e.message)}</p>`;
     }
@@ -690,11 +926,8 @@ async function refreshLuaStats() {
         api('/v1/system/dnat'),
         api('/v1/system/ssl/stats'),
       ]);
-      state.health = {};
-      renderHealth();
       renderNginxOverview();
       renderCacheOverview();
-      renderThrottleOverview();
       renderDNAT(dnat);
       renderSSLStats(ssl);
       if (el.lastUpdated) el.lastUpdated.textContent = 'Updated ' + new Date().toLocaleTimeString();
@@ -704,6 +937,7 @@ async function refreshLuaStats() {
       setLoading(false);
     }
     refreshLuaStats();
+    refreshHealthSnapshot();
     refreshSecurityOverview();
   }
 
