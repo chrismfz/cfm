@@ -203,6 +203,9 @@ type HeartbeatRequest struct {
 	// binary's version token (e.g. "openresty/1.25.3.2"), best-effort.
 	Edge        *string `json:"edge,omitempty"`
 	EdgeVersion *string `json:"edge_version,omitempty"`
+	// Vitals is the quick-glance host metrics block (vitals.go); nil —
+	// and therefore absent — when no fresh health sample exists.
+	Vitals *HeartbeatVitals `json:"vitals,omitempty"`
 }
 
 func (c *APIClient) SendHeartbeat(ctx context.Context, version, userAgent string, hb HeartbeatRequest) (int, time.Duration, error) {

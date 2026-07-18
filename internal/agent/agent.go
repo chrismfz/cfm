@@ -204,6 +204,7 @@ func (r *Runner) doHeartbeat(ctx context.Context) {
 		hb.Edge = &edge
 		hb.EdgeVersion = &edgeVer
 	}
+	hb.Vitals = collectVitals()
 
 	heartbeatHost := hostForLog(cfg.BaseURL)
 	if logging.DebugEnabled() {
