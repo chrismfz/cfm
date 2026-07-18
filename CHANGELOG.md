@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **WAF PHP stream-wrapper rule (305, `WAF_PHP_WRAPPER`) promoted to `block` and
+  armed for autoblock.** `php://`/`phar://`/`data://`/`zip://`/`expect://`/`glob://`
+  in request args or body is the primary sink for LFI→RCE and CVE-2024-4577-style
+  php-cgi injection, and no benign app sends those, so the rule moves from
+  `challenge` to edge-`block`. Because it now has an edge-block rule, `WAF_PHP_WRAPPER`
+  auto-arms in `waf_security` (`PHP_WRAPPER = 1`): a hit gets a 6h soft nft ban plus
+  a Slack/mail alert. The detector scans args/body only (not the URL path) and
+  matches `data://` (the stream wrapper), **not** `data:` image/JS URIs, so inline
+  data-URI page assets do not trip it. Opt back out per-vhost with
+  `rule_php_wrappers = "challenge"` or hold the ban with `PHP_WRAPPER = 0`.
+
 ### Added
 - **Webdetector history: hard row cap (`HISTORY_MAX_ROWS`, default 1M) +
   sane sqlite maintenance.** Retention was time-based only, so a busy box
@@ -31,6 +43,22 @@ back-filled here — see the git/PR history for that period.
   reports the cap (`max_rows`).
 
 ### Fixed
+- **WAF XSS/RCE (rules 302/320): stop false-positiving on `data:` URIs in the
+  request path.** A browser or link-preview crawler that resolves an inline
+  `<img src="data:…">` / `<script src="data:…">` as a *relative* link makes the
+  origin receive the data: payload as a URL path. That payload is inert
+  server-side (it 404s, is never executed or reflected), but its content tripped
+  the content-injection rules: **RCE (320, block-tier)** on `base64,` plus a
+  coincidental `eval`/`exec`/`system` substring inside the base64 (all valid
+  base64 chars — so it hit **any** `data:*;base64` type: png/jpg/webp/gif/svg/woff2),
+  and **XSS (302)** on inline `on…=`/`<script` in a `data:text/javascript,` body.
+  Confirmed in production: a Greek Vodafone user was **blocked + ban-listed** on a
+  WooCommerce product page (rule 320), and `facebookexternalhit` was repeatedly
+  challenged on a site (rule 302), breaking Facebook link previews. Fix: the
+  content-pattern rules now scan the path truncated at the `data:` scheme
+  (`strip_data_uri`); **structural** rules (traversal/long-path) keep the raw URI,
+  so a `data:`-prefixed `../` is still caught, and a data: URI in a query **arg**
+  (a real open-redirect/XSS vector) stays fully scanned.
 - **WAF false positives on inline `data:` URIs in the request path (rules 302
   XSS / 320 RCE).** When a browser or link-preview crawler resolves an inline
   `data:...` URI as a *relative* URL, the whole payload arrives as the request

@@ -27,6 +27,7 @@ local lower         = util.lower
 local cap           = util.cap
 local normalize     = util.normalize
 local scan_str      = util.scan_str
+local strip_data_uri = util.strip_data_uri
 local header_string = util.header_string
 local is_known_legit_php_upload_endpoint = util.is_known_legit_php_upload_endpoint
 local is_php_hostile_asset_upload = util.is_php_hostile_asset_upload
@@ -57,7 +58,7 @@ local CFG = {
   rule_superglobal_override = "logonly", -- request param KEY named like a PHP superglobal (_GET/_SERVER/GLOBALS/…) = variable poisoning; observe-only pending FP review
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
-  rule_php_wrappers      = "challenge",  -- php:// phar:// data:// zip:// expect:// glob://
+  rule_php_wrappers      = "block",      -- php:// phar:// data:// zip:// expect:// glob:// (args/body only; edge-block + autoblock-armed since 2026-07-18)
   rule_ip_host           = "challenge",  -- Host header is bare IPv4/IPv6 literal
                                          -- (promoted from logonly: 2026-05 hit analysis showed
                                          --  100% scanner traffic against raw IPv4 hosts —
@@ -685,7 +686,7 @@ function _M.check(ctx)
   -- scan_str(uri,args) is shared by traversal/rce/xss/sqli (4 rules).
   -- norm_args_body is shared by php_wrappers/ssrf/js_proto (3 rules).
   -- Without this, each rule independently calls normalize()+url_decode twice.
-  local _scan_ua, _norm_ab, _norm_args, _body_lc
+  local _scan_ua, _scan_ua_nodata, _norm_ab, _norm_args, _body_lc
   -- Comment-stripped SQLi scan pair (sc, scw), memoized PER SURFACE so the
   -- three SQLi rules share one strip_sql_comments + '+'-collapse pass instead
   -- of recomputing it each (uri+args and args+body surfaces) — audit F30b.
@@ -694,6 +695,27 @@ function _M.check(ctx)
   local function get_scan_ua()
     if not _scan_ua then _scan_ua = scan_str(uri, args) end
     return _scan_ua
+  end
+
+  -- Same URI+args scan surface, but with an embedded `data:` URI in the PATH
+  -- truncated at the scheme (strip_data_uri). Used ONLY by the content-pattern
+  -- rules that a data: payload false-positives — RCE (base64,+eval/exec/system
+  -- coincidence) and XSS (inline on…=/<script in the payload). Structural rules
+  -- (traversal/long-path) deliberately keep get_scan_ua() (the RAW uri) so a
+  -- data:-prefixed ../ still can't slip past them.
+  local function get_scan_ua_nodata()
+    if not _scan_ua_nodata then
+      local u = strip_data_uri(uri)
+      -- No data: URI in the path (the overwhelming common case) → the stripped
+      -- surface is byte-identical to the raw one, so reuse the memoized
+      -- get_scan_ua() instead of paying a second normalize pass per request.
+      if u == uri then
+        _scan_ua_nodata = get_scan_ua()
+      else
+        _scan_ua_nodata = scan_str(u, args)
+      end
+    end
+    return _scan_ua_nodata
   end
 
   -- args-only normalize, shared by cmd_param_key/cmd_payload/debug_toggles/
@@ -961,7 +983,7 @@ function _M.check(ctx)
   -- ── 6) RCE ────────────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_rce, "block")
-    if mode ~= "disabled" and det.detect_rce(uri, args, get_scan_ua()) then
+    if mode ~= "disabled" and det.detect_rce(uri, args, get_scan_ua_nodata()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
       if record("WAF_RCE", ttl, mode, RULE_IDS.rule_rce) then goto done end
@@ -1218,7 +1240,7 @@ function _M.check(ctx)
   -- ── 20) XSS ───────────────────────────────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xss, "challenge")
-    if mode ~= "disabled" and det.detect_xss(uri, args, get_scan_ua()) then
+    if mode ~= "disabled" and det.detect_xss(uri, args, get_scan_ua_nodata()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       if record("WAF_XSS", ttl, mode, RULE_IDS.rule_xss) then goto done end
     end
