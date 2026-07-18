@@ -345,6 +345,13 @@ select.input { width: auto; }
 
 /* ── Tables ────────────────────────────────────────────────────────────── */
 .table-wrap { overflow: auto; }
+/* Headers stay visible while scrolling long tables (690-vhost lists…). */
+.table-wrap thead th {
+  position: sticky;
+  top: 0;
+  background: var(--card);
+  z-index: 2;
+}
 .stable-table-wrap { max-height: 420px; min-height: 420px; }
 .wide-table-wrap { max-height: 500px; }
 table {
@@ -406,6 +413,40 @@ tr.bulk-selected:hover { background: var(--danger-soft); }
   gap: .6rem;
   margin-bottom: .7rem;
 }
+/* Top-N breakdown columns (WAF engine analytics). Previously unstyled, so
+ * the lists stacked vertically into a very tall card. */
+.grid.two {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: .4rem .9rem;
+  margin-bottom: .7rem;
+}
+.grid.two h3 { margin: .4rem 0 .3rem; font-size: .9rem; }
+.grid.two ul { margin: 0; padding-left: 1.1rem; font-size: .85rem; }
+.grid.two li { margin-bottom: .15rem; }
+.top-hint { color: var(--muted); font-weight: 400; font-size: .72rem; }
+/* The scope badge doubles as a "focus a vhost" entry point (opens the
+ * quick-search palette). */
+.scoped-badge { cursor: pointer; }
+.scoped-badge:hover { border-color: var(--accent); color: var(--accent-strong); }
+
+/* Click-to-copy feedback chip (nav.js). */
+.copy-chip {
+  position: fixed;
+  z-index: 1300;
+  background: var(--card);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: .2rem .55rem;
+  font-size: .75rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s ease;
+  box-shadow: var(--shadow);
+}
+.copy-chip.show { opacity: 1; }
+code { cursor: copy; }
 .summary-card {
   border: 1px solid var(--border-soft);
   border-radius: 10px;

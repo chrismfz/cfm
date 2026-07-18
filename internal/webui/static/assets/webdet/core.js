@@ -49,6 +49,7 @@ export function createWebdetApp(config) {
         refreshIntervalSec: 5,
         timer: null,
         refreshInProgress: false,
+        lastRefreshAt: null,
         actionMsg: "",
         pageMode,
         // Token / identity state
@@ -59,6 +60,9 @@ export function createWebdetApp(config) {
         scopedExcludeManagementAllowed: true,
         scopedPathExcludeAllowed: false,
         meLoaded: false,
+        // Known vhost names for the host-input datalists (vhost live,
+        // forensics, controls). Loaded lazily by pages that render one.
+        knownVhosts: [],
         scopedSkipInfoLogged: false,
         tokenBootLogged: false,
         modeChangeLogged: false,
@@ -77,6 +81,10 @@ export function createWebdetApp(config) {
       isForensicsPage() { return this.pageMode === "forensics"; },
       isWAFPage() { return this.pageMode === "waf"; },
       isControlsPage() { return this.pageMode === "controls"; },
+      lastRefreshLabel() {
+        if (!this.lastRefreshAt) return "";
+        return "Updated " + this.lastRefreshAt.toLocaleTimeString();
+      },
       pageTitle() {
         if (this.isVhostPage) return "WebDetector / vhost live";
         if (this.isForensicsPage) return "WebDetector / forensics";
@@ -94,6 +102,17 @@ export function createWebdetApp(config) {
           if (hiddenForScoped.has(section)) return false;
         }
         return sections.has(section);
+      },
+      // Fills knownVhosts once (fire-and-forget) so host inputs offer
+      // type-ahead instead of blind typing. Scoped tokens get their own list.
+      async refreshKnownVhosts() {
+        if (this.knownVhosts.length) return;
+        const payload = await this.fetchJSONSafe("v1/webdet/vhosts", { rows: [] });
+        const hosts = this.extractRows(payload, "rows")
+          .map((r) => String(r?.host || "").trim())
+          .filter(Boolean)
+          .sort();
+        this.knownVhosts = hosts;
       },
       logScopedAdminSkipsOnce(paths) {
         if (!this.isScoped || this.scopedSkipInfoLogged) return;
@@ -321,6 +340,8 @@ export function createWebdetApp(config) {
         this.refreshInProgress = true;
         this.loading = true;
         try {
+          // Type-ahead host list: only pages that render a datalist need it.
+          if (document.getElementById("cfm-vhost-list")) this.refreshKnownVhosts();
           await this.refreshLists?.();
           if (this.shouldShow("excludes")) await this.refreshExcludeLists?.();
           if (this.shouldShow("history")) await this.refreshHistory?.();
@@ -332,6 +353,7 @@ export function createWebdetApp(config) {
           if (this.shouldShow("tokens")) await this.refreshTokens?.();
           if (this.shouldShow("vhost_overview") && this.vhostOverviewHost) await this.refreshVhostOverview?.();
           await this.afterListsRefreshed?.();
+          this.lastRefreshAt = new Date();
         } catch (err) {
           console.error("[cfm-admin] refresh failed", err);
           this.actionMsg = `Refresh failed: ${err}`;
@@ -339,6 +361,17 @@ export function createWebdetApp(config) {
           this.loading = false;
           this.refreshInProgress = false;
         }
+      },
+
+      // Relative time for event tables; hover shows the absolute stamp.
+      agoTs(unix) {
+        const v = Number(unix || 0);
+        if (!v) return "-";
+        const secs = Math.max(0, Math.round(Date.now() / 1000 - v));
+        if (secs < 60) return `${secs}s ago`;
+        if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+        if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`;
+        return `${Math.floor(secs / 86400)}d ago`;
       },
 
       // ── Identity / auth boot ──────────────────────────────────────────
@@ -452,6 +485,29 @@ export function createWebdetApp(config) {
 
     mounted() {
       _appVm = this;
+
+      // Per-page preferences (limits, TTLs, filters) survive reloads. Only
+      // keys the page's mixins actually declare are loaded/saved.
+      const PERSIST_KEYS = [
+        "refreshIntervalSec", "topShortLimit", "longTopLimit", "ipShortLimit",
+        "hotIPsLimit", "wafHours", "wafEventLimit", "wafTopN",
+        "vhostControlsLimit", "vhostTopIPLimit", "vhostTopPathLimit",
+        "challengeTTL", "blockTTL", "historyType",
+      ];
+      const prefsKey = `cfm-prefs:${pageMode}`;
+      try {
+        const saved = JSON.parse(localStorage.getItem(prefsKey) || "{}");
+        for (const k of PERSIST_KEYS) {
+          if (k in this.$data && saved[k] !== undefined && saved[k] !== null) this[k] = saved[k];
+        }
+      } catch { /* corrupted prefs are ignored */ }
+      const savePrefs = () => {
+        const out = {};
+        for (const k of PERSIST_KEYS) if (k in this.$data) out[k] = this[k];
+        try { localStorage.setItem(prefsKey, JSON.stringify(out)); } catch { /* quota/private mode */ }
+      };
+      for (const k of PERSIST_KEYS) if (k in this.$data) this.$watch(k, savePrefs);
+
       const currentURL = new URL(window.location.href);
       const qHost = currentURL.searchParams.get("host");
       const qIP = currentURL.searchParams.get("ip");

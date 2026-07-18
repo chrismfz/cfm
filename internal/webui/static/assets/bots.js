@@ -107,8 +107,8 @@
   async function loadAll() {
     try {
       const [rows, rules] = await Promise.all([
-        api('/api/v1/webdet/ua-top?limit=50'),
-        api('/api/v1/webdet/ua-emergency'),
+        api('/v1/webdet/ua-top?limit=50'),
+        api('/v1/webdet/ua-emergency'),
       ]);
       st.topRows = Array.isArray(rows) ? rows : [];
       const byUA = Object.create(null);
@@ -190,7 +190,7 @@
       if (!yes) return;
     }
     try {
-      const r = await api('/api/v1/webdet/ua-emergency', {
+      const r = await api('/v1/webdet/ua-emergency', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -216,7 +216,7 @@
 
   async function undoRule(ua) {
     try {
-      const r = await api(`/api/v1/webdet/ua-emergency?ua=${encodeURIComponent(ua)}`, {
+      const r = await api(`/v1/webdet/ua-emergency?ua=${encodeURIComponent(ua)}`, {
         method: 'DELETE',
       });
       flashMsg(`✓ undone ${r.ua}`, 'success');

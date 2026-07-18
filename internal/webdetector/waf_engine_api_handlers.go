@@ -39,6 +39,12 @@ type wafTopIPValue struct {
 	ASNName string `json:"asn_name,omitempty"`
 }
 
+type wafHistBucket struct {
+	TsUnix  int64 `json:"ts_unix"` // bucket start
+	Count   int   `json:"count"`
+	Blocked int   `json:"blocked"`
+}
+
 type wafEngineSummary struct {
 	FromUnix      int64            `json:"from_unix"`
 	ToUnix        int64            `json:"to_unix"`
@@ -51,7 +57,14 @@ type wafEngineSummary struct {
 	TopRuleBases  []wafTopValue    `json:"top_rule_bases"`
 	TopHosts      []wafTopValue    `json:"top_hosts"`
 	TopIPs        []wafTopIPValue  `json:"top_ips"`
-	Rows          []wafEngineEvent `json:"rows"`
+	TopCountries  []wafTopValue    `json:"top_countries,omitempty"`
+	// Histogram buckets the (filtered) events per hour across the window,
+	// oldest first — feeds the hits-over-time chart in the UI.
+	Histogram []wafHistBucket  `json:"histogram,omitempty"`
+	Rows      []wafEngineEvent `json:"rows"`
+	// Echo of the applied filters so the UI can show what the numbers cover.
+	CountryFilter []string `json:"country_filter,omitempty"`
+	RuleFilter    string   `json:"rule_filter,omitempty"`
 }
 
 func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +101,23 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	}
 	enrichEnabled := strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "1") || strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "true")
 
+	// Optional filters, applied BEFORE aggregation so totals and every top-N
+	// list reflect them — that's what makes them useful for false-positive
+	// hunting ("show me everything rule X did to visitors from country Y").
+	countryFilter := map[string]struct{}{}
+	for _, c := range strings.Split(q.Get("country"), ",") {
+		c = strings.ToUpper(strings.TrimSpace(c))
+		if c != "" {
+			countryFilter[c] = struct{}{}
+			res.CountryFilter = append(res.CountryFilter, c)
+		}
+	}
+	ruleFilter := strings.ToLower(strings.TrimSpace(q.Get("rule")))
+	res.RuleFilter = ruleFilter
+	// Country filtering needs the country even when the caller didn't ask
+	// for enriched rows.
+	needCountry := enrichEnabled || len(countryFilter) > 0
+
 	to := time.Now()
 	from := to.Add(-time.Duration(hours) * time.Hour)
 	res.FromUnix = from.Unix()
@@ -110,6 +140,12 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	ruleBaseCount := map[string]int{}
 	hostCount := map[string]int{}
 	ipCount := map[string]int{}
+	countryCount := map[string]int{}
+	// One bucket per hour across the window (hours is clamped to <=720).
+	hist := make([]wafHistBucket, hours)
+	for i := range hist {
+		hist[i].TsUnix = res.FromUnix + int64(i)*3600
+	}
 	rows := make([]wafEngineEvent, 0, limit) // limit is clamped to a maximum of 2000 above before this allocation.
 	enrichCache := map[string]wafEngineEvent{}
 
@@ -158,9 +194,6 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		} else if ev.Status == http.StatusForbidden {
 			row.Result = "blocked"
 		}
-		if ev.Status == http.StatusForbidden || strings.EqualFold(ev.Mode, "block") {
-			res.BlockedEvents++
-		}
 		if ev.Payload != nil {
 			if c, ok := ev.Payload["country"].(string); ok && strings.TrimSpace(c) != "" {
 				row.Country = c
@@ -179,7 +212,7 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 		}
-		if enrichEnabled && (row.Country == "" || row.ASN == 0 || row.ASNName == "") {
+		if needCountry && (row.Country == "" || row.ASN == 0 || row.ASNName == "") {
 			if info, ok := enrichCache[row.IP]; ok {
 				row.Country = info.Country
 				row.ASN = info.ASN
@@ -192,8 +225,35 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 				enrichCache[row.IP] = wafEngineEvent{Country: row.Country, ASN: row.ASN, ASNName: row.ASNName}
 			}
 		}
+		if len(countryFilter) > 0 {
+			if _, ok := countryFilter[strings.ToUpper(strings.TrimSpace(row.Country))]; !ok {
+				continue
+			}
+		}
+		if ruleFilter != "" &&
+			!strings.Contains(strings.ToLower(rule), ruleFilter) &&
+			!strings.Contains(strings.ToLower(ruleBase), ruleFilter) {
+			continue
+		}
 
 		res.TotalEvents++
+		// Counted after the filters so a filtered summary's blocked count
+		// matches the events it actually covers.
+		blocked := ev.Status == http.StatusForbidden || strings.EqualFold(ev.Mode, "block")
+		if blocked {
+			res.BlockedEvents++
+		}
+		if bi := int((ev.TsUnix - res.FromUnix) / 3600); bi >= 0 && len(hist) > 0 {
+			// An event at exactly ToUnix computes to index==len; it belongs
+			// to the last bucket.
+			if bi >= len(hist) {
+				bi = len(hist) - 1
+			}
+			hist[bi].Count++
+			if blocked {
+				hist[bi].Blocked++
+			}
+		}
 		if h := cleanHost(row.Host); h != "" {
 			hosts[h] = struct{}{}
 			hostCount[h]++
@@ -204,6 +264,9 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		}
 		ruleCount[rule]++
 		ruleBaseCount[ruleBase]++
+		if c := strings.ToUpper(strings.TrimSpace(row.Country)); c != "" {
+			countryCount[c]++
+		}
 
 		if len(rows) < limit {
 			rows = append(rows, row)
@@ -216,6 +279,8 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	res.TopRuleBases = toSortedTop(ruleBaseCount, topN)
 	res.TopHosts = toSortedTop(hostCount, topN)
 	res.TopIPs = toSortedTopIPs(ipCount, topN, enrichEnabled, e)
+	res.TopCountries = toSortedTop(countryCount, topN)
+	res.Histogram = hist
 	res.Rows = rows
 
 	writeJSON(w, http.StatusOK, res)

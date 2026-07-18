@@ -11,6 +11,7 @@ const ICONS = {
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.7 2.6 4 5.7 4 9s-1.3 6.4-4 9c-2.7-2.6-4-5.7-4-9s1.3-6.4 4-9z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.5-4.5"/>',
   shield: '<path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6l7-3z"/>',
+  ban: '<circle cx="12" cy="12" r="9"/><path d="M5.5 5.5l13 13"/>',
   sliders: '<path d="M4 7h10m4 0h2M4 12h2m4 0h10M4 17h10m4 0h2"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="17" r="2"/>',
   bot: '<rect x="5" y="8" width="14" height="11" rx="2"/><path d="M12 4v4M8 4h8"/><circle cx="9.5" cy="13" r="1"/><circle cx="14.5" cy="13" r="1"/>',
   db: '<ellipse cx="12" cy="5.5" rx="7" ry="2.5"/><path d="M5 5.5V18.5c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V5.5"/><path d="M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/>',
@@ -33,6 +34,7 @@ const MENU_GROUPS = [
     { label: "Web Bots", href: "/cfm-admin/webdetector/bots/", icon: "bot" },
   ]},
   { title: "Rules & engine", items: [
+    { label: "Firewall", href: "/cfm-admin/firewall/", icon: "ban" },
     { label: "WAF engine", href: "/cfm-admin/webdetector/waf/", icon: "shield" },
     { label: "Vhost controls", href: "/cfm-admin/webdetector/controls/", icon: "sliders" },
   ]},
@@ -160,12 +162,41 @@ function initializeSharedNav() {
   ensureBackdrop();
 }
 
+// Click-to-copy on IP/host <code> cells. Deliberately does NOT stop
+// propagation: a row's click-through (e.g. drilldown) still happens.
+const COPYABLE_RX = /^[0-9a-f.:]+$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+let copyChip = null;
+function showCopyChip(text, x, y) {
+  if (!copyChip) {
+    copyChip = document.createElement("div");
+    copyChip.className = "copy-chip";
+    document.body.appendChild(copyChip);
+  }
+  copyChip.textContent = `Copied ${text}`;
+  copyChip.style.left = `${x + 10}px`;
+  copyChip.style.top = `${y - 28}px`;
+  copyChip.classList.add("show");
+  window.clearTimeout(showCopyChip._t);
+  showCopyChip._t = window.setTimeout(() => copyChip.classList.remove("show"), 1200);
+}
+document.addEventListener("click", (e) => {
+  const code = e.target.closest("code");
+  if (!code || e.target.closest("a,button,input,select")) return;
+  const text = (code.textContent || "").trim();
+  if (!text || text.length > 64 || !COPYABLE_RX.test(text)) return;
+  navigator.clipboard?.writeText(text).then(() => showCopyChip(text, e.clientX, e.clientY)).catch(() => {});
+});
+
 // Burger + backdrop via delegation: survives Vue mounting over the topbar.
+// The scope badge ("Global view") opens the palette — type a vhost to focus
+// any page on it, which is what "switching scope" practically means here.
 document.addEventListener("click", (e) => {
   if (e.target.closest("[data-nav-burger]")) {
     document.body.classList.toggle("nav-open");
   } else if (e.target.closest(".nav-backdrop") || e.target.closest(".sidebar a")) {
     document.body.classList.remove("nav-open");
+  } else if (e.target.closest(".scoped-badge")) {
+    if (openPalette) openPalette();
   }
 });
 
@@ -178,22 +209,59 @@ const IPV4_RX = /^\d{1,3}(\.\d{1,3}){3}$/;
 const IPV6_RX = /^[0-9a-f:]+:[0-9a-f:]*$/i;
 const HOST_RX = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
 
+// Known vhosts for palette suggestions, fetched lazily when the palette
+// first opens (cookie-authed; a scoped token's list is already scoped
+// server-side). Failure just means no suggestions.
+let knownVhosts = null;
+let knownVhostsFetching = false;
+function fetchKnownVhosts(onReady) {
+  if (knownVhosts !== null || knownVhostsFetching) return;
+  knownVhostsFetching = true;
+  fetch("/cfm-admin/api/v1/webdet/vhosts", { credentials: "same-origin", headers: { Accept: "application/json" } })
+    .then((res) => (res.ok ? res.json() : { rows: [] }))
+    .then((data) => {
+      const rows = Array.isArray(data) ? data : (data?.rows || []);
+      knownVhosts = rows.map((r) => String(r?.host || "").trim()).filter(Boolean).sort();
+    })
+    .catch(() => { knownVhosts = []; })
+    .finally(() => {
+      knownVhostsFetching = false;
+      if (typeof onReady === "function") onReady();
+    });
+}
+
+function hostActions(host) {
+  const h = encodeURIComponent(host);
+  return [
+    { label: `Vhost live: ${host}`, hint: "Live charts", href: `/cfm-admin/webdetector/vhost/?host=${h}` },
+    { label: `History for ${host}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?host=${h}#history-card` },
+    { label: `Controls for ${host}`, hint: "WAF / Challenge / HTTP3", href: `/cfm-admin/webdetector/controls/?vhost=${h}` },
+  ];
+}
+
 function paletteActions(query) {
   const q = query.trim();
+  const ql = q.toLowerCase();
   const out = [];
   if (q && IPV4_RX.test(q) || q && IPV6_RX.test(q) && q.includes(":")) {
     out.push(
       { label: `History for IP ${q}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?ip=${encodeURIComponent(q)}#history-card` },
       { label: `Analyze IP ${q}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?ip=${encodeURIComponent(q)}` },
+      { label: `Firewall: is ${q} blocked?`, hint: "Check / unblock", href: `/cfm-admin/firewall/?q=${encodeURIComponent(q)}` },
     );
   } else if (q && HOST_RX.test(q)) {
-    out.push(
-      { label: `Vhost live: ${q}`, hint: "Live charts", href: `/cfm-admin/webdetector/vhost/?host=${encodeURIComponent(q)}` },
-      { label: `History for ${q}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?host=${encodeURIComponent(q)}#history-card` },
-      { label: `Controls for ${q}`, hint: "WAF / Challenge / HTTP3", href: `/cfm-admin/webdetector/controls/?vhost=${encodeURIComponent(q)}` },
-    );
+    out.push(...hostActions(q));
   }
-  const ql = q.toLowerCase();
+  // Real vhost suggestions: exact match expands to its actions (unless the
+  // literal-hostname branch above already did), partial matches list up to 5.
+  if (q && Array.isArray(knownVhosts) && knownVhosts.length) {
+    const matches = knownVhosts.filter((h) => h.includes(ql));
+    const exact = matches.find((h) => h === ql);
+    if (exact && !HOST_RX.test(q)) out.push(...hostActions(exact));
+    for (const h of matches.filter((m) => m !== ql).slice(0, 5)) {
+      out.push({ label: h, hint: "vhost — open live", href: `/cfm-admin/webdetector/vhost/?host=${encodeURIComponent(h)}`, fill: h });
+    }
+  }
   for (const group of MENU_GROUPS) {
     for (const item of group.items) {
       if (!q || item.label.toLowerCase().includes(ql) || group.title.toLowerCase().includes(ql)) {
@@ -237,10 +305,11 @@ function buildPalette() {
       list.appendChild(row);
     });
   };
-  const open = () => {
+  const open = (prefill = "") => {
     backdrop.classList.add("open");
-    input.value = "";
+    input.value = prefill;
     active = 0;
+    fetchKnownVhosts(render);
     render();
     input.focus();
   };

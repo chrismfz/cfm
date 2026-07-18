@@ -6,6 +6,7 @@ export const forensicsMixin = {
     return {
       historyHost: "",
       historyIP: "",
+      historyType: "",
       historyEvents: [],
       historySummary: null,
       historyStats: null,
@@ -25,12 +26,14 @@ export const forensicsMixin = {
     async refreshHistory() {
       const host = String(this.historyHost || "").trim();
       const ip = String(this.historyIP || "").trim();
+      const evType = String(this.historyType || "").trim();
       const q = [];
       if (host) q.push(`host=${encodeURIComponent(host)}`);
       if (ip) q.push(`ip=${encodeURIComponent(ip)}`);
       const qs = q.length ? `&${q.join("&")}` : "";
+      const evQS = evType ? `${qs}&type=${encodeURIComponent(evType)}` : qs;
       const [events, summary, stats] = await Promise.all([
-        this.fetchJSONSafe(`v1/webdet/history/events?limit=50${qs}`, { rows: [] }),
+        this.fetchJSONSafe(`v1/webdet/history/events?limit=50&enrich=1${evQS}`, { rows: [] }),
         this.fetchJSONSafe(`v1/webdet/history/summary?hours=24${qs}`, null),
         this.fetchJSONSafe("v1/webdet/history/stats", null),
       ]);

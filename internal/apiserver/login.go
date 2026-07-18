@@ -26,33 +26,39 @@ import (
 	"strings"
 )
 
+// Matches the admin UI theme in internal/webui/static/assets/style.css
+// (dark palette; the login page deliberately stays single-theme).
 const loginCSS = `
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{background:#0d1117;color:#c9d1d9;font-family:'SF Mono',Consolas,'Liberation Mono',monospace;
+body{background:#141b2d;color:#e9eef6;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;
   display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:2rem;
-  width:100%;max-width:360px}
+.card{background:#1a2338;border:1px solid #2c3b58;border-radius:12px;padding:2rem;
+  width:100%;max-width:380px;box-shadow:0 10px 30px rgba(4,10,25,.35)}
 .logo{text-align:center;margin-bottom:1.5rem}
-.logo h1{font-size:1.4rem;color:#58a6ff;letter-spacing:.1em}
-.logo p{font-size:.75rem;color:#8b949e;margin-top:.25rem}
-label{display:block;font-size:.8rem;color:#8b949e;margin-bottom:.35rem}
-input[type=text],input[type=password],input[type=text]{width:100%;background:#0d1117;
-  border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-family:inherit;
-  font-size:.9rem;padding:.5rem .75rem;margin-bottom:1rem;outline:none;
+.logo .mark{display:inline-grid;place-items:center;width:44px;height:44px;border-radius:10px;
+  background:rgba(77,163,255,.14);color:#6db4ff;font-size:1.5rem;margin-bottom:.6rem}
+.logo h1{font-size:1.25rem;color:#e9eef6;letter-spacing:.04em;font-weight:700}
+.logo p{font-size:.75rem;color:#9aa9c0;margin-top:.25rem;letter-spacing:.06em}
+label{display:block;font-size:.8rem;color:#9aa9c0;margin-bottom:.35rem}
+input[type=text],input[type=password],select{width:100%;background:#0f1626;
+  border:1px solid #2c3b58;border-radius:8px;color:#e9eef6;font-family:inherit;
+  font-size:.9rem;padding:.55rem .75rem;margin-bottom:1rem;outline:none;
   transition:border-color .15s}
-input:focus{border-color:#58a6ff}
-button{width:100%;background:#238636;border:none;border-radius:4px;color:#fff;
-  cursor:pointer;font-family:inherit;font-size:.9rem;padding:.6rem;
-  transition:background .15s}
-button:hover{background:#2ea043}
-button:disabled{background:#1f6328;cursor:default;opacity:.7}
-.err{background:#3d1f1f;border:1px solid #8b2020;border-radius:4px;color:#f85149;
+input:focus,select:focus{border-color:#4da3ff}
+button{width:100%;background:#4da3ff;border:none;border-radius:8px;color:#fff;
+  cursor:pointer;font-family:inherit;font-size:.9rem;font-weight:600;padding:.6rem;
+  transition:filter .15s}
+button:hover{filter:brightness(1.08)}
+button:disabled{cursor:default;opacity:.6;filter:none}
+.err{background:rgba(229,100,127,.13);border:1px solid #e5647f;border-radius:8px;color:#e5647f;
   font-size:.8rem;margin-bottom:1rem;padding:.5rem .75rem;display:none}
 .err.on{display:block}
-a{color:#58a6ff;text-decoration:none}
+a{color:#6db4ff;text-decoration:none}
 a:hover{text-decoration:underline}
-.note{color:#8b949e;font-size:.85rem;text-align:center;margin-bottom:1rem}
+.note{color:#9aa9c0;font-size:.85rem;text-align:center;margin-bottom:1rem}
 `
+
+const loginFaviconLink = `<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2032%2032%27%3E%3Crect%20width=%2732%27%20height=%2732%27%20rx=%277%27%20fill=%27%23141b2d%27/%3E%3Cpath%20d=%27M16%206l8.7%205v10L16%2026l-8.7-5V11z%27%20fill=%27none%27%20stroke=%27%234da3ff%27%20stroke-width=%272.4%27/%3E%3C/svg%3E" />`
 
 const loginHTML = `<!DOCTYPE html>
 <html lang="en">
@@ -60,11 +66,12 @@ const loginHTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CFM — Sign in</title>
+`+loginFaviconLink+`
 <style>` + loginCSS + `</style>
 </head>
 <body>
 <div class="card">
-  <div class="logo"><h1>⬡ CFM</h1><p>Firewall Manager</p></div>
+  <div class="logo"><span class="mark">⬡</span><h1>CFM</h1><p>FIREWALL MANAGER</p></div>
   <div class="err" id="err"></div>
   <label for="u">Username</label>
   <input type="text" id="u" autocomplete="username" autofocus>
@@ -108,14 +115,15 @@ const verifyHTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CFM — Two-Factor Auth</title>
+`+loginFaviconLink+`
 <style>` + loginCSS + `</style>
 </head>
 <body>
 <div class="card">
-  <div class="logo"><h1>⬡ CFM</h1><p>Two-Factor Authentication</p></div>
+  <div class="logo"><span class="mark">⬡</span><h1>CFM</h1><p>TWO-FACTOR AUTHENTICATION</p></div>
   <div class="err" id="err"></div>
   <label for="method">Method</label>
-  <select id="method" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-family:inherit;font-size:.9rem;padding:.5rem .75rem;margin-bottom:1rem;outline:none;">
+  <select id="method">
     <option value="totp">Authenticator app (TOTP)</option>
     <option value="recovery_code">Recovery code</option>
   </select>
