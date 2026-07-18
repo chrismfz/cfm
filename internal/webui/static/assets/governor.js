@@ -249,32 +249,44 @@
 
   function initCharts() {
     if (!window.echarts) return;
-    st.connChart = echarts.init(el.connSpark);
-    st.cpuChart = echarts.init(el.cpuSpark);
+    // Styling (text/axis colors, palette) comes from the shared cfm ECharts
+    // theme; series keep their semantic colors in both UI themes. Seeding
+    // the data from st.* makes a theme-toggle re-init lossless.
+    const { initChart, chartColors } = window.CFMChartTheme;
+    const cc = chartColors();
+    st.connChart = initChart(el.connSpark);
+    st.cpuChart = initChart(el.cpuSpark);
 
     st.connChart.setOption({
-      backgroundColor: 'transparent',
       animation: true,
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
       grid: { left: 45, right: 20, top: 20, bottom: 30 },
-      xAxis: { type: 'category', boundaryGap: false, data: [] },
+      xAxis: { type: 'category', boundaryGap: false, data: st.connLabels.slice() },
       yAxis: { type: 'value', name: 'Conn %' },
-      series: [{ name: 'Connection pressure', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#f1d64a', width: 2 }, data: [] }],
+      series: [{ name: 'Connection pressure', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: cc.yellow, width: 2 }, itemStyle: { color: cc.yellow }, data: st.connPctSeries.slice() }],
     });
 
     st.cpuChart.setOption({
-      backgroundColor: 'transparent',
       animation: true,
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-      legend: { top: 0, right: 10, textStyle: { color: '#dbe7f7' }, data: ['CPU', 'Queries'] },
+      legend: { top: 0, right: 10, data: ['CPU', 'Queries'] },
       grid: { left: 50, right: 50, top: 35, bottom: 30 },
-      xAxis: { type: 'category', boundaryGap: false, data: [] },
+      xAxis: { type: 'category', boundaryGap: false, data: st.cpuLabels.slice() },
       yAxis: [{ type: 'value', name: 'CPU sec' }, { type: 'value', name: 'Queries' }],
       series: [
-        { name: 'CPU', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: '#2ec9d7', width: 2 }, data: [] },
-        { name: 'Queries', type: 'line', smooth: true, showSymbol: false, yAxisIndex: 1, lineStyle: { color: '#db62e6', width: 2 }, data: [] },
+        { name: 'CPU', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: cc.cyan, width: 2 }, itemStyle: { color: cc.cyan }, data: st.cpuSeries.slice() },
+        { name: 'Queries', type: 'line', smooth: true, showSymbol: false, yAxisIndex: 1, lineStyle: { color: cc.purple, width: 2 }, itemStyle: { color: cc.purple }, data: st.qrySeries.slice() },
       ],
     });
+  }
+
+  function rebuildChartsForTheme() {
+    if (!window.echarts) return;
+    st.connChart?.dispose();
+    st.cpuChart?.dispose();
+    st.connChart = null;
+    st.cpuChart = null;
+    initCharts();
   }
 
 
@@ -847,6 +859,7 @@
       st.connChart?.resize();
       st.cpuChart?.resize();
     });
+    window.CFMChartTheme.onThemeChange(() => rebuildChartsForTheme());
   } else {
     showMsg('ECharts is unavailable; chart rendering disabled.');
   }

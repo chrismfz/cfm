@@ -15,7 +15,7 @@ The UI is now split into pages:
 ## What gets installed
 
 - Static UI files: `/usr/share/cfm/html/`
-- Vue app: `index.html` + `assets/app.js` + `assets/style.css`
+- Vue app: per-page entries under `assets/webdet/pages/` + shared feature mixins in `assets/webdet/` + section partials in `assets/webdet/partials.js` + `assets/style.css`
 - Data source: CFM API on `127.0.0.1:6060`
 
 The UI currently focuses on **WebTop**:

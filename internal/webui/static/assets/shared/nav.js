@@ -101,6 +101,8 @@ function currentTheme() {
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem(THEME_KEY, theme); } catch { /* private mode */ }
+  // Charts (and anything else color-derived) re-render on this.
+  window.dispatchEvent(new CustomEvent("cfm-themechange", { detail: { theme } }));
 }
 
 function buildSidebar(root) {
@@ -167,8 +169,134 @@ document.addEventListener("click", (e) => {
   }
 });
 
+// ── Quick search (Ctrl/Cmd+K) ────────────────────────────────────────────
+// One palette on every page: type an IP → forensics/analyze actions for it;
+// type a hostname → vhost live / forensics / controls / rules actions; or
+// just fuzzy-jump to any page from the menu. Pure navigation, no API calls.
+
+const IPV4_RX = /^\d{1,3}(\.\d{1,3}){3}$/;
+const IPV6_RX = /^[0-9a-f:]+:[0-9a-f:]*$/i;
+const HOST_RX = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+
+function paletteActions(query) {
+  const q = query.trim();
+  const out = [];
+  if (q && IPV4_RX.test(q) || q && IPV6_RX.test(q) && q.includes(":")) {
+    out.push(
+      { label: `History for IP ${q}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?ip=${encodeURIComponent(q)}#history-card` },
+      { label: `Analyze IP ${q}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?ip=${encodeURIComponent(q)}` },
+    );
+  } else if (q && HOST_RX.test(q)) {
+    out.push(
+      { label: `Vhost live: ${q}`, hint: "Live charts", href: `/cfm-admin/webdetector/vhost/?host=${encodeURIComponent(q)}` },
+      { label: `History for ${q}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?host=${encodeURIComponent(q)}#history-card` },
+      { label: `Controls for ${q}`, hint: "WAF / Challenge / HTTP3", href: `/cfm-admin/webdetector/controls/?vhost=${encodeURIComponent(q)}` },
+    );
+  }
+  const ql = q.toLowerCase();
+  for (const group of MENU_GROUPS) {
+    for (const item of group.items) {
+      if (!q || item.label.toLowerCase().includes(ql) || group.title.toLowerCase().includes(ql)) {
+        out.push({ label: item.label, hint: group.title, href: item.href, icon: item.icon });
+      }
+    }
+  }
+  return out.slice(0, 12);
+}
+
+function buildPalette() {
+  const backdrop = document.createElement("div");
+  backdrop.className = "palette-backdrop";
+  backdrop.innerHTML = `
+    <div class="palette" role="dialog" aria-label="Quick search">
+      <input class="palette-input" type="text" placeholder="Search pages, or type an IP / vhost…" autocomplete="off" spellcheck="false" />
+      <div class="palette-list"></div>
+      <div class="palette-foot"><kbd>↑↓</kbd> navigate · <kbd>Enter</kbd> open · <kbd>Esc</kbd> close</div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const input = backdrop.querySelector(".palette-input");
+  const list = backdrop.querySelector(".palette-list");
+  let items = [];
+  let active = 0;
+
+  const render = () => {
+    items = paletteActions(input.value);
+    active = Math.min(active, Math.max(0, items.length - 1));
+    list.replaceChildren();
+    items.forEach((it, i) => {
+      const row = document.createElement("a");
+      row.className = "palette-item" + (i === active ? " active" : "");
+      row.href = it.href;
+      const l = document.createElement("span");
+      l.textContent = it.label;
+      const h = document.createElement("span");
+      h.className = "palette-hint";
+      h.textContent = it.hint || "";
+      row.append(l, h);
+      row.addEventListener("mouseenter", () => { active = i; render(); });
+      list.appendChild(row);
+    });
+  };
+  const open = () => {
+    backdrop.classList.add("open");
+    input.value = "";
+    active = 0;
+    render();
+    input.focus();
+  };
+  const close = () => backdrop.classList.remove("open");
+
+  input.addEventListener("input", () => { active = 0; render(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(active + 1, items.length - 1); render(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(active - 1, 0); render(); }
+    else if (e.key === "Enter" && items[active]) { window.location.href = items[active].href; }
+    else if (e.key === "Escape") { close(); }
+  });
+  backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) close(); });
+
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      if (backdrop.classList.contains("open")) close();
+      else open();
+    } else if (e.key === "Escape" && backdrop.classList.contains("open")) {
+      close();
+    }
+  });
+  return open;
+}
+
+let openPalette = null;
+function initializePalette() {
+  if (!openPalette) openPalette = buildPalette();
+}
+
+// Sidebar search button (below brand) so the palette is discoverable
+// without knowing the shortcut.
+function addSidebarSearch(root) {
+  const nav = root.querySelector(".sidebar-nav");
+  if (!nav) return;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "nav-item nav-search";
+  btn.appendChild(svgIcon("search"));
+  btn.appendChild(document.createTextNode("Search"));
+  const kbd = document.createElement("kbd");
+  kbd.textContent = "Ctrl K";
+  btn.appendChild(kbd);
+  btn.addEventListener("click", () => openPalette && openPalette());
+  nav.prepend(btn);
+}
+
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initializeSharedNav, { once: true });
+  document.addEventListener("DOMContentLoaded", () => {
+    initializeSharedNav();
+    initializePalette();
+    document.querySelectorAll("[data-shared-nav]").forEach(addSidebarSearch);
+  }, { once: true });
 } else {
   initializeSharedNav();
+  initializePalette();
+  document.querySelectorAll("[data-shared-nav]").forEach(addSidebarSearch);
 }

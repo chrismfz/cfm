@@ -1,3 +1,5 @@
+import { initChart as cfmInitChart, onThemeChange as cfmOnThemeChange } from "./shared/chart-theme.js";
+
 (() => {
   const q = (id) => document.getElementById(id);
   const detectorColumns = [
@@ -289,9 +291,14 @@
   }
 
   function chartInit(elRef) {
-    if (!elRef || !window.echarts) return null;
-    return window.echarts.init(elRef);
+    return cfmInitChart(elRef);
   }
+
+  // Re-render the last capture with the new theme when the toggle flips.
+  let lastCaptureRender = null;
+  cfmOnThemeChange(() => {
+    if (lastCaptureRender) renderCaptureCharts(lastCaptureRender.capture, lastCaptureRender.detectorName);
+  });
 
   function buildCaptureSeries(capture, detectorName) {
     const snapshots = Array.isArray(capture?.snapshots) ? capture.snapshots : [];
@@ -319,6 +326,7 @@
   }
 
   function renderCaptureCharts(capture, detectorName) {
+    lastCaptureRender = { capture, detectorName };
     const snapshots = Array.isArray(capture?.snapshots) ? capture.snapshots : [];
     destroyCaptureCharts();
     if (!snapshots.length) return;
