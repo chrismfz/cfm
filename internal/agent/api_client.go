@@ -192,16 +192,23 @@ func (c *APIClient) ConfirmUnblock(id int, ip string, success bool, found *locat
 	return nil
 }
 
+// HeartbeatRequest carries the agent's self-reported state. Pointer
+// fields distinguish "not detected this beat" (nil → key absent →
+// cfm-web keeps its last value) from a real observation (set → key
+// present, even when the value is false/empty and clears web state).
 type HeartbeatRequest struct {
 	DNATEnabled *bool `json:"dnat_enabled,omitempty"`
+	// Edge is the active in-path edge proxy service: "openresty",
+	// "angie", or "" when neither is active. EdgeVersion is that
+	// binary's version token (e.g. "openresty/1.25.3.2"), best-effort.
+	Edge        *string `json:"edge,omitempty"`
+	EdgeVersion *string `json:"edge_version,omitempty"`
 }
 
-func (c *APIClient) SendHeartbeat(ctx context.Context, version, userAgent string, dnatEnabled *bool) (int, time.Duration, error) {
+func (c *APIClient) SendHeartbeat(ctx context.Context, version, userAgent string, hb HeartbeatRequest) (int, time.Duration, error) {
 	u := strings.TrimRight(c.BaseURL, "/") + "/api/agent/heartbeat"
 
-	body, err := json.Marshal(HeartbeatRequest{
-		DNATEnabled: dnatEnabled,
-	})
+	body, err := json.Marshal(hb)
 	if err != nil {
 		return 0, 0, fmt.Errorf("marshal heartbeat: %w", err)
 	}

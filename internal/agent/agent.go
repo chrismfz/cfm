@@ -191,14 +191,18 @@ func (r *Runner) doHeartbeat(ctx context.Context) {
 		HTTP:    r.client,
 	}
 
-	var dnatEnabled *bool
+	var hb HeartbeatRequest
 	if r.backend != nil {
 		on, err := dnat.Status(r.backend)
 		if err != nil {
 			logging.LogfAPI("[agent] heartbeat dnat status check failed: %v", err)
 		} else {
-			dnatEnabled = &on
+			hb.DNATEnabled = &on
 		}
+	}
+	if edge, edgeVer, ok := detectEdge(ctx); ok {
+		hb.Edge = &edge
+		hb.EdgeVersion = &edgeVer
 	}
 
 	heartbeatHost := hostForLog(cfg.BaseURL)
@@ -206,7 +210,7 @@ func (r *Runner) doHeartbeat(ctx context.Context) {
 		logging.LogfAPI("[agent] heartbeat attempt host=%s", heartbeatHost)
 	}
 
-	statusCode, duration, err := api.SendHeartbeat(ctx, cfg.Version, cfg.UserAgent, dnatEnabled)
+	statusCode, duration, err := api.SendHeartbeat(ctx, cfg.Version, cfg.UserAgent, hb)
 	if err != nil {
 		logging.LogfAPI("[agent] heartbeat failed: %v", err)
 		return
