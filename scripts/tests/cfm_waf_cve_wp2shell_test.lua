@@ -80,11 +80,55 @@ fires(post("/wp-json/batch/v1", "",
       '{"requests":[{"method":"POST","path":"///"},{"method":"POST","path":"/wp/v2/posts"}]}'),
       "wp2shell batch desync primer (///)", DESYNC)
 
+-- Pretty-printed JSON (spaced colon) must still match the primer.
+fires(post("/wp-json/batch/v1", "",
+      '{"requests": [{"method": "POST", "path": "///"}]}'),
+      "wp2shell desync primer, pretty-printed JSON", DESYNC)
+
+-- Comment-obfuscated SQLi (MySQL # comment, /**/ around OR) must NOT be dodgeable:
+-- author_exclude=0)/**/OR/**/(1=1)#  — no sleep/union/`) or `/`-- -` keyword present,
+-- but the extracted value has non-integer bytes, so the value-scoped check fires.
+fires(post("/wp-json/batch/v1", "",
+      '{"requests":[{"method":"GET","path":"/wp/v2/users?author_exclude='
+      .. '0%29%2F%2A%2A%2FOR%2F%2A%2A%2F%281%3D1%29%23"}]}'),
+      "wp2shell SQLi via /**/+# comment obfuscation (no keyword marker)", SQLI)
+
 -- ── Negatives ───────────────────────────────────────────────────────────────
 -- Legit batch request: real integer author_exclude, no primer, no SQL.
 clean(post("/wp-json/batch/v1", "",
       '{"requests":[{"method":"GET","path":"/wp/v2/posts?author_exclude=5,6"}]}'),
-      "legit batch: integer author_exclude, no traversal/SQL")
+      "legit batch: integer author_exclude CSV")
+
+-- Legit REST array form + a second query param: value must be extracted per-param.
+clean(post("/wp-json/batch/v1", "",
+      '{"requests":[{"method":"GET","path":"/wp/v2/posts?author_exclude[]=5&author_exclude[]=6&per_page=10"}]}'),
+      "legit batch: author_exclude[] array form")
+
+-- Legit space-separated id list (wp_parse_id_list tolerates spaces).
+clean(post("/wp-json/batch/v1", "",
+      '{"requests":[{"method":"GET","path":"/wp/v2/posts?author_exclude=5%2C%206"}]}'),
+      "legit batch: author_exclude=5, 6 (spaced list)")
+
+-- FP GUARD: a legit batch that filters by integer author_exclude AND creates a post
+-- whose PROSE contains ") or " / ") and " — the old whole-body keyword match blocked
+-- this; the value-scoped check must not. This is the core WordPress-fleet FP.
+clean(post("/wp-json/batch/v1", "",
+      '{"requests":[' ..
+      '{"method":"GET","path":"/wp/v2/posts?author_exclude=5"},' ..
+      '{"method":"POST","path":"/wp/v2/posts","body":{"content":"Pick option (a) or (b), then (this) and (that)."}}' ..
+      ']}'),
+      "FP guard: integer author_exclude + prose ') or '/') and ' in another sub-request")
+
+-- FP GUARD: a post that merely *mentions* author_exclude in prose (no `=` param).
+clean(post("/wp-json/batch/v1", "",
+      '{"requests":[{"method":"POST","path":"/wp/v2/posts","body":{"content":'
+      .. '"Use author_exclude to hide authors; combine (this) and (that)."}}]}'),
+      "FP guard: author_exclude named in prose, not a query param")
+
+-- FP GUARD: a field VALUE that happens to be /// must not read as the primer path.
+clean(post("/wp-json/batch/v1", "",
+      '{"requests":[{"method":"POST","path":"/wp/v2/posts","body":{"slug":"foo","title":"about /// slashes"}}]}'),
+      "FP guard: /// inside content, not a path value")
 
 -- SQL-looking payload but NOT the batch endpoint -> this rule stays scoped
 -- (generic SQLi rule 301 is what would catch it elsewhere).

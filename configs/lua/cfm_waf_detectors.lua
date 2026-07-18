@@ -2587,9 +2587,11 @@ end
 -- normalized body, then key on two near-zero-FP markers in `nab` (the shared
 -- normalized+lowercased args+body; the PoC url-encodes the batch value with
 -- urllib.quote, so normalize()'s url-decode reveals the raw SQL):
---   SQLI   — author_exclude / author_not_in (a strict integer-CSV REST param) whose
---            value carries a ")" breakout + a SQL verb/comment. Impossible in legit use.
---   DESYNC — the "///" primer path (a quoted triple-slash), not seen in legit batch.
+--   SQLI   — author_exclude / author_not_in (a strict integer-list REST param) whose
+--            EXTRACTED VALUE contains any byte outside `[0-9, ]`. Value-scoped so
+--            legit prose elsewhere in the batch body can't trip it, and technique-
+--            agnostic so it can't be dodged with /**/ or # comment obfuscation.
+--   DESYNC — the "///" primer PATH value, not seen in legit batch traffic.
 -- Each leg is attributed to its own CVE id at the call site.
 local function _wp2shell_is_batch_endpoint(uri, args)
   -- normalize (url-decode x2 + lower) so an encoded rest_route=%2fbatch%2fv1 —
@@ -2600,17 +2602,43 @@ local function _wp2shell_is_batch_endpoint(uri, args)
 end
 _M.wp2shell_is_batch_endpoint = _wp2shell_is_batch_endpoint
 
+-- Extract every author_exclude / author_not_in value out of nab (the param rides
+-- inside a JSON path string like `/wp/v2/users?author_exclude=<v>`, value ending at
+-- the JSON quote, next query param, or JSON escape) and flag any that is not a
+-- clean integer list. A legit REST value is digits, commas and spaces ONLY
+-- (wp_parse_id_list): ANY other byte — a ")" breakout, a SQL keyword, an inline
+-- /**/ or # comment, a quote — means the route confusion smuggled a raw value past
+-- the sanitiser. Scoping to the extracted VALUE (not the whole body) is what keeps
+-- a legit batch that merely mentions ") or " in post prose from tripping, AND it
+-- catches injection shapes a fixed keyword list misses (e.g. `0)/**/or/**/(1=1)#`).
+-- The `[%[%]0-9]*=` between key and value tolerates the array forms
+-- (author_exclude[]= / author_exclude[0]=) without matching the key inside prose
+-- (where no `=` follows it).
+local function _wp2shell_sqli_in_author_param(s)
+  for _, key in ipairs({ "author_exclude", "author_not_in" }) do
+    for val in s:gmatch(key .. "[%[%]0-9]*=([^\"&\\]*)") do
+      -- legit value = integers separated by commas/whitespace (wp_parse_id_list);
+      -- any other byte is a smuggled injection.
+      if val ~= "" and val:find("[^0-9,%s]") then
+        return true
+      end
+    end
+  end
+  return false
+end
+
 function _M.detect_cve_wp2shell(nab)
   local s = nab or ""
   if s == "" then return nil end
-  -- Leg A — CVE-2026-60137: SQLi in the author-exclusion REST param.
-  if (has(s, "author_exclude") or has(s, "author_not_in"))
-     and (has(s, "sleep(") or has(s, "union select") or has(s, ") or ")
-          or has(s, ") and ") or has(s, ") union") or has(s, "-- -")) then
+  -- Leg A — CVE-2026-60137: SQLi in the author-exclusion REST param (value-scoped).
+  if _wp2shell_sqli_in_author_param(s) then
     return "SQLI"
   end
-  -- Leg B — CVE-2026-63030: the batch route-confusion desync primer path "///".
-  if has(s, '"///"') then
+  -- Leg B — CVE-2026-63030: the batch route-confusion desync primer, a sub-request
+  -- whose PATH is "///". Keyed on the `path` key (not a bare "///") so a post/slug
+  -- whose value happens to be `///` can't trip it. Tolerant of the colon spacing
+  -- of both compact and pretty-printed JSON.
+  if s:find('path"%s*:%s*"///"') then
     return "DESYNC"
   end
   return nil

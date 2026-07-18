@@ -68,12 +68,16 @@ back-filled here — see the git/PR history for that period.
   in 6.9.5 / 7.0.2 via forced auto-update); a working PoC is public and it is
   actively exploited. The detector gates on the REST batch endpoint (`batch/v1`,
   either `/wp-json/batch/v1` or `?rest_route=/batch/v1`) and fires on two
-  near-zero-FP markers in the normalized body: the `"///"` desync primer path
-  (route confusion → `BATCH_DESYNC`, attributed to CVE-2026-63030), and a SQL
-  breakout (`0) OR SLEEP(n)-- -` etc.) in the strictly integer-CSV `author_exclude`
-  / `author_not_in` REST parameter (core SQLi → `BATCH_SQLI`, attributed to
-  CVE-2026-60137). Signature taken from the public PoC, not from memory. Armed at
-  `block` (WAF_CVE family): nft-ban + CVE-named Slack/mail alert.
+  near-zero-FP markers in the normalized body: the `"///"` desync primer *path*
+  value (route confusion → `BATCH_DESYNC`, attributed to CVE-2026-63030), and an
+  `author_exclude` / `author_not_in` REST parameter whose **extracted value** is
+  not a clean integer list (core SQLi → `BATCH_SQLI`, attributed to
+  CVE-2026-60137). Both checks are scoped to the specific field value — not the
+  whole batch body — so a legit batch that merely mentions `author_exclude` or
+  `) or ` in post prose is not blocked; the SQLi check is technique-agnostic
+  (matches any non-integer value), so it can't be dodged with `/**/` or `#`
+  comment obfuscation. Signature taken from the public PoC, not from memory. Armed
+  at `block` (WAF_CVE family): nft-ban + CVE-named Slack/mail alert.
 - **WAF CVE detector: Multi Uploader for Gravity Forms unauth upload → RCE
   (rule 10010, CVE-2025-23921).** The Multi Uploader for Gravity Forms plugin
   (`<= 1.1.3`, CVSS 9.0, actively exploited since Aug 2024) has an
