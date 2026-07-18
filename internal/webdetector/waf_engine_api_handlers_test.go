@@ -125,3 +125,52 @@ func TestWAFEngineSummaryCountryAndRuleFilters(t *testing.T) {
 		t.Fatalf("combined filter: %+v", both)
 	}
 }
+
+// TestWAFEngineSummary_WindowedTypeFilteredRead is the regression guard for
+// the dashboard-pinned-CPU incident: the summary used to read the WHOLE
+// history table (every event type, unbounded time) and filter in Go — ~1.4GB
+// of allocations per poll on a box with millions of rows. The read must stay
+// windowed and type-filtered in SQL.
+func TestWAFEngineSummary_WindowedTypeFilteredRead(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	now := time.Now().Unix()
+	// In-window WAF events (both types) — must be returned.
+	hs.Append(HistoryEvent{TsUnix: now - 60, Type: "waf_trigger", Host: "a.com", IP: "1.1.1.1", Mode: "block", Reason: "WAF_SQLI:42"})
+	hs.Append(HistoryEvent{TsUnix: now - 120, Type: "waf_observe", Host: "b.com", IP: "2.2.2.2", Mode: "logonly", Reason: "WAF_XSS:7"})
+	// Noise the SQL filter must drop: non-WAF types in window, WAF out of window.
+	hs.Append(HistoryEvent{TsUnix: now - 30, Type: "challenge_decision", Host: "a.com", IP: "3.3.3.3", Reason: "WEB/RPS"})
+	hs.Append(HistoryEvent{TsUnix: now - 48*3600, Type: "waf_trigger", Host: "old.com", IP: "4.4.4.4", Mode: "block", Reason: "WAF_RCE:1"})
+
+	hs.mu.Lock()
+	got, err := hs.readWAFEventsSinceLocked(now - 24*3600)
+	hs.mu.Unlock()
+	if err != nil {
+		t.Fatalf("readWAFEventsSinceLocked: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("rows=%d want=2 (non-WAF and out-of-window rows must be excluded in SQL)", len(got))
+	}
+	if got[0].Reason != "WAF_SQLI:42" || got[1].Reason != "WAF_XSS:7" {
+		t.Fatalf("unexpected order/rows: %+v", got)
+	}
+
+	// End-to-end: the handler sees the same two events, nothing else.
+	e := &Engine{history: hs}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/waf/engine/summary?hours=24&limit=20&top=10", nil).WithContext(adminCtx())
+	e.handleWAFEngineSummary(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out wafEngineSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.TotalEvents != 2 {
+		t.Fatalf("total_events=%d want=2", out.TotalEvents)
+	}
+}

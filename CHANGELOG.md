@@ -17,6 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **Daemon pinned at ~40% CPU while a dashboard tab stayed open.** The
+  dashboard's Security overview polls `/api/v1/waf/engine/summary` every 10s,
+  and the handler read the **entire** `history_events` table (every event
+  type, unbounded time — millions of rows on a busy box) and filtered
+  WAF-in-window rows in Go: ~1.4 GB of allocations per call, 543 GB
+  cumulative in one observed hour, i.e. ~28 CPU-minutes of JSON decode + GC
+  (plus a ~1.9 GB heap peak). The read is now windowed and type-filtered in
+  SQL (`event_type IN (waf_observe, waf_trigger) AND ts_unix >= from`, served
+  by the existing `idx_history_events_type_ts` index), which reduces it to
+  just the WAF rows in the window — typically thousands, not millions.
+  Regression-guarded by a test asserting the SQL-side filtering. Also raised
+  the dashboard's cache TTLs on `/v1/system/dnat` (30s) and
+  `/v1/system/ssl/stats` (60s): with the 5s/10s defaults, the 10s auto-refresh
+  spawned a `cfm` CLI subprocess nearly every poll — and each `ssl stats` run
+  triggered a daemon-side cert refresh + dumpall (another ~50 GB of
+  allocations/hour on a 2.3k-cert box).
+
 ### Added
 - **WebUI: Health page (`/cfm-admin/health/`) — metric history + anomaly
   feed.** New sidebar entry (Overview → Health, admin-only) rendering the
