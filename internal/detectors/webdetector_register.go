@@ -780,6 +780,7 @@ func init() {
 			HistoryEnabled:            kvBool(kv, "HISTORY_ENABLED", true),
 			HistoryDBPath:             kvStrClean(kv, "HISTORY_DB_PATH", "/var/lib/cfm/webdetector-history.db"),
 			HistoryRetentionDays:      kvInt(kv, "HISTORY_RETENTION_DAYS", 30),
+			HistoryMaxRows:            kvInt(kv, "HISTORY_MAX_ROWS", 1000000),
 			HistoryPruneEvery:         kvDur(kv, "HISTORY_PRUNE_EVERY", time.Hour),
 			IPScoreRules:              parseIPScoreRules(kvStrClean(kv, "IP_SCORE_RULES", "")),
 		}

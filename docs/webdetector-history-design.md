@@ -249,7 +249,18 @@ Yes — SQLite can support all three cleanly:
 
 - `HISTORY_RETENTION_DAYS=30` (0 = disabled retention)
 - `HISTORY_PRUNE_EVERY=1h` (or 24h for lower churn)
+- `HISTORY_MAX_ROWS=1000000` (hard row cap, newest kept, enforced by the
+  pruner in addition to the day window; 0 = uncapped. ~1M rows ≈ 150-200 MB.
+  Bounds the DB on busy boxes where even a few retention days means millions
+  of rows.)
 - Admin/API verbs: `prune`, `truncate`, `vacuum` (optional)
+
+Maintenance behavior (as built): the pruner deletes by time, then by row
+cap; VACUUM runs only when ≥20% of pages **and** ≥8 MB sit on the freelist
+(a full VACUUM rewrites the whole DB — unconditional hourly VACUUMs were
+most of the history I/O); the WAL checkpoint (TRUNCATE) runs last so the
+WAL file shrinks after VACUUM's writes, and `journal_size_limit=64MB` caps
+the WAL between checkpoints.
 
 This gives predictable disk usage while preserving useful recent incident context.
 

@@ -362,7 +362,7 @@ func TestHistoryStats_AdminOnly(t *testing.T) {
 
 func TestWAFEngineSummary_ScopeFiltered(t *testing.T) {
 	e, mux := newStep3Engine(t)
-	hs, err := NewHistoryStore(filepath.Join(t.TempDir(), "history.jsonl"), 30, time.Hour)
+	hs, err := NewHistoryStore(filepath.Join(t.TempDir(), "history.jsonl"), 30, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("new history store: %v", err)
 	}
