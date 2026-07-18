@@ -59,6 +59,25 @@ back-filled here — see the git/PR history for that period.
   (`strip_data_uri`); **structural** rules (traversal/long-path) keep the raw URI,
   so a `data:`-prefixed `../` is still caught, and a data: URI in a query **arg**
   (a real open-redirect/XSS vector) stays fully scanned.
+- **WAF false positives on inline `data:` URIs in the request path (rules 302
+  XSS / 320 RCE).** When a browser or link-preview crawler resolves an inline
+  `data:...` URI as a *relative* URL, the whole payload arrives as the request
+  path (which then 404s). Its content — inline JavaScript, or a base64 image/
+  font — was scanned as if it were a reflected-XSS/code-exec payload. Two real
+  incidents: `facebookexternalhit` crawling a `data:text/javascript,<counter>`
+  script on `mobian.eu` got a **WAF_XSS** challenge (breaking that site's
+  Facebook link previews, since a crawler can't solve a JS challenge); and a
+  real Greek Vodafone customer on `epiplosou.gr` hitting a
+  `/product/…/data:image/jpg;base64,<blob>` URL was **blocked and ban-listed**
+  by the block-tier **WAF_RCE** rule — the base64 blob coincidentally contained
+  `eval`/`exec`/`system` (all base64-alphabet letters). Fix: a `data:` URI in
+  the request PATH is now recognised as a client artifact and skipped by the
+  XSS/RCE URI heuristics, and the RCE base64 marker is paren-anchored
+  (`eval(`/`exec(`/`system(`) so a base64 blob can never coincidentally trip it.
+  Both rules keep full strength on real paths and query strings: reflected XSS,
+  `data:` payloads in the **query string**, and the structural RCE markers
+  (`${jndi:`, `;wget `, …) and traversal all still fire — a `data:` path prefix
+  cannot evade them. RCE stays at `block`.
 - **Daemon pinned at ~40% CPU while a dashboard tab stayed open.** The
   dashboard's Security overview polls `/api/v1/waf/engine/summary` every 10s,
   and the handler read the **entire** `history_events` table (every event
