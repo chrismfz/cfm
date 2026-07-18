@@ -29,6 +29,16 @@ back-filled here — see the git/PR history for that period.
   dashboard's Node health card links over ("History →"). To make the 24h
   window real, the health ring store's default capacity grows from 720
   samples (2-4h at the detector's 10-20s cadence) to 8640 (~1 MB per node).
+- **Heartbeat now carries quick-glance vitals (fleet-monitoring Phase 1).**
+  Alongside `dnat_enabled`/`edge`, the agent heartbeat sends a `vitals` block
+  — load1, real CPU%, RAM%, swap%, disk-root%, uptime, and the mail-queue
+  count (exim/postfix) when a queue detector is enabled. Nothing new is
+  measured on the heartbeat path: values come from the health detector's
+  in-memory sample ring (10s cadence) and the `mailq` store. The block is
+  omitted (not zeroed) when the health detector is disabled or its latest
+  sample is >2min stale, so cfm-web keeps its last record and can grey it
+  out. Powers the Load/CPU/RAM/Swap/Disk/Mail-Q columns on the cfm-web
+  Agents list.
 - **Mail queue in the health surface (`cfm health` + dashboard).** The
   exim_queues/postfix_queues detectors now publish their latest queue count
   (total + frozen/deferred) to a tiny shared store (`internal/mailq`,
