@@ -2571,6 +2571,51 @@ function _M.detect_cve_gf_multi_uploader(uri, method, args, body)
   return nil
 end
 
+-- wp2shell — WordPress CORE unauthenticated RCE chain, actively exploited, public
+-- PoC (Icex0/wp2shell-poc). Two chained WordPress-core bugs:
+--   • CVE-2026-63030 — REST batch route confusion. An anonymous POST to the batch
+--     endpoint (/wp-json/batch/v1 or /?rest_route=/batch/v1) nests a batch inside a
+--     sub-request `body` and uses a desync primer sub-request whose path is "///"
+--     to confuse route parsing, smuggling a raw GET to /wp/v2/users past the REST
+--     parameter sanitiser.
+--   • CVE-2026-60137 — SQL injection in core. The smuggled GET carries
+--     author_exclude=<value>; the value lands unsanitised in `post_author NOT IN
+--     (<value>)`. The PoC breaks out with `0) OR SLEEP(n)-- -` / `0) AND (<cond>)-- -`.
+-- Affects WP 6.9–6.9.4 and 7.0–7.0.1; fixed 6.9.5 / 7.0.2 (forced auto-update).
+--
+-- Gate on the batch endpoint (_wp2shell_is_batch_endpoint) BEFORE materialising the
+-- normalized body, then key on two near-zero-FP markers in `nab` (the shared
+-- normalized+lowercased args+body; the PoC url-encodes the batch value with
+-- urllib.quote, so normalize()'s url-decode reveals the raw SQL):
+--   SQLI   — author_exclude / author_not_in (a strict integer-CSV REST param) whose
+--            value carries a ")" breakout + a SQL verb/comment. Impossible in legit use.
+--   DESYNC — the "///" primer path (a quoted triple-slash), not seen in legit batch.
+-- Each leg is attributed to its own CVE id at the call site.
+local function _wp2shell_is_batch_endpoint(uri, args)
+  -- normalize (url-decode x2 + lower) so an encoded rest_route=%2fbatch%2fv1 —
+  -- which WordPress still routes to the batch controller — can't dodge the gate.
+  -- Cheap: uri/args are short and normalize() fast-paths strings with no '%'.
+  if has(normalize(uri or ""), "batch/v1") then return true end
+  return has(normalize(args or ""), "batch/v1")
+end
+_M.wp2shell_is_batch_endpoint = _wp2shell_is_batch_endpoint
+
+function _M.detect_cve_wp2shell(nab)
+  local s = nab or ""
+  if s == "" then return nil end
+  -- Leg A — CVE-2026-60137: SQLi in the author-exclusion REST param.
+  if (has(s, "author_exclude") or has(s, "author_not_in"))
+     and (has(s, "sleep(") or has(s, "union select") or has(s, ") or ")
+          or has(s, ") and ") or has(s, ") union") or has(s, "-- -")) then
+    return "SQLI"
+  end
+  -- Leg B — CVE-2026-63030: the batch route-confusion desync primer path "///".
+  if has(s, '"///"') then
+    return "DESYNC"
+  end
+  return nil
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject

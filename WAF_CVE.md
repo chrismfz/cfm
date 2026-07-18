@@ -153,7 +153,7 @@ entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
 (`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
 hosting mix changes.
 
-Ten implemented; the rest are WordPress/Joomla candidates awaiting a
+Eleven implemented; the rest are WordPress/Joomla candidates awaiting a
 validated exact request shape:
 
 | Product / CVE | Status |
@@ -168,6 +168,7 @@ validated exact request shape:
 | Avada / Fusion Builder (`CVE-2026-6279` + `CVE-2026-8713`) | ✅ **implemented** (rule 10008) — `fusion_get_widget_markup` + `render_logics` base64→dangerous callable (RCE); `fusion_form_submit_ajax` + `privacy_expiration_action` (file delete) |
 | Kirki (`CVE-2026-8206`) | ✅ **implemented** (rule 10009) — unauth `POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password` + `username`&`email` → account takeover (reset link to attacker) |
 | Multi Uploader for Gravity Forms (`CVE-2025-23921`) | ✅ **implemented** (rule 10010) — `gf_page=upload` + `gform_unique_id` traversal→`.phtml` (php-exec in field value, not `filename=`, so rule 401 misses it) |
+| WordPress **core** "wp2shell" (`CVE-2026-63030` + `CVE-2026-60137`) | ✅ **implemented** (rule 10011) — batch-endpoint (`batch/v1`) POST; `"///"` desync primer (63030 route confusion) → `BATCH_DESYNC`, and SQL breakout in the integer-only `author_exclude`/`author_not_in` param (60137 core SQLi) → `BATCH_SQLI`. Two CVE ids, one rule. Affects 6.9–6.9.4 / 7.0–7.0.1; public PoC, actively exploited |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
 Keep the plan doc's candidate table as the backlog; update the ✅ column here
