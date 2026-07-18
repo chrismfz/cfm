@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -210,6 +211,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
+	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
 	m.HandleFunc("/api/v1/health/snapshot", handleHealthSnapshot(backend))
 	m.HandleFunc("/api/v1/health/timeseries", handleHealthTimeseries)
 	m.HandleFunc("/api/v1/health/anomalies", handleHealthAnomalies)
@@ -262,13 +264,26 @@ func handleSystemSSLStats(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "duration_ms": ms, "output": string(out)})
 		return
 	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "duration_ms": ms, "stats": parseCLIJSONOutput(out)})
+}
+
+// parseCLIJSONOutput decodes the JSON body of a CLI command's combined
+// output. `cfm ssl ... --json` can emit log lines before the JSON (the CLI
+// process's logging.Logf goes to stdout, and we capture CombinedOutput), so
+// on a whole-output parse failure it retries from the first '{'. Falls back
+// to the trimmed raw string — a string, not []byte: encoding/json would
+// base64 a byte slice and the UI would render gibberish.
+func parseCLIJSONOutput(out []byte) any {
 	var parsed any
-	if json.Unmarshal(out, &parsed) != nil {
-		// String, not []byte: encoding/json would base64 a byte slice and the
-		// UI would render gibberish instead of the raw CLI output.
-		parsed = string(bytes.TrimSpace(out))
+	if json.Unmarshal(out, &parsed) == nil {
+		return parsed
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "duration_ms": ms, "stats": parsed})
+	if idx := bytes.IndexByte(out, '{'); idx >= 0 {
+		if json.NewDecoder(bytes.NewReader(out[idx:])).Decode(&parsed) == nil {
+			return parsed
+		}
+	}
+	return string(bytes.TrimSpace(out))
 }
 
 // handleHealthSnapshot serves the canonical health snapshot (admin-only).
@@ -276,6 +291,38 @@ func handleSystemSSLStats(w http.ResponseWriter, r *http.Request) {
 // (clamped to 1s..1m, same as the other system endpoints) opts into the
 // stale-while-revalidate cache the dashboard uses, so it recollects at most
 // once per TTL. `collected_at` in the payload tells the caller the real age.
+// runSSLRefreshFn is a test seam for the `cfm ssl refresh` invocation.
+var runSSLRefreshFn = func(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(ctx, "cfm", "ssl", "refresh", "--json").CombinedOutput()
+}
+
+// handleSystemSSLRefresh forces a certificate rescan + collector refresh
+// (`cfm ssl refresh --json` — the WebUI "Rescan certs" button). Admin-only,
+// POST-only, bounded to 90s: the refresh walks the cert source directories,
+// which can take a while on boxes with thousands of vhosts.
+func handleSystemSSLRefresh(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	start := time.Now()
+	out, err := runSSLRefreshFn(ctx)
+	ms := time.Since(start).Milliseconds()
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "duration_ms": ms, "output": string(bytes.TrimSpace(out))})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "duration_ms": ms, "stats": parseCLIJSONOutput(out)})
+}
+
 func handleHealthSnapshot(backend firewall.Backend) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireHealthAccess(w, r) {
