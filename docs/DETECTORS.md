@@ -79,10 +79,10 @@ Typical defaults below are representative from the shipped template and should b
 | `mysql_governor` | Processlist pressure, long query, conn cap enforcement | `MODE`, `POLL_EVERY`, `QUERY_RULES`, `CONN_RULES`, kill limits | `MODE=enforce`, `POLL_EVERY=5s` |
 | `exim_security` | Exim security/auth/reject patterns | `LOG_PATH`, `REJECT_LOG_PATH`, per-rule thresholds, `BLOCK` | `WINDOW=30m`, `BLOCK=12h` |
 | `exim_relays` | Exim relay/throughput abuse | `LOCAL_USER_MAX`, `AUTH_*`, `UNAUTH_IP_MAX`, `BLOCK` | `WINDOW=15m`, `BLOCK=dryrun` |
-| `exim_queues` | Exim queue growth/frozen queue pressure | `QUEUE_TOTAL_MAX`, `QUEUE_FROZEN_MAX`, `COOLDOWN` | `EVERY=60s`, alerting focus |
+| `exim_queues` | Exim queue growth/frozen queue pressure | `QUEUE_TOTAL_MAX`, `QUEUE_FROZEN_MAX`, `COOLDOWN` | `EVERY=60s`, alerting focus; also publishes the queue count to the health snapshot (`cfm health` / dashboard Mail queue tile) via `internal/mailq` |
 | `postfix_security` | Postfix auth/reject/rbl/tls anomalies | `MODE` or Docker/Journal source keys, thresholds, `BLOCK` | `WINDOW=30m`, `BLOCK=permanent` |
 | `postfix_relays` | Postfix relay-style abuse counters | threshold family similar to Exim relays, `BLOCK` | `WINDOW=15m` |
-| `postfix_queues` | Postfix queue saturation | `TOTAL_CMD`, `LIST_CMD`, queue thresholds | `EVERY=60s`, alerting focus |
+| `postfix_queues` | Postfix queue saturation | `TOTAL_CMD`, `LIST_CMD`, queue thresholds | `EVERY=60s`, alerting focus; also publishes the queue count to the health snapshot (`cfm health` / dashboard Mail queue tile) via `internal/mailq` |
 | `modsec` | ModSecurity denial bursts per IP | `LOG_PATH`, `MODSEC_IP`, `BLOCK` | `WINDOW=15m`, `BLOCK=permanent` |
 | `outbound` | outbound abuse sentinel (per-uid SMTP/scan/HTTP bursts) | `OUTBOUND_*` thresholds, allow users/groups, dedupe | `WINDOW=60s`, alerting focus |
 | `health` | host health anomalies (CPU/RAM/disk/temp/net spikes) | `% thresholds`, spike multipliers, watch lists | `EVERY=20s`, mostly alerting |

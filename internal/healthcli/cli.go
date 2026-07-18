@@ -45,6 +45,15 @@ type legacySample struct {
 	TxMbps      float64   `json:"tx_mbps"`
 }
 
+// mailQueueSample mirrors healthmodel.MailQueueStatus (published by the
+// exim_queues/postfix_queues detectors via internal/mailq).
+type mailQueueSample struct {
+	MTA        string `json:"mta"`
+	Queued     int    `json:"queued"`
+	Frozen     int    `json:"frozen"`
+	AgeSeconds int64  `json:"age_seconds"`
+}
+
 type modernSample struct {
 	NodeID      string    `json:"node_id"`
 	CollectedAt time.Time `json:"collected_at"`
@@ -104,6 +113,7 @@ type modernSample struct {
 		WAFEvents1h    int `json:"waf_events_1h"`
 		OutboundAlerts int `json:"outbound_alerts"`
 	} `json:"cfm_metrics"`
+	Mail *mailQueueSample `json:"mail"`
 	Runtime struct {
 		CFMDaemonLive                bool   `json:"cfm_daemon_live"`
 		CFMDaemonPID                 *int   `json:"cfm_daemon_pid"`
@@ -329,8 +339,34 @@ func printSummary(s parsedSnapshot, opts cliOptions) {
 	printRuntimeSection(s, opts)
 	printDiskSection(s, opts)
 	printStorageSection(s, opts)
+	printMailSection(s, opts)
 	printNetworkSection(s, opts)
 	printCFMSection(s, opts)
+}
+
+// printMailSection renders the MTA queue line. Quiet when no queue
+// detector is publishing (mail-less box or exim_queues/postfix_queues
+// disabled). Thresholds follow the detectors' defaults: QUEUE_TOTAL_MAX
+// 500, QUEUE_FROZEN_MAX 200.
+func printMailSection(s parsedSnapshot, opts cliOptions) {
+	m := s.Modern.Mail
+	if m == nil || m.MTA == "" {
+		return
+	}
+	status := worstLabel(labelByCount(m.Queued, 500, 5000), labelByCount(m.Frozen, 200, 2000))
+	if opts.Compact {
+		fmt.Printf("Mail %-6s mta=%s queued=%d frozen=%d\n", badge(status, opts), m.MTA, m.Queued, m.Frozen)
+		return
+	}
+	fmt.Printf("Mail queue %s\n", badge(status, opts))
+	line := fmt.Sprintf("  %s: %d queued", m.MTA, m.Queued)
+	if m.Frozen > 0 {
+		line += fmt.Sprintf(" · %d frozen", m.Frozen)
+	}
+	if m.AgeSeconds > 300 {
+		line += fmt.Sprintf(" (measured %dm ago)", m.AgeSeconds/60)
+	}
+	fmt.Println(line)
 }
 
 func printRuntimeSection(s parsedSnapshot, opts cliOptions) {
@@ -1483,6 +1519,9 @@ func fetchSnapshot(baseURL string) (parsedSnapshot, error) {
 		out.Modern.CFM.ChallengeQueue = latest.CFM.ChallengeQueue
 		out.Modern.CFM.WAFEvents1h = latest.CFM.WAFEvents1h
 		out.Modern.CFM.OutboundAlerts = latest.CFM.OutboundAlerts
+		if latest.Mail != nil {
+			out.Modern.Mail = &mailQueueSample{MTA: latest.Mail.MTA, Queued: latest.Mail.Queued, Frozen: latest.Mail.Frozen, AgeSeconds: latest.Mail.AgeSeconds}
+		}
 		out.Modern.Network.InBps = latest.Network.BandwidthInBytesPerSec
 		out.Modern.Network.OutBps = latest.Network.BandwidthOutBytesPerSec
 		out.Modern.Network.ConntrackCount = latest.Network.ConntrackCount

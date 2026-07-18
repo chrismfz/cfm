@@ -5,6 +5,7 @@ import (
 	edgediag "cfm/internal/diagnostics/edge"
 	"cfm/internal/dnat"
 	"cfm/internal/firewall"
+	"cfm/internal/mailq"
 	webdet "cfm/internal/webdetector"
 	"context"
 	"crypto/tls"
@@ -93,7 +94,22 @@ func CollectSnapshotNow(nodeID string, backend firewall.Backend) (snap HealthSna
 	snap.Services = collectServiceStatuses()
 	populateConntrackUsage(&snap.Network)
 	snap.Runtime = collectRuntimeStatus(backend)
+	snap.Mail = latestMailQueueStatus()
 	return snap
+}
+
+// latestMailQueueStatus maps the mailq store's freshest measurement into
+// the snapshot; nil when no queue detector has published anything.
+func latestMailQueueStatus() *MailQueueStatus {
+	m, ok := mailq.Latest()
+	if !ok {
+		return nil
+	}
+	age := int64(time.Since(m.MeasuredAt).Seconds())
+	if age < 0 {
+		age = 0
+	}
+	return &MailQueueStatus{MTA: m.MTA, Queued: m.Total, Frozen: m.Frozen, AgeSeconds: age}
 }
 
 func populateConntrackUsage(network *NetworkThroughput) {

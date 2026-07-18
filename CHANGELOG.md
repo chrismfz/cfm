@@ -18,6 +18,34 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Mail queue in the health surface (`cfm health` + dashboard).** The
+  exim_queues/postfix_queues detectors now publish their latest queue count
+  (total + frozen/deferred) to a tiny shared store (`internal/mailq`,
+  healthstore pattern), and the health snapshot carries it as `mail`
+  (`mta`/`queued`/`frozen`/`age_seconds`) — the queue is counted ONCE, by the
+  detector with its operator-configurable `TOTAL_CMD`, no extra probing on
+  the snapshot path. `cfm health` prints a "Mail queue" section and the
+  dashboard Node health card gets a "Mail queue" tile + header issue chip
+  (warn ≥500 queued / ≥200 frozen, danger ≥5000/≥2000 — the detector's alert
+  defaults). Quiet on boxes where neither queue detector is enabled. A spam
+  blast filling the queue is now visible at a glance before the blacklists
+  notice. Also hardened the queue detectors' count parsing: the count command
+  runs under a login shell, so profile noise (motd, `/etc/profile.d` chatter)
+  before the number no longer breaks parsing (last numeric line wins).
+
+### Removed
+- **Dashboard: "Cache overview" card and `cfm_cache_stats` dict tile.**
+  Leftovers of the abandoned static/micro caching experiment — the card only
+  ever showed the reference TTL table and "Cache telemetry not available
+  yet", and the shared-dict tile was permanently "unavailable".
+
+### Changed
+- **Dashboard: sslcollector status stays quiet unless actually not ready.**
+  The stats poll usually has *something* stale in `last_error`, so the
+  always-on error surfacing read as noise; the last error is now only a
+  hover tooltip on the status tile.
+
+### Added
 - **Dashboard: "Rescan certs" button on the SSL certificates card.** Backed by
   the new admin-only `POST /api/v1/system/ssl/refresh` (runs `cfm ssl refresh
   --json`, bounded to 90s) — forces a certificate-source rescan + collector

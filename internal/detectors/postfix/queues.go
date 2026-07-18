@@ -12,6 +12,7 @@ import (
     "time"
 
     core "cfm/internal/detectors/core"
+    "cfm/internal/mailq"
 )
 
 type QueuesConfig struct {
@@ -70,10 +71,16 @@ const (
 func (q *Queues) RunOnce(ctx context.Context, out chan<- core.Alert) error {
     start := time.Now()
 
-    total, _ := q.totalCount(ctx)
+    total, totalErr := q.totalCount(ctx)
     frozen, samples, _ := q.frozenCountAndSamples(ctx)
 
     now := time.Now()
+    // Publish for the health snapshot (cfm health / dashboard). Only on a
+    // successful count — a failed probe (postfix absent, timeout) must not
+    // surface as a fake empty queue.
+    if totalErr == nil {
+        mailq.Publish(mailq.Measurement{MTA: "postfix", Total: total, Frozen: frozen, MeasuredAt: now})
+    }
 
     if q.cfg.MaxTotal > 0 && total > q.cfg.MaxTotal &&
         q.gate.Allow(string(QueueTotal), now, total, q.cfg.MaxTotal) {
@@ -121,10 +128,22 @@ func (q *Queues) totalCount(ctx context.Context) (int, error) {
     if err != nil {
         return 0, err
     }
-    s := strings.TrimSpace(string(out))
-    n, err := strconv.Atoi(s)
-    if err != nil {
-        return 0, fmt.Errorf("parse total: %w (got %q)", err, s)
+    return parseCountOutput(string(out))
+}
+
+// parseCountOutput extracts the count from the command's stdout. The
+// command runs under a login shell (`sh -lc`), so profile noise (motd,
+// /etc/profile.d chatter) can precede the number — take the last line
+// that parses as an integer instead of requiring clean output.
+func parseCountOutput(raw string) (int, error) {
+    n, found := 0, false
+    for _, line := range strings.Split(raw, "\n") {
+        if v, err := strconv.Atoi(strings.TrimSpace(line)); err == nil {
+            n, found = v, true
+        }
+    }
+    if !found {
+        return 0, fmt.Errorf("parse total: no numeric line in %q", strings.TrimSpace(raw))
     }
     return n, nil
 }
