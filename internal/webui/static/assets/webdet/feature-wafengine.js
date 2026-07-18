@@ -8,6 +8,10 @@ export const wafEngineMixin = {
       wafEventLimit: 200,
       wafTopN: 10,
       wafSummary: null,
+      // Server-side filters: applied before aggregation, so totals and every
+      // top list reflect them — the false-positive-hunting workflow.
+      wafCountry: "",
+      wafRule: "",
     };
   },
   methods: {
@@ -19,7 +23,47 @@ export const wafEngineMixin = {
       this.wafHours = hours;
       this.wafEventLimit = limit;
       this.wafTopN = top;
-      this.wafSummary = await this.fetchJSONSafe(`v1/waf/engine/summary?hours=${hours}&limit=${limit}&top=${top}&enrich=1`, null);
+      let url = `v1/waf/engine/summary?hours=${hours}&limit=${limit}&top=${top}&enrich=1`;
+      const country = String(this.wafCountry || "").trim();
+      const rule = String(this.wafRule || "").trim();
+      if (country) url += `&country=${encodeURIComponent(country)}`;
+      if (rule) url += `&rule=${encodeURIComponent(rule)}`;
+      this.wafSummary = await this.fetchJSONSafe(url, null);
+    },
+    setWAFRuleFilter(rule) {
+      const r = String(rule || "").trim();
+      if (!r) return;
+      this.wafRule = this.wafRule === r ? "" : r;
+      this.refreshWAFEngine();
+    },
+    setWAFCountryFilter(cc) {
+      const c = String(cc || "").trim().toUpperCase();
+      if (!c) return;
+      this.wafCountry = this.wafCountry === c ? "" : c;
+      this.refreshWAFEngine();
+    },
+    clearWAFFilters() {
+      this.wafCountry = "";
+      this.wafRule = "";
+      this.refreshWAFEngine();
+    },
+    uriPath(uri) {
+      return String(uri || "").split("?")[0] || "/";
+    },
+    // One-click false-positive fix from an event row: add a WAF exclude for
+    // the host or the path without retyping it in the excludes card.
+    async quickWAFExclude(type, value) {
+      const v = String(value || "").trim();
+      if (!v) return;
+      if (!window.confirm(`Add WAF exclude ${type}=${v}?\n\nMatching requests will BYPASS the WAF engine until the exclude is removed.`)) return;
+      try {
+        await this.postJSON(`v1/waf/exclude/add?type=${encodeURIComponent(type)}&value=${encodeURIComponent(v)}`, {});
+        this.actionMsg = `WAF exclude added: ${type}=${v}`;
+        await this.refreshExcludeLists?.();
+      } catch (err) {
+        this.actionMsg = `WAF exclude add failed: ${this.formatApiError(err)}`;
+        console.error("[cfm-admin] quick waf exclude failed", err);
+      }
     },
   },
 };

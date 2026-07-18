@@ -29,6 +29,17 @@ func scopeCheckHost(w http.ResponseWriter, r *http.Request, host string) bool {
 	return true
 }
 
+// historyEventView is a HistoryEvent plus GeoIP context, returned when the
+// caller asks for enrich=1. Country/ASN come from the enricher at read time
+// (bounded: one lookup per unique IP in the returned page), so the forensics
+// table can show where an IP is from without storing it per event.
+type historyEventView struct {
+	HistoryEvent
+	Country string `json:"country,omitempty"`
+	ASN     uint   `json:"asn,omitempty"`
+	ASNName string `json:"asn_name,omitempty"`
+}
+
 func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
@@ -48,7 +59,35 @@ func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"rows": rows})
+	enrichEnabled := strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "1") || strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "true")
+	if !enrichEnabled || e.enr == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"rows": rows})
+		return
+	}
+	type geo struct {
+		country string
+		asn     uint
+		asnName string
+	}
+	cache := map[string]geo{}
+	out := make([]historyEventView, 0, len(rows))
+	for _, ev := range rows {
+		v := historyEventView{HistoryEvent: ev}
+		ip := strings.TrimSpace(ev.IP)
+		if ip != "" {
+			g, ok := cache[ip]
+			if !ok {
+				res := e.enr.Lookup(ip)
+				g = geo{country: res.Country, asn: res.ASN, asnName: res.ASNName}
+				cache[ip] = g
+			}
+			v.Country = g.country
+			v.ASN = g.asn
+			v.ASNName = g.asnName
+		}
+		out = append(out, v)
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"rows": out})
 }
 
 func (e *Engine) handleHistorySummary(w http.ResponseWriter, r *http.Request) {

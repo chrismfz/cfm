@@ -406,6 +406,18 @@ tr.bulk-selected:hover { background: var(--danger-soft); }
   gap: .6rem;
   margin-bottom: .7rem;
 }
+/* Top-N breakdown columns (WAF engine analytics). Previously unstyled, so
+ * the lists stacked vertically into a very tall card. */
+.grid.two {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: .4rem .9rem;
+  margin-bottom: .7rem;
+}
+.grid.two h3 { margin: .4rem 0 .3rem; font-size: .9rem; }
+.grid.two ul { margin: 0; padding-left: 1.1rem; font-size: .85rem; }
+.grid.two li { margin-bottom: .15rem; }
+.top-hint { color: var(--muted); font-weight: 400; font-size: .72rem; }
 .summary-card {
   border: 1px solid var(--border-soft);
   border-radius: 10px;
