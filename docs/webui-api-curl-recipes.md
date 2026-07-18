@@ -162,6 +162,10 @@ curl -sS "$CFM_API/api/v1/health/snapshot" | jq .
 # cached, stale-while-revalidate — what the dashboard polls (recollects at most
 # once per TTL; TTL clamped to 1s..1m; check `collected_at` for the real age)
 curl -sS "$CFM_API/api/v1/health/snapshot?cache_ttl=60s" | jq .
+
+# metric history (in-memory ring, ~24h reach) + anomaly feed — the /cfm-admin/health/ page
+curl -sS "$CFM_API/api/v1/health/timeseries?window=1h&step=1m" | jq .
+curl -sS "$CFM_API/api/v1/health/anomalies?since=24h" | jq .
 ```
 
 ---

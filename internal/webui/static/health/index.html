@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM — Health</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2032%2032%27%3E%3Crect%20width=%2732%27%20height=%2732%27%20rx=%277%27%20fill=%27%23141b2d%27/%3E%3Cpath%20d=%27M16%206l8.7%205v10L16%2026l-8.7-5V11z%27%20fill=%27none%27%20stroke=%27%234da3ff%27%20stroke-width=%272.4%27/%3E%3C/svg%3E" />
+  <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <script src="/cfm-admin/assets/vendor/echarts-5.6.0.min.js"></script>
+  <script type="module">
+    import "../assets/shared/constants.js";
+    import "../assets/shared/auth-context.js";
+    import "../assets/shared/auth-mode.js";
+    import "../assets/shared/api-client.js";
+    import "../assets/shared/controller-bootstrap.js";
+    import "../assets/shared/ui-scope.js";
+    import "../assets/shared/chart-theme.js";
+    import "../assets/health.js";
+  </script>
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar" data-shared-nav></aside>
+<div class="main">
+<div id="app">
+    <header class="topbar">
+      <button class="nav-burger" type="button" data-nav-burger aria-label="Toggle navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <h1>Health</h1>
+      <div class="meta">
+        <span id="healthPageMeta" class="muted"></span>
+        <span class="muted">Auto-refresh: <strong id="autoState">ON</strong></span>
+        <button id="refreshBtn" class="btn-quiet">Refresh now</button>
+        <button id="toggleAutoBtn" class="btn-quiet">Stop</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>
+          Utilization
+          <span class="top-hint">CPU · RAM · swap · disk / — averaged per bucket from the in-memory health timeseries</span>
+        </h2>
+        <div class="toolbar">
+          <label for="windowSelect">Window</label>
+          <select id="windowSelect" class="input">
+            <option value="1h" selected>1h · 1m avg</option>
+            <option value="3h">3h · 3m avg</option>
+            <option value="6h">6h · 5m avg</option>
+            <option value="24h">24h · 15m avg</option>
+          </select>
+          <span id="pointsInfo" class="muted"></span>
+          <span id="actionMsg" class="pill" style="display:none"></span>
+        </div>
+        <div id="utilChart" class="spark"></div>
+      </section>
+
+      <section class="card">
+        <h2>Load average (1m)</h2>
+        <div id="loadChart" class="spark"></div>
+      </section>
+
+      <section class="card">
+        <h2>Network throughput</h2>
+        <div id="netChart" class="spark"></div>
+      </section>
+
+      <section class="card wide" id="tempCard" style="display:none">
+        <h2>Temperature <span class="top-hint">max sensor °C</span></h2>
+        <div id="tempChart" class="spark"></div>
+      </section>
+
+      <section class="card wide">
+        <h2>
+          Anomaly feed
+          <span class="top-hint">API/scoring anomalies the daemon observed — window follows the selector</span>
+        </h2>
+        <div class="table-wrap stable-table-wrap">
+          <table>
+            <thead>
+              <tr><th>When</th><th>Source</th><th>Signal</th><th>Reason</th><th>Scope</th><th>Count</th><th>IP</th><th>Path</th><th>Status</th></tr>
+            </thead>
+            <tbody id="anomaliesBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+</div><!-- /.main -->
+</div><!-- /.shell -->
+</body>
+</html>

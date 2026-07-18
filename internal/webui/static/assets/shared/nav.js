@@ -21,11 +21,13 @@ const ICONS = {
   bug: '<circle cx="12" cy="13" r="6"/><path d="M12 7V4m-5 3L5 5m12 2l2-2M3 13h3m12 0h3M5 20l2.5-2.5M19 20l-2.5-2.5"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/>',
   theme: '<path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/>',
+  pulse: '<path d="M3 12h4l2.5-7 5 14 2.5-7h4"/>',
 };
 
 const MENU_GROUPS = [
   { title: "Overview", items: [
     { label: "Dashboard", href: "/cfm-admin/", icon: "gauge" },
+    { label: "Health", href: "/cfm-admin/health/", icon: "pulse" },
   ]},
   { title: "Web protection", items: [
     { label: "WebDetector", href: "/cfm-admin/webdetector/", icon: "radar" },
