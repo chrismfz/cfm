@@ -17,6 +17,30 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **SMART: Samsung SATA SSDs reported no wearout and 0°C.** Two parsing bugs
+  in the health detector's `smartctl -a` reader (`parseSmartInfo`): (1) attr
+  **177 Wear_Leveling_Count** — the Samsung SATA wear indicator, normalized
+  VALUE declines from 100 — wasn't in the remaining-style attribute set, so
+  MZ7L3-class drives showed `wearout n/a` in `cfm health --disk-detail` and
+  the dashboard while their NVMe siblings reported fine; (2) the ATA
+  temperature regex captured "the first number after the attribute name",
+  which is the leading 0 of the hex FLAG column (`0x0022`) — every SATA drive
+  reported 0°C. Temperature now reads attr 194/190's RAW_VALUE. Wearout from
+  177 also feeds the existing `HEALTH/SMART_WEAR_WARN/CRIT` thresholds, which
+  previously never armed for these drives.
+
+### Changed
+- **Dashboard: SMART devices table always visible; "Nginx overview" card
+  removed.** The SMART per-device table was inside a `<details>` that the
+  10s auto-refresh reset to collapsed — it's now a normal always-visible
+  table under Storage health. The "Nginx overview" card duplicated a subset
+  of "Nginx internals" directly below it and is removed; internals got a
+  format pass — version/worker/connection gauges merged into one leading
+  "nginx — worker & connections" section, and counter tiles the build
+  doesn't expose (accepted/handled/requests without `stub_status`) are
+  omitted instead of rendering "-".
+
 ### Added
 - **Web Bots: per-UA drilldown panel (vhosts / IPs+geo/ASN / paths / raw
   variants) with inline actions.** The Live UA Top table gains a **details**
