@@ -51,9 +51,30 @@ type modernSample struct {
 	Host        struct {
 		Hostname      string  `json:"hostname"`
 		LoadAvg1      float64 `json:"load_avg_1"`
+		LoadAvg5      float64 `json:"load_avg_5"`
+		LoadAvg15     float64 `json:"load_avg_15"`
 		CPUPercent    float64 `json:"cpu_percent"`
 		MemUsedBytes  uint64  `json:"mem_used_bytes"`
 		MemTotalBytes uint64  `json:"mem_total_bytes"`
+
+		CPUPercentSource string  `json:"cpu_percent_source"`
+		CPUUserPct       float64 `json:"cpu_user_pct"`
+		CPUSystemPct     float64 `json:"cpu_system_pct"`
+		CPUIOWaitPct     float64 `json:"cpu_iowait_pct"`
+		CPUStealPct      float64 `json:"cpu_steal_pct"`
+
+		MemAvailableBytes uint64 `json:"mem_available_bytes"`
+		MemBuffersBytes   uint64 `json:"mem_buffers_bytes"`
+		MemCachedBytes    uint64 `json:"mem_cached_bytes"`
+		SwapTotalBytes    uint64 `json:"swap_total_bytes"`
+		SwapUsedBytes     uint64 `json:"swap_used_bytes"`
+
+		UptimeSeconds uint64  `json:"uptime_seconds"`
+		CPUModel      string  `json:"cpu_model"`
+		CPUThreads    int     `json:"cpu_threads"`
+		CPUMHz        float64 `json:"cpu_mhz"`
+		OSPrettyName  string  `json:"os_pretty_name"`
+		KernelVersion string  `json:"kernel_version"`
 	} `json:"host"`
 	Disk struct {
 		Mounts []struct {
@@ -65,6 +86,11 @@ type modernSample struct {
 			TotalInodes  uint64  `json:"total_inodes"`
 			InodeUsedPct float64 `json:"inode_used_pct"`
 		} `json:"mounts"`
+		IORates []struct {
+			Device   string `json:"device"`
+			ReadBps  uint64 `json:"read_bps"`
+			WriteBps uint64 `json:"write_bps"`
+		} `json:"io_rates"`
 		SmartHealth  string                             `json:"smart_health"`
 		DiskWearout  string                             `json:"disk_wearout"`
 		SmartDevices map[string]healthmodel.SmartDevice `json:"smart_devices"`
@@ -121,6 +147,11 @@ type modernSample struct {
 		ConntrackMax      int            `json:"conntrack_max"`
 		ConntrackUsagePct float64        `json:"conntrack_usage_pct"`
 		TCP               map[string]int `json:"connection_states"`
+		NICs              []struct {
+			Name  string `json:"name"`
+			RxBps uint64 `json:"rx_bps"`
+			TxBps uint64 `json:"tx_bps"`
+		} `json:"nics"`
 	} `json:"network"`
 	Services []serviceStatus `json:"services"`
 }
@@ -808,13 +839,18 @@ func printOneLine(s parsedSnapshot, opts cliOptions) {
 }
 
 func printHostSection(s parsedSnapshot, opts cliOptions) {
-	load := nonZero(s.Modern.Host.LoadAvg1, s.Legacy.Load1)
-	cpu := nonZero(s.Modern.Host.CPUPercent, load*25)
-	ramUsed := s.Modern.Host.MemUsedBytes
-	ramTotal := s.Modern.Host.MemTotalBytes
+	h := s.Modern.Host
+	load := nonZero(h.LoadAvg1, s.Legacy.Load1)
+	cpu := nonZero(h.CPUPercent, load*25)
+	ramUsed := h.MemUsedBytes
+	ramTotal := h.MemTotalBytes
 	ramPct := s.Legacy.RamUsedPct
 	if ramTotal > 0 {
 		ramPct = 100 * float64(ramUsed) / float64(ramTotal)
+	}
+	swapPct := 0.0
+	if h.SwapTotalBytes > 0 {
+		swapPct = 100 * float64(h.SwapUsedBytes) / float64(h.SwapTotalBytes)
 	}
 
 	if opts.Compact {
@@ -822,16 +858,65 @@ func printHostSection(s parsedSnapshot, opts cliOptions) {
 		if ramTotal > 0 {
 			fmt.Printf(" (%s/%s)", bytesIEC(ramUsed), bytesIEC(ramTotal))
 		}
+		if h.SwapTotalBytes > 0 {
+			fmt.Printf(" swap=%s", pctStr(swapPct))
+		}
+		if h.UptimeSeconds > 0 {
+			fmt.Printf(" up=%s", formatShortDuration(time.Duration(h.UptimeSeconds)*time.Second))
+		}
 		fmt.Println()
 		return
 	}
 	fmt.Printf("Host %s\n", badge(labelByPct(max(cpu, ramPct)), opts))
-	fmt.Printf("  Load avg: %.2f\n", load)
-	fmt.Printf("  CPU: %s\n", pctStr(cpu))
+	if h.OSPrettyName != "" || h.KernelVersion != "" {
+		switch {
+		case h.OSPrettyName != "" && h.KernelVersion != "":
+			fmt.Printf("  OS: %s (kernel %s)\n", h.OSPrettyName, h.KernelVersion)
+		case h.OSPrettyName != "":
+			fmt.Printf("  OS: %s\n", h.OSPrettyName)
+		default:
+			fmt.Printf("  Kernel: %s\n", h.KernelVersion)
+		}
+	}
+	if h.UptimeSeconds > 0 {
+		fmt.Printf("  Uptime: %s\n", formatShortDuration(time.Duration(h.UptimeSeconds)*time.Second))
+	}
+	if h.CPUModel != "" {
+		ident := h.CPUModel
+		if h.CPUThreads > 0 {
+			ident += fmt.Sprintf(" (%d threads", h.CPUThreads)
+			if h.CPUMHz > 0 {
+				ident += fmt.Sprintf(" @ %.0f MHz", h.CPUMHz)
+			}
+			ident += ")"
+		}
+		fmt.Printf("  CPU model: %s\n", ident)
+	}
+	if h.LoadAvg5 > 0 || h.LoadAvg15 > 0 {
+		fmt.Printf("  Load avg: %.2f / %.2f / %.2f\n", load, h.LoadAvg5, h.LoadAvg15)
+	} else {
+		fmt.Printf("  Load avg: %.2f\n", load)
+	}
+	if h.CPUPercentSource == "procstat" {
+		fmt.Printf("  CPU: %s (user %s · system %s · iowait %s · steal %s)\n",
+			pctStr(cpu), pctStr(h.CPUUserPct), pctStr(h.CPUSystemPct), pctStr(h.CPUIOWaitPct), pctStr(h.CPUStealPct))
+	} else {
+		fmt.Printf("  CPU: %s\n", pctStr(cpu))
+	}
 	if ramTotal > 0 {
-		fmt.Printf("  RAM: %s / %s (%s)\n", bytesIEC(ramUsed), bytesIEC(ramTotal), pctStr(ramPct))
+		fmt.Printf("  RAM: %s / %s (%s)", bytesIEC(ramUsed), bytesIEC(ramTotal), pctStr(ramPct))
+		if h.MemAvailableBytes > 0 {
+			fmt.Printf(" — available %s, buffers %s, cached %s",
+				bytesIEC(h.MemAvailableBytes), bytesIEC(h.MemBuffersBytes), bytesIEC(h.MemCachedBytes))
+		}
+		fmt.Println()
 	} else {
 		fmt.Printf("  RAM: %s\n", pctStr(ramPct))
+	}
+	if h.SwapTotalBytes > 0 {
+		fmt.Printf("  Swap: %s / %s (%s)\n", bytesIEC(h.SwapUsedBytes), bytesIEC(h.SwapTotalBytes), pctStr(swapPct))
+	} else if ramTotal > 0 {
+		fmt.Printf("  Swap: none\n")
 	}
 }
 
@@ -875,6 +960,13 @@ func printDiskSection(s parsedSnapshot, opts cliOptions) {
 			}
 		}
 		fmt.Printf("  %-6s %-16s %-29s %-7s %-24s\n", badge(status, opts), r.mount, capacity, usage, inode)
+	}
+	if len(s.Modern.Disk.IORates) > 0 {
+		parts := make([]string, 0, len(s.Modern.Disk.IORates))
+		for _, r := range s.Modern.Disk.IORates {
+			parts = append(parts, fmt.Sprintf("%s read %s write %s", r.Device, bytesPerSec(r.ReadBps), bytesPerSec(r.WriteBps)))
+		}
+		fmt.Printf("  I/O: %s\n", strings.Join(parts, " · "))
 	}
 }
 
@@ -1257,6 +1349,12 @@ func printNetworkSection(s parsedSnapshot, opts cliOptions) {
 		fmt.Printf("  Conntrack: %d / %d (%s)\n", ctCount, ctMax, pctWholeStr(ctPct))
 	} else {
 		fmt.Printf("  Conntrack: unavailable\n")
+	}
+	if s.Modern.Network.InBps > 0 || s.Modern.Network.OutBps > 0 {
+		fmt.Printf("  Throughput: in %s · out %s\n", bytesPerSec(s.Modern.Network.InBps), bytesPerSec(s.Modern.Network.OutBps))
+	}
+	for _, nic := range s.Modern.Network.NICs {
+		fmt.Printf("    %-12s in %s · out %s\n", nic.Name, bytesPerSec(nic.RxBps), bytesPerSec(nic.TxBps))
 	}
 	if len(tcp) > 0 {
 		fmt.Printf("  Connection states: %s\n", renderConnStates(tcp))

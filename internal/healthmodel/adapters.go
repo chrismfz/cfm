@@ -26,9 +26,23 @@ func FromDetectorSnapshot(src health.Snapshot, nodeID string, collectedAt time.T
 			LoadAvg5:   0,
 			LoadAvg15:  0,
 			CPUPercent: cpuPercentEstimate(src.Load1, src.CPUCores),
+
+			MemAvailableBytes: src.Mem.AvailableBytes,
+			MemBuffersBytes:   src.Mem.BuffersBytes,
+			MemCachedBytes:    src.Mem.CachedBytes,
+			SwapTotalBytes:    src.Mem.SwapTotalBytes,
+			SwapUsedBytes:     src.Mem.SwapUsedBytes,
+
+			UptimeSeconds: src.UptimeSeconds,
+			CPUModel:      src.CPU.Model,
+			CPUThreads:    src.CPU.Threads,
+			CPUMHz:        src.CPU.MHz,
+			OSPrettyName:  src.OSPrettyName,
+			KernelVersion: src.KernelVersion,
 		},
 		Disk: DiskSnapshot{
 			Mounts:       mapDiskMounts(src.DiskStats),
+			IORates:      mapDiskIORates(src.DiskIO),
 			DiskHealth:   diskHealthFromUsage(src.DiskStats),
 			SmartHealth:  smartHealth(src.Smart),
 			DiskWearout:  wearoutHealth(src.Smart),
@@ -41,8 +55,54 @@ func FromDetectorSnapshot(src health.Snapshot, nodeID string, collectedAt time.T
 		Network: NetworkThroughput{
 			BandwidthInBytesPerSec:  mbpsToBytesPerSec(src.RxMbps),
 			BandwidthOutBytesPerSec: mbpsToBytesPerSec(src.TxMbps),
+			NICs:                    mapNICRates(src.NICRates),
 		},
 		Services: []ServiceStatus{},
+	}
+	// Prefer real utilization from /proc/stat deltas over the load1/cores
+	// heuristic; the seeding call (CPUUtil.Valid=false) keeps the estimate
+	// so CPUPercent never goes silently missing.
+	if src.CPUUtil.Valid {
+		out.Host.CPUPercent = src.CPUUtil.BusyPct
+		out.Host.CPUPercentSource = "procstat"
+		out.Host.CPUUserPct = src.CPUUtil.UserPct
+		out.Host.CPUSystemPct = src.CPUUtil.SystemPct
+		out.Host.CPUIOWaitPct = src.CPUUtil.IOWaitPct
+		out.Host.CPUStealPct = src.CPUUtil.StealPct
+	} else {
+		out.Host.CPUPercentSource = "load_estimate"
+	}
+	if src.Mem.TotalBytes > 0 {
+		out.Host.MemTotalBytes = src.Mem.TotalBytes
+		if src.Mem.AvailableBytes <= src.Mem.TotalBytes {
+			out.Host.MemUsedBytes = src.Mem.TotalBytes - src.Mem.AvailableBytes
+		}
+	}
+	return out
+}
+
+func mapDiskIORates(in []health.DiskIORate) []DiskIORate {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]DiskIORate, 0, len(in))
+	for _, r := range in {
+		out = append(out, DiskIORate{Device: r.Device, ReadBps: r.ReadBps, WriteBps: r.WriteBps})
+	}
+	return out
+}
+
+func mapNICRates(in []health.NICRate) []NICThroughput {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]NICThroughput, 0, len(in))
+	for _, r := range in {
+		out = append(out, NICThroughput{
+			Name:  r.Name,
+			RxBps: mbpsToBytesPerSec(r.RxMbps),
+			TxBps: mbpsToBytesPerSec(r.TxMbps),
+		})
 	}
 	return out
 }

@@ -22,18 +22,10 @@ func TestSnapshotNow_UsesSharedDetectorForThroughputDelta(t *testing.T) {
 		snapshotCollectorMu.Unlock()
 	})
 
-	times := []time.Time{
-		time.Unix(100, 0),
-		time.Unix(101, 0),
-	}
-	throughputNow = func() time.Time {
-		if len(times) == 0 {
-			t.Fatal("throughputNow called more than expected")
-		}
-		n := times[0]
-		times = times[1:]
-		return n
-	}
+	// Settable fake clock: shared by the throughput AND disk-I/O delta
+	// collectors, so it must tolerate multiple reads per snapshot.
+	now := time.Unix(100, 0)
+	throughputNow = func() time.Time { return now }
 
 	netDevSamples := []string{
 		"Inter-|   Receive                                                |  Transmit\n" +
@@ -56,12 +48,19 @@ func TestSnapshotNow_UsesSharedDetectorForThroughputDelta(t *testing.T) {
 	if first.RxMbps != 0 || first.TxMbps != 0 {
 		t.Fatalf("first snapshot should seed throughput counters, got rx=%f tx=%f", first.RxMbps, first.TxMbps)
 	}
+	if len(first.NICRates) != 0 {
+		t.Fatalf("first snapshot should not report per-NIC rates, got %+v", first.NICRates)
+	}
 
+	now = time.Unix(101, 0)
 	second := SnapshotNow()
 	if second.RxMbps <= 0 {
 		t.Fatalf("expected rx throughput > 0 on second snapshot, got %f", second.RxMbps)
 	}
 	if second.TxMbps <= 0 {
 		t.Fatalf("expected tx throughput > 0 on second snapshot, got %f", second.TxMbps)
+	}
+	if len(second.NICRates) != 1 || second.NICRates[0].Name != "eth0" || second.NICRates[0].RxMbps <= 0 {
+		t.Fatalf("expected per-NIC rate for eth0 on second snapshot, got %+v", second.NICRates)
 	}
 }
