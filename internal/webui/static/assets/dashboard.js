@@ -40,7 +40,6 @@ const el = {
   healthGrid:        document.getElementById('healthGrid'),
   healthStatusPill:  document.getElementById('healthStatusPill'),
   healthMeta:        document.getElementById('healthMeta'),
-  cacheOverview:     document.getElementById('cacheOverview'),
   nginxStatsGrid:    document.getElementById('nginxStatsGrid'),
 };
 
@@ -243,6 +242,14 @@ const el = {
     </div>`;
   }
 
+  function mailQueueTone(mail) {
+    const queued = num(mail?.queued) ?? 0;
+    const frozen = num(mail?.frozen) ?? 0;
+    if (queued >= 5000 || frozen >= 2000) return 'danger';
+    if (queued >= 500 || frozen >= 200) return 'warn';
+    return '';
+  }
+
   function collectHealthIssues(s) {
     const issues = [];
     const push = (tone, text) => issues.push({ tone, text });
@@ -271,6 +278,8 @@ const el = {
     const ctPct = num(net.conntrack_usage_pct);
     if (ctPct != null && ctPct >= 90) push('danger', `conntrack at ${ctPct.toFixed(0)}%`);
     else if (ctPct != null && ctPct >= 75) push('warn', `conntrack at ${ctPct.toFixed(0)}%`);
+    const mailTone = mailQueueTone(s.mail);
+    if (mailTone) push(mailTone, `mail queue at ${s.mail.queued} (${s.mail.mta})`);
     if (s.error) push('warn', `collector: ${s.error}`);
     return issues;
   }
@@ -309,12 +318,26 @@ const el = {
     const ctMax = num(net.conntrack_max);
     const ctPct = num(net.conntrack_usage_pct);
 
+    // Mail queue: published by the exim_queues/postfix_queues detectors;
+    // tile omitted when neither runs. Thresholds mirror the detector
+    // defaults (QUEUE_TOTAL_MAX 500 / QUEUE_FROZEN_MAX 200).
+    const mail = s.mail || null;
+    let mailTile = '';
+    if (mail && mail.mta) {
+      const tone = mailQueueTone(mail);
+      const valStyle = tone === 'danger' ? ' style="color:var(--danger)"'
+        : tone === 'warn' ? ' style="color:var(--warn)"' : '';
+      const sub = `${mail.mta}${num(mail.frozen) > 0 ? ` · ${mail.frozen} frozen` : ''}`;
+      mailTile = miniCard('Mail queue', `<span${valStyle}>${escapeHTML(String(mail.queued ?? 0))}</span>`, escapeHTML(sub), null);
+    }
+
     return `<div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))">
       ${miniCard('CPU', cpuPct != null ? escapeHTML(`${cpuPct.toFixed(1)}%`) : '-', escapeHTML(cpuSub), cpuPct, trend('cpu_pct', 'CPU busy %'))}
       ${miniCard('Load avg (1m)', load1 != null ? escapeHTML(load1.toFixed(2)) : '-', escapeHTML(loadSub), loadPct, trend('load1', 'Load avg (1m)'))}
       ${miniCard('RAM', memTotal > 0 ? escapeHTML(`${fmtBytes(memUsed)} / ${fmtBytes(memTotal)}`) : '-', memPct != null ? escapeHTML(`${memPct.toFixed(1)}%`) : '', memPct, trend('ram_used_pct', 'RAM used %'))}
       ${miniCard('Swap', swapTotal > 0 ? escapeHTML(`${fmtBytes(swapUsed)} / ${fmtBytes(swapTotal)}`) : 'none', swapPct != null ? escapeHTML(`${swapPct.toFixed(1)}%`) : '', swapPct, swapTotal > 0 ? trend('swap_used_pct', 'Swap used %') : '')}
       ${miniCard('Conntrack', (ctCount != null && ctMax > 0) ? escapeHTML(`${ctCount} / ${ctMax}`) : '-', ctPct != null ? escapeHTML(`${ctPct.toFixed(1)}%`) : '', ctPct)}
+      ${mailTile}
       ${miniCard('Net in', `↓ ${escapeHTML(fmtBytes(net.bandwidth_in_bps))}/s`, '', null, trend('rx_mbps', 'Inbound Mbps'))}
       ${miniCard('Net out', `↑ ${escapeHTML(fmtBytes(net.bandwidth_out_bps))}/s`, '', null, trend('tx_mbps', 'Outbound Mbps'))}
     </div>`;
@@ -509,117 +532,6 @@ const el = {
     renderHealth();
   }
 
-function renderCacheOverview() {
-  if (!el.cacheOverview) return;
-
-  const cache = state.lua?.cache || null;
-  const zones = cache?.zones || {};
-  const zs = zones.cfm_static || {};
-  const zm = zones.cfm_micro || {};
-
-  function cachePctBar(p) {
-    const pct = Number.isFinite(Number(p)) ? Number(p) : 0;
-    return `
-      <div class="progress" style="margin-top:.25rem">
-        <span style="width:${pct}%"></span>
-      </div>
-    `;
-  }
-
-
-
-  function row(label, z) {
-    const total = z.total ?? 0;
-    const cacheable = z.cacheable_total ?? 0;
-    const hit = z.hit ?? 0;
-    const miss = z.miss ?? 0;
-    const bypass = z.bypass ?? 0;
-    const stale = z.stale ?? 0;
-    const revalidated = z.revalidated ?? 0;
-
-    return `
-      <tr>
-        <td><code>${escapeHTML(label)}</code></td>
-        <td>${escapeHTML(String(total))}</td>
-        <td>
-          ${escapeHTML(String(hit))} (${escapeHTML(String(z.hit_pct ?? 0))}%)
-          ${cachePctBar(z.hit_pct ?? 0)}
-        </td>
-        <td>${escapeHTML(String(miss))} (${escapeHTML(String(z.miss_pct ?? 0))}%)</td>
-        <td>${escapeHTML(String(bypass))} (${escapeHTML(String(z.bypass_pct ?? 0))}%)</td>
-        <td>${escapeHTML(String(stale))}</td>
-        <td>${escapeHTML(String(revalidated))}</td>
-        <td>${escapeHTML(String(cacheable))}</td>
-      </tr>
-    `;
-  }
-
-  if (!cache || cache.error) {
-    el.cacheOverview.innerHTML = `
-      <table class="compact-table" style="width:100%">
-        <thead>
-          <tr>
-            <th>Zone / path</th>
-            <th>Purpose</th>
-            <th>TTL / inactivity</th>
-            <th>Bypass / notes</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><code>cfm_static</code></td>
-            <td>Static assets (css/js/images/fonts/media)</td>
-            <td>cache valid: 5m<br>inactive: 24h</td>
-            <td>Background update enabled only for safe static content</td>
-          </tr>
-          <tr>
-            <td><code>cfm_micro</code></td>
-            <td>Anonymous dynamic pages</td>
-            <td>200: 2s<br>404: 1s<br>inactive: 60m</td>
-            <td>Bypassed on challenge traffic and when cookies are present</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="muted" style="margin-top:.65rem">
-        Cache telemetry not available yet.
-      </p>
-    `;
-    return;
-  }
-
-  el.cacheOverview.innerHTML = `
-    <div class="muted" style="margin-bottom:.55rem">
-      Total cache-tracked requests: <strong>${escapeHTML(String(cache.total ?? 0))}</strong>
-      &nbsp;·&nbsp;
-      Last seen: <strong>${escapeHTML(fmtAge(cache.last_seen_age_s))}</strong>
-    </div>
-
-    <table class="compact-table" style="width:100%">
-      <thead>
-        <tr>
-          <th>Zone</th>
-          <th>Total</th>
-          <th>Hit</th>
-          <th>Miss</th>
-          <th>Bypass</th>
-          <th>Stale</th>
-          <th>Revalidated</th>
-          <th>Cacheable total</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${row('cfm_static', zs)}
-        ${row('cfm_micro', zm)}
-      </tbody>
-    </table>
-
-    <p class="muted" style="margin-top:.65rem">
-      Hit/Miss percentages are calculated over cacheable responses.
-      Bypass percentage is calculated over total tracked requests per zone.
-    </p>
-  `;
-}
-
 
   function renderNginxStats() {
     if (!el.nginxStatsGrid) return;
@@ -638,7 +550,6 @@ function renderCacheOverview() {
     const bk = dec.key_breakdown || {};
     const wx = dec.waf_excludes || {};
 
-const cache = d.cache || {};
 
 const dictSection = `
   <div style="grid-column:1/-1">
@@ -648,18 +559,18 @@ const dictSection = `
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">
       ${dictCard('cfm_decisions', dec)}
       ${dictCard('sslcache', ssl)}
-      ${dictCard('cfm_cache_stats', cache)}
     </div>
   </div>`;
 
     // Trimmed to the tiles an operator acts on; version hash / snapshot
-    // written / poll interval were noise. A recent error shows as ⚠ on the
-    // status tile with the message in the tooltip.
+    // written / poll interval / last error were noise (the stats poll has
+    // something to grumble about most of the time). The last error stays
+    // reachable as a hover tooltip on the status tile, nothing visible.
     const errTitle = ssl.last_error
-      ? ` title="${escapeHTML(`${ssl.last_error} (${fmtAge(ssl.last_error_age_s)})`)}"`
+      ? ` title="${escapeHTML(`last error: ${ssl.last_error} (${fmtAge(ssl.last_error_age_s)})`)}"`
       : '';
     const readyBadge = ssl.ready === '1'
-      ? `<span style="color:#87d45b"${errTitle}>✓ ready${ssl.last_error ? ' <span style="color:#ffd27c">⚠</span>' : ''}</span>`
+      ? `<span style="color:#87d45b"${errTitle}>✓ ready</span>`
       : `<span style="color:#d9516f"${errTitle}>✗ not ready</span>`;
 
     const sslHealthSection = `
@@ -803,10 +714,8 @@ const dictSection = `
 async function refreshLuaStats() {
   try {
     state.lua = await fetchLuaStats();
-    renderCacheOverview();
     renderNginxStats();
   } catch (e) {
-    renderCacheOverview();
     if (el.nginxStatsGrid) {
       el.nginxStatsGrid.innerHTML = `<p class="muted" style="grid-column:1/-1">Lua stats unavailable: ${escapeHTML(e.message)}</p>`;
     }
@@ -908,8 +817,7 @@ async function refreshLuaStats() {
         api('/v1/system/dnat'),
         api('/v1/system/ssl/stats'),
       ]);
-      renderCacheOverview();
-      renderDNAT(dnat);
+        renderDNAT(dnat);
       renderSSLStats(ssl);
       if (el.lastUpdated) el.lastUpdated.textContent = 'Updated ' + new Date().toLocaleTimeString();
     } catch (e) {

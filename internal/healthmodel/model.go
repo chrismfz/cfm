@@ -16,6 +16,19 @@ type HealthSnapshotV1 struct {
 	CFM           CFMMetrics        `json:"cfm_metrics"`
 	Network       NetworkThroughput `json:"network"`
 	Runtime       RuntimeStatus     `json:"runtime"`
+
+	// Mail is the latest MTA queue measurement published by the
+	// exim_queues/postfix_queues detectors (internal/mailq); nil when
+	// neither detector is enabled or nothing has been measured yet.
+	Mail *MailQueueStatus `json:"mail,omitempty"`
+}
+
+// MailQueueStatus mirrors the latest mailq.Measurement into the snapshot.
+type MailQueueStatus struct {
+	MTA        string `json:"mta"`    // "exim" | "postfix"
+	Queued     int    `json:"queued"` // messages in queue
+	Frozen     int    `json:"frozen,omitempty"`
+	AgeSeconds int64  `json:"age_seconds"` // measurement age at snapshot time
 }
 
 type RuntimeStatus struct {
