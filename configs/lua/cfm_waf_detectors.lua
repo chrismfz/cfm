@@ -3079,6 +3079,38 @@ function _M.detect_upload_content(body, headers)
   return nil
 end
 
+-- SP Page Builder unauthenticated arbitrary file upload -> RCE (CVE-2026-48908,
+-- the "ANTONKILL" vector, actively exploited 2026-07). The Joomla component
+-- com_sppagebuilder exposes asset.upload* tasks (uploadCustomIcon / uploadImage /
+-- uploadFont) with NO auth check and NO server-side file-type restriction, so an
+-- anonymous POST can drop a webshell. Confirmed in the wild dropping payload.zip
+-- (a php webshell inside an icon-pack zip; ClamAV: Win.Trojan.Hide-1).
+--
+-- Cheap gate FIRST on the component + task (both live in the query string, small)
+-- before touching the capped body. Then reuse the hardened upload detectors — the
+-- com_sppagebuilder + asset.upload + php-executable-payload triple is near-zero FP
+-- (a real icon/image/font upload never carries PHP):
+--   PHP_FILENAME — a php-exec multipart filename (rule 401's detector).
+--   PHP_IN_ZIP   — a php-exec entry inside the uploaded zip (rule 414's scanner).
+--   PHP_CONTENT  — raw php webshell bytes in the upload (rule 402's scanner).
+-- Body-budget caveat: a php entry past waf_body_max_len is not visible in-path
+-- (ClamAV is the backstop, as it was for the reported payload.zip).
+function _M.detect_cve_sppagebuilder_upload(uri, method, args, body, headers)
+  if method ~= "post" then return nil end
+  local qs = lower((uri or "") .. "&" .. (args or ""))
+  if not has(qs, "com_sppagebuilder") then return nil end
+  -- the vulnerable asset-upload task family; accept it from the body too, in case
+  -- a client sends `task` as a multipart field rather than a query param.
+  if not (has(qs, "asset.upload")
+          or has(lower(cap(body or "", CFG.max_scan_len)), "asset.upload")) then
+    return nil
+  end
+  if _M.detect_upload_filename(body, headers)   then return "PHP_FILENAME" end
+  if _M.detect_upload_archive_php(body, headers) then return "PHP_IN_ZIP" end
+  if _M.detect_upload_content(body, headers)     then return "PHP_CONTENT" end
+  return nil
+end
+
 -- [top-4c] Obfuscation scorer for raw POST bodies (forms, JSON, text, XML).
 -- Catches JS/PHP payload delivery that bypasses detect_b64_injection by using
 -- client-side decode (atob+XOR+new Function) instead of PHP-side base64_decode.

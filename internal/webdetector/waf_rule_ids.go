@@ -149,6 +149,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 10011, Name: "rule_cve_wp2shell", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10012, Name: "rule_cve_woocommerce_payments", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10013, Name: "rule_cve_gravity_smtp", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	{ID: 10014, Name: "rule_cve_sppagebuilder_upload", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

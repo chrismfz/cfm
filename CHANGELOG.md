@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF CVE detector: SP Page Builder (Joomla) unauth arbitrary upload → RCE
+  (rule 10014, CVE-2026-48908).** The `com_sppagebuilder` `asset.upload*` tasks
+  (`uploadCustomIcon`/`uploadImage`/`uploadFont`) have no auth check and no
+  server-side file-type restriction (the "ANTONKILL" vector, actively exploited
+  2026-07), so an anonymous POST can drop a webshell — seen in the wild uploading
+  `payload.zip` (ClamAV: `Win.Trojan.Hide-1`). The detector gates on the
+  component + task and flags a php-executable payload via three legs, reusing the
+  hardened upload detectors: a php-exec multipart **filename** (rule 401's
+  scanner), a php-exec entry **inside the uploaded zip** (rule 414's scanner), or
+  raw php webshell **content** (rule 402's scanner). It runs **before** the
+  generic upload rules so the hit is attributed to the CVE (nft ban +
+  `WAF/CVE-2026-48908` alert). Near-zero FP — a legit icon/image/font upload to
+  this endpoint never carries PHP. Defence-in-depth note: a php payload past the
+  in-path body-scan budget (`waf_body_max_len`) remains ClamAV's backstop.
 - **detectors.conf duration values now accept a `d` (days) unit.** Go's
   `time.ParseDuration` (which CFM used) stops at `h`, so `BLOCK = "7d"`,
   `WINDOW = 3d`, etc. previously failed to parse and *silently* fell back to the
