@@ -102,6 +102,14 @@ type Config struct {
 	// 40x combo detector (403+404) with optional unique-path gating.
 	IP40xComboCount       int
 	IP40xComboUniquePaths int
+	// IP40xComboMinSharePct gates the hard-ban on the 40x SHARE of the IP's
+	// traffic: the ban fires only when 40x responses are at least this percent
+	// of the IP's total requests in the window. A scanner enumerating paths is
+	// almost all 40x; a legit heavy client (content migration, headless
+	// frontend, dashboard) does bulk 2xx with incidental 404s and stays under
+	// the floor. Unset (0) defaults to 25; a NEGATIVE value disables the gate
+	// (count/unique-path only, the pre-2026-07 behaviour).
+	IP40xComboMinSharePct int
 	Ignore40xPrefixes     []string // optional: "/.well-known/", "/robots.txt", ...
 
 	AgentList  []string // substrings (lowercased)
@@ -458,6 +466,9 @@ func (c *Config) FillDefaults() {
 	if c.IP40xComboCount > 0 {
 		if c.IP40xComboUniquePaths <= 0 {
 			c.IP40xComboUniquePaths = 20
+		}
+		if c.IP40xComboMinSharePct == 0 {
+			c.IP40xComboMinSharePct = 25
 		}
 		if len(c.Ignore40xPrefixes) == 0 {
 			c.Ignore40xPrefixes = []string{"/.well-known/", "/robots.txt", "/favicon.ico", "/sitemap", "/apple-touch-icon", "/manifest.json"}

@@ -50,6 +50,20 @@ back-filled here — see the git/PR history for that period.
   "Removed boot arguments".
 
 ### Fixed
+- **Web-detector `40x_combo` autoblock: don't ban legit heavy clients on a
+  success-share gate.** The 403/404 flood detector (`WEB/40X`) hard-banned any IP
+  that produced enough unique 40x paths, which mis-fired on legit bulk workflows:
+  a content-migration/sync tool reading `/wp-json/wp/v2/posts/<id>` across an ID
+  range 404s the gaps, and each ID is a distinct path, so it sailed past the
+  unique-path safety gate — a real Greek user was banned for 2h despite being only
+  ~9% 40x (the same IP did hundreds of `2xx`/`201 Created`). The ban now also
+  requires the 40x to be at least `IP40xComboMinSharePct` of the IP's total
+  window requests (default **25%**): a path scanner is almost all 40x and still
+  bans, while a client doing bulk `2xx` with incidental 404s is spared. Static
+  assets and the ignore-prefixes were already excluded — this adds the missing
+  ratio dimension for non-asset REST 404s. Tunable per section via
+  `IP40X_MIN_SHARE_PCT`; a negative value restores the prior count/unique-path-only
+  behaviour.
 - **kernsec: `secure-tmp` fstab lines now carry `nofail`** (boot-availability
   audit follow-up to the `efi=disable_early_pci_dma` incident). Without
   `nofail`, the `/var/tmpDSK → /tmp` loop mount is a hard requirement of

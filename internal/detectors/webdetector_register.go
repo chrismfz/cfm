@@ -715,6 +715,7 @@ func init() {
 			// 40x combo (403+404) detector
 			IP40xComboCount:       kvInt(kv, "IP40X_COMBO", 0),
 			IP40xComboUniquePaths: kvInt(kv, "IP40X_UNIQUE_PATHS", 0),
+			IP40xComboMinSharePct: kvInt(kv, "IP40X_MIN_SHARE_PCT", 0),
 
 			AgentCount:   kvInt(kv, "AGENT_COUNT", 0),
 			MalPathCount: kvInt(kv, "MALPATH_COUNT", 0),

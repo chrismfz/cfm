@@ -2592,10 +2592,25 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 			if a.p40x != nil {
 				uniq = len(a.p40x)
 			}
-			if e.cfg.IP40xComboUniquePaths <= 0 || uniq >= e.cfg.IP40xComboUniquePaths {
+			// Success-share gate: a path scanner is almost all 40x, while a legit
+			// heavy client (content migration, headless frontend, dashboard) does
+			// bulk 2xx with incidental 404s. Require the 40x to be at least
+			// IP40xComboMinSharePct of the IP's total window requests (a.req counts
+			// ALL requests incl. the 40x). A negative pct disables the gate; req<=0
+			// (can't happen when c40x>0) fails open to preserve the ban.
+			share := 0
+			if a.req > 0 {
+				share = 100 * a.c40x / a.req
+			}
+			shareOK := e.cfg.IP40xComboMinSharePct <= 0 || a.req <= 0 ||
+				a.c40x*100 >= a.req*e.cfg.IP40xComboMinSharePct
+			pathsOK := e.cfg.IP40xComboUniquePaths <= 0 || uniq >= e.cfg.IP40xComboUniquePaths
+			if pathsOK && shareOK {
 				hard = true
 				reasons = append(reasons,
-					fmt.Sprintf("40x_combo(%d/%d paths=%d/%d)", a.c40x, e.cfg.IP40xComboCount, uniq, e.cfg.IP40xComboUniquePaths),
+					fmt.Sprintf("40x_combo(%d/%d paths=%d/%d share=%d%%/%d%%)",
+						a.c40x, e.cfg.IP40xComboCount, uniq, e.cfg.IP40xComboUniquePaths,
+						share, e.cfg.IP40xComboMinSharePct),
 				)
 			}
 		}
