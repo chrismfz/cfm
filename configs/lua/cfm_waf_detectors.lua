@@ -2690,6 +2690,76 @@ function _M.detect_cve_wp2shell(nab)
   return nil
 end
 
+-- [CVE] WooCommerce Payments (woocommerce-payments 4.8.0–5.6.1) unauthenticated
+-- authentication bypass -> privilege escalation. CVE-2023-28121 (CVSS 9.8,
+-- mass-exploited since Jul 2023).
+--
+-- determine_current_user_for_platform_checkout() trusts the
+-- `X-WCPAY-Platform-Checkout-User` request header and returns its value as the
+-- CURRENT USER ID with no validation. An unauthenticated attacker sets it to `1`
+-- and then drives any privileged action as that admin — the public PoC
+-- (rcesecurity patch-diff) POSTs /wp-json/wp/v2/users with roles=[administrator]
+-- to mint a fresh admin account.
+--
+-- The header is the ENTIRE exploit primitive and is set only server-side by
+-- WCPay's own WooPay / platform-checkout infrastructure — a browser or external
+-- client never sends it. So keying on header PRESENCE (any value, any method,
+-- any path) is the canonical near-zero-FP virtual patch (Wordfence / Patchstack
+-- ship the same shape). We deliberately do NOT gate on the WP logged-in cookie:
+-- the header alone is already never-legit, and a cookie gate would only hand the
+-- attacker a trivial bypass (append a junk wordpress_logged_in_ cookie) for zero
+-- FP gain. Header keys arrive lowercased from ngx.req.get_headers(); the extra
+-- casings cover a raw/test table. Collateral note: a site that genuinely runs
+-- WooPay receives this header from WooPay's servers — exempt those source nets
+-- with waf_security ALLOW_NETS rather than un-arming the family.
+function _M.detect_cve_woocommerce_payments(headers)
+  headers = headers or {}
+  if headers["x-wcpay-platform-checkout-user"]
+     or headers["X-WCPAY-Platform-Checkout-User"]
+     or headers["X-Wcpay-Platform-Checkout-User"] then
+    return "PLATFORM_CHECKOUT_HDR"
+  end
+  return nil
+end
+
+-- [CVE] Gravity SMTP (gravitysmtp <= 2.1.4) unauthenticated sensitive-information
+-- exposure via REST API. CVE-2026-4020 (CVSS 7.5).
+--
+-- The plugin registers the REST route /gravitysmtp/v1/tests/mock-data with a
+-- permission_callback that unconditionally returns `true`. An unauthenticated
+-- request (the PoC appends ?page=gravitysmtp-settings) makes
+-- register_connector_data() populate the full System Report — ~365 KB of JSON
+-- leaking PHP/DB/server versions, absolute paths, active plugins/theme, DB table
+-- names, and any configured connector API keys/tokens.
+--
+-- Key on the plugin-unique REST route, matched in EITHER permalink form (pretty
+-- `/wp-json/gravitysmtp/v1/tests/mock-data` in the URI, or plain
+-- `/?rest_route=/gravitysmtp/v1/tests/mock-data` where the route rides in args).
+-- It's a `tests/mock-data` endpoint external visitors never hit; the only legit
+-- caller is the plugin's own settings screen, which runs in wp-admin and so
+-- carries the WP logged-in cookie — gate on its ABSENCE (forgeable FP-reduction
+-- heuristic, per the fleet spec, not a security control), exactly like the Post
+-- SMTP detector. All methods (permission_callback=true accepts any). Ref: WPScan
+-- / Patchstack CVE-2026-4020, atomicedge PoC.
+function _M.detect_cve_gravity_smtp(uri, args, cookie)
+  -- Cheap prefilter FIRST — this runs on every request. The plugin slug is a
+  -- literal even in the %2f-slash evasion below (only the SLASHES are encoded),
+  -- and WordPress routes the REST namespace case-sensitively, so a case-sensitive
+  -- substring test is exact and lets us skip the normalize() url-decode+lower on
+  -- the ~99.99% of requests that never mention the plugin (the post_smtp detector
+  -- uses the same case-sensitive-args-prefilter trick to stay off the hot path).
+  if not (has(uri or "", "gravitysmtp") or has(args or "", "gravitysmtp")) then
+    return nil
+  end
+  -- normalize = url-decode x2 + lower, so an encoded plain-permalink form
+  -- (?rest_route=%2fgravitysmtp%2fv1%2ftests%2fmock-data, which WordPress still
+  -- routes to the same controller) can't dodge the literal route match.
+  local scope = normalize((uri or "") .. "&" .. (args or ""))
+  if not has(scope, "gravitysmtp/v1/tests/mock-data") then return nil end
+  if has(lower(cookie or ""), "wordpress_logged_in_") then return nil end
+  return "MOCK_DATA"
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject
