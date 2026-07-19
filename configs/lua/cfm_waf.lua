@@ -702,11 +702,14 @@ function _M.check(ctx)
   end
 
   -- Same URI+args scan surface, but with an embedded `data:` URI in the PATH
-  -- truncated at the scheme (strip_data_uri). Used ONLY by the content-pattern
-  -- rules that a data: payload false-positives — RCE (base64,+eval/exec/system
-  -- coincidence) and XSS (inline on…=/<script in the payload). Structural rules
-  -- (traversal/long-path) deliberately keep get_scan_ua() (the RAW uri) so a
-  -- data:-prefixed ../ still can't slip past them.
+  -- truncated at the scheme (strip_data_uri). Used ONLY by XSS (302): a data:
+  -- payload's inline on…=/<script (incl. slashless/empty-mime data: URIs the
+  -- detector's own uri_is_data_uri_path guard doesn't cover) would false-positive
+  -- reflected-XSS. RCE (320) deliberately scans the RAW surface instead — its
+  -- structural markers (${jndi:…}, ;wget/;curl) must stay full-surface so a data:
+  -- prefix can't smuggle them past a block-tier rule, and its lone base64 FP is
+  -- already paren-anchored + inline-gated. Structural rules (traversal/long-path)
+  -- likewise keep get_scan_ua() (the RAW uri) so a data:-prefixed ../ can't slip.
   local function get_scan_ua_nodata()
     if not _scan_ua_nodata then
       local u = strip_data_uri(uri)
@@ -1012,9 +1015,17 @@ function _M.check(ctx)
   end
 
   -- ── 6) RCE ────────────────────────────────────────────────────────────────
+  -- RCE scans the RAW surface (get_scan_ua), NOT the data:-stripped one. Its
+  -- structural markers (${jndi:…}, ;wget/;curl/|bash) are never valid inside a
+  -- base64/image/JS data: payload, so they MUST stay full-surface — otherwise a
+  -- data: path prefix (`/data:image/x,${jndi:…}`) evades this block-tier rule.
+  -- detect_rce already suppresses the one real data: FP (a base64 blob whose
+  -- letters spell eval/exec/system) surgically: that branch is paren-anchored
+  -- (`eval(` can't occur in base64) AND inline-gated on uri_is_data_uri_path, so
+  -- the raw surface needs no outer strip here.
   do
     local mode = rule_mode(CFG.rule_rce, "block")
-    if mode ~= "disabled" and det.detect_rce(uri, args, get_scan_ua_nodata()) then
+    if mode ~= "disabled" and det.detect_rce(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
       if record("WAF_RCE", ttl, mode, RULE_IDS.rule_rce) then goto done end

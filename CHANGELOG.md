@@ -29,6 +29,20 @@ back-filled here — see the git/PR history for that period.
   data-URI page assets do not trip it. Opt back out per-vhost with
   `rule_php_wrappers = "challenge"` or hold the ban with `PHP_WRAPPER = 0`.
 
+### Fixed
+- **WAF RCE rule (320, `WAF_RCE`) no longer evadable behind a `data:` URI path
+  prefix.** The `data:`-URI false-positive carve-out (added so a base64 image
+  data: URI a browser resolved as a relative path couldn't trip the block-tier
+  RCE rule) was applied too broadly: RCE scanned the payload-stripped surface,
+  so structural markers that are *never* valid inside a base64/image/JS data:
+  payload — `${jndi:…}` (Log4Shell), `;wget`/`;curl`/`|bash` — could be smuggled
+  past rule 320 by prefixing them with `/data:image/x,…`. RCE now scans the raw
+  surface again; the one genuine data: FP (a base64 blob whose letters spell
+  `eval`/`exec`/`system`) stays suppressed by the detector's existing
+  paren-anchored + `uri_is_data_uri_path` inline guard, so no FP returns. XSS
+  (302) keeps the broader strip (its `on…=`/`<script` markers legitimately
+  appear in data: payloads). Traversal was never affected.
+
 ### Added
 - **Two new WAF CVE detectors (family `WAF_CVE`), both edge-`block` + armed
   autoblock.** Each nft-bans the source for 6h and raises a `WAF/CVE-YYYY-NNNN`
