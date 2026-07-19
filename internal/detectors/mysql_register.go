@@ -235,7 +235,7 @@ func parseQueryRules(lines []string) []mysql.QueryRule {
 		if maxTimeStr == "0" {
 			maxTime = 0
 		} else {
-			d, err := time.ParseDuration(maxTimeStr)
+			d, err := parseCfgDuration(maxTimeStr)
 			if err != nil {
 				logMySQLGovf("[detectors/mysql] QUERY_RULES: bad duration %q in %q", maxTimeStr, line)
 				continue
