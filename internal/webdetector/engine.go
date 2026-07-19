@@ -2547,13 +2547,29 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 
 		// Per-IP flood triggers (same WINDOW)
 		hard := false
-		if e.cfg.IP404Count > 0 && a.c404 >= e.cfg.IP404Count {
-			hard = true
-			reasons = append(reasons, fmt.Sprintf("404_flood(%d/%d)", a.c404, e.cfg.IP404Count))
+
+		// Success-share gate, shared by the 40x flood detectors (404_flood,
+		// 403_flood, 40x_combo): spare an IP whose error responses are only a
+		// small fraction of its (mostly 2xx) traffic — a legit heavy client
+		// (content migration, headless frontend, dashboard), not a scanner.
+		// a.req counts ALL requests incl. the errors, so cnt/req is the error
+		// share. minShare<=0 disables it; req<=0 (can't happen when cnt>0) fails
+		// open to preserve the ban. NOT applied to 403waf_flood: WAF-origin 403s
+		// are a genuine attack signal, not incidental errors.
+		minShare := e.cfg.IP40xFloodMinSharePct
+		shareOK := func(cnt int) bool {
+			return minShare <= 0 || a.req <= 0 || cnt*100 >= a.req*minShare
 		}
-		if e.cfg.IP403Count > 0 && a.c403 >= e.cfg.IP403Count {
+
+		if e.cfg.IP404Count > 0 && a.c404 >= e.cfg.IP404Count && shareOK(a.c404) {
 			hard = true
-			reasons = append(reasons, fmt.Sprintf("403_flood(%d/%d)", a.c403, e.cfg.IP403Count))
+			reasons = append(reasons, fmt.Sprintf("404_flood(%d/%d share=%d%%/%d%%)",
+				a.c404, e.cfg.IP404Count, pctOf(a.c404, a.req), minShare))
+		}
+		if e.cfg.IP403Count > 0 && a.c403 >= e.cfg.IP403Count && shareOK(a.c403) {
+			hard = true
+			reasons = append(reasons, fmt.Sprintf("403_flood(%d/%d share=%d%%/%d%%)",
+				a.c403, e.cfg.IP403Count, pctOf(a.c403, a.req), minShare))
 		}
 
 		if e.cfg.IP403WAFCount > 0 && a.c403WAF >= e.cfg.IP403WAFCount {
@@ -2592,10 +2608,16 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 			if a.p40x != nil {
 				uniq = len(a.p40x)
 			}
-			if e.cfg.IP40xComboUniquePaths <= 0 || uniq >= e.cfg.IP40xComboUniquePaths {
+			// Success-share gate (shared with 404_flood/403_flood above): a path
+			// scanner is almost all 40x, while a legit heavy client does bulk 2xx
+			// with incidental 404s and stays under the share floor.
+			pathsOK := e.cfg.IP40xComboUniquePaths <= 0 || uniq >= e.cfg.IP40xComboUniquePaths
+			if pathsOK && shareOK(a.c40x) {
 				hard = true
 				reasons = append(reasons,
-					fmt.Sprintf("40x_combo(%d/%d paths=%d/%d)", a.c40x, e.cfg.IP40xComboCount, uniq, e.cfg.IP40xComboUniquePaths),
+					fmt.Sprintf("40x_combo(%d/%d paths=%d/%d share=%d%%/%d%%)",
+						a.c40x, e.cfg.IP40xComboCount, uniq, e.cfg.IP40xComboUniquePaths,
+						pctOf(a.c40x, a.req), minShare),
 				)
 			}
 		}
@@ -3235,6 +3257,15 @@ func hash64(s string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(s))
 	return h.Sum64()
+}
+
+// pctOf returns cnt as an integer percentage of total (0 when total<=0), used
+// only for observability in the 40x flood reason strings.
+func pctOf(cnt, total int) int {
+	if total <= 0 {
+		return 0
+	}
+	return 100 * cnt / total
 }
 
 func addHashToSetWithCap(m map[string]map[uint64]struct{}, key string, h uint64, capN int) {

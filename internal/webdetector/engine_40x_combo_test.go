@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -123,5 +124,116 @@ func TestIP40xCombo_IgnorePrefixesStillApplied(t *testing.T) {
 	rows := e.IPShort(0)
 	if ipHas40xComboReason(rows, "10.0.0.3") {
 		t.Fatalf("did not expect 40x_combo for ignored prefix paths; rows=%+v", rows)
+	}
+}
+
+// TestIP40xCombo_SuccessShareGate covers the success-share gate: the 40x_combo
+// hard-ban must fire only when 40x is a meaningful SHARE of the IP's traffic, so
+// a legit heavy client (content migration probing REST post IDs, headless
+// frontend, dashboard) that does bulk 2xx with incidental 404s is spared, while a
+// path scanner (almost all 40x) is still banned. Reproduces the production FP: a
+// Greek user's migration tool read /wp-json/wp/v2/posts/<id> across a range,
+// 404ing the gaps, and got a WEB/40X ban despite being ~9% 40x.
+func TestIP40xCombo_SuccessShareGate(t *testing.T) {
+	mk := func(minShare int) *Engine {
+		return NewEngine(Config{
+			Every:                 1 * time.Second,
+			Window:                5 * time.Minute,
+			IP40xComboCount:       20,
+			IP40xComboUniquePaths: 10,
+			IP40xFloodMinSharePct: minShare, // 0 → FillDefaults sets 25
+		})
+	}
+	feed := func(e *Engine, ip string, ok, notFound int) {
+		now := float64(time.Now().Unix())
+		ts := now
+		for i := 0; i < ok; i++ {
+			e.ingest(LogRec{TS: ts, IP: ip, Host: "h", Method: "get",
+				URI: fmt.Sprintf("/wp-json/wp/v2/posts/%d", 1000+i), Status: 200, UA: "ua"}, "raw")
+			ts += 0.05
+		}
+		for i := 0; i < notFound; i++ {
+			e.ingest(LogRec{TS: ts, IP: ip, Host: "h", Method: "get",
+				URI: fmt.Sprintf("/wp-json/wp/v2/posts/%d", 5000+i), Status: 404, UA: "ua"}, "raw")
+			ts += 0.05
+		}
+	}
+
+	// Legit heavy client: 300 × 2xx + 30 unique 404s → 40x share ≈ 9% < 25% → NO ban.
+	e := mk(0)
+	feed(e, "10.0.0.9", 300, 30)
+	if ipHas40xComboReason(e.IPShort(0), "10.0.0.9") {
+		t.Fatalf("legit heavy client (~9%% 40x) must NOT get a 40x_combo ban")
+	}
+
+	// Scanner: the SAME 30 unique 404s, but essentially no successes → ~100% 40x
+	// share → still banned (the gate does not weaken real enumeration detection).
+	e2 := mk(0)
+	feed(e2, "10.0.0.10", 0, 30)
+	if !ipHas40xComboReason(e2.IPShort(0), "10.0.0.10") {
+		t.Fatalf("scanner (~100%% 40x) must still get a 40x_combo ban")
+	}
+
+	// Disable knob: a negative pct restores the pre-gate behaviour, so the same
+	// heavy client IS banned again — proving the gate is what spared it.
+	e3 := mk(-1)
+	feed(e3, "10.0.0.11", 300, 30)
+	if !ipHas40xComboReason(e3.IPShort(0), "10.0.0.11") {
+		t.Fatalf("negative IP40xFloodMinSharePct must disable the gate (client banned again)")
+	}
+}
+
+// TestIP404Flood_SuccessShareGate covers the sibling 404_flood detector: the
+// share gate must apply there too, otherwise the migration-client FP just
+// relabels from WEB/40X to WEB/404 (404_flood has NO unique-path gate, so it is
+// even easier to trip). Enabled independently via IP404Count.
+func TestIP404Flood_SuccessShareGate(t *testing.T) {
+	mk := func() *Engine {
+		return NewEngine(Config{
+			Every:      1 * time.Second,
+			Window:     5 * time.Minute,
+			IP404Count: 50, // 404_flood only; combo disabled
+			// IP40xFloodMinSharePct defaults to 25 (IP404Count>0 → FillDefaults)
+		})
+	}
+	feed := func(e *Engine, ip string, ok, notFound int) {
+		now := float64(time.Now().Unix())
+		ts := now
+		for i := 0; i < ok; i++ {
+			e.ingest(LogRec{TS: ts, IP: ip, Host: "h", Method: "get",
+				URI: fmt.Sprintf("/wp-json/wp/v2/posts/%d", 1000+i), Status: 200, UA: "ua"}, "raw")
+			ts += 0.05
+		}
+		for i := 0; i < notFound; i++ {
+			e.ingest(LogRec{TS: ts, IP: ip, Host: "h", Method: "get",
+				URI: fmt.Sprintf("/wp-json/wp/v2/posts/%d", 5000+i), Status: 404, UA: "ua"}, "raw")
+			ts += 0.05
+		}
+	}
+	has404 := func(rows []IPSignals, ip string) bool {
+		for _, r := range rows {
+			if r.IP == ip {
+				for _, reason := range r.Reasons {
+					if strings.HasPrefix(reason, "404_flood") {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+
+	// Legit heavy client: 300 × 2xx + 60 × 404 → ~17% < 25% → NO 404_flood ban.
+	e := mk()
+	feed(e, "10.0.1.9", 300, 60)
+	if has404(e.IPShort(0), "10.0.1.9") {
+		t.Fatalf("legit heavy client must NOT get a 404_flood ban (share gate)")
+	}
+
+	// Scanner: 60 × 404, no successes → 100% → still 404_flood banned.
+	e2 := mk()
+	feed(e2, "10.0.1.10", 0, 60)
+	if !has404(e2.IPShort(0), "10.0.1.10") {
+		t.Fatalf("scanner (100%% 404) must still get a 404_flood ban")
 	}
 }
