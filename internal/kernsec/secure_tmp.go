@@ -340,10 +340,20 @@ func max1(x int64) int64 {
 // secureTmpFstabLines returns the two lines secure-tmp appends to
 // /etc/fstab. Kept as a separate function so dry-run preview, the
 // real fstab edit, and tests render exactly the same text.
+//
+// Both lines carry `nofail` deliberately: without it, systemd makes a
+// fstab entry a hard requirement of local-fs.target, so a damaged or
+// deleted /var/tmpDSK (fsck pass is 0 — the ext4 inside is never
+// checked) would drop the host into emergency mode at boot — no SSH,
+// console-only recovery. With nofail the host still boots and /tmp
+// falls back to a plain root directory: temporarily unhardened (no
+// noexec) but UP and reachable, which is the right availability
+// trade-off for a remote fleet. A hardening gap can be fixed over
+// SSH; a host stuck in emergency mode cannot.
 func secureTmpFstabLines() []string {
 	return []string{
-		fmt.Sprintf("%s  /tmp      ext4  loop,nodev,nosuid,noexec,rw  0 0", SecureTmpDevicePath),
-		"/tmp        /var/tmp  none  bind                          0 0",
+		fmt.Sprintf("%s  /tmp      ext4  loop,nofail,nodev,nosuid,noexec,rw  0 0", SecureTmpDevicePath),
+		"/tmp        /var/tmp  none  bind,nofail                          0 0",
 	}
 }
 

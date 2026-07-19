@@ -440,9 +440,19 @@ What it does:
 4. **Unmounts the scratch path** and removes the empty `/mnt/.cfm-newtmp` directory.
 5. **Appends `/etc/fstab`** with a `BackupOnce` of the original to `/etc/fstab.cfm-kernsec.bak`:
    ```
-   /var/tmpDSK  /tmp      ext4  loop,nodev,nosuid,noexec,rw  0 0
-   /tmp         /var/tmp  none  bind                          0 0
+   /var/tmpDSK  /tmp      ext4  loop,nofail,nodev,nosuid,noexec,rw  0 0
+   /tmp         /var/tmp  none  bind,nofail                          0 0
    ```
+   Both lines carry `nofail` deliberately (added 2026-07-19). Without it, a
+   fstab entry is a hard requirement of systemd's `local-fs.target`, so a
+   damaged or deleted `/var/tmpDSK` (its fsck pass is 0 — the embedded ext4 is
+   never checked) would drop the host into **emergency mode at boot** — no
+   SSH, console-only recovery. With `nofail` the host still boots and `/tmp`
+   falls back to a plain root directory: temporarily unhardened (no `noexec`)
+   but reachable, which is the right trade-off for a remote fleet. Hosts where
+   `secure-tmp` ran **before** this change should add `nofail` to both lines
+   by hand (one word per line in `/etc/fstab`; no reboot needed for the edit
+   itself to be safe).
 6. **Stops.** The operator reboots when convenient. Activation is reboot-only; the subcommand never tries to `umount /tmp` on the running host.
 
 Why reboot-only: every service with `PrivateTmp=yes` (`mysqld`, `named`, `nginx`, `php-fpm`, `exim`, `memcached`, `dbus-broker`, `chronyd`, `irqbalance`, `systemd-logind`, …) holds a kernel bind mount that pins the live `/tmp` inode. `umount /tmp` returns `EBUSY` until every one of those services is restarted, and remounting under them risks stale file descriptors for in-flight temp files. The reboot is the only clean way to clear both problems at once and pick up the new fstab entries.

@@ -163,6 +163,33 @@ func TestBootImpactingRisks_InitOnFreeStackedNote(t *testing.T) {
 	}
 }
 
+func TestBootImpactingRisks_OopsPanicRebootLoopNote(t *testing.T) {
+	risks := boot_impacting_risks(
+		[]BootArg{{Key: "oops", Value: "panic"}},
+		nil,
+		HostProfile{},
+	)
+	var found string
+	for _, r := range risks {
+		if strings.Contains(r, "oops=panic") {
+			found = r
+			break
+		}
+	}
+	if found == "" {
+		t.Fatalf("oops=panic should surface a preflight risk note, got: %v", risks)
+	}
+	// The note must warn about the boot-time reboot-loop failure mode and
+	// point the operator at console access — that's the part an operator
+	// enabling Tier 2 is most likely to be surprised by.
+	if !strings.Contains(found, "reboot loop") {
+		t.Errorf("oops=panic preflight note should call out the boot-time reboot-loop risk, got: %q", found)
+	}
+	if !strings.Contains(found, "console") {
+		t.Errorf("oops=panic preflight note should point at console/BMC recovery, got: %q", found)
+	}
+}
+
 func TestBootImpactingRisks_InitOnAllocBareNote(t *testing.T) {
 	risks := boot_impacting_risks(
 		[]BootArg{{Key: "init_on_alloc", Value: "1"}},

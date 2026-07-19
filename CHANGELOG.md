@@ -37,6 +37,25 @@ back-filled here — see the git/PR history for that period.
   `ManagedBootArgKeys` so it cannot silently return. See `docs/kernsec.md` →
   "Removed boot arguments".
 
+### Fixed
+- **kernsec: `secure-tmp` fstab lines now carry `nofail`** (boot-availability
+  audit follow-up to the `efi=disable_early_pci_dma` incident). Without
+  `nofail`, the `/var/tmpDSK → /tmp` loop mount is a hard requirement of
+  systemd's `local-fs.target`, so a damaged or deleted backing file (its fsck
+  pass is 0 — the embedded ext4 is never checked) dropped the host into
+  emergency mode at boot: no SSH, console-only recovery. With `nofail` the host
+  still boots and `/tmp` temporarily falls back to a plain (unhardened) root
+  directory instead — reachable over SSH and fixable. **Operator action:** hosts
+  where `secure-tmp` ran before this change should add `nofail` to both kernsec
+  lines in `/etc/fstab` by hand. A test now guards the option so it cannot be
+  dropped.
+- **kernsec: the interactive `apply` preflight now names the Tier 2
+  `oops=panic` reboot-loop risk** before the y/N prompt: with
+  `kernel.panic_on_oops=1` + `kernel.panic=10`, an oops **during boot** (e.g. a
+  driver regression after a kernel update) becomes a panic/reboot loop
+  recoverable only from the console. Previously the preflight only surfaced the
+  init_on_alloc/init_on_free perf notes and a generic bootloader line.
+
 ### Changed
 - **WAF PHP stream-wrapper rule (305, `WAF_PHP_WRAPPER`) promoted to `block` and
   armed for autoblock.** `php://`/`phar://`/`data://`/`zip://`/`expect://`/`glob://`

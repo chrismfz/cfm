@@ -163,6 +163,15 @@ func TestSecureTmpFstabLines_BothEntriesPresent(t *testing.T) {
 	if !strings.Contains(lines[1], "/var/tmp") || !strings.Contains(lines[1], "bind") {
 		t.Errorf("second line should declare the /var/tmp bind; got %q", lines[1])
 	}
+	// nofail is a boot-availability guarantee, not a style choice: without
+	// it a damaged/deleted /var/tmpDSK drops the host into emergency mode
+	// at boot (fstab entries without nofail are hard requirements of
+	// local-fs.target). Both lines must keep it.
+	for i, line := range lines {
+		if !strings.Contains(line, "nofail") {
+			t.Errorf("fstab line %d must carry nofail (boot-availability guard); got %q", i, line)
+		}
+	}
 }
 
 func TestRunSecureTmp_DryRunPrintsPlanAndDoesNotExecute(t *testing.T) {
