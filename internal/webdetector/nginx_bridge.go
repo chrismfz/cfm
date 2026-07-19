@@ -114,6 +114,11 @@ type NginxBridge struct {
 	// ListWAFExcludes returns current dynamic WAF exclude entries.
 	ListWAFExcludes func() []excludeEntry
 
+	// ListClamExcludes returns the per-vhost ClamAV upload-scan opt-out list
+	// (host entries). Polled by configs/lua/cfm_clamav.lua so the edge upload
+	// hook can skip excluded vhosts.
+	ListClamExcludes func() []excludeEntry
+
 	// ListHTTP3Hosts returns the per-vhost HTTP/3 opt-in list. The Lua
 	// worker polls this every ~60s to refresh its per-worker cache and
 	// decide whether to emit the Alt-Svc header on responses. See
@@ -238,17 +243,17 @@ type BridgeStats struct {
 }
 
 type BridgeTimingStats struct {
-	TotalP50Ms      int64 `json:"total_p50_ms"`
-	TotalP95Ms      int64 `json:"total_p95_ms"`
-	TotalP99Ms      int64 `json:"total_p99_ms"`
-	QueueWaitP95Ms  int64 `json:"queue_wait_p95_ms"`
-	StageAAvgMs     int64 `json:"stage_a_avg_ms"`
-	StageBAvgMs     int64 `json:"stage_b_avg_ms"`
-	StageCAvgMs     int64 `json:"stage_c_avg_ms"`
-	TimeoutPerMin   int64 `json:"timeout_count_last_minute"`
-	TimeoutCurrMin  int64 `json:"timeout_count_current_minute"`
-	SamplesTotal    int64 `json:"samples_total"`
-	QueueSamples    int64 `json:"queue_wait_samples"`
+	TotalP50Ms     int64 `json:"total_p50_ms"`
+	TotalP95Ms     int64 `json:"total_p95_ms"`
+	TotalP99Ms     int64 `json:"total_p99_ms"`
+	QueueWaitP95Ms int64 `json:"queue_wait_p95_ms"`
+	StageAAvgMs    int64 `json:"stage_a_avg_ms"`
+	StageBAvgMs    int64 `json:"stage_b_avg_ms"`
+	StageCAvgMs    int64 `json:"stage_c_avg_ms"`
+	TimeoutPerMin  int64 `json:"timeout_count_last_minute"`
+	TimeoutCurrMin int64 `json:"timeout_count_current_minute"`
+	SamplesTotal   int64 `json:"samples_total"`
+	QueueSamples   int64 `json:"queue_wait_samples"`
 	// SheddedCount: total decision requests that were fail-open shed
 	// because the handler concurrency semaphore was saturated. See
 	// bridgeStatsState.shedCount for context. Cumulative since process
@@ -1378,6 +1383,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/waf/excluded", b.instrument("/nginx/waf/excluded", b.handleWAFExcluded))
 	mux.HandleFunc("/nginx/waf/excluded/meta", b.instrument("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta))
 	mux.HandleFunc("/nginx/waf/excludes", b.instrument("/nginx/waf/excludes", b.handleWAFExcludes))
+	mux.HandleFunc("/nginx/clam/excludes", b.instrument("/nginx/clam/excludes", b.handleClamExcludes))
 	mux.HandleFunc("/nginx/h3/config", b.instrument("/nginx/h3/config", b.handleHTTP3Config))
 	mux.HandleFunc("/nginx/waf/stats", b.instrument("/nginx/waf/stats", b.handleWAFStats))
 	mux.HandleFunc("/nginx/snapshot", b.instrument("/nginx/snapshot", b.handleSnapshot))
@@ -2118,6 +2124,31 @@ func (b *NginxBridge) handleWAFExcludes(w http.ResponseWriter, r *http.Request) 
 	items := make([]excludeEntry, 0)
 	if b.ListWAFExcludes != nil {
 		for _, e := range b.ListWAFExcludes() {
+			if strings.TrimSpace(e.Type) == "" || strings.TrimSpace(e.Value) == "" {
+				continue
+			}
+			items = append(items, e)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"entries": items})
+}
+
+// handleClamExcludes returns the per-vhost ClamAV upload-scan opt-out list.
+// Polled by configs/lua/cfm_clamav.lua so the edge upload hook skips excluded
+// vhosts. Host entries only (upload scanning is a whole-vhost on/off).
+func (b *NginxBridge) handleClamExcludes(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	items := make([]excludeEntry, 0)
+	if b.ListClamExcludes != nil {
+		for _, e := range b.ListClamExcludes() {
 			if strings.TrimSpace(e.Type) == "" || strings.TrimSpace(e.Value) == "" {
 				continue
 			}

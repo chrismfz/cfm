@@ -401,6 +401,7 @@ type Engine struct {
 
 	challengeExcludes *excludeStore
 	wafExcludes       *excludeStore
+	clamExcludes      *excludeStore
 	http3Overrides    *http3OverrideStore
 	trafficRules      *trafficRuleStore
 	history           *HistoryStore
@@ -459,6 +460,7 @@ func NewEngine(cfg Config) *Engine {
 	e.chalExpiredSeen = make(map[string]time.Time)
 	e.challengeExcludes = newExcludeStore(cfg.ChallengeExcludeStorePath)
 	e.wafExcludes = newExcludeStore(cfg.WAFExcludeStorePath)
+	e.clamExcludes = newExcludeStore(cfg.ClamExcludeStorePath)
 	e.http3Overrides = newHTTP3OverrideStore(cfg.HTTP3OverridesStorePath)
 	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
 	e.uaEmergency = NewUAEmergencyStore(cfg.UAEmergencyStorePath, cfg.UAEmergencyAuditLog)
@@ -472,6 +474,7 @@ func NewEngine(cfg Config) *Engine {
 		e.nginxBridge.IsWAFExcluded = e.isWAFExcluded
 		e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
 		e.nginxBridge.ListWAFExcludes = e.WAFExcludeList
+		e.nginxBridge.ListClamExcludes = e.ClamExcludeList
 		e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
 		e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 		e.nginxBridge.ListTrafficRules = e.TrafficRuleList
@@ -3512,6 +3515,50 @@ func (e *Engine) WAFExcludeHasAny() bool {
 		return false
 	}
 	return len(e.wafExcludes.List()) > 0
+}
+
+// ---------------------------------------------------------------------------
+// Per-vhost ClamAV upload-scan opt-out. Same "exclude = disabled" semantics as
+// WAF/Challenge: a `host` entry means the ClamAV upload hook skips that vhost.
+// ClamAV interception happens in OpenResty (cfm_clamav.lua), so — like WAF, and
+// unlike the daemon-enforced Challenge — the edge reads this list via the nginx
+// bridge (/nginx/clam/excludes). Host-only: there is no per-path or per-rule
+// clam exclude (upload scanning is a whole-vhost on/off).
+
+func (e *Engine) ClamExcludeAdd(typ, value string, scope map[string]struct{}) bool {
+	if e == nil || e.clamExcludes == nil {
+		return false
+	}
+	return e.clamExcludes.Add(typ, value, scope)
+}
+
+func (e *Engine) ClamExcludeRemove(typ, value string, scope map[string]struct{}) bool {
+	if e == nil || e.clamExcludes == nil {
+		return false
+	}
+	return e.clamExcludes.Remove(typ, value, scope)
+}
+
+func (e *Engine) ClamExcludeList() []excludeEntry {
+	if e == nil || e.clamExcludes == nil {
+		return nil
+	}
+	return e.clamExcludes.List()
+}
+
+// isClamExcluded reports whether the ClamAV upload scan is disabled for host.
+func (e *Engine) isClamExcluded(host string) bool {
+	if e == nil || e.clamExcludes == nil {
+		return false
+	}
+	return e.clamExcludes.MatchHost(host)
+}
+
+func (e *Engine) ClamExcludeHasAny() bool {
+	if e == nil || e.clamExcludes == nil {
+		return false
+	}
+	return len(e.clamExcludes.List()) > 0
 }
 
 // ---------------------------------------------------------------------------

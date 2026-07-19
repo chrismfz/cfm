@@ -238,3 +238,74 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// Per-vhost ClamAV upload-scan opt-out. Same "exclude = disabled" model as the
+// WAF/Challenge handlers above, reusing the identical scoped-vs-admin auth
+// (RequireScopedOrAdmin + validateScopedExcludeWrite + filterExcludeListForScope),
+// so a scoped cPanel token can toggle only its own vhost. HOST type only — upload
+// scanning is a whole-vhost on/off, there is no per-path/per-rule clam exclude.
+
+// GET /api/v1/clam/exclude/list
+func (e *Engine) handleClamExcludeList(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
+	if e == nil {
+		writeJSON(w, http.StatusOK, []excludeEntry{})
+		return
+	}
+	scope := vhostScopeFromContext(r.Context())
+	writeJSON(w, http.StatusOK, filterExcludeListForScope(e.ClamExcludeList(), scope))
+}
+
+// POST /api/v1/clam/exclude/add?type=host&value=example.com
+func (e *Engine) handleClamExcludeAdd(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
+	typ, value := readExcludeParams(r)
+	if typ != "host" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clam exclude supports type=host only"})
+		return
+	}
+	scope := vhostScopeFromContext(r.Context())
+	if !validateScopedExcludeWrite(r, typ, value) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+		return
+	}
+	if strings.TrimSpace(value) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
+		return
+	}
+	if ok := e.ClamExcludeAdd(typ, value, scope); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// POST /api/v1/clam/exclude/remove?type=host&value=example.com
+func (e *Engine) handleClamExcludeRemove(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
+	typ, value := readExcludeParams(r)
+	if typ != "host" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clam exclude supports type=host only"})
+		return
+	}
+	scope := vhostScopeFromContext(r.Context())
+	if !validateScopedExcludeWrite(r, typ, value) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+		return
+	}
+	if strings.TrimSpace(value) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
+		return
+	}
+	if ok := e.ClamExcludeRemove(typ, value, scope); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
