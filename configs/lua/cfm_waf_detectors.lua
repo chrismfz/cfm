@@ -2172,7 +2172,7 @@ end
 -- ee-file-engine.php, and no legitimate image upload carries a `<?php` open tag.
 -- `method` is expected already lowercased (m_lower from the caller).
 -- php-executable extension at a value boundary. Kept in step with bad_fname()
--- in detect_upload_filename (rule 401): .php[%d] / .phtm[l] / .pht / .phar. If
+-- in detect_upload_filename (rule 401): .php[%d]* / .phtm[l] / .pht / .phar. If
 -- that set grows, grow this too (they intentionally match the same engine-mapped
 -- extensions; bad_fname is a nested local, so this is a parallel matcher).
 local function _cve_sfl_has_exec_ext(s)
@@ -2843,7 +2843,7 @@ function _M.detect_upload_filename(body, headers)
     -- Extension checks: match anywhere in filename to catch double-extensions
     if fname:match("%.php[%d]*[^%w]") or fname:match("%.php[%d]*$") then return "php" end
     -- PHP alt-handlers Apache/LiteSpeed commonly map to the engine: .phtml/.phtm
-    -- and the bare .pht slip past the .php[%d] matcher above, so they join the
+    -- and the bare .pht slip past the .php[%d]* matcher above, so they join the
     -- block-tier set. (.phtml is also Magento's server-side template extension,
     -- but templates ship via code/FTP, not a web-form upload, so a multipart
     -- .phtml upload is still overwhelmingly an attack.)
