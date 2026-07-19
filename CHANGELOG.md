@@ -17,7 +17,35 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **WAF upload rules: catch multi-digit `.phpNN` (MultiPHP handler) extensions.**
+  The php-executable extension matchers in `_zip_entry_bad_ext` (rule 414),
+  `bad_fname` (rule 401) and `_cve_sfl_has_exec_ext` (rules 10001/10010/10014)
+  used `%.php%d?` — `.php` plus at most **one** digit — so `.php56`/`.php70`/
+  `.php74`/`.php80`/`.php81` slipped through. Those extensions **execute PHP** on
+  cPanel/Plesk MultiPHP hosts (the shared-hosting fleet this protects). A captured
+  2026-07 SP Page Builder drop used exactly this: an icon-pack zip whose webshell
+  hid as `fonts/kamley.php56` (GIF-magic + `<?php`, deflate-compressed so only the
+  entry name was in-path-visible) — it passed the WAF signature layer and was
+  stopped only by the downstream ClamAV scan. Widened to `%.php%d*` (zero-or-more
+  digits); `.phpx`/`.phpfoo` and legit `.svg`/`.woff2`/`.css`/`.png` uploads stay
+  clean. Verified against the exact captured payload.
+
 ### Added
+- **WAF CVE detector: SP Page Builder (Joomla) unauth arbitrary upload → RCE
+  (rule 10014, CVE-2026-48908).** The `com_sppagebuilder` `asset.upload*` tasks
+  (`uploadCustomIcon`/`uploadImage`/`uploadFont`) have no auth check and no
+  server-side file-type restriction (the "ANTONKILL" vector, actively exploited
+  2026-07), so an anonymous POST can drop a webshell — seen in the wild uploading
+  `payload.zip` (ClamAV: `Win.Trojan.Hide-1`). The detector gates on the
+  component + task and flags a php-executable payload via three legs, reusing the
+  hardened upload detectors: a php-exec multipart **filename** (rule 401's
+  scanner), a php-exec entry **inside the uploaded zip** (rule 414's scanner), or
+  raw php webshell **content** (rule 402's scanner). It runs **before** the
+  generic upload rules so the hit is attributed to the CVE (nft ban +
+  `WAF/CVE-2026-48908` alert). Near-zero FP — a legit icon/image/font upload to
+  this endpoint never carries PHP. Defence-in-depth note: a php payload past the
+  in-path body-scan budget (`waf_body_max_len`) remains ClamAV's backstop.
 - **detectors.conf duration values now accept a `d` (days) unit.** Go's
   `time.ParseDuration` (which CFM used) stops at `h`, so `BLOCK = "7d"`,
   `WINDOW = 3d`, etc. previously failed to parse and *silently* fell back to the
