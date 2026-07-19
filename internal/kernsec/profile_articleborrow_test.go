@@ -12,6 +12,9 @@ import (
 // docs/kernsec.md under "Considered but not shipped"; the registry
 // absence below is the regression guard that keeps them out until
 // the probe / managed-key issues called out in that section are fixed.
+// The same guard also pins efi=disable_early_pci_dma out of the
+// registry — it shipped, then was removed 2026-07-19 after a boot hang
+// (see docs/kernsec.md) — so it can never silently return.
 
 // ---------------------------------------------------------------------
 // AcceptValues coverage for the relaxed audit rules
@@ -101,10 +104,16 @@ func TestHeldBackRules_NotInBootArgRegistry(t *testing.T) {
 	heldKeys := map[string]string{
 		"vsyscall": "see docs/kernsec.md \"Considered but not shipped\" — probe needs Elf_Verneed parsing",
 		"debugfs":  "see docs/kernsec.md \"Considered but not shipped\" — ManagedBootArgKeys regression",
+		// Removed 2026-07-19: efi=disable_early_pci_dma hung an mdraid-root /
+		// power-managed-PCIe host at boot (cut early PCI DMA before the
+		// storage controller could assemble the root array). It must stay
+		// out of the registry AND out of ManagedBootArgKeys — see docs/kernsec.md.
+		"efi": "removed 2026-07-19 — efi=disable_early_pci_dma early-PCI-DMA boot hang; see docs/kernsec.md",
 	}
 	heldIDs := map[string]string{
-		"KSEC-BOOT-tier3.legacycompat-001":   "see docs/kernsec.md \"Considered but not shipped\"",
+		"KSEC-BOOT-tier3.legacycompat-001":  "see docs/kernsec.md \"Considered but not shipped\"",
 		"KSEC-BOOT-tier3.observability-001": "see docs/kernsec.md \"Considered but not shipped\"",
+		"KSEC-BOOT-dma-001":                 "removed 2026-07-19 — efi=disable_early_pci_dma early-PCI-DMA boot hang; see docs/kernsec.md",
 	}
 	for _, a := range AllBootArgs() {
 		if reason, held := heldKeys[a.Key]; held {
@@ -151,6 +160,33 @@ func TestBootImpactingRisks_InitOnFreeStackedNote(t *testing.T) {
 	}
 	if !strings.Contains(found, "init_on_alloc") {
 		t.Errorf("init_on_free preflight note should reference the Tier 1 init_on_alloc pair, got: %q", found)
+	}
+}
+
+func TestBootImpactingRisks_OopsPanicRebootLoopNote(t *testing.T) {
+	risks := boot_impacting_risks(
+		[]BootArg{{Key: "oops", Value: "panic"}},
+		nil,
+		HostProfile{},
+	)
+	var found string
+	for _, r := range risks {
+		if strings.Contains(r, "oops=panic") {
+			found = r
+			break
+		}
+	}
+	if found == "" {
+		t.Fatalf("oops=panic should surface a preflight risk note, got: %v", risks)
+	}
+	// The note must warn about the boot-time reboot-loop failure mode and
+	// point the operator at console access — that's the part an operator
+	// enabling Tier 2 is most likely to be surprised by.
+	if !strings.Contains(found, "reboot loop") {
+		t.Errorf("oops=panic preflight note should call out the boot-time reboot-loop risk, got: %q", found)
+	}
+	if !strings.Contains(found, "console") {
+		t.Errorf("oops=panic preflight note should point at console/BMC recovery, got: %q", found)
 	}
 }
 

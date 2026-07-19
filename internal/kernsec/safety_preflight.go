@@ -134,6 +134,13 @@ func boot_impacting_risks(bootArgs []BootArg, modules []ModuleRule, profile Host
 			} else {
 				risks = append(risks, a.Key+"="+a.Value+": ~0-5% memory-allocation perf cost on alloc paths; brick-safe.")
 			}
+		case "oops":
+			// Tier 2 fail-closed pair (oops=panic + kernel.panic_on_oops=1
+			// + kernel.panic=10). The under-appreciated failure mode is an
+			// oops DURING boot (e.g. a driver regression after a kernel
+			// update): panic → auto-reboot → same oops → reboot loop with
+			// no SSH window. Say it before the y/N, not in a postmortem.
+			risks = append(risks, a.Key+"="+a.Value+": any kernel oops becomes a panic + reboot (with kernel.panic=10). If an oops fires DURING boot — e.g. a driver regression after a kernel update — the host can enter a panic/reboot loop recoverable only from the console. Keep console/BMC access available before rebooting with this armed.")
 		}
 	}
 	for _, m := range modules {

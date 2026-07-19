@@ -17,6 +17,45 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Removed
+- **kernsec: dropped the `efi=disable_early_pci_dma` boot arg (`KSEC-BOOT-dma-001`,
+  group `boot.dma`).** This Tier 1 arg cleared PCI bus-master DMA at
+  `ExitBootServices` to close the pre-IOMMU DMA window, but it hung a production
+  host at boot: on a UEFI box with an `mdraid` root behind a power-managed PCIe
+  controller (already running `pcie_aspm=off pcie_port_pm=off`), cutting early PCI
+  DMA stopped the storage controller from assembling the root array, leaving a
+  black screen right after the kernel loaded. The kernel's own
+  `CONFIG_EFI_DISABLE_PCI_DMA` help text warns it "can cause failures to boot", so
+  the availability risk outweighs the narrow benefit for a hosting fleet. `efi` was
+  also removed from `ManagedBootArgKeys`, so kernsec no longer owns the `efi` key
+  and will not strip an operator's own `efi=` argument. **Operator action:** hosts
+  that an earlier kernsec already wrote `efi=disable_early_pci_dma` to will NOT be
+  auto-cleaned (kernsec no longer owns the key) — remove it by hand and regenerate
+  the bootloader (`sed -i 's/ *efi=disable_early_pci_dma//' /etc/default/grub &&
+  grub2-mkconfig -o /boot/grub2/grub.cfg` on legacy-GRUB EL9), or the next reboot
+  will hang. A regression guard keeps the arg out of the registry and out of
+  `ManagedBootArgKeys` so it cannot silently return. See `docs/kernsec.md` →
+  "Removed boot arguments".
+
+### Fixed
+- **kernsec: `secure-tmp` fstab lines now carry `nofail`** (boot-availability
+  audit follow-up to the `efi=disable_early_pci_dma` incident). Without
+  `nofail`, the `/var/tmpDSK → /tmp` loop mount is a hard requirement of
+  systemd's `local-fs.target`, so a damaged or deleted backing file (its fsck
+  pass is 0 — the embedded ext4 is never checked) dropped the host into
+  emergency mode at boot: no SSH, console-only recovery. With `nofail` the host
+  still boots and `/tmp` temporarily falls back to a plain (unhardened) root
+  directory instead — reachable over SSH and fixable. **Operator action:** hosts
+  where `secure-tmp` ran before this change should add `nofail` to both kernsec
+  lines in `/etc/fstab` by hand. A test now guards the option so it cannot be
+  dropped.
+- **kernsec: the interactive `apply` preflight now names the Tier 2
+  `oops=panic` reboot-loop risk** before the y/N prompt: with
+  `kernel.panic_on_oops=1` + `kernel.panic=10`, an oops **during boot** (e.g. a
+  driver regression after a kernel update) becomes a panic/reboot loop
+  recoverable only from the console. Previously the preflight only surfaced the
+  init_on_alloc/init_on_free perf notes and a generic bootloader line.
+
 ### Changed
 - **WAF PHP stream-wrapper rule (305, `WAF_PHP_WRAPPER`) promoted to `block` and
   armed for autoblock.** `php://`/`phar://`/`data://`/`zip://`/`expect://`/`glob://`

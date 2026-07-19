@@ -66,7 +66,7 @@ type HostProfile struct {
 	HasKSMBDServer           bool   `json:"has_ksmbd_server"`                      // kernel SMB server in use: /sys/class/ksmbd, ksmbd.mountd process, ksmbd-tools installed → don't blacklist ksmbd
 	HasDevTools              bool   `json:"has_dev_tools"`                         // gdb / strace / py-spy / bpftrace / bcc-tools installed → soft advisory for yama.ptrace_scope and unprivileged_bpf_disabled
 	HasNFS                   bool   `json:"has_nfs"`                               // active NFS mounts → keep NFS untouched (already excluded by policy)
-	IsEFIBoot                bool   `json:"is_efi_boot"`                           // /sys/firmware/efi present → EFI boot; efi= boot args are meaningful
+	IsEFIBoot                bool   `json:"is_efi_boot"`                           // /sys/firmware/efi present → EFI boot (informational; no boot-arg rule gates on this anymore)
 	IsCPanel                 bool   `json:"is_cpanel"`                             // /usr/local/cpanel exists → cPanel/WHM host
 	IsDirectAdmin            bool   `json:"is_directadmin"`                        // /usr/local/directadmin exists → DirectAdmin host
 	HasCloudLinuxLVE         bool   `json:"has_cloudlinux_lve"`                    // /proc/lve or loaded lve/kmodlve → CloudLinux LVE host
@@ -1168,13 +1168,6 @@ func (p HostProfile) SkipReason(group string) string {
 		}
 		if reason := p.hostingPanelReason(); reason != "" {
 			return "hosting panel namespace workload: " + reason
-		}
-	case "boot.dma":
-		// efi=disable_early_pci_dma is an EFI-specific boot parameter;
-		// on BIOS/legacy-boot systems the kernel ignores it entirely so
-		// writing it to the cmdline would be a no-op but confuse operators.
-		if !p.IsEFIBoot {
-			return "non-EFI boot — efi=disable_early_pci_dma is a no-op on BIOS/legacy-boot systems"
 		}
 	case "sysctl.kernel.kexec":
 		// kernel.kexec_load_disabled=1 locks out kexec_load(2) and

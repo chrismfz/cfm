@@ -271,7 +271,6 @@ Audited keys are `net.ipv4.conf.all.rp_filter=1`,
 |---|---:|---|---|
 | `kspp.boot` | 1 | `slab_nomerge`, `init_on_alloc=1`, `page_alloc.shuffle=1`, `randomize_kstack_offset=on`, `initcall_blacklist=algif_aead_init` | Memory-safety hardening. `init_on_alloc=1` can have modest alloc-heavy overhead. The `initcall_blacklist` entry is a temporary Copy Fail / CVE-2026-31431 mitigation affecting AEAD AF_ALG use. |
 | `boot.bug-detection` | 1 | `kfence.sample_interval=100` | Enables low-overhead KFENCE sampling. |
-| `boot.dma` | 1 | `efi=disable_early_pci_dma` | EFI-only pre-IOMMU DMA hardening; skipped on non-EFI hosts. |
 | `boot.sidechannel` | 1 | `tsx=off` | Disables Intel TSX side-channel surface; no expected hosting impact. |
 | `boot.bpf` | 1 | `unprivileged_bpf_disabled=2` | Pairs with the `kernel.unprivileged_bpf_disabled=2` sysctl. On kernels built with `CONFIG_BPF_UNPRIV_DEFAULT_OFF=y` (RHEL/Alma 9-10, recent stable) the sysctl is locked at boot — only this boot arg can land the value at 2. |
 | `tier2.oops` | 2 | `oops=panic` | Pairs with Tier 2 panic-on-oops sysctls; can reboot on kernel oops. |
@@ -441,9 +440,19 @@ What it does:
 4. **Unmounts the scratch path** and removes the empty `/mnt/.cfm-newtmp` directory.
 5. **Appends `/etc/fstab`** with a `BackupOnce` of the original to `/etc/fstab.cfm-kernsec.bak`:
    ```
-   /var/tmpDSK  /tmp      ext4  loop,nodev,nosuid,noexec,rw  0 0
-   /tmp         /var/tmp  none  bind                          0 0
+   /var/tmpDSK  /tmp      ext4  loop,nofail,nodev,nosuid,noexec,rw  0 0
+   /tmp         /var/tmp  none  bind,nofail                          0 0
    ```
+   Both lines carry `nofail` deliberately (added 2026-07-19). Without it, a
+   fstab entry is a hard requirement of systemd's `local-fs.target`, so a
+   damaged or deleted `/var/tmpDSK` (its fsck pass is 0 — the embedded ext4 is
+   never checked) would drop the host into **emergency mode at boot** — no
+   SSH, console-only recovery. With `nofail` the host still boots and `/tmp`
+   falls back to a plain root directory: temporarily unhardened (no `noexec`)
+   but reachable, which is the right trade-off for a remote fleet. Hosts where
+   `secure-tmp` ran **before** this change should add `nofail` to both lines
+   by hand (one word per line in `/etc/fstab`; no reboot needed for the edit
+   itself to be safe).
 6. **Stops.** The operator reboots when convenient. Activation is reboot-only; the subcommand never tries to `umount /tmp` on the running host.
 
 Why reboot-only: every service with `PrivateTmp=yes` (`mysqld`, `named`, `nginx`, `php-fpm`, `exim`, `memcached`, `dbus-broker`, `chronyd`, `irqbalance`, `systemd-logind`, …) holds a kernel bind mount that pins the live `/tmp` inode. `umount /tmp` returns `EBUSY` until every one of those services is restarted, and remounting under them risks stale file descriptors for in-flight temp files. The reboot is the only clean way to clear both problems at once and pick up the new fstab entries.
@@ -543,6 +552,47 @@ governing rule is actually being applied (or the boot-arg writer gains a "this
 rule is held by Tier N — don't touch the key unless tier >= N" flag), and the
 probe is moved to the on-demand path described under io_uring above.
 
+## Removed boot arguments
+
+### `efi=disable_early_pci_dma` — removed 2026-07-19
+
+Shipped as a Tier 1 boot arg (`KSEC-BOOT-dma-001`, group `boot.dma`) that
+cleared PCI bus-master DMA on all bridges at `ExitBootServices` to close the
+pre-IOMMU DMA window. **Removed after it hung a production host at boot.**
+
+**Why it was removed:** on a UEFI host whose root filesystem lives on an
+`mdraid` array behind a power-managed PCIe storage controller (the cmdline
+already carried `pcie_aspm=off pcie_port_pm=off` to tame a finicky PCIe link),
+cutting early PCI DMA stopped the controller from doing DMA before the driver
+took over, the root array never assembled, and the machine hung with a black
+screen immediately after the kernel loaded — recoverable only by editing the
+args out at the GRUB prompt. This matches the kernel's own
+`CONFIG_EFI_DISABLE_PCI_DMA` help text, which warns the option "can cause
+failures to boot." Early PCI DMA is exactly what storage/NIC controllers need
+during early boot, so the availability risk outweighs the narrow
+pre-IOMMU-window benefit for a general hosting fleet.
+
+**Consequences of the removal:**
+
+- kernsec no longer writes `efi=disable_early_pci_dma` on any tier.
+- `efi` was also dropped from `ManagedBootArgKeys`, so kernsec no longer
+  owns the `efi` key and will not strip an operator's own `efi=` argument.
+- Because kernsec no longer owns the key, `cfm kernsec apply` / `disable` /
+  `rollback` will **not** auto-strip an `efi=disable_early_pci_dma` that an
+  earlier kernsec version already wrote to a host. Remove it from already-
+  applied hosts by hand, then regenerate the bootloader config, e.g. on
+  legacy-GRUB EL9:
+
+  ```bash
+  cp -a /etc/default/grub /root/grub.$(date +%F).bak
+  sed -i 's/ *efi=disable_early_pci_dma//' /etc/default/grub
+  grub2-mkconfig -o /boot/grub2/grub.cfg
+  ```
+
+  The remaining Tier 1 hardening args are unaffected. A regression guard
+  (`TestHeldBackRules_NotInBootArgRegistry`) keeps the arg and its ID out of
+  the registry and out of `ManagedBootArgKeys` so it cannot silently return.
+
 ## Host-profile gates
 
 Host-profile gates prevent high-risk rules from applying on hosts where they are
@@ -584,7 +634,7 @@ the operator can force a rule only after accepting the workload impact.
 | FireWire | Non-empty `/sys/bus/firewire/devices`. | Skips `modules.bus.firewire` so bare-metal hosts with FireWire hardware keep the transport. |
 | ksmbd in use | `ksmbd` loaded, `/sys/class/ksmbd` non-empty, `ksmbd.mountd` binary or `/etc/ksmbd` present, or `ksmbd.service` installed. | Skips `modules.recent_cves.ksmbd` so operators deliberately running the kernel SMB server keep it. |
 | NFS | Active `nfs` or `nfs4` mounts in `/proc/mounts`. | Recorded as host context; shipped NFS modules are intentionally not blacklisted. |
-| EFI boot | `/sys/firmware/efi`. | Allows EFI-specific DMA boot hardening; non-EFI hosts skip `efi=disable_early_pci_dma` as a no-op. |
+| EFI boot | `/sys/firmware/efi`. | Recorded as host context (informational). No boot-arg rule gates on this signal anymore — the only one that did, `efi=disable_early_pci_dma`, was removed (see "Removed boot arguments"). |
 
 Current risky Tier 2 skip reasons:
 

@@ -121,7 +121,6 @@ func TestManagedBootArgKeysExactOwnedSet(t *testing.T) {
 		"randomize_kstack_offset",
 		"initcall_blacklist",
 		"kfence.sample_interval",
-		"efi",
 		"tsx",
 		"unprivileged_bpf_disabled",
 		"oops",

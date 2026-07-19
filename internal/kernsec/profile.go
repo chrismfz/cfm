@@ -381,13 +381,6 @@ var Tier1BootArgsExt = []BootArg{
 		Description: "Enable KFENCE heap safety net: one in 100 allocations gets a guarded page, catching use-after-free and out-of-bounds bugs in production at effectively zero overhead.",
 		Affects:     "None measurable. The guarded fraction adds <0.1% allocation latency on benchmarks; field experience shows negligible impact on hosting workloads.",
 	},
-	// --- boot.dma: pre-IOMMU DMA window hardening (EFI only) ---------
-	{
-		ID: "KSEC-BOOT-dma-001", Group: "boot.dma", Tier: Tier1,
-		Key: "efi", Value: "disable_early_pci_dma",
-		Description: "Disable DMA from PCI devices before the IOMMU is initialised — closes the pre-IOMMU window that a malicious peripheral (e.g. a Thunderbolt device) could use to read/write kernel memory before protections are active.",
-		Affects:     "None on well-behaved hardware. Skipped on non-EFI systems (parameter is EFI-specific and a no-op on BIOS/legacy-boot).",
-	},
 	// --- boot.sidechannel: TSX side-channel mitigation ---------------
 	{
 		ID: "KSEC-BOOT-sidechannel-001", Group: "boot.sidechannel", Tier: Tier1,
@@ -549,7 +542,12 @@ var ManagedBootArgKeys = []string{
 	"initcall_blacklist",
 	// Tier 1 extensions
 	"kfence.sample_interval",
-	"efi",
+	// NOTE: "efi" is deliberately NOT owned. efi=disable_early_pci_dma
+	// (KSEC-BOOT-dma-001) was removed 2026-07-19 after it hung an
+	// mdraid-root / power-managed-PCIe host at boot (cut early PCI DMA →
+	// the storage controller could not assemble the root array → black
+	// screen). Keeping "efi" here would let kernsec strip an operator's
+	// own efi= argument, so the key stays unmanaged. See docs/kernsec.md.
 	"tsx",
 	"unprivileged_bpf_disabled",
 	// Tier 2

@@ -41,10 +41,9 @@ func TestResolveForceDoesNotResurrectRemovedRules(t *testing.T) {
 }
 
 func TestResolve_Tier1AppliesKSPP(t *testing.T) {
-	// IsEFIBoot: true ensures boot.dma (efi=disable_early_pci_dma) is not
-	// host-profile skipped in this test — the rule is EFI-specific but we
-	// want to verify the resolver lets it through on an EFI host.
-	rs := Resolve(&Conf{Tier: Tier1}, HostProfile{IsEFIBoot: true})
+	// No boot-arg rule gates on IsEFIBoot anymore (efi=disable_early_pci_dma
+	// was removed 2026-07-19), so an empty host profile is enough here.
+	rs := Resolve(&Conf{Tier: Tier1}, HostProfile{})
 	// Tier 1 rules should Apply; Tier 2 rules should SkipByTier.
 	// Exception: sysctl.net group is owned by cfm-sysctl-tweaks per
 	// managedsysctl, so those Tier 1 rules resolve to ManagedExternally
@@ -73,8 +72,7 @@ func TestResolve_Tier1AppliesKSPP(t *testing.T) {
 }
 
 func TestResolve_Tier2AppliesAll(t *testing.T) {
-	// IsEFIBoot: true so boot.dma rules apply (they're skipped on non-EFI hosts).
-	rs := Resolve(&Conf{Tier: Tier2}, HostProfile{IsEFIBoot: true})
+	rs := Resolve(&Conf{Tier: Tier2}, HostProfile{})
 	// At tier=2 with an EFI host profile, every Tier 1 + Tier 2 rule
 	// should Apply EXCEPT KSEC-SCT-net.* (ManagedExternally — owned
 	// by cfm-sysctl-tweaks). Tier 3 rules remain SkipByTier — that's
@@ -334,8 +332,7 @@ func TestResolvedSet_ApplySysctlsAndBootArgs(t *testing.T) {
 			"KSEC-BOOT-kspp-005":       OverrideSkip,
 		},
 	}
-	// IsEFIBoot:true so efi=disable_early_pci_dma (boot.dma) applies.
-	rs := Resolve(conf, HostProfile{IsEFIBoot: true})
+	rs := Resolve(conf, HostProfile{})
 
 	// Expected applying sysctls at tier=1:
 	//   KSPPSysctls (11) - 1 skipped     = 10
@@ -356,11 +353,11 @@ func TestResolvedSet_ApplySysctlsAndBootArgs(t *testing.T) {
 		}
 	}
 
-	// Expected applying boot args at tier=1 with IsEFIBoot:
+	// Expected applying boot args at tier=1:
 	//   KSPPBootArgs (5) - 1 skipped = 4
-	//   Tier1BootArgsExt (3)        = 3
+	//   Tier1BootArgsExt (2)        = 2
 	//   Tier2BootArgs: SkipByTier   = 0
-	// Total = 7
+	// Total = 6
 	wantBootArgs := len(KSPPBootArgs) - 1 + len(Tier1BootArgsExt)
 	args := rs.ApplyBootArgs()
 	if len(args) != wantBootArgs {
