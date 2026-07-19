@@ -12,6 +12,9 @@ import (
 // docs/kernsec.md under "Considered but not shipped"; the registry
 // absence below is the regression guard that keeps them out until
 // the probe / managed-key issues called out in that section are fixed.
+// The same guard also pins efi=disable_early_pci_dma out of the
+// registry — it shipped, then was removed 2026-07-19 after a boot hang
+// (see docs/kernsec.md) — so it can never silently return.
 
 // ---------------------------------------------------------------------
 // AcceptValues coverage for the relaxed audit rules
@@ -101,10 +104,16 @@ func TestHeldBackRules_NotInBootArgRegistry(t *testing.T) {
 	heldKeys := map[string]string{
 		"vsyscall": "see docs/kernsec.md \"Considered but not shipped\" — probe needs Elf_Verneed parsing",
 		"debugfs":  "see docs/kernsec.md \"Considered but not shipped\" — ManagedBootArgKeys regression",
+		// Removed 2026-07-19: efi=disable_early_pci_dma hung an mdraid-root /
+		// power-managed-PCIe host at boot (cut early PCI DMA before the
+		// storage controller could assemble the root array). It must stay
+		// out of the registry AND out of ManagedBootArgKeys — see docs/kernsec.md.
+		"efi": "removed 2026-07-19 — efi=disable_early_pci_dma early-PCI-DMA boot hang; see docs/kernsec.md",
 	}
 	heldIDs := map[string]string{
-		"KSEC-BOOT-tier3.legacycompat-001":   "see docs/kernsec.md \"Considered but not shipped\"",
+		"KSEC-BOOT-tier3.legacycompat-001":  "see docs/kernsec.md \"Considered but not shipped\"",
 		"KSEC-BOOT-tier3.observability-001": "see docs/kernsec.md \"Considered but not shipped\"",
+		"KSEC-BOOT-dma-001":                 "removed 2026-07-19 — efi=disable_early_pci_dma early-PCI-DMA boot hang; see docs/kernsec.md",
 	}
 	for _, a := range AllBootArgs() {
 		if reason, held := heldKeys[a.Key]; held {
