@@ -77,6 +77,12 @@ fires(post(EP, upload("shell.php", "<?php system($_GET['c']); ?>")),
       "direct php filename upload", "WAF_CVE:CVE_2026_48908:SPPAGEBUILDER:PHP_FILENAME")
 fires(post(EP, zip_with("payload.php", "<?php eval($_POST[0]); ?>")),
       "php-in-zip icon-pack (the wild payload.zip vector)", "WAF_CVE:CVE_2026_48908:SPPAGEBUILDER:PHP_IN_ZIP")
+-- The EXACT captured 2026-07 drop: an icon-pack zip whose webshell hides as a
+-- MULTI-DIGIT MultiPHP handler extension (fonts/kamley.php56), GIF-magic + <?php,
+-- deflate-compressed so only the entry NAME is scannable in-path.
+fires(post("/index.php?option=com_sppagebuilder&task=asset.uploadCustomIcon",
+      zip_with("fonts/kamley.php56", "GIF89a;<?php system($_GET[0]);?>")),
+      "php-in-zip with a .php56 (MultiPHP) entry — the captured payload", "WAF_CVE:CVE_2026_48908:SPPAGEBUILDER:PHP_IN_ZIP")
 fires(post(EP, upload("icon.gif", "<?php echo shell_exec($_REQUEST['x']); ?>")),
       "php webshell CONTENT under an image filename", "WAF_CVE:CVE_2026_48908:SPPAGEBUILDER:PHP_CONTENT")
 -- uploadImage/uploadFont share the same vulnerable task family.

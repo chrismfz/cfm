@@ -60,6 +60,8 @@ end
 -- Positives — PHP-executable / handler-override entries hidden in the zip.
 check(hit_local("shell.php"),          "php entry must be flagged")
 check(hit_local("wp/x.php5"),          ".php5 entry must be flagged")
+check(hit_local("fonts/kamley.php56"),  ".php56 multi-digit MultiPHP entry must be flagged (2026-07 captured drop)")
+check(hit_local("x.php74"),            ".php74 multi-digit MultiPHP entry must be flagged")
 check(hit_local("a/b/cmd.phtml"),      ".phtml entry must be flagged")
 check(hit_local("evil.pht"),           ".pht entry must be flagged")
 check(hit_local("x.phar"),             ".phar entry must be flagged")

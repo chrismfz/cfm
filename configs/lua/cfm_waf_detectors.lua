@@ -2179,7 +2179,7 @@ local function _cve_sfl_has_exec_ext(s)
   if s:find("%.pht%f[%W]")       then return true end  -- .pht
   if s:find("%.phtml?%f[%W]")    then return true end  -- .phtm / .phtml
   if s:find("%.phar%f[%W]")      then return true end  -- .phar
-  if s:find("%.php[0-9]?%f[%W]") then return true end  -- .php / .php3 / .php5 / .php7
+  if s:find("%.php[0-9]*%f[%W]") then return true end  -- .php / .php3 / .php5 / .php7 / .php56 / .php74 (MultiPHP handlers)
   return false
 end
 
@@ -2841,7 +2841,7 @@ function _M.detect_upload_filename(body, headers)
     if has(fname, "web.config") then return "web.config" end
 
     -- Extension checks: match anywhere in filename to catch double-extensions
-    if fname:match("%.php[%d]?[^%w]") or fname:match("%.php[%d]?$") then return "php" end
+    if fname:match("%.php[%d]*[^%w]") or fname:match("%.php[%d]*$") then return "php" end
     -- PHP alt-handlers Apache/LiteSpeed commonly map to the engine: .phtml/.phtm
     -- and the bare .pht slip past the .php[%d] matcher above, so they join the
     -- block-tier set. (.phtml is also Magento's server-side template extension,
@@ -2968,7 +2968,10 @@ local function _zip_entry_bad_ext(name)
   -- .asp/.jsp/.exe): the threat is a PHP webshell / handler dropped into a
   -- Joomla/WP tree, plus the two config files that make a dir execute PHP.
   if name == "" then return nil end
-  if name:match("%.php%d?$")  or name:match("%.php%d?[^%w]")  then return "PHP" end
+  -- %d* (not %d?) so multi-digit MultiPHP handler extensions are caught:
+  -- .php56 / .php70 / .php74 / .php80 / .php81 execute on cPanel/Plesk MultiPHP
+  -- hosts. (2026-07 SP Page Builder drop hid its webshell as fonts/kamley.php56.)
+  if name:match("%.php%d*$")  or name:match("%.php%d*[^%w]")  then return "PHP" end
   if name:match("%.phtml?$")  or name:match("%.phtml?[^%w]")  then return "PHTML" end
   if name:match("%.pht$")     or name:match("%.pht[^%w]")     then return "PHT" end
   if name:match("%.phar$")    or name:match("%.phar[^%w]")    then return "PHAR" end

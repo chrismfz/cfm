@@ -17,6 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **WAF upload rules: catch multi-digit `.phpNN` (MultiPHP handler) extensions.**
+  The php-executable extension matchers in `_zip_entry_bad_ext` (rule 414),
+  `bad_fname` (rule 401) and `_cve_sfl_has_exec_ext` (rules 10001/10010/10014)
+  used `%.php%d?` — `.php` plus at most **one** digit — so `.php56`/`.php70`/
+  `.php74`/`.php80`/`.php81` slipped through. Those extensions **execute PHP** on
+  cPanel/Plesk MultiPHP hosts (the shared-hosting fleet this protects). A captured
+  2026-07 SP Page Builder drop used exactly this: an icon-pack zip whose webshell
+  hid as `fonts/kamley.php56` (GIF-magic + `<?php`, deflate-compressed so only the
+  entry name was in-path-visible) — it passed the WAF signature layer and was
+  stopped only by the downstream ClamAV scan. Widened to `%.php%d*` (zero-or-more
+  digits); `.phpx`/`.phpfoo` and legit `.svg`/`.woff2`/`.css`/`.png` uploads stay
+  clean. Verified against the exact captured payload.
+
 ### Added
 - **WAF CVE detector: SP Page Builder (Joomla) unauth arbitrary upload → RCE
   (rule 10014, CVE-2026-48908).** The `com_sppagebuilder` `asset.upload*` tasks
