@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **detectors.conf duration values now accept a `d` (days) unit.** Go's
+  `time.ParseDuration` (which CFM used) stops at `h`, so `BLOCK = "7d"`,
+  `WINDOW = 3d`, etc. previously failed to parse and *silently* fell back to the
+  built-in default. A shared `parseCfgDuration` helper adds a lowercase `d`
+  (`1d == 24h`) on top of the stdlib units and is routed through every
+  operator-writable duration field — `kvDur` (`EVERY`/`WINDOW`/`COOLDOWN`/
+  `TIMEOUT`/…), the `BLOCK` TTL policy, and the mysql `QUERY_RULES` max-time — so
+  `d` means the same thing everywhere. Units compose (`1d12h`, `2d30m`) and days
+  may be fractional (`1.5d`). No `w`/`y` unit; unreadable values still fall back
+  to the default (keep to lowercase `d`).
+
 ### Removed
 - **kernsec: dropped the `efi=disable_early_pci_dma` boot arg (`KSEC-BOOT-dma-001`,
   group `boot.dma`).** This Tier 1 arg cleared PCI bus-master DMA at
