@@ -110,7 +110,11 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 		wafMatched, wafValue, wafExact := matchHostExclude(wafEntries, host)
 		http3Matched, http3Pattern, http3Exact := e.HTTP3OverrideMatchInfo(host)
 
-		_, clamPresent := clamOverride[host]
+		// Normalize the lookup key: collectKnownVhosts seeds some hosts
+		// (cPanel userdata) un-normalized, and matchHostExclude normalizes its
+		// host internally — the exact clam membership check must too, or a
+		// mixed-case/trailing-dot host would miss its own override.
+		_, clamPresent := clamOverride[normalizeControlHost(host)]
 		// XOR: an override flips the vhost relative to the global default.
 		clamEnabled := clamGlobal && (clamScanDefault != clamPresent)
 
