@@ -55,6 +55,7 @@ type Manager struct {
 	jobs    chan Job
 	stopCh  chan struct{}
 	started bool
+	health  *scanHealth
 }
 
 type Enqueuer interface {
@@ -106,6 +107,7 @@ func NewManager(cfg Config) *Manager {
 		client: New(cfg),
 		jobs:   make(chan Job, cfg.QueueSize),
 		stopCh: make(chan struct{}),
+		health: &scanHealth{},
 	}
 }
 
@@ -114,23 +116,40 @@ func (c *Client) Enabled() bool {
 }
 
 func (c *Client) dial() (net.Conn, error) {
+	return c.dialTimeout(c.cfg.Timeout)
+}
+
+func (c *Client) dialTimeout(d time.Duration) (net.Conn, error) {
 	if c == nil {
 		return nil, errors.New("clam: nil client")
 	}
 	if !c.Enabled() {
 		return nil, errors.New("clam: disabled or missing address")
 	}
-	return net.DialTimeout(c.cfg.Network, c.cfg.Address, c.cfg.Timeout)
+	if d <= 0 {
+		d = c.cfg.Timeout
+	}
+	return net.DialTimeout(c.cfg.Network, c.cfg.Address, d)
 }
 
 func (c *Client) cmd(command string) (string, error) {
-	conn, err := c.dial()
+	return c.cmdTimeout(command, c.cfg.Timeout)
+}
+
+// cmdTimeout runs one clamd command bounded by d (dial + read deadline) instead
+// of the full Config.Timeout — used by the health prober and `cfm clam status`
+// so a hung/absent clamd never blocks them for the scan timeout.
+func (c *Client) cmdTimeout(command string, d time.Duration) (string, error) {
+	if d <= 0 {
+		d = c.cfg.Timeout
+	}
+	conn, err := c.dialTimeout(d)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
 
-	_ = conn.SetDeadline(time.Now().Add(c.cfg.Timeout))
+	_ = conn.SetDeadline(time.Now().Add(d))
 
 	if _, err := fmt.Fprintf(conn, "%s\n", command); err != nil {
 		return "", err
@@ -145,7 +164,14 @@ func (c *Client) cmd(command string) (string, error) {
 }
 
 func (c *Client) Ping() error {
-	resp, err := c.cmd("PING")
+	return c.PingWithTimeout(c.cfg.Timeout)
+}
+
+// PingWithTimeout pings clamd with a bounded dial+read timeout. Callers that
+// must stay responsive (status output, the background health prober) pass a
+// short d rather than the full scan Config.Timeout.
+func (c *Client) PingWithTimeout(d time.Duration) error {
+	resp, err := c.cmdTimeout("PING", d)
 	if err != nil {
 		return err
 	}
@@ -248,6 +274,7 @@ func (m *Manager) Start() {
 	for i := 0; i < m.cfg.MaxWorkers; i++ {
 		go m.worker(i + 1)
 	}
+	go m.healthLoop()
 }
 
 func (m *Manager) Stop() {
@@ -272,6 +299,7 @@ func (m *Manager) Enqueue(job Job) bool {
 	case m.jobs <- job:
 		return true
 	default:
+		m.health.queueDrops.Add(1)
 		logf("[clam] result=queue_full path=%s ip=%s host=%s uri=%s reason=%s",
 			job.Path, job.IP, job.Host, job.URI, job.Reason)
 		return false
@@ -346,13 +374,28 @@ func (m *Manager) process(job Job) {
 		return
 	}
 
+	// Circuit breaker: clamd is known-down, so don't dial it per-job (each dial
+	// would block up to Config.Timeout). Fast-skip and clean up the temp copy;
+	// the health prober re-checks clamd and closes the breaker on recovery.
+	if m.health.isOpen() {
+		m.health.skippedBreaker.Add(1)
+		logf("[clam_scan] result=skipped_clamd_down ip=%s host=%s uri=%s reason=%s",
+			job.IP, job.Host, job.URI, job.Reason)
+		if job.TempCopy {
+			_ = os.Remove(job.Path)
+		}
+		return
+	}
+
 	if fi.IsDir() {
 		results, err := m.client.ScanPath(job.Path)
 		if err != nil {
+			m.recordScan(false, err.Error())
 			logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
 				job.IP, job.Host, job.URI, job.Reason, err)
 			return
 		}
+		m.recordScan(true, "")
 		for i := range results {
 			logResult(job, &results[i])
 		}
@@ -361,6 +404,7 @@ func (m *Manager) process(job Job) {
 
 	r, err := m.client.ScanFile(job.Path)
 	if err != nil {
+		m.recordScan(false, err.Error())
 		logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
 			job.IP, job.Host, job.URI, job.Reason, err)
 		if job.TempCopy {
@@ -368,6 +412,7 @@ func (m *Manager) process(job Job) {
 		}
 		return
 	}
+	m.recordScan(true, "")
 
 	// Always log result first.
 	logResult(job, r)

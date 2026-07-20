@@ -323,9 +323,16 @@ func runClamStatus(client *clam.Client, cfg *cfgpkg.Config, cfgDir string) int {
 
 	fmt.Println()
 	fmt.Println("-- clamd reachability --")
+	// Bound the status ping so a hung/absent clamd can't stall `status` for the
+	// full scan timeout (CLAMD_TIMEOUT, often 10s). Never exceed the configured
+	// timeout when it is already shorter.
+	pingTimeout := 3 * time.Second
+	if cfg.Clam.Timeout > 0 && cfg.Clam.Timeout < pingTimeout {
+		pingTimeout = cfg.Clam.Timeout
+	}
 	if !client.Enabled() {
 		fmt.Println("ping: skipped (CLAMD_ENABLED=false)")
-	} else if err := client.Ping(); err != nil {
+	} else if err := client.PingWithTimeout(pingTimeout); err != nil {
 		fmt.Printf("ping: FAIL (%v)\n", err)
 	} else {
 		fmt.Println("ping: OK")

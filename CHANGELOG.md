@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **ClamAV scanner resilience: circuit breaker + health prober + down alert.**
+  The async upload scanner no longer stalls when clamd is down or hung. A
+  circuit breaker opens after a few consecutive scan/probe failures: workers
+  then fast-skip (with temp-file cleanup) instead of blocking up to
+  `CLAMD_TIMEOUT` on every dial, so a dead clamd can't starve the workers or
+  silently fill (and drop) the queue. A background prober pings clamd every 10s
+  (bounded 3s) so an outage is detected — and recovery cleared — even with no
+  upload traffic, and emits a one-shot **CLAM/DOWN** / **CLAM/UP** notification
+  (same `clam` notify section as upload/infected) plus a degraded log heartbeat.
+  Lifetime counters (scanned, scan errors, breaker-skips, queue drops) are
+  exposed via a new `Manager.Health()` snapshot. `cfm clam status` now bounds
+  its reachability ping (≤3s) so it can't hang for the full scan timeout on an
+  absent clamd.
 - **Per-vhost ClamAV upload-scan toggle + global scan-default.**
   ClamAV upload scanning is now governed by a global policy `CLAM_SCAN_DEFAULT`
   (**default ON**) plus a per-vhost override, mirroring the WAF/Challenge
