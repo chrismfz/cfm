@@ -13,6 +13,11 @@ local _M = {}
 local CFG = {
     enabled     = true,
 
+    -- Global scanning POLICY (CLAM_SCAN_DEFAULT), overwritten by init() from the
+    -- rendered cfm_clamav_config.lua. Default OFF: a fresh deploy scans nothing
+    -- until vhosts are opted in (per-vhost override) or this is flipped on.
+    scan_default = false,
+
     methods     = { POST = true, PUT = true },
 
     exclude_hosts = {
@@ -49,6 +54,67 @@ local function is_excluded(host, uri)
         if uri:sub(1, #prefix) == prefix then return true end
     end
     return false
+end
+
+-- Per-vhost scan override set, fetched from the bridge (/nginx/clam/overrides)
+-- and cached per-worker with a short TTL. A host in this set is FLIPPED from the
+-- global scan_default: with scan_default=false it is opted IN, with
+-- scan_default=true it is opted OUT. (v1 matches exact hostnames — the same set
+-- the vhost-controls UI toggles; wildcard admin overrides can mirror
+-- cfm_waf_excl.lua later if needed.)
+local _ovr = { hosts = {}, ts = 0 }
+local _OVR_TTL = 10
+
+local function fetch_overrides()
+    local sock = ngx.socket.tcp()
+    sock:settimeout(CFG.timeout_ms)
+    local ok = sock:connect("unix:" .. (CFG.sock_path or ""))
+    if not ok then return nil end
+    local req = table.concat({
+        "GET /nginx/clam/overrides HTTP/1.1\r\n",
+        "Host: cfm\r\n",
+        "X-CFM-Token: " .. (CFG.token or "") .. "\r\n",
+        "Connection: close\r\n\r\n",
+    })
+    if not sock:send(req) then sock:close(); return nil end
+    local body = sock:receive("*a")
+    sock:close()
+    if not body then return nil end
+    local json = body:match("\r\n\r\n(.*)$")
+    if not json then return nil end
+    local ok_json, cjson = pcall(require, "cjson")
+    if not ok_json then return nil end
+    local ok_dec, parsed = pcall(cjson.decode, json)
+    if not ok_dec or type(parsed) ~= "table" then return nil end
+    local set = {}
+    if type(parsed.entries) == "table" then
+        for _, e in ipairs(parsed.entries) do
+            if type(e) == "table" and e.type == "host" and type(e.value) == "string" then
+                set[e.value:lower()] = true
+            end
+        end
+    end
+    return set
+end
+
+local function overrides_get()
+    local now = ngx.now()
+    if (now - _ovr.ts) < _OVR_TTL then return _ovr.hosts end
+    local set = fetch_overrides()
+    if set then _ovr.hosts = set end
+    _ovr.ts = now   -- advance ts even on failure to avoid hammering a down bridge
+    return _ovr.hosts
+end
+
+-- should_scan: global default XOR per-vhost override.
+--   scan_default=false → scan ONLY vhosts opted in (in the override set)
+--   scan_default=true  → scan ALL vhosts EXCEPT those opted out (in the set)
+local function should_scan(host)
+    local flipped = overrides_get()[host] == true
+    if CFG.scan_default then
+        return not flipped
+    end
+    return flipped
 end
 
 local function write_temp(body_data, ip)
@@ -176,6 +242,11 @@ function _M.notify(ip, waf_tag)
 
         local ct = (ngx.var.content_type or ""):lower()
         if not ct:find("multipart/form-data", 1, true) then return end
+
+        -- Per-vhost scan decision (scan_default XOR override). Cheap-exits a
+        -- scan-off vhost here, BEFORE any body read/spool/bridge-post — so a
+        -- deploy default of scan-off costs nothing on the upload path.
+        if not should_scan(host) then return end
 
         if not ngx.ctx.waf_body then
             ngx.req.read_body()
