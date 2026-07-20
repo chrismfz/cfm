@@ -111,6 +111,28 @@
         </div>
       </section>
 
+      <!-- 3. Recent infections (scoped: your vhost; admin: all vhosts) -->
+      <section class="card wide" v-if="shouldShow('clam')">
+        <h2>Recent infections</h2>
+        <p class="muted" v-if="!clamInfections.length">No infections recorded<span v-if="isScopedMode"> for your vhost</span>. Infected uploads that ClamAV catches appear here.</p>
+        <div class="table-wrap" v-else>
+          <table>
+            <thead>
+              <tr><th>When</th><th>Vhost</th><th>Source IP</th><th>File</th><th>Signature</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in clamInfections" :key="row.id">
+                <td>{{ fmtTs(row.ts_unix) }}</td>
+                <td><code>{{ row.host }}</code></td>
+                <td>{{ row.ip }}<span class="muted" v-if="row.country"> · {{ row.country }}</span></td>
+                <td class="truncate">{{ (row.payload && row.payload.filename) || '-' }}</td>
+                <td>{{ row.reason }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
     </main>
 </div>
 </div>

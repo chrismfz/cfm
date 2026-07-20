@@ -9,6 +9,7 @@ export const clamMixin = {
     return {
       clamHealth: null, // admin: /api/v1/clam/health snapshot (null when scoped or unavailable)
       clamRows: [], // scoped: vhost rows carrying clam_* fields
+      clamInfections: [], // recent clam_infected history events (scoped by host)
     };
   },
 
@@ -40,7 +41,30 @@ export const clamMixin = {
   methods: {
     // core.js always invokes refreshLists() — the reliable auto-refresh hook.
     async refreshLists() {
-      await Promise.all([this.refreshClamHealth(), this.refreshClamRows()]);
+      await Promise.all([this.refreshClamHealth(), this.refreshClamRows(), this.refreshClamInfections()]);
+    },
+    // Focus host for scoped queries: ?vhost= wins, else the scoped token's first
+    // allowed vhost. Admins may omit it (query spans all vhosts).
+    clamFocusHost() {
+      const url = new URL(window.location.href);
+      let host = (url.searchParams.get("vhost") || url.searchParams.get("vhosts") || "").trim();
+      if (host.includes(",")) host = host.split(",")[0].trim();
+      if (!host && this.isScopedMode && Array.isArray(this.allowedVhosts) && this.allowedVhosts.length) {
+        host = String(this.allowedVhosts[0] || "").trim();
+      }
+      return host;
+    },
+    async refreshClamInfections() {
+      const host = this.clamFocusHost();
+      // The history endpoint requires a host for scoped tokens (else 400) —
+      // skip rather than fire a doomed request.
+      if (this.isScopedMode && !host) {
+        this.clamInfections = [];
+        return;
+      }
+      const hq = host ? `&host=${encodeURIComponent(host)}` : "";
+      const payload = await this.fetchJSONSafe(`v1/webdet/history/events?type=clam_infected&limit=50&enrich=1${hq}`, { rows: [] });
+      this.clamInfections = this.extractRows(payload, "rows");
     },
     async refreshClamHealth() {
       // Daemon status is admin-only; scoped users skip it (and would 403).

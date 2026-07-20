@@ -18,6 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **ClamAV infections are recorded in the scoped history + shown on the ClamAV page.**
+  Infected uploads the scanner catches are now persisted into the webdetector
+  history store (`event_type=clam_infected`) — preserving the file name, request
+  URI and evidence path that the notify audit log drops — and surfaced in a new
+  "Recent infections" table on the ClamAV page, scoped so a cPanel user sees only
+  their own vhost's infections (via the existing scope-enforced
+  `/api/v1/webdet/history/events`). Wiring is a small settable scan-event sink in
+  `internal/clam` (the leaf both packages import) that the webdetector engine
+  registers on start; only infections are persisted (clean uploads are
+  high-volume and covered by the scanner's counters instead). No new endpoint.
 - **cfm-admin ClamAV page: scanner status + per-vhost scan coverage.** New
   `/cfm-admin/webdetector/clam/` page (nav: Rules & engine → ClamAV). For admins,
   a **scanner status** card from a new admin-only `GET /api/v1/clam/health`:

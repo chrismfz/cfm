@@ -16,11 +16,11 @@ import (
 	"time"
 
 	"cfm/internal/apiserver"
+	"cfm/internal/clam"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectors/meta"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
-	// "cfm/internal/clam"
 )
 
 // webdetectorWrapped ensures that background servers (API + challenge)
@@ -964,6 +964,12 @@ func init() {
 		}
 
 		engine := webdet.NewEngine(cfg)
+
+		// Persist ClamAV scan events (infections) into the webdetector history
+		// store so they are queryable, scoped, on the ClamAV insights page.
+		// A settable sink (replace, not append) keeps this pointed at the
+		// current engine across reloads without accumulating subscribers.
+		clam.SetScanEventSink(engine.RecordClamScanEvent)
 
 		// Wire the Unix ingest socket (log_by_lua_block path). Attached
 		// unconditionally — the arbiter in Engine.RunOnce picks between

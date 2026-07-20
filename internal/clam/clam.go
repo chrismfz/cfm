@@ -440,6 +440,21 @@ func (m *Manager) process(job Job) {
 			dest, job.IP, job.Host, r.Signature)
 
 		m.safeNotifyInfected(job, r, dest)
+
+		fileName := strings.TrimSpace(job.FileName)
+		if fileName == "" {
+			fileName = filepath.Base(job.Path)
+		}
+		publishScanEvent(ScanEvent{
+			EventType: "clam_infected",
+			Host:      job.Host,
+			IP:        job.IP,
+			URI:       job.URI,
+			FileName:  fileName,
+			Signature: r.Signature,
+			Evidence:  dest,
+			When:      time.Now(),
+		})
 		return
 	}
 
