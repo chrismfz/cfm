@@ -12,7 +12,7 @@ func TestIsWellKnownChallengeExempt(t *testing.T) {
 		"/.WELL-KNOWN/acme-challenge/0ebjUVe":  true, // case-insensitive
 		"/.well-known/pki-validation/abc.txt":  true,
 		"/.well-known/security.txt":            true,
-		"/.well-known/acme-challenge/x?foo=..": true, // query stripped before check
+		"/.well-known/acme-challenge/x?foo=..": true,  // query stripped before check
 		"/index.php":                           false,
 		"/well-known/x":                        false, // missing the leading dot
 		"/app/.well-known/x":                   false, // not at the start

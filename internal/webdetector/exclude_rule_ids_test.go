@@ -113,3 +113,4 @@ func TestRuleIDsKey_StableAcrossOrder(t *testing.T) {
 		t.Skip("ruleIDsKey contract is sorted input; behaviour on unsorted is undefined")
 	}
 }
+

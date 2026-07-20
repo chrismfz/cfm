@@ -3,20 +3,18 @@
 // `cfm bots` — box-wide UA emergency control surface.
 //
 // Subcommands:
-//
-//	cfm bots                         live two-pane termui (default)
-//	cfm bots top   [N]               static top-N snapshot
-//	cfm bots list                    active emergency rules
-//	cfm bots drill <ua>              drilldown for one normalized UA
-//	cfm bots block    <ua> [opts]    install block rule
-//	cfm bots throttle <ua> [opts]    install throttle rule
-//	cfm bots remove   <ua>           undo an active rule
+//   cfm bots                         live two-pane termui (default)
+//   cfm bots top   [N]               static top-N snapshot
+//   cfm bots list                    active emergency rules
+//   cfm bots drill <ua>              drilldown for one normalized UA
+//   cfm bots block    <ua> [opts]    install block rule
+//   cfm bots throttle <ua> [opts]    install throttle rule
+//   cfm bots remove   <ua>           undo an active rule
 //
 // Options for install commands:
-//
-//	--ttl <duration>    rule TTL (default 30m, max 60m)
-//	--reason <text>     free-form reason captured in audit log
-//	--confirm           required when the UA is a verified Google crawler
+//   --ttl <duration>    rule TTL (default 30m, max 60m)
+//   --reason <text>     free-form reason captured in audit log
+//   --confirm           required when the UA is a verified Google crawler
 //
 // All commands talk to the existing webdetector HTTP API. Authentication is
 // the same Bearer token that backs `cfm webtop`.

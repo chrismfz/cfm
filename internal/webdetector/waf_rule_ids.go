@@ -27,12 +27,12 @@ import "sort"
 
 // WAFRule describes one cfm_waf rule entry exposed to operators.
 type WAFRule struct {
-	ID           int    `json:"id"`            // stable numeric handle
-	Name         string `json:"name"`          // CFG key, e.g. "rule_traversal"
-	Group        int    `json:"group"`         // ID / 100, e.g. 3 for the injection family
-	GroupName    string `json:"group_name"`    // "injection", "upload", …
-	ReasonFamily string `json:"reason_family"` // canonical WAF_* prefix the rule emits
-	DefaultMode  string `json:"default_mode"`  // built-in default mode in Lua CFG (informational)
+	ID            int    `json:"id"`             // stable numeric handle
+	Name          string `json:"name"`           // CFG key, e.g. "rule_traversal"
+	Group         int    `json:"group"`          // ID / 100, e.g. 3 for the injection family
+	GroupName     string `json:"group_name"`     // "injection", "upload", …
+	ReasonFamily  string `json:"reason_family"`  // canonical WAF_* prefix the rule emits
+	DefaultMode   string `json:"default_mode"`   // built-in default mode in Lua CFG (informational)
 }
 
 // wafRuleIDs is the in-process registry. Keep entries sorted by ID — the
@@ -155,13 +155,13 @@ var wafRuleIDs = []WAFRule{
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.
 // Used by /api/v1/waf/rules and the CLI "rules" subcommand.
 var wafRuleGroupNames = map[int]string{
-	1:   "path",
-	2:   "client_identity",
-	3:   "injection",
-	4:   "upload_malware",
-	5:   "auth_abuse",
-	6:   "header_protocol",
-	7:   "ssrf",
+	1: "path",
+	2: "client_identity",
+	3: "injection",
+	4: "upload_malware",
+	5: "auth_abuse",
+	6: "header_protocol",
+	7: "ssrf",
 	8:   "info_disclosure",
 	9:   "reserved",
 	100: "cve", // id/100 for the 10000+ named-vulnerability band

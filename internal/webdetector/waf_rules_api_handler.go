@@ -14,8 +14,7 @@ import (
 // GET /api/v1/waf/rules
 //
 // Response: { "rules": [ {id, name, group, group_name, reason_family,
-//
-//	default_mode}, ... ], "groups": { "1": "path", ... } }
+//                         default_mode}, ... ], "groups": { "1": "path", ... } }
 func (e *Engine) handleWAFRules(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return

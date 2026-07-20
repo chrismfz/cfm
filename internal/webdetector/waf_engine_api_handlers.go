@@ -46,18 +46,18 @@ type wafHistBucket struct {
 }
 
 type wafEngineSummary struct {
-	FromUnix      int64           `json:"from_unix"`
-	ToUnix        int64           `json:"to_unix"`
-	Hours         int             `json:"hours"`
-	TotalEvents   int             `json:"total_events"`
-	UniqueHosts   int             `json:"unique_hosts"`
-	UniqueIPs     int             `json:"unique_ips"`
-	BlockedEvents int             `json:"blocked_events"`
-	TopRules      []wafTopValue   `json:"top_rules"`
-	TopRuleBases  []wafTopValue   `json:"top_rule_bases"`
-	TopHosts      []wafTopValue   `json:"top_hosts"`
-	TopIPs        []wafTopIPValue `json:"top_ips"`
-	TopCountries  []wafTopValue   `json:"top_countries,omitempty"`
+	FromUnix      int64            `json:"from_unix"`
+	ToUnix        int64            `json:"to_unix"`
+	Hours         int              `json:"hours"`
+	TotalEvents   int              `json:"total_events"`
+	UniqueHosts   int              `json:"unique_hosts"`
+	UniqueIPs     int              `json:"unique_ips"`
+	BlockedEvents int              `json:"blocked_events"`
+	TopRules      []wafTopValue    `json:"top_rules"`
+	TopRuleBases  []wafTopValue    `json:"top_rule_bases"`
+	TopHosts      []wafTopValue    `json:"top_hosts"`
+	TopIPs        []wafTopIPValue  `json:"top_ips"`
+	TopCountries  []wafTopValue    `json:"top_countries,omitempty"`
 	// Histogram buckets the (filtered) events per hour across the window,
 	// oldest first — feeds the hits-over-time chart in the UI.
 	Histogram []wafHistBucket  `json:"histogram,omitempty"`

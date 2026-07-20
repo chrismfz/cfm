@@ -3546,21 +3546,6 @@ func (e *Engine) ClamOverrideList() []excludeEntry {
 	return e.clamScanOverrides.List()
 }
 
-// isClamScanOverridden reports whether the ClamAV upload scan is disabled for host.
-func (e *Engine) isClamScanOverridden(host string) bool {
-	if e == nil || e.clamScanOverrides == nil {
-		return false
-	}
-	return e.clamScanOverrides.MatchHost(host)
-}
-
-func (e *Engine) ClamOverrideHasAny() bool {
-	if e == nil || e.clamScanOverrides == nil {
-		return false
-	}
-	return len(e.clamScanOverrides.List()) > 0
-}
-
 // ---------------------------------------------------------------------------
 // HTTP/3 per-vhost opt-in. Default for every vhost is "H3 disabled" (no
 // Alt-Svc header advertised). Entries here are the OPT-IN list — opposite

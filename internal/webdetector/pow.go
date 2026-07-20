@@ -14,10 +14,10 @@ import (
 
 // POW params (μπορείς αργότερα να τα κάνεις config/env)
 const (
-	defaultPowEnabled    = true
-	defaultPowDifficulty = 16              // bits of leading zeros (18–22 είναι “ok”)
-	defaultPowTTL        = 2 * time.Minute // challenge must be solved quickly
-	maxPowSolutionLen    = 64
+	defaultPowEnabled     = true
+	defaultPowDifficulty  = 16               // bits of leading zeros (18–22 είναι “ok”)
+	defaultPowTTL         = 2 * time.Minute  // challenge must be solved quickly
+	maxPowSolutionLen     = 64
 )
 
 // PowConfig: έτοιμο για επέκταση (π.χ. ανά vhost, ανά method, κλπ)
