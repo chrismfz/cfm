@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **cfm-admin ClamAV page: scanner status + per-vhost scan coverage.** New
+  `/cfm-admin/webdetector/clam/` page (nav: Rules & engine → ClamAV). For admins,
+  a **scanner status** card from a new admin-only `GET /api/v1/clam/health`:
+  clamd reachability / circuit-breaker state (with down-since + last error),
+  queue depth, the global scan default, and lifetime counters (scanned, scan
+  errors, breaker-skips, queue drops). For everyone (scoped included), a
+  **scan-coverage** card built from the existing scoped `/api/v1/webdet/vhosts`
+  rows: how many vhosts are scanned vs not, with a one-click "Enable scan" that
+  reuses the scoped `/api/v1/clam/override/*` flip — so a cPanel user can turn
+  scanning on for their own vhost. (Scoped per-vhost scan/infection _history_ is
+  a planned follow-up — it needs a new clam→history persistence bridge.)
 - **ClamAV scanner resilience: circuit breaker + health prober + down alert.**
   The async upload scanner no longer stalls when clamd is down or hung. A
   circuit breaker opens after a few consecutive scan/probe failures: workers

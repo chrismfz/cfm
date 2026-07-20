@@ -446,6 +446,25 @@ func (b *NginxBridge) BypassIPScopeTemp(ip, host, scope string, ttl time.Duratio
 }
 
 // Clam Manager
+// clamHealthReporter is the optional health surface of the wired clam manager
+// (satisfied by *clam.Manager). Kept separate from clam.Enqueuer so the
+// hot-path upload interface stays minimal.
+type clamHealthReporter interface {
+	Health() clam.HealthSnapshot
+}
+
+// ClamHealth returns the scanner health snapshot when a clam manager is wired
+// and exposes one. Non-blocking (reads cached breaker state; never dials clamd).
+func (b *NginxBridge) ClamHealth() (clam.HealthSnapshot, bool) {
+	if b == nil || b.clamMgr == nil {
+		return clam.HealthSnapshot{}, false
+	}
+	if hr, ok := b.clamMgr.(clamHealthReporter); ok {
+		return hr.Health(), true
+	}
+	return clam.HealthSnapshot{}, false
+}
+
 func (b *NginxBridge) SetClamManager(m clam.Enqueuer, pendingDir, infectedDir string) {
 	if b == nil {
 		return

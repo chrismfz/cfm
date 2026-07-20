@@ -39,6 +39,7 @@ const MENU_GROUPS = [
     { label: "Firewall", href: "/cfm-admin/firewall/", icon: "ban" },
     { label: "WAF engine", href: "/cfm-admin/webdetector/waf/", icon: "shield" },
     { label: "Vhost controls", href: "/cfm-admin/webdetector/controls/", icon: "sliders" },
+    { label: "ClamAV", href: "/cfm-admin/webdetector/clam/", icon: "bug" },
   ]},
   { title: "Services", items: [
     { label: "MySQL governor", href: "/cfm-admin/governor/", icon: "db" },

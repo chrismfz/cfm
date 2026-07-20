@@ -77,6 +77,7 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/clam/override/list", e.handleClamOverrideList)
 	mux.HandleFunc("/api/v1/clam/override/add", e.handleClamOverrideAdd)
 	mux.HandleFunc("/api/v1/clam/override/remove", e.handleClamOverrideRemove)
+	mux.HandleFunc("/api/v1/clam/health", e.handleClamHealth)
 	mux.HandleFunc("/api/v1/http3/list", e.handleHTTP3List)
 	mux.HandleFunc("/api/v1/http3/enable", e.handleHTTP3Enable)
 	mux.HandleFunc("/api/v1/http3/disable", e.handleHTTP3Disable)
