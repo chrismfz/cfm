@@ -16,16 +16,28 @@ type excludeCLIEntry struct {
 }
 
 func runChallengeExclude(baseURL string, args []string) error {
-	return runGenericExclude(baseURL, "challenge", args)
+	return runGenericExclude(baseURL, "challenge", "exclude", args)
 }
 
 func runWAFExclude(baseURL string, args []string) error {
-	return runGenericExclude(baseURL, "waf", args)
+	return runGenericExclude(baseURL, "waf", "exclude", args)
 }
 
-func runGenericExclude(baseURL, prefix string, args []string) error {
+// RunClamOverride drives `cfm clam override` / `cfm webtop clam override`. The
+// per-vhost ClamAV scan toggle is an "override" (a flip from the global
+// CLAM_SCAN_DEFAULT), not an "exclude", so it uses the /api/v1/clam/override/*
+// resource. Raw add/remove/list of the override host list; whether a listed host
+// ends up scanned depends on the global default (the vhost-controls UI shows the
+// resolved on/off state).
+func RunClamOverride(baseURL string, args []string) error {
+	return runGenericExclude(baseURL, "clam", "override", args)
+}
+
+// resource is the API path segment after the feature prefix ("exclude" for
+// waf/challenge, "override" for clam).
+func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 	if len(args) == 0 || args[0] == "list" {
-		u := fmt.Sprintf("%s/api/v1/%s/exclude/list", strings.TrimRight(baseURL, "/"), prefix)
+		u := fmt.Sprintf("%s/api/v1/%s/%s/list", strings.TrimRight(baseURL, "/"), prefix, resource)
 		resp, err := clihttp.Get(u)
 		if err != nil {
 			return err
@@ -52,8 +64,8 @@ func runGenericExclude(baseURL, prefix string, args []string) error {
 		return nil
 	}
 	if len(args) < 2 {
-		return fmt.Errorf("usage: cfm webtop %s exclude [add|remove] <value> [--type host|path]%s",
-			prefix, ruleFlagUsage(prefix))
+		return fmt.Errorf("usage: cfm webtop %s %s [add|remove] <value> [--type host|path]%s",
+			prefix, resource, ruleFlagUsage(prefix))
 	}
 	action := args[0]
 	value := args[1]
@@ -91,8 +103,8 @@ func runGenericExclude(baseURL, prefix string, args []string) error {
 		// API parser accepts comma-separated mix of N / Nxx / N-M.
 		q.Set("rule_ids", strings.Join(rules, ","))
 	}
-	u := fmt.Sprintf("%s/api/v1/%s/exclude/%s?%s",
-		strings.TrimRight(baseURL, "/"), prefix, endpoint, q.Encode())
+	u := fmt.Sprintf("%s/api/v1/%s/%s/%s?%s",
+		strings.TrimRight(baseURL, "/"), prefix, resource, endpoint, q.Encode())
 	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err

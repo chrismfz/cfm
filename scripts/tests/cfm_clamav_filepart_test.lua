@@ -19,7 +19,12 @@ local sent, encoded = {}, {}
 local fake_sock = {}
 fake_sock.settimeout = function() end
 fake_sock.connect    = function() return true end
-fake_sock.send       = function(_, req) sent[#sent + 1] = req; return true end
+-- Only the upload POST counts as "a scan dispatched"; the per-vhost override
+-- GET (/nginx/clam/overrides) that should_scan() issues is not a scan.
+fake_sock.send       = function(_, req)
+  if req:find("/nginx/upload", 1, true) then sent[#sent + 1] = req end
+  return true
+end
 fake_sock.receive    = function() return "HTTP/1.1 200 OK" end
 fake_sock.close      = function() end
 
@@ -63,7 +68,7 @@ _G.ngx = build_ngx()
 package.path = "configs/lua/?.lua;" .. package.path
 local M = require("cfm_clamav")
 M.init({
-  token = "t", enabled = true, sock_path = "/run/cfm/scan.sock",
+  token = "t", enabled = true, scan_default = true, sock_path = "/run/cfm/scan.sock",
   exclude_hosts = { ["blocked.example.gr"] = true },
 })
 

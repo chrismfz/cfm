@@ -17,6 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Per-vhost ClamAV upload-scan toggle + global scan-default (opt-in rollout).**
+  ClamAV upload scanning is now governed by a global policy `CLAM_SCAN_DEFAULT`
+  (**default OFF**) plus a per-vhost override, mirroring the WAF/Challenge
+  per-vhost model: effective per host = `CLAMD_ENABLED && (CLAM_SCAN_DEFAULT XOR
+  host-in-override)`. A fresh deploy scans nothing until vhosts are opted in one
+  by one (gradual burn-in) or the whole server is flipped on. Controls:
+  `cfm clam scan on|off` (global), `cfm clam override add|remove|list <host>` and
+  the mirror `cfm webtop clam override …` (per-vhost). The override API
+  (`/api/v1/clam/override/{list,add,remove}`) reuses the identical scoped-vs-admin
+  auth as the WAF/Challenge excludes, so a scoped cPanel token can toggle only its
+  own vhost. The edge (`cfm_clamav.lua`) reads the global default from the rendered
+  config and the override set from the bridge (`/nginx/clam/overrides`, 10s cache),
+  and cheap-exits a scan-off vhost before any body read/spool — so scan-off costs
+  nothing on the upload path. **Migration:** because the default is OFF, an install
+  that previously scanned every upload (`CLAMD_ENABLED=1`) must set
+  `CLAM_SCAN_DEFAULT = 1` after upgrade to keep scanning server-wide.
+
 ### Security
 - **WAF upload rules: catch multi-digit `.phpNN` (MultiPHP handler) extensions.**
   The php-executable extension matchers in `_zip_entry_bad_ext` (rule 414),

@@ -329,6 +329,18 @@ func main() {
 		}
 
 	case "clam", "clamd", "clamav":
+		// `cfm clam override …` mirrors `cfm webtop clam override …` for
+		// discoverability (it lives next to `cfm clam status/enable/scan`). It
+		// hits the webdetector API, so it needs the API base URL + auth token,
+		// unlike the clamd-socket subcommands handled by cli.RunClam.
+		if len(os.Args) >= 3 && os.Args[2] == "override" {
+			clihttp.SetToken(apiAuthToken())
+			if err := webdet.RunClamOverride(apiBaseURL(), os.Args[3:]); err != nil {
+				fmt.Fprintln(os.Stderr, "clam override error:", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
 		os.Exit(cli.RunClam(os.Args[2:], cfgDir()))
 
 	case "debug":
