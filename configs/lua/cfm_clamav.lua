@@ -14,8 +14,10 @@ local CFG = {
     enabled     = true,
 
     -- Global scanning POLICY (CLAM_SCAN_DEFAULT), overwritten by init() from the
-    -- rendered cfm_clamav_config.lua. Default OFF: a fresh deploy scans nothing
-    -- until vhosts are opted in (per-vhost override) or this is flipped on.
+    -- rendered cfm_clamav_config.lua. The deploy default is ON (set in the Go
+    -- config); a per-vhost override then opts a vhost OUT. This module-level
+    -- value stays false as the conservative fallback if init() never runs / the
+    -- rendered config is unreadable (unknown state → do not scan).
     scan_default = false,
 
     methods     = { POST = true, PUT = true },
@@ -244,8 +246,8 @@ function _M.notify(ip, waf_tag)
         if not ct:find("multipart/form-data", 1, true) then return end
 
         -- Per-vhost scan decision (scan_default XOR override). Cheap-exits a
-        -- scan-off vhost here, BEFORE any body read/spool/bridge-post — so a
-        -- deploy default of scan-off costs nothing on the upload path.
+        -- non-scanned vhost here, BEFORE any body read/spool/bridge-post — so an
+        -- opted-out vhost (or scan-off server) costs nothing on the upload path.
         if not should_scan(host) then return end
 
         if not ngx.ctx.waf_body then

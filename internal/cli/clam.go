@@ -245,7 +245,7 @@ func printClamHelp() {
 	fmt.Println("  cfm clam hook status")
 	fmt.Println("  cfm clam ping")
 	fmt.Println("  cfm clam version")
-	fmt.Println("  cfm clam scan on|off        # CLAM_SCAN_DEFAULT: global upload-scan policy (default OFF)")
+	fmt.Println("  cfm clam scan on|off        # CLAM_SCAN_DEFAULT: global upload-scan policy (default ON)")
 	fmt.Println("  cfm clam scan <file>")
 	fmt.Println("  cfm clam scan <dir>")
 	fmt.Println("  cfm clam scan --quiet-clean <file-or-dir>")
