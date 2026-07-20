@@ -239,11 +239,14 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// Per-vhost ClamAV upload-scan opt-out. Same "exclude = disabled" model as the
-// WAF/Challenge handlers above, reusing the identical scoped-vs-admin auth
-// (RequireScopedOrAdmin + validateScopedExcludeWrite + filterExcludeListForScope),
-// so a scoped cPanel token can toggle only its own vhost. HOST type only — upload
-// scanning is a whole-vhost on/off, there is no per-path/per-rule clam exclude.
+// Per-vhost ClamAV upload-scan override. A listed host is FLIPPED relative to
+// the global CLAM_SCAN_DEFAULT (opt-out when the default is ON, opt-in when it
+// is OFF) — the XOR is applied at the edge; these handlers just edit the raw
+// override set. They reuse the identical scoped-vs-admin auth as the
+// WAF/Challenge handlers above (RequireScopedOrAdmin + validateScopedExcludeWrite
+// + filterExcludeListForScope), so a scoped cPanel token can toggle only its own
+// vhost. HOST type only — upload scanning is a whole-vhost on/off, there is no
+// per-path/per-rule clam override.
 
 // GET /api/v1/clam/override/list
 func (e *Engine) handleClamOverrideList(w http.ResponseWriter, r *http.Request) {

@@ -3518,12 +3518,15 @@ func (e *Engine) WAFExcludeHasAny() bool {
 }
 
 // ---------------------------------------------------------------------------
-// Per-vhost ClamAV upload-scan opt-out. Same "exclude = disabled" semantics as
-// WAF/Challenge: a `host` entry means the ClamAV upload hook skips that vhost.
-// ClamAV interception happens in OpenResty (cfm_clamav.lua), so — like WAF, and
-// unlike the daemon-enforced Challenge — the edge reads this list via the nginx
-// bridge (/nginx/clam/overrides). Host-only: there is no per-path or per-rule
-// clam exclude (upload scanning is a whole-vhost on/off).
+// Per-vhost ClamAV upload-scan override. Unlike the WAF/Challenge excludes
+// (which unconditionally disable), a `host` entry here FLIPS the vhost relative
+// to the global CLAM_SCAN_DEFAULT: opt-out when the default is ON (the shipped
+// default), opt-in when it is OFF. The XOR is applied at the edge; this store
+// only holds the raw override set. ClamAV interception happens in OpenResty
+// (cfm_clamav.lua), so — like WAF, and unlike the daemon-enforced Challenge —
+// the edge reads this list via the nginx bridge (/nginx/clam/overrides).
+// Host-only: there is no per-path or per-rule clam override (upload scanning is
+// a whole-vhost on/off).
 
 func (e *Engine) ClamOverrideAdd(typ, value string, scope map[string]struct{}) bool {
 	if e == nil || e.clamScanOverrides == nil {

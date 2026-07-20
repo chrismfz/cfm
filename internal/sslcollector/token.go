@@ -337,8 +337,10 @@ func WriteLuaConfig(luaPath string, offlineCache bool, cfmGID int) error {
 // editor reformats this file. The sentinel is grep-cheap, format-stable,
 // and decoupled from the Lua surface — change one, change the other.
 // scanDefault is the global scanning POLICY (CLAM_SCAN_DEFAULT). The edge
-// (cfm_clamav.lua) computes should-scan(host) = scan_default XOR host-in-override,
-// so a fresh deploy (scan_default=false, no overrides) does zero upload work.
+// (cfm_clamav.lua) computes should-scan(host) = scan_default XOR host-in-override.
+// The deploy default is ON (async notify-only scanner, unchanged for months), so
+// a listed override host is an opt-OUT; a scan-off server (scan_default=false)
+// with no overrides does zero upload work.
 func WriteClamavLuaConfig(luaPath string, enabled bool, scanDefault bool, cfmGID int) error {
 	if !filepath.IsAbs(luaPath) {
 		return fmt.Errorf("clam: luaPath must be absolute, got %q", luaPath)

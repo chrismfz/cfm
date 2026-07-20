@@ -2134,9 +2134,17 @@ func (b *NginxBridge) handleWAFExcludes(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(map[string]any{"entries": items})
 }
 
-// handleClamExcludes returns the per-vhost ClamAV upload-scan opt-out list.
-// Polled by configs/lua/cfm_clamav.lua so the edge upload hook skips excluded
-// vhosts. Host entries only (upload scanning is a whole-vhost on/off).
+// handleClamExcludes returns the per-vhost ClamAV upload-scan override set.
+// Polled by configs/lua/cfm_clamav.lua, which FLIPS a listed host relative to
+// the global CLAM_SCAN_DEFAULT (opt-out when the default is ON, opt-in when it
+// is OFF). Host entries only (upload scanning is a whole-vhost on/off).
+//
+// The edge reader (cfm_clamav.lua fetch_overrides) is a minimal HTTP parser
+// that splits on CRLFCRLF and decodes the remainder, so it needs a
+// Content-Length-delimited body. net/http auto-chunks once a response exceeds
+// its ~2KB write buffer (~25 entries here), which that parser can't decode — so
+// marshal first and set Content-Length explicitly to guarantee no chunking at
+// any list size.
 func (b *NginxBridge) handleClamExcludes(w http.ResponseWriter, r *http.Request) {
 	if !b.checkToken(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -2155,8 +2163,14 @@ func (b *NginxBridge) handleClamExcludes(w http.ResponseWriter, r *http.Request)
 			items = append(items, e)
 		}
 	}
+	buf, err := json.Marshal(map[string]any{"entries": items})
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"entries": items})
+	w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
+	_, _ = w.Write(buf)
 }
 
 // handleHTTP3Config returns the per-vhost HTTP/3 opt-in list. Polled by
