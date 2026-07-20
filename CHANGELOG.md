@@ -18,22 +18,23 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
-- **Per-vhost ClamAV upload-scan toggle + global scan-default (opt-in rollout).**
+- **Per-vhost ClamAV upload-scan toggle + global scan-default.**
   ClamAV upload scanning is now governed by a global policy `CLAM_SCAN_DEFAULT`
-  (**default OFF**) plus a per-vhost override, mirroring the WAF/Challenge
+  (**default ON**) plus a per-vhost override, mirroring the WAF/Challenge
   per-vhost model: effective per host = `CLAMD_ENABLED && (CLAM_SCAN_DEFAULT XOR
-  host-in-override)`. A fresh deploy scans nothing until vhosts are opted in one
-  by one (gradual burn-in) or the whole server is flipped on. Controls:
+  host-in-override)`. The async (notify-only) scanner has run fleet-wide for
+  months, so scanning stays on by upgrade and the override list is an OPT-OUT
+  set (exempt a noisy/heavy vhost); set `CLAM_SCAN_DEFAULT = 0` to disable
+  server-wide, after which the override list becomes an opt-IN set. Controls:
   `cfm clam scan on|off` (global), `cfm clam override add|remove|list <host>` and
   the mirror `cfm webtop clam override …` (per-vhost). The override API
   (`/api/v1/clam/override/{list,add,remove}`) reuses the identical scoped-vs-admin
   auth as the WAF/Challenge excludes, so a scoped cPanel token can toggle only its
   own vhost. The edge (`cfm_clamav.lua`) reads the global default from the rendered
   config and the override set from the bridge (`/nginx/clam/overrides`, 10s cache),
-  and cheap-exits a scan-off vhost before any body read/spool — so scan-off costs
-  nothing on the upload path. **Migration:** because the default is OFF, an install
-  that previously scanned every upload (`CLAMD_ENABLED=1`) must set
-  `CLAM_SCAN_DEFAULT = 1` after upgrade to keep scanning server-wide.
+  and cheap-exits an opted-out vhost before any body read/spool — so scan-off costs
+  nothing on the upload path. Scanning here is async/notify-only (non-blocking);
+  inline blocking remains a separate future knob (will default OFF).
 
 ### Security
 - **WAF upload rules: catch multi-digit `.phpNN` (MultiPHP handler) extensions.**

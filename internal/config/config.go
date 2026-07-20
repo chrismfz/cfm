@@ -50,7 +50,7 @@ type SSLCollectorSockConfig struct {
 
 type ClamConfig struct {
 	Enabled          bool          // CLAMD_ENABLED (pipeline/infra: manager runs, clamd wired)
-	ScanDefault      bool          // CLAM_SCAN_DEFAULT (global scanning POLICY; default OFF). Effective per host = Enabled && (ScanDefault XOR host-in-override). Deploy scan-off; opt vhosts in gradually, or flip this on server-wide.
+	ScanDefault      bool          // CLAM_SCAN_DEFAULT (global scanning POLICY; default ON — the async notify-only scanner has run fleet-wide for months). Effective per host = Enabled && (ScanDefault XOR host-in-override). With the default, the override list is an OPT-OUT set; set CLAM_SCAN_DEFAULT = 0 to disable server-wide.
 	NginxHookEnabled bool          // CLAMD_NGINX_HOOK_ENABLED (default true; controls whether cfm_clamav.lua intercepts uploads)
 	Network          string        // CLAMD_NETWORK (unix|tcp)
 	Address          string        // CLAMD_SOCKET or 127.0.0.1:3310
@@ -596,6 +596,11 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 	// Clam pipeline knobs that default to true: ParseCFMConf only flips
 	// them when the key is present, so initialise here.
 	cfg.Clam.NginxHookEnabled = true
+	// CLAM_SCAN_DEFAULT defaults ON: the async (notify-only) scanner has run
+	// fleet-wide for months, so an absent key must preserve that — not silently
+	// stop scanning on upgrade. Operators opt individual vhosts OUT via the
+	// per-vhost override; set CLAM_SCAN_DEFAULT = 0 to disable server-wide.
+	cfg.Clam.ScanDefault = true
 	outboundDNSDeprecatedSeen := false
 	lineNo := 0
 	for s.Scan() {

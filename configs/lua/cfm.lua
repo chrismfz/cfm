@@ -276,7 +276,9 @@ if clamav_ok then
       transform = function(v)
         if type(v) ~= "table" then error("did not return a table") end
         -- enabled fails SAFE to true (upgrade lag must not silently disable the
-        -- hook); scan_default fails SAFE to false (deploy default is scan-off).
+        -- hook); scan_default fails SAFE to false — if the rendered config is
+        -- missing/corrupt we do NOT scan (conservative in an unknown state; the
+        -- ON deploy default lives in the Go config, not this degraded fallback).
         return { enabled = (v.enabled ~= false), scan_default = (v.scan_default == true) }
       end,
     })
