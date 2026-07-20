@@ -1116,6 +1116,10 @@ func runDaemon(args []string) {
 		} else {
 			logging.LogfCLAM("[clam] cfm_clamav_config.lua written path=%s enabled=%v scan_default=%v", clamavLuaConfigPath, hookEnabled, cfg.Clam.ScanDefault)
 		}
+		// Mirror the same policy into the webdetector package so the
+		// vhost-controls API reports the effective per-vhost scan state
+		// consistently with what the edge enforces.
+		webdet.SetClamScanPolicy(hookEnabled, cfg.Clam.ScanDefault)
 
 		for _, ln := range cfg.Summary() {
 			logging.Logf("[config] %s", ln)

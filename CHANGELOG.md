@@ -35,6 +35,16 @@ back-filled here — see the git/PR history for that period.
   and cheap-exits an opted-out vhost before any body read/spool — so scan-off costs
   nothing on the upload path. Scanning here is async/notify-only (non-blocking);
   inline blocking remains a separate future knob (will default OFF).
+- **cfm-admin vhost-controls: ClamAV scan column.** The per-vhost controls grid
+  (`/cfm-admin` → Controls) gains a **Clam** column alongside Challenge/WAF/HTTP3,
+  a **Clam OFF** quick-filter chip and sort key. Each row shows the effective scan
+  state (`ON / SCANNING`, `OFF / NOT SCANNED`, or `OFF / GLOBALLY OFF` when ClamAV
+  is disabled), computed the same way the edge decides:
+  `globallyEnabled && (CLAM_SCAN_DEFAULT XOR override)`. Clicking flips the vhost's
+  override via the scoped `/api/v1/clam/override/*` API — so a scoped cPanel user
+  can toggle scanning for their own vhost from the UI. The API mirrors the policy
+  into the daemon on every config reload, so the grid stays consistent with what
+  the edge enforces.
 
 ### Security
 - **WAF upload rules: catch multi-digit `.phpNN` (MultiPHP handler) extensions.**
