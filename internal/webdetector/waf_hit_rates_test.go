@@ -201,11 +201,11 @@ func TestHandleWAFHitRates_Smoke(t *testing.T) {
 // TestHitRatePromotionHint covers the boundary mapping directly.
 func TestHitRatePromotionHint(t *testing.T) {
 	cases := []struct {
-		name       string
-		ratePct    float64
-		hits       int
-		inspected  int
-		want       string
+		name      string
+		ratePct   float64
+		hits      int
+		inspected int
+		want      string
 	}{
 		{"no inspections", 0, 0, 0, "n_a"},
 		{"silent with inspections", 0, 0, 1000, "silent"},

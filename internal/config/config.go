@@ -49,7 +49,8 @@ type SSLCollectorSockConfig struct {
 }
 
 type ClamConfig struct {
-	Enabled          bool          // CLAMD_ENABLED
+	Enabled          bool          // CLAMD_ENABLED (pipeline/infra: manager runs, clamd wired)
+	ScanDefault      bool          // CLAM_SCAN_DEFAULT (global scanning POLICY; default OFF). Effective per host = Enabled && (ScanDefault XOR host-in-override). Deploy scan-off; opt vhosts in gradually, or flip this on server-wide.
 	NginxHookEnabled bool          // CLAMD_NGINX_HOOK_ENABLED (default true; controls whether cfm_clamav.lua intercepts uploads)
 	Network          string        // CLAMD_NETWORK (unix|tcp)
 	Address          string        // CLAMD_SOCKET or 127.0.0.1:3310
@@ -946,6 +947,8 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 
 		case "CLAMD_ENABLED":
 			cfg.Clam.Enabled = parseBool(val)
+		case "CLAM_SCAN_DEFAULT":
+			cfg.Clam.ScanDefault = parseBool(val)
 		case "CLAMD_NGINX_HOOK_ENABLED":
 			cfg.Clam.NginxHookEnabled = parseBool(val)
 		case "CLAMD_NETWORK":

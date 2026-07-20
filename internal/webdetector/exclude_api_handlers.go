@@ -245,8 +245,8 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 // so a scoped cPanel token can toggle only its own vhost. HOST type only — upload
 // scanning is a whole-vhost on/off, there is no per-path/per-rule clam exclude.
 
-// GET /api/v1/clam/exclude/list
-func (e *Engine) handleClamExcludeList(w http.ResponseWriter, r *http.Request) {
+// GET /api/v1/clam/override/list
+func (e *Engine) handleClamOverrideList(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
@@ -255,17 +255,17 @@ func (e *Engine) handleClamExcludeList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := vhostScopeFromContext(r.Context())
-	writeJSON(w, http.StatusOK, filterExcludeListForScope(e.ClamExcludeList(), scope))
+	writeJSON(w, http.StatusOK, filterExcludeListForScope(e.ClamOverrideList(), scope))
 }
 
-// POST /api/v1/clam/exclude/add?type=host&value=example.com
-func (e *Engine) handleClamExcludeAdd(w http.ResponseWriter, r *http.Request) {
+// POST /api/v1/clam/override/add?type=host&value=example.com
+func (e *Engine) handleClamOverrideAdd(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
 	if typ != "host" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clam exclude supports type=host only"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clam override supports type=host only"})
 		return
 	}
 	scope := vhostScopeFromContext(r.Context())
@@ -277,21 +277,21 @@ func (e *Engine) handleClamExcludeAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
 	}
-	if ok := e.ClamExcludeAdd(typ, value, scope); !ok {
+	if ok := e.ClamOverrideAdd(typ, value, scope); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// POST /api/v1/clam/exclude/remove?type=host&value=example.com
-func (e *Engine) handleClamExcludeRemove(w http.ResponseWriter, r *http.Request) {
+// POST /api/v1/clam/override/remove?type=host&value=example.com
+func (e *Engine) handleClamOverrideRemove(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
 	if typ != "host" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clam exclude supports type=host only"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clam override supports type=host only"})
 		return
 	}
 	scope := vhostScopeFromContext(r.Context())
@@ -303,7 +303,7 @@ func (e *Engine) handleClamExcludeRemove(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
 	}
-	if ok := e.ClamExcludeRemove(typ, value, scope); !ok {
+	if ok := e.ClamOverrideRemove(typ, value, scope); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
 		return
 	}

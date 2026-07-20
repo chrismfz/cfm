@@ -1,9 +1,9 @@
 package webdetector
 
 import (
+	"cfm/internal/clihttp"
 	"encoding/json"
 	"fmt"
-	"cfm/internal/clihttp"
 	"net/url"
 	"os"
 	"strconv"
@@ -227,7 +227,6 @@ func runHistoryTruncate(baseURL string, args []string) error {
 	return nil
 }
 
-
 func runHistoryWAFByRule(baseURL string, args []string) error {
 	host, _, _, hours := parseHistoryFilters(args)
 	u, _ := url.Parse(strings.TrimRight(baseURL, "/") + "/api/v1/webdet/history/waf-by-rule")
@@ -312,4 +311,3 @@ func runHistoryVhostOverview(baseURL string, args []string) error {
 	}
 	return nil
 }
-

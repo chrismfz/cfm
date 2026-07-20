@@ -53,15 +53,15 @@ const (
 // avoid RFC3339 parsing. Go callers use the time.Time fields; the unix
 // mirrors are populated automatically by Set() and on reload from disk.
 type UAEmergencyRule struct {
-	UA             string    `json:"ua"`              // normalized UA key
-	Action         string    `json:"action"`          // throttle | block
-	CreatedAt      time.Time `json:"created_at"`      // wall clock
-	ExpiresAt      time.Time `json:"expires_at"`      // wall clock
-	CreatedAtUnix  int64     `json:"created_at_unix"` // for Lua consumers
-	ExpiresAtUnix  int64     `json:"expires_at_unix"` // for Lua consumers
-	CreatedBy      string    `json:"created_by"`      // token name / "admin" / "scoped:foo"
-	Reason         string    `json:"reason,omitempty"`
-	Hits           int64     `json:"hits"` // incremented by enforcement layer via IncHits
+	UA            string    `json:"ua"`              // normalized UA key
+	Action        string    `json:"action"`          // throttle | block
+	CreatedAt     time.Time `json:"created_at"`      // wall clock
+	ExpiresAt     time.Time `json:"expires_at"`      // wall clock
+	CreatedAtUnix int64     `json:"created_at_unix"` // for Lua consumers
+	ExpiresAtUnix int64     `json:"expires_at_unix"` // for Lua consumers
+	CreatedBy     string    `json:"created_by"`      // token name / "admin" / "scoped:foo"
+	Reason        string    `json:"reason,omitempty"`
+	Hits          int64     `json:"hits"` // incremented by enforcement layer via IncHits
 }
 
 // UAEmergencyStore holds the active rules and writes them to disk so the

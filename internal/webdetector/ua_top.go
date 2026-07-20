@@ -104,12 +104,12 @@ func (e *Engine) UATop(limit int) []UATopRow {
 
 	// Aggregate across all hosts and buckets.
 	type agg struct {
-		reqs   int
-		ips    map[string]struct{}
-		hosts  map[string]struct{}
-		first  time.Time
-		last   time.Time
-		seen   bool
+		reqs  int
+		ips   map[string]struct{}
+		hosts map[string]struct{}
+		first time.Time
+		last  time.Time
+		seen  bool
 	}
 	tally := make(map[string]*agg)
 

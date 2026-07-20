@@ -73,11 +73,12 @@ func runWafWebTop(baseURL string, args []string) error {
 // <0.01% gate. Operators read this before promoting any rule's mode.
 //
 // Usage:
-//   cfm webtop waf hit-rates                        # last 24h, all hosts
-//   cfm webtop waf hit-rates --hours 168            # last week
-//   cfm webtop waf hit-rates --host example.com     # single vhost
-//   cfm webtop waf hit-rates --json                 # machine-readable
-//   cfm webtop waf hit-rates --hint ok_to_promote   # filter by promotion hint
+//
+//	cfm webtop waf hit-rates                        # last 24h, all hosts
+//	cfm webtop waf hit-rates --hours 168            # last week
+//	cfm webtop waf hit-rates --host example.com     # single vhost
+//	cfm webtop waf hit-rates --json                 # machine-readable
+//	cfm webtop waf hit-rates --hint ok_to_promote   # filter by promotion hint
 func runWAFHitRates(baseURL string, args []string) error {
 	hours := 24
 	host := ""
@@ -160,8 +161,9 @@ func runWAFHitRates(baseURL string, args []string) error {
 // using it in (PR B) per-vhost exclusions.
 //
 // Usage:
-//   cfm webtop waf rules           # all rules, grouped by family
-//   cfm webtop waf rules --json    # JSON for scripts
+//
+//	cfm webtop waf rules           # all rules, grouped by family
+//	cfm webtop waf rules --json    # JSON for scripts
 func runWAFRules(baseURL string, args []string) error {
 	wantJSON := false
 	for _, a := range args {
@@ -204,7 +206,6 @@ func runWAFRules(baseURL string, args []string) error {
 	}
 	return nil
 }
-
 
 type wafEngineSummaryCLI struct {
 	FromUnix      int64 `json:"from_unix"`

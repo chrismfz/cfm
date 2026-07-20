@@ -223,7 +223,7 @@ type Config struct {
 	// Dynamic excludes persisted on disk (JSON) and editable via CLI/API.
 	ChallengeExcludeStorePath string        // CHALLENGE_EXCLUDE_STORE_PATH
 	WAFExcludeStorePath       string        // WAF_EXCLUDE_STORE_PATH
-	ClamExcludeStorePath      string        // CLAM_EXCLUDE_STORE_PATH (per-vhost ClamAV upload-scan opt-out)
+	ClamScanOverrideStorePath string        // CLAM_SCAN_OVERRIDE_STORE_PATH (per-vhost ClamAV upload-scan opt-out)
 	HTTP3OverridesStorePath   string        // HTTP3_OVERRIDES_STORE_PATH (per-vhost H3 opt-in)
 	TrafficRulesStorePath     string        // TRAFFIC_RULES_STORE_PATH
 	IPScoreRules              []IPScoreRule // IP_SCORE_RULES = block:0.90,challenge:0.75
@@ -264,8 +264,8 @@ func (c *Config) FillDefaults() {
 	if c.WAFExcludeStorePath == "" {
 		c.WAFExcludeStorePath = "/var/lib/cfm/webdetector_waf_excludes.json"
 	}
-	if c.ClamExcludeStorePath == "" {
-		c.ClamExcludeStorePath = "/var/lib/cfm/webdetector_clam_excludes.json"
+	if c.ClamScanOverrideStorePath == "" {
+		c.ClamScanOverrideStorePath = "/var/lib/cfm/webdetector_clam_overrides.json"
 	}
 	if c.HTTP3OverridesStorePath == "" {
 		c.HTTP3OverridesStorePath = "/var/lib/cfm/webdetector_http3_overrides.json"

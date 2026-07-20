@@ -41,8 +41,8 @@ type TrafficRuleMatch struct {
 	PathAny   []string `json:"path_any,omitempty"`
 	Methods   []string `json:"methods,omitempty"`
 	// Query-string guards (both optional, evaluated only when set)
-	HasQS    bool   `json:"has_qs,omitempty"`    // true → rule only fires when QS is present
-	QSNotRx  string `json:"qs_not_rx,omitempty"` // if set, pass-through when QS matches this pattern
+	HasQS   bool   `json:"has_qs,omitempty"`    // true → rule only fires when QS is present
+	QSNotRx string `json:"qs_not_rx,omitempty"` // if set, pass-through when QS matches this pattern
 
 	qsNotRxCompiled *regexp.Regexp // pre-compiled from QSNotRx; set by normalizeTrafficRule
 }
@@ -65,12 +65,12 @@ type TrafficRule struct {
 }
 
 type TrafficRuleEvalInput struct {
-	Host    string `json:"host"`
-	IP      string `json:"ip,omitempty"`
-	UA      string `json:"ua,omitempty"`
-	Path    string `json:"path,omitempty"`
-	Method  string `json:"method,omitempty"`
-	Country string `json:"country,omitempty"`
+	Host        string `json:"host"`
+	IP          string `json:"ip,omitempty"`
+	UA          string `json:"ua,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Method      string `json:"method,omitempty"`
+	Country     string `json:"country,omitempty"`
 	QueryString string `json:"qs,omitempty"` // raw query string, no leading '?'
 }
 
@@ -299,14 +299,14 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 	}
 	r.Match.Methods = methods
 
-if rx := strings.TrimSpace(r.Match.QSNotRx); rx != "" {
-	compiled, err := regexp.Compile("(?i)" + rx)
-	if err != nil {
-		return TrafficRule{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
+	if rx := strings.TrimSpace(r.Match.QSNotRx); rx != "" {
+		compiled, err := regexp.Compile("(?i)" + rx)
+		if err != nil {
+			return TrafficRule{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
+		}
+		r.Match.QSNotRx = rx
+		r.Match.qsNotRxCompiled = compiled
 	}
-	r.Match.QSNotRx = rx
-	r.Match.qsNotRxCompiled = compiled
-}
 
 	r.Action.Type = strings.ToLower(strings.TrimSpace(r.Action.Type))
 	r.Action.Profile = strings.TrimSpace(r.Action.Profile)
@@ -424,9 +424,6 @@ func ruleHostMatch(vhosts []string, host string) bool {
 	return false
 }
 
-
-
-
 func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) bool {
 	if len(m.CountryIn) > 0 {
 		ok := false
@@ -503,12 +500,6 @@ func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) 
 	}
 	return true
 }
-
-
-
-
-
-
 
 // wildcardMatch matches pattern with '*' and '?' against s.
 // Unlike filepath.Match, '*' can match '/' too (needed for UA/path matching).

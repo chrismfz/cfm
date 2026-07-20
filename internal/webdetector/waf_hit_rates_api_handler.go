@@ -17,8 +17,8 @@ type RuleHitRate struct {
 	ReasonFamily  string  `json:"reason_family"`
 	DefaultMode   string  `json:"default_mode"`
 	Hits          int     `json:"hits"`
-	RatePct       float64 `json:"rate_pct"`        // hits / inspected * 100
-	PromotionHint string  `json:"promotion_hint"`  // ok_to_promote | silent | review | noisy | n_a
+	RatePct       float64 `json:"rate_pct"`       // hits / inspected * 100
+	PromotionHint string  `json:"promotion_hint"` // ok_to_promote | silent | review | noisy | n_a
 }
 
 // HitRatesResult is the /api/v1/waf/hit-rates response envelope.
@@ -34,11 +34,11 @@ type HitRatesResult struct {
 // docs/waf.md ("<0.01% FP rate before promoting"); over time these may
 // move into config.
 //
-//   ok_to_promote — fired but at <0.01% (clean signal, ready to promote)
-//   silent        — never fired in window (verify rule isn't broken)
-//   review        — fired between 0.01% and 1% (likely some FP, investigate)
-//   noisy         — fired at >=1% (FP-heavy, demote or tighten)
-//   n_a           — no inspection data yet
+//	ok_to_promote — fired but at <0.01% (clean signal, ready to promote)
+//	silent        — never fired in window (verify rule isn't broken)
+//	review        — fired between 0.01% and 1% (likely some FP, investigate)
+//	noisy         — fired at >=1% (FP-heavy, demote or tighten)
+//	n_a           — no inspection data yet
 func hitRatePromotionHint(ratePct float64, hits, inspected int) string {
 	if inspected == 0 {
 		return "n_a"

@@ -114,10 +114,10 @@ type NginxBridge struct {
 	// ListWAFExcludes returns current dynamic WAF exclude entries.
 	ListWAFExcludes func() []excludeEntry
 
-	// ListClamExcludes returns the per-vhost ClamAV upload-scan opt-out list
+	// ListClamScanOverrides returns the per-vhost ClamAV upload-scan opt-out list
 	// (host entries). Polled by configs/lua/cfm_clamav.lua so the edge upload
 	// hook can skip excluded vhosts.
-	ListClamExcludes func() []excludeEntry
+	ListClamScanOverrides func() []excludeEntry
 
 	// ListHTTP3Hosts returns the per-vhost HTTP/3 opt-in list. The Lua
 	// worker polls this every ~60s to refresh its per-worker cache and
@@ -1383,7 +1383,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/waf/excluded", b.instrument("/nginx/waf/excluded", b.handleWAFExcluded))
 	mux.HandleFunc("/nginx/waf/excluded/meta", b.instrument("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta))
 	mux.HandleFunc("/nginx/waf/excludes", b.instrument("/nginx/waf/excludes", b.handleWAFExcludes))
-	mux.HandleFunc("/nginx/clam/excludes", b.instrument("/nginx/clam/excludes", b.handleClamExcludes))
+	mux.HandleFunc("/nginx/clam/overrides", b.instrument("/nginx/clam/overrides", b.handleClamExcludes))
 	mux.HandleFunc("/nginx/h3/config", b.instrument("/nginx/h3/config", b.handleHTTP3Config))
 	mux.HandleFunc("/nginx/waf/stats", b.instrument("/nginx/waf/stats", b.handleWAFStats))
 	mux.HandleFunc("/nginx/snapshot", b.instrument("/nginx/snapshot", b.handleSnapshot))
@@ -2147,8 +2147,8 @@ func (b *NginxBridge) handleClamExcludes(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	items := make([]excludeEntry, 0)
-	if b.ListClamExcludes != nil {
-		for _, e := range b.ListClamExcludes() {
+	if b.ListClamScanOverrides != nil {
+		for _, e := range b.ListClamScanOverrides() {
 			if strings.TrimSpace(e.Type) == "" || strings.TrimSpace(e.Value) == "" {
 				continue
 			}

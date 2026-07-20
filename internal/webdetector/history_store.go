@@ -67,10 +67,10 @@ type WAFRuleHit struct {
 // VhostOverview is the combined per-vhost security summary for the
 // "Security Overview" panel tab.
 type VhostOverview struct {
-	Host         string       `json:"host"`
-	Hours        int          `json:"hours"`
-	FromUnix     int64        `json:"from_unix"`
-	ToUnix       int64        `json:"to_unix"`
+	Host     string `json:"host"`
+	Hours    int    `json:"hours"`
+	FromUnix int64  `json:"from_unix"`
+	ToUnix   int64  `json:"to_unix"`
 	// Challenge stats
 	ChallengeIssued int     `json:"challenge_issued"`
 	ChallengeSolved int     `json:"challenge_solved"`
@@ -545,7 +545,7 @@ GROUP BY rid`
 }
 
 // WAFInspected returns the total inspection count over the given window.
-// host="" returns the global aggregate (the rows where host=''); a non-empty
+// host="" returns the global aggregate (the rows where host=”); a non-empty
 // host filters to that vhost's per-host counts.
 //
 // Window is [now - hours*3600, now]; the table stores per-hour buckets so

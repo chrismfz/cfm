@@ -74,9 +74,9 @@ func TestJSStringLiteral_NoScriptBreakout(t *testing.T) {
 // runtime.
 func TestJSStringLiteral_EscapesAreValidJSSyntax(t *testing.T) {
 	cases := map[string]string{
-		"<": `\u003c`,
-		">": `\u003e`,
-		"&": `\u0026`,
+		"<":      `\u003c`,
+		">":      `\u003e`,
+		"&":      `\u0026`,
 		"\u2028": `\u2028`,
 		"\u2029": `\u2029`,
 	}
