@@ -1099,10 +1099,10 @@ func runDaemon(args []string) {
 		// next worker init / cycle; no SIGHUP needed.
 		hookEnabled := cfg.Clam.Enabled && cfg.Clam.NginxHookEnabled
 		const clamavLuaConfigPath = "/var/lib/cfm/lua/cfm_clamav_config.lua"
-		if err := sslcollector.WriteClamavLuaConfig(clamavLuaConfigPath, hookEnabled, cfmGID); err != nil {
+		if err := sslcollector.WriteClamavLuaConfig(clamavLuaConfigPath, hookEnabled, cfg.Clam.ScanDefault, cfmGID); err != nil {
 			logging.LogfCLAM("[clam] cfm_clamav_config.lua write failed path=%s err=%v", clamavLuaConfigPath, err)
 		} else {
-			logging.LogfCLAM("[clam] cfm_clamav_config.lua written path=%s enabled=%v", clamavLuaConfigPath, hookEnabled)
+			logging.LogfCLAM("[clam] cfm_clamav_config.lua written path=%s enabled=%v scan_default=%v", clamavLuaConfigPath, hookEnabled, cfg.Clam.ScanDefault)
 		}
 
 		for _, ln := range cfg.Summary() {

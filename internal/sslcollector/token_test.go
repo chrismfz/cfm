@@ -126,7 +126,7 @@ func TestWriteClamavLuaConfigContent(t *testing.T) {
 	luaPath := filepath.Join(dir, "cfm_clamav_config.lua")
 
 	// enabled = true
-	if err := WriteClamavLuaConfig(luaPath, true, 0); err != nil {
+	if err := WriteClamavLuaConfig(luaPath, true, false, 0); err != nil {
 		t.Fatalf("WriteClamavLuaConfig(true): %v", err)
 	}
 	data, err := os.ReadFile(luaPath)
@@ -145,7 +145,7 @@ func TestWriteClamavLuaConfigContent(t *testing.T) {
 	}
 
 	// enabled = false (atomic overwrite)
-	if err := WriteClamavLuaConfig(luaPath, false, 0); err != nil {
+	if err := WriteClamavLuaConfig(luaPath, false, false, 0); err != nil {
 		t.Fatalf("WriteClamavLuaConfig(false): %v", err)
 	}
 	data, err = os.ReadFile(luaPath)
