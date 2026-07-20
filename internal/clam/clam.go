@@ -388,14 +388,17 @@ func (m *Manager) process(job Job) {
 	}
 
 	if fi.IsDir() {
+		// Directory jobs don't occur in the async upload path (uploads are
+		// single temp files) and ScanPath swallows per-file transport errors
+		// into results (returning nil), so its error is a walk/stat signal, not
+		// clamd reachability — don't feed the breaker from here. The single-file
+		// path below and the health prober drive it.
 		results, err := m.client.ScanPath(job.Path)
 		if err != nil {
-			m.recordScan(false, err.Error())
 			logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
 				job.IP, job.Host, job.URI, job.Reason, err)
 			return
 		}
-		m.recordScan(true, "")
 		for i := range results {
 			logResult(job, &results[i])
 		}
