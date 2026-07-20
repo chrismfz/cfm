@@ -46,7 +46,12 @@ func (e *Engine) handleClamHealth(w http.ResponseWriter, r *http.Request) {
 	_, scanDefault := clamScanPolicy()
 	resp := clamHealthResponse{GlobalScanDefault: scanDefault}
 	if e != nil && e.nginxBridge != nil {
-		if snap, ok := e.nginxBridge.ClamHealth(); ok {
+		// available == the scanner is actually running and reporting live.
+		// snap.Enabled is false once the manager is stopped, so a disabled
+		// clam (whose stale manager pointer the bridge still holds — the disable
+		// path never clears it) reports available=false → the page shows a clean
+		// "not running" state instead of frozen counters.
+		if snap, ok := e.nginxBridge.ClamHealth(); ok && snap.Enabled {
 			resp.Available = true
 			resp.Enabled = snap.Enabled
 			resp.BreakerOpen = snap.BreakerOpen

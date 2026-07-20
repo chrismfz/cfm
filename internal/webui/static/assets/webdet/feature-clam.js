@@ -28,10 +28,11 @@ export const clamMixin = {
     },
     // Resolved reachability badge for the status card.
     clamStatusBadge() {
+      // available is true only when the scanner is running and reporting, so the
+      // only live sub-states are reachable (OK) vs breaker-open (DOWN).
       const h = this.clamHealth;
       if (!h || !h.available) return { label: "not running", cls: "" };
       if (h.breaker_open) return { label: "DOWN", cls: "danger" };
-      if (!h.enabled) return { label: "disabled", cls: "warn" };
       return { label: "OK", cls: "ok" };
     },
   },
