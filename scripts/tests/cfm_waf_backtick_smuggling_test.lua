@@ -111,6 +111,29 @@ clean(get("note=get well soon"),                "verb word without request line"
 clean(post("note=connect to http/2 is supported"), "prose: connect to http/2")
 clean(post("body=options for http/2 and copy of http/1.1 spec"), "prose: options/copy + http")
 
+-- Pasted-access-log carve-out [FP 2026-07-21]: combined/common-log lines quote
+-- a literal request line ("GET /x HTTP/1.1" 200 26307). A WHMCS ticket reply
+-- carrying such lines got challenged (and the 1MB multipart POST could not be
+-- replayed, losing the reply). The quoted-line + 3-digit-status fingerprint is
+-- exempted; a bare smuggled line still fires.
+local LOG_LINES = table.concat({
+  'message=Ο crawler περνάει κανονικά, δείτε τα logs:\r\n',
+  '173.252.82.52 - - [21/Jul/2026:11:36:13 +0300] "GET /2026/07/20/charopo-xerizothike-dentro-toys-anemoys-ki-epese-se-aytokinito/ HTTP/1.1" 200 26307 "-" "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"\r\n',
+  '69.63.184.27 - - [21/Jul/2026:11:36:15 +0300] "GET /2026/07/20/charopo-xerizothike-dentro-toys-anemoys-ki-epese-se-aytokinito/ HTTP/1.1" 200 26307 "-" "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"\r\n',
+})
+clean(post(LOG_LINES), "pasted access-log lines in ticket body (quoted + status)")
+clean(post('log=1.2.3.4 - - [21/Jul/2026] "POST /wp-login.php HTTP/1.1" 403 199 "-" "curl/8.0"'),
+  "single pasted log line, POST + 403")
+clean(post('log="HEAD /健康 HTTP/2" 204 -'), "pasted log line, HTTP/2 + 204")
+-- The exemption must NOT weaken the attack shape:
+fires(post("payload=GET /admin HTTP/1.1"), "bare smuggled line still fires", "WAF_HTTP_SMUGGLING:SMUG_GET")
+fires(post('x="GET /admin HTTP/1.1" and more'), "quoted line WITHOUT status still fires", "WAF_HTTP_SMUGGLING:SMUG_GET")
+fires(post('x=GET /admin HTTP/1.1" 200'), "status without leading quote still fires", "WAF_HTTP_SMUGGLING:SMUG_GET")
+fires(post('x="GET /admin HTTP/1.1" 20000 body'), "5-digit trailer is not a status — still fires", "WAF_HTTP_SMUGGLING:SMUG_GET")
+-- Mixed: one exempt log line PLUS one bare smuggled line — the bare one wins.
+fires(post(LOG_LINES .. "&inject=DELETE /etc HTTP/1.1"),
+  "log paste must not mask a bare smuggled line elsewhere", "WAF_HTTP_SMUGGLING:SMUG_DELETE")
+
 if fails > 0 then
   io.stderr:write(("cfm_waf backtick/smuggling tests: %d FAILED\n"):format(fails))
   os.exit(1)

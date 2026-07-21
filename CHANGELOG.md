@@ -17,6 +17,31 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **Challenge POST replay now covers multipart forms.** The challenge flow has
+  long replayed a challenged POST's body after the challenge solves (that is
+  what saved forum posts) — but only for urlencoded/json/text bodies, so
+  ticket/forum forms that submit `multipart/form-data` (they carry a file
+  field, used or not) still lost the user's text: the same WHMCS incident's
+  reply fell through to the challenge server's `note=no_replay` fallback.
+  `multipart/form-data` joined the replay allowlist; replay is byte-identical
+  (the stored Content-Type keeps the boundary). The 64KB
+  `post_resume_max_len` cap is unchanged — a text-only reply fits, a real
+  attachment falls back to the previous behaviour — so shared-dict memory
+  posture is untouched (tunable via `CFM_POST_RESUME_MAX_LEN`). Guarded by a
+  source-level test asserting the allowlist and both size caps.
+- **WAF rule 606 (`WAF_HTTP_SMUGGLING`): pasted access-log lines no longer
+  challenged.** Support-ticket replies / forum posts / CMS articles that quote
+  combined-log lines (`... "GET /path HTTP/1.1" 200 26307 ...`) carry a literal
+  request line in the body and tripped the smuggling detector — observed on a
+  WHMCS ticket reply, where the challenge also lost the (non-replayable ~1MB
+  multipart) reply. The detector now exempts the unambiguous access-log
+  fingerprint — the request line wrapped in double quotes AND immediately
+  followed by a 3-digit status — and only that: a bare smuggled line, a quoted
+  line without a status, or a status without the quote still fire, and a log
+  paste cannot mask a separate bare smuggled line elsewhere in the request
+  (all pinned by tests). Detector-level fix; the rule stays at challenge.
+
 ### Changed
 - **cfm-admin: API tokens moved to their own page + nav polish.** Scoped-token
   issuance/revocation left the Vhost-controls page for a dedicated admin-only

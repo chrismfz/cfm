@@ -2792,8 +2792,26 @@ function _M.detect_http_smuggling(args, body)
       -- smuggled line takes inside a param). This rejects English prose such
       -- as "connect to http/2" / "options for http/2" where the middle token
       -- is a word, not a path — a genuine FP source at logonly. [review F12]
-      if sl:find("%f[%a]" .. verb .. "%s+/[^%s]*%s+http/%d") then
-        return "SMUG_" .. verb:upper()
+      local pat = "%f[%a]" .. verb .. "%s+/[^%s]*%s+http/%d"
+      local init = 1
+      while true do
+        local s_pos, e_pos = sl:find(pat, init)
+        if not s_pos then break end
+        -- Pasted-access-log carve-out [FP 2026-07-21]: support tickets, forum
+        -- posts and CMS articles routinely quote combined/common-log lines —
+        --   1.2.3.4 - - [21/Jul/2026:11:36:13 +0300] "GET /x HTTP/1.1" 200 26307
+        -- which IS a literal request line inside a body. The log fingerprint
+        -- is unambiguous: the line sits in double quotes AND is immediately
+        -- followed by a 3-digit status. Skip that occurrence only — a bare
+        -- smuggled line (the actual attack shape) has neither. Raw quotes
+        -- only (the FP surface is multipart/raw bodies); a %22-encoded paste
+        -- inside args still flags — extend here if that ever bites.
+        local quoted = s_pos > 1 and sl:sub(s_pos - 1, s_pos - 1) == '"'
+        local log_tail = sl:find('^[%d%.]*"%s+%d%d%d%f[%D]', e_pos + 1) ~= nil
+        if not (quoted and log_tail) then
+          return "SMUG_" .. verb:upper()
+        end
+        init = e_pos + 1
       end
     end
     return nil
