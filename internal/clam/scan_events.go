@@ -31,6 +31,7 @@ type ScanEvent struct {
 	Evidence   string // empty for a sig-ignored hit (nothing is quarantined)
 	SigIgnored bool   // verdict downgraded to log-only by the signature-trust layer
 	IgnoredBy  string // which config pattern / store entry downgraded it
+	Mode       string // how the verdict was handled: async | inline | inline_dryrun
 	When       time.Time
 }
 

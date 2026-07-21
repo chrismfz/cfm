@@ -31,6 +31,14 @@ type Config struct {
 	ScanScope string
 	// SigIgnore holds the baseline CLAM_SIG_IGNORE globs (see sigignore.go).
 	SigIgnore []string
+
+	// Inline (blocking) mode — see inline.go. ScanMode is the GLOBAL default
+	// ("async"|"inline"); the per-vhost flip lives edge-side (webdetector mode
+	// override store). InlineTimeout bounds one synchronous scan (default 3s);
+	// InlineDryRun scans inline but never blocks (burn-in).
+	ScanMode      string
+	InlineTimeout time.Duration
+	InlineDryRun  bool
 }
 
 type Client struct {
@@ -478,7 +486,7 @@ func (m *Manager) process(job Job) {
 		logf("[clam_scan] evidence kept path=%s ip=%s host=%s sig=%q",
 			dest, job.IP, job.Host, r.Signature)
 
-		m.safeNotifyInfected(job, r, dest)
+		m.safeNotifyInfected(job, r, dest, "async")
 
 		publishScanEvent(ScanEvent{
 			EventType: "clam_infected",
@@ -488,6 +496,7 @@ func (m *Manager) process(job Job) {
 			FileName:  jobFileName(job),
 			Signature: r.Signature,
 			Evidence:  dest,
+			Mode:      "async",
 			When:      time.Now(),
 		})
 		return
@@ -506,6 +515,7 @@ func (m *Manager) process(job Job) {
 			Signature:  r.Signature,
 			SigIgnored: true,
 			IgnoredBy:  sigIgnoredBy,
+			Mode:       "async",
 			When:       time.Now(),
 		})
 	}
@@ -532,14 +542,14 @@ func (m *Manager) safeNotifyUpload(job Job, r *Result) {
 	m.notifyUpload(job, r)
 }
 
-func (m *Manager) safeNotifyInfected(job Job, r *Result, evidencePath string) {
+func (m *Manager) safeNotifyInfected(job Job, r *Result, evidencePath, mode string) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			logf("[clam_notify] panic kind=CLAM/INFECTED ip=%s host=%s uri=%s err=%v",
 				job.IP, job.Host, job.URI, rec)
 		}
 	}()
-	m.notifyInfected(job, r, evidencePath)
+	m.notifyInfected(job, r, evidencePath, mode)
 }
 
 func (m *Manager) notifyUpload(job Job, r *Result) {
@@ -587,9 +597,14 @@ func (m *Manager) notifyUpload(job Job, r *Result) {
 	})
 }
 
-func (m *Manager) notifyInfected(job Job, r *Result, evidencePath string) {
+// mode records how the verdict was handled: "async" (notify-only pipeline),
+// "inline" (request blocked) or "inline_dryrun" (would have blocked).
+func (m *Manager) notifyInfected(job Job, r *Result, evidencePath, mode string) {
 	if m == nil || r == nil || !r.Infected {
 		return
+	}
+	if mode == "" {
+		mode = "async"
 	}
 
 	asnText, countryText, ptr := m.enrichIP(job.IP)

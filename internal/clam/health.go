@@ -45,6 +45,9 @@ type scanHealth struct {
 	queueDrops     atomic.Uint64
 	skippedScope   atomic.Uint64 // uploads not scanned: not an archive (CLAM_SCAN_SCOPE=archives)
 	sigIgnored     atomic.Uint64 // infected verdicts downgraded to log-only (signature-trust layer)
+
+	inlineBlocked    atomic.Uint64 // inline mode: uploads 403'd on an infected verdict
+	inlineDryRunHits atomic.Uint64 // inline DRY_RUN: infected verdicts that WOULD have blocked
 }
 
 // record folds one outcome (scan result or probe) into the breaker state and
@@ -88,6 +91,8 @@ func (h *scanHealth) isOpen() bool {
 type HealthSnapshot struct {
 	Enabled        bool
 	ScanScope      string // effective scope ("archives" gates; anything else is full coverage)
+	ScanMode       string // global default mode ("async" unless explicitly "inline")
+	InlineDryRun   bool
 	BreakerOpen    bool
 	DownSince      time.Time
 	ConsecFails    int
@@ -102,6 +107,9 @@ type HealthSnapshot struct {
 	QueueDrops     uint64
 	SkippedScope   uint64
 	SigIgnored     uint64
+
+	InlineBlocked    uint64
+	InlineDryRunHits uint64
 }
 
 // Health returns a snapshot of scanner reachability + counters. Cheap and
@@ -116,11 +124,17 @@ func (m *Manager) Health() HealthSnapshot {
 	if scope != ScanScopeArchives {
 		scope = ScanScopeAll
 	}
+	mode := "async"
+	if m.cfg.ScanMode == "inline" {
+		mode = "inline"
+	}
 	h.mu.Lock()
 	snap := HealthSnapshot{
-		Enabled:     m.Enabled(),
-		ScanScope:   scope,
-		BreakerOpen: h.breakerOpen,
+		Enabled:      m.Enabled(),
+		ScanScope:    scope,
+		ScanMode:     mode,
+		InlineDryRun: m.cfg.InlineDryRun,
+		BreakerOpen:  h.breakerOpen,
 		DownSince:   h.downSince,
 		ConsecFails: h.consecFails,
 		LastOK:      h.lastOK,
@@ -135,6 +149,8 @@ func (m *Manager) Health() HealthSnapshot {
 	snap.QueueDrops = h.queueDrops.Load()
 	snap.SkippedScope = h.skippedScope.Load()
 	snap.SigIgnored = h.sigIgnored.Load()
+	snap.InlineBlocked = h.inlineBlocked.Load()
+	snap.InlineDryRunHits = h.inlineDryRunHits.Load()
 	return snap
 }
 
