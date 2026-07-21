@@ -71,6 +71,7 @@ type HostProfile struct {
 	IsDirectAdmin            bool   `json:"is_directadmin"`                        // /usr/local/directadmin exists → DirectAdmin host
 	HasCloudLinuxLVE         bool   `json:"has_cloudlinux_lve"`                    // /proc/lve or loaded lve/kmodlve → CloudLinux LVE host
 	HasCageFS                bool   `json:"has_cagefs"`                            // /etc/cagefs or cagefsctl → CageFS host
+	CgroupV2Unified          bool   `json:"cgroup_v2_unified"`                     // /sys/fs/cgroup is pure unified cgroup v2 — CloudLinux LVE needs the v1 controllers, so this combination silently disables LVE limit enforcement
 	HasImunify360            bool   `json:"has_imunify360"`                        // Imunify360 service/package/path indicators
 	HasKernelCare            bool   `json:"has_kernelcare"`                        // KernelCare live-patching indicators
 	HasKsplice               bool   `json:"has_ksplice"`                           // Ksplice live-patching indicators
@@ -111,6 +112,7 @@ func DetectHostProfile() HostProfile {
 		IsDirectAdmin:          detectDirectAdmin(),
 		HasCloudLinuxLVE:       detectCloudLinuxLVE(),
 		HasCageFS:              detectCageFS(),
+		CgroupV2Unified:        detectCgroupV2Unified(),
 		HasImunify360:          detectImunify360(),
 		HasKernelCare:          detectKernelCare(),
 		HasKsplice:             detectKsplice(),
@@ -230,6 +232,17 @@ func detectCloudLinuxLVE() bool {
 
 func detectCageFS() bool {
 	return anyPathExists("/etc/cagefs", "/usr/sbin/cagefsctl")
+}
+
+// detectCgroupV2Unified reports whether the host booted into the pure
+// unified cgroup v2 hierarchy (systemd.unified_cgroup_hierarchy=1, the
+// modern-distro default). The root cgroup2 mount exposes cgroup.controllers
+// at its top level ONLY in pure-unified mode; legacy (v1) and hybrid modes
+// keep /sys/fs/cgroup as a tmpfs with per-controller subdirectories (hybrid
+// puts the v2 tree under /sys/fs/cgroup/unified). CloudLinux LVE needs the
+// v1 controllers, so pure-unified v2 is the mode that silently breaks it.
+func detectCgroupV2Unified() bool {
+	return anyPathExists("/sys/fs/cgroup/cgroup.controllers")
 }
 
 func detectImunify360() bool {

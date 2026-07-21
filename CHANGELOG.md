@@ -17,6 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **kernsec status: CloudLinux LVE vs. cgroup-mode advisory.** `cfm kernsec
+  status` now emits a `[CloudLinux LVE / cgroup mode]` section on CloudLinux
+  LVE / CageFS hosts and WARNs when the host is running the unified **cgroup
+  v2** hierarchy. LVE needs the cgroup v1 controllers; on pure-unified v2 it
+  cannot place processes into its cgroups, so per-tenant limits are silently
+  NOT enforced (`dmesg` fills with `os_resource_push … rc=-2` and panels /
+  LiteSpeed report bogus "resource limit reached"). The warning points at the
+  fix — add `systemd.unified_cgroup_hierarchy=0` to the kernel cmdline and
+  reboot. Read-only advisory: kernsec does not manage that operator/distro-owned
+  arg, it only surfaces the mismatch so it is caught in `status` instead of
+  after a reboot. New probe field `HostProfile.CgroupV2Unified`.
+
 ### Removed
 - **kernsec: dropped the `efi=disable_early_pci_dma` boot arg (`KSEC-BOOT-dma-001`,
   group `boot.dma`).** This Tier 1 arg cleared PCI bus-master DMA at
