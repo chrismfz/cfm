@@ -22,6 +22,7 @@ const ICONS = {
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/>',
   theme: '<path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/>',
   pulse: '<path d="M3 12h4l2.5-7 5 14 2.5-7h4"/>',
+  funnel: '<path d="M3 5h18l-7 8v5l-4 2v-7L3 5z"/>',
 };
 
 const MENU_GROUPS = [
@@ -39,6 +40,7 @@ const MENU_GROUPS = [
     { label: "Firewall", href: "/cfm-admin/firewall/", icon: "ban" },
     { label: "WAF engine", href: "/cfm-admin/webdetector/waf/", icon: "shield" },
     { label: "Vhost controls", href: "/cfm-admin/webdetector/controls/", icon: "sliders" },
+    { label: "Traffic rules", href: "/cfm-admin/webdetector/rules/", icon: "funnel" },
     { label: "ClamAV", href: "/cfm-admin/webdetector/clam/", icon: "bug" },
   ]},
   { title: "Services", items: [

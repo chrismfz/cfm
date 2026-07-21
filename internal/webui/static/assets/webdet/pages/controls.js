@@ -1,5 +1,5 @@
-// WebDetector / vhost controls: per-vhost protection toggles, traffic rules
-// with presets + simulation, scoped tokens and the security overview.
+// WebDetector / vhost controls: per-vhost protection toggles, scoped tokens
+// and the security overview. Traffic rules live on their own page (pages/rules.js).
 import "../../shared/constants.js";
 import "../../shared/auth-context.js";
 import "../../shared/auth-mode.js";

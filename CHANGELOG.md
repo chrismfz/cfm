@@ -17,6 +17,15 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **cfm-admin: Traffic Rules moved to their own page.** The Cloudflare-style
+  per-vhost rules (allow/block/challenge/throttle with presets, editor and
+  pre-enforcement simulation) left the increasingly crowded Vhost-controls
+  page and now live at `/cfm-admin/webdetector/rules/` (nav: Rules & engine →
+  Traffic rules). Same scope-filtered `/api/v1/webdet/rules/*` API — nothing
+  changes for scoped users or the CLI; the Vhost-controls page keeps the
+  toggles grid, scoped tokens and security overview, and links across.
+
 ### Fixed
 - **The `/api/v1/clam/*` API group was unreachable through the shared
   apiserver — ClamAV page showed "not wired" / empty on live boxes.** The
