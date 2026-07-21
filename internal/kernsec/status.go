@@ -406,6 +406,17 @@ func RunStatus(w io.Writer, opts StatusOptions) StatusResult {
 	}
 	fmt.Fprintln(w)
 
+	if lines, warn, show := lveCgroupStatus(profile); show {
+		fmt.Fprintln(w, "[CloudLinux LVE / cgroup mode]")
+		for _, l := range lines {
+			fmt.Fprintln(w, l)
+		}
+		if warn {
+			res.warn()
+		}
+		fmt.Fprintln(w)
+	}
+
 	if res.Indeterminate {
 		fmt.Fprintf(w, "[!] Status verification indeterminate due to %d read error(s). Review ERROR lines above.\n", len(res.Errors))
 	} else if res.Warnings == 0 {
@@ -457,6 +468,32 @@ func (res *StatusResult) printArgState(w io.Writer, label string, tokens []strin
 func (res *StatusResult) warn() {
 	res.Warnings++
 	res.OK = false
+}
+
+// lveCgroupStatus returns the status lines for the CloudLinux-LVE-vs-cgroup
+// check and whether they represent a WARN. show is false on a
+// non-CloudLinux/CageFS host, where the section is skipped entirely.
+//
+// CloudLinux LVE requires the cgroup v1 controllers. A host that boots into
+// pure unified cgroup v2 (systemd.unified_cgroup_hierarchy=1, the modern
+// default) silently loses LVE enforcement: LVE cannot place processes into
+// its cgroups (os_resource_push -ENOENT), so per-tenant limits stop applying
+// and hosting panels / LiteSpeed report bogus "resource limit reached".
+// Surface it loudly so an operator finds it in `status`, not after a reboot.
+func lveCgroupStatus(profile HostProfile) (lines []string, warn, show bool) {
+	if !profile.HasCloudLinuxLVE && !profile.HasCageFS {
+		return nil, false, false
+	}
+	if profile.CgroupV2Unified {
+		return []string{
+			"WARN  CloudLinux LVE/CageFS detected but the host is on unified cgroup v2.",
+			"      LVE needs the cgroup v1 controllers; on v2 it cannot place processes",
+			"      into its cgroups, so per-tenant limits are NOT enforced and hosting",
+			"      panels / LiteSpeed report bogus \"resource limit reached\".",
+			"      Fix: add systemd.unified_cgroup_hierarchy=0 to the kernel cmdline and reboot.",
+		}, true, true
+	}
+	return []string{"OK    LVE-compatible cgroup mode (cgroup v1 controllers present)"}, false, true
 }
 
 func (res *StatusResult) indeterminate(msg string) {

@@ -669,6 +669,24 @@ Shipped advisories:
 Advisories appear in the `cfm kernsec status --json` output under the
 per-rule `advisories` field (omitted when empty).
 
+### CloudLinux LVE vs. cgroup mode (status advisory)
+
+`cfm kernsec status` emits a `[CloudLinux LVE / cgroup mode]` section on
+CloudLinux LVE / CageFS hosts. It WARNs when the host is running the unified
+**cgroup v2** hierarchy (`systemd.unified_cgroup_hierarchy=1`, the modern
+distro default): LVE needs the cgroup **v1** controllers, and on pure-unified
+v2 it cannot place processes into its cgroups, so per-tenant limits are
+silently NOT enforced — `dmesg` fills with `os_resource_push … rc=-2` and
+hosting panels / LiteSpeed report bogus "resource limit reached". The fix is
+to add `systemd.unified_cgroup_hierarchy=0` to the kernel cmdline and reboot.
+
+This is a **read-only advisory**: `systemd.unified_cgroup_hierarchy` is
+operator/distro-owned, not a kernsec-managed boot arg, so kernsec never writes
+it — it only surfaces the mismatch so it is caught in `status` rather than
+after a reboot. Detection: `/sys/fs/cgroup/cgroup.controllers` present at the
+mount root ⇒ pure-unified v2 (legacy v1 and hybrid keep the v1 controllers and
+do not trip the warning). The probe field is `HostProfile.CgroupV2Unified`.
+
 ## Bootloader backends
 
 kernsec detects and uses one of these bootloader backends:
