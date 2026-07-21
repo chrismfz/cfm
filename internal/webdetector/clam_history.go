@@ -26,17 +26,25 @@ func (e *Engine) RecordClamScanEvent(ev clam.ScanEvent) {
 	if typ == "" {
 		typ = "clam_infected"
 	}
+	payload := map[string]interface{}{
+		"uri":       ev.URI,
+		"filename":  ev.FileName,
+		"signature": ev.Signature,
+		"evidence":  ev.Evidence,
+	}
+	// A sig-ignored hit stays queryable (the ClamAV page greys it out) but is
+	// explicitly marked so the UI/CLI can distinguish "acted on" from
+	// "downgraded to log-only by the signature-trust layer".
+	if ev.SigIgnored {
+		payload["sig_ignored"] = true
+		payload["ignored_by"] = ev.IgnoredBy
+	}
 	e.appendHistory(HistoryEvent{
-		TsUnix: ts.Unix(),
-		Type:   typ,
-		Host:   ev.Host,
-		IP:     ev.IP,
-		Reason: ev.Signature,
-		Payload: map[string]interface{}{
-			"uri":       ev.URI,
-			"filename":  ev.FileName,
-			"signature": ev.Signature,
-			"evidence":  ev.Evidence,
-		},
+		TsUnix:  ts.Unix(),
+		Type:    typ,
+		Host:    ev.Host,
+		IP:      ev.IP,
+		Reason:  ev.Signature,
+		Payload: payload,
 	})
 }

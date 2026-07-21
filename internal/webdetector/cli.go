@@ -210,11 +210,18 @@ func RunWebTop(baseURL string, args []string) error {
 		case "waf":
 			return runWafWebTop(baseURL, args[1:])
 		case "clam", "clamav":
-			// cfm webtop clam override [add|remove|list] <host>
-			if len(args) >= 2 && args[1] == "override" {
-				return RunClamOverride(baseURL, args[2:])
+			// cfm webtop clam override|sigignore|infections … (mirrors `cfm clam …`)
+			if len(args) >= 2 {
+				switch args[1] {
+				case "override":
+					return RunClamOverride(baseURL, args[2:])
+				case "sigignore":
+					return RunClamSigIgnore(baseURL, args[2:])
+				case "infections":
+					return RunClamInfections(baseURL, args[2:])
+				}
 			}
-			return fmt.Errorf("usage: cfm webtop clam override [add|remove|list] <host>")
+			return fmt.Errorf("usage: cfm webtop clam {override [add|remove|list] <host> | sigignore [list|add|remove] <pattern> [--host h] | infections [--host h] [--limit N]}")
 		case "http3", "h3":
 			return runHTTP3WebTop(baseURL, args[1:])
 		case "rules":

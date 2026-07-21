@@ -402,6 +402,7 @@ type Engine struct {
 	challengeExcludes *excludeStore
 	wafExcludes       *excludeStore
 	clamScanOverrides *excludeStore
+	clamSigIgnores    *clamSigIgnoreStore
 	http3Overrides    *http3OverrideStore
 	trafficRules      *trafficRuleStore
 	history           *HistoryStore
@@ -461,6 +462,7 @@ func NewEngine(cfg Config) *Engine {
 	e.challengeExcludes = newExcludeStore(cfg.ChallengeExcludeStorePath)
 	e.wafExcludes = newExcludeStore(cfg.WAFExcludeStorePath)
 	e.clamScanOverrides = newExcludeStore(cfg.ClamScanOverrideStorePath)
+	e.clamSigIgnores = newClamSigIgnoreStore(cfg.ClamSigIgnoreStorePath)
 	e.http3Overrides = newHTTP3OverrideStore(cfg.HTTP3OverridesStorePath)
 	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
 	e.uaEmergency = NewUAEmergencyStore(cfg.UAEmergencyStorePath, cfg.UAEmergencyAuditLog)
@@ -3547,6 +3549,38 @@ func (e *Engine) ClamOverrideList() []excludeEntry {
 		return nil
 	}
 	return e.clamScanOverrides.List()
+}
+
+// Per-signature ClamAV excludes (sig-ignore). Registered as the scanner's
+// runtime lookup via clam.SetSigIgnoreLookup — see clam_sigignore_store.go
+// for semantics (global entry = admin-only, host entry = scoped-editable).
+
+func (e *Engine) ClamSigIgnoreAdd(host, pattern string, scopeHosts []string) bool {
+	if e == nil || e.clamSigIgnores == nil {
+		return false
+	}
+	return e.clamSigIgnores.Add(host, pattern, scopeHosts)
+}
+
+func (e *Engine) ClamSigIgnoreRemove(host, pattern string) bool {
+	if e == nil || e.clamSigIgnores == nil {
+		return false
+	}
+	return e.clamSigIgnores.Remove(host, pattern)
+}
+
+func (e *Engine) ClamSigIgnoreList() []clamSigIgnoreEntry {
+	if e == nil || e.clamSigIgnores == nil {
+		return nil
+	}
+	return e.clamSigIgnores.List()
+}
+
+func (e *Engine) ClamSigIgnoreMatch(host, sig string) (bool, string) {
+	if e == nil || e.clamSigIgnores == nil {
+		return false, ""
+	}
+	return e.clamSigIgnores.Match(host, sig)
 }
 
 // ---------------------------------------------------------------------------

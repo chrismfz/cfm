@@ -970,6 +970,10 @@ func init() {
 		// A settable sink (replace, not append) keeps this pointed at the
 		// current engine across reloads without accumulating subscribers.
 		clam.SetScanEventSink(engine.RecordClamScanEvent)
+		// Runtime per-signature/per-vhost excludes: the scanner consults the
+		// engine's sig-ignore store on every infected verdict (after the
+		// CLAM_SIG_IGNORE config baseline). Same replace-not-append shape.
+		clam.SetSigIgnoreLookup(engine.ClamSigIgnoreMatch)
 
 		// Wire the Unix ingest socket (log_by_lua_block path). Attached
 		// unconditionally — the arbiter in Engine.RunOnce picks between
