@@ -45,6 +45,29 @@ back-filled here — see the git/PR history for that period.
   customer upload).
 
 ### Added
+- **ClamAV inline (blocking) upload scanning — `CLAM_SCAN_MODE`, default OFF.**
+  A vhost in **inline** mode makes the edge wait (bounded by
+  `CLAM_INLINE_TIMEOUT`, default 3s) for the scan verdict and answer **403** on
+  an infected upload, instead of only notifying after the fact. Ships
+  **disabled** (`CLAM_SCAN_MODE = async` — zero behaviour change on deploy) and
+  is **fail-open by contract**: clamd down/hung, circuit breaker open, verdict
+  timeout, oversize stream, bridge unreachable — every failure ALLOWS the
+  upload and degrades to an async notify-only scan (the file is re-queued), so
+  a clamd outage can never take down uploads; the hung-clamd and
+  stream-rejected paths have dedicated tests. The scan runs over clamd
+  **INSTREAM** (the daemon streams the spooled body; clamd needs no filesystem
+  access, no extra pending-dir copy). Policy lives entirely in the daemon — the
+  edge obeys a single `block` flag — so inline honours the archive scope gate
+  and the signature excludes (a hunting-sig FP can never 403 a customer
+  upload), and `/acctxfer*` transfer endpoints never wait on a verdict.
+  Burn-in: `CLAM_INLINE_DRY_RUN = 1` scans inline and records what WOULD block
+  (log + history `mode=inline_dryrun` + counter) without blocking. Controls:
+  `cfm clam mode async|inline` (global), `cfm clam mode add|remove|list <host>`
+  (per-vhost XOR flip, scoped API `/api/v1/clam/mode/*` with `[clam_mode]`
+  audit trail), a **Clam mode** column + INLINE quick-filter on the
+  vhost-controls grid, and scan-mode / inline-blocked cards on the ClamAV page.
+  Blocked requests log `clam_block` with `X-CFM-Action: clam_block`. Inline is
+  OpenResty-mode only (DNAT has no in-path edge; the knob is a no-op there).
 - **Per-signature ClamAV excludes — runtime, global + per-vhost, with full
   CLI/UI.** New sig-ignore store editable with no config edit and no reload:
   `/api/v1/clam/sigignore/{list,add,remove}` (patterns are case-insensitive

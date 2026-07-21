@@ -1,9 +1,11 @@
 # CFM — ClamAV Scan Scope & Mode Roadmap
 
-**Status:** Items 1 (scope, scanner-side) and 2 (sig-ignore: config baseline +
-global/per-vhost store + API/CLI/UI) **shipped 2026-07-21**. Remaining: the
-optional edge pre-filter (phase 4) and inline mode + per-vhost mode (phases
-5-6, Item 3).
+**Status:** Items 1 (scope, scanner-side), 2 (sig-ignore: config baseline +
+global/per-vhost store + API/CLI/UI) and 3 (inline mode: INSTREAM client,
+synchronous bridge endpoint, fail-open edge path, DRY_RUN burn-in, per-vhost
+mode override + UI/CLI) **shipped 2026-07-21**. `CLAM_SCAN_MODE` defaults
+async — inline is per-operator opt-in after burn-in. The only remaining item
+is the optional edge pre-filter (phase 4).
 **Scope:** Three independent knobs layered on the existing async upload scanner —
 (1) `CLAM_SCAN_SCOPE` (what file types are worth scanning),
 (2) `CLAM_SIG_IGNORE` (which signatures are trusted enough to act on), and

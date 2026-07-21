@@ -137,6 +137,17 @@ curl -sS -X POST "$CFM_API/api/v1/clam/override/add?type=host&value=example.com"
 curl -sS -X POST "$CFM_API/api/v1/clam/override/remove?type=host&value=example.com" | jq .
 ```
 
+Per-vhost scan MODE (async vs inline): a listed host is FLIPPED relative to
+the global `CLAM_SCAN_MODE` (inline opt-in with the shipped async default).
+Inline blocks an infected upload with a 403 and is fail-open; audit trail
+`[clam_mode]` in `cfm.clam.log`.
+
+```bash
+curl -sS "$CFM_API/api/v1/clam/mode/list" | jq .
+curl -sS -X POST "$CFM_API/api/v1/clam/mode/add?type=host&value=shop.example.com" | jq .
+curl -sS -X POST "$CFM_API/api/v1/clam/mode/remove?type=host&value=shop.example.com" | jq .
+```
+
 Per-signature excludes ("sig-ignore"): a matching infected verdict is
 downgraded to log-only (no email, no quarantine). `host` empty = GLOBAL entry
 (admin-only); with `host`, scoped tokens may manage their own vhost. Audit
