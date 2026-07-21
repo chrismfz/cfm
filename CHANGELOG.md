@@ -184,6 +184,21 @@ back-filled here — see the git/PR history for that period.
   missing ratio dimension for non-asset REST 40x. `403waf_flood` is intentionally
   NOT gated (WAF-origin 403s are a genuine attack signal). Tunable per section via
   `IP40X_MIN_SHARE_PCT`; a negative value restores the prior count-only behaviour.
+- **kernsec: on cPanel securetmp hosts, `EnableMount` no longer adds a
+  `/tmp /var/tmp none bind` fstab line for `/var/tmp`.** cPanel securetmp
+  (`/usr/tmpDSK`) already binds `/var/tmp` onto its loop-mounted, hardened
+  `/tmp` at boot. A kernsec bind line on top of that generated a systemd
+  `var-tmp.mount` that RACED securetmp: an early auto-mount pinned the
+  pre-securetmp root `/tmp`, and once securetmp rebuilt `/tmp` on its loop
+  device that bind was orphaned onto a **dead inode** — after which every
+  `PrivateTmp=yes` service (mysqld, named, php-fpm, nginx, exim, memcached, …)
+  failed to start with `Result: resources` because it could not create its
+  `/var/tmp/systemd-private-*` dir. kernsec now detects `/usr/tmpDSK` and
+  defers `/var/tmp` to securetmp entirely (the clean reference state), while
+  non-securetmp hosts keep the existing bind-line behaviour. Also corrected a
+  stale in-code comment (`mounts.go` claimed `/tmp` and `/var/tmp` "do NOT get
+  CanEnable" while both are `CanEnable: true`) and a stale `docs/kernsec.md`
+  claim that kernsec "never mutates fstab" for those paths.
 - **kernsec: `secure-tmp` fstab lines now carry `nofail`** (boot-availability
   audit follow-up to the `efi=disable_early_pci_dma` incident). Without
   `nofail`, the `/var/tmpDSK → /tmp` loop mount is a hard requirement of

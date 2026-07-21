@@ -128,6 +128,20 @@ func EnableMount(rule MountRule, w io.Writer, opts EnableMountOptions) error {
 	// checking whether /var/tmp currently has non-trivial content
 	// beyond systemd-private-* runtime dirs).
 	if rule.MountPoint == "/var/tmp" && detail.State == MountNotSeparate {
+		// cPanel securetmp host: /usr/tmpDSK is the loop file securetmp
+		// mounts on /tmp and then binds onto /var/tmp itself (with
+		// noexec,nosuid) at boot. Adding our own `/tmp /var/tmp none
+		// bind` line here is redundant AND generates a systemd
+		// var-tmp.mount that RACES securetmp — an early auto-mount binds
+		// /var/tmp to the pre-securetmp root /tmp, and once securetmp
+		// rebuilds /tmp on its loop device that bind is orphaned (dead
+		// inode → every PrivateTmp=yes service then fails to start).
+		// Defer to securetmp: the working reference is a securetmp host
+		// with NO kernsec /var/tmp line, where securetmp owns the bind.
+		if anyPathExists("/usr/tmpDSK") {
+			fmt.Fprintf(w, "[Mount] %s is managed by cPanel securetmp (/usr/tmpDSK) — not adding a kernsec bind line; securetmp binds /var/tmp onto the hardened /tmp at boot.\n", rule.MountPoint)
+			return nil
+		}
 		return enableBindFstab(rule, w, opts, "/tmp")
 	}
 

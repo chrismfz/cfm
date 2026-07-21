@@ -488,10 +488,15 @@ var Tier1Mounts = []MountRule{
 		//   sandbox, pre-15 PostgreSQL with JIT enabled) are easy to
 		//   detect and roll back with one `mount -o remount,exec
 		//   /dev/shm` if anything breaks.
-		// /tmp and /var/tmp do NOT get CanEnable: live database temp
-		// state, the /var/tmp-survives-reboot contract, and the
-		// dedicated-filesystem provisioning step make auto-apply
-		// unsafe. Those rows stay tip-only.
+		// /tmp and /var/tmp are CanEnable too, but persistence-only:
+		// Enable writes an /etc/fstab edit (or a systemd tmp.mount
+		// drop-in) and deliberately leaves the running kernel alone —
+		// a live remount would break every PrivateTmp=yes service that
+		// has bind mounts rooted in the current /tmp namespace, so
+		// those rows report PEND until reboot. /dev/shm is the only row
+		// that ALSO live-remounts (safe: tmpfs, no on-disk state). On a
+		// cPanel securetmp host (/usr/tmpDSK) /var/tmp is left to
+		// securetmp entirely — see EnableMount.
 		CanEnable: true,
 		// Every modern distro (EL, Alma, Debian, Ubuntu, Arch) has
 		// systemd PID 1 mount /dev/shm with nosuid,nodev already on
