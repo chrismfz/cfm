@@ -364,6 +364,39 @@ func (s *HistoryStore) QueryEvents(host, ip, typ string, limit int) ([]HistoryEv
 	return scanHistoryRows(rows)
 }
 
+// CountEventsSince returns how many events of type typ landed in the last
+// `hours` (default 24). Cheap COUNT(*) with the type+ts index — for at-a-glance
+// KPI tiles (e.g. the dashboard ClamAV card's "infections 24h"). host/ip empty
+// means box-wide; a non-empty host scopes the count.
+func (s *HistoryStore) CountEventsSince(typ, host string, hours int) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	if hours <= 0 {
+		hours = 24
+	}
+	from := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	clauses := []string{"ts_unix >= ?"}
+	args := []interface{}{from}
+	if typ != "" {
+		clauses = append(clauses, "event_type = ?")
+		args = append(args, typ)
+	}
+	if host != "" {
+		clauses = append(clauses, "host = ?")
+		args = append(args, host)
+	}
+	q := "SELECT COUNT(*) FROM history_events WHERE " + strings.Join(clauses, " AND ")
+	var n int
+	if err := s.db.QueryRow(q, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 func (s *HistoryStore) Summarize(host, ip string, hours int) (HistorySummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
