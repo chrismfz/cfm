@@ -2172,14 +2172,14 @@ end
 -- ee-file-engine.php, and no legitimate image upload carries a `<?php` open tag.
 -- `method` is expected already lowercased (m_lower from the caller).
 -- php-executable extension at a value boundary. Kept in step with bad_fname()
--- in detect_upload_filename (rule 401): .php[%d] / .phtm[l] / .pht / .phar. If
+-- in detect_upload_filename (rule 401): .php[%d]* / .phtm[l] / .pht / .phar. If
 -- that set grows, grow this too (they intentionally match the same engine-mapped
 -- extensions; bad_fname is a nested local, so this is a parallel matcher).
 local function _cve_sfl_has_exec_ext(s)
   if s:find("%.pht%f[%W]")       then return true end  -- .pht
   if s:find("%.phtml?%f[%W]")    then return true end  -- .phtm / .phtml
   if s:find("%.phar%f[%W]")      then return true end  -- .phar
-  if s:find("%.php[0-9]?%f[%W]") then return true end  -- .php / .php3 / .php5 / .php7
+  if s:find("%.php[0-9]*%f[%W]") then return true end  -- .php / .php3 / .php5 / .php7 / .php56 / .php74 (MultiPHP handlers)
   return false
 end
 
@@ -2841,9 +2841,9 @@ function _M.detect_upload_filename(body, headers)
     if has(fname, "web.config") then return "web.config" end
 
     -- Extension checks: match anywhere in filename to catch double-extensions
-    if fname:match("%.php[%d]?[^%w]") or fname:match("%.php[%d]?$") then return "php" end
+    if fname:match("%.php[%d]*[^%w]") or fname:match("%.php[%d]*$") then return "php" end
     -- PHP alt-handlers Apache/LiteSpeed commonly map to the engine: .phtml/.phtm
-    -- and the bare .pht slip past the .php[%d] matcher above, so they join the
+    -- and the bare .pht slip past the .php[%d]* matcher above, so they join the
     -- block-tier set. (.phtml is also Magento's server-side template extension,
     -- but templates ship via code/FTP, not a web-form upload, so a multipart
     -- .phtml upload is still overwhelmingly an attack.)
@@ -2968,7 +2968,10 @@ local function _zip_entry_bad_ext(name)
   -- .asp/.jsp/.exe): the threat is a PHP webshell / handler dropped into a
   -- Joomla/WP tree, plus the two config files that make a dir execute PHP.
   if name == "" then return nil end
-  if name:match("%.php%d?$")  or name:match("%.php%d?[^%w]")  then return "PHP" end
+  -- %d* (not %d?) so multi-digit MultiPHP handler extensions are caught:
+  -- .php56 / .php70 / .php74 / .php80 / .php81 execute on cPanel/Plesk MultiPHP
+  -- hosts. (2026-07 SP Page Builder drop hid its webshell as fonts/kamley.php56.)
+  if name:match("%.php%d*$")  or name:match("%.php%d*[^%w]")  then return "PHP" end
   if name:match("%.phtml?$")  or name:match("%.phtml?[^%w]")  then return "PHTML" end
   if name:match("%.pht$")     or name:match("%.pht[^%w]")     then return "PHT" end
   if name:match("%.phar$")    or name:match("%.phar[^%w]")    then return "PHAR" end
@@ -3076,6 +3079,38 @@ function _M.detect_upload_content(body, headers)
   if has(b, "push graphic-context") then return "UPLOAD_IMAGEMAGICK_MVG" end
   if b:find("<image%s") and has(b, "url%(") then return "UPLOAD_IMAGEMAGICK_URL" end
 
+  return nil
+end
+
+-- SP Page Builder unauthenticated arbitrary file upload -> RCE (CVE-2026-48908,
+-- the "ANTONKILL" vector, actively exploited 2026-07). The Joomla component
+-- com_sppagebuilder exposes asset.upload* tasks (uploadCustomIcon / uploadImage /
+-- uploadFont) with NO auth check and NO server-side file-type restriction, so an
+-- anonymous POST can drop a webshell. Confirmed in the wild dropping payload.zip
+-- (a php webshell inside an icon-pack zip; ClamAV: Win.Trojan.Hide-1).
+--
+-- Cheap gate FIRST on the component + task (both live in the query string, small)
+-- before touching the capped body. Then reuse the hardened upload detectors — the
+-- com_sppagebuilder + asset.upload + php-executable-payload triple is near-zero FP
+-- (a real icon/image/font upload never carries PHP):
+--   PHP_FILENAME — a php-exec multipart filename (rule 401's detector).
+--   PHP_IN_ZIP   — a php-exec entry inside the uploaded zip (rule 414's scanner).
+--   PHP_CONTENT  — raw php webshell bytes in the upload (rule 402's scanner).
+-- Body-budget caveat: a php entry past waf_body_max_len is not visible in-path
+-- (ClamAV is the backstop, as it was for the reported payload.zip).
+function _M.detect_cve_sppagebuilder_upload(uri, method, args, body, headers)
+  if method ~= "post" then return nil end
+  local qs = lower((uri or "") .. "&" .. (args or ""))
+  if not has(qs, "com_sppagebuilder") then return nil end
+  -- the vulnerable asset-upload task family; accept it from the body too, in case
+  -- a client sends `task` as a multipart field rather than a query param.
+  if not (has(qs, "asset.upload")
+          or has(lower(cap(body or "", CFG.max_scan_len)), "asset.upload")) then
+    return nil
+  end
+  if _M.detect_upload_filename(body, headers)   then return "PHP_FILENAME" end
+  if _M.detect_upload_archive_php(body, headers) then return "PHP_IN_ZIP" end
+  if _M.detect_upload_content(body, headers)     then return "PHP_CONTENT" end
   return nil
 end
 

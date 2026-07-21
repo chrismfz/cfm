@@ -29,6 +29,45 @@ back-filled here — see the git/PR history for that period.
   reboot. Read-only advisory: kernsec does not manage that operator/distro-owned
   arg, it only surfaces the mismatch so it is caught in `status` instead of
   after a reboot. New probe field `HostProfile.CgroupV2Unified`.
+### Security
+- **WAF upload rules: catch multi-digit `.phpNN` (MultiPHP handler) extensions.**
+  The php-executable extension matchers in `_zip_entry_bad_ext` (rule 414),
+  `bad_fname` (rule 401) and `_cve_sfl_has_exec_ext` (rules 10001/10010/10014)
+  used `%.php%d?` — `.php` plus at most **one** digit — so `.php56`/`.php70`/
+  `.php74`/`.php80`/`.php81` slipped through. Those extensions **execute PHP** on
+  cPanel/Plesk MultiPHP hosts (the shared-hosting fleet this protects). A captured
+  2026-07 SP Page Builder drop used exactly this: an icon-pack zip whose webshell
+  hid as `fonts/kamley.php56` (GIF-magic + `<?php`, deflate-compressed so only the
+  entry name was in-path-visible) — it passed the WAF signature layer and was
+  stopped only by the downstream ClamAV scan. Widened to `%.php%d*` (zero-or-more
+  digits); `.phpx`/`.phpfoo` and legit `.svg`/`.woff2`/`.css`/`.png` uploads stay
+  clean. Verified against the exact captured payload.
+
+### Added
+- **WAF CVE detector: SP Page Builder (Joomla) unauth arbitrary upload → RCE
+  (rule 10014, CVE-2026-48908).** The `com_sppagebuilder` `asset.upload*` tasks
+  (`uploadCustomIcon`/`uploadImage`/`uploadFont`) have no auth check and no
+  server-side file-type restriction (the "ANTONKILL" vector, actively exploited
+  2026-07), so an anonymous POST can drop a webshell — seen in the wild uploading
+  `payload.zip` (ClamAV: `Win.Trojan.Hide-1`). The detector gates on the
+  component + task and flags a php-executable payload via three legs, reusing the
+  hardened upload detectors: a php-exec multipart **filename** (rule 401's
+  scanner), a php-exec entry **inside the uploaded zip** (rule 414's scanner), or
+  raw php webshell **content** (rule 402's scanner). It runs **before** the
+  generic upload rules so the hit is attributed to the CVE (nft ban +
+  `WAF/CVE-2026-48908` alert). Near-zero FP — a legit icon/image/font upload to
+  this endpoint never carries PHP. Defence-in-depth note: a php payload past the
+  in-path body-scan budget (`waf_body_max_len`) remains ClamAV's backstop.
+- **detectors.conf duration values now accept a `d` (days) unit.** Go's
+  `time.ParseDuration` (which CFM used) stops at `h`, so `BLOCK = "7d"`,
+  `WINDOW = 3d`, etc. previously failed to parse and *silently* fell back to the
+  built-in default. A shared `parseCfgDuration` helper adds a lowercase `d`
+  (`1d == 24h`) on top of the stdlib units and is routed through every
+  operator-writable duration field — `kvDur` (`EVERY`/`WINDOW`/`COOLDOWN`/
+  `TIMEOUT`/…), the `BLOCK` TTL policy, and the mysql `QUERY_RULES` max-time — so
+  `d` means the same thing everywhere. Units compose (`1d12h`, `2d30m`) and days
+  may be fractional (`1.5d`). No `w`/`y` unit; unreadable values still fall back
+  to the default (keep to lowercase `d`).
 
 ### Removed
 - **kernsec: dropped the `efi=disable_early_pci_dma` boot arg (`KSEC-BOOT-dma-001`,
@@ -51,6 +90,20 @@ back-filled here — see the git/PR history for that period.
   "Removed boot arguments".
 
 ### Fixed
+- **Web-detector 40x flood autoblocks: don't ban legit heavy clients (success-share
+  gate).** The per-IP 40x flood detectors — `404_flood` (`WEB/404`), `403_flood`
+  (`WEB/403`) and `40x_combo` (`WEB/40X`) — hard-banned on raw 40x counts, which
+  mis-fired on legit bulk workflows: a content-migration/sync tool reading
+  `/wp-json/wp/v2/posts/<id>` across an ID range 404s the gaps (each ID a distinct
+  path, so it also sailed past `40x_combo`'s unique-path gate). A real Greek user
+  was banned for 2h despite being only ~9% 40x — the same IP did hundreds of
+  `2xx`/`201 Created`. All three now also require the detector's 40x count to be at
+  least `IP40xFloodMinSharePct` of the IP's total window requests (default **25%**):
+  a path scanner is almost all 40x and still bans, while a client doing bulk `2xx`
+  with incidental 40x is spared. Static assets were already excluded — this adds the
+  missing ratio dimension for non-asset REST 40x. `403waf_flood` is intentionally
+  NOT gated (WAF-origin 403s are a genuine attack signal). Tunable per section via
+  `IP40X_MIN_SHARE_PCT`; a negative value restores the prior count-only behaviour.
 - **kernsec: `secure-tmp` fstab lines now carry `nofail`** (boot-availability
   audit follow-up to the `efi=disable_early_pci_dma` incident). Without
   `nofail`, the `/var/tmpDSK → /tmp` loop mount is a hard requirement of
@@ -80,6 +133,20 @@ back-filled here — see the git/PR history for that period.
   matches `data://` (the stream wrapper), **not** `data:` image/JS URIs, so inline
   data-URI page assets do not trip it. Opt back out per-vhost with
   `rule_php_wrappers = "challenge"` or hold the ban with `PHP_WRAPPER = 0`.
+
+### Fixed
+- **WAF RCE rule (320, `WAF_RCE`) no longer evadable behind a `data:` URI path
+  prefix.** The `data:`-URI false-positive carve-out (added so a base64 image
+  data: URI a browser resolved as a relative path couldn't trip the block-tier
+  RCE rule) was applied too broadly: RCE scanned the payload-stripped surface,
+  so structural markers that are *never* valid inside a base64/image/JS data:
+  payload — `${jndi:…}` (Log4Shell), `;wget`/`;curl`/`|bash` — could be smuggled
+  past rule 320 by prefixing them with `/data:image/x,…`. RCE now scans the raw
+  surface again; the one genuine data: FP (a base64 blob whose letters spell
+  `eval`/`exec`/`system`) stays suppressed by the detector's existing
+  paren-anchored + `uri_is_data_uri_path` inline guard, so no FP returns. XSS
+  (302) keeps the broader strip (its `on…=`/`<script` markers legitimately
+  appear in data: payloads). Traversal was never affected.
 
 ### Added
 - **Two new WAF CVE detectors (family `WAF_CVE`), both edge-`block` + armed

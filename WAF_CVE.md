@@ -155,7 +155,7 @@ entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
 (`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
 hosting mix changes.
 
-Thirteen implemented; the rest are WordPress/Joomla candidates awaiting a
+Fourteen implemented; the rest are WordPress/Joomla candidates awaiting a
 validated exact request shape:
 
 | Product / CVE | Status |
@@ -173,6 +173,7 @@ validated exact request shape:
 | WordPress **core** "wp2shell" (`CVE-2026-63030` + `CVE-2026-60137`) | ✅ **implemented** (rule 10011) — batch-endpoint (`batch/v1`) POST; `"///"` desync primer (63030 route confusion) → `BATCH_DESYNC`, and SQL breakout in the integer-only `author_exclude`/`author_not_in` param (60137 core SQLi) → `BATCH_SQLI`. Two CVE ids, one rule. Affects 6.9–6.9.4 / 7.0–7.0.1; public PoC, actively exploited |
 | WooCommerce Payments (`CVE-2023-28121`) | ✅ **implemented** (rule 10012) — `X-WCPAY-Platform-Checkout-User` request header trusted as the current user id (unauth auth-bypass→privesc); keyed on header presence, all methods. Server-set by WooPay only, so near-zero FP; exempt genuine WooPay nets via `ALLOW_NETS` |
 | Gravity SMTP (`CVE-2026-4020`) | ✅ **implemented** (rule 10013) — unauth REST route `/gravitysmtp/v1/tests/mock-data` (`permission_callback=true`) dumps the full System Report (versions/paths/plugins/API keys). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate (only legit caller is the wp-admin settings screen) |
+| SP Page Builder (Joomla, `CVE-2026-48908`) | ✅ **implemented** (rule 10014) — `com_sppagebuilder` + `task=asset.upload*` (uploadCustomIcon/uploadImage/uploadFont) unauth arbitrary upload→RCE ("ANTONKILL"). Runs before rules 401/414 for CVE attribution; keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content), reusing the hardened upload detectors. Body-budget caveat: a php entry past `waf_body_max_len` is ClamAV's backstop |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
 Keep the plan doc's candidate table as the backlog; update the ✅ column here

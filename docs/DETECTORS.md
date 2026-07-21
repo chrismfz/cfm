@@ -50,15 +50,25 @@ Autoblock is configured per detector section:
 BLOCK = off        ; aliases: no, 0
 # BLOCK = dryrun
 # BLOCK = permanent
-# BLOCK = 30m      ; any Go-style duration
+# BLOCK = 30m      ; Go-style duration, plus a "d" (days) unit
+# BLOCK = 7d       ; days extension: 7d == 168h; composites like 1d12h work too
 BLOCK_COOLDOWN = 20m
 ```
 
 - `off`/`no`/`0`: alert only, never write firewall block set
 - `dryrun`: logs “would block …” without enforcement
 - `permanent`: non-expiring nft block
-- duration (for example `10m`, `2h`, `24h`): TTL block, auto-expired by timed sets
+- duration (for example `10m`, `2h`, `24h`, `7d`): TTL block, auto-expired by timed sets
 - `BLOCK_COOLDOWN`: minimum time before same section can block same IP again
+
+> **Duration units.** All duration values in `detectors.conf` (`BLOCK`, `EVERY`,
+> `WINDOW`, `COOLDOWN`, `TIMEOUT`, mysql `QUERY_RULES` max-time, …) use Go's
+> duration syntax — `s` (seconds), `m` (minutes), `h` (hours) — extended by CFM
+> with a lowercase **`d` (days)** unit, where `1d == 24h`. Units compose
+> (`1d12h`, `2d30m`) and days may be fractional (`1.5d == 36h`). There is no
+> `w` (weeks) or `y` unit — use `168h`/`14d` etc. A value the parser cannot
+> read (e.g. `7days`, uppercase `7D`) silently falls back to the built-in
+> default, so keep to lowercase `d`.
 
 > **Production-safe rollout:** begin with `BLOCK=dryrun`, tune, then move to short TTL (for example `10m` or `30m`) before permanent blocks.
 

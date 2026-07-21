@@ -171,6 +171,7 @@ local CFG = {
   rule_cve_wp2shell = "block", -- CVE-2026-63030 + CVE-2026-60137 ("wp2shell"): WordPress CORE unauth RCE chain (6.9–6.9.4 / 7.0–7.0.1; fixed 6.9.5/7.0.2), public PoC, actively exploited. Anon POST to the REST batch endpoint (/wp-json/batch/v1 or ?rest_route=/batch/v1); a nested-batch + "///" desync primer (63030 route confusion) smuggles a raw GET to /wp/v2/users?author_exclude=<SQLi> (60137 core SQLi, `0) OR SLEEP(n)-- -`). Gated on batch/v1; keyed on the "///" primer and SQL-breakout in the integer-only author_exclude param.
   rule_cve_woocommerce_payments = "block", -- CVE-2023-28121: WooCommerce Payments (4.8.0–5.6.1) unauth auth-bypass->privesc. The X-WCPAY-Platform-Checkout-User request header is trusted as the current user id with no validation; an attacker sets it to 1 and mints an admin (POST /wp-json/wp/v2/users roles=administrator). Header is server-set by WooPay only — a client never sends it (near-zero FP); keyed on header presence, all methods. Exempt genuine WooPay source nets via waf_security ALLOW_NETS.
   rule_cve_gravity_smtp = "block", -- CVE-2026-4020: Gravity SMTP (<=2.1.4) unauth sensitive-info exposure. REST route /gravitysmtp/v1/tests/mock-data has permission_callback=true and dumps the full System Report (PHP/DB/server versions, paths, plugins, API keys/tokens). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate — the only legit caller is the wp-admin settings screen, which carries the logged-in cookie.
+  rule_cve_sppagebuilder_upload = "block", -- CVE-2026-48908: Joomla SP Page Builder (com_sppagebuilder) asset.upload* (uploadCustomIcon/uploadImage/uploadFont) — unauth arbitrary file upload->RCE ("ANTONKILL", actively exploited 2026-07). Runs before rules 401/414 for CVE attribution. Keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content); reuses the hardened upload detectors. Near-zero FP (a legit icon/image/font upload never carries PHP). Body-budget caveat: a php entry past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -551,6 +552,7 @@ local RULE_IDS = {
   rule_cve_wp2shell = 10011,
   rule_cve_woocommerce_payments = 10012,
   rule_cve_gravity_smtp = 10013,
+  rule_cve_sppagebuilder_upload = 10014,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -702,11 +704,14 @@ function _M.check(ctx)
   end
 
   -- Same URI+args scan surface, but with an embedded `data:` URI in the PATH
-  -- truncated at the scheme (strip_data_uri). Used ONLY by the content-pattern
-  -- rules that a data: payload false-positives — RCE (base64,+eval/exec/system
-  -- coincidence) and XSS (inline on…=/<script in the payload). Structural rules
-  -- (traversal/long-path) deliberately keep get_scan_ua() (the RAW uri) so a
-  -- data:-prefixed ../ still can't slip past them.
+  -- truncated at the scheme (strip_data_uri). Used ONLY by XSS (302): a data:
+  -- payload's inline on…=/<script (incl. slashless/empty-mime data: URIs the
+  -- detector's own uri_is_data_uri_path guard doesn't cover) would false-positive
+  -- reflected-XSS. RCE (320) deliberately scans the RAW surface instead — its
+  -- structural markers (${jndi:…}, ;wget/;curl) must stay full-surface so a data:
+  -- prefix can't smuggle them past a block-tier rule, and its lone base64 FP is
+  -- already paren-anchored + inline-gated. Structural rules (traversal/long-path)
+  -- likewise keep get_scan_ua() (the RAW uri) so a data:-prefixed ../ can't slip.
   local function get_scan_ua_nodata()
     if not _scan_ua_nodata then
       local u = strip_data_uri(uri)
@@ -989,6 +994,25 @@ function _M.check(ctx)
     end
   end
 
+  -- ── 3l) SP Page Builder unauth arbitrary-upload -> RCE (CVE-2026-48908) ──────
+  -- Joomla com_sppagebuilder asset.upload* (uploadCustomIcon/uploadImage/upload
+  -- Font) has NO auth check and NO file-type restriction (the "ANTONKILL" vector,
+  -- actively exploited 2026-07). Runs BEFORE the generic upload rules (401/414) so
+  -- the hit is attributed to the CVE. Near-zero FP: a legit icon/image/font upload
+  -- to this endpoint never carries a php-executable filename, a php entry inside a
+  -- zip icon-pack, or raw php webshell content. (Body-budget caveat: a php entry
+  -- past waf_body_max_len is ClamAV's backstop, not the WAF's — defence in depth.)
+  do
+    local mode = rule_mode(CFG.rule_cve_sppagebuilder_upload, "block")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_sppagebuilder_upload(uri, m_lower, args, body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_48908:SPPAGEBUILDER:" .. tag, ttl, mode, RULE_IDS.rule_cve_sppagebuilder_upload) then goto done end
+      end
+    end
+  end
+
   -- ── 4) Content-Type anomaly (charset bypass / malformed boundary) ─────────
   do
     local mode = rule_mode(CFG.rule_content_type_anomaly, "logonly")
@@ -1012,9 +1036,17 @@ function _M.check(ctx)
   end
 
   -- ── 6) RCE ────────────────────────────────────────────────────────────────
+  -- RCE scans the RAW surface (get_scan_ua), NOT the data:-stripped one. Its
+  -- structural markers (${jndi:…}, ;wget/;curl/|bash) are never valid inside a
+  -- base64/image/JS data: payload, so they MUST stay full-surface — otherwise a
+  -- data: path prefix (`/data:image/x,${jndi:…}`) evades this block-tier rule.
+  -- detect_rce already suppresses the one real data: FP (a base64 blob whose
+  -- letters spell eval/exec/system) surgically: that branch is paren-anchored
+  -- (`eval(` can't occur in base64) AND inline-gated on uri_is_data_uri_path, so
+  -- the raw surface needs no outer strip here.
   do
     local mode = rule_mode(CFG.rule_rce, "block")
-    if mode ~= "disabled" and det.detect_rce(uri, args, get_scan_ua_nodata()) then
+    if mode ~= "disabled" and det.detect_rce(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
       if record("WAF_RCE", ttl, mode, RULE_IDS.rule_rce) then goto done end

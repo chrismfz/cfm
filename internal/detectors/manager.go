@@ -663,7 +663,7 @@ func parseBlockPolicy(kv KV) blockPolicy {
 	case "permanent", "perm":
 		p.Mode = "permanent"
 	default:
-		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		if d, err := parseCfgDuration(raw); err == nil && d > 0 {
 			p.Mode = "ttl"
 			p.TTL = d
 		} else {

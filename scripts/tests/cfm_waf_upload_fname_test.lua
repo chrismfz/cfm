@@ -50,6 +50,8 @@ check(hit("evil.pht.jpg"), ".pht double-extension must be flagged")
 -- Positives: pre-existing coverage must still fire.
 check(hit("c99.php"),  ".php must be flagged")
 check(hit("c99.php5"), ".php5 must be flagged")
+check(hit("c99.php56"), ".php56 multi-digit MultiPHP handler must be flagged")
+check(hit("c99.php74.jpg"), ".php74 double-extension must be flagged")
 check(hit("x.phar"),   ".phar must be flagged")
 
 -- Positives: the server-side-handler extensions must still fire when they are a
