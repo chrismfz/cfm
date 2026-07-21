@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM — API tokens</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2032%2032%27%3E%3Crect%20width=%2732%27%20height=%2732%27%20rx=%277%27%20fill=%27%23141b2d%27/%3E%3Cpath%20d=%27M16%206l8.7%205v10L16%2026l-8.7-5V11z%27%20fill=%27none%27%20stroke=%27%234da3ff%27%20stroke-width=%272.4%27/%3E%3C/svg%3E" />
+  <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <script src="/cfm-admin/assets/vendor/vue-3.5.13.global.prod.js" defer></script>
+  <script type="module">
+    import "../../assets/webdet/pages/tokens.js";
+  </script>
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar" data-shared-nav></aside>
+<div class="main">
+<div id="app" v-cloak>
+    <div data-wd-section="topbar"></div>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>API tokens</h2>
+        <p class="muted">Issue tokens scoped to specific vhosts for panel plugins (cPanel, DirectAdmin, etc.). Tokens persist across restarts.</p>
+      </section>
+
+      <section class="card wide" v-if="shouldShow('tokens') && isAdmin">
+        <div class="exclude-grid" style="margin-bottom:1rem">
+          <section class="mini-card">
+            <h3>Create token</h3>
+            <div class="toolbar">
+              <label>Vhosts</label>
+              <input class="input input-wide" type="text" v-model.trim="tokenForm.vhosts" placeholder="example.com, other.com" />
+            </div>
+            <div class="toolbar">
+              <label>Label</label>
+              <input class="input input-wide" type="text" v-model.trim="tokenForm.label" placeholder="cpanel-user-foo" />
+              <label>TTL</label>
+              <input class="input input-small" type="text" v-model.trim="tokenForm.ttl" placeholder="8760h" />
+            </div>
+            <div class="toolbar">
+              <label>Role</label>
+              <select class="input" v-model="tokenForm.role">
+                <option value="viewer">viewer</option>
+                <option value="admin">admin</option>
+              </select>
+              <button class="btn-quiet" @click="createScopedToken">Create token</button>
+            </div>
+            <p class="statusline" v-if="tokenCreateMsg" style="word-break:break-all;margin-top:.5rem">{{ tokenCreateMsg }}</p>
+          </section>
+          <section class="mini-card">
+            <h3>Notes</h3>
+            <p class="muted" style="font-size:.85rem">
+              Scoped tokens can only access their assigned vhosts. Token value is shown only once at creation — copy it immediately.
+              Stored in <code>/var/lib/cfm/tokens.json</code>.
+            </p>
+          </section>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Label</th><th>Role</th><th>Vhosts</th><th>Expires</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in tokens" :key="row.id">
+                <td><code>{{ row.id }}</code></td>
+                <td>{{ row.label || '(unlabelled)' }}</td>
+                <td><span class="pill">{{ row.role }}</span></td>
+                <td><code>{{ (row.vhosts || []).join(', ') }}</code></td>
+                <td :class="row.expired ? 'pill danger' : ''">
+                  {{ row.expires_at ? new Date(row.expires_at).toLocaleString() : '-' }}
+                  <span v-if="row.expired"> EXPIRED</span>
+                </td>
+                <td><button class="btn-danger btn-sm" @click="revokeToken(row.id)">Revoke</button></td>
+              </tr>
+              <tr v-if="!tokens.length"><td colspan="6" class="muted">No scoped tokens issued.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+</div>
+</div>
+</div>
+</body>
+</html>

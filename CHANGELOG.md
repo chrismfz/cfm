@@ -18,6 +18,18 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
+- **cfm-admin: API tokens moved to their own page + nav polish.** Scoped-token
+  issuance/revocation left the Vhost-controls page for a dedicated admin-only
+  `/cfm-admin/webdetector/tokens/` page (nav: Services → API tokens; hidden
+  from scoped users like the other admin pages). The global search palette
+  gains per-host quick actions for **Traffic rules** (lands with the rules
+  list pre-filtered to the vhost via `?vhost=`) and **ClamAV** (the page's
+  existing `?vhost=` view). ClamAV also gets its own nav icon instead of
+  sharing the bug icon with Debug. Same APIs everywhere — display-only
+  reorganisation; Vhost-controls now holds just the toggles grid and the
+  security overview, with links across.
+
+### Changed
 - **cfm-admin: Traffic Rules moved to their own page.** The Cloudflare-style
   per-vhost rules (allow/block/challenge/throttle with presets, editor and
   pre-enforcement simulation) left the increasingly crowded Vhost-controls

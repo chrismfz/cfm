@@ -23,7 +23,7 @@
     <main class="layout">
       <section class="card wide">
         <h2>{{ pageTitle }}</h2>
-        <p class="muted">Per-vhost WAF, challenge, HTTP/3 and ClamAV controls, scoped tokens and security overview. Traffic rules moved to their own <a href="/cfm-admin/webdetector/rules/">Traffic Rules</a> page. Supports <code>?vhost=a.com,b.com</code>.</p>
+        <p class="muted">Per-vhost WAF, challenge, HTTP/3 and ClamAV controls, and security overview. <a href="/cfm-admin/webdetector/rules/">Traffic Rules</a> and <a href="/cfm-admin/webdetector/tokens/">API tokens</a> have their own pages. Supports <code>?vhost=a.com,b.com</code>.</p>
       </section>
 
       <!-- 1. Security Overview -->
@@ -82,67 +82,7 @@
         <p class="muted" v-else>Enter a vhost and click Load.</p>
       </section>
 
-      <!-- 2. Token Management — admin only -->
-      <section class="card wide" v-if="shouldShow('tokens') && isAdmin">
-        <h2>Scoped token management</h2>
-        <p class="muted">Issue tokens scoped to specific vhosts for panel plugins (cPanel, DirectAdmin, etc.). Tokens persist across restarts.</p>
-
-        <div class="exclude-grid" style="margin-bottom:1rem">
-          <section class="mini-card">
-            <h3>Create token</h3>
-            <div class="toolbar">
-              <label>Vhosts</label>
-              <input class="input input-wide" type="text" v-model.trim="tokenForm.vhosts" placeholder="example.com, other.com" />
-            </div>
-            <div class="toolbar">
-              <label>Label</label>
-              <input class="input input-wide" type="text" v-model.trim="tokenForm.label" placeholder="cpanel-user-foo" />
-              <label>TTL</label>
-              <input class="input input-small" type="text" v-model.trim="tokenForm.ttl" placeholder="8760h" />
-            </div>
-            <div class="toolbar">
-              <label>Role</label>
-              <select class="input" v-model="tokenForm.role">
-                <option value="viewer">viewer</option>
-                <option value="admin">admin</option>
-              </select>
-              <button class="btn-quiet" @click="createScopedToken">Create token</button>
-            </div>
-            <p class="statusline" v-if="tokenCreateMsg" style="word-break:break-all;margin-top:.5rem">{{ tokenCreateMsg }}</p>
-          </section>
-          <section class="mini-card">
-            <h3>Notes</h3>
-            <p class="muted" style="font-size:.85rem">
-              Scoped tokens can only access their assigned vhosts. Token value is shown only once at creation — copy it immediately.
-              Stored in <code>/var/lib/cfm/tokens.json</code>.
-            </p>
-          </section>
-        </div>
-
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>ID</th><th>Label</th><th>Role</th><th>Vhosts</th><th>Expires</th><th>Actions</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in tokens" :key="row.id">
-                <td><code>{{ row.id }}</code></td>
-                <td>{{ row.label || '(unlabelled)' }}</td>
-                <td><span class="pill">{{ row.role }}</span></td>
-                <td><code>{{ (row.vhosts || []).join(', ') }}</code></td>
-                <td :class="row.expired ? 'pill danger' : ''">
-                  {{ row.expires_at ? new Date(row.expires_at).toLocaleString() : '-' }}
-                  <span v-if="row.expired"> EXPIRED</span>
-                </td>
-                <td><button class="btn-danger btn-sm" @click="revokeToken(row.id)">Revoke</button></td>
-              </tr>
-              <tr v-if="!tokens.length"><td colspan="6" class="muted">No scoped tokens issued.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- 3. Per-vhost controls — with limit dropdown -->
+      <!-- 2. Per-vhost controls — with limit dropdown -->
       <section class="card wide" v-if="shouldShow('controls')">
         <h2>Per-vhost controls</h2>
         <div class="toolbar wrap">
