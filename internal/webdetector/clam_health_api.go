@@ -14,6 +14,8 @@ type clamHealthResponse struct {
 	Enabled           bool   `json:"enabled"`             // scanner running (started + clamd address set)
 	GlobalScanDefault bool   `json:"global_scan_default"` // CLAM_SCAN_DEFAULT (config policy)
 	ScanScope         string `json:"scan_scope"`          // CLAM_SCAN_SCOPE effective value (archives|all)
+	ScanMode          string `json:"scan_mode"`           // CLAM_SCAN_MODE global default (async|inline)
+	InlineDryRun      bool   `json:"inline_dry_run"`      // inline burn-in guard active
 	BreakerOpen       bool   `json:"breaker_open"`        // circuit breaker tripped (clamd unreachable)
 	DownSince         int64  `json:"down_since"`
 	ConsecFails       int    `json:"consec_fails"`
@@ -26,8 +28,10 @@ type clamHealthResponse struct {
 	ScanErrors        uint64 `json:"scan_errors"`
 	SkippedBreaker    uint64 `json:"skipped_breaker"`
 	QueueDrops        uint64 `json:"queue_drops"`
-	SkippedScope      uint64 `json:"skipped_scope"` // uploads skipped: not an archive (scope=archives)
-	SigIgnored        uint64 `json:"sig_ignored"`   // infected verdicts downgraded to log-only
+	SkippedScope      uint64 `json:"skipped_scope"`      // uploads skipped: not an archive (scope=archives)
+	SigIgnored        uint64 `json:"sig_ignored"`        // infected verdicts downgraded to log-only
+	InlineBlocked     uint64 `json:"inline_blocked"`     // uploads 403'd by inline mode
+	InlineDryRunHits  uint64 `json:"inline_dryrun_hits"` // dry-run verdicts that WOULD have blocked
 }
 
 func clamUnix(t time.Time) int64 {
@@ -58,6 +62,8 @@ func (e *Engine) handleClamHealth(w http.ResponseWriter, r *http.Request) {
 			resp.Available = true
 			resp.Enabled = snap.Enabled
 			resp.ScanScope = snap.ScanScope
+			resp.ScanMode = snap.ScanMode
+			resp.InlineDryRun = snap.InlineDryRun
 			resp.BreakerOpen = snap.BreakerOpen
 			resp.DownSince = clamUnix(snap.DownSince)
 			resp.ConsecFails = snap.ConsecFails
@@ -72,6 +78,8 @@ func (e *Engine) handleClamHealth(w http.ResponseWriter, r *http.Request) {
 			resp.QueueDrops = snap.QueueDrops
 			resp.SkippedScope = snap.SkippedScope
 			resp.SigIgnored = snap.SigIgnored
+			resp.InlineBlocked = snap.InlineBlocked
+			resp.InlineDryRunHits = snap.InlineDryRunHits
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

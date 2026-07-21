@@ -402,6 +402,7 @@ type Engine struct {
 	challengeExcludes *excludeStore
 	wafExcludes       *excludeStore
 	clamScanOverrides *excludeStore
+	clamModeOverrides *excludeStore
 	clamSigIgnores    *clamSigIgnoreStore
 	http3Overrides    *http3OverrideStore
 	trafficRules      *trafficRuleStore
@@ -462,6 +463,7 @@ func NewEngine(cfg Config) *Engine {
 	e.challengeExcludes = newExcludeStore(cfg.ChallengeExcludeStorePath)
 	e.wafExcludes = newExcludeStore(cfg.WAFExcludeStorePath)
 	e.clamScanOverrides = newExcludeStore(cfg.ClamScanOverrideStorePath)
+	e.clamModeOverrides = newExcludeStore(cfg.ClamModeOverrideStorePath)
 	e.clamSigIgnores = newClamSigIgnoreStore(cfg.ClamSigIgnoreStorePath)
 	e.http3Overrides = newHTTP3OverrideStore(cfg.HTTP3OverridesStorePath)
 	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
@@ -477,6 +479,7 @@ func NewEngine(cfg Config) *Engine {
 		e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
 		e.nginxBridge.ListWAFExcludes = e.WAFExcludeList
 		e.nginxBridge.ListClamScanOverrides = e.ClamOverrideList
+		e.nginxBridge.ListClamModeOverrides = e.ClamModeOverrideList
 		e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
 		e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 		e.nginxBridge.ListTrafficRules = e.TrafficRuleList
@@ -3549,6 +3552,33 @@ func (e *Engine) ClamOverrideList() []excludeEntry {
 		return nil
 	}
 	return e.clamScanOverrides.List()
+}
+
+// Per-vhost ClamAV scan-MODE override (async vs inline). Same XOR shape as
+// the on/off override but in a deliberately SEPARATE store: a listed host is
+// FLIPPED relative to the global CLAM_SCAN_MODE (inline opt-in when the
+// default is async — the shipped default — async opt-out when it is inline).
+// Host-only; the edge reads it via /nginx/clam/mode_overrides.
+
+func (e *Engine) ClamModeOverrideAdd(typ, value string, scope map[string]struct{}) bool {
+	if e == nil || e.clamModeOverrides == nil {
+		return false
+	}
+	return e.clamModeOverrides.Add(typ, value, scope)
+}
+
+func (e *Engine) ClamModeOverrideRemove(typ, value string, scope map[string]struct{}) bool {
+	if e == nil || e.clamModeOverrides == nil {
+		return false
+	}
+	return e.clamModeOverrides.Remove(typ, value, scope)
+}
+
+func (e *Engine) ClamModeOverrideList() []excludeEntry {
+	if e == nil || e.clamModeOverrides == nil {
+		return nil
+	}
+	return e.clamModeOverrides.List()
 }
 
 // Per-signature ClamAV excludes (sig-ignore). Registered as the scanner's

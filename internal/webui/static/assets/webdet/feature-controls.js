@@ -73,13 +73,15 @@ export const controlsMixin = {
       let wafOff = 0;
       let http3On = 0;
       let clamOff = 0;
+      let clamInline = 0;
       for (const row of this.vhostControls) {
         if (!row?.challenge_enabled) challengeOff++;
         if (!row?.waf_enabled) wafOff++;
         if (row?.http3_enabled) http3On++;
         if (!row?.clam_enabled) clamOff++;
+        if (row?.clam_mode_inline) clamInline++;
       }
-      return { challengeOff, wafOff, http3On, clamOff };
+      return { challengeOff, wafOff, http3On, clamOff, clamInline };
     },
     vhostControlsFiltered() {
       const q = String(this.controlsSearch || "").trim().toLowerCase();
@@ -91,6 +93,7 @@ export const controlsMixin = {
       else if (quick === "waf_off") filtered = filtered.filter((row) => !row?.waf_enabled);
       else if (quick === "http3_on") filtered = filtered.filter((row) => row?.http3_enabled);
       else if (quick === "clam_off") filtered = filtered.filter((row) => !row?.clam_enabled);
+      else if (quick === "clam_inline") filtered = filtered.filter((row) => row?.clam_mode_inline);
       const key = String(this.controlsSortKey || "host");
       const dir = this.controlsSortDir === "desc" ? -1 : 1;
       const boolOrder = (v) => (v ? 1 : 0);
@@ -106,6 +109,9 @@ export const controlsMixin = {
           if (cmp !== 0) return cmp * dir;
         } else if (key === "clam") {
           const cmp = boolOrder(Boolean(a?.clam_enabled)) - boolOrder(Boolean(b?.clam_enabled));
+          if (cmp !== 0) return cmp * dir;
+        } else if (key === "clammode") {
+          const cmp = boolOrder(Boolean(a?.clam_mode_inline)) - boolOrder(Boolean(b?.clam_mode_inline));
           if (cmp !== 0) return cmp * dir;
         } else {
           const cmpHost = String(a?.host || "").localeCompare(String(b?.host || ""), undefined, { sensitivity: "base" });
@@ -138,6 +144,7 @@ export const controlsMixin = {
       else if (kind === "waf") key = "waf_enabled";
       else if (kind === "http3") key = "http3_enabled";
       else if (kind === "clam") key = "clam_enabled";
+      else if (kind === "clammode") key = "clam_mode_inline";
       else return false;
       return Boolean(row?.[key]);
     },
@@ -147,6 +154,7 @@ export const controlsMixin = {
       else if (kind === "waf") key = "waf_toggleable";
       else if (kind === "http3") key = "http3_toggleable";
       else if (kind === "clam") key = "clam_toggleable";
+      else if (kind === "clammode") key = "clam_mode_toggleable";
       else return false;
       return Boolean(row?.[key]);
     },
@@ -155,7 +163,7 @@ export const controlsMixin = {
       if (kind === "challenge") key = "challenge_matched_exclude";
       else if (kind === "waf") key = "waf_matched_exclude";
       else if (kind === "http3") key = "http3_matched_optin";
-      else return ""; // clam: exact-match only, no pattern to surface
+      else return ""; // clam/clammode: exact-match only, no pattern to surface
       return String(row?.[key] || "").trim();
     },
     vhostControlButtonLabel(row, kind) {
@@ -173,6 +181,12 @@ export const controlsMixin = {
         if (enabled) return "ON / SCANNING";
         return toggleable ? "OFF / NOT SCANNED" : "OFF / GLOBALLY OFF";
       }
+      // ClamAV mode: inline blocks an infected upload (fail-open); async only
+      // notifies. Not-toggleable = the vhost isn't scanned at all.
+      if (kind === "clammode") {
+        if (enabled) return "INLINE / BLOCKING";
+        return toggleable ? "ASYNC / NOTIFY" : "N/A / NOT SCANNED";
+      }
       if (enabled) return "ON / ENABLED";
       return toggleable ? "OFF / DISABLED" : "OFF / MATCHED BY PATTERN";
     },
@@ -182,8 +196,13 @@ export const controlsMixin = {
       const toggleable = this.vhostControlToggleable(row, kind);
       if (kind === "clam") {
         if (!toggleable) return "ClamAV upload scanning is globally off (CLAMD_ENABLED / hook). Enable it in cfm.conf first.";
-        if (enabled) return "ClamAV scans uploads for this vhost (async, notify-only). Click to stop scanning it.";
+        if (enabled) return "ClamAV scans uploads for this vhost. Click to stop scanning it.";
         return "ClamAV upload scanning is off for this vhost. Click to start scanning it.";
+      }
+      if (kind === "clammode") {
+        if (!toggleable) return "Scan mode applies only to scanned vhosts. Enable ClamAV scanning for this vhost first.";
+        if (enabled) return "INLINE: an infected upload gets a 403 (fail-open when clamd is down/slow). Click to switch back to async notify-only.";
+        return "ASYNC: infections are logged/notified, never blocked. Click to switch this vhost to inline blocking (burn in with CLAM_INLINE_DRY_RUN first).";
       }
       if (kind === "http3") {
         if (!enabled) {
@@ -234,6 +253,8 @@ export const controlsMixin = {
           this.actionMsg = `HTTP/3 for ${host} is enabled by wildcard opt-in (${matched || "pattern"}). Remove/edit it via CLI to change.`;
         } else if (kind === "clam") {
           this.actionMsg = `ClamAV scanning for ${host} can't be toggled — it is globally off (enable CLAMD_ENABLED / scan policy in cfm.conf first).`;
+        } else if (kind === "clammode") {
+          this.actionMsg = `Scan mode for ${host} needs the vhost scanned first — enable its Clam toggle.`;
         } else {
           this.actionMsg = `${kind.toUpperCase()} for ${host} is disabled by non-exact exclude (${matched || "pattern"}). Remove/edit it in Dynamic excludes first.`;
         }
@@ -253,6 +274,11 @@ export const controlsMixin = {
           const endpoint = row?.clam_override_present ? "remove" : "add";
           await this.postJSON(`v1/clam/override/${endpoint}?type=host&value=${encodeURIComponent(host)}`, {});
           this.actionMsg = `ClamAV scanning ${currentlyEnabled ? "disabled" : "enabled"} for ${host}`;
+        } else if (kind === "clammode") {
+          // Same XOR flip against the separate mode store.
+          const endpoint = row?.clam_mode_override_present ? "remove" : "add";
+          await this.postJSON(`v1/clam/mode/${endpoint}?type=host&value=${encodeURIComponent(host)}`, {});
+          this.actionMsg = `ClamAV mode for ${host} switched to ${currentlyEnabled ? "async (notify-only)" : "inline (blocking)"}`;
         } else if (currentlyEnabled) {
           await this.postJSON(`v1/${kind}/exclude/add?type=host&value=${encodeURIComponent(host)}`, {});
           this.actionMsg = `${kind.toUpperCase()} disabled for ${host}`;

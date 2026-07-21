@@ -22,8 +22,8 @@ func TestHandleClamHealth_AdminOnlyAndPolicy(t *testing.T) {
 	mux := http.NewServeMux()
 	e.RegisterHTTP(mux)
 
-	SetClamScanPolicy(true, true)
-	t.Cleanup(func() { SetClamScanPolicy(false, false) })
+	SetClamScanPolicy(true, true, false)
+	t.Cleanup(func() { SetClamScanPolicy(false, false, false) })
 
 	// Scoped tokens must be refused — this is box-level daemon state.
 	if rr := get(mux, scopedCtx("x.example.com"), "/api/v1/clam/health"); rr.Code != http.StatusForbidden {

@@ -39,6 +39,9 @@ func (e *Engine) RecordClamScanEvent(ev clam.ScanEvent) {
 		payload["sig_ignored"] = true
 		payload["ignored_by"] = ev.IgnoredBy
 	}
+	if ev.Mode != "" {
+		payload["mode"] = ev.Mode
+	}
 	e.appendHistory(HistoryEvent{
 		TsUnix:  ts.Unix(),
 		Type:    typ,

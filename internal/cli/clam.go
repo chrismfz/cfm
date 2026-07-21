@@ -129,6 +129,29 @@ func RunClam(args []string, cfgDir string) int {
 			return 2
 		}
 
+	case "mode":
+		// `cfm clam mode async|inline` = the GLOBAL scan mode (CLAM_SCAN_MODE);
+		// `cfm clam mode add|remove|list <host>` (per-vhost flip) is routed to
+		// the webdetector API by cmd/cfm before RunClam is reached.
+		if len(args) < 2 {
+			fmt.Printf("scan mode (CLAM_SCAN_MODE):    %s\n", cfg.Clam.ScanMode)
+			fmt.Printf("inline dry-run:                %v\n", cfg.Clam.InlineDryRun)
+			fmt.Printf("inline timeout:                %s\n", cfg.Clam.InlineTimeout)
+			fmt.Println("usage: cfm clam mode {async|inline} | cfm clam mode add|remove|list <host>")
+			return 0
+		}
+		switch strings.ToLower(strings.TrimSpace(args[1])) {
+		case "async":
+			return runClamSetValue(cfgDir, "CLAM_SCAN_MODE", "async")
+		case "inline":
+			fmt.Println("note: inline mode is FAIL-OPEN (clamd down/timeout => upload allowed).")
+			fmt.Println("      burn in with CLAM_INLINE_DRY_RUN = 1 before trusting it in anger.")
+			return runClamSetValue(cfgDir, "CLAM_SCAN_MODE", "inline")
+		default:
+			fmt.Fprintf(os.Stderr, "clam mode: unknown value %q (want async|inline, or add|remove|list <host>)\n", args[1])
+			return 2
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "clam: unknown subcommand: %s\n\n", cmd)
 		printClamHelp()
@@ -265,6 +288,8 @@ func printClamHelp() {
 	fmt.Println("  cfm clam version")
 	fmt.Println("  cfm clam scan on|off        # CLAM_SCAN_DEFAULT: global upload-scan policy (default ON)")
 	fmt.Println("  cfm clam scope archives|all # CLAM_SCAN_SCOPE: magic-bytes upload gate (default archives)")
+	fmt.Println("  cfm clam mode async|inline  # CLAM_SCAN_MODE: notify-only vs block-on-infection (default async, fail-open)")
+	fmt.Println("  cfm clam mode add|remove|list <host>       # per-vhost flip of the global mode (scoped)")
 	fmt.Println("  cfm clam scan <file>")
 	fmt.Println("  cfm clam scan <dir>")
 	fmt.Println("  cfm clam scan --quiet-clean <file-or-dir>")

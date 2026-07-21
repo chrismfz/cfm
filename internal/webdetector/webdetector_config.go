@@ -224,6 +224,7 @@ type Config struct {
 	ChallengeExcludeStorePath string        // CHALLENGE_EXCLUDE_STORE_PATH
 	WAFExcludeStorePath       string        // WAF_EXCLUDE_STORE_PATH
 	ClamScanOverrideStorePath string        // CLAM_SCAN_OVERRIDE_STORE_PATH (per-vhost ClamAV upload-scan opt-out)
+	ClamModeOverrideStorePath string        // CLAM_MODE_OVERRIDE_STORE_PATH (per-vhost async/inline mode flip)
 	ClamSigIgnoreStorePath    string        // CLAM_SIGIGNORE_STORE_PATH (per-signature ClamAV excludes, global + per-vhost)
 	HTTP3OverridesStorePath   string        // HTTP3_OVERRIDES_STORE_PATH (per-vhost H3 opt-in)
 	TrafficRulesStorePath     string        // TRAFFIC_RULES_STORE_PATH
@@ -267,6 +268,9 @@ func (c *Config) FillDefaults() {
 	}
 	if c.ClamScanOverrideStorePath == "" {
 		c.ClamScanOverrideStorePath = "/var/lib/cfm/webdetector_clam_overrides.json"
+	}
+	if c.ClamModeOverrideStorePath == "" {
+		c.ClamModeOverrideStorePath = "/var/lib/cfm/webdetector_clam_mode_overrides.json"
 	}
 	if c.ClamSigIgnoreStorePath == "" {
 		c.ClamSigIgnoreStorePath = "/var/lib/cfm/webdetector_clam_sigignore.json"

@@ -23,7 +23,7 @@
     <main class="layout">
       <section class="card wide">
         <h2>ClamAV</h2>
-        <p class="muted">Upload-scan status and per-vhost coverage. Scanning is asynchronous (notify-only) — it never blocks a request. Supports <code>?vhost=a.com,b.com</code>.</p>
+        <p class="muted">Upload-scan status and per-vhost coverage. Default mode is async (notify-only, never blocks); vhosts switched to <strong>inline</strong> block infected uploads with a 403 (fail-open when clamd is unavailable). Supports <code>?vhost=a.com,b.com</code>.</p>
       </section>
 
       <!-- 1. Scanner status (admin only — box-level daemon state) -->
@@ -50,6 +50,14 @@
               <h3>Scan scope</h3>
               <div><span class="pill" :class="clamHealth.scan_scope === 'archives' ? 'ok' : ''">{{ clamHealth.scan_scope || '-' }}</span></div>
               <div class="muted" style="font-size:.8rem;margin-top:.3rem">magic-bytes gate · <code>cfm clam scope archives|all</code></div>
+            </section>
+            <section class="mini-card">
+              <h3>Scan mode</h3>
+              <div>
+                <span class="pill" :class="clamHealth.scan_mode === 'inline' ? 'warn' : 'ok'">{{ clamHealth.scan_mode || 'async' }}</span>
+                <span class="pill" v-if="clamHealth.inline_dry_run" title="Inline scans run but never block — burn-in">DRY RUN</span>
+              </div>
+              <div class="muted" style="font-size:.8rem;margin-top:.3rem">global default · per-vhost on Vhost controls · <code>cfm clam mode …</code></div>
             </section>
             <section class="mini-card">
               <h3>Queue</h3>
@@ -83,6 +91,11 @@
               <h3>Ignored (signature)</h3>
               <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.sig_ignored }}</div>
               <div class="muted" style="font-size:.8rem">verdicts downgraded to log-only</div>
+            </section>
+            <section class="mini-card">
+              <h3>Inline blocked</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.inline_blocked }}<span class="muted" style="font-size:.9rem" v-if="clamHealth.inline_dryrun_hits"> · {{ clamHealth.inline_dryrun_hits }} dry-run</span></div>
+              <div class="muted" style="font-size:.8rem">uploads 403'd on an infected verdict</div>
             </section>
           </div>
         </div>

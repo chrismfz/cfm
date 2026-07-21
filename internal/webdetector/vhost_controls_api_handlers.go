@@ -30,6 +30,14 @@ type webdetVhostControlRow struct {
 	ClamEnabled         bool `json:"clam_enabled"`
 	ClamToggleable      bool `json:"clam_toggleable"`
 	ClamOverridePresent bool `json:"clam_override_present"`
+
+	// ClamAV scan MODE (async vs inline). Resolved the same XOR way against
+	// the global CLAM_SCAN_MODE and the separate mode-override store. Mode is
+	// meaningless for a vhost that isn't scanned, so ClamModeToggleable is
+	// clamGlobal && ClamEnabled.
+	ClamModeInline          bool `json:"clam_mode_inline"`
+	ClamModeToggleable      bool `json:"clam_mode_toggleable"`
+	ClamModeOverridePresent bool `json:"clam_mode_override_present"`
 }
 
 type webdetVhostControlResponse struct {
@@ -94,7 +102,15 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 			hosts[h] = struct{}{}
 		}
 	}
+	clamModeOverride := make(map[string]struct{})
+	for _, val := range hostExcludeValues(e.ClamModeOverrideList()) {
+		if h := normalizeControlHost(val); h != "" {
+			clamModeOverride[h] = struct{}{}
+			hosts[h] = struct{}{}
+		}
+	}
 	clamGlobal, clamScanDefault := clamScanPolicy()
+	clamInline := clamInlineDefault()
 
 	list := make([]string, 0, len(hosts))
 	for host := range hosts {
@@ -117,6 +133,8 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 		_, clamPresent := clamOverride[normalizeControlHost(host)]
 		// XOR: an override flips the vhost relative to the global default.
 		clamEnabled := clamGlobal && (clamScanDefault != clamPresent)
+		_, clamModePresent := clamModeOverride[normalizeControlHost(host)]
+		clamModeInline := clamEnabled && (clamInline != clamModePresent)
 
 		rows = append(rows, webdetVhostControlRow{
 			Host:                    host,
@@ -132,6 +150,9 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 			ClamEnabled:             clamEnabled,
 			ClamToggleable:          clamGlobal, // every clam override is exact
 			ClamOverridePresent:     clamPresent,
+			ClamModeInline:          clamModeInline,
+			ClamModeToggleable:      clamGlobal && clamEnabled,
+			ClamModeOverridePresent: clamModePresent,
 		})
 	}
 
