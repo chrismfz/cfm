@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM — Traffic Rules</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2032%2032%27%3E%3Crect%20width=%2732%27%20height=%2732%27%20rx=%277%27%20fill=%27%23141b2d%27/%3E%3Cpath%20d=%27M16%206l8.7%205v10L16%2026l-8.7-5V11z%27%20fill=%27none%27%20stroke=%27%234da3ff%27%20stroke-width=%272.4%27/%3E%3C/svg%3E" />
+  <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <script src="/cfm-admin/assets/vendor/vue-3.5.13.global.prod.js" defer></script>
+  <script type="module">
+    import "../../assets/webdet/pages/rules.js";
+  </script>
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar" data-shared-nav></aside>
+<div class="main">
+<div id="app" v-cloak>
+    <div data-wd-section="topbar"></div>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>Traffic Rules (Cloudflare-style)</h2>
+        <p class="muted">
+          Build per-vhost rules for <code>allow</code>, <code>block</code>, <code>challenge</code>, and <code>throttle</code>.
+          Start with disabled rules or presets, then test with simulation before enabling.
+          Per-vhost protection toggles live on the <a href="/cfm-admin/webdetector/controls/">Vhost controls</a> page.
+        </p>
+      </section>
+
+      <section class="card wide" v-if="shouldShow('rules')">
+        <h2>Rules</h2>
+        <datalist id="cfm-vhost-list"><option v-for="h in knownVhosts" :key="h" :value="h"></option></datalist>
+
+        <div class="toolbar">
+          <label for="rules-search">Search</label>
+          <input id="rules-search" class="input input-wide" type="text" v-model.trim="rulesSearch" placeholder="Filter by id / vhost / action / note" />
+          <span class="muted">{{ rulesFiltered.length }} / {{ rules.length }} shown</span>
+        </div>
+
+        <div class="toolbar">
+          <span class="muted">Quick presets:</span>
+          <button class="btn-quiet btn-sm" v-for="p in presets" :key="p.key" @click="applyPreset(p.key)" :title="p.hint">{{ p.label }}</button>
+        </div>
+
+        <p class="statusline" v-if="actionMsg">{{ actionMsg }}</p>
+
+        <div class="exclude-grid">
+          <section class="mini-card">
+            <h3>{{ ruleEditID ? 'Edit rule ' + ruleEditID : 'Create rule' }}</h3>
+            <div class="form-grid">
+              <div class="form-section-title">Scope</div>
+              <label for="rule-vhosts">Vhosts</label>
+              <input id="rule-vhosts" class="input" type="text" v-model.trim="ruleForm.vhosts" placeholder="example.com, *.example.com" />
+
+              <div class="form-section-title">Match — empty fields match everything</div>
+              <label for="rule-countries">Countries</label>
+              <input id="rule-countries" class="input" type="text" v-model.trim="ruleForm.countries" placeholder="US, CA" />
+              <label for="rule-methods">Methods</label>
+              <input id="rule-methods" class="input" type="text" v-model.trim="ruleForm.methods" placeholder="GET, POST" />
+              <label for="rule-uas">UA patterns</label>
+              <input id="rule-uas" class="input" type="text" v-model.trim="ruleForm.uas" placeholder="*facebookexternalhit*, *meta-externalagent*" />
+              <label for="rule-paths">Path patterns</label>
+              <input id="rule-paths" class="input" type="text" v-model.trim="ruleForm.paths" placeholder="/wp-login.php, /xmlrpc.php" />
+              <label for="rule-hasqs">Query string</label>
+              <label class="muted" style="font-size:.84rem"><input id="rule-hasqs" type="checkbox" v-model="ruleForm.hasQS" /> only match requests that HAVE a query string</label>
+              <label for="rule-qsnotrx" title="Requests whose query string matches this regex are NOT matched by the rule.">QS pass-through</label>
+              <input id="rule-qsnotrx" class="input" type="text" v-model.trim="ruleForm.qsNotRx"
+                placeholder="(?:fbclid|export|xml)(?:=|[&amp;;]|$)" :disabled="!ruleForm.hasQS" />
+
+              <div class="form-section-title">Action</div>
+              <label for="rule-action">Action</label>
+              <select id="rule-action" class="input" v-model="ruleForm.actionType" title="Action when rule matches.">
+                <option value="allow">allow</option>
+                <option value="block">block</option>
+                <option value="challenge">challenge</option>
+                <option value="throttle">throttle</option>
+              </select>
+              <template v-if="ruleForm.actionType === 'throttle'">
+                <label for="rule-profile">Throttle profile</label>
+                <input id="rule-profile" class="input" type="text" v-model.trim="ruleForm.throttleProfile" placeholder="soft_bot / medium_bot / hard_bot" />
+              </template>
+              <label for="rule-priority" title="Lower number runs first.">Priority</label>
+              <input id="rule-priority" class="input input-small" type="number" min="1" max="100000" step="1" v-model.number="ruleForm.priority" />
+              <label for="rule-enabled">Enabled</label>
+              <label class="muted" style="font-size:.84rem"><input id="rule-enabled" type="checkbox" v-model="ruleForm.enabled" /> rule is active immediately after save</label>
+
+              <label for="rule-note">Note</label>
+              <input id="rule-note" class="input" type="text" v-model.trim="ruleForm.note" placeholder="Short rule description" />
+            </div>
+            <div class="toolbar">
+              <button @click="saveRule">{{ ruleEditID ? 'Update rule' : 'Add rule' }}</button>
+              <button class="btn-quiet" @click="resetRuleForm">Clear</button>
+            </div>
+          </section>
+
+          <section class="mini-card">
+            <h3>Rule simulation</h3>
+            <p class="muted">Test a request shape against the rule set before enforcement.</p>
+            <div class="form-grid">
+              <label for="sim-host">Host</label>
+              <input id="sim-host" class="input" type="text" v-model.trim="simulateForm.host" placeholder="example.com" list="cfm-vhost-list" />
+              <label for="sim-ip">IP</label>
+              <input id="sim-ip" class="input" type="text" v-model.trim="simulateForm.ip" placeholder="1.2.3.4" />
+              <label for="sim-country">Country</label>
+              <input id="sim-country" class="input input-small" type="text" v-model.trim="simulateForm.country" placeholder="US" />
+              <label for="sim-method">Method</label>
+              <input id="sim-method" class="input input-small" type="text" v-model.trim="simulateForm.method" placeholder="GET" />
+              <label for="sim-path">Path</label>
+              <input id="sim-path" class="input" type="text" v-model.trim="simulateForm.path" placeholder="/" />
+              <label for="sim-ua">UA</label>
+              <input id="sim-ua" class="input" type="text" v-model.trim="simulateForm.ua" placeholder="facebookexternalhit/1.1" />
+              <label for="sim-qs">QS</label>
+              <input id="sim-qs" class="input" type="text" v-model.trim="simulateForm.qs" placeholder="page=2&amp;sort=title" />
+            </div>
+            <div class="toolbar">
+              <button @click="runRuleSimulation">Run simulation</button>
+            </div>
+            <p v-if="simulateResult" class="muted">
+              matched={{ simulateResult.matched ? 'yes' : 'no' }}
+              <span v-if="simulateResult.matched"> |
+                action={{ simulateResult.action || '-' }} |
+                rule={{ simulateResult.rule?.id || '-' }} |
+                profile={{ simulateResult.profile || '-' }}
+              </span>
+            </p>
+          </section>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>Enabled</th><th>Priority</th><th>Action</th><th>Vhosts</th><th>Filters</th><th>Note</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in rulesFiltered" :key="row.id">
+                <td><code>{{ row.id }}</code></td>
+                <td><span class="pill" :class="row.enabled ? '' : 'warn'">{{ row.enabled ? 'on' : 'off' }}</span></td>
+                <td>{{ row.priority }}</td>
+                <td>
+                  <span class="pill" :class="row.action?.type === 'block' ? 'danger' : (row.action?.type === 'challenge' ? 'warn' : '')">
+                    {{ row.action?.type || '-' }}
+                  </span>
+                  <span class="muted" v-if="row.action?.profile">({{ row.action.profile }})</span>
+                </td>
+                <td><code>{{ (row.scope?.vhosts || []).join(', ') }}</code></td>
+                <td>{{ ruleMatchSummary(row) }}</td>
+                <td>{{ row.note || '-' }}</td>
+                <td class="actions-cell">
+                  <button class="btn-quiet btn-sm" @click="loadRuleIntoForm(row)">Edit</button>
+                  <button class="btn-quiet btn-sm" @click="removeRule(row)">Delete</button>
+                </td>
+              </tr>
+              <tr v-if="!rulesFiltered.length"><td colspan="8" class="muted">No rules configured.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+</div>
+</div>
+</div>
+</body>
+</html>
