@@ -32,7 +32,7 @@ This inventory documents the effective authz classification enforced by the back
 - `/api/v1/webdet/hot-ips`, `/api/v1/webdet/ip-short`, `/api/v1/webdet/ip-drilldown`, `/api/v1/webdet/analyze-ip`
 - `/api/v1/webdet/history/stats|prune|truncate`
 - `/api/v1/webdet/ua-top`, `/api/v1/webdet/ua-drill`, `/api/v1/webdet/ua-emergency` (global "Web Bots" UA controls — `RequireAdmin`)
-- `/api/v1/clam/health` (`RequireAdmin`: box-level ClamAV scanner status — clamd reachability, circuit breaker, queue geometry, lifetime counters, global scan default. Not per-vhost, so admin-only. Per-vhost scan coverage on the ClamAV page comes from the scoped `/api/v1/webdet/vhosts` instead.)
+- `/api/v1/clam/health` (`RequireAdmin`: box-level ClamAV scanner status — clamd reachability, circuit breaker, queue geometry, lifetime counters, 24h infection count (persisted), global scan default. Not per-vhost, so admin-only. Per-vhost scan coverage on the ClamAV page comes from the scoped `/api/v1/webdet/vhosts` instead.)
 - `/api/v1/challenge/summary|vhosts|ips|ip`
 
 ## `internal/apiserver/apiserver.go` + token/mysql endpoints

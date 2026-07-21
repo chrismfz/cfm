@@ -32,6 +32,7 @@ type clamHealthResponse struct {
 	SigIgnored        uint64 `json:"sig_ignored"`        // infected verdicts downgraded to log-only
 	InlineBlocked     uint64 `json:"inline_blocked"`     // uploads 403'd by inline mode
 	InlineDryRunHits  uint64 `json:"inline_dryrun_hits"` // dry-run verdicts that WOULD have blocked
+	Infections24h     int    `json:"infections_24h"`     // clam_infected history events in the last 24h (persistence-based, survives restarts)
 }
 
 func clamUnix(t time.Time) int64 {
@@ -80,6 +81,14 @@ func (e *Engine) handleClamHealth(w http.ResponseWriter, r *http.Request) {
 			resp.SigIgnored = snap.SigIgnored
 			resp.InlineBlocked = snap.InlineBlocked
 			resp.InlineDryRunHits = snap.InlineDryRunHits
+		}
+	}
+	// Infections in the last 24h come from the persisted history store, so the
+	// figure survives a daemon restart and is meaningful even when the scanner
+	// is momentarily down (available=false) — past infections still matter.
+	if e != nil && e.history != nil {
+		if n, err := e.history.CountEventsSince("clam_infected", "", 24); err == nil {
+			resp.Infections24h = n
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

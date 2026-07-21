@@ -740,11 +740,12 @@ async function refreshLuaStats() {
       return;
     }
     const safe = (p) => api(p).catch(() => null);
-    const [fw, ch, waf, susp] = await Promise.all([
+    const [fw, ch, waf, susp, clam] = await Promise.all([
       safe('/v1/firewall/list'),
       safe('/v1/challenge/vhosts?status=active&mode=all&limit=500'),
       safe('/v1/waf/engine/summary?hours=24&limit=1&top=1'),
       safe('/v1/webdet/suspicious?limit=100'),
+      safe('/v1/clam/health'),
     ]);
     const rows = (payload, key = 'rows') => (Array.isArray(payload) ? payload : (payload && Array.isArray(payload[key]) ? payload[key] : []));
     const cards = [];
@@ -763,6 +764,19 @@ async function refreshLuaStats() {
     if (susp) {
       const n = rows(susp).length;
       cards.push(linkCard('/cfm-admin/webdetector/', 'Suspicious vhosts', escapeHTML(String(n)), 'short window', n > 0));
+    }
+    if (clam) {
+      // ClamAV headline = infections in the last 24h (persisted, survives
+      // restarts). Sub-line carries the live scanner state so a down/paused
+      // scanner is visible even at zero infections; the value goes red on a
+      // fresh infection OR when clamd is unreachable (breaker open).
+      const inf = Number(clam.infections_24h || 0);
+      let scanState;
+      if (!clam.available) scanState = 'scanner off';
+      else if (clam.breaker_open) scanState = 'clamd DOWN';
+      else scanState = (clam.scan_mode === 'inline' ? 'inline' : 'async') + ' · 24h';
+      cards.push(linkCard('/cfm-admin/webdetector/clam/', 'ClamAV infections', escapeHTML(String(inf)),
+        scanState, inf > 0 || (clam.available && clam.breaker_open)));
     }
     el.securityGrid.innerHTML = cards.length ? cards.join('') : '<p class="muted">No security data available.</p>';
   }

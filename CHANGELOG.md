@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Dashboard security overview: ClamAV card.** The at-a-glance security row
+  gains a fifth tile — **ClamAV infections** — showing infections in the last
+  24h with the live scanner state on the sub-line (`async/inline · 24h`,
+  `clamd DOWN`, or `scanner off`). It goes red on a fresh infection or when
+  clamd is unreachable, and deep-links to the ClamAV page. The 24h figure is a
+  windowed COUNT over the persisted history store (new
+  `HistoryStore.CountEventsSince`), surfaced as `infections_24h` on the
+  admin-only `/api/v1/clam/health` — so it survives a daemon restart and is
+  reported even when the scanner is momentarily down. Admin-only, like the rest
+  of the security overview.
+
 ### Fixed
 - **Challenge POST replay now covers multipart forms.** The challenge flow has
   long replayed a challenged POST's body after the challenge solves (that is
