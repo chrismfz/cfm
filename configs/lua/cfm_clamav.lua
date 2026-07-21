@@ -64,8 +64,18 @@ end
 -- scan_default=true it is opted OUT. (v1 matches exact hostnames — the same set
 -- the vhost-controls UI toggles; wildcard admin overrides can mirror
 -- cfm_waf_excl.lua later if needed.)
+--
+-- REFRESH MODEL (mirrors cfm_h3_config.lua): a request that finds the cache
+-- stale schedules an ASYNC ngx.timer refresh and proceeds with the cached set
+-- (even if empty) — the bridge fetch never blocks the upload request path. A
+-- per-worker flag dedupes in-flight refreshes; on fetch failure the worker
+-- keeps the last known set and retries next interval. Cold start serves the
+-- empty set until the first refresh lands: with scan_default=true an opted-out
+-- vhost may get one early scan (harmless), with scan_default=false an opted-in
+-- vhost may miss one — the same fail-quiet direction as an unreachable bridge.
 local _ovr = { hosts = {}, ts = 0 }
 local _OVR_TTL = 10
+local _ovr_refreshing = false
 
 local function fetch_overrides()
     local sock = ngx.socket.tcp()
@@ -99,12 +109,30 @@ local function fetch_overrides()
     return set
 end
 
+local function refresh_overrides_handler(premature)
+    -- The dedupe flag MUST clear even if anything below raises, or this worker
+    -- never refreshes again until restart (same finally-style as cfm_h3_config).
+    local ok, err = pcall(function()
+        if premature then return end
+        local set = fetch_overrides()
+        _ovr.ts = ngx.now()   -- advance even on failure to avoid hammering a down bridge
+        if set then _ovr.hosts = set end
+    end)
+    _ovr_refreshing = false
+    if not ok then
+        ngx.log(ngx.ERR, "[cfm_clamav] override refresh raised: ", tostring(err))
+    end
+end
+
 local function overrides_get()
-    local now = ngx.now()
-    if (now - _ovr.ts) < _OVR_TTL then return _ovr.hosts end
-    local set = fetch_overrides()
-    if set then _ovr.hosts = set end
-    _ovr.ts = now   -- advance ts even on failure to avoid hammering a down bridge
+    if not _ovr_refreshing and (ngx.now() - _ovr.ts) >= _OVR_TTL then
+        _ovr_refreshing = true
+        local ok, err = ngx.timer.at(0, refresh_overrides_handler)
+        if not ok then
+            _ovr_refreshing = false
+            ngx.log(ngx.WARN, "[cfm_clamav] could not schedule override refresh: ", tostring(err))
+        end
+    end
     return _ovr.hosts
 end
 

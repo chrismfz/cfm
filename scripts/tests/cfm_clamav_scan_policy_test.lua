@@ -47,6 +47,9 @@ local function build_ngx()
       get_body_data  = function() return S.body_data end,
     },
     socket = { tcp = function() return fake_sock end },
+    -- The async override refresh runs via ngx.timer.at in production; run it
+    -- synchronously here so should_scan() sees a settled cache.
+    timer = { at = function(_, fn) fn(false); return true end },
   }
 end
 
