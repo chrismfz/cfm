@@ -111,6 +111,47 @@ func RunClam(args []string, cfgDir string) int {
 		}
 		return runClamScan(client, cfg, args[1:])
 
+	case "scope":
+		// `cfm clam scope archives|all` = CLAM_SCAN_SCOPE, the magic-bytes upload
+		// gate. Same write-cfm.conf + fsnotify-reload path as `clam scan on|off`.
+		if len(args) < 2 {
+			fmt.Printf("scan scope (CLAM_SCAN_SCOPE): %s\n", cfg.Clam.ScanScope)
+			fmt.Println("usage: cfm clam scope {archives|all}")
+			return 0
+		}
+		switch strings.ToLower(strings.TrimSpace(args[1])) {
+		case "archives":
+			return runClamSetValue(cfgDir, "CLAM_SCAN_SCOPE", "archives")
+		case "all":
+			return runClamSetValue(cfgDir, "CLAM_SCAN_SCOPE", "all")
+		default:
+			fmt.Fprintf(os.Stderr, "clam scope: unknown value %q (want archives|all)\n", args[1])
+			return 2
+		}
+
+	case "mode":
+		// `cfm clam mode async|inline` = the GLOBAL scan mode (CLAM_SCAN_MODE);
+		// `cfm clam mode add|remove|list <host>` (per-vhost flip) is routed to
+		// the webdetector API by cmd/cfm before RunClam is reached.
+		if len(args) < 2 {
+			fmt.Printf("scan mode (CLAM_SCAN_MODE):    %s\n", cfg.Clam.ScanMode)
+			fmt.Printf("inline dry-run:                %v\n", cfg.Clam.InlineDryRun)
+			fmt.Printf("inline timeout:                %s\n", cfg.Clam.InlineTimeout)
+			fmt.Println("usage: cfm clam mode {async|inline} | cfm clam mode add|remove|list <host>")
+			return 0
+		}
+		switch strings.ToLower(strings.TrimSpace(args[1])) {
+		case "async":
+			return runClamSetValue(cfgDir, "CLAM_SCAN_MODE", "async")
+		case "inline":
+			fmt.Println("note: inline mode is FAIL-OPEN (clamd down/timeout => upload allowed).")
+			fmt.Println("      burn in with CLAM_INLINE_DRY_RUN = 1 before trusting it in anger.")
+			return runClamSetValue(cfgDir, "CLAM_SCAN_MODE", "inline")
+		default:
+			fmt.Fprintf(os.Stderr, "clam mode: unknown value %q (want async|inline, or add|remove|list <host>)\n", args[1])
+			return 2
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "clam: unknown subcommand: %s\n\n", cmd)
 		printClamHelp()
@@ -246,10 +287,16 @@ func printClamHelp() {
 	fmt.Println("  cfm clam ping")
 	fmt.Println("  cfm clam version")
 	fmt.Println("  cfm clam scan on|off        # CLAM_SCAN_DEFAULT: global upload-scan policy (default ON)")
+	fmt.Println("  cfm clam scope archives|all # CLAM_SCAN_SCOPE: magic-bytes upload gate (default archives)")
+	fmt.Println("  cfm clam mode async|inline  # CLAM_SCAN_MODE: notify-only vs block-on-infection (default async, fail-open)")
+	fmt.Println("  cfm clam mode add|remove|list <host>       # per-vhost flip of the global mode (scoped)")
 	fmt.Println("  cfm clam scan <file>")
 	fmt.Println("  cfm clam scan <dir>")
 	fmt.Println("  cfm clam scan --quiet-clean <file-or-dir>")
 	fmt.Println("  cfm clam override add|remove|list <host>   # per-vhost flip of the global scan policy (scoped)")
+	fmt.Println("  cfm clam sigignore list [--host <vhost>]                  # signature excludes (log-only downgrade)")
+	fmt.Println("  cfm clam sigignore add|remove <pattern> [--host <vhost>]  # glob on signature name; no --host = global (admin)")
+	fmt.Println("  cfm clam infections [--host <vhost>] [--limit N]          # recent infections (scoped history)")
 }
 
 // runClamToggle persists key=value into <cfgDir>/cfm.conf. The cfm
@@ -257,13 +304,19 @@ func printClamHelp() {
 // and triggers the reload path that re-renders cfm_clamav_config.lua;
 // no SIGHUP needed.
 func runClamToggle(cfgDir, key string, enabled bool) int {
-	if cfgDir == "" {
-		fmt.Fprintln(os.Stderr, "clam: no cfm.conf path resolved (use --config or set CFM_CONFIG_DIR)")
-		return 1
-	}
 	val := "false"
 	if enabled {
 		val = "true"
+	}
+	return runClamSetValue(cfgDir, key, val)
+}
+
+// runClamSetValue persists key=value into <cfgDir>/cfm.conf; the daemon's
+// fsnotify watcher picks it up (same reload path as runClamToggle's booleans).
+func runClamSetValue(cfgDir, key, val string) int {
+	if cfgDir == "" {
+		fmt.Fprintln(os.Stderr, "clam: no cfm.conf path resolved (use --config or set CFM_CONFIG_DIR)")
+		return 1
 	}
 	confPath := filepath.Join(cfgDir, "cfm.conf")
 	if err := UpsertConfKey(confPath, key, val); err != nil {
@@ -314,6 +367,9 @@ func runClamStatus(client *clam.Client, cfg *cfgpkg.Config, cfgDir string) int {
 	} else {
 		fmt.Println("deployed lua hook:        unknown (cfm_clamav_config.lua missing)")
 	}
+	fmt.Printf("CLAM_SCAN_DEFAULT:        %v\n", cfg.Clam.ScanDefault)
+	fmt.Printf("CLAM_SCAN_SCOPE:          %s\n", cfg.Clam.ScanScope)
+	fmt.Printf("CLAM_SIG_IGNORE:          %s\n", strings.Join(cfg.Clam.SigIgnore, ", "))
 	fmt.Printf("network:                  %s\n", cfg.Clam.Network)
 	fmt.Printf("address:                  %s\n", cfg.Clam.Address)
 	fmt.Printf("timeout:                  %s\n", cfg.Clam.Timeout)

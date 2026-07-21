@@ -270,6 +270,8 @@ if clamav_ok then
   local _CLAMAV_CONFIG_FILE = "/var/lib/cfm/lua/cfm_clamav_config.lua"
   local clamav_hook_enabled = true
   local clamav_scan_default = false
+  local clamav_scan_mode = "async"
+  local clamav_inline_timeout_ms = 3000
   do
     local val = fc.get(_CLAMAV_CONFIG_FILE, {
       ttl = 10,
@@ -279,19 +281,30 @@ if clamav_ok then
         -- hook); scan_default fails SAFE to false — if the rendered config is
         -- missing/corrupt we do NOT scan (conservative in an unknown state; the
         -- ON deploy default lives in the Go config, not this degraded fallback).
-        return { enabled = (v.enabled ~= false), scan_default = (v.scan_default == true) }
+        -- scan_mode fails SAFE to async — blocking must never arm through a
+        -- corrupt render.
+        return {
+          enabled           = (v.enabled ~= false),
+          scan_default      = (v.scan_default == true),
+          scan_mode         = (v.scan_mode == "inline") and "inline" or "async",
+          inline_timeout_ms = tonumber(v.inline_timeout_ms) or 3000,
+        }
       end,
     })
     if type(val) == "table" then
       clamav_hook_enabled = val.enabled
       clamav_scan_default = val.scan_default
+      clamav_scan_mode = val.scan_mode
+      clamav_inline_timeout_ms = val.inline_timeout_ms
     end
   end
   clamav.init({
-    token        = CFG.token,
-    sock_path    = CFG.sock_path,
-    enabled      = clamav_hook_enabled,
-    scan_default = clamav_scan_default,
+    token             = CFG.token,
+    sock_path         = CFG.sock_path,
+    enabled           = clamav_hook_enabled,
+    scan_default      = clamav_scan_default,
+    scan_mode         = clamav_scan_mode,
+    inline_timeout_ms = clamav_inline_timeout_ms,
   })
 end
 
@@ -1640,7 +1653,16 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- matches) DOES reach origin and must still be scanned.
       if clamav_ok and waf_action ~= "block"
          and not (waf_action == "challenge" and ngx.ctx.cfm_resumed_post) then
-        clamav.notify(ip, reason)
+        -- notify() returns non-nil ONLY when the vhost runs in inline mode and
+        -- the bridge answered block=true (infected, not sig-ignored, not
+        -- dry-run). Every failure inside is fail-open (nil) by contract.
+        local cv = clamav.notify(ip, reason)
+        if cv and cv.block then
+          ngx.header["X-CFM-Action"] = "clam_block"
+          log_route(ngx.WARN, "clam_block ip=" .. ip .. " host=" .. host ..
+            " sig=" .. tostring(cv.signature))
+          return ngx.exit(CFG.block_code)
+        end
       end
 
       if waf_action == "logonly" then
@@ -1694,11 +1716,27 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       return
     else
       -- No WAF rule fired: the upload passed the WAF cleanly, so scan it.
-      if clamav_ok then clamav.notify(ip, nil) end
+      if clamav_ok then
+        local cv = clamav.notify(ip, nil)
+        if cv and cv.block then
+          ngx.header["X-CFM-Action"] = "clam_block"
+          log_route(ngx.WARN, "clam_block ip=" .. ip .. " host=" .. host ..
+            " sig=" .. tostring(cv.signature))
+          return ngx.exit(CFG.block_code)
+        end
+      end
     end
   end
 end
-if not waf_ok and clamav_ok then clamav.notify(ip, nil) end
+if not waf_ok and clamav_ok then
+  local cv = clamav.notify(ip, nil)
+  if cv and cv.block then
+    ngx.header["X-CFM-Action"] = "clam_block"
+    log_route(ngx.WARN, "clam_block ip=" .. ip .. " host=" .. host ..
+      " sig=" .. tostring(cv.signature))
+    return ngx.exit(CFG.block_code)
+  end
+end
 
 -- ── Step 2b: Honour clearance allow (deferred from Step 1) ──────────────────
 -- WAF either passed cleanly or is disabled/excluded for this host. Now we

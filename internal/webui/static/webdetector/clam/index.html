@@ -23,7 +23,7 @@
     <main class="layout">
       <section class="card wide">
         <h2>ClamAV</h2>
-        <p class="muted">Upload-scan status and per-vhost coverage. Scanning is asynchronous (notify-only) — it never blocks a request. Supports <code>?vhost=a.com,b.com</code>.</p>
+        <p class="muted">Upload-scan status and per-vhost coverage. Default mode is async (notify-only, never blocks); vhosts switched to <strong>inline</strong> block infected uploads with a 403 (fail-open when clamd is unavailable). Supports <code>?vhost=a.com,b.com</code>.</p>
       </section>
 
       <!-- 1. Scanner status (admin only — box-level daemon state) -->
@@ -47,6 +47,19 @@
               <div class="muted" style="font-size:.8rem;margin-top:.3rem">flip with <code>cfm clam scan on|off</code></div>
             </section>
             <section class="mini-card">
+              <h3>Scan scope</h3>
+              <div><span class="pill" :class="clamHealth.scan_scope === 'archives' ? 'ok' : ''">{{ clamHealth.scan_scope || '-' }}</span></div>
+              <div class="muted" style="font-size:.8rem;margin-top:.3rem">magic-bytes gate · <code>cfm clam scope archives|all</code></div>
+            </section>
+            <section class="mini-card">
+              <h3>Scan mode</h3>
+              <div>
+                <span class="pill" :class="clamHealth.scan_mode === 'inline' ? 'warn' : 'ok'">{{ clamHealth.scan_mode || 'async' }}</span>
+                <span class="pill" v-if="clamHealth.inline_dry_run" title="Inline scans run but never block — burn-in">DRY RUN</span>
+              </div>
+              <div class="muted" style="font-size:.8rem;margin-top:.3rem">global default · per-vhost on Vhost controls · <code>cfm clam mode …</code></div>
+            </section>
+            <section class="mini-card">
               <h3>Queue</h3>
               <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.queue_len }} <span class="muted" style="font-size:.9rem">/ {{ clamHealth.queue_cap }}</span></div>
             </section>
@@ -68,6 +81,21 @@
               <h3>Queue drops</h3>
               <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.queue_drops }}</div>
               <div class="muted" style="font-size:.8rem">dropped when the queue was full</div>
+            </section>
+            <section class="mini-card">
+              <h3>Skipped (scope)</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.skipped_scope }}</div>
+              <div class="muted" style="font-size:.8rem">uploads outside the archive scope</div>
+            </section>
+            <section class="mini-card">
+              <h3>Ignored (signature)</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.sig_ignored }}</div>
+              <div class="muted" style="font-size:.8rem">verdicts downgraded to log-only</div>
+            </section>
+            <section class="mini-card">
+              <h3>Inline blocked</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.inline_blocked }}<span class="muted" style="font-size:.9rem" v-if="clamHealth.inline_dryrun_hits"> · {{ clamHealth.inline_dryrun_hits }} dry-run</span></div>
+              <div class="muted" style="font-size:.8rem">uploads 403'd on an infected verdict</div>
             </section>
           </div>
         </div>
@@ -111,22 +139,85 @@
         </div>
       </section>
 
-      <!-- 3. Recent infections (scoped: your vhost; admin: all vhosts) -->
+      <!-- 3. Signatures (aggregated view of the loaded infections window) -->
+      <section class="card wide" v-if="shouldShow('clam')">
+        <h2>Signatures</h2>
+        <p class="muted" v-if="!clamSignatures.length">No signature hits in the loaded window.</p>
+        <div class="table-wrap" v-else>
+          <table>
+            <thead>
+              <tr><th>Signature</th><th>Hits</th><th>Vhosts</th><th>Last seen</th><th>Status</th><th v-if="isAdmin">Action</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="s in clamSignatures" :key="s.sig">
+                <td class="truncate">{{ s.sig }}</td>
+                <td>{{ s.hits }}</td>
+                <td>{{ s.vhosts }}</td>
+                <td>{{ fmtTs(s.lastTs) }}</td>
+                <td>
+                  <span class="pill warn" v-if="s.ignoredHits === s.hits">ignored</span>
+                  <span class="pill warn" v-else-if="s.ignoredHits > 0">partially ignored</span>
+                  <span class="pill danger" v-else>notifying</span>
+                </td>
+                <td v-if="isAdmin">
+                  <button class="btn-quiet btn-sm" v-if="s.ignoredHits < s.hits" @click="ignoreSignatureGlobally(s.sig)" title="Downgrade this signature to log-only on EVERY vhost (no email, no quarantine)">Ignore globally</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 4. Signature excludes (scoped: own vhost; admin: global + any vhost) -->
+      <section class="card wide" v-if="shouldShow('clam')">
+        <h2>Signature excludes</h2>
+        <p class="muted">A matching verdict is downgraded to <strong>log-only</strong>: still recorded here and in <code>cfm.clam.log</code>, but no email and no quarantine. Patterns are case-insensitive globs on the signature name. The config baseline (<code>CLAM_SIG_IGNORE</code>, default <code>*_Hunting.UNOFFICIAL</code>) applies on top and is managed in <code>cfm.conf</code>.</p>
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.7rem">
+          <input class="input" style="min-width:260px" v-model="sigIgnoreNewPattern" placeholder="pattern, e.g. YARA.*_Hunting.UNOFFICIAL" />
+          <input class="input" style="min-width:200px" v-model="sigIgnoreNewHost" :placeholder="isAdmin ? 'vhost (empty = global)' : 'your vhost (required)'" />
+          <button class="btn-quiet btn-sm" :disabled="loading || !sigIgnoreNewPattern.trim()" @click="addSigIgnoreFromForm()">Add exclude</button>
+        </div>
+        <p class="muted" v-if="!clamSigIgnores.length">No runtime signature excludes.</p>
+        <div class="table-wrap" v-else>
+          <table>
+            <thead>
+              <tr><th>Scope</th><th>Pattern</th><th>Created</th><th>Action</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="e in clamSigIgnores" :key="(e.host || '*') + ':' + e.pattern">
+                <td><code>{{ e.host || '(global)' }}</code></td>
+                <td>{{ e.pattern }}</td>
+                <td>{{ e.created_at ? e.created_at.slice(0, 16).replace('T', ' ') : '-' }}</td>
+                <td><button class="btn-quiet btn-sm" :disabled="loading" @click="removeSigIgnore(e)">Remove</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 5. Recent infections (scoped: your vhost; admin: all vhosts) -->
       <section class="card wide" v-if="shouldShow('clam')">
         <h2>Recent infections</h2>
         <p class="muted" v-if="!clamInfections.length">No infections recorded<span v-if="isScopedMode"> for your vhost</span>. Infected uploads that ClamAV catches appear here.</p>
         <div class="table-wrap" v-else>
           <table>
             <thead>
-              <tr><th>When</th><th>Vhost</th><th>Source IP</th><th>File</th><th>Signature</th></tr>
+              <tr><th>When</th><th>Vhost</th><th>Source IP</th><th>File</th><th>Signature</th><th>Status</th><th>Action</th></tr>
             </thead>
             <tbody>
-              <tr v-for="row in clamInfections" :key="row.id">
+              <tr v-for="row in clamInfections" :key="row.id" :style="row.payload && row.payload.sig_ignored ? 'opacity:.55' : ''">
                 <td>{{ fmtTs(row.ts_unix) }}</td>
                 <td><code>{{ row.host }}</code></td>
                 <td>{{ row.ip }}<span class="muted" v-if="row.country"> · {{ row.country }}</span></td>
                 <td class="truncate">{{ (row.payload && row.payload.filename) || '-' }}</td>
-                <td>{{ row.reason }}</td>
+                <td class="truncate">{{ row.reason }}</td>
+                <td>
+                  <span class="pill warn" v-if="row.payload && row.payload.sig_ignored" :title="row.payload.ignored_by || ''">ignored</span>
+                  <span class="pill danger" v-else>notified</span>
+                </td>
+                <td>
+                  <button class="btn-quiet btn-sm" v-if="!sigAlreadyIgnored(row)" :disabled="loading" @click="ignoreSignatureForRow(row)" :title="'Stop notifying/quarantining ' + row.reason + ' on ' + row.host + ' (log-only)'">Ignore sig</button>
+                </td>
               </tr>
             </tbody>
           </table>

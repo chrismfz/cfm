@@ -250,12 +250,13 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 // vhost. HOST type only — upload scanning is a whole-vhost on/off, there is no
 // per-path/per-rule clam override.
 
-// logClamOverrideAudit writes the per-vhost scan-override change trail to the
-// CLAM log: who (admin or the token's vhost scope) flipped which host, from
-// where, and whether it took. Upload scanning is a protection layer a scoped
-// token may switch off for its own vhost, so every flip (and every out-of-scope
-// attempt) must be reconstructable from cfm.clam.log after the fact.
-func logClamOverrideAudit(r *http.Request, action, value, result string) {
+// logClamHostAudit writes the per-vhost clam change trail to the CLAM log:
+// who (admin or the token's vhost scope) flipped which host, from where, and
+// whether it took. Both the scan override (tag clam_override) and the mode
+// override (tag clam_mode) are protection knobs a scoped token may flip for
+// its own vhost, so every flip (and every out-of-scope attempt) must be
+// reconstructable from cfm.clam.log after the fact.
+func logClamHostAudit(r *http.Request, tag, action, value, result string) {
 	actor := "admin"
 	if scope := vhostScopeFromContext(r.Context()); scope != nil {
 		hosts := make([]string, 0, len(scope))
@@ -265,8 +266,12 @@ func logClamOverrideAudit(r *http.Request, action, value, result string) {
 		sort.Strings(hosts)
 		actor = "scoped:" + strings.Join(hosts, ",")
 	}
-	logging.LogfCLAM("[clam_override] action=%s host=%q result=%s actor=%s remote=%s",
-		action, value, result, actor, r.RemoteAddr)
+	logging.LogfCLAM("[%s] action=%s host=%q result=%s actor=%s remote=%s",
+		tag, action, value, result, actor, r.RemoteAddr)
+}
+
+func logClamOverrideAudit(r *http.Request, action, value, result string) {
+	logClamHostAudit(r, "clam_override", action, value, result)
 }
 
 // GET /api/v1/clam/override/list
@@ -335,5 +340,61 @@ func (e *Engine) handleClamOverrideRemove(w http.ResponseWriter, r *http.Request
 		return
 	}
 	logClamOverrideAudit(r, "remove", value, "ok")
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// Per-vhost ClamAV scan-MODE override (async vs inline). Same scoped-auth and
+// XOR-flip shape as the scan override above, against the SEPARATE mode store:
+// a listed host is flipped relative to the global CLAM_SCAN_MODE. A scoped
+// token flipping its own vhost to inline blocks only that vhost's uploads —
+// self-inflicted and self-serviceable, same trust model as the scan toggle.
+
+// GET /api/v1/clam/mode/list
+func (e *Engine) handleClamModeList(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
+	if e == nil {
+		writeJSON(w, http.StatusOK, []excludeEntry{})
+		return
+	}
+	scope := vhostScopeFromContext(r.Context())
+	writeJSON(w, http.StatusOK, filterExcludeListForScope(e.ClamModeOverrideList(), scope))
+}
+
+// POST /api/v1/clam/mode/add?type=host&value=example.com
+func (e *Engine) handleClamModeAdd(w http.ResponseWriter, r *http.Request) {
+	e.handleClamModeWrite(w, r, "add", e.ClamModeOverrideAdd)
+}
+
+// POST /api/v1/clam/mode/remove?type=host&value=example.com
+func (e *Engine) handleClamModeRemove(w http.ResponseWriter, r *http.Request) {
+	e.handleClamModeWrite(w, r, "remove", e.ClamModeOverrideRemove)
+}
+
+func (e *Engine) handleClamModeWrite(w http.ResponseWriter, r *http.Request, action string, op func(string, string, map[string]struct{}) bool) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
+	typ, value := readExcludeParams(r)
+	if typ != "host" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clam mode override supports type=host only"})
+		return
+	}
+	scope := vhostScopeFromContext(r.Context())
+	if !validateScopedExcludeWrite(r, typ, value) {
+		logClamHostAudit(r, "clam_mode", action, value, "denied_out_of_scope")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "value outside token scope"})
+		return
+	}
+	if strings.TrimSpace(value) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
+		return
+	}
+	if ok := op(typ, value, scope); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to " + action + " mode override"})
+		return
+	}
+	logClamHostAudit(r, "clam_mode", action, value, "ok")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

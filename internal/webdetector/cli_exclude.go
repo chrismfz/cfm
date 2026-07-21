@@ -33,6 +33,13 @@ func RunClamOverride(baseURL string, args []string) error {
 	return runGenericExclude(baseURL, "clam", "override", args)
 }
 
+// RunClamMode drives `cfm clam mode add|remove|list <host>` — the per-vhost
+// async/inline flip against the global CLAM_SCAN_MODE (same XOR shape as the
+// scan override, separate /api/v1/clam/mode/* store).
+func RunClamMode(baseURL string, args []string) error {
+	return runGenericExclude(baseURL, "clam", "mode", args)
+}
+
 // resource is the API path segment after the feature prefix ("exclude" for
 // waf/challenge, "override" for clam).
 func runGenericExclude(baseURL, prefix, resource string, args []string) error {

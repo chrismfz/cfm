@@ -119,6 +119,11 @@ type NginxBridge struct {
 	// hook can skip excluded vhosts.
 	ListClamScanOverrides func() []excludeEntry
 
+	// ListClamModeOverrides returns the per-vhost ClamAV scan-MODE flip list
+	// (host entries; XOR against the global CLAM_SCAN_MODE). Polled by
+	// cfm_clamav.lua to decide async vs inline per host.
+	ListClamModeOverrides func() []excludeEntry
+
 	// ListHTTP3Hosts returns the per-vhost HTTP/3 opt-in list. The Lua
 	// worker polls this every ~60s to refresh its per-worker cache and
 	// decide whether to emit the Alt-Svc header on responses. See
@@ -453,6 +458,12 @@ type clamHealthReporter interface {
 	Health() clam.HealthSnapshot
 }
 
+// clamSyncScanner is the optional inline-scan surface of the wired clam
+// manager (satisfied by *clam.Manager). Same separation rationale.
+type clamSyncScanner interface {
+	ScanUploadSync(clam.Job) clam.SyncVerdict
+}
+
 // ClamHealth returns the scanner health snapshot when a clam manager is wired
 // and exposes one. Non-blocking (reads cached breaker state; never dials clamd).
 func (b *NginxBridge) ClamHealth() (clam.HealthSnapshot, bool) {
@@ -630,6 +641,89 @@ func sanitizeForFilename(s string) string {
 		return "unknown"
 	}
 	return out
+}
+
+// clamSyncResponse is the inline-scan verdict returned to cfm_clamav.lua.
+// The edge obeys ONLY `block` — every policy decision (breaker, scope,
+// sig-ignore, dry-run) already happened in clam.ScanUploadSync. Failure of
+// any kind is expressed as block=false: the endpoint can never fail closed.
+type clamSyncResponse struct {
+	Block      bool   `json:"block"`
+	Verdict    string `json:"verdict"`
+	Signature  string `json:"signature,omitempty"`
+	WouldBlock bool   `json:"would_block,omitempty"`
+}
+
+// handleUploadScanSync is the blocking counterpart of handleUpload for
+// CLAM_SCAN_MODE=inline. Ownership: a Lua-written temp (already_copied) is
+// consumed HERE (removed after the scan — quarantine copies, never moves);
+// an nginx spool file belongs to nginx and is left alone. The response body
+// carries an explicit Content-Length for the minimal Lua parser (same
+// no-chunking guarantee as handleClamExcludes).
+func (b *NginxBridge) handleUploadScanSync(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
+
+	allow := func(verdict string) clamSyncResponse { return clamSyncResponse{Verdict: verdict} }
+	writeVerdict := func(resp clamSyncResponse) {
+		buf, err := json.Marshal(resp)
+		if err != nil {
+			http.Error(w, "encode", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
+		_, _ = w.Write(buf)
+	}
+
+	var msg nginxUploadMsg
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		writeVerdict(allow("bad_request"))
+		return
+	}
+	ip := strings.TrimSpace(msg.IP)
+	host := normalizeHost(msg.Host)
+	uri := strings.TrimSpace(msg.URI)
+	filename := strings.TrimSpace(msg.Filename)
+
+	scanner, _ := b.clamMgr.(clamSyncScanner)
+	if b.clamMgr == nil || !b.clamMgr.Enabled() || scanner == nil {
+		writeVerdict(allow("scanner_unavailable"))
+		return
+	}
+	srcPath, ok := validateUploadSourcePath(msg.BodyFile, msg.AlreadyCopied, b.clamPending)
+	if !ok {
+		writeVerdict(allow("bad_path"))
+		return
+	}
+	if msg.AlreadyCopied {
+		defer os.Remove(srcPath)
+	}
+
+	v := scanner.ScanUploadSync(clam.Job{
+		Path:        srcPath,
+		IP:          ip,
+		Host:        host,
+		URI:         uri,
+		FileName:    filename,
+		Reason:      "UPLOAD:inline",
+		InfectedDir: b.clamInfected,
+	})
+	logging.LogfCLAM("[upload_sync] ip=%s host=%s uri=%s verdict=%s block=%v sig=%q",
+		ip, host, uri, v.Verdict, v.Block, v.Signature)
+	writeVerdict(clamSyncResponse{
+		Block:      v.Block,
+		Verdict:    v.Verdict,
+		Signature:  v.Signature,
+		WouldBlock: v.WouldBlock,
+	})
 }
 
 func validateUploadSourcePath(bodyFile string, alreadyCopied bool, clamPending string) (string, bool) {
@@ -1403,11 +1497,13 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/waf/excluded/meta", b.instrument("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta))
 	mux.HandleFunc("/nginx/waf/excludes", b.instrument("/nginx/waf/excludes", b.handleWAFExcludes))
 	mux.HandleFunc("/nginx/clam/overrides", b.instrument("/nginx/clam/overrides", b.handleClamExcludes))
+	mux.HandleFunc("/nginx/clam/mode_overrides", b.instrument("/nginx/clam/mode_overrides", b.handleClamModeOverrides))
 	mux.HandleFunc("/nginx/h3/config", b.instrument("/nginx/h3/config", b.handleHTTP3Config))
 	mux.HandleFunc("/nginx/waf/stats", b.instrument("/nginx/waf/stats", b.handleWAFStats))
 	mux.HandleFunc("/nginx/snapshot", b.instrument("/nginx/snapshot", b.handleSnapshot))
 	mux.HandleFunc("/nginx/status", b.instrument("/nginx/status", b.handleStatus))
 	mux.HandleFunc("/nginx/upload", b.instrument("/nginx/upload", b.handleUpload))
+	mux.HandleFunc("/nginx/upload/scan", b.instrument("/nginx/upload/scan", b.handleUploadScanSync))
 	mux.HandleFunc("/nginx/events/batch", b.instrument("/nginx/events/batch", b.handleEventsBatch))
 
 	srv := newBridgeHTTPServer(mux)
@@ -2165,6 +2261,16 @@ func (b *NginxBridge) handleWAFExcludes(w http.ResponseWriter, r *http.Request) 
 // marshal first and set Content-Length explicitly to guarantee no chunking at
 // any list size.
 func (b *NginxBridge) handleClamExcludes(w http.ResponseWriter, r *http.Request) {
+	b.serveClamHostEntries(w, r, b.ListClamScanOverrides)
+}
+
+// handleClamModeOverrides serves the per-vhost mode-flip set for
+// cfm_clamav.lua — same wire contract as the scan overrides.
+func (b *NginxBridge) handleClamModeOverrides(w http.ResponseWriter, r *http.Request) {
+	b.serveClamHostEntries(w, r, b.ListClamModeOverrides)
+}
+
+func (b *NginxBridge) serveClamHostEntries(w http.ResponseWriter, r *http.Request, list func() []excludeEntry) {
 	if !b.checkToken(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -2174,8 +2280,8 @@ func (b *NginxBridge) handleClamExcludes(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	items := make([]excludeEntry, 0)
-	if b.ListClamScanOverrides != nil {
-		for _, e := range b.ListClamScanOverrides() {
+	if list != nil {
+		for _, e := range list() {
 			if strings.TrimSpace(e.Type) == "" || strings.TrimSpace(e.Value) == "" {
 				continue
 			}

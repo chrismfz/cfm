@@ -17,7 +17,80 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **ClamAV upload scanning now defaults to ARCHIVES ONLY (`CLAM_SCAN_SCOPE`).**
+  ⚠️ Deliberate coverage change on upgrade: the scanner gates every upload job
+  on **magic bytes** and, with the new default `CLAM_SCAN_SCOPE = archives`,
+  scans only container formats — zip (which includes docx/xlsx/odt/jar/apk),
+  gzip, rar, 7z, xz, bzip2 — the one class the WAF's signature layer genuinely
+  cannot inspect. High-volume/low-value uploads (images, video, pdf, plain
+  files) are no longer sent to clamd, making fleet-wide scanning viable on busy
+  shared servers. `CLAM_SCAN_SCOPE = all` (or `cfm clam scope all`) restores
+  the previous full coverage; skipped uploads are counted (`skipped_scope`) on
+  the ClamAV page and in `/api/v1/clam/health`. Extensions are never trusted —
+  the gate reads the spooled file's leading bytes (plain `.tar` is out of the
+  v1 magic set; `.tar.gz` is caught as gzip). Ad-hoc `cfm clam scan <path>`
+  CLI scans are unaffected (the gate applies to the upload pipeline only).
+- **Hunting-grade ClamAV signatures are now log-only by default
+  (`CLAM_SIG_IGNORE`).** ⚠️ Deliberate notification change on upgrade: infected
+  verdicts whose signature matches `*_Hunting.UNOFFICIAL` (third-party YARA
+  "hunting" rules, FP-prone by design — observed FP:
+  `YARA.SIGNATURE_BASE_Brooxml_Hunting.UNOFFICIAL` on a legitimate customer
+  `.docx`) are **downgraded to log-only**: still written to `cfm.clam.log` and
+  the scoped history (flagged `sig_ignored`, greyed on the ClamAV page), but no
+  CLAM/INFECTED email and no quarantine copy — legitimate customer files are no
+  longer retained as "evidence" on a hunting-rule match. Set an explicit empty
+  `CLAM_SIG_IGNORE =` to act on every verdict. This layer is also the
+  prerequisite for future inline blocking (a hunting sig must never 403 a
+  customer upload).
+
 ### Added
+- **ClamAV inline (blocking) upload scanning — `CLAM_SCAN_MODE`, default OFF.**
+  A vhost in **inline** mode makes the edge wait (bounded by
+  `CLAM_INLINE_TIMEOUT`, default 3s) for the scan verdict and answer **403** on
+  an infected upload, instead of only notifying after the fact. Ships
+  **disabled** (`CLAM_SCAN_MODE = async` — zero behaviour change on deploy) and
+  is **fail-open by contract**: clamd down/hung, circuit breaker open, verdict
+  timeout, oversize stream, bridge unreachable — every failure ALLOWS the
+  upload and degrades to an async notify-only scan (the file is re-queued), so
+  a clamd outage can never take down uploads; the hung-clamd and
+  stream-rejected paths have dedicated tests. The scan runs over clamd
+  **INSTREAM** (the daemon streams the spooled body; clamd needs no filesystem
+  access, no extra pending-dir copy). Policy lives entirely in the daemon — the
+  edge obeys a single `block` flag — so inline honours the archive scope gate
+  and the signature excludes (a hunting-sig FP can never 403 a customer
+  upload), and `/acctxfer*` transfer endpoints never wait on a verdict.
+  Burn-in: `CLAM_INLINE_DRY_RUN = 1` scans inline and records what WOULD block
+  (log + history `mode=inline_dryrun` + counter) without blocking. Controls:
+  `cfm clam mode async|inline` (global), `cfm clam mode add|remove|list <host>`
+  (per-vhost XOR flip, scoped API `/api/v1/clam/mode/*` with `[clam_mode]`
+  audit trail), a **Clam mode** column + INLINE quick-filter on the
+  vhost-controls grid, and scan-mode / inline-blocked cards on the ClamAV page.
+  Blocked requests log `clam_block` with `X-CFM-Action: clam_block`. Inline is
+  OpenResty-mode only (DNAT has no in-path edge; the knob is a no-op there).
+- **Per-signature ClamAV excludes — runtime, global + per-vhost, with full
+  CLI/UI.** New sig-ignore store editable with no config edit and no reload:
+  `/api/v1/clam/sigignore/{list,add,remove}` (patterns are case-insensitive
+  globs on the signature name; matching uses the same matcher the scanner
+  enforces with). GLOBAL entries are **admin-only**; a scoped cPanel token may
+  add/remove/see only entries for its own vhosts. Every write **and every
+  denied out-of-scope attempt** is audit-logged to `cfm.clam.log`
+  (`[clam_sigignore]` lines). CLI: `cfm clam sigignore list|add|remove
+  <pattern> [--host <vhost>]` (mirrored under `cfm webtop clam sigignore`).
+- **ClamAV page: per-signature insights + one-click signature excludes.** The
+  cfm-admin ClamAV page gains: a **Signatures** card (per-signature hit count,
+  vhosts affected, last seen, notifying/ignored status, admin "Ignore
+  globally" action); a **Signature excludes** card (add/remove entries, scoped
+  visibility); and per-row **"Ignore sig"** on the Recent-infections table —
+  adds an exact-signature exclude for that row's vhost, so an operator (or the
+  vhost owner) can neutralise a false positive right where they see it, without
+  a whole-vhost scan opt-out. Sig-ignored rows stay visible, greyed with an
+  `ignored` badge (and `ignored_by` provenance). The scanner-status card now
+  also shows the scan scope and the skipped-by-scope / sig-ignored counters.
+- **CLI infection visibility: `cfm clam infections`.** Tabular view of the
+  scoped `clam_infected` history (when / vhost / source IP+country / file /
+  signature / action taken), with `--host` and `--limit`; works for admin and
+  scoped tokens alike. Mirrored under `cfm webtop clam infections`.
 - **ClamAV infections are recorded in the scoped history + shown on the ClamAV page.**
   Infected uploads the scanner catches are now persisted into the webdetector
   history store (`event_type=clam_infected`) — preserving the file name, request

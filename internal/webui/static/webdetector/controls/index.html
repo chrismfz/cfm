@@ -286,6 +286,7 @@
           <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': controlsQuickFilter === 'waf_off' }" @click="setControlsQuickFilter('waf_off')" title="Vhosts with the WAF disabled (excluded)">WAF OFF ({{ controlsCounts.wafOff }})</button>
           <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': controlsQuickFilter === 'http3_on' }" @click="setControlsQuickFilter('http3_on')" title="Vhosts that opted in to HTTP/3">HTTP/3 ON ({{ controlsCounts.http3On }})</button>
           <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': controlsQuickFilter === 'clam_off' }" @click="setControlsQuickFilter('clam_off')" title="Vhosts with ClamAV upload scanning off">Clam OFF ({{ controlsCounts.clamOff }})</button>
+          <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': controlsQuickFilter === 'clam_inline' }" @click="setControlsQuickFilter('clam_inline')" title="Vhosts with inline (blocking) ClamAV mode">Clam INLINE ({{ controlsCounts.clamInline }})</button>
           <label>Show</label>
           <select class="input" v-model.number="vhostControlsLimit">
             <option :value="50">50</option>
@@ -305,6 +306,7 @@
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('waf')">WAF {{ controlsSortArrow('waf') }}</button></th>
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('http3')">HTTP/3 {{ controlsSortArrow('http3') }}</button></th>
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('clam')">Clam {{ controlsSortArrow('clam') }}</button></th>
+                <th><button class="btn-quiet btn-sm" @click="setControlsSort('clammode')">Clam mode {{ controlsSortArrow('clammode') }}</button></th>
               </tr>
             </thead>
             <tbody>
@@ -322,8 +324,11 @@
                 <td>
                   <button :class="vhostControlEnabled(row, 'clam') ? 'btn-quiet' : 'btn-muted'" @click="toggleVhostProtection(row, 'clam')" :disabled="loading || !vhostControlToggleable(row, 'clam')" :title="vhostControlButtonTitle(row, 'clam')">{{ vhostControlButtonLabel(row, 'clam') }}</button>
                 </td>
+                <td>
+                  <button :class="vhostControlEnabled(row, 'clammode') ? 'btn-quiet' : 'btn-muted'" @click="toggleVhostProtection(row, 'clammode')" :disabled="loading || !vhostControlToggleable(row, 'clammode')" :title="vhostControlButtonTitle(row, 'clammode')">{{ vhostControlButtonLabel(row, 'clammode') }}</button>
+                </td>
               </tr>
-              <tr v-if="!vhostControlsFiltered.length"><td colspan="5" class="muted">No vhosts matched current scope/filter.</td></tr>
+              <tr v-if="!vhostControlsFiltered.length"><td colspan="6" class="muted">No vhosts matched current scope/filter.</td></tr>
             </tbody>
           </table>
         </div>
