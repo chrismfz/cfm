@@ -17,6 +17,23 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **The `/api/v1/clam/*` API group was unreachable through the shared
+  apiserver — ClamAV page showed "not wired" / empty on live boxes.** The
+  shared apiserver mounts the webdetector engine's routes per top-level
+  prefix (`/api/v1/webdet/`, `/challenge/`, `/waf/`, `/cpanel/`, `/http3/`),
+  and `/api/v1/clam/` was never added — so every clam endpoint (health,
+  override, mode, sigignore) fell through to the webui catch-all and returned
+  the dashboard HTML instead of JSON. The UI rendered its fail-safe fallbacks
+  (scanner "not wired", empty excludes/infections) and the CLI mirrors
+  (`cfm clam override|mode|sigignore list`) got HTML; unit tests passed
+  because they exercise the engine mux directly. Fixed by adding the prefix,
+  and hardened against recurrence: the prefix list now lives next to the
+  engine's route table (`webdet.SharedAPIPrefixes`, consumed by the apiserver
+  mount), RegisterHTTP is table-driven, and a new test fails any route whose
+  prefix is not proxied (this class of bug shipped twice before — `/http3/`,
+  then `/clam/`).
+
 ### Changed
 - **ClamAV upload scanning now defaults to ARCHIVES ONLY (`CLAM_SCAN_SCOPE`).**
   ⚠️ Deliberate coverage change on upgrade: the scanner gates every upload job

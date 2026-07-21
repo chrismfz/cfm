@@ -35,11 +35,9 @@ type cpanelUserInfo struct {
 	Databases []string `json:"databases"`
 }
 
-// RegisterCpanelHTTP wires the cPanel helper endpoints onto the mux.
-// Call from RegisterHTTP or from apiserver after auth middleware is in place.
-func (e *Engine) RegisterCpanelHTTP(mux *http.ServeMux) {
-	mux.HandleFunc("/api/v1/cpanel/user-info", e.handleCpanelUserInfo)
-}
+// The cPanel helper endpoint (/api/v1/cpanel/user-info) is registered via the
+// apiRoutes table in http_api.go — the single source of truth for the
+// engine's HTTP surface, paired with SharedAPIPrefixes.
 
 func (e *Engine) handleCpanelUserInfo(w http.ResponseWriter, r *http.Request) {
 	now := cpanelAuthNow()

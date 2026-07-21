@@ -13,84 +13,117 @@ import (
 	"time"
 )
 
+// SharedAPIPrefixes is the canonical list of top-level /api/v1/<group>/
+// prefixes the shared apiserver must proxy to the engine mux
+// (internal/detectors/webdetector_register.go mounts exactly these behind
+// webdetRoutesProxy). The engine's routes and this list MUST move together:
+// a route under a prefix missing here is registered on the engine mux but
+// unreachable through the shared apiserver — the request falls through to
+// the webui catch-all and callers get the dashboard HTML instead of JSON
+// (how the /api/v1/clam/ group shipped broken).
+// TestRegisterHTTP_SharedPrefixCoverage enforces the pairing.
+func SharedAPIPrefixes() []string {
+	return []string{
+		"/api/v1/webdet/",
+		"/api/v1/challenge/",
+		"/api/v1/waf/",
+		"/api/v1/cpanel/",
+		"/api/v1/http3/",
+		"/api/v1/clam/",
+	}
+}
+
+type apiRoute struct {
+	path    string
+	handler http.HandlerFunc
+}
+
+// apiRoutes is the single source of truth for the engine's HTTP surface —
+// RegisterHTTP registers exactly this table, and the prefix-coverage test
+// walks it. Add new endpoints here, never with a bare mux.HandleFunc.
+func (e *Engine) apiRoutes() []apiRoute {
+	return []apiRoute{
+		{"/api/v1/webdet/top-short", e.handleTopShort},
+		// aliases (compat)
+		{"/api/v1/webdet/top", e.handleTopShort},
+		{"/api/v1/webdet/suspicious", e.handleSuspicious},
+		{"/api/v1/webdet/drilldown", e.handleDrilldown},
+		{"/api/v1/webdet/hot-ips", e.handleHotIPs},
+		{"/api/v1/webdet/long-top", e.handleLongTop},
+		{"/api/v1/webdet/ip-short", e.handleIPShort},
+		{"/api/v1/webdet/ip-drilldown", e.handleIPDrilldown},
+		{"/api/v1/webdet/analyze-ip", e.handleAnalyzeIP},
+		{"/api/v1/webdet/force-unblock-ip", e.handleForceUnblockIP},
+		{"/api/v1/webdet/analyze-host", e.handleAnalyzeHost},
+		{"/api/v1/webdet/summary", e.handleWebdetSummary},
+		{"/api/v1/webdet/ingest-source", e.handleIngestSource},
+		{"/api/v1/webdet/vhosts", e.handleWebdetVhosts},
+		{"/api/v1/webdet/rules", e.handleWebdetRulesList},
+		{"/api/v1/webdet/rules/get", e.handleWebdetRulesGet},
+		{"/api/v1/webdet/rules/add", e.handleWebdetRulesAdd},
+		{"/api/v1/webdet/rules/update", e.handleWebdetRulesUpdate},
+		{"/api/v1/webdet/rules/remove", e.handleWebdetRulesRemove},
+		{"/api/v1/webdet/rules/simulate", e.handleWebdetRulesSimulate},
+
+		// Bot-top control surface (box-wide, UA-keyed).
+		{"/api/v1/webdet/ua-top", e.handleUATop},
+		{"/api/v1/webdet/ua-drill", e.handleUADrill},
+		{"/api/v1/webdet/ua-emergency", e.handleUAEmergency},
+
+		// History API
+		{"/api/v1/webdet/history/events", e.handleHistoryEvents},
+		{"/api/v1/webdet/history/summary", e.handleHistorySummary},
+		{"/api/v1/webdet/history/stats", e.handleHistoryStats},
+		{"/api/v1/webdet/history/challenge-outcomes", e.handleHistoryChallengeOutcomes},
+		{"/api/v1/webdet/history/waf-by-rule", e.handleHistoryWAFByRule},
+		{"/api/v1/webdet/history/vhost-overview", e.handleHistoryVhostOverview},
+		{"/api/v1/webdet/history/prune", e.handleHistoryPrune},
+		{"/api/v1/webdet/history/truncate", e.handleHistoryTruncate},
+
+		// Challenge JSON API
+		{"/api/v1/challenge/summary", e.handleChallengeSummary},
+		{"/api/v1/challenge/vhosts", e.handleChallengeVhosts},
+		{"/api/v1/challenge/vhost", e.handleChallengeVhost}, // ?host=
+		{"/api/v1/challenge/ips", e.handleChallengeIPs},
+		{"/api/v1/challenge/ip", e.handleChallengeIP}, // ?ip=
+		{"/api/v1/challenge/events", e.handleChallengeEvents},
+		{"/api/v1/challenge/vhost/add", e.handleChallengeVhostAdd},
+		{"/api/v1/challenge/vhost/remove", e.handleChallengeVhostRemove},
+		{"/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus},
+		{"/api/v1/challenge/exclude/list", e.handleChallengeExcludeList},
+		{"/api/v1/challenge/exclude/add", e.handleChallengeExcludeAdd},
+		{"/api/v1/challenge/exclude/remove", e.handleChallengeExcludeRemove},
+		{"/api/v1/waf/exclude/list", e.handleWAFExcludeList},
+		{"/api/v1/waf/exclude/add", e.handleWAFExcludeAdd},
+		{"/api/v1/waf/exclude/remove", e.handleWAFExcludeRemove},
+		{"/api/v1/clam/override/list", e.handleClamOverrideList},
+		{"/api/v1/clam/override/add", e.handleClamOverrideAdd},
+		{"/api/v1/clam/override/remove", e.handleClamOverrideRemove},
+		{"/api/v1/clam/mode/list", e.handleClamModeList},
+		{"/api/v1/clam/mode/add", e.handleClamModeAdd},
+		{"/api/v1/clam/mode/remove", e.handleClamModeRemove},
+		{"/api/v1/clam/sigignore/list", e.handleClamSigIgnoreList},
+		{"/api/v1/clam/sigignore/add", e.handleClamSigIgnoreAdd},
+		{"/api/v1/clam/sigignore/remove", e.handleClamSigIgnoreRemove},
+		{"/api/v1/clam/health", e.handleClamHealth},
+		{"/api/v1/http3/list", e.handleHTTP3List},
+		{"/api/v1/http3/enable", e.handleHTTP3Enable},
+		{"/api/v1/http3/disable", e.handleHTTP3Disable},
+		{"/api/v1/waf/engine/summary", e.handleWAFEngineSummary},
+		{"/api/v1/waf/rules", e.handleWAFRules},
+		{"/api/v1/waf/hit-rates", e.handleWAFHitRates},
+		{"/api/v1/cpanel/user-info", e.handleCpanelUserInfo},
+	}
+}
+
 // RegisterHTTP wires all webdetector + challenge endpoints onto the provided mux.
 func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	if mux == nil {
 		return
 	}
-
-	mux.HandleFunc("/api/v1/webdet/top-short", e.handleTopShort)
-	// aliases (compat)
-	mux.HandleFunc("/api/v1/webdet/top", e.handleTopShort)
-	mux.HandleFunc("/api/v1/webdet/suspicious", e.handleSuspicious)
-	mux.HandleFunc("/api/v1/webdet/drilldown", e.handleDrilldown)
-	mux.HandleFunc("/api/v1/webdet/hot-ips", e.handleHotIPs)
-	mux.HandleFunc("/api/v1/webdet/long-top", e.handleLongTop)
-	mux.HandleFunc("/api/v1/webdet/ip-short", e.handleIPShort)
-	mux.HandleFunc("/api/v1/webdet/ip-drilldown", e.handleIPDrilldown)
-	mux.HandleFunc("/api/v1/webdet/analyze-ip", e.handleAnalyzeIP)
-	mux.HandleFunc("/api/v1/webdet/force-unblock-ip", e.handleForceUnblockIP)
-	mux.HandleFunc("/api/v1/webdet/analyze-host", e.handleAnalyzeHost)
-	mux.HandleFunc("/api/v1/webdet/summary", e.handleWebdetSummary)
-	mux.HandleFunc("/api/v1/webdet/ingest-source", e.handleIngestSource)
-	mux.HandleFunc("/api/v1/webdet/vhosts", e.handleWebdetVhosts)
-	mux.HandleFunc("/api/v1/webdet/rules", e.handleWebdetRulesList)
-	mux.HandleFunc("/api/v1/webdet/rules/get", e.handleWebdetRulesGet)
-	mux.HandleFunc("/api/v1/webdet/rules/add", e.handleWebdetRulesAdd)
-	mux.HandleFunc("/api/v1/webdet/rules/update", e.handleWebdetRulesUpdate)
-	mux.HandleFunc("/api/v1/webdet/rules/remove", e.handleWebdetRulesRemove)
-	mux.HandleFunc("/api/v1/webdet/rules/simulate", e.handleWebdetRulesSimulate)
-
-	// Bot-top control surface (box-wide, UA-keyed).
-	mux.HandleFunc("/api/v1/webdet/ua-top", e.handleUATop)
-	mux.HandleFunc("/api/v1/webdet/ua-drill", e.handleUADrill)
-	mux.HandleFunc("/api/v1/webdet/ua-emergency", e.handleUAEmergency)
-
-	// History API
-	mux.HandleFunc("/api/v1/webdet/history/events", e.handleHistoryEvents)
-	mux.HandleFunc("/api/v1/webdet/history/summary", e.handleHistorySummary)
-	mux.HandleFunc("/api/v1/webdet/history/stats", e.handleHistoryStats)
-	mux.HandleFunc("/api/v1/webdet/history/challenge-outcomes", e.handleHistoryChallengeOutcomes)
-
-	mux.HandleFunc("/api/v1/webdet/history/waf-by-rule", e.handleHistoryWAFByRule)
-	mux.HandleFunc("/api/v1/webdet/history/vhost-overview", e.handleHistoryVhostOverview)
-
-	mux.HandleFunc("/api/v1/webdet/history/prune", e.handleHistoryPrune)
-	mux.HandleFunc("/api/v1/webdet/history/truncate", e.handleHistoryTruncate)
-
-	// Challenge JSON API
-	mux.HandleFunc("/api/v1/challenge/summary", e.handleChallengeSummary)
-	mux.HandleFunc("/api/v1/challenge/vhosts", e.handleChallengeVhosts)
-	mux.HandleFunc("/api/v1/challenge/vhost", e.handleChallengeVhost) // ?host=
-	mux.HandleFunc("/api/v1/challenge/ips", e.handleChallengeIPs)
-	mux.HandleFunc("/api/v1/challenge/ip", e.handleChallengeIP) // ?ip=
-	mux.HandleFunc("/api/v1/challenge/events", e.handleChallengeEvents)
-	mux.HandleFunc("/api/v1/challenge/vhost/add", e.handleChallengeVhostAdd)
-	mux.HandleFunc("/api/v1/challenge/vhost/remove", e.handleChallengeVhostRemove)
-	mux.HandleFunc("/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus)
-	mux.HandleFunc("/api/v1/challenge/exclude/list", e.handleChallengeExcludeList)
-	mux.HandleFunc("/api/v1/challenge/exclude/add", e.handleChallengeExcludeAdd)
-	mux.HandleFunc("/api/v1/challenge/exclude/remove", e.handleChallengeExcludeRemove)
-	mux.HandleFunc("/api/v1/waf/exclude/list", e.handleWAFExcludeList)
-	mux.HandleFunc("/api/v1/waf/exclude/add", e.handleWAFExcludeAdd)
-	mux.HandleFunc("/api/v1/waf/exclude/remove", e.handleWAFExcludeRemove)
-	mux.HandleFunc("/api/v1/clam/override/list", e.handleClamOverrideList)
-	mux.HandleFunc("/api/v1/clam/override/add", e.handleClamOverrideAdd)
-	mux.HandleFunc("/api/v1/clam/override/remove", e.handleClamOverrideRemove)
-	mux.HandleFunc("/api/v1/clam/mode/list", e.handleClamModeList)
-	mux.HandleFunc("/api/v1/clam/mode/add", e.handleClamModeAdd)
-	mux.HandleFunc("/api/v1/clam/mode/remove", e.handleClamModeRemove)
-	mux.HandleFunc("/api/v1/clam/sigignore/list", e.handleClamSigIgnoreList)
-	mux.HandleFunc("/api/v1/clam/sigignore/add", e.handleClamSigIgnoreAdd)
-	mux.HandleFunc("/api/v1/clam/sigignore/remove", e.handleClamSigIgnoreRemove)
-	mux.HandleFunc("/api/v1/clam/health", e.handleClamHealth)
-	mux.HandleFunc("/api/v1/http3/list", e.handleHTTP3List)
-	mux.HandleFunc("/api/v1/http3/enable", e.handleHTTP3Enable)
-	mux.HandleFunc("/api/v1/http3/disable", e.handleHTTP3Disable)
-	mux.HandleFunc("/api/v1/waf/engine/summary", e.handleWAFEngineSummary)
-	mux.HandleFunc("/api/v1/waf/rules", e.handleWAFRules)
-	mux.HandleFunc("/api/v1/waf/hit-rates", e.handleWAFHitRates)
-	e.RegisterCpanelHTTP(mux)
+	for _, rt := range e.apiRoutes() {
+		mux.HandleFunc(rt.path, rt.handler)
+	}
 }
 
 // ServeHTTPWithContext starts a small standalone HTTP server for webdetector API.

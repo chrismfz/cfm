@@ -193,14 +193,14 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
 		webdetRoutesOnce.Do(func() {
 			apiserver.Register(func(m *http.ServeMux) {
-				m.HandleFunc("/api/v1/webdet/", webdetRoutesProxy)
-				m.HandleFunc("/api/v1/challenge/", webdetRoutesProxy)
-				m.HandleFunc("/api/v1/waf/", webdetRoutesProxy)
-				m.HandleFunc("/api/v1/cpanel/", webdetRoutesProxy)
-				// HTTP/3 per-vhost opt-in lives under /api/v1/http3/. Without
-				// this prefix the apiserver falls through to the dashboard
-				// catch-all and CLI gets HTML back instead of JSON.
-				m.HandleFunc("/api/v1/http3/", webdetRoutesProxy)
+				// The canonical prefix list lives NEXT TO the engine's route
+				// table (webdet.SharedAPIPrefixes) and a test pairs the two —
+				// a route group missing a proxied prefix falls through to the
+				// dashboard catch-all and callers get HTML instead of JSON
+				// (bit us with /api/v1/http3/ and again with /api/v1/clam/).
+				for _, prefix := range webdet.SharedAPIPrefixes() {
+					m.HandleFunc(prefix, webdetRoutesProxy)
+				}
 			})
 			logging.Logf("[webdetector] routes registered on shared apiserver")
 		})
