@@ -17,6 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **WAF rule 606 (`WAF_HTTP_SMUGGLING`): pasted access-log lines no longer
+  challenged.** Support-ticket replies / forum posts / CMS articles that quote
+  combined-log lines (`... "GET /path HTTP/1.1" 200 26307 ...`) carry a literal
+  request line in the body and tripped the smuggling detector — observed on a
+  WHMCS ticket reply, where the challenge also lost the (non-replayable ~1MB
+  multipart) reply. The detector now exempts the unambiguous access-log
+  fingerprint — the request line wrapped in double quotes AND immediately
+  followed by a 3-digit status — and only that: a bare smuggled line, a quoted
+  line without a status, or a status without the quote still fire, and a log
+  paste cannot mask a separate bare smuggled line elsewhere in the request
+  (all pinned by tests). Detector-level fix; the rule stays at challenge.
+
 ### Changed
 - **cfm-admin: API tokens moved to their own page + nav polish.** Scoped-token
   issuance/revocation left the Vhost-controls page for a dedicated admin-only
