@@ -349,6 +349,15 @@ func main() {
 				runAPI(webdet.RunClamSigIgnore, "clam sigignore")
 			case "infections":
 				runAPI(webdet.RunClamInfections, "clam infections")
+			case "mode":
+				// Per-vhost flips go to the API; `mode async|inline` (the
+				// global default) falls through to cli.RunClam's cfm.conf path.
+				if len(os.Args) >= 4 {
+					switch os.Args[3] {
+					case "add", "remove", "list":
+						runAPI(webdet.RunClamMode, "clam mode")
+					}
+				}
 			}
 		}
 		os.Exit(cli.RunClam(os.Args[2:], cfgDir()))
@@ -1080,6 +1089,10 @@ func runDaemon(args []string) {
 				InfectedDir: cfg.Clam.InfectedDir,
 				ScanScope:   cfg.Clam.ScanScope,
 				SigIgnore:   cfg.Clam.SigIgnore,
+
+				ScanMode:      cfg.Clam.ScanMode,
+				InlineTimeout: cfg.Clam.InlineTimeout,
+				InlineDryRun:  cfg.Clam.InlineDryRun,
 			})
 			if nb, ok := be.(*nft.Backend); ok {
 				if enr := nb.GetEnricher(); enr != nil {
@@ -1123,15 +1136,16 @@ func runDaemon(args []string) {
 		// next worker init / cycle; no SIGHUP needed.
 		hookEnabled := cfg.Clam.Enabled && cfg.Clam.NginxHookEnabled
 		const clamavLuaConfigPath = "/var/lib/cfm/lua/cfm_clamav_config.lua"
-		if err := sslcollector.WriteClamavLuaConfig(clamavLuaConfigPath, hookEnabled, cfg.Clam.ScanDefault, cfmGID); err != nil {
+		inlineTimeoutMs := int(cfg.Clam.InlineTimeout / time.Millisecond)
+		if err := sslcollector.WriteClamavLuaConfig(clamavLuaConfigPath, hookEnabled, cfg.Clam.ScanDefault, cfg.Clam.ScanMode, inlineTimeoutMs, cfmGID); err != nil {
 			logging.LogfCLAM("[clam] cfm_clamav_config.lua write failed path=%s err=%v", clamavLuaConfigPath, err)
 		} else {
-			logging.LogfCLAM("[clam] cfm_clamav_config.lua written path=%s enabled=%v scan_default=%v", clamavLuaConfigPath, hookEnabled, cfg.Clam.ScanDefault)
+			logging.LogfCLAM("[clam] cfm_clamav_config.lua written path=%s enabled=%v scan_default=%v scan_mode=%s", clamavLuaConfigPath, hookEnabled, cfg.Clam.ScanDefault, cfg.Clam.ScanMode)
 		}
 		// Mirror the same policy into the webdetector package so the
 		// vhost-controls API reports the effective per-vhost scan state
 		// consistently with what the edge enforces.
-		webdet.SetClamScanPolicy(hookEnabled, cfg.Clam.ScanDefault)
+		webdet.SetClamScanPolicy(hookEnabled, cfg.Clam.ScanDefault, cfg.Clam.ScanMode == "inline")
 
 		for _, ln := range cfg.Summary() {
 			logging.Logf("[config] %s", ln)

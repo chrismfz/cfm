@@ -53,6 +53,9 @@ type ClamConfig struct {
 	ScanDefault      bool          // CLAM_SCAN_DEFAULT (global scanning POLICY; default ON — the async notify-only scanner has run fleet-wide for months). Effective per host = Enabled && (ScanDefault XOR host-in-override). With the default, the override list is an OPT-OUT set; set CLAM_SCAN_DEFAULT = 0 to disable server-wide.
 	ScanScope        string        // CLAM_SCAN_SCOPE (archives|all, default archives): which upload file types are worth clamd's time, decided by magic bytes in the scanner. "archives" scans only container formats (zip — incl. docx/xlsx/jar —, gzip, rar, 7z, xz, bzip2), the one class the WAF genuinely can't inspect; "all" restores full-coverage scanning of every multipart file part.
 	SigIgnore        []string      // CLAM_SIG_IGNORE (comma-separated globs on the signature name, case-insensitive; default *_Hunting.UNOFFICIAL): verdicts DOWNGRADED to log-only — still logged + recorded in history with sig_ignored, but no CLAM/INFECTED notification and no quarantine. Hunting-grade third-party YARA rules are FP-prone by design; an empty value ("CLAM_SIG_IGNORE =") acts on everything.
+	ScanMode         string        // CLAM_SCAN_MODE (async|inline, default async): async = today's notify-only pipeline; inline = the edge WAITS for the verdict and 403s an infected upload. Inline is FAIL-OPEN by contract: clamd down/hung/oversize/timeouts all allow the upload (degrading to an async scan). Per-vhost flips live in the mode-override store.
+	InlineTimeout    time.Duration // CLAM_INLINE_TIMEOUT (default 3s): hard cap for one inline scan; on expiry the upload is allowed (fail-open).
+	InlineDryRun     bool          // CLAM_INLINE_DRY_RUN (default 0): scan inline and record what WOULD block, without blocking — the burn-in guard before arming real inline blocking.
 	NginxHookEnabled bool          // CLAMD_NGINX_HOOK_ENABLED (default true; controls whether cfm_clamav.lua intercepts uploads)
 	Network          string        // CLAMD_NETWORK (unix|tcp)
 	Address          string        // CLAMD_SOCKET or 127.0.0.1:3310
@@ -613,6 +616,10 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 	// FP-prone by design (observed: Brooxml_Hunting on a legitimate docx).
 	// An explicit empty key acts on everything.
 	cfg.Clam.SigIgnore = []string{"*_Hunting.UNOFFICIAL"}
+	// Inline mode defaults OFF (async) with a 3s fail-open cap — arming
+	// blocking is a deliberate operator opt-in, never an upgrade side effect.
+	cfg.Clam.ScanMode = "async"
+	cfg.Clam.InlineTimeout = 3 * time.Second
 	outboundDNSDeprecatedSeen := false
 	lineNo := 0
 	for s.Scan() {
@@ -972,6 +979,18 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			if s := strings.ToLower(strings.TrimSpace(val)); s == "archives" || s == "all" {
 				cfg.Clam.ScanScope = s
 			}
+		case "CLAM_SCAN_MODE":
+			// Only the two known values; anything else keeps the async default
+			// (blocking must never arm via a typo).
+			if s := strings.ToLower(strings.TrimSpace(val)); s == "async" || s == "inline" {
+				cfg.Clam.ScanMode = s
+			}
+		case "CLAM_INLINE_TIMEOUT":
+			if d, err := time.ParseDuration(strings.TrimSpace(val)); err == nil && d > 0 {
+				cfg.Clam.InlineTimeout = d
+			}
+		case "CLAM_INLINE_DRY_RUN":
+			cfg.Clam.InlineDryRun = parseBool(val)
 		case "CLAM_SIG_IGNORE":
 			// Comma-separated globs on the signature name. An explicit empty
 			// value clears the default (act on every verdict).
