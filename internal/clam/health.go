@@ -43,6 +43,8 @@ type scanHealth struct {
 	scanErrors     atomic.Uint64
 	skippedBreaker atomic.Uint64
 	queueDrops     atomic.Uint64
+	skippedScope   atomic.Uint64 // uploads not scanned: not an archive (CLAM_SCAN_SCOPE=archives)
+	sigIgnored     atomic.Uint64 // infected verdicts downgraded to log-only (signature-trust layer)
 }
 
 // record folds one outcome (scan result or probe) into the breaker state and
@@ -85,6 +87,7 @@ func (h *scanHealth) isOpen() bool {
 // and lifetime counters — for `cfm clam status` and the admin/insights API.
 type HealthSnapshot struct {
 	Enabled        bool
+	ScanScope      string // effective scope ("archives" gates; anything else is full coverage)
 	BreakerOpen    bool
 	DownSince      time.Time
 	ConsecFails    int
@@ -97,6 +100,8 @@ type HealthSnapshot struct {
 	ScanErrors     uint64
 	SkippedBreaker uint64
 	QueueDrops     uint64
+	SkippedScope   uint64
+	SigIgnored     uint64
 }
 
 // Health returns a snapshot of scanner reachability + counters. Cheap and
@@ -107,9 +112,14 @@ func (m *Manager) Health() HealthSnapshot {
 	}
 	h := m.health
 	ql, qc := m.QueueDepth()
+	scope := m.cfg.ScanScope
+	if scope != ScanScopeArchives {
+		scope = ScanScopeAll
+	}
 	h.mu.Lock()
 	snap := HealthSnapshot{
 		Enabled:     m.Enabled(),
+		ScanScope:   scope,
 		BreakerOpen: h.breakerOpen,
 		DownSince:   h.downSince,
 		ConsecFails: h.consecFails,
@@ -123,6 +133,8 @@ func (m *Manager) Health() HealthSnapshot {
 	snap.ScanErrors = h.scanErrors.Load()
 	snap.SkippedBreaker = h.skippedBreaker.Load()
 	snap.QueueDrops = h.queueDrops.Load()
+	snap.SkippedScope = h.skippedScope.Load()
+	snap.SigIgnored = h.sigIgnored.Load()
 	return snap
 }
 

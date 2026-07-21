@@ -329,17 +329,27 @@ func main() {
 		}
 
 	case "clam", "clamd", "clamav":
-		// `cfm clam override …` mirrors `cfm webtop clam override …` for
-		// discoverability (it lives next to `cfm clam status/enable/scan`). It
-		// hits the webdetector API, so it needs the API base URL + auth token,
-		// unlike the clamd-socket subcommands handled by cli.RunClam.
-		if len(os.Args) >= 3 && os.Args[2] == "override" {
-			clihttp.SetToken(apiAuthToken())
-			if err := webdet.RunClamOverride(apiBaseURL(), os.Args[3:]); err != nil {
-				fmt.Fprintln(os.Stderr, "clam override error:", err)
-				os.Exit(1)
+		// `cfm clam override|sigignore|infections …` hit the webdetector API,
+		// so they need the API base URL + auth token, unlike the clamd-socket
+		// subcommands handled by cli.RunClam. They live under `cfm clam` for
+		// discoverability (next to status/enable/scan).
+		if len(os.Args) >= 3 {
+			runAPI := func(fn func(string, []string) error, label string) {
+				clihttp.SetToken(apiAuthToken())
+				if err := fn(apiBaseURL(), os.Args[3:]); err != nil {
+					fmt.Fprintln(os.Stderr, label+" error:", err)
+					os.Exit(1)
+				}
+				os.Exit(0)
 			}
-			os.Exit(0)
+			switch os.Args[2] {
+			case "override":
+				runAPI(webdet.RunClamOverride, "clam override")
+			case "sigignore":
+				runAPI(webdet.RunClamSigIgnore, "clam sigignore")
+			case "infections":
+				runAPI(webdet.RunClamInfections, "clam infections")
+			}
 		}
 		os.Exit(cli.RunClam(os.Args[2:], cfgDir()))
 
@@ -1068,6 +1078,8 @@ func runDaemon(args []string) {
 				QueueSize:   cfg.Clam.QueueSize,
 				PendingDir:  cfg.Clam.PendingDir,
 				InfectedDir: cfg.Clam.InfectedDir,
+				ScanScope:   cfg.Clam.ScanScope,
+				SigIgnore:   cfg.Clam.SigIgnore,
 			})
 			if nb, ok := be.(*nft.Backend); ok {
 				if enr := nb.GetEnricher(); enr != nil {

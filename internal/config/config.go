@@ -51,6 +51,8 @@ type SSLCollectorSockConfig struct {
 type ClamConfig struct {
 	Enabled          bool          // CLAMD_ENABLED (pipeline/infra: manager runs, clamd wired)
 	ScanDefault      bool          // CLAM_SCAN_DEFAULT (global scanning POLICY; default ON — the async notify-only scanner has run fleet-wide for months). Effective per host = Enabled && (ScanDefault XOR host-in-override). With the default, the override list is an OPT-OUT set; set CLAM_SCAN_DEFAULT = 0 to disable server-wide.
+	ScanScope        string        // CLAM_SCAN_SCOPE (archives|all, default archives): which upload file types are worth clamd's time, decided by magic bytes in the scanner. "archives" scans only container formats (zip — incl. docx/xlsx/jar —, gzip, rar, 7z, xz, bzip2), the one class the WAF genuinely can't inspect; "all" restores full-coverage scanning of every multipart file part.
+	SigIgnore        []string      // CLAM_SIG_IGNORE (comma-separated globs on the signature name, case-insensitive; default *_Hunting.UNOFFICIAL): verdicts DOWNGRADED to log-only — still logged + recorded in history with sig_ignored, but no CLAM/INFECTED notification and no quarantine. Hunting-grade third-party YARA rules are FP-prone by design; an empty value ("CLAM_SIG_IGNORE =") acts on everything.
 	NginxHookEnabled bool          // CLAMD_NGINX_HOOK_ENABLED (default true; controls whether cfm_clamav.lua intercepts uploads)
 	Network          string        // CLAMD_NETWORK (unix|tcp)
 	Address          string        // CLAMD_SOCKET or 127.0.0.1:3310
@@ -601,6 +603,16 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 	// stop scanning on upgrade. Operators opt individual vhosts OUT via the
 	// per-vhost override; set CLAM_SCAN_DEFAULT = 0 to disable server-wide.
 	cfg.Clam.ScanDefault = true
+	// CLAM_SCAN_SCOPE defaults to archives — a DELIBERATE coverage change
+	// (announced in the CHANGELOG): fleet-scale scanning of every image/video/pdf
+	// upload is not viable on shared hosting, and the class the WAF can't inspect
+	// is compressed containers. "all" restores full coverage.
+	cfg.Clam.ScanScope = "archives"
+	// CLAM_SIG_IGNORE defaults to downgrading hunting-grade YARA verdicts
+	// (log-only, no notify/quarantine): signature-base "Hunting" rules are
+	// FP-prone by design (observed: Brooxml_Hunting on a legitimate docx).
+	// An explicit empty key acts on everything.
+	cfg.Clam.SigIgnore = []string{"*_Hunting.UNOFFICIAL"}
 	outboundDNSDeprecatedSeen := false
 	lineNo := 0
 	for s.Scan() {
@@ -954,6 +966,22 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.Clam.Enabled = parseBool(val)
 		case "CLAM_SCAN_DEFAULT":
 			cfg.Clam.ScanDefault = parseBool(val)
+		case "CLAM_SCAN_SCOPE":
+			// Only the two known values are accepted; anything else keeps the
+			// archives default rather than silently disabling the gate.
+			if s := strings.ToLower(strings.TrimSpace(val)); s == "archives" || s == "all" {
+				cfg.Clam.ScanScope = s
+			}
+		case "CLAM_SIG_IGNORE":
+			// Comma-separated globs on the signature name. An explicit empty
+			// value clears the default (act on every verdict).
+			pats := make([]string, 0, 4)
+			for _, p := range strings.Split(val, ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					pats = append(pats, p)
+				}
+			}
+			cfg.Clam.SigIgnore = pats
 		case "CLAMD_NGINX_HOOK_ENABLED":
 			cfg.Clam.NginxHookEnabled = parseBool(val)
 		case "CLAMD_NETWORK":

@@ -22,14 +22,16 @@ import (
 // valuable infected rows out of the bounded history store; scan *volume* is
 // covered by the HealthSnapshot counters instead).
 type ScanEvent struct {
-	EventType string // "clam_infected"
-	Host      string
-	IP        string
-	URI       string
-	FileName  string
-	Signature string
-	Evidence  string
-	When      time.Time
+	EventType  string // "clam_infected"
+	Host       string
+	IP         string
+	URI        string
+	FileName   string
+	Signature  string
+	Evidence   string // empty for a sig-ignored hit (nothing is quarantined)
+	SigIgnored bool   // verdict downgraded to log-only by the signature-trust layer
+	IgnoredBy  string // which config pattern / store entry downgraded it
+	When       time.Time
 }
 
 var (

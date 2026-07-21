@@ -24,6 +24,13 @@ type Config struct {
 	QueueSize   int
 	PendingDir  string
 	InfectedDir string
+
+	// ScanScope gates upload jobs by magic bytes (see scope.go). Only the
+	// explicit ScanScopeArchives value gates; "" behaves like ScanScopeAll so
+	// non-daemon constructions (CLI client, tests) keep full coverage.
+	ScanScope string
+	// SigIgnore holds the baseline CLAM_SIG_IGNORE globs (see sigignore.go).
+	SigIgnore []string
 }
 
 type Client struct {
@@ -405,6 +412,22 @@ func (m *Manager) process(job Job) {
 		return
 	}
 
+	// Scope gate (CLAM_SCAN_SCOPE=archives): only container/archive uploads are
+	// worth clamd's time — the class the WAF's signature layer can't inspect.
+	// Decided by magic bytes (extensions are forgeable). A read error falls
+	// through to the scan: fail toward coverage, never silently skip.
+	if m.cfg.ScanScope == ScanScopeArchives {
+		if isArch, aerr := isArchiveFile(job.Path); aerr == nil && !isArch {
+			m.health.skippedScope.Add(1)
+			logf("[clam_scan] result=skipped_scope ip=%s host=%s uri=%s reason=%s",
+				job.IP, job.Host, job.URI, job.Reason)
+			if job.TempCopy {
+				_ = os.Remove(job.Path)
+			}
+			return
+		}
+	}
+
 	r, err := m.client.ScanFile(job.Path)
 	if err != nil {
 		m.recordScan(false, err.Error())
@@ -417,17 +440,33 @@ func (m *Manager) process(job Job) {
 	}
 	m.recordScan(true, "")
 
+	// Signature-trust downgrade: an ignored signature's infected verdict is
+	// handled log-only — recorded (log + history, flagged) but neither
+	// notified nor quarantined. Decided BEFORE logging so the log line and
+	// the published event both carry the downgrade.
+	sigIgnoredHit, sigIgnoredBy := false, ""
+	if r.Infected {
+		sigIgnoredHit, sigIgnoredBy = m.sigIgnored(job.Host, r.Signature)
+	}
+
 	// Always log result first.
 	logResult(job, r)
 
-	// Best-effort notify for test mode.
-	m.safeNotifyUpload(job, r)
+	if sigIgnoredHit {
+		m.health.sigIgnored.Add(1)
+		logf("[clam_scan] result=infected_ignored ip=%s host=%s uri=%s sig=%q by=%s",
+			job.IP, job.Host, job.URI, r.Signature, sigIgnoredBy)
+	} else {
+		// Best-effort notify for test mode. Skipped for a downgraded verdict —
+		// its result=infected/critical framing IS the notification we suppress.
+		m.safeNotifyUpload(job, r)
+	}
 
 	if !job.TempCopy {
 		return
 	}
 
-	if r.Infected {
+	if r.Infected && !sigIgnoredHit {
 		dest := job.Path // fallback if rename fails
 		if job.InfectedDir != "" {
 			_ = os.MkdirAll(job.InfectedDir, 0o700)
@@ -441,16 +480,12 @@ func (m *Manager) process(job Job) {
 
 		m.safeNotifyInfected(job, r, dest)
 
-		fileName := strings.TrimSpace(job.FileName)
-		if fileName == "" {
-			fileName = filepath.Base(job.Path)
-		}
 		publishScanEvent(ScanEvent{
 			EventType: "clam_infected",
 			Host:      job.Host,
 			IP:        job.IP,
 			URI:       job.URI,
-			FileName:  fileName,
+			FileName:  jobFileName(job),
 			Signature: r.Signature,
 			Evidence:  dest,
 			When:      time.Now(),
@@ -458,7 +493,33 @@ func (m *Manager) process(job Job) {
 		return
 	}
 
+	if r.Infected && sigIgnoredHit {
+		// Keep the hit queryable (greyed on the ClamAV page) but treat the
+		// file like a clean upload: no quarantine copy — the whole point is
+		// that legitimate customer files must not be retained as "evidence".
+		publishScanEvent(ScanEvent{
+			EventType:  "clam_infected",
+			Host:       job.Host,
+			IP:         job.IP,
+			URI:        job.URI,
+			FileName:   jobFileName(job),
+			Signature:  r.Signature,
+			SigIgnored: true,
+			IgnoredBy:  sigIgnoredBy,
+			When:       time.Now(),
+		})
+	}
+
 	_ = os.Remove(job.Path)
+}
+
+// jobFileName is the operator-facing file label: the multipart filename when
+// the edge captured one, else the spool basename.
+func jobFileName(job Job) string {
+	if fn := strings.TrimSpace(job.FileName); fn != "" {
+		return fn
+	}
+	return filepath.Base(job.Path)
 }
 
 func (m *Manager) safeNotifyUpload(job Job, r *Result) {
