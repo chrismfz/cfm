@@ -82,6 +82,7 @@ export function createWebdetApp(config) {
       isWAFPage() { return this.pageMode === "waf"; },
       isControlsPage() { return this.pageMode === "controls"; },
       isRulesPage() { return this.pageMode === "rules"; },
+      isTokensPage() { return this.pageMode === "tokens"; },
       lastRefreshLabel() {
         if (!this.lastRefreshAt) return "";
         return "Updated " + this.lastRefreshAt.toLocaleTimeString();
@@ -92,6 +93,7 @@ export function createWebdetApp(config) {
         if (this.isWAFPage) return "WebDetector / WAF engine";
         if (this.isControlsPage) return "WebDetector / vhost controls";
         if (this.isRulesPage) return "WebDetector / traffic rules";
+        if (this.isTokensPage) return "System / API tokens";
         return "WebDetector / overview";
       },
     },
@@ -515,6 +517,12 @@ export function createWebdetApp(config) {
       if (this.isVhostPage && qHost && "vhostFocusHost" in this.$data) {
         this.vhostFocusHost = qHost.trim();
         this.activeHost = this.vhostFocusHost;
+      }
+      // Traffic Rules deep link (?vhost= / ?host=): prefill the search filter
+      // so "Traffic rules for <host>" from the global palette lands filtered.
+      if (this.isRulesPage && "rulesSearch" in this.$data) {
+        const qVhost = (currentURL.searchParams.get("vhost") || qHost || "").trim();
+        if (qVhost) this.rulesSearch = qVhost.split(",")[0].trim();
       }
       if ((this.isForensicsPage || this.isWAFPage) && qHost && "historyHost" in this.$data) {
         this.historyHost = qHost.trim();

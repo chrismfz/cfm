@@ -1,6 +1,6 @@
-// Vhost controls page: per-vhost WAF/Challenge/HTTP3/Clam toggles,
-// scoped-token management and the per-vhost security overview. Traffic rules
-// live on their own page (feature-rules.js).
+// Vhost controls page: per-vhost WAF/Challenge/HTTP3/Clam toggles and the
+// per-vhost security overview. Traffic rules and API tokens live on their own
+// pages (feature-rules.js, feature-tokens.js).
 
 export const controlsMixin = {
   data() {
@@ -13,10 +13,6 @@ export const controlsMixin = {
       // Quick filter chips: "" (all) | challenge_off | waf_off | http3_on —
       // the deviations-from-default an operator actually scans 690 vhosts for.
       controlsQuickFilter: "",
-      // Token management (admin only)
-      tokens: [],
-      tokenForm: { vhosts: "", label: "", ttl: "8760h", role: "viewer" },
-      tokenCreateMsg: "",
       // Per-vhost Security Overview
       vhostOverview: null,
       vhostOverviewHost: "",
@@ -236,40 +232,6 @@ export const controlsMixin = {
         this.actionMsg = `${kind.toUpperCase()} toggle failed for ${host}: ${err}`;
         console.error("[cfm-admin] vhost controls toggle failed", kind, host, err);
       }
-    },
-
-    // ── Token management (admin only) ──────────────────────────────────
-    async refreshTokens() {
-      if (!this.isAdmin) return;
-      try {
-        const rows = await this.fetchJSONSafe("v1/tokens/list", []);
-        this.tokens = Array.isArray(rows) ? rows : [];
-      } catch (_) { this.tokens = []; }
-    },
-    async createScopedToken() {
-      this.tokenCreateMsg = "";
-      const vhosts = this.tokenForm.vhosts.split(",").map((v) => v.trim()).filter(Boolean);
-      if (!vhosts.length) { this.tokenCreateMsg = "Vhosts required."; return; }
-      try {
-        const res = await this.postJSON("v1/auth/token", {
-          vhosts,
-          label: this.tokenForm.label,
-          ttl: this.tokenForm.ttl || "8760h",
-          role: this.tokenForm.role || "viewer",
-        });
-        if (res.error) { this.tokenCreateMsg = res.error; return; }
-        this.tokenCreateMsg = `✓ Created: ${res.id}  Token: ${res.token}`;
-        await this.refreshTokens();
-      } catch (err) { this.tokenCreateMsg = String(err); }
-    },
-    async revokeToken(id) {
-      if (!confirm(`Revoke token ${id}?`)) return;
-      try {
-        const res = await this.postJSON("v1/tokens/revoke", { id });
-        if (res.error) { this.tokenCreateMsg = res.error; return; }
-        this.tokenCreateMsg = `✓ Revoked ${id}`;
-        await this.refreshTokens();
-      } catch (err) { this.tokenCreateMsg = String(err); }
     },
 
     // ── Security Overview ──────────────────────────────────────────────

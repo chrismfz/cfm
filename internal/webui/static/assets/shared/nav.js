@@ -23,6 +23,8 @@ const ICONS = {
   theme: '<path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/>',
   pulse: '<path d="M3 12h4l2.5-7 5 14 2.5-7h4"/>',
   funnel: '<path d="M3 5h18l-7 8v5l-4 2v-7L3 5z"/>',
+  virus: '<circle cx="12" cy="12" r="5"/><path d="M12 3v4m0 10v4M3 12h4m10 0h4M5.6 5.6l2.9 2.9m7 7l2.9 2.9M18.4 5.6l-2.9 2.9m-7 7l-2.9 2.9"/><circle cx="12" cy="12" r="1"/>',
+  key: '<circle cx="8" cy="14" r="4"/><path d="M11 11l9-9m-4 4l3 3m-6 0l2 2"/>',
 };
 
 const MENU_GROUPS = [
@@ -41,10 +43,11 @@ const MENU_GROUPS = [
     { label: "WAF engine", href: "/cfm-admin/webdetector/waf/", icon: "shield" },
     { label: "Vhost controls", href: "/cfm-admin/webdetector/controls/", icon: "sliders" },
     { label: "Traffic rules", href: "/cfm-admin/webdetector/rules/", icon: "funnel" },
-    { label: "ClamAV", href: "/cfm-admin/webdetector/clam/", icon: "bug" },
+    { label: "ClamAV", href: "/cfm-admin/webdetector/clam/", icon: "virus" },
   ]},
   { title: "Services", items: [
     { label: "MySQL governor", href: "/cfm-admin/governor/", icon: "db" },
+    { label: "API tokens", href: "/cfm-admin/webdetector/tokens/", icon: "key" },
     { label: "Notifier", href: "/cfm-admin/notifier/", icon: "bell" },
     { label: "Detectors", href: "/cfm-admin/detectors/", icon: "layers" },
   ]},
@@ -240,7 +243,9 @@ function hostActions(host) {
   return [
     { label: `Vhost live: ${host}`, hint: "Live charts", href: `/cfm-admin/webdetector/vhost/?host=${h}` },
     { label: `History for ${host}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?host=${h}#history-card` },
-    { label: `Controls for ${host}`, hint: "WAF / Challenge / HTTP3", href: `/cfm-admin/webdetector/controls/?vhost=${h}` },
+    { label: `Controls for ${host}`, hint: "WAF / Challenge / HTTP3 / Clam", href: `/cfm-admin/webdetector/controls/?vhost=${h}` },
+    { label: `Traffic rules for ${host}`, hint: "Rules filtered to this vhost", href: `/cfm-admin/webdetector/rules/?vhost=${h}` },
+    { label: `ClamAV for ${host}`, hint: "Upload scanning / infections", href: `/cfm-admin/webdetector/clam/?vhost=${h}` },
   ];
 }
 

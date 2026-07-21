@@ -9,6 +9,7 @@
     '/cfm-admin',                    // Dashboard (global stats + global block/unblock)
     '/cfm-admin/health',             // Health history — box-wide metrics (admin-only endpoints)
     '/cfm-admin/webdetector/bots',   // Web Bots — global UA emergency controls
+    '/cfm-admin/webdetector/tokens', // API tokens — admin-only issuance/revocation
     '/cfm-admin/notifier',
     '/cfm-admin/detectors',
     '/cfm-admin/settings',
