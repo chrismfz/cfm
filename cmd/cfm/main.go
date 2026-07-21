@@ -329,6 +329,18 @@ func main() {
 		}
 
 	case "clam", "clamd", "clamav":
+		// `cfm clam override …` mirrors `cfm webtop clam override …` for
+		// discoverability (it lives next to `cfm clam status/enable/scan`). It
+		// hits the webdetector API, so it needs the API base URL + auth token,
+		// unlike the clamd-socket subcommands handled by cli.RunClam.
+		if len(os.Args) >= 3 && os.Args[2] == "override" {
+			clihttp.SetToken(apiAuthToken())
+			if err := webdet.RunClamOverride(apiBaseURL(), os.Args[3:]); err != nil {
+				fmt.Fprintln(os.Stderr, "clam override error:", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
 		os.Exit(cli.RunClam(os.Args[2:], cfgDir()))
 
 	case "debug":
@@ -1099,11 +1111,15 @@ func runDaemon(args []string) {
 		// next worker init / cycle; no SIGHUP needed.
 		hookEnabled := cfg.Clam.Enabled && cfg.Clam.NginxHookEnabled
 		const clamavLuaConfigPath = "/var/lib/cfm/lua/cfm_clamav_config.lua"
-		if err := sslcollector.WriteClamavLuaConfig(clamavLuaConfigPath, hookEnabled, cfmGID); err != nil {
+		if err := sslcollector.WriteClamavLuaConfig(clamavLuaConfigPath, hookEnabled, cfg.Clam.ScanDefault, cfmGID); err != nil {
 			logging.LogfCLAM("[clam] cfm_clamav_config.lua write failed path=%s err=%v", clamavLuaConfigPath, err)
 		} else {
-			logging.LogfCLAM("[clam] cfm_clamav_config.lua written path=%s enabled=%v", clamavLuaConfigPath, hookEnabled)
+			logging.LogfCLAM("[clam] cfm_clamav_config.lua written path=%s enabled=%v scan_default=%v", clamavLuaConfigPath, hookEnabled, cfg.Clam.ScanDefault)
 		}
+		// Mirror the same policy into the webdetector package so the
+		// vhost-controls API reports the effective per-vhost scan state
+		// consistently with what the edge enforces.
+		webdet.SetClamScanPolicy(hookEnabled, cfg.Clam.ScanDefault)
 
 		for _, ln := range cfg.Summary() {
 			logging.Logf("[config] %s", ln)

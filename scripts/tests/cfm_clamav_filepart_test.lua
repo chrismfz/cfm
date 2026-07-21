@@ -19,7 +19,12 @@ local sent, encoded = {}, {}
 local fake_sock = {}
 fake_sock.settimeout = function() end
 fake_sock.connect    = function() return true end
-fake_sock.send       = function(_, req) sent[#sent + 1] = req; return true end
+-- Only the upload POST counts as "a scan dispatched"; the per-vhost override
+-- GET (/nginx/clam/overrides) that should_scan() issues is not a scan.
+fake_sock.send       = function(_, req)
+  if req:find("/nginx/upload", 1, true) then sent[#sent + 1] = req end
+  return true
+end
 fake_sock.receive    = function() return "HTTP/1.1 200 OK" end
 fake_sock.close      = function() end
 
@@ -53,6 +58,9 @@ local function build_ngx()
       request_id   = "deadbeef",
     },
     socket = { tcp = function() return fake_sock end },
+    -- The async override refresh runs via ngx.timer.at in production; run it
+    -- synchronously here so should_scan() sees a settled cache.
+    timer = { at = function(_, fn) fn(false); return true end },
     now = function() return 1000 end,
     log = function() end,
     WARN = 1, ERR = 2, INFO = 3, DEBUG = 4,
@@ -63,7 +71,7 @@ _G.ngx = build_ngx()
 package.path = "configs/lua/?.lua;" .. package.path
 local M = require("cfm_clamav")
 M.init({
-  token = "t", enabled = true, sock_path = "/run/cfm/scan.sock",
+  token = "t", enabled = true, scan_default = true, sock_path = "/run/cfm/scan.sock",
   exclude_hosts = { ["blocked.example.gr"] = true },
 })
 

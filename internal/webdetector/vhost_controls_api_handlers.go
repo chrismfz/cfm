@@ -20,6 +20,16 @@ type webdetVhostControlRow struct {
 	ChallengeMatchedExclude string `json:"challenge_matched_exclude,omitempty"`
 	WAFMatchedExclude       string `json:"waf_matched_exclude,omitempty"`
 	HTTP3MatchedOptIn       string `json:"http3_matched_optin,omitempty"`
+
+	// ClamAV upload-scan (async, notify-only). Effective state is
+	// globallyEnabled && (scanDefault XOR override). ClamEnabled is that
+	// resolved decision; ClamOverridePresent says an EXACT per-vhost override
+	// exists (so the UI toggle knows add-vs-remove — flipping membership always
+	// flips the resolved state, whatever the global default); ClamToggleable is
+	// false only when ClamAV is globally off.
+	ClamEnabled         bool `json:"clam_enabled"`
+	ClamToggleable      bool `json:"clam_toggleable"`
+	ClamOverridePresent bool `json:"clam_override_present"`
 }
 
 type webdetVhostControlResponse struct {
@@ -72,6 +82,20 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ClamAV per-vhost override set. Like HTTP/3 (and unlike the WAF/Challenge
+	// columns) we match EXACT hosts only — cfm_clamav.lua keys its override set
+	// by exact hostname, so matchHostExclude's suffix expansion would lie about
+	// runtime behaviour. Surface every override host as a row so the owner can
+	// toggle it even without recent traffic.
+	clamOverride := make(map[string]struct{})
+	for _, val := range hostExcludeValues(e.ClamOverrideList()) {
+		if h := normalizeControlHost(val); h != "" {
+			clamOverride[h] = struct{}{}
+			hosts[h] = struct{}{}
+		}
+	}
+	clamGlobal, clamScanDefault := clamScanPolicy()
+
 	list := make([]string, 0, len(hosts))
 	for host := range hosts {
 		if vhostAllowed(host, filter) {
@@ -86,6 +110,14 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 		wafMatched, wafValue, wafExact := matchHostExclude(wafEntries, host)
 		http3Matched, http3Pattern, http3Exact := e.HTTP3OverrideMatchInfo(host)
 
+		// Normalize the lookup key: collectKnownVhosts seeds some hosts
+		// (cPanel userdata) un-normalized, and matchHostExclude normalizes its
+		// host internally — the exact clam membership check must too, or a
+		// mixed-case/trailing-dot host would miss its own override.
+		_, clamPresent := clamOverride[normalizeControlHost(host)]
+		// XOR: an override flips the vhost relative to the global default.
+		clamEnabled := clamGlobal && (clamScanDefault != clamPresent)
+
 		rows = append(rows, webdetVhostControlRow{
 			Host:                    host,
 			ChallengeEnabled:        !challengeMatched,
@@ -97,6 +129,9 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 			ChallengeMatchedExclude: challengeValue,
 			WAFMatchedExclude:       wafValue,
 			HTTP3MatchedOptIn:       http3Pattern,
+			ClamEnabled:             clamEnabled,
+			ClamToggleable:          clamGlobal, // every clam override is exact
+			ClamOverridePresent:     clamPresent,
 		})
 	}
 

@@ -114,6 +114,11 @@ type NginxBridge struct {
 	// ListWAFExcludes returns current dynamic WAF exclude entries.
 	ListWAFExcludes func() []excludeEntry
 
+	// ListClamScanOverrides returns the per-vhost ClamAV upload-scan opt-out list
+	// (host entries). Polled by configs/lua/cfm_clamav.lua so the edge upload
+	// hook can skip excluded vhosts.
+	ListClamScanOverrides func() []excludeEntry
+
 	// ListHTTP3Hosts returns the per-vhost HTTP/3 opt-in list. The Lua
 	// worker polls this every ~60s to refresh its per-worker cache and
 	// decide whether to emit the Alt-Svc header on responses. See
@@ -238,17 +243,17 @@ type BridgeStats struct {
 }
 
 type BridgeTimingStats struct {
-	TotalP50Ms      int64 `json:"total_p50_ms"`
-	TotalP95Ms      int64 `json:"total_p95_ms"`
-	TotalP99Ms      int64 `json:"total_p99_ms"`
-	QueueWaitP95Ms  int64 `json:"queue_wait_p95_ms"`
-	StageAAvgMs     int64 `json:"stage_a_avg_ms"`
-	StageBAvgMs     int64 `json:"stage_b_avg_ms"`
-	StageCAvgMs     int64 `json:"stage_c_avg_ms"`
-	TimeoutPerMin   int64 `json:"timeout_count_last_minute"`
-	TimeoutCurrMin  int64 `json:"timeout_count_current_minute"`
-	SamplesTotal    int64 `json:"samples_total"`
-	QueueSamples    int64 `json:"queue_wait_samples"`
+	TotalP50Ms     int64 `json:"total_p50_ms"`
+	TotalP95Ms     int64 `json:"total_p95_ms"`
+	TotalP99Ms     int64 `json:"total_p99_ms"`
+	QueueWaitP95Ms int64 `json:"queue_wait_p95_ms"`
+	StageAAvgMs    int64 `json:"stage_a_avg_ms"`
+	StageBAvgMs    int64 `json:"stage_b_avg_ms"`
+	StageCAvgMs    int64 `json:"stage_c_avg_ms"`
+	TimeoutPerMin  int64 `json:"timeout_count_last_minute"`
+	TimeoutCurrMin int64 `json:"timeout_count_current_minute"`
+	SamplesTotal   int64 `json:"samples_total"`
+	QueueSamples   int64 `json:"queue_wait_samples"`
 	// SheddedCount: total decision requests that were fail-open shed
 	// because the handler concurrency semaphore was saturated. See
 	// bridgeStatsState.shedCount for context. Cumulative since process
@@ -441,6 +446,25 @@ func (b *NginxBridge) BypassIPScopeTemp(ip, host, scope string, ttl time.Duratio
 }
 
 // Clam Manager
+// clamHealthReporter is the optional health surface of the wired clam manager
+// (satisfied by *clam.Manager). Kept separate from clam.Enqueuer so the
+// hot-path upload interface stays minimal.
+type clamHealthReporter interface {
+	Health() clam.HealthSnapshot
+}
+
+// ClamHealth returns the scanner health snapshot when a clam manager is wired
+// and exposes one. Non-blocking (reads cached breaker state; never dials clamd).
+func (b *NginxBridge) ClamHealth() (clam.HealthSnapshot, bool) {
+	if b == nil || b.clamMgr == nil {
+		return clam.HealthSnapshot{}, false
+	}
+	if hr, ok := b.clamMgr.(clamHealthReporter); ok {
+		return hr.Health(), true
+	}
+	return clam.HealthSnapshot{}, false
+}
+
 func (b *NginxBridge) SetClamManager(m clam.Enqueuer, pendingDir, infectedDir string) {
 	if b == nil {
 		return
@@ -1378,6 +1402,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/waf/excluded", b.instrument("/nginx/waf/excluded", b.handleWAFExcluded))
 	mux.HandleFunc("/nginx/waf/excluded/meta", b.instrument("/nginx/waf/excluded/meta", b.handleWAFExcludedMeta))
 	mux.HandleFunc("/nginx/waf/excludes", b.instrument("/nginx/waf/excludes", b.handleWAFExcludes))
+	mux.HandleFunc("/nginx/clam/overrides", b.instrument("/nginx/clam/overrides", b.handleClamExcludes))
 	mux.HandleFunc("/nginx/h3/config", b.instrument("/nginx/h3/config", b.handleHTTP3Config))
 	mux.HandleFunc("/nginx/waf/stats", b.instrument("/nginx/waf/stats", b.handleWAFStats))
 	mux.HandleFunc("/nginx/snapshot", b.instrument("/nginx/snapshot", b.handleSnapshot))
@@ -2126,6 +2151,45 @@ func (b *NginxBridge) handleWAFExcludes(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"entries": items})
+}
+
+// handleClamExcludes returns the per-vhost ClamAV upload-scan override set.
+// Polled by configs/lua/cfm_clamav.lua, which FLIPS a listed host relative to
+// the global CLAM_SCAN_DEFAULT (opt-out when the default is ON, opt-in when it
+// is OFF). Host entries only (upload scanning is a whole-vhost on/off).
+//
+// The edge reader (cfm_clamav.lua fetch_overrides) is a minimal HTTP parser
+// that splits on CRLFCRLF and decodes the remainder, so it needs a
+// Content-Length-delimited body. net/http auto-chunks once a response exceeds
+// its ~2KB write buffer (~25 entries here), which that parser can't decode — so
+// marshal first and set Content-Length explicitly to guarantee no chunking at
+// any list size.
+func (b *NginxBridge) handleClamExcludes(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	items := make([]excludeEntry, 0)
+	if b.ListClamScanOverrides != nil {
+		for _, e := range b.ListClamScanOverrides() {
+			if strings.TrimSpace(e.Type) == "" || strings.TrimSpace(e.Value) == "" {
+				continue
+			}
+			items = append(items, e)
+		}
+	}
+	buf, err := json.Marshal(map[string]any{"entries": items})
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
+	_, _ = w.Write(buf)
 }
 
 // handleHTTP3Config returns the per-vhost HTTP/3 opt-in list. Polled by

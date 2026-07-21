@@ -18,6 +18,73 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **ClamAV infections are recorded in the scoped history + shown on the ClamAV page.**
+  Infected uploads the scanner catches are now persisted into the webdetector
+  history store (`event_type=clam_infected`) — preserving the file name, request
+  URI and evidence path that the notify audit log drops — and surfaced in a new
+  "Recent infections" table on the ClamAV page, scoped so a cPanel user sees only
+  their own vhost's infections (via the existing scope-enforced
+  `/api/v1/webdet/history/events`). Wiring is a small settable scan-event sink in
+  `internal/clam` (the leaf both packages import) that the webdetector engine
+  registers on start; only infections are persisted (clean uploads are
+  high-volume and covered by the scanner's counters instead). No new endpoint.
+- **cfm-admin ClamAV page: scanner status + per-vhost scan coverage.** New
+  `/cfm-admin/webdetector/clam/` page (nav: Rules & engine → ClamAV). For admins,
+  a **scanner status** card from a new admin-only `GET /api/v1/clam/health`:
+  clamd reachability / circuit-breaker state (with down-since + last error),
+  queue depth, the global scan default, and lifetime counters (scanned, scan
+  errors, breaker-skips, queue drops). For everyone (scoped included), a
+  **scan-coverage** card built from the existing scoped `/api/v1/webdet/vhosts`
+  rows: how many vhosts are scanned vs not, with a one-click "Enable scan" that
+  reuses the scoped `/api/v1/clam/override/*` flip — so a cPanel user can turn
+  scanning on for their own vhost.
+- **ClamAV scanner resilience: circuit breaker + health prober + down alert.**
+  The async upload scanner no longer stalls when clamd is down or hung. A
+  circuit breaker opens after a few consecutive scan/probe failures: workers
+  then fast-skip (with temp-file cleanup) instead of blocking up to
+  `CLAMD_TIMEOUT` on every dial, so a dead clamd can't starve the workers or
+  silently fill (and drop) the queue. A background prober pings clamd every 10s
+  (bounded 3s) so an outage is detected — and recovery cleared — even with no
+  upload traffic, and emits a one-shot **CLAM/DOWN** / **CLAM/UP** notification
+  (same `clam` notify section as upload/infected) plus a degraded log heartbeat.
+  Lifetime counters (scanned, scan errors, breaker-skips, queue drops) are
+  exposed via a new `Manager.Health()` snapshot. `cfm clam status` now bounds
+  its reachability ping (≤3s) so it can't hang for the full scan timeout on an
+  absent clamd.
+- **Per-vhost ClamAV upload-scan toggle + global scan-default.**
+  ClamAV upload scanning is now governed by a global policy `CLAM_SCAN_DEFAULT`
+  (**default ON**) plus a per-vhost override, mirroring the WAF/Challenge
+  per-vhost model: effective per host = `CLAMD_ENABLED && (CLAM_SCAN_DEFAULT XOR
+  host-in-override)`. The async (notify-only) scanner has run fleet-wide for
+  months, so scanning stays on by upgrade and the override list is an OPT-OUT
+  set (exempt a noisy/heavy vhost); set `CLAM_SCAN_DEFAULT = 0` to disable
+  server-wide, after which the override list becomes an opt-IN set. Controls:
+  `cfm clam scan on|off` (global), `cfm clam override add|remove|list <host>` and
+  the mirror `cfm webtop clam override …` (per-vhost). The override API
+  (`/api/v1/clam/override/{list,add,remove}`) reuses the identical scoped-vs-admin
+  auth as the WAF/Challenge excludes, so a scoped cPanel token can toggle only its
+  own vhost. The edge (`cfm_clamav.lua`) reads the global default from the rendered
+  config and the override set from the bridge (`/nginx/clam/overrides`, 10s cache),
+  and cheap-exits an opted-out vhost before any body read/spool — so scan-off costs
+  nothing on the upload path. Scanning here is async/notify-only (non-blocking);
+  inline blocking remains a separate future knob (will default OFF).
+- **cfm-admin vhost-controls: ClamAV scan column.** The per-vhost controls grid
+  (`/cfm-admin` → Controls) gains a **Clam** column alongside Challenge/WAF/HTTP3,
+  a **Clam OFF** quick-filter chip and sort key. Each row shows the effective scan
+  state (`ON / SCANNING`, `OFF / NOT SCANNED`, or `OFF / GLOBALLY OFF` when ClamAV
+  is disabled), computed the same way the edge decides:
+  `globallyEnabled && (CLAM_SCAN_DEFAULT XOR override)`. Clicking flips the vhost's
+  override via the scoped `/api/v1/clam/override/*` API — so a scoped cPanel user
+  can toggle scanning for their own vhost from the UI. The API mirrors the policy
+  into the daemon on every config reload, so the grid stays consistent with what
+  the edge enforces.
+- **ClamAV override changes are audit-logged.** Every
+  `/api/v1/clam/override/add|remove` write (vhost-controls / ClamAV page toggle,
+  `cfm clam override …`) now writes a `[clam_override]` line to `cfm.clam.log`
+  with the action, host, result, actor (admin vs the scoped token's vhost scope)
+  and remote address — including **denied out-of-scope attempts**. Upload
+  scanning is a protection layer a scoped cPanel token may legitimately switch
+  off for its own vhost, so every flip must be reconstructable after the fact.
 - **kernsec status: CloudLinux LVE vs. cgroup-mode advisory.** `cfm kernsec
   status` now emits a `[CloudLinux LVE / cgroup mode]` section on CloudLinux
   LVE / CageFS hosts and WARNs when the host is running the unified **cgroup
@@ -29,6 +96,19 @@ back-filled here — see the git/PR history for that period.
   reboot. Read-only advisory: kernsec does not manage that operator/distro-owned
   arg, it only surfaces the mismatch so it is caught in `status` instead of
   after a reboot. New probe field `HostProfile.CgroupV2Unified`.
+
+### Changed
+- **ClamAV per-vhost override refresh moved fully off the request path.** The
+  edge (`cfm_clamav.lua`) used to fetch the override list synchronously from the
+  bridge when its 10s per-worker cache expired, pinning one upload request per
+  worker per interval to the bridge round-trip (sub-ms healthy, but up to
+  ~3×300ms against a *hung* bridge). It now mirrors the `cfm_h3_config.lua`
+  refresh model: a stale cache schedules an async `ngx.timer` refresh and the
+  request proceeds on the cached set, so the bridge fetch never blocks an
+  upload. Fetch failure keeps the last known set; a cold worker serves the empty
+  set until the first refresh lands (same fail direction as an unreachable
+  bridge before).
+
 ### Security
 - **WAF upload rules: catch multi-digit `.phpNN` (MultiPHP handler) extensions.**
   The php-executable extension matchers in `_zip_entry_bad_ext` (rule 414),

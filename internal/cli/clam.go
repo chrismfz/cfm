@@ -98,6 +98,17 @@ func RunClam(args []string, cfgDir string) int {
 		return 0
 
 	case "scan":
+		// `cfm clam scan on|off` = the GLOBAL scanning policy (CLAM_SCAN_DEFAULT);
+		// `cfm clam scan <file|dir>` = an ad-hoc file scan. "on"/"off" are reserved
+		// keywords here (no one scans a file literally named "on"/"off").
+		if len(args) >= 2 {
+			switch strings.ToLower(strings.TrimSpace(args[1])) {
+			case "on":
+				return runClamToggle(cfgDir, "CLAM_SCAN_DEFAULT", true)
+			case "off":
+				return runClamToggle(cfgDir, "CLAM_SCAN_DEFAULT", false)
+			}
+		}
 		return runClamScan(client, cfg, args[1:])
 
 	default:
@@ -106,8 +117,6 @@ func RunClam(args []string, cfgDir string) int {
 		return 2
 	}
 }
-
-
 
 func runClamScan(client *clam.Client, cfg *cfgpkg.Config, args []string) int {
 	fs := flag.NewFlagSet("clam scan", flag.ContinueOnError)
@@ -236,9 +245,11 @@ func printClamHelp() {
 	fmt.Println("  cfm clam hook status")
 	fmt.Println("  cfm clam ping")
 	fmt.Println("  cfm clam version")
+	fmt.Println("  cfm clam scan on|off        # CLAM_SCAN_DEFAULT: global upload-scan policy (default ON)")
 	fmt.Println("  cfm clam scan <file>")
 	fmt.Println("  cfm clam scan <dir>")
 	fmt.Println("  cfm clam scan --quiet-clean <file-or-dir>")
+	fmt.Println("  cfm clam override add|remove|list <host>   # per-vhost flip of the global scan policy (scoped)")
 }
 
 // runClamToggle persists key=value into <cfgDir>/cfm.conf. The cfm
@@ -312,9 +323,16 @@ func runClamStatus(client *clam.Client, cfg *cfgpkg.Config, cfgDir string) int {
 
 	fmt.Println()
 	fmt.Println("-- clamd reachability --")
+	// Bound the status ping so a hung/absent clamd can't stall `status` for the
+	// full scan timeout (CLAMD_TIMEOUT, often 10s). Never exceed the configured
+	// timeout when it is already shorter.
+	pingTimeout := 3 * time.Second
+	if cfg.Clam.Timeout > 0 && cfg.Clam.Timeout < pingTimeout {
+		pingTimeout = cfg.Clam.Timeout
+	}
 	if !client.Enabled() {
 		fmt.Println("ping: skipped (CLAMD_ENABLED=false)")
-	} else if err := client.Ping(); err != nil {
+	} else if err := client.PingWithTimeout(pingTimeout); err != nil {
 		fmt.Printf("ping: FAIL (%v)\n", err)
 	} else {
 		fmt.Println("ping: OK")

@@ -269,22 +269,29 @@ if clamav_ok then
   -- toggle no longer costs a loadfile() on every request.
   local _CLAMAV_CONFIG_FILE = "/var/lib/cfm/lua/cfm_clamav_config.lua"
   local clamav_hook_enabled = true
+  local clamav_scan_default = false
   do
     local val = fc.get(_CLAMAV_CONFIG_FILE, {
       ttl = 10,
       transform = function(v)
         if type(v) ~= "table" then error("did not return a table") end
-        return (v.enabled ~= false)
+        -- enabled fails SAFE to true (upgrade lag must not silently disable the
+        -- hook); scan_default fails SAFE to false — if the rendered config is
+        -- missing/corrupt we do NOT scan (conservative in an unknown state; the
+        -- ON deploy default lives in the Go config, not this degraded fallback).
+        return { enabled = (v.enabled ~= false), scan_default = (v.scan_default == true) }
       end,
     })
-    if val ~= nil then
-      clamav_hook_enabled = val
+    if type(val) == "table" then
+      clamav_hook_enabled = val.enabled
+      clamav_scan_default = val.scan_default
     end
   end
   clamav.init({
-    token     = CFG.token,
-    sock_path = CFG.sock_path,
-    enabled   = clamav_hook_enabled,
+    token        = CFG.token,
+    sock_path    = CFG.sock_path,
+    enabled      = clamav_hook_enabled,
+    scan_default = clamav_scan_default,
   })
 end
 

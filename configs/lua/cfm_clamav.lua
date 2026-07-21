@@ -13,6 +13,13 @@ local _M = {}
 local CFG = {
     enabled     = true,
 
+    -- Global scanning POLICY (CLAM_SCAN_DEFAULT), overwritten by init() from the
+    -- rendered cfm_clamav_config.lua. The deploy default is ON (set in the Go
+    -- config); a per-vhost override then opts a vhost OUT. This module-level
+    -- value stays false as the conservative fallback if init() never runs / the
+    -- rendered config is unreadable (unknown state → do not scan).
+    scan_default = false,
+
     methods     = { POST = true, PUT = true },
 
     exclude_hosts = {
@@ -49,6 +56,95 @@ local function is_excluded(host, uri)
         if uri:sub(1, #prefix) == prefix then return true end
     end
     return false
+end
+
+-- Per-vhost scan override set, fetched from the bridge (/nginx/clam/overrides)
+-- and cached per-worker with a short TTL. A host in this set is FLIPPED from the
+-- global scan_default: with scan_default=false it is opted IN, with
+-- scan_default=true it is opted OUT. (v1 matches exact hostnames — the same set
+-- the vhost-controls UI toggles; wildcard admin overrides can mirror
+-- cfm_waf_excl.lua later if needed.)
+--
+-- REFRESH MODEL (mirrors cfm_h3_config.lua): a request that finds the cache
+-- stale schedules an ASYNC ngx.timer refresh and proceeds with the cached set
+-- (even if empty) — the bridge fetch never blocks the upload request path. A
+-- per-worker flag dedupes in-flight refreshes; on fetch failure the worker
+-- keeps the last known set and retries next interval. Cold start serves the
+-- empty set until the first refresh lands: with scan_default=true an opted-out
+-- vhost may get one early scan (harmless), with scan_default=false an opted-in
+-- vhost may miss one — the same fail-quiet direction as an unreachable bridge.
+local _ovr = { hosts = {}, ts = 0 }
+local _OVR_TTL = 10
+local _ovr_refreshing = false
+
+local function fetch_overrides()
+    local sock = ngx.socket.tcp()
+    sock:settimeout(CFG.timeout_ms)
+    local ok = sock:connect("unix:" .. (CFG.sock_path or ""))
+    if not ok then return nil end
+    local req = table.concat({
+        "GET /nginx/clam/overrides HTTP/1.1\r\n",
+        "Host: cfm\r\n",
+        "X-CFM-Token: " .. (CFG.token or "") .. "\r\n",
+        "Connection: close\r\n\r\n",
+    })
+    if not sock:send(req) then sock:close(); return nil end
+    local body = sock:receive("*a")
+    sock:close()
+    if not body then return nil end
+    local json = body:match("\r\n\r\n(.*)$")
+    if not json then return nil end
+    local ok_json, cjson = pcall(require, "cjson")
+    if not ok_json then return nil end
+    local ok_dec, parsed = pcall(cjson.decode, json)
+    if not ok_dec or type(parsed) ~= "table" then return nil end
+    local set = {}
+    if type(parsed.entries) == "table" then
+        for _, e in ipairs(parsed.entries) do
+            if type(e) == "table" and e.type == "host" and type(e.value) == "string" then
+                set[e.value:lower()] = true
+            end
+        end
+    end
+    return set
+end
+
+local function refresh_overrides_handler(premature)
+    -- The dedupe flag MUST clear even if anything below raises, or this worker
+    -- never refreshes again until restart (same finally-style as cfm_h3_config).
+    local ok, err = pcall(function()
+        if premature then return end
+        local set = fetch_overrides()
+        _ovr.ts = ngx.now()   -- advance even on failure to avoid hammering a down bridge
+        if set then _ovr.hosts = set end
+    end)
+    _ovr_refreshing = false
+    if not ok then
+        ngx.log(ngx.ERR, "[cfm_clamav] override refresh raised: ", tostring(err))
+    end
+end
+
+local function overrides_get()
+    if not _ovr_refreshing and (ngx.now() - _ovr.ts) >= _OVR_TTL then
+        _ovr_refreshing = true
+        local ok, err = ngx.timer.at(0, refresh_overrides_handler)
+        if not ok then
+            _ovr_refreshing = false
+            ngx.log(ngx.WARN, "[cfm_clamav] could not schedule override refresh: ", tostring(err))
+        end
+    end
+    return _ovr.hosts
+end
+
+-- should_scan: global default XOR per-vhost override.
+--   scan_default=false → scan ONLY vhosts opted in (in the override set)
+--   scan_default=true  → scan ALL vhosts EXCEPT those opted out (in the set)
+local function should_scan(host)
+    local flipped = overrides_get()[host] == true
+    if CFG.scan_default then
+        return not flipped
+    end
+    return flipped
 end
 
 local function write_temp(body_data, ip)
@@ -176,6 +272,11 @@ function _M.notify(ip, waf_tag)
 
         local ct = (ngx.var.content_type or ""):lower()
         if not ct:find("multipart/form-data", 1, true) then return end
+
+        -- Per-vhost scan decision (scan_default XOR override). Cheap-exits a
+        -- non-scanned vhost here, BEFORE any body read/spool/bridge-post — so an
+        -- opted-out vhost (or scan-off server) costs nothing on the upload path.
+        if not should_scan(host) then return end
 
         if not ngx.ctx.waf_body then
             ngx.req.read_body()

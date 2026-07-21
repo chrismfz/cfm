@@ -119,6 +119,40 @@ curl -sS -X POST \
 
 ---
 
+## 2a) ClamAV per-vhost scan override + scanner health (ClamAV / Controls pages)
+
+The override set FLIPS a host relative to the global `CLAM_SCAN_DEFAULT`
+(opt-out when the default is ON — the shipped default — opt-in when OFF).
+Host type only. Scoped tokens may flip only hosts inside their vhost scope;
+every write is audit-logged to `cfm.clam.log` (`[clam_override]` lines).
+
+```bash
+# list current overrides (scope-filtered for scoped tokens)
+curl -sS "$CFM_API/api/v1/clam/override/list" | jq .
+
+# opt a vhost out of scanning (with default ON) / in (with default OFF)
+curl -sS -X POST "$CFM_API/api/v1/clam/override/add?type=host&value=example.com" | jq .
+
+# undo the flip
+curl -sS -X POST "$CFM_API/api/v1/clam/override/remove?type=host&value=example.com" | jq .
+```
+
+Scanner health (admin-only; box-level daemon state for the ClamAV page's
+status card — breaker, queue, lifetime counters, global scan default):
+
+```bash
+curl -sS "$CFM_API/api/v1/clam/health" | jq .
+```
+
+Recent infections for the ClamAV page come from the existing scoped history
+endpoint:
+
+```bash
+curl -sS "$CFM_API/api/v1/webdet/history/events?type=clam_infected&limit=50&enrich=1" | jq .
+```
+
+---
+
 ## 2b) Web Bots UA drilldown (Web Bots page "details" panel)
 
 Per-UA breakdown: vhosts hit, source IPs with geo/ASN (and cached PTR), top

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM — ClamAV</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2032%2032%27%3E%3Crect%20width=%2732%27%20height=%2732%27%20rx=%277%27%20fill=%27%23141b2d%27/%3E%3Cpath%20d=%27M16%206l8.7%205v10L16%2026l-8.7-5V11z%27%20fill=%27none%27%20stroke=%27%234da3ff%27%20stroke-width=%272.4%27/%3E%3C/svg%3E" />
+  <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <script src="/cfm-admin/assets/vendor/vue-3.5.13.global.prod.js" defer></script>
+  <script type="module">
+    import "../../assets/webdet/pages/clam.js";
+  </script>
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar" data-shared-nav></aside>
+<div class="main">
+<div id="app" v-cloak>
+    <div data-wd-section="topbar"></div>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>ClamAV</h2>
+        <p class="muted">Upload-scan status and per-vhost coverage. Scanning is asynchronous (notify-only) — it never blocks a request. Supports <code>?vhost=a.com,b.com</code>.</p>
+      </section>
+
+      <!-- 1. Scanner status (admin only — box-level daemon state) -->
+      <section class="card wide" v-if="isAdmin">
+        <h2>Scanner status</h2>
+        <p class="muted" v-if="!clamHealth || !clamHealth.available">
+          ClamAV is not wired on this node (<code>CLAMD_ENABLED=0</code> or the scanner is not running).
+        </p>
+        <div v-else>
+          <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
+            <section class="mini-card">
+              <h3>clamd reachability</h3>
+              <div><span class="pill" :class="clamStatusBadge.cls">{{ clamStatusBadge.label }}</span></div>
+              <div class="muted" style="font-size:.8rem;margin-top:.3rem" v-if="clamHealth.breaker_open">
+                down since {{ fmtTs(clamHealth.down_since) }}<br />{{ clamHealth.last_err }}
+              </div>
+            </section>
+            <section class="mini-card">
+              <h3>Global scan default</h3>
+              <div><span class="pill" :class="clamHealth.global_scan_default ? 'ok' : 'warn'">{{ clamHealth.global_scan_default ? 'ON' : 'OFF' }}</span></div>
+              <div class="muted" style="font-size:.8rem;margin-top:.3rem">flip with <code>cfm clam scan on|off</code></div>
+            </section>
+            <section class="mini-card">
+              <h3>Queue</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.queue_len }} <span class="muted" style="font-size:.9rem">/ {{ clamHealth.queue_cap }}</span></div>
+            </section>
+            <section class="mini-card">
+              <h3>Scanned</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.scanned_ok }}</div>
+              <div class="muted" style="font-size:.8rem">since scanner start</div>
+            </section>
+            <section class="mini-card">
+              <h3>Scan errors</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.scan_errors }}</div>
+            </section>
+            <section class="mini-card">
+              <h3>Skipped (breaker)</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.skipped_breaker }}</div>
+              <div class="muted" style="font-size:.8rem">uploads not scanned while clamd was down</div>
+            </section>
+            <section class="mini-card">
+              <h3>Queue drops</h3>
+              <div style="font-size:1.6rem;font-weight:700">{{ clamHealth.queue_drops }}</div>
+              <div class="muted" style="font-size:.8rem">dropped when the queue was full</div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Per-vhost scan coverage (scoped: your vhosts; admin: all) -->
+      <section class="card wide" v-if="shouldShow('clam')">
+        <h2>Scan coverage</h2>
+        <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr));margin-bottom:.8rem">
+          <section class="mini-card">
+            <h3>Vhosts</h3>
+            <div style="font-size:1.6rem;font-weight:700">{{ clamCoverage.total }}</div>
+          </section>
+          <section class="mini-card">
+            <h3>Scanned</h3>
+            <div style="font-size:1.6rem;font-weight:700">{{ clamCoverage.scanned }}</div>
+          </section>
+          <section class="mini-card">
+            <h3>Not scanned</h3>
+            <div style="font-size:1.6rem;font-weight:700">{{ clamCoverage.notScanned }}</div>
+          </section>
+        </div>
+
+        <p class="statusline" v-if="actionMsg">{{ actionMsg }}</p>
+
+        <p class="muted" v-if="!clamNotScanned.length">Every listed vhost is scanned. Manage per-vhost scanning on the <a href="/cfm-admin/webdetector/controls/">Vhost controls</a> page.</p>
+        <div class="table-wrap" v-else>
+          <table>
+            <thead>
+              <tr><th>Vhost (not scanned)</th><th>Action</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in clamNotScanned" :key="row.host">
+                <td><code>{{ row.host }}</code></td>
+                <td>
+                  <button class="btn-quiet btn-sm" @click="toggleClamScan(row)" :disabled="loading || !row.clam_toggleable" :title="row.clam_toggleable ? 'Start scanning uploads for this vhost' : 'ClamAV is globally off'">Enable scan</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 3. Recent infections (scoped: your vhost; admin: all vhosts) -->
+      <section class="card wide" v-if="shouldShow('clam')">
+        <h2>Recent infections</h2>
+        <p class="muted" v-if="!clamInfections.length">No infections recorded<span v-if="isScopedMode"> for your vhost</span>. Infected uploads that ClamAV catches appear here.</p>
+        <div class="table-wrap" v-else>
+          <table>
+            <thead>
+              <tr><th>When</th><th>Vhost</th><th>Source IP</th><th>File</th><th>Signature</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in clamInfections" :key="row.id">
+                <td>{{ fmtTs(row.ts_unix) }}</td>
+                <td><code>{{ row.host }}</code></td>
+                <td>{{ row.ip }}<span class="muted" v-if="row.country"> · {{ row.country }}</span></td>
+                <td class="truncate">{{ (row.payload && row.payload.filename) || '-' }}</td>
+                <td>{{ row.reason }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+</div>
+</div>
+</div>
+</body>
+</html>

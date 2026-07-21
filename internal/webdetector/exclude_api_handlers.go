@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"cfm/internal/logging"
 )
 
 func readExcludeParams(r *http.Request) (string, string) {
@@ -236,5 +238,102 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// Per-vhost ClamAV upload-scan override. A listed host is FLIPPED relative to
+// the global CLAM_SCAN_DEFAULT (opt-out when the default is ON, opt-in when it
+// is OFF) — the XOR is applied at the edge; these handlers just edit the raw
+// override set. They reuse the identical scoped-vs-admin auth as the
+// WAF/Challenge handlers above (RequireScopedOrAdmin + validateScopedExcludeWrite
+// + filterExcludeListForScope), so a scoped cPanel token can toggle only its own
+// vhost. HOST type only — upload scanning is a whole-vhost on/off, there is no
+// per-path/per-rule clam override.
+
+// logClamOverrideAudit writes the per-vhost scan-override change trail to the
+// CLAM log: who (admin or the token's vhost scope) flipped which host, from
+// where, and whether it took. Upload scanning is a protection layer a scoped
+// token may switch off for its own vhost, so every flip (and every out-of-scope
+// attempt) must be reconstructable from cfm.clam.log after the fact.
+func logClamOverrideAudit(r *http.Request, action, value, result string) {
+	actor := "admin"
+	if scope := vhostScopeFromContext(r.Context()); scope != nil {
+		hosts := make([]string, 0, len(scope))
+		for h := range scope {
+			hosts = append(hosts, h)
+		}
+		sort.Strings(hosts)
+		actor = "scoped:" + strings.Join(hosts, ",")
+	}
+	logging.LogfCLAM("[clam_override] action=%s host=%q result=%s actor=%s remote=%s",
+		action, value, result, actor, r.RemoteAddr)
+}
+
+// GET /api/v1/clam/override/list
+func (e *Engine) handleClamOverrideList(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
+	if e == nil {
+		writeJSON(w, http.StatusOK, []excludeEntry{})
+		return
+	}
+	scope := vhostScopeFromContext(r.Context())
+	writeJSON(w, http.StatusOK, filterExcludeListForScope(e.ClamOverrideList(), scope))
+}
+
+// POST /api/v1/clam/override/add?type=host&value=example.com
+func (e *Engine) handleClamOverrideAdd(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
+	typ, value := readExcludeParams(r)
+	if typ != "host" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clam override supports type=host only"})
+		return
+	}
+	scope := vhostScopeFromContext(r.Context())
+	if !validateScopedExcludeWrite(r, typ, value) {
+		logClamOverrideAudit(r, "add", value, "denied_out_of_scope")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+		return
+	}
+	if strings.TrimSpace(value) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
+		return
+	}
+	if ok := e.ClamOverrideAdd(typ, value, scope); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
+		return
+	}
+	logClamOverrideAudit(r, "add", value, "ok")
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// POST /api/v1/clam/override/remove?type=host&value=example.com
+func (e *Engine) handleClamOverrideRemove(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
+	typ, value := readExcludeParams(r)
+	if typ != "host" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clam override supports type=host only"})
+		return
+	}
+	scope := vhostScopeFromContext(r.Context())
+	if !validateScopedExcludeWrite(r, typ, value) {
+		logClamOverrideAudit(r, "remove", value, "denied_out_of_scope")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+		return
+	}
+	if strings.TrimSpace(value) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
+		return
+	}
+	if ok := e.ClamOverrideRemove(typ, value, scope); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
+		return
+	}
+	logClamOverrideAudit(r, "remove", value, "ok")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

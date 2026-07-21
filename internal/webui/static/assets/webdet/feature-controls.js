@@ -72,12 +72,14 @@ export const controlsMixin = {
       let challengeOff = 0;
       let wafOff = 0;
       let http3On = 0;
+      let clamOff = 0;
       for (const row of this.vhostControls) {
         if (!row?.challenge_enabled) challengeOff++;
         if (!row?.waf_enabled) wafOff++;
         if (row?.http3_enabled) http3On++;
+        if (!row?.clam_enabled) clamOff++;
       }
-      return { challengeOff, wafOff, http3On };
+      return { challengeOff, wafOff, http3On, clamOff };
     },
     vhostControlsFiltered() {
       const q = String(this.controlsSearch || "").trim().toLowerCase();
@@ -88,6 +90,7 @@ export const controlsMixin = {
       if (quick === "challenge_off") filtered = filtered.filter((row) => !row?.challenge_enabled);
       else if (quick === "waf_off") filtered = filtered.filter((row) => !row?.waf_enabled);
       else if (quick === "http3_on") filtered = filtered.filter((row) => row?.http3_enabled);
+      else if (quick === "clam_off") filtered = filtered.filter((row) => !row?.clam_enabled);
       const key = String(this.controlsSortKey || "host");
       const dir = this.controlsSortDir === "desc" ? -1 : 1;
       const boolOrder = (v) => (v ? 1 : 0);
@@ -100,6 +103,9 @@ export const controlsMixin = {
           if (cmp !== 0) return cmp * dir;
         } else if (key === "http3") {
           const cmp = boolOrder(Boolean(a?.http3_enabled)) - boolOrder(Boolean(b?.http3_enabled));
+          if (cmp !== 0) return cmp * dir;
+        } else if (key === "clam") {
+          const cmp = boolOrder(Boolean(a?.clam_enabled)) - boolOrder(Boolean(b?.clam_enabled));
           if (cmp !== 0) return cmp * dir;
         } else {
           const cmpHost = String(a?.host || "").localeCompare(String(b?.host || ""), undefined, { sensitivity: "base" });
@@ -131,6 +137,7 @@ export const controlsMixin = {
       if (kind === "challenge") key = "challenge_enabled";
       else if (kind === "waf") key = "waf_enabled";
       else if (kind === "http3") key = "http3_enabled";
+      else if (kind === "clam") key = "clam_enabled";
       else return false;
       return Boolean(row?.[key]);
     },
@@ -139,6 +146,7 @@ export const controlsMixin = {
       if (kind === "challenge") key = "challenge_toggleable";
       else if (kind === "waf") key = "waf_toggleable";
       else if (kind === "http3") key = "http3_toggleable";
+      else if (kind === "clam") key = "clam_toggleable";
       else return false;
       return Boolean(row?.[key]);
     },
@@ -147,7 +155,7 @@ export const controlsMixin = {
       if (kind === "challenge") key = "challenge_matched_exclude";
       else if (kind === "waf") key = "waf_matched_exclude";
       else if (kind === "http3") key = "http3_matched_optin";
-      else return "";
+      else return ""; // clam: exact-match only, no pattern to surface
       return String(row?.[key] || "").trim();
     },
     vhostControlButtonLabel(row, kind) {
@@ -159,6 +167,12 @@ export const controlsMixin = {
         if (enabled) return "ON / ENABLED";
         return toggleable ? "OFF / DEFAULT" : "ON / MATCHED BY PATTERN";
       }
+      // ClamAV: XOR of global default and per-vhost override. Not-toggleable
+      // means ClamAV is globally off (there is no per-vhost pattern lock).
+      if (kind === "clam") {
+        if (enabled) return "ON / SCANNING";
+        return toggleable ? "OFF / NOT SCANNED" : "OFF / GLOBALLY OFF";
+      }
       if (enabled) return "ON / ENABLED";
       return toggleable ? "OFF / DISABLED" : "OFF / MATCHED BY PATTERN";
     },
@@ -166,6 +180,11 @@ export const controlsMixin = {
       const enabled = this.vhostControlEnabled(row, kind);
       const matched = this.vhostControlMatchedExclude(row, kind);
       const toggleable = this.vhostControlToggleable(row, kind);
+      if (kind === "clam") {
+        if (!toggleable) return "ClamAV upload scanning is globally off (CLAMD_ENABLED / hook). Enable it in cfm.conf first.";
+        if (enabled) return "ClamAV scans uploads for this vhost (async, notify-only). Click to stop scanning it.";
+        return "ClamAV upload scanning is off for this vhost. Click to start scanning it.";
+      }
       if (kind === "http3") {
         if (!enabled) {
           return "HTTP/3 (Alt-Svc) is OFF by default. Click to enable for this vhost.";
@@ -213,6 +232,8 @@ export const controlsMixin = {
         const matched = this.vhostControlMatchedExclude(row, kind);
         if (kind === "http3") {
           this.actionMsg = `HTTP/3 for ${host} is enabled by wildcard opt-in (${matched || "pattern"}). Remove/edit it via CLI to change.`;
+        } else if (kind === "clam") {
+          this.actionMsg = `ClamAV scanning for ${host} can't be toggled — it is globally off (enable CLAMD_ENABLED / scan policy in cfm.conf first).`;
         } else {
           this.actionMsg = `${kind.toUpperCase()} for ${host} is disabled by non-exact exclude (${matched || "pattern"}). Remove/edit it in Dynamic excludes first.`;
         }
@@ -225,6 +246,13 @@ export const controlsMixin = {
           const endpoint = currentlyEnabled ? "disable" : "enable";
           await this.postJSON(`v1/http3/${endpoint}?host=${encodeURIComponent(host)}`, {});
           this.actionMsg = `HTTP/3 ${currentlyEnabled ? "disabled" : "enabled"} for ${host}`;
+        } else if (kind === "clam") {
+          // ClamAV scan = scanDefault XOR override. Flipping override membership
+          // always flips the resolved state regardless of the global default,
+          // so add when no override exists, remove when one does.
+          const endpoint = row?.clam_override_present ? "remove" : "add";
+          await this.postJSON(`v1/clam/override/${endpoint}?type=host&value=${encodeURIComponent(host)}`, {});
+          this.actionMsg = `ClamAV scanning ${currentlyEnabled ? "disabled" : "enabled"} for ${host}`;
         } else if (currentlyEnabled) {
           await this.postJSON(`v1/${kind}/exclude/add?type=host&value=${encodeURIComponent(host)}`, {});
           this.actionMsg = `${kind.toUpperCase()} disabled for ${host}`;

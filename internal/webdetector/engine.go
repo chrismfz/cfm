@@ -401,6 +401,7 @@ type Engine struct {
 
 	challengeExcludes *excludeStore
 	wafExcludes       *excludeStore
+	clamScanOverrides *excludeStore
 	http3Overrides    *http3OverrideStore
 	trafficRules      *trafficRuleStore
 	history           *HistoryStore
@@ -459,6 +460,7 @@ func NewEngine(cfg Config) *Engine {
 	e.chalExpiredSeen = make(map[string]time.Time)
 	e.challengeExcludes = newExcludeStore(cfg.ChallengeExcludeStorePath)
 	e.wafExcludes = newExcludeStore(cfg.WAFExcludeStorePath)
+	e.clamScanOverrides = newExcludeStore(cfg.ClamScanOverrideStorePath)
 	e.http3Overrides = newHTTP3OverrideStore(cfg.HTTP3OverridesStorePath)
 	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
 	e.uaEmergency = NewUAEmergencyStore(cfg.UAEmergencyStorePath, cfg.UAEmergencyAuditLog)
@@ -472,6 +474,7 @@ func NewEngine(cfg Config) *Engine {
 		e.nginxBridge.IsWAFExcluded = e.isWAFExcluded
 		e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
 		e.nginxBridge.ListWAFExcludes = e.WAFExcludeList
+		e.nginxBridge.ListClamScanOverrides = e.ClamOverrideList
 		e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
 		e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 		e.nginxBridge.ListTrafficRules = e.TrafficRuleList
@@ -3512,6 +3515,38 @@ func (e *Engine) WAFExcludeHasAny() bool {
 		return false
 	}
 	return len(e.wafExcludes.List()) > 0
+}
+
+// ---------------------------------------------------------------------------
+// Per-vhost ClamAV upload-scan override. Unlike the WAF/Challenge excludes
+// (which unconditionally disable), a `host` entry here FLIPS the vhost relative
+// to the global CLAM_SCAN_DEFAULT: opt-out when the default is ON (the shipped
+// default), opt-in when it is OFF. The XOR is applied at the edge; this store
+// only holds the raw override set. ClamAV interception happens in OpenResty
+// (cfm_clamav.lua), so — like WAF, and unlike the daemon-enforced Challenge —
+// the edge reads this list via the nginx bridge (/nginx/clam/overrides).
+// Host-only: there is no per-path or per-rule clam override (upload scanning is
+// a whole-vhost on/off).
+
+func (e *Engine) ClamOverrideAdd(typ, value string, scope map[string]struct{}) bool {
+	if e == nil || e.clamScanOverrides == nil {
+		return false
+	}
+	return e.clamScanOverrides.Add(typ, value, scope)
+}
+
+func (e *Engine) ClamOverrideRemove(typ, value string, scope map[string]struct{}) bool {
+	if e == nil || e.clamScanOverrides == nil {
+		return false
+	}
+	return e.clamScanOverrides.Remove(typ, value, scope)
+}
+
+func (e *Engine) ClamOverrideList() []excludeEntry {
+	if e == nil || e.clamScanOverrides == nil {
+		return nil
+	}
+	return e.clamScanOverrides.List()
 }
 
 // ---------------------------------------------------------------------------

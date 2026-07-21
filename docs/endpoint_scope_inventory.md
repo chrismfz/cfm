@@ -19,6 +19,7 @@ This inventory documents the effective authz classification enforced by the back
 - `/api/v1/webdet/history/events|summary|challenge-outcomes|waf-by-rule|vhost-overview` (`scopeCheckHost`)
 - `/api/v1/challenge/vhost`, `/api/v1/challenge/events`, `/api/v1/challenge/vhost/add|remove|status` (`vhostAllowed` checks)
 - `/api/v1/challenge/exclude/*`, `/api/v1/waf/exclude/*` (`validateScopedExcludeWrite`: scoped tokens limited to `type=host` within their vhost allowlist; list reads are scope-filtered)
+- `/api/v1/clam/override/list|add|remove` (`validateScopedExcludeWrite`, `type=host` only: per-vhost ClamAV upload-scan override; a scoped token can flip only its own vhost, list reads are scope-filtered. The override XORs the vhost against the global `CLAM_SCAN_DEFAULT`)
 - `/api/v1/waf/engine/summary` (`vhostAllowed` filter — scoped callers see only their own vhosts' WAF-engine stats; verified by `authz_integration_test.go`)
 - `/api/v1/http3/enable|disable` (`validateScopedHTTP3Write` host-scope check)
 - `/api/v1/waf/hit-rates` (`vhostAllowed` host-scope guard in `handleWAFHitRates`: a scoped caller must target one in-scope host — an empty host, which aggregates every tenant, and any out-of-scope host are `403`; admin/loopback may pass any host or none. Audit F02.)
@@ -29,6 +30,7 @@ This inventory documents the effective authz classification enforced by the back
 - `/api/v1/webdet/hot-ips`, `/api/v1/webdet/ip-short`, `/api/v1/webdet/ip-drilldown`, `/api/v1/webdet/analyze-ip`
 - `/api/v1/webdet/history/stats|prune|truncate`
 - `/api/v1/webdet/ua-top`, `/api/v1/webdet/ua-drill`, `/api/v1/webdet/ua-emergency` (global "Web Bots" UA controls — `RequireAdmin`)
+- `/api/v1/clam/health` (`RequireAdmin`: box-level ClamAV scanner status — clamd reachability, circuit breaker, queue geometry, lifetime counters, global scan default. Not per-vhost, so admin-only. Per-vhost scan coverage on the ClamAV page comes from the scoped `/api/v1/webdet/vhosts` instead.)
 - `/api/v1/challenge/summary|vhosts|ips|ip`
 
 ## `internal/apiserver/apiserver.go` + token/mysql endpoints
