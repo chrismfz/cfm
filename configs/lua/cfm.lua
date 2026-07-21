@@ -221,6 +221,12 @@ local CFG = {
   -- (they read regardless of size, as before).
   waf_body_read_max_cl = tonumber(os.getenv("CFM_WAF_BODY_READ_MAX_CL") or "1048576"),
 
+  -- Challenge POST replay: a challenged POST's body is stashed (shared dict,
+  -- base64) and re-applied after the challenge solves, so form content is not
+  -- lost. Allowed content-types: urlencoded / json / text/plain / multipart
+  -- (see ct_allows_resume). max_len bounds the stored body — raising it
+  -- trades shared-dict memory for replaying bigger (e.g. attachment-bearing)
+  -- posts; a body over the cap falls back to the old lose-the-form behaviour.
   post_resume_enable  = (os.getenv("CFM_POST_RESUME_ENABLE") or "1") == "1",
   post_resume_max_len = tonumber(os.getenv("CFM_POST_RESUME_MAX_LEN") or "65536"),
   post_resume_ttl_sec = tonumber(os.getenv("CFM_POST_RESUME_TTL_SEC") or "90"),
@@ -693,6 +699,16 @@ local function ct_allows_resume(ct)
   if has(ct, "application/x-www-form-urlencoded") then return true end
   if has(ct, "application/json")  then return true end
   if has(ct, "text/plain")        then return true end
+  -- multipart/form-data joined the allowlist 2026-07-21: ticket/forum forms
+  -- with a (often unused) file field submit multipart, and a challenged reply
+  -- was lost because only the challenge-server no-replay fallback ran. Replay
+  -- is byte-identical (raw body + the original Content-Type keeps the
+  -- boundary), so the origin reparses it fine. The post_resume_max_len cap
+  -- (64KB default) still governs: a text-only reply fits; a real attachment
+  -- overflows the cap (or spools to disk, where get_body_data returns nil)
+  -- and falls back to no_replay exactly as before — the shared-dict memory
+  -- posture is unchanged.
+  if has(ct, "multipart/form-data") then return true end
   return false
 end
 
