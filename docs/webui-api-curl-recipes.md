@@ -137,8 +137,21 @@ curl -sS -X POST "$CFM_API/api/v1/clam/override/add?type=host&value=example.com"
 curl -sS -X POST "$CFM_API/api/v1/clam/override/remove?type=host&value=example.com" | jq .
 ```
 
+Per-signature excludes ("sig-ignore"): a matching infected verdict is
+downgraded to log-only (no email, no quarantine). `host` empty = GLOBAL entry
+(admin-only); with `host`, scoped tokens may manage their own vhost. Audit
+trail in `cfm.clam.log` (`[clam_sigignore]` lines).
+
+```bash
+curl -sS "$CFM_API/api/v1/clam/sigignore/list" | jq .
+curl -sS -X POST "$CFM_API/api/v1/clam/sigignore/add?pattern=*_Hunting.UNOFFICIAL" | jq .
+curl -sS -X POST "$CFM_API/api/v1/clam/sigignore/add?pattern=Doc.Dropper.Agent-*&host=shop.example.com" | jq .
+curl -sS -X POST "$CFM_API/api/v1/clam/sigignore/remove?pattern=Doc.Dropper.Agent-*&host=shop.example.com" | jq .
+```
+
 Scanner health (admin-only; box-level daemon state for the ClamAV page's
-status card — breaker, queue, lifetime counters, global scan default):
+status card — breaker, queue, scan scope, lifetime counters incl.
+skipped-by-scope and sig-ignored, global scan default):
 
 ```bash
 curl -sS "$CFM_API/api/v1/clam/health" | jq .

@@ -1,6 +1,9 @@
 # CFM — ClamAV Scan Scope & Mode Roadmap
 
-**Status:** Design — deferred from the ClamAV per-vhost work (PR-A/B/C). Not started.
+**Status:** Items 1 (scope, scanner-side) and 2 (sig-ignore: config baseline +
+global/per-vhost store + API/CLI/UI) **shipped 2026-07-21**. Remaining: the
+optional edge pre-filter (phase 4) and inline mode + per-vhost mode (phases
+5-6, Item 3).
 **Scope:** Three independent knobs layered on the existing async upload scanner —
 (1) `CLAM_SCAN_SCOPE` (what file types are worth scanning),
 (2) `CLAM_SIG_IGNORE` (which signatures are trusted enough to act on), and
