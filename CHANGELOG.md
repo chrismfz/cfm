@@ -37,8 +37,7 @@ back-filled here — see the git/PR history for that period.
   **scan-coverage** card built from the existing scoped `/api/v1/webdet/vhosts`
   rows: how many vhosts are scanned vs not, with a one-click "Enable scan" that
   reuses the scoped `/api/v1/clam/override/*` flip — so a cPanel user can turn
-  scanning on for their own vhost. (Scoped per-vhost scan/infection _history_ is
-  a planned follow-up — it needs a new clam→history persistence bridge.)
+  scanning on for their own vhost.
 - **ClamAV scanner resilience: circuit breaker + health prober + down alert.**
   The async upload scanner no longer stalls when clamd is down or hung. A
   circuit breaker opens after a few consecutive scan/probe failures: workers
@@ -79,6 +78,25 @@ back-filled here — see the git/PR history for that period.
   can toggle scanning for their own vhost from the UI. The API mirrors the policy
   into the daemon on every config reload, so the grid stays consistent with what
   the edge enforces.
+- **ClamAV override changes are audit-logged.** Every
+  `/api/v1/clam/override/add|remove` write (vhost-controls / ClamAV page toggle,
+  `cfm clam override …`) now writes a `[clam_override]` line to `cfm.clam.log`
+  with the action, host, result, actor (admin vs the scoped token's vhost scope)
+  and remote address — including **denied out-of-scope attempts**. Upload
+  scanning is a protection layer a scoped cPanel token may legitimately switch
+  off for its own vhost, so every flip must be reconstructable after the fact.
+
+### Changed
+- **ClamAV per-vhost override refresh moved fully off the request path.** The
+  edge (`cfm_clamav.lua`) used to fetch the override list synchronously from the
+  bridge when its 10s per-worker cache expired, pinning one upload request per
+  worker per interval to the bridge round-trip (sub-ms healthy, but up to
+  ~3×300ms against a *hung* bridge). It now mirrors the `cfm_h3_config.lua`
+  refresh model: a stale cache schedules an async `ngx.timer` refresh and the
+  request proceeds on the cached set, so the bridge fetch never blocks an
+  upload. Fetch failure keeps the last known set; a cold worker serves the empty
+  set until the first refresh lands (same fail direction as an unreachable
+  bridge before).
 
 ### Security
 - **WAF upload rules: catch multi-digit `.phpNN` (MultiPHP handler) extensions.**
