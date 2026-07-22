@@ -18,6 +18,15 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **`cfm php-inventory` — read-only PHP build discovery (SP roadmap P0).** New
+  command that enumerates the host's PHP builds across cPanel EA4, CloudLinux
+  alt-php, DirectAdmin CustomBuild, LiteSpeed lsphp and system PHP, reporting
+  per build its version, thread-safety, module count, and whether Snuffleupagus
+  or an Imunify PHP extension is loaded — plus a warning when BOTH are loaded in
+  one build (the coexistence hazard). Touches no config; safe to run
+  fleet-wide. `--json` for machine consumption. This is the visibility layer
+  that sizes the PHP-runtime-defense build matrix before any per-platform work
+  (`docs/roadmaps/php-runtime-defense.md`).
 - **Dashboard security overview: ClamAV card.** The at-a-glance security row
   gains a fifth tile — **ClamAV infections** — showing infections in the last
   24h with the live scanner state on the sub-line (`async/inline · 24h`,

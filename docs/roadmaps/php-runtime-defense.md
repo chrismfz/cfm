@@ -363,11 +363,17 @@ Each phase is its own PR(s) + review; later phases only start after the
 previous one has fleet burn-in. Once the manager core (P1) exists, new
 **adapters** (P3) and rule **promotions** (P4) can proceed in parallel.
 
-0. **P0 — Inventory (all platforms, read-only). START HERE.** `cfm php-inventory`
-   + `/api/v1/sp/inventory`: per-server PHP builds/SAPIs, per-vhost handler,
-   `snuffleupagus.so` present?, `proactive.so` present?, build-without-SP drift.
-   Touches no PHP config — **safe to deploy fleet-wide immediately**; sizes the
-   build matrix and is the foundation the manager needs.
+0. **P0 — Inventory (all platforms, read-only).**
+   - **P0a — build discovery `cfm php-inventory` — DONE (2026-07-22).**
+     `internal/phpinventory` + the CLI: per-build flavour / version / ZTS /
+     module count / Snuffleupagus-loaded / Imunify-extension-loaded, plus the
+     SP+Imunify coexistence-conflict warning. `--json`. Read-only, no config
+     touched. (Imunify module name is best-effort substring — verify on a live
+     host; see open questions.)
+   - **P0b — next:** per-vhost PHP handler mapping (which build+SAPI serves each
+     vhost, from panel config), extension_dir / ini-scan-dir per build (adapter
+     prep), and the admin `/api/v1/sp/inventory` + an inventory card on the SP
+     page.
 1. **P1 — Manager core + EA4 beachhead adapter (monitor-only, one server).**
    Platform-independent manager: render Tier-1 `.simulation()` rules, the
    render→validate→swap→reload gate (§10) + CI guardrail, SP detector →
