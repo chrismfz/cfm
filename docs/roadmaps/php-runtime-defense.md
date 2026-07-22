@@ -1,15 +1,19 @@
 # CFM — PHP Runtime Defense (Snuffleupagus) Roadmap
 
-**Status:** Design — not started. Facts below verified against the upstream docs
-(https://snuffleupagus.readthedocs.io/) on 2026-07-22; re-verify before building.
-**Scope:** Deploy and *manage* the Snuffleupagus (SP) PHP extension as CFM's
-PHP-runtime layer: CFM-rendered rules, monitor/enforce modes, per-vhost
-excludes, a JSON event log + detector, and a cfm-admin page — mirroring the
-ClamAV/vhost-controls patterns.
+**Status:** Design — not started. **Revised 2026-07-22** to lead with a
+panel-agnostic PHP *inventory* and a **manager / adapter split**, because the
+fleet runs a heterogeneous PHP matrix (cPanel EA4, CloudLinux alt-php,
+DirectAdmin CustomBuild, LiteSpeed lsphp, custom). SP facts verified against
+the upstream docs (https://snuffleupagus.readthedocs.io/); re-verify before
+building.
+**Scope:** *Manage* the Snuffleupagus (SP) PHP extension as CFM's PHP-runtime
+layer — CFM-rendered rules, monitor/enforce modes, per-vhost excludes, a JSON
+event log + detector, and a cfm-admin page — with the platform-specific
+build/load/reload mess isolated behind a thin per-target adapter.
 **Goal:** Close the "Proactive Defense" gap in the Imunify360-replacement
-picture with a maintained open-source engine we orchestrate — instead of
-writing our own PHP extension — with a simulation-first rollout that never
-takes down customer PHP.
+picture with a maintained open-source engine we orchestrate — never writing our
+own PHP extension — with a simulation-first rollout that never takes down
+customer PHP, and an inventory-first approach that never guesses the matrix.
 
 ---
 
@@ -17,18 +21,20 @@ takes down customer PHP.
 
 1. [Positioning — what layer this is](#1-positioning--what-layer-this-is)
 2. [How SP actually works (verified)](#2-how-sp-actually-works-verified)
-3. [Deployment model — global load, CFM-rendered rules](#3-deployment-model--global-load-cfm-rendered-rules)
-4. [Modes — monitor / enforce, global + per-rule](#4-modes--monitor--enforce-global--per-rule)
-5. [Per-vhost model](#5-per-vhost-model)
-6. [Logging, alerts & the FP loop](#6-logging-alerts--the-fp-loop)
-7. [Ruleset — what we ship, in tiers](#7-ruleset--what-we-ship-in-tiers)
-8. [The failure mode that matters: a broken rules file](#8-the-failure-mode-that-matters-a-broken-rules-file)
-9. [Packaging — the per-PHP-version build matrix](#9-packaging--the-per-php-version-build-matrix)
-10. [Synergies with existing CFM layers](#10-synergies-with-existing-cfm-layers)
-11. [Control plane & UI](#11-control-plane--ui)
-12. [Phase plan](#12-phase-plan)
-13. [Open questions](#13-open-questions)
-14. [Out of scope](#14-out-of-scope)
+3. [The fleet reality — manager vs adapter](#3-the-fleet-reality--manager-vs-adapter)
+4. [PHP-platform adapters — the target matrix](#4-php-platform-adapters--the-target-matrix)
+5. [Deployment model — global load, CFM-rendered rules](#5-deployment-model--global-load-cfm-rendered-rules)
+6. [Modes — monitor / enforce, global + per-rule](#6-modes--monitor--enforce-global--per-rule)
+7. [Per-vhost model](#7-per-vhost-model)
+8. [Logging, alerts & the FP loop](#8-logging-alerts--the-fp-loop)
+9. [Ruleset — what we ship, in tiers](#9-ruleset--what-we-ship-in-tiers)
+10. [The failure mode that matters: a broken rules file](#10-the-failure-mode-that-matters-a-broken-rules-file)
+11. [Coexistence with Imunify Proactive Defense & cutover](#11-coexistence-with-imunify-proactive-defense--cutover)
+12. [Synergies with existing CFM layers](#12-synergies-with-existing-cfm-layers)
+13. [Control plane & UI](#13-control-plane--ui)
+14. [Phase plan](#14-phase-plan)
+15. [Open questions](#15-open-questions)
+16. [Out of scope](#16-out-of-scope)
 
 ---
 
@@ -70,30 +76,108 @@ the LSM).
   at a dedicated file and tail it.
 - **Broken config**: by default an invalid rules file breaks PHP startup.
   `sp.allow_broken_configuration` exists but upstream recommends against it —
-  see §8 for our gate instead.
+  see §10 for our gate instead.
 
-## 3. Deployment model — global load, CFM-rendered rules
+## 3. The fleet reality — manager vs adapter
 
-Load **globally per PHP version** (cPanel EA4 `ea-phpXX`, DA equivalents, and
-CloudLinux `alt-php` where present): one ini drop-in per version pointing at a
-CFM-owned rules directory:
+The fleet is a heterogeneous PHP matrix: LiteSpeed + lsphp, lsphp behind
+nginx/apache, plain php-fpm; some cPanel, some DirectAdmin, some custom. The
+temptation is to see chaos and stall. The discipline is: **the chaos lives in
+exactly one layer — isolate it there.**
+
+| Layer | What it does | Platform-specific? | Share of the value |
+|---|---|---|---|
+| **Manager** | render rules, monitor/enforce modes, per-vhost excludes, log → `cfm.sp.log` JSON, detector, notifier, UI | **none** | ~80% |
+| **Adapter** | build / install / load / reload SP for one PHP flavour | **all of it** | ~20% |
+
+The manager operates on **rendered `.rules` files + the SP log** — both
+identical on every platform. So it is written **once** and works anywhere SP is
+loadable. Everything panel-specific (compile per PHP version, extension dir,
+ini drop-in path, reload command, CageFS visibility) hides behind a small
+adapter interface (§4), one implementation per target.
+
+**The decisive principle: manager, not builder (in v1).** Architect the manager
+to be *agnostic to how SP got installed*. Installation/build is a pluggable
+adapter step that **starts with one target** and grows target-by-target. This
+means the valuable 80% ships without waiting on the full build matrix, and a
+new platform is a new small adapter — never a manager rewrite.
+
+**Corollary: inventory before anything (§14 P0).** You cannot scope the build
+matrix, or even decide which targets exist, without first *measuring* the
+fleet. A read-only inventory is therefore the true first step — safe to deploy
+everywhere, useful on its own, and the foundation the manager needs anyway.
+
+## 4. PHP-platform adapters — the target matrix
+
+One adapter per PHP flavour, behind an interface roughly:
 
 ```
-; /opt/cpanel/ea-php82/root/etc/php.d/zz-cfm-sp.ini
+// conceptual — one implementation per target
+type PHPTarget interface {
+    Enumerate() []PHPBuild   // version, SAPI, NTS/ZTS, extension_dir, ini scan dir, devel headers?
+    Build(b PHPBuild) error  // phpize+compile, OR "already packaged / bring-your-own"
+    Install(b, soPath)       // place snuffleupagus.so in the build's extension_dir
+    IniDropIn(b) (path, body)// how this build loads the .so + points at the rules dir
+    RulesVisible(b, dir) bool// e.g. CageFS: is the rendered rules dir inside the user's virt FS?
+    Reload(b) error          // FPM pool reload / lsws restart / no-op for CGI
+}
+```
+
+Honest difficulty ranking (drives the phase order):
+
+| Target | PHP flavour | Load | Reload | Difficulty | v1? |
+|---|---|---|---|---|---|
+| **cPanel EA4** | `ea-phpXX` (fpm/cgi) | `php.d/` drop-in | FPM pool reload | **low** — standard, `phpize` + `ea-phpXX-devel` | **beachhead** |
+| CloudLinux alt-php | `alt-phpXX` | `php.d/` + **CageFS skeleton** | FPM reload | medium — CageFS visibility | later |
+| DirectAdmin | CustomBuild `phpXX` | `php.conf.d/` drop-in | FPM reload | medium — custombuild paths/hooks | later |
+| **LiteSpeed lsphp** | `lsphp` (LSWS) | lsphp `php.ini` | `lswsctrl restart` / kill lsphp children | **high** — build against LiteSpeed's PHP; different reload | last / "unsupported v1" |
+| custom | anything | ? | ? | unknown — inventory decides | case-by-case |
+
+Per-target landmines to bake into each adapter:
+
+- **CloudLinux CageFS**: the `.so` *and* the rendered rules dir must live inside
+  the CageFS skeleton, or the user's virtualized PHP can't see them. A rules
+  swap must update the skeleton, not just the host path.
+- **LiteSpeed lsphp**: `snuffleupagus.so` must be compiled against LiteSpeed's
+  PHP build; reload is `lswsctrl`-level (restart / graceful), not FPM. This is
+  the one target we may ship as "detected but unsupported" in v1.
+- **CGI / suPHP / suEXEC**: fresh PHP process per request → **no reload needed**
+  (rules take effect immediately, including monitor→enforce flips) but worst
+  perf. The upside: the reload-window class of bug doesn't exist here.
+- **Build drift**: within a PHP minor the extension ABI is usually stable, but
+  a panel bumping the *minor* (`ea-php82` 8.2.x → an ABI-affecting rebuild) can
+  silently unload SP. The inventory/status **must flag "PHP build present
+  without a matching SP"** so drift is visible, never silent.
+- **`ext/` vs Zend extension load order**: SP is a normal extension; keep the
+  drop-in prefix (`zz-…`) so it loads after anything it must observe.
+
+Whether CFM **builds** the `.so` or **requires it present** is a per-adapter
+choice: the EA4 adapter builds it (`phpize`); a "bring-your-own" adapter can
+just install+load+manage a `.so` the operator supplies. Both satisfy the same
+interface — the manager doesn't care.
+
+## 5. Deployment model — global load, CFM-rendered rules
+
+Load **globally per PHP build** via the adapter's ini drop-in, pointing every
+build at one CFM-owned rules directory. Illustrative (EA4):
+
+```
+; /opt/cpanel/ea-php82/root/etc/php.d/zz-cfm-sp.ini   (path is adapter-specific)
 extension=snuffleupagus.so
 sp.configuration_file=/var/lib/cfm/sp/rules/*.rules
 ```
 
 The rules directory is **generated** by cfm (like the rendered Lua configs):
 reference material under `configs/sp/` → rendered, validated output under
-`/var/lib/cfm/sp/rules/` (root:cfm, 0640 discipline). Operators never
-hand-edit the rendered dir; overrides flow through the CFM control plane.
+`/var/lib/cfm/sp/rules/` (root:cfm, 0640 discipline; adapters relocate/mirror
+it where the platform needs, e.g. CageFS). Operators never hand-edit the
+rendered dir; overrides flow through the CFM control plane.
 
 Per-vhost *loading* (per-FPM-pool ini) is deliberately **not** the v1
 mechanism — pool templates differ per panel and fight with panel upgrades.
-Path-scoped rules (§5) give per-vhost behaviour inside one global config.
+Path-scoped rules (§7) give per-vhost behaviour inside one global config.
 
-## 4. Modes — monitor / enforce, global + per-rule
+## 6. Modes — monitor / enforce, global + per-rule
 
 Two knobs, mirroring the WAF's `logonly → block` discipline:
 
@@ -104,13 +188,13 @@ Two knobs, mirroring the WAF's `logonly → block` discipline:
 - **Per-rule state** `RULE_<id> = enforce | monitor | off` — every CFM-shipped
   rule carries a stable CFM rule id (comment-tagged in the rendered file and
   keyed in config). Promotion is per-rule, after its measured FP rate is
-  clean (§6), exactly like promoting a WAF rule from logonly.
+  clean (§8), exactly like promoting a WAF rule from logonly.
 
 `enforce` global mode still honours per-rule `monitor`/`off` holds — arming a
 newly added rule is always a deliberate per-rule decision (the
 `waf_security`/WAF_CVE lesson: never let a default silently arm).
 
-## 5. Per-vhost model
+## 7. Per-vhost model
 
 Same operator model as WAF/Challenge/Clam, different mechanics underneath:
 
@@ -121,12 +205,13 @@ Same operator model as WAF/Challenge/Clam, different mechanics underneath:
   the `excludeStore` + scoped-API pattern (`RequireScopedOrAdmin` +
   `validateScopedExcludeWrite`; scoped tokens: host-type only, own vhost only).
 - **Docroot → regex mapping** comes from the same vhost discovery the
-  webdetector already does (cPanel userdata); rendered, never hand-written.
+  webdetector already does (cPanel userdata / the inventory §14 P0); rendered,
+  never hand-written. DA/LiteSpeed docroots differ — render per-panel.
 - Optional later: per-vhost *enforce* while global is monitor (the inverse),
   for early-adopter vhosts — the renderer supports it naturally (scoped
   non-simulation rule before the global simulation one).
 
-## 6. Logging, alerts & the FP loop
+## 8. Logging, alerts & the FP loop
 
 SP's own log lines are plain text; CFM normalizes them:
 
@@ -149,7 +234,7 @@ SP's own log lines are plain text; CFM normalizes them:
   pass. CLI/cron hits have `cidr`/IP semantics that don't map to a remote
   attacker at all.
 
-## 7. Ruleset — what we ship, in tiers
+## 9. Ruleset — what we ship, in tiers
 
 Curated from upstream's `default.rules`/`default_php8.rules` plus our own;
 every rule gets a CFM id, a tier, and a default state:
@@ -186,20 +271,20 @@ signature from memory** — PoC/patch/NVD/operator captures only; per-rule hold
 (`monitor`) for lower-confidence rules; Lua↔Go-style id parity between the
 rendered rules and the Go rule registry, enforced by a test.
 
-## 8. The failure mode that matters: a broken rules file
+## 10. The failure mode that matters: a broken rules file
 
 An invalid rules file **breaks PHP startup fleet-wide** — every vhost, every
 request. This is the SP equivalent of shipping a Lua file that fails to load,
 and it gets the same treatment (a hard gate, not hope):
 
 1. **Render** to a staging path.
-2. **Validate** against *every installed PHP version*:
-   `ea-phpXX/root/usr/bin/php -d extension=snuffleupagus.so -d sp.configuration_file=<staging>/*.rules -v`
-   must exit 0 for each — a rule can be valid on 8.2 and break 7.4.
+2. **Validate against every installed PHP build** (the adapter enumerates
+   them): `<php-bin> -d extension=snuffleupagus.so -d sp.configuration_file=<staging>/*.rules -v`
+   must exit 0 for each — a rule can be valid on 8.2 and break 7.4, or on
+   ea-php but not lsphp.
 3. **Atomically swap** staging → live only when all pass; keep the previous
    rules dir as `last-good`.
-4. **Reload FPM pools** (SP reads config at startup) — panel-appropriate
-   reload, batched.
+4. **Reload** via each adapter's `Reload` (SP reads config at startup) — batched.
 5. On any validation failure: keep serving last-good, alert loudly
    (`SP/CONFIG_INVALID`), never deploy.
 6. `sp.allow_broken_configuration` stays **off** — it converts a loud failure
@@ -208,22 +293,29 @@ and it gets the same treatment (a hard gate, not hope):
 A `scripts/tests/check_sp_rules.sh` CI guardrail (syntax-validate reference
 rules with whatever PHP is on the runner) mirrors `make lua`.
 
-## 9. Packaging — the per-PHP-version build matrix
+## 11. Coexistence with Imunify Proactive Defense & cutover
 
-The single biggest operational cost. `snuffleupagus.so` must be built **per
-PHP version** (`phpize` per `ea-phpXX` / DA php-mode / `alt-php`), and rebuilt
-when panels roll minor PHP updates.
+The point of SP is to *replace* Imunify's PD — but you **cannot comfortably run
+SP-enforce and Imunify PD at the same time**: both hook PHP execution, so
+running both means double per-request overhead and possible conflicts.
 
-- v1: a build script iterating installed PHP SDKs on the host (or a CFM repo
-  package per EA4 version, like CloudLinux does for its modules), triggered
-  from `make release` tooling.
-- `cfm sp status` must show, per PHP version: extension built? loaded? rules
-  file hash? — drift here (a new ea-php installed without SP) silently opens a
-  gap, so the detector should also flag "PHP version present without SP".
-- CloudLinux `alt-php` multiplies the matrix; DirectAdmin's custombuild has
-  its own hook points. Scope v1 to the panel/PHP set our fleet actually runs.
+Safe cutover, per server:
 
-## 10. Synergies with existing CFM layers
+1. **SP in monitor, alongside PD still enforcing.** The SP detector logs what
+   SP *would* catch; PD keeps protecting. Zero risk to customers.
+2. **Compare coverage** over a burn-in window: does SP-sim catch what PD
+   catches (and vice-versa)? Feed the gap analysis back into the ruleset.
+3. **Cut over**: disable Imunify PD, flip SP the burned-in Tier-1 rules to
+   `enforce` (per-rule). SP is now the PHP-runtime layer.
+
+**Prerequisite test (before deploying anywhere):** verify SP loaded +
+`.simulation()` **coexists peacefully with `proactive.so` loaded in the same
+PHP**. If the two extensions conflict even in monitor, stage SP first on
+non-Imunify / non-PD servers and treat PD-servers as cutover-only (remove PD,
+then install SP). The **inventory (§14 P0) must detect `proactive.so`** and
+surface the coexistence status per build.
+
+## 12. Synergies with existing CFM layers
 
 - **`sp.upload_validation`** runs an external script per upload; non-zero exit
   blocks the file. `CLAM_SCAN_MODE=inline` already ships at the edge (see
@@ -240,62 +332,78 @@ when panels roll minor PHP updates.
   escapes to syscalls. Expect the same "signal, then noise" tuning curve the
   LSM had — budget for it.
 
-## 11. Control plane & UI
+## 13. Control plane & UI
 
 Mirror the ClamAV work end-to-end (same shapes, same auth):
 
+- **Inventory** (P0): `cfm php-inventory` (CLI) + `/api/v1/sp/inventory` (admin)
+  — per-server PHP builds/SAPIs, per-vhost handler, SP present?, `proactive.so`
+  present?, build-without-SP drift.
 - **Config** (`cfm.conf`): `SP_ENABLED` (infra), `SP_MODE = monitor|enforce`,
   per-rule `SP_RULE_<id>` states; rendered like the clam lua config, mirrored
   into the daemon (à la `SetClamScanPolicy`) so UI == enforced reality.
-- **CLI**: `cfm sp status` (per-PHP-version load state, mode, rule counts,
-  last render/validate), `cfm sp mode monitor|enforce`,
+- **CLI**: `cfm php-inventory`, `cfm sp status` (per-build load state, mode,
+  rule counts, last render/validate), `cfm sp mode monitor|enforce`,
   `cfm sp rule list|monitor|enforce|off <id>`,
   `cfm sp exclude add|remove|list <host> [--rule N]` (scoped semantics
   identical to `cfm clam override`).
-- **API**: `/api/v1/sp/health` (admin: per-version load matrix, mode, config
-  hash, last validation), `/api/v1/sp/exclude/*` (scoped, host-type only),
-  events via the history store (`sp_sim`/`sp_drop` event types) queryable
-  through the existing scoped history endpoint — the PR-C.2 pattern verbatim.
-- **UI**: an "SP" page (status card + per-rule hit table + recent events,
-  scoped like the ClamAV page) and later an SP column in vhost-controls.
+- **API**: `/api/v1/sp/inventory` + `/api/v1/sp/health` (admin: per-build load
+  matrix, mode, config hash, last validation), `/api/v1/sp/exclude/*` (scoped,
+  host-type only), events via the history store (`sp_sim`/`sp_drop` event
+  types) queryable through the existing scoped history endpoint — the PR-C.2
+  pattern verbatim.
+- **UI**: an "SP" page (inventory/status card + per-rule hit table + recent
+  events, scoped like the ClamAV page) and later an SP column in vhost-controls.
 - **Docs**: endpoint_scope_inventory.md entries land in the same change as the
   handlers (house rule).
 
-## 12. Phase plan
+## 14. Phase plan
 
 Each phase is its own PR(s) + review; later phases only start after the
-previous one has fleet burn-in.
+previous one has fleet burn-in. Once the manager core (P1) exists, new
+**adapters** (P3) and rule **promotions** (P4) can proceed in parallel.
 
-1. **P0 — packaging spike**: build `snuffleupagus.so` for the fleet's PHP
-   matrix; `cfm sp status` detection only. No rules, nothing loaded.
-2. **P1 — monitor-only fleet deploy**: ini drop-ins + rendered Tier-1 ruleset,
-   all `.simulation()`; the render→validate→swap→reload pipeline (§8) and the
-   CI guardrail; SP detector → `cfm.sp.log` JSON + notifier + per-rule
-   hit-rates. *No enforcement anywhere.*
-3. **P2 — control plane**: modes + per-rule states + scoped per-vhost
-   excludes + `/api/v1/sp/*` + the SP admin page.
-4. **P3 — first promotions**: Tier-1 rules with clean burn-in to `enforce`,
-   one by one; `.dump()` forensics on the promoted set.
-5. **P4 — CVE virtual patching**: per-CVE rules under the WAF_CVE discipline.
+0. **P0 — Inventory (all platforms, read-only). START HERE.** `cfm php-inventory`
+   + `/api/v1/sp/inventory`: per-server PHP builds/SAPIs, per-vhost handler,
+   `snuffleupagus.so` present?, `proactive.so` present?, build-without-SP drift.
+   Touches no PHP config — **safe to deploy fleet-wide immediately**; sizes the
+   build matrix and is the foundation the manager needs.
+1. **P1 — Manager core + EA4 beachhead adapter (monitor-only, one server).**
+   Platform-independent manager: render Tier-1 `.simulation()` rules, the
+   render→validate→swap→reload gate (§10) + CI guardrail, SP detector →
+   `cfm.sp.log` JSON + notifier + per-rule hit-rates. Plus the **EA4 adapter**
+   only (build `.so`, drop-in, FPM reload). Prove the full loop on one test EA4
+   server. *No enforcement anywhere.*
+2. **P2 — Control plane + UI**: `SP_MODE` + per-rule states + scoped per-vhost
+   excludes + `/api/v1/sp/*` + the SP admin page. Still monitor by default.
+3. **P3 — More adapters**, gated on inventory data + real need: alt-php
+   (CageFS), DirectAdmin. **LiteSpeed lsphp last, or "detected-unsupported".**
+4. **P4 — First promotions + Imunify cutover**: Tier-1 rules with clean burn-in
+   → `enforce` per-rule; `.dump()` forensics on the promoted set; the §11
+   PD→SP cutover on burned-in servers.
+5. **P5 — CVE virtual patching**: per-CVE rules under the WAF_CVE discipline.
 
-## 13. Open questions
+## 15. Open questions
 
-- Which PHP versions/panels does the fleet actually run (bounds the P0 build
-  matrix — EA4 only? alt-php? DA)?
-- CLI/cron PHP invocations don't read FPM ini the same way — confirm the ini
-  drop-in covers CLI SAPI too, and decide whether cron-side enforcement is
-  wanted at all in v1 (Imunify PD covers it; it's where its `/tmp/...` catches
-  came from).
+- Inventory output first: which PHP versions / SAPIs / panels does the fleet
+  *actually* run, and how many servers per target? (P0 answers this and bounds
+  everything downstream.)
+- Does SP + `.simulation()` coexist with Imunify `proactive.so` in the same PHP
+  without conflict? (§11 prerequisite — decides whether PD-servers are
+  stage-first or cutover-only.)
+- CLI/cron PHP doesn't read FPM ini the same way — confirm the ini drop-in
+  covers the CLI SAPI too, and decide whether cron-side enforcement is wanted
+  in v1 (Imunify PD covers it; it's where its `/tmp/...` catches came from).
+- lsphp: is building `snuffleupagus.so` against LiteSpeed's PHP even viable on
+  our LSWS versions, or is that target permanently "bring-your-own / DNAT-only"?
 - Rule-id scheme: numeric bands like the WAF (1xx hardening / 9xx CVE), and
   where the id↔rule parity test lives.
 - Does `sp.log_media("file:")` handle log rotation sanely, or do we need
   copytruncate care in the tailer?
-- Per-vhost docroot regexes: `/home[0-9]*/user/` covers cPanel; DA paths
-  differ — render per-panel.
-- Opcache/FPM interaction: any need to clear opcache on rules swap? (Rules are
-  ini-level, read at startup — FPM reload should suffice; verify.)
+- Build drift detection cadence: how often does the inventory re-scan for a
+  new PHP build that landed without SP?
 
-## 14. Out of scope
+## 16. Out of scope
 
 - Writing our own PHP extension (SP *is* the engine; we orchestrate).
 - Hash-based PHP malware signature feeds (that's ClamAV's + the scanner
@@ -304,3 +412,4 @@ previous one has fleet burn-in.
   design pass).
 - Tier-3 features (cookie encryption, unserialize HMAC, strict mode) — revisit
   only per-app, never fleet-default.
+- Full lsphp support in v1 (detected in inventory; adapter deferred).
