@@ -136,12 +136,27 @@ expensive part, and CloudLinux already does it for alt-php:
 | **Standalone LiteSpeed** | `lsws/lsphpXX` | build against LiteSpeed's PHP | lsphp `php.ini` | `lswsctrl restart` | **high** | last / "unsupported v1" |
 | custom | anything | ? | ? | ? | unknown — inventory decides | case-by-case |
 
-**The alt-php vendor package reshapes the plan.** On the (common) cPanel+
-CloudLinux fleet, the lowest-friction path to real SP is **alt-php via PHP
-Selector + `yum install alt-phpXX-snuffleupagus`** — zero compilation, vendor
-patches it. Where the fleet serves via cPanel MultiPHP (`ea-php`), we build.
-P0b's per-vhost handler map tells us which stack actually serves each vhost,
-i.e. which adapter matters where.
+**The alt-php vendor package reshapes the plan — but "installed" ≠ "loaded".**
+On the (common) cPanel+CloudLinux fleet, the lowest-friction path to real SP is
+**alt-php via PHP Selector + `yum install alt-phpXX-snuffleupagus`** — zero
+compilation, vendor patches it. **BUT verified on a live host (2026-07-23):
+after installing `alt-php83-snuffleupagus-0.13.0`, `php -m` still shows no
+`snuffleupagus`** — the RPM only *places* the `.so`; loading it is a **CloudLinux
+PHP-Selector operation (very likely per-user), not a global `php.d` auto-load**.
+So the alt-php adapter is "install RPM → **enable via the selector** → render
+rules into CageFS", and its load model is **per-user/selector**, unlike ea-php's
+global `php.d` drop-in. Still no *build*, but not a one-liner. Two hard
+consequences:
+- **Inventory can't detect alt-php SP via CLI `php -m`** (it isn't loaded in the
+  default context). Detect by RPM/`.so` presence + selector state instead — a
+  P0b task; today's `cfm php-inventory` will under-report SP on alt-php.
+- **The manager's "global load" assumption is ea-php-only.** The alt-php adapter
+  owns a different enable/load model; keep that behind the adapter so the
+  manager stays load-model-agnostic.
+
+Where the fleet serves via cPanel MultiPHP (`ea-php`), we build. P0b's per-vhost
+handler map tells us which stack actually serves each vhost, i.e. which adapter
+matters where.
 
 **Why EA4 is a build (the "did cPanel remove it?" answer).** cPanel never
 shipped a *maintained* ea-php snuffleupagus package — only the **experimental,
@@ -441,6 +456,16 @@ previous one has fleet burn-in. Once the manager core (P1) exists, new
 - Inventory output first: which PHP versions / SAPIs / panels does the fleet
   *actually* run, and how many servers per target? (P0 answers this and bounds
   everything downstream.)
+- **alt-php enable mechanism (blocking for the alt-php adapter):** installing
+  `alt-phpXX-snuffleupagus` does NOT load it (`php -m` empty). How does
+  CloudLinux enable it — `selectorctl`/`cloudlinux-selector`, a per-user ini
+  overlay, an admin "force extension" toggle? Confirm with
+  `rpm -ql alt-php83-snuffleupagus` (what/where it placed) + the CloudLinux
+  Selector docs. This decides whether alt-php SP is global or per-user, and how
+  the inventory detects it (not via CLI `php -m`).
+- Confirmed (2026-07-23): Imunify's module is `i360` on ea-php 8.1/8.2/8.3;
+  upstream SP registers as `snuffleupagus` (unverified on alt-php only because
+  it wasn't loaded — see above).
 - Does SP + `.simulation()` coexist with Imunify `i360` in the same PHP
   without conflict? (§11 prerequisite — decides whether PD-servers are
   stage-first or cutover-only.)

@@ -26,11 +26,9 @@ import (
 const spModuleName = "snuffleupagus"
 
 // proactiveModuleHints are substrings for Imunify's PHP-runtime extension.
-// On a real cPanel+CloudLinux host the module ships as i360.so / i360.ini (in
-// the build's php.d), so "i360" is the strong signal; the broader hints stay as
-// a backstop. The exact `php -m` registered name is worth confirming per host
-// (a build could load i360.so under a different module identifier), and P0b
-// will also detect by i360.ini presence — more robust than the module name.
+// Confirmed on a live cPanel+CloudLinux host (ea-php 8.1/8.2/8.3, 2026-07-23):
+// `php -m` reports the module as exactly "i360" (i360.so in the modules dir,
+// i360.ini in php.d, globally loaded). The broader hints stay as a backstop.
 var proactiveModuleHints = []string{"i360", "imunify", "proactive"}
 
 // probeTimeout bounds each `php -v`/`php -m` exec so a hung binary can't stall
