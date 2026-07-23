@@ -136,23 +136,37 @@ expensive part, and CloudLinux already does it for alt-php:
 | **Standalone LiteSpeed** | `lsws/lsphpXX` | build against LiteSpeed's PHP | lsphp `php.ini` | `lswsctrl restart` | **high** | last / "unsupported v1" |
 | custom | anything | ? | ? | ? | unknown — inventory decides | case-by-case |
 
-**The alt-php vendor package reshapes the plan — but "installed" ≠ "loaded".**
+**The alt-php vendor package reshapes the plan — no build, just a symlink.**
 On the (common) cPanel+CloudLinux fleet, the lowest-friction path to real SP is
-**alt-php via PHP Selector + `yum install alt-phpXX-snuffleupagus`** — zero
-compilation, vendor patches it. **BUT verified on a live host (2026-07-23):
-after installing `alt-php83-snuffleupagus-0.13.0`, `php -m` still shows no
-`snuffleupagus`** — the RPM only *places* the `.so`; loading it is a **CloudLinux
-PHP-Selector operation (very likely per-user), not a global `php.d` auto-load**.
-So the alt-php adapter is "install RPM → **enable via the selector** → render
-rules into CageFS", and its load model is **per-user/selector**, unlike ea-php's
-global `php.d` drop-in. Still no *build*, but not a one-liner. Two hard
-consequences:
-- **Inventory can't detect alt-php SP via CLI `php -m`** (it isn't loaded in the
-  default context). Detect by RPM/`.so` presence + selector state instead — a
-  P0b task; today's `cfm php-inventory` will under-report SP on alt-php.
-- **The manager's "global load" assumption is ea-php-only.** The alt-php adapter
-  owns a different enable/load model; keep that behind the adapter so the
-  manager stays load-model-agnostic.
+**alt-php + `yum install alt-phpXX-snuffleupagus`** — zero compilation, vendor
+patches it. The CloudLinux extension model is now fully mapped from a live host
+(2026-07-23):
+- The RPM drops into **`/opt/alt/phpXX/etc/php.d.all/`** — the *catalog* of all
+  installed extension inis: `snuffleupagus.ini`, a vendor `snuffleupagus-default.rules`,
+  and the `.so` under `…/usr/lib64/php/modules/`.
+- PHP actually scans **`/opt/alt/phpXX/link/conf/`** — the *active/enabled* set.
+  A freshly-installed SP is in the catalog but NOT linked into `link/conf`, so
+  `php -m` shows nothing. **Enabling = linking `php.d.all/snuffleupagus.ini`
+  into `link/conf/`** — which is exactly what CloudLinux `selectorctl` / the PHP
+  Selector manages.
+
+So the alt-php adapter is: install RPM → **enable (`selectorctl`, so the ini
+lands in `link/conf`)** → point `sp.configuration_file` at OUR rendered rules
+(override the vendor default) → render into the CageFS-visible path → reload.
+Pure file/symlink management, **no build**. Residual question: enable it
+*globally for the alt-php version* (native default, all users) vs per-user, and
+whether to force it so users can't disable a security module — a `selectorctl`
+flag choice, not a blocker.
+
+Two consequences the adapter/inventory must honour:
+- **Inventory: report "available" separately from "loaded" on alt-php.** CLI
+  `php -m` reflects `link/conf` (loaded) — accurate but incomplete. "Available"
+  = `php.d.all/snuffleupagus.ini` / the RPM present. Detect both by file
+  presence (P0b); today's `cfm php-inventory` reports only "loaded", so it
+  under-states alt-php readiness ("one `selectorctl` away", not "absent").
+- **The manager's "global `php.d` load" model is ea-php-only.** alt-php loads
+  via `link/conf` (selector); keep that behind the adapter so the manager stays
+  load-model-agnostic.
 
 Where the fleet serves via cPanel MultiPHP (`ea-php`), we build. P0b's per-vhost
 handler map tells us which stack actually serves each vhost, i.e. which adapter
@@ -456,16 +470,14 @@ previous one has fleet burn-in. Once the manager core (P1) exists, new
 - Inventory output first: which PHP versions / SAPIs / panels does the fleet
   *actually* run, and how many servers per target? (P0 answers this and bounds
   everything downstream.)
-- **alt-php enable mechanism (blocking for the alt-php adapter):** installing
-  `alt-phpXX-snuffleupagus` does NOT load it (`php -m` empty). How does
-  CloudLinux enable it — `selectorctl`/`cloudlinux-selector`, a per-user ini
-  overlay, an admin "force extension" toggle? Confirm with
-  `rpm -ql alt-php83-snuffleupagus` (what/where it placed) + the CloudLinux
-  Selector docs. This decides whether alt-php SP is global or per-user, and how
-  the inventory detects it (not via CLI `php -m`).
-- Confirmed (2026-07-23): Imunify's module is `i360` on ea-php 8.1/8.2/8.3;
-  upstream SP registers as `snuffleupagus` (unverified on alt-php only because
-  it wasn't loaded — see above).
+- Confirmed (2026-07-23): Imunify's module is `i360` on ea-php 8.1/8.2/8.3.
+  alt-php CloudLinux model mapped (see §4): `php.d.all` catalog vs `link/conf`
+  active set; SP enables by linking `snuffleupagus.ini` into `link/conf` via
+  `selectorctl`; the RPM ships a vendor `snuffleupagus-default.rules`.
+- alt-php enable — residual (not blocking): exact `selectorctl` invocation to
+  enable+force snuffleupagus **globally for an alt-php version** (native default,
+  all users) vs per-user; and whether "force" (users can't disable) is wanted
+  for a security module. A flag choice for the alt-php adapter.
 - Does SP + `.simulation()` coexist with Imunify `i360` in the same PHP
   without conflict? (§11 prerequisite — decides whether PD-servers are
   stage-first or cutover-only.)
