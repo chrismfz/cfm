@@ -25,11 +25,13 @@ import (
 // spModuleName is the exact `php -m` name of the Snuffleupagus extension.
 const spModuleName = "snuffleupagus"
 
-// proactiveModuleHints are best-effort substrings for Imunify's PHP-runtime
-// extension (Proactive Defense / PHP Immunity). The exact `php -m` name is not
-// yet confirmed against a live Imunify host — see the roadmap open question —
-// so match broadly and treat a hit as "likely", to be verified on deploy.
-var proactiveModuleHints = []string{"imunify", "proactive"}
+// proactiveModuleHints are substrings for Imunify's PHP-runtime extension.
+// On a real cPanel+CloudLinux host the module ships as i360.so / i360.ini (in
+// the build's php.d), so "i360" is the strong signal; the broader hints stay as
+// a backstop. The exact `php -m` registered name is worth confirming per host
+// (a build could load i360.so under a different module identifier), and P0b
+// will also detect by i360.ini presence — more robust than the module name.
+var proactiveModuleHints = []string{"i360", "imunify", "proactive"}
 
 // probeTimeout bounds each `php -v`/`php -m` exec so a hung binary can't stall
 // the whole inventory.

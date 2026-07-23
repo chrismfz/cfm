@@ -30,9 +30,13 @@ Zend OPcache
 }
 
 func TestParseModules_ProactiveHint(t *testing.T) {
-	// Best-effort substring match (exact Imunify module name unconfirmed).
-	_, pro, _ := parseModules("Core\nimunify_proactive\ncurl\n")
-	if !pro {
+	// Imunify's PHP module ships as i360 (i360.so/i360.ini) on real
+	// cPanel+CloudLinux hosts — that's the primary signal.
+	if _, pro, _ := parseModules("Core\ni360\ncurl\n"); !pro {
+		t.Error("expected i360 (Imunify) module to be flagged")
+	}
+	// Broader hints still work as a backstop.
+	if _, pro, _ := parseModules("Core\nimunify_proactive\ncurl\n"); !pro {
 		t.Error("expected a proactive/imunify module to be flagged")
 	}
 }
