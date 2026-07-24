@@ -30,6 +30,35 @@ back-filled here — see the git/PR history for that period.
   of the security overview.
 
 ### Fixed
+- **Traffic rules can now match the query string (edge sent path only).** A
+  rule like *challenge `/forum/ucp.php?mode=register`* silently never fired: the
+  edge (`cfm.lua`) sent `ngx.var.uri` — the path **without** the query string —
+  to `/nginx/decision`, so the query never reached the rule engine. The `?`
+  embedded in a `path_any` pattern was also treated as a single-char wildcard
+  against the path. This left **all** query-string matching dead end-to-end —
+  including the `has_qs` ("only match requests that HAVE a query string")
+  checkbox and the QS pass-through (`qs_not_rx`) field. Now the edge sends the
+  **decoded** path (`ngx.var.uri`, so `path_any` stays un-evadable by
+  percent-encoding) and the raw query (`ngx.var.args`) as **separate** RPC
+  params — structured transport, so the bridge never re-splits a `path?query`
+  concat (a decoded path can itself contain a literal `?`). The decision cache
+  key folds in the query so a clean-allow warmed by
+  `/x` is never reused for `/x?mode=register` (a query-less request keeps its
+  previous path-only cache entry). A `path_any` pattern may embed a `?query`
+  suffix — the part before `?` matches the path, the part after matches **per
+  query parameter**: each `key=value` token must be present as a parameter with
+  that exact (case-insensitive) key and value, and a bare `key` matches any
+  value. Both sides are URL-decoded first, so `mode=register` matches an encoded
+  `mode=%72egister` (no percent-encode evasion) and `id=5` does **not** match
+  `id=50` (no substring over-match). `/forum/ucp.php?mode=register` therefore
+  matches `…?mode=register&sid=…`. Static assets still coalesce to one cache
+  entry, so only dynamic endpoints pay the per-query cache cardinality. Pinned
+  by matcher unit tests and a full edge→bridge decision test.
+  **Incompatibility:** a literal `?` in a `path_any` pattern is now the
+  path/query separator, not a single-character wildcard as before — an old
+  pattern like `/admin?.php` that relied on `?` matching one char must be
+  rewritten with `*` (`/admin*.php`). Path wildcards use `*`; `?` is reserved
+  for the query.
 - **Challenge POST replay now covers multipart forms.** The challenge flow has
   long replayed a challenged POST's body after the challenge solves (that is
   what saved forum posts) — but only for urlencoded/json/text bodies, so

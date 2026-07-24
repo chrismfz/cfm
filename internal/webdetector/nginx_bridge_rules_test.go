@@ -201,6 +201,97 @@ func TestNginxBridgeDecisionRuleActionMatchesSimulate(t *testing.T) {
 	}
 }
 
+// TestNginxBridgeDecisionMatchesQueryInPath exercises the full edge→bridge
+// path: cfm.lua now sends the request target with its query string, the bridge
+// splits it into path + qs, and a "/forum/ucp.php?mode=register" rule matches.
+// The uri param carries the encoded '?'/'=' exactly as ngx.escape_uri produces.
+func TestNginxBridgeDecisionMatchesQueryInPath(t *testing.T) {
+	store := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	if _, err := store.Add(TrafficRule{
+		ID:       "r_ucp",
+		Enabled:  true,
+		Priority: 120,
+		Scope:    TrafficRuleScope{Vhosts: []string{"mathematica.gr"}},
+		Match: TrafficRuleMatch{
+			Methods: []string{"GET", "POST"},
+			PathAny: []string{"/forum/ucp.php?mode=register"},
+		},
+		Action: TrafficRuleAction{Type: TrafficActionChallenge},
+	}); err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.RuleDecision = store.Simulate
+
+	decide := func(encodedURI string) map[string]any {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet,
+			"/nginx/decision?ip=1.2.3.4&host=mathematica.gr&method=GET&ua=testua&uri="+encodedURI, nil)
+		req.Header.Set("X-CFM-Token", "tok")
+		b.handleDecision(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return payload
+	}
+
+	// /forum/ucp.php?mode=register&sid=deadbeef  (escape_uri-encoded)
+	got := decide("%2Fforum%2Fucp.php%3Fmode%3Dregister%26sid%3Ddeadbeef")
+	if got["rule_action"] != TrafficActionChallenge {
+		t.Fatalf("expected challenge for register page, got=%+v", got)
+	}
+	if got["rule_id"] != "r_ucp" {
+		t.Fatalf("expected rule id r_ucp, got=%+v", got)
+	}
+
+	// Same path, different mode — must NOT match.
+	got = decide("%2Fforum%2Fucp.php%3Fmode%3Dlogin")
+	if _, ok := got["rule_action"]; ok {
+		t.Fatalf("expected no rule_action for mode=login, got=%+v", got)
+	}
+}
+
+// TestNginxBridgeDecisionSeparateQSParam exercises the structured transport:
+// the edge sends the decoded path in "uri" and the raw query in a separate "qs"
+// param. The bridge must trust "qs" and NOT split "uri" — so a decoded path
+// that itself contains a literal '?' (from %3F) stays intact.
+func TestNginxBridgeDecisionSeparateQSParam(t *testing.T) {
+	var gotPath, gotQS string
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.RuleDecision = func(in TrafficRuleEvalInput) TrafficRuleEvalResult {
+		gotPath, gotQS = in.Path, in.QueryString
+		return TrafficRuleEvalResult{}
+	}
+
+	// uri carries a literal '?' in the path; qs is the real (separate) query.
+	req := httptest.NewRequest(http.MethodGet,
+		"/nginx/decision?ip=1.2.3.4&host=example.com&method=GET&ua=x"+
+			"&uri=%2Fweird%3Fpath.php&qs=mode%3Dregister", nil)
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleDecision(httptest.NewRecorder(), req)
+
+	if gotPath != "/weird?path.php" {
+		t.Fatalf("path mis-split: got %q want %q", gotPath, "/weird?path.php")
+	}
+	if gotQS != "mode=register" {
+		t.Fatalf("qs wrong: got %q want %q", gotQS, "mode=register")
+	}
+
+	// Empty qs param present → still no split, query is empty.
+	req = httptest.NewRequest(http.MethodGet,
+		"/nginx/decision?ip=1.2.3.4&host=example.com&method=GET&ua=x&uri=%2Ffoo&qs=", nil)
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleDecision(httptest.NewRecorder(), req)
+	if gotPath != "/foo" || gotQS != "" {
+		t.Fatalf("empty qs: got path=%q qs=%q want /foo and empty", gotPath, gotQS)
+	}
+}
+
 func TestValidateUploadSourcePath(t *testing.T) {
 	pending := filepath.Join(t.TempDir(), "pending")
 	if err := os.MkdirAll(pending, 0o700); err != nil {

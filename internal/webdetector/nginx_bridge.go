@@ -1657,9 +1657,19 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
 	host := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host")))
 	uri := strings.TrimSpace(r.URL.Query().Get("uri"))
-	// split path from query string — Lua sends request_uri which includes "?qs"
+	// Query string transport. The edge (cfm.lua) sends the DECODED path in "uri"
+	// and the raw query in a separate "qs" param — passing them structured
+	// avoids the ambiguity of concatenating and re-splitting on '?' (a decoded
+	// path can itself contain a literal '?' from %3F). When the "qs" param is
+	// present (even empty) we trust it and never split "uri". Absent "qs" is the
+	// legacy contract (older edge / other callers embed "?qs" in "uri"): fall
+	// back to splitting on the first '?'.
 	var qs string
-	if idx := strings.IndexByte(uri, '?'); idx >= 0 {
+	if qsVals, ok := r.URL.Query()["qs"]; ok {
+		if len(qsVals) > 0 {
+			qs = qsVals[0]
+		}
+	} else if idx := strings.IndexByte(uri, '?'); idx >= 0 {
 		qs = uri[idx+1:]
 		uri = uri[:idx]
 	}

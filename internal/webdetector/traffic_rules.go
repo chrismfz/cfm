@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -479,14 +480,22 @@ func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) 
 			if p == "" {
 				continue
 			}
-			if wildcardMatch(p, path) {
-				ok = true
-				break
+			// A path pattern may embed a query part ("/x.php?a=b"): the segment
+			// before the first '?' matches the request path, the segment after
+			// matches the request query string per-parameter (see
+			// queryPatternMatch). The edge (cfm.lua) delivers path and query
+			// split, so operators can paste a full URL — e.g.
+			// "/forum/ucp.php?mode=register" — and it matches "/forum/ucp.php"
+			// with qs "mode=register&sid=…".
+			pPath, pQuery, hasQuery := strings.Cut(p, "?")
+			if !pathPatternMatch(strings.TrimSpace(pPath), path) {
+				continue
 			}
-			if !strings.ContainsAny(p, "*?") && strings.HasPrefix(path, p) {
-				ok = true
-				break
+			if hasQuery && !queryPatternMatch(strings.TrimSpace(pQuery), qs) {
+				continue
 			}
+			ok = true
+			break
 		}
 		if !ok {
 			return false
@@ -509,6 +518,102 @@ func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) 
 
 
 
+
+// pathPatternMatch applies the two path-matching rules used by ruleMatchFilters
+// to the path portion of a pattern (the segment before any '?'): a wildcard
+// match ('*'/'?' honoured), else a literal prefix match for patterns with no
+// wildcard metacharacters. An empty pattern (e.g. a bare "?query" rule) matches
+// any path.
+func pathPatternMatch(p, path string) bool {
+	if p == "" {
+		return true
+	}
+	if wildcardMatch(p, path) {
+		return true
+	}
+	if !strings.ContainsAny(p, "*?") && strings.HasPrefix(path, p) {
+		return true
+	}
+	return false
+}
+
+// queryPatternMatch reports whether the request query string satisfies the
+// query part of a path pattern ("/x?a=b&c" → "a=b&c"). Matching is per
+// parameter, NOT a raw substring:
+//   - Both the request query and the pattern are URL-decoded first, so an
+//     evasion like "mode=%72egister" (which the origin decodes to
+//     "mode=register") still matches a "mode=register" pattern.
+//   - Each '&'-separated token in the pattern must be present in the request:
+//     "key=value" matches a parameter with that exact (case-insensitive) key
+//     AND value — so "id=5" does NOT match "id=50" — while a bare "key" matches
+//     any parameter with that key regardless of value.
+//   - An empty pattern query (a bare "…?" suffix) matches any query; the
+//     has_qs guard is the way to require merely that a query be present.
+func queryPatternMatch(patQS, rawQS string) bool {
+	patQS = strings.TrimSpace(patQS)
+	if patQS == "" {
+		return true
+	}
+	req := parseQueryParams(rawQS)
+	for _, tok := range strings.Split(patQS, "&") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		pk, pv, hasVal := strings.Cut(tok, "=")
+		pk = strings.ToLower(strings.TrimSpace(decodeQueryComponent(pk)))
+		pv = strings.ToLower(strings.TrimSpace(decodeQueryComponent(pv)))
+		found := false
+		for _, rp := range req {
+			if rp.key != pk {
+				continue
+			}
+			if !hasVal || rp.val == pv {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+type queryParam struct{ key, val string }
+
+// parseQueryParams splits a raw query string into URL-decoded, lowercased
+// key/value pairs. Malformed percent-escapes fall back to the raw component so
+// a broken escape can never make the parser skip (and thus silently pass) a
+// parameter.
+func parseQueryParams(raw string) []queryParam {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, "&")
+	out := make([]queryParam, 0, len(parts))
+	for _, kv := range parts {
+		if kv == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(kv, "=")
+		out = append(out, queryParam{
+			key: strings.ToLower(decodeQueryComponent(k)),
+			val: strings.ToLower(decodeQueryComponent(v)),
+		})
+	}
+	return out
+}
+
+// decodeQueryComponent URL-decodes a single query key or value, returning the
+// original string unchanged if it is not valid percent-encoding.
+func decodeQueryComponent(s string) string {
+	if dec, err := url.QueryUnescape(s); err == nil {
+		return dec
+	}
+	return s
+}
 
 // wildcardMatch matches pattern with '*' and '?' against s.
 // Unlike filepath.Match, '*' can match '/' too (needed for UA/path matching).
