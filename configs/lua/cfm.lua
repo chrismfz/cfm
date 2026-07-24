@@ -1114,15 +1114,19 @@ local function decision_cache_key(ip, host, method, scheme, uri, qs, scope)
     -- static-asset path is unusual; the static coalesce (hot-path win) is kept.
     return "ds|" .. ip .. "|" .. host .. "|" .. (scope or "web")
   end
-  -- Fold the query into the hashed key (concat is fine for hashing — it only
-  -- needs to be unique per (path, query)), so a clean-allow warmed by "/x" is
-  -- never reused for "/x?mode=register" whose query-scoped rule would
-  -- challenge/block. A query-less request hashes exactly the path (== the old
-  -- key), so no-query traffic keeps its previous cache entry.
-  local keyed = uri or "-"
-  if qs and qs ~= "" then keyed = keyed .. "?" .. qs end
+  -- Fold the query into the key by hashing path and query INDEPENDENTLY. Each
+  -- ngx.md5 is a fixed 32-hex field, so md5(uri)..md5(qs) is injective in
+  -- (uri, qs). Do NOT concat "uri.."?"..qs" and hash once: '?' can legitimately
+  -- appear in a DECODED path (from %3F), so "/x?y" with no query and "/x" with
+  -- query "y" would hash the same string — letting an attacker warm a
+  -- clean-allow under the harmless "/x?y" form and reuse it for the real
+  -- "/x?y" that a query-scoped rule would challenge/block. A query-less request
+  -- hashes exactly md5(uri) (== the old key), so no-query traffic keeps its
+  -- previous cache entry.
+  local h = ngx.md5(uri or "-")
+  if qs and qs ~= "" then h = h .. ngx.md5(qs) end
   return "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" ..
-         ngx.md5(keyed) .. "|" .. (scope or "web")
+         h .. "|" .. (scope or "web")
 end
 
 -- [R1] Pass ua + country so Go evaluates traffic rules. Cache clean allows only.

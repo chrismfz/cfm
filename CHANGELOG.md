@@ -54,6 +54,11 @@ back-filled here — see the git/PR history for that period.
   matches `…?mode=register&sid=…`. Static assets still coalesce to one cache
   entry, so only dynamic endpoints pay the per-query cache cardinality. Pinned
   by matcher unit tests and a full edge→bridge decision test.
+  **Incompatibility:** a literal `?` in a `path_any` pattern is now the
+  path/query separator, not a single-character wildcard as before — an old
+  pattern like `/admin?.php` that relied on `?` matching one char must be
+  rewritten with `*` (`/admin*.php`). Path wildcards use `*`; `?` is reserved
+  for the query.
 - **Challenge POST replay now covers multipart forms.** The challenge flow has
   long replayed a challenged POST's body after the challenge solves (that is
   what saved forum posts) — but only for urlencoded/json/text bodies, so

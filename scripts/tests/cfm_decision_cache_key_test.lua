@@ -79,8 +79,16 @@ check(dk(uriB) ~= dk(uriB, { qs = "mode=register" }),
       "a query-scoped request gets a DISTINCT key from the query-less one")
 check(dk(uriB, { qs = "mode=register" }) ~= dk(uriB, { qs = "mode=login" }),
       "different query -> different key")
-check(dk(uriB, { qs = "mode=register" }):find("md5(" .. uriB .. "?mode=register)", 1, true) ~= nil,
-      "query key hashes path .. '?' .. query")
+check(dk(uriB, { qs = "mode=register" }):find("md5(" .. uriB .. ")md5(mode=register)", 1, true) ~= nil,
+      "query key hashes path and query INDEPENDENTLY (md5(uri)..md5(qs))")
+
+-- Regression: '?' can appear in a DECODED path (from %3F), so hashing
+-- "uri..'?'..qs" once would collide "/p?q" (no query) with "/p" (query "q") and
+-- let an attacker warm a clean-allow under the former to bypass a query-scoped
+-- rule on the latter. Independent hashing must keep them DISTINCT.
+check(dk("/forum/ucp.php?mode=register", { qs = "" }) ~=
+      dk("/forum/ucp.php", { qs = "mode=register" }),
+      "literal-'?' path must NOT collide with path+query (cache-bypass guard)")
 
 -- ── Static assets: one coalesced entry per (ip, host, scope), path-independent ─
 local ks1 = dk("/assets/app.css")
