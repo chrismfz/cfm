@@ -43,13 +43,16 @@ back-filled here — see the git/PR history for that period.
   (`ngx.var.args`); the bridge splits it back into path + query (it already
   did), and the decision cache key folds in the query so a clean-allow warmed by
   `/x` is never reused for `/x?mode=register` (a query-less request keeps its
-  previous path-only cache entry). A
-  `path_any` pattern may embed a `?query` suffix — the part before `?` matches
-  the path, the part after is a case-insensitive **substring** match against the
-  request query string (so `/forum/ucp.php?mode=register` matches
-  `…?mode=register&sid=…`). Static assets still coalesce to one cache entry, so
-  only dynamic endpoints pay the per-query cache cardinality. Pinned by matcher
-  unit tests and a full edge→bridge decision test.
+  previous path-only cache entry). A `path_any` pattern may embed a `?query`
+  suffix — the part before `?` matches the path, the part after matches **per
+  query parameter**: each `key=value` token must be present as a parameter with
+  that exact (case-insensitive) key and value, and a bare `key` matches any
+  value. Both sides are URL-decoded first, so `mode=register` matches an encoded
+  `mode=%72egister` (no percent-encode evasion) and `id=5` does **not** match
+  `id=50` (no substring over-match). `/forum/ucp.php?mode=register` therefore
+  matches `…?mode=register&sid=…`. Static assets still coalesce to one cache
+  entry, so only dynamic endpoints pay the per-query cache cardinality. Pinned
+  by matcher unit tests and a full edge→bridge decision test.
 - **Challenge POST replay now covers multipart forms.** The challenge flow has
   long replayed a challenged POST's body after the challenge solves (that is
   what saved forum posts) — but only for urlencoded/json/text bodies, so

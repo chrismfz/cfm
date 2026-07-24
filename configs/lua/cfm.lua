@@ -1107,6 +1107,11 @@ end
 --     F38 path-truncation fix — do not silently assume the key covers ua.
 local function decision_cache_key(ip, host, method, scheme, uri, scope)
   if is_static_asset_uri(uri) then
+    -- Static assets coalesce to ONE entry per (ip,host,scope) with path AND
+    -- query dropped. Known limitation: a query-scoped traffic rule written for
+    -- a static-extension path (e.g. "/x.css?token=…") can be served a cached
+    -- clean-allow warmed by a benign hit to the same extension. Query-scoping a
+    -- static-asset path is unusual; the static coalesce (hot-path win) is kept.
     return "ds|" .. ip .. "|" .. host .. "|" .. (scope or "web")
   end
   return "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" ..
