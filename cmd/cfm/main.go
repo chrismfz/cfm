@@ -271,6 +271,8 @@ func main() {
 		os.Exit(cli.RunWhich(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "asn":
 		os.Exit(cli.RunASN(os.Args[2:]))
+	case "php-inventory", "php-inv":
+		os.Exit(cli.RunPHPInventory(os.Args[2:]))
 	case "htpasswd":
 		os.Exit(cli.RunHtpasswd(os.Args[2:]))
 	case "status":

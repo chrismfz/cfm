@@ -123,38 +123,105 @@ type PHPTarget interface {
 }
 ```
 
-Honest difficulty ranking (drives the phase order):
+Honest difficulty ranking (drives the phase order). **The big finding
+(verified on a live cPanel+CloudLinux host, 2026-07-23): whether a maintained
+vendor package exists dominates the difficulty** — building the `.so` is the
+expensive part, and CloudLinux already does it for alt-php:
 
-| Target | PHP flavour | Load | Reload | Difficulty | v1? |
-|---|---|---|---|---|---|
-| **cPanel EA4** | `ea-phpXX` (fpm/cgi) | `php.d/` drop-in | FPM pool reload | **low** — standard, `phpize` + `ea-phpXX-devel` | **beachhead** |
-| CloudLinux alt-php | `alt-phpXX` | `php.d/` + **CageFS skeleton** | FPM reload | medium — CageFS visibility | later |
-| DirectAdmin | CustomBuild `phpXX` | `php.conf.d/` drop-in | FPM reload | medium — custombuild paths/hooks | later |
-| **LiteSpeed lsphp** | `lsphp` (LSWS) | lsphp `php.ini` | `lswsctrl restart` / kill lsphp children | **high** — build against LiteSpeed's PHP; different reload | last / "unsupported v1" |
-| custom | anything | ? | ? | unknown — inventory decides | case-by-case |
+| Target | PHP flavour | Get the `.so` | Load | Reload | Difficulty | v1? |
+|---|---|---|---|---|---|---|
+| **CloudLinux alt-php** | `alt-phpXX` | **`yum install alt-phpXX-snuffleupagus`** (vendor-maintained, all of 7.0–8.5) | `php.d/` + **CageFS skeleton** | FPM reload | **lowest — no build** | **beachhead where the fleet uses PHP Selector** |
+| **cPanel EA4** | `ea-phpXX` (fpm/cgi/lsphp) | **build it** — no maintained vendor pkg (see below); `phpize` + `ea-phpXX-devel` headers present in the tree | `php.d/` drop-in | FPM pool reload | **medium — we own the build** | **beachhead where the fleet uses MultiPHP** |
+| DirectAdmin | CustomBuild `phpXX` | build (custombuild) | `php.conf.d/` | FPM reload | medium — custombuild paths/hooks | later |
+| **Standalone LiteSpeed** | `lsws/lsphpXX` | build against LiteSpeed's PHP | lsphp `php.ini` | `lswsctrl restart` | **high** | last / "unsupported v1" |
+| custom | anything | ? | ? | ? | unknown — inventory decides | case-by-case |
+
+**The alt-php vendor package reshapes the plan — no build, just a symlink.**
+On the (common) cPanel+CloudLinux fleet, the lowest-friction path to real SP is
+**alt-php + `yum install alt-phpXX-snuffleupagus`** — zero compilation, vendor
+patches it. The CloudLinux extension model is now fully mapped from a live host
+(2026-07-23):
+- The RPM drops into **`/opt/alt/phpXX/etc/php.d.all/`** — the *catalog* of all
+  installed extension inis: `snuffleupagus.ini`, a vendor `snuffleupagus-default.rules`,
+  and the `.so` under `…/usr/lib64/php/modules/`.
+- PHP actually scans **`/opt/alt/phpXX/link/conf/`** — the *active/enabled* set.
+  A freshly-installed SP is in the catalog but NOT linked into `link/conf`, so
+  `php -m` shows nothing. **Enabling = linking `php.d.all/snuffleupagus.ini`
+  into `link/conf/`** — which is exactly what CloudLinux `selectorctl` / the PHP
+  Selector manages.
+
+So the alt-php adapter is: install RPM → **enable (`selectorctl`, so the ini
+lands in `link/conf`)** → point `sp.configuration_file` at OUR rendered rules
+(override the vendor default) → render into the CageFS-visible path → reload.
+Pure file/symlink management, **no build**. Residual question: enable it
+*globally for the alt-php version* (native default, all users) vs per-user, and
+whether to force it so users can't disable a security module — a `selectorctl`
+flag choice, not a blocker.
+
+Two consequences the adapter/inventory must honour:
+- **Inventory: report "available" separately from "loaded" on alt-php.** CLI
+  `php -m` reflects `link/conf` (loaded) — accurate but incomplete. "Available"
+  = `php.d.all/snuffleupagus.ini` / the RPM present. Detect both by file
+  presence (P0b); today's `cfm php-inventory` reports only "loaded", so it
+  under-states alt-php readiness ("one `selectorctl` away", not "absent").
+- **The manager's "global `php.d` load" model is ea-php-only.** alt-php loads
+  via `link/conf` (selector); keep that behind the adapter so the manager stays
+  load-model-agnostic.
+
+Where the fleet serves via cPanel MultiPHP (`ea-php`), we build. P0b's per-vhost
+handler map tells us which stack actually serves each vhost, i.e. which adapter
+matters where.
+
+**Why EA4 is a build (the "did cPanel remove it?" answer).** cPanel never
+shipped a *maintained* ea-php snuffleupagus package — only the **experimental,
+release-less `CpanelInc/ea-scl-snuffleupagus`** repo, which stalled. So EA4's
+intended path for a non-bundled extension applies: build with `phpize` against
+`ea-phpXX-devel` (the full `…/ea-phpXX/root/usr/include/php` header tree +
+`phpize`/`php-config` are present in the tree). The abandoned `ea-scl-*` spec is
+still a useful **starting recipe** for the EA4 adapter's build step — crib it,
+don't depend on it.
+
+**LiteSpeed on cPanel is not the hard case.** On a cPanel+LSWS host the handler
+is **ea-php's own `lsphp`** (`…/ea-phpXX/root/usr/bin/lsphp`, present in the
+tree), sharing the ea-php `php.d/` — so it folds into the **EA4 adapter** (same
+`.so`, same ini dir; reload differs: restart LSWS, not FPM). Only *standalone*
+LiteSpeed (`/usr/local/lsws/lsphpXX/`, non-cPanel) is the separate high target.
+
+Verified real paths (cPanel ea-php83, for the adapter):
+- binaries: `…/ea-php83/root/usr/bin/{php,lsphp,php-cgi}`, FPM at
+  `…/root/usr/sbin/php-fpm`, `phpize`/`php-config` in `…/usr/bin/`.
+- ini scan dir: `…/ea-php83/root/etc/php.d/` (drop-in target).
+- extension dir: `…/ea-php83/root/usr/lib64/php/modules/` (`.so` install target).
+- **Imunify's PHP module is `i360`** (`i360.so` in modules, `i360.ini` in
+  php.d) — that's what coexistence detection keys on, not "imunify"/"proactive".
+- **CageFS is live** (`php.ini.cagefs`, `lsphp.cagefs` variants present) — the
+  CageFS skeleton landmine is real on this fleet, not hypothetical.
 
 Per-target landmines to bake into each adapter:
 
 - **CloudLinux CageFS**: the `.so` *and* the rendered rules dir must live inside
   the CageFS skeleton, or the user's virtualized PHP can't see them. A rules
-  swap must update the skeleton, not just the host path.
-- **LiteSpeed lsphp**: `snuffleupagus.so` must be compiled against LiteSpeed's
-  PHP build; reload is `lswsctrl`-level (restart / graceful), not FPM. This is
-  the one target we may ship as "detected but unsupported" in v1.
+  swap must update the skeleton, not just the host path. (The vendor alt-php
+  package already handles the `.so` side; we still render rules into the
+  skeleton.)
+- **Standalone LiteSpeed lsphp**: `.so` compiled against LiteSpeed's PHP; reload
+  is `lswsctrl`-level. The one target we may ship "detected but unsupported".
 - **CGI / suPHP / suEXEC**: fresh PHP process per request → **no reload needed**
   (rules take effect immediately, including monitor→enforce flips) but worst
   perf. The upside: the reload-window class of bug doesn't exist here.
 - **Build drift**: within a PHP minor the extension ABI is usually stable, but
   a panel bumping the *minor* (`ea-php82` 8.2.x → an ABI-affecting rebuild) can
-  silently unload SP. The inventory/status **must flag "PHP build present
-  without a matching SP"** so drift is visible, never silent.
+  silently unload a self-built SP. The inventory/status **must flag "PHP build
+  present without a matching SP"** so drift is visible, never silent. (alt-php's
+  vendor package sidesteps this — yum rebuilds track the PHP package.)
 - **`ext/` vs Zend extension load order**: SP is a normal extension; keep the
   drop-in prefix (`zz-…`) so it loads after anything it must observe.
 
-Whether CFM **builds** the `.so` or **requires it present** is a per-adapter
-choice: the EA4 adapter builds it (`phpize`); a "bring-your-own" adapter can
-just install+load+manage a `.so` the operator supplies. Both satisfy the same
-interface — the manager doesn't care.
+Whether CFM **installs a vendor package**, **builds the `.so`**, or **requires
+it present** is a per-adapter choice: alt-php `yum install`s the vendor RPM; EA4
+builds via `phpize`; a "bring-your-own" adapter just installs+loads+manages a
+`.so` the operator supplies. All satisfy the same interface — the manager
+doesn't care.
 
 ## 5. Deployment model — global load, CFM-rendered rules
 
@@ -309,10 +376,10 @@ Safe cutover, per server:
    `enforce` (per-rule). SP is now the PHP-runtime layer.
 
 **Prerequisite test (before deploying anywhere):** verify SP loaded +
-`.simulation()` **coexists peacefully with `proactive.so` loaded in the same
+`.simulation()` **coexists peacefully with `i360` (Imunify) loaded in the same
 PHP**. If the two extensions conflict even in monitor, stage SP first on
 non-Imunify / non-PD servers and treat PD-servers as cutover-only (remove PD,
-then install SP). The **inventory (§14 P0) must detect `proactive.so`** and
+then install SP). The **inventory (§14 P0) must detect `i360` (Imunify)** and
 surface the coexistence status per build.
 
 ## 12. Synergies with existing CFM layers
@@ -337,7 +404,7 @@ surface the coexistence status per build.
 Mirror the ClamAV work end-to-end (same shapes, same auth):
 
 - **Inventory** (P0): `cfm php-inventory` (CLI) + `/api/v1/sp/inventory` (admin)
-  — per-server PHP builds/SAPIs, per-vhost handler, SP present?, `proactive.so`
+  — per-server PHP builds/SAPIs, per-vhost handler, SP present?, `i360` (Imunify)
   present?, build-without-SP drift.
 - **Config** (`cfm.conf`): `SP_ENABLED` (infra), `SP_MODE = monitor|enforce`,
   per-rule `SP_RULE_<id>` states; rendered like the clam lua config, mirrored
@@ -363,21 +430,36 @@ Each phase is its own PR(s) + review; later phases only start after the
 previous one has fleet burn-in. Once the manager core (P1) exists, new
 **adapters** (P3) and rule **promotions** (P4) can proceed in parallel.
 
-0. **P0 — Inventory (all platforms, read-only). START HERE.** `cfm php-inventory`
-   + `/api/v1/sp/inventory`: per-server PHP builds/SAPIs, per-vhost handler,
-   `snuffleupagus.so` present?, `proactive.so` present?, build-without-SP drift.
-   Touches no PHP config — **safe to deploy fleet-wide immediately**; sizes the
-   build matrix and is the foundation the manager needs.
-1. **P1 — Manager core + EA4 beachhead adapter (monitor-only, one server).**
+0. **P0 — Inventory (all platforms, read-only).**
+   - **P0a — build discovery `cfm php-inventory` — DONE (2026-07-22).**
+     `internal/phpinventory` + the CLI: per-build flavour / version / ZTS /
+     module count / Snuffleupagus-loaded / Imunify-`i360`-loaded, plus the
+     SP+Imunify coexistence-conflict warning. `--json`. Read-only, no config
+     touched. (Imunify keys on the `i360` module — confirm the exact `php -m`
+     name on a live host; see open questions.)
+   - **P0b — next, and DECISIVE:** per-vhost PHP handler mapping — which stack
+     actually serves each vhost, **alt-php (PHP Selector) vs ea-php (MultiPHP)**.
+     This split determines the build burden fleet-wide: alt-php vhosts get SP via
+     the vendor RPM (no build), ea-php vhosts need a CFM-built `.so`. Also
+     extension_dir / ini-scan-dir per build (adapter prep) and the admin
+     `/api/v1/sp/inventory` + inventory card. **Do P0b before choosing which
+     adapter to build first** — if the fleet is mostly alt-php, P1's beachhead
+     should be the alt-php (yum) adapter, not EA4.
+1. **P1 — Manager core + beachhead adapter (monitor-only, one server).**
+   Beachhead adapter chosen by P0b — **alt-php (yum-install the vendor RPM) if
+   the fleet skews PHP-Selector, else EA4 (phpize build)**.
    Platform-independent manager: render Tier-1 `.simulation()` rules, the
    render→validate→swap→reload gate (§10) + CI guardrail, SP detector →
-   `cfm.sp.log` JSON + notifier + per-rule hit-rates. Plus the **EA4 adapter**
-   only (build `.so`, drop-in, FPM reload). Prove the full loop on one test EA4
-   server. *No enforcement anywhere.*
+   `cfm.sp.log` JSON + notifier + per-rule hit-rates. Plus the **one beachhead
+   adapter** (alt-php: install RPM + render rules into the CageFS skeleton +
+   reload; or EA4: build `.so` + drop-in + FPM reload). Prove the full loop on
+   one test server. *No enforcement anywhere.*
 2. **P2 — Control plane + UI**: `SP_MODE` + per-rule states + scoped per-vhost
    excludes + `/api/v1/sp/*` + the SP admin page. Still monitor by default.
-3. **P3 — More adapters**, gated on inventory data + real need: alt-php
-   (CageFS), DirectAdmin. **LiteSpeed lsphp last, or "detected-unsupported".**
+3. **P3 — The other adapters**, gated on inventory data + real need: whichever
+   of {alt-php, EA4} wasn't the beachhead, then DirectAdmin. **Standalone
+   LiteSpeed lsphp last, or "detected-unsupported"** (cPanel+LSWS lsphp already
+   rides the EA4 adapter).
 4. **P4 — First promotions + Imunify cutover**: Tier-1 rules with clean burn-in
    → `enforce` per-rule; `.dump()` forensics on the promoted set; the §11
    PD→SP cutover on burned-in servers.
@@ -388,7 +470,15 @@ previous one has fleet burn-in. Once the manager core (P1) exists, new
 - Inventory output first: which PHP versions / SAPIs / panels does the fleet
   *actually* run, and how many servers per target? (P0 answers this and bounds
   everything downstream.)
-- Does SP + `.simulation()` coexist with Imunify `proactive.so` in the same PHP
+- Confirmed (2026-07-23): Imunify's module is `i360` on ea-php 8.1/8.2/8.3.
+  alt-php CloudLinux model mapped (see §4): `php.d.all` catalog vs `link/conf`
+  active set; SP enables by linking `snuffleupagus.ini` into `link/conf` via
+  `selectorctl`; the RPM ships a vendor `snuffleupagus-default.rules`.
+- alt-php enable — residual (not blocking): exact `selectorctl` invocation to
+  enable+force snuffleupagus **globally for an alt-php version** (native default,
+  all users) vs per-user; and whether "force" (users can't disable) is wanted
+  for a security module. A flag choice for the alt-php adapter.
+- Does SP + `.simulation()` coexist with Imunify `i360` in the same PHP
   without conflict? (§11 prerequisite — decides whether PD-servers are
   stage-first or cutover-only.)
 - CLI/cron PHP doesn't read FPM ini the same way — confirm the ini drop-in
