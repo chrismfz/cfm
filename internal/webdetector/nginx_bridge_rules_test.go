@@ -201,6 +201,61 @@ func TestNginxBridgeDecisionRuleActionMatchesSimulate(t *testing.T) {
 	}
 }
 
+// TestNginxBridgeDecisionMatchesQueryInPath exercises the full edge→bridge
+// path: cfm.lua now sends the request target with its query string, the bridge
+// splits it into path + qs, and a "/forum/ucp.php?mode=register" rule matches.
+// The uri param carries the encoded '?'/'=' exactly as ngx.escape_uri produces.
+func TestNginxBridgeDecisionMatchesQueryInPath(t *testing.T) {
+	store := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	if _, err := store.Add(TrafficRule{
+		ID:       "r_ucp",
+		Enabled:  true,
+		Priority: 120,
+		Scope:    TrafficRuleScope{Vhosts: []string{"mathematica.gr"}},
+		Match: TrafficRuleMatch{
+			Methods: []string{"GET", "POST"},
+			PathAny: []string{"/forum/ucp.php?mode=register"},
+		},
+		Action: TrafficRuleAction{Type: TrafficActionChallenge},
+	}); err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.RuleDecision = store.Simulate
+
+	decide := func(encodedURI string) map[string]any {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet,
+			"/nginx/decision?ip=1.2.3.4&host=mathematica.gr&method=GET&ua=testua&uri="+encodedURI, nil)
+		req.Header.Set("X-CFM-Token", "tok")
+		b.handleDecision(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return payload
+	}
+
+	// /forum/ucp.php?mode=register&sid=deadbeef  (escape_uri-encoded)
+	got := decide("%2Fforum%2Fucp.php%3Fmode%3Dregister%26sid%3Ddeadbeef")
+	if got["rule_action"] != TrafficActionChallenge {
+		t.Fatalf("expected challenge for register page, got=%+v", got)
+	}
+	if got["rule_id"] != "r_ucp" {
+		t.Fatalf("expected rule id r_ucp, got=%+v", got)
+	}
+
+	// Same path, different mode — must NOT match.
+	got = decide("%2Fforum%2Fucp.php%3Fmode%3Dlogin")
+	if _, ok := got["rule_action"]; ok {
+		t.Fatalf("expected no rule_action for mode=login, got=%+v", got)
+	}
+}
+
 func TestValidateUploadSourcePath(t *testing.T) {
 	pending := filepath.Join(t.TempDir(), "pending")
 	if err := os.MkdirAll(pending, 0o700); err != nil {

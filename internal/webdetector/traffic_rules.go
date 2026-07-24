@@ -479,14 +479,24 @@ func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) 
 			if p == "" {
 				continue
 			}
-			if wildcardMatch(p, path) {
-				ok = true
-				break
+			// A path pattern may embed a query part ("/x.php?a=b"): the segment
+			// before the first '?' matches the request path, the segment after
+			// is matched (case-insensitive substring) against the request query
+			// string. The edge (cfm.lua) delivers path and query split, so
+			// operators can paste a full URL — e.g. "/forum/ucp.php?mode=register"
+			// — and it matches "/forum/ucp.php" with qs "mode=register&sid=…".
+			pPath, pQuery, hasQuery := strings.Cut(p, "?")
+			if !pathPatternMatch(strings.TrimSpace(pPath), path) {
+				continue
 			}
-			if !strings.ContainsAny(p, "*?") && strings.HasPrefix(path, p) {
-				ok = true
-				break
+			if hasQuery {
+				pQuery = strings.TrimSpace(pQuery)
+				if pQuery != "" && !strings.Contains(strings.ToLower(qs), strings.ToLower(pQuery)) {
+					continue
+				}
 			}
+			ok = true
+			break
 		}
 		if !ok {
 			return false
@@ -509,6 +519,24 @@ func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) 
 
 
 
+
+// pathPatternMatch applies the two path-matching rules used by ruleMatchFilters
+// to the path portion of a pattern (the segment before any '?'): a wildcard
+// match ('*'/'?' honoured), else a literal prefix match for patterns with no
+// wildcard metacharacters. An empty pattern (e.g. a bare "?query" rule) matches
+// any path.
+func pathPatternMatch(p, path string) bool {
+	if p == "" {
+		return true
+	}
+	if wildcardMatch(p, path) {
+		return true
+	}
+	if !strings.ContainsAny(p, "*?") && strings.HasPrefix(path, p) {
+		return true
+	}
+	return false
+}
 
 // wildcardMatch matches pattern with '*' and '?' against s.
 // Unlike filepath.Match, '*' can match '/' too (needed for UA/path matching).

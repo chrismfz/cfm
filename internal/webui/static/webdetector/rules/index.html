@@ -63,7 +63,8 @@
               <label for="rule-uas">UA patterns</label>
               <input id="rule-uas" class="input" type="text" v-model.trim="ruleForm.uas" placeholder="*facebookexternalhit*, *meta-externalagent*" />
               <label for="rule-paths">Path patterns</label>
-              <input id="rule-paths" class="input" type="text" v-model.trim="ruleForm.paths" placeholder="/wp-login.php, /xmlrpc.php" />
+              <input id="rule-paths" class="input" type="text" v-model.trim="ruleForm.paths" placeholder="/wp-login.php, /forum/ucp.php?mode=register" />
+              <label class="muted" style="font-size:.84rem">Prefix / <code>*</code>-glob match. A <code>?query</code> suffix also matches the request query string (substring), e.g. <code>/forum/ucp.php?mode=register</code>.</label>
               <label for="rule-hasqs">Query string</label>
               <label class="muted" style="font-size:.84rem"><input id="rule-hasqs" type="checkbox" v-model="ruleForm.hasQS" /> only match requests that HAVE a query string</label>
               <label for="rule-qsnotrx" title="Requests whose query string matches this regex are NOT matched by the rule.">QS pass-through</label>

@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "priority": 120,
+  "scope": {
+    "vhosts": ["mathematica.gr", "www.mathematica.gr"]
+  },
+  "match": {
+    "path_any": ["/forum/ucp.php?mode=register"],
+    "methods": ["GET", "POST"]
+  },
+  "action": {
+    "type": "challenge"
+  },
+  "note": "Challenge the phpBB registration page (anti-spam)"
+}

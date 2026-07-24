@@ -1089,8 +1089,13 @@ end
 --     site, so this is defensive symmetry, not yet load-bearing.)
 --   * country is ip-derived (geo_country_cached(ip)) and ip is already keyed,
 --     so two key-colliding requests share a country — safe to omit.
---   * the query string is NOT sent to the bridge (the RPC carries only the
---     path), so the verdict cannot depend on it — excluded on purpose.
+--   * the query string IS part of the key (the RPC now carries the full
+--     request target so traffic rules can match on it). It is folded into the
+--     hashed per-URL key below via the full `uri` passed by get_decision, so a
+--     clean-allow warmed by "/x" is never reused for "/x?mode=register" whose
+--     query-scoped rule would challenge/block. Static assets still coalesce
+--     (is_static_asset_uri strips the query first), so only dynamic endpoints —
+--     where query-scoped rules live — pay the extra per-query cache cardinality.
 --   * ua IS a verdict input (UAAny traffic rules can block/challenge) yet is
 --     deliberately omitted: it is client-controlled (a determined attacker sets
 --     any UA anyway), only clean allows are cached, and the TTL is short, so the
@@ -1788,9 +1793,14 @@ end
 
 -- ── Step 3: Bridge Decision ──────────────────────────────────────────────────
 -- [R1] ua + country passed so Go can evaluate traffic rules.
-local ua_raw  = ngx.var.http_user_agent or ""
-local country = geo_country_cached(ip)
-local d       = get_decision(ip, host, uri, method, scheme, ua_raw, country, clearance_scope)
+-- Pass the FULL request target (path + "?query") to the decision RPC — the
+-- bridge splits it back into path + query string so traffic rules can match on
+-- the query (has_qs / qs pass-through, and "/path?token" patterns). The
+-- top-level `uri` (ngx.var.uri, path only) stays the source for WAF/excludes.
+local ua_raw   = ngx.var.http_user_agent or ""
+local country  = geo_country_cached(ip)
+local dec_uri  = ngx.var.request_uri or uri
+local d        = get_decision(ip, host, dec_uri, method, scheme, ua_raw, country, clearance_scope)
 
 local ip_action        = d.ip_action        or "allow"
 local vh_action        = d.vhost_action      or "allow"

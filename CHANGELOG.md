@@ -30,6 +30,23 @@ back-filled here — see the git/PR history for that period.
   of the security overview.
 
 ### Fixed
+- **Traffic rules can now match the query string (edge sent path only).** A
+  rule like *challenge `/forum/ucp.php?mode=register`* silently never fired: the
+  edge (`cfm.lua`) sent `ngx.var.uri` — the path **without** the query string —
+  to `/nginx/decision`, so the query never reached the rule engine. The `?`
+  embedded in a `path_any` pattern was also treated as a single-char wildcard
+  against the path. This left **all** query-string matching dead end-to-end —
+  including the `has_qs` ("only match requests that HAVE a query string")
+  checkbox and the QS pass-through (`qs_not_rx`) field. Now the edge sends the
+  full request target (`request_uri`); the bridge splits it back into path +
+  query (it already did), and the decision cache key folds in the full target so
+  a clean-allow warmed by `/x` is never reused for `/x?mode=register`. A
+  `path_any` pattern may embed a `?query` suffix — the part before `?` matches
+  the path, the part after is a case-insensitive **substring** match against the
+  request query string (so `/forum/ucp.php?mode=register` matches
+  `…?mode=register&sid=…`). Static assets still coalesce to one cache entry, so
+  only dynamic endpoints pay the per-query cache cardinality. Pinned by matcher
+  unit tests and a full edge→bridge decision test.
 - **Challenge POST replay now covers multipart forms.** The challenge flow has
   long replayed a challenged POST's body after the challenge solves (that is
   what saved forum posts) — but only for urlencoded/json/text bodies, so
