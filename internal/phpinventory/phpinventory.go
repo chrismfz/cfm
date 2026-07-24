@@ -71,7 +71,9 @@ var defaultProbes = []probe{
 // Scanner discovers and probes PHP builds. Root and Run are injectable so the
 // discovery + parsing can be unit-tested without real PHP on the host.
 type Scanner struct {
-	// Root is prepended to every probe glob ("" ⇒ "/" via filepath.Join).
+	// Root is prepended to every probe glob. Empty means the real filesystem
+	// root "/" (NOT filepath.Join's "": that yields a CWD-relative glob, so the
+	// probes would silently match nothing off the real host). See rootOrSlash.
 	Root string
 	// Probes overrides the default binary globs (nil ⇒ defaultProbes).
 	Probes []probe
@@ -80,7 +82,17 @@ type Scanner struct {
 }
 
 // DefaultScanner scans the real filesystem with a bounded exec.
-func DefaultScanner() *Scanner { return &Scanner{Run: execPHP} }
+func DefaultScanner() *Scanner { return &Scanner{Root: "/", Run: execPHP} }
+
+// rootOrSlash resolves the scan root: an empty Root means the real filesystem
+// root "/". Without this, filepath.Join("", "opt/…") returns a CWD-relative
+// glob, so `cfm php-inventory` would find no builds unless run from "/".
+func rootOrSlash(root string) string {
+	if root == "" {
+		return "/"
+	}
+	return root
+}
 
 func execPHP(bin string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
@@ -101,10 +113,11 @@ func (s *Scanner) Scan() Report {
 		probes = defaultProbes
 	}
 
+	root := rootOrSlash(s.Root)
 	var builds []Build
 	seen := map[string]bool{}
 	for _, p := range probes {
-		matches, _ := filepath.Glob(filepath.Join(s.Root, p.glob))
+		matches, _ := filepath.Glob(filepath.Join(root, p.glob))
 		sort.Strings(matches)
 		for _, path := range matches {
 			if seen[path] {

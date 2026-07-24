@@ -127,6 +127,27 @@ func TestScan_DiscoveryAndConflictWarning(t *testing.T) {
 	}
 }
 
+// TestDefaultScannerRootIsAbsolute guards the production glob path: with an
+// empty Root, filepath.Join("", "opt/…") yields a CWD-RELATIVE glob, so
+// `cfm php-inventory` would silently find nothing off a real host unless run
+// from "/". DefaultScanner must root at "/" and rootOrSlash("") must resolve
+// to "/", so every probe glob is absolute.
+func TestDefaultScannerRootIsAbsolute(t *testing.T) {
+	if got := DefaultScanner().Root; got != "/" {
+		t.Fatalf("DefaultScanner().Root = %q, want \"/\"", got)
+	}
+	if got := rootOrSlash(""); got != "/" {
+		t.Fatalf("rootOrSlash(\"\") = %q, want \"/\"", got)
+	}
+	// The joined probe globs must be absolute (the actual bug: they were not).
+	for _, p := range defaultProbes {
+		g := filepath.Join(rootOrSlash(""), p.glob)
+		if !filepath.IsAbs(g) {
+			t.Errorf("probe glob %q joined to %q is not absolute", p.glob, g)
+		}
+	}
+}
+
 func TestScan_NoBuilds(t *testing.T) {
 	rep := (&Scanner{Root: t.TempDir(), Run: func(string, ...string) (string, error) { return "", nil }}).Scan()
 	if len(rep.Builds) != 0 || len(rep.Warnings) != 0 {
