@@ -256,6 +256,42 @@ func TestNginxBridgeDecisionMatchesQueryInPath(t *testing.T) {
 	}
 }
 
+// TestNginxBridgeDecisionSeparateQSParam exercises the structured transport:
+// the edge sends the decoded path in "uri" and the raw query in a separate "qs"
+// param. The bridge must trust "qs" and NOT split "uri" — so a decoded path
+// that itself contains a literal '?' (from %3F) stays intact.
+func TestNginxBridgeDecisionSeparateQSParam(t *testing.T) {
+	var gotPath, gotQS string
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.RuleDecision = func(in TrafficRuleEvalInput) TrafficRuleEvalResult {
+		gotPath, gotQS = in.Path, in.QueryString
+		return TrafficRuleEvalResult{}
+	}
+
+	// uri carries a literal '?' in the path; qs is the real (separate) query.
+	req := httptest.NewRequest(http.MethodGet,
+		"/nginx/decision?ip=1.2.3.4&host=example.com&method=GET&ua=x"+
+			"&uri=%2Fweird%3Fpath.php&qs=mode%3Dregister", nil)
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleDecision(httptest.NewRecorder(), req)
+
+	if gotPath != "/weird?path.php" {
+		t.Fatalf("path mis-split: got %q want %q", gotPath, "/weird?path.php")
+	}
+	if gotQS != "mode=register" {
+		t.Fatalf("qs wrong: got %q want %q", gotQS, "mode=register")
+	}
+
+	// Empty qs param present → still no split, query is empty.
+	req = httptest.NewRequest(http.MethodGet,
+		"/nginx/decision?ip=1.2.3.4&host=example.com&method=GET&ua=x&uri=%2Ffoo&qs=", nil)
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleDecision(httptest.NewRecorder(), req)
+	if gotPath != "/foo" || gotQS != "" {
+		t.Fatalf("empty qs: got path=%q qs=%q want /foo and empty", gotPath, gotQS)
+	}
+}
+
 func TestValidateUploadSourcePath(t *testing.T) {
 	pending := filepath.Join(t.TempDir(), "pending")
 	if err := os.MkdirAll(pending, 0o700); err != nil {

@@ -1089,15 +1089,15 @@ end
 --     site, so this is defensive symmetry, not yet load-bearing.)
 --   * country is ip-derived (geo_country_cached(ip)) and ip is already keyed,
 --     so two key-colliding requests share a country — safe to omit.
---   * the query string IS part of the key (the RPC now carries "path?query" —
---     decoded path from ngx.var.uri plus the raw query, appended at the call
---     site) so traffic rules can match on it. It is folded into the hashed
---     per-URL key below, so a clean-allow warmed by "/x" is never reused for
---     "/x?mode=register" whose query-scoped rule would challenge/block. A
---     query-less request hashes exactly the path (== the old key), so no-query
---     traffic keeps its previous cache entry; static assets still coalesce
---     (is_static_asset_uri strips the query first). Only dynamic endpoints —
---     where query-scoped rules live — pay the extra per-query cache cardinality.
+--   * the query string IS part of the key (the RPC carries the decoded path in
+--     "uri" and the raw query in a separate "qs" param) so traffic rules can
+--     match on it. It is folded into the hashed per-URL key below, so a
+--     clean-allow warmed by "/x" is never reused for "/x?mode=register" whose
+--     query-scoped rule would challenge/block. A query-less request hashes
+--     exactly the path (== the old key), so no-query traffic keeps its previous
+--     cache entry; static assets still coalesce (is_static_asset_uri strips the
+--     query first). Only dynamic endpoints — where query-scoped rules live —
+--     pay the extra per-query cache cardinality.
 --   * ua IS a verdict input (UAAny traffic rules can block/challenge) yet is
 --     deliberately omitted: it is client-controlled (a determined attacker sets
 --     any UA anyway), only clean allows are cached, and the TTL is short, so the
@@ -1105,7 +1105,7 @@ end
 --     allow. Tightening this (fold ngx.md5(ua) in, or skip caching when
 --     UA-sensitive rules exist) is a tracked audit follow-up, separate from the
 --     F38 path-truncation fix — do not silently assume the key covers ua.
-local function decision_cache_key(ip, host, method, scheme, uri, scope)
+local function decision_cache_key(ip, host, method, scheme, uri, qs, scope)
   if is_static_asset_uri(uri) then
     -- Static assets coalesce to ONE entry per (ip,host,scope) with path AND
     -- query dropped. Known limitation: a query-scoped traffic rule written for
@@ -1114,13 +1114,23 @@ local function decision_cache_key(ip, host, method, scheme, uri, scope)
     -- static-asset path is unusual; the static coalesce (hot-path win) is kept.
     return "ds|" .. ip .. "|" .. host .. "|" .. (scope or "web")
   end
+  -- Fold the query into the hashed key (concat is fine for hashing — it only
+  -- needs to be unique per (path, query)), so a clean-allow warmed by "/x" is
+  -- never reused for "/x?mode=register" whose query-scoped rule would
+  -- challenge/block. A query-less request hashes exactly the path (== the old
+  -- key), so no-query traffic keeps its previous cache entry.
+  local keyed = uri or "-"
+  if qs and qs ~= "" then keyed = keyed .. "?" .. qs end
   return "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" ..
-         ngx.md5(uri or "-") .. "|" .. (scope or "web")
+         ngx.md5(keyed) .. "|" .. (scope or "web")
 end
 
 -- [R1] Pass ua + country so Go evaluates traffic rules. Cache clean allows only.
-local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
-  local key = decision_cache_key(ip, host, method, scheme, uri, scope)
+-- `uri` is the DECODED path (ngx.var.uri); `qs` is the raw query (ngx.var.args,
+-- may be ""). They are sent as separate RPC params so the bridge never has to
+-- re-split a "path?query" concat (a decoded path can contain a literal '?').
+local function get_decision(ip, host, uri, qs, method, scheme, ua, country, scope)
+  local key = decision_cache_key(ip, host, method, scheme, uri, qs, scope)
 
   -- Accepted residual (2026-07 audit round-2): a cache HIT serves the prior
   -- clean-allow for up to decision_cache_ttl_ms (90s) WITHOUT re-consulting the
@@ -1166,6 +1176,7 @@ local function get_decision(ip, host, uri, method, scheme, ua, country, scope)
   local path = "/nginx/decision?ip=" .. esc(ip) ..
                "&host="    .. esc(host)    ..
                "&uri="     .. esc(uri)     ..
+               "&qs="      .. esc(qs or "")      ..
                "&method="  .. esc(method)  ..
                "&scheme="  .. esc(scheme)  ..
                "&ua="      .. esc(ua or "")      ..
@@ -1800,20 +1811,17 @@ end
 
 -- ── Step 3: Bridge Decision ──────────────────────────────────────────────────
 -- [R1] ua + country passed so Go can evaluate traffic rules.
--- Pass the request target (decoded path + "?query") to the decision RPC — the
--- bridge splits it back into path + query string so traffic rules can match on
--- the query (has_qs / qs pass-through, and "/path?token" patterns).
--- IMPORTANT: keep the path DECODED/normalized (ngx.var.uri) and append only the
--- raw query (ngx.var.args). Do NOT use ngx.var.request_uri here: its path
--- segment is raw/undecoded, so path_any rules would become evadable by
+-- Pass the DECODED path (ngx.var.uri) and the raw query (ngx.var.args) as
+-- SEPARATE arguments so the bridge can match traffic rules on the query
+-- (has_qs / qs pass-through, and "/path?token" patterns) without re-splitting a
+-- concat. Keep the path DECODED: do NOT use ngx.var.request_uri, whose path
+-- segment is raw/undecoded and would let path_any rules be evaded by
 -- percent-encoding (e.g. /wp-%6cogin.php). ngx.var.uri stays the WAF/excludes
--- source; only the decision RPC gets the query appended.
+-- source; only the decision RPC additionally carries the query.
 local ua_raw   = ngx.var.http_user_agent or ""
 local country  = geo_country_cached(ip)
-local dec_uri  = uri
-local qs_raw   = ngx.var.args
-if qs_raw and qs_raw ~= "" then dec_uri = uri .. "?" .. qs_raw end
-local d        = get_decision(ip, host, dec_uri, method, scheme, ua_raw, country, clearance_scope)
+local qs_raw    = ngx.var.args or ""
+local d        = get_decision(ip, host, uri, qs_raw, method, scheme, ua_raw, country, clearance_scope)
 
 local ip_action        = d.ip_action        or "allow"
 local vh_action        = d.vhost_action      or "allow"

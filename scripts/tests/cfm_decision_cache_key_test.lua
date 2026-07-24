@@ -45,7 +45,7 @@ local IP, HOST, SCOPE = "203.0.113.7", "shop.example.com", "web"
 local function dk(uri, opt)
   opt = opt or {}
   return decision_cache_key(opt.ip or IP, opt.host or HOST, opt.method or "GET",
-                            opt.scheme or "https", uri, opt.scope or SCOPE)
+                            opt.scheme or "https", uri, opt.qs or "", opt.scope or SCOPE)
 end
 
 -- ── F38: two paths sharing a 64-byte prefix get DISTINCT keys ────────────────
@@ -69,10 +69,25 @@ check(dk(uriB) ~= dk(uriB, { ip = "198.51.100.9" }), "different ip -> different 
 check(dk(uriB) ~= dk(uriB, { scope = "panel:2087" }), "different scope -> different key (non-static keyed on scope too)")
 check(dk(uriB):sub(1, 2) == "d|", "non-static key uses the 'd|' namespace")
 
+-- ── Query dimension: query is folded into the non-static key ─────────────────
+-- A query-less request must hash exactly the path (== the pre-query key), so
+-- no-query traffic keeps its previous cache entry.
+check(dk(uriB) == dk(uriB, { qs = "" }), "empty qs == no qs (unchanged key)")
+check(dk(uriB):find("md5(" .. uriB .. ")", 1, true) ~= nil,
+      "query-less key hashes the bare path (no '?query' appended)")
+check(dk(uriB) ~= dk(uriB, { qs = "mode=register" }),
+      "a query-scoped request gets a DISTINCT key from the query-less one")
+check(dk(uriB, { qs = "mode=register" }) ~= dk(uriB, { qs = "mode=login" }),
+      "different query -> different key")
+check(dk(uriB, { qs = "mode=register" }):find("md5(" .. uriB .. "?mode=register)", 1, true) ~= nil,
+      "query key hashes path .. '?' .. query")
+
 -- ── Static assets: one coalesced entry per (ip, host, scope), path-independent ─
 local ks1 = dk("/assets/app.css")
 local ks2 = dk("/assets/vendor/huge/" .. string.rep("z", 100) .. ".js")
 check(ks1 == ks2, "static assets from same (ip,host,scope) share one coalesced key")
+check(ks1 == dk("/assets/app.css", { qs = "v=123" }),
+      "static assets coalesce regardless of query (cache-buster ?v= ignored)")
 check(ks1:sub(1, 3) == "ds|", "static key uses the 'ds|' namespace")
 check(ks1 ~= dk("/assets/app.css", { scope = "panel:2087" }),
       "static key varies by scope")
