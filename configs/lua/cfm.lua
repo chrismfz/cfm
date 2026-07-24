@@ -1089,12 +1089,14 @@ end
 --     site, so this is defensive symmetry, not yet load-bearing.)
 --   * country is ip-derived (geo_country_cached(ip)) and ip is already keyed,
 --     so two key-colliding requests share a country — safe to omit.
---   * the query string IS part of the key (the RPC now carries the full
---     request target so traffic rules can match on it). It is folded into the
---     hashed per-URL key below via the full `uri` passed by get_decision, so a
---     clean-allow warmed by "/x" is never reused for "/x?mode=register" whose
---     query-scoped rule would challenge/block. Static assets still coalesce
---     (is_static_asset_uri strips the query first), so only dynamic endpoints —
+--   * the query string IS part of the key (the RPC now carries "path?query" —
+--     decoded path from ngx.var.uri plus the raw query, appended at the call
+--     site) so traffic rules can match on it. It is folded into the hashed
+--     per-URL key below, so a clean-allow warmed by "/x" is never reused for
+--     "/x?mode=register" whose query-scoped rule would challenge/block. A
+--     query-less request hashes exactly the path (== the old key), so no-query
+--     traffic keeps its previous cache entry; static assets still coalesce
+--     (is_static_asset_uri strips the query first). Only dynamic endpoints —
 --     where query-scoped rules live — pay the extra per-query cache cardinality.
 --   * ua IS a verdict input (UAAny traffic rules can block/challenge) yet is
 --     deliberately omitted: it is client-controlled (a determined attacker sets
@@ -1793,13 +1795,19 @@ end
 
 -- ── Step 3: Bridge Decision ──────────────────────────────────────────────────
 -- [R1] ua + country passed so Go can evaluate traffic rules.
--- Pass the FULL request target (path + "?query") to the decision RPC — the
+-- Pass the request target (decoded path + "?query") to the decision RPC — the
 -- bridge splits it back into path + query string so traffic rules can match on
--- the query (has_qs / qs pass-through, and "/path?token" patterns). The
--- top-level `uri` (ngx.var.uri, path only) stays the source for WAF/excludes.
+-- the query (has_qs / qs pass-through, and "/path?token" patterns).
+-- IMPORTANT: keep the path DECODED/normalized (ngx.var.uri) and append only the
+-- raw query (ngx.var.args). Do NOT use ngx.var.request_uri here: its path
+-- segment is raw/undecoded, so path_any rules would become evadable by
+-- percent-encoding (e.g. /wp-%6cogin.php). ngx.var.uri stays the WAF/excludes
+-- source; only the decision RPC gets the query appended.
 local ua_raw   = ngx.var.http_user_agent or ""
 local country  = geo_country_cached(ip)
-local dec_uri  = ngx.var.request_uri or uri
+local dec_uri  = uri
+local qs_raw   = ngx.var.args
+if qs_raw and qs_raw ~= "" then dec_uri = uri .. "?" .. qs_raw end
 local d        = get_decision(ip, host, dec_uri, method, scheme, ua_raw, country, clearance_scope)
 
 local ip_action        = d.ip_action        or "allow"

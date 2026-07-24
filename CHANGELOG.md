@@ -38,9 +38,12 @@ back-filled here — see the git/PR history for that period.
   against the path. This left **all** query-string matching dead end-to-end —
   including the `has_qs` ("only match requests that HAVE a query string")
   checkbox and the QS pass-through (`qs_not_rx`) field. Now the edge sends the
-  full request target (`request_uri`); the bridge splits it back into path +
-  query (it already did), and the decision cache key folds in the full target so
-  a clean-allow warmed by `/x` is never reused for `/x?mode=register`. A
+  request target as `path?query` — the **decoded** path (`ngx.var.uri`, so
+  `path_any` stays un-evadable by percent-encoding) plus the raw query
+  (`ngx.var.args`); the bridge splits it back into path + query (it already
+  did), and the decision cache key folds in the query so a clean-allow warmed by
+  `/x` is never reused for `/x?mode=register` (a query-less request keeps its
+  previous path-only cache entry). A
   `path_any` pattern may embed a `?query` suffix — the part before `?` matches
   the path, the part after is a case-insensitive **substring** match against the
   request query string (so `/forum/ucp.php?mode=register` matches
