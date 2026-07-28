@@ -64,6 +64,7 @@ make test-lua
 ./scripts/tests/check_cli_transport.sh          # CLI transport guardrail (see §5)
 ./scripts/tests/check_cfm_clearance_require.sh   # Lua clearance module load check
 ./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf bounds + generator tests
+./scripts/tests/check_logrotate_coverage.sh      # every CFM log path is rotated (see §5)
 ```
 
 Additional scanners run in CI: **CodeQL** (`codeql.yml`), **Semgrep**
@@ -132,6 +133,19 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   TODO" guard comments once the work lands, and never keep a second copy of a
   list/matcher that can drift. When a comment and the code disagree, trust the
   code and fix the comment.
+- **A new log file needs a rotation entry in the same change.**
+  `check_logrotate_coverage.sh` fails CI if a path CFM writes (edge
+  `access_log`/`error_log`, a `*_LOG_FILE` key in `cfm.conf`, a `/var/log/cfm/…`
+  literal in Go) is neither matched by `configs/logrotate-cfm` nor in a
+  directory documented as vendor-rotated. Two rules behind it: (a) never list a
+  path a distro/panel logrotate config already globs — `/var/log/{angie,nginx,
+  apache2,httpd}/`, `/usr/local/apache/logs/` — logrotate treats the second
+  declaration as a `duplicate log entry` error and aborts the run instead of
+  rotating; (b) prefer the directory glob already in the file over adding a
+  filename, because enumerated lists drift (they silently missed
+  `access.bad_request.log`, `cfm.clam.log`, `cfm.socket.log`, `ua_emergency.log`).
+  Run `./scripts/tests/check_logrotate_coverage.sh --host` on a live server to
+  see what is actually rotated there. See `docs/log-rotation.md`.
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
 - **`detectors.conf` scalar readers now tolerate an inline `;`/`#` comment.**
@@ -299,6 +313,7 @@ rather than advancing heartbeats on failure.
 | DNAT bypass | `docs/dnat-bypass.md` · Debug capture: `docs/debug-capture-runbook.md` |
 | Proxy latency: measuring & origin keepalive | `docs/proxy-performance.md` |
 | Endpoint scope inventory | `docs/endpoint_scope_inventory.md` |
+| Log rotation (who rotates what) | `docs/log-rotation.md` |
 
 ---
 
