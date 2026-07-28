@@ -502,3 +502,79 @@ func TestActionObserveNotifies(t *testing.T) {
 		}
 	}
 }
+
+// The badge the WebUI draws must mean "farmed right now", which is NOT what the
+// alert means: the alert is suppressed for COOLDOWN (30m by default) because a
+// farm runs for hours. A hook that fired with the alert would let the badge blink
+// off mid-attack, so it fires on every over-threshold evaluation instead.
+func TestFarmHookFiresThroughTheAlertCooldown(t *testing.T) {
+	h := newHarness(t, Config{Window: time.Minute, Cooldown: 30 * time.Minute})
+	var marks []string
+	var ttls []time.Duration
+	h.d.SetFarmHook(func(host string, ttl time.Duration) {
+		marks = append(marks, host)
+		ttls = append(ttls, ttl)
+	})
+
+	h.farmBurst("shop.example.com", 80, func(int) string { return chromeUA })
+	if alerts := h.run(t); len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1", len(alerts))
+	}
+	if len(marks) != 1 {
+		t.Fatalf("got %d marks on the alerting pass, want 1", len(marks))
+	}
+
+	// Second pass, well inside the cooldown: no alert, but the vhost is still
+	// being farmed and must still be marked.
+	h.clock = h.clock.Add(30 * time.Second)
+	h.farmBurst("shop.example.com", 80, func(int) string { return chromeUA })
+	if alerts := h.run(t); len(alerts) != 0 {
+		t.Fatalf("got %d alerts inside the cooldown, want 0", len(alerts))
+	}
+	if len(marks) != 2 {
+		t.Fatalf("got %d marks total, want 2 — the badge would have gone dark while the farm ran", len(marks))
+	}
+	for _, m := range marks {
+		if m != "shop.example.com" {
+			t.Errorf("marked %q, want the vhost", m)
+		}
+	}
+	// The TTL must outlive the gap between evaluations, or the badge flickers
+	// between passes even while the farm is continuous.
+	for _, ttl := range ttls {
+		if ttl <= h.d.Every() {
+			t.Errorf("mark TTL %s is not longer than the evaluation interval %s", ttl, h.d.Every())
+		}
+		if ttl < h.d.cfg.Window {
+			t.Errorf("mark TTL %s is shorter than the window it was derived from (%s)", ttl, h.d.cfg.Window)
+		}
+	}
+}
+
+// Below threshold there is nothing to badge.
+func TestFarmHookSilentBelowThreshold(t *testing.T) {
+	h := newHarness(t, Config{MinSubnets: 40, MinSolves: 40})
+	fired := 0
+	h.d.SetFarmHook(func(string, time.Duration) { fired++ })
+	h.farmBurst("shop.example.com", 20, func(int) string { return chromeUA })
+	if alerts := h.run(t); len(alerts) != 0 {
+		t.Fatalf("got %d alerts below threshold", len(alerts))
+	}
+	if fired != 0 {
+		t.Fatalf("hook fired %d times below threshold, want 0", fired)
+	}
+}
+
+// An allowlisted vhost must not be badged either — the allowlist is how an
+// operator says "this spread is legitimate", and a badge would keep asserting
+// the opposite.
+func TestFarmHookRespectsAllowlist(t *testing.T) {
+	h := newHarness(t, Config{AllowHosts: []string{"shop.example.com"}})
+	fired := 0
+	h.d.SetFarmHook(func(string, time.Duration) { fired++ })
+	h.farmBurst("shop.example.com", 80, func(int) string { return chromeUA })
+	h.run(t)
+	if fired != 0 {
+		t.Fatalf("hook fired %d times for an allowlisted vhost, want 0", fired)
+	}
+}

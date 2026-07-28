@@ -38,7 +38,11 @@ func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []ChallengeVhostState{})
 		return
 	}
-	writeJSON(w, http.StatusOK, e.chalAPI.ListVhosts(status, mode, limit))
+	rows := e.chalAPI.ListVhosts(status, mode, limit)
+	for i := range rows {
+		rows[i].SolverFarm = IsSolverFarm(rows[i].Host)
+	}
+	writeJSON(w, http.StatusOK, rows)
 }
 
 // handleChallengeVhost returns the challenge state for a single vhost.

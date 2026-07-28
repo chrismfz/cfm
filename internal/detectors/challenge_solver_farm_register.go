@@ -99,6 +99,12 @@ func init() {
 		d := solverfarm.New(cfg)
 		d.SetName(section)
 
+		// Feed the "farmed right now" mark the WebUI badges from. Fires on every
+		// over-threshold evaluation rather than on the alert, because the alert
+		// is suppressed for COOLDOWN (30m) while the farm keeps running — a badge
+		// driven by alerts would blink off mid-attack.
+		d.SetFarmHook(webdetector.MarkSolverFarm)
+
 		webdetector.SubscribeChallengeSolveEvents(func(s webdetector.ChallengeSolve) {
 			d.Enqueue(s.InputEvent())
 		})

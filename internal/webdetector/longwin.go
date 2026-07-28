@@ -53,6 +53,12 @@ type SuspiciousRow struct {
         PathDiversity float64 `json:"path_diversity"`
         UADiversity   float64 `json:"ua_diversity"`
         PostRatio     float64 `json:"post_ratio"`
+
+	// SolverFarm is true while challenge_solver_farm currently sees a
+	// distributed solver farm on this vhost. Stamped by the API handlers, not
+	// by the long-window scorer: it is an external verdict, not a scoring
+	// input. See solverfarm_marks.go.
+	SolverFarm bool `json:"solver_farm"`
 }
 
 // LongRow is the raw long-window aggregate without scoring.

@@ -86,6 +86,124 @@ back-filled here — see the git/PR history for that period.
   previous config is kept under `/var/lib/cfm/backups/` instead.
 
 ### Added
+- **`farm` badge for `challenge_solver_farm` in the WebUI and the TUI.** A blue
+  pill in *WebTop* → Flags and in *Suspicious + challenged vhosts* → Status, and
+  an `F` in the leading slot of the TUI's `SUP` column. Until now the detector's
+  only output was an email and a `cfm.detector.log` line, so nothing on the
+  dashboard said which vhost was being farmed.
+
+  It is **not** driven by the alert, and that is the point: `COOLDOWN`
+  rate-limits alerts to one per 30 minutes because a farm runs for hours, so a
+  badge fed by alerts would blink off mid-attack. The detector marks the vhost on
+  every over-threshold evaluation — before the cooldown is consulted — with a TTL
+  of `max(3 × EVERY, WINDOW)`, so the badge means "farmed right now" and clears
+  itself within one TTL of the farm stopping. There is no un-mark path, so a
+  missed callback cannot leave a vhost badged forever, and the marks are dropped
+  when the detectors manager stops so a reload cannot leave stale ones behind.
+
+  `solver_farm` is now on the `top-short`, `suspicious`, `long-top`,
+  `challenge/vhosts` and `challenge/vhost/status` responses — the last so scoped
+  tokens, which reach the vhost list only through it, get the badge too. The new
+  `pill info` style is for observations rather than enforcement state: `warn` and
+  `danger` already mean "scored suspicious" and "challenge is on", and this
+  detector never enforces anything. The badge is also orthogonal to the score
+  beside it, since a farm solves the challenge correctly and need not look
+  suspicious at all.
+- **TLS fingerprint on every challenge solve, log-first.** Every other signal on
+  a solve is written by the client — the User-Agent, the cookies, the PoW
+  solution, the timing. The TLS handshake is written by its TLS stack before a
+  byte of HTTP is sent, so a client claiming `Chrome/118` whose handshake does
+  not look like Chrome's is lying in a way no header edit can fix. The observed
+  farm sends one exact User-Agent for 100% of its solves, so this holds even if
+  it randomises that tomorrow.
+
+  `configs/lua/cfm_tlsfp.lua` stamps `X-CFM-TLS` on the request the edge
+  forwards to `/__cfm_verify` (protocol, offered ciphers, offered curves, ALPN,
+  HTTP version, resumption flag); `internal/tlsfp` parses it into an
+  8-character id. It is a poor-man's JA3, not a JA4 — the edge cannot report the
+  extension list or its order without a module — but it needs no module, patch
+  or rebuild, which is why it goes first.
+
+  GREASE code points are stripped before hashing. RFC 8701 stacks insert one
+  chosen at random *per connection* into the cipher list and the
+  supported_groups, and nginx renders them as hex — left in, one real Chrome
+  would produce up to 16×16 distinct ids and the dictionary would fill with
+  noise. `Raw` stays verbatim as the evidence and the offered order is preserved;
+  `grease=true|false` on the first_seen line records whether GREASE survives
+  OpenSSL's ClientHello parsing on this edge at all.
+
+  Lands as `tls_fp=<id>` on every `result=solved` line in `cfm.challenges.log`,
+  `payload.tls_fp` on the `challenge_solved` history event, and one
+  `tls_fp=<id> first_seen grease=… ua=… tls=…` dictionary line per distinct
+  fingerprint,
+  so `grep tls_fp=<id>` finds the definition and every solve that used it. `-`
+  means the edge supplied none (older edge config, plain HTTP, legacy DNAT), not
+  a parse failure.
+
+  **Nothing decides on it.** The fingerprint↔UA mapping has to be derived from
+  captured traffic rather than written from memory — the cipher names come from
+  the edge's OpenSSL build, so a table from another fleet is not comparable.
+  Reading it, the edge tolerates an older nginx without `$ssl_curves` or
+  `$ssl_alpn_protocol` (missing variables degrade to empty fields instead of
+  refusing to start), always clears a client-supplied `X-CFM-TLS` before setting
+  its own, and restricts the value to a charset that cannot carry CR/LF or the
+  field separator into a log line. See `docs/roadmaps/challenge-engine.md` §6.
+- **`uaplausible` gains three Chrome version-shape rules**
+  (`chrome_impossible_patch`, `chrome_nonzero_minor`,
+  `chrome_reduced_build_with_patch`). The farm does not reuse one forged
+  User-Agent — it *generates* them: in the production capture, Chrome majors
+  39–60 carry 110–170 distinct build numbers each, drawn roughly uniformly from
+  `810..9996`, while every other major has at most 8 sitting tightly on the real
+  release build. That is 3,128 of 4,151 distinct Chrome version strings from one
+  generator, over just four device templates.
+
+  The rules need no table of Chrome release builds — writing one from memory is
+  what this package's doc comment forbids, and it would need maintaining forever.
+  Each states a property of Chrome's own version scheme that holds across the
+  corpus, majors 15 → 150: the 4th component is ≥ 1000 (the highest
+  non-generated patch observed is 280, with outliers to 819; the generator draws
+  1000–1999), the 2nd component is non-zero (4,149 of 4,151 strings have it at
+  0), or the build is 0 while the patch is not (a reduced UA freezes the last
+  three components together).
+
+  With these, the package flags 64.5% of the distinct UA strings but only 2.22%
+  of the requests — the gap is the finding, since a generator minting a fresh
+  string per request dominates the vocabulary without moving the traffic share.
+  No known crawler or Chromium derivative is caught. The verdict reaches
+  `ua_impossible=` in `cfm.challenges.log`, the `challenge_solved` history event,
+  the forensics `impossible` pill, and the `impossible_ua` count on
+  `challenge_solver_farm` alerts, exactly as the existing rules do.
+- **New detector `challenge_cookie_discard`** — clients that re-solve the
+  challenge while still holding valid clearance. Solving mints a signed
+  `cfm_clearance` cookie good for `CHALLENGE_COOKIE_LIFE` (45m by default), so a
+  browser solves once and is done. An address that solves again minutes later
+  never stored the cookie: a request pipeline with no cookie jar, driving a
+  headless browser per request. Worst offender in the production capture: 138
+  solves in 10 minutes, 1,121 across the day, one User-Agent, two vhosts.
+
+  It is the mirror image of `challenge_solver_farm` and its exact blind spot —
+  that one keys on a vhost because a farm burns a fresh address per solve, this
+  one keys on the address, for the population that does the opposite. Neither
+  sees the other's traffic.
+
+  Calibrated on the same 23h capture (111,537 solves, 97,556 distinct addresses)
+  replayed through a sliding 10-minute window: 99.6% of addresses never solved
+  twice in any window, 248 reached 3+ (244 of them carrying one identical
+  desktop Chrome UA), the plausibly-legitimate repeaters topped out at 4, and no
+  address in the capture peaked at exactly 5. `MIN_SOLVES` defaults to 8 — a 2x
+  margin over the busiest legitimate repeater, still flagging 219 of the 248 —
+  because a user who opens several tabs at once is challenged in each before any
+  cookie is set, and that small burst must stay under the line.
+
+  Unlike `challenge_solver_farm`, blocking here is coherent: the subject is one
+  real address abusing the challenge right now, and the alert sets `Extra["ip"]`
+  authoritatively so the sink never falls back to scanning samples that quote
+  User-Agents and URIs. It still ships **alert-only** — `BLOCK = "dryrun"` to
+  watch the blocking path without touching nftables, then `BLOCK = "6h"` in
+  `[challenge_cookie_discard]` once you trust it (soft TTL rather than
+  `permanent`, because every address observed was a residential proxy exit).
+  Add the section to `/etc/cfm/detectors.conf` to enable it; greppable as
+  `Challenge/CookieDiscard`.
 - **`scripts/tests/check_logrotate_coverage.sh`, wired into CI.** Cross-checks
   every log path CFM configures — edge `access_log`/`error_log`, Apache
   `CustomLog`, `*_LOG_FILE` keys in `cfm.conf`, the systemd stdout/stderr

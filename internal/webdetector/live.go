@@ -957,6 +957,14 @@ func RunLiveTop(baseURL string, limit int) error {
 					suspCell = "  ?"
 				}
 			}
+			// challenge_solver_farm currently sees a distributed solver farm on
+			// this vhost. It goes in the leading slot of the already-reserved SUP
+			// cell rather than a new column, so the layout is unchanged — and it
+			// is orthogonal to the score beside it: a farm solves the challenge
+			// correctly, so it need not score suspicious at all.
+			if row.SolverFarm {
+				suspCell = "F" + suspCell[1:]
+			}
 
 			tableRows = append(tableRows, []string{
 				host,
@@ -1122,7 +1130,7 @@ func RunLiveTop(baseURL string, limit int) error {
 			blockLine = "  │  " + lastBlockMsg
 		}
 
-		legend := "[cyan]=selected  [yellow]=warn/challenged  [red]=high-risk  SUP: !=suspect  !!=strong"
+		legend := "[cyan]=selected  [yellow]=warn/challenged  [red]=high-risk  SUP: !=suspect  !!=strong  F=solver farm"
 		statusBar.Text = fmt.Sprintf(
 			" [↑↓] vhosts  [Enter] drill  [%s]  [s] sort(%s)  [x] bottom(%s)  │  %s%s  [q] quit\n %s",
 			chalHint, sortKey, bottomMode, ipHint, blockLine, legend,

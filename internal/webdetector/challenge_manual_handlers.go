@@ -156,5 +156,9 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"reason":        reason,
 		"auto_active":   autoActive,
 		"auto_since":    autoSince,
+		// Scoped tokens reach the vhost list only through this endpoint, so the
+		// farm mark has to ride along here too or the badge would be
+		// admin-only.
+		"solver_farm": IsSolverFarm(host),
 	})
 }

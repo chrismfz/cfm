@@ -23,6 +23,12 @@ type ChallengeVhostState struct {
 
 	LastAction  string    `json:"last_action"`
 	LastChanged time.Time `json:"last_changed"`
+
+	// SolverFarm is true while challenge_solver_farm currently sees a
+	// distributed solver farm on this vhost. Stamped by the handler, not stored:
+	// the mark lives in solverfarm_marks.go with its own TTL, and copying it
+	// into this store would leave two things to expire instead of one.
+	SolverFarm bool `json:"solver_farm"`
 }
 
 type ChallengeIPState struct {

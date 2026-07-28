@@ -98,6 +98,7 @@ Typical defaults below are representative from the shipped template and should b
 | `health` | host health anomalies (CPU/RAM/disk/temp/net spikes) | `% thresholds`, spike multipliers, watch lists | `EVERY=20s`, mostly alerting |
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
 | `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=60s`, `MIN_SUBNETS=40`, **alert-only** |
+| `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
 
 ### `challenge_solver_farm` — why it exists
 
@@ -172,6 +173,8 @@ solver first; see `docs/roadmaps/challenge-engine.md`.
 |---|---|
 | Email (and Slack if routed) | The full alert: solves, distinct IPs, distinct subnets, solves-per-IP, the UA breakdown and the impossible-UA share |
 | `cfm.detector.log` | Same content, greppable as `Challenge/SolverFarm` |
+| WebUI → WebDetector | A blue **farm** badge in *WebTop* → Flags and in *Suspicious + challenged vhosts* → Status |
+| `cfm web live` (TUI) | `F` in the leading slot of the `SUP` column |
 | `/var/lib/cfm/notify.log.jsonl` | One JSON record per notification |
 | `cfm.challenges.log` | Per solve: `ua=`, `solve_ms=`, `ua_impossible=` |
 | WebUI → WebDetector → Forensics | `challenge_solved` rows with the UA, a **Solve** latency column, and the impossible-UA pill/filter |
@@ -184,6 +187,28 @@ the (unset) default severity gate. Slack needs an explicit `[detector
 
 Because the detector never blocks, the notification *is* the product. That is
 why a `BLOCK` value, which silences it, is worth warning about.
+
+#### The `farm` badge
+
+The badge is **not** driven by the alert. `COOLDOWN` rate-limits alerts to one
+per 30 minutes because a farm runs for hours, so a badge fed by alerts would
+blink off while the attack continued. Instead the detector marks the vhost on
+*every* over-threshold evaluation — before the cooldown is consulted — and the
+mark carries a TTL of `max(3 × EVERY, WINDOW)`. So the badge means "farmed right
+now" and clears on its own within one TTL of the farm stopping.
+
+There is deliberately no un-mark path: expiry is the only way a mark goes away,
+so a missed callback cannot leave a vhost badged forever. `solver_farm` rides on
+the `top-short`, `suspicious`, `long-top`, `challenge/vhosts` and
+`challenge/vhost/status` responses (the last so scoped tokens, which reach the
+list only through it, get the badge too). The marks are dropped when the
+detectors manager stops, so a reload that disables or retunes the detector
+cannot leave stale badges behind.
+
+The badge is styled `pill info` (blue), not `warn`/`danger`: those already mean
+"scored suspicious" and "challenge is on", and this detector never enforces
+anything. Note it is orthogonal to the score beside it — a farm solves the
+challenge *correctly*, so a farmed vhost need not look suspicious at all.
 
 Note the calibration is one server over one day. A very large vhost with a
 genuinely global mobile audience could legitimately spread wider; `MIN_SUBNETS`
@@ -199,6 +224,70 @@ self-contradictory User-Agent (see below). It is corroboration for the operator
 reading the alert, never part of the threshold: a farm can send a well-formed UA
 whenever it chooses.
 
+### `challenge_cookie_discard` — why it exists
+
+The mirror image of `challenge_solver_farm`, and its exact blind spot.
+
+Solving mints a signed `cfm_clearance` cookie valid for `CHALLENGE_COOKIE_LIFE`
+(45m by default). A browser stores it and does not solve again until it expires.
+An address that re-solves minutes later is saying something very specific: **it
+never stored the cookie**. That is not aggressive crawling — it is a request
+pipeline with no cookie jar, driving a headless browser per request. The
+challenge is working perfectly and the client is paying it every single time.
+
+`challenge_solver_farm` keys on a vhost because a farm burns a fresh address per
+solve (~1.07 solves/IP), so no per-IP counter can see it. This one keys on the
+**address**, for the population that does the opposite: a few addresses solving
+dozens of times each. Neither detector sees the other's traffic.
+
+Calibration, from the same 23h capture (111,537 solves, 97,556 distinct
+addresses) replayed through a **sliding** 10-minute window:
+
+| max solves by one address per 10m window | addresses |
+|---|---|
+| 1 (never re-solved) | 97,182 — **99.6%** |
+| 3 or more | 248, of which **244** carried one identical desktop Chrome UA |
+| exactly 5 | **0** |
+| worst offender | **138** (1,121 solves across the day, one UA, two vhosts) |
+
+The four remaining repeaters are the plausibly-legitimate ones and they top out
+at **4**: an iPhone and an iPad on small vhosts, one datacenter client, and a
+webmail address sending three different User-Agents — a NAT or VPN exit with
+several real devices behind it. Legitimate traffic stops at 4, the abusive
+population resumes at 6, so the gap in the distribution sits at 5.
+
+`MIN_SOLVES` defaults to **8** — a 2× margin over the busiest legitimate
+repeater, still flagging 219 of the 248. The margin is deliberate rather than
+tight: a user who opens several tabs at once is challenged in each of them
+before any cookie is set, which is a small instantaneous burst, while this
+detector's real target sustains 30+ solves over minutes.
+
+Design choices, and how they differ from `challenge_solver_farm`:
+
+- **Not keyed on User-Agent**, for the same reason: it is attacker-controlled.
+  The UA, vhost and URI breakdowns ride on the alert as evidence only.
+- **Blocking is coherent here.** The subject is one real address abusing the
+  challenge right now, so the alert is an ordinary per-IP finding and sets
+  `Extra["ip"]` authoritatively — the sink never has to guess (its fallback
+  scans samples for anything IP-shaped, and these samples quote User-Agents and
+  URIs). It still **ships alert-only**: leave `BLOCK` unset to watch it first,
+  then `BLOCK = "6h"` in `[challenge_cookie_discard]` when you trust it. A soft
+  TTL rather than `permanent` is right because every address observed was a
+  residential proxy exit that may belong to a real visitor later. The
+  intermediate step is `BLOCK = "dryrun"`, which runs the whole blocking path and
+  reports what it *would* have banned without touching nftables — note there is
+  no generic `DRY_RUN` key in this framework, so setting one here would be
+  silently ignored while `BLOCK` kept banning for real.
+- **Neither cap can hide the behaviour.** `MAX_TRACKED_PER_IP` bounds the
+  evidence buffer only — records it drops are still counted toward the solve
+  total, and truncation is stated on the alert. `MAX_TRACKED_IPS` bounds the
+  address map (the key is client-controlled, so it must be bounded); when it is
+  reached, only *new* addresses are refused, so a flood of one-shot solvers can
+  delay a new finding but cannot erase one already accumulating.
+
+Greppable as `Challenge/CookieDiscard` in `cfm.detector.log`; notification
+follows the same `[detector "*"]` catch-all as every other section.
+
 ### User-Agent plausibility (`internal/uaplausible`)
 
 Reports whether a UA contradicts *itself* — a combination no shipping browser
@@ -206,6 +295,49 @@ emits. Examples, all present in real traffic: an iPhone carrying Blink's
 `AppleWebKit/537.36` (iOS is required to use the system WebKit, which reports
 `60x`), a bare `Chrome/` token on iOS (Chrome on iOS is `CriOS`), a Firefox
 carrying the Blink WebKit token, a Chrome UA missing `KHTML, like Gecko`.
+
+Three of the rules are about the **shape of a Chrome version string**, and they
+exist because the observed farm does not reuse one forged UA — it *generates*
+them. In the capture, Chrome majors 39–60 carry 110–170 distinct build numbers
+each, drawn roughly uniformly from `810..9996`, while every other major has at
+most 8 and they sit tightly on the real release build: 3,128 of 4,151 distinct
+Chrome version strings from a single generator, using only four device templates
+(`SM-G900P Build/LRX21T`, `Nexus 5 Build/MRA58N`, `Pixel 2 Build/OPD3.170816.012`,
+`iPhone OS 11_0`).
+
+The tempting rule — "major 43 must have build 2357" — is a lookup table of Chrome
+release builds. Writing one from memory is exactly what this package's doc comment
+forbids, and it would need maintaining for every future release. These three need
+no table; each states a property of Chrome's own version scheme that holds across
+the whole corpus, majors 15 → 150:
+
+| rule | what it says | evidence |
+|---|---|---|
+| `chrome_impossible_patch` | 4th component ≥ 1000 | highest non-generated patch in the capture is **280**, with outliers to 819; the generator draws 1000–1999 |
+| `chrome_nonzero_minor` | 2nd component ≠ 0 | 4,149 of 4,151 Chrome strings have minor 0, a decade of releases |
+| `chrome_reduced_build_with_patch` | build 0 **and** patch ≠ 0 | a reduced UA freezes the last three together (`145.0.0.0`); all 70 distinct `build==0` strings are that clean form bar one |
+
+Together with the existing rules this flags **64.5% of the distinct UA strings**
+but only **2.22% of the requests** — and that gap *is* the finding: one generator
+minting a fresh string per request dominates the vocabulary while barely moving
+the traffic share.
+
+**Chromium derivatives.** They all carry a `Chrome/` token, so the fair question
+is whether any writes something other than the upstream Chromium version there.
+Measured across the capture — **69 distinct derivative UA strings in 12 families**
+(Edge, Opera, Vivaldi, Brave, Samsung, Yandex, Electron, Chromium, WebView, MIUI,
+Sputnik, Edge Android), 1,497 requests — **none is flagged**, and their highest
+patch is **280** (Opera's `Chrome/120.0.6099.280`) against a bound of 1000. That
+is what the token is *for*: a derivative advertises the Chromium build it was
+made from, using Chromium's own version string, because inventing its own numbers
+there would break UA sniffing everywhere. Forks with no product token of their
+own (Brave by default, Cromite, ungoogled-chromium) are indistinguishable from
+plain Chrome here by construction and pass on that upstream version alone.
+
+If one ever does land here, the cost is bounded by design: **this verdict is
+corroboration, never a threshold.** It reaches a log tag, a history field and a
+counted column on two detectors' alerts — nothing blocks, throttles or challenges
+on it. The fix is to hold the offending rule, not the package.
 
 It is checked on every challenge solve and surfaced three ways:
 
