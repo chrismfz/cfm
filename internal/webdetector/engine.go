@@ -635,12 +635,25 @@ func (e *Engine) StopUAEmergencyPruner() {
 }
 
 // RecordChallengeSolved updates the store when a challenge is solved.
-func (e *Engine) RecordChallengeSolved(ip, host, uri string, diff int, ms int64) {
+//
+// The history payload carries the UA and the real solve latency alongside the
+// legacy server-side `ms`, so the forensics view (which renders payload.ua) and
+// any downstream solver-farm correlation have something to work with. Before
+// this, a solve recorded neither — which is why challenge_solved rows showed an
+// empty UA column while waf_trigger rows were populated.
+func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	if e == nil || e.chalAPI == nil {
 		return
 	}
-	e.chalAPI.RecordSolved(ip, host, uri, diff, ms)
-	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_solved", Host: host, IP: ip, Payload: map[string]interface{}{"uri": uri, "diff": diff, "ms": ms}})
+	e.chalAPI.RecordSolved(s.IP, s.Host, s.URI, s.Diff, s.VerifyMS)
+	payload := map[string]interface{}{"uri": s.URI, "diff": s.Diff, "ms": s.VerifyMS}
+	if s.UA != "" {
+		payload["ua"] = s.UA
+	}
+	if s.SolveMS >= 0 {
+		payload["solve_ms"] = s.SolveMS
+	}
+	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_solved", Host: s.Host, IP: s.IP, Payload: payload})
 }
 
 // RecordIPChallenge updates the store when we emit a challenge for an IP.

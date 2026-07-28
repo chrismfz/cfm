@@ -133,7 +133,10 @@ Yes — we should explicitly model challenge lifecycle status so you can query:
 Suggested events:
 
 - `challenge_issued` (ip, host, rule, ttl_sec)
-- `challenge_solved` (ip, host, latency_ms, diff)
+- `challenge_solved` (ip, host, diff, `ms`, `solve_ms`, `ua`) — note `ms` is the
+  server-side verify-handler time, NOT how long the client took; `solve_ms` is
+  the real client-side solve latency (PoW issue → verify POST, derived from the
+  issue timestamp carried in the token). `solve_ms` is absent when unknown.
 - `challenge_expired_unsolved` (ip, host, rule, ttl_sec)
 - optional `challenge_escalated_block` when fail policy escalates
 

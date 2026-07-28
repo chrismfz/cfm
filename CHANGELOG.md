@@ -18,6 +18,33 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Challenge solves now record the UA and the real solve latency.** Groundwork
+  for detecting distributed solver farms — bots that legitimately complete the
+  cookie + JS + PoW flow, once per IP, and so stay under every per-IP abuse
+  threshold. Two things were missing to spot them:
+  - **UA.** `challenge_solved` history events carried only `{uri, diff, ms}`, so
+    the forensics UI (which renders `payload.ua`) showed an empty UA column on
+    solve rows while WAF rows were populated. A farm's signature is one *exact*
+    UA string solving from dozens of ASNs within seconds; without the UA there
+    was nothing to correlate on. Now recorded on the event and in
+    `cfm.challenges.log` (`ua=`).
+  - **Real solve latency.** The `ms=` field measured only the verify handler's
+    own processing (its timer started when the POST arrived, after the client had
+    already solved), which is why solves logged `ms=0`. The PoW token already
+    carries its issue timestamp, so the true issue→submit latency needs no new
+    server state — but the timestamp was in whole seconds, and an honest browser
+    solves the default difficulty in ~1s, rounding the signal away. Tokens are
+    now minted with millisecond timestamps and solves log/persist `solve_ms=`
+    alongside the unchanged `ms=`. Implausibly fast solves are the one PoW signal
+    a native solver cannot fake without surrendering its speed advantage.
+    Per-solve values are noisy (solve time is exponentially distributed) — judge
+    them per IP/ASN/UA cluster, not per event.
+
+  Verification of a token minted by the *previous* binary (whole seconds) is
+  preserved by magnitude-detecting the encoding, so a rolling upgrade does not
+  fail every in-flight solve for the length of the PoW TTL. The browser-side
+  solver is untouched: the token keeps its 58-byte layout and the client never
+  read the timestamp field.
 - **`cfm php-inventory` — read-only PHP build discovery (SP roadmap P0).** New
   command that enumerates the host's PHP builds across cPanel EA4, CloudLinux
   alt-php, DirectAdmin CustomBuild, LiteSpeed lsphp and system PHP, reporting

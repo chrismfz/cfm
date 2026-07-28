@@ -389,9 +389,37 @@ const (
 	rlStateTTL   = 10 * time.Minute
 )
 
+// ChallengeSolve describes one successful challenge solve. It is a struct rather
+// than a positional argument list because the solve is the natural place to hang
+// client-attestation signals, and every new signal would otherwise churn the
+// hook signature and all its callers.
+type ChallengeSolve struct {
+	IP   string
+	Host string
+	URI  string
+	Diff int
+	// UA is the User-Agent that submitted the solve. Recorded because a solver
+	// farm shows up as one exact UA string solving from many ASNs at once —
+	// a correlation that is invisible without it.
+	UA string
+	// VerifyMS is how long the server spent processing the verify POST. It is
+	// NOT how long the client took to solve — it never was, despite being
+	// logged as a bare `ms=` since the challenge server was written.
+	VerifyMS int64
+	// SolveMS is the real client-side solve latency: wall-clock from PoW
+	// issuance (read back out of the token) to the verify POST. -1 when the
+	// issue timestamp is missing or implausible.
+	//
+	// This is the one PoW signal a native solver cannot fake without giving up
+	// the speed advantage that makes it worth running. Note the per-solve value
+	// is noisy — solve time is exponentially distributed, so a lucky honest
+	// browser can land near zero. Judge it over a cluster, not a single event.
+	SolveMS int64
+}
+
 // ChallengeSolvedHook lets the detectors layer log solved/expired in a unified way.
 // It is optional; if unset, ChallengeServer will log a minimal solved line.
-type ChallengeSolvedHook func(ip, host, uri string, diff int, ms int64)
+type ChallengeSolvedHook func(ChallengeSolve)
 
 var challengeSolvedHook ChallengeSolvedHook
 
@@ -603,22 +631,33 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// IMPORTANT: bind must be JS-reproducible => UA + cookie (no IP)
 		bind := powBind(r.UserAgent(), c.Value)
 
-		diff, nonce16, ok := verifyPowChallenge(powSecretKey(), powTok, bind, cfg, time.Now().UTC())
+		issuedAt, diff, nonce16, ok := verifyPowChallenge(powSecretKey(), powTok, bind, cfg, time.Now().UTC())
 		if !ok || !verifyPowSolution(nonce16, bind, sol, diff) {
 			http.Error(w, "bad pow", http.StatusForbidden)
 			return
 		}
 
+		solve := ChallengeSolve{
+			IP:       ipStr,
+			Host:     host,
+			URI:      next,
+			Diff:     diff,
+			UA:       strings.TrimSpace(r.UserAgent()),
+			VerifyMS: time.Since(verifyStart).Milliseconds(),
+			SolveMS:  powSolveLatencyMS(issuedAt, time.Now().UTC()),
+		}
+
 		if challengeSolvedHook != nil {
-			challengeSolvedHook(ipStr, host, next, diff, time.Since(verifyStart).Milliseconds())
+			challengeSolvedHook(solve)
 		} else {
 			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d",
-				ip.String(),
-				host,
-				next,
-				time.Since(verifyStart).Milliseconds(),
-				diff,
+				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%d diff=%d",
+				solve.IP,
+				solve.Host,
+				solve.URI,
+				solve.VerifyMS,
+				solve.SolveMS,
+				solve.Diff,
 			)
 		}
 

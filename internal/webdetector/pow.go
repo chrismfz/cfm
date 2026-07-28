@@ -14,11 +14,20 @@ import (
 
 // POW params (μπορείς αργότερα να τα κάνεις config/env)
 const (
-	defaultPowEnabled     = true
-	defaultPowDifficulty  = 16               // bits of leading zeros (18–22 είναι “ok”)
-	defaultPowTTL         = 2 * time.Minute  // challenge must be solved quickly
-	maxPowSolutionLen     = 64
+	defaultPowEnabled    = true
+	defaultPowDifficulty = 16              // bits of leading zeros (18–22 είναι “ok”)
+	defaultPowTTL        = 2 * time.Minute // challenge must be solved quickly
+	maxPowSolutionLen    = 64
 )
+
+// powEpochMillisMin separates a millisecond issue timestamp from a second one.
+// Unix *seconds* stay below it until the year ~5138 and Unix *milliseconds*
+// passed it in 1973, so the two encodings are unambiguous for any timestamp CFM
+// will ever mint or verify. Tokens are minted in milliseconds (needed to measure
+// real solve latency — see challenge_server.go), but a token minted by an older
+// binary carries seconds and must keep verifying across a rolling upgrade,
+// otherwise every in-flight solve fails for the length of the PoW TTL.
+const powEpochMillisMin = int64(1e11)
 
 // PowConfig: έτοιμο για επέκταση (π.χ. ανά vhost, ανά method, κλπ)
 type PowConfig struct {
@@ -36,7 +45,12 @@ func defaultPowConfig() PowConfig {
 }
 
 // powChallenge is a compact token we embed in HTML.
-// Format: base64url( ts_unix(8 bytes) || difficulty(2 bytes) || nonce(16 bytes) || mac(32 bytes) )
+// Format: base64url( ts_unix_ms(8 bytes) || difficulty(2 bytes) || nonce(16 bytes) || mac(32 bytes) )
+//
+// The issue timestamp is in milliseconds so that verify can measure the real
+// client-side solve latency (issue → submit) without keeping any server-side
+// state: the token itself is the clock. Second granularity was useless for that
+// — an honest browser solves the default difficulty in ~1s, which rounds to 0.
 func issuePowChallenge(secret []byte, now time.Time, difficulty int, nonce16 []byte, bind string) (string, error) {
 	if len(nonce16) != 16 {
 		return "", fmt.Errorf("nonce must be 16 bytes")
@@ -45,7 +59,7 @@ func issuePowChallenge(secret []byte, now time.Time, difficulty int, nonce16 []b
 		return "", fmt.Errorf("bad difficulty: %d", difficulty)
 	}
 
-	ts := uint64(now.Unix())
+	ts := uint64(now.UnixMilli())
 	buf := make([]byte, 8+2+16)
 	binary.BigEndian.PutUint64(buf[0:8], ts)
 	binary.BigEndian.PutUint16(buf[8:10], uint16(difficulty))
@@ -62,24 +76,41 @@ func issuePowChallenge(secret []byte, now time.Time, difficulty int, nonce16 []b
 	return base64.RawURLEncoding.EncodeToString(full), nil
 }
 
-func parsePowChallenge(tok string) (ts time.Time, difficulty int, nonce16 []byte, mac []byte, ok bool) {
+// parsePowChallenge splits a token into its fields. It returns the raw 26-byte
+// header verbatim: the MAC covers those exact bytes, so verification must
+// re-MAC them rather than re-encode a decoded timestamp — otherwise a token
+// minted in seconds by an older binary would fail its own MAC here.
+func parsePowChallenge(tok string) (hdr []byte, issued time.Time, difficulty int, nonce16 []byte, mac []byte, ok bool) {
 	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(tok))
 	if err != nil || len(raw) != 8+2+16+32 {
-		return time.Time{}, 0, nil, nil, false
+		return nil, time.Time{}, 0, nil, nil, false
 	}
+	h := make([]byte, 26)
+	copy(h, raw[0:26])
 	tsu := int64(binary.BigEndian.Uint64(raw[0:8]))
 	diff := int(binary.BigEndian.Uint16(raw[8:10]))
 	nonce := make([]byte, 16)
 	copy(nonce, raw[10:26])
 	m := make([]byte, 32)
 	copy(m, raw[26:58])
-	return time.Unix(tsu, 0).UTC(), diff, nonce, m, true
+	return h, powDecodeIssued(tsu), diff, nonce, m, true
 }
 
-func verifyPowChallenge(secret []byte, tok string, bind string, cfg PowConfig, now time.Time) (difficulty int, nonce16 []byte, ok bool) {
-	ts, diff, nonce, macWant, okp := parsePowChallenge(tok)
+// powDecodeIssued reads an issue timestamp that may be encoded in either
+// milliseconds (current) or seconds (pre-upgrade tokens still inside their TTL).
+func powDecodeIssued(tsu int64) time.Time {
+	if tsu >= powEpochMillisMin {
+		return time.UnixMilli(tsu).UTC()
+	}
+	return time.Unix(tsu, 0).UTC()
+}
+
+// verifyPowChallenge validates a token's MAC and freshness. It also returns the
+// issue time so the caller can derive the real solve latency (now - issued).
+func verifyPowChallenge(secret []byte, tok string, bind string, cfg PowConfig, now time.Time) (issued time.Time, difficulty int, nonce16 []byte, ok bool) {
+	hdr, ts, diff, nonce, macWant, okp := parsePowChallenge(tok)
 	if !okp {
-		return 0, nil, false
+		return time.Time{}, 0, nil, false
 	}
 	// time window
 	ttl := cfg.TTL
@@ -87,29 +118,41 @@ func verifyPowChallenge(secret []byte, tok string, bind string, cfg PowConfig, n
 		ttl = defaultPowTTL
 	}
 	if now.Sub(ts) > ttl || now.Before(ts.Add(-10*time.Second)) {
-		return 0, nil, false
+		return time.Time{}, 0, nil, false
 	}
 	// difficulty clamp
 	if diff < 8 || diff > 30 {
-		return 0, nil, false
+		return time.Time{}, 0, nil, false
 	}
 
-	// recompute mac
-	buf := make([]byte, 8+2+16)
-	binary.BigEndian.PutUint64(buf[0:8], uint64(ts.Unix()))
-	binary.BigEndian.PutUint16(buf[8:10], uint16(diff))
-	copy(buf[10:26], nonce)
-
+	// recompute mac over the header bytes exactly as they were signed
 	mac := hmac.New(sha256.New, secret)
-	mac.Write(buf)
+	mac.Write(hdr)
 	mac.Write([]byte{0})
 	mac.Write([]byte(bind))
 	sum := mac.Sum(nil)
 
 	if !hmac.Equal(sum, macWant) {
-		return 0, nil, false
+		return time.Time{}, 0, nil, false
 	}
-	return diff, nonce, true
+	return ts, diff, nonce, true
+}
+
+// powSolveLatencyMS returns the wall-clock milliseconds a client took to solve,
+// measured from the issue timestamp carried inside the PoW token.
+//
+// Returns -1 rather than a bogus number when the value is not usable: a zero
+// issue time (token never parsed), or a clock that ran backwards between issue
+// and verify. Callers treat -1 as "unknown" and must not score on it.
+func powSolveLatencyMS(issued, now time.Time) int64 {
+	if issued.IsZero() {
+		return -1
+	}
+	ms := now.Sub(issued).Milliseconds()
+	if ms < 0 {
+		return -1
+	}
+	return ms
 }
 
 // verifyPowSolution checks: sha256( nonce16 || 0 || bind || 0 || solution ) has N leading zero bits.
