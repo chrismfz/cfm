@@ -173,14 +173,36 @@ fingerprint discriminating), and records `grease=true|false` on the first_seen
 line — so whether GREASE survives OpenSSL's ClientHello parsing on this edge at
 all comes out of the data instead of an assumption.
 
-Three things to check when reading that data rather than assume:
+**Confirmed in production on first deploy (2026-07-28), within a minute of
+start.** Two of the open questions above are answered by the data, not by
+argument:
 
-- whether `$ssl_ciphers`/`$ssl_curves` stay populated on **resumed** sessions
-  (that is what field 7 is for — `r` means resumed, `.` means not);
+- **GREASE does survive into these variables**, so the stripping is load-bearing
+  rather than defensive. The first fingerprint recorded was
+  `grease=true` with `0xfafa` leading the cipher list and `0xdada` leading the
+  curves. Reconstructing the hash over that exact tuple: unstripped, this single
+  client would have produced **256 distinct ids** (16 GREASE values × 2
+  positions), and the 5000-entry dictionary would have been exhausted by about
+  **19 real clients**. Stripped, it is one id — `95070673`.
+- **A resumed session still carries the full cipher and curve lists.** That first
+  record ended in `|r` and had all fifteen ciphers and four groups present, so
+  resumption does not thin the fingerprint and field 7 does not need to gate
+  anything.
+
+Still open, and still to be answered from the log rather than assumed:
+
 - how much of the fleet reaches the edge through a TLS-terminating middlebox
   (corporate inspection, antivirus proxy, VPN client, CDN), which produces a
   legitimate fingerprint↔UA mismatch;
-- the id's stability across an edge OpenSSL upgrade, since it hashes names.
+- the id's stability across an edge OpenSSL upgrade, since it hashes names;
+- **what `0x11ec` is.** It appears as the first non-GREASE group, ahead of
+  X25519, on a client whose UA claims Chrome/145. A post-quantum hybrid group is
+  the obvious reading, and if that is right it is the sharpest UA-coherence token
+  available — it entered Chrome at a known version, so a UA claiming an older
+  Chrome that offers it is lying, and one claiming a newer Chrome that does not
+  is equally suspect. **Confirm it against the corpus before building any rule on
+  it**: pair the group against the UAs that carry it across a week of solves. Do
+  not take the identification from memory, including this note's.
 
 **Why it is worth doing anyway, even against uTLS.** A farm can mimic any
 fingerprint with uTLS — but not while running real headless Chrome, which is what
