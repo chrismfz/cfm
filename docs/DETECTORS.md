@@ -108,16 +108,27 @@ single vhost from 95,281 distinct IPs (**1.07 solves per IP**) spread across
 77,792 distinct `/24`s. A per-IP counter only ever sees a first-and-only request.
 
 The detector therefore keys on the **vhost**, and counts the number of distinct
-client subnets that solve it within `WINDOW`. On that same data the farm ran at
-73 subnets/minute (median; p01 49, max 110) while the busiest legitimate vhost on
-the server peaked at 22 — so `MIN_SUBNETS=40` caught 1380 of 1381 farm-minutes
-with zero hits across 1605 legitimate vhost-minutes.
+client subnets that solve it within `WINDOW`. Calibration was re-derived by
+replaying that capture through the detector at its original timestamps, so the
+figures describe what the code measures — a **sliding** window sampled every
+`EVERY`, not disjoint one-minute buckets. The distinction matters: the maximum
+over sliding windows is always ≥ the maximum over fixed buckets, so bucket-derived
+numbers overstate the headroom.
+
+| | farm vhost | every other vhost |
+|---|---|---|
+| distinct `/24` per window | median 73, p01 49, max 122 | **max 27** |
+| evaluations flagged at `MIN_SUBNETS=40` | 2758 / 2761 | **0 / 3212** |
 
 Two deliberate design choices:
 
 - **Not keyed on User-Agent.** The UA is attacker-controlled; keying detection on
   it would be defeated by randomising a header. The separation above holds
   UA-agnostically. The UA breakdown rides on the alert as attribution evidence.
+- **The evidence cap cannot suppress detection.** `MAX_TRACKED_PER_HOST` bounds
+  the sample buffer only; the subnet and IP sets the threshold reads are tracked
+  separately. Otherwise a cheap flood from a single subnet could fill the buffer
+  and bury a farm's spread behind it. Truncation is always stated on the alert.
 - **Alert-only, structurally.** At ~1 solve per IP a per-IP ban cannot work — the
   address never returns — and the pool is residential, so banning it risks a real
   customer. What to *do* about a flagged vhost (raise its PoW difficulty,
@@ -139,7 +150,12 @@ Two deliberate design choices:
 
 Note the calibration is one server over one day. A very large vhost with a
 genuinely global mobile audience could legitimately spread wider; `MIN_SUBNETS`
-is a knob and `ALLOW_HOSTS` / `ALLOW_UA_CONTAINS` exempt known-good sources.
+is a knob and `ALLOW_HOSTS` / `ALLOW_UA_CONTAINS` / `ALLOW_NETS` / `ALLOW_IPS`
+exempt known-good sources.
+
+`EVERY` is clamped to `WINDOW` at load — a longer evaluation interval would prune
+part of the stream away before it was ever examined, and a section that omits
+`EVERY` inherits `[global] DEFAULT_EVERY`, which ships at 60s.
 
 Alerts also carry `impossible_ua` — how many solves in the window submitted a
 self-contradictory User-Agent (see below). It is corroboration for the operator
@@ -160,6 +176,9 @@ It is checked on every challenge solve and surfaced three ways:
 - `payload.ua_impossible` on the `challenge_solved` history event
 - `impossible_ua` count on `challenge_solver_farm` alerts
 
+All three are written only when the verdict is *impossible*, so their absence on
+a solve means the UA was coherent, not that the check did not run.
+
 Two boundaries worth keeping in mind:
 
 - **Coherence, not freshness.** An old-but-consistent UA is a real person on an
@@ -168,6 +187,11 @@ Two boundaries worth keeping in mind:
   fleet its version is. On the capture these rules came from, Chrome 118 was
   72.5% of all Chrome requests *because the farm dominated the traffic* —
   calibrating "current" by volume lets the attacker define normal.
+
+`Verdict.Family` reports the **engine** identity, so every Chromium derivative
+(Edge, Opera, Samsung Internet, Brave, Vivaldi, Yandex, Electron apps) reads as
+`Chrome`. `HeadlessChrome/` is deliberately not matched at all — a headless UA is
+honest, not impossible.
 
 When adding a rule, validate it against a real UA corpus first. The
 `(KHTML, like Gecko)` exact-match draft of one rule flagged legitimate crawlers

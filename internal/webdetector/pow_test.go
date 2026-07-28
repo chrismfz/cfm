@@ -120,6 +120,7 @@ func TestPowChallengeRejectsTamperedAndStale(t *testing.T) {
 
 func TestPowSolveLatencyMS(t *testing.T) {
 	issued := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	ttl := defaultPowTTL
 	tests := []struct {
 		name   string
 		issued time.Time
@@ -129,15 +130,90 @@ func TestPowSolveLatencyMS(t *testing.T) {
 		{"sub-second resolution", issued, issued.Add(640 * time.Millisecond), 640},
 		{"multi-second", issued, issued.Add(3 * time.Second), 3000},
 		{"same instant", issued, issued, 0},
+		{"at the TTL", issued, issued.Add(ttl), ttl.Milliseconds()},
 		{"zero issue time is unknown", time.Time{}, issued, -1},
-		{"clock went backwards is unknown", issued, issued.Add(-time.Second), -1},
+		// A backward clock step makes fast solves negative. Dropping only those
+		// would truncate the distribution at exactly the end this measurement
+		// exists to observe, so a forward step must be rejected symmetrically.
+		// -1ms would return -1 either way (the raw value happens to equal the
+		// sentinel), so use a step big enough to tell a rejection from a
+		// pass-through: an unguarded version returns -5000 here.
+		{"clock went backwards is unknown", issued, issued.Add(-5 * time.Second), -1},
+		{"one millisecond backwards is already unknown", issued, issued.Add(-time.Millisecond), -1},
+		{"beyond the TTL is unknown, not a slow solve", issued, issued.Add(ttl + time.Millisecond), -1},
+		{"forward clock step is unknown", issued, issued.Add(ttl + time.Hour), -1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := powSolveLatencyMS(tc.issued, tc.now); got != tc.want {
+			if got := powSolveLatencyMS(tc.issued, tc.now, ttl); got != tc.want {
 				t.Errorf("powSolveLatencyMS = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// The zero value of ChallengeSolve must not read as an instantaneous — i.e.
+// maximally suspicious — solve. Any literal that omits SolveMS gets 0, so the
+// accessor treats <= 0 as unknown.
+func TestSolveLatencyAccessorTreatsZeroAsUnknown(t *testing.T) {
+	if _, ok := (ChallengeSolve{}).SolveLatencyMS(); ok {
+		t.Error("zero-value ChallengeSolve reports a known solve latency")
+	}
+	if _, ok := (ChallengeSolve{SolveMS: -1}).SolveLatencyMS(); ok {
+		t.Error("sentinel -1 reports a known solve latency")
+	}
+	ms, ok := (ChallengeSolve{SolveMS: 1300}).SolveLatencyMS()
+	if !ok || ms != 1300 {
+		t.Errorf("SolveLatencyMS() = %d, %v; want 1300, true", ms, ok)
+	}
+}
+
+// The millisecond encoding moved both freshness boundaries by up to 999ms. Pin
+// them exactly: without these, changing `> ttl` to `>= ttl` or the skew guard
+// from -10s to -11s leaves the whole package green.
+func TestPowChallengeFreshnessBoundaries(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	tok, err := issuePowChallenge(testPowSecret(), now, 16, testNonce(), testPowBind)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	check := func(t *testing.T, at time.Time, want bool) {
+		t.Helper()
+		_, _, _, ok := verifyPowChallenge(testPowSecret(), tok, testPowBind, defaultPowConfig(), at)
+		if ok != want {
+			t.Errorf("verify at issue%+v = %v, want %v", at.Sub(now), ok, want)
+		}
+	}
+	t.Run("exactly at the TTL is still valid", func(t *testing.T) {
+		check(t, now.Add(defaultPowTTL), true)
+	})
+	t.Run("one millisecond past the TTL is not", func(t *testing.T) {
+		check(t, now.Add(defaultPowTTL+time.Millisecond), false)
+	})
+	t.Run("at the edge of the skew allowance", func(t *testing.T) {
+		check(t, now.Add(-10*time.Second), true)
+	})
+	t.Run("one millisecond beyond the skew allowance", func(t *testing.T) {
+		check(t, now.Add(-10*time.Second-time.Millisecond), false)
+	})
+}
+
+// A host with no RTC boots at the Unix epoch. Minting there would produce a
+// token the decoder reads back as seconds, so it would fail its own freshness
+// check and every correctly-solved challenge would be rejected with no clue why.
+// Fail loudly at issue instead.
+func TestPowIssueRefusesPreEpochClock(t *testing.T) {
+	for _, at := range []time.Time{
+		time.Unix(0, 0).UTC(),
+		time.Unix(30, 0).UTC(),
+		time.UnixMilli(powEpochMillisMin - 1).UTC(),
+	} {
+		if _, err := issuePowChallenge(testPowSecret(), at, 16, testNonce(), testPowBind); err == nil {
+			t.Errorf("issuePowChallenge at %v succeeded; want an error", at)
+		}
+	}
+	if _, err := issuePowChallenge(testPowSecret(), time.UnixMilli(powEpochMillisMin).UTC(), 16, testNonce(), testPowBind); err != nil {
+		t.Errorf("issuePowChallenge at the threshold failed: %v", err)
 	}
 }
 

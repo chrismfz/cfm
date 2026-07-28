@@ -9,13 +9,23 @@
 // 77,792 distinct /24s. Every per-IP counter sees a first-and-only request and
 // stays silent by construction. The population is only visible in aggregate.
 //
-// The signal is the *spread of solvers per vhost per minute*, deliberately NOT
+// The signal is the *spread of solvers per vhost per window*, deliberately NOT
 // keyed on User-Agent: the UA is attacker-controlled, so keying detection on it
-// would be evaded by randomising a header. Measured on the same data, distinct
-// /24s solving one vhost in one minute was 73 (median) for the farm versus a
-// maximum of 22 across every other vhost — a clean separation that survives UA
-// randomisation. The UA breakdown is carried on the alert as *evidence* for
-// attribution, not as the detection key.
+// would be evaded by randomising a header. The UA breakdown is carried on the
+// alert as *evidence* for attribution, not as the detection key.
+//
+// Calibration, measured the way this code measures — a SLIDING 60s window
+// sampled every 30s, not disjoint one-minute buckets. That distinction matters:
+// the maximum over sliding windows is always >= the maximum over fixed buckets,
+// so calibrating on buckets would overstate the headroom. Over the same 23h
+// capture, replayed at its original timestamps:
+//
+//	farm vhost   : median 73 distinct /24 per window, p01 49, max 122
+//	every other  : max 27, across 3212 evaluations
+//
+// MinSubnets = 40 therefore flags 2758 of 2761 farm evaluations and 0 of 3212
+// legitimate ones — a 1.5x margin over the busiest legitimate vhost observed.
+// (Bucket-derived figures would have read "max 22" and implied 1.8x.)
 //
 // This detector is alert-only by design: at ~1 solve per IP a per-IP nft ban is
 // useless (the address is never seen again) and actively risky (the pool is
@@ -50,6 +60,7 @@ import (
 	"time"
 
 	core "cfm/internal/detectors/core"
+	"cfm/internal/logging"
 )
 
 type Config struct {
@@ -80,6 +91,12 @@ type Config struct {
 
 	SampleLimit int
 
+	// MaxQueue bounds the ingest buffer between ticks. Enqueue runs inline on
+	// the verify path and RunOnce is the only drain, so an unbounded buffer turns
+	// any stall of the detector loop into unbounded growth. Overflow is counted
+	// and logged rather than dropped silently.
+	MaxQueue int
+
 	AllowHosts      []string
 	AllowIPs        []string
 	AllowNets       []string
@@ -99,18 +116,78 @@ type solveRec struct {
 }
 
 type hostState struct {
-	recs      []solveRec
-	lastAlert time.Time
+	// subnets and ips are the authoritative in-window sets. They are kept
+	// separate from recs and are NEVER dropped by the evidence cap: the subnet
+	// count is what the threshold reads, so letting a cap suppress it would hand
+	// an attacker a way to hide. A cheap flood from one subnet fills recs but
+	// adds exactly one entry here, leaving a farm's spread fully visible.
+	subnets map[string]time.Time // subnet -> newest solve seen from it
+	ips     map[string]time.Time // client address -> newest solve seen from it
+
+	// recs is the evidence buffer (UA histogram, sample lines) and is capped.
+	// Losing records here costs detail, never detection.
+	recs []solveRec
+
+	// truncated counts records the evidence cap dropped SINCE THE LAST
+	// EVALUATION. It is reset every pass, not only when an alert fires —
+	// otherwise a vhost that truncates for an hour without ever crossing the
+	// threshold would attribute an hour of drops to one 60s window the next time
+	// it did.
 	truncated int
+	// setsCapped records that the subnet/IP sets themselves hit MaxTrackedPerHost
+	// and stopped admitting new members, so their counts are lower bounds too.
+	// Reaching this needs MaxTrackedPerHost DISTINCT subnets inside one window
+	// (20000 by default, against a farm observed at ~110), but the alert must not
+	// claim completeness it cannot verify.
+	setsCapped bool
+
+	lastAlert time.Time
+}
+
+func newHostState() *hostState {
+	return &hostState{subnets: map[string]time.Time{}, ips: map[string]time.Time{}}
+}
+
+// prune drops everything that fell out of the window and returns whether the
+// host still holds any in-window activity.
+func (st *hostState) prune(cutoff time.Time) bool {
+	for k, t := range st.subnets {
+		if !t.After(cutoff) {
+			delete(st.subnets, k)
+		}
+	}
+	for k, t := range st.ips {
+		if !t.After(cutoff) {
+			delete(st.ips, k)
+		}
+	}
+	kept := st.recs[:0]
+	for _, r := range st.recs {
+		if r.when.After(cutoff) {
+			kept = append(kept, r)
+		}
+	}
+	// Release the strings held by the pruned tail; the backing array itself is
+	// reused, but a host that once peaked would otherwise pin every UA it saw.
+	for i := len(kept); i < len(st.recs); i++ {
+		st.recs[i] = solveRec{}
+	}
+	st.recs = kept
+	return len(st.subnets) > 0 || len(st.recs) > 0
 }
 
 type Detector struct {
 	cfg  Config
 	name string
 
-	mu     sync.Mutex
-	events []core.InputEvent
-	hosts  map[string]*hostState
+	mu      sync.Mutex
+	events  []core.InputEvent
+	dropped int
+	// hosts is owned by RunOnce and is NOT guarded by mu: the framework runs
+	// RunOnce serially per detector (run.go refuses to start a second pass while
+	// one is in flight) and Enqueue never touches it. Take mu here too if that
+	// ever stops being true.
+	hosts map[string]*hostState
 
 	// nowFn is the detector's clock. Injectable so tests can replay a recorded
 	// traffic window at its original timestamps instead of wall-clock.
@@ -127,6 +204,14 @@ func New(cfg Config) *Detector {
 	}
 	if cfg.Window <= 0 {
 		cfg.Window = time.Minute
+	}
+	// An evaluation interval longer than the window leaves a blind gap: each pass
+	// prunes everything older than Window, so solves that arrived more than
+	// Window before the tick are ingested and immediately discarded, unexamined.
+	// This is reachable without anyone choosing it — a section that omits EVERY
+	// inherits [global] DEFAULT_EVERY, which ships at 60s.
+	if cfg.Every > cfg.Window {
+		cfg.Every = cfg.Window
 	}
 	if cfg.MinSubnets <= 0 {
 		cfg.MinSubnets = 40
@@ -148,6 +233,11 @@ func New(cfg Config) *Detector {
 	}
 	if cfg.SampleLimit <= 0 {
 		cfg.SampleLimit = 10
+	}
+	if cfg.MaxQueue <= 0 {
+		// ~15x the busiest window observed in production (110 solves/min), so a
+		// healthy loop never reaches it.
+		cfg.MaxQueue = 20000
 	}
 
 	d := &Detector{
@@ -195,6 +285,11 @@ func (d *Detector) Enqueue(ev core.InputEvent) {
 		return
 	}
 	d.mu.Lock()
+	if len(d.events) >= d.cfg.MaxQueue {
+		d.dropped++
+		d.mu.Unlock()
+		return
+	}
 	d.events = append(d.events, ev)
 	d.mu.Unlock()
 }
@@ -241,10 +336,24 @@ func subnetOf(ipStr string, v4bits, v6bits int) string {
 func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	d.mu.Lock()
 	batch := d.events
-	d.events = nil
+	dropped := d.dropped
+	d.events, d.dropped = nil, 0
 	d.mu.Unlock()
 
+	if dropped > 0 {
+		logging.Logf("[challenge_solver_farm] ingest queue full: dropped %d solve events (MAX_QUEUE=%d)",
+			dropped, d.cfg.MaxQueue)
+	}
+
 	now := d.nowFn()
+	cutoff := now.Add(-d.cfg.Window)
+
+	// Prune BEFORE ingesting, so the evidence cap is measured against what is
+	// actually still in the window. Checking it against last pass's length let
+	// up to Every seconds of already-expired records occupy the budget.
+	for _, st := range d.hosts {
+		st.prune(cutoff)
+	}
 
 	for _, ev := range batch {
 		select {
@@ -259,8 +368,20 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		host := strings.ToLower(strings.TrimSpace(ev.Scope))
 		st := d.hosts[host]
 		if st == nil {
-			st = &hostState{}
+			st = newHostState()
 			d.hosts[host] = st
+		}
+		// The threshold input is recorded first, and is not subject to the
+		// evidence cap — only to its own much larger cardinality bound.
+		if _, seen := st.subnets[sn]; seen || len(st.subnets) < d.cfg.MaxTrackedPerHost {
+			st.subnets[sn] = ev.When
+		} else {
+			st.setsCapped = true
+		}
+		if _, seen := st.ips[ev.SrcIP]; seen || len(st.ips) < d.cfg.MaxTrackedPerHost {
+			st.ips[ev.SrcIP] = ev.When
+		} else {
+			st.setsCapped = true
 		}
 		if len(st.recs) >= d.cfg.MaxTrackedPerHost {
 			st.truncated++
@@ -269,52 +390,53 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		st.recs = append(st.recs, solveRec{when: ev.When, subnet: sn, ip: ev.SrcIP, ua: ev.UserAgent, uaBad: ev.Signal})
 	}
 
-	cutoff := now.Add(-d.cfg.Window)
 	for host, st := range d.hosts {
-		kept := st.recs[:0]
-		for _, r := range st.recs {
-			if r.when.After(cutoff) {
-				kept = append(kept, r)
-			}
-		}
-		st.recs = kept
-
 		// Drop vhosts that have gone quiet so state does not grow without bound.
-		if len(st.recs) == 0 && now.Sub(st.lastAlert) > d.cfg.Cooldown {
+		// Guarded by the cooldown so state is never reclaimed while it still
+		// suppresses a repeat alert.
+		if len(st.subnets) == 0 && len(st.recs) == 0 && now.Sub(st.lastAlert) > d.cfg.Cooldown {
 			delete(d.hosts, host)
 			continue
 		}
-		if len(st.recs) < d.cfg.MinSolves {
-			continue
-		}
 
-		subnets := make(map[string]struct{}, len(st.recs))
-		ips := make(map[string]struct{}, len(st.recs))
-		uas := make(map[string]int)
-		impossibleUA := 0
-		for _, r := range st.recs {
-			subnets[r.subnet] = struct{}{}
-			ips[r.ip] = struct{}{}
-			uas[r.ua]++
-			if r.uaBad != "" {
-				impossibleUA++
-			}
-		}
-		if len(subnets) < d.cfg.MinSubnets {
+		solves := len(st.recs) + st.truncated
+		truncated, setsCapped := st.truncated, st.setsCapped
+		// Reset every pass, not only when an alert fires.
+		st.truncated, st.setsCapped = 0, false
+
+		if solves < d.cfg.MinSolves || len(st.subnets) < d.cfg.MinSubnets {
 			continue
 		}
 		if !st.lastAlert.IsZero() && now.Sub(st.lastAlert) < d.cfg.Cooldown {
 			continue
 		}
-		st.lastAlert = now
 
-		out <- d.buildAlert(now, host, st, subnets, ips, uas, impossibleUA)
+		uas := make(map[string]int, len(st.recs))
+		impossibleUA := 0
+		for _, r := range st.recs {
+			uas[r.ua]++
+			if r.uaBad != "" {
+				impossibleUA++
+			}
+		}
+
+		alert := d.buildAlert(now, host, st, solves, truncated, setsCapped, uas, impossibleUA)
+		select {
+		case out <- alert:
+			// Stamp the cooldown only once the alert is actually handed off, so a
+			// shutdown mid-send does not silence the next window.
+			st.lastAlert = now
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return nil
 }
 
+// buildAlert renders the finding. It reads state but does not mutate it — the
+// caller owns the truncation counter and the cooldown stamp.
 func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
-	subnets, ips map[string]struct{}, uas map[string]int, impossibleUA int) core.Alert {
+	solves, truncated int, setsCapped bool, uas map[string]int, impossibleUA int) core.Alert {
 
 	topUA, topUACount := "", 0
 	for ua, n := range uas {
@@ -322,19 +444,24 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			topUA, topUACount = ua, n
 		}
 	}
-	solves := len(st.recs)
+	// The UA histogram is built from the evidence buffer, which the cap may have
+	// truncated, so percentages are of what was sampled rather than of `solves`.
+	sampled := len(st.recs)
 	uaShare := 0
-	if solves > 0 {
-		uaShare = topUACount * 100 / solves
+	if sampled > 0 {
+		uaShare = topUACount * 100 / sampled
 	}
 	// Solves per IP is the tell that per-IP thresholds cannot fire: a farm burns
 	// a fresh address per solve, so this sits at ~1.0 while a real repeat
 	// visitor population sits well above it.
-	solvesPerIP := float64(solves) / float64(len(ips))
+	solvesPerIP := 0.0
+	if len(st.ips) > 0 {
+		solvesPerIP = float64(solves) / float64(len(st.ips))
+	}
 
 	samples := []string{
 		fmt.Sprintf("[challenge] host=%s solves=%d distinct_ips=%d distinct_subnets=%d solves_per_ip=%.2f window=%s",
-			host, solves, len(ips), len(subnets), solvesPerIP, d.cfg.Window),
+			host, solves, len(st.ips), len(st.subnets), solvesPerIP, d.cfg.Window),
 	}
 	type uaCount struct {
 		ua string
@@ -354,23 +481,35 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 		if i >= d.cfg.SampleLimit-1 {
 			break
 		}
-		samples = append(samples, fmt.Sprintf("[challenge] ua=%q solves=%d (%d%%)", u.ua, u.n, u.n*100/solves))
+		samples = append(samples, fmt.Sprintf("[challenge] ua=%q solves=%d (%d%%)", u.ua, u.n, u.n*100/sampled))
 	}
 	if impossibleUA > 0 {
-		samples = append(samples, fmt.Sprintf("[challenge] self-contradictory User-Agents: %d of %d solves (%d%%)",
-			impossibleUA, solves, impossibleUA*100/solves))
+		samples = append(samples, fmt.Sprintf("[challenge] self-contradictory User-Agents: %d of %d sampled solves (%d%%)",
+			impossibleUA, sampled, impossibleUA*100/sampled))
 	}
-	if st.truncated > 0 {
-		samples = append(samples, fmt.Sprintf("[challenge] NOTE: %d further solves in this window were not tracked (MAX_TRACKED_PER_HOST=%d); counts above are a lower bound",
-			st.truncated, d.cfg.MaxTrackedPerHost))
-		st.truncated = 0
+	// No silent caps: say which counts are lower bounds and which are not. The
+	// subnet and IP sets are tracked separately from the evidence buffer
+	// precisely so a flood from one subnet cannot mask a farm, so a truncated
+	// buffer costs UA detail only — unless the sets hit their own bound too.
+	if truncated > 0 {
+		note := fmt.Sprintf("[challenge] NOTE: %d solves since the last evaluation were not sampled (MAX_TRACKED_PER_HOST=%d); the UA breakdown covers %d of %d solves",
+			truncated, d.cfg.MaxTrackedPerHost, sampled, solves)
+		if setsCapped {
+			note += "; the subnet and IP counts also hit that bound and are lower bounds"
+		} else {
+			note += "; the subnet and IP counts are unaffected"
+		}
+		samples = append(samples, note)
+	} else if setsCapped {
+		samples = append(samples, fmt.Sprintf("[challenge] NOTE: the subnet/IP sets hit MAX_TRACKED_PER_HOST=%d; those counts are lower bounds",
+			d.cfg.MaxTrackedPerHost))
 	}
 
 	return core.Alert{
 		When:    now,
 		Kind:    core.AlertKind("Challenge/SolverFarm"),
 		Key:     host,
-		Count:   len(subnets),
+		Count:   len(st.subnets),
 		Samples: samples,
 		Extra: map[string]string{
 			// The Key is a vhost, not an address, and Samples quote observed
@@ -384,8 +523,8 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			"reason":        "CHALLENGE_SOLVER_FARM",
 			"host":          host,
 			"solves":        fmt.Sprint(solves),
-			"distinct_ips":  fmt.Sprint(len(ips)),
-			"subnets":       fmt.Sprint(len(subnets)),
+			"distinct_ips":  fmt.Sprint(len(st.ips)),
+			"subnets":       fmt.Sprint(len(st.subnets)),
 			"solves_per_ip": fmt.Sprintf("%.2f", solvesPerIP),
 			"top_ua":        topUA,
 			"top_ua_share":  fmt.Sprintf("%d%%", uaShare),

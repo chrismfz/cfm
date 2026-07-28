@@ -350,10 +350,17 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
 				// ms= stays the server-side verify time it has always been, so
 				// existing log tooling keeps parsing. solve_ms= is the new,
-				// actually-meaningful number: issue → submit wall clock.
+				// actually-meaningful number: issue → submit wall clock. It
+				// prints "-" rather than a number when unknown (clock step
+				// between issue and verify), so a reader never mistakes a
+				// sentinel for a measurement.
+				solveMS := "-"
+				if ms, ok := s.SolveLatencyMS(); ok {
+					solveMS = strconv.FormatInt(ms, 10)
+				}
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%d diff=%d ua=%q%s%s%s%s",
-					ip, host, uri, s.VerifyMS, s.SolveMS, diff, s.UA, uaBad, reasonPart, ridPart, suffix,
+					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d ua=%q%s%s%s%s",
+					ip, host, uri, s.VerifyMS, solveMS, diff, s.UA, uaBad, reasonPart, ridPart, suffix,
 				)
 
 				// Record solve in challenge API store (best-effort)

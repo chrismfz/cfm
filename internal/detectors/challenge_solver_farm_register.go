@@ -1,11 +1,13 @@
 package detectors
 
 import (
+	"strings"
 	"time"
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectors/meta"
 	"cfm/internal/detectors/solverfarm"
+	"cfm/internal/logging"
 	"cfm/internal/webdetector"
 )
 
@@ -47,6 +49,8 @@ func init() {
 			"MIN_SUBNETS": "40",
 			"MIN_SOLVES":  "40",
 			"COOLDOWN":    "30m",
+			"PREFIX_V4":   "24",
+			"PREFIX_V6":   "48",
 		},
 		LeniencySupported:   false,
 		LeniencyRecommended: false,
@@ -64,12 +68,23 @@ func init() {
 			PrefixV6:          kvInt(kv, "PREFIX_V6", 48),
 			Cooldown:          kvDur(kv, "COOLDOWN", 30*time.Minute),
 			MaxTrackedPerHost: kvInt(kv, "MAX_TRACKED_PER_HOST", 20000),
+			MaxQueue:          kvInt(kv, "MAX_QUEUE", 20000),
 			SampleLimit:       kvInt(kv, "SAMPLE_LIMIT", 10),
 			AllowHosts:        csvKV(kv, "ALLOW_HOSTS"),
 			AllowIPs:          csvKV(kv, "ALLOW_IPS"),
 			AllowNets:         csvKV(kv, "ALLOW_NETS"),
 			AllowUAContains:   csvKV(kv, "ALLOW_UA_CONTAINS"),
 		}
+		// Setting BLOCK here does not block — enforcement=observe wins — but it
+		// moves the alert onto a path that logs without notifying. "BLOCK = dryrun
+		// while tuning" is what every other section teaches, so the most likely
+		// operator action on a new alert-only detector is exactly the one that
+		// makes it go quiet. Say so rather than let them discover it by silence.
+		if raw := strings.TrimSpace(kvStrClean(kv, "BLOCK", "")); raw != "" {
+			logging.Logf("[%s] BLOCK=%q is set but this detector never blocks; it only suppresses the alert's notification. Remove BLOCK from [%s].",
+				section, raw, section)
+		}
+
 		d := solverfarm.New(cfg)
 		d.SetName(section)
 

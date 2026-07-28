@@ -804,7 +804,9 @@ func (s *sectionSink) pickIP(a core.Alert) string {
 		// would also mis-name an innocent address in the operator's notification,
 		// and an ordinary "Chrome/118.0.0.0" is IP-shaped enough to do that by
 		// accident.
-		if a.Extra[core.ExtraIPScope] == core.IPScopeHost {
+		// Trimmed and case-folded: this branch is the fail-closed one, so a stray
+		// space or capital must not silently re-enable the fallback.
+		if strings.EqualFold(strings.TrimSpace(a.Extra[core.ExtraIPScope]), core.IPScopeHost) {
 			return ""
 		}
 	}

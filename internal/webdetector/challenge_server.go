@@ -415,6 +415,15 @@ type ChallengeSolve struct {
 	// the speed advantage that makes it worth running. Note the per-solve value
 	// is noisy — solve time is exponentially distributed, so a lucky honest
 	// browser can land near zero. Judge it over a cluster, not a single event.
+	//
+	// It measures issue → submit, so it also contains HTML delivery, browser
+	// startup, JS scheduling and the POST round trip. A datacenter client looks
+	// faster than a mobile one for reasons unrelated to CPU; keep that in mind
+	// before thresholding on it.
+	//
+	// Read it through SolveLatencyMS(), never directly: any value <= 0 means
+	// unknown, so that a ChallengeSolve literal which omits the field cannot be
+	// mistaken for an instantaneous — i.e. maximally suspicious — solve.
 	SolveMS int64
 	// UAImpossible is set when the submitted User-Agent contradicts itself (an
 	// iPhone running desktop Blink, a Firefox carrying the Blink WebKit token).
@@ -422,6 +431,16 @@ type ChallengeSolve struct {
 	// a *lie*, not that it is old.
 	UAImpossible bool
 	UAReason     string
+}
+
+// SolveLatencyMS reports the real client-side solve latency and whether it is
+// known. A sub-millisecond issue→submit gap cannot occur over HTTP, so treating
+// 0 as unknown costs no real measurement and makes the struct's zero value safe.
+func (s ChallengeSolve) SolveLatencyMS() (int64, bool) {
+	if s.SolveMS <= 0 {
+		return 0, false
+	}
+	return s.SolveMS, true
 }
 
 // ChallengeSolvedHook lets the detectors layer log solved/expired in a unified way.
@@ -638,7 +657,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// IMPORTANT: bind must be JS-reproducible => UA + cookie (no IP)
 		bind := powBind(r.UserAgent(), c.Value)
 
-		issuedAt, diff, nonce16, ok := verifyPowChallenge(powSecretKey(), powTok, bind, cfg, time.Now().UTC())
+		// One reading of the wall clock for both the freshness check and the
+		// latency, so SolveMS can never exceed the TTL that was just enforced.
+		verifyAt := time.Now().UTC()
+		issuedAt, diff, nonce16, ok := verifyPowChallenge(powSecretKey(), powTok, bind, cfg, verifyAt)
 		if !ok || !verifyPowSolution(nonce16, bind, sol, diff) {
 			http.Error(w, "bad pow", http.StatusForbidden)
 			return
@@ -653,7 +675,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			Diff:         diff,
 			UA:           ua,
 			VerifyMS:     time.Since(verifyStart).Milliseconds(),
-			SolveMS:      powSolveLatencyMS(issuedAt, time.Now().UTC()),
+			SolveMS:      powSolveLatencyMS(issuedAt, verifyAt, cfg.TTL),
 			UAImpossible: uaVerdict.Impossible,
 			UAReason:     uaVerdict.Reason(),
 		}

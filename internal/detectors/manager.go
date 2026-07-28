@@ -6,6 +6,7 @@ import (
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
+	webdet "cfm/internal/webdetector"
 	"context"
 	"encoding/binary"
 	"hash/fnv"
@@ -635,6 +636,12 @@ func (m *manager) stopAll() {
 	}
 	wasRunning := m.running
 	m.running = false
+
+	// Detector factories re-run on every reload, and challenge-solve subscribers
+	// are registered from one. Drop them here so a retired detector's closure
+	// stops feeding a buffer nothing drains any more; the new instance
+	// re-subscribes as it is built.
+	webdet.ResetChallengeSolveSubscribers()
 
 	// Wait outside the mutex.
 	m.wg.Wait()

@@ -636,11 +636,13 @@ func (e *Engine) StopUAEmergencyPruner() {
 
 // RecordChallengeSolved updates the store when a challenge is solved.
 //
-// The history payload carries the UA and the real solve latency alongside the
-// legacy server-side `ms`, so the forensics view (which renders payload.ua) and
-// any downstream solver-farm correlation have something to work with. Before
-// this, a solve recorded neither — which is why challenge_solved rows showed an
-// empty UA column while waf_trigger rows were populated.
+// The history payload carries the UA, the real solve latency and the
+// UA-plausibility verdict alongside the legacy server-side `ms`, so the
+// forensics view (which renders payload.ua) and any downstream solver-farm
+// correlation have something to work with. Before this, a solve recorded none of
+// them — which is why challenge_solved rows showed an empty UA column while
+// waf_trigger rows were populated. solve_ms and ua_impossible are written only
+// when known/true, so their absence is meaningful.
 func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	if e == nil || e.chalAPI == nil {
 		return
@@ -650,8 +652,8 @@ func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	if s.UA != "" {
 		payload["ua"] = s.UA
 	}
-	if s.SolveMS >= 0 {
-		payload["solve_ms"] = s.SolveMS
+	if ms, ok := s.SolveLatencyMS(); ok {
+		payload["solve_ms"] = ms
 	}
 	if s.UAImpossible {
 		payload["ua_impossible"] = s.UAReason

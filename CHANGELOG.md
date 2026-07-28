@@ -35,7 +35,19 @@ back-filled here — see the git/PR history for that period.
   their `Key` is not an address; the sink's guesswork fallback stands down for
   those, while a detector-supplied `Extra["ip"]` still wins. Only
   `challenge_solver_farm` sets it — IP-keyed detectors (`waf_security`,
-  `api_abuse`, …) resolve authoritatively from `Key` and are unaffected.
+  `api_abuse`, …) resolve authoritatively from `Extra["ip"]` or `Key` and are
+  unaffected.
+
+### Fixed
+- **Challenge-solve subscribers no longer leak across config reloads.** Detector
+  factories re-run on every reload — and the config signature folds in each
+  tailed log's inode, so a nightly logrotate forces one. Each run registered
+  another challenge-solve callback with no way to remove it, so the closures
+  belonging to retired detectors kept enqueueing into buffers nothing drained any
+  more. On the ~100k-solves/day stream this change introduces, that grows
+  without bound with reload count. `stopAll` now clears the subscriber list, the
+  new instance re-subscribes as it is built, and the detector's own ingest buffer
+  is bounded with a logged overflow count.
 
 ### Added
 - **User-Agent plausibility check (`internal/uaplausible`).** Flags a UA that
@@ -69,11 +81,23 @@ back-filled here — see the git/PR history for that period.
   counter can fire on that; the population is only visible in aggregate.
 
   The detector keys on the **vhost** and counts distinct client subnets solving
-  it within `WINDOW`. On the same data the farm ran at 73 subnets/min (median;
-  p01 49, max 110) against a peak of 22 for the busiest legitimate vhost, so the
-  default `MIN_SUBNETS = 40` caught 1380 of 1381 farm-minutes with zero hits
-  across 1605 legitimate vhost-minutes. Replaying the full 111,537-solve log
-  through the detector flags exactly one vhost and nothing else.
+  it within `WINDOW`. Thresholds were derived by replaying that capture through
+  the detector at its original timestamps, so they describe what the code
+  measures — a **sliding** window sampled every `EVERY`, not disjoint one-minute
+  buckets (the sliding maximum is always ≥ the bucket maximum, so bucket figures
+  would overstate the headroom). The farm ran at a median of 73 subnets per
+  window (p01 49, max 122) against a maximum of 27 for every other vhost, so the
+  default `MIN_SUBNETS = 40` flags 2758 of 2761 farm evaluations and 0 of 3212
+  legitimate ones. Replaying the full 111,537-solve log flags exactly one vhost
+  and nothing else.
+
+  The evidence cap cannot suppress detection: `MAX_TRACKED_PER_HOST` bounds the
+  sample buffer only, while the subnet and IP sets the threshold reads are
+  tracked separately — otherwise a cheap flood from one subnet could fill the
+  buffer and bury a farm's spread behind it. Truncation is always stated on the
+  alert. `EVERY` is clamped to `WINDOW`, since a longer interval would prune part
+  of the stream away before it was ever examined (a section omitting `EVERY`
+  inherits `[global] DEFAULT_EVERY`, which ships at 60s).
 
   Two deliberate choices: detection is **not** keyed on User-Agent (it is
   attacker-controlled — the separation holds UA-agnostically, and the UA
@@ -98,9 +122,10 @@ back-filled here — see the git/PR history for that period.
     UA string solving from dozens of ASNs within seconds; without the UA there
     was nothing to correlate on. Now recorded on the event and in
     `cfm.challenges.log` (`ua=`).
-  - **Real solve latency.** The `ms=` field measured only the verify handler's
-    own processing (its timer started when the POST arrived, after the client had
-    already solved), which is why solves logged `ms=0`. The PoW token already
+  - **Real solve latency** (logged as `solve_ms=`, or `-` when unknown). The
+    `ms=` field measured only the verify handler's
+    own processing — its timer started when the POST arrived, after the client
+    had already solved, which is why solves logged `ms=0`. The PoW token already
     carries its issue timestamp, so the true issue→submit latency needs no new
     server state — but the timestamp was in whole seconds, and an honest browser
     solves the default difficulty in ~1s, rounding the signal away. Tokens are
@@ -108,7 +133,11 @@ back-filled here — see the git/PR history for that period.
     alongside the unchanged `ms=`. Implausibly fast solves are the one PoW signal
     a native solver cannot fake without surrendering its speed advantage.
     Per-solve values are noisy (solve time is exponentially distributed) — judge
-    them per IP/ASN/UA cluster, not per event.
+    them per IP/ASN/UA cluster, not per event. A value is reported only when it
+    is real: the two timestamps are two readings of the wall clock, so anything
+    outside `[0, PoW TTL]` (an NTP step, a VM migration) is recorded as unknown
+    rather than as a measurement. Rejecting only negatives would have truncated
+    the distribution at exactly the end this signal exists to observe.
 
   Verification of a token minted by the *previous* binary (whole seconds) is
   preserved by magnitude-detecting the encoding, so a rolling upgrade does not

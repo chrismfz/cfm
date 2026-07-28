@@ -45,6 +45,20 @@ func SubscribeChallengeSolveEvents(fn func(ChallengeSolve)) {
 	solveSubsMu.Unlock()
 }
 
+// ResetChallengeSolveSubscribers drops every registered callback. The detectors
+// manager calls it from stopAll, because a config reload tears down and
+// re-instantiates every detector: without this the factory's Subscribe call adds
+// a closure per reload, and the ones belonging to retired detectors keep
+// enqueueing into a buffer whose RunOnce loop is gone — an unbounded leak that
+// grows with reload count on a stream measured at ~100k solves/day. Reloads are
+// routine: the config signature folds in each tailed log's inode, so a nightly
+// logrotate forces one.
+func ResetChallengeSolveSubscribers() {
+	solveSubsMu.Lock()
+	solveSubs = nil
+	solveSubsMu.Unlock()
+}
+
 func publishChallengeSolveEvent(s ChallengeSolve) {
 	solveSubsMu.RLock()
 	subs := append([]func(ChallengeSolve){}, solveSubs...)

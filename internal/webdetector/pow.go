@@ -59,6 +59,17 @@ func issuePowChallenge(secret []byte, now time.Time, difficulty int, nonce16 []b
 		return "", fmt.Errorf("bad difficulty: %d", difficulty)
 	}
 
+	// Refuse to mint a token the decoder would read back as seconds. A host with
+	// no RTC and no NTP yet boots at the Unix epoch, and 30 seconds of uptime
+	// later every minted token carries a millisecond value below the threshold —
+	// so it decodes as a far-future seconds timestamp, fails its freshness check,
+	// and every correctly-solved challenge is rejected with no clue why. Failing
+	// the issue is loud; failing every verify is not.
+	if now.UnixMilli() < powEpochMillisMin {
+		return "", fmt.Errorf("system clock is before %s; refusing to mint a PoW token",
+			time.UnixMilli(powEpochMillisMin).UTC().Format(time.RFC3339))
+	}
+
 	ts := uint64(now.UnixMilli())
 	buf := make([]byte, 8+2+16)
 	binary.BigEndian.PutUint64(buf[0:8], ts)
@@ -141,18 +152,30 @@ func verifyPowChallenge(secret []byte, tok string, bind string, cfg PowConfig, n
 // powSolveLatencyMS returns the wall-clock milliseconds a client took to solve,
 // measured from the issue timestamp carried inside the PoW token.
 //
-// Returns -1 rather than a bogus number when the value is not usable: a zero
-// issue time (token never parsed), or a clock that ran backwards between issue
-// and verify. Callers treat -1 as "unknown" and must not score on it.
-func powSolveLatencyMS(issued, now time.Time) int64 {
+// Returns -1 for "unknown" whenever the number would be a fiction: a zero issue
+// time, or a value outside [0, ttl]. The bound matters in both directions and
+// neither is hypothetical — the two timestamps come from two readings of the
+// wall clock, so any NTP step or VM migration between issue and verify lands
+// here. A backward step makes fast solves negative, and dropping only those
+// would silently truncate the distribution at its low end — precisely the end
+// this measurement exists to observe. A forward step inflates the latency, and
+// reporting that as fact is the same error mirrored. Verification has already
+// rejected anything genuinely older than the TTL, so a latency beyond it means
+// the clock moved, not that the client was slow.
+//
+// Callers must treat -1 as unknown and never score on it.
+func powSolveLatencyMS(issued, now time.Time, ttl time.Duration) int64 {
 	if issued.IsZero() {
 		return -1
 	}
-	ms := now.Sub(issued).Milliseconds()
-	if ms < 0 {
+	if ttl <= 0 {
+		ttl = defaultPowTTL
+	}
+	d := now.Sub(issued)
+	if d < 0 || d > ttl {
 		return -1
 	}
-	return ms
+	return d.Milliseconds()
 }
 
 // verifyPowSolution checks: sha256( nonce16 || 0 || bind || 0 || solution ) has N leading zero bits.

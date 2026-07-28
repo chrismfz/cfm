@@ -7,7 +7,7 @@
 //
 // Every rule below was derived from, and validated against, 314,877 real
 // requests (4,889 distinct UA strings) captured on a production edge. The rules
-// flag ~0.54% of that traffic, and every flagged string was inspected. That
+// flag 0.55% of that traffic, and every flagged string was inspected. That
 // validation matters more than it sounds: an earlier version of the KHTML rule
 // tested for the literal "(KHTML, like Gecko)" and wrongly flagged legitimate
 // crawlers — Amazonbot, YouBot, GeedoShopProductFinder — which place their own
@@ -24,7 +24,10 @@
 package uaplausible
 
 import (
+	"errors"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -60,6 +63,13 @@ var (
 		regexp.MustCompile(`\bX11;`),
 		reIOSPlatform,
 	}
+	// rePlatformGroup captures the leading parenthetical, which is where a UA
+	// declares its platform. Everything after it is product and device tokens —
+	// an in-app browser appends `FBDV/iPad11,3;FBMD/iPad`, IE Mobile shipped
+	// `like iPhone OS 7_0_3 Mac OS X`, the Kindle browser said `Linux armv7l like
+	// Android`. Counting platform words across the whole string flags all of
+	// those, so the platform-conflict rule looks only inside this group.
+	rePlatformGroup = regexp.MustCompile(`^[^(]*\(([^)]*)\)`)
 )
 
 // blinkWebKit is the AppleWebKit build token frozen into every Blink-engine UA
@@ -86,6 +96,12 @@ func Check(ua string) Verdict {
 	case hasCriOS:
 		v.Family, v.Major = "CriOS", atoi(reCriOSTok.FindStringSubmatch(ua)[1])
 	case chrome != nil:
+		// "Chrome" here means the Blink engine identity, not the Chrome browser:
+		// Edge, Opera, Samsung Internet, Brave, Vivaldi, Yandex and Electron apps
+		// all carry a Chrome/ token and are reported as Chrome. Note also that
+		// HeadlessChrome/ does NOT match (no word boundary before "Chrome"), so
+		// headless Chrome is classified as "" and is invisible to both Chrome
+		// rules — a deliberate gap, since a headless UA is honest, not impossible.
 		v.Family, v.Major = "Chrome", atoi(chrome[1])
 	case reFirefoxTok.MatchString(ua):
 		v.Family, v.Major = "Firefox", atoi(reFirefoxTok.FindStringSubmatch(ua)[1])
@@ -93,8 +109,12 @@ func Check(ua string) Verdict {
 		v.Family, v.Major = "Safari", atoi(reSafariVer.FindStringSubmatch(ua)[1])
 	}
 
-	// iOS never ships the Blink WebKit build token — every browser on iOS is
-	// required to use the system WebKit, which reports AppleWebKit/60x.
+	// iOS has historically been required to use the system WebKit, which reports
+	// AppleWebKit/60x, so the Blink token on an Apple platform is a contradiction.
+	// Watch this one: the EU DMA has obliged Apple to allow alternative engines
+	// since iOS 17.4, so a genuinely Blink-based iOS browser would land here. It
+	// would arrive as a version-coherent UA from a wide, ordinary population —
+	// recheck against a corpus if this rule's share starts climbing.
 	if isIOS && hasBlinkWK {
 		v.Reasons = append(v.Reasons, "ios_with_blink_webkit")
 	}
@@ -103,8 +123,11 @@ func Check(ua string) Verdict {
 	if isIOS && chrome != nil && !hasCriOS {
 		v.Reasons = append(v.Reasons, "ios_with_desktop_chrome_token")
 	}
-	// ...and the converse: CriOS only exists on iOS.
-	if hasCriOS && !isIOS {
+	// ...and the converse: CriOS only exists on iOS. Skip the check when the
+	// platform is Macintosh — iPadOS in desktop-content mode reports `Macintosh`
+	// while apps keep their own product token, so `Macintosh` + `CriOS` is a real
+	// shape, not a contradiction.
+	if hasCriOS && !isIOS && !strings.Contains(ua, "Macintosh") {
 		v.Reasons = append(v.Reasons, "crios_without_ios_platform")
 	}
 	// Firefox is Gecko. It never carries the Blink WebKit token.
@@ -118,17 +141,31 @@ func Check(ua string) Verdict {
 		v.Reasons = append(v.Reasons, "chrome_missing_khtml_token")
 	}
 	// Chrome always reports four version components (145.0.0.0 today,
-	// 78.0.3904.108 before the reduced-UA change). Fewer means hand-written.
+	// 78.0.3904.108 before the reduced-UA change), and so do the Chromium
+	// derivatives checked against a real corpus: Edge, Opera, Samsung Internet,
+	// Brave, Vivaldi, Yandex, Electron apps and Android WebView. Fewer means the
+	// string was hand-written — which includes benign tooling (uptime monitors,
+	// link previewers, corporate proxies), not only bots.
 	if chrome != nil && strings.Count(chrome[2], ".") < 3 {
 		v.Reasons = append(v.Reasons, "chrome_truncated_version")
 	}
-	// A UA claims exactly one platform.
-	if countPlatformTokens(ua) > 1 {
+	// A UA declares exactly one platform. Counted inside the leading
+	// parenthetical only — see rePlatformGroup.
+	if countPlatformTokens(platformGroup(ua)) > 1 {
 		v.Reasons = append(v.Reasons, "multiple_platform_tokens")
 	}
 
 	v.Impossible = len(v.Reasons) > 0
 	return v
+}
+
+// platformGroup returns the leading parenthetical, or "" when the UA has none
+// (many crawlers do not), in which case there is no platform claim to check.
+func platformGroup(ua string) string {
+	if m := rePlatformGroup.FindStringSubmatch(ua); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 func countPlatformTokens(ua string) int {
@@ -141,13 +178,16 @@ func countPlatformTokens(ua string) int {
 	return n
 }
 
+// atoi parses a leading run of digits, saturating instead of wrapping. The digit
+// run comes from a client-controlled header via an unbounded (\d+) capture, so a
+// hand-rolled accumulator would let a caller pick the sign of Major.
 func atoi(s string) int {
-	n := 0
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return n
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
+			return math.MaxInt
 		}
-		n = n*10 + int(c-'0')
+		return 0
 	}
 	return n
 }

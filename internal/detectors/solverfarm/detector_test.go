@@ -3,6 +3,7 @@ package solverfarm
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -202,14 +203,145 @@ func TestLegitimateShapesDoNotAlert(t *testing.T) {
 	})
 }
 
+// Two bursts of DISJOINT subnets, far enough apart that the first has expired.
+// Each is below MinSubnets on its own; their union is comfortably above it. If
+// the window stopped expiring, the second evaluation would see 50 subnets and
+// alert — so this fails if the prune is removed, which the previous version of
+// this test did not (it reused the same 30 subnets for both bursts, so the union
+// was still 30 and the assertion held for the wrong reason).
 func TestSlidingWindowExpiresSolves(t *testing.T) {
-	h := newHarness(t, Config{Window: time.Minute})
-	h.farmBurst("shop.example.com", 30, func(int) string { return chromeUA })
-	h.clock = h.clock.Add(90 * time.Second) // first burst falls out of the window
-	h.farmBurst("shop.example.com", 30, func(int) string { return chromeUA })
+	// Each burst is 25 subnets but 50 solves, so MIN_SOLVES is satisfied by ONE
+	// burst alone. That matters: if the burst were solve-starved, MIN_SOLVES
+	// would suppress the alert and the test would pass without the subnet set
+	// ever having to expire — which is exactly how the first version of this
+	// test managed to prove nothing.
+	burst := func(h *harness, from int) {
+		for i := from; i < from+25; i++ {
+			ip := fmt.Sprintf("203.0.%d.1", i)
+			h.solve("shop.example.com", ip, chromeUA)
+			h.solve("shop.example.com", ip, chromeUA)
+		}
+	}
 
-	if alerts := h.run(t); len(alerts) != 0 {
-		t.Fatalf("got %d alerts, want 0 — two 30-subnet bursts 90s apart must not sum", len(alerts))
+	h := newHarness(t, Config{Window: time.Minute, MinSubnets: 40, MinSolves: 40})
+	burst(h, 0)
+	if got := h.run(t); len(got) != 0 {
+		t.Fatalf("first burst alone (25 subnets, 50 solves): got %d alerts, want 0", len(got))
+	}
+
+	h.clock = h.clock.Add(90 * time.Second) // first burst is now outside the window
+	burst(h, 100)                           // disjoint /24s, another 50 solves
+	if got := h.run(t); len(got) != 0 {
+		t.Fatalf("got %d alerts, want 0 — 25 + 25 disjoint subnets 90s apart must not sum to 50", len(got))
+	}
+
+	// The same two bursts INSIDE one window do cross the threshold, proving the
+	// fixture can alert at all and that expiry is what suppressed it above.
+	h2 := newHarness(t, Config{Window: time.Minute, MinSubnets: 40, MinSolves: 40})
+	burst(h2, 0)
+	h2.clock = h2.clock.Add(10 * time.Second)
+	burst(h2, 100)
+	if got := h2.run(t); len(got) != 1 {
+		t.Fatalf("both bursts within the window: got %d alerts, want 1", len(got))
+	}
+}
+
+// The alert's Count, distinct_ips and subnets are three different numbers; every
+// other fixture makes them coincide, so a Count: len(subnets) -> len(ips) swap
+// would pass unnoticed. Pin them apart.
+func TestCountsAreDistinguishable(t *testing.T) {
+	h := newHarness(t, Config{MinSubnets: 40, MinSolves: 40})
+	// 45 subnets, 90 addresses (2 per subnet), 180 solves (2 per address).
+	for i := 0; i < 45; i++ {
+		for a := 1; a <= 2; a++ {
+			ip := fmt.Sprintf("203.0.%d.%d", i, a)
+			h.solve("shop.example.com", ip, chromeUA)
+			h.solve("shop.example.com", ip, chromeUA)
+		}
+	}
+	alerts := h.run(t)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1", len(alerts))
+	}
+	a := alerts[0]
+	if a.Count != 45 {
+		t.Errorf("Count = %d, want 45 (distinct subnets)", a.Count)
+	}
+	if a.Extra["subnets"] != "45" {
+		t.Errorf("subnets = %q, want 45", a.Extra["subnets"])
+	}
+	if a.Extra["distinct_ips"] != "90" {
+		t.Errorf("distinct_ips = %q, want 90", a.Extra["distinct_ips"])
+	}
+	if a.Extra["solves"] != "180" {
+		t.Errorf("solves = %q, want 180", a.Extra["solves"])
+	}
+	if a.Extra["solves_per_ip"] != "2.00" {
+		t.Errorf("solves_per_ip = %q, want 2.00", a.Extra["solves_per_ip"])
+	}
+}
+
+// Exact-threshold behaviour: MinSubnets is a floor that must be reached, not
+// exceeded. Without this, flipping `<` to `<=` passes every other test.
+func TestThresholdBoundaries(t *testing.T) {
+	burst := func(t *testing.T, subnets int) int {
+		t.Helper()
+		h := newHarness(t, Config{MinSubnets: 40, MinSolves: 40})
+		for i := 0; i < subnets; i++ {
+			h.solve("shop.example.com", fmt.Sprintf("203.0.%d.1", i), chromeUA)
+		}
+		return len(h.run(t))
+	}
+	if got := burst(t, 39); got != 0 {
+		t.Errorf("39 subnets: got %d alerts, want 0", got)
+	}
+	if got := burst(t, 40); got != 1 {
+		t.Errorf("40 subnets (exactly MinSubnets): got %d alerts, want 1", got)
+	}
+}
+
+// MinSolves counts every solve seen in the window, including ones the evidence
+// cap dropped — otherwise a flood could stay under the floor by overflowing it.
+func TestMinSolvesCountsTruncatedSolves(t *testing.T) {
+	h := newHarness(t, Config{MinSubnets: 40, MinSolves: 100, MaxTrackedPerHost: 50})
+	for i := 0; i < 120; i++ {
+		h.solve("shop.example.com", fmt.Sprintf("203.0.%d.1", i), chromeUA)
+	}
+	alerts := h.run(t)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1 — 120 solves must satisfy MIN_SOLVES=100 despite a 50-record cap", len(alerts))
+	}
+	if alerts[0].Extra["solves"] != "120" {
+		t.Errorf("solves = %q, want 120", alerts[0].Extra["solves"])
+	}
+}
+
+// The evidence cap must never suppress detection: a cheap flood from one subnet
+// fills the buffer, but the farm's spread still has to be visible.
+func TestFloodCannotMaskFarm(t *testing.T) {
+	h := newHarness(t, Config{MinSubnets: 40, MinSolves: 40, MaxTrackedPerHost: 100})
+	// Flood arrives first and exhausts the evidence buffer from a single /24.
+	for i := 0; i < 500; i++ {
+		h.solve("shop.example.com", "198.51.100.7", chromeUA)
+	}
+	// The farm's solves land after the buffer is already full.
+	for i := 0; i < 60; i++ {
+		h.solve("shop.example.com", fmt.Sprintf("203.0.%d.1", i), chromeUA)
+	}
+	alerts := h.run(t)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1 — a flood must not hide the farm behind the evidence cap", len(alerts))
+	}
+	if alerts[0].Count != 61 {
+		t.Errorf("Count = %d, want 61 distinct subnets (60 farm + 1 flood)", alerts[0].Count)
+	}
+}
+
+// Every > Window would prune away a slice of the stream unexamined every tick.
+func TestEveryIsClampedToWindow(t *testing.T) {
+	d := New(Config{Window: 60 * time.Second, Every: 120 * time.Second})
+	if d.Every() != 60*time.Second {
+		t.Errorf("Every() = %v, want it clamped to Window (60s); a longer interval discards unexamined solves", d.Every())
 	}
 }
 
@@ -301,29 +433,11 @@ func TestTruncationIsReported(t *testing.T) {
 	}
 	found := false
 	for _, s := range alerts[0].Samples {
-		if len(s) > 0 && containsAll(s, "not tracked", "lower bound") {
+		if strings.Contains(s, "were not sampled") && strings.Contains(s, "MAX_TRACKED_PER_HOST") {
 			found = true
 		}
 	}
 	if !found {
 		t.Errorf("truncation not reported in samples: %v", alerts[0].Samples)
 	}
-}
-
-func containsAll(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if !contains(s, sub) {
-			return false
-		}
-	}
-	return true
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
