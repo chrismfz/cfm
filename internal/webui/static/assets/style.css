@@ -418,6 +418,12 @@ tr.bulk-selected:hover { background: var(--danger-soft); }
 .pill.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
 .pill.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
 .pill.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+/* Observation, not enforcement state — e.g. the WebDetector "farm" badge, which
+   says a detector currently sees something on this row while nothing is being
+   blocked. Deliberately not warn/danger: those two already mean "scored
+   suspicious" and "challenge is on", and a third red pill beside them reads as
+   a third enforcement state. */
+.pill.info { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-soft); }
 .statusline { margin: 0 0 .6rem; color: var(--accent-strong); }
 
 .summary-grid {

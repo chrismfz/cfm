@@ -207,6 +207,11 @@ type ShortRow struct {
 	UADiversity   float64 `json:"ua_diversity"`
 	PathDiversity float64 `json:"path_diversity"`
 	PostRatio     float64 `json:"post_ratio"`
+
+	// SolverFarm is true while challenge_solver_farm currently sees a
+	// distributed solver farm on this vhost. It is an external verdict stamped
+	// onto the row, not an input to Score — see solverfarm_marks.go.
+	SolverFarm bool `json:"solver_farm"`
 }
 
 // TopKV for drilldown views.

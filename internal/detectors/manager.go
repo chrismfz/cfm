@@ -643,6 +643,12 @@ func (m *manager) stopAll() {
 	// re-subscribes as it is built.
 	webdet.ResetChallengeSolveSubscribers()
 
+	// Same reasoning for the solver-farm marks the WebUI badges from: they are
+	// refreshed by a running detector and expire on their own. A reload that
+	// disables or retunes challenge_solver_farm would otherwise leave the last
+	// marks to age out with nothing left running to refresh or correct them.
+	webdet.ResetSolverFarmMarks()
+
 	// Wait outside the mutex.
 	m.wg.Wait()
 

@@ -173,6 +173,8 @@ solver first; see `docs/roadmaps/challenge-engine.md`.
 |---|---|
 | Email (and Slack if routed) | The full alert: solves, distinct IPs, distinct subnets, solves-per-IP, the UA breakdown and the impossible-UA share |
 | `cfm.detector.log` | Same content, greppable as `Challenge/SolverFarm` |
+| WebUI → WebDetector | A blue **farm** badge in *WebTop* → Flags and in *Suspicious + challenged vhosts* → Status |
+| `cfm web live` (TUI) | `F` in the leading slot of the `SUP` column |
 | `/var/lib/cfm/notify.log.jsonl` | One JSON record per notification |
 | `cfm.challenges.log` | Per solve: `ua=`, `solve_ms=`, `ua_impossible=` |
 | WebUI → WebDetector → Forensics | `challenge_solved` rows with the UA, a **Solve** latency column, and the impossible-UA pill/filter |
@@ -185,6 +187,28 @@ the (unset) default severity gate. Slack needs an explicit `[detector
 
 Because the detector never blocks, the notification *is* the product. That is
 why a `BLOCK` value, which silences it, is worth warning about.
+
+#### The `farm` badge
+
+The badge is **not** driven by the alert. `COOLDOWN` rate-limits alerts to one
+per 30 minutes because a farm runs for hours, so a badge fed by alerts would
+blink off while the attack continued. Instead the detector marks the vhost on
+*every* over-threshold evaluation — before the cooldown is consulted — and the
+mark carries a TTL of `max(3 × EVERY, WINDOW)`. So the badge means "farmed right
+now" and clears on its own within one TTL of the farm stopping.
+
+There is deliberately no un-mark path: expiry is the only way a mark goes away,
+so a missed callback cannot leave a vhost badged forever. `solver_farm` rides on
+the `top-short`, `suspicious`, `long-top`, `challenge/vhosts` and
+`challenge/vhost/status` responses (the last so scoped tokens, which reach the
+list only through it, get the badge too). The marks are dropped when the
+detectors manager stops, so a reload that disables or retunes the detector
+cannot leave stale badges behind.
+
+The badge is styled `pill info` (blue), not `warn`/`danger`: those already mean
+"scored suspicious" and "challenge is on", and this detector never enforces
+anything. Note it is orthogonal to the score beside it — a farm solves the
+challenge *correctly*, so a farmed vhost need not look suspicious at all.
 
 Note the calibration is one server over one day. A very large vhost with a
 genuinely global mobile audience could legitimately spread wider; `MIN_SUBNETS`

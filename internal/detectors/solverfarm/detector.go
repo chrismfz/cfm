@@ -262,6 +262,30 @@ type Detector struct {
 	allowHosts map[string]struct{}
 	allowIPs   map[string]struct{}
 	allowNets  []*net.IPNet
+
+	// onFarm is called for every over-threshold evaluation, BEFORE the alert
+	// cooldown is consulted. That distinction is the whole point: the alert is
+	// rate-limited to one per COOLDOWN (30m by default) because a farm runs for
+	// hours, so anything driven by alerts — a UI badge, a live status — would
+	// blink off while the farm never stopped. See webdetector.MarkSolverFarm.
+	onFarm func(host string, ttl time.Duration)
+}
+
+// SetFarmHook installs a callback invoked on every evaluation where a vhost is
+// over threshold. It must be cheap and non-blocking; it runs inside RunOnce.
+func (d *Detector) SetFarmHook(fn func(host string, ttl time.Duration)) { d.onFarm = fn }
+
+// markTTL is how long a "farmed right now" mark should stay live. Three
+// evaluation intervals, floored at the measurement window, so the mark survives
+// normal jitter between passes and never expires faster than the window it was
+// derived from. Expiry is the only way a mark clears — there is no unmark path
+// to get wrong.
+func (d *Detector) markTTL() time.Duration {
+	ttl := 3 * d.cfg.Every
+	if ttl < d.cfg.Window {
+		ttl = d.cfg.Window
+	}
+	return ttl
 }
 
 func New(cfg Config) *Detector {
@@ -475,6 +499,12 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
 		if solves < d.cfg.MinSolves || len(st.subnets) < d.cfg.MinSubnets {
 			continue
+		}
+		// Mark before the cooldown check, not after: the mark answers "is this
+		// vhost being farmed right now", which stays true through the 30m the
+		// alert is suppressed for.
+		if d.onFarm != nil {
+			d.onFarm(host, d.markTTL())
 		}
 		if !st.lastAlert.IsZero() && now.Sub(st.lastAlert) < d.cfg.Cooldown {
 			continue

@@ -39,6 +39,29 @@ back-filled here — see the git/PR history for that period.
   unaffected.
 
 ### Added
+- **`farm` badge for `challenge_solver_farm` in the WebUI and the TUI.** A blue
+  pill in *WebTop* → Flags and in *Suspicious + challenged vhosts* → Status, and
+  an `F` in the leading slot of the TUI's `SUP` column. Until now the detector's
+  only output was an email and a `cfm.detector.log` line, so nothing on the
+  dashboard said which vhost was being farmed.
+
+  It is **not** driven by the alert, and that is the point: `COOLDOWN`
+  rate-limits alerts to one per 30 minutes because a farm runs for hours, so a
+  badge fed by alerts would blink off mid-attack. The detector marks the vhost on
+  every over-threshold evaluation — before the cooldown is consulted — with a TTL
+  of `max(3 × EVERY, WINDOW)`, so the badge means "farmed right now" and clears
+  itself within one TTL of the farm stopping. There is no un-mark path, so a
+  missed callback cannot leave a vhost badged forever, and the marks are dropped
+  when the detectors manager stops so a reload cannot leave stale ones behind.
+
+  `solver_farm` is now on the `top-short`, `suspicious`, `long-top`,
+  `challenge/vhosts` and `challenge/vhost/status` responses — the last so scoped
+  tokens, which reach the vhost list only through it, get the badge too. The new
+  `pill info` style is for observations rather than enforcement state: `warn` and
+  `danger` already mean "scored suspicious" and "challenge is on", and this
+  detector never enforces anything. The badge is also orthogonal to the score
+  beside it, since a farm solves the challenge correctly and need not look
+  suspicious at all.
 - **TLS fingerprint on every challenge solve, log-first.** Every other signal on
   a solve is written by the client — the User-Agent, the cookies, the PoW
   solution, the timing. The TLS handshake is written by its TLS stack before a

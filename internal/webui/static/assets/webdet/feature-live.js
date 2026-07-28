@@ -160,6 +160,11 @@ export const liveMixin = {
           unique_ips: existing.unique_ips ?? row.uniq_ip,
           reasons: mergedReasons.length ? Array.from(new Set(mergedReasons)) : existing.reasons,
           challenge_mode: row.mode,
+          // The farm mark can arrive from either source: /suspicious carries it
+          // on scored rows, /challenge/vhosts on challenged ones. A vhost that is
+          // farmed AND auto-challenged is the common case, and it must not lose
+          // the badge just because the merge picked the other side.
+          solver_farm: Boolean(existing.solver_farm || row.solver_farm),
           fromSuspicious: Boolean(existing.fromSuspicious),
           fromChallenge: true,
           source: existing.fromSuspicious ? "both" : "challenged",
