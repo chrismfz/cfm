@@ -38,6 +38,16 @@ back-filled here — see the git/PR history for that period.
   `api_abuse`, …) resolve authoritatively from `Extra["ip"]` or `Key` and are
   unaffected.
 
+### Added
+- **Forensics history surfaces the new solve signals.** The WebUI table gains a
+  **Solve** column showing the real client-side solve latency (`892ms`, `1.4s`,
+  and `-` when unknown or not applicable — never a misleading `0`), an
+  `impossible` pill beside a self-contradictory User-Agent with the matched rules
+  in its tooltip, and an **impossible UA only** filter. The tooltip also now
+  lists the PoW difficulty and distinguishes the real solve latency from the
+  legacy server-side verify time. Without this the two new fields were persisted
+  but invisible in the page whose empty UA column motivated the work.
+
 ### Fixed
 - **Challenge-solve subscribers no longer leak across config reloads.** Detector
   factories re-run on every reload — and the config signature folds in each

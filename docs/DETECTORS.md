@@ -148,6 +148,25 @@ Two deliberate design choices:
   move the alert onto the observe path, which logs without notifying — you would
   quietly stop being alerted.
 
+#### Where the finding shows up
+
+| Surface | What you get |
+|---|---|
+| Email (and Slack if routed) | The full alert: solves, distinct IPs, distinct subnets, solves-per-IP, the UA breakdown and the impossible-UA share |
+| `cfm.detector.log` | Same content, greppable as `Challenge/SolverFarm` |
+| `/var/lib/cfm/notify.log.jsonl` | One JSON record per notification |
+| `cfm.challenges.log` | Per solve: `ua=`, `solve_ms=`, `ua_impossible=` |
+| WebUI → WebDetector → Forensics | `challenge_solved` rows with the UA, a **Solve** latency column, and the impossible-UA pill/filter |
+
+Notification is on by default: the section matches the `[detector "*"]` catch-all
+in `notify.conf`, which routes to email, and the alert's `warn` severity passes
+the (unset) default severity gate. Slack needs an explicit `[detector
+"challenge_solver_farm"]` block — there is a commented example in
+`configs/notify.conf` — and the `[channel "slack"]` itself ships disabled.
+
+Because the detector never blocks, the notification *is* the product. That is
+why a `BLOCK` value, which silences it, is worth warning about.
+
 Note the calibration is one server over one day. A very large vhost with a
 genuinely global mobile audience could legitimately spread wider; `MIN_SUBNETS`
 is a knob and `ALLOW_HOSTS` / `ALLOW_UA_CONTAINS` / `ALLOW_NETS` / `ALLOW_IPS`
@@ -178,6 +197,10 @@ It is checked on every challenge solve and surfaced three ways:
 
 All three are written only when the verdict is *impossible*, so their absence on
 a solve means the UA was coherent, not that the check did not run.
+
+In the WebUI, the forensics history table shows an `impossible` pill next to the
+offending UA (with the matched rules in its tooltip) and has an
+**impossible UA only** filter.
 
 Two boundaries worth keeping in mind:
 

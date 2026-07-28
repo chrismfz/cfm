@@ -7,6 +7,7 @@ export const forensicsMixin = {
       historyHost: "",
       historyIP: "",
       historyType: "",
+      historyOnlyImpossibleUA: false,
       historyEvents: [],
       historySummary: null,
       historyStats: null,
@@ -19,8 +20,30 @@ export const forensicsMixin = {
       const p = (row && row.payload) || {};
       const lines = [];
       if (p.ua) lines.push(`UA: ${p.ua}`);
+      if (p.ua_impossible) lines.push(`Self-contradictory UA: ${p.ua_impossible}`);
       if (p.referer) lines.push(`Referer: ${p.referer}`);
       if (p.ct) lines.push(`Content-Type: ${p.ct}`);
+      return lines.length ? lines.join("\n") : "-";
+    },
+
+    // Real client-side solve latency (PoW issue -> verify POST). Absent when the
+    // clock stepped between the two readings, and absent on every event type
+    // other than a solve -- so "-" means "not applicable or not known", never 0.
+    historySolveMs(row) {
+      const p = (row && row.payload) || {};
+      const ms = Number(p.solve_ms);
+      if (!Number.isFinite(ms) || ms <= 0) return "-";
+      return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+    },
+    historySolveTitle(row) {
+      const p = (row && row.payload) || {};
+      const lines = [];
+      if (Number.isFinite(Number(p.solve_ms))) {
+        lines.push(`Solve latency: ${p.solve_ms}ms (challenge issued -> solution submitted)`);
+      }
+      // The legacy field: server-side verify handling only, never the client.
+      if (p.ms !== undefined) lines.push(`Server verify time: ${p.ms}ms`);
+      if (p.diff !== undefined) lines.push(`PoW difficulty: ${p.diff} bits`);
       return lines.length ? lines.join("\n") : "-";
     },
     async refreshHistory() {
@@ -37,7 +60,11 @@ export const forensicsMixin = {
         this.fetchJSONSafe(`v1/webdet/history/summary?hours=24${qs}`, null),
         this.fetchJSONSafe("v1/webdet/history/stats", null),
       ]);
-      this.historyEvents = this.extractRows(events, "rows");
+      let rows = this.extractRows(events, "rows");
+      if (this.historyOnlyImpossibleUA) {
+        rows = rows.filter((r) => r && r.payload && r.payload.ua_impossible);
+      }
+      this.historyEvents = rows;
       this.historySummary = summary;
       this.historyStats = stats;
     },
