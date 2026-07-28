@@ -150,8 +150,41 @@ per-address threshold by construction — `MIN_SOLVES = 8` can never fire — wh
 31 subnets in 140 s is exactly what the per-vhost subnet-spread rule is for. The
 two detectors are mirror images on purpose (`cookiediscard` keys on the address,
 `solverfarm` on the vhost); this capture is the evidence that neither alone is
-enough. Check `cfm.detector.log` for the matching `Challenge/SolverFarm` alert
-when reading this window.
+enough.
+
+**`solver_farm` did not fire on it, and the reason is `WINDOW`, not the
+thresholds.** The shipped default is `WINDOW = "60s"`; an operator who lowers
+`MIN_SUBNETS`/`MIN_SOLVES` and leaves the window alone inherits it. Sliding a
+60 s window over the swarm's real timestamps peaks at **18 solves / 18 subnets**
+— the subnet threshold (16) was met and the solve threshold (20) missed **by
+two**. The attack is not below the thresholds; it is wider than the window.
+
+Swept against the 23-hour production corpus (111,537 solves, 79 vhosts), one
+evaluation per `EVERY`=30 s:
+
+| WINDOW | 16/20 catches the swarm | vhosts that ever fire |
+|---|---|---|
+| 60 s | no | `electroexpert.gr`, `www.mathematica.gr` |
+| **120 s** | **yes** (28 solves / 28 subnets) | the same two |
+| 300 s | yes | those two + `www.vitolighting.com` |
+
+The false-positive column is the point: across **79 vhosts** only three ever
+fire anywhere in the grid, and all three are independently known to be under
+attack. Widening to 120 s buys the detection without touching the thresholds and
+without pulling in one new vhost. 300 s adds `www.vitolighting.com`, itself under
+the `chrome_impossible_patch` flood — more coverage, not a false positive. The
+caveat worth keeping: the corpus is 23 hours during which three vhosts were
+attacked, so a legitimately viral vhost on a quiet day is not represented in it.
+
+**`cookiediscard`'s `MIN_SOLVES` has no headroom left to give, and that is the
+useful finding.** Peak solves per address in any 10-minute window over the same
+corpus: **97,484 of 97,556 addresses (99.93%) solved exactly once**, 72 ever
+reached 2, 9 reached 4, and only 4 reached 5 or more. Every threshold from **5
+to 12 selects the identical four addresses.** The shipped 8 sits in the middle
+of an empty canyon between 4 and the farm's 20–60, so lowering it to 6 changes
+nothing whatsoever, and lowering it to 4 buys five addresses at the price of
+sitting on the edge of the human distribution. Leave it alone; if this detector
+ever needs to be more aggressive the lever is `WINDOW`, not `MIN_SOLVES`.
 serial shape — one exit at a time rather than many in parallel — is the thing
 the detector was built to see, and it is also why a per-vhost concurrency rule
 misses it entirely. No false positive has appeared: a human who clears cookies
