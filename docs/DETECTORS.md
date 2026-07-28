@@ -144,9 +144,27 @@ Two deliberate design choices:
   - `enforcement=observe` — stops the sink short of any block if a `BLOCK` policy
     is configured on the section.
 
-  **Leave `BLOCK` unset on this section.** It would not block, but it *would*
-  move the alert onto the observe path, which logs without notifying — you would
-  quietly stop being alerted.
+  **Leave `BLOCK` unset on this section** — use `ACTION` instead. `BLOCK` would
+  not block, but it *would* move the alert onto a path that logs without
+  notifying, so you would quietly stop being alerted. The daemon logs a warning
+  if it finds one.
+
+#### `ACTION`
+
+| value | effect |
+|---|---|
+| `observe` | **default**, and what you get when the key is absent: notification + `cfm.detector.log` |
+| `logonly` | log record only, no notification — for a vhost already triaged and accepted as farmed |
+| `deny`, `block` | **reserved**: recognised, refused at load with a logged reason, falls back to `observe` |
+
+`deny` and `block` are defined but not implemented, deliberately. `block` does
+not work on this traffic shape — at 1.07 solves per address the address is gone
+before the alert fires, and the pool is residential, so the ban lands on a real
+visitor. `deny` has no safe subject: a vhost-wide 403 takes the customer's site
+down, and the narrow form is a UA-cluster traffic rule that a farm evades by
+randomising one header. The actuator that fits — raising the vhost's PoW
+difficulty while flagged — needs per-vhost difficulty and a faster browser
+solver first; see `docs/roadmaps/challenge-engine.md`.
 
 #### Where the finding shows up
 

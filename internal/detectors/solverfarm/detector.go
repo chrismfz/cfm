@@ -63,9 +63,75 @@ import (
 	"cfm/internal/logging"
 )
 
+// Action is what the detector does with a flagged vhost, set by ACTION in
+// detectors.conf. The full vocabulary is defined here even though only the first
+// two are implemented, so the config surface is stable: detectors.conf is a
+// packaged conffile, and growing its accepted values later costs an upgrade
+// prompt on every host.
+//
+// Unset means ActionObserve, so a config written before this key existed keeps
+// working unchanged.
+type Action string
+
+const (
+	// ActionObserve raises the alert through the normal path: operator
+	// notification (email, and Slack if routed) plus the detector log.
+	ActionObserve Action = "observe"
+
+	// ActionLogonly writes the detector-log record but suppresses the
+	// notification. For a vhost already triaged and accepted as farmed, where the
+	// finding stays true for hours and the mail is noise but the record is not.
+	ActionLogonly Action = "logonly"
+
+	// ActionDeny and ActionBlock are RESERVED, recognised but refused at load
+	// with an explanation. They are not "not written yet" — each needs a design
+	// decision this detector cannot make on its own:
+	//
+	//   deny  — 403 whom? The finding is about a vhost, so denying the vhost
+	//           takes the customer's site down and the farm wins by proxy. The
+	//           only subject narrow enough is the dominant UA cluster, which is
+	//           a traffic rule — and one a farm evades by randomising a header,
+	//           which is precisely what this detector is built to survive.
+	//
+	//   block — measured on the traffic this detector was written against, a farm
+	//           solves 1.07 times per address. By the time an alert fires the
+	//           address is gone, and the pool is residential, so the ban lands on
+	//           whoever the ISP hands it to next. It is implementable and it does
+	//           not work.
+	//
+	// The actuator that does fit is raising the vhost's PoW difficulty while
+	// flagged: it costs a farm solving 100k times proportionally and a real
+	// visitor once. That needs per-vhost difficulty (PowConfig is a process-wide
+	// constant today) AND the faster browser solver, since at present raising
+	// difficulty costs an honest client roughly 92x what it costs a native one.
+	ActionDeny  Action = "deny"
+	ActionBlock Action = "block"
+)
+
+// ParseAction resolves a configured ACTION value. It returns the action to use,
+// and a non-empty note when the request could not be honoured — the caller logs
+// that rather than letting an operator believe enforcement is on.
+func ParseAction(raw string) (Action, string) {
+	switch Action(strings.ToLower(strings.TrimSpace(raw))) {
+	case "", ActionObserve:
+		return ActionObserve, ""
+	case ActionLogonly:
+		return ActionLogonly, ""
+	case ActionDeny:
+		return ActionObserve, "ACTION=deny is reserved and not implemented (a vhost-wide 403 would take the site down; the narrow form is a traffic rule on the UA cluster, which a farm evades by randomising a header) — falling back to observe"
+	case ActionBlock:
+		return ActionObserve, "ACTION=block is reserved and not implemented (a farm solves ~1 time per address, so the address is gone before the alert fires, and the pool is residential — the ban would land on a real visitor) — falling back to observe"
+	default:
+		return ActionObserve, fmt.Sprintf("ACTION=%q is not a known value (observe, logonly) — falling back to observe", raw)
+	}
+}
+
 type Config struct {
 	Every  time.Duration
 	Window time.Duration
+
+	// Action selects what happens to a flagged vhost. Zero value = ActionObserve.
+	Action Action
 
 	// MinSubnets is the number of DISTINCT client subnets that must solve the
 	// same vhost within Window to raise the alert.
@@ -233,6 +299,9 @@ func New(cfg Config) *Detector {
 	}
 	if cfg.SampleLimit <= 0 {
 		cfg.SampleLimit = 10
+	}
+	if cfg.Action == "" {
+		cfg.Action = ActionObserve
 	}
 	if cfg.MaxQueue <= 0 {
 		// ~15x the busiest window observed in production (110 solves/min), so a
@@ -505,7 +574,7 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			d.cfg.MaxTrackedPerHost))
 	}
 
-	return core.Alert{
+	alert := core.Alert{
 		When:    now,
 		Kind:    core.AlertKind("Challenge/SolverFarm"),
 		Key:     host,
@@ -520,6 +589,7 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			// Alert-only: a per-IP ban is useless at ~1 solve per IP and risks
 			// banning a real customer's residential address. See the package doc.
 			"enforcement":   "observe",
+			"action":        string(d.cfg.Action),
 			"reason":        "CHALLENGE_SOLVER_FARM",
 			"host":          host,
 			"solves":        fmt.Sprint(solves),
@@ -533,4 +603,10 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			"impossible_ua": fmt.Sprint(impossibleUA),
 		},
 	}
+	// logonly keeps the detector-log record but drops the mail: the finding stays
+	// true for hours on a vhost the operator has already triaged.
+	if d.cfg.Action == ActionLogonly {
+		alert.Extra[core.ExtraNotify] = core.NotifyNo
+	}
+	return alert
 }

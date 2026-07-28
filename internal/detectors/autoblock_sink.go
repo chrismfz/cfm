@@ -141,17 +141,21 @@ func (s *sectionSink) Publish(a core.Alert) {
 		if len(smp) > 10 {
 			smp = smp[:10]
 		}
-		notify.Enqueue(notify.Event{
-			Kind:     string(a.Kind),
-			Section:  s.section,
-			SrcIP:    ipStr, // may be ""
-			Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
-			Count:    a.Count,
-			When:     a.When,
-			Severity: "warn",
-			Samples:  smp,
-			Extra:    map[string]string{"key": a.Key},
-		})
+		// A detector may ask for the log record without the mail (core.ExtraNotify).
+		// Absent means notify, so nothing that predates this key changes.
+		if out.Extra[core.ExtraNotify] != core.NotifyNo {
+			notify.Enqueue(notify.Event{
+				Kind:     string(a.Kind),
+				Section:  s.section,
+				SrcIP:    ipStr, // may be ""
+				Reason:   firstNonEmpty(a.Extra["reason"], string(a.Kind)),
+				Count:    a.Count,
+				When:     a.When,
+				Severity: "warn",
+				Samples:  smp,
+				Extra:    map[string]string{"key": a.Key},
+			})
+		}
 		if s.inner != nil {
 			s.inner.Publish(out)
 		}

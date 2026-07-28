@@ -49,6 +49,7 @@ func init() {
 			"MIN_SUBNETS": "40",
 			"MIN_SOLVES":  "40",
 			"COOLDOWN":    "30m",
+			"ACTION":      "observe",
 			"PREFIX_V4":   "24",
 			"PREFIX_V6":   "48",
 		},
@@ -59,8 +60,18 @@ func init() {
 	Register("challenge_solver_farm", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		defEvery := kvDur(global, "DEFAULT_EVERY", 30*time.Second)
 
+		// ACTION decides what a flagged vhost gets. Absent = observe, so a config
+		// predating the key is unchanged. A value we cannot honour falls back to
+		// observe and says so loudly — an operator must never be left believing
+		// enforcement is on when it is not.
+		action, note := solverfarm.ParseAction(kvStrClean(kv, "ACTION", ""))
+		if note != "" {
+			logging.Logf("[%s] %s", section, note)
+		}
+
 		cfg := solverfarm.Config{
 			Every:             kvDur(kv, "EVERY", defEvery),
+			Action:            action,
 			Window:            kvDur(kv, "WINDOW", time.Minute),
 			MinSubnets:        kvInt(kv, "MIN_SUBNETS", 40),
 			MinSolves:         kvInt(kv, "MIN_SOLVES", 40),
@@ -81,7 +92,7 @@ func init() {
 		// operator action on a new alert-only detector is exactly the one that
 		// makes it go quiet. Say so rather than let them discover it by silence.
 		if raw := strings.TrimSpace(kvStrClean(kv, "BLOCK", "")); raw != "" {
-			logging.Logf("[%s] BLOCK=%q is set but this detector never blocks; it only suppresses the alert's notification. Remove BLOCK from [%s].",
+			logging.Logf("[%s] BLOCK=%q is set but this detector never blocks; it only suppresses the alert's notification. Remove BLOCK and use ACTION in [%s] instead.",
 				section, raw, section)
 		}
 

@@ -441,3 +441,64 @@ func TestTruncationIsReported(t *testing.T) {
 		t.Errorf("truncation not reported in samples: %v", alerts[0].Samples)
 	}
 }
+
+func TestParseAction(t *testing.T) {
+	tests := []struct {
+		raw      string
+		want     Action
+		wantNote bool
+	}{
+		{"", ActionObserve, false}, // absent: backward compatible
+		{"observe", ActionObserve, false},
+		{"  OBSERVE ", ActionObserve, false}, // tolerant of case and spacing
+		{"logonly", ActionLogonly, false},
+		// Reserved values must fall back to observe AND say why, never silently.
+		{"deny", ActionObserve, true},
+		{"block", ActionObserve, true},
+		{"nonsense", ActionObserve, true},
+	}
+	for _, tc := range tests {
+		got, note := ParseAction(tc.raw)
+		if got != tc.want {
+			t.Errorf("ParseAction(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+		if (note != "") != tc.wantNote {
+			t.Errorf("ParseAction(%q) note = %q, wantNote=%v", tc.raw, note, tc.wantNote)
+		}
+	}
+}
+
+// logonly must keep the detector-log record and drop only the notification.
+func TestActionLogonlySuppressesNotificationOnly(t *testing.T) {
+	h := newHarness(t, Config{Action: ActionLogonly})
+	h.farmBurst("shop.example.com", 60, func(int) string { return chromeUA })
+
+	alerts := h.run(t)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1 — logonly must still raise the alert", len(alerts))
+	}
+	if got := alerts[0].Extra[core.ExtraNotify]; got != core.NotifyNo {
+		t.Errorf("%s = %q, want %q", core.ExtraNotify, got, core.NotifyNo)
+	}
+	if got := alerts[0].Extra["action"]; got != string(ActionLogonly) {
+		t.Errorf("action = %q, want logonly", got)
+	}
+}
+
+// observe (and the zero value) must not carry the notify-suppression key.
+func TestActionObserveNotifies(t *testing.T) {
+	for _, cfg := range []Config{{}, {Action: ActionObserve}} {
+		h := newHarness(t, cfg)
+		h.farmBurst("shop.example.com", 60, func(int) string { return chromeUA })
+		alerts := h.run(t)
+		if len(alerts) != 1 {
+			t.Fatalf("got %d alerts, want 1", len(alerts))
+		}
+		if _, ok := alerts[0].Extra[core.ExtraNotify]; ok {
+			t.Errorf("observe must not set %s (absent means notify)", core.ExtraNotify)
+		}
+		if got := alerts[0].Extra["action"]; got != string(ActionObserve) {
+			t.Errorf("action = %q, want observe", got)
+		}
+	}
+}

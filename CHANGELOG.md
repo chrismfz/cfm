@@ -39,6 +39,30 @@ back-filled here — see the git/PR history for that period.
   unaffected.
 
 ### Added
+- **`challenge_solver_farm` gains an `ACTION` knob.** `observe` (the default, and
+  what an existing config without the key gets) notifies and logs; `logonly`
+  keeps the `cfm.detector.log` record but sends no notification, for a vhost
+  already triaged and accepted as farmed. `deny` and `block` are defined and
+  recognised but refuse to activate, falling back to `observe` with a logged
+  reason — the vocabulary is fixed now so `detectors.conf`, a packaged conffile,
+  does not have to grow its accepted values later.
+
+  They are reserved rather than merely unwritten. `block` does not work on this
+  traffic shape: at 1.07 solves per address the address is gone before the alert
+  fires, and the pool is residential, so the ban lands on a real visitor. `deny`
+  has no safe subject — a vhost-wide 403 takes the customer's site down, and the
+  narrow form is a UA-cluster traffic rule that a farm evades by randomising one
+  header. Detectors can now also set `core.ExtraNotify` to ask the sink for the
+  log record without the mail; absent means notify, so nothing else changes.
+- **`docs/roadmaps/challenge-engine.md`.** Records the measurements behind the
+  challenge-engine decisions so they are not re-derived or, worse, contradicted
+  from intuition: why raising `defaultPowDifficulty` is a trap until the browser
+  solver is rewritten (the shipped solver runs at 48.8 kH/s against 4.49 MH/s
+  for naive native code — a ~92x handicap that raising difficulty does not
+  change), why memory-hard PoW was rejected (verification cost becomes an
+  amplification DoS, and it defends against GPU solvers while the observed farms
+  run real browsers), what per-vhost difficulty needs, and the `solve_ms`
+  baseline that says whether any of it is urgent.
 - **Forensics history surfaces the new solve signals.** The WebUI table gains a
   **Solve** column showing the real client-side solve latency (`892ms`, `1.4s`,
   and `-` when unknown or not applicable — never a misleading `0`), an
