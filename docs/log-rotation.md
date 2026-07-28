@@ -69,6 +69,24 @@ there (or ship a host-specific drop-in), don't duplicate the entry.
   logrotate's default state file, the same one the daily run uses, so the
   time-based directives are not applied twice.
 
+## Adding a new log
+
+A new file under `/var/log/cfm/` or `/usr/local/openresty/nginx/logs/` **named
+`*.log`** needs no change at all: logrotate expands the glob on every run, so
+the file is rotated from the first pass after it appears. No package upgrade,
+no installer re-run.
+
+Anything else needs a config change in the same commit, and CI will tell you:
+`check_logrotate_coverage.sh` collects every configured log path — including
+`*_LOG_FILE` keys and `/var/log/cfm/…` literals in Go, whatever their
+extension — and fails on one that nothing rotates. Two cases it catches:
+
+- a log outside the two CFM-owned directories → add a block, unless the
+  directory is vendor-rotated (then add it to `VENDOR_DIRS` in the checker and
+  to the header comment in `configs/logrotate-cfm`);
+- a log inside them that is not named `*.log` (`audit.json`, say) → either
+  rename it to `*.log` or add an explicit entry.
+
 ## Deployment
 
 Installed by **both**:
@@ -79,6 +97,31 @@ Installed by **both**:
 
 The postinst path matters: the installers are run once by hand, so hosts that
 have only ever been package-upgraded previously had no CFM rotation at all.
+
+### Refresh policy on upgrade
+
+`/etc/logrotate.d/logrotate-cfm` is **force-refreshed on every package
+upgrade** — that is the point, since a fleet-wide rotation fix that waits for
+someone to re-run an installer does not fix anything. It follows the same
+hash-stamp policy the postinst already uses for the Lua runtime, with the
+fingerprint of the last deployed version in
+`/var/lib/cfm/.packaged/logrotate-cfm.sha256`:
+
+| Live file | What happens |
+|---|---|
+| missing | installed |
+| identical to the packaged one | nothing, stamp refreshed |
+| unchanged since we last deployed it | force-refreshed (normal upgrade) |
+| locally modified | backed up to `/var/lib/cfm/backups/logrotate-cfm.local-prepkg.<ts>`, then force-refreshed, with a `WARNING` in the upgrade output |
+
+So operator tuning is never lost silently, but it is also not sticky — if you
+retune `rotate` or `maxsize` on a host, expect to reapply it after an upgrade,
+or better, raise it so the shipped defaults suit the fleet. The installers
+write the same stamp, so a hand-run installer deploy is not mistaken for a
+local edit by the next upgrade.
+
+`/etc/cron.hourly/cfm-logrotate` is a script rather than a knob, so it is
+overwritten unconditionally.
 
 Neither path leaves a `.bak` inside `/etc/logrotate.d/`. A
 `logrotate-cfm.bak` there is read as a second config by any logrotate whose

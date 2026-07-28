@@ -465,6 +465,14 @@ install_logrotate_config() {
     chmod 0644 "$dst"
     log "Copied: $src -> $dst"
 
+    # Record the packaged fingerprint the postinst compares against
+    # (deploy_logrotate_config in package-proxy-config-deploy.sh). Without it,
+    # a config this installer just deployed looks locally modified to the next
+    # package upgrade, which then backs it up and warns for no reason.
+    local stamp_dir="/var/lib/cfm/.packaged"
+    mkdir -p "$stamp_dir"
+    sha256sum "$dst" | awk '{print $1}' > "$stamp_dir/logrotate-cfm.sha256"
+
     # No dot in the basename: run-parts skips /etc/cron.hourly entries whose
     # name contains one.
     local cron_src="/usr/share/cfm/configs/cfm-logrotate.cron"

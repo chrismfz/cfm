@@ -354,8 +354,6 @@ process_engine() {
 deploy_logrotate_config() {
     dlc_src="$CFM_CONFIG_DIR/logrotate-cfm"
     dlc_dst=${CFM_LOGROTATE_DST:-/etc/logrotate.d/logrotate-cfm}
-    dlc_cron_src="$CFM_CONFIG_DIR/cfm-logrotate.cron"
-    dlc_cron_dst=${CFM_LOGROTATE_CRON_DST:-/etc/cron.hourly/cfm-logrotate}
 
     if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
         echo "CFM logrotate: not running as root; skipping"
@@ -377,34 +375,97 @@ deploy_logrotate_config() {
     fi
 
     mkdir -p "$(dirname "$dlc_dst")" 2>/dev/null || true
+
+    # Same refresh policy as the Lua runtime sync in the postinst, and for the
+    # same reason: a fleet-wide rotation fix is worthless if it does not land
+    # on upgrade, but an operator who retuned `rotate` must not lose it
+    # silently.
+    #
+    #   missing                      -> install
+    #   identical to packaged        -> nothing to do
+    #   unchanged since we last      -> force refresh (the normal upgrade path)
+    #     deployed (stamp matches)
+    #   locally modified             -> back up, then force refresh, and say so
+    #
+    # The stamp is what separates the last two: without it every version bump
+    # would look like a local edit and spam backups.
+    dlc_stamp_dir=/var/lib/cfm/.packaged
+    dlc_stamp="$dlc_stamp_dir/logrotate-cfm.sha256"
+    dlc_new_hash=$(sha256sum "$dlc_src" 2>/dev/null | awk '{print $1}')
+
+    if [ -e "$dlc_dst" ]; then
+        dlc_cur_hash=$(sha256sum "$dlc_dst" 2>/dev/null | awk '{print $1}')
+        dlc_old_hash=""
+        [ -f "$dlc_stamp" ] && dlc_old_hash=$(cat "$dlc_stamp" 2>/dev/null || true)
+
+        if [ -n "$dlc_cur_hash" ] && [ "$dlc_cur_hash" = "$dlc_new_hash" ]; then
+            echo "CFM logrotate: already current $dlc_dst"
+            mkdir -p "$dlc_stamp_dir" 2>/dev/null || true
+            printf '%s\n' "$dlc_new_hash" > "$dlc_stamp" 2>/dev/null || true
+            deploy_logrotate_cron
+            validate_logrotate_config "$dlc_dst"
+            return 0
+        fi
+
+        if [ -z "$dlc_old_hash" ] || [ "$dlc_cur_hash" != "$dlc_old_hash" ]; then
+            dlc_backup="/var/lib/cfm/backups/logrotate-cfm.local-prepkg.$(date +%s)"
+            mkdir -p /var/lib/cfm/backups 2>/dev/null || true
+            if cp -a "$dlc_dst" "$dlc_backup" 2>/dev/null; then
+                echo "WARNING: CFM logrotate: $dlc_dst was modified locally; backup saved to $dlc_backup"
+            else
+                echo "WARNING: CFM logrotate: $dlc_dst was modified locally and could not be backed up; overwriting"
+            fi
+        fi
+    fi
+
     if cp -f "$dlc_src" "$dlc_dst" 2>/dev/null; then
         chmod 0644 "$dlc_dst" 2>/dev/null || true
+        mkdir -p "$dlc_stamp_dir" 2>/dev/null || true
+        printf '%s\n' "$dlc_new_hash" > "$dlc_stamp" 2>/dev/null || true
         echo "CFM logrotate: deployed $dlc_dst"
     else
         echo "WARNING: CFM logrotate: failed to deploy $dlc_dst"
         return 0
     fi
 
-    # No dot in the basename: run-parts skips /etc/cron.hourly entries that
-    # contain one.
-    if [ -f "$dlc_cron_src" ]; then
-        mkdir -p "$(dirname "$dlc_cron_dst")" 2>/dev/null || true
-        if cp -f "$dlc_cron_src" "$dlc_cron_dst" 2>/dev/null; then
-            chmod 0755 "$dlc_cron_dst" 2>/dev/null || true
-            echo "CFM logrotate: deployed hourly pass $dlc_cron_dst"
-        else
-            echo "WARNING: CFM logrotate: failed to deploy $dlc_cron_dst"
-        fi
-    else
-        echo "WARNING: CFM logrotate: hourly runner missing: $dlc_cron_src"
+    deploy_logrotate_cron
+    validate_logrotate_config "$dlc_dst"
+
+    return 0
+}
+
+# The hourly runner is a script, not an operator knob, so it is refreshed
+# unconditionally. No dot in the basename: run-parts skips /etc/cron.hourly
+# entries that contain one.
+deploy_logrotate_cron() {
+    dlcr_src="$CFM_CONFIG_DIR/cfm-logrotate.cron"
+    dlcr_dst=${CFM_LOGROTATE_CRON_DST:-/etc/cron.hourly/cfm-logrotate}
+
+    if [ ! -f "$dlcr_src" ]; then
+        echo "WARNING: CFM logrotate: hourly runner missing: $dlcr_src"
+        return 0
     fi
 
-    if command -v logrotate >/dev/null 2>&1; then
-        if logrotate -d "$dlc_dst" >/dev/null 2>&1; then
-            echo "CFM logrotate: config validates"
-        else
-            echo "WARNING: CFM logrotate: logrotate rejected $dlc_dst; rotation may not run"
-        fi
+    mkdir -p "$(dirname "$dlcr_dst")" 2>/dev/null || true
+    if cp -f "$dlcr_src" "$dlcr_dst" 2>/dev/null; then
+        chmod 0755 "$dlcr_dst" 2>/dev/null || true
+        echo "CFM logrotate: deployed hourly pass $dlcr_dst"
+    else
+        echo "WARNING: CFM logrotate: failed to deploy $dlcr_dst"
+    fi
+
+    return 0
+}
+
+validate_logrotate_config() {
+    vlc_dst=$1
+
+    command -v logrotate >/dev/null 2>&1 || return 0
+
+    if logrotate -d "$vlc_dst" >/dev/null 2>&1; then
+        echo "CFM logrotate: config validates"
+    else
+        echo "WARNING: CFM logrotate: logrotate rejected $vlc_dst; rotation may not run"
     fi
 
     return 0

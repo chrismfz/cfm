@@ -80,7 +80,16 @@ collect_configured_paths() {
         grep -rhoE '"/var/log/cfm[./][^"]*\.log"' \
             --include="*.go" "$REPO_ROOT/internal" "$REPO_ROOT/cmd" 2>/dev/null |
             tr -d '"'
-    } | grep -E '\.log$|_log$' | sort -u
+    } |
+        # Filter by what a path IS, not by its extension. An earlier version
+        # kept only *.log / *_log, which meant a log file named anything else
+        # (say /var/log/cfm/audit.json) was invisible to this check AND to the
+        # *.log globs in configs/logrotate-cfm — uncovered, with nothing
+        # failing. /dev/stdout and friends are the only real non-files here;
+        # `access_log off` and `syslog:...` never start with / so they are
+        # already excluded by the patterns above.
+        grep -vE '^/dev/' |
+        sort -u
 }
 
 # ---------------------------------------------------------------------------

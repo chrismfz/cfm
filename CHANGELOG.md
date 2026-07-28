@@ -49,6 +49,12 @@ back-filled here — see the git/PR history for that period.
     at all — not for the edge logs, not for `/var/log/cfm/`. The package
     postinst now deploys it too (`deploy_logrotate_config` in
     `scripts/package-proxy-config-deploy.sh`), so an upgrade fixes the host.
+    It force-refreshes on every upgrade, following the same hash-stamp policy
+    the postinst already uses for the Lua runtime: untouched files are updated
+    silently, a locally modified one is backed up to
+    `/var/lib/cfm/backups/logrotate-cfm.local-prepkg.<ts>` with a `WARNING`
+    before being refreshed. A future rotation fix therefore reaches the fleet
+    without anyone re-running an installer, and without eating operator edits.
   - The config listed filenames, and the list had drifted:
     `access.bad_request.log` (1.1 GB on that host), `cfm.clam.log`,
     `cfm.socket.log`, `cfm.mysql.log`, `cfm.lsm.log`, `ua_emergency.log`,
@@ -87,7 +93,9 @@ back-filled here — see the git/PR history for that period.
   `configs/logrotate-cfm`, and fails if one is neither covered by CFM nor in a
   directory documented as vendor-rotated. It also fails if CFM declares a
   vendor-globbed path, which is what makes the duplicate-entry class of bug
-  impossible to reintroduce. `--host` runs the same audit against a live
+  impossible to reintroduce. Paths are collected regardless of extension: a
+  future log named something other than `*.log` would be missed by both the
+  globs and an extension-filtered check, so the check does not filter. `--host` runs the same audit against a live
   server's `/etc/logrotate.d`, printing each log's size and the config that
   rotates it. New doc: `docs/log-rotation.md`.
 - **`challenge_solver_farm` gains an `ACTION` knob.** `observe` (the default, and
