@@ -1,42 +1,59 @@
 # =============================================================================
-# CFM Combined Logrotate Configuration
-# Covers: Web server access logs (nginx/apache2/httpd), CFM app logs, OpenResty
+# CFM logrotate configuration   ->  /etc/logrotate.d/logrotate-cfm
 #
-# Uses copytruncate throughout:
-#   - No postrotate signals needed (no pid file path assumptions)
-#   - Works across Debian, Ubuntu, CentOS/RHEL, DirectAdmin, cPanel, OpenResty
-#   - Safe for any process that holds the log file open
-#   - Tiny theoretical data loss window (microseconds) is acceptable for access logs
+# SCOPE RULE — only log directories CFM owns are listed here:
 #
-# missingok ensures no errors if a path doesn't exist on a given server
+#   /var/log/cfm/                     CFM daemon logs
+#   /usr/local/openresty/nginx/logs/  OpenResty edge logs (the OpenResty
+#                                     tarball/package ships no logrotate
+#                                     config, so nobody else rotates these)
+#
+# Deliberately NOT listed, even though CFM writes into them:
+#
+#   /var/log/angie/          -> vendor  /etc/logrotate.d/angie    globs *.log
+#   /var/log/nginx/          -> distro  /etc/logrotate.d/nginx    globs *.log
+#   /var/log/apache2/        -> distro  /etc/logrotate.d/apache2  globs *.log
+#   /var/log/httpd/          -> distro  /etc/logrotate.d/httpd    globs *log
+#   /usr/local/apache/logs/  -> cPanel EA4 rotation
+#
+# logrotate treats a second entry for an already-configured path as a config
+# error ("duplicate log entry for ..."), so listing a vendor-globbed file here
+# does not add rotation — it breaks the run. To confirm those directories are
+# really covered on a given server, run:
+#
+#   scripts/tests/check_logrotate_coverage.sh --host
+#
+# GLOBS, NOT ENUMERATED FILENAMES. Both directories keep growing new log
+# files (access.bad_request.log, cfm.clam.log, cfm.socket.log,
+# ua_emergency.log, ...) and an enumerated list silently missed every one of
+# them. `*.log` picks up new files automatically and never re-matches an
+# already-rotated `.log.1` / `.log.2.gz`.
+#
+# copytruncate throughout:
+#   - no postrotate signals, so no pid-file path assumptions
+#   - works across Debian, Ubuntu, CentOS/RHEL, DirectAdmin, cPanel, OpenResty
+#   - safe for any process that holds the log file open
+#   - tiny theoretical data-loss window (microseconds) is fine for access logs
+# It does copy the whole file, which is exactly why the maxsize caps below
+# matter.
+#
+# WHY maxsize. A busy edge writes tens of GB/day. With `daily` alone,
+# access.log grows unbounded until the nightly run — and once it is larger
+# than the free space, copytruncate + compress cannot complete, so the file
+# never rotates again and the disk fills. maxsize rotates as soon as the cap
+# is hit, but only when logrotate actually runs, and the distro timer runs it
+# once a day — so CFM also installs /etc/cron.hourly/cfm-logrotate
+# (configs/cfm-logrotate.cron) to give maxsize an hourly chance to fire.
 # =============================================================================
 
-# --- Web server CFM access logs (nginx / apache2 / httpd) ---
-/var/log/nginx/access_cfm_combined.log
-/var/log/apache2/access_cfm_tsv.log
-/var/log/httpd/access_cfm_tsv.log {
+# --- CFM daemon logs ---------------------------------------------------------
+# cfm.log, cfm.api.log, cfm.detector.log, cfm.challenges.log, cfm.socket.log,
+# cfm.waf.log, cfm.mysql.log, cfm.smtp.log, cfm.clam.log, cfm.lsm.log,
+# lsm.log, challenge.access.log, ua_emergency.log, cfm-service.log,
+# cfm-error.log — plus anything added later.
+/var/log/cfm/*.log {
     daily
-    size 250M
-    rotate 10
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
-}
-
-# --- CFM application logs ---
-/var/log/cfm/cfm.api.log
-/var/log/cfm/cfm.challenges.log
-/var/log/cfm/cfm.detector.log
-/var/log/cfm/cfm-error.log
-/var/log/cfm/cfm.log
-/var/log/cfm/cfm.waf.log
-/var/log/cfm/cfm-service.log
-/var/log/cfm/cfm.smtp.log
-/var/log/cfm/lsm.log
-/var/log/cfm/challenge.access.log {
-    daily
+    maxsize 200M
     rotate 14
     compress
     delaycompress
@@ -45,15 +62,39 @@
     copytruncate
 }
 
-# --- OpenResty nginx logs ---
-/usr/local/openresty/nginx/logs/access.log
-/usr/local/openresty/nginx/logs/access-panel.log
-/usr/local/openresty/nginx/logs/access.cfm.log
-/usr/local/openresty/nginx/logs/throttle.log
-/usr/local/openresty/nginx/logs/access_cfm_tsv.log
-/var/log/angie/access-panel.log
-/usr/local/openresty/nginx/logs/error.log {
+# --- OpenResty edge logs -----------------------------------------------------
+# access.log, access.cfm.log, access-panel.log, access.bad_request.log,
+# throttle.log, access_cfm_tsv.log, error.log (+ leftovers such as
+# 429-debug.log).
+#
+# High volume, so this block differs from the one above on purpose:
+#   - no delaycompress: an uncompressed .1 of a multi-GB access log costs as
+#     much disk as the live file
+#   - shorter tail (rotate 7): 7 compressed generations of a 2G cap is already
+#     a lot of disk
+/usr/local/openresty/nginx/logs/*.log {
     daily
+    maxsize 2G
+    rotate 7
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+
+# --- Legacy top-level paths --------------------------------------------------
+# Pre-/var/log/cfm/ locations that some hosts still write to:
+#   /var/log/cfm.smtp.log   default when SMTP logging is on and SMTP_LOG_FILE
+#                           is unset in cfm.conf (internal/config/config.go)
+#   /var/log/cfm.log        }  legacy daemon/service logs still read back by
+#   /var/log/cfm-service.log}  the status API (internal/status/status.go)
+# Not globbed as /var/log/*.log on purpose — that directory belongs to the
+# distro and to every other daemon on the box.
+/var/log/cfm.log
+/var/log/cfm.smtp.log
+/var/log/cfm-service.log {
+    daily
+    maxsize 200M
     rotate 14
     compress
     delaycompress

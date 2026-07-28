@@ -42,6 +42,8 @@ jobs:
         run: ./scripts/tests/check_cfm_clearance_require.sh
       - name: Validate challenge/WAF bypass list + generator safety bounds
         run: ./scripts/tests/check_bypass_list.sh
+      - name: Enforce logrotate coverage for every CFM log path
+        run: ./scripts/tests/check_logrotate_coverage.sh
       # Lua syntax check + unit tests. luajit was installed above; both
       # targets bail out with a clear message if it ever goes missing.
       - name: Lua syntax check (configs/lua)

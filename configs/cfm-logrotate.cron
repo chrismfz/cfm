@@ -1,0 +1,34 @@
+#!/bin/sh
+# CFM hourly logrotate pass  ->  /etc/cron.hourly/cfm-logrotate
+#
+# /etc/logrotate.d/logrotate-cfm caps the edge access logs with `maxsize`, but
+# maxsize only takes effect when logrotate actually runs, and the distro
+# cron/timer runs it once a day. A busy edge writes tens of GB in a day, so
+# once-a-day is far too coarse: without this pass access.log grows until
+# copytruncate + compress no longer fit on disk, after which it never rotates
+# again.
+#
+# No -s: logrotate's built-in default state file is the same one the distro's
+# daily run uses, so that run sees the rotations we performed here and the
+# time-based directives (daily / rotate N) are not applied twice.
+set -e
+
+CONF=/etc/logrotate.d/logrotate-cfm
+
+[ -r "$CONF" ] || exit 0
+command -v logrotate >/dev/null 2>&1 || exit 0
+
+# A concurrent daily run holds the state-file lock, and a previous hourly pass
+# may still be copying a multi-GB access log; skipping this hour is harmless,
+# the next hour picks it up. Never exit non-zero for a skipped or failed run —
+# cron would mail the operator every hour.
+LOCK=/var/lock/cfm-logrotate.lock
+[ -d /var/lock ] || LOCK=/tmp/cfm-logrotate.lock
+
+if command -v flock >/dev/null 2>&1; then
+    flock -n "$LOCK" logrotate "$CONF" || exit 0
+else
+    logrotate "$CONF" || exit 0
+fi
+
+exit 0
