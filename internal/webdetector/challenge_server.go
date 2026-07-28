@@ -647,6 +647,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			SolveMS:  powSolveLatencyMS(issuedAt, time.Now().UTC()),
 		}
 
+		publishChallengeSolveEvent(solve)
+
 		if challengeSolvedHook != nil {
 			challengeSolvedHook(solve)
 		} else {

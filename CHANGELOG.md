@@ -18,6 +18,32 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **`challenge_solver_farm` detector — spots distributed challenge-solving
+  botnets. Alert-only.** Bots now complete the whole cookie + JS + PoW flow
+  correctly, and defeat every per-IP threshold *by construction*: they solve once
+  per address from a large residential-proxy pool. Measured on a production edge
+  over 23h, one farm produced **101,880 solves on a single vhost from 95,281
+  distinct IPs — 1.07 solves per IP — across 77,792 distinct `/24`s**. No per-IP
+  counter can fire on that; the population is only visible in aggregate.
+
+  The detector keys on the **vhost** and counts distinct client subnets solving
+  it within `WINDOW`. On the same data the farm ran at 73 subnets/min (median;
+  p01 49, max 110) against a peak of 22 for the busiest legitimate vhost, so the
+  default `MIN_SUBNETS = 40` caught 1380 of 1381 farm-minutes with zero hits
+  across 1605 legitimate vhost-minutes. Replaying the full 111,537-solve log
+  through the detector flags exactly one vhost and nothing else.
+
+  Two deliberate choices: detection is **not** keyed on User-Agent (it is
+  attacker-controlled — the separation holds UA-agnostically, and the UA
+  breakdown rides on the alert as attribution evidence instead); and every alert
+  is stamped `enforcement=observe`, so the sink notifies and returns before
+  picking an IP to ban. At ~1 solve per IP a per-IP ban cannot work — the address
+  never returns — and the pool is residential, so it risks banning a real
+  customer. Acting on a flagged vhost is a separate, deliberate change.
+
+  Calibration is one server over one day; `MIN_SUBNETS` is a knob and
+  `ALLOW_HOSTS`/`ALLOW_UA_CONTAINS`/`ALLOW_NETS` exempt known-good sources.
+  See `docs/DETECTORS.md`.
 - **Challenge solves now record the UA and the real solve latency.** Groundwork
   for detecting distributed solver farms — bots that legitimately complete the
   cookie + JS + PoW flow, once per IP, and so stay under every per-IP abuse

@@ -97,6 +97,37 @@ Typical defaults below are representative from the shipped template and should b
 | `outbound` | outbound abuse sentinel (per-uid SMTP/scan/HTTP bursts) | `OUTBOUND_*` thresholds, allow users/groups, dedupe | `WINDOW=60s`, alerting focus |
 | `health` | host health anomalies (CPU/RAM/disk/temp/net spikes) | `% thresholds`, spike multipliers, watch lists | `EVERY=20s`, mostly alerting |
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
+| `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=60s`, `MIN_SUBNETS=40`, **alert-only** |
+
+### `challenge_solver_farm` — why it exists
+
+Bots that solve the challenge *correctly* defeat every per-IP threshold by
+construction: they solve once per address from a large residential-proxy pool.
+Measured on a production edge over 23h, one farm produced 101,880 solves on a
+single vhost from 95,281 distinct IPs (**1.07 solves per IP**) spread across
+77,792 distinct `/24`s. A per-IP counter only ever sees a first-and-only request.
+
+The detector therefore keys on the **vhost**, and counts the number of distinct
+client subnets that solve it within `WINDOW`. On that same data the farm ran at
+73 subnets/minute (median; p01 49, max 110) while the busiest legitimate vhost on
+the server peaked at 22 — so `MIN_SUBNETS=40` caught 1380 of 1381 farm-minutes
+with zero hits across 1605 legitimate vhost-minutes.
+
+Two deliberate design choices:
+
+- **Not keyed on User-Agent.** The UA is attacker-controlled; keying detection on
+  it would be defeated by randomising a header. The separation above holds
+  UA-agnostically. The UA breakdown rides on the alert as attribution evidence.
+- **Alert-only, structurally.** Every alert is stamped `enforcement=observe`, so
+  the section sink notifies and returns *before* choosing an IP to block. At ~1
+  solve per IP a per-IP ban cannot work — the address never returns — and the
+  pool is residential, so banning it risks a real customer. What to *do* about a
+  flagged vhost (raise its PoW difficulty, rate-limit challenge issuance, block a
+  cluster) is a separate, deliberate decision.
+
+Note the calibration is one server over one day. A very large vhost with a
+genuinely global mobile audience could legitimately spread wider; `MIN_SUBNETS`
+is a knob and `ALLOW_HOSTS` / `ALLOW_UA_CONTAINS` exempt known-good sources.
 
 ---
 
