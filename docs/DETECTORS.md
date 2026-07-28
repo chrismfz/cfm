@@ -97,6 +97,147 @@ Typical defaults below are representative from the shipped template and should b
 | `outbound` | outbound abuse sentinel (per-uid SMTP/scan/HTTP bursts) | `OUTBOUND_*` thresholds, allow users/groups, dedupe | `WINDOW=60s`, alerting focus |
 | `health` | host health anomalies (CPU/RAM/disk/temp/net spikes) | `% thresholds`, spike multipliers, watch lists | `EVERY=20s`, mostly alerting |
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
+| `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=60s`, `MIN_SUBNETS=40`, **alert-only** |
+
+### `challenge_solver_farm` — why it exists
+
+Bots that solve the challenge *correctly* defeat every per-IP threshold by
+construction: they solve once per address from a large residential-proxy pool.
+Measured on a production edge over 23h, one farm produced 101,880 solves on a
+single vhost from 95,281 distinct IPs (**1.07 solves per IP**) spread across
+77,792 distinct `/24`s. A per-IP counter only ever sees a first-and-only request.
+
+The detector therefore keys on the **vhost**, and counts the number of distinct
+client subnets that solve it within `WINDOW`. Calibration was re-derived by
+replaying that capture through the detector at its original timestamps, so the
+figures describe what the code measures — a **sliding** window sampled every
+`EVERY`, not disjoint one-minute buckets. The distinction matters: the maximum
+over sliding windows is always ≥ the maximum over fixed buckets, so bucket-derived
+numbers overstate the headroom.
+
+| | farm vhost | every other vhost |
+|---|---|---|
+| distinct `/24` per window | median 73, p01 49, max 122 | **max 27** |
+| evaluations flagged at `MIN_SUBNETS=40` | 2758 / 2761 | **0 / 3212** |
+
+Two deliberate design choices:
+
+- **Not keyed on User-Agent.** The UA is attacker-controlled; keying detection on
+  it would be defeated by randomising a header. The separation above holds
+  UA-agnostically. The UA breakdown rides on the alert as attribution evidence.
+- **The evidence cap cannot suppress detection.** `MAX_TRACKED_PER_HOST` bounds
+  the sample buffer only; the subnet and IP sets the threshold reads are tracked
+  separately. Otherwise a cheap flood from a single subnet could fill the buffer
+  and bury a farm's spread behind it. Truncation is always stated on the alert.
+- **Alert-only, structurally.** At ~1 solve per IP a per-IP ban cannot work — the
+  address never returns — and the pool is residential, so banning it risks a real
+  customer. What to *do* about a flagged vhost (raise its PoW difficulty,
+  rate-limit challenge issuance, block a cluster) is a separate, deliberate
+  decision. Two `Extra` keys carry that, doing different jobs:
+  - `ip_scope=host` — the finding is about a vhost, so the sink must not resolve
+    a source address for it. Its resolver otherwise falls back to scanning the
+    alert's samples for anything IP-shaped, and those samples quote the observed
+    User-Agents; a client could then name its own "source" address, have it
+    matched by the global ignore list, and get the alert dropped before any
+    notification. An ordinary `Chrome/118.0.0.0` is IP-shaped enough to cause the
+    same mis-attribution by accident.
+  - `enforcement=observe` — stops the sink short of any block if a `BLOCK` policy
+    is configured on the section.
+
+  **Leave `BLOCK` unset on this section** — use `ACTION` instead. `BLOCK` would
+  not block, but it *would* move the alert onto a path that logs without
+  notifying, so you would quietly stop being alerted. The daemon logs a warning
+  if it finds one.
+
+#### `ACTION`
+
+| value | effect |
+|---|---|
+| `observe` | **default**, and what you get when the key is absent: notification + `cfm.detector.log` |
+| `logonly` | log record only, no notification — for a vhost already triaged and accepted as farmed |
+| `deny`, `block` | **reserved**: recognised, refused at load with a logged reason, falls back to `observe` |
+
+`deny` and `block` are defined but not implemented, deliberately. `block` does
+not work on this traffic shape — at 1.07 solves per address the address is gone
+before the alert fires, and the pool is residential, so the ban lands on a real
+visitor. `deny` has no safe subject: a vhost-wide 403 takes the customer's site
+down, and the narrow form is a UA-cluster traffic rule that a farm evades by
+randomising one header. The actuator that fits — raising the vhost's PoW
+difficulty while flagged — needs per-vhost difficulty and a faster browser
+solver first; see `docs/roadmaps/challenge-engine.md`.
+
+#### Where the finding shows up
+
+| Surface | What you get |
+|---|---|
+| Email (and Slack if routed) | The full alert: solves, distinct IPs, distinct subnets, solves-per-IP, the UA breakdown and the impossible-UA share |
+| `cfm.detector.log` | Same content, greppable as `Challenge/SolverFarm` |
+| `/var/lib/cfm/notify.log.jsonl` | One JSON record per notification |
+| `cfm.challenges.log` | Per solve: `ua=`, `solve_ms=`, `ua_impossible=` |
+| WebUI → WebDetector → Forensics | `challenge_solved` rows with the UA, a **Solve** latency column, and the impossible-UA pill/filter |
+
+Notification is on by default: the section matches the `[detector "*"]` catch-all
+in `notify.conf`, which routes to email, and the alert's `warn` severity passes
+the (unset) default severity gate. Slack needs an explicit `[detector
+"challenge_solver_farm"]` block — there is a commented example in
+`configs/notify.conf` — and the `[channel "slack"]` itself ships disabled.
+
+Because the detector never blocks, the notification *is* the product. That is
+why a `BLOCK` value, which silences it, is worth warning about.
+
+Note the calibration is one server over one day. A very large vhost with a
+genuinely global mobile audience could legitimately spread wider; `MIN_SUBNETS`
+is a knob and `ALLOW_HOSTS` / `ALLOW_UA_CONTAINS` / `ALLOW_NETS` / `ALLOW_IPS`
+exempt known-good sources.
+
+`EVERY` is clamped to `WINDOW` at load — a longer evaluation interval would prune
+part of the stream away before it was ever examined, and a section that omits
+`EVERY` inherits `[global] DEFAULT_EVERY`, which ships at 60s.
+
+Alerts also carry `impossible_ua` — how many solves in the window submitted a
+self-contradictory User-Agent (see below). It is corroboration for the operator
+reading the alert, never part of the threshold: a farm can send a well-formed UA
+whenever it chooses.
+
+### User-Agent plausibility (`internal/uaplausible`)
+
+Reports whether a UA contradicts *itself* — a combination no shipping browser
+emits. Examples, all present in real traffic: an iPhone carrying Blink's
+`AppleWebKit/537.36` (iOS is required to use the system WebKit, which reports
+`60x`), a bare `Chrome/` token on iOS (Chrome on iOS is `CriOS`), a Firefox
+carrying the Blink WebKit token, a Chrome UA missing `KHTML, like Gecko`.
+
+It is checked on every challenge solve and surfaced three ways:
+
+- `ua_impossible=<reasons>` in `cfm.challenges.log`
+- `payload.ua_impossible` on the `challenge_solved` history event
+- `impossible_ua` count on `challenge_solver_farm` alerts
+
+All three are written only when the verdict is *impossible*, so their absence on
+a solve means the UA was coherent, not that the check did not run.
+
+In the WebUI, the forensics history table shows an `impossible` pill next to the
+offending UA (with the matched rules in its tooltip) and has an
+**impossible UA only** filter.
+
+Two boundaries worth keeping in mind:
+
+- **Coherence, not freshness.** An old-but-consistent UA is a real person on an
+  old browser and is never flagged.
+- **No staleness scoring.** It is tempting to score a UA by how far behind the
+  fleet its version is. On the capture these rules came from, Chrome 118 was
+  72.5% of all Chrome requests *because the farm dominated the traffic* —
+  calibrating "current" by volume lets the attacker define normal.
+
+`Verdict.Family` reports the **engine** identity, so every Chromium derivative
+(Edge, Opera, Samsung Internet, Brave, Vivaldi, Yandex, Electron apps) reads as
+`Chrome`. `HeadlessChrome/` is deliberately not matched at all — a headless UA is
+honest, not impossible.
+
+When adding a rule, validate it against a real UA corpus first. The
+`(KHTML, like Gecko)` exact-match draft of one rule flagged legitimate crawlers
+(Amazonbot, YouBot, GeedoShopProductFinder) that append their identity inside
+the same parentheses — caught only because the rule was measured before shipping.
 
 ---
 

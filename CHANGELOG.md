@@ -17,7 +17,167 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **A host-scoped alert can no longer be silenced by the client it reports on.**
+  The section sink resolves an alert's source IP by falling back to scanning the
+  alert's samples for anything IP-shaped — safe while every detector keyed its
+  alerts on an IP, but the new `challenge_solver_farm` finding is keyed on a
+  vhost and quotes the User-Agents it observed. A client could therefore put
+  `10.0.0.1` (or `127.0.0.1`) in its User-Agent, have the sink adopt it as the
+  alert's source, and hit the global ignore list — which returns before any
+  notification and, with the shipped `LOG_IGNORED = no`, without a log line
+  either. One header would have suppressed the detector built to catch that
+  client. The same fallback mis-attributed alerts by accident: an ordinary
+  `Chrome/118.0.0.0` is IP-shaped, so it was reported as the source address and
+  enriched with that unrelated network's ASN/geo.
+
+  Detectors can now declare `Extra[core.ExtraIPScope] = core.IPScopeHost` when
+  their `Key` is not an address; the sink's guesswork fallback stands down for
+  those, while a detector-supplied `Extra["ip"]` still wins. Only
+  `challenge_solver_farm` sets it — IP-keyed detectors (`waf_security`,
+  `api_abuse`, …) resolve authoritatively from `Extra["ip"]` or `Key` and are
+  unaffected.
+
 ### Added
+- **`challenge_solver_farm` gains an `ACTION` knob.** `observe` (the default, and
+  what an existing config without the key gets) notifies and logs; `logonly`
+  keeps the `cfm.detector.log` record but sends no notification, for a vhost
+  already triaged and accepted as farmed. `deny` and `block` are defined and
+  recognised but refuse to activate, falling back to `observe` with a logged
+  reason — the vocabulary is fixed now so `detectors.conf`, a packaged conffile,
+  does not have to grow its accepted values later.
+
+  They are reserved rather than merely unwritten. `block` does not work on this
+  traffic shape: at 1.07 solves per address the address is gone before the alert
+  fires, and the pool is residential, so the ban lands on a real visitor. `deny`
+  has no safe subject — a vhost-wide 403 takes the customer's site down, and the
+  narrow form is a UA-cluster traffic rule that a farm evades by randomising one
+  header. Detectors can now also set `core.ExtraNotify` to ask the sink for the
+  log record without the mail; absent means notify, so nothing else changes.
+- **`docs/roadmaps/challenge-engine.md`.** Records the measurements behind the
+  challenge-engine decisions so they are not re-derived or, worse, contradicted
+  from intuition: why raising `defaultPowDifficulty` is a trap until the browser
+  solver is rewritten (the shipped solver runs at 48.8 kH/s against 4.49 MH/s
+  for naive native code — a ~92x handicap that raising difficulty does not
+  change), why memory-hard PoW was rejected (verification cost becomes an
+  amplification DoS, and it defends against GPU solvers while the observed farms
+  run real browsers), what per-vhost difficulty needs, and the `solve_ms`
+  baseline that says whether any of it is urgent.
+- **Forensics history surfaces the new solve signals.** The WebUI table gains a
+  **Solve** column showing the real client-side solve latency (`892ms`, `1.4s`,
+  and `-` when unknown or not applicable — never a misleading `0`), an
+  `impossible` pill beside a self-contradictory User-Agent with the matched rules
+  in its tooltip, and an **impossible UA only** filter. The tooltip also now
+  lists the PoW difficulty and distinguishes the real solve latency from the
+  legacy server-side verify time. Without this the two new fields were persisted
+  but invisible in the page whose empty UA column motivated the work.
+
+### Fixed
+- **Challenge-solve subscribers no longer leak across config reloads.** Detector
+  factories re-run on every reload — and the config signature folds in each
+  tailed log's inode, so a nightly logrotate forces one. Each run registered
+  another challenge-solve callback with no way to remove it, so the closures
+  belonging to retired detectors kept enqueueing into buffers nothing drained any
+  more. On the ~100k-solves/day stream this change introduces, that grows
+  without bound with reload count. `stopAll` now clears the subscriber list, the
+  new instance re-subscribes as it is built, and the detector's own ingest buffer
+  is bounded with a logged overflow count.
+
+### Added
+- **User-Agent plausibility check (`internal/uaplausible`).** Flags a UA that
+  contradicts *itself* — an iPhone carrying the Blink `AppleWebKit/537.36` token,
+  a `Chrome/` token on iOS where only `CriOS` exists, a Firefox carrying Blink's
+  WebKit build, a Chrome UA missing `KHTML, like Gecko` or with a hand-truncated
+  version, two platform tokens at once. Recorded on every challenge solve
+  (`ua_impossible=` in `cfm.challenges.log`, `payload.ua_impossible` in history)
+  and reported as corroborating evidence on `challenge_solver_farm` alerts.
+
+  It answers "is this UA a lie", **not** "is this UA old": a stale-but-coherent
+  UA belongs to a real person on an old browser. Every rule was derived from and
+  validated against a 314,877-request production capture (4,889 distinct UA
+  strings); together they flag 0.55% of it, and every flagged string was
+  inspected. An earlier draft of the `KHTML` rule matched the literal
+  `(KHTML, like Gecko)` and wrongly flagged legitimate crawlers — Amazonbot,
+  YouBot, GeedoShopProductFinder — which append their own identity inside the
+  same parentheses; those three are now regression cases.
+
+  Deliberately **not** included: version-staleness scoring. On the same capture,
+  Chrome 118 was 72.5% of all Chrome requests *because a solver farm dominated
+  the traffic* — so calibrating "current" by request volume would let an attacker
+  define normal, and any other calibration still only measures age, which
+  legitimate old browsers share.
+- **`challenge_solver_farm` detector — spots distributed challenge-solving
+  botnets. Alert-only.** Bots now complete the whole cookie + JS + PoW flow
+  correctly, and defeat every per-IP threshold *by construction*: they solve once
+  per address from a large residential-proxy pool. Measured on a production edge
+  over 23h, one farm produced **101,880 solves on a single vhost from 95,281
+  distinct IPs — 1.07 solves per IP — across 77,792 distinct `/24`s**. No per-IP
+  counter can fire on that; the population is only visible in aggregate.
+
+  The detector keys on the **vhost** and counts distinct client subnets solving
+  it within `WINDOW`. Thresholds were derived by replaying that capture through
+  the detector at its original timestamps, so they describe what the code
+  measures — a **sliding** window sampled every `EVERY`, not disjoint one-minute
+  buckets (the sliding maximum is always ≥ the bucket maximum, so bucket figures
+  would overstate the headroom). The farm ran at a median of 73 subnets per
+  window (p01 49, max 122) against a maximum of 27 for every other vhost, so the
+  default `MIN_SUBNETS = 40` flags 2758 of 2761 farm evaluations and 0 of 3212
+  legitimate ones. Replaying the full 111,537-solve log flags exactly one vhost
+  and nothing else.
+
+  The evidence cap cannot suppress detection: `MAX_TRACKED_PER_HOST` bounds the
+  sample buffer only, while the subnet and IP sets the threshold reads are
+  tracked separately — otherwise a cheap flood from one subnet could fill the
+  buffer and bury a farm's spread behind it. Truncation is always stated on the
+  alert. `EVERY` is clamped to `WINDOW`, since a longer interval would prune part
+  of the stream away before it was ever examined (a section omitting `EVERY`
+  inherits `[global] DEFAULT_EVERY`, which ships at 60s).
+
+  Two deliberate choices: detection is **not** keyed on User-Agent (it is
+  attacker-controlled — the separation holds UA-agnostically, and the UA
+  breakdown rides on the alert as attribution evidence instead); and the detector
+  never blocks. At ~1 solve per IP a per-IP ban cannot work — the address never
+  returns — and the pool is residential, so it risks banning a real customer.
+  Acting on a flagged vhost is a separate, deliberate change. Alerts carry
+  `ip_scope=host` and `enforcement=observe`; leave `BLOCK` unset on the section
+  (it would not block, but it would move the alert onto a path that logs without
+  notifying).
+
+  Calibration is one server over one day; `MIN_SUBNETS` is a knob and
+  `ALLOW_HOSTS`/`ALLOW_UA_CONTAINS`/`ALLOW_NETS` exempt known-good sources.
+  See `docs/DETECTORS.md`.
+- **Challenge solves now record the UA and the real solve latency.** Groundwork
+  for detecting distributed solver farms — bots that legitimately complete the
+  cookie + JS + PoW flow, once per IP, and so stay under every per-IP abuse
+  threshold. Two things were missing to spot them:
+  - **UA.** `challenge_solved` history events carried only `{uri, diff, ms}`, so
+    the forensics UI (which renders `payload.ua`) showed an empty UA column on
+    solve rows while WAF rows were populated. A farm's signature is one *exact*
+    UA string solving from dozens of ASNs within seconds; without the UA there
+    was nothing to correlate on. Now recorded on the event and in
+    `cfm.challenges.log` (`ua=`).
+  - **Real solve latency** (logged as `solve_ms=`, or `-` when unknown). The
+    `ms=` field measured only the verify handler's
+    own processing — its timer started when the POST arrived, after the client
+    had already solved, which is why solves logged `ms=0`. The PoW token already
+    carries its issue timestamp, so the true issue→submit latency needs no new
+    server state — but the timestamp was in whole seconds, and an honest browser
+    solves the default difficulty in ~1s, rounding the signal away. Tokens are
+    now minted with millisecond timestamps and solves log/persist `solve_ms=`
+    alongside the unchanged `ms=`. Implausibly fast solves are the one PoW signal
+    a native solver cannot fake without surrendering its speed advantage.
+    Per-solve values are noisy (solve time is exponentially distributed) — judge
+    them per IP/ASN/UA cluster, not per event. A value is reported only when it
+    is real: the two timestamps are two readings of the wall clock, so anything
+    outside `[0, PoW TTL]` (an NTP step, a VM migration) is recorded as unknown
+    rather than as a measurement. Rejecting only negatives would have truncated
+    the distribution at exactly the end this signal exists to observe.
+
+  Verification of a token minted by the *previous* binary (whole seconds) is
+  preserved by magnitude-detecting the encoding, so a rolling upgrade does not
+  fail every in-flight solve for the length of the PoW TTL. The browser-side
+  solver is untouched: the token keeps its 58-byte layout and the client never
+  read the timestamp field.
 - **`cfm php-inventory` — read-only PHP build discovery (SP roadmap P0).** New
   command that enumerates the host's PHP builds across cPanel EA4, CloudLinux
   alt-php, DirectAdmin CustomBuild, LiteSpeed lsphp and system PHP, reporting

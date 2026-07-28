@@ -16,6 +16,35 @@ type Alert struct {
 	Extra   map[string]string
 }
 
+// ExtraIPScope is the Alert.Extra key a detector uses to declare what its Key
+// identifies. Set it to IPScopeHost when the finding is about a vhost (or any
+// non-IP subject) rather than a single source address.
+//
+// This is not cosmetic. The sink resolves an alert's source IP by falling back
+// to scanning Alert.Samples for anything IP-shaped, which is safe only while
+// samples are server-generated. A detector whose Key is not an IP AND whose
+// samples quote client-controlled text (a User-Agent, a URI, a header) would
+// otherwise hand the sink an address chosen by the very client it is reporting
+// on — which the sink then feeds to the global ignore list, so a caller could
+// suppress its own alert. Declaring the scope makes the fallback stand down.
+const (
+	ExtraIPScope = "ip_scope"
+	IPScopeHost  = "host"
+)
+
+// ExtraNotify lets a detector suppress the operator notification for one alert
+// while still writing it to the detector log. Set it to NotifyNo.
+//
+// The sink's no-policy path notifies unconditionally, which is right for a
+// detector whose alerts are all worth a mail. It is wrong for one an operator
+// runs continuously against a vhost they have already triaged: the finding stays
+// true for hours, so the mail becomes noise while the log record is still worth
+// keeping. Absent (the default) means notify, so no existing detector changes.
+const (
+	ExtraNotify = "notify"
+	NotifyNo    = "no"
+)
+
 type Sink interface{ Publish(Alert) }
 
 type PeriodicDetector interface {

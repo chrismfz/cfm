@@ -302,7 +302,8 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			}
 
 			// Hook solved logging into detectors layer (adds enrichment + lets us emit "expired" elsewhere).
-			webdet.SetChallengeSolvedHook(func(ip, host, uri string, diff int, ms int64) {
+			webdet.SetChallengeSolvedHook(func(s webdet.ChallengeSolve) {
+				ip, host, uri, diff := s.IP, s.Host, s.URI, s.Diff
 				// Best-effort enrichment using the same enricher as the engine.
 				suffix := ""
 				if enr := w.eng.Enricher(); enr != nil {
@@ -341,13 +342,29 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 					ridPart = fmt.Sprintf(" waf_rule_id=%d", wafRuleID)
 				}
 
+				// A self-contradictory UA is worth grepping for on its own.
+				uaBad := ""
+				if s.UAImpossible {
+					uaBad = " ua_impossible=" + s.UAReason
+				}
+
+				// ms= stays the server-side verify time it has always been, so
+				// existing log tooling keeps parsing. solve_ms= is the new,
+				// actually-meaningful number: issue → submit wall clock. It
+				// prints "-" rather than a number when unknown (clock step
+				// between issue and verify), so a reader never mistakes a
+				// sentinel for a measurement.
+				solveMS := "-"
+				if ms, ok := s.SolveLatencyMS(); ok {
+					solveMS = strconv.FormatInt(ms, 10)
+				}
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d diff=%d%s%s%s",
-					ip, host, uri, ms, diff, reasonPart, ridPart, suffix,
+					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d ua=%q%s%s%s%s",
+					ip, host, uri, s.VerifyMS, solveMS, diff, s.UA, uaBad, reasonPart, ridPart, suffix,
 				)
 
 				// Record solve in challenge API store (best-effort)
-				w.eng.RecordChallengeSolved(ip, host, uri, diff, ms)
+				w.eng.RecordChallengeSolved(s)
 
 			})
 
