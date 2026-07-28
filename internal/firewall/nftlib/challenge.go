@@ -311,6 +311,19 @@ func (b *Backend) SetChallengeRedirectEnabled(enabled bool) {
 	}
 }
 
+// ChallengeRedirectEnabled reports whether the challenge DNAT redirect is armed.
+//
+// It exists so the challenge server can say which of two very different things
+// its "ensure redirect" call actually did: install the rules, or find the
+// redirect disabled and clean up. Both return nil, and a log line that says
+// "OK" for both is how an operator ends up believing DNAT is armed when it is
+// not — or the reverse.
+func (b *Backend) ChallengeRedirectEnabled() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.challengeRedirectEnabled
+}
+
 func (b *Backend) CleanupChallengeRedirect() error {
 	if err := b.cleanupScopedDNATAccepts(dnatAcceptNamespaceChallenge); err != nil {
 		return err

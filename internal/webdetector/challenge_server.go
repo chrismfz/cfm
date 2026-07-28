@@ -585,10 +585,25 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 					httpAddr, httpsAddr, err,
 				)
 				return fmt.Errorf("EnsureChallengeRedirect: %w", err)
-			} else {
-				// Optional: one-line confirmation (useful during debugging)
+			}
+			// EnsureChallengeRedirect returns nil for two opposite outcomes: it
+			// installed the DNAT rules, or it found the redirect disabled
+			// (OPENRESTY_MODE, where the edge decides in-path) and cleaned them
+			// up instead. Reporting "OK" for both is how an operator ends up
+			// believing DNAT is armed when it is not, in the one area whose own
+			// code comment records having been burned before. Say which.
+			armed := true
+			if q, ok := any(s.fw).(interface{ ChallengeRedirectEnabled() bool }); ok {
+				armed = q.ChallengeRedirectEnabled()
+			}
+			if armed {
 				logging.LogfCHALLENGES(
-					"[challenge] nft ensure redirect OK http=%s https=%s",
+					"[challenge] nft challenge DNAT armed: flagged clients are redirected to http=%s https=%s",
+					httpAddr, httpsAddr,
+				)
+			} else {
+				logging.LogfCHALLENGES(
+					"[challenge] nft challenge DNAT disabled (edge decides in-path); any stale redirect rules cleaned up. Listeners http=%s https=%s still serve the edge's proxy_pass",
 					httpAddr, httpsAddr,
 				)
 			}
@@ -731,8 +746,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// record that lets a fingerprint↔UA mapping be derived from real traffic
 		// later rather than written from memory.
 		if tlsPrints.FirstSeen(solve.TLSFP) {
-			logging.LogfCHALLENGES("[challenge] tls_fp=%s first_seen grease=%t ua=%q tls=%q",
-				solve.TLSFP, fp.GREASE, solve.UA, solve.TLSRaw)
+			// trunc= is not decoration: a truncated list can be shared by two
+			// different clients whose offers agree up to the bound, so the id is
+			// weaker evidence and the line has to say which kind it is.
+			logging.LogfCHALLENGES("[challenge] tls_fp=%s first_seen grease=%t trunc=%t ua=%q tls=%q",
+				solve.TLSFP, fp.GREASE, fp.Truncated, solve.UA, solve.TLSRaw)
 		} else if solve.TLSFP != "" && tlsPrints.Capped() {
 			// No silent caps: say the dictionary stopped admitting entries, once,
 			// rather than let a reader conclude the daemon lost a first_seen line.

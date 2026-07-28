@@ -123,6 +123,31 @@ Note the farm is **slower** than legitimate traffic, and nothing solved under
 "suspiciously fast solve" rule catches nothing today, and why §3 is not urgent.
 If that distribution ever collapses toward zero for some cluster, revisit.
 
+Two solves in the same window ran **59.4 s** (Chrome on a Nova residential line)
+and **26.3 s** (Firefox Android). The p90 above is 11.4 s, so these are the tail
+rather than the norm — but difficulty 16 costs a weak phone or an old desktop
+close to a minute, and that is a real user sitting in front of a spinner. If §2
+(per-vhost difficulty) ever lands, this tail is the argument for lowering it,
+not raising it.
+
+**`challenge_cookie_discard` in its first three hours of production**: 20+
+alerts, each address doing 20–60 solves in a 2–5 minute burst and then falling
+silent while the next takes over. Mostly US residential ISPs (Frontier, Charter,
+AT&T, Comcast, Taylor Telephone) — but **not exclusively**: the busiest single
+exit in the 16:17 window was `109.166.36.188`, AS212238 Datacamp in Japan, a
+datacenter. An earlier note in this file said "every one a US residential ISP";
+that was drawn from one window and is corrected here. The pool mixes residential
+and datacenter exits, which matters because an ASN-based allowlist would not
+have covered it either way. That
+serial shape — one exit at a time rather than many in parallel — is the thing
+the detector was built to see, and it is also why a per-vhost concurrency rule
+misses it entirely. No false positive has appeared: a human who clears cookies
+does it a handful of times an hour, not fifty times in three minutes, and the
+`MIN_SOLVES = 8` threshold sits above the natural gap measured at 5 in the
+offline corpus. The detector still ships alert-only (`BLOCK` unset); this is the
+evidence that would justify `BLOCK = "dryrun"` and then a TTL block, in that
+order.
+
 ## 6. TLS fingerprint ↔ UA coherence (log-first since 2026-07-28)
 
 Every other signal on a solve is written by the client: the User-Agent, the
@@ -173,14 +198,160 @@ fingerprint discriminating), and records `grease=true|false` on the first_seen
 line — so whether GREASE survives OpenSSL's ClientHello parsing on this edge at
 all comes out of the data instead of an assumption.
 
-Three things to check when reading that data rather than assume:
+**Confirmed in production on first deploy (2026-07-28), within a minute of
+start.** Two of the open questions above are answered by the data, not by
+argument:
 
-- whether `$ssl_ciphers`/`$ssl_curves` stay populated on **resumed** sessions
-  (that is what field 7 is for — `r` means resumed, `.` means not);
+- **GREASE does survive into these variables**, so the stripping is load-bearing
+  rather than defensive. The first fingerprint recorded was
+  `grease=true` with `0xfafa` leading the cipher list and `0xdada` leading the
+  curves. Reconstructing the hash over that exact tuple: unstripped, this single
+  client would have produced **256 distinct ids** (16 GREASE values × 2
+  positions), and the 5000-entry dictionary would have been exhausted by about
+  **19 real clients**. Stripped, it is one id — `95070673`.
+- **A resumed session still carries the full cipher and curve lists.** That first
+  record ended in `|r` and had all fifteen ciphers and four groups present, so
+  resumption does not thin the fingerprint and field 7 does not need to gate
+  anything.
+
+**First 23 minutes of production data: three distinct fingerprints, and one of
+them is a lie.** All three ids reproduce exactly from their logged tuples, so
+the implementation is verified end to end.
+
+| id | grease | what carries it |
+|---|---|---|
+| `95070673` | true | almost everything — Chrome 40 through 150, Edge, Samsung Browser, on Windows / macOS / Android / Linux, bots and real visitors alike |
+| `42d907e9` | true | iPhone Safari (21 ciphers incl. 3DES, `secp521r1`) |
+| `6edad59b` | **false** | a single client claiming `Chrome/150.0.0.0` |
+
+Two lessons, one disappointing and one very much not.
+
+**The resolution is low.** One id covers the entire Chromium family across a
+decade of claimed versions, because the offered cipher list and curve list have
+been frozen across Chromium releases for years — which is precisely why JA3/JA4
+hash the *extension list and its order*, the one thing nginx cannot report. So
+this will never pin "which Chrome version"; do not build a rule that assumes it
+can. What it does resolve is **TLS-stack generation**, and that turns out to be
+enough: every `chrome_impossible_patch` bot in the capture presented
+`95070673` — a modern Chromium ClientHello, TLS 1.3, `0x11ec` and all — while
+claiming `Chrome/40`–`Chrome/60` on macOS 10_12. A real Chrome 40 predates all
+three by years. The UA rules caught those independently, so the fingerprint is
+corroboration there rather than a new detection.
+
+**A `grease=false` fingerprint appeared and looked like a catch.** `6edad59b`
+carries a cipher list byte-for-byte identical to Chrome's *plus*
+`TLS_EMPTY_RENEGOTIATION_INFO_SCSV`, with no GREASE and no `0x11ec`, on a client
+claiming `Chrome/150.0.0.0`. A real Chrome sends GREASE on every connection by
+construction, so the reading was: a non-Chromium stack wearing Chrome's cipher
+list, invisible to `uaplausible` because the UA is well-formed.
+
+**Three hours of data said otherwise, and this is the correction that matters
+most.** `6edad59b` went on to appear on three Greek residential ISP addresses
+(Nova, Vodafone) doing `search.php?author_id=`, `memberlist.php` and a webmail
+logout, under two different Chrome majors. Those are logged-in humans, not a
+scraper. The overwhelmingly likely explanation is a **TLS-terminating middlebox**
+— an antivirus or security suite intercepting TLS on the client machine — which
+is precisely the legitimate `grease=false` producer this section had already
+flagged as the reason not to ship the rule. `19877aeb` shows the same shape:
+first seen on a `Dataprovider.com` crawler, then on ordinary Greek residential
+users.
+
+So: **`grease=false` on its own is not a bot signal.** Anyone tempted to write
+that rule should read this paragraph first. It was one observation, it looked
+clean, and it was wrong.
+
+**What still looks right is `c2e09593`**, and it is a different shape: no GREASE,
+no `0x11ec`, **empty ALPN with `HTTP/1.1`**, and every sighting on a datacenter
+ASN (Tencent Cloud, Alibaba Cloud — US, Germany, Singapore, Hong Kong) under
+Chrome majors scattered across 104, 106, 109, 112, 120, 124, 131. A single TLS
+stack claiming seven Chrome versions from cloud ranges is a scraper library, not
+a browser. The candidate rule is therefore not `grease=false` alone but a
+**conjunction** — no GREASE *and* one of {no ALPN/HTTP-1.1-only, datacenter ASN,
+UA-version spread across one fingerprint}. Measure each leg separately before
+combining them.
+
+**The resolution is also better than the first 23 minutes suggested.** Ten
+distinct fingerprints appeared, and they separate cleanly *between* engine
+families even though they cannot separate *within* Chromium: Firefox
+(`00b68027`, three Gecko versions, Greek ISPs), Firefox on Android
+(`2696c4f4`), Safari and CriOS on Apple platforms (`42d907e9`), the iPhone
+Google-app webview (`2bfd7bbb`, distinct from Safari), and Meta's crawler
+(`6821efa4`). Engine-family attribution is real; version attribution is not.
+
+**The 512-byte field bound was too small, and production found it, not a
+test.** Meta's crawler (`6821efa4`) offers the full OpenSSL-style suite list;
+its cipher field measured exactly 512 characters and ended
+`...:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-S` — cut mid-name. The comment
+above the bound said it "sits above anything a real stack sends", which was
+simply wrong. Fixed on 2026-07-28: `MAX_FIELD` 1024, `MAX_TOTAL` 2048 (which
+must stay `<= tlsfp.maxHeader`), the cut now lands on a `:` boundary, and a cut
+field ends in a `TRUNC` token. The token is deliberately part of the hashed
+value — otherwise a truncated list would hash equal to a client that genuinely
+offered exactly that shorter prefix, and nothing in the log would separate them.
+`Print.Truncated` and `trunc=` on the `first_seen` line exist so a truncated id
+is never read as a whole one: it is stable per client, but two clients whose
+offers agree up to the bound collapse onto it.
+
+**Two ids can be one browser, and the fingerprint does not know it.** Two
+findings from the same three hours, both worth having before anyone writes a
+"new id ⇒ suspicious" rule:
+
+- `0ed5b601` and `95070673` are both `Chrome/150.0.0.0` on Windows and, after
+  GREASE stripping, offer **the same fifteen suites and the same four groups** —
+  in a different order, with ChaCha20 promoted to the front of each tier.
+  Reordering by whether the platform has AES hardware acceleration is the
+  obvious reading, and the corroboration is in the same line: that solve took
+  **59.4 seconds**, the slowest in the window, i.e. a weak CPU. Obvious is not
+  confirmed — pair the ordering against device class across a week before
+  claiming it.
+- `00b68027` and `93ba418f` are both `Firefox/153.0` on Windows with **identical
+  curve lists**, differing by a single trailing `DES-CBC3-SHA`. One browser
+  version, two ids. The cause is not established and must not be guessed.
+
+So an id is a TLS-offer shape, not a client identity. A rule may say "this shape
+is a scraper"; it may never say "this shape is new, therefore suspicious".
+
+**Empty ALPN with HTTP/1.1 is not a bot signal either.** `c41a0f3f` is
+Google-Read-Aloud from AS15169 — empty ALPN, `HTTP/1.1`, and GREASE present. It
+would trip the ALPN leg of the `c2e09593` conjunction on its own. That is what a
+conjunction is for: `c2e09593` is no-GREASE *and* empty-ALPN *and* datacenter
+*and* UA-version spread. Each leg alone has now been observed on legitimate
+traffic — GREASE on Greek residential users behind a middlebox, ALPN on a Google
+crawler. Do not ship any single leg.
+
+**Every `tls_fp=-` line in the capture is a panel scope** — `scope=panel:2083`
+or `scope=panel:2096`, without exception. That is the expected result and worth
+recording so nobody hunts a bug: the cPanel/WHM listeners terminate TLS
+themselves and never traverse the edge's `/__cfm_verify` location, so nothing
+stamps `X-CFM-TLS` on them. A `-` on a **vhost** scope would be a real signal
+(edge misconfiguration, or a request reaching the challenge server directly);
+a `-` on `panel:*` is structural. Coverage of the fingerprint is therefore
+"everything through the edge", not "everything", and any coverage metric must
+exclude panel scopes or it will read as a permanent ~x% gap.
+
+Still open, and still to be answered from the log rather than assumed:
+
 - how much of the fleet reaches the edge through a TLS-terminating middlebox
   (corporate inspection, antivirus proxy, VPN client, CDN), which produces a
   legitimate fingerprint↔UA mismatch;
-- the id's stability across an edge OpenSSL upgrade, since it hashes names.
+- the id's stability across an edge OpenSSL upgrade, since it hashes names;
+- **what `0x11ec` is.** It appears as the first non-GREASE group, ahead of
+  X25519, on both the Chromium fingerprint and the Safari one. A post-quantum
+  hybrid group is the obvious reading; it entered browsers at known versions, so
+  its presence or absence dates the stack. **Confirm it against the corpus
+  before building any rule on it** — pair the group against the UAs that carry
+  it across a week of solves. Do not take the identification from memory,
+  including this note's.
+
+## 7. What this cannot do without an edge module
+
+Worth stating plainly so nobody re-derives it: the ceiling on the current
+approach is that nginx reports the *contents* of the cipher and curve lists but
+not the **extension list or its order**, which is what actually separates one
+Chromium build from another and what a real JA3/JA4 hashes. Every Chromium-family
+browser therefore lands on one id. Raising the resolution means a module or a
+patched edge, and that is a much bigger commitment than this was — take it only
+if a week of `grease`/group data proves the coarse signal insufficient.
 
 **Why it is worth doing anyway, even against uTLS.** A farm can mimic any
 fingerprint with uTLS — but not while running real headless Chrome, which is what
@@ -188,7 +359,7 @@ fingerprint with uTLS — but not while running real headless Chrome, which is w
 a native PoW solve, which collapses `solve_ms` toward zero — already measured. The
 two signals box the adversary in from opposite sides; neither does that alone.
 
-## 7. Related
+## 8. Related
 
 - `internal/webdetector/pow.go` — difficulty, TTL, token format
 - `internal/webdetector/challenge_server.go` — issue site and the browser solver

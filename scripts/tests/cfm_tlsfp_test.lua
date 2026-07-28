@@ -125,7 +125,71 @@ vars.ssl_protocol = "TLSv1.3"
 vars.ssl_ciphers = string.rep("A", 5000)
 vars.ssl_curves = string.rep("B", 5000)
 fp.stamp()
-check(#headers["X-CFM-TLS"] <= 1024, "bounds the total value")
+check(#headers["X-CFM-TLS"] <= 2048, "bounds the total value")
+
+-- 7b. truncation must land on a ":" boundary and say so.
+--
+-- Production found this: on 2026-07-28 Meta's crawler offered a cipher list
+-- longer than the old 512-byte bound and the value was cut mid-name, ending
+-- "...:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-S". A partial cipher name is
+-- worse than a dropped one — it reads as a cipher, and it fabricates a token
+-- that exists in no ClientHello.
+reset()
+vars.ssl_protocol = "TLSv1.3"
+local suites = {}
+for i = 1, 80 do suites[i] = "ECDHE-ECDSA-AES256-GCM-SHA384" end
+vars.ssl_ciphers = table.concat(suites, ":")
+fp.stamp()
+local cut = headers["X-CFM-TLS"]:match("^1|TLSv1%.3|([^|]*)|")
+check(cut ~= nil and #cut <= 1024, "bounds a single field")
+check(cut:sub(-6) == ":TRUNC", "marks a truncated field with a TRUNC token")
+for tok in cut:gmatch("[^:]+") do
+  check(tok == "ECDHE-ECDSA-AES256-GCM-SHA384" or tok == "TRUNC",
+    "every token survives whole: got " .. tok)
+end
+
+-- 7d. the tuple must never lose a FIELD, however long the lists are.
+--
+-- MAX_FIELD bounds each list but not their sum, and the client picks both: it
+-- may offer as many unknown suites and groups as it likes and nginx renders
+-- every unknown one as hex. Cutting the joined tuple instead of the fields was
+-- measured to produce a 2048-byte value with three separators instead of six —
+-- ALPN, the HTTP version and the resumption flag gone, so the value read as
+-- "a client that offered no ALPN" (the shape the roadmap treats as suspicious),
+-- with the TRUNC marker itself cut to "TR" so nothing said it was incomplete.
+-- A client could manufacture that on purpose. Every field must survive.
+reset()
+local many_c, many_g = {}, {}
+for i = 1, 200 do many_c[i] = string.format("0x%04x", 0x1300 + i) end
+for i = 1, 200 do many_g[i] = string.format("0x%04x", 0x2300 + i) end
+vars.ssl_protocol = "TLSv1.3"
+vars.ssl_ciphers = table.concat(many_c, ":")
+vars.ssl_curves = table.concat(many_g, ":")
+vars.ssl_alpn_protocol = "h2"
+vars.server_protocol = "HTTP/2.0"
+vars.ssl_session_reused = "r"
+fp.stamp()
+local big = headers["X-CFM-TLS"]
+check(big ~= nil, "an oversized ClientHello still yields a value")
+local seps = select(2, big:gsub("|", ""))
+check(seps == 6, "keeps all seven fields, got " .. seps .. " separators")
+check(#big <= 2048, "still within the total bound: " .. #big)
+local bf = {}
+for field in (big .. "|"):gmatch("([^|]*)|") do bf[#bf + 1] = field end
+check(bf[5] == "h2", "ALPN survives an oversized cipher/curve pair, got " .. tostring(bf[5]))
+check(bf[6] == "HTTP/2.0", "HTTP version survives, got " .. tostring(bf[6]))
+check(bf[7] == "r", "resumption flag survives, got " .. tostring(bf[7]))
+-- The marker must be whole. A cut "TR" is worse than no marker: the daemon
+-- reads TRUNC as a token, so a mangled one silently reports trunc=false.
+check(big:find(":TRUNC|") ~= nil, "the TRUNC marker itself is not cut")
+check(big:find(":TR|") == nil, "no half-written marker")
+
+-- 7c. a field that fits is untouched — no TRUNC on a normal browser.
+reset()
+vars.ssl_protocol = "TLSv1.3"
+vars.ssl_ciphers = "TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256"
+fp.stamp()
+check(headers["X-CFM-TLS"]:find("TRUNC") == nil, "does not mark a field that fits")
 
 -- 8. "-" is nginx's empty marker, not a value
 reset()

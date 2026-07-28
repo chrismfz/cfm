@@ -190,6 +190,15 @@ func (b *Backend) SetChallengeRedirectEnabled(enabled bool) {
 	}
 }
 
+// ChallengeRedirectEnabled reports whether the challenge DNAT redirect is armed.
+// See the nftlib backend's copy for why the challenge server needs to know:
+// EnsureChallengeRedirect returns nil both when it installs the rules and when
+// it finds the redirect disabled and cleans up, so the log line has to say
+// which.
+func (b *Backend) ChallengeRedirectEnabled() bool {
+	return b != nil && b.challengeDNATEnabled
+}
+
 func (b *Backend) CleanupChallengeRedirect() error {
 	if b == nil {
 		return nil

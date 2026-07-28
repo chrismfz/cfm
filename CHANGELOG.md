@@ -39,6 +39,24 @@ back-filled here — see the git/PR history for that period.
   unaffected.
 
 ### Fixed
+- **TLS fingerprint: a long cipher list was cut mid-cipher-name.** The edge
+  stamper bounded each field at 512 bytes and cut blindly, so a client offering
+  the full OpenSSL suite list ended its cipher field on a partial name
+  (`...:ECDHE-RSA-AES256-S` — observed in production from Meta's crawler). A
+  partial name reads as a cipher that exists in no ClientHello. Fields now bound
+  at 1024 bytes (2048 total), the cut lands on a `:` boundary, and a cut field
+  ends in a `TRUNC` token that stays in the hashed value — so a truncated list
+  can never hash equal to a client that genuinely offered that shorter prefix.
+  The `first_seen` log line gained `trunc=`, because a truncated fingerprint can
+  be shared by two clients whose offers agree up to the bound and must not be
+  counted as one. The two list fields are now budgeted against the total bound
+  and cut individually, never by cutting the joined tuple: 200 unknown cipher
+  suites plus 200 unknown groups — all client-chosen — produced a value carrying
+  three field separators instead of six, so ALPN, the HTTP version and the
+  resumption flag vanished and the tuple read as "a client that offered no
+  ALPN", with the `TRUNC` marker itself cut in half so `trunc=` reported false.
+  If the total is ever exceeded anyway the edge now stamps no header at all,
+  since no fingerprint is honest where a mutilated one is not.
 - **OpenResty edge logs now actually rotate.** On a busy OpenResty host
   `/usr/local/openresty/nginx/logs/access.log` had reached 235 GB (249 GB in
   that directory) with no rotated generations. Three causes, all fixed:
