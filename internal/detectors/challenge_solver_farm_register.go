@@ -23,11 +23,18 @@ import (
 // the threshold is a config knob and the detector ships alert-only.
 //
 // Alert-only is structural, not a burn-in default: the detector stamps
-// enforcement=observe on every alert, so the section sink notifies and returns
-// before choosing an IP to block. At ~1 solve per IP a per-IP ban cannot work —
-// the address never returns — and the pool is residential, so banning it risks a
-// real customer. Deciding what to DO about a flagged vhost (raise difficulty,
-// rate-limit issuance, block a cluster) is a separate deliberate change.
+// ip_scope=host and enforcement=observe on every alert: the first stops the sink
+// resolving a source IP for a finding whose Key is a vhost (its fallback would
+// otherwise scrape one out of the User-Agents the alert quotes), the second stops
+// it short of any block if a BLOCK policy is configured. At ~1 solve per IP a
+// per-IP ban cannot work — the address never returns — and the pool is
+// residential, so banning it risks a real customer. Deciding what to DO about a
+// flagged vhost (raise difficulty, rate-limit issuance, block a cluster) is a
+// separate deliberate change.
+//
+// Leave BLOCK unset on this section: it would not block (enforcement=observe
+// wins) but it WOULD move the alert onto the observe path, which logs without
+// notifying.
 func init() {
 	meta.Register(meta.DetectorMeta{
 		TypeKey:     "challenge_solver_farm",

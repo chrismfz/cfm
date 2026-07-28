@@ -118,12 +118,24 @@ Two deliberate design choices:
 - **Not keyed on User-Agent.** The UA is attacker-controlled; keying detection on
   it would be defeated by randomising a header. The separation above holds
   UA-agnostically. The UA breakdown rides on the alert as attribution evidence.
-- **Alert-only, structurally.** Every alert is stamped `enforcement=observe`, so
-  the section sink notifies and returns *before* choosing an IP to block. At ~1
-  solve per IP a per-IP ban cannot work — the address never returns — and the
-  pool is residential, so banning it risks a real customer. What to *do* about a
-  flagged vhost (raise its PoW difficulty, rate-limit challenge issuance, block a
-  cluster) is a separate, deliberate decision.
+- **Alert-only, structurally.** At ~1 solve per IP a per-IP ban cannot work — the
+  address never returns — and the pool is residential, so banning it risks a real
+  customer. What to *do* about a flagged vhost (raise its PoW difficulty,
+  rate-limit challenge issuance, block a cluster) is a separate, deliberate
+  decision. Two `Extra` keys carry that, doing different jobs:
+  - `ip_scope=host` — the finding is about a vhost, so the sink must not resolve
+    a source address for it. Its resolver otherwise falls back to scanning the
+    alert's samples for anything IP-shaped, and those samples quote the observed
+    User-Agents; a client could then name its own "source" address, have it
+    matched by the global ignore list, and get the alert dropped before any
+    notification. An ordinary `Chrome/118.0.0.0` is IP-shaped enough to cause the
+    same mis-attribution by accident.
+  - `enforcement=observe` — stops the sink short of any block if a `BLOCK` policy
+    is configured on the section.
+
+  **Leave `BLOCK` unset on this section.** It would not block, but it *would*
+  move the alert onto the observe path, which logs without notifying — you would
+  quietly stop being alerted.
 
 Note the calibration is one server over one day. A very large vhost with a
 genuinely global mobile audience could legitimately spread wider; `MIN_SUBNETS`

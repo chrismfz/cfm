@@ -17,13 +17,27 @@
 // randomisation. The UA breakdown is carried on the alert as *evidence* for
 // attribution, not as the detection key.
 //
-// This detector is alert-only by design. It marks every alert
-// enforcement=observe so the section sink notifies and returns before picking
-// an IP to ban: at ~1 solve per IP, a per-IP nft ban is useless (the address is
-// never seen again) and actively risky (the pool is residential, so the address
-// may belong to a real customer by the time it is banned). Acting on the finding
-// — raising difficulty for the vhost, rate-limiting issuance, blocking a cluster
-// — is a separate, deliberate decision.
+// This detector is alert-only by design: at ~1 solve per IP a per-IP nft ban is
+// useless (the address is never seen again) and actively risky (the pool is
+// residential, so it may belong to a real customer by the time it is banned).
+// Acting on the finding — raising difficulty for the vhost, rate-limiting
+// issuance, blocking a cluster — is a separate, deliberate decision.
+//
+// Two Extra keys enforce that, and they do different jobs:
+//
+//   - ip_scope=host (core.ExtraIPScope) tells the sink this finding is about a
+//     vhost, so it must not resolve a source IP for it. Without it the sink
+//     falls back to scanning Samples for anything IP-shaped — and Samples quote
+//     the User-Agents observed, so a client could name its own "source" address.
+//   - enforcement=observe stops the sink short of any block if an operator does
+//     configure a BLOCK policy on the section.
+//
+// With no BLOCK key in the section (the shipped config), the sink takes its
+// "no policy" path and notifies from there; enforcement=observe is the guard
+// for when that is not true. Note the consequence: SETTING a BLOCK value on
+// this section does not block, but it does move the alert onto the observe
+// path, which logs to the detector log without raising a notification. Leave
+// BLOCK unset.
 package solverfarm
 
 import (
@@ -359,9 +373,13 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 		Count:   len(subnets),
 		Samples: samples,
 		Extra: map[string]string{
-			// Alert-only: the sink must notify and return WITHOUT picking an IP
-			// to ban. See the package doc — a per-IP ban is useless at ~1 solve
-			// per IP and risks banning a real customer's residential address.
+			// The Key is a vhost, not an address, and Samples quote observed
+			// User-Agents — so the sink must not try to resolve a source IP for
+			// this alert. See core.ExtraIPScope for why that fallback is unsafe
+			// once a detector quotes client-controlled text.
+			core.ExtraIPScope: core.IPScopeHost,
+			// Alert-only: a per-IP ban is useless at ~1 solve per IP and risks
+			// banning a real customer's residential address. See the package doc.
 			"enforcement":   "observe",
 			"reason":        "CHALLENGE_SOLVER_FARM",
 			"host":          host,

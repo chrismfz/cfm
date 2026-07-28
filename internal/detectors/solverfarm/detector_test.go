@@ -91,7 +91,28 @@ func TestAlertIsObserveOnly(t *testing.T) {
 		t.Fatalf("got %d alerts, want 1", len(alerts))
 	}
 	if got := alerts[0].Extra["enforcement"]; got != "observe" {
-		t.Errorf("enforcement = %q, want %q — the sink would otherwise pick an IP to ban", got, "observe")
+		t.Errorf("enforcement = %q, want %q — the sink would otherwise block on a BLOCK policy", got, "observe")
+	}
+}
+
+// The alert quotes the User-Agents it observed, and its Key is a vhost. Without
+// declaring host scope the sink resolves a source IP by scanning Samples for
+// anything IP-shaped, letting a client name its own address via its UA — which
+// the global ignore list then uses to drop the alert silently.
+func TestAlertDeclaresHostScope(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.farmBurst("shop.example.com", 60, func(int) string { return chromeUA })
+
+	alerts := h.run(t)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1", len(alerts))
+	}
+	if got := alerts[0].Extra[core.ExtraIPScope]; got != core.IPScopeHost {
+		t.Errorf("%s = %q, want %q — the sink would otherwise scrape a source IP out of a quoted User-Agent",
+			core.ExtraIPScope, got, core.IPScopeHost)
+	}
+	if _, ok := alerts[0].Extra["ip"]; ok {
+		t.Error(`Extra["ip"] must stay absent: this finding is about a vhost, not an address`)
 	}
 }
 

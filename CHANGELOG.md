@@ -17,6 +17,26 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **A host-scoped alert can no longer be silenced by the client it reports on.**
+  The section sink resolves an alert's source IP by falling back to scanning the
+  alert's samples for anything IP-shaped — safe while every detector keyed its
+  alerts on an IP, but the new `challenge_solver_farm` finding is keyed on a
+  vhost and quotes the User-Agents it observed. A client could therefore put
+  `10.0.0.1` (or `127.0.0.1`) in its User-Agent, have the sink adopt it as the
+  alert's source, and hit the global ignore list — which returns before any
+  notification and, with the shipped `LOG_IGNORED = no`, without a log line
+  either. One header would have suppressed the detector built to catch that
+  client. The same fallback mis-attributed alerts by accident: an ordinary
+  `Chrome/118.0.0.0` is IP-shaped, so it was reported as the source address and
+  enriched with that unrelated network's ASN/geo.
+
+  Detectors can now declare `Extra[core.ExtraIPScope] = core.IPScopeHost` when
+  their `Key` is not an address; the sink's guesswork fallback stands down for
+  those, while a detector-supplied `Extra["ip"]` still wins. Only
+  `challenge_solver_farm` sets it — IP-keyed detectors (`waf_security`,
+  `api_abuse`, …) resolve authoritatively from `Key` and are unaffected.
+
 ### Added
 - **User-Agent plausibility check (`internal/uaplausible`).** Flags a UA that
   contradicts *itself* — an iPhone carrying the Blink `AppleWebKit/537.36` token,
@@ -57,11 +77,13 @@ back-filled here — see the git/PR history for that period.
 
   Two deliberate choices: detection is **not** keyed on User-Agent (it is
   attacker-controlled — the separation holds UA-agnostically, and the UA
-  breakdown rides on the alert as attribution evidence instead); and every alert
-  is stamped `enforcement=observe`, so the sink notifies and returns before
-  picking an IP to ban. At ~1 solve per IP a per-IP ban cannot work — the address
-  never returns — and the pool is residential, so it risks banning a real
-  customer. Acting on a flagged vhost is a separate, deliberate change.
+  breakdown rides on the alert as attribution evidence instead); and the detector
+  never blocks. At ~1 solve per IP a per-IP ban cannot work — the address never
+  returns — and the pool is residential, so it risks banning a real customer.
+  Acting on a flagged vhost is a separate, deliberate change. Alerts carry
+  `ip_scope=host` and `enforcement=observe`; leave `BLOCK` unset on the section
+  (it would not block, but it would move the alert onto a path that logs without
+  notifying).
 
   Calibration is one server over one day; `MIN_SUBNETS` is a knob and
   `ALLOW_HOSTS`/`ALLOW_UA_CONTAINS`/`ALLOW_NETS` exempt known-good sources.

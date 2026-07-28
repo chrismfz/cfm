@@ -791,6 +791,22 @@ func (s *sectionSink) pickIP(a core.Alert) string {
 		if ip := net.ParseIP(strings.TrimSpace(a.Extra["ip"])); ip != nil {
 			return ip.String()
 		}
+		// 0b) The detector says this finding is not about one address (its Key is
+		// a vhost). Stop here rather than fall through to the Samples scan below.
+		//
+		// That scan is the whole reason this branch exists: it takes the first
+		// IP-shaped string in any sample line, which is fine for server-generated
+		// samples but not for a detector that quotes client-controlled text. The
+		// solver-farm alert lists the User-Agents it saw, so without this a client
+		// could put "10.0.0.1" in its UA, have the sink adopt it as the alert's
+		// source, and get the whole alert dropped by the global ignore list a few
+		// lines into Publish — silently, since LOG_IGNORED defaults to no. It
+		// would also mis-name an innocent address in the operator's notification,
+		// and an ordinary "Chrome/118.0.0.0" is IP-shaped enough to do that by
+		// accident.
+		if a.Extra[core.ExtraIPScope] == core.IPScopeHost {
+			return ""
+		}
 	}
 	// 1) If alert key itself is an IP, or "ip X..." (from decorateIP), use it.
 	if ip := net.ParseIP(a.Key); ip != nil {
