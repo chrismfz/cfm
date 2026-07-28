@@ -39,6 +39,36 @@ back-filled here — see the git/PR history for that period.
   unaffected.
 
 ### Added
+- **New detector `challenge_cookie_discard`** — clients that re-solve the
+  challenge while still holding valid clearance. Solving mints a signed
+  `cfm_clearance` cookie good for `CHALLENGE_COOKIE_LIFE` (45m by default), so a
+  browser solves once and is done. An address that solves again minutes later
+  never stored the cookie: a request pipeline with no cookie jar, driving a
+  headless browser per request. Worst offender in the production capture: 138
+  solves in 10 minutes, 1,121 across the day, one User-Agent, two vhosts.
+
+  It is the mirror image of `challenge_solver_farm` and its exact blind spot —
+  that one keys on a vhost because a farm burns a fresh address per solve, this
+  one keys on the address, for the population that does the opposite. Neither
+  sees the other's traffic.
+
+  Calibrated on the same 23h capture (111,537 solves, 97,556 distinct addresses)
+  replayed through a sliding 10-minute window: 99.6% of addresses never solved
+  twice in any window, 248 reached 3+ (244 of them carrying one identical
+  desktop Chrome UA), the plausibly-legitimate repeaters topped out at 4, and no
+  address in the capture peaked at exactly 5. `MIN_SOLVES` defaults to 8 — a 2x
+  margin over the busiest legitimate repeater, still flagging 219 of the 248 —
+  because a user who opens several tabs at once is challenged in each before any
+  cookie is set, and that small burst must stay under the line.
+
+  Unlike `challenge_solver_farm`, blocking here is coherent: the subject is one
+  real address abusing the challenge right now, and the alert sets `Extra["ip"]`
+  authoritatively so the sink never falls back to scanning samples that quote
+  User-Agents and URIs. It still ships **alert-only** — set `BLOCK = "6h"` in
+  `[challenge_cookie_discard]` after a burn-in (soft TTL rather than
+  `permanent`, because every address observed was a residential proxy exit).
+  Add the section to `/etc/cfm/detectors.conf` to enable it; greppable as
+  `Challenge/CookieDiscard`.
 - **`challenge_solver_farm` gains an `ACTION` knob.** `observe` (the default, and
   what an existing config without the key gets) notifies and logs; `logonly`
   keeps the `cfm.detector.log` record but sends no notification, for a vhost

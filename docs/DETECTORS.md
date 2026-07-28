@@ -98,6 +98,7 @@ Typical defaults below are representative from the shipped template and should b
 | `health` | host health anomalies (CPU/RAM/disk/temp/net spikes) | `% thresholds`, spike multipliers, watch lists | `EVERY=20s`, mostly alerting |
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
 | `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=60s`, `MIN_SUBNETS=40`, **alert-only** |
+| `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
 
 ### `challenge_solver_farm` — why it exists
 
@@ -198,6 +199,67 @@ Alerts also carry `impossible_ua` — how many solves in the window submitted a
 self-contradictory User-Agent (see below). It is corroboration for the operator
 reading the alert, never part of the threshold: a farm can send a well-formed UA
 whenever it chooses.
+
+### `challenge_cookie_discard` — why it exists
+
+The mirror image of `challenge_solver_farm`, and its exact blind spot.
+
+Solving mints a signed `cfm_clearance` cookie valid for `CHALLENGE_COOKIE_LIFE`
+(45m by default). A browser stores it and does not solve again until it expires.
+An address that re-solves minutes later is saying something very specific: **it
+never stored the cookie**. That is not aggressive crawling — it is a request
+pipeline with no cookie jar, driving a headless browser per request. The
+challenge is working perfectly and the client is paying it every single time.
+
+`challenge_solver_farm` keys on a vhost because a farm burns a fresh address per
+solve (~1.07 solves/IP), so no per-IP counter can see it. This one keys on the
+**address**, for the population that does the opposite: a few addresses solving
+dozens of times each. Neither detector sees the other's traffic.
+
+Calibration, from the same 23h capture (111,537 solves, 97,556 distinct
+addresses) replayed through a **sliding** 10-minute window:
+
+| max solves by one address per 10m window | addresses |
+|---|---|
+| 1 (never re-solved) | 97,182 — **99.6%** |
+| 3 or more | 248, of which **244** carried one identical desktop Chrome UA |
+| exactly 5 | **0** |
+| worst offender | **138** (1,121 solves across the day, one UA, two vhosts) |
+
+The four remaining repeaters are the plausibly-legitimate ones and they top out
+at **4**: an iPhone and an iPad on small vhosts, one datacenter client, and a
+webmail address sending three different User-Agents — a NAT or VPN exit with
+several real devices behind it. Legitimate traffic stops at 4, the abusive
+population resumes at 6, so the gap in the distribution sits at 5.
+
+`MIN_SOLVES` defaults to **8** — a 2× margin over the busiest legitimate
+repeater, still flagging 219 of the 248. The margin is deliberate rather than
+tight: a user who opens several tabs at once is challenged in each of them
+before any cookie is set, which is a small instantaneous burst, while this
+detector's real target sustains 30+ solves over minutes.
+
+Design choices, and how they differ from `challenge_solver_farm`:
+
+- **Not keyed on User-Agent**, for the same reason: it is attacker-controlled.
+  The UA, vhost and URI breakdowns ride on the alert as evidence only.
+- **Blocking is coherent here.** The subject is one real address abusing the
+  challenge right now, so the alert is an ordinary per-IP finding and sets
+  `Extra["ip"]` authoritatively — the sink never has to guess (its fallback
+  scans samples for anything IP-shaped, and these samples quote User-Agents and
+  URIs). It still **ships alert-only**: leave `BLOCK` unset to watch it first,
+  then `BLOCK = "6h"` in `[challenge_cookie_discard]` when you trust it. A soft
+  TTL rather than `permanent` is right because every address observed was a
+  residential proxy exit that may belong to a real visitor later; `DRY_RUN = 1`
+  alongside it gives a watch-with-policy burn-in.
+- **Neither cap can hide the behaviour.** `MAX_TRACKED_PER_IP` bounds the
+  evidence buffer only — records it drops are still counted toward the solve
+  total, and truncation is stated on the alert. `MAX_TRACKED_IPS` bounds the
+  address map (the key is client-controlled, so it must be bounded); when it is
+  reached, only *new* addresses are refused, so a flood of one-shot solvers can
+  delay a new finding but cannot erase one already accumulating.
+
+Greppable as `Challenge/CookieDiscard` in `cfm.detector.log`; notification
+follows the same `[detector "*"]` catch-all as every other section.
 
 ### User-Agent plausibility (`internal/uaplausible`)
 
