@@ -39,6 +39,17 @@ back-filled here — see the git/PR history for that period.
   of the security overview.
 
 ### Fixed
+- **Traffic rules editor: fields were pushed off the right edge of the card.**
+  On the *Traffic rules* page the whole rule-editor pane rendered unusable —
+  every input sat ~570px past its card boundary, clipped behind the simulation
+  pane, and labels no longer lined up with their fields (`Query string` and
+  `QS pass-through` landed in the value column). Cause: `.form-grid` sizes its
+  label column `max-content` with `white-space: nowrap`, and the long
+  "Prefix / `*`-glob match…" hint under **Path patterns** was marked up as a
+  bare `<label>` — so it inflated column 1 to its full one-line width and
+  shifted the auto-placement of every following cell by one. The hint is now a
+  full-row wrapping `.form-hint`, and the two inline checkbox captions use a
+  `.form-check` that wraps instead of inheriting the label nowrap.
 - **Traffic rules can now match the query string (edge sent path only).** A
   rule like *challenge `/forum/ucp.php?mode=register`* silently never fired: the
   edge (`cfm.lua`) sent `ngx.var.uri` — the path **without** the query string —
