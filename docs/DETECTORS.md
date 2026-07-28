@@ -269,6 +269,32 @@ emits. Examples, all present in real traffic: an iPhone carrying Blink's
 `60x`), a bare `Chrome/` token on iOS (Chrome on iOS is `CriOS`), a Firefox
 carrying the Blink WebKit token, a Chrome UA missing `KHTML, like Gecko`.
 
+Three of the rules are about the **shape of a Chrome version string**, and they
+exist because the observed farm does not reuse one forged UA — it *generates*
+them. In the capture, Chrome majors 39–60 carry 110–170 distinct build numbers
+each, drawn roughly uniformly from `810..9996`, while every other major has at
+most 8 and they sit tightly on the real release build: 3,128 of 4,151 distinct
+Chrome version strings from a single generator, using only four device templates
+(`SM-G900P Build/LRX21T`, `Nexus 5 Build/MRA58N`, `Pixel 2 Build/OPD3.170816.012`,
+`iPhone OS 11_0`).
+
+The tempting rule — "major 43 must have build 2357" — is a lookup table of Chrome
+release builds. Writing one from memory is exactly what this package's doc comment
+forbids, and it would need maintaining for every future release. These three need
+no table; each states a property of Chrome's own version scheme that holds across
+the whole corpus, majors 15 → 150:
+
+| rule | what it says | evidence |
+|---|---|---|
+| `chrome_impossible_patch` | 4th component ≥ 1000 | highest non-generated patch in the capture is **280**, with outliers to 819; the generator draws 1000–1999 |
+| `chrome_nonzero_minor` | 2nd component ≠ 0 | 4,149 of 4,151 Chrome strings have minor 0, a decade of releases |
+| `chrome_reduced_build_with_patch` | build 0 **and** patch ≠ 0 | a reduced UA freezes the last three together (`145.0.0.0`); all 70 distinct `build==0` strings are that clean form bar one |
+
+Together with the existing rules this flags **64.5% of the distinct UA strings**
+but only **2.22% of the requests** — and that gap *is* the finding: one generator
+minting a fresh string per request dominates the vocabulary while barely moving
+the traffic share. Zero known crawlers or Chromium derivatives are caught.
+
 It is checked on every challenge solve and surfaced three ways:
 
 - `ua_impossible=<reasons>` in `cfm.challenges.log`

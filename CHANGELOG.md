@@ -39,6 +39,31 @@ back-filled here — see the git/PR history for that period.
   unaffected.
 
 ### Added
+- **`uaplausible` gains three Chrome version-shape rules**
+  (`chrome_impossible_patch`, `chrome_nonzero_minor`,
+  `chrome_reduced_build_with_patch`). The farm does not reuse one forged
+  User-Agent — it *generates* them: in the production capture, Chrome majors
+  39–60 carry 110–170 distinct build numbers each, drawn roughly uniformly from
+  `810..9996`, while every other major has at most 8 sitting tightly on the real
+  release build. That is 3,128 of 4,151 distinct Chrome version strings from one
+  generator, over just four device templates.
+
+  The rules need no table of Chrome release builds — writing one from memory is
+  what this package's doc comment forbids, and it would need maintaining forever.
+  Each states a property of Chrome's own version scheme that holds across the
+  corpus, majors 15 → 150: the 4th component is ≥ 1000 (the highest
+  non-generated patch observed is 280, with outliers to 819; the generator draws
+  1000–1999), the 2nd component is non-zero (4,149 of 4,151 strings have it at
+  0), or the build is 0 while the patch is not (a reduced UA freezes the last
+  three components together).
+
+  With these, the package flags 64.5% of the distinct UA strings but only 2.22%
+  of the requests — the gap is the finding, since a generator minting a fresh
+  string per request dominates the vocabulary without moving the traffic share.
+  No known crawler or Chromium derivative is caught. The verdict reaches
+  `ua_impossible=` in `cfm.challenges.log`, the `challenge_solved` history event,
+  the forensics `impossible` pill, and the `impossible_ua` count on
+  `challenge_solver_farm` alerts, exactly as the existing rules do.
 - **New detector `challenge_cookie_discard`** — clients that re-solve the
   challenge while still holding valid clearance. Solving mints a signed
   `cfm_clearance` cookie good for `CHALLENGE_COOKIE_LIFE` (45m by default), so a

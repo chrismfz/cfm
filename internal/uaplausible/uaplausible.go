@@ -5,10 +5,14 @@
 // belongs to a real person on an old browser; a UA claiming an iPhone running
 // desktop Blink belongs to nobody. Only the second is reported here.
 //
-// Every rule below was derived from, and validated against, 314,877 real
-// requests (4,889 distinct UA strings) captured on a production edge. The rules
-// flag 0.55% of that traffic, and every flagged string was inspected. That
-// validation matters more than it sounds: an earlier version of the KHTML rule
+// Every rule below was derived from, and validated against, real traffic
+// captured on a production edge: 314,589 requests, 4,878 distinct UA strings.
+// The rules flag 64.5% of those distinct strings but only 2.22% of the requests,
+// and every flagged string was inspected. The gap between those two figures is
+// itself the finding — one generator mints a fresh version string per request,
+// so it dominates the vocabulary while barely moving the traffic share.
+//
+// That validation matters more than it sounds: an earlier version of the KHTML rule
 // tested for the literal "(KHTML, like Gecko)" and wrongly flagged legitimate
 // crawlers — Amazonbot, YouBot, GeedoShopProductFinder — which place their own
 // token inside the same parentheses ("(KHTML, like Gecko; Amazonbot/0.1)").
@@ -149,6 +153,49 @@ func Check(ua string) Verdict {
 	if chrome != nil && strings.Count(chrome[2], ".") < 3 {
 		v.Reasons = append(v.Reasons, "chrome_truncated_version")
 	}
+	// Rules on the shape of a four-component Chrome version. They exist because
+	// the observed farm does not reuse one forged UA — it GENERATES them: in the
+	// capture, Chrome majors 39-60 carry 110-170 distinct build numbers each,
+	// drawn roughly uniformly from 810..9996, while every other major in the same
+	// corpus has at most 8 and they sit tightly on the real release build. That
+	// is 3,128 of 4,151 distinct Chrome version strings from one generator.
+	//
+	// The tempting rule — "major 43 must have build 2357" — is a lookup table of
+	// Chrome release builds, and writing one from memory is exactly the mistake
+	// this package's doc comment warns about. It would also need maintaining for
+	// every future release. The three rules below need no table: each states a
+	// property of Chrome's own version scheme that holds across the entire
+	// corpus, majors 15 through 150, and each is violated by the generator.
+	if parts := chromeVersionParts(chrome); len(parts) == 3 {
+		minor, build, patch := parts[0], parts[1], parts[2]
+		// The fourth component is the patch. Across every Chrome version string
+		// in the capture that is NOT from the generator, the highest patch seen
+		// is 280, with a handful of outliers up to 819; the generator draws
+		// 1000-1999 and produces 3,101 of the 3,102 strings these three rules
+		// flag. 1000 is therefore a deliberately loose bound rather than a tight
+		// one — it sits above every legitimate value observed with room to spare,
+		// so a future release that pushes patch numbers higher than Chrome ever
+		// has would still have to more than double before reaching it.
+		if patch >= 1000 {
+			v.Reasons = append(v.Reasons, "chrome_impossible_patch")
+		}
+		// Chrome's second component has been 0 for its entire history. 4,149 of
+		// the 4,151 Chrome version strings in the capture have it, spanning
+		// majors 15 to 150 — a decade of releases. The two that do not
+		// ("Chrome/99.101.4951.54", "Chrome/69.2.0.1713") are generator output.
+		if minor != 0 {
+			v.Reasons = append(v.Reasons, "chrome_nonzero_minor")
+		}
+		// Since the reduced-UA change, Chrome freezes the last three components
+		// to zero together ("145.0.0.0"); before it, all four were real
+		// ("78.0.3904.108"). A zero BUILD with a non-zero patch is neither shape:
+		// it is a reduced UA whose last field was overwritten. All 70 distinct
+		// build==0 strings in the capture are the clean X.0.0.0 form except the
+		// generator's "Chrome/69.0.0.3016".
+		if build == 0 && patch != 0 {
+			v.Reasons = append(v.Reasons, "chrome_reduced_build_with_patch")
+		}
+	}
 	// A UA declares exactly one platform. Counted inside the leading
 	// parenthetical only — see rePlatformGroup.
 	if countPlatformTokens(platformGroup(ua)) > 1 {
@@ -166,6 +213,33 @@ func platformGroup(ua string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// chromeVersionParts splits the tail captured after a Chrome major
+// (".0.3904.108") into its numeric components, and returns nil when the UA
+// carries no Chrome token at all — the version rules must not read a submatch
+// that was never captured.
+//
+// The caller checks the length: those rules describe the four-component form
+// only, and a string with more or fewer components is left to
+// chrome_truncated_version rather than judged by a rule no corpus supports.
+func chromeVersionParts(chrome []string) []int {
+	if chrome == nil {
+		return nil
+	}
+	tail := strings.TrimPrefix(chrome[2], ".")
+	if tail == "" {
+		return nil
+	}
+	fields := strings.Split(tail, ".")
+	out := make([]int, 0, len(fields))
+	for _, f := range fields {
+		if f == "" {
+			return nil
+		}
+		out = append(out, atoi(f))
+	}
+	return out
 }
 
 func countPlatformTokens(ua string) int {
