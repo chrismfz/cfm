@@ -123,6 +123,18 @@ Note the farm is **slower** than legitimate traffic, and nothing solved under
 "suspiciously fast solve" rule catches nothing today, and why §3 is not urgent.
 If that distribution ever collapses toward zero for some cluster, revisit.
 
+**`challenge_cookie_discard` in its first three hours of production**: 20+
+alerts, every one a US residential ISP address, each doing 20–60 solves in a
+2–5 minute burst and then falling silent while the next address takes over. That
+serial shape — one exit at a time rather than many in parallel — is the thing
+the detector was built to see, and it is also why a per-vhost concurrency rule
+misses it entirely. No false positive has appeared: a human who clears cookies
+does it a handful of times an hour, not fifty times in three minutes, and the
+`MIN_SOLVES = 8` threshold sits above the natural gap measured at 5 in the
+offline corpus. The detector still ships alert-only (`BLOCK` unset); this is the
+evidence that would justify `BLOCK = "dryrun"` and then a TTL block, in that
+order.
+
 ## 6. TLS fingerprint ↔ UA coherence (log-first since 2026-07-28)
 
 Every other signal on a solve is written by the client: the User-Agent, the
@@ -213,21 +225,55 @@ claiming `Chrome/40`–`Chrome/60` on macOS 10_12. A real Chrome 40 predates all
 three by years. The UA rules caught those independently, so the fingerprint is
 corroboration there rather than a new detection.
 
-**The new detection is `6edad59b`.** Its cipher list is byte-for-byte the
-Chrome list *plus* `TLS_EMPTY_RENEGOTIATION_INFO_SCSV`, with **no GREASE** and
-**no `0x11ec`**. A real Chrome 150 sends GREASE on every connection, by
-construction. So this is a non-Chromium stack wearing Chrome's cipher list — and
-it gets caught by the two things a copier forgets: GREASE (which is randomised
-per connection, so it has to be implemented rather than copied) and the newest
-group. `uaplausible` cannot see it at all — `Chrome/150.0.0.0` is a perfectly
-well-formed UA. **This is the first detection the fingerprint made on its own,
-16 minutes in.**
+**A `grease=false` fingerprint appeared and looked like a catch.** `6edad59b`
+carries a cipher list byte-for-byte identical to Chrome's *plus*
+`TLS_EMPTY_RENEGOTIATION_INFO_SCSV`, with no GREASE and no `0x11ec`, on a client
+claiming `Chrome/150.0.0.0`. A real Chrome sends GREASE on every connection by
+construction, so the reading was: a non-Chromium stack wearing Chrome's cipher
+list, invisible to `uaplausible` because the UA is well-formed.
 
-The rule that suggests itself — *UA claims a modern Chromium AND `grease=false`
-→ mismatch* — is exactly the kind that must not be shipped from one observation.
-A TLS-terminating middlebox (corporate inspection, antivirus proxy, some VPN
-clients) produces the same shape legitimately. Collect a week, measure what
-share of `grease=false` traffic is plausibly a middlebox, then decide.
+**Three hours of data said otherwise, and this is the correction that matters
+most.** `6edad59b` went on to appear on three Greek residential ISP addresses
+(Nova, Vodafone) doing `search.php?author_id=`, `memberlist.php` and a webmail
+logout, under two different Chrome majors. Those are logged-in humans, not a
+scraper. The overwhelmingly likely explanation is a **TLS-terminating middlebox**
+— an antivirus or security suite intercepting TLS on the client machine — which
+is precisely the legitimate `grease=false` producer this section had already
+flagged as the reason not to ship the rule. `19877aeb` shows the same shape:
+first seen on a `Dataprovider.com` crawler, then on ordinary Greek residential
+users.
+
+So: **`grease=false` on its own is not a bot signal.** Anyone tempted to write
+that rule should read this paragraph first. It was one observation, it looked
+clean, and it was wrong.
+
+**What still looks right is `c2e09593`**, and it is a different shape: no GREASE,
+no `0x11ec`, **empty ALPN with `HTTP/1.1`**, and every sighting on a datacenter
+ASN (Tencent Cloud, Alibaba Cloud — US, Germany, Singapore, Hong Kong) under
+Chrome majors scattered across 104, 106, 109, 112, 120, 124, 131. A single TLS
+stack claiming seven Chrome versions from cloud ranges is a scraper library, not
+a browser. The candidate rule is therefore not `grease=false` alone but a
+**conjunction** — no GREASE *and* one of {no ALPN/HTTP-1.1-only, datacenter ASN,
+UA-version spread across one fingerprint}. Measure each leg separately before
+combining them.
+
+**The resolution is also better than the first 23 minutes suggested.** Ten
+distinct fingerprints appeared, and they separate cleanly *between* engine
+families even though they cannot separate *within* Chromium: Firefox
+(`00b68027`, three Gecko versions, Greek ISPs), Firefox on Android
+(`2696c4f4`), Safari and CriOS on Apple platforms (`42d907e9`), the iPhone
+Google-app webview (`2bfd7bbb`, distinct from Safari), and Meta's crawler
+(`6821efa4`). Engine-family attribution is real; version attribution is not.
+
+**Every `tls_fp=-` line in the capture is a panel scope** — `scope=panel:2083`
+or `scope=panel:2096`, without exception. That is the expected result and worth
+recording so nobody hunts a bug: the cPanel/WHM listeners terminate TLS
+themselves and never traverse the edge's `/__cfm_verify` location, so nothing
+stamps `X-CFM-TLS` on them. A `-` on a **vhost** scope would be a real signal
+(edge misconfiguration, or a request reaching the challenge server directly);
+a `-` on `panel:*` is structural. Coverage of the fingerprint is therefore
+"everything through the edge", not "everything", and any coverage metric must
+exclude panel scopes or it will read as a permanent ~x% gap.
 
 Still open, and still to be answered from the log rather than assumed:
 
