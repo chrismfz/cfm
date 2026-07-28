@@ -38,7 +38,58 @@ back-filled here — see the git/PR history for that period.
   `api_abuse`, …) resolve authoritatively from `Extra["ip"]` or `Key` and are
   unaffected.
 
+### Fixed
+- **OpenResty edge logs now actually rotate.** On a busy OpenResty host
+  `/usr/local/openresty/nginx/logs/access.log` had reached 235 GB (249 GB in
+  that directory) with no rotated generations. Three causes, all fixed:
+
+  - `/etc/logrotate.d/logrotate-cfm` was installed **only** by
+    `scripts/install-{openresty,angie}.sh`, which an operator runs once by
+    hand. A host that had only ever been package-upgraded had no CFM rotation
+    at all — not for the edge logs, not for `/var/log/cfm/`. The package
+    postinst now deploys it too (`deploy_logrotate_config` in
+    `scripts/package-proxy-config-deploy.sh`), so an upgrade fixes the host.
+  - The config listed filenames, and the list had drifted:
+    `access.bad_request.log` (1.1 GB on that host), `cfm.clam.log`,
+    `cfm.socket.log`, `cfm.mysql.log`, `cfm.lsm.log`, `ua_emergency.log`,
+    `challenge.access.log` and `/var/log/cfm.smtp.log` were all unrotated. It
+    now globs `*.log` per CFM-owned directory, so new log files are covered on
+    the day they appear.
+  - `daily` was the only trigger. An edge writing tens of GB/day grows
+    unbounded until the nightly run, and past a certain size `copytruncate` +
+    `compress` no longer fits in free space — after which the file can never
+    rotate again. The blocks now carry `maxsize` caps (200M for `/var/log/cfm/`,
+    2G for the edge), and `/etc/cron.hourly/cfm-logrotate` gives those caps an
+    hourly chance to fire instead of a daily one. The edge block also drops
+    `delaycompress`, which was keeping a full-size uncompressed `.1` alongside
+    the live file.
+
+  Recovering an already-full host: truncate in place (`: > access.log`), never
+  `rm` — see `docs/log-rotation.md`.
+- **Vendor-rotated paths removed from the CFM logrotate config.**
+  `/var/log/angie/access-panel.log` and `/var/log/nginx/access_cfm_combined.log`
+  were declared by CFM *and* by the angie/nginx packages' own
+  `/etc/logrotate.d/*` globs. logrotate treats a second declaration of a path as
+  a config error (`duplicate log entry`) and aborts the run rather than rotating
+  it, so those entries removed rotation instead of adding it. CFM now covers only
+  the two directories nobody else owns (`/var/log/cfm/`,
+  `/usr/local/openresty/nginx/logs/`); `--host` mode of the new checker verifies
+  the vendor-owned ones on a live server. Relatedly, the deploy path no longer
+  leaves `/etc/logrotate.d/logrotate-cfm.bak` behind (read as a duplicate config
+  by older logrotate builds) and removes any left by earlier installers — the
+  previous config is kept under `/var/lib/cfm/backups/` instead.
+
 ### Added
+- **`scripts/tests/check_logrotate_coverage.sh`, wired into CI.** Cross-checks
+  every log path CFM configures — edge `access_log`/`error_log`, Apache
+  `CustomLog`, `*_LOG_FILE` keys in `cfm.conf`, the systemd stdout/stderr
+  capture, the rsyslog LSM sink, and `/var/log/cfm/…` literals in Go — against
+  `configs/logrotate-cfm`, and fails if one is neither covered by CFM nor in a
+  directory documented as vendor-rotated. It also fails if CFM declares a
+  vendor-globbed path, which is what makes the duplicate-entry class of bug
+  impossible to reintroduce. `--host` runs the same audit against a live
+  server's `/etc/logrotate.d`, printing each log's size and the config that
+  rotates it. New doc: `docs/log-rotation.md`.
 - **`challenge_solver_farm` gains an `ACTION` knob.** `observe` (the default, and
   what an existing config without the key gets) notifies and logs; `logonly`
   keeps the `cfm.detector.log` record but sends no notification, for a vhost

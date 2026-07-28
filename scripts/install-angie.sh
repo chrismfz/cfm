@@ -447,6 +447,66 @@ backup_and_copy_file() {
     log "Copied: $src -> $dst"
 }
 
+# Install the CFM logrotate config plus the hourly runner that gives its
+# `maxsize` caps a chance to fire (configs/logrotate-cfm explains why a
+# once-a-day pass is not enough on a busy edge).
+#
+# Deliberately NOT backup_and_copy_file: that helper leaves the old copy next
+# to the original, and /etc/logrotate.d/logrotate-cfm.bak is read as a second
+# config by any logrotate old enough to lack ".bak" in its taboo extension
+# list. Every path would then be declared twice -> "duplicate log entry" ->
+# the run aborts and nothing rotates. So back up outside the directory, and
+# clear any .bak an earlier version of this installer left behind.
+install_logrotate_config() {
+    local src="/usr/share/cfm/configs/logrotate-cfm"
+    local dst="/etc/logrotate.d/logrotate-cfm"
+    local backup_dir="/var/lib/cfm/backups"
+
+    if [ ! -f "$src" ]; then
+        warn "Source file not found, skipping: $src"
+        return 0
+    fi
+
+    mkdir -p /etc/logrotate.d
+
+    if [ -e "${dst}.bak" ]; then
+        rm -f "${dst}.bak"
+        log "Removed stale ${dst}.bak (logrotate can read it as a duplicate config)"
+    fi
+
+    if [ -e "$dst" ]; then
+        mkdir -p "$backup_dir"
+        mv -f "$dst" "$backup_dir/logrotate-cfm.bak"
+        log "Backed up existing file: $dst -> $backup_dir/logrotate-cfm.bak"
+    fi
+
+    cp -f "$src" "$dst"
+    chmod 0644 "$dst"
+    log "Copied: $src -> $dst"
+
+    # No dot in the basename: run-parts skips /etc/cron.hourly entries whose
+    # name contains one.
+    local cron_src="/usr/share/cfm/configs/cfm-logrotate.cron"
+    local cron_dst="/etc/cron.hourly/cfm-logrotate"
+    if [ -f "$cron_src" ]; then
+        mkdir -p /etc/cron.hourly
+        cp -f "$cron_src" "$cron_dst"
+        chmod 0755 "$cron_dst"
+        log "Installed hourly logrotate pass: $cron_dst"
+    else
+        warn "Hourly logrotate runner not found, skipping: $cron_src"
+    fi
+
+    if command -v logrotate >/dev/null 2>&1; then
+        if logrotate -d "$dst" >/dev/null 2>&1; then
+            log "logrotate config validates: $dst"
+        else
+            warn "logrotate rejected $dst — rotation may not run:"
+            logrotate -d "$dst" >&2 || true
+        fi
+    fi
+}
+
 render_panel_listener_template() {
     local engine_name="$1"
     local listener_dest="$2"
@@ -475,8 +535,7 @@ deploy_cfm_files() {
     backup_and_copy_file "/usr/share/cfm/configs/challenge_waf_bypass.conf" \
                          "$conf_dir/challenge_waf_bypass.conf"
 
-    backup_and_copy_file "/usr/share/cfm/configs/logrotate-cfm" \
-                         "/etc/logrotate.d/logrotate-cfm"
+    install_logrotate_config
 }
 
 validate_shared_lua_runtime() {

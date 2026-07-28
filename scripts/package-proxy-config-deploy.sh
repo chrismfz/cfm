@@ -340,6 +340,77 @@ process_engine() {
     return 0
 }
 
+# Install /etc/logrotate.d/logrotate-cfm and the hourly runner that lets its
+# `maxsize` caps fire between the distro's once-a-day logrotate pass.
+#
+# This runs from the package postinst rather than only from
+# install-{openresty,angie}.sh on purpose: the installers are run once by hand,
+# so a host that has only ever been package-upgraded had no rotation at all for
+# the OpenResty edge logs (/usr/local/openresty/nginx/logs/access.log reaching
+# hundreds of GB) and none for /var/log/cfm/.
+#
+# Any failure is a warning, never fatal — an unrotated log must not abort an
+# upgrade.
+deploy_logrotate_config() {
+    dlc_src="$CFM_CONFIG_DIR/logrotate-cfm"
+    dlc_dst=${CFM_LOGROTATE_DST:-/etc/logrotate.d/logrotate-cfm}
+    dlc_cron_src="$CFM_CONFIG_DIR/cfm-logrotate.cron"
+    dlc_cron_dst=${CFM_LOGROTATE_CRON_DST:-/etc/cron.hourly/cfm-logrotate}
+
+    if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
+        echo "CFM logrotate: not running as root; skipping"
+        return 0
+    fi
+
+    if [ ! -f "$dlc_src" ]; then
+        echo "WARNING: CFM logrotate: packaged config missing: $dlc_src"
+        return 0
+    fi
+
+    # A stray .bak beside the config is read as a SECOND config by any
+    # logrotate whose taboo-extension list predates ".bak" — every path then
+    # appears twice, logrotate reports "duplicate log entry" and the run
+    # aborts. Older installers left exactly that file behind.
+    if [ -e "$dlc_dst.bak" ]; then
+        rm -f "$dlc_dst.bak" &&
+            echo "CFM logrotate: removed stale $dlc_dst.bak (read as a duplicate config)"
+    fi
+
+    mkdir -p "$(dirname "$dlc_dst")" 2>/dev/null || true
+    if cp -f "$dlc_src" "$dlc_dst" 2>/dev/null; then
+        chmod 0644 "$dlc_dst" 2>/dev/null || true
+        echo "CFM logrotate: deployed $dlc_dst"
+    else
+        echo "WARNING: CFM logrotate: failed to deploy $dlc_dst"
+        return 0
+    fi
+
+    # No dot in the basename: run-parts skips /etc/cron.hourly entries that
+    # contain one.
+    if [ -f "$dlc_cron_src" ]; then
+        mkdir -p "$(dirname "$dlc_cron_dst")" 2>/dev/null || true
+        if cp -f "$dlc_cron_src" "$dlc_cron_dst" 2>/dev/null; then
+            chmod 0755 "$dlc_cron_dst" 2>/dev/null || true
+            echo "CFM logrotate: deployed hourly pass $dlc_cron_dst"
+        else
+            echo "WARNING: CFM logrotate: failed to deploy $dlc_cron_dst"
+        fi
+    else
+        echo "WARNING: CFM logrotate: hourly runner missing: $dlc_cron_src"
+    fi
+
+    if command -v logrotate >/dev/null 2>&1; then
+        if logrotate -d "$dlc_dst" >/dev/null 2>&1; then
+            echo "CFM logrotate: config validates"
+        else
+            echo "WARNING: CFM logrotate: logrotate rejected $dlc_dst; rotation may not run"
+        fi
+    fi
+
+    return 0
+}
+
+deploy_logrotate_config
 if ! ensure_fallback_cert_if_missing; then
     echo "WARNING: CFM proxy config: failed to create fallback self-signed certs; config tests may fail"
 fi
