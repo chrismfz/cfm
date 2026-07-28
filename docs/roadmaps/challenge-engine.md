@@ -139,6 +139,19 @@ datacenter. An earlier note in this file said "every one a US residential ISP";
 that was drawn from one window and is corrected here. The pool mixes residential
 and datacenter exits, which matters because an ASN-based allowlist would not
 have covered it either way. That
+
+**And the same night showed the shape `cookiediscard` structurally cannot see —
+which is why `solver_farm` earns its keep.** Between 22:35:45 and 22:38:05, ~31
+addresses from AS398781 (plus one from a Twitter range carrying the identical
+UA) each solved **exactly once** on `www.mathematica.gr`, every one on a
+different `viewtopic.php`, all `X11; Linux x86_64 … Chrome/149`, all
+`tls_fp=95070673`, across ~31 distinct /24s. One solve per exit defeats a
+per-address threshold by construction — `MIN_SOLVES = 8` can never fire — while
+31 subnets in 140 s is exactly what the per-vhost subnet-spread rule is for. The
+two detectors are mirror images on purpose (`cookiediscard` keys on the address,
+`solverfarm` on the vhost); this capture is the evidence that neither alone is
+enough. Check `cfm.detector.log` for the matching `Challenge/SolverFarm` alert
+when reading this window.
 serial shape — one exit at a time rather than many in parallel — is the thing
 the detector was built to see, and it is also why a per-vhost concurrency rule
 misses it entirely. No false positive has appeared: a human who clears cookies
@@ -318,6 +331,40 @@ conjunction is for: `c2e09593` is no-GREASE *and* empty-ALPN *and* datacenter
 *and* UA-version spread. Each leg alone has now been observed on legitimate
 traffic — GREASE on Greek residential users behind a middlebox, ALPN on a Google
 crawler. Do not ship any single leg.
+
+**A full night confirmed `c2e09593` and produced a better candidate.** Thirteen
+sightings across the 2026-07-28 evening capture, and the ASN column has no
+exceptions at all: Tencent (US, Germany, Singapore, Hong Kong), Alibaba
+(Germany, Singapore, Hong Kong, Japan), Byteplus (Singapore, Hong Kong).
+**Zero residential.** The UA spread widened to eight Chrome majors — 103, 104,
+107, 116, 117, 120, 131, 133 — on one TLS stack. Its distinguishing shape is
+also structural rather than an absence: the three TLS 1.3 suites come **last**,
+after the ECDHE block, which no browser print in this capture does.
+
+**The cleaner marker is a positive one: DHE-RSA suites and X448.** Measured
+across the capture rather than recalled:
+
+| id | DHE-RSA | X448 | TLS1.3 suites last | carried by |
+|---|---|---|---|---|
+| `95070673` | no | no | no | Chrome/145 — the majority print |
+| `00b68027` | no | no | no | Firefox 153 — real browser |
+| `c2e09593` | no | no | **yes** | datacenter only, 8 Chrome majors |
+| `6821efa4` | **yes** | **yes** | no | `meta-externalagent` — a *declared* crawler |
+| `9ca6ad0b` | **yes** | **yes** | no | claims plain `Chrome/139`, from AWS |
+
+`6821efa4` is the control: a bot that says it is a bot, carrying DHE-RSA and
+X448. `9ca6ad0b` has the same TLS shape and a UA with no bot token at all. That
+is the lie the fingerprint is for — and unlike `grease=false` it is a *positive*
+marker (offering suites and a group), not a missing one, so a TLS-terminating
+middlebox does not produce it by omission. **Still a hypothesis**: what is
+established is that in this corpus no browser print carries DHE-RSA or X448 and
+two non-browser prints carry both. Confirm against a week before writing a rule,
+and expect corporate proxies to be the false-positive class to measure.
+
+**`19877aeb` is the counter-example that keeps the caution honest.** In one
+night it appeared on `ClaudeBot/1.0` (AWS), on Greek residential Nova/OTEnet
+users, and on Saudi Telecom. One id, a declared crawler and ordinary humans. An
+id is a TLS-offer shape; it is not a client, and it is not an intent.
 
 **Every `tls_fp=-` line in the capture is a panel scope** — `scope=panel:2083`
 or `scope=panel:2096`, without exception. That is the expected result and worth
