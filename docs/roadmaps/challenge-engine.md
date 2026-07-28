@@ -189,6 +189,46 @@ argument:
   resumption does not thin the fingerprint and field 7 does not need to gate
   anything.
 
+**First 23 minutes of production data: three distinct fingerprints, and one of
+them is a lie.** All three ids reproduce exactly from their logged tuples, so
+the implementation is verified end to end.
+
+| id | grease | what carries it |
+|---|---|---|
+| `95070673` | true | almost everything — Chrome 40 through 150, Edge, Samsung Browser, on Windows / macOS / Android / Linux, bots and real visitors alike |
+| `42d907e9` | true | iPhone Safari (21 ciphers incl. 3DES, `secp521r1`) |
+| `6edad59b` | **false** | a single client claiming `Chrome/150.0.0.0` |
+
+Two lessons, one disappointing and one very much not.
+
+**The resolution is low.** One id covers the entire Chromium family across a
+decade of claimed versions, because the offered cipher list and curve list have
+been frozen across Chromium releases for years — which is precisely why JA3/JA4
+hash the *extension list and its order*, the one thing nginx cannot report. So
+this will never pin "which Chrome version"; do not build a rule that assumes it
+can. What it does resolve is **TLS-stack generation**, and that turns out to be
+enough: every `chrome_impossible_patch` bot in the capture presented
+`95070673` — a modern Chromium ClientHello, TLS 1.3, `0x11ec` and all — while
+claiming `Chrome/40`–`Chrome/60` on macOS 10_12. A real Chrome 40 predates all
+three by years. The UA rules caught those independently, so the fingerprint is
+corroboration there rather than a new detection.
+
+**The new detection is `6edad59b`.** Its cipher list is byte-for-byte the
+Chrome list *plus* `TLS_EMPTY_RENEGOTIATION_INFO_SCSV`, with **no GREASE** and
+**no `0x11ec`**. A real Chrome 150 sends GREASE on every connection, by
+construction. So this is a non-Chromium stack wearing Chrome's cipher list — and
+it gets caught by the two things a copier forgets: GREASE (which is randomised
+per connection, so it has to be implemented rather than copied) and the newest
+group. `uaplausible` cannot see it at all — `Chrome/150.0.0.0` is a perfectly
+well-formed UA. **This is the first detection the fingerprint made on its own,
+16 minutes in.**
+
+The rule that suggests itself — *UA claims a modern Chromium AND `grease=false`
+→ mismatch* — is exactly the kind that must not be shipped from one observation.
+A TLS-terminating middlebox (corporate inspection, antivirus proxy, some VPN
+clients) produces the same shape legitimately. Collect a week, measure what
+share of `grease=false` traffic is plausibly a middlebox, then decide.
+
 Still open, and still to be answered from the log rather than assumed:
 
 - how much of the fleet reaches the edge through a TLS-terminating middlebox
@@ -196,13 +236,22 @@ Still open, and still to be answered from the log rather than assumed:
   legitimate fingerprint↔UA mismatch;
 - the id's stability across an edge OpenSSL upgrade, since it hashes names;
 - **what `0x11ec` is.** It appears as the first non-GREASE group, ahead of
-  X25519, on a client whose UA claims Chrome/145. A post-quantum hybrid group is
-  the obvious reading, and if that is right it is the sharpest UA-coherence token
-  available — it entered Chrome at a known version, so a UA claiming an older
-  Chrome that offers it is lying, and one claiming a newer Chrome that does not
-  is equally suspect. **Confirm it against the corpus before building any rule on
-  it**: pair the group against the UAs that carry it across a week of solves. Do
-  not take the identification from memory, including this note's.
+  X25519, on both the Chromium fingerprint and the Safari one. A post-quantum
+  hybrid group is the obvious reading; it entered browsers at known versions, so
+  its presence or absence dates the stack. **Confirm it against the corpus
+  before building any rule on it** — pair the group against the UAs that carry
+  it across a week of solves. Do not take the identification from memory,
+  including this note's.
+
+## 7. What this cannot do without an edge module
+
+Worth stating plainly so nobody re-derives it: the ceiling on the current
+approach is that nginx reports the *contents* of the cipher and curve lists but
+not the **extension list or its order**, which is what actually separates one
+Chromium build from another and what a real JA3/JA4 hashes. Every Chromium-family
+browser therefore lands on one id. Raising the resolution means a module or a
+patched edge, and that is a much bigger commitment than this was — take it only
+if a week of `grease`/group data proves the coarse signal insufficient.
 
 **Why it is worth doing anyway, even against uTLS.** A farm can mimic any
 fingerprint with uTLS — but not while running real headless Chrome, which is what
@@ -210,7 +259,7 @@ fingerprint with uTLS — but not while running real headless Chrome, which is w
 a native PoW solve, which collapses `solve_ms` toward zero — already measured. The
 two signals box the adversary in from opposite sides; neither does that alone.
 
-## 7. Related
+## 8. Related
 
 - `internal/webdetector/pow.go` — difficulty, TTL, token format
 - `internal/webdetector/challenge_server.go` — issue site and the browser solver
