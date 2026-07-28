@@ -641,8 +641,12 @@ func (e *Engine) StopUAEmergencyPruner() {
 // forensics view (which renders payload.ua) and any downstream solver-farm
 // correlation have something to work with. Before this, a solve recorded none of
 // them — which is why challenge_solved rows showed an empty UA column while
-// waf_trigger rows were populated. solve_ms and ua_impossible are written only
-// when known/true, so their absence is meaningful.
+// waf_trigger rows were populated. solve_ms, ua_impossible and tls_fp are
+// written only when known/true, so their absence is meaningful.
+//
+// tls_fp is the id of the client's TLS ClientHello as stamped by the edge; the
+// full tuple behind it is in cfm.challenges.log, written once per distinct
+// fingerprint.
 func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	if e == nil || e.chalAPI == nil {
 		return
@@ -657,6 +661,9 @@ func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	}
 	if s.UAImpossible {
 		payload["ua_impossible"] = s.UAReason
+	}
+	if s.TLSFP != "" {
+		payload["tls_fp"] = s.TLSFP
 	}
 	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_solved", Host: s.Host, IP: s.IP, Payload: payload})
 }

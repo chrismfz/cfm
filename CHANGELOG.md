@@ -39,6 +39,36 @@ back-filled here — see the git/PR history for that period.
   unaffected.
 
 ### Added
+- **TLS fingerprint on every challenge solve, log-first.** Every other signal on
+  a solve is written by the client — the User-Agent, the cookies, the PoW
+  solution, the timing. The TLS handshake is written by its TLS stack before a
+  byte of HTTP is sent, so a client claiming `Chrome/118` whose handshake does
+  not look like Chrome's is lying in a way no header edit can fix. The observed
+  farm sends one exact User-Agent for 100% of its solves, so this holds even if
+  it randomises that tomorrow.
+
+  `configs/lua/cfm_tlsfp.lua` stamps `X-CFM-TLS` on the request the edge
+  forwards to `/__cfm_verify` (protocol, offered ciphers, offered curves, ALPN,
+  HTTP version, resumption flag); `internal/tlsfp` parses it into an
+  8-character id. It is a poor-man's JA3, not a JA4 — the edge cannot report the
+  extension list or its order without a module — but it needs no module, patch
+  or rebuild, which is why it goes first.
+
+  Lands as `tls_fp=<id>` on every `result=solved` line in `cfm.challenges.log`,
+  `payload.tls_fp` on the `challenge_solved` history event, and one
+  `tls_fp=<id> first_seen ua=… tls=…` dictionary line per distinct fingerprint,
+  so `grep tls_fp=<id>` finds the definition and every solve that used it. `-`
+  means the edge supplied none (older edge config, plain HTTP, legacy DNAT), not
+  a parse failure.
+
+  **Nothing decides on it.** The fingerprint↔UA mapping has to be derived from
+  captured traffic rather than written from memory — the cipher names come from
+  the edge's OpenSSL build, so a table from another fleet is not comparable.
+  Reading it, the edge tolerates an older nginx without `$ssl_curves` or
+  `$ssl_alpn_protocol` (missing variables degrade to empty fields instead of
+  refusing to start), always clears a client-supplied `X-CFM-TLS` before setting
+  its own, and restricts the value to a charset that cannot carry CR/LF or the
+  field separator into a log line. See `docs/roadmaps/challenge-engine.md` §6.
 - **`uaplausible` gains three Chrome version-shape rules**
   (`chrome_impossible_patch`, `chrome_nonzero_minor`,
   `chrome_reduced_build_with_patch`). The farm does not reuse one forged

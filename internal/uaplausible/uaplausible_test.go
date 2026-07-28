@@ -174,6 +174,46 @@ func TestVersionOverflowSaturates(t *testing.T) {
 	}
 }
 
+// The version-shape rules read the Chrome token, which every Chromium
+// derivative carries — so the question is whether any of them writes something
+// other than the upstream Chromium version there. Measured over the capture:
+// 69 distinct derivative UA strings across 12 families (Edge, Opera, Vivaldi,
+// Brave, Samsung, Yandex-style, Electron, Chromium, WebView, MIUI, Sputnik,
+// EdgeAndroid), 1,497 requests, and NONE is flagged. Their highest patch is 280
+// — Opera's Chrome/120.0.6099.280, which is also the highest legitimate patch
+// anywhere in the capture.
+//
+// That is what the rules rest on: derivatives carry the Chrome token precisely
+// for compatibility, so they advertise the Chromium build they are made from,
+// using Chromium's own version string. A fork that invented its own numbers
+// there would break UA sniffing everywhere, which is the opposite of why the
+// token exists.
+func TestChromiumDerivativesAreNotFlagged(t *testing.T) {
+	// Each of these carries the highest patch number its family reached in the
+	// capture, so they sit as close to the bound as real traffic gets.
+	for _, ua := range []string{
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.280 Safari/537.36 OPR/106.0.0.0",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.6834.210 Electron/34.0.0 Safari/537.36",
+		"Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.181 Mobile Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.5615.136 Mobile Safari/537.36 MiuiBrowser/17.2.11",
+		"Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/25.0 Chrome/123.0.6312.120 Mobile Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.112 Safari/537.36 Brave/125",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.70 Safari/537.36 Vivaldi/6.8",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36 Edg/86.0.622.51",
+		"Mozilla/5.0 (Linux; Android 13; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.5414.117 Mobile Safari/537.36 EdgA/109.0.1518.80",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.117 YaBrowser/23.11.0.0 Safari/537.36",
+		// Forks with no product token of their own, which is the case the rules
+		// cannot distinguish from plain Chrome even in principle — they must
+		// pass on the strength of the upstream version alone.
+		"Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.107 Mobile Safari/537.36",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/120.0.6099.109 Chrome/120.0.6099.109 Safari/537.36",
+	} {
+		if v := Check(ua); v.Impossible {
+			t.Errorf("false positive on a Chromium derivative %q: %v", ua, v.Reasons)
+		}
+	}
+}
+
 // The patch bound is the one number in this package chosen from a distribution
 // rather than from a structural fact, so pin both sides of it.
 func TestChromePatchBound(t *testing.T) {

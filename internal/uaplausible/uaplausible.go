@@ -166,6 +166,24 @@ func Check(ua string) Verdict {
 	// every future release. The three rules below need no table: each states a
 	// property of Chrome's own version scheme that holds across the entire
 	// corpus, majors 15 through 150, and each is violated by the generator.
+	//
+	// Chromium derivatives: they all carry a Chrome/ token, so the question is
+	// whether any writes something other than the upstream Chromium version
+	// there. Measured across the capture — 69 distinct derivative UA strings in
+	// 12 families (Edge, Opera, Vivaldi, Brave, Samsung, Yandex, Electron,
+	// Chromium, WebView, MIUI, Sputnik, Edge Android), 1,497 requests — none is
+	// flagged, and their highest patch is 280 against a bound of 1000. That is
+	// what the token is FOR: a derivative advertises the Chromium build it is
+	// made from, using Chromium's own version string, because inventing its own
+	// numbers there would break UA sniffing everywhere. Forks with no product
+	// token of their own (Brave by default, Cromite, ungoogled-chromium) are
+	// indistinguishable from plain Chrome here by construction and pass on the
+	// strength of that upstream version alone.
+	//
+	// If a fork ever does land here, the cost is bounded by design: this verdict
+	// is corroboration, never a threshold. It reaches a log tag, a history field
+	// and a counted column on two detectors' alerts — nothing blocks, throttles
+	// or challenges on it. Hold the offending rule rather than the package.
 	if parts := chromeVersionParts(chrome); len(parts) == 3 {
 		minor, build, patch := parts[0], parts[1], parts[2]
 		// The fourth component is the patch. Across every Chrome version string

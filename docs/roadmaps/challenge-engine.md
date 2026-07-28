@@ -123,9 +123,62 @@ Note the farm is **slower** than legitimate traffic, and nothing solved under
 "suspiciously fast solve" rule catches nothing today, and why §3 is not urgent.
 If that distribution ever collapses toward zero for some cluster, revisit.
 
-## 6. Related
+## 6. TLS fingerprint ↔ UA coherence (log-first since 2026-07-28)
+
+Every other signal on a solve is written by the client: the User-Agent, the
+cookies, the PoW solution, the timing. The TLS handshake is written by its TLS
+stack before a byte of HTTP is sent. A client claiming `Chrome/118` whose
+handshake does not look like Chrome's is lying in a way no header edit can fix —
+and the observed farm sends one exact User-Agent for **100%** of its solves, so a
+coherence check would still hold if it randomised that tomorrow.
+
+**What ships today.** `configs/lua/cfm_tlsfp.lua` stamps `X-CFM-TLS` on the
+request the edge forwards to `/__cfm_verify`; `internal/tlsfp` parses it and
+reduces it to an 8-character id. Wire format is positional and versioned:
+
+```
+1|$ssl_protocol|$ssl_ciphers|$ssl_curves|$ssl_alpn_protocol|$server_protocol|$ssl_session_reused
+```
+
+This is a poor-man's JA3, not a JA4 — nginx exposes the offered cipher suites and
+curves plus the negotiated protocol and ALPN, but not the extension list or its
+order. A real JA4 needs a module or a patched edge. This needs neither, which is
+why it goes first.
+
+**Where it lands.** `tls_fp=<id>` on every `result=solved` line in
+`cfm.challenges.log`, `payload.tls_fp` on the `challenge_solved` history event,
+and one `tls_fp=<id> first_seen ua=… tls=…` dictionary line per distinct
+fingerprint (the tuple is a few hundred bytes; writing it per solve would add
+tens of MB a day). So `grep tls_fp=<id>` finds both the definition and every
+solve that used it.
+
+**Explicitly not a rule yet.** The mapping from fingerprint to browser identity
+must be derived from captured traffic, not written from memory — the same
+discipline `internal/uaplausible` documents, and here it is stronger: the cipher
+names come from the edge's OpenSSL build, so a table lifted from another fleet is
+not even comparable. Give it a week of log, then build the table from solves
+whose UA is corroborated by other means.
+
+Three things to check when reading that data rather than assume:
+
+- whether `$ssl_ciphers`/`$ssl_curves` stay populated on **resumed** sessions
+  (that is what field 7 is for — `r` means resumed, `.` means not);
+- how much of the fleet reaches the edge through a TLS-terminating middlebox
+  (corporate inspection, antivirus proxy, VPN client, CDN), which produces a
+  legitimate fingerprint↔UA mismatch;
+- the id's stability across an edge OpenSSL upgrade, since it hashes names.
+
+**Why it is worth doing anyway, even against uTLS.** A farm can mimic any
+fingerprint with uTLS — but not while running real headless Chrome, which is what
+`solve_ms` says it runs today (§5). Moving to uTLS costs it the browser and forces
+a native PoW solve, which collapses `solve_ms` toward zero — already measured. The
+two signals box the adversary in from opposite sides; neither does that alone.
+
+## 7. Related
 
 - `internal/webdetector/pow.go` — difficulty, TTL, token format
 - `internal/webdetector/challenge_server.go` — issue site and the browser solver
 - `internal/detectors/solverfarm/` — the farm detector and `Action`
+- `internal/detectors/cookiediscard/` — the re-solver detector
+- `internal/tlsfp/` + `configs/lua/cfm_tlsfp.lua` — the TLS fingerprint signal
 - `docs/DETECTORS.md` — `challenge_solver_farm` operator documentation

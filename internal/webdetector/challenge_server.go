@@ -4,6 +4,7 @@ import (
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
+	"cfm/internal/tlsfp"
 	"cfm/internal/uaplausible"
 	"context"
 	"crypto/tls"
@@ -431,6 +432,19 @@ type ChallengeSolve struct {
 	// a *lie*, not that it is old.
 	UAImpossible bool
 	UAReason     string
+	// TLSFP is a short id for the client's TLS ClientHello, stamped by the edge
+	// (configs/lua/cfm_tlsfp.lua) and parsed by internal/tlsfp. Empty when the
+	// edge did not supply one — an older edge config, a plain-HTTP request, or
+	// the legacy DNAT path where the daemon terminates TLS itself.
+	//
+	// This is the one signal on a solve the client does not author: its TLS
+	// stack emits the handshake before any HTTP is sent. Log-first — nothing
+	// scores on it yet, and the fingerprint↔UA mapping must be derived from
+	// captured traffic rather than written from memory.
+	TLSFP string
+	// TLSRaw is the full tuple behind TLSFP, kept so it can be written once per
+	// distinct fingerprint instead of on every solve.
+	TLSRaw string
 }
 
 // SolveLatencyMS reports the real client-side solve latency and whether it is
@@ -445,6 +459,27 @@ func (s ChallengeSolve) SolveLatencyMS() (int64, bool) {
 
 // ChallengeSolvedHook lets the detectors layer log solved/expired in a unified way.
 // It is optional; if unset, ChallengeServer will log a minimal solved line.
+// tlsFingerprintHeader is the request header the edge stamps with the client's
+// TLS ClientHello summary. The edge clears any client-supplied value before
+// setting its own — see configs/lua/cfm_tlsfp.lua and internal/tlsfp for the
+// trust boundary that makes reading it safe while this stays log-only.
+const tlsFingerprintHeader = "X-CFM-TLS"
+
+// tlsPrints tracks which fingerprints have already been written out in full, so
+// the tuple is logged once and each solve carries only the id.
+var tlsPrints = tlsfp.NewRegistry(5000)
+
+// logValueOrDash renders an optional field for a log line. An empty value means
+// "not available" — an older edge config, plain HTTP, or the legacy DNAT path —
+// and "-" says that, where an empty %s would silently produce `tls_fp= ` and
+// read as a parse failure.
+func logValueOrDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
 type ChallengeSolvedHook func(ChallengeSolve)
 
 var challengeSolvedHook ChallengeSolvedHook
@@ -668,6 +703,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 		ua := strings.TrimSpace(r.UserAgent())
 		uaVerdict := uaplausible.Check(ua)
+		fp, _ := tlsfp.Parse(r.Header.Get(tlsFingerprintHeader))
 		solve := ChallengeSolve{
 			IP:           ipStr,
 			Host:         host,
@@ -678,6 +714,17 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			SolveMS:      powSolveLatencyMS(issuedAt, verifyAt, cfg.TTL),
 			UAImpossible: uaVerdict.Impossible,
 			UAReason:     uaVerdict.Reason(),
+			TLSFP:        fp.ID,
+			TLSRaw:       fp.Raw,
+		}
+
+		// One dictionary line per distinct fingerprint, so every solve can carry
+		// the 8-character id instead of the full tuple. The UA rides along
+		// because the whole point of the signal is the pairing: this is the
+		// record that lets a fingerprint↔UA mapping be derived from real traffic
+		// later rather than written from memory.
+		if tlsPrints.FirstSeen(solve.TLSFP) {
+			logging.LogfCHALLENGES("[challenge] tls_fp=%s first_seen ua=%q tls=%q", solve.TLSFP, solve.UA, solve.TLSRaw)
 		}
 
 		publishChallengeSolveEvent(solve)
@@ -686,13 +733,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			challengeSolvedHook(solve)
 		} else {
 			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%d diff=%d",
+				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%d diff=%d tls_fp=%s",
 				solve.IP,
 				solve.Host,
 				solve.URI,
 				solve.VerifyMS,
 				solve.SolveMS,
 				solve.Diff,
+				logValueOrDash(solve.TLSFP),
 			)
 		}
 

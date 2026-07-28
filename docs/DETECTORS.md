@@ -293,7 +293,24 @@ the whole corpus, majors 15 → 150:
 Together with the existing rules this flags **64.5% of the distinct UA strings**
 but only **2.22% of the requests** — and that gap *is* the finding: one generator
 minting a fresh string per request dominates the vocabulary while barely moving
-the traffic share. Zero known crawlers or Chromium derivatives are caught.
+the traffic share.
+
+**Chromium derivatives.** They all carry a `Chrome/` token, so the fair question
+is whether any writes something other than the upstream Chromium version there.
+Measured across the capture — **69 distinct derivative UA strings in 12 families**
+(Edge, Opera, Vivaldi, Brave, Samsung, Yandex, Electron, Chromium, WebView, MIUI,
+Sputnik, Edge Android), 1,497 requests — **none is flagged**, and their highest
+patch is **280** (Opera's `Chrome/120.0.6099.280`) against a bound of 1000. That
+is what the token is *for*: a derivative advertises the Chromium build it was
+made from, using Chromium's own version string, because inventing its own numbers
+there would break UA sniffing everywhere. Forks with no product token of their
+own (Brave by default, Cromite, ungoogled-chromium) are indistinguishable from
+plain Chrome here by construction and pass on that upstream version alone.
+
+If one ever does land here, the cost is bounded by design: **this verdict is
+corroboration, never a threshold.** It reaches a log tag, a history field and a
+counted column on two detectors' alerts — nothing blocks, throttles or challenges
+on it. The fix is to hold the offending rule, not the package.
 
 It is checked on every challenge solve and surfaced three ways:
 
