@@ -148,6 +148,42 @@ for tok in cut:gmatch("[^:]+") do
     "every token survives whole: got " .. tok)
 end
 
+-- 7d. the tuple must never lose a FIELD, however long the lists are.
+--
+-- MAX_FIELD bounds each list but not their sum, and the client picks both: it
+-- may offer as many unknown suites and groups as it likes and nginx renders
+-- every unknown one as hex. Cutting the joined tuple instead of the fields was
+-- measured to produce a 2048-byte value with three separators instead of six —
+-- ALPN, the HTTP version and the resumption flag gone, so the value read as
+-- "a client that offered no ALPN" (the shape the roadmap treats as suspicious),
+-- with the TRUNC marker itself cut to "TR" so nothing said it was incomplete.
+-- A client could manufacture that on purpose. Every field must survive.
+reset()
+local many_c, many_g = {}, {}
+for i = 1, 200 do many_c[i] = string.format("0x%04x", 0x1300 + i) end
+for i = 1, 200 do many_g[i] = string.format("0x%04x", 0x2300 + i) end
+vars.ssl_protocol = "TLSv1.3"
+vars.ssl_ciphers = table.concat(many_c, ":")
+vars.ssl_curves = table.concat(many_g, ":")
+vars.ssl_alpn_protocol = "h2"
+vars.server_protocol = "HTTP/2.0"
+vars.ssl_session_reused = "r"
+fp.stamp()
+local big = headers["X-CFM-TLS"]
+check(big ~= nil, "an oversized ClientHello still yields a value")
+local seps = select(2, big:gsub("|", ""))
+check(seps == 6, "keeps all seven fields, got " .. seps .. " separators")
+check(#big <= 2048, "still within the total bound: " .. #big)
+local bf = {}
+for field in (big .. "|"):gmatch("([^|]*)|") do bf[#bf + 1] = field end
+check(bf[5] == "h2", "ALPN survives an oversized cipher/curve pair, got " .. tostring(bf[5]))
+check(bf[6] == "HTTP/2.0", "HTTP version survives, got " .. tostring(bf[6]))
+check(bf[7] == "r", "resumption flag survives, got " .. tostring(bf[7]))
+-- The marker must be whole. A cut "TR" is worse than no marker: the daemon
+-- reads TRUNC as a token, so a mangled one silently reports trunc=false.
+check(big:find(":TRUNC|") ~= nil, "the TRUNC marker itself is not cut")
+check(big:find(":TR|") == nil, "no half-written marker")
+
 -- 7c. a field that fits is untouched — no TRUNC on a normal browser.
 reset()
 vars.ssl_protocol = "TLSv1.3"

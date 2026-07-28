@@ -49,7 +49,14 @@ back-filled here — see the git/PR history for that period.
   can never hash equal to a client that genuinely offered that shorter prefix.
   The `first_seen` log line gained `trunc=`, because a truncated fingerprint can
   be shared by two clients whose offers agree up to the bound and must not be
-  counted as one.
+  counted as one. The two list fields are now budgeted against the total bound
+  and cut individually, never by cutting the joined tuple: 200 unknown cipher
+  suites plus 200 unknown groups — all client-chosen — produced a value carrying
+  three field separators instead of six, so ALPN, the HTTP version and the
+  resumption flag vanished and the tuple read as "a client that offered no
+  ALPN", with the `TRUNC` marker itself cut in half so `trunc=` reported false.
+  If the total is ever exceeded anyway the edge now stamps no header at all,
+  since no fingerprint is honest where a mutilated one is not.
 - **OpenResty edge logs now actually rotate.** On a busy OpenResty host
   `/usr/local/openresty/nginx/logs/access.log` had reached 235 GB (249 GB in
   that directory) with no rotated generations. Three causes, all fixed:

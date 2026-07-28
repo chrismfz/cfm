@@ -58,6 +58,26 @@ local function getvar(name)
   return v
 end
 
+-- cut_to shortens v to at most limit bytes, ending on a ":" boundary and saying
+-- so with a TRUNC token.
+--
+-- Cutting on the boundary is the point: half a cipher name is worse than a
+-- missing one. It looks like a cipher, it differs between two clients that
+-- offered the same list under different bounds, and it invents a token that
+-- exists in no ClientHello and that nobody can look up.
+local function cut_to(v, limit)
+  if #v <= limit then return v end
+  -- Room for ":" .. TRUNC_MARK. If the caller left less than that there is
+  -- nothing honest to say in the space available, so say nothing: an empty
+  -- field reads as "no data", while a half-written marker reads as data.
+  local room = limit - #TRUNC_MARK - 1
+  if room < 1 then return "" end
+  local cut = v:sub(1, room)
+  local sep = cut:match("^.*()%:")
+  if sep then cut = cut:sub(1, sep - 1) end
+  return cut .. ":" .. TRUNC_MARK
+end
+
 -- clean restricts a field to the characters nginx can legitimately produce
 -- here. That is what guarantees the value cannot smuggle CR/LF (header
 -- splitting) or the "|" field separator into the daemon's parser.
@@ -66,17 +86,7 @@ local function clean(v)
   v = tostring(v)
   if v == "" or v == "-" then return "" end
   v = v:gsub("[^%w%.%-%_%:%/%,%+]", "")
-  if #v > MAX_FIELD then
-    -- Cut on a ":" boundary so half a cipher name never becomes a token. A
-    -- partial name is worse than a missing one: it looks like a cipher, it
-    -- differs between two clients that offered the same list under different
-    -- bounds, and it silently invents a fingerprint nobody can look up.
-    local cut = v:sub(1, MAX_FIELD - #TRUNC_MARK - 1)
-    local sep = cut:match("^.*()%:")
-    if sep then cut = cut:sub(1, sep - 1) end
-    v = cut .. ":" .. TRUNC_MARK
-  end
-  return v
+  return cut_to(v, MAX_FIELD)
 end
 
 -- value returns the versioned tuple, or nil when there is nothing to describe
@@ -98,16 +108,49 @@ end
 function M.value()
   local proto = clean(getvar("ssl_protocol"))
   if proto == "" then return nil end
+
+  local ciphers = clean(getvar("ssl_ciphers"))
+  local curves  = clean(getvar("ssl_curves"))
+  local alpn    = clean(getvar("ssl_alpn_protocol"))
+  local http    = clean(getvar("server_protocol"))
+  local reused  = clean(getvar("ssl_session_reused"))
+
+  -- MAX_FIELD bounds each list. It does NOT bound their sum, and the client
+  -- chooses both: it may offer as many unknown cipher suites and groups as it
+  -- likes, and nginx renders every unknown one as hex. So the two list fields
+  -- are budgeted against MAX_TOTAL here, and cut individually — never by
+  -- cutting the joined tuple.
+  --
+  -- Cutting the tuple was measured, not imagined: 200 unknown suites plus 200
+  -- unknown groups produced a 2048-byte value carrying THREE separators instead
+  -- of six. ALPN, the HTTP version and the resumption flag were gone entirely,
+  -- so a reader saw "a client that offered no ALPN" — the exact shape §6 of
+  -- docs/roadmaps/challenge-engine.md treats as the suspicious one — and the
+  -- TRUNC marker had itself been cut to "TR", so nothing in the value said it
+  -- was incomplete. A client could manufacture that on purpose.
+  local budget = MAX_TOTAL - (#VERSION + #proto + #alpn + #http + #reused + 6)
+  if budget < 0 then budget = 0 end
+  if #ciphers + #curves > budget then
+    local half = math.floor(budget / 2)
+    if #ciphers > half and #curves > half then
+      ciphers = cut_to(ciphers, half)
+      curves  = cut_to(curves, budget - half)
+    elseif #ciphers > half then
+      ciphers = cut_to(ciphers, budget - #curves)
+    else
+      curves = cut_to(curves, budget - #ciphers)
+    end
+  end
+
   local v = table.concat({
-    VERSION,
-    proto,
-    clean(getvar("ssl_ciphers")),
-    clean(getvar("ssl_curves")),
-    clean(getvar("ssl_alpn_protocol")),
-    clean(getvar("server_protocol")),
-    clean(getvar("ssl_session_reused")),
+    VERSION, proto, ciphers, curves, alpn, http, reused,
   }, "|")
-  if #v > MAX_TOTAL then v = v:sub(1, MAX_TOTAL) end
+  -- Unreachable given the budget above, and kept as a hard backstop for the day
+  -- someone adds a field and forgets it. Note what it does NOT do: it does not
+  -- cut. A cut tuple loses whole fields silently and lies to the reader, so the
+  -- honest failure is no fingerprint at all — internal/tlsfp treats a missing
+  -- header as "no fingerprint", never as an error.
+  if #v > MAX_TOTAL then return nil end
   return v
 end
 
