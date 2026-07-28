@@ -653,6 +653,9 @@ func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	if s.SolveMS >= 0 {
 		payload["solve_ms"] = s.SolveMS
 	}
+	if s.UAImpossible {
+		payload["ua_impossible"] = s.UAReason
+	}
 	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_solved", Host: s.Host, IP: s.IP, Payload: payload})
 }
 

@@ -77,6 +77,11 @@ type solveRec struct {
 	subnet string
 	ip     string
 	ua     string
+	// uaBad is the UA-plausibility verdict carried on the event (empty when the
+	// UA is coherent). Reported as corroborating evidence only — the detection
+	// threshold never depends on it, because a farm can trivially send a
+	// well-formed UA.
+	uaBad string
 }
 
 type hostState struct {
@@ -247,7 +252,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			st.truncated++
 			continue
 		}
-		st.recs = append(st.recs, solveRec{when: ev.When, subnet: sn, ip: ev.SrcIP, ua: ev.UserAgent})
+		st.recs = append(st.recs, solveRec{when: ev.When, subnet: sn, ip: ev.SrcIP, ua: ev.UserAgent, uaBad: ev.Signal})
 	}
 
 	cutoff := now.Add(-d.cfg.Window)
@@ -272,10 +277,14 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		subnets := make(map[string]struct{}, len(st.recs))
 		ips := make(map[string]struct{}, len(st.recs))
 		uas := make(map[string]int)
+		impossibleUA := 0
 		for _, r := range st.recs {
 			subnets[r.subnet] = struct{}{}
 			ips[r.ip] = struct{}{}
 			uas[r.ua]++
+			if r.uaBad != "" {
+				impossibleUA++
+			}
 		}
 		if len(subnets) < d.cfg.MinSubnets {
 			continue
@@ -285,13 +294,13 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 		st.lastAlert = now
 
-		out <- d.buildAlert(now, host, st, subnets, ips, uas)
+		out <- d.buildAlert(now, host, st, subnets, ips, uas, impossibleUA)
 	}
 	return nil
 }
 
 func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
-	subnets, ips map[string]struct{}, uas map[string]int) core.Alert {
+	subnets, ips map[string]struct{}, uas map[string]int, impossibleUA int) core.Alert {
 
 	topUA, topUACount := "", 0
 	for ua, n := range uas {
@@ -333,6 +342,10 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 		}
 		samples = append(samples, fmt.Sprintf("[challenge] ua=%q solves=%d (%d%%)", u.ua, u.n, u.n*100/solves))
 	}
+	if impossibleUA > 0 {
+		samples = append(samples, fmt.Sprintf("[challenge] self-contradictory User-Agents: %d of %d solves (%d%%)",
+			impossibleUA, solves, impossibleUA*100/solves))
+	}
 	if st.truncated > 0 {
 		samples = append(samples, fmt.Sprintf("[challenge] NOTE: %d further solves in this window were not tracked (MAX_TRACKED_PER_HOST=%d); counts above are a lower bound",
 			st.truncated, d.cfg.MaxTrackedPerHost))
@@ -359,6 +372,8 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			"top_ua":        topUA,
 			"top_ua_share":  fmt.Sprintf("%d%%", uaShare),
 			"window":        d.cfg.Window.String(),
+			// Corroboration only — never part of the threshold.
+			"impossible_ua": fmt.Sprint(impossibleUA),
 		},
 	}
 }

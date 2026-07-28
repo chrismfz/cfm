@@ -113,6 +113,43 @@ func TestUARandomisationDoesNotEvade(t *testing.T) {
 	}
 }
 
+// A self-contradictory UA corroborates a finding but must never be part of the
+// threshold — a farm can send a perfectly well-formed UA whenever it likes.
+func TestImpossibleUAIsEvidenceNotThreshold(t *testing.T) {
+	t.Run("reported when present", func(t *testing.T) {
+		h := newHarness(t, Config{})
+		for i := 0; i < 80; i++ {
+			ev := core.InputEvent{
+				When: h.clock, Scope: "shop.example.com",
+				SrcIP: fmt.Sprintf("203.0.%d.1", i), UserAgent: chromeUA, Source: "challenge",
+			}
+			if i%4 == 0 {
+				ev.Signal = "ios_with_blink_webkit"
+			}
+			h.d.Enqueue(ev)
+		}
+		alerts := h.run(t)
+		if len(alerts) != 1 {
+			t.Fatalf("got %d alerts, want 1", len(alerts))
+		}
+		if got := alerts[0].Extra["impossible_ua"]; got != "20" {
+			t.Errorf("impossible_ua = %q, want 20", got)
+		}
+	})
+
+	t.Run("absence does not suppress the alert", func(t *testing.T) {
+		h := newHarness(t, Config{})
+		h.farmBurst("shop.example.com", 80, func(int) string { return chromeUA })
+		alerts := h.run(t)
+		if len(alerts) != 1 {
+			t.Fatalf("got %d alerts with entirely well-formed UAs, want 1", len(alerts))
+		}
+		if got := alerts[0].Extra["impossible_ua"]; got != "0" {
+			t.Errorf("impossible_ua = %q, want 0", got)
+		}
+	})
+}
+
 func TestLegitimateShapesDoNotAlert(t *testing.T) {
 	t.Run("normal audience: few subnets, repeat visitors", func(t *testing.T) {
 		h := newHarness(t, Config{})

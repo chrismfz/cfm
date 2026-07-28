@@ -129,6 +129,39 @@ Note the calibration is one server over one day. A very large vhost with a
 genuinely global mobile audience could legitimately spread wider; `MIN_SUBNETS`
 is a knob and `ALLOW_HOSTS` / `ALLOW_UA_CONTAINS` exempt known-good sources.
 
+Alerts also carry `impossible_ua` — how many solves in the window submitted a
+self-contradictory User-Agent (see below). It is corroboration for the operator
+reading the alert, never part of the threshold: a farm can send a well-formed UA
+whenever it chooses.
+
+### User-Agent plausibility (`internal/uaplausible`)
+
+Reports whether a UA contradicts *itself* — a combination no shipping browser
+emits. Examples, all present in real traffic: an iPhone carrying Blink's
+`AppleWebKit/537.36` (iOS is required to use the system WebKit, which reports
+`60x`), a bare `Chrome/` token on iOS (Chrome on iOS is `CriOS`), a Firefox
+carrying the Blink WebKit token, a Chrome UA missing `KHTML, like Gecko`.
+
+It is checked on every challenge solve and surfaced three ways:
+
+- `ua_impossible=<reasons>` in `cfm.challenges.log`
+- `payload.ua_impossible` on the `challenge_solved` history event
+- `impossible_ua` count on `challenge_solver_farm` alerts
+
+Two boundaries worth keeping in mind:
+
+- **Coherence, not freshness.** An old-but-consistent UA is a real person on an
+  old browser and is never flagged.
+- **No staleness scoring.** It is tempting to score a UA by how far behind the
+  fleet its version is. On the capture these rules came from, Chrome 118 was
+  72.5% of all Chrome requests *because the farm dominated the traffic* —
+  calibrating "current" by volume lets the attacker define normal.
+
+When adding a rule, validate it against a real UA corpus first. The
+`(KHTML, like Gecko)` exact-match draft of one rule flagged legitimate crawlers
+(Amazonbot, YouBot, GeedoShopProductFinder) that append their identity inside
+the same parentheses — caught only because the rule was measured before shipping.
+
 ---
 
 ## 3) Custom detectors

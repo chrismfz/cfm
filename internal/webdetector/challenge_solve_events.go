@@ -10,10 +10,15 @@ import (
 // carries the vhost (the key a solver-farm detector aggregates on) and SrcIP the
 // solver, so a detector can measure how widely spread the solvers of one vhost
 // are without knowing anything about the challenge internals.
+//
+// Signal carries the UA-plausibility verdict (empty when the UA is coherent), so
+// a detector can report what share of a cluster submitted a self-contradictory
+// User-Agent without re-parsing it.
 func (s ChallengeSolve) InputEvent() core.InputEvent {
 	return core.InputEvent{
 		Source:    "challenge",
 		Reason:    "CHALLENGE_SOLVED",
+		Signal:    s.UAReason,
 		Scope:     s.Host,
 		SrcIP:     s.IP,
 		Path:      s.URI,

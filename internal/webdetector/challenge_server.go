@@ -4,6 +4,7 @@ import (
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
+	"cfm/internal/uaplausible"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -415,6 +416,12 @@ type ChallengeSolve struct {
 	// is noisy — solve time is exponentially distributed, so a lucky honest
 	// browser can land near zero. Judge it over a cluster, not a single event.
 	SolveMS int64
+	// UAImpossible is set when the submitted User-Agent contradicts itself (an
+	// iPhone running desktop Blink, a Firefox carrying the Blink WebKit token).
+	// UAReason names the rule(s). See internal/uaplausible — this says the UA is
+	// a *lie*, not that it is old.
+	UAImpossible bool
+	UAReason     string
 }
 
 // ChallengeSolvedHook lets the detectors layer log solved/expired in a unified way.
@@ -637,14 +644,18 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			return
 		}
 
+		ua := strings.TrimSpace(r.UserAgent())
+		uaVerdict := uaplausible.Check(ua)
 		solve := ChallengeSolve{
-			IP:       ipStr,
-			Host:     host,
-			URI:      next,
-			Diff:     diff,
-			UA:       strings.TrimSpace(r.UserAgent()),
-			VerifyMS: time.Since(verifyStart).Milliseconds(),
-			SolveMS:  powSolveLatencyMS(issuedAt, time.Now().UTC()),
+			IP:           ipStr,
+			Host:         host,
+			URI:          next,
+			Diff:         diff,
+			UA:           ua,
+			VerifyMS:     time.Since(verifyStart).Milliseconds(),
+			SolveMS:      powSolveLatencyMS(issuedAt, time.Now().UTC()),
+			UAImpossible: uaVerdict.Impossible,
+			UAReason:     uaVerdict.Reason(),
 		}
 
 		publishChallengeSolveEvent(solve)

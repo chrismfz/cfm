@@ -342,12 +342,18 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 					ridPart = fmt.Sprintf(" waf_rule_id=%d", wafRuleID)
 				}
 
+				// A self-contradictory UA is worth grepping for on its own.
+				uaBad := ""
+				if s.UAImpossible {
+					uaBad = " ua_impossible=" + s.UAReason
+				}
+
 				// ms= stays the server-side verify time it has always been, so
 				// existing log tooling keeps parsing. solve_ms= is the new,
 				// actually-meaningful number: issue → submit wall clock.
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%d diff=%d ua=%q%s%s%s",
-					ip, host, uri, s.VerifyMS, s.SolveMS, diff, s.UA, reasonPart, ridPart, suffix,
+					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%d diff=%d ua=%q%s%s%s%s",
+					ip, host, uri, s.VerifyMS, s.SolveMS, diff, s.UA, uaBad, reasonPart, ridPart, suffix,
 				)
 
 				// Record solve in challenge API store (best-effort)

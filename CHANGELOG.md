@@ -18,6 +18,28 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **User-Agent plausibility check (`internal/uaplausible`).** Flags a UA that
+  contradicts *itself* — an iPhone carrying the Blink `AppleWebKit/537.36` token,
+  a `Chrome/` token on iOS where only `CriOS` exists, a Firefox carrying Blink's
+  WebKit build, a Chrome UA missing `KHTML, like Gecko` or with a hand-truncated
+  version, two platform tokens at once. Recorded on every challenge solve
+  (`ua_impossible=` in `cfm.challenges.log`, `payload.ua_impossible` in history)
+  and reported as corroborating evidence on `challenge_solver_farm` alerts.
+
+  It answers "is this UA a lie", **not** "is this UA old": a stale-but-coherent
+  UA belongs to a real person on an old browser. Every rule was derived from and
+  validated against a 314,877-request production capture (4,889 distinct UA
+  strings); together they flag 0.55% of it, and every flagged string was
+  inspected. An earlier draft of the `KHTML` rule matched the literal
+  `(KHTML, like Gecko)` and wrongly flagged legitimate crawlers — Amazonbot,
+  YouBot, GeedoShopProductFinder — which append their own identity inside the
+  same parentheses; those three are now regression cases.
+
+  Deliberately **not** included: version-staleness scoring. On the same capture,
+  Chrome 118 was 72.5% of all Chrome requests *because a solver farm dominated
+  the traffic* — so calibrating "current" by request volume would let an attacker
+  define normal, and any other calibration still only measures age, which
+  legitimate old browsers share.
 - **`challenge_solver_farm` detector — spots distributed challenge-solving
   botnets. Alert-only.** Bots now complete the whole cookie + JS + PoW flow
   correctly, and defeat every per-IP threshold *by construction*: they solve once
