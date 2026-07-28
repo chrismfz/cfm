@@ -585,10 +585,25 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 					httpAddr, httpsAddr, err,
 				)
 				return fmt.Errorf("EnsureChallengeRedirect: %w", err)
-			} else {
-				// Optional: one-line confirmation (useful during debugging)
+			}
+			// EnsureChallengeRedirect returns nil for two opposite outcomes: it
+			// installed the DNAT rules, or it found the redirect disabled
+			// (OPENRESTY_MODE, where the edge decides in-path) and cleaned them
+			// up instead. Reporting "OK" for both is how an operator ends up
+			// believing DNAT is armed when it is not, in the one area whose own
+			// code comment records having been burned before. Say which.
+			armed := true
+			if q, ok := any(s.fw).(interface{ ChallengeRedirectEnabled() bool }); ok {
+				armed = q.ChallengeRedirectEnabled()
+			}
+			if armed {
 				logging.LogfCHALLENGES(
-					"[challenge] nft ensure redirect OK http=%s https=%s",
+					"[challenge] nft challenge DNAT armed: flagged clients are redirected to http=%s https=%s",
+					httpAddr, httpsAddr,
+				)
+			} else {
+				logging.LogfCHALLENGES(
+					"[challenge] nft challenge DNAT disabled (edge decides in-path); any stale redirect rules cleaned up. Listeners http=%s https=%s still serve the edge's proxy_pass",
 					httpAddr, httpsAddr,
 				)
 			}
