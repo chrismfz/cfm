@@ -14,10 +14,40 @@ import (
 
 // POW params (μπορείς αργότερα να τα κάνεις config/env)
 const (
-	defaultPowEnabled    = true
-	defaultPowDifficulty = 16              // bits of leading zeros (18–22 είναι “ok”)
-	defaultPowTTL        = 2 * time.Minute // challenge must be solved quickly
-	maxPowSolutionLen    = 64
+	defaultPowEnabled = true
+
+	// defaultPowDifficulty is leading zero bits required of the solution.
+	//
+	// DO NOT RAISE THIS before the browser solver is rewritten. It reads like a
+	// low number with obvious headroom, and it is not: raising it scales the cost
+	// on BOTH sides equally, so it never separates a human from a solver farm —
+	// it only moves the honest client's bill. Measured on identical message
+	// shapes, the shipped solver (one `await crypto.subtle.digest` per candidate)
+	// runs at 48.8 kH/s against 4.49 MH/s for naive single-core native code: a
+	// ~92x handicap, before midstate precomputation and SIMD, which take a tuned
+	// native solver to 500-1000x.
+	//
+	// What that costs in practice, and why defaultPowTTL below is the real limit:
+	//
+	//	difficulty   browser (shipped)   native 1 core
+	//	16 (this)    1.3 s               15 ms
+	//	18           5.4 s               58 ms
+	//	20           21.5 s              233 ms
+	//	22           1.4 min             933 ms
+	//
+	// Solve time is exponentially distributed, so against the 2-minute TTL,
+	// difficulty 20 already loses roughly a third of mobile clients to expiry —
+	// an unbreakable challenge loop — and 22 loses about a quarter of desktop
+	// ones, while a farm pays under a second either way.
+	//
+	// The prerequisite is a synchronous/WASM solver in a Web Worker (~4x measured
+	// for plain sync JS, near-native for WASM); after that, several bits are
+	// available at unchanged user-visible cost. Full workings, and why memory-hard
+	// PoW was measured and rejected: docs/roadmaps/challenge-engine.md.
+	defaultPowDifficulty = 16
+
+	defaultPowTTL     = 2 * time.Minute // challenge must be solved quickly
+	maxPowSolutionLen = 64
 )
 
 // powEpochMillisMin separates a millisecond issue timestamp from a second one.
