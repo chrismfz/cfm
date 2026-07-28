@@ -447,6 +447,18 @@ type ChallengeSolve struct {
 	TLSRaw string
 }
 
+// TLSFingerprintOrDash renders TLSFP for a log line. Empty means "not
+// available" — an older edge config, a plain-HTTP request, or the legacy DNAT
+// path where no edge stamps the header — and "-" says so, where a bare %s would
+// produce `tls_fp= ` and read as a parse failure. Both writers of the solve line
+// go through this so the two can never disagree about what absence looks like.
+func (s ChallengeSolve) TLSFingerprintOrDash() string {
+	if s.TLSFP == "" {
+		return "-"
+	}
+	return s.TLSFP
+}
+
 // SolveLatencyMS reports the real client-side solve latency and whether it is
 // known. A sub-millisecond issue→submit gap cannot occur over HTTP, so treating
 // 0 as unknown costs no real measurement and makes the struct's zero value safe.
@@ -469,16 +481,11 @@ const tlsFingerprintHeader = "X-CFM-TLS"
 // the tuple is logged once and each solve carries only the id.
 var tlsPrints = tlsfp.NewRegistry(5000)
 
-// logValueOrDash renders an optional field for a log line. An empty value means
-// "not available" — an older edge config, plain HTTP, or the legacy DNAT path —
-// and "-" says that, where an empty %s would silently produce `tls_fp= ` and
-// read as a parse failure.
-func logValueOrDash(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
-}
+// tlsPrintsCapWarn fires the one-time notice that the fingerprint dictionary is
+// full. Without it the cap would be silent, and a reader hunting the first_seen
+// line for an id would conclude the daemon had lost it rather than that the
+// dictionary stopped admitting entries.
+var tlsPrintsCapWarn sync.Once
 
 type ChallengeSolvedHook func(ChallengeSolve)
 
@@ -724,7 +731,15 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// record that lets a fingerprint↔UA mapping be derived from real traffic
 		// later rather than written from memory.
 		if tlsPrints.FirstSeen(solve.TLSFP) {
-			logging.LogfCHALLENGES("[challenge] tls_fp=%s first_seen ua=%q tls=%q", solve.TLSFP, solve.UA, solve.TLSRaw)
+			logging.LogfCHALLENGES("[challenge] tls_fp=%s first_seen grease=%t ua=%q tls=%q",
+				solve.TLSFP, fp.GREASE, solve.UA, solve.TLSRaw)
+		} else if solve.TLSFP != "" && tlsPrints.Capped() {
+			// No silent caps: say the dictionary stopped admitting entries, once,
+			// rather than let a reader conclude the daemon lost a first_seen line.
+			tlsPrintsCapWarn.Do(func() {
+				logging.LogfCHALLENGES("[challenge] tls_fp dictionary full at %d entries; new fingerprints still log tls_fp= but get no first_seen line",
+					tlsPrints.Len())
+			})
 		}
 
 		publishChallengeSolveEvent(solve)
@@ -740,7 +755,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 				solve.VerifyMS,
 				solve.SolveMS,
 				solve.Diff,
-				logValueOrDash(solve.TLSFP),
+				solve.TLSFingerprintOrDash(),
 			)
 		}
 

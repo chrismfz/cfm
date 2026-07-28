@@ -159,6 +159,20 @@ names come from the edge's OpenSSL build, so a table lifted from another fleet i
 not even comparable. Give it a week of log, then build the table from solves
 whose UA is corroborated by other means.
 
+**GREASE is stripped before hashing.** RFC 8701 stacks — Chrome above all —
+insert a code point chosen at random *per connection* into the cipher list and
+the supported_groups, and nginx renders values OpenSSL does not recognise as hex,
+so a GREASE value lands in `$ssl_ciphers`/`$ssl_curves` as `0x?a?a` and changes
+on every connection. Left in, one real client would produce up to 16×16 distinct
+ids: the grouping would be gone and the first_seen dictionary would fill with
+noise until it hit its bound. This is why JA4 strips GREASE and why the original
+JA3 was criticised for not doing so. `internal/tlsfp` drops the sixteen GREASE
+code points from both lists before hashing, keeps `Raw` verbatim as the evidence,
+preserves the offered order (which is stable per stack and part of what makes the
+fingerprint discriminating), and records `grease=true|false` on the first_seen
+line — so whether GREASE survives OpenSSL's ClientHello parsing on this edge at
+all comes out of the data instead of an assumption.
+
 Three things to check when reading that data rather than assume:
 
 - whether `$ssl_ciphers`/`$ssl_curves` stay populated on **resumed** sessions

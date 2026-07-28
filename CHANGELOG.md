@@ -77,9 +77,18 @@ back-filled here — see the git/PR history for that period.
   extension list or its order without a module — but it needs no module, patch
   or rebuild, which is why it goes first.
 
+  GREASE code points are stripped before hashing. RFC 8701 stacks insert one
+  chosen at random *per connection* into the cipher list and the
+  supported_groups, and nginx renders them as hex — left in, one real Chrome
+  would produce up to 16×16 distinct ids and the dictionary would fill with
+  noise. `Raw` stays verbatim as the evidence and the offered order is preserved;
+  `grease=true|false` on the first_seen line records whether GREASE survives
+  OpenSSL's ClientHello parsing on this edge at all.
+
   Lands as `tls_fp=<id>` on every `result=solved` line in `cfm.challenges.log`,
   `payload.tls_fp` on the `challenge_solved` history event, and one
-  `tls_fp=<id> first_seen ua=… tls=…` dictionary line per distinct fingerprint,
+  `tls_fp=<id> first_seen grease=… ua=… tls=…` dictionary line per distinct
+  fingerprint,
   so `grep tls_fp=<id>` finds the definition and every solve that used it. `-`
   means the edge supplied none (older edge config, plain HTTP, legacy DNAT), not
   a parse failure.
@@ -142,8 +151,9 @@ back-filled here — see the git/PR history for that period.
   Unlike `challenge_solver_farm`, blocking here is coherent: the subject is one
   real address abusing the challenge right now, and the alert sets `Extra["ip"]`
   authoritatively so the sink never falls back to scanning samples that quote
-  User-Agents and URIs. It still ships **alert-only** — set `BLOCK = "6h"` in
-  `[challenge_cookie_discard]` after a burn-in (soft TTL rather than
+  User-Agents and URIs. It still ships **alert-only** — `BLOCK = "dryrun"` to
+  watch the blocking path without touching nftables, then `BLOCK = "6h"` in
+  `[challenge_cookie_discard]` once you trust it (soft TTL rather than
   `permanent`, because every address observed was a residential proxy exit).
   Add the section to `/etc/cfm/detectors.conf` to enable it; greppable as
   `Challenge/CookieDiscard`.

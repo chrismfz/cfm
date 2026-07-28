@@ -273,8 +273,11 @@ Design choices, and how they differ from `challenge_solver_farm`:
   URIs). It still **ships alert-only**: leave `BLOCK` unset to watch it first,
   then `BLOCK = "6h"` in `[challenge_cookie_discard]` when you trust it. A soft
   TTL rather than `permanent` is right because every address observed was a
-  residential proxy exit that may belong to a real visitor later; `DRY_RUN = 1`
-  alongside it gives a watch-with-policy burn-in.
+  residential proxy exit that may belong to a real visitor later. The
+  intermediate step is `BLOCK = "dryrun"`, which runs the whole blocking path and
+  reports what it *would* have banned without touching nftables — note there is
+  no generic `DRY_RUN` key in this framework, so setting one here would be
+  silently ignored while `BLOCK` kept banning for real.
 - **Neither cap can hide the behaviour.** `MAX_TRACKED_PER_IP` bounds the
   evidence buffer only — records it drops are still counted toward the solve
   total, and truncation is stated on the alert. `MAX_TRACKED_IPS` bounds the

@@ -45,11 +45,20 @@ type Print struct {
 	// ID is 8 lowercase hex characters identifying the fingerprint.
 	ID string
 
+	// Ciphers and Curves are the lists the client offered, with GREASE code
+	// points removed — see stripGREASE for why that is mandatory rather than
+	// tidy. Raw keeps the value exactly as the edge sent it, GREASE included, so
+	// the evidence line is faithful while the analysis fields are comparable.
 	Proto   string // negotiated TLS version
-	Ciphers string // cipher suites the client offered
-	Curves  string // curves the client offered
+	Ciphers string // cipher suites the client offered, GREASE removed
+	Curves  string // curves the client offered, GREASE removed
 	ALPN    string // negotiated ALPN
 	HTTP    string // HTTP/2.0 or HTTP/1.1
+	// GREASE reports that at least one GREASE code point was stripped. Worth
+	// recording during the log-first phase: it answers whether GREASE survives
+	// OpenSSL's ClientHello parsing into these variables on this edge at all,
+	// which decides how much the stripping is actually doing.
+	GREASE bool
 	// Resumed reports a resumed TLS session. It matters when reading the data:
 	// a resumed handshake can carry thinner cipher/curve lists, so a reader must
 	// be able to tell that apart from an unusual client.
@@ -93,20 +102,86 @@ func Parse(header string) (Print, bool) {
 		}
 		return ""
 	}
+	ciphers, cipherGREASE := stripGREASE(at(2))
+	curves, curveGREASE := stripGREASE(at(3))
 	p := Print{
 		Raw:     h,
 		Proto:   at(1),
-		Ciphers: at(2),
-		Curves:  at(3),
+		Ciphers: ciphers,
+		Curves:  curves,
 		ALPN:    at(4),
 		HTTP:    at(5),
 		Resumed: at(6) == "r",
+		GREASE:  cipherGREASE || curveGREASE,
 	}
 	if p.Proto == "" {
 		return Print{}, false
 	}
 	p.ID = id(p)
 	return p, true
+}
+
+// stripGREASE removes GREASE code points from a colon-separated cipher or curve
+// list and reports whether any were found.
+//
+// This is not cosmetic — without it the whole signal would be close to useless.
+// Chrome (and every stack that follows RFC 8701) inserts a GREASE value chosen
+// at random per connection into its cipher list and its supported_groups, to
+// keep middleboxes from ossifying on a fixed set. nginx renders values OpenSSL
+// does not know as hex, so a GREASE value lands in $ssl_ciphers/$ssl_curves as
+// 0x?a?a and CHANGES ON EVERY CONNECTION. Hashing it would give one real client
+// up to 16x16 distinct ids, destroying the grouping the id exists for and
+// filling the first_seen dictionary with noise until it hit its bound.
+//
+// This is exactly why JA4 strips GREASE and why the original JA3 was criticised
+// for not doing so. Whether GREASE actually survives into these variables
+// depends on how the edge's OpenSSL parses the ClientHello, which is one of the
+// things the log-first phase is meant to establish — hence Print.GREASE, so the
+// answer comes from the data rather than from an assumption either way.
+//
+// The list ORDER is untouched: it is the client's offered order, which is stable
+// per stack and part of what makes the fingerprint discriminating. Only the
+// randomised entries are dropped.
+func stripGREASE(list string) (string, bool) {
+	if list == "" {
+		return "", false
+	}
+	parts := strings.Split(list, ":")
+	kept := parts[:0]
+	found := false
+	for _, tok := range parts {
+		if isGREASE(tok) {
+			found = true
+			continue
+		}
+		kept = append(kept, tok)
+	}
+	if !found {
+		return list, false
+	}
+	return strings.Join(kept, ":"), true
+}
+
+// isGREASE reports whether tok is one of the 16 GREASE code points as nginx
+// renders an unrecognised cipher suite or curve: 0x0a0a, 0x1a1a, … 0xfafa —
+// two identical bytes whose low nibble is 0xa.
+func isGREASE(tok string) bool {
+	if len(tok) != 6 || tok[0] != '0' || (tok[1] != 'x' && tok[1] != 'X') {
+		return false
+	}
+	hi1, lo1 := lowerHex(tok[2]), lowerHex(tok[3])
+	hi2, lo2 := lowerHex(tok[4]), lowerHex(tok[5])
+	if lo1 != 'a' || lo2 != 'a' || hi1 != hi2 {
+		return false
+	}
+	return (hi1 >= '0' && hi1 <= '9') || (hi1 >= 'a' && hi1 <= 'f')
+}
+
+func lowerHex(c byte) byte {
+	if c >= 'A' && c <= 'F' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // id hashes the parts that describe the CLIENT.

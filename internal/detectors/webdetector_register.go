@@ -365,14 +365,12 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 				// "first_seen" line, so `grep tls_fp=<id>` finds both the
 				// dictionary entry and every solve that used it. "-" means the
 				// edge supplied none (older edge config, plain HTTP, or the
-				// legacy DNAT path) — never a parse failure.
-				tlsFP := "-"
-				if s.TLSFP != "" {
-					tlsFP = s.TLSFP
-				}
+				// legacy DNAT path) — never a parse failure. Rendered through
+				// ChallengeSolve.TLSFingerprintOrDash so this and the challenge
+				// server's own fallback line cannot disagree.
 				logging.LogfCHALLENGES(
 					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua=%q%s%s%s%s",
-					ip, host, uri, s.VerifyMS, solveMS, diff, tlsFP, s.UA, uaBad, reasonPart, ridPart, suffix,
+					ip, host, uri, s.VerifyMS, solveMS, diff, s.TLSFingerprintOrDash(), s.UA, uaBad, reasonPart, ridPart, suffix,
 				)
 
 				// Record solve in challenge API store (best-effort)
