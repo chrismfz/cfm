@@ -63,6 +63,28 @@ type Print struct {
 	// a resumed handshake can carry thinner cipher/curve lists, so a reader must
 	// be able to tell that apart from an unusual client.
 	Resumed bool
+	// Truncated reports that the edge had to cut a list at its length bound and
+	// said so with a TRUNC token. Such a fingerprint is still stable for one
+	// client — the cut is deterministic — but two clients whose lists agree up
+	// to the bound collapse onto one id, so a truncated print is weaker evidence
+	// than a whole one and any analysis that counts distinct clients must say so.
+	Truncated bool
+}
+
+// truncMark is the token cfm_tlsfp.lua appends when it cuts a field. It stays
+// in Ciphers/Curves and therefore in the id on purpose: a truncated list must
+// not hash equal to a client that genuinely offered exactly that shorter list.
+const truncMark = "TRUNC"
+
+// truncated reports whether a colon-separated list carries the edge's cut
+// marker as one of its tokens.
+func truncated(list string) bool {
+	for _, tok := range strings.Split(list, ":") {
+		if tok == truncMark {
+			return true
+		}
+	}
+	return false
 }
 
 // safe reports whether the value contains only characters the producer can
@@ -113,6 +135,8 @@ func Parse(header string) (Print, bool) {
 		HTTP:    at(5),
 		Resumed: at(6) == "r",
 		GREASE:  cipherGREASE || curveGREASE,
+
+		Truncated: truncated(ciphers) || truncated(curves),
 	}
 	if p.Proto == "" {
 		return Print{}, false

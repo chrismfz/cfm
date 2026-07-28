@@ -274,3 +274,60 @@ func TestStripGREASEPreservesOrder(t *testing.T) {
 		t.Fatalf("empty list gave %q/%v", s, found)
 	}
 }
+
+// TestTruncatedFieldIsFlaggedAndDistinct covers the case production hit on
+// 2026-07-28: Meta's crawler offered a cipher list longer than the edge's field
+// bound, so the edge cut it. Two things must hold, and neither is cosmetic.
+//
+// The print must be marked truncated, because a cut list can be shared by two
+// different clients whose offers agree up to the bound — the id is real but it
+// counts fewer distinct clients than it appears to, and a reader has to know.
+//
+// And the cut list must NOT hash equal to a client that genuinely offered
+// exactly that shorter list. Without the TRUNC token in the hashed value they
+// would collide, and the collision would be invisible: the same id, one from a
+// long offer and one from a short one, with nothing in the log to separate them.
+func TestTruncatedFieldIsFlaggedAndDistinct(t *testing.T) {
+	const short = "1|TLSv1.3|TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256|X25519|h2|HTTP/2.0|."
+	cut := "1|TLSv1.3|TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:TRUNC|X25519|h2|HTTP/2.0|."
+
+	whole, ok := Parse(short)
+	if !ok {
+		t.Fatal("Parse(short) not ok")
+	}
+	if whole.Truncated {
+		t.Error("an untruncated tuple must not be flagged truncated")
+	}
+
+	part, ok := Parse(cut)
+	if !ok {
+		t.Fatal("Parse(cut) not ok")
+	}
+	if !part.Truncated {
+		t.Error("a tuple carrying the TRUNC token must be flagged truncated")
+	}
+	if part.ID == whole.ID {
+		t.Errorf("a truncated list hashes equal to a genuinely shorter one (both %s); "+
+			"the TRUNC token must stay in the hashed value", part.ID)
+	}
+
+	// The marker is also honoured on the curve list, which is the field a
+	// post-quantum-heavy client is most likely to overrun next.
+	curves, ok := Parse("1|TLSv1.3|TLS_AES_128_GCM_SHA256|X25519:prime256v1:TRUNC|h2|HTTP/2.0|.")
+	if !ok {
+		t.Fatal("Parse(curves) not ok")
+	}
+	if !curves.Truncated {
+		t.Error("TRUNC in the curve list must flag the print truncated")
+	}
+
+	// A cipher merely *containing* the letters is not the marker — only a whole
+	// token is, or a real suite name would start flagging prints at random.
+	near, ok := Parse("1|TLSv1.3|TRUNCATED-CIPHER:AES128-SHA|X25519|h2|HTTP/2.0|.")
+	if !ok {
+		t.Fatal("Parse(near) not ok")
+	}
+	if near.Truncated {
+		t.Error("a token that merely contains TRUNC must not flag the print")
+	}
+}

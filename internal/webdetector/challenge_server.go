@@ -746,8 +746,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// record that lets a fingerprint↔UA mapping be derived from real traffic
 		// later rather than written from memory.
 		if tlsPrints.FirstSeen(solve.TLSFP) {
-			logging.LogfCHALLENGES("[challenge] tls_fp=%s first_seen grease=%t ua=%q tls=%q",
-				solve.TLSFP, fp.GREASE, solve.UA, solve.TLSRaw)
+			// trunc= is not decoration: a truncated list can be shared by two
+			// different clients whose offers agree up to the bound, so the id is
+			// weaker evidence and the line has to say which kind it is.
+			logging.LogfCHALLENGES("[challenge] tls_fp=%s first_seen grease=%t trunc=%t ua=%q tls=%q",
+				solve.TLSFP, fp.GREASE, fp.Truncated, solve.UA, solve.TLSRaw)
 		} else if solve.TLSFP != "" && tlsPrints.Capped() {
 			// No silent caps: say the dictionary stopped admitting entries, once,
 			// rather than let a reader conclude the daemon lost a first_seen line.

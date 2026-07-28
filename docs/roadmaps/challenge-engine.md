@@ -123,9 +123,22 @@ Note the farm is **slower** than legitimate traffic, and nothing solved under
 "suspiciously fast solve" rule catches nothing today, and why §3 is not urgent.
 If that distribution ever collapses toward zero for some cluster, revisit.
 
+Two solves in the same window ran **59.4 s** (Chrome on a Nova residential line)
+and **26.3 s** (Firefox Android). The p90 above is 11.4 s, so these are the tail
+rather than the norm — but difficulty 16 costs a weak phone or an old desktop
+close to a minute, and that is a real user sitting in front of a spinner. If §2
+(per-vhost difficulty) ever lands, this tail is the argument for lowering it,
+not raising it.
+
 **`challenge_cookie_discard` in its first three hours of production**: 20+
-alerts, every one a US residential ISP address, each doing 20–60 solves in a
-2–5 minute burst and then falling silent while the next address takes over. That
+alerts, each address doing 20–60 solves in a 2–5 minute burst and then falling
+silent while the next takes over. Mostly US residential ISPs (Frontier, Charter,
+AT&T, Comcast, Taylor Telephone) — but **not exclusively**: the busiest single
+exit in the 16:17 window was `109.166.36.188`, AS212238 Datacamp in Japan, a
+datacenter. An earlier note in this file said "every one a US residential ISP";
+that was drawn from one window and is corrected here. The pool mixes residential
+and datacenter exits, which matters because an ASN-based allowlist would not
+have covered it either way. That
 serial shape — one exit at a time rather than many in parallel — is the thing
 the detector was built to see, and it is also why a per-vhost concurrency rule
 misses it entirely. No false positive has appeared: a human who clears cookies
@@ -264,6 +277,47 @@ families even though they cannot separate *within* Chromium: Firefox
 (`2696c4f4`), Safari and CriOS on Apple platforms (`42d907e9`), the iPhone
 Google-app webview (`2bfd7bbb`, distinct from Safari), and Meta's crawler
 (`6821efa4`). Engine-family attribution is real; version attribution is not.
+
+**The 512-byte field bound was too small, and production found it, not a
+test.** Meta's crawler (`6821efa4`) offers the full OpenSSL-style suite list;
+its cipher field measured exactly 512 characters and ended
+`...:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-S` — cut mid-name. The comment
+above the bound said it "sits above anything a real stack sends", which was
+simply wrong. Fixed on 2026-07-28: `MAX_FIELD` 1024, `MAX_TOTAL` 2048 (which
+must stay `<= tlsfp.maxHeader`), the cut now lands on a `:` boundary, and a cut
+field ends in a `TRUNC` token. The token is deliberately part of the hashed
+value — otherwise a truncated list would hash equal to a client that genuinely
+offered exactly that shorter prefix, and nothing in the log would separate them.
+`Print.Truncated` and `trunc=` on the `first_seen` line exist so a truncated id
+is never read as a whole one: it is stable per client, but two clients whose
+offers agree up to the bound collapse onto it.
+
+**Two ids can be one browser, and the fingerprint does not know it.** Two
+findings from the same three hours, both worth having before anyone writes a
+"new id ⇒ suspicious" rule:
+
+- `0ed5b601` and `95070673` are both `Chrome/150.0.0.0` on Windows and, after
+  GREASE stripping, offer **the same fifteen suites and the same four groups** —
+  in a different order, with ChaCha20 promoted to the front of each tier.
+  Reordering by whether the platform has AES hardware acceleration is the
+  obvious reading, and the corroboration is in the same line: that solve took
+  **59.4 seconds**, the slowest in the window, i.e. a weak CPU. Obvious is not
+  confirmed — pair the ordering against device class across a week before
+  claiming it.
+- `00b68027` and `93ba418f` are both `Firefox/153.0` on Windows with **identical
+  curve lists**, differing by a single trailing `DES-CBC3-SHA`. One browser
+  version, two ids. The cause is not established and must not be guessed.
+
+So an id is a TLS-offer shape, not a client identity. A rule may say "this shape
+is a scraper"; it may never say "this shape is new, therefore suspicious".
+
+**Empty ALPN with HTTP/1.1 is not a bot signal either.** `c41a0f3f` is
+Google-Read-Aloud from AS15169 — empty ALPN, `HTTP/1.1`, and GREASE present. It
+would trip the ALPN leg of the `c2e09593` conjunction on its own. That is what a
+conjunction is for: `c2e09593` is no-GREASE *and* empty-ALPN *and* datacenter
+*and* UA-version spread. Each leg alone has now been observed on legitimate
+traffic — GREASE on Greek residential users behind a middlebox, ALPN on a Google
+crawler. Do not ship any single leg.
 
 **Every `tls_fp=-` line in the capture is a panel scope** — `scope=panel:2083`
 or `scope=panel:2096`, without exception. That is the expected result and worth

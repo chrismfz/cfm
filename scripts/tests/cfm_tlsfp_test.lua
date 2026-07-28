@@ -125,7 +125,35 @@ vars.ssl_protocol = "TLSv1.3"
 vars.ssl_ciphers = string.rep("A", 5000)
 vars.ssl_curves = string.rep("B", 5000)
 fp.stamp()
-check(#headers["X-CFM-TLS"] <= 1024, "bounds the total value")
+check(#headers["X-CFM-TLS"] <= 2048, "bounds the total value")
+
+-- 7b. truncation must land on a ":" boundary and say so.
+--
+-- Production found this: on 2026-07-28 Meta's crawler offered a cipher list
+-- longer than the old 512-byte bound and the value was cut mid-name, ending
+-- "...:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-S". A partial cipher name is
+-- worse than a dropped one — it reads as a cipher, and it fabricates a token
+-- that exists in no ClientHello.
+reset()
+vars.ssl_protocol = "TLSv1.3"
+local suites = {}
+for i = 1, 80 do suites[i] = "ECDHE-ECDSA-AES256-GCM-SHA384" end
+vars.ssl_ciphers = table.concat(suites, ":")
+fp.stamp()
+local cut = headers["X-CFM-TLS"]:match("^1|TLSv1%.3|([^|]*)|")
+check(cut ~= nil and #cut <= 1024, "bounds a single field")
+check(cut:sub(-6) == ":TRUNC", "marks a truncated field with a TRUNC token")
+for tok in cut:gmatch("[^:]+") do
+  check(tok == "ECDHE-ECDSA-AES256-GCM-SHA384" or tok == "TRUNC",
+    "every token survives whole: got " .. tok)
+end
+
+-- 7c. a field that fits is untouched — no TRUNC on a normal browser.
+reset()
+vars.ssl_protocol = "TLSv1.3"
+vars.ssl_ciphers = "TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256"
+fp.stamp()
+check(headers["X-CFM-TLS"]:find("TRUNC") == nil, "does not mark a field that fits")
 
 -- 8. "-" is nginx's empty marker, not a value
 reset()

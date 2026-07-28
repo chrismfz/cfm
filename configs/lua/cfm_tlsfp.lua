@@ -29,11 +29,23 @@ local M = {}
 local HEADER  = "X-CFM-TLS"
 local VERSION = "1"
 
--- Chrome offers ~15 cipher suites; OpenSSL renders those as names, so the list
--- runs a few hundred characters. These bounds sit above anything a real stack
--- sends and keep one weird client from writing an unbounded log line.
-local MAX_FIELD = 512
-local MAX_TOTAL = 1024
+-- Chrome offers ~15 cipher suites and OpenSSL renders those as names, so a
+-- browser list runs a few hundred characters. A stack that offers the whole
+-- OpenSSL default set runs far longer: Meta's crawler was measured at over 512
+-- bytes of ciphers alone in production on 2026-07-28, which the previous bound
+-- cut mid-name ("...:ECDHE-RSA-AES256-S"). So these are NOT "above anything a
+-- real stack sends" — they are a backstop, and truncation is a thing that
+-- happens and must be legible. MAX_TOTAL must stay <= internal/tlsfp.maxHeader,
+-- which rejects anything longer outright.
+local MAX_FIELD = 1024
+local MAX_TOTAL = 2048
+
+-- TRUNC_MARK is appended as its own token when a field had to be cut, for two
+-- reasons. It keeps a truncated list from hashing equal to a client that
+-- genuinely offered exactly that shorter list, and it makes the cut visible in
+-- the log instead of something a reader has to infer from a value that happens
+-- to sit on the bound.
+local TRUNC_MARK = "TRUNC"
 
 -- getvar reads an nginx variable without ever raising. $ssl_curves needs
 -- OpenSSL 1.0.2+ and $ssl_alpn_protocol needs nginx 1.21.4+; on an older edge
@@ -54,7 +66,16 @@ local function clean(v)
   v = tostring(v)
   if v == "" or v == "-" then return "" end
   v = v:gsub("[^%w%.%-%_%:%/%,%+]", "")
-  if #v > MAX_FIELD then v = v:sub(1, MAX_FIELD) end
+  if #v > MAX_FIELD then
+    -- Cut on a ":" boundary so half a cipher name never becomes a token. A
+    -- partial name is worse than a missing one: it looks like a cipher, it
+    -- differs between two clients that offered the same list under different
+    -- bounds, and it silently invents a fingerprint nobody can look up.
+    local cut = v:sub(1, MAX_FIELD - #TRUNC_MARK - 1)
+    local sep = cut:match("^.*()%:")
+    if sep then cut = cut:sub(1, sep - 1) end
+    v = cut .. ":" .. TRUNC_MARK
+  end
   return v
 end
 
