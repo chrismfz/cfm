@@ -64,9 +64,9 @@
               <input id="rule-uas" class="input" type="text" v-model.trim="ruleForm.uas" placeholder="*facebookexternalhit*, *meta-externalagent*" />
               <label for="rule-paths">Path patterns</label>
               <input id="rule-paths" class="input" type="text" v-model.trim="ruleForm.paths" placeholder="/wp-login.php, /forum/ucp.php?mode=register" />
-              <label class="muted" style="font-size:.84rem">Prefix / <code>*</code>-glob match. A <code>?query</code> suffix matches per query parameter (each <code>key=value</code> must be present; a bare <code>key</code> matches any value), e.g. <code>/forum/ucp.php?mode=register</code>.</label>
+              <p class="muted form-hint">Prefix / <code>*</code>-glob match. A <code>?query</code> suffix matches per query parameter (each <code>key=value</code> must be present; a bare <code>key</code> matches any value), e.g. <code>/forum/ucp.php?mode=register</code>.</p>
               <label for="rule-hasqs">Query string</label>
-              <label class="muted" style="font-size:.84rem"><input id="rule-hasqs" type="checkbox" v-model="ruleForm.hasQS" /> only match requests that HAVE a query string</label>
+              <label class="muted form-check"><input id="rule-hasqs" type="checkbox" v-model="ruleForm.hasQS" /> only match requests that HAVE a query string</label>
               <label for="rule-qsnotrx" title="Requests whose query string matches this regex are NOT matched by the rule.">QS pass-through</label>
               <input id="rule-qsnotrx" class="input" type="text" v-model.trim="ruleForm.qsNotRx"
                 placeholder="(?:fbclid|export|xml)(?:=|[&amp;;]|$)" :disabled="!ruleForm.hasQS" />
@@ -86,7 +86,7 @@
               <label for="rule-priority" title="Lower number runs first.">Priority</label>
               <input id="rule-priority" class="input input-small" type="number" min="1" max="100000" step="1" v-model.number="ruleForm.priority" />
               <label for="rule-enabled">Enabled</label>
-              <label class="muted" style="font-size:.84rem"><input id="rule-enabled" type="checkbox" v-model="ruleForm.enabled" /> rule is active immediately after save</label>
+              <label class="muted form-check"><input id="rule-enabled" type="checkbox" v-model="ruleForm.enabled" /> rule is active immediately after save</label>
 
               <label for="rule-note">Note</label>
               <input id="rule-note" class="input" type="text" v-model.trim="ruleForm.note" placeholder="Short rule description" />

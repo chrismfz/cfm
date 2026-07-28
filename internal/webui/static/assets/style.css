@@ -730,8 +730,26 @@ code {
   margin-bottom: .8rem;
 }
 .form-grid > label { color: var(--muted); font-size: .84rem; white-space: nowrap; }
-.form-grid .input { width: 100%; }
+.form-grid .input { width: 100%; min-width: 0; }
 .form-grid .grid-span { grid-column: 1 / -1; }
+/* Explanatory text under a field: spans the whole row and wraps. Never leave
+   it as a bare <label> — the nowrap label column is max-content, so one long
+   line inflates column 1 and pushes every input out of the card. */
+.form-grid .form-hint {
+  grid-column: 1 / -1;
+  white-space: normal;
+  font-size: .84rem;
+  line-height: 1.45;
+  margin: -.15rem 0 .15rem;
+}
+/* Inline checkbox + caption sitting in the value column. */
+.form-grid .form-check {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  white-space: normal;
+}
+.form-grid .form-check input[type="checkbox"] { flex: none; margin: 0; }
 .form-section-title {
   grid-column: 1 / -1;
   margin: .5rem 0 .1rem;
