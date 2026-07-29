@@ -39,6 +39,24 @@ back-filled here — see the git/PR history for that period.
   unaffected.
 
 ### Fixed
+- **A solved challenge now survives the apex↔www canonical redirect.** Clearance
+  is host-only and the token binds the exact host, so a client that solved on
+  `example.gr` had no clearance on `www.example.gr` — and almost every site
+  301s one to the other from the origin, *behind* CFM. Real users looped:
+  solve, get redirected, get challenged again. Every iteration is a genuine
+  solve, so `challenge_cookie_discard` read nine of them in thirty-six seconds
+  as a client discarding its cookie and banned a CGNAT address carrying real
+  subscribers. After a solve the client is now sent once through the sibling's
+  `/__cfm_clearance_handoff`, which grants the clearance that host already
+  earned and forwards on. The cookie `Domain` attribute is deliberately NOT
+  used: it is a suffix match that cannot express "apex and www only", and both
+  ways of applying it break a cPanel box — scoped to the pair it leaves two
+  cookies of the same name so `$cookie_cfm_clearance` can return the wrong one
+  and `webmail.` loops forever; applied everywhere `webmail.` and the apex
+  overwrite each other and ping-pong. The handoff touches exactly one sibling,
+  every cookie stays host-only, the endpoint never issues a handoff of its own
+  (that is the loop guard), and the sibling must be served under exactly that
+  name — a wildcard certificate is not evidence a vhost answers.
 - **TLS fingerprint: a long cipher list was cut mid-cipher-name.** The edge
   stamper bounded each field at 512 bytes and cut blindly, so a client offering
   the full OpenSSL suite list ended its cipher field on a partial name

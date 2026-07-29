@@ -841,10 +841,81 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Connection", "close")
 
+		// Carry the clearance across the apex↔www pair, once, before handing the
+		// client back to its destination. Without this the origin's canonical
+		// 301 lands the client on a host that has no clearance and it is
+		// challenged again — a loop that a real user pays for and that
+		// challenge_cookie_discard reads as a client discarding its cookie.
+		// See clearance_handoff.go for why the cookie Domain attribute is not
+		// the tool for this.
+		//
+		// Guarded three ways: the sibling must be a real apex↔www counterpart,
+		// CFM must serve it under exactly that name (a wildcard certificate is
+		// not evidence the vhost answers), and the request being handled must
+		// not itself be a handoff — that last one is what makes the flow
+		// terminate rather than bounce between the two hosts forever.
+		if sib := clearanceSibling(host); sib != "" && s.ssl.HasExactHost(sib) && r.URL.Path != clearanceHandoffPath {
+			if tok := issueHandoffToken(ipStr, sib, scope, time.Now().UTC().Add(handoffTokenTTL)); tok != "" {
+				http.Redirect(w, r, handoffRedirectURL(sib, tok, next), http.StatusSeeOther)
+				return
+			}
+		}
+
 		// Safety: next is already forced to start with "/" above.
 		http.Redirect(w, r, next, http.StatusSeeOther) // 303
 
 	}
+
+	// clearanceHandoffHandler is the second half of the apex↔www carry. It
+	// grants the clearance the sibling host already earned and forwards on.
+	//
+	// It never issues a handoff of its own — that is the loop guard, and it is
+	// structural rather than a counter.
+	//
+	// Every failure path still forwards to `next` without a cookie: a bad,
+	// expired or replayed-from-elsewhere token must leave the client in the
+	// ordinary challenge flow, never at a dead end. A handoff that does not
+	// work costs one extra redirect; a handoff that 403s costs a visitor.
+	clearanceHandoffHandler := func(w http.ResponseWriter, r *http.Request) {
+		if !basicHeaderSanity(w, r) {
+			return
+		}
+		host := cleanHost(r.Host)
+		scope := clearanceScope(r)
+		next := safeHandoffNext(r.URL.Query().Get("next"))
+
+		w.Header().Set("Cache-Control", "no-store")
+
+		ip := clientIP(r)
+		if ip == nil {
+			// No usable client address: forward, do not grant. The token is
+			// address-bound, so there is nothing to verify against.
+			http.Redirect(w, r, next, http.StatusSeeOther)
+			return
+		}
+		ipStr := ip.String()
+
+		if verifyHandoffToken(r.URL.Query().Get("t"), ipStr, host, scope, time.Now().UTC()) {
+			ttl := s.cookieTTL()
+			exp := time.Now().UTC().Add(ttl)
+			http.SetCookie(w, &http.Cookie{
+				Name:     "cfm_clearance",
+				Value:    issueClearanceToken(ipStr, host, scope, exp),
+				Path:     "/",
+				MaxAge:   int(ttl.Seconds()),
+				HttpOnly: true,
+				Secure:   trustedForwardedProto(r) == "https",
+				SameSite: http.SameSiteLaxMode,
+			})
+			logClearanceIssueTrace(r, host, scope, exp, true)
+			logging.LogfCHALLENGES("[challenge] clearance handoff accepted ip=%s host=%s scope=%s", ipStr, host, scope)
+		} else {
+			logging.LogfCHALLENGES("[challenge] clearance handoff rejected ip=%s host=%s scope=%s (forwarding without clearance)", ipStr, host, scope)
+		}
+
+		http.Redirect(w, r, next, http.StatusSeeOther)
+	}
+	mux.HandleFunc(clearanceHandoffPath, clearanceHandoffHandler)
 
 	// New endpoint + legacy alias.
 	mux.HandleFunc(verifyPath, verifyHandler)
