@@ -893,6 +893,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		if !basicHeaderSanity(w, r) {
 			return
 		}
+		if isWeirdUA(r.UserAgent()) {
+			http.Error(w, "bad ua", http.StatusForbidden)
+			return
+		}
 		host := cleanHost(r.Host)
 		scope := clearanceScope(r)
 		next := safeHandoffNext(r.URL.Query().Get("next"))
@@ -907,6 +911,19 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			return
 		}
 		ipStr := ip.String()
+
+		// Self-protection, but DELIBERATELY non-escalating. The page and verify
+		// handlers turn a rate-limit trip into an nft block; this one must not.
+		// A legitimate client reaches the handoff exactly once per solve, so the
+		// only thing that hammers it is abuse — but the endpoint is reached by
+		// real users mid-flow, often from behind CGNAT, and firewall-banning a
+		// shared exit here would reintroduce the precise harm this whole change
+		// exists to remove. A 429 sheds load without ever turning a redirect
+		// endpoint into a source of bans.
+		if ok, retry, _ := s.rlAllow(ipStr, rlKindPage); !ok {
+			s.rlReject(w, retry)
+			return
+		}
 
 		if verifyHandoffToken(r.URL.Query().Get("t"), ipStr, host, scope, time.Now().UTC()) {
 			ttl := s.cookieTTL()
