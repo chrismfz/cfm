@@ -391,3 +391,25 @@ func (c *Collector) EntryForHost(host string) *Entry {
 	}
 	return e
 }
+
+// HasExactHost reports whether host is served under exactly that name — an
+// explicit certificate/vhost entry, never a wildcard match.
+//
+// The distinction matters to callers that must not redirect a browser to a
+// hostname that may not answer. A `*.example.com` certificate says nothing
+// about whether `www.foo.example.com` is a configured vhost, so a wildcard hit
+// is not evidence the name resolves and serves; EntryForHost deliberately
+// accepts one and this deliberately does not.
+func (c *Collector) HasExactHost(host string) bool {
+	if c == nil {
+		return false
+	}
+	h := normalizeHost(host)
+	if h == "" {
+		return false
+	}
+	c.mu.RLock()
+	_, ok := c.exact[h]
+	c.mu.RUnlock()
+	return ok
+}

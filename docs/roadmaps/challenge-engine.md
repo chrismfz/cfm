@@ -139,6 +139,52 @@ datacenter. An earlier note in this file said "every one a US residential ISP";
 that was drawn from one window and is corrected here. The pool mixes residential
 and datacenter exits, which matters because an ASN-based allowlist would not
 have covered it either way. That
+
+**And the same night showed the shape `cookiediscard` structurally cannot see —
+which is why `solver_farm` earns its keep.** Between 22:35:45 and 22:38:05, ~31
+addresses from AS398781 (plus one from a Twitter range carrying the identical
+UA) each solved **exactly once** on `www.mathematica.gr`, every one on a
+different `viewtopic.php`, all `X11; Linux x86_64 … Chrome/149`, all
+`tls_fp=95070673`, across ~31 distinct /24s. One solve per exit defeats a
+per-address threshold by construction — `MIN_SOLVES = 8` can never fire — while
+31 subnets in 140 s is exactly what the per-vhost subnet-spread rule is for. The
+two detectors are mirror images on purpose (`cookiediscard` keys on the address,
+`solverfarm` on the vhost); this capture is the evidence that neither alone is
+enough.
+
+**`solver_farm` did not fire on it, and the reason is `WINDOW`, not the
+thresholds.** The shipped default is `WINDOW = "60s"`; an operator who lowers
+`MIN_SUBNETS`/`MIN_SOLVES` and leaves the window alone inherits it. Sliding a
+60 s window over the swarm's real timestamps peaks at **18 solves / 18 subnets**
+— the subnet threshold (16) was met and the solve threshold (20) missed **by
+two**. The attack is not below the thresholds; it is wider than the window.
+
+Swept against the 23-hour production corpus (111,537 solves, 79 vhosts), one
+evaluation per `EVERY`=30 s:
+
+| WINDOW | 16/20 catches the swarm | vhosts that ever fire |
+|---|---|---|
+| 60 s | no | `electroexpert.gr`, `www.mathematica.gr` |
+| **120 s** | **yes** (28 solves / 28 subnets) | the same two |
+| 300 s | yes | those two + `www.vitolighting.com` |
+
+The false-positive column is the point: across **79 vhosts** only three ever
+fire anywhere in the grid, and all three are independently known to be under
+attack. Widening to 120 s buys the detection without touching the thresholds and
+without pulling in one new vhost. 300 s adds `www.vitolighting.com`, itself under
+the `chrome_impossible_patch` flood — more coverage, not a false positive. The
+caveat worth keeping: the corpus is 23 hours during which three vhosts were
+attacked, so a legitimately viral vhost on a quiet day is not represented in it.
+
+**`cookiediscard`'s `MIN_SOLVES` has no headroom left to give, and that is the
+useful finding.** Peak solves per address in any 10-minute window over the same
+corpus: **97,484 of 97,556 addresses (99.93%) solved exactly once**, 72 ever
+reached 2, 9 reached 4, and only 4 reached 5 or more. Every threshold from **5
+to 12 selects the identical four addresses.** The shipped 8 sits in the middle
+of an empty canyon between 4 and the farm's 20–60, so lowering it to 6 changes
+nothing whatsoever, and lowering it to 4 buys five addresses at the price of
+sitting on the edge of the human distribution. Leave it alone; if this detector
+ever needs to be more aggressive the lever is `WINDOW`, not `MIN_SOLVES`.
 serial shape — one exit at a time rather than many in parallel — is the thing
 the detector was built to see, and it is also why a per-vhost concurrency rule
 misses it entirely. No false positive has appeared: a human who clears cookies
@@ -318,6 +364,40 @@ conjunction is for: `c2e09593` is no-GREASE *and* empty-ALPN *and* datacenter
 *and* UA-version spread. Each leg alone has now been observed on legitimate
 traffic — GREASE on Greek residential users behind a middlebox, ALPN on a Google
 crawler. Do not ship any single leg.
+
+**A full night confirmed `c2e09593` and produced a better candidate.** Thirteen
+sightings across the 2026-07-28 evening capture, and the ASN column has no
+exceptions at all: Tencent (US, Germany, Singapore, Hong Kong), Alibaba
+(Germany, Singapore, Hong Kong, Japan), Byteplus (Singapore, Hong Kong).
+**Zero residential.** The UA spread widened to eight Chrome majors — 103, 104,
+107, 116, 117, 120, 131, 133 — on one TLS stack. Its distinguishing shape is
+also structural rather than an absence: the three TLS 1.3 suites come **last**,
+after the ECDHE block, which no browser print in this capture does.
+
+**The cleaner marker is a positive one: DHE-RSA suites and X448.** Measured
+across the capture rather than recalled:
+
+| id | DHE-RSA | X448 | TLS1.3 suites last | carried by |
+|---|---|---|---|---|
+| `95070673` | no | no | no | Chrome/145 — the majority print |
+| `00b68027` | no | no | no | Firefox 153 — real browser |
+| `c2e09593` | no | no | **yes** | datacenter only, 8 Chrome majors |
+| `6821efa4` | **yes** | **yes** | no | `meta-externalagent` — a *declared* crawler |
+| `9ca6ad0b` | **yes** | **yes** | no | claims plain `Chrome/139`, from AWS |
+
+`6821efa4` is the control: a bot that says it is a bot, carrying DHE-RSA and
+X448. `9ca6ad0b` has the same TLS shape and a UA with no bot token at all. That
+is the lie the fingerprint is for — and unlike `grease=false` it is a *positive*
+marker (offering suites and a group), not a missing one, so a TLS-terminating
+middlebox does not produce it by omission. **Still a hypothesis**: what is
+established is that in this corpus no browser print carries DHE-RSA or X448 and
+two non-browser prints carry both. Confirm against a week before writing a rule,
+and expect corporate proxies to be the false-positive class to measure.
+
+**`19877aeb` is the counter-example that keeps the caution honest.** In one
+night it appeared on `ClaudeBot/1.0` (AWS), on Greek residential Nova/OTEnet
+users, and on Saudi Telecom. One id, a declared crawler and ordinary humans. An
+id is a TLS-offer shape; it is not a client, and it is not an intent.
 
 **Every `tls_fp=-` line in the capture is a panel scope** — `scope=panel:2083`
 or `scope=panel:2096`, without exception. That is the expected result and worth
