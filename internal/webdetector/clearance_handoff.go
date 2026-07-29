@@ -50,6 +50,13 @@ import (
 // clearance there and forwards to the original destination. Exactly one sibling
 // is ever involved, every cookie stays host-only, and the flow terminates by
 // construction: the handoff endpoint never issues another handoff.
+//
+// A handoff is only issued in edge (OpenResty/Angie) mode and only for the
+// "web" scope. In DNAT mode the loop this fixes cannot occur — release is
+// per-IP, covering every host at once — and the handoff URL would 404 at the
+// origin, which has no such route once the IP leaves the nft set. A panel
+// solve must return to its panel port, which the scheme+host handoff URL
+// cannot express.
 
 const (
 	clearanceHandoffPath = "/__cfm_clearance_handoff"

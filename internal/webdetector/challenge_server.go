@@ -849,12 +849,25 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// See clearance_handoff.go for why the cookie Domain attribute is not
 		// the tool for this.
 		//
-		// Guarded three ways: the sibling must be a real apex↔www counterpart,
-		// CFM must serve it under exactly that name (a wildcard certificate is
-		// not evidence the vhost answers), and the request being handled must
-		// not itself be a handoff — that last one is what makes the flow
-		// terminate rather than bounce between the two hosts forever.
-		if sib := clearanceSibling(host); sib != "" && s.ssl.HasExactHost(sib) && r.URL.Path != clearanceHandoffPath {
+		// Gated on the mode and the scope before anything else:
+		//
+		//   - s.bridge != nil means the edge decides in-path off the clearance
+		//     cookie, which is the only mode where the loop exists. In DNAT
+		//     mode release is per-IP (RemoveChallenge above covers every host
+		//     at once), and worse, the handoff URL would 404: the IP was just
+		//     removed from the nft set, so https://www.H/__cfm_clearance_handoff
+		//     goes straight to the origin, which has no such route.
+		//   - scope must be "web". A panel solve must return to its panel
+		//     port, and the handoff URL is scheme+host only — it would strand
+		//     a cPanel user on the website at :443 instead of back at :2083.
+		//
+		// Then: the sibling must be a real apex↔www counterpart, and CFM must
+		// serve it under exactly that name (a wildcard certificate is not
+		// evidence the vhost answers). Termination is structural — the handoff
+		// handler below never issues a handoff of its own; the path check here
+		// is defence in depth, not the guard.
+		if sib := clearanceSibling(host); s.bridge != nil && scope == "web" &&
+			sib != "" && s.ssl.HasExactHost(sib) && r.URL.Path != clearanceHandoffPath {
 			if tok := issueHandoffToken(ipStr, sib, scope, time.Now().UTC().Add(handoffTokenTTL)); tok != "" {
 				http.Redirect(w, r, handoffRedirectURL(sib, tok, next), http.StatusSeeOther)
 				return
