@@ -67,7 +67,11 @@
 // max(apex, www) == 1, while a cookie-less pipeline that repeats the whole
 // redirect chain N times still scores N because both spellings climb together.
 // The collapse can only ever LOWER the count — effectiveSolves <= raw — so it
-// suppresses a canonical-inflated finding but can never manufacture one.
+// suppresses a canonical-inflated finding but can never manufacture one. The
+// accepted cost: a client that DELIBERATELY alternates spellings halves its
+// score, so the worst-case threshold for such a client is 2x MIN_SOLVES raw
+// solves — 16 by default, still a fraction of the 30+/window the abusive
+// population sustains.
 package cookiediscard
 
 import (
@@ -375,10 +379,18 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 
 		raw := len(st.recs) + st.truncated
-		solves := effectiveSolves(st.recs, st.truncated)
 		truncated := st.truncated
 		st.truncated = 0
 
+		// effectiveSolves can only lower a count (eff <= raw, by construction),
+		// so an address whose raw total is already below threshold cannot cross
+		// it — skip the per-group map for the ~99.6% of addresses with a single
+		// solve. This matters under the exact flood MAX_TRACKED_IPS exists for:
+		// up to 100k tracked addresses re-evaluated every EVERY tick.
+		if raw < d.cfg.MinSolves {
+			continue
+		}
+		solves := effectiveSolves(st.recs, truncated)
 		if solves < d.cfg.MinSolves {
 			continue
 		}
