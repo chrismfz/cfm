@@ -53,6 +53,25 @@
 // finding can be burned in first; enabling it is one line in detectors.conf and
 // deliberately the operator's call, because the addresses observed here were
 // residential proxy exits, which may belong to a real visitor later.
+//
+// apex↔www collapse. Almost every site canonicalises example.gr to
+// www.example.gr (or the reverse) with a 301 from the origin, and CFM sits in
+// front of that redirect. A visitor who lands on the non-canonical host solves
+// there, is 301'd to the sibling — a different host, so a different host-only
+// clearance cookie — and is challenged again: two genuine solves, seconds apart,
+// for one gate. On a force-challenge endpoint under bot-registration attack this
+// is routine, and behind a CGNAT/residential address carrying several real
+// visitors the doubled count is exactly what crossed MIN_SOLVES and banned the
+// shared address (observed 2026-07-29). So the threshold counts the busier host
+// spelling per (apex-normalised host, path), not their sum: one journey is
+// max(apex, www) == 1, while a cookie-less pipeline that repeats the whole
+// redirect chain N times still scores N because both spellings climb together.
+// The collapse can only ever LOWER the count — effectiveSolves <= raw — so it
+// suppresses a canonical-inflated finding but can never manufacture one. The
+// accepted cost: a client that DELIBERATELY alternates spellings halves its
+// score, so the worst-case threshold for such a client is 2x MIN_SOLVES raw
+// solves — 16 by default, still a fraction of the 30+/window the abusive
+// population sustains.
 package cookiediscard
 
 import (
@@ -359,10 +378,19 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			continue
 		}
 
-		solves := len(st.recs) + st.truncated
+		raw := len(st.recs) + st.truncated
 		truncated := st.truncated
 		st.truncated = 0
 
+		// effectiveSolves can only lower a count (eff <= raw, by construction),
+		// so an address whose raw total is already below threshold cannot cross
+		// it — skip the per-group map for the ~99.6% of addresses with a single
+		// solve. This matters under the exact flood MAX_TRACKED_IPS exists for:
+		// up to 100k tracked addresses re-evaluated every EVERY tick.
+		if raw < d.cfg.MinSolves {
+			continue
+		}
+		solves := effectiveSolves(st.recs, truncated)
 		if solves < d.cfg.MinSolves {
 			continue
 		}
@@ -370,7 +398,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			continue
 		}
 
-		alert := d.buildAlert(now, ip, st, solves, truncated)
+		alert := d.buildAlert(now, ip, st, solves, raw, truncated)
 		select {
 		case out <- alert:
 			// Stamp the cooldown only once the alert is actually handed off, so a
@@ -383,9 +411,59 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	return nil
 }
 
+// splitWWW reports the apex form of host and whether host carried a leading
+// "www.". The strip applies only when something with a dot remains, so
+// "www.example.gr" → ("example.gr", true) while "www.localhost" and a bare
+// "webmail.example.gr" are returned unchanged with isWWW=false. This is the ONLY
+// host relationship the collapse understands: the apex and its www, never a
+// panel or mail label — the same narrow rule the clearance layer applies.
+func splitWWW(host string) (apex string, isWWW bool) {
+	if rest, ok := strings.CutPrefix(host, "www."); ok && strings.Contains(rest, ".") {
+		return rest, true
+	}
+	return host, false
+}
+
+// effectiveSolves is the raw solve total with the apex↔www canonical
+// double-solve collapsed out (see the package doc for why). For each
+// (apex-normalised host, path) the logical count is the busier spelling rather
+// than the sum, so a single visitor's apex-then-www journey counts once while a
+// pipeline that solves N times still counts N. truncated records carry no host,
+// so they are added back verbatim — truncation only happens far above threshold,
+// on the abusive population this detector is for. The result is always <= raw.
+func effectiveSolves(recs []solveRec, truncated int) int {
+	type spellings struct{ apex, www int }
+	groups := make(map[string]*spellings)
+	for _, r := range recs {
+		apex, isWWW := splitWWW(r.host)
+		key := apex + "\x00" + r.path
+		g := groups[key]
+		if g == nil {
+			g = &spellings{}
+			groups[key] = g
+		}
+		if isWWW {
+			g.www++
+		} else {
+			g.apex++
+		}
+	}
+	total := truncated
+	for _, g := range groups {
+		if g.www > g.apex {
+			total += g.www
+		} else {
+			total += g.apex
+		}
+	}
+	return total
+}
+
 // buildAlert renders the finding. It reads state but does not mutate it — the
-// caller owns the truncation counter and the cooldown stamp.
-func (d *Detector) buildAlert(now time.Time, ip string, st *ipState, solves, truncated int) core.Alert {
+// caller owns the truncation counter and the cooldown stamp. solves is the
+// threshold basis (apex↔www collapsed); raw is the uncollapsed total, reported
+// so an operator can see how much the canonical redirect inflated it.
+func (d *Detector) buildAlert(now time.Time, ip string, st *ipState, solves, raw, truncated int) core.Alert {
 	hosts := map[string]int{}
 	paths := map[string]int{}
 	uas := map[string]int{}
@@ -415,6 +493,11 @@ func (d *Detector) buildAlert(now time.Time, ip string, st *ipState, solves, tru
 		fmt.Sprintf("[challenge] ip=%s solves=%d window=%s (%.1f/min) distinct_vhosts=%d distinct_uas=%d",
 			ip, solves, d.cfg.Window, perMinute, len(hosts), len(uas)),
 		"[challenge] a solved challenge grants clearance for CHALLENGE_COOKIE_LIFE; re-solving inside it means the client is discarding the cookie",
+	}
+	if raw != solves {
+		samples = append(samples, fmt.Sprintf(
+			"[challenge] apex↔www canonical collapse: %d raw solves scored as %d (a solve on a host and its www/apex sibling for the same path is one journey, not two)",
+			raw, solves))
 	}
 	for _, s := range rank(hosts, sampled, "vhost") {
 		if len(samples) >= d.cfg.SampleLimit {
@@ -459,6 +542,7 @@ func (d *Detector) buildAlert(now time.Time, ip string, st *ipState, solves, tru
 			"ip":              ip,
 			"reason":          "CHALLENGE_COOKIE_DISCARD",
 			"solves":          fmt.Sprint(solves),
+			"raw_solves":      fmt.Sprint(raw),
 			"window":          d.cfg.Window.String(),
 			"solves_per_min":  fmt.Sprintf("%.1f", perMinute),
 			"distinct_vhosts": fmt.Sprint(len(hosts)),

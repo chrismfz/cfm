@@ -39,24 +39,22 @@ back-filled here — see the git/PR history for that period.
   unaffected.
 
 ### Fixed
-- **A solved challenge now survives the apex↔www canonical redirect.** Clearance
-  is host-only and the token binds the exact host, so a client that solved on
-  `example.gr` had no clearance on `www.example.gr` — and almost every site
-  301s one to the other from the origin, *behind* CFM. Real users looped:
-  solve, get redirected, get challenged again. Every iteration is a genuine
-  solve, so `challenge_cookie_discard` read nine of them in thirty-six seconds
-  as a client discarding its cookie and banned a CGNAT address carrying real
-  subscribers. After a solve the client is now sent once through the sibling's
-  `/__cfm_clearance_handoff`, which grants the clearance that host already
-  earned and forwards on. The cookie `Domain` attribute is deliberately NOT
-  used: it is a suffix match that cannot express "apex and www only", and both
-  ways of applying it break a cPanel box — scoped to the pair it leaves two
-  cookies of the same name so `$cookie_cfm_clearance` can return the wrong one
-  and `webmail.` loops forever; applied everywhere `webmail.` and the apex
-  overwrite each other and ping-pong. The handoff touches exactly one sibling,
-  every cookie stays host-only, the endpoint never issues a handoff of its own
-  (that is the loop guard), and the sibling must be served under exactly that
-  name — a wildcard certificate is not evidence a vhost answers.
+- **`challenge_cookie_discard` no longer counts an apex↔www canonical redirect
+  as two solves.** Almost every site 301s `example.gr` to `www.example.gr` (or
+  the reverse) from the origin, and CFM sits in front of it. A real visitor who
+  lands on the non-canonical host solves the challenge there, is redirected to
+  the sibling — a different host, so a different host-only clearance cookie — and
+  is challenged again: two genuine solves, seconds apart, for one gate. On a
+  force-challenge endpoint under bot-registration attack this is routine, and
+  behind a CGNAT/residential address carrying several real visitors the doubled
+  count crossed `MIN_SOLVES` and got the shared address flagged (and, with
+  enforcement on, banned — taking real subscribers with it). The detector now
+  scores the busier host spelling per `(apex-normalised host, path)` instead of
+  their sum, so one visitor's apex-then-www journey counts once while a
+  cookie-less pipeline that re-solves the same gate still counts every pass. The
+  collapse can only ever lower a count, so it never creates a new finding; the
+  alert reports both the collapsed and raw totals (`raw_solves`). Nothing touches
+  the edge, Lua, or the clearance cookie.
 - **TLS fingerprint: a long cipher list was cut mid-cipher-name.** The edge
   stamper bounded each field at 512 bytes and cut blindly, so a client offering
   the full OpenSSL suite list ended its cipher field on a partial name

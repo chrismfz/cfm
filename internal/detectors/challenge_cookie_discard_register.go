@@ -26,6 +26,13 @@ import (
 // in each before any cookie is set, which is a small instantaneous burst, while
 // the traffic this detector is for sustains 30+ solves over minutes.
 //
+// The count collapses the apex↔www canonical double-solve: a visitor 301'd from
+// example.gr to www.example.gr (or the reverse) solves once per host spelling for
+// the same gate, and counting that as two is what banned a CGNAT address on
+// 2026-07-29. The threshold scores the busier spelling per (apex-normalised host,
+// path), so one journey counts once while a repeat-solver still counts N. It can
+// only lower the count, never raise it.
+//
 // Unlike challenge_solver_farm this detector CAN sensibly block — its Key is one
 // real address that is abusing the challenge right now, and it sets Extra["ip"]
 // authoritatively so the sink never has to guess. It still ships alert-only
