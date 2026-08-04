@@ -51,11 +51,32 @@ type ScopedDBScope struct {
 	Databases map[string]struct{}
 }
 
-// vhostScopeFromContext returns the scoped vhost set injected by the middleware,
-// or nil if no scope is set (admin token or loopback bypass).
+// vhostScopeFromContext returns the scoped vhost set injected by the middleware.
+//
+// A nil return is the "no restriction" sentinel and means admin / loopback
+// ONLY. This is the single point that enforces that invariant: the middleware
+// injects a scoped token's allowlist as-is (map[string]struct{}), and a scoped
+// token whose vhost set is empty/nil (e.g. a DB-only viewer token) would
+// otherwise produce a nil scope that every `nil == admin` caller
+// (vhostAllowed, parseVhostFilter, the *ForScope list filters, the
+// validateScoped* write guards) reads as full access. To close that, when the
+// authenticated role is `scoped` but no scope map is present, we return a
+// non-nil EMPTY set — so those callers fail closed (an empty allowlist matches
+// no host) instead of failing open. Admin/loopback (role != scoped) keep the
+// nil sentinel and full access.
+//
+// NOTE: any code that reads CtxScopeKey{} DIRECTLY (bypassing this function —
+// today only deriveScopedMySQLOwners in the apiserver) must apply its own
+// len(scope)==0 guard, since it never sees this normalization.
 func vhostScopeFromContext(ctx context.Context) map[string]struct{} {
 	v, _ := ctx.Value(CtxScopeKey{}).(map[string]struct{})
-	return v
+	if v != nil {
+		return v
+	}
+	if role, _ := ctx.Value(CtxRoleKey{}).(string); role == CtxRoleScoped {
+		return map[string]struct{}{}
+	}
+	return nil
 }
 
 // parseVhostFilter returns the effective vhost filter for this request.

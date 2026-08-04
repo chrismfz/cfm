@@ -38,3 +38,40 @@ func TestIsAdminRequestAcceptsOnlyAdminRole(t *testing.T) {
 		t.Fatalf("expected admin role to be admin")
 	}
 }
+
+// vhostScopeFromContext must return nil (the "no restriction" sentinel) ONLY
+// for admin/loopback. A scoped role with no scope map must get a non-nil EMPTY
+// set so every nil==admin caller fails closed for a vhost-less scoped token.
+func TestVhostScopeFromContext_ScopedNilYieldsEmptyNotNil(t *testing.T) {
+	// Admin (role admin, no scope) → nil = no restriction.
+	adminCtxVal := context.WithValue(context.Background(), CtxRoleKey{}, CtxRoleAdmin)
+	if s := vhostScopeFromContext(adminCtxVal); s != nil {
+		t.Fatalf("admin: expected nil scope, got %v", s)
+	}
+
+	// No role at all (e.g. internal/loopback) → nil, unchanged.
+	if s := vhostScopeFromContext(context.Background()); s != nil {
+		t.Fatalf("no-role: expected nil scope, got %v", s)
+	}
+
+	// Scoped role with NO scope map → non-nil empty set (fails closed).
+	scopedNil := context.WithValue(context.Background(), CtxRoleKey{}, CtxRoleScoped)
+	got := vhostScopeFromContext(scopedNil)
+	if got == nil {
+		t.Fatalf("vhost-less scoped: expected non-nil empty set, got nil (would read as admin)")
+	}
+	if len(got) != 0 {
+		t.Fatalf("vhost-less scoped: expected empty set, got %v", got)
+	}
+	if vhostAllowed("victim.com", got) {
+		t.Fatalf("empty scope must not allow any host")
+	}
+
+	// Scoped role WITH a scope map → returned as-is.
+	scopedSet := map[string]struct{}{"a.com": {}}
+	ctxSet := context.WithValue(context.Background(), CtxRoleKey{}, CtxRoleScoped)
+	ctxSet = context.WithValue(ctxSet, CtxScopeKey{}, scopedSet)
+	if s := vhostScopeFromContext(ctxSet); len(s) != 1 || !vhostAllowed("a.com", s) {
+		t.Fatalf("scoped-with-hosts: expected {a.com}, got %v", s)
+	}
+}

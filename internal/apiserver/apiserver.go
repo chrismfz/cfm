@@ -707,6 +707,10 @@ func deriveScopedMySQLDatabases(r *http.Request) []string {
 }
 
 func deriveScopedMySQLOwners(r *http.Request) []string {
+	// Direct CtxScopeKey read — bypasses webdet.vhostScopeFromContext and its
+	// scoped-role empty-set normalization, so the len(scope)==0 guard below is
+	// load-bearing: it fails closed (nil owners) for both admin (no scope) and
+	// a vhost-less scoped token. Keep it if this is ever refactored.
 	scope, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
 	if len(scope) == 0 {
 		return nil

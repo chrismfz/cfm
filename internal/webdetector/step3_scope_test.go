@@ -351,6 +351,68 @@ func TestWAFExclude_ScopeQualifiedRemoveRoundTrip(t *testing.T) {
 	}
 }
 
+// Read-path audit: the vhost-less scoped token must fail closed across every
+// endpoint that previously read `scope == nil` as admin. The fix is a single
+// choke point (vhostScopeFromContext returns a non-nil empty set for a scoped
+// role), so these handlers were NOT individually edited — this test proves the
+// choke point actually reaches each category: fail-open write, fail-open
+// single-host read, and filter-only list.
+func TestReadPath_VhostlessScopedTokenFailsClosed(t *testing.T) {
+	_, mux := newStep3Engine(t)
+	noscope := scopedCtxNoVhosts()
+
+	forbidden := []struct{ name, method, path string }{
+		{"http3 enable (fail-open write)", http.MethodPost, "/api/v1/http3/enable?host=victim.com"},
+		{"http3 disable (fail-open write)", http.MethodPost, "/api/v1/http3/disable?host=victim.com"},
+		{"clam sigignore add (distinct write validator)", http.MethodPost, "/api/v1/clam/sigignore/add?host=victim.com&pattern=Eicar-Test.Signature"},
+		{"challenge vhost status (fail-open read)", http.MethodGet, "/api/v1/challenge/vhost/status?host=victim.com"},
+	}
+	for _, c := range forbidden {
+		rr := doRequest(mux, noscope, c.method, c.path, nil)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("%s: vhost-less scoped expected 403, got %d body=%s", c.name, rr.Code, rr.Body.String())
+		}
+	}
+
+	// Traffic-rules write (fail-open via scopeAllowsVhosts) — body-based, so
+	// checked separately. The scope gate runs before any rule validation.
+	if rr := doRequest(mux, noscope, http.MethodPost, "/api/v1/webdet/rules/add",
+		[]byte(`{"scope":{"vhosts":["victim.com"]}}`)); rr.Code != http.StatusForbidden {
+		t.Fatalf("traffic rules add: vhost-less scoped expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Filter-only list must not leak global / other-tenant entries: admin seeds
+	// a global WAF exclude, the vhost-less scoped token must see an EMPTY list
+	// (before the fix its nil scope made filterExcludeListForScope return all).
+	if rr := doRequest(mux, adminCtx(), http.MethodPost,
+		"/api/v1/waf/exclude/add?type=path&value=/global-secret&rule_ids=402", nil); rr.Code != http.StatusOK {
+		t.Fatalf("seed global exclude: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	rr := doRequest(mux, noscope, http.MethodGet, "/api/v1/waf/exclude/list", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("waf exclude list: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var rows []excludeEntry
+	if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode exclude list: %v body=%s", err, rr.Body.String())
+	}
+	if len(rows) != 0 {
+		t.Fatalf("vhost-less scoped must see 0 excludes, leaked %d: %v", len(rows), rows)
+	}
+
+	// Regression — the choke point did not over-tighten the roles that SHOULD
+	// pass: a real admin still reaches the write (not 403)...
+	if rr := doRequest(mux, adminCtx(), http.MethodPost,
+		"/api/v1/http3/enable?host=ok.example.com", nil); rr.Code == http.StatusForbidden {
+		t.Fatalf("admin http3 enable must not be 403, body=%s", rr.Body.String())
+	}
+	// ...and a normal scoped token still manages its own in-scope host.
+	if rr := doRequest(mux, scopedCtx("mine.example.com"), http.MethodPost,
+		"/api/v1/http3/enable?host=mine.example.com", nil); rr.Code == http.StatusForbidden {
+		t.Fatalf("in-scope scoped http3 enable must not be 403, body=%s", rr.Body.String())
+	}
+}
+
 // N1 regression: a scoped token with NO vhost scope (a DB-only viewer token
 // whose Vhosts map is nil) must NOT be treated as admin on exclude / clam
 // writes. Before keying the write guard on IsAdminRequest, its nil context
