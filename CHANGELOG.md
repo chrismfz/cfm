@@ -57,6 +57,20 @@ back-filled here — see the git/PR history for that period.
   `scope == nil ⇒ admin` pattern in other handlers is a separate follow-up.)
 
 ### Added
+- **`docs/roadmaps/challenge-engine.md` §8: "Level-2 humanity gate" design
+  (docs only — nothing built).** Records the reasoning for an escalation-gated
+  proof-of-humanity step against distributed solver farms that run real
+  headless browsers, which PoW cannot separate from humans by construction.
+  Covers a passive, NON-PII interaction-entropy signal collected during the
+  existing light challenge (evidence-first, alongside `solve_ms`/`tls_fp`, never
+  a gate on its own); the utilization ladder (alert attribution → aggregate
+  vhost-window detector → correlation); and the two-decision gate (vhost-level
+  under-attack trigger vs per-request soft-gate that decides who sees a puzzle),
+  with the light challenge acting as the interaction probe. Includes the honest
+  economic (not absolute) framing of a puzzle, the level-2 non-negotiables
+  (operator bypass/allowlist/fail-open, accessibility, auto-exit with holddown
+  honouring the manual-vs-auto challenge lifecycle), and an explicit
+  evidence-first, threshold-after-burn-in sequencing.
 - **`docs/waf.md`: "Upstream interception" section — traffic that never
   reaches the WAF.** Documents the silent failure mode where something ahead
   of CFM's DNAT chain diverts web traffic so it never hits openresty (no
