@@ -26,9 +26,16 @@ back-filled here — see the git/PR history for that period.
   Attackers smuggle arbitrary PHP with "phpfuck" — every character built from
   XOR of parenthesised digit literals — so no literal `system`/`eval`/`<?php`
   token exists for the generic RCE/webshell/obfuscation rules to catch. The
-  new rule keys on the ajax/render route plus a phpfuck-blob signature (a long
-  `[0-9().^]` run with a storm of `^` and `).(` tokens) in args or body; the
-  pair is near-zero FP (a real page number is a small integer). Ships at
+  new rule keys on the ajax/render route plus a phpfuck-blob signature in args
+  or body; the pair is near-zero FP (a real page number is a small integer).
+  The signature is evasion-hardened (adversarial review): the route gate
+  decides on url-DECODED surfaces (so `routestring=%61jax/render` /
+  `/ajax/%72ender/` can't slip past a raw substring check), and the blob scorer
+  first projects input onto vBulletin `runMaths()`'s own survivor character set
+  — deleting exactly what the sink's `preg_replace` strips — before counting the
+  paren/XOR/concatenation tokens phpfuck cannot avoid, so interspersing
+  stripped chars (spaces/letters) or sink-allowed no-op operators
+  (`+ * / < > & |`) between tokens no longer fragments the scan. Ships at
   `block` and, being a `WAF_CVE` family rule with an exact shape, is autoblock-
   armed by default — a hit nft-bans the source (6h) and alerts as
   `WAF/CVE-2026-61511` on Slack/mail.

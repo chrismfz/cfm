@@ -76,7 +76,26 @@ fires(req("GET", "/ajax/render/pagenav", "pagenav[pagenumber]=" .. PHPFUCK, ""),
 fires(req("POST", "/index.php", "routestring=ajax/render/pagenav", "pagenav[pagenumber]=" .. PHPFUCK),
       "route in query string, phpfuck in body", R)
 
+-- ── Adversarial regressions (red-team review 2026-08) ────────────────────────
+-- Bypass 1: intersperse characters runMaths() STRIPS (spaces + letters) between
+-- tokens. The sink deletes them and reconstructs the clean payload for eval();
+-- the projection in has_phpfuck_blob must delete them too so the blob is scored.
+local STRIP_EVADE = (PHPFUCK:gsub("%)", ")x ")) -- inject a letter+space after every ')'
+fires(req("POST", "/", "", "routestring=ajax/render/pagenav&pagenav[pagenumber]=" .. STRIP_EVADE),
+      "bypass1: strip-char (letter/space) interspersing — projection reconstructs", R)
+-- Bypass 2: url-encode a letter of the route. vBulletin decodes routestring
+-- before routing, so `%61jax` still hits the vulnerable template; the gate must
+-- decide on the DECODED surface, not a raw substring.
+fires(req("POST", "/", "", "routestring=%61jax/render/pagenav&pagenav[pagenumber]=" .. PHPFUCK),
+      "bypass2: url-encoded route letter (routestring=%61jax) — decoded gate", R)
+fires(req("GET", "/ajax/%72ender/pagenav", "pagenav[pagenumber]=" .. PHPFUCK, ""),
+      "bypass2: url-encoded path letter (/ajax/%72ender/) — normalize decodes", R)
+
 -- ── Negatives ───────────────────────────────────────────────────────────────
+-- Projection must not create FPs: a body with letters, parens and dots but no
+-- caret storm stays clean even after the survivor-set projection.
+clean(req("POST", "/", "", "routestring=ajax/render/pagenav&note=see(fig.1)and(fig.2)for(details.here)"),
+      "prose with parens/dots but no caret storm — projection stays clean")
 clean(req("POST", "/", "", "routestring=ajax/render/pagenav&pagenav[pagenumber]=2"),
       "legit pagination: real integer page number on the same route")
 clean(req("GET", "/ajax/render/pagenav", "pagenav[pagenumber]=(1+2)^3", ""),

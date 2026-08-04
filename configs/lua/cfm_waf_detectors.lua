@@ -3133,39 +3133,48 @@ function _M.detect_cve_sppagebuilder_upload(uri, method, args, body, headers)
 end
 
 -- phpfuck / numeric-XOR obfuscation blob detector. Shared by the vBulletin
--- runMaths CVE rule below and (Phase 2) the generic obfuscation rule. Matches
--- the INVARIANT shape of a PHP payload built to survive an eval() sink that
--- permits only digits and arithmetic/bitwise operators (`[0-9().^<>&|+*/=-]`):
--- a long contiguous run of ONLY digits / parens / dots / carets, carrying a
--- storm of XOR operators (`^`) and parenthesised-digit concatenations (`).(`)
--- that spell out ASCII codes character by character, e.g.
+-- runMaths CVE rule below and the generic obfuscation rule (439). Matches the
+-- INVARIANT shape of a PHP payload built to survive an eval() sink that permits
+-- only digits and arithmetic/bitwise operators, e.g.
 --   ((((999…).(9))^((2).(0).(4)))^((8).(6).(((9).(9))^((9).(9)))))((6).(5))…
--- No legitimate math / page-number / template parameter looks like this. The
--- thresholds are intentionally high so a short real formula — `(1+2)^3`, a
--- bitmask like `(6)^(1)` — never trips it; a real phpfuck payload carries
--- hundreds of each token. Scans on the tight `[0-9().^]` class so ordinary
--- punctuation breaks the run and a coincidental scattering of carets across a
--- normal body can't accumulate into a hit.
+-- where each ASCII byte is XOR-built from parenthesised digit literals.
+--
+-- ADVERSARIAL HARDENING (red-team review 2026-08): the earlier version scanned
+-- a tight contiguous `[0-9().^]` run, which was trivially evaded two ways —
+-- (a) interspersing characters the sink STRIPS (spaces/letters/commas) between
+-- tokens fragmented the run while `runMaths()`'s own `preg_replace` deleted
+-- them and reconstructed the clean payload for `eval()`; (b) interspersing
+-- sink-ALLOWED no-op operators (`+ * / = < > & | -`) likewise broke the run.
+-- Both are closed by mirroring the sink: FIRST project the input onto
+-- runMaths()'s exact survivor set (delete precisely the chars its preg_replace
+-- strips), reconstructing the byte string that actually reaches eval(); THEN
+-- count the three tokens phpfuck cannot avoid, GLOBALLY over the reconstruction
+-- — parenthesis nesting, XOR operators, and concatenation dots. Stripped-char
+-- insertion is removed by the projection; no-op-operator insertion only ADDS
+-- chars and cannot pull the counts below threshold. Thresholds stay high so a
+-- short real formula (`(1+2)^3`) never trips: a real phpfuck payload carries
+-- hundreds of each token.
+--
+-- min_concat is the minimum concatenation-DOT count (not the exact `).(` triad,
+-- which a no-op like `).+(` would break). The parens>=10 conjunction plus the
+-- caret requirement are the FP-killers — legit traffic essentially never pairs
+-- a caret storm with deep paren nesting and no letters.
 local function has_phpfuck_blob(s, min_len, min_caret, min_concat)
   if not s or s == "" then return false end
   min_len    = min_len    or 40
   min_caret  = min_caret  or 3
   min_concat = min_concat or 3
-  for run in s:gmatch("[%d%(%)%.%^]+") do
-    if #run >= min_len then
-      local carets = select(2, run:gsub("%^", ""))
-      if carets >= min_caret then
-        local concat = select(2, run:gsub("%)%.%(", ""))
-        if concat >= min_concat then
-          local parens = select(2, run:gsub("%(", ""))
-          if parens >= 10 then
-            return true
-          end
-        end
-      end
-    end
-  end
-  return false
+  -- Project onto runMaths()'s survivor set `[0-9().^<>&|+*/=-]`: delete exactly
+  -- what the sink's `preg_replace('#([^+\-*=/\(\)\d\^<>&|\.]*)#','',…)` strips.
+  local proj = (s:gsub("[^0-9%(%)%.%^<>&|%+%*/=%-]", ""))
+  if #proj < min_len then return false end
+  local carets = select(2, proj:gsub("%^", ""))
+  if carets < min_caret then return false end
+  local dots = select(2, proj:gsub("%.", ""))
+  if dots < min_concat then return false end
+  local parens = select(2, proj:gsub("%(", ""))
+  if parens < 10 then return false end
+  return true
 end
 
 -- [CVE] vBulletin `runMaths()` unauthenticated remote code execution.
@@ -3188,22 +3197,21 @@ end
 -- the near-zero-FP half — so the PAIR is what fires. `method` is m_lower from
 -- the caller; the PoC POSTs, but vBulletin also routes ajax/render via GET, so
 -- both methods are accepted.
+--
+-- The route gate runs on DECODED surfaces (normalize = url-decode x2 + lower),
+-- NOT a raw substring — an earlier raw-`has(...,"routestring=ajax")` pre-gate
+-- was bypassable by url-encoding a letter (`routestring=%61jax/render`, which
+-- vBulletin still decodes+routes) or the path (`/ajax/%72ender/`). Deciding on
+-- the same decoded bytes the router sees closes that gap (red-team review
+-- 2026-08). Residual: `cap(...,max_scan_len)` bounds the scan window; a payload
+-- padded past it is the codebase's standard bounded-scan limitation (host /
+-- ClamAV backstop), shared by every body-aware rule.
 function _M.detect_cve_vbulletin_runmaths(uri, method, args, body, headers)
-  local u = lower(uri or "")
-  -- Cheap route pre-gate BEFORE the normalize pass: the ajax/render route is
-  -- either a path segment (friendly URL) or a `routestring=ajax/render` param
-  -- (the PoC POSTs it). `ajax` itself is never url-encoded — only the slashes
-  -- are (`routestring=ajax%2Frender`) — so a raw lowercased substring check on
-  -- `routestring=ajax` filters out the overwhelming majority of traffic without
-  -- paying for normalize on every request body.
-  local raw = lower(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
-  if not (has(u, "ajax/render") or has(raw, "routestring=ajax")) then
+  local u = normalize(uri or "")
+  local scope = normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
+  if not (has(u, "ajax/render") or has(scope, "routestring=ajax")) then
     return nil
   end
-  -- Confirmed on-route: normalize (url-decode x2 + lower) so the %-encoded PoC
-  -- body (`pagenav%5Bpagenumber%5D=%28%28...`) is decoded to literal
-  -- parens/carets before the blob scan, then look for the phpfuck signature.
-  local scope = normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
   if has_phpfuck_blob(scope) then
     return "RUNMATHS_RCE"
   end
@@ -4615,13 +4623,13 @@ end
 -- detect_cve_vbulletin_runmaths): that rule is endpoint-anchored, this one has
 -- NO route context and catches the same phpfuck construction against any
 -- restricted-charset eval() sink (custom code, another CMS). Reuses the shared
--- has_phpfuck_blob helper at STRICTER thresholds (min 60-char run, >=4 carets,
--- >=4 `).(` concatenations) precisely because there is no endpoint to lean on,
--- and normalizes the body first so the url-encoded form-POST shape
--- (`%28%28...%5E...`) is decoded before the scan. Ships logonly (see the check
--- site) — WAF_BACKDOOR is autoblock-armed but Phase-1 autoblock feeds
--- edge-`block` hits only, so logonly logs/alerts without banning during
--- burn-in.
+-- has_phpfuck_blob helper (survivor-set projection + global token counts) at
+-- STRICTER thresholds (min 60 chars, >=4 carets, >=4 concatenation dots)
+-- precisely because there is no endpoint to lean on, and normalizes the body
+-- first so the url-encoded form-POST shape (`%28%28...%5E...`) is decoded before
+-- the scan. Ships logonly (see the check site) — WAF_BACKDOOR is autoblock-armed
+-- but Phase-1 autoblock feeds edge-`block` hits only, so logonly logs/alerts
+-- without banning during burn-in.
 function _M.detect_php_numeric_xor_obfuscation(body, _headers)
   if not body or body == "" then return nil end
   local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len

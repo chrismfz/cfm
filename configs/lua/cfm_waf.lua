@@ -1026,10 +1026,12 @@ function _M.check(ctx)
   -- parenthesised digit literals, so NONE of the RCE/webshell/obfuscation
   -- detectors (which key on eval(/system(/<?php/chr(/base64) match. We key on the
   -- route + the phpfuck blob shape instead. Near-zero FP: a real pagenumber is a
-  -- small integer, never a hundreds-of-parens ^/).( storm. All-methods (NOT
-  -- gated on body_inspect_ok): vBulletin routes ajax/render via GET too, so the
-  -- payload can ride the query string; the detector's own cheap route pre-gate
-  -- keeps the fleet-wide cost down.
+  -- small integer, never a hundreds-of-parens ^/. storm. All-methods (NOT gated
+  -- on body_inspect_ok): vBulletin routes ajax/render via GET too, so the payload
+  -- can ride the query string. The detector decides on DECODED surfaces and
+  -- projects the payload onto runMaths()'s survivor set before scoring, so
+  -- url-encoded route letters and strip-char/no-op interspersing don't evade it
+  -- (red-team review 2026-08).
   do
     local mode = rule_mode(CFG.rule_cve_vbulletin_runmaths, "block")
     if mode ~= "disabled" then

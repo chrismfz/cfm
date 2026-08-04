@@ -60,6 +60,11 @@ local ENC = (PHPFUCK:gsub("[%(%)%^]", { ["("] = "%28", [")"] = "%29", ["^"] = "%
 fires("x=" .. PHPFUCK, "phpfuck blob in a form field (any endpoint)")
 fires("x=" .. ENC, "url-encoded phpfuck blob (normalize decodes before scan)")
 fires('{"q":"' .. PHPFUCK .. '"}', "phpfuck blob inside a JSON body", "application/json")
+-- Adversarial regression (red-team 2026-08): strip-char interspersing. The
+-- survivor-set projection must delete the injected letters/spaces and score the
+-- reconstructed blob, not the fragmented raw run.
+local STRIP_EVADE = (PHPFUCK:gsub("%)", ")x "))
+fires("x=" .. STRIP_EVADE, "strip-char (letter/space) interspersed blob — projection reconstructs")
 
 -- ── Negatives ───────────────────────────────────────────────────────────────
 clean("page=2", "plain integer parameter")
