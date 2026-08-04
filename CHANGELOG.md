@@ -32,6 +32,16 @@ back-filled here — see the git/PR history for that period.
   `block` and, being a `WAF_CVE` family rule with an exact shape, is autoblock-
   armed by default — a hit nft-bans the source (6h) and alerts as
   `WAF/CVE-2026-61511` on Slack/mail.
+- **WAF: generic phpfuck / numeric-XOR obfuscation detector (rule 439,
+  `WAF_BACKDOOR`, logonly).** Technique-level companion to the vBulletin CVE
+  rule above: it catches the same "phpfuck" construction — arbitrary PHP built
+  entirely from XOR of parenthesised digit literals — against *any*
+  restricted-charset `eval()` sink, with no endpoint anchor. Fires on a long
+  `[0-9().^]`-only run carrying a storm of `^` and `).(` tokens in a request
+  body (stricter thresholds than the endpoint-anchored CVE rule since there is
+  no route to lean on). Ships **logonly** for fleet burn-in — a `WAF_BACKDOOR`
+  logonly hit logs/alerts without banning — to be promoted to
+  challenge/block only after it is confirmed FP-free.
 
 ### Security
 - **Read/write endpoints no longer treat a nil vhost scope as admin (the

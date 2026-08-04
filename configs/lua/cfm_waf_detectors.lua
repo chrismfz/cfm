@@ -4610,6 +4610,28 @@ function _M.detect_php_char_pool_obfuscation(body, _headers)
   return nil
 end
 
+-- 439 — generic phpfuck / numeric-XOR obfuscation blob. Technique-level
+-- companion to the vBulletin runMaths CVE rule (10015,
+-- detect_cve_vbulletin_runmaths): that rule is endpoint-anchored, this one has
+-- NO route context and catches the same phpfuck construction against any
+-- restricted-charset eval() sink (custom code, another CMS). Reuses the shared
+-- has_phpfuck_blob helper at STRICTER thresholds (min 60-char run, >=4 carets,
+-- >=4 `).(` concatenations) precisely because there is no endpoint to lean on,
+-- and normalizes the body first so the url-encoded form-POST shape
+-- (`%28%28...%5E...`) is decoded before the scan. Ships logonly (see the check
+-- site) — WAF_BACKDOOR is autoblock-armed but Phase-1 autoblock feeds
+-- edge-`block` hits only, so logonly logs/alerts without banning during
+-- burn-in.
+function _M.detect_php_numeric_xor_obfuscation(body, _headers)
+  if not body or body == "" then return nil end
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = normalize(cap(body, cap_len))
+  if has_phpfuck_blob(s, 60, 4, 4) then
+    return "NUMERIC_XOR_OBFUSCATION"
+  end
+  return nil
+end
+
 -- 432 — full-body polyglot (image/PDF/ZIP magic + PHP opener anywhere).
 -- Rule 412 covers the first 64 bytes of multipart parts; this rule covers
 -- the case where `<?php` sits further in than 64 bytes after a magic-byte

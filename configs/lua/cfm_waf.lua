@@ -280,6 +280,7 @@ local CFG = {
   rule_php_superglobal_callable   = "logonly", -- $_GET[c]( / $_POST[c]( / $_SERVER[HTTP_X_…]( minimalist webshell
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
   rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
+  rule_php_numeric_xor_obfuscation = "logonly", -- phpfuck: a long [0-9().^] run with a ^/).( storm — arbitrary PHP built for a restricted-charset eval() sink (technique-level companion to CVE-2026-61511 rule 10015). Logonly burn-in.
   rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener — JS `\x` hex-escape form only (`\x3c\x3fphp`).
                                                  -- Audit F16 REMOVED the URL (`%3C%3Fphp`), HTML-entity (`&lt;?php`) and
                                                  --  JS-unicode (`<…`) forms: they are the normal on-wire encodings of
@@ -509,6 +510,7 @@ local RULE_IDS = {
   rule_php_decode_chain           = 436,
   rule_php_encoded_opener         = 437,
   rule_php_encoded_opener_b64     = 438,
+  rule_php_numeric_xor_obfuscation = 439,
 
   -- 5xx auth abuse
   rule_auth_burst              = 501,
@@ -2062,6 +2064,27 @@ function _M.check(ctx)
           local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
           if record("WAF_BACKDOOR:" .. tag, ttl, mode, rid) then goto done end
         end
+      end
+    end
+  end
+
+  -- ── 60) Generic phpfuck / numeric-XOR obfuscation blob (439) ─────────────
+  -- Technique-level companion to the vBulletin runMaths CVE rule (10015). That
+  -- rule is endpoint-anchored (ajax/render + armed block); THIS one is the
+  -- safety net for a phpfuck payload built to survive ANY restricted-charset
+  -- eval() sink (custom code, another CMS), with no route to lean on. Same
+  -- shared has_phpfuck_blob signature at stricter thresholds. Ships logonly:
+  -- WAF_BACKDOOR is autoblock-armed, but Phase-1 autoblock ingests edge-`block`
+  -- hits only, so a logonly hit logs/visibly-alerts WITHOUT banning — the
+  -- correct burn-in posture for a new global body scan (promote logonly ->
+  -- challenge -> block only after the fleet confirms no FPs).
+  do
+    local mode = rule_mode(CFG.rule_php_numeric_xor_obfuscation, "logonly")
+    if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
+      local tag = det.detect_php_numeric_xor_obfuscation(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_numeric_xor_obfuscation) then goto done end
       end
     end
   end
