@@ -172,6 +172,7 @@ local CFG = {
   rule_cve_woocommerce_payments = "block", -- CVE-2023-28121: WooCommerce Payments (4.8.0–5.6.1) unauth auth-bypass->privesc. The X-WCPAY-Platform-Checkout-User request header is trusted as the current user id with no validation; an attacker sets it to 1 and mints an admin (POST /wp-json/wp/v2/users roles=administrator). Header is server-set by WooPay only — a client never sends it (near-zero FP); keyed on header presence, all methods. Exempt genuine WooPay source nets via waf_security ALLOW_NETS.
   rule_cve_gravity_smtp = "block", -- CVE-2026-4020: Gravity SMTP (<=2.1.4) unauth sensitive-info exposure. REST route /gravitysmtp/v1/tests/mock-data has permission_callback=true and dumps the full System Report (PHP/DB/server versions, paths, plugins, API keys/tokens). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate — the only legit caller is the wp-admin settings screen, which carries the logged-in cookie.
   rule_cve_sppagebuilder_upload = "block", -- CVE-2026-48908: Joomla SP Page Builder (com_sppagebuilder) asset.upload* (uploadCustomIcon/uploadImage/uploadFont) — unauth arbitrary file upload->RCE ("ANTONKILL", actively exploited 2026-07). Runs before rules 401/414 for CVE attribution. Keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content); reuses the hardened upload detectors. Near-zero FP (a legit icon/image/font upload never carries PHP). Body-budget caveat: a php entry past waf_body_max_len is ClamAV's backstop.
+  rule_cve_vbulletin_runmaths = "block", -- CVE-2026-61511: vBulletin (5.x <=5.7.5 / 6.x <=6.2.1) runMaths() unauth RCE. vB5_Template_Runtime::runMaths() strips input to [0-9().^<>&|+*/=-] then eval()s it; reachable unauthenticated via ajax/render/<template> (default "pagenav" feeds pagenav[pagenumber] into a {vb:math} tag). Arbitrary PHP is smuggled via "phpfuck" (each char XOR-built from parenthesised digit literals). Keyed on the ajax/render route + a phpfuck-shaped blob (long [0-9().^] run with a ^ and ).( storm) in args/body — the pair is near-zero FP (no legit page-number looks like that).
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -553,6 +554,7 @@ local RULE_IDS = {
   rule_cve_woocommerce_payments = 10012,
   rule_cve_gravity_smtp = 10013,
   rule_cve_sppagebuilder_upload = 10014,
+  rule_cve_vbulletin_runmaths = 10015,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -1009,6 +1011,30 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_48908:SPPAGEBUILDER:" .. tag, ttl, mode, RULE_IDS.rule_cve_sppagebuilder_upload) then goto done end
+      end
+    end
+  end
+
+  -- ── 3m) vBulletin runMaths() unauth RCE (CVE-2026-61511) ────────────────────
+  -- vB5_Template_Runtime::runMaths() sanitises its input to digits + math/bitwise
+  -- operators, then eval()s it — reachable unauthenticated through the
+  -- ajax/render/<template> route (the default "pagenav" template feeds the tainted
+  -- pagenav[pagenumber] into a {vb:math} tag). Arbitrary PHP is smuggled with
+  -- "phpfuck": each character of system()/the command is XOR-built from
+  -- parenthesised digit literals, so NONE of the RCE/webshell/obfuscation
+  -- detectors (which key on eval(/system(/<?php/chr(/base64) match. We key on the
+  -- route + the phpfuck blob shape instead. Near-zero FP: a real pagenumber is a
+  -- small integer, never a hundreds-of-parens ^/).( storm. All-methods (NOT
+  -- gated on body_inspect_ok): vBulletin routes ajax/render via GET too, so the
+  -- payload can ride the query string; the detector's own cheap route pre-gate
+  -- keeps the fleet-wide cost down.
+  do
+    local mode = rule_mode(CFG.rule_cve_vbulletin_runmaths, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_vbulletin_runmaths(uri, m_lower, args, body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_61511:VBULLETIN:" .. tag, ttl, mode, RULE_IDS.rule_cve_vbulletin_runmaths) then goto done end
       end
     end
   end

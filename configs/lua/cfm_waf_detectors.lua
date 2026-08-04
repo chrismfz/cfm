@@ -3132,6 +3132,84 @@ function _M.detect_cve_sppagebuilder_upload(uri, method, args, body, headers)
   return nil
 end
 
+-- phpfuck / numeric-XOR obfuscation blob detector. Shared by the vBulletin
+-- runMaths CVE rule below and (Phase 2) the generic obfuscation rule. Matches
+-- the INVARIANT shape of a PHP payload built to survive an eval() sink that
+-- permits only digits and arithmetic/bitwise operators (`[0-9().^<>&|+*/=-]`):
+-- a long contiguous run of ONLY digits / parens / dots / carets, carrying a
+-- storm of XOR operators (`^`) and parenthesised-digit concatenations (`).(`)
+-- that spell out ASCII codes character by character, e.g.
+--   ((((999…).(9))^((2).(0).(4)))^((8).(6).(((9).(9))^((9).(9)))))((6).(5))…
+-- No legitimate math / page-number / template parameter looks like this. The
+-- thresholds are intentionally high so a short real formula — `(1+2)^3`, a
+-- bitmask like `(6)^(1)` — never trips it; a real phpfuck payload carries
+-- hundreds of each token. Scans on the tight `[0-9().^]` class so ordinary
+-- punctuation breaks the run and a coincidental scattering of carets across a
+-- normal body can't accumulate into a hit.
+local function has_phpfuck_blob(s, min_len, min_caret, min_concat)
+  if not s or s == "" then return false end
+  min_len    = min_len    or 40
+  min_caret  = min_caret  or 3
+  min_concat = min_concat or 3
+  for run in s:gmatch("[%d%(%)%.%^]+") do
+    if #run >= min_len then
+      local carets = select(2, run:gsub("%^", ""))
+      if carets >= min_caret then
+        local concat = select(2, run:gsub("%)%.%(", ""))
+        if concat >= min_concat then
+          local parens = select(2, run:gsub("%(", ""))
+          if parens >= 10 then
+            return true
+          end
+        end
+      end
+    end
+  end
+  return false
+end
+
+-- [CVE] vBulletin `runMaths()` unauthenticated remote code execution.
+-- CVE-2026-61511 (vBulletin 5.x <= 5.7.5 and 6.x <= 6.2.1; fixed 6.2.2).
+-- `vB5_Template_Runtime::runMaths()` strips its input to
+-- `[0-9().^<>&|+*/=-]` and passes it straight to `eval("$str = $str;")`. An
+-- attacker reaches it UNAUTHENTICATED via the `ajax/render/<template>` route:
+-- the default "pagenav" template assigns the user-tainted
+-- `pagenav[pagenumber]` to a `{vb:math}` tag, so the value flows to
+-- `runMaths()` → `eval()`. Because the sink only permits digits and
+-- operators, arbitrary PHP is smuggled with "phpfuck": every character of the
+-- target function/argument (`system`, the shell command) is built from XOR
+-- (`^`) of parenthesised digit literals. Ref: Egidio Romano / SSD Secure
+-- Disclosure advisory KIS-2026-13; public PoC CVE-2026-61511.php
+-- (karmainsecurity.com). Signature sourced from the PoC, not from memory.
+--
+-- Keyed on the ajax/render route (path OR a `routestring=ajax/render` param,
+-- both permalink forms) AND a phpfuck-shaped blob in args/body. Either signal
+-- alone is weak — the route sees legit paging traffic, and a phpfuck blob is
+-- the near-zero-FP half — so the PAIR is what fires. `method` is m_lower from
+-- the caller; the PoC POSTs, but vBulletin also routes ajax/render via GET, so
+-- both methods are accepted.
+function _M.detect_cve_vbulletin_runmaths(uri, method, args, body, headers)
+  local u = lower(uri or "")
+  -- Cheap route pre-gate BEFORE the normalize pass: the ajax/render route is
+  -- either a path segment (friendly URL) or a `routestring=ajax/render` param
+  -- (the PoC POSTs it). `ajax` itself is never url-encoded — only the slashes
+  -- are (`routestring=ajax%2Frender`) — so a raw lowercased substring check on
+  -- `routestring=ajax` filters out the overwhelming majority of traffic without
+  -- paying for normalize on every request body.
+  local raw = lower(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
+  if not (has(u, "ajax/render") or has(raw, "routestring=ajax")) then
+    return nil
+  end
+  -- Confirmed on-route: normalize (url-decode x2 + lower) so the %-encoded PoC
+  -- body (`pagenav%5Bpagenumber%5D=%28%28...`) is decoded to literal
+  -- parens/carets before the blob scan, then look for the phpfuck signature.
+  local scope = normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
+  if has_phpfuck_blob(scope) then
+    return "RUNMATHS_RCE"
+  end
+  return nil
+end
+
 -- [top-4c] Obfuscation scorer for raw POST bodies (forms, JSON, text, XML).
 -- Catches JS/PHP payload delivery that bypasses detect_b64_injection by using
 -- client-side decode (atob+XOR+new Function) instead of PHP-side base64_decode.

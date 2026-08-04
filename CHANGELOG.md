@@ -17,6 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **WAF CVE detector: vBulletin `runMaths()` unauthenticated RCE
+  (CVE-2026-61511, rule 10015).** vBulletin 5.x ≤5.7.5 / 6.x ≤6.2.1 pass a
+  digit-and-operator-only string straight to `eval()`, reachable
+  unauthenticated via the `ajax/render/<template>` route (the default
+  "pagenav" template feeds `pagenav[pagenumber]` into a `{vb:math}` tag).
+  Attackers smuggle arbitrary PHP with "phpfuck" — every character built from
+  XOR of parenthesised digit literals — so no literal `system`/`eval`/`<?php`
+  token exists for the generic RCE/webshell/obfuscation rules to catch. The
+  new rule keys on the ajax/render route plus a phpfuck-blob signature (a long
+  `[0-9().^]` run with a storm of `^` and `).(` tokens) in args or body; the
+  pair is near-zero FP (a real page number is a small integer). Ships at
+  `block` and, being a `WAF_CVE` family rule with an exact shape, is autoblock-
+  armed by default — a hit nft-bans the source (6h) and alerts as
+  `WAF/CVE-2026-61511` on Slack/mail.
+
 ### Security
 - **Read/write endpoints no longer treat a nil vhost scope as admin (the
   `scope == nil ⇒ full access` pattern, fleet-wide).** Following the exclude
