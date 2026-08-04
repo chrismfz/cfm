@@ -18,6 +18,28 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Read/write endpoints no longer treat a nil vhost scope as admin (the
+  `scope == nil ⇒ full access` pattern, fleet-wide).** Following the exclude
+  write-guard fix, an audit found the same misclassification across many
+  scoped-allowed handlers: a scoped token with an empty vhost set (e.g. a
+  DB-only viewer token) produced a `nil` scope that `vhostAllowed`,
+  `parseVhostFilter`, the `*ForScope` list filters and several write guards
+  (`validateScopedHTTP3Write`, `validateScopedSigIgnoreWrite`,
+  `scopeAllowsVhosts`, `scopeCheckHost`, the challenge single-host handlers,
+  the fleet-wide list endpoints) all read as "no restriction" — letting such a
+  token toggle HTTP/3, add global ClamAV sig-ignores, manage any vhost's
+  challenge/traffic rules, and read cross-tenant aggregates/lists. Fixed at a
+  single choke point: `vhostScopeFromContext` now returns a non-nil **empty**
+  set for a scoped-role request with no scope map, so every one of those
+  consumers fails closed (empty allowlist matches no host, filters to no rows)
+  while admin/loopback keep the `nil` sentinel and full access. The one direct
+  `CtxScopeKey{}` reader (`deriveScopedMySQLOwners`) already fails closed via
+  its own `len(scope)==0` guard and is documented as such. Not reachable via
+  the real cPanel token flow (a zero-domain scoped token is never minted), so
+  defence-in-depth; behaviour is unchanged for real admins and normally-scoped
+  tokens. New tests: `TestVhostScopeFromContext_ScopedNilYieldsEmptyNotNil` and
+  `TestReadPath_VhostlessScopedTokenFailsClosed` (http3 / clam-sigignore /
+  challenge-status / exclude-list leak), both verified to fail without the fix.
 - **Exclude / clam-override writes now key the admin decision on the explicit
   admin role, not on a nil vhost scope (fail-closed).** `validateScopedExcludeWrite`
   and `effectiveExcludeScope` previously treated a nil context vhost scope as

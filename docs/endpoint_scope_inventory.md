@@ -5,6 +5,16 @@ This inventory documents the effective authz classification enforced by the back
 - **scoped-allowed**: endpoint is allowed for scoped tokens, but must apply vhost/user scoping (`parseVhostFilter`, `vhostAllowed`, `scopeCheckHost`, or `scopedMySQLFilterHandler` derived filters).
 - **admin-only**: endpoint rejects scoped tokens with `403` via `IsAdminRequest`/admin wrappers.
 
+**The `nil` scope sentinel means admin/loopback ONLY.** `vhostScopeFromContext`
+normalizes a *scoped*-role request that carries no scope map (e.g. a DB-only
+viewer token whose vhost set is nil) to a non-nil **empty** set, so every
+`nil == no restriction` consumer above (`vhostAllowed`, `parseVhostFilter`, the
+`*ForScope` list filters, and the `validateScoped*` write guards) fails closed
+for it — a vhost-less scoped token matches no host and sees no rows, rather
+than being mistaken for admin. Code that reads `CtxScopeKey{}` **directly**
+(bypassing that helper — today only `deriveScopedMySQLOwners`) must keep its own
+`len(scope)==0` guard.
+
 ## `internal/webdetector/http_api.go` + related handlers
 
 ### Scoped-allowed
