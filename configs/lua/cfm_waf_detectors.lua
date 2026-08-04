@@ -3139,42 +3139,59 @@ end
 --   ((((999…).(9))^((2).(0).(4)))^((8).(6).(((9).(9))^((9).(9)))))((6).(5))…
 -- where each ASCII byte is XOR-built from parenthesised digit literals.
 --
--- ADVERSARIAL HARDENING (red-team review 2026-08): the earlier version scanned
--- a tight contiguous `[0-9().^]` run, which was trivially evaded two ways —
--- (a) interspersing characters the sink STRIPS (spaces/letters/commas) between
--- tokens fragmented the run while `runMaths()`'s own `preg_replace` deleted
--- them and reconstructed the clean payload for `eval()`; (b) interspersing
--- sink-ALLOWED no-op operators (`+ * / = < > & | -`) likewise broke the run.
--- Both are closed by mirroring the sink: FIRST project the input onto
--- runMaths()'s exact survivor set (delete precisely the chars its preg_replace
--- strips), reconstructing the byte string that actually reaches eval(); THEN
--- count the three tokens phpfuck cannot avoid, GLOBALLY over the reconstruction
--- — parenthesis nesting, XOR operators, and concatenation dots. Stripped-char
--- insertion is removed by the projection; no-op-operator insertion only ADDS
--- chars and cannot pull the counts below threshold. Thresholds stay high so a
--- short real formula (`(1+2)^3`) never trips: a real phpfuck payload carries
--- hundreds of each token.
+-- DESIGN (two adversarial rounds, red-team review 2026-08):
+--   Round 1 broke a naive tight `[0-9().^]` contiguous run by interspersing
+--   either sink-STRIPPED chars (spaces/letters/commas — deleted by runMaths()
+--   and reconstructed for eval()) or sink-ALLOWED no-op operators (`+ * / |`).
+--   The first fix (project onto the survivor set, count globally) then
+--   FALSE-POSITIVE-BANNED legitimate forum/admin content: projecting away the
+--   letters/`;`/whitespace that naturally separate a caret-region from a
+--   dot-region merged ordinary code/math into one qualifying run, and global
+--   counting summed tokens across unrelated fields.
 --
--- min_concat is the minimum concatenation-DOT count (not the exact `).(` triad,
--- which a no-op like `).+(` would break). The parens>=10 conjunction plus the
--- caret requirement are the FP-killers — legit traffic essentially never pairs
--- a caret storm with deep paren nesting and no letters.
+--   The stable design keeps three properties at once:
+--   1. Scan the RAW (normalized, NOT projected) input in CONTIGUOUS runs, so
+--      letters / `;` / whitespace / commas stay as natural run breakers — this
+--      is what keeps ordinary code and math from scoring (their sub-expressions
+--      fragment, and identifiers ARE letters).
+--   2. Run charset = the phpfuck-constructible subset `[0-9().^]` PLUS the
+--      arithmetic/bitwise operators an attacker can insert value-preservingly
+--      (`+ - * / |`), so no-op-operator interspersing cannot fragment the
+--      payload. `& < > =` are deliberately EXCLUDED (they can't be no-op
+--      inserted into a numeric expression, and they delimit real params).
+--   3. Require a SINGLE run to carry a storm of ALL THREE tokens — nested
+--      parens AND XOR carets AND concatenation dots. Legitimate content never
+--      interleaves all three (XOR chains have no dots, float lists have no
+--      carets); phpfuck does by construction, at hundreds-of-each scale.
+--
+--   Accepted residual (documented in WAF_CVE.md): interspersing sink-STRIPPED
+--   chars (letters/spaces) still evades — but that payload is, by construction,
+--   indistinguishable at request time from a forum code paste (same letters),
+--   so closing it re-introduces the FP-ban. This is defence-in-depth; the
+--   vBulletin patch is the real fix.
+--
+-- min_concat is the minimum concatenation-DOT count (not the `).(` triad, which
+-- a `).+(` no-op would break).
 local function has_phpfuck_blob(s, min_len, min_caret, min_concat)
   if not s or s == "" then return false end
   min_len    = min_len    or 40
   min_caret  = min_caret  or 3
   min_concat = min_concat or 3
-  -- Project onto runMaths()'s survivor set `[0-9().^<>&|+*/=-]`: delete exactly
-  -- what the sink's `preg_replace('#([^+\-*=/\(\)\d\^<>&|\.]*)#','',…)` strips.
-  local proj = (s:gsub("[^0-9%(%)%.%^<>&|%+%*/=%-]", ""))
-  if #proj < min_len then return false end
-  local carets = select(2, proj:gsub("%^", ""))
-  if carets < min_caret then return false end
-  local dots = select(2, proj:gsub("%.", ""))
-  if dots < min_concat then return false end
-  local parens = select(2, proj:gsub("%(", ""))
-  if parens < 10 then return false end
-  return true
+  for run in s:gmatch("[0-9%(%)%.%^|%+%*/%-]+") do
+    if #run >= min_len then
+      local carets = select(2, run:gsub("%^", ""))
+      if carets >= min_caret then
+        local dots = select(2, run:gsub("%.", ""))
+        if dots >= min_concat then
+          local parens = select(2, run:gsub("%(", ""))
+          if parens >= 10 then
+            return true
+          end
+        end
+      end
+    end
+  end
+  return false
 end
 
 -- [CVE] vBulletin `runMaths()` unauthenticated remote code execution.
@@ -3201,15 +3218,17 @@ end
 -- The route gate runs on DECODED surfaces (normalize = url-decode x2 + lower),
 -- NOT a raw substring — an earlier raw-`has(...,"routestring=ajax")` pre-gate
 -- was bypassable by url-encoding a letter (`routestring=%61jax/render`, which
--- vBulletin still decodes+routes) or the path (`/ajax/%72ender/`). Deciding on
--- the same decoded bytes the router sees closes that gap (red-team review
--- 2026-08). Residual: `cap(...,max_scan_len)` bounds the scan window; a payload
--- padded past it is the codebase's standard bounded-scan limitation (host /
--- ClamAV backstop), shared by every body-aware rule.
+-- vBulletin still decodes+routes) or the path (`/ajax/%72ender/`). It is also
+-- SEGMENT-ANCHORED with the trailing slash (`ajax/render/`): a bare
+-- `has(...,"ajax/render")` substring fired on unrelated paths like
+-- `/api/ajax/render-widget` or `/js/myajax/renderer`, blocking non-vBulletin
+-- sites (red-team review 2026-08). Residual: `cap(...,max_scan_len)` bounds the
+-- scan window; a payload padded past it is the codebase's standard bounded-scan
+-- limitation (host / ClamAV backstop), shared by every body-aware rule.
 function _M.detect_cve_vbulletin_runmaths(uri, method, args, body, headers)
   local u = normalize(uri or "")
   local scope = normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
-  if not (has(u, "ajax/render") or has(scope, "routestring=ajax")) then
+  if not (has(u, "ajax/render/") or has(scope, "routestring=ajax/render")) then
     return nil
   end
   if has_phpfuck_blob(scope) then
@@ -4623,13 +4642,13 @@ end
 -- detect_cve_vbulletin_runmaths): that rule is endpoint-anchored, this one has
 -- NO route context and catches the same phpfuck construction against any
 -- restricted-charset eval() sink (custom code, another CMS). Reuses the shared
--- has_phpfuck_blob helper (survivor-set projection + global token counts) at
--- STRICTER thresholds (min 60 chars, >=4 carets, >=4 concatenation dots)
--- precisely because there is no endpoint to lean on, and normalizes the body
--- first so the url-encoded form-POST shape (`%28%28...%5E...`) is decoded before
--- the scan. Ships logonly (see the check site) — WAF_BACKDOOR is autoblock-armed
--- but Phase-1 autoblock feeds edge-`block` hits only, so logonly logs/alerts
--- without banning during burn-in.
+-- has_phpfuck_blob helper (contiguous-run, all-three-token scan) at STRICTER
+-- thresholds (min 60 chars, >=4 carets, >=4 concatenation dots) precisely
+-- because there is no endpoint to lean on, and normalizes the body first so the
+-- url-encoded form-POST shape (`%28%28...%5E...`) is decoded before the scan.
+-- Ships logonly (see the check site) — WAF_BACKDOOR is autoblock-armed but
+-- Phase-1 autoblock feeds edge-`block` hits only, so logonly logs/alerts without
+-- banning during burn-in.
 function _M.detect_php_numeric_xor_obfuscation(body, _headers)
   if not body or body == "" then return nil end
   local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len

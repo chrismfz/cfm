@@ -77,25 +77,39 @@ fires(req("POST", "/index.php", "routestring=ajax/render/pagenav", "pagenav[page
       "route in query string, phpfuck in body", R)
 
 -- ── Adversarial regressions (red-team review 2026-08) ────────────────────────
--- Bypass 1: intersperse characters runMaths() STRIPS (spaces + letters) between
--- tokens. The sink deletes them and reconstructs the clean payload for eval();
--- the projection in has_phpfuck_blob must delete them too so the blob is scored.
-local STRIP_EVADE = (PHPFUCK:gsub("%)", ")x ")) -- inject a letter+space after every ')'
-fires(req("POST", "/", "", "routestring=ajax/render/pagenav&pagenav[pagenumber]=" .. STRIP_EVADE),
-      "bypass1: strip-char (letter/space) interspersing — projection reconstructs", R)
--- Bypass 2: url-encode a letter of the route. vBulletin decodes routestring
--- before routing, so `%61jax` still hits the vulnerable template; the gate must
--- decide on the DECODED surface, not a raw substring.
+-- Bypass: intersperse sink-ALLOWED no-op operators (`+ * / |`) between tokens.
+-- These stay in the run charset, so the payload must NOT fragment below score.
+local NOOP_EVADE = (PHPFUCK:gsub("%)", ")+0")) -- `+0` value-preserving no-op after every ')'
+fires(req("POST", "/", "", "routestring=ajax/render/pagenav&pagenav[pagenumber]=" .. NOOP_EVADE),
+      "bypass: no-op-operator (+0) interspersing — operators stay in run", R)
+-- Bypass: url-encode a letter of the route. vBulletin decodes routestring before
+-- routing, so `%61jax` still hits the vulnerable template; the gate must decide
+-- on the DECODED surface, not a raw substring.
 fires(req("POST", "/", "", "routestring=%61jax/render/pagenav&pagenav[pagenumber]=" .. PHPFUCK),
-      "bypass2: url-encoded route letter (routestring=%61jax) — decoded gate", R)
+      "bypass: url-encoded route letter (routestring=%61jax) — decoded gate", R)
 fires(req("GET", "/ajax/%72ender/pagenav", "pagenav[pagenumber]=" .. PHPFUCK, ""),
-      "bypass2: url-encoded path letter (/ajax/%72ender/) — normalize decodes", R)
+      "bypass: url-encoded path letter (/ajax/%72ender/) — normalize decodes", R)
 
--- ── Negatives ───────────────────────────────────────────────────────────────
--- Projection must not create FPs: a body with letters, parens and dots but no
--- caret storm stays clean even after the survivor-set projection.
-clean(req("POST", "/", "", "routestring=ajax/render/pagenav&note=see(fig.1)and(fig.2)for(details.here)"),
-      "prose with parens/dots but no caret storm — projection stays clean")
+-- ── False-positive regressions (red-team review 2026-08) ─────────────────────
+-- The FP-ban failure this rule must never re-introduce: legitimate forum/admin
+-- content (code / math / regex) on an ajax/render route. Each mixes parens with
+-- SOME carets or SOME dots, but never interleaves a caret storm AND a dot storm
+-- AND deep paren nesting in ONE contiguous run — letters, ';' and whitespace
+-- break the run. All must stay CLEAN (a hit here = a 6h ban on a real user).
+clean(req("POST", "/forum/ajax/render/bbcode", "",
+          "message=[code](a^b)+(c^d)+(e^f)+(g^h)+(i^j); (x&255)|(y<<8)|(z<<16); (1.5+2.5+3.5+4.5)/(2.0*2.0); ((p*q)/(r+s))-((t*u)/(v+w))[/code]"),
+      "FP: forum C/bit-twiddling code block on ajax/render — must not ban")
+clean(req("POST", "/ajax/render/pagenav", "",
+          "message=f(n)=(a^n)+(b^n)-(c^n) where a=(1.5),b=(2.5),c=(3.5). g(x)=(x^2)+(x^3)+(x^4) at (0.1),(0.2),(0.3),(0.4),(0.5)."),
+      "FP: math/CAS forum post on ajax/render — must not ban")
+clean(req("POST", "/ajax/render/pagenav", "", "note=see(fig.1)and(fig.2)for(details.here)"),
+      "FP: prose with parens/dots but no caret storm")
+-- Route gate must be segment-anchored: a phpfuck blob to an unrelated path that
+-- merely CONTAINS the substring 'ajax/render' must NOT fire (non-vBulletin site).
+clean(req("POST", "/api/ajax/render-widget", "", "x=" .. PHPFUCK),
+      "route anchoring: /api/ajax/render-widget (no trailing slash) — not vBulletin")
+clean(req("POST", "/js/myajax/renderer", "", "x=" .. PHPFUCK),
+      "route anchoring: /js/myajax/renderer — not vBulletin")
 clean(req("POST", "/", "", "routestring=ajax/render/pagenav&pagenav[pagenumber]=2"),
       "legit pagination: real integer page number on the same route")
 clean(req("GET", "/ajax/render/pagenav", "pagenav[pagenumber]=(1+2)^3", ""),

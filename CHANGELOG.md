@@ -28,17 +28,22 @@ back-filled here — see the git/PR history for that period.
   token exists for the generic RCE/webshell/obfuscation rules to catch. The
   new rule keys on the ajax/render route plus a phpfuck-blob signature in args
   or body; the pair is near-zero FP (a real page number is a small integer).
-  The signature is evasion-hardened (adversarial review): the route gate
-  decides on url-DECODED surfaces (so `routestring=%61jax/render` /
-  `/ajax/%72ender/` can't slip past a raw substring check), and the blob scorer
-  first projects input onto vBulletin `runMaths()`'s own survivor character set
-  — deleting exactly what the sink's `preg_replace` strips — before counting the
-  paren/XOR/concatenation tokens phpfuck cannot avoid, so interspersing
-  stripped chars (spaces/letters) or sink-allowed no-op operators
-  (`+ * / < > & |`) between tokens no longer fragments the scan. Ships at
-  `block` and, being a `WAF_CVE` family rule with an exact shape, is autoblock-
-  armed by default — a hit nft-bans the source (6h) and alerts as
-  `WAF/CVE-2026-61511` on Slack/mail.
+  The signature is evasion-hardened over two adversarial review rounds: the
+  route gate decides on url-DECODED, slash-anchored surfaces (so
+  `routestring=%61jax/render` / `/ajax/%72ender/` can't slip a raw substring
+  check, and an unrelated `/api/ajax/render-widget` path can't be matched), and
+  the blob scorer requires a single contiguous run carrying deep paren nesting
+  AND an XOR-caret storm AND concatenation dots, with sink-allowed no-op
+  operators (`+ * / |`) kept in the run charset so operator interspersing can't
+  fragment the payload. The all-three-tokens-in-one-run rule is what keeps it
+  FP-safe on forum code/math (which separates carets from dots, and whose
+  identifiers are letters that break the run) — an early variant that projected
+  the payload onto the sink's survivor set was reverted for FP-banning legit
+  posts. Residual (documented): interspersing sink-STRIPPED chars evades but is
+  indistinguishable from a forum code paste, so it's defence-in-depth behind the
+  vendor patch. Ships at `block` and, being a `WAF_CVE` family rule with an exact
+  shape, is autoblock-armed by default — a hit nft-bans the source (6h) and
+  alerts as `WAF/CVE-2026-61511` on Slack/mail.
 - **WAF: generic phpfuck / numeric-XOR obfuscation detector (rule 439,
   `WAF_BACKDOOR`, logonly).** Technique-level companion to the vBulletin CVE
   rule above: it catches the same "phpfuck" construction — arbitrary PHP built

@@ -1025,13 +1025,16 @@ function _M.check(ctx)
   -- "phpfuck": each character of system()/the command is XOR-built from
   -- parenthesised digit literals, so NONE of the RCE/webshell/obfuscation
   -- detectors (which key on eval(/system(/<?php/chr(/base64) match. We key on the
-  -- route + the phpfuck blob shape instead. Near-zero FP: a real pagenumber is a
-  -- small integer, never a hundreds-of-parens ^/. storm. All-methods (NOT gated
-  -- on body_inspect_ok): vBulletin routes ajax/render via GET too, so the payload
-  -- can ride the query string. The detector decides on DECODED surfaces and
-  -- projects the payload onto runMaths()'s survivor set before scoring, so
-  -- url-encoded route letters and strip-char/no-op interspersing don't evade it
-  -- (red-team review 2026-08).
+  -- route + the phpfuck blob shape instead. Near-zero FP: the scorer requires a
+  -- single contiguous run carrying a storm of ALL THREE tokens (deep parens AND
+  -- XOR carets AND concatenation dots) — legit code/math on an ajax/render route
+  -- separates carets from dots (and identifiers are letters that break the run),
+  -- so it never scores. All-methods (NOT gated on body_inspect_ok): vBulletin
+  -- routes ajax/render via GET too. The detector decides on DECODED, segment-
+  -- anchored surfaces (so url-encoded route letters and unrelated `/ajax/render`
+  -- substrings don't match) and keeps no-op operators in the run charset (so
+  -- operator interspersing can't fragment the payload) — two adversarial rounds,
+  -- red-team review 2026-08.
   do
     local mode = rule_mode(CFG.rule_cve_vbulletin_runmaths, "block")
     if mode ~= "disabled" then
