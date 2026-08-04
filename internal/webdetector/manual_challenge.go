@@ -172,6 +172,34 @@ func (e *Engine) manualChallengeCovering(host string) (bool, time.Time, string) 
 	return false, time.Time{}, ""
 }
 
+// manualChallengeCoversClear reports whether calling ClearVhost(host) would
+// tear down a bridge entry that belongs to an active manual challenge, and
+// the latest such expiry (for logging).
+//
+// This is the guard for a *clear*, which is broader than the per-host
+// lifecycle check above. ClearVhost expands host through
+// vhostVariantsForBridge and deletes EVERY resulting entry, so an apex clear
+// ("victim.com") also removes the "www.victim.com" entry — and that entry may
+// belong to a manual challenge placed on EITHER "victim.com" or
+// "www.victim.com". Guarding with manualChallengeCovering(host) alone missed
+// the www-only manual case: the apex has no manual challenge, covering
+// returns false, and the clear silently deletes the www manual entry. So test
+// every variant the clear will delete via manualChallengeCovering (which in
+// turn maps each www variant back to its apex manual challenge).
+func (e *Engine) manualChallengeCoversClear(host string) (bool, time.Time) {
+	covered := false
+	var latest time.Time
+	for _, v := range vhostVariantsForBridge(host) {
+		if ok, exp, _ := e.manualChallengeCovering(v); ok {
+			covered = true
+			if exp.After(latest) {
+				latest = exp
+			}
+		}
+	}
+	return covered, latest
+}
+
 // ManualChallengeSnapshot returns all currently active manual challenges.
 func (e *Engine) ManualChallengeSnapshot() map[string]manualChalEntry {
 	return e.manualChal.snapshot()

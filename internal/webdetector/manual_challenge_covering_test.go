@@ -80,3 +80,56 @@ func TestManualChallengeCovering(t *testing.T) {
 		}
 	})
 }
+
+// manualChallengeCoversClear guards ClearVhost, which expands apex→www and
+// deletes BOTH entries. A manual challenge on either the apex or the www host
+// must therefore block an apex clear — the security-review follow-up that the
+// per-host covering check alone missed the www-only case (an apex auto
+// cool-down would delete the www manual entry).
+func TestManualChallengeCoversClear(t *testing.T) {
+	t.Run("apex clear is blocked by a www-only manual challenge", func(t *testing.T) {
+		e := &Engine{}
+		e.manualChal.init()
+		e.manualChal.set("www.victim.com", 24*time.Hour, "manual")
+
+		// Clearing the apex would delete [victim.com, www.victim.com] —
+		// including the operator's www manual entry.
+		covered, exp := e.manualChallengeCoversClear("victim.com")
+		if !covered {
+			t.Fatal("apex clear must be blocked when www has a manual challenge")
+		}
+		if rem := time.Until(exp); rem < 23*time.Hour {
+			t.Fatalf("expected ~24h remaining, got %s", rem)
+		}
+
+		// Sanity: the narrow per-host check does NOT catch this — which is
+		// exactly why the clear needs the variant-aware guard.
+		if ok, _, _ := e.manualChallengeCovering("victim.com"); ok {
+			t.Fatal("per-host covering unexpectedly matched the apex")
+		}
+	})
+
+	t.Run("apex clear is blocked by an apex manual challenge", func(t *testing.T) {
+		e := &Engine{}
+		e.manualChal.init()
+		e.manualChal.set("victim.com", 24*time.Hour, "manual")
+
+		if covered, _ := e.manualChallengeCoversClear("victim.com"); !covered {
+			t.Fatal("apex clear must be blocked by an apex manual challenge")
+		}
+		// The www clear must also be blocked (apex expands to www).
+		if covered, _ := e.manualChallengeCoversClear("www.victim.com"); !covered {
+			t.Fatal("www clear must be blocked by an apex manual challenge")
+		}
+	})
+
+	t.Run("unrelated host clear is not blocked", func(t *testing.T) {
+		e := &Engine{}
+		e.manualChal.init()
+		e.manualChal.set("victim.com", 24*time.Hour, "manual")
+
+		if covered, _ := e.manualChallengeCoversClear("other.com"); covered {
+			t.Fatal("clearing an unrelated host must not be blocked")
+		}
+	})
+}

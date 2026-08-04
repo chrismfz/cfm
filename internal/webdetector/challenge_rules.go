@@ -1698,9 +1698,11 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
                         // silently shortening e.g. a 24h manual challenge to 1h
                         // (and losing it entirely once the vhost drops out of
                         // the candidate set). Keep the bridge entry while a
-                        // manual challenge covers this host; only the auto
+                        // manual challenge covers ANY variant this clear would
+                        // delete (ClearVhost expands apex→www, so an apex clear
+                        // also removes a www-only manual entry); only the auto
                         // flag turns off.
-                        if covered, mexp, _ := e.manualChallengeCovering(host); covered {
+                        if covered, mexp := e.manualChallengeCoversClear(host); covered {
                             if e.cfg.ChallengeLog {
                                 logging.LogfCHALLENGES(
                                     "[challenge][vhost] action=auto_off_keep_manual host=%s manual_expires_in=%s",

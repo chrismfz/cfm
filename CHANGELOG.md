@@ -155,8 +155,12 @@ back-filled here — see the git/PR history for that period.
   decisions use the new `manualChallengeCovering`, which also honours the
   bridge's apex→www expansion (a manual challenge on `example.com` covers
   `www.example.com`, matching `vhostVariantsForBridge`; not the reverse) so
-  the www variant is protected and refreshed too. Test:
-  `TestManualChallengeCovering`.
+  the www variant is protected and refreshed too. The auto cool-down clear
+  guard additionally uses `manualChallengeCoversClear`, which checks **every**
+  bridge variant the clear would delete — because `ClearVhost` expands apex→www
+  and deletes both, an apex auto cool-down would otherwise still tear down a
+  manual challenge placed on the `www` host alone. Tests:
+  `TestManualChallengeCovering`, `TestManualChallengeCoversClear`.
 - **`challenge_cookie_discard` no longer counts an apex↔www canonical redirect
   as two solves.** Almost every site 301s `example.gr` to `www.example.gr` (or
   the reverse) from the origin, and CFM sits in front of it. A real visitor who
