@@ -1481,7 +1481,7 @@ if doChallenge {
 
             // Manual panic applies immediately.
 manual := (haveVhostManual && hostMatchAny(host, e.cfg.ChallengeVHost)) ||
-func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
+func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
 
             // Auto suspicious: long-window score with hysteresis + holddown.
             autoActive := false
@@ -1691,9 +1691,27 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
                         e.vhostUnderAttack[host] = false
                         e.vhostLastChange[host] = now
 
-                       if e.nginxBridge != nil {
-                           e.nginxBridge.ClearVhost(host)
-                       }
+                        // Auto cool-down must not tear down an operator manual
+                        // challenge: ClearVhost deletes the bridge entry no
+                        // matter who installed it, and the manual re-push later
+                        // this tick would recreate it with the tick TTL —
+                        // silently shortening e.g. a 24h manual challenge to 1h
+                        // (and losing it entirely once the vhost drops out of
+                        // the candidate set). Keep the bridge entry while a
+                        // manual challenge covers ANY variant this clear would
+                        // delete (ClearVhost expands apex→www, so an apex clear
+                        // also removes a www-only manual entry); only the auto
+                        // flag turns off.
+                        if covered, mexp := e.manualChallengeCoversClear(host); covered {
+                            if e.cfg.ChallengeLog {
+                                logging.LogfCHALLENGES(
+                                    "[challenge][vhost] action=auto_off_keep_manual host=%s manual_expires_in=%s",
+                                    host, time.Until(mexp).Round(time.Second),
+                                )
+                            }
+                        } else if e.nginxBridge != nil {
+                            e.nginxBridge.ClearVhost(host)
+                        }
 
 
                         if e.cfg.ChallengeLog {
@@ -1745,7 +1763,18 @@ func() bool { ok, _, _ := e.manualChal.active(host); return ok }()
             // for them even while the vhost is in challenge mode.
             if e.nginxBridge != nil {
                 vttl := 60 * time.Minute
-                if !manual && e.cfg.ChallengeSuspiciousHolddown > 0 {
+                if manualOn, mexp, _ := e.manualChallengeCovering(host); manualOn {
+                    // An operator manual challenge carries its own expiry —
+                    // push the REMAINING window, not the tick default. The
+                    // tick default silently rewrote a 24h manual challenge to
+                    // 1h whenever the bridge entry had to be recreated (e.g.
+                    // after an auto cool-down cleared it), and the challenge
+                    // then vanished ~1h later if the vhost fell out of the
+                    // candidate set before the next refresh.
+                    if rem := time.Until(mexp); rem > 0 {
+                        vttl = rem
+                    }
+                } else if !manual && e.cfg.ChallengeSuspiciousHolddown > 0 {
                     // keep it at least holddown (+small cushion), refreshed each cycle
                     vttl = e.cfg.ChallengeSuspiciousHolddown + (2 * time.Minute)
                 }
@@ -1782,7 +1811,7 @@ if ha := short[host]; ha != nil {
                 // action" — a real manual challenge must stay reason=manual.
                 vReason := "suspicious_vhost"
                 if manual {
-                    if ok, _, _ := e.manualChal.active(host); ok {
+                    if ok, _, _ := e.manualChallengeCovering(host); ok {
                         vReason = "manual"
                     } else {
                         vReason = "vhost_config"

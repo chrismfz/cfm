@@ -15,6 +15,7 @@
 package webdetector
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -149,6 +150,54 @@ func (e *Engine) ClearManualChallengeVhost(host string) {
 // manual challenge, its expiry, and the reason.
 func (e *Engine) IsManualChallengeActive(host string) (bool, time.Time, string) {
 	return e.manualChal.active(host)
+}
+
+// manualChallengeCovering returns whether an active manual challenge applies
+// to host, its expiry, and its reason. Unlike manualChal.active (exact-key
+// lookup), it also honours the apex→www expansion the bridge performs: a
+// manual challenge on "example.com" installs bridge entries for BOTH
+// "example.com" and "www.example.com" (vhostVariantsForBridge), so for
+// challenge-lifecycle decisions "www.example.com" must count as manually
+// challenged when the operator challenged the apex. The reverse does not
+// hold — a manual challenge on "www.example.com" does not expand to the apex.
+func (e *Engine) manualChallengeCovering(host string) (bool, time.Time, string) {
+	if ok, exp, reason := e.manualChal.active(host); ok {
+		return ok, exp, reason
+	}
+	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
+		if ok, exp, reason := e.manualChal.active(apex); ok {
+			return ok, exp, reason
+		}
+	}
+	return false, time.Time{}, ""
+}
+
+// manualChallengeCoversClear reports whether calling ClearVhost(host) would
+// tear down a bridge entry that belongs to an active manual challenge, and
+// the latest such expiry (for logging).
+//
+// This is the guard for a *clear*, which is broader than the per-host
+// lifecycle check above. ClearVhost expands host through
+// vhostVariantsForBridge and deletes EVERY resulting entry, so an apex clear
+// ("victim.com") also removes the "www.victim.com" entry — and that entry may
+// belong to a manual challenge placed on EITHER "victim.com" or
+// "www.victim.com". Guarding with manualChallengeCovering(host) alone missed
+// the www-only manual case: the apex has no manual challenge, covering
+// returns false, and the clear silently deletes the www manual entry. So test
+// every variant the clear will delete via manualChallengeCovering (which in
+// turn maps each www variant back to its apex manual challenge).
+func (e *Engine) manualChallengeCoversClear(host string) (bool, time.Time) {
+	covered := false
+	var latest time.Time
+	for _, v := range vhostVariantsForBridge(host) {
+		if ok, exp, _ := e.manualChallengeCovering(v); ok {
+			covered = true
+			if exp.After(latest) {
+				latest = exp
+			}
+		}
+	}
+	return covered, latest
 }
 
 // ManualChallengeSnapshot returns all currently active manual challenges.

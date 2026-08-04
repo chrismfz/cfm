@@ -138,6 +138,29 @@ back-filled here — see the git/PR history for that period.
   unaffected.
 
 ### Fixed
+- **The suspicious-vhost auto cool-down no longer silently shortens (and then
+  drops) an operator manual vhost challenge.** Two cooperating defects in the
+  challenge tick loop: (a) when the auto scorer cooled below `score_off` it
+  called `ClearVhost` unconditionally, deleting the bridge entry even when a
+  manual challenge (e.g. `24h` from the CLI) was active on that host; (b) the
+  same-tick manual re-push used a hardcoded 60-minute TTL, so the recreated
+  entry carried 1h instead of the operator's remaining window — observable in
+  the logs as `vhost_clear` + `vhost_challenge ttl=1h0m0s reason=manual` in
+  the same second — and once the (now-challenged) abuse traffic stopped and
+  the vhost fell out of the tick's candidate set, nothing refreshed the 1h
+  entry: it expired and the janitor pruned it silently, ending a 24h manual
+  challenge ~19h early. Now the auto cool-down keeps the bridge entry when a
+  manual challenge covers the host (logging `auto_off_keep_manual` instead),
+  and the manual re-push always sends the remaining manual window. Both
+  decisions use the new `manualChallengeCovering`, which also honours the
+  bridge's apex→www expansion (a manual challenge on `example.com` covers
+  `www.example.com`, matching `vhostVariantsForBridge`; not the reverse) so
+  the www variant is protected and refreshed too. The auto cool-down clear
+  guard additionally uses `manualChallengeCoversClear`, which checks **every**
+  bridge variant the clear would delete — because `ClearVhost` expands apex→www
+  and deletes both, an apex auto cool-down would otherwise still tear down a
+  manual challenge placed on the `www` host alone. Tests:
+  `TestManualChallengeCovering`, `TestManualChallengeCoversClear`.
 - **`challenge_cookie_discard` no longer counts an apex↔www canonical redirect
   as two solves.** Almost every site 301s `example.gr` to `www.example.gr` (or
   the reverse) from the origin, and CFM sits in front of it. A real visitor who
