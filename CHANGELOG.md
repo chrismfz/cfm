@@ -17,18 +17,25 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-### Changed
-- **Documented WAF FP case 6: migration-plugin imports vs rule 402** (docs
-  only, no rule change). A WordPress Website Migration WordPress import
+### Fixed
+- **WAF FP case 6: WP migration-plugin imports no longer blocked by the
+  upload scanners.** A Website Migration WordPress import
   (`admin-ajax.php?action=WMW_import`, chunked multipart carrying raw PHP
-  source) trips `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` and — because the family
-  is autoblock-armed — can nft-ban the admin mid-migration. The documented
-  remedy is a temporary rule-scoped exclude
-  (`cfm webtop waf exclude add /wp-admin/admin-ajax.php --type path --rule 402`,
-  removed after the import). A permanent `action=WMW_import` carve-out was
-  evaluated and rejected: admin-ajax dispatches on `$_REQUEST['action']`
-  (POST body overrides query), so a query-keyed exemption would be an
-  attacker-selectable upload-scanner bypass. See `docs/waf.md` FP case 6.
+  source — a WP backup *is* PHP) tripped rule 402
+  `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` at block tier, and because the family
+  is autoblock-armed could nft-ban the admin mid-migration. Requests whose
+  **effective** wp_ajax action matches the new `migration_import_actions`
+  allowlist (comma-separated, default `WMW_import`, exact + case-sensitive)
+  now demote the legit-PHP-upload scanner set (401/402/403, 431-436) to
+  **logonly** — still scanned, still logged, never enforced, never fed to
+  autoblock. The match reconstructs the action with PHP `$_REQUEST`
+  semantics and fails closed (query `parse_str` last-duplicate-wins with
+  decoded names, multipart body fields walked by the declared boundary,
+  cookies named `action`), because a query-only carve-out would let an
+  attacker wear `?action=WMW_import` while a body `action` dispatches to any
+  vulnerable `wp_ajax_nopriv_*` upload handler. On builds without the fix:
+  temporary `cfm webtop waf exclude add /wp-admin/admin-ajax.php --type path
+  --rule 402` for the duration of the import. See `docs/waf.md` FP case 6.
 
 ### Security
 - **A host-scoped alert can no longer be silenced by the client it reports on.**

@@ -477,34 +477,54 @@ mid-migration can earn a 6h nft ban on top of the edge TTL block.
 allowlist is keyed on the two installer endpoints only. Migration plugins
 use plugin-specific admin-ajax actions the edge has never heard of.
 
-**Fix:** operator-side, temporary, rule-scoped exclusion for the duration of
-the migration — **not** a code carve-out:
+**Fix:** a fleet-wide **demotion** (never a skip): requests matching
+`CFG.migration_import_actions` (comma-separated wp_ajax action names, default
+`WMW_import`) demote the whole legit-PHP-upload scanner set — 401/402/403 and
+the 431-436 backdoor scorers — to **logonly**. The bytes are still scanned
+and logged (visibility preserved), the edge never enforces, and the autoblock
+feed (which ingests only `action=block`) never sees them.
 
-```
-cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402
-# ... run the import, then:
-cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402
-```
+The naive fix — exempting on the query string (`?action=WMW_import`) — was
+rejected as an attacker-selectable bypass: WP's admin-ajax dispatches on
+`$_REQUEST['action']`, where a POST-body `action` **overrides** the query
+(PHP `request_order=GP`) and the last duplicate wins. The shipped matcher
+(`util.is_allowlisted_ajax_php_import`) therefore computes the **effective**
+action the way PHP does, and fails closed on every mismatch:
 
-A permanent code carve-out keyed on the query (`action=WMW_import`) was
-considered and rejected: WP's admin-ajax dispatches on `$_REQUEST['action']`,
-where a POST-body `action` overrides the query string. An attacker could send
-`?action=WMW_import` in the query (satisfying the carve-out) while the body's
-`action` targets any vulnerable `wp_ajax_nopriv_*` upload handler — turning
-the exemption into a fleet-wide 401/402/403 bypass on every WP site. The
-`update.php` carve-out does not have this flaw because `update.php` itself is
-the (cookie-auth-gated) handler. Migrations are time-bounded; the temporary
-exclude is the right tool.
+- **query:** params split on `&`, names/values percent-decoded (`%61ction=`
+  *is* `action` to `parse_str`), last duplicate wins, must be allowlisted;
+- **body:** multipart parts walked by the declared boundary — part *headers*
+  only, so an `action` string inside migrated file *content* is data, not a
+  field — any non-file `action` field (quoted or unquoted, the spellings
+  PHP's rfc1867 parser accepts) must equal the query action;
+- **cookie:** any cookie literally named `action` denies (covers
+  `request_order=GPC` hosts where cookies override GET).
+
+Two residual classes are explicitly out of scope, with reasoning: (a) a body
+`action` hidden past the WAF's bounded body window is invisible to the
+matcher — but so is any webshell past the window, exemption or not, so the
+marginal exposure is nil (the attacker's strictly simpler move is padding the
+payload itself out of the window, which is the pre-existing bounded-scan
+limitation); (b) `init`/`admin_init`-hooked handlers that ignore `action`
+entirely (Gravity-Forms-style `gf_page=upload`) are unaffected because their
+per-CVE rules key on their own params and are not demoted. Matching requests
+are demoted to logonly precisely so both classes stay visible in the log
+stream. On builds without the demotion, the operator-side remedy is a
+temporary rule-scoped exclusion
+(`cfm webtop waf exclude add /wp-admin/admin-ajax.php --type path --rule 402`,
+removed after the import).
 
 **Lesson:** chunked migration/backup imports (WMW, All-in-One WP Migration,
 Duplicator, WPvivid …) are the third member of the "legitimately uploads PHP"
-family alongside installers and code editors. Before hard-coding an exemption
-for one, check what the endpoint dispatches on — if the routing key is
-attacker-movable (`$_REQUEST`-style), the exemption must stay operator-side
-and temporary. Behavioural tells that separate a migration from a webshell
-drop: a long steady stream of large chunked POSTs, referred from the plugin's
-own admin page, inside an authenticated admin browsing session — versus one or
-a few POSTs from a cold IP.
+family alongside installers and code editors. Before exempting one, check
+what the endpoint dispatches on — if the routing key is attacker-movable
+(`$_REQUEST`-style), the exemption must reconstruct the *effective* key with
+PHP's own semantics and fail closed, and it should demote to logonly rather
+than skip, so spoof attempts and residual gaps stay observable. Behavioural
+tells that separate a migration from a webshell drop: a long steady stream of
+large chunked POSTs, referred from the plugin's own admin page, inside an
+authenticated admin browsing session — versus one or a few POSTs from a cold
+IP.
 
 ### Structural anti-patterns to check during rule review
 

@@ -190,9 +190,11 @@ The WAF needs continuous tuning against real apps. Recurring offenders:
 Joomla K2 / elFinder (`cmd=<verb>` misread as command injection),
 `/.well-known/` (breaks AutoSSL/CA HTTP DCV), WP migration/backup plugin
 imports (chunked multipart carrying raw PHP trips rule 402
-`UPLOAD_PHP_TAG` — e.g. `admin-ajax.php?action=WMW_import`; fix is a
-temporary rule-scoped exclude, NOT a query-keyed carve-out — see
-`docs/waf.md` FP case 6). When adding/strengthening a
+`UPLOAD_PHP_TAG` — e.g. `admin-ajax.php?action=WMW_import`; fixed by an
+effective-action-keyed logonly demotion, `CFG.migration_import_actions` —
+a query-only carve-out would be a bypass since admin-ajax dispatches on
+`$_REQUEST['action']` where POST body overrides query — see `docs/waf.md`
+FP case 6). When adding/strengthening a
 rule, check it doesn't trip legitimate panel/app traffic, and prefer
 `logonly` → `challenge` → `block` promotion over going straight to block.
 Reference: `docs/waf.md`, `docs/waf-analysis-2026-05-08.md`,
