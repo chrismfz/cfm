@@ -449,6 +449,63 @@ phpMyAdmin, Adminer, Joomla administrator, cPanel file manager,
 DirectAdmin, and the various theme/plugin code editors are the usual
 suspects.
 
+### FP case 6 — `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` on WP migration-plugin imports
+
+**Shape:** repeated `block` events (rule 402, reason
+`WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG`) on
+`POST /wp-admin/admin-ajax.php?action=WMW_import` of `mtgtravel.gr`, from a
+single real Greek admin (2.85.210.197, AS6799 OTEnet, Chrome 150). Referer was
+the plugin's own admin page (`admin.php?page=WMW_import`); the same IP had a
+fully authenticated wp-admin browsing session around the hits (themes.php,
+dashboard widgets, load-styles.php all 200). The import ran as a ~90-minute
+stream of chunked `multipart/form-data` POSTs, each large enough that the edge
+buffered the body to disk (`client_body_temp` warnings in error.log).
+
+**Root cause:** the Website Migration WordPress plugin (`WMW_*` admin-ajax
+actions) uploads a whole-site backup in chunks. A WordPress site backup *is*
+PHP source, and the archive chunks carry literal `<?php` bytes in the
+multipart body, so rule 402's byte scan fires — on content that is the
+upload's whole point. Same class as the `update.php?action=upload-plugin` /
+Code Snippets carve-outs (`is_known_legit_php_upload_endpoint`): the
+plugin/theme/backup/migration ecosystem legitimately ships PHP-bearing
+payloads. Note the family is autoblock-armed (`UPLOAD_CONTENT` is a Phase-1
+edge-`block` family), so each edge hit also feeds `waf_security` — a customer
+mid-migration can earn a 6h nft ban on top of the edge TTL block.
+
+**Why we missed it:** rule 402 deliberately has no admin-ajax carve-out
+(upload exploits land exactly there), and the existing legit-PHP-upload
+allowlist is keyed on the two installer endpoints only. Migration plugins
+use plugin-specific admin-ajax actions the edge has never heard of.
+
+**Fix:** operator-side, temporary, rule-scoped exclusion for the duration of
+the migration — **not** a code carve-out:
+
+```
+cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402
+# ... run the import, then:
+cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402
+```
+
+A permanent code carve-out keyed on the query (`action=WMW_import`) was
+considered and rejected: WP's admin-ajax dispatches on `$_REQUEST['action']`,
+where a POST-body `action` overrides the query string. An attacker could send
+`?action=WMW_import` in the query (satisfying the carve-out) while the body's
+`action` targets any vulnerable `wp_ajax_nopriv_*` upload handler — turning
+the exemption into a fleet-wide 401/402/403 bypass on every WP site. The
+`update.php` carve-out does not have this flaw because `update.php` itself is
+the (cookie-auth-gated) handler. Migrations are time-bounded; the temporary
+exclude is the right tool.
+
+**Lesson:** chunked migration/backup imports (WMW, All-in-One WP Migration,
+Duplicator, WPvivid …) are the third member of the "legitimately uploads PHP"
+family alongside installers and code editors. Before hard-coding an exemption
+for one, check what the endpoint dispatches on — if the routing key is
+attacker-movable (`$_REQUEST`-style), the exemption must stay operator-side
+and temporary. Behavioural tells that separate a migration from a webshell
+drop: a long steady stream of large chunked POSTs, referred from the plugin's
+own admin page, inside an authenticated admin browsing session — versus one or
+a few POSTs from a cold IP.
+
 ### Structural anti-patterns to check during rule review
 
 A short list. Every one of these surfaced as a real FP above; reading

@@ -17,6 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Documented WAF FP case 6: migration-plugin imports vs rule 402** (docs
+  only, no rule change). A WordPress Website Migration WordPress import
+  (`admin-ajax.php?action=WMW_import`, chunked multipart carrying raw PHP
+  source) trips `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` and — because the family
+  is autoblock-armed — can nft-ban the admin mid-migration. The documented
+  remedy is a temporary rule-scoped exclude
+  (`cfm webtop waf exclude add /wp-admin/admin-ajax.php --type path --rule 402`,
+  removed after the import). A permanent `action=WMW_import` carve-out was
+  evaluated and rejected: admin-ajax dispatches on `$_REQUEST['action']`
+  (POST body overrides query), so a query-keyed exemption would be an
+  attacker-selectable upload-scanner bypass. See `docs/waf.md` FP case 6.
+
 ### Security
 - **A host-scoped alert can no longer be silenced by the client it reports on.**
   The section sink resolves an alert's source IP by falling back to scanning the
