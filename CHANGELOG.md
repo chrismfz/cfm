@@ -33,9 +33,17 @@ back-filled here — see the git/PR history for that period.
   decoded names, multipart body fields walked by the declared boundary,
   cookies named `action`), because a query-only carve-out would let an
   attacker wear `?action=WMW_import` while a body `action` dispatches to any
-  vulnerable `wp_ajax_nopriv_*` upload handler. On builds without the fix:
-  temporary `cfm webtop waf exclude add /wp-admin/admin-ajax.php --type path
-  --rule 402` for the duration of the import. See `docs/waf.md` FP case 6.
+  vulnerable `wp_ajax_nopriv_*` upload handler. The demotion covers the
+  upload-scanner family only (401/402/403, 431-436) — the same set the
+  existing plugin-installer exemption covers; the block-tier body scanners on
+  the shared args+body surface (`php_wrappers` 305/armed, `sqli` 301,
+  `php_object_injection` 329) are intentionally **not** relaxed, since a
+  backup chunk can legitimately carry `php://`, SQL, or serialized objects and
+  those families are too dangerous to weaken on an unauthenticated-reachable
+  endpoint. If a migration trips one of those, extend the temporary
+  rule-scoped exclude to that id (`--rule 305/301/329`) for the import's
+  duration; the same exclude (`--rule 402`) is the whole remedy on builds
+  predating the demotion. See `docs/waf.md` FP case 6.
 
 ### Security
 - **A host-scoped alert can no longer be silenced by the client it reports on.**

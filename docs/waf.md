@@ -500,7 +500,7 @@ action the way PHP does, and fails closed on every mismatch:
 - **cookie:** any cookie literally named `action` denies (covers
   `request_order=GPC` hosts where cookies override GET).
 
-Two residual classes are explicitly out of scope, with reasoning: (a) a body
+Residual classes explicitly out of scope, with reasoning: (a) a body
 `action` hidden past the WAF's bounded body window is invisible to the
 matcher — but so is any webshell past the window, exemption or not, so the
 marginal exposure is nil (the attacker's strictly simpler move is padding the
@@ -509,10 +509,37 @@ limitation); (b) `init`/`admin_init`-hooked handlers that ignore `action`
 entirely (Gravity-Forms-style `gf_page=upload`) are unaffected because their
 per-CVE rules key on their own params and are not demoted. Matching requests
 are demoted to logonly precisely so both classes stay visible in the log
-stream. On builds without the demotion, the operator-side remedy is a
-temporary rule-scoped exclusion
-(`cfm webtop waf exclude add /wp-admin/admin-ajax.php --type path --rule 402`,
-removed after the import).
+stream.
+
+(c) **The demotion covers the upload-scanner family only** (401/402/403 and
+the 431-436 backdoor scorers) — deliberately the same set the existing
+`legit_archive_upload` (plugin-installer) exemption covers, and no wider. It
+does **not** touch the block-tier body scanners that read the shared
+`args+body` surface (`get_norm_ab`): `php_wrappers` (305, armed→block, and it
+runs *before* 402 in `check()`), `sqli` (301), `php_object_injection` (329),
+`serialize` (306). A full-site backup legitimately contains PHP source
+(`php://input` appears throughout plugin code), a SQL dump, and serialized
+PHP objects (WP stores serialized data in `options`/`postmeta`), so a chunk
+carrying any of those can still be blocked — and `php_wrappers` being armed
+can nft-ban — regardless of this exemption. This is intentional: relaxing
+SQLi / stream-wrapper / object-injection on an unauthenticated-reachable
+endpoint like admin-ajax is a far larger concession than exempting the
+"a plugin/backup archive *is* PHP" upload family, and `get_norm_ab` is a
+combined args+body surface, so demoting there would also blind query-string
+SQLi on the same request. If a migration trips one of these (the captured
+`mtgtravel.gr` incident tripped only 402, but a different chunk boundary
+could surface `php://` first), extend the temporary operator-side exclude to
+the offending rule id for the duration of the import:
+
+```
+cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402 --rule 305 --rule 301 --rule 329
+# ... run the import, then remove exactly what you added:
+cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402 --rule 305 --rule 301 --rule 329
+```
+
+The same temporary rule-scoped exclude is also the whole remedy on builds
+that predate the demotion (`--rule 402` alone reproduces the shipped
+behaviour for the reported case).
 
 **Lesson:** chunked migration/backup imports (WMW, All-in-One WP Migration,
 Duplicator, WPvivid …) are the third member of the "legitimately uploads PHP"
