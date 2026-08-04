@@ -72,9 +72,20 @@ func scopedExcludeHostAllowed(value string, scope map[string]struct{}) bool {
 }
 
 func validateScopedExcludeWrite(r *http.Request, typ, value string) bool {
-	scope := vhostScopeFromContext(r.Context())
-	if scope == nil {
+	// The unscoped-write role must be the EXPLICIT admin role, never merely a
+	// nil/empty vhost scope. A scoped token with no vhosts (e.g. a DB-only
+	// viewer token) also has a nil context scope, so keying on `scope == nil`
+	// misclassified it as admin and let it create global / out-of-scope
+	// excludes (and, via the shared clam override/mode handlers, flip global
+	// scan state). Key on IsAdminRequest and fail closed for everyone else —
+	// same posture as waf_hit_rates / scopedMySQLFilterHandler (audit F02).
+	if IsAdminRequest(r) {
 		return true
+	}
+	scope := vhostScopeFromContext(r.Context())
+	if len(scope) == 0 {
+		// Non-admin with no vhost scope: nothing is in scope, so deny.
+		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(typ), "host") {
 		return false
@@ -85,21 +96,24 @@ func validateScopedExcludeWrite(r *http.Request, typ, value string) bool {
 // effectiveExcludeScope resolves the ScopeHosts qualifier an exclude write
 // should carry. This is a HARD tenant boundary:
 //
-//   - A scoped token is ALWAYS pinned to its own context vhost set. The
+//   - A scoped caller is ALWAYS pinned to its own context vhost set. The
 //     request cannot widen it, narrow it, or point it elsewhere — any
-//     `scope_hosts` query param from a scoped caller is ignored — so a cPanel
-//     tenant can never author an exclude that reaches another tenant's vhost.
-//   - Only an admin token (nil context scope) may pass an explicit
-//     `scope_hosts` qualifier, used to NARROW an otherwise admin-global entry
-//     to specific vhosts (e.g. suppress one WAF rule on
+//     `scope_hosts` query param from a non-admin caller is ignored — so a
+//     cPanel tenant can never author an exclude that reaches another tenant's
+//     vhost. (A vhost-less scoped token gets a nil scope here, but
+//     validateScopedExcludeWrite already rejected its write before this value
+//     is used.)
+//   - Only an EXPLICIT admin (IsAdminRequest — not merely a nil context scope)
+//     may pass a `scope_hosts` qualifier, used to NARROW an otherwise
+//     admin-global entry to specific vhosts (e.g. suppress one WAF rule on
 //     /wp-admin/admin-ajax.php for a single site). Absent/empty => nil =>
 //     admin-global, identical to the behaviour before this param existed.
 //
 // Because the param can only ever add a host filter, it never broadens an
 // exclude beyond what the caller could already create without it.
 func effectiveExcludeScope(r *http.Request) map[string]struct{} {
-	if scope := vhostScopeFromContext(r.Context()); scope != nil {
-		return scope
+	if !IsAdminRequest(r) {
+		return vhostScopeFromContext(r.Context())
 	}
 	return parseQueryVhostSet(r, "scope_hosts")
 }

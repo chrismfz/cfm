@@ -351,6 +351,44 @@ func TestWAFExclude_ScopeQualifiedRemoveRoundTrip(t *testing.T) {
 	}
 }
 
+// N1 regression: a scoped token with NO vhost scope (a DB-only viewer token
+// whose Vhosts map is nil) must NOT be treated as admin on exclude / clam
+// writes. Before keying the write guard on IsAdminRequest, its nil context
+// scope made validateScopedExcludeWrite return true — letting it create
+// global excludes and (via the shared clam override/mode handlers) flip
+// global scan state. The guard now fails closed for any non-admin caller.
+func TestExcludeWrite_VhostlessScopedTokenIsNotAdmin(t *testing.T) {
+	_, mux := newStep3Engine(t)
+	noscope := scopedCtxNoVhosts()
+
+	// Each of these would have succeeded when nil scope == admin. All must 403.
+	cases := []struct{ name, path string }{
+		{"waf global path exclude add", "/api/v1/waf/exclude/add?type=path&value=/anything&rule_ids=402"},
+		{"waf host exclude add (foreign)", "/api/v1/waf/exclude/add?type=host&value=victim.com"},
+		{"waf exclude remove", "/api/v1/waf/exclude/remove?type=path&value=/anything&rule_ids=402"},
+		{"challenge global path exclude add", "/api/v1/challenge/exclude/add?type=path&value=/anything"},
+		{"clam override add (shared validator)", "/api/v1/clam/override/add?type=host&value=victim.com"},
+	}
+	for _, c := range cases {
+		rr := doRequest(mux, noscope, http.MethodPost, c.path, nil)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("%s: vhost-less scoped token expected 403, got %d body=%s", c.name, rr.Code, rr.Body.String())
+		}
+	}
+
+	// Sanity — the fix did not over-tighten the two roles that SHOULD write:
+	// a real admin can still add a global exclude...
+	if rr := doRequest(mux, adminCtx(), http.MethodPost,
+		"/api/v1/waf/exclude/add?type=path&value=/anything&rule_ids=402", nil); rr.Code == http.StatusForbidden {
+		t.Fatalf("admin WAF exclude add must not be 403, body=%s", rr.Body.String())
+	}
+	// ...and a normal scoped token can still self-service its own in-scope host.
+	if rr := doRequest(mux, scopedCtx("mine.example.com"), http.MethodPost,
+		"/api/v1/waf/exclude/add?type=host&value=mine.example.com", nil); rr.Code == http.StatusForbidden {
+		t.Fatalf("in-scope scoped WAF exclude add must not be 403, body=%s", rr.Body.String())
+	}
+}
+
 // ── WAF excludes (scoped list + scoped-write guard) ───────────
 
 func TestWAFExclude_ScopedAndAdmin(t *testing.T) {

@@ -33,6 +33,19 @@ func adminCtx() context.Context {
 	return ctx
 }
 
+// scopedCtxNoVhosts models the awkward-but-real token the middleware produces
+// for a DB-only viewer: authenticated, role=scoped, but with a NIL vhost scope
+// map (st.Vhosts == nil). It must never be mistaken for admin on vhost-scoped
+// writes — distinct from scopedCtx() with zero args, which yields a non-nil
+// empty map.
+func scopedCtxNoVhosts() context.Context {
+	var nilScope map[string]struct{}
+	ctx := context.WithValue(context.Background(), CtxScopeKey{}, nilScope)
+	ctx = context.WithValue(ctx, CtxAuthnKey{}, true)
+	ctx = context.WithValue(ctx, CtxRoleKey{}, CtxRoleScoped)
+	return ctx
+}
+
 // mustAddRule adds a rule through the store directly (bypasses HTTP) and
 // returns the normalised rule with its generated ID.
 func mustAddRule(t *testing.T, e *Engine, vhost, action string) TrafficRule {

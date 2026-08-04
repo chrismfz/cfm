@@ -17,6 +17,23 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **Exclude / clam-override writes now key the admin decision on the explicit
+  admin role, not on a nil vhost scope (fail-closed).** `validateScopedExcludeWrite`
+  and `effectiveExcludeScope` previously treated a nil context vhost scope as
+  "admin". A scoped token with no vhosts (e.g. a DB-only viewer token, whose
+  `Vhosts` map is nil) also produced a nil scope, so it was misclassified as
+  admin and could create global / out-of-scope WAF & challenge excludes and —
+  via the shared validator — flip global ClamAV scan state. Both functions now
+  key on `IsAdminRequest` (the explicit authenticated-admin role) and deny any
+  non-admin caller with an empty/nil scope, matching the posture already used
+  by the WAF hit-rates and scoped-MySQL handlers (audit F02). Not reachable via
+  the real cPanel token flow (`mintScopedViewerToken` refuses a zero-domain
+  mint and `/api/v1/auth/token` requires an admin token), but the write guard
+  is now correct regardless of how such a token is issued. Regression test:
+  `TestExcludeWrite_VhostlessScopedTokenIsNotAdmin`. (The broader read-path
+  `scope == nil ⇒ admin` pattern in other handlers is a separate follow-up.)
+
 ### Added
 - **WAF excludes can be scoped to specific vhosts (`--scope` / `scope_hosts`).**
   A new host qualifier lets an operator pin a WAF exclude to one or more vhosts
