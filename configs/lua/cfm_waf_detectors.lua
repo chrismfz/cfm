@@ -3132,6 +3132,58 @@ function _M.detect_cve_sppagebuilder_upload(uri, method, args, body, headers)
   return nil
 end
 
+-- phpfuck / numeric-XOR obfuscation blob detector, used by the generic
+-- obfuscation rule (439, logonly). Matches the INVARIANT shape of a PHP payload
+-- built to survive an eval() sink that permits only digits and arithmetic/
+-- bitwise operators (the vBulletin runMaths() / CVE-2026-61511 technique and any
+-- similar restricted-charset eval sink), e.g.
+--   ((((999…).(9))^((2).(0).(4)))^((8).(6).(((9).(9))^((9).(9)))))((6).(5))…
+-- where each ASCII byte is XOR-built from parenthesised digit literals.
+--
+-- HISTORY — this rule shipped alongside an endpoint-anchored, block-tier CVE
+-- rule (10015) that was REMOVED after a third adversarial round: keeping the
+-- no-op operators (`+ * / |`) in the run charset (to resist `+0`-style
+-- interspersing) let form-urlencoded SPACES — sent on the wire as `+`, which
+-- `normalize` does not turn back into a space — bridge an ordinary spaced math
+-- post (`(1.5)^2 + (2.5)^2 + …`) into one qualifying run, FALSE-POSITIVE-BANNING
+-- a real forum user at the block tier. The block rule was judged too dangerous
+-- for a forum host and deleted; only this logonly detector remains.
+--
+-- So the run charset is the TIGHT `[0-9().^]` (core phpfuck only): any operator
+-- or space FRAGMENTS the run, so ordinary math/code — which is full of
+-- operators, spaces (→`+`), and letters — never scores. The cost is accepted,
+-- documented residuals for this logonly rule: interspersing no-op operators
+-- (`+0`) OR sink-stripped chars (letters/spaces) evades. Both are fine here —
+-- the real defence against runMaths RCE is patching vBulletin; this rule is
+-- best-effort visibility, never an enforcement gate.
+--
+-- Requiring a SINGLE contiguous run to carry ALL THREE tokens (nested parens
+-- AND XOR carets AND concatenation dots) is the FP guard: legitimate content
+-- separates them (XOR masks have no dots, float lists have no carets), phpfuck
+-- interleaves all three at hundreds-of-each scale. min_concat is the minimum
+-- concatenation-DOT count.
+local function has_phpfuck_blob(s, min_len, min_caret, min_concat)
+  if not s or s == "" then return false end
+  min_len    = min_len    or 40
+  min_caret  = min_caret  or 3
+  min_concat = min_concat or 3
+  for run in s:gmatch("[0-9%(%)%.%^]+") do
+    if #run >= min_len then
+      local carets = select(2, run:gsub("%^", ""))
+      if carets >= min_caret then
+        local dots = select(2, run:gsub("%.", ""))
+        if dots >= min_concat then
+          local parens = select(2, run:gsub("%(", ""))
+          if parens >= 10 then
+            return true
+          end
+        end
+      end
+    end
+  end
+  return false
+end
+
 -- [top-4c] Obfuscation scorer for raw POST bodies (forms, JSON, text, XML).
 -- Catches JS/PHP payload delivery that bypasses detect_b64_injection by using
 -- client-side decode (atob+XOR+new Function) instead of PHP-side base64_decode.
@@ -4528,6 +4580,34 @@ function _M.detect_php_char_pool_obfuscation(body, _headers)
   -- otherwise truncate at the underscore and the backreference would fail.
   if s:find("%$([%w_]+)%[%d+%]%s*%.%s*%$%1%[%d+%]%s*%.%s*%$%1%[%d+%]") then
     return "CHAR_POOL_BUILDER"
+  end
+  return nil
+end
+
+-- 439 — generic phpfuck / numeric-XOR obfuscation blob (logonly). Best-effort,
+-- technique-level visibility for a phpfuck payload built against ANY restricted-
+-- charset eval() sink (vBulletin runMaths / CVE-2026-61511, custom code, another
+-- CMS). It has NO route context, so it relies purely on the blob shape via the
+-- shared has_phpfuck_blob helper (tight `[0-9().^]` run + all-three-token) at
+-- STRICTER thresholds (min 60 chars, >=4 carets, >=4 concatenation dots) than a
+-- route-anchored rule would need. Normalizes the body first so the url-encoded
+-- form-POST shape (`%28%28...%5E...`) is decoded before the scan.
+--
+-- Deliberately LOGONLY and best-effort. An endpoint-anchored BLOCK companion
+-- (the vBulletin CVE rule 10015) was removed after it false-positive-banned
+-- spaced math forum posts (see has_phpfuck_blob's history note), so this rule
+-- must never be promoted above logonly without solving that FP. Known limits,
+-- all acceptable for logonly visibility: (a) BODY-ONLY — a phpfuck delivered in
+-- the GET query string is not scanned here; (b) the tight charset means no-op
+-- operators / spaces / letters interspersed in the payload fragment the run and
+-- evade; (c) dense spaced numeric math can still log-flag (no ban). The real
+-- defence against runMaths RCE is patching vBulletin.
+function _M.detect_php_numeric_xor_obfuscation(body, _headers)
+  if not body or body == "" then return nil end
+  local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  local s = normalize(cap(body, cap_len))
+  if has_phpfuck_blob(s, 60, 4, 4) then
+    return "NUMERIC_XOR_OBFUSCATION"
   end
   return nil
 end

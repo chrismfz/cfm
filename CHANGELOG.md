@@ -17,6 +17,32 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **WAF: generic phpfuck / numeric-XOR obfuscation detector (rule 439,
+  `WAF_BACKDOOR`, logonly).** Best-effort, technique-level visibility for a
+  "phpfuck" payload — arbitrary PHP built entirely from XOR of parenthesised
+  digit literals — aimed at restricted-charset `eval()` sinks such as vBulletin
+  `runMaths()` (CVE-2026-61511) and similar. Fires when a request body carries a
+  single contiguous `[0-9().^]` run (≥60 chars) with a storm of parens, XOR
+  carets and concatenation dots together. Ships **logonly** and is deliberately
+  kept there: it is body-only (misses GET-args delivery) and its tight run
+  charset means no-op-operator / whitespace / letter interspersing evades — all
+  acceptable for a visibility-only rule. The real defence against runMaths RCE
+  is patching vBulletin (≥6.2.2).
+
+### Removed
+- **WAF: dropped the prototyped block-tier vBulletin `runMaths()` CVE rule
+  (CVE-2026-61511, was rule 10015) — never released.** A route-anchored,
+  autoblock-armed version was built and put through three adversarial review
+  rounds, then removed as too dangerous for a forum-hosting fleet: an ordinary
+  *spaced* math forum post (`(1.5)^2 + (2.5)^2 + …`) is form-urlencoded with
+  spaces as `+`, which `normalize` does not restore to spaces, so the phpfuck
+  signature merged it into one run and **false-positive-banned a real user**
+  (6h nft ban) on the `ajax/render` preview route. The FP fix and the
+  evasion-resistance fix are mutually exclusive, and a benign math post is
+  indistinguishable from the attack at request time — so no safe enforcement
+  rule exists at this endpoint. Only the logonly detector above remains.
+
 ### Security
 - **Read/write endpoints no longer treat a nil vhost scope as admin (the
   `scope == nil ⇒ full access` pattern, fleet-wide).** Following the exclude

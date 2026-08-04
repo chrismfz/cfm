@@ -279,6 +279,7 @@ local CFG = {
   rule_php_superglobal_callable   = "logonly", -- $_GET[c]( / $_POST[c]( / $_SERVER[HTTP_X_…]( minimalist webshell
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
   rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
+  rule_php_numeric_xor_obfuscation = "logonly", -- phpfuck: a long tight [0-9().^] run with a paren/^/dot storm — arbitrary PHP built for a restricted-charset eval() sink (e.g. vBulletin runMaths / CVE-2026-61511). Best-effort visibility only; STAYS logonly (a block companion was removed for FP-banning spaced math posts).
   rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener — JS `\x` hex-escape form only (`\x3c\x3fphp`).
                                                  -- Audit F16 REMOVED the URL (`%3C%3Fphp`), HTML-entity (`&lt;?php`) and
                                                  --  JS-unicode (`<…`) forms: they are the normal on-wire encodings of
@@ -508,6 +509,7 @@ local RULE_IDS = {
   rule_php_decode_chain           = 436,
   rule_php_encoded_opener         = 437,
   rule_php_encoded_opener_b64     = 438,
+  rule_php_numeric_xor_obfuscation = 439,
 
   -- 5xx auth abuse
   rule_auth_burst              = 501,
@@ -1012,6 +1014,13 @@ function _M.check(ctx)
       end
     end
   end
+
+  -- (A block-tier vBulletin runMaths CVE rule, CVE-2026-61511 / id 10015, was
+  -- prototyped here and REMOVED: its phpfuck signature false-positive-banned
+  -- legitimate spaced math forum posts on ajax/render routes — form-urlencoded
+  -- spaces arrive as `+`, which bridged the run. The technique-level detector
+  -- survives as the logonly rule 439 below with a tight run charset. See
+  -- WAF_CVE.md and the 2026-08 red-team history.)
 
   -- ── 4) Content-Type anomaly (charset bypass / malformed boundary) ─────────
   do
@@ -2036,6 +2045,26 @@ function _M.check(ctx)
           local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
           if record("WAF_BACKDOOR:" .. tag, ttl, mode, rid) then goto done end
         end
+      end
+    end
+  end
+
+  -- ── 60) Generic phpfuck / numeric-XOR obfuscation blob (439) ─────────────
+  -- Best-effort, technique-level visibility for a phpfuck payload built to
+  -- survive ANY restricted-charset eval() sink (vBulletin runMaths /
+  -- CVE-2026-61511, custom code, another CMS), keyed purely on the blob shape
+  -- with no route to lean on. Ships logonly and STAYS logonly: an endpoint-
+  -- anchored block companion was removed after it FP-banned spaced math forum
+  -- posts (see detect_php_numeric_xor_obfuscation + WAF_CVE.md). WAF_BACKDOOR is
+  -- autoblock-armed, but Phase-1 autoblock ingests edge-`block` hits only, so a
+  -- logonly hit logs/alerts WITHOUT banning — the only safe posture here.
+  do
+    local mode = rule_mode(CFG.rule_php_numeric_xor_obfuscation, "logonly")
+    if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
+      local tag = det.detect_php_numeric_xor_obfuscation(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_numeric_xor_obfuscation) then goto done end
       end
     end
   end

@@ -107,6 +107,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 436, Name: "rule_php_decode_chain", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 	{ID: 437, Name: "rule_php_encoded_opener", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "challenge"},
 	{ID: 438, Name: "rule_php_encoded_opener_b64", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "challenge"},
+	{ID: 439, Name: "rule_php_numeric_xor_obfuscation", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 
 	// 5xx auth abuse
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},
