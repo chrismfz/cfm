@@ -31,7 +31,6 @@ local strip_data_uri = util.strip_data_uri
 local header_string = util.header_string
 local is_known_legit_php_upload_endpoint = util.is_known_legit_php_upload_endpoint
 local is_php_hostile_asset_upload = util.is_php_hostile_asset_upload
-local is_allowlisted_ajax_php_import = util.is_allowlisted_ajax_php_import
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- CONFIG
@@ -180,18 +179,6 @@ local CFG = {
   rule_upload_archive_php = "block",  -- PHP webshell compressed inside an uploaded .zip (ZIP entry name scan). Scoped to Joomla asset uploads (option=com_ + task=asset.upload), where a php-bearing zip is never legitimate → safe to block.
   rule_script_obfuscation = "challenge",  -- raw POST-body PHP/JS obfuscation scorer
   rule_upload_obfuscation = "challenge",  -- multipart uploaded file content obfuscation scorer
-
-  -- FP case 6 (docs/waf.md): comma-separated wp_ajax action names whose
-  -- admin-ajax multipart imports legitimately carry raw PHP source (site
-  -- migration / backup chunk uploads — a WP backup *is* PHP). A matching
-  -- request demotes the PHP-bearing upload scanners (401/402/403, 431-436)
-  -- to logonly: the bytes are still scanned and logged, never enforced, and
-  -- logonly hits are dropped by the autoblock feed. Keyed on the EFFECTIVE
-  -- action (query + multipart body + cookie, PHP $_REQUEST semantics, fail-
-  -- closed) — see util.is_allowlisted_ajax_php_import for why query-only
-  -- keying would be an attacker-selectable bypass. Names are exact and
-  -- case-sensitive (WP hooks are case-sensitive).
-  migration_import_actions = "WMW_import",
 
   -- ── Phase 1 — webshell delivery + reverse shell (logonly rollout) ─────────
   -- Sources: docs/waf.md "Detector phases" §Phase 1 / §Phase 2 / §Phase 5 (B5).
@@ -615,19 +602,6 @@ local ACTION_SEVERITY = {
 }
 local SEV_BLOCK = ACTION_SEVERITY.block
 
--- Parsed-set cache for CFG.migration_import_actions (comma-separated →
--- { name = true }). Re-parsed only when the config string changes.
-local _mig_actions_src, _mig_actions_set
-local function migration_actions_set()
-  local src = CFG.migration_import_actions or ""
-  if src ~= _mig_actions_src then
-    local set = {}
-    for a in src:gmatch("[^,%s]+") do set[a] = true end
-    _mig_actions_src, _mig_actions_set = src, set
-  end
-  return _mig_actions_set
-end
-
 local function cmd_payload_mode(tag)
   local override = nil
 
@@ -708,19 +682,6 @@ function _M.check(ctx)
   -- their own broader /wp-admin/ carve-out, with 438's pre-auth admin-ajax/
   -- admin-post logonly exception — see rule 59 / audit F11.)
   local legit_archive_upload = is_known_legit_php_upload_endpoint(uri, args)
-  -- FP case 6 (docs/waf.md): allowlisted admin-ajax migration imports carry
-  -- raw PHP by design. Demote — never skip — the same scanner set that
-  -- legit_archive_upload exempts, so the hits stay visible at logonly (and
-  -- the block-only autoblock feed never ingests them). Effective-action
-  -- keyed, fail-closed; see util.is_allowlisted_ajax_php_import.
-  local migration_import_logonly = body_inspect_ok
-    and not legit_archive_upload
-    and is_allowlisted_ajax_php_import(uri, args, body, headers, cookie, migration_actions_set())
-  local function upload_scan_mode(cfg_value, default)
-    local mode = rule_mode(cfg_value, default)
-    if migration_import_logonly and mode ~= "disabled" then return "logonly" end
-    return mode
-  end
   -- Rule 414 (php-inside-zip) fires ONLY on media-asset upload endpoints (see
   -- is_php_hostile_asset_upload) — a positive allowlist, so legit plugin / theme
   -- / extension / backup `.zip` uploads (which contain PHP by design) are never
@@ -1283,7 +1244,7 @@ function _M.check(ctx)
 
   -- ── 17) Upload filename extension blacklist ───────────────────────────────
   do
-    local mode = upload_scan_mode(CFG.rule_upload_filename, "logonly")
+    local mode = rule_mode(CFG.rule_upload_filename, "logonly")
     if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_upload_filename(body, headers)
       if tag then
@@ -1315,7 +1276,7 @@ function _M.check(ctx)
 
   -- ── 18) Upload content / webshell byte scan ───────────────────────────────
   do
-    local mode = upload_scan_mode(CFG.rule_upload_content, "logonly")
+    local mode = rule_mode(CFG.rule_upload_content, "logonly")
     if mode ~= "disabled"
        and body_inspect_ok
        and not legit_archive_upload then
@@ -1329,7 +1290,7 @@ function _M.check(ctx)
 
   -- ── 19) Upload obfuscation scorer (multipart file content) ───────────────
   do
-    local mode = upload_scan_mode(CFG.rule_upload_obfuscation, "logonly")
+    local mode = rule_mode(CFG.rule_upload_obfuscation, "logonly")
     if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_upload_obfuscation(body, headers)
       if tag then
@@ -1933,7 +1894,7 @@ function _M.check(ctx)
 
   -- ── 53) PHP char-pool function-name builder (431) ────────────────────────
   do
-    local mode = upload_scan_mode(CFG.rule_php_char_pool_obfuscation, "logonly")
+    local mode = rule_mode(CFG.rule_php_char_pool_obfuscation, "logonly")
     if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_char_pool_obfuscation(body, headers)
       if tag then
@@ -1945,7 +1906,7 @@ function _M.check(ctx)
 
   -- ── 54) PHP polyglot full-body (432) ─────────────────────────────────────
   do
-    local mode = upload_scan_mode(CFG.rule_php_polyglot_full_body, "logonly")
+    local mode = rule_mode(CFG.rule_php_polyglot_full_body, "logonly")
     if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_polyglot_full_body(body, headers)
       if tag then
@@ -1957,7 +1918,7 @@ function _M.check(ctx)
 
   -- ── 55) PHP eval-loader with large b64 literal (433) ─────────────────────
   do
-    local mode = upload_scan_mode(CFG.rule_php_eval_loader_b64, "logonly")
+    local mode = rule_mode(CFG.rule_php_eval_loader_b64, "logonly")
     if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_eval_loader_b64(body, headers)
       if tag then
@@ -1969,7 +1930,7 @@ function _M.check(ctx)
 
   -- ── 56) PHP superglobal-fed callable (434) ───────────────────────────────
   do
-    local mode = upload_scan_mode(CFG.rule_php_superglobal_callable, "logonly")
+    local mode = rule_mode(CFG.rule_php_superglobal_callable, "logonly")
     if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_superglobal_callable(body, headers)
       if tag then
@@ -1981,7 +1942,7 @@ function _M.check(ctx)
 
   -- ── 57) PHP concat function-name eval (435) ──────────────────────────────
   do
-    local mode = upload_scan_mode(CFG.rule_php_concat_funcname_eval, "logonly")
+    local mode = rule_mode(CFG.rule_php_concat_funcname_eval, "logonly")
     if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_concat_funcname_eval(body, headers)
       if tag then
@@ -1993,7 +1954,7 @@ function _M.check(ctx)
 
   -- ── 58) PHP multi-decode-chain proximity scorer (436) ────────────────────
   do
-    local mode = upload_scan_mode(CFG.rule_php_decode_chain, "logonly")
+    local mode = rule_mode(CFG.rule_php_decode_chain, "logonly")
     if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then
       local tag = det.detect_php_decode_chain(body, headers)
       if tag then

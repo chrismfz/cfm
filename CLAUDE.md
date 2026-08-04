@@ -189,12 +189,13 @@ and easy to regress. Before changing it, read
 The WAF needs continuous tuning against real apps. Recurring offenders:
 Joomla K2 / elFinder (`cmd=<verb>` misread as command injection),
 `/.well-known/` (breaks AutoSSL/CA HTTP DCV), WP migration/backup plugin
-imports (chunked multipart carrying raw PHP trips rule 402
-`UPLOAD_PHP_TAG` — e.g. `admin-ajax.php?action=WMW_import`; fixed by an
-effective-action-keyed logonly demotion, `CFG.migration_import_actions` —
-a query-only carve-out would be a bypass since admin-ajax dispatches on
-`$_REQUEST['action']` where POST body overrides query — see `docs/waf.md`
-FP case 6). When adding/strengthening a
+imports (chunked multipart carrying raw PHP trips rule 402 `UPLOAD_PHP_TAG` —
+e.g. `admin-ajax.php?action=WMW_import`; remedy is an operator-side temporary
+rule-scoped exclude, NOT a code carve-out — an automatic `action`-keyed
+exemption was tried and reverted: admin-ajax dispatches on `$_REQUEST['action']`
+(body overrides query) and the 32 KB body window can't see an `action` hidden
+past it, so no edge-time keying is safe — see `docs/waf.md` FP case 6). When
+adding/strengthening a
 rule, check it doesn't trip legitimate panel/app traffic, and prefer
 `logonly` → `challenge` → `block` promotion over going straight to block.
 Reference: `docs/waf.md`, `docs/waf-analysis-2026-05-08.md`,

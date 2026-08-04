@@ -17,33 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-### Fixed
-- **WAF FP case 6: WP migration-plugin imports no longer blocked by the
-  upload scanners.** A Website Migration WordPress import
-  (`admin-ajax.php?action=WMW_import`, chunked multipart carrying raw PHP
-  source — a WP backup *is* PHP) tripped rule 402
-  `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` at block tier, and because the family
-  is autoblock-armed could nft-ban the admin mid-migration. Requests whose
-  **effective** wp_ajax action matches the new `migration_import_actions`
-  allowlist (comma-separated, default `WMW_import`, exact + case-sensitive)
-  now demote the legit-PHP-upload scanner set (401/402/403, 431-436) to
-  **logonly** — still scanned, still logged, never enforced, never fed to
-  autoblock. The match reconstructs the action with PHP `$_REQUEST`
-  semantics and fails closed (query `parse_str` last-duplicate-wins with
-  decoded names, multipart body fields walked by the declared boundary,
-  cookies named `action`), because a query-only carve-out would let an
-  attacker wear `?action=WMW_import` while a body `action` dispatches to any
-  vulnerable `wp_ajax_nopriv_*` upload handler. The demotion covers the
-  upload-scanner family only (401/402/403, 431-436) — the same set the
-  existing plugin-installer exemption covers; the block-tier body scanners on
-  the shared args+body surface (`php_wrappers` 305/armed, `sqli` 301,
-  `php_object_injection` 329) are intentionally **not** relaxed, since a
-  backup chunk can legitimately carry `php://`, SQL, or serialized objects and
-  those families are too dangerous to weaken on an unauthenticated-reachable
-  endpoint. If a migration trips one of those, extend the temporary
-  rule-scoped exclude to that id (`--rule 305/301/329`) for the import's
-  duration; the same exclude (`--rule 402`) is the whole remedy on builds
-  predating the demotion. See `docs/waf.md` FP case 6.
+### Changed
+- **Documented WAF FP case 6: WP migration-plugin imports vs the upload
+  scanners** (docs only — no rule or code change). A Website Migration
+  WordPress import (`admin-ajax.php?action=WMW_import`, chunked multipart
+  carrying raw PHP source — a WP backup *is* PHP) trips rule 402
+  `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` at block tier, and because the family is
+  autoblock-armed can nft-ban the admin mid-migration; a large backup will
+  also often trip `php_wrappers` (305, armed, runs before 402), `sqli` (301),
+  and `php_object_injection` (329). The documented remedy is a **temporary,
+  operator-applied, rule-scoped exclude** for the duration of the import
+  (`cfm webtop waf exclude add /wp-admin/admin-ajax.php --type path --rule 402
+  [--rule 305 --rule 301 --rule 329]`, removed afterwards). An automatic
+  `action`-keyed code exemption was prototyped and **reverted after
+  adversarial review**: admin-ajax dispatches on `$_REQUEST['action']` (a body
+  field overrides the query, so any edge matcher must out-parse PHP's
+  `parse_str`/rfc1867 — a review found four confirmed bypasses), and the 32 KB
+  body-scan window cannot see an `action` hidden past it in a large chunk, so
+  no request-time keying is both safe and useful. See `docs/waf.md` FP case 6.
 
 ### Security
 - **A host-scoped alert can no longer be silenced by the client it reports on.**
