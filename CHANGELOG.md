@@ -18,42 +18,30 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
-- **WAF CVE detector: vBulletin `runMaths()` unauthenticated RCE
-  (CVE-2026-61511, rule 10015).** vBulletin 5.x ≤5.7.5 / 6.x ≤6.2.1 pass a
-  digit-and-operator-only string straight to `eval()`, reachable
-  unauthenticated via the `ajax/render/<template>` route (the default
-  "pagenav" template feeds `pagenav[pagenumber]` into a `{vb:math}` tag).
-  Attackers smuggle arbitrary PHP with "phpfuck" — every character built from
-  XOR of parenthesised digit literals — so no literal `system`/`eval`/`<?php`
-  token exists for the generic RCE/webshell/obfuscation rules to catch. The
-  new rule keys on the ajax/render route plus a phpfuck-blob signature in args
-  or body; the pair is near-zero FP (a real page number is a small integer).
-  The signature is evasion-hardened over two adversarial review rounds: the
-  route gate decides on url-DECODED, slash-anchored surfaces (so
-  `routestring=%61jax/render` / `/ajax/%72ender/` can't slip a raw substring
-  check, and an unrelated `/api/ajax/render-widget` path can't be matched), and
-  the blob scorer requires a single contiguous run carrying deep paren nesting
-  AND an XOR-caret storm AND concatenation dots, with sink-allowed no-op
-  operators (`+ * / |`) kept in the run charset so operator interspersing can't
-  fragment the payload. The all-three-tokens-in-one-run rule is what keeps it
-  FP-safe on forum code/math (which separates carets from dots, and whose
-  identifiers are letters that break the run) — an early variant that projected
-  the payload onto the sink's survivor set was reverted for FP-banning legit
-  posts. Residual (documented): interspersing sink-STRIPPED chars evades but is
-  indistinguishable from a forum code paste, so it's defence-in-depth behind the
-  vendor patch. Ships at `block` and, being a `WAF_CVE` family rule with an exact
-  shape, is autoblock-armed by default — a hit nft-bans the source (6h) and
-  alerts as `WAF/CVE-2026-61511` on Slack/mail.
 - **WAF: generic phpfuck / numeric-XOR obfuscation detector (rule 439,
-  `WAF_BACKDOOR`, logonly).** Technique-level companion to the vBulletin CVE
-  rule above: it catches the same "phpfuck" construction — arbitrary PHP built
-  entirely from XOR of parenthesised digit literals — against *any*
-  restricted-charset `eval()` sink, with no endpoint anchor. Fires on a long
-  `[0-9().^]`-only run carrying a storm of `^` and `).(` tokens in a request
-  body (stricter thresholds than the endpoint-anchored CVE rule since there is
-  no route to lean on). Ships **logonly** for fleet burn-in — a `WAF_BACKDOOR`
-  logonly hit logs/alerts without banning — to be promoted to
-  challenge/block only after it is confirmed FP-free.
+  `WAF_BACKDOOR`, logonly).** Best-effort, technique-level visibility for a
+  "phpfuck" payload — arbitrary PHP built entirely from XOR of parenthesised
+  digit literals — aimed at restricted-charset `eval()` sinks such as vBulletin
+  `runMaths()` (CVE-2026-61511) and similar. Fires when a request body carries a
+  single contiguous `[0-9().^]` run (≥60 chars) with a storm of parens, XOR
+  carets and concatenation dots together. Ships **logonly** and is deliberately
+  kept there: it is body-only (misses GET-args delivery) and its tight run
+  charset means no-op-operator / whitespace / letter interspersing evades — all
+  acceptable for a visibility-only rule. The real defence against runMaths RCE
+  is patching vBulletin (≥6.2.2).
+
+### Removed
+- **WAF: dropped the prototyped block-tier vBulletin `runMaths()` CVE rule
+  (CVE-2026-61511, was rule 10015) — never released.** A route-anchored,
+  autoblock-armed version was built and put through three adversarial review
+  rounds, then removed as too dangerous for a forum-hosting fleet: an ordinary
+  *spaced* math forum post (`(1.5)^2 + (2.5)^2 + …`) is form-urlencoded with
+  spaces as `+`, which `normalize` does not restore to spaces, so the phpfuck
+  signature merged it into one run and **false-positive-banned a real user**
+  (6h nft ban) on the `ajax/render` preview route. The FP fix and the
+  evasion-resistance fix are mutually exclusive, and a benign math post is
+  indistinguishable from the attack at request time — so no safe enforcement
+  rule exists at this endpoint. Only the logonly detector above remains.
 
 ### Security
 - **Read/write endpoints no longer treat a nil vhost scope as admin (the

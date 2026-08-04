@@ -155,7 +155,7 @@ entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
 (`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
 hosting mix changes.
 
-Fifteen implemented; the rest are WordPress/Joomla candidates awaiting a
+Fourteen implemented; the rest are WordPress/Joomla candidates awaiting a
 validated exact request shape:
 
 | Product / CVE | Status |
@@ -174,11 +174,30 @@ validated exact request shape:
 | WooCommerce Payments (`CVE-2023-28121`) | ✅ **implemented** (rule 10012) — `X-WCPAY-Platform-Checkout-User` request header trusted as the current user id (unauth auth-bypass→privesc); keyed on header presence, all methods. Server-set by WooPay only, so near-zero FP; exempt genuine WooPay nets via `ALLOW_NETS` |
 | Gravity SMTP (`CVE-2026-4020`) | ✅ **implemented** (rule 10013) — unauth REST route `/gravitysmtp/v1/tests/mock-data` (`permission_callback=true`) dumps the full System Report (versions/paths/plugins/API keys). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate (only legit caller is the wp-admin settings screen) |
 | SP Page Builder (Joomla, `CVE-2026-48908`) | ✅ **implemented** (rule 10014) — `com_sppagebuilder` + `task=asset.upload*` (uploadCustomIcon/uploadImage/uploadFont) unauth arbitrary upload→RCE ("ANTONKILL"). Runs before rules 401/414 for CVE attribution; keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content), reusing the hardened upload detectors. Body-budget caveat: a php entry past `waf_body_max_len` is ClamAV's backstop |
-| vBulletin (`CVE-2026-61511`) | ✅ **implemented** (rule 10015) — `vB5_Template_Runtime::runMaths()` unauth RCE (vB 5.x ≤5.7.5 / 6.x ≤6.2.1). Reached via `ajax/render/<template>` (default "pagenav" feeds `pagenav[pagenumber]` into a `{vb:math}` tag → `eval()`); arbitrary PHP smuggled with "phpfuck" (each char XOR-built from parenthesised digit literals, so no literal `system`/`eval`/`<?php` token exists for the generic rules to catch). Keyed on the segment-anchored ajax/render route + a phpfuck-blob signature in args/body — the pair is near-zero FP. Evasion-hardened over **two** adversarial rounds: route gate decides on url-DECODED, slash-anchored surfaces (defeats `routestring=%61jax`/`/ajax/%72ender/` and won't fire on unrelated `/api/ajax/render-widget`); the blob scorer requires a single contiguous run carrying a storm of ALL THREE tokens (deep parens AND XOR carets AND concatenation dots) with no-op operators (`+ * / |`) kept in the run charset (defeats operator interspersing). The all-three-in-one-run rule is the FP-killer: legit forum code/math separates carets from dots and its identifiers are letters that break the run, so it never scores — the round-1 fix that projected the payload onto the survivor set was **reverted** because it merged legit code into a scoring run and FP-BANNED forum users. **Documented residual:** interspersing sink-STRIPPED chars (letters/spaces) still evades — such a payload is indistinguishable at request time from a forum code paste, so closing it re-introduces the FP-ban (defence-in-depth; the vBulletin patch is the real fix). **Outside the WP/Joomla shortlist above — added at operator request (fleet hosts vBulletin).** All-methods (GET friendly-URL or POST body) |
+| vBulletin (`CVE-2026-61511`) | ⛔ **block rule REMOVED** (was rule 10015) — see the "Removed" note below. Only a **logonly** technique-level phpfuck detector (rule 439, `WAF_BACKDOOR`) remains; there is no CVE-attributed block/ban for this vector. |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
 Keep the plan doc's candidate table as the backlog; update the ✅ column here
 as detectors land.
+
+**Removed — vBulletin `runMaths()` (CVE-2026-61511), block rule 10015.** A
+route-anchored, block-tier phpfuck detector was prototyped and, over three
+adversarial review rounds, **removed** as too dangerous for a forum-hosting
+fleet. The signature scores a "phpfuck" blob — a dense run of parenthesised
+digit literals joined by `.` and XORed with `^`. The fatal flaw was a
+false-positive **ban**: an ordinary *spaced* math forum post
+(`(1.5)^2 + (2.5)^2 + …`) is sent by the browser as `application/x-www-form-
+urlencoded`, where each space becomes `+`; `normalize` does not turn `+` back
+into a space, so with `+` in the run charset the whole expression bridged into
+one qualifying run → `block` → `WAF_CVE` 6h nft ban of a real user on the
+`ajax/render` preview route. Removing `+` from the charset (to fix the FP)
+re-opens a no-op-operator bypass, and projecting the payload the way the sink
+does re-merges legit code — the defences collide. Since the endpoint gate
+cannot separate a benign math post from the attack at request time, an
+enforcement rule here bans real users; the correct fix is **patching vBulletin
+(≥6.2.2)**. What remains is the logonly rule 439 (below), for visibility only.
+It is best-effort: body-only (misses GET-args delivery), tight-charset (no-op /
+strip-char interspersing evades), and never to be promoted above logonly.
 
 **Fleet-driven priority (2026-07):** the operator's own plugin scan (1,473
 critical-unauth installs across 495 sites) produced a ranked WAF-rule worklist

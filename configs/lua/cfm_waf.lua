@@ -172,7 +172,6 @@ local CFG = {
   rule_cve_woocommerce_payments = "block", -- CVE-2023-28121: WooCommerce Payments (4.8.0–5.6.1) unauth auth-bypass->privesc. The X-WCPAY-Platform-Checkout-User request header is trusted as the current user id with no validation; an attacker sets it to 1 and mints an admin (POST /wp-json/wp/v2/users roles=administrator). Header is server-set by WooPay only — a client never sends it (near-zero FP); keyed on header presence, all methods. Exempt genuine WooPay source nets via waf_security ALLOW_NETS.
   rule_cve_gravity_smtp = "block", -- CVE-2026-4020: Gravity SMTP (<=2.1.4) unauth sensitive-info exposure. REST route /gravitysmtp/v1/tests/mock-data has permission_callback=true and dumps the full System Report (PHP/DB/server versions, paths, plugins, API keys/tokens). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate — the only legit caller is the wp-admin settings screen, which carries the logged-in cookie.
   rule_cve_sppagebuilder_upload = "block", -- CVE-2026-48908: Joomla SP Page Builder (com_sppagebuilder) asset.upload* (uploadCustomIcon/uploadImage/uploadFont) — unauth arbitrary file upload->RCE ("ANTONKILL", actively exploited 2026-07). Runs before rules 401/414 for CVE attribution. Keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content); reuses the hardened upload detectors. Near-zero FP (a legit icon/image/font upload never carries PHP). Body-budget caveat: a php entry past waf_body_max_len is ClamAV's backstop.
-  rule_cve_vbulletin_runmaths = "block", -- CVE-2026-61511: vBulletin (5.x <=5.7.5 / 6.x <=6.2.1) runMaths() unauth RCE. vB5_Template_Runtime::runMaths() strips input to [0-9().^<>&|+*/=-] then eval()s it; reachable unauthenticated via ajax/render/<template> (default "pagenav" feeds pagenav[pagenumber] into a {vb:math} tag). Arbitrary PHP is smuggled via "phpfuck" (each char XOR-built from parenthesised digit literals). Keyed on the ajax/render route + a phpfuck-shaped blob (long [0-9().^] run with a ^ and ).( storm) in args/body — the pair is near-zero FP (no legit page-number looks like that).
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -280,7 +279,7 @@ local CFG = {
   rule_php_superglobal_callable   = "logonly", -- $_GET[c]( / $_POST[c]( / $_SERVER[HTTP_X_…]( minimalist webshell
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
   rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
-  rule_php_numeric_xor_obfuscation = "logonly", -- phpfuck: a long [0-9().^] run with a ^/).( storm — arbitrary PHP built for a restricted-charset eval() sink (technique-level companion to CVE-2026-61511 rule 10015). Logonly burn-in.
+  rule_php_numeric_xor_obfuscation = "logonly", -- phpfuck: a long tight [0-9().^] run with a paren/^/dot storm — arbitrary PHP built for a restricted-charset eval() sink (e.g. vBulletin runMaths / CVE-2026-61511). Best-effort visibility only; STAYS logonly (a block companion was removed for FP-banning spaced math posts).
   rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener — JS `\x` hex-escape form only (`\x3c\x3fphp`).
                                                  -- Audit F16 REMOVED the URL (`%3C%3Fphp`), HTML-entity (`&lt;?php`) and
                                                  --  JS-unicode (`<…`) forms: they are the normal on-wire encodings of
@@ -556,7 +555,6 @@ local RULE_IDS = {
   rule_cve_woocommerce_payments = 10012,
   rule_cve_gravity_smtp = 10013,
   rule_cve_sppagebuilder_upload = 10014,
-  rule_cve_vbulletin_runmaths = 10015,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -1017,34 +1015,12 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 3m) vBulletin runMaths() unauth RCE (CVE-2026-61511) ────────────────────
-  -- vB5_Template_Runtime::runMaths() sanitises its input to digits + math/bitwise
-  -- operators, then eval()s it — reachable unauthenticated through the
-  -- ajax/render/<template> route (the default "pagenav" template feeds the tainted
-  -- pagenav[pagenumber] into a {vb:math} tag). Arbitrary PHP is smuggled with
-  -- "phpfuck": each character of system()/the command is XOR-built from
-  -- parenthesised digit literals, so NONE of the RCE/webshell/obfuscation
-  -- detectors (which key on eval(/system(/<?php/chr(/base64) match. We key on the
-  -- route + the phpfuck blob shape instead. Near-zero FP: the scorer requires a
-  -- single contiguous run carrying a storm of ALL THREE tokens (deep parens AND
-  -- XOR carets AND concatenation dots) — legit code/math on an ajax/render route
-  -- separates carets from dots (and identifiers are letters that break the run),
-  -- so it never scores. All-methods (NOT gated on body_inspect_ok): vBulletin
-  -- routes ajax/render via GET too. The detector decides on DECODED, segment-
-  -- anchored surfaces (so url-encoded route letters and unrelated `/ajax/render`
-  -- substrings don't match) and keeps no-op operators in the run charset (so
-  -- operator interspersing can't fragment the payload) — two adversarial rounds,
-  -- red-team review 2026-08.
-  do
-    local mode = rule_mode(CFG.rule_cve_vbulletin_runmaths, "block")
-    if mode ~= "disabled" then
-      local tag = det.detect_cve_vbulletin_runmaths(uri, m_lower, args, body, headers)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CVE:CVE_2026_61511:VBULLETIN:" .. tag, ttl, mode, RULE_IDS.rule_cve_vbulletin_runmaths) then goto done end
-      end
-    end
-  end
+  -- (A block-tier vBulletin runMaths CVE rule, CVE-2026-61511 / id 10015, was
+  -- prototyped here and REMOVED: its phpfuck signature false-positive-banned
+  -- legitimate spaced math forum posts on ajax/render routes — form-urlencoded
+  -- spaces arrive as `+`, which bridged the run. The technique-level detector
+  -- survives as the logonly rule 439 below with a tight run charset. See
+  -- WAF_CVE.md and the 2026-08 red-team history.)
 
   -- ── 4) Content-Type anomaly (charset bypass / malformed boundary) ─────────
   do
@@ -2074,15 +2050,14 @@ function _M.check(ctx)
   end
 
   -- ── 60) Generic phpfuck / numeric-XOR obfuscation blob (439) ─────────────
-  -- Technique-level companion to the vBulletin runMaths CVE rule (10015). That
-  -- rule is endpoint-anchored (ajax/render + armed block); THIS one is the
-  -- safety net for a phpfuck payload built to survive ANY restricted-charset
-  -- eval() sink (custom code, another CMS), with no route to lean on. Same
-  -- shared has_phpfuck_blob signature at stricter thresholds. Ships logonly:
-  -- WAF_BACKDOOR is autoblock-armed, but Phase-1 autoblock ingests edge-`block`
-  -- hits only, so a logonly hit logs/visibly-alerts WITHOUT banning — the
-  -- correct burn-in posture for a new global body scan (promote logonly ->
-  -- challenge -> block only after the fleet confirms no FPs).
+  -- Best-effort, technique-level visibility for a phpfuck payload built to
+  -- survive ANY restricted-charset eval() sink (vBulletin runMaths /
+  -- CVE-2026-61511, custom code, another CMS), keyed purely on the blob shape
+  -- with no route to lean on. Ships logonly and STAYS logonly: an endpoint-
+  -- anchored block companion was removed after it FP-banned spaced math forum
+  -- posts (see detect_php_numeric_xor_obfuscation + WAF_CVE.md). WAF_BACKDOOR is
+  -- autoblock-armed, but Phase-1 autoblock ingests edge-`block` hits only, so a
+  -- logonly hit logs/alerts WITHOUT banning — the only safe posture here.
   do
     local mode = rule_mode(CFG.rule_php_numeric_xor_obfuscation, "logonly")
     if mode ~= "disabled" and body_inspect_ok and not legit_archive_upload then

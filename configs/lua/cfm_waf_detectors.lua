@@ -3132,52 +3132,42 @@ function _M.detect_cve_sppagebuilder_upload(uri, method, args, body, headers)
   return nil
 end
 
--- phpfuck / numeric-XOR obfuscation blob detector. Shared by the vBulletin
--- runMaths CVE rule below and the generic obfuscation rule (439). Matches the
--- INVARIANT shape of a PHP payload built to survive an eval() sink that permits
--- only digits and arithmetic/bitwise operators, e.g.
+-- phpfuck / numeric-XOR obfuscation blob detector, used by the generic
+-- obfuscation rule (439, logonly). Matches the INVARIANT shape of a PHP payload
+-- built to survive an eval() sink that permits only digits and arithmetic/
+-- bitwise operators (the vBulletin runMaths() / CVE-2026-61511 technique and any
+-- similar restricted-charset eval sink), e.g.
 --   ((((999…).(9))^((2).(0).(4)))^((8).(6).(((9).(9))^((9).(9)))))((6).(5))…
 -- where each ASCII byte is XOR-built from parenthesised digit literals.
 --
--- DESIGN (two adversarial rounds, red-team review 2026-08):
---   Round 1 broke a naive tight `[0-9().^]` contiguous run by interspersing
---   either sink-STRIPPED chars (spaces/letters/commas — deleted by runMaths()
---   and reconstructed for eval()) or sink-ALLOWED no-op operators (`+ * / |`).
---   The first fix (project onto the survivor set, count globally) then
---   FALSE-POSITIVE-BANNED legitimate forum/admin content: projecting away the
---   letters/`;`/whitespace that naturally separate a caret-region from a
---   dot-region merged ordinary code/math into one qualifying run, and global
---   counting summed tokens across unrelated fields.
+-- HISTORY — this rule shipped alongside an endpoint-anchored, block-tier CVE
+-- rule (10015) that was REMOVED after a third adversarial round: keeping the
+-- no-op operators (`+ * / |`) in the run charset (to resist `+0`-style
+-- interspersing) let form-urlencoded SPACES — sent on the wire as `+`, which
+-- `normalize` does not turn back into a space — bridge an ordinary spaced math
+-- post (`(1.5)^2 + (2.5)^2 + …`) into one qualifying run, FALSE-POSITIVE-BANNING
+-- a real forum user at the block tier. The block rule was judged too dangerous
+-- for a forum host and deleted; only this logonly detector remains.
 --
---   The stable design keeps three properties at once:
---   1. Scan the RAW (normalized, NOT projected) input in CONTIGUOUS runs, so
---      letters / `;` / whitespace / commas stay as natural run breakers — this
---      is what keeps ordinary code and math from scoring (their sub-expressions
---      fragment, and identifiers ARE letters).
---   2. Run charset = the phpfuck-constructible subset `[0-9().^]` PLUS the
---      arithmetic/bitwise operators an attacker can insert value-preservingly
---      (`+ - * / |`), so no-op-operator interspersing cannot fragment the
---      payload. `& < > =` are deliberately EXCLUDED (they can't be no-op
---      inserted into a numeric expression, and they delimit real params).
---   3. Require a SINGLE run to carry a storm of ALL THREE tokens — nested
---      parens AND XOR carets AND concatenation dots. Legitimate content never
---      interleaves all three (XOR chains have no dots, float lists have no
---      carets); phpfuck does by construction, at hundreds-of-each scale.
+-- So the run charset is the TIGHT `[0-9().^]` (core phpfuck only): any operator
+-- or space FRAGMENTS the run, so ordinary math/code — which is full of
+-- operators, spaces (→`+`), and letters — never scores. The cost is accepted,
+-- documented residuals for this logonly rule: interspersing no-op operators
+-- (`+0`) OR sink-stripped chars (letters/spaces) evades. Both are fine here —
+-- the real defence against runMaths RCE is patching vBulletin; this rule is
+-- best-effort visibility, never an enforcement gate.
 --
---   Accepted residual (documented in WAF_CVE.md): interspersing sink-STRIPPED
---   chars (letters/spaces) still evades — but that payload is, by construction,
---   indistinguishable at request time from a forum code paste (same letters),
---   so closing it re-introduces the FP-ban. This is defence-in-depth; the
---   vBulletin patch is the real fix.
---
--- min_concat is the minimum concatenation-DOT count (not the `).(` triad, which
--- a `).+(` no-op would break).
+-- Requiring a SINGLE contiguous run to carry ALL THREE tokens (nested parens
+-- AND XOR carets AND concatenation dots) is the FP guard: legitimate content
+-- separates them (XOR masks have no dots, float lists have no carets), phpfuck
+-- interleaves all three at hundreds-of-each scale. min_concat is the minimum
+-- concatenation-DOT count.
 local function has_phpfuck_blob(s, min_len, min_caret, min_concat)
   if not s or s == "" then return false end
   min_len    = min_len    or 40
   min_caret  = min_caret  or 3
   min_concat = min_concat or 3
-  for run in s:gmatch("[0-9%(%)%.%^|%+%*/%-]+") do
+  for run in s:gmatch("[0-9%(%)%.%^]+") do
     if #run >= min_len then
       local carets = select(2, run:gsub("%^", ""))
       if carets >= min_caret then
@@ -3192,49 +3182,6 @@ local function has_phpfuck_blob(s, min_len, min_caret, min_concat)
     end
   end
   return false
-end
-
--- [CVE] vBulletin `runMaths()` unauthenticated remote code execution.
--- CVE-2026-61511 (vBulletin 5.x <= 5.7.5 and 6.x <= 6.2.1; fixed 6.2.2).
--- `vB5_Template_Runtime::runMaths()` strips its input to
--- `[0-9().^<>&|+*/=-]` and passes it straight to `eval("$str = $str;")`. An
--- attacker reaches it UNAUTHENTICATED via the `ajax/render/<template>` route:
--- the default "pagenav" template assigns the user-tainted
--- `pagenav[pagenumber]` to a `{vb:math}` tag, so the value flows to
--- `runMaths()` → `eval()`. Because the sink only permits digits and
--- operators, arbitrary PHP is smuggled with "phpfuck": every character of the
--- target function/argument (`system`, the shell command) is built from XOR
--- (`^`) of parenthesised digit literals. Ref: Egidio Romano / SSD Secure
--- Disclosure advisory KIS-2026-13; public PoC CVE-2026-61511.php
--- (karmainsecurity.com). Signature sourced from the PoC, not from memory.
---
--- Keyed on the ajax/render route (path OR a `routestring=ajax/render` param,
--- both permalink forms) AND a phpfuck-shaped blob in args/body. Either signal
--- alone is weak — the route sees legit paging traffic, and a phpfuck blob is
--- the near-zero-FP half — so the PAIR is what fires. `method` is m_lower from
--- the caller; the PoC POSTs, but vBulletin also routes ajax/render via GET, so
--- both methods are accepted.
---
--- The route gate runs on DECODED surfaces (normalize = url-decode x2 + lower),
--- NOT a raw substring — an earlier raw-`has(...,"routestring=ajax")` pre-gate
--- was bypassable by url-encoding a letter (`routestring=%61jax/render`, which
--- vBulletin still decodes+routes) or the path (`/ajax/%72ender/`). It is also
--- SEGMENT-ANCHORED with the trailing slash (`ajax/render/`): a bare
--- `has(...,"ajax/render")` substring fired on unrelated paths like
--- `/api/ajax/render-widget` or `/js/myajax/renderer`, blocking non-vBulletin
--- sites (red-team review 2026-08). Residual: `cap(...,max_scan_len)` bounds the
--- scan window; a payload padded past it is the codebase's standard bounded-scan
--- limitation (host / ClamAV backstop), shared by every body-aware rule.
-function _M.detect_cve_vbulletin_runmaths(uri, method, args, body, headers)
-  local u = normalize(uri or "")
-  local scope = normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
-  if not (has(u, "ajax/render/") or has(scope, "routestring=ajax/render")) then
-    return nil
-  end
-  if has_phpfuck_blob(scope) then
-    return "RUNMATHS_RCE"
-  end
-  return nil
 end
 
 -- [top-4c] Obfuscation scorer for raw POST bodies (forms, JSON, text, XML).
@@ -4637,18 +4584,24 @@ function _M.detect_php_char_pool_obfuscation(body, _headers)
   return nil
 end
 
--- 439 — generic phpfuck / numeric-XOR obfuscation blob. Technique-level
--- companion to the vBulletin runMaths CVE rule (10015,
--- detect_cve_vbulletin_runmaths): that rule is endpoint-anchored, this one has
--- NO route context and catches the same phpfuck construction against any
--- restricted-charset eval() sink (custom code, another CMS). Reuses the shared
--- has_phpfuck_blob helper (contiguous-run, all-three-token scan) at STRICTER
--- thresholds (min 60 chars, >=4 carets, >=4 concatenation dots) precisely
--- because there is no endpoint to lean on, and normalizes the body first so the
--- url-encoded form-POST shape (`%28%28...%5E...`) is decoded before the scan.
--- Ships logonly (see the check site) — WAF_BACKDOOR is autoblock-armed but
--- Phase-1 autoblock feeds edge-`block` hits only, so logonly logs/alerts without
--- banning during burn-in.
+-- 439 — generic phpfuck / numeric-XOR obfuscation blob (logonly). Best-effort,
+-- technique-level visibility for a phpfuck payload built against ANY restricted-
+-- charset eval() sink (vBulletin runMaths / CVE-2026-61511, custom code, another
+-- CMS). It has NO route context, so it relies purely on the blob shape via the
+-- shared has_phpfuck_blob helper (tight `[0-9().^]` run + all-three-token) at
+-- STRICTER thresholds (min 60 chars, >=4 carets, >=4 concatenation dots) than a
+-- route-anchored rule would need. Normalizes the body first so the url-encoded
+-- form-POST shape (`%28%28...%5E...`) is decoded before the scan.
+--
+-- Deliberately LOGONLY and best-effort. An endpoint-anchored BLOCK companion
+-- (the vBulletin CVE rule 10015) was removed after it false-positive-banned
+-- spaced math forum posts (see has_phpfuck_blob's history note), so this rule
+-- must never be promoted above logonly without solving that FP. Known limits,
+-- all acceptable for logonly visibility: (a) BODY-ONLY — a phpfuck delivered in
+-- the GET query string is not scanned here; (b) the tight charset means no-op
+-- operators / spaces / letters interspersed in the payload fragment the run and
+-- evade; (c) dense spaced numeric math can still log-flag (no ban). The real
+-- defence against runMaths RCE is patching vBulletin.
 function _M.detect_php_numeric_xor_obfuscation(body, _headers)
   if not body or body == "" then return nil end
   local cap_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len

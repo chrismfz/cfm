@@ -1,10 +1,14 @@
 -- Tests for the generic phpfuck / numeric-XOR obfuscation detector
--- (rule 439, WAF_BACKDOOR, ships logonly). Technique-level companion to the
--- vBulletin runMaths CVE rule (10015): it catches the SAME phpfuck payload
--- shape against any restricted-charset eval() sink, with no route context.
--- A phpfuck payload builds arbitrary PHP from XOR (^) of parenthesised digit
--- literals, so it is a long run of only [0-9().^] with a storm of ^ and ).(
--- tokens — the signature has_phpfuck_blob keys on.
+-- (rule 439, WAF_BACKDOOR, ships logonly — best-effort visibility for a phpfuck
+-- payload against any restricted-charset eval() sink, e.g. vBulletin runMaths /
+-- CVE-2026-61511). A phpfuck payload builds arbitrary PHP from XOR (^) of
+-- parenthesised digit literals, so it is a long TIGHT run of only [0-9().^] with
+-- a storm of parens, ^ and concatenation dots — the shape has_phpfuck_blob keys
+-- on. The tight charset is deliberate: operators/spaces/letters fragment the run
+-- (that is what keeps ordinary math/code from scoring), at the cost of documented
+-- residuals (no-op / strip-char interspersing evades). An endpoint-anchored BLOCK
+-- companion (CVE rule 10015) was REMOVED for FP-banning spaced math forum posts;
+-- this rule must never be promoted above logonly.
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -60,10 +64,6 @@ local ENC = (PHPFUCK:gsub("[%(%)%^]", { ["("] = "%28", [")"] = "%29", ["^"] = "%
 fires("x=" .. PHPFUCK, "phpfuck blob in a form field (any endpoint)")
 fires("x=" .. ENC, "url-encoded phpfuck blob (normalize decodes before scan)")
 fires('{"q":"' .. PHPFUCK .. '"}', "phpfuck blob inside a JSON body", "application/json")
--- Adversarial regression (red-team 2026-08): no-op-operator interspersing. The
--- `+ * / |` operators stay in the run charset, so the blob must not fragment.
-local NOOP_EVADE = (PHPFUCK:gsub("%)", ")+0"))
-fires("x=" .. NOOP_EVADE, "no-op-operator (+0) interspersed blob — operators stay in run")
 
 -- ── Negatives ───────────────────────────────────────────────────────────────
 clean("page=2", "plain integer parameter")
@@ -71,12 +71,17 @@ clean("expr=(1+2)^3", "short real arithmetic — below thresholds")
 clean("coords=(41.9).(12.5)", "a couple of parenthesised numbers, no ^ storm")
 clean("body=hello world, this is ordinary text with (parentheses).", "ordinary prose")
 -- FP regressions (red-team 2026-08): legit code/math bodies must not log-flag.
--- Carets and dots live in separate sub-expressions (broken by letters/';'),
+-- With the TIGHT `[0-9().^]` run charset, operators and spaces fragment the run,
 -- so no single run carries the full paren+caret+dot storm.
 clean("message=[code](a^b)+(c^d)+(e^f)+(g^h)+(i^j); (1.5+2.5+3.5)/(2.0*2.0); ((p*q)/(r+s))[/code]",
       "FP: forum C/bit-twiddling code block")
 clean("message=f(n)=(a^n)+(b^n)-(c^n) where a=(1.5),b=(2.5),c=(3.5). g(x)=(x^2)+(x^3) at (0.1),(0.2),(0.3).",
       "FP: math/CAS post")
+-- The FP-BAN that killed the block-tier CVE rule: a spaced math series whose
+-- form-urlencoded spaces arrive as `+`. The tight charset makes the `+`
+-- (and literal operators) fragment the run, so it must stay CLEAN here too.
+clean("message=(1.5)^2+%2B+(2.5)^2+%2B+(3.5)^2+%2B+(4.5)^2+%2B+(5.5)^2+%2B+(6.5)^2+%2B+(7.5)^2+%2B+(8.5)^2+%2B+(9.5)^2",
+      "FP: spaced math series (spaces->'+') — tight charset fragments on '+'")
 clean("", "empty body")
 
 if fails > 0 then
