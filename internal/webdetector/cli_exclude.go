@@ -77,7 +77,8 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 	action := args[0]
 	value := args[1]
 	typ := "host"
-	var rules []string // collected raw specifiers; sent verbatim to API for parsing
+	var rules []string  // collected raw specifiers; sent verbatim to API for parsing
+	var scopes []string // WAF-only: host(s) to scope the entry to (admin only)
 	for i := 2; i < len(args); i++ {
 		switch {
 		case args[i] == "--type" && i+1 < len(args):
@@ -90,6 +91,11 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 			i++
 		case prefix == "waf" && strings.HasPrefix(args[i], "--rule="):
 			rules = append(rules, strings.TrimPrefix(args[i], "--rule="))
+		case prefix == "waf" && args[i] == "--scope" && i+1 < len(args):
+			scopes = append(scopes, args[i+1])
+			i++
+		case prefix == "waf" && strings.HasPrefix(args[i], "--scope="):
+			scopes = append(scopes, strings.TrimPrefix(args[i], "--scope="))
 		default:
 			return fmt.Errorf("unknown flag %q", args[i])
 		}
@@ -110,6 +116,11 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 		// API parser accepts comma-separated mix of N / Nxx / N-M.
 		q.Set("rule_ids", strings.Join(rules, ","))
 	}
+	if len(scopes) > 0 {
+		// Host(s) to scope the entry to. The server honours this only for an
+		// admin token; a scoped token is always pinned to its own vhost set.
+		q.Set("scope_hosts", strings.Join(scopes, ","))
+	}
 	u := fmt.Sprintf("%s/api/v1/%s/%s/%s?%s",
 		strings.TrimRight(baseURL, "/"), prefix, resource, endpoint, q.Encode())
 	resp, err := clihttp.Post(u, "application/json", nil)
@@ -125,6 +136,9 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 	rulesShown := ""
 	if len(rules) > 0 {
 		rulesShown = " rules=" + strings.Join(rules, ",")
+	}
+	if len(scopes) > 0 {
+		rulesShown += " scope=" + strings.Join(scopes, ",")
 	}
 	fmt.Printf("✓ %s exclude %s: type=%s value=%s%s\n", strings.ToUpper(prefix), action, typ, value, rulesShown)
 	return nil
@@ -158,5 +172,5 @@ func ruleFlagUsage(prefix string) string {
 	if prefix != "waf" {
 		return ""
 	}
-	return " [--rule N|Nxx|N-M ...]"
+	return " [--rule N|Nxx|N-M ...] [--scope host ...]"
 }

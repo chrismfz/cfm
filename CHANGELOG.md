@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF excludes can be scoped to specific vhosts (`--scope` / `scope_hosts`).**
+  A new host qualifier lets an operator pin a WAF exclude to one or more vhosts
+  — the third axis alongside type/value and rule IDs — so the exact
+  intersection "rule N, on path P, for vhost H" is now expressible (e.g.
+  suppress rule 402 on `/wp-admin/admin-ajax.php` for one migrating site
+  only, instead of fleet-wide for that path). Available on the CLI
+  (`cfm webtop waf exclude add … --scope <host>`), the API (`scope_hosts`
+  query param on `waf/exclude/add|remove`), and the cfm-admin WAF excludes
+  card (a "scope host" field + a Scope column). **Security:** the qualifier
+  is admin-only in effect and can only *narrow* — a scoped (cPanel) token is
+  always pinned to its own context vhost set server-side (`effectiveExcludeScope`
+  ignores a scoped caller's `scope_hosts`), so it can never widen or redirect
+  an exclude to another tenant's vhost. Regression-tested in
+  `step3_scope_test.go` (admin narrows; scoped token cannot widen).
 - **cfm-admin WAF excludes card now supports rule-scoped entries.** The
   "Dynamic excludes (Challenge / WAF)" panel gained an optional **rule IDs**
   field (e.g. `402` or `401,431-436`) and a **Rules** column. Previously the

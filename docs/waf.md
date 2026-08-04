@@ -483,27 +483,32 @@ case (see the rejected-approaches analysis below); the operator, who knows a
 migration is running, is the right actor:
 
 ```
-cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402
+cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402 --scope mtgtravel.gr
 # ... run the import, then remove exactly what you added:
-cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402
+cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402 --scope mtgtravel.gr
 ```
 
-If the backup chunks also trip the other block-tier body scanners — likely in
-practice, since a full-site backup carries `php://input`/`php://temp` strings
-(→ `php_wrappers`, rule **305**, armed→block, and it runs *before* 402), a SQL
-dump (→ `sqli`, **301**), and serialized PHP objects from the DB (→
-`php_object_injection`, **329**) — add those ids to the same temporary
-exclude and remove them all afterwards:
+`--scope <vhost>` pins the exclude to the one migrating site — minimal
+surface. Omit it and the path+rule exclude applies on every vhost (still
+rule-scoped, but fleet-wide for that path). If the backup chunks also trip the
+other block-tier body scanners — likely in practice, since a full-site backup
+carries `php://input`/`php://temp` strings (→ `php_wrappers`, rule **305**,
+armed→block, and it runs *before* 402), a SQL dump (→ `sqli`, **301**), and
+serialized PHP objects from the DB (→ `php_object_injection`, **329**) — add
+those ids to the same temporary exclude and remove them all afterwards:
 
 ```
-cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402 --rule 305 --rule 301 --rule 329
-cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402 --rule 305 --rule 301 --rule 329
+cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402 --rule 305 --rule 301 --rule 329 --scope mtgtravel.gr
+cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402 --rule 305 --rule 301 --rule 329 --scope mtgtravel.gr
 ```
 
-The exclude is per-vhost path-scoped and rule-scoped: the rest of the WAF
-still inspects those requests (traversal, XSS, CVE detectors, everything not
-listed), and every other URL on every other vhost keeps all rules. Removing
-it after the import restores full enforcement.
+With `--scope`, the exclude is pinned to one vhost, one path, and only the
+listed rules: the rest of the WAF still inspects those requests (traversal,
+XSS, CVE detectors, everything not listed), every other path on the same vhost
+keeps all rules, and every other vhost is untouched entirely. Removing it after
+the import restores full enforcement. (The same add/remove is available from
+the cfm-admin WAF excludes card — type/value plus the rule-IDs and scope-host
+fields.)
 
 **Rejected — an automatic content-keyed exemption (why it cannot be safe
 here).** The tempting fix is a fleet-wide rule keyed on the WordPress action
@@ -900,20 +905,30 @@ Whole-WAF wins on collision. Two rule-scoped entries on the same host/path get m
 
 ```
 cfm webtop waf exclude list
-cfm webtop waf exclude add    <value> [--type host|path] [--rule N|Nxx|N-M ...]
-cfm webtop waf exclude remove <value> [--type host|path] [--rule N|Nxx|N-M ...]
+cfm webtop waf exclude add    <value> [--type host|path] [--rule N|Nxx|N-M ...] [--scope host ...]
+cfm webtop waf exclude remove <value> [--type host|path] [--rule N|Nxx|N-M ...] [--scope host ...]
 ```
 
 `<value>` is matched with `strings.Contains` (plain text) or as a glob when it
 contains any of `* ? [ ]`. `--type host` matches against the request host;
 `--type path` matches against the request path. `--type` defaults to `host`.
-Each entry is single-axis — host **or** path, not both — so to scope a path
-exclusion to one site, pick a path string that's unique to that site, or use
-a glob like `*/plexusnet/*`.
+Each entry is single-axis on its `--type` — host **or** path — but `--scope`
+adds an independent host filter on top, so you can pin a path exclusion to one
+vhost without a unique path string (or a glob like `*/plexusnet/*`).
 
 Omitting `--rule` creates a **whole-WAF** entry (legacy "WAF off for this
 scope"). Pass `--rule` one or more times to create a **rule-scoped** entry
 that suppresses only the listed `waf_rule_id`s.
+
+`--scope <host>` (repeatable / comma-separated) restricts the entry to
+specific vhosts — the third axis that lets you express the exact intersection
+"rule N, on path P, for vhost H" (e.g. suppress rule 402 on
+`/wp-admin/admin-ajax.php` for one migrating site only). Omitting it leaves the
+entry admin-global (all vhosts), as before. **Admin-only in effect:** a scoped
+(cPanel) token is always pinned to its own vhost set server-side, so a
+`--scope`/`scope_hosts` value from a scoped caller is ignored — it can never
+widen or redirect an exclude to another tenant's vhost. Because the qualifier
+can only *add* a host filter, it never broadens an exclude.
 
 Rule-ID spec accepts:
 
@@ -954,13 +969,22 @@ Wrong answers, for reference:
 
 ```
 GET  /api/v1/waf/exclude/list
-POST /api/v1/waf/exclude/add?type=host&value=example.com[&rule_ids=320,3xx,310-317]
-POST /api/v1/waf/exclude/remove?type=path&value=/plexusnet/&rule_ids=201
+POST /api/v1/waf/exclude/add?type=host&value=example.com[&rule_ids=320,3xx,310-317][&scope_hosts=a.com,b.com]
+POST /api/v1/waf/exclude/remove?type=path&value=/plexusnet/&rule_ids=201[&scope_hosts=a.com]
 ```
 
 `rule_ids` is a CSV string in the same spec format as `--rule`. Empty / missing → whole-WAF entry.
 
-`GET /api/v1/waf/exclude/list` returns each entry's `rule_ids` (sorted, deduped) when set; the field is omitted otherwise.
+`scope_hosts` is a CSV of vhosts to scope the entry to (the API form of
+`--scope`). It is honoured only for an admin token; for a scoped token the
+effective scope is always the token's own vhost set, so a `scope_hosts` value
+from a scoped caller is ignored (it can never widen or redirect the entry).
+Empty / missing → admin-global (all vhosts). To remove a scope-qualified
+entry, echo the same `scope_hosts` (the list response returns each entry's
+`scope_hosts`, so the UI/CLI can round-trip it) — the entry is keyed by its
+`(type, value, scope_hosts, rule_ids)` tuple.
+
+`GET /api/v1/waf/exclude/list` returns each entry's `rule_ids` (sorted, deduped) and `scope_hosts` (sorted, deduped) when set; either field is omitted otherwise.
 
 ### Lua wiring
 
