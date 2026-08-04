@@ -909,9 +909,14 @@ cfm webtop waf exclude add    <value> [--type host|path] [--rule N|Nxx|N-M ...] 
 cfm webtop waf exclude remove <value> [--type host|path] [--rule N|Nxx|N-M ...] [--scope host ...]
 ```
 
-`<value>` is matched with `strings.Contains` (plain text) or as a glob when it
-contains any of `* ? [ ]`. `--type host` matches against the request host;
-`--type path` matches against the request path. `--type` defaults to `host`.
+`<value>` is matched at a domain/path **boundary** (not a raw substring), or
+as a glob when it contains any of `* ? [ ]`. For `--type host` a literal is the
+exact host or a dot-boundary subdomain suffix (`shop.gr` matches `shop.gr` and
+`www.shop.gr`, never `myshop.gr` / `shop.gr.evil.com`); for `--type path` it is
+the exact path or a path-segment prefix (`/admin` matches `/admin` and
+`/admin/x`, never `/administrator`). `--type host` matches against the request
+host; `--type path` matches against the request path. `--type` defaults to
+`host`.
 Each entry is single-axis on its `--type` — host **or** path — but `--scope`
 adds an independent host filter on top, so you can pin a path exclusion to one
 vhost without a unique path string (or a glob like `*/plexusnet/*`).

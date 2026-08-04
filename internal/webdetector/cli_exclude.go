@@ -9,10 +9,11 @@ import (
 )
 
 type excludeCLIEntry struct {
-	Type      string `json:"type"`
-	Value     string `json:"value"`
-	RuleIDs   []int  `json:"rule_ids,omitempty"`
-	CreatedAt string `json:"created_at"`
+	Type       string   `json:"type"`
+	Value      string   `json:"value"`
+	RuleIDs    []int    `json:"rule_ids,omitempty"`
+	ScopeHosts []string `json:"scope_hosts,omitempty"`
+	CreatedAt  string   `json:"created_at"`
 }
 
 func runChallengeExclude(baseURL string, args []string) error {
@@ -58,15 +59,20 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 			fmt.Printf("No %s excludes configured.\n", prefix)
 			return nil
 		}
-		// "RULES" column is empty for whole-WAF / challenge entries; populated
-		// with the comma-joined rule-id list when the entry is rule-scoped.
-		fmt.Printf("%-8s %-50s %-20s %s\n", "TYPE", "VALUE", "RULES", "CREATED")
+		// RULES is "*" for whole-WAF / challenge entries, else the rule-id list.
+		// SCOPE is "*" for admin-global entries, else the comma-joined vhost(s)
+		// the entry is pinned to — the value to echo back on `remove`.
+		fmt.Printf("%-8s %-40s %-16s %-24s %s\n", "TYPE", "VALUE", "RULES", "SCOPE", "CREATED")
 		for _, r := range rows {
 			rules := "*"
 			if len(r.RuleIDs) > 0 {
 				rules = formatRuleIDs(r.RuleIDs)
 			}
-			fmt.Printf("%-8s %-50s %-20s %s\n", r.Type, r.Value, rules, r.CreatedAt)
+			scope := "*"
+			if len(r.ScopeHosts) > 0 {
+				scope = strings.Join(r.ScopeHosts, ",")
+			}
+			fmt.Printf("%-8s %-40s %-16s %-24s %s\n", r.Type, r.Value, rules, scope, r.CreatedAt)
 		}
 		return nil
 	}
