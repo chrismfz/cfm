@@ -439,7 +439,144 @@ fingerprint with uTLS — but not while running real headless Chrome, which is w
 a native PoW solve, which collapses `solve_ms` toward zero — already measured. The
 two signals box the adversary in from opposite sides; neither does that alone.
 
-## 8. Related
+## 8. Level-2 humanity gate (proposed — design, not built)
+
+This section records a design worked out in discussion, so the reasoning is not
+lost. **Nothing here is built or measured yet**; the numbers to justify each
+threshold do not exist until the evidence signal in §8.2 has run. Treat every
+"human vs farm" claim below as a hypothesis to confirm against real logs, the
+same discipline §5/§6 impose.
+
+### 8.1 The reframing: proof-of-work cannot separate two real browsers
+
+Everything above §5 measures one thing repeatedly: today's farm runs **real
+headless Chrome** (`solve_ms` median 6.55 s, nothing under 0.3 s — §5). PoW
+proves "a CPU did work"; the farm has CPUs, and Playwright/Puppeteer *is* a
+browser. So harder PoW (§1), memory-hard PoW (§3), and Chrome-build checks are
+all taxes the honest user pays while the farm shrugs — because none of them
+asks the one question that actually divides the populations: *is there a human
+here?*
+
+The escape is a **proof-of-humanity / proof-of-interaction** step, and its
+whole viability rests on being **escalation-gated** — off by default, on only
+when a vhost is demonstrably under attack. Always-on humanity friction destroys
+conversion and accessibility for everyone; under-attack friction is paid by
+real users only in the rare window when the alternative is the site drowning in
+farm traffic. This is the `harden` actuator §4 reserved, with one correction:
+level-2 changes the *kind* of proof, not the PoW *difficulty* (§4's original
+`harden = raise difficulty` does not work against a browser farm, per §1).
+
+### 8.2 First step — passive interaction-entropy as evidence (zero UX, no gate)
+
+The current interstitial (`challenge_server.go`, the browser solver at the
+`solvePow()` / auto-`fetch("/__cfm_verify")` block) is fully automatic: it
+solves PoW and submits with **zero user interaction**. That ~1.3 s PoW window
+is a free place to *observe* interaction without adding any UX: attach passive
+listeners (`pointermove` / `scroll` / `touchstart` / `keydown` + timing) and
+submit a **compact, NON-PII summary** — event count, distinct event types,
+active-ms, a coarse entropy/timing bucket — in an extra header on the verify
+POST. Never raw pointer paths (volume + PII); a few scalars, the way `tls_fp`
+is 8 chars and `solve_ms` is one number.
+
+It lands exactly where `solve_ms` and `tls_fp` already land: on the
+`challenge_solved` history event (`engine.go` payload) and on the
+`result=solved` line in `cfm.challenges.log`. A third evidence signal of the
+same class — **collected on every solve, carried for attribution, never a
+gate** by itself (a single solve's score is attacker-controllable; Playwright
+can synthesise events).
+
+Targeting note: this signal only exists in real-browser mode. A non-JS client
+never reaches the verify POST (it fails the existing JS+cookie+PoW gate), so
+interaction-entropy adds nothing against non-JS bots — it aims squarely at the
+JS-executing headless-browser farm, which is the threat.
+
+### 8.3 How the evidence is used — a ladder, thresholds last
+
+1. **Attribution on existing alerts (immediate, zero risk).** When
+   `solver_farm` / `cookiediscard` fire, attach the interaction distribution of
+   the flagged cluster, exactly as UA/`tls_fp` breakdowns already ride on the
+   alert. Makes the finding actionable; changes no decision; needs no threshold.
+2. **Aggregate detector signal (the payoff, after burn-in).** Per-solve is
+   spoofable, so — like `solver_farm` — key on the **population over a
+   vhost/window**: the fraction of solves with human-plausible interaction
+   *collapsing* from its baseline. Matching a human *distribution* across
+   thousands of solves is far harder than faking one gesture. New leg inside
+   `solver_farm`, or its own detector.
+3. **Correlation — the §7 boxing-in, third wall.** Cross interaction with
+   `solve_ms` and `tls_fp`: fast + coherent-TLS + zero-interaction is a
+   different animal from slow + middlebox-TLS + rich-interaction. The
+   conjunction forces the farm to *simultaneously* run a real browser (high
+   `solve_ms`, coherent TLS) **and** reproduce a human interaction
+   distribution.
+
+### 8.4 The gate — two decisions, not one
+
+When "something is wrong" is established, it drives level-2. Keep two decisions
+distinct — the split is the entire false-positive story:
+
+- **Trigger (vhost-level, aggregate): "is this vhost under attack now?"**
+  Decided on the population signal (§8.3 leg 2, alongside `solve_ms` collapse /
+  `tls_fp` cluster / subnet spread). Turns level-2 **mode** on for the vhost.
+  Reuses the existing `vhostUnderAttack` auto on/off machinery with its
+  hysteresis + holddown, so it does not flap and **auto-exits** when the farm
+  leaves — a vhost must never stay stuck in puzzle-mode after the attack ends.
+- **Per-request soft-gate: "who, inside that mode, actually sees the puzzle?"**
+  Never everyone — that is the FP disaster. High-confidence-human requests
+  still pass with the light challenge; only the suspicious stream gets the
+  puzzle.
+
+**The light challenge is the probe.** Interaction-entropy is collected *during*
+the light PoW, so a brand-new request has no score yet — which is a feature,
+not a chicken-and-egg problem. The flow is:
+
+> light PoW (collects interaction) → interaction bar not met → **then** puzzle
+> before clearance is minted.
+
+The light step becomes the detector, and failing its interaction bar escalates
+to the puzzle **within the same flow**, keyed on a signal the client just
+produced. (Pre-JS signals — `tls_fp` at handshake, UA plausibility, ASN — can
+pre-filter, but interaction is post-solve and fits naturally as the second
+rung.)
+
+### 8.5 Honest reality check
+
+A puzzle is **not unbreakable**: a farm can pipe it to a human-solver service
+(2captcha and similar). The win is **economic** — it converts the farm's cost
+from "free PoW" to "paid human solve per request", and only for the duration of
+the attack. At ~100k solves/day that is a punishing bill for the attacker,
+while a real visitor pays it only in the rare under-attack window. "Would it
+work" honestly means *it moves the cost curve*, not *it builds a wall*. Design
+and message it that way.
+
+### 8.6 Non-negotiables for level-2
+
+- **Hard operator bypass + allowlist + fail-open.** A humanity gate *will* lock
+  out screen readers, keyboard-only clients, API/cron clients, `/.well-known`
+  ACME/DCV validators (remember the two carve-outs), and some mobile webviews.
+  Without an allowlist and a fail-open story, level-2 drops legitimate traffic
+  worse than the farm does.
+- **Accessibility.** Any visual/interaction puzzle needs an accessible path
+  (audio, or a non-visual alternative), or it is an outage for a class of real
+  users the moment it triggers.
+- **Auto-exit with holddown**, driven by the aggregate signal cooling — and
+  note this leans on the manual-vs-auto vhost-challenge lifecycle: the auto
+  cool-down must not stomp an operator's manual challenge, and vice versa (the
+  class of bug fixed in `manualChallengeCoversClear`). Level-2 escalation must
+  honour the same rule.
+- **Config surface.** Extends `solverfarm.Action` (`observe` / `logonly` today;
+  `harden` / `throttle` reserved — §4). Level-2 is a new action tier; grow the
+  accepted vocabulary deliberately, since `detectors.conf` is a packaged
+  conffile and every new value costs an upgrade prompt.
+
+### 8.7 Sequencing
+
+Evidence-only → measure human-vs-farm distributions on real logs → aggregate
+detector → escalation trigger → per-request soft-gate → puzzle. **No threshold
+before its burn-in** — the same path `solve_ms` and `tls_fp` walked. Step 1
+(attribution) ships without any of the later machinery and is the correct first
+commit.
+
+## 9. Related
 
 - `internal/webdetector/pow.go` — difficulty, TTL, token format
 - `internal/webdetector/challenge_server.go` — issue site and the browser solver
@@ -447,3 +584,6 @@ two signals box the adversary in from opposite sides; neither does that alone.
 - `internal/detectors/cookiediscard/` — the re-solver detector
 - `internal/tlsfp/` + `configs/lua/cfm_tlsfp.lua` — the TLS fingerprint signal
 - `docs/DETECTORS.md` — `challenge_solver_farm` operator documentation
+- `internal/webdetector/manual_challenge.go` — manual vhost challenge lifecycle
+  (`manualChallengeCovering` / `manualChallengeCoversClear`), the auto-exit
+  rule level-2 must honour (§8.6)
