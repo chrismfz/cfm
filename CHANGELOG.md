@@ -57,6 +57,21 @@ back-filled here — see the git/PR history for that period.
   `scope == nil ⇒ admin` pattern in other handlers is a separate follow-up.)
 
 ### Added
+- **`docs/waf.md`: "Upstream interception" section — traffic that never
+  reaches the WAF.** Documents the silent failure mode where something ahead
+  of CFM's DNAT chain diverts web traffic so it never hits openresty (no
+  access log, no WAF, no challenge, site still works), with a real case
+  study: on an Imunify360 host running CFM at the default priority `-99`
+  (Imunify-first), WebShield's nat PREROUTING at `-100` intercepts all
+  traffic sourced from its known-proxy ipset (the Cloudflare ranges), so
+  every Cloudflare-fronted vhost vanished from the edge log while direct
+  traffic was logged normally. Includes a step-by-step diagnosis recipe
+  (prerouting hook enumeration, nat counters, ipset checks, `ss -tnp`
+  process verdict), the remedies (`cfm dnat on --priority -101` CFM-first
+  mode vs accepting Imunify-first vs disabling WebShield), and the correct
+  way to implement "never block Cloudflare" (CDN ranges in
+  `cfm.ignore`/`cfm.allow` + realip from `CF-Connecting-IP` — never
+  `cfm.dnat_bypass`, never NAT/conntrack exemptions).
 - **WAF excludes can be scoped to specific vhosts (`--scope` / `scope_hosts`).**
   A new host qualifier lets an operator pin a WAF exclude to one or more vhosts
   — the third axis alongside type/value and rule IDs — so the exact
