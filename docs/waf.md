@@ -1153,6 +1153,129 @@ Key invariants:
 
 ---
 
+## Upstream interception — when traffic never reaches the WAF
+
+The WAF (and the challenge engine, and the edge access log) only see traffic
+that actually reaches the openresty/angie listener. In full-DNAT mode that
+path is: packet arrives on 80/443 → `inet cfm_redirect` prerouting DNATs it
+to 9080/9043 → edge proxy → `cfm.lua`. **Anything that diverts the packet
+before our DNAT chain runs makes it invisible to the entire L7 stack** — no
+access-log line, no WAF, no challenge — while the site keeps working, because
+whatever intercepted the packet still proxies it to Apache. This failure mode
+is completely silent; you only notice it when you go looking for log lines
+that aren't there.
+
+Things that run before (or instead of) our DNAT chain:
+
+| Interceptor | Where | Effect |
+|---|---|---|
+| Entries in `/etc/cfm/cfm.dnat_bypass` | `inet cfm_redirect` itself, accept before the dport rules | Listed source IPs go straight to Apache. See `docs/dnat-bypass.md`. |
+| **Imunify360 WebShield** | `ip nat` / `ip6 nat` PREROUTING at priority `dstnat` (-100), managed by iptables-nft | DNATs matched sources to WebShield's own listener, which proxies to Apache directly. Runs *before* `cfm_redirect` when CFM is at `dstnat + 1` (-99, the default "Imunify-first" mode). |
+| `NOTRACK` / `-j CT --notrack` rules in raw PREROUTING | priority raw (-300) | Untracked connections skip NAT entirely (NAT requires conntrack), so the packet lands raw on Apache:443. A classic side effect of "keep CDN traffic out of conntrack" scripts. |
+
+### Case study — Cloudflare-fronted vhosts vanish from the edge log (2026-08-04)
+
+**Symptom.** On a cPanel host running both CFM (DNAT mode) and Imunify360,
+domains whose DNS is on Cloudflare (orange-cloud proxied) produced *zero*
+openresty access-log lines. The same request forced to the origin IP was
+logged and WAF-inspected normally:
+
+```bash
+curl "https://example-shop.gr/?q=..." --resolve "example-shop.gr:443:84.54.49.204"
+# → logged; an XSS payload here even got the CFM challenge page
+
+curl "https://example-shop.gr/?q=..."     # resolves to Cloudflare edge
+# → site works, but NOT logged. No WAF. No challenge.
+```
+
+First suspicion was an operator "whitelist Cloudflare" script feeding CF
+ranges into `cfm.dnat_bypass` — wrong, the file was empty and
+`nft list table inet cfm_redirect` showed a clean chain. The real chain of
+events:
+
+1. CFM ran at the default priority `dstnat + 1` (-99): the documented
+   **Imunify-first fallback mode** (`cfm dnat` prints exactly this).
+2. Imunify360's iptables-nft nat PREROUTING sits at `dstnat` (-100) and
+   its WebShield intercepts traffic whose *source* is in its known-proxy
+   ipset — `i360.ipv4.remote_proxy_static` — which contains the Cloudflare
+   ranges.
+3. So every packet arriving *via Cloudflare* was DNAT'd to WebShield at
+   -100. By the time `cfm_redirect` ran at -99, the dport was no longer
+   80/443, our `tcp dport 443 dnat to :9043` didn't match, and WebShield
+   proxied straight to Apache. Direct traffic (not in any i360 set) fell
+   through -100 untouched and was caught by us at -99 — hence the
+   asymmetry.
+
+Nothing was misconfigured in `openresty.conf`/`angie.conf` — realip from
+`CF-Connecting-IP` + `trusted_proxies.conf` were correct and simply never
+got the chance to run.
+
+### Diagnosis recipe
+
+```bash
+# 0) Our own chain first: bypass entries + priority
+cfm dnat bypass list
+cfm dnat                       # note "priority -99" vs "-101" in the State line
+nft list table inet cfm_redirect
+
+# 1) Everyone hooked at prerouting, in priority order (lowest runs first)
+nft list ruleset | grep -B4 'hook prerouting'
+
+# 2) Who intercepts by source? Look for DNAT/REDIRECT with a src match-set,
+#    and check the packet counters climb while you curl through the CDN
+iptables -t nat -L PREROUTING -n -v --line-numbers
+
+# 3) Which ipsets hold the CDN ranges (Cloudflare: 173.245.48.0/20,
+#    104.16.0.0/13, 172.64.0.0/13, 162.158.0.0/15, 198.41.128.0/17, ...)
+ipset list i360.ipv4.remote_proxy_static 2>/dev/null | head
+
+# 4) The one-shot verdict: curl through the CDN and see which PROCESS
+#    owns the connection from the CDN edge IP
+ss -tnp | grep <cdn-edge-ip>
+#   httpd on :443            → NAT skipped entirely (notrack / raw accept)
+#   imunify webshield nginx  → WebShield interception (check its logs too:
+#                              /var/log/imunify360-webshield/)
+#   openresty on :9043       → traffic reaches us; problem is elsewhere
+```
+
+### Remedies
+
+Pick who fronts web traffic — the two stacks cannot both do it for the same
+packet:
+
+- **CFM-first:** `cfm dnat on --priority -101`. CFM DNATs 80/443 before
+  Imunify's chain at -100; ALL traffic (including CDN-sourced) flows through
+  openresty → full logging/WAF/challenge, with the real client IP restored
+  from `CF-Connecting-IP`. Trade-off: WebShield effectively stops seeing web
+  traffic; CFM's challenge layer replaces its graylist challenge on 80/443.
+- **Imunify-first (priority -99, the default):** accept that CDN-sourced
+  traffic is served and logged by WebShield, not by CFM. This is by design
+  in this mode — do not chase it as a CFM logging bug.
+- Disabling WebShield (`imunify360-agent config update
+  '{"WEBSHIELD": {"enable": false}}'`) removes the -100 interception while
+  keeping the rest of Imunify, letting CDN traffic fall through to CFM even
+  at -99.
+
+**"Never block Cloudflare" done right.** The legitimate operator goal —
+never L4-block/challenge a CDN edge IP (thousands of innocent sites share
+it) while still knowing the real client — does *not* need any
+prerouting/NAT-level exemption. The CDN traffic *should* pass through the
+edge proxy:
+
+- L4 never-block: put the CDN ranges in `cfm.ignore` / `cfm.allow`. Those
+  render in the **input** chain only (`nft.go` early rules) — they cannot
+  divert or hide traffic from the WAF.
+- Real client IP: already handled at the edge by `real_ip_header
+  CF-Connecting-IP` + `trusted_proxies.conf`; scoring, challenge and WAF
+  decisions then apply to the real client, not the CDN edge IP.
+- Do **not** put CDN ranges in `cfm.dnat_bypass` (that's for cluster peers /
+  WHM transfer sources — see `docs/dnat-bypass.md`) and do not exempt them
+  from NAT/conntrack: either one silently disables L7 inspection for every
+  request arriving via the CDN — an attacker only has to put a domain
+  behind Cloudflare to bypass the WAF.
+
+---
+
 ## Configuration
 
 | Var | Default | Allowed | Notes |
