@@ -10,6 +10,10 @@ export const excludesMixin = {
       challengeExcludeType: "host",
       wafExcludeValue: "",
       wafExcludeType: "host",
+      // Comma-separated WAF rule-id spec (e.g. "402" or "401,431-436"). Empty
+      // means a legacy whole-WAF exclude (all rules). WAF-only: challenge
+      // excludes have no per-rule scoping.
+      wafExcludeRules: "",
     };
   },
 
@@ -21,6 +25,12 @@ export const excludesMixin = {
       ]);
       this.challengeExcludes = this.extractRows(challengeExcludes, "rows");
       this.wafExcludes = this.extractRows(wafExcludes, "rows");
+    },
+    // Render an exclude row's rule scope for the table: "*" when it is a
+    // whole-WAF entry (no rule_ids), otherwise the comma-joined rule IDs.
+    formatExcludeRules(ids) {
+      const a = Array.isArray(ids) ? ids : [];
+      return a.length ? a.join(", ") : "*";
     },
     enforceScopedExcludeControls() {
       if (!this.isScoped) {
@@ -66,10 +76,20 @@ export const excludesMixin = {
         }
       }
       try {
-        await this.postJSON(`v1/${scope}/exclude/add?type=${encodeURIComponent(type)}&value=${encodeURIComponent(value)}`, {});
-        this.actionMsg = `${scope.toUpperCase()} exclude added: ${type}=${value}`;
-        if (isChallenge) this.challengeExcludeValue = "";
-        else this.wafExcludeValue = "";
+        // rule_ids is WAF-only and optional. When present, the server adds a
+        // rule-scoped exclude (WAF still runs; only these rule IDs are
+        // suppressed); when absent it stays a whole-WAF exclude.
+        const rules = isChallenge ? "" : String(this.wafExcludeRules || "").trim();
+        let path = `v1/${scope}/exclude/add?type=${encodeURIComponent(type)}&value=${encodeURIComponent(value)}`;
+        if (rules) path += `&rule_ids=${encodeURIComponent(rules)}`;
+        await this.postJSON(path, {});
+        this.actionMsg = `${scope.toUpperCase()} exclude added: ${type}=${value}${rules ? ` rules=${rules}` : ""}`;
+        if (isChallenge) {
+          this.challengeExcludeValue = "";
+        } else {
+          this.wafExcludeValue = "";
+          this.wafExcludeRules = "";
+        }
         await this.refreshExcludeLists();
         await this.refreshHistory?.();
       } catch (err) {
@@ -84,7 +104,12 @@ export const excludesMixin = {
         return;
       }
       try {
-        await this.postJSON(`v1/${scope}/exclude/remove?type=${encodeURIComponent(entry.type)}&value=${encodeURIComponent(entry.value)}`, {});
+        // A rule-scoped entry is keyed by its exact rule-id set on the server,
+        // so removal must echo the row's rule_ids; a whole-WAF entry has none.
+        let path = `v1/${scope}/exclude/remove?type=${encodeURIComponent(entry.type)}&value=${encodeURIComponent(entry.value)}`;
+        const ids = Array.isArray(entry.rule_ids) ? entry.rule_ids : [];
+        if (ids.length) path += `&rule_ids=${encodeURIComponent(ids.join(","))}`;
+        await this.postJSON(path, {});
         this.actionMsg = `${scope.toUpperCase()} exclude removed: ${entry.type}=${entry.value}`;
         await this.refreshExcludeLists();
         await this.refreshHistory?.();

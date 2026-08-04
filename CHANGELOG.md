@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **cfm-admin WAF excludes card now supports rule-scoped entries.** The
+  "Dynamic excludes (Challenge / WAF)" panel gained an optional **rule IDs**
+  field (e.g. `402` or `401,431-436`) and a **Rules** column. Previously the
+  UI could only create *whole-WAF* excludes (disable the entire WAF for a
+  host/path — the "way too broad" option); it can now create the same
+  rule-scoped excludes the CLI/API already supported (`--rule`), so an
+  operator can suppress just rule 402 on `/wp-admin/admin-ajax.php` from the
+  UI instead of turning the WAF off. Empty field keeps the legacy whole-WAF
+  behaviour; removal echoes the row's exact rule-id set so rule-scoped entries
+  delete correctly. WAF-only (challenge excludes have no per-rule scoping).
+
 ### Changed
 - **Documented WAF FP case 6: WP migration-plugin imports vs the upload
   scanners** (docs only — no rule or code change). A Website Migration
