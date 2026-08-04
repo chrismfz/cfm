@@ -17,6 +17,51 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **WAF excludes can be scoped to specific vhosts (`--scope` / `scope_hosts`).**
+  A new host qualifier lets an operator pin a WAF exclude to one or more vhosts
+  — the third axis alongside type/value and rule IDs — so the exact
+  intersection "rule N, on path P, for vhost H" is now expressible (e.g.
+  suppress rule 402 on `/wp-admin/admin-ajax.php` for one migrating site
+  only, instead of fleet-wide for that path). Available on the CLI
+  (`cfm webtop waf exclude add … --scope <host>`), the API (`scope_hosts`
+  query param on `waf/exclude/add|remove`), and the cfm-admin WAF excludes
+  card (a "scope host" field + a Scope column). **Security:** the qualifier
+  is admin-only in effect and can only *narrow* — a scoped (cPanel) token is
+  always pinned to its own context vhost set server-side (`effectiveExcludeScope`
+  ignores a scoped caller's `scope_hosts`), so it can never widen or redirect
+  an exclude to another tenant's vhost. Regression-tested in
+  `step3_scope_test.go` (admin narrows; scoped token cannot widen).
+- **cfm-admin WAF excludes card now supports rule-scoped entries.** The
+  "Dynamic excludes (Challenge / WAF)" panel gained an optional **rule IDs**
+  field (e.g. `402` or `401,431-436`) and a **Rules** column. Previously the
+  UI could only create *whole-WAF* excludes (disable the entire WAF for a
+  host/path — the "way too broad" option); it can now create the same
+  rule-scoped excludes the CLI/API already supported (`--rule`), so an
+  operator can suppress just rule 402 on `/wp-admin/admin-ajax.php` from the
+  UI instead of turning the WAF off. Empty field keeps the legacy whole-WAF
+  behaviour; removal echoes the row's exact rule-id set so rule-scoped entries
+  delete correctly. WAF-only (challenge excludes have no per-rule scoping).
+
+### Changed
+- **Documented WAF FP case 6: WP migration-plugin imports vs the upload
+  scanners** (docs only — no rule or code change). A Website Migration
+  WordPress import (`admin-ajax.php?action=WMW_import`, chunked multipart
+  carrying raw PHP source — a WP backup *is* PHP) trips rule 402
+  `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` at block tier, and because the family is
+  autoblock-armed can nft-ban the admin mid-migration; a large backup will
+  also often trip `php_wrappers` (305, armed, runs before 402), `sqli` (301),
+  and `php_object_injection` (329). The documented remedy is a **temporary,
+  operator-applied, rule-scoped exclude** for the duration of the import
+  (`cfm webtop waf exclude add /wp-admin/admin-ajax.php --type path --rule 402
+  [--rule 305 --rule 301 --rule 329]`, removed afterwards). An automatic
+  `action`-keyed code exemption was prototyped and **reverted after
+  adversarial review**: admin-ajax dispatches on `$_REQUEST['action']` (a body
+  field overrides the query, so any edge matcher must out-parse PHP's
+  `parse_str`/rfc1867 — a review found four confirmed bypasses), and the 32 KB
+  body-scan window cannot see an `action` hidden past it in a large chunk, so
+  no request-time keying is both safe and useful. See `docs/waf.md` FP case 6.
+
 ### Security
 - **A host-scoped alert can no longer be silenced by the client it reports on.**
   The section sink resolves an alert's source IP by falling back to scanning the

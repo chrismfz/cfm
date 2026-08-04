@@ -449,6 +449,114 @@ phpMyAdmin, Adminer, Joomla administrator, cPanel file manager,
 DirectAdmin, and the various theme/plugin code editors are the usual
 suspects.
 
+### FP case 6 — `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` on WP migration-plugin imports
+
+**Shape:** repeated `block` events (rule 402, reason
+`WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG`) on
+`POST /wp-admin/admin-ajax.php?action=WMW_import` of `mtgtravel.gr`, from a
+single real Greek admin (2.85.210.197, AS6799 OTEnet, Chrome 150). Referer was
+the plugin's own admin page (`admin.php?page=WMW_import`); the same IP had a
+fully authenticated wp-admin browsing session around the hits (themes.php,
+dashboard widgets, load-styles.php all 200). The import ran as a ~90-minute
+stream of chunked `multipart/form-data` POSTs, each large enough that the edge
+buffered the body to disk (`client_body_temp` warnings in error.log).
+
+**Root cause:** the Website Migration WordPress plugin (`WMW_*` admin-ajax
+actions) uploads a whole-site backup in chunks. A WordPress site backup *is*
+PHP source, and the archive chunks carry literal `<?php` bytes in the
+multipart body, so rule 402's byte scan fires — on content that is the
+upload's whole point. Same class as the `update.php?action=upload-plugin` /
+Code Snippets carve-outs (`is_known_legit_php_upload_endpoint`): the
+plugin/theme/backup/migration ecosystem legitimately ships PHP-bearing
+payloads. Note the family is autoblock-armed (`UPLOAD_CONTENT` is a Phase-1
+edge-`block` family), so each edge hit also feeds `waf_security` — a customer
+mid-migration can earn a 6h nft ban on top of the edge TTL block.
+
+**Why we missed it:** rule 402 deliberately has no admin-ajax carve-out
+(upload exploits land exactly there), and the existing legit-PHP-upload
+allowlist is keyed on the two installer endpoints only. Migration plugins
+use plugin-specific admin-ajax actions the edge has never heard of.
+
+**Fix — operator-side, temporary, rule-scoped exclusion for the duration of
+the migration.** There is **no safe fully-automatic code carve-out** for this
+case (see the rejected-approaches analysis below); the operator, who knows a
+migration is running, is the right actor:
+
+```
+cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402 --scope mtgtravel.gr
+# ... run the import, then remove exactly what you added:
+cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402 --scope mtgtravel.gr
+```
+
+`--scope <vhost>` pins the exclude to the one migrating site — minimal
+surface. Omit it and the path+rule exclude applies on every vhost (still
+rule-scoped, but fleet-wide for that path). If the backup chunks also trip the
+other block-tier body scanners — likely in practice, since a full-site backup
+carries `php://input`/`php://temp` strings (→ `php_wrappers`, rule **305**,
+armed→block, and it runs *before* 402), a SQL dump (→ `sqli`, **301**), and
+serialized PHP objects from the DB (→ `php_object_injection`, **329**) — add
+those ids to the same temporary exclude and remove them all afterwards:
+
+```
+cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402 --rule 305 --rule 301 --rule 329 --scope mtgtravel.gr
+cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402 --rule 305 --rule 301 --rule 329 --scope mtgtravel.gr
+```
+
+With `--scope`, the exclude is pinned to one vhost, one path, and only the
+listed rules: the rest of the WAF still inspects those requests (traversal,
+XSS, CVE detectors, everything not listed), every other path on the same vhost
+keeps all rules, and every other vhost is untouched entirely. Removing it after
+the import restores full enforcement. (The same add/remove is available from
+the cfm-admin WAF excludes card — type/value plus the rule-IDs and scope-host
+fields.)
+
+**Rejected — an automatic content-keyed exemption (why it cannot be safe
+here).** The tempting fix is a fleet-wide rule keyed on the WordPress action
+(`action=WMW_import`) that demotes the upload scanners to logonly. A first
+draft of exactly this shipped on the branch and was **reverted after
+adversarial review** — the approach is unsound at two independent levels:
+
+1. **Parser differential (admin-ajax dispatches on `$_REQUEST['action']`).**
+   The query action is not the effective action: a POST-body `action` field
+   overrides the query (PHP `request_order=GP`, last duplicate wins). Any
+   matcher must therefore reconstruct PHP's `parse_str` + rfc1867 multipart
+   parsing in Lua — and an adversarial pass found **four** confirmed
+   request differentials against real PHP where the matcher computed
+   `WMW_import` while PHP dispatched an attacker-chosen `wp_ajax_nopriv_*`
+   handler: an in-data fake `--boundary--` (substring, not line-anchored,
+   match), a decoy `filename=` in an unrelated part header, a bare-`LF`
+   header terminator, and an all-`LF` body — each exploiting a body-walker
+   that *fails open* (grants the exemption) on any parse ambiguity. Matching
+   PHP's lenient line-oriented parser byte-for-byte in Lua is a losing game.
+2. **Windowed body vs full-body dispatch (fatal even with a perfect
+   parser).** The edge only reads the first `waf_body_max_len` (32 KB) of the
+   body; the origin PHP sees all of it. Legit migration chunks are *larger*
+   than the window (they spool to disk — the `client_body_temp` warnings
+   above). So an attacker places a webshell file part in the first 32 KB
+   (fully in-window, exactly what rule 402 would catch) and hides
+   `action=evil` *past* 32 KB. Any matcher that grants when it sees no
+   conflicting action in its window is bypassed; any matcher that fails
+   closed when the body is truncated denies **every** real (large) migration
+   — the exact case the fix exists for. There is no setting of the fail
+   direction that is both safe and useful.
+
+Because the legitimate case is inseparable (at the edge, at request time)
+from the attack, no automatic keying resolves it. The operator exclude wins
+precisely because it is out-of-band: the operator asserts "a migration is
+happening now", scoped and time-bounded, instead of the edge trying to infer
+it from attacker-controlled bytes.
+
+**Lesson:** chunked migration/backup imports (WMW, All-in-One WP Migration,
+Duplicator, WPvivid …) are a third "legitimately uploads PHP" shape alongside
+installers and code editors — but unlike the installer endpoints
+(`update.php`, which *is* the cookie-auth-gated handler), a plugin-specific
+`admin-ajax.php?action=…` is body-overridable for dispatch and reachable
+pre-auth, so it cannot be safely allowlisted in code. When an exemption would
+have to key on an attacker-movable routing key (`$_REQUEST`-style) *and* the
+verifying scanner reads only a bounded prefix of a body the backend consumes
+in full, the honest answer is an operator-driven, temporary exclusion — not a
+detector carve-out.
+
 ### Structural anti-patterns to check during rule review
 
 A short list. Every one of these surfaced as a real FP above; reading
@@ -797,20 +905,35 @@ Whole-WAF wins on collision. Two rule-scoped entries on the same host/path get m
 
 ```
 cfm webtop waf exclude list
-cfm webtop waf exclude add    <value> [--type host|path] [--rule N|Nxx|N-M ...]
-cfm webtop waf exclude remove <value> [--type host|path] [--rule N|Nxx|N-M ...]
+cfm webtop waf exclude add    <value> [--type host|path] [--rule N|Nxx|N-M ...] [--scope host ...]
+cfm webtop waf exclude remove <value> [--type host|path] [--rule N|Nxx|N-M ...] [--scope host ...]
 ```
 
-`<value>` is matched with `strings.Contains` (plain text) or as a glob when it
-contains any of `* ? [ ]`. `--type host` matches against the request host;
-`--type path` matches against the request path. `--type` defaults to `host`.
-Each entry is single-axis — host **or** path, not both — so to scope a path
-exclusion to one site, pick a path string that's unique to that site, or use
-a glob like `*/plexusnet/*`.
+`<value>` is matched at a domain/path **boundary** (not a raw substring), or
+as a glob when it contains any of `* ? [ ]`. For `--type host` a literal is the
+exact host or a dot-boundary subdomain suffix (`shop.gr` matches `shop.gr` and
+`www.shop.gr`, never `myshop.gr` / `shop.gr.evil.com`); for `--type path` it is
+the exact path or a path-segment prefix (`/admin` matches `/admin` and
+`/admin/x`, never `/administrator`). `--type host` matches against the request
+host; `--type path` matches against the request path. `--type` defaults to
+`host`.
+Each entry is single-axis on its `--type` — host **or** path — but `--scope`
+adds an independent host filter on top, so you can pin a path exclusion to one
+vhost without a unique path string (or a glob like `*/plexusnet/*`).
 
 Omitting `--rule` creates a **whole-WAF** entry (legacy "WAF off for this
 scope"). Pass `--rule` one or more times to create a **rule-scoped** entry
 that suppresses only the listed `waf_rule_id`s.
+
+`--scope <host>` (repeatable / comma-separated) restricts the entry to
+specific vhosts — the third axis that lets you express the exact intersection
+"rule N, on path P, for vhost H" (e.g. suppress rule 402 on
+`/wp-admin/admin-ajax.php` for one migrating site only). Omitting it leaves the
+entry admin-global (all vhosts), as before. **Admin-only in effect:** a scoped
+(cPanel) token is always pinned to its own vhost set server-side, so a
+`--scope`/`scope_hosts` value from a scoped caller is ignored — it can never
+widen or redirect an exclude to another tenant's vhost. Because the qualifier
+can only *add* a host filter, it never broadens an exclude.
 
 Rule-ID spec accepts:
 
@@ -851,13 +974,22 @@ Wrong answers, for reference:
 
 ```
 GET  /api/v1/waf/exclude/list
-POST /api/v1/waf/exclude/add?type=host&value=example.com[&rule_ids=320,3xx,310-317]
-POST /api/v1/waf/exclude/remove?type=path&value=/plexusnet/&rule_ids=201
+POST /api/v1/waf/exclude/add?type=host&value=example.com[&rule_ids=320,3xx,310-317][&scope_hosts=a.com,b.com]
+POST /api/v1/waf/exclude/remove?type=path&value=/plexusnet/&rule_ids=201[&scope_hosts=a.com]
 ```
 
 `rule_ids` is a CSV string in the same spec format as `--rule`. Empty / missing → whole-WAF entry.
 
-`GET /api/v1/waf/exclude/list` returns each entry's `rule_ids` (sorted, deduped) when set; the field is omitted otherwise.
+`scope_hosts` is a CSV of vhosts to scope the entry to (the API form of
+`--scope`). It is honoured only for an admin token; for a scoped token the
+effective scope is always the token's own vhost set, so a `scope_hosts` value
+from a scoped caller is ignored (it can never widen or redirect the entry).
+Empty / missing → admin-global (all vhosts). To remove a scope-qualified
+entry, echo the same `scope_hosts` (the list response returns each entry's
+`scope_hosts`, so the UI/CLI can round-trip it) — the entry is keyed by its
+`(type, value, scope_hosts, rule_ids)` tuple.
+
+`GET /api/v1/waf/exclude/list` returns each entry's `rule_ids` (sorted, deduped) and `scope_hosts` (sorted, deduped) when set; either field is omitted otherwise.
 
 ### Lua wiring
 

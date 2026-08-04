@@ -82,6 +82,28 @@ func validateScopedExcludeWrite(r *http.Request, typ, value string) bool {
 	return scopedExcludeHostAllowed(value, scope)
 }
 
+// effectiveExcludeScope resolves the ScopeHosts qualifier an exclude write
+// should carry. This is a HARD tenant boundary:
+//
+//   - A scoped token is ALWAYS pinned to its own context vhost set. The
+//     request cannot widen it, narrow it, or point it elsewhere — any
+//     `scope_hosts` query param from a scoped caller is ignored — so a cPanel
+//     tenant can never author an exclude that reaches another tenant's vhost.
+//   - Only an admin token (nil context scope) may pass an explicit
+//     `scope_hosts` qualifier, used to NARROW an otherwise admin-global entry
+//     to specific vhosts (e.g. suppress one WAF rule on
+//     /wp-admin/admin-ajax.php for a single site). Absent/empty => nil =>
+//     admin-global, identical to the behaviour before this param existed.
+//
+// Because the param can only ever add a host filter, it never broadens an
+// exclude beyond what the caller could already create without it.
+func effectiveExcludeScope(r *http.Request) map[string]struct{} {
+	if scope := vhostScopeFromContext(r.Context()); scope != nil {
+		return scope
+	}
+	return parseQueryVhostSet(r, "scope_hosts")
+}
+
 func filterExcludeListForScope(entries []excludeEntry, scope map[string]struct{}) []excludeEntry {
 	if len(entries) == 0 || scope == nil {
 		return entries
@@ -189,7 +211,7 @@ func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	typ, value := readExcludeParams(r)
-	scope := vhostScopeFromContext(r.Context())
+	scope := effectiveExcludeScope(r)
 	if !validateScopedExcludeWrite(r, typ, value) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
 		return
@@ -220,7 +242,7 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	typ, value := readExcludeParams(r)
-	scope := vhostScopeFromContext(r.Context())
+	scope := effectiveExcludeScope(r)
 	if !validateScopedExcludeWrite(r, typ, value) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
 		return

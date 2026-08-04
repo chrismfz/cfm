@@ -253,6 +253,104 @@ func TestChallengeExclude_ScopedAndAdmin(t *testing.T) {
 	}
 }
 
+// ── WAF exclude scope_hosts qualifier (admin narrows; scoped can't widen) ──
+
+// An admin may attach an explicit scope_hosts qualifier to narrow a path
+// exclude to specific vhosts — the minimal-surface remedy for a per-vhost
+// false positive (e.g. suppress rule 402 on /wp-admin/admin-ajax.php for one
+// migrating site only).
+func TestWAFExclude_AdminScopeHostsNarrowsPathRule(t *testing.T) {
+	e, mux := newStep3Engine(t)
+	host := "scoped-site.example.com"
+	other := "other-site.example.com"
+	path := "/wp-admin/admin-ajax.php"
+
+	rr := doRequest(mux, adminCtx(), http.MethodPost,
+		"/api/v1/waf/exclude/add?type=path&value="+path+"&scope_hosts="+host+"&rule_ids=402", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin path+scope+rule exclude add: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Suppressed on the scoped vhost — and only rule 402, WAF still runs.
+	skipAll, ids := e.wafExcludes.MatchWAFRules(host, path)
+	if skipAll {
+		t.Fatalf("rule-scoped exclude must not skip the whole WAF")
+	}
+	if _, ok := ids[402]; !ok {
+		t.Fatalf("expected rule 402 suppressed on %s, got %v", host, ids)
+	}
+	// NOT suppressed on any other vhost — the scope qualifier is doing its job.
+	if skipAll, ids := e.wafExcludes.MatchWAFRules(other, path); skipAll || len(ids) != 0 {
+		t.Fatalf("scope_hosts leaked to out-of-scope vhost %s: skipAll=%v ids=%v", other, skipAll, ids)
+	}
+}
+
+// A scoped (cPanel) token must NOT be able to point an exclude at another
+// tenant's vhost by smuggling a scope_hosts param — the effective scope is
+// always pinned to the token's own context scope, param ignored.
+func TestWAFExclude_ScopedTokenCannotWidenViaScopeHosts(t *testing.T) {
+	e, mux := newStep3Engine(t)
+	own := "own.example.com"
+	victim := "victim.example.com"
+
+	rr := doRequest(mux, scopedCtx(own), http.MethodPost,
+		"/api/v1/waf/exclude/add?type=host&value="+own+"&scope_hosts="+victim, nil)
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("scoped in-scope add should not be 403, body=%s", rr.Body.String())
+	}
+
+	// No stored entry may carry the attacker-supplied victim host in its scope.
+	for _, row := range e.WAFExcludeList() {
+		if strings.Contains(strings.ToLower(strings.Join(row.ScopeHosts, ",")), victim) {
+			t.Fatalf("scoped token widened scope via scope_hosts: entry scope=%v", row.ScopeHosts)
+		}
+	}
+	// And the exclude never fires for the victim vhost.
+	if skipAll, ids := e.wafExcludes.MatchWAFRules(victim, "/anything"); skipAll || len(ids) != 0 {
+		t.Fatalf("scoped host exclude must not affect victim vhost: skipAll=%v ids=%v", skipAll, ids)
+	}
+}
+
+// A scope-qualified entry must be removable by echoing the list-returned
+// (normalized) scope_hosts — the add/remove key symmetry the whole feature
+// rests on. Also exercises input normalization (mixed case, dup, trailing
+// comma) and a multi-host scope.
+func TestWAFExclude_ScopeQualifiedRemoveRoundTrip(t *testing.T) {
+	e, mux := newStep3Engine(t)
+	path := "/wp-admin/admin-ajax.php"
+	a := "a.example.com"
+	b := "b.example.com"
+
+	add := "/api/v1/waf/exclude/add?type=path&value=" + path +
+		"&rule_ids=402&scope_hosts=B.example.com,a.example.com,a.example.com,"
+	if rr := doRequest(mux, adminCtx(), http.MethodPost, add, nil); rr.Code != http.StatusOK {
+		t.Fatalf("add: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	for _, h := range []string{a, b} {
+		_, ids := e.wafExcludes.MatchWAFRules(h, path)
+		if _, ok := ids[402]; !ok {
+			t.Fatalf("rule 402 should be suppressed on %s, got %v", h, ids)
+		}
+	}
+
+	rows := e.WAFExcludeList()
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 stored entry, got %d (%v)", len(rows), rows)
+	}
+	// Echo exactly what the UI/CLI would from the list response.
+	rm := "/api/v1/waf/exclude/remove?type=path&value=" + path +
+		"&rule_ids=402&scope_hosts=" + strings.Join(rows[0].ScopeHosts, ",")
+	if rr := doRequest(mux, adminCtx(), http.MethodPost, rm, nil); rr.Code != http.StatusOK {
+		t.Fatalf("remove: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, ids := e.wafExcludes.MatchWAFRules(a, path); len(ids) != 0 {
+		t.Fatalf("entry should be removed, still matches on %s: %v", a, ids)
+	}
+	if got := len(e.WAFExcludeList()); got != 0 {
+		t.Fatalf("expected 0 entries after remove, got %d", got)
+	}
+}
+
 // ── WAF excludes (scoped list + scoped-write guard) ───────────
 
 func TestWAFExclude_ScopedAndAdmin(t *testing.T) {
