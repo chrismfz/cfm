@@ -374,6 +374,13 @@ func TestReadPath_VhostlessScopedTokenFailsClosed(t *testing.T) {
 		}
 	}
 
+	// Traffic-rules write (fail-open via scopeAllowsVhosts) — body-based, so
+	// checked separately. The scope gate runs before any rule validation.
+	if rr := doRequest(mux, noscope, http.MethodPost, "/api/v1/webdet/rules/add",
+		[]byte(`{"scope":{"vhosts":["victim.com"]}}`)); rr.Code != http.StatusForbidden {
+		t.Fatalf("traffic rules add: vhost-less scoped expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
 	// Filter-only list must not leak global / other-tenant entries: admin seeds
 	// a global WAF exclude, the vhost-less scoped token must see an EMPTY list
 	// (before the fix its nil scope made filterExcludeListForScope return all).
