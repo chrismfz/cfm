@@ -78,6 +78,35 @@ func TestManualWinsOverExcludeDecision(t *testing.T) {
 	}
 }
 
+// The manual-keep guard distinguishes "clearing host would delete a manual
+// entry" (manualChallengeCoversClear — the keep decision) from "host ITSELF is
+// manually challenged" (manualChallengeCovering — the re-push decision). The
+// gap matters for a www-only manual: an excluded apex whose www carries the
+// manual must be KEPT (not cleared, since ClearVhost(apex) would delete the www
+// entry) but must NOT be re-pushed as a manual challenge (the apex was never
+// manually challenged and is excluded). This documents that split.
+func TestManualKeepSelfVsSiblingCoverage(t *testing.T) {
+	e := &Engine{}
+	e.manualChal.init()
+	e.manualChal.set("www.only.gr", 24*time.Hour, "manual") // www-only manual
+
+	// Apex: clearing it WOULD delete the www manual entry → keep (don't clear)…
+	if covered, _ := e.manualChallengeCoversClear("only.gr"); !covered {
+		t.Fatalf("apex clear must be blocked by the www-only manual (coversClear)")
+	}
+	// …but the apex itself is NOT manually challenged → must not be re-pushed.
+	if selfOK, _, _ := e.manualChallengeCovering("only.gr"); selfOK {
+		t.Fatalf("apex must not be self-covered by a www-only manual (covering)")
+	}
+	// The www host is both: kept AND re-pushed.
+	if covered, _ := e.manualChallengeCoversClear("www.only.gr"); !covered {
+		t.Fatalf("www clear must be blocked (coversClear)")
+	}
+	if selfOK, _, _ := e.manualChallengeCovering("www.only.gr"); !selfOK {
+		t.Fatalf("www must be self-covered (covering)")
+	}
+}
+
 // tripReason names the trigger for the suppressed_by_exclude audit
 // line — it must mirror the auto-suspicious scorer's trip conditions.
 func TestTripReason(t *testing.T) {
