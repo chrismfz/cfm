@@ -253,6 +253,66 @@ func (e *Engine) shouldLogVhostSuppress(host string, now time.Time) bool {
     return true
 }
 
+// keepManualOverSuppression is the shared "manual wins" handling for the
+// per-host exclude and ignore guards (kind is "exclude"/"ignore"). The caller
+// has already decided NOT to ClearVhost (manualChallengeCoversClear was true);
+// this does the rest:
+//
+//   - clears the auto flag under vhostMu, so the display doesn't claim the auto
+//     scorer owns a row the manual challenge is really holding (both modes);
+//   - in edge (bridge) mode, when the host ITSELF carries an active manual
+//     challenge, refreshes it with the host's OWN remaining TTL (not the
+//     cross-variant max, which would over-extend a shorter-lived variant) and
+//     re-grants the per-IP bypasses the bottom manual-push path grants
+//     (IGNORE_IPS + dynamic chalExclude), so an excluded host under a manual
+//     challenge treats those IPs the same way every other manual host does;
+//   - throttles its log line to once per holddown per host (matching
+//     suppressed_by_exclude) so a candidate host doesn't spam the log every tick.
+//
+// When only a SIBLING variant is manual-covered (e.g. host is an excluded apex
+// whose www carries the manual), it deliberately does NOT push a challenge on
+// host — that would challenge an excluded host that was never manually
+// challenged. The caller's skipped clear already preserves the sibling's entry.
+// In DNAT mode (no bridge) there is no bridge entry to keep or refresh, so it
+// only clears the auto flag and stays silent rather than logging a keep it did
+// not perform.
+func (e *Engine) keepManualOverSuppression(host, kind string, now time.Time, ips map[string]int) {
+    func() {
+        e.vhostMu.Lock()
+        defer e.vhostMu.Unlock()
+        if e.vhostUnderAttack[host] {
+            e.vhostUnderAttack[host] = false
+            e.vhostLastChange[host] = now
+        }
+    }()
+    if e.nginxBridge == nil {
+        return
+    }
+    selfOK, selfExp, _ := e.manualChallengeCovering(host)
+    if !selfOK {
+        return
+    }
+    rem := time.Until(selfExp)
+    if rem <= 0 {
+        return
+    }
+    if e.cfg.ChallengeLog && e.shouldLogVhostSuppress("keepmanual:"+host, now) {
+        logging.LogfCHALLENGES(
+            "[challenge][vhost] action=kept_manual_over_%s host=%s manual_expires_in=%s note=%s_suppresses_auto_only",
+            kind, host, rem.Round(time.Second), kind,
+        )
+    }
+    // Same per-IP bypasses as the bottom manual-push path: IGNORE_IPS and
+    // dynamic chalExclude matches slip through the vhost-wide challenge.
+    bypTTL := rem + 2*time.Minute
+    for ipStr := range ips {
+        if e.isBypassed(ipStr) || e.isExcluded(ipStr, host, "", "CHALLENGE_VHOST") {
+            e.nginxBridge.BypassIPTemp(ipStr, bypTTL)
+        }
+    }
+    e.nginxBridge.ChallengeVhostWithReason(host, rem, "manual")
+}
+
 
 func compileChalRules(list []string, defCount int) []chalRule {
 	if defCount <= 0 {
@@ -1138,26 +1198,36 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
 
         // Absolute bypass wins over everything.
         if e.hostBypassed(pat) {
-            e.nginxBridge.ClearVhost(pat)
+            e.nginxBridge.ClearVhost(pat, "cfg_host_bypass")
             continue
         }
 
                 // ignore list wins (only meaningful for exact hosts)
-                // If someone puts an exact host in IGNORE, don't push it.
+                // If someone puts an exact host in IGNORE, don't push it — unless
+                // an explicit manual challenge covers it (manual wins over ignore,
+                // same as the per-host guard). Skipping the clear here also avoids
+                // a per-tick clear→re-push churn when the candidate-loop guard
+                // keeps the same manual.
                 if len(e.cfg.ChallengeVHostIgnore) > 0 && hostMatchAny(pat, e.cfg.ChallengeVHostIgnore) {
-                    e.nginxBridge.ClearVhost(pat)
+                    if covered, _ := e.manualChallengeCoversClear(pat); !covered {
+                        e.nginxBridge.ClearVhost(pat, "cfg_ignored")
+                    }
                     continue
                 }
-                // Dynamic Challenge-exclude wins over the CHALLENGE_VHOST list too.
+                // Dynamic Challenge-exclude wins over the CHALLENGE_VHOST list too
+                // (manual still wins over the exclude — don't tear it down here).
                 if e.hostChallengeExcluded(pat) {
+                    manualCovered, _ := e.manualChallengeCoversClear(pat)
                     // Throttle key is prefixed "cfg:" so this low-detail line does
                     // NOT share a slot with — and starve — the richer auto-suspicious
                     // suppressed_by_exclude line (keyed by bare host) for a host that
                     // is both in CHALLENGE_VHOST and an auto candidate.
-                    if e.cfg.ChallengeLog && e.shouldLogVhostSuppress("cfg:"+pat, now) {
+                    if !manualCovered && e.cfg.ChallengeLog && e.shouldLogVhostSuppress("cfg:"+pat, now) {
                         logging.LogfCHALLENGES("[challenge][vhost] action=suppressed_by_exclude host=%s would_reason=vhost_config note=host_in_challenge_excludes", pat)
                     }
-                    e.nginxBridge.ClearVhost(pat)
+                    if !manualCovered {
+                        e.nginxBridge.ClearVhost(pat, "cfg_excluded")
+                    }
                     continue
                 }
                 // reason "vhost_config": pushed from the CHALLENGE_VHOST config
@@ -1231,8 +1301,18 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
 
 
-    // Absolute bypass wins over all vhost-wide challenge actions.
+    // Absolute bypass wins over all vhost-wide challenge actions — INCLUDING an
+    // operator manual challenge. bypass (cfm.allow) is the "never touch this
+    // host" safety valve, so it is deliberately NOT overridden by manual (unlike
+    // exclude/ignore below). But a manual challenge silently disappearing here
+    // would be baffling, so log the conflict loudly when it happens.
     if e.hostBypassed(host) {
+        if covered, mexp := e.manualChallengeCoversClear(host); covered && e.cfg.ChallengeLog && e.shouldLogVhostSuppress("bypassmanual:"+host, now) {
+            logging.LogfCHALLENGES(
+                "[challenge][vhost] action=manual_suppressed_by_bypass host=%s manual_expires_in=%s note=bypass_is_absolute",
+                host, time.Until(mexp).Round(time.Second),
+            )
+        }
         if haveVhostAuto {
             wasOn := false
             func() {
@@ -1249,7 +1329,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                     logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=host_bypass", host)
                 }
                 if e.nginxBridge != nil {
-                    e.nginxBridge.ClearVhost(host)
+                    e.nginxBridge.ClearVhost(host, "host_bypass")
                 }
                 if e.cfg.ChallengeNotify {
                     a := core.Alert{
@@ -1264,7 +1344,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
         }
         if e.nginxBridge != nil {
-            e.nginxBridge.ClearVhost(host)
+            e.nginxBridge.ClearVhost(host, "host_bypass")
         }
         continue
     }
@@ -1276,6 +1356,18 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
     // to exclude a host has proof of exactly what protection they opted out of
     // ("we would have challenged N unique IPs on this vhost — you excluded it").
     if e.hostChallengeExcluded(host) {
+        // Manual wins over exclude: an explicit operator challenge is kept and
+        // refreshed; a challenge-exclude only governs AUTO challenges. Handle it
+        // up front so the auto-suppression path below (which clears the bridge
+        // entry and emits a misleading "challenge lifted" alert) does not run.
+        if manualCovered, _ := e.manualChallengeCoversClear(host); manualCovered {
+            var ips map[string]int
+            if ha := short[host]; ha != nil {
+                ips = ha.ips
+            }
+            e.keepManualOverSuppression(host, "exclude", now, ips)
+            continue
+        }
         if haveVhostAuto {
             if e.cfg.ChallengeLog && e.longwin != nil {
                 row := SuspiciousRow{Host: host}
@@ -1320,64 +1412,60 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
         }
         if e.nginxBridge != nil {
-            e.nginxBridge.ClearVhost(host)
+            e.nginxBridge.ClearVhost(host, "excluded")
         }
         continue
     }
 
 
-            // Ignore list wins for vhost-wide actions
+            // Ignore list wins for vhost-wide actions — EXCEPT over an explicit
+            // manual challenge, which is kept and refreshed (same policy as
+            // exclude; ignore governs AUTO only).
             if len(e.cfg.ChallengeVHostIgnore) > 0 && hostMatchAny(host, e.cfg.ChallengeVHostIgnore) {
+                if manualCovered, _ := e.manualChallengeCoversClear(host); manualCovered {
+                    var ips map[string]int
+                    if ha := short[host]; ha != nil {
+                        ips = ha.ips
+                    }
+                    e.keepManualOverSuppression(host, "ignore", now, ips)
+                    continue
+                }
                 // If auto-state is currently ON, turn it off and emit OFF (reason=ignored).
                 if haveVhostAuto {
-
-
-
-
-                        wasOn := false
-                        func() {
-                            e.vhostMu.Lock()
-                            defer e.vhostMu.Unlock()
-                            if e.vhostUnderAttack[host] {
-                                wasOn = true
-                                e.vhostUnderAttack[host] = false
-                                e.vhostLastChange[host] = now
-                            }
-                        }()
-
-                        if wasOn {
-                            if e.cfg.ChallengeLog {
-                                logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=ignored", host)
-                            }
-
-
-                            if e.nginxBridge != nil {
-                                e.nginxBridge.ClearVhost(host)
-                            }
-
-
-                            if e.cfg.ChallengeNotify {
-                                a := core.Alert{
-                                    When:  now,
-                                    Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
-                                    Key:   host,
-                                    Count: 0,
-                                    Extra: map[string]string{
-                                        "host":   host,
-                                        "action": "auto_off",
-                                        "reason": "ignored",
-                                    },
-                                }
-                                select { case out <- a: default: }
-
-                           if e.nginxBridge != nil {
-                               e.nginxBridge.ClearVhost(host)
-                           }
-
-
-                            }
+                    wasOn := false
+                    func() {
+                        e.vhostMu.Lock()
+                        defer e.vhostMu.Unlock()
+                        if e.vhostUnderAttack[host] {
+                            wasOn = true
+                            e.vhostUnderAttack[host] = false
+                            e.vhostLastChange[host] = now
                         }
-		}
+                    }()
+
+                    if wasOn {
+                        if e.cfg.ChallengeLog {
+                            logging.LogfCHALLENGES("[challenge][vhost] action=auto_off host=%s reason=ignored", host)
+                        }
+                        if e.nginxBridge != nil {
+                            e.nginxBridge.ClearVhost(host, "ignored")
+                        }
+                        if e.cfg.ChallengeNotify {
+                            a := core.Alert{
+                                When:  now,
+                                Kind:  core.AlertKind("WEB/VHOST_CHALLENGE_OFF"),
+                                Key:   host,
+                                Count: 0,
+                                Extra: map[string]string{
+                                    "host":   host,
+                                    "action": "auto_off",
+                                    "reason": "ignored",
+                                },
+                            }
+                            select { case out <- a: default: }
+                        }
+                    }
+                }
 
                 continue
             }
@@ -1700,19 +1788,31 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
                         // the candidate set). Keep the bridge entry while a
                         // manual challenge covers ANY variant this clear would
                         // delete (ClearVhost expands apex→www, so an apex clear
-                        // also removes a www-only manual entry); only the auto
-                        // flag turns off.
+                        // also removes a www-only manual entry).
                         if covered, mexp := e.manualChallengeCoversClear(host); covered {
+                            // The auto scorer cooled but the manual challenge is
+                            // STILL in force: only the auto flag turns off. Do
+                            // NOT clear, and do NOT emit a "challenge lifted"
+                            // signal — neither the action=auto_off log line nor
+                            // the WEB/VHOST_CHALLENGE_OFF alert — because the
+                            // challenge did not lift (the manual holds it, and
+                            // the bottom manual-push refreshes it this same
+                            // tick). RecordVhostAuto still runs to record the
+                            // cooled score as evidence; the store keeps the
+                            // manual top-line (LastAction=auto_off_keep_manual).
                             if e.cfg.ChallengeLog {
                                 logging.LogfCHALLENGES(
                                     "[challenge][vhost] action=auto_off_keep_manual host=%s manual_expires_in=%s",
                                     host, time.Until(mexp).Round(time.Second),
                                 )
                             }
-                        } else if e.nginxBridge != nil {
-                            e.nginxBridge.ClearVhost(host)
+                            e.RecordVhostAuto(host, false, row, on, off, hold)
+                            return false
                         }
 
+                        if e.nginxBridge != nil {
+                            e.nginxBridge.ClearVhost(host, "auto_off")
+                        }
 
                         if e.cfg.ChallengeLog {
                             logging.LogfCHALLENGES(
