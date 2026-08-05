@@ -100,7 +100,11 @@ this, so **no manual token handling in Claude** is needed.
    unauthenticated request with `401` +
    `WWW-Authenticate: … resource_metadata="https://<host>/cfm-admin/.well-known/oauth-protected-resource"`,
    which Claude follows (RFC 9728) → registers a client → opens a **consent page**
-   in *your* browser.
+   in *your* browser. Authorization-server metadata is served both at the RFC 8414
+   path (`/.well-known/oauth-authorization-server`) and, as an alias, at the OIDC
+   discovery path (`/.well-known/openid-configuration`) — the claude.ai connector
+   probes the OIDC URL first, so serving it there is what lets registration
+   complete (all three are proxied under `/cfm-admin/` by the edge; no edge change).
 3. On the consent page (`/cfm-admin/mcp/oauth/authorize`), **paste your
    `MCP_TOKEN`** and click **Approve**. Claude receives a **read-only** access
    token bound to this node.

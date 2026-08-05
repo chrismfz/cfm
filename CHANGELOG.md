@@ -193,6 +193,18 @@ back-filled here — see the git/PR history for that period.
   indistinguishable from the attack at request time — so no safe enforcement
   rule exists at this endpoint. Only the logonly detector above remains.
 
+### Fixed
+- **MCP OAuth: serve `/.well-known/openid-configuration` (OIDC discovery) as an
+  alias of the RFC 8414 authorization-server metadata.** The claude.ai remote
+  connector probes the OIDC discovery URL when locating the
+  registration/authorize/token endpoints; CFM only served the RFC 8414 doc
+  (`oauth-authorization-server`), so the OIDC probe fell through to a `401` and
+  the connector aborted dynamic client registration ("Couldn't register with …
+  sign-in service"). The alias returns the same OAuth metadata, letting
+  registration complete. No edge-config change (the edge already proxies
+  `/cfm-admin/.well-known/*` to the daemon); static-bearer clients were never
+  affected. Test: `TestOAuthOIDCMetadataAlias`.
+
 ### Security
 - **`/unblock` and `/search` are now admin-only (`adminOnlyHandler`).** Both
   root-level routes were registered with a bare handler, i.e. protected only by

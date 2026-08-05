@@ -150,6 +150,37 @@ func TestOAuthASMetadata(t *testing.T) {
 	}
 }
 
+// TestOAuthOIDCMetadataAlias verifies /.well-known/openid-configuration is
+// served as an alias of the RFC 8414 AS metadata. The claude.ai remote
+// connector probes the OIDC discovery URL first; before the alias it hit a
+// 401 and aborted dynamic client registration. It must return the same
+// authorize/token/registration endpoints as oauth-authorization-server.
+func TestOAuthOIDCMetadataAlias(t *testing.T) {
+	ts := newTestServer(t, nil)
+	res, err := ts.Client().Get(ts.URL + "/.well-known/openid-configuration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("openid-configuration status = %d, want 200", res.StatusCode)
+	}
+	var m map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&m); err != nil {
+		t.Fatal(err)
+	}
+	base := "https://" + hostOf(ts) + "/cfm-admin"
+	if m["issuer"] != base {
+		t.Errorf("issuer = %v, want %q", m["issuer"], base)
+	}
+	if m["authorization_endpoint"] != base+"/mcp/oauth/authorize" {
+		t.Errorf("authorization_endpoint = %v", m["authorization_endpoint"])
+	}
+	if m["registration_endpoint"] != base+"/mcp/oauth/register" {
+		t.Errorf("registration_endpoint = %v", m["registration_endpoint"])
+	}
+}
+
 // TestOAuthFlowMintsUsableToken drives the full register → authorize → token
 // (authorization_code + PKCE S256) flow and confirms the minted access token
 // passes the /mcp bearer gate.

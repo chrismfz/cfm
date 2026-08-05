@@ -44,6 +44,16 @@ import (
 const (
 	oauthProtectedResourcePath = "/.well-known/oauth-protected-resource"
 	oauthASMetadataPath        = "/.well-known/oauth-authorization-server"
+	// oauthOIDCMetadataPath is served as an alias of the RFC 8414 AS metadata.
+	// The MCP spec advertises authorization-server metadata via RFC 8414
+	// (oauth-authorization-server), but several OAuth clients — including the
+	// claude.ai remote connector — probe the OIDC discovery URL
+	// (openid-configuration) first when locating the registration/authorize/
+	// token endpoints. Without this alias that probe hit the daemon and fell
+	// through to a 401 (not a public path), which the client read as "auth
+	// required to read discovery" and aborted registration. Serving the same
+	// OAuth metadata here lets the OIDC-first probe succeed directly.
+	oauthOIDCMetadataPath = "/.well-known/openid-configuration"
 	oauthRegisterPath          = "/mcp/oauth/register"
 	oauthAuthorizePath         = "/mcp/oauth/authorize"
 	oauthTokenPath             = "/mcp/oauth/token"
@@ -136,6 +146,8 @@ func (s *oauthServer) resourceMetadataURL(r *http.Request) string {
 func (s *oauthServer) register(mux *http.ServeMux) {
 	mux.HandleFunc(oauthProtectedResourcePath, s.handleProtectedResource)
 	mux.HandleFunc(oauthASMetadataPath, s.handleASMetadata)
+	mux.HandleFunc(oauthOIDCMetadataPath, s.handleASMetadata) // OIDC-discovery alias
+
 	mux.HandleFunc(oauthRegisterPath, s.handleRegister)
 	mux.HandleFunc(oauthAuthorizePath, s.handleAuthorize)
 	mux.HandleFunc(oauthTokenPath, s.handleToken)

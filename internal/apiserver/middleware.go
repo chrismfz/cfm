@@ -165,7 +165,8 @@ func isPublicPath(r *http.Request) bool {
 	// OAuth gate), so they bypass session/token auth here. See internal/mcpserver.
 	if path == "/mcp" || strings.HasPrefix(path, "/mcp/") ||
 		path == "/.well-known/oauth-protected-resource" ||
-		path == "/.well-known/oauth-authorization-server" {
+		path == "/.well-known/oauth-authorization-server" ||
+		path == "/.well-known/openid-configuration" {
 		return true
 	}
 	return false
