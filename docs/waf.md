@@ -557,6 +557,80 @@ verifying scanner reads only a bounded prefix of a body the backend consumes
 in full, the honest answer is an operator-driven, temporary exclusion — not a
 detector carve-out.
 
+### FP case 7 — `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` on the String Locator file editor
+
+**Shape:** repeated `block` events (rule 402, reason
+`WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG`) on
+`POST /wp-json/string-locator/v1/save`, from a single real authenticated admin
+(e.g. 2.85.210.197, AS6799 OTEnet — the same operator as case 6, different
+site/plugin). Referer is the plugin's own editor page and the IP has a live
+wp-admin session around the hits. After the saves are blocked the admin falls
+back to cPanel File Manager to edit the file — the tell that the block disrupted
+legitimate work.
+
+**Root cause:** String Locator is an in-browser theme/plugin **file editor**: it
+searches PHP source across the install and, on Save, POSTs the *entire file being
+edited* (`header.php` / `footer.php` / `functions.php` …) back to its REST
+endpoint. That body starts with `<?php`, so rule 402's byte scan fires on the
+content that is the editor's whole purpose. (The search leg can also carry PHP
+tokens like `<?php` / `$_POST`, since searching *for* them is the point.) Same
+class as the installer / Code Snippets carve-outs.
+
+**Fix — allowlist in code (unlike case 6).** Added to
+`is_known_legit_php_upload_endpoint` (`configs/lua/cfm_waf_util.lua`), keyed on
+the plugin's REST namespace prefix:
+
+```
+if u:match("^/wp%-json/string%-locator/") then return true end
+```
+
+Like every entry in that helper, matching stands down the full **body-PHP
+scanner set** on the path — the upload scanners **401** (filename), **402**
+(content), **403** (obfuscation) and the **431-436** and **439** `WAF_BACKDOOR`
+body detectors — because a saved theme/plugin file is arbitrary PHP that trips
+more than a bare `<?php` (a save whose content used `$_POST` would otherwise eat
+a 434 block on the next click). Every **URI-based** rule (traversal, XSS, SQLi,
+RCE, the CVE detectors, long-path …) still runs, as do rule **414** (php-in-zip,
+gated by a separate media-asset allowlist) and **437/438** (encoded-opener,
+which keep their own `/wp-admin/` carve-out).
+
+**Why this one is safe in code but the WMW migration (case 6) is not.** The two
+rejected-approach failures of case 6 both turn on the *discriminator* being
+attacker-controlled at the edge — neither applies here:
+
+1. *Routing key.* WMW is keyed on `admin-ajax.php?action=WMW_import`, and
+   admin-ajax dispatches on `$_REQUEST['action']`, which a POST-body field
+   overrides (PHP `request_order=GP`) — the query action is forgeable. String
+   Locator is keyed on the **REST request path**, which is exactly what routes
+   the request; no body field makes PHP dispatch a *different* handler. The
+   discriminator is unforgeable and always fully visible (it is in the request
+   line, not past the 32 KB body window).
+2. *Reachability.* `admin-ajax.php` also serves **unauthenticated**
+   `wp_ajax_nopriv_*` handlers, so a pre-auth attacker can reach it; exempting
+   rule 402 there (on a forgeable key) opens a real pre-auth webshell-upload
+   path. String Locator's `/save` sits behind the plugin's own
+   `permission_callback` (an `edit_themes`/`manage_options` capability) — the
+   same trust boundary we already accept for the installer and Code Snippets.
+   We do not bypass that check; we only stand down the *body-PHP scanners*, and
+   every URI-based WAF rule still runs.
+
+**Note — we do NOT (and cannot) authenticate the caller at the edge.** The
+carve-out does not try to prove the request is "really an admin", and does not
+need to: on a site *without* the plugin the path 404s (the exemption is inert);
+an unauthenticated caller is rejected by the plugin's own permission check (body
+never written); and an attacker who *does* hold `edit_themes` can already write
+PHP via the native WP Theme Editor, so rule 402 on this one path was never the
+load-bearing control. A WordPress logged-in cookie can't be validated here
+anyway — it is HMAC-signed with per-site `wp-config.php` secrets plus per-user
+session tokens in that site's DB, none of which the shared edge holds, and its
+mere presence is attacker-supplied. The WAF sits *below* app auth by design;
+safety here comes from the exemption being narrow (one path, PHP-body scanners
+only) over an endpoint that carries its own downstream enforcement — not from
+the edge guessing who is calling. This is the general rule for a path-keyed
+PHP-upload carve-out: it is only safe when the target endpoint enforces its own
+auth and standing down the body-PHP scanners there grants nothing an
+already-authorized user couldn't do by design.
+
 ### Structural anti-patterns to check during rule review
 
 A short list. Every one of these surfaced as a real FP above; reading
