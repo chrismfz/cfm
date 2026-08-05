@@ -1044,7 +1044,7 @@ func (s *sectionSink) challengeEnrichSuffix(ip string) string {
 	if ip == "" || s.enr == nil {
 		return ""
 	}
-	r := s.enr.Lookup(ip)
+	r := s.enr.LookupGeoFast(ip) // Country/ASN suffix only; avoid blocking PTR rDNS
 	parts := []string{}
 
 	// AS first

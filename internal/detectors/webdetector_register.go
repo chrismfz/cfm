@@ -307,7 +307,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 				// Best-effort enrichment using the same enricher as the engine.
 				suffix := ""
 				if enr := w.eng.Enricher(); enr != nil {
-					r := enr.Lookup(ip)
+					r := enr.LookupGeoFast(ip) // Country/ASN only; avoid blocking PTR rDNS
 					parts := []string{}
 					if r.ASN > 0 {
 						if r.ASNName != "" {
@@ -388,7 +388,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 					var asn uint
 					var asnName, country string
 					if enr := w.eng.Enricher(); enr != nil {
-						r := enr.Lookup(ip)
+						r := enr.LookupGeoFast(ip) // Country/ASN only; avoid blocking PTR rDNS
 						asn = r.ASN
 						asnName = r.ASNName
 						country = r.Country

@@ -3792,7 +3792,7 @@ func (e *Engine) TrafficRuleSimulate(in TrafficRuleEvalInput) TrafficRuleEvalRes
 		return TrafficRuleEvalResult{Matched: false}
 	}
 	if strings.TrimSpace(in.Country) == "" && strings.TrimSpace(in.IP) != "" && e.enr != nil {
-		if geo := e.enr.Lookup(strings.TrimSpace(in.IP)); strings.TrimSpace(geo.Country) != "" {
+		if geo := e.enr.LookupGeoFast(strings.TrimSpace(in.IP)); strings.TrimSpace(geo.Country) != "" { // Country only; avoid blocking PTR rDNS
 			in.Country = geo.Country
 		}
 	}

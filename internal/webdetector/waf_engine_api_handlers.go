@@ -304,23 +304,7 @@ func toSortedTopIPs(m map[string]int, n int, enrichEnabled bool, e *Engine) []wa
 		if ip == "" {
 			continue
 		}
-		row := wafTopIPValue{Key: ip, Count: v}
-		if enrichEnabled && e != nil && e.enr != nil && net.ParseIP(ip) != nil {
-			geo := e.enr.Lookup(ip)
-			if geo.PTR != "" {
-				row.PTR = geo.PTR
-			}
-			if geo.Country != "" {
-				row.Country = geo.Country
-			}
-			if geo.ASN != 0 {
-				row.ASN = geo.ASN
-			}
-			if geo.ASNName != "" {
-				row.ASNName = geo.ASNName
-			}
-		}
-		out = append(out, row)
+		out = append(out, wafTopIPValue{Key: ip, Count: v})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Count == out[j].Count {
@@ -328,10 +312,34 @@ func toSortedTopIPs(m map[string]int, n int, enrichEnabled bool, e *Engine) []wa
 		}
 		return out[i].Count > out[j].Count
 	})
-	if n <= 0 || len(out) <= n {
-		return out
+	if n > 0 && len(out) > n {
+		out = out[:n]
 	}
-	return out[:n]
+	// Enrich only the top-N survivors. PTR reverse-DNS is up to ~1s per IP, so
+	// enriching before truncation paid that cost for every unique IP in the
+	// window and then discarded most of the rows. top_ips genuinely displays the
+	// PTR, so we keep the full Lookup here — but only for the handful we return.
+	if enrichEnabled && e != nil && e.enr != nil {
+		for i := range out {
+			if net.ParseIP(out[i].Key) == nil {
+				continue
+			}
+			geo := e.enr.Lookup(out[i].Key)
+			if geo.PTR != "" {
+				out[i].PTR = geo.PTR
+			}
+			if geo.Country != "" {
+				out[i].Country = geo.Country
+			}
+			if geo.ASN != 0 {
+				out[i].ASN = geo.ASN
+			}
+			if geo.ASNName != "" {
+				out[i].ASNName = geo.ASNName
+			}
+		}
+	}
+	return out
 }
 
 func toSortedTop(m map[string]int, n int) []wafTopValue {

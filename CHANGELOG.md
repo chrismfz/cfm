@@ -194,6 +194,17 @@ back-filled here — see the git/PR history for that period.
   rule exists at this endpoint. Only the logonly detector above remains.
 
 ### Fixed
+- **Dropped wasteful blocking reverse-DNS from several hot/read enrich paths
+  (fleet-wide latency).** Audited every `Enricher.Lookup` call (which does a PTR
+  reverse-DNS, up to ~1s/IP) and switched the sites that only use Country/ASN and
+  discard the PTR to the PTR-free `LookupGeoFast`: the challenge-solved and
+  WAF-trigger detector hooks (per event), leniency country/ASN matching, the
+  autoblock challenge enrich-suffix, the history-events API per-row enrich, and
+  the traffic-rule country simulate. Additionally, WAF `top_ips` now resolves PTR
+  **after** truncating to the top-N instead of for every unique IP in the window
+  (behaviour-identical output, far fewer rDNS calls). Per-alert detector display
+  paths that actually show PTR, and the FCrDNS challenge-exclude matcher, keep the
+  full `Lookup` deliberately. No output changes.
 - **WAF engine summary (`/api/v1/waf/engine/summary?enrich=1`) no longer does a
   blocking reverse-DNS per distinct IP — fixes multi-minute latency / MCP 60s
   timeouts.** The per-row enrich branch called `Enricher.Lookup` (which performs a
