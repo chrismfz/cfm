@@ -36,8 +36,12 @@ func newTickTestEngine(t *testing.T) *Engine {
 	if e.vhostLastChange == nil {
 		e.vhostLastChange = map[string]time.Time{}
 	}
-	// A file-backed store (NewEngine's default path is empty, where Add is a
-	// no-op) so exclude Add actually persists for the guard to see.
+	// Use an isolated tempdir-backed exclude store. NewEngine's default store
+	// (via FillDefaults) points at the SHARED real path
+	// /var/lib/cfm/webdetector_challenge_excludes.json and its Add persists
+	// there, so tests sharing it both pollute a system path and see
+	// non-deterministic "already exists" Add failures across runs. A per-test
+	// tempdir keeps Add deterministic and writes nothing outside the test.
 	e.challengeExcludes = newExcludeStore(filepath.Join(t.TempDir(), "ch.json"))
 	return e
 }
