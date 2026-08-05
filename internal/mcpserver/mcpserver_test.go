@@ -10,26 +10,40 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // fakeDispatch records the last in-process read it was asked to perform and
 // returns a canned body, so tests can assert which endpoint a tool hit.
 type fakeDispatch struct {
+	mu        sync.Mutex // guards the last* fields (security_overview dispatches concurrently)
 	lastPath  string
 	lastQuery url.Values
 	body      []byte
 	status    int
+	delay     time.Duration // if >0, fn blocks this long (honouring ctx) before returning
 }
 
-func (f *fakeDispatch) fn(_ context.Context, path string, q url.Values) (int, []byte, error) {
+func (f *fakeDispatch) fn(ctx context.Context, path string, q url.Values) (int, []byte, error) {
+	f.mu.Lock()
 	f.lastPath = path
 	f.lastQuery = q
 	body := f.body
+	status := f.status
+	delay := f.delay
+	f.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		}
+	}
 	if body == nil {
 		body = []byte(`{"ok":true}`)
 	}
-	status := f.status
 	if status == 0 {
 		status = http.StatusOK
 	}
@@ -206,6 +220,35 @@ func TestMCPBehindProxyNonLoopbackHost(t *testing.T) {
 	}
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+}
+
+// TestSecurityOverviewSectionBudget verifies a slow section degrades to a
+// per-section timeout error instead of hanging the whole composed call past the
+// client timeout. Sections run concurrently and each is capped by
+// overviewSectionBudget, shrunk here so the test is fast.
+func TestSecurityOverviewSectionBudget(t *testing.T) {
+	orig := overviewSectionBudget
+	overviewSectionBudget = 30 * time.Millisecond
+	t.Cleanup(func() { overviewSectionBudget = orig })
+
+	fd := &fakeDispatch{delay: 3 * time.Second} // far exceeds the budget
+	ts := newTestServer(t, fd)
+	start := time.Now()
+	res, body := mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"security_overview","arguments":{}}}`)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	if strings.Contains(body, `"isError":true`) {
+		t.Fatalf("overview should stay a valid result, got isError: %s", body)
+	}
+	if !strings.Contains(body, "section timed out") {
+		t.Fatalf("expected a per-section timeout marker, got: %s", body)
+	}
+	// Concurrent + budgeted: must return well under the sum of five 3s delays.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("composed call took %s; sections not bounded/concurrent", elapsed)
 	}
 }
 

@@ -11,9 +11,18 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// overviewSectionBudget bounds how long any single security_overview section may
+// take. The sections run concurrently (see registerSecurityOverview), so the
+// tool's latency is ~the slowest section rather than the sum of all five; this
+// caps a stuck/slow read so it degrades to an error object instead of blowing the
+// MCP client's ~60s per-call timeout. A var so tests can shrink it.
+var overviewSectionBudget = 25 * time.Second
 
 var readOnly = &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()}
 
@@ -62,19 +71,60 @@ func registerSecurityOverview(srv *mcp.Server, d Deps) {
 		Name:        "security_overview",
 		Description: "Headline security picture for this CFM node in one call: system health, recent WAF activity (last hour), active challenged vhosts, current firewall blocks, and top suspicious hosts. Start here for \"what's going on right now?\", then drill in with the more specific tools.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
-		out := map[string]any{
-			"health":           section(ctx, d, "/api/v1/health/snapshot", nil),
-			"waf_last_hour":    section(ctx, d, "/api/v1/waf/engine/summary", url.Values{"hours": {"1"}, "top": {"10"}, "enrich": {"1"}}),
-			"challenge_vhosts": section(ctx, d, "/api/v1/challenge/vhosts", url.Values{"status": {"active"}, "mode": {"all"}, "limit": {"100"}}),
-			"firewall_blocks":  section(ctx, d, "/api/v1/firewall/list", nil),
-			"suspicious_hosts": section(ctx, d, "/api/v1/webdet/suspicious", url.Values{"limit": {"20"}}),
+		secs := []struct {
+			key, path string
+			q         url.Values
+		}{
+			{"health", "/api/v1/health/snapshot", nil},
+			{"waf_last_hour", "/api/v1/waf/engine/summary", url.Values{"hours": {"1"}, "top": {"10"}, "enrich": {"1"}}},
+			{"challenge_vhosts", "/api/v1/challenge/vhosts", url.Values{"status": {"active"}, "mode": {"all"}, "limit": {"100"}}},
+			{"firewall_blocks", "/api/v1/firewall/list", nil},
+			{"suspicious_hosts", "/api/v1/webdet/suspicious", url.Values{"limit": {"20"}}},
 		}
+		// Run the sections concurrently and cap each with overviewSectionBudget, so
+		// the composed call's latency is ~the slowest section (not the sum) and a
+		// single slow endpoint degrades to a per-section error instead of blowing
+		// the MCP client's ~60s timeout for the whole tool.
+		out := make(map[string]any, len(secs))
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for _, s := range secs {
+			wg.Add(1)
+			go func(key, path string, q url.Values) {
+				defer wg.Done()
+				res := sectionBudgeted(ctx, d, path, q)
+				mu.Lock()
+				out[key] = res
+				mu.Unlock()
+			}(s.key, s.path, s.q)
+		}
+		wg.Wait()
 		b, err := marshal(out)
 		if err != nil {
 			return nil, nil, err
 		}
 		return textResult(b), nil, nil
 	})
+}
+
+// sectionBudgeted runs one composed-tool section under overviewSectionBudget,
+// returning its body or an {"error":...} object if it overruns — so one slow read
+// can't hold the whole composed call past the client timeout. The dispatch runs
+// on a child context (best-effort cancellation for ctx-aware handlers); the
+// buffered channel lets a late-returning dispatch finish without leaking a blocked
+// goroutine.
+func sectionBudgeted(ctx context.Context, d Deps, path string, q url.Values) json.RawMessage {
+	cctx, cancel := context.WithTimeout(ctx, overviewSectionBudget)
+	defer cancel()
+	ch := make(chan json.RawMessage, 1)
+	go func() { ch <- section(cctx, d, path, q) }()
+	select {
+	case res := <-ch:
+		return res
+	case <-cctx.Done():
+		e, _ := json.Marshal(map[string]string{"error": "section timed out"})
+		return e
+	}
 }
 
 // section runs one read endpoint for a composed tool, returning its body as raw

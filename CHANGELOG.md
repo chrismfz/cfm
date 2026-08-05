@@ -194,6 +194,14 @@ back-filled here — see the git/PR history for that period.
   rule exists at this endpoint. Only the logonly detector above remains.
 
 ### Fixed
+- **MCP `security_overview` now runs its five sections concurrently, each under a
+  timeout budget.** The composed tool used to fetch health, WAF, challenge,
+  firewall and suspicious sections sequentially, so its latency was the sum and a
+  single slow read (e.g. the WAF summary) could blow the MCP client's ~60s call
+  timeout and sink the whole tool. Sections now run in parallel and each degrades
+  to a per-section `{"error":"section timed out"}` object, so the tool returns
+  bounded partial data instead of failing. Test: `TestSecurityOverviewSectionBudget`.
+  (Does not by itself fix the underlying WAF-summary latency — see below/roadmap.)
 - **MCP: disable the go-sdk localhost/DNS-rebinding guard so the edge-proxied
   server stops returning 403 to authenticated clients.** The go-sdk streamable
   transport rejects (403) any request whose accepted-connection LocalAddr is
