@@ -219,7 +219,11 @@ func (e *Engine) AnalyzeHostWithOptions(host string, opts AnalyzeOptions) (Analy
 				"count": strconv.Itoa(kv.Count),
 			}
 
-			geo := e.enr.Lookup(ipStr)
+			// Async: this loops up to analyzeHostMaxIPs (500) distinct IPs, so a
+			// blocking PTR rDNS (~1s each) could stall the drilldown for minutes.
+			// Country/ASN are returned inline; PTR is served from cache when warm
+			// and resolved in the background otherwise (appears on a later view).
+			geo := e.enr.LookupCachedOrAsync(ipStr)
 			if geo.PTR != "" {
 				info["ptr"] = geo.PTR
 			}

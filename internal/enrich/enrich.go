@@ -15,23 +15,29 @@ import (
 )
 
 const (
-	// 4-hour TTL: longer than mmdb publish cadence (weekly) and longer than
-	// any realistic ASN/PTR drift on stable networks. PTR-using consumers
-	// (FCrDNS for crawlers) re-verify the PTR back-resolves to the IP, so
-	// stale PTR data fails closed rather than open. Bumped from 1h after
-	// confirming the cache no longer grows unboundedly (LRU cap below).
-	cacheTTL   = 4 * time.Hour
+	// 24-hour TTL. PTR reverse-DNS is the expensive field (up to dnsTimeout per
+	// cold IP) and changes very rarely, so a long cache means we resolve a given
+	// IP roughly once a day instead of every few hours — the bulk of the WAF/
+	// challenge/drilldown enrich cost is repeat lookups of the same IPs. The TTL
+	// is shared with the (cheap) mmdb country/ASN fields, which bounds their
+	// staleness to ~1 day after a weekly mmdb update — acceptable for country/ASN
+	// rules (an IP's geo/ASN almost never changes). PTR-using consumers (FCrDNS
+	// for crawlers) re-verify the PTR back-resolves, so stale PTR fails closed.
+	// A longer, PTR-only cache (week+) would need PTR split from the geo TTL.
+	cacheTTL   = 24 * time.Hour
 	dnsTimeout = 1 * time.Second   // 1s timeout για PTR lookups
 	statEvery  = 300 * time.Second // πόσο συχνά θα ελέγχουμε για αλλαγές στα mmdb αρχεία
 
 	// cacheCap is the maximum number of distinct IPs held in the geoip
 	// result cache. The previous map[string]Result had no eviction and
 	// grew with every unique IP seen since worker start (~250 bytes per
-	// entry). At 200 000 entries the worst-case footprint is ~50 MB per
+	// entry). At 400 000 entries the worst-case footprint is ~100 MB per
 	// worker; the LRU evicts the coldest entry once the cap is reached,
 	// so memory plateaus regardless of how many unique IPs the worker
-	// has seen over its lifetime.
-	cacheCap = 200_000
+	// has seen over its lifetime. Raised from 200k alongside the 24h TTL so
+	// a busy node's active IP set stays resident for the full day rather than
+	// being evicted and re-resolved (PTR rDNS) under churn.
+	cacheCap = 400_000
 
 	// asyncWorkerCap caps the number of concurrent in-flight async PTR/mmdb
 	// lookups dispatched by LookupCachedOrAsync. Past this, fresh-IP misses

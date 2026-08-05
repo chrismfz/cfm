@@ -193,6 +193,19 @@ back-filled here — see the git/PR history for that period.
   indistinguishable from the attack at request time — so no safe enforcement
   rule exists at this endpoint. Only the logonly detector above remains.
 
+### Changed
+- **Enricher: 24h cache TTL (was 4h) + 400k-entry cap (was 200k); host/IP
+  drilldown enrich no longer blocks on PTR.** PTR reverse-DNS is the expensive,
+  rarely-changing field, so the longer TTL + larger LRU keep a busy node's active
+  IP set resident and resolve each IP's PTR ~once a day instead of every few hours
+  (~100 MB worst-case footprint). The host-analyze loop (up to 500 IPs) and the
+  HostDetail/IPShort/IPLong drilldowns (which feed the MCP `host_drilldown`/
+  `ip_drilldown`/traffic tools under a 60s cap) now use `LookupCachedOrAsync`:
+  Country/ASN are returned inline, PTR is served from cache when warm and resolved
+  in the background otherwise (so it appears on a later view rather than stalling
+  the request). Per-alert display paths and the FCrDNS challenge-exclude matcher
+  keep synchronous `Lookup` (PTR wanted immediately / correctness-critical).
+
 ### Fixed
 - **Dropped wasteful blocking reverse-DNS from several hot/read enrich paths
   (fleet-wide latency).** Audited every `Enricher.Lookup` call (which does a PTR
