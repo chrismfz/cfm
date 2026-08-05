@@ -598,6 +598,10 @@ func runDaemon(args []string) {
 	if err := enrich.EnablePersistentPTR("/var/lib/cfm/ptrcache.db"); err != nil {
 		logging.Logf("[enrich] persistent PTR cache unavailable, using in-memory only: %v", err)
 	}
+	// Drain + close the PTR store on daemon shutdown. Registered before the
+	// context/subsystem defers below, so (LIFO) it runs LAST — after every
+	// subsystem has stopped writing to it.
+	defer enrich.ShutdownPersistentPTR()
 
 	// Daemon context — created early so sslcollector (started right
 	// below) and any other early-start subsystem can use it for their

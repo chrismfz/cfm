@@ -90,6 +90,19 @@ func sharedPTRStore() *ptrStore {
 	return sharedPTR
 }
 
+// ShutdownPersistentPTR drains queued writes and closes the process-wide PTR
+// store if one was enabled (no-op otherwise). Intended for daemon shutdown so
+// in-flight async writes are flushed and the SQLite handle closes cleanly. After
+// this, sharedPTRStore() returns nil again and enrichment falls back to the
+// per-Enricher in-memory caches.
+func ShutdownPersistentPTR() {
+	sharedPTRMu.Lock()
+	s := sharedPTR
+	sharedPTR = nil
+	sharedPTRMu.Unlock()
+	s.close() // nil-safe
+}
+
 func openPTRStore(path string, ttl time.Duration) (*ptrStore, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
