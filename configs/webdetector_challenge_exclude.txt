@@ -27,6 +27,13 @@
 #   verify_fcrdns=1   After PTR matches, require forward-confirmed rDNS — the
 #                     PTR hostname must resolve back to the request IP. This is
 #                     the spoof-proof check; recommended for all PTR rules.
+#                     NOTE: resolved PTRs are cached ~30 days. A verify_fcrdns=1
+#                     rule re-confirms forward DNS live on every request, so a
+#                     changed rDNS fails closed regardless of the cache. A bare
+#                     ptr= rule (verify_fcrdns=0, "trust the rDNS string") can
+#                     keep matching a stale-but-still-matching PTR for up to that
+#                     window if a netblock is reassigned — one more reason to set
+#                     verify_fcrdns=1 on PTR rules.
 #   mode=all|any      Combination mode (default: all).
 #                       all → every specified field must match (safer)
 #                       any → at least one field matching is enough (riskier)

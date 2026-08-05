@@ -243,8 +243,12 @@ func TestSecurityOverviewSectionBudget(t *testing.T) {
 	if strings.Contains(body, `"isError":true`) {
 		t.Fatalf("overview should stay a valid result, got isError: %s", body)
 	}
-	if !strings.Contains(body, "section timed out") {
-		t.Fatalf("expected a per-section timeout marker, got: %s", body)
+	// The slow section degrades to an error object. Normally sectionBudgeted's
+	// own cctx.Done() fires first ("section timed out"); if the dispatch's
+	// context-deadline error races ahead it surfaces "deadline exceeded". Either
+	// is a valid bounded degradation — assert on the degradation, not the wording.
+	if !strings.Contains(body, "section timed out") && !strings.Contains(body, "deadline exceeded") {
+		t.Fatalf("expected a degraded per-section error, got: %s", body)
 	}
 	// Concurrent + budgeted: must return well under the sum of five 3s delays.
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
