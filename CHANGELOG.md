@@ -193,7 +193,59 @@ back-filled here — see the git/PR history for that period.
   indistinguishable from the attack at request time — so no safe enforcement
   rule exists at this endpoint. Only the logonly detector above remains.
 
+### Changed
+- **Enricher: PTR reverse-DNS split into its own 30-day cache (geo stays 24h).**
+  PTR is the only expensive enrich field (a blocking reverse-DNS) and an IP's
+  rDNS is stable for months, so resolved PTRs now live in a separate long-lived
+  cache while country/ASN keep refreshing daily from mmdb. Net effect: a given
+  IP's reverse-DNS runs ~once a month no matter how many times it is seen, with
+  no cost to geo freshness. Negative results (no PTR / DNS timeout) are not
+  cached, so a transient failure isn't pinned for 30 days. In-memory only
+  (rebuilds after a restart); a persistent PTR store is a possible follow-up but
+  low-value now that no hot path blocks on PTR. Test: `TestLookupUsesLongLivedPTRCache`.
+- **Enricher: 24h cache TTL (was 4h) + 400k-entry cap (was 200k); host/IP
+  drilldown enrich no longer blocks on PTR.** PTR reverse-DNS is the expensive,
+  rarely-changing field, so the longer TTL + larger LRU keep a busy node's active
+  IP set resident and resolve each IP's PTR ~once a day instead of every few hours
+  (~100 MB worst-case footprint). The host-analyze loop (up to 500 IPs) and the
+  HostDetail/IPShort/IPLong drilldowns (which feed the MCP `host_drilldown`/
+  `ip_drilldown`/traffic tools under a 60s cap) now use `LookupCachedOrAsync`:
+  Country/ASN are returned inline, PTR is served from cache when warm and resolved
+  in the background otherwise (so it appears on a later view rather than stalling
+  the request). Per-alert display paths and the FCrDNS challenge-exclude matcher
+  keep synchronous `Lookup` (PTR wanted immediately / correctness-critical).
+
 ### Fixed
+- **Dropped wasteful blocking reverse-DNS from several hot/read enrich paths
+  (fleet-wide latency).** Audited every `Enricher.Lookup` call (which does a PTR
+  reverse-DNS, up to ~1s/IP) and switched the sites that only use Country/ASN and
+  discard the PTR to the PTR-free `LookupGeoFast`: the challenge-solved and
+  WAF-trigger detector hooks (per event), leniency country/ASN matching, the
+  autoblock challenge enrich-suffix, the history-events API per-row enrich, and
+  the traffic-rule country simulate. Additionally, WAF `top_ips` now resolves PTR
+  **after** truncating to the top-N instead of for every unique IP in the window
+  (behaviour-identical output, far fewer rDNS calls). Per-alert detector display
+  paths that actually show PTR, and the FCrDNS challenge-exclude matcher, keep the
+  full `Lookup` deliberately. No output changes.
+- **WAF engine summary (`/api/v1/waf/engine/summary?enrich=1`) no longer does a
+  blocking reverse-DNS per distinct IP — fixes multi-minute latency / MCP 60s
+  timeouts.** The per-row enrich branch called `Enricher.Lookup` (which performs a
+  PTR reverse-DNS, up to 1s per IP) for every distinct source IP in the window,
+  yet only used the mmdb Country/ASN fields and discarded the PTR. On a busy node
+  (hundreds of distinct IPs over 24h) this serialized into minutes, so
+  `waf_activity` / `security_overview` over MCP timed out at the client's 60s cap
+  while the PTR-free `cfm webtop history overview` returned in ~1.5s. Switched that
+  branch to `LookupGeoFast` (mmdb Country/ASN, no PTR) — behaviour-identical for
+  the country filter and enriched rows. `top_ips` still resolves PTR (bounded to
+  the top-N). Affects the CLI/web UI/MCP summary alike.
+- **MCP `security_overview` now runs its five sections concurrently, each under a
+  timeout budget.** The composed tool used to fetch health, WAF, challenge,
+  firewall and suspicious sections sequentially, so its latency was the sum and a
+  single slow read (e.g. the WAF summary) could blow the MCP client's ~60s call
+  timeout and sink the whole tool. Sections now run in parallel and each degrades
+  to a per-section `{"error":"section timed out"}` object, so the tool returns
+  bounded partial data instead of failing. Test: `TestSecurityOverviewSectionBudget`.
+  (Does not by itself fix the underlying WAF-summary latency — see below/roadmap.)
 - **MCP: disable the go-sdk localhost/DNS-rebinding guard so the edge-proxied
   server stops returning 403 to authenticated clients.** The go-sdk streamable
   transport rejects (403) any request whose accepted-connection LocalAddr is

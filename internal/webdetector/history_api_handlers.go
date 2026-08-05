@@ -77,7 +77,7 @@ func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 		if ip != "" {
 			g, ok := cache[ip]
 			if !ok {
-				res := e.enr.Lookup(ip)
+				res := e.enr.LookupGeoFast(ip) // per-request loop; Country/ASN only, PTR unused → skip blocking rDNS
 				g = geo{country: res.Country, asn: res.ASN, asnName: res.ASNName}
 				cache[ip] = g
 			}

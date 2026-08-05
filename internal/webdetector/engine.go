@@ -2286,8 +2286,10 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
 			}
 			enriched = append(enriched, info)
 
-			// Enricher.Lookup returns a value struct (no nil check needed)
-			geo := e.enr.Lookup(ipStr)
+			// Async: top-N drilldown loop feeding an MCP tool (60s cap). Country/
+			// ASN inline; PTR from cache when warm, resolved in the background
+			// otherwise (no blocking reverse-DNS on the request path).
+			geo := e.enr.LookupCachedOrAsync(ipStr)
 			if geo.PTR != "" {
 				info["ptr"] = geo.PTR
 			}
@@ -2698,7 +2700,9 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 			continue
 		}
 
-		geo := e.enr.Lookup(ip)
+		// Async: top-N drilldown loop feeding an MCP tool (60s cap). Country/ASN
+		// inline; PTR from cache when warm, resolved in the background otherwise.
+		geo := e.enr.LookupCachedOrAsync(ip)
 		if geo.PTR != "" {
 			rows[i].PTR = geo.PTR
 		}
@@ -2891,7 +2895,9 @@ func (e *Engine) IPLong(limit int) []IPSignals {
 			continue
 		}
 
-		geo := e.enr.Lookup(ip)
+		// Async: top-N drilldown loop feeding an MCP tool (60s cap). Country/ASN
+		// inline; PTR from cache when warm, resolved in the background otherwise.
+		geo := e.enr.LookupCachedOrAsync(ip)
 		if geo.PTR != "" {
 			rows[i].PTR = geo.PTR
 		}
@@ -3792,7 +3798,7 @@ func (e *Engine) TrafficRuleSimulate(in TrafficRuleEvalInput) TrafficRuleEvalRes
 		return TrafficRuleEvalResult{Matched: false}
 	}
 	if strings.TrimSpace(in.Country) == "" && strings.TrimSpace(in.IP) != "" && e.enr != nil {
-		if geo := e.enr.Lookup(strings.TrimSpace(in.IP)); strings.TrimSpace(geo.Country) != "" {
+		if geo := e.enr.LookupGeoFast(strings.TrimSpace(in.IP)); strings.TrimSpace(geo.Country) != "" { // Country only; avoid blocking PTR rDNS
 			in.Country = geo.Country
 		}
 	}

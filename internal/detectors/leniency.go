@@ -117,7 +117,7 @@ func (lp *leniencyPolicy) matchesIP(ipStr string, enr *enrich.Enricher) (bool, s
 		return false, ""
 	}
 
-	r := enr.Lookup(ipStr)
+	r := enr.LookupGeoFast(ipStr) // matches on Country/ASN only; avoid blocking PTR rDNS
 
 	// Country match — supports both ISO codes ("GR") and full names ("Greece")
 	if len(lp.Countries) > 0 && r.Country != "" {

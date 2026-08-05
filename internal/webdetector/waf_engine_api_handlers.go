@@ -220,7 +220,16 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 				row.ASN = info.ASN
 				row.ASNName = info.ASNName
 			} else if row.IP != "" && e.enr != nil {
-				r := e.enr.Lookup(row.IP)
+				// LookupGeoFast, NOT Lookup: this per-row branch reads only
+				// Country/ASN/ASNName (mmdb, microseconds) and discards PTR, but
+				// Lookup() does a blocking reverse-DNS (up to dnsTimeout=1s) per
+				// distinct IP. Over a busy window that is hundreds of 1s rDNS
+				// calls — the reason /api/v1/waf/engine/summary?enrich=1 timed out
+				// (>60s) while the PTR-free CLI overview returned in ~1.5s. The
+				// country filter and enriched rows come purely from the mmdb, so
+				// the fast path is behaviour-identical here. (top_ips still uses
+				// Lookup in toSortedTopIPs, where PTR IS shown and is bounded to N.)
+				r := e.enr.LookupGeoFast(row.IP)
 				row.Country = r.Country
 				row.ASN = r.ASN
 				row.ASNName = r.ASNName
@@ -295,23 +304,7 @@ func toSortedTopIPs(m map[string]int, n int, enrichEnabled bool, e *Engine) []wa
 		if ip == "" {
 			continue
 		}
-		row := wafTopIPValue{Key: ip, Count: v}
-		if enrichEnabled && e != nil && e.enr != nil && net.ParseIP(ip) != nil {
-			geo := e.enr.Lookup(ip)
-			if geo.PTR != "" {
-				row.PTR = geo.PTR
-			}
-			if geo.Country != "" {
-				row.Country = geo.Country
-			}
-			if geo.ASN != 0 {
-				row.ASN = geo.ASN
-			}
-			if geo.ASNName != "" {
-				row.ASNName = geo.ASNName
-			}
-		}
-		out = append(out, row)
+		out = append(out, wafTopIPValue{Key: ip, Count: v})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Count == out[j].Count {
@@ -319,10 +312,34 @@ func toSortedTopIPs(m map[string]int, n int, enrichEnabled bool, e *Engine) []wa
 		}
 		return out[i].Count > out[j].Count
 	})
-	if n <= 0 || len(out) <= n {
-		return out
+	if n > 0 && len(out) > n {
+		out = out[:n]
 	}
-	return out[:n]
+	// Enrich only the top-N survivors. PTR reverse-DNS is up to ~1s per IP, so
+	// enriching before truncation paid that cost for every unique IP in the
+	// window and then discarded most of the rows. top_ips genuinely displays the
+	// PTR, so we keep the full Lookup here — but only for the handful we return.
+	if enrichEnabled && e != nil && e.enr != nil {
+		for i := range out {
+			if net.ParseIP(out[i].Key) == nil {
+				continue
+			}
+			geo := e.enr.Lookup(out[i].Key)
+			if geo.PTR != "" {
+				out[i].PTR = geo.PTR
+			}
+			if geo.Country != "" {
+				out[i].Country = geo.Country
+			}
+			if geo.ASN != 0 {
+				out[i].ASN = geo.ASN
+			}
+			if geo.ASNName != "" {
+				out[i].ASNName = geo.ASNName
+			}
+		}
+	}
+	return out
 }
 
 func toSortedTop(m map[string]int, n int) []wafTopValue {
