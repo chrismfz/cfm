@@ -6,9 +6,12 @@
 //
 // It runs the same multi-source locate used by `cfm search`: nft,
 // cfm.deny, csf, fail2ban and imunify360 — strictly read-only, no state
-// changes. Auth comes from the mux-wide TokenMiddleware, same as
-// /unblock. Intended consumers: cfm-web fleet-wide "where is this IP
-// blocked?" lookups and the unblock pipeline's where-&-why reporting.
+// changes. It is nonetheless admin-only: the result enumerates every place
+// an arbitrary IP is blocked host-wide (all vhosts, all planes), which is
+// cross-tenant reconnaissance with no per-vhost scoping, so a scoped
+// (cPanel/DA) token must not reach it. Intended consumers: cfm-web
+// fleet-wide "where is this IP blocked?" lookups and the unblock pipeline's
+// where-&-why reporting — both admin-token callers, same as /unblock.
 package apiserver
 
 import (
@@ -30,7 +33,7 @@ func RegisterSearch(m *http.ServeMux, be firewall.Backend, cfgDir string) {
 	if m == nil {
 		return
 	}
-	m.HandleFunc("/search", makeSearchHandler(be, cfgDir))
+	m.Handle("/search", adminOnlyHandler(makeSearchHandler(be, cfgDir)))
 }
 
 func makeSearchHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {

@@ -5,8 +5,8 @@
 // Endpoints:
 //   /login, /logout, /login/verify  — public auth routes
 //   /debug/pprof/                   — profiling
-//   /unblock                        — manual IP unblock
-//   /search                         — read-only multi-source IP lookup
+//   /unblock                        — manual IP unblock (admin token required)
+//   /search                         — multi-source IP lookup (admin token required)
 //   /api/v1/firewall/block          — manual IP block
 //   /api/v1/firewall/block/batch    — manual bulk IP block (selfip/caller guarded)
 //   /api/v1/system/                 — system status

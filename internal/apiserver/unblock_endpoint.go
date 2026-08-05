@@ -30,11 +30,19 @@ import (
 var unblockDo = unblock.Do
 
 // RegisterUnblock adds the /unblock route to the provided mux.
+//
+// Manual IP unblock is admin-only: it removes a global nft block AND lays down
+// a 24h allow-whitelist for the IP across every enforcement plane (nft,
+// cfm.deny, csf, fail2ban, imunify, OpenResty/Lua WAF). That is a host-wide
+// state change with no per-vhost meaning, so a scoped (cPanel/DA) token must
+// never reach it — otherwise a tenant could unblock and whitelist any IP on
+// the box. Guard it like /api/v1/firewall/block and the other global routes
+// rather than relying on the caller to hold the admin token by convention.
 func RegisterUnblock(m *http.ServeMux, be firewall.Backend, cfgDir string) {
 	if m == nil {
 		return
 	}
-	m.HandleFunc("/unblock", makeUnblockHandler(be, cfgDir))
+	m.Handle("/unblock", adminOnlyHandler(makeUnblockHandler(be, cfgDir)))
 }
 
 // makeUnblockHandler returns the http.HandlerFunc for /unblock.
