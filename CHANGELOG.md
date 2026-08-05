@@ -194,6 +194,17 @@ back-filled here — see the git/PR history for that period.
   rule exists at this endpoint. Only the logonly detector above remains.
 
 ### Fixed
+- **MCP: disable the go-sdk localhost/DNS-rebinding guard so the edge-proxied
+  server stops returning 403 to authenticated clients.** The go-sdk streamable
+  transport rejects (403) any request whose accepted-connection LocalAddr is
+  loopback but whose Host header is not — a guard for localhost-only dev servers.
+  CFM's edge (OpenResty/Angie) terminates TLS and upstreams to the daemon over
+  `127.0.0.1:6060` while forwarding the public Host, which tripped the guard: the
+  claude.ai connector completed the full OAuth flow (register→authorize→consent→
+  token, all 200/302) and then got 403 on every `/mcp` tool call. `/mcp` is gated
+  by `MCP_TOKEN`/audience-bound OAuth and is not cookie/session (not CSRF-reachable),
+  so the guard only broke the real topology; it is now disabled and the bearer/OAuth
+  gate is the sole authority. Test: `TestMCPBehindProxyNonLoopbackHost`.
 - **MCP OAuth: serve `/.well-known/openid-configuration` (OIDC discovery) as an
   alias of the RFC 8414 authorization-server metadata.** The claude.ai remote
   connector probes the OIDC discovery URL when locating the
