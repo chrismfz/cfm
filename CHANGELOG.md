@@ -30,6 +30,23 @@ back-filled here — see the git/PR history for that period.
   acceptable for a visibility-only rule. The real defence against runMaths RCE
   is patching vBulletin (≥6.2.2).
 
+### Fixed
+- **WAF: stop rule 402 (`WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG`) from blocking the
+  String Locator plugin's file editor.** String Locator is an in-browser
+  theme/plugin file editor: on Save it POSTs the entire PHP file being edited to
+  `/wp-json/string-locator/v1/save`, whose `<?php` opener tripped the upload
+  content scanner and 403'd the request (and, because `UPLOAD_CONTENT` is
+  autoblock-armed, fed a 6h `waf_security` nft ban) — a real authenticated admin
+  editing their own theme. Added the plugin's REST namespace
+  (`^/wp-json/string-locator/`) to `is_known_legit_php_upload_endpoint`, which on
+  that namespace stands down the body-PHP scanner set — upload rules 401/402/403
+  plus the 431-436 and 439 `WAF_BACKDOOR` body detectors, the same treatment as
+  the installer / Code Snippets; every URI-based rule still runs. Safe to
+  allowlist in code — unlike the WMW migration FP,
+  which stays an operator-side exclude — because it is keyed on a fixed REST
+  *path* (not a body-overridable admin-ajax action) over an endpoint that keeps
+  its own downstream capability check. See docs/waf.md FP case 7.
+
 ### Removed
 - **WAF: dropped the prototyped block-tier vBulletin `runMaths()` CVE rule
   (CVE-2026-61511, was rule 10015) — never released.** A route-anchored,

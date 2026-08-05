@@ -678,7 +678,7 @@ function _M.check(ctx)
   -- Authenticated WP plugin/theme installer (and Code Snippets REST) carry
   -- PHP-bearing uploads by design — a plugin/theme archive *is* PHP, often
   -- obfuscated. Reused below to exempt the upload-malware / webshell-content
-  -- scanners (401/402/403 and the 431-436 backdoor family) so they don't
+  -- scanners (401/402/403 and the 431-436/439 backdoor family) so they don't
   -- flag the PHP that is the upload's whole point. Declared up here (before
   -- any `goto done`) so those jumps don't cross its scope. (437/438 keep
   -- their own broader /wp-admin/ carve-out, with 438's pre-auth admin-ajax/
