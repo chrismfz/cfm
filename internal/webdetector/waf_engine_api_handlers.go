@@ -220,7 +220,16 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 				row.ASN = info.ASN
 				row.ASNName = info.ASNName
 			} else if row.IP != "" && e.enr != nil {
-				r := e.enr.Lookup(row.IP)
+				// LookupGeoFast, NOT Lookup: this per-row branch reads only
+				// Country/ASN/ASNName (mmdb, microseconds) and discards PTR, but
+				// Lookup() does a blocking reverse-DNS (up to dnsTimeout=1s) per
+				// distinct IP. Over a busy window that is hundreds of 1s rDNS
+				// calls — the reason /api/v1/waf/engine/summary?enrich=1 timed out
+				// (>60s) while the PTR-free CLI overview returned in ~1.5s. The
+				// country filter and enriched rows come purely from the mmdb, so
+				// the fast path is behaviour-identical here. (top_ips still uses
+				// Lookup in toSortedTopIPs, where PTR IS shown and is bounded to N.)
+				r := e.enr.LookupGeoFast(row.IP)
 				row.Country = r.Country
 				row.ASN = r.ASN
 				row.ASNName = r.ASNName

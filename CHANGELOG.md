@@ -194,6 +194,17 @@ back-filled here — see the git/PR history for that period.
   rule exists at this endpoint. Only the logonly detector above remains.
 
 ### Fixed
+- **WAF engine summary (`/api/v1/waf/engine/summary?enrich=1`) no longer does a
+  blocking reverse-DNS per distinct IP — fixes multi-minute latency / MCP 60s
+  timeouts.** The per-row enrich branch called `Enricher.Lookup` (which performs a
+  PTR reverse-DNS, up to 1s per IP) for every distinct source IP in the window,
+  yet only used the mmdb Country/ASN fields and discarded the PTR. On a busy node
+  (hundreds of distinct IPs over 24h) this serialized into minutes, so
+  `waf_activity` / `security_overview` over MCP timed out at the client's 60s cap
+  while the PTR-free `cfm webtop history overview` returned in ~1.5s. Switched that
+  branch to `LookupGeoFast` (mmdb Country/ASN, no PTR) — behaviour-identical for
+  the country filter and enriched rows. `top_ips` still resolves PTR (bounded to
+  the top-N). Affects the CLI/web UI/MCP summary alike.
 - **MCP `security_overview` now runs its five sections concurrently, each under a
   timeout budget.** The composed tool used to fetch health, WAF, challenge,
   firewall and suspicious sections sequentially, so its latency was the sum and a
