@@ -60,8 +60,16 @@ back-filled here — see the git/PR history for that period.
   `excluded` / `ignored` / `host_bypass` / `manual_off` / `cfg_*`) — a bare
   `vhost_clear` previously gave no way to tell an auto cool-down from an
   exclude/bypass/operator clear. Also tidies a pre-existing duplicate
-  `ClearVhost` in the ignore branch. Tests: `TestManualWinsOverExcludeDecision`,
-  `TestManualKeepSelfVsSiblingCoverage`.
+  `ClearVhost` in the ignore branch. Finally, the auto cool-down (`offOK`) path
+  no longer emits a `WEB/VHOST_CHALLENGE_OFF` "challenge lifted" alert (nor an
+  `action=auto_off` log line) when a manual challenge still holds the vhost —
+  only the auto flag turns off; the challenge did not lift. Tests:
+  `TestManualWinsOverExcludeDecision`, `TestManualKeepSelfVsSiblingCoverage`,
+  and end-to-end through the real tick (`emitIPChallenges`):
+  `TestEmitIPChallenges_ManualKeptOverExclude`,
+  `TestEmitIPChallenges_ExcludeClearsWhenNoManual`,
+  `TestEmitIPChallenges_AutoCooldownKeepsManual_NoOffAlert` (with a negative
+  control proving the OFF alert fires without the manual).
 - **Challenge status list: a manually-challenged vhost no longer "drops from
   the list" when the auto scorer cools.** The ChalAPI vhost store
   (`challenge_api_store.go`) kept a single `Status`/`Mode` per host and recorded

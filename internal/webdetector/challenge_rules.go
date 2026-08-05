@@ -1788,19 +1788,31 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
                         // the candidate set). Keep the bridge entry while a
                         // manual challenge covers ANY variant this clear would
                         // delete (ClearVhost expands apex→www, so an apex clear
-                        // also removes a www-only manual entry); only the auto
-                        // flag turns off.
+                        // also removes a www-only manual entry).
                         if covered, mexp := e.manualChallengeCoversClear(host); covered {
+                            // The auto scorer cooled but the manual challenge is
+                            // STILL in force: only the auto flag turns off. Do
+                            // NOT clear, and do NOT emit a "challenge lifted"
+                            // signal — neither the action=auto_off log line nor
+                            // the WEB/VHOST_CHALLENGE_OFF alert — because the
+                            // challenge did not lift (the manual holds it, and
+                            // the bottom manual-push refreshes it this same
+                            // tick). RecordVhostAuto still runs to record the
+                            // cooled score as evidence; the store keeps the
+                            // manual top-line (LastAction=auto_off_keep_manual).
                             if e.cfg.ChallengeLog {
                                 logging.LogfCHALLENGES(
                                     "[challenge][vhost] action=auto_off_keep_manual host=%s manual_expires_in=%s",
                                     host, time.Until(mexp).Round(time.Second),
                                 )
                             }
-                        } else if e.nginxBridge != nil {
-                            e.nginxBridge.ClearVhost(host, "auto_off")
+                            e.RecordVhostAuto(host, false, row, on, off, hold)
+                            return false
                         }
 
+                        if e.nginxBridge != nil {
+                            e.nginxBridge.ClearVhost(host, "auto_off")
+                        }
 
                         if e.cfg.ChallengeLog {
                             logging.LogfCHALLENGES(
