@@ -318,6 +318,10 @@ func Start(
 	}
 	registerMeSecurityRoutes(m)
 
+	// ── Embedded read-only MCP server (mounted at /mcp; edge: /cfm-admin/mcp) ──
+	// Registered last so its in-process dispatch can reach every /api/v1 route.
+	registerMCPServer(m, cfg, store)
+
 	// ── Build handler stack ───────────────────────────────────────────────────
 	// Innermost → outermost:
 	//   mux → TokenMiddleware → LoadAndSave

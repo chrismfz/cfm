@@ -18,6 +18,35 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Read-only MCP server (`/cfm-admin/mcp`) — read CFM's security telemetry from
+  an MCP client (e.g. the claude.ai remote connector).** The daemon now embeds a
+  read-only [Model Context Protocol](https://modelcontextprotocol.io) server,
+  served through the existing OpenResty edge under `/cfm-admin/mcp` (no new port,
+  no edge-config change). It exposes 15 read-only tools — WAF activity/rules,
+  challenge vhosts/events, suspicious hosts, top talkers, hot IPs, host/IP
+  drilldowns, detection history, top bots, firewall blocks, detector status,
+  system health, and a one-call `security_overview` — each dispatching to the
+  same `/api/v1` read handler the CLI/web UI use, in-process, GET-only,
+  allow-listed (read-only by construction; no tool can block/exclude/configure).
+  Auth uses a **dedicated `MCP_TOKEN`** (in `cfm.conf`), kept separate from the
+  admin/API `AUTH_TOKEN` — MCP clients never see the admin token, which is used
+  only for the in-process read dispatch. An OAuth 2.1 + PKCE flow (dynamic client
+  registration, discovery via the 401 `resource_metadata` pointer) serves the
+  claude.ai web connector — consent is approving with `MCP_TOKEN`, minting a
+  read-only token that is inert against `/api/v1`; Claude Code / API clients may
+  present `MCP_TOKEN` as a static `Authorization: Bearer` instead. The server is
+  mounted only when `AUTH_TOKEN` is set AND `MCP_TOKEN` is set and ≥24 chars
+  (a short/weak/missing `MCP_TOKEN` fails closed → server stays disabled);
+  rotating `MCP_TOKEN` revokes all issued MCP tokens without touching `AUTH_TOKEN`.
+  See `MCP.md` for the as-built map, arming steps, and roadmap. Code in
+  `internal/mcpserver/`; tests cover the bearer gate, OAuth discovery/flow, tool
+  dispatch, and the `MCP_TOKEN` strength gate. Hardened after adversarial +
+  security review: OAuth authorization codes and refresh tokens are single-use
+  (replay rejected / rotation with reuse detection), the consent page displays the
+  redirect host and warns on a non-first-party client (anti-phishing on open
+  dynamic client registration), the advertised scheme is trusted from
+  `X-Forwarded-Proto` only via the loopback edge, and the in-process dispatch
+  scrubs the admin token from any response body as defense-in-depth.
 - **Challenge/WAF exclude add/remove is now logged to `cfm.log`.** Adding or
   removing a challenge- or WAF-exclude previously left no paper trail, yet an
   exclude silently governs whether the challenge/WAF layer runs for a host or

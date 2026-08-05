@@ -160,6 +160,14 @@ func isPublicPath(r *http.Request) bool {
 			return true
 		}
 	}
+	// MCP surface: the /mcp endpoint, its OAuth endpoints (/mcp/oauth/*) and the
+	// OAuth discovery documents are self-authenticating (mcpserver's own bearer /
+	// OAuth gate), so they bypass session/token auth here. See internal/mcpserver.
+	if path == "/mcp" || strings.HasPrefix(path, "/mcp/") ||
+		path == "/.well-known/oauth-protected-resource" ||
+		path == "/.well-known/oauth-authorization-server" {
+		return true
+	}
 	return false
 }
 

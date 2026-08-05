@@ -194,6 +194,7 @@ type SystemTweaksConfig struct {
 type APIConfig struct {
 	URL             string
 	AuthToken       string
+	MCPToken        string // MCP_TOKEN — client-facing auth for the read-only MCP server; kept separate from AuthToken so the MCP credential is not the admin/API token
 	AutoBlockSend   bool // AUTOBLOCK_SEND_TO_API
 	ManualBlockSend bool // MANUAL_BLOCK_SEND_TO_API
 	UnblockSend     bool // UNBLOCK_SEND_TO_API
@@ -643,6 +644,8 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.API.URL = val
 		case "AUTH_TOKEN", "TOKEN":
 			cfg.API.AuthToken = val
+		case "MCP_TOKEN":
+			cfg.API.MCPToken = val
 
 		case "AUTOBLOCK_SEND_TO_API":
 			cfg.API.AutoBlockSend = parseBool(val)
@@ -1098,7 +1101,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 func IsKnownKey(key string) bool {
 	key = strings.ToUpper(strings.TrimSpace(key))
 	switch key {
-	case "API_URL", "AUTH_TOKEN", "TOKEN", "AUTOBLOCK_SEND_TO_API", "MANUAL_BLOCK_SEND_TO_API", "UNBLOCK_SEND_TO_API", "DETECTORS_SEND_TO_API",
+	case "API_URL", "AUTH_TOKEN", "TOKEN", "MCP_TOKEN", "AUTOBLOCK_SEND_TO_API", "MANUAL_BLOCK_SEND_TO_API", "UNBLOCK_SEND_TO_API", "DETECTORS_SEND_TO_API",
 		"FIREWALL_ENGINE", "CFM_FIREWALL_ENGINE",
 		"LOG_STDOUT", "LOG_FILE", "API_LOG_STDOUT", "API_LOG_FILE", "DETECTOR_LOG_STDOUT", "DETECTOR_LOG_FILE", "CHALLENGES_LOG_STDOUT", "CHALLENGES_LOG_FILE",
 		"SMTP_LOG_STDOUT", "SMTP_LOG_FILE", "WAF_LOG_STDOUT", "WAF_LOG_FILE", "MYSQL_LOG_STDOUT", "MYSQL_LOG_FILE",
