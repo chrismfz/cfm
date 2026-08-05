@@ -194,6 +194,21 @@ back-filled here — see the git/PR history for that period.
   rule exists at this endpoint. Only the logonly detector above remains.
 
 ### Security
+- **`/unblock` and `/search` are now admin-only (`adminOnlyHandler`).** Both
+  root-level routes were registered with a bare handler, i.e. protected only by
+  the mux-wide token check, which authenticates but does not separate admin from
+  a scoped (per-vhost cPanel/DA) token. A scoped token could therefore call
+  `POST /unblock` to remove a global nft block **and** lay down a 24h
+  allow-whitelist for any IP across every enforcement plane (nft, cfm.deny, csf,
+  fail2ban, imunify, OpenResty/Lua WAF), and `GET /search` to enumerate where an
+  arbitrary IP is blocked host-wide (cross-tenant recon). Both are host-wide
+  operations with no per-vhost meaning, so they are now gated like
+  `/api/v1/firewall/block`; scoped/anonymous callers get 403. Legitimate
+  consumers (the cfm-web fleet controller and the `cfm` CLI) already use the
+  admin token and are unaffected; the read-only MCP server never exposed either
+  route. Regression tests: `TestUnblockEndpointRequiresAdmin`,
+  `TestSearchEndpointRequiresAdmin`. (`docs/endpoint_scope_inventory.md` updated;
+  the stale "unblock flow … intentionally not admin-gated" note is removed.)
 - **Read/write endpoints no longer treat a nil vhost scope as admin (the
   `scope == nil ⇒ full access` pattern, fleet-wide).** Following the exclude
   write-guard fix, an audit found the same misclassification across many

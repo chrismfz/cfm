@@ -57,8 +57,10 @@ than being mistaken for admin. Code that reads `CtxScopeKey{}` **directly**
 
 - `/api/v1/mysql/state|processlist|top|locks|kills|history|history/events|history/summary|history/prune|history/truncate|history/timeline|cpu` via `adminOnlyHandler`.
 - `/api/v1/auth/token` (issue token), `/api/v1/tokens/list`, `/api/v1/tokens/revoke`.
-- `/api/v1/firewall/block` via `adminOnlyHandler` (global IP block; the customer-facing unblock flow is separate and intentionally not admin-gated).
+- `/api/v1/firewall/block` via `adminOnlyHandler` (global IP block).
 - `/api/v1/firewall/block/batch` via `adminOnlyHandler` (bulk global IP block, ≤256 IPs/request; skips the server's own IPs and the calling admin's IP with per-IP `skipped` reasons).
+- `/unblock` (POST) via `adminOnlyHandler` (`unblock_endpoint.go`) — removes a global nft block AND lays down a 24h allow-whitelist across every plane (nft, cfm.deny, csf, fail2ban, imunify, OpenResty/Lua WAF); host-wide state change with no per-vhost meaning. Consumers are admin-token callers (cfm-web fleet controller, `cfm` CLI). Was previously ungated behind mux-wide `TokenMiddleware`, so any authenticated scoped token could unblock+whitelist any IP.
+- `/search` (GET) via `adminOnlyHandler` (`search_endpoint.go`) — read-only multi-source locate (nft/cfm.deny/csf/fail2ban/imunify) that enumerates where an arbitrary IP is blocked host-wide; cross-tenant recon with no per-vhost scoping. Was previously ungated behind mux-wide `TokenMiddleware`.
 - `/api/v1/admin/authcheck` (admin-only auth probe for the edge `auth_request`; `RequireAdmin` → 200 for admin, 403 for scoped/anonymous; returns no data).
 - `/api/v1/system/dnat`, `/api/v1/system/ssl/stats`, `/api/v1/system/ssl/refresh` (POST) and `/api/v1/health/{snapshot,timeseries,anomalies,ingest}` — all `RequireAdmin` (`system_status_endpoint.go`); back the dashboard's system/Node-health cards and the "Rescan certs" button.
 
