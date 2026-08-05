@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestEngineForChallengeHandlers() *Engine {
@@ -36,6 +37,35 @@ func TestHandleChallengeVhostAdd_AllowsEmptyJSONBodyWithQueryParams(t *testing.T
 	}
 	if got["status"] != "active" {
 		t.Fatalf("expected status active, got %#v", got["status"])
+	}
+}
+
+func TestHandleChallengeVhostStatus_WWWCoveredByApexManual(t *testing.T) {
+	e := newTestEngineForChallengeHandlers()
+
+	// Operator challenges the apex; the bridge enforces it on apex AND www.
+	e.ManualChallengeVhost("e-vafeiadis.gr", time.Hour, "manual")
+
+	get := func(host string) map[string]interface{} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/challenge/vhost/status?host="+host, nil)
+		rr := httptest.NewRecorder()
+		e.handleChallengeVhostStatus(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: status %d: %s", host, rr.Code, rr.Body.String())
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &m); err != nil {
+			t.Fatalf("%s: bad json: %v", host, err)
+		}
+		return m
+	}
+
+	if m := get("e-vafeiadis.gr"); m["manual_active"] != true {
+		t.Fatalf("apex: expected manual_active=true, got %#v", m["manual_active"])
+	}
+	// The regression: before the fix this reported false for the www variant.
+	if m := get("www.e-vafeiadis.gr"); m["manual_active"] != true {
+		t.Fatalf("www: expected manual_active=true (covered by apex manual), got %#v", m["manual_active"])
 	}
 }
 

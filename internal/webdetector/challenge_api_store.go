@@ -29,6 +29,20 @@ type ChallengeVhostState struct {
 	// the mark lives in solverfarm_marks.go with its own TTL, and copying it
 	// into this store would leave two things to expire instead of one.
 	SolverFarm bool `json:"solver_farm"`
+
+	// manualUntil tracks an active operator manual challenge on this host,
+	// independent of the auto scorer. Unexported on purpose: it is NOT part of
+	// the API JSON (the status list keeps its single Status/Mode shape) — it
+	// exists so RecordVhostAuto can tell that a manual challenge still covers
+	// the host and must not be masked by an auto_off. Zero = no manual coverage.
+	//
+	// Without it the list lied: a manual challenge is recorded on the apex key
+	// only, but the bridge enforces it on apex AND www (vhostVariantsForBridge);
+	// the www row therefore carried only auto records, so when the auto scorer
+	// cooled, RecordVhostAuto(false) flipped www to Status=inactive/Mode=auto
+	// while the challenge was still being served — the vhost "dropped from the
+	// list" though enforcement was intact.
+	manualUntil time.Time
 }
 
 type ChallengeIPState struct {
@@ -105,17 +119,36 @@ func (s *ChallengeAPIStore) RecordVhostAuto(host string, active bool, row Suspic
 		st = &ChallengeVhostState{Host: host}
 		s.vhosts[host] = st
 	}
-	st.Mode = "auto"
-	if active {
+
+	// An operator manual challenge outranks the auto scorer in the list: while
+	// one is active on this host, neither an auto_on nor (critically) an
+	// auto_off may overwrite Status/Mode/ExpiresAt — the auto cool-down must not
+	// make a manually-challenged, still-enforced vhost read as inactive. Record
+	// the auto score/metrics as evidence, but keep the manual top-line. The auto
+	// action is surfaced through LastAction so the reason is still visible.
+	manualActive := !st.manualUntil.IsZero() && st.manualUntil.After(now)
+	if manualActive {
+		st.Mode = "manual"
 		st.Status = "active"
-		if st.Since.IsZero() {
+		st.ExpiresAt = st.manualUntil
+		if active {
+			st.LastAction = "auto_on_under_manual"
+		} else {
+			st.LastAction = "auto_off_keep_manual"
+		}
+	} else {
+		st.Mode = "auto"
+		if active {
+			st.Status = "active"
+			if st.Since.IsZero() {
+				st.Since = now
+			}
+			st.LastAction = "auto_on"
+		} else {
+			st.Status = "inactive"
+			st.LastAction = "auto_off"
 			st.Since = now
 		}
-		st.LastAction = "auto_on"
-	} else {
-		st.Status = "inactive"
-		st.LastAction = "auto_off"
-		st.Since = now
 	}
 	st.LastChanged = now
 	st.Score = row.Score
@@ -123,7 +156,11 @@ func (s *ChallengeAPIStore) RecordVhostAuto(host string, active bool, row Suspic
 	st.OffThresh = off
 	st.UniqIP = row.UniqueIPs
 	st.RPS = row.RPS
-	st.Reasons = append([]string(nil), row.Reasons...)
+	// Don't overwrite the manual reason with auto scanner reasons while manual
+	// owns the row; the auto score/uniqIP/rps above are still recorded as evidence.
+	if !manualActive {
+		st.Reasons = append([]string(nil), row.Reasons...)
+	}
 
 	s.addEvent(ChallengeEvent{
 		Ts:     now,
@@ -140,38 +177,46 @@ func (s *ChallengeAPIStore) RecordVhostManual(host string, active bool, ttl time
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	st, ok := s.vhosts[host]
-	if !ok {
-		st = &ChallengeVhostState{Host: host}
-		s.vhosts[host] = st
-	}
-	st.Mode = "manual"
-	if active {
-		st.Status = "active"
-		st.LastAction = "manual_on"
-		if st.Since.IsZero() {
+	// Mirror the bridge's apex→www expansion (vhostVariantsForBridge): a manual
+	// challenge on the apex is enforced on apex AND www, so the status list must
+	// carry a manual record for BOTH — otherwise the www row shows only auto
+	// state and an auto_off masks the still-active manual challenge.
+	for _, h := range vhostVariantsForBridge(host) {
+		st, ok := s.vhosts[h]
+		if !ok {
+			st = &ChallengeVhostState{Host: h}
+			s.vhosts[h] = st
+		}
+		st.Mode = "manual"
+		if active {
+			st.Status = "active"
+			st.LastAction = "manual_on"
+			if st.Since.IsZero() {
+				st.Since = now
+			}
+			if ttl > 0 {
+				st.ExpiresAt = now.Add(ttl)
+				st.manualUntil = st.ExpiresAt
+			}
+		} else {
+			st.Status = "inactive"
+			st.LastAction = "manual_off"
 			st.Since = now
+			st.ExpiresAt = time.Time{}
+			st.manualUntil = time.Time{}
 		}
-		if ttl > 0 {
-			st.ExpiresAt = now.Add(ttl)
+		st.LastChanged = now
+		if len(st.Reasons) == 0 || st.Reasons[0] != reason {
+			st.Reasons = []string{reason}
 		}
-	} else {
-		st.Status = "inactive"
-		st.LastAction = "manual_off"
-		st.Since = now
-		st.ExpiresAt = time.Time{}
-	}
-	st.LastChanged = now
-	if len(st.Reasons) == 0 || st.Reasons[0] != reason {
-		st.Reasons = []string{reason}
-	}
 
-	s.addEvent(ChallengeEvent{
-		Ts:   now,
-		Type: st.LastAction,
-		Host: host,
-		Rule: reason,
-	})
+		s.addEvent(ChallengeEvent{
+			Ts:   now,
+			Type: st.LastAction,
+			Host: h,
+			Rule: reason,
+		})
+	}
 }
 
 // RecordIPChallenge records/refreshes an active challenge for ip and reports
