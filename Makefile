@@ -1,9 +1,13 @@
 # -------------------------------
 # Project directories & binary
 # -------------------------------
-VERSION      ?= $(shell date +%Y.%m.%d)
+VERSION      ?= $(shell date -u +%Y.%m.%d)
 BUILD_TIME   ?= $(shell date -u +"%Y-%m-%dT%H:%M:%S")
 TAG          ?= v$(VERSION)
+# Release date for the CHANGELOG heading — UTC, date-only, always equal to the
+# date portion of VERSION/TAG (kept separate because VERSION is overridden to
+# carry a -HHMMSS suffix for the .deb below).
+REL_DATE     := $(shell date -u +%Y.%m.%d)
 
 RPM_VERSION  := $(shell echo "$(VERSION)" | sed 's/-.*//; s/[^A-Za-z0-9._+~]/./g')
 RPM_TS       := $(shell echo "$(BUILD_TIME)" | sed 's/.*T//; s/://g')
@@ -21,7 +25,7 @@ ARCH         ?= x86_64
 
 
 override ARCH    := amd64
-override VERSION := $(shell date +%Y.%m.%d-%H%M%S)
+override VERSION := $(shell date -u +%Y.%m.%d-%H%M%S)
 override PKGROOT := build/pkgroot
 override OUTDIR  := build/deb
 BIN := bin/cfm
@@ -136,7 +140,7 @@ build: verify-bpf-bindings ## Build the binary into ./bin/
 	GOOS=$(GOOS) GOARCH=$(GOARCH) GOAMD64=$(GOAMD64) CGO_ENABLED=$(CGO_ENABLED) \
 	go build -a \
 		-tags netgo,osusergo \
-		-ldflags "-X 'main.Version=$(shell date +%Y.%m.%d)' -X 'main.BuildTime=$(shell date +%Y-%m-%dT%H:%M:%S)'" \
+		-ldflags "-X 'main.Version=$(shell date -u +%Y.%m.%d)' -X 'main.BuildTime=$(shell date -u +%Y-%m-%dT%H:%M:%S)'" \
 		-o $(BINARY) ./$(MAIN_DIR)
 	@echo "✅ Built: $(BINARY)"
 
@@ -375,7 +379,14 @@ GH := gh
 # verify-bpf-bindings guard wired into `build:` will then re-validate
 # the freshly-regenerated .o against the Go bindings as a sanity check.
 # Requires clang + libbpf-devel on the release host (see `make bpf`).
+.PHONY: changelog
+# Stamp CHANGELOG.md: move [Unreleased] under today's UTC date. Run
+# automatically by `release`; also available standalone. Idempotent.
+changelog:
+	@scripts/stamp-changelog.sh $(REL_DATE)
+
 release: bpf deb rpm
+	@scripts/stamp-changelog.sh $(REL_DATE)
 	@set -euo pipefail; \
 	echo "🔐 Checking GitHub auth..."; \
 	$(GH) auth status -h github.com >/dev/null || { echo "Run: gh auth login"; exit 1; }; \

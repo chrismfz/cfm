@@ -65,6 +65,7 @@ make test-lua
 ./scripts/tests/check_cfm_clearance_require.sh   # Lua clearance module load check
 ./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf bounds + generator tests
 ./scripts/tests/check_logrotate_coverage.sh      # every CFM log path is rotated (see §5)
+./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
 ```
 
 Additional scanners run in CI: **CodeQL** (`codeql.yml`), **Semgrep**
@@ -326,36 +327,48 @@ rather than advancing heartbeats on failure.
 
 ## 8. Releasing & CHANGELOG
 
-**The version IS the date.** The Makefile sets `VERSION ?= $(date +%Y.%m.%d)`
-(the `.deb` adds an `-HHMMSS` suffix; the git tag is `vYYYY.MM.DD`). There is
-no separate semver to bump — building on a given day produces that day's
-version. The normal release is just:
+**The version IS the date, in UTC.** The Makefile sets
+`VERSION ?= $(date -u +%Y.%m.%d)` (all release timestamps are `date -u` — UTC —
+so a build never lands on a different day depending on the build host's
+timezone). The `.deb` and the git tag carry a `-HHMMSS` UTC suffix
+(`vYYYY.MM.DD-HHMMSS`) so multiple builds in a day are distinct; the CHANGELOG
+heading, however, is **date-only** (`YYYY.MM.DD`) — the date is the unit of
+release. There is no separate semver to bump. The normal release is just:
 
 ```bash
-make release    # builds bin/cfm, then the .deb and .rpm stamped with today's date
+make release    # builds bin/cfm, then the .deb and .rpm; also stamps CHANGELOG (below)
 make sync       # rsyncs today's .deb/.rpm (+ checksums) to the remote repo
 ```
 
 `make release` runs `bpf deb rpm`, so it also regenerates BPF objects — needs
 `clang` + `libbpf-dev` on the build host.
 
-### CHANGELOG discipline (do this — it's not automated)
+### CHANGELOG discipline (dating is now automated)
 
-`CHANGELOG.md` is maintained **by hand** (no Makefile hook). Because version ==
-date, every released package should be reflected by a dated section.
+`CHANGELOG.md` dating is **automated**: `make release` runs
+`scripts/stamp-changelog.sh $(REL_DATE)` after the packages build, which moves
+everything under `## [Unreleased]` beneath a `## YYYY.MM.DD` (UTC) heading and
+leaves a fresh empty `## [Unreleased]`. You no longer hand-edit the date on
+release day. What you still do by hand:
 
 1. **While working:** add a bullet under `## [Unreleased]`, grouped by
    **Added / Changed / Fixed / Security / Removed**. Keep entries
    operator-facing (what changed, why it matters) — not "fixed typo".
-2. **On release day**, before/with `make release`: rename `## [Unreleased]`
-   to `## YYYY.MM.DD` using **today's date — the same date `make release`
-   stamps** (`date +%Y.%m.%d`). Then add a fresh empty
-   `## [Unreleased]\n\n_Nothing yet._` block at the top for the next cycle.
-3. If you ship more than one build in a single day, keep one dated section for
-   that day and keep appending — the date is the unit of release.
+2. **Commit the stamped `CHANGELOG.md`** with the release (the stamp edits the
+   working tree; it does not commit for you — the script prints a reminder).
 
-So the steady-state release ritual is: _move Unreleased → today's date in
-`CHANGELOG.md`_, then `make release ; make sync`.
+The stamp is idempotent and safe to re-run:
+- an empty `[Unreleased]` (only `_Nothing yet._`) is a no-op;
+- a second build the same day appends the new `[Unreleased]` bullets **under**
+  the existing `## YYYY.MM.DD` section (one section per day), then resets
+  `[Unreleased]`.
+
+You can run it standalone with `make changelog`. The date always comes from the
+Makefile (`REL_DATE := date -u +%Y.%m.%d`), so the CHANGELOG date can never
+drift from the date portion of the package/tag.
+
+So the steady-state release ritual is now just: `make release ; make sync`,
+then commit the stamped `CHANGELOG.md`.
 
 ## 9. Workflow
 
