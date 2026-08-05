@@ -26,6 +26,17 @@ const (
 	// A longer, PTR-only cache (week+) would need PTR split from the geo TTL.
 	cacheTTL   = 24 * time.Hour
 	dnsTimeout = 1 * time.Second   // 1s timeout για PTR lookups
+
+	// ptrCacheTTL keeps resolved PTRs far longer than the 24h geo TTL. PTR is
+	// the ONLY expensive field (a blocking reverse-DNS, up to dnsTimeout each)
+	// and it changes very rarely (an IP's rDNS is stable for months), so it lives
+	// in its own long-lived cache: geo (country/ASN) still refreshes daily from
+	// mmdb while a given IP's PTR is resolved roughly once a month regardless of
+	// how many times it is seen. Negative results (no PTR / DNS timeout) are NOT
+	// cached, so a transient failure doesn't suppress a real PTR for 30 days.
+	// In-memory only (lost on restart); a persistent (SQLite) PTR store is a
+	// possible follow-up, low-value now that no hot path blocks on PTR.
+	ptrCacheTTL = 30 * 24 * time.Hour
 	statEvery  = 300 * time.Second // πόσο συχνά θα ελέγχουμε για αλλαγές στα mmdb αρχεία
 
 	// cacheCap is the maximum number of distinct IPs held in the geoip
@@ -69,8 +80,11 @@ type Enricher struct {
 	// This bounds memory at cacheCap entries (~50 MB worst case per worker)
 	// regardless of how many unique IPs have been seen since worker start.
 	cache  *lruexp.LRU[string, Result]
-	asnDB  *geoip2.Reader
-	cityDB *geoip2.Reader
+	// ptrCache holds resolved PTRs alone, on the much longer ptrCacheTTL, so a
+	// given IP's reverse-DNS is done ~once a month while geo stays daily-fresh.
+	ptrCache *lruexp.LRU[string, string]
+	asnDB    *geoip2.Reader
+	cityDB   *geoip2.Reader
 	// hot-reload state
 	asnPath     string
 	cityPath    string
@@ -94,6 +108,7 @@ type Enricher struct {
 func New(dirs ...string) (*Enricher, error) {
 	e := &Enricher{
 		cache:     lruexp.NewLRU[string, Result](cacheCap, nil, cacheTTL),
+		ptrCache:  lruexp.NewLRU[string, string](cacheCap, nil, ptrCacheTTL),
 		enablePTR: true,
 		asyncSem:  make(chan struct{}, asyncWorkerCap),
 	}
@@ -176,12 +191,22 @@ func (e *Enricher) Lookup(ipStr string) Result {
 	// PTR (reverse DNS) με timeout
 
 	if e.enablePTR && isRoutable(ip) {
-		ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
-		names, _ := net.DefaultResolver.LookupAddr(ctx, ipStr)
-		cancel()
-		if len(names) > 0 {
-			// καθάρισε τυχόν τελεία στο τέλος
-			r.PTR = strings.TrimSuffix(names[0], ".")
+		if p, ok := e.ptrCache.Get(ipStr); ok {
+			// Long-lived PTR hit — skip the blocking reverse-DNS entirely.
+			r.PTR = p
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
+			names, _ := net.DefaultResolver.LookupAddr(ctx, ipStr)
+			cancel()
+			if len(names) > 0 {
+				// καθάρισε τυχόν τελεία στο τέλος
+				r.PTR = strings.TrimSuffix(names[0], ".")
+			}
+			// Cache only a real PTR; a miss/timeout is left uncached so it is
+			// retried next time rather than pinned empty for ptrCacheTTL.
+			if r.PTR != "" {
+				e.ptrCache.Add(ipStr, r.PTR)
+			}
 		}
 	}
 

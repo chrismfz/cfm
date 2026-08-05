@@ -194,6 +194,15 @@ back-filled here — see the git/PR history for that period.
   rule exists at this endpoint. Only the logonly detector above remains.
 
 ### Changed
+- **Enricher: PTR reverse-DNS split into its own 30-day cache (geo stays 24h).**
+  PTR is the only expensive enrich field (a blocking reverse-DNS) and an IP's
+  rDNS is stable for months, so resolved PTRs now live in a separate long-lived
+  cache while country/ASN keep refreshing daily from mmdb. Net effect: a given
+  IP's reverse-DNS runs ~once a month no matter how many times it is seen, with
+  no cost to geo freshness. Negative results (no PTR / DNS timeout) are not
+  cached, so a transient failure isn't pinned for 30 days. In-memory only
+  (rebuilds after a restart); a persistent PTR store is a possible follow-up but
+  low-value now that no hot path blocks on PTR. Test: `TestLookupUsesLongLivedPTRCache`.
 - **Enricher: 24h cache TTL (was 4h) + 400k-entry cap (was 200k); host/IP
   drilldown enrich no longer blocks on PTR.** PTR reverse-DNS is the expensive,
   rarely-changing field, so the longer TTL + larger LRU keep a busy node's active
