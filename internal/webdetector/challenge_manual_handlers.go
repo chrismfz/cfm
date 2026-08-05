@@ -137,7 +137,10 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	active, expiresAt, reason := e.IsManualChallengeActive(host)
+	// Use covering (not exact-key) so the www variant of an apex manual
+	// challenge reports manual_active=true — matching what the bridge enforces
+	// and what the vhost status list now shows (apex→www expansion).
+	active, expiresAt, reason := e.manualChallengeCovering(host)
 
 	// Also check chalAPI for auto-challenge status
 	autoActive := false

@@ -50,9 +50,13 @@ back-filled here — see the git/PR history for that period.
   `LastAction=auto_on_under_manual`/`auto_off_keep_manual` and still recording
   the auto score/uniqIP/rps as evidence. Reporting-only (a companion to the
   enforcement fix in the manual-vs-auto lifecycle work); no API/JSON shape
-  change — the manual-coverage marker is unexported. Tests:
+  change — the manual-coverage marker is unexported. The
+  `GET /api/v1/challenge/vhost/status` endpoint now resolves `manual_active`
+  via `manualChallengeCovering` (not exact-key), so querying the `www` variant
+  of an apex manual challenge correctly reports it active. Tests:
   `TestChallengeAPIStore_ManualCoversWWWacrossAutoCycle`,
-  `TestChallengeAPIStore_AutoOffAppliesAfterManualCleared`.
+  `TestChallengeAPIStore_AutoOffAppliesAfterManualCleared`,
+  `TestHandleChallengeVhostStatus_WWWCoveredByApexManual`.
 - **WAF: stop rule 402 (`WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG`) from blocking the
   String Locator plugin's file editor.** String Locator is an in-browser
   theme/plugin file editor: on Save it POSTs the entire PHP file being edited to
