@@ -31,6 +31,17 @@ back-filled here — see the git/PR history for that period.
   is patching vBulletin (≥6.2.2).
 
 ### Fixed
+- **Challenge status list/summary: an expired manual vhost row no longer counts
+  as active.** The ChalAPI store has no TTL sweeper for vhost rows, so a manual
+  (or manual-kept) challenge whose TTL lapsed sat at `Status=active` with a past
+  `ExpiresAt` until some later event rewrote that key — inflating the
+  active-vhost count and the `status=active` list with challenges no longer in
+  force. `Summary()` and `ListVhosts()` now filter on an effective-active check
+  (`Status=active` AND `ExpiresAt` unset-or-future); auto rows (zero `ExpiresAt`,
+  governed by the tick loop) are unaffected, and `status=all`/`inactive` views
+  still surface the stale row. Tests:
+  `TestChallengeAPIStore_ExpiredManualNotCountedActive`,
+  `TestChallengeAPIStore_AutoActiveNotHiddenByZeroExpiry`.
 - **An operator manual vhost challenge now wins over a challenge-exclude / an
   ignore-list match, and every `vhost_clear` records WHY.** The vhost gate's
   per-host clear paths (`challenge_rules.go`) called `ClearVhost` whenever a
