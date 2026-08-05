@@ -18,6 +18,24 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Read-only MCP server (`/cfm-admin/mcp`) — read CFM's security telemetry from
+  an MCP client (e.g. the claude.ai remote connector).** The daemon now embeds a
+  read-only [Model Context Protocol](https://modelcontextprotocol.io) server,
+  served through the existing OpenResty edge under `/cfm-admin/mcp` (no new port,
+  no edge-config change). It exposes 15 read-only tools — WAF activity/rules,
+  challenge vhosts/events, suspicious hosts, top talkers, hot IPs, host/IP
+  drilldowns, detection history, top bots, firewall blocks, detector status,
+  system health, and a one-call `security_overview` — each dispatching to the
+  same `/api/v1` read handler the CLI/web UI use, in-process, GET-only,
+  allow-listed (read-only by construction; no tool can block/exclude/configure).
+  Auth: an OAuth 2.1 + PKCE flow (dynamic client registration, discovery via the
+  401 `resource_metadata` pointer) for the claude.ai web connector — consent is
+  approving with the CFM admin API token, which mints a read-only token that is
+  inert against `/api/v1`; Claude Code / API clients may present the admin token
+  as a static `Authorization: Bearer` instead. Mounted only when `AUTH_TOKEN` is
+  configured; rotating `AUTH_TOKEN` revokes all issued MCP tokens. See `MCP.md`
+  for the as-built map, arming steps, and roadmap. Code in `internal/mcpserver/`;
+  tests cover the bearer gate, OAuth discovery/flow, and tool dispatch.
 - **Challenge/WAF exclude add/remove is now logged to `cfm.log`.** Adding or
   removing a challenge- or WAF-exclude previously left no paper trail, yet an
   exclude silently governs whether the challenge/WAF layer runs for a host or
