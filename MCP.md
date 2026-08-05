@@ -56,13 +56,31 @@ Code: `internal/mcpserver/` (`server.go`, `oauth.go`, `tools.go`) +
 
 ## 2. How to arm it
 
-### Prerequisite: an admin API token
+### Prerequisite: a dedicated `MCP_TOKEN`
 
-The MCP server is **only mounted when an admin API token is configured**
-(`AUTH_TOKEN` in `/etc/cfm/cfm.api.conf`). Without it the daemon logs
-`mcp: AUTH_TOKEN not set — MCP server disabled` and mounts nothing. That token
-is the consent credential and the OAuth signing key — **rotating it revokes every
-issued MCP token.**
+The MCP server has its **own** credential, `MCP_TOKEN` in `cfm.conf`, kept
+separate from the admin/API `AUTH_TOKEN` (which CFM also uses for `/cfm-admin`
+and the Laravel API). The MCP client only ever sees `MCP_TOKEN`; the admin token
+is used solely for the in-process read dispatch and never leaves the daemon.
+
+The server is mounted **only when both** hold:
+
+- `AUTH_TOKEN` is set (needed for the internal read dispatch), and
+- `MCP_TOKEN` is set **and at least 24 characters** (a short/weak/missing
+  `MCP_TOKEN` keeps the server **disabled** — it is internet-reachable through the
+  edge, so a guessable credential is treated as misconfiguration).
+
+`MCP_TOKEN` is the consent credential, the static bearer, and the OAuth signing
+key — **rotating it revokes every issued MCP token.** Use a value distinct from
+`AUTH_TOKEN` (if they are equal the daemon logs a warning), e.g.:
+
+```
+# /etc/cfm/cfm.conf
+MCP_TOKEN=<32+ random chars, e.g. `openssl rand -hex 24`>
+```
+
+Startup log lines when disabled: `mcp: MCP_TOKEN not set — MCP server disabled`
+or `mcp: MCP_TOKEN too weak (need >= 24 chars) — MCP server disabled`.
 
 The connector URL is always:
 
@@ -83,28 +101,27 @@ this, so **no manual token handling in Claude** is needed.
    `WWW-Authenticate: … resource_metadata="https://<host>/cfm-admin/.well-known/oauth-protected-resource"`,
    which Claude follows (RFC 9728) → registers a client → opens a **consent page**
    in *your* browser.
-3. On the consent page (`/cfm-admin/mcp/oauth/authorize`), **paste your CFM admin
-   API token** and click **Approve**. This proves you are an admin; Claude
-   receives a **read-only** access token bound to this node.
+3. On the consent page (`/cfm-admin/mcp/oauth/authorize`), **paste your
+   `MCP_TOKEN`** and click **Approve**. Claude receives a **read-only** access
+   token bound to this node.
 4. Done — the connector is connected and the read-only tools are available.
 
-> The pasted admin token stays in your browser → the panel over HTTPS (same trust
-> as logging into `/cfm-admin`). Claude never receives the admin token, only the
-> read-only OAuth token.
+> The pasted `MCP_TOKEN` goes to your own panel over HTTPS. Claude never receives
+> the admin `AUTH_TOKEN` at all, and the OAuth token it does receive is read-only
+> and inert against `/api/v1`.
 
 ### Option B — Claude Code / API / curl (static bearer)
 
-Clients that *can* send a header may skip OAuth and present the admin token
-directly:
+Clients that *can* send a header may skip OAuth and present `MCP_TOKEN` directly:
 
 ```bash
 # Claude Code (project or user config): a remote MCP server with an auth header
 claude mcp add --transport http cfm https://<host>/cfm-admin/mcp \
-  --header "Authorization: Bearer $AUTH_TOKEN"
+  --header "Authorization: Bearer $MCP_TOKEN"
 
 # Smoke test with curl (stateless streamable endpoint):
 curl -sS https://<host>/cfm-admin/mcp \
-  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -H "Authorization: Bearer $MCP_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
@@ -112,11 +129,11 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ### Disable / revoke
 
-- **Revoke all issued MCP tokens:** rotate `AUTH_TOKEN` in `cfm.api.conf` and
-  reload — every OAuth artifact (signed with a key derived from it) becomes
-  invalid.
-- **Disable the server entirely:** unset `AUTH_TOKEN` (also disables the rest of
-  the token-authenticated API) — the MCP surface is not mounted.
+- **Revoke all issued MCP tokens:** rotate `MCP_TOKEN` in `cfm.conf` and reload —
+  every OAuth artifact (signed with a key derived from it) becomes invalid. This
+  does **not** touch `AUTH_TOKEN`, so `/cfm-admin` and the API keep working.
+- **Disable the server entirely:** unset `MCP_TOKEN` (or set one shorter than 24
+  chars) — the MCP surface is not mounted; the rest of the API is unaffected.
 
 ---
 
@@ -125,13 +142,17 @@ curl -sS https://<host>/cfm-admin/mcp \
 - **Read-only by construction.** Only GET, only a fixed allow-list of `/api/v1`
   read paths, only read tools are registered. The tool never chooses the HTTP verb
   or an arbitrary path.
-- **Least-exposure token.** The OAuth access token is audience-bound to
-  `https://<host>/cfm-admin/mcp` and is validated *only* at the `/mcp` gate; it
-  does not authenticate against `/api/v1` directly. A leaked MCP token grants
-  read-only MCP access, not admin API access.
-- **Admin/scoped boundary preserved.** The admin token is used purely in-process;
-  it is never handed to the client. (See `CLAUDE.md` §5 — scoped-vs-admin is a hard
-  boundary.)
+- **Dedicated, least-exposure credential.** MCP clients authenticate with
+  `MCP_TOKEN`, never the admin `AUTH_TOKEN`. The OAuth access token minted from it
+  is audience-bound to `https://<host>/cfm-admin/mcp` and validated *only* at the
+  `/mcp` gate; it does not authenticate against `/api/v1`. So a leaked MCP token
+  grants read-only MCP access — not admin API access, and not `/cfm-admin`/Laravel
+  API access (those use `AUTH_TOKEN`).
+- **Admin/scoped boundary preserved.** The admin token is used purely in-process
+  for the read dispatch; it is never handed to a client. (See `CLAUDE.md` §5 —
+  scoped-vs-admin is a hard boundary.)
+- **Weak-token fail-closed.** A missing or <24-char `MCP_TOKEN` leaves the server
+  unmounted rather than exposing a guessable internet-facing credential.
 - **PKCE S256 mandatory**, dynamic client registration restricted to `https` (or
   `http://localhost`) redirect URIs, consent page is frame-denied (clickjacking),
   and all OAuth/discovery responses are CORS-open (the connector fetches them
@@ -224,4 +245,4 @@ The MCP surface is versioned by CFM's date-based releases (see `CHANGELOG.md`).
 
 | Release | MCP status | Tools active |
 |---|---|---|
-| 2026.08.05 | **Introduced** — read-only MCP server, OAuth 2.1 + PKCE for the claude.ai connector, static-bearer for Claude Code/API | The 15 tools in §4 (WAF, challenge, suspicious/traffic, drilldowns, history, bots, firewall blocks, detectors, health) |
+| 2026.08.05 | **Introduced** — read-only MCP server; dedicated `MCP_TOKEN` credential (min 24 chars, fail-closed) separate from `AUTH_TOKEN`; OAuth 2.1 + PKCE for the claude.ai connector, static-bearer for Claude Code/API | The 15 tools in §4 (WAF, challenge, suspicious/traffic, drilldowns, history, bots, firewall blocks, detectors, health) |

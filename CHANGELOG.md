@@ -28,14 +28,19 @@ back-filled here — see the git/PR history for that period.
   system health, and a one-call `security_overview` — each dispatching to the
   same `/api/v1` read handler the CLI/web UI use, in-process, GET-only,
   allow-listed (read-only by construction; no tool can block/exclude/configure).
-  Auth: an OAuth 2.1 + PKCE flow (dynamic client registration, discovery via the
-  401 `resource_metadata` pointer) for the claude.ai web connector — consent is
-  approving with the CFM admin API token, which mints a read-only token that is
-  inert against `/api/v1`; Claude Code / API clients may present the admin token
-  as a static `Authorization: Bearer` instead. Mounted only when `AUTH_TOKEN` is
-  configured; rotating `AUTH_TOKEN` revokes all issued MCP tokens. See `MCP.md`
-  for the as-built map, arming steps, and roadmap. Code in `internal/mcpserver/`;
-  tests cover the bearer gate, OAuth discovery/flow, and tool dispatch.
+  Auth uses a **dedicated `MCP_TOKEN`** (in `cfm.conf`), kept separate from the
+  admin/API `AUTH_TOKEN` — MCP clients never see the admin token, which is used
+  only for the in-process read dispatch. An OAuth 2.1 + PKCE flow (dynamic client
+  registration, discovery via the 401 `resource_metadata` pointer) serves the
+  claude.ai web connector — consent is approving with `MCP_TOKEN`, minting a
+  read-only token that is inert against `/api/v1`; Claude Code / API clients may
+  present `MCP_TOKEN` as a static `Authorization: Bearer` instead. The server is
+  mounted only when `AUTH_TOKEN` is set AND `MCP_TOKEN` is set and ≥24 chars
+  (a short/weak/missing `MCP_TOKEN` fails closed → server stays disabled);
+  rotating `MCP_TOKEN` revokes all issued MCP tokens without touching `AUTH_TOKEN`.
+  See `MCP.md` for the as-built map, arming steps, and roadmap. Code in
+  `internal/mcpserver/`; tests cover the bearer gate, OAuth discovery/flow, tool
+  dispatch, and the `MCP_TOKEN` strength gate.
 - **Challenge/WAF exclude add/remove is now logged to `cfm.log`.** Adding or
   removing a challenge- or WAF-exclude previously left no paper trail, yet an
   exclude silently governs whether the challenge/WAF layer runs for a host or

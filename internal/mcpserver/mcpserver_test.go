@@ -50,7 +50,7 @@ func newTestServer(t *testing.T, fd *fakeDispatch) *httptest.Server {
 		BaseURL:       func(r *http.Request) string { return "https://" + r.Host + "/cfm-admin" },
 		Authenticate:  func(cred string) (string, bool) { return "", cred == testAdminToken },
 		SigningSecret: testAdminToken,
-		AdminBearer:   func(tok string) bool { return tok == testAdminToken },
+		StaticBearer:  func(tok string) bool { return tok == testAdminToken },
 	})
 	mux := http.NewServeMux()
 	h.Register(mux)

@@ -56,9 +56,10 @@ type Deps struct {
 	Authenticate  Authenticator
 	SigningSecret string
 
-	// AdminBearer reports whether a bearer presented directly at /mcp is the
-	// static admin token (so Claude Code / API clients can skip the OAuth dance).
-	AdminBearer func(string) bool
+	// StaticBearer reports whether a bearer presented directly at /mcp is the
+	// configured MCP token (so Claude Code / API clients can skip the OAuth dance
+	// by sending Authorization: Bearer <MCP_TOKEN> themselves).
+	StaticBearer func(string) bool
 }
 
 // Handler is the mounted MCP surface: the OAuth authorization server plus the
@@ -116,7 +117,7 @@ func (h *Handler) requireMCPBearer(next http.Handler) http.Handler {
 			return
 		}
 		if tok := extractBearer(r); tok != "" {
-			if (h.deps.AdminBearer != nil && h.deps.AdminBearer(tok)) || h.oauth.validAccessToken(tok, r) {
+			if (h.deps.StaticBearer != nil && h.deps.StaticBearer(tok)) || h.oauth.validAccessToken(tok, r) {
 				next.ServeHTTP(w, r)
 				return
 			}

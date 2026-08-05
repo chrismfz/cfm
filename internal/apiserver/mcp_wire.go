@@ -25,14 +25,42 @@ import (
 	"cfm/internal/mcpserver"
 )
 
+// minMCPTokenLen is the minimum MCP_TOKEN length we accept. The MCP endpoint is
+// internet-reachable through the edge, so a short/weak token is treated as
+// misconfiguration and the server stays disabled rather than expose a guessable
+// credential.
+const minMCPTokenLen = 24
+
+// mcpTokenUsable reports whether an MCP_TOKEN is present and strong enough to arm
+// the MCP server.
+func mcpTokenUsable(tok string) bool {
+	return len(strings.TrimSpace(tok)) >= minMCPTokenLen
+}
+
 // registerMCPServer mounts the MCP + OAuth endpoints on m. It is a no-op (with a
-// warning) when no admin API token is configured, since the dispatch path and the
-// OAuth signing key both require it.
+// warning) unless BOTH are true: an admin API token is configured (needed for the
+// in-process read dispatch) AND a strong, distinct MCP_TOKEN is set (the
+// client-facing credential). The admin token is never exposed to MCP clients.
 func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) {
 	adminTok := strings.TrimSpace(cfg.API.AuthToken)
+	mcpTok := strings.TrimSpace(cfg.API.MCPToken)
+
 	if adminTok == "" {
 		logging.LogfAPI("[apiserver] mcp: AUTH_TOKEN not set — MCP server disabled")
 		return
+	}
+	if mcpTok == "" {
+		logging.LogfAPI("[apiserver] mcp: MCP_TOKEN not set — MCP server disabled (set a strong MCP_TOKEN in cfm.conf to enable)")
+		return
+	}
+	if !mcpTokenUsable(mcpTok) {
+		logging.LogfAPI("[apiserver] mcp: MCP_TOKEN too weak (need >= %d chars) — MCP server disabled", minMCPTokenLen)
+		return
+	}
+	if mcpTok == adminTok {
+		// Not fatal, but it defeats the point of a separate credential: an MCP
+		// token leak would then equal an admin/API token leak.
+		logging.LogfAPI("[apiserver] mcp: WARNING MCP_TOKEN equals AUTH_TOKEN — use a distinct MCP_TOKEN so an MCP leak is not an admin-token leak")
 	}
 
 	// dispatchHandler authenticates in-process reads as admin without exposing the
@@ -55,14 +83,17 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 		return rec.status, rec.buf.Bytes(), nil
 	}
 
+	// Client-facing auth (consent credential, static bearer, OAuth signing) binds
+	// to MCP_TOKEN — never the admin token. The admin token is used only for the
+	// in-process dispatch above and never reaches an MCP client.
 	h := mcpserver.New(mcpserver.Deps{
 		Version:       daemonVersion(),
 		MCPPath:       "/mcp",
 		Dispatch:      dispatch,
 		BaseURL:       func(r *http.Request) string { return mcpRequestScheme(r) + "://" + r.Host + cfmBase(r) },
-		Authenticate:  func(cred string) (string, bool) { return "", tokenMatch(cred, adminTok) },
-		SigningSecret: adminTok,
-		AdminBearer:   func(tok string) bool { return tokenMatch(tok, adminTok) },
+		Authenticate:  func(cred string) (string, bool) { return "", tokenMatch(cred, mcpTok) },
+		SigningSecret: mcpTok,
+		StaticBearer:  func(tok string) bool { return tokenMatch(tok, mcpTok) },
 	})
 	h.Register(m)
 	logging.LogfAPI("[apiserver] mcp: read-only MCP server mounted at /mcp (edge: /cfm-admin/mcp)")
