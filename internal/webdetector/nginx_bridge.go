@@ -1132,9 +1132,12 @@ func (b *NginxBridge) ChallengeVhostWithReason(host string, ttl time.Duration, r
 	}
 }
 
-// ClearVhost removes vhost-wide challenge mode.
-// Called when CHALLENGE_SUSPICIOUS_VHOST_SCORE score drops below ScoreOff.
-func (b *NginxBridge) ClearVhost(host string) {
+// ClearVhost removes vhost-wide challenge mode. reason names WHY the clear
+// happened (auto_off / excluded / ignored / host_bypass / manual_off / …) and
+// is stamped on the vhost_clear log line — without it a bare "vhost_clear"
+// gave no way to tell an auto cool-down from an exclude/bypass/operator clear.
+// Pass "" only when there is genuinely no reason to record.
+func (b *NginxBridge) ClearVhost(host, reason string) {
 	if !b.cfg.Enabled {
 		return
 	}
@@ -1144,6 +1147,7 @@ func (b *NginxBridge) ClearVhost(host string) {
 		return
 	}
 
+	reason = strings.TrimSpace(reason)
 	for _, host := range hosts {
 		wasSet := false
 
@@ -1156,7 +1160,11 @@ func (b *NginxBridge) ClearVhost(host string) {
 
 		if wasSet {
 			b.post("/nginx/vhost/clear", nginxVhostClearMsg{Host: host})
-			logging.Logf("[nginx_bridge] vhost_clear host=%s", host)
+			if reason != "" {
+				logging.Logf("[nginx_bridge] vhost_clear host=%s reason=%s", host, reason)
+			} else {
+				logging.Logf("[nginx_bridge] vhost_clear host=%s", host)
+			}
 		}
 	}
 }
