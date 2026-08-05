@@ -18,6 +18,18 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Challenge/WAF exclude add/remove is now logged to `cfm.log`.** Adding or
+  removing a challenge- or WAF-exclude previously left no paper trail, yet an
+  exclude silently governs whether the challenge/WAF layer runs for a host or
+  path — so a challenge/protection "disappearing" could not be traced to an
+  exclude change. Every add/remove now emits one `[exclude]` line with
+  `action`, `kind` (challenge|waf), `type` (host|path), `value`, `scope`
+  (`global` or the sorted host list), `rule_ids` (`all` or the WAF rule-id set),
+  and `result` (`ok` = state changed, `noop` = already in that state / invalid).
+  Logged at the `Engine.{Challenge,WAF}Exclude{Add,Remove}*` wrappers, the single
+  choke point every source (HTTP API, CLI, WebUI) passes through; uses the
+  existing `cfm.log` sink (no new log file). ClamAV scan/mode overrides keep
+  their own `LogfCLAM` line and are unaffected. Test: `TestFormatExcludeChange`.
 - **WAF: generic phpfuck / numeric-XOR obfuscation detector (rule 439,
   `WAF_BACKDOOR`, logonly).** Best-effort, technique-level visibility for a
   "phpfuck" payload — arbitrary PHP built entirely from XOR of parenthesised

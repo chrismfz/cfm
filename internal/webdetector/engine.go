@@ -3476,18 +3476,59 @@ func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
 	return matched
 }
 
+// logExcludeChange records every challenge/WAF exclude add/remove to cfm.log
+// so the exclude lifecycle is observable — previously an operator (or the UI)
+// could add/remove an exclude with no paper trail, and an exclude silently
+// governs whether the challenge/WAF layer runs for a host or path. kind is
+// "challenge" or "waf"; result is "ok" (state changed) or "noop" (already in
+// that state, or invalid input). scope renders as "global" when unscoped, else
+// the sorted host list; ruleIDs render as "all" for a whole-layer exclude.
+// Single choke point: both the HTTP handlers and any CLI path go through these
+// Engine wrappers, so one log call here covers every source.
+func logExcludeChange(kind, action, typ, value string, scope map[string]struct{}, ruleIDs []int, ok bool) {
+	logging.Logf("%s", formatExcludeChange(kind, action, typ, value, scope, ruleIDs, ok))
+}
+
+// formatExcludeChange builds the exclude-lifecycle log line. Split out from
+// logExcludeChange so the field rendering (scope→global/host-list,
+// ruleIDs→all/list, result→ok/noop) is unit-testable without a global logger.
+func formatExcludeChange(kind, action, typ, value string, scope map[string]struct{}, ruleIDs []int, ok bool) string {
+	result := "ok"
+	if !ok {
+		result = "noop"
+	}
+	sc := "global"
+	if hs := scopeMapToHosts(scope); len(hs) > 0 {
+		sc = strings.Join(hs, ",")
+	}
+	rid := "all"
+	if len(ruleIDs) > 0 {
+		parts := make([]string, len(ruleIDs))
+		for i, id := range ruleIDs {
+			parts[i] = strconv.Itoa(id)
+		}
+		rid = strings.Join(parts, ",")
+	}
+	return fmt.Sprintf("[exclude] action=%s kind=%s type=%s value=%q scope=%s rule_ids=%s result=%s",
+		action, kind, typ, value, sc, rid, result)
+}
+
 func (e *Engine) ChallengeExcludeAdd(typ, value string, scope map[string]struct{}) bool {
 	if e == nil || e.challengeExcludes == nil {
 		return false
 	}
-	return e.challengeExcludes.Add(typ, value, scope)
+	ok := e.challengeExcludes.Add(typ, value, scope)
+	logExcludeChange("challenge", "add", typ, value, scope, nil, ok)
+	return ok
 }
 
 func (e *Engine) ChallengeExcludeRemove(typ, value string, scope map[string]struct{}) bool {
 	if e == nil || e.challengeExcludes == nil {
 		return false
 	}
-	return e.challengeExcludes.Remove(typ, value, scope)
+	ok := e.challengeExcludes.Remove(typ, value, scope)
+	logExcludeChange("challenge", "remove", typ, value, scope, nil, ok)
+	return ok
 }
 
 func (e *Engine) ChallengeExcludeList() []excludeEntry {
@@ -3501,7 +3542,9 @@ func (e *Engine) WAFExcludeAdd(typ, value string, scope map[string]struct{}) boo
 	if e == nil || e.wafExcludes == nil {
 		return false
 	}
-	return e.wafExcludes.Add(typ, value, scope)
+	ok := e.wafExcludes.Add(typ, value, scope)
+	logExcludeChange("waf", "add", typ, value, scope, nil, ok)
+	return ok
 }
 
 // WAFExcludeAddRules is the rule-scoped variant of WAFExcludeAdd. ruleIDs
@@ -3512,14 +3555,18 @@ func (e *Engine) WAFExcludeAddRules(typ, value string, scope map[string]struct{}
 	if e == nil || e.wafExcludes == nil {
 		return false
 	}
-	return e.wafExcludes.AddWithRuleIDs(typ, value, scope, ruleIDs)
+	ok := e.wafExcludes.AddWithRuleIDs(typ, value, scope, ruleIDs)
+	logExcludeChange("waf", "add", typ, value, scope, ruleIDs, ok)
+	return ok
 }
 
 func (e *Engine) WAFExcludeRemove(typ, value string, scope map[string]struct{}) bool {
 	if e == nil || e.wafExcludes == nil {
 		return false
 	}
-	return e.wafExcludes.Remove(typ, value, scope)
+	ok := e.wafExcludes.Remove(typ, value, scope)
+	logExcludeChange("waf", "remove", typ, value, scope, nil, ok)
+	return ok
 }
 
 // WAFExcludeRemoveRules removes the rule-scoped entry matching (typ, value,
@@ -3528,7 +3575,9 @@ func (e *Engine) WAFExcludeRemoveRules(typ, value string, scope map[string]struc
 	if e == nil || e.wafExcludes == nil {
 		return false
 	}
-	return e.wafExcludes.RemoveWithRuleIDs(typ, value, scope, ruleIDs)
+	ok := e.wafExcludes.RemoveWithRuleIDs(typ, value, scope, ruleIDs)
+	logExcludeChange("waf", "remove", typ, value, scope, ruleIDs, ok)
+	return ok
 }
 
 func (e *Engine) WAFExcludeList() []excludeEntry {
