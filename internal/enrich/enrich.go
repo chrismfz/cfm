@@ -191,10 +191,20 @@ func (e *Enricher) Lookup(ipStr string) Result {
 	// PTR (reverse DNS) με timeout
 
 	if e.enablePTR && isRoutable(ip) {
+		// L1: this Enricher's own in-memory PTR cache.
 		if p, ok := e.ptrCache.Get(ipStr); ok {
-			// Long-lived PTR hit — skip the blocking reverse-DNS entirely.
 			r.PTR = p
-		} else {
+		} else if sp := sharedPTRStore(); sp != nil {
+			// L2: the process-wide persistent store, warmed by every Enricher
+			// and surviving restarts. A hit here still skips reverse-DNS; warm
+			// L1 so subsequent lookups on this instance don't touch SQLite.
+			if p, ok := sp.get(ipStr); ok {
+				r.PTR = p
+				e.ptrCache.Add(ipStr, p)
+			}
+		}
+		if r.PTR == "" {
+			// Cold in both layers → resolve, then populate L1 and (async) L2.
 			ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
 			names, _ := net.DefaultResolver.LookupAddr(ctx, ipStr)
 			cancel()
@@ -206,6 +216,7 @@ func (e *Enricher) Lookup(ipStr string) Result {
 			// retried next time rather than pinned empty for ptrCacheTTL.
 			if r.PTR != "" {
 				e.ptrCache.Add(ipStr, r.PTR)
+				sharedPTRStore().put(ipStr, r.PTR) // nil-safe when persistence is off
 			}
 		}
 	}

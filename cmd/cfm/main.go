@@ -7,6 +7,7 @@ import (
 	"cfm/internal/blocklists"
 	cfgpkg "cfm/internal/config"
 	detpkg "cfm/internal/detectors"
+	"cfm/internal/enrich"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
 	"cfm/internal/firewall/nftlib"
@@ -589,6 +590,13 @@ func runDaemon(args []string) {
 			_ = os.Chmod(d, 0o770)
 			_ = os.Chown(d, 0, cfmGID)
 		}
+	}
+
+	// Process-wide persistent PTR cache (shared L2 for every Enricher). Best-
+	// effort: if it can't be opened, enrichment falls back to per-Enricher
+	// in-memory caches. Only the daemon enables it (the CLI stays in-memory).
+	if err := enrich.EnablePersistentPTR("/var/lib/cfm/ptrcache.db"); err != nil {
+		logging.Logf("[enrich] persistent PTR cache unavailable, using in-memory only: %v", err)
 	}
 
 	// Daemon context — created early so sslcollector (started right
