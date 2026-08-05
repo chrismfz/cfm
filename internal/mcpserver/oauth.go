@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"cfm/internal/logging"
@@ -66,6 +67,13 @@ type oauthServer struct {
 	refreshTTL time.Duration
 	codeTTL    time.Duration
 	clientTTL  time.Duration
+
+	// consumed makes authorization codes and refresh tokens single-use despite the
+	// otherwise-stateless design: their nonce is recorded on first redemption and
+	// re-presentation is rejected (OAuth 2.1 single-use codes + refresh-reuse
+	// detection). Bounded + self-GCing; lost on restart (acceptable — codes live
+	// 2 min, and a restart is a far bigger event than a replayed code).
+	consumed *nonceCache
 }
 
 func newOAuthServer(baseFn func(*http.Request) string, mcpPath, signingSecret string, auth Authenticator) *oauthServer {
@@ -73,14 +81,46 @@ func newOAuthServer(baseFn func(*http.Request) string, mcpPath, signingSecret st
 		baseFn:     baseFn,
 		mcpPath:    mcpPath,
 		auth:       auth,
-		prompt:     "Paste your CFM admin API token to approve read-only access.",
+		prompt:     "Paste your MCP_TOKEN to approve read-only access.",
 		key:        deriveOAuthKey(signingSecret),
 		tpl:        template.Must(template.New("authorize").Parse(authorizeHTML)),
 		accessTTL:  time.Hour,
 		refreshTTL: 7 * 24 * time.Hour,
 		codeTTL:    2 * time.Minute,
 		clientTTL:  10 * 365 * 24 * time.Hour,
+		consumed:   newNonceCache(),
 	}
+}
+
+// nonceCache is a small, self-GCing set of consumed artifact nonces, keyed by
+// nonce with a unix expiry so entries drop once the artifact would have expired
+// anyway.
+type nonceCache struct {
+	mu   sync.Mutex
+	seen map[string]int64
+}
+
+func newNonceCache() *nonceCache { return &nonceCache{seen: map[string]int64{}} }
+
+// consume records nonce (valid until exp) and reports whether this was the FIRST
+// time it was seen. A false return means replay.
+func (c *nonceCache) consume(nonce string, exp int64) bool {
+	if nonce == "" {
+		return true // no nonce to enforce (older artifacts); fail open only for absence
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now().Unix()
+	for k, e := range c.seen {
+		if e < now {
+			delete(c.seen, k)
+		}
+	}
+	if _, ok := c.seen[nonce]; ok {
+		return false
+	}
+	c.seen[nonce] = exp
+	return true
 }
 
 // base / resource / metadata URL are all derived from the incoming request so the
@@ -192,6 +232,8 @@ type authView struct {
 	Action        string
 	ClientID      string
 	RedirectURI   string
+	RedirectHost  string // host the code will be delivered to — shown to the operator
+	FirstParty    bool   // redirect host == this server's host (no cross-site warning)
 	State         string
 	CodeChallenge string
 	Resource      string
@@ -252,11 +294,22 @@ func (s *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The operator must be able to SEE where the code is going before approving.
+	// DCR is open (any client can register any https redirect), so the consent
+	// page shows the redirect host and warns when it is not first-party — this is
+	// the anti-phishing control, not the redirect allow-list.
+	redirectHost := ""
+	if ru, err := url.Parse(redirectURI); err == nil {
+		redirectHost = ru.Hostname()
+	}
+	view := authView{
+		Action: action, ClientID: clientID, RedirectURI: redirectURI,
+		RedirectHost: redirectHost, FirstParty: strings.EqualFold(redirectHost, hostnameOnly(r.Host)),
+		State: state, CodeChallenge: challenge, Resource: resource, Scope: scope,
+	}
+
 	if r.Method == http.MethodGet {
-		s.renderAuthorize(w, authView{
-			Action: action, ClientID: clientID, RedirectURI: redirectURI, State: state,
-			CodeChallenge: challenge, Resource: resource, Scope: scope,
-		}, "")
+		s.renderAuthorize(w, view, "")
 		return
 	}
 
@@ -264,16 +317,14 @@ func (s *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	_, ok = s.auth(get("token"))
 	if !ok {
 		logging.LogfAPI("[apiserver] event=mcp_oauth_consent_denied src_ip=%s", realIPFromRequestMCP(r))
-		s.renderAuthorize(w, authView{
-			Action: action, ClientID: clientID, RedirectURI: redirectURI, State: state,
-			CodeChallenge: challenge, Resource: resource, Scope: scope,
-		}, "Invalid token.")
+		s.renderAuthorize(w, view, "Invalid token.")
 		return
 	}
 	code := s.sign(oauthClaims{
 		Kind:      "code",
 		Redirect:  redirectURI,
 		Challenge: challenge,
+		Nonce:     oauthNonce(), // makes the code single-use (see grantAuthorizationCode)
 		Exp:       time.Now().Add(s.codeTTL).Unix(),
 	})
 	u, _ := url.Parse(redirectURI)
@@ -348,6 +399,11 @@ func (s *oauthServer) grantAuthorizationCode(w http.ResponseWriter, r *http.Requ
 		oauthWriteErr(w, http.StatusBadRequest, "invalid_target", "resource mismatch")
 		return
 	}
+	// Single-use: reject a code that has already been redeemed (OAuth 2.1).
+	if !s.consumed.consume(c.Nonce, c.Exp) {
+		oauthWriteErr(w, http.StatusBadRequest, "invalid_grant", "authorization code already used")
+		return
+	}
 	s.issueTokens(w, r)
 }
 
@@ -357,11 +413,20 @@ func (s *oauthServer) grantRefresh(w http.ResponseWriter, r *http.Request) {
 		oauthWriteErr(w, http.StatusBadRequest, "invalid_grant", "bad or expired refresh_token")
 		return
 	}
+	// Rotation with reuse detection: a refresh token is single-use, so a replay of
+	// an already-rotated refresh token is rejected here.
+	if !s.consumed.consume(c.Nonce, c.Exp) {
+		oauthWriteErr(w, http.StatusBadRequest, "invalid_grant", "refresh token already used")
+		return
+	}
 	s.issueTokens(w, r)
 }
 
 // issueTokens mints a fresh access+refresh pair bound to this request's resource.
-// Refresh tokens are rotated on every use (each carries a nonce).
+// Each refresh token carries a unique nonce and is single-use: redeeming it (in
+// grantRefresh) consumes that nonce, so the previous refresh token is invalidated
+// on rotation. Note tokens cannot be revoked individually before expiry other
+// than by rotating MCP_TOKEN (which invalidates ALL artifacts); see MCP.md.
 func (s *oauthServer) issueTokens(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	resource := s.resource(r)
@@ -530,9 +595,14 @@ const authorizeHTML = `<!doctype html>
  input[type=password]{width:100%;padding:.6rem;font-size:1rem;box-sizing:border-box}
  button{margin-top:1rem;padding:.6rem 1.2rem;font-size:1rem;cursor:pointer}
  .sub{color:#666;font-size:.85rem}
+ .dest{margin:.75rem 0;padding:.6rem .8rem;border:1px solid #ccc;border-radius:6px;background:#f6f6f6}
+ .dest code{font-weight:600}
+ .warn{margin:.75rem 0;padding:.6rem .8rem;border:1px solid #b00020;border-radius:6px;background:#fff2f2;color:#b00020}
 </style></head><body>
 <h1>Authorize read-only access to CFM</h1>
 <p class="sub">A client is requesting read-only access to this CFM node's security telemetry. {{.Prompt}}</p>
+<p class="dest">This will send the access grant to: <code>{{.RedirectHost}}</code></p>
+{{if not .FirstParty}}<p class="warn">⚠ This is <strong>not</strong> this server's own hostname. Only approve if you recognise <code>{{.RedirectHost}}</code> as the client you are connecting (e.g. <code>claude.ai</code>). Do not approve links sent to you by others.</p>{{end}}
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
 <form method="post" action="{{.Action}}">
  <input type="hidden" name="response_type" value="code">

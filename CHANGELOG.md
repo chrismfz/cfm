@@ -40,7 +40,13 @@ back-filled here — see the git/PR history for that period.
   rotating `MCP_TOKEN` revokes all issued MCP tokens without touching `AUTH_TOKEN`.
   See `MCP.md` for the as-built map, arming steps, and roadmap. Code in
   `internal/mcpserver/`; tests cover the bearer gate, OAuth discovery/flow, tool
-  dispatch, and the `MCP_TOKEN` strength gate.
+  dispatch, and the `MCP_TOKEN` strength gate. Hardened after adversarial +
+  security review: OAuth authorization codes and refresh tokens are single-use
+  (replay rejected / rotation with reuse detection), the consent page displays the
+  redirect host and warns on a non-first-party client (anti-phishing on open
+  dynamic client registration), the advertised scheme is trusted from
+  `X-Forwarded-Proto` only via the loopback edge, and the in-process dispatch
+  scrubs the admin token from any response body as defense-in-depth.
 - **Challenge/WAF exclude add/remove is now logged to `cfm.log`.** Adding or
   removing a challenge- or WAF-exclude previously left no paper trail, yet an
   exclude silently governs whether the challenge/WAF layer runs for a host or

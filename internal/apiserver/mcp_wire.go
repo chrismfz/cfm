@@ -17,7 +17,6 @@ import (
 	"context"
 	"net/http"
 	"net/url"
-	"runtime/debug"
 	"strings"
 
 	cfgpkg "cfm/internal/config"
@@ -65,6 +64,8 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 
 	// dispatchHandler authenticates in-process reads as admin without exposing the
 	// admin token to the network. Built once; m is fully populated by call time.
+	// It deliberately wraps ONLY TokenMiddleware (not CSRF/MFA/session): these are
+	// GET reads, CSRF guards mutations, and MFA rollout is session-oriented.
 	dispatchHandler := TokenMiddleware(adminTok, store)(m)
 
 	dispatch := func(ctx context.Context, path string, query url.Values) (int, []byte, error) {
@@ -80,7 +81,14 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 		req.RemoteAddr = "127.0.0.1:0" // loopback: satisfies trusted-proxy checks
 		rec := &mcpRecorder{status: http.StatusOK, hdr: http.Header{}}
 		dispatchHandler.ServeHTTP(rec, req)
-		return rec.status, rec.buf.Bytes(), nil
+		body := rec.buf.Bytes()
+		// Defense-in-depth: the admin token is only ever an in-process request
+		// header, but if any read handler were to echo the inbound Authorization
+		// value into its body, scrub it so it can never surface in a tool result.
+		if bytes.Contains(body, []byte(adminTok)) {
+			body = bytes.ReplaceAll(body, []byte(adminTok), []byte("[redacted]"))
+		}
+		return rec.status, body, nil
 	}
 
 	// Client-facing auth (consent credential, static bearer, OAuth signing) binds
@@ -100,34 +108,39 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 }
 
 // mcpRequestScheme reports the externally visible scheme. Behind the TLS-
-// terminating edge the daemon sees plain HTTP on loopback, so a trusted proxy
-// prefix (or X-Forwarded-Proto) implies https.
+// terminating edge the daemon sees plain HTTP on loopback, so a trusted (loopback)
+// proxy hop implies https. Forwarded headers are honoured ONLY from the loopback
+// edge — the same trust rule as the prefix headers — so a direct non-loopback
+// caller cannot spoof the advertised scheme.
 func mcpRequestScheme(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
 	}
-	if p := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); p != "" {
-		return strings.ToLower(strings.TrimSpace(strings.Split(p, ",")[0]))
-	}
 	if trustedProxyBase(r) != "" {
+		if p := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); p != "" {
+			return strings.ToLower(strings.TrimSpace(strings.Split(p, ",")[0]))
+		}
 		return "https"
 	}
 	return "http"
 }
 
-// daemonVersion is the informational version reported in the MCP initialize
-// result. The binary's own version lives in package main (ldflags), so read it
-// from the embedded build info; fall back to "dev".
+// DaemonVersion is the build version reported in the MCP initialize result. It is
+// set from package main's ldflags-injected Version at startup (main.Version does
+// NOT populate runtime/debug BuildInfo, so it must be plumbed explicitly). Left as
+// "dev" for local/test builds that don't set it.
+var DaemonVersion = "dev"
+
 func daemonVersion() string {
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		if v := strings.TrimSpace(bi.Main.Version); v != "" && v != "(devel)" {
-			return v
-		}
+	if v := strings.TrimSpace(DaemonVersion); v != "" {
+		return v
 	}
 	return "dev"
 }
 
 // mcpRecorder is a minimal http.ResponseWriter capturing an in-process response.
+// It buffers the whole body (no Flush/Hijack) — the allow-listed MCP read
+// endpoints all return small buffered JSON, so streaming support is not needed.
 type mcpRecorder struct {
 	status int
 	hdr    http.Header

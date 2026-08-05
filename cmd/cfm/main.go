@@ -1177,6 +1177,9 @@ func runDaemon(args []string) {
 
 		// Start the unified internal HTTP server.
 		// Registers pprof, /unblock, and mysql governor routes internally.
+		// ldflags sets main.Version but not runtime/debug BuildInfo, so plumb it
+		// explicitly for the MCP server's initialize result.
+		apiserver.DaemonVersion = Version
 		go apiserver.Start(ctx, cfg, be, cfgDir, gov, sslcol)
 
 		_ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")

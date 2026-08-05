@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -197,7 +198,7 @@ func registerTopTalkers(srv *mcp.Server, d Deps) {
 		Description: "Vhosts by request volume / rate — the busiest sites, i.e. where load and any request-rate spikes are. Use window=short for the recent window (spikes/RPS) or window=long for sustained volume.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in topTalkersInput) (*mcp.CallToolResult, any, error) {
 		path := "/api/v1/webdet/top-short"
-		if in.Window == "long" {
+		if strings.EqualFold(strings.TrimSpace(in.Window), "long") {
 			path = "/api/v1/webdet/long-top"
 		}
 		q := url.Values{}
@@ -229,7 +230,9 @@ func registerHostDrilldown(srv *mcp.Server, d Deps) {
 		Name:        "host_drilldown",
 		Description: "Per-vhost drilldown: the top request paths and top source IPs hitting one host, in both the short and long windows. The \"why is this host busy/suspicious?\" view.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in hostDrilldownInput) (*mcp.CallToolResult, any, error) {
-		if in.Host == "" {
+		// The SDK's schema enforces `host` is PRESENT (no omitempty); this guard
+		// additionally rejects present-but-empty ("host":"").
+		if strings.TrimSpace(in.Host) == "" {
 			return nil, nil, errRequired("host")
 		}
 		q := url.Values{"host": {in.Host}}
@@ -248,7 +251,8 @@ func registerIPDrilldown(srv *mcp.Server, d Deps) {
 		Name:        "ip_drilldown",
 		Description: "Per-IP drilldown: which vhosts and paths one source IP is touching, its request pattern and score. The \"what is this IP doing?\" view.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ipDrilldownInput) (*mcp.CallToolResult, any, error) {
-		if in.IP == "" {
+		// Schema enforces presence; this also rejects present-but-empty ("ip":"").
+		if strings.TrimSpace(in.IP) == "" {
 			return nil, nil, errRequired("ip")
 		}
 		return dispatchJSON(ctx, d, "/api/v1/webdet/ip-drilldown", url.Values{"ip": {in.IP}})

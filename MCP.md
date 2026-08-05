@@ -155,10 +155,20 @@ curl -sS https://<host>/cfm-admin/mcp \
   unmounted rather than exposing a guessable internet-facing credential.
 - **PKCE S256 mandatory**, dynamic client registration restricted to `https` (or
   `http://localhost`) redirect URIs, consent page is frame-denied (clickjacking),
-  and all OAuth/discovery responses are CORS-open (the connector fetches them
-  cross-origin from a browser).
+  and all OAuth/discovery responses are CORS-open but credential-less (Bearer-only,
+  no cookies, `Allow-Credentials` never set — no ambient cross-origin read).
+- **Anti-phishing consent:** DCR is open (any client can register), so the consent
+  page **displays the redirect host** the grant will be delivered to and **warns**
+  when it is not this server's own hostname — the operator can see where a code is
+  going before approving.
+- **Single-use artifacts:** authorization codes are single-use (replay rejected),
+  and refresh tokens rotate with reuse detection (a redeemed refresh token is
+  invalidated). Access tokens are audience-bound and validated only at `/mcp`.
 - **CSRF:** `/mcp*` is bearer/OAuth-authenticated (not session), so it is naturally
   outside the session-cookie CSRF check.
+- **Forwarded-header trust:** the advertised scheme/prefix are taken from
+  `X-Forwarded-*` **only** when the peer is the loopback edge; a direct non-loopback
+  caller cannot spoof them.
 
 ---
 
@@ -228,7 +238,13 @@ prune). The MCP server issues **GET only** and never registers a write tool.
   token pasting).
 - **Revocable token store:** move from stateless HMAC tokens to entries in the
   existing revocable token store, surfaced in `/ui/tokens`, for per-connector
-  revocation without rotating `AUTH_TOKEN`.
+  revocation without rotating `MCP_TOKEN`. (Today: codes/refresh are single-use
+  via an in-memory nonce set, but individual access tokens can only be revoked en
+  masse by rotating `MCP_TOKEN`.)
+- **Consent-failure backoff:** the consent POST validates `MCP_TOKEN` with a
+  constant-time compare but is not yet rate-limited (a known INFO item, same shape
+  as the existing `/api/v1` bearer gate). Feed repeated `mcp_oauth_consent_denied`
+  into the API anomaly/backoff machinery.
 - **Guarded write tools (far later, opt-in):** a *very* narrow, confirm-gated set
   (e.g. temporary exclude, manual challenge on/off) behind an explicit server-side
   opt-in — mirroring how the sibling projects gate their write tools OFF by
