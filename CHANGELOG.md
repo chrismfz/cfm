@@ -31,6 +31,28 @@ back-filled here — see the git/PR history for that period.
   is patching vBulletin (≥6.2.2).
 
 ### Fixed
+- **Challenge status list: a manually-challenged vhost no longer "drops from
+  the list" when the auto scorer cools.** The ChalAPI vhost store
+  (`challenge_api_store.go`) kept a single `Status`/`Mode` per host and recorded
+  a manual challenge only under the exact host the operator named — the apex.
+  The bridge, though, enforces an apex manual challenge on apex **and** `www`
+  (`vhostVariantsForBridge`), so the `www` row carried only auto records; when
+  `challenge_suspicious_vhost` cooled below `score_off`,
+  `RecordVhostAuto(host,false)` flipped `www` to `Status=inactive`/`Mode=auto`
+  while the challenge was still being served, so it vanished from the
+  active/manual list view and the active-vhost count — enforcement intact,
+  reporting wrong (observed on `www.e-vafeiadis.gr`, 2026-08-05, where the
+  operator re-issued the still-active challenge because the list showed it
+  gone). Now `RecordVhostManual` mirrors the apex→www expansion (both rows show
+  manual/active), and an active manual challenge outranks the auto scorer in the
+  store: neither `auto_on` nor `auto_off` overwrites the manual top-line
+  (`Status`/`Mode`/`ExpiresAt`), surfacing the auto action via
+  `LastAction=auto_on_under_manual`/`auto_off_keep_manual` and still recording
+  the auto score/uniqIP/rps as evidence. Reporting-only (a companion to the
+  enforcement fix in the manual-vs-auto lifecycle work); no API/JSON shape
+  change — the manual-coverage marker is unexported. Tests:
+  `TestChallengeAPIStore_ManualCoversWWWacrossAutoCycle`,
+  `TestChallengeAPIStore_AutoOffAppliesAfterManualCleared`.
 - **WAF: stop rule 402 (`WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG`) from blocking the
   String Locator plugin's file editor.** String Locator is an in-browser
   theme/plugin file editor: on Save it POSTs the entire PHP file being edited to
