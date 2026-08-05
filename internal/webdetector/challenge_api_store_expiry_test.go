@@ -58,3 +58,39 @@ func TestChallengeAPIStore_AutoActiveNotHiddenByZeroExpiry(t *testing.T) {
 		t.Fatalf("auto active should be listed, got %d", len(got))
 	}
 }
+
+// Regression (review Finding 1.1): a manual challenge lapses WITHOUT an explicit
+// manual_off (nothing rewrites the row, so its past ExpiresAt lingers), the host
+// is still hot, and the next auto_on flips the row to Mode=auto but does not
+// clear that stale ExpiresAt. Such a row is a genuinely-active AUTO challenge
+// and must NOT be hidden by the expiry filter — the Mode=="auto" short-circuit
+// in vhostEffectivelyActive is what protects it.
+func TestChallengeAPIStore_AutoActiveWithStaleExpiresNotHidden(t *testing.T) {
+	s := NewChallengeAPIStore(100)
+	s.RecordVhostManual("shop.gr", true, time.Hour, "manual") // apex row: Mode=manual, ExpiresAt=+1h
+
+	// Simulate the manual TTL lapsing with no manual_off: force BOTH rows the
+	// manual created (apex + www) into the past. www then stays a lapsed manual
+	// row (correctly inactive); apex is the one we drive back to auto below.
+	past := time.Now().Add(-time.Minute)
+	s.mu.Lock()
+	for _, st := range s.vhosts {
+		st.manualUntil = past
+		st.ExpiresAt = past
+	}
+	s.mu.Unlock()
+
+	// Host is still hot → auto_on flips the row to Mode=auto (manualUntil is
+	// past, so the manual branch is not taken) and leaves ExpiresAt stale.
+	s.RecordVhostAuto("shop.gr", true, SuspiciousRow{Host: "shop.gr", Score: 0.8, UniqueIPs: 120}, 0.7, 0.6, 0)
+
+	if v, _ := s.GetVhost("shop.gr"); v.Mode != "auto" || v.Status != "active" || !v.ExpiresAt.Before(time.Now()) {
+		t.Fatalf("precondition: expected active auto row with a stale (past) ExpiresAt, got mode=%s status=%s expires=%s", v.Mode, v.Status, v.ExpiresAt)
+	}
+	if got := s.Summary().ActiveVhosts; got != 1 {
+		t.Fatalf("live auto challenge with stale ExpiresAt hidden from summary: got %d active", got)
+	}
+	if got := s.ListVhosts("active", "", 100); len(got) != 1 {
+		t.Fatalf("live auto challenge with stale ExpiresAt missing from active list: got %d", len(got))
+	}
+}

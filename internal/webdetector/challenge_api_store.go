@@ -293,15 +293,24 @@ func (s *ChallengeAPIStore) RecordSolved(ip, host, uri string, diff int, ms int6
 }
 
 // vhostEffectivelyActive reports whether a vhost row counts as active right
-// now. A row can carry Status=="active" with an ExpiresAt already in the past —
-// a manual (or manual-kept) challenge whose TTL lapsed without any later event
-// rewriting the row, since the store has no TTL sweeper. Such a stale row must
-// not be counted or listed as active. Auto rows have a zero ExpiresAt (their
-// lifetime is governed by the tick loop, not a stored expiry) and are therefore
-// unaffected.
+// now. A MANUAL row can carry Status=="active" with an ExpiresAt already in the
+// past — a manual (or manual-kept) challenge whose TTL lapsed without any later
+// event rewriting the row, since the store has no TTL sweeper. Such a stale
+// manual row must not be counted or listed as active.
+//
+// AUTO rows are governed by the tick loop, not a stored expiry, so they are
+// active whenever Status=="active" regardless of ExpiresAt. This Mode check is
+// load-bearing, not cosmetic: when a manual challenge lapses (leaving a past
+// ExpiresAt on the row) and the host is still hot, the next auto_on flips the
+// row to Mode=="auto" via RecordVhostAuto but does NOT clear that stale
+// ExpiresAt — so keying purely on ExpiresAt would hide a genuinely-active auto
+// challenge for its whole lifetime.
 func vhostEffectivelyActive(v *ChallengeVhostState, now time.Time) bool {
 	if v == nil || v.Status != "active" {
 		return false
+	}
+	if v.Mode == "auto" {
+		return true
 	}
 	return v.ExpiresAt.IsZero() || v.ExpiresAt.After(now)
 }
