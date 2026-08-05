@@ -74,7 +74,25 @@ type Handler struct {
 // tool call is a self-contained POST→JSON exchange, so there is no stream to
 // silently drop behind the edge. The tool set is static per deploy and we never
 // push notifications, so statelessness costs nothing.
-var statelessMCP = &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true}
+// statelessMCP configures the go-sdk streamable transport.
+//
+// DisableLocalhostProtection is REQUIRED here. The SDK's DNS-rebinding guard
+// rejects (403) any request whose accepted-connection LocalAddr is loopback but
+// whose Host header is not — a protection meant for localhost-only dev servers
+// reached directly by a browser. CFM's MCP server is deliberately the opposite:
+// it sits behind the OpenResty/Angie edge, which terminates TLS and upstreams to
+// the daemon over loopback (127.0.0.1:6060) while forwarding the public Host
+// (e.g. titan.example.com). That legitimate topology trips the guard, so an
+// OAuth-authenticated client got 403 on every /mcp call AFTER a fully successful
+// register→authorize→consent→token flow. We do not rely on Host/loopback for
+// auth — the endpoint is gated by MCP_TOKEN / audience-bound OAuth and is not
+// cookie/session (so not CSRF-reachable) — so the guard only breaks the real
+// deployment. Disable it and let the bearer/OAuth gate be the sole authority.
+var statelessMCP = &mcp.StreamableHTTPOptions{
+	Stateless:                  true,
+	JSONResponse:               true,
+	DisableLocalhostProtection: true,
+}
 
 // New builds the MCP handler from deps.
 func New(deps Deps) *Handler {

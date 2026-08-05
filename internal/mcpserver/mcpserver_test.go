@@ -181,6 +181,34 @@ func TestOAuthOIDCMetadataAlias(t *testing.T) {
 	}
 }
 
+// TestMCPBehindProxyNonLoopbackHost pins DisableLocalhostProtection. The edge
+// upstreams to the daemon over loopback (127.0.0.1) while forwarding the public
+// Host header; the go-sdk DNS-rebinding guard (loopback LocalAddr + non-loopback
+// Host) otherwise 403s every authenticated /mcp call — exactly what happened in
+// production after a fully successful OAuth flow. A valid bearer with a
+// non-loopback Host must reach the tools, not get Forbidden.
+func TestMCPBehindProxyNonLoopbackHost(t *testing.T) {
+	ts := newTestServer(t, nil)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	req.Host = "titan.example.com" // non-loopback, as the edge forwards it
+	res, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusForbidden {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("got 403 — DNS-rebinding guard not disabled: %s", body)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+}
+
 // TestOAuthFlowMintsUsableToken drives the full register → authorize → token
 // (authorization_code + PKCE S256) flow and confirms the minted access token
 // passes the /mcp bearer gate.

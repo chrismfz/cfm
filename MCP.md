@@ -40,6 +40,14 @@ Key properties:
   self-contained POST→JSON exchange, so there is no long-lived SSE stream to drop
   behind the proxy (which otherwise causes the connector to show "disconnected"
   and re-ask for permission).
+- **`DisableLocalhostProtection` is set on purpose.** The go-sdk's DNS-rebinding
+  guard 403s any request whose accepted-connection LocalAddr is loopback but whose
+  Host header is not — right for a localhost-only dev server, wrong for us: the
+  edge terminates TLS and upstreams over `127.0.0.1:6060` while forwarding the
+  public Host, so an OAuth-authenticated client would get 403 on every `/mcp` call
+  after a fully successful auth flow. `/mcp` is bearer/OAuth-gated (not
+  cookie/session, so not CSRF-reachable), so the guard only breaks the real
+  topology; the bearer/OAuth gate is the sole authority. (`TestMCPBehindProxyNonLoopbackHost`.)
 - **Tools reuse existing handlers.** Each tool dispatches a GET to a hard-coded,
   allow-listed `/api/v1` path **in-process** (a synthetic request run through
   `TokenMiddleware(admin-token)(mux)`), so it reuses every existing handler and
