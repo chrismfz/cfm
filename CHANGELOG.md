@@ -42,6 +42,22 @@ back-filled here — see the git/PR history for that period.
   acceptable for a visibility-only rule. The real defence against runMaths RCE
   is patching vBulletin (≥6.2.2).
 
+### Changed
+- **Release dating is now UTC and the `CHANGELOG` is stamped automatically.**
+  All `make release` timestamps use `date -u` (UTC) so a build can't land on a
+  different day depending on the build host's timezone; `VERSION`/tag keep a
+  `-HHMMSS` UTC suffix while the CHANGELOG heading stays date-only
+  (`YYYY.MM.DD`). `make release` now runs `scripts/stamp-changelog.sh`
+  (`REL_DATE`, UTC) after building: it moves `## [Unreleased]` under a dated
+  `## YYYY.MM.DD` heading and leaves a fresh empty `[Unreleased]` — no more
+  hand-editing the date on release day (you still add bullets while working and
+  commit the stamped file with the release). Idempotent: an empty `[Unreleased]`
+  is a no-op and a second same-day build appends under the existing dated
+  section. Also available standalone as `make changelog`. A new CI gate
+  (`scripts/tests/stamp_changelog_test.sh`) covers the stamper, and CLAUDE.md §8
+  is updated (and its stale "tag is `vYYYY.MM.DD`" note corrected — the tag
+  actually carries the `-HHMMSS` suffix).
+
 ### Fixed
 - **Challenge status list/summary: an expired manual vhost row no longer counts
   as active.** The ChalAPI store has no TTL sweeper for vhost rows, so a manual
