@@ -292,13 +292,36 @@ func (s *ChallengeAPIStore) RecordSolved(ip, host, uri string, diff int, ms int6
 	})
 }
 
+// vhostEffectivelyActive reports whether a vhost row counts as active right
+// now. A MANUAL row can carry Status=="active" with an ExpiresAt already in the
+// past — a manual (or manual-kept) challenge whose TTL lapsed without any later
+// event rewriting the row, since the store has no TTL sweeper. Such a stale
+// manual row must not be counted or listed as active.
+//
+// AUTO rows are governed by the tick loop, not a stored expiry, so they are
+// active whenever Status=="active" regardless of ExpiresAt. This Mode check is
+// load-bearing, not cosmetic: when a manual challenge lapses (leaving a past
+// ExpiresAt on the row) and the host is still hot, the next auto_on flips the
+// row to Mode=="auto" via RecordVhostAuto but does NOT clear that stale
+// ExpiresAt — so keying purely on ExpiresAt would hide a genuinely-active auto
+// challenge for its whole lifetime.
+func vhostEffectivelyActive(v *ChallengeVhostState, now time.Time) bool {
+	if v == nil || v.Status != "active" {
+		return false
+	}
+	if v.Mode == "auto" {
+		return true
+	}
+	return v.ExpiresAt.IsZero() || v.ExpiresAt.After(now)
+}
+
 func (s *ChallengeAPIStore) Summary() ChallengeSummary {
 	now := time.Now()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	av := 0
 	for _, v := range s.vhosts {
-		if v != nil && v.Status == "active" {
+		if vhostEffectivelyActive(v, now) {
 			av++
 		}
 	}
@@ -315,6 +338,7 @@ func (s *ChallengeAPIStore) ListVhosts(status, mode string, limit int) []Challen
 	if limit <= 0 {
 		limit = 200
 	}
+	now := time.Now()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]ChallengeVhostState, 0, len(s.vhosts))
@@ -322,7 +346,15 @@ func (s *ChallengeAPIStore) ListVhosts(status, mode string, limit int) []Challen
 		if v == nil {
 			continue
 		}
-		if status != "" && status != "all" && v.Status != status {
+		// Filter on the EFFECTIVE status so a stale active row (Status=="active"
+		// but ExpiresAt already past — a lapsed manual challenge) is treated as
+		// inactive, matching Summary(). Otherwise a status=active view would list
+		// challenges that are no longer in force.
+		eff := "inactive"
+		if vhostEffectivelyActive(v, now) {
+			eff = "active"
+		}
+		if status != "" && status != "all" && eff != status {
 			continue
 		}
 		if mode != "" && mode != "all" && v.Mode != mode {

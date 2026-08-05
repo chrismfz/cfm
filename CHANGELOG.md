@@ -43,6 +43,56 @@ back-filled here — see the git/PR history for that period.
   is patching vBulletin (≥6.2.2).
 
 ### Fixed
+- **Challenge status list/summary: an expired manual vhost row no longer counts
+  as active.** The ChalAPI store has no TTL sweeper for vhost rows, so a manual
+  (or manual-kept) challenge whose TTL lapsed sat at `Status=active` with a past
+  `ExpiresAt` until some later event rewrote that key — inflating the
+  active-vhost count and the `status=active` list with challenges no longer in
+  force. `Summary()` and `ListVhosts()` now filter on an effective-active check
+  (`Status=active` AND `ExpiresAt` unset-or-future); auto rows (zero `ExpiresAt`,
+  governed by the tick loop) are unaffected, and `status=all`/`inactive` views
+  still surface the stale row. Tests:
+  `TestChallengeAPIStore_ExpiredManualNotCountedActive`,
+  `TestChallengeAPIStore_AutoActiveNotHiddenByZeroExpiry`.
+- **An operator manual vhost challenge now wins over a challenge-exclude / an
+  ignore-list match, and every `vhost_clear` records WHY.** The vhost gate's
+  per-host clear paths (`challenge_rules.go`) called `ClearVhost` whenever a
+  host matched `hostChallengeExcluded` or `ChallengeVHostIgnore` — tearing down
+  an explicit operator manual challenge on that host, even though a
+  challenge-exclude / ignore entry is only meant to govern *auto* challenges.
+  Now those two paths keep and refresh the manual challenge when
+  `manualChallengeCoversClear(host)` is true (honouring apex→www, so the `www`
+  variant of an apex manual is kept too), via a shared
+  `keepManualOverSuppression` helper that: refreshes the bridge entry with the
+  host's **own** remaining TTL (`manualChallengeCovering`, not the cross-variant
+  max — so a shorter-lived variant is not over-extended); re-grants the same
+  per-IP bypasses the normal manual-push path grants (IGNORE_IPS + dynamic
+  `chalExclude`); throttles its `kept_manual_over_exclude`/`kept_manual_over_ignore`
+  log to once per holddown per host (so a candidate host doesn't spam the log
+  every tick); and, when only a *sibling* variant carries the manual (e.g. an
+  excluded apex whose `www` has it), keeps the sibling's entry without
+  challenging the excluded host itself. The auto flag is still cleared so the
+  display doesn't claim auto owns the row; in DNAT mode (no bridge) it clears
+  the flag and stays silent rather than logging a keep it can't perform. The
+  config-`CHALLENGE_VHOST` reconcile skips its clear too when a manual covers the
+  pattern, avoiding a per-tick clear→re-push churn. **Bypass stays absolute** —
+  `cfm.allow`/`hostBypassed` is the "never challenge this host" safety valve and
+  still clears, but now logs (throttled) `manual_suppressed_by_bypass` so the
+  override is visible instead of silent. Separately, `ClearVhost` now takes a
+  `reason` and stamps it on the `nginx_bridge vhost_clear` log line (`auto_off` /
+  `excluded` / `ignored` / `host_bypass` / `manual_off` / `cfg_*`) — a bare
+  `vhost_clear` previously gave no way to tell an auto cool-down from an
+  exclude/bypass/operator clear. Also tidies a pre-existing duplicate
+  `ClearVhost` in the ignore branch. Finally, the auto cool-down (`offOK`) path
+  no longer emits a `WEB/VHOST_CHALLENGE_OFF` "challenge lifted" alert (nor an
+  `action=auto_off` log line) when a manual challenge still holds the vhost —
+  only the auto flag turns off; the challenge did not lift. Tests:
+  `TestManualWinsOverExcludeDecision`, `TestManualKeepSelfVsSiblingCoverage`,
+  and end-to-end through the real tick (`emitIPChallenges`):
+  `TestEmitIPChallenges_ManualKeptOverExclude`,
+  `TestEmitIPChallenges_ExcludeClearsWhenNoManual`,
+  `TestEmitIPChallenges_AutoCooldownKeepsManual_NoOffAlert` (with a negative
+  control proving the OFF alert fires without the manual).
 - **Challenge status list: a manually-challenged vhost no longer "drops from
   the list" when the auto scorer cools.** The ChalAPI vhost store
   (`challenge_api_store.go`) kept a single `Status`/`Mode` per host and recorded
