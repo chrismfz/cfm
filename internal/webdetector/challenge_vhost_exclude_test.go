@@ -35,6 +35,49 @@ func TestHostChallengeExcluded(t *testing.T) {
 	}
 }
 
+// Manual wins over exclude/ignore: the vhost gate's clear paths keep (and
+// refresh) an explicit operator manual challenge instead of clearing it when a
+// host is challenge-excluded or in ChallengeVHostIgnore. The guards key that
+// "keep" decision on manualChallengeCoversClear(host) — which, like the bridge
+// and the auto cool-down, honours the apex→www expansion. This covers the
+// decision the way TestHostChallengeExcluded covers the exclude decision:
+// exclude/ignore still MATCH the host, but manual coverage overrides the clear.
+func TestManualWinsOverExcludeDecision(t *testing.T) {
+	e := &Engine{}
+	e.manualChal.init()
+	e.challengeExcludes = newExcludeStore(filepath.Join(t.TempDir(), "ch.json"))
+
+	// Operator: challenge-exclude the apex AND manual-challenge the apex.
+	if !e.challengeExcludes.Add("host", "e-vafeiadis.gr", map[string]struct{}{"e-vafeiadis.gr": {}}) {
+		t.Fatalf("add exclude failed")
+	}
+	e.manualChal.set("e-vafeiadis.gr", 24*time.Hour, "manual")
+
+	// The apex is both excluded and manual-covered → the guard keeps manual.
+	if !e.hostChallengeExcluded("e-vafeiadis.gr") {
+		t.Fatalf("apex must be challenge-excluded")
+	}
+	if covered, _ := e.manualChallengeCoversClear("e-vafeiadis.gr"); !covered {
+		t.Fatalf("apex manual must make the clear a keep")
+	}
+
+	// The www variant: the bridge would delete it on an apex clear, and the
+	// apex manual covers it — so the guard must keep it too, even though the
+	// exclude was added only for the apex host key.
+	if covered, _ := e.manualChallengeCoversClear("www.e-vafeiadis.gr"); !covered {
+		t.Fatalf("www variant must be kept (covered by apex manual)")
+	}
+
+	// A different host with an exclude but no manual challenge is NOT kept —
+	// exclude still clears it (manual precedence is scoped to a live manual).
+	if !e.challengeExcludes.Add("host", "other.gr", map[string]struct{}{"other.gr": {}}) {
+		t.Fatalf("add exclude failed")
+	}
+	if covered, _ := e.manualChallengeCoversClear("other.gr"); covered {
+		t.Fatalf("host without a manual challenge must not be kept")
+	}
+}
+
 // tripReason names the trigger for the suppressed_by_exclude audit
 // line — it must mirror the auto-suspicious scorer's trip conditions.
 func TestTripReason(t *testing.T) {

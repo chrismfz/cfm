@@ -137,7 +137,7 @@ func (e *Engine) ClearManualChallengeVhost(host string) {
 	)
 
 	if e.nginxBridge != nil {
-		e.nginxBridge.ClearVhost(host)
+		e.nginxBridge.ClearVhost(host, "manual_off")
 	}
 
 	if e.chalAPI != nil {

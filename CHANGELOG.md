@@ -31,6 +31,26 @@ back-filled here — see the git/PR history for that period.
   is patching vBulletin (≥6.2.2).
 
 ### Fixed
+- **An operator manual vhost challenge now wins over a challenge-exclude / an
+  ignore-list match, and every `vhost_clear` records WHY.** The vhost gate's
+  per-host clear paths (`challenge_rules.go`) called `ClearVhost` whenever a
+  host matched `hostChallengeExcluded` or `ChallengeVHostIgnore` — tearing down
+  an explicit operator manual challenge on that host, even though a
+  challenge-exclude / ignore entry is only meant to govern *auto* challenges.
+  Now those two paths keep and refresh the manual challenge when
+  `manualChallengeCoversClear(host)` is true (honouring apex→www, so the `www`
+  variant of an apex manual is kept too), logging
+  `kept_manual_over_exclude`/`kept_manual_over_ignore`; the auto flag is still
+  cleared so the display doesn't claim auto owns the row. **Bypass stays
+  absolute** — `cfm.allow`/`hostBypassed` is the "never challenge this host"
+  safety valve and still clears, but now logs `manual_suppressed_by_bypass` so
+  the override is visible instead of silent. Separately, `ClearVhost` now takes
+  a `reason` and stamps it on the `nginx_bridge vhost_clear` log line
+  (`auto_off` / `excluded` / `ignored` / `host_bypass` / `manual_off` /
+  `cfg_*`) — a bare `vhost_clear` previously gave no way to tell an auto
+  cool-down from an exclude/bypass/operator clear. Also tidies a pre-existing
+  duplicate `ClearVhost` in the ignore branch. Test:
+  `TestManualWinsOverExcludeDecision`.
 - **Challenge status list: a manually-challenged vhost no longer "drops from
   the list" when the auto scorer cools.** The ChalAPI vhost store
   (`challenge_api_store.go`) kept a single `Status`/`Mode` per host and recorded
