@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP tool `ip_forensics` + `GET /api/v1/system/ip-forensics` — on-demand raw
+  access-log lines for one source IP.** Read-only, admin-only. The correlation
+  for an OLDER WAF hit that has aged out of `edge_access_tail`'s live ring:
+  returns the raw edge access-log lines mentioning an IP, the equivalent of
+  `tail -n N access.log | grep <ip>`. Cost-bounded by design — nothing runs
+  until called, and a call reads only the last `lines` (default 300k, max 2M)
+  via `tail` (backward from EOF, so a multi-GB log is never read whole), under a
+  timeout, with a capped match set. The target log is auto-detected from a fixed
+  allow-list of known edge access logs (OpenResty/Angie) — never a caller-
+  supplied path. Complements `ip_drilldown` (in-memory aggregate: vhosts, rate,
+  score) and `edge_access_tail` (right-now traffic).
 - **MCP tool `edge_access_tail` + `GET /api/v1/webdet/access-recent` — recent
   edge access-log lines for WAF false-positive triage.** Read-only, **admin-only**
   (exposes requests across all vhosts). Returns the last requests (method, URI,

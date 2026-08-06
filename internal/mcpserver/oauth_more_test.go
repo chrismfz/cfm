@@ -296,6 +296,22 @@ func TestEdgeAccessTailRouting(t *testing.T) {
 	}
 }
 
+func TestIPForensicsRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ip_forensics","arguments":{"ip":"1.2.3.4","lines":100000,"limit":50}}}`)
+	if fd.lastPath != "/api/v1/system/ip-forensics" {
+		t.Errorf("ip_forensics routed to %q, want /api/v1/system/ip-forensics", fd.lastPath)
+	}
+	if got := fd.lastQuery.Get("ip"); got != "1.2.3.4" {
+		t.Errorf("ip = %q, want 1.2.3.4", got)
+	}
+	if got := fd.lastQuery.Get("lines"); got != "100000" {
+		t.Errorf("lines = %q, want 100000", got)
+	}
+}
+
 // The consent page must disclose where the grant is delivered and warn on a
 // non-first-party redirect (anti-phishing).
 func TestConsentPageShowsRedirectAndWarns(t *testing.T) {
