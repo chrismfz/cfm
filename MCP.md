@@ -186,7 +186,7 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ## 4. Active tools (as-built)
 
-18 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
+19 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
 CLI/UI use). All carry the `readOnlyHint` annotation.
 
 | Tool | What it answers | Endpoint(s) | Args |
@@ -209,6 +209,7 @@ CLI/UI use). All carry the `readOnlyHint` annotation.
 | `process_list` | Busiest processes (top-like: pid/user/state/%cpu/%mem/rss/threads/comm) — "load is high, who's eating it?" | `system/processes` | `top` |
 | `listening_ports` | Listening TCP/UDP sockets + owning process (`ss -tlnp`) — "is the edge/daemon/panel up, who owns :443?" | `system/listeners` | — |
 | `dmesg_tail` | Kernel ring buffer tail (OOM kills, I/O errors, segfaults, nft drops) — "why did it OOM/crash/reset?" | `system/dmesg` | `lines`, `grep` |
+| `service_status` | systemd unit status (loaded/active/enabled, sub-state, pid, memory, restarts, uptime) — "is cfm/edge/mysql/mail up, anything flapping?" | `system/services` | `units` |
 
 `*` required.
 
@@ -283,4 +284,4 @@ The MCP surface is versioned by CFM's date-based releases (see `CHANGELOG.md`).
 | Release | MCP status | Tools active |
 |---|---|---|
 | 2026.08.05 | **Introduced** — read-only MCP server; dedicated `MCP_TOKEN` credential (min 24 chars, fail-closed) separate from `AUTH_TOKEN`; OAuth 2.1 + PKCE for the claude.ai connector, static-bearer for Claude Code/API | The 15 tools in §4 (WAF, challenge, suspicious/traffic, drilldowns, history, bots, firewall blocks, detectors, health) |
-| 2026.08.06 | Edge-proxy connectivity fixes (OIDC-discovery alias, DNS-rebinding guard disabled); consent POST rate-limit; enrich reverse-DNS perf (waf/security summaries ~60s→~1.5s) | **+`process_list`, +`listening_ports`, +`dmesg_tail`** (18 tools) — node system diagnostics (busiest processes; listening sockets + owner; kernel ring buffer) |
+| 2026.08.06 | Edge-proxy connectivity fixes (OIDC-discovery alias, DNS-rebinding guard disabled); consent POST rate-limit; enrich reverse-DNS perf (waf/security summaries ~60s→~1.5s) | **+`process_list`, +`listening_ports`, +`dmesg_tail`, +`service_status`** (19 tools) — node system diagnostics (busiest processes; listening sockets + owner; kernel ring buffer; systemd unit status) |

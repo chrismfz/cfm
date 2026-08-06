@@ -50,6 +50,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerProcessList(srv, d)
 	registerListeningPorts(srv, d)
 	registerDmesgTail(srv, d)
+	registerServiceStatus(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -431,5 +432,21 @@ func registerDmesgTail(srv *mcp.Server, d Deps) {
 		setInt(q, "lines", in.Lines)
 		setStr(q, "grep", in.Grep)
 		return dispatchJSON(ctx, d, "/api/v1/system/dmesg", q)
+	})
+}
+
+type serviceStatusInput struct {
+	Units string `json:"units,omitempty" jsonschema:"comma-separated systemd units to check (e.g. 'cfm,mariadb,exim'); a bare name is treated as '.service'. Omit to get the curated CFM + hosting-stack set (cfm, edge, db, mail, dns, ftp, ssh, panel), with not-installed units elided."`
+}
+
+func registerServiceStatus(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "service_status",
+		Description: "systemd unit status (structured `systemctl status`): for each unit whether it's loaded, active, enabled-at-boot, its sub-state, main pid, memory, restart count and how long it's been up. Use to confirm cfm/the edge/mysql/mail are actually running and to spot a flapping service (high restart count). Omit units for the curated CFM + hosting-stack set; pass units= to check specific ones (an explicitly named unit that isn't installed is reported as not-found).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in serviceStatusInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setStr(q, "units", in.Units)
+		return dispatchJSON(ctx, d, "/api/v1/system/services", q)
 	})
 }

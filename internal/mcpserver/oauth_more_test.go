@@ -261,6 +261,19 @@ func TestDmesgTailRouting(t *testing.T) {
 	}
 }
 
+func TestServiceStatusRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"service_status","arguments":{"units":"cfm,mariadb"}}}`)
+	if fd.lastPath != "/api/v1/system/services" {
+		t.Errorf("service_status routed to %q, want /api/v1/system/services", fd.lastPath)
+	}
+	if got := fd.lastQuery.Get("units"); got != "cfm,mariadb" {
+		t.Errorf("units param = %q, want cfm,mariadb", got)
+	}
+}
+
 // The consent page must disclose where the grant is delivered and warn on a
 // non-first-party redirect (anti-phishing).
 func TestConsentPageShowsRedirectAndWarns(t *testing.T) {
