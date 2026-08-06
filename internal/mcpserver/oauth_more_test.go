@@ -235,6 +235,32 @@ func TestProcessListRouting(t *testing.T) {
 	}
 }
 
+func TestListeningPortsRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"listening_ports","arguments":{}}}`)
+	if fd.lastPath != "/api/v1/system/listeners" {
+		t.Errorf("listening_ports routed to %q, want /api/v1/system/listeners", fd.lastPath)
+	}
+}
+
+func TestDmesgTailRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dmesg_tail","arguments":{"lines":50,"grep":"oom"}}}`)
+	if fd.lastPath != "/api/v1/system/dmesg" {
+		t.Errorf("dmesg_tail routed to %q, want /api/v1/system/dmesg", fd.lastPath)
+	}
+	if got := fd.lastQuery.Get("lines"); got != "50" {
+		t.Errorf("lines = %q, want 50", got)
+	}
+	if got := fd.lastQuery.Get("grep"); got != "oom" {
+		t.Errorf("grep = %q, want oom", got)
+	}
+}
+
 // The consent page must disclose where the grant is delivered and warn on a
 // non-first-party redirect (anti-phishing).
 func TestConsentPageShowsRedirectAndWarns(t *testing.T) {
