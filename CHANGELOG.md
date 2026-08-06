@@ -18,6 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP tool `mysql_pressure` — the mysqltop view (per-user MySQL pressure).**
+  Read-only. Composes the MySQL governor's `/api/v1/mysql/top` (connection
+  saturation used/max/%, per-user connection load) with `/api/v1/mysql/cpu`
+  (per-user CPU seconds, query count, avg latency), merges them by user and
+  ranks by pressure (active connections → CPU → queries → total connections),
+  capped to `top` (default 25). This is where you catch the offender — e.g. a
+  user with few connections but high CPU/queries, or an account driving heavy
+  MySQL load with little HTTP traffic. A `perf` block reports whether CPU
+  numbers are actually available (performance_schema / MariaDB userstat); when
+  off, cpu/query fields read 0.
 - **MCP tool `ip_forensics` + `GET /api/v1/system/ip-forensics` — on-demand raw
   access-log lines for one source IP.** Read-only, admin-only. The correlation
   for an OLDER WAF hit that has aged out of `edge_access_tail`'s live ring:
