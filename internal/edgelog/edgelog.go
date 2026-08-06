@@ -93,6 +93,11 @@ func resolveLog(want string) (string, error) {
 // the resolved edge access log. Bounded: tail window, context timeout, output
 // cap. ip must be a valid IP (rejects arbitrary strings). source, when set,
 // selects among AvailableLogs.
+//
+// Matching is a plain substring test (as a hand-run `grep <ip>` would be), so a
+// v4 needle like "1.2.3.4" can also match "1.2.3.45"; the caller reads the raw
+// line and sees the real client field. Only the current log is scanned (rotated
+// .gz are not), so reach is bounded to what's still in the live file.
 func GrepIP(ctx context.Context, ip string, source string, tailLines, limit int) (Result, error) {
 	ip = strings.TrimSpace(ip)
 	if net.ParseIP(ip) == nil {
@@ -120,7 +125,7 @@ func GrepIP(ctx context.Context, ip string, source string, tailLines, limit int)
 	defer cancel()
 
 	res := Result{IP: ip, LogFile: logFile, TailLines: tailLines, Lines: make([]string, 0, limit)}
-	err = streamTailMatches(cctx, logFile, tailLines, ip, func(line string) bool {
+	err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
 		res.Scanned++
 		if !strings.Contains(line, ip) {
 			return true
@@ -142,7 +147,7 @@ func GrepIP(ctx context.Context, ip string, source string, tailLines, limit int)
 // streamTailMatches runs `tail -n <tailLines> <file>` and feeds each line to fn.
 // tail reads backward from EOF, so the disk read is bounded to the tail window
 // regardless of the file's total size. Output is streamed (never fully buffered).
-func streamTailMatches(ctx context.Context, file string, tailLines int, _ip string, fn func(line string) bool) error {
+func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(line string) bool) error {
 	cmd := exec.CommandContext(ctx, tailPath(), "-n", fmt.Sprintf("%d", tailLines), file)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
