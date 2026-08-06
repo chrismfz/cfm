@@ -342,6 +342,10 @@ type Engine struct {
 	adapter  LogFormatAdapter
 	malRules []malRule
 
+	// accessRing retains the last N parsed access lines (edge_access_tail) for
+	// WAF false-positive triage — the raw request context around a hit.
+	accessRing *accessRing
+
 	chalRules   []chalRule
 	nginxBridge *NginxBridge // nil if OpenRestyMode disabled
 	manualChal  manualChalState
@@ -454,7 +458,8 @@ func NewEngine(cfg Config) *Engine {
 		scorer:  DefaultScorer(),
 		longwin: NewLongWindow(cfg.LongHorizon(), cfg.Window, DefaultScorer()),
 		//chris//
-		adapter: NewAutoDetectAdapter(),
+		adapter:    NewAutoDetectAdapter(),
+		accessRing: newAccessRing(accessRingCap),
 
 		ipLong: &ipLongMem{
 			stats: make(map[string]*ipLongAgg),
@@ -1115,6 +1120,12 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	// Decision-side mirror of the in-path carve-out (cfm.lua Step 0a1).
 	if isWellKnownChallengeExempt(rec.URI) {
 		return
+	}
+
+	// Retain the raw request in the access ring for edge_access_tail triage.
+	// Own mutex, off the engine lock; bounded + truncated in newAccessEntry.
+	if e.accessRing != nil {
+		e.accessRing.add(newAccessEntry(rec))
 	}
 
 	t := tsToTime(rec.TS)

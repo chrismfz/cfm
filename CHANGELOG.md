@@ -17,6 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **MCP tool `edge_access_tail` + `GET /api/v1/webdet/access-recent` — recent
+  edge access-log lines for WAF false-positive triage.** Read-only, **admin-only**
+  (exposes requests across all vhosts). Returns the last requests (method, URI,
+  status, bytes, response time, UA, referer), newest last, filterable by
+  `ip`/`host`/`method`/`status` (exact `403` or class `4`)/`path` substring/
+  `since` duration/`limit` (default 50, max 500). Pair it with a WAF hit (same
+  `ip=`/`host=`) to see what the client was actually requesting around the
+  trigger. Backed by a fixed-size in-memory ring at the log-ingest chokepoint
+  (bounded memory regardless of traffic); per-field lengths are truncated and
+  secret-looking query params (`token`, `password`, `api_key`, …) are redacted.
+  Request bodies are never retained.
+
 ### Changed
 - **`listening_ports` / `GET /api/v1/system/listeners` now groups by (proto,
   port, process).** On a host that binds a service on many IP aliases (e.g.

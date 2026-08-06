@@ -274,6 +274,28 @@ func TestServiceStatusRouting(t *testing.T) {
 	}
 }
 
+func TestEdgeAccessTailRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edge_access_tail","arguments":{"ip":"1.2.3.4","status":"4","path":"admin-ajax.php","since":"10m","limit":25}}}`)
+	if fd.lastPath != "/api/v1/webdet/access-recent" {
+		t.Errorf("edge_access_tail routed to %q, want /api/v1/webdet/access-recent", fd.lastPath)
+	}
+	if got := fd.lastQuery.Get("ip"); got != "1.2.3.4" {
+		t.Errorf("ip = %q, want 1.2.3.4", got)
+	}
+	if got := fd.lastQuery.Get("status"); got != "4" {
+		t.Errorf("status = %q, want 4", got)
+	}
+	if got := fd.lastQuery.Get("path"); got != "admin-ajax.php" {
+		t.Errorf("path = %q, want admin-ajax.php", got)
+	}
+	if got := fd.lastQuery.Get("limit"); got != "25" {
+		t.Errorf("limit = %q, want 25", got)
+	}
+}
+
 // The consent page must disclose where the grant is delivered and warn on a
 // non-first-party redirect (anti-phishing).
 func TestConsentPageShowsRedirectAndWarns(t *testing.T) {

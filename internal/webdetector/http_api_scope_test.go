@@ -96,6 +96,21 @@ func TestMonitoring_IPDrilldown_ScopedBlocked(t *testing.T) {
 	}
 }
 
+func TestMonitoring_AccessRecent_ScopedBlocked(t *testing.T) {
+	_, mux := newMonitoringTestEngine(t)
+
+	// access-recent exposes requests across ALL vhosts → admin-only.
+	rr := get(mux, adminCtx(), "/api/v1/webdet/access-recent?ip=1.2.3.4")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin access-recent: expected 200, got %d", rr.Code)
+	}
+
+	rr = get(mux, scopedCtx("example.com"), "/api/v1/webdet/access-recent?host=example.com")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("scoped access-recent: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestMonitoring_AnalyzeIP_ScopedBlocked(t *testing.T) {
 	_, mux := newMonitoringTestEngine(t)
 

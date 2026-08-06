@@ -186,7 +186,7 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ## 4. Active tools (as-built)
 
-19 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
+20 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
 CLI/UI use). All carry the `readOnlyHint` annotation.
 
 | Tool | What it answers | Endpoint(s) | Args |
@@ -201,6 +201,7 @@ CLI/UI use). All carry the `readOnlyHint` annotation.
 | `hot_ips` | Hottest source IPs by recent rate | `webdet/ip-short` | `limit` |
 | `host_drilldown` | Top paths/IPs for one vhost (the "why") | `webdet/drilldown` | `host`*, `top` |
 | `ip_drilldown` | What one source IP is doing | `webdet/ip-drilldown` | `ip`* |
+| `edge_access_tail` | Recent edge access-log lines (method/URI/status/UA/timing) — raw request context around a WAF hit, for FP triage | `webdet/access-recent` | `ip`, `host`, `method`, `status`, `path`, `since`, `limit` |
 | `detection_history` | Durable timeline of detections (WAF/challenge/clam/…) | `webdet/history/events` | `limit`, `type`, `host` |
 | `bots_top` | Top user-agents (bots/crawlers/scrapers) | `webdet/ua-top` | `limit` |
 | `firewall_blocks` | Active nft bans incl. WAF autoblocks (TTL, reason, GeoIP) | `firewall/list` | — |
@@ -284,4 +285,4 @@ The MCP surface is versioned by CFM's date-based releases (see `CHANGELOG.md`).
 | Release | MCP status | Tools active |
 |---|---|---|
 | 2026.08.05 | **Introduced** — read-only MCP server; dedicated `MCP_TOKEN` credential (min 24 chars, fail-closed) separate from `AUTH_TOKEN`; OAuth 2.1 + PKCE for the claude.ai connector, static-bearer for Claude Code/API | The 15 tools in §4 (WAF, challenge, suspicious/traffic, drilldowns, history, bots, firewall blocks, detectors, health) |
-| 2026.08.06 | Edge-proxy connectivity fixes (OIDC-discovery alias, DNS-rebinding guard disabled); consent POST rate-limit; enrich reverse-DNS perf (waf/security summaries ~60s→~1.5s) | **+`process_list`, +`listening_ports`, +`dmesg_tail`, +`service_status`** (19 tools) — node system diagnostics (busiest processes; listening sockets + owner; kernel ring buffer; systemd unit status) |
+| 2026.08.06 | Edge-proxy connectivity fixes (OIDC-discovery alias, DNS-rebinding guard disabled); consent POST rate-limit; enrich reverse-DNS perf (waf/security summaries ~60s→~1.5s) | **+`process_list`, +`listening_ports`, +`dmesg_tail`, +`service_status`, +`edge_access_tail`** (20 tools) — node system diagnostics (busiest processes; listening sockets + owner; kernel ring buffer; systemd unit status) + WAF triage (recent edge access lines around a hit) |
