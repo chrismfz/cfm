@@ -31,8 +31,12 @@ back-filled here — see the git/PR history for that period.
   queue detector (`exim_queues`/`postfix_queues`) builds the report each poll
   from output it already has (plus a bounded mainlog tail for reasons) and
   publishes it to the new `internal/mailqueue` store; the API/CLI/WebUI read it
-  with zero extra MTA probe. exim wired now (postfix report to follow); the same
-  breakdown will also surface in `cfm` CLI and the WebUI.
+  with zero extra MTA probe. **Both exim and postfix are wired** — the postfix
+  provider parses `postqueue -p` (with the defer reason carried inline in the
+  listing, so no maillog tail is needed) and works for a plain postfix node or
+  postfix-in-a-container (mailcow) via the detector's configurable list command
+  (`docker exec … postqueue -p`). The same breakdown will also surface in the
+  `cfm` CLI and the WebUI.
 - **MCP tools `mysql_log_tail` + `mysql_slow_queries` + `GET /api/v1/system/mysql-log`
   — on-demand tails of the MySQL error / slow-query logs.** Read-only, admin-only.
   `mysql_log_tail` tails the MySQL/MariaDB **error log** (crashes, deadlocks,

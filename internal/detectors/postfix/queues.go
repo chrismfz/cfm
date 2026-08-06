@@ -13,6 +13,7 @@ import (
 
     core "cfm/internal/detectors/core"
     "cfm/internal/mailq"
+    "cfm/internal/mailqueue"
 )
 
 type QueuesConfig struct {
@@ -72,7 +73,7 @@ func (q *Queues) RunOnce(ctx context.Context, out chan<- core.Alert) error {
     start := time.Now()
 
     total, totalErr := q.totalCount(ctx)
-    frozen, samples, _ := q.frozenCountAndSamples(ctx)
+    frozen, samples, rawList, _ := q.frozenCountAndSamples(ctx)
 
     now := time.Now()
     // Publish for the health snapshot (cfm health / dashboard). Only on a
@@ -80,6 +81,13 @@ func (q *Queues) RunOnce(ctx context.Context, out chan<- core.Alert) error {
     // surface as a fake empty queue.
     if totalErr == nil {
         mailq.Publish(mailq.Measurement{MTA: "postfix", Total: total, Frozen: frozen, MeasuredAt: now})
+
+        // Publish the MTA-agnostic rich report (mail_queue_summary / _defer_reasons
+        // / CLI / WebUI) from the SAME `postqueue -p` output — no extra probe.
+        // postfix carries the defer reason inline, so no maillog tail is needed.
+        rep := mailqueue.BuildPostfixReport(rawList, now, total, mailqueue.DefaultTop)
+        rep.MeasuredAt = now
+        mailqueue.Publish(rep)
     }
 
     if q.cfg.MaxTotal > 0 && total > q.cfg.MaxTotal &&
@@ -148,7 +156,7 @@ func parseCountOutput(raw string) (int, error) {
     return n, nil
 }
 
-func (q *Queues) frozenCountAndSamples(ctx context.Context) (int, []string, error) {
+func (q *Queues) frozenCountAndSamples(ctx context.Context) (int, []string, string, error) {
     cmd := shell(q.cfg.ListCmd)
     if q.cfg.Timeout > 0 {
         var cancel context.CancelFunc
@@ -157,13 +165,14 @@ func (q *Queues) frozenCountAndSamples(ctx context.Context) (int, []string, erro
     }
     out, err := cmd.Output()
     if err != nil {
-        return 0, nil, err
+        return 0, nil, "", err
     }
 
     frozen := 0
     samples := make([]string, 0, q.cfg.SampleLimit)
 
     sc := bufio.NewScanner(strings.NewReader(string(out)))
+    sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
     for sc.Scan() {
         line := sc.Text()
         // Για postfix μπορείς να προσαρμόσεις το κριτήριο "frozen":
@@ -175,7 +184,9 @@ func (q *Queues) frozenCountAndSamples(ctx context.Context) (int, []string, erro
             samples = append(samples, line)
         }
     }
-    return frozen, samples, nil
+    // The full output feeds mailqueue.BuildPostfixReport (age/domains/oldest/
+    // reasons) with no extra `postqueue -p` call.
+    return frozen, samples, string(out), nil
 }
 
 func trimSamples(a []string, n int) []string {
