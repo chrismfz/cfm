@@ -20,10 +20,12 @@ var (
 	reIP          = regexp.MustCompile(`\[?\b\d{1,3}(?:\.\d{1,3}){3}\b\]?`)
 	reWS          = regexp.MustCompile(`\s+`)
 	reURL         = regexp.MustCompile(`https?://\S+`)
-	// A per-session id + provider trailer, e.g. "…NoSuchUser ffacd0b85a97d-47ff…si… - gsmtp"
-	// or "…- mxfront…". Strip it so short bounces carrying a session id still
-	// aggregate instead of splitting one reason per delivery attempt.
-	reSessionTail = regexp.MustCompile(`\s+\S+\s+-\s+\w+\s*$`)
+	// A per-session id + provider trailer, e.g. "…NoSuchUser ffacd0b85a97d-47ff…si… - gsmtp".
+	// Strip it so short bounces carrying a session id aggregate instead of
+	// splitting one reason per delivery attempt. The pre-dash token must be
+	// session-id-shaped (contains an internal '.' or '-') so a normal reason
+	// ending in "… <word> - <word>" is NOT eaten.
+	reSessionTail = regexp.MustCompile(`\s+[0-9a-z]+[.-][0-9a-z.-]*\s+-\s+\w+\s*$`)
 )
 
 const maxReasonLen = 140

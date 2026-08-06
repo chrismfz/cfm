@@ -86,6 +86,10 @@ func TestNormalizeDeferReason(t *testing.T) {
 		"retry time not reached":                                "retry time not reached",
 		"Connection refused":                                    "Connection refused",
 		"Network is unreachable":                                "Network is unreachable",
+		// session-id tail (has internal '-') IS stripped:
+		"mailbox full deadbeef12-99aa - gsmtp": "mailbox full",
+		// a normal reason ending "<word> - <word>" (no id-shaped token) is NOT eaten:
+		"unexpected end of data - retry": "unexpected end of data - retry",
 	}
 	for in, want := range cases {
 		if got := normalizeDeferReason(in); got != want {
