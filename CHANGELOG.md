@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **`cfm which` / `cfm search <IP>` now shows the "why / from where" too.** On
+  top of the existing multi-source enforcement lookup (nft / cfm.deny / csf /
+  fail2ban / imunify360, with set/feed/reason), for a single IP it appends a
+  best-effort **CFM detection history** section — the WAF / challenge / autoblock
+  events the daemon recorded for that IP, grouped by type+reason with counts and
+  last-seen. This attributes a ban whose nft entry carries no comment: events →
+  WAF/detector/challenge; **no events → a manual `cfm block` or an imported
+  blocklist ban** (which is why it's permanent, unlike the 6h soft-TTL
+  autoblocks). Best-effort over the local API — if the daemon isn't reachable the
+  local lookup still stands and the section is marked unavailable. `--json`
+  includes it under `detection_history`.
 - **MCP `detection_history` tool now takes `ip=<addr>`** — attribute one source
   IP to the WAF/detector/challenge events CFM recorded for it ("who/why was this
   IP acted on?"). The `/api/v1/webdet/history/events` endpoint already filtered by
