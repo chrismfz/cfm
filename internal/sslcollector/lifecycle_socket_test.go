@@ -344,11 +344,8 @@ func TestSockLifecycle_ConfigChangeRestartStaysDialable(t *testing.T) {
 	cfgA := &cfgpkg.SSLCollectorSockConfig{Enabled: true, SockPath: sock, Token: strongToken, PEMTTL: time.Minute}
 	lc.ApplyConfig(ctx, cfgA)
 	waitFor(t, "A dialable", func() bool { return dialOK(sock) })
-	inoA, ok := inodeOf(sock)
-	if !ok {
-		t.Fatalf("could not stat A's socket")
-	}
 	keyA := lc.testCfgKey()
+	genA := lc.testSeq()
 
 	// Rotate the token → different key → restart on the same path.
 	cfgB := &cfgpkg.SSLCollectorSockConfig{Enabled: true, SockPath: sock, Token: strongToken + "rotated", PEMTTL: time.Minute}
@@ -356,11 +353,14 @@ func TestSockLifecycle_ConfigChangeRestartStaysDialable(t *testing.T) {
 	if lc.testCfgKey() == keyA {
 		t.Fatalf("restart: cfgKey did not change on a config change")
 	}
-	// New server must rebind (fresh inode) and be dialable — proves the old
-	// generation's Close() did not orphan the new socket by name.
-	waitFor(t, "restart: new inode live and dialable", func() bool {
-		ino, ok := inodeOf(sock)
-		return ok && ino != inoA && lc.testRunning() && dialOK(sock)
+	// A NEW server generation must come up live and dialable on the same path —
+	// proving the old generation's Close() did not orphan the new socket by name.
+	// We assert on the generation counter, NOT a "fresh inode number" (the old
+	// `ino != inoA` check): inode numbers are recyclable, and on CI's tmpfs the
+	// rebind routinely reuses the just-freed inode, so that check wedged until
+	// the 30s deadline and failed the whole sslcollector suite on every run.
+	waitFor(t, "restart: new generation live and dialable", func() bool {
+		return lc.testSeq() > genA && lc.testRunning() && dialOK(sock)
 	})
 	lc.Stop()
 }
