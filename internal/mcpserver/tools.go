@@ -75,7 +75,7 @@ func registerSecurityOverview(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "security_overview",
-		Description: "Headline security picture for this CFM node in one call: system health, recent WAF activity (last hour), active challenged vhosts, current firewall blocks, and top suspicious hosts. Start here for \"what's going on right now?\", then drill in with the more specific tools.",
+		Description: "Headline security picture for this CFM node in one call: system health, recent WAF activity (last hour), active challenged vhosts, current firewall-block count, and top suspicious hosts. Deliberately compact — counts + top-N, not full lists; call firewall_blocks / waf_activity for the raw rows. Start here for \"what's going on right now?\", then drill in.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		secs := []struct {
 			key, path string
@@ -98,7 +98,7 @@ func registerSecurityOverview(srv *mcp.Server, d Deps) {
 			wg.Add(1)
 			go func(key, path string, q url.Values) {
 				defer wg.Done()
-				res := sectionBudgeted(ctx, d, path, q)
+				res := compactOverviewSection(key, sectionBudgeted(ctx, d, path, q))
 				mu.Lock()
 				out[key] = res
 				mu.Unlock()
@@ -111,6 +111,44 @@ func registerSecurityOverview(srv *mcp.Server, d Deps) {
 		}
 		return textResult(b), nil, nil
 	})
+}
+
+// overviewRowSample bounds how many rows any embedded list keeps in the
+// composed security_overview (counts stay authoritative; the full list lives in
+// the dedicated tool).
+const overviewRowSample = 10
+
+// compactOverviewSection trims a section body to headline size. The underlying
+// endpoints embed full lists — firewall/list returns every active block (1000s),
+// waf/engine/summary carries the raw per-hit rows — which turn the "headline"
+// tool into hundreds of KB and blow the MCP response budget. We keep the
+// summary (counts, top-N, histogram) and drop/sample the big arrays, pointing
+// the caller to firewall_blocks / waf_activity for the raw rows. A non-object
+// body (error stub, array) is passed through untouched.
+func compactOverviewSection(key string, body json.RawMessage) any {
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return body
+	}
+	switch key {
+	case "firewall_blocks":
+		if rows, ok := m["rows"].([]any); ok {
+			m["rows_total"] = len(rows)
+			if len(rows) > overviewRowSample {
+				m["rows"] = rows[:overviewRowSample]
+				m["rows_truncated"] = true
+				m["note"] = "sample only; call firewall_blocks for the full list"
+			}
+		}
+	case "waf_last_hour":
+		// top_rules/top_ips/top_countries/histogram are the summary; the raw
+		// per-hit rows are what bloat it — drop them.
+		if _, ok := m["rows"]; ok {
+			delete(m, "rows")
+			m["note"] = "summary only; call waf_activity for the raw hit rows"
+		}
+	}
+	return m
 }
 
 // sectionBudgeted runs one composed-tool section under overviewSectionBudget,

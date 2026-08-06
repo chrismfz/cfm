@@ -42,6 +42,13 @@ back-filled here — see the git/PR history for that period.
   Request bodies are never retained.
 
 ### Changed
+- **`security_overview` MCP tool is now compact.** It embedded the full
+  firewall-block list (1000s of enriched rows) and the WAF summary's raw per-hit
+  rows, so the "one-call headline" ballooned to hundreds of KB and could exceed
+  an MCP client's response budget. It now keeps counts + top-N (firewall: a small
+  row sample plus `rows_total`; WAF: the top rules/IPs/countries/histogram, raw
+  hit rows dropped) and points to `firewall_blocks` / `waf_activity` for the full
+  lists.
 - **`listening_ports` / `GET /api/v1/system/listeners` now groups by (proto,
   port, process).** On a host that binds a service on many IP aliases (e.g.
   `named` on :53 across hundreds of addresses) the flat per-socket list was

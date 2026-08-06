@@ -191,7 +191,7 @@ CLI/UI use). All carry the `readOnlyHint` annotation.
 
 | Tool | What it answers | Endpoint(s) | Args |
 |---|---|---|---|
-| `security_overview` | "What's going on right now?" — one-call headline | `health/snapshot` + `waf/engine/summary` + `challenge/vhosts` + `firewall/list` + `webdet/suspicious` | — |
+| `security_overview` | "What's going on right now?" — one-call headline (compact: counts + top-N, not full lists) | `health/snapshot` + `waf/engine/summary` + `challenge/vhosts` + `firewall/list` + `webdet/suspicious` | — |
 | `waf_activity` | Recent WAF hits, top rules, top IPs, per-hour histogram | `waf/engine/summary` | `hours`, `limit`, `top` |
 | `waf_rules` | Loaded WAF rules + enforcement tier | `waf/rules` | — |
 | `challenge_vhosts` | Which vhosts are challenged (manual/auto) and state | `challenge/vhosts` | `status`, `mode`, `limit` |
