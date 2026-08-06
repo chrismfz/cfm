@@ -411,7 +411,7 @@ func registerListeningPorts(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "listening_ports",
-		Description: "Listening TCP/UDP sockets on the node and the process that owns each (proto, bind address, port, command name, pid) — the `ss -tlnp` view. Use to confirm the edge/daemon/panel are actually listening, spot an unexpected open port, or see who owns :443. Bind address + owning command name only; no connections or peers.",
+		Description: "Listening TCP/UDP sockets on the node and the process that owns each — the `ss -tlnp` view, grouped by (proto, port, process): each group has the owning command name + pid, a count of bind addresses, and a bounded address sample (just the wildcard when it binds 0.0.0.0/::). Use to confirm the edge/daemon/panel are actually listening, spot an unexpected open port, or see who owns :443. Owning command + bind addresses only; no connections or peers.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		return dispatchJSON(ctx, d, "/api/v1/system/listeners", nil)
 	})

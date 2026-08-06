@@ -274,7 +274,9 @@ func handleSystemProcesses(w http.ResponseWriter, r *http.Request) {
 // handleSystemListeners serves the listening TCP/UDP sockets and their owning
 // process (GET /api/v1/system/listeners). Read-only, admin-only. Backs the MCP
 // listening_ports tool — "is the edge/daemon/panel actually listening, who owns
-// :443?". Returns bind address/port + owning COMM/pid only (no connections/peers).
+// :443?". Returns owning COMM/pid + a bounded bind-address sample per group (no
+// connections/peers); results are grouped by (proto, port, process) so a host
+// binding a service on hundreds of IP aliases stays compact — see netstat.PortGroup.
 func handleSystemListeners(w http.ResponseWriter, r *http.Request) {
 	if !webdet.RequireAdmin(w, r) {
 		return
@@ -295,7 +297,7 @@ func handleSystemListeners(w http.ResponseWriter, r *http.Request) {
 		"ok":        true,
 		"schema":    "system.listeners.v1",
 		"count":     len(listeners),
-		"listeners": listeners,
+		"groups":    listeners,
 	})
 }
 

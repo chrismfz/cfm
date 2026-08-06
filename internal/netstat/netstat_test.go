@@ -1,6 +1,51 @@
 package netstat
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestGroupListeners(t *testing.T) {
+	raw := []Listener{
+		// named on :53 across many specific IPs → collapses to one group,
+		// sampled + more count.
+		{Proto: "udp", Addr: "1.1.1.1", Port: 53, Comm: "named", PID: 9},
+		{Proto: "udp", Addr: "1.1.1.2", Port: 53, Comm: "named", PID: 9},
+		{Proto: "udp", Addr: "1.1.1.3", Port: 53, Comm: "named", PID: 9},
+		{Proto: "udp", Addr: "1.1.1.4", Port: 53, Comm: "named", PID: 9},
+		{Proto: "udp", Addr: "1.1.1.5", Port: 53, Comm: "named", PID: 9},
+		{Proto: "udp", Addr: "1.1.1.6", Port: 53, Comm: "named", PID: 9},
+		{Proto: "udp", Addr: "1.1.1.7", Port: 53, Comm: "named", PID: 9},
+		{Proto: "udp", Addr: "1.1.1.8", Port: 53, Comm: "named", PID: 9},
+		// wildcard bind subsumes any specific address in the same group.
+		{Proto: "tcp", Addr: "0.0.0.0", Port: 443, Comm: "litespeed", PID: 5},
+		{Proto: "tcp", Addr: "1.2.3.4", Port: 443, Comm: "litespeed", PID: 5},
+		// a lone listener.
+		{Proto: "tcp", Addr: "127.0.0.1", Port: 6060, Comm: "cfm", PID: 2},
+		// duplicate address in a group must not double-count.
+		{Proto: "tcp", Addr: "127.0.0.1", Port: 6060, Comm: "cfm", PID: 2},
+	}
+	got := groupListeners(raw)
+	if len(got) != 3 {
+		t.Fatalf("groups = %d, want 3", len(got))
+	}
+	// sorted by port: 53, 443, 6060
+	dns := got[0]
+	if dns.Port != 53 || dns.Comm != "named" || dns.Count != 8 {
+		t.Fatalf("dns group wrong: %+v", dns)
+	}
+	if len(dns.Addrs) != sampleAddrs || dns.More != 8-sampleAddrs {
+		t.Fatalf("dns sample = %d addrs, more=%d; want %d, %d", len(dns.Addrs), dns.More, sampleAddrs, 8-sampleAddrs)
+	}
+	ls := got[1]
+	if ls.Port != 443 || !reflect.DeepEqual(ls.Addrs, []string{"0.0.0.0"}) || ls.Count != 2 || ls.More != 0 {
+		t.Fatalf("litespeed group should report only the wildcard: %+v", ls)
+	}
+	cfm := got[2]
+	if cfm.Port != 6060 || cfm.Count != 1 || !reflect.DeepEqual(cfm.Addrs, []string{"127.0.0.1"}) {
+		t.Fatalf("cfm group wrong (dup addr must collapse): %+v", cfm)
+	}
+}
 
 func TestParseSSLine(t *testing.T) {
 	cases := []struct {
