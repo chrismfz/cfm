@@ -99,6 +99,15 @@ back-filled here — see the git/PR history for that period.
   `0.0.0.0`/`::`). The response key is `groups` (was `listeners`).
 
 ### Fixed
+- **postfix queue `total` / `frozen` counts are now accurate.** The
+  `postfix_queues` detector counted the queue total with a line-counting shell
+  command (`mailq | … | wc -l`), which over-counts ~3-5× because each message
+  spans a header + optional reason + N recipient lines; and it derived "frozen"
+  from the substring `"deferred"`, which `mailq` never prints (so the count was
+  ~always 0). Both the health snapshot and the new mail-queue report now take
+  the exact message count and the held-message count (postfix `!` marker)
+  straight from the parsed listing — one probe, no line-counting — so the
+  `QUEUE_TOTAL`/`QUEUE_FROZEN` alert thresholds finally mean what they say.
 - **`mysql_slow_queries` no longer 502s on a long slow-log line.** A slow-query
   entry longer than the scanner buffer returned `bufio.Scanner: token too long`
   and failed the whole call. `internal/mysqllog` now uses a bounded
