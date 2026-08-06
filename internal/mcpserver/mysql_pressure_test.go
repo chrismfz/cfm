@@ -82,6 +82,35 @@ func TestSectionError(t *testing.T) {
 	}
 }
 
+func TestMySQLLogTailRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mysql_log_tail","arguments":{"lines":300,"grep":"deadlock"}}}`)
+	if fd.lastPath != "/api/v1/system/mysql-log" {
+		t.Errorf("mysql_log_tail routed to %q", fd.lastPath)
+	}
+	if got := fd.lastQuery.Get("which"); got != "error" {
+		t.Errorf("which = %q, want error", got)
+	}
+	if got := fd.lastQuery.Get("grep"); got != "deadlock" {
+		t.Errorf("grep = %q, want deadlock", got)
+	}
+}
+
+func TestMySQLSlowQueriesRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mysql_slow_queries","arguments":{"lines":500}}}`)
+	if fd.lastPath != "/api/v1/system/mysql-log" {
+		t.Errorf("mysql_slow_queries routed to %q", fd.lastPath)
+	}
+	if got := fd.lastQuery.Get("which"); got != "slow" {
+		t.Errorf("which = %q, want slow", got)
+	}
+}
+
 func TestMySQLPressureRouting(t *testing.T) {
 	fd := &fakeDispatch{}
 	ts := newTestServer(t, fd)

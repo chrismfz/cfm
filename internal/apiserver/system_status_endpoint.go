@@ -18,6 +18,7 @@ import (
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 	"cfm/internal/kmsg"
+	"cfm/internal/mysqllog"
 	"cfm/internal/netstat"
 	"cfm/internal/procstat"
 	"cfm/internal/svcstat"
@@ -219,6 +220,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/dmesg", handleSystemDmesg)
 	m.HandleFunc("/api/v1/system/services", handleSystemServices)
 	m.HandleFunc("/api/v1/system/ip-forensics", handleSystemIPForensics)
+	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
 	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
@@ -430,6 +432,51 @@ func handleSystemIPForensics(w http.ResponseWriter, r *http.Request) {
 		"schema":         "system.ip_forensics.v1",
 		"result":         res,
 		"available_logs": edgelog.AvailableLogs(),
+	})
+}
+
+// handleSystemMySQLLog tails the MySQL error or slow-query log
+// (GET /api/v1/system/mysql-log?which=error|slow&lines=N&grep=SUBSTR). Read-only,
+// admin-only. Backs the MCP mysql_log_tail (error) and mysql_slow_queries (slow)
+// tools — the "MySQL pressure is high, what's erroring / what's slow?" companion
+// to mysql_pressure. Bounded (tail window + timeout + capped output); needs no DB
+// connection, just the log files. A missing slow log is reported as found=false
+// (likely disabled), not an error.
+func handleSystemMySQLLog(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	which := strings.TrimSpace(r.URL.Query().Get("which"))
+	lines := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("lines")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			lines = n
+		}
+	}
+	limit := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	grep := strings.TrimSpace(r.URL.Query().Get("grep"))
+
+	res, err := mysqllog.Tail(r.Context(), which, lines, limit, grep)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":     true,
+		"schema": "system.mysql_log.v1",
+		"result": res,
 	})
 }
 
