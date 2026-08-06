@@ -235,6 +235,16 @@ func TestProcessListRouting(t *testing.T) {
 	}
 }
 
+func TestListeningPortsRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"listening_ports","arguments":{}}}`)
+	if fd.lastPath != "/api/v1/system/listeners" {
+		t.Errorf("listening_ports routed to %q, want /api/v1/system/listeners", fd.lastPath)
+	}
+}
+
 // The consent page must disclose where the grant is delivered and warn on a
 // non-first-party redirect (anti-phishing).
 func TestConsentPageShowsRedirectAndWarns(t *testing.T) {

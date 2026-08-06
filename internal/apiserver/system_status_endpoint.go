@@ -16,6 +16,7 @@ import (
 	"cfm/internal/firewall"
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
+	"cfm/internal/netstat"
 	"cfm/internal/procstat"
 	webdet "cfm/internal/webdetector"
 )
@@ -211,6 +212,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	})
 
 	m.HandleFunc("/api/v1/system/processes", handleSystemProcesses)
+	m.HandleFunc("/api/v1/system/listeners", handleSystemListeners)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
 	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
@@ -262,6 +264,34 @@ func handleSystemProcesses(w http.ResponseWriter, r *http.Request) {
 		"top":       top,
 		"count":     len(procs),
 		"processes": procs,
+	})
+}
+
+// handleSystemListeners serves the listening TCP/UDP sockets and their owning
+// process (GET /api/v1/system/listeners). Read-only, admin-only. Backs the MCP
+// listening_ports tool — "is the edge/daemon/panel actually listening, who owns
+// :443?". Returns bind address/port + owning COMM/pid only (no connections/peers).
+func handleSystemListeners(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	listeners, err := netstat.Listeners(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":        true,
+		"schema":    "system.listeners.v1",
+		"count":     len(listeners),
+		"listeners": listeners,
 	})
 }
 

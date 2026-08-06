@@ -48,6 +48,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerDetectorsStatus(srv, d)
 	registerSystemHealth(srv, d)
 	registerProcessList(srv, d)
+	registerListeningPorts(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -401,5 +402,15 @@ func registerProcessList(srv *mcp.Server, d Deps) {
 		q := url.Values{}
 		setInt(q, "top", in.Top)
 		return dispatchJSON(ctx, d, "/api/v1/system/processes", q)
+	})
+}
+
+func registerListeningPorts(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "listening_ports",
+		Description: "Listening TCP/UDP sockets on the node and the process that owns each (proto, bind address, port, command name, pid) — the `ss -tlnp` view. Use to confirm the edge/daemon/panel are actually listening, spot an unexpected open port, or see who owns :443. Bind address + owning command name only; no connections or peers.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
+		return dispatchJSON(ctx, d, "/api/v1/system/listeners", nil)
 	})
 }
