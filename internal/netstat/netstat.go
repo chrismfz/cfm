@@ -26,14 +26,34 @@ type Listener struct {
 	PID   int    `json:"pid"`
 }
 
+// PortGroup is one (proto, port, owning-process) collapsed across all the bind
+// addresses it listens on. A shared host binds a service on every IP alias
+// (e.g. named on :53 across hundreds of addresses); the operator-relevant fact
+// is "named owns :53 on N addresses", not N near-identical rows — so we group
+// and keep a bounded address sample.
+type PortGroup struct {
+	Proto string   `json:"proto"`
+	Port  int      `json:"port"`
+	Comm  string   `json:"comm"`
+	PID   int      `json:"pid"`
+	Count int      `json:"count"`           // distinct bind addresses in this group
+	Addrs []string `json:"addrs"`           // the wildcard bind(s), else a bounded sample of specific addresses
+	More  int      `json:"more,omitempty"`  // addresses beyond the sample (Count-len(Addrs)) when not wildcard
+}
+
 const ssTimeout = 5 * time.Second
 
-// Listeners returns every listening TCP and UDP socket with its owning process.
-func Listeners(ctx context.Context) ([]Listener, error) {
+// sampleAddrs bounds how many specific bind addresses a non-wildcard group lists.
+const sampleAddrs = 6
+
+// Listeners returns listening TCP/UDP sockets grouped by (proto, port, owning
+// process). Grouping keeps the output bounded on hosts with many IP aliases
+// (see PortGroup).
+func Listeners(ctx context.Context) ([]PortGroup, error) {
 	cctx, cancel := context.WithTimeout(ctx, ssTimeout)
 	defer cancel()
 
-	out := make([]Listener, 0, 64)
+	raw := make([]Listener, 0, 128)
 	// -H no header, -t/-u tcp/udp, -l listening, -n numeric, -p process.
 	for _, spec := range []struct{ flag, tcpProto, v6Proto string }{
 		{"-Htlnp", "tcp", "tcp6"},
@@ -45,18 +65,78 @@ func Listeners(ctx context.Context) ([]Listener, error) {
 		}
 		for _, line := range lines {
 			if l, ok := parseSSLine(line, spec.tcpProto, spec.v6Proto); ok {
-				out = append(out, l)
+				raw = append(raw, l)
 			}
 		}
+	}
+	return groupListeners(raw), nil
+}
+
+// isWildcardAddr reports whether a bind address covers all local addresses, so
+// the specific-address list is redundant.
+func isWildcardAddr(a string) bool {
+	return a == "0.0.0.0" || a == "::" || a == "*"
+}
+
+// groupListeners collapses per-socket listeners into per-(proto,port,comm,pid)
+// groups. Separated from exec so it is unit-tested. Within a group: if any bind
+// is a wildcard, only the wildcard(s) are reported (they subsume the rest);
+// otherwise a bounded sample of distinct specific addresses plus a `more` count.
+func groupListeners(raw []Listener) []PortGroup {
+	type key struct {
+		proto string
+		port  int
+		comm  string
+		pid   int
+	}
+	order := make([]key, 0, 64)
+	seenKey := map[key]bool{}
+	addrs := map[key][]string{}     // insertion-ordered distinct addresses
+	seenAddr := map[key]map[string]bool{}
+	for _, l := range raw {
+		k := key{l.Proto, l.Port, l.Comm, l.PID}
+		if !seenKey[k] {
+			seenKey[k] = true
+			order = append(order, k)
+			seenAddr[k] = map[string]bool{}
+		}
+		if !seenAddr[k][l.Addr] {
+			seenAddr[k][l.Addr] = true
+			addrs[k] = append(addrs[k], l.Addr)
+		}
+	}
+
+	out := make([]PortGroup, 0, len(order))
+	for _, k := range order {
+		all := addrs[k]
+		g := PortGroup{Proto: k.proto, Port: k.port, Comm: k.comm, PID: k.pid, Count: len(all)}
+		var wilds []string
+		for _, a := range all {
+			if isWildcardAddr(a) {
+				wilds = append(wilds, a)
+			}
+		}
+		if len(wilds) > 0 {
+			g.Addrs = wilds
+		} else if len(all) > sampleAddrs {
+			g.Addrs = append([]string(nil), all[:sampleAddrs]...)
+			g.More = len(all) - sampleAddrs
+		} else {
+			g.Addrs = all
+		}
+		out = append(out, g)
 	}
 
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Port != out[j].Port {
 			return out[i].Port < out[j].Port
 		}
-		return out[i].Proto < out[j].Proto
+		if out[i].Proto != out[j].Proto {
+			return out[i].Proto < out[j].Proto
+		}
+		return out[i].Comm < out[j].Comm
 	})
-	return out, nil
+	return out
 }
 
 // ssPath resolves the ss binary, falling back to the usual sbin locations for a

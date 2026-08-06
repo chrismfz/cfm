@@ -72,6 +72,37 @@ ActiveEnterTimestampMonotonic=0`
 	}
 }
 
+// Several query names can alias the same unit (mysql/mysqld → mariadb.service),
+// so systemctl show emits one block per name for the same Id. parseShowBlocks
+// must keep the first and drop the repeats.
+func TestParseShowBlocks_DedupByID(t *testing.T) {
+	raw := `Id=mariadb.service
+LoadState=loaded
+ActiveState=active
+SubState=running
+MainPID=999
+
+Id=mariadb.service
+LoadState=loaded
+ActiveState=active
+SubState=running
+MainPID=999
+
+Id=lshttpd.service
+LoadState=loaded
+ActiveState=active
+SubState=running
+MainPID=111`
+
+	got := parseShowBlocks(raw)
+	if len(got) != 2 {
+		t.Fatalf("blocks = %d, want 2 (mariadb collapsed)", len(got))
+	}
+	if got[0].Unit != "mariadb.service" || got[1].Unit != "lshttpd.service" {
+		t.Fatalf("wrong units after dedup: %q, %q", got[0].Unit, got[1].Unit)
+	}
+}
+
 func TestFillUptime(t *testing.T) {
 	svcs := []Service{
 		{Unit: "a.service", Active: "active", monoUsec: 5_000_000},   // activated 5s after boot

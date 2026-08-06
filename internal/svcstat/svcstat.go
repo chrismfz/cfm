@@ -119,10 +119,14 @@ func Status(ctx context.Context, units []string) ([]Service, error) {
 // parseShowBlocks parses the `systemctl show` output: KEY=VALUE lines, one unit
 // per block, blocks separated by a blank line. Separated from exec so it is
 // unit-tested without systemd. monotonicUsec is carried out-of-band (not a JSON
-// field) so fillUptime can turn it into UptimeSec.
+// field) so fillUptime can turn it into UptimeSec. Blocks are de-duplicated by
+// resolved unit Id: several query names can alias the same unit (mysql/mysqld →
+// mariadb.service, lsws → lshttpd.service), and systemctl emits one block per
+// name — we keep the first and drop the repeats.
 func parseShowBlocks(raw string) []Service {
 	blocks := strings.Split(strings.TrimSpace(raw), "\n\n")
 	out := make([]Service, 0, len(blocks))
+	seen := make(map[string]struct{}, len(blocks))
 	for _, block := range blocks {
 		kv := map[string]string{}
 		for _, line := range strings.Split(block, "\n") {
@@ -134,6 +138,10 @@ func parseShowBlocks(raw string) []Service {
 		if id == "" {
 			continue
 		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
 		s := Service{
 			Unit:        id,
 			Load:        kv["LoadState"],

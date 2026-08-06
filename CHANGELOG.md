@@ -17,6 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **`listening_ports` / `GET /api/v1/system/listeners` now groups by (proto,
+  port, process).** On a host that binds a service on many IP aliases (e.g.
+  `named` on :53 across hundreds of addresses) the flat per-socket list was
+  hundreds of near-identical rows (tens of KB — enough to blow the MCP response
+  budget). Each group now carries the owning command + pid, a `count` of bind
+  addresses and a bounded address sample (just the wildcard when it binds
+  `0.0.0.0`/`::`). The response key is `groups` (was `listeners`).
+
+### Fixed
+- **`service_status` de-duplicates units that share a resolved systemd Id.**
+  Alias query names (`mysql`/`mysqld` → `mariadb.service`, `lsws` →
+  `lshttpd.service`) made `systemctl show` emit the same unit several times, so
+  the tool reported `mariadb`/`lshttpd` two or three times. Blocks are now
+  collapsed by resolved unit Id.
+
 ### Added
 - **MCP tool `service_status` + `GET /api/v1/system/services` — systemd unit
   status.** Read-only, admin-only. For a curated CFM + hosting-stack set (cfm,
