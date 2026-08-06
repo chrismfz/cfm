@@ -49,6 +49,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerSystemHealth(srv, d)
 	registerProcessList(srv, d)
 	registerListeningPorts(srv, d)
+	registerDmesgTail(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -412,5 +413,23 @@ func registerListeningPorts(srv *mcp.Server, d Deps) {
 		Description: "Listening TCP/UDP sockets on the node and the process that owns each (proto, bind address, port, command name, pid) — the `ss -tlnp` view. Use to confirm the edge/daemon/panel are actually listening, spot an unexpected open port, or see who owns :443. Bind address + owning command name only; no connections or peers.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		return dispatchJSON(ctx, d, "/api/v1/system/listeners", nil)
+	})
+}
+
+type dmesgTailInput struct {
+	Lines int    `json:"lines,omitempty" jsonschema:"how many recent kernel-ring lines to return; default 80, max 1000"`
+	Grep  string `json:"grep,omitempty" jsonschema:"case-insensitive substring filter (e.g. 'oom', 'segfault', 'I/O error', 'nft'); omit for all"`
+}
+
+func registerDmesgTail(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "dmesg_tail",
+		Description: "Tail the kernel ring buffer (dmesg): OOM kills, I/O/disk errors, segfaults, nftables drops, hardware/driver messages. The \"why did it OOM/crash/reset?\" view that the health snapshot can't answer. Use grep to focus (e.g. 'oom', 'segfault', 'error').",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in dmesgTailInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setInt(q, "lines", in.Lines)
+		setStr(q, "grep", in.Grep)
+		return dispatchJSON(ctx, d, "/api/v1/system/dmesg", q)
 	})
 }

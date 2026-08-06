@@ -18,6 +18,13 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP tool `dmesg_tail` + `GET /api/v1/system/dmesg` — kernel ring buffer
+  tail.** Read-only, admin-only. Returns the last N `dmesg -T` lines (default 80,
+  max 1000) with an optional case-insensitive `grep` filter — OOM kills, I/O/disk
+  errors, segfaults, nftables drops, hardware/driver messages. The "why did it
+  OOM/crash/reset?" view the structured health snapshot can't surface. New
+  `internal/kmsg` shells out to `dmesg -T` (bounded ring buffer, cheap — no
+  filesystem walk); requires CAP_SYSLOG (the daemon runs privileged).
 - **MCP tool `listening_ports` + `GET /api/v1/system/listeners` — listening
   sockets and their owning process.** Read-only, admin-only. The `ss -tlnp` view:
   proto (tcp/tcp6/udp/udp6), bind address, port, owning command name + pid, for

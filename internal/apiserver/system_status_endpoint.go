@@ -16,6 +16,7 @@ import (
 	"cfm/internal/firewall"
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
+	"cfm/internal/kmsg"
 	"cfm/internal/netstat"
 	"cfm/internal/procstat"
 	webdet "cfm/internal/webdetector"
@@ -213,6 +214,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 
 	m.HandleFunc("/api/v1/system/processes", handleSystemProcesses)
 	m.HandleFunc("/api/v1/system/listeners", handleSystemListeners)
+	m.HandleFunc("/api/v1/system/dmesg", handleSystemDmesg)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
 	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
@@ -292,6 +294,43 @@ func handleSystemListeners(w http.ResponseWriter, r *http.Request) {
 		"schema":    "system.listeners.v1",
 		"count":     len(listeners),
 		"listeners": listeners,
+	})
+}
+
+// handleSystemDmesg tails the kernel ring buffer (GET /api/v1/system/dmesg?
+// lines=N&grep=SUBSTR). Read-only, admin-only. Backs the MCP dmesg_tail tool —
+// the "why did it OOM/crash/reset?" view (OOM kills, I/O errors, segfaults, nft
+// drops) that the structured health snapshot can't surface.
+func handleSystemDmesg(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	lines := kmsg.DefaultLines
+	if v := strings.TrimSpace(r.URL.Query().Get("lines")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			lines = n
+		}
+	}
+	grep := strings.TrimSpace(r.URL.Query().Get("grep"))
+	out, truncated, err := kmsg.Tail(r.Context(), lines, grep)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":        true,
+		"schema":    "system.dmesg.v1",
+		"count":     len(out),
+		"truncated": truncated,
+		"grep":      grep,
+		"lines":     out,
 	})
 }
 
