@@ -58,6 +58,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerMySQLPressure(srv, d)
 	registerMySQLLogTail(srv, d)
 	registerMySQLSlowQueries(srv, d)
+	registerMailQueueSummary(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -567,6 +568,16 @@ func registerMySQLSlowQueries(srv *mcp.Server, d Deps) {
 		setInt(q, "limit", in.Limit)
 		setStr(q, "grep", in.Grep)
 		return dispatchJSON(ctx, d, "/api/v1/system/mysql-log", q)
+	})
+}
+
+func registerMailQueueSummary(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "mail_queue_summary",
+		Description: "Mail-queue breakdown (exim or postfix, auto-detected): total/frozen/deferred counts, age distribution (<10m…>1d), top sender + recipient domains, the oldest messages, AND the top deferral/freeze reasons (e.g. 'retry time not reached', 'Connection refused', a 550 mailbox-not-found bounce). The \"why is mail backing up / who's flooding it / why are messages stuck?\" view on top of the raw counts in system_health. Reads the report the queue detector publishes each poll — no per-request probe; `available:false` if no queue detector is enabled yet. (A spike in one sender domain often means a compromised account or a bounce storm.)",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
+		return dispatchJSON(ctx, d, "/api/v1/system/mail-queue", nil)
 	})
 }
 

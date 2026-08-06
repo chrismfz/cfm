@@ -54,9 +54,9 @@ const (
 	// required to read discovery" and aborted registration. Serving the same
 	// OAuth metadata here lets the OIDC-first probe succeed directly.
 	oauthOIDCMetadataPath = "/.well-known/openid-configuration"
-	oauthRegisterPath          = "/mcp/oauth/register"
-	oauthAuthorizePath         = "/mcp/oauth/authorize"
-	oauthTokenPath             = "/mcp/oauth/token"
+	oauthRegisterPath     = "/mcp/oauth/register"
+	oauthAuthorizePath    = "/mcp/oauth/authorize"
+	oauthTokenPath        = "/mcp/oauth/token"
 )
 
 // Authenticator validates the consent-page credential and reports whether it is

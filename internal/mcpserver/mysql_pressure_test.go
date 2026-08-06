@@ -132,6 +132,16 @@ func TestMySQLSlowQueriesRouting(t *testing.T) {
 	}
 }
 
+func TestMailQueueSummaryRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mail_queue_summary","arguments":{}}}`)
+	if fd.lastPath != "/api/v1/system/mail-queue" {
+		t.Errorf("mail_queue_summary routed to %q", fd.lastPath)
+	}
+}
+
 func TestMySQLPressureRouting(t *testing.T) {
 	fd := &fakeDispatch{}
 	ts := newTestServer(t, fd)

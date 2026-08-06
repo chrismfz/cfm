@@ -18,6 +18,7 @@ import (
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 	"cfm/internal/kmsg"
+	"cfm/internal/mailqueue"
 	"cfm/internal/mysqllog"
 	"cfm/internal/netstat"
 	"cfm/internal/procstat"
@@ -221,6 +222,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/services", handleSystemServices)
 	m.HandleFunc("/api/v1/system/ip-forensics", handleSystemIPForensics)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
+	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
 	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
@@ -477,6 +479,40 @@ func handleSystemMySQLLog(w http.ResponseWriter, r *http.Request) {
 		"ok":     true,
 		"schema": "system.mysql_log.v1",
 		"result": res,
+	})
+}
+
+// handleSystemMailQueue serves the MTA-agnostic mail-queue report
+// (GET /api/v1/system/mail-queue). Read-only, admin-only. Backs the MCP
+// mail_queue_summary tool — the "why is mail backing up / who's flooding the
+// queue / why are messages frozen?" breakdown (age distribution + top sender/
+// recipient domains + oldest + top defer/freeze reasons). It reads the report
+// the active queue detector (exim_queues / postfix_queues) publishes each poll,
+// so there is NO per-request MTA probe. `available:false` when no queue detector
+// is enabled or the first poll hasn't run yet.
+func handleSystemMailQueue(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	rep, ok := mailqueue.Latest()
+	if !ok {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "schema": "system.mail_queue.v1", "available": false,
+			"note": "no mail-queue report yet (exim_queues/postfix_queues detector not enabled, or first poll pending)",
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":        true,
+		"schema":    "system.mail_queue.v1",
+		"available": true,
+		"report":    rep,
 	})
 }
 

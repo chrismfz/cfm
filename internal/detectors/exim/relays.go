@@ -1,7 +1,7 @@
 package exim
 
 import (
-//	"bufio"
+	//	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -10,14 +10,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"sync"
-//	"syscall"
-	"time"
+	//	"syscall"
 	"net"
 	"strings"
+	"time"
 
 	core "cfm/internal/detectors/core"
-	"cfm/internal/logging"
 	"cfm/internal/enrich"
+	"cfm/internal/logging"
 
 	"html"
 	"mime"
@@ -38,23 +38,23 @@ type RelaysConfig struct {
 	Cooldown    time.Duration // default: 10m
 
 	// Thresholds (>= triggers)
-	LocalUserMax   int // U=user, P=local
-	AuthUserMax    int // P=esmtpa|esmtpsa + A=user
-	AuthIPMax      int // P=esmtpa|esmtpsa + H=[ip]
-	AuthUserIPMax  int // combined key ip/user
-	UnauthIPMax    int // P=esmtp|esmtps + H=[ip] (χωρίς A=)
+	LocalUserMax  int // U=user, P=local
+	AuthUserMax   int // P=esmtpa|esmtpsa + A=user
+	AuthIPMax     int // P=esmtpa|esmtpsa + H=[ip]
+	AuthUserIPMax int // combined key ip/user
+	UnauthIPMax   int // P=esmtp|esmtps + H=[ip] (χωρίς A=)
 
- // enrichment flags (νέα)
-    UseEnrich  bool          // default: true
-    UsePTR     bool          // default: true (αν enrich αποτύχει)
-    EnrichDirs []string      // π.χ. ["/etc/cfm", "/usr/share/GeoIP"]
+	// enrichment flags (νέα)
+	UseEnrich  bool     // default: true
+	UsePTR     bool     // default: true (αν enrich αποτύχει)
+	EnrichDirs []string // π.χ. ["/etc/cfm", "/usr/share/GeoIP"]
 }
 
 // ---- Alert kinds ----
 const (
-	KindLocalRelay  core.AlertKind = "LOCALRELAY"
-	KindAuthRelay   core.AlertKind = "AUTHRELAY"
-	KindRelay       core.AlertKind = "RELAY"
+	KindLocalRelay core.AlertKind = "LOCALRELAY"
+	KindAuthRelay  core.AlertKind = "AUTHRELAY"
+	KindRelay      core.AlertKind = "RELAY"
 )
 
 // ---- Detector ----
@@ -62,25 +62,24 @@ const (
 type Relays struct {
 	cfg RelaysConfig
 
-	mu       sync.Mutex
-	off      int64      // file offset
-	inode    uint64     // file inode για rotation
+	mu    sync.Mutex
+	off   int64  // file offset
+	inode uint64 // file inode για rotation
 
-samples *core.SampleRing
-gate    *core.AlertGate
-counts  *core.SlidingCounter
+	samples *core.SampleRing
+	gate    *core.AlertGate
+	counts  *core.SlidingCounter
 
-	path     string               // effective path
+	path     string // effective path
 	readyLog bool
-	recent []string // last few lines to infer PHP context
-	enr *enrich.Enricher //enrich output
-	pending map[string]pend
+	recent   []string         // last few lines to infer PHP context
+	enr      *enrich.Enricher //enrich output
+	pending  map[string]pend
 
-	name string
-	src  *core.FileTailer
+	name  string
+	src   *core.FileTailer
 	state *core.State
 }
-
 
 type pend struct {
 	kindKey string
@@ -88,41 +87,46 @@ type pend struct {
 	n       int
 }
 
-
 func NewRelays(cfg RelaysConfig) *Relays {
-    if cfg.Every <= 0 { cfg.Every = 5 * time.Second }
-    if cfg.Window <= 0 { cfg.Window = 15 * time.Minute }
-    if cfg.SampleLimit <= 0 { cfg.SampleLimit = 10 }
-    if cfg.Cooldown <= 0 { cfg.Cooldown = 10 * time.Minute }
+	if cfg.Every <= 0 {
+		cfg.Every = 5 * time.Second
+	}
+	if cfg.Window <= 0 {
+		cfg.Window = 15 * time.Minute
+	}
+	if cfg.SampleLimit <= 0 {
+		cfg.SampleLimit = 10
+	}
+	if cfg.Cooldown <= 0 {
+		cfg.Cooldown = 10 * time.Minute
+	}
 
-    // enrichment defaults
-    if !cfg.UseEnrich && !cfg.UsePTR {
-        cfg.UsePTR = true
-    }
-    if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
-        cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
-    }
+	// enrichment defaults
+	if !cfg.UseEnrich && !cfg.UsePTR {
+		cfg.UsePTR = true
+	}
+	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
+		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
+	}
 
-    d := &Relays{ cfg: cfg }
+	d := &Relays{cfg: cfg}
 
-    // init core window primitives
-    d.samples = core.NewSampleRing(cfg.SampleLimit)
-    d.gate    = core.NewAlertGate(cfg.Cooldown)
-    d.counts  = core.NewSlidingCounter(cfg.Window, 0)
+	// init core window primitives
+	d.samples = core.NewSampleRing(cfg.SampleLimit)
+	d.gate = core.NewAlertGate(cfg.Cooldown)
+	d.counts = core.NewSlidingCounter(cfg.Window, 0)
 
-    if cfg.UseEnrich {
-        if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
-            d.enr = e
-            logging.Logf("[detectors] exim/relays enrichment enabled (dirs=%v, geo=%v asn=%v)",
-                cfg.EnrichDirs, e.Enabled(), e.Enabled())
-        } else {
-            logging.Logf("[detectors] exim/relays enrichment unavailable; falling back to PTR only")
-        }
-    }
-    return d
+	if cfg.UseEnrich {
+		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
+			d.enr = e
+			logging.Logf("[detectors] exim/relays enrichment enabled (dirs=%v, geo=%v asn=%v)",
+				cfg.EnrichDirs, e.Enabled(), e.Enabled())
+		} else {
+			logging.Logf("[detectors] exim/relays enrichment unavailable; falling back to PTR only")
+		}
+	}
+	return d
 }
-
-
 
 func (d *Relays) Every() time.Duration { return d.cfg.Every }
 
@@ -150,7 +154,7 @@ func (d *Relays) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 	}
 
-var stateKey string
+	var stateKey string
 
 	// 2) Init non-blocking tailer (starts at "now" unless ApplyPosition set a resume)
 	if d.src == nil {
@@ -194,50 +198,56 @@ var stateKey string
 
 	// ---- 4) flush aggregated alerts (τέλος run) ----
 
-nowSend := time.Now()
-for _, p := range d.pending {
-    thr, kind, baseKey := d.thresholdAndKey(p.kindKey, p.key)
-    if thr <= 0 { continue }
+	nowSend := time.Now()
+	for _, p := range d.pending {
+		thr, kind, baseKey := d.thresholdAndKey(p.kindKey, p.key)
+		if thr <= 0 {
+			continue
+		}
 
-    sk := p.kindKey + ":" + p.key
-    n := d.counts.Count(sk, nowSend)
-    if !d.gate.Allow(sk, nowSend, n, thr) { continue }
+		sk := p.kindKey + ":" + p.key
+		n := d.counts.Count(sk, nowSend)
+		if !d.gate.Allow(sk, nowSend, n, thr) {
+			continue
+		}
 
-    // PHP guess stays unchanged
-    isPHP, cwd, uid := false, "", ""
-    if kind == KindLocalRelay {
-        if ok, c, u := d.guessPHP(); ok {
-            isPHP, cwd, uid = true, c, u
-            baseKey += " (php)"
-        }
-    }
+		// PHP guess stays unchanged
+		isPHP, cwd, uid := false, "", ""
+		if kind == KindLocalRelay {
+			if ok, c, u := d.guessPHP(); ok {
+				isPHP, cwd, uid = true, c, u
+				baseKey += " (php)"
+			}
+		}
 
-    displayKey := d.enrichDisplay(p.kindKey, baseKey, p.key)
-    samples := d.samples.GetAndClear(sk)
-    pretty  := make([]string, 0, len(samples)*2)
-    for _, ln := range samples {
-        pretty = append(pretty, ln)
-        if subj := decodeSubjectFromLine(ln); subj != "" {
-            pretty = append(pretty, "SUBJ: "+subj)
-        }
-    }
+		displayKey := d.enrichDisplay(p.kindKey, baseKey, p.key)
+		samples := d.samples.GetAndClear(sk)
+		pretty := make([]string, 0, len(samples)*2)
+		for _, ln := range samples {
+			pretty = append(pretty, ln)
+			if subj := decodeSubjectFromLine(ln); subj != "" {
+				pretty = append(pretty, "SUBJ: "+subj)
+			}
+		}
 
-    extra := map[string]string{
-        "log": d.path, "window": d.cfg.Window.String(),
-        "cooldown": d.cfg.Cooldown.String(), "limit": strconv.Itoa(thr),
-    }
-    if isPHP {
-        if cwd != "" { extra["cwd"] = cwd }
-        if uid != "" { extra["uid"] = uid }
-    }
+		extra := map[string]string{
+			"log": d.path, "window": d.cfg.Window.String(),
+			"cooldown": d.cfg.Cooldown.String(), "limit": strconv.Itoa(thr),
+		}
+		if isPHP {
+			if cwd != "" {
+				extra["cwd"] = cwd
+			}
+			if uid != "" {
+				extra["uid"] = uid
+			}
+		}
 
-    out <- core.Alert{
-        When: nowSend, Kind: kind, Key: displayKey,
-        Count: n, Samples: pretty, Extra: extra,
-    }
-}
-
-
+		out <- core.Alert{
+			When: nowSend, Kind: kind, Key: displayKey,
+			Count: n, Samples: pretty, Extra: extra,
+		}
+	}
 
 	// προαιρετικό metrics όταν τρέχεις με debug
 	if os.Getenv("CFM_DEBUG") == "2" && lines > 0 {
@@ -245,14 +255,6 @@ for _, p := range d.pending {
 	}
 	return nil
 }
-
-
-
-
-
-
-
-
 
 // ---- Parsing ----
 // Δουλεύουμε πάνω σε γραμμές τύπου:
@@ -262,13 +264,13 @@ for _, p := range d.pending {
 
 // πιο χαλαρά regex για να μην «σπάνε» σε edge cases
 var (
-	reHasArrowIn  = regexp.MustCompile(`\s<=\s`) // μόνο εισερχόμενα στο exim (γένεση μηνύματος)
+	reHasArrowIn = regexp.MustCompile(`\s<=\s`) // μόνο εισερχόμενα στο exim (γένεση μηνύματος)
 	// Strictly capture the *socket* IP that Exim logs in brackets after H=...
 	// We deliberately ignore any numeric prefix inside H= hostname.
-	reSocketIP    = regexp.MustCompile(`H=[^\[]*\[([0-9]{1,3}(?:\.[0-9]{1,3}){3})\]`)
-	reUserLocal  = regexp.MustCompile(`\bU=([^\s]+)\s+P=local\b`)
-	reAuthUser   = regexp.MustCompile(`\bA=[^:\s]+:([^\s]+)`)
-	reProto      = regexp.MustCompile(`\bP=(\w+)\b`) // esmtp, esmtps, esmtpa, esmtpsa, local
+	reSocketIP  = regexp.MustCompile(`H=[^\[]*\[([0-9]{1,3}(?:\.[0-9]{1,3}){3})\]`)
+	reUserLocal = regexp.MustCompile(`\bU=([^\s]+)\s+P=local\b`)
+	reAuthUser  = regexp.MustCompile(`\bA=[^:\s]+:([^\s]+)`)
+	reProto     = regexp.MustCompile(`\bP=(\w+)\b`) // esmtp, esmtps, esmtpa, esmtpsa, local
 )
 
 // process a single line
@@ -294,19 +296,21 @@ func (d *Relays) processLine(now time.Time, line string, out chan<- core.Alert) 
 		return
 	}
 
-    // Remote socket IP (must come from the [ ... ] after H=)
-    ip := ""
-    if m := reSocketIP.FindStringSubmatch(line); m != nil {
-        ip = m[1]
-    } else {
-        // fallback: last bracketed IPv4 on the line (safer than "first IPv4 anywhere")
-        if i := strings.LastIndexByte(line, '['); i >= 0 {
-            if j := strings.IndexByte(line[i:], ']'); j > 1 {
-                cand := line[i+1 : i+j]
-                if regexp.MustCompile(`^\d{1,3}(?:\.\d{1,3}){3}$`).MatchString(cand) { ip = cand }
-            }
-        }
-    }
+	// Remote socket IP (must come from the [ ... ] after H=)
+	ip := ""
+	if m := reSocketIP.FindStringSubmatch(line); m != nil {
+		ip = m[1]
+	} else {
+		// fallback: last bracketed IPv4 on the line (safer than "first IPv4 anywhere")
+		if i := strings.LastIndexByte(line, '['); i >= 0 {
+			if j := strings.IndexByte(line[i:], ']'); j > 1 {
+				cand := line[i+1 : i+j]
+				if regexp.MustCompile(`^\d{1,3}(?:\.\d{1,3}){3}$`).MatchString(cand) {
+					ip = cand
+				}
+			}
+		}
+	}
 
 	// AUTH
 	if proto == "esmtpa" || proto == "esmtpsa" {
@@ -335,19 +339,16 @@ func (d *Relays) processLine(now time.Time, line string, out chan<- core.Alert) 
 	}
 }
 
-
-
-
-
-
 //func bump
 
 func (d *Relays) bump(now time.Time, kindKey, key, line string, _ chan<- core.Alert) {
-    sk := kindKey + ":" + key
-    d.samples.Add(sk, line)
-    _ = d.counts.Add(sk, now)
-    if d.pending == nil { d.pending = make(map[string]pend) }
-    d.pending[sk] = pend{kindKey: kindKey, key: key}
+	sk := kindKey + ":" + key
+	d.samples.Add(sk, line)
+	_ = d.counts.Add(sk, now)
+	if d.pending == nil {
+		d.pending = make(map[string]pend)
+	}
+	d.pending[sk] = pend{kindKey: kindKey, key: key}
 }
 
 //fun bump end
@@ -404,150 +405,150 @@ func (d *Relays) enrichDisplay(kindKey, alertKey, rawKey string) string {
 	return displayKey
 }
 
-
-
-
-
-
-
-
 // ---- helpers ----
 
-
-
 func autoDetectEximLog() string {
-        paths := []string{"/var/log/exim_mainlog", "/var/log/exim4/mainlog", "/var/log/exim/mainlog"}
-        for _, p := range paths {
-                if _, err := os.Stat(p); err == nil { return p }
-        }
-        var found string
-        _ = filepath.Walk("/var/log", func(path string, info os.FileInfo, err error) error {
-                if err != nil || info.IsDir() { return nil }
-                base := filepath.Base(path)
-                if base != "exim_mainlog" && base != "mainlog" { return nil }
-                out, _ := exec.Command("/bin/sh", "-lc", fmt.Sprintf("head -n1 %q | grep -qi exim", path)).CombinedOutput()
-                if len(out) == 0 { found = path; return filepath.SkipDir }
-                return nil
-        })
-        return found
+	paths := []string{"/var/log/exim_mainlog", "/var/log/exim4/mainlog", "/var/log/exim/mainlog"}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	var found string
+	_ = filepath.Walk("/var/log", func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		base := filepath.Base(path)
+		if base != "exim_mainlog" && base != "mainlog" {
+			return nil
+		}
+		out, _ := exec.Command("/bin/sh", "-lc", fmt.Sprintf("head -n1 %q | grep -qi exim", path)).CombinedOutput()
+		if len(out) == 0 {
+			found = path
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return found
 }
-
-
-
-
-
-
 
 func (d *Relays) lookupMeta(ip string) string {
-    if ip == "" {
-        return ""
-    }
+	if ip == "" {
+		return ""
+	}
 
-    var country, city, ptr, asname string
-    var asn uint
+	var country, city, ptr, asname string
+	var asn uint
 
-    // 1) enrich package (PTR+ASN+City με cache 1h)
-    if d.enr != nil {
-        r := d.enr.Lookup(ip)
-        if r.Country != "" { country = r.Country }   // μπορεί να είναι όνομα ή ISO (όπως το γεμίζεις εσύ)
-        if r.City != "" { city = r.City }
-        if r.PTR != "" { ptr = strings.TrimSuffix(r.PTR, ".") }
-        if r.ASN > 0 {
-            asn = r.ASN
-            asname = r.ASNName
-        }
-    }
+	// 1) enrich package (PTR+ASN+City με cache 1h)
+	if d.enr != nil {
+		r := d.enr.Lookup(ip)
+		if r.Country != "" {
+			country = r.Country
+		} // μπορεί να είναι όνομα ή ISO (όπως το γεμίζεις εσύ)
+		if r.City != "" {
+			city = r.City
+		}
+		if r.PTR != "" {
+			ptr = strings.TrimSuffix(r.PTR, ".")
+		}
+		if r.ASN > 0 {
+			asn = r.ASN
+			asname = r.ASNName
+		}
+	}
 
-    // 2) PTR fallback αν ζητήθηκε και δεν ήρθε από το enrich
-    if d.cfg.UsePTR && ptr == "" {
-        names, _ := net.LookupAddr(ip)
-        if len(names) > 0 {
-            ptr = strings.TrimSuffix(names[0], ".")
-        }
-    }
+	// 2) PTR fallback αν ζητήθηκε και δεν ήρθε από το enrich
+	if d.cfg.UsePTR && ptr == "" {
+		names, _ := net.LookupAddr(ip)
+		if len(names) > 0 {
+			ptr = strings.TrimSuffix(names[0], ".")
+		}
+	}
 
-    // compose
-    geo := ""
-    if country != "" || city != "" {
-        if country == "" { country = "-" }
-        if city == "" { city = "-" }
-        geo = country + "/" + city
-    }
+	// compose
+	geo := ""
+	if country != "" || city != "" {
+		if country == "" {
+			country = "-"
+		}
+		if city == "" {
+			city = "-"
+		}
+		geo = country + "/" + city
+	}
 
-    as := ""
-    if asn > 0 && asname != "" {
-        as = fmt.Sprintf("[AS%d %s", asn, asname)
-    } else if asn > 0 {
-        as = fmt.Sprintf("[AS%d", asn)
-    }
-    if ptr != "" {
-        if as != "" { as += "; PTR " + ptr + "]" } else { as = "[PTR " + ptr + "]" }
-    } else if as != "" {
-        as += "]"
-    }
+	as := ""
+	if asn > 0 && asname != "" {
+		as = fmt.Sprintf("[AS%d %s", asn, asname)
+	} else if asn > 0 {
+		as = fmt.Sprintf("[AS%d", asn)
+	}
+	if ptr != "" {
+		if as != "" {
+			as += "; PTR " + ptr + "]"
+		} else {
+			as = "[PTR " + ptr + "]"
+		}
+	} else if as != "" {
+		as += "]"
+	}
 
-    if geo != "" && as != "" {
-        return geo + "/" + as
-    }
-    if geo != "" {
-        return geo
-    }
-    return as // ίσως μόνο PTR
+	if geo != "" && as != "" {
+		return geo + "/" + as
+	}
+	if geo != "" {
+		return geo
+	}
+	return as // ίσως μόνο PTR
 }
-
 
 // keep last 6 lines for comments
 func (d *Relays) pushRecent(line string) {
-    const max = 6
-    d.recent = append(d.recent, line)
-    if len(d.recent) > max {
-        d.recent = d.recent[len(d.recent)-max:]
-    }
+	const max = 6
+	d.recent = append(d.recent, line)
+	if len(d.recent) > max {
+		d.recent = d.recent[len(d.recent)-max:]
+	}
 }
 
-
-
 var (
-    reCwd = regexp.MustCompile(`\bcwd=([^\s]+)`)
-    reUid = regexp.MustCompile(`\buid=(\d+)\b`)
+	reCwd = regexp.MustCompile(`\bcwd=([^\s]+)`)
+	reUid = regexp.MustCompile(`\buid=(\d+)\b`)
 )
 
 func looksWebRoot(cwd string) bool {
-    // πολύ απλή ευρετική – μπορείς να προσθέσεις patterns
-    patterns := []string{"/public_html", "/httpdocs", "/htdocs", "/var/www", "/www/", "/site/htdocs"}
-    for _, p := range patterns {
-        if strings.Contains(cwd, p) {
-            return true
-        }
-    }
-    return false
+	// πολύ απλή ευρετική – μπορείς να προσθέσεις patterns
+	patterns := []string{"/public_html", "/httpdocs", "/htdocs", "/var/www", "/www/", "/site/htdocs"}
+	for _, p := range patterns {
+		if strings.Contains(cwd, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Αναζήτησε στα 3-4 προηγούμενα lines στοιχεία που μαρτυρούν PHP/web
 func (d *Relays) guessPHP() (bool, string, string) {
-    for i := len(d.recent) - 1; i >= 0 && i >= len(d.recent)-4; i-- {
-        line := d.recent[i]
-        if !strings.Contains(line, "cwd=") {
-            continue
-        }
-        var cwd, uid string
-        if m := reCwd.FindStringSubmatch(line); len(m) > 1 {
-            cwd = m[1]
-        }
-        if m := reUid.FindStringSubmatch(line); len(m) > 1 {
-            uid = m[1]
-        }
-        if cwd != "" && looksWebRoot(cwd) {
-            return true, cwd, uid
-        }
-    }
-    return false, "", ""
+	for i := len(d.recent) - 1; i >= 0 && i >= len(d.recent)-4; i-- {
+		line := d.recent[i]
+		if !strings.Contains(line, "cwd=") {
+			continue
+		}
+		var cwd, uid string
+		if m := reCwd.FindStringSubmatch(line); len(m) > 1 {
+			cwd = m[1]
+		}
+		if m := reUid.FindStringSubmatch(line); len(m) > 1 {
+			uid = m[1]
+		}
+		if cwd != "" && looksWebRoot(cwd) {
+			return true, cwd, uid
+		}
+	}
+	return false, "", ""
 }
-
-
-
-
-
 
 // extract and decode Exim T="..." subject to readable UTF-8
 func decodeSubjectFromLine(line string) string {
@@ -694,11 +695,8 @@ func hasRFC2047(s string) bool {
 	return strings.Contains(s, "=?") && strings.Contains(s, "?=")
 }
 
-
 // State wiring from register
 func (d *Relays) SetState(st *core.State) { d.state = st }
-
-
 
 func (d *Relays) SetName(n string) { d.name = n }
 
@@ -706,21 +704,23 @@ func (d *Relays) setSource(src *core.FileTailer) { d.src = src }
 
 // --- PositionAware implementation ---
 
-func (d *Relays) Name() string { 
-    if d.name != "" { return d.name }
-    return "exim/relays" // fallback
+func (d *Relays) Name() string {
+	if d.name != "" {
+		return d.name
+	}
+	return "exim/relays" // fallback
 }
 
 func (d *Relays) ApplyPosition(p core.Position) {
-    if d.src != nil {
-        d.src.ApplyResume(p.Inode, p.Offset) // resume from saved inode/offset
-    }
+	if d.src != nil {
+		d.src.ApplyResume(p.Inode, p.Offset) // resume from saved inode/offset
+	}
 }
 
 func (d *Relays) Position() core.Position {
-    if d.src == nil {
-        return core.Position{}
-    }
-    off, ino, ts := d.src.Position()
-    return core.Position{Offset: off, Inode: ino, TS: ts}
+	if d.src == nil {
+		return core.Position{}
+	}
+	off, ino, ts := d.src.Position()
+	return core.Position{Offset: off, Inode: ino, TS: ts}
 }
