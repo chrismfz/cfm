@@ -19,6 +19,7 @@ import (
 	"cfm/internal/kmsg"
 	"cfm/internal/netstat"
 	"cfm/internal/procstat"
+	"cfm/internal/svcstat"
 	webdet "cfm/internal/webdetector"
 )
 
@@ -215,6 +216,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/processes", handleSystemProcesses)
 	m.HandleFunc("/api/v1/system/listeners", handleSystemListeners)
 	m.HandleFunc("/api/v1/system/dmesg", handleSystemDmesg)
+	m.HandleFunc("/api/v1/system/services", handleSystemServices)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
 	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
@@ -331,6 +333,46 @@ func handleSystemDmesg(w http.ResponseWriter, r *http.Request) {
 		"truncated": truncated,
 		"grep":      grep,
 		"lines":     out,
+	})
+}
+
+// handleSystemServices serves systemd unit status for the CFM / hosting-stack
+// units — or an explicit comma-separated `units=` list (GET /api/v1/system/
+// services?units=cfm,mariadb). Read-only, admin-only. Backs the MCP
+// service_status tool — "is cfm/the edge/mysql/mail running, and is anything
+// flapping (restart count)?". With no units the curated default set is returned
+// and not-installed units are elided; an explicit list keeps not-found units so
+// the operator learns a named unit isn't present.
+func handleSystemServices(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	var units []string
+	if v := strings.TrimSpace(r.URL.Query().Get("units")); v != "" {
+		for _, u := range strings.Split(v, ",") {
+			if u = strings.TrimSpace(u); u != "" {
+				units = append(units, u)
+			}
+		}
+	}
+	svcs, err := svcstat.Status(r.Context(), units)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":       true,
+		"schema":   "system.services.v1",
+		"explicit": len(units) > 0,
+		"count":    len(svcs),
+		"services": svcs,
 	})
 }
 

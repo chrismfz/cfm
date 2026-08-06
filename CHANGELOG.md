@@ -18,6 +18,15 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP tool `service_status` + `GET /api/v1/system/services` — systemd unit
+  status.** Read-only, admin-only. For a curated CFM + hosting-stack set (cfm,
+  edge, db, mail, dns, ftp, ssh, panel) — or an explicit `units=` list — reports
+  each unit's load/active/enabled state, sub-state, main pid, memory, restart
+  count and uptime. Answers "is cfm/the edge/mysql/mail actually running, and is
+  anything flapping?". New `internal/svcstat` runs one `systemctl show` for the
+  whole set; uptime is derived from the monotonic activation stamp against
+  `/proc/uptime` (locale/timezone-independent). Not-installed units are elided
+  from the default view but reported as `not-found` when named explicitly.
 - **MCP tool `dmesg_tail` + `GET /api/v1/system/dmesg` — kernel ring buffer
   tail.** Read-only, admin-only. Returns the last N `dmesg -T` lines (default 80,
   max 1000) with an optional case-insensitive `grep` filter — OOM kills, I/O/disk
