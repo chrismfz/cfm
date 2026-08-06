@@ -18,6 +18,14 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP tool `process_list` + `GET /api/v1/system/processes` — the busiest
+  processes on a node (top-like).** Read-only, admin-only. Returns pid, user,
+  state, %cpu (short two-sample delta, one core ≈ 100%), %mem, rss, threads and
+  the command **name** for the top-N processes (default 15, max 200), read
+  straight from `/proc` (no external tools/cgo). The "system_health shows high
+  load — which process is eating it, or are many stuck in D-state on I/O?"
+  companion to the aggregate health snapshot. Security: exposes the process COMM
+  only, never `/proc/<pid>/cmdline` (command-line args routinely carry secrets).
 - **Persistent, process-wide PTR (reverse-DNS) cache backed by SQLite.** Resolved
   PTRs are now shared across every Enricher in the daemon (engine + all detectors
   + nflog + outbound) via a single on-disk store at `/var/lib/cfm/ptrcache.db`,

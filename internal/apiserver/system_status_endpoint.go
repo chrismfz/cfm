@@ -16,6 +16,7 @@ import (
 	"cfm/internal/firewall"
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
+	"cfm/internal/procstat"
 	webdet "cfm/internal/webdetector"
 )
 
@@ -209,6 +210,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 		})
 	})
 
+	m.HandleFunc("/api/v1/system/processes", handleSystemProcesses)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
 	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
@@ -225,6 +227,42 @@ func requireHealthAccess(w http.ResponseWriter, r *http.Request) bool {
 	// Hook: add scoped health authorization rules here when product requirements
 	// permit non-admin access to selected health slices.
 	return false
+}
+
+// handleSystemProcesses serves a top-like snapshot of the busiest processes
+// (GET /api/v1/system/processes?top=N). Read-only, admin-only. Returns process
+// COMM only — never the cmdline (which can carry secrets). Backs the MCP
+// process_list tool; the "load is high, who's eating it?" companion to
+// system_health's aggregate CPU.
+func handleSystemProcesses(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	top := 15
+	if v := strings.TrimSpace(r.URL.Query().Get("top")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			top = n
+		}
+	}
+	procs, err := procstat.Top(top)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":        true,
+		"schema":    "system.processes.v1",
+		"top":       top,
+		"count":     len(procs),
+		"processes": procs,
+	})
 }
 
 func handleSystemDNAT(w http.ResponseWriter, r *http.Request) {
