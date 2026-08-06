@@ -237,7 +237,7 @@ func TestOAuthConsentRateLimited(t *testing.T) {
 		return rr.StatusCode
 	}
 
-	// The first burst attempts render "Invalid token" (200), not throttled.
+	// The first burst attempts render "Invalid token" (401), not throttled (429).
 	for i := 0; i < consentRLBurst; i++ {
 		if code := post(); code == http.StatusTooManyRequests {
 			t.Fatalf("attempt %d unexpectedly rate-limited (429) before burst", i+1)
