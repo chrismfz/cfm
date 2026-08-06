@@ -63,6 +63,23 @@ func TestParseEximDeferReasons(t *testing.T) {
 	}
 }
 
+// Two SHORT gmail-style bounces (under maxReasonLen) that differ only in a
+// trailing per-session id + provider tag must still collapse to one reason —
+// they don't rely on truncation, they rely on the session-tail strip.
+func TestParseEximDeferReasons_ShortBounceCollapse(t *testing.T) {
+	lines := []string{
+		`2026-08-06 15:24:02 1a-x ** a@gmail.com R=r T=t H=h : mailbox unavailable ffacd0b85a97d-47ff7ba699dsi - gsmtp`,
+		`2026-08-06 15:24:04 1b-x ** b@gmail.com R=r T=t H=h : mailbox unavailable 771b2c3d4e5f6a-33aa11bb22cc - gsmtp`,
+	}
+	got := ParseEximDeferReasons(lines, 10)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 collapsed failed reason, got %d: %+v", len(got), got)
+	}
+	if got[0].Count != 2 || got[0].Category != "failed" {
+		t.Fatalf("collapse wrong: %+v", got[0])
+	}
+}
+
 func TestNormalizeDeferReason(t *testing.T) {
 	cases := map[string]string{
 		"retry time not reached for any host for 'example.com'": "retry time not reached",

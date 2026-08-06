@@ -85,15 +85,25 @@ func Publish(r Report) {
 	mu.Unlock()
 }
 
-// Latest returns the last-published report, ok=false when none yet (no queue
-// detector enabled, or first cycle hasn't run).
+// Latest returns a copy of the last-published report, ok=false when none yet
+// (no queue detector enabled, or first cycle hasn't run). The AgeBuckets map is
+// deep-copied so a caller can never mutate the shared published object; the
+// slices are treated as read-only (callers must not mutate them in place).
 func Latest() (Report, bool) {
 	mu.RLock()
 	defer mu.RUnlock()
 	if latest == nil {
 		return Report{}, false
 	}
-	return *latest, true
+	r := *latest
+	if r.AgeBuckets != nil {
+		m := make(map[string]int, len(r.AgeBuckets))
+		for k, v := range r.AgeBuckets {
+			m[k] = v
+		}
+		r.AgeBuckets = m
+	}
+	return r, true
 }
 
 // TestOnlyReset clears the store (package-global; tests share it).
@@ -105,10 +115,13 @@ func TestOnlyReset() {
 
 // ── exim `-bp` → Report (pure) ───────────────────────────────────────────────
 
-// BuildEximReport parses `exim -bp` output into an aggregated Report. total is
-// the authoritative count from `exim -bpc` (0 → fall back to the parsed count).
+// BuildEximReport parses `exim -bp` output into an aggregated Report. total and
+// frozen are the authoritative counts from the detector (`exim -bpc` and the
+// uncapped frozen-line count); they win over the parsed values so Report.Total /
+// Report.Frozen match the health snapshot even when the queue exceeds the parse
+// cap (Truncated=true; age/domains/deferred are then over the parsed subset).
 // top bounds the returned domain lists and oldest-N sample.
-func BuildEximReport(bpOutput string, total, top int) Report {
+func BuildEximReport(bpOutput string, total, frozen, top int) Report {
 	if top <= 0 {
 		top = DefaultTop
 	}
@@ -123,9 +136,7 @@ func BuildEximReport(bpOutput string, total, top int) Report {
 	senderDom := map[string]int{}
 	recipDom := map[string]int{}
 	for _, m := range msgs {
-		if m.Frozen {
-			r.Frozen++
-		} else if m.AgeSec >= 3600 {
+		if !m.Frozen && m.AgeSec >= 3600 {
 			r.Deferred++
 		}
 		bucketAge(r.AgeBuckets, m.AgeSec)
@@ -140,6 +151,7 @@ func BuildEximReport(bpOutput string, total, top int) Report {
 	if total > 0 {
 		r.Total = total
 	}
+	r.Frozen = frozen // authoritative (uncapped) count from the detector
 	r.TopSenderDomains = topDomains(senderDom, top)
 	r.TopRecipientDomains = topDomains(recipDom, top)
 	r.Oldest = oldestN(msgs, top)
@@ -160,19 +172,25 @@ func parseBP(out string) (msgs []QueuedMsg, truncated bool) {
 		}
 	}
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "*** frozen ***") {
-			if cur != nil {
-				cur.Frozen = true
-			}
-			continue
-		}
+		// Real `exim -bp` appends "*** frozen ***" to the HEADER line (after the
+		// sender), e.g. `22h 3.2K 1wr…-3n2Z <> *** frozen ***`. So detect the
+		// marker but STILL parse the header (parseHeaderLine ignores the trailing
+		// marker) and flag that message — not the previous one.
+		frozen := strings.Contains(line, "*** frozen ***")
 		if m, ok := parseHeaderLine(line); ok {
 			if len(msgs) >= maxParseMsgs {
 				truncated = true
 				break
 			}
 			flush()
+			m.Frozen = frozen
 			cur = &m
+			continue
+		}
+		if frozen { // defensive: own-line marker form
+			if cur != nil {
+				cur.Frozen = true
+			}
 			continue
 		}
 		if cur != nil && strings.TrimSpace(line) != "" && strings.Contains(line, "@") {

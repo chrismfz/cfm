@@ -81,7 +81,7 @@ func (q *Queues) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// Publish the MTA-agnostic rich report (mail_queue_summary / _defer_reasons
 		// / CLI / WebUI) from the SAME `exim -bp` output — no extra probe. Defer
 		// reasons come from a bounded mainlog tail, only when the queue is non-empty.
-		rep := mailqueue.BuildEximReport(rawBP, total, mailqueue.DefaultTop)
+		rep := mailqueue.BuildEximReport(rawBP, total, frozen, mailqueue.DefaultTop)
 		rep.MeasuredAt = now
 		if total > 0 {
 			if lines := q.tailMainlog(ctx); len(lines) > 0 {

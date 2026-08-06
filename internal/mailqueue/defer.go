@@ -19,6 +19,11 @@ var (
 	reEmail       = regexp.MustCompile(`[\w.+%=-]+@[\w.-]+`)
 	reIP          = regexp.MustCompile(`\[?\b\d{1,3}(?:\.\d{1,3}){3}\b\]?`)
 	reWS          = regexp.MustCompile(`\s+`)
+	reURL         = regexp.MustCompile(`https?://\S+`)
+	// A per-session id + provider trailer, e.g. "…NoSuchUser ffacd0b85a97d-47ff…si… - gsmtp"
+	// or "…- mxfront…". Strip it so short bounces carrying a session id still
+	// aggregate instead of splitting one reason per delivery attempt.
+	reSessionTail = regexp.MustCompile(`\s+\S+\s+-\s+\w+\s*$`)
 )
 
 const maxReasonLen = 140
@@ -101,11 +106,13 @@ func eximLineReason(line string) (category, raw string) {
 // the ubiquitous transient "retry time not reached …" into a single bucket.
 func normalizeDeferReason(s string) string {
 	s = strings.ReplaceAll(s, `\n`, " ")
+	s = reURL.ReplaceAllString(s, "")
 	s = reQuoted.ReplaceAllString(s, "")
 	s = reAngleAddr.ReplaceAllString(s, "")
 	s = reEmail.ReplaceAllString(s, "")
 	s = reIP.ReplaceAllString(s, "")
 	s = reWS.ReplaceAllString(s, " ")
+	s = reSessionTail.ReplaceAllString(s, "") // drop a trailing "<sessionid> - <provider>"
 	s = strings.TrimSpace(strings.Trim(s, ":"))
 	s = strings.TrimSpace(s)
 

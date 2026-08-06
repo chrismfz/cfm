@@ -2,13 +2,14 @@ package mailqueue
 
 import "testing"
 
+// Real exim -bp format: the "*** frozen ***" marker is appended to the HEADER
+// line (after the sender), and a frozen bounce DSN has an empty <> sender.
 const sampleBP = `25m  2.9K 1rABCD-000abc-1A <sender@example.com>
           user@dest.com
           user2@dest.com
 
- 2h   541 1rABCE-000abd-2B <bounce@mail.foo.gr>
+ 2h   541 1rABCE-000abd-2B <> *** frozen ***
           admin@bar.com
-          *** frozen ***
 
 3d  1.5M 1rABCF-000abe-3C <newsletter@shop.gr>
           a@aol.com
@@ -30,12 +31,17 @@ func TestParseBP(t *testing.T) {
 	if msgs[0].SizeBytes != 2969 { // int(2.9*1024)
 		t.Fatalf("msg0 size = %d", msgs[0].SizeBytes)
 	}
-	// msg 1: frozen, 2h
-	if !msgs[1].Frozen || msgs[1].AgeSec != 7200 {
-		t.Fatalf("msg1 should be frozen@2h: %+v", msgs[1])
+	// msg 0 must NOT be frozen — the marker on msg1's header line must not leak
+	// back to the previous message (the bug this guards).
+	if msgs[0].Frozen {
+		t.Fatalf("msg0 wrongly marked frozen (marker leaked from msg1)")
 	}
-	// msg 2: 3d, 1.5M
-	if msgs[2].AgeSec != 3*86400 || msgs[2].SizeBytes != 1572864 { // int(1.5*1024*1024)
+	// msg 1: the frozen bounce — marker on the HEADER line, empty <> sender, 2h.
+	if !msgs[1].Frozen || msgs[1].AgeSec != 7200 || msgs[1].Sender != "" || msgs[1].Recipients != 1 {
+		t.Fatalf("msg1 should be the frozen <> message @2h with 1 rcpt: %+v", msgs[1])
+	}
+	// msg 2: 3d, 1.5M, not frozen
+	if msgs[2].AgeSec != 3*86400 || msgs[2].SizeBytes != 1572864 || msgs[2].Frozen { // int(1.5*1024*1024)
 		t.Fatalf("msg2 wrong: %+v", msgs[2])
 	}
 }
@@ -73,7 +79,8 @@ func TestAggregateFromParse(t *testing.T) {
 	if frozen != 1 {
 		t.Fatalf("frozen = %d, want 1", frozen)
 	}
-	if senderDom["example.com"] != 1 || senderDom["mail.foo.gr"] != 1 || senderDom["shop.gr"] != 1 {
+	// msg1 is a <> bounce → no sender domain; example.com + shop.gr present.
+	if senderDom["example.com"] != 1 || senderDom["shop.gr"] != 1 {
 		t.Fatalf("sender domains wrong: %v", senderDom)
 	}
 	// msg0 had 2 recipients but both @dest.com → 1 distinct domain for that msg.
@@ -87,7 +94,8 @@ func TestAggregateFromParse(t *testing.T) {
 }
 
 func TestBuildEximReport(t *testing.T) {
-	r := BuildEximReport(sampleBP, 3, DefaultTop)
+	// total=3 (exim -bpc), frozen=1 (detector's authoritative marker count).
+	r := BuildEximReport(sampleBP, 3, 1, DefaultTop)
 	if r.MTA != "exim" || r.Total != 3 || r.Parsed != 3 || r.Frozen != 1 {
 		t.Fatalf("report totals wrong: %+v", r)
 	}
@@ -98,9 +106,25 @@ func TestBuildEximReport(t *testing.T) {
 	if r.AgeBuckets["10m-1h"] != 1 || r.AgeBuckets["1h-6h"] != 1 || r.AgeBuckets[">1d"] != 1 {
 		t.Fatalf("age buckets wrong: %v", r.AgeBuckets)
 	}
+	// Frozen is authoritative from the param, not the parsed count.
+	if r2 := BuildEximReport(sampleBP, 3, 42, DefaultTop); r2.Frozen != 42 {
+		t.Fatalf("Frozen should come from the authoritative param: %d", r2.Frozen)
+	}
 	// total=0 falls back to parsed count
-	if r0 := BuildEximReport(sampleBP, 0, DefaultTop); r0.Total != 3 {
+	if r0 := BuildEximReport(sampleBP, 0, 0, DefaultTop); r0.Total != 3 {
 		t.Fatalf("total fallback = %d, want 3", r0.Total)
+	}
+}
+
+// Latest must deep-copy the AgeBuckets map so a caller can't corrupt the store.
+func TestLatestDeepCopiesMap(t *testing.T) {
+	TestOnlyReset()
+	Publish(Report{MTA: "exim", AgeBuckets: map[string]int{"<10m": 1}})
+	got, _ := Latest()
+	got.AgeBuckets["<10m"] = 999 // mutate the copy
+	again, _ := Latest()
+	if again.AgeBuckets["<10m"] != 1 {
+		t.Fatalf("Latest did not deep-copy AgeBuckets: %v", again.AgeBuckets)
 	}
 }
 
