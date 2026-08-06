@@ -48,6 +48,7 @@ import (
 	"cfm/internal/healthcli"
 	"cfm/internal/kernsec"
 	"cfm/internal/lsm"
+	"cfm/internal/mailqcli"
 	"cfm/internal/unblock"
 )
 
@@ -320,6 +321,14 @@ func main() {
 		clihttp.SetToken(apiAuthToken())
 		if err := mysql.RunMySQLTop(addr, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "mysqltop error:", err)
+			os.Exit(1)
+		}
+
+	case "mailtop", "mail-queue", "mailq":
+		addr := apiBaseURL()
+		clihttp.SetToken(apiAuthToken())
+		if err := mailqcli.Run(addr, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "mailtop error:", err)
 			os.Exit(1)
 		}
 
