@@ -8,6 +8,7 @@
   const ADMIN_ONLY_NAV_PATHS = new Set([
     '/cfm-admin',                    // Dashboard (global stats + global block/unblock)
     '/cfm-admin/health',             // Health history — box-wide metrics (admin-only endpoints)
+    '/cfm-admin/mail',               // Mail queue — box-wide queue report (admin-only endpoint)
     '/cfm-admin/webdetector/bots',   // Web Bots — global UA emergency controls
     '/cfm-admin/webdetector/tokens', // API tokens — admin-only issuance/revocation
     '/cfm-admin/notifier',
