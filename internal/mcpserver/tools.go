@@ -8,7 +8,9 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +55,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerServiceStatus(srv, d)
 	registerEdgeAccessTail(srv, d)
 	registerIPForensics(srv, d)
+	registerMySQLPressure(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -372,6 +375,166 @@ func registerIPForensics(srv *mcp.Server, d Deps) {
 		setStr(q, "source", in.Source)
 		return dispatchJSON(ctx, d, "/api/v1/system/ip-forensics", q)
 	})
+}
+
+type mysqlPressureInput struct {
+	Top int `json:"top,omitempty" jsonschema:"how many top users (by pressure) to return; default 25, max 200"`
+}
+
+func registerMySQLPressure(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "mysql_pressure",
+		Description: "MySQL/MariaDB pressure right now (the mysqltop view): overall connection saturation (used/max, %), and per-user connection load MERGED with per-user CPU/query deltas, ranked by pressure. This is where you catch the offender — e.g. a user with few connections but high CPU/queries, or the correlation 'this account drives heavy MySQL load with little HTTP traffic'. The perf block says whether CPU numbers are actually available (performance_schema / MariaDB userstat); if off, cpu_sec/queries read 0.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mysqlPressureInput) (*mcp.CallToolResult, any, error) {
+		topN := in.Top
+		if topN <= 0 {
+			topN = 25
+		}
+		if topN > 200 {
+			topN = 200
+		}
+		topBody := section(ctx, d, "/api/v1/mysql/top", nil)
+		cpuBody := section(ctx, d, "/api/v1/mysql/cpu", nil)
+		// Surface a section error (e.g. governor not running → HTTP 404) instead
+		// of a misleading empty result.
+		if e := sectionError(topBody); e != "" {
+			return nil, nil, fmt.Errorf("mysql/top: %s", e)
+		}
+		b, err := marshal(mergeMySQLPressure(topBody, cpuBody, topN))
+		if err != nil {
+			return nil, nil, err
+		}
+		return textResult(b), nil, nil
+	})
+}
+
+// mysqlUserRow is one merged per-user pressure row.
+type mysqlUserRow struct {
+	User         string  `json:"user"`
+	Conns        int     `json:"conns"`
+	Active       int     `json:"active"`
+	Sleeping     int     `json:"sleeping"`
+	Locked       int     `json:"locked"`
+	MaxSleepSec  int64   `json:"max_sleep_sec,omitempty"`
+	CPUSec       float64 `json:"cpu_sec,omitempty"`
+	QueryCount   int64   `json:"query_count,omitempty"`
+	AvgQueryMsec float64 `json:"avg_query_msec,omitempty"`
+}
+
+// mergeMySQLPressure joins the /mysql/top per-user connection view with the
+// /mysql/cpu per-user CPU/query deltas by user, ranks by pressure (active conns,
+// then CPU, then queries, then total conns) and keeps the top N. Separated from
+// dispatch so it is unit-tested. Note UserStat has no json tags, so the top
+// endpoint emits capitalized keys (User/Active/…) — matched below.
+func mergeMySQLPressure(topBody, cpuBody json.RawMessage, topN int) map[string]any {
+	var top struct {
+		Ts      string  `json:"ts"`
+		Flavor  string  `json:"flavor"`
+		Mode    string  `json:"mode"`
+		ConnPct float64 `json:"conn_pct"`
+		Total   int     `json:"total"`
+		Max     int     `json:"max"`
+		PerUser []struct {
+			User        string `json:"User"`
+			Total       int    `json:"Total"`
+			Active      int    `json:"Active"`
+			Sleeping    int    `json:"Sleeping"`
+			Locked      int    `json:"Locked"`
+			MaxSleepSec int64  `json:"MaxSleepSec"`
+		} `json:"per_user"`
+	}
+	_ = json.Unmarshal(topBody, &top)
+
+	var cpu struct {
+		PerfSchemaOK  bool `json:"perf_schema_ok"`
+		PerfCPUActive bool `json:"perf_cpu_active"`
+		UserstatOK    bool `json:"userstat_ok"`
+		UserstatOff   bool `json:"userstat_off"`
+		Users         []struct {
+			User         string  `json:"user"`
+			CPUSec       float64 `json:"cpu_sec"`
+			QueryCount   int64   `json:"query_count"`
+			AvgQueryMsec float64 `json:"avg_query_msec"`
+		} `json:"users"`
+	}
+	_ = json.Unmarshal(cpuBody, &cpu)
+
+	cpuByUser := make(map[string]int, len(cpu.Users))
+	for i, u := range cpu.Users {
+		cpuByUser[u.User] = i
+	}
+
+	rows := make([]mysqlUserRow, 0, len(top.PerUser))
+	for _, u := range top.PerUser {
+		r := mysqlUserRow{
+			User: u.User, Conns: u.Total, Active: u.Active,
+			Sleeping: u.Sleeping, Locked: u.Locked, MaxSleepSec: u.MaxSleepSec,
+		}
+		if i, ok := cpuByUser[u.User]; ok {
+			c := cpu.Users[i]
+			r.CPUSec, r.QueryCount, r.AvgQueryMsec = c.CPUSec, c.QueryCount, c.AvgQueryMsec
+		}
+		rows = append(rows, r)
+	}
+	// A user with CPU/query activity but no live connection row still matters
+	// (short-lived queries) — fold those in too.
+	seen := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		seen[r.User] = true
+	}
+	for _, c := range cpu.Users {
+		if !seen[c.User] {
+			rows = append(rows, mysqlUserRow{User: c.User, CPUSec: c.CPUSec, QueryCount: c.QueryCount, AvgQueryMsec: c.AvgQueryMsec})
+		}
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		if a.Active != b.Active {
+			return a.Active > b.Active
+		}
+		if a.CPUSec != b.CPUSec {
+			return a.CPUSec > b.CPUSec
+		}
+		if a.QueryCount != b.QueryCount {
+			return a.QueryCount > b.QueryCount
+		}
+		return a.Conns > b.Conns
+	})
+	truncated := false
+	if len(rows) > topN {
+		rows = rows[:topN]
+		truncated = true
+	}
+
+	return map[string]any{
+		"ts":     top.Ts,
+		"flavor": top.Flavor,
+		"mode":   top.Mode,
+		"conn": map[string]any{
+			"used": top.Total, "max": top.Max, "pct": top.ConnPct,
+		},
+		"perf": map[string]any{
+			"perf_schema_ok": cpu.PerfSchemaOK, "perf_cpu_active": cpu.PerfCPUActive,
+			"userstat_ok": cpu.UserstatOK, "userstat_off": cpu.UserstatOff,
+		},
+		"users_total":     len(top.PerUser),
+		"users_truncated": truncated,
+		"top_users":       rows,
+	}
+}
+
+// sectionError returns the error string if body is a section error stub
+// ({"error":"..."}), else "".
+func sectionError(body json.RawMessage) string {
+	var m struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &m) == nil {
+		return m.Error
+	}
+	return ""
 }
 
 func registerEdgeAccessTail(srv *mcp.Server, d Deps) {
