@@ -206,7 +206,7 @@ CLI/UI use). All carry the `readOnlyHint` annotation.
 | `mysql_pressure` | MySQL/MariaDB pressure now (mysqltop): connection saturation + per-user conns MERGED with CPU/query deltas, ranked — catch the offender ("few conns, high CPU") | `mysql/top` + `mysql/cpu` | `top` |
 | `mysql_log_tail` | Tail the MySQL ERROR log (crashes, deadlocks, aborted conns, InnoDB errors) — "what's erroring?" | `system/mysql-log` | `lines`, `grep`, `limit` |
 | `mysql_slow_queries` | Tail the MySQL SLOW-QUERY log (where enabled) — the slow statements behind high CPU | `system/mysql-log` | `lines`, `grep`, `limit` |
-| `mail_queue_summary` | Exim queue breakdown — total/frozen/deferred, age buckets, top sender+recipient domains, oldest (`exim -bp`) — "why is mail backing up?" | `system/mail-queue` | `top` |
+| `mail_queue_summary` | Mail-queue breakdown (exim/postfix, auto) — total/frozen/deferred, age buckets, top sender+recipient domains, oldest, + top defer/freeze reasons — "why is mail backing up / stuck?" (detector-published, no probe) | `system/mail-queue` | — |
 | `detection_history` | Durable timeline of detections (WAF/challenge/clam/…) | `webdet/history/events` | `limit`, `type`, `host` |
 | `bots_top` | Top user-agents (bots/crawlers/scrapers) | `webdet/ua-top` | `limit` |
 | `firewall_blocks` | Active nft bans incl. WAF autoblocks (TTL, reason, GeoIP) | `firewall/list` | — |

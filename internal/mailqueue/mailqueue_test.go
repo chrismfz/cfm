@@ -86,12 +86,32 @@ func TestAggregateFromParse(t *testing.T) {
 	}
 }
 
-func TestParseCount(t *testing.T) {
-	// login-shell noise before the number → take the last numeric line.
-	if n, err := parseCount("/etc/profile chatter\n42\n", nil); err != nil || n != 42 {
-		t.Fatalf("parseCount = %d,%v", n, err)
+func TestBuildEximReport(t *testing.T) {
+	r := BuildEximReport(sampleBP, 3, DefaultTop)
+	if r.MTA != "exim" || r.Total != 3 || r.Parsed != 3 || r.Frozen != 1 {
+		t.Fatalf("report totals wrong: %+v", r)
 	}
-	if _, err := parseCount("no number here", nil); err == nil {
-		t.Fatal("expected error when no numeric line")
+	if len(r.TopSenderDomains) == 0 || r.TopSenderDomains[0].Count < 1 {
+		t.Fatalf("sender domains not aggregated: %+v", r.TopSenderDomains)
+	}
+	// age buckets: 25m→10m-1h, 2h→1h-6h, 3d→>1d
+	if r.AgeBuckets["10m-1h"] != 1 || r.AgeBuckets["1h-6h"] != 1 || r.AgeBuckets[">1d"] != 1 {
+		t.Fatalf("age buckets wrong: %v", r.AgeBuckets)
+	}
+	// total=0 falls back to parsed count
+	if r0 := BuildEximReport(sampleBP, 0, DefaultTop); r0.Total != 3 {
+		t.Fatalf("total fallback = %d, want 3", r0.Total)
+	}
+}
+
+func TestPublishLatest(t *testing.T) {
+	TestOnlyReset()
+	if _, ok := Latest(); ok {
+		t.Fatal("expected no report before publish")
+	}
+	Publish(Report{MTA: "exim", Total: 5})
+	got, ok := Latest()
+	if !ok || got.MTA != "exim" || got.Total != 5 || got.MeasuredAt.IsZero() {
+		t.Fatalf("Latest after publish = %+v ok=%v", got, ok)
 	}
 }

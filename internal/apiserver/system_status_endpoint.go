@@ -482,11 +482,14 @@ func handleSystemMySQLLog(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSystemMailQueue serves the exim mail-queue summary (GET /api/v1/system/
-// mail-queue?top=N). Read-only, admin-only. Backs the MCP mail_queue_summary
-// tool — the "why is mail backing up / who's flooding the queue?" breakdown
-// (age distribution + top sender/recipient domains + oldest) on top of the raw
-// queued/frozen counts the health snapshot already has. One bounded `exim -bp`.
+// handleSystemMailQueue serves the MTA-agnostic mail-queue report
+// (GET /api/v1/system/mail-queue). Read-only, admin-only. Backs the MCP
+// mail_queue_summary tool — the "why is mail backing up / who's flooding the
+// queue / why are messages frozen?" breakdown (age distribution + top sender/
+// recipient domains + oldest + top defer/freeze reasons). It reads the report
+// the active queue detector (exim_queues / postfix_queues) publishes each poll,
+// so there is NO per-request MTA probe. `available:false` when no queue detector
+// is enabled or the first poll hasn't run yet.
 func handleSystemMailQueue(w http.ResponseWriter, r *http.Request) {
 	if !webdet.RequireAdmin(w, r) {
 		return
@@ -497,22 +500,19 @@ func handleSystemMailQueue(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
 		return
 	}
-	top := 0
-	if v := strings.TrimSpace(r.URL.Query().Get("top")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			top = n
-		}
-	}
-	sum, err := mailqueue.SummarizeQueue(r.Context(), top)
-	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+	rep, ok := mailqueue.Latest()
+	if !ok {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "schema": "system.mail_queue.v1", "available": false,
+			"note": "no mail-queue report yet (exim_queues/postfix_queues detector not enabled, or first poll pending)",
+		})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok":      true,
-		"schema":  "system.mail_queue.v1",
-		"summary": sum,
+		"ok":        true,
+		"schema":    "system.mail_queue.v1",
+		"available": true,
+		"report":    rep,
 	})
 }
 

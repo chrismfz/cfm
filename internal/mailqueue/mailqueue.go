@@ -1,36 +1,49 @@
-// Package mailqueue summarizes the exim mail queue on demand (the `exim -bp`
-// view, structured): how many messages are queued/frozen, how old they are, and
-// which sender / recipient domains dominate. It backs the read-only MCP tool
-// mail_queue_summary / GET /api/v1/system/mail-queue.
+// Package mailqueue builds and holds an MTA-agnostic mail-queue report — the
+// structured `exim -bp` / `postqueue -p` view: how many messages are queued/
+// frozen/deferred, their age distribution, the top sender/recipient domains, the
+// oldest messages, and the top deferral/freeze reasons.
 //
-// The health snapshot already carries the raw queued/frozen COUNTS (from the
-// exim_queues detector via internal/mailq); this adds the breakdown an operator
-// needs to answer "why is the queue backing up?" — age distribution + the top
-// sender/recipient domains + the oldest messages — without shelling out
-// per-message. One `exim -bp` (+ `exim -bpc` for the authoritative count),
-// bounded by a message cap and a context timeout; read-only, no reason logs.
+// Sourcing is detector-published, NOT per-request: the active queue detector
+// (exim_queues / postfix_queues) already polls the MTA, so it builds the report
+// once per cycle from output it already has and Publish()es it here; the API,
+// CLI and WebUI all read the last-published report with zero extra exec. This
+// package owns the shared types + the pure parsers (no exec, unit-tested); the
+// MTA-specific commands live in the detectors.
 package mailqueue
 
 import (
-	"bufio"
-	"context"
-	"fmt"
-	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	scanTimeout   = 15 * time.Second
-	maxParseMsgs  = 20000 // hard cap on messages parsed from `exim -bp`
-	defaultTopDom = 10
+	maxParseMsgs         = 20000 // hard cap on messages parsed from a queue listing
+	maxRcptDomainsPerMsg = 8     // distinct recipient domains retained per message
+	DefaultTop           = 10
 )
 
-// QueuedMsg is one parsed `exim -bp` entry (kept internal; the API returns
-// aggregates + a bounded oldest-N sample, not the whole queue).
+// Report is the MTA-agnostic queue snapshot published by the active detector.
+type Report struct {
+	MTA        string         `json:"mta"` // exim | postfix
+	MeasuredAt time.Time      `json:"measured_at"`
+	Total      int            `json:"total"`    // authoritative count (exim -bpc / postqueue count)
+	Parsed     int            `json:"parsed"`   // messages parsed from the listing (<= maxParseMsgs)
+	Frozen     int            `json:"frozen"`   // exim frozen / postfix hold
+	Deferred   int            `json:"deferred"` // non-frozen, older than 1h (stuck but retrying)
+	Truncated  bool           `json:"truncated"`
+	AgeBuckets map[string]int `json:"age_buckets"` // <10m,10m-1h,1h-6h,6h-1d,>1d
+
+	TopSenderDomains    []DomCount    `json:"top_sender_domains"`
+	TopRecipientDomains []DomCount    `json:"top_recipient_domains"`
+	Oldest              []QueuedMsg   `json:"oldest"`
+	DeferReasons        []DeferReason `json:"defer_reasons"` // top normalized deferral/freeze reasons (may be nil)
+}
+
+// QueuedMsg is one parsed queue entry (aggregates + a bounded oldest-N sample
+// are returned, not the whole queue).
 type QueuedMsg struct {
 	AgeSec      int64    `json:"age_sec"`
 	SizeBytes   int64    `json:"size_bytes"`
@@ -41,49 +54,67 @@ type QueuedMsg struct {
 	rcptDomains []string // deduped, capped; aggregated then dropped from JSON
 }
 
-// maxRcptDomainsPerMsg bounds how many distinct recipient domains we retain per
-// message (fan-out mail can list thousands) — enough for the aggregate.
-const maxRcptDomainsPerMsg = 8
-
-// Summary is the aggregated queue view.
-type Summary struct {
-	MTA                 string         `json:"mta"`
-	Total               int            `json:"total"`  // authoritative count (exim -bpc); falls back to parsed
-	Parsed              int            `json:"parsed"` // messages actually parsed from -bp (<= maxParseMsgs)
-	Frozen              int            `json:"frozen"`
-	Deferred            int            `json:"deferred"`    // non-frozen, older than 1h (stuck but retrying)
-	Truncated           bool           `json:"truncated"`   // queue larger than the parse cap
-	AgeBuckets          map[string]int `json:"age_buckets"` // <10m,10m-1h,1h-6h,6h-1d,>1d
-	TopSenderDomains    []DomCount     `json:"top_sender_domains"`
-	TopRecipientDomains []DomCount     `json:"top_recipient_domains"`
-	Oldest              []QueuedMsg    `json:"oldest"` // bounded sample, oldest first
-}
-
 // DomCount is a domain with its message count.
 type DomCount struct {
 	Domain string `json:"domain"`
 	Count  int    `json:"count"`
 }
 
-// SummarizeQueue runs `exim -bp`/`-bpc`, parses and aggregates. top bounds how
-// many domains and oldest-messages to return.
-func SummarizeQueue(ctx context.Context, top int) (Summary, error) {
+// DeferReason is one normalized deferral/freeze reason with its frequency.
+type DeferReason struct {
+	Reason   string `json:"reason"`   // normalized (variable bits stripped)
+	Category string `json:"category"` // deferred | failed | frozen
+	Count    int    `json:"count"`
+	Sample   string `json:"sample"` // one representative raw reason
+}
+
+// ── published store ─────────────────────────────────────────────────────────
+
+var (
+	mu     sync.RWMutex
+	latest *Report
+)
+
+// Publish records the newest report (detector calls this each cycle).
+func Publish(r Report) {
+	if r.MeasuredAt.IsZero() {
+		r.MeasuredAt = time.Now()
+	}
+	mu.Lock()
+	latest = &r
+	mu.Unlock()
+}
+
+// Latest returns the last-published report, ok=false when none yet (no queue
+// detector enabled, or first cycle hasn't run).
+func Latest() (Report, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	if latest == nil {
+		return Report{}, false
+	}
+	return *latest, true
+}
+
+// TestOnlyReset clears the store (package-global; tests share it).
+func TestOnlyReset() {
+	mu.Lock()
+	latest = nil
+	mu.Unlock()
+}
+
+// ── exim `-bp` → Report (pure) ───────────────────────────────────────────────
+
+// BuildEximReport parses `exim -bp` output into an aggregated Report. total is
+// the authoritative count from `exim -bpc` (0 → fall back to the parsed count).
+// top bounds the returned domain lists and oldest-N sample.
+func BuildEximReport(bpOutput string, total, top int) Report {
 	if top <= 0 {
-		top = defaultTopDom
+		top = DefaultTop
 	}
-	if _, err := eximPath(); err != nil {
-		return Summary{}, fmt.Errorf("exim not found (postfix not yet supported): %w", err)
-	}
-	cctx, cancel := context.WithTimeout(ctx, scanTimeout)
-	defer cancel()
+	msgs, truncated := parseBP(bpOutput)
 
-	out, err := runExim(cctx, "-bp")
-	if err != nil {
-		return Summary{}, fmt.Errorf("exim -bp: %w", err)
-	}
-	msgs, truncated := parseBP(out)
-
-	s := Summary{
+	r := Report{
 		MTA:        "exim",
 		Parsed:     len(msgs),
 		Truncated:  truncated,
@@ -93,11 +124,11 @@ func SummarizeQueue(ctx context.Context, top int) (Summary, error) {
 	recipDom := map[string]int{}
 	for _, m := range msgs {
 		if m.Frozen {
-			s.Frozen++
+			r.Frozen++
 		} else if m.AgeSec >= 3600 {
-			s.Deferred++
+			r.Deferred++
 		}
-		bucketAge(s.AgeBuckets, m.AgeSec)
+		bucketAge(r.AgeBuckets, m.AgeSec)
 		if d := domainOf(m.Sender); d != "" {
 			senderDom[d]++
 		}
@@ -105,29 +136,22 @@ func SummarizeQueue(ctx context.Context, top int) (Summary, error) {
 			recipDom[d]++
 		}
 	}
-	s.Total = len(msgs)
-	if n, err := parseCount(runEximCount(cctx)); err == nil {
-		s.Total = n
+	r.Total = len(msgs)
+	if total > 0 {
+		r.Total = total
 	}
-
-	s.TopSenderDomains = topDomains(senderDom, top)
-	s.TopRecipientDomains = topDomains(recipDom, top)
-	s.Oldest = oldestN(msgs, top)
-	return s, nil
+	r.TopSenderDomains = topDomains(senderDom, top)
+	r.TopRecipientDomains = topDomains(recipDom, top)
+	r.Oldest = oldestN(msgs, top)
+	return r
 }
 
-// parseBP parses `exim -bp` output into messages. Format per message:
+// parseBP parses `exim -bp` output. Format per message:
 //
 //	<age> <size> <id> <sender@dom>
 //	          recipient@dom          (indented; one or more)
 //	*** frozen ***                   (only for frozen messages)
-//
-// A line under a login shell can be preceded by profile noise; a message row is
-// recognized by the "<age> <size> <id> <...>" shape, so noise is ignored. The
-// parse stops at maxParseMsgs (truncated=true) to bound work on a huge queue.
 func parseBP(out string) (msgs []QueuedMsg, truncated bool) {
-	sc := bufio.NewScanner(strings.NewReader(out))
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var cur *QueuedMsg
 	flush := func() {
 		if cur != nil {
@@ -135,8 +159,7 @@ func parseBP(out string) (msgs []QueuedMsg, truncated bool) {
 			cur = nil
 		}
 	}
-	for sc.Scan() {
-		line := sc.Text()
+	for _, line := range strings.Split(out, "\n") {
 		if strings.Contains(line, "*** frozen ***") {
 			if cur != nil {
 				cur.Frozen = true
@@ -152,7 +175,6 @@ func parseBP(out string) (msgs []QueuedMsg, truncated bool) {
 			cur = &m
 			continue
 		}
-		// indented recipient line
 		if cur != nil && strings.TrimSpace(line) != "" && strings.Contains(line, "@") {
 			cur.Recipients++
 			if d := domainOf(strings.Trim(strings.TrimSpace(line), "<>")); d != "" {
@@ -164,8 +186,6 @@ func parseBP(out string) (msgs []QueuedMsg, truncated bool) {
 	return msgs, truncated
 }
 
-// parseHeaderLine matches the "<age> <size> <id> <sender>" first line of a queue
-// entry. Returns ok=false for anything else (recipients, blank, profile noise).
 func parseHeaderLine(line string) (QueuedMsg, bool) {
 	f := strings.Fields(line)
 	if len(f) < 4 {
@@ -179,7 +199,6 @@ func parseHeaderLine(line string) (QueuedMsg, bool) {
 	if !ok {
 		return QueuedMsg{}, false
 	}
-	// f[2] = message id; sender is the first <...> token on the line.
 	sender := ""
 	if i := strings.IndexByte(line, '<'); i >= 0 {
 		if j := strings.IndexByte(line[i:], '>'); j >= 0 {
@@ -189,17 +208,15 @@ func parseHeaderLine(line string) (QueuedMsg, bool) {
 	return QueuedMsg{AgeSec: age, SizeBytes: size, ID: f[2], Sender: sender}, true
 }
 
-// parseAge converts an exim age token ("45s","25m","2h","3d") to seconds.
 func parseAge(s string) (int64, bool) {
 	if len(s) < 2 {
 		return 0, false
 	}
-	unit := s[len(s)-1]
 	num, err := strconv.ParseFloat(s[:len(s)-1], 64)
 	if err != nil {
 		return 0, false
 	}
-	switch unit {
+	switch s[len(s)-1] {
 	case 's':
 		return int64(num), true
 	case 'm':
@@ -214,7 +231,6 @@ func parseAge(s string) (int64, bool) {
 	return 0, false
 }
 
-// parseSize converts an exim size token ("541","2.9K","1.5M","1G") to bytes.
 func parseSize(s string) (int64, bool) {
 	if s == "" {
 		return 0, false
@@ -235,22 +251,21 @@ func parseSize(s string) (int64, bool) {
 	return int64(num * mult), true
 }
 
-func bucketAge(buckets map[string]int, age int64) {
+func bucketAge(b map[string]int, age int64) {
 	switch {
 	case age < 600:
-		buckets["<10m"]++
+		b["<10m"]++
 	case age < 3600:
-		buckets["10m-1h"]++
+		b["10m-1h"]++
 	case age < 6*3600:
-		buckets["1h-6h"]++
+		b["1h-6h"]++
 	case age < 86400:
-		buckets["6h-1d"]++
+		b["6h-1d"]++
 	default:
-		buckets[">1d"]++
+		b[">1d"]++
 	}
 }
 
-// addDomainCapped adds a distinct recipient domain to the message, bounded.
 func addDomainCapped(m *QueuedMsg, d string) {
 	if len(m.rcptDomains) >= maxRcptDomainsPerMsg {
 		return
@@ -296,41 +311,4 @@ func oldestN(msgs []QueuedMsg, n int) []QueuedMsg {
 		cp = cp[:n]
 	}
 	return cp
-}
-
-func parseCount(out string, err error) (int, error) {
-	if err != nil {
-		return 0, err
-	}
-	n, found := 0, false
-	for _, line := range strings.Split(out, "\n") {
-		if v, e := strconv.Atoi(strings.TrimSpace(line)); e == nil {
-			n, found = v, true
-		}
-	}
-	if !found {
-		return 0, fmt.Errorf("no numeric line")
-	}
-	return n, nil
-}
-
-func runExim(ctx context.Context, args ...string) (string, error) {
-	// Login shell like the exim_queues detector, so PATH/profile resolve exim.
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", "exim "+strings.Join(args, " "))
-	out, err := cmd.Output()
-	return string(out), err
-}
-
-func runEximCount(ctx context.Context) (string, error) { return runExim(ctx, "-bpc") }
-
-func eximPath() (string, error) {
-	if p, err := exec.LookPath("exim"); err == nil {
-		return p, nil
-	}
-	for _, p := range []string{"/usr/sbin/exim", "/usr/sbin/exim4", "/usr/exim/bin/exim"} {
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("exim binary not found")
 }

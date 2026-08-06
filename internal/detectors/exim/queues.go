@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/mailq"
+	"cfm/internal/mailqueue"
 )
 
 type QueuesConfig struct {
@@ -26,9 +28,9 @@ type QueuesConfig struct {
 }
 
 type Queues struct {
-	cfg      QueuesConfig
+	cfg  QueuesConfig
 	gate *core.AlertGate
-	mu       sync.Mutex
+	mu   sync.Mutex
 }
 
 func NewQueues(cfg QueuesConfig) *Queues {
@@ -51,7 +53,7 @@ func NewQueues(cfg QueuesConfig) *Queues {
 		cfg.Cooldown = 10 * time.Minute
 	}
 
-return &Queues{ cfg: cfg, gate: core.NewAlertGate(cfg.Cooldown) }
+	return &Queues{cfg: cfg, gate: core.NewAlertGate(cfg.Cooldown)}
 }
 
 func (q *Queues) Name() string         { return "exim/queues" }
@@ -67,7 +69,7 @@ func (q *Queues) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	start := time.Now()
 
 	total, totalErr := q.totalCount(ctx)
-	frozen, samples, _ := q.frozenCountAndSamples(ctx)
+	frozen, samples, rawBP, _ := q.frozenCountAndSamples(ctx)
 
 	now := time.Now()
 	// Publish for the health snapshot (cfm health / dashboard). Only on a
@@ -75,9 +77,21 @@ func (q *Queues) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// surface as a fake empty queue.
 	if totalErr == nil {
 		mailq.Publish(mailq.Measurement{MTA: "exim", Total: total, Frozen: frozen, MeasuredAt: now})
+
+		// Publish the MTA-agnostic rich report (mail_queue_summary / _defer_reasons
+		// / CLI / WebUI) from the SAME `exim -bp` output — no extra probe. Defer
+		// reasons come from a bounded mainlog tail, only when the queue is non-empty.
+		rep := mailqueue.BuildEximReport(rawBP, total, mailqueue.DefaultTop)
+		rep.MeasuredAt = now
+		if total > 0 {
+			if lines := q.tailMainlog(ctx); len(lines) > 0 {
+				rep.DeferReasons = mailqueue.ParseEximDeferReasons(lines, mailqueue.DefaultTop)
+			}
+		}
+		mailqueue.Publish(rep)
 	}
-if q.cfg.MaxTotal > 0 && total > q.cfg.MaxTotal &&
-   q.gate.Allow(string(QueueTotal), now, total, q.cfg.MaxTotal) {
+	if q.cfg.MaxTotal > 0 && total > q.cfg.MaxTotal &&
+		q.gate.Allow(string(QueueTotal), now, total, q.cfg.MaxTotal) {
 		out <- core.Alert{
 			When:    now,
 			Kind:    QueueTotal,
@@ -91,8 +105,8 @@ if q.cfg.MaxTotal > 0 && total > q.cfg.MaxTotal &&
 			},
 		}
 	}
-if q.cfg.MaxFrozen > 0 && frozen > q.cfg.MaxFrozen &&
-   q.gate.Allow(string(QueueFrozen), now, frozen, q.cfg.MaxFrozen) {
+	if q.cfg.MaxFrozen > 0 && frozen > q.cfg.MaxFrozen &&
+		q.gate.Allow(string(QueueFrozen), now, frozen, q.cfg.MaxFrozen) {
 		out <- core.Alert{
 			When:    now,
 			Kind:    QueueFrozen,
@@ -140,7 +154,7 @@ func parseCountOutput(raw string) (int, error) {
 	return n, nil
 }
 
-func (q *Queues) frozenCountAndSamples(ctx context.Context) (int, []string, error) {
+func (q *Queues) frozenCountAndSamples(ctx context.Context) (int, []string, string, error) {
 	cmd := shell(q.cfg.ListCmd)
 	if q.cfg.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -149,13 +163,14 @@ func (q *Queues) frozenCountAndSamples(ctx context.Context) (int, []string, erro
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, "", err
 	}
 
 	frozen := 0
 	samples := make([]string, 0, q.cfg.SampleLimit)
 
 	sc := bufio.NewScanner(strings.NewReader(string(out)))
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
 		if strings.Contains(line, "*** frozen ***") {
@@ -165,10 +180,42 @@ func (q *Queues) frozenCountAndSamples(ctx context.Context) (int, []string, erro
 			samples = append(samples, line)
 		}
 	}
-	return frozen, samples, nil
+	// The full output feeds mailqueue.BuildEximReport (age/domains/oldest) with
+	// no extra `exim -bp` call.
+	return frozen, samples, string(out), nil
 }
 
+// eximMainlogCandidates are the standard exim mainlog locations (mirrors the
+// exim/relays resolver).
+var eximMainlogCandidates = []string{
+	"/var/log/exim_mainlog", "/var/log/exim4/mainlog", "/var/log/exim/mainlog",
+}
 
+// mainlogTailLines bounds how much of the mainlog is scanned for defer reasons.
+const mainlogTailLines = 4000
+
+// tailMainlog returns the last mainlogTailLines of the exim mainlog (bounded,
+// best-effort). Empty when no mainlog is found. Uses `tail` so a multi-GB log is
+// read backward, not whole.
+func (q *Queues) tailMainlog(ctx context.Context) []string {
+	path := ""
+	for _, p := range eximMainlogCandidates {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+			path = p
+			break
+		}
+	}
+	if path == "" {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, q.cfg.Timeout)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, "tail", "-n", strconv.Itoa(mainlogTailLines), path).Output()
+	if err != nil {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+}
 
 func trimSamples(a []string, n int) []string {
 	if len(a) <= n {

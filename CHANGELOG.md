@@ -18,16 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
-- **MCP tool `mail_queue_summary` + `GET /api/v1/system/mail-queue` — exim
-  queue breakdown.** Read-only, admin-only. On top of the raw queued/frozen
-  counts already in the health snapshot, this parses `exim -bp` into the
-  actionable view: total / frozen / deferred, an age distribution
-  (<10m…>1d), and the top sender + recipient domains, plus the oldest
-  messages — the "why is mail backing up / who's flooding the queue?" drill-down
-  (a spike in one sender domain often means a compromised account or a bounce
-  storm). One bounded `exim -bp` (+ `exim -bpc` for the authoritative count),
-  message-capped + timeout-bounded. New `internal/mailqueue`; exim only for now
-  (postfix returns a clear "not supported yet").
+- **MCP tool `mail_queue_summary` + `GET /api/v1/system/mail-queue` —
+  MTA-agnostic mail-queue breakdown.** Read-only, admin-only. On top of the raw
+  queued/frozen counts already in the health snapshot, this gives the actionable
+  view: total / frozen / deferred, an age distribution (<10m…>1d), the top
+  sender + recipient domains, the oldest messages, **and the top deferral/freeze
+  reasons** (normalized so hundreds of "retry time not reached for host X"
+  collapse into one, alongside "Connection refused", 550 mailbox-not-found
+  bounces, etc.) — the "why is mail backing up / who's flooding it / why are
+  messages stuck?" view (a spike in one sender domain often means a compromised
+  account or a bounce storm). **Detector-published, not per-request**: the active
+  queue detector (`exim_queues`/`postfix_queues`) builds the report each poll
+  from output it already has (plus a bounded mainlog tail for reasons) and
+  publishes it to the new `internal/mailqueue` store; the API/CLI/WebUI read it
+  with zero extra MTA probe. exim wired now (postfix report to follow); the same
+  breakdown will also surface in `cfm` CLI and the WebUI.
 - **MCP tools `mysql_log_tail` + `mysql_slow_queries` + `GET /api/v1/system/mysql-log`
   — on-demand tails of the MySQL error / slow-query logs.** Read-only, admin-only.
   `mysql_log_tail` tails the MySQL/MariaDB **error log** (crashes, deadlocks,
