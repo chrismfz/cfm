@@ -27,6 +27,10 @@ back-filled here — see the git/PR history for that period.
   `0.0.0.0`/`::`). The response key is `groups` (was `listeners`).
 
 ### Fixed
+- **`listening_ports` renders IPv6 link-local zones cleanly.** A zoned bind
+  address (`[fe80::1]%eth0:53`) left a stray `]` mid-string
+  (`fe80::1]%eth0`); the closing bracket is now dropped so the zone survives
+  intact. Cosmetic — ports/owners were always correct.
 - **`service_status` de-duplicates units that share a resolved systemd Id.**
   Alias query names (`mysql`/`mysqld` → `mariadb.service`, `lsws` →
   `lshttpd.service`) made `systemctl show` emit the same unit several times, so

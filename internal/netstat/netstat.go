@@ -191,6 +191,10 @@ func parseSSLine(line, v4Proto, v6Proto string) (Listener, bool) {
 }
 
 // splitHostPort splits ss's "addr:port" where addr may be IPv4, [IPv6], * or ::.
+// Link-local sockets carry a zone as "[fe80::1]%eth0:53" — the closing bracket
+// sits mid-string, so a plain Trim("[]") would leave it stranded ("fe80::1]%eth0").
+// Drop the surrounding brackets explicitly (leading '[' + the single ']') so the
+// zone survives clean.
 func splitHostPort(s string) (addr string, port int, ok bool) {
 	c := strings.LastIndexByte(s, ':')
 	if c < 0 || c == len(s)-1 {
@@ -200,7 +204,8 @@ func splitHostPort(s string) (addr string, port int, ok bool) {
 	if err != nil {
 		return "", 0, false
 	}
-	addr = strings.Trim(s[:c], "[]")
+	addr = strings.TrimPrefix(s[:c], "[")
+	addr = strings.Replace(addr, "]", "", 1)
 	return addr, p, true
 }
 
