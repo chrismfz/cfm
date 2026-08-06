@@ -270,7 +270,8 @@ func main() {
 		os.Exit(cli.RunFlush(os.Args[2:], be, tableExistsProbe(be)))
 	case "which", "search":
 		be := mustBackend()
-		os.Exit(cli.RunWhich(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
+		clihttp.SetToken(apiAuthToken())
+		os.Exit(cli.RunWhich(os.Args[2:], be, cfgDir(), apiBaseURL(), tableExistsProbe(be)))
 	case "asn":
 		os.Exit(cli.RunASN(os.Args[2:]))
 	case "php-inventory", "php-inv":
