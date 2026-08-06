@@ -96,15 +96,15 @@
       .join('');
 
     rows(el.senderBody, rep.top_sender_domains, (d) =>
-      `<tr><td>${escapeHTML(d.domain)}</td><td>${d.count}</td></tr>`);
+      `<tr><td>${escapeHTML(d.domain)}</td><td>${Number(d.count) || 0}</td></tr>`);
     rows(el.recipientBody, rep.top_recipient_domains, (d) =>
-      `<tr><td>${escapeHTML(d.domain)}</td><td>${d.count}</td></tr>`);
+      `<tr><td>${escapeHTML(d.domain)}</td><td>${Number(d.count) || 0}</td></tr>`);
     rows(el.reasonsBody, rep.defer_reasons, (d) =>
-      `<tr><td>${d.count}</td><td>${escapeHTML(d.category)}</td><td>${escapeHTML(d.reason)}</td></tr>`);
+      `<tr><td>${Number(d.count) || 0}</td><td>${escapeHTML(d.category)}</td><td>${escapeHTML(d.reason)}</td></tr>`);
     rows(el.oldestBody, rep.oldest, (m) =>
       `<tr><td>${formatAge(m.age_sec)}</td><td>${formatSize(m.size_bytes)}</td>` +
       `<td>${m.frozen ? '❄' : ''}</td><td>${escapeHTML(m.sender || '<>')}</td>` +
-      `<td>${m.recipients || 0}</td><td>${escapeHTML(m.id)}</td></tr>`);
+      `<td>${Number(m.recipients) || 0}</td><td>${escapeHTML(m.id)}</td></tr>`);
   }
 
   function renderUnavailable(note) {
@@ -118,7 +118,9 @@
 
   async function refresh() {
     try {
-      const data = await api('/api/v1/system/mail-queue');
+      // basePath is '/cfm-admin/api', so the call path omits the leading /api
+      // (→ /cfm-admin/api/v1/system/mail-queue → strips to /api/v1/system/mail-queue).
+      const data = await api('/v1/system/mail-queue');
       if (data && data.available && data.report) {
         renderReport(data.report);
       } else {
