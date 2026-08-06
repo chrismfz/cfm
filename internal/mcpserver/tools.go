@@ -629,18 +629,20 @@ type detectionHistoryInput struct {
 	Limit int    `json:"limit,omitempty" jsonschema:"max event rows to return; default server-side"`
 	Type  string `json:"type,omitempty" jsonschema:"filter by event type, e.g. waf, challenge_arm, clam_infected; omit for all"`
 	Host  string `json:"host,omitempty" jsonschema:"restrict to one vhost; omit for all"`
+	IP    string `json:"ip,omitempty" jsonschema:"restrict to ONE source IP — the events CFM recorded for it (WAF hits, challenge, autoblock), i.e. WHO/WHY this IP was acted on; omit for all. Detector/WAF/challenge bans appear here; manual/blocklist bans do not."`
 }
 
 func registerDetectionHistory(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "detection_history",
-		Description: "Durable, time-ordered log of detection events (WAF hits, challenge arm/pass/fail, ClamAV infections, autoblocks, …), GeoIP-enriched. The forensic timeline: \"what has CFM detected/done over time?\".",
+		Description: "Durable, time-ordered log of detection events (WAF hits, challenge arm/pass/fail, ClamAV infections, autoblocks, …), GeoIP-enriched. The forensic timeline: \"what has CFM detected/done over time?\". Pass ip=<addr> to attribute one IP — the WAF/detector/challenge events behind why CFM acted on it (a firewall_blocks ban with no comment: check here for its origin; note manual/blocklist bans leave no detection event).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in detectionHistoryInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{"enrich": {"1"}}
 		setInt(q, "limit", in.Limit)
 		setStr(q, "type", in.Type)
 		setStr(q, "host", in.Host)
+		setStr(q, "ip", in.IP)
 		return dispatchJSON(ctx, d, "/api/v1/webdet/history/events", q)
 	})
 }
