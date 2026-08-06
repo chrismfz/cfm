@@ -56,6 +56,8 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerEdgeAccessTail(srv, d)
 	registerIPForensics(srv, d)
 	registerMySQLPressure(srv, d)
+	registerMySQLLogTail(srv, d)
+	registerMySQLSlowQueries(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -523,6 +525,40 @@ func mergeMySQLPressure(topBody, cpuBody json.RawMessage, topN int) map[string]a
 		"users_truncated": truncated,
 		"top_users":       rows,
 	}
+}
+
+type mysqlLogInput struct {
+	Lines int    `json:"lines,omitempty" jsonschema:"how many trailing log lines to scan (tail window); default 200, max 5000"`
+	Grep  string `json:"grep,omitempty" jsonschema:"case-insensitive substring filter (e.g. 'error', 'deadlock', a table/db name); omit for all"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max matching lines to return; default 200, max 2000"`
+}
+
+func registerMySQLLogTail(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "mysql_log_tail",
+		Description: "Tail the MySQL/MariaDB ERROR log: crashes, aborted connections, deadlocks, InnoDB errors, 'too many connections', table corruption. The 'MySQL pressure is high / something's wrong — what's erroring?' companion to mysql_pressure. Bounded on-demand tail (last N lines) with optional grep; no DB connection needed.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mysqlLogInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{"which": {"error"}}
+		setInt(q, "lines", in.Lines)
+		setInt(q, "limit", in.Limit)
+		setStr(q, "grep", in.Grep)
+		return dispatchJSON(ctx, d, "/api/v1/system/mysql-log", q)
+	})
+}
+
+func registerMySQLSlowQueries(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "mysql_slow_queries",
+		Description: "Tail the MySQL/MariaDB SLOW-QUERY log (where enabled): the actual slow statements behind high MySQL CPU — query time, rows examined, the SQL. The 'why is this account's MySQL pressure high?' drill-down after mysql_pressure. Bounded on-demand tail with optional grep (e.g. a db/table/user). If the slow log isn't configured, result.found is false (likely disabled).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mysqlLogInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{"which": {"slow"}}
+		setInt(q, "lines", in.Lines)
+		setInt(q, "limit", in.Limit)
+		setStr(q, "grep", in.Grep)
+		return dispatchJSON(ctx, d, "/api/v1/system/mysql-log", q)
+	})
 }
 
 // sectionError returns the error string if body is a section error stub

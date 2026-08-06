@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP tools `mysql_log_tail` + `mysql_slow_queries` + `GET /api/v1/system/mysql-log`
+  — on-demand tails of the MySQL error / slow-query logs.** Read-only, admin-only.
+  `mysql_log_tail` tails the MySQL/MariaDB **error log** (crashes, deadlocks,
+  aborted connections, InnoDB errors, "too many connections"); `mysql_slow_queries`
+  tails the **slow-query log** where enabled (the actual slow statements behind
+  high MySQL CPU). The "MySQL pressure is high — what's erroring / what's slow?"
+  companion to `mysql_pressure`. Bounded like the other log tails (last N lines
+  via `tail`, timeout, optional case-insensitive grep, capped output); needs no DB
+  connection — just the log files. The path is resolved from `my.cnf` +
+  a fixed candidate list (never a caller-supplied path); a missing slow log is
+  reported as `found:false` (likely disabled), not an error. New `internal/mysqllog`.
 - **MCP tool `mysql_pressure` — the mysqltop view (per-user MySQL pressure).**
   Read-only. Composes the MySQL governor's `/api/v1/mysql/top` (connection
   saturation used/max/%, per-user connection load) with `/api/v1/mysql/cpu`

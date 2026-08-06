@@ -186,7 +186,7 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ## 4. Active tools (as-built)
 
-22 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
+24 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
 CLI/UI use). All carry the `readOnlyHint` annotation.
 
 | Tool | What it answers | Endpoint(s) | Args |
@@ -204,6 +204,8 @@ CLI/UI use). All carry the `readOnlyHint` annotation.
 | `edge_access_tail` | Recent edge access-log lines (method/URI/status/UA/timing) — raw request context around a WAF hit, for FP triage | `webdet/access-recent` | `ip`, `host`, `method`, `status`, `path`, `since`, `limit` |
 | `ip_forensics` | On-demand raw access-log lines for one IP (bounded `tail … \| grep`) — correlate an OLDER WAF hit; reaches back further than the live ring | `system/ip-forensics` | `ip`*, `lines`, `limit`, `source` |
 | `mysql_pressure` | MySQL/MariaDB pressure now (mysqltop): connection saturation + per-user conns MERGED with CPU/query deltas, ranked — catch the offender ("few conns, high CPU") | `mysql/top` + `mysql/cpu` | `top` |
+| `mysql_log_tail` | Tail the MySQL ERROR log (crashes, deadlocks, aborted conns, InnoDB errors) — "what's erroring?" | `system/mysql-log` | `lines`, `grep`, `limit` |
+| `mysql_slow_queries` | Tail the MySQL SLOW-QUERY log (where enabled) — the slow statements behind high CPU | `system/mysql-log` | `lines`, `grep`, `limit` |
 | `detection_history` | Durable timeline of detections (WAF/challenge/clam/…) | `webdet/history/events` | `limit`, `type`, `host` |
 | `bots_top` | Top user-agents (bots/crawlers/scrapers) | `webdet/ua-top` | `limit` |
 | `firewall_blocks` | Active nft bans incl. WAF autoblocks (TTL, reason, GeoIP) | `firewall/list` | — |
@@ -287,4 +289,4 @@ The MCP surface is versioned by CFM's date-based releases (see `CHANGELOG.md`).
 | Release | MCP status | Tools active |
 |---|---|---|
 | 2026.08.05 | **Introduced** — read-only MCP server; dedicated `MCP_TOKEN` credential (min 24 chars, fail-closed) separate from `AUTH_TOKEN`; OAuth 2.1 + PKCE for the claude.ai connector, static-bearer for Claude Code/API | The 15 tools in §4 (WAF, challenge, suspicious/traffic, drilldowns, history, bots, firewall blocks, detectors, health) |
-| 2026.08.06 | Edge-proxy connectivity fixes (OIDC-discovery alias, DNS-rebinding guard disabled); consent POST rate-limit; enrich reverse-DNS perf (waf/security summaries ~60s→~1.5s) | **+`process_list`, +`listening_ports`, +`dmesg_tail`, +`service_status`, +`edge_access_tail`, +`ip_forensics`, +`mysql_pressure`** (22 tools) — node system diagnostics (busiest processes; listening sockets + owner; kernel ring buffer; systemd unit status) + WAF triage (recent edge access lines around a hit; on-demand bounded per-IP access-log lookup) + MySQL pressure (per-user conns×CPU, the mysqltop view); `security_overview` made compact |
+| 2026.08.06 | Edge-proxy connectivity fixes (OIDC-discovery alias, DNS-rebinding guard disabled); consent POST rate-limit; enrich reverse-DNS perf (waf/security summaries ~60s→~1.5s) | **+`process_list`, +`listening_ports`, +`dmesg_tail`, +`service_status`, +`edge_access_tail`, +`ip_forensics`, +`mysql_pressure`, +`mysql_log_tail`, +`mysql_slow_queries`** (24 tools) — node system diagnostics (busiest processes; listening sockets + owner; kernel ring buffer; systemd unit status) + WAF triage (recent edge access lines around a hit; on-demand bounded per-IP access-log lookup) + MySQL pressure (per-user conns×CPU) + MySQL error/slow-log tails; `security_overview` made compact |
