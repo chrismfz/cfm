@@ -25,6 +25,7 @@ const ICONS = {
   funnel: '<path d="M3 5h18l-7 8v5l-4 2v-7L3 5z"/>',
   virus: '<circle cx="12" cy="12" r="5"/><path d="M12 3v4m0 10v4M3 12h4m10 0h4M5.6 5.6l2.9 2.9m7 7l2.9 2.9M18.4 5.6l-2.9 2.9m-7 7l-2.9 2.9"/><circle cx="12" cy="12" r="1"/>',
   key: '<circle cx="8" cy="14" r="4"/><path d="M11 11l9-9m-4 4l3 3m-6 0l2 2"/>',
+  mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>',
 };
 
 const MENU_GROUPS = [
@@ -47,6 +48,7 @@ const MENU_GROUPS = [
   ]},
   { title: "Services", items: [
     { label: "MySQL governor", href: "/cfm-admin/governor/", icon: "db" },
+    { label: "Mail queue", href: "/cfm-admin/mail/", icon: "mail" },
     { label: "API tokens", href: "/cfm-admin/webdetector/tokens/", icon: "key" },
     { label: "Notifier", href: "/cfm-admin/notifier/", icon: "bell" },
     { label: "Detectors", href: "/cfm-admin/detectors/", icon: "layers" },

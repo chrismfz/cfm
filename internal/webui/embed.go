@@ -11,6 +11,7 @@
 //   /webdetector/waf/        → static/webdetector/waf/index.html
 //   /webdetector/controls/   → static/webdetector/controls/index.html
 //   /governor/               → static/governor/index.html
+//   /mail/                   → static/mail/index.html
 //   /settings/               → static/settings/index.html
 //   /assets/                → static/assets/  (JS, CSS)
 //   unknown path             → static/index.html  (fallback)

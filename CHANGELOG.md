@@ -18,6 +18,13 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **cfm-admin WebUI: a "Mail queue" page** (`/cfm-admin/mail/`) — the mail-queue
+  breakdown now in the panel too, closing the "everywhere" set (API + MCP + CLI +
+  WebUI). Renders the detector-published report (total/frozen/deferred, age
+  distribution, top sender + recipient domains, top defer/freeze reasons, oldest
+  messages) — the same data as `cfm mailtop` / `mail_queue_summary`, no
+  per-request MTA probe. Admin-only: the nav link hides for scoped viewers and
+  the backend 403s. Shows a note when no queue detector is enabled yet.
 - **MCP tool `ip_locate`** — the `cfm which/search <ip>` equivalent over MCP:
   where an IP is blocked across ALL sources (nft / cfm.deny / csf / fail2ban /
   imunify360) **and why**, since each hit carries the source's reason — notably
