@@ -222,6 +222,19 @@ func TestTopTalkersWindowRouting(t *testing.T) {
 	}
 }
 
+func TestProcessListRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"process_list","arguments":{"top":10}}}`)
+	if fd.lastPath != "/api/v1/system/processes" {
+		t.Errorf("process_list routed to %q, want /api/v1/system/processes", fd.lastPath)
+	}
+	if got := fd.lastQuery.Get("top"); got != "10" {
+		t.Errorf("top param = %q, want 10", got)
+	}
+}
+
 // The consent page must disclose where the grant is delivered and warn on a
 // non-first-party redirect (anti-phishing).
 func TestConsentPageShowsRedirectAndWarns(t *testing.T) {

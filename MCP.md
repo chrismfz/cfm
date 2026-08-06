@@ -186,7 +186,7 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ## 4. Active tools (as-built)
 
-15 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
+16 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
 CLI/UI use). All carry the `readOnlyHint` annotation.
 
 | Tool | What it answers | Endpoint(s) | Args |
@@ -206,8 +206,12 @@ CLI/UI use). All carry the `readOnlyHint` annotation.
 | `firewall_blocks` | Active nft bans incl. WAF autoblocks (TTL, reason, GeoIP) | `firewall/list` | — |
 | `detectors_status` | Which detectors run + recent activity | `detectors/status` | — |
 | `system_health` | Health snapshot + recent anomalies | `health/snapshot` + `health/anomalies` | `since` |
+| `process_list` | Busiest processes (top-like: pid/user/state/%cpu/%mem/rss/threads/comm) — "load is high, who's eating it?" | `system/processes` | `top` |
 
 `*` required.
+
+> `process_list` returns the process **COMM** (executable name) only — never the
+> full cmdline, which routinely carries secrets (`mysql -pXXXX`, `--token=…`).
 
 ---
 
@@ -277,3 +281,4 @@ The MCP surface is versioned by CFM's date-based releases (see `CHANGELOG.md`).
 | Release | MCP status | Tools active |
 |---|---|---|
 | 2026.08.05 | **Introduced** — read-only MCP server; dedicated `MCP_TOKEN` credential (min 24 chars, fail-closed) separate from `AUTH_TOKEN`; OAuth 2.1 + PKCE for the claude.ai connector, static-bearer for Claude Code/API | The 15 tools in §4 (WAF, challenge, suspicious/traffic, drilldowns, history, bots, firewall blocks, detectors, health) |
+| 2026.08.06 | Edge-proxy connectivity fixes (OIDC-discovery alias, DNS-rebinding guard disabled); consent POST rate-limit; enrich reverse-DNS perf (waf/security summaries ~60s→~1.5s) | **+`process_list`** (16 tools) — busiest processes for "load is high, who's eating it?" |

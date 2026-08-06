@@ -47,6 +47,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerFirewallBlocks(srv, d)
 	registerDetectorsStatus(srv, d)
 	registerSystemHealth(srv, d)
+	registerProcessList(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -384,5 +385,21 @@ func registerSystemHealth(srv *mcp.Server, d Deps) {
 			return nil, nil, err
 		}
 		return textResult(b), nil, nil
+	})
+}
+
+type processListInput struct {
+	Top int `json:"top,omitempty" jsonschema:"how many busiest processes to return; default 15, max 200"`
+}
+
+func registerProcessList(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "process_list",
+		Description: "The busiest processes on the node right now (top-like: pid, user, state, %cpu, %mem, rss, threads, command name), newest CPU sample. Use when system_health shows high load to find WHICH process is eating it — or many D-state (uninterruptible) processes stuck on I/O. Command NAME only; never the full cmdline (which can carry secrets).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in processListInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setInt(q, "top", in.Top)
+		return dispatchJSON(ctx, d, "/api/v1/system/processes", q)
 	})
 }
