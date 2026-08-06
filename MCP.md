@@ -253,10 +253,13 @@ prune). The MCP server issues **GET only** and never registers a write tool.
   revocation without rotating `MCP_TOKEN`. (Today: codes/refresh are single-use
   via an in-memory nonce set, but individual access tokens can only be revoked en
   masse by rotating `MCP_TOKEN`.)
-- **Consent-failure backoff:** the consent POST validates `MCP_TOKEN` with a
-  constant-time compare but is not yet rate-limited (a known INFO item, same shape
-  as the existing `/api/v1` bearer gate). Feed repeated `mcp_oauth_consent_denied`
-  into the API anomaly/backoff machinery.
+- ~~**Consent-failure backoff**~~ **(done 2026.08.06):** the consent POST is now
+  rate-limited per source IP (`consentRLBurst=10` per `consentRLWindow=5m`,
+  `internal/mcpserver/ratelimit.go`); exceeding it returns `429` with a
+  `Retry-After` and logs `event=mcp_oauth_consent_ratelimited`. Defence-in-depth
+  against brute-forcing `MCP_TOKEN` through the form and against
+  `mcp_oauth_consent_*` log spam — the token entropy (>=24 chars) remains the
+  primary control.
 - **Guarded write tools (far later, opt-in):** a *very* narrow, confirm-gated set
   (e.g. temporary exclude, manual challenge on/off) behind an explicit server-side
   opt-in — mirroring how the sibling projects gate their write tools OFF by

@@ -84,6 +84,10 @@ type oauthServer struct {
 	// detection). Bounded + self-GCing; lost on restart (acceptable — codes live
 	// 2 min, and a restart is a far bigger event than a replayed code).
 	consumed *nonceCache
+
+	// consentRL throttles consent-form submissions per source IP (brute-force /
+	// log-abuse defence-in-depth on top of the MCP_TOKEN entropy).
+	consentRL *ipRateLimiter
 }
 
 func newOAuthServer(baseFn func(*http.Request) string, mcpPath, signingSecret string, auth Authenticator) *oauthServer {
@@ -99,6 +103,7 @@ func newOAuthServer(baseFn func(*http.Request) string, mcpPath, signingSecret st
 		codeTTL:    2 * time.Minute,
 		clientTTL:  10 * 365 * 24 * time.Hour,
 		consumed:   newNonceCache(),
+		consentRL:  &ipRateLimiter{},
 	}
 }
 
@@ -325,10 +330,22 @@ func (s *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// POST from here. Throttle consent submissions per source IP: the MCP_TOKEN
+	// entropy (>=24 chars) is the primary defence, this is defence-in-depth
+	// against brute-forcing it through the form and against mcp_oauth_consent_*
+	// log spam. A legitimate operator submits once, well under the burst.
+	ip := realIPFromRequestMCP(r)
+	if !s.consentRL.allow(ip, time.Now(), consentRLWindow, consentRLBurst) {
+		logging.LogfAPI("[apiserver] event=mcp_oauth_consent_ratelimited src_ip=%s window=%s burst=%d", ip, consentRLWindow, consentRLBurst)
+		w.Header().Set("Retry-After", "300")
+		http.Error(w, "too many consent attempts; try again later", http.StatusTooManyRequests)
+		return
+	}
+
 	// POST: the consent submit. The credential is validated by the Authenticator.
 	_, ok = s.auth(get("token"))
 	if !ok {
-		logging.LogfAPI("[apiserver] event=mcp_oauth_consent_denied src_ip=%s", realIPFromRequestMCP(r))
+		logging.LogfAPI("[apiserver] event=mcp_oauth_consent_denied src_ip=%s", ip)
 		s.renderAuthorize(w, view, "Invalid token.")
 		return
 	}

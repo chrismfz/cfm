@@ -282,6 +282,14 @@ back-filled here — see the git/PR history for that period.
   affected. Test: `TestOAuthOIDCMetadataAlias`.
 
 ### Security
+- **MCP OAuth consent POST is now rate-limited per source IP.** The consent
+  submit (`/cfm-admin/mcp/oauth/authorize` POST, which validates `MCP_TOKEN`) is
+  throttled to 10 attempts per 5-minute window per IP; exceeding it returns `429`
+  with `Retry-After` and logs `event=mcp_oauth_consent_ratelimited`. Defence-in-
+  depth against brute-forcing `MCP_TOKEN` through the form and against consent-log
+  spam — the token entropy remains the primary control. A legitimate operator
+  submits once, well under the burst. (Closes the last INFO item from the MCP
+  security review.)
 - **`/unblock` and `/search` are now admin-only (`adminOnlyHandler`).** Both
   root-level routes were registered with a bare handler, i.e. protected only by
   the mux-wide token check, which authenticates but does not separate admin from

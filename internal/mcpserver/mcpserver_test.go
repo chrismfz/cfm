@@ -195,6 +195,60 @@ func TestOAuthOIDCMetadataAlias(t *testing.T) {
 	}
 }
 
+// TestOAuthConsentRateLimited verifies the consent POST is throttled per source
+// IP: after consentRLBurst submissions in the window, further attempts get 429
+// (defence-in-depth against brute-forcing MCP_TOKEN through the form).
+func TestOAuthConsentRateLimited(t *testing.T) {
+	ts := newTestServer(t, nil)
+	client := ts.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	// Register a client to get a valid client_id bound to redirectURI.
+	redirectURI := "https://claude.ai/api/mcp/auth_callback"
+	regBody, _ := json.Marshal(map[string]any{"redirect_uris": []string{redirectURI}})
+	regRes, err := client.Post(ts.URL+"/mcp/oauth/register", "application/json", strings.NewReader(string(regBody)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg struct {
+		ClientID string `json:"client_id"`
+	}
+	_ = json.NewDecoder(regRes.Body).Decode(&reg)
+	regRes.Body.Close()
+	if reg.ClientID == "" {
+		t.Fatal("registration returned no client_id")
+	}
+
+	form := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {reg.ClientID},
+		"redirect_uri":          {redirectURI},
+		"code_challenge":        {"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"},
+		"code_challenge_method": {"S256"},
+		"scope":                 {"mcp"},
+		"token":                 {"wrong-token"}, // always invalid → never redirects away
+	}
+	post := func() int {
+		rr, err := client.PostForm(ts.URL+"/mcp/oauth/authorize", form)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rr.Body.Close()
+		return rr.StatusCode
+	}
+
+	// The first burst attempts render "Invalid token" (401), not throttled (429).
+	for i := 0; i < consentRLBurst; i++ {
+		if code := post(); code == http.StatusTooManyRequests {
+			t.Fatalf("attempt %d unexpectedly rate-limited (429) before burst", i+1)
+		}
+	}
+	// The next one exceeds the burst → 429.
+	if code := post(); code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after %d attempts, got %d", consentRLBurst, code)
+	}
+}
+
 // TestMCPBehindProxyNonLoopbackHost pins DisableLocalhostProtection. The edge
 // upstreams to the daemon over loopback (127.0.0.1) while forwarding the public
 // Host header; the go-sdk DNS-rebinding guard (loopback LocalAddr + non-loopback
