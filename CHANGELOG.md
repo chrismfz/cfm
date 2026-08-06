@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Persistent, process-wide PTR (reverse-DNS) cache backed by SQLite.** Resolved
+  PTRs are now shared across every Enricher in the daemon (engine + all detectors
+  + nflog + outbound) via a single on-disk store at `/var/lib/cfm/ptrcache.db`,
+  behind each Enricher's in-memory cache. Two wins: (1) a PTR resolved by any
+  component — a challenge-exclude check, WAF `top_ips`, a host/IP drilldown, a
+  detector alert — is immediately available to all the others, so read views like
+  `host_drilldown` almost always show the PTR instead of only after that
+  component has seen the IP; (2) it survives a daemon restart/redeploy, so the box
+  doesn't re-resolve every IP from cold. Reads are an indexed primary-key lookup
+  on an in-memory miss; writes are async (never block enrichment); rows older than
+  the 30-day TTL are pruned. Enabled only in the daemon (`EnablePersistentPTR`);
+  the CLI and tests keep the pure in-memory behaviour. Best-effort — if the DB
+  can't be opened, enrichment falls back to the per-Enricher in-memory caches.
 - **Read-only MCP server (`/cfm-admin/mcp`) — read CFM's security telemetry from
   an MCP client (e.g. the claude.ai remote connector).** The daemon now embeds a
   read-only [Model Context Protocol](https://modelcontextprotocol.io) server,
