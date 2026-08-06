@@ -179,6 +179,7 @@ type Governor struct {
 	// userstatsOff=true means MariaDB was detected but userstat=OFF (show hint).
 	userstatsOK     bool
 	userstatsOff    bool
+	userstatRetryAt time.Time // next time to re-check @@userstat when it's off (runtime SET GLOBAL self-heal)
 	lastUserstatRaw map[string]userstatRawRow
 
 	// Per-user connection-limit enforcement state.
@@ -560,7 +561,7 @@ func (g *Governor) evaluate(ctx context.Context, state GovernorState, procs []Pr
 			Reason: fmt.Sprintf("%s pid=%d user=%s host=%s db=%s runtime=%ds unblocked=%d",
 				kr.Action, kr.PID, kr.User, kr.Host, kr.DB, p.TimeSec, kr.Unblocked),
 			Severity: "critical",
-			Samples:  []string{
+			Samples: []string{
 				"state: " + kr.State,
 				"query: " + kr.Query,
 				"reason: " + kr.Reason,
@@ -784,16 +785,16 @@ func (g *Governor) checkConnPressure(state GovernorState) {
 			Severity: "critical",
 		})
 
-g.appendHistoryEvent(GovernorHistoryEvent{
-    TsUnix:    now.Unix(),
-    EventType: "conn_pressure",
-    Action:    "critical",
-    Reason:    fmt.Sprintf("CRITICAL %d/%d (%.0f%%)", state.TotalConn, state.MaxConn, state.ConnPct),
-    ConnPct:   state.ConnPct,
-    TotalConn: state.TotalConn,
-    MaxConn:   state.MaxConn,
-    Payload:   g.buildSnapshot(state, state.Processes),
-})
+		g.appendHistoryEvent(GovernorHistoryEvent{
+			TsUnix:    now.Unix(),
+			EventType: "conn_pressure",
+			Action:    "critical",
+			Reason:    fmt.Sprintf("CRITICAL %d/%d (%.0f%%)", state.TotalConn, state.MaxConn, state.ConnPct),
+			ConnPct:   state.ConnPct,
+			TotalConn: state.TotalConn,
+			MaxConn:   state.MaxConn,
+			Payload:   g.buildSnapshot(state, state.Processes),
+		})
 
 		return
 	}
@@ -811,17 +812,16 @@ g.appendHistoryEvent(GovernorHistoryEvent{
 			Severity: "warn",
 		})
 
-g.appendHistoryEvent(GovernorHistoryEvent{
-    TsUnix:    now.Unix(),
-    EventType: "conn_pressure",
-    Action:    "warn",
-    Reason:    fmt.Sprintf("WARNING %d/%d (%.0f%%)", state.TotalConn, state.MaxConn, state.ConnPct),
-    ConnPct:   state.ConnPct,
-    TotalConn: state.TotalConn,
-    MaxConn:   state.MaxConn,
-    Payload:   g.buildSnapshot(state, state.Processes),
-})
-
+		g.appendHistoryEvent(GovernorHistoryEvent{
+			TsUnix:    now.Unix(),
+			EventType: "conn_pressure",
+			Action:    "warn",
+			Reason:    fmt.Sprintf("WARNING %d/%d (%.0f%%)", state.TotalConn, state.MaxConn, state.ConnPct),
+			ConnPct:   state.ConnPct,
+			TotalConn: state.TotalConn,
+			MaxConn:   state.MaxConn,
+			Payload:   g.buildSnapshot(state, state.Processes),
+		})
 
 	}
 }
@@ -1020,36 +1020,34 @@ func truncate(s string, n int) string {
 }
 
 func (g *Governor) buildSnapshot(state GovernorState, procs []Process) map[string]any {
-    if len(procs) == 0 {
-        procs = state.Processes
-    }
+	if len(procs) == 0 {
+		procs = state.Processes
+	}
 
-    topQueries := 20
-    if len(procs) < topQueries {
-        topQueries = len(procs)
-    }
+	topQueries := 20
+	if len(procs) < topQueries {
+		topQueries = len(procs)
+	}
 
-    topUsers := 10
-    if len(state.PerUser) < topUsers {
-        topUsers = len(state.PerUser)
-    }
+	topUsers := 10
+	if len(state.PerUser) < topUsers {
+		topUsers = len(state.PerUser)
+	}
 
-    return map[string]any{
-        "conn": map[string]any{
-            "total":  state.TotalConn,
-            "max":    state.MaxConn,
-            "pct":    state.ConnPct,
-            "active": state.ActiveConn,
-            "sleep":  state.SleepConn,
-            "locked": state.LockedConn,
-        },
-        "top_users":   state.PerUser[:topUsers],
-        "top_queries": procs[:topQueries],
-        "locks":       state.LockGraph,
-    }
+	return map[string]any{
+		"conn": map[string]any{
+			"total":  state.TotalConn,
+			"max":    state.MaxConn,
+			"pct":    state.ConnPct,
+			"active": state.ActiveConn,
+			"sleep":  state.SleepConn,
+			"locked": state.LockedConn,
+		},
+		"top_users":   state.PerUser[:topUsers],
+		"top_queries": procs[:topQueries],
+		"locks":       state.LockGraph,
+	}
 }
-
-
 
 func normalizeHostPort(host string) string {
 	if i := strings.LastIndex(host, ":"); i > 0 {
@@ -1167,15 +1165,15 @@ func (g *Governor) buildSnapshotForUser(state GovernorState, user, db string) ma
 			"sleep":  state.SleepConn,
 			"locked": state.LockedConn,
 		},
-		"user":            user,
-		"db":              db,
-		"top_users":       state.PerUser[:topUsers],
-		"process_count":   len(filtered),
-		"processes":       filtered[:topProcs],
-		"hosts":           toTopList(hostCounts, 10),
-		"commands":        toTopList(commandCounts, 10),
-		"states":          toTopList(stateCounts, 10),
-		"query_patterns":  toTopList(fpCounts, 10),
-		"locks":           locks,
+		"user":           user,
+		"db":             db,
+		"top_users":      state.PerUser[:topUsers],
+		"process_count":  len(filtered),
+		"processes":      filtered[:topProcs],
+		"hosts":          toTopList(hostCounts, 10),
+		"commands":       toTopList(commandCounts, 10),
+		"states":         toTopList(stateCounts, 10),
+		"query_patterns": toTopList(fpCounts, 10),
+		"locks":          locks,
 	}
 }

@@ -1,6 +1,7 @@
 package mysqllog
 
 import (
+	"bufio"
 	"context"
 	"os"
 	"os/exec"
@@ -101,6 +102,40 @@ func TestTail_SlowMissing_NotAnError(t *testing.T) {
 	}
 	if res.Found {
 		t.Fatalf("found should be false for a missing slow log")
+	}
+}
+
+func TestScanBoundedLines_OverlongLineNotFatal(t *testing.T) {
+	// Reproduces the mysql_slow_queries 502: a line longer than the reader
+	// buffer must be truncated + skipped, not abort the whole scan.
+	huge := strings.Repeat("x", 300) // > tiny buffer below
+	input := "short line 1\n" + huge + "\nshort line 2\n"
+	r := bufio.NewReaderSize(strings.NewReader(input), 64) // force ErrBufferFull on `huge`
+
+	var got []string
+	if err := scanBoundedLines(r, func(s string) { got = append(got, s) }); err != nil {
+		t.Fatalf("scanBoundedLines errored on long line: %v", err)
+	}
+	// 3 logical lines survive; the huge one is truncated to the buffer prefix.
+	if len(got) != 3 {
+		t.Fatalf("got %d lines, want 3: %q", len(got), got)
+	}
+	if got[0] != "short line 1" || got[2] != "short line 2" {
+		t.Fatalf("surrounding lines corrupted: %q", got)
+	}
+	if len(got[1]) == 0 || len(got[1]) > 64 {
+		t.Fatalf("huge line should be a non-empty bounded prefix, got %d bytes", len(got[1]))
+	}
+}
+
+func TestScanBoundedLines_NoTrailingNewline(t *testing.T) {
+	r := bufio.NewReaderSize(strings.NewReader("a\nb\nc"), 4096) // last line has no \n
+	var got []string
+	if err := scanBoundedLines(r, func(s string) { got = append(got, s) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[2] != "c" {
+		t.Fatalf("want a,b,c; got %q", got)
 	}
 }
 

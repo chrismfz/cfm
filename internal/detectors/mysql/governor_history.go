@@ -125,7 +125,7 @@ func (g *Governor) TopUserHistory(window time.Duration, topN int) []UserHistoryS
 			Samples:    a.count,
 		}
 		if a.count > 0 {
-			stat.AvgConns  = float64(a.sumConns)  / float64(a.count)
+			stat.AvgConns = float64(a.sumConns) / float64(a.count)
 			stat.AvgActive = float64(a.sumActive) / float64(a.count)
 		}
 		out = append(out, stat)
@@ -193,19 +193,20 @@ type userstatRawRow struct {
 // Included in GovernorState so the API and CLI can expose it.
 //
 // Source mapping:
-//   CPUSec       — Path A: SUM_CPU_TIME/1e12   Path B: CPU_TIME delta   Path C: 0
-//   QueryCount   — Path A+B+C: COUNT_STAR delta
-//   AvgQueryMsec — Path A+B+C: SUM_TIMER_WAIT delta / COUNT_STAR delta / 1e9
-//   RowsRead     — Path B only (userstat); omitted (0) on Path A and C
-//   RowsSent     — Path B only (userstat); omitted (0) on Path A and C
+//
+//	CPUSec       — Path A: SUM_CPU_TIME/1e12   Path B: CPU_TIME delta   Path C: 0
+//	QueryCount   — Path A+B+C: COUNT_STAR delta
+//	AvgQueryMsec — Path A+B+C: SUM_TIMER_WAIT delta / COUNT_STAR delta / 1e9
+//	RowsRead     — Path B only (userstat); omitted (0) on Path A and C
+//	RowsSent     — Path B only (userstat); omitted (0) on Path A and C
 type UserPerfDelta struct {
 	User         string  `json:"user"`
-	CPUSec       float64 `json:"cpu_sec"`               // CPU seconds in the last poll window
-	BusySec      float64 `json:"busy_sec,omitempty"`    // wall-clock busy seconds (MariaDB userstat only)
-	QueryCount   int64   `json:"query_count"`           // queries executed in the last poll window
-	AvgQueryMsec float64 `json:"avg_query_msec"`        // mean wall-time latency per query, ms
-	RowsRead     int64   `json:"rows_read,omitempty"`   // rows read (MariaDB userstat only)
-	RowsSent     int64   `json:"rows_sent,omitempty"`   // rows sent (MariaDB userstat only)
+	CPUSec       float64 `json:"cpu_sec"`             // CPU seconds in the last poll window
+	BusySec      float64 `json:"busy_sec,omitempty"`  // wall-clock busy seconds (MariaDB userstat only)
+	QueryCount   int64   `json:"query_count"`         // queries executed in the last poll window
+	AvgQueryMsec float64 `json:"avg_query_msec"`      // mean wall-time latency per query, ms
+	RowsRead     int64   `json:"rows_read,omitempty"` // rows read (MariaDB userstat only)
+	RowsSent     int64   `json:"rows_sent,omitempty"` // rows sent (MariaDB userstat only)
 }
 
 // probePerfSchema checks once at startup (and on retry) which data sources
@@ -220,11 +221,11 @@ type UserPerfDelta struct {
 //   - @@userstat is MariaDB-only; the column simply does not exist on MySQL.
 func (g *Governor) probePerfSchema(ctx context.Context) {
 	// Reset all flags so a re-probe starts from a clean state.
-	g.perfSchemaOK  = false
-	g.perfHasCPU    = false
+	g.perfSchemaOK = false
+	g.perfHasCPU = false
 	g.perfCPUActive = false
-	g.userstatsOK   = false
-	g.userstatsOff  = false
+	g.userstatsOK = false
+	g.userstatsOff = false
 
 	// ---- Step 1: is performance_schema ON? --------------------------------
 	var psInt sql.NullInt64
@@ -341,6 +342,10 @@ func (g *Governor) probeUserstatEnabled(ctx context.Context) (exists, enabled bo
 // self-heals after a MySQL restart or after performance_schema is enabled
 // without restarting cfm.  The baseline is reset on a successful re-probe
 // so the first delta doesn't produce a false spike.
+// userstatRetryEvery bounds how often fetchPerfDeltas re-checks @@userstat while
+// it's off, so a runtime enable is picked up promptly without a per-poll query.
+const userstatRetryEvery = 60 * time.Second
+
 func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 	if !g.perfSchemaOK {
 		if time.Now().Before(g.perfRetryAt) {
@@ -351,8 +356,27 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 		if !g.perfSchemaOK {
 			return nil
 		}
-		g.lastPerfRaw    = nil
+		g.lastPerfRaw = nil
 		g.lastUserstatRaw = nil
+	}
+
+	// ---- Live upgrade to Path B when userstat is enabled at runtime ----
+	// probePerfSchema only runs at startup (and while perfSchemaOK is false), so
+	// a `SET GLOBAL userstat=ON` issued after cfm started is otherwise invisible
+	// until a restart. When we're on MariaDB with userstat currently off, re-check
+	// @@userstat cheaply on a cadence and upgrade to Path B (CPU/busy/rows) live.
+	if g.userstatsOff && !g.userstatsOK && !time.Now().Before(g.userstatRetryAt) {
+		g.userstatRetryAt = time.Now().Add(userstatRetryEvery)
+		if exists, enabled := g.probeUserstatEnabled(ctx); exists && enabled {
+			var dummy int
+			if err := g.db.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM information_schema.USER_STATISTICS").Scan(&dummy); err == nil {
+				g.userstatsOK = true
+				g.userstatsOff = false
+				g.lastUserstatRaw = nil // reset baseline so the first delta isn't a false spike
+				logging.Logf("[mysql/governor] userstat enabled at runtime — upgrading to Path B (CPU/busy/rows tracking)")
+			}
+		}
 	}
 
 	// ---- Fetch perf_schema counters (query count + latency, all paths) ----
@@ -408,15 +432,15 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 		if currentUserstat == nil {
 			// Table became unreadable — fall back to Path C quietly.
 			logging.Logf("[mysql/governor] USER_STATISTICS read failed, falling back to query-only tracking")
-			g.userstatsOK  = false
+			g.userstatsOK = false
 			g.userstatsOff = true
 		}
 	}
 
 	// ---- Compute deltas ---------------------------------------------------
-	prevPerf     := g.lastPerfRaw
+	prevPerf := g.lastPerfRaw
 	prevUserstat := g.lastUserstatRaw
-	g.lastPerfRaw     = currentPerf
+	g.lastPerfRaw = currentPerf
 	g.lastUserstatRaw = currentUserstat
 
 	if prevPerf == nil {
@@ -428,14 +452,20 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 	for user, cur := range currentPerf {
 		p := prevPerf[user]
 
-		cpuDelta   := cur.CPUPico   - p.CPUPico
+		cpuDelta := cur.CPUPico - p.CPUPico
 		countDelta := cur.CountStar - p.CountStar
-		waitDelta  := cur.WaitPico  - p.WaitPico
+		waitDelta := cur.WaitPico - p.WaitPico
 
 		// Counter rollback = server restart.
-		if cpuDelta   < 0 { cpuDelta   = cur.CPUPico   }
-		if countDelta < 0 { countDelta = cur.CountStar  }
-		if waitDelta  < 0 { waitDelta  = cur.WaitPico   }
+		if cpuDelta < 0 {
+			cpuDelta = cur.CPUPico
+		}
+		if countDelta < 0 {
+			countDelta = cur.CountStar
+		}
+		if waitDelta < 0 {
+			waitDelta = cur.WaitPico
+		}
 
 		if cpuDelta == 0 && countDelta == 0 {
 			continue
@@ -462,18 +492,26 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 			cu := currentUserstat[user]
 			pu := prevUserstat[user]
 
-			cpuSecDelta   := cu.CPUSec   - pu.CPUSec
-			busySecDelta  := cu.BusySec  - pu.BusySec
+			cpuSecDelta := cu.CPUSec - pu.CPUSec
+			busySecDelta := cu.BusySec - pu.BusySec
 			rowsReadDelta := cu.RowsRead - pu.RowsRead
 			rowsSentDelta := cu.RowsSent - pu.RowsSent
 
-			if cpuSecDelta   < 0 { cpuSecDelta   = cu.CPUSec   }
-			if busySecDelta  < 0 { busySecDelta  = cu.BusySec  }
-			if rowsReadDelta < 0 { rowsReadDelta = cu.RowsRead }
-			if rowsSentDelta < 0 { rowsSentDelta = cu.RowsSent }
+			if cpuSecDelta < 0 {
+				cpuSecDelta = cu.CPUSec
+			}
+			if busySecDelta < 0 {
+				busySecDelta = cu.BusySec
+			}
+			if rowsReadDelta < 0 {
+				rowsReadDelta = cu.RowsRead
+			}
+			if rowsSentDelta < 0 {
+				rowsSentDelta = cu.RowsSent
+			}
 
-			d.CPUSec   = cpuSecDelta
-			d.BusySec  = busySecDelta
+			d.CPUSec = cpuSecDelta
+			d.BusySec = busySecDelta
 			d.RowsRead = rowsReadDelta
 			d.RowsSent = rowsSentDelta
 

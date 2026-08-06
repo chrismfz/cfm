@@ -387,7 +387,7 @@ func registerMySQLPressure(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "mysql_pressure",
-		Description: "MySQL/MariaDB pressure right now (the mysqltop view): overall connection saturation (used/max, %), and per-user connection load MERGED with per-user CPU/query deltas, ranked by pressure. This is where you catch the offender — e.g. a user with few connections but high CPU/queries, or the correlation 'this account drives heavy MySQL load with little HTTP traffic'. The perf block says whether CPU numbers are actually available (performance_schema / MariaDB userstat); if off, cpu_sec/queries read 0.",
+		Description: "MySQL/MariaDB pressure right now (the mysqltop view): overall connection saturation (used/max, %), and per-user connection load MERGED with per-user CPU/busy/query deltas, ranked by pressure. This is where you catch the offender — a user with few connections but high CPU/busy-time/queries, or the correlation 'this account drives heavy MySQL load with little HTTP traffic'. The perf block says which numbers are real: on many CloudLinux MariaDB builds CPU_TIME is 0 but busy_sec (wall-clock busy time) is populated and is the CPU proxy — ranking falls back to it. If perf_schema/userstat are off, cpu/busy read 0 and ranking uses query volume.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mysqlPressureInput) (*mcp.CallToolResult, any, error) {
 		topN := in.Top
 		if topN <= 0 {
@@ -420,8 +420,10 @@ type mysqlUserRow struct {
 	Locked       int     `json:"locked"`
 	MaxSleepSec  int64   `json:"max_sleep_sec,omitempty"`
 	CPUSec       float64 `json:"cpu_sec,omitempty"`
+	BusySec      float64 `json:"busy_sec,omitempty"` // wall-clock busy time; the CPU proxy when CPU_TIME is 0 (common on CloudLinux MariaDB)
 	QueryCount   int64   `json:"query_count,omitempty"`
 	AvgQueryMsec float64 `json:"avg_query_msec,omitempty"`
+	RowsRead     int64   `json:"rows_read,omitempty"`
 }
 
 // mergeMySQLPressure joins the /mysql/top per-user connection view with the
@@ -456,8 +458,10 @@ func mergeMySQLPressure(topBody, cpuBody json.RawMessage, topN int) map[string]a
 		Users         []struct {
 			User         string  `json:"user"`
 			CPUSec       float64 `json:"cpu_sec"`
+			BusySec      float64 `json:"busy_sec"`
 			QueryCount   int64   `json:"query_count"`
 			AvgQueryMsec float64 `json:"avg_query_msec"`
+			RowsRead     int64   `json:"rows_read"`
 		} `json:"users"`
 	}
 	_ = json.Unmarshal(cpuBody, &cpu)
@@ -475,7 +479,7 @@ func mergeMySQLPressure(topBody, cpuBody json.RawMessage, topN int) map[string]a
 		}
 		if i, ok := cpuByUser[u.User]; ok {
 			c := cpu.Users[i]
-			r.CPUSec, r.QueryCount, r.AvgQueryMsec = c.CPUSec, c.QueryCount, c.AvgQueryMsec
+			r.CPUSec, r.BusySec, r.QueryCount, r.AvgQueryMsec, r.RowsRead = c.CPUSec, c.BusySec, c.QueryCount, c.AvgQueryMsec, c.RowsRead
 		}
 		rows = append(rows, r)
 	}
@@ -487,10 +491,12 @@ func mergeMySQLPressure(topBody, cpuBody json.RawMessage, topN int) map[string]a
 	}
 	for _, c := range cpu.Users {
 		if !seen[c.User] {
-			rows = append(rows, mysqlUserRow{User: c.User, CPUSec: c.CPUSec, QueryCount: c.QueryCount, AvgQueryMsec: c.AvgQueryMsec})
+			rows = append(rows, mysqlUserRow{User: c.User, CPUSec: c.CPUSec, BusySec: c.BusySec, QueryCount: c.QueryCount, AvgQueryMsec: c.AvgQueryMsec, RowsRead: c.RowsRead})
 		}
 	}
 
+	// Rank by pressure: active conns, then CPU, then BUSY (the CPU proxy when
+	// CPU_TIME is 0 — common on CloudLinux MariaDB), then query volume, then conns.
 	sort.Slice(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		if a.Active != b.Active {
@@ -498,6 +504,9 @@ func mergeMySQLPressure(topBody, cpuBody json.RawMessage, topN int) map[string]a
 		}
 		if a.CPUSec != b.CPUSec {
 			return a.CPUSec > b.CPUSec
+		}
+		if a.BusySec != b.BusySec {
+			return a.BusySec > b.BusySec
 		}
 		if a.QueryCount != b.QueryCount {
 			return a.QueryCount > b.QueryCount

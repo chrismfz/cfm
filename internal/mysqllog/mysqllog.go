@@ -216,8 +216,16 @@ func fileExists(p string) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
+// readerBufSize bounds how much of a single line is held in memory. A line
+// longer than this (a slow-query log entry can carry huge SQL) is truncated to
+// this prefix and the remainder drained to the next newline — so one monster
+// line can neither blow memory nor abort the whole call (the old bufio.Scanner
+// returned ErrTooLong and 502'd the request; see mysql_slow_queries bug).
+const readerBufSize = 1024 * 1024
+
 // streamTail runs `tail -n N file`, feeding each line to fn. tail reads backward
 // from EOF, so the read is bounded to the tail window regardless of file size.
+// Over-long lines are truncated (not fatal) via a bounded bufio.Reader.
 func streamTail(ctx context.Context, file string, lines int, fn func(string)) error {
 	cmd := exec.CommandContext(ctx, tailPath(), "-n", fmt.Sprintf("%d", lines), file)
 	stdout, err := cmd.StdoutPipe()
@@ -228,18 +236,49 @@ func streamTail(ctx context.Context, file string, lines int, fn func(string)) er
 		stdout.Close()
 		return err
 	}
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		fn(sc.Text())
-	}
-	scanErr := sc.Err()
-	_, _ = io.Copy(io.Discard, stdout)
+	r := bufio.NewReaderSize(stdout, readerBufSize)
+	readErr := scanBoundedLines(r, fn)
+	_, _ = io.Copy(io.Discard, stdout) // drain so tail can exit
 	_ = cmd.Wait()
 	if ctx.Err() != nil {
 		return fmt.Errorf("scan timed out after %s", scanTimeout)
 	}
-	return scanErr
+	return readErr
+}
+
+// scanBoundedLines reads newline-delimited lines from r, emitting each via fn.
+// A line longer than r's buffer is emitted truncated to the buffer prefix and
+// the rest is discarded up to the next newline (never buffered), so memory is
+// bounded to the reader's buffer size and an over-long line is not fatal.
+// Separated from exec so it is unit-tested. io.EOF is the normal terminator.
+func scanBoundedLines(r *bufio.Reader, fn func(string)) error {
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			// Over-long line: `chunk` is the buffer-sized prefix (no newline).
+			// Emit it (copied) truncated, then drain the rest of this line.
+			fn(strings.TrimRight(string(chunk), "\r\n"))
+			for err == bufio.ErrBufferFull {
+				_, err = r.ReadSlice('\n')
+			}
+			if err == nil {
+				continue
+			}
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if len(chunk) > 0 {
+			fn(strings.TrimRight(string(chunk), "\r\n"))
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
 }
 
 func truncLine(s string) string {

@@ -55,6 +55,27 @@ func TestMergeMySQLPressure(t *testing.T) {
 	}
 }
 
+func TestMergeMySQLPressure_BusySecSurfacedAndRanks(t *testing.T) {
+	// CloudLinux MariaDB: CPU_TIME=0 everywhere, BUSY_TIME populated. busy_sec
+	// must be surfaced and used as the tiebreaker after cpu (both 0 active).
+	topBody := json.RawMessage(`{"total":2,"max":100,"per_user":[
+		{"User":"heavy","Active":0,"Total":1},
+		{"User":"light","Active":0,"Total":1}]}`)
+	cpuBody := json.RawMessage(`{"userstat_ok":true,"users":[
+		{"user":"light","cpu_sec":0,"busy_sec":0.2,"query_count":9000,"avg_query_msec":0.1,"rows_read":100},
+		{"user":"heavy","cpu_sec":0,"busy_sec":45.7,"query_count":300,"avg_query_msec":80.0,"rows_read":5000000}]}`)
+
+	res := mergeMySQLPressure(topBody, cpuBody, 25)
+	rows := res["top_users"].([]mysqlUserRow)
+	// heavy has far higher busy_sec despite fewer queries → ranks first.
+	if rows[0].User != "heavy" {
+		t.Fatalf("expected busy_sec to rank 'heavy' first, got %+v", rows[0])
+	}
+	if rows[0].BusySec != 45.7 || rows[0].RowsRead != 5000000 {
+		t.Fatalf("busy_sec/rows_read not surfaced: %+v", rows[0])
+	}
+}
+
 func TestMergeMySQLPressure_TopNTruncates(t *testing.T) {
 	// 5 users, ask for top 2.
 	topBody := json.RawMessage(`{"total":5,"max":100,"per_user":[

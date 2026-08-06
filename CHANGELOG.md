@@ -79,6 +79,27 @@ back-filled here — see the git/PR history for that period.
   `0.0.0.0`/`::`). The response key is `groups` (was `listeners`).
 
 ### Fixed
+- **`mysql_slow_queries` no longer 502s on a long slow-log line.** A slow-query
+  entry longer than the scanner buffer returned `bufio.Scanner: token too long`
+  and failed the whole call. `internal/mysqllog` now uses a bounded
+  `bufio.Reader`: an over-long line is truncated to the buffer prefix and the
+  remainder drained to the next newline, so one monster query can neither blow
+  memory nor abort the tail.
+- **MySQL governor picks up a runtime `SET GLOBAL userstat=ON` without a cfm
+  restart.** The capability probe ran once at startup and (while
+  performance_schema was already OK) never re-evaluated userstat, so enabling
+  userstat after the daemon started left the governor stuck on the query-only
+  path — `mysql_pressure` kept reporting `userstat_off:true` with no CPU/busy
+  data. `fetchPerfDeltas` now re-checks `@@userstat` on a 60s cadence while it's
+  off and upgrades to the userstat path live (resetting the baseline so the
+  first delta isn't a false spike).
+
+### Changed
+- **`mysql_pressure` surfaces `busy_sec` (+ `rows_read`) and ranks by it.** On
+  many CloudLinux MariaDB builds `USER_STATISTICS.CPU_TIME` is 0 while
+  `BUSY_TIME` (wall-clock busy time) is populated — the usable CPU proxy. The
+  tool now exposes `busy_sec` per user and ranks active → cpu_sec → busy_sec →
+  query volume, so the expensive tenant surfaces even when CPU_TIME reads 0.
 - **`listening_ports` renders IPv6 link-local zones cleanly.** A zoned bind
   address (`[fe80::1]%eth0:53`) left a stray `]` mid-string
   (`fe80::1]%eth0`); the closing bracket is now dropped so the zone survives
