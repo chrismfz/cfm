@@ -75,13 +75,15 @@ type AccessFilter struct {
 }
 
 func (f AccessFilter) match(e AccessEntry) bool {
+	// Host/Method/PathSub are pre-lowered once by recent() before the walk, so
+	// this runs no per-entry allocation while the RLock is held.
 	if f.IP != "" && e.IP != f.IP {
 		return false
 	}
-	if f.Host != "" && e.Host != strings.ToLower(f.Host) {
+	if f.Host != "" && e.Host != f.Host {
 		return false
 	}
-	if f.Method != "" && e.Method != strings.ToLower(f.Method) {
+	if f.Method != "" && e.Method != f.Method {
 		return false
 	}
 	if f.StatusClass > 0 {
@@ -91,7 +93,7 @@ func (f AccessFilter) match(e AccessEntry) bool {
 	} else if f.Status > 0 && e.Status != f.Status {
 		return false
 	}
-	if f.PathSub != "" && !strings.Contains(e.URI, strings.ToLower(f.PathSub)) {
+	if f.PathSub != "" && !strings.Contains(e.URI, f.PathSub) {
 		return false
 	}
 	if f.Since > 0 && e.TS < f.Since {
@@ -111,6 +113,12 @@ func (r *accessRing) recent(f AccessFilter) []AccessEntry {
 	if limit > accessMaxLimit {
 		limit = accessMaxLimit
 	}
+	// Normalize case-insensitive filters ONCE, not per entry — keeps the RLock
+	// window (up to 4096 iterations) allocation-free. Stored entries are already
+	// lowercased at ingest.
+	f.Host = strings.ToLower(f.Host)
+	f.Method = strings.ToLower(f.Method)
+	f.PathSub = strings.ToLower(f.PathSub)
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
