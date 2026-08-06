@@ -468,6 +468,25 @@ func TestToolCallDispatchesToAllowlistedEndpoint(t *testing.T) {
 	}
 }
 
+func TestDetectionHistoryPassesIP(t *testing.T) {
+	fd := &fakeDispatch{body: []byte(`{"rows":[]}`)}
+	ts := newTestServer(t, fd)
+
+	// detection_history ip=<addr> → /api/v1/webdet/history/events?ip=…&enrich=1
+	// (the "who/why was this IP acted on" attribution lookup).
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"detection_history","arguments":{"ip":"79.130.136.88"}}}`)
+	if fd.lastPath != "/api/v1/webdet/history/events" {
+		t.Errorf("detection_history dispatched to %q", fd.lastPath)
+	}
+	if fd.lastQuery.Get("ip") != "79.130.136.88" {
+		t.Errorf("detection_history ip = %q, want 79.130.136.88", fd.lastQuery.Get("ip"))
+	}
+	if fd.lastQuery.Get("enrich") != "1" {
+		t.Errorf("detection_history should request enrich=1, got %q", fd.lastQuery.Get("enrich"))
+	}
+}
+
 func TestToolCallMissingRequiredArg(t *testing.T) {
 	fd := &fakeDispatch{}
 	ts := newTestServer(t, fd)

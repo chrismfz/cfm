@@ -18,6 +18,13 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP `detection_history` tool now takes `ip=<addr>`** — attribute one source
+  IP to the WAF/detector/challenge events CFM recorded for it ("who/why was this
+  IP acted on?"). The `/api/v1/webdet/history/events` endpoint already filtered by
+  IP (and the `cfm webtop history events --ip` CLI already used it); this just
+  exposes it on the MCP tool, so a `firewall_blocks` ban that carries no nft
+  comment can be traced to its origin (note: manual/blocklist bans leave no
+  detection event, so an empty result there points to a manual/imported ban).
 - **MCP tool `mail_queue_summary` + `GET /api/v1/system/mail-queue` —
   MTA-agnostic mail-queue breakdown.** Read-only, admin-only. On top of the raw
   queued/frozen counts already in the health snapshot, this gives the actionable
