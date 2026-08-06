@@ -35,8 +35,9 @@ back-filled here — see the git/PR history for that period.
   provider parses `postqueue -p` (with the defer reason carried inline in the
   listing, so no maillog tail is needed) and works for a plain postfix node or
   postfix-in-a-container (mailcow) via the detector's configurable list command
-  (`docker exec … postqueue -p`). The same breakdown will also surface in the
-  `cfm` CLI and the WebUI.
+  (`docker exec … postqueue -p`). Exposed on the CLI as **`cfm mailtop`**
+  (aliases `mail-queue`, `mailq`; `--json` for scripting); the same breakdown
+  will also surface in the WebUI.
 - **MCP tools `mysql_log_tail` + `mysql_slow_queries` + `GET /api/v1/system/mysql-log`
   — on-demand tails of the MySQL error / slow-query logs.** Read-only, admin-only.
   `mysql_log_tail` tails the MySQL/MariaDB **error log** (crashes, deadlocks,
