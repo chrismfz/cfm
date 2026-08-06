@@ -4,37 +4,36 @@
 //
 // Two complementary mechanisms:
 //
-//   reap_sleep   — on every poll: if a user has more connections than their cap,
-//                  kill the oldest sleeping ones (by idle time) until back under
-//                  the limit. InnoDB open-transaction guard always applied.
-//                  Requires only PROCESS privilege.
+//	reap_sleep   — on every poll: if a user has more connections than their cap,
+//	               kill the oldest sleeping ones (by idle time) until back under
+//	               the limit. InnoDB open-transaction guard always applied.
+//	               Requires only PROCESS privilege.
 //
-//   alter_user   — issue ALTER USER … WITH MAX_USER_CONNECTIONS N so MariaDB
-//                  refuses new connections beyond the cap at the protocol level.
-//                  Also falls through to reap_sleep to clean up existing sleepers.
-//                  Reversed automatically when the user drops back under limit.
-//                  Requires GRANT CREATE USER ON *.* TO 'cfm_governor'@'localhost'.
+//	alter_user   — issue ALTER USER … WITH MAX_USER_CONNECTIONS N so MariaDB
+//	               refuses new connections beyond the cap at the protocol level.
+//	               Also falls through to reap_sleep to clean up existing sleepers.
+//	               Reversed automatically when the user drops back under limit.
+//	               Requires GRANT CREATE USER ON *.* TO 'cfm_governor'@'localhost'.
 //
-//   notify       — alert only, no kill. Use as an early-warning first stage.
+//	notify       — alert only, no kill. Use as an early-warning first stage.
 //
 // Persistence safety — ALTER USER writes to mysql.user and survives MySQL
 // restarts.  Two mechanisms keep caps from getting permanently stuck:
 //
-//   auditAlterUserOnStartup  — runs once in NewGovernor. Queries mysql.user for
-//                              any non-zero MAX_USER_CONNECTIONS that match our
-//                              alter_user rules and resets them to 0.  Handles
-//                              cfm crash / restart / update scenarios.
+//	auditAlterUserOnStartup  — runs once in NewGovernor. Queries mysql.user for
+//	                           any non-zero MAX_USER_CONNECTIONS that match our
+//	                           alter_user rules and resets them to 0.  Handles
+//	                           cfm crash / restart / update scenarios.
 //
-//   cleanupStaleAlterCaps    — runs every alterAuditInterval (15 min) from poll().
-//                              Reverses caps for users that have dropped under
-//                              their limit or have zero connections at all (site
-//                              offline, account suspended). Handles the edge case
-//                              where a user vanishes from the processlist entirely
-//                              so enforceConnRules never sees them.
+//	cleanupStaleAlterCaps    — runs every alterAuditInterval (15 min) from poll().
+//	                           Reverses caps for users that have dropped under
+//	                           their limit or have zero connections at all (site
+//	                           offline, account suspended). Handles the edge case
+//	                           where a user vanishes from the processlist entirely
+//	                           so enforceConnRules never sees them.
 //
 // Notify cooldown: a per-user notify is suppressed for connNotifyCooldown after
 // the last fire, so a persistently-over-limit user does not flood the log.
-//
 package mysql
 
 import (
@@ -60,10 +59,10 @@ const (
 // ConnRule describes one entry in the CONN_RULES list.
 type ConnRule struct {
 	UserPattern string
-	Max         int            // connection cap (total connections for this user)
+	Max         int // connection cap (total connections for this user)
 	Action      ConnRuleAction
-	ConnPct     float64        // dynamic trigger: only enforce when global conn >= N%
-	                           // 0 = always active (static)
+	ConnPct     float64 // dynamic trigger: only enforce when global conn >= N%
+	// 0 = always active (static)
 }
 
 // connNotifyCooldown suppresses repeated notify-only alerts for the same user.
@@ -190,16 +189,16 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 				}
 
 				kr := KillRecord{
-					Ts:        time.Now(),
-					PID:       s.proc.ID,
-					User:      us.User,
-					Host:      s.proc.Host,
-					DB:        s.proc.DB,
-					Runtime:   time.Duration(s.proc.TimeSec) * time.Second,
-					State:     s.proc.State,
-					Query:     truncate(strings.TrimSpace(s.proc.Info), 300),
-					Action:    actionLabel,
-					Reason:    fmt.Sprintf("conn_limit: excess=%d max=%d total=%d idle=%ds",
+					Ts:      time.Now(),
+					PID:     s.proc.ID,
+					User:    us.User,
+					Host:    s.proc.Host,
+					DB:      s.proc.DB,
+					Runtime: time.Duration(s.proc.TimeSec) * time.Second,
+					State:   s.proc.State,
+					Query:   truncate(strings.TrimSpace(s.proc.Info), 300),
+					Action:  actionLabel,
+					Reason: fmt.Sprintf("conn_limit: excess=%d max=%d total=%d idle=%ds",
 						excess, rule.Max, us.Total, s.proc.TimeSec),
 					Result:    result,
 					Unblocked: 0,
@@ -238,11 +237,6 @@ func (g *Governor) enforceConnRules(ctx context.Context, state GovernorState, pr
 					Severity: "warn",
 				})
 			}
-
-
-
-
-
 
 		}
 	}
