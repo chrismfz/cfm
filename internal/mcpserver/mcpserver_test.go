@@ -487,6 +487,33 @@ func TestDetectionHistoryPassesIP(t *testing.T) {
 	}
 }
 
+func TestIPLocateDispatchesToSearch(t *testing.T) {
+	fd := &fakeDispatch{body: []byte(`{"ok":true,"locations":[]}`)}
+	ts := newTestServer(t, fd)
+
+	// ip_locate ip=<addr> → /search?ip=… (the `cfm which` multi-source lookup,
+	// which carries the cfm.deny autoblock reason).
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ip_locate","arguments":{"ip":"79.130.136.88"}}}`)
+	if fd.lastPath != "/search" {
+		t.Errorf("ip_locate dispatched to %q, want /search", fd.lastPath)
+	}
+	if fd.lastQuery.Get("ip") != "79.130.136.88" {
+		t.Errorf("ip_locate ip = %q, want 79.130.136.88", fd.lastQuery.Get("ip"))
+	}
+
+	// Missing ip must error before dispatch (schema-required + explicit guard).
+	fd.lastPath = ""
+	_, body := mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ip_locate","arguments":{"ip":""}}}`)
+	if fd.lastPath != "" {
+		t.Errorf("ip_locate dispatched despite empty ip (path=%q)", fd.lastPath)
+	}
+	if !strings.Contains(body, "ip") {
+		t.Errorf("expected a required-field error mentioning ip, got: %s", body)
+	}
+}
+
 func TestToolCallMissingRequiredArg(t *testing.T) {
 	fd := &fakeDispatch{}
 	ts := newTestServer(t, fd)

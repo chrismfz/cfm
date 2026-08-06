@@ -18,6 +18,14 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP tool `ip_locate`** — the `cfm which/search <ip>` equivalent over MCP:
+  where an IP is blocked across ALL sources (nft / cfm.deny / csf / fail2ban /
+  imunify360) **and why**, since each hit carries the source's reason — notably
+  the cfm.deny autoblock comment (e.g. `autoblock: portscan (N distinct ports) …
+  at <time>`). This closes the attribution gap `firewall_blocks` + `detection_
+  history` left: a permanent nft ban with no comment and no WAF/challenge event
+  is explained here (portscan/detector autoblocks are written to cfm.deny, not
+  the webdet history). Wraps the existing read-only `/search` endpoint; admin-only.
 - **`cfm which` / `cfm search <IP>` now shows the "why / from where" too.** On
   top of the existing multi-source enforcement lookup (nft / cfm.deny / csf /
   fail2ban / imunify360, with set/feed/reason), for a single IP it appends a
