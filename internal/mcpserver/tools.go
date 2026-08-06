@@ -659,14 +659,221 @@ func registerBotsTop(srv *mcp.Server, d Deps) {
 
 // ── Enforcement & platform ──────────────────────────────────────────────────────
 
+type firewallBlocksInput struct {
+	Country string `json:"country,omitempty" jsonschema:"drill down to blocks from ONE country — a value from the summary's by_country (case-insensitive, substring ok: 'greece', 'china', 'united states'); omit for the summary view"`
+	ASN     int    `json:"asn,omitempty" jsonschema:"drill down to blocks in ONE ASN number (from the summary's by_asn); omit for the summary view"`
+	Reason  string `json:"reason,omitempty" jsonschema:"drill down to blocks whose ban comment CONTAINS this text, case-insensitive (e.g. 'ssh','exim','waf'); only useful where autoblocks carry a comment (many bulk/blocklist bans have none). Omit for the summary view"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"in a drill-down, max ban rows to return; default 100, max 1000"`
+}
+
 func registerFirewallBlocks(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "firewall_blocks",
-		Description: "Currently blocked IPs in the nftables firewall — including WAF autoblocks and detector-driven bans — each with its TTL (or permanent), comment/reason, and GeoIP. Answers \"who is banned right now, and why?\".",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
-		return dispatchJSON(ctx, d, "/api/v1/firewall/list", nil)
+		Description: "Currently blocked IPs in the nftables firewall (WAF autoblocks, detector bans, blocklist/manual). The full ban list is often THOUSANDS of IPs, so with no args this returns a COMPACT SUMMARY: total + permanent/temporary counts, the top blocked countries (by_country), and the top blocked networks (by_asn — GeoIP ASN + name). To see the actual bans, DRILL DOWN with country=<name from by_country>, asn=<number from by_asn>, and/or reason=<comment substring>; the drill-down returns the matching rows plus a within-facet ASN breakdown, so you can judge likely false positives (a residential-ISP ASN is a more likely FP than a hosting/VPS network). e.g. country='greece' to review bans of your own country. Read-only.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in firewallBlocksInput) (*mcp.CallToolResult, any, error) {
+		body := section(ctx, d, "/api/v1/firewall/list", nil)
+		if e := sectionError(body); e != "" {
+			return nil, nil, fmt.Errorf("firewall/list: %s", e)
+		}
+		b, err := marshal(summarizeFirewallBlocks(body, in))
+		if err != nil {
+			return nil, nil, err
+		}
+		return textResult(b), nil, nil
 	})
+}
+
+// fwBlockRow mirrors the firewallListRow the /api/v1/firewall/list handler emits.
+type fwBlockRow struct {
+	IP           string `json:"ip"`
+	Country      string `json:"country,omitempty"`
+	ASN          uint   `json:"asn,omitempty"`
+	ASNName      string `json:"asn_name,omitempty"`
+	Comment      string `json:"comment,omitempty"`
+	Permanent    bool   `json:"permanent"`
+	ExpiresInSec int64  `json:"expires_in_sec,omitempty"`
+}
+
+const (
+	fwSummaryTopN = 15   // countries/ASNs listed in the summary
+	fwDrillTopN   = 10   // ASN breakdown within a drill-down
+	fwDrillLimit  = 100  // default drill-down row cap
+	fwDrillMax    = 1000 // hard drill-down row cap
+)
+
+// summarizeFirewallBlocks turns the full ban list (often thousands of rows) into
+// either a compact summary (top countries + top ASNs + perm/temp counts) or, when
+// a country/asn/reason facet is given, the matching rows with an ASN breakdown.
+// Separated from dispatch so it is unit-tested.
+func summarizeFirewallBlocks(body json.RawMessage, in firewallBlocksInput) map[string]any {
+	var resp struct {
+		Rows      []fwBlockRow `json:"rows"`
+		Total     int          `json:"total"`
+		Permanent int          `json:"permanent"`
+	}
+	_ = json.Unmarshal(body, &resp)
+
+	country := strings.ToLower(strings.TrimSpace(in.Country))
+	reason := strings.ToLower(strings.TrimSpace(in.Reason))
+	drill := country != "" || in.ASN > 0 || reason != ""
+
+	if !drill {
+		perm, temp := splitPermTemp(resp.Rows)
+		total := resp.Total
+		if total <= 0 {
+			total = len(resp.Rows)
+		}
+		return map[string]any{
+			"view":            "summary",
+			"total":           total,
+			"permanent":       perm,
+			"temporary":       temp,
+			"countries_total": distinctCountries(resp.Rows),
+			"by_country":      topCountries(resp.Rows, fwSummaryTopN),
+			"by_asn":          topASNs(resp.Rows, fwSummaryTopN),
+			"note":            "summary — drill down with country=<name>, asn=<number>, or reason=<comment substring> to get the actual ban rows (with GeoIP + ASN for FP judgement)",
+		}
+	}
+
+	matched := make([]fwBlockRow, 0)
+	for _, r := range resp.Rows {
+		if country != "" && !strings.Contains(strings.ToLower(r.Country), country) {
+			continue
+		}
+		if in.ASN > 0 && r.ASN != uint(in.ASN) {
+			continue
+		}
+		if reason != "" && !strings.Contains(strings.ToLower(r.Comment), reason) {
+			continue
+		}
+		matched = append(matched, r)
+	}
+	limit := in.Limit
+	if limit <= 0 {
+		limit = fwDrillLimit
+	}
+	if limit > fwDrillMax {
+		limit = fwDrillMax
+	}
+	perm, temp := splitPermTemp(matched)
+	rows := matched
+	truncated := false
+	if len(rows) > limit {
+		rows = rows[:limit]
+		truncated = true
+	}
+	filter := map[string]any{}
+	if in.Country != "" {
+		filter["country"] = in.Country
+	}
+	if in.ASN > 0 {
+		filter["asn"] = in.ASN
+	}
+	if in.Reason != "" {
+		filter["reason"] = in.Reason
+	}
+	return map[string]any{
+		"view":      "drilldown",
+		"filter":    filter,
+		"matched":   len(matched),
+		"returned":  len(rows),
+		"truncated": truncated,
+		"permanent": perm,
+		"temporary": temp,
+		"by_asn":    topASNs(matched, fwDrillTopN),
+		"rows":      rows,
+	}
+}
+
+func splitPermTemp(rows []fwBlockRow) (perm, temp int) {
+	for _, r := range rows {
+		if r.Permanent {
+			perm++
+		} else {
+			temp++
+		}
+	}
+	return perm, temp
+}
+
+func distinctCountries(rows []fwBlockRow) int {
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if r.Country != "" {
+			seen[r.Country] = true
+		}
+	}
+	return len(seen)
+}
+
+type fwCountRow struct {
+	Country string `json:"country"`
+	Count   int    `json:"count"`
+}
+
+func topCountries(rows []fwBlockRow, topN int) []fwCountRow {
+	m := map[string]int{}
+	for _, r := range rows {
+		c := r.Country
+		if c == "" {
+			c = "(unknown)"
+		}
+		m[c]++
+	}
+	out := make([]fwCountRow, 0, len(m))
+	for c, n := range m {
+		out = append(out, fwCountRow{Country: c, Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Country < out[j].Country
+	})
+	if len(out) > topN {
+		out = out[:topN]
+	}
+	return out
+}
+
+type fwASNRow struct {
+	ASN     uint   `json:"asn"`
+	ASNName string `json:"asn_name,omitempty"`
+	Count   int    `json:"count"`
+}
+
+func topASNs(rows []fwBlockRow, topN int) []fwASNRow {
+	type agg struct {
+		name  string
+		count int
+	}
+	m := map[uint]*agg{}
+	for _, r := range rows {
+		a := m[r.ASN]
+		if a == nil {
+			a = &agg{name: r.ASNName}
+			m[r.ASN] = a
+		}
+		if a.name == "" && r.ASNName != "" {
+			a.name = r.ASNName
+		}
+		a.count++
+	}
+	out := make([]fwASNRow, 0, len(m))
+	for asn, a := range m {
+		out = append(out, fwASNRow{ASN: asn, ASNName: a.name, Count: a.count})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].ASN < out[j].ASN
+	})
+	if len(out) > topN {
+		out = out[:topN]
+	}
+	return out
 }
 
 func registerDetectorsStatus(srv *mcp.Server, d Deps) {
