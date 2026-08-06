@@ -34,15 +34,7 @@ const maxReasonLen = 140
 // (`**`) and freeze (`Frozen`) events, normalizes each reason, and returns the
 // top reasons by frequency. Pure — the caller supplies a bounded log tail.
 func ParseEximDeferReasons(lines []string, top int) []DeferReason {
-	if top <= 0 {
-		top = DefaultTop
-	}
-	type agg struct {
-		count    int
-		category string
-		sample   string
-	}
-	m := map[string]*agg{}
+	hits := make([]reasonHit, 0, len(lines))
 	for _, line := range lines {
 		cat, raw := eximLineReason(line)
 		if raw == "" {
@@ -52,10 +44,41 @@ func ParseEximDeferReasons(lines []string, top int) []DeferReason {
 		if key == "" {
 			continue
 		}
-		mk := cat + "\x00" + key
+		hits = append(hits, reasonHit{category: cat, key: key, sample: raw})
+	}
+	return aggregateReasons(hits, top)
+}
+
+// reasonHit is one classified+normalized reason occurrence fed to
+// aggregateReasons. sample is the RAW reason (trimmed on aggregation).
+type reasonHit struct {
+	category string // deferred | failed | frozen
+	key      string // normalized reason (the aggregation key)
+	sample   string // representative raw reason
+}
+
+// aggregateReasons buckets reasonHits by (category, normalized key), counts
+// them, keeps one representative sample per bucket, and returns the top-N by
+// frequency. Shared by the exim (mainlog) and postfix (inline) providers so the
+// two can never drift.
+func aggregateReasons(hits []reasonHit, top int) []DeferReason {
+	if top <= 0 {
+		top = DefaultTop
+	}
+	type agg struct {
+		count    int
+		category string
+		sample   string
+	}
+	m := map[string]*agg{}
+	for _, h := range hits {
+		if h.key == "" {
+			continue
+		}
+		mk := h.category + "\x00" + h.key
 		a := m[mk]
 		if a == nil {
-			a = &agg{category: cat, sample: trimSample(raw)}
+			a = &agg{category: h.category, sample: trimSample(h.sample)}
 			m[mk] = a
 		}
 		a.count++

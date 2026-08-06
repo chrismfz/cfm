@@ -31,8 +31,13 @@ back-filled here — see the git/PR history for that period.
   queue detector (`exim_queues`/`postfix_queues`) builds the report each poll
   from output it already has (plus a bounded mainlog tail for reasons) and
   publishes it to the new `internal/mailqueue` store; the API/CLI/WebUI read it
-  with zero extra MTA probe. exim wired now (postfix report to follow); the same
-  breakdown will also surface in `cfm` CLI and the WebUI.
+  with zero extra MTA probe. **Both exim and postfix are wired** — the postfix
+  provider parses `postqueue -p` (with the defer reason carried inline in the
+  listing, so no maillog tail is needed) and works for a plain postfix node or
+  postfix-in-a-container (mailcow) via the detector's configurable list command
+  (`docker exec … postqueue -p`). Exposed on the CLI as **`cfm mailtop`**
+  (aliases `mail-queue`, `mailq`; `--json` for scripting); the same breakdown
+  will also surface in the WebUI.
 - **MCP tools `mysql_log_tail` + `mysql_slow_queries` + `GET /api/v1/system/mysql-log`
   — on-demand tails of the MySQL error / slow-query logs.** Read-only, admin-only.
   `mysql_log_tail` tails the MySQL/MariaDB **error log** (crashes, deadlocks,
@@ -94,6 +99,15 @@ back-filled here — see the git/PR history for that period.
   `0.0.0.0`/`::`). The response key is `groups` (was `listeners`).
 
 ### Fixed
+- **postfix queue `total` / `frozen` counts are now accurate.** The
+  `postfix_queues` detector counted the queue total with a line-counting shell
+  command (`mailq | … | wc -l`), which over-counts ~3-5× because each message
+  spans a header + optional reason + N recipient lines; and it derived "frozen"
+  from the substring `"deferred"`, which `mailq` never prints (so the count was
+  ~always 0). Both the health snapshot and the new mail-queue report now take
+  the exact message count and the held-message count (postfix `!` marker)
+  straight from the parsed listing — one probe, no line-counting — so the
+  `QUEUE_TOTAL`/`QUEUE_FROZEN` alert thresholds finally mean what they say.
 - **`mysql_slow_queries` no longer 502s on a long slow-log line.** A slow-query
   entry longer than the scanner buffer returned `bufio.Scanner: token too long`
   and failed the whole call. `internal/mysqllog` now uses a bounded

@@ -52,6 +52,7 @@ type QueuedMsg struct {
 	Frozen      bool     `json:"frozen"`
 	Recipients  int      `json:"recipients"`
 	rcptDomains []string // deduped, capped; aggregated then dropped from JSON
+	reason      string   // postfix inline defer reason (raw); aggregated then dropped from JSON
 }
 
 // DomCount is a domain with its message count.
