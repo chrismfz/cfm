@@ -150,16 +150,28 @@ func (e *Engine) RecentAccess(f AccessFilter) []AccessEntry {
 func newAccessEntry(rec LogRec) AccessEntry {
 	return AccessEntry{
 		TS:     rec.TS,
-		IP:     rec.IP,
-		Host:   truncate(rec.Host, accessMaxHost),
-		Method: rec.Method,
-		URI:    truncate(redactQuery(rec.URI), accessMaxURI),
+		IP:     boundStr(rec.IP, accessMaxHost),
+		Host:   boundStr(rec.Host, accessMaxHost),
+		Method: boundStr(rec.Method, 16),
+		URI:    boundStr(redactQuery(rec.URI), accessMaxURI),
 		Status: rec.Status,
 		Bytes:  rec.Bytes,
 		RTms:   int64(rec.RT * 1000),
-		UA:     truncate(rec.UA, accessMaxUA),
-		Ref:    truncate(redactQuery(rec.Ref), accessMaxRef),
+		UA:     boundStr(rec.UA, accessMaxUA),
+		Ref:    boundStr(redactQuery(rec.Ref), accessMaxRef),
 	}
+}
+
+// boundStr caps a field at max runes/bytes AND guarantees the result is a fresh
+// allocation — never a substring aliasing a larger backing array. This matters
+// because a LogRec's fields are slices into the full raw ingest line; storing
+// them directly in the ring would pin the entire line (all fields) in memory for
+// as long as the entry lives. strings.Clone / the truncating concat both detach.
+func boundStr(s string, max int) string {
+	if len(s) > max {
+		return s[:max] + "…" // concatenation allocates fresh — no parent retention
+	}
+	return strings.Clone(s)
 }
 
 // secretParamHints are query-string keys whose values we blank out before
@@ -176,6 +188,12 @@ func redactQuery(uri string) string {
 		return uri
 	}
 	path, query := uri[:q+1], uri[q+1:]
+	// Fast path: the vast majority of URLs carry no secret-hinted param, so
+	// avoid the Split/Join allocation entirely when no hint appears anywhere in
+	// the query string. This keeps the per-request ingest cost near-zero.
+	if !queryHasSecretHint(query) {
+		return uri
+	}
 	parts := strings.Split(query, "&")
 	for i, p := range parts {
 		eq := strings.IndexByte(p, '=')
@@ -191,4 +209,15 @@ func redactQuery(uri string) string {
 		}
 	}
 	return path + strings.Join(parts, "&")
+}
+
+// queryHasSecretHint reports whether any secret-hint substring appears anywhere
+// in the query string. Allocation-free (strings.Contains over the hint list).
+func queryHasSecretHint(query string) bool {
+	for _, hint := range secretParamHints {
+		if strings.Contains(query, hint) {
+			return true
+		}
+	}
+	return false
 }

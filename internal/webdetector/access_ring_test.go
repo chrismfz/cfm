@@ -77,6 +77,38 @@ func TestRedactQuery(t *testing.T) {
 	}
 }
 
+func TestQueryHasSecretHint(t *testing.T) {
+	if queryHasSecretHint("a=1&b=2") {
+		t.Fatal("no hint should be false (fast path)")
+	}
+	if !queryHasSecretHint("a=1&token=x") {
+		t.Fatal("token should be detected")
+	}
+	if !queryHasSecretHint("api_key=x") {
+		t.Fatal("api_key should be detected")
+	}
+}
+
+func TestBoundStr_TruncatesAndDetaches(t *testing.T) {
+	// short: returned intact.
+	if got := boundStr("hello", 16); got != "hello" {
+		t.Fatalf("short boundStr = %q, want hello", got)
+	}
+	// long: capped + ellipsis.
+	long := strings.Repeat("a", 20)
+	got := boundStr(long, 5)
+	if got != "aaaaa…" {
+		t.Fatalf("long boundStr = %q, want aaaaa…", got)
+	}
+	// detaches from a large parent (substring must not survive as an alias):
+	// we can't inspect the backing array, but a clone must be byte-equal.
+	parent := strings.Repeat("x", 1000) + "tail"
+	sub := parent[1000:] // aliases parent
+	if boundStr(sub, 16) != "tail" {
+		t.Fatalf("boundStr content changed on clone")
+	}
+}
+
 func TestNewAccessEntry_TruncatesAndRedacts(t *testing.T) {
 	long := make([]byte, accessMaxURI+50)
 	for i := range long {
