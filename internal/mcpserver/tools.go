@@ -47,6 +47,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerDetectionHistory(srv, d)
 	registerBotsTop(srv, d)
 	registerFirewallBlocks(srv, d)
+	registerIPLocate(srv, d)
 	registerDetectorsStatus(srv, d)
 	registerSystemHealth(srv, d)
 	registerProcessList(srv, d)
@@ -876,6 +877,24 @@ func topASNs(rows []fwBlockRow, topN int) []fwASNRow {
 		out = out[:topN]
 	}
 	return out
+}
+
+type ipLocateInput struct {
+	IP string `json:"ip" jsonschema:"the source IP (or CIDR) to locate across every block source"`
+}
+
+func registerIPLocate(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "ip_locate",
+		Description: "Where — and WHY — an IP is blocked across ALL sources on this node: nft, cfm.deny, csf, fail2ban, imunify360. Each hit carries source, list/set/jail, action, the matched entry, and the REASON when the source records one — notably cfm.deny keeps the autoblock reason (e.g. \"autoblock: portscan (N distinct ports) … at <time>\"). This is the `cfm which/search <ip>` equivalent, and the tool that explains a firewall_blocks ban whose nft entry has no comment: the reason lives in cfm.deny, which this reads. (detection_history only covers WAF/challenge/webdet events — portscan/detector autoblocks written to cfm.deny won't show there, but will here.) Admin-only, read-only; accepts an IP or CIDR.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ipLocateInput) (*mcp.CallToolResult, any, error) {
+		// Schema enforces presence; this also rejects present-but-empty ("ip":"").
+		if strings.TrimSpace(in.IP) == "" {
+			return nil, nil, errRequired("ip")
+		}
+		return dispatchJSON(ctx, d, "/search", url.Values{"ip": {in.IP}})
+	})
 }
 
 func registerDetectorsStatus(srv *mcp.Server, d Deps) {

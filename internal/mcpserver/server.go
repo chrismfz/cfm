@@ -31,11 +31,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// DispatchFunc performs an in-process GET against a CFM /api/v1 read endpoint and
-// returns the HTTP status and raw JSON body. path is an absolute, unprefixed API
-// path (e.g. "/api/v1/waf/engine/summary"); query holds the endpoint's params.
-// err is reserved for internal wiring failures; an HTTP-level failure is conveyed
-// via status + body.
+// DispatchFunc performs an in-process GET against a CFM read endpoint and returns
+// the HTTP status and raw JSON body. path is an absolute, unprefixed route on the
+// admin mux — almost always under /api/v1 (e.g. "/api/v1/waf/engine/summary"),
+// though a few read routes live elsewhere (e.g. "/search", the ip_locate lookup);
+// query holds the endpoint's params. err is reserved for internal wiring failures;
+// an HTTP-level failure is conveyed via status + body.
 type DispatchFunc func(ctx context.Context, path string, query url.Values) (status int, body []byte, err error)
 
 // Deps is everything the apiserver injects to stand the MCP server up. The
