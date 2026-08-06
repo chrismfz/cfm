@@ -52,6 +52,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerDmesgTail(srv, d)
 	registerServiceStatus(srv, d)
 	registerEdgeAccessTail(srv, d)
+	registerIPForensics(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -308,6 +309,31 @@ type edgeAccessTailInput struct {
 	Path   string `json:"path,omitempty" jsonschema:"case-insensitive substring of the request URI (e.g. 'admin-ajax.php')"`
 	Since  string `json:"since,omitempty" jsonschema:"only entries newer than now minus this duration (e.g. '10m', '2h')"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"max rows (default 50, max 500)"`
+}
+
+type ipForensicsInput struct {
+	IP     string `json:"ip" jsonschema:"the source IP to look up (e.g. from a WAF hit / firewall_blocks / suspicious_hosts)"`
+	Lines  int    `json:"lines,omitempty" jsonschema:"how many trailing access-log lines to scan (tail window); default 300000, max 2000000"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"max matching lines to return (default 200, max 1000)"`
+	Source string `json:"source,omitempty" jsonschema:"which edge access log to scan (basename or full path from the available list); omit for the default main access log"`
+}
+
+func registerIPForensics(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "ip_forensics",
+		Description: "On-demand: the raw edge access-log lines for one source IP — what it actually requested, for correlating an OLDER WAF hit (reaches back further than edge_access_tail's live ring; complements ip_drilldown's aggregate vhosts/rate/score). Runs the equivalent of `tail -n N access.log | grep <ip>`: bounded to the last N lines (default 300k) with a timeout and a capped result, so it costs nothing until called and never scans a multi-GB log whole. Returns raw log lines. For the aggregate 'how much / which vhosts' use ip_drilldown; for right-now traffic use edge_access_tail.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ipForensicsInput) (*mcp.CallToolResult, any, error) {
+		if strings.TrimSpace(in.IP) == "" {
+			return nil, nil, errRequired("ip")
+		}
+		q := url.Values{}
+		setStr(q, "ip", in.IP)
+		setInt(q, "lines", in.Lines)
+		setInt(q, "limit", in.Limit)
+		setStr(q, "source", in.Source)
+		return dispatchJSON(ctx, d, "/api/v1/system/ip-forensics", q)
+	})
 }
 
 func registerEdgeAccessTail(srv *mcp.Server, d Deps) {
