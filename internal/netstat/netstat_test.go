@@ -65,6 +65,10 @@ func TestParseSSLine(t *testing.T) {
 			v4: "tcp", v6: "tcp6", wantOK: true, proto: "tcp6", addr: "::", port: 443, comm: "litespeed", pid: 1254197,
 		},
 		{
+			name: "tcp v6 link-local with zone", line: `UNCONN 0 0 [fe80::f34b:c470:cc90:4d21]%enp1s0f0:53 [::]:* users:(("named",pid=9,fd=4))`,
+			v4: "udp", v6: "udp6", wantOK: true, proto: "udp6", addr: "fe80::f34b:c470:cc90:4d21%enp1s0f0", port: 53, comm: "named", pid: 9,
+		},
+		{
 			name: "udp v4", line: `UNCONN 0 0 0.0.0.0:53 0.0.0.0:* users:(("named",pid=9,fd=4))`,
 			v4: "udp", v6: "udp6", wantOK: true, proto: "udp", addr: "0.0.0.0", port: 53, comm: "named", pid: 9,
 		},
