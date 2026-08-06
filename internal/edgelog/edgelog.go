@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -44,6 +45,9 @@ const (
 	DefaultLimit     = 200
 	MaxLimit         = 1000
 	scanTimeout      = 20 * time.Second
+
+	maxLineToken  = 4 * 1024 * 1024 // scanner ceiling: tolerate long URIs/UAs without aborting the call
+	maxStoredLine = 8 * 1024        // truncate each retained match so worst-case memory = limit×this
 )
 
 // Result is the outcome of an IP lookup.
@@ -91,18 +95,22 @@ func resolveLog(want string) (string, error) {
 
 // GrepIP returns the raw lines mentioning ip within the last tailLines lines of
 // the resolved edge access log. Bounded: tail window, context timeout, output
-// cap. ip must be a valid IP (rejects arbitrary strings). source, when set,
-// selects among AvailableLogs.
+// cap, per-line retention cap. ip must be a valid IP (rejects arbitrary
+// strings). source, when set, selects among AvailableLogs.
 //
-// Matching is a plain substring test (as a hand-run `grep <ip>` would be), so a
-// v4 needle like "1.2.3.4" can also match "1.2.3.45"; the caller reads the raw
-// line and sees the real client field. Only the current log is scanned (rotated
-// .gz are not), so reach is bounded to what's still in the live file.
+// The IP is canonicalized (so 2001:DB8::1 matches a log's 2001:db8::1) and
+// matched as a standalone address token — NOT a bare substring — so "1.2.3.4"
+// does not match "1.2.3.45". Note the token can still appear in a non-address
+// field (URI/referer); the caller reads the raw line and sees the real client
+// field. Only the current log is scanned (rotated .gz are not), so reach is
+// bounded to what's still in the live file.
 func GrepIP(ctx context.Context, ip string, source string, tailLines, limit int) (Result, error) {
 	ip = strings.TrimSpace(ip)
-	if net.ParseIP(ip) == nil {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
 		return Result{}, fmt.Errorf("invalid IP %q", ip)
 	}
+	ip = parsed.String() // canonical form (lowercased/compressed) for matching + display
 	if tailLines <= 0 {
 		tailLines = DefaultTailLines
 	}
@@ -127,12 +135,12 @@ func GrepIP(ctx context.Context, ip string, source string, tailLines, limit int)
 	res := Result{IP: ip, LogFile: logFile, TailLines: tailLines, Lines: make([]string, 0, limit)}
 	err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
 		res.Scanned++
-		if !strings.Contains(line, ip) {
+		if !mentionsIP(line, ip) {
 			return true
 		}
 		res.Matched++
 		if len(res.Lines) < limit {
-			res.Lines = append(res.Lines, line)
+			res.Lines = append(res.Lines, truncLine(line))
 		} else {
 			res.Truncated = true
 		}
@@ -154,23 +162,70 @@ func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(
 		return err
 	}
 	if err := cmd.Start(); err != nil {
+		stdout.Close() // Wait (which normally closes the pipe) is never reached on a Start failure
 		return err
 	}
 	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024) // tolerate long log lines
+	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
 	for sc.Scan() {
 		if !fn(sc.Text()) {
 			break
 		}
 	}
 	scanErr := sc.Err()
-	// Drain/So the child can exit; ignore its status (tail may SIGPIPE if we
-	// stopped early, and a timeout surfaces via ctx).
-	_ = cmd.Wait()
+	// Drain any unread output so tail can exit even if we stopped early (fn
+	// returning false) — otherwise it could block on a full pipe until the ctx
+	// SIGKILL. Harmless no-op on the normal full-drain-to-EOF path.
+	_, _ = io.Copy(io.Discard, stdout)
+	_ = cmd.Wait() // reap; status ignored (SIGPIPE on early stop, timeout surfaces via ctx)
 	if ctx.Err() != nil {
 		return fmt.Errorf("scan timed out after %s (log too large for the tail window)", scanTimeout)
 	}
 	return scanErr
+}
+
+// mentionsIP reports whether ip (already canonical) appears in line as a
+// standalone address token, i.e. not immediately flanked by characters that
+// could be part of a longer IP literal. This stops "1.2.3.4" from matching
+// "1.2.3.45"/"11.2.3.4" while staying format-agnostic (no assumption about which
+// field the address sits in).
+func mentionsIP(line, ip string) bool {
+	for from := 0; from+len(ip) <= len(line); {
+		i := strings.Index(line[from:], ip)
+		if i < 0 {
+			return false
+		}
+		i += from
+		if ipBoundary(line, i-1) && ipBoundary(line, i+len(ip)) {
+			return true
+		}
+		from = i + 1
+	}
+	return false
+}
+
+// ipBoundary reports whether the byte at idx is a valid edge of an IP token
+// (out of range = line start/end = boundary). Digits, hex letters, '.', ':' are
+// IP-internal, so an address adjacent to one of them is part of a longer run.
+func ipBoundary(s string, idx int) bool {
+	if idx < 0 || idx >= len(s) {
+		return true
+	}
+	c := s[idx]
+	switch {
+	case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F', c == '.', c == ':':
+		return false
+	default:
+		return true
+	}
+}
+
+// truncLine caps a retained match so worst-case memory is limit×maxStoredLine.
+func truncLine(s string) string {
+	if len(s) <= maxStoredLine {
+		return s
+	}
+	return s[:maxStoredLine] + "…"
 }
 
 func tailPath() string {

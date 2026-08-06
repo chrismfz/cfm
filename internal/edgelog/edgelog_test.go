@@ -100,6 +100,84 @@ func TestGrepIP_InvalidIP(t *testing.T) {
 	}
 }
 
+func TestMentionsIP_TokenBoundary(t *testing.T) {
+	ip := "1.2.3.4"
+	yes := []string{
+		`1.2.3.4 - - "GET / HTTP/1.1" 200`, // leading field
+		`x [1.2.3.4] "GET"`,                // bracketed
+		`fwd="1.2.3.4"`,                    // quoted
+		`a 1.2.3.4`,                        // trailing
+	}
+	no := []string{
+		`1.2.3.45 - - "GET"`, // longer IP, trailing digit
+		`11.2.3.4 - - "GET"`, // longer IP, leading digit
+		`1.2.3.4a`,           // hex letter adjacency
+		`10.0.0.1 - - "GET"`, // different IP
+	}
+	for _, l := range yes {
+		if !mentionsIP(l, ip) {
+			t.Errorf("mentionsIP false, want true: %q", l)
+		}
+	}
+	for _, l := range no {
+		if mentionsIP(l, ip) {
+			t.Errorf("mentionsIP true, want false: %q", l)
+		}
+	}
+}
+
+func TestGrepIP_NoSubstringOvermatch(t *testing.T) {
+	if _, err := exec.LookPath("tail"); err != nil {
+		t.Skip("tail not available")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "access.log")
+	body := "1.2.3.45 - - \"GET /a\" 200\n" + // must NOT match 1.2.3.4
+		"1.2.3.4 - - \"GET /b\" 200\n" + // must match
+		"11.2.3.4 - - \"GET /c\" 200\n" // must NOT match
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := accessLogCandidates
+	accessLogCandidates = append([]string{p}, old...)
+	defer func() { accessLogCandidates = old }()
+
+	res, err := GrepIP(context.Background(), "1.2.3.4", "", 100, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Matched != 1 || len(res.Lines) != 1 || !strings.Contains(res.Lines[0], "/b") {
+		t.Fatalf("expected only the exact-IP line, got matched=%d lines=%v", res.Matched, res.Lines)
+	}
+}
+
+func TestGrepIP_IPv6Canonicalization(t *testing.T) {
+	if _, err := exec.LookPath("tail"); err != nil {
+		t.Skip("tail not available")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "access.log")
+	// log stores the canonical lowercase/compressed form; caller passes an
+	// uppercase/uncompressed variant.
+	if err := os.WriteFile(p, []byte("2001:db8::1 - - \"GET /\" 200\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := accessLogCandidates
+	accessLogCandidates = append([]string{p}, old...)
+	defer func() { accessLogCandidates = old }()
+
+	res, err := GrepIP(context.Background(), "2001:0DB8::1", "", 100, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Matched != 1 {
+		t.Fatalf("IPv6 canonicalization failed: matched=%d (want 1)", res.Matched)
+	}
+	if res.IP != "2001:db8::1" {
+		t.Fatalf("result IP not canonical: %q", res.IP)
+	}
+}
+
 func TestResolveLog_SourceAllowlist(t *testing.T) {
 	p := writeLog(t, 1, "1.1.1.1", 0)
 	old := accessLogCandidates
