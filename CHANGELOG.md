@@ -83,6 +83,17 @@ back-filled here — see the git/PR history for that period.
   Request bodies are never retained.
 
 ### Changed
+- **`firewall_blocks` MCP tool is now summary-first with drill-down.** The nft
+  ban list is often thousands of IPs, so returning it whole could blow an MCP
+  client's response budget (a live node showed ~1000 bans / 110 KB). With no
+  args the tool now returns a compact summary — total, permanent/temporary
+  counts, top blocked countries (`by_country`) and top blocked networks
+  (`by_asn`, GeoIP ASN + name). To see the actual bans, drill down with
+  `country=<name>`, `asn=<number>`, and/or `reason=<comment substring>`; the
+  drill-down returns the matching rows plus a within-facet ASN breakdown, so you
+  can review one country's bans for false positives (a residential-ISP ASN is a
+  likelier FP than a hosting/VPS network). Read-only; `GET /api/v1/firewall/list`
+  (the WebUI's data source) is unchanged — the summarization is in the tool layer.
 - **`security_overview` MCP tool is now compact.** It embedded the full
   firewall-block list (1000s of enriched rows) and the WAF summary's raw per-hit
   rows, so the "one-call headline" ballooned to hundreds of KB and could exceed

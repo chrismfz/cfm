@@ -443,17 +443,18 @@ func TestOAuthAuthorizeRejectsBadCredential(t *testing.T) {
 }
 
 func TestToolCallDispatchesToAllowlistedEndpoint(t *testing.T) {
-	fd := &fakeDispatch{body: []byte(`{"blocks":[]}`)}
+	fd := &fakeDispatch{body: []byte(`{"rows":[{"ip":"1.2.3.4","country":"China","permanent":true}],"total":1,"permanent":1}`)}
 	ts := newTestServer(t, fd)
 
-	// firewall_blocks → /api/v1/firewall/list
+	// firewall_blocks → /api/v1/firewall/list (then summarized in the tool layer)
 	_, body := mcpPost(t, ts, testAdminToken,
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"firewall_blocks","arguments":{}}}`)
 	if fd.lastPath != "/api/v1/firewall/list" {
 		t.Errorf("firewall_blocks dispatched to %q, want /api/v1/firewall/list", fd.lastPath)
 	}
-	if !strings.Contains(body, `blocks`) {
-		t.Errorf("tool result missing dispatched body: %s", body)
+	// The tool no longer passes the raw list through — it emits the compact summary.
+	if !strings.Contains(body, `by_country`) {
+		t.Errorf("firewall_blocks result missing summary (by_country): %s", body)
 	}
 
 	// waf_activity with hours → /api/v1/waf/engine/summary?enrich=1&hours=6
