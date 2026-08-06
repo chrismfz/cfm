@@ -18,6 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP tool `mail_queue_summary` + `GET /api/v1/system/mail-queue` — exim
+  queue breakdown.** Read-only, admin-only. On top of the raw queued/frozen
+  counts already in the health snapshot, this parses `exim -bp` into the
+  actionable view: total / frozen / deferred, an age distribution
+  (<10m…>1d), and the top sender + recipient domains, plus the oldest
+  messages — the "why is mail backing up / who's flooding the queue?" drill-down
+  (a spike in one sender domain often means a compromised account or a bounce
+  storm). One bounded `exim -bp` (+ `exim -bpc` for the authoritative count),
+  message-capped + timeout-bounded. New `internal/mailqueue`; exim only for now
+  (postfix returns a clear "not supported yet").
 - **MCP tools `mysql_log_tail` + `mysql_slow_queries` + `GET /api/v1/system/mysql-log`
   — on-demand tails of the MySQL error / slow-query logs.** Read-only, admin-only.
   `mysql_log_tail` tails the MySQL/MariaDB **error log** (crashes, deadlocks,

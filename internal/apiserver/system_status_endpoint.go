@@ -18,6 +18,7 @@ import (
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 	"cfm/internal/kmsg"
+	"cfm/internal/mailqueue"
 	"cfm/internal/mysqllog"
 	"cfm/internal/netstat"
 	"cfm/internal/procstat"
@@ -221,6 +222,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/services", handleSystemServices)
 	m.HandleFunc("/api/v1/system/ip-forensics", handleSystemIPForensics)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
+	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
 	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
@@ -477,6 +479,40 @@ func handleSystemMySQLLog(w http.ResponseWriter, r *http.Request) {
 		"ok":     true,
 		"schema": "system.mysql_log.v1",
 		"result": res,
+	})
+}
+
+// handleSystemMailQueue serves the exim mail-queue summary (GET /api/v1/system/
+// mail-queue?top=N). Read-only, admin-only. Backs the MCP mail_queue_summary
+// tool — the "why is mail backing up / who's flooding the queue?" breakdown
+// (age distribution + top sender/recipient domains + oldest) on top of the raw
+// queued/frozen counts the health snapshot already has. One bounded `exim -bp`.
+func handleSystemMailQueue(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	top := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("top")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			top = n
+		}
+	}
+	sum, err := mailqueue.SummarizeQueue(r.Context(), top)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"schema":  "system.mail_queue.v1",
+		"summary": sum,
 	})
 }
 

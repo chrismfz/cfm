@@ -58,6 +58,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerMySQLPressure(srv, d)
 	registerMySQLLogTail(srv, d)
 	registerMySQLSlowQueries(srv, d)
+	registerMailQueueSummary(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -567,6 +568,22 @@ func registerMySQLSlowQueries(srv *mcp.Server, d Deps) {
 		setInt(q, "limit", in.Limit)
 		setStr(q, "grep", in.Grep)
 		return dispatchJSON(ctx, d, "/api/v1/system/mysql-log", q)
+	})
+}
+
+type mailQueueInput struct {
+	Top int `json:"top,omitempty" jsonschema:"how many top sender/recipient domains and oldest messages to return; default 10"`
+}
+
+func registerMailQueueSummary(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "mail_queue_summary",
+		Description: "Exim mail-queue breakdown (the `exim -bp` view, structured): total/frozen/deferred counts, age distribution (<10m…>1d), and the top sender + recipient domains, plus the oldest messages. The \"why is mail backing up / who's flooding the queue?\" drill-down on top of the raw queued/frozen counts in system_health. Read-only; one bounded `exim -bp`. (Frozen = stuck/undeliverable; a spike in one sender domain often means a compromised account or a bounce storm.)",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mailQueueInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setInt(q, "top", in.Top)
+		return dispatchJSON(ctx, d, "/api/v1/system/mail-queue", q)
 	})
 }
 
