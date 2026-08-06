@@ -82,7 +82,12 @@ func dialOK(path string) bool {
 
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// 30s ceiling, not 5s: the condition is polled every 5ms and returns the
+	// instant it holds, so a generous deadline costs nothing on the happy path
+	// (these tests finish in ~1s locally). The old 5s bound flaked on loaded CI
+	// runners where a socket rebind/respawn occasionally took longer, failing
+	// TestSockLifecycle_ConfigChangeRestartStaysDialable with a false "timed out".
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
