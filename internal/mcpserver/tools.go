@@ -51,6 +51,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerListeningPorts(srv, d)
 	registerDmesgTail(srv, d)
 	registerServiceStatus(srv, d)
+	registerEdgeAccessTail(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -297,6 +298,34 @@ func registerHostDrilldown(srv *mcp.Server, d Deps) {
 
 type ipDrilldownInput struct {
 	IP string `json:"ip" jsonschema:"the source IP to drill into (from hot_ips / suspicious host drilldown / firewall_blocks)"`
+}
+
+type edgeAccessTailInput struct {
+	IP     string `json:"ip,omitempty" jsonschema:"filter to one source IP (e.g. the IP from a WAF hit / firewall_blocks)"`
+	Host   string `json:"host,omitempty" jsonschema:"filter to one vhost"`
+	Method string `json:"method,omitempty" jsonschema:"filter by HTTP method (get/post/…)"`
+	Status string `json:"status,omitempty" jsonschema:"filter by status: an exact code ('403') or a class digit ('4' = 4xx, '5' = 5xx)"`
+	Path   string `json:"path,omitempty" jsonschema:"case-insensitive substring of the request URI (e.g. 'admin-ajax.php')"`
+	Since  string `json:"since,omitempty" jsonschema:"only entries newer than now minus this duration (e.g. '10m', '2h')"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"max rows (default 50, max 500)"`
+}
+
+func registerEdgeAccessTail(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "edge_access_tail",
+		Description: "Recent edge access-log lines (method, URI, status, bytes, response time, UA, referer), newest last — the raw request context around a WAF hit, for false-positive triage. Filter by ip/host/method/status/path/since. Pair it with waf_activity or a WAF hit: use the same ip= or host= to see what the client was actually requesting. Request bodies are never included; secret-looking query params are redacted. Bounded in-memory ring (recent traffic only).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in edgeAccessTailInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setStr(q, "ip", in.IP)
+		setStr(q, "host", in.Host)
+		setStr(q, "method", in.Method)
+		setStr(q, "status", in.Status)
+		setStr(q, "path", in.Path)
+		setStr(q, "since", in.Since)
+		setInt(q, "limit", in.Limit)
+		return dispatchJSON(ctx, d, "/api/v1/webdet/access-recent", q)
+	})
 }
 
 func registerIPDrilldown(srv *mcp.Server, d Deps) {
