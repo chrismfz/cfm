@@ -197,6 +197,10 @@ firewall, and detector framework are seeing and doing right now. They only read 
 nothing here blocks, unblocks, challenges, or changes configuration.
 
 Orientation:
+- whats_wrong is the triage entry point: one call that ranks concrete problems
+  (health/disk/load, failed services, MySQL saturation, mail-queue backlog,
+  suspected outbound-mail spikes, API-abuse bursts) most-severe first, each with
+  the drill-down tool to use next. Start here for "is anything wrong right now?".
 - security_overview gives the headline picture (health + recent WAF/challenge
   activity + active blocks); start there for "what's going on?".
 - WAF: waf_activity (recent hits, top rules, per-hour histogram), waf_rules.

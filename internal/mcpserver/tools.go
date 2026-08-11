@@ -34,6 +34,7 @@ type emptyInput struct{}
 
 // registerTools wires the full read-only tool set onto srv. Single choke point.
 func registerTools(srv *mcp.Server, d Deps) {
+	registerWhatsWrong(srv, d)
 	registerSecurityOverview(srv, d)
 	registerWAFActivity(srv, d)
 	registerWAFRules(srv, d)

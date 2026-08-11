@@ -33,6 +33,21 @@ back-filled here — see the git/PR history for that period.
   `CFM_FIREWALL_ENGINE=nftlib` worked around on one node.
 
 ### Added
+- **MCP `whats_wrong` — one-call triage flagship.** A new read-only MCP tool that
+  pulls the key signals together (health snapshot + health anomalies + systemd
+  services + MySQL saturation + mail queue + mail-traffic anomalies) and returns a
+  **severity-ranked** list of concrete problems — critical → warning → info — each
+  with a one-line detail and the drill-down tool to call next (`process_list`,
+  `service_status`, `mysql_pressure`, `mail_queue_summary`, `mail_traffic`, …). It
+  flags disk/inode near-full, high sustained load, swap/conntrack pressure, a
+  failed or flapping service, edge/frontend down or degraded, MySQL connections
+  near max, a frozen mail-queue backlog, suspected outbound-mail spikes, and
+  API-abuse bursts — and deliberately NOT routine activity (WAF hits, normal
+  firewall blocks). A `sources` map reports which signals were read, unavailable
+  (collector/governor off), or errored, so an unread signal is never mistaken for
+  healthy. Reuses only existing allow-listed GET endpoints (read-only by
+  construction); now the recommended MCP starting point ("is anything wrong right
+  now?"). Brings the MCP tool set to 30.
 - **Mail queue: "who filled the queue" per-sender attribution** — the mail-queue
   report (`mail_queue_summary` / the cfm-admin "Mail queue" page) now includes a
   `top_senders` list: queued messages attributed to the individual envelope

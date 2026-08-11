@@ -186,11 +186,12 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ## 4. Active tools (as-built)
 
-29 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
+30 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
 CLI/UI use). All carry the `readOnlyHint` annotation.
 
 | Tool | What it answers | Endpoint(s) | Args |
 |---|---|---|---|
+| `whats_wrong` | "Is anything wrong right now?" — one-call triage: pulls health/services/mysql/mail signals concurrently and returns a SEVERITY-RANKED (critical→warning→info) list of concrete problems (disk/inode near-full, high load, swap/conntrack pressure, failed/flapping service, edge/frontend down/degraded, MySQL near max conns, frozen mail backlog, suspected outbound-mail spikes, API-abuse bursts), each with the drill-down tool to use next. Conservative (no routine WAF/block noise); `sources` reports which signals were read/unavailable/errored (an unread signal is never assumed healthy) | `health/snapshot` + `health/anomalies` + `system/services` + `mysql/top` + `system/mail-queue` + `mail/traffic` | — |
 | `security_overview` | "What's going on right now?" — one-call headline (compact: counts + top-N, not full lists) | `health/snapshot` + `waf/engine/summary` + `challenge/vhosts` + `firewall/list` + `webdet/suspicious` | — |
 | `waf_activity` | Recent WAF hits, top rules, top IPs, per-hour histogram | `waf/engine/summary` | `hours`, `limit`, `top` |
 | `waf_rules` | Loaded WAF rules + enforcement tier | `waf/rules` | — |
@@ -295,3 +296,4 @@ The MCP surface is versioned by CFM's date-based releases (see `CHANGELOG.md`).
 |---|---|---|
 | 2026.08.05 | **Introduced** — read-only MCP server; dedicated `MCP_TOKEN` credential (min 24 chars, fail-closed) separate from `AUTH_TOKEN`; OAuth 2.1 + PKCE for the claude.ai connector, static-bearer for Claude Code/API | The 15 tools in §4 (WAF, challenge, suspicious/traffic, drilldowns, history, bots, firewall blocks, detectors, health) |
 | 2026.08.06 | Edge-proxy connectivity fixes (OIDC-discovery alias, DNS-rebinding guard disabled); consent POST rate-limit; enrich reverse-DNS perf (waf/security summaries ~60s→~1.5s) | **+`process_list`, +`listening_ports`, +`dmesg_tail`, +`service_status`, +`edge_access_tail`, +`ip_forensics`, +`mysql_pressure`, +`mysql_log_tail`, +`mysql_slow_queries`, +`mail_queue_summary`** (25 tools) — node system diagnostics (busiest processes; listening sockets + owner; kernel ring buffer; systemd unit status) + WAF triage (recent edge access lines around a hit; on-demand bounded per-IP access-log lookup) + MySQL pressure (per-user conns×CPU) + MySQL error/slow-log tails + exim mail-queue breakdown; `security_overview` made compact |
+| 2026.08.11 | Mail Monitor + triage flagship | **+`mail_log_tail`, +`mail_traffic`, +`mail_dns_check`** (Mail Monitor: raw mail-log tail; per-hour traffic/anomaly/deliverability summary; mail-auth DNS check) **+`whats_wrong`** (30 tools) — one-call SEVERITY-RANKED triage that synthesizes health/services/mysql/mail signals into concrete problems, each pointing at its drill-down tool; the new recommended entry point |
