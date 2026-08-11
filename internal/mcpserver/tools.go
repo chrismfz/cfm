@@ -61,6 +61,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerMySQLSlowQueries(srv, d)
 	registerMailQueueSummary(srv, d)
 	registerMailLogTail(srv, d)
+	registerMailTraffic(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -602,6 +603,24 @@ func registerMailLogTail(srv *mcp.Server, d Deps) {
 		setInt(q, "limit", in.Limit)
 		setStr(q, "grep", in.Grep)
 		return dispatchJSON(ctx, d, "/api/v1/system/mail-log", q)
+	})
+}
+
+type mailTrafficInput struct {
+	Hours int `json:"hours,omitempty" jsonschema:"lookback window in hours (default 24, max 720/30d)"`
+	Limit int `json:"limit,omitempty" jsonschema:"max rows per list (default 20, max 200)"`
+}
+
+func registerMailTraffic(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "mail_traffic",
+		Description: "Mail traffic over a window (default 24h): top outbound senders, most-sent domains, top inbound mailboxes, local-script (PHP/cron) submitters keyed by unix user, plus rejected/throttled/over-quota/failed-login tallies. The \"who is sending a lot / which account is compromised\" view — the aggregated companion to mail_log_tail (raw lines) and mail_queue_summary (what's stuck now). Reads per-hour counters the Mail Monitor collector persists from the exim mainlog + syslog maillog, so there is NO per-request MTA probe; `available:false` until the collector has run. A sender or unix user far above the pack — especially to many recipient domains — is the classic compromised-account signal.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mailTrafficInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setInt(q, "hours", in.Hours)
+		setInt(q, "limit", in.Limit)
+		return dispatchJSON(ctx, d, "/api/v1/mail/traffic", q)
 	})
 }
 

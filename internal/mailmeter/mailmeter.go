@@ -76,7 +76,7 @@ type Report struct {
 	InboundByMailbox   map[string]int `json:"-"`
 	OverQuotaByMailbox map[string]int `json:"-"`
 	ThrottledBySender  map[string]int `json:"-"`
-	AuthFailByMailbox  map[string]int `json:"-"` // key "" = host-wide failures
+	AuthFailByMailbox  map[string]int `json:"-"` // key HostWide ("*") = host-wide failures
 
 	OutboundTotal    int `json:"outbound_total"`
 	LocalSubmitTotal int `json:"local_submit_total"`
@@ -84,7 +84,10 @@ type Report struct {
 	RejectedTotal    int `json:"rejected_total"`
 }
 
-func newReport() Report {
+// NewReport returns a Report with all counter maps initialised. The streaming
+// collector makes a fresh one per poll (feeding it that poll's events) and
+// flushes the deltas, so the maps never grow across polls.
+func NewReport() Report {
 	return Report{
 		OutboundBySender:   map[string]int{},
 		LocalSubmitByUser:  map[string]int{},
@@ -95,61 +98,95 @@ func newReport() Report {
 	}
 }
 
+// HostWide is the sentinel address for signals not tied to one mailbox (inbound
+// rejects, and failed-login attempts on attacker-supplied junk usernames).
+const HostWide = "*"
+
+// maxCorrelated caps the QID→sender correlation map. Entries are normally freed
+// on `qmgr: removed`; the cap is a backstop against QIDs leaked because tailing
+// began mid-queue — clearing it only loses attribution for a few in-flight
+// messages, never miscounts.
+const maxCorrelated = 20000
+
+// Correlator carries the Postfix QID→authenticated-sender map ACROSS Feed calls,
+// so a streaming collector can call Feed poll-by-poll and still resolve an
+// OutboundSent whose AuthSender arrived in an earlier poll. Not safe for
+// concurrent use; a single collector goroutine owns one Correlator.
+type Correlator struct {
+	sender map[string]string
+}
+
+// NewCorrelator returns an empty Correlator.
+func NewCorrelator() *Correlator {
+	return &Correlator{sender: map[string]string{}}
+}
+
+// Feed folds one event into r, resolving Postfix outbound sends against the
+// carried QID→sender map. Events must arrive in log order (an AuthSender before
+// the OutboundSent it explains). This is the single home for the counting and
+// correlation rules, shared by the batch Aggregate and the streaming collector.
+func (c *Correlator) Feed(ev Event, r *Report) {
+	switch ev.Kind {
+	case AuthSender:
+		if ev.ID != "" && ev.Addr != "" {
+			if len(c.sender) >= maxCorrelated {
+				c.sender = map[string]string{} // backstop against leaked QIDs
+			}
+			c.sender[ev.ID] = ev.Addr
+		}
+	case OutboundSent:
+		addr := ev.Addr
+		if addr == "" {
+			addr = c.sender[ev.ID]
+		}
+		if addr != "" {
+			r.OutboundBySender[addr]++
+			r.OutboundTotal++
+		}
+	case LocalSubmit:
+		if ev.Addr != "" {
+			r.LocalSubmitByUser[ev.Addr]++
+			r.LocalSubmitTotal++
+		}
+	case InboundLocal:
+		if ev.Addr != "" {
+			r.InboundByMailbox[ev.Addr]++
+			r.InboundTotal++
+		}
+	case Rejected:
+		r.RejectedTotal++
+	case OverQuota:
+		if ev.Addr != "" {
+			r.OverQuotaByMailbox[ev.Addr]++
+		}
+	case Throttled:
+		if ev.Addr != "" {
+			r.ThrottledBySender[ev.Addr]++
+		}
+	case AuthFailed:
+		// Fold empty / non-mailbox / oversized usernames into the host-wide
+		// bucket. The tried username is ATTACKER-CONTROLLED, so a password spray
+		// with random distinct usernames would otherwise grow this map without
+		// bound and drown the real "top targeted mailboxes" view. A bare login
+		// name (no "@") is a spray guess, not one of our mailboxes.
+		if isMailbox(ev.Addr) {
+			r.AuthFailByMailbox[ev.Addr]++
+		} else {
+			r.AuthFailByMailbox[HostWide]++
+		}
+	case QueueDone:
+		delete(c.sender, ev.ID)
+	}
+}
+
 // Aggregate folds an event batch into a Report, correlating Postfix outbound
 // sends by QID. The events must be in log order (an AuthSender must precede the
 // OutboundSent it explains); a tailing collector naturally provides that.
 func Aggregate(events []Event) Report {
-	r := newReport()
-	sender := map[string]string{} // QID -> authenticated sasl_username (Postfix)
+	c := NewCorrelator()
+	r := NewReport()
 	for _, ev := range events {
-		switch ev.Kind {
-		case AuthSender:
-			if ev.ID != "" && ev.Addr != "" {
-				sender[ev.ID] = ev.Addr
-			}
-		case OutboundSent:
-			addr := ev.Addr
-			if addr == "" {
-				addr = sender[ev.ID]
-			}
-			if addr != "" {
-				r.OutboundBySender[addr]++
-				r.OutboundTotal++
-			}
-		case LocalSubmit:
-			if ev.Addr != "" {
-				r.LocalSubmitByUser[ev.Addr]++
-				r.LocalSubmitTotal++
-			}
-		case InboundLocal:
-			if ev.Addr != "" {
-				r.InboundByMailbox[ev.Addr]++
-				r.InboundTotal++
-			}
-		case Rejected:
-			r.RejectedTotal++
-		case OverQuota:
-			if ev.Addr != "" {
-				r.OverQuotaByMailbox[ev.Addr]++
-			}
-		case Throttled:
-			if ev.Addr != "" {
-				r.ThrottledBySender[ev.Addr]++
-			}
-		case AuthFailed:
-			// Fold empty / non-mailbox / oversized usernames into the host-wide
-			// bucket. The tried username is ATTACKER-CONTROLLED, so a password
-			// spray with random distinct usernames would otherwise grow this map
-			// without bound and drown the real "top targeted mailboxes" view. A
-			// bare login name (no "@") is a spray guess, not one of our mailboxes.
-			if isMailbox(ev.Addr) {
-				r.AuthFailByMailbox[ev.Addr]++
-			} else {
-				r.AuthFailByMailbox[""]++
-			}
-		case QueueDone:
-			delete(sender, ev.ID)
-		}
+		c.Feed(ev, &r)
 	}
 	return r
 }

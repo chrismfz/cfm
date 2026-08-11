@@ -12,6 +12,7 @@ import (
 	"cfm/internal/firewall/nft"
 	"cfm/internal/firewall/nftlib"
 	"cfm/internal/logging"
+	"cfm/internal/mailtraffic"
 	"cfm/internal/notify"
 	"cfm/internal/panelauth"
 	status "cfm/internal/status"
@@ -612,6 +613,15 @@ func runDaemon(args []string) {
 	// context/subsystem defers below, so (LIFO) it runs LAST — after every
 	// subsystem has stopped writing to it.
 	defer enrich.ShutdownPersistentPTR()
+
+	// Mail Monitor traffic collector (tails the exim mainlog + syslog maillog
+	// every minute into per-hour per-mailbox counters). Best-effort: if the
+	// SQLite store can't be opened, the read endpoint just reports unavailable.
+	// Only the daemon runs it (the CLI does not).
+	if err := mailtraffic.Enable("/var/lib/cfm/mailtraffic.db"); err != nil {
+		logging.Logf("[mailtraffic] disabled (store unavailable): %v", err)
+	}
+	defer mailtraffic.Shutdown()
 
 	// Daemon context — created early so sslcollector (started right
 	// below) and any other early-start subsystem can use it for their
