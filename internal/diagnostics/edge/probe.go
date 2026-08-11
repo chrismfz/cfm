@@ -148,11 +148,11 @@ func ResolveBridgeRuntimeConfigWithStat(path string, statFn func(string) (os.Fil
 		defaultSockPath = "/var/run/cfm/cfm_nginx.sock"
 		legacySockPath  = "/var/run/cfm_nginx.sock"
 	)
-	cfg := BridgeRuntimeConfig{Enabled: false, SocketPath: defaultSockPath, SocketSource: "fallback"}
+	// Edge mode is the only mode: the bridge is always on, so the probe always
+	// runs. OPENRESTY_MODE is deprecated and ignored (only OPENRESTY_SOCK is
+	// still honored for a custom socket path).
+	cfg := BridgeRuntimeConfig{Enabled: true, SocketPath: defaultSockPath, SocketSource: "fallback"}
 	kv := ReadDetectorSectionKV(path, "webdetector")
-	if v, ok := kv["OPENRESTY_MODE"]; ok {
-		cfg.Enabled = parseBoolLoose(v)
-	}
 	if v, ok := kv["OPENRESTY_SOCK"]; ok {
 		if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
 			cfg.SocketPath = clean

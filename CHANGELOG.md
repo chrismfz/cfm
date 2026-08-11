@@ -17,6 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Edge mode is now the only mode — `OPENRESTY_MODE` is deprecated and
+  ignored (edge-unification Phase 1a).** The OpenResty/Angie decision bridge
+  is always constructed and always serves; the webdetector no longer has a
+  DNAT-mode branch. Setting `OPENRESTY_MODE = 0` only logs a deprecation
+  warning. The legacy per-IP challenge redirect is force-disabled and cleaned
+  up on every start (the machinery itself is deleted in Phase 1b), the
+  DNAT-era pre-auth login challenge is permanently disabled (subsystem also
+  removed in 1b), and the status/diagnostics readers (`cfm status` bridge
+  panel, edge probe, `cfm firewall-status`) treat the edge as always-on
+  instead of re-parsing the deprecated key — `dnat_edge` is always expected,
+  `dnat_challenge`/`challenge_redirect` always N/A. Reference `detectors.conf`
+  section 13 updated accordingly. No enforcement behavior changes on any
+  fleet node: every node already ran `OPENRESTY_MODE = 1`.
+
 ### Added
 - **Edge-unification design doc** (`docs/edge-unification-plan.md`): the
   accepted plan to make edge mode the only mode — retire the legacy per-IP
