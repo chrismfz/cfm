@@ -1423,14 +1423,8 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 		return fmt.Errorf("flush %s: %w", setName, err)
 	}
 
-	// Αν είναι *nets set, καθάρισε επικαλύψεις
-
-	if strings.Contains(setName, "_v4_nets") {
-		elems = feedutil.NormalizeCIDRsV4(elems)
-	}
-	if strings.Contains(setName, "_v6_nets") {
-		elems = feedutil.NormalizeCIDRsV6(elems)
-	}
+	// Αν είναι *nets set, καθάρισε επικαλύψεις (shared keying — no drift with nftlib)
+	elems = feedutil.NormalizeNetsForSet(setName, elems)
 
 	ttlStr := ""
 	if ttl != nil && *ttl > 0 {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
-	"strings"
 	"time"
 
 	"cfm/internal/firewall/feedutil"
@@ -155,14 +154,10 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 	}
 
 	// Interval (nets) sets: de-overlap the CIDRs first, exactly as the exec-nft
-	// backend does. The kernel rejects overlapping/adjacent interval elements with
-	// ENOTEMPTY ("directory not empty"); nft merges them in userspace, netlink does
-	// not, so we must feed a clean, non-overlapping set. Shared impl (no drift).
-	if strings.Contains(setName, "_v4_nets") {
-		elems = feedutil.NormalizeCIDRsV4(elems)
-	} else if strings.Contains(setName, "_v6_nets") {
-		elems = feedutil.NormalizeCIDRsV6(elems)
-	}
+	// backend does. The kernel rejects overlapping interval elements with ENOTEMPTY
+	// ("directory not empty"); nft merges them in userspace, netlink does not, so we
+	// must feed a clean, non-overlapping set. Shared keying+impl (no drift with nft).
+	elems = feedutil.NormalizeNetsForSet(setName, elems)
 	n = len(elems)
 
 	// Skip-if-unchanged, permanent (no-TTL) sets only.

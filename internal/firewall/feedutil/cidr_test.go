@@ -95,6 +95,50 @@ func TestNormalizeCIDRsV6_DropsContainedAndDedups(t *testing.T) {
 	}
 }
 
+// NormalizeCIDRsV4 must skip a wrong-family (IPv6) CIDR instead of panicking in
+// the range math (index-out-of-range on a nil To4()). Same for V6 given a v4.
+func TestNormalizeCIDRs_WrongFamilySkippedNoPanic(t *testing.T) {
+	// v6 fed to the v4 normalizer: the v6 entry is dropped, the v4 kept.
+	got := NormalizeCIDRsV4([]string{"2001:db8::/32", "10.0.0.0/8"})
+	if !reflect.DeepEqual(got, []string{"10.0.0.0/8"}) {
+		t.Fatalf("V4 wrong-family: got %v, want [10.0.0.0/8]", got)
+	}
+	// v6 normalizer fed only a v4 CIDR: it drops it → nil.
+	if g := NormalizeCIDRsV6([]string{"10.0.0.0/8"}); g != nil {
+		t.Fatalf("V6 wrong-family: got %v, want nil", g)
+	}
+	// v4 normalizer fed only a v6 CIDR: nil (no surviving v4).
+	if g := NormalizeCIDRsV4([]string{"2001:db8::/32"}); g != nil {
+		t.Fatalf("V4 only-v6: got %v, want nil", g)
+	}
+}
+
+// NormalizeNetsForSet keys on the FIRST family token. The regression: a feed
+// name that echoes the other family's token in the suffix must not flip the
+// family (and must never panic by running the v4 range math over v6 CIDRs).
+func TestNormalizeNetsForSet_Keying(t *testing.T) {
+	// Pathological: v6 nets set whose feed-name suffix contains "_v4_nets".
+	// Must be treated as v6 (first token wins) and keep the v6 CIDR.
+	got := NormalizeNetsForSet("block_ext_v6_nets_block_v4_nets", []string{"2001:db8::/32"})
+	if !reflect.DeepEqual(got, []string{"2001:db8::/32"}) {
+		t.Fatalf("v6 set w/ v4 echo: got %v, want [2001:db8::/32]", got)
+	}
+	// Ordinary v4 nets set.
+	if g := NormalizeNetsForSet("allow_ext_v4_nets", []string{"10.1.2.3/24"}); !reflect.DeepEqual(g, []string{"10.1.2.0/24"}) {
+		t.Fatalf("v4 set: got %v, want [10.1.2.0/24]", g)
+	}
+	// Ordinary per-feed v6 nets set.
+	if g := NormalizeNetsForSet("block_ext_v6_nets_spamhaus", []string{"2001:db8::/48", "2001:db8::/32"}); !reflect.DeepEqual(g, []string{"2001:db8::/32"}) {
+		t.Fatalf("v6 per-feed set: got %v, want [2001:db8::/32]", g)
+	}
+	// A host set (no family token) passes elems through untouched — including a
+	// bare IP that the CIDR normalizers would otherwise drop.
+	in := []string{"10.0.0.1", "10.0.0.2"}
+	if g := NormalizeNetsForSet("allow_ext_v4_hosts", in); !reflect.DeepEqual(g, in) {
+		t.Fatalf("hosts passthrough: got %v, want %v", g, in)
+	}
+}
+
 // mustRangeV4 re-derives the numeric range of a canonical CIDR for the overlap
 // assertion (kept local to the test so it doesn't widen the package surface).
 func mustRangeV4(t *testing.T, cidr string) (uint32, uint32) {

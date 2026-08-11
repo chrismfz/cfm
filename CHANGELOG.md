@@ -27,7 +27,13 @@ back-filled here — see the git/PR history for that period.
   is now a single shared implementation in `internal/firewall/feedutil`
   (`NormalizeCIDRsV4/V6`, moved verbatim from the nft backend so both backends
   use one copy and can't drift), and nftlib applies it to `*_nets` sets before
-  writing — matching the nft backend.
+  writing — matching the nft backend. The set-name→family selection is also
+  shared (`NormalizeNetsForSet`): it keys on whichever `_v{4,6}_nets` token
+  appears first (the real family marker, never a feed-name echo in the suffix)
+  and the normalizers now skip wrong-family CIDRs instead of indexing blindly —
+  closing a latent crash where a feed literally named e.g. "block v4 nets" made
+  its IPv6 set name contain `_v4_nets`, ran the v4 range math over v6 CIDRs, and
+  panicked the (recover-less) feed goroutine into a restart loop.
 - **nftlib: stop the every-tick `EnsureBase` that drove a slow daemon restart
   loop.** On the nftlib backend `LoadPortScanner` called `EnsureBase` every tick
   (~20s), and `EnsureBase`'s cost is its CLI part (`refreshSelfSets` +

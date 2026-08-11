@@ -46,7 +46,11 @@ func maskOnes(m net.IPMask) int {
 }
 
 // NormalizeCIDRsV4 canonicalizes, dedups and drops contained/overlapping IPv4
-// CIDRs, returning a set safe to load into an nftables interval set.
+// CIDRs, returning a set safe to load into an nftables interval set. Entries that
+// are not IPv4 CIDRs (blank, non-CIDR, or an IPv6 CIDR) are skipped rather than
+// indexed blindly — feeding a v6 CIDR to the v4 range math would panic
+// (index-out-of-range on a nil To4()), which in a feed goroutine with no
+// recover() would crash-loop the daemon.
 func NormalizeCIDRsV4(in []string) []string {
 	// parse + canonicalize + dedup
 	seen := make(map[string]struct{})
@@ -58,6 +62,9 @@ func NormalizeCIDRsV4(in []string) []string {
 		}
 		_, ipnet, err := net.ParseCIDR(s)
 		if err != nil {
+			continue
+		}
+		if ipnet.IP.To4() == nil { // not an IPv4 CIDR — wrong family, skip
 			continue
 		}
 		// canonical cidr string
@@ -137,7 +144,9 @@ func cidrRangeV6(n *net.IPNet) (*big.Int, *big.Int) {
 	return base, end
 }
 
-// NormalizeCIDRsV6 is the IPv6 counterpart of NormalizeCIDRsV4.
+// NormalizeCIDRsV6 is the IPv6 counterpart of NormalizeCIDRsV4. Entries that are
+// not IPv6 CIDRs (blank, non-CIDR, or an IPv4 CIDR) are skipped — see the
+// wrong-family note on NormalizeCIDRsV4.
 func NormalizeCIDRsV6(in []string) []string {
 	seen := make(map[string]struct{})
 	var arr []v6range
@@ -148,6 +157,9 @@ func NormalizeCIDRsV6(in []string) []string {
 		}
 		_, ipnet, err := net.ParseCIDR(s)
 		if err != nil {
+			continue
+		}
+		if ipnet.IP.To4() != nil { // an IPv4 CIDR — wrong family, skip
 			continue
 		}
 		ipnet.IP = ipnet.IP.Mask(ipnet.Mask)
@@ -202,4 +214,35 @@ func NormalizeCIDRsV6(in []string) []string {
 		}
 	}
 	return out
+}
+
+// ---------- set-name keying (shared by both backends) ----------
+
+// NormalizeNetsForSet de-overlaps the CIDRs of an interval ("nets") set,
+// selecting the address family from the set name. A non-nets set name (a
+// "_hosts" set or anything without a family token) returns elems unchanged.
+//
+// The family token (`_v4_nets` / `_v6_nets`) always appears immediately after
+// the set's base prefix, and any feed-name suffix is appended AFTER it (e.g.
+// `block_ext_v6_nets_<feedKey>`). A sanitized feed name can itself contain the
+// OTHER family's token (a feed literally named "block v4 nets" → set
+// `block_ext_v6_nets_block_v4_nets`), so a plain "contains _v4_nets first"
+// test would pick the wrong family and run the v4 normalizer over v6 CIDRs.
+// We therefore key on whichever token appears FIRST — that is always the real
+// family marker, never the feed-name echo. (The normalizers are also
+// family-tolerant, so a mis-key degrades to dropped entries, never a panic.)
+//
+// Both backends call this instead of keeping their own substring matcher, so
+// the two can't drift.
+func NormalizeNetsForSet(setName string, elems []string) []string {
+	i4 := strings.Index(setName, "_v4_nets")
+	i6 := strings.Index(setName, "_v6_nets")
+	switch {
+	case i4 >= 0 && (i6 < 0 || i4 < i6):
+		return NormalizeCIDRsV4(elems)
+	case i6 >= 0:
+		return NormalizeCIDRsV6(elems)
+	default:
+		return elems
+	}
 }
