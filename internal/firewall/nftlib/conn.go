@@ -75,6 +75,10 @@ func (b *Backend) lookupSet(name string) (*nftables.Set, error) {
 func (b *Backend) invalidateCache() {
 	b.table = nil
 	b.namedSets = make(map[string]*nftables.Set)
+	// Drop the applied-content cache too: after any structural change the kernel
+	// set may have been recreated/flushed, so a matching input hash no longer
+	// means the kernel still holds that content — force the next write to apply.
+	b.appliedHash = make(map[string]uint64)
 }
 
 // normalizeIP returns the canonical byte encoding for a set element key.
