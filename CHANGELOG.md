@@ -18,6 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP tool `mail_log_tail` + `GET /api/v1/system/mail-log`** — bounded on-demand
+  tail of a mail log (`which=exim` / `dovecot` / `postfix`), read-only, admin-only.
+  The raw-log companion to `mail_queue_summary`: the exim mainlog is where
+  outbound-abuse evidence lives — authenticated senders (grep `A=dovecot_login:`)
+  and injecting scripts (grep `cwd=/home`) — which no other read tool exposed.
+  Same cost discipline as `mysql_log_tail`: last N lines via `tail` (backward from
+  EOF), timeout, optional case-insensitive grep, capped output, no continuous
+  overhead; path resolved from a fixed per-service candidate list, never
+  caller-supplied. `found:false` (not an error) when the service isn't logging at
+  a known path. New `internal/maillog`.
 - **cfm-admin WebUI: a "Mail queue" page** (`/cfm-admin/mail/`) — the mail-queue
   breakdown now in the panel too, closing the "everywhere" set (API + MCP + CLI +
   WebUI). Renders the detector-published report (total/frozen/deferred, age

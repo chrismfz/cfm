@@ -18,6 +18,7 @@ import (
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 	"cfm/internal/kmsg"
+	"cfm/internal/maillog"
 	"cfm/internal/mailqueue"
 	"cfm/internal/mysqllog"
 	"cfm/internal/netstat"
@@ -222,6 +223,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/services", handleSystemServices)
 	m.HandleFunc("/api/v1/system/ip-forensics", handleSystemIPForensics)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
+	m.HandleFunc("/api/v1/system/mail-log", handleSystemMailLog)
 	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
@@ -478,6 +480,50 @@ func handleSystemMySQLLog(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":     true,
 		"schema": "system.mysql_log.v1",
+		"result": res,
+	})
+}
+
+// handleSystemMailLog serves a bounded tail of a mail log (exim/dovecot/postfix)
+// — GET /api/v1/system/mail-log?which=exim|dovecot|postfix&lines=&limit=&grep=.
+// Read-only, admin-only. Backs the MCP mail_log_tail tool: the raw exim mainlog
+// is where authenticated senders (A=dovecot_login:) and injecting scripts (cwd=)
+// live, for outbound-abuse investigations. `found:false` when the service isn't
+// logging at a known path (not installed / logs elsewhere), not an error.
+func handleSystemMailLog(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	which := strings.TrimSpace(r.URL.Query().Get("which"))
+	lines := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("lines")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			lines = n
+		}
+	}
+	limit := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	grep := strings.TrimSpace(r.URL.Query().Get("grep"))
+
+	res, err := maillog.Tail(r.Context(), which, lines, limit, grep)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":     true,
+		"schema": "system.mail_log.v1",
 		"result": res,
 	})
 }

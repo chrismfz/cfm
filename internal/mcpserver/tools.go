@@ -60,6 +60,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerMySQLLogTail(srv, d)
 	registerMySQLSlowQueries(srv, d)
 	registerMailQueueSummary(srv, d)
+	registerMailLogTail(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -579,6 +580,28 @@ func registerMailQueueSummary(srv *mcp.Server, d Deps) {
 		Description: "Mail-queue breakdown (exim or postfix, auto-detected): total/frozen/deferred counts, age distribution (<10m…>1d), top sender + recipient domains, the oldest messages, AND the top deferral/freeze reasons (e.g. 'retry time not reached', 'Connection refused', a 550 mailbox-not-found bounce). The \"why is mail backing up / who's flooding it / why are messages stuck?\" view on top of the raw counts in system_health. Reads the report the queue detector publishes each poll — no per-request probe; `available:false` if no queue detector is enabled yet. (A spike in one sender domain often means a compromised account or a bounce storm.)",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		return dispatchJSON(ctx, d, "/api/v1/system/mail-queue", nil)
+	})
+}
+
+type mailLogInput struct {
+	Which string `json:"which,omitempty" jsonschema:"which mail log: exim (default), dovecot, or postfix"`
+	Lines int    `json:"lines,omitempty" jsonschema:"how many trailing log lines to scan (tail window); default 500, max 20000"`
+	Grep  string `json:"grep,omitempty" jsonschema:"case-insensitive substring filter (e.g. an email, a user, 'A=dovecot_login', 'cwd=/home', a recipient domain); omit for all"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max matching lines to return; default 200, max 2000"`
+}
+
+func registerMailLogTail(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "mail_log_tail",
+		Description: "Tail a mail log — exim (exim_mainlog, default), dovecot, or postfix. The raw-log companion to mail_queue_summary: the exim mainlog is where outbound-abuse evidence lives — authenticated senders (grep 'A=dovecot_login:'), injecting scripts (grep 'cwd=/home'), and per-message sender/recipient/defer lines. Bounded on-demand tail (last N lines via `tail`, timeout, optional case-insensitive grep, capped output); no continuous overhead. Path is resolved from a fixed per-service candidate list, never caller-supplied. `result.found` is false when that service isn't logging at a known path (not installed / logs elsewhere).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mailLogInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setStr(q, "which", in.Which)
+		setInt(q, "lines", in.Lines)
+		setInt(q, "limit", in.Limit)
+		setStr(q, "grep", in.Grep)
+		return dispatchJSON(ctx, d, "/api/v1/system/mail-log", q)
 	})
 }
 
