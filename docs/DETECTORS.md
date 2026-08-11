@@ -228,7 +228,7 @@ whenever it chooses.
 
 The mirror image of `challenge_solver_farm`, and its exact blind spot.
 
-Solving mints a signed `cfm_clearance` cookie valid for `CHALLENGE_COOKIE_LIFE`
+Solving mints a signed clearance cookie (`cfm_clearance` on web, `cfm_clearance_p<port>` on panel ports) valid for `CHALLENGE_COOKIE_LIFE`
 (45m by default). A browser stores it and does not solve again until it expires.
 An address that re-solves minutes later is saying something very specific: **it
 never stored the cookie**. That is not aggressive crawling — it is a request

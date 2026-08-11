@@ -74,6 +74,19 @@ back-filled here — see the git/PR history for that period.
   `cfm dnat` / `cfm dnat cpanel` (edge + panel routing) are explicitly kept.
 
 ### Fixed
+- **Web and panel clearance cookies no longer clobber each other
+  (edge-unification Phase 2a).** Browsers do not isolate cookies by port, so
+  the single shared `cfm_clearance` name on `Path=/` meant solving a panel
+  challenge (`:2083/:2087/...`) overwrote the web clearance and vice versa —
+  the recurring "solved but still challenged" loop the panel loop-breaker
+  masks. The challenge server now mints panel clearances under a per-scope
+  name (`cfm_clearance_p<port>`; web keeps `cfm_clearance`), and
+  `cfm_panel.lua` reads the scoped name first, still accepts a panel-scoped
+  token under the legacy shared name (upgrade lag — scope validation is
+  HMAC-bound either way), and re-mints under the scoped name so old cookies
+  migrate forward. The loop-breaker stays as a safety net for the upgrade
+  window and will be removed after burn-in. Existing clearances survive:
+  web cookies are untouched, panel cookies revalidate via the fallback.
 - **Edge Lua drift fixes (edge-unification Phase 0).** Five long-standing
   divergences between the web (`cfm.lua`) and panel (`cfm_panel.lua`) paths:
   (1) the panel-subdomain prefix lists had drifted (`cfm.lua` knew `mail.` but

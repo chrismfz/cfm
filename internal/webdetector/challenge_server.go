@@ -746,7 +746,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		exp := time.Now().UTC().Add(ttl)
 		clearanceVal := issueClearanceToken(ipStr, host, scope, exp)
 		http.SetCookie(w, &http.Cookie{
-			Name:     "cfm_clearance",
+			Name:     clearanceCookieName(scope),
 			Value:    clearanceVal,
 			Path:     "/",
 			MaxAge:   int(ttl.Seconds()),
@@ -1522,7 +1522,7 @@ func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Req
 	exp := time.Now().UTC().Add(ttl)
 	clearanceVal := issueClearanceToken(ipStr, host, scope, exp)
 	http.SetCookie(w, &http.Cookie{
-		Name:     "cfm_clearance",
+		Name:     clearanceCookieName(scope),
 		Value:    clearanceVal,
 		Path:     "/",
 		MaxAge:   int(ttl.Seconds()),
@@ -1777,6 +1777,26 @@ func clearanceScope(r *http.Request) string {
 		return "web"
 	}
 	return "panel:" + p
+}
+
+// clearanceCookieName returns the per-scope clearance cookie name:
+// "cfm_clearance" for the web scope, "cfm_clearance_p<port>" for a panel
+// scope. Browsers do not isolate cookies by port, so one shared name on
+// Path=/ made web and panel tokens clobber each other (the panel
+// loop-breaker's raison d'être — edge-unification Phase 2); a per-scope
+// name gives each surface its own cookie. A scope that is not a
+// well-formed "panel:<digits>" falls back to the shared web name.
+func clearanceCookieName(scope string) string {
+	port, ok := strings.CutPrefix(scope, "panel:")
+	if !ok || port == "" {
+		return "cfm_clearance"
+	}
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return "cfm_clearance"
+		}
+	}
+	return "cfm_clearance_p" + port
 }
 
 func issueClearanceToken(ip, host, scope string, exp time.Time) string {

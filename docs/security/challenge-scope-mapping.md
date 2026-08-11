@@ -15,14 +15,22 @@ CFM now uses one canonical model across challenge token issuance (Go) and Lua va
 - Challenge host/scope checks were less explicit about forwarded host/port guardrails in sensitive challenge endpoints.
 
 ### New host-bound model
-- `cfm_clearance` is authoritative and bound to `ip + normalized_host + exact_scope`.
+- The clearance cookie is authoritative and bound to `ip + normalized_host + exact_scope`.
+- **The cookie name is per-scope** (edge-unification Phase 2a): web mints
+  `cfm_clearance`, panel scopes mint `cfm_clearance_p<port>` (e.g.
+  `cfm_clearance_p2087`). Browsers do not isolate cookies by port, so the
+  previously shared name let a panel solve clobber the web token (and vice
+  versa) — the per-scope name removes the clobber. `cfm_panel.lua` still
+  accepts a panel-scoped token under the legacy shared name (upgrade lag)
+  and migrates it to the scoped name on refresh; scope validation is
+  HMAC-bound either way.
 - `cfm_ok` remains migration-only and non-authoritative.
 - Challenge/verify endpoints enforce forwarded-host presence and reject invalid/missing forwarded-port for panel scope contexts.
 
 ## Migration notes (`cfm_ok`)
 
 - Legacy `cfm_ok` can still be issued for compatibility, but do not rely on it for cross-host or cross-scope pass state.
-- Prefer validating behavior with `cfm_clearance` only.
+- Prefer validating behavior with the clearance cookie only (`cfm_clearance` on web, `cfm_clearance_p<port>` on panel).
 - During rollout, monitor challenge logs for `host_mismatch` and `scope_mismatch` to identify stale or replayed cookies.
 
 ## Validation-path carve-out (`/.well-known/`)
