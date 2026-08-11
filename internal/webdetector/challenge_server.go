@@ -780,11 +780,20 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// Release:
 		// 1) remove from nft challenge set (DNAT mode)
 		if s.fw != nil {
-			_ = s.fw.RemoveChallenge(ip)
+			// A failure here means a solved IP stays a member of the challenge set
+			// and keeps getting DNAT-redirected → the endless "Checking your
+			// browser" loop. It used to be discarded, so such a failure left no
+			// trace; log it (benign "element not found" is swallowed by the
+			// backend, so this only fires on a real release failure).
+			if err := s.fw.RemoveChallenge(ip); err != nil {
+				logging.LogfCHALLENGES("[challenge] release ERROR: RemoveChallenge ip=%s host=%s failed: %v (IP may stay redirected in DNAT mode)", ipStr, host, err)
+			}
 			// 2) add cooldown OK (prevents immediate re-challenge loop)
 			if oker, ok := any(s.fw).(challengeOKer); ok {
 				ttl := s.cookieTTL()
-				_ = oker.AddChallengeOK(ip, &ttl)
+				if err := oker.AddChallengeOK(ip, &ttl); err != nil {
+					logging.LogfCHALLENGES("[challenge] release ERROR: AddChallengeOK ip=%s host=%s failed: %v", ipStr, host, err)
+				}
 			}
 		}
 
@@ -1633,12 +1642,18 @@ func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Req
 		logging.LogfCHALLENGES("[challenge_ignore] ip=%s host=%s uri=%s reason=%s", ipStr, host, next, reason)
 	}
 
-	// Release from nft sets (DNAT mode)
+	// Release from nft sets (DNAT mode). Failures used to be discarded; log them
+	// (a stuck member = endless challenge loop). Benign "element not found" is
+	// swallowed by the backend, so this only fires on a real release failure.
 	if s.fw != nil && ip != nil {
-		_ = s.fw.RemoveChallenge(ip)
+		if err := s.fw.RemoveChallenge(ip); err != nil {
+			logging.LogfCHALLENGES("[challenge] release ERROR: RemoveChallenge ip=%s host=%s failed: %v (IP may stay redirected in DNAT mode)", ipStr, host, err)
+		}
 		if oker, ok := any(s.fw).(challengeOKer); ok {
 			ttl := s.cookieTTL()
-			_ = oker.AddChallengeOK(ip, &ttl)
+			if err := oker.AddChallengeOK(ip, &ttl); err != nil {
+				logging.LogfCHALLENGES("[challenge] release ERROR: AddChallengeOK ip=%s host=%s failed: %v", ipStr, host, err)
+			}
 		}
 	}
 

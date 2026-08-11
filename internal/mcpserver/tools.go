@@ -49,6 +49,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerBotsTop(srv, d)
 	registerFirewallBlocks(srv, d)
 	registerFirewallSelfTest(srv, d)
+	registerChallengeIPStatus(srv, d)
 	registerIPLocate(srv, d)
 	registerDetectorsStatus(srv, d)
 	registerSystemHealth(srv, d)
@@ -967,6 +968,16 @@ func registerFirewallSelfTest(srv *mcp.Server, d Deps) {
 		Description: "nftlib firewall self-diagnostics (read-only): the recent EnsureBase calls with their time split into lock_wait_ms (contention on the backend mutex), nl_work_ms (netlink add+flush — the shared connection's own health) and cli_work_ms (the `nft` CLI part), the worst call in the window, and the latest per-set feed writes (elems, dur, error). Use to root-cause an nftlib node whose EnsureBase duration climbs over a run (rising lock_wait ⇒ contention from a slow/failed feed write; rising nl_work ⇒ the netlink connection degrading) or a feed that never applies (a large set write erroring with 'message too long'). `available:false` on the exec-nft backend (it doesn't record this).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		return dispatchJSON(ctx, d, "/api/v1/firewall/selftest", nil)
+	})
+}
+
+func registerChallengeIPStatus(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "challenge_ip_status",
+		Description: "Dump the DNAT challenge sets (challenge_v4/v6) with each IP's remaining ttl_sec — the live view for a 'stuck in an endless Checking-your-browser loop' report on a DNAT node. Read it: is a just-solved IP still present (release failed to clear it) or does it keep reappearing with a fresh ttl_sec (the engine re-challenges it faster than the solve cooldown)? Poll across a few seconds — a ttl_sec that RESETS is a re-add, one that counts DOWN is aging out. Empty sets are normal in edge/OpenResty mode (there the gate is the Lua clearance cookie, not an nft set), so an empty result means the loop, if any, is NOT the challenge set. Admin-only.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
+		return dispatchJSON(ctx, d, "/api/v1/firewall/challenge/list", nil)
 	})
 }
 

@@ -17,7 +17,31 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **`challenge_ip_status` MCP tool + `GET /api/v1/firewall/challenge/list`
+  (admin-only): dump the DNAT challenge sets with per-IP TTL.** The live
+  instrument for a "stuck in an endless Checking-your-browser loop" report on a
+  DNAT node — it shows whether a just-solved IP is still a member of
+  `challenge_v4`/`challenge_v6` (release failed to clear it) or keeps reappearing
+  with a fresh TTL (the engine re-challenges it faster than any solve cooldown).
+  Poll it: a `ttl_sec` that resets across calls is a re-add, one that counts down
+  is aging out. Empty sets are normal in edge/OpenResty mode (there the gate is
+  the Lua clearance cookie, not an nft set). Read-only; reuses the existing
+  `ListSetElementsTimed` backend read on both nft and nftlib.
+
 ### Fixed
+- **nftlib: deleting a set element that isn't present is no longer an error
+  (parity with exec-nft), and challenge-release failures are now logged.** The
+  exec-nft backend has always tolerated "delete a non-member" (`Could not delete
+  element` / ENOENT) as a no-op; the nftlib backend returned the raw netlink
+  error instead. That error was harmless only because the challenge-release path
+  discarded it (`_ = s.fw.RemoveChallenge(ip)`) — which also meant a *real*
+  failure to remove a solved IP from `challenge_v4` (leaving it DNAT-redirected
+  into an endless "Checking your browser" loop) left no trace at all. `delIPElem`
+  /`delCIDRElem` now swallow not-found (matching nft), and the release sites in
+  `challenge_server.go` log a genuine `RemoveChallenge`/`AddChallengeOK` failure
+  (`[challenge] release ERROR: …`) instead of dropping it. No behaviour change
+  for a successful release; benign "already absent" stays silent.
 - **nftlib: large CIDR/nets feeds now apply (de-overlap before writing).** An
   interval (`*_nets`) feed set with overlapping/adjacent CIDRs was rejected by
   the kernel with `netlink receive: directory not empty` (ENOTEMPTY) — observed

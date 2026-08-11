@@ -204,7 +204,18 @@ func (b *Backend) delIPElem(setName string, ip net.IP) error {
 	if err := b.conn.SetDeleteElements(set, []nftables.SetElement{elem}); err != nil {
 		return fmt.Errorf("nftlib delIPElem %s %s: %w", setName, ip, err)
 	}
-	return b.conn.Flush()
+	if err := b.conn.Flush(); err != nil {
+		// Deleting an element that isn't in the set is the desired end state, not a
+		// failure — the exec-nft backend explicitly tolerates it ("Could not delete
+		// element" / ENOENT). Match that so callers (e.g. RemoveChallenge on an IP
+		// that was never in challenge_v4, the common edge-mode case) don't see a
+		// spurious error. lookupSet already caught a missing set above.
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("nftlib delIPElem %s %s: %w", setName, ip, err)
+	}
+	return nil
 }
 
 func (b *Backend) addCIDRElem(setName, cidr string, ttl *time.Duration) error {
@@ -242,7 +253,15 @@ func (b *Backend) delCIDRElem(setName, cidr string) error {
 	if err := b.conn.SetDeleteElements(set, elems); err != nil {
 		return fmt.Errorf("nftlib delCIDRElem %s %s: %w", setName, cidr, err)
 	}
-	return b.conn.Flush()
+	if err := b.conn.Flush(); err != nil {
+		// Deleting a CIDR that isn't in the set is a no-op success — parity with the
+		// exec-nft backend (tolerates "Could not delete element" / ENOENT).
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("nftlib delCIDRElem %s %s: %w", setName, cidr, err)
+	}
+	return nil
 }
 
 // cidrSetName picks the v4 or v6 set name based on the address family of cidr.
