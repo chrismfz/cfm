@@ -17,6 +17,25 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Removed
+- **The legacy per-IP challenge-DNAT machinery is deleted (edge-unification
+  Phase 1b).** Gone from both firewall backends: `AddChallenge`/`RemoveChallenge`,
+  `SetChallengeRedirectEnabled`/`CleanupChallengeRedirect`/`EnsureChallengeRedirect`,
+  the nft `challenge_guard` chain machinery and the `challenge_v4`/`challenge_v6`
+  set creation, and nftlib's challenge DNAT namespace (`dnatWantedSpecs` incl. the
+  challenge-scoped `self_v4/v6` redirect specs — the self sets themselves and the
+  base input accept rules are untouched). The challenge server's legacy HTTPS
+  listener (daemon-terminated TLS on `CHALLENGE_HTTPS_LISTEN`, default 9099) and
+  the DNAT-era pre-auth login-challenge subsystem are removed with it; the
+  post-solve release is bridge-only. `EnsureBase` now performs a one-shot legacy
+  cleanup (drops leftover `challenge_v4`/`v6` sets and flushes a stale
+  `challenge_guard`) so upgraded nodes shed old state. The
+  `GET /api/v1/firewall/challenge/list` endpoint and the `challenge_ip_status`
+  MCP tool are retired with the sets they dumped (they served their diagnostic
+  purpose during the 2026-08-11 incident). No behavior change on any fleet node:
+  in edge mode nothing ever populated the sets, and the enforcement path
+  (bridge + Lua clearance cookie) is untouched.
+
 ### Changed
 - **Edge mode is now the only mode — `OPENRESTY_MODE` is deprecated and
   ignored (edge-unification Phase 1a).** The OpenResty/Angie decision bridge

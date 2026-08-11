@@ -148,12 +148,6 @@ func Start(
 	configureDebugCaptureFromConfig(cfg)
 	setMFARolloutPolicyFromConfig(cfg)
 
-	SetPreAuthLoginChallengeEnforcer(func(ip net.IP, ttl time.Duration, _ string) error {
-		if be == nil {
-			return fmt.Errorf("firewall backend unavailable")
-		}
-		return be.AddChallenge(ip, &ttl)
-	}, 5*time.Minute)
 	m := http.NewServeMux()
 
 	// Publish mux and apply any deferred registrations.
@@ -201,7 +195,6 @@ func Start(
 	RegisterBlock(m, be)
 	RegisterFirewallList(m, be)
 	RegisterFirewallSelfTest(m, be) // read-only nftlib self-diagnostics
-	RegisterChallengeList(m, be)    // read-only DNAT challenge-set dump (loop debug)
 	RegisterSearch(m, be, cfgDir)   // read-only multi-source IP lookup
 
 	// ── System status ─────────────────────────────────────────────────────────

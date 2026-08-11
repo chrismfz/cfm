@@ -39,11 +39,6 @@ type webdetectorWrapped struct {
 	stopOnce sync.Once
 	chalSrv  *webdet.ChallengeServer
 
-	// challenge redirect rules can be lost if firewall reloads/recreates tables.
-	// Re-ensure periodically from RunOnce as a self-healing watchdog.
-	lastEnsureMu sync.Mutex
-	lastEnsure   time.Time
-
 	// External alerts coming from background components (e.g. challenge server
 	// abuse self-protection). These are drained into the normal RunOnce(out)
 	// channel so the section sink (API/firewall/notifier + our logs) handles them.
@@ -166,7 +161,7 @@ func (w *webdetectorWrapped) Every() time.Duration { return w.eng.Every() }
 
 func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	w.startOnce.Do(func() {
-		SetNginxBridge(nil) // default (DNAT mode)
+		SetNginxBridge(nil) // reset; wired to the engine bridge below
 
 		// IMPORTANT:
 		// ctx here is a per-run watchdog ctx (timeout) from runOnceSafeTimed.
@@ -176,12 +171,6 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 		if pctx == nil {
 			pctx = ctx
 		}
-
-		// Pre-auth login challenge is a DNAT-era mechanism (it enforced via the
-		// nft challenge sets); edge mode is the only mode now, so it is always
-		// disabled. The whole subsystem is deleted in Phase 1b together with
-		// the backend challenge machinery it depends on.
-		apiserver.SetPreAuthLoginChallengeEnabled(false)
 
 		// Build per-engine mux and hot-swap it behind a stable proxy route.
 		// This avoids duplicate ServeMux registrations on detector reload while
@@ -224,17 +213,11 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
 		// NginxBridge decision socket — same lifecycle as API server. Edge mode
 		// is the only mode: the bridge is always constructed and always serves.
-		// The legacy per-IP challenge DNAT is force-disabled and cleaned up on
-		// every start until Phase 1b deletes the machinery outright (this keeps
-		// upgraded nodes shedding any stale redirect rules).
-		if fwBackend != nil {
-			fwBackend.SetChallengeRedirectEnabled(false)
-			_ = fwBackend.CleanupChallengeRedirect()
-		}
-
+		// (Stale legacy challenge-DNAT state is shed by EnsureBase's one-shot
+		// cleanup in the firewall backends.)
 		if b := w.eng.NginxBridge(); b != nil {
 
-			// expose to sinks so challenge enforcement uses bridge instead of fw.AddChallenge()
+			// expose to sinks so challenge enforcement goes through the bridge
 			ResetClamBridgeWireState()
 			SetNginxBridge(b)
 
@@ -259,11 +242,8 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 		webdet.SetChallengeToken(w.cfg.ChallengeToken)
 
 		// Challenge server + nft redirect rules (ctx-bound)
-		if w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != "" {
-			// initial ensure (best-effort)
-			w.ensureChallengeRedirect("init")
-
-			srv := webdet.NewChallengeServer(webdet.SSLCollector(), fwBackend)
+		if w.cfg.ChallengeHTTPListen != "" {
+			srv := webdet.NewChallengeServer(fwBackend)
 			w.chalSrv = srv
 
 			// Global ignore: [global] IGNORE_IPS / IGNORE_NETS
@@ -468,7 +448,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			w.srvWG.Add(1)
 			go func() {
 				defer w.srvWG.Done()
-				started <- srv.Start(pctx, w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen)
+				started <- srv.Start(pctx, w.cfg.ChallengeHTTPListen)
 			}()
 
 			select {
@@ -483,11 +463,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 		}
 	})
 
-	// Watchdog: re-ensure redirect rules periodically to recover from
 	// nft table reloads (e.g. autoblock/loadAll paths).
-	if w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != "" {
-		w.ensureChallengeRedirect("tick")
-	}
 
 	// Flush any external alerts that were queued by background components
 	// (e.g. challenge-server abuse), before we do the ingest pass.
@@ -594,33 +570,6 @@ func scanFolderSourceForDebug(dir, glob string, recursive bool, st *core.State, 
 	return stats
 }
 
-// ensureChallengeRedirect runs EnsureChallengeRedirect at most once per minute.
-// This is intentionally cheap and self-healing.
-func (w *webdetectorWrapped) ensureChallengeRedirect(tag string) {
-	// throttle
-
-	skip := func() bool {
-		w.lastEnsureMu.Lock()
-		defer w.lastEnsureMu.Unlock()
-		if !w.lastEnsure.IsZero() && time.Since(w.lastEnsure) < 10*time.Minute {
-			return true
-		}
-		w.lastEnsure = time.Now()
-		return false
-	}()
-	if skip {
-		return
-	}
-
-	// Edge mode is the only mode: never install the legacy challenge DNAT;
-	// keep force-disabling + cleaning it so upgraded nodes shed stale rules.
-	// The whole function goes away in Phase 1b with the backend machinery.
-	if fwBackend != nil {
-		fwBackend.SetChallengeRedirectEnabled(false)
-		_ = fwBackend.CleanupChallengeRedirect()
-	}
-}
-
 func init() {
 	meta.Register(meta.DetectorMeta{
 		TypeKey:          "webdetector",
@@ -680,7 +629,6 @@ func init() {
 			APIListen: kvStrClean(kv, "API_LISTEN", ""),
 
 			ChallengeHTTPListen:  kvStrClean(kv, "CHALLENGE_HTTP_LISTEN", ""),
-			ChallengeHTTPSListen: kvStrClean(kv, "CHALLENGE_HTTPS_LISTEN", ""),
 
 			// Separate per-request access log for the challenge server ([challenge_http] lines).
 			ChallengeAccessLogPath: kvStrClean(kv, "CHALLENGE_ACCESS_LOG", "/var/log/cfm/challenge.access.log"),

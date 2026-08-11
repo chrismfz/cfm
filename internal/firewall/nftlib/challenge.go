@@ -22,12 +22,8 @@ import (
 const (
 	dnatRuleTag                  = "cfm-dnat-managed"
 	dnatLoopbackAcceptTag        = dnatRuleTag + ":loopback-accept:v1"
-	dnatAcceptNamespaceEdge      = "cfm_edge_dnat_accept"
-	dnatAcceptNamespaceChallenge = "cfm_challenge_dnat_accept"
-	dnatRuleNamespaceEdge        = "edge"
-	dnatRuleNamespaceChallenge   = "challenge"
-	defaultWebDNATHTTPPort       = 9080
-	defaultWebDNATHTTPSPort      = 9043
+	dnatAcceptNamespaceEdge = "cfm_edge_dnat_accept"
+	dnatRuleNamespaceEdge   = "edge"
 )
 
 type dnatRuleSpec struct {
@@ -140,10 +136,9 @@ func managedDNATRule(userData []byte) bool {
 	return strings.HasPrefix(string(userData), dnatRuleTag)
 }
 
-func dnatAcceptNamespace(namespace string) string {
-	if namespace == dnatRuleNamespaceChallenge {
-		return dnatAcceptNamespaceChallenge
-	}
+func dnatAcceptNamespace(string) string {
+	// Only the edge namespace exists — the per-IP challenge DNAT namespace is
+	// retired (edge-unification Phase 1b).
 	return dnatAcceptNamespaceEdge
 }
 
@@ -155,9 +150,9 @@ func dnatRuleInNamespace(r *nftables.Rule, namespace string) bool {
 	if !ok {
 		return false
 	}
-	if namespace == dnatRuleNamespaceChallenge {
-		return spec.sourceSet != ""
-	}
+	// Edge rules are unscoped; a sourceSet marks a stale rule from the retired
+	// challenge namespace, which never matches (and gets cleaned as foreign).
+	_ = namespace
 	return spec.sourceSet == ""
 }
 
@@ -302,61 +297,6 @@ func tableFamilyFromString(s string) nftables.TableFamily {
 	}
 }
 
-func (b *Backend) SetChallengeRedirectEnabled(enabled bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.challengeRedirectEnabled = enabled
-	if !enabled {
-		_ = b.cleanupChallengeRedirectUnlocked("", "")
-	}
-}
-
-// ChallengeRedirectEnabled reports whether the challenge DNAT redirect is armed.
-//
-// It exists so the challenge server can say which of two very different things
-// its "ensure redirect" call actually did: install the rules, or find the
-// redirect disabled and clean up. Both return nil, and a log line that says
-// "OK" for both is how an operator ends up believing DNAT is armed when it is
-// not — or the reverse.
-func (b *Backend) ChallengeRedirectEnabled() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.challengeRedirectEnabled
-}
-
-func (b *Backend) CleanupChallengeRedirect() error {
-	if err := b.cleanupScopedDNATAccepts(dnatAcceptNamespaceChallenge); err != nil {
-		return err
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.cleanupChallengeRedirectUnlocked("", "")
-}
-
-func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) (err error) {
-	start := time.Now()
-	b.logPhase("EnsureChallengeRedirect", "start", 0, nil, "op=dnat scope=challenge")
-	defer func() {
-		st := "ok"
-		if err != nil {
-			st = "fail"
-		}
-		b.logPhase("EnsureChallengeRedirect", st, time.Since(start), err, "op=dnat scope=challenge")
-	}()
-	if !b.challengeRedirectEnabled {
-		return b.CleanupChallengeRedirect()
-	}
-	httpHost, httpPort, okHTTP := parseListenHostPort(httpListen)
-	httpsHost, httpsPort, okHTTPS := parseListenHostPort(httpsListen)
-	if !okHTTP {
-		httpPort = defaultWebDNATHTTPPort
-	}
-	if !okHTTPS {
-		httpsPort = defaultWebDNATHTTPSPort
-	}
-	return b.dnatOnScoped("", "", httpHost, httpPort, httpsHost, httpsPort)
-}
-
 func (b *Backend) getDNATTableAndChain(family, table string) (*nftables.Table, *nftables.Chain, error) {
 	tf := tableFamilyFromString(family)
 	t := &nftables.Table{Name: table, Family: tf}
@@ -499,36 +439,6 @@ func dnatAcceptProtoName(proto uint8) string {
 		return "udp"
 	}
 	return "tcp"
-}
-
-func dnatWantedSpecs(httpHost string, httpPort int, httpsHost string, httpsPort int) []dnatRuleSpec {
-	var specs []dnatRuleSpec
-	addListener := func(host string, dport uint16, proto uint8, toPort int) {
-		if toPort < 1 {
-			return
-		}
-		if toPort > 65535 {
-			return
-		}
-		toPort16 := uint16(toPort)
-		for _, fam := range []nftables.TableFamily{nftables.TableFamilyIPv4, nftables.TableFamilyIPv6} {
-			addr, ok := dnatTargetAddr(host, fam)
-			if !ok {
-				continue
-			}
-			sets := []string{setChalV4, "self_v4"}
-			if fam == nftables.TableFamilyIPv6 {
-				sets = []string{setChalV6, "self_v6"}
-			}
-			for _, setName := range sets {
-				specs = append(specs, dnatRuleSpec{family: fam, proto: proto, dport: dport, toPort: toPort16, sourceSet: setName, toAddr: addr})
-			}
-		}
-	}
-	addListener(httpHost, 80, 6, httpPort)
-	addListener(httpsHost, 443, 6, httpsPort)
-	addListener(httpsHost, 443, 17, httpsPort)
-	return specs
 }
 
 func dnatUnscopedWantedSpecs(family nftables.TableFamily, httpPort, httpsPort int) []dnatRuleSpec {
@@ -686,27 +596,6 @@ func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) (err err
 		return err
 	}
 	return b.installDNATRules(family, table, dnatUnscopedWantedSpecs(tableFamilyFromString(family), httpPort, httpsPort), dnatRuleNamespaceEdge, true)
-}
-
-func (b *Backend) dnatOnScoped(family, table, httpHost string, httpPort int, httpsHost string, httpsPort int) (err error) {
-	start := time.Now()
-	b.logPhase("DNATOn", "start", 0, nil, fmt.Sprintf("op=dnat scope=challenge http_port=%d https_port=%d", httpPort, httpsPort))
-	defer func() {
-		st := "ok"
-		if err != nil {
-			st = "fail"
-		}
-		b.logPhase("DNATOn", st, time.Since(start), err, fmt.Sprintf("op=dnat scope=challenge http_port=%d https_port=%d", httpPort, httpsPort))
-	}()
-	family, table = dnatDefaults(family, table)
-	if httpPort <= 0 || httpsPort <= 0 || httpPort > 65535 || httpsPort > 65535 {
-		return fmt.Errorf("invalid ports: http=%d https=%d", httpPort, httpsPort)
-	}
-	if err := b.EnsureBase(); err != nil {
-		return err
-	}
-	wanted := dnatWantedSpecs(httpHost, httpPort, httpsHost, httpsPort)
-	return b.installDNATRules(family, table, wanted, dnatRuleNamespaceChallenge, false)
 }
 
 func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, namespace string, includeLoopbackAccept bool) error {
@@ -879,10 +768,6 @@ func (b *Backend) dnatOffUnlocked(family, table, namespace string) error {
 	return b.conn.Flush()
 }
 
-func (b *Backend) cleanupChallengeRedirectUnlocked(family, table string) error {
-	return b.dnatOffUnlocked(family, table, dnatRuleNamespaceChallenge)
-}
-
 // EnsureDNATAccepts re-asserts the scoped `ct status dnat` accept rules in
 // inet cfm/input for whatever unconditional (edge) web DNAT is currently
 // active. No-op when the DNAT table is absent or no edge rules are present.
@@ -937,28 +822,6 @@ func (b *Backend) DNATOff(family, table string) (err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.dnatOffUnlocked(family, table, dnatRuleNamespaceEdge)
-}
-
-func parseListenHostPort(addr string) (host string, port int, ok bool) {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return "", 0, false
-	}
-	if p, err := strconv.Atoi(addr); err == nil {
-		if p > 0 && p <= 65535 {
-			return "", p, true
-		}
-		return "", 0, false
-	}
-	h, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", 0, false
-	}
-	p, err := strconv.Atoi(portStr)
-	if err != nil || p <= 0 || p > 65535 {
-		return strings.TrimSpace(h), 0, false
-	}
-	return strings.TrimSpace(h), p, true
 }
 
 func getenvInt(key string, def int) int {

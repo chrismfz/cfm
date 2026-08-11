@@ -3,11 +3,9 @@ package webdetector
 import (
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
-	"cfm/internal/sslcollector"
 	"cfm/internal/tlsfp"
 	"cfm/internal/uaplausible"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -39,15 +37,11 @@ const (
 var clearanceBridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 
 type ChallengeServer struct {
-	httpSrv  *http.Server
-	httpsSrv *http.Server
-
+	httpSrv *http.Server
 	httpLn  net.Listener
-	httpsLn net.Listener
 
-	ssl    *sslcollector.Collector
-	fw     firewall.Backend
-	bridge *NginxBridge // OpenResty mode: ClearIP after solve
+	fw     firewall.Backend // abuse self-protection only (rlFirewallBlock → AddBlock)
+	bridge *NginxBridge     // release path: ClearIP after solve
 
 	cookieLife time.Duration // solved cookie lifetime (cfm_ok) and OK TTL
 
@@ -315,46 +309,17 @@ func (s *ChallengeServer) cookieTTL() time.Duration {
 // on the next request without querying the bridge again.
 func (s *ChallengeServer) SetNginxBridge(b *NginxBridge) { s.bridge = b }
 
-// releaseSolvedIP performs the post-solve release of a source IP, shared by the
-// /verify handler and autoSolveAndRelease.
-//
-// In DNAT mode (no OpenResty bridge wired) the IP was redirected because it is a
-// member of the nft challenge set, so it is dropped from that set and given a
-// short cooldown-OK. In OpenResty/edge mode (bridge != nil) the edge decides
-// in-path and the IP was NEVER added to the nft challenge set — so touching the
-// firewall backend here is not only pointless, it is dangerous: on the nftlib
-// backend the call serializes on a shared mutex that a wedged netlink connection
-// can hold for a long time, which would block the /__cfm_verify response and
-// leave the cfm_clearance cookie unset → an endless "Checking your browser"
-// loop. In edge mode we therefore ONLY clear the IP from the bridge (the intended
-// release path — "solve → ClearIP instead of nft remove") and never call the
-// firewall backend.
-func (s *ChallengeServer) releaseSolvedIP(ip net.IP, ipStr, host string) {
-	if s.bridge != nil {
-		// Edge/OpenResty mode: the bridge is the release path; do NOT touch the
-		// firewall backend (nothing was added to the nft set, and the call can
-		// block on a wedged nftlib connection).
-		if ipStr != "" {
-			s.bridge.ClearIP(ipStr)
-		}
-		return
-	}
-
-	// DNAT mode: remove from the nft challenge set + add the cooldown OK. A
-	// failure here means a solved IP stays a member and keeps getting redirected
-	// (endless loop), so log it; benign "element not found" is swallowed by the
-	// backend, so this only fires on a real release failure.
-	if s.fw == nil || ip == nil {
-		return
-	}
-	if err := s.fw.RemoveChallenge(ip); err != nil {
-		logging.LogfCHALLENGES("[challenge] release ERROR: RemoveChallenge ip=%s host=%s failed: %v (IP may stay redirected in DNAT mode)", ipStr, host, err)
-	}
-	if oker, ok := any(s.fw).(challengeOKer); ok {
-		ttl := s.cookieTTL()
-		if err := oker.AddChallengeOK(ip, &ttl); err != nil {
-			logging.LogfCHALLENGES("[challenge] release ERROR: AddChallengeOK ip=%s host=%s failed: %v", ipStr, host, err)
-		}
+// releaseSolvedIP performs the post-solve release of a source IP, shared by
+// the /verify handler and autoSolveAndRelease. Edge mode is the only mode:
+// the release is clearing the IP from the decision bridge so the edge Lua
+// passes it through on the next request (the clearance cookie set by the
+// caller is the durable proof). The firewall backend is deliberately never
+// touched here — the retired per-IP challenge DNAT was the only reason to,
+// and a blocking backend call on this path once looped every visitor
+// ("Checking your browser", 2026-08-11).
+func (s *ChallengeServer) releaseSolvedIP(ipStr string) {
+	if s.bridge != nil && ipStr != "" {
+		s.bridge.ClearIP(ipStr)
 	}
 }
 
@@ -389,11 +354,6 @@ func (s *ChallengeServer) SetAbuseConfig(enabled bool, window time.Duration, bad
 	}
 }
 
-// Optional interface: only nft backend implements this.
-type challengeRedirector interface {
-	EnsureChallengeRedirect(httpListen, httpsListen string) error
-}
-
 func maybeListenV6LoopbackFromV4Loopback(addr string) (string, bool) {
 	h, p, err := net.SplitHostPort(strings.TrimSpace(addr))
 	if err != nil {
@@ -404,12 +364,6 @@ func maybeListenV6LoopbackFromV4Loopback(addr string) (string, bool) {
 	}
 	// build "[::1]:port"
 	return net.JoinHostPort("::1", p), true
-}
-
-// Optional: cooldown-bypass set (recommended to avoid loops).
-type challengeOKer interface {
-	AddChallengeOK(ip net.IP, ttl *time.Duration) error
-	RemoveChallengeOK(ip net.IP) error
 }
 
 const (
@@ -569,10 +523,9 @@ func SetChallengeToken(token string) {
 // detects abuse (many 4xx/5xx on non-verify paths within a window).
 func SetChallengeAbuseHook(h ChallengeAbuseHook) { challengeAbuseHook = h }
 
-func NewChallengeServer(ssl *sslcollector.Collector, fw firewall.Backend) *ChallengeServer {
+func NewChallengeServer(fw firewall.Backend) *ChallengeServer {
 	return &ChallengeServer{
-		ssl: ssl,
-		fw:  fw,
+		fw: fw,
 
 		rlByIP:   make(map[string]*ipRateState),
 		rlLastGC: time.Now().UTC(),
@@ -598,9 +551,8 @@ func normalizeChallengeListenAddress(addr string) string {
 	return addr
 }
 
-func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string) error {
+func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 	httpAddr = normalizeChallengeListenAddress(httpAddr)
-	httpsAddr = normalizeChallengeListenAddress(httpsAddr)
 	if s.accessLog == nil && strings.TrimSpace(s.accessLogPath) != "" {
 		s.accessLog = newChallengeAccessLogger(s.accessLogPath)
 	}
@@ -610,48 +562,6 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 	}
 
 	mux := http.NewServeMux()
-
-	// Ensure nft NAT redirect rules exist (only if challenge listeners are set)
-	if s.fw != nil {
-		// Allow nft backend to emit rule-install debug lines into the same log file.
-		if ls, ok := any(s.fw).(interface {
-			SetChallengeLogger(func(format string, args ...any))
-		}); ok {
-			ls.SetChallengeLogger(logging.LogfCHALLENGES)
-		}
-
-		if cr, ok := any(s.fw).(challengeRedirector); ok {
-			if err := cr.EnsureChallengeRedirect(httpAddr, httpsAddr); err != nil {
-				// IMPORTANT: do NOT swallow; this is exactly how we ended up with DNAT but missing reset rules.
-				logging.LogfCHALLENGES(
-					"[challenge] nft ensure redirect FAILED http=%s https=%s err=%v",
-					httpAddr, httpsAddr, err,
-				)
-				return fmt.Errorf("EnsureChallengeRedirect: %w", err)
-			}
-			// EnsureChallengeRedirect returns nil for two opposite outcomes: it
-			// installed the DNAT rules, or it found the redirect disabled (the
-			// norm — edge mode is the only mode and the register force-disables
-			// it) and cleaned them up instead. Reporting "OK" for both is how an
-			// operator ends up believing DNAT is armed when it is not. Say which.
-			// (This whole block goes away in Phase 1b with the machinery.)
-			armed := true
-			if q, ok := any(s.fw).(interface{ ChallengeRedirectEnabled() bool }); ok {
-				armed = q.ChallengeRedirectEnabled()
-			}
-			if armed {
-				logging.LogfCHALLENGES(
-					"[challenge] nft challenge DNAT armed: flagged clients are redirected to http=%s https=%s",
-					httpAddr, httpsAddr,
-				)
-			} else {
-				logging.LogfCHALLENGES(
-					"[challenge] nft challenge DNAT disabled (edge decides in-path); any stale redirect rules cleaned up. Listeners http=%s https=%s still serve the edge's proxy_pass",
-					httpAddr, httpsAddr,
-				)
-			}
-		}
-	}
 
 	// basic endpoints
 	// --- VERIFY endpoint ---
@@ -824,7 +734,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 		// and never blocks on the firewall backend (see releaseSolvedIP) — that
 		// blocking call was leaving the clearance cookie below unset and looping
 		// the browser. The clearance cookie is set right after, unconditionally.
-		s.releaseSolvedIP(ip, ipStr, host)
+		s.releaseSolvedIP(ipStr)
 
 		// 4) Set solved cookie so OpenResty can fast-path without re-query/cache loops.
 		// Secure should follow the *original* scheme (OpenResty terminates TLS),
@@ -1109,72 +1019,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 
 	}
 
-	// ---------------- HTTPS server ----------------
-	if httpsAddr != "" {
-		ln, err := net.Listen("tcp", httpsAddr)
-		if err != nil {
-			return fmt.Errorf("challenge https listen %s: %w", httpsAddr, err)
-		}
-		s.httpsLn = ln
-
-		tlsCfg := &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			NextProtos: []string{"h2", "http/1.1"},
-			GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-				if s.ssl == nil {
-					return nil, fmt.Errorf("sslcollector not set")
-				}
-				// normalize servername
-				name := strings.ToLower(strings.TrimSpace(chi.ServerName))
-				name = strings.TrimSuffix(name, ".")
-				if name == "" {
-					// no SNI -> refuse (or later serve a default cert)
-					return nil, fmt.Errorf("missing SNI")
-				}
-				return s.ssl.GetCertificate(chi) // you’ll implement/export this (see below)
-			},
-		}
-
-		s.httpsSrv = &http.Server{
-			Addr: httpsAddr,
-			//Handler:           mux,
-			Handler:           s.wrapAccessLog(mux),
-			ReadHeaderTimeout: 2 * time.Second,
-			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      20 * time.Second,
-			IdleTimeout:       60 * time.Second,
-			MaxHeaderBytes:    maxHeaderBytesTight,
-			TLSConfig:         tlsCfg,
-		}
-
-		s.httpsSrv.SetKeepAlivesEnabled(false)
-
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			logging.Logf("[challenge] HTTPS listening on %s", httpsAddr)
-			if err := s.httpsSrv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && err != http.ErrServerClosed {
-				logging.Logf("[challenge] HTTPS serve error: %v", err)
-			}
-		}()
-
-		// If user configured 127.0.0.1:PORT, also listen on [::1]:PORT for dual-stack DNAT.
-		if v6addr, ok := maybeListenV6LoopbackFromV4Loopback(httpsAddr); ok {
-			if ln6, err := net.Listen("tcp", v6addr); err == nil {
-				s.wg.Add(1)
-				go func() {
-					defer s.wg.Done()
-					logging.Logf("[challenge] HTTPS listening on %s", v6addr)
-					if err := s.httpsSrv.Serve(tls.NewListener(ln6, tlsCfg)); err != nil && err != http.ErrServerClosed {
-						logging.Logf("[challenge] HTTPS serve error (v6): %v", err)
-					}
-				}()
-			} else {
-				logging.Logf("[challenge] HTTPS v6 loopback listen failed on %s: %v", v6addr, err)
-			}
-		}
-
-	}
+	// The legacy HTTPS listener (the daemon terminating TLS itself with
+	// sslcollector certs) existed only for the retired per-IP challenge DNAT,
+	// where flagged clients were redirected here on :443. The edge always
+	// proxies the challenge page over plain HTTP (the cfm_challenge upstream),
+	// so there is nothing left to serve TLS to.
 
 	// stop on ctx cancel
 	s.wg.Add(1)
@@ -1195,11 +1044,6 @@ func (s *ChallengeServer) Stop(ctx context.Context) error {
 
 	if s.httpSrv != nil {
 		if err := s.httpSrv.Shutdown(ctx); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	if s.httpsSrv != nil {
-		if err := s.httpsSrv.Shutdown(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -1667,7 +1511,7 @@ func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Req
 
 	// Release the solved IP (shared with the /verify handler): edge mode only
 	// clears the bridge and never blocks on the firewall backend.
-	s.releaseSolvedIP(ip, ipStr, host)
+	s.releaseSolvedIP(ipStr)
 
 	// Match secure flag to original scheme (OpenResty terminates TLS)
 	secure := trustedForwardedProto(r) == "https"

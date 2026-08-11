@@ -298,10 +298,6 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			embedded := isCpanelEmbeddedRequest(r)
 
-			if maybeHandlePreAuthLoginChallenge(w, r) {
-				return
-			}
-
 			// ── 1. Public paths ────────────────────────────────────────────
 			if isPublicPath(r) || isCpanelPluginSelfServicePath(r) {
 				next.ServeHTTP(w, r)

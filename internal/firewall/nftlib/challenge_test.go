@@ -12,40 +12,13 @@ import (
 	"github.com/google/nftables/expr"
 )
 
-func TestParseListenHostPort(t *testing.T) {
-	tests := []struct {
-		name     string
-		addr     string
-		wantHost string
-		wantPort int
-		wantOK   bool
-	}{
-		{name: "port only", addr: "9080", wantPort: 9080, wantOK: true},
-		{name: "wildcard", addr: ":9080", wantPort: 9080, wantOK: true},
-		{name: "loopback ipv4", addr: "127.0.0.1:9080", wantHost: "127.0.0.1", wantPort: 9080, wantOK: true},
-		{name: "loopback ipv6", addr: "[::1]:9043", wantHost: "::1", wantPort: 9043, wantOK: true},
-		{name: "dedicated ipv4", addr: "192.0.2.10:9080", wantHost: "192.0.2.10", wantPort: 9080, wantOK: true},
-		{name: "dedicated ipv6", addr: "[2001:db8::10]:9043", wantHost: "2001:db8::10", wantPort: 9043, wantOK: true},
-		{name: "bad port", addr: "127.0.0.1:0", wantHost: "127.0.0.1"},
-		{name: "missing port", addr: "127.0.0.1"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			gotHost, gotPort, gotOK := parseListenHostPort(tc.addr)
-			if gotHost != tc.wantHost || gotPort != tc.wantPort || gotOK != tc.wantOK {
-				t.Fatalf("parseListenHostPort(%q) = (%q, %d, %v), want (%q, %d, %v)", tc.addr, gotHost, gotPort, gotOK, tc.wantHost, tc.wantPort, tc.wantOK)
-			}
-		})
-	}
-}
-
 func TestDNATRuleSpecIdentityParsing(t *testing.T) {
 	specs := []dnatRuleSpec{
-		{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV4, toAddr: net.ParseIP("127.0.0.1")},
+		{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v4", toAddr: net.ParseIP("127.0.0.1")},
 		{family: nftables.TableFamilyIPv4, proto: 6, dport: 443, toPort: 9043, sourceSet: "self_v4", toAddr: net.ParseIP("192.0.2.10")},
-		{family: nftables.TableFamilyIPv6, proto: 17, dport: 443, toPort: 9043, sourceSet: setChalV6, toAddr: net.ParseIP("::1")},
+		{family: nftables.TableFamilyIPv6, proto: 17, dport: 443, toPort: 9043, sourceSet: "challenge_v6", toAddr: net.ParseIP("::1")},
 		{family: nftables.TableFamilyIPv6, proto: 6, dport: 80, toPort: 9080, sourceSet: "self_v6", toAddr: net.ParseIP("2001:db8::10")},
-		{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV4},
+		{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v4"},
 	}
 	for _, spec := range specs {
 		got, ok := parseDNATRuleSpecID(spec.id())
@@ -67,7 +40,7 @@ func TestDNATRuleSpecIdentityParsing(t *testing.T) {
 
 func TestDNATRuleSpecIdentityPortBoundaries(t *testing.T) {
 	for _, port := range []uint16{1, 80, 443, 65535} {
-		spec := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: port, toPort: port, sourceSet: setChalV4}
+		spec := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: port, toPort: port, sourceSet: "challenge_v4"}
 		got, ok := parseDNATRuleSpecID(spec.id())
 		if !ok {
 			t.Fatalf("parseDNATRuleSpecID(%q) returned !ok", spec.id())
@@ -79,7 +52,7 @@ func TestDNATRuleSpecIdentityPortBoundaries(t *testing.T) {
 }
 
 func TestDNATRuleSpecIdentityRejectsOutOfRangeComponents(t *testing.T) {
-	valid := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV4}.id()
+	valid := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v4"}.id()
 	tests := []struct {
 		name string
 		id   string
@@ -194,40 +167,12 @@ func TestDNATLoopbackAcceptRuleMatchesIIFLoAccept(t *testing.T) {
 	}
 }
 
-func TestDNATWantedSpecsAreSourceScopedAndHostScoped(t *testing.T) {
-	specs := dnatWantedSpecs("127.0.0.1", 9080, "2001:db8::10", 9043)
-	assertHasSpec := func(fam nftables.TableFamily, proto uint8, dport uint16, setName, addr string) {
-		t.Helper()
-		for _, spec := range specs {
-			if spec.family == fam && spec.proto == proto && spec.dport == dport && spec.sourceSet == setName && dnatAddrID(spec.toAddr) == addr {
-				return
-			}
-		}
-		t.Fatalf("missing family=%d proto=%d dport=%d sourceSet=%s addr=%s in %#v", fam, proto, dport, setName, addr, specs)
-	}
-	assertHasSpec(nftables.TableFamilyIPv4, 6, 80, setChalV4, "127.0.0.1")
-	assertHasSpec(nftables.TableFamilyIPv4, 6, 80, "self_v4", "127.0.0.1")
-	assertHasSpec(nftables.TableFamilyIPv6, 6, 443, setChalV6, "2001:db8::10")
-	assertHasSpec(nftables.TableFamilyIPv6, 17, 443, "self_v6", "2001:db8::10")
-	for _, spec := range specs {
-		if spec.sourceSet == "" {
-			t.Fatalf("unscoped DNAT spec would redirect unrelated external sources: %#v", spec)
-		}
-		if spec.family == nftables.TableFamilyIPv6 && spec.dport == 80 {
-			t.Fatalf("IPv4-only loopback HTTP listener produced IPv6 DNAT spec: %#v", spec)
-		}
-		if spec.family == nftables.TableFamilyIPv4 && spec.dport == 443 {
-			t.Fatalf("IPv6 dedicated HTTPS listener produced IPv4 DNAT spec: %#v", spec)
-		}
-	}
-}
-
 func TestDNATRuleExprsIncludeSourceLookupAndDestination(t *testing.T) {
-	spec := dnatRuleSpec{family: nftables.TableFamilyIPv6, proto: 6, dport: 443, toPort: 9043, sourceSet: setChalV6, toAddr: net.ParseIP("::1")}
+	spec := dnatRuleSpec{family: nftables.TableFamilyIPv6, proto: 6, dport: 443, toPort: 9043, sourceSet: "challenge_v6", toAddr: net.ParseIP("::1")}
 	exprs := dnatRuleExprs(spec)
 	lookup, ok := exprs[1].(*expr.Lookup)
-	if !ok || lookup.SetName != setChalV6 || lookup.SourceRegister != 1 || lookup.Invert {
-		t.Fatalf("source lookup = %#v, want non-inverted @%s lookup from register 1", exprs[1], setChalV6)
+	if !ok || lookup.SetName != "challenge_v6" || lookup.SourceRegister != 1 || lookup.Invert {
+		t.Fatalf("source lookup = %#v, want non-inverted @%s lookup from register 1", exprs[1], "challenge_v6")
 	}
 	var nat *expr.NAT
 	for _, ex := range exprs {
@@ -245,11 +190,11 @@ func TestDNATShowRuleLineOutput(t *testing.T) {
 		spec dnatRuleSpec
 		want string
 	}{
-		{spec: dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV4, toAddr: net.ParseIP("127.0.0.1")}, want: "ip saddr @challenge_v4 tcp dport 80 dnat to 127.0.0.1:9080"},
+		{spec: dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v4", toAddr: net.ParseIP("127.0.0.1")}, want: "ip saddr @challenge_v4 tcp dport 80 dnat to 127.0.0.1:9080"},
 		{spec: dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 443, toPort: 9043, sourceSet: "self_v4", toAddr: net.ParseIP("192.0.2.10")}, want: "ip saddr @self_v4 tcp dport 443 dnat to 192.0.2.10:9043"},
-		{spec: dnatRuleSpec{family: nftables.TableFamilyIPv6, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV6, toAddr: net.ParseIP("::1")}, want: "ip6 saddr @challenge_v6 tcp dport 80 dnat to [::1]:9080"},
+		{spec: dnatRuleSpec{family: nftables.TableFamilyIPv6, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v6", toAddr: net.ParseIP("::1")}, want: "ip6 saddr @challenge_v6 tcp dport 80 dnat to [::1]:9080"},
 		{spec: dnatRuleSpec{family: nftables.TableFamilyIPv6, proto: 17, dport: 443, toPort: 9043, sourceSet: "self_v6", toAddr: net.ParseIP("2001:db8::10")}, want: "ip6 saddr @self_v6 udp dport 443 dnat to [2001:db8::10]:9043"},
-		{spec: dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV4}, want: "ip saddr @challenge_v4 tcp dport 80 dnat to :9080"},
+		{spec: dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v4"}, want: "ip saddr @challenge_v4 tcp dport 80 dnat to :9080"},
 	}
 	for _, tc := range tests {
 		if got := dnatShowRuleLine(tc.spec); got != tc.want {
@@ -260,8 +205,8 @@ func TestDNATShowRuleLineOutput(t *testing.T) {
 
 func TestDNATAcceptRuleExprUsesDNATMetadataAndTranslatedDestination(t *testing.T) {
 	spec := dnatRuleSpec{family: nftables.TableFamilyIPv6, proto: 17, dport: 443, toPort: 9043, sourceSet: "self_v6", toAddr: net.ParseIP("2001:db8::10")}
-	want := `add rule inet cfm input ip6 daddr 2001:db8::10 udp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_challenge_dnat_accept:web_https_ip6_udp:443:9043"`
-	got := dnatAcceptRuleExpr(dnatAcceptNamespaceChallenge, spec)
+	want := `add rule inet cfm input ip6 daddr 2001:db8::10 udp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_edge_dnat_accept:web_https_ip6_udp:443:9043"`
+	got := dnatAcceptRuleExpr(dnatAcceptNamespaceEdge, spec)
 	if got != want {
 		t.Fatalf("dnatAcceptRuleExpr() = %q, want %q", got, want)
 	}
@@ -271,7 +216,7 @@ func TestDNATAcceptRuleExprUsesDNATMetadataAndTranslatedDestination(t *testing.T
 }
 
 func TestDNATAcceptRuleExprCanInsertBeforeDefaultDropHandle(t *testing.T) {
-	spec := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV4, toAddr: net.ParseIP("127.0.0.1")}
+	spec := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v4", toAddr: net.ParseIP("127.0.0.1")}
 	chain := `table inet cfm {
 		chain input {
 			ct state new tcp dport 0-65535 drop # handle 31
@@ -282,7 +227,7 @@ func TestDNATAcceptRuleExprCanInsertBeforeDefaultDropHandle(t *testing.T) {
 	if handle != "31" {
 		t.Fatalf("firstInputDefaultDropHandle() = %q, want 31", handle)
 	}
-	got := dnatAcceptRuleExpr(dnatAcceptNamespaceChallenge, spec, handle)
+	got := dnatAcceptRuleExpr(dnatAcceptNamespaceEdge, spec, handle)
 	if !strings.HasPrefix(got, "insert rule inet cfm input position 31 ") {
 		t.Fatalf("DNAT accept rule was not handle-inserted before default drops: %q", got)
 	}
@@ -303,7 +248,10 @@ func TestScopedDNATAcceptHandlesFiltersChallengeWithoutEdge(t *testing.T) {
 		`}`,
 	}, "\n")
 
-	gotChallenge := scopedDNATAcceptHandles(chain, dnatAcceptNamespaceChallenge)
+	// Stale rules from the retired challenge namespace can still exist on an
+	// upgraded node; scoped cleanup must be able to target them by their
+	// literal comment prefix without ever matching edge rules.
+	gotChallenge := scopedDNATAcceptHandles(chain, "cfm_challenge_dnat_accept")
 	wantChallenge := []string{"22", "33"}
 	if !reflect.DeepEqual(gotChallenge, wantChallenge) {
 		t.Fatalf("challenge cleanup handles = %v, want %v", gotChallenge, wantChallenge)
@@ -316,22 +264,19 @@ func TestScopedDNATAcceptHandlesFiltersChallengeWithoutEdge(t *testing.T) {
 	}
 }
 
-func TestDNATRuleNamespaceFiltersChallengeWithoutEdge(t *testing.T) {
+func TestDNATRuleNamespaceExcludesStaleScopedRules(t *testing.T) {
+	// Only the edge namespace exists now, but a stale source-scoped rule from
+	// the retired challenge namespace can still be present on an upgraded
+	// node. Edge operations must classify it as foreign (never touch/own it).
 	edgeSpec := dnatRuleSpec{family: nftables.TableFamilyINet, proto: 6, dport: 80, toPort: 9080}
-	challengeSpec := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: setChalV4, toAddr: net.ParseIP("127.0.0.1")}
+	staleScoped := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v4", toAddr: net.ParseIP("127.0.0.1")}
 	edgeRule := &nftables.Rule{UserData: []byte(edgeSpec.id())}
-	challengeRule := &nftables.Rule{UserData: []byte(challengeSpec.id())}
+	staleRule := &nftables.Rule{UserData: []byte(staleScoped.id())}
 
-	if dnatRuleInNamespace(edgeRule, dnatRuleNamespaceChallenge) {
-		t.Fatal("edge DNAT rule was classified as challenge namespace")
-	}
 	if !dnatRuleInNamespace(edgeRule, dnatRuleNamespaceEdge) {
 		t.Fatal("edge DNAT rule was not classified as edge namespace")
 	}
-	if !dnatRuleInNamespace(challengeRule, dnatRuleNamespaceChallenge) {
-		t.Fatal("challenge DNAT rule was not classified as challenge namespace")
-	}
-	if dnatRuleInNamespace(challengeRule, dnatRuleNamespaceEdge) {
-		t.Fatal("challenge DNAT rule was classified as edge namespace")
+	if dnatRuleInNamespace(staleRule, dnatRuleNamespaceEdge) {
+		t.Fatal("stale source-scoped DNAT rule was classified as edge namespace")
 	}
 }

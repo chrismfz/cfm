@@ -50,8 +50,6 @@ const (
 	setIgnoreV6    = "ignore_v6"
 	setIgnoreV4Net = "ignore_v4_nets"
 	setIgnoreV6Net = "ignore_v6_nets"
-	setChalV4      = "challenge_v4"
-	setChalV6      = "challenge_v6"
 )
 
 // Backend implements firewall.Backend using github.com/google/nftables.
@@ -79,12 +77,10 @@ type Backend struct {
 	appliedHash map[string]uint64
 
 	// Wiring fields set by callers at startup.
-	enr           *enrichpkg.Enricher
-	reporter      reporting.Reporter
-	challengeLogf func(format string, args ...any)
-	cfgDir        string
+	enr      *enrichpkg.Enricher
+	reporter reporting.Reporter
+	cfgDir   string
 
-	challengeRedirectEnabled bool
 
 	// cfg is stored in ApplyFloodRules so telemetry methods can read throttle
 	// and portscan config without re-reading the config file on every tick.
@@ -130,7 +126,6 @@ func New() (*Backend, error) {
 	}
 	return &Backend{
 		conn:                     conn,
-		challengeRedirectEnabled: true,
 		namedSets:                make(map[string]*nftables.Set),
 		extAllow:                 make(map[string]extFeedData),
 		extBlock:                 make(map[string]extFeedData),

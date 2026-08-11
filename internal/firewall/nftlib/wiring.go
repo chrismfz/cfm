@@ -35,10 +35,6 @@ func (b *Backend) SetReporter(r reporting.Reporter) {
 	b.reporter = r
 }
 
-func (b *Backend) SetChallengeLogger(f func(format string, args ...any)) {
-	b.challengeLogf = f
-}
-
 func (b *Backend) ReportBlock(ip, comment, source, mode string, ttlSeconds int) error {
 	if b == nil || b.reporter == nil {
 		return nil

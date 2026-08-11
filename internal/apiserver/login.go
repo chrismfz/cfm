@@ -205,7 +205,6 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		rec := httptest.NewRecorder()
 		h(rec, r)
 		recordLoginLimiterResult(r, username, rec.Code)
-		recordLoginAttemptResult(r, rec.Code)
 
 		if isBrowser(r) && mfaLoginVerifyEnabled() && isMFARequiredResponse(rec.Body.Bytes()) {
 			base := cfmBase(r)
