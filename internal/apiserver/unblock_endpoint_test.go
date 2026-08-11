@@ -110,9 +110,14 @@ func (s *stubFirewallBackend) RemoveBlockBatch(ips []net.IP) error {
 
 // slowFirewallBackend makes the nft point-lookup block, simulating exec-engine
 // nft lock contention on a busy node — the condition that made cfm-web time out.
+// nftFinished is closed once the (possibly abandoned) nft goroutine reaches
+// RemoveBlock, giving a test a deterministic join point so it never leaves that
+// goroutine running past the test and contaminating a sibling's goroutine count.
 type slowFirewallBackend struct {
 	*stubFirewallBackend
-	delay time.Duration
+	delay       time.Duration
+	nftFinished chan struct{}
+	once        sync.Once
 }
 
 func (s *slowFirewallBackend) HasElem(string, string) (bool, error) {
@@ -120,11 +125,47 @@ func (s *slowFirewallBackend) HasElem(string, string) (bool, error) {
 	return false, nil
 }
 
+func (s *slowFirewallBackend) RemoveBlock(ip net.IP) error {
+	err := s.stubFirewallBackend.RemoveBlock(ip)
+	if s.nftFinished != nil {
+		s.once.Do(func() { close(s.nftFinished) })
+	}
+	return err
+}
+
+// waitStableGoroutines returns once the live goroutine count has held steady for
+// a short window (or the timeout elapses). Taking a baseline only at quiescence
+// drains any goroutine a prior test left running, so the count is a trustworthy
+// reference rather than one inflated by unrelated in-flight goroutines.
+func waitStableGoroutines(timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	last, stable := -1, 0
+	for {
+		runtime.GC()
+		n := runtime.NumGoroutine()
+		if n == last {
+			if stable++; stable >= 5 { // ~100ms unchanged
+				return n
+			}
+		} else {
+			last, stable = n, 0
+		}
+		if !time.Now().Before(deadline) {
+			return n
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // A slow firewall backend must NOT make the handler exceed its response budget:
 // the fast path is abandoned at the deadline and the response is sent promptly,
 // flagged fastpath_done=false (the cleanup goroutine still guarantees removal).
 func TestUnblockFastPathBudgetBounded(t *testing.T) {
-	be := &slowFirewallBackend{stubFirewallBackend: &stubFirewallBackend{}, delay: 2 * time.Second}
+	be := &slowFirewallBackend{
+		stubFirewallBackend: &stubFirewallBackend{},
+		delay:               1200 * time.Millisecond,
+		nftFinished:         make(chan struct{}),
+	}
 	origUnblockDo := unblockDo
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -133,6 +174,7 @@ func TestUnblockFastPathBudgetBounded(t *testing.T) {
 		return &unblock.Result{}, nil
 	}
 	t.Cleanup(func() {
+		<-be.nftFinished // join the abandoned nft goroutine; leave no cross-test stray
 		wg.Wait()
 		unblockDo = origUnblockDo
 	})
@@ -147,7 +189,7 @@ func TestUnblockFastPathBudgetBounded(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	elapsed := time.Since(start)
 
-	// Budget is 800ms; the backend blocks 2s. The response must land well under
+	// Budget is 800ms; the backend blocks 1.2s. The response must land well under
 	// cfm-web's ~1.2s node-call deadline despite the slow backend.
 	if elapsed > 1200*time.Millisecond {
 		t.Fatalf("handler blocked %s on a slow backend — response budget not enforced", elapsed)
@@ -165,7 +207,6 @@ func TestUnblockFastPathBudgetBounded(t *testing.T) {
 	if done, _ := body["fastpath_done"].(bool); done {
 		t.Fatalf("fastpath_done should be false when the nft path is still blocked at the budget: %v", body)
 	}
-	wg.Wait()
 }
 
 // When the fast path is abandoned at the budget, the nft goroutine finishes its
@@ -177,7 +218,11 @@ func TestUnblockFastPathBudgetBounded(t *testing.T) {
 // buffered cap-1 channel must still let it send and return. We assert it by
 // watching the live goroutine count settle back to baseline.
 func TestUnblockAbandonedNftGoroutineDoesNotLeak(t *testing.T) {
-	be := &slowFirewallBackend{stubFirewallBackend: &stubFirewallBackend{}, delay: 1100 * time.Millisecond}
+	be := &slowFirewallBackend{
+		stubFirewallBackend: &stubFirewallBackend{},
+		delay:               1200 * time.Millisecond,
+		nftFinished:         make(chan struct{}),
+	}
 	origUnblockDo := unblockDo
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -196,15 +241,18 @@ func TestUnblockAbandonedNftGoroutineDoesNotLeak(t *testing.T) {
 	req.RemoteAddr = "198.51.100.26:12345"
 	rr := httptest.NewRecorder()
 
-	// Let transient startup goroutines settle, then take a baseline.
-	runtime.GC()
-	base := runtime.NumGoroutine()
+	// Baseline only at quiescence, so a goroutine left running by a prior test
+	// can't inflate it (an inflated baseline would let a real leak drop back to
+	// it and pass — the false-negative we must avoid).
+	base := waitStableGoroutines(4 * time.Second)
 
-	h.ServeHTTP(rr, req)
-	wg.Wait() // fire-and-forget cleanup has finished
+	h.ServeHTTP(rr, req) // abandons the nft goroutine at the 800ms budget
+	wg.Wait()            // fire-and-forget cleanup has finished
+	<-be.nftFinished     // nft goroutine reached RemoveBlock; correct code now returns
 
-	// The nft goroutine sends at ~1100ms (> the 800ms budget). Poll until the
-	// count returns to baseline; if it never does, the abandoned goroutine leaked.
+	// After RemoveBlock the nft goroutine performs its buffered send and returns,
+	// so the live count returns to baseline. The pre-fix nil-channel send would
+	// block forever on that send, pinning the count one above baseline.
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		runtime.GC()
