@@ -192,9 +192,16 @@ local CFG = {
   -- cookie_life_sec — the same CHALLENGE_COOKIE_LIFE chain the challenge
   -- server mints tokens with, so sliding re-mints can't silently extend or
   -- shorten the operator-configured clearance lifetime); historical 3600
-  -- fallback (upgrade lag: old daemon, new Lua).
+  -- fallback (upgrade lag: old daemon, new Lua). The published value is
+  -- honored only when > 0 — a sub-second configured life truncates to 0 in
+  -- the file, and 0 is truthy in Lua (Max-Age=0 would expire the cookie
+  -- immediately). Same guard cfm_panel.lua's clearance_cookie_ttl uses.
   ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC") or "")
-                         or tonumber(_bridge_cfg.cookie_life_sec or "")
+                         or (function()
+                              local pub = tonumber(_bridge_cfg.cookie_life_sec or "")
+                              if pub and pub > 0 then return pub end
+                              return nil
+                            end)()
                          or 3600,
   ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
 
