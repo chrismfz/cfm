@@ -77,10 +77,9 @@ type Backend struct {
 	appliedHash map[string]uint64
 
 	// Wiring fields set by callers at startup.
-	enr           *enrichpkg.Enricher
-	reporter      reporting.Reporter
-	challengeLogf func(format string, args ...any)
-	cfgDir        string
+	enr      *enrichpkg.Enricher
+	reporter reporting.Reporter
+	cfgDir   string
 
 
 	// cfg is stored in ApplyFloodRules so telemetry methods can read throttle

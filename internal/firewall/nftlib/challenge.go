@@ -824,28 +824,6 @@ func (b *Backend) DNATOff(family, table string) (err error) {
 	return b.dnatOffUnlocked(family, table, dnatRuleNamespaceEdge)
 }
 
-func parseListenHostPort(addr string) (host string, port int, ok bool) {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return "", 0, false
-	}
-	if p, err := strconv.Atoi(addr); err == nil {
-		if p > 0 && p <= 65535 {
-			return "", p, true
-		}
-		return "", 0, false
-	}
-	h, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", 0, false
-	}
-	p, err := strconv.Atoi(portStr)
-	if err != nil || p <= 0 || p > 65535 {
-		return strings.TrimSpace(h), 0, false
-	}
-	return strings.TrimSpace(h), p, true
-}
-
 func getenvInt(key string, def int) int {
 	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {

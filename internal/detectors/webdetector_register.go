@@ -463,7 +463,6 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 		}
 	})
 
-	// Watchdog: re-ensure redirect rules periodically to recover from
 	// nft table reloads (e.g. autoblock/loadAll paths).
 
 	// Flush any external alerts that were queued by background components

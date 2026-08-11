@@ -156,11 +156,12 @@ func (b *Backend) EnsureBase() (err error) {
 	nlWork = time.Since(nlStart)
 	b.mu.Unlock()
 
-	// One-shot legacy cleanup: earlier versions created the retired per-IP
-	// challenge-DNAT sets unconditionally. Drop them if still present so
-	// upgraded nodes shed the stale (empty) sets; tolerant when absent, and a
-	// hypothetical node with rules still referencing them just keeps them
-	// (delete fails EBUSY, ignored) until the next full table reset.
+	// Legacy cleanup (runs each EnsureBase; no-op once clean): earlier
+	// versions created the retired per-IP challenge-DNAT sets unconditionally.
+	// Drop them if still present so upgraded nodes shed the stale (empty)
+	// sets; tolerant when absent, and a hypothetical node with rules still
+	// referencing them just keeps them (delete fails EBUSY, ignored) until
+	// the next full table reset.
 	_ = b.DeleteSetIfExists("challenge_v4")
 	_ = b.DeleteSetIfExists("challenge_v6")
 

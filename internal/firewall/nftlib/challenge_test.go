@@ -12,33 +12,6 @@ import (
 	"github.com/google/nftables/expr"
 )
 
-func TestParseListenHostPort(t *testing.T) {
-	tests := []struct {
-		name     string
-		addr     string
-		wantHost string
-		wantPort int
-		wantOK   bool
-	}{
-		{name: "port only", addr: "9080", wantPort: 9080, wantOK: true},
-		{name: "wildcard", addr: ":9080", wantPort: 9080, wantOK: true},
-		{name: "loopback ipv4", addr: "127.0.0.1:9080", wantHost: "127.0.0.1", wantPort: 9080, wantOK: true},
-		{name: "loopback ipv6", addr: "[::1]:9043", wantHost: "::1", wantPort: 9043, wantOK: true},
-		{name: "dedicated ipv4", addr: "192.0.2.10:9080", wantHost: "192.0.2.10", wantPort: 9080, wantOK: true},
-		{name: "dedicated ipv6", addr: "[2001:db8::10]:9043", wantHost: "2001:db8::10", wantPort: 9043, wantOK: true},
-		{name: "bad port", addr: "127.0.0.1:0", wantHost: "127.0.0.1"},
-		{name: "missing port", addr: "127.0.0.1"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			gotHost, gotPort, gotOK := parseListenHostPort(tc.addr)
-			if gotHost != tc.wantHost || gotPort != tc.wantPort || gotOK != tc.wantOK {
-				t.Fatalf("parseListenHostPort(%q) = (%q, %d, %v), want (%q, %d, %v)", tc.addr, gotHost, gotPort, gotOK, tc.wantHost, tc.wantPort, tc.wantOK)
-			}
-		})
-	}
-}
-
 func TestDNATRuleSpecIdentityParsing(t *testing.T) {
 	specs := []dnatRuleSpec{
 		{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v4", toAddr: net.ParseIP("127.0.0.1")},

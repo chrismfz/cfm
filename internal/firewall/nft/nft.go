@@ -161,9 +161,8 @@ func New() *Backend {
 
 // cleanupLegacyChallengeDNAT sheds any state left behind by the retired
 // per-IP challenge DNAT (challenge_v4/v6 sets, the challenge_guard chain's
-// rules). One-shot, tolerant: on a node that never ran the legacy mode all
-// probes miss and nothing is executed. Called from EnsureBase so an upgraded
-// node self-cleans on its first (re)start.
+// rules). Runs on every EnsureBase; after the first pass the existence probes
+// miss and it is a cheap no-op. Tolerant of a missing table (fresh install).
 func (b *Backend) cleanupLegacyChallengeDNAT() {
 	if b == nil {
 		return
@@ -480,8 +479,8 @@ func (b *Backend) EnsureBase() (err error) {
 	_ = b.ensureSetWithFlags("throttled_v4", "ipv4_addr", "timeout")
 	_ = b.ensureSetWithFlags("throttled_v6", "ipv6_addr", "timeout")
 
-	// One-shot cleanup of retired per-IP challenge-DNAT state (sets/chain
-	// left behind by pre-edge-unification versions).
+	// Shed retired per-IP challenge-DNAT state (sets/chain left behind by
+	// pre-edge-unification versions); no-op once clean.
 	b.cleanupLegacyChallengeDNAT()
 
 	// 4) Base allow/deny rules (idempotent, σταθερή σειρά)

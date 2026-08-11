@@ -691,7 +691,6 @@ func runDaemon(args []string) {
 		}
 	}()
 
-	webdet.SetSSLCollector(sslcol)
 	logging.Logf("[sslcollector] started")
 
 	// Bind the sslcollector unix socket NOW with the config we already
