@@ -2,8 +2,9 @@
 //
 // NginxBridge is the Go side of the cfm ↔ OpenResty integration.
 //
-// When OpenRestyMode is enabled in config, cfm pushes decisions to a
-// small unix-socket HTTP server that OpenResty Lua polls per-request.
+// cfm pushes decisions to a small unix-socket HTTP server that OpenResty
+// Lua polls per-request. The bridge is always on — edge mode is the only
+// mode (the old OPENRESTY_MODE toggle is deprecated and ignored).
 //
 // Two decision types:
 //   - Per-IP:    challenge / block / clear  (from existing IP rules)
@@ -51,7 +52,6 @@ import (
 
 // ── Config fields (add these to webdetector.Config) ──────────────────────────
 //
-//   OpenRestyMode  bool          // OPENRESTY_MODE = 1
 //   OpenRestySock  string        // OPENRESTY_SOCK  = /var/run/cfm_nginx.sock
 //   OpenRestyToken string        // OPENRESTY_TOKEN = sometoken
 //

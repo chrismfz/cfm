@@ -177,12 +177,11 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			pctx = ctx
 		}
 
-		preAuthChallengeConfigured := w.cfg.ChallengeHTTPListen != "" || w.cfg.ChallengeHTTPSListen != ""
-		preAuthChallengeEnabled := preAuthChallengeConfigured && !w.cfg.OpenRestyMode
-		apiserver.SetPreAuthLoginChallengeEnabled(preAuthChallengeEnabled)
-		if preAuthChallengeConfigured && w.cfg.OpenRestyMode {
-			logging.Logf("[apiserver] pre-auth login challenge disabled in OpenResty mode (nft challenge sets unavailable)")
-		}
+		// Pre-auth login challenge is a DNAT-era mechanism (it enforced via the
+		// nft challenge sets); edge mode is the only mode now, so it is always
+		// disabled. The whole subsystem is deleted in Phase 1b together with
+		// the backend challenge machinery it depends on.
+		apiserver.SetPreAuthLoginChallengeEnabled(false)
 
 		// Build per-engine mux and hot-swap it behind a stable proxy route.
 		// This avoids duplicate ServeMux registrations on detector reload while
@@ -223,37 +222,36 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			}()
 		}
 
-		// NginxBridge decision socket — same lifecycle as API server
-		if w.cfg.OpenRestyMode {
+		// NginxBridge decision socket — same lifecycle as API server. Edge mode
+		// is the only mode: the bridge is always constructed and always serves.
+		// The legacy per-IP challenge DNAT is force-disabled and cleaned up on
+		// every start until Phase 1b deletes the machinery outright (this keeps
+		// upgraded nodes shedding any stale redirect rules).
+		if fwBackend != nil {
+			fwBackend.SetChallengeRedirectEnabled(false)
+			_ = fwBackend.CleanupChallengeRedirect()
+		}
 
-			// Disable nft dynamic DNAT challenge sets in OpenResty mode
-			if fwBackend != nil {
-				fwBackend.SetChallengeRedirectEnabled(false)
-				_ = fwBackend.CleanupChallengeRedirect()
+		if b := w.eng.NginxBridge(); b != nil {
+
+			// expose to sinks so challenge enforcement uses bridge instead of fw.AddChallenge()
+			ResetClamBridgeWireState()
+			SetNginxBridge(b)
+
+			// wire bypass so handleDecision respects IGNORE_IPS/IGNORE_NETS
+			if w.ipIgnore != nil {
+				b.SetBypassFunc(w.ipIgnore.ShouldIgnore)
 			}
+			_ = TryWireClamBridge()
 
-			if b := w.eng.NginxBridge(); b != nil {
-
-				// expose to sinks so challenge enforcement uses bridge instead of fw.AddChallenge()
-				ResetClamBridgeWireState()
-				SetNginxBridge(b)
-
-				// ── NEW: wire bypass so handleDecision respects IGNORE_IPS/IGNORE_NETS ──
-				if w.ipIgnore != nil {
-					b.SetBypassFunc(w.ipIgnore.ShouldIgnore)
+			go b.RunExpireLoop(pctx)
+			w.srvWG.Add(1)
+			go func() {
+				defer w.srvWG.Done()
+				if err := b.ServeDecisions(pctx); err != nil {
+					logging.Logf("[webdetector] nginx bridge exited: %v", err)
 				}
-				// ─────────────────────────────────────────────────
-				_ = TryWireClamBridge()
-
-				go b.RunExpireLoop(pctx)
-				w.srvWG.Add(1)
-				go func() {
-					defer w.srvWG.Done()
-					if err := b.ServeDecisions(pctx); err != nil {
-						logging.Logf("[webdetector] nginx bridge exited: %v", err)
-					}
-				}()
-			}
+			}()
 		}
 
 		// Challenge token source: detectors.conf [webdetector] CHALLENGE_TOKEN.
@@ -294,11 +292,9 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 				srv.SetCookieLife(w.cfg.ChallengeCookieLife)
 			}
 
-			// OpenResty mode: wire bridge so solve → ClearIP instead of nft remove.
-			if w.cfg.OpenRestyMode {
-				if b := w.eng.NginxBridge(); b != nil {
-					srv.SetNginxBridge(b)
-				}
+			// Wire the bridge so solve → ClearIP (the edge release path).
+			if b := w.eng.NginxBridge(); b != nil {
+				srv.SetNginxBridge(b)
 			}
 
 			// Hook solved logging into detectors layer (adds enrichment + lets us emit "expired" elsewhere).
@@ -616,25 +612,13 @@ func (w *webdetectorWrapped) ensureChallengeRedirect(tag string) {
 		return
 	}
 
-	// OpenResty mode: do not manage challenge DNAT sets/rules
-	if w.cfg.OpenRestyMode {
-		if fwBackend != nil {
-			fwBackend.SetChallengeRedirectEnabled(false)
-			_ = fwBackend.CleanupChallengeRedirect()
-		}
-		return
+	// Edge mode is the only mode: never install the legacy challenge DNAT;
+	// keep force-disabling + cleaning it so upgraded nodes shed stale rules.
+	// The whole function goes away in Phase 1b with the backend machinery.
+	if fwBackend != nil {
+		fwBackend.SetChallengeRedirectEnabled(false)
+		_ = fwBackend.CleanupChallengeRedirect()
 	}
-
-	if fwBackend == nil {
-		logging.Logf("[webdetector] no firewall backend; cannot ensure challenge redirect rules (%s)", tag)
-		return
-	}
-	if err := fwBackend.EnsureChallengeRedirect(w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen); err != nil {
-		logging.Logf("[webdetector] EnsureChallengeRedirect failed (%s): %v", tag, err)
-		return
-	}
-	logging.Logf("[webdetector] challenge redirect rules ensured (%s) (http=%q https=%q)",
-		tag, w.cfg.ChallengeHTTPListen, w.cfg.ChallengeHTTPSListen)
 }
 
 func init() {
@@ -710,8 +694,9 @@ func init() {
 
 			ChallengeToken: kvStrClean(kv, "CHALLENGE_TOKEN", ""),
 
-			// OpenResty in-path mode (replaces standalone challenge_server)
-			OpenRestyMode:        kvBool(kv, "OPENRESTY_MODE", false),
+			// OpenResty/Angie in-path edge — always on. OPENRESTY_MODE is
+			// deprecated and ignored (a warning is logged below when it is
+			// explicitly set to 0).
 			OpenRestySock:        kvStrClean(kv, "OPENRESTY_SOCK", "/var/run/cfm_nginx.sock"),
 			OpenRestyToken:       kvStrClean(kv, "OPENRESTY_TOKEN", ""),
 			OpenRestyBridgeTrace: kvBool(kv, "OPENRESTY_BRIDGE_TRACE", false),
@@ -817,6 +802,15 @@ func init() {
 		// Shared resolver: the same value is published to the edge Lua via
 		// cfm_bridge_config.lua (manager.go), so keep exactly one derivation.
 		cfg.ChallengeCookieLife = resolveChallengeCookieLife(global, kv)
+
+		// OPENRESTY_MODE is deprecated: edge mode is the only mode
+		// (docs/edge-unification-plan.md Phase 1). Warn once per reload when an
+		// operator has it explicitly OFF so they learn the toggle no longer
+		// does anything; any other value (unset or truthy) is silently fine.
+		if _, ok := kv["OPENRESTY_MODE"]; ok && !kvBool(kv, "OPENRESTY_MODE", true) {
+			logging.Logf("[webdetector] OPENRESTY_MODE=%s is deprecated and IGNORED — edge (OpenResty/Angie in-path) mode is always on; remove the key from detectors.conf",
+				kvStrClean(kv, "OPENRESTY_MODE", ""))
+		}
 
 		// CHALLENGE_VHOST (comma/space separated)
 		rawVHosts := kvStrClean(kv, "CHALLENGE_VHOST", "")

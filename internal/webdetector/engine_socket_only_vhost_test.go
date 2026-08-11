@@ -24,7 +24,6 @@ func TestRunOnce_SocketOnlyStillPushesForcedVhosts(t *testing.T) {
 	e := NewEngine(Config{
 		Every:         time.Second,
 		Window:        2 * time.Minute,
-		OpenRestyMode: true,
 		// Non-empty sock path → bridge is Enabled; the path does not exist so the
 		// fire-and-forget POST fails fast, but ChallengeVhostWithReason records
 		// the vhost in local state before posting, which is what we assert on.

@@ -347,7 +347,7 @@ type Engine struct {
 	accessRing *accessRing
 
 	chalRules   []chalRule
-	nginxBridge *NginxBridge // nil if OpenRestyMode disabled
+	nginxBridge *NginxBridge // always set (edge mode is the only mode)
 	manualChal  manualChalState
 
 	// bypassFunc: covers IGNORE_IPS / IGNORE_NETS — skip emit entirely for these IPs.
@@ -481,24 +481,24 @@ func NewEngine(cfg Config) *Engine {
 	// manual from api webtop challenge add//
 	e.manualChal.init()
 
-	// enable openresty mode//
-	if cfg.OpenRestyMode {
-		e.nginxBridge = NewNginxBridge(cfg.OpenRestySock, cfg.OpenRestyToken, cfg.ChallengePathsTTL, cfg.OpenRestyOkIPTTL)
-		e.nginxBridge.cfg.Trace = cfg.OpenRestyBridgeTrace
-		e.nginxBridge.IsWAFExcluded = e.isWAFExcluded
-		e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
-		e.nginxBridge.ListWAFExcludes = e.WAFExcludeList
-		e.nginxBridge.ListClamScanOverrides = e.ClamOverrideList
-		e.nginxBridge.ListClamModeOverrides = e.ClamModeOverrideList
-		e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
-		e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
-		e.nginxBridge.ListTrafficRules = e.TrafficRuleList
+	// Edge (OpenResty/Angie) decision bridge — always on. Edge mode is the
+	// only mode (docs/edge-unification-plan.md Phase 1); the old OPENRESTY_MODE
+	// toggle is deprecated and ignored.
+	e.nginxBridge = NewNginxBridge(cfg.OpenRestySock, cfg.OpenRestyToken, cfg.ChallengePathsTTL, cfg.OpenRestyOkIPTTL)
+	e.nginxBridge.cfg.Trace = cfg.OpenRestyBridgeTrace
+	e.nginxBridge.IsWAFExcluded = e.isWAFExcluded
+	e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
+	e.nginxBridge.ListWAFExcludes = e.WAFExcludeList
+	e.nginxBridge.ListClamScanOverrides = e.ClamOverrideList
+	e.nginxBridge.ListClamModeOverrides = e.ClamModeOverrideList
+	e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
+	e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
+	e.nginxBridge.ListTrafficRules = e.TrafficRuleList
 
-		// Register the bridge as the process-wide WAF cleaner so in-daemon
-		// unblock paths (the /unblock endpoint and the agent's pending-unblock
-		// queue) clear the OpenResty WAF planes as part of a force unblock.
-		unblock.SetWAFCleaner(e.nginxBridge)
-	}
+	// Register the bridge as the process-wide WAF cleaner so in-daemon
+	// unblock paths (the /unblock endpoint and the agent's pending-unblock
+	// queue) clear the OpenResty WAF planes as part of a force unblock.
+	unblock.SetWAFCleaner(e.nginxBridge)
 	// Compile MALPATH rules. Supports "N:substring" override syntax.
 	e.malRules = compileMalRules(cfg.MalPathList, cfg.MalPathCount)
 

@@ -69,7 +69,8 @@ type Config struct {
 	ChallengeLogSuppressed bool
 
 	// OpenResty integration (optional)
-	OpenRestyMode        bool          // OPENRESTY_MODE = 1
+	// OPENRESTY_MODE is deprecated and ignored: the edge decision bridge is
+	// always on (docs/edge-unification-plan.md Phase 1).
 	OpenRestySock        string        // OPENRESTY_SOCK  = /var/run/cfm_nginx.sock
 	OpenRestyToken       string        // OPENRESTY_TOKEN = sometoken
 	OpenRestyOkIPTTL     time.Duration // OPENRESTY_OK_IP_TTL = 1m (0 disables IP ok-state; cookie-only)

@@ -12,7 +12,6 @@ import (
 
 	"cfm/internal/blocklists"
 	cfgpkg "cfm/internal/config"
-	"cfm/internal/detectors"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/setinventory"
 )
@@ -237,14 +236,11 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	r.Features["smtp"] = cfg.SMTPBlock.Enabled
 	r.Features["autoblock"] = cfg.Throttle.Enabled
 	r.Features["feeds"] = true
-	openrestyMode := openrestyModeConfigured(cfgDir)
-	r.Features["dnat_edge"] = openrestyMode
-	// dnat_challenge means the legacy per-IP nft challenge redirect. In
-	// OpenResty/edge mode the daemon explicitly disables and cleans it up
-	// (SetChallengeRedirectEnabled(false) — the edge decides in-path), so
-	// reporting it armed there was a mislabel: DNATStatus("inet","cfm") is
-	// true on an edge node purely because the EDGE rules exist.
-	r.Features["dnat_challenge"] = challengeRedirectConfigured(cfgDir) && !openrestyMode
+	// Edge mode is the only mode (OPENRESTY_MODE deprecated/ignored), so the
+	// edge feature is always expected and the legacy per-IP challenge redirect
+	// is never armed — the daemon force-disables and cleans it up on start.
+	r.Features["dnat_edge"] = true
+	r.Features["dnat_challenge"] = false
 	r.Features["challenge_runtime_mode"] = false
 
 	if ok, err := be.DNATStatus("inet", "cfm"); err == nil {
@@ -287,8 +283,8 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		if !req.applicable {
 			r.Findings = append(r.Findings, fwFinding{"info", fmt.Sprintf("set(%s) skipped (feature=%s dependency=%s; expected source: %s)", s, req.feature, req.dependsOn, req.reason)})
 			// Still publish the canonical _cardinality key so nft↔nftlib
-			// status output stays parity-complete regardless of which
-			// challenge mode (per-IP vs OPENRESTY_MODE edge) is configured.
+			// status output stays parity-complete (the legacy challenge sets
+			// are never applicable now that edge is the only mode).
 			r.SetSizes[req.key+"_cardinality"] = 0
 			continue
 		}
@@ -404,47 +400,6 @@ func loadConfiguredFeeds(cfgDir string) []blocklists.Feed {
 	return feeds
 }
 
-
-func openrestyModeConfigured(cfgDir string) bool {
-	if cfgDir == "" {
-		return false
-	}
-	secs, err := detectors.ReadSectionsFile(filepath.Join(cfgDir, "detectors.conf"))
-	if err != nil {
-		return false
-	}
-	for _, secName := range []string{"webdetector", "web"} {
-		if sec, ok := secs.ByName[secName]; ok {
-			if v := strings.TrimSpace(sec["OPENRESTY_MODE"]); strings.EqualFold(v, "1") || strings.EqualFold(v, "true") || strings.EqualFold(v, "on") {
-				return true
-			}
-		}
-	}
-	if v := strings.TrimSpace(secs.Global["OPENRESTY_MODE"]); strings.EqualFold(v, "1") || strings.EqualFold(v, "true") || strings.EqualFold(v, "on") {
-		return true
-	}
-	return false
-}
-
-func challengeRedirectConfigured(cfgDir string) bool {
-	if cfgDir == "" {
-		return false
-	}
-	b, err := os.ReadFile(filepath.Join(cfgDir, "detectors.conf"))
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		trim := strings.TrimSpace(line)
-		if trim == "" || strings.HasPrefix(trim, "#") {
-			continue
-		}
-		if strings.Contains(trim, "CHALLENGE_") && !strings.Contains(trim, "_LOG") && !strings.Contains(trim, "_NOTIFY") && (strings.HasSuffix(trim, "=1") || strings.HasSuffix(strings.ToLower(trim), "=true") || strings.HasSuffix(strings.ToLower(trim), "=on")) {
-			return true
-		}
-	}
-	return false
-}
 
 func printFirewallReport(r fwReport) {
 	fmt.Printf("Firewall diagnostics: %s (%s)\n", r.Engine, r.Status)

@@ -56,66 +56,18 @@ func TestCollectFirewallStatusHealthy(t *testing.T) {
 	if r.Status != "ok" {
 		t.Fatalf("expected ok got %s", r.Status)
 	}
-	if !r.Features["dnat_challenge"] {
-		t.Fatalf("expected dnat enabled")
+	if !r.Features["dnat_edge"] {
+		t.Fatalf("expected edge dnat feature enabled")
+	}
+	if r.Features["dnat_challenge"] {
+		t.Fatalf("legacy challenge DNAT must never report enabled (edge-only)")
 	}
 	if r.SetSizes["block_v4"] != 0 {
 		t.Fatalf("expected block_v4 size 0")
 	}
 }
 
-func TestCollectFirewallStatusDNATPassWithoutChallengeSets(t *testing.T) {
-	cfgDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cfgDir, "detectors.conf"), []byte("CHALLENGE_PATHS=1\n"), 0o644); err != nil {
-		t.Fatalf("write detectors.conf: %v", err)
-	}
-	be := mockDiagBE{dnat: true, dnatJSON: []byte(`{"nftables":[{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"dnat":{"addr":"","port":8080}}]}},{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"addr":"","port":8443}}]}}]}`), sets: map[string][]string{
-		"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
-		"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
-		"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
-		"allow_dyn_v4": {}, "allow_dyn_v6": {},
-	}}
-	r := collectFirewallStatus(be, cfgDir, "nft", "default", false)
-	if r.FeatureChecks["dnat_challenge"].Status != "pass" {
-		t.Fatalf("expected dnat_challenge pass got %s", r.FeatureChecks["dnat_challenge"].Status)
-	}
-}
 
-func TestCollectFirewallStatusDNATChallengeConfigWithoutChallengeSetPassesDNAT(t *testing.T) {
-	cfgDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cfgDir, "detectors.conf"), []byte("CHALLENGE_V4=1\n"), 0o644); err != nil {
-		t.Fatalf("write detectors.conf: %v", err)
-	}
-	be := mockDiagBE{dnat: true, dnatJSON: []byte(`{"nftables":[{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"dnat":{"addr":"","port":8080}}]}},{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"addr":"","port":8443}}]}}]}`), sets: map[string][]string{
-		"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
-		"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
-		"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
-		"allow_dyn_v4": {}, "allow_dyn_v6": {},
-	}}
-	r := collectFirewallStatus(be, cfgDir, "nft", "default", false)
-	if r.FeatureChecks["dnat_challenge"].Status != "pass" {
-		t.Fatalf("expected dnat_challenge pass got %s", r.FeatureChecks["dnat_challenge"].Status)
-	}
-}
-func TestCollectFirewallStatusChallengeEnabledMissingSetsFailsChallengeOnly(t *testing.T) {
-	cfgDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cfgDir, "detectors.conf"), []byte("CHALLENGE_PATHS=1\n"), 0o644); err != nil {
-		t.Fatalf("write detectors.conf: %v", err)
-	}
-	be := mockDiagBE{dnat: true, dnatJSON: []byte(`{"nftables":[{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"dnat":{"addr":"","port":8080}}]}},{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"addr":"","port":8443}}]}}]}`), sets: map[string][]string{
-		"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
-		"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
-		"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
-		"allow_dyn_v4": {}, "allow_dyn_v6": {},
-	}}
-	r := collectFirewallStatus(be, cfgDir, "nft", "default", false)
-	if r.FeatureChecks["dnat_challenge"].Status != "pass" {
-		t.Fatalf("expected dnat_challenge pass got %s", r.FeatureChecks["dnat_challenge"].Status)
-	}
-	if r.FeatureChecks["challenge_redirect"].Status != "fail" {
-		t.Fatalf("expected challenge_redirect fail got %s", r.FeatureChecks["challenge_redirect"].Status)
-	}
-}
 
 func TestCollectFirewallStatusOpenRestyModeOnlyDNATEdgeOK(t *testing.T) {
 	cfgDir := t.TempDir()
@@ -150,11 +102,10 @@ func TestCollectFirewallStatusOpenRestyModeOnlyDNATEdgeOK(t *testing.T) {
 }
 
 func TestCollectFirewallStatusBothEnabledAndHealthy(t *testing.T) {
-	// Edge node: OPENRESTY_MODE=1 means the daemon has explicitly disabled and
-	// cleaned up the legacy per-IP challenge DNAT (the edge decides in-path),
-	// so dnat_challenge must NOT report armed just because the EDGE dnat rules
-	// exist in the kernel. It used to — that mislabel sent a scope audit the
-	// wrong way during the 2026-08-11 challenge-loop incident.
+	// Edge mode is the only mode: dnat_edge is always expected, and the legacy
+	// per-IP challenge DNAT never reports armed (the daemon force-disables and
+	// cleans it up on start). The deprecated OPENRESTY_MODE key in the config
+	// is ignored either way.
 	cfgDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cfgDir, "detectors.conf"), []byte("OPENRESTY_MODE=1\nCHALLENGE_PATHS=1\n"), 0o644); err != nil {
 		t.Fatalf("write detectors.conf: %v", err)
@@ -182,10 +133,10 @@ func TestCollectFirewallStatusBothEnabledAndHealthy(t *testing.T) {
 	}
 }
 
-func TestCollectFirewallStatusDNATChallengeMode(t *testing.T) {
-	// Legacy DNAT-challenge node (no OPENRESTY_MODE): the challenge redirect
-	// really is the enforcement path, so dnat_challenge/challenge_redirect
-	// keep reporting pass there.
+func TestCollectFirewallStatusChallengeAlwaysNA(t *testing.T) {
+	// Even with no OPENRESTY_MODE key at all, edge mode is the only mode:
+	// the legacy challenge-DNAT features stay N/A (the reportable legacy
+	// path no longer exists — Phase 1a of docs/edge-unification-plan.md).
 	cfgDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cfgDir, "detectors.conf"), []byte("CHALLENGE_PATHS=1\n"), 0o644); err != nil {
 		t.Fatalf("write detectors.conf: %v", err)
@@ -202,11 +153,14 @@ func TestCollectFirewallStatusDNATChallengeMode(t *testing.T) {
 		},
 	}
 	r := collectFirewallStatus(be, cfgDir, "nft", "default", false)
-	if r.FeatureChecks["dnat_challenge"].Status != "pass" {
-		t.Fatalf("expected dnat_challenge pass got %s", r.FeatureChecks["dnat_challenge"].Status)
+	if r.FeatureChecks["dnat_edge"].Status != "pass" {
+		t.Fatalf("expected dnat_edge pass got %s", r.FeatureChecks["dnat_edge"].Status)
 	}
-	if r.FeatureChecks["challenge_redirect"].Status != "pass" {
-		t.Fatalf("expected challenge_redirect pass got %s", r.FeatureChecks["challenge_redirect"].Status)
+	if r.FeatureChecks["dnat_challenge"].Status != "N/A" {
+		t.Fatalf("expected dnat_challenge N/A got %s", r.FeatureChecks["dnat_challenge"].Status)
+	}
+	if r.FeatureChecks["challenge_redirect"].Status != "N/A" {
+		t.Fatalf("expected challenge_redirect N/A got %s", r.FeatureChecks["challenge_redirect"].Status)
 	}
 }
 
