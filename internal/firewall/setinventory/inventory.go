@@ -23,8 +23,6 @@ func BuildSetNames(feeds []blocklists.Feed) map[string]string {
 		"ignore_v6_nets": "ignore_v6_nets",
 		"allow_dyn_v4":   "allow_dyn_v4",
 		"allow_dyn_v6":   "allow_dyn_v6",
-		"challenge_v4":   "challenge_v4",
-		"challenge_v6":   "challenge_v6",
 	}
 	for _, f := range feeds {
 		key := feedutil.SanitizeFeedName(f.Name)
@@ -45,7 +43,6 @@ func LegacyAliases() map[string]string {
 		"block_ips":     "block_v4/block_v6",
 		"allow_ips":     "allow_v4/allow_v6",
 		"ignore_ips":    "ignore_v4/ignore_v6",
-		"challenge_ips": "challenge_v4/challenge_v6",
 		"feed_ext":      "allow_ext_*/block_ext_*",
 	}
 }

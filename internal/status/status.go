@@ -268,7 +268,7 @@ func Run(args []string, backend firewall.Backend) {
 
 	// --- Challenge section (nft + journal) ---
 	t0 = time.Now()
-	printChallengeStatus(backend, st, en)
+	printChallengeStatus(en)
 	timing["challenge_ms"] = time.Since(t0).Milliseconds()
 
 	// --- TTL summary (manual hosts + nets) ---
@@ -1617,35 +1617,6 @@ type recentHit struct {
 	Expires string // e.g. "59m31s" (empty if not parsed)
 }
 
-// listSetElemsDetailed returns up to max host IPs from a set with their
-// remaining TTL, going through the firewall backend.
-func listSetElemsDetailed(backend firewall.Backend, set string, max int) []recentHit {
-	if backend == nil {
-		return nil
-	}
-	elems, err := backend.ListSetElementsTimed(set)
-	if err != nil {
-		return nil
-	}
-	out := make([]recentHit, 0, max)
-	for _, e := range elems {
-		ip := e.Elem
-		// keep only host IPs here (recent hits list is per-IP)
-		if net.ParseIP(strings.TrimSuffix(ip, "/32")) == nil || strings.Contains(ip, "/") {
-			continue
-		}
-		ttl := ""
-		if e.Expires > 0 {
-			ttl = e.Expires.Truncate(time.Second).String()
-		}
-		out = append(out, recentHit{IP: ip, Expires: ttl})
-		if len(out) >= max {
-			break
-		}
-	}
-	return out
-}
-
 //helpers for IP status conntrack
 
 // helpers for IP status conntrack (inbound προς local + μόνο TCP_IN ports)
@@ -1689,76 +1660,18 @@ func portBreakdownByIP(entries []ctEntry, tcpIn map[int]struct{}, locals map[str
 // Challenge printing
 // ---------------------------------------------------------------------------
 
-func printChallengeStatus(backend firewall.Backend, st statusOut, en *enrich.Enricher) {
-	// Enabled if challenge sets or chains exist
-	if !st.TablePresent {
-		return
-	}
-
-	// Check for presence via nft output (cheap + robust)
-	pre := listChainFiltered(backend, "prerouting", "cfm_challenge_nat_")
-	guard := listChainFiltered(backend, "challenge_guard", "cfm_challenge_guard_")
-
-	// Also treat as enabled if sets exist even if chain listing fails
-	v4 := listSetElemsDetailed(backend, "challenge_v4", 50)
-	v6 := listSetElemsDetailed(backend, "challenge_v6", 50)
-
-	enabled := len(pre) > 0 || len(guard) > 0 || len(v4) > 0 || len(v6) > 0
-	if !enabled {
-		return
-	}
-
-	fmt.Printf("\n---- Challenge ----\n")
-
-	// Prerouting rules
-	if len(pre) > 0 {
-		fmt.Println("Prerouting OK:")
-		for _, ln := range pre {
-			fmt.Printf("  %s\n", ln)
-		}
-	} else {
-		fmt.Println("Prerouting: MISSING (no cfm_challenge_nat_* rules found)")
-	}
-
-	// Guard chain rules
-	if len(guard) > 0 {
-		fmt.Println("Guard chain OK (challenge_guard):")
-		for _, ln := range guard {
-			fmt.Printf("  %s\n", ln)
-		}
-	} else {
-		fmt.Println("Guard chain: MISSING (no cfm_challenge_guard_* rules found)")
-	}
-
-	// Current challenged IPs with TTLs
-	if len(v4) > 0 || len(v6) > 0 {
-		fmt.Println("Current IPs challenged (TTL):")
-		if len(v4) > 0 {
-			fmt.Println("  v4:")
-			for _, h := range v4 {
-				if h.Expires != "" {
-					fmt.Printf("    %-16s  expires %s\n", h.IP, h.Expires)
-				} else {
-					fmt.Printf("    %-16s\n", h.IP)
-				}
-			}
-		}
-		if len(v6) > 0 {
-			fmt.Println("  v6:")
-			for _, h := range v6 {
-				if h.Expires != "" {
-					fmt.Printf("    %-39s  expires %s\n", h.IP, h.Expires)
-				} else {
-					fmt.Printf("    %-39s\n", h.IP)
-				}
-			}
-		}
-	}
-
-	// Journal-based totals (since service start)
+func printChallengeStatus(en *enrich.Enricher) {
+	// Edge challenge-engine activity from the journal ([challenge] lines).
+	// The legacy DNAT artifacts this section used to probe (prerouting rules,
+	// challenge_guard, challenge_v4/v6 sets) are retired — edge-unification
+	// Phase 1; only the journal totals remain.
 	since, ok := serviceActiveSince()
 	if ok {
 		ch, sol, topIPs, topASNs := readChallengeJournalStats(since, en)
+		if ch == 0 && sol == 0 {
+			return
+		}
+		fmt.Printf("\n---- Challenge ----\n")
 		fmt.Printf("Totals since service start (%s): %d challenged / %d solved\n", since, ch, sol)
 
 		if len(topIPs) > 0 {
@@ -1773,35 +1686,7 @@ func printChallengeStatus(backend firewall.Backend, st statusOut, en *enrich.Enr
 				fmt.Printf("  %-28s %6d\n", kv.Key, kv.Count)
 			}
 		}
-	} else {
-		// Still show a hint
-		fmt.Println("Totals since startup: (unavailable - systemd/journalctl not found or service not running)")
 	}
-}
-
-func listChainFiltered(backend firewall.Backend, chain, contains string) []string {
-	// Use -a so handles present; but we print compact lines without the "table inet cfm {"
-	out, err := backend.ListChainText("inet", "cfm", chain)
-	if err != nil {
-		return nil
-	}
-	lines := strings.Split(string(out), "\n")
-	var keep []string
-	for _, ln := range lines {
-		ln = strings.TrimSpace(ln)
-		if ln == "" {
-			continue
-		}
-		// skip wrappers
-		if strings.HasPrefix(ln, "table ") || strings.HasPrefix(ln, "chain ") || ln == "}" {
-			continue
-		}
-		if contains != "" && !strings.Contains(ln, contains) {
-			continue
-		}
-		keep = append(keep, ln)
-	}
-	return keep
 }
 
 func serviceActiveSince() (string, bool) {

@@ -1,6 +1,6 @@
 # Edge Unification Plan — one enforcement path, one clearance model
 
-Status: **accepted design, Phase 0 landing** (this PR) · Owner: operator + assistant
+Status: **Phases 0–1 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: this PR — closes Phase 1) · Owner: operator + assistant
 Date: 2026-08-11 · Origin: the orion challenge-loop incident (PR #1220/#1221/#1222)
 
 ---
@@ -144,7 +144,7 @@ currently masks this).
 
 ## 6. Phases
 
-### Phase 0 — drift fixes (THIS PR; no behavior change beyond the noted nits)
+### Phase 0 — drift fixes (landed, PR #1223; no behavior change beyond the noted nits)
 1. **Shared panel-prefix module** `configs/lua/cfm_panel_hosts.lua` — canonical
    prefix set `{cpanel, whm, webmail, webdisk, mail}`; both `cfm.lua` and
    `cfm_panel.lua` consume it (pcall-require with their previous inline lists
@@ -172,11 +172,11 @@ Gates: `make lua`, `make test-lua`, `check_cfm_clearance_require.sh`,
 `go build/vet/test -race`, panel-listener config tests, logrotate/CLI-transport
 guards. Deploy note: pure package upgrade; no config migration.
 
-### Phase 1 — retire challenge-DNAT + the mode toggle (2–3 PRs)
-- **PR 1a**: make edge mode unconditional in the webdetector register (drop the
+### Phase 1 — retire challenge-DNAT + the mode toggle (landed: 1a #1224, 1b #1225, 1c closes it)
+- **PR 1a** (landed, #1224): make edge mode unconditional in the webdetector register (drop the
   `=0` branches, always wire the bridge); delete the pre-auth login-challenge
   enforcer path; deprecate `OPENRESTY_MODE` (parse, warn if `0`, ignore).
-- **PR 1b**: delete backend machinery per §7 — both backends' `AddChallenge` /
+- **PR 1b** (landed, #1225): delete backend machinery per §7 — both backends' `AddChallenge` /
   `RemoveChallenge` / `SetChallengeRedirectEnabled` / `ChallengeRedirectEnabled`
   / `CleanupChallengeRedirect` / `EnsureChallengeRedirect`, the `challenge_guard`
   chain, the sets, the 9099 TLS listener + `CHALLENGE_HTTPS_LISTEN`, the
@@ -184,7 +184,7 @@ guards. Deploy note: pure package upgrade; no config migration.
   arm. **Pre-req check**: `dnatWantedSpecs` bundles `self_v4/self_v6` redirect
   specs into the challenge namespace — verify whether the self-IP redirects are
   load-bearing before wholesale namespace deletion, and rehome them if so.
-- **PR 1c**: reporting/docs sweep — `printChallengeStatus`, firewall-status
+- **PR 1c** (this PR): reporting/docs sweep — `printChallengeStatus`, firewall-status
   challenge probes, `setinventory`/`ipquery` rows, retire the
   `challenge/list` endpoint + `challenge_ip_status` MCP tool (it served its
   diagnostic purpose during the incident; keep only if any DNAT-challenge node

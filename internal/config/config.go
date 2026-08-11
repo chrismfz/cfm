@@ -32,7 +32,6 @@ type Config struct {
 	Debug            DebugConfig
 	SSLCollectorSock SSLCollectorSockConfig
 	Clam             ClamConfig
-	Challenge        ChallengeConfig
 }
 
 // --- Categories ---
@@ -237,11 +236,6 @@ type LoggingConfig struct {
 	LSMStdout bool   // LSM_LOG_STDOUT
 	LSMFile   string // LSM_LOG_FILE
 
-}
-
-type ChallengeConfig struct {
-	HTTPListen  string // CHALLENGE_HTTP_LISTEN
-	HTTPSListen string // CHALLENGE_HTTPS_LISTEN
 }
 
 type NFTConfig struct {
@@ -693,10 +687,9 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "NFT_DNAT_PRIORITY":
 			cfg.NFT.DNATPriority = clamp(parseInt(val), -300, 300)
 
-		case "CHALLENGE_HTTP_LISTEN":
-			cfg.Challenge.HTTPListen = val
-		case "CHALLENGE_HTTPS_LISTEN":
-			cfg.Challenge.HTTPSListen = val
+		// CHALLENGE_HTTP(S)_LISTEN in cfm.conf are legacy no-ops (the challenge
+		// listener is configured in detectors.conf; the HTTPS one is retired) —
+		// still accepted by IsKnownKey so old configs don't warn.
 
 		// Ports
 		case "TCP_IN":

@@ -92,14 +92,6 @@ func staticSetProbes(features map[string]bool, engine string, names map[string]s
 		reason := "core infrastructure"
 		feature := "core"
 		dependsOn := "always"
-		switch s {
-		case "challenge_v4", "challenge_v6":
-			applicable = features["challenge_runtime_mode"] && engine == "nft"
-			required = applicable
-			reason = "required only when challenge runtime mode is enabled on nft backend"
-			feature = "challenge_redirect"
-			dependsOn = "features.challenge_runtime_mode + engine=nft"
-		}
 		items = append(items, setProbeItem{key: key, setName: s, required: required, applicable: applicable, reason: reason, feature: feature, dependsOn: dependsOn})
 	}
 	for _, s := range []string{"smtp_ports", "smtp_allow_uids", "smtp_allow_gids"} {
@@ -240,12 +232,9 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	// edge feature is always expected and the legacy per-IP challenge redirect
 	// is never armed — the daemon force-disables and cleans it up on start.
 	r.Features["dnat_edge"] = true
-	r.Features["dnat_challenge"] = false
-	r.Features["challenge_runtime_mode"] = false
 
 	if ok, err := be.DNATStatus("inet", "cfm"); err == nil {
-		r.Features["dnat_challenge"] = r.Features["dnat_challenge"] && ok
-		r.Features["challenge_runtime_mode"] = r.Features["dnat_challenge"] && engine == "nft"
+		_ = ok
 	} else {
 		r.Unsupported["dnat_redirect"] = true
 		r.Findings = append(r.Findings, fwFinding{"warn", "dnat status unsupported: " + err.Error()})
@@ -320,13 +309,7 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		if err != nil {
 			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing or unreadable (feature=dnat_edge expected source: cfm_redirect table): " + err.Error()})
 		} else if !hasExpectedDNATPreroutingRules(tableJSON) {
-			reasonFeature := "dnat_edge"
-			reasonSource := "cfm_redirect prerouting rules"
-			if r.Features["dnat_challenge"] {
-				reasonFeature = "dnat_challenge"
-				reasonSource = "challenge sets"
-			}
-			r.Findings = append(r.Findings, fwFinding{"fail", fmt.Sprintf("dnat redirect table inet/cfm_redirect missing expected prerouting dnat rules (feature=%s expected source: %s)", reasonFeature, reasonSource)})
+			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing expected prerouting dnat rules (feature=dnat_edge expected source: cfm_redirect prerouting rules)"})
 		}
 	}
 	if cp, ok := any(be).(counterProbe); ok {
@@ -348,7 +331,6 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	}
 	r.FeatureChecks = evaluateFeatureChecks(r)
 	r.DNATChecks["dnat_edge"] = buildDNATCheckStatus(r, "dnat_edge")
-	r.DNATChecks["dnat_challenge"] = buildDNATCheckStatus(r, "dnat_challenge")
 	r.CanonicalChecks = evaluateCanonicalChecks(r)
 	if verbose {
 		if ds, ok := any(be).(dnatShowProbe); ok {
@@ -405,7 +387,7 @@ func printFirewallReport(r fwReport) {
 	fmt.Printf("Config source: %s\n", r.ConfigSource)
 	fmt.Printf("Capabilities: %s\n", strings.Join(r.Capabilities, ", "))
 	fmt.Println("Configured features:")
-	for _, k := range []string{"ports", "connlimit", "portflood", "smtp", "autoblock", "feeds", "dnat_edge", "dnat_challenge", "challenge_redirect"} {
+	for _, k := range []string{"ports", "connlimit", "portflood", "smtp", "autoblock", "feeds", "dnat_edge"} {
 		fmt.Printf("  %-10s %v\n", k, r.Features[k])
 	}
 	fmt.Println("Detected runtime objects:")
@@ -465,7 +447,7 @@ func printFirewallReport(r fwReport) {
 	}
 	if len(r.DNATChecks) > 0 {
 		fmt.Println("DNAT status:")
-		for _, name := range []string{"dnat_edge", "dnat_challenge"} {
+		for _, name := range []string{"dnat_edge"} {
 			if d, ok := r.DNATChecks[name]; ok {
 				fmt.Printf("%s=%s\n", name, strings.ToUpper(d.Status))
 			}
@@ -527,9 +509,6 @@ func printFirewallReport(r fwReport) {
 
 func buildDNATCheckStatus(r fwReport, feature string) fwDNATCheck {
 	expected := "cfm_redirect table"
-	if feature == "dnat_challenge" {
-		expected = "challenge sets"
-	}
 	if !r.Features[feature] {
 		return fwDNATCheck{Status: "N/A", ExpectedSource: expected, Reason: "feature disabled"}
 	}
@@ -555,7 +534,7 @@ func evaluateCanonicalChecks(r fwReport) fwCanonicalChecks {
 	for _, f := range r.Findings {
 		msg := strings.ToLower(f.Message)
 		domain := "base"
-		for _, d := range []string{"dnat_edge", "dnat_challenge", "smtp", "portflood", "connlimit", "autoblock", "feeds", "ports"} {
+		for _, d := range []string{"dnat_edge", "smtp", "portflood", "connlimit", "autoblock", "feeds", "ports"} {
 			if strings.Contains(msg, d) {
 				domain = d
 				break
@@ -621,16 +600,8 @@ func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 		}
 		return false
 	}
-	for _, feature := range []string{"dnat_edge", "dnat_challenge", "challenge_redirect", "smtp", "portflood", "connlimit", "autoblock"} {
-		sourceFeature := feature
-		if feature == "challenge_redirect" {
-			sourceFeature = "dnat_challenge"
-		}
-		enabled := r.Features[sourceFeature]
-		if feature == "challenge_redirect" && !r.Features["challenge_runtime_mode"] {
-			checks[feature] = fwFeatureCheck{Status: "N/A", Reason: "challenge runtime mode disabled", Samples: map[string]string{"last_update": "n/a"}}
-			continue
-		}
+	for _, feature := range []string{"dnat_edge", "smtp", "portflood", "connlimit", "autoblock"} {
+		enabled := r.Features[feature]
 		if !enabled {
 			checks[feature] = fwFeatureCheck{Status: "N/A", Reason: "feature disabled", Samples: map[string]string{"last_update": "n/a"}}
 			continue
@@ -639,10 +610,6 @@ func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 		switch feature {
 		case "dnat_edge":
 			check.Samples["mode"] = "openresty/angie"
-		case "dnat_challenge":
-			check.Samples["table"] = "inet/cfm_redirect"
-		case "challenge_redirect":
-			check.RequiredSets = []string{"challenge_v4", "challenge_v6"}
 		case "smtp":
 			check.RequiredSets = []string{"smtp_ports", "smtp_allow_uids", "smtp_allow_gids"}
 		case "portflood":

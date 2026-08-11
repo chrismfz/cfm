@@ -74,7 +74,7 @@ for the trade-offs and how to choose.
    - [Hard-Block Triggers](#web-abuse-hard-block-triggers)
    - [Suspicious Scoring](#suspicious-scoring)
 7. [Challenge System](#7-challenge-system)
-   - [DNAT Mode](#dnat-mode)
+   - [Challenge Serving](#challenge-serving)
    - [Challenge Triggers](#challenge-triggers)
    - [Challenge Abuse Protection](#challenge-abuse-protection)
 8. [In-Path Mode (OpenResty / Angie)](#8-in-path-mode-openresty--angie)
@@ -793,15 +793,22 @@ The Challenge System intercepts HTTP(S) traffic and presents a browser-solvable 
 ![Challenge Mobile](docs/screenshots/challenge_mobile.jpg)
 
 
-### DNAT Mode
+### Challenge Serving
 
 ```
-Client → nftables DNAT → CFM challenge listener → (pass) → origin
+Client → nftables edge DNAT (80/443 → 9080/9043) → edge proxy (OpenResty/Angie)
+       → Lua clearance check → (challenge required) → CFM challenge server → solve → origin
 ```
 
-Configured via `CHALLENGE_HTTP_LISTEN` / `CHALLENGE_HTTPS_LISTEN`. Keep listeners on `127.0.0.1`.
+Challenges are served in-path by the edge proxy: the Lua layer consults the
+daemon's decision socket and, when a challenge is required, proxies the request
+to the local challenge server (`CHALLENGE_HTTP_LISTEN` in `detectors.conf`,
+default `127.0.0.1:9098`). Solving sets a signed clearance cookie. There is no
+per-IP challenge DNAT: the legacy `challenge_v4`/`challenge_v6` sets, the
+`:9099` TLS listener, and `CHALLENGE_HTTPS_LISTEN` are retired — stale rules
+left by older versions are cleaned up automatically on daemon start.
 
-`TCP_IN` no longer needs the DNAT listener ports `9098,9099,12222,9080,9043,12082,12083,12086,12087,12095,12096`. Translated traffic to those listeners is permitted by scoped `ct status dnat` firewall rules, so the legacy `TCP_IN` entry should stay commented unless you need it temporarily for compatibility testing or debugging.
+`TCP_IN` no longer needs the DNAT listener ports `9098,12222,9080,9043,12082,12083,12086,12087,12095,12096`. Translated traffic to those listeners is permitted by scoped `ct status dnat` firewall rules, so the legacy `TCP_IN` entry should stay commented unless you need it temporarily for compatibility testing or debugging.
 
 ### Challenge Triggers
 
@@ -1649,7 +1656,7 @@ Report fields include:
 - engine + config source
 - capability flags
 - feature enablement (`ports`, `connlimit`, `portflood`, `smtp`, `autoblock`, `feeds`, `dnat`)
-- set sizes for key sets (`block_ips`, `allow_ips`, `ignore_ips`, `challenge_ips`)
+- set sizes for key sets (`block_ips`, `allow_ips`, `ignore_ips`)
 - key counters (when backend exposes them)
 - health findings with level `ok` / `warn` / `fail`
 
@@ -1742,7 +1749,7 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 
 ## 16. Security Notes
 
-- In **DNAT mode**, keep the challenge listeners local-only (`127.0.0.1`). Do not expose them directly to the internet.
+- Keep the challenge listener local-only (`CHALLENGE_HTTP_LISTEN`, default `127.0.0.1:9098`). Do not expose it directly to the internet.
 - In **in-path mode** (OpenResty or Angie), treat the unix socket as sensitive — enforce tight file permissions and always use the token.
 - When using `ssl_certificate_by_lua*` (OpenResty or Angie), cache aggressively (shared_dict + lock) and use tight timeouts.
 - The **MySQL Governor** debug API (`/api/v1/mysql/*`) is served on the cfm debug port (`PORT` in cfm.conf). Keep that port firewalled to localhost or trusted management IPs — it exposes live processlist data and kill history.

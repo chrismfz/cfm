@@ -4,6 +4,15 @@
 **Scope:** `internal/firewall/` — interface, nft implementation, future backends  
 **Goal:** Decouple *what CFM tells the firewall to do* from *how a specific firewall does it*
 
+> **2026-08 note:** the per-IP challenge-DNAT API family (`AddChallenge`,
+> `RemoveChallenge`, `SetChallengeRedirectEnabled`, `CleanupChallengeRedirect`,
+> `EnsureChallengeRedirect`, the `challenge_v4/v6` sets and `challenge_guard`
+> chain) was **retired** by the edge-unification work
+> (`docs/edge-unification-plan.md`, Phase 1) — challenges are now enforced by
+> the edge proxy via clearance cookies. Mentions of those methods below are
+> historical record of the porting work, not the current interface. The edge
+> DNAT (`DNATOn/Off/Status/Show`, 80/443 → 9080/9043) and panel DNAT remain.
+
 ---
 
 ## Table of Contents
@@ -1396,14 +1405,14 @@ internal/outbound/
 
 ---
 
-#### DNAT / NAT prerouting — challenge redirect
-**Used in:** `nft.go` (`EnsureChallengeRedirect`), `dnat.go` (`DNATOn/Off`)
+#### DNAT / NAT prerouting — edge DNAT
+**Used in:** `dnat.go` (`DNATOn/Off`)
 
-```nft
-# nftables — redirect challenged IPs' HTTP/S to local challenge listener
-ip saddr @challenge_v4 tcp dport 80 dnat to 127.0.0.1:8080
-ip saddr @challenge_v4 tcp dport 443 dnat to 127.0.0.1:8443
-```
+The per-IP challenge redirect (`EnsureChallengeRedirect`, `challenge_v4/v6`
+sets) was retired in the edge-unification work (`docs/edge-unification-plan.md`,
+Phase 1) — challenges are enforced by the edge proxy via clearance cookies, not
+NAT. What remains is the unconditional edge DNAT (80/443 → 9080/9043) and the
+panel DNAT.
 
 **Grade: ✅ Ports cleanly to pf**
 
@@ -1411,11 +1420,11 @@ pf `rdr-to` is the direct equivalent:
 
 ```pf
 # pf
-rdr pass on egress proto tcp from <cfm_challenge> to port 80 -> 127.0.0.1 port 8080
-rdr pass on egress proto tcp from <cfm_challenge> to port 443 -> 127.0.0.1 port 8443
+rdr pass on egress proto tcp to port 80 -> 127.0.0.1 port 9080
+rdr pass on egress proto tcp to port 443 -> 127.0.0.1 port 9043
 ```
 
-Managed via `pfctl -a cfm/challenge -f -` (anchor). `DNATOn` generates the
+Managed via `pfctl -a cfm/dnat -f -` (anchor). `DNATOn` generates the
 anchor rules, `DNATOff` flushes the anchor. The method signatures on the
 interface don't change.
 
