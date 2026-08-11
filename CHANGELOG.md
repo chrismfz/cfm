@@ -37,6 +37,19 @@ back-filled here — see the git/PR history for that period.
   (bridge + Lua clearance cookie) is untouched.
 
 ### Changed
+- **Challenge status/reporting swept clean of DNAT-era probes (edge-unification
+  Phase 1c — closes Phase 1).** `cfm status`'s challenge section is now
+  journal-driven only (challenged/solved totals since service start; the nft
+  set listings and DNAT-rule probes are gone, and the section only prints when
+  there is something to show). `cfm firewall-status` no longer publishes the
+  retired `dnat_challenge`/`challenge_redirect` feature checks at all
+  (previously reported N/A); `dnat_edge` remains the only DNAT check.
+  `challenge_v4`/`challenge_v6` and the `challenge_ips` alias are removed from
+  the set inventory and from `cfm ip` set classification. `CHALLENGE_HTTP_LISTEN`
+  / `CHALLENGE_HTTPS_LISTEN` in `cfm.conf` are now parsed as tolerated no-ops
+  (the challenge listener is configured in `detectors.conf`; the HTTPS one is
+  retired). Reference `cfm.conf` drops 9099 from `TCP_IN`; README, the
+  edge-unification plan, and the firewall-backend roadmap updated to match.
 - **Edge mode is now the only mode — `OPENRESTY_MODE` is deprecated and
   ignored (edge-unification Phase 1a).** The OpenResty/Angie decision bridge
   is always constructed and always serves; the webdetector no longer has a

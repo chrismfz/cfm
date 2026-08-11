@@ -59,8 +59,8 @@ func TestCollectFirewallStatusHealthy(t *testing.T) {
 	if !r.Features["dnat_edge"] {
 		t.Fatalf("expected edge dnat feature enabled")
 	}
-	if r.Features["dnat_challenge"] {
-		t.Fatalf("legacy challenge DNAT must never report enabled (edge-only)")
+	if _, ok := r.Features["dnat_challenge"]; ok {
+		t.Fatalf("retired dnat_challenge feature must not be published")
 	}
 	if r.SetSizes["block_v4"] != 0 {
 		t.Fatalf("expected block_v4 size 0")
@@ -88,11 +88,11 @@ func TestCollectFirewallStatusOpenRestyModeOnlyDNATEdgeOK(t *testing.T) {
 	if r.FeatureChecks["dnat_edge"].Status != "pass" {
 		t.Fatalf("expected dnat_edge pass got %s", r.FeatureChecks["dnat_edge"].Status)
 	}
-	if s := r.FeatureChecks["dnat_challenge"].Status; s != "N/A" {
-		t.Fatalf("expected dnat_challenge N/A when challenge mode disabled, got %s", s)
+	if _, ok := r.FeatureChecks["dnat_challenge"]; ok {
+		t.Fatalf("retired dnat_challenge feature check must not be published")
 	}
-	if s := r.FeatureChecks["challenge_redirect"].Status; s != "N/A" {
-		t.Fatalf("expected challenge_redirect N/A when challenge mode disabled, got %s", s)
+	if _, ok := r.FeatureChecks["challenge_redirect"]; ok {
+		t.Fatalf("retired challenge_redirect feature check must not be published")
 	}
 	for _, f := range r.Findings {
 		if f.Level == "fail" {
@@ -125,18 +125,19 @@ func TestCollectFirewallStatusBothEnabledAndHealthy(t *testing.T) {
 	if r.FeatureChecks["dnat_edge"].Status != "pass" {
 		t.Fatalf("expected dnat_edge pass got %s", r.FeatureChecks["dnat_edge"].Status)
 	}
-	if r.FeatureChecks["dnat_challenge"].Status != "N/A" {
-		t.Fatalf("expected dnat_challenge N/A on an edge node got %s", r.FeatureChecks["dnat_challenge"].Status)
+	if _, ok := r.FeatureChecks["dnat_challenge"]; ok {
+		t.Fatal("retired dnat_challenge feature check must not be published")
 	}
-	if r.FeatureChecks["challenge_redirect"].Status != "N/A" {
-		t.Fatalf("expected challenge_redirect N/A on an edge node got %s", r.FeatureChecks["challenge_redirect"].Status)
+	if _, ok := r.FeatureChecks["challenge_redirect"]; ok {
+		t.Fatal("retired challenge_redirect feature check must not be published")
 	}
 }
 
-func TestCollectFirewallStatusChallengeAlwaysNA(t *testing.T) {
+func TestCollectFirewallStatusChallengeChecksNeverPublished(t *testing.T) {
 	// Even with no OPENRESTY_MODE key at all, edge mode is the only mode:
-	// the legacy challenge-DNAT features stay N/A (the reportable legacy
-	// path no longer exists — Phase 1a of docs/edge-unification-plan.md).
+	// the retired challenge-DNAT feature checks are never published, even
+	// when challenge config and stale challenge sets are present (Phase 1c
+	// of docs/edge-unification-plan.md).
 	cfgDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cfgDir, "detectors.conf"), []byte("CHALLENGE_PATHS=1\n"), 0o644); err != nil {
 		t.Fatalf("write detectors.conf: %v", err)
@@ -156,22 +157,27 @@ func TestCollectFirewallStatusChallengeAlwaysNA(t *testing.T) {
 	if r.FeatureChecks["dnat_edge"].Status != "pass" {
 		t.Fatalf("expected dnat_edge pass got %s", r.FeatureChecks["dnat_edge"].Status)
 	}
-	if r.FeatureChecks["dnat_challenge"].Status != "N/A" {
-		t.Fatalf("expected dnat_challenge N/A got %s", r.FeatureChecks["dnat_challenge"].Status)
+	if _, ok := r.FeatureChecks["dnat_challenge"]; ok {
+		t.Fatal("retired dnat_challenge feature check must not be published")
 	}
-	if r.FeatureChecks["challenge_redirect"].Status != "N/A" {
-		t.Fatalf("expected challenge_redirect N/A got %s", r.FeatureChecks["challenge_redirect"].Status)
+	if _, ok := r.FeatureChecks["challenge_redirect"]; ok {
+		t.Fatal("retired challenge_redirect feature check must not be published")
 	}
 }
 
-func TestEvaluateFeatureChecksBothDisabled(t *testing.T) {
+func TestEvaluateFeatureChecksRetiredKeysAbsent(t *testing.T) {
+	// The legacy challenge-DNAT feature checks are retired entirely — the
+	// evaluator must not publish them even when the caller passes stale keys.
 	r := fwReport{Features: map[string]bool{"dnat_challenge": false, "challenge_redirect": false, "smtp": false, "portflood": false, "connlimit": false, "autoblock": false}, SetSizes: map[string]int{}, Counters: map[string]int64{}}
 	checks := evaluateFeatureChecks(r)
-	if checks["dnat_challenge"].Status != "N/A" {
-		t.Fatalf("expected dnat_challenge N/A got %s", checks["dnat_challenge"].Status)
+	if _, ok := checks["dnat_challenge"]; ok {
+		t.Fatal("retired dnat_challenge feature check must not be published")
 	}
-	if checks["challenge_redirect"].Status != "N/A" {
-		t.Fatalf("expected challenge_redirect N/A got %s", checks["challenge_redirect"].Status)
+	if _, ok := checks["challenge_redirect"]; ok {
+		t.Fatal("retired challenge_redirect feature check must not be published")
+	}
+	if checks["smtp"].Status != "N/A" {
+		t.Fatalf("expected smtp N/A got %s", checks["smtp"].Status)
 	}
 }
 

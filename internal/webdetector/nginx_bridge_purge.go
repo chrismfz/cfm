@@ -30,11 +30,9 @@ import (
 )
 
 // nginxAdminHTTPPort returns the port the local nginx (angie/openresty) serves
-// the /cfm-admin/* endpoints on. This is the web DNAT target, so we resolve it
-// through the same canonical helper the rest of the codebase uses
-// (CHALLENGE_HTTP_LISTEN takes precedence over the legacy HTTP_PORT, default
-// 9080) instead of reading HTTP_PORT directly — otherwise purge would POST to
-// the wrong port on deployments that set a custom challenge listener.
+// the /cfm-admin/* endpoints on. This is the web (edge) DNAT target, resolved
+// through the same canonical helper the DNAT installers use (HTTP_PORT env
+// override, default 9080) so purge always POSTs to the port DNAT points at.
 func nginxAdminHTTPPort() int {
 	if httpPort, _ := dnat.EffectiveTargetPorts(); httpPort > 0 && httpPort < 65536 {
 		return httpPort

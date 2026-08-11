@@ -13,10 +13,11 @@ import (
 )
 
 // Bypass rules carry a UserData tag that is DISTINCT from the dnatRuleTag
-// namespace so the existing DNAT reconcile loop (in installDNATRules) does
-// not consider them "managed DNAT rules" and therefore does not delete or
-// reorder them. They are managed exclusively by the helpers in this file
-// and are rebuilt every time PanelDNATOn / DNATOn is called.
+// namespace so rule parsing can tell them apart from the dport DNAT rules.
+// They are still edge-owned: installEdgeDNATRules deletes and re-adds them
+// (via dnatBypassIsManaged) as part of the deterministic clean rebuild, so
+// they always land between the loopback accept and the dport rules. They
+// are rebuilt every time PanelDNATOn / DNATOn is called.
 const dnatBypassUserDataPrefix = "cfm_dnat_bypass:v1:"
 
 // dnatBypassRuleID returns the per-entry UserData marker so we can match a

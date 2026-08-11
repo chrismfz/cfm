@@ -154,14 +154,6 @@ func classifySetName(name string) setDesc {
 		return setDesc{name: name, family: "v6", kind: "hosts", action: "ALLOW"}
 	}
 
-	// --- challenge sets ---
-	if name == "challenge_v4" {
-		return setDesc{name: name, family: "v4", kind: "hosts", action: "MATCH"}
-	}
-	if name == "challenge_v6" {
-		return setDesc{name: name, family: "v6", kind: "hosts", action: "MATCH"}
-	}
-
 	// --- generic cfm sets (ignore/self/debug/throttle/etc.) ---
 	if strings.HasSuffix(name, "_v4") {
 		return setDesc{name: name, family: "v4", kind: "hosts", action: classifyActionFromName(name)}

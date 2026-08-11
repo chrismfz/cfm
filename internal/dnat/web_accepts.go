@@ -55,11 +55,12 @@ func (s webDNATAcceptStatus) mapping() string {
 }
 
 // webDNATEdgeLabels are the labels used ONLY by the global web redirect accepts.
-// The per-IP challenge redirect emits accepts with labels like web_http_ip_tcp
-// and the panel accepts use the cfm_cpanel_dnat comment namespace; both share
-// the inet cfm/input chain, so matching on these exact labels keeps this
-// report scoped to the `cfm dnat on` accepts. Derived from webDNATAcceptSpecs
-// so adding a mapping there can't silently leave this filter stale.
+// The panel accepts use the cfm_cpanel_dnat comment namespace (and the retired
+// per-IP challenge redirect used labels like web_http_ip_tcp, which may linger
+// on not-yet-cleaned nodes); all share the inet cfm/input chain, so matching on
+// these exact labels keeps this report scoped to the `cfm dnat on` accepts.
+// Derived from webDNATAcceptSpecs so adding a mapping there can't silently
+// leave this filter stale.
 var webDNATEdgeLabels = func() map[string]bool {
 	m := map[string]bool{}
 	for _, s := range webDNATAcceptSpecs(0, 0) {
@@ -72,7 +73,7 @@ var webDNATEdgeLabels = func() map[string]bool {
 // accept comment token such as the nft backend's
 // "cfm_dnat_accept:web_http_tcp:80:9080" or the nftlib backend's
 // "cfm_edge_dnat_accept:web_http_tcp:80:9080". ok is false for any other token
-// (panel accepts, per-IP challenge accepts, non-edge labels).
+// (panel accepts, lingering retired per-IP challenge accepts, non-edge labels).
 func parseWebDNATAcceptComment(line string) (label string, from, to int, ok bool) {
 	norm := strings.ReplaceAll(line, `"`, "")
 	for _, tok := range strings.Fields(norm) {
