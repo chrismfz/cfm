@@ -211,7 +211,8 @@ guards. Deploy note: pure package upgrade; no config migration.
   panel-scoped token under the legacy shared name (upgrade lag) and migrates
   it to the scoped name on refresh; the loop-breaker is deliberately RETAINED
   as the safety net for the upgrade window and drops only after burn-in
-  (Phase 2 cleanup, together with the legacy-name fallback). Test the
+  (Phase 2 cleanup, together with the legacy-name fallback and the inert
+  shared-name `cfm_ok` marker — no Lua reads it anymore). Test the
   cPanel-plugin iframe cross-port flow (WHM :2087 iframing `/cfm-admin` on
   :443) under the new scheme.
 - Never touch: acctxfer tunnel ordering (test-locked), DA-no-tunnel invariant,

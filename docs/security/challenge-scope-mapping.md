@@ -31,7 +31,7 @@ CFM now uses one canonical model across challenge token issuance (Go) and Lua va
 
 - Legacy `cfm_ok` can still be issued for compatibility, but do not rely on it for cross-host or cross-scope pass state.
 - Prefer validating behavior with the clearance cookie only (`cfm_clearance` on web, `cfm_clearance_p<port>` on panel).
-- During rollout, monitor challenge logs for `host_mismatch` and `scope_mismatch` to identify stale or replayed cookies.
+- During rollout, monitor challenge logs for `host_mismatch` and `scope_mismatch` to identify stale or replayed cookies. Note: with per-scope names a cross-port replay usually never reaches the validator (the other port's cookie is simply not read), so `scope_mismatch` now mostly appears for tokens arriving via the legacy shared-name fallback; also watch `[cfm_panel_loop_break]` rates during the upgrade window.
 
 ## Validation-path carve-out (`/.well-known/`)
 
