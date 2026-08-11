@@ -48,25 +48,35 @@ func TestSPFAllQualifier(t *testing.T) {
 	}
 }
 
-func TestSPFAuthorizesDirect(t *testing.T) {
+func TestSPFDirectResult(t *testing.T) {
 	srv := []string{"84.54.49.200", "2a01:dead::5"}
 	cases := []struct {
-		rec        string
-		wantAuth   bool
-		wantUneval bool
+		rec  string
+		want string
 	}{
-		{"v=spf1 ip4:84.54.49.200 -all", true, false},
-		{"v=spf1 ip4:84.54.49.0/24 -all", true, false},         // CIDR contains the IP
-		{"v=spf1 ip6:2a01:dead::/32 -all", true, false},        // IPv6 CIDR
-		{"v=spf1 ip4:203.0.113.9 -all", false, false},          // no match, all direct
-		{"v=spf1 include:_spf.google.com -all", false, true},   // relies on include → unknown
-		{"v=spf1 a mx ~all", false, true},                      // a/mx not expanded → unknown
-		{"v=spf1 ip4:203.0.113.9 include:x -all", false, true}, // direct miss + include
+		{"v=spf1 ip4:84.54.49.200 -all", "pass"},
+		{"v=spf1 ip4:84.54.49.0/24 -all", "pass"},   // CIDR contains the IP
+		{"v=spf1 ip6:2a01:dead::/32 -all", "pass"},  // IPv6 CIDR
+		{"v=spf1 ip4:203.0.113.9 -all", "fail"},     // no match → falls to -all
+		{"v=spf1 ip4:203.0.113.9 ~all", "softfail"}, // → ~all
+		{"v=spf1 ip4:203.0.113.9 ?all", "neutral"},  // → ?all
+		// F1: a matching ip with a Fail/SoftFail/Neutral qualifier is NOT a pass.
+		{"v=spf1 -ip4:84.54.49.200 -all", "fail"},
+		{"v=spf1 ~ip4:84.54.49.200 -all", "softfail"},
+		{"v=spf1 ?ip4:84.54.49.200 -all", "neutral"},
+		// F2: +all (and bare all) pass everything.
+		{"v=spf1 +all", "pass"},
+		{"v=spf1 mx all", "unknown"}, // mx unresolved appears before `all` → unknown
+		// include/a/mx before a decision → unknown (first-match order matters).
+		{"v=spf1 include:_spf.google.com -all", "unknown"},
+		{"v=spf1 ip4:203.0.113.9 include:x -all", "unknown"},
+		// but a direct match BEFORE the include is decidable.
+		{"v=spf1 ip4:84.54.49.200 include:x -all", "pass"},
+		{"v=spf1", "unknown"}, // no terminal
 	}
 	for _, c := range cases {
-		auth, uneval := spfAuthorizesDirect(c.rec, srv)
-		if auth != c.wantAuth || uneval != c.wantUneval {
-			t.Errorf("spfAuthorizesDirect(%q) = (%v,%v), want (%v,%v)", c.rec, auth, uneval, c.wantAuth, c.wantUneval)
+		if got := spfDirectResult(c.rec, srv); got != c.want {
+			t.Errorf("spfDirectResult(%q) = %q, want %q", c.rec, got, c.want)
 		}
 	}
 }
@@ -101,7 +111,7 @@ func TestCheck_FullReport(t *testing.T) {
 	if rep.Domain != "axidwear.com" {
 		t.Fatalf("domain not normalized: %q", rep.Domain)
 	}
-	if !rep.SPF.Present || rep.SPF.Multiple || rep.SPF.AuthorizesServerIP != "yes" || rep.SPF.AllQualifier != "-all" {
+	if !rep.SPF.Present || rep.SPF.Multiple || rep.SPF.AuthorizesServerIP != "pass" || rep.SPF.AllQualifier != "-all" {
 		t.Fatalf("SPF wrong: %+v", rep.SPF)
 	}
 	if !rep.DMARC.Present || rep.DMARC.Policy != "reject" || rep.DMARC.Pct != "100" {
@@ -131,17 +141,30 @@ func TestCheck_MisconfiguredFindings(t *testing.T) {
 		addr: map[string][]string{"84.54.49.200": {}}, // no PTR
 	}
 	rep := Check(context.Background(), f, "bad.example", srv, nil)
-	if rep.SPF.AuthorizesServerIP != "no" {
-		t.Fatalf("expected SPF not-authorized, got %q", rep.SPF.AuthorizesServerIP)
+	if rep.SPF.AuthorizesServerIP != "fail" { // server IP not listed → falls through to -all
+		t.Fatalf("expected SPF fail, got %q", rep.SPF.AuthorizesServerIP)
 	}
 	joined := ""
 	for _, s := range rep.Findings {
 		joined += s + "\n"
 	}
-	for _, want := range []string{"SPF: does NOT list the server IP", "DMARC: MISSING", "DKIM: no key", "PTR: 84.54.49.200 has no reverse DNS"} {
+	for _, want := range []string{"SPF: the server IP FAILS SPF", "DMARC: MISSING", "DKIM: no key", "PTR: 84.54.49.200 has no reverse DNS"} {
 		if !contains(joined, want) {
 			t.Fatalf("missing finding %q in:\n%s", want, joined)
 		}
+	}
+}
+
+func TestCheck_DKIMRevokedKeyNotPresent(t *testing.T) {
+	f := fakeResolver{txt: map[string][]string{
+		"default._domainkey.rev.example": {"v=DKIM1; k=rsa; p="}, // empty p= = revoked
+	}}
+	rep := Check(context.Background(), f, "rev.example", nil, nil)
+	if len(rep.DKIM) != 1 || rep.DKIM[0].Present {
+		t.Fatalf("revoked (empty p=) key must not be Present: %+v", rep.DKIM)
+	}
+	if !contains(rep.DKIM[0].Note, "revoked") {
+		t.Fatalf("expected revoked note, got %q", rep.DKIM[0].Note)
 	}
 }
 

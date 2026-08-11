@@ -34,10 +34,11 @@ type SPF struct {
 	Record       string   `json:"record,omitempty"`  // the record, when exactly one
 	Multiple     bool     `json:"multiple"`          // more than one v=spf1 record → invalid
 	AllQualifier string   `json:"all_qualifier,omitempty"`
-	// AuthorizesServerIP: "yes" (a direct ip4:/ip6: mechanism lists a server IP),
-	// "no" (only direct mechanisms, none match), or "unknown" (the record relies
-	// on include:/a/mx/redirect/exists/ptr, which this checker does not expand —
-	// the mail log's SPF verdict is authoritative there).
+	// AuthorizesServerIP is the SPF result for the server's sending IP, evaluated
+	// left-to-right over the record's directly-resolvable mechanisms (ip4:/ip6:
+	// and the terminal `all`, qualifier-aware): "pass", "fail", "softfail",
+	// "neutral", or "unknown" when the outcome depends on an include:/a/mx the
+	// checker does not expand (the mail log's SPF verdict is authoritative there).
 	AuthorizesServerIP string `json:"authorizes_server_ip"`
 	Note               string `json:"note,omitempty"`
 }
@@ -129,16 +130,16 @@ func checkSPF(ctx context.Context, r Resolver, domain string, serverIPs []string
 	// RFC 7208: more than one SPF record is a permerror; still report the first.
 	out.Record = out.Records[0]
 	out.AllQualifier = spfAllQualifier(out.Record)
-	authorized, hadUneval := spfAuthorizesDirect(out.Record, serverIPs)
-	switch {
-	case authorized:
-		out.AuthorizesServerIP = "yes"
-	case hadUneval:
-		out.AuthorizesServerIP = "unknown"
-		out.Note = "relies on include:/a/mx/redirect — not expanded here; the mail log's SPF verdict is authoritative"
-	default:
-		out.AuthorizesServerIP = "no"
-		out.Note = "no ip4:/ip6: mechanism lists a server IP"
+	out.AuthorizesServerIP = spfDirectResult(out.Record, serverIPs)
+	switch out.AuthorizesServerIP {
+	case "unknown":
+		out.Note = "result depends on include:/a/mx/redirect — not expanded here; the mail log's SPF verdict is authoritative"
+	case "fail":
+		out.Note = "the server IP matches a Fail (-) mechanism — mail from this host fails SPF"
+	case "softfail":
+		out.Note = "the server IP is SoftFail (~) — mail may be accepted but spam-filtered"
+	case "neutral":
+		out.Note = "the server IP is Neutral (?) — SPF neither passes nor fails it"
 	}
 	return out
 }
@@ -158,10 +159,16 @@ func spfAllQualifier(record string) string {
 	return ""
 }
 
-// spfAuthorizesDirect reports whether a direct ip4:/ip6: mechanism in record
-// lists any server IP, and whether the record also carries mechanisms this
-// checker does not expand (include/a/mx/redirect/exists/ptr).
-func spfAuthorizesDirect(record string, serverIPs []string) (authorized, hadUnevaluated bool) {
+// spfDirectResult evaluates record left-to-right against serverIPs and returns
+// the SPF result for the server IP — one of "pass", "fail", "softfail",
+// "neutral", or "unknown". It resolves only the mechanisms it can answer
+// locally: `ip4:`/`ip6:` (honouring the +/-/~/? qualifier — a match on a `-ip4:`
+// is a Fail, NOT a pass) and the terminal `all`. SPF is first-match-wins, so if
+// an unresolved mechanism (include/a/mx/redirect/exists/ptr) appears BEFORE a
+// decision, the real outcome depends on DNS this checker does not expand and the
+// result is "unknown" (the mail log's SPF verdict is authoritative there). A
+// record with no resolvable terminal is likewise "unknown".
+func spfDirectResult(record string, serverIPs []string) string {
 	ips := make([]net.IP, 0, len(serverIPs))
 	for _, s := range serverIPs {
 		if ip := net.ParseIP(s); ip != nil {
@@ -169,24 +176,47 @@ func spfAuthorizesDirect(record string, serverIPs []string) (authorized, hadUnev
 		}
 	}
 	for _, tok := range strings.Fields(record) {
+		if strings.EqualFold(tok, "v=spf1") {
+			continue
+		}
+		q := byte('+')
 		mech := tok
 		if n := len(mech); n > 0 && (mech[0] == '+' || mech[0] == '-' || mech[0] == '~' || mech[0] == '?') {
+			q = mech[0]
 			mech = mech[1:]
 		}
 		l := strings.ToLower(mech)
 		switch {
 		case strings.HasPrefix(l, "ip4:") || strings.HasPrefix(l, "ip6:"):
 			if ipMechMatches(mech[4:], ips) {
-				return true, hadUnevaluated
+				return qualifierResult(q)
 			}
-		case l == "a" || strings.HasPrefix(l, "a:") || strings.HasPrefix(l, "a/"),
+		case l == "all":
+			return qualifierResult(q) // `all` matches everything → terminal
+		case strings.HasPrefix(l, "include:"), strings.HasPrefix(l, "redirect="),
+			l == "a" || strings.HasPrefix(l, "a:") || strings.HasPrefix(l, "a/"),
 			l == "mx" || strings.HasPrefix(l, "mx:") || strings.HasPrefix(l, "mx/"),
-			strings.HasPrefix(l, "include:"), strings.HasPrefix(l, "redirect="),
 			strings.HasPrefix(l, "exists:"), l == "ptr" || strings.HasPrefix(l, "ptr:"):
-			hadUnevaluated = true
+			// First-match-wins: this could match (with its own qualifier) before
+			// any later ip4:/ip6: we can see, so we cannot decide locally.
+			return "unknown"
 		}
 	}
-	return false, hadUnevaluated
+	return "unknown"
+}
+
+// qualifierResult maps an SPF mechanism qualifier to its result name.
+func qualifierResult(q byte) string {
+	switch q {
+	case '-':
+		return "fail"
+	case '~':
+		return "softfail"
+	case '?':
+		return "neutral"
+	default: // '+' or the implicit default
+		return "pass"
+	}
 }
 
 // ipMechMatches reports whether spec (an SPF ip4:/ip6: value, a bare address or
@@ -260,10 +290,17 @@ func checkDKIM(ctx context.Context, r Resolver, domain, selector string) DKIM {
 	}
 	for _, t := range txts {
 		l := strings.ToLower(strings.TrimSpace(t))
-		if strings.HasPrefix(l, "v=dkim1") || strings.Contains(l, "p=") {
-			out.Present = true
+		if !strings.HasPrefix(l, "v=dkim1") && !strings.Contains(l, "p=") {
+			continue // not a DKIM key record
+		}
+		// A DKIM record with an empty p= is a REVOKED key, not a usable one — do
+		// not report it as present (that would hide a broken signing setup).
+		if dmarcTag(l, "p") == "" {
+			out.Note = "key at " + name + " is revoked/empty (p= has no value)"
 			return out
 		}
+		out.Present = true
+		return out
 	}
 	out.Note = "no key at " + name
 	return out
@@ -319,8 +356,12 @@ func findings(rep Report) []string {
 		f = append(f, "SPF: MISSING — add a v=spf1 record that authorizes the sending IP")
 	case rep.SPF.Multiple:
 		f = append(f, "SPF: INVALID — more than one v=spf1 record (RFC permerror); keep exactly one")
-	case rep.SPF.AuthorizesServerIP == "no":
-		f = append(f, "SPF: does NOT list the server IP — mail from this host will fail SPF")
+	case rep.SPF.AuthorizesServerIP == "fail":
+		f = append(f, "SPF: the server IP FAILS SPF (matches a -all/-mechanism) — mail from this host will be rejected or spam-filtered")
+	case rep.SPF.AuthorizesServerIP == "softfail":
+		f = append(f, "SPF: the server IP is SoftFail (~) — mail may be accepted but spam-filtered")
+	case rep.SPF.AuthorizesServerIP == "neutral":
+		f = append(f, "SPF: the server IP is Neutral (?) — SPF gives it no protection")
 	case rep.SPF.AllQualifier == "+all":
 		f = append(f, "SPF: uses +all (passes everything) — effectively no protection")
 	}

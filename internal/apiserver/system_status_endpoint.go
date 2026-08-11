@@ -686,7 +686,9 @@ func handleMailDNS(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
 		return
 	}
-	domain := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("domain")))
+	// Normalize an FQDN root dot before the scope check so a scoped owner querying
+	// "example.com." isn't wrongly denied (maildns.Check normalizes again anyway).
+	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(r.URL.Query().Get("domain"))), ".")
 	if domain == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "domain required"})
@@ -704,11 +706,17 @@ func handleMailDNS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap the DKIM selectors so a caller can't turn one request into an
+	// unbounded burst of DNS lookups at the target's nameservers.
+	const maxSelectors = 10
 	var selectors []string
 	if sel := strings.TrimSpace(r.URL.Query().Get("dkim_selector")); sel != "" {
 		for _, s := range strings.Split(sel, ",") {
 			if s = strings.TrimSpace(s); s != "" {
 				selectors = append(selectors, s)
+				if len(selectors) >= maxSelectors {
+					break
+				}
 			}
 		}
 	}
