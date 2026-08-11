@@ -34,8 +34,13 @@ func (b *Backend) EnsureBase() (err error) {
 			lockWait.Round(time.Millisecond), nlWork.Round(time.Millisecond), cliWork.Round(time.Millisecond))
 		b.logPhase("EnsureBase", st, time.Since(start), err, extra)
 	}()
+	// Baseline lock_wait immediately before Lock (not from `start`) so it measures
+	// ONLY mutex acquisition — otherwise the pre-lock logPhase/log write latency
+	// would be misattributed to contention, which is exactly the signal this tool
+	// exists to read cleanly.
+	lockStart := time.Now()
 	b.mu.Lock()
-	lockWait = time.Since(start)
+	lockWait = time.Since(lockStart)
 	nlStart := time.Now()
 
 	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
