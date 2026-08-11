@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM — Mail Monitor</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2032%2032%27%3E%3Crect%20width=%2732%27%20height=%2732%27%20rx=%277%27%20fill=%27%23141b2d%27/%3E%3Cpath%20d=%27M16%206l8.7%205v10L16%2026l-8.7-5V11z%27%20fill=%27none%27%20stroke=%27%234da3ff%27%20stroke-width=%272.4%27/%3E%3C/svg%3E" />
+  <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <script type="module">
+    import "../assets/shared/constants.js";
+    import "../assets/shared/auth-context.js";
+    import "../assets/shared/auth-mode.js";
+    import "../assets/shared/api-client.js";
+    import "../assets/shared/controller-bootstrap.js";
+    import "../assets/shared/ui-scope.js";
+    import "../assets/mailmon.js";
+  </script>
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar" data-shared-nav></aside>
+<div class="main">
+<div id="app">
+    <header class="topbar">
+      <button class="nav-burger" type="button" data-nav-burger aria-label="Toggle navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <h1>Mail Monitor</h1>
+      <div class="meta">
+        <label class="muted">Window:
+          <select id="hoursSel" class="btn-quiet">
+            <option value="1">1h</option>
+            <option value="6">6h</option>
+            <option value="24" selected>24h</option>
+            <option value="72">3d</option>
+            <option value="168">7d</option>
+          </select>
+        </label>
+        <span class="muted">Auto-refresh: <strong id="autoState">ON</strong></span>
+        <button id="refreshBtn" class="btn-quiet">Refresh now</button>
+        <button id="toggleAutoBtn" class="btn-quiet">Stop</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>
+          Traffic totals
+          <span class="top-hint" id="scopeHint">per-hour counters from the exim mainlog + syslog maillog — no per-request MTA probe; the "who is sending a lot / which account is compromised" view</span>
+        </h2>
+        <div class="toolbar">
+          <span id="mmMeta" class="muted"></span>
+          <span id="actionMsg" class="pill" style="display:none"></span>
+        </div>
+        <div id="mmUnavailable" class="muted" style="display:none"></div>
+        <div id="totals" class="statgrid"></div>
+      </section>
+
+      <section class="card">
+        <h2>Top outbound senders <span class="top-hint">a sender far above the pack — especially to many domains — is the classic compromised account</span></h2>
+        <div class="table-wrap">
+          <table><thead><tr><th>Sender</th><th>Sent</th></tr></thead><tbody id="outBody"></tbody></table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Most-sent domains</h2>
+        <div class="table-wrap">
+          <table><thead><tr><th>Domain</th><th>Sent</th></tr></thead><tbody id="domBody"></tbody></table>
+        </div>
+      </section>
+
+      <section class="card" id="localCard">
+        <h2>Local script submitters <span class="top-hint">PHP/cron <code>sendmail</code>, keyed by unix user — the dominant cPanel spam path (admin-only)</span></h2>
+        <div class="table-wrap">
+          <table><thead><tr><th>Unix user</th><th>Submitted</th></tr></thead><tbody id="localBody"></tbody></table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Top inbound mailboxes</h2>
+        <div class="table-wrap">
+          <table><thead><tr><th>Mailbox</th><th>Received</th></tr></thead><tbody id="inBody"></tbody></table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Failed logins <span class="top-hint">targeted mailboxes; host-wide/junk-username attempts fold to <code>*</code> (admin)</span></h2>
+        <div class="table-wrap">
+          <table><thead><tr><th>Mailbox</th><th>Failures</th></tr></thead><tbody id="authFailBody"></tbody></table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Rate-limited senders</h2>
+        <div class="table-wrap">
+          <table><thead><tr><th>Sender</th><th>Throttled</th></tr></thead><tbody id="throttledBody"></tbody></table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Over-quota mailboxes</h2>
+        <div class="table-wrap">
+          <table><thead><tr><th>Mailbox</th><th>Bounces</th></tr></thead><tbody id="overQuotaBody"></tbody></table>
+        </div>
+      </section>
+    </main>
+  </div>
+</div><!-- /.main -->
+</div><!-- /.shell -->
+</body>
+</html>

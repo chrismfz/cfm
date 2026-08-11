@@ -52,6 +52,7 @@ than being mistaken for admin. Code that reads `CtxScopeKey{}` **directly**
 - `/api/v1/mysql/user-summary|user-kills|user-history` via `scopedMySQLFilterHandler` (explicit `?user=` or derived scoped owners).
 - `/api/v1/mysql/user-kill` (POST) via `scopedMySQLFilterHandler` — kills one connection/query; `handleUserKill` enforces the target `(user, db)` is within scope (`userDBMatch`); admin (no filter) may target any pid.
 - `/api/v1/tokens/me` (self descriptor only; scoped callers only see their own token metadata).
+- `/api/v1/mail/traffic` (`system_status_endpoint.go`, `mailTrafficScope` → `mailtraffic.TrafficSummary`) — Mail Monitor traffic view. Admin (nil scope) sees the whole server; a scoped caller is filtered to its own mail domains (`domain IN (allowlist)`), following the `nil=admin / non-nil=scoped / empty=owns-nothing` convention. Host-wide (`*`) and local-unix-user rows key to domain `*`, which is never in a vhost allowlist, so they are admin-only by construction (`totals.rejected`/`top_local_submitters` are empty for scoped); the scope helper also defensively drops `*` from a scoped allowlist. Ignores `?vhosts=` (scope comes only from the token). Sibling mail reads `/api/v1/system/mail-queue` and `/api/v1/system/mail-log` remain `RequireAdmin`.
 
 ### Admin-only
 
