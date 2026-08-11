@@ -20,14 +20,47 @@ import (
 // under the default socket send buffer.
 const setWriteChunk = 1000
 
-// chunkedAdd adds nftElems to set in batches of setWriteChunk, one Flush per
-// batch, so no single netlink message exceeds the kernel/socket limit. When
-// flushFirst is true a set flush is queued before the first batch (the flush +
-// first batch execute as one transaction; later batches are separate
-// transactions — a large set is therefore briefly partial DURING a refresh,
-// which is acceptable versus failing to apply the set at all). Caller must hold
-// b.mu.
+// chunkedAdd writes nftElems to set. Caller must hold b.mu.
+//
+// Two shapes, chosen from the ELEMENTS (an IntervalEnd marker ⇒ interval set —
+// reliable regardless of whether GetSetByName populated set.Interval):
+//
+//   - Interval sets (CIDR/nets): the flush must be its OWN netlink transaction —
+//     flushing and re-adding an interval set in one batch fails with ENOTEMPTY
+//     ("directory not empty"); CFM's CLI path (replacePortSetCLI) splits them for
+//     the same reason. And the elements are start/IntervalEnd PAIRS that must not
+//     be split across messages, so they go in a single add batch. Interval feeds
+//     are small in practice (a very large one could still hit the message limit —
+//     none exist today).
+//   - Plain sets (host IPs): flush queued with the first batch, then batches of
+//     setWriteChunk each with its own Flush, so a huge set (e.g. a 113k blocklist)
+//     can't overflow the netlink socket buffer. A large set is briefly partial
+//     during a refresh — acceptable versus failing to apply it at all.
 func (b *Backend) chunkedAdd(set *nftables.Set, nftElems []nftables.SetElement, flushFirst bool) error {
+	interval := false
+	for i := range nftElems {
+		if nftElems[i].IntervalEnd {
+			interval = true
+			break
+		}
+	}
+
+	if interval {
+		if flushFirst {
+			b.conn.FlushSet(set)
+			if err := b.conn.Flush(); err != nil { // separate transaction
+				return err
+			}
+		}
+		if len(nftElems) == 0 {
+			return nil
+		}
+		if err := b.conn.SetAddElements(set, nftElems); err != nil {
+			return err
+		}
+		return b.conn.Flush()
+	}
+
 	if flushFirst {
 		b.conn.FlushSet(set)
 	}

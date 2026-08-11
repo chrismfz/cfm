@@ -40,7 +40,11 @@ back-filled here — see the git/PR history for that period.
   successful apply is now a no-op (a blocklist that didn't change this hour is
   not needlessly rewritten); the content cache is dropped on any structural
   change (`invalidateCache`) so a recreated/flushed set is always rewritten. TTL
-  sets are always rewritten (their kernel contents expire).
+  sets are always rewritten (their kernel contents expire). Interval sets
+  (CIDR/nets feeds) additionally had their flush issued as a SEPARATE netlink
+  transaction — flushing and re-adding an interval set in one batch failed with
+  `netlink receive: directory not empty` (observed on a `*_nets` allowlist feed),
+  and their start/interval-end element pairs are never split across batches.
 - **`/unblock` now responds within a bounded budget regardless of firewall
   backend speed.** The pre-response fast path (nft point-lookup + remove, WAF
   clear) previously ran the nft work synchronously and unbounded; on a busy node
