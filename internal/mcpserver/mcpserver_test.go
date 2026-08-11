@@ -18,19 +18,25 @@ import (
 // fakeDispatch records the last in-process read it was asked to perform and
 // returns a canned body, so tests can assert which endpoint a tool hit.
 type fakeDispatch struct {
-	mu        sync.Mutex // guards the last* fields (security_overview dispatches concurrently)
-	lastPath  string
-	lastQuery url.Values
-	body      []byte
-	status    int
-	delay     time.Duration // if >0, fn blocks this long (honouring ctx) before returning
+	mu         sync.Mutex // guards the last*/seen fields (composed tools dispatch concurrently)
+	lastPath   string
+	lastQuery  url.Values
+	seen       []string          // every path dispatched (composed tools hit several)
+	body       []byte            // default body for any path without a bodyByPath entry
+	bodyByPath map[string][]byte // optional per-path body (for composed multi-endpoint tools)
+	status     int
+	delay      time.Duration // if >0, fn blocks this long (honouring ctx) before returning
 }
 
 func (f *fakeDispatch) fn(ctx context.Context, path string, q url.Values) (int, []byte, error) {
 	f.mu.Lock()
 	f.lastPath = path
 	f.lastQuery = q
+	f.seen = append(f.seen, path)
 	body := f.body
+	if b, ok := f.bodyByPath[path]; ok {
+		body = b
+	}
 	status := f.status
 	delay := f.delay
 	f.mu.Unlock()
@@ -48,6 +54,18 @@ func (f *fakeDispatch) fn(ctx context.Context, path string, q url.Values) (int, 
 		status = http.StatusOK
 	}
 	return status, body, nil
+}
+
+// sawPath reports whether path was dispatched at least once.
+func (f *fakeDispatch) sawPath(path string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range f.seen {
+		if p == path {
+			return true
+		}
+	}
+	return false
 }
 
 const testAdminToken = "ADMINTOK"
@@ -512,6 +530,69 @@ func TestIPLocateDispatchesToSearch(t *testing.T) {
 	if !strings.Contains(body, "ip") {
 		t.Errorf("expected a required-field error mentioning ip, got: %s", body)
 	}
+}
+
+func TestWhatsWrongEndToEnd(t *testing.T) {
+	fd := &fakeDispatch{bodyByPath: map[string][]byte{
+		"/api/v1/health/snapshot":   []byte(`{"disk":{"mounts":[{"mount":"/","used_pct":97}]},"runtime":{"frontend_working":"working","edge_status":"active"},"host":{"load_avg_5":1,"cpu_threads":8}}`),
+		"/api/v1/health/anomalies":  []byte(`{"count":0,"anomalies":[]}`),
+		"/api/v1/system/services":   []byte(`{"ok":true,"services":[{"unit":"cfm.service","load":"loaded","active":"active","sub":"running","enabled":"enabled","restarts":0}]}`),
+		"/api/v1/mysql/top":         []byte(`{"error":"HTTP 404"}`), // governor off → recorded as error, not a finding
+		"/api/v1/system/mail-queue": []byte(`{"available":false,"note":"no detector"}`),
+		"/api/v1/mail/traffic":      []byte(`{"available":true,"traffic":{"anomalies":[]}}`),
+	}}
+	ts := newTestServer(t, fd)
+
+	_, body := mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"whats_wrong","arguments":{}}}`)
+
+	// All six signal endpoints must have been consulted.
+	for _, p := range []string{
+		"/api/v1/health/snapshot", "/api/v1/health/anomalies", "/api/v1/system/services",
+		"/api/v1/mysql/top", "/api/v1/system/mail-queue", "/api/v1/mail/traffic",
+	} {
+		if !fd.sawPath(p) {
+			t.Errorf("whats_wrong did not dispatch %s", p)
+		}
+	}
+
+	// The tool text content is itself a JSON document; decode it and assert on the
+	// structured result rather than substring-matching the escaped envelope.
+	var res whatsWrongResult
+	if err := json.Unmarshal([]byte(toolText(t, body)), &res); err != nil {
+		t.Fatalf("decode whats_wrong result: %v; body=%s", err, body)
+	}
+	if res.Status != "issues" {
+		t.Errorf("status = %q, want issues", res.Status)
+	}
+	if res.Sources["mysql"] != "error: HTTP 404" { // governor off → errored, not healthy
+		t.Errorf("mysql source = %q, want error: HTTP 404", res.Sources["mysql"])
+	}
+	if res.Sources["mail_queue"] != "unavailable" {
+		t.Errorf("mail_queue source = %q, want unavailable", res.Sources["mail_queue"])
+	}
+	if f := findBy(res.Findings, "disk", sevCritical); f == nil {
+		t.Errorf("expected a critical disk finding, got %+v", res.Findings)
+	}
+}
+
+// toolText extracts result.content[0].text from a JSON-RPC tool-call response.
+func toolText(t *testing.T, body string) string {
+	t.Helper()
+	var env struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(body), &env); err != nil {
+		t.Fatalf("decode JSON-RPC envelope: %v; body=%s", err, body)
+	}
+	if len(env.Result.Content) == 0 {
+		t.Fatalf("tool result has no content; body=%s", body)
+	}
+	return env.Result.Content[0].Text
 }
 
 func TestToolCallMissingRequiredArg(t *testing.T) {
