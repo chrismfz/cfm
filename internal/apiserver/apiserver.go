@@ -200,7 +200,8 @@ func Start(
 	RegisterUnblock(m, be, cfgDir)
 	RegisterBlock(m, be)
 	RegisterFirewallList(m, be)
-	RegisterSearch(m, be, cfgDir) // read-only multi-source IP lookup
+	RegisterFirewallSelfTest(m, be) // read-only nftlib self-diagnostics
+	RegisterSearch(m, be, cfgDir)   // read-only multi-source IP lookup
 
 	// ── System status ─────────────────────────────────────────────────────────
 	RegisterSystemStatus(m, be)

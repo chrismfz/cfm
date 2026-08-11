@@ -33,6 +33,20 @@ back-filled here — see the git/PR history for that period.
   `CFM_FIREWALL_ENGINE=nftlib` worked around on one node.
 
 ### Added
+- **nftlib self-diagnostics + `firewall_selftest` MCP tool.** The nftlib firewall
+  backend now records a bounded, read-only self-test: each `EnsureBase` call is
+  timed with its parts split — `lock_wait` (contention on the backend mutex),
+  `nl_work` (netlink add+flush — the shared connection's own health) and
+  `cli_work` (the `nft` CLI portion) — kept in a small ring, plus the latest
+  per-set feed write (element count, duration, error). The split is now also in
+  the existing `[firewall] … EnsureBase` log line. Surfaced via
+  `GET /api/v1/firewall/selftest` (admin-only) and the new `firewall_selftest`
+  MCP tool. This is the live view for root-causing an nftlib node whose
+  `EnsureBase` duration climbs over a run (rising `lock_wait` ⇒ a slow/failed feed
+  write holding the mutex; rising `nl_work` ⇒ the netlink connection degrading) or
+  a large feed that fails to apply (a set write erroring with "message too long").
+  Instrumentation only — no change to enforcement behaviour; the exec-nft backend
+  reports `available:false`. Brings the MCP tool set to 31.
 - **MCP `whats_wrong` — one-call triage flagship.** A new read-only MCP tool that
   pulls the key signals together (health snapshot + health anomalies + systemd
   services + MySQL saturation + mail queue + mail-traffic anomalies) and returns a

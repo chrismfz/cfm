@@ -105,6 +105,14 @@ type Backend struct {
 	// flood rebuild deduplication (same semantics as nft backend).
 	lastFloodHash    uint64
 	lastFloodRebuild time.Time
+
+	// Self-test instrumentation (read-only diagnostics; see selftest.go). Guarded
+	// by statMu — NEVER b.mu — so recording a measurement can't add contention to
+	// the very path (EnsureBase / set writes) we are measuring.
+	statMu     sync.Mutex
+	ebBuf      [ensureBaseRingCap]ebSample // fixed ring of recent EnsureBase timings
+	ebN        int                         // total EnsureBase calls (ring index = ebN % cap)
+	feedWrites map[string]fwSample         // latest write per set name
 }
 
 // New opens a lasting netlink connection and returns a ready nftlib.Backend.
@@ -125,6 +133,7 @@ func New() (*Backend, error) {
 		lastAutoBlockAt:          make(map[string]time.Time),
 		lastIgnoredAt:            make(map[string]time.Time),
 		selfResolver:             selfip.New(),
+		feedWrites:               make(map[string]fwSample),
 	}, nil
 }
 

@@ -21,14 +21,27 @@ import (
 func (b *Backend) EnsureBase() (err error) {
 	start := time.Now()
 	b.logPhase("EnsureBase", "start", 0, nil, "")
+	// Split the timing so the self-test can tell contention (lock_wait) from
+	// netlink-connection degradation (nl_work) from the nft CLI part (cli_work).
+	var lockWait, nlWork, cliWork time.Duration
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
 		}
-		b.logPhase("EnsureBase", st, time.Since(start), err, "")
+		b.recordEnsureBase(lockWait, nlWork, cliWork, err)
+		extra := fmt.Sprintf("lock_wait=%s nl_work=%s cli_work=%s",
+			lockWait.Round(time.Millisecond), nlWork.Round(time.Millisecond), cliWork.Round(time.Millisecond))
+		b.logPhase("EnsureBase", st, time.Since(start), err, extra)
 	}()
+	// Baseline lock_wait immediately before Lock (not from `start`) so it measures
+	// ONLY mutex acquisition — otherwise the pre-lock logPhase/log write latency
+	// would be misattributed to contention, which is exactly the signal this tool
+	// exists to read cleanly.
+	lockStart := time.Now()
 	b.mu.Lock()
+	lockWait = time.Since(lockStart)
+	nlStart := time.Now()
 
 	table := &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}
 	b.conn.AddTable(table)
@@ -135,6 +148,7 @@ func (b *Backend) EnsureBase() (err error) {
 		if isAlreadyExists(err) {
 			// preserve idempotency for repeated EnsureBase calls
 		} else {
+			nlWork = time.Since(nlStart)
 			b.mu.Unlock()
 			return fmt.Errorf("nftlib: ensure base: %w", err)
 		}
@@ -142,13 +156,16 @@ func (b *Backend) EnsureBase() (err error) {
 
 	b.invalidateCache()
 
+	nlWork = time.Since(nlStart)
 	b.mu.Unlock()
 
+	cliStart := time.Now()
 	// Populate self_v4 / self_v6 with loopback + local interface IPs.
 	b.refreshSelfSets()
 
 	// Install base input chain rules (idempotent).
 	b.applyBaseInputRules()
+	cliWork = time.Since(cliStart)
 
 	return nil
 }

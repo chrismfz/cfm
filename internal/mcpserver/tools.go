@@ -48,6 +48,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerDetectionHistory(srv, d)
 	registerBotsTop(srv, d)
 	registerFirewallBlocks(srv, d)
+	registerFirewallSelfTest(srv, d)
 	registerIPLocate(srv, d)
 	registerDetectorsStatus(srv, d)
 	registerSystemHealth(srv, d)
@@ -956,6 +957,16 @@ func registerIPLocate(srv *mcp.Server, d Deps) {
 			return nil, nil, errRequired("ip")
 		}
 		return dispatchJSON(ctx, d, "/search", url.Values{"ip": {in.IP}})
+	})
+}
+
+func registerFirewallSelfTest(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "firewall_selftest",
+		Description: "nftlib firewall self-diagnostics (read-only): the recent EnsureBase calls with their time split into lock_wait_ms (contention on the backend mutex), nl_work_ms (netlink add+flush — the shared connection's own health) and cli_work_ms (the `nft` CLI part), the worst call in the window, and the latest per-set feed writes (elems, dur, error). Use to root-cause an nftlib node whose EnsureBase duration climbs over a run (rising lock_wait ⇒ contention from a slow/failed feed write; rising nl_work ⇒ the netlink connection degrading) or a feed that never applies (a large set write erroring with 'message too long'). `available:false` on the exec-nft backend (it doesn't record this).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
+		return dispatchJSON(ctx, d, "/api/v1/firewall/selftest", nil)
 	})
 }
 
