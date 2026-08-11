@@ -186,7 +186,7 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ## 4. Active tools (as-built)
 
-30 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
+31 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
 CLI/UI use). All carry the `readOnlyHint` annotation.
 
 | Tool | What it answers | Endpoint(s) | Args |
@@ -215,6 +215,7 @@ CLI/UI use). All carry the `readOnlyHint` annotation.
 | `bots_top` | Top user-agents (bots/crawlers/scrapers) | `webdet/ua-top` | `limit` |
 | `ip_locate` | Where + WHY an IP is blocked across ALL sources (nft/cfm.deny/csf/fail2ban/imunify360), incl. the cfm.deny autoblock reason (e.g. "autoblock: portscan …"). The `cfm which/search` equivalent; explains a `firewall_blocks` ban whose nft entry has no comment | `/search` | `ip`* |
 | `firewall_blocks` | Active nft bans (WAF autoblocks/detector bans/blocklist). No args → compact SUMMARY (total, perm/temp, top `by_country`, top `by_asn`); the list is often thousands of IPs. Drill down with `country`/`asn`/`reason` → matching rows + within-facet ASN breakdown for FP judgement (residential ISP vs VPS) | `firewall/list` | `country`, `asn`, `reason`, `limit` |
+| `firewall_selftest` | nftlib backend self-diagnostics — recent EnsureBase timings split into lock_wait/netlink/CLI (+ worst call) and per-set feed-write sizes/errors. Root-cause an nftlib slowdown (EnsureBase duration climbing) or a feed that won't apply ("message too long"). `available:false` on exec-nft | `firewall/selftest` | — |
 | `detectors_status` | Which detectors run + recent activity | `detectors/status` | — |
 | `system_health` | Health snapshot + recent anomalies | `health/snapshot` + `health/anomalies` | `since` |
 | `process_list` | Busiest processes (top-like: pid/user/state/%cpu/%mem/rss/threads/comm) — "load is high, who's eating it?" | `system/processes` | `top` |
@@ -297,3 +298,4 @@ The MCP surface is versioned by CFM's date-based releases (see `CHANGELOG.md`).
 | 2026.08.05 | **Introduced** — read-only MCP server; dedicated `MCP_TOKEN` credential (min 24 chars, fail-closed) separate from `AUTH_TOKEN`; OAuth 2.1 + PKCE for the claude.ai connector, static-bearer for Claude Code/API | The 15 tools in §4 (WAF, challenge, suspicious/traffic, drilldowns, history, bots, firewall blocks, detectors, health) |
 | 2026.08.06 | Edge-proxy connectivity fixes (OIDC-discovery alias, DNS-rebinding guard disabled); consent POST rate-limit; enrich reverse-DNS perf (waf/security summaries ~60s→~1.5s) | **+`process_list`, +`listening_ports`, +`dmesg_tail`, +`service_status`, +`edge_access_tail`, +`ip_forensics`, +`mysql_pressure`, +`mysql_log_tail`, +`mysql_slow_queries`, +`mail_queue_summary`** (25 tools) — node system diagnostics (busiest processes; listening sockets + owner; kernel ring buffer; systemd unit status) + WAF triage (recent edge access lines around a hit; on-demand bounded per-IP access-log lookup) + MySQL pressure (per-user conns×CPU) + MySQL error/slow-log tails + exim mail-queue breakdown; `security_overview` made compact |
 | 2026.08.11 | Mail Monitor + triage flagship | **+`mail_log_tail`, +`mail_traffic`, +`mail_dns_check`** (Mail Monitor: raw mail-log tail; per-hour traffic/anomaly/deliverability summary; mail-auth DNS check) **+`whats_wrong`** (30 tools) — one-call SEVERITY-RANKED triage that synthesizes health/services/mysql/mail signals into concrete problems, each pointing at its drill-down tool; the new recommended entry point |
+| 2026.08.11 | nftlib diagnostics | **+`firewall_selftest`** (31 tools) — read-only nftlib backend self-diagnostics: EnsureBase timing split (lock_wait/netlink/CLI) + per-set feed-write sizes/errors, to root-cause an nftlib EnsureBase slowdown or a feed failing to apply |

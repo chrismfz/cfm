@@ -595,6 +595,19 @@ func toolText(t *testing.T, body string) string {
 	return env.Result.Content[0].Text
 }
 
+func TestFirewallSelfTestDispatches(t *testing.T) {
+	fd := &fakeDispatch{body: []byte(`{"ok":true,"available":true,"selftest":{"engine":"nftlib","samples":3}}`)}
+	ts := newTestServer(t, fd)
+	_, body := mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"firewall_selftest","arguments":{}}}`)
+	if fd.lastPath != "/api/v1/firewall/selftest" {
+		t.Errorf("firewall_selftest dispatched to %q, want /api/v1/firewall/selftest", fd.lastPath)
+	}
+	if !strings.Contains(body, "nftlib") {
+		t.Errorf("firewall_selftest result missing payload: %s", body)
+	}
+}
+
 func TestToolCallMissingRequiredArg(t *testing.T) {
 	fd := &fakeDispatch{}
 	ts := newTestServer(t, fd)
