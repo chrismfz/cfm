@@ -48,8 +48,7 @@ type CapabilityReporter interface {
 // - nftcli-owned operations (hybrid until nftlib parity):
 //   - Policy/rules programming: ApplyFloodRules, ApplyHardeningRules, ApplyPortsPolicy,
 //     ApplyConnlimit, ApplyPortFlood, ApplySMTPBlock, ApplyOutboundObserve.
-//   - Challenge redirect/DNAT control: SetChallengeRedirectEnabled, CleanupChallengeRedirect,
-//     EnsureChallengeRedirect, DNATStatus, DNATShow, DNATOn, DNATOff.
+//   - Edge DNAT control: DNATStatus, DNATShow, DNATOn, DNATOff.
 //   - Panel DNAT control: PanelDNATOn/Off/Status and scoped panel DNAT accepts.
 //   - Protections: keep timeout + backpressure controls (central command runner, bounded
 //     concurrency/serialization, and context cancellation propagation) on every subprocess path.
@@ -62,7 +61,6 @@ type Backend interface {
 	EnableEnrichment(dirs ...string)
 	GetEnricher() *enrich.Enricher
 	SetReporter(r reporting.Reporter)
-	SetChallengeLogger(f func(format string, args ...any))
 
 	// Policy
 	ApplyFloodRules(c *config.Config) error
@@ -97,13 +95,6 @@ type Backend interface {
 	RemoveIgnore(ip net.IP) error
 	AddIgnoreNet(cidr string, ttl *time.Duration) error
 	RemoveIgnoreNet(cidr string) error
-
-	// NEW: Challenge (HTTP/HTTPS redirect for selected source IPs)
-	AddChallenge(ip net.IP, ttl *time.Duration) error
-	RemoveChallenge(ip net.IP) error
-	SetChallengeRedirectEnabled(enabled bool)
-	CleanupChallengeRedirect() error
-	EnsureChallengeRedirect(httpListen, httpsListen string) error
 
 	// Feed/bulk/set ops + diagnostics
 	ApplyFeed(ctx context.Context, f blocklists.Feed, res *blocklists.FetchResult) error

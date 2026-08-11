@@ -35,10 +35,10 @@ const (
 	family         = "inet"
 	selfIPsLuaPath = "/var/lib/cfm/lua/cfm_self_ips.lua"
 
-	//web challenge nets
-	challengeV4       = "challenge_v4"
-	challengeV6       = "challenge_v6"
-	challengeNatChain = "prerouting"
+	// Retired per-IP challenge DNAT set names — referenced only by the
+	// one-shot legacy cleanup in EnsureBase.
+	challengeV4 = "challenge_v4"
+	challengeV6 = "challenge_v6"
 
 	// manual
 	setV4   = "block_v4"
@@ -96,14 +96,6 @@ type Backend struct {
 	reporter reporting.Reporter
 	cfgDir   string // resolve config dir
 
-	// Optional logger used by the challenge server so nft can log rule installs
-	// into the same cfm.challenges.log stream.
-	challengeLogf func(format string, args ...any)
-
-	// When false (OpenResty mode), do NOT create challenge_v4/challenge_v6 sets.
-	// Also remove them if they already exist.
-	challengeDNATEnabled bool
-
 	pfSets   []string            // th_pf_<port>_<proto>_v4/v6
 	clSets   []string            // th_connlimit_<port>_<proto>_v4/v6
 	feedKeys map[string]struct{} // π.χ. {"dshield":{}, "abuseipdb":{}}
@@ -152,18 +144,6 @@ func (b *Backend) GetEnricher() *enrichpkg.Enricher {
 
 func (b *Backend) SetReporter(r reporting.Reporter) { b.reporter = r }
 
-// SetChallengeLogger allows the challenge server to pass its log function so nft
-// can emit per-rule debug lines into cfm.challenges.log.
-func (b *Backend) SetChallengeLogger(f func(format string, args ...any)) {
-	b.challengeLogf = f
-}
-
-func (b *Backend) chlogf(format string, args ...any) {
-	if b != nil && b.challengeLogf != nil {
-		b.challengeLogf(format, args...)
-	}
-}
-
 //func New() *Backend { return &Backend{} }
 
 func New() *Backend {
@@ -173,35 +153,20 @@ func New() *Backend {
 		extAllow:             make(map[string]extFeedData),
 		extBlock:             make(map[string]extFeedData),
 		selfResolver:         selfip.New(),
-		challengeDNATEnabled: true,
 		ab:                   autoblock.New(),
 		lastAutoBlockAt:      make(map[string]time.Time),
 		lastIgnoredAt:        make(map[string]time.Time),
 	}
 }
 
-func (b *Backend) SetChallengeRedirectEnabled(enabled bool) {
+// cleanupLegacyChallengeDNAT sheds any state left behind by the retired
+// per-IP challenge DNAT (challenge_v4/v6 sets, the challenge_guard chain's
+// rules). One-shot, tolerant: on a node that never ran the legacy mode all
+// probes miss and nothing is executed. Called from EnsureBase so an upgraded
+// node self-cleans on its first (re)start.
+func (b *Backend) cleanupLegacyChallengeDNAT() {
 	if b == nil {
 		return
-	}
-	b.challengeDNATEnabled = enabled
-	if !enabled {
-		_ = b.CleanupChallengeRedirect()
-	}
-}
-
-// ChallengeRedirectEnabled reports whether the challenge DNAT redirect is armed.
-// See the nftlib backend's copy for why the challenge server needs to know:
-// EnsureChallengeRedirect returns nil both when it installs the rules and when
-// it finds the redirect disabled and cleans up, so the log line has to say
-// which.
-func (b *Backend) ChallengeRedirectEnabled() bool {
-	return b != nil && b.challengeDNATEnabled
-}
-
-func (b *Backend) CleanupChallengeRedirect() error {
-	if b == nil {
-		return nil
 	}
 	if b.setExists(challengeV4) {
 		_ = b.nftCmd(fmt.Sprintf(`flush set %s %s %s`, family, tableName, challengeV4))
@@ -214,11 +179,6 @@ func (b *Backend) CleanupChallengeRedirect() error {
 	if b.chainExists("challenge_guard") {
 		_ = b.nftCmd(fmt.Sprintf(`flush chain %s %s challenge_guard`, family, tableName))
 	}
-	return nil
-}
-
-func (b *Backend) SetChallengeDNATEnabled(enabled bool) {
-	b.SetChallengeRedirectEnabled(enabled)
 }
 
 func (b *Backend) logPhase(phase, status string, duration time.Duration, err error, extra string) {
@@ -232,10 +192,6 @@ func (b *Backend) logPhase(phase, status string, duration time.Duration, err err
 		msg += " " + extra
 	}
 	logging.Logf("%s", msg)
-}
-
-func (b *Backend) CleanupChallengeDNAT() error {
-	return b.CleanupChallengeRedirect()
 }
 
 // ReportBlock decides (based on config + source) whether to notify the API and then calls reporter.
@@ -420,16 +376,6 @@ func (b *Backend) EnsureBase() (err error) {
 		}
 	}
 
-	// 2b) Ensure NAT prerouting chain for challenge redirects
-	if !b.chainExists(challengeNatChain) {
-		if err := b.nftCmd(fmt.Sprintf(
-			`add chain %s %s %s { type nat hook prerouting priority dstnat; policy accept; }`,
-			family, tableName, challengeNatChain,
-		)); err != nil {
-			return err
-		}
-	}
-
 	// 3) Ensure sets (manual/dyn/external + throttling)
 	// manual allow/block
 	if err := b.ensureSet(allowV4, "ipv4_addr"); err != nil {
@@ -534,18 +480,9 @@ func (b *Backend) EnsureBase() (err error) {
 	_ = b.ensureSetWithFlags("throttled_v4", "ipv4_addr", "timeout")
 	_ = b.ensureSetWithFlags("throttled_v6", "ipv6_addr", "timeout")
 
-	// Challenge sets (source IPs that should be redirected to challenge ports)
-	// Challenge sets (dynamic DNAT mode only)
-	if b.challengeDNATEnabled {
-		if err := b.ensureSetWithFlags(challengeV4, "ipv4_addr", "timeout"); err != nil {
-			return err
-		}
-		if err := b.ensureSetWithFlags(challengeV6, "ipv6_addr", "timeout"); err != nil {
-			return err
-		}
-	} else {
-		_ = b.CleanupChallengeRedirect()
-	}
+	// One-shot cleanup of retired per-IP challenge-DNAT state (sets/chain
+	// left behind by pre-edge-unification versions).
+	b.cleanupLegacyChallengeDNAT()
 
 	// 4) Base allow/deny rules (idempotent, σταθερή σειρά)
 	// NOTE: querying `nft list chain ...` repeatedly can become very expensive on
@@ -1791,320 +1728,7 @@ func (b *Backend) getExtAllowSets(fam int) (hosts []string, nets []string) {
 	return append([]string(nil), b.extAllowV4Hosts...), append([]string(nil), b.extAllowV4Nets...)
 }
 
-// EnsureChallengeRedirect installs NAT redirect rules for IPs in challenge sets.
-// httpListen / httpsListen are like "127.0.0.1:9098" or ":9098".
-func (b *Backend) EnsureChallengeRedirect(httpListen, httpsListen string) (err error) {
-	start := time.Now()
-	b.logPhase("EnsureChallengeRedirect", "start", 0, nil, "")
-	defer func() {
-		st := "ok"
-		if err != nil {
-			st = "fail"
-		}
-		b.logPhase("EnsureChallengeRedirect", st, time.Since(start), err, "")
-	}()
-	httpHost, httpPort, okHTTP := parseListenHostPort(httpListen)
-	httpsHost, httpsPort, okHTTPS := parseListenHostPort(httpsListen)
-	if !okHTTP && !okHTTPS {
-		// nothing to do
-		return nil
-	}
-
-	if !b.challengeDNATEnabled {
-		_ = b.CleanupChallengeRedirect()
-		return nil
-	}
-
-	// Ensure base exists (chains/sets)
-	if err := b.EnsureBase(); err != nil {
-		return err
-	}
-
-	// Ensure challenge sets exist BEFORE any rule references @challenge_v4/@challenge_v6
-	// (otherwise nft insert rule fails with "No such file or directory" at @challenge_v4)
-	if err := b.ensureSet(challengeV4, "ipv4_addr"); err != nil {
-		return err
-	}
-	if err := b.ensureSet(challengeV6, "ipv6_addr"); err != nil {
-		return err
-	}
-
-	hasComment := func(chain, label string) bool {
-		// Match by comment only so formatting differences can't cause duplicates.
-		return b.ruleExists(chain, fmt.Sprintf(`comment "cfm_challenge_%s"`, label))
-	}
-
-	// Ensure dedicated guard chain + early jump (so it runs BEFORE established/related accept).
-	// The jump rule must not reference any sets.
-	if !b.chainExists("challenge_guard") {
-		if err := b.nftCmd(fmt.Sprintf(`add chain %s %s challenge_guard`, family, tableName)); err != nil {
-			return fmt.Errorf("nft add chain challenge_guard: %w", err)
-		}
-		b.chlogf("nft add chain challenge_guard")
-	}
-	if !b.ruleExists("input", "jump challenge_guard") {
-		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 jump challenge_guard`, family, tableName)); err != nil {
-			return fmt.Errorf("nft insert jump challenge_guard failed: %w", err)
-		}
-		b.chlogf("nft insert jump challenge_guard at input pos0")
-	}
-
-	addGuardRule := func(label, expr string) error {
-		if hasComment("challenge_guard", label) {
-			return nil
-		}
-		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm_challenge_%s"`, label)
-		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s challenge_guard %s`, family, tableName, expr)); err != nil {
-			return err
-		}
-		b.chlogf("nft add %s: %s", label, expr)
-		return nil
-	}
-
-	addInputAccept := func(label, expr string) error {
-		if hasComment("input", label) {
-			return nil
-		}
-		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm_challenge_%s"`, label)
-		// IMPORTANT: keep the jump-to-guard at position 0, so the guard chain runs FIRST.
-		// Insert accepts right after it.
-		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr)); err != nil {
-			return err
-		}
-		b.chlogf("nft insert %s (pos1): %s", label, expr)
-		return nil
-	}
-
-	// NOTE: we no longer insert set-dependent enforcement rules directly into input (position juggling can be brittle).
-	// Challenge enforcement rules live in the dedicated challenge_guard chain.
-
-	addNatRule := func(label, expr string) error {
-		if hasComment(challengeNatChain, label) {
-			return nil
-		}
-		expr = strings.TrimSpace(expr) + fmt.Sprintf(` comment "cfm_challenge_%s"`, label)
-		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s %s %s`, family, tableName, challengeNatChain, expr)); err != nil {
-			return err
-		}
-		b.chlogf("nft add %s: %s", label, expr)
-		return nil
-	}
-
-	// HTTP :80 -> challenge httpPort
-	if okHTTP && httpPort > 0 {
-
-		// DNAT to loopback if server is bound to loopback
-		if httpHost == "127.0.0.1" {
-			if err := addNatRule("nat_v4_80", fmt.Sprintf(`ip saddr @%s tcp dport 80 dnat to 127.0.0.1:%d`, challengeV4, httpPort)); err != nil {
-				return err
-			}
-			// allow challenged sources to reach loopback-dnatted listener
-			if err := addInputAccept("accept_v4_http", fmt.Sprintf(`ip saddr @%s ip daddr 127.0.0.1 tcp dport %d accept`, challengeV4, httpPort)); err != nil {
-				return err
-			}
-		} else {
-			// fallback: keep old behavior if not loopback-bound
-			if err := addNatRule("nat_v4_80", fmt.Sprintf(`ip saddr @%s tcp dport 80 redirect to :%d`, challengeV4, httpPort)); err != nil {
-				return err
-			}
-			if err := addInputAccept("accept_v4_http", fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpPort)); err != nil {
-				return err
-			}
-		}
-
-		if httpHost == "::1" || httpHost == "127.0.0.1" {
-			if err := addNatRule("nat_v6_80", fmt.Sprintf(`ip6 saddr @%s tcp dport 80 dnat to [::1]:%d`, challengeV6, httpPort)); err != nil {
-				return err
-			}
-			if err := addInputAccept("accept_v6_http", fmt.Sprintf(`ip6 saddr @%s ip6 daddr ::1 tcp dport %d accept`, challengeV6, httpPort)); err != nil {
-				return err
-			}
-		} else {
-			// fallback for v6
-			if err := addNatRule("nat_v6_80", fmt.Sprintf(`ip6 saddr @%s tcp dport 80 redirect to :%d`, challengeV6, httpPort)); err != nil {
-				return err
-			}
-			if err := addInputAccept("accept_v6_http", fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpPort)); err != nil {
-				return err
-			}
-		}
-
-	}
-
-	// HTTPS :443 -> challenge httpsPort
-	if okHTTPS && httpsPort > 0 {
-
-		if httpsHost == "127.0.0.1" {
-			if err := addNatRule("nat_v4_443", fmt.Sprintf(`ip saddr @%s tcp dport 443 dnat to 127.0.0.1:%d`, challengeV4, httpsPort)); err != nil {
-				return err
-			}
-			if err := addInputAccept("accept_v4_https", fmt.Sprintf(`ip saddr @%s ip daddr 127.0.0.1 tcp dport %d accept`, challengeV4, httpsPort)); err != nil {
-				return err
-			}
-		} else {
-			if err := addNatRule("nat_v4_443", fmt.Sprintf(`ip saddr @%s tcp dport 443 redirect to :%d`, challengeV4, httpsPort)); err != nil {
-				return err
-			}
-			if err := addInputAccept("accept_v4_https", fmt.Sprintf(`ip saddr @%s tcp dport %d accept`, challengeV4, httpsPort)); err != nil {
-				return err
-			}
-		}
-
-		if httpsHost == "::1" || httpsHost == "127.0.0.1" {
-			if err := addNatRule("nat_v6_443", fmt.Sprintf(`ip6 saddr @%s tcp dport 443 dnat to [::1]:%d`, challengeV6, httpsPort)); err != nil {
-				return err
-			}
-			if err := addInputAccept("accept_v6_https", fmt.Sprintf(`ip6 saddr @%s ip6 daddr ::1 tcp dport %d accept`, challengeV6, httpsPort)); err != nil {
-				return err
-			}
-		} else {
-			if err := addNatRule("nat_v6_443", fmt.Sprintf(`ip6 saddr @%s tcp dport 443 redirect to :%d`, challengeV6, httpsPort)); err != nil {
-				return err
-			}
-			if err := addInputAccept("accept_v6_https", fmt.Sprintf(`ip6 saddr @%s tcp dport %d accept`, challengeV6, httpsPort)); err != nil {
-				return err
-			}
-		}
-
-	}
-
-	// Challenge port connlimit (protect the challenge listener itself):
-	// If a challenged IP tries to open too many concurrent connections to the challenge ports,
-	// drop NEW connections beyond the threshold.
-	// This is per-source-IP, and state naturally disappears as conns close.
-	// NOTE: this matches the post-DNAT destination ports (httpPort/httpsPort), not 80/443.
-	const chalConnLimit = 16 // per-IP NEW connections/sec to challenge ports
-	if okHTTP && httpPort > 0 {
-		if err := addGuardRule("guard_v4_http_connlimit",
-			fmt.Sprintf(
-				`ip saddr @%s tcp dport %d ct state new `+
-					`meter chal_cl_http_v4 size 65535 { ip saddr limit rate over %d/second } drop`,
-				challengeV4, httpPort, chalConnLimit)); err != nil {
-			return err
-		}
-		if err := addGuardRule("guard_v6_http_connlimit",
-			fmt.Sprintf(
-				`ip6 saddr @%s tcp dport %d ct state new `+
-					`meter chal_cl_http_v6 size 65535 { ip6 saddr limit rate over %d/second } drop`,
-				challengeV6, httpPort, chalConnLimit)); err != nil {
-			return err
-		}
-	}
-	if okHTTPS && httpsPort > 0 {
-		if err := addGuardRule("guard_v4_https_connlimit",
-			fmt.Sprintf(
-				`ip saddr @%s tcp dport %d ct state new `+
-					`meter chal_cl_https_v4 size 65535 { ip saddr limit rate over %d/second } drop`,
-				challengeV4, httpsPort, chalConnLimit)); err != nil {
-			return err
-		}
-		if err := addGuardRule("guard_v6_https_connlimit",
-			fmt.Sprintf(
-				`ip6 saddr @%s tcp dport %d ct state new `+
-					`meter chal_cl_https_v6 size 65535 { ip6 saddr limit rate over %d/second } drop`,
-				challengeV6, httpsPort, chalConnLimit)); err != nil {
-			return err
-		}
-	}
-
-	// QUIC/HTTP3 bypass fix:
-	// Challenged IPs must not be able to keep browsing via UDP/443 (h3/quic).
-	// Dropping UDP/443 forces browsers to fall back to TCP so DNAT redirect can work.
-	if okHTTPS && httpsPort > 0 {
-		if err := addGuardRule("guard_v4_quic_drop", fmt.Sprintf(`ip saddr @%s udp dport 443 drop`, challengeV4)); err != nil {
-			return err
-		}
-		if err := addGuardRule("guard_v6_quic_drop", fmt.Sprintf(`ip6 saddr @%s udp dport 443 drop`, challengeV6)); err != nil {
-			return err
-		}
-	}
-
-	// Kill existing keepalive connections to real web ports for challenged IPs.
-	// This forces clients to reconnect, so the next NEW connection hits the NAT redirect.
-	if err := addGuardRule("guard_v4_reset", fmt.Sprintf(`ip saddr @%s tcp dport {80,443} ct state established,related reject with tcp reset`, challengeV4)); err != nil {
-		return err
-	}
-	if err := addGuardRule("guard_v6_reset", fmt.Sprintf(`ip6 saddr @%s tcp dport {80,443} ct state established,related reject with tcp reset`, challengeV6)); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func parseListenHostPort(addr string) (host string, port int, ok bool) {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return "", 0, false
-	}
-	if p, err := strconv.Atoi(addr); err == nil {
-		if p > 0 && p <= 65535 {
-			return "", p, true
-		}
-		return "", 0, false
-	}
-	h, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", 0, false
-	}
-
-	host = strings.TrimSpace(h)
-	p, err := strconv.Atoi(portStr)
-	if err != nil || p <= 0 || p > 65535 {
-		return host, 0, false
-	}
-	return host, p, true
-}
-
 // -------- challenge (source IP redirect) --------
-
-func (b *Backend) AddChallenge(ip net.IP, ttl *time.Duration) error {
-	if ip == nil {
-		return errors.New("nil ip")
-	}
-	set := challengeV4
-	if ip.To4() == nil {
-		set = challengeV6
-	}
-	elem := ip.String()
-
-	_ = b.RemoveChallenge(ip)
-
-	ttlStr := ""
-	if ttl != nil && *ttl > 0 {
-		ttlStr = humanTimeout(*ttl)
-	}
-
-	out, err := b.nftAddElementArgv(set, elem, ttlStr)
-	if err == nil {
-		return nil
-	}
-	if strings.Contains(out, "already exists") || strings.Contains(out, "File exists") {
-		_ = b.RemoveChallenge(ip)
-		if out2, err2 := b.nftAddElementArgv(set, elem, ttlStr); err2 == nil {
-			return nil
-		} else {
-			return fmt.Errorf("nft add challenge (retry) failed: %v: %s", err2, out2)
-		}
-	}
-	return fmt.Errorf("nft add challenge failed: %v: %s", err, out)
-}
-
-func (b *Backend) RemoveChallenge(ip net.IP) error {
-	if ip == nil {
-		return errors.New("nil ip")
-	}
-	set := challengeV4
-	elem := ip.String()
-	if ip.To4() == nil {
-		set = challengeV6
-	}
-	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, elem)
-	out, err := b.nftOut(cmd)
-	if err != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
-		return fmt.Errorf("nft: %v: %s", err, out)
-	}
-	return nil
-}
 
 // RemoveBlockBatch removes multiple IPs from their respective sets in a single
 // nft process invocation. Falls back to sequential on partial failure.

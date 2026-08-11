@@ -2,8 +2,12 @@ package apiserver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -348,4 +352,49 @@ func emitLoginLimiterAudit(r *http.Request, action, ip, account string, delay ti
 		Status:    http.StatusTooManyRequests,
 		UserAgent: ua,
 	})
+}
+
+// ── helpers shared with the login rate limiter (moved from the retired
+//    pre-auth login-challenge subsystem, edge-unification Phase 1b) ──────────
+
+func normalizeChallengeIP(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, ",") {
+		raw = strings.TrimSpace(strings.Split(raw, ",")[0])
+	}
+	if ip := net.ParseIP(raw); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+func loginAttemptUsername(r *http.Request) string {
+	if r == nil || r.Body == nil {
+		return ""
+	}
+	buf, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	if err != nil {
+		return ""
+	}
+	r.Body.Close()
+	r.Body = io.NopCloser(strings.NewReader(string(buf)))
+	ct := strings.ToLower(strings.TrimSpace(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0]))
+	switch ct {
+	case "application/json", "text/json", "":
+		var payload struct {
+			Username string `json:"username"`
+		}
+		if err := json.Unmarshal(buf, &payload); err == nil {
+			return payload.Username
+		}
+	case "application/x-www-form-urlencoded":
+		vals, err := url.ParseQuery(string(buf))
+		if err == nil {
+			return vals.Get("username")
+		}
+	}
+	return ""
 }

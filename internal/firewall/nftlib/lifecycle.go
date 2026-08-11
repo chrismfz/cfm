@@ -102,9 +102,6 @@ func (b *Backend) EnsureBase() (err error) {
 		{name: setIgnoreV6, keyType: nftables.TypeIP6Addr, hasTimeout: true},
 		{name: setIgnoreV4Net, keyType: nftables.TypeIPAddr, hasTimeout: true, interval: true},
 		{name: setIgnoreV6Net, keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
-		{name: setChalV4, keyType: nftables.TypeIPAddr, hasTimeout: true},
-		{name: setChalV6, keyType: nftables.TypeIP6Addr, hasTimeout: true},
-
 		// self (loopback + local IPs) — interval set for CIDR entries
 		{name: "self_v4", keyType: nftables.TypeIPAddr, hasTimeout: true, interval: true},
 		{name: "self_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
@@ -158,6 +155,14 @@ func (b *Backend) EnsureBase() (err error) {
 
 	nlWork = time.Since(nlStart)
 	b.mu.Unlock()
+
+	// One-shot legacy cleanup: earlier versions created the retired per-IP
+	// challenge-DNAT sets unconditionally. Drop them if still present so
+	// upgraded nodes shed the stale (empty) sets; tolerant when absent, and a
+	// hypothetical node with rules still referencing them just keeps them
+	// (delete fails EBUSY, ignored) until the next full table reset.
+	_ = b.DeleteSetIfExists("challenge_v4")
+	_ = b.DeleteSetIfExists("challenge_v6")
 
 	cliStart := time.Now()
 	// Populate self_v4 / self_v6 with loopback + local interface IPs.

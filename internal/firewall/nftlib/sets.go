@@ -104,24 +104,6 @@ func (b *Backend) RemoveIgnore(ip net.IP) error {
 	return b.delIPElem(setName, ip)
 }
 
-// ── AddChallenge / RemoveChallenge ───────────────────────────────────────────
-
-func (b *Backend) AddChallenge(ip net.IP, ttl *time.Duration) error {
-	setName := setChalV4
-	if ip.To4() == nil {
-		setName = setChalV6
-	}
-	return b.addIPElem(setName, ip, ttl)
-}
-
-func (b *Backend) RemoveChallenge(ip net.IP) error {
-	setName := setChalV4
-	if ip.To4() == nil {
-		setName = setChalV6
-	}
-	return b.delIPElem(setName, ip)
-}
-
 // ── CIDR variants ────────────────────────────────────────────────────────────
 
 func (b *Backend) AddBlockNet(cidr string, ttl *time.Duration) error {
@@ -207,9 +189,8 @@ func (b *Backend) delIPElem(setName string, ip net.IP) error {
 	if err := b.conn.Flush(); err != nil {
 		// Deleting an element that isn't in the set is the desired end state, not a
 		// failure — the exec-nft backend explicitly tolerates it ("Could not delete
-		// element" / ENOENT). Match that so callers (e.g. RemoveChallenge on an IP
-		// that was never in challenge_v4, the common edge-mode case) don't see a
-		// spurious error. lookupSet already caught a missing set above.
+		// element" / ENOENT). Match that so callers don't see a spurious error.
+		// lookupSet already caught a missing set above.
 		if isNotFound(err) {
 			return nil
 		}

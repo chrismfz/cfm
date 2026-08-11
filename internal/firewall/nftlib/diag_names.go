@@ -9,7 +9,6 @@ const (
 	blockSetName       = "block_v4"
 	allowSetName       = "allow_v4"
 	ignoreSetName      = "ignore_v4"
-	challengeSetName   = "challenge_v4"
 	feedSetName        = "block_ext_v4_hosts"
 )
 
@@ -24,7 +23,6 @@ func (b *Backend) CardinalitySetNames() map[string]string {
 		"block":     blockSetName,
 		"allow":     allowSetName,
 		"ignore":    ignoreSetName,
-		"challenge": challengeSetName,
 		"feed":      feedSetName,
 	}
 }

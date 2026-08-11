@@ -403,29 +403,20 @@ func (s *sectionSink) Publish(a core.Alert) {
 			s.chalMu.Unlock()
 		}
 
-		// Enforce challenge (no block here)
+		// Enforce challenge (no block here). Edge mode is the only mode: the
+		// nginx bridge is the sole enforcement plane (the per-IP nft challenge
+		// DNAT is retired). The bridge is wired at webdetector start; a nil
+		// bridge here means that hasn't happened yet (early startup) — log the
+		// miss rather than silently claiming enforcement.
 		enforced := "challenge_failed"
 		if s.pol.Mode == "dryrun" {
 			enforced = "challenge_dryrun"
+		} else if nginxBridge != nil {
+			nginxBridge.ChallengeIP(ipStr, ttl)
+			enforced = "challenge"
+			out.Extra["enforced_via"] = "nginx_bridge"
 		} else {
-			// OpenResty mode: enforce via nginx bridge, not nft backend.
-			if nginxBridge != nil {
-				nginxBridge.ChallengeIP(ipStr, ttl)
-				enforced = "challenge"
-				out.Extra["enforced_via"] = "nginx_bridge"
-			} else {
-				if s.fw != nil {
-					if err := s.fw.AddChallenge(ip, &ttl); err == nil {
-						enforced = "challenge"
-					} else {
-						out.Extra["challenge_err"] = err.Error()
-					}
-				} else {
-					// Should not happen due to earlier guard, but keep safe behavior.
-					out.Extra["challenge_err"] = "no_firewall_backend"
-				}
-			}
-
+			out.Extra["challenge_err"] = "nginx_bridge_not_wired"
 		}
 
 		// stamp cooldown only if challenge enforcement succeeded

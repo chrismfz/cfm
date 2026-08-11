@@ -40,17 +40,12 @@ func (s *stubFirewallBackend) AddIgnore(net.IP, *time.Duration) error           
 func (s *stubFirewallBackend) RemoveIgnore(net.IP) error                         { return nil }
 func (s *stubFirewallBackend) AddIgnoreNet(string, *time.Duration) error         { return nil }
 func (s *stubFirewallBackend) RemoveIgnoreNet(string) error                      { return nil }
-func (s *stubFirewallBackend) AddChallenge(net.IP, *time.Duration) error         { return nil }
-func (s *stubFirewallBackend) RemoveChallenge(net.IP) error                      { return nil }
-func (s *stubFirewallBackend) SetChallengeRedirectEnabled(bool)                  {}
-func (s *stubFirewallBackend) CleanupChallengeRedirect() error                   { return nil }
 func (s *stubFirewallBackend) DropEverything() error                             { return nil }
 func (s *stubFirewallBackend) ResetTable() error                                 { return nil }
 func (s *stubFirewallBackend) SetConfigDir(string)                               {}
 func (s *stubFirewallBackend) EnableEnrichment(...string)                        {}
 func (s *stubFirewallBackend) GetEnricher() *enrich.Enricher                     { return nil }
 func (s *stubFirewallBackend) SetReporter(reporting.Reporter)                    {}
-func (s *stubFirewallBackend) SetChallengeLogger(func(string, ...any))           {}
 func (s *stubFirewallBackend) ApplyFloodRules(*config.Config) error              { return nil }
 func (s *stubFirewallBackend) ApplyHardeningRules(*config.Config) error          { return nil }
 func (s *stubFirewallBackend) ApplyPortsPolicy(*config.PortsConfig) error        { return nil }
@@ -72,7 +67,6 @@ func (s *stubFirewallBackend) PanelDNATStatus() (bool, string, error)           
 func (s *stubFirewallBackend) EnsurePanelDNATAccepts() ([]string, error)         { return nil, nil }
 func (s *stubFirewallBackend) RemovePanelDNATAccepts() ([]string, error)         { return nil, nil }
 func (s *stubFirewallBackend) PanelDNATAcceptState() map[int]string              { return nil }
-func (s *stubFirewallBackend) EnsureChallengeRedirect(string, string) error      { return nil }
 func (s *stubFirewallBackend) ApplyFeed(context.Context, blocklists.Feed, *blocklists.FetchResult) error {
 	return nil
 }

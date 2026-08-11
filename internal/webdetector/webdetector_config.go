@@ -45,9 +45,9 @@ type Config struct {
 	// Source: [webdetector] CHALLENGE_TOKEN in detectors.conf.
 	ChallengeToken string
 
-	// Challenge server listeners (optional)
-	ChallengeHTTPListen  string
-	ChallengeHTTPSListen string
+	// Challenge server listener (plain HTTP; the edge proxies to it as the
+	// cfm_challenge upstream). The legacy HTTPS listener is retired.
+	ChallengeHTTPListen string
 
 	// Separate access log for per-request challenge HTTP lines ([challenge_http] ...).
 	// If empty, [challenge_http] continues to go to the main challenges log.

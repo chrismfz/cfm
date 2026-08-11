@@ -44,7 +44,7 @@ func TestNftlibParityCoverageMarkers(t *testing.T) {
 		snippets []string
 	}{
 		{"internal/firewall/nftlib/lifecycle.go", []string{"EnsureBase(", "ResetTable(", "DropEverything("}},
-		{"internal/firewall/nftlib/sets.go", []string{"AddBlock(", "RemoveBlockBatch(", "AddAllow(", "AddIgnore(", "AddChallenge("}},
+		{"internal/firewall/nftlib/sets.go", []string{"AddBlock(", "RemoveBlockBatch(", "AddAllow(", "AddIgnore("}},
 		{"internal/firewall/nftlib/feeds.go", []string{"ApplyFeed(", "RebuildExternalUnions(", "PruneExternalFeeds(", "DropFeedSets("}},
 		{"internal/firewall/nftlib/flood_nftlib.go", []string{"ApplyFloodRules("}},
 		{"internal/firewall/nftlib/hardening_nftlib.go", []string{"ApplyHardeningRules("}},
@@ -52,7 +52,7 @@ func TestNftlibParityCoverageMarkers(t *testing.T) {
 		{"internal/firewall/nftlib/connlimit_nftlib.go", []string{"ApplyConnlimit("}},
 		{"internal/firewall/nftlib/portflood_nftlib.go", []string{"ApplyPortFlood("}},
 		{"internal/firewall/nftlib/smtpblock_nftlib.go", []string{"ApplySMTPBlock("}},
-		{"internal/firewall/nftlib/challenge.go", []string{"DNATOn(", "DNATOff(", "DNATStatus(", "EnsureChallengeRedirect("}},
+		{"internal/firewall/nftlib/challenge.go", []string{"DNATOn(", "DNATOff(", "DNATStatus("}},
 	}
 
 	for _, tc := range checks {
