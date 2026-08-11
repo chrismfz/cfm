@@ -180,29 +180,39 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 		// empty. The clear always runs to completion in its own goroutine (the
 		// buffered channel means it never blocks even if we stop waiting); the
 		// findings double as the "was this IP actually being enforced, and why".
-		var wafCh chan unblock.WAFResult
+		var wafCh chan unblock.WAFResult // nil when no WAF cleaner is registered
 		if c := unblock.WAFCleanerHook(); c != nil {
 			wafCh = make(chan unblock.WAFResult, 1)
 			go func() { wafCh <- c.ForceUnblock(ip.String()) }()
 		}
 
 		// Collect whatever completes before the shared budget expires.
+		//
+		// "Still waiting" is tracked with plain bools, NOT by nil-ing the channel
+		// variables. The goroutines above close over nftDone/wafCh and perform
+		// their final send on them; if we set the variable to nil, that send would
+		// become `nil <- x`, which blocks forever (goroutine leak) AND races the
+		// write. Leaving the variables stable means an abandoned send lands in the
+		// cap-1 buffer harmlessly. A receive from a nil channel in a select is
+		// simply never-ready, so a nil wafCh (no hook) needs no special-casing.
 		var (
 			wasBlocked  bool
 			nftComplete bool
 			wafResult   *unblock.WAFResult
 		)
-		for nftDone != nil || wafCh != nil {
+		nftPending := true
+		wafPending := wafCh != nil
+		for nftPending || wafPending {
 			select {
 			case wb := <-nftDone:
-				wasBlocked, nftComplete, nftDone = wb, true, nil
+				wasBlocked, nftComplete, nftPending = wb, true, false
 			case wr := <-wafCh:
 				w := wr
-				wafResult, wafCh = &w, nil
+				wafResult, wafPending = &w, false
 				logging.LogfAPI("[unblock.waf] ip=%s found=%t cleared=%q err=%q", ip.String(), w.Found, w.Summary(), w.Err)
 			case <-budget.C:
 				logging.LogfAPI("[unblock.fastpath] ip=%s budget %s exhausted; responding now, background cleanup finishes the rest", ip.String(), fastPathBudget)
-				nftDone, wafCh = nil, nil // stop waiting; goroutines run to completion on their own
+				nftPending, wafPending = false, false // stop waiting; goroutines run to completion, sending into their buffered channels
 			}
 		}
 

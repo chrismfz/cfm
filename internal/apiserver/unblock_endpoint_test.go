@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -165,6 +166,56 @@ func TestUnblockFastPathBudgetBounded(t *testing.T) {
 		t.Fatalf("fastpath_done should be false when the nft path is still blocked at the budget: %v", body)
 	}
 	wg.Wait()
+}
+
+// When the fast path is abandoned at the budget, the nft goroutine finishes its
+// slow HasElem+RemoveBlock AFTER the handler has already responded, then sends
+// its result. That send must not block forever: a regression that nil-ed the
+// send-target channel variable on the budget path turned `nftDone <- wb` into
+// `nil <- wb`, leaking the goroutine (and racing the variable). Here the nft
+// backend is slower than the budget, so the goroutine is always abandoned; the
+// buffered cap-1 channel must still let it send and return. We assert it by
+// watching the live goroutine count settle back to baseline.
+func TestUnblockAbandonedNftGoroutineDoesNotLeak(t *testing.T) {
+	be := &slowFirewallBackend{stubFirewallBackend: &stubFirewallBackend{}, delay: 1100 * time.Millisecond}
+	origUnblockDo := unblockDo
+	var wg sync.WaitGroup
+	wg.Add(1)
+	unblockDo = func(_ context.Context, _ net.IP, _ unblock.Options) (*unblock.Result, error) {
+		defer wg.Done()
+		return &unblock.Result{}, nil
+	}
+	t.Cleanup(func() {
+		wg.Wait()
+		unblockDo = origUnblockDo
+	})
+
+	h := makeUnblockHandler(be, t.TempDir())
+	req := httptest.NewRequest(http.MethodPost, "/unblock", strings.NewReader(`{"ip":"192.0.2.11"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "198.51.100.26:12345"
+	rr := httptest.NewRecorder()
+
+	// Let transient startup goroutines settle, then take a baseline.
+	runtime.GC()
+	base := runtime.NumGoroutine()
+
+	h.ServeHTTP(rr, req)
+	wg.Wait() // fire-and-forget cleanup has finished
+
+	// The nft goroutine sends at ~1100ms (> the 800ms budget). Poll until the
+	// count returns to baseline; if it never does, the abandoned goroutine leaked.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		runtime.GC()
+		if runtime.NumGoroutine() <= base {
+			return // settled — no leak
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("goroutine count did not return to baseline %d (still %d) — abandoned fast-path goroutine leaked", base, runtime.NumGoroutine())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func TestUnblockRejectsNonPOSTMethods(t *testing.T) {
