@@ -73,7 +73,7 @@ func TestAggregateAuthFailFoldsJunk(t *testing.T) {
 	if r.AuthFailByMailbox["victim@nac.gr"] != 2 {
 		t.Fatalf("real mailbox miscounted: %v", r.AuthFailByMailbox)
 	}
-	if r.AuthFailByMailbox[""] != 3 {
+	if r.AuthFailByMailbox[HostWide] != 3 {
 		t.Fatalf("junk/empty usernames not folded host-wide: %v", r.AuthFailByMailbox)
 	}
 	if _, ok := r.AuthFailByMailbox["admin"]; ok {
@@ -95,6 +95,27 @@ func TestAggregateLocalSubmit(t *testing.T) {
 	}
 	if r.OutboundBySender["s@d"] != 1 || r.OutboundTotal != 1 {
 		t.Fatalf("SMTP sender should not mix with local submitters: %v", r.OutboundBySender)
+	}
+}
+
+// A streaming collector feeds one Correlator across many polls: an AuthSender
+// seen in an early poll must still resolve an OutboundSent seen in a later poll,
+// even though each poll uses a fresh Report for its deltas.
+func TestCorrelatorAcrossPolls(t *testing.T) {
+	c := NewCorrelator()
+
+	// Poll 1: only the submission line (records the sender for QID Q9).
+	p1 := NewReport()
+	c.Feed(ParseMaillogLine(`Jul 23 13:46:09 ngm postfix/submission/smtpd[1]: Q9: client=localhost[127.0.0.1], sasl_method=PLAIN, sasl_username=late@nac.gr`), &p1)
+	if p1.OutboundTotal != 0 {
+		t.Fatalf("poll 1 should have no completed send yet: %+v", p1.OutboundBySender)
+	}
+
+	// Poll 2 (later): the relay status=sent line resolves against the carried QID.
+	p2 := NewReport()
+	c.Feed(ParseMaillogLine(`Jul 23 13:46:16 ngm postfix/smtp[1]: Q9: to=<x@y>, status=sent (250 ok)`), &p2)
+	if p2.OutboundBySender["late@nac.gr"] != 1 || p2.OutboundTotal != 1 {
+		t.Fatalf("cross-poll correlation lost: %+v", p2.OutboundBySender)
 	}
 }
 

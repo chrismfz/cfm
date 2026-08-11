@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Mail Monitor traffic collector + `mail_traffic` MCP tool + `GET /api/v1/mail/traffic`**
+  — the stateful stage on top of the `mailmeter` leaf. A boot-time collector
+  (`internal/mailtraffic`) tails the exim mainlog and the syslog maillog every
+  minute and folds new lines into per-hour, per-mailbox counters in its own
+  SQLite DB (`/var/lib/cfm/mailtraffic.db`); a read endpoint serves top outbound
+  senders, most-sent domains, top inbound mailboxes, local-script (PHP/cron)
+  submitters by unix user, and rejected/throttled/over-quota/failed-login
+  tallies over a window (default 24h). This is the "who is sending a lot / which
+  account is compromised" view, with NO per-request MTA probe (reads the
+  persisted counters). **Scope-aware:** admins see the whole server; a scoped
+  cPanel viewer sees only its own domains — host-wide and local-unix-user rows
+  are admin-only by construction, fail-closed. Hourly buckets (not day-only) are
+  stored deliberately, to unlock a later baseline-anomaly view. Tail positions
+  persist (inode/offset), so a restart resumes without re-scanning history.
 - **Mail Monitor foundation — `internal/mailmeter` (parser leaf)** — an
   MTA-agnostic, pure (no I/O, no clock) metering core that turns mail-server log
   lines into per-mailbox counters: outbound-by-sender, local-script submissions

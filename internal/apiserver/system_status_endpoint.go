@@ -19,7 +19,9 @@ import (
 	"cfm/internal/healthstore"
 	"cfm/internal/kmsg"
 	"cfm/internal/maillog"
+	"cfm/internal/mailmeter"
 	"cfm/internal/mailqueue"
+	"cfm/internal/mailtraffic"
 	"cfm/internal/mysqllog"
 	"cfm/internal/netstat"
 	"cfm/internal/procstat"
@@ -225,6 +227,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
 	m.HandleFunc("/api/v1/system/mail-log", handleSystemMailLog)
 	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
+	m.HandleFunc("/api/v1/mail/traffic", handleMailTraffic)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
 	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
@@ -559,6 +562,81 @@ func handleSystemMailQueue(w http.ResponseWriter, r *http.Request) {
 		"schema":    "system.mail_queue.v1",
 		"available": true,
 		"report":    rep,
+	})
+}
+
+// mailTrafficScope resolves the caller's mail-traffic view. It returns
+// (scope, ok): scope==nil means admin (whole server, no domain filter); a
+// non-nil (possibly empty) set is a scoped caller limited to exactly those mail
+// domains — an empty set therefore sees nothing (fail closed). ok=false denies
+// (unauthenticated / unknown role → the handler 403s). Unlike MySQL scope,
+// mail domains ARE the token's vhost allowlist, so no /etc/userdomains mapping
+// is needed.
+func mailTrafficScope(r *http.Request) (map[string]struct{}, bool) {
+	if webdet.IsAdminRequest(r) {
+		return nil, true // admin: whole server
+	}
+	role, _ := r.Context().Value(webdet.CtxRoleKey{}).(string)
+	authn, _ := r.Context().Value(webdet.CtxAuthnKey{}).(bool)
+	if !authn || role != webdet.CtxRoleScoped {
+		return nil, false // unauthenticated / unknown role → deny
+	}
+	// Scoped: copy the vhost allowlist, lowercased. A nil/empty allowlist yields
+	// a non-nil empty set (owns nothing) so the store filters to nothing rather
+	// than mistaking it for the admin nil sentinel. Defensively drop the
+	// host-wide sentinel "*": it is the store's key for host-wide and local-user
+	// rows, so were it ever to appear in a scoped token's allowlist it would
+	// otherwise match all of them — a scoped caller must never reach those.
+	raw, _ := r.Context().Value(webdet.CtxScopeKey{}).(map[string]struct{})
+	scope := make(map[string]struct{}, len(raw))
+	for h := range raw {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" || h == mailmeter.HostWide {
+			continue
+		}
+		scope[h] = struct{}{}
+	}
+	return scope, true
+}
+
+// handleMailTraffic serves the Mail Monitor traffic report
+// (GET /api/v1/mail/traffic). Read-only, scope-aware: admins see the whole
+// server; a scoped cPanel viewer sees only its own domains (host-wide and
+// local-unix-user rows are admin-only by construction). It reads the per-hour
+// counters the mailtraffic collector persists, so there is NO per-request MTA
+// probe. `available:false` when the collector isn't enabled. Query params:
+// hours (window, default 24, max 720) and limit (rows per list, default 20).
+func handleMailTraffic(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	scope, ok := mailTrafficScope(r)
+	if !ok {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not authorized"})
+		return
+	}
+	st := mailtraffic.SharedStore()
+	if st == nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "schema": "system.mail_traffic.v1", "available": false,
+			"note": "mail-traffic collector not enabled (or store unavailable)",
+		})
+		return
+	}
+	hours := clampInt(r.URL.Query().Get("hours"), 24, 1, 24*30)
+	limit := clampInt(r.URL.Query().Get("limit"), 20, 1, 200)
+	sum, err := st.TrafficSummary(hours, scope, limit)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok": true, "schema": "system.mail_traffic.v1", "available": true, "traffic": sum,
 	})
 }
 
