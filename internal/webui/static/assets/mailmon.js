@@ -48,6 +48,8 @@
     authFailBody:  document.getElementById('authFailBody'),
     throttledBody: document.getElementById('throttledBody'),
     overQuotaBody: document.getElementById('overQuotaBody'),
+    anomalyCard:   document.getElementById('anomalyCard'),
+    anomalyBody:   document.getElementById('anomalyBody'),
     delivCard:     document.getElementById('delivCard'),
     delivTotals:   document.getElementById('delivTotals'),
     delivProviderBody: document.getElementById('delivProviderBody'),
@@ -117,6 +119,7 @@
     el.meta.textContent = `window ${data.window || ''} · ${data.scope || ''} view`;
     if (el.localCard) el.localCard.style.display = scoped ? 'none' : '';
 
+    renderAnomalies(data.anomalies);
     renderTotals(data.totals || {}, scoped);
     rows(el.outBody, data.top_outbound_senders);
     rows(el.domBody, data.most_sent_domains);
@@ -126,6 +129,25 @@
     rows(el.throttledBody, data.top_throttled);
     rows(el.overQuotaBody, data.top_over_quota);
     renderDeliverability(data.deliverability); // admin-only; absent for scoped
+  }
+
+  // renderAnomalies shows suspected-compromise senders (spike vs own baseline,
+  // or brand-new blasters). The card only appears when there's something to
+  // show — it reads as an alert, not a permanent panel. Shown for scoped users
+  // too (their own senders). All values escaped / Number-coerced.
+  function renderAnomalies(list) {
+    if (!el.anomalyCard) return;
+    const arr = Array.isArray(list) ? list : [];
+    if (arr.length === 0) { el.anomalyCard.style.display = 'none'; return; }
+    el.anomalyCard.style.display = '';
+    el.anomalyBody.innerHTML = arr.map((a) => {
+      const isNew = a.kind === 'new-sender';
+      const signal = isNew ? 'new sender' : 'spike';
+      const base = isNew ? '—' : (Number(a.baseline_per_hour) || 0);
+      const ratio = isNew ? '—' : `${Number(a.ratio) || 0}×`;
+      return `<tr><td>${escapeHTML(a.addr)}</td><td>${signal}</td>` +
+        `<td>${Number(a.recent) || 0}</td><td>${base}</td><td>${ratio}</td></tr>`;
+    }).join('');
   }
 
   // renderDeliverability shows the per-provider outcome matrix + top reasons.
@@ -156,6 +178,7 @@
     el.totals.innerHTML = '';
     [el.outBody, el.domBody, el.localBody, el.inBody, el.authFailBody, el.throttledBody, el.overQuotaBody]
       .forEach((b) => { if (b) b.innerHTML = ''; });
+    if (el.anomalyCard) el.anomalyCard.style.display = 'none';
     if (el.delivCard) el.delivCard.style.display = 'none';
     el.unavailable.style.display = '';
     el.unavailable.textContent = note || 'Mail-traffic collector not enabled yet (no counters collected).';
