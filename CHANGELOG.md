@@ -18,6 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **cfm-admin WebUI: a "Mail Monitor" page** (`/cfm-admin/mailmon/`) — the Mail
+  Monitor traffic view in the panel, alongside API + MCP. Window selector
+  (1h…7d) over the per-hour counters, with top outbound senders, most-sent
+  domains, top inbound mailboxes, local-script (PHP/cron) submitters by unix
+  user, failed-login targets, rate-limited senders, over-quota mailboxes, and
+  the whole-window totals. **Scope-aware:** admins see the whole server; a
+  scoped cPanel viewer sees only its own domains, and the admin-only cards
+  (local submitters, host-wide rejected) hide in scoped mode. Reads
+  `GET /api/v1/mail/traffic` — the same data as the `mail_traffic` MCP tool, no
+  per-request MTA probe.
 - **Mail Monitor traffic collector + `mail_traffic` MCP tool + `GET /api/v1/mail/traffic`**
   — the stateful stage on top of the `mailmeter` leaf. A boot-time collector
   (`internal/mailtraffic`) tails the exim mainlog and the syslog maillog every
