@@ -51,32 +51,6 @@ type nftCounter struct {
 	Packets int
 }
 
-// ---------------------------------------------------------------------------
-// Challenge status (nft + journal)
-// ---------------------------------------------------------------------------
-
-type ChallengeStatus struct {
-	Enabled bool `json:"enabled"`
-
-	PreroutingOK bool     `json:"prerouting_ok,omitempty"`
-	Prerouting   []string `json:"prerouting,omitempty"`
-
-	GuardOK bool     `json:"guard_ok,omitempty"`
-	Guard   []string `json:"guard,omitempty"`
-
-	CurrentV4 []recentHit `json:"current_v4,omitempty"`
-	CurrentV6 []recentHit `json:"current_v6,omitempty"`
-
-	SinceServiceStart bool   `json:"since_service_start,omitempty"`
-	ServiceSince      string `json:"service_since,omitempty"`
-
-	TotalChallenged int `json:"total_challenged,omitempty"`
-	TotalSolved     int `json:"total_solved,omitempty"`
-
-	TopIPs  []HitCount `json:"top_ips,omitempty"`
-	TopASNs []HitCount `json:"top_asns,omitempty"`
-}
-
 type HitCount struct {
 	Key   string `json:"key"`
 	Count int    `json:"count"`
@@ -1610,11 +1584,6 @@ func countTTLInSet(backend firewall.Backend, set string) (withTTL, total int) {
 		}
 	}
 	return
-}
-
-type recentHit struct {
-	IP      string
-	Expires string // e.g. "59m31s" (empty if not parsed)
 }
 
 //helpers for IP status conntrack

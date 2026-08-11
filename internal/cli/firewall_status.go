@@ -84,7 +84,7 @@ type setProbeItem struct {
 	dependsOn  string
 }
 
-func staticSetProbes(features map[string]bool, engine string, names map[string]string) []setProbeItem {
+func staticSetProbes(features map[string]bool, names map[string]string) []setProbeItem {
 	items := make([]setProbeItem, 0, 24)
 	for key, s := range names {
 		required := true
@@ -233,9 +233,10 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	// is never armed — the daemon force-disables and cleans it up on start.
 	r.Features["dnat_edge"] = true
 
-	if ok, err := be.DNATStatus("inet", "cfm"); err == nil {
-		_ = ok
-	} else {
+	// Probe only for capability: the boolean result is unused (edge DNAT health
+	// is judged by the prerouting-rule check below), but a probe error marks
+	// the backend as not supporting DNAT status.
+	if _, err := be.DNATStatus("inet", "cfm"); err != nil {
 		r.Unsupported["dnat_redirect"] = true
 		r.Findings = append(r.Findings, fwFinding{"warn", "dnat status unsupported: " + err.Error()})
 	}
@@ -256,7 +257,7 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		}
 	}
 	probeReq := map[string]setProbeItem{}
-	for _, req := range staticSetProbes(r.Features, engine, setNames) {
+	for _, req := range staticSetProbes(r.Features, setNames) {
 		probeReq[req.setName] = req
 	}
 	dynReq := dynamicFeedSetProbes(feeds)

@@ -185,11 +185,11 @@ guards. Deploy note: pure package upgrade; no config migration.
   specs into the challenge namespace — verify whether the self-IP redirects are
   load-bearing before wholesale namespace deletion, and rehome them if so.
 - **PR 1c** (this PR): reporting/docs sweep — `printChallengeStatus`, firewall-status
-  challenge probes, `setinventory`/`ipquery` rows, retire the
-  `challenge/list` endpoint + `challenge_ip_status` MCP tool (it served its
-  diagnostic purpose during the incident; keep only if any DNAT-challenge node
-  still exists — today none does), `endpoint_scope_inventory.md`, `MCP.md`,
-  README §challenge, `docs/roadmaps/firewall_backend.md`.
+  challenge probes, `setinventory`/`ipquery` rows, README §challenge,
+  `docs/roadmaps/firewall_backend.md`. (The `challenge/list` endpoint +
+  `challenge_ip_status` MCP tool retirement and the
+  `endpoint_scope_inventory.md`/`MCP.md` updates, originally slated here,
+  landed early with 1b.)
 
 ### Phase 2 — panel unification (the substance of "Option B")
 - Extract the shared pipeline pieces `cfm.lua` and `cfm_panel.lua` both need

@@ -39,7 +39,7 @@ back-filled here — see the git/PR history for that period.
 ### Changed
 - **Challenge status/reporting swept clean of DNAT-era probes (edge-unification
   Phase 1c — closes Phase 1).** `cfm status`'s challenge section is now
-  journal-driven only (active/solved counts from the daemon journal; the nft
+  journal-driven only (challenged/solved totals since service start; the nft
   set listings and DNAT-rule probes are gone, and the section only prints when
   there is something to show). `cfm firewall-status` no longer publishes the
   retired `dnat_challenge`/`challenge_redirect` feature checks at all

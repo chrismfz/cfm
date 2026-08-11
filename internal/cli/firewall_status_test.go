@@ -59,8 +59,8 @@ func TestCollectFirewallStatusHealthy(t *testing.T) {
 	if !r.Features["dnat_edge"] {
 		t.Fatalf("expected edge dnat feature enabled")
 	}
-	if r.Features["dnat_challenge"] {
-		t.Fatalf("legacy challenge DNAT must never report enabled (edge-only)")
+	if _, ok := r.Features["dnat_challenge"]; ok {
+		t.Fatalf("retired dnat_challenge feature must not be published")
 	}
 	if r.SetSizes["block_v4"] != 0 {
 		t.Fatalf("expected block_v4 size 0")
@@ -133,10 +133,11 @@ func TestCollectFirewallStatusBothEnabledAndHealthy(t *testing.T) {
 	}
 }
 
-func TestCollectFirewallStatusChallengeAlwaysNA(t *testing.T) {
+func TestCollectFirewallStatusChallengeChecksNeverPublished(t *testing.T) {
 	// Even with no OPENRESTY_MODE key at all, edge mode is the only mode:
-	// the legacy challenge-DNAT features stay N/A (the reportable legacy
-	// path no longer exists — Phase 1a of docs/edge-unification-plan.md).
+	// the retired challenge-DNAT feature checks are never published, even
+	// when challenge config and stale challenge sets are present (Phase 1c
+	// of docs/edge-unification-plan.md).
 	cfgDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cfgDir, "detectors.conf"), []byte("CHALLENGE_PATHS=1\n"), 0o644); err != nil {
 		t.Fatalf("write detectors.conf: %v", err)

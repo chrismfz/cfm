@@ -3,10 +3,6 @@ package dnat
 import (
 	"cfm/internal/firewall"
 	"fmt"
-	"net"
-	"os"
-	"strconv"
-	"strings"
 )
 
 const (
@@ -39,51 +35,13 @@ func PanelStatus() (bool, string, error) {
 	return panelStatus()
 }
 
-// EffectiveTargetPorts returns the web DNAT target ports resolved from the
-// effective challenge listeners. CHALLENGE_HTTP_LISTEN and
-// CHALLENGE_HTTPS_LISTEN may be host:port, :port, or a plain port. Legacy
-// HTTP_PORT/HTTPS_PORT are retained as fallback overrides for CLI-driven DNAT.
+// EffectiveTargetPorts returns the web (edge) DNAT target ports — the same
+// HTTP_PORT/HTTPS_PORT env overrides and 9080/9043 defaults that `cfm dnat on`,
+// the failsafe, and restore actually install. (The retired per-IP challenge
+// DNAT used to make CHALLENGE_HTTP(S)_LISTEN take precedence here; that layer
+// is gone, so expected and installed ports can no longer diverge.)
 func EffectiveTargetPorts() (httpPort int, httpsPort int) {
-	httpPort = effectiveListenPort("CHALLENGE_HTTP_LISTEN", getenvInt("HTTP_PORT", DefaultHTTPPort))
-	httpsPort = effectiveListenPort("CHALLENGE_HTTPS_LISTEN", getenvInt("HTTPS_PORT", DefaultHTTPSPort))
-	return httpPort, httpsPort
-}
-
-func effectiveListenPort(envKey string, def int) int {
-	v := strings.TrimSpace(os.Getenv(envKey))
-	if v == "" {
-		return def
-	}
-	if p, ok := parseListenPort(v); ok {
-		return p
-	}
-	return def
-}
-
-func parseListenPort(addr string) (int, bool) {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return 0, false
-	}
-	if p, err := strconv.Atoi(addr); err == nil {
-		return validPort(p)
-	}
-	_, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return 0, false
-	}
-	p, err := strconv.Atoi(portStr)
-	if err != nil {
-		return 0, false
-	}
-	return validPort(p)
-}
-
-func validPort(p int) (int, bool) {
-	if p <= 0 || p > 65535 {
-		return 0, false
-	}
-	return p, true
+	return getenvInt("HTTP_PORT", DefaultHTTPPort), getenvInt("HTTPS_PORT", DefaultHTTPSPort)
 }
 
 type panelChallengeStatus struct {

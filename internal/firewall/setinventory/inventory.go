@@ -38,15 +38,6 @@ func BuildSetNames(feeds []blocklists.Feed) map[string]string {
 	return setNames
 }
 
-func LegacyAliases() map[string]string {
-	return map[string]string{
-		"block_ips":     "block_v4/block_v6",
-		"allow_ips":     "allow_v4/allow_v6",
-		"ignore_ips":    "ignore_v4/ignore_v6",
-		"feed_ext":      "allow_ext_*/block_ext_*",
-	}
-}
-
 func ClassifySet(name string) (action, family, scope, feed string, ok bool) {
 	switch name {
 	case "allow_v4", "allow_v4_nets":

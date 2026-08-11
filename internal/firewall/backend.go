@@ -38,7 +38,7 @@ type CapabilityReporter interface {
 // Phase 2 backend operation ownership matrix (roadmap-aligned):
 // - nftlib-owned operations:
 //   - Lifecycle/list primitives: EnsureBase, ResetTable, List* + table/set dump helpers.
-//   - Manual element writes: Add/Remove Block|Allow|Ignore|Challenge (+ CIDR, batch variants).
+//   - Manual element writes: Add/Remove Block|Allow|Ignore (+ CIDR, batch variants).
 //   - Set/bulk/feed lifecycle: EnsureSetDynamic, DeleteSetIfExists, ReplaceSetFlushAdd,
 //     AddElementsBulk, FlushSet, HasElem/ListSetElementsRaw, ApplyFeed/RebuildExternalUnions/
 //     PruneExternalFeeds/DropFeedSets/RemoveFeedByKey.

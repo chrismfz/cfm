@@ -803,12 +803,13 @@ Client → nftables edge DNAT (80/443 → 9080/9043) → edge proxy (OpenResty/A
 Challenges are served in-path by the edge proxy: the Lua layer consults the
 daemon's decision socket and, when a challenge is required, proxies the request
 to the local challenge server (`CHALLENGE_HTTP_LISTEN` in `detectors.conf`,
-default `127.0.0.1:9098`). Solving sets a signed clearance cookie. There is no
-per-IP challenge DNAT: the legacy `challenge_v4`/`challenge_v6` sets, the
-`:9099` TLS listener, and `CHALLENGE_HTTPS_LISTEN` are retired — stale rules
-left by older versions are cleaned up automatically on daemon start.
+shipped default `127.0.0.1:9098`). Solving sets a signed clearance cookie.
+There is no per-IP challenge DNAT: the legacy `challenge_v4`/`challenge_v6`
+sets, the `:9099` TLS listener, and `CHALLENGE_HTTPS_LISTEN` are retired — the
+legacy sets and guard chain left by older versions are cleaned up automatically
+on daemon start.
 
-`TCP_IN` no longer needs the DNAT listener ports `9098,12222,9080,9043,12082,12083,12086,12087,12095,12096`. Translated traffic to those listeners is permitted by scoped `ct status dnat` firewall rules, so the legacy `TCP_IN` entry should stay commented unless you need it temporarily for compatibility testing or debugging.
+`TCP_IN` no longer needs the DNAT listener ports `12222,9080,9043,12082,12083,12086,12087,12095,12096`. Translated traffic to those listeners is permitted by scoped `ct status dnat` firewall rules, so the legacy `TCP_IN` entry should stay commented unless you need it temporarily for compatibility testing or debugging. The challenge listener port `9098` is not a DNAT target: it binds loopback and is reached over loopback (admitted by the input chain's `iif lo accept`), so it only needs a `TCP_IN` entry if you bind it to a non-loopback address.
 
 ### Challenge Triggers
 
@@ -1656,7 +1657,7 @@ Report fields include:
 - engine + config source
 - capability flags
 - feature enablement (`ports`, `connlimit`, `portflood`, `smtp`, `autoblock`, `feeds`, `dnat`)
-- set sizes for key sets (`block_ips`, `allow_ips`, `ignore_ips`)
+- set sizes for key sets (`block_v4/v6`, `allow_v4/v6`, `ignore_v4/v6`, feed sets, plus `*_cardinality` roll-ups)
 - key counters (when backend exposes them)
 - health findings with level `ok` / `warn` / `fail`
 
@@ -1749,7 +1750,7 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 
 ## 16. Security Notes
 
-- Keep the challenge listener local-only (`CHALLENGE_HTTP_LISTEN`, default `127.0.0.1:9098`). Do not expose it directly to the internet.
+- Keep the challenge listener local-only (`CHALLENGE_HTTP_LISTEN`, shipped default `127.0.0.1:9098`). Do not expose it directly to the internet.
 - In **in-path mode** (OpenResty or Angie), treat the unix socket as sensitive — enforce tight file permissions and always use the token.
 - When using `ssl_certificate_by_lua*` (OpenResty or Angie), cache aggressively (shared_dict + lock) and use tight timeouts.
 - The **MySQL Governor** debug API (`/api/v1/mysql/*`) is served on the cfm debug port (`PORT` in cfm.conf). Keep that port firewalled to localhost or trusted management IPs — it exposes live processlist data and kill history.
