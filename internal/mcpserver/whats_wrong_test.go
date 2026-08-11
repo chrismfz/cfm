@@ -395,6 +395,54 @@ func TestWhatsWrong_OneshotNotFlagged(t *testing.T) {
 	}
 }
 
+// Exactly at the cap ⇒ no "+N more" indicator (pins the `extra > 0` boundary).
+func TestWhatsWrong_MailAnomalyExactlyAtCap(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{"available":true,"traffic":{"anomalies":[`)
+	for i := 0; i < wwMailAnomalyCap; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`{"addr":"s@x","recent":9,"ratio":5,"kind":"spike"}`)
+	}
+	b.WriteString(`]}}`)
+	got := evalMailTraffic(json.RawMessage(b.String()), map[string]string{})
+	if len(got) != wwMailAnomalyCap {
+		t.Fatalf("exactly cap should yield %d findings, got %d", wwMailAnomalyCap, len(got))
+	}
+	for _, f := range got {
+		if strings.Contains(f.Title, "more outbound-mail") {
+			t.Fatalf("no indicator expected at exactly the cap, got %+v", f)
+		}
+	}
+}
+
+// count>0 with an empty anomalies array ⇒ clean detail, no dangling "; top:".
+func TestWhatsWrong_APIAnomaliesEmptyArray(t *testing.T) {
+	got := evalAnomalies(json.RawMessage(`{"count":3,"anomalies":[]}`))
+	if len(got) != 1 {
+		t.Fatalf("expected 1 finding, got %+v", got)
+	}
+	if strings.Contains(got[0].Detail, "top:") || strings.HasSuffix(got[0].Detail, "; ") {
+		t.Fatalf("detail should have no dangling top-signals label: %q", got[0].Detail)
+	}
+	if topSignals(map[string]int{}) != "" {
+		t.Fatalf("topSignals of empty map must be empty string")
+	}
+}
+
+// An unmapped category sorts LAST within its severity tier, not first.
+func TestWhatsWrong_UnmappedCategorySortsLast(t *testing.T) {
+	fs := []finding{
+		{Severity: sevWarning, Category: "zzz-unmapped", Title: "x"},
+		{Severity: sevWarning, Category: "edge", Title: "y"},
+	}
+	sortFindings(fs)
+	if fs[0].Category != "edge" || fs[1].Category != "zzz-unmapped" {
+		t.Fatalf("unmapped category must sort last, got %+v", fs)
+	}
+}
+
 // Info-only findings keep status "ok" (info is not an "issue"); ranking puts
 // critical before warning before info, and category orders within a tier.
 func TestWhatsWrong_RankingAndStatus(t *testing.T) {
