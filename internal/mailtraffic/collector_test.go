@@ -38,7 +38,7 @@ func TestCollectorTailsAppendsFromEOF(t *testing.T) {
 
 	// First poll: establishes position at EOF, so the two pre-existing lines are
 	// NOT counted (we don't rescan history on startup).
-	c.pollFile(now, log, mailmeter.ParseEximLine)
+	c.pollFile(now, log, mailmeter.ParseEximLine, mailmeter.ParseEximDelivery)
 	sum, _ := st.trafficSummaryAt(now, 24, nil, 10)
 	if find(sum.TopOutboundSenders, "support@ordermusic.gr") != -1 {
 		t.Fatalf("pre-existing history must not be counted: %+v", sum.TopOutboundSenders)
@@ -46,7 +46,7 @@ func TestCollectorTailsAppendsFromEOF(t *testing.T) {
 
 	// Append three new lines, poll again: only the appends count.
 	appendFile(t, log, eximLine("support@ordermusic.gr")+eximLine("support@ordermusic.gr")+eximLine("info@axidwear.com"))
-	c.pollFile(now, log, mailmeter.ParseEximLine)
+	c.pollFile(now, log, mailmeter.ParseEximLine, mailmeter.ParseEximDelivery)
 	sum, _ = st.trafficSummaryAt(now, 24, nil, 10)
 	if got := find(sum.TopOutboundSenders, "support@ordermusic.gr"); got != 2 {
 		t.Fatalf("appended support lines = %d, want 2", got)
@@ -65,7 +65,7 @@ func TestCollectorHandlesRotation(t *testing.T) {
 	writeFile(t, log, eximLine("a@x.gr"))
 	c := newCollector(st)
 	now := time.Unix(1_700_000_000, 0)
-	c.pollFile(now, log, mailmeter.ParseEximLine) // establish position at EOF
+	c.pollFile(now, log, mailmeter.ParseEximLine, mailmeter.ParseEximDelivery) // establish position at EOF
 
 	// Rotate the way logrotate `create` does: build the replacement as a sibling
 	// (so it gets a distinct inode while the old file still holds its own), then
@@ -76,7 +76,7 @@ func TestCollectorHandlesRotation(t *testing.T) {
 	if err := os.Rename(rotated, log); err != nil {
 		t.Fatal(err)
 	}
-	c.pollFile(now, log, mailmeter.ParseEximLine)
+	c.pollFile(now, log, mailmeter.ParseEximLine, mailmeter.ParseEximDelivery)
 
 	sum, _ := st.trafficSummaryAt(now, 24, nil, 10)
 	if got := find(sum.TopOutboundSenders, "b@x.gr"); got != 2 {
@@ -92,11 +92,11 @@ func TestCollectorHandlesTruncate(t *testing.T) {
 	writeFile(t, log, eximLine("a@x.gr")+eximLine("a@x.gr")+eximLine("a@x.gr"))
 	c := newCollector(st)
 	now := time.Unix(1_700_000_000, 0)
-	c.pollFile(now, log, mailmeter.ParseEximLine) // position at EOF
+	c.pollFile(now, log, mailmeter.ParseEximLine, mailmeter.ParseEximDelivery) // position at EOF
 
 	// Truncate in place and write one fresh line.
 	writeFile(t, log, eximLine("c@x.gr"))
-	c.pollFile(now, log, mailmeter.ParseEximLine)
+	c.pollFile(now, log, mailmeter.ParseEximLine, mailmeter.ParseEximDelivery)
 
 	sum, _ := st.trafficSummaryAt(now, 24, nil, 10)
 	if got := find(sum.TopOutboundSenders, "c@x.gr"); got != 1 {

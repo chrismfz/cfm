@@ -3,6 +3,7 @@ package mailtraffic
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"time"
 
 	"cfm/internal/mailmeter"
@@ -19,6 +20,34 @@ type Totals struct {
 	Rejected    int64 `json:"rejected"`
 }
 
+// ProviderOutcomes is one remote provider's delivery tally over the window.
+type ProviderOutcomes struct {
+	Provider  string `json:"provider"`
+	Delivered int64  `json:"delivered"`
+	Deferred  int64  `json:"deferred"`
+	Bounced   int64  `json:"bounced"`
+}
+
+// ReasonCount is one normalized failure/defer reason and its count.
+type ReasonCount struct {
+	Reason string `json:"reason"`
+	Count  int64  `json:"count"`
+}
+
+// Deliverability is the outbound remote-delivery health view: how each provider
+// (Gmail, Microsoft, …) is treating this server's mail, and the top reasons for
+// defers/bounces. Host-wide (delivery lines aren't reliably attributable to a
+// tenant), so it is admin-only. NOTE: deferred counts include exim retries —
+// each `==` retry of one stuck message is a separate event — so a few stuck
+// messages inflate "deferred"; that is intentional (it reflects live pressure).
+type Deliverability struct {
+	ByProvider []ProviderOutcomes `json:"by_provider"` // most active first
+	TopReasons []ReasonCount      `json:"top_reasons"` // non-ok defer/bounce reasons, count desc
+	Delivered  int64              `json:"delivered"`
+	Deferred   int64              `json:"deferred"`
+	Bounced    int64              `json:"bounced"`
+}
+
 // Summary is the read view served by GET /api/v1/mail/traffic. All lists are
 // already scope-filtered and capped to the requested limit. The HTTP handler
 // wraps it in the usual {ok, schema, available, …} envelope, so Summary itself
@@ -26,6 +55,10 @@ type Totals struct {
 type Summary struct {
 	Window string `json:"window"`
 	Scope  string `json:"scope"` // "admin" | "scoped"
+
+	// Deliverability is populated for admins only (host-wide data); nil/omitted
+	// for scoped callers.
+	Deliverability *Deliverability `json:"deliverability,omitempty"`
 
 	TopOutboundSenders  []mailmeter.AddrCount `json:"top_outbound_senders"`
 	TopLocalSubmitters  []mailmeter.AddrCount `json:"top_local_submitters"` // admin-only (unix users)
@@ -106,7 +139,92 @@ func (s *Store) trafficSummaryAt(now time.Time, hours int, scope map[string]stru
 		return sum, err
 	}
 	sum.Totals = tot
+
+	// Deliverability is host-wide → admin only (nil scope).
+	if scope == nil {
+		dl, err := s.deliverability(cutoff, limit)
+		if err != nil {
+			return sum, err
+		}
+		sum.Deliverability = dl
+	}
 	return sum, nil
+}
+
+// deliverability aggregates the mail_delivery counters over the window into the
+// per-provider outcome matrix and the top non-ok reasons.
+func (s *Store) deliverability(cutoff int64, limit int) (*Deliverability, error) {
+	dl := &Deliverability{ByProvider: []ProviderOutcomes{}, TopReasons: []ReasonCount{}}
+
+	rows, err := s.db.Query(
+		`SELECT provider, outcome, SUM(n) FROM mail_delivery WHERE bucket>=? GROUP BY provider, outcome`, cutoff)
+	if err != nil {
+		return dl, err
+	}
+	byProv := map[string]*ProviderOutcomes{}
+	order := []string{}
+	for rows.Next() {
+		var prov string
+		var outcome int
+		var n int64
+		if err := rows.Scan(&prov, &outcome, &n); err != nil {
+			rows.Close()
+			return dl, err
+		}
+		po := byProv[prov]
+		if po == nil {
+			po = &ProviderOutcomes{Provider: prov}
+			byProv[prov] = po
+			order = append(order, prov)
+		}
+		switch mailmeter.Outcome(outcome) {
+		case mailmeter.Delivered:
+			po.Delivered += n
+			dl.Delivered += n
+		case mailmeter.Deferred:
+			po.Deferred += n
+			dl.Deferred += n
+		case mailmeter.Bounced:
+			po.Bounced += n
+			dl.Bounced += n
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return dl, err
+	}
+	for _, prov := range order {
+		dl.ByProvider = append(dl.ByProvider, *byProv[prov])
+	}
+	sort.Slice(dl.ByProvider, func(i, j int) bool {
+		ti := dl.ByProvider[i].Delivered + dl.ByProvider[i].Deferred + dl.ByProvider[i].Bounced
+		tj := dl.ByProvider[j].Delivered + dl.ByProvider[j].Deferred + dl.ByProvider[j].Bounced
+		if ti != tj {
+			return ti > tj
+		}
+		return dl.ByProvider[i].Provider < dl.ByProvider[j].Provider
+	})
+	if limit > 0 && len(dl.ByProvider) > limit {
+		dl.ByProvider = dl.ByProvider[:limit]
+	}
+
+	// Top defer/bounce reasons (skip clean deliveries and unclassified blanks).
+	rr, err := s.db.Query(
+		`SELECT reason, SUM(n) c FROM mail_delivery
+		 WHERE bucket>=? AND reason NOT IN ('ok','') GROUP BY reason ORDER BY c DESC, reason ASC LIMIT ?`,
+		cutoff, limit)
+	if err != nil {
+		return dl, err
+	}
+	defer rr.Close()
+	for rr.Next() {
+		var rc ReasonCount
+		if err := rr.Scan(&rc.Reason, &rc.Count); err != nil {
+			return dl, err
+		}
+		dl.TopReasons = append(dl.TopReasons, rc)
+	}
+	return dl, rr.Err()
 }
 
 // topByAddr returns the top addresses by a single counter column over the

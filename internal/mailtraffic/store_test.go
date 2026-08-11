@@ -154,7 +154,7 @@ func TestFlushWritesCountersAndTailPos(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	r := mailmeter.NewReport()
 	r.OutboundBySender["a@x.gr"] = 3
-	if err := st.Flush(now, r, "/var/log/exim_mainlog", 42, 1024); err != nil {
+	if err := st.Flush(now, r, nil, "/var/log/exim_mainlog", 42, 1024); err != nil {
 		t.Fatal(err)
 	}
 	sum, _ := st.trafficSummaryAt(now, 24, nil, 10)
@@ -166,11 +166,56 @@ func TestFlushWritesCountersAndTailPos(t *testing.T) {
 		t.Fatalf("Flush did not persist tail pos: ino=%d off=%d ok=%v", ino, off, ok)
 	}
 	// An empty report still advances the offset (non-event chunk).
-	if err := st.Flush(now, mailmeter.NewReport(), "/var/log/exim_mainlog", 42, 2048); err != nil {
+	if err := st.Flush(now, mailmeter.NewReport(), nil, "/var/log/exim_mainlog", 42, 2048); err != nil {
 		t.Fatal(err)
 	}
 	if _, off, _ := st.LoadTailPos("/var/log/exim_mainlog"); off != 2048 {
 		t.Fatalf("empty-report Flush must still advance offset, got %d", off)
+	}
+}
+
+// Deliverability aggregates the mail_delivery counters per provider/outcome and
+// surfaces top non-ok reasons — for admins only.
+func TestDeliverabilitySummary(t *testing.T) {
+	st := openTemp(t)
+	now := time.Unix(1_700_000_000, 0)
+	deliv := map[DeliveryKey]int64{
+		{Provider: "google", Outcome: int(mailmeter.Delivered), Reason: "ok"}:                      40,
+		{Provider: "google", Outcome: int(mailmeter.Deferred), Reason: "unsolicited-rate-limited"}: 12,
+		{Provider: "google", Outcome: int(mailmeter.Bounced), Reason: "unsolicited-blocked"}:       3,
+		{Provider: "microsoft", Outcome: int(mailmeter.Delivered), Reason: "ok"}:                   10,
+	}
+	if err := st.Flush(now, mailmeter.NewReport(), deliv, "/var/log/exim_mainlog", 1, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	// Admin (nil scope) gets the deliverability block.
+	sum, err := st.trafficSummaryAt(now, 24, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Deliverability == nil {
+		t.Fatal("admin summary must include deliverability")
+	}
+	dl := sum.Deliverability
+	if dl.Delivered != 50 || dl.Deferred != 12 || dl.Bounced != 3 {
+		t.Fatalf("totals wrong: %+v", dl)
+	}
+	if len(dl.ByProvider) != 2 || dl.ByProvider[0].Provider != "google" { // google most active
+		t.Fatalf("by_provider wrong: %+v", dl.ByProvider)
+	}
+	if dl.ByProvider[0].Delivered != 40 || dl.ByProvider[0].Deferred != 12 || dl.ByProvider[0].Bounced != 3 {
+		t.Fatalf("google outcomes wrong: %+v", dl.ByProvider[0])
+	}
+	// top_reasons excludes "ok"; unsolicited-rate-limited (12) ranks above unsolicited-blocked (3).
+	if len(dl.TopReasons) != 2 || dl.TopReasons[0].Reason != "unsolicited-rate-limited" || dl.TopReasons[0].Count != 12 {
+		t.Fatalf("top_reasons wrong: %+v", dl.TopReasons)
+	}
+
+	// Scoped callers do NOT get host-wide deliverability.
+	scoped, _ := st.trafficSummaryAt(now, 24, map[string]struct{}{"x.gr": {}}, 10)
+	if scoped.Deliverability != nil {
+		t.Fatalf("scoped caller must not receive deliverability, got %+v", scoped.Deliverability)
 	}
 }
 

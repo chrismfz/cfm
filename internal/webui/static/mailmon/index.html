@@ -56,6 +56,18 @@
         <div id="totals" class="statgrid"></div>
       </section>
 
+      <section class="card wide" id="delivCard" style="display:none">
+        <h2>Outbound deliverability <span class="top-hint">how remote providers are treating this server's mail — pair with <code>mail_dns_check</code> for the DNS-side "why" (SPF/DMARC). Admin-only; deferred counts include retries.</span></h2>
+        <div class="toolbar"><span id="delivTotals" class="muted"></span></div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Provider</th><th>Delivered</th><th>Deferred</th><th>Bounced</th></tr></thead><tbody id="delivProviderBody"></tbody></table>
+        </div>
+        <h2 style="margin-top:1rem">Top defer / bounce reasons</h2>
+        <div class="table-wrap">
+          <table><thead><tr><th>Reason</th><th>Count</th></tr></thead><tbody id="delivReasonBody"></tbody></table>
+        </div>
+      </section>
+
       <section class="card">
         <h2>Top outbound senders <span class="top-hint">a sender far above the pack — especially to many domains — is the classic compromised account</span></h2>
         <div class="table-wrap">
