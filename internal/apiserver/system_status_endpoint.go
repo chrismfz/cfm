@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -15,9 +16,11 @@ import (
 
 	"cfm/internal/edgelog"
 	"cfm/internal/firewall"
+	"cfm/internal/firewall/selfip"
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 	"cfm/internal/kmsg"
+	"cfm/internal/maildns"
 	"cfm/internal/maillog"
 	"cfm/internal/mailmeter"
 	"cfm/internal/mailqueue"
@@ -228,6 +231,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/mail-log", handleSystemMailLog)
 	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
 	m.HandleFunc("/api/v1/mail/traffic", handleMailTraffic)
+	m.HandleFunc("/api/v1/mail/dns", handleMailDNS)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
 	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
@@ -637,6 +641,83 @@ func handleMailTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok": true, "schema": "system.mail_traffic.v1", "available": true, "traffic": sum,
+	})
+}
+
+// mailSelfIP caches the host's bound IPs (enumerated once) for the DNS check.
+var mailSelfIP = selfip.New()
+
+// publicSendingIPs keeps only the globally-routable addresses — the ones that
+// would appear in an SPF record or carry a PTR. Loopback/link-local/private are
+// dropped (they'd never be a sending IP and only add noise).
+func publicSendingIPs(ips []string) []string {
+	out := make([]string, 0, len(ips))
+	for _, s := range ips {
+		ip := net.ParseIP(s)
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate() || !ip.IsGlobalUnicast() {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// domainInScope reports whether a scoped caller may query domain: it must equal,
+// or be a subdomain of, one of the caller's vhosts.
+func domainInScope(domain string, scope map[string]struct{}) bool {
+	for v := range scope {
+		if domain == v || strings.HasSuffix(domain, "."+v) {
+			return true
+		}
+	}
+	return false
+}
+
+// handleMailDNS serves the DNS mail-auth check (GET /api/v1/mail/dns?domain=).
+// Read-only, scope-aware: admins may check any domain; a scoped cPanel viewer
+// only its own domains (or their subdomains). Reports SPF/DMARC/DKIM/PTR/MX with
+// human findings — the DNS half of a deliverability diagnosis (why Gmail says
+// "SPF did not pass"). Optional dkim_selector (comma-separated) overrides the
+// default selector probed.
+func handleMailDNS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	domain := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("domain")))
+	if domain == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "domain required"})
+		return
+	}
+	scope, ok := mailTrafficScope(r)
+	if !ok {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not authorized"})
+		return
+	}
+	if scope != nil && !domainInScope(domain, scope) { // scoped caller, out-of-scope domain
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "domain not in scope"})
+		return
+	}
+
+	var selectors []string
+	if sel := strings.TrimSpace(r.URL.Query().Get("dkim_selector")); sel != "" {
+		for _, s := range strings.Split(sel, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				selectors = append(selectors, s)
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+	rep := maildns.Check(ctx, net.DefaultResolver, domain, publicSendingIPs(mailSelfIP.LocalIPs()), selectors)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok": true, "schema": "system.mail_dns.v1", "report": rep,
 	})
 }
 

@@ -186,7 +186,7 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ## 4. Active tools (as-built)
 
-28 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
+29 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
 CLI/UI use). All carry the `readOnlyHint` annotation.
 
 | Tool | What it answers | Endpoint(s) | Args |
@@ -209,6 +209,7 @@ CLI/UI use). All carry the `readOnlyHint` annotation.
 | `mail_log_tail` | Tail a mail log — `which=exim` (exim_mainlog, default) / `dovecot` / `postfix`. Raw-log companion to mail_queue_summary; where outbound-abuse evidence lives (`A=dovecot_login:` senders, `cwd=/home` scripts). Bounded tail + grep; path from a fixed candidate list; `found:false` if not logging there | `system/mail-log` | `which`, `lines`, `grep`, `limit` |
 | `mail_queue_summary` | Mail-queue breakdown (exim/postfix, auto) — total/frozen/deferred, age buckets, top sender+recipient domains, oldest, + top defer/freeze reasons — "why is mail backing up / stuck?" (detector-published, no probe) | `system/mail-queue` | — |
 | `mail_traffic` | Mail traffic over a window (Mail Monitor) — top outbound senders, most-sent domains, top inbound mailboxes, local-script (PHP/cron) submitters by unix user, + rejected/throttled/over-quota/failed-login tallies. "Who is sending a lot / which account is compromised" (per-hour counters persisted by the collector, no per-request probe; scope-aware) | `mail/traffic` | `hours`, `limit` |
+| `mail_dns_check` | Mail-auth DNS for a domain — SPF (present? lists this server's IP? all-qualifier), DMARC (policy), DKIM (selector key), sending-IP PTR/FCrDNS, MX + plain findings. The DNS "why" behind a Gmail `421-4.7.27 SPF did not pass` / `550 unsolicited`. Live TXT lookups; scope-aware (scoped users → own domains) | `mail/dns` | `domain`, `dkim_selector` |
 | `detection_history` | Durable timeline of detections (WAF/challenge/clam/…). `ip=<addr>` attributes one IP — the WAF/detector/challenge events behind why CFM acted on it (a `firewall_blocks` ban with no comment → check here; manual/blocklist bans leave no event). Same data as `cfm webtop history events --ip` | `webdet/history/events` | `limit`, `type`, `host`, `ip` |
 | `bots_top` | Top user-agents (bots/crawlers/scrapers) | `webdet/ua-top` | `limit` |
 | `ip_locate` | Where + WHY an IP is blocked across ALL sources (nft/cfm.deny/csf/fail2ban/imunify360), incl. the cfm.deny autoblock reason (e.g. "autoblock: portscan …"). The `cfm which/search` equivalent; explains a `firewall_blocks` ban whose nft entry has no comment | `/search` | `ip`* |

@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP tool `mail_dns_check` + `GET /api/v1/mail/dns`** — the DNS half of a
+  deliverability diagnosis (`internal/maildns`). Live TXT lookups for a domain's
+  **SPF** (present? more than one? `all` qualifier? does it list the server's
+  sending IP — best-effort via direct `ip4:`/`ip6:` mechanisms), **DMARC**
+  (present? policy `p=`), **DKIM** (key at `<selector>._domainkey`), the sending
+  IP's **PTR / forward-confirmed rDNS**, and **MX**, plus plain-language findings
+  worst-first. Explains *why* Gmail returns `421-4.7.27 SPF did not pass` /
+  `550 unsolicited` — a missing or misaligned SPF, no DMARC, or a bad PTR.
+  Read-only; scope-aware (admins any domain, scoped cPanel viewers only their
+  own). The evaluation logic is resolver-injected and unit-tested; includes an
+  optional `dkim_selector` override.
 - **cfm-admin WebUI: a "Mail Monitor" page** (`/cfm-admin/mailmon/`) — the Mail
   Monitor traffic view in the panel, alongside API + MCP. Window selector
   (1h…7d) over the per-hour counters, with top outbound senders, most-sent
