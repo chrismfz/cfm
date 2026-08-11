@@ -165,6 +165,13 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 	nftElems := parseElems(set, elems, ttl)
 	n = len(nftElems)
 	if e := b.chunkedAdd(set, nftElems, true); e != nil {
+		// A multi-transaction write (chunked, or interval flush-then-add) may have
+		// PARTIALLY committed — the flush landed but a later add failed, leaving the
+		// kernel set empty or half-written. Drop any cached content hash so the next
+		// apply always rewrites; otherwise skip-if-unchanged could leave the set
+		// silently empty (a fail-open blocklist) after the content reverts to a
+		// previously-applied hash. Safe on a nil/absent map (no-op).
+		delete(b.appliedHash, setName)
 		err = fmt.Errorf("nftlib ReplaceSetFlushAdd %s (%d elems): %w", setName, n, e)
 		return err
 	}
