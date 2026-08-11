@@ -108,7 +108,9 @@
   function render(data) {
     el.unavailable.style.display = 'none';
     const scoped = data.scope === 'scoped';
-    el.meta.textContent = `window ${escapeHTML(data.window || '')} · ${escapeHTML(data.scope || '')} view`;
+    // textContent is inherently safe, so no escaping here (window/scope are a
+    // server-formatted integer + an enum literal anyway).
+    el.meta.textContent = `window ${data.window || ''} · ${data.scope || ''} view`;
     if (el.localCard) el.localCard.style.display = scoped ? 'none' : '';
 
     renderTotals(data.totals || {}, scoped);
