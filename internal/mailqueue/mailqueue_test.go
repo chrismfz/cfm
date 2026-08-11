@@ -116,6 +116,47 @@ func TestBuildEximReport(t *testing.T) {
 	}
 }
 
+func TestTopSenders(t *testing.T) {
+	// From sampleBP: sender@example.com (25m, fresh), <> (frozen, 2h),
+	// newsletter@shop.gr (3d, deferred). One message each.
+	r := BuildEximReport(sampleBP, 3, 1, DefaultTop)
+	if len(r.TopSenders) != 3 {
+		t.Fatalf("want 3 senders, got %d: %+v", len(r.TopSenders), r.TopSenders)
+	}
+	by := map[string]SenderQueueStat{}
+	for _, s := range r.TopSenders {
+		by[s.Sender] = s
+	}
+	if s := by["<>"]; s.Total != 1 || s.Frozen != 1 || s.Deferred != 0 {
+		t.Fatalf("null sender (frozen bounce): %+v", s)
+	}
+	if s := by["newsletter@shop.gr"]; s.Total != 1 || s.Frozen != 0 || s.Deferred != 1 {
+		t.Fatalf("newsletter (3d → deferred): %+v", s)
+	}
+	if s := by["sender@example.com"]; s.Total != 1 || s.Frozen != 0 || s.Deferred != 0 {
+		t.Fatalf("fresh sender (25m → neither): %+v", s)
+	}
+	// All Total=1 → tie broken by sender ascending, so "<>" sorts first.
+	if r.TopSenders[0].Sender != "<>" {
+		t.Fatalf("tie-break should sort '<>' first: %+v", r.TopSenders)
+	}
+
+	// Same sender across several messages is summed with the frozen/deferred split.
+	const dupBP = "2h 1K 1a-b-1 <spammer@x.gr> *** frozen ***\n" +
+		"          v1@dest.com\n" +
+		"2h 1K 1a-b-2 <spammer@x.gr> *** frozen ***\n" +
+		"          v2@dest.com\n" +
+		"3d 1K 1a-b-3 <spammer@x.gr>\n" +
+		"          v3@dest.com\n"
+	r2 := BuildEximReport(dupBP, 3, 2, DefaultTop)
+	if len(r2.TopSenders) != 1 {
+		t.Fatalf("want 1 aggregated sender, got %+v", r2.TopSenders)
+	}
+	if s := r2.TopSenders[0]; s.Sender != "spammer@x.gr" || s.Total != 3 || s.Frozen != 2 || s.Deferred != 1 {
+		t.Fatalf("aggregation wrong: %+v", s)
+	}
+}
+
 // Latest must deep-copy the AgeBuckets map so a caller can't corrupt the store.
 func TestLatestDeepCopiesMap(t *testing.T) {
 	TestOnlyReset()

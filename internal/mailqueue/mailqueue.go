@@ -36,10 +36,23 @@ type Report struct {
 	Truncated  bool           `json:"truncated"`
 	AgeBuckets map[string]int `json:"age_buckets"` // <10m,10m-1h,1h-6h,6h-1d,>1d
 
-	TopSenderDomains    []DomCount    `json:"top_sender_domains"`
-	TopRecipientDomains []DomCount    `json:"top_recipient_domains"`
-	Oldest              []QueuedMsg   `json:"oldest"`
-	DeferReasons        []DeferReason `json:"defer_reasons"` // top normalized deferral/freeze reasons (may be nil)
+	TopSenderDomains    []DomCount        `json:"top_sender_domains"`
+	TopSenders          []SenderQueueStat `json:"top_senders"` // who filled the queue (individual sender, frozen/deferred split)
+	TopRecipientDomains []DomCount        `json:"top_recipient_domains"`
+	Oldest              []QueuedMsg       `json:"oldest"`
+	DeferReasons        []DeferReason     `json:"defer_reasons"` // top normalized deferral/freeze reasons (may be nil)
+}
+
+// SenderQueueStat attributes queued messages to an individual sender — the
+// "who filled the queue" view. Total is all of that sender's queued messages;
+// Frozen and Deferred (non-frozen, stuck ≥1h) are the actionable subsets (the
+// remainder are fresh, still in first-attempt retry). Aggregated over the
+// parsed subset (see Truncated), like TopSenderDomains/Oldest.
+type SenderQueueStat struct {
+	Sender   string `json:"sender"` // envelope sender; "<>" for a null sender (bounce/backscatter)
+	Total    int    `json:"total"`
+	Frozen   int    `json:"frozen"`
+	Deferred int    `json:"deferred"`
 }
 
 // QueuedMsg is one parsed queue entry (aggregates + a bounded oldest-N sample
@@ -154,6 +167,7 @@ func BuildEximReport(bpOutput string, total, frozen, top int) Report {
 	}
 	r.Frozen = frozen // authoritative (uncapped) count from the detector
 	r.TopSenderDomains = topDomains(senderDom, top)
+	r.TopSenders = topSenders(msgs, top)
 	r.TopRecipientDomains = topDomains(recipDom, top)
 	r.Oldest = oldestN(msgs, top)
 	return r
@@ -317,6 +331,46 @@ func topDomains(m map[string]int, top int) []DomCount {
 		return out[i].Domain < out[j].Domain
 	})
 	if len(out) > top {
+		out = out[:top]
+	}
+	return out
+}
+
+// topSenders attributes the parsed queue to individual senders, most-queued
+// first, with the frozen/deferred split. A null sender (`<>`, bounce
+// backscatter) is bucketed under "<>". Frozen/Deferred mirror the Report-level
+// definitions (frozen flag; else non-frozen and ≥1h old).
+func topSenders(msgs []QueuedMsg, top int) []SenderQueueStat {
+	agg := map[string]*SenderQueueStat{}
+	for _, m := range msgs {
+		s := m.Sender
+		if s == "" {
+			s = "<>"
+		}
+		st := agg[s]
+		if st == nil {
+			st = &SenderQueueStat{Sender: s}
+			agg[s] = st
+		}
+		st.Total++
+		switch {
+		case m.Frozen:
+			st.Frozen++
+		case m.AgeSec >= 3600:
+			st.Deferred++
+		}
+	}
+	out := make([]SenderQueueStat, 0, len(agg))
+	for _, st := range agg {
+		out = append(out, *st)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Total != out[j].Total {
+			return out[i].Total > out[j].Total
+		}
+		return out[i].Sender < out[j].Sender
+	})
+	if top > 0 && len(out) > top {
 		out = out[:top]
 	}
 	return out

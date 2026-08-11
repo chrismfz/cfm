@@ -24,6 +24,7 @@
     unavailable:   document.getElementById('mailUnavailable'),
     ageBuckets:    document.getElementById('ageBuckets'),
     senderBody:    document.getElementById('senderBody'),
+    queueSenderBody: document.getElementById('queueSenderBody'),
     recipientBody: document.getElementById('recipientBody'),
     reasonsBody:   document.getElementById('reasonsBody'),
     oldestBody:    document.getElementById('oldestBody'),
@@ -97,6 +98,9 @@
 
     rows(el.senderBody, rep.top_sender_domains, (d) =>
       `<tr><td>${escapeHTML(d.domain)}</td><td>${Number(d.count) || 0}</td></tr>`);
+    rows(el.queueSenderBody, rep.top_senders, (s) =>
+      `<tr><td>${escapeHTML(s.sender)}</td><td>${Number(s.total) || 0}</td>` +
+      `<td>${Number(s.frozen) || 0}</td><td>${Number(s.deferred) || 0}</td></tr>`);
     rows(el.recipientBody, rep.top_recipient_domains, (d) =>
       `<tr><td>${escapeHTML(d.domain)}</td><td>${Number(d.count) || 0}</td></tr>`);
     rows(el.reasonsBody, rep.defer_reasons, (d) =>
@@ -111,7 +115,7 @@
     el.headline.textContent = '';
     el.meta.textContent = '';
     el.ageBuckets.innerHTML = '';
-    [el.senderBody, el.recipientBody, el.reasonsBody, el.oldestBody].forEach((b) => { if (b) b.innerHTML = ''; });
+    [el.senderBody, el.queueSenderBody, el.recipientBody, el.reasonsBody, el.oldestBody].forEach((b) => { if (b) b.innerHTML = ''; });
     el.unavailable.style.display = '';
     el.unavailable.textContent = note || 'No mail-queue report yet (exim_queues/postfix_queues detector not enabled, or first poll pending).';
   }
