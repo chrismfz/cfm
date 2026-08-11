@@ -392,6 +392,12 @@ type WebdetectorBridgeConfig struct {
 	// ([webdetector] ORIGIN_KEEPALIVE_IDLE_SEC / ORIGIN_KEEPALIVE_MAX_REQS).
 	OriginKAIdleSec int
 	OriginKAMaxReqs int
+	// CookieLifeSec is the authoritative clearance-cookie lifetime in seconds
+	// (the challenge server's CHALLENGE_COOKIE_LIFE → CHALLENGE_COOLDOWN → 60m
+	// chain). Published so the edge Lua re-mint/refresh paths (cfm.lua
+	// ok_ttl_sec, cfm_panel.lua clearance_cookie_ttl) use the SAME lifetime the
+	// daemon mints tokens with, instead of their own hardcoded fallbacks.
+	CookieLifeSec int
 }
 
 // WriteWebdetectorBridgeConfig atomically writes a Lua module exposing
@@ -417,11 +423,13 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 			"  origin_keepalive = %s,\n"+
 			"  origin_ka_idle_sec = %d,\n"+
 			"  origin_ka_max_reqs = %d,\n"+
+			"  cookie_life_sec = %d,\n"+
 			"}\n",
 		luaBool(cfg.ClearanceRefresh),
 		luaBool(cfg.OriginKeepalive),
 		cfg.OriginKAIdleSec,
 		cfg.OriginKAMaxReqs,
+		cfg.CookieLifeSec,
 	)
 	return writeLuaFileAtomic(luaPath, content, cfmGID, "sslcollector", "[sslcollector]", "webdetector bridge config")
 }

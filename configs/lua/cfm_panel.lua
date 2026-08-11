@@ -649,11 +649,24 @@ safe_cookie_value = function(v)
     return v
 end
 
+-- Clearance-cookie TTL, in priority order:
+--   1. nginx var escape hatch ($cfm_challenge_cookie_life) — explicit local
+--      operator override, set by no shipped config;
+--   2. the daemon-published authoritative value (cfm_bridge_config.lua
+--      cookie_life_sec — the same CHALLENGE_COOKIE_LIFE chain the challenge
+--      server mints tokens with), so panel re-mints stop diverging from the
+--      operator-configured clearance lifetime;
+--   3. the historical 45m fallback (upgrade lag: old daemon, new Lua).
+local function clearance_cookie_ttl()
+    local v = ngx.var.cfm_challenge_cookie_life or ngx.var.CHALLENGE_COOKIE_LIFE
+    if v and v ~= "" then return parse_duration_seconds(v, 2700) end
+    local pub = panel_bridge_cfg and tonumber(panel_bridge_cfg.cookie_life_sec)
+    if pub and pub > 0 then return pub end
+    return 2700
+end
+
 local function refresh_clearance_cookie(ip, host, scope)
-    local ttl = parse_duration_seconds(
-        ngx.var.cfm_challenge_cookie_life or ngx.var.CHALLENGE_COOKIE_LIFE or "45m",
-        2700
-    )
+    local ttl = clearance_cookie_ttl()
 
     local attrs = "Path=/; Max-Age=" .. tostring(ttl) .. "; HttpOnly; SameSite=Lax"
 
@@ -738,7 +751,13 @@ local function is_human_entry_uri(uri)
         or uri == "/webmail/"
 end
 
+-- Canonical panel-subdomain prefixes (shared with cfm.lua — single source,
+-- no drift). nil on upgrade lag → fall back to the old inline list.
+local ok_panel_hosts, panel_hosts_mod = pcall(require, "cfm_panel_hosts")
+if not ok_panel_hosts then panel_hosts_mod = nil end
+
 local function has_panel_prefix(host)
+    if panel_hosts_mod then return panel_hosts_mod.has_panel_prefix(host) end
     local h = (host or ""):lower()
 
     return starts_with(h, "cpanel.")
@@ -947,10 +966,7 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
     end
 
     if clearance_ok then
-        local ttl = parse_duration_seconds(
-            ngx.var.cfm_challenge_cookie_life or ngx.var.CHALLENGE_COOKIE_LIFE or "45m",
-            2700
-        )
+        local ttl = clearance_cookie_ttl()
         trace_verify_success(req_id, client_ip, normalized_host, panel_scope, ngx.time() + ttl, true)
         local ok_refresh, refresh_err = pcall(refresh_clearance_cookie, client_ip, normalized_host, panel_scope)
 

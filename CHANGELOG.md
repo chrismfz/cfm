@@ -17,7 +17,34 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Edge-unification design doc** (`docs/edge-unification-plan.md`): the
+  accepted plan to make edge mode the only mode — retire the legacy per-IP
+  nft challenge-DNAT (`challenge_v4/v6`, `EnsureChallengeRedirect`,
+  `challenge_guard`, the daemon's 9099 TLS interception) and the
+  `OPENRESTY_MODE` toggle, and converge the panel listeners (12xxx) on the full
+  in-path pipeline via shared Lua modules. Grounded in two full-surface scans;
+  `cfm dnat` / `cfm dnat cpanel` (edge + panel routing) are explicitly kept.
+
 ### Fixed
+- **Edge Lua drift fixes (edge-unification Phase 0).** Five long-standing
+  divergences between the web (`cfm.lua`) and panel (`cfm_panel.lua`) paths:
+  (1) the panel-subdomain prefix lists had drifted (`cfm.lua` knew `mail.` but
+  not `webdisk.`, `cfm_panel.lua` the reverse) — now one shared module,
+  `cfm_panel_hosts.lua`, with the old inline lists kept as upgrade-lag
+  fallbacks; (2) the clearance-cookie lifetime diverged three ways (daemon
+  mints `CHALLENGE_COOKIE_LIFE`, web Lua re-mints 3600s, panel Lua re-mints a
+  hardcoded 2700s) — the daemon now publishes its authoritative
+  `cookie_life_sec` in `cfm_bridge_config.lua` (same resolver as
+  `SetCookieLife`, so it can never drift) and both Lua paths prefer it;
+  (3) `lua_shared_dict cfm_panel_state` is now declared in both engine configs,
+  making the panel verify-trace functional instead of silently dead — exactly
+  the debug instrument the 2026-08-11 clearance-loop incident needed;
+  (4) removed the dead `$cfm_panel_fail_mode` from the panel listener template
+  (set in 7 blocks, read by nothing — the real policy is `CFM_PANEL_FAIL_OPEN`);
+  (5) `cfm firewall-status` no longer mislabels `dnat_challenge=true` on
+  OpenResty/edge nodes where the daemon has explicitly disabled and cleaned up
+  the challenge redirect.
 - **nftlib: serialize all shared-netlink-socket reads under the backend mutex —
   fixes a connection desync that wedged the firewall backend.** `b.conn` (a single
   `*nftables.Conn` / netlink socket) is not safe for concurrent use, but four

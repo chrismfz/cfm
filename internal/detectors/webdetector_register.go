@@ -813,12 +813,10 @@ func init() {
 			IPScoreRules:              parseIPScoreRules(kvStrClean(kv, "IP_SCORE_RULES", "")),
 		}
 
-		// If CHALLENGE_COOKIE_LIFE not set, default to CHALLENGE_COOLDOWN
-		if _, ok := kv["CHALLENGE_COOKIE_LIFE"]; ok {
-			cfg.ChallengeCookieLife = kvDur(kv, "CHALLENGE_COOKIE_LIFE", chalCooldown)
-		} else {
-			cfg.ChallengeCookieLife = chalCooldown
-		}
+		// If CHALLENGE_COOKIE_LIFE not set, default to CHALLENGE_COOLDOWN.
+		// Shared resolver: the same value is published to the edge Lua via
+		// cfm_bridge_config.lua (manager.go), so keep exactly one derivation.
+		cfg.ChallengeCookieLife = resolveChallengeCookieLife(global, kv)
 
 		// CHALLENGE_VHOST (comma/space separated)
 		rawVHosts := kvStrClean(kv, "CHALLENGE_VHOST", "")
@@ -1087,4 +1085,26 @@ func (w *webdetectorWrapped) SetBypassFunc(fn func(string) bool) {
 // Called from manager.go via interface assertion.
 func (w *webdetectorWrapped) SetChalExcludeFunc(fn func(string, string, string, string, string, string) (string, bool)) {
 	w.eng.SetChalExcludeFunc(fn)
+}
+
+// resolveChallengeCookieLife resolves the clearance-cookie lifetime exactly as
+// the challenge server ends up using it: [webdetector] CHALLENGE_COOKIE_LIFE
+// when the key is present (CHALLENGE_COOLDOWN as its parse fallback), else the
+// CHALLENGE_COOLDOWN chain ([webdetector] override of [global], default 30m),
+// floored to the server's 60m default when non-positive (mirrors
+// ChallengeServer.cookieTTL). ONE derivation for both consumers — the register
+// (SetCookieLife) and the cfm_bridge_config.lua publisher (manager.go) — so
+// the value the daemon mints tokens with and the value the edge Lua re-mints
+// with can never drift.
+func resolveChallengeCookieLife(global, kv map[string]string) time.Duration {
+	defChalCooldown := kvDur(global, "CHALLENGE_COOLDOWN", 30*time.Minute)
+	chalCooldown := kvDur(kv, "CHALLENGE_COOLDOWN", defChalCooldown)
+	life := chalCooldown
+	if _, ok := kv["CHALLENGE_COOKIE_LIFE"]; ok {
+		life = kvDur(kv, "CHALLENGE_COOKIE_LIFE", chalCooldown)
+	}
+	if life <= 0 {
+		return 60 * time.Minute
+	}
+	return life
 }

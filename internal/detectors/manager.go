@@ -372,6 +372,10 @@ func (m *manager) maybeReload(parent context.Context) {
 				OriginKeepalive: kvBool(wdKV, "ORIGIN_KEEPALIVE", false),
 				OriginKAIdleSec: kvInt(wdKV, "ORIGIN_KEEPALIVE_IDLE_SEC", 3),
 				OriginKAMaxReqs: kvInt(wdKV, "ORIGIN_KEEPALIVE_MAX_REQS", 1000),
+				// Authoritative clearance-cookie lifetime — SAME resolver the
+				// webdetector register uses for SetCookieLife, so the edge Lua
+				// re-mint TTL can never drift from what the daemon mints.
+				CookieLifeSec: int(resolveChallengeCookieLife(secs.Global, wdKV) / time.Second),
 			}
 			// Guard nonsense values; the Lua side re-guards but keep the
 			// published file sane. Idle must stay below Apache's

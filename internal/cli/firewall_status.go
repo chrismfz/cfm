@@ -237,8 +237,14 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	r.Features["smtp"] = cfg.SMTPBlock.Enabled
 	r.Features["autoblock"] = cfg.Throttle.Enabled
 	r.Features["feeds"] = true
-	r.Features["dnat_edge"] = openrestyModeConfigured(cfgDir)
-	r.Features["dnat_challenge"] = challengeRedirectConfigured(cfgDir)
+	openrestyMode := openrestyModeConfigured(cfgDir)
+	r.Features["dnat_edge"] = openrestyMode
+	// dnat_challenge means the legacy per-IP nft challenge redirect. In
+	// OpenResty/edge mode the daemon explicitly disables and cleans it up
+	// (SetChallengeRedirectEnabled(false) — the edge decides in-path), so
+	// reporting it armed there was a mislabel: DNATStatus("inet","cfm") is
+	// true on an edge node purely because the EDGE rules exist.
+	r.Features["dnat_challenge"] = challengeRedirectConfigured(cfgDir) && !openrestyMode
 	r.Features["challenge_runtime_mode"] = false
 
 	if ok, err := be.DNATStatus("inet", "cfm"); err == nil {

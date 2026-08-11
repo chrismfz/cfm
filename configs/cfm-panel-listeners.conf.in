@@ -70,7 +70,7 @@ server {
     }
 
     set $cfm_panel_origin "https://127.0.0.1:2083";
-    set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
+    set $cfm_panel_challenge_mode "forced";
     set $cfm_pass "";
     set $cfm_lua_ms "-";
     set $cfm_upstream "cfm_panel_2083";
@@ -143,7 +143,7 @@ server {
     }
 
     set $cfm_panel_origin "https://127.0.0.1:2087";
-    set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
+    set $cfm_panel_challenge_mode "forced";
     set $cfm_pass "";
     set $cfm_lua_ms "-";
     set $cfm_upstream "cfm_panel_2087";
@@ -216,7 +216,7 @@ server {
     }
 
     set $cfm_panel_origin "https://127.0.0.1:2096";
-    set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
+    set $cfm_panel_challenge_mode "forced";
     set $cfm_pass "";
     set $cfm_lua_ms "-";
     set $cfm_upstream "cfm_panel_2096";
@@ -235,7 +235,7 @@ server {
     listen 12082;
     server_name _;
     set $cfm_panel_origin "http://127.0.0.1:2082";
-    set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
+    set $cfm_panel_challenge_mode "forced";
     set $cfm_pass "";
     set $cfm_lua_ms "-";
     set $cfm_upstream "cfm_panel_2082";
@@ -254,7 +254,7 @@ server {
     listen 12086;
     server_name _;
     set $cfm_panel_origin "http://127.0.0.1:2086";
-    set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
+    set $cfm_panel_challenge_mode "forced";
     set $cfm_pass "";
     set $cfm_lua_ms "-";
     set $cfm_upstream "cfm_panel_2086";
@@ -272,7 +272,7 @@ server {
     listen 12095;
     server_name _;
     set $cfm_panel_origin "http://127.0.0.1:2095";
-    set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
+    set $cfm_panel_challenge_mode "forced";
     set $cfm_pass "";
     set $cfm_lua_ms "-";
     set $cfm_upstream "cfm_panel_2095";
@@ -344,7 +344,7 @@ server {
     }
 
     set $cfm_panel_origin "https://127.0.0.1:2222";
-    set $cfm_panel_challenge_mode "forced"; set $cfm_panel_fail_mode "fail-open";
+    set $cfm_panel_challenge_mode "forced";
     set $cfm_pass "";
     set $cfm_lua_ms "-";
     set $cfm_upstream "cfm_panel_2222";
