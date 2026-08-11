@@ -9,6 +9,7 @@ import (
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/autoblock"
+	"cfm/internal/firewall/feedutil"
 	"cfm/internal/firewall/selfip"
 	"cfm/internal/logging"
 	"cfm/internal/reporting"
@@ -16,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"net"
 	"net/url"
 	"os"
@@ -1423,14 +1423,8 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 		return fmt.Errorf("flush %s: %w", setName, err)
 	}
 
-	// Αν είναι *nets set, καθάρισε επικαλύψεις
-
-	if strings.Contains(setName, "_v4_nets") {
-		elems = normalizeCIDRsV4(elems)
-	}
-	if strings.Contains(setName, "_v6_nets") {
-		elems = normalizeCIDRsV6(elems)
-	}
+	// Αν είναι *nets set, καθάρισε επικαλύψεις (shared keying — no drift with nftlib)
+	elems = feedutil.NormalizeNetsForSet(setName, elems)
 
 	ttlStr := ""
 	if ttl != nil && *ttl > 0 {
@@ -1517,191 +1511,6 @@ func (b *Backend) nftExpr(expr string) error {
 		return fmt.Errorf("%v: %s", err, string(out))
 	}
 	return nil
-}
-
-// ---------- CIDR normalization (drop overlaps) ----------
-
-// IPv4
-type v4range struct {
-	start uint32
-	end   uint32
-	cidr  string
-}
-
-func ip4ToU32(ip net.IP) uint32 {
-	ip4 := ip.To4()
-	return uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3])
-}
-
-func cidrRangeV4(c *net.IPNet) (uint32, uint32) {
-	network := c.IP.Mask(c.Mask).To4()
-	start := ip4ToU32(network)
-	ones, bits := c.Mask.Size()
-	// host count = 2^(bits-ones)
-	host := uint32(1)<<(uint(bits-ones)) - 1
-	end := start + host
-	return start, end
-}
-
-func normalizeCIDRsV4(in []string) []string {
-	// parse + canonicalize + dedup
-	seen := make(map[string]struct{})
-	var arr []v4range
-	for _, s := range in {
-		s = strings.TrimSpace(s)
-		if s == "" || strings.IndexByte(s, '/') == -1 {
-			continue
-		}
-		_, ipnet, err := net.ParseCIDR(s)
-		if err != nil {
-			continue
-		}
-		// canonical cidr string
-		canon := ipnet.IP.Mask(ipnet.Mask).String() + "/" + strconv.Itoa(maskOnes(ipnet.Mask))
-		if _, ok := seen[canon]; ok {
-			continue
-		}
-		seen[canon] = struct{}{}
-		st, en := cidrRangeV4(ipnet)
-		arr = append(arr, v4range{start: st, end: en, cidr: canon})
-	}
-
-	if len(arr) == 0 {
-		return nil
-	}
-
-	// sort: start asc, end desc (ώστε ο υπερ-χώρος πρώτος)
-	sortFunc := func(i, j int) bool {
-		if arr[i].start == arr[j].start {
-			return arr[i].end > arr[j].end
-		}
-		return arr[i].start < arr[j].start
-	}
-	// local sort to avoid extra import
-	for i := 1; i < len(arr); i++ {
-		for j := i; j > 0 && sortFunc(j, j-1); j-- {
-			arr[j], arr[j-1] = arr[j-1], arr[j]
-		}
-	}
-
-	out := make([]string, 0, len(arr))
-	var coverEnd uint32 = 0
-	for _, r := range arr {
-		if len(out) == 0 {
-			out = append(out, r.cidr)
-			coverEnd = r.end
-			continue
-		}
-		// αν ο τρέχων αρχίζει μέσα σε ήδη καλυμμένο διάστημα και τελειώνει πριν/ίσο με coverEnd => contained → drop
-		if r.start <= coverEnd && r.end <= coverEnd {
-			continue
-		}
-		// εκτός κάλυψης → keep
-		if r.start > coverEnd {
-			out = append(out, r.cidr)
-			coverEnd = r.end
-			continue
-		}
-		// Θεωρητικά partial overlap δεν πρέπει να υπάρξει με CIDR, παρ' όλα αυτά:
-		if r.end > coverEnd {
-			// επεκτείνει την κάλυψη (σπάνιο για CIDR) – κρατάμε το νέο για ασφάλεια
-			out = append(out, r.cidr)
-			coverEnd = r.end
-		}
-	}
-	return out
-}
-
-func maskOnes(m net.IPMask) int {
-	ones, _ := m.Size()
-	return ones
-}
-
-// IPv6
-type v6range struct {
-	start *big.Int
-	end   *big.Int
-	cidr  string
-}
-
-func ip6ToBig(ip net.IP) *big.Int {
-	ip = ip.To16()
-	return new(big.Int).SetBytes(ip)
-}
-
-func cidrRangeV6(n *net.IPNet) (*big.Int, *big.Int) {
-	base := ip6ToBig(n.IP.Mask(n.Mask))
-	ones, bits := n.Mask.Size()
-	rem := uint(bits - ones)
-	hostCount := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), rem), big.NewInt(1))
-	end := new(big.Int).Add(base, hostCount)
-	return base, end
-}
-
-func normalizeCIDRsV6(in []string) []string {
-	seen := make(map[string]struct{})
-	var arr []v6range
-	for _, s := range in {
-		s = strings.TrimSpace(s)
-		if s == "" || strings.IndexByte(s, '/') == -1 {
-			continue
-		}
-		_, ipnet, err := net.ParseCIDR(s)
-		if err != nil {
-			continue
-		}
-		ipnet.IP = ipnet.IP.Mask(ipnet.Mask)
-		canon := ipnet.String()
-		if _, ok := seen[canon]; ok {
-			continue
-		}
-		seen[canon] = struct{}{}
-		st, en := cidrRangeV6(ipnet)
-		arr = append(arr, v6range{start: st, end: en, cidr: canon})
-	}
-	if len(arr) == 0 {
-		return nil
-	}
-
-	// sort: start asc, end desc
-	less := func(a, b v6range) bool {
-		c := a.start.Cmp(b.start)
-		if c == 0 {
-			return a.end.Cmp(b.end) > 0
-		}
-		return c < 0
-	}
-	for i := 1; i < len(arr); i++ {
-		for j := i; j > 0 && less(arr[j], arr[j-1]); j-- {
-			arr[j], arr[j-1] = arr[j-1], arr[j]
-		}
-	}
-
-	out := make([]string, 0, len(arr))
-	coverEnd := new(big.Int).SetUint64(0)
-	for _, r := range arr {
-		if len(out) == 0 {
-			out = append(out, r.cidr)
-			coverEnd = new(big.Int).Set(r.end)
-			continue
-		}
-		if r.start.Cmp(coverEnd) <= 0 && r.end.Cmp(coverEnd) <= 0 {
-			// contained
-			continue
-		}
-		if r.start.Cmp(coverEnd) == 1 {
-			// disjoint → keep
-			out = append(out, r.cidr)
-			coverEnd = new(big.Int).Set(r.end)
-			continue
-		}
-		// unexpected partial: keep and extend cover
-		if r.end.Cmp(coverEnd) == 1 {
-			out = append(out, r.cidr)
-			coverEnd = new(big.Int).Set(r.end)
-		}
-	}
-	return out
 }
 
 // Sanitizer για feed names: lower, [a-z0-9_], κόψιμο μήκους, prefix αν αρχίζει με digit
