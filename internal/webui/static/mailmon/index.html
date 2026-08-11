@@ -56,6 +56,13 @@
         <div id="totals" class="statgrid"></div>
       </section>
 
+      <section class="card wide" id="anomalyCard" style="display:none">
+        <h2>⚠ Suspected compromise <span class="top-hint">senders whose last-2h volume is far above their own 7-day baseline, or brand-new senders suddenly blasting — the earliest compromised-account signal, before they reach the top-senders list</span></h2>
+        <div class="table-wrap">
+          <table><thead><tr><th>Sender</th><th>Signal</th><th>Recent (2h)</th><th>Baseline/hr</th><th>Ratio</th></tr></thead><tbody id="anomalyBody"></tbody></table>
+        </div>
+      </section>
+
       <section class="card wide" id="delivCard" style="display:none">
         <h2>Outbound deliverability <span class="top-hint">how remote providers are treating this server's mail — pair with <code>mail_dns_check</code> for the DNS-side "why" (SPF/DMARC). Admin-only; deferred counts include retries.</span></h2>
         <div class="toolbar"><span id="delivTotals" class="muted"></span></div>

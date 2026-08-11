@@ -3,10 +3,21 @@ package mailtraffic
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
 	"cfm/internal/mailmeter"
+)
+
+// Anomaly-detection windows/thresholds (fixed in v1; tunable later).
+const (
+	anomalyRecentHours    = 2   // the "recent" window
+	anomalyBaselineDays   = 7   // trailing baseline window
+	anomalyRatioThreshold = 3.0 // recent must be >= this × its expected rate
+	anomalySpikeFloor     = 20  // and at least this many, so tiny senders don't trip
+	anomalyNewSenderFloor = 50  // a sender with too little history sending >= this is flagged outright
+	anomalyMinActiveHours = 3   // need the sender active in this many baseline hours before a ratio is trusted
 )
 
 // Totals is the whole-window sum of each counter within the caller's scope.
@@ -48,6 +59,17 @@ type Deliverability struct {
 	Bounced    int64              `json:"bounced"`
 }
 
+// Anomaly is one sender whose recent outbound stands out against its OWN
+// trailing baseline — the "suspected compromise" signal that catches a
+// freshly-abused account before it climbs the top-senders list.
+type Anomaly struct {
+	Addr            string  `json:"addr"`
+	Recent          int64   `json:"recent"`            // outbound in the last anomalyRecentHours
+	BaselinePerHour float64 `json:"baseline_per_hour"` // the sender's own average per ACTIVE hour over the baseline (0 for new-sender)
+	Ratio           float64 `json:"ratio"`             // recent ÷ expected (0 for new-sender)
+	Kind            string  `json:"kind"`              // "spike" | "new-sender"
+}
+
 // Summary is the read view served by GET /api/v1/mail/traffic. All lists are
 // already scope-filtered and capped to the requested limit. The HTTP handler
 // wraps it in the usual {ok, schema, available, …} envelope, so Summary itself
@@ -55,6 +77,10 @@ type Deliverability struct {
 type Summary struct {
 	Window string `json:"window"`
 	Scope  string `json:"scope"` // "admin" | "scoped"
+
+	// Anomalies are scope-aware (a scoped caller sees only its own senders'
+	// anomalies); always present, possibly empty.
+	Anomalies []Anomaly `json:"anomalies"`
 
 	// Deliverability is populated for admins only (host-wide data); nil/omitted
 	// for scoped callers.
@@ -100,6 +126,7 @@ func (s *Store) trafficSummaryAt(now time.Time, hours int, scope map[string]stru
 		TopAuthFailed:       []mailmeter.AddrCount{},
 		TopThrottled:        []mailmeter.AddrCount{},
 		TopOverQuota:        []mailmeter.AddrCount{},
+		Anomalies:           []Anomaly{},
 	}
 	if scope != nil {
 		sum.Scope = "scoped"
@@ -139,6 +166,14 @@ func (s *Store) trafficSummaryAt(now time.Time, hours int, scope map[string]stru
 		return sum, err
 	}
 	sum.Totals = tot
+
+	// Per-sender anomalies (own fixed 2h/7d windows, independent of `hours`);
+	// scope-aware like the top-N lists.
+	an, err := s.anomalies(now, scope, limit)
+	if err != nil {
+		return sum, err
+	}
+	sum.Anomalies = an
 
 	// Deliverability is host-wide → admin only (nil scope).
 	if scope == nil {
@@ -225,6 +260,146 @@ func (s *Store) deliverability(cutoff int64, limit int) (*Deliverability, error)
 		dl.TopReasons = append(dl.TopReasons, rc)
 	}
 	return dl, rr.Err()
+}
+
+// anomalies flags senders whose recent outbound stands out against their own
+// trailing baseline. The baseline rate is the sender's average per ACTIVE hour
+// (its total baseline outbound ÷ the number of baseline hours it actually sent
+// in), NOT per wall-clock hour — so a legitimately bursty/periodic sender (a
+// daily newsletter, cron mail) is measured against its own burst size and isn't
+// flagged every run, and the estimate doesn't depend on how long the collector
+// has been up. A sender with too little history (< anomalyMinActiveHours active
+// baseline hours) sending a lot is flagged as "new-sender" instead. Scope-aware:
+// a scoped caller only sees anomalies among its own domains' senders.
+//
+// Known limitation: because the baseline runs up to now-2h, a compromise
+// sustained for many hours slowly bleeds into the sender's own baseline and can
+// fall back under the ratio after ~2 days — detection is strongest at onset.
+func (s *Store) anomalies(now time.Time, scope map[string]struct{}, limit int) ([]Anomaly, error) {
+	out := []Anomaly{}
+	recentCutoff := bucketOf(now.Add(-anomalyRecentHours * time.Hour))
+	baselineStart := bucketOf(now.Add(-anomalyBaselineDays * 24 * time.Hour))
+
+	recent, err := s.sumOutbound(scope, recentCutoff, 0)
+	if err != nil {
+		return out, err
+	}
+	if len(recent) == 0 {
+		return out, nil
+	}
+	base, err := s.baselineStats(scope, baselineStart, recentCutoff)
+	if err != nil {
+		return out, err
+	}
+
+	for addr, rec := range recent {
+		bs := base[addr] // zero value {0,0} when the sender has no baseline
+		switch {
+		case bs.active < anomalyMinActiveHours && rec >= anomalyNewSenderFloor:
+			// Too little history to trust a ratio, yet blasting now.
+			out = append(out, Anomaly{Addr: addr, Recent: rec, Kind: "new-sender"})
+		case bs.active >= anomalyMinActiveHours && rec >= anomalySpikeFloor:
+			perHour := float64(bs.sum) / float64(bs.active) // per ACTIVE hour
+			expected := perHour * anomalyRecentHours
+			if expected <= 0 {
+				continue
+			}
+			if ratio := float64(rec) / expected; ratio >= anomalyRatioThreshold {
+				out = append(out, Anomaly{
+					Addr: addr, Recent: rec,
+					BaselinePerHour: math.Round(perHour*100) / 100,
+					Ratio:           math.Round(ratio*100) / 100,
+					Kind:            "spike",
+				})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		// New senders first (strongest signal), then higher ratio, then volume.
+		if ni, nj := out[i].Kind == "new-sender", out[j].Kind == "new-sender"; ni != nj {
+			return ni
+		}
+		if out[i].Ratio != out[j].Ratio {
+			return out[i].Ratio > out[j].Ratio
+		}
+		if out[i].Recent != out[j].Recent {
+			return out[i].Recent > out[j].Recent
+		}
+		return out[i].Addr < out[j].Addr
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// sumOutbound sums the outbound column per sender address over [lo, hi) buckets
+// (hi<=0 means no upper bound), scope-filtered. Only real senders appear (the
+// outbound column is set only for email senders, never local users or "*").
+func (s *Store) sumOutbound(scope map[string]struct{}, lo, hi int64) (map[string]int64, error) {
+	q := `SELECT address, SUM(outbound) FROM mail_counters WHERE bucket>=? AND outbound>0`
+	args := []any{lo}
+	if hi > 0 {
+		q += ` AND bucket<?`
+		args = append(args, hi)
+	}
+	if scope != nil {
+		frag, a := inClause(scope)
+		q += frag
+		args = append(args, a...)
+	}
+	q += ` GROUP BY address`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]int64{}
+	for rows.Next() {
+		var addr string
+		var n int64
+		if err := rows.Scan(&addr, &n); err != nil {
+			return nil, err
+		}
+		m[addr] = n
+	}
+	return m, rows.Err()
+}
+
+// baselineStat is one sender's baseline outbound total and the number of
+// distinct hours it was active (both over the baseline window).
+type baselineStat struct {
+	sum    int64
+	active int64
+}
+
+// baselineStats sums outbound and counts distinct active hours per sender over
+// [lo, hi), scope-filtered. The active-hour count is the divisor for a
+// per-active-hour rate, so silent hours don't dilute a bursty sender's rate.
+func (s *Store) baselineStats(scope map[string]struct{}, lo, hi int64) (map[string]baselineStat, error) {
+	q := `SELECT address, SUM(outbound), COUNT(DISTINCT bucket) FROM mail_counters WHERE bucket>=? AND bucket<? AND outbound>0`
+	args := []any{lo, hi}
+	if scope != nil {
+		frag, a := inClause(scope)
+		q += frag
+		args = append(args, a...)
+	}
+	q += ` GROUP BY address`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]baselineStat{}
+	for rows.Next() {
+		var addr string
+		var sum, active int64
+		if err := rows.Scan(&addr, &sum, &active); err != nil {
+			return nil, err
+		}
+		m[addr] = baselineStat{sum: sum, active: active}
+	}
+	return m, rows.Err()
 }
 
 // topByAddr returns the top addresses by a single counter column over the

@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Mail Monitor: suspected-compromise anomaly detection** — `mail_traffic` /
+  `GET /api/v1/mail/traffic` and the cfm-admin "Mail Monitor" page now carry an
+  `anomalies` block: senders whose outbound in the last 2h is far above their
+  OWN trailing 7-day baseline (`kind:"spike"`, with the ratio), plus
+  never-before-seen senders suddenly blasting (`kind:"new-sender"`). This is the
+  earliest compromised-account signal — it catches an account before it climbs
+  the top-senders list, and a constant high-volume legitimate sender is NOT
+  flagged (it's measured against itself). The baseline divisor uses the actual
+  span of collected history, so a freshly-started collector doesn't over-flag.
+  Scope-aware (a scoped cPanel viewer sees only its own senders); thresholds
+  fixed in this version (ratio ≥3 and ≥20 recent, or ≥50 for a new sender).
 - **Mail Monitor: outbound deliverability view** — `mail_traffic` / `GET /api/v1/mail/traffic`
   and the cfm-admin "Mail Monitor" page now carry a `deliverability` block: per
   remote provider (Gmail / Microsoft / Yahoo / …) **delivered / deferred /
