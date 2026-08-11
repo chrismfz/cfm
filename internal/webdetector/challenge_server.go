@@ -630,11 +630,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 				return fmt.Errorf("EnsureChallengeRedirect: %w", err)
 			}
 			// EnsureChallengeRedirect returns nil for two opposite outcomes: it
-			// installed the DNAT rules, or it found the redirect disabled
-			// (OPENRESTY_MODE, where the edge decides in-path) and cleaned them
-			// up instead. Reporting "OK" for both is how an operator ends up
-			// believing DNAT is armed when it is not, in the one area whose own
-			// code comment records having been burned before. Say which.
+			// installed the DNAT rules, or it found the redirect disabled (the
+			// norm — edge mode is the only mode and the register force-disables
+			// it) and cleaned them up instead. Reporting "OK" for both is how an
+			// operator ends up believing DNAT is armed when it is not. Say which.
+			// (This whole block goes away in Phase 1b with the machinery.)
 			armed := true
 			if q, ok := any(s.fw).(interface{ ChallengeRedirectEnabled() bool }); ok {
 				armed = q.ChallengeRedirectEnabled()

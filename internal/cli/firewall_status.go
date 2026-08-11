@@ -283,8 +283,8 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 		if !req.applicable {
 			r.Findings = append(r.Findings, fwFinding{"info", fmt.Sprintf("set(%s) skipped (feature=%s dependency=%s; expected source: %s)", s, req.feature, req.dependsOn, req.reason)})
 			// Still publish the canonical _cardinality key so nft↔nftlib
-			// status output stays parity-complete regardless of which
-			// challenge mode (per-IP vs OPENRESTY_MODE edge) is configured.
+			// status output stays parity-complete (the legacy challenge sets
+			// are never applicable now that edge is the only mode).
 			r.SetSizes[req.key+"_cardinality"] = 0
 			continue
 		}

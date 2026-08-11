@@ -807,8 +807,9 @@ func init() {
 		// (docs/edge-unification-plan.md Phase 1). Warn once per reload when an
 		// operator has it explicitly OFF so they learn the toggle no longer
 		// does anything; any other value (unset or truthy) is silently fine.
-		if raw, ok := kv["OPENRESTY_MODE"]; ok && !kvBool(kv, "OPENRESTY_MODE", true) {
-			logging.Logf("[webdetector] OPENRESTY_MODE=%s is deprecated and IGNORED — edge (OpenResty/Angie in-path) mode is always on; remove the key from detectors.conf", strings.TrimSpace(raw))
+		if _, ok := kv["OPENRESTY_MODE"]; ok && !kvBool(kv, "OPENRESTY_MODE", true) {
+			logging.Logf("[webdetector] OPENRESTY_MODE=%s is deprecated and IGNORED — edge (OpenResty/Angie in-path) mode is always on; remove the key from detectors.conf",
+				kvStrClean(kv, "OPENRESTY_MODE", ""))
 		}
 
 		// CHALLENGE_VHOST (comma/space separated)

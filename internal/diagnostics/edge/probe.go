@@ -181,14 +181,6 @@ func NormalizeRunPathForDisplay(path string) string {
 	return trim
 }
 
-func parseBoolLoose(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(stripInlineComment(v))) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
-}
-
 func stripInlineComment(s string) string {
 	inQuote := false
 	var q rune
