@@ -363,6 +363,7 @@ func (b *Backend) DeleteSetIfExists(name string) error {
 		return fmt.Errorf("nftlib: delete set %q: %w", name, err)
 	}
 	delete(b.namedSets, name)
+	delete(b.appliedHash, name) // set is gone → its applied-content hash is stale
 	return nil
 }
 
@@ -405,6 +406,7 @@ func (b *Backend) FlushSet(family, table, set string) error {
 		return fmt.Errorf("nftlib: flush set %s %s %s (delete): %w", family, table, set, err)
 	}
 	delete(b.namedSets, set)
+	delete(b.appliedHash, set) // set was just emptied → drop its applied-content hash
 	b.mu.Unlock()
 
 	// Transaction 2: recreate the set with the original schema.

@@ -462,8 +462,25 @@ func (b *Backend) LoadPortScanner() {
 }
 
 func (b *Backend) loadPortScannerOnce() {
-	if err := b.EnsureBase(); err != nil {
-		return
+	// Do NOT call EnsureBase on every tick. EnsureBase's cost is its CLI part
+	// (refreshSelfSets + applyBaseInputRules fork ~26 `nft` subprocesses), and
+	// running it every ~20s here was the driver of the nftlib EnsureBase-duration
+	// climb (cli_work grows as those forks slow with the ruleset) → watchdog
+	// restart. The base ruleset is created at startup; self-heal it here ONLY if
+	// the table went missing. The portscan sets are (re)ensured by
+	// ensurePortscanSetsNative below via netlink regardless.
+	//
+	// Probe the KERNEL directly (not lookupTable, which returns a cached handle
+	// that never re-checks the kernel) so an out-of-band wipe — `nft flush
+	// ruleset`, an nftables.service restart, a panel firewall reload — is actually
+	// detected and self-healed instead of trusting a stale cache forever.
+	b.mu.Lock()
+	_, terr := b.conn.ListTableOfFamily(cfmTableName, nftables.TableFamilyINet)
+	b.mu.Unlock()
+	if terr != nil {
+		if err := b.EnsureBase(); err != nil {
+			return
+		}
 	}
 	b.ensurePortscanSetsNative()
 

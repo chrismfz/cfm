@@ -18,6 +18,33 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **nftlib: stop the every-tick `EnsureBase` that drove a slow daemon restart
+  loop.** On the nftlib backend `LoadPortScanner` called `EnsureBase` every tick
+  (~20s), and `EnsureBase`'s cost is its CLI part (`refreshSelfSets` +
+  `applyBaseInputRules` fork ~26 `nft` subprocesses). Those forks get slower as
+  the ruleset grows over a run, so `EnsureBase` climbed from ~0.7s to ~16s over a
+  couple of hours until the daemon missed its heartbeat and the watchdog
+  restarted it (seen on a busy nftlib node; exec-nft nodes were unaffected).
+  `LoadPortScanner` now only calls `EnsureBase` when the table is actually
+  missing (mirroring `DumpFloodCounters`), so the base ruleset is still
+  self-healed but not needlessly re-reconciled every tick. The
+  `firewall_selftest` split (lock_wait/nl_work/cli_work) confirmed the cost was
+  entirely `cli_work`. Diagnosed via the new `firewall_selftest` tool.
+- **nftlib: large blocklist/allowlist feeds now apply (chunked writes) and
+  unchanged feeds are skipped.** A feed set was written in ONE netlink
+  `SetAddElements`+`Flush`; a large feed (observed: a 113k-entry blocklist)
+  overflowed the socket buffer and failed with `sendmsg: message too long`, so
+  that blocklist was silently NOT enforced on the nftlib backend. Set writes are
+  now split into bounded batches so any size applies. Additionally, a full
+  replace of a PERMANENT (no-TTL) set whose content is unchanged since the last
+  successful apply is now a no-op (a blocklist that didn't change this hour is
+  not needlessly rewritten); the content cache is dropped on any structural
+  change (`invalidateCache`) so a recreated/flushed set is always rewritten. TTL
+  sets are always rewritten (their kernel contents expire). Interval sets
+  (CIDR/nets feeds) additionally had their flush issued as a SEPARATE netlink
+  transaction — flushing and re-adding an interval set in one batch failed with
+  `netlink receive: directory not empty` (observed on a `*_nets` allowlist feed),
+  and their start/interval-end element pairs are never split across batches.
 - **`/unblock` now responds within a bounded budget regardless of firewall
   backend speed.** The pre-response fast path (nft point-lookup + remove, WAF
   clear) previously ran the nft work synchronously and unbounded; on a busy node

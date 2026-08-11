@@ -71,6 +71,13 @@ type Backend struct {
 	extBlock  map[string]extFeedData // feedKey → data
 	feedKeys  map[string]struct{}    // active sanitized feed keys
 
+	// appliedHash is the content hash of the last full-replace successfully
+	// written to a PERMANENT (no-TTL) set, so ReplaceSetFlushAdd can skip
+	// rewriting an unchanged set (e.g. a blocklist that didn't change this hour).
+	// Guarded by b.mu (all set writes hold it) and DROPPED by invalidateCache on
+	// any structural change, so a recreated/flushed set is always rewritten.
+	appliedHash map[string]uint64
+
 	// Wiring fields set by callers at startup.
 	enr           *enrichpkg.Enricher
 	reporter      reporting.Reporter
@@ -134,6 +141,7 @@ func New() (*Backend, error) {
 		lastIgnoredAt:            make(map[string]time.Time),
 		selfResolver:             selfip.New(),
 		feedWrites:               make(map[string]fwSample),
+		appliedHash:              make(map[string]uint64),
 	}, nil
 }
 
