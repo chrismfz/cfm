@@ -62,6 +62,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerMailQueueSummary(srv, d)
 	registerMailLogTail(srv, d)
 	registerMailTraffic(srv, d)
+	registerMailDNSCheck(srv, d)
 }
 
 // ── query-param helpers ────────────────────────────────────────────────────────
@@ -621,6 +622,24 @@ func registerMailTraffic(srv *mcp.Server, d Deps) {
 		setInt(q, "hours", in.Hours)
 		setInt(q, "limit", in.Limit)
 		return dispatchJSON(ctx, d, "/api/v1/mail/traffic", q)
+	})
+}
+
+type mailDNSInput struct {
+	Domain       string `json:"domain" jsonschema:"the mail domain to check, e.g. axidwear.com (required)"`
+	DKIMSelector string `json:"dkim_selector,omitempty" jsonschema:"DKIM selector(s) to probe at <selector>._domainkey.<domain>; comma-separated; default 'default'"`
+}
+
+func registerMailDNSCheck(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "mail_dns_check",
+		Description: "Check a domain's mail-authentication DNS: SPF (present? does it list this server's sending IP? all-qualifier), DMARC (present? policy p=none/quarantine/reject), DKIM (key at the selector?), the sending IP's PTR/forward-confirmed rDNS, and MX — plus plain-language findings, worst first. The DNS half of a deliverability diagnosis: when mail_traffic / mail_log_tail show Gmail returning '421-4.7.27 SPF did not pass' or '550 unsolicited', this says WHY (missing/misaligned SPF, no DMARC, bad PTR). Live TXT lookups, read-only.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mailDNSInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setStr(q, "domain", in.Domain)
+		setStr(q, "dkim_selector", in.DKIMSelector)
+		return dispatchJSON(ctx, d, "/api/v1/mail/dns", q)
 	})
 }
 
