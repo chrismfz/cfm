@@ -90,12 +90,12 @@ func (s *stubFirewallBackend) ListSetElementsRaw(string) ([]string, error)      
 func (s *stubFirewallBackend) ListSetElementsTimed(string) ([]firewall.SetElementTimed, error) {
 	return nil, nil
 }
-func (s *stubFirewallBackend) ListTableJSON(string, string) ([]byte, error)           { return nil, nil }
-func (s *stubFirewallBackend) ListSetJSON(string, string, string) ([]byte, error)     { return nil, nil }
-func (s *stubFirewallBackend) ListTableTextNoDNS(string, string) (string, error)      { return "", nil }
-func (s *stubFirewallBackend) ListChainText(string, string, string) (string, error)   { return "", nil }
-func (s *stubFirewallBackend) FlushSet(string, string, string) error                  { return nil }
-func (s *stubFirewallBackend) ReportBlock(string, string, string, string, int) error  { return nil }
+func (s *stubFirewallBackend) ListTableJSON(string, string) ([]byte, error)          { return nil, nil }
+func (s *stubFirewallBackend) ListSetJSON(string, string, string) ([]byte, error)    { return nil, nil }
+func (s *stubFirewallBackend) ListTableTextNoDNS(string, string) (string, error)     { return "", nil }
+func (s *stubFirewallBackend) ListChainText(string, string, string) (string, error)  { return "", nil }
+func (s *stubFirewallBackend) FlushSet(string, string, string) error                 { return nil }
+func (s *stubFirewallBackend) ReportBlock(string, string, string, string, int) error { return nil }
 func (s *stubFirewallBackend) RemoveBlock(ip net.IP) error {
 	s.removed = append(s.removed, ip.String())
 	return nil
@@ -105,6 +105,66 @@ func (s *stubFirewallBackend) RemoveBlockBatch(ips []net.IP) error {
 		s.removed = append(s.removed, ip.String())
 	}
 	return nil
+}
+
+// slowFirewallBackend makes the nft point-lookup block, simulating exec-engine
+// nft lock contention on a busy node — the condition that made cfm-web time out.
+type slowFirewallBackend struct {
+	*stubFirewallBackend
+	delay time.Duration
+}
+
+func (s *slowFirewallBackend) HasElem(string, string) (bool, error) {
+	time.Sleep(s.delay)
+	return false, nil
+}
+
+// A slow firewall backend must NOT make the handler exceed its response budget:
+// the fast path is abandoned at the deadline and the response is sent promptly,
+// flagged fastpath_done=false (the cleanup goroutine still guarantees removal).
+func TestUnblockFastPathBudgetBounded(t *testing.T) {
+	be := &slowFirewallBackend{stubFirewallBackend: &stubFirewallBackend{}, delay: 2 * time.Second}
+	origUnblockDo := unblockDo
+	var wg sync.WaitGroup
+	wg.Add(1)
+	unblockDo = func(_ context.Context, _ net.IP, _ unblock.Options) (*unblock.Result, error) {
+		defer wg.Done()
+		return &unblock.Result{}, nil
+	}
+	t.Cleanup(func() {
+		wg.Wait()
+		unblockDo = origUnblockDo
+	})
+
+	h := makeUnblockHandler(be, t.TempDir())
+	req := httptest.NewRequest(http.MethodPost, "/unblock", strings.NewReader(`{"ip":"192.0.2.10"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "198.51.100.25:12345"
+	rr := httptest.NewRecorder()
+
+	start := time.Now()
+	h.ServeHTTP(rr, req)
+	elapsed := time.Since(start)
+
+	// Budget is 800ms; the backend blocks 2s. The response must land well under
+	// cfm-web's ~1.2s node-call deadline despite the slow backend.
+	if elapsed > 1200*time.Millisecond {
+		t.Fatalf("handler blocked %s on a slow backend — response budget not enforced", elapsed)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if ok, _ := body["ok"].(bool); !ok {
+		t.Fatalf("expected ok=true, got %v", body)
+	}
+	if done, _ := body["fastpath_done"].(bool); done {
+		t.Fatalf("fastpath_done should be false when the nft path is still blocked at the budget: %v", body)
+	}
+	wg.Wait()
 }
 
 func TestUnblockRejectsNonPOSTMethods(t *testing.T) {

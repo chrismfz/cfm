@@ -126,21 +126,8 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 			backendType = t.String()
 		}
 
-		// ── 2. Fast local path: remove from nft immediately ───────────────
-		// Point-lookup instead of full set dump — O(1) vs O(n)
-		wasBlocked := false
-		if found, _ := be.HasElem("block_v4", ip.String()); found {
-			wasBlocked = true
-		} else if found, _ := be.HasElem("block_v6", ip.String()); found {
-			wasBlocked = true
-		}
-		removeStart := time.Now()
-		removeMethod := "RemoveBlock"
-		logging.LogfAPI("[unblock.exec] engine=%s backend_type=%s batch_size=%d method=%s ip=%s", engine, backendType, 1, removeMethod, ip.String())
-		_ = be.RemoveBlock(ip) // idempotent
-		logging.LogfAPI("[unblock.exec.done] engine=%s backend_type=%s batch_size=%d method=%s ip=%s duration=%s", engine, backendType, 1, removeMethod, ip.String(), time.Since(removeStart))
-
-		// ── 3. Capture requester identity for the audit log ───────────────
+		// ── 2. Capture requester identity for the audit log ───────────────
+		// Done first, on the handler goroutine, since it reads the request.
 		requester := func() string {
 			if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
 				parts := strings.Split(xf, ",")
@@ -153,39 +140,85 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 			return host
 		}()
 
-		// ── 3a. WAF planes (OpenResty/Lua) ────────────────────────────────
-		// Clear the per-IP WAF enforcement state (challenge/block + shared-dict
-		// throttle/decision caches) on this node. These live outside the
-		// firewall/blocklist, so without this a user can stay stuck behind a
-		// challenge/throttle while every blocklist search comes back empty.
+		// ── 3. Bounded fast path ──────────────────────────────────────────
+		// The nft check+remove and the WAF clear both run in goroutines under a
+		// SINGLE response budget, well under cfm-web's ~1.2s node-call deadline.
+		// Whatever finishes in time is folded into the response; whatever doesn't
+		// is completed by the fire-and-forget cleanup below.
 		//
-		// The clear always runs to completion in its own goroutine; we wait up
-		// to a tight budget to fold the findings into this response (the
-		// caller — cfm-web — has its own ~1.2s deadline). The findings double
-		// as the "was this IP actually being enforced, and why" signal.
-		var wafResult *unblock.WAFResult
+		// This is the backend-agnostic fix for the incident where exec-engine nft
+		// lock contention on a busy node stalled the synchronous HasElem/RemoveBlock
+		// for several seconds, so cfm-web timed out and reported a healthy node
+		// "unreachable" even though the unblock had actually succeeded. It is safe
+		// to abandon the nft work early because unblock.Do in the cleanup goroutine
+		// ALSO calls be.RemoveBlock(ip) (idempotent) — a slow backend can never
+		// leave the IP blocked, it only defers the removal by a moment.
+		const fastPathBudget = 800 * time.Millisecond
+		budget := time.NewTimer(fastPathBudget)
+		defer budget.Stop()
+
+		// nft: point-lookup (O(1)) whether it was blocked, then remove.
+		nftDone := make(chan bool, 1) // carries wasBlocked
+		go func() {
+			wb := false
+			if found, _ := be.HasElem("block_v4", ip.String()); found {
+				wb = true
+			} else if found, _ := be.HasElem("block_v6", ip.String()); found {
+				wb = true
+			}
+			rs := time.Now()
+			logging.LogfAPI("[unblock.exec] engine=%s backend_type=%s batch_size=%d method=RemoveBlock ip=%s", engine, backendType, 1, ip.String())
+			_ = be.RemoveBlock(ip) // idempotent
+			logging.LogfAPI("[unblock.exec.done] engine=%s backend_type=%s batch_size=%d method=RemoveBlock ip=%s duration=%s", engine, backendType, 1, ip.String(), time.Since(rs))
+			nftDone <- wb
+		}()
+
+		// WAF planes (OpenResty/Lua): clear the per-IP enforcement state
+		// (challenge/block + shared-dict throttle/decision caches). These live
+		// outside the firewall/blocklist, so without this a user can stay stuck
+		// behind a challenge/throttle while every blocklist search comes back
+		// empty. The clear always runs to completion in its own goroutine (the
+		// buffered channel means it never blocks even if we stop waiting); the
+		// findings double as the "was this IP actually being enforced, and why".
+		var wafCh chan unblock.WAFResult
 		if c := unblock.WAFCleanerHook(); c != nil {
-			done := make(chan unblock.WAFResult, 1)
-			go func() { done <- c.ForceUnblock(ip.String()) }()
+			wafCh = make(chan unblock.WAFResult, 1)
+			go func() { wafCh <- c.ForceUnblock(ip.String()) }()
+		}
+
+		// Collect whatever completes before the shared budget expires.
+		var (
+			wasBlocked  bool
+			nftComplete bool
+			wafResult   *unblock.WAFResult
+		)
+		for nftDone != nil || wafCh != nil {
 			select {
-			case wr := <-done:
-				wafResult = &wr
-				logging.LogfAPI("[unblock.waf] ip=%s found=%t cleared=%q err=%q",
-					ip.String(), wr.Found, wr.Summary(), wr.Err)
-			case <-time.After(700 * time.Millisecond):
-				logging.LogfAPI("[unblock.waf] ip=%s clear still running after 700ms; responding without findings", ip.String())
+			case wb := <-nftDone:
+				wasBlocked, nftComplete, nftDone = wb, true, nil
+			case wr := <-wafCh:
+				w := wr
+				wafResult, wafCh = &w, nil
+				logging.LogfAPI("[unblock.waf] ip=%s found=%t cleared=%q err=%q", ip.String(), w.Found, w.Summary(), w.Err)
+			case <-budget.C:
+				logging.LogfAPI("[unblock.fastpath] ip=%s budget %s exhausted; responding now, background cleanup finishes the rest", ip.String(), fastPathBudget)
+				nftDone, wafCh = nil, nil // stop waiting; goroutines run to completion on their own
 			}
 		}
 
 		// ── 4. Immediate JSON response ─────────────────────────────────────
+		// fastpath_done=false means the nft check/remove was still running at the
+		// budget, so was_blocked/waf aren't authoritative yet — the cleanup
+		// goroutine below still guarantees the removal.
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":          true,
-			"ip":          ip.String(),
-			"hostname":    localNodeID(),
-			"was_blocked": wasBlocked,
-			"waf":         wafResult,
-			"duration_ms": time.Since(start).Milliseconds(),
-			"bg_cleanup":  true,
+			"ok":            true,
+			"ip":            ip.String(),
+			"hostname":      localNodeID(),
+			"was_blocked":   wasBlocked,
+			"waf":           wafResult,
+			"duration_ms":   time.Since(start).Milliseconds(),
+			"bg_cleanup":    true,
+			"fastpath_done": nftComplete,
 		})
 
 		// ── 5. Fire-and-forget cleanup ─────────────────────────────────────
