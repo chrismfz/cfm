@@ -58,6 +58,46 @@ func TestAggregateEximAndMixed(t *testing.T) {
 	}
 }
 
+// A password spray with distinct attacker-chosen non-mailbox usernames must
+// fold into the host-wide bucket, not spawn a row per guess. A real mailbox
+// (has "@") keeps its own row.
+func TestAggregateAuthFailFoldsJunk(t *testing.T) {
+	evs := []Event{
+		{Kind: AuthFailed, Addr: "victim@nac.gr"},
+		{Kind: AuthFailed, Addr: "victim@nac.gr"},
+		{Kind: AuthFailed, Addr: "admin"},  // bare login guess → host-wide
+		{Kind: AuthFailed, Addr: "x8f3zz"}, // random guess → host-wide
+		{Kind: AuthFailed, Addr: ""},       // already host-wide
+	}
+	r := Aggregate(evs)
+	if r.AuthFailByMailbox["victim@nac.gr"] != 2 {
+		t.Fatalf("real mailbox miscounted: %v", r.AuthFailByMailbox)
+	}
+	if r.AuthFailByMailbox[""] != 3 {
+		t.Fatalf("junk/empty usernames not folded host-wide: %v", r.AuthFailByMailbox)
+	}
+	if _, ok := r.AuthFailByMailbox["admin"]; ok {
+		t.Fatalf("non-mailbox guess leaked its own row: %v", r.AuthFailByMailbox)
+	}
+}
+
+// Exim local sendmail (PHP/cron) submissions tally per unix user, separate from
+// the SMTP-authenticated senders.
+func TestAggregateLocalSubmit(t *testing.T) {
+	evs := []Event{
+		ParseEximLine(`2026-08-07 12:00:01 1a-b-c <= x@y U=evafeiadis P=local S=1`),
+		ParseEximLine(`2026-08-07 12:00:02 1a-b-d <= x@y U=evafeiadis P=local S=1`),
+		ParseEximLine(`2026-08-07 12:00:03 1a-b-e <= s@d H=(h) [10.0.0.5]:5 P=esmtpa A=dovecot_login:s@d S=1`),
+	}
+	r := Aggregate(evs)
+	if r.LocalSubmitByUser["evafeiadis"] != 2 || r.LocalSubmitTotal != 2 {
+		t.Fatalf("local submit miscounted: byuser=%v total=%d", r.LocalSubmitByUser, r.LocalSubmitTotal)
+	}
+	if r.OutboundBySender["s@d"] != 1 || r.OutboundTotal != 1 {
+		t.Fatalf("SMTP sender should not mix with local submitters: %v", r.OutboundBySender)
+	}
+}
+
 func TestTopNDeterministicOrder(t *testing.T) {
 	m := map[string]int{"a@x": 5, "b@x": 5, "c@x": 9, "d@x": 1}
 	got := TopN(m, 3)

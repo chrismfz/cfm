@@ -22,9 +22,18 @@
 // authenticated sender on the single `<=` arrival line. Aggregate handles both:
 // OutboundSent with an empty Addr is resolved through the sender map, while
 // OutboundSent that already carries its Addr (Exim) is counted directly.
+//
+// One cross-MTA caveat: Postfix logs one status=sent line per recipient, so a
+// message fanned out to N recipients counts as N outbound (recipient-deliveries),
+// whereas Exim's `<=` is one event per message. For the abuse view "recipients
+// fanned out" is the more useful signal, and a host runs a single MTA, so the
+// difference never mixes within one host's numbers.
 package mailmeter
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // Kind classifies a parsed mail-log line.
 type Kind int
@@ -33,6 +42,7 @@ const (
 	None         Kind = iota
 	AuthSender        // Postfix submission: QID authenticated as Addr (sasl_username). Populates correlation only.
 	OutboundSent      // a message left the server for a local sender. Addr set (Exim) or resolved via ID (Postfix).
+	LocalSubmit       // a local script/cron submission (Exim `U=user P=local`); Addr = the submitting local user.
 	InboundLocal      // a message delivered into local mailbox Addr.
 	Rejected          // an inbound recipient permanently (5xx) rejected — host-wide, no Addr.
 	OverQuota         // a message rejected/bounced because recipient Addr is over quota.
@@ -62,19 +72,22 @@ type Report struct {
 	Window string `json:"window,omitempty"`
 
 	OutboundBySender   map[string]int `json:"-"`
+	LocalSubmitByUser  map[string]int `json:"-"` // Exim local-script (PHP/cron) submitters, keyed on unix user
 	InboundByMailbox   map[string]int `json:"-"`
 	OverQuotaByMailbox map[string]int `json:"-"`
 	ThrottledBySender  map[string]int `json:"-"`
 	AuthFailByMailbox  map[string]int `json:"-"` // key "" = host-wide failures
 
-	OutboundTotal int `json:"outbound_total"`
-	InboundTotal  int `json:"inbound_total"`
-	RejectedTotal int `json:"rejected_total"`
+	OutboundTotal    int `json:"outbound_total"`
+	LocalSubmitTotal int `json:"local_submit_total"`
+	InboundTotal     int `json:"inbound_total"`
+	RejectedTotal    int `json:"rejected_total"`
 }
 
 func newReport() Report {
 	return Report{
 		OutboundBySender:   map[string]int{},
+		LocalSubmitByUser:  map[string]int{},
 		InboundByMailbox:   map[string]int{},
 		OverQuotaByMailbox: map[string]int{},
 		ThrottledBySender:  map[string]int{},
@@ -103,6 +116,11 @@ func Aggregate(events []Event) Report {
 				r.OutboundBySender[addr]++
 				r.OutboundTotal++
 			}
+		case LocalSubmit:
+			if ev.Addr != "" {
+				r.LocalSubmitByUser[ev.Addr]++
+				r.LocalSubmitTotal++
+			}
 		case InboundLocal:
 			if ev.Addr != "" {
 				r.InboundByMailbox[ev.Addr]++
@@ -119,7 +137,16 @@ func Aggregate(events []Event) Report {
 				r.ThrottledBySender[ev.Addr]++
 			}
 		case AuthFailed:
-			r.AuthFailByMailbox[ev.Addr]++ // "" host-wide bucket is intentional
+			// Fold empty / non-mailbox / oversized usernames into the host-wide
+			// bucket. The tried username is ATTACKER-CONTROLLED, so a password
+			// spray with random distinct usernames would otherwise grow this map
+			// without bound and drown the real "top targeted mailboxes" view. A
+			// bare login name (no "@") is a spray guess, not one of our mailboxes.
+			if isMailbox(ev.Addr) {
+				r.AuthFailByMailbox[ev.Addr]++
+			} else {
+				r.AuthFailByMailbox[""]++
+			}
 		case QueueDone:
 			delete(sender, ev.ID)
 		}
@@ -145,6 +172,13 @@ func TopN(m map[string]int, n int) []AddrCount {
 		out = out[:n]
 	}
 	return out
+}
+
+// isMailbox reports whether s looks like one of our mailbox addresses rather
+// than an attacker-supplied login guess: it must contain "@" and fit the
+// RFC 5321 forward-path limit. Matches NGM's collector guard.
+func isMailbox(s string) bool {
+	return len(s) <= 254 && strings.IndexByte(s, '@') >= 0
 }
 
 // lower lowercases an ASCII mailbox address without allocating for the common

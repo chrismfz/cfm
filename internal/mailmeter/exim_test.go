@@ -32,9 +32,9 @@ func TestParseEximLine(t *testing.T) {
 			Event{Kind: None},
 		},
 		{
-			"local submission (cron/PHP, P=local) is not attributed to a mailbox in 1a",
-			`2026-08-07 12:00:04 1uKq9u-0002Ae-0L <= root@server.example U=root P=local S=512`,
-			Event{Kind: None},
+			"local sendmail submission (cron/PHP, P=local) keyed on the unix user",
+			`2026-08-07 12:00:04 1uKq9u-0002Ae-0L <= root@server.example U=evafeiadis P=local S=512`,
+			Event{Kind: LocalSubmit, ID: "1uKq9u-0002Ae-0L", Addr: "evafeiadis"},
 		},
 		{
 			"a delivery (=>) line is not an arrival — deferred to the collector stage",

@@ -20,10 +20,12 @@ back-filled here — see the git/PR history for that period.
 ### Added
 - **Mail Monitor foundation — `internal/mailmeter` (parser leaf)** — an
   MTA-agnostic, pure (no I/O, no clock) metering core that turns mail-server log
-  lines into per-mailbox counters: outbound-by-sender, inbound-by-mailbox,
-  over-quota, rate-limited (throttled), and failed-login tallies, correlating
-  Postfix sends by queue-id and counting Exim authenticated `<=` submissions
-  directly. Groundwork for the coming "who is sending a lot / which account is
+  lines into per-mailbox counters: outbound-by-sender, local-script submissions
+  (Exim PHP/cron `sendmail`, keyed on the unix user — the dominant cPanel spam
+  path), inbound-by-mailbox, over-quota, rate-limited (throttled), and
+  failed-login tallies, correlating Postfix sends by queue-id and counting Exim
+  authenticated `<=` submissions directly. Attacker-controlled failed-login
+  usernames fold to a host-wide bucket so a password spray can't bloat the view. Groundwork for the coming "who is sending a lot / which account is
   compromised" view; no operator-facing surface yet (the tailing collector,
   persistence and MCP/API/WebUI reads land in a follow-up). Postfix+Dovecot
   parsing is ported from NGM's field-validated parser; Exim regexes are lifted
