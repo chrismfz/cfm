@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
+	"strings"
 	"time"
 
+	"cfm/internal/firewall/feedutil"
 	"cfm/internal/logging"
 
 	"github.com/google/nftables"
@@ -151,6 +153,17 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 		err = fmt.Errorf("nftlib ReplaceSetFlushAdd %s: %w", setName, e)
 		return err
 	}
+
+	// Interval (nets) sets: de-overlap the CIDRs first, exactly as the exec-nft
+	// backend does. The kernel rejects overlapping/adjacent interval elements with
+	// ENOTEMPTY ("directory not empty"); nft merges them in userspace, netlink does
+	// not, so we must feed a clean, non-overlapping set. Shared impl (no drift).
+	if strings.Contains(setName, "_v4_nets") {
+		elems = feedutil.NormalizeCIDRsV4(elems)
+	} else if strings.Contains(setName, "_v6_nets") {
+		elems = feedutil.NormalizeCIDRsV6(elems)
+	}
+	n = len(elems)
 
 	// Skip-if-unchanged, permanent (no-TTL) sets only.
 	permanent := ttl == nil
