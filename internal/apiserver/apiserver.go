@@ -201,6 +201,7 @@ func Start(
 	RegisterBlock(m, be)
 	RegisterFirewallList(m, be)
 	RegisterFirewallSelfTest(m, be) // read-only nftlib self-diagnostics
+	RegisterChallengeList(m, be)    // read-only DNAT challenge-set dump (loop debug)
 	RegisterSearch(m, be, cfgDir)   // read-only multi-source IP lookup
 
 	// ── System status ─────────────────────────────────────────────────────────
