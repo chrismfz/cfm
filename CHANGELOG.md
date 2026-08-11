@@ -18,6 +18,18 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **nftlib: serialize all shared-netlink-socket reads under the backend mutex —
+  fixes a connection desync that wedged the firewall backend.** `b.conn` (a single
+  `*nftables.Conn` / netlink socket) is not safe for concurrent use, but four
+  telemetry/feed read paths released `b.mu` before reading it
+  (`DumpFloodCounters`' `GetObjects`, `getSetIPStrings`/`dumpPortscanPairsNative`'s
+  `GetSetElements`, `listSetsByPrefix`' `GetSets`). Racing a locked writer on the
+  same socket produced `unexpected header type` (observed live as
+  `[flood] cannot list counters: unexpected header type`) and left the socket
+  desynced, after which subsequent operations could hang holding `b.mu` — wedging
+  every firewall op, including the post-solve challenge release (which is what
+  turned into the "Checking your browser" loop). All four now hold `b.mu` across
+  the read; the shared connection is only ever touched under the lock.
 - **Challenge solve no longer blocks on the firewall backend in edge mode — fixes
   an endless "Checking your browser" loop on nftlib nodes.** In OpenResty/edge
   mode the challenge is enforced in-path (Lua clearance cookie) and the source IP

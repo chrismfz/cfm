@@ -50,14 +50,17 @@ func (b *Backend) DumpFloodCounters() {
 func (b *Backend) dumpFloodCountersOnce() {
 	b.mu.Lock()
 	t, err := b.lookupTable()
-	b.mu.Unlock()
 	if err != nil {
+		b.mu.Unlock()
 		_ = b.EnsureBase()
 		logging.Logf("[flood] cannot get table: %v", err)
 		return
 	}
-
+	// b.conn wraps a single netlink socket and is NOT safe for concurrent use;
+	// this read MUST hold b.mu (releasing before GetObjects let it race a locked
+	// writer on the same socket → "unexpected header type" desync → wedge).
 	objs, err := b.conn.GetObjects(t)
+	b.mu.Unlock()
 	if err != nil {
 		logging.Logf("[flood] cannot list counters: %v", err)
 		return
@@ -194,11 +197,13 @@ func (b *Backend) dumpThrottledIPsNative() {
 func (b *Backend) getSetIPStrings(setName string) []string {
 	b.mu.Lock()
 	set, err := b.lookupSet(setName)
-	b.mu.Unlock()
 	if err != nil {
+		b.mu.Unlock()
 		return nil
 	}
+	// Hold b.mu across the netlink read — b.conn is a single shared socket.
 	elems, err := b.conn.GetSetElements(set)
+	b.mu.Unlock()
 	if err != nil {
 		return nil
 	}
@@ -644,12 +649,13 @@ func (b *Backend) dumpPortscanPairsNative() (tcp, udp map[string]map[int]struct{
 
 		b.mu.Lock()
 		set, err := b.lookupSet(setName)
-		b.mu.Unlock()
 		if err != nil {
+			b.mu.Unlock()
 			return m
 		}
-
+		// Hold b.mu across the netlink read — b.conn is a single shared socket.
 		elems, err := b.conn.GetSetElements(set)
+		b.mu.Unlock()
 		if err != nil {
 			return m
 		}

@@ -217,12 +217,15 @@ func (b *Backend) RemoveFeedByKey(feedKey string) error {
 func (b *Backend) listSetsByPrefix(prefixes ...string) ([]string, error) {
 	b.mu.Lock()
 	t, err := b.lookupTable()
-	b.mu.Unlock()
 	if err != nil {
+		b.mu.Unlock()
 		return nil, err
 	}
-
+	// Hold b.mu across the netlink read — b.conn is a single shared socket and is
+	// not safe for concurrent use (an unlocked read here races a locked writer and
+	// desyncs the socket: "unexpected header type").
 	sets, err := b.conn.GetSets(t)
+	b.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("nftlib listSetsByPrefix: %w", err)
 	}
