@@ -49,8 +49,9 @@ const (
 	wwLoadWarnRatio = 4.0 // load_avg_5 ÷ cpu_threads (sustained load vs cores)
 	wwLoadCritRatio = 8.0
 
-	wwMemAvailWarnPct = 5.0  // warn when <5% of RAM is available (accounts for cache)
-	wwSwapWarnPct     = 50.0 // warn when >50% of swap is in use
+	wwMemAvailWarnPct     = 5.0  // warn when <5% of RAM is available (accounts for cache)
+	wwMemPressureAvailPct = 10.0 // swap only counts as pressure when RAM is also this tight
+	wwSwapWarnPct         = 50.0 // ...AND at least this much swap is in use
 
 	wwConntrackWarnPct = 90.0
 	wwConntrackCritPct = 98.0
@@ -219,6 +220,26 @@ func summarize(counts map[string]int) string {
 	return strings.Join(parts, ", ")
 }
 
+// readonlyImageFS reports read-only image filesystems that legitimately sit at
+// ~100% used (snaps, mounted ISOs), so a disk-fullness rule must skip them.
+func readonlyImageFS(fsType string) bool {
+	switch fsType {
+	case "squashfs", "iso9660", "erofs", "cramfs", "romfs":
+		return true
+	}
+	return false
+}
+
+// catRank orders a category within a severity tier. An unmapped category sorts
+// LAST (not first), so adding a category without a categoryOrder entry degrades
+// gracefully instead of silently jumping to the top.
+func catRank(c string) int {
+	if r, ok := categoryOrder[c]; ok {
+		return r
+	}
+	return len(categoryOrder) + 1
+}
+
 func sevRank(s string) int {
 	switch s {
 	case sevCritical:
@@ -235,7 +256,7 @@ func sortFindings(fs []finding) {
 		if a, b := sevRank(fs[i].Severity), sevRank(fs[j].Severity); a != b {
 			return a < b
 		}
-		if a, b := categoryOrder[fs[i].Category], categoryOrder[fs[j].Category]; a != b {
+		if a, b := catRank(fs[i].Category), catRank(fs[j].Category); a != b {
 			return a < b
 		}
 		return fs[i].Title < fs[j].Title
@@ -245,9 +266,12 @@ func sortFindings(fs []finding) {
 // ── per-section evaluators ──────────────────────────────────────────────────────
 
 func evalHealth(body json.RawMessage) []finding {
+	// Note: a snapshot with a total-collector-panic `error` set carries no host/disk
+	// data, and the section-error stub check in usable() already routes such a body
+	// to an errored source before we get here — so there is no h.Error rule; when we
+	// reach this point the snapshot has real data to evaluate.
 	var h struct {
-		Error string `json:"error"`
-		Host  struct {
+		Host struct {
 			Load5      float64 `json:"load_avg_5"`
 			CPUThreads int     `json:"cpu_threads"`
 			MemTotal   uint64  `json:"mem_total_bytes"`
@@ -258,6 +282,7 @@ func evalHealth(body json.RawMessage) []finding {
 		Disk struct {
 			Mounts []struct {
 				Mount        string  `json:"mount"`
+				FSType       string  `json:"fs_type"`
 				UsedPct      float64 `json:"used_pct"`
 				InodeUsedPct float64 `json:"inode_used_pct"`
 				TotalInodes  uint64  `json:"total_inodes"`
@@ -279,11 +304,6 @@ func evalHealth(body json.RawMessage) []finding {
 	}
 	var fs []finding
 
-	if strings.TrimSpace(h.Error) != "" {
-		fs = append(fs, finding{sevWarning, "health", "health snapshot reported an error",
-			h.Error, "system_health", nil})
-	}
-
 	// Edge / frontend liveness — act only on explicit bad enums.
 	switch h.Runtime.FrontendWorking {
 	case "down":
@@ -302,8 +322,13 @@ func evalHealth(body json.RawMessage) []finding {
 			strings.TrimSpace("edge service reports degraded. " + h.Runtime.EdgeReason), "service_status", nil})
 	}
 
-	// Disk fullness + inode exhaustion, per real mount.
+	// Disk fullness + inode exhaustion, per real mount. Read-only image
+	// filesystems (squashfs/iso9660/erofs — snaps, mounted ISOs) sit at 100% by
+	// design and are pure noise here, so skip them.
 	for _, m := range h.Disk.Mounts {
+		if readonlyImageFS(m.FSType) {
+			continue
+		}
 		switch {
 		case m.UsedPct >= wwDiskCritPct:
 			fs = append(fs, finding{sevCritical, "disk", "disk almost full: " + m.Mount,
@@ -338,18 +363,24 @@ func evalHealth(body json.RawMessage) []finding {
 	}
 
 	// Memory available (accounts for reclaimable cache) + swap pressure.
-	if h.Host.MemTotal > 0 && h.Host.MemAvail > 0 {
-		availPct := float64(h.Host.MemAvail) / float64(h.Host.MemTotal) * 100
+	availKnown := h.Host.MemTotal > 0 && h.Host.MemAvail > 0
+	availPct := 0.0
+	if availKnown {
+		availPct = float64(h.Host.MemAvail) / float64(h.Host.MemTotal) * 100
 		if availPct < wwMemAvailWarnPct {
 			fs = append(fs, finding{sevWarning, "memory", "low free memory",
 				fmt.Sprintf("only %.1f%% of RAM available", availPct), "process_list", nil})
 		}
 	}
-	if h.Host.SwapTotal > 0 {
+	// Swap OCCUPANCY alone is normal — with default swappiness the kernel parks
+	// idle anonymous pages in swap on a perfectly healthy box. Only flag swap when
+	// it is heavily used AND RAM is genuinely tight (real memory pressure), and
+	// only when mem_available is known (0 = unknown, don't guess).
+	if h.Host.SwapTotal > 0 && availKnown && availPct < wwMemPressureAvailPct {
 		swapPct := float64(h.Host.SwapUsed) / float64(h.Host.SwapTotal) * 100
 		if swapPct >= wwSwapWarnPct {
-			fs = append(fs, finding{sevWarning, "memory", "swap pressure",
-				fmt.Sprintf("%.1f%% of swap in use", swapPct), "process_list", nil})
+			fs = append(fs, finding{sevWarning, "memory", "memory pressure (swapping)",
+				fmt.Sprintf("%.1f%% RAM available with %.1f%% of swap in use", availPct, swapPct), "process_list", nil})
 		}
 	}
 
@@ -393,9 +424,13 @@ func evalServices(body json.RawMessage) []finding {
 			fs = append(fs, finding{sevCritical, "service", "service failed: " + u.Unit,
 				fmt.Sprintf("%s active=%s sub=%s", u.Unit, u.Active, u.Sub), "service_status",
 				map[string]any{"units": u.Unit}})
-		case u.Active == "inactive" && u.Enabled == "enabled":
+		case u.Active == "inactive" && u.Enabled == "enabled" && u.Sub != "exited":
+			// sub=="exited" is a cleanly-completed oneshot (enabled + inactive is
+			// normal for it), not a fault. whats_wrong only ever reads the curated
+			// long-running set (no units= arg), so oneshots are unlikely here, but
+			// this keeps the rule safe if it is ever pointed at the full unit list.
 			fs = append(fs, finding{sevCritical, "service", "enabled service not running: " + u.Unit,
-				fmt.Sprintf("%s is enabled at boot but active=inactive", u.Unit), "service_status",
+				fmt.Sprintf("%s is enabled at boot but active=inactive (sub=%s)", u.Unit, u.Sub), "service_status",
 				map[string]any{"units": u.Unit}})
 		}
 		// Flapping is orthogonal to current state (a unit can be active yet restarting).
@@ -444,6 +479,11 @@ func evalMailQueue(body json.RawMessage, sources map[string]string) []finding {
 		sources["mail_queue"] = "unavailable"
 		return nil
 	}
+	// Deliberately keyed on FROZEN only, not deferred. Deferred messages are the
+	// normal retry/greylisting backlog and swing widely on a healthy node, so
+	// thresholding them would over-flag; frozen messages are genuinely stuck. A
+	// pure-deferred outage is therefore an accepted blind spot for this tool (use
+	// mail_queue_summary to see the deferred count + reasons).
 	switch {
 	case q.Report.Frozen >= wwMailFrozenCrit:
 		return []finding{{sevCritical, "mail_queue", "large frozen mail backlog",
@@ -492,6 +532,12 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 		// this is a "look at this account" signal, not proof of compromise.
 		fs = append(fs, finding{sevWarning, "mail", title, detail, "mail_traffic", nil})
 	}
+	// Don't silently drop the tail — say how many more there are (a mass compromise
+	// can far exceed the cap), pointing at mail_traffic for the full list.
+	if extra := len(t.Traffic.Anomalies) - wwMailAnomalyCap; extra > 0 {
+		fs = append(fs, finding{sevWarning, "mail", "more outbound-mail anomalies",
+			fmt.Sprintf("%d more sender anomaly(ies) beyond the top %d shown", extra, wwMailAnomalyCap), "mail_traffic", nil})
+	}
 	return fs
 }
 
@@ -524,12 +570,19 @@ func evalAnomalies(body json.RawMessage) []finding {
 	if a.Count >= wwAPIAnomalyWarnCount {
 		sev = sevWarning
 	}
-	return []finding{{sev, "abuse", "API-abuse anomalies detected",
-		fmt.Sprintf("%d anomaly event(s) over the window; %s", a.Count, topSignals(sig)), "system_health", nil}}
+	detail := fmt.Sprintf("%d anomaly event(s) over the window", a.Count)
+	if ts := topSignals(sig); ts != "" {
+		detail += "; " + ts
+	}
+	return []finding{{sev, "abuse", "API-abuse anomalies detected", detail, "system_health", nil}}
 }
 
-// topSignals renders the up-to-3 most frequent signal names as "sig(n), sig(n)".
+// topSignals renders the up-to-3 most frequent signal names as "top: sig(n), …",
+// or "" when there are none (so the caller omits a dangling label).
 func topSignals(sig map[string]int) string {
+	if len(sig) == 0 {
+		return ""
+	}
 	type kv struct {
 		k string
 		n int

@@ -261,8 +261,9 @@ func TestWhatsWrong_MailTrafficAnomalies(t *testing.T) {
 		{"addr":"g@x","recent":1,"ratio":3,"kind":"spike"}
 	]}}`
 	got := evalMailTraffic(json.RawMessage(body), src)
-	if len(got) != wwMailAnomalyCap {
-		t.Fatalf("expected cap=%d mail findings, got %d", wwMailAnomalyCap, len(got))
+	// 5 capped individual findings + 1 "more" indicator (7 anomalies, cap 5).
+	if len(got) != wwMailAnomalyCap+1 {
+		t.Fatalf("expected %d findings (cap + indicator), got %d: %+v", wwMailAnomalyCap+1, len(got), got)
 	}
 	for _, f := range got {
 		if f.Severity != sevWarning || f.Category != "mail" {
@@ -271,6 +272,15 @@ func TestWhatsWrong_MailTrafficAnomalies(t *testing.T) {
 	}
 	if !strings.Contains(got[0].Detail, "no prior baseline") {
 		t.Errorf("new-sender detail wrong: %q", got[0].Detail)
+	}
+	last := got[len(got)-1]
+	if !strings.Contains(last.Title, "more outbound-mail") || !strings.Contains(last.Detail, "2 more") {
+		t.Errorf("expected a '2 more' indicator finding, got %+v", last)
+	}
+	// At/under the cap: no indicator finding.
+	small := evalMailTraffic(json.RawMessage(`{"available":true,"traffic":{"anomalies":[{"addr":"a@x","recent":9,"ratio":5,"kind":"spike"}]}}`), src)
+	if len(small) != 1 {
+		t.Fatalf("expected exactly 1 finding under the cap, got %+v", small)
 	}
 }
 
@@ -291,6 +301,97 @@ func TestWhatsWrong_APIAnomaliesSeverity(t *testing.T) {
 	// count 0 ⇒ nothing.
 	if n := evalAnomalies(json.RawMessage(`{"count":0,"anomalies":[]}`)); len(n) != 0 {
 		t.Fatalf("count=0 must not flag, got %+v", n)
+	}
+}
+
+// Boundary pins: a value just BELOW each threshold must NOT flag, and the exact
+// threshold must. These fail if a threshold is loosened (lowered), which is the
+// over-flag regression the whole tool is built to avoid.
+func TestWhatsWrong_ThresholdBoundaries(t *testing.T) {
+	// Disk: 89.999% clear, 90.0% warns.
+	if fs := evalHealth(json.RawMessage(`{"disk":{"mounts":[{"mount":"/","used_pct":89.999}]}}`)); countCat(fs, "disk") != 0 {
+		t.Errorf("disk 89.999%% should not flag, got %+v", fs)
+	}
+	if fs := evalHealth(json.RawMessage(`{"disk":{"mounts":[{"mount":"/","used_pct":90.0}]}}`)); findBy(fs, "disk", sevWarning) == nil {
+		t.Errorf("disk 90.0%% should warn, got %+v", fs)
+	}
+	// Load: ratio 3.99 clear, 4.0 warns (cpu_threads=10 ⇒ load 39.9 vs 40).
+	if fs := evalHealth(json.RawMessage(`{"host":{"load_avg_5":39.9,"cpu_threads":10}}`)); countCat(fs, "load") != 0 {
+		t.Errorf("load ratio 3.99 should not flag, got %+v", fs)
+	}
+	if fs := evalHealth(json.RawMessage(`{"host":{"load_avg_5":40.0,"cpu_threads":10}}`)); findBy(fs, "load", sevWarning) == nil {
+		t.Errorf("load ratio 4.0 should warn, got %+v", fs)
+	}
+	// MySQL: 84.99% clear, 85.0% warns.
+	if fs := evalMySQL(json.RawMessage(`{"conn_pct":84.99,"total":85,"max":100}`)); len(fs) != 0 {
+		t.Errorf("mysql 84.99%% should not flag, got %+v", fs)
+	}
+	if fs := evalMySQL(json.RawMessage(`{"conn_pct":85.0,"total":85,"max":100}`)); findBy(fs, "mysql", sevWarning) == nil {
+		t.Errorf("mysql 85.0%% should warn, got %+v", fs)
+	}
+	// Mail queue: 99 frozen clear, 100 warns.
+	src := map[string]string{}
+	if fs := evalMailQueue(json.RawMessage(`{"available":true,"report":{"frozen":99}}`), src); len(fs) != 0 {
+		t.Errorf("99 frozen should not flag, got %+v", fs)
+	}
+	if fs := evalMailQueue(json.RawMessage(`{"available":true,"report":{"frozen":100}}`), src); findBy(fs, "mail_queue", sevWarning) == nil {
+		t.Errorf("100 frozen should warn, got %+v", fs)
+	}
+}
+
+// Read-only image filesystems (squashfs/iso9660/erofs) sit at 100% by design and
+// must never be flagged — the classic snap/ISO false positive.
+func TestWhatsWrong_ReadOnlyFSNotFlagged(t *testing.T) {
+	fs := evalHealth(json.RawMessage(`{"disk":{"mounts":[
+		{"mount":"/snap/core/1","fs_type":"squashfs","used_pct":100},
+		{"mount":"/mnt/iso","fs_type":"iso9660","used_pct":100},
+		{"mount":"/mnt/img","fs_type":"erofs","used_pct":100},
+		{"mount":"/","fs_type":"ext4","used_pct":40}
+	]}}`))
+	if countCat(fs, "disk") != 0 {
+		t.Fatalf("read-only image FS at 100%% must not flag (and ext4 at 40%% is fine), got %+v", fs)
+	}
+	// But a real writable FS at 100% still flags.
+	full := evalHealth(json.RawMessage(`{"disk":{"mounts":[{"mount":"/","fs_type":"ext4","used_pct":100}]}}`))
+	if findBy(full, "disk", sevCritical) == nil {
+		t.Fatalf("writable ext4 at 100%% must flag critical, got %+v", full)
+	}
+}
+
+// Swap occupancy alone (plenty of free RAM) is NOT flagged — only swap heavy-use
+// combined with genuinely tight RAM counts as memory pressure.
+func TestWhatsWrong_SwapNeedsMemoryPressure(t *testing.T) {
+	// 60% swap used but 40% RAM available ⇒ healthy, no finding.
+	healthy := evalHealth(json.RawMessage(`{"host":{"mem_total_bytes":1000,"mem_available_bytes":400,"swap_total_bytes":1000,"swap_used_bytes":600}}`))
+	if countCat(healthy, "memory") != 0 {
+		t.Fatalf("swap occupancy with ample free RAM must not flag, got %+v", healthy)
+	}
+	// 60% swap AND only 8% RAM available ⇒ real pressure, warn.
+	pressured := evalHealth(json.RawMessage(`{"host":{"mem_total_bytes":1000,"mem_available_bytes":80,"swap_total_bytes":1000,"swap_used_bytes":600}}`))
+	if findBy(pressured, "memory", sevWarning) == nil {
+		t.Fatalf("swap heavy-use with tight RAM must warn, got %+v", pressured)
+	}
+	// Swap heavy but mem_available unknown (0) ⇒ can't confirm pressure ⇒ no flag.
+	unknown := evalHealth(json.RawMessage(`{"host":{"mem_total_bytes":1000,"mem_available_bytes":0,"swap_total_bytes":1000,"swap_used_bytes":900}}`))
+	if countCat(unknown, "memory") != 0 {
+		t.Fatalf("swap with unknown mem_available must not flag, got %+v", unknown)
+	}
+}
+
+// A cleanly-completed enabled oneshot (inactive + sub=exited) is not a fault.
+func TestWhatsWrong_OneshotNotFlagged(t *testing.T) {
+	fs := evalServices(json.RawMessage(`{"services":[
+		{"unit":"once.service","load":"loaded","active":"inactive","sub":"exited","enabled":"enabled","restarts":0}
+	]}`))
+	if countCat(fs, "service") != 0 {
+		t.Fatalf("clean oneshot (inactive+exited) must not flag, got %+v", fs)
+	}
+	// But inactive+dead+enabled (a crashed long-running unit) still flags.
+	dead := evalServices(json.RawMessage(`{"services":[
+		{"unit":"daemon.service","load":"loaded","active":"inactive","sub":"dead","enabled":"enabled","restarts":0}
+	]}`))
+	if findBy(dead, "service", sevCritical) == nil {
+		t.Fatalf("enabled inactive+dead unit must flag, got %+v", dead)
 	}
 }
 
