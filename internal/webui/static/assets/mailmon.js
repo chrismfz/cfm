@@ -48,6 +48,10 @@
     authFailBody:  document.getElementById('authFailBody'),
     throttledBody: document.getElementById('throttledBody'),
     overQuotaBody: document.getElementById('overQuotaBody'),
+    delivCard:     document.getElementById('delivCard'),
+    delivTotals:   document.getElementById('delivTotals'),
+    delivProviderBody: document.getElementById('delivProviderBody'),
+    delivReasonBody:   document.getElementById('delivReasonBody'),
     hoursSel:      document.getElementById('hoursSel'),
     autoState:     document.getElementById('autoState'),
     refreshBtn:    document.getElementById('refreshBtn'),
@@ -121,6 +125,30 @@
     rows(el.authFailBody, data.top_auth_failed);
     rows(el.throttledBody, data.top_throttled);
     rows(el.overQuotaBody, data.top_over_quota);
+    renderDeliverability(data.deliverability); // admin-only; absent for scoped
+  }
+
+  // renderDeliverability shows the per-provider outcome matrix + top reasons.
+  // The block is admin-only (server omits it for scoped callers), so the card
+  // hides entirely when it's absent.
+  function renderDeliverability(dl) {
+    if (!el.delivCard) return;
+    if (!dl) { el.delivCard.style.display = 'none'; return; }
+    el.delivCard.style.display = '';
+    el.delivTotals.textContent =
+      `delivered ${Number(dl.delivered) || 0} · deferred ${Number(dl.deferred) || 0} · bounced ${Number(dl.bounced) || 0}`;
+
+    const provs = Array.isArray(dl.by_provider) ? dl.by_provider : [];
+    el.delivProviderBody.innerHTML = provs.length
+      ? provs.map((p) =>
+          `<tr><td>${escapeHTML(p.provider || '(unknown)')}</td>` +
+          `<td>${Number(p.delivered) || 0}</td><td>${Number(p.deferred) || 0}</td><td>${Number(p.bounced) || 0}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="muted">(none)</td></tr>';
+
+    const reasons = Array.isArray(dl.top_reasons) ? dl.top_reasons : [];
+    el.delivReasonBody.innerHTML = reasons.length
+      ? reasons.map((r) => `<tr><td>${escapeHTML(r.reason)}</td><td>${Number(r.count) || 0}</td></tr>`).join('')
+      : '<tr><td colspan="2" class="muted">(none)</td></tr>';
   }
 
   function renderUnavailable(note) {
@@ -128,6 +156,7 @@
     el.totals.innerHTML = '';
     [el.outBody, el.domBody, el.localBody, el.inBody, el.authFailBody, el.throttledBody, el.overQuotaBody]
       .forEach((b) => { if (b) b.innerHTML = ''; });
+    if (el.delivCard) el.delivCard.style.display = 'none';
     el.unavailable.style.display = '';
     el.unavailable.textContent = note || 'Mail-traffic collector not enabled yet (no counters collected).';
   }

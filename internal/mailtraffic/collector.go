@@ -63,12 +63,14 @@ func (c *Collector) run() {
 	}
 }
 
+type parseDeliveryFn func(string) (mailmeter.Delivery, bool)
+
 func (c *Collector) pollOnce(now time.Time) {
 	if p := firstExisting(eximPaths); p != "" {
-		c.pollFile(now, p, mailmeter.ParseEximLine)
+		c.pollFile(now, p, mailmeter.ParseEximLine, mailmeter.ParseEximDelivery)
 	}
 	if p := firstExisting(maillogPaths); p != "" {
-		c.pollFile(now, p, mailmeter.ParseMaillogLine)
+		c.pollFile(now, p, mailmeter.ParseMaillogLine, mailmeter.ParsePostfixDelivery)
 	}
 }
 
@@ -85,7 +87,7 @@ func (c *Collector) pollOnce(now time.Time) {
 // double-counted; the chunk is re-read next poll and the QID→sender map may have
 // already advanced past a freed QID, undercounting at most the sends whose
 // submission was in an earlier already-persisted poll — acceptable here.
-func (c *Collector) pollFile(now time.Time, path string, parse parseFn) {
+func (c *Collector) pollFile(now time.Time, path string, parse parseFn, parseDeliv parseDeliveryFn) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return
@@ -124,6 +126,7 @@ func (c *Collector) pollFile(now time.Time, path string, parse parseFn) {
 		c.corr[path] = corr
 	}
 	r := mailmeter.NewReport()
+	deliv := map[DeliveryKey]int64{}
 
 	rd := bufio.NewReaderSize(f, 256<<10)
 	var consumed int64
@@ -134,11 +137,15 @@ func (c *Collector) pollFile(now time.Time, path string, parse parseFn) {
 		}
 		consumed += int64(len(line))
 		corr.Feed(parse(line), &r)
+		if d, ok := parseDeliv(line); ok {
+			deliv[DeliveryKey{Provider: d.Provider, Outcome: int(d.Outcome), Reason: d.Reason}]++
+		}
 	}
 
-	// Counters + new offset commit together (Flush is one transaction); on error
-	// neither lands, so the chunk is simply re-read next poll — never double-counted.
-	if err := c.st.Flush(now, r, path, inode, offset+consumed); err != nil {
+	// Per-mailbox counters, remote-delivery counters, and the new offset commit
+	// together (Flush is one transaction); on error none land, so the chunk is
+	// simply re-read next poll — never double-counted.
+	if err := c.st.Flush(now, r, deliv, path, inode, offset+consumed); err != nil {
 		logging.Logf("[mailtraffic] flush failed for %s: %v", path, err)
 	}
 }

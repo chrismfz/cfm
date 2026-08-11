@@ -105,7 +105,17 @@ CREATE TABLE IF NOT EXISTS mail_tailpos (
 	path   TEXT PRIMARY KEY,
 	inode  INTEGER NOT NULL,
 	offset INTEGER NOT NULL
-);`
+);
+
+CREATE TABLE IF NOT EXISTS mail_delivery (
+	bucket   INTEGER NOT NULL,   -- unix epoch truncated to the hour
+	provider TEXT    NOT NULL,   -- google | microsoft | yahoo | apple | <registrable domain> | "" (unknown)
+	outcome  INTEGER NOT NULL,   -- mailmeter.Outcome: 1 delivered, 2 deferred, 3 bounced
+	reason   TEXT    NOT NULL,   -- normalized reason family ("" for a clean delivery)
+	n        INTEGER NOT NULL,
+	PRIMARY KEY (bucket, provider, outcome, reason)
+);
+CREATE INDEX IF NOT EXISTS mail_delivery_bucket ON mail_delivery(bucket);`
 
 // bucketOf truncates t to the start of its hour (unix seconds).
 func bucketOf(t time.Time) int64 {
@@ -187,14 +197,22 @@ func upsertCounters(tx *sql.Tx, bucket int64, rows map[string]*rowCounts) error 
 	return nil
 }
 
-// Flush atomically applies one poll's counters AND advances the tail position
-// for path in a SINGLE transaction. Atomicity matters: if the counter upsert and
-// the offset save were separate writes, a failure of the second after the first
-// committed would leave the offset behind and the next poll would re-read and
-// double-count the same lines. All-or-nothing means a failed poll simply
-// re-reads cleanly next time. now is the poll time; the poll's lines are
-// attributed to now's hour (a meter, not exact per-line accounting).
-func (s *Store) Flush(now time.Time, r mailmeter.Report, path string, inode, offset int64) error {
+// DeliveryKey identifies a remote-delivery counter cell (see mail_delivery).
+// Outcome is a mailmeter.Outcome stored as its int value.
+type DeliveryKey struct {
+	Provider string
+	Outcome  int
+	Reason   string
+}
+
+// Flush atomically applies one poll's per-mailbox counters, its remote-delivery
+// counters, AND advances the tail position for path in a SINGLE transaction.
+// Atomicity matters: if these were separate writes, a failure after a partial
+// commit would leave the offset behind and the next poll would re-read and
+// double-count. All-or-nothing means a failed poll simply re-reads cleanly next
+// time. now is the poll time; the poll's lines are attributed to now's hour (a
+// meter, not exact per-line accounting).
+func (s *Store) Flush(now time.Time, r mailmeter.Report, deliv map[DeliveryKey]int64, path string, inode, offset int64) error {
 	rows := reportRows(r)
 	bucket := bucketOf(now)
 	s.wmu.Lock()
@@ -209,6 +227,12 @@ func (s *Store) Flush(now time.Time, r mailmeter.Report, path string, inode, off
 			return err
 		}
 	}
+	if len(deliv) > 0 {
+		if err := upsertDelivery(tx, bucket, deliv); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
 	if _, err := tx.Exec(
 		`INSERT INTO mail_tailpos(path,inode,offset) VALUES(?,?,?)
 		 ON CONFLICT(path) DO UPDATE SET inode=excluded.inode, offset=excluded.offset`,
@@ -217,6 +241,23 @@ func (s *Store) Flush(now time.Time, r mailmeter.Report, path string, inode, off
 		return err
 	}
 	return tx.Commit()
+}
+
+// upsertDelivery applies one poll's remote-delivery deltas within an open tx.
+func upsertDelivery(tx *sql.Tx, bucket int64, deliv map[DeliveryKey]int64) error {
+	stmt, err := tx.Prepare(`INSERT INTO mail_delivery(bucket,provider,outcome,reason,n)
+		VALUES(?,?,?,?,?)
+		ON CONFLICT(bucket,provider,outcome,reason) DO UPDATE SET n=n+excluded.n`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for k, v := range deliv {
+		if _, err := stmt.Exec(bucket, k.Provider, k.Outcome, k.Reason, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AddReport increments the hour-bucket counters from one poll's deltas, without
@@ -273,6 +314,7 @@ func (s *Store) pruneLoop() {
 				cutoff := bucketOf(time.Now().Add(-s.retention))
 				s.wmu.Lock()
 				_, _ = s.db.Exec(`DELETE FROM mail_counters WHERE bucket < ?`, cutoff)
+				_, _ = s.db.Exec(`DELETE FROM mail_delivery WHERE bucket < ?`, cutoff)
 				s.wmu.Unlock()
 			}
 		case <-s.stop:

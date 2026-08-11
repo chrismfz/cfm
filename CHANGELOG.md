@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Mail Monitor: outbound deliverability view** — `mail_traffic` / `GET /api/v1/mail/traffic`
+  and the cfm-admin "Mail Monitor" page now carry a `deliverability` block: per
+  remote provider (Gmail / Microsoft / Yahoo / …) **delivered / deferred /
+  bounced** counts plus the **top defer/bounce reasons**, normalized into stable
+  families (`spf-not-passed`, `unsolicited-rate-limited`, `unsolicited-blocked`,
+  `over-quota`, `no-such-user`, `retry-backoff`, …). Answers "is our mail
+  actually landing, and if not, why" — pair it with `mail_dns_check` for the
+  DNS-side cause. The collector parses exim `=>`/`**`/`==` and postfix
+  `status=sent|bounced|deferred` delivery lines (`internal/mailmeter`), storing
+  per-hour `mail_delivery(provider, outcome, reason)` counters. Admin-only
+  (delivery is host-wide, not per-tenant); deferred counts include exim retries.
 - **MCP tool `mail_dns_check` + `GET /api/v1/mail/dns`** — the DNS half of a
   deliverability diagnosis (`internal/maildns`). Live TXT lookups for a domain's
   **SPF** (present? more than one? `all` qualifier? does it list the server's
