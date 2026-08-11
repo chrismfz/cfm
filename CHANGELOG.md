@@ -17,6 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **`/unblock` now responds within a bounded budget regardless of firewall
+  backend speed.** The pre-response fast path (nft point-lookup + remove, WAF
+  clear) previously ran the nft work synchronously and unbounded; on a busy node
+  under exec-engine nft lock contention it could stall for seconds, so cfm-web
+  hit its ~1.2s node-call deadline and reported a healthy node "unreachable"
+  even though the unblock had actually succeeded. The fast path now runs under a
+  single ~800ms response budget; whatever doesn't finish is completed by the
+  existing fire-and-forget cleanup goroutine (which already calls
+  `RemoveBlock` idempotently — a slow backend can never leave the IP blocked,
+  only defer removal by a moment). The response gains a `fastpath_done` flag
+  (false ⇒ `was_blocked`/`waf` not yet authoritative; cleanup still guarantees
+  the removal). Backend-agnostic — the durable fix for the incident that
+  `CFM_FIREWALL_ENGINE=nftlib` worked around on one node.
+
 ### Added
 - **Mail queue: "who filled the queue" per-sender attribution** — the mail-queue
   report (`mail_queue_summary` / the cfm-admin "Mail queue" page) now includes a
