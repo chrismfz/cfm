@@ -315,6 +315,49 @@ func (s *ChallengeServer) cookieTTL() time.Duration {
 // on the next request without querying the bridge again.
 func (s *ChallengeServer) SetNginxBridge(b *NginxBridge) { s.bridge = b }
 
+// releaseSolvedIP performs the post-solve release of a source IP, shared by the
+// /verify handler and autoSolveAndRelease.
+//
+// In DNAT mode (no OpenResty bridge wired) the IP was redirected because it is a
+// member of the nft challenge set, so it is dropped from that set and given a
+// short cooldown-OK. In OpenResty/edge mode (bridge != nil) the edge decides
+// in-path and the IP was NEVER added to the nft challenge set — so touching the
+// firewall backend here is not only pointless, it is dangerous: on the nftlib
+// backend the call serializes on a shared mutex that a wedged netlink connection
+// can hold for a long time, which would block the /__cfm_verify response and
+// leave the cfm_clearance cookie unset → an endless "Checking your browser"
+// loop. In edge mode we therefore ONLY clear the IP from the bridge (the intended
+// release path — "solve → ClearIP instead of nft remove") and never call the
+// firewall backend.
+func (s *ChallengeServer) releaseSolvedIP(ip net.IP, ipStr, host string) {
+	if s.bridge != nil {
+		// Edge/OpenResty mode: the bridge is the release path; do NOT touch the
+		// firewall backend (nothing was added to the nft set, and the call can
+		// block on a wedged nftlib connection).
+		if ipStr != "" {
+			s.bridge.ClearIP(ipStr)
+		}
+		return
+	}
+
+	// DNAT mode: remove from the nft challenge set + add the cooldown OK. A
+	// failure here means a solved IP stays a member and keeps getting redirected
+	// (endless loop), so log it; benign "element not found" is swallowed by the
+	// backend, so this only fires on a real release failure.
+	if s.fw == nil || ip == nil {
+		return
+	}
+	if err := s.fw.RemoveChallenge(ip); err != nil {
+		logging.LogfCHALLENGES("[challenge] release ERROR: RemoveChallenge ip=%s host=%s failed: %v (IP may stay redirected in DNAT mode)", ipStr, host, err)
+	}
+	if oker, ok := any(s.fw).(challengeOKer); ok {
+		ttl := s.cookieTTL()
+		if err := oker.AddChallengeOK(ip, &ttl); err != nil {
+			logging.LogfCHALLENGES("[challenge] release ERROR: AddChallengeOK ip=%s host=%s failed: %v", ipStr, host, err)
+		}
+	}
+}
+
 // SetAccessLogPath sets a separate file where [challenge_http] access lines will be written.
 // If empty, access lines will continue to go to the main challenges log.
 func (s *ChallengeServer) SetAccessLogPath(path string) { s.accessLogPath = strings.TrimSpace(path) }
@@ -777,31 +820,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr, httpsAddr string)
 			)
 		}
 
-		// Release:
-		// 1) remove from nft challenge set (DNAT mode)
-		if s.fw != nil {
-			// A failure here means a solved IP stays a member of the challenge set
-			// and keeps getting DNAT-redirected → the endless "Checking your
-			// browser" loop. It used to be discarded, so such a failure left no
-			// trace; log it (benign "element not found" is swallowed by the
-			// backend, so this only fires on a real release failure).
-			if err := s.fw.RemoveChallenge(ip); err != nil {
-				logging.LogfCHALLENGES("[challenge] release ERROR: RemoveChallenge ip=%s host=%s failed: %v (IP may stay redirected in DNAT mode)", ipStr, host, err)
-			}
-			// 2) add cooldown OK (prevents immediate re-challenge loop)
-			if oker, ok := any(s.fw).(challengeOKer); ok {
-				ttl := s.cookieTTL()
-				if err := oker.AddChallengeOK(ip, &ttl); err != nil {
-					logging.LogfCHALLENGES("[challenge] release ERROR: AddChallengeOK ip=%s host=%s failed: %v", ipStr, host, err)
-				}
-			}
-		}
-
-		// 3) OpenResty mode: clear IP from bridge so Lua passes it through.
-		//    This is the primary release path when fw == nil (no DNAT).
-		if s.bridge != nil {
-			s.bridge.ClearIP(ipStr)
-		}
+		// Release the solved IP. In edge/OpenResty mode this only clears the bridge
+		// and never blocks on the firewall backend (see releaseSolvedIP) — that
+		// blocking call was leaving the clearance cookie below unset and looping
+		// the browser. The clearance cookie is set right after, unconditionally.
+		s.releaseSolvedIP(ip, ipStr, host)
 
 		// 4) Set solved cookie so OpenResty can fast-path without re-query/cache loops.
 		// Secure should follow the *original* scheme (OpenResty terminates TLS),
@@ -1642,25 +1665,9 @@ func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Req
 		logging.LogfCHALLENGES("[challenge_ignore] ip=%s host=%s uri=%s reason=%s", ipStr, host, next, reason)
 	}
 
-	// Release from nft sets (DNAT mode). Failures used to be discarded; log them
-	// (a stuck member = endless challenge loop). Benign "element not found" is
-	// swallowed by the backend, so this only fires on a real release failure.
-	if s.fw != nil && ip != nil {
-		if err := s.fw.RemoveChallenge(ip); err != nil {
-			logging.LogfCHALLENGES("[challenge] release ERROR: RemoveChallenge ip=%s host=%s failed: %v (IP may stay redirected in DNAT mode)", ipStr, host, err)
-		}
-		if oker, ok := any(s.fw).(challengeOKer); ok {
-			ttl := s.cookieTTL()
-			if err := oker.AddChallengeOK(ip, &ttl); err != nil {
-				logging.LogfCHALLENGES("[challenge] release ERROR: AddChallengeOK ip=%s host=%s failed: %v", ipStr, host, err)
-			}
-		}
-	}
-
-	// OpenResty mode: clear IP from bridge (Lua pass-through)
-	if s.bridge != nil && ipStr != "" {
-		s.bridge.ClearIP(ipStr)
-	}
+	// Release the solved IP (shared with the /verify handler): edge mode only
+	// clears the bridge and never blocks on the firewall backend.
+	s.releaseSolvedIP(ip, ipStr, host)
 
 	// Match secure flag to original scheme (OpenResty terminates TLS)
 	secure := trustedForwardedProto(r) == "https"

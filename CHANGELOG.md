@@ -17,7 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-### Added
+### Fixed
+- **Challenge solve no longer blocks on the firewall backend in edge mode — fixes
+  an endless "Checking your browser" loop on nftlib nodes.** In OpenResty/edge
+  mode the challenge is enforced in-path (Lua clearance cookie) and the source IP
+  is never added to the nft challenge set — yet the `/verify` solve handler still
+  called `RemoveChallenge(ip)` on the firewall backend before setting the
+  `cfm_clearance` cookie. On the nftlib backend that call serializes on a shared
+  mutex which a wedged netlink connection can hold for a long time (observed:
+  `/__cfm_verify` hanging 1–234s → HTTP 499), so the clearance cookie was never
+  set and every reload re-served the challenge page — an endless loop for real
+  visitors. The post-solve release is now a single shared helper
+  (`releaseSolvedIP`) that, in edge mode, ONLY clears the bridge and never touches
+  the firewall backend (the intended "solve → ClearIP instead of nft remove"
+  design); DNAT mode is unchanged. (The underlying nftlib shared-connection wedge
+  is tracked separately.)
 - **`challenge_ip_status` MCP tool + `GET /api/v1/firewall/challenge/list`
   (admin-only): dump the DNAT challenge sets with per-IP TTL.** The live
   instrument for a "stuck in an endless Checking-your-browser loop" report on a
