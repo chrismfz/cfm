@@ -92,6 +92,12 @@ local function fallback_normalize_host(raw)
   end
   return h
 end
+-- Canonical panel-subdomain prefixes (shared with cfm_panel.lua — single
+-- source, no drift). nil on upgrade lag → Step 0 falls back to its old
+-- inline list below.
+local ok_panel_hosts, panel_hosts = pcall(require, "cfm_panel_hosts")
+if not ok_panel_hosts then panel_hosts = nil end
+
 local ok_clearance, clearance_validator = pcall(require, "cfm_clearance")
 if not ok_clearance then
   ngx.log(ngx.ERR, "[cfm] clearance module load failed module=cfm_clearance err=", tostring(clearance_validator))
@@ -181,7 +187,22 @@ local CFG = {
   debug_headers = (os.getenv("CFM_DEBUG_HEADERS") == "1"),
   log_allows    = (os.getenv("CFM_LOG_ALLOWS") == "1"),
 
-  ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC")         or "3600"),
+  -- Clearance/OK TTL, in priority order: explicit env override; the
+  -- daemon-published authoritative cookie life (cfm_bridge_config.lua
+  -- cookie_life_sec — the same CHALLENGE_COOKIE_LIFE chain the challenge
+  -- server mints tokens with, so sliding re-mints can't silently extend or
+  -- shorten the operator-configured clearance lifetime); historical 3600
+  -- fallback (upgrade lag: old daemon, new Lua). The published value is
+  -- honored only when > 0 — a sub-second configured life truncates to 0 in
+  -- the file, and 0 is truthy in Lua (Max-Age=0 would expire the cookie
+  -- immediately). Same guard cfm_panel.lua's clearance_cookie_ttl uses.
+  ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC") or "")
+                         or (function()
+                              local pub = tonumber(_bridge_cfg.cookie_life_sec or "")
+                              if pub and pub > 0 then return pub end
+                              return nil
+                            end)()
+                         or 3600,
   ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
 
   -- Sliding clearance: when true, accepted requests re-mint cfm_clearance
@@ -1493,7 +1514,13 @@ do
   local h = lower(host); local u = lower(uri)
   local pfx = h:match("^([^%.]+)%.")
 
-  local is_panel_host = (pfx == "cpanel" or pfx == "webmail" or pfx == "whm" or pfx == "mail")
+  -- Shared canonical list (cfm_panel_hosts.lua); inline fallback for deploy lag.
+  local is_panel_host
+  if panel_hosts then
+    is_panel_host = panel_hosts.is_panel_prefix(pfx)
+  else
+    is_panel_host = (pfx == "cpanel" or pfx == "webmail" or pfx == "whm" or pfx == "mail")
+  end
   local is_panel_uri  = (u:sub(1, 7) == "/cpanel") or (u:sub(1, 8) == "/webmail") or (u:sub(1, 4) == "/whm")
   local panel_like_req = is_panel_host or is_panel_uri
 

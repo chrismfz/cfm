@@ -21,6 +21,8 @@
 --   origin_keepalive    boolean or nil
 --   origin_ka_idle_sec  number  or nil
 --   origin_ka_max_reqs  number  or nil
+--   cookie_life_sec     number  or nil (authoritative clearance-cookie TTL;
+--                       consumers honor it only when > 0)
 
 local fc = require "cfm_filecache"
 
@@ -47,6 +49,10 @@ local OPTS = {
     end
     out.origin_ka_idle_sec = tonumber(val.origin_ka_idle_sec)
     out.origin_ka_max_reqs = tonumber(val.origin_ka_max_reqs)
+    -- Authoritative clearance-cookie lifetime (seconds) — the daemon's
+    -- CHALLENGE_COOKIE_LIFE chain. nil on an older daemon's file; consumers
+    -- (cfm.lua ok_ttl_sec, cfm_panel.lua clearance_cookie_ttl) fall back.
+    out.cookie_life_sec = tonumber(val.cookie_life_sec)
     return out
   end,
 }
