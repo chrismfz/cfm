@@ -21,6 +21,8 @@
 --   origin_keepalive    boolean or nil
 --   origin_ka_idle_sec  number  or nil
 --   origin_ka_max_reqs  number  or nil
+--   cookie_life_sec     number  or nil (authoritative clearance-cookie TTL;
+--                       consumers honor it only when > 0)
 
 local fc = require "cfm_filecache"
 
