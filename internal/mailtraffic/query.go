@@ -12,12 +12,12 @@ import (
 
 // Anomaly-detection windows/thresholds (fixed in v1; tunable later).
 const (
-	anomalyRecentHours      = 2   // the "recent" window
-	anomalyBaselineDays     = 7   // trailing baseline window
-	anomalyRatioThreshold   = 3.0 // recent must be >= this × its expected rate
-	anomalySpikeFloor       = 20  // and at least this many, so tiny senders don't trip
-	anomalyNewSenderFloor   = 50  // a never-before-seen sender at >= this is flagged outright
-	anomalyMinBaselineHours = 6.0 // need this much history before a ratio is meaningful
+	anomalyRecentHours    = 2   // the "recent" window
+	anomalyBaselineDays   = 7   // trailing baseline window
+	anomalyRatioThreshold = 3.0 // recent must be >= this × its expected rate
+	anomalySpikeFloor     = 20  // and at least this many, so tiny senders don't trip
+	anomalyNewSenderFloor = 50  // a sender with too little history sending >= this is flagged outright
+	anomalyMinActiveHours = 3   // need the sender active in this many baseline hours before a ratio is trusted
 )
 
 // Totals is the whole-window sum of each counter within the caller's scope.
@@ -65,7 +65,7 @@ type Deliverability struct {
 type Anomaly struct {
 	Addr            string  `json:"addr"`
 	Recent          int64   `json:"recent"`            // outbound in the last anomalyRecentHours
-	BaselinePerHour float64 `json:"baseline_per_hour"` // the sender's own trailing hourly average (0 for new-sender)
+	BaselinePerHour float64 `json:"baseline_per_hour"` // the sender's own average per ACTIVE hour over the baseline (0 for new-sender)
 	Ratio           float64 `json:"ratio"`             // recent ÷ expected (0 for new-sender)
 	Kind            string  `json:"kind"`              // "spike" | "new-sender"
 }
@@ -263,12 +263,18 @@ func (s *Store) deliverability(cutoff int64, limit int) (*Deliverability, error)
 }
 
 // anomalies flags senders whose recent outbound stands out against their own
-// trailing baseline. It compares the last anomalyRecentHours against the
-// per-hour average over the preceding anomalyBaselineDays, using the ACTUAL
-// span of collected history as the divisor (so a fresh collector with only a
-// few hours of data doesn't over-flag every steady sender). A never-seen sender
-// sending a lot is flagged outright as "new-sender". Scope-aware: a scoped
-// caller only sees anomalies among its own domains' senders.
+// trailing baseline. The baseline rate is the sender's average per ACTIVE hour
+// (its total baseline outbound ÷ the number of baseline hours it actually sent
+// in), NOT per wall-clock hour — so a legitimately bursty/periodic sender (a
+// daily newsletter, cron mail) is measured against its own burst size and isn't
+// flagged every run, and the estimate doesn't depend on how long the collector
+// has been up. A sender with too little history (< anomalyMinActiveHours active
+// baseline hours) sending a lot is flagged as "new-sender" instead. Scope-aware:
+// a scoped caller only sees anomalies among its own domains' senders.
+//
+// Known limitation: because the baseline runs up to now-2h, a compromise
+// sustained for many hours slowly bleeds into the sender's own baseline and can
+// fall back under the ratio after ~2 days — detection is strongest at onset.
 func (s *Store) anomalies(now time.Time, scope map[string]struct{}, limit int) ([]Anomaly, error) {
 	out := []Anomaly{}
 	recentCutoff := bucketOf(now.Add(-anomalyRecentHours * time.Hour))
@@ -281,27 +287,19 @@ func (s *Store) anomalies(now time.Time, scope map[string]struct{}, limit int) (
 	if len(recent) == 0 {
 		return out, nil
 	}
-	base, err := s.sumOutbound(scope, baselineStart, recentCutoff)
+	base, err := s.baselineStats(scope, baselineStart, recentCutoff)
 	if err != nil {
 		return out, err
-	}
-	earliest, err := s.minOutboundBucket(scope, baselineStart, recentCutoff)
-	if err != nil {
-		return out, err
-	}
-	var baselineHours float64
-	if earliest > 0 && recentCutoff > earliest {
-		baselineHours = float64(recentCutoff-earliest) / 3600.0
 	}
 
 	for addr, rec := range recent {
-		b := base[addr]
+		bs := base[addr] // zero value {0,0} when the sender has no baseline
 		switch {
-		case (b == 0 || baselineHours < anomalyMinBaselineHours) && rec >= anomalyNewSenderFloor:
-			// Never seen (or not enough history for a ratio) yet blasting now.
+		case bs.active < anomalyMinActiveHours && rec >= anomalyNewSenderFloor:
+			// Too little history to trust a ratio, yet blasting now.
 			out = append(out, Anomaly{Addr: addr, Recent: rec, Kind: "new-sender"})
-		case b > 0 && baselineHours >= anomalyMinBaselineHours && rec >= anomalySpikeFloor:
-			perHour := float64(b) / baselineHours
+		case bs.active >= anomalyMinActiveHours && rec >= anomalySpikeFloor:
+			perHour := float64(bs.sum) / float64(bs.active) // per ACTIVE hour
 			expected := perHour * anomalyRecentHours
 			if expected <= 0 {
 				continue
@@ -368,25 +366,40 @@ func (s *Store) sumOutbound(scope map[string]struct{}, lo, hi int64) (map[string
 	return m, rows.Err()
 }
 
-// minOutboundBucket returns the earliest bucket with outbound activity in
-// [lo, hi), or 0 when there is none — the actual start of collected history,
-// used to size the baseline divisor.
-func (s *Store) minOutboundBucket(scope map[string]struct{}, lo, hi int64) (int64, error) {
-	q := `SELECT MIN(bucket) FROM mail_counters WHERE bucket>=? AND bucket<? AND outbound>0`
+// baselineStat is one sender's baseline outbound total and the number of
+// distinct hours it was active (both over the baseline window).
+type baselineStat struct {
+	sum    int64
+	active int64
+}
+
+// baselineStats sums outbound and counts distinct active hours per sender over
+// [lo, hi), scope-filtered. The active-hour count is the divisor for a
+// per-active-hour rate, so silent hours don't dilute a bursty sender's rate.
+func (s *Store) baselineStats(scope map[string]struct{}, lo, hi int64) (map[string]baselineStat, error) {
+	q := `SELECT address, SUM(outbound), COUNT(DISTINCT bucket) FROM mail_counters WHERE bucket>=? AND bucket<? AND outbound>0`
 	args := []any{lo, hi}
 	if scope != nil {
 		frag, a := inClause(scope)
 		q += frag
 		args = append(args, a...)
 	}
-	var mb sql.NullInt64
-	if err := s.db.QueryRow(q, args...).Scan(&mb); err != nil {
-		return 0, err
+	q += ` GROUP BY address`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
 	}
-	if !mb.Valid {
-		return 0, nil
+	defer rows.Close()
+	m := map[string]baselineStat{}
+	for rows.Next() {
+		var addr string
+		var sum, active int64
+		if err := rows.Scan(&addr, &sum, &active); err != nil {
+			return nil, err
+		}
+		m[addr] = baselineStat{sum: sum, active: active}
 	}
-	return mb.Int64, nil
+	return m, rows.Err()
 }
 
 // topByAddr returns the top addresses by a single counter column over the

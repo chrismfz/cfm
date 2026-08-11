@@ -107,20 +107,20 @@ func TestAnomalies(t *testing.T) {
 	}
 }
 
-// A fresh collector with < anomalyMinBaselineHours of history must not flag a
-// steady sender as a spike (cold-start guard), but a big new sender still trips
-// the new-sender rule.
+// A sender active in fewer than anomalyMinActiveHours baseline hours has too
+// little history to trust a ratio, so it is not spike-evaluated (only the
+// new-sender floor applies) — but a big new sender still trips new-sender.
 func TestAnomaliesColdStart(t *testing.T) {
 	st := openTemp(t)
 	T := time.Unix(1_700_000_000, 0)
 
-	// Only 3h of baseline history (< 6h min) at 2/h, then 30 recent.
-	seedBaseline(t, st, T, "steady@x.gr", 3, 2)
+	// Only 2 active baseline hours (< anomalyMinActiveHours) at 2/h, then 30 recent.
+	seedBaseline(t, st, T, "steady@x.gr", 2, 2)
 	if err := st.AddReport(T.Add(-1*time.Hour), outboundReport("steady@x.gr", 30)); err != nil {
 		t.Fatal(err)
 	}
-	// steady@ sent 30 (>= spike floor) but < new-sender floor, and history is too
-	// short for a ratio → not flagged.
+	// steady@ sent 30 (>= spike floor) but < new-sender floor, and has too few
+	// active baseline hours for a ratio → not flagged.
 	if err := st.AddReport(T.Add(-1*time.Hour), outboundReport("blast@x.gr", 80)); err != nil {
 		t.Fatal(err)
 	}
