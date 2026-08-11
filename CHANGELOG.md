@@ -18,6 +18,14 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Mail queue: "who filled the queue" per-sender attribution** — the mail-queue
+  report (`mail_queue_summary` / the cfm-admin "Mail queue" page) now includes a
+  `top_senders` list: queued messages attributed to the individual envelope
+  sender with a **frozen / deferred** split (`<>` = null sender / bounce
+  backscatter), not just by domain. Turns "the queue is backing up" into "sender
+  X has 40 frozen messages" — the actionable culprit for a compromised account
+  or a bounce storm. Aggregated by the existing exim/postfix queue parsers (no
+  new probe); admin-only, like the rest of the queue report.
 - **Mail Monitor: suspected-compromise anomaly detection** — `mail_traffic` /
   `GET /api/v1/mail/traffic` and the cfm-admin "Mail Monitor" page now carry an
   `anomalies` block: senders whose outbound in the last 2h is far above their

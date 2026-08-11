@@ -85,6 +85,7 @@ func BuildPostfixReport(out string, now time.Time, total, top int) Report {
 	}
 	r.Frozen = frozen
 	r.TopSenderDomains = topDomains(senderDom, top)
+	r.TopSenders = topSenders(msgs, top)
 	r.TopRecipientDomains = topDomains(recipDom, top)
 	r.Oldest = oldestN(msgs, top)
 	r.DeferReasons = aggregateReasons(hits, top)
