@@ -1,6 +1,7 @@
 package mailmeter
 
 import (
+	"net"
 	"regexp"
 	"strings"
 )
@@ -50,10 +51,15 @@ type Delivery struct {
 //	<id> == user@dom R=… T=dkim_remote_smtp defer (-54): retry time not reached for any host for 'dom'                  (defer, no host)
 //	<id> == user (orig) <user@dom> R=… T=dkim_remote_forwarded_smtp defer (-46) H=mx [ip]: SMTP error … 421-4.7.28 …    (defer, remote)
 var (
-	reEximDeliv = regexp.MustCompile(`\s(=>|->|\*\*|==)\s`)
-	reEximT     = regexp.MustCompile(`\sT=(\S+)`)
-	reEximHost  = regexp.MustCompile(`\sH=(\S+)`)
-	reEximC     = regexp.MustCompile(`\sC="([^"]*)"`) // completion response on a delivered line
+	// reEximFlag captures the FIRST exim flag token (the field right after the
+	// message-id). Including the non-delivery flags (<=, >>, *>, <>) is what
+	// makes the match positional: on an arrival line the first flag is "<=", so
+	// we bail before a later delimited "=>" inside a logged subject (log_selector
+	// +subject) can be mistaken for a delivery.
+	reEximFlag = regexp.MustCompile(`\s(<=|=>|->|>>|\*\*|==|<>|\*>)\s`)
+	reEximT    = regexp.MustCompile(`\sT=(\S+)`)
+	reEximHost = regexp.MustCompile(`\sH=(\S+)`)
+	reEximC    = regexp.MustCompile(`\sC="([^"]*)"`) // completion response on a delivered line
 )
 
 // ParseEximDelivery extracts a remote delivery outcome from one exim mainlog
@@ -63,7 +69,7 @@ var (
 // inflate the "sent to a provider" counts.
 func ParseEximDelivery(line string) (Delivery, bool) {
 	line = strings.TrimRight(line, "\r\n")
-	m := reEximDeliv.FindStringSubmatch(line)
+	m := reEximFlag.FindStringSubmatch(line)
 	if m == nil {
 		return Delivery{}, false
 	}
@@ -90,6 +96,10 @@ func ParseEximDelivery(line string) (Delivery, bool) {
 		d.Outcome = Bounced
 	case "==":
 		d.Outcome = Deferred
+	default:
+		// "<=" (arrival), ">>" (cutthrough), "*>" (delivery suppressed), "<>"
+		// (address ignored) — not a remote delivery outcome.
+		return Delivery{}, false
 	}
 	if host != "" {
 		d.Provider = classifyProvider(host)
@@ -142,6 +152,13 @@ func ParsePostfixDelivery(line string) (Delivery, bool) {
 	if sm == nil {
 		return Delivery{}, false
 	}
+	rel := rePfxRelay.FindStringSubmatch(line)
+	if rel != nil && isLocalRelay(rel[1]) {
+		// A handoff to a loopback/private content filter (amavis/rspamd on
+		// 127.0.0.1:10025, a private smarthost, or the dovecot-lmtp socket) is an
+		// internal hop, not a delivery to a remote provider — don't count it.
+		return Delivery{}, false
+	}
 	var d Delivery
 	switch sm[1] {
 	case "sent":
@@ -167,6 +184,34 @@ func relayHost(relay string) string {
 		return relay[:i]
 	}
 	return relay
+}
+
+// isLocalRelay reports whether a postfix relay= target is an internal hop rather
+// than a remote MX: a loopback/localhost name, a non-socket bracket target that
+// resolves to a loopback/private IP, or a unix-socket relay (`[private/…]`, e.g.
+// dovecot-lmtp). Those are content-filter reinjections or local delivery, not a
+// delivery to a remote provider.
+func isLocalRelay(relay string) bool {
+	switch strings.ToLower(relayHost(relay)) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	i := strings.IndexByte(relay, '[')
+	if i < 0 {
+		return false
+	}
+	j := strings.IndexByte(relay[i:], ']')
+	if j < 0 {
+		return false
+	}
+	inner := relay[i+1 : i+j]
+	if strings.HasPrefix(inner, "private/") || strings.HasPrefix(inner, "public/") {
+		return true // unix socket transport (e.g. [private/dovecot-lmtp])
+	}
+	if ip := net.ParseIP(inner); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
+		return true
+	}
+	return false
 }
 
 // postfixDeliveryReason returns the text inside the trailing "status=… (…)"
@@ -199,17 +244,28 @@ func classifyProvider(host string) string {
 		return ""
 	}
 	switch {
-	case strings.Contains(host, "google.com") || strings.Contains(host, "googlemail.com") || strings.Contains(host, "gmail.com"):
+	case underDomain(host, "google.com", "googlemail.com", "gmail.com"):
 		return "google"
-	case strings.Contains(host, "outlook.com") || strings.Contains(host, "hotmail.com") ||
-		strings.Contains(host, "office365.com") || strings.Contains(host, "protection.outlook.com"):
+	case underDomain(host, "outlook.com", "hotmail.com", "office365.com"):
 		return "microsoft"
-	case strings.Contains(host, "yahoodns.net") || strings.Contains(host, "yahoo.com") || strings.Contains(host, "yahoo.net"):
+	case underDomain(host, "yahoodns.net", "yahoo.com", "yahoo.net"):
 		return "yahoo"
-	case strings.Contains(host, "icloud.com") || strings.Contains(host, "apple.com") || strings.Contains(host, "me.com"):
+	case underDomain(host, "icloud.com", "apple.com", "me.com"):
 		return "apple"
 	}
 	return registrableDomain(host)
+}
+
+// underDomain reports whether host equals or is a subdomain of any of doms —
+// a label-boundary match, so "acme.com"/"readme.com" do NOT match "me.com" and
+// "notgoogle.com.attacker.net" does NOT match "google.com".
+func underDomain(host string, doms ...string) bool {
+	for _, d := range doms {
+		if host == d || strings.HasSuffix(host, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 // registrableDomain returns the last two dot-labels of host (best-effort, no

@@ -53,6 +53,13 @@ func TestParseEximDelivery(t *testing.T) {
 			`2026-08-11 00:05:05 1wtXBC-0000000CnX4-1EyU <= info@axidwear.com H=(axidwear.com) [84.54.49.200] P=esmtpsa A=dovecot_login:info@axidwear.com S=27356`,
 			false, OutcomeNone, "", "", "",
 		},
+		{
+			// F1: an arrival with a logged subject containing " => " must NOT be
+			// booked as a delivery — the flag field ("<=") is matched positionally.
+			"arrival with '=>' inside the logged subject is still an arrival",
+			`2026-08-11 00:05:05 1wtXBD-0000000CnX5-2Fy6 <= promo@shop.gr H=(shop.gr) [1.2.3.4] P=esmtpa A=dovecot_login:promo@shop.gr S=900 T="Big Sale => 50% off => today"`,
+			false, OutcomeNone, "", "", "",
+		},
 	}
 	for _, c := range cases {
 		d, ok := ParseEximDelivery(c.line)
@@ -100,6 +107,13 @@ func TestParsePostfixDelivery(t *testing.T) {
 			`Jul 23 19:38:16 ngm postfix/lmtp[105198]: CFDA41FBCEF: to=<test@nac.gr>, relay=ngm.myip.gr[private/dovecot-lmtp], dsn=2.0.0, status=sent (250 2.0.0 Saved)`,
 			false, OutcomeNone, "", "", "",
 		},
+		{
+			// F2: a handoff to a loopback content filter (amavis/rspamd) is an
+			// internal hop, not a remote delivery.
+			"content-filter reinjection to 127.0.0.1 is not a remote delivery",
+			`Jul 23 19:40:00 ngm postfix/smtp[105300]: D1: to=<u@rem.example>, relay=127.0.0.1[127.0.0.1]:10025, delay=0.1, dsn=2.0.0, status=sent (250 2.0.0 from MTA(smtp:[127.0.0.1]:10026): 250 Ok)`,
+			false, OutcomeNone, "", "", "",
+		},
 	}
 	for _, c := range cases {
 		d, ok := ParsePostfixDelivery(c.line)
@@ -129,6 +143,12 @@ func TestClassifyProvider(t *testing.T) {
 		"example.com":                     "example.com",
 		"120.48.27.74":                    "120.48.27.74", // bare IP kept, not chopped
 		"":                                "",
+		// F3: label-boundary match — these must NOT be mislabeled apple/google.
+		"acme.com":                   "acme.com",
+		"readme.com":                 "readme.com",
+		"pineapple.com":              "pineapple.com",
+		"notgoogle.com.attacker.net": "attacker.net",
+		"mail.me.com":                "apple", // a real apple subdomain still matches
 	}
 	for host, want := range cases {
 		if got := classifyProvider(host); got != want {
