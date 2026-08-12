@@ -39,12 +39,29 @@ var accessLogCandidates = []string{
 	"/var/log/nginx/access.log",
 }
 
+// errorLogCandidates are the known CFM edge ERROR logs, in priority order
+// (OpenResty first, then Angie). Same auto-detect + allow-list discipline as
+// the access candidates. This is where the edge Lua writes ngx.log(): panel
+// decision logonly verdicts ([cfm_panel_decision] logonly=would_enforce …),
+// module-load failures, and Lua runtime errors.
+var errorLogCandidates = []string{
+	"/usr/local/openresty/nginx/logs/error.log",
+	"/var/log/angie/error.log",
+	"/var/log/nginx/error.log",
+}
+
 const (
 	DefaultTailLines = 300_000
 	MaxTailLines     = 2_000_000
 	DefaultLimit     = 200
 	MaxLimit         = 1000
 	scanTimeout      = 20 * time.Second
+
+	// Error logs are far smaller and denser than access logs, and are usually
+	// read for "the last few matching lines", so the error tail window is much
+	// smaller than the access one.
+	DefaultErrorTailLines = 5_000
+	MaxErrorTailLines     = 200_000
 
 	maxLineToken  = 4 * 1024 * 1024 // scanner ceiling: tolerate long URIs/UAs without aborting the call
 	maxStoredLine = 8 * 1024        // truncate each retained match so worst-case memory = limit×this
@@ -61,11 +78,10 @@ type Result struct {
 	Lines     []string `json:"lines"`      // raw matching log lines, oldest→newest
 }
 
-// AvailableLogs returns the candidate access logs that currently exist, so the
-// tool/handler can report choices and validate a caller-named source.
-func AvailableLogs() []string {
-	out := make([]string, 0, len(accessLogCandidates))
-	for _, p := range accessLogCandidates {
+// availableFrom returns the candidates that currently exist as regular files.
+func availableFrom(candidates []string) []string {
+	out := make([]string, 0, len(candidates))
+	for _, p := range candidates {
 		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
 			out = append(out, p)
 		}
@@ -73,13 +89,14 @@ func AvailableLogs() []string {
 	return out
 }
 
-// resolveLog picks the log to scan: if want is non-empty it MUST be one of the
-// allow-listed candidates (basename or full path) and must exist; otherwise the
-// first existing candidate is used.
-func resolveLog(want string) (string, error) {
-	avail := AvailableLogs()
+// resolveFrom picks the log to scan from candidates: if want is non-empty it
+// MUST be one of the allow-listed candidates (basename or full path) and must
+// exist; otherwise the first existing candidate is used. kind names the log
+// class for error messages ("access" / "error").
+func resolveFrom(candidates []string, want, kind string) (string, error) {
+	avail := availableFrom(candidates)
 	if len(avail) == 0 {
-		return "", fmt.Errorf("no edge access log found (looked in %d known locations)", len(accessLogCandidates))
+		return "", fmt.Errorf("no edge %s log found (looked in %d known locations)", kind, len(candidates))
 	}
 	want = strings.TrimSpace(want)
 	if want == "" {
@@ -90,8 +107,17 @@ func resolveLog(want string) (string, error) {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("requested log %q is not an available edge access log; choices: %s", want, strings.Join(avail, ", "))
+	return "", fmt.Errorf("requested log %q is not an available edge %s log; choices: %s", want, kind, strings.Join(avail, ", "))
 }
+
+// AvailableLogs returns the candidate access logs that currently exist, so the
+// tool/handler can report choices and validate a caller-named source.
+func AvailableLogs() []string { return availableFrom(accessLogCandidates) }
+
+// AvailableErrorLogs returns the candidate ERROR logs that currently exist.
+func AvailableErrorLogs() []string { return availableFrom(errorLogCandidates) }
+
+func resolveLog(want string) (string, error) { return resolveFrom(accessLogCandidates, want, "access") }
 
 // GrepIP returns the raw lines mentioning ip within the last tailLines lines of
 // the resolved edge access log. Bounded: tail window, context timeout, output
@@ -146,6 +172,72 @@ func GrepIP(ctx context.Context, ip string, source string, tailLines, limit int)
 		}
 		return true
 	})
+	if err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// ErrorTailResult is the outcome of an edge error-log tail.
+type ErrorTailResult struct {
+	LogFile   string   `json:"log_file"`
+	Grep      string   `json:"grep,omitempty"`
+	TailLines int      `json:"tail_lines"` // trailing lines scanned
+	Scanned   int      `json:"scanned"`    // lines actually read from tail
+	Matched   int      `json:"matched"`    // total lines matching grep (may exceed len(Lines))
+	Truncated bool     `json:"truncated"`  // older matches were dropped to keep the newest `limit`
+	Lines     []string `json:"lines"`      // matching lines, oldest→newest, capped to the NEWEST `limit`
+}
+
+// TailError returns lines from the last tailLines lines of the resolved edge
+// ERROR log, optionally filtered to a case-insensitive substring (grep ""
+// returns every tail line). Unlike GrepIP (which keeps the FIRST `limit`
+// matches for a specific IP), this keeps the NEWEST `limit` matches — an error
+// tail is read for "what happened most recently". Bounded the same way: tail
+// window, context timeout, per-line retention cap. source, when set, selects
+// among AvailableErrorLogs.
+func TailError(ctx context.Context, grep, source string, tailLines, limit int) (ErrorTailResult, error) {
+	if tailLines <= 0 {
+		tailLines = DefaultErrorTailLines
+	}
+	if tailLines > MaxErrorTailLines {
+		tailLines = MaxErrorTailLines
+	}
+	if limit <= 0 {
+		limit = DefaultLimit
+	}
+	if limit > MaxLimit {
+		limit = MaxLimit
+	}
+	needle := strings.ToLower(strings.TrimSpace(grep))
+
+	logFile, err := resolveFrom(errorLogCandidates, source, "error")
+	if err != nil {
+		return ErrorTailResult{}, err
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, scanTimeout)
+	defer cancel()
+
+	res := ErrorTailResult{LogFile: logFile, Grep: strings.TrimSpace(grep), TailLines: tailLines}
+	// Ring of the newest `limit` matches: append until full, then slide.
+	buf := make([]string, 0, limit)
+	err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
+		res.Scanned++
+		if needle != "" && !strings.Contains(strings.ToLower(line), needle) {
+			return true
+		}
+		res.Matched++
+		if len(buf) < limit {
+			buf = append(buf, truncLine(line))
+		} else {
+			copy(buf, buf[1:])
+			buf[limit-1] = truncLine(line)
+			res.Truncated = true
+		}
+		return true
+	})
+	res.Lines = buf
 	if err != nil {
 		return res, err
 	}

@@ -227,6 +227,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/dmesg", handleSystemDmesg)
 	m.HandleFunc("/api/v1/system/services", handleSystemServices)
 	m.HandleFunc("/api/v1/system/ip-forensics", handleSystemIPForensics)
+	m.HandleFunc("/api/v1/system/edge-error-log", handleSystemEdgeErrorLog)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
 	m.HandleFunc("/api/v1/system/mail-log", handleSystemMailLog)
 	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
@@ -443,6 +444,55 @@ func handleSystemIPForensics(w http.ResponseWriter, r *http.Request) {
 		"schema":         "system.ip_forensics.v1",
 		"result":         res,
 		"available_logs": edgelog.AvailableLogs(),
+	})
+}
+
+// handleSystemEdgeErrorLog tails the edge (OpenResty/Angie) ERROR log
+// (GET /api/v1/system/edge-error-log?grep=SUBSTR&lines=N&limit=M&source=). Read-only,
+// admin-only. Backs the MCP edge_error_tail tool: this is where the edge Lua
+// writes ngx.log() — panel decision logonly verdicts
+// ([cfm_panel_decision] logonly=would_enforce …), module-load failures, and Lua
+// runtime errors — none of which the access-log ring (edge_access_tail) carries.
+// Bounded by design: reads only the last `lines` via tail (default 5000, max
+// 200k) with a timeout, returns the NEWEST `limit` matches; no continuous cost.
+func handleSystemEdgeErrorLog(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	lines := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("lines")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			lines = n
+		}
+	}
+	limit := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	grep := strings.TrimSpace(r.URL.Query().Get("grep"))
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+
+	res, err := edgelog.TailError(r.Context(), grep, source, lines, limit)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": false, "error": err.Error(), "available_logs": edgelog.AvailableErrorLogs(),
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":             true,
+		"schema":         "system.edge_error_log.v1",
+		"result":         res,
+		"available_logs": edgelog.AvailableErrorLogs(),
 	})
 }
 

@@ -296,6 +296,22 @@ func TestEdgeAccessTailRouting(t *testing.T) {
 	}
 }
 
+func TestEdgeErrorTailRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edge_error_tail","arguments":{"grep":"logonly=would_enforce","lines":5000,"limit":50}}}`)
+	if fd.lastPath != "/api/v1/system/edge-error-log" {
+		t.Errorf("edge_error_tail routed to %q, want /api/v1/system/edge-error-log", fd.lastPath)
+	}
+	if got := fd.lastQuery.Get("grep"); got != "logonly=would_enforce" {
+		t.Errorf("grep = %q, want logonly=would_enforce", got)
+	}
+	if got := fd.lastQuery.Get("limit"); got != "50" {
+		t.Errorf("limit = %q, want 50", got)
+	}
+}
+
 func TestIPForensicsRouting(t *testing.T) {
 	fd := &fakeDispatch{}
 	ts := newTestServer(t, fd)
