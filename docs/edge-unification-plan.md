@@ -1,6 +1,6 @@
 # Edge Unification Plan — one enforcement path, one clearance model
 
-Status: **Phases 0–1 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226) · **Phase 2 in progress** (2a cookie isolation: #1227 · 2b panel tls-fp stamp: #1228 · 2d shared decision module + panel LOGONLY bridge decision: this PR) · Owner: operator + assistant
+Status: **Phases 0–1 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226) · **Phase 2 in progress** (2a cookie isolation: #1227 · 2b panel tls-fp stamp: #1228 · 2d shared decision module + panel LOGONLY bridge decision: #1229 · 2e panel WAF LOGONLY: this PR) · Owner: operator + assistant
 Date: 2026-08-11 · Origin: the orion challenge-loop incident (PR #1220/#1221/#1222)
 
 ---
@@ -207,10 +207,20 @@ guards. Deploy note: pure package upgrade; no config migration.
   module on upgrade lag) disables the probe entirely. The Go bridge already
   accepts/stores panel scopes end-to-end (`okState` keyed by `(ip,host,scope)`).
   Enforcement (acting on the verdict) is a later opt-in phase after burn-in.
-- **Reduced WAF on panel**: run on human-entry + generic paths; hard-skip the
-  `is_panel_api_or_sso` allowlist, `/acctxfer*`, `/cgi/transfer`,
-  `/cgi/live_tail_log`, `/cpsess…/websocket/`. No body buffering on streams;
-  no POST-resume on panel.
+- **Reduced WAF on panel** — **LOGONLY landed (PR 2e)**. `cfm_panel.lua` runs
+  the SAME `cfm_waf` ruleset the web edge uses on human-entry + generic panel
+  requests and RECORDS what it would do (`[cfm_panel_waf] logonly=would_<action>
+  scope=panel:<port> …`), but does **not** act on the verdict — nothing blocks
+  or challenges because of the WAF. Hard-skips (never inspected) are the
+  `is_panel_api_or_sso` allowlist: `/acctxfer*`, `/cgi/transfer`,
+  `/cgi/live_tail_log`, `/cpsess…/websocket/`, `/json-api`, `/execute`, etc.
+  Reduced profile: **header/URI/args/cookie only — no request body is read**, so
+  panel upload/rsync/websocket streams are never buffered; no POST-resume on
+  panel. Loopback/self traffic is skipped (loopback-only for now; full self-IP +
+  IGNORE_NETS parity lands with the enforce step). Per-`(ip,rule)` log throttle.
+  Everything is `pcall`'d + fail-open; kill switch `CFM_PANEL_WAF=0` (needs
+  `env CFM_PANEL_WAF;` in the confs) or a missing `cfm_waf` on upgrade lag
+  disables the probe. Enforcement is a later opt-in phase after burn-in.
 - **TLS-fp stamping** on panel `/__cfm_verify` — **landed (PR 2b)**: the bare
   `access_by_lua_block { return; }` is replaced with the same clear-then-
   `cfm_tlsfp.stamp()` the web `/__cfm_verify` runs, so panel solves carry a
@@ -237,6 +247,25 @@ guards. Deploy note: pure package upgrade; no config migration.
 orion first (it has the MCP tooling), one release of burn-in for Phase 1+2,
 then fleet. After burn-in: delete `cfm_panel.lua`'s superseded local policy and
 the deprecated `OPENRESTY_MODE` key entirely; stamp CHANGELOG accordingly.
+
+### Phase 4 — panel enforcement graduation (REMINDER — do not lose this)
+Everything panel-side today is deliberately **observe-only**: the panel WAF
+(2e) and the panel bridge decision (2d) both LOGONLY, and the panel challenge is
+the pre-existing behaviour. **After enough logging confirms low false-positive
+rates, BOTH the panel challenge/decision AND the panel WAF must graduate to
+enforce** — otherwise the panel ports stay softer than the web edge and the
+unification is only half done. Each graduation is its own opt-in PR after its
+own burn-in, and each needs the deferred pieces wired first, notably:
+- **Full self-origin parity** — the panel WAF's self-skip is loopback-only
+  today; enforce needs the web edge's `is_self_origin` (self-IP set +
+  `IGNORE_NETS`), ideally extracted into a shared module so web and panel can't
+  drift (CLAUDE.md §5).
+- **Body inspection decision** — 2e reads no body; decide per-Content-Type
+  bounded body reads for panel (mirroring the web `get_req_body_for_waf` gate)
+  vs staying header/URI/args-only, without buffering panel streams.
+- **Fail-open + kill-switch discipline preserved** — an enforcing panel WAF/
+  decision must never be able to lock an admin out of WHM/cPanel; keep the
+  `CFM_PANEL_WAF` / `CFM_PANEL_DECISION` switches and the loop-breaker.
 
 ---
 
