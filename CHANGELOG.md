@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.12
+
 ### Changed
 - **Mail queue admin page: "Top sender domains" and "Top recipient domains" now
   sit side-by-side.** They are both half-width cards but were separated by the
@@ -24,8 +28,6 @@ back-filled here — see the git/PR history for that period.
   Reordered so the two Top-domains cards are adjacent (one grid row, side-by-side;
   they still stack on narrow screens), with "Who filled the queue" below them.
   Pure layout reorder — no data or behaviour change.
-
-## 2026.08.12
 
 ### Added
 - **LVE per-tenant CPU now shows the account username, not just the uid.**
