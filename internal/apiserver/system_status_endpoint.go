@@ -20,6 +20,7 @@ import (
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 	"cfm/internal/kmsg"
+	"cfm/internal/lvecpu"
 	"cfm/internal/maildns"
 	"cfm/internal/maillog"
 	"cfm/internal/mailmeter"
@@ -230,6 +231,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/ip-forensics", handleSystemIPForensics)
 	m.HandleFunc("/api/v1/system/edge-error-log", handleSystemEdgeErrorLog)
 	m.HandleFunc("/api/v1/system/waf-fp-hunt", handleSystemWAFFPHunt)
+	m.HandleFunc("/api/v1/system/lve-cpu", handleSystemLVECPU)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
 	m.HandleFunc("/api/v1/system/mail-log", handleSystemMailLog)
 	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
@@ -560,6 +562,58 @@ func handleSystemWAFFPHunt(w http.ResponseWriter, r *http.Request) {
 		"truncated":      truncated,
 		"summary":        summary,
 		"available_logs": edgelog.AvailableErrorLogs(),
+	})
+}
+
+// handleSystemLVECPU returns the per-tenant CPU pressure ranking on CloudLinux
+// (GET /api/v1/system/lve-cpu?top=N). Read-only, admin-only. Backs the MCP
+// lve_cpu tool. The data comes from the in-memory lvecpu collector, which
+// samples /proc/lve/list every ~15s and computes each LVE's CPU cores + %-of-
+// limit (lvestat.Diff), hottest-first. `available:false` on a non-CloudLinux
+// host; `ready:false` while the collector is warming up (needs two samples).
+// Host-wide (all tenants), so admin-only by construction.
+func handleSystemLVECPU(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	top := 25
+	if v := strings.TrimSpace(r.URL.Query().Get("top")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			top = n
+		}
+	}
+	if top > 500 {
+		top = 500
+	}
+
+	if !lvecpu.Available() {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "schema": "system.lve_cpu.v1", "available": false,
+		})
+		return
+	}
+	samples, at, ready := lvecpu.Latest()
+	if !ready {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "schema": "system.lve_cpu.v1", "available": true,
+			"ready": false, "interval_sec": lvecpu.IntervalSeconds(),
+		})
+		return
+	}
+	total := len(samples)
+	if len(samples) > top {
+		samples = samples[:top]
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok": true, "schema": "system.lve_cpu.v1", "available": true, "ready": true,
+		"sampled_at": at.UTC(), "interval_sec": lvecpu.IntervalSeconds(),
+		"tenants": total, "top": samples,
 	})
 }
 

@@ -59,6 +59,17 @@ back-filled here — see the git/PR history for that period.
   (loopback-only fallback on upgrade lag).
 
 ### Added
+- **MCP `lve_cpu` — per-tenant CPU pressure on CloudLinux.** New read-only,
+  admin-only MCP tool + `GET /api/v1/system/lve-cpu`, backed by a new in-memory
+  collector that samples `/proc/lve/list` every ~15s and computes each LVE
+  tenant's CPU **cores** consumed and **% of its CPU cap** (100 = being
+  throttled), plus its lCPU/nCPU limits and current EP/NPROC — hottest-first,
+  `top=N`. The per-tenant companion to `mysql_pressure` for "box load is high,
+  which hosting account is responsible?", and the CPU input for the few-hits/
+  high-pressure correlation. The CPU-usage counter's unit was calibrated to
+  nanoseconds against live CL8/CL9. `available:false` on non-CloudLinux hosts
+  (the collector never starts); `ready:false` briefly at startup until two
+  samples exist. Daemon-only; the CLI / web UI surface follows in a later change.
 - **MCP `waf_fp_hunt` — panel-logonly burn-in analysis ("safe to enforce?").**
   New read-only, admin-only MCP tool + `GET /api/v1/system/waf-fp-hunt`: it scans
   the edge ERROR log for the panel LOGONLY markers (`[cfm_panel_waf]` would-be WAF

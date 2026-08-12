@@ -60,6 +60,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerIPForensics(srv, d)
 	registerEdgeErrorTail(srv, d)
 	registerWAFFPHunt(srv, d)
+	registerLVECPU(srv, d)
 	registerMySQLPressure(srv, d)
 	registerMySQLLogTail(srv, d)
 	registerMySQLSlowQueries(srv, d)
@@ -425,6 +426,22 @@ func registerWAFFPHunt(srv *mcp.Server, d Deps) {
 		setInt(q, "lines", in.Lines)
 		setStr(q, "source", in.Source)
 		return dispatchJSON(ctx, d, "/api/v1/system/waf-fp-hunt", q)
+	})
+}
+
+type lveCPUInput struct {
+	Top int `json:"top,omitempty" jsonschema:"how many tenants (by CPU pressure) to return, hottest first; default 25, max 500"`
+}
+
+func registerLVECPU(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "lve_cpu",
+		Description: "Per-tenant CPU pressure on CloudLinux (LVE) — which hosting account is burning CPU right now. Reads the in-memory collector that samples /proc/lve/list every ~15s and returns each tenant hottest-first with: cores (CPU cores consumed, 0.93 = 93% of one core), pct_of_limit (% of the account's LVE CPU cap; 100 = at its limit → being throttled), plus its lCPU/nCPU limits and current EP/NPROC. The per-tenant companion to mysql_pressure — use it for 'the box load is high, which account is responsible?' and correlate with vhost hit-rates (a tenant near 100% of its CPU cap with few requests = heavy/looping code, not traffic). `available:false` on non-CloudLinux hosts; `ready:false` briefly at startup (needs two samples).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in lveCPUInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setInt(q, "top", in.Top)
+		return dispatchJSON(ctx, d, "/api/v1/system/lve-cpu", q)
 	})
 }
 

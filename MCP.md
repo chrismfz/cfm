@@ -186,7 +186,7 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ## 4. Active tools (as-built)
 
-33 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
+34 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
 CLI/UI use). All carry the `readOnlyHint` annotation.
 
 | Tool | What it answers | Endpoint(s) | Args |
@@ -207,6 +207,7 @@ CLI/UI use). All carry the `readOnlyHint` annotation.
 | `edge_error_tail` | Tail the edge (OpenResty/Angie) ERROR log — where the in-path Lua writes `ngx.log()`: panel LOGONLY decision verdicts (`logonly=would_enforce`), module-load failures, Lua errors. The error-log companion to `edge_access_tail` (which is the access ring). Bounded `tail` + optional grep, newest matches kept | `system/edge-error-log` | `grep`, `lines`, `limit`, `source` |
 | `waf_fp_hunt` | "Is it safe to enforce on the panel?" — aggregates the panel LOGONLY burn-in from the edge error log (`[cfm_panel_waf]` would-be actions + `[cfm_panel_decision]` would-enforce verdicts), SEPARATING known-scanner noise (Censys/Shodan/… by UA) from the customer-facing residue. Headline gates: `panel_waf.nonscanner_would_block` + `panel_decision.ip_block_count`. Also per-rule breakdown, candidate FPs (worst first, with samples), top UAs. Body rules not represented (panel WAF reads no body). The aggregated view over `edge_error_tail`'s raw lines | `system/waf-fp-hunt` | `lines`, `source` |
 | `mysql_pressure` | MySQL/MariaDB pressure now (mysqltop): connection saturation + per-user conns MERGED with CPU/query deltas, ranked — catch the offender ("few conns, high CPU") | `mysql/top` + `mysql/cpu` | `top` |
+| `lve_cpu` | Per-tenant CPU pressure on CloudLinux (LVE) — which hosting account is burning CPU now. Each tenant hottest-first with `cores` (CPU cores used) + `pct_of_limit` (% of its LVE CPU cap; 100 = throttled) + lCPU/nCPU + EP/NPROC. In-memory sampler of `/proc/lve/list` (~15s); the per-tenant companion to `mysql_pressure`. `available:false` off CloudLinux, `ready:false` while warming | `system/lve-cpu` | `top` |
 | `mysql_log_tail` | Tail the MySQL ERROR log (crashes, deadlocks, aborted conns, InnoDB errors) — "what's erroring?" | `system/mysql-log` | `lines`, `grep`, `limit` |
 | `mysql_slow_queries` | Tail the MySQL SLOW-QUERY log (where enabled) — the slow statements behind high CPU | `system/mysql-log` | `lines`, `grep`, `limit` |
 | `mail_log_tail` | Tail a mail log — `which=exim` (exim_mainlog, default) / `dovecot` / `postfix`. Raw-log companion to mail_queue_summary; where outbound-abuse evidence lives (`A=dovecot_login:` senders, `cwd=/home` scripts). Bounded tail + grep; path from a fixed candidate list; `found:false` if not logging there | `system/mail-log` | `which`, `lines`, `grep`, `limit` |
@@ -305,3 +306,4 @@ The MCP surface is versioned by CFM's date-based releases (see `CHANGELOG.md`).
 | 2026.08.11 | edge-unification 1b | **−`challenge_ip_status`** (31 tools) — retired with the per-IP challenge-DNAT machinery (the sets no longer exist; the edge Lua cookie is the only clearance model) |
 | 2026.08.12 | edge-unification 2d observability | **+`edge_error_tail`** (32 tools) — bounded tail of the edge (OpenResty/Angie) ERROR log with optional grep; surfaces the panel LOGONLY decision verdicts (`logonly=would_enforce`) + edge-Lua module/runtime errors that the access-log ring can't carry |
 | 2026.08.12 | edge-unification 2e burn-in analysis | **+`waf_fp_hunt`** (33 tools) — aggregates the panel LOGONLY signal (`[cfm_panel_waf]` + `[cfm_panel_decision]`) from the edge error log, separating known-scanner noise from the customer-facing residue (`nonscanner_would_block` + `ip_block_count`); the Phase-4 "safe to enforce?" read over `edge_error_tail`'s raw lines |
+| 2026.08.12 | CloudLinux per-tenant CPU | **+`lve_cpu`** (34 tools) — per-tenant CPU pressure from an in-memory `/proc/lve/list` sampler (~15s): each LVE's cores + %-of-limit (100 = throttled), hottest-first; the per-tenant companion to `mysql_pressure` for "box load high, which account?". Unit calibrated to nanoseconds against live CL8/CL9 |
