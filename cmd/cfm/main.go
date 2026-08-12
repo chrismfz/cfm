@@ -12,6 +12,7 @@ import (
 	"cfm/internal/firewall/nft"
 	"cfm/internal/firewall/nftlib"
 	"cfm/internal/logging"
+	"cfm/internal/lvecpu"
 	"cfm/internal/mailtraffic"
 	"cfm/internal/notify"
 	"cfm/internal/panelauth"
@@ -622,6 +623,12 @@ func runDaemon(args []string) {
 		logging.Logf("[mailtraffic] disabled (store unavailable): %v", err)
 	}
 	defer mailtraffic.Shutdown()
+
+	// Per-tenant CPU signal (CloudLinux LVE). Starts an in-memory sampler of
+	// /proc/lve/list only on a CloudLinux host; a no-op everywhere else. Daemon
+	// only.
+	lvecpu.Enable()
+	defer lvecpu.Shutdown()
 
 	// Daemon context — created early so sslcollector (started right
 	// below) and any other early-start subsystem can use it for their
