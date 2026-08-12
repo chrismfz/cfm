@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.12
+
 ### Added
 - **`make release` now auto-commits & pushes `CHANGELOG.md` (only).** After
   stamping the date, `release` commits **just** `CHANGELOG.md` (path-scoped, so
