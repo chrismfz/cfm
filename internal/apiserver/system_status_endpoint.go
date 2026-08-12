@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"cfm/internal/cputhrottle"
 	"cfm/internal/edgelog"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/selfip"
@@ -232,6 +233,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/edge-error-log", handleSystemEdgeErrorLog)
 	m.HandleFunc("/api/v1/system/waf-fp-hunt", handleSystemWAFFPHunt)
 	m.HandleFunc("/api/v1/system/lve-cpu", handleSystemLVECPU)
+	m.HandleFunc("/api/v1/system/cpu-throttle", handleSystemCPUThrottle)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
 	m.HandleFunc("/api/v1/system/mail-log", handleSystemMailLog)
 	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
@@ -614,6 +616,30 @@ func handleSystemLVECPU(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "schema": "system.lve_cpu.v1", "available": true, "ready": true,
 		"sampled_at": at.UTC(), "interval_sec": lvecpu.IntervalSeconds(),
 		"tenants": total, "top": samples,
+	})
+}
+
+// handleSystemCPUThrottle answers "the box load is high — is the CPU being
+// throttled or is this genuine demand?" (GET /api/v1/system/cpu-throttle).
+// Read-only, admin-only. It reads the instantaneous cpufreq/thermal/load signals
+// from sysfs/proc and classifies the root cause (thermal_throttling /
+// frequency_capped / genuine_demand / low_load / no_cpufreq_data — the last on
+// VMs where cpufreq isn't exposed). Cheap synchronous read (a handful of small
+// sysfs files); no collector, no external command.
+func handleSystemCPUThrottle(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":         true,
+		"schema":     "system.cpu_throttle.v1",
+		"assessment": cputhrottle.ReadAndClassify(cputhrottle.Params{}),
 	})
 }
 

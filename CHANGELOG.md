@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP `cpu_throttle` — turns "load is high" into a root cause.** New
+  read-only, admin-only MCP tool + `GET /api/v1/system/cpu-throttle`, backed by
+  the pure `internal/cputhrottle` leaf. It reads the instantaneous
+  cpufreq/thermal/loadavg signals from sysfs/proc and classifies WHY the CPU is
+  loaded: `genuine_demand` (cores at/near max frequency under load — hunt the
+  workload, not a fault), `thermal_throttling` (slow under load + hot / kernel
+  throttle counters set — check cooling), `frequency_capped` (slow but cool —
+  powersave governor or a policy cap; switch to performance), `frequency_reduced`
+  (slow, cause unclear — BIOS/host cap), `low_load` (idle downclock, normal), or
+  `no_cpufreq_data` (cpufreq/thermal not exposed — typical on VMs; check the
+  hypervisor's CPU steal instead). The classifier is **load-gated** — a
+  downclocked idle CPU is never mislabelled as throttled — and every verdict
+  carries a plain-language summary plus the freq ratio, governor, temperature,
+  and throttle counters behind it. Cheap synchronous read; no collector.
 - **MCP `db_web_pressure` — "few web hits, high DB pressure" tenant finder.**
   New read-only, admin-only MCP tool that correlates per-account MySQL pressure
   with per-vhost web request volume: it composes `mysql/cpu` + `mysql/top` +
