@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.12
+
 ### Fixed
 - **`make release` GitHub release failed on a large CHANGELOG (`gh: Argument
   list too long`).** The release notes were passed as a single `gh … --notes`
@@ -30,8 +34,6 @@ back-filled here — see the git/PR history for that period.
   under GitHub's ~125 000-char release-body limit. Also fixed a `set -o
   pipefail`/SIGPIPE bug in the first cut of the cap that made an oversized
   section come back empty.
-
-## 2026.08.12
 
 ### Added
 - **`make release` now auto-commits & pushes `CHANGELOG.md` (only).** After
