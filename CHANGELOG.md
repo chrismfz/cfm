@@ -49,6 +49,18 @@ back-filled here — see the git/PR history for that period.
   are edge-layer 403 denials, not nftables rules — use `waf_activity` /
   `waf_fp_hunt`).
 
+### Changed
+- **`ip_forensics` can now reach rotated logs (opt-in).** `include_rotated=true`
+  (MCP) / `?include_rotated=1` also scans the resolved access log's rotated
+  siblings — `access.log.1`, `access.log.2.gz`, `access.log-YYYYMMDD.gz`, … —
+  newest-first, so per-IP forensics can see evidence from before the last
+  logrotate instead of only what's still in the live file. Still bounded: at most
+  `max_files` siblings (default 10, max 60), a shared line budget across all of
+  them, the same single scan timeout, and gz is streamed (never decompressed
+  whole into memory); `Truncated` is set if any bound is hit. Default behaviour is
+  unchanged (live file only). The response gains `files_scanned` (live first, then
+  the rotated files actually read).
+
 ### Fixed
 - **`waf_fp_hunt` no longer under-counts the panel block-tier FP gate on
   enforcing nodes.** After the Phase-4c default-enforce flip, an enforcing panel

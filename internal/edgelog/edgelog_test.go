@@ -1,6 +1,7 @@
 package edgelog
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
 	"os"
@@ -30,6 +31,80 @@ func writeLog(t *testing.T, n int, ip string, every int) string {
 	return p
 }
 
+// TestGrepIP_IncludeRotated verifies the opt-in rotated reach: a live file, a
+// plain rotated .1, and a gzipped .2.gz are all scanned when IncludeRotated is
+// set (and only then), while an unrelated same-dir log is never touched.
+func TestGrepIP_IncludeRotated(t *testing.T) {
+	if _, err := exec.LookPath("tail"); err != nil {
+		t.Skip("tail not available")
+	}
+	ip := "203.0.113.9"
+	logLine := func(path string) string {
+		return fmt.Sprintf("%s - - [t] \"GET %s HTTP/1.1\" 200 10\n", ip, path)
+	}
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	if err := os.WriteFile(live, []byte(logLine("/live")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "access.log.1"), []byte(logLine("/rot1")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// gzipped rotated sibling.
+	gzf, err := os.Create(filepath.Join(dir, "access.log.2.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gzip.NewWriter(gzf)
+	if _, err := gw.Write([]byte(logLine("/rot2gz"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzf.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated log in the same dir must be excluded (name doesn't start with "access.log.").
+	if err := os.WriteFile(filepath.Join(dir, "other.log"), []byte(logLine("/nope")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	old := accessLogCandidates
+	accessLogCandidates = append([]string{live}, old...)
+	defer func() { accessLogCandidates = old }()
+
+	// Default (no rotated): only the live match, one file scanned.
+	res, err := GrepIP(context.Background(), ip, Opts{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Matched != 1 || len(res.FilesScanned) != 1 {
+		t.Fatalf("live-only: matched=%d files=%v, want 1 match / 1 file", res.Matched, res.FilesScanned)
+	}
+
+	// With rotated: live + .1 + .2.gz = 3 matches; other.log excluded.
+	res2, err := GrepIP(context.Background(), ip, Opts{Limit: 100, IncludeRotated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Matched != 3 {
+		t.Fatalf("rotated: matched=%d, want 3 (files=%v)", res2.Matched, res2.FilesScanned)
+	}
+	if len(res2.FilesScanned) != 3 {
+		t.Fatalf("rotated: files_scanned=%v, want 3", res2.FilesScanned)
+	}
+	joined := strings.Join(res2.Lines, "\n")
+	for _, want := range []string{"/live", "/rot1", "/rot2gz"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("rotated result missing %q; lines=%v", want, res2.Lines)
+		}
+	}
+	if strings.Contains(joined, "/nope") {
+		t.Errorf("unrelated other.log was scanned: %v", res2.Lines)
+	}
+}
+
 func TestGrepIP_TailAndFilter(t *testing.T) {
 	if _, err := exec.LookPath("tail"); err != nil {
 		t.Skip("tail not available")
@@ -42,7 +117,7 @@ func TestGrepIP_TailAndFilter(t *testing.T) {
 	defer func() { accessLogCandidates = old }()
 
 	// scan all 1000, cap matches at 40 → truncated.
-	res, err := GrepIP(context.Background(), ip, "", 1000, 40)
+	res, err := GrepIP(context.Background(), ip, Opts{TailLines: 1000, Limit: 40})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +158,7 @@ func TestGrepIP_TailWindowBounds(t *testing.T) {
 	accessLogCandidates = append([]string{p}, old...)
 	defer func() { accessLogCandidates = old }()
 
-	res, err := GrepIP(context.Background(), ip, "", 100, 50)
+	res, err := GrepIP(context.Background(), ip, Opts{TailLines: 100, Limit: 50})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,10 +168,10 @@ func TestGrepIP_TailWindowBounds(t *testing.T) {
 }
 
 func TestGrepIP_InvalidIP(t *testing.T) {
-	if _, err := GrepIP(context.Background(), "not-an-ip", "", 0, 0); err == nil {
+	if _, err := GrepIP(context.Background(), "not-an-ip", Opts{}); err == nil {
 		t.Fatal("expected error for invalid IP")
 	}
-	if _, err := GrepIP(context.Background(), "1.2.3.4; rm -rf /", "", 0, 0); err == nil {
+	if _, err := GrepIP(context.Background(), "1.2.3.4; rm -rf /", Opts{}); err == nil {
 		t.Fatal("expected error for injection-shaped input")
 	}
 }
@@ -143,7 +218,7 @@ func TestGrepIP_NoSubstringOvermatch(t *testing.T) {
 	accessLogCandidates = append([]string{p}, old...)
 	defer func() { accessLogCandidates = old }()
 
-	res, err := GrepIP(context.Background(), "1.2.3.4", "", 100, 50)
+	res, err := GrepIP(context.Background(), "1.2.3.4", Opts{TailLines: 100, Limit: 50})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +242,7 @@ func TestGrepIP_IPv6Canonicalization(t *testing.T) {
 	accessLogCandidates = append([]string{p}, old...)
 	defer func() { accessLogCandidates = old }()
 
-	res, err := GrepIP(context.Background(), "2001:0DB8::1", "", 100, 50)
+	res, err := GrepIP(context.Background(), "2001:0DB8::1", Opts{TailLines: 100, Limit: 50})
 	if err != nil {
 		t.Fatal(err)
 	}

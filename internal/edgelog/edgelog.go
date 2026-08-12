@@ -18,12 +18,14 @@ package edgelog
 
 import (
 	"bufio"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -60,6 +62,14 @@ const (
 	MaxLimit         = 1000
 	scanTimeout      = 20 * time.Second
 
+	// Rotated-log reach (opt-in): how many rotated siblings to scan by default
+	// and at most, plus the shared line budget across ALL rotated files so an
+	// operator who asks for rotated reach can't trigger an unbounded multi-GB
+	// decompress. The live file's own tail window is unaffected.
+	DefaultRotatedFiles = 10
+	MaxRotatedFiles     = 60
+	rotatedScanBudget   = MaxTailLines
+
 	// Error logs are far smaller and denser than access logs, and are usually
 	// read for "the last few matching lines", so the error tail window is much
 	// smaller than the access one.
@@ -72,13 +82,24 @@ const (
 
 // Result is the outcome of an IP lookup.
 type Result struct {
-	IP        string   `json:"ip"`
-	LogFile   string   `json:"log_file"`
-	TailLines int      `json:"tail_lines"` // how many trailing lines were scanned
-	Scanned   int      `json:"scanned"`    // lines actually read from tail
-	Matched   int      `json:"matched"`    // total matches found (may exceed len(Lines))
-	Truncated bool     `json:"truncated"`  // matches beyond the returned cap existed
-	Lines     []string `json:"lines"`      // raw matching log lines, oldest→newest
+	IP           string   `json:"ip"`
+	LogFile      string   `json:"log_file"`             // the live log (default source)
+	FilesScanned []string `json:"files_scanned"`        // every file read: live first, then rotated newest→oldest
+	TailLines    int      `json:"tail_lines"`           // how many trailing lines were scanned in the LIVE file
+	Scanned      int      `json:"scanned"`              // lines actually read across all scanned files
+	Matched      int      `json:"matched"`              // total matches found (may exceed len(Lines))
+	Truncated    bool     `json:"truncated"`            // matches beyond the returned cap, or scan bound hit
+	Lines        []string `json:"lines"`                // raw matching log lines, newest file first
+}
+
+// Opts tunes an IP lookup. The zero value is the historical behaviour: scan only
+// the live access log's tail (no rotated reach).
+type Opts struct {
+	Source         string // which allow-listed access log to treat as live; "" = most-recent
+	TailLines      int    // live-file tail window (0 → DefaultTailLines)
+	Limit          int    // max matching lines returned (0 → DefaultLimit)
+	IncludeRotated bool   // also scan rotated siblings (.1, .2.gz, -YYYYMMDD.gz, …)
+	MaxFiles       int    // cap rotated siblings scanned (0 → DefaultRotatedFiles)
 }
 
 // availableFrom returns the candidates that currently exist as regular files,
@@ -143,30 +164,40 @@ func AvailableErrorLogs() []string { return availableFrom(errorLogCandidates) }
 
 func resolveLog(want string) (string, error) { return resolveFrom(accessLogCandidates, want, "access") }
 
-// GrepIP returns the raw lines mentioning ip within the last tailLines lines of
+// GrepIP returns the raw lines mentioning ip within the last o.TailLines lines of
 // the resolved edge access log. Bounded: tail window, context timeout, output
 // cap, per-line retention cap. ip must be a valid IP (rejects arbitrary
-// strings). source, when set, selects among AvailableLogs.
+// strings). o.Source, when set, selects among AvailableLogs.
 //
 // The IP is canonicalized (so 2001:DB8::1 matches a log's 2001:db8::1) and
 // matched as a standalone address token — NOT a bare substring — so "1.2.3.4"
 // does not match "1.2.3.45". Note the token can still appear in a non-address
 // field (URI/referer); the caller reads the raw line and sees the real client
-// field. Only the current log is scanned (rotated .gz are not), so reach is
-// bounded to what's still in the live file.
-func GrepIP(ctx context.Context, ip string, source string, tailLines, limit int) (Result, error) {
+// field.
+//
+// By default only the live log is scanned. With o.IncludeRotated the resolved
+// log's rotated siblings (access.log.1, access.log.2.gz, access.log-YYYYMMDD.gz,
+// …) are ALSO scanned, newest→oldest, so forensics can reach evidence from
+// before the last logrotate. That reach is still bounded: at most o.MaxFiles
+// siblings, a shared rotatedScanBudget of lines across all of them, and the same
+// single scanTimeout covering the whole call (gz is streamed, never buffered
+// whole). Matches are returned live-first then newest-sibling-first, capped at
+// o.Limit; Truncated is set if the cap or any bound was hit.
+func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 	ip = strings.TrimSpace(ip)
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return Result{}, fmt.Errorf("invalid IP %q", ip)
 	}
 	ip = parsed.String() // canonical form (lowercased/compressed) for matching + display
+	tailLines := o.TailLines
 	if tailLines <= 0 {
 		tailLines = DefaultTailLines
 	}
 	if tailLines > MaxTailLines {
 		tailLines = MaxTailLines
 	}
+	limit := o.Limit
 	if limit <= 0 {
 		limit = DefaultLimit
 	}
@@ -174,7 +205,7 @@ func GrepIP(ctx context.Context, ip string, source string, tailLines, limit int)
 		limit = MaxLimit
 	}
 
-	logFile, err := resolveLog(source)
+	logFile, err := resolveLog(o.Source)
 	if err != nil {
 		return Result{}, err
 	}
@@ -183,7 +214,9 @@ func GrepIP(ctx context.Context, ip string, source string, tailLines, limit int)
 	defer cancel()
 
 	res := Result{IP: ip, LogFile: logFile, TailLines: tailLines, Lines: make([]string, 0, limit)}
-	err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
+	// One match handler shared by the live tail and every rotated scan, so the
+	// output cap / Matched count / Truncated flag are accounted uniformly.
+	onLine := func(line string) bool {
 		res.Scanned++
 		if !mentionsIP(line, ip) {
 			return true
@@ -195,11 +228,125 @@ func GrepIP(ctx context.Context, ip string, source string, tailLines, limit int)
 			res.Truncated = true
 		}
 		return true
-	})
-	if err != nil {
+	}
+
+	res.FilesScanned = append(res.FilesScanned, logFile)
+	if err = streamTailMatches(cctx, logFile, tailLines, onLine); err != nil {
 		return res, err
 	}
+
+	if o.IncludeRotated {
+		maxFiles := o.MaxFiles
+		if maxFiles <= 0 {
+			maxFiles = DefaultRotatedFiles
+		}
+		if maxFiles > MaxRotatedFiles {
+			maxFiles = MaxRotatedFiles
+		}
+		budget := rotatedScanBudget
+		for _, rf := range rotatedSiblings(logFile, maxFiles) {
+			if cctx.Err() != nil || budget <= 0 {
+				// Ran out of time/budget before this file — mark it and any
+				// remaining files as unscanned reach.
+				res.Truncated = true
+				break
+			}
+			res.FilesScanned = append(res.FilesScanned, rf)
+			// A single unreadable/corrupt rotated file must not fail the whole
+			// lookup — the live-file result is already in hand; skip and go on.
+			if scanErr := scanWholeForIP(cctx, rf, &budget, onLine); scanErr != nil {
+				if cctx.Err() != nil {
+					res.Truncated = true
+					break
+				}
+				continue
+			}
+			// Budget exhausted mid-file (possibly the last one, where the
+			// loop-top guard won't run again): the reach was cut short.
+			if budget <= 0 {
+				res.Truncated = true
+			}
+		}
+	}
 	return res, nil
+}
+
+// rotatedSiblings returns the rotated variants of live (same directory, name
+// starting with "<base>." or "<base>-": .1, .1.gz, -20260810.gz, …), most
+// recently modified FIRST, capped at maxFiles. The live file itself, empty
+// files, and non-regular entries are excluded. A directory it can't read yields
+// nothing (best-effort — the live result still stands).
+func rotatedSiblings(live string, maxFiles int) []string {
+	dir := filepath.Dir(live)
+	base := filepath.Base(live)
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	type fe struct {
+		path string
+		mod  time.Time
+	}
+	var out []fe
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == base {
+			continue
+		}
+		if !strings.HasPrefix(name, base+".") && !strings.HasPrefix(name, base+"-") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			continue
+		}
+		out = append(out, fe{filepath.Join(dir, name), info.ModTime()})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].mod.After(out[j].mod) })
+	if len(out) > maxFiles {
+		out = out[:maxFiles]
+	}
+	paths := make([]string, len(out))
+	for i, e := range out {
+		paths[i] = e.path
+	}
+	return paths
+}
+
+// scanWholeForIP streams a rotated file from the start (gz-transparent) feeding
+// each line to fn, decrementing the shared budget. Unlike the live tail this
+// reads the whole file, but the caller's budget + ctx timeout bound the work,
+// and gz is streamed through gzip.Reader (never decompressed whole into memory).
+func scanWholeForIP(ctx context.Context, path string, budget *int, fn func(line string) bool) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var r io.Reader = f
+	if strings.HasSuffix(path, ".gz") {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return err
+		}
+		defer gz.Close()
+		r = gz
+	}
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
+	for sc.Scan() {
+		if *budget <= 0 || ctx.Err() != nil {
+			return ctx.Err()
+		}
+		*budget--
+		if !fn(sc.Text()) {
+			return nil
+		}
+	}
+	return sc.Err()
 }
 
 // ErrorTailResult is the outcome of an edge error-log tail.
