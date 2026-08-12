@@ -89,23 +89,31 @@ do
     panel_bridge_cfg = panel_bridge_cfg or { clearance_refresh = true }
 end
 
--- LOGONLY bridge decision (edge-unification Phase 2d). The panel consults the
--- SAME /nginx/decision the web edge uses (via the shared cfm_decision module,
--- scope=panel:<port>) and RECORDS what the bridge would do — but does NOT act
--- on the verdict: the clearance-cookie challenge below is unchanged, nothing
--- here blocks or adds a challenge. The point is to gather false-positive data on
--- panel traffic before any enforcement phase. Everything is pcall'd and
--- fail-open, and a missing module/cjson (upgrade lag) or the kill switch
--- CFM_PANEL_DECISION=0 simply leaves panel_decision nil (no probe at all), so a
--- bridge hiccup can never touch panel access.
-local PANEL_DECISION_LOGONLY = (os.getenv("CFM_PANEL_DECISION") or "1") ~= "0"
+-- Bridge decision (edge-unification Phase 2d LOGONLY → Phase 4b enforce). The
+-- panel consults the SAME /nginx/decision the web edge uses (via the shared
+-- cfm_decision module, scope=panel:<port>). Enforce is now available and OPT-IN
+-- (CFM_PANEL_DECISION=enforce, default LOGONLY) — see the mode selector and
+-- docs/edge-unification-plan.md Phase 4b.
+-- CFM_PANEL_DECISION selects the panel bridge-decision mode:
+--   "0"/"off"     → probe disabled entirely (no bridge consult on panel at all);
+--   "enforce"/"2" → act on the verdict: a bridge `block` (ip/vhost/rule) → deny;
+--   anything else → LOGONLY (default "1"): record the would-be verdict, never act.
+-- Default stays LOGONLY so a binary/config upgrade never silently starts
+-- enforcing on the cPanel/WHM ports — the operator opts in per node (orion
+-- first), and CFM_PANEL_DECISION=0 remains the instant kill switch. Everything
+-- is pcall'd and fail-open: a missing module/cjson (upgrade lag) or the kill
+-- switch simply leaves panel_decision nil (no probe, no deny), and a bridge RPC
+-- error is swallowed, so a bridge hiccup can never lock the panel.
+local PANEL_DECISION_ENV = (os.getenv("CFM_PANEL_DECISION") or "1")
+local PANEL_DECISION_OFF = (PANEL_DECISION_ENV == "0" or PANEL_DECISION_ENV == "off")
+local PANEL_DECISION_ENFORCE = (PANEL_DECISION_ENV == "enforce" or PANEL_DECISION_ENV == "2")
 local panel_decision
 local panel_decision_cjson
 do
     local ok_cjson, cj = pcall(require, "cjson.safe")
     local ok_mod, dec_mod = pcall(require, "cfm_decision")
     local ok_bmod, bmod = pcall(require, "cfm_bridge_cfg")
-    if PANEL_DECISION_LOGONLY and ok_cjson and ok_mod and type(dec_mod) == "table" and dec_mod.new then
+    if not PANEL_DECISION_OFF and ok_cjson and ok_mod and type(dec_mod) == "table" and dec_mod.new then
         panel_decision_cjson = cj
         -- Transport values mirror cfm.lua's CFG so the panel's bridge RPC
         -- behaves identically to the web edge's.
@@ -153,9 +161,21 @@ local function panel_touch_ok(ip, host, scope, ttl_sec)
         { ip = ip, host = host })
 end
 
--- panel_decision_probe fires the LOGONLY decision on a panel human-entry request
--- and records what the bridge WOULD do. It returns nothing and changes no
--- control flow; a bridge error is swallowed (fail-open, no log line).
+-- panel_decision_probe fires the bridge decision on a panel human-entry request.
+-- It returns `(is_block, why)` when the verdict is the HIGH-CONFIDENCE block tier
+-- (ip/vhost/rule action == "block"), so the caller can hard-deny in enforce mode;
+-- it returns nil when the probe is disabled, the bridge errors (fail-open — no
+-- deny), or the verdict is anything other than block. Every non-allow verdict is
+-- LOGGED with a mode-aware marker (`enforce=block` when it will actually deny,
+-- else the observe-only `logonly=would_enforce` — waf_fp_hunt parses the
+-- ip/vhost/rule_action fields, not the marker, so the FP picture is unchanged).
+--
+-- Only the block tier is returned for enforcement. The CHALLENGE tier is
+-- deliberately NOT surfaced here: the clearance-aware human-entry challenge in
+-- section 3 already challenges un-cleared browsers and passes non-browsers
+-- through, so deriving a challenge from the verdict would duplicate it and risk
+-- the exact loop Phase 4a avoided (a solved cookie doesn't clear the verdict).
+-- throttle/other verdicts stay observe-only in Phase 4b.
 local function panel_decision_probe(ip, host, uri, method, ua, scope)
     if not panel_decision then return end
     local okd, d = pcall(function()
@@ -166,13 +186,21 @@ local function panel_decision_probe(ip, host, uri, method, ua, scope)
     local ipa = d.ip_action or "allow"
     local vha = d.vhost_action or "allow"
     local ra  = d.rule_action
+    local is_block = (ipa == "block" or vha == "block" or ra == "block")
+    local will_enforce = PANEL_DECISION_ENFORCE and is_block
     if ipa ~= "allow" or vha ~= "allow" or ra then
         ngx.log(ngx.WARN,
-            "[cfm_panel_decision] logonly=would_enforce scope=", tostring(scope),
+            "[cfm_panel_decision] ", (will_enforce and "enforce=block" or "logonly=would_enforce"),
+            " scope=", tostring(scope),
             " ip=", tostring(ip), " host=", tostring(host), " uri=", tostring(uri),
             " ip_action=", tostring(ipa), " vhost_action=", tostring(vha),
             " rule_action=", tostring(ra or "-"),
             " cached=", d._cache and "1" or "0")
+    end
+    if is_block then
+        -- Name the tier that blocked for the deny reason (ip > vhost > rule).
+        local why = (ipa == "block" and "ip") or (vha == "block" and "vhost") or "rule"
+        return true, why
     end
 end
 
@@ -1226,9 +1254,22 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
         ngx.header["X-CFM-Clearance"] = "module_error"
     end
 
-    -- LOGONLY bridge decision: record what the bridge would do for this panel
-    -- human-entry request. Never alters the flow below (see panel_decision_probe).
-    panel_decision_probe(client_ip, normalized_host, uri, method, ua, panel_scope)
+    -- Bridge decision. LOGONLY (default) only records the would-be verdict.
+    -- ENFORCE acts on the HIGH-CONFIDENCE BLOCK tier ONLY: a bridge `block`
+    -- (ip/vhost/rule) → hard deny, applied here BEFORE the clearance short-circuit
+    -- so an IP the bridge blocked mid-session is denied even with a valid
+    -- clearance cookie (web-edge parity: cfm.lua's block ignores clearance). `deny`
+    -- is a plain 403 with no redirect, so it can't loop. The CHALLENGE tier is
+    -- deliberately NOT enforced from the verdict — the clearance-aware human-entry
+    -- challenge below already challenges un-cleared browsers (and passes
+    -- non-browsers through), so deriving a challenge from the verdict would
+    -- duplicate it and risk the loop Phase 4a avoided. The probe is pcall'd, so any
+    -- bridge error fails OPEN to the normal flow (no deny) — a bridge fault can
+    -- never lock the panel; CFM_PANEL_DECISION=0 is the instant kill switch.
+    local okdp, dec_block, dec_why = pcall(panel_decision_probe, client_ip, normalized_host, uri, method, ua, panel_scope)
+    if okdp and PANEL_DECISION_ENFORCE and dec_block then
+        return deny(mode, "panel_decision_block_" .. tostring(dec_why or "-"))
+    end
 
     local validator_degraded = validator_degraded_reason(clearance_reason)
     if validator_degraded then

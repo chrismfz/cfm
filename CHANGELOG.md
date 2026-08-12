@@ -69,6 +69,23 @@ back-filled here — see the git/PR history for that period.
   and the probe is fail-open (any WAF error → normal flow), so an enforcing panel
   WAF can't lock an admin out of WHM/cPanel. The panel challenge was already
   enforced; the shared bridge **decision** stays LOGONLY until Phase 4b.
+- **Edge unification Phase 4b: panel bridge-decision enforce is now available,
+  opt-in (default LOGONLY), BLOCK-tier only.** `CFM_PANEL_DECISION` gains an
+  `enforce` value alongside `0`/off and the default `1`/logonly, mirroring 4a. In
+  `enforce`, a bridge verdict whose ip/vhost/rule action is **`block`** hard-denies
+  (a plain 403, no redirect, so it can't loop); the deny applies on human-entry
+  even to a client with a valid clearance cookie (web-edge parity — a blocked IP
+  is blocked). The **challenge tier is deliberately not enforced from the
+  verdict** — the existing clearance-aware human-entry challenge already covers
+  un-cleared browsers and passes non-browsers through, so deriving a challenge
+  from the verdict would duplicate it and reintroduce the loop Phase 4a avoided;
+  `throttle`/other verdicts stay observe-only. **Merging changes nothing** — the
+  default stays LOGONLY; the operator opts in per node (`CFM_PANEL_DECISION=enforce`,
+  orion first → fleet), and `CFM_PANEL_DECISION=0` is the instant kill switch. The
+  probe is fail-open (any bridge error → normal flow, no deny), so an enforcing
+  decision can't lock an admin out of WHM/cPanel. `waf_fp_hunt`'s
+  `panel_decision.ip_block_count` keeps counting on enforcing nodes (it keys on
+  the verdict fields, not the log marker).
 
 ### Added
 - **MCP `cpu_throttle` — turns "load is high" into a root cause.** New
