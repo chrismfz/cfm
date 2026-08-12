@@ -374,17 +374,19 @@ type edgeAccessTailInput struct {
 }
 
 type ipForensicsInput struct {
-	IP     string `json:"ip" jsonschema:"the source IP to look up (e.g. from a WAF hit / firewall_blocks / suspicious_hosts)"`
-	Lines  int    `json:"lines,omitempty" jsonschema:"how many trailing access-log lines to scan (tail window); default 300000, max 2000000"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"max matching lines to return (default 200, max 1000)"`
-	Source string `json:"source,omitempty" jsonschema:"which edge access log to scan (basename or full path from the available list); omit for the default main access log"`
+	IP             string `json:"ip" jsonschema:"the source IP to look up (e.g. from a WAF hit / firewall_blocks / suspicious_hosts)"`
+	Lines          int    `json:"lines,omitempty" jsonschema:"how many trailing access-log lines to scan (tail window); default 300000, max 2000000"`
+	Limit          int    `json:"limit,omitempty" jsonschema:"max matching lines to return (default 200, max 1000)"`
+	Source         string `json:"source,omitempty" jsonschema:"which edge access log to scan (basename or full path from the available list); omit for the default main access log"`
+	IncludeRotated bool   `json:"include_rotated,omitempty" jsonschema:"also scan the rotated siblings of the resolved log (access.log.1, .2.gz, -YYYYMMDD.gz) newest-first, to reach evidence from before the last logrotate; default false (live file only)"`
+	MaxFiles       int    `json:"max_files,omitempty" jsonschema:"when include_rotated is set, cap how many rotated siblings to scan (default 10, max 60)"`
 }
 
 func registerIPForensics(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "ip_forensics",
-		Description: "On-demand: the raw edge access-log lines for one source IP — what it actually requested, for correlating an OLDER WAF hit (reaches back further than edge_access_tail's live ring; complements ip_drilldown's aggregate vhosts/rate/score). Runs the equivalent of `tail -n N access.log | grep <ip>`: bounded to the last N lines (default 300k) with a timeout and a capped result, so it costs nothing until called and never scans a multi-GB log whole. Returns raw log lines. For the aggregate 'how much / which vhosts' use ip_drilldown; for right-now traffic use edge_access_tail.",
+		Description: "On-demand: the raw edge access-log lines for one source IP — what it actually requested, for correlating an OLDER WAF hit (reaches back further than edge_access_tail's live ring; complements ip_drilldown's aggregate vhosts/rate/score). Runs the equivalent of `tail -n N access.log | grep <ip>`: bounded to the last N lines (default 300k) with a timeout and a capped result, so it costs nothing until called and never scans a multi-GB log whole. Returns raw log lines (and `files_scanned`). Set include_rotated=true to ALSO scan the resolved log's rotated siblings (access.log.1, .2.gz, -YYYYMMDD.gz) newest-first — evidence from before the last logrotate — still bounded (max_files siblings, default 10; a shared line budget; one timeout; gz streamed). For the aggregate 'how much / which vhosts' use ip_drilldown; for right-now traffic use edge_access_tail.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ipForensicsInput) (*mcp.CallToolResult, any, error) {
 		if strings.TrimSpace(in.IP) == "" {
 			return nil, nil, errRequired("ip")
@@ -394,6 +396,10 @@ func registerIPForensics(srv *mcp.Server, d Deps) {
 		setInt(q, "lines", in.Lines)
 		setInt(q, "limit", in.Limit)
 		setStr(q, "source", in.Source)
+		if in.IncludeRotated {
+			q.Set("include_rotated", "1")
+		}
+		setInt(q, "max_files", in.MaxFiles)
 		return dispatchJSON(ctx, d, "/api/v1/system/ip-forensics", q)
 	})
 }

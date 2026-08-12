@@ -440,8 +440,21 @@ func handleSystemIPForensics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	includeRotated := r.URL.Query().Get("include_rotated") == "1"
+	maxFiles := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("max_files")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			maxFiles = n
+		}
+	}
 
-	res, err := edgelog.GrepIP(r.Context(), ip, source, lines, limit)
+	res, err := edgelog.GrepIP(r.Context(), ip, edgelog.Opts{
+		Source:         source,
+		TailLines:      lines,
+		Limit:          limit,
+		IncludeRotated: includeRotated,
+		MaxFiles:       maxFiles,
+	})
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{
