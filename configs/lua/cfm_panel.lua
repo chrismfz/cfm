@@ -7,7 +7,10 @@
 --   4) Everything else: pass to cpsrvd.
 --
 -- Important:
---   - Do not run mini-WAF here.
+--   - The WAF here is LOGONLY (Phase 2e): it records would-be hits on
+--     human-entry/generic requests and never blocks or alters the flow. Do NOT
+--     turn it into an enforcing in-path WAF without the burn-in + enforce step
+--     (see docs/edge-unification-plan.md).
 --   - Do not validate WHM/API auth here. cpsrvd does that.
 --   - Do not require User-Agent or Authorization for API passthrough.
 
@@ -171,6 +174,92 @@ local function panel_decision_probe(ip, host, uri, method, ua, scope)
             " rule_action=", tostring(ra or "-"),
             " cached=", d._cache and "1" or "0")
     end
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Panel WAF (edge-unification Phase 2e) — LOGONLY.
+--
+-- Runs the SAME cfm_waf ruleset the web edge uses against panel human-entry +
+-- generic requests and RECORDS what it WOULD do — it never blocks, challenges,
+-- or alters the flow (parallel to panel_decision_probe). The point is to gather
+-- false-positive data on real panel traffic before any enforcement phase.
+--
+-- Reduced profile, deliberately:
+--   * Header / URI / args / cookie only — NO request body is read, so panel
+--     upload/rsync/websocket streams are never buffered. The api/sso/acctxfer/
+--     /cgi/transfer//cgi/live_tail_log/websocket allowlist (is_panel_api_or_sso)
+--     is already hard-skipped upstream, so those paths never reach this probe.
+--   * Self/loopback traffic is skipped (panel_is_self_ip) to keep the burn-in
+--     log free of the box's own monitoring. This is loopback/link-local only —
+--     full self-IP-set + IGNORE_NETS parity (as the web edge's is_self_origin
+--     does) is deferred to the enforcement PR, where it actually gates blocking.
+--   * Per-(ip,rule) log throttle so a noisy scanner can't flood the error log.
+--
+-- Everything is pcall'd + fail-open; the kill switch CFM_PANEL_WAF=0 (or a
+-- cfm_waf module missing on upgrade lag) leaves panel_waf nil so nothing runs.
+-- REMINDER: once burn-in is clean, panel WAF (and the panel challenge) graduate
+-- to enforce — see docs/edge-unification-plan.md.
+local PANEL_WAF_LOGONLY = (os.getenv("CFM_PANEL_WAF") or "1") ~= "0"
+local panel_waf
+do
+    local ok_waf, w = pcall(require, "cfm_waf")
+    if PANEL_WAF_LOGONLY and ok_waf and type(w) == "table" and w.check and w.enabled then
+        panel_waf = w
+    end
+end
+
+-- Loopback / link-local only (mirrors cfm.lua is_loopback_or_linklocal). Kept
+-- minimal on purpose — see the note above about deferred full self-IP parity.
+local function panel_is_self_ip(ip)
+    local s = tostring(ip or ""):lower()
+    if s == "" then return false end
+    if s:sub(1, 1) == "[" and s:sub(-1) == "]" then s = s:sub(2, -2) end
+    if s == "::1" then return true end
+    if s:sub(1, 4) == "127." then return true end
+    if s:sub(1, 6) == "fe80::" then return true end
+    if s:sub(1, 8) == "169.254." then return true end
+    return false
+end
+
+-- panel_waf_probe runs the LOGONLY WAF and records a hit. Returns nothing and
+-- changes no control flow. A cfm_waf error is swallowed (fail-open, no line).
+local function panel_waf_probe(ip, host, uri, args, method, ua, scope)
+    if not panel_waf then return end
+    if not panel_waf.enabled() then return end
+    if panel_is_self_ip(ip) then return end
+
+    local okc, hit, reason, _ttl, action, _hits, rule_id = pcall(function()
+        return panel_waf.check({
+            uri = uri, args = args or "", method = method,
+            host = host, ip = ip, peer = ip,
+            cookie = ngx.var.http_cookie or "",
+            headers = ngx.req.get_headers(),
+            body = "",  -- LOGONLY reduced profile: never buffer the panel body
+            -- Same dict the web edge passes as SH. cfm_waf's burst detectors
+            -- mutate counters here, but they are gated on web-app auth markers
+            -- (/wp-login.php, /xmlrpc.php, …) AND keyed by (ip,host), so a panel
+            -- URI on a panel Host never tips a web vhost's enforced burst state.
+            shdict = ngx.shared.cfm_decisions,
+            self_origin = false,
+        })
+    end)
+    if not okc or not hit then return end
+
+    -- Throttle per (ip, rule_id) so a scanner cannot flood the error log; the
+    -- first hit in each 60s window is what the burn-in needs.
+    local sh = ngx.shared.cfm_decisions
+    if sh then
+        local k = "waf_ll|" .. (ip or "-") .. "|" .. tostring(rule_id or reason or "-")
+        if not sh:add(k, 1, 60) then return end
+    end
+
+    ngx.log(ngx.WARN,
+        "[cfm_panel_waf] logonly=would_", tostring(action or "block"),
+        " scope=", tostring(scope),
+        " ip=", tostring(ip), " host=", tostring(host),
+        " uri=", tostring(uri), " method=", tostring(method),
+        " reason=", tostring(reason), " rule_id=", tostring(rule_id or "-"),
+        " ua=", tostring(ua or "-"))
 end
 
 local function starts_with(s, p)
@@ -1034,6 +1123,14 @@ if is_exempt_path(uri) then
     end
 
     return allow_origin(mode, exempt_reason, origin, method, ua)
+end
+
+-- 2e) Panel WAF (LOGONLY): record what the WAF would do on this request. Runs
+-- after the api/sso + exempt-path hard-skips above, so those paths are never
+-- inspected; covers human-entry AND generic passthrough in one place. Skips the
+-- internal verify/decision sub-locations. Never alters the flow below.
+if uri ~= decision_uri and uri ~= "/__cfm_verify" then
+    pcall(panel_waf_probe, client_ip, normalized_host, uri, ngx.var.args or "", method, ua, panel_scope)
 end
 
 -- 3) Human panel entrypoints.

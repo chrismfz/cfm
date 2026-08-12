@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Panel WAF — LOGONLY (edge-unification Phase 2e).** `cfm_panel.lua` now runs
+  the same `cfm_waf` ruleset the web edge uses against panel human-entry +
+  generic requests and RECORDS what it would do
+  (`[cfm_panel_waf] logonly=would_<action> scope=panel:<port> …` in the edge
+  error log), but does **not** act on the verdict — nothing blocks or challenges
+  because of the WAF, so there is zero panel-lockout risk while false-positive
+  data is gathered. Reduced profile: header/URI/args/cookie only (no request
+  body is read, so panel upload/rsync/websocket streams are never buffered); the
+  API/SSO/`acctxfer`/transfer/`live_tail_log`/websocket allowlist is hard-skipped
+  and never inspected; loopback/self traffic is skipped; per-`(ip,rule)` log
+  throttle. Everything is `pcall`'d + fail-open; kill switch `CFM_PANEL_WAF=0`
+  (declared `env CFM_PANEL_WAF;` in both engine confs) or a missing `cfm_waf`
+  module on upgrade lag disables the probe entirely. Enforcement is a later
+  opt-in phase after burn-in (see `docs/edge-unification-plan.md`).
 - **MCP `edge_error_tail` — read the edge (OpenResty/Angie) ERROR log.** New
   read-only, admin-only MCP tool + `GET /api/v1/system/edge-error-log`: a
   bounded on-demand tail (last N lines, default 5000, max 200k) of the edge
