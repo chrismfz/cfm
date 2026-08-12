@@ -60,8 +60,9 @@ As-built + roadmap: **`MCP.md`**. Read-only telemetry across the fleet
 
 - **`whats_wrong` triage synthesis** — [in flight]. Ranked "what's wrong right
   now" entry point.
-- **Logs group** — [next]. `journal_tail` / `cfm_log_tail` (edge `edge_error_tail`
-  landed).
+- **Logs group** — DONE. `cfm_log_tail` (CFM's own `/var/log/cfm/*`, curated
+  keys) + `journal_tail` (allow-listed systemd units) landed via `internal/cfmlog`
+  (edge `edge_error_tail` already landed).
 - **Firewall/WAF drilldowns** — [next]. `nft_counters`, `waf_rule_detail`,
   `challenge_ip_status` (`waf_fp_hunt` landed — panel-logonly burn-in aggregator).
 - **`ip_forensics` → rotated logs** — [next]. Optionally reach rotated log

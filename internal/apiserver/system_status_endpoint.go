@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"cfm/internal/cfmlog"
 	"cfm/internal/cputhrottle"
 	"cfm/internal/edgelog"
 	"cfm/internal/firewall"
@@ -235,6 +237,8 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/lve-cpu", handleSystemLVECPU)
 	m.HandleFunc("/api/v1/system/cpu-throttle", handleSystemCPUThrottle)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
+	m.HandleFunc("/api/v1/system/cfm-log", handleSystemCFMLog)
+	m.HandleFunc("/api/v1/system/journal", handleSystemJournal)
 	m.HandleFunc("/api/v1/system/mail-log", handleSystemMailLog)
 	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
 	m.HandleFunc("/api/v1/mail/traffic", handleMailTraffic)
@@ -685,6 +689,99 @@ func handleSystemMySQLLog(w http.ResponseWriter, r *http.Request) {
 		"ok":     true,
 		"schema": "system.mysql_log.v1",
 		"result": res,
+	})
+}
+
+// handleSystemCFMLog tails one of CFM's own logs (GET /api/v1/system/cfm-log?
+// which=main|error|api|detector|challenges|smtp|mysql|waf|clam|socket|lsm|service
+// &lines=N&limit=M&grep=SUBSTR). Read-only, admin-only. Backs the MCP
+// cfm_log_tail tool — "what did the daemon/detector/WAF/challenge subsystem log?"
+// without shelling into the box. Bounded tail (window + timeout + capped output);
+// a missing log path is found=false, not an error (feature off / relocated).
+func handleSystemCFMLog(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	which := strings.TrimSpace(r.URL.Query().Get("which"))
+	lines := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("lines")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			lines = n
+		}
+	}
+	limit := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	grep := strings.TrimSpace(r.URL.Query().Get("grep"))
+
+	res, err := cfmlog.TailFile(r.Context(), which, lines, limit, grep)
+	if err != nil {
+		status := http.StatusBadGateway // stream/exec failure (timeout, unreadable) → server error
+		if errors.Is(err, cfmlog.ErrUnknownSource) {
+			status = http.StatusBadRequest // bad `which` → client error
+		}
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "sources": cfmlog.FileSources()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok": true, "schema": "system.cfm_log.v1", "result": res, "sources": cfmlog.FileSources(),
+	})
+}
+
+// handleSystemJournal tails an allow-listed systemd unit's journal
+// (GET /api/v1/system/journal?unit=<unit>&lines=N&limit=M&grep=SUBSTR). Read-only,
+// admin-only. Backs the MCP journal_tail tool. The unit MUST be in the allow-list
+// (cfm + hosting-stack units) — an arbitrary unit is rejected 400, so the read
+// surface stays bounded. A non-systemd host returns available=false, not an error.
+func handleSystemJournal(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	unit := strings.TrimSpace(r.URL.Query().Get("unit"))
+	lines := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("lines")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			lines = n
+		}
+	}
+	limit := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	grep := strings.TrimSpace(r.URL.Query().Get("grep"))
+
+	res, err := cfmlog.TailJournal(r.Context(), unit, lines, limit, grep)
+	if err != nil {
+		// TailJournal only errors on a bad/blocked unit (a caller fault); a
+		// journalctl runtime failure is surfaced in res.Note, not as an error.
+		status := http.StatusBadGateway
+		if errors.Is(err, cfmlog.ErrUnitNotAllowed) {
+			status = http.StatusBadRequest
+		}
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error(), "units": cfmlog.JournalUnits()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok": true, "schema": "system.journal.v1", "result": res, "units": cfmlog.JournalUnits(),
 	})
 }
 
