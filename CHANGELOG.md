@@ -31,6 +31,18 @@ back-filled here — see the git/PR history for that period.
   candidate set (`…/error.log` for OpenResty/Angie/nginx) alongside the
   existing access-log one.
 
+### Fixed
+- **`cfm health` no longer reports the "Web stack - Edge Interceptor" line as
+  `[CRIT]` because of the idle alternate edge engine.** A node fronts traffic
+  with exactly one engine (Angie OR OpenResty); the other typically lingers as a
+  disabled leftover unit reporting `state=failed`. The web-stack roll-up
+  escalated to CRIT on *any* failed edge-engine row, so on an Angie node the
+  dead OpenResty leftover forced a false CRIT even though every sub-check was OK.
+  The roll-up now only lets the **active** edge engine's state (from
+  `edge_service`, falling back to the DNAT frontend) drive the badge — a failed
+  idle alternate is ignored, an unresolved active edge still fails safe. Same
+  "which engine is the edge" rule the `whats_wrong` roll-up already applies.
+
 ### Removed
 - **The legacy per-IP challenge-DNAT machinery is deleted (edge-unification
   Phase 1b).** Gone from both firewall backends: `AddChallenge`/`RemoveChallenge`,

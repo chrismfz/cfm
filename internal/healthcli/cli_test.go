@@ -387,6 +387,85 @@ func TestWebStackStatusUsesDetectedEdge(t *testing.T) {
 	}
 }
 
+func TestWebStackStatusIgnoresIdleAlternateEngine(t *testing.T) {
+	// A node fronts traffic with exactly one edge engine; the other lingers as
+	// a disabled leftover. Only the ACTIVE edge's state may drive the badge.
+	tests := []struct {
+		name         string
+		edgeService  string
+		dnatFrontend string
+		rows         []serviceStatus
+		want         healthLabelRank
+	}{
+		{
+			// The live bug: Angie is the edge and healthy, openresty is a
+			// disabled leftover reporting state=failed. Must stay OK, not CRIT.
+			name:        "idle alternate failed does not crit",
+			edgeService: "angie",
+			rows: []serviceStatus{
+				{Name: "angie", State: "active", Active: true, Enabled: true},
+				{Name: "openresty", State: "failed"},
+			},
+			want: okLabel,
+		},
+		{
+			name:        "idle alternate inactive does not warn",
+			edgeService: "angie",
+			rows: []serviceStatus{
+				{Name: "angie", State: "active", Active: true, Enabled: true},
+				{Name: "openresty", State: "inactive"},
+			},
+			want: okLabel,
+		},
+		{
+			// The active edge itself failing must still surface as CRIT.
+			name:        "active edge failed crits",
+			edgeService: "angie",
+			rows: []serviceStatus{
+				{Name: "angie", State: "failed"},
+				{Name: "openresty", State: "inactive"},
+			},
+			want: critLabel,
+		},
+		{
+			name:        "active edge inactive warns",
+			edgeService: "angie",
+			rows: []serviceStatus{
+				{Name: "angie", State: "inactive"},
+				{Name: "openresty", State: "inactive"},
+			},
+			want: warnLabel,
+		},
+		{
+			// edge_service empty; DNAT frontend resolves the active edge.
+			name:         "dnat frontend fallback picks active edge",
+			dnatFrontend: "openresty",
+			rows: []serviceStatus{
+				{Name: "angie", State: "failed"},
+				{Name: "openresty", State: "active", Active: true, Enabled: true},
+			},
+			want: okLabel,
+		},
+		{
+			// Neither edge_service nor DNAT frontend resolves: fail safe and let
+			// any bad state through (can't tell which row is the live one).
+			name: "unknown edge fails safe to crit",
+			rows: []serviceStatus{
+				{Name: "angie", State: "failed"},
+				{Name: "openresty", State: "inactive"},
+			},
+			want: critLabel,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := webStackStatus(tc.rows, tc.edgeService, tc.dnatFrontend); got != tc.want {
+				t.Fatalf("webStackStatus=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestChallengeFlowReadinessLabels(t *testing.T) {
 	tests := []struct {
 		name      string

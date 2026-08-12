@@ -785,20 +785,40 @@ func collectWebStackRows(s parsedSnapshot) []serviceStatus {
 	return out
 }
 
+// webStackStatus rolls the edge-engine rows (angie + openresty) up into a
+// single badge for the "Web stack - Edge Interceptor" line. A node fronts its
+// traffic with exactly ONE engine; the other engine's unit typically lingers as
+// a disabled leftover (`enabled=no active=no state=failed`), so a bad state on
+// that idle alternate must NOT drive the badge — only the ACTIVE edge's state
+// counts. The active edge is edge_service (falling back to the DNAT frontend);
+// when neither resolves the engine we fail safe and let any bad state through
+// (can't tell which row is the live one). This is the same "which engine is the
+// edge" rule the whats_wrong roll-up (#1230) applies.
+//
+// If the active edge resolves to nginx (a valid edge_service value) it matches
+// neither tracked row, so this badge abstains (stays OK) — nginx health was
+// never reflected on this line; its own row/health is surfaced elsewhere.
 func webStackStatus(rows []serviceStatus, edgeService, dnatFrontend string) healthLabelRank {
 	status := okLabel
 	edge := strings.ToLower(strings.TrimSpace(edgeService))
 	if edge == "" || edge == "unknown" {
 		edge = strings.ToLower(strings.TrimSpace(dnatFrontend))
 	}
+	// counts reports whether a bad state on this row should affect the badge:
+	// only the active edge engine (or, when the active edge is unknown, every
+	// row — fail safe).
+	counts := func(name string) bool {
+		return edge == "" || edge == "unknown" || strings.EqualFold(name, edge)
+	}
 	for _, row := range rows {
+		if !counts(row.Name) {
+			continue
+		}
 		switch strings.ToLower(strings.TrimSpace(row.State)) {
 		case "failed":
 			status = worstLabel(status, critLabel)
 		case "inactive":
-			if edge == "" || edge == "unknown" || strings.EqualFold(row.Name, edge) {
-				status = worstLabel(status, warnLabel)
-			}
+			status = worstLabel(status, warnLabel)
 		}
 	}
 	return status
