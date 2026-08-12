@@ -63,6 +63,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerLVECPU(srv, d)
 	registerMySQLPressure(srv, d)
 	registerDBWebPressure(srv, d)
+	registerCPUThrottle(srv, d)
 	registerMySQLLogTail(srv, d)
 	registerMySQLSlowQueries(srv, d)
 	registerMailQueueSummary(srv, d)
@@ -601,6 +602,16 @@ func mergeMySQLPressure(topBody, cpuBody json.RawMessage, topN int) map[string]a
 		"users_truncated": truncated,
 		"top_users":       rows,
 	}
+}
+
+func registerCPUThrottle(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "cpu_throttle",
+		Description: "Root-causes high CPU load: is the CPU being THROTTLED or is this genuine demand? Reads instantaneous cpufreq + thermal + loadavg from sysfs/proc and returns a `cause`: `genuine_demand` (cores at/near max freq under load — go find the workload, not a fault), `thermal_throttling` (slow under load + hot / kernel throttle counters set — check cooling), `frequency_capped` (slow under load but cool — powersave governor or a policy cap, switch to performance), `frequency_reduced` (slow under load, cause unclear — BIOS/host cap), `low_load` (not under pressure; reduced clock is normal idle downclock), or `no_cpufreq_data` (cpufreq/thermal not exposed — typical on VMs; check the hypervisor's CPU steal instead). The verdict is LOAD-GATED (a downclocked idle CPU is never called throttled). Each cause carries a plain-language summary + the freq ratio, governor, temperature, and throttle counters behind it.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
+		return dispatchJSON(ctx, d, "/api/v1/system/cpu-throttle", nil)
+	})
 }
 
 type mysqlLogInput struct {

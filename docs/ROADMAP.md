@@ -77,8 +77,12 @@ As-built + roadmap: **`MCP.md`**. Read-only telemetry across the fleet
   pressure" tenants. Follow-ups (optional): a CLI/web-UI surface, and DirectAdmin
   host→owner support in `panelmap` (`/etc/virtual/domainowners`) so attribution
   works off cPanel too.
-- **CPU thermal/throttle signal** — [next]. Turn "high load" into a root-cause
-  flag (thermal/throttle vs genuine demand).
+- **CPU thermal/throttle signal** — DONE. `internal/cputhrottle` (pure,
+  load-gated classifier) + `GET /api/v1/system/cpu-throttle` + MCP `cpu_throttle`
+  turn "high load" into a root cause: thermal throttling vs frequency cap
+  (governor/policy) vs genuine demand vs idle downclock vs no-cpufreq (VM → check
+  host steal). Follow-up idea: fold CPU steal% (from the health snapshot) into the
+  verdict so the VM case gets a concrete answer, not just a pointer.
 - **LVE per-tenant CPU signal (CloudLinux)** — DONE. Data plane:
   `internal/lvestat` (pure parser + cores/%-of-limit, unit calibrated to ns) →
   `internal/lvecpu` collector → `/api/v1/system/lve-cpu` + MCP `lve_cpu`.
