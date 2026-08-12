@@ -307,6 +307,7 @@ rather than advancing heartbeats on failure.
 
 | Topic | Doc |
 |---|---|
+| Roadmap (where CFM is going: in-flight + backlog) | `docs/ROADMAP.md` |
 | WAF behaviour & tuning | `docs/waf.md`, `docs/waf-analysis-2026-05-08.md` |
 | Challenge/WAF release gate | `docs/challenge-waf-release-checklist.md` |
 | cPanel token transport | `docs/cpanel-plugin-token-transport.md` |
