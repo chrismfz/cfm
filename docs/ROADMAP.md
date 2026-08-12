@@ -92,8 +92,11 @@ deliverability, per-domain, DNS, spam largely landed (see CHANGELOG).
 
 ## 6. Health / observability correctness
 
-- **`cfm_metrics.waf_events_1h` vs `waf_last_hour` mismatch** — [next]. Health
-  snapshot reports two different WAF-hit counts; reconcile the source.
+- **Wire the remaining `cfm_metrics`** — [next]. `waf_events_1h` now reads the
+  real last-hour count (reconciled with `waf_last_hour`), but its siblings
+  `active_blocks` / `challenge_queue` / `outbound_alerts` are still structural
+  zeros (no production producer). Populate them from their real sources
+  (firewall block list / challenge engine / mail anomaly), or drop them.
 - ("which engine is the edge" family — resolved across whats_wrong #1230,
   edge_error_tail #1231/#1232, health-CLI #1233. Kept here as a watch item: any
   NEW consumer of edge-engine state must use `runtime.edge_service`.)

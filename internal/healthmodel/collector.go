@@ -95,6 +95,17 @@ func CollectSnapshotNow(nodeID string, backend firewall.Backend) (snap HealthSna
 	populateConntrackUsage(&snap.Network)
 	snap.Runtime = collectRuntimeStatus(backend)
 	snap.Mail = latestMailQueueStatus()
+	// cfm_metrics.waf_events_1h: durable last-rolling-hour WAF event count
+	// (waf_observe+waf_trigger, node-wide) from the SAME history store the
+	// /api/v1/waf/engine/summary endpoint uses, so this reconciles with
+	// security_overview's waf_last_hour. Before this it was never populated and
+	// always read 0 next to a non-zero summary. A COUNT(*) over the type+ts
+	// index is cheap on this collection path. (The sibling CFMMetrics fields —
+	// active_blocks/challenge_queue/outbound_alerts — remain unwired; separate
+	// follow-up. See docs/ROADMAP.md.)
+	if n, ok := webdet.WAFEventsLastHour(time.Now()); ok {
+		snap.CFM.WAFEvents1h = n
+	}
 	return snap
 }
 

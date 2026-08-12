@@ -357,6 +357,26 @@ func CurrentIngestSourceState() (IngestSourceState, bool) {
 	return e.IngestSourceState(), true
 }
 
+// WAFEventsLastHour returns the node-wide count of WAF events
+// (waf_observe + waf_trigger) in the last rolling hour, read from the daemon
+// engine's durable history store — the SAME source and definition
+// /api/v1/waf/engine/summary uses for its total. It exists so the health
+// snapshot's cfm_metrics.waf_events_1h reconciles with security_overview's
+// waf_last_hour instead of being a structural zero. Uses the same package-level
+// engine handle as CurrentIngestSourceState; returns (0,false) when no engine or
+// history store is wired yet (the caller then leaves the field at 0).
+func WAFEventsLastHour(now time.Time) (int, bool) {
+	e := currentIngestSourceEngine.Load()
+	if e == nil || e.history == nil {
+		return 0, false
+	}
+	n, err := e.history.CountWAFEventsSince(now.Add(-time.Hour).Unix())
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
 // IngestSourceState returns this engine's current arbiter state. It is the
 // single source used by /api/v1/webdet/ingest-source and health snapshots.
 func (e *Engine) IngestSourceState() IngestSourceState {
