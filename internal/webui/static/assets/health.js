@@ -172,10 +172,11 @@
 
   // ── LVE per-tenant CPU (CloudLinux) ─────────────────────────────────────────
 
-  // limitCPU renders the lCPU cap as cores (10000 units = 1 core); 0 = unlimited.
+  // limitCPU renders the lCPU cap as cores (10000 units = 1 core; 0 = unlimited),
+  // minimal digits so it matches the `cfm lve` CLI exactly (6c / 15.5c / 100c).
   function fmtLimit(l) {
     if (!(l > 0)) return '∞';
-    return `${(l / 10000).toFixed(2)}c`;
+    return `${parseFloat((l / 10000).toFixed(2))}c`;
   }
 
   function fmtPctOfLimit(s) {

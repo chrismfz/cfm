@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+func TestLimitCores(t *testing.T) {
+	cases := map[int64]float64{0: 0, -5: 0, 10000: 1, 60000: 6, 155000: 15.5, 5000: 0.5}
+	for in, want := range cases {
+		if got := LimitCores(in); got != want {
+			t.Errorf("LimitCores(%d) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 func snap(entries ...LVE) Snapshot { return Snapshot{Version: 10, Entries: entries} }
 
 func TestDiff_RatesAndSort(t *testing.T) {

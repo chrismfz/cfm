@@ -16,6 +16,17 @@ const cpuNsPerSecPerCore = 1e9
 // cpuLimitUnitsPerCore is the lCPU limit unit: 10000 == 100% of one core.
 const cpuLimitUnitsPerCore = 10000.0
 
+// LimitCores converts an lCPU cap (hundredths of a %-of-one-core; 10000 == one
+// core) to whole cores. Returns 0 for an unlimited/zero cap. Exported so the
+// CLI/UI render the cap from one source of truth rather than re-hardcoding the
+// 10000 unit.
+func LimitCores(limitCPU int64) float64 {
+	if limitCPU <= 0 {
+		return 0
+	}
+	return float64(limitCPU) / cpuLimitUnitsPerCore
+}
+
 // CPUSample is one tenant's CPU rate between two /proc/lve/list snapshots.
 type CPUSample struct {
 	Reseller int64 `json:"reseller"`
