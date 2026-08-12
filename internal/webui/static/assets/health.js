@@ -202,7 +202,7 @@
     el.lveCard.style.display = '';
     if (data.ready !== true) {
       if (el.lveMeta) el.lveMeta.textContent = `CloudLinux — collector warming up (first delta needs two samples, ~${data.interval_sec || 15}s)`;
-      if (el.lveBody) el.lveBody.innerHTML = '<tr><td colspan="8" class="muted">warming up…</td></tr>';
+      if (el.lveBody) el.lveBody.innerHTML = '<tr><td colspan="9" class="muted">warming up…</td></tr>';
       return;
     }
     const rows = Array.isArray(data.top) ? data.top : [];
@@ -213,12 +213,13 @@
     }
     if (!el.lveBody) return;
     if (!rows.length) {
-      el.lveBody.innerHTML = '<tr><td colspan="8" class="muted">no tenants reported</td></tr>';
+      el.lveBody.innerHTML = '<tr><td colspan="9" class="muted">no tenants reported</td></tr>';
       return;
     }
     el.lveBody.innerHTML = rows.map((s) => `<tr>
       <td>${escapeHTML(String(s.reseller ?? 0))}</td>
       <td>${escapeHTML(String(s.uid ?? 0))}</td>
+      <td>${escapeHTML(s.username || '-')}</td>
       <td>${(Number(s.cores) || 0).toFixed(2)}</td>
       <td>${fmtPctOfLimit(s)}</td>
       <td>${escapeHTML(fmtLimit(Number(s.limit_cpu) || 0))}</td>

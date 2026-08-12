@@ -629,6 +629,12 @@ func handleSystemLVECPU(w http.ResponseWriter, r *http.Request) {
 	if len(samples) > top {
 		samples = samples[:top]
 	}
+	// Resolve uid→login for the returned rows only (bounded, cached). samples is
+	// the collector's copy, so filling Username here is safe.
+	now := time.Now()
+	for i := range samples {
+		samples[i].Username = resolveLVEUsername(samples[i].UID, now)
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok": true, "schema": "system.lve_cpu.v1", "available": true, "ready": true,
 		"sampled_at": at.UTC(), "interval_sec": lvecpu.IntervalSeconds(),

@@ -18,6 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **LVE per-tenant CPU now shows the account username, not just the uid.**
+  `lve_cpu` / `GET /api/v1/system/lve-cpu`, the `cfm lve` CLI, and the Health UI
+  table gain a resolved `username` per tenant — on cPanel/DirectAdmin the Linux
+  user IS the hosting account, so a hot LVE now says WHO to look at instead of a
+  bare numeric uid. Resolution is at the API layer (the pure `lvestat` leaf stays
+  side-effect-free), bounded and cached (5-min TTL over both hits and misses, so
+  repeated ~15s polls don't re-read `/etc/passwd` per row while a new account
+  still appears within the window). The default/aggregate LVE uid `4294967295` is
+  labelled `(default LVE / outside)` rather than looked up; a uid with no passwd
+  entry shows blank (the bare uid still displays).
 - **MCP `waf_rule_detail` — one WAF rule across both surfaces.** New read-only,
   admin-only MCP tool that deep-dives a single WAF rule / reason-family across
   BOTH enforcement surfaces at once — the in-path web edge and the panel
