@@ -5,20 +5,35 @@ import (
 	"time"
 )
 
+// cpuNsPerSecPerCore is the CPU-usage counter's rate for one fully-busy core.
+// The /proc/lve/list CPU column is cumulative NANOSECONDS of CPU time — verified
+// empirically against two live snapshots ~22s apart (titan, CL9): the busiest
+// tenant's ΔCPU/Δt came to ~0.93 cores against a 6-core limit and the whole-box
+// non-LVE aggregate to ~10 cores, i.e. every value bounded sanely by nCPU. So a
+// rate of 1e9 counter-units/sec == one core fully consumed.
+const cpuNsPerSecPerCore = 1e9
+
+// cpuLimitUnitsPerCore is the lCPU limit unit: 10000 == 100% of one core.
+const cpuLimitUnitsPerCore = 10000.0
+
 // CPUSample is one tenant's CPU rate between two /proc/lve/list snapshots.
 type CPUSample struct {
 	Reseller int64 `json:"reseller"`
 	UID      int64 `json:"uid"`
-	// CPURate is the change in the raw CPU-usage counter per second between the
-	// two snapshots. It is a RELATIVE signal for ranking tenants against each
-	// other — the counter's absolute unit is not yet confirmed, so this is NOT
-	// normalized to a percentage of a core. (Normalizing to a %-of-limit against
-	// LimitCPU needs that unit; a later slice adds it once calibrated.)
-	CPURate  float64 `json:"cpu_rate"`
-	LimitCPU int64   `json:"limit_cpu"` // lCPU passthrough (hundredths of a %; 0 = unlimited)
-	NumCPU   int64   `json:"num_cpu"`   // nCPU passthrough
-	EP       int64   `json:"ep"`        // current entry procs (from cur)
-	NProc    int64   `json:"nproc"`     // current procs (from cur)
+	// CPURate is the change in the CPU-usage counter (nanoseconds of CPU time)
+	// per second between the two snapshots — the raw signal Cores/PctOfLimit are
+	// derived from. Kept for debugging; consumers usually want Cores.
+	CPURate float64 `json:"cpu_rate"`
+	// Cores is CPU cores consumed = CPURate / 1e9 (e.g. 0.93 = 93% of one core,
+	// 2.4 = 2.4 cores). The human-facing "how hot is this tenant" number.
+	Cores float64 `json:"cores"`
+	// PctOfLimit is Cores as a percentage of the tenant's lCPU limit (100 = at
+	// its cap → throttling). 0 when the tenant is unlimited (lCPU == 0).
+	PctOfLimit float64 `json:"pct_of_limit"`
+	LimitCPU   int64   `json:"limit_cpu"` // lCPU passthrough (hundredths of a %; 0 = unlimited)
+	NumCPU     int64   `json:"num_cpu"`   // nCPU passthrough
+	EP         int64   `json:"ep"`        // current entry procs (from cur)
+	NProc      int64   `json:"nproc"`     // current procs (from cur)
 }
 
 // Diff computes per-tenant CPU rates between prev and cur (cur is the newer
@@ -45,14 +60,24 @@ func Diff(prev, cur Snapshot, elapsed time.Duration) []CPUSample {
 		if p, ok := prevCPU[[2]int64{e.Reseller, e.UID}]; ok && e.CPUUsage >= p {
 			rate = float64(e.CPUUsage-p) / secs
 		}
+		cores := rate / cpuNsPerSecPerCore
+		pct := 0.0
+		if e.LimitCPU > 0 { // lCPU == 0 means unlimited → no meaningful %
+			limitCores := float64(e.LimitCPU) / cpuLimitUnitsPerCore
+			if limitCores > 0 {
+				pct = cores / limitCores * 100
+			}
+		}
 		out = append(out, CPUSample{
-			Reseller: e.Reseller,
-			UID:      e.UID,
-			CPURate:  rate,
-			LimitCPU: e.LimitCPU,
-			NumCPU:   e.NumCPU,
-			EP:       e.EP,
-			NProc:    e.NProc,
+			Reseller:   e.Reseller,
+			UID:        e.UID,
+			CPURate:    rate,
+			Cores:      cores,
+			PctOfLimit: pct,
+			LimitCPU:   e.LimitCPU,
+			NumCPU:     e.NumCPU,
+			EP:         e.EP,
+			NProc:      e.NProc,
 		})
 	}
 
