@@ -331,3 +331,50 @@ func TestAvailableFrom_PrefersMostRecentActiveLog(t *testing.T) {
 		t.Fatalf("AvailableErrorLogs()=%v, want freshest %q first", av, fresh)
 	}
 }
+
+func TestScanError_MatchesAnySubstrAndAllowlist(t *testing.T) {
+	if _, err := exec.LookPath("tail"); err != nil {
+		t.Skip("tail not available")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "error.log")
+	body := "" +
+		"2026/08/12 12:00:00 [warn] [cfm_panel_waf] logonly=would_block rule_id=320\n" +
+		"2026/08/12 12:00:01 [warn] [cfm_panel_trace] phase=validate_next\n" + // must NOT match
+		"2026/08/12 12:00:02 [notice] ordinary line\n" + // must NOT match
+		"2026/08/12 12:00:03 [warn] panel_decision_probe(): [cfm_panel_decision] logonly=would_enforce ip_action=block\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := errorLogCandidates
+	errorLogCandidates = append([]string{p}, old...)
+	defer func() { errorLogCandidates = old }()
+
+	// ScanError observes EVERY match for ANY of the substrings — both markers,
+	// not the trace/ordinary lines.
+	var got []string
+	logFile, scanned, err := ScanError(context.Background(),
+		[]string{"[cfm_panel_waf]", "[cfm_panel_decision]"}, "", 1000,
+		func(line string) { got = append(got, line) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logFile != p {
+		t.Fatalf("logFile=%q want %q", logFile, p)
+	}
+	if scanned != 4 {
+		t.Fatalf("scanned=%d want 4 (whole file)", scanned)
+	}
+	if len(got) != 2 {
+		t.Fatalf("matched %d lines want 2 (both markers, not trace/ordinary): %v", len(got), got)
+	}
+	if !strings.Contains(got[0], "[cfm_panel_waf]") || !strings.Contains(got[1], "[cfm_panel_decision]") {
+		t.Fatalf("wrong lines captured: %v", got)
+	}
+
+	// A source not on the error-log allow-list is rejected (no arbitrary path).
+	if _, _, err := ScanError(context.Background(), []string{"x"}, "/etc/passwd", 0,
+		func(string) {}); err == nil {
+		t.Fatal("expected non-allowlisted source to be rejected")
+	}
+}

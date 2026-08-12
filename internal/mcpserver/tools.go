@@ -59,6 +59,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerEdgeAccessTail(srv, d)
 	registerIPForensics(srv, d)
 	registerEdgeErrorTail(srv, d)
+	registerWAFFPHunt(srv, d)
 	registerMySQLPressure(srv, d)
 	registerMySQLLogTail(srv, d)
 	registerMySQLSlowQueries(srv, d)
@@ -406,6 +407,24 @@ func registerEdgeErrorTail(srv *mcp.Server, d Deps) {
 		setInt(q, "limit", in.Limit)
 		setStr(q, "source", in.Source)
 		return dispatchJSON(ctx, d, "/api/v1/system/edge-error-log", q)
+	})
+}
+
+type wafFPHuntInput struct {
+	Lines  int    `json:"lines,omitempty" jsonschema:"how many trailing edge error-log lines to scan (tail window); default 5000, max 200000"`
+	Source string `json:"source,omitempty" jsonschema:"which edge error log to scan (basename or full path from the available list); omit for the default"`
+}
+
+func registerWAFFPHunt(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "waf_fp_hunt",
+		Description: "Aggregate the panel LOGONLY burn-in signal from the edge ERROR log to answer 'is it safe to turn panel enforcement on?'. Scans the edge error log for the panel WAF would-be actions ('[cfm_panel_waf] logonly=would_block/would_challenge/…', Phase 2e) and the panel bridge-decision would-enforce verdicts ('[cfm_panel_decision] logonly=would_enforce …', Phase 2d) and returns aggregates that SEPARATE expected internet-scanner noise (Censys/Shodan/… by UA) from the customer-facing residue. The two numbers that gate enforcement: panel_waf.nonscanner_would_block (non-scanner clients a panel WAF BLOCK rule would have blocked) and panel_decision.ip_block_count (requests the bridge would ip-block on a panel port); both near-zero after excluding scanners ⇒ header/URI/args rules are safe to enforce. Also returns per-rule breakdowns, candidate false positives (worst first, with sample requests) and top user-agents. Bounded on-demand tail (last N lines, default 5000); costs nothing until called. NOTE the panel WAF reads no request body, so body-rule coverage is not represented here. Companion to edge_error_tail (raw lines) — this is the aggregated view.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in wafFPHuntInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setInt(q, "lines", in.Lines)
+		setStr(q, "source", in.Source)
+		return dispatchJSON(ctx, d, "/api/v1/system/waf-fp-hunt", q)
 	})
 }
 

@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP `waf_fp_hunt` — panel-logonly burn-in analysis ("safe to enforce?").**
+  New read-only, admin-only MCP tool + `GET /api/v1/system/waf-fp-hunt`: it scans
+  the edge ERROR log for the panel LOGONLY markers (`[cfm_panel_waf]` would-be WAF
+  actions from Phase 2e, `[cfm_panel_decision]` would-enforce verdicts from Phase
+  2d) and returns aggregates that answer whether panel enforcement is safe to turn
+  on. It SEPARATES expected internet-scanner noise (Censys/Shodan/… by user-agent)
+  from the customer-facing residue — the two headline gates are
+  `panel_waf.nonscanner_would_block` (non-scanner clients a panel WAF block rule
+  would have blocked) and `panel_decision.ip_block_count` (bridge ip-blocks on a
+  panel port) — plus per-rule/verdict breakdowns, candidate false positives (worst
+  first, with sample requests) and top user-agents. Body rules are not represented
+  (the panel WAF reads no request body). Same allow-listed-path, bounded-tail
+  discipline as `edge_error_tail` (a new `edgelog.ScanError` streams every match in
+  the window; the pure aggregator lives in `internal/panelfp`). MCP tool count
+  32 → 33.
 - **Panel WAF — LOGONLY (edge-unification Phase 2e).** `cfm_panel.lua` now runs
   the same `cfm_waf` ruleset the web edge uses against panel human-entry +
   generic requests and RECORDS what it would do
