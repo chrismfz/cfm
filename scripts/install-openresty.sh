@@ -7,7 +7,7 @@ readonly CFM_LUA_MANIFEST=(
     cfm_waf.lua cfm_waf_util.lua cfm_waf_detectors.lua cfm_waf_excl.lua
     cfm_clamav.lua cfm_cache_log.lua cfm_clearance.lua cfm_geo.lua cfm_purge.lua
     cfm_filecache.lua cfm_origin_ka.lua cfm_bridge_cfg.lua cfm_tlsfp.lua
-    cfm_decision.lua
+    cfm_decision.lua cfm_selfip.lua
     log-cfm.lua sslcollector.lua
 )
 

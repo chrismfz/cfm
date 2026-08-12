@@ -27,8 +27,9 @@ per-IP challenge-DNAT path; unify web + panel on the edge cookie-clearance model
 - **Phase 4 — panel enforcement graduation** — [track]. **Both** the panel
   challenge/decision (2d) **and** the panel WAF (2e) graduate from LOGONLY to
   enforce after logging confirms low false-positive rates — each its own opt-in
-  PR after its own burn-in. Prereqs: full self-origin parity (self-IP set +
-  `IGNORE_NETS`, ideally a shared module so web/panel can't drift), a
+  PR after its own burn-in. Prereqs: ~~full self-origin parity~~ (DONE — shared
+  `cfm_selfip` module gives the panel WAF the web edge's self-IP + `IGNORE_NETS`
+  skip; wire it into the panel decision path when that enforces), a
   per-Content-Type body-inspection decision for panel, and preserved fail-open +
   kill-switch discipline so an admin can never be locked out of WHM/cPanel.
 

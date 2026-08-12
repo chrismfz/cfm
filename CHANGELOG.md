@@ -17,6 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Panel WAF now honours the server's self-IPs AND `[global] IGNORE_IPS`/
+  `IGNORE_NETS`, matching the web edge.** The self-origin bypass predicate
+  (`is_self_origin`: self-IP set + `IGNORE_NETS` + loopback/link-local) is
+  extracted from `cfm.lua` into a shared `cfm_selfip` Lua module used by both the
+  web edge and `cfm_panel.lua`, so the two can't drift (a single source, per
+  CLAUDE.md §5). Effect: the panel LOGONLY WAF (Phase 2e) no longer records
+  would-be actions for the box's own IPs or an operator-ignored network — before
+  this it only skipped loopback, so monitoring/operator traffic from a public
+  self-IP or an `IGNORE_NETS` range showed up as burn-in noise. No web-edge
+  behaviour change (pure extraction). The module is `require`d by `cfm.lua`
+  (deployed via the installer manifest) and `pcall`-required by `cfm_panel.lua`
+  (loopback-only fallback on upgrade lag).
+
 ### Added
 - **MCP `waf_fp_hunt` — panel-logonly burn-in analysis ("safe to enforce?").**
   New read-only, admin-only MCP tool + `GET /api/v1/system/waf-fp-hunt`: it scans

@@ -256,10 +256,13 @@ rates, BOTH the panel challenge/decision AND the panel WAF must graduate to
 enforce** — otherwise the panel ports stay softer than the web edge and the
 unification is only half done. Each graduation is its own opt-in PR after its
 own burn-in, and each needs the deferred pieces wired first, notably:
-- **Full self-origin parity** — the panel WAF's self-skip is loopback-only
-  today; enforce needs the web edge's `is_self_origin` (self-IP set +
-  `IGNORE_NETS`), ideally extracted into a shared module so web and panel can't
-  drift (CLAUDE.md §5).
+- **Full self-origin parity** — **DONE for the panel WAF.** `is_self_origin`
+  (self-IP set + `IGNORE_NETS` + loopback) is extracted to the shared
+  `cfm_selfip` module used by both `cfm.lua` and `cfm_panel.lua` (no drift, §5),
+  so the panel WAF now skips the box's own IPs and operator-ignored networks
+  exactly as the web edge does. When the panel **decision** path graduates to
+  enforce, wire the same `cfm_selfip.is_self_origin` into it (the panel probe
+  currently relies on the bridge's own view).
 - **Body inspection decision** — 2e reads no body; decide per-Content-Type
   bounded body reads for panel (mirroring the web `get_req_body_for_waf` gate)
   vs staying header/URI/args-only, without buffering panel streams.
