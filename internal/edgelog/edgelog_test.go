@@ -198,3 +198,89 @@ func TestResolveLog_SourceAllowlist(t *testing.T) {
 		t.Fatal("expected rejection of non-allowlisted path")
 	}
 }
+
+// writeErrLog writes n numbered error-log lines, tagging every `every`-th line
+// with token so it matches a grep. Line index is embedded as "line N".
+func writeErrLog(t *testing.T, n int, token string, every int) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "error.log")
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		if every > 0 && i%every == 0 {
+			b.WriteString(fmt.Sprintf("2026/08/12 12:00:%02d [warn] %s marker line %d\n", i%60, token, i))
+		} else {
+			b.WriteString(fmt.Sprintf("2026/08/12 12:00:%02d [notice] other line %d\n", i%60, i))
+		}
+	}
+	if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestTailError_NewestMatchesAndGrep(t *testing.T) {
+	if _, err := exec.LookPath("tail"); err != nil {
+		t.Skip("tail not available")
+	}
+	// 100 matching lines at i=0,10,…,990 (token "LOGONLY").
+	p := writeErrLog(t, 1000, "LOGONLY", 10)
+	old := errorLogCandidates
+	errorLogCandidates = append([]string{p}, old...)
+	defer func() { errorLogCandidates = old }()
+
+	// Case-insensitive grep, scan all 1000, cap at 40 → the NEWEST 40 matches
+	// (i=600,610,…,990). Older matches dropped → Truncated.
+	res, err := TailError(context.Background(), "logonly", "", 1000, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LogFile != p {
+		t.Fatalf("logFile=%q want %q", res.LogFile, p)
+	}
+	if res.Matched != 100 {
+		t.Fatalf("matched=%d want 100", res.Matched)
+	}
+	if len(res.Lines) != 40 || !res.Truncated {
+		t.Fatalf("lines=%d truncated=%v want 40,true", len(res.Lines), res.Truncated)
+	}
+	// Newest kept = i=990 (last), oldest kept = i=600 (first).
+	if !strings.Contains(res.Lines[len(res.Lines)-1], "line 990") {
+		t.Fatalf("newest kept line wrong: %q", res.Lines[len(res.Lines)-1])
+	}
+	if !strings.Contains(res.Lines[0], "line 600") {
+		t.Fatalf("oldest kept line wrong: %q", res.Lines[0])
+	}
+	for _, l := range res.Lines {
+		if !strings.Contains(l, "LOGONLY") { // grep was lowercase; matching is case-insensitive
+			t.Fatalf("returned non-matching line: %q", l)
+		}
+	}
+}
+
+func TestTailError_EmptyGrepAndSourceAllowlist(t *testing.T) {
+	if _, err := exec.LookPath("tail"); err != nil {
+		t.Skip("tail not available")
+	}
+	p := writeErrLog(t, 50, "X", 0) // no matches injected; every line is a plain line
+	old := errorLogCandidates
+	errorLogCandidates = append([]string{p}, old...)
+	defer func() { errorLogCandidates = old }()
+
+	// Empty grep → every tail line "matches"; newest `limit` returned.
+	res, err := TailError(context.Background(), "", "", 50, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Matched != 50 || len(res.Lines) != 10 || !res.Truncated {
+		t.Fatalf("empty-grep: matched=%d lines=%d truncated=%v want 50,10,true", res.Matched, len(res.Lines), res.Truncated)
+	}
+	if !strings.Contains(res.Lines[len(res.Lines)-1], "line 49") {
+		t.Fatalf("empty-grep newest line wrong: %q", res.Lines[len(res.Lines)-1])
+	}
+
+	// A source not on the error-log allow-list is rejected (no arbitrary path).
+	if _, err := TailError(context.Background(), "", "/etc/passwd", 0, 0); err == nil {
+		t.Fatal("expected rejection of non-allowlisted error-log source")
+	}
+}

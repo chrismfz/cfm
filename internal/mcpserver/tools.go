@@ -58,6 +58,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerServiceStatus(srv, d)
 	registerEdgeAccessTail(srv, d)
 	registerIPForensics(srv, d)
+	registerEdgeErrorTail(srv, d)
 	registerMySQLPressure(srv, d)
 	registerMySQLLogTail(srv, d)
 	registerMySQLSlowQueries(srv, d)
@@ -383,6 +384,28 @@ func registerIPForensics(srv *mcp.Server, d Deps) {
 		setInt(q, "limit", in.Limit)
 		setStr(q, "source", in.Source)
 		return dispatchJSON(ctx, d, "/api/v1/system/ip-forensics", q)
+	})
+}
+
+type edgeErrorTailInput struct {
+	Grep   string `json:"grep,omitempty" jsonschema:"case-insensitive substring filter (e.g. 'logonly=would_enforce', 'cfm_decision', '[error]', a vhost); omit for the raw tail"`
+	Lines  int    `json:"lines,omitempty" jsonschema:"how many trailing error-log lines to scan (tail window); default 5000, max 200000"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"max matching lines to return, NEWEST first-kept (default 200, max 1000)"`
+	Source string `json:"source,omitempty" jsonschema:"which edge error log to scan (basename or full path from the available list); omit for the default"`
+}
+
+func registerEdgeErrorTail(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "edge_error_tail",
+		Description: "Tail the edge (OpenResty/Angie) ERROR log — where the in-path Lua writes ngx.log(): the panel LOGONLY decision verdicts ('[cfm_panel_decision] logonly=would_enforce …' — what the bridge WOULD challenge/block on panel human-entry), module-load failures, and Lua runtime errors. This is the companion to edge_access_tail (which is the ACCESS ring and cannot show error-log lines). Bounded on-demand tail (last N lines, default 5000) with an optional case-insensitive grep, returning the newest matches; costs nothing until called. For a specific IP's raw requests use ip_forensics; for right-now access traffic use edge_access_tail.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in edgeErrorTailInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setStr(q, "grep", in.Grep)
+		setInt(q, "lines", in.Lines)
+		setInt(q, "limit", in.Limit)
+		setStr(q, "source", in.Source)
+		return dispatchJSON(ctx, d, "/api/v1/system/edge-error-log", q)
 	})
 }
 

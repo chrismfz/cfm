@@ -17,6 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **MCP `edge_error_tail` — read the edge (OpenResty/Angie) ERROR log.** New
+  read-only, admin-only MCP tool + `GET /api/v1/system/edge-error-log`: a
+  bounded on-demand tail (last N lines, default 5000, max 200k) of the edge
+  proxy's error log with an optional case-insensitive `grep`, returning the
+  newest matches. This is where the in-path Lua writes `ngx.log()` — the panel
+  LOGONLY decision verdicts (`[cfm_panel_decision] logonly=would_enforce …`),
+  module-load failures, and Lua runtime errors — none of which the access-log
+  ring behind `edge_access_tail` can carry. Same allow-listed-path, tail-window
+  + timeout + capped-output discipline as `ip_forensics`/`mysql_log_tail` (no
+  continuous cost). The `internal/edgelog` resolver gains an error-log
+  candidate set (`…/error.log` for OpenResty/Angie/nginx) alongside the
+  existing access-log one.
+
 ### Removed
 - **The legacy per-IP challenge-DNAT machinery is deleted (edge-unification
   Phase 1b).** Gone from both firewall backends: `AddChallenge`/`RemoveChallenge`,

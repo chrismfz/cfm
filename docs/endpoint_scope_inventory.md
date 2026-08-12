@@ -67,6 +67,7 @@ than being mistaken for admin. Code that reads `CtxScopeKey{}` **directly**
 - `/search` (GET) via `adminOnlyHandler` (`search_endpoint.go`) — read-only multi-source locate (nft/cfm.deny/csf/fail2ban/imunify) that enumerates where an arbitrary IP is blocked host-wide; cross-tenant recon with no per-vhost scoping. Was previously ungated behind mux-wide `TokenMiddleware`.
 - `/api/v1/admin/authcheck` (admin-only auth probe for the edge `auth_request`; `RequireAdmin` → 200 for admin, 403 for scoped/anonymous; returns no data).
 - `/api/v1/system/dnat`, `/api/v1/system/ssl/stats`, `/api/v1/system/ssl/refresh` (POST) and `/api/v1/health/{snapshot,timeseries,anomalies,ingest}` — all `RequireAdmin` (`system_status_endpoint.go`); back the dashboard's system/Node-health cards and the "Rescan certs" button.
+- `/api/v1/system/edge-error-log` (`system_status_endpoint.go`, `handleSystemEdgeErrorLog` → `edgelog.TailError`) — `RequireAdmin`; bounded on-demand tail of the edge (OpenResty/Angie) ERROR log with optional grep. Host-wide (all vhosts share one error log), so admin-only by construction. Backs the MCP `edge_error_tail` tool. Same admin-only, allow-listed-path, bounded-tail family as the sibling on-demand log reads `/api/v1/system/ip-forensics`, `/api/v1/system/mysql-log`, and `/api/v1/system/mail-log`.
 
 ## Edge-served admin endpoints (OpenResty / Angie)
 
