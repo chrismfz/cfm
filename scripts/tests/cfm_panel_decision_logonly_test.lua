@@ -15,6 +15,10 @@ local panel_path = "configs/lua/cfm_panel.lua"
 
 -- Shared harness state, reset per load.
 local verdict, probe_gets, rpc_kinds, log_lines, clearance_valid
+-- Panel decision mode the fake cfm_bridge_cfg publishes for the run. Defaults to
+-- "logonly" so the observe-only cases stay observe-only even though the SHIPPED
+-- default is "enforce"; enforce/off are exercised explicitly further down.
+local bridge_decision_mode
 
 local function install_fakes()
   package.loaded["cjson.safe"] = { encode = function(_) return "{}" end, decode = function() return nil end }
@@ -31,7 +35,7 @@ local function install_fakes()
     end,
   }
   package.loaded["cfm_bridge_cfg"] = {
-    get = function() return { clearance_refresh = true, cookie_life_sec = 2700 } end,
+    get = function() return { clearance_refresh = true, cookie_life_sec = 2700, panel_decision_mode = bridge_decision_mode } end,
     token = function() return "test-bridge-secret" end,
     refresh_token_throttled = function() return nil end,
     TOKEN_PATH = "/var/lib/cfm/lua/cfm_bridge_token.lua",
@@ -51,6 +55,13 @@ local function run(opts)
   opts = opts or {}
   verdict = opts.verdict or { ip_action = "allow", vhost_action = "allow" }
   clearance_valid = opts.clearance_valid or false
+  -- Mode the fake config publishes: "__absent__" → nil (prove missing→enforce);
+  -- any other falsey → "logonly" (harness default so observe-only cases stay so).
+  if opts.mode == "__absent__" then
+    bridge_decision_mode = nil
+  else
+    bridge_decision_mode = opts.mode or "logonly"
+  end
   probe_gets, rpc_kinds, log_lines = {}, {}, {}
 
   local actions = {}
@@ -192,6 +203,44 @@ do
   local _ = prev
 end
 
+local function has_enforce_block(ngx)
+  for _, l in ipairs(log_lines) do if l:find("[cfm_panel_decision] enforce=block", 1, true) then return true end end
+  return false
+end
+
+-- 5b) ENFORCE mode (config panel_decision_mode=enforce): a bridge `block` verdict
+--     DENIES (403 exit) and logs `enforce=block`; control flow CHANGES.
+do
+  local ngx, last = run({ mode = "enforce", verdict = { ip_action = "block", vhost_action = "allow" }, clearance_valid = false })
+  assert_true(#probe_gets == 1, "enforce: probe runs on human-entry")
+  assert_true(has_enforce_block(ngx), "enforce: block verdict logs `[cfm_panel_decision] enforce=block`")
+  assert_true(last and last.action == "exit" and last.code == 403,
+              "enforce: a block verdict DENIES with 403 (control flow changed)")
+end
+
+-- 5c) DEFAULT enforce: no env AND no config mode published must resolve to
+--     enforce (the shipped fleet posture).
+do
+  local ngx, last = run({ mode = "__absent__", verdict = { ip_action = "block", vhost_action = "allow" }, clearance_valid = false })
+  assert_true(has_enforce_block(ngx), "default (absent config mode) resolves to enforce: `enforce=block` logged")
+  assert_true(last and last.action == "exit" and last.code == 403, "default (absent config mode) DENIES with 403")
+end
+
+-- 5d) ENFORCE but a non-block verdict (challenge tier) must NOT deny — only the
+--     block tier acts; the clearance-aware human-entry challenge still runs.
+do
+  local _, last = run({ mode = "enforce", verdict = { ip_action = "allow", vhost_action = "challenge" }, clearance_valid = false })
+  assert_true(last and last.action == "redirect" and last.code == 307,
+              "enforce: a challenge-tier verdict does NOT deny (human-entry challenge intact)")
+end
+
+-- 5e) config panel_decision_mode=off: probe AND ok/touch skipped entirely.
+do
+  local _, last = run({ mode = "off", verdict = { ip_action = "block", vhost_action = "allow" }, clearance_valid = true })
+  assert_true(#probe_gets == 0, "config off: probe never runs")
+  assert_true(count(rpc_kinds, "ok_touch") == 0, "config off: no ok/touch (no bridge interaction)")
+end
+
 -- 6) Production kill-switch wiring: nginx/OpenResty workers only see an env var
 --    if it is re-exported with an `env` directive. The CFM_PANEL_DECISION switch
 --    is inert without it, so assert both engine confs declare it (regression
@@ -205,4 +254,4 @@ do
   end
 end
 
-print("ok: cfm_panel logonly bridge decision — records, never enforces")
+print("ok: cfm_panel bridge decision — logonly records, enforce denies block-tier, off skips")

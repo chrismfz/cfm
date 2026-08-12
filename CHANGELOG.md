@@ -109,7 +109,29 @@ _Nothing yet._
   probe is fail-open (any bridge error → normal flow, no deny), so an enforcing
   decision can't lock an admin out of WHM/cPanel. `waf_fp_hunt`'s
   `panel_decision.ip_block_count` keeps counting on enforcing nodes (it keys on
-  the verdict fields, not the log marker).
+  the verdict fields, not the log marker). **Note:** the "default LOGONLY / merging
+  changes nothing" wording in the 4a and 4b entries above is superseded by
+  Phase 4c below, which ships in the same release and flips the default to
+  **enforce**.
+- **Edge unification Phase 4c: panel enforcement is now config-driven and DEFAULTS
+  TO ENFORCE fleet-wide.** New `detectors.conf [webdetector]` keys `PANEL_WAF_MODE`
+  and `PANEL_DECISION_MODE` (`off | logonly | enforce`) control the panel WAF and
+  panel bridge-decision modes, published to the edge through the existing
+  `cfm_bridge_config.lua` channel (so `cfm reload` applies within ~10s, no proxy
+  reload). `cfm_panel.lua` now resolves the mode **per request**: env override
+  (`CFM_PANEL_WAF`/`CFM_PANEL_DECISION`, emergency kill switch) → the config value
+  → **default `enforce`**. The reference `detectors.conf` ships both at `enforce`,
+  and a missing key / old daemon file / unknown token also resolves to enforce —
+  so a package upgrade turns panel WAF + bridge-decision enforcement **on by
+  default**, no per-node config needed. **This is a deliberate posture change:**
+  after upgrading, the cPanel/WHM ports enforce the high-confidence block tier.
+  To hold a node back, set `PANEL_WAF_MODE`/`PANEL_DECISION_MODE = logonly` (keep
+  observing) or `off` on that node and `cfm reload`. All the 4a/4b safety nets are
+  unchanged (block-tier only, self-IP/`IGNORE_NETS` skipped, `deny` is a
+  redirect-less 403 that can't loop, probe fail-open), so enforce-by-default cannot
+  turn a WAF/bridge fault into a WHM/cPanel lockout — only a genuine block verdict
+  denies. Motivation: enable enforcement across a ~20-node fleet without editing
+  every node, since the deployment does not set env vars.
 
 ### Fixed
 - **`make release` GitHub-release publish was silently broken by shell

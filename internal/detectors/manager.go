@@ -376,6 +376,14 @@ func (m *manager) maybeReload(parent context.Context) {
 				// webdetector register uses for SetCookieLife, so the edge Lua
 				// re-mint TTL can never drift from what the daemon mints.
 				CookieLifeSec: int(resolveChallengeCookieLife(secs.Global, wdKV) / time.Second),
+				// Panel enforce modes (off|logonly|enforce). Default ENFORCE:
+				// the fleet runs panel WAF + bridge-decision enforcement on by
+				// default; a node that misbehaves sets PANEL_*_MODE=off|logonly
+				// there. Missing/unknown → enforce (token.go re-normalises, and
+				// cfm_panel.lua's resolver defaults to enforce for an absent field
+				// too). kvStrClean tolerates an inline ;/# comment (§5).
+				PanelWAFMode:      kvStrClean(wdKV, "PANEL_WAF_MODE", "enforce"),
+				PanelDecisionMode: kvStrClean(wdKV, "PANEL_DECISION_MODE", "enforce"),
 			}
 			// Guard nonsense values; the Lua side re-guards but keep the
 			// published file sane. Idle must stay below Apache's
@@ -392,8 +400,8 @@ func (m *manager) maybeReload(parent context.Context) {
 			if err := sslcollector.WriteWebdetectorBridgeConfig(bridgeConfigPath, bridgeCfg, cfmGID); err != nil {
 				logging.Logf("[detectors] cfm_bridge_config.lua write failed path=%s err=%v", bridgeConfigPath, err)
 			} else {
-				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v",
-					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive)
+				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s",
+					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode)
 			}
 		}
 	}

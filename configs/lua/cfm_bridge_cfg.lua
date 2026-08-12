@@ -23,6 +23,10 @@
 --   origin_ka_max_reqs  number  or nil
 --   cookie_life_sec     number  or nil (authoritative clearance-cookie TTL;
 --                       consumers honor it only when > 0)
+--   panel_waf_mode      string  or nil ("off"|"logonly"|"enforce"; nil when the
+--                       daemon predates the field → cfm_panel.lua defaults it to
+--                       "enforce")
+--   panel_decision_mode string  or nil (same shape as panel_waf_mode)
 
 local fc = require "cfm_filecache"
 
@@ -53,6 +57,16 @@ local OPTS = {
     -- CHALLENGE_COOKIE_LIFE chain. nil on an older daemon's file; consumers
     -- (cfm.lua ok_ttl_sec, cfm_panel.lua clearance_cookie_ttl) fall back.
     out.cookie_life_sec = tonumber(val.cookie_life_sec)
+    -- Panel enforce modes (off|logonly|enforce). Kept as-is when a string;
+    -- nil on an older daemon's file → cfm_panel.lua's resolver defaults to
+    -- "enforce" (the fleet posture). The Lua re-normalises, so an unexpected
+    -- token here is harmless.
+    if type(val.panel_waf_mode) == "string" then
+      out.panel_waf_mode = val.panel_waf_mode
+    end
+    if type(val.panel_decision_mode) == "string" then
+      out.panel_decision_mode = val.panel_decision_mode
+    end
     return out
   end,
 }

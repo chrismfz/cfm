@@ -87,6 +87,26 @@ check(cfg.clearance_refresh == false, "old daemon file: clearance_refresh=false 
 check(cfg.origin_keepalive == nil, "old daemon file: origin_keepalive nil → env fallback")
 check(cfg.origin_ka_idle_sec == nil, "old daemon file: idle_sec nil → env fallback")
 
+-- 4b) Panel enforce modes: present strings pass through; absent → nil so
+--     cfm_panel.lua's resolver applies the "enforce" default.
+expire()
+fixture = table.concat({
+  "return {",
+  "  clearance_refresh = true,",
+  "  panel_waf_mode = \"logonly\",",
+  "  panel_decision_mode = \"enforce\",",
+  "}",
+}, "\n")
+cfg = bc.get()
+check(cfg.panel_waf_mode == "logonly", "daemon file: panel_waf_mode parsed as string")
+check(cfg.panel_decision_mode == "enforce", "daemon file: panel_decision_mode parsed as string")
+
+expire()
+fixture = "return { clearance_refresh = true }"
+cfg = bc.get()
+check(cfg.panel_waf_mode == nil, "old daemon file: panel_waf_mode nil → resolver defaults enforce")
+check(cfg.panel_decision_mode == nil, "old daemon file: panel_decision_mode nil → resolver defaults enforce")
+
 -- 5) Garbage file → fallback, not a crash.
 expire()
 fixture = "return 42"

@@ -318,9 +318,37 @@ one env var. The waf_fp_hunt aggregator keys on the `ip/vhost/rule_action`
 fields (not the log marker), so `panel_decision.ip_block_count` keeps counting on
 enforcing nodes — regression-guarded by `TestParse_DecisionLine_EnforceMarker`.
 
-With 4a + 4b landed the panel WAF and the panel bridge decision can both enforce
-(opt-in). Remaining to fully close unification: flip enforce orion→fleet after
-burn-in, then the Phase-3 cleanup (delete `cfm_panel.lua`'s superseded local
+**Phase 4c — config-driven mode, DEFAULT ENFORCE fleet-wide.** The env-only
+gate from 4a/4b was a kill switch, not an *enable* path: the operator does not
+set env vars anywhere, so enforce could never actually turn on. 4c adds a config
+key for each mode and **flips the default to enforce**:
+- `detectors.conf [webdetector] PANEL_WAF_MODE` / `PANEL_DECISION_MODE` take
+  `off | logonly | enforce`. They flow daemon→edge through the existing
+  `cfm_bridge_config.lua` channel (Go `WebdetectorBridgeConfig` →
+  `cfm_bridge_cfg`), so a `cfm reload` propagates within the ~10s TTL with **no
+  proxy reload**.
+- `cfm_panel.lua` resolves the mode **per request**: env override
+  (`CFM_PANEL_WAF`/`CFM_PANEL_DECISION`, emergency kill switch, wins) → config
+  value → **default `enforce`**. A missing key, an old daemon's file without the
+  field, or an unknown token all resolve to enforce.
+- The reference `detectors.conf` ships both keys at `enforce`.
+
+Rationale: the fleet (~20 nodes) should get panel enforcement **on by default**
+without editing every node's config. If ONE node develops a false positive, set
+`PANEL_WAF_MODE`/`PANEL_DECISION_MODE = logonly` (keep observing) or `off`
+(disable) on THAT node and `cfm reload`. All the 4a/4b safety nets are unchanged
+and are what make an enforce-by-default safe: block-tier only, self-IP/`IGNORE_NETS`
+skipped, `deny` is a redirect-less 403 (can't loop), and the probe is fail-open
+(any WAF/bridge error → normal flow, no deny) — so defaulting to enforce cannot
+turn a fault into a WHM/cPanel lockout; only a genuine block verdict denies.
+
+**Burn-in caveat carried forward:** the FP burn-in that justified enforce was
+scanner-dominated (authenticated panel ops are hostname-based / hard-skipped), so
+default-enforce is the first real exercise of enforce on authenticated panel
+traffic — bounded and per-node reversible, but watch the first fleet rollout.
+
+Remaining to fully close unification: confirm default-enforce is clean across the
+fleet, then the Phase-3 cleanup (delete `cfm_panel.lua`'s superseded local
 challenge policy — now that the bridge decision can enforce the challenge tier
 via a clearance-aware follow-up — plus the loop-breaker, the legacy shared-cookie
 fallback, and the inert `cfm_ok` marker).

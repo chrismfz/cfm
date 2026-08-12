@@ -18,6 +18,11 @@ local panel_path = "configs/lua/cfm_panel.lua"
 
 -- Shared harness state, reset per load.
 local waf_hit, waf_ctx, checks, log_lines
+-- Panel WAF mode the fake cfm_bridge_cfg publishes for the run (env unset in
+-- most cases, so this drives resolve_panel_mode). Defaults to "logonly" so the
+-- observe-only cases below stay observe-only even though the SHIPPED default is
+-- "enforce"; enforce/off are exercised explicitly further down.
+local bridge_waf_mode
 
 local function install_fakes()
   package.loaded["cjson.safe"] = { encode = function(_) return "{}" end, decode = function() return nil end }
@@ -39,7 +44,7 @@ local function install_fakes()
   -- never emit lines that confuse the WAF assertions.
   package.preload["cfm_decision"] = function() error("absent for waf test") end
   package.loaded["cfm_bridge_cfg"] = {
-    get = function() return { clearance_refresh = true, cookie_life_sec = 2700 } end,
+    get = function() return { clearance_refresh = true, cookie_life_sec = 2700, panel_waf_mode = bridge_waf_mode } end,
     token = function() return "test-bridge-secret" end,
     refresh_token_throttled = function() return nil end,
     TOKEN_PATH = "/var/lib/cfm/lua/cfm_bridge_token.lua",
@@ -58,6 +63,13 @@ end
 local function run(opts)
   opts = opts or {}
   waf_hit = opts.waf_hit  -- nil = clean
+  -- Mode the fake config publishes: "__absent__" → nil (prove missing→enforce);
+  -- any other falsey → "logonly" (harness default so observe-only cases stay so).
+  if opts.mode == "__absent__" then
+    bridge_waf_mode = nil
+  else
+    bridge_waf_mode = opts.mode or "logonly"
+  end
   checks, log_lines, waf_ctx = {}, {}, nil
 
   local actions = {}
@@ -181,4 +193,48 @@ do
   end
 end
 
-print("ok: cfm_panel logonly WAF probe — records, never enforces")
+local function has_enforce_waf_line()
+  for _, l in ipairs(log_lines) do
+    if l:find("[cfm_panel_waf] enforce=block", 1, true) then return true end
+  end
+  return false
+end
+
+-- 8) ENFORCE mode (config panel_waf_mode=enforce): a high-confidence block hit
+--    DENIES (403 exit) and logs `enforce=block`; control flow CHANGES.
+do
+  local _, last = run({ mode = "enforce", waf_hit = { action = "block", reason = "WAF_SQLI:TEST", rule_id = 320 } })
+  assert_true(#checks == 1, "enforce: waf.check runs on human-entry")
+  assert_true(has_enforce_waf_line(), "enforce: block hit logs `[cfm_panel_waf] enforce=block`")
+  assert_true(last and last.action == "exit" and last.code == 403,
+              "enforce: a block hit DENIES with 403 (control flow changed)")
+end
+
+-- 8b) DEFAULT enforce: no env AND no config mode published (fake returns nil for
+--     panel_waf_mode) must resolve to enforce — the shipped fleet posture, and the
+--     whole point of this change.
+do
+  local _, last = run({ mode = "__absent__", waf_hit = { action = "block", reason = "WAF_SQLI:TEST", rule_id = 320 } })
+  assert_true(has_enforce_waf_line(),
+              "default (absent config mode) resolves to enforce: `enforce=block` logged")
+  assert_true(last and last.action == "exit" and last.code == 403,
+              "default (absent config mode) DENIES with 403")
+end
+
+-- 9) ENFORCE but a non-block hit (logonly/challenge tier) must NOT deny — only
+--    the high-confidence block tier acts.
+do
+  local _, last = run({ mode = "enforce", waf_hit = { action = "logonly", reason = "WAF_XSS:TEST", rule_id = 210 } })
+  assert_true(last and last.action == "redirect",
+              "enforce: a logonly-tier hit does NOT deny (challenge flow intact)")
+end
+
+-- 10) config panel_waf_mode=off: probe skipped entirely (parity with env=0).
+do
+  local _, last = run({ mode = "off", waf_hit = { action = "block", reason = "WAF_SQLI:TEST" } })
+  assert_true(#checks == 0, "config off: waf.check never runs")
+  assert_true(not any_waf_line(), "config off: no WAF line")
+  assert_true(last and last.action == "redirect", "config off: panel still challenges normally")
+end
+
+print("ok: cfm_panel WAF probe — logonly records, enforce denies block-tier, off skips")
