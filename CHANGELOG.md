@@ -49,6 +49,18 @@ back-filled here — see the git/PR history for that period.
   are edge-layer 403 denials, not nftables rules — use `waf_activity` /
   `waf_fp_hunt`).
 
+### Fixed
+- **`waf_fp_hunt` no longer under-counts the panel block-tier FP gate on
+  enforcing nodes.** After the Phase-4c default-enforce flip, an enforcing panel
+  WAF logs `[cfm_panel_waf] enforce=block` (not `logonly=would_block`), but the
+  `panelfp` aggregator still keyed its WAF action tally on the `logonly=` field —
+  so enforce hits bucketed as `unknown` and were left OUT of
+  `nonscanner_would_block` (and the per-rule candidate-FP count). That silently
+  masked panel false positives precisely when enforcement was on. `panelfp` now
+  derives the action from the `enforce=` marker too and counts an actual block the
+  same as a would-block (distinct `enforce_block` label in `by_action` so the
+  aggregate still shows which side acted). LOGONLY burn-in nodes are unchanged.
+
 ## 2026.08.12
 
 ### Fixed

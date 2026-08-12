@@ -13,6 +13,9 @@ const (
 	wafBlockFP = `2026/08/12 16:00:00 [warn] 1#1: *1 [lua] cfm_panel.lua:256: [cfm_panel_waf] logonly=would_block scope=panel:2083 ip=203.0.113.7 host=cpanel.example.com uri=/login?x=1 method=POST reason=WAF_SQLI:BLIND rule_id=320 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/128.0, client: "203.0.113.7"`
 	// Non-scanner logonly hit (not a block).
 	wafLogonly = `2026/08/12 16:01:00 [warn] 1#1: *2 [lua] cfm_panel.lua:256: [cfm_panel_waf] logonly=would_logonly scope=panel:2083 ip=198.51.100.9 host=cpanel.example.com uri=/ method=GET reason=WAF_XSS rule_id=210 ua=Mozilla/5.0 (X11; Linux x86_64) Chrome/126.0, client: "198.51.100.9"`
+	// Phase-4c enforce: a block on an ENFORCING node logs `enforce=block` (not
+	// `logonly=would_block`). Non-scanner → must still count as a block-tier FP.
+	wafEnforceBlock = `2026/08/12 16:07:00 [warn] 1#1: *3 [lua] cfm_panel.lua:256: [cfm_panel_waf] enforce=block scope=panel:2083 ip=203.0.113.8 host=cpanel.example.com uri=/login?y=2 method=POST reason=WAF_SQLI:BLIND rule_id=320 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/128.0, client: "203.0.113.8"`
 
 	decAllowChallenge = `2026/08/12 13:39:05 [warn] 1046969#1046969: *306117 [lua] cfm_panel.lua:167: panel_decision_probe(): [cfm_panel_decision] logonly=would_enforce scope=panel:2086 ip=87.236.176.108 host=webmail.mx-architecture.com uri=/ ip_action=allow vhost_action=challenge rule_action=- cached=0, client: "87.236.176.108", server: "_"`
 	// The real FP risk: an ip_action=block verdict on a panel port.
@@ -63,6 +66,28 @@ func TestParse_DecisionLine(t *testing.T) {
 	}
 	if f["host"] != "webmail.mx-architecture.com" {
 		t.Errorf("host = %q", f["host"])
+	}
+}
+
+// An enforcing-node WAF block (`enforce=block`) must count as a non-scanner
+// block-tier FP exactly like a logonly `would_block` — else waf_fp_hunt goes
+// blind on the FP gate precisely when enforcement is on.
+func TestSummarize_EnforceBlockCountsAsBlock(t *testing.T) {
+	s := Summarize([]string{wafEnforceBlock})
+	if s.WAF.Total != 1 {
+		t.Fatalf("WAF.Total = %d, want 1", s.WAF.Total)
+	}
+	if s.WAF.NonScannerHits != 1 || s.WAF.NonScannerWouldBlk != 1 {
+		t.Fatalf("enforce=block non-scanner: hits=%d wouldblk=%d, want 1/1",
+			s.WAF.NonScannerHits, s.WAF.NonScannerWouldBlk)
+	}
+	if s.WAF.ByAction["enforce_block"] != 1 {
+		t.Errorf("ByAction should record enforce_block=1, got %+v", s.WAF.ByAction)
+	}
+	// The rule must surface as a candidate FP with its non-scanner block counted.
+	if len(s.WAF.CandidateFPs) != 1 || s.WAF.CandidateFPs[0].RuleID != "320" ||
+		s.WAF.CandidateFPs[0].NonScannerWouldBlk != 1 {
+		t.Fatalf("candidate FP: %+v", s.WAF.CandidateFPs)
 	}
 }
 

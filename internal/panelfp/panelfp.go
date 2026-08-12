@@ -1,9 +1,13 @@
-// Package panelfp aggregates the panel LOGONLY burn-in signal that the edge Lua
-// writes to the edge ERROR log — the `[cfm_panel_waf]` would-be WAF actions
-// (Phase 2e) and the `[cfm_panel_decision]` would-enforce bridge verdicts
-// (Phase 2d). It answers the Phase-4 question "is it safe to turn panel
-// enforcement on?" by separating expected internet-scanner noise from the
-// residue that would actually affect real panel users.
+// Package panelfp aggregates the panel burn-in signal that the edge Lua writes
+// to the edge ERROR log — the `[cfm_panel_waf]` WAF actions (Phase 2e) and the
+// `[cfm_panel_decision]` bridge verdicts (Phase 2d). Both markers are
+// mode-dependent: a LOGONLY node records would-be actions (`logonly=would_…` /
+// `logonly=would_enforce`), while an ENFORCING node (Phase 4a/4c) records the
+// actual block (`[cfm_panel_waf] enforce=block`); the aggregation counts both as
+// the same block-tier signal (see wafActionOf). It answers "is it safe to turn
+// panel enforcement on?" — and, on an already-enforcing node, "what is it
+// actually blocking?" — by separating expected internet-scanner noise from the
+// residue that affects real panel users.
 //
 // The two numbers that gate enforcement:
 //   - panel_waf.nonscanner_would_block  — non-scanner clients a panel WAF BLOCK
@@ -113,6 +117,27 @@ func Parse(line string) (Kind, Fields) {
 	return kind, f
 }
 
+// wafActionOf normalises a parsed `[cfm_panel_waf]` line into (action, isBlock).
+// The panel WAF marker is mode-dependent (cfm_panel.lua panel_waf_probe):
+//   - LOGONLY (and any non-enforced tier, even on an enforcing node): the token
+//     is `logonly=would_<action>` → field "logonly" = "would_block"/"would_challenge"/…
+//   - ENFORCE, block tier: the token is `enforce=block` → field "enforce" = "block".
+// Both a would-block (logonly) and an actual block (enforce) are the same
+// block-tier FALSE-POSITIVE signal for burn-in, so both set isBlock — otherwise
+// an already-enforcing node would silently under-count nonscanner_would_block
+// (the marker changed with the Phase-4c default-enforce flip, but this parser
+// still keyed only on "logonly"). The enforce hits keep a distinct ByAction
+// label ("enforce_block") so the aggregate still shows which side acted.
+func wafActionOf(f Fields) (action string, isBlock bool) {
+	if v := f["enforce"]; v != "" {
+		return "enforce_" + v, v == "block"
+	}
+	if v := f["logonly"]; v != "" {
+		return v, v == "would_block"
+	}
+	return "unknown", false
+}
+
 // Summary is the aggregated panel-logonly picture.
 type Summary struct {
 	Window   Window     `json:"window"`
@@ -129,7 +154,7 @@ type Window struct {
 // WAFSummary aggregates `[cfm_panel_waf]` lines.
 type WAFSummary struct {
 	Total              int            `json:"total"`
-	ByAction           map[string]int `json:"by_action"` // would_block/would_challenge/would_logonly
+	ByAction           map[string]int `json:"by_action"` // would_block/would_challenge/would_logonly (logonly) + enforce_block (enforcing node)
 	ScannerHits        int            `json:"scanner_hits"`
 	NonScannerHits     int            `json:"nonscanner_hits"`
 	NonScannerWouldBlk int            `json:"nonscanner_would_block"` // the customer-facing FP risk
@@ -209,10 +234,7 @@ func Summarize(lines []string) Summary {
 		case KindWAF:
 			s.Window.WAFLines++
 			s.WAF.Total++
-			action := f["logonly"]
-			if action == "" {
-				action = "unknown"
-			}
+			action, isBlock := wafActionOf(f)
 			s.WAF.ByAction[action]++
 			ua := f["ua"]
 			scanner := IsScannerUA(ua)
@@ -220,7 +242,7 @@ func Summarize(lines []string) Summary {
 				s.WAF.ScannerHits++
 			} else {
 				s.WAF.NonScannerHits++
-				if action == "would_block" {
+				if isBlock {
 					s.WAF.NonScannerWouldBlk++
 				}
 			}
@@ -249,7 +271,7 @@ func Summarize(lines []string) Summary {
 				ra.scanner++
 			} else {
 				ra.nonScanner++
-				if action == "would_block" {
+				if isBlock {
 					ra.nonScanBlock++
 				}
 				if len(ra.samples) < maxSamples {
