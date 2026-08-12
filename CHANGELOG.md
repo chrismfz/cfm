@@ -17,6 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **MCP minor status reads — `clam_status`, `notifier_status`, `http3_status`.**
+  Three thin read-only, admin-only MCP tools over existing endpoints:
+  `clam_status` (ClamAV on-upload scanner health — enabled?, scan scope/mode,
+  circuit-breaker open/since/consec-fails, queue len/cap, lifetime counters:
+  "is upload scanning running or has clamd tripped the breaker?"),
+  `notifier_status` (which alert channels are enabled + delivery runtime state —
+  "are CFM's alerts actually going out?"; no secrets returned), and
+  `http3_status` (the HTTP/3/QUIC opt-in vhost list). No new endpoints.
+
 ### Changed
 - **Edge unification: Phase 2 closed, Phase 3 started.** Panel unification
   (LOGONLY challenge decision + reduced panel WAF + per-scope clearance cookies +

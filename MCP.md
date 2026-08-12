@@ -186,7 +186,7 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ## 4. Active tools (as-built)
 
-36 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
+39 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
 CLI/UI use). All carry the `readOnlyHint` annotation.
 
 | Tool | What it answers | Endpoint(s) | Args |
@@ -222,6 +222,9 @@ CLI/UI use). All carry the `readOnlyHint` annotation.
 | `firewall_blocks` | Active nft bans (WAF autoblocks/detector bans/blocklist). No args → compact SUMMARY (total, perm/temp, top `by_country`, top `by_asn`); the list is often thousands of IPs. Drill down with `country`/`asn`/`reason` → matching rows + within-facet ASN breakdown for FP judgement (residential ISP vs VPS) | `firewall/list` | `country`, `asn`, `reason`, `limit` |
 | `firewall_selftest` | nftlib backend self-diagnostics — recent EnsureBase timings split into lock_wait/netlink/CLI (+ worst call) and per-set feed-write sizes/errors. Root-cause an nftlib slowdown (EnsureBase duration climbing) or a feed that won't apply ("message too long"). `available:false` on exec-nft | `firewall/selftest` | — |
 | `detectors_status` | Which detectors run + recent activity | `detectors/status` | — |
+| `clam_status` | ClamAV on-upload scanner health (box-wide): enabled? scope/mode (archives-gate, async/inline, dry-run), circuit-breaker (open/since/consec-fails/last-OK/last-err), queue len/cap, lifetime counters (scanned OK, errors, breaker-skips, queue drops, inline blocks). "Is upload scanning running or has clamd tripped the breaker/filled the queue?" | `clam/health` | — |
+| `notifier_status` | Alert-notifier runtime: which channels are enabled (Slack/email/webhook) + delivery state — "are CFM's alerts actually going out?". Secrets never returned | `notifier/status` | — |
+| `http3_status` | HTTP/3 (QUIC) opt-in list — which vhosts have HTTP/3 enabled at the edge | `http3/list` | — |
 | `system_health` | Health snapshot + recent anomalies | `health/snapshot` + `health/anomalies` | `since` |
 | `process_list` | Busiest processes (top-like: pid/user/state/%cpu/%mem/rss/threads/comm) — "load is high, who's eating it?" | `system/processes` | `top` |
 | `listening_ports` | Listening TCP/UDP sockets + owning process (`ss -tlnp`) — "is the edge/daemon/panel up, who owns :443?" | `system/listeners` | — |
@@ -311,3 +314,4 @@ The MCP surface is versioned by CFM's date-based releases (see `CHANGELOG.md`).
 | 2026.08.12 | CloudLinux per-tenant CPU | **+`lve_cpu`** (34 tools) — per-tenant CPU pressure from an in-memory `/proc/lve/list` sampler (~15s): each LVE's cores + %-of-limit (100 = throttled), hottest-first; the per-tenant companion to `mysql_pressure` for "box load high, which account?". Unit calibrated to nanoseconds against live CL8/CL9 |
 | 2026.08.12 | DB↔web correlation | **+`db_web_pressure`** (35 tools) — folds per-DB-user MySQL pressure and per-vhost web request rate up to the owning cPanel account and flags "few web hits, high DB pressure" tenants (runaway cron/import, abusive script, compromised account). Composes `mysql/cpu`+`mysql/top`+`webdet/top-short`; host→owner via the canonical `internal/panelmap` reader; pure join in `internal/dbwebcorr`. cPanel-only attribution (notes when it can't map) |
 | 2026.08.12 | CPU throttle root-cause | **+`cpu_throttle`** (36 tools) — turns "load is high" into a root cause: reads instantaneous cpufreq/thermal/loadavg and classifies thermal throttling vs frequency cap (governor/policy) vs genuine demand vs idle downclock vs no-cpufreq (VM → check host steal). Load-gated classifier so a downclocked idle CPU is never mislabelled. Pure leaf `internal/cputhrottle` |
+| 2026.08.12 | Minor status reads | **+`clam_status`, +`notifier_status`, +`http3_status`** (39 tools) — thin read-only wrappers over existing admin endpoints: ClamAV scanner health (breaker/queue/counters), alert-notifier channel + delivery state, and the HTTP/3 opt-in vhost list |
