@@ -257,25 +257,40 @@ conflated three edits of very different risk):
   removes the leftover reference-config note — **done**. The runtime deprecation
   warning (`webdetector_register.go`, logs when a stale live config still sets
   `=0`) is **kept** on purpose so operators mid-cleanup get nudged.
-- **Cookie-net cleanup** — drop the inert `cfm_ok` marker, the legacy
-  shared-cookie-name fallback, and (only with Phase 4) the panel loop-breaker.
-  These touch the exact clearance path behind the original incident, and the
-  burn-in was clean *because these nets are in place*, so this is its **own**
-  sign-off-gated PR after a longer burn-in — not bundled. Worst case of dropping
-  the legacy-name fallback alone is a one-time re-challenge (not a lockout).
-- **`cfm_panel.lua`'s superseded local policy** — this is **Phase-4-coupled, not
-  Phase 3**: the panel's local challenge policy is still the *live* enforcement;
-  the shared bridge decision (2d) is still LOGONLY. It can only be deleted once
-  the bridge decision *enforces* (Phase 4). Corrected here to avoid deleting the
-  thing that is currently enforcing.
+- **Cookie-net cleanup** — drop the legacy shared-cookie-name fallback and the
+  panel loop-breaker. (The inert `cfm_ok` marker is already gone — no live Lua
+  reads or writes it; only vestigial mock vars remain in tests.) These touch the
+  exact clearance path behind the original incident, and the burn-in was clean
+  *because these nets are in place*, so this is its **own** sign-off-gated PR after
+  a longer burn-in — not bundled. Worst case of dropping the legacy-name fallback
+  alone is a one-time re-challenge (not a lockout). The loop-breaker stays coupled
+  to the retained blanket challenge (below): it is a general challenge-loop circuit
+  breaker, so it is dropped only once the per-scope cookie scheme has proven itself
+  fleet-wide, not because the challenge itself is going away.
+- **`cfm_panel.lua`'s local challenge policy — KEEPER, not dead code (decision
+  2026-08-12).** Earlier drafts slated the panel's local blanket challenge for
+  deletion once the bridge decision enforced. That is **reversed by an explicit
+  operator decision**: the blanket front-door challenge (every un-cleared browser
+  on a panel human-entry URI is challenged once, then rides a per-scope clearance
+  cookie) is a deliberate **edge bot-shield** kept for defense-in-depth, consistent
+  with CFM's armed-by-default posture. The bridge decision adds the per-IP **block**
+  tier *on top* (Phase 4b), it does **not replace** the challenge. So Phase 3 does
+  **NOT** delete the local challenge policy — only the redundant cookie-net plumbing
+  above. This also means the deferred "clearance-aware challenge-tier bridge
+  enforcement" (once called Phase 4d) is **unnecessary**: the blanket local
+  challenge already covers the challenge tier for all un-cleared browsers, so
+  deriving a selective challenge from the bridge verdict would be redundant.
 
 ### Phase 4 — panel enforcement graduation (REMINDER — do not lose this)
-The panel **challenge** is enforced already (pre-existing local policy). What was
-observe-only is the panel **WAF** (2e) and the panel **bridge decision** (2d).
-**After enough logging confirms low false-positive rates, BOTH must graduate to
-enforce** — otherwise the panel ports stay softer than the web edge and the
-unification is only half done. Each graduation is its own opt-in PR after its own
-burn-in, and each needs the deferred pieces wired first (below).
+The panel **challenge** is enforced already (pre-existing local blanket policy,
+KEPT — see the Phase 3 note above). What was observe-only is the panel **WAF**
+(2e) and the panel **bridge decision** (2d). **After enough logging confirms low
+false-positive rates, both graduate to enforce for the high-confidence BLOCK
+tier** — otherwise the panel ports stay softer than the web edge and the
+unification is only half done. The **challenge tier stays with the local blanket
+policy** (operator decision 2026-08-12): the bridge adds per-IP block on top, it
+does not take over the challenge. Each graduation is its own opt-in PR after its
+own burn-in.
 
 **Phase 4a — panel WAF enforce: MECHANISM LANDED, opt-in, BLOCK-tier only.**
 `CFM_PANEL_WAF` now selects `0`/`off` · `1`/logonly (default) · `enforce`. In
@@ -348,10 +363,10 @@ default-enforce is the first real exercise of enforce on authenticated panel
 traffic — bounded and per-node reversible, but watch the first fleet rollout.
 
 Remaining to fully close unification: confirm default-enforce is clean across the
-fleet, then the Phase-3 cleanup (delete `cfm_panel.lua`'s superseded local
-challenge policy — now that the bridge decision can enforce the challenge tier
-via a clearance-aware follow-up — plus the loop-breaker, the legacy shared-cookie
-fallback, and the inert `cfm_ok` marker).
+fleet, then the Phase-3 cookie-net cleanup (drop the legacy shared-cookie-name
+fallback and the loop-breaker after a longer burn-in). The local blanket challenge
+policy is **kept** (operator decision 2026-08-12), so there is no local-policy
+deletion and no challenge-tier bridge enforcement to build.
 
 Prereqs / deferred pieces:
 - **Full self-origin parity** — **DONE for the panel WAF.** `is_self_origin`
