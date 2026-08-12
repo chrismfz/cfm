@@ -68,9 +68,15 @@ make test-lua
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
 ```
 
-Additional scanners run in CI: **CodeQL** (`codeql.yml`), **Semgrep**
-(`semgrep.yml`), **govulncheck**. CodeQL has flagged real issues before
-(e.g. reflected XSS on the challenge page) — treat its alerts as real.
+The per-PR gate is `security.yml`'s **build-test** job only (the block above),
+kept lean so it runs on every PR without burning the repo's Actions-minute
+budget. The heavier **advisory** scanners — **CodeQL** + **govulncheck** — moved
+to a **weekly schedule + manual dispatch** (`codeql.yml`, "Weekly Security
+Scans"); they no longer run per-PR/per-push. Trigger a manual run (Actions tab →
+Run workflow) before a release or after a risky merge. gosec and Semgrep were
+dropped (CodeQL covers the same ground). CodeQL has flagged real issues before
+(e.g. reflected XSS on the challenge page) — treat its alerts as real; just
+check the weekly run (or dispatch one) rather than expecting it on your PR.
 
 ---
 

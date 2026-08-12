@@ -1,12 +1,14 @@
 name: Security & Quality (OSS)
 
+# The per-PR correctness gate — kept deliberately lean so it can run on every
+# PR without burning Actions minutes. The heavier security scanners (CodeQL,
+# govulncheck) moved to a weekly schedule (see codeql.yml) instead of running on
+# every PR/push; gosec and Semgrep were dropped (CodeQL covers the same ground).
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  schedule:
-    - cron: '0 3 * * *' # Every day at 03:00 UTC
   workflow_dispatch: {}   # Run manually from the Actions tab
 
 concurrency:
@@ -57,53 +59,4 @@ jobs:
       - name: go vet
         run: go vet ./...
       - run: go build ./...
-      - run: go test -race -v ./...
-
-  govulncheck:
-    name: govulncheck (Go official)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - name: Run govulncheck
-        uses: golang/govulncheck-action@v1
-        with:
-          go-version-input: ${{ env.GO_VERSION }}
-          directory: .
-
-  gosec:
-    name: gosec (static analyzer)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write  # for SARIF upload
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      # Pin or use latest; we'll sanitize SARIF either way
-      - run: go install github.com/securego/gosec/v2/cmd/gosec@latest
-      - name: Run gosec (produce SARIF)
-        run: |
-          gosec -no-fail -exclude-dir=vendor -fmt sarif -out gosec.sarif ./...
-      - name: Sanitize SARIF for GitHub (remove problematic 'fixes' nodes)
-        run: |
-          sudo apt-get update && sudo apt-get install -y jq
-          jq '.runs = (.runs | map(.results = (.results // [] | map(del(.fixes)))))' \
-            gosec.sarif > gosec.cleaned.sarif
-      # Best-effort: gosec runs with -no-fail and produces SARIF regardless.
-      # The upload only works when GitHub code scanning is enabled on the repo;
-      # otherwise it returns "Resource not accessible by integration / Code
-      # scanning is not enabled" and must NOT fail the check. Once code scanning
-      # is enabled this becomes a real upload with no further change needed.
-      - name: Upload SARIF (gosec)
-        if: always()
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: gosec.cleaned.sarif
+      - run: go test -race ./...
