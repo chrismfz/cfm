@@ -109,8 +109,10 @@ back-filled here — see the git/PR history for that period.
   snapshot's `runtime.edge_service` and suppresses failed/inactive findings for
   an edge engine (`angie`/`openresty`/`nginx`) that isn't the active one — the
   active edge's own health is still evaluated authoritatively (edge_status /
-  frontend_working). Fail-safe: if the active edge can't be resolved, a failed
-  edge engine is still flagged (nothing masked).
+  frontend_working). Fail-safe: suppression applies only when the active edge
+  resolved to a KNOWN engine; the collector's unresolved sentinels
+  (`unknown`/`mixed`) and a missing health section suppress nothing, so a
+  genuinely-failed active edge is never masked.
 - **Web and panel clearance cookies no longer clobber each other
   (edge-unification Phase 2a).** Browsers do not isolate cookies by port, so
   the single shared `cfm_clearance` name on `Path=/` meant solving a panel

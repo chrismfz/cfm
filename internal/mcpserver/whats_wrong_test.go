@@ -239,15 +239,20 @@ func TestWhatsWrong_EdgeEngineAlternate(t *testing.T) {
 		t.Fatalf("unrelated failed memcached must survive suppression, got %+v", got)
 	}
 
-	// Edge unknown ("") ⇒ fail safe: the failed openresty IS flagged (no masking).
-	sawOR := false
-	for _, f := range evalServices(body, "") {
-		if f.Args != nil && f.Args["units"] == "openresty.service" {
-			sawOR = true
+	// Fail-safe: when the active edge is NOT a known engine, nothing is
+	// suppressed. Cover the collector's real unresolved sentinels ("unknown",
+	// "mixed") AND the absent-health case (""). A failed openresty must be
+	// flagged in all three — never mask a real edge-down.
+	for _, unresolved := range []string{"", "unknown", "mixed"} {
+		sawOR := false
+		for _, f := range evalServices(body, unresolved) {
+			if f.Args != nil && f.Args["units"] == "openresty.service" {
+				sawOR = true
+			}
 		}
-	}
-	if !sawOR {
-		t.Fatalf("with edge unknown, a failed openresty must still be flagged (fail-safe)")
+		if !sawOR {
+			t.Fatalf("edge_service=%q (unresolved): a failed openresty must still be flagged (fail-safe)", unresolved)
+		}
 	}
 
 	// The ACTIVE edge failing is never suppressed.
@@ -256,6 +261,42 @@ func TestWhatsWrong_EdgeEngineAlternate(t *testing.T) {
 	]}`), "angie")
 	if f := findBy(af, "service", sevCritical); f == nil || f.Args["units"] != "angie.service" {
 		t.Fatalf("active edge angie failing must be flagged critical, got %+v", af)
+	}
+}
+
+// Drives the FULL evaluateWhatsWrong path: the runtime.edge_service extraction
+// (JSON tag + ToLower/TrimSpace) must feed evalServices so the idle alternate
+// is suppressed end-to-end. Uses mixed-case " Angie " to pin the normalization.
+func TestWhatsWrong_EdgeServiceExtraction(t *testing.T) {
+	sections := map[string]json.RawMessage{
+		"health": json.RawMessage(`{"runtime":{"edge_service":" Angie ","frontend_working":"working","edge_status":"active"}}`),
+		"services": json.RawMessage(`{"services":[
+			{"unit":"angie.service","load":"loaded","active":"active","sub":"running","enabled":"enabled","restarts":0},
+			{"unit":"openresty.service","load":"loaded","active":"failed","sub":"failed","enabled":"disabled","restarts":0}
+		]}`),
+	}
+	res := evaluateWhatsWrong(sections)
+	for _, f := range res.Findings {
+		if f.Args != nil && f.Args["units"] == "openresty.service" {
+			t.Fatalf("end-to-end: idle openresty must be suppressed via extracted edge_service, got %+v", res.Findings)
+		}
+	}
+	if res.Counts[sevCritical] != 0 {
+		t.Fatalf("end-to-end: expected no criticals (angie active, openresty suppressed), got %d: %+v", res.Counts[sevCritical], res.Findings)
+	}
+
+	// And the negative: unresolved edge_service ("unknown") must NOT suppress —
+	// the failed openresty surfaces as critical end-to-end.
+	sections["health"] = json.RawMessage(`{"runtime":{"edge_service":"unknown"}}`)
+	res2 := evaluateWhatsWrong(sections)
+	sawOR := false
+	for _, f := range res2.Findings {
+		if f.Args != nil && f.Args["units"] == "openresty.service" {
+			sawOR = true
+		}
+	}
+	if !sawOR {
+		t.Fatalf("end-to-end: edge_service=unknown must not suppress a failed openresty, got %+v", res2.Findings)
 	}
 }
 
