@@ -1,6 +1,6 @@
 # Edge Unification Plan — one enforcement path, one clearance model
 
-Status: **Phases 0–1 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226) · **Phase 2 in progress** (2a cookie isolation: this PR) · Owner: operator + assistant
+Status: **Phases 0–1 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226) · **Phase 2 in progress** (2a cookie isolation: #1227 · 2b panel tls-fp stamp: this PR) · Owner: operator + assistant
 Date: 2026-08-11 · Origin: the orion challenge-loop incident (PR #1220/#1221/#1222)
 
 ---
@@ -202,9 +202,14 @@ guards. Deploy note: pure package upgrade; no config migration.
   `is_panel_api_or_sso` allowlist, `/acctxfer*`, `/cgi/transfer`,
   `/cgi/live_tail_log`, `/cpsess…/websocket/`. No body buffering on streams;
   no POST-resume on panel.
-- **TLS-fp stamping** on panel `/__cfm_challenge` + `/__cfm_verify` (replace
-  the bare `access_by_lua_block { return; }` with the tlsfp stamp) — closes the
-  `tls_fp=-` blind spot.
+- **TLS-fp stamping** on panel `/__cfm_verify` — **landed (PR 2b)**: the bare
+  `access_by_lua_block { return; }` is replaced with the same clear-then-
+  `cfm_tlsfp.stamp()` the web `/__cfm_verify` runs, so panel solves carry a
+  fingerprint instead of `tls_fp=-`. Verify-only, matching the web edge — the
+  `/__cfm_challenge` location records no solve, so it stays bare (stamping it
+  would be dead work and would diverge from web). The plain-HTTP panel ports
+  (2082/2086/2095) still resolve to no fingerprint, correctly: no TLS
+  handshake to summarise.
 - **Cookie isolation per scope** (Go + Lua together) — **landed (PR 2a)**:
   per-scope cookie name (`cfm_clearance` for web, `cfm_clearance_p<port>` for
   panel) so web/panel tokens stop clobbering each other. The panel accepts a

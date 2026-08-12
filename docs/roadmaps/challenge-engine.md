@@ -399,15 +399,19 @@ night it appeared on `ClaudeBot/1.0` (AWS), on Greek residential Nova/OTEnet
 users, and on Saudi Telecom. One id, a declared crawler and ordinary humans. An
 id is a TLS-offer shape; it is not a client, and it is not an intent.
 
-**Every `tls_fp=-` line in the capture is a panel scope** — `scope=panel:2083`
-or `scope=panel:2096`, without exception. That is the expected result and worth
-recording so nobody hunts a bug: the cPanel/WHM listeners terminate TLS
-themselves and never traverse the edge's `/__cfm_verify` location, so nothing
-stamps `X-CFM-TLS` on them. A `-` on a **vhost** scope would be a real signal
-(edge misconfiguration, or a request reaching the challenge server directly);
-a `-` on `panel:*` is structural. Coverage of the fingerprint is therefore
-"everything through the edge", not "everything", and any coverage metric must
-exclude panel scopes or it will read as a permanent ~x% gap.
+**Every `tls_fp=-` line in the pre-2026-08 capture was a panel scope** —
+`scope=panel:2083` or `scope=panel:2096`, without exception. The cause was
+structural: the cPanel/WHM listeners terminate TLS themselves and their
+`/__cfm_verify` location ran a bare `access_by_lua_block { return; }`, so
+nothing stamped `X-CFM-TLS`. **Closed in Phase 2b** (edge-unification): the
+panel `/__cfm_verify` location now runs the same clear-then-`cfm_tlsfp.stamp()`
+the web edge does, and the panel listeners terminate TLS with real
+`$ssl_ciphers`/`$ssl_curves` available, so panel solves now carry a
+fingerprint. Two residual `-` cases remain and are both correct: the plain-HTTP
+panel ports (2082/2086/2095) have no handshake to fingerprint, and a `-` on a
+**vhost** scope is still a real signal (edge misconfiguration, or a request
+reaching the challenge server directly). A coverage metric should still exclude
+plain-HTTP panel ports.
 
 Still open, and still to be answered from the log rather than assumed:
 

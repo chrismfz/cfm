@@ -162,7 +162,11 @@ func TestPanelListenerConfig_DecideRouteIsInternalOnlyWhileChallengeAndVerifySta
 
 	exactDecide := "location = /__cfm_panel_decide { internal;"
 	exactChallenge := "location = /__cfm_challenge { access_by_lua_block { return; } proxy_pass http://cfm_challenge;"
-	exactVerify := "location = /__cfm_verify { access_by_lua_block { return; } proxy_pass http://cfm_challenge;"
+	// The verify location stamps the client's TLS ClientHello (X-CFM-TLS) so
+	// panel solves carry a fingerprint like web solves do — see Phase 2b in
+	// docs/edge-unification-plan.md. The clear-then-pcall(stamp) shape mirrors
+	// the web `/__cfm_verify` block in openresty.conf/angie.conf.
+	exactVerify := `location = /__cfm_verify { access_by_lua_block { ngx.req.clear_header("X-CFM-TLS") pcall(function() require("cfm_tlsfp").stamp() end) } proxy_pass http://cfm_challenge;`
 
 	decideCount := strings.Count(s, exactDecide)
 	challengeCount := strings.Count(s, exactChallenge)
@@ -172,6 +176,48 @@ func TestPanelListenerConfig_DecideRouteIsInternalOnlyWhileChallengeAndVerifySta
 	}
 	if decideCount != challengeCount || decideCount != verifyCount {
 		t.Fatalf("decide must stay internal while challenge/verify remain reachable per listener: decide=%d challenge=%d verify=%d", decideCount, challengeCount, verifyCount)
+	}
+}
+
+// TestPanelListenerConfig_VerifyStampsTLSFingerprint verifies that every panel
+// /__cfm_verify location stamps the client's TLS ClientHello (X-CFM-TLS) before
+// proxying to the challenge server, so panel solves carry a fingerprint instead
+// of tls_fp=- (edge-unification Phase 2b; docs/roadmaps/challenge-engine.md §6
+// flagged panel scopes as the fingerprint's one structural blind spot). The
+// stamp is verify-only, matching the web edge: the /__cfm_challenge location
+// records no solve, so it stays bare — stamping it would be dead work and would
+// diverge from web.
+func TestPanelListenerConfig_VerifyStampsTLSFingerprint(t *testing.T) {
+	b, err := os.ReadFile("../../configs/cfm-panel-listeners.conf.in")
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	s := string(b)
+
+	const stamp = `access_by_lua_block { ngx.req.clear_header("X-CFM-TLS") pcall(function() require("cfm_tlsfp").stamp() end) }`
+	const verifyStamped = "location = /__cfm_verify { " + stamp
+	const expectedPanelListenerCount = 7
+
+	// Every verify location carries the stamp; none is left bare.
+	if got := strings.Count(s, verifyStamped); got != expectedPanelListenerCount {
+		t.Fatalf("expected %d stamped verify locations, got %d", expectedPanelListenerCount, got)
+	}
+	if strings.Contains(s, "location = /__cfm_verify { access_by_lua_block { return; }") {
+		t.Fatalf("a verify location is still bare; every verify must stamp X-CFM-TLS")
+	}
+
+	// The clear MUST precede the pcall'd stamp: if the module fails to load the
+	// pcall is a no-op, and only the explicit clear then stops a client-supplied
+	// X-CFM-TLS from reaching the daemon. Guard the ordering, not just presence.
+	clearTok := `ngx.req.clear_header("X-CFM-TLS")`
+	stampTok := `require("cfm_tlsfp").stamp()`
+	if ci, si := strings.Index(s, clearTok), strings.Index(s, stampTok); ci < 0 || si < 0 || ci > si {
+		t.Fatalf("clear_header must precede stamp() in the verify block (clear=%d stamp=%d)", ci, si)
+	}
+
+	// Challenge location stays bare (web parity: no solve, no fingerprint).
+	if got := strings.Count(s, "location = /__cfm_challenge { access_by_lua_block { return; }"); got != expectedPanelListenerCount {
+		t.Fatalf("expected %d bare challenge locations (verify-only stamping), got %d", expectedPanelListenerCount, got)
 	}
 }
 

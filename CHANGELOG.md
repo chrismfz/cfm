@@ -37,6 +37,16 @@ back-filled here — see the git/PR history for that period.
   (bridge + Lua clearance cookie) is untouched.
 
 ### Changed
+- **Panel challenge solves now carry a TLS fingerprint (edge-unification
+  Phase 2b).** The cPanel/WHM/DirectAdmin listeners' `/__cfm_verify` location
+  previously ran a bare `access_by_lua_block { return; }`, so panel solves
+  logged `tls_fp=-` — the fingerprint's one structural blind spot. It now runs
+  the same clear-then-`cfm_tlsfp.stamp()` the web edge does (the panel
+  listeners terminate TLS, so `$ssl_ciphers`/`$ssl_curves` are available), so
+  panel solves record a fingerprint like web solves. Verify-only, matching the
+  web edge: `/__cfm_challenge` records no solve and stays bare. Plain-HTTP
+  panel ports (2082/2086/2095) correctly still resolve to no fingerprint (no
+  handshake). Still log-first — nothing decides on the value yet.
 - **Challenge status/reporting swept clean of DNAT-era probes (edge-unification
   Phase 1c — closes Phase 1).** `cfm status`'s challenge section is now
   journal-driven only (challenged/solved totals since service start; the nft
