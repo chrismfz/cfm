@@ -69,6 +69,8 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerHTTP3Status(srv, d)
 	registerMySQLLogTail(srv, d)
 	registerMySQLSlowQueries(srv, d)
+	registerCFMLogTail(srv, d)
+	registerJournalTail(srv, d)
 	registerMailQueueSummary(srv, d)
 	registerMailLogTail(srv, d)
 	registerMailTraffic(srv, d)
@@ -648,6 +650,50 @@ func registerMySQLSlowQueries(srv *mcp.Server, d Deps) {
 		setInt(q, "limit", in.Limit)
 		setStr(q, "grep", in.Grep)
 		return dispatchJSON(ctx, d, "/api/v1/system/mysql-log", q)
+	})
+}
+
+type cfmLogInput struct {
+	Which string `json:"which,omitempty" jsonschema:"which CFM log: main|error|api|detector|challenges|smtp|mysql|waf|clam|socket|lsm|service (default main)"`
+	Lines int    `json:"lines,omitempty" jsonschema:"trailing lines to scan (tail window); default 500, max 20000"`
+	Grep  string `json:"grep,omitempty" jsonschema:"case-insensitive substring filter; omit for all"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max matching lines to return; default 200, max 2000"`
+}
+
+func registerCFMLogTail(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "cfm_log_tail",
+		Description: "Tail one of CFM's OWN logs (`/var/log/cfm/*`, with a few legacy `/var/log/cfm.*` fallbacks) — pick `which`: main (daemon), error, api, detector, challenges, smtp, mysql, waf, clam, socket, lsm, service. This is 'what did the CFM daemon / a subsystem log?' when a symptom isn't explained by the edge access/error logs (which edge_access_tail / edge_error_tail cover) — e.g. why a detector acted, a socket/API error, a challenge-engine note. Bounded on-demand tail (last N lines) + optional grep; a log that isn't present returns result.found=false (feature off or relocated), not an error. result.window_full=true means the tail window was saturated (older lines exist — raise `lines` if a grep found nothing).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cfmLogInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setStr(q, "which", in.Which)
+		setInt(q, "lines", in.Lines)
+		setInt(q, "limit", in.Limit)
+		setStr(q, "grep", in.Grep)
+		return dispatchJSON(ctx, d, "/api/v1/system/cfm-log", q)
+	})
+}
+
+type journalInput struct {
+	Unit  string `json:"unit" jsonschema:"systemd unit to tail; MUST be allow-listed: cfm, angie, openresty, nginx, httpd, apache2, mysql, mysqld, mariadb, exim, dovecot, postfix, sshd, clamd, named"`
+	Lines int    `json:"lines,omitempty" jsonschema:"trailing journal lines (journalctl -n); default 500, max 20000"`
+	Grep  string `json:"grep,omitempty" jsonschema:"case-insensitive substring filter; omit for all"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max matching lines to return; default 200, max 2000"`
+}
+
+func registerJournalTail(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "journal_tail",
+		Description: "Tail the systemd journal for an ALLOW-LISTED unit (cfm, angie/openresty/nginx/httpd/apache2, mysql/mysqld/mariadb, exim, dovecot, postfix, sshd, clamd, named). This is where a service's own startup/crash/restart output lives — 'did cfm/the edge/mysql restart or fail to start, and why?' — that the app-level logs don't carry. An arbitrary (non-allow-listed) unit is rejected; a non-systemd host returns result.available=false. Bounded (journalctl -n N) + optional grep.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in journalInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setStr(q, "unit", in.Unit)
+		setInt(q, "lines", in.Lines)
+		setInt(q, "limit", in.Limit)
+		setStr(q, "grep", in.Grep)
+		return dispatchJSON(ctx, d, "/api/v1/system/journal", q)
 	})
 }
 

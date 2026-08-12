@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP logs group — `cfm_log_tail` + `journal_tail`.** Two read-only,
+  admin-only MCP tools (+ `GET /api/v1/system/cfm-log` and `/api/v1/system/journal`),
+  backed by the new `internal/cfmlog` bounded reader. `cfm_log_tail` tails CFM's
+  own `/var/log/cfm/*` logs by curated key (main/error/api/detector/challenges/
+  smtp/mysql/waf/clam/socket/lsm/service) — "what did the daemon or a subsystem
+  log?" when the edge access/error logs don't explain a symptom; a log that
+  isn't present returns `found:false`, not an error. `journal_tail` tails the
+  systemd journal for an **allow-listed** unit (cfm + hosting-stack: angie/
+  openresty/nginx/httpd/apache2, mysql/mysqld/mariadb, exim, dovecot, postfix,
+  sshd, clamd, named) — a service's own start/crash/restart output; an arbitrary
+  unit is rejected (the allow-list is the boundary, so an admin read tool can't
+  tail any unit on the box) and a non-systemd host returns `available:false`.
+  Both are bounded (last-N tail/`journalctl -n` + timeout + capped output + optional
+  grep) with no continuous cost.
 - **MCP minor status reads — `clam_status`, `notifier_status`, `http3_status`.**
   Three thin read-only, admin-only MCP tools over existing endpoints:
   `clam_status` (ClamAV on-upload scanner health — enabled?, scan scope/mode,
