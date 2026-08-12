@@ -270,13 +270,33 @@ conflated three edits of very different risk):
   thing that is currently enforcing.
 
 ### Phase 4 — panel enforcement graduation (REMINDER — do not lose this)
-Everything panel-side today is deliberately **observe-only**: the panel WAF
-(2e) and the panel bridge decision (2d) both LOGONLY, and the panel challenge is
-the pre-existing behaviour. **After enough logging confirms low false-positive
-rates, BOTH the panel challenge/decision AND the panel WAF must graduate to
+The panel **challenge** is enforced already (pre-existing local policy). What was
+observe-only is the panel **WAF** (2e) and the panel **bridge decision** (2d).
+**After enough logging confirms low false-positive rates, BOTH must graduate to
 enforce** — otherwise the panel ports stay softer than the web edge and the
-unification is only half done. Each graduation is its own opt-in PR after its
-own burn-in, and each needs the deferred pieces wired first, notably:
+unification is only half done. Each graduation is its own opt-in PR after its own
+burn-in, and each needs the deferred pieces wired first (below).
+
+**Phase 4a — panel WAF enforce: MECHANISM LANDED, opt-in, BLOCK-tier only.**
+`CFM_PANEL_WAF` now selects `0`/`off` · `1`/logonly (default) · `enforce`. In
+`enforce`, only the **high-confidence `block` tier acts (`block` → deny)**;
+`logonly`-tier hits are never enforced (observe-only by definition) and
+`challenge`-tier hits are deliberately NOT converted to a standalone WAF
+challenge — doing so loops (a solved clearance cookie doesn't clear the WAF
+match, and the WAF branch returns before the section-3 loop-breaker) and hands
+non-browser clients an unsolvable PoW. (These three traps were caught by the
+pre-PR adversarial review; the naive "block-vs-everything-else" mapping is
+wrong.) Challenge-tier enforcement therefore defers to the clearance-aware
+**Phase 4b** decision path; the existing human-entry challenge is unchanged.
+Default stays LOGONLY so merging changes nothing; the operator flips
+`CFM_PANEL_WAF=enforce` on orion first, burns in, then fleet. Self/`IGNORE_NETS`
+sources are skipped, `deny` can't loop, and the probe is fail-open (any WAF
+error → normal flow), so a WAF fault can't lock the panel. Rollback is one env
+var. **Phase 4b — panel decision enforce** is next (same gated, default-logonly
+shape; it is clearance/loop-aware by construction, so it also carries the
+challenge-tier enforcement).
+
+Prereqs / deferred pieces:
 - **Full self-origin parity** — **DONE for the panel WAF.** `is_self_origin`
   (self-IP set + `IGNORE_NETS` + loopback) is extracted to the shared
   `cfm_selfip` module used by both `cfm.lua` and `cfm_panel.lua` (no drift, §5),
