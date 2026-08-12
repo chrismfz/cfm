@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP `waf_rule_detail` — one WAF rule across both surfaces.** New read-only,
+  admin-only MCP tool that deep-dives a single WAF rule / reason-family across
+  BOTH enforcement surfaces at once — the in-path web edge and the panel
+  (cPanel/WHM) edge — now that the panel runs the same `cfm_waf` ruleset. Give a
+  reason family or substring (`WAF_SQLI`, `WAF_RCE:EVAL`, `sqli`) or a numeric rule
+  id (`320`, `10001`; resolved to its family for the web side, since web WAF events
+  key on the reason string, not the panel log's numeric id). Returns the matched
+  registry rules (id / family / built-in default_mode), the WEB slice (events,
+  blocked, unique ips+hosts, top exact-reasons/ips/hosts/countries over `hours`),
+  and the PANEL slice (hits, scanner vs non-scanner split, `nonscanner_would_block`,
+  matched rule ids, sample non-scanner requests). Answers "is rule X safe to
+  enforce?" and surfaces a rule clean on the web but firing on the panel from real
+  browsers (an FP) — the burn-in companion to the aggregate `waf_activity` (web)
+  and `waf_fp_hunt` (panel). Composes three existing read-only endpoints
+  (`waf/rules` + `waf/engine/summary` + `system/waf-fp-hunt`); no new endpoint.
 - **MCP `nft_counters` — nftables named-counter view.** New read-only, admin-only
   MCP tool + `GET /api/v1/firewall/counters`. Reports how much traffic each L3/L4
   firewall RULE is matching in `table inet cfm`, grouped by family (portflood /

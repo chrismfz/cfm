@@ -38,6 +38,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerSecurityOverview(srv, d)
 	registerWAFActivity(srv, d)
 	registerWAFRules(srv, d)
+	registerWAFRuleDetail(srv, d)
 	registerChallengeVhosts(srv, d)
 	registerChallengeEvents(srv, d)
 	registerSuspiciousHosts(srv, d)
