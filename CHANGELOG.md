@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.12
+
 ### Added
 - **LVE per-tenant CPU now shows the account username, not just the uid.**
   `lve_cpu` / `GET /api/v1/system/lve-cpu`, the `cfm lve` CLI, and the Health UI
@@ -91,8 +95,6 @@ back-filled here — see the git/PR history for that period.
   derives the action from the `enforce=` marker too and counts an actual block the
   same as a would-block (distinct `enforce_block` label in `by_action` so the
   aggregate still shows which side acted). LOGONLY burn-in nodes are unchanged.
-
-## 2026.08.12
 
 ### Fixed
 - **`make release` GitHub release failed on a large CHANGELOG (`gh: Argument
