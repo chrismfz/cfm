@@ -62,6 +62,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerWAFFPHunt(srv, d)
 	registerLVECPU(srv, d)
 	registerMySQLPressure(srv, d)
+	registerDBWebPressure(srv, d)
 	registerMySQLLogTail(srv, d)
 	registerMySQLSlowQueries(srv, d)
 	registerMailQueueSummary(srv, d)

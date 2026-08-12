@@ -71,12 +71,12 @@ As-built + roadmap: **`MCP.md`**. Read-only telemetry across the fleet
 
 ## 4. MySQL / resource pressure & governor
 
-- **Correlation: MySQL pressure vs vhost hits** — [in flight]. Surface "few
-  hits, high DB pressure" tenants. Pure join+scoring leaf landed
-  (`internal/dbwebcorr`: per-account DB pressure × per-vhost web hits →
-  few-hits/high-pressure flag). Remaining: wire the endpoint + MCP tool
-  (fetch governor `cpu`/`top` + webdet `top-short`, build the host→owner map
-  from `/etc/userdomains`) and a CLI/UI surface.
+- **Correlation: MySQL pressure vs vhost hits** — DONE (MCP). `internal/dbwebcorr`
+  join + the `db_web_pressure` MCP tool (composes governor `cpu`/`top` + webdet
+  `top-short`, host→owner via `internal/panelmap`) surface "few hits, high DB
+  pressure" tenants. Follow-ups (optional): a CLI/web-UI surface, and DirectAdmin
+  host→owner support in `panelmap` (`/etc/virtual/domainowners`) so attribution
+  works off cPanel too.
 - **CPU thermal/throttle signal** — [next]. Turn "high load" into a root-cause
   flag (thermal/throttle vs genuine demand).
 - **LVE per-tenant CPU signal (CloudLinux)** — DONE. Data plane:

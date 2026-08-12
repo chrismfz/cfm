@@ -18,15 +18,29 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **MCP `db_web_pressure` — "few web hits, high DB pressure" tenant finder.**
+  New read-only, admin-only MCP tool that correlates per-account MySQL pressure
+  with per-vhost web request volume: it composes `mysql/cpu` + `mysql/top` +
+  `webdet/top-short`, folds DB users (`acct_*`) and vhosts up to the owning
+  cPanel account (via the canonical `internal/panelmap` host→owner reader), and
+  runs the `internal/dbwebcorr` join. Accounts come back most-interesting-first —
+  those flagged `few_hits_high_pressure` (DB pressure above a floor **and** web
+  hits at/under a ceiling) sort first, then by pressure-per-hit — each with its
+  cpu_sec/busy_sec/query_count, web_rps/web_hits, db_users + vhosts. The tell for
+  a runaway cron/import, an abusive backend script, or a compromised account
+  grinding the DB without a matching visitor load (vs the boring "lots of traffic
+  → lots of DB"). The `perf` block says whether cpu numbers are real (busy_sec is
+  the CPU proxy on CloudLinux MariaDB where CPU_TIME is 0). Attribution is
+  cPanel-only; on a non-cPanel host `web_attribution.vhosts_mapped` is 0 and a
+  `note` flags that the few-hits verdicts are unreliable there.
 - **Correlation leaf for "few web hits, high DB pressure" tenants
   (`internal/dbwebcorr`).** Pure, unit-tested join+scoring foundation that folds
   per-DB-user MySQL pressure and per-vhost web request rate up to the hosting
   account (DB user `acct_*` → `acct`; vhost → owner) and flags accounts whose
   databases are busy while their sites take almost no traffic — the tell for a
   runaway cron/import, an abusive backend script, or a compromised account
-  (vs the boring "lots of traffic → lots of DB"). No behaviour change yet — the
-  HTTP endpoint + MCP tool that feed it live governor/webdetector snapshots and
-  the `/etc/userdomains` host→owner map follow in a later change.
+  (vs the boring "lots of traffic → lots of DB"). Now surfaced by the
+  `db_web_pressure` MCP tool above.
 
 ### Changed
 - **One canonical cPanel domain→owner reader (`internal/panelmap`).** The
