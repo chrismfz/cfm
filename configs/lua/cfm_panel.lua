@@ -560,8 +560,34 @@ local function normalize_validator_reason(reason)
     return "validator_error"
 end
 
+-- Per-scope clearance cookie name: the Go challenge server mints panel
+-- clearances as cfm_clearance_p<port> (web keeps cfm_clearance) so web and
+-- panel tokens no longer clobber each other in the port-agnostic browser
+-- cookie jar (edge-unification Phase 2a). Must mirror clearanceCookieName
+-- in challenge_server.go.
+local function scoped_clearance_cookie_name(scope)
+    local port = tostring(scope or ""):match("^panel:(%d+)$")
+    if port then return "cfm_clearance_p" .. port end
+    return "cfm_clearance"
+end
+
+-- Read the clearance token for this scope: prefer the per-scope cookie,
+-- fall back to the legacy shared name (upgrade lag / pre-rename cookies).
+-- The fallback cannot weaken per-port isolation — the token's scope claim
+-- is HMAC-bound and still validated against this listener's panel scope.
+local function read_clearance_cookie(scope)
+    local name = scoped_clearance_cookie_name(scope)
+    local token = safe_cookie_value(ngx.var["cookie_" .. name])
+    if token then return token, name end
+    if name ~= "cfm_clearance" then
+        local legacy = safe_cookie_value(ngx.var.cookie_cfm_clearance)
+        if legacy then return legacy, "cfm_clearance" end
+    end
+    return nil, name
+end
+
 local function clearance_cookie_state(ip, host, scope)
-    local token = safe_cookie_value(ngx.var.cookie_cfm_clearance)
+    local token = read_clearance_cookie(scope)
     local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET")
     if not secret or secret == "" then secret = panel_bridge_token end
     if not secret or secret == "" then
@@ -676,7 +702,10 @@ local function refresh_clearance_cookie(ip, host, scope)
 
     local refreshed = false
 
-    local cfm_clearance = safe_cookie_value(ngx.var.cookie_cfm_clearance)
+    -- Read via the per-scope helper; always RE-SET under the scoped name so
+    -- a token accepted via the legacy-name fallback migrates forward. The
+    -- legacy cookie itself is left alone — it may hold the user's web token.
+    local cfm_clearance = read_clearance_cookie(scope)
     if cfm_clearance then
         local out_val = tostring(cfm_clearance)
         if panel_bridge_cfg.clearance_refresh and ip and host and ok_clearance and clearance_validator and type(clearance_validator.mint) == "function" then
@@ -694,7 +723,7 @@ local function refresh_clearance_cookie(ip, host, scope)
                 end
             end
         end
-        append_set_cookie("cfm_clearance=" .. out_val .. "; " .. attrs)
+        append_set_cookie(scoped_clearance_cookie_name(scope) .. "=" .. out_val .. "; " .. attrs)
         refreshed = true
     end
 
@@ -924,7 +953,7 @@ end
 if is_human_panel_entry(ngx.var.host or "", uri) then
     local clearance_ok, clearance_reason = clearance_cookie_state(client_ip, normalized_host, panel_scope)
     clearance_reason = normalize_validator_reason(clearance_reason)
-    local cookie_present = safe_cookie_value(ngx.var.cookie_cfm_clearance) and "1" or "0"
+    local cookie_present = read_clearance_cookie(panel_scope) and "1" or "0"
     local prior = pop_verify_trace(client_ip)
 
     -- error_log defaults to "warn"; use WARN on validation failures so the

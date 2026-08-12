@@ -102,6 +102,29 @@ func TestClearanceScope(t *testing.T) {
 	}
 }
 
+func TestClearanceCookieName(t *testing.T) {
+	cases := map[string]string{
+		"web":          "cfm_clearance",
+		"":             "cfm_clearance",
+		"panel:2082":   "cfm_clearance_p2082",
+		"panel:2083":   "cfm_clearance_p2083",
+		"panel:2086":   "cfm_clearance_p2086",
+		"panel:2087":   "cfm_clearance_p2087",
+		"panel:2095":   "cfm_clearance_p2095",
+		"panel:2096":   "cfm_clearance_p2096",
+		"panel:2222":   "cfm_clearance_p2222",
+		"panel:":       "cfm_clearance", // malformed: no port
+		"panel:20x87":  "cfm_clearance", // malformed: non-digit
+		"panel:2087; ": "cfm_clearance", // malformed: header-injection shape
+		"other":        "cfm_clearance",
+	}
+	for scope, want := range cases {
+		if got := clearanceCookieName(scope); got != want {
+			t.Fatalf("clearanceCookieName(%q) = %q, want %q", scope, got, want)
+		}
+	}
+}
+
 func TestClearanceUsesOpenRestyTokenNotChallengeSecret(t *testing.T) {
 	t.Setenv("CFM_CHALLENGE_SECRET", "challenge-secret-a")
 	t.Setenv("OPENRESTY_TOKEN", "bridge-secret-a")

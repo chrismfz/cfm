@@ -1,6 +1,6 @@
 # Edge Unification Plan — one enforcement path, one clearance model
 
-Status: **Phases 0–1 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: this PR — closes Phase 1) · Owner: operator + assistant
+Status: **Phases 0–1 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226) · **Phase 2 in progress** (2a cookie isolation: this PR) · Owner: operator + assistant
 Date: 2026-08-11 · Origin: the orion challenge-loop incident (PR #1220/#1221/#1222)
 
 ---
@@ -205,11 +205,16 @@ guards. Deploy note: pure package upgrade; no config migration.
 - **TLS-fp stamping** on panel `/__cfm_challenge` + `/__cfm_verify` (replace
   the bare `access_by_lua_block { return; }` with the tlsfp stamp) — closes the
   `tls_fp=-` blind spot.
-- **Cookie isolation per scope** (Go + Lua together): per-scope cookie name
-  (e.g. `cfm_clearance` for web, `cfm_clearance_p<port>` for panel) so
-  web/panel tokens stop clobbering each other; drop the loop-breaker once the
-  clobber is gone. Test the cPanel-plugin iframe cross-port flow (WHM :2087
-  iframing `/cfm-admin` on :443) under the new scheme.
+- **Cookie isolation per scope** (Go + Lua together) — **landed (PR 2a)**:
+  per-scope cookie name (`cfm_clearance` for web, `cfm_clearance_p<port>` for
+  panel) so web/panel tokens stop clobbering each other. The panel accepts a
+  panel-scoped token under the legacy shared name (upgrade lag) and migrates
+  it to the scoped name on refresh; the loop-breaker is deliberately RETAINED
+  as the safety net for the upgrade window and drops only after burn-in
+  (Phase 2 cleanup, together with the legacy-name fallback and the inert
+  shared-name `cfm_ok` marker — no Lua reads it anymore). Test the
+  cPanel-plugin iframe cross-port flow (WHM :2087 iframing `/cfm-admin` on
+  :443) under the new scheme.
 - Never touch: acctxfer tunnel ordering (test-locked), DA-no-tunnel invariant,
   websocket headers, fixed `X-Forwarded-For` literals (no
   `$proxy_add_x_forwarded_for` on panel — client must not seed the chain).
