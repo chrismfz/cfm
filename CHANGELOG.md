@@ -101,6 +101,16 @@ back-filled here — see the git/PR history for that period.
   tests now exercise the module directly).
 
 ### Fixed
+- **`whats_wrong` no longer reports a spurious critical for the idle edge
+  engine.** On a node fronted by Angie, the installed-but-disabled
+  `openresty.service` (the mutually-exclusive alternate) sits `failed`, and
+  `whats_wrong` flagged it as a critical "service failed" even though the edge
+  was perfectly healthy. It now resolves the active edge from the health
+  snapshot's `runtime.edge_service` and suppresses failed/inactive findings for
+  an edge engine (`angie`/`openresty`/`nginx`) that isn't the active one — the
+  active edge's own health is still evaluated authoritatively (edge_status /
+  frontend_working). Fail-safe: if the active edge can't be resolved, a failed
+  edge engine is still flagged (nothing masked).
 - **Web and panel clearance cookies no longer clobber each other
   (edge-unification Phase 2a).** Browsers do not isolate cookies by port, so
   the single shared `cfm_clearance` name on `Path=/` meant solving a panel

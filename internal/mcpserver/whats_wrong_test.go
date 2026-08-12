@@ -196,7 +196,7 @@ func TestWhatsWrong_Services(t *testing.T) {
 		{"unit":"d.service","load":"loaded","active":"active","sub":"running","enabled":"enabled","restarts":7},
 		{"unit":"e.service","load":"not-found","active":"inactive","sub":"dead","enabled":"","restarts":0},
 		{"unit":"f.service","load":"masked","active":"inactive","sub":"dead","enabled":"masked","restarts":0}
-	]}`))
+	]}`), "")
 	// a → critical (failed); b → critical (enabled-but-inactive); c → none (disabled+inactive is fine);
 	// d → warning (flapping); e,f → skipped (not-found/masked).
 	if n := countCat(got, "service"); n != 3 {
@@ -213,6 +213,49 @@ func TestWhatsWrong_Services(t *testing.T) {
 	}
 	if crit != 2 {
 		t.Errorf("expected 2 critical service findings (a,b), got %d: %+v", crit, got)
+	}
+}
+
+func TestWhatsWrong_EdgeEngineAlternate(t *testing.T) {
+	// A node runs Angie; openresty is installed-but-disabled and reports failed.
+	body := json.RawMessage(`{"services":[
+		{"unit":"angie.service","load":"loaded","active":"active","sub":"running","enabled":"enabled","restarts":0},
+		{"unit":"openresty.service","load":"loaded","active":"failed","sub":"failed","enabled":"disabled","restarts":0},
+		{"unit":"memcached.service","load":"loaded","active":"failed","sub":"failed","enabled":"enabled","restarts":0}
+	]}`)
+
+	// Active edge = angie: the idle openresty must NOT be flagged; the unrelated
+	// failed memcached still is (exactly 1 finding).
+	got := evalServices(body, "angie")
+	for _, f := range got {
+		if f.Args != nil && f.Args["units"] == "openresty.service" {
+			t.Fatalf("idle alternate openresty must be suppressed when angie is the edge, got %+v", got)
+		}
+	}
+	if n := countCat(got, "service"); n != 1 {
+		t.Fatalf("expected exactly 1 service finding (memcached), got %d: %+v", n, got)
+	}
+	if f := findBy(got, "service", sevCritical); f == nil || f.Args["units"] != "memcached.service" {
+		t.Fatalf("unrelated failed memcached must survive suppression, got %+v", got)
+	}
+
+	// Edge unknown ("") ⇒ fail safe: the failed openresty IS flagged (no masking).
+	sawOR := false
+	for _, f := range evalServices(body, "") {
+		if f.Args != nil && f.Args["units"] == "openresty.service" {
+			sawOR = true
+		}
+	}
+	if !sawOR {
+		t.Fatalf("with edge unknown, a failed openresty must still be flagged (fail-safe)")
+	}
+
+	// The ACTIVE edge failing is never suppressed.
+	af := evalServices(json.RawMessage(`{"services":[
+		{"unit":"angie.service","load":"loaded","active":"failed","sub":"failed","enabled":"enabled","restarts":0}
+	]}`), "angie")
+	if f := findBy(af, "service", sevCritical); f == nil || f.Args["units"] != "angie.service" {
+		t.Fatalf("active edge angie failing must be flagged critical, got %+v", af)
 	}
 }
 
@@ -382,14 +425,14 @@ func TestWhatsWrong_SwapNeedsMemoryPressure(t *testing.T) {
 func TestWhatsWrong_OneshotNotFlagged(t *testing.T) {
 	fs := evalServices(json.RawMessage(`{"services":[
 		{"unit":"once.service","load":"loaded","active":"inactive","sub":"exited","enabled":"enabled","restarts":0}
-	]}`))
+	]}`), "")
 	if countCat(fs, "service") != 0 {
 		t.Fatalf("clean oneshot (inactive+exited) must not flag, got %+v", fs)
 	}
 	// But inactive+dead+enabled (a crashed long-running unit) still flags.
 	dead := evalServices(json.RawMessage(`{"services":[
 		{"unit":"daemon.service","load":"loaded","active":"inactive","sub":"dead","enabled":"enabled","restarts":0}
-	]}`))
+	]}`), "")
 	if findBy(dead, "service", sevCritical) == nil {
 		t.Fatalf("enabled inactive+dead unit must flag, got %+v", dead)
 	}

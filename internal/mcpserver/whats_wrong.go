@@ -169,11 +169,31 @@ func evaluateWhatsWrong(sections map[string]json.RawMessage) whatsWrongResult {
 		return true
 	}
 
+	// Resolve the active edge engine (angie|openresty|nginx) from the health
+	// snapshot. A node runs ONE edge; the idle alternate is installed-but-
+	// disabled and legitimately reports failed/inactive, so evalServices uses
+	// this to suppress that false "service failed" critical. When it can't be
+	// resolved (health missing/errored), evalServices falls back to flagging any
+	// failed edge engine — never masking a real edge-down. The ACTIVE edge's own
+	// health is still evaluated authoritatively by evalHealth (edge_status /
+	// frontend_working).
+	edgeService := ""
+	if body, ok := sections["health"]; ok && json.Valid(body) && sectionError(body) == "" {
+		var h struct {
+			Runtime struct {
+				EdgeService string `json:"edge_service"`
+			} `json:"runtime"`
+		}
+		if json.Unmarshal(body, &h) == nil {
+			edgeService = strings.ToLower(strings.TrimSpace(h.Runtime.EdgeService))
+		}
+	}
+
 	if body, ok := sections["health"]; ok && usable("health", body) {
 		fs = append(fs, evalHealth(body)...)
 	}
 	if body, ok := sections["services"]; ok && usable("services", body) {
-		fs = append(fs, evalServices(body)...)
+		fs = append(fs, evalServices(body, edgeService)...)
 	}
 	if body, ok := sections["mysql"]; ok && usable("mysql", body) {
 		fs = append(fs, evalMySQL(body)...)
@@ -399,7 +419,18 @@ func evalHealth(body json.RawMessage) []finding {
 	return fs
 }
 
-func evalServices(body json.RawMessage) []finding {
+// edgeEngineUnits are the mutually-exclusive edge proxies: a node fronts its
+// traffic with exactly one of these, so the others are installed-but-disabled
+// alternates whose failed/inactive state is not a fault. (httpd/apache2 are the
+// ORIGIN, not an edge alternate, so they are deliberately absent here.)
+var edgeEngineUnits = map[string]bool{"angie": true, "openresty": true, "nginx": true}
+
+// evalServices flags failed/inactive/flapping units. edgeService is the resolved
+// active edge engine (from the health snapshot, lowercased, no ".service"); when
+// non-empty it suppresses state faults for the IDLE alternate edge engine — the
+// classic false "openresty.service failed" on an Angie node. Pass "" to disable
+// the suppression (edge unknown → fail safe by flagging).
+func evalServices(body json.RawMessage, edgeService string) []finding {
 	var s struct {
 		Services []struct {
 			Unit     string `json:"unit"`
@@ -417,6 +448,15 @@ func evalServices(body json.RawMessage) []finding {
 	for _, u := range s.Services {
 		// Skip units that aren't installed / are masked — not a fault.
 		if u.Load == "not-found" || u.Load == "masked" {
+			continue
+		}
+		// Skip the idle alternate edge engine (e.g. a failed/disabled openresty
+		// while Angie owns the edge). Only when the active edge is known AND this
+		// is a DIFFERENT edge engine — the active edge's own health is covered by
+		// evalHealth (edge_status/frontend_working), so we never mask a real
+		// edge-down here.
+		unitBase := strings.TrimSuffix(u.Unit, ".service")
+		if edgeService != "" && edgeEngineUnits[unitBase] && unitBase != edgeService {
 			continue
 		}
 		switch {
