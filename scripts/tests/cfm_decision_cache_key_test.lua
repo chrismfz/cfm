@@ -7,32 +7,27 @@
 -- (the bridge is never consulted for the second path). Fix: hash the FULL path
 -- with ngx.md5 so distinct paths never collide.
 --
--- cfm.lua is an access_by_lua_file (running main() on require), so we extract
--- decision_cache_key from the source and load() it — exercising the PRODUCTION
--- function. Its two free names, is_static_asset_uri and ngx.md5, are provided as
--- globals in the loaded chunk.
+-- The key builder now lives in cfm_decision.lua as Client:cache_key (extracted
+-- from cfm.lua in edge-unification Phase 2). We require the module and exercise
+-- the PRODUCTION method; its free names are ngx.md5 and the injected is_static
+-- hook.
 
-local path = "configs/lua/cfm.lua"
-local f = assert(io.open(path, "r"), "cannot open " .. path)
-local src = f:read("*a"); f:close()
-
-local start = src:find("local function decision_cache_key%(")
-assert(start, "decision_cache_key() not found in " .. path .. " (renamed/moved?)")
-local body = src:sub(start)
-local stop = body:find("\nend\n")
-assert(stop, "could not delimit decision_cache_key() body")
-local fnsrc = body:sub(1, stop + 4)
+-- cfm_decision requires cjson.safe at load; stub it (unused by cache_key).
+package.loaded["cjson.safe"] = { decode = function() return nil end, encode = function() return "" end }
+package.path = package.path .. ";configs/lua/?.lua;./?.lua"
 
 -- Deterministic stand-ins. md5 is modelled as a function of the FULL input, so
 -- the key depends on the whole path (the real ngx.md5 also bounds it to 32 hex).
 _G.ngx = { md5 = function(s) return "md5(" .. tostring(s) .. ")" end }
-_G.is_static_asset_uri = function(uri)
-  local ext = tostring(uri):match("%.([%w]+)$")
-  return ext ~= nil and ({ css = true, js = true, png = true, woff = true })[ext:lower()] == true
-end
 
-local decision_cache_key = assert(load(fnsrc .. "\nreturn decision_cache_key"))()
-assert(type(decision_cache_key) == "function", "extracted decision_cache_key is not a function")
+local cfm_decision = require("cfm_decision")
+local client = cfm_decision.new({}, {
+  is_static = function(uri)
+    local ext = tostring(uri):match("%.([%w]+)$")
+    return ext ~= nil and ({ css = true, js = true, png = true, woff = true })[ext:lower()] == true
+  end,
+})
+assert(type(client.cache_key) == "function", "Client:cache_key missing")
 
 local fails = 0
 local function check(cond, msg)
@@ -44,8 +39,8 @@ end
 local IP, HOST, SCOPE = "203.0.113.7", "shop.example.com", "web"
 local function dk(uri, opt)
   opt = opt or {}
-  return decision_cache_key(opt.ip or IP, opt.host or HOST, opt.method or "GET",
-                            opt.scheme or "https", uri, opt.qs or "", opt.scope or SCOPE)
+  return client:cache_key(opt.ip or IP, opt.host or HOST, opt.method or "GET",
+                          opt.scheme or "https", uri, opt.qs or "", opt.scope or SCOPE)
 end
 
 -- ── F38: two paths sharing a 64-byte prefix get DISTINCT keys ────────────────

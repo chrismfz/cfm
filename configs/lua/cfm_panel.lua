@@ -86,6 +86,93 @@ do
     panel_bridge_cfg = panel_bridge_cfg or { clearance_refresh = true }
 end
 
+-- LOGONLY bridge decision (edge-unification Phase 2d). The panel consults the
+-- SAME /nginx/decision the web edge uses (via the shared cfm_decision module,
+-- scope=panel:<port>) and RECORDS what the bridge would do — but does NOT act
+-- on the verdict: the clearance-cookie challenge below is unchanged, nothing
+-- here blocks or adds a challenge. The point is to gather false-positive data on
+-- panel traffic before any enforcement phase. Everything is pcall'd and
+-- fail-open, and a missing module/cjson (upgrade lag) or the kill switch
+-- CFM_PANEL_DECISION=0 simply leaves panel_decision nil (no probe at all), so a
+-- bridge hiccup can never touch panel access.
+local PANEL_DECISION_LOGONLY = (os.getenv("CFM_PANEL_DECISION") or "1") ~= "0"
+local panel_decision
+local panel_decision_cjson
+do
+    local ok_cjson, cj = pcall(require, "cjson.safe")
+    local ok_mod, dec_mod = pcall(require, "cfm_decision")
+    local ok_bmod, bmod = pcall(require, "cfm_bridge_cfg")
+    if PANEL_DECISION_LOGONLY and ok_cjson and ok_mod and type(dec_mod) == "table" and dec_mod.new then
+        panel_decision_cjson = cj
+        -- Transport values mirror cfm.lua's CFG so the panel's bridge RPC
+        -- behaves identically to the web edge's.
+        local dcfg = {
+            sock_path             = "/var/run/cfm/cfm_nginx.sock",
+            token                 = panel_bridge_token,
+            token_header          = "X-CFM-Token",
+            decision_timeout_ms   = tonumber(os.getenv("CFM_DECISION_TIMEOUT_MS") or "300"),
+            keepalive_idle_ms     = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "60000"),
+            keepalive_pool        = tonumber(os.getenv("CFM_BRIDGE_KA_POOL") or "512"),
+            fail_open             = (os.getenv("CFM_FAIL_OPEN") or "1") ~= "0",
+            decision_cache_ttl_ms = 90000,
+            debug                 = false,
+            debug_headers         = false,
+        }
+        panel_decision = dec_mod.new(dcfg, {
+            shdict       = ngx.shared.cfm_decisions,
+            is_static    = function() return false end,  -- panel human-entry is never a static asset
+            real_ip      = function() return ngx.var.remote_addr end,
+            log_route    = function(lvl, msg) ngx.log(lvl, "[cfm_panel] ", tostring(msg)) end,
+            on_token_403 = (ok_bmod and bmod and bmod.refresh_token_throttled)
+                             and function() return bmod.refresh_token_throttled(2) end or nil,
+            token_path   = ok_bmod and bmod and bmod.TOKEN_PATH or nil,
+            token_err    = function() return nil end,
+        })
+    end
+end
+
+-- panel_touch_ok mirrors cfm.lua's touch_ok_scoped: after a valid clearance it
+-- POSTs /nginx/ok/touch so the bridge records that this IP passed on this panel
+-- scope. LOGONLY: this is a bypass HINT for a future enforcement phase; it never
+-- blocks or challenges. Throttled per (ip,host,scope), best-effort, pcall'd.
+local function panel_touch_ok(ip, host, scope, ttl_sec)
+    if not panel_decision then return end
+    local sh = ngx.shared.cfm_decisions
+    if sh then
+        local k = "ok_touch|panel|" .. (ip or "-") .. "|" .. (host or "-") .. "|" .. tostring(scope or "")
+        local now = ngx.now()
+        local last = sh:get(k)
+        if last and (now - last) < 120 then return end
+        sh:set(k, now, 120)
+    end
+    panel_decision:rpc("ok_touch", "POST", "/nginx/ok/touch",
+        panel_decision_cjson.encode({ ip = ip, host = host, scope = scope, ttl_sec = ttl_sec }),
+        { ip = ip, host = host })
+end
+
+-- panel_decision_probe fires the LOGONLY decision on a panel human-entry request
+-- and records what the bridge WOULD do. It returns nothing and changes no
+-- control flow; a bridge error is swallowed (fail-open, no log line).
+local function panel_decision_probe(ip, host, uri, method, ua, scope)
+    if not panel_decision then return end
+    local okd, d = pcall(function()
+        return panel_decision:get(ip, host, uri, ngx.var.args or "",
+                                  method, ngx.var.scheme or "https", ua, "", scope)
+    end)
+    if not okd or type(d) ~= "table" then return end
+    local ipa = d.ip_action or "allow"
+    local vha = d.vhost_action or "allow"
+    local ra  = d.rule_action
+    if ipa ~= "allow" or vha ~= "allow" or ra then
+        ngx.log(ngx.WARN,
+            "[cfm_panel_decision] logonly=would_enforce scope=", tostring(scope),
+            " ip=", tostring(ip), " host=", tostring(host), " uri=", tostring(uri),
+            " ip_action=", tostring(ipa), " vhost_action=", tostring(vha),
+            " rule_action=", tostring(ra or "-"),
+            " cached=", d._cache and "1" or "0")
+    end
+end
+
 local function starts_with(s, p)
     return s and p and s:sub(1, #p) == p
 end
@@ -980,6 +1067,10 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
         ngx.header["X-CFM-Clearance"] = "module_error"
     end
 
+    -- LOGONLY bridge decision: record what the bridge would do for this panel
+    -- human-entry request. Never alters the flow below (see panel_decision_probe).
+    panel_decision_probe(client_ip, normalized_host, uri, method, ua, panel_scope)
+
     local validator_degraded = validator_degraded_reason(clearance_reason)
     if validator_degraded then
         ngx.ctx.cfm_validator_guard_reason = clearance_reason
@@ -1002,6 +1093,11 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
         if not ok_refresh then
             ngx.log(ngx.WARN, "CFM_PANEL clearance refresh failed: ", tostring(refresh_err))
         end
+
+        -- LOGONLY: mirror the web ok/touch so the bridge records this IP passed
+        -- on this panel scope (bypass hint for a future enforcement phase; never
+        -- blocks/challenges). Best-effort, throttled, must not affect the allow.
+        pcall(panel_touch_ok, client_ip, normalized_host, panel_scope, ttl)
 
         return allow_origin(mode, "challenge_pass_clearance_valid", origin, method, ua)
     end

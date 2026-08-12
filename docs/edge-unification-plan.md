@@ -1,6 +1,6 @@
 # Edge Unification Plan — one enforcement path, one clearance model
 
-Status: **Phases 0–1 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226) · **Phase 2 in progress** (2a cookie isolation: #1227 · 2b panel tls-fp stamp: this PR) · Owner: operator + assistant
+Status: **Phases 0–1 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226) · **Phase 2 in progress** (2a cookie isolation: #1227 · 2b panel tls-fp stamp: #1228 · 2d shared decision module + panel LOGONLY bridge decision: this PR) · Owner: operator + assistant
 Date: 2026-08-11 · Origin: the orion challenge-loop incident (PR #1220/#1221/#1222)
 
 ---
@@ -195,9 +195,18 @@ guards. Deploy note: pure package upgrade; no config migration.
 - Extract the shared pipeline pieces `cfm.lua` and `cfm_panel.lua` both need
   (decision RPC, clearance refresh, tlsfp stamp) into modules; keep per-surface
   policy (origins, skip-lists, timeouts) in each entrypoint.
-- **Bridge decision on panel ports** with `scope=panel:<port>` — `cfm.lua`'s
-  decision cache already keys by scope and sends `&scope=`; the Go bridge
-  needs to accept/store panel scopes end-to-end.
+- **Bridge decision on panel ports** with `scope=panel:<port>` — **LOGONLY
+  landed (PR 2d)**. The decision-RPC client is extracted to `cfm_decision.lua`
+  (commit 1, zero web behaviour change) and `cfm_panel.lua` now consults
+  `/nginx/decision` on human-entry with `scope=panel:<port>` and fires
+  `/nginx/ok/touch` after a valid clearance (commit 2). It **records** what the
+  bridge would do (`[cfm_panel_decision] logonly=would_enforce …`) but does
+  **not** act on the verdict — the clearance-cookie challenge is unchanged, so
+  there is zero panel-lockout risk while FP data is gathered. Everything is
+  `pcall`'d + fail-open; the kill switch `CFM_PANEL_DECISION=0` (or a missing
+  module on upgrade lag) disables the probe entirely. The Go bridge already
+  accepts/stores panel scopes end-to-end (`okState` keyed by `(ip,host,scope)`).
+  Enforcement (acting on the verdict) is a later opt-in phase after burn-in.
 - **Reduced WAF on panel**: run on human-entry + generic paths; hard-skip the
   `is_panel_api_or_sso` allowlist, `/acctxfer*`, `/cgi/transfer`,
   `/cgi/live_tail_log`, `/cpsess…/websocket/`. No body buffering on streams;

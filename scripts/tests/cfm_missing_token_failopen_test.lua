@@ -5,31 +5,26 @@
 -- 500 for EVERY request while the token was absent (e.g. a reboot where nginx
 -- starts before the cfm daemon writes the token) — while a present-but-dead
 -- daemon fails OPEN. Operator decision: make the two uniform and never interrupt
--- service. The fatal error() is gone, and get_decision() now treats a missing
--- token exactly like an unreachable daemon: fail_decision() under CFG.fail_open,
+-- service. The fatal error() is gone, and the decision path now treats a missing
+-- token exactly like an unreachable daemon: Client:fail() under cfg.fail_open,
 -- WITHOUT the pointless auth-less RPC, logged (throttled).
 --
--- cfm.lua is an access_by_lua_file (runs main() on require), so we extract the
--- real get_decision() from source and load() it, providing its free names as
--- globals — exercising the PRODUCTION function.
+-- The decision path now lives in cfm_decision.lua as Client:get (extracted from
+-- cfm.lua in edge-unification Phase 2). We require the module and exercise the
+-- PRODUCTION method, stubbing the transport (Client:rpc) and cache key.
 
-local path = "configs/lua/cfm.lua"
-local f = assert(io.open(path, "r"), "cannot open " .. path)
-local src = f:read("*a"); f:close()
-
--- 1) The fatal error() on a missing token must be GONE (else it 500s per request).
-assert(not src:find('error%("%[cfm%] bridge token unavailable'),
+-- 1) The fatal error() on a missing token must be GONE from the production
+--    source (else it 500s per request).
+local dsrc = assert(io.open("configs/lua/cfm_decision.lua", "r")):read("*a")
+assert(not dsrc:find('error%("%[cfm%] bridge token unavailable'),
   "the fatal error() on a missing bridge token is still present — F47 not applied")
 
--- 2) Extract get_decision() and load it.
-local start = src:find("local function get_decision%(")
-assert(start, "get_decision() not found (renamed/moved?)")
-local body = src:sub(start)
-local stop = body:find("\nend\n")
-assert(stop, "could not delimit get_decision() body")
-local fnsrc = body:sub(1, stop + 4)
+package.loaded["cjson.safe"] = {
+  decode = function(s) return (s == nil or s == "") and nil or { ip_action = "allow", vhost_action = "allow" } end,
+  encode = function(_) return "{}" end,
+}
+package.path = package.path .. ";configs/lua/?.lua;./?.lua"
 
--- ── Test harness: stubs for get_decision's free names ────────────────────────
 local rpc_calls, log_lines
 local function reset() rpc_calls, log_lines = 0, {} end
 reset()
@@ -38,33 +33,31 @@ _G.ngx = {
   ERR = 1, WARN = 2, INFO = 3,
   ctx = {}, header = {},
   now = function() return 1000 end,
+  md5 = function(s) return tostring(s) end,
+  escape_uri = function(s) return tostring(s or "") end,
   log = function(_, ...)
     local parts = {}
     for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
     log_lines[#log_lines + 1] = table.concat(parts)
   end,
 }
-_G.cjson = {
-  decode = function(s) return s == "" and nil or { ip_action = "allow", vhost_action = "allow" } end,
-  encode = function(_) return "{}" end,
-}
-_G.esc = function(x) return tostring(x) end
-_G.log_route = function() end
-_G._bridge = { TOKEN_PATH = "/var/lib/cfm/lua/cfm_bridge_token.lua" }
-_G._bridge_token_err = "no token file at path"
-_G.decision_cache_key = function() return "testkey" end
--- Mirror of the real fail_decision (cfm.lua): honours CFG.fail_open.
-_G.fail_decision = function(err)
-  if _G.CFG.fail_open then
-    return { ip_action = "allow", vhost_action = "allow", err = err }
-  end
-  return { ip_action = "block", vhost_action = "block", err = err }
-end
--- rpc_call records that it ran and returns a clean bridge "allow".
-_G.rpc_call = function() rpc_calls = rpc_calls + 1; return '{"ok":1}', nil end
 
-local get_decision = assert(load(fnsrc .. "\nreturn get_decision"))()
-assert(type(get_decision) == "function", "extracted get_decision is not a function")
+local cfm_decision = require("cfm_decision")
+
+-- mk builds a production client with the transport + cache-key stubbed. cfg is
+-- held by reference (as in production); fail() and the token/cache/throttle
+-- logic under test are the REAL module code.
+local function mk(cfg, sh)
+  local c = cfm_decision.new(cfg, {
+    shdict     = sh,
+    token_path = "/var/lib/cfm/lua/cfm_bridge_token.lua",
+    token_err  = function() return "no token file at path" end,
+    on_token_403 = function() return nil end,
+  })
+  c.cache_key = function() return "testkey" end
+  c.rpc = function() rpc_calls = rpc_calls + 1; return '{"ok":1}', nil end
+  return c
+end
 
 local fails = 0
 local function check(cond, msg)
@@ -72,14 +65,12 @@ local function check(cond, msg)
   fails = fails + 1
   io.stderr:write("FAIL: " .. msg .. "\n")
 end
-local function call() return get_decision("1.2.3.4", "h", "/u", "GET", "https", "ua", "US", "web") end
+local function callon(c) return c:get("1.2.3.4", "h", "/u", "", "GET", "https", "ua", "US", "web") end
 
 -- ── Missing token + fail_open (default): allow, NO rpc, logged ────────────────
 do
   reset()
-  _G.SH = nil
-  _G.CFG = { token = nil, fail_open = true }
-  local d = call()
+  local d = callon(mk({ token = nil, fail_open = true }, nil))
   check(d.ip_action == "allow" and d.vhost_action == "allow", "missing token + fail_open -> allow")
   check(d.err == "bridge_token_missing", "missing token -> err=bridge_token_missing (got " .. tostring(d.err) .. ")")
   check(rpc_calls == 0, "missing token -> the bridge RPC is NOT attempted (got " .. rpc_calls .. " calls)")
@@ -91,9 +82,7 @@ end
 -- ── Missing token + fail_closed: block, NO rpc ───────────────────────────────
 do
   reset()
-  _G.SH = nil
-  _G.CFG = { token = nil, fail_open = false }
-  local d = call()
+  local d = callon(mk({ token = nil, fail_open = false }, nil))
   check(d.ip_action == "block" and d.vhost_action == "block", "missing token + fail_closed -> block")
   check(rpc_calls == 0, "missing token (fail_closed) -> no RPC")
   check(log_lines[1]:find("FAILING CLOSED", 1, true) ~= nil, "fail_closed log says FAILING CLOSED")
@@ -102,18 +91,14 @@ end
 -- ── Empty-string token behaves like missing ──────────────────────────────────
 do
   reset()
-  _G.SH = nil
-  _G.CFG = { token = "", fail_open = true }
-  local d = call()
+  local d = callon(mk({ token = "", fail_open = true }, nil))
   check(rpc_calls == 0 and d.err == "bridge_token_missing", "empty-string token -> fail-open, no RPC")
 end
 
 -- ── Present token: the normal RPC path runs ──────────────────────────────────
 do
   reset()
-  _G.SH = nil
-  _G.CFG = { token = "realtoken", fail_open = true, decision_cache_ttl_ms = 90000 }
-  local d = call()
+  local d = callon(mk({ token = "realtoken", fail_open = true, decision_cache_ttl_ms = 90000 }, nil))
   check(rpc_calls == 1, "present token -> the bridge RPC IS attempted (got " .. rpc_calls .. ")")
   check(d.err == nil, "present token + clean bridge allow -> no fail-open err")
   check(#log_lines == 0, "present token -> no missing-token log")
@@ -125,11 +110,10 @@ end
 do
   reset()
   local store = { testkey = '{"cached":1}' }
-  _G.SH = { get = function(_, k) return store[k] end,
-            set = function() end,
-            add = function() return true end }
-  _G.CFG = { token = nil, fail_open = true }
-  local d = call()
+  local sh = { get = function(_, k) return store[k] end,
+               set = function() end,
+               add = function() return true end }
+  local d = callon(mk({ token = nil, fail_open = true }, sh))
   check(d._cache == true, "cached clean-allow is served even when the token is missing")
   check(rpc_calls == 0, "cache hit -> no RPC")
   check(#log_lines == 0, "cache hit -> no fail-open log (token check not reached)")
@@ -139,11 +123,11 @@ end
 do
   reset()
   local added = {}
-  _G.SH = { get = function() return nil end,
-            set = function() end,
-            add = function(_, k, _v, _ttl) if added[k] then return false, "exists" end added[k] = true; return true end }
-  _G.CFG = { token = nil, fail_open = true }
-  call(); call()
+  local sh = { get = function() return nil end,
+               set = function() end,
+               add = function(_, k, _v, _ttl) if added[k] then return false, "exists" end added[k] = true; return true end }
+  local c = mk({ token = nil, fail_open = true }, sh)
+  callon(c); callon(c)
   check(#log_lines == 1, "two missing-token requests within the window log ONCE (got " .. #log_lines .. ")")
 end
 
