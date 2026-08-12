@@ -48,6 +48,8 @@ jobs:
         run: ./scripts/tests/check_logrotate_coverage.sh
       - name: CHANGELOG date-stamper regression test
         run: ./scripts/tests/stamp_changelog_test.sh
+      - name: Release-notes extractor regression test
+        run: ./scripts/tests/release_notes_test.sh
       # Lua syntax check + unit tests. luajit was installed above; both
       # targets bail out with a clear message if it ever goes missing.
       - name: Lua syntax check (configs/lua)

@@ -55,6 +55,13 @@ back-filled here — see the git/PR history for that period.
   `http3_status` (the HTTP/3/QUIC opt-in vhost list). No new endpoints.
 
 ### Changed
+- **GitHub releases are now tag + CHANGELOG notes only — no `.deb`/`.rpm`
+  assets.** `make release` publishes a lightweight release (title + that day's
+  CHANGELOG section as the notes, via `scripts/release-notes.sh`) and no longer
+  attaches packages. Binaries are distributed via `make sync` to the apt/yum
+  repo, so the GitHub assets were redundant; dropping them keeps GitHub storage
+  flat across the many date-based releases. (`checksums.txt` is still generated
+  for `make sync`.)
 - **Edge unification: Phase 2 closed, Phase 3 started.** Panel unification
   (LOGONLY challenge decision + reduced panel WAF + per-scope clearance cookies +
   self-origin parity) has burned in on both engines with a clean false-positive

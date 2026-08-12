@@ -353,7 +353,11 @@ make sync       # rsyncs today's .deb/.rpm (+ checksums) to the remote repo
 ```
 
 `make release` runs `bpf deb rpm`, so it also regenerates BPF objects — needs
-`clang` + `libbpf-dev` on the build host.
+`clang` + `libbpf-dev` on the build host. It also stamps + commits/pushes
+`CHANGELOG.md` and cuts a **tag-only GitHub release** (title + that day's
+CHANGELOG section as notes, via `scripts/release-notes.sh`) — **no `.deb`/`.rpm`
+attached**, since packages are distributed by `make sync` to the apt/yum repo.
+`make sync` is what actually ships the binaries (+ `checksums.txt`).
 
 ### CHANGELOG discipline (dating is now automated)
 
