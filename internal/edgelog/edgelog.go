@@ -268,6 +268,61 @@ func TailError(ctx context.Context, grep, source string, tailLines, limit int) (
 	return res, nil
 }
 
+// ScanError streams the last tailLines of the resolved edge ERROR log and
+// invokes fn for every line that contains ANY of substrs (case-insensitive; an
+// empty substrs list matches every line). Each line passed to fn is truncated to
+// the same per-line cap as the tail tools. Bounded like TailError (tail window,
+// context timeout). Returns the resolved log file and how many lines were
+// scanned.
+//
+// Unlike TailError (which keeps only the NEWEST `limit` matches in a ring),
+// ScanError observes EVERY match in the window — for aggregators (e.g. the
+// panel-logonly FP hunt) that must count all hits, not just the most recent.
+// The caller bounds its own memory by what it accumulates in fn.
+func ScanError(ctx context.Context, substrs []string, source string, tailLines int, fn func(line string)) (logFile string, scanned int, err error) {
+	if tailLines <= 0 {
+		tailLines = DefaultErrorTailLines
+	}
+	if tailLines > MaxErrorTailLines {
+		tailLines = MaxErrorTailLines
+	}
+	lower := make([]string, 0, len(substrs))
+	for _, s := range substrs {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s != "" {
+			lower = append(lower, s)
+		}
+	}
+
+	logFile, err = resolveFrom(errorLogCandidates, source, "error")
+	if err != nil {
+		return "", 0, err
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, scanTimeout)
+	defer cancel()
+
+	err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
+		scanned++
+		if len(lower) > 0 {
+			ll := strings.ToLower(line)
+			matched := false
+			for _, s := range lower {
+				if strings.Contains(ll, s) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return true
+			}
+		}
+		fn(truncLine(line))
+		return true
+	})
+	return logFile, scanned, err
+}
+
 // streamTailMatches runs `tail -n <tailLines> <file>` and feeds each line to fn.
 // tail reads backward from EOF, so the disk read is bounded to the tail window
 // regardless of the file's total size. Output is streamed (never fully buffered).

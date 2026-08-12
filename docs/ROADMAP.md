@@ -56,7 +56,7 @@ As-built + roadmap: **`MCP.md`**. Read-only telemetry across the fleet
 - **Logs group** — [next]. `journal_tail` / `cfm_log_tail` (edge `edge_error_tail`
   landed).
 - **Firewall/WAF drilldowns** — [next]. `nft_counters`, `waf_rule_detail`,
-  `challenge_ip_status`, `waf_fp_hunt`.
+  `challenge_ip_status` (`waf_fp_hunt` landed — panel-logonly burn-in aggregator).
 - **`ip_forensics` → rotated logs** — [next]. Optionally reach rotated log
   segments, not just the live file.
 - **Minor read wins** — [next]. `notifier_status`, `clam_status`, `http3_status`.

@@ -27,6 +27,7 @@ import (
 	"cfm/internal/mailtraffic"
 	"cfm/internal/mysqllog"
 	"cfm/internal/netstat"
+	"cfm/internal/panelfp"
 	"cfm/internal/procstat"
 	"cfm/internal/svcstat"
 	webdet "cfm/internal/webdetector"
@@ -228,6 +229,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/services", handleSystemServices)
 	m.HandleFunc("/api/v1/system/ip-forensics", handleSystemIPForensics)
 	m.HandleFunc("/api/v1/system/edge-error-log", handleSystemEdgeErrorLog)
+	m.HandleFunc("/api/v1/system/waf-fp-hunt", handleSystemWAFFPHunt)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
 	m.HandleFunc("/api/v1/system/mail-log", handleSystemMailLog)
 	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
@@ -492,6 +494,71 @@ func handleSystemEdgeErrorLog(w http.ResponseWriter, r *http.Request) {
 		"ok":             true,
 		"schema":         "system.edge_error_log.v1",
 		"result":         res,
+		"available_logs": edgelog.AvailableErrorLogs(),
+	})
+}
+
+// handleSystemWAFFPHunt aggregates the panel LOGONLY burn-in signal from the
+// edge ERROR log (GET /api/v1/system/waf-fp-hunt?lines=N&source=). Read-only,
+// admin-only. Backs the MCP waf_fp_hunt tool: it scans the edge error log for
+// the `[cfm_panel_waf]` would-be WAF actions (Phase 2e) and `[cfm_panel_decision]`
+// would-enforce verdicts (Phase 2d) and returns aggregates that answer "is it
+// safe to turn panel enforcement on?" — separating expected internet-scanner
+// noise from the non-scanner residue (panel_waf.nonscanner_would_block) and any
+// bridge ip-block (panel_decision.ip_block_count). Host-wide (all panel vhosts
+// share one error log), so admin-only by construction. Bounded like the sibling
+// edge-error-log read (tail window + timeout); the collected panel-marker lines
+// are capped so a huge window can't blow memory.
+func handleSystemWAFFPHunt(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	lines := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("lines")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			lines = n
+		}
+	}
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+
+	// Collect the panel-marker lines (bounded), then aggregate. Each marker line
+	// is short (~300 B); the cap keeps worst-case memory small even on a 200k
+	// tail window that is mostly panel traffic.
+	const maxCollect = 50000
+	collected := make([]string, 0, 1024)
+	truncated := false
+	logFile, scanned, err := edgelog.ScanError(r.Context(),
+		[]string{"[cfm_panel_waf]", "[cfm_panel_decision]"}, source, lines,
+		func(line string) {
+			if len(collected) < maxCollect {
+				collected = append(collected, line)
+			} else {
+				truncated = true
+			}
+		})
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": false, "error": err.Error(), "available_logs": edgelog.AvailableErrorLogs(),
+		})
+		return
+	}
+
+	summary := panelfp.Summarize(collected)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":             true,
+		"schema":         "system.waf_fp_hunt.v1",
+		"log_file":       logFile,
+		"lines_scanned":  scanned,
+		"collected":      len(collected),
+		"truncated":      truncated,
+		"summary":        summary,
 		"available_logs": edgelog.AvailableErrorLogs(),
 	})
 }
