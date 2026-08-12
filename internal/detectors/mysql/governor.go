@@ -213,6 +213,13 @@ type killEntry struct {
 	db string
 }
 
+// IsExemptUser reports whether a MySQL user is a cPanel/DA/system internal that
+// the governor never kills — and, by the same token, is not a real hosting
+// tenant. Exported so other read-only surfaces (e.g. the db_web_pressure
+// correlation) filter the same authoritative set instead of keeping a
+// divergent copy (CLAUDE.md §5).
+func IsExemptUser(user string) bool { return alwaysExemptUsers[user] }
+
 // alwaysExemptUsers are never killed regardless of rules — cPanel/DA/system internals.
 var alwaysExemptUsers = map[string]bool{
 	"root":              true,
