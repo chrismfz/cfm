@@ -109,6 +109,17 @@ back-filled here — see the git/PR history for that period.
   review step is codified as non-optional for any change with runtime behaviour.
 
 ### Fixed
+- **`cfm lve` LIMIT column now renders the CPU cap exactly, and the throttle
+  glyph no longer misaligns the table.** The cap was formatted with `%.2g`
+  (2 significant digits), so a `15.5`-core cap printed as `16c` and a `100`-core
+  cap as `1e+02c`; it now uses exact minimal-digit formatting (`15.5c` / `100c`)
+  via a shared `lvestat.LimitCores` helper (killing the duplicated `10000` unit
+  literal), and the web-UI Health table matches. The 🟡/🔴 throttle flag (two
+  terminal cells wide, but tabwriter pads by rune count) moved to its own
+  trailing `FLAG` column so it can't shift the columns to its right. Also: `cfm
+  lve --json` now reflects a non-2xx status in its exit code, and an unknown
+  argument/typo is an error instead of being silently ignored. (Retro-review of
+  the merged LVE CLI PR.)
 - **`db_web_pressure` no longer false-flags a tenant when the MySQL user's case
   differs from the userdomains owner.** The correlation joined the DB side (account
   derived from the DB user, case-preserved) against the web side (owner from the

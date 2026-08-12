@@ -43,19 +43,27 @@ func RunCLI(baseURL string, args []string) error {
 		switch {
 		case a == "--json":
 			rawJSON = true
-		case a == "top" && i+1 < len(args):
-			if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
-				top = n
+		case a == "top":
+			if i+1 >= len(args) {
+				return fmt.Errorf("lve: `top` needs a number, e.g. `cfm lve top 50`")
 			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil || n <= 0 {
+				return fmt.Errorf("lve: `top` needs a positive number, got %q", args[i+1])
+			}
+			top = n
 			i++
 		case a == "help" || a == "-h" || a == "--help":
 			printLVEHelp()
 			return nil
 		default:
-			// A bare number after no keyword is also accepted as the top-N.
-			if n, err := strconv.Atoi(a); err == nil && n > 0 {
-				top = n
+			// A bare positive number is shorthand for the top-N; anything else is
+			// a typo we surface rather than silently ignore.
+			n, err := strconv.Atoi(a)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("lve: unknown argument %q (see `cfm lve help`)", a)
 			}
+			top = n
 		}
 	}
 
@@ -74,6 +82,11 @@ func RunCLI(baseURL string, args []string) error {
 		}
 		b, _ := json.MarshalIndent(raw, "", "  ")
 		fmt.Println(string(b))
+		// Reflect a non-2xx (e.g. 403 forbidden) in the exit status even though we
+		// printed the body, matching the table path's error handling.
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("lve: HTTP %d", resp.StatusCode)
+		}
 		return nil
 	}
 
@@ -105,37 +118,51 @@ func RunCLI(baseURL string, args []string) error {
 		return nil
 	}
 
+	// FLAG is the LAST column on purpose: the 🟡/🔴 glyphs render two terminal
+	// cells wide but tabwriter pads by rune count, so keeping them trailing means
+	// they can't shift the alignment of any column to their right.
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "RESELLER\tUID\tCORES\t%OF_LIMIT\tLIMIT\tNCPU\tEP\tNPROC")
+	fmt.Fprintln(w, "RESELLER\tUID\tCORES\t%OF_LIMIT\tLIMIT\tNCPU\tEP\tNPROC\tFLAG")
 	for _, s := range r.Top {
-		fmt.Fprintf(w, "%d\t%d\t%.2f\t%s\t%s\t%d\t%d\t%d\n",
-			s.Reseller, s.UID, s.Cores, pctOfLimit(s), limitCPU(s.LimitCPU), s.NumCPU, s.EP, s.NProc)
+		fmt.Fprintf(w, "%d\t%d\t%.2f\t%s\t%s\t%d\t%d\t%d\t%s\n",
+			s.Reseller, s.UID, s.Cores, pctOfLimit(s), limitCPU(s.LimitCPU), s.NumCPU, s.EP, s.NProc, flagStr(s))
 	}
 	return w.Flush()
 }
 
-// pctOfLimit formats the %-of-limit with a throttle flag. lCPU==0 means the
-// tenant is unlimited, so no percentage is meaningful.
+// pctOfLimit formats the %-of-limit (ASCII only — the throttle glyph is a
+// separate trailing column). lCPU==0 means unlimited, so no percentage applies.
 func pctOfLimit(s lvestat.CPUSample) string {
 	if s.LimitCPU <= 0 {
 		return "-"
 	}
-	flag := ""
-	switch {
-	case s.PctOfLimit >= 90:
-		flag = " 🔴"
-	case s.PctOfLimit >= 70:
-		flag = " 🟡"
-	}
-	return fmt.Sprintf("%.0f%%%s", s.PctOfLimit, flag)
+	return fmt.Sprintf("%.0f%%", s.PctOfLimit)
 }
 
-// limitCPU renders the lCPU cap as cores (10000 units = 1 core); 0 = unlimited.
+// flagStr is the throttle-severity glyph (or empty), rendered in its own
+// trailing column so its display width never misaligns the table.
+func flagStr(s lvestat.CPUSample) string {
+	if s.LimitCPU <= 0 {
+		return ""
+	}
+	switch {
+	case s.PctOfLimit >= 90:
+		return "🔴"
+	case s.PctOfLimit >= 70:
+		return "🟡"
+	}
+	return ""
+}
+
+// limitCPU renders the lCPU cap as cores (10000 units = 1 core; 0 = unlimited),
+// with exact minimal-digit formatting so a two-digit fractional cap isn't
+// rounded and a large cap isn't shown in scientific notation (and it matches the
+// web UI's rendering of the same value).
 func limitCPU(l int64) string {
 	if l <= 0 {
 		return "∞"
 	}
-	return fmt.Sprintf("%.2gc", float64(l)/10000.0)
+	return strconv.FormatFloat(lvestat.LimitCores(l), 'f', -1, 64) + "c"
 }
 
 func printLVEHelp() {
@@ -146,8 +173,8 @@ func printLVEHelp() {
 	fmt.Println("  cfm lve --json         # raw JSON passthrough")
 	fmt.Println()
 	fmt.Println("Columns: CORES = CPU cores consumed over the last sample interval;")
-	fmt.Println("  %OF_LIMIT = cores as a share of the tenant's lCPU cap (100% = throttling,")
-	fmt.Println("  🟡≥70% 🔴≥90%); LIMIT = lCPU cap in cores (∞ = unlimited).")
+	fmt.Println("  %OF_LIMIT = cores as a share of the tenant's lCPU cap (100% = throttling);")
+	fmt.Println("  LIMIT = lCPU cap in cores (∞ = unlimited); FLAG = 🟡≥70% 🔴≥90%.")
 	fmt.Println()
 	fmt.Println("CloudLinux only: on a non-CloudLinux host /proc/lve/list is absent and this")
 	fmt.Println("reports nothing.")
