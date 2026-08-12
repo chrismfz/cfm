@@ -187,11 +187,11 @@ func (g *Governor) handleCPU(w http.ResponseWriter, r *http.Request) {
 	deltas := g.PerfDeltas()
 	writeGovernorJSON(w, http.StatusOK, map[string]any{
 		"ts":              time.Now(),
-		"perf_schema_ok":  g.perfSchemaOK,
-		"perf_has_cpu":    g.perfHasCPU,
-		"perf_cpu_active": g.perfCPUActive,
-		"userstat_ok":     g.userstatsOK,
-		"userstat_off":    g.userstatsOff,
+		"perf_schema_ok":  g.perfSchemaOK.Load(),
+		"perf_has_cpu":    g.perfHasCPU.Load(),
+		"perf_cpu_active": g.perfCPUActive.Load(),
+		"userstat_ok":     g.userstatsOK.Load(),
+		"userstat_off":    g.userstatsOff.Load(),
 		"users":           deltas,
 	})
 }
