@@ -189,10 +189,11 @@ end
 --     upload/rsync/websocket streams are never buffered. The api/sso/acctxfer/
 --     /cgi/transfer//cgi/live_tail_log/websocket allowlist (is_panel_api_or_sso)
 --     is already hard-skipped upstream, so those paths never reach this probe.
---   * Self/loopback traffic is skipped (panel_is_self_ip) to keep the burn-in
---     log free of the box's own monitoring. This is loopback/link-local only —
---     full self-IP-set + IGNORE_NETS parity (as the web edge's is_self_origin
---     does) is deferred to the enforcement PR, where it actually gates blocking.
+--   * Self / self-IP / IGNORE_NETS traffic is skipped (panel_is_self) using the
+--     SAME cfm_selfip.is_self_origin the web edge uses — so an operator-ignored
+--     network (cfm.cfg [global] IGNORE_IPS/IGNORE_NETS) and the box's own IPs
+--     bypass the panel WAF exactly as they bypass the web WAF, no drift. Falls
+--     back to a loopback-only check only if cfm_selfip is missing on upgrade lag.
 --   * Per-(ip,rule) log throttle so a noisy scanner can't flood the error log.
 --
 -- Everything is pcall'd + fail-open; the kill switch CFM_PANEL_WAF=0 (or a
@@ -208,9 +209,15 @@ do
     end
 end
 
--- Loopback / link-local only (mirrors cfm.lua is_loopback_or_linklocal). Kept
--- minimal on purpose — see the note above about deferred full self-IP parity.
-local function panel_is_self_ip(ip)
+-- Shared self-origin predicate (self-IP set + [global] IGNORE_IPS/IGNORE_NETS +
+-- loopback), identical to the web edge — single source, no drift (§5). pcall'd
+-- so an upgrade-lag copy without cfm_selfip degrades to loopback-only rather
+-- than erroring the panel path.
+local ok_selfip, selfip = pcall(require, "cfm_selfip")
+if not ok_selfip then selfip = nil end
+
+-- Fallback loopback/link-local check for when cfm_selfip is absent (upgrade lag).
+local function panel_is_loopback(ip)
     local s = tostring(ip or ""):lower()
     if s == "" then return false end
     if s:sub(1, 1) == "[" and s:sub(-1) == "]" then s = s:sub(2, -2) end
@@ -221,12 +228,23 @@ local function panel_is_self_ip(ip)
     return false
 end
 
+-- panel_is_self prefers the shared cfm_selfip.is_self_origin (full parity with
+-- the web edge); pcall-guarded, falling back to loopback-only if the module is
+-- absent or errors, so a self-check hiccup can never break the probe.
+local function panel_is_self(ip)
+    if selfip and selfip.is_self_origin then
+        local ok, res = pcall(selfip.is_self_origin, ip)
+        if ok then return res end
+    end
+    return panel_is_loopback(ip)
+end
+
 -- panel_waf_probe runs the LOGONLY WAF and records a hit. Returns nothing and
 -- changes no control flow. A cfm_waf error is swallowed (fail-open, no line).
 local function panel_waf_probe(ip, host, uri, args, method, ua, scope)
     if not panel_waf then return end
     if not panel_waf.enabled() then return end
-    if panel_is_self_ip(ip) then return end
+    if panel_is_self(ip) then return end
 
     local okc, hit, reason, _ttl, action, _hits, rule_id = pcall(function()
         return panel_waf.check({
