@@ -75,10 +75,10 @@ As-built + roadmap: **`MCP.md`**. Read-only telemetry across the fleet
   high DB pressure" tenants.
 - **CPU thermal/throttle signal** — [next]. Turn "high load" into a root-cause
   flag (thermal/throttle vs genuine demand).
-- **LVE per-tenant CPU signal (CloudLinux)** — [in flight]. Data plane landed:
+- **LVE per-tenant CPU signal (CloudLinux)** — DONE. Data plane:
   `internal/lvestat` (pure parser + cores/%-of-limit, unit calibrated to ns) →
   `internal/lvecpu` collector → `/api/v1/system/lve-cpu` + MCP `lve_cpu`.
-  Remaining: CLI + cfm-admin web UI tab (presentation).
+  Presentation: `cfm lve` CLI + the Health-page "LVE per-tenant CPU" table.
 - **Guard governor perf/userstat capability flags** — DONE (data race fixed;
   atomic.Bool + -race regression test).
 

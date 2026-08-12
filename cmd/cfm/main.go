@@ -343,6 +343,14 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "lve", "lvetop", "lve-top", "lve-cpu":
+		addr := apiBaseURL()
+		clihttp.SetToken(apiAuthToken())
+		if err := lvecpu.RunCLI(addr, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "lve error:", err)
+			os.Exit(1)
+		}
+
 	case "clam", "clamd", "clamav":
 		// `cfm clam override|sigignore|infections …` hit the webdetector API,
 		// so they need the API base URL + auth token, unlike the clamd-socket
@@ -435,6 +443,10 @@ Usage:
   cfm health json                 -- machine-readable local snapshot
   cfm health watch --interval=2s  -- periodic one-line local snapshot output
   cfm health live                 -- TTY dashboard; non-TTY auto-falls back to watch
+
+  cfm lve                         -- CloudLinux per-tenant CPU ranking (hottest first); non-CloudLinux hosts show nothing
+  cfm lve top <N>                 -- top N tenants by CPU
+  cfm lve --json                  -- raw JSON passthrough
 
   cfm kernsec                     -- interactive TUI for kernel hardening audit (TTY); auto-falls back to text
   cfm kernsec live                -- force the TUI
