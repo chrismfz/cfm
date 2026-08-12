@@ -71,6 +71,21 @@
         <div id="tempChart" class="spark"></div>
       </section>
 
+      <section class="card wide" id="lveCard" style="display:none">
+        <h2>
+          LVE per-tenant CPU
+          <span class="top-hint" id="lveMeta">CloudLinux — CPU cores consumed per tenant over the last sample interval, hottest first</span>
+        </h2>
+        <div class="table-wrap stable-table-wrap wide-table-wrap">
+          <table>
+            <thead>
+              <tr><th>Reseller</th><th>UID</th><th>Cores</th><th>% of limit</th><th>Limit</th><th>nCPU</th><th>EP</th><th>Procs</th></tr>
+            </thead>
+            <tbody id="lveBody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="card wide">
         <h2>
           Anomaly feed

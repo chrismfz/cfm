@@ -70,6 +70,17 @@ back-filled here — see the git/PR history for that period.
   nanoseconds against live CL8/CL9. `available:false` on non-CloudLinux hosts
   (the collector never starts); `ready:false` briefly at startup until two
   samples exist. Daemon-only; the CLI / web UI surface follows in a later change.
+- **`cfm lve` CLI + Health-page LVE table — the presentation surface for the
+  per-tenant CPU signal above.** `cfm lve` (aliases `lvetop`/`lve-top`/`lve-cpu`)
+  prints the hottest CloudLinux tenants — CPU cores over the last sample
+  interval, % of the tenant's lCPU cap (🟡≥70% 🔴≥90%), the cap in cores, and
+  EP/NPROC — with `top <N>` and `--json`. On a non-CloudLinux host it prints a
+  one-line "nothing to show"; while the collector warms up it says so. The
+  cfm-admin **Health** page gains an "LVE per-tenant CPU" table fed by the same
+  `/api/v1/system/lve-cpu` endpoint (refreshes on the page's existing cycle); the
+  card hides itself entirely on non-CloudLinux hosts (`available:false`) and shows
+  a warming-up note until the first delta is ready. No new endpoint, no new
+  auth surface — both are read-only, admin-only views over the existing collector.
 - **MCP `waf_fp_hunt` — panel-logonly burn-in analysis ("safe to enforce?").**
   New read-only, admin-only MCP tool + `GET /api/v1/system/waf-fp-hunt`: it scans
   the edge ERROR log for the panel LOGONLY markers (`[cfm_panel_waf]` would-be WAF

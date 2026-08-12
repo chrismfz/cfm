@@ -31,6 +31,9 @@
     netChart:      document.getElementById('netChart'),
     tempCard:      document.getElementById('tempCard'),
     tempChart:     document.getElementById('tempChart'),
+    lveCard:       document.getElementById('lveCard'),
+    lveMeta:       document.getElementById('lveMeta'),
+    lveBody:       document.getElementById('lveBody'),
     anomaliesBody: document.getElementById('anomaliesBody'),
   };
 
@@ -167,14 +170,72 @@
     el.anomaliesBody.innerHTML = rows.join('');
   }
 
+  // ── LVE per-tenant CPU (CloudLinux) ─────────────────────────────────────────
+
+  // limitCPU renders the lCPU cap as cores (10000 units = 1 core); 0 = unlimited.
+  function fmtLimit(l) {
+    if (!(l > 0)) return '∞';
+    return `${(l / 10000).toFixed(2)}c`;
+  }
+
+  function fmtPctOfLimit(s) {
+    if (!(s.limit_cpu > 0)) return '<span class="muted">-</span>';
+    const pct = Number(s.pct_of_limit) || 0;
+    let cls = '';
+    if (pct >= 90) cls = 'danger';
+    else if (pct >= 70) cls = 'warn';
+    const txt = `${pct.toFixed(0)}%`;
+    return cls ? `<span class="pill ${cls}">${txt}</span>` : txt;
+  }
+
+  // renderLVE fills the LVE card from the /system/lve-cpu payload, hiding the
+  // whole card when the host isn't CloudLinux (available:false). While the
+  // collector warms up (ready:false) it shows a one-line note instead of a
+  // stale/empty table.
+  function renderLVE(data) {
+    if (!el.lveCard) return;
+    if (!data || data.available !== true) {
+      el.lveCard.style.display = 'none';
+      return;
+    }
+    el.lveCard.style.display = '';
+    if (data.ready !== true) {
+      if (el.lveMeta) el.lveMeta.textContent = `CloudLinux — collector warming up (first delta needs two samples, ~${data.interval_sec || 15}s)`;
+      if (el.lveBody) el.lveBody.innerHTML = '<tr><td colspan="8" class="muted">warming up…</td></tr>';
+      return;
+    }
+    const rows = Array.isArray(data.top) ? data.top : [];
+    if (el.lveMeta) {
+      const when = data.sampled_at ? new Date(data.sampled_at) : null;
+      const ts = when && !Number.isNaN(when.getTime()) ? when.toLocaleTimeString() : '';
+      el.lveMeta.textContent = `CloudLinux — ${data.tenants ?? rows.length} tenants · interval ${data.interval_sec || 15}s${ts ? ` · ${ts}` : ''} · CPU cores over last interval, hottest first`;
+    }
+    if (!el.lveBody) return;
+    if (!rows.length) {
+      el.lveBody.innerHTML = '<tr><td colspan="8" class="muted">no tenants reported</td></tr>';
+      return;
+    }
+    el.lveBody.innerHTML = rows.map((s) => `<tr>
+      <td>${escapeHTML(String(s.reseller ?? 0))}</td>
+      <td>${escapeHTML(String(s.uid ?? 0))}</td>
+      <td>${(Number(s.cores) || 0).toFixed(2)}</td>
+      <td>${fmtPctOfLimit(s)}</td>
+      <td>${escapeHTML(fmtLimit(Number(s.limit_cpu) || 0))}</td>
+      <td>${escapeHTML(String(s.num_cpu ?? 0))}</td>
+      <td>${escapeHTML(String(s.ep ?? 0))}</td>
+      <td>${escapeHTML(String(s.nproc ?? 0))}</td>
+    </tr>`).join('');
+  }
+
   // ── data loading ──────────────────────────────────────────────────────────
 
   async function loadAll() {
     const step = WINDOW_STEPS[st.window] || '1m';
     try {
-      const [ts, an] = await Promise.all([
+      const [ts, an, lve] = await Promise.all([
         api(`/v1/health/timeseries?window=${st.window}&step=${step}`),
         api(`/v1/health/anomalies?since=${st.window}`).catch(() => null),
+        api('/v1/system/lve-cpu?top=50').catch(() => null),
       ]);
       st.points = Array.isArray(ts?.points) ? ts.points : [];
       st.nodeID = ts?.node_id || '';
@@ -186,6 +247,7 @@
       }
       renderCharts();
       renderAnomalies(Array.isArray(an?.anomalies) ? an.anomalies : []);
+      renderLVE(lve);
     } catch (err) {
       console.error('[health] load failed', err);
       flashMsg(`load failed: ${err.message || err}`, 'danger');
