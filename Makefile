@@ -385,8 +385,35 @@ GH := gh
 changelog:
 	@scripts/stamp-changelog.sh $(REL_DATE)
 
+# release flow: (1) stamp CHANGELOG for today's UTC date; (2) commit & push
+# ONLY CHANGELOG.md — never the whole tree, since a release host usually has
+# built binaries / compiled BPF objects sitting in the working dir that must
+# not be committed; (3) create + publish a tag-only GitHub release (title +
+# CHANGELOG notes, NO .deb/.rpm assets; packages ship via `make sync`). Steps 2 and 3
+# are each ONE self-contained shell segment — do NOT add a bare `#` comment line
+# inside them: a comment without a trailing backslash ends the segment, so the
+# shell vars (DEB_FILE/RPM_FILE/REPO/NOTES) set above it silently vanish and the rest
+# runs without `set -e`. (That exact trap masked a broken gh-release publish.)
 release: bpf deb rpm
 	@scripts/stamp-changelog.sh $(REL_DATE)
+	@set -uo pipefail; \
+	if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$$(git status --porcelain -- CHANGELOG.md)" ]; then \
+	  echo "📝 Committing CHANGELOG.md (only) for $(REL_DATE)..."; \
+	  if git commit -q -m "changelog: stamp $(REL_DATE) release" -- CHANGELOG.md; then \
+	    branch="$$(git rev-parse --abbrev-ref HEAD)"; \
+	    if [ "$$branch" = "HEAD" ]; then \
+	      echo "⚠️  detached HEAD — CHANGELOG committed locally, not pushed."; \
+	    elif git push origin "HEAD:$$branch"; then \
+	      echo "✅ CHANGELOG committed & pushed to $$branch."; \
+	    else \
+	      echo "⚠️  push failed — commit is local; run: git push origin HEAD:$$branch"; \
+	    fi; \
+	  else \
+	    echo "⚠️  git commit failed — CHANGELOG stamped but not committed."; \
+	  fi; \
+	else \
+	  echo "📝 CHANGELOG.md unchanged since HEAD — nothing to commit."; \
+	fi
 	@set -euo pipefail; \
 	echo "🔐 Checking GitHub auth..."; \
 	$(GH) auth status -h github.com >/dev/null || { echo "Run: gh auth login"; exit 1; }; \
@@ -397,24 +424,18 @@ release: bpf deb rpm
 	echo "📦 DEB=$$DEB_FILE"; echo "📦 RPM=$$RPM_FILE"; \
 	sha256sum "$$DEB_FILE" "$$RPM_FILE" > checksums.txt; \
 	REPO="chrismfz/cfm"; \
-	# 1) create (no assets). If it exists (422), continue.
+	NOTES="$$(scripts/release-notes.sh $(REL_DATE))"; \
 	echo "🚀 Ensuring release $(TAG) exists..."; \
 	if ! $(GH) release view "$(TAG)" --repo "$$REPO" >/dev/null 2>&1; then \
 	  $(GH) release create "$(TAG)" \
 	    --repo "$$REPO" \
 	    --title "cfm $(TAG)" \
-	    --notes "Automated release" \
+	    --notes "$$NOTES" \
 	    --draft ; \
 	  echo "✅ Created draft release $(TAG)."; \
 	else \
 	  echo "↻ Release $(TAG) already exists."; \
 	fi; \
-	# 2) upload assets (clobber)
-	echo "⬆️  Uploading: $$DEB_FILE $$RPM_FILE"; \
-	$(GH) release upload "$(TAG)" "$$DEB_FILE" "$$RPM_FILE" checksums.txt \
-	  --repo "$$REPO" --clobber; \
-	echo "✅ Assets uploaded."; \
-	# 3) publish (optional – only if you want non-draft)
-	echo "📣 Publishing release..."; \
+	echo "📣 Publishing release (tag + CHANGELOG notes; no .deb/.rpm assets — packages ship via 'make sync')..."; \
 	$(GH) release edit "$(TAG)" --repo "$$REPO" --draft=false ; \
 	echo "✅ Release $(TAG) published."

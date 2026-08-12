@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **`make release` now auto-commits & pushes `CHANGELOG.md` (only).** After
+  stamping the date, `release` commits **just** `CHANGELOG.md` (path-scoped, so
+  a release host's built binaries / compiled BPF objects in the working tree are
+  never swept in) and pushes the current branch. No more "stamped but forgot to
+  commit" — a failed commit/push warns but never aborts an otherwise-good
+  release. Standalone `make changelog` still only edits the file.
+- **CI `changelog` guard (`scripts/tests/check_changelog_entry.sh`).** New job
+  in `security.yml`: (1) asserts `CHANGELOG.md` keeps exactly one, correctly
+  placed `## [Unreleased]` heading (the invariant the date-stamper needs — a
+  renamed/removed one silently stops `make release` from stamping); (2) on PRs,
+  fails when runtime code changed but no `CHANGELOG.md` entry was added. Escape
+  hatches for the rare no-op-to-operators change: `[skip changelog]` in the PR
+  title/body, or a `no-changelog` label. Docs/tests/CI-only PRs are exempt.
 - **MCP logs group — `cfm_log_tail` + `journal_tail`.** Two read-only,
   admin-only MCP tools (+ `GET /api/v1/system/cfm-log` and `/api/v1/system/journal`),
   backed by the new `internal/cfmlog` bounded reader. `cfm_log_tail` tails CFM's
@@ -42,6 +55,13 @@ back-filled here — see the git/PR history for that period.
   `http3_status` (the HTTP/3/QUIC opt-in vhost list). No new endpoints.
 
 ### Changed
+- **GitHub releases are now tag + CHANGELOG notes only — no `.deb`/`.rpm`
+  assets.** `make release` publishes a lightweight release (title + that day's
+  CHANGELOG section as the notes, via `scripts/release-notes.sh`) and no longer
+  attaches packages. Binaries are distributed via `make sync` to the apt/yum
+  repo, so the GitHub assets were redundant; dropping them keeps GitHub storage
+  flat across the many date-based releases. (`checksums.txt` is still generated
+  for `make sync`.)
 - **Edge unification: Phase 2 closed, Phase 3 started.** Panel unification
   (LOGONLY challenge decision + reduced panel WAF + per-scope clearance cookies +
   self-origin parity) has burned in on both engines with a clean false-positive
@@ -86,6 +106,18 @@ back-filled here — see the git/PR history for that period.
   decision can't lock an admin out of WHM/cPanel. `waf_fp_hunt`'s
   `panel_decision.ip_block_count` keeps counting on enforcing nodes (it keys on
   the verdict fields, not the log marker).
+
+### Fixed
+- **`make release` GitHub-release publish was silently broken by shell
+  segmentation.** Three inline `# 1)/2)/3)` comment lines inside the release
+  recipe's gh-block each ended the shell segment (a `#` comment without a
+  trailing `\`), so `$REPO`/`$DEB_FILE`/`$RPM_FILE` set earlier were **empty** in
+  the later segments, which also ran **without** `set -e`: `gh … --repo ""` and
+  `gh release upload … "" "" …` with empty asset paths, each failure masked by a
+  following `echo`, so `make release` printed "✅ Release published" even when
+  nothing was created/uploaded. Folded the whole gh-block into one
+  `set -euo pipefail` shell so the vars persist and real `gh` failures now abort
+  the release instead of being swallowed.
 
 ### Added
 - **MCP `cpu_throttle` — turns "load is high" into a root cause.** New

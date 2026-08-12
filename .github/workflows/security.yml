@@ -48,6 +48,8 @@ jobs:
         run: ./scripts/tests/check_logrotate_coverage.sh
       - name: CHANGELOG date-stamper regression test
         run: ./scripts/tests/stamp_changelog_test.sh
+      - name: Release-notes extractor regression test
+        run: ./scripts/tests/release_notes_test.sh
       # Lua syntax check + unit tests. luajit was installed above; both
       # targets bail out with a clear message if it ever goes missing.
       - name: Lua syntax check (configs/lua)
@@ -60,3 +62,22 @@ jobs:
         run: go vet ./...
       - run: go build ./...
       - run: go test -race ./...
+
+  # CHANGELOG hygiene — a separate, tiny job (own checkout so it can diff the PR
+  # against its base). Two guards: the CHANGELOG structure stays stampable, and
+  # a PR that changes runtime code doesn't merge with an empty changelog.
+  changelog:
+    name: CHANGELOG hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need the merge-base with the PR base to diff changed files
+      - name: CHANGELOG entry + structure guard
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: ./scripts/tests/check_changelog_entry.sh

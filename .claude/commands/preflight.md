@@ -13,6 +13,8 @@ relevant output and stop (don't keep going past a hard failure).
 6. `./scripts/tests/check_cli_transport.sh`
 7. `./scripts/tests/check_cfm_clearance_require.sh`
 8. `./scripts/tests/check_bypass_list.sh`
+9. `./scripts/tests/check_changelog_entry.sh` (CHANGELOG structure; the per-PR
+   "code changed → needs a `[Unreleased]` entry" leg only runs in CI)
 
 If everything passes, say so explicitly. If something fails, summarize what
 broke and the most likely fix. Do not commit or push.
