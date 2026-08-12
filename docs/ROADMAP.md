@@ -18,13 +18,19 @@ review-until-clean → PR → merge → next (many small single-concern PRs).
 Full design + phase log: **`docs/edge-unification-plan.md`**. Retire the legacy
 per-IP challenge-DNAT path; unify web + panel on the edge cookie-clearance model.
 
-- **Phase 2f — cleanup after burn-in** — [next]. Drop the panel loop-breaker,
-  the legacy shared-cookie-name fallback, and the inert `cfm_ok` marker once the
-  per-scope cookie scheme (2a) has burned in.
-- **Phase 3 — burn-in + fleet** — [next]. orion first, one release of burn-in
-  for Phase 1+2, then fleet. Delete `cfm_panel.lua`'s superseded local policy
-  and the deprecated `OPENRESTY_MODE` key.
-- **Phase 4 — panel enforcement graduation** — [track]. **Both** the panel
+- **Phase 2 — DONE** (2026-08-12). Panel unification LOGONLY landed (2a/2b/2d/2e
+  + `cfm_selfip` parity); the last open item, the cPanel-plugin iframe cross-port
+  clearance flow, was verified live (no loop). Burn-in FP gate clean on both
+  engines (see `docs/edge-unification-plan.md` Status).
+- **Phase 3 — burn-in + fleet + dead-code removal** — [in flight]. Burn-in done
+  (orion+titan). `OPENRESTY_MODE` reference key removed (behavioural collapse was
+  already in 1a; runtime deprecation warning kept). **Remaining:** the
+  **cookie-net cleanup** (inert `cfm_ok`, legacy shared-cookie-name fallback, and
+  — with Phase 4 — the panel loop-breaker) as its **own sign-off-gated PR** after
+  a longer burn-in, since it touches the incident clearance path.
+- **Phase 4 — panel enforcement graduation** — [track]. Also owns deleting
+  `cfm_panel.lua`'s superseded local policy (can't remove the live enforcer
+  before the bridge decision enforces). **Both** the panel
   challenge/decision (2d) **and** the panel WAF (2e) graduate from LOGONLY to
   enforce after logging confirms low false-positive rates — each its own opt-in
   PR after its own burn-in. Prereqs: ~~full self-origin parity~~ (DONE — shared

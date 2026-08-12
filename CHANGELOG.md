@@ -17,6 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Edge unification: Phase 2 closed, Phase 3 started.** Panel unification
+  (LOGONLY challenge decision + reduced panel WAF + per-scope clearance cookies +
+  self-origin parity) has burned in on both engines with a clean false-positive
+  gate (`waf_fp_hunt`: zero non-scanner would-blocks, zero bridge IP-bans; the
+  only panel-WAF signal is bare-IP scanner probes → would-challenge), and the
+  cPanel-plugin iframe cross-port clearance flow was verified live with no loop.
+  The former `OPENRESTY_MODE` key is now removed from the reference
+  `detectors.conf` (edge mode has been unconditional since Phase 1a; a stale key
+  in a live config is still ignored with a one-line deprecation warning). The
+  remaining Phase 3 cookie-net cleanup (inert `cfm_ok`, legacy shared-cookie
+  fallback, loop-breaker) is deferred to its own change; panel enforcement stays
+  observe-only until Phase 4. See `docs/edge-unification-plan.md`.
+
 ### Added
 - **MCP `cpu_throttle` — turns "load is high" into a root cause.** New
   read-only, admin-only MCP tool + `GET /api/v1/system/cpu-throttle`, backed by

@@ -1,6 +1,8 @@
 # Edge Unification Plan — one enforcement path, one clearance model
 
-Status: **Phases 0–1 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226) · **Phase 2 in progress** (2a cookie isolation: #1227 · 2b panel tls-fp stamp: #1228 · 2d shared decision module + panel LOGONLY bridge decision: #1229 · 2e panel WAF LOGONLY: this PR) · Owner: operator + assistant
+Status: **Phases 0–2 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226 · 2a cookie isolation: #1227 · 2b panel tls-fp stamp: #1228 · 2d shared decision module + panel LOGONLY bridge decision: #1229 · 2e panel WAF LOGONLY · 2-parity self-origin: #1247-era `cfm_selfip`) · **Phase 3 in progress** (burn-in confirmed on orion+titan; OPENRESTY_MODE reference key removed) · Owner: operator + assistant
+
+**Phase 2 closed 2026-08-12.** The last open Phase-2 item — the cPanel-plugin iframe cross-port clearance flow (WHM :2087 iframing `/cfm-admin` on :443 under the per-scope cookie scheme) — was verified live as a real cPanel user: clearance works across ports with no "Checking your browser" loop. Burn-in FP gate (`waf_fp_hunt`) on both engines: `panel_waf.nonscanner_would_block = 0` and `panel_decision.ip_block_count = 0`; the only panel-WAF signal is rule 602 `WAF_IP_HOST → would_challenge`, essentially all bare-IP scanner probes (Censys/Modat/zgrab/…), no legitimate client would-block. Caveat carried into Phase 4: the sample is scanner-dominated (authenticated panel ops are hostname-based or hard-skipped by `is_panel_api_or_sso`), so "low FP" is not yet a full exercise of the risky surface.
 Date: 2026-08-11 · Origin: the orion challenge-loop incident (PR #1220/#1221/#1222)
 
 ---
@@ -243,10 +245,29 @@ guards. Deploy note: pure package upgrade; no config migration.
   websocket headers, fixed `X-Forwarded-For` literals (no
   `$proxy_add_x_forwarded_for` on panel — client must not seed the chain).
 
-### Phase 3 — burn-in + fleet
+### Phase 3 — burn-in + fleet + dead-code removal
 orion first (it has the MCP tooling), one release of burn-in for Phase 1+2,
-then fleet. After burn-in: delete `cfm_panel.lua`'s superseded local policy and
-the deprecated `OPENRESTY_MODE` key entirely; stamp CHANGELOG accordingly.
+then fleet. **Burn-in done** (orion + titan, evidence in the Status block above).
+
+Dead-code removal, re-scoped after re-reading the code (the original one-liner
+conflated three edits of very different risk):
+
+- **`OPENRESTY_MODE` key** — the behavioural collapse already shipped in Phase 1a
+  (parse-warn-ignore; edge unconditional; `=0` branches gone). Phase 3 just
+  removes the leftover reference-config note — **done**. The runtime deprecation
+  warning (`webdetector_register.go`, logs when a stale live config still sets
+  `=0`) is **kept** on purpose so operators mid-cleanup get nudged.
+- **Cookie-net cleanup** — drop the inert `cfm_ok` marker, the legacy
+  shared-cookie-name fallback, and (only with Phase 4) the panel loop-breaker.
+  These touch the exact clearance path behind the original incident, and the
+  burn-in was clean *because these nets are in place*, so this is its **own**
+  sign-off-gated PR after a longer burn-in — not bundled. Worst case of dropping
+  the legacy-name fallback alone is a one-time re-challenge (not a lockout).
+- **`cfm_panel.lua`'s superseded local policy** — this is **Phase-4-coupled, not
+  Phase 3**: the panel's local challenge policy is still the *live* enforcement;
+  the shared bridge decision (2d) is still LOGONLY. It can only be deleted once
+  the bridge decision *enforces* (Phase 4). Corrected here to avoid deleting the
+  thing that is currently enforcing.
 
 ### Phase 4 — panel enforcement graduation (REMINDER — do not lose this)
 Everything panel-side today is deliberately **observe-only**: the panel WAF
