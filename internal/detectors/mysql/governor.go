@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cfm/internal/logging"
@@ -163,10 +164,14 @@ type Governor struct {
 	historySamples []HistorySample
 	historyMu      sync.Mutex
 
-	// performance_schema CPU / query tracking
-	perfSchemaOK  bool                  // set once by probePerfSchema at startup
-	perfHasCPU    bool                  // true on MySQL 8+; false on MariaDB (no SUM_CPU_TIME)
-	perfCPUActive bool                  // true once we see at least one non-zero SUM_CPU_TIME delta
+	// performance_schema CPU / query tracking.
+	// The three capability bools are written by the poll goroutine
+	// (probePerfSchema/fetchPerfDeltas) and read concurrently by the HTTP
+	// handler handleCPU, so they are atomic.Bool (data-race fix). perfRetryAt
+	// stays a plain time.Time — it is only ever touched on the poll goroutine.
+	perfSchemaOK  atomic.Bool           // set once by probePerfSchema at startup
+	perfHasCPU    atomic.Bool           // true on MySQL 8+; false on MariaDB (no SUM_CPU_TIME)
+	perfCPUActive atomic.Bool           // true once we see at least one non-zero SUM_CPU_TIME delta
 	perfRetryAt   time.Time             // next time to re-probe when perfSchemaOK is false
 	lastPerfRaw   map[string]perfRawRow // cumulative counters from last poll
 	perfDeltas    []UserPerfDelta       // most recent per-poll deltas
@@ -177,8 +182,10 @@ type Governor struct {
 	// MariaDB userstat — information_schema.USER_STATISTICS
 	// Provides real CPU_TIME on MariaDB where SUM_CPU_TIME is absent.
 	// userstatsOff=true means MariaDB was detected but userstat=OFF (show hint).
-	userstatsOK     bool
-	userstatsOff    bool
+	// atomic.Bool for the same poll-writer / handleCPU-reader race as the perf
+	// flags above; userstatRetryAt stays plain (poll-goroutine only).
+	userstatsOK     atomic.Bool
+	userstatsOff    atomic.Bool
 	userstatRetryAt time.Time // next time to re-check @@userstat when it's off (runtime SET GLOBAL self-heal)
 	lastUserstatRaw map[string]userstatRawRow
 

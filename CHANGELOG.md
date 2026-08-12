@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **Data race on the MySQL governor's perf_schema / userstat capability flags.**
+  `perfSchemaOK`, `perfHasCPU`, `perfCPUActive`, `userstatsOK` and `userstatsOff`
+  are written by the governor poll goroutine (`probePerfSchema`/`fetchPerfDeltas`)
+  and read concurrently, without synchronization, by the HTTP handler serving
+  `GET /api/v1/mysql/cpu` (`handleCPU`) — a real data race (`go test -race`
+  territory) that could surface a torn/stale flag in the `mysql/cpu` response
+  while the daemon (re)probes. They are now `atomic.Bool` (Store/Load), which
+  keeps the poll loop lock-free and takes no lock across DB I/O. The three
+  poll-goroutine-only `time.Time` retry fields are left as-is (never read
+  cross-goroutine). Adds a `-race` regression test driving `handleCPU`
+  concurrently with the flag writer.
 - **`cfm_metrics.waf_events_1h` in the health snapshot is now the real last-hour
   WAF count, reconciled with `security_overview`'s `waf_last_hour`.** It was
   never populated by any production path (the only writer, `ApplyCounterSnapshot`,

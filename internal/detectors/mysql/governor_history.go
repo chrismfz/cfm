@@ -221,11 +221,11 @@ type UserPerfDelta struct {
 //   - @@userstat is MariaDB-only; the column simply does not exist on MySQL.
 func (g *Governor) probePerfSchema(ctx context.Context) {
 	// Reset all flags so a re-probe starts from a clean state.
-	g.perfSchemaOK = false
-	g.perfHasCPU = false
-	g.perfCPUActive = false
-	g.userstatsOK = false
-	g.userstatsOff = false
+	g.perfSchemaOK.Store(false)
+	g.perfHasCPU.Store(false)
+	g.perfCPUActive.Store(false)
+	g.userstatsOK.Store(false)
+	g.userstatsOff.Store(false)
 
 	// ---- Step 1: is performance_schema ON? --------------------------------
 	var psInt sql.NullInt64
@@ -262,7 +262,7 @@ func (g *Governor) probePerfSchema(ctx context.Context) {
 
 	// performance_schema is usable from here — query count + latency work on
 	// both MySQL and MariaDB regardless of the CPU path chosen below.
-	g.perfSchemaOK = true
+	g.perfSchemaOK.Store(true)
 
 	// ---- Step 3: does SUM_CPU_TIME exist? → MySQL 8+ (Path A) ------------
 	var cpuColExists int
@@ -280,7 +280,7 @@ func (g *Governor) probePerfSchema(ctx context.Context) {
 		// Path A: MySQL 8+ — SUM_CPU_TIME available.
 		// perfCPUActive will flip to true the first time we see a non-zero delta
 		// (instruments may still need enabling; we report that in the CLI hint).
-		g.perfHasCPU = true
+		g.perfHasCPU.Store(true)
 		logging.Logf("[mysql/governor] Path A (MySQL 8+): performance_schema CPU + query tracking enabled (flavor: %s)", g.flavor)
 		return
 	}
@@ -304,7 +304,7 @@ func (g *Governor) probePerfSchema(ctx context.Context) {
 	// Variable exists — this is MariaDB.
 	if userstatValue != "ON" && userstatValue != "1" && userstatValue != "YES" {
 		// Path C with hint: userstat is there but disabled.
-		g.userstatsOff = true
+		g.userstatsOff.Store(true)
 		logging.Logf("[mysql/governor] Path C (MariaDB, userstat=OFF): query count + latency only — enable userstat for CPU tracking (flavor: %s)", g.flavor)
 		return
 	}
@@ -319,7 +319,7 @@ func (g *Governor) probePerfSchema(ctx context.Context) {
 	}
 
 	// Path B: MariaDB with userstat=ON.
-	g.userstatsOK = true
+	g.userstatsOK.Store(true)
 	logging.Logf("[mysql/governor] Path B (MariaDB + userstat): CPU + query + rows tracking enabled (flavor: %s)", g.flavor)
 }
 
@@ -347,13 +347,13 @@ func (g *Governor) probeUserstatEnabled(ctx context.Context) (exists, enabled bo
 const userstatRetryEvery = 60 * time.Second
 
 func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
-	if !g.perfSchemaOK {
+	if !g.perfSchemaOK.Load() {
 		if time.Now().Before(g.perfRetryAt) {
 			return nil
 		}
 		g.perfRetryAt = time.Now().Add(5 * time.Minute)
 		g.probePerfSchema(ctx)
-		if !g.perfSchemaOK {
+		if !g.perfSchemaOK.Load() {
 			return nil
 		}
 		g.lastPerfRaw = nil
@@ -365,14 +365,14 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 	// a `SET GLOBAL userstat=ON` issued after cfm started is otherwise invisible
 	// until a restart. When we're on MariaDB with userstat currently off, re-check
 	// @@userstat cheaply on a cadence and upgrade to Path B (CPU/busy/rows) live.
-	if g.userstatsOff && !g.userstatsOK && !time.Now().Before(g.userstatRetryAt) {
+	if g.userstatsOff.Load() && !g.userstatsOK.Load() && !time.Now().Before(g.userstatRetryAt) {
 		g.userstatRetryAt = time.Now().Add(userstatRetryEvery)
 		if exists, enabled := g.probeUserstatEnabled(ctx); exists && enabled {
 			var dummy int
 			if err := g.db.QueryRowContext(ctx,
 				"SELECT COUNT(*) FROM information_schema.USER_STATISTICS").Scan(&dummy); err == nil {
-				g.userstatsOK = true
-				g.userstatsOff = false
+				g.userstatsOK.Store(true)
+				g.userstatsOff.Store(false)
 				g.lastUserstatRaw = nil // reset baseline so the first delta isn't a false spike
 				logging.Logf("[mysql/governor] userstat enabled at runtime — upgrading to Path B (CPU/busy/rows tracking)")
 			}
@@ -381,7 +381,7 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 
 	// ---- Fetch perf_schema counters (query count + latency, all paths) ----
 	var perfQuery string
-	if g.perfHasCPU {
+	if g.perfHasCPU.Load() {
 		// Path A: include SUM_CPU_TIME
 		perfQuery = `
 			SELECT   USER,
@@ -406,7 +406,7 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 	rows, err := g.db.QueryContext(ctx, perfQuery)
 	if err != nil {
 		logging.Logf("[mysql/governor] performance_schema query failed, disabling query stats: %v", err)
-		g.perfSchemaOK = false
+		g.perfSchemaOK.Store(false)
 		return nil
 	}
 
@@ -427,13 +427,13 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 	// ---- Fetch userstat counters (Path B only) ----------------------------
 	// cpu (seconds float) + rows — merged into the per-user delta below.
 	var currentUserstat map[string]userstatRawRow
-	if g.userstatsOK {
+	if g.userstatsOK.Load() {
 		currentUserstat = g.fetchUserstatRaw(ctx)
 		if currentUserstat == nil {
 			// Table became unreadable — fall back to Path C quietly.
 			logging.Logf("[mysql/governor] USER_STATISTICS read failed, falling back to query-only tracking")
-			g.userstatsOK = false
-			g.userstatsOff = true
+			g.userstatsOK.Store(false)
+			g.userstatsOff.Store(true)
 		}
 	}
 
@@ -472,8 +472,8 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 		}
 
 		// Path A: detect instruments going live for the first time.
-		if g.perfHasCPU && cpuDelta > 0 && !g.perfCPUActive {
-			g.perfCPUActive = true
+		if g.perfHasCPU.Load() && cpuDelta > 0 && !g.perfCPUActive.Load() {
+			g.perfCPUActive.Store(true)
 			logging.Logf("[mysql/governor] SUM_CPU_TIME is being populated — CPU tracking active")
 		}
 
@@ -488,7 +488,7 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 
 		// Path B: overlay CPU + rows from USER_STATISTICS.
 		// The userstat delta replaces the zero CPUSec from the perf_schema row.
-		if g.userstatsOK && currentUserstat != nil && prevUserstat != nil {
+		if g.userstatsOK.Load() && currentUserstat != nil && prevUserstat != nil {
 			cu := currentUserstat[user]
 			pu := prevUserstat[user]
 
@@ -515,8 +515,8 @@ func (g *Governor) fetchPerfDeltas(ctx context.Context) []UserPerfDelta {
 			d.RowsRead = rowsReadDelta
 			d.RowsSent = rowsSentDelta
 
-			if cpuSecDelta > 0 && !g.perfCPUActive {
-				g.perfCPUActive = true
+			if cpuSecDelta > 0 && !g.perfCPUActive.Load() {
+				g.perfCPUActive.Store(true)
 				logging.Logf("[mysql/governor] USER_STATISTICS CPU_TIME is being populated — CPU tracking active")
 			}
 		}
