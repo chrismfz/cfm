@@ -17,7 +17,13 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **Mail queue admin page: "Top sender domains" and "Top recipient domains" now
+  sit side-by-side.** They are both half-width cards but were separated by the
+  full-width "Who filled the queue" table, so each rendered alone on its row.
+  Reordered so the two Top-domains cards are adjacent (one grid row, side-by-side;
+  they still stack on narrow screens), with "Who filled the queue" below them.
+  Pure layout reorder — no data or behaviour change.
 
 ## 2026.08.12
 
