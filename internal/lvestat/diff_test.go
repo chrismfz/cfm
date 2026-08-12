@@ -58,6 +58,46 @@ func TestDiff_NonPositiveElapsed(t *testing.T) {
 	}
 }
 
+func approx(a, b float64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d < 1e-6
+}
+
+// Cores = ΔCPU_ns / (Δt × 1e9); PctOfLimit = Cores / (lCPU/10000) × 100.
+func TestDiff_CoresAndPctOfLimit(t *testing.T) {
+	prev := snap(
+		LVE{Reseller: 0, UID: 1, CPUUsage: 0, LimitCPU: 60000}, // 6-core cap
+		LVE{Reseller: 0, UID: 2, CPUUsage: 0, LimitCPU: 10000}, // 1-core cap
+		LVE{Reseller: 0, UID: 3, CPUUsage: 0, LimitCPU: 0},     // unlimited
+	)
+	cur := snap(
+		LVE{Reseller: 0, UID: 1, CPUUsage: 9_300_000_000, LimitCPU: 60000},  // 0.93 cores
+		LVE{Reseller: 0, UID: 2, CPUUsage: 10_000_000_000, LimitCPU: 10000}, // 1.0 core == 100% of cap
+		LVE{Reseller: 0, UID: 3, CPUUsage: 5_000_000_000, LimitCPU: 0},      // 0.5 cores, no cap
+	)
+	got := Diff(prev, cur, 10*time.Second)
+	by := map[int64]CPUSample{}
+	for _, s := range got {
+		by[s.UID] = s
+	}
+	if !approx(by[1].Cores, 0.93) || !approx(by[1].PctOfLimit, 15.5) {
+		t.Errorf("uid1 = %.4f cores / %.4f%%, want 0.93 / 15.5", by[1].Cores, by[1].PctOfLimit)
+	}
+	if !approx(by[2].Cores, 1.0) || !approx(by[2].PctOfLimit, 100) {
+		t.Errorf("uid2 = %.4f cores / %.4f%%, want 1.0 / 100 (at cap)", by[2].Cores, by[2].PctOfLimit)
+	}
+	if !approx(by[3].Cores, 0.5) || by[3].PctOfLimit != 0 {
+		t.Errorf("uid3 = %.4f cores / %.4f%%, want 0.5 / 0 (unlimited)", by[3].Cores, by[3].PctOfLimit)
+	}
+	// Hottest-first ordering is by rate: uid2 (1.0) > uid1 (0.93) > uid3 (0.5).
+	if got[0].UID != 2 || got[1].UID != 1 || got[2].UID != 3 {
+		t.Errorf("order = %d,%d,%d, want 2,1,3", got[0].UID, got[1].UID, got[2].UID)
+	}
+}
+
 // Reseller is part of the match key: same uid under different resellers are
 // distinct tenants and must not cross-match.
 func TestDiff_ResellerScopedMatch(t *testing.T) {
