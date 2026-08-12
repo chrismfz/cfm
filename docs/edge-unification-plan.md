@@ -292,9 +292,38 @@ Default stays LOGONLY so merging changes nothing; the operator flips
 `CFM_PANEL_WAF=enforce` on orion first, burns in, then fleet. Self/`IGNORE_NETS`
 sources are skipped, `deny` can't loop, and the probe is fail-open (any WAF
 error → normal flow), so a WAF fault can't lock the panel. Rollback is one env
-var. **Phase 4b — panel decision enforce** is next (same gated, default-logonly
-shape; it is clearance/loop-aware by construction, so it also carries the
-challenge-tier enforcement).
+var.
+
+**Phase 4b — panel decision enforce: MECHANISM LANDED, opt-in, BLOCK-tier only.**
+`CFM_PANEL_DECISION` now selects `0`/`off` · `1`/logonly (default) · `enforce`,
+mirroring 4a. In `enforce`, a bridge verdict whose **ip/vhost/rule action is
+`block`** hard-denies (`block` → `deny`, a plain 403 with no redirect, so it
+can't loop). The deny is applied on the human-entry path **before** the
+clearance short-circuit, so an IP the bridge blocked mid-session is denied even
+with a valid clearance cookie — web-edge parity (`cfm.lua`'s block ignores
+clearance). The **challenge tier is intentionally NOT enforced from the
+verdict**: the existing clearance-aware human-entry challenge (section 3) already
+challenges un-cleared browsers and passes non-browsers through, so re-deriving a
+challenge from the verdict would duplicate it and reintroduce the exact loop
+Phase 4a avoided (a solved clearance cookie doesn't clear the bridge verdict).
+`throttle`/other verdicts stay observe-only in 4b. The enforce surface is
+**identical to the burned-in LOGONLY probe surface** (human-entry paths only);
+full per-request panel-path parity (denying blocked IPs on generic passthrough
+paths too) is a later step with its own burn-in. The probe is `pcall`'d twice
+(the RPC inside, the whole probe at the call site), so any bridge error fails
+OPEN — no deny — and `CFM_PANEL_DECISION=0` is the instant kill switch. Default
+stays LOGONLY so merging changes nothing; the operator flips
+`CFM_PANEL_DECISION=enforce` on orion first, burns in, then fleet. Rollback is
+one env var. The waf_fp_hunt aggregator keys on the `ip/vhost/rule_action`
+fields (not the log marker), so `panel_decision.ip_block_count` keeps counting on
+enforcing nodes — regression-guarded by `TestParse_DecisionLine_EnforceMarker`.
+
+With 4a + 4b landed the panel WAF and the panel bridge decision can both enforce
+(opt-in). Remaining to fully close unification: flip enforce orion→fleet after
+burn-in, then the Phase-3 cleanup (delete `cfm_panel.lua`'s superseded local
+challenge policy — now that the bridge decision can enforce the challenge tier
+via a clearance-aware follow-up — plus the loop-breaker, the legacy shared-cookie
+fallback, and the inert `cfm_ok` marker).
 
 Prereqs / deferred pieces:
 - **Full self-origin parity** — **DONE for the panel WAF.** `is_self_origin`
