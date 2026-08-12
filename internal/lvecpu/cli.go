@@ -122,12 +122,21 @@ func RunCLI(baseURL string, args []string) error {
 	// cells wide but tabwriter pads by rune count, so keeping them trailing means
 	// they can't shift the alignment of any column to their right.
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "RESELLER\tUID\tCORES\t%OF_LIMIT\tLIMIT\tNCPU\tEP\tNPROC\tFLAG")
+	fmt.Fprintln(w, "RESELLER\tUID\tUSER\tCORES\t%OF_LIMIT\tLIMIT\tNCPU\tEP\tNPROC\tFLAG")
 	for _, s := range r.Top {
-		fmt.Fprintf(w, "%d\t%d\t%.2f\t%s\t%s\t%d\t%d\t%d\t%s\n",
-			s.Reseller, s.UID, s.Cores, pctOfLimit(s), limitCPU(s.LimitCPU), s.NumCPU, s.EP, s.NProc, flagStr(s))
+		fmt.Fprintf(w, "%d\t%d\t%s\t%.2f\t%s\t%s\t%d\t%d\t%d\t%s\n",
+			s.Reseller, s.UID, userLabel(s.Username), s.Cores, pctOfLimit(s), limitCPU(s.LimitCPU), s.NumCPU, s.EP, s.NProc, flagStr(s))
 	}
 	return w.Flush()
+}
+
+// userLabel renders the resolved login, or "-" when the daemon couldn't resolve
+// the uid (no passwd entry) so the column never prints an empty cell.
+func userLabel(username string) string {
+	if strings.TrimSpace(username) == "" {
+		return "-"
+	}
+	return username
 }
 
 // pctOfLimit formats the %-of-limit (ASCII only — the throttle glyph is a

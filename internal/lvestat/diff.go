@@ -31,6 +31,11 @@ func LimitCores(limitCPU int64) float64 {
 type CPUSample struct {
 	Reseller int64 `json:"reseller"`
 	UID      int64 `json:"uid"`
+	// Username is the login the UID maps to (on cPanel/DA the Linux user IS the
+	// hosting account) — "who is this tenant?". The pure Diff never sets it
+	// (kept side-effect-free); the API layer resolves + fills it from /etc/passwd
+	// before serving. Empty when unresolved; a label for the default/aggregate LVE.
+	Username string `json:"username,omitempty"`
 	// CPURate is the change in the CPU-usage counter (nanoseconds of CPU time)
 	// per second between the two snapshots — the raw signal Cores/PctOfLimit are
 	// derived from. Kept for debugging; consumers usually want Cores.
