@@ -52,8 +52,23 @@ back-filled here — see the git/PR history for that period.
   `detectors.conf` (edge mode has been unconditional since Phase 1a; a stale key
   in a live config is still ignored with a one-line deprecation warning). The
   remaining Phase 3 cookie-net cleanup (inert `cfm_ok`, legacy shared-cookie
-  fallback, loop-breaker) is deferred to its own change; panel enforcement stays
-  observe-only until Phase 4. See `docs/edge-unification-plan.md`.
+  fallback, loop-breaker) is deferred to its own change. See
+  `docs/edge-unification-plan.md`.
+- **Edge unification Phase 4a: panel WAF enforce is now available, opt-in
+  (default LOGONLY), BLOCK-tier only.** `CFM_PANEL_WAF` gains an `enforce` value
+  alongside `0`/off and the default `1`/logonly. In `enforce`, only the
+  high-confidence **`block`** tier acts (`block` → deny); `logonly`-tier hits are
+  never enforced (observe-only by design) and `challenge`-tier hits are NOT
+  turned into a standalone WAF challenge (that would loop — a solved clearance
+  cookie doesn't clear the WAF match — and break non-browser clients), so
+  challenge-tier enforcement waits for the clearance-aware Phase 4b decision
+  path. **Merging changes nothing** — the default stays LOGONLY, so an upgrade
+  never starts enforcing on the cPanel/WHM ports; the operator opts in per node
+  (`CFM_PANEL_WAF=enforce`, orion first → fleet), and `CFM_PANEL_WAF=0` is the
+  instant kill switch. Self-IPs / `IGNORE_NETS` are skipped, `deny` can't loop,
+  and the probe is fail-open (any WAF error → normal flow), so an enforcing panel
+  WAF can't lock an admin out of WHM/cPanel. The panel challenge was already
+  enforced; the shared bridge **decision** stays LOGONLY until Phase 4b.
 
 ### Added
 - **MCP `cpu_throttle` — turns "load is high" into a root cause.** New

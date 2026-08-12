@@ -198,13 +198,24 @@ end
 --
 -- Everything is pcall'd + fail-open; the kill switch CFM_PANEL_WAF=0 (or a
 -- cfm_waf module missing on upgrade lag) leaves panel_waf nil so nothing runs.
--- REMINDER: once burn-in is clean, panel WAF (and the panel challenge) graduate
--- to enforce — see docs/edge-unification-plan.md.
-local PANEL_WAF_LOGONLY = (os.getenv("CFM_PANEL_WAF") or "1") ~= "0"
+-- Enforce is now available and OPT-IN (CFM_PANEL_WAF=enforce, default LOGONLY) —
+-- see the mode selector below and docs/edge-unification-plan.md Phase 4a. The
+-- shared bridge DECISION is still LOGONLY (Phase 4b, next).
+-- CFM_PANEL_WAF selects the panel-WAF mode:
+--   "0"/"off"        → probe disabled entirely (no WAF on panel at all);
+--   "enforce"/"2"    → a WAF hit ACTS (block → deny, else → issue_challenge);
+--   anything else    → LOGONLY (default "1"): record would-be action, never act.
+-- Default stays LOGONLY so a binary/config upgrade never silently starts
+-- enforcing on the cPanel/WHM ports — the operator opts in per node (orion
+-- first), and CFM_PANEL_WAF=0 remains the instant kill switch. See
+-- docs/edge-unification-plan.md Phase 4.
+local PANEL_WAF_ENV = (os.getenv("CFM_PANEL_WAF") or "1")
+local PANEL_WAF_OFF = (PANEL_WAF_ENV == "0" or PANEL_WAF_ENV == "off")
+local PANEL_WAF_ENFORCE = (PANEL_WAF_ENV == "enforce" or PANEL_WAF_ENV == "2")
 local panel_waf
 do
     local ok_waf, w = pcall(require, "cfm_waf")
-    if PANEL_WAF_LOGONLY and ok_waf and type(w) == "table" and w.check and w.enabled then
+    if not PANEL_WAF_OFF and ok_waf and type(w) == "table" and w.check and w.enabled then
         panel_waf = w
     end
 end
@@ -239,8 +250,14 @@ local function panel_is_self(ip)
     return panel_is_loopback(ip)
 end
 
--- panel_waf_probe runs the LOGONLY WAF and records a hit. Returns nothing and
--- changes no control flow. A cfm_waf error is swallowed (fail-open, no line).
+-- panel_waf_probe runs the reduced panel WAF. On a hit it returns
+-- (action, reason, rule_id) so the caller can enforce; it returns nil when the
+-- WAF is off/disabled, the source is self/IGNORE, there is no hit, or cfm_waf
+-- errors (fail-open — no line, no action). It LOGS every counted hit (throttled
+-- per (ip,rule)) with a mode-aware marker: `logonly=would_<action>` in logonly
+-- mode (unchanged — waf_fp_hunt parses this) or `enforce=<action>` when
+-- enforcing. Logging is throttled; the returned action is NOT (enforcement acts
+-- on every hit regardless of the log-throttle window).
 local function panel_waf_probe(ip, host, uri, args, method, ua, scope)
     if not panel_waf then return end
     if not panel_waf.enabled() then return end
@@ -252,7 +269,7 @@ local function panel_waf_probe(ip, host, uri, args, method, ua, scope)
             host = host, ip = ip, peer = ip,
             cookie = ngx.var.http_cookie or "",
             headers = ngx.req.get_headers(),
-            body = "",  -- LOGONLY reduced profile: never buffer the panel body
+            body = "",  -- reduced profile: never buffer the panel body
             -- Same dict the web edge passes as SH. cfm_waf's burst detectors
             -- mutate counters here, but they are gated on web-app auth markers
             -- (/wp-login.php, /xmlrpc.php, …) AND keyed by (ip,host), so a panel
@@ -262,22 +279,32 @@ local function panel_waf_probe(ip, host, uri, args, method, ua, scope)
         })
     end)
     if not okc or not hit then return end
+    action = tostring(action or "block")
 
-    -- Throttle per (ip, rule_id) so a scanner cannot flood the error log; the
-    -- first hit in each 60s window is what the burn-in needs.
+    -- Throttle only the LOG line per (ip, rule_id) so a scanner cannot flood the
+    -- error log; the action return below is unaffected.
     local sh = ngx.shared.cfm_decisions
+    local do_log = true
     if sh then
         local k = "waf_ll|" .. (ip or "-") .. "|" .. tostring(rule_id or reason or "-")
-        if not sh:add(k, 1, 60) then return end
+        if not sh:add(k, 1, 60) then do_log = false end
+    end
+    -- Only the high-confidence BLOCK tier is enforced (see the call site); mark
+    -- the log line `enforce=block` only when it will actually act, else keep the
+    -- observe-only `logonly=would_<action>` marker (which waf_fp_hunt parses and
+    -- which stays accurate for the still-unenforced challenge/logonly tiers).
+    local will_enforce = PANEL_WAF_ENFORCE and action == "block"
+    if do_log then
+        ngx.log(ngx.WARN,
+            "[cfm_panel_waf] ", (will_enforce and "enforce=" or "logonly=would_"), action,
+            " scope=", tostring(scope),
+            " ip=", tostring(ip), " host=", tostring(host),
+            " uri=", tostring(uri), " method=", tostring(method),
+            " reason=", tostring(reason), " rule_id=", tostring(rule_id or "-"),
+            " ua=", tostring(ua or "-"))
     end
 
-    ngx.log(ngx.WARN,
-        "[cfm_panel_waf] logonly=would_", tostring(action or "block"),
-        " scope=", tostring(scope),
-        " ip=", tostring(ip), " host=", tostring(host),
-        " uri=", tostring(uri), " method=", tostring(method),
-        " reason=", tostring(reason), " rule_id=", tostring(rule_id or "-"),
-        " ua=", tostring(ua or "-"))
+    return action, reason, rule_id
 end
 
 local function starts_with(s, p)
@@ -1143,12 +1170,29 @@ if is_exempt_path(uri) then
     return allow_origin(mode, exempt_reason, origin, method, ua)
 end
 
--- 2e) Panel WAF (LOGONLY): record what the WAF would do on this request. Runs
--- after the api/sso + exempt-path hard-skips above, so those paths are never
--- inspected; covers human-entry AND generic passthrough in one place. Skips the
--- internal verify/decision sub-locations. Never alters the flow below.
+-- 2e) Panel WAF. Runs after the api/sso + exempt-path hard-skips above (so those
+-- paths are never inspected) and covers human-entry AND generic passthrough in
+-- one place; skips the internal verify/decision sub-locations. LOGONLY (default)
+-- only records the would-be action.
+--
+-- ENFORCE acts on the HIGH-CONFIDENCE BLOCK tier ONLY: `block` → deny. This is
+-- deliberately narrow:
+--   * `logonly`-tier hits are observe-only by definition — never enforced (they
+--     are held at logonly precisely because they haven't passed FP burn-in);
+--   * `challenge`-tier hits are NOT converted to a standalone WAF challenge here
+--     — that would LOOP (a solved clearance cookie doesn't clear the WAF match,
+--     so the request re-trips and re-challenges, and this returns before the
+--     section-3 loop-breaker) and would hand non-browser clients an unsolvable
+--     PoW. Challenge-tier enforcement is deferred to the clearance-aware Phase 4b
+--     decision path; the existing human-entry challenge (section 3) is unchanged.
+-- `deny` can't loop (no redirect). Self/IGNORE_NETS sources never reach here
+-- (panel_waf_probe skips them), and the probe is pcall'd so any WAF error fails
+-- OPEN to the normal flow — a WAF fault can never lock the panel.
 if uri ~= decision_uri and uri ~= "/__cfm_verify" then
-    pcall(panel_waf_probe, client_ip, normalized_host, uri, ngx.var.args or "", method, ua, panel_scope)
+    local okp, waf_action, waf_reason = pcall(panel_waf_probe, client_ip, normalized_host, uri, ngx.var.args or "", method, ua, panel_scope)
+    if okp and PANEL_WAF_ENFORCE and waf_action == "block" then
+        return deny(mode, "panel_waf_block_" .. tostring(waf_reason or "-"))
+    end
 end
 
 -- 3) Human panel entrypoints.
