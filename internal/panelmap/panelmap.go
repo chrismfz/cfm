@@ -53,8 +53,9 @@ func parseOwnerLine(line string, userDataDomains bool) (host, owner string, ok b
 }
 
 // collectFile scans one map file, invoking fn(host, owner) for each valid line
-// whose host is in want. want==nil matches every host. A missing/unreadable
-// file is a silent no-op (the box may not be cPanel, or the file may not exist).
+// whose host is in want (always non-empty here — both callers early-return on an
+// empty host set). A missing/unreadable file is a silent no-op (the box may not
+// be cPanel, or the file may not exist).
 func collectFile(path string, userDataDomains bool, want map[string]struct{}, fn func(host, owner string)) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -62,15 +63,18 @@ func collectFile(path string, userDataDomains bool, want map[string]struct{}, fn
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
+	// These files are one domain per line (short), but raise the cap well above
+	// bufio.Scanner's 64 KiB default so an outsized line can't silently end the
+	// scan and drop a host — which, on this scope-derivation path, would narrow a
+	// scoped token's owner set (fail-closed, but still wrong).
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		host, owner, ok := parseOwnerLine(sc.Text(), userDataDomains)
 		if !ok {
 			continue
 		}
-		if want != nil {
-			if _, keep := want[host]; !keep {
-				continue
-			}
+		if _, keep := want[host]; !keep {
+			continue
 		}
 		fn(host, owner)
 	}

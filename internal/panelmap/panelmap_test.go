@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -95,6 +96,22 @@ func TestOwnerSet_NoMatch(t *testing.T) {
 	writeFixtures(t, "main.com: alice==x\n", "")
 	if got := OwnerSet([]string{"nope.com"}); got != nil {
 		t.Errorf("OwnerSet(no match) = %v, want nil", got)
+	}
+}
+
+func TestHostOwners_OversizedLineNotDropped(t *testing.T) {
+	// A line longer than bufio.Scanner's 64 KiB default must still parse (else the
+	// scan silently ends and the host — and any after it — is dropped, narrowing
+	// scope). Uses a >64 KiB host followed by a normal one to prove the scan
+	// continues past the big line too.
+	bigHost := strings.Repeat("a", 70*1024) + ".com"
+	writeFixtures(t, "", bigHost+": bigowner\nnormal.com: normalowner\n")
+	got := HostOwners([]string{bigHost, "normal.com"})
+	if got[bigHost] != "bigowner" {
+		t.Errorf("oversized-line host dropped: %v", got[bigHost])
+	}
+	if got["normal.com"] != "normalowner" {
+		t.Errorf("host after oversized line dropped (scan ended early): %v", got)
 	}
 }
 

@@ -109,6 +109,12 @@ back-filled here — see the git/PR history for that period.
   review step is codified as non-optional for any change with runtime behaviour.
 
 ### Fixed
+- **`internal/panelmap` domain→owner parse hardened on the scoped-auth path.**
+  The line scanner now raises its buffer well above `bufio.Scanner`'s 64 KiB
+  default, so an outsized `/etc/userdatadomains`/`userdomains` line can't silently
+  end the scan and drop a host (which would narrow a scoped token's owner set —
+  fail-closed, but wrong); a dead `want==nil` match-all branch was removed. Adds
+  a >64 KiB-line regression test. (Retro-review of the panelmap extraction PR.)
 - **`cfm lve` LIMIT column now renders the CPU cap exactly, and the throttle
   glyph no longer misaligns the table.** The cap was formatted with `%.2g`
   (2 significant digits), so a `15.5`-core cap printed as `16c` and a `100`-core
