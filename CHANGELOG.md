@@ -17,7 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **MCP `nft_counters` — nftables named-counter view.** New read-only, admin-only
+  MCP tool + `GET /api/v1/firewall/counters`. Reports how much traffic each L3/L4
+  firewall RULE is matching in `table inet cfm`, grouped by family (portflood /
+  connlimit / synflood / ppsflood / hardening / smtpblock), busiest-first with
+  `by_family` totals — the rule-match volume, distinct from `firewall_blocks`
+  (the blocked-IP sets). Answers "which firewall rules are firing, and how hard?";
+  a spiking `portflood_*` or `synrate` counter flags an active L3/L4 flood.
+  Backend-agnostic: parses the counters out of the existing `ListTableJSON`
+  (`nft -j list table`) both engines implement, so there is no new firewall
+  backend method and no nftlib netlink object read. Reads on the default exec-nft
+  backend; on the nftlib backend (whose `ListTableJSON` emits no counter objects)
+  it reports `available:false` rather than a misleading empty list. `nonzero=true`
+  hides idle counters. Does NOT reflect panel/web WAF or bridge enforcement (those
+  are edge-layer 403 denials, not nftables rules — use `waf_activity` /
+  `waf_fp_hunt`).
 
 ## 2026.08.12
 

@@ -191,6 +191,7 @@ func Start(
 	RegisterUnblock(m, be, cfgDir)
 	RegisterBlock(m, be)
 	RegisterFirewallList(m, be)
+	RegisterFirewallCounters(m, be) // read-only nft named-counter view (rule match volume)
 	RegisterFirewallSelfTest(m, be) // read-only nftlib self-diagnostics
 	RegisterSearch(m, be, cfgDir)   // read-only multi-source IP lookup
 

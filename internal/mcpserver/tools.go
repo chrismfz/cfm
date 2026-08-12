@@ -48,6 +48,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerDetectionHistory(srv, d)
 	registerBotsTop(srv, d)
 	registerFirewallBlocks(srv, d)
+	registerFirewallCounters(srv, d)
 	registerFirewallSelfTest(srv, d)
 	registerIPLocate(srv, d)
 	registerDetectorsStatus(srv, d)
@@ -1077,6 +1078,24 @@ func registerIPLocate(srv *mcp.Server, d Deps) {
 			return nil, nil, errRequired("ip")
 		}
 		return dispatchJSON(ctx, d, "/search", url.Values{"ip": {in.IP}})
+	})
+}
+
+type nftCountersInput struct {
+	Nonzero bool `json:"nonzero,omitempty" jsonschema:"only return counters that have matched at least one packet (hide idle rules)"`
+}
+
+func registerFirewallCounters(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "nft_counters",
+		Description: "nftables named-counter view (read-only): how much traffic each L3/L4 firewall RULE is matching in `table inet cfm`, grouped by family — portflood, connlimit, synflood (SYN rate), ppsflood (packet rate), hardening (badflags/icmp/new-conn-rate drops), smtpblock. This is the RULE-match volume, distinct from firewall_blocks (which lists the blocked-IP sets). Answers \"which firewall rules are actually firing, and how hard?\" — e.g. a spiking portflood_80_tcp or synrate counter points at an active L3/L4 flood. Note: this does NOT reflect panel/web WAF or bridge enforcement (those are edge-layer 403 denials, not nftables rules — use waf_activity / waf_fp_hunt for those). Reads on the default exec-nft backend; on the nftlib backend it returns available:false. Pass nonzero=true to hide idle counters.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in nftCountersInput) (*mcp.CallToolResult, any, error) {
+		var q url.Values
+		if in.Nonzero {
+			q = url.Values{"nonzero": {"1"}}
+		}
+		return dispatchJSON(ctx, d, "/api/v1/firewall/counters", q)
 	})
 }
 
