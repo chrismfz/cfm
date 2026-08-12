@@ -103,8 +103,21 @@ back-filled here — see the git/PR history for that period.
   the existing scoped-MySQL owner tests) — this removes a parser that would
   otherwise drift as new consumers (the upcoming DB↔web correlation) need the
   same mapping (CLAUDE.md §5).
+- **Doc/process: adversarial self-review is now required on every code PR**
+  (`CLAUDE.md` §9). Retro-reviews of already-merged PRs surfaced real issues (the
+  case-inconsistent correlation join below; a `%.2g` LVE cap misrender), so the
+  review step is codified as non-optional for any change with runtime behaviour.
 
 ### Fixed
+- **`db_web_pressure` no longer false-flags a tenant when the MySQL user's case
+  differs from the userdomains owner.** The correlation joined the DB side (account
+  derived from the DB user, case-preserved) against the web side (owner from the
+  host→owner map, lowercase) without normalizing the key, so a mixed-case MySQL
+  user (e.g. `Chris_wp` → account `Chris`) split into a separate row from its
+  lowercase owner (`chris`) — the DB half then showed zero web hits and was
+  wrongly flagged `few_hits_high_pressure`. The join key is now normalized on both
+  sides (found by an adversarial retro-review of the merged PR). No effect on the
+  common all-lowercase case.
 - **Data race on the MySQL governor's perf_schema / userstat capability flags.**
   `perfSchemaOK`, `perfHasCPU`, `perfCPUActive`, `userstatsOK` and `userstatsOff`
   are written by the governor poll goroutine (`probePerfSchema`/`fetchPerfDeltas`)

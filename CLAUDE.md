@@ -382,6 +382,14 @@ then commit the stamped `CHANGELOG.md`.
 - Develop on the feature branch you were assigned; create it from `main` if
   missing. Don't push to `main` directly.
 - Keep PRs focused — this repo favours many small, single-concern PRs.
+- **Adversarial self-review on every code PR, before opening it.** Run a
+  high-effort review of the diff (the `code-review` skill, or an equivalent
+  skeptical read that tries to *break* the change), and fold the confirmed
+  findings into the **same** PR. This is not optional and not only for "risky"
+  changes — retro-reviews have caught real issues in already-merged PRs (a
+  case-inconsistent join that false-flagged tenants; a `%.2g` value misrender).
+  Docs-only / config-comment PRs may skip it; anything with runtime behaviour
+  does not. Note in the PR body that the review ran and what it found.
 - After edge-affecting changes, run the relevant runbook/checklist in `docs/`
   before considering the change done.
 - Update `CHANGELOG.md` (`[Unreleased]`) as part of the change, per §8.
