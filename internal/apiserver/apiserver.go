@@ -29,7 +29,6 @@
 package apiserver
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -42,7 +41,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +53,7 @@ import (
 	mysqlpkg "cfm/internal/detectors/mysql"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
+	"cfm/internal/panelmap"
 	sslpkg "cfm/internal/sslcollector"
 	webdet "cfm/internal/webdetector"
 	webui "cfm/internal/webui"
@@ -96,9 +95,7 @@ var (
 	sharedMux *http.ServeMux
 	pending   []func(*http.ServeMux)
 
-	cpanelUserDataDomainsPath = "/etc/userdatadomains"
-	cpanelUserDomainsPath     = "/etc/userdomains"
-	mfaKeyStatePath           = "/var/lib/cfm/auth-mfa.key"
+	mfaKeyStatePath = "/var/lib/cfm/auth-mfa.key"
 )
 
 // Mux returns the shared mux after Start() has initialised it.
@@ -825,77 +822,10 @@ func mysqlPatternPrefix(s string) (prefix string, wildcard bool) {
 	return s, false
 }
 
+// cpanelOwnersForHosts returns the distinct set of cPanel accounts owning the
+// given vhosts. It delegates to the canonical reader in internal/panelmap
+// (OwnerSet: the union across /etc/userdatadomains and /etc/userdomains) so
+// this scope-derivation path shares one parser with the rest of CFM (§5).
 func cpanelOwnersForHosts(hosts []string) []string {
-	if len(hosts) == 0 {
-		return nil
-	}
-	hostSet := make(map[string]struct{}, len(hosts))
-	for _, h := range hosts {
-		if h != "" {
-			hostSet[h] = struct{}{}
-		}
-	}
-	owners := map[string]struct{}{}
-	collectCpanelOwnersFromUserDataDomains(hostSet, owners)
-	collectCpanelOwnersFromUserDomains(hostSet, owners)
-	if len(owners) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(owners))
-	for owner := range owners {
-		out = append(out, owner)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func collectCpanelOwnersFromUserDataDomains(hostSet, owners map[string]struct{}) {
-	f, err := os.Open(cpanelUserDataDomainsPath)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	collectCpanelOwners(f, hostSet, owners, true)
-}
-
-func collectCpanelOwnersFromUserDomains(hostSet, owners map[string]struct{}) {
-	f, err := os.Open(cpanelUserDomainsPath)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	collectCpanelOwners(f, hostSet, owners, false)
-}
-
-func collectCpanelOwners(f *os.File, hostSet, owners map[string]struct{}, userDataDomains bool) {
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		colon := strings.IndexByte(line, ':')
-		if colon <= 0 || colon+1 >= len(line) {
-			continue
-		}
-		host := strings.ToLower(strings.TrimSpace(line[:colon]))
-		if _, ok := hostSet[host]; !ok {
-			continue
-		}
-		rest := strings.TrimSpace(line[colon+1:])
-		var owner string
-		if userDataDomains {
-			parts := strings.SplitN(rest, "==", 2)
-			if len(parts) == 0 {
-				continue
-			}
-			owner = strings.ToLower(strings.TrimSpace(parts[0]))
-		} else {
-			owner = strings.ToLower(strings.TrimSpace(rest))
-		}
-		if owner == "" {
-			continue
-		}
-		owners[owner] = struct{}{}
-	}
+	return panelmap.OwnerSet(hosts)
 }

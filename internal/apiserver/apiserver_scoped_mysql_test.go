@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"testing"
 
+	"cfm/internal/panelmap"
 	webdet "cfm/internal/webdetector"
 )
 
@@ -233,13 +234,13 @@ func writeScopedMySQLOwnerFixture(t *testing.T) {
 		t.Fatalf("write userdatadomains: %v", err)
 	}
 
-	oldUD := cpanelUserDomainsPath
-	oldUDD := cpanelUserDataDomainsPath
-	cpanelUserDomainsPath = userDomains
-	cpanelUserDataDomainsPath = userDataDomains
+	oldUD := panelmap.UserDomainsPath
+	oldUDD := panelmap.UserDataDomainsPath
+	panelmap.UserDomainsPath = userDomains
+	panelmap.UserDataDomainsPath = userDataDomains
 	t.Cleanup(func() {
-		cpanelUserDomainsPath = oldUD
-		cpanelUserDataDomainsPath = oldUDD
+		panelmap.UserDomainsPath = oldUD
+		panelmap.UserDataDomainsPath = oldUDD
 	})
 }
 
