@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -78,13 +79,33 @@ type Result struct {
 	Lines     []string `json:"lines"`      // raw matching log lines, oldest→newest
 }
 
-// availableFrom returns the candidates that currently exist as regular files.
+// availableFrom returns the candidates that currently exist as regular files,
+// most-recently-modified FIRST.
+//
+// The ordering is load-bearing, not cosmetic: a node fronts its traffic with
+// exactly one engine (Angie OR OpenResty), but the OTHER engine's log file
+// often still exists as a stale/empty leftover from a disabled install. A
+// static "OpenResty-first" order would then default-select that wrong-engine
+// empty log (observed live: edge_error_tail read an empty
+// /usr/local/openresty/nginx/logs/error.log on an Angie node). mtime tracks the
+// ACTIVE edge — it is the one actually being written — so most-recent-first
+// makes the default (avail[0]) the live log. Stable sort keeps the original
+// candidate order as the tiebreak when mtimes are equal.
 func availableFrom(candidates []string) []string {
-	out := make([]string, 0, len(candidates))
+	type ent struct {
+		path string
+		mod  time.Time
+	}
+	ents := make([]ent, 0, len(candidates))
 	for _, p := range candidates {
 		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
-			out = append(out, p)
+			ents = append(ents, ent{path: p, mod: fi.ModTime()})
 		}
+	}
+	sort.SliceStable(ents, func(i, j int) bool { return ents[i].mod.After(ents[j].mod) })
+	out := make([]string, len(ents))
+	for i, e := range ents {
+		out[i] = e.path
 	}
 	return out
 }

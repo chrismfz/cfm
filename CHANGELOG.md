@@ -115,6 +115,17 @@ back-filled here — see the git/PR history for that period.
   tests now exercise the module directly).
 
 ### Fixed
+- **Edge log auto-detection now picks the ACTIVE engine's log, not a stale
+  leftover.** `internal/edgelog` selected the first *existing* candidate in a
+  static "OpenResty-before-Angie" order, so on an Angie-fronted node the
+  disabled OpenResty install's leftover (stale/empty) `error.log` was chosen
+  over the live Angie one — `edge_error_tail` returned zero lines by default
+  (caught live: it read an empty `/usr/local/openresty/nginx/logs/error.log`
+  while the panel `logonly` verdicts were in `/var/log/angie/error.log`). The
+  resolver now defaults to the most-recently-modified candidate (the active
+  edge is the one being written), fixing `edge_error_tail` and, latently,
+  `ip_forensics` on nodes where both engines' log files exist. An explicit
+  `source=` still overrides.
 - **`whats_wrong` no longer reports a spurious critical for the idle edge
   engine.** On a node fronted by Angie, the installed-but-disabled
   `openresty.service` (the mutually-exclusive alternate) sits `failed`, and
