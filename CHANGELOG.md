@@ -17,7 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **`make release` GitHub release failed on a large CHANGELOG (`gh: Argument
+  list too long`).** The release notes were passed as a single `gh … --notes`
+  argument; when a big `[Unreleased]` backlog is stamped into one day's section
+  (e.g. 320 KB), that one argument blows past Linux's 128 KiB per-arg limit and
+  `gh release create` dies with exit 126 — so no tag/release is cut (the package
+  build, CHANGELOG commit/push, and `make sync` had already succeeded). Now the
+  notes go via `--notes-file` (a temp file, cleaned up after), and
+  `scripts/release-notes.sh` caps its output (default 100 KB, override with
+  `RELEASE_NOTES_MAX_BYTES`) with a "see CHANGELOG.md" footer so it also stays
+  under GitHub's ~125 000-char release-body limit. Also fixed a `set -o
+  pipefail`/SIGPIPE bug in the first cut of the cap that made an oversized
+  section come back empty.
 
 ## 2026.08.12
 

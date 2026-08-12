@@ -392,7 +392,7 @@ changelog:
 # CHANGELOG notes, NO .deb/.rpm assets; packages ship via `make sync`). Steps 2 and 3
 # are each ONE self-contained shell segment — do NOT add a bare `#` comment line
 # inside them: a comment without a trailing backslash ends the segment, so the
-# shell vars (DEB_FILE/RPM_FILE/REPO/NOTES) set above it silently vanish and the rest
+# shell vars (DEB_FILE/RPM_FILE/REPO/NOTES_FILE) set above it silently vanish and the rest
 # runs without `set -e`. (That exact trap masked a broken gh-release publish.)
 release: bpf deb rpm
 	@scripts/stamp-changelog.sh $(REL_DATE)
@@ -424,18 +424,20 @@ release: bpf deb rpm
 	echo "📦 DEB=$$DEB_FILE"; echo "📦 RPM=$$RPM_FILE"; \
 	sha256sum "$$DEB_FILE" "$$RPM_FILE" > checksums.txt; \
 	REPO="chrismfz/cfm"; \
-	NOTES="$$(scripts/release-notes.sh $(REL_DATE))"; \
+	NOTES_FILE="$$(mktemp)"; \
+	scripts/release-notes.sh $(REL_DATE) > "$$NOTES_FILE"; \
 	echo "🚀 Ensuring release $(TAG) exists..."; \
 	if ! $(GH) release view "$(TAG)" --repo "$$REPO" >/dev/null 2>&1; then \
 	  $(GH) release create "$(TAG)" \
 	    --repo "$$REPO" \
 	    --title "cfm $(TAG)" \
-	    --notes "$$NOTES" \
+	    --notes-file "$$NOTES_FILE" \
 	    --draft ; \
 	  echo "✅ Created draft release $(TAG)."; \
 	else \
 	  echo "↻ Release $(TAG) already exists."; \
 	fi; \
+	rm -f "$$NOTES_FILE"; \
 	echo "📣 Publishing release (tag + CHANGELOG notes; no .deb/.rpm assets — packages ship via 'make sync')..."; \
 	$(GH) release edit "$(TAG)" --repo "$$REPO" --draft=false ; \
 	echo "✅ Release $(TAG) published."

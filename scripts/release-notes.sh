@@ -38,7 +38,25 @@ if [ -f "$FILE" ]; then
 fi
 
 if [ -n "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
-  printf '%s\n' "$body"
+  out="$body"
 else
-  printf 'Automated release %s\n' "$DATE"
+  out="Automated release $DATE"
 fi
+
+# GitHub caps a release body at ~125,000 characters (and Linux caps a single
+# argv entry at 128 KiB), so a huge accumulated section — the very backlog this
+# tool exists to drain — must be trimmed or the release fails. Keep whole lines
+# up to a byte budget (bytes >= chars, so this stays under GitHub's char limit)
+# and append a pointer to the full CHANGELOG section.
+CAP="${RELEASE_NOTES_MAX_BYTES:-100000}"
+if [ "$(printf '%s' "$out" | wc -c)" -gt "$CAP" ]; then
+  keep=$(( CAP > 200 ? CAP - 160 : CAP ))
+  # Keep whole lines up to the byte budget. A here-string (not a pipe) feeds awk
+  # so its early `exit` can't SIGPIPE a producer and trip `set -o pipefail`;
+  # LC_ALL=C makes awk's length() count bytes, not locale characters.
+  trimmed="$(LC_ALL=C awk -v cap="$keep" '{ n += length($0) + 1; if (n > cap) exit; print }' <<< "$out")"
+  out="$trimmed
+… (release notes truncated to fit GitHub's limit — see the full ## $DATE section in CHANGELOG.md)"
+fi
+
+printf '%s\n' "$out"

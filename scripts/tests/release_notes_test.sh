@@ -62,4 +62,19 @@ if "$SCRIPT" 2026-07-07 "$cl" >/dev/null 2>&1; then fail "malformed date accepte
 out="$("$SCRIPT" 2026.08.01 "$cl")"
 [ "$out" = "- old entry" ] || fail "last-section extraction mismatch; got: $out"
 
+# 8. Oversized section → capped to the byte budget + a truncation footer, and it
+#    must NOT come back empty (regression: `head|sed` under `set -o pipefail`
+#    aborted on SIGPIPE and emitted nothing). Build a big section.
+big="$tmp/big.md"
+{ echo "## 2026.09.09"; echo; for i in $(seq 1 5000); do echo "- filler bullet line number $i with some padding text"; done; } > "$big"
+out="$(RELEASE_NOTES_MAX_BYTES=4000 "$SCRIPT" 2026.09.09 "$big")"
+[ -n "$out" ] || fail "oversized section produced EMPTY notes (pipefail/SIGPIPE regression)"
+bytes="$(printf '%s' "$out" | wc -c)"
+[ "$bytes" -le 4000 ] || fail "capped notes exceed budget: $bytes > 4000"
+printf '%s' "$out" | grep -q 'truncated to fit' || fail "capped notes missing truncation footer"
+
+# 9. Under-budget section → emitted verbatim, no footer.
+out="$(RELEASE_NOTES_MAX_BYTES=100000 "$SCRIPT" 2026.08.12 "$cl")"
+printf '%s' "$out" | grep -q 'truncated to fit' && fail "small section should not be truncated"
+
 echo "OK: release-notes.sh — all cases pass"
