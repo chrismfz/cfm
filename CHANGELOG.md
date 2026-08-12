@@ -17,6 +17,17 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Correlation leaf for "few web hits, high DB pressure" tenants
+  (`internal/dbwebcorr`).** Pure, unit-tested join+scoring foundation that folds
+  per-DB-user MySQL pressure and per-vhost web request rate up to the hosting
+  account (DB user `acct_*` → `acct`; vhost → owner) and flags accounts whose
+  databases are busy while their sites take almost no traffic — the tell for a
+  runaway cron/import, an abusive backend script, or a compromised account
+  (vs the boring "lots of traffic → lots of DB"). No behaviour change yet — the
+  HTTP endpoint + MCP tool that feed it live governor/webdetector snapshots and
+  the `/etc/userdomains` host→owner map follow in a later change.
+
 ### Fixed
 - **Data race on the MySQL governor's perf_schema / userstat capability flags.**
   `perfSchemaOK`, `perfHasCPU`, `perfCPUActive`, `userstatsOK` and `userstatsOff`
