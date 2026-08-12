@@ -173,8 +173,8 @@ func evaluateWhatsWrong(sections map[string]json.RawMessage) whatsWrongResult {
 	// snapshot. A node runs ONE edge; the idle alternate is installed-but-
 	// disabled and legitimately reports failed/inactive, so evalServices uses
 	// this to suppress that false "service failed" critical. When the edge can't
-	// be resolved the collector emits "unknown"/"mixed" (and a missing/errored
-	// health section leaves this ""); none of those is a known engine, so
+	// be resolved the collector emits the sentinel "unknown" (and a missing/
+	// errored health section leaves this ""); neither is a known engine, so
 	// evalServices suppresses nothing and still flags a failed edge — never
 	// masking a real edge-down. The ACTIVE edge's own health is additionally
 	// evaluated authoritatively by evalHealth (edge_status / frontend_working).
@@ -454,11 +454,12 @@ func evalServices(body json.RawMessage, edgeService string) []finding {
 		// Skip the idle alternate edge engine (e.g. a failed/disabled openresty
 		// while Angie owns the edge). Suppress ONLY when the active edge resolved
 		// to a KNOWN engine (edgeEngineUnits[edgeService]) and this is a DIFFERENT
-		// edge engine. Fail-safe: the collector reports an unresolved edge as the
-		// sentinel "unknown" / "mixed" (not ""), and neither is in edgeEngineUnits,
-		// so an unresolved edge suppresses nothing and a genuinely-failed edge is
-		// still flagged. The active edge's own health is additionally covered by
-		// evalHealth (edge_status / frontend_working).
+		// edge engine. Fail-safe: any value that is not a known engine — the
+		// collector's unresolved sentinel "unknown", "" from a missing health
+		// section, or any unexpected string — is not in edgeEngineUnits, so it
+		// suppresses nothing and a genuinely-failed edge is still flagged. The
+		// active edge's own health is additionally covered by evalHealth
+		// (edge_status / frontend_working).
 		unitBase := strings.ToLower(strings.TrimSuffix(u.Unit, ".service"))
 		if edgeEngineUnits[edgeService] && edgeEngineUnits[unitBase] && unitBase != edgeService {
 			continue

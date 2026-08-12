@@ -240,9 +240,10 @@ func TestWhatsWrong_EdgeEngineAlternate(t *testing.T) {
 	}
 
 	// Fail-safe: when the active edge is NOT a known engine, nothing is
-	// suppressed. Cover the collector's real unresolved sentinels ("unknown",
-	// "mixed") AND the absent-health case (""). A failed openresty must be
-	// flagged in all three — never mask a real edge-down.
+	// suppressed. Cover the collector's unresolved sentinel ("unknown"), the
+	// absent-health case (""), and an unexpected value ("mixed") to prove any
+	// non-engine string fails safe. A failed openresty must be flagged in all —
+	// never mask a real edge-down.
 	for _, unresolved := range []string{"", "unknown", "mixed"} {
 		sawOR := false
 		for _, f := range evalServices(body, unresolved) {
