@@ -24,13 +24,15 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
 
-// accessLogCandidates are the known CFM edge access logs, in priority order
-// (OpenResty first, then Angie; main log before the cfm-formatted split). The
-// first that exists is used unless the caller names one from this same set.
+// accessLogCandidates are the known CFM edge access logs. The one selected by
+// default is the most-recently-modified of those that exist (see availableFrom
+// — it tracks the ACTIVE edge, not this list order); this static order is only
+// the tiebreak when mtimes are equal. A caller may name any one from this set.
 var accessLogCandidates = []string{
 	"/usr/local/openresty/nginx/logs/access.log",
 	"/var/log/angie/access.log",
@@ -39,9 +41,10 @@ var accessLogCandidates = []string{
 	"/var/log/nginx/access.log",
 }
 
-// errorLogCandidates are the known CFM edge ERROR logs, in priority order
-// (OpenResty first, then Angie). Same auto-detect + allow-list discipline as
-// the access candidates. This is where the edge Lua writes ngx.log(): panel
+// errorLogCandidates are the known CFM edge ERROR logs. Same most-recently-
+// modified default-selection + allow-list discipline as the access candidates
+// (this static order is only the equal-mtime tiebreak). This is where the edge
+// Lua writes ngx.log(): panel
 // decision logonly verdicts ([cfm_panel_decision] logonly=would_enforce …),
 // module-load failures, and Lua runtime errors.
 var errorLogCandidates = []string{
@@ -78,21 +81,42 @@ type Result struct {
 	Lines     []string `json:"lines"`      // raw matching log lines, oldest→newest
 }
 
-// availableFrom returns the candidates that currently exist as regular files.
+// availableFrom returns the candidates that currently exist as regular files,
+// most-recently-modified FIRST.
+//
+// The ordering is load-bearing, not cosmetic: a node fronts its traffic with
+// exactly one engine (Angie OR OpenResty), but the OTHER engine's log file
+// often still exists as a stale/empty leftover from a disabled install. A
+// static "OpenResty-first" order would then default-select that wrong-engine
+// empty log (observed live: edge_error_tail read an empty
+// /usr/local/openresty/nginx/logs/error.log on an Angie node). mtime tracks the
+// ACTIVE edge — it is the one actually being written — so most-recent-first
+// makes the default (avail[0]) the live log. Stable sort keeps the original
+// candidate order as the tiebreak when mtimes are equal.
 func availableFrom(candidates []string) []string {
-	out := make([]string, 0, len(candidates))
+	type ent struct {
+		path string
+		mod  time.Time
+	}
+	ents := make([]ent, 0, len(candidates))
 	for _, p := range candidates {
 		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
-			out = append(out, p)
+			ents = append(ents, ent{path: p, mod: fi.ModTime()})
 		}
+	}
+	sort.SliceStable(ents, func(i, j int) bool { return ents[i].mod.After(ents[j].mod) })
+	out := make([]string, len(ents))
+	for i, e := range ents {
+		out[i] = e.path
 	}
 	return out
 }
 
 // resolveFrom picks the log to scan from candidates: if want is non-empty it
 // MUST be one of the allow-listed candidates (basename or full path) and must
-// exist; otherwise the first existing candidate is used. kind names the log
-// class for error messages ("access" / "error").
+// exist; otherwise the most-recently-modified existing candidate is used (via
+// availableFrom). kind names the log class for error messages ("access" /
+// "error").
 func resolveFrom(candidates []string, want, kind string) (string, error) {
 	avail := availableFrom(candidates)
 	if len(avail) == 0 {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeLog writes n numbered lines, injecting the target IP on some of them.
@@ -282,5 +283,51 @@ func TestTailError_EmptyGrepAndSourceAllowlist(t *testing.T) {
 	// A source not on the error-log allow-list is rejected (no arbitrary path).
 	if _, err := TailError(context.Background(), "", "/etc/passwd", 0, 0); err == nil {
 		t.Fatal("expected rejection of non-allowlisted error-log source")
+	}
+}
+
+// Reproduces the live bug: on an Angie-fronted node the disabled OpenResty
+// error.log still exists (stale/empty) and, under a static "OpenResty-first"
+// order, was default-selected over the actively-written Angie log. The resolver
+// must default to the most-recently-modified (active) log instead.
+func TestAvailableFrom_PrefersMostRecentActiveLog(t *testing.T) {
+	if _, err := exec.LookPath("tail"); err != nil {
+		t.Skip("tail not available")
+	}
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "openresty-error.log") // exists but disabled engine → old mtime
+	fresh := filepath.Join(dir, "angie-error.log")     // active edge → new mtime
+	if err := os.WriteFile(stale, []byte("2026/01/01 00:00:00 [warn] stale leftover line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fresh, []byte("2026/08/12 14:00:00 [warn] logonly=would_enforce active line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldT, newT := time.Unix(1_700_000_000, 0), time.Unix(1_800_000_000, 0)
+	if err := os.Chtimes(stale, oldT, oldT); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(fresh, newT, newT); err != nil {
+		t.Fatal(err)
+	}
+	// Candidate order deliberately lists the STALE one first (mimics the static
+	// openresty-before-angie priority that caused the bug).
+	old := errorLogCandidates
+	errorLogCandidates = []string{stale, fresh}
+	defer func() { errorLogCandidates = old }()
+
+	res, err := TailError(context.Background(), "logonly", "", 1000, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LogFile != fresh {
+		t.Fatalf("default selected %q, want the freshest (active edge) %q", res.LogFile, fresh)
+	}
+	if res.Matched != 1 {
+		t.Fatalf("matched=%d want 1 (the active log's logonly line)", res.Matched)
+	}
+	// AvailableErrorLogs reports freshest-first too.
+	if av := AvailableErrorLogs(); len(av) != 2 || av[0] != fresh {
+		t.Fatalf("AvailableErrorLogs()=%v, want freshest %q first", av, fresh)
 	}
 }
