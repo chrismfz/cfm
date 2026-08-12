@@ -126,14 +126,29 @@ do
   assert_true(count(rpc_kinds, "ok_touch") == 1, "valid clearance fires exactly one ok_touch (got " .. count(rpc_kinds, "ok_touch") .. ")")
 end
 
--- 4) kill switch CFM_PANEL_DECISION=0: no probe at all.
+-- 4) kill switch CFM_PANEL_DECISION=0: the fake module IS present, but the
+--    switch is off, so construction is skipped and no probe fires. luajit has
+--    no os.setenv, so we wrap os.getenv for the load (which reads the env at
+--    module top level) and restore it after. This is the REAL switch path, not
+--    a proxy. (In production the switch also needs `env CFM_PANEL_DECISION;` in
+--    the engine conf so workers see it — asserted at the end of this file.)
 do
-  local prev = os.getenv("CFM_PANEL_DECISION")
-  -- luajit has no os.setenv; simulate via a package.loaded guard instead:
-  -- set the env through a wrapper is not available, so assert the default-on
-  -- path already proven above and document that 0 disables (checked at load).
-  -- Instead verify: with the module absent, the probe is a no-op (same code path
-  -- the kill switch takes — panel_decision stays nil).
+  local verdict_local = { ip_action = "block", vhost_action = "allow" }
+  local real_getenv = os.getenv
+  os.getenv = function(k) if k == "CFM_PANEL_DECISION" then return "0" end return real_getenv(k) end
+  local ok_run, ngx_off, last_off = pcall(run, { verdict = verdict_local, clearance_valid = false })
+  os.getenv = real_getenv
+  assert_true(ok_run, "kill-switch load did not raise")
+  assert_true(#probe_gets == 0, "CFM_PANEL_DECISION=0: no probe fired (got " .. #probe_gets .. ")")
+  assert_true(#rpc_kinds == 0, "CFM_PANEL_DECISION=0: no ok/touch fired")
+  assert_true(last_off and last_off.action == "redirect",
+              "CFM_PANEL_DECISION=0: panel still challenges normally (probe off, flow intact)")
+end
+
+-- 5) module ABSENT (upgrade lag: new cfm_panel.lua, old /var/lib/cfm/lua without
+--    cfm_decision): pcall(require) fails, panel_decision stays nil, probe is a
+--    no-op, and the panel challenges exactly as before.
+do
   verdict = { ip_action = "block", vhost_action = "allow" }
   clearance_valid = false
   probe_gets, rpc_kinds, log_lines = {}, {}, {}
@@ -175,6 +190,19 @@ do
   assert_true(actions[#actions] and actions[#actions].action == "redirect",
               "module absent: panel still challenges normally (no dependency on the probe)")
   local _ = prev
+end
+
+-- 6) Production kill-switch wiring: nginx/OpenResty workers only see an env var
+--    if it is re-exported with an `env` directive. The CFM_PANEL_DECISION switch
+--    is inert without it, so assert both engine confs declare it (regression
+--    guard for the exact "advertised-but-dead switch" bug this replaces).
+do
+  for _, conf in ipairs({ "configs/openresty.conf", "configs/angie.conf" }) do
+    local fh = assert(io.open(conf, "r"), "cannot open " .. conf)
+    local src = fh:read("*a"); fh:close()
+    assert_true(src:find("env%s+CFM_PANEL_DECISION%s*;") ~= nil,
+      conf .. " must declare `env CFM_PANEL_DECISION;` or the kill switch is inert in workers")
+  end
 end
 
 print("ok: cfm_panel logonly bridge decision — records, never enforces")
