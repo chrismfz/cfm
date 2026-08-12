@@ -72,8 +72,40 @@ back-filled here — see the git/PR history for that period.
   `detectors.conf` (edge mode has been unconditional since Phase 1a; a stale key
   in a live config is still ignored with a one-line deprecation warning). The
   remaining Phase 3 cookie-net cleanup (inert `cfm_ok`, legacy shared-cookie
-  fallback, loop-breaker) is deferred to its own change; panel enforcement stays
-  observe-only until Phase 4. See `docs/edge-unification-plan.md`.
+  fallback, loop-breaker) is deferred to its own change. See
+  `docs/edge-unification-plan.md`.
+- **Edge unification Phase 4a: panel WAF enforce is now available, opt-in
+  (default LOGONLY), BLOCK-tier only.** `CFM_PANEL_WAF` gains an `enforce` value
+  alongside `0`/off and the default `1`/logonly. In `enforce`, only the
+  high-confidence **`block`** tier acts (`block` → deny); `logonly`-tier hits are
+  never enforced (observe-only by design) and `challenge`-tier hits are NOT
+  turned into a standalone WAF challenge (that would loop — a solved clearance
+  cookie doesn't clear the WAF match — and break non-browser clients), so
+  challenge-tier enforcement waits for the clearance-aware Phase 4b decision
+  path. **Merging changes nothing** — the default stays LOGONLY, so an upgrade
+  never starts enforcing on the cPanel/WHM ports; the operator opts in per node
+  (`CFM_PANEL_WAF=enforce`, orion first → fleet), and `CFM_PANEL_WAF=0` is the
+  instant kill switch. Self-IPs / `IGNORE_NETS` are skipped, `deny` can't loop,
+  and the probe is fail-open (any WAF error → normal flow), so an enforcing panel
+  WAF can't lock an admin out of WHM/cPanel. The panel challenge was already
+  enforced; the shared bridge **decision** stays LOGONLY until Phase 4b.
+- **Edge unification Phase 4b: panel bridge-decision enforce is now available,
+  opt-in (default LOGONLY), BLOCK-tier only.** `CFM_PANEL_DECISION` gains an
+  `enforce` value alongside `0`/off and the default `1`/logonly, mirroring 4a. In
+  `enforce`, a bridge verdict whose ip/vhost/rule action is **`block`** hard-denies
+  (a plain 403, no redirect, so it can't loop); the deny applies on human-entry
+  even to a client with a valid clearance cookie (web-edge parity — a blocked IP
+  is blocked). The **challenge tier is deliberately not enforced from the
+  verdict** — the existing clearance-aware human-entry challenge already covers
+  un-cleared browsers and passes non-browsers through, so deriving a challenge
+  from the verdict would duplicate it and reintroduce the loop Phase 4a avoided;
+  `throttle`/other verdicts stay observe-only. **Merging changes nothing** — the
+  default stays LOGONLY; the operator opts in per node (`CFM_PANEL_DECISION=enforce`,
+  orion first → fleet), and `CFM_PANEL_DECISION=0` is the instant kill switch. The
+  probe is fail-open (any bridge error → normal flow, no deny), so an enforcing
+  decision can't lock an admin out of WHM/cPanel. `waf_fp_hunt`'s
+  `panel_decision.ip_block_count` keeps counting on enforcing nodes (it keys on
+  the verdict fields, not the log marker).
 
 ### Fixed
 - **`make release` GitHub-release publish was silently broken by shell

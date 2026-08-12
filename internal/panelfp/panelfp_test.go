@@ -17,6 +17,12 @@ const (
 	decAllowChallenge = `2026/08/12 13:39:05 [warn] 1046969#1046969: *306117 [lua] cfm_panel.lua:167: panel_decision_probe(): [cfm_panel_decision] logonly=would_enforce scope=panel:2086 ip=87.236.176.108 host=webmail.mx-architecture.com uri=/ ip_action=allow vhost_action=challenge rule_action=- cached=0, client: "87.236.176.108", server: "_"`
 	// The real FP risk: an ip_action=block verdict on a panel port.
 	decIPBlock = `2026/08/12 16:05:00 [warn] 1#1: *9 [lua] cfm_panel.lua:170: panel_decision_probe(): [cfm_panel_decision] logonly=would_enforce scope=panel:2083 ip=203.0.113.50 host=cpanel.example.com uri=/ ip_action=block vhost_action=challenge rule_action=- cached=0, client: "203.0.113.50"`
+	// Phase 4b enforce: the SAME block verdict, but the marker now reads
+	// `enforce=block` (it actually denied). The aggregator keys on the
+	// ip/vhost/rule_action fields, not the marker, so this must aggregate
+	// identically to decIPBlock — a live enforcing node must still show up in the
+	// FP-hunt ip_block_count.
+	decIPBlockEnforced = `2026/08/12 16:06:00 [warn] 1#1: *9 [lua] cfm_panel.lua:170: panel_decision_probe(): [cfm_panel_decision] enforce=block scope=panel:2083 ip=203.0.113.51 host=cpanel.example.com uri=/ ip_action=block vhost_action=allow rule_action=- cached=0, client: "203.0.113.51"`
 	traceLine  = `2026/08/12 15:47:44 [warn] 146679#146679: *90218079 [lua] cfm_panel.lua:934: [cfm_panel_trace] phase=validate_next corr_id=6fe host_norm=x scope=panel:2082 cookie_present=0 validator_reason=missing, client: 185.247.137.219`
 )
 
@@ -57,6 +63,25 @@ func TestParse_DecisionLine(t *testing.T) {
 	}
 	if f["host"] != "webmail.mx-architecture.com" {
 		t.Errorf("host = %q", f["host"])
+	}
+}
+
+func TestParse_DecisionLine_EnforceMarker(t *testing.T) {
+	// Once CFM_PANEL_DECISION=enforce is live, a block verdict logs
+	// `enforce=block` instead of `logonly=would_enforce`. The parser must still
+	// classify it as a decision line and read the verdict fields, and Summarize
+	// must still count it as an ip block (the FP-hunt tool must not go blind on
+	// enforcing nodes).
+	kind, f := Parse(decIPBlockEnforced)
+	if kind != KindDecision {
+		t.Fatalf("kind = %v, want KindDecision", kind)
+	}
+	if f["ip_action"] != "block" {
+		t.Errorf("ip_action = %q, want block", f["ip_action"])
+	}
+	s := Summarize([]string{decIPBlockEnforced})
+	if s.Decision.IPBlockCount != 1 {
+		t.Errorf("IPBlockCount = %d, want 1 (enforce=block line must still count)", s.Decision.IPBlockCount)
 	}
 }
 
