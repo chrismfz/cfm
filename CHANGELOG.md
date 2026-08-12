@@ -28,6 +28,16 @@ back-filled here — see the git/PR history for that period.
   HTTP endpoint + MCP tool that feed it live governor/webdetector snapshots and
   the `/etc/userdomains` host→owner map follow in a later change.
 
+### Changed
+- **One canonical cPanel domain→owner reader (`internal/panelmap`).** The
+  `/etc/userdatadomains` + `/etc/userdomains` parse used to derive scoped-MySQL
+  ownership was inlined in `apiserver`; it now lives in `internal/panelmap`
+  (`HostOwners` for host→single-owner, `OwnerSet` for the union used by scope
+  derivation), and `apiserver` delegates to it. Behaviour-preserving (guarded by
+  the existing scoped-MySQL owner tests) — this removes a parser that would
+  otherwise drift as new consumers (the upcoming DB↔web correlation) need the
+  same mapping (CLAUDE.md §5).
+
 ### Fixed
 - **Data race on the MySQL governor's perf_schema / userstat capability flags.**
   `perfSchemaOK`, `perfHasCPU`, `perfCPUActive`, `userstatsOK` and `userstatsOff`
