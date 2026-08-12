@@ -66,11 +66,16 @@ make test-lua
 ./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf bounds + generator tests
 ./scripts/tests/check_logrotate_coverage.sh      # every CFM log path is rotated (see §5)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
+./scripts/tests/check_changelog_entry.sh         # CHANGELOG structure (locally); per-PR "code changed → needs entry" runs in CI
 ```
 
-The per-PR gate is `security.yml`'s **build-test** job only (the block above),
-kept lean so it runs on every PR without burning the repo's Actions-minute
-budget. The heavier **advisory** scanners — **CodeQL** + **govulncheck** — moved
+The per-PR gate is `security.yml`'s **build-test** job (the block above) plus a
+tiny separate **changelog** job — it asserts `CHANGELOG.md` keeps a single,
+correctly-placed `## [Unreleased]` heading (the date-stamper's invariant) and
+fails a PR that changes runtime code without adding a `[Unreleased]` entry
+(escape hatches: `[skip changelog]` in the PR title/body, or a `no-changelog`
+label; docs/tests/CI-only PRs are exempt). Both are kept lean so they run on
+every PR without burning the repo's Actions-minute budget. The heavier **advisory** scanners — **CodeQL** + **govulncheck** — moved
 to a **weekly schedule + manual dispatch** (`codeql.yml`, "Weekly Security
 Scans"); they no longer run per-PR/per-push. Trigger a manual run (Actions tab →
 Run workflow) before a release or after a risky merge. gosec and Semgrep were
@@ -356,13 +361,19 @@ make sync       # rsyncs today's .deb/.rpm (+ checksums) to the remote repo
 `scripts/stamp-changelog.sh $(REL_DATE)` after the packages build, which moves
 everything under `## [Unreleased]` beneath a `## YYYY.MM.DD` (UTC) heading and
 leaves a fresh empty `## [Unreleased]`. You no longer hand-edit the date on
-release day. What you still do by hand:
+release day, and — as of the changelog-automation change — you no longer commit
+it by hand either:
 
-1. **While working:** add a bullet under `## [Unreleased]`, grouped by
-   **Added / Changed / Fixed / Security / Removed**. Keep entries
-   operator-facing (what changed, why it matters) — not "fixed typo".
-2. **Commit the stamped `CHANGELOG.md`** with the release (the stamp edits the
-   working tree; it does not commit for you — the script prints a reminder).
+1. **While working (the only manual step):** add a bullet under
+   `## [Unreleased]`, grouped by **Added / Changed / Fixed / Security /
+   Removed**. Keep entries operator-facing (what changed, why it matters) — not
+   "fixed typo".
+2. **`make release` commits & pushes it for you** — but **only** `CHANGELOG.md`
+   (path-scoped `git commit -- CHANGELOG.md`), never the whole tree, so built
+   binaries / compiled BPF objects sitting in a release host's working dir are
+   never swept into the commit. A failed commit/push warns but never aborts an
+   otherwise-good release. (Standalone `make changelog` still only edits the
+   file — it does not commit.)
 
 The stamp is idempotent and safe to re-run:
 - an empty `[Unreleased]` (only `_Nothing yet._`) is a no-op;
@@ -374,8 +385,11 @@ You can run it standalone with `make changelog`. The date always comes from the
 Makefile (`REL_DATE := date -u +%Y.%m.%d`), so the CHANGELOG date can never
 drift from the date portion of the package/tag.
 
-So the steady-state release ritual is now just: `make release ; make sync`,
-then commit the stamped `CHANGELOG.md`.
+So the steady-state release ritual is now just: `make release ; make sync`.
+`make release` stamps **and** commits/pushes `CHANGELOG.md` for you; a CI
+`changelog` guard (`scripts/tests/check_changelog_entry.sh`, see §3) keeps the
+`[Unreleased]` heading stampable and nudges every runtime-code PR to carry an
+entry.
 
 ## 9. Workflow
 
