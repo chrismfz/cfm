@@ -83,6 +83,23 @@ back-filled here — see the git/PR history for that period.
   in-path pipeline via shared Lua modules. Grounded in two full-surface scans;
   `cfm dnat` / `cfm dnat cpanel` (edge + panel routing) are explicitly kept.
 
+### Added
+- **Panel LOGONLY bridge decision (edge-unification Phase 2d).** The cPanel/WHM/
+  DirectAdmin listeners now consult the same `/nginx/decision` bridge the web
+  edge uses (`scope=panel:<port>`) on human-entry and fire `/nginx/ok/touch`
+  after a valid clearance, so panel traffic gets a per-IP/host/rule verdict and
+  the bridge learns that an IP passed on a panel scope. It is **log-only**:
+  when the bridge would block/challenge, the panel logs
+  `[cfm_panel_decision] logonly=would_enforce …` but does **not** act on it —
+  the clearance-cookie challenge is unchanged, so there is no new way to lock an
+  admin out of WHM/cPanel. This gathers false-positive data before any panel
+  enforcement lands. Fully fail-open and `pcall`-guarded; disable with
+  `CFM_PANEL_DECISION=0`. Under the hood the decision-RPC client (unix-socket
+  transport + `/nginx/decision` verdict with clean-allow caching) is extracted
+  from `cfm.lua` into a shared, requirable `cfm_decision.lua` module with **zero
+  behaviour change on the web path** (the three F38/F45/F47 decision regression
+  tests now exercise the module directly).
+
 ### Fixed
 - **Web and panel clearance cookies no longer clobber each other
   (edge-unification Phase 2a).** Browsers do not isolate cookies by port, so
