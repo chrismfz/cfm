@@ -48,6 +48,9 @@
         <div id="ageBuckets" class="statgrid"></div>
       </section>
 
+      <!-- Top sender + Top recipient sit side-by-side (two half-width cards on
+           one grid row; they stack on narrow screens via the .layout collapse).
+           "Who filled the queue" (full-width) follows below them. -->
       <section class="card">
         <h2>Top sender domains <span class="top-hint">a spike often = a compromised account / bounce storm</span></h2>
         <div class="table-wrap">
@@ -55,17 +58,17 @@
         </div>
       </section>
 
-      <section class="card wide">
-        <h2>Who filled the queue <span class="top-hint">per individual sender — Frozen and Deferred are the stuck subsets; <code>&lt;&gt;</code> is a null sender (bounce backscatter)</span></h2>
-        <div class="table-wrap">
-          <table><thead><tr><th>Sender</th><th>Total</th><th>Frozen</th><th>Deferred</th></tr></thead><tbody id="queueSenderBody"></tbody></table>
-        </div>
-      </section>
-
       <section class="card">
         <h2>Top recipient domains</h2>
         <div class="table-wrap">
           <table><thead><tr><th>Domain</th><th>Count</th></tr></thead><tbody id="recipientBody"></tbody></table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Who filled the queue <span class="top-hint">per individual sender — Frozen and Deferred are the stuck subsets; <code>&lt;&gt;</code> is a null sender (bounce backscatter)</span></h2>
+        <div class="table-wrap">
+          <table><thead><tr><th>Sender</th><th>Total</th><th>Frozen</th><th>Deferred</th></tr></thead><tbody id="queueSenderBody"></tbody></table>
         </div>
       </section>
 
