@@ -122,6 +122,14 @@ func Correlate(db []DBUser, web []Vhost, hostOwner map[string]string, params Par
 		excluded[strings.ToLower(strings.TrimSpace(a))] = struct{}{}
 	}
 
+	// accountKey normalizes the join key so the DB side (account derived from the
+	// MySQL user) and the web side (owner from the host→owner map) always agree.
+	// Without this, a mixed-case MySQL user (AccountOf("Chris_wp")="Chris") would
+	// key a different account than the lowercase userdomains owner ("chris"),
+	// splitting one tenant into two rows and FALSELY flagging the DB half as
+	// few-hits/high-pressure. Matches the (already lowercased) exclusion keys.
+	accountKey := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
 	acc := make(map[string]*Account)
 	get := func(name string) *Account {
 		if a, ok := acc[name]; ok {
@@ -134,11 +142,11 @@ func Correlate(db []DBUser, web []Vhost, hostOwner map[string]string, params Par
 
 	// DB side: fold each user into its account.
 	for _, u := range db {
-		name := AccountOf(u.User)
+		name := accountKey(AccountOf(u.User))
 		if name == "" {
 			continue
 		}
-		if _, skip := excluded[strings.ToLower(name)]; skip {
+		if _, skip := excluded[name]; skip {
 			continue
 		}
 		a := get(name)
@@ -152,11 +160,11 @@ func Correlate(db []DBUser, web []Vhost, hostOwner map[string]string, params Par
 
 	// Web side: fold each vhost into its owner account (skip unmapped hosts).
 	for _, v := range web {
-		owner, ok := hostOwner[v.Host]
-		if !ok || strings.TrimSpace(owner) == "" {
+		owner := accountKey(hostOwner[v.Host])
+		if owner == "" {
 			continue
 		}
-		if _, skip := excluded[strings.ToLower(owner)]; skip {
+		if _, skip := excluded[owner]; skip {
 			continue
 		}
 		a := get(owner)

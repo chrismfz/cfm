@@ -97,6 +97,30 @@ func TestCorrelate_FlagsFewHitsHighPressure(t *testing.T) {
 	}
 }
 
+func TestCorrelate_CaseInsensitiveJoin(t *testing.T) {
+	// Mixed-case MySQL user vs lowercase userdomains owner must join to ONE
+	// account (regression: previously split into "Chris" + "chris", falsely
+	// flagging the DB half). Real traffic on the mapped host must count.
+	db := []DBUser{{User: "Chris_wp", CPUSec: 3.0, QueryCount: 1000}}
+	web := []Vhost{{Host: "chris.com", RPS: 20.0}} // ~1200 hits/min → not few-hits
+	hostOwner := map[string]string{"chris.com": "chris"}
+
+	rows := Correlate(db, web, hostOwner, Params{WindowSec: 60})
+	if len(rows) != 1 {
+		t.Fatalf("expected exactly 1 joined account, got %d: %+v", len(rows), rows)
+	}
+	a := rows[0]
+	if a.Account != "chris" {
+		t.Errorf("account key not normalized: %q", a.Account)
+	}
+	if a.Pressure != 3.0 || a.WebRPS != 20.0 {
+		t.Errorf("DB pressure and web hits did not join: %+v", a)
+	}
+	if a.FewHitsHighPressure {
+		t.Errorf("must NOT be flagged — it has heavy traffic once joined: %+v", a)
+	}
+}
+
 func TestCorrelate_BusySecProxyWhenCPUZero(t *testing.T) {
 	// CloudLinux MariaDB path: CPUSec 0, BusySec carries the signal.
 	db := []DBUser{{User: "cl_db", CPUSec: 0, BusySec: 2.5, QueryCount: 400}}
