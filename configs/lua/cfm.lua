@@ -794,122 +794,13 @@ end
 -- NETWORK LAYER
 -- ─────────────────────────────────────────────────────────────────────────────
 
-local function read_chunked(sock)
-  local out = {}
-  while true do
-    local line, err = sock:receive("*l")
-    if not line then return nil, "chunked size line: " .. (err or "?") end
-    local hex = line:match("^%s*([0-9a-fA-F]+)")
-    if not hex then return nil, "bad chunk size line: " .. tostring(line) end
-    local n = tonumber(hex, 16)
-    if not n then return nil, "bad chunk size hex: " .. tostring(hex) end
-    if n == 0 then
-      while true do local tl = sock:receive("*l"); if not tl or tl == "" then break end end
-      break
-    end
-    local data, derr = sock:receive(n)
-    if not data then return nil, "chunk read: " .. (derr or "?") end
-    table.insert(out, data); sock:receive(2)
-  end
-  return table.concat(out), nil
-end
+-- Bridge decision-RPC client (unix-socket transport + /nginx/decision verdict
+-- with clean-allow caching) lives in cfm_decision.lua. Forward-declared here
+-- and constructed once below, after its injected hooks (is_static_asset_uri,
+-- real_ip, log_route, the token-refresh hook) are defined; the RPC callers
+-- defined between here and the construction capture it as an upvalue.
+local decision
 
-local function http_unix(method, path, body)
-  local s, err = ngx.socket.tcp()
-  if not s then return nil, "socket.tcp: " .. (err or "unknown") end
-  s:settimeouts(CFG.decision_timeout_ms, CFG.decision_timeout_ms, CFG.decision_timeout_ms)
-  local ok, cerr = s:connect("unix:" .. CFG.sock_path)
-  if not ok then s:close(); return nil, "connect: " .. (cerr or "unknown") end
-  body = body or ""
-  local req = method .. " " .. path .. " HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n"
-  if CFG.token and CFG.token ~= "" then
-    req = req .. CFG.token_header .. ": " .. CFG.token .. "\r\n"
-  end
-  if method == "POST" then
-    req = req .. "Content-Type: application/json\r\nContent-Length: " .. tostring(#body) .. "\r\n"
-  end
-  req = req .. "\r\n" .. body
-  local _, werr = s:send(req)
-  if werr then s:close(); return nil, "send: " .. (werr or "unknown") end
-  local status_line, rerr = s:receive("*l")
-  if not status_line then s:close(); return nil, "recv status: " .. (rerr or "unknown") end
-  local code = tonumber(status_line:match("%s(%d%d%d)%s"))
-  if not code then s:close(); return nil, "bad status line: " .. status_line end
-  local content_length, is_chunked
-  while true do
-    local line, _ = s:receive("*l")
-    if not line or line == "" then break end
-    local k, v = line:match("^([^:]+):%s*(.*)$")
-    if k and v then
-      local kl = k:lower()
-      if kl == "content-length" then content_length = tonumber(v)
-      elseif kl == "transfer-encoding" and v:lower():find("chunked", 1, true) then is_chunked = true end
-    end
-  end
-  local resp = ""
-  if method == "HEAD" or code == 204 or code == 304 then resp = ""
-  -- Explicit empty body (Content-Length: 0). The bridge's ip/vhost push and
-  -- clear handlers (/nginx/ip, /nginx/vhost) reply 200 with Content-Length: 0.
-  -- (observe and ok-touch instead return a small JSON body, so they take the
-  -- content_length > 0 branch — they were never "*a" victims.) This MUST be
-  -- handled before the fall-through "*a" read below: on a keep-alive connection
-  -- the server never closes, so "*a" would block until decision_timeout_ms
-  -- (~300ms) on every such call — a per-push worker stall that amplifies under
-  -- a WAF-tripping flood. The hot-path victim is the WAF autoblock push. [F04]
-  elseif content_length == 0 then resp = ""
-  elseif content_length and content_length > 0 then resp = s:receive(content_length)
-  elseif is_chunked then
-    local b, berr = read_chunked(s); if not b then s:close(); return nil, berr end; resp = b
-  else resp = s:receive("*a") or "" end
-  local ok_ka = s:setkeepalive(CFG.keepalive_idle_ms, CFG.keepalive_pool)
-  if not ok_ka then s:close() end
-  if code ~= 200 then return nil, "http " .. tostring(code) .. " body=" .. tostring(resp) end
-  return resp, nil
-end
-
-local function classify_bridge_err(err)
-  local msg = lower(tostring(err or ""))
-  if msg == "" then return "unknown" end
-  if msg:find("timeout", 1, true) then return "timeout" end
-  if msg:find("connect:", 1, true) then return "connect" end
-  local code = msg:match("http%s+(%d%d%d)")
-  if code then return "http_" .. code end
-  if msg:find("decode", 1, true) or msg:find("json", 1, true) then return "json" end
-  return "unknown"
-end
-
-local function rpc_call(kind, method, path, body, req_ctx)
-  local t0 = ngx.now()
-  local resp, err = http_unix(method, path, body)
-  local elapsed_ms = math.floor((ngx.now() - t0) * 1000 + 0.5)
-  if err then
-    req_ctx = req_ctx or {}
-    local ctx_ip = req_ctx.ip or real_ip()
-    local ctx_host = req_ctx.host or (ngx.var.host or "-")
-    local ctx_uri = req_ctx.uri or (ngx.var.request_uri or ngx.var.uri or "-")
-    local err_class = classify_bridge_err(err)
-
-    if CFG.debug or CFG.debug_headers then
-      ngx.ctx.cfm_bridge_error = err_class
-      ngx.ctx.cfm_bridge_latency_ms = elapsed_ms
-      if CFG.debug_headers then
-        ngx.header["X-CFM-Bridge-Error"] = err_class
-        ngx.header["X-CFM-Bridge-Latency-Ms"] = tostring(elapsed_ms)
-      end
-    end
-
-    if CFG.debug then
-      log_route(ngx.WARN, "rpc_err kind=" .. tostring(kind or "-") ..
-        " path=" .. tostring(path or "-") ..
-        " class=" .. tostring(err_class) ..
-        " elapsed_ms=" .. tostring(elapsed_ms) ..
-        " ip=" .. tostring(ctx_ip or "-") ..
-        " host=" .. tostring(ctx_host or "-") ..
-        " uri=" .. tostring(ctx_uri or "-"))
-    end
-  end
-  return resp, err
-end
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- HELPERS
@@ -917,7 +808,7 @@ end
 
 local function observe_waf(ip, host, uri, method, status, reason)
   if not ip or ip == "" then return end
-  rpc_call("observe", "POST", "/nginx/observe", cjson.encode({
+  decision:rpc("observe", "POST", "/nginx/observe", cjson.encode({
     ip = ip, host = host or "", uri = uri or "/",
     method = method or "", status = status or 403, reason = reason or "",
   }), { ip = ip, host = host, uri = uri, method = method })
@@ -996,7 +887,7 @@ local function maybe_flush_waf_insp()
       end
     end
     if #rows == 0 then return end
-    rpc_call("waf_stats", "POST", "/nginx/waf/stats", cjson.encode({ rows = rows }))
+    decision:rpc("waf_stats", "POST", "/nginx/waf/stats", cjson.encode({ rows = rows }))
   end)
   if not sched_ok and CFG.debug then
     ngx.log(ngx.WARN, "cfm: waf_insp flush schedule failed: ", tostring(sched_err))
@@ -1010,7 +901,7 @@ local function touch_ok_scoped(ip, host, scope)
   local last = SH:get(k)
   if last and (now - last) < CFG.ok_touch_every_sec then return end
   SH:set(k, now, CFG.ok_touch_every_sec)
-  rpc_call("ok_touch", "POST", "/nginx/ok/touch",
+  decision:rpc("ok_touch", "POST", "/nginx/ok/touch",
     cjson.encode({ ip = ip, host = normalize_host(host), scope = scope, ttl_sec = CFG.ok_ttl_sec }),
     { ip = ip, host = host })
 end
@@ -1058,13 +949,7 @@ local function validate_clearance_token(token, ip, host, scope)
   return ok, reason
 end
 
-local function fail_decision(errmsg)
-  if CFG.fail_open then
-    return { ip_action = "allow", vhost_action = "allow", err = errmsg }
-  else
-    return { ip_action = "block", vhost_action = "block", err = errmsg }
-  end
-end
+
 
 -- Static asset extensions whose bridge verdict is purely a function of
 -- (ip, host, scope) — never CHALLENGE_PATHS-eligible (no .git/.env/wp-config
@@ -1126,140 +1011,20 @@ end
 --     allow. Tightening this (fold ngx.md5(ua) in, or skip caching when
 --     UA-sensitive rules exist) is a tracked audit follow-up, separate from the
 --     F38 path-truncation fix — do not silently assume the key covers ua.
-local function decision_cache_key(ip, host, method, scheme, uri, qs, scope)
-  if is_static_asset_uri(uri) then
-    -- Static assets coalesce to ONE entry per (ip,host,scope) with path AND
-    -- query dropped. Known limitation: a query-scoped traffic rule written for
-    -- a static-extension path (e.g. "/x.css?token=…") can be served a cached
-    -- clean-allow warmed by a benign hit to the same extension. Query-scoping a
-    -- static-asset path is unusual; the static coalesce (hot-path win) is kept.
-    return "ds|" .. ip .. "|" .. host .. "|" .. (scope or "web")
-  end
-  -- Fold the query into the key by hashing path and query INDEPENDENTLY. Each
-  -- ngx.md5 is a fixed 32-hex field, so md5(uri)..md5(qs) is injective in
-  -- (uri, qs). Do NOT concat "uri.."?"..qs" and hash once: '?' can legitimately
-  -- appear in a DECODED path (from %3F), so "/x?y" with no query and "/x" with
-  -- query "y" would hash the same string — letting an attacker warm a
-  -- clean-allow under the harmless "/x?y" form and reuse it for the real
-  -- "/x?y" that a query-scoped rule would challenge/block. A query-less request
-  -- hashes exactly md5(uri) (== the old key), so no-query traffic keeps its
-  -- previous cache entry.
-  local h = ngx.md5(uri or "-")
-  if qs and qs ~= "" then h = h .. ngx.md5(qs) end
-  return "d|" .. ip .. "|" .. host .. "|" .. method .. "|" .. scheme .. "|" ..
-         h .. "|" .. (scope or "web")
-end
+-- Construct the shared bridge decision client now that its injected hooks
+-- exist. CFG is passed BY REFERENCE: cfm_decision reads cfg.token live and
+-- mutates it in place on a token rotation, exactly as the inline get_decision
+-- did (so this file's other bridge RPCs pick up the fresh token too).
+decision = require("cfm_decision").new(CFG, {
+  shdict       = SH,
+  is_static    = is_static_asset_uri,
+  real_ip      = real_ip,
+  log_route    = log_route,
+  on_token_403 = function() return _bridge.refresh_token_throttled(2) end,
+  token_path   = _bridge.TOKEN_PATH,
+  token_err    = function() return _bridge_token_err end,
+})
 
--- [R1] Pass ua + country so Go evaluates traffic rules. Cache clean allows only.
--- `uri` is the DECODED path (ngx.var.uri); `qs` is the raw query (ngx.var.args,
--- may be ""). They are sent as separate RPC params so the bridge never has to
--- re-split a "path?query" concat (a decoded path can contain a literal '?').
-local function get_decision(ip, host, uri, qs, method, scheme, ua, country, scope)
-  local key = decision_cache_key(ip, host, method, scheme, uri, qs, scope)
-
-  -- Accepted residual (2026-07 audit round-2): a cache HIT serves the prior
-  -- clean-allow for up to decision_cache_ttl_ms (90s) WITHOUT re-consulting the
-  -- bridge, so an IP the daemon block/challenge-flags DURING that window keeps
-  -- being served on URLs it already warmed. Bounded and accepted, not closed:
-  --   * only clean allows are cached (see the cache write below), so a
-  --     currently-blocked IP hitting a NEW url misses and sees the block;
-  --   * the WAF runs uncached on EVERY request — payloads are always caught;
-  --   * nft autoblock is kernel-level — severe bans drop before the edge.
-  -- The residual is thus "evade an edge behavioural challenge/block for <=90s on
-  -- already-cached URLs", which is self-healing. Closing it would need a per-IP
-  -- block-generation marker checked on every hit + Go-side publishing — a poor
-  -- trade for a <=90s soft window, and this file deliberately does no snapshot
-  -- polling (see header). Revisit only if edge-only challenge/block evasion
-  -- becomes an observed problem.
-  if SH then
-    local cached = SH:get(key)
-    if cached then
-      local obj = cjson.decode(cached)
-      if obj then obj._cache = true; return obj end
-    end
-  end
-
-  -- Missing bridge token (daemon not yet ready): fail through the SAME policy as
-  -- an unreachable daemon — fail_decision() honours CFG.fail_open (allow by
-  -- default) — instead of RPC'ing with no auth token (which the bridge would
-  -- 401/403 anyway). Uniform behaviour regardless of token-file presence (F47).
-  -- Loud but throttled to once/60s across workers so a prolonged outage can't
-  -- flood the error log; the first occurrence still logs immediately.
-  if not CFG.token or CFG.token == "" then
-    if (not SH) or SH:add("cfm_token_missing_log", "1", 60) then
-      ngx.log(ngx.ERR,
-        "[cfm] bridge token unavailable — FAILING ",
-        (CFG.fail_open and "OPEN (requests pass WITHOUT bridge IP/vhost/rule enforcement)"
-                        or "CLOSED (requests blocked)"),
-        "; ensure the cfm daemon has started. path: ",
-        tostring(_bridge.TOKEN_PATH or "/var/lib/cfm/lua/cfm_bridge_token.lua"),
-        " details: ", tostring(_bridge_token_err))
-    end
-    return fail_decision("bridge_token_missing")
-  end
-
-  local path = "/nginx/decision?ip=" .. esc(ip) ..
-               "&host="    .. esc(host)    ..
-               "&uri="     .. esc(uri)     ..
-               "&qs="      .. esc(qs or "")      ..
-               "&method="  .. esc(method)  ..
-               "&scheme="  .. esc(scheme)  ..
-               "&ua="      .. esc(ua or "")      ..
-               "&country=" .. esc(country or "") ..
-               "&scope="   .. esc(scope or "web")
-
-  local body, err = rpc_call("decision", "GET", path, nil, {
-    ip = ip, host = host, uri = uri, method = method,
-  })
-  if not body then
-    -- A bridge 403 on a request that DID present a token usually means the daemon
-    -- just rotated the token (weak-token replacement at startup) and our ~10s
-    -- cached copy is stale. Force-refresh once (throttled per worker) and — only
-    -- if the token actually CHANGED — retry with the fresh token before failing
-    -- open. This closes the up-to-10s rotation fail-open window (audit F45). The
-    -- "changed" guard means a persistent 403 from a genuinely wrong token (file
-    -- unchanged) does NOT retry (it would 403 again) and does NOT loop; the
-    -- throttle bounds the re-read cost under that misconfig. Updating CFG.token
-    -- also switches this request's later bridge RPCs to the fresh secret.
-    local klass = classify_bridge_err(err)
-    if (klass == "http_403" or klass == "http_401") and CFG.token and CFG.token ~= "" then
-      local fresh = _bridge.refresh_token_throttled(2)
-      if fresh and fresh ~= "" and fresh ~= CFG.token then
-        log_route(ngx.WARN, "bridge token rotated (403 on stale token); refreshed + retrying ip=" ..
-          tostring(ip or "-") .. " host=" .. tostring(host or "-"))
-        CFG.token = fresh
-        body, err = rpc_call("decision", "GET", path, nil, {
-          ip = ip, host = host, uri = uri, method = method,
-        })
-      end
-    end
-    if not body then
-      return fail_decision(err)
-    end
-  end
-  local obj = cjson.decode(body)
-  if not obj then
-    if CFG.debug or CFG.debug_headers then
-      ngx.ctx.cfm_bridge_error = "json"
-    end
-    if CFG.debug_headers then
-      ngx.header["X-CFM-Bridge-Error"] = "json"
-    end
-    if CFG.debug then
-      log_route(ngx.WARN, "rpc_err kind=decision class=json elapsed_ms=- ip=" .. tostring(ip or "-") ..
-        " host=" .. tostring(host or "-") ..
-        " uri=" .. tostring(uri or "-"))
-    end
-    return fail_decision("decode_failed")
-  end
-
-  -- Only cache clean allows (no rule action = no challenge/block/throttle pending)
-  if SH and obj.ip_action == "allow" and obj.vhost_action == "allow"
-     and not obj.rule_action then
-    SH:set(key, body, CFG.decision_cache_ttl_ms / 1000)
-  end
-  return obj
-end
 
 -- WAF excludes snapshot
 --
@@ -1274,7 +1039,7 @@ local function refresh_waf_excludes_if_needed()
   local last = tonumber(SH:get("wxsnap_ts") or "0") or 0
   if (now - last) < CFG.waf_excl_refresh_sec then return end
   if not SH:add("wxsnap_lock", "1", 1) then return end
-  local body, _ = rpc_call("waf_excludes", "GET", "/nginx/waf/excludes")
+  local body, _ = decision:rpc("waf_excludes", "GET", "/nginx/waf/excludes")
   if not body then
     SH:set("wxsnap_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
     SH:delete("wxsnap_lock"); return
@@ -1776,7 +1541,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
           referer      = req_headers["referer"],
           content_type = req_headers["content-type"],
         }
-        rpc_call("ip_push", "POST", "/nginx/ip", cjson.encode(push),
+        decision:rpc("ip_push", "POST", "/nginx/ip", cjson.encode(push),
           { ip = ip, host = p_host, uri = p_uri, method = p_meth })
       end
       log_route(ngx.INFO, "waf_" .. waf_action .. " ip=" .. ip .. " host=" .. host ..
@@ -1852,7 +1617,7 @@ end
 local ua_raw   = ngx.var.http_user_agent or ""
 local country  = geo_country_cached(ip)
 local qs_raw    = ngx.var.args or ""
-local d        = get_decision(ip, host, uri, qs_raw, method, scheme, ua_raw, country, clearance_scope)
+local d        = decision:get(ip, host, uri, qs_raw, method, scheme, ua_raw, country, clearance_scope)
 
 local ip_action        = d.ip_action        or "allow"
 local vh_action        = d.vhost_action      or "allow"
