@@ -67,10 +67,10 @@ type WAFRuleHit struct {
 // VhostOverview is the combined per-vhost security summary for the
 // "Security Overview" panel tab.
 type VhostOverview struct {
-	Host         string       `json:"host"`
-	Hours        int          `json:"hours"`
-	FromUnix     int64        `json:"from_unix"`
-	ToUnix       int64        `json:"to_unix"`
+	Host     string `json:"host"`
+	Hours    int    `json:"hours"`
+	FromUnix int64  `json:"from_unix"`
+	ToUnix   int64  `json:"to_unix"`
 	// Challenge stats
 	ChallengeIssued int     `json:"challenge_issued"`
 	ChallengeSolved int     `json:"challenge_solved"`
@@ -327,6 +327,25 @@ ORDER BY ts_unix DESC, id DESC`, fromUnix)
 	return scanHistoryRows(rows)
 }
 
+// CountWAFEventsSince returns the number of waf_observe + waf_trigger events
+// with ts_unix >= fromUnix, node-wide. It is a COUNT(*) over the
+// idx_history_events_type_ts index — far cheaper than readWAFEventsSinceLocked
+// (which scans full rows into memory) — so it is safe to call on the
+// health-snapshot collection path. Same event set + window as the WAF engine
+// summary's total, so cfm_metrics.waf_events_1h reconciles with it.
+func (s *HistoryStore) CountWAFEventsSince(fromUnix int64) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int
+	err := s.db.QueryRow(`
+SELECT COUNT(*) FROM history_events
+WHERE event_type IN ('waf_observe', 'waf_trigger') AND ts_unix >= ?`, fromUnix).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 func (s *HistoryStore) QueryEvents(host, ip, typ string, limit int) ([]HistoryEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -578,7 +597,7 @@ GROUP BY rid`
 }
 
 // WAFInspected returns the total inspection count over the given window.
-// host="" returns the global aggregate (the rows where host=''); a non-empty
+// host="" returns the global aggregate (the rows where host=”); a non-empty
 // host filters to that vhost's per-host counts.
 //
 // Window is [now - hours*3600, now]; the table stores per-hour buckets so

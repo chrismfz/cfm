@@ -17,6 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **`cfm_metrics.waf_events_1h` in the health snapshot is now the real last-hour
+  WAF count, reconciled with `security_overview`'s `waf_last_hour`.** It was
+  never populated by any production path (the only writer, `ApplyCounterSnapshot`,
+  is test-only), so it always read `0` next to a non-zero `waf_last_hour` — a
+  confusing discrepancy. `CollectSnapshotNow` now fills it from the **same**
+  durable history store `/api/v1/waf/engine/summary` uses (a cheap indexed
+  `COUNT(*)` of `waf_observe`+`waf_trigger` over the last rolling hour, node-wide
+  — matching the summary's total), via `webdetector.WAFEventsLastHour`. The
+  `cfm health` CLI additionally **stops letting WAF-event volume drive the CFM
+  health badge**: a high WAF count means the WAF is working, not that the node is
+  unhealthy, and now that the value is live the old 50/200 thresholds would peg a
+  busy box at WARN — it stays a displayed metric only. (The sibling
+  `active_blocks`/`challenge_queue`/`outbound_alerts` metrics are still unwired;
+  tracked separately.)
+
 ### Changed
 - **Panel WAF now honours the server's self-IPs AND `[global] IGNORE_IPS`/
   `IGNORE_NETS`, matching the web edge.** The self-origin bypass predicate

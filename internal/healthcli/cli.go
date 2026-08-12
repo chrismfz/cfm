@@ -113,7 +113,7 @@ type modernSample struct {
 		WAFEvents1h    int `json:"waf_events_1h"`
 		OutboundAlerts int `json:"outbound_alerts"`
 	} `json:"cfm_metrics"`
-	Mail *mailQueueSample `json:"mail"`
+	Mail    *mailQueueSample `json:"mail"`
 	Runtime struct {
 		CFMDaemonLive                bool   `json:"cfm_daemon_live"`
 		CFMDaemonPID                 *int   `json:"cfm_daemon_pid"`
@@ -1468,7 +1468,14 @@ func printCFMSection(s parsedSnapshot, opts cliOptions) {
 		fmt.Printf("CFM %s metrics not available\n", badge(okLabel, opts))
 		return
 	}
-	status := worstLabel(labelByCount(m.ChallengeQueue, 5, 25), labelByCount(m.WAFEvents1h, 50, 200), labelByCount(m.OutboundAlerts, 1, 5))
+	// WAF-event volume is informational — a high count means the WAF is
+	// catching things, NOT that the node is unhealthy — so it is displayed as a
+	// metric but must NOT drive the health badge. (It used to be dead-zero, so
+	// this term never fired; now that waf_events_1h is populated from the real
+	// last-hour count, letting the 50/200 thresholds gate the badge would peg a
+	// busy box's CFM line at WARN on normal observe/trigger volume. WAF spikes
+	// surface via waf_activity / security_overview instead.)
+	status := worstLabel(labelByCount(m.ChallengeQueue, 5, 25), labelByCount(m.OutboundAlerts, 1, 5))
 	if opts.Compact {
 		fmt.Printf("CFM %-6s blocks=%d queue=%d waf1h=%d alerts=%d\n", badge(status, opts), m.ActiveBlocks, m.ChallengeQueue, m.WAFEvents1h, m.OutboundAlerts)
 		return
