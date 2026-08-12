@@ -568,3 +568,33 @@ func TestWhatsWrong_InfoOnlyIsOk(t *testing.T) {
 		t.Fatalf("expected exactly one info finding, got %+v", got)
 	}
 }
+
+// Panel enforcement burn-in residue: real (non-scanner) clients a panel BLOCK
+// rule / the bridge would/did act on must surface as warnings; a clean burn-in
+// is silent but still read (source ok).
+func TestWhatsWrong_PanelBurnIn(t *testing.T) {
+	got := evaluateWhatsWrong(sec(
+		"panel_burnin", `{"ok":true,"summary":{"panel_waf":{"nonscanner_would_block":3},"panel_decision":{"ip_block_count":1}}}`,
+	))
+	if got.Sources["panel_burnin"] != "ok" {
+		t.Fatalf("panel_burnin source = %q, want ok", got.Sources["panel_burnin"])
+	}
+	wf := findBy(got.Findings, "panel", sevWarning)
+	if wf == nil || wf.Tool != "waf_fp_hunt" {
+		t.Fatalf("expected a panel warning with drill-down waf_fp_hunt, got %+v", got.Findings)
+	}
+	if countCat(got.Findings, "panel") != 2 {
+		t.Fatalf("expected 2 panel findings (waf + decision), got %d: %+v", countCat(got.Findings, "panel"), got.Findings)
+	}
+
+	// Clean burn-in (both zero): no panel finding, but the signal was read.
+	clean := evaluateWhatsWrong(sec(
+		"panel_burnin", `{"ok":true,"summary":{"panel_waf":{"nonscanner_would_block":0},"panel_decision":{"ip_block_count":0}}}`,
+	))
+	if clean.Sources["panel_burnin"] != "ok" {
+		t.Errorf("clean panel_burnin source = %q, want ok", clean.Sources["panel_burnin"])
+	}
+	if countCat(clean.Findings, "panel") != 0 {
+		t.Errorf("clean burn-in should yield no panel finding, got %+v", clean.Findings)
+	}
+}

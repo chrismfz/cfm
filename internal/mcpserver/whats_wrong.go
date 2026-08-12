@@ -79,8 +79,9 @@ var categoryOrder = map[string]int{
 	"mysql":      6,
 	"mail_queue": 7,
 	"mail":       8,
-	"abuse":      9,
-	"health":     10,
+	"panel":      9,
+	"abuse":      10,
+	"health":     11,
 }
 
 // finding is one ranked triage item.
@@ -106,7 +107,7 @@ func registerWhatsWrong(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "whats_wrong",
-		Description: "Triage in one call: pulls health, systemd services, MySQL saturation, the mail queue, mail-traffic anomalies, and API-abuse anomalies together, then returns a SEVERITY-RANKED list of concrete problems (critical → warning → info), each with a one-line detail and the drill-down tool to call next (e.g. process_list, service_status, mysql_pressure, mail_queue_summary, mail_traffic). Deliberately conservative — it flags real problems (disk/inode near-full, high sustained load, swap/conntrack pressure, a failed or flapping service, edge/frontend down or degraded, MySQL connections near max, a frozen mail-queue backlog, suspected outbound-mail spikes, API-abuse bursts), NOT routine activity like WAF hits or normal firewall blocks. `status:\"ok\"` means no problems among the signals it could read; `sources` shows which signals were read, unavailable (collector/governor off), or errored — an unread signal is never assumed healthy. Start here for \"is anything wrong right now?\", then use the per-finding tool to dig in.",
+		Description: "Triage in one call: pulls health, systemd services, MySQL saturation, the mail queue, mail-traffic anomalies, API-abuse anomalies, and panel-enforcement burn-in residue together, then returns a SEVERITY-RANKED list of concrete problems (critical → warning → info), each with a one-line detail and the drill-down tool to call next (e.g. process_list, service_status, mysql_pressure, mail_queue_summary, mail_traffic, waf_fp_hunt). Deliberately conservative — it flags real problems (disk/inode near-full, high sustained load, swap/conntrack pressure, a failed or flapping service, edge/frontend down or degraded, MySQL connections near max, a frozen mail-queue backlog, suspected outbound-mail spikes, API-abuse bursts, and real non-scanner clients a panel BLOCK rule / the bridge would/did act on), NOT routine activity like WAF hits or normal firewall blocks. `status:\"ok\"` means no problems among the signals it could read; `sources` shows which signals were read, unavailable (collector/governor off), or errored — an unread signal is never assumed healthy. Start here for \"is anything wrong right now?\", then use the per-finding tool to dig in.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		secs := []struct {
 			key, path string
@@ -118,6 +119,7 @@ func registerWhatsWrong(srv *mcp.Server, d Deps) {
 			{"mysql", "/api/v1/mysql/top", nil},
 			{"mail_queue", "/api/v1/system/mail-queue", nil},
 			{"mail_traffic", "/api/v1/mail/traffic", nil},
+			{"panel_burnin", "/api/v1/system/waf-fp-hunt", nil},
 		}
 		bodies := make(map[string]json.RawMessage, len(secs))
 		var mu sync.Mutex
@@ -207,6 +209,9 @@ func evaluateWhatsWrong(sections map[string]json.RawMessage) whatsWrongResult {
 	}
 	if body, ok := sections["anomalies"]; ok && usable("anomalies", body) {
 		fs = append(fs, evalAnomalies(body)...)
+	}
+	if body, ok := sections["panel_burnin"]; ok && usable("panel_burnin", body) {
+		fs = append(fs, evalPanelBurnIn(body)...)
 	}
 
 	sortFindings(fs)
@@ -620,6 +625,40 @@ func evalAnomalies(body json.RawMessage) []finding {
 		detail += "; " + ts
 	}
 	return []finding{{sev, "abuse", "API-abuse anomalies detected", detail, "system_health", nil}}
+}
+
+// evalPanelBurnIn flags panel enforcement burn-in residue from waf_fp_hunt: the
+// customer-facing signal that separates known-scanner noise from real clients a
+// panel BLOCK rule (or the bridge) would/did act on. During burn-in these two
+// counters gate whether panel enforcement is safe to arm; once enforcing (Phase
+// 4a/4c default), a non-zero count is a LIVE false positive worth a look. Scanner
+// noise is already excluded upstream, so any residue here is real — hence a
+// conservative >0 threshold fits this tool's under-flag ethos. Drill in with
+// waf_fp_hunt (per-rule breakdown + sample requests).
+func evalPanelBurnIn(body json.RawMessage) []finding {
+	var w struct {
+		Summary struct {
+			WAF struct {
+				NonScannerWouldBlk int `json:"nonscanner_would_block"`
+			} `json:"panel_waf"`
+			Decision struct {
+				IPBlockCount int `json:"ip_block_count"`
+			} `json:"panel_decision"`
+		} `json:"summary"`
+	}
+	if json.Unmarshal(body, &w) != nil {
+		return nil
+	}
+	var out []finding
+	if n := w.Summary.WAF.NonScannerWouldBlk; n > 0 {
+		out = append(out, finding{sevWarning, "panel", "panel WAF hitting real clients",
+			fmt.Sprintf("%d non-scanner client(s) a panel BLOCK rule would/did deny on the cPanel/WHM ports — review before/while enforcing", n), "waf_fp_hunt", nil})
+	}
+	if n := w.Summary.Decision.IPBlockCount; n > 0 {
+		out = append(out, finding{sevWarning, "panel", "panel bridge IP-blocking on a panel port",
+			fmt.Sprintf("%d request(s) the bridge would/did IP-block on a panel port — confirm none are real admins", n), "waf_fp_hunt", nil})
+	}
+	return out
 }
 
 // topSignals renders the up-to-3 most frequent signal names as "top: sig(n), …",

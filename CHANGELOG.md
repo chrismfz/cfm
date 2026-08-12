@@ -60,6 +60,15 @@ back-filled here — see the git/PR history for that period.
   whole into memory); `Truncated` is set if any bound is hit. Default behaviour is
   unchanged (live file only). The response gains `files_scanned` (live first, then
   the rotated files actually read).
+- **`whats_wrong` now includes a panel-enforcement burn-in signal.** The triage
+  flagship additionally pulls `waf_fp_hunt` and flags, conservatively (count > 0),
+  real **non-scanner** clients a panel WAF BLOCK rule would/did deny
+  (`panel_waf.nonscanner_would_block`) or requests the bridge would/did IP-block on
+  a panel port (`panel_decision.ip_block_count`) — the customer-facing residue that
+  gates whether panel enforcement is safe to arm, and a live false-positive once
+  enforcing (Phase 4a/4c). Each finding points at `waf_fp_hunt` to drill in.
+  Scanner noise is already excluded upstream, so any residue is real. `sources`
+  reports the new `panel_burnin` signal like the rest (read / unavailable / errored).
 
 ### Fixed
 - **`waf_fp_hunt` no longer under-counts the panel block-tier FP gate on
