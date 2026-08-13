@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.13
+
 ### Changed
 - **The read-only MCP server is now DEFAULT-ON.** With `AUTH_TOKEN` set (and no
   explicit `MCP = off`), `/mcp` arms automatically. If no `MCP_TOKEN` is
@@ -35,8 +39,6 @@ back-filled here — see the git/PR history for that period.
 - Auto-generated `MCP_TOKEN` is written `0600 root:root` (not the `0640 root:cfm`
   of edge-consumed Lua tokens): it is a daemon-only secret — the gateway
   authenticates with `AUTH_TOKEN`, and nothing else reads it.
-
-## 2026.08.13
 
 ### Changed
 - **The `/mcp` static-bearer gate now also accepts the admin `AUTH_TOKEN`, not
