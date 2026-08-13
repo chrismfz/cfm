@@ -64,31 +64,47 @@ Code: `internal/mcpserver/` (`server.go`, `oauth.go`, `tools.go`) +
 
 ## 2. How to arm it
 
-### Prerequisite: a dedicated `MCP_TOKEN`
+### Arming: DEFAULT-ON, with an auto-generated `MCP_TOKEN`
 
-The MCP server has its **own** credential, `MCP_TOKEN` in `cfm.conf`, kept
-separate from the admin/API `AUTH_TOKEN` (which CFM also uses for `/cfm-admin`
-and the Laravel API). The MCP client only ever sees `MCP_TOKEN`; the admin token
-is used solely for the in-process read dispatch and never leaves the daemon.
+The MCP server has its **own** credential, `MCP_TOKEN`, kept separate from the
+admin/API `AUTH_TOKEN` (which CFM also uses for `/cfm-admin` and the Laravel
+API). The MCP client only ever sees `MCP_TOKEN`; the admin token is used solely
+for the in-process read dispatch and never leaves the daemon.
 
-The server is mounted **only when both** hold:
+As of 2026-08 the server is **default-ON**. It mounts when:
 
-- `AUTH_TOKEN` is set (needed for the internal read dispatch), and
-- `MCP_TOKEN` is set **and at least 24 characters** (a short/weak/missing
-  `MCP_TOKEN` keeps the server **disabled** — it is internet-reachable through the
-  edge, so a guessable credential is treated as misconfiguration).
+- `AUTH_TOKEN` is set (needed for the internal read dispatch), **and**
+- MCP is not turned off (`MCP = off` in `cfm.conf` is a per-node kill switch;
+  unset/`on` = armed).
 
-`MCP_TOKEN` is the consent credential, the static bearer, and the OAuth signing
-key — **rotating it revokes every issued MCP token.** Use a value distinct from
-`AUTH_TOKEN` (if they are equal the daemon logs a warning), e.g.:
+You **no longer have to set `MCP_TOKEN` per node.** If none is configured the
+daemon **auto-generates a strong, distinct one** and persists it at
+`/var/lib/cfm/mcp_token` (`0600 root:root` — a daemon-only secret; unlike the
+edge-consumed Lua token files it is never group-readable). This is what lets the
+fleet gateway reach every node's `/mcp` with the `AUTH_TOKEN` it already holds,
+with **no per-node `MCP_TOKEN` to distribute** across ~20 servers. A distinct
+auto-generated token preserves "an MCP leak is not an admin leak".
+
+Set `MCP_TOKEN` explicitly only to **pin** a specific value (must be ≥ 24 chars;
+a configured-but-weak token is treated as misconfiguration and keeps the server
+disabled — the daemon does not silently replace your explicit value). A
+hand-set `MCP_TOKEN` equal to `AUTH_TOKEN` logs a warning.
 
 ```
 # /etc/cfm/cfm.conf
-MCP_TOKEN=<32+ random chars, e.g. `openssl rand -hex 24`>
+# (nothing needed — default ON; the daemon self-arms with a generated token)
+# MCP_TOKEN=<32+ random chars>   # only to pin a specific token
+# MCP = off                      # only to disable on this node
 ```
 
-Startup log lines when disabled: `mcp: MCP_TOKEN not set — MCP server disabled`
-or `mcp: MCP_TOKEN too weak (need >= 24 chars) — MCP server disabled`.
+`MCP_TOKEN` (whether set or auto-generated) is the consent credential, the
+static bearer, and the OAuth signing key — **rotating it revokes every issued
+MCP token** (delete `/var/lib/cfm/mcp_token` to roll the auto-generated one).
+
+Startup log lines: `mcp: read-only MCP server mounted at /mcp … armed with an
+auto-generated MCP_TOKEN persisted at /var/lib/cfm/mcp_token` (default path), or
+when off: `mcp: MCP server disabled (disabled by config (MCP=off))` /
+`… (AUTH_TOKEN not set)` / `… (MCP_TOKEN too weak …)`.
 
 The connector URL is always:
 
@@ -149,11 +165,15 @@ curl -sS https://<host>/cfm-admin/mcp \
 
 ### Disable / revoke
 
-- **Revoke all issued MCP tokens:** rotate `MCP_TOKEN` in `cfm.conf` and reload —
-  every OAuth artifact (signed with a key derived from it) becomes invalid. This
-  does **not** touch `AUTH_TOKEN`, so `/cfm-admin` and the API keep working.
-- **Disable the server entirely:** unset `MCP_TOKEN` (or set one shorter than 24
-  chars) — the MCP surface is not mounted; the rest of the API is unaffected.
+- **Revoke all issued MCP tokens:** rotate `MCP_TOKEN` and reload — every OAuth
+  artifact (signed with a key derived from it) becomes invalid. If the token is
+  the auto-generated one, delete `/var/lib/cfm/mcp_token` (the daemon mints a
+  fresh one on next start); if pinned, change the `MCP_TOKEN` value in
+  `cfm.conf`. Either way this does **not** touch `AUTH_TOKEN`, so `/cfm-admin`
+  and the API keep working.
+- **Disable the server entirely:** set `MCP = off` in `cfm.conf` and reload — the
+  MCP surface is not mounted; the rest of the API is unaffected. (Since arming is
+  now default-ON, unsetting `MCP_TOKEN` no longer disables it — use `MCP = off`.)
 
 ---
 

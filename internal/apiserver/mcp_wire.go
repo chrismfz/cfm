@@ -15,8 +15,14 @@ package apiserver
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 
 	cfgpkg "cfm/internal/config"
@@ -56,29 +62,110 @@ func mcpStaticBearer(tok, mcpTok, adminTok string) bool {
 	return tokenMatch(tok, mcpTok) || tokenMatch(tok, adminTok)
 }
 
+// mcpTokenStatePath is where an auto-generated MCP_TOKEN is persisted when the
+// operator configures none. Unlike the edge-consumed Lua token files (root:cfm
+// 0640), this is a DAEMON-ONLY secret — the fleet gateway authenticates to /mcp
+// with AUTH_TOKEN, and nothing but the daemon ever reads this — so it is written
+// 0600 root:root. Overridable in tests.
+var mcpTokenStatePath = "/var/lib/cfm/mcp_token"
+
+// mcpArmToken is the DEFAULT-ON arming policy in one testable place. It reports
+// whether the read-only MCP server should mount and with which client-facing
+// token:
+//
+//   - MCP=off (explicit) always wins → not armed (per-node kill switch).
+//   - AUTH_TOKEN is required (the in-process read dispatch authenticates as
+//     admin); without it there is nothing to dispatch → not armed.
+//   - If no MCP_TOKEN is configured, auto-generate+persist a DISTINCT one via
+//     loadOrCreate, so /mcp arms fleet-wide without hand-editing every node's
+//     cfm.conf. Distinct-from-AUTH_TOKEN preserves "an MCP leak is not an admin
+//     leak"; the fleet gateway still reaches /mcp with AUTH_TOKEN (mcpStaticBearer
+//     accepts both).
+//   - A configured-but-weak MCP_TOKEN is misconfiguration → not armed (we do not
+//     silently replace an operator's explicit value with a generated one).
+//
+// Returns (token, autogen, ok, reason); reason is the disabled-log line when ok
+// is false.
+func mcpArmToken(cfg *cfgpkg.Config, loadOrCreate func() (string, error)) (tok string, autogen, ok bool, reason string) {
+	if cfg.API.MCPEnabled != nil && !*cfg.API.MCPEnabled {
+		return "", false, false, "disabled by config (MCP=off)"
+	}
+	if strings.TrimSpace(cfg.API.AuthToken) == "" {
+		return "", false, false, "AUTH_TOKEN not set"
+	}
+	mcpTok := strings.TrimSpace(cfg.API.MCPToken)
+	if mcpTok == "" {
+		gen, err := loadOrCreate()
+		if err != nil {
+			return "", false, false, fmt.Sprintf("MCP_TOKEN not set and auto-generate failed: %v", err)
+		}
+		mcpTok = strings.TrimSpace(gen)
+		autogen = true
+	}
+	if !mcpTokenUsable(mcpTok) {
+		return "", false, false, fmt.Sprintf("MCP_TOKEN too weak (need >= %d chars)", minMCPTokenLen)
+	}
+	return mcpTok, autogen, true, ""
+}
+
+// loadOrCreateMCPToken returns the persisted auto-generated MCP token at path,
+// creating a fresh 32-byte URL-safe base64 token (0600 root:root) on first use.
+// Mirrors loadOrCreateMFAEncryptionKey. Persisting keeps the token stable across
+// restarts, so any client pointed straight at MCP_TOKEN keeps working; the fleet
+// gateway uses AUTH_TOKEN regardless.
+func loadOrCreateMCPToken(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("empty path")
+	}
+	if raw, err := os.ReadFile(path); err == nil {
+		if t := strings.TrimSpace(string(raw)); t != "" {
+			return t, nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	t := base64.RawURLEncoding.EncodeToString(buf)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(t+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return t, nil
+}
+
 // registerMCPServer mounts the MCP + OAuth endpoints on m. It is a no-op (with a
 // warning) unless BOTH are true: an admin API token is configured (needed for the
 // in-process read dispatch) AND a strong, distinct MCP_TOKEN is set (the
 // client-facing credential). The admin token is never exposed to MCP clients.
 func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) {
 	adminTok := strings.TrimSpace(cfg.API.AuthToken)
-	mcpTok := strings.TrimSpace(cfg.API.MCPToken)
 
-	if adminTok == "" {
-		logging.LogfAPI("[apiserver] mcp: AUTH_TOKEN not set — MCP server disabled")
-		return
-	}
-	if mcpTok == "" {
-		logging.LogfAPI("[apiserver] mcp: MCP_TOKEN not set — MCP server disabled (set a strong MCP_TOKEN in cfm.conf to enable)")
-		return
-	}
-	if !mcpTokenUsable(mcpTok) {
-		logging.LogfAPI("[apiserver] mcp: MCP_TOKEN too weak (need >= %d chars) — MCP server disabled", minMCPTokenLen)
+	// Default-ON arming: with AUTH_TOKEN present and no explicit MCP=off, the
+	// server arms, auto-generating a distinct MCP_TOKEN if none is configured
+	// (see mcpArmToken). This is what lets the fleet gateway reach every node's
+	// /mcp without hand-editing MCP_TOKEN into ~20 cfm.conf files.
+	mcpTok, autogen, ok, reason := mcpArmToken(cfg, func() (string, error) {
+		return loadOrCreateMCPToken(mcpTokenStatePath)
+	})
+	if !ok {
+		logging.LogfAPI("[apiserver] mcp: MCP server disabled (%s)", reason)
 		return
 	}
 	if mcpTok == adminTok {
 		// Not fatal, but it defeats the point of a separate credential: an MCP
-		// token leak would then equal an admin/API token leak.
+		// token leak would then equal an admin/API token leak. (Auto-generated
+		// tokens are always distinct; this only trips on a hand-set MCP_TOKEN.)
 		logging.LogfAPI("[apiserver] mcp: WARNING MCP_TOKEN equals AUTH_TOKEN — use a distinct MCP_TOKEN so an MCP leak is not an admin-token leak")
 	}
 
@@ -127,7 +214,11 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 		StaticBearer:  func(tok string) bool { return mcpStaticBearer(tok, mcpTok, adminTok) },
 	})
 	h.Register(m)
-	logging.LogfAPI("[apiserver] mcp: read-only MCP server mounted at /mcp (edge: /cfm-admin/mcp)")
+	if autogen {
+		logging.LogfAPI("[apiserver] mcp: read-only MCP server mounted at /mcp (edge: /cfm-admin/mcp); armed with an auto-generated MCP_TOKEN persisted at %s — set MCP_TOKEN in cfm.conf to override, or MCP=off to disable", mcpTokenStatePath)
+	} else {
+		logging.LogfAPI("[apiserver] mcp: read-only MCP server mounted at /mcp (edge: /cfm-admin/mcp)")
+	}
 }
 
 // mcpRequestScheme reports the externally visible scheme. Behind the TLS-

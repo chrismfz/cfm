@@ -1,9 +1,16 @@
 package apiserver
 
 import (
+	"errors"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+
+	cfgpkg "cfm/internal/config"
 )
+
+func boolPtr(b bool) *bool { return &b }
 
 // A non-loopback caller must NOT be able to force the advertised scheme to https
 // via X-Forwarded-Proto; only the loopback edge is trusted for forwarded headers.
@@ -81,5 +88,89 @@ func TestMCPStaticBearer(t *testing.T) {
 				t.Errorf("mcpStaticBearer(%q, m, a) = %v, want %v", c.tok, got, c.want)
 			}
 		})
+	}
+}
+
+// The default-ON arming policy: arm when AUTH_TOKEN is present (auto-generating
+// a distinct MCP_TOKEN if none is configured); MCP=off is a hard kill switch;
+// no AUTH_TOKEN, a weak explicit MCP_TOKEN, or an auto-generate failure all keep
+// the server disabled.
+func TestMCPArmToken(t *testing.T) {
+	const strong = "cfm-mcp-3f9a2b7c8d1e4f6a9b0c2d5e" // >= 24
+	const gen = "auto-generated-abcdefghijklmnop"      // 31 chars, >= 24
+	okLoader := func() (string, error) { return gen, nil }
+	failLoader := func() (string, error) { return "", errors.New("boom") }
+	panicLoader := func() (string, error) { t.Fatal("loader must not be called when MCP_TOKEN is set"); return "", nil }
+
+	cases := []struct {
+		name        string
+		cfg         cfgpkg.APIConfig
+		loader      func() (string, error)
+		wantOK      bool
+		wantAutogen bool
+		wantTok     string
+	}{
+		{"off kill-switch wins", cfgpkg.APIConfig{AuthToken: "admintok", MCPToken: strong, MCPEnabled: boolPtr(false)}, panicLoader, false, false, ""},
+		{"no auth token", cfgpkg.APIConfig{MCPToken: strong}, panicLoader, false, false, ""},
+		{"explicit strong token, default on", cfgpkg.APIConfig{AuthToken: "admintok", MCPToken: strong}, panicLoader, true, false, strong},
+		{"explicit on, autogen", cfgpkg.APIConfig{AuthToken: "admintok", MCPEnabled: boolPtr(true)}, okLoader, true, true, gen},
+		{"default on, no mcp token, autogen", cfgpkg.APIConfig{AuthToken: "admintok"}, okLoader, true, true, gen},
+		{"autogen failure disables", cfgpkg.APIConfig{AuthToken: "admintok"}, failLoader, false, false, ""},
+		{"weak explicit token disables", cfgpkg.APIConfig{AuthToken: "admintok", MCPToken: "short"}, panicLoader, false, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &cfgpkg.Config{API: c.cfg}
+			tok, autogen, ok, reason := mcpArmToken(cfg, c.loader)
+			if ok != c.wantOK {
+				t.Fatalf("ok=%v want %v (reason=%q)", ok, c.wantOK, reason)
+			}
+			if !ok {
+				if reason == "" {
+					t.Errorf("disabled but empty reason")
+				}
+				return
+			}
+			if autogen != c.wantAutogen {
+				t.Errorf("autogen=%v want %v", autogen, c.wantAutogen)
+			}
+			if c.wantTok != "" && tok != c.wantTok {
+				t.Errorf("tok=%q want %q", tok, c.wantTok)
+			}
+		})
+	}
+}
+
+// loadOrCreateMCPToken generates a strong token on first use, persists it 0600,
+// and returns the SAME token on the next call (stable across restarts).
+func TestLoadOrCreateMCPToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "mcp_token")
+
+	first, err := loadOrCreateMCPToken(path)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if !mcpTokenUsable(first) {
+		t.Errorf("generated token not usable (len=%d): %q", len(first), first)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("mode=%o want 0600", perm)
+	}
+
+	second, err := loadOrCreateMCPToken(path)
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if second != first {
+		t.Errorf("token not stable across calls: %q vs %q", first, second)
+	}
+
+	if _, err := loadOrCreateMCPToken(""); err == nil {
+		t.Errorf("empty path should error")
 	}
 }
