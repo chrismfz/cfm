@@ -17,7 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **The read-only MCP server is now DEFAULT-ON.** With `AUTH_TOKEN` set (and no
+  explicit `MCP = off`), `/mcp` arms automatically. If no `MCP_TOKEN` is
+  configured the daemon **auto-generates a strong, distinct one** and persists it
+  at `/var/lib/cfm/mcp_token` (`0600 root:root`, daemon-only). This lets the
+  fleet gateway (cfm-web) reach every node's `/mcp` with the `AUTH_TOKEN` it
+  already holds — **no per-node `MCP_TOKEN` to hand-distribute across ~20
+  servers** — while a distinct generated token keeps "an MCP leak is not an admin
+  leak". Set `MCP_TOKEN` explicitly only to pin a value (still must be ≥ 24
+  chars; a weak explicit token stays disabled and is never silently replaced).
+  New `MCP` / `MCP_ENABLED` config key is a per-node kill switch (`MCP = off`);
+  unset/`on` = armed. Previously the server mounted **only** when a strong
+  `MCP_TOKEN` was set by hand, so all but the two burn-in nodes were unreachable.
+
+### Security
+- Auto-generated `MCP_TOKEN` is written `0600 root:root` (not the `0640 root:cfm`
+  of edge-consumed Lua tokens): it is a daemon-only secret — the gateway
+  authenticates with `AUTH_TOKEN`, and nothing else reads it.
 
 ## 2026.08.13
 
