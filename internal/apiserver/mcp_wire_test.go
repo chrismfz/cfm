@@ -53,3 +53,33 @@ func TestMCPTokenUsable(t *testing.T) {
 		})
 	}
 }
+
+// The /mcp static bearer must accept BOTH the MCP_TOKEN and the admin AUTH_TOKEN
+// (so a fleet gateway holding AUTH_TOKEN can reach /mcp without a separate
+// MCP_TOKEN), reject anything else, and never match an empty bearer even when a
+// configured token is somehow empty (ConstantTimeCompare("","") is true).
+func TestMCPStaticBearer(t *testing.T) {
+	const mcpTok = "cfm-mcp-3f9a2b7c8d1e4f6a9b0c2d5e"
+	const adminTok = "cfm-admin-1a2b3c4d5e6f7a8b9c0d1e2f"
+
+	cases := []struct {
+		name          string
+		tok, m, a     string
+		want          bool
+	}{
+		{"mcp token", mcpTok, mcpTok, adminTok, true},
+		{"admin token", adminTok, mcpTok, adminTok, true},
+		{"wrong token", "nope", mcpTok, adminTok, false},
+		{"empty bearer", "", mcpTok, adminTok, false},
+		{"empty bearer, empty mcp", "", "", adminTok, false},   // must not match "" vs ""
+		{"empty bearer, both empty", "", "", "", false},        // defensive
+		{"admin accepted when mcp unset", adminTok, "", adminTok, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := mcpStaticBearer(c.tok, c.m, c.a); got != c.want {
+				t.Errorf("mcpStaticBearer(%q, m, a) = %v, want %v", c.tok, got, c.want)
+			}
+		})
+	}
+}

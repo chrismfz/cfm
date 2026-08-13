@@ -57,9 +57,13 @@ type Deps struct {
 	Authenticate  Authenticator
 	SigningSecret string
 
-	// StaticBearer reports whether a bearer presented directly at /mcp is the
-	// configured MCP token (so Claude Code / API clients can skip the OAuth dance
-	// by sending Authorization: Bearer <MCP_TOKEN> themselves).
+	// StaticBearer reports whether a bearer presented directly at /mcp is an
+	// accepted static credential (so a client can skip the OAuth dance by sending
+	// Authorization: Bearer <token> itself). The wiring decides which tokens
+	// qualify: the CFM apiserver accepts the MCP_TOKEN and additionally the admin
+	// AUTH_TOKEN, so a fleet gateway that already holds AUTH_TOKEN can reach /mcp
+	// without a separate MCP_TOKEN. This gate never grants /api/v1 access; the MCP
+	// tool surface is read-only regardless of which token authenticated.
 	StaticBearer func(string) bool
 }
 

@@ -36,6 +36,26 @@ func mcpTokenUsable(tok string) bool {
 	return len(strings.TrimSpace(tok)) >= minMCPTokenLen
 }
 
+// mcpStaticBearer reports whether a bearer presented directly at /mcp is an
+// accepted static credential: the client-facing MCP_TOKEN OR the admin
+// AUTH_TOKEN.
+//
+// Accepting AUTH_TOKEN is what lets a FLEET GATEWAY (e.g. the Laravel cfm-web,
+// which already stores each node's AUTH_TOKEN to reach /api/v1) speak MCP to a
+// node WITHOUT a second, separately-managed MCP_TOKEN in its agents table. It
+// does NOT widen the MCP↔API boundary: MCP_TOKEN still cannot touch /api/v1, and
+// the /mcp tool surface is read-only no matter which token authenticated — an
+// AUTH_TOKEN holder can already do everything through /api/v1, so exposing the
+// read-only subset to the same credential adds no privilege. An empty bearer
+// never matches (the caller also guards, but ConstantTimeCompare("","") is true,
+// so guard here too).
+func mcpStaticBearer(tok, mcpTok, adminTok string) bool {
+	if tok == "" {
+		return false
+	}
+	return tokenMatch(tok, mcpTok) || tokenMatch(tok, adminTok)
+}
+
 // registerMCPServer mounts the MCP + OAuth endpoints on m. It is a no-op (with a
 // warning) unless BOTH are true: an admin API token is configured (needed for the
 // in-process read dispatch) AND a strong, distinct MCP_TOKEN is set (the
@@ -91,9 +111,12 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 		return rec.status, body, nil
 	}
 
-	// Client-facing auth (consent credential, static bearer, OAuth signing) binds
-	// to MCP_TOKEN — never the admin token. The admin token is used only for the
-	// in-process dispatch above and never reaches an MCP client.
+	// Client-facing auth. The OAuth consent credential + signing secret bind to
+	// MCP_TOKEN (the read-only, /api/v1-inert credential). The STATIC bearer
+	// additionally accepts the admin AUTH_TOKEN so a fleet gateway that already
+	// holds it (cfm-web) can reach /mcp without a separate MCP_TOKEN — see
+	// mcpStaticBearer for why that doesn't widen the boundary. The admin token is
+	// used for the in-process dispatch above and is never handed to an MCP client.
 	h := mcpserver.New(mcpserver.Deps{
 		Version:       daemonVersion(),
 		MCPPath:       "/mcp",
@@ -101,7 +124,7 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 		BaseURL:       func(r *http.Request) string { return mcpRequestScheme(r) + "://" + r.Host + cfmBase(r) },
 		Authenticate:  func(cred string) (string, bool) { return "", tokenMatch(cred, mcpTok) },
 		SigningSecret: mcpTok,
-		StaticBearer:  func(tok string) bool { return tokenMatch(tok, mcpTok) },
+		StaticBearer:  func(tok string) bool { return mcpStaticBearer(tok, mcpTok, adminTok) },
 	})
 	h.Register(m)
 	logging.LogfAPI("[apiserver] mcp: read-only MCP server mounted at /mcp (edge: /cfm-admin/mcp)")

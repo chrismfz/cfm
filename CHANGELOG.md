@@ -17,7 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **The `/mcp` static-bearer gate now also accepts the admin `AUTH_TOKEN`, not
+  just `MCP_TOKEN`.** A fleet gateway (the Laravel cfm-web) already stores each
+  node's `AUTH_TOKEN` to reach `/api/v1`; accepting it at `/mcp` lets that gateway
+  speak MCP to every node **without a second, separately-managed `MCP_TOKEN`** in
+  its agents table. The security boundary is unchanged: `MCP_TOKEN` still cannot
+  touch `/api/v1`, the `/mcp` tool surface is read-only regardless of which token
+  authenticated, and an `AUTH_TOKEN` holder can already do everything via
+  `/api/v1` — so exposing the read-only subset to it adds no privilege. The OAuth
+  consent flow stays `MCP_TOKEN`-only (`AUTH_TOKEN` is never browser-pasted), and
+  arming is unchanged — a node still needs a strong `MCP_TOKEN` set to mount
+  `/mcp` at all, so no node gains an MCP endpoint it didn't already have.
 
 ## 2026.08.12
 

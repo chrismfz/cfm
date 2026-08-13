@@ -124,7 +124,15 @@ this, so **no manual token handling in Claude** is needed.
 
 ### Option B — Claude Code / API / curl (static bearer)
 
-Clients that *can* send a header may skip OAuth and present `MCP_TOKEN` directly:
+Clients that *can* send a header may skip OAuth and present `MCP_TOKEN` directly.
+The static-bearer gate **also accepts the admin `AUTH_TOKEN`** — so a fleet
+gateway (e.g. the Laravel cfm-web) that already stores each node's `AUTH_TOKEN`
+to reach `/api/v1` can speak MCP to the node **without a second, separately
+managed `MCP_TOKEN`** in its agents table. This does not widen the boundary:
+`MCP_TOKEN` still cannot touch `/api/v1`, the `/mcp` tool surface is read-only
+whichever token authenticated, and an `AUTH_TOKEN` holder can already do
+everything via `/api/v1`. (The OAuth *consent* flow in Option A stays
+`MCP_TOKEN`-only — `AUTH_TOKEN` is never pasted into a browser.)
 
 ```bash
 # Claude Code (project or user config): a remote MCP server with an auth header
