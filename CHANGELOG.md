@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.13
+
 ### Changed
 - **The `/mcp` static-bearer gate now also accepts the admin `AUTH_TOKEN`, not
   just `MCP_TOKEN`.** A fleet gateway (the Laravel cfm-web) already stores each
