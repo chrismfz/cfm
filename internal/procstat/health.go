@@ -18,10 +18,18 @@ const healthTopN = 20
 // like summing per-process RSS in ps/top); it is intended for relative triage,
 // not as a replacement for host-level memory accounting.
 type FamilySummary struct {
-	Comm    string `json:"comm"`
-	Count   int    `json:"count"`
-	RSSKB   int64  `json:"rss_kb"`
-	Threads int    `json:"threads"`
+	Comm    string         `json:"comm"`
+	Count   int            `json:"count"`
+	RSSKB   int64          `json:"rss_kb"`
+	Threads int            `json:"threads"`
+	States  map[string]int `json:"states"`
+}
+
+// StateFamilySummary attributes one process state to one exact COMM family.
+// Count is the number of processes in that family observed in the named state.
+type StateFamilySummary struct {
+	Comm  string `json:"comm"`
+	Count int    `json:"count"`
 }
 
 // FanoutSummary is one process ranked by its number of direct children in the
@@ -54,9 +62,10 @@ type HealthSummary struct {
 	UniqueFamilies int            `json:"unique_families"`
 	Scan           ScanSummary    `json:"scan"`
 
-	TopFamiliesByCount []FamilySummary `json:"top_families_by_count"`
-	TopFamiliesByRSS   []FamilySummary `json:"top_families_by_rss"`
-	TopFanout          []FanoutSummary `json:"top_fanout"`
+	TopFamiliesByCount []FamilySummary                   `json:"top_families_by_count"`
+	TopFamiliesByRSS   []FamilySummary                   `json:"top_families_by_rss"`
+	TopFamiliesByState map[string][]StateFamilySummary   `json:"top_families_by_state"`
+	TopFanout          []FanoutSummary                   `json:"top_fanout"`
 }
 
 // Health scans /proc once and returns a compact process-health snapshot. Unlike
@@ -148,7 +157,10 @@ func summarizeHealth(rows []Process, limit int) HealthSummary {
 		limit = healthTopN
 	}
 
-	out := HealthSummary{States: map[string]int{}}
+	out := HealthSummary{
+		States:             map[string]int{},
+		TopFamiliesByState: map[string][]StateFamilySummary{},
+	}
 	families := make(map[string]FamilySummary)
 	children := make(map[int]int)
 
@@ -162,6 +174,10 @@ func summarizeHealth(rows []Process, limit int) HealthSummary {
 		f.Count++
 		f.RSSKB += p.RSSKB
 		f.Threads += p.Threads
+		if f.States == nil {
+			f.States = map[string]int{}
+		}
+		f.States[p.State]++
 		families[p.Comm] = f
 
 		if p.PPID >= 0 {
@@ -173,6 +189,12 @@ func summarizeHealth(rows []Process, limit int) HealthSummary {
 	allFamilies := make([]FamilySummary, 0, len(families))
 	for _, f := range families {
 		allFamilies = append(allFamilies, f)
+		for state, count := range f.States {
+			out.TopFamiliesByState[state] = append(out.TopFamiliesByState[state], StateFamilySummary{
+				Comm:  f.Comm,
+				Count: count,
+			})
+		}
 	}
 
 	byCount := append([]FamilySummary(nil), allFamilies...)
@@ -204,6 +226,19 @@ func summarizeHealth(rows []Process, limit int) HealthSummary {
 		byRSS = byRSS[:limit]
 	}
 	out.TopFamiliesByRSS = byRSS
+
+	for state, ranked := range out.TopFamiliesByState {
+		sort.Slice(ranked, func(i, j int) bool {
+			if ranked[i].Count != ranked[j].Count {
+				return ranked[i].Count > ranked[j].Count
+			}
+			return ranked[i].Comm < ranked[j].Comm
+		})
+		if len(ranked) > limit {
+			ranked = ranked[:limit]
+		}
+		out.TopFamiliesByState[state] = ranked
+	}
 
 	fanout := make([]FanoutSummary, 0)
 	for _, p := range rows {

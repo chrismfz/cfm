@@ -71,6 +71,19 @@ func TestProcessHealthEndpointSnapshot(t *testing.T) {
 		t.Fatalf("ranked list exceeded bounded top-20: count=%d rss=%d fanout=%d",
 			len(got.ProcessHealth.TopFamiliesByCount), len(got.ProcessHealth.TopFamiliesByRSS), len(got.ProcessHealth.TopFanout))
 	}
+	if len(got.ProcessHealth.TopFamiliesByState) == 0 {
+		t.Fatal("top_families_by_state is empty, want at least the live process states")
+	}
+	for state, ranked := range got.ProcessHealth.TopFamiliesByState {
+		if state == "" || len(ranked) > 20 {
+			t.Fatalf("invalid state family ranking %q: %+v", state, ranked)
+		}
+		for _, f := range ranked {
+			if f.Comm == "" || f.Count <= 0 {
+				t.Fatalf("invalid state family row for %q: %+v", state, f)
+			}
+		}
+	}
 }
 
 func TestProcessHealthEndpointGuards(t *testing.T) {
