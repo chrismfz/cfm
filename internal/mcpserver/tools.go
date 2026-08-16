@@ -1151,17 +1151,25 @@ func registerSystemHealth(srv *mcp.Server, d Deps) {
 }
 
 type processListInput struct {
-	Top int `json:"top,omitempty" jsonschema:"how many busiest processes to return; default 15, max 200"`
+	Top     int    `json:"top,omitempty" jsonschema:"how many busiest matching processes to return; default 15, max 200. With no filters this is the original top-like process_list behaviour"`
+	Match   string `json:"match,omitempty" jsonschema:"case-insensitive substring match on the process command name (COMM); applied before the top limit so idle matching processes are not lost"`
+	PID     int    `json:"pid,omitempty" jsonschema:"exact positive process ID to inspect; applied before the top limit"`
+	Details bool   `json:"details,omitempty" jsonschema:"include direct child PIDs plus bounded, best-effort sanitized argv for returned processes; default false. Raw cmdline is never returned"`
 }
 
 func registerProcessList(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "process_list",
-		Description: "The busiest processes on the node right now (top-like: pid, user, state, %cpu, %mem, rss, threads, command name), newest CPU sample. Use when system_health shows high load to find WHICH process is eating it — or many D-state (uninterruptible) processes stuck on I/O. Command NAME only; never the full cmdline (which can carry secrets).",
+		Description: "The busiest processes on the node right now (top-like: pid, ppid, user, state, %cpu, %mem, rss, threads, command name), newest CPU sample. With no filters it preserves the original process_list behaviour. Use match=<comm substring> or pid=<pid> to inspect a process even when it is idle; filters are applied before the top limit. Set details=true to add direct child PIDs and bounded, best-effort sanitized argv. The default view still exposes command NAME only; raw /proc/<pid>/cmdline is never returned.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in processListInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{}
 		setInt(q, "top", in.Top)
+		setStr(q, "match", in.Match)
+		setInt(q, "pid", in.PID)
+		if in.Details {
+			q.Set("details", "1")
+		}
 		return dispatchJSON(ctx, d, "/api/v1/system/processes", q)
 	})
 }

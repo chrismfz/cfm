@@ -261,11 +261,12 @@ func requireHealthAccess(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// handleSystemProcesses serves a top-like snapshot of the busiest processes
-// (GET /api/v1/system/processes?top=N). Read-only, admin-only. Returns process
-// COMM only — never the cmdline (which can carry secrets). Backs the MCP
-// process_list tool; the "load is high, who's eating it?" companion to
-// system_health's aggregate CPU.
+// handleSystemProcesses serves the historical top-like process snapshot plus
+// optional filtered inspection (GET /api/v1/system/processes?top=N&match=COMM&
+// pid=PID&details=1). With no new options it preserves the original behaviour:
+// all processes are ranked by CPU, then RSS, and truncated to top. PPID is an
+// additive base field. `details=1` opts into direct child PIDs and bounded,
+// best-effort sanitized argv; raw /proc/<pid>/cmdline is never returned.
 func handleSystemProcesses(w http.ResponseWriter, r *http.Request) {
 	if !webdet.RequireAdmin(w, r) {
 		return
@@ -282,19 +283,45 @@ func handleSystemProcesses(w http.ResponseWriter, r *http.Request) {
 			top = n
 		}
 	}
-	procs, err := procstat.Top(top)
+	match := strings.TrimSpace(r.URL.Query().Get("match"))
+	pid := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("pid")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "pid must be a positive integer"})
+			return
+		}
+		pid = n
+	}
+	detailRaw := strings.TrimSpace(r.URL.Query().Get("details"))
+	details := detailRaw == "1" || strings.EqualFold(detailRaw, "true")
+
+	procs, err := procstat.List(procstat.Options{
+		Limit: top, Match: match, PID: pid, Details: details,
+	})
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	resp := map[string]any{
 		"ok":        true,
 		"schema":    "system.processes.v1",
 		"top":       top,
 		"count":     len(procs),
 		"processes": procs,
-	})
+	}
+	if match != "" {
+		resp["match"] = match
+	}
+	if pid > 0 {
+		resp["pid"] = pid
+	}
+	if details {
+		resp["details"] = true
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleSystemListeners serves the listening TCP/UDP sockets and their owning
