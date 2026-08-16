@@ -23,8 +23,8 @@ func registerProcessHealthRoute(mux *http.ServeMux) {
 }
 
 // handleSystemProcessHealth exposes the cheap single-scan procstat.Health()
-// snapshot. It is intentionally descriptive only: no thresholds, anomaly
-// classification, baseline comparison, or whats_wrong integration live here.
+// snapshot plus the conservative single-snapshot evaluator. Historical
+// baselines and whats_wrong integration remain separate follow-up slices.
 func handleSystemProcessHealth(w http.ResponseWriter, r *http.Request) {
 	if !webdet.RequireAdmin(w, r) {
 		return
@@ -42,10 +42,12 @@ func handleSystemProcessHealth(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	evaluation := procstat.EvaluateHealth(snapshot)
 
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":             true,
 		"schema":         "system.process_health.v1",
 		"process_health": snapshot,
+		"evaluation":     evaluation,
 	})
 }

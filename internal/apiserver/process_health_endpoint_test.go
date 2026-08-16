@@ -34,9 +34,10 @@ func TestProcessHealthEndpointSnapshot(t *testing.T) {
 	}
 
 	var got struct {
-		OK            bool                   `json:"ok"`
-		Schema        string                 `json:"schema"`
-		ProcessHealth procstat.HealthSummary `json:"process_health"`
+		OK            bool                      `json:"ok"`
+		Schema        string                    `json:"schema"`
+		ProcessHealth procstat.HealthSummary    `json:"process_health"`
+		Evaluation    procstat.HealthEvaluation `json:"evaluation"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode response: %v; body=%s", err, rr.Body.String())
@@ -83,6 +84,28 @@ func TestProcessHealthEndpointSnapshot(t *testing.T) {
 				t.Fatalf("invalid state family row for %q: %+v", state, f)
 			}
 		}
+	}
+
+	switch got.Evaluation.Status {
+	case "ok":
+		if !got.Evaluation.Reliable || len(got.Evaluation.Findings) != 0 {
+			t.Fatalf("ok evaluation is inconsistent: %+v", got.Evaluation)
+		}
+	case "issues":
+		if !got.Evaluation.Reliable || len(got.Evaluation.Findings) == 0 {
+			t.Fatalf("issues evaluation is inconsistent: %+v", got.Evaluation)
+		}
+		for _, f := range got.Evaluation.Findings {
+			if f.Code == "" || (f.Severity != "warning" && f.Severity != "critical") || f.Count <= 0 || f.Percent <= 0 {
+				t.Fatalf("invalid process health finding: %+v", f)
+			}
+		}
+	case "degraded":
+		if got.Evaluation.Reliable || got.Evaluation.Reason == "" || len(got.Evaluation.Findings) != 0 {
+			t.Fatalf("degraded evaluation is inconsistent: %+v", got.Evaluation)
+		}
+	default:
+		t.Fatalf("unexpected evaluation status %q: %+v", got.Evaluation.Status, got.Evaluation)
 	}
 }
 
