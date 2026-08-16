@@ -3,6 +3,7 @@ package procstat
 import (
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -84,6 +85,43 @@ func TestSummarizeHealth_LimitsRankedListsAfterFullAggregation(t *testing.T) {
 	}
 }
 
+func healthStatRaw(ppid, threads, rss string) []byte {
+	fields := make([]string, 22)
+	for i := range fields {
+		fields[i] = "0"
+	}
+	fields[0] = "S"
+	fields[1] = ppid
+	fields[17] = threads
+	fields[21] = rss
+	return []byte("123 (worker ) name) " + strings.Join(fields, " "))
+}
+
+func TestParseHealthStatRejectsMalformedNumericFields(t *testing.T) {
+	p, ok := parseHealthStat(123, healthStatRaw("7", "3", "100"))
+	if !ok {
+		t.Fatal("valid stat row rejected")
+	}
+	if p.PID != 123 || p.PPID != 7 || p.Comm != "worker ) name" || p.State != "S" || p.Threads != 3 {
+		t.Fatalf("parsed row = %+v", p)
+	}
+	if p.RSSKB != 100*(int64(os.Getpagesize())/1024) {
+		t.Fatalf("rss_kb = %d, want %d pages converted to KB", p.RSSKB, 100)
+	}
+
+	for name, raw := range map[string][]byte{
+		"ppid":    healthStatRaw("bad", "3", "100"),
+		"threads": healthStatRaw("7", "bad", "100"),
+		"rss":     healthStatRaw("7", "3", "bad"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, ok := parseHealthStat(123, raw); ok {
+				t.Fatal("malformed numeric field was accepted")
+			}
+		})
+	}
+}
+
 func TestReadHealthProcess_IsLightweight(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("procstat reads /proc; linux only")
@@ -115,6 +153,12 @@ func TestHealth_LiveSnapshotIsBounded(t *testing.T) {
 	}
 	if got.TotalProcesses <= 0 || got.TotalThreads <= 0 || got.UniqueFamilies <= 0 || len(got.States) == 0 {
 		t.Fatalf("empty live health summary: %+v", got)
+	}
+	if got.Scan.PIDsEnumerated <= 0 || got.Scan.PIDsReadable != got.TotalProcesses {
+		t.Fatalf("inconsistent scan summary: scan=%+v total_processes=%d", got.Scan, got.TotalProcesses)
+	}
+	if got.Scan.PIDsSkipped != got.Scan.PIDsEnumerated-got.Scan.PIDsReadable || got.Scan.PIDsSkipped < 0 {
+		t.Fatalf("invalid scan completeness accounting: %+v", got.Scan)
 	}
 	if len(got.TopFamiliesByCount) > healthTopN || len(got.TopFamiliesByRSS) > healthTopN || len(got.TopFanout) > healthTopN {
 		t.Fatalf("health ranked lists exceeded cap %d: count=%d rss=%d fanout=%d",

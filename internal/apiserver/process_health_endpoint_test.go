@@ -53,6 +53,12 @@ func TestProcessHealthEndpointSnapshot(t *testing.T) {
 	if got.ProcessHealth.TotalThreads <= 0 {
 		t.Fatalf("total_threads = %d, want > 0", got.ProcessHealth.TotalThreads)
 	}
+	if got.ProcessHealth.Scan.PIDsEnumerated <= 0 || got.ProcessHealth.Scan.PIDsReadable != got.ProcessHealth.TotalProcesses {
+		t.Fatalf("inconsistent scan summary: scan=%+v total_processes=%d", got.ProcessHealth.Scan, got.ProcessHealth.TotalProcesses)
+	}
+	if got.ProcessHealth.Scan.PIDsSkipped != got.ProcessHealth.Scan.PIDsEnumerated-got.ProcessHealth.Scan.PIDsReadable || got.ProcessHealth.Scan.PIDsSkipped < 0 {
+		t.Fatalf("invalid scan completeness accounting: %+v", got.ProcessHealth.Scan)
+	}
 
 	stateTotal := 0
 	for _, n := range got.ProcessHealth.States {
