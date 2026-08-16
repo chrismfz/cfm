@@ -62,20 +62,30 @@ type HealthSummary struct {
 	UniqueFamilies int            `json:"unique_families"`
 	Scan           ScanSummary    `json:"scan"`
 
-	TopFamiliesByCount []FamilySummary                   `json:"top_families_by_count"`
-	TopFamiliesByRSS   []FamilySummary                   `json:"top_families_by_rss"`
-	TopFamiliesByState map[string][]StateFamilySummary   `json:"top_families_by_state"`
-	TopFanout          []FanoutSummary                   `json:"top_fanout"`
+	TopFamiliesByCount []FamilySummary                 `json:"top_families_by_count"`
+	TopFamiliesByRSS   []FamilySummary                 `json:"top_families_by_rss"`
+	TopFamiliesByState map[string][]StateFamilySummary `json:"top_families_by_state"`
+	TopFanout          []FanoutSummary                 `json:"top_fanout"`
 }
 
-// Health scans /proc once and returns a compact process-health snapshot. Unlike
-// List/Top it intentionally does not sleep for CPU sampling and never touches
-// /proc/<pid>/cmdline. Processes that exit during the scan are counted as skipped
-// so consumers can judge snapshot completeness.
+// Health scans /proc once and returns the existing compact process-health
+// snapshot. The full COMM-family map used by the rolling-baseline collector is
+// deliberately not exposed through HealthSummary or its JSON API.
 func Health() (HealthSummary, error) {
+	out, _, err := HealthWithFamilyCounts()
+	return out, err
+}
+
+// HealthWithFamilyCounts performs the same single lightweight /proc scan as
+// Health and additionally returns the complete exact-COMM process-count map.
+// This internal-package API exists so a rolling-baseline sampler can persist all
+// families without a second /proc walk or expanding the bounded HTTP/MCP JSON
+// surface. Callers must still use EvaluateHealth(out).Reliable before learning
+// from the snapshot.
+func HealthWithFamilyCounts() (HealthSummary, map[string]int, error) {
 	pids := listPIDs()
 	if len(pids) == 0 {
-		return HealthSummary{}, errors.New("procstat: cannot enumerate /proc")
+		return HealthSummary{}, nil, errors.New("procstat: cannot enumerate /proc")
 	}
 
 	rows := make([]Process, 0, len(pids))
@@ -87,16 +97,16 @@ func Health() (HealthSummary, error) {
 		rows = append(rows, p)
 	}
 	if len(rows) == 0 {
-		return HealthSummary{}, errors.New("procstat: no readable processes")
+		return HealthSummary{}, nil, errors.New("procstat: no readable processes")
 	}
 
-	out := summarizeHealth(rows, healthTopN)
+	out, familyCounts := summarizeHealthWithFamilyCounts(rows, healthTopN)
 	out.Scan = ScanSummary{
 		PIDsEnumerated: len(pids),
 		PIDsReadable:   len(rows),
 		PIDsSkipped:    len(pids) - len(rows),
 	}
-	return out, nil
+	return out, familyCounts, nil
 }
 
 // readHealthProcess reads only the /proc/<pid>/stat fields needed by Health.
@@ -153,6 +163,14 @@ func parseHealthStat(pid int, raw []byte) (Process, bool) {
 // summarizeHealth is pure so aggregation, ranking, and truncation can be tested
 // deterministically without depending on the live host process table.
 func summarizeHealth(rows []Process, limit int) HealthSummary {
+	out, _ := summarizeHealthWithFamilyCounts(rows, limit)
+	return out
+}
+
+// summarizeHealthWithFamilyCounts keeps the complete exact-COMM count map next
+// to the existing bounded summary. The map is derived from the same aggregation,
+// before any top-N truncation, so its counts always describe the same snapshot.
+func summarizeHealthWithFamilyCounts(rows []Process, limit int) (HealthSummary, map[string]int) {
 	if limit < 1 {
 		limit = healthTopN
 	}
@@ -187,8 +205,10 @@ func summarizeHealth(rows []Process, limit int) HealthSummary {
 	out.UniqueFamilies = len(families)
 
 	allFamilies := make([]FamilySummary, 0, len(families))
+	familyCounts := make(map[string]int, len(families))
 	for _, f := range families {
 		allFamilies = append(allFamilies, f)
+		familyCounts[f.Comm] = f.Count
 		for state, count := range f.States {
 			out.TopFamiliesByState[state] = append(out.TopFamiliesByState[state], StateFamilySummary{
 				Comm:  f.Comm,
@@ -260,5 +280,5 @@ func summarizeHealth(rows []Process, limit int) HealthSummary {
 	}
 	out.TopFanout = fanout
 
-	return out
+	return out, familyCounts
 }
