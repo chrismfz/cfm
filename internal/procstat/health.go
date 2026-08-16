@@ -33,6 +33,17 @@ type FanoutSummary struct {
 	Children int    `json:"children"`
 }
 
+// ScanSummary makes snapshot completeness explicit. A small skipped count is
+// normal on a busy host because processes can exit between /proc enumeration and
+// reading /proc/<pid>/stat; callers can now distinguish that race from a severely
+// partial snapshot instead of silently treating every successful Health() call as
+// complete.
+type ScanSummary struct {
+	PIDsEnumerated int `json:"pids_enumerated"`
+	PIDsReadable   int `json:"pids_readable"`
+	PIDsSkipped    int `json:"pids_skipped"`
+}
+
 // HealthSummary is a cheap, read-only process-table summary intended to become
 // the foundation for process-health anomaly rules. It does not read cmdline,
 // resolve usernames, or take the 150ms CPU sample used by process_list.
@@ -41,6 +52,7 @@ type HealthSummary struct {
 	TotalThreads   int            `json:"total_threads"`
 	States         map[string]int `json:"states"`
 	UniqueFamilies int            `json:"unique_families"`
+	Scan           ScanSummary    `json:"scan"`
 
 	TopFamiliesByCount []FamilySummary `json:"top_families_by_count"`
 	TopFamiliesByRSS   []FamilySummary `json:"top_families_by_rss"`
@@ -49,7 +61,8 @@ type HealthSummary struct {
 
 // Health scans /proc once and returns a compact process-health snapshot. Unlike
 // List/Top it intentionally does not sleep for CPU sampling and never touches
-// /proc/<pid>/cmdline. Processes that exit during the scan are simply skipped.
+// /proc/<pid>/cmdline. Processes that exit during the scan are counted as skipped
+// so consumers can judge snapshot completeness.
 func Health() (HealthSummary, error) {
 	pids := listPIDs()
 	if len(pids) == 0 {
@@ -67,7 +80,14 @@ func Health() (HealthSummary, error) {
 	if len(rows) == 0 {
 		return HealthSummary{}, errors.New("procstat: no readable processes")
 	}
-	return summarizeHealth(rows, healthTopN), nil
+
+	out := summarizeHealth(rows, healthTopN)
+	out.Scan = ScanSummary{
+		PIDsEnumerated: len(pids),
+		PIDsReadable:   len(rows),
+		PIDsSkipped:    len(pids) - len(rows),
+	}
+	return out, nil
 }
 
 // readHealthProcess reads only the /proc/<pid>/stat fields needed by Health.
@@ -78,6 +98,14 @@ func readHealthProcess(pid int) (Process, bool) {
 	if err != nil {
 		return Process{}, false
 	}
+	return parseHealthStat(pid, raw)
+}
+
+// parseHealthStat decodes the small subset of /proc/<pid>/stat used by Health.
+// Numeric parse failures reject the row rather than silently turning malformed
+// data into zero-valued PPID/thread/RSS fields that could distort later health
+// decisions.
+func parseHealthStat(pid int, raw []byte) (Process, bool) {
 	s := string(raw)
 	lp := strings.IndexByte(s, '(')
 	rp := strings.LastIndexByte(s, ')')
@@ -85,13 +113,22 @@ func readHealthProcess(pid int) (Process, bool) {
 		return Process{}, false
 	}
 	f := strings.Fields(s[rp+1:])
-	if len(f) < 22 {
+	if len(f) < 22 || f[0] == "" {
 		return Process{}, false
 	}
 
-	ppid, _ := strconv.Atoi(f[1])                  // field 4  -> f[1]
-	threads, _ := strconv.Atoi(f[17])              // field 20 -> f[17]
-	rssPages, _ := strconv.ParseInt(f[21], 10, 64) // field 24 -> f[21]
+	ppid, err := strconv.Atoi(f[1]) // field 4 -> f[1]
+	if err != nil {
+		return Process{}, false
+	}
+	threads, err := strconv.Atoi(f[17]) // field 20 -> f[17]
+	if err != nil {
+		return Process{}, false
+	}
+	rssPages, err := strconv.ParseInt(f[21], 10, 64) // field 24 -> f[21]
+	if err != nil {
+		return Process{}, false
+	}
 	pagesKB := int64(os.Getpagesize()) / 1024
 
 	return Process{
