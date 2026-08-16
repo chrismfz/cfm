@@ -1,7 +1,7 @@
 package mcpserver
 
 // whats_wrong.go implements the flagship triage tool: one read-only call that
-// pulls the key health/security/mail/db signals concurrently (the SAME allow-listed
+// pulls the key health/process/security/mail/db signals concurrently (the SAME allow-listed
 // GET endpoints the other tools use), runs a CONSERVATIVE rule set over them, and
 // returns a severity-ranked list of concrete problems — each with a one-line
 // detail and a pointer to the drill-down tool to call next.
@@ -16,8 +16,9 @@ package mcpserver
 //     firewall blocks, busy top-talkers) is NOT a finding. Over-flagging is the
 //     cardinal sin for a triage tool, so ambiguous signals stay out until proven.
 //   - A section that errors or is unavailable (collector/governor off) is reported
-//     in `sources` as error/unavailable — NOT silently treated as healthy. status
-//     "ok" means "no findings among the signals we could actually read".
+//     in `sources` as error/unavailable — NOT silently treated as healthy. A
+//     semantically degraded process-health snapshot is also surfaced explicitly.
+//     status "ok" means "no findings among the signals we could actually read".
 
 import (
 	"context"
@@ -72,16 +73,17 @@ const (
 var categoryOrder = map[string]int{
 	"edge":       0,
 	"service":    1,
-	"disk":       2,
-	"memory":     3,
-	"load":       4,
-	"network":    5,
-	"mysql":      6,
-	"mail_queue": 7,
-	"mail":       8,
-	"panel":      9,
-	"abuse":      10,
-	"health":     11,
+	"process":    2,
+	"disk":       3,
+	"memory":     4,
+	"load":       5,
+	"network":    6,
+	"mysql":      7,
+	"mail_queue": 8,
+	"mail":       9,
+	"panel":      10,
+	"abuse":      11,
+	"health":     12,
 }
 
 // finding is one ranked triage item.
@@ -99,7 +101,7 @@ type whatsWrongResult struct {
 	Status   string            `json:"status"`  // "ok" | "issues"
 	Summary  string            `json:"summary"` // human one-liner
 	Counts   map[string]int    `json:"counts"`  // critical/warning/info
-	Sources  map[string]string `json:"sources"` // per-signal: ok | unavailable | error: <msg>
+	Sources  map[string]string `json:"sources"` // per-signal: ok | unavailable | degraded: <msg> | error: <msg>
 	Findings []finding         `json:"findings"`
 }
 
@@ -107,13 +109,14 @@ func registerWhatsWrong(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "whats_wrong",
-		Description: "Triage in one call: pulls health, systemd services, MySQL saturation, the mail queue, mail-traffic anomalies, API-abuse anomalies, and panel-enforcement burn-in residue together, then returns a SEVERITY-RANKED list of concrete problems (critical → warning → info), each with a one-line detail and the drill-down tool to call next (e.g. process_list, service_status, mysql_pressure, mail_queue_summary, mail_traffic, waf_fp_hunt). Deliberately conservative — it flags real problems (disk/inode near-full, high sustained load, swap/conntrack pressure, a failed or flapping service, edge/frontend down or degraded, MySQL connections near max, a frozen mail-queue backlog, suspected outbound-mail spikes, API-abuse bursts, and real non-scanner clients a panel BLOCK rule / the bridge would/did act on), NOT routine activity like WAF hits or normal firewall blocks. `status:\"ok\"` means no problems among the signals it could read; `sources` shows which signals were read, unavailable (collector/governor off), or errored — an unread signal is never assumed healthy. Start here for \"is anything wrong right now?\", then use the per-finding tool to dig in.",
+		Description: "Triage in one call: pulls host health, process-health anomalies, systemd services, MySQL saturation, the mail queue, mail-traffic anomalies, API-abuse anomalies, and panel-enforcement burn-in residue together, then returns a SEVERITY-RANKED list of concrete problems (critical → warning → info), each with a one-line detail and the drill-down tool to call next (e.g. process_health, process_list, service_status, mysql_pressure, mail_queue_summary, mail_traffic, waf_fp_hunt). Deliberately conservative — it flags real problems (D-state/zombie accumulation, disk/inode near-full, high sustained load, swap/conntrack pressure, a failed or flapping service, edge/frontend down or degraded, MySQL connections near max, a frozen mail-queue backlog, suspected outbound-mail spikes, API-abuse bursts, and real non-scanner clients a panel BLOCK rule / the bridge would/did act on), NOT routine activity like WAF hits or normal firewall blocks. A degraded process-health snapshot is itself a warning so missing process evidence cannot masquerade as healthy. `status:\"ok\"` means no problems among the signals it could read; `sources` shows which signals were read, unavailable, degraded, or errored. Start here for \"is anything wrong right now?\", then use the per-finding tool to dig in.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		secs := []struct {
 			key, path string
 			q         url.Values
 		}{
 			{"health", "/api/v1/health/snapshot", nil},
+			{"process_health", "/api/v1/system/process-health", nil},
 			{"anomalies", "/api/v1/health/anomalies", nil},
 			{"services", "/api/v1/system/services", nil},
 			{"mysql", "/api/v1/mysql/top", nil},
@@ -194,6 +197,9 @@ func evaluateWhatsWrong(sections map[string]json.RawMessage) whatsWrongResult {
 
 	if body, ok := sections["health"]; ok && usable("health", body) {
 		fs = append(fs, evalHealth(body)...)
+	}
+	if body, ok := sections["process_health"]; ok && usable("process_health", body) {
+		fs = append(fs, evalProcessHealth(body, sources)...)
 	}
 	if body, ok := sections["services"]; ok && usable("services", body) {
 		fs = append(fs, evalServices(body, edgeService)...)
