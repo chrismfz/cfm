@@ -46,7 +46,7 @@ This layer deliberately contains no duplicate D/Z thresholds and does not inspec
 - One minute is a **snapshot**, not an additive counter. A retry in the same minute atomically replaces the whole bucket so stale families cannot survive.
 - Family counts must sum exactly to the sample's total process count; malformed/incomplete samples are rejected before storage.
 - A family absent from a valid host sample is represented as `count=0` when its series is read. A minute for which no valid sample exists remains a telemetry gap instead of becoming a fake zero.
-- Retention is bounded to eight days, leaving enough room for a seven-day trailing baseline while excluding a recent comparison window.
+- Retention is bounded to **72 hours**. Three days preserves minute-resolution recent host history while materially reducing row/index growth compared with week-scale retention on busy shared hosts.
 - Retention pruning is transactional with each write and explicitly removes both sample and family rows; no background maintenance goroutine is required.
 - `procstat.HealthWithFamilyCounts()` returns the existing bounded health summary plus the **complete** exact-COMM count map from the same single `/proc` scan. The full map is internal-only and does not expand the HTTP/MCP JSON surface.
 - `procbaseline.Collector` samples immediately and then once per minute via `Run(ctx)`, with normal context cancellation.
