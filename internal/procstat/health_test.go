@@ -34,11 +34,11 @@ func TestSummarizeHealth_AggregatesAndRanks(t *testing.T) {
 	if len(got.TopFamiliesByCount) != 4 {
 		t.Fatalf("TopFamiliesByCount len = %d, want 4", len(got.TopFamiliesByCount))
 	}
-	if f := got.TopFamiliesByCount[0]; f.Comm != "exim" || f.Count != 2 || f.RSSKB != 120 || f.Threads != 3 {
-		t.Fatalf("top family by count = %+v, want exim count=2 rss=120 threads=3", f)
+	if f := got.TopFamiliesByCount[0]; f.Comm != "exim" || f.Count != 2 || f.RSSKB != 120 || f.Threads != 3 || f.States["S"] != 1 || f.States["D"] != 1 {
+		t.Fatalf("top family by count = %+v, want exim count=2 rss=120 threads=3 states=S1/D1", f)
 	}
-	if f := got.TopFamiliesByCount[1]; f.Comm != "spamd child" || f.Count != 2 || f.RSSKB != 50 || f.Threads != 2 {
-		t.Fatalf("second family by count = %+v, want spamd child", f)
+	if f := got.TopFamiliesByCount[1]; f.Comm != "spamd child" || f.Count != 2 || f.RSSKB != 50 || f.Threads != 2 || f.States["S"] != 1 || f.States["Z"] != 1 {
+		t.Fatalf("second family by count = %+v, want spamd child states=S1/Z1", f)
 	}
 
 	if len(got.TopFamiliesByRSS) != 4 {
@@ -49,6 +49,13 @@ func TestSummarizeHealth_AggregatesAndRanks(t *testing.T) {
 	}
 	if f := got.TopFamiliesByRSS[1]; f.Comm != "exim" || f.RSSKB != 120 {
 		t.Fatalf("second family by RSS = %+v, want exim rss=120", f)
+	}
+
+	if d := got.TopFamiliesByState["D"]; len(d) != 1 || d[0].Comm != "exim" || d[0].Count != 1 {
+		t.Fatalf("D-state families = %+v, want exim/count=1", d)
+	}
+	if z := got.TopFamiliesByState["Z"]; len(z) != 1 || z[0].Comm != "spamd child" || z[0].Count != 1 {
+		t.Fatalf("Z-state families = %+v, want spamd child/count=1", z)
 	}
 
 	if len(got.TopFanout) != 2 {
@@ -80,8 +87,32 @@ func TestSummarizeHealth_LimitsRankedListsAfterFullAggregation(t *testing.T) {
 	if len(got.TopFamiliesByRSS) != 1 || got.TopFamiliesByRSS[0].Comm != "large" || got.TopFamiliesByRSS[0].RSSKB != 1000 {
 		t.Fatalf("TopFamiliesByRSS = %+v, want only large/rss=1000", got.TopFamiliesByRSS)
 	}
+	if s := got.TopFamiliesByState["S"]; len(s) != 1 || s[0].Comm != "many" || s[0].Count != 2 {
+		t.Fatalf("TopFamiliesByState[S] = %+v, want only many/count=2", s)
+	}
 	if len(got.TopFanout) != 1 || got.TopFanout[0].PID != 1 || got.TopFanout[0].Children != 2 {
 		t.Fatalf("TopFanout = %+v, want pid 1 with 2 direct children", got.TopFanout)
+	}
+}
+
+func TestSummarizeHealth_StateAttributionSurvivesGlobalTopN(t *testing.T) {
+	rows := []Process{
+		{PID: 1, PPID: 0, Comm: "busy", State: "S", Threads: 1, RSSKB: 100},
+		{PID: 2, PPID: 0, Comm: "busy", State: "S", Threads: 1, RSSKB: 100},
+		{PID: 3, PPID: 0, Comm: "busy", State: "S", Threads: 1, RSSKB: 100},
+		{PID: 4, PPID: 0, Comm: "blocked", State: "D", Threads: 1, RSSKB: 1},
+		{PID: 5, PPID: 0, Comm: "orphaned", State: "Z", Threads: 1, RSSKB: 0},
+	}
+
+	got := summarizeHealth(rows, 1)
+	if len(got.TopFamiliesByCount) != 1 || got.TopFamiliesByCount[0].Comm != "busy" {
+		t.Fatalf("TopFamiliesByCount = %+v, want busy only", got.TopFamiliesByCount)
+	}
+	if d := got.TopFamiliesByState["D"]; len(d) != 1 || d[0].Comm != "blocked" || d[0].Count != 1 {
+		t.Fatalf("D-state attribution lost outside global top-N: %+v", d)
+	}
+	if z := got.TopFamiliesByState["Z"]; len(z) != 1 || z[0].Comm != "orphaned" || z[0].Count != 1 {
+		t.Fatalf("Z-state attribution lost outside global top-N: %+v", z)
 	}
 }
 
@@ -163,5 +194,26 @@ func TestHealth_LiveSnapshotIsBounded(t *testing.T) {
 	if len(got.TopFamiliesByCount) > healthTopN || len(got.TopFamiliesByRSS) > healthTopN || len(got.TopFanout) > healthTopN {
 		t.Fatalf("health ranked lists exceeded cap %d: count=%d rss=%d fanout=%d",
 			healthTopN, len(got.TopFamiliesByCount), len(got.TopFamiliesByRSS), len(got.TopFanout))
+	}
+	for state, ranked := range got.TopFamiliesByState {
+		if state == "" || len(ranked) > healthTopN {
+			t.Fatalf("invalid state ranking %q: %+v", state, ranked)
+		}
+		for _, f := range ranked {
+			if f.Comm == "" || f.Count <= 0 {
+				t.Fatalf("invalid state-family row for %q: %+v", state, f)
+			}
+		}
+	}
+	for _, families := range [][]FamilySummary{got.TopFamiliesByCount, got.TopFamiliesByRSS} {
+		for _, f := range families {
+			stateCount := 0
+			for _, n := range f.States {
+				stateCount += n
+			}
+			if stateCount != f.Count {
+				t.Fatalf("family state total = %d, family count = %d: %+v", stateCount, f.Count, f)
+			}
+		}
 	}
 }
