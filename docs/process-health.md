@@ -7,6 +7,7 @@ Current as-built surface:
 - `procstat.Health()` provides a cheap single-scan `/proc` summary.
 - `GET /api/v1/system/process-health` exposes that summary as admin-only JSON (`system.process_health.v1`).
 - MCP `process_health` exposes the same snapshot read-only with no arguments.
+- MCP `whats_wrong` consumes the endpoint's existing evaluation as a first-class triage source; it does not re-run process thresholds.
 
 The snapshot reports total readable processes and threads, process-state counts (including D/Z), exact COMM-family aggregates ranked by count and aggregate RSS, and the largest direct-child fanouts. Each family aggregate also carries its own `states` breakdown, and `top_families_by_state` gives a separately bounded ranking for every observed process state. This means a small D- or Z-state family remains attributable even when it is not large enough to appear in the global top-by-count or top-by-RSS lists.
 
@@ -26,4 +27,13 @@ The evaluator refuses to make a healthy/unhealthy verdict when the snapshot is m
 
 Deliberately still **not** classified from a single snapshot: raw COMM-family counts, family dominance, direct-child fanout, aggregate RSS, or total process count. Those are workload-dependent and remain descriptive until historical baselines make them safe to judge.
 
-Use `process_list` for PID/family drill-down. Historical baselines, `whats_wrong` integration, and service-level responsiveness checks are separate follow-up slices.
+## `whats_wrong` integration
+
+`whats_wrong` fetches `/api/v1/system/process-health` concurrently with its existing host/service/database/mail/security sources and maps only the endpoint's already-classified `evaluation` into the triage result:
+
+- reliable D/Z findings keep their upstream warning/critical severity;
+- the top contributing COMM family becomes a direct `process_list(match=..., details=true)` drill-down when available;
+- `evaluation.status=degraded`, an unreliable evaluation, or a semantically inconsistent evaluation becomes a **warning** and marks `sources.process_health` as `degraded: ...`;
+- therefore a materially partial process snapshot cannot leave the flagship result looking healthy.
+
+This layer deliberately contains no duplicate D/Z thresholds and does not inspect the raw family/fanout/RSS counts. Historical baselines and service-level protocol responsiveness remain separate follow-up work.
