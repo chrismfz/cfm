@@ -22,9 +22,9 @@ const (
 	// without storing per-process detail.
 	bucketSeconds int64 = 60
 
-	// Keep slightly more than the intended seven-day baseline window so a recent
-	// comparison window can be excluded without losing the oldest baseline edge.
-	defaultRetention = 8 * 24 * time.Hour
+	// Three days is enough recent host-specific history for the initial process
+	// baseline while bounding minute-resolution SQLite growth on busy shared hosts.
+	defaultRetention = 72 * time.Hour
 )
 
 // Sample is one complete, reliable process-table observation. Families contains
