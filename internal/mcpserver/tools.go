@@ -55,6 +55,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerDetectorsStatus(srv, d)
 	registerSystemHealth(srv, d)
 	registerProcessList(srv, d)
+	registerProcessHealth(srv, d)
 	registerListeningPorts(srv, d)
 	registerDmesgTail(srv, d)
 	registerServiceStatus(srv, d)
