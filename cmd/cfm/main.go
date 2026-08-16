@@ -1402,6 +1402,10 @@ func runDaemon(args []string) {
 	if os.Getenv("CFM_DEBUG") == "1" {
 		fmt.Printf("Starting MAD COW FIREWALL v2 Moooooooh Maf|[]z05 rulez\n")
 	}
+
+	stopProcessBaseline := startProcessBaseline(ctx)
+	defer stopProcessBaseline()
+
 	logging.Logf("cfm daemon starting (tick=%s). Ctrl+C to exit.\n", interval.String())
 
 	// DNAT failsafe: if the edge proxy stops serving (TCP listener down or
