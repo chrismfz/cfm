@@ -38,9 +38,9 @@ Deliberately still **not** classified from a single snapshot: raw COMM-family co
 
 This layer deliberately contains no duplicate D/Z thresholds and does not inspect the raw family/fanout/RSS counts.
 
-## Rolling baseline storage foundation
+## Rolling baseline storage and sampler foundation
 
-`internal/procbaseline` provides the persistence model for a later historical process-count detector. It is intentionally not wired into the daemon yet and does not change any current process-health verdict.
+`internal/procbaseline` provides the persistence and sampling model for a later historical process-count detector. It is still intentionally **not wired into `runDaemon`**, so this foundation does not yet create background work in production or change any current process-health verdict.
 
 - SQLite-backed minute buckets store only total readable process count plus exact COMM-family counts; there is no PID, argv, username, or other per-process history.
 - One minute is a **snapshot**, not an additive counter. A retry in the same minute atomically replaces the whole bucket so stale families cannot survive.
@@ -48,5 +48,10 @@ This layer deliberately contains no duplicate D/Z thresholds and does not inspec
 - A family absent from a valid host sample is represented as `count=0` when its series is read. A minute for which no valid sample exists remains a telemetry gap instead of becoming a fake zero.
 - Retention is bounded to eight days, leaving enough room for a seven-day trailing baseline while excluding a recent comparison window.
 - Retention pruning is transactional with each write and explicitly removes both sample and family rows; no background maintenance goroutine is required.
+- `procstat.HealthWithFamilyCounts()` returns the existing bounded health summary plus the **complete** exact-COMM count map from the same single `/proc` scan. The full map is internal-only and does not expand the HTTP/MCP JSON surface.
+- `procbaseline.Collector` samples immediately and then once per minute via `Run(ctx)`, with normal context cancellation.
+- A sample is persisted only when the existing `procstat.EvaluateHealth(...).Reliable` contract is true. Materially partial/inconsistent scans become telemetry gaps rather than learned zeros.
+- A reliable snapshot that contains a D/Z finding is still persisted: anomaly presence is real workload data; `Reliable=false` is the criterion for whether the observation itself is safe to learn from.
+- Read/store failures do not terminate the collector loop; the failed minute is left as a gap and the next interval is attempted normally.
 
-The next slice will connect a cheap `/proc` sampler to this store and persist **only reliable** snapshots. Baseline statistics/anomaly thresholds and sustained verdicts remain separate follow-up work, as do service-level protocol responsiveness checks.
+The next slice will be daemon lifecycle wiring only: open `/var/lib/cfm/processbaseline.db`, start the collector under the daemon context, and close it cleanly on shutdown. Baseline statistics/anomaly thresholds and sustained verdicts remain separate follow-up work, as do service-level protocol responsiveness checks.
