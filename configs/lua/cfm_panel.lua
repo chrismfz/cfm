@@ -415,12 +415,6 @@ local function cooldown_key(ip, host)
     return "panel_cooldown|" .. tostring(ip or "-") .. "|" .. tostring(host or "-")
 end
 
-local function loop_key(ip, host)
-    return "panel_loop|" .. tostring(ip or "-") .. "|" .. tostring(host or "-")
-end
-
-
-
 local function validator_degraded_reason(reason)
     return reason == "module_error" or reason == "crypto_unavailable"
 end
@@ -485,25 +479,6 @@ local function cooldown_active(ip, host)
     if not sh then return false end
 
     return sh:get(cooldown_key(ip, host)) ~= nil
-end
-
-local function note_challenge_attempt(ip, host, ttl)
-    local sh = challenge_state()
-    if not sh then return 0 end
-
-    local key = loop_key(ip, host)
-    local n = tonumber(sh:get(key) or 0) or 0
-    n = n + 1
-
-    sh:set(key, n, ttl or 20)
-
-    return n
-end
-
-local function read_challenge_attempts(ip, host)
-    local sh = challenge_state()
-    if not sh then return 0 end
-    return tonumber(sh:get(loop_key(ip, host)) or 0) or 0
 end
 
 local decision_uri = "/__cfm_panel_decide"
@@ -697,7 +672,6 @@ end
 local function issue_challenge(mode, reason, decision, cooldown_ttl, include_loop_marker)
     local loc = challenge_redirect_target(decision, include_loop_marker)
 
-    local attempts = note_challenge_attempt(ngx.var.remote_addr, ngx.var.host or "", 20)
     mark_challenge_issued(ngx.var.remote_addr, ngx.var.host or "", cooldown_ttl or 0)
 
     decision_log(ngx.INFO, {
@@ -718,7 +692,7 @@ local function issue_challenge(mode, reason, decision, cooldown_ttl, include_loo
         challenge_issued = "1",
         challenge_entry = "1",
         challenge_solved = "0",
-        challenge_resume = tostring(attempts),
+        challenge_resume = "0",
         deny_fail_closed = "0",
         target = loc,
     })
@@ -840,18 +814,15 @@ local function scoped_clearance_cookie_name(scope)
     return "cfm_clearance"
 end
 
--- Read the clearance token for this scope: prefer the per-scope cookie,
--- fall back to the legacy shared name (upgrade lag / pre-rename cookies).
--- The fallback cannot weaken per-port isolation — the token's scope claim
--- is HMAC-bound and still validated against this listener's panel scope.
+-- Read the clearance token for this scope: the per-scope cookie only.
+-- The legacy shared-name (cfm_clearance) fallback was dropped in the Phase 3
+-- cookie-net cleanup (docs/edge-unification-plan.md) once the per-scope cookie
+-- scheme proved itself fleet-wide (burn-in clean on orion+titan). A stale
+-- legacy-name cookie now costs at most a one-time re-challenge, never a lockout.
 local function read_clearance_cookie(scope)
     local name = scoped_clearance_cookie_name(scope)
     local token = safe_cookie_value(ngx.var["cookie_" .. name])
     if token then return token, name end
-    if name ~= "cfm_clearance" then
-        local legacy = safe_cookie_value(ngx.var.cookie_cfm_clearance)
-        if legacy then return legacy, "cfm_clearance" end
-    end
     return nil, name
 end
 
@@ -971,9 +942,8 @@ local function refresh_clearance_cookie(ip, host, scope)
 
     local refreshed = false
 
-    -- Read via the per-scope helper; always RE-SET under the scoped name so
-    -- a token accepted via the legacy-name fallback migrates forward. The
-    -- legacy cookie itself is left alone — it may hold the user's web token.
+    -- Read via the per-scope helper and RE-SET under the scoped name to slide
+    -- the clearance TTL forward on each cleared request.
     local cfm_clearance = read_clearance_cookie(scope)
     if cfm_clearance then
         local out_val = tostring(cfm_clearance)
@@ -1344,28 +1314,13 @@ if is_human_panel_entry(ngx.var.host or "", uri) then
             return allow_origin(mode, "validator_degraded_fail_open_" .. tostring(clearance_reason), origin, method, ua)
         end
 
-        -- Circuit breaker: if a browser has already been bounced through the
-        -- challenge several times in the last 20s and *still* arrives without
-        -- a valid clearance cookie, validation is structurally broken (cookie
-        -- not coming back, scope/host/IP mismatch, etc). Fail open with a
-        -- loop-guard cookie so the user can actually use the panel; the
-        -- WARN log above already records the validator_reason for diagnosis.
-        local prior_attempts = read_challenge_attempts(client_ip, ngx.var.host or "")
-        if loop_marker_present() or prior_attempts >= 3 then
-            ngx.log(
-                ngx.WARN,
-                "[cfm_panel_loop_break] prior_attempts=", tostring(prior_attempts),
-                " loop_marker=", loop_marker_present() and "1" or "0",
-                " ip=", tostring(client_ip or "-"),
-                " host=", tostring(normalized_host or "-"),
-                " scope=", tostring(panel_scope or "-"),
-                " validator_reason=", tostring(clearance_reason or "-"),
-                " cookie_present=", cookie_present
-            )
-            set_loop_marker_cookie(20)
-            return allow_origin(mode, "challenge_loop_break_" .. tostring(clearance_reason or "invalid"), origin, method, ua)
-        end
-
+        -- Un-cleared browser: challenge once, then it rides the per-scope
+        -- clearance cookie. The prior_attempts>=3 circuit breaker was removed in
+        -- the Phase 3 cookie-net cleanup (docs/edge-unification-plan.md) after the
+        -- per-scope cookie scheme proved itself fleet-wide — the loop-breaker was
+        -- idle on both burn-in nodes in a window entirely after the enforce flip.
+        -- The validator_degraded fail-open above still catches a genuinely broken
+        -- validator module (HMAC unavailable), which is a different failure mode.
         return issue_challenge(mode, "human_entry_challenge_" .. tostring(clearance_reason or "invalid"), nil, 0, false)
     end
 

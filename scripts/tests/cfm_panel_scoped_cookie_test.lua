@@ -1,10 +1,10 @@
 -- Tests for cfm_panel.lua per-scope clearance cookie handling (Phase 2a).
 --
--- The panel reads cfm_clearance_p<port> first (the name the Go challenge
--- server mints for panel scopes), falls back to the legacy shared
--- cfm_clearance name for upgrade lag, and always re-mints under the scoped
--- name so legacy cookies migrate forward. Validation stays scope-bound
--- either way, so the fallback cannot weaken per-port isolation.
+-- The panel reads cfm_clearance_p<port> ONLY (the name the Go challenge
+-- server mints for panel scopes) and re-mints under that scoped name. The
+-- legacy shared cfm_clearance-name fallback was dropped in the Phase 3
+-- cookie-net cleanup, so a legacy-only cookie now yields a one-time
+-- re-challenge rather than being honoured.
 --
 -- Uses fake cfm_clearance / cfm_bridge_cfg modules injected via
 -- package.loaded: tokens are "TOK_<scope>" and validate() succeeds only
@@ -120,16 +120,19 @@ assert_eq(ngx1.var.cfm_upstream, "cfm_panel_origin", "valid scoped cookie should
 assert_eq(find_cookie(ngx1, "cfm_clearance_p2087"), "MINTED_panel:2087", "re-mint must use the scoped cookie name")
 assert_eq(find_cookie(ngx1, "cfm_clearance"), nil, "re-mint must not touch the legacy shared name")
 
--- 2) Legacy fallback: panel-scoped token under the shared name (upgrade lag)
---    → still validates, and the re-mint migrates it to the scoped name.
+-- 2) Legacy shared-name cookie is NO LONGER honoured (Phase 3 cookie-net
+--    cleanup): even a correctly panel-scoped token under the legacy name is
+--    ignored, so the browser gets a one-time re-challenge and the legacy
+--    cookie is left untouched (never rewritten under the scoped name).
 local ngx2, r2 = run_case({
   legacy_cookie = "TOK_panel:2087",
 })
-assert_eq(r2, nil, "legacy panel-scoped cookie must not redirect/exit")
-assert_eq(ngx2.var.cfm_upstream, "cfm_panel_origin", "legacy panel-scoped cookie should pass to origin")
-assert_eq(find_cookie(ngx2, "cfm_clearance_p2087"), "MINTED_panel:2087", "legacy cookie must migrate to the scoped name")
+assert_eq(r2 and r2.action, "redirect", "legacy-name cookie must no longer clear the panel")
+assert_eq(r2.code, 307, "re-challenge must be 307")
+assert_eq(find_cookie(ngx2, "cfm_clearance_p2087"), nil, "legacy cookie must not be migrated to the scoped name")
+assert_eq(find_cookie(ngx2, "cfm_clearance"), nil, "the legacy cookie itself must be left alone")
 
--- 3) Legacy holding a WEB token (the old clobber shape) → scope mismatch →
+-- 3) Legacy holding a WEB token (the old clobber shape) → also ignored →
 --    browser gets the challenge; the web token itself is left alone.
 local ngx3, r3 = run_case({
   legacy_cookie = "TOK_web",

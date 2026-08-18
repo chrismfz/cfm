@@ -1,6 +1,6 @@
 # Edge Unification Plan — one enforcement path, one clearance model
 
-Status: **Phases 0–2 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226 · 2a cookie isolation: #1227 · 2b panel tls-fp stamp: #1228 · 2d shared decision module + panel LOGONLY bridge decision: #1229 · 2e panel WAF LOGONLY · 2-parity self-origin: #1247-era `cfm_selfip`) · **Phase 3 in progress** (burn-in confirmed on orion+titan; OPENRESTY_MODE reference key removed) · Owner: operator + assistant
+Status: **Phases 0–2 landed** (Phase 0: PR #1223 · 1a: #1224 · 1b: #1225 · 1c: #1226 · 2a cookie isolation: #1227 · 2b panel tls-fp stamp: #1228 · 2d shared decision module + panel LOGONLY bridge decision: #1229 · 2e panel WAF LOGONLY · 2-parity self-origin: #1247-era `cfm_selfip`) · **Phase 3 in progress** (burn-in confirmed on orion+titan; OPENRESTY_MODE reference key removed; **cookie-net cleanup landed** — legacy shared-cookie-name fallback + panel loop-breaker dropped after a re-run gate showed both idle in a window entirely after the enforce flip) · Owner: operator + assistant
 
 **Phase 2 closed 2026-08-12.** The last open Phase-2 item — the cPanel-plugin iframe cross-port clearance flow (WHM :2087 iframing `/cfm-admin` on :443 under the per-scope cookie scheme) — was verified live as a real cPanel user: clearance works across ports with no "Checking your browser" loop. Burn-in FP gate (`waf_fp_hunt`) on both engines: `panel_waf.nonscanner_would_block = 0` and `panel_decision.ip_block_count = 0`; the only panel-WAF signal is rule 602 `WAF_IP_HOST → would_challenge`, essentially all bare-IP scanner probes (Censys/Modat/zgrab/…), no legitimate client would-block. Caveat carried into Phase 4: the sample is scanner-dominated (authenticated panel ops are hostname-based or hard-skipped by `is_panel_api_or_sso`), so "low FP" is not yet a full exercise of the risky surface.
 Date: 2026-08-11 · Origin: the orion challenge-loop incident (PR #1220/#1221/#1222)
@@ -257,16 +257,22 @@ conflated three edits of very different risk):
   removes the leftover reference-config note — **done**. The runtime deprecation
   warning (`webdetector_register.go`, logs when a stale live config still sets
   `=0`) is **kept** on purpose so operators mid-cleanup get nudged.
-- **Cookie-net cleanup** — drop the legacy shared-cookie-name fallback and the
-  panel loop-breaker. (The inert `cfm_ok` marker is already gone — no live Lua
-  reads or writes it; only vestigial mock vars remain in tests.) These touch the
-  exact clearance path behind the original incident, and the burn-in was clean
-  *because these nets are in place*, so this is its **own** sign-off-gated PR after
-  a longer burn-in — not bundled. Worst case of dropping the legacy-name fallback
-  alone is a one-time re-challenge (not a lockout). The loop-breaker stays coupled
-  to the retained blanket challenge (below): it is a general challenge-loop circuit
-  breaker, so it is dropped only once the per-scope cookie scheme has proven itself
-  fleet-wide, not because the challenge itself is going away.
+- **Cookie-net cleanup — LANDED.** Dropped the legacy shared-cookie-name
+  fallback and the panel loop-breaker. (The inert `cfm_ok` marker was already
+  gone — no live Lua reads or writes it; only vestigial mock vars remain in
+  tests.) These touch the exact clearance path behind the original incident, and
+  the burn-in was clean *because these nets were in place*, so this was its
+  **own** sign-off-gated PR after a longer burn-in — not bundled. The sign-off
+  gate was re-run on both enforce nodes and read clean in a window **entirely
+  after** the 2026-08-13 enforce flip: zero `cfm_panel_loop_break` fires (the
+  only historical fires, incl. `www.foxbox.gr`, predated the flip) and
+  `panel_waf.nonscanner_would_block = panel_decision.ip_block_count = 0`. Worst
+  case of dropping the legacy-name fallback alone is a one-time re-challenge (not
+  a lockout). The loop-breaker was a general challenge-loop circuit breaker
+  coupled to the retained blanket challenge (below), dropped now that the
+  per-scope cookie scheme has proven itself fleet-wide — not because the
+  challenge itself is going away. The `validator_degraded` fail-open (broken
+  validator module) is a distinct net and is **retained**.
 - **`cfm_panel.lua`'s local challenge policy — KEEPER, not dead code (decision
   2026-08-12).** Earlier drafts slated the panel's local blanket challenge for
   deletion once the bridge decision enforced. That is **reversed by an explicit
