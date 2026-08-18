@@ -25,6 +25,18 @@ back-filled here — see the git/PR history for that period.
   in `configs/logrotate-cfm`.
 
 ### Added
+- **mailruntime: pure geometry leaf (PR 1a of the `mail_runtime` subsystem).**
+  New `internal/mailruntime` package supplying the SMTP/spamd *saturation*
+  geometry the queue-centric mail summary can't see — a server up-but-wedged
+  (spamd saturated → SMTP sessions pile up → Exim hits its connection cap → 587
+  unavailable). Ships the effective-geometry math (`Utilisation` current-vs-max
+  → utilisation% → an under-flagging saturation class, mirroring the MySQL
+  governor's connection-pressure shape) and the config-maxima parsers (Exim
+  `smtp_accept_max`/`_per_host`, spamd `--max-children`/`-m`). Pure/no-I/O, with
+  `unknown` first-class (an unresolved cap never reads as `ok`, per
+  `docs/whats-wrong-rootcause.md` §3). Not yet wired to any collector or
+  `what's_wrong` finding; the log-signature parsers land in a follow-up once
+  real captured lines are in hand.
 - **procbaseline: `Store.FamilyStats` descriptive family statistics** — count,
   coverage, present-samples, median, p95 (nearest-rank) and max for one COMM
   family over an explicit history window. Purely descriptive: it carries no
