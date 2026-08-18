@@ -30,6 +30,24 @@ func TestSummarizeFamilyStatsIncludesValidZeroes(t *testing.T) {
 	}
 }
 
+func TestSummarizeFamilyStatsSingleSample(t *testing.T) {
+	t0 := time.Unix(1_700_150_000, 0).Truncate(time.Minute)
+	points := []Point{{At: t0, Count: 7}}
+
+	got := summarizeFamilyStats("dovecot", t0, t0.Add(time.Minute), points)
+	if got.Samples != 1 || got.ExpectedSamples != 1 || got.Coverage != 1 {
+		t.Fatalf("single-sample accounting = %+v", got)
+	}
+	if got.PresentSamples != 1 {
+		t.Fatalf("present samples = %d, want 1", got.PresentSamples)
+	}
+	// n=1 is the smallest non-empty case: nearest-rank p95 is ceil(0.95*1)=1 →
+	// counts[0], so median, p95 and max are all the lone observation.
+	if got.Median != 7 || got.P95 != 7 || got.Max != 7 {
+		t.Fatalf("single-sample distribution = median=%v p95=%d max=%d, want 7/7/7", got.Median, got.P95, got.Max)
+	}
+}
+
 func TestSummarizeFamilyStatsTreatsMissingMinutesAsCoverageGaps(t *testing.T) {
 	t0 := time.Unix(1_700_110_000, 0).Truncate(time.Minute)
 	points := []Point{
