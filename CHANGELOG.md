@@ -17,6 +17,15 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **procbaseline: `Store.FamilyStats` descriptive family statistics** — count,
+  coverage, present-samples, median, p95 (nearest-rank) and max for one COMM
+  family over an explicit history window. Purely descriptive: it carries no
+  anomaly verdict or minimum-history policy, so a later rule layer can inspect
+  Samples/Coverage before deciding the history is sufficient. (Changelog entry
+  back-filled for #1283, which merged while CI was not enforcing the hygiene
+  gate.)
+
 ### Changed
 - **Edge unification Phase 3 — panel cookie-net cleanup.** Dropped two nets from
   the panel guard (`configs/lua/cfm_panel.lua`) now that the per-scope clearance

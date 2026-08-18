@@ -88,13 +88,11 @@ func expectedMinuteBuckets(start, end time.Time) int {
 		return 0
 	}
 
+	// lo is the Unix second of a real monitoring window (always ≥ 0), so the
+	// remainder is non-negative; round up to the next minute-aligned bucket.
 	first := lo
 	if rem := first % bucketSeconds; rem != 0 {
-		if rem > 0 {
-			first += bucketSeconds - rem
-		} else {
-			first -= rem
-		}
+		first += bucketSeconds - rem
 	}
 	if first >= hi {
 		return 0
