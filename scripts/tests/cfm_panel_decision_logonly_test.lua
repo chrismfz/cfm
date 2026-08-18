@@ -73,7 +73,11 @@ local function run(opts)
       uri = "/", request_uri = "/", host = "cpanel.example.com",
       remote_addr = "203.0.113.9", http_authorization = "",
       http_user_agent = opts.ua or "Mozilla/5.0", http_cookie = "",
-      cookie_cfm_ok = "", cookie_cfm_clearance = opts.clearance_valid and "TOK" or "",
+      -- Clearance is delivered under the per-scope cookie name (panel:2087 →
+      -- cfm_clearance_p2087); the legacy shared-name fallback was removed in the
+      -- Phase 3 cookie-net cleanup, so cookie_cfm_clearance is no longer read.
+      cookie_cfm_ok = "", cookie_cfm_clearance = "",
+      cookie_cfm_clearance_p2087 = opts.clearance_valid and "TOK" or "",
       cfm_panel_origin = "https://127.0.0.1:2087", cfm_panel_challenge_mode = "forced",
       cfm_panel_challenge_location = "/__cfm_challenge", server_port = "12087",
       scheme = "https", args = "",

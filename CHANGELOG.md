@@ -17,7 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **Edge unification Phase 3 — panel cookie-net cleanup.** Dropped two nets from
+  the panel guard (`configs/lua/cfm_panel.lua`) now that the per-scope clearance
+  cookie scheme has proven itself fleet-wide (burn-in clean on the two enforce
+  nodes: zero panel loop-breaker fires and zero would-block/ip-block residue in a
+  window entirely after the enforce flip):
+  - the **legacy shared-cookie-name (`cfm_clearance`) fallback** in
+    `read_clearance_cookie` — the panel now reads only the per-scope
+    `cfm_clearance_p<port>` cookie the challenge server mints. Worst case for a
+    stale legacy-name cookie is a one-time re-challenge, never a lockout.
+  - the **panel challenge loop-breaker** (the `prior_attempts >= 3` circuit
+    breaker and its per-IP attempt counter). The `validator_degraded` fail-open
+    (broken HMAC/validator module) is retained — it is a distinct safety net —
+    and the blanket human-entry challenge itself is unchanged (kept by design as
+    the edge bot-shield).
 
 ## 2026.08.13
 
