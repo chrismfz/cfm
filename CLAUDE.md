@@ -327,6 +327,7 @@ rather than advancing heartbeats on failure.
 | BPF LSM | `docs/cfm-lsm.md` · Kernel hardening: `docs/kernsec.md` |
 | Detectors | `docs/DETECTORS.md`, `docs/Detectors.Leniency.md` |
 | Web detector history design | `docs/webdetector-history-design.md` |
+| `what's_wrong` root-cause engine (contract + roadmap) | `docs/whats-wrong-rootcause.md` |
 | WAF → autoblock (`waf_security`) | `docs/waf-autoblock-design.md` |
 | WAF CVE detectors (`WAF_CVE`) | `WAF_CVE.md` (as-built + "CVE hunting" recipe) · `WAF_CVE_PLAN.md` (design + backlog) |
 | Admin/WebUI API | `docs/webui-api-curl-recipes.md`, `docs/webui-api-sample-responses.md` |
