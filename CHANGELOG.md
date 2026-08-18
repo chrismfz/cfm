@@ -17,6 +17,13 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **logrotate: cover the legacy flat `/var/log/cfm.api.log` fallback.** The
+  primary `/var/log/cfm/cfm.api.log` was already rotated by the directory glob,
+  but the flat fallback path `cfmlog.go` can write to had no rotation entry, so
+  `check_logrotate_coverage` flagged it. Added it to the legacy top-level stanza
+  in `configs/logrotate-cfm`.
+
 ### Added
 - **procbaseline: `Store.FamilyStats` descriptive family statistics** — count,
   coverage, present-samples, median, p95 (nearest-rank) and max for one COMM

@@ -88,9 +88,14 @@
 #                           is unset in cfm.conf (internal/config/config.go)
 #   /var/log/cfm.log        }  legacy daemon/service logs still read back by
 #   /var/log/cfm-service.log}  the status API (internal/status/status.go)
+#   /var/log/cfm.api.log    legacy flat fallback for the API log (the primary
+#                           /var/log/cfm/cfm.api.log is already covered by the
+#                           glob above; cfmlog.go keeps this flat path as a
+#                           second candidate — internal/cfmlog/cfmlog.go)
 # Not globbed as /var/log/*.log on purpose — that directory belongs to the
 # distro and to every other daemon on the box.
 /var/log/cfm.log
+/var/log/cfm.api.log
 /var/log/cfm.smtp.log
 /var/log/cfm-service.log {
     daily
