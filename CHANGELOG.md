@@ -25,6 +25,18 @@ back-filled here — see the git/PR history for that period.
   in `configs/logrotate-cfm`.
 
 ### Added
+- **mailruntime: current-count sources + snapshot assembler (PR 1b of the
+  `mail_runtime` subsystem).** Adds the live-gauge half of the SMTP/spamd
+  saturation picture, exec-free: inbound SMTP session count from ESTABLISHED
+  sockets on the listener ports (25/465/587) via `/proc/net/tcp{,6}` (local-port
+  keyed, so outbound deliveries don't count; mirrors the health detector's
+  reader), and active spamd children by counting the `spamd child` process COMM
+  (grounded in `configs/lsm.conf`). A pure `buildSnapshot` assembler turns those
+  counts + the parsed maxima into per-resource `Utilisation`/saturation with a
+  visible `Worst` (an unresolved or unlimited cap stays `unknown`, never `ok`).
+  Still read-only and not yet wired to an endpoint/`what's_wrong`; config
+  discovery (locating exim.conf / the spamd command line) and the MCP surface
+  come next, and the log-signature parsers await real captured lines.
 - **mailruntime: pure geometry leaf (PR 1a of the `mail_runtime` subsystem).**
   New `internal/mailruntime` package supplying the SMTP/spamd *saturation*
   geometry the queue-centric mail summary can't see — a server up-but-wedged
