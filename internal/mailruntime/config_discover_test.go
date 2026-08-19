@@ -67,13 +67,30 @@ func TestDiscoverSpamdMaxChildrenIn(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A worker child (must be ignored — comm "spamd child") and the master.
-	mkProc("501", "spamd child\n", "spamd child\x00")
+	// The worker gets the LOWER pid so os.ReadDir (lexical order) visits it
+	// first: the loop must actively reject the "spamd child" worker before it
+	// reaches the "spamd" master, so a contains/prefix COMM bug would fail here.
+	mkProc("300", "spamd child\n", "spamd child\x00")
 	mkProc("500", "spamd\n", "/usr/bin/spamd\x00--max-children=6\x00--daemonize\x00")
 
 	n, ok := discoverSpamdMaxChildrenIn(root)
 	if !ok || n != 6 {
 		t.Fatalf("discoverSpamdMaxChildrenIn = (%d,%v), want (6,true)", n, ok)
+	}
+}
+
+func TestDiscoverSpamdMaxChildrenInEmptyCmdline(t *testing.T) {
+	// A master whose cmdline raced away to empty (zombie/kernel-thread shape):
+	// no flag → unresolved, never a bogus number.
+	root := t.TempDir()
+	dir := filepath.Join(root, "500")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "comm"), []byte("spamd\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "cmdline"), []byte(""), 0o644)
+	if n, ok := discoverSpamdMaxChildrenIn(root); ok || n != 0 {
+		t.Fatalf("empty master cmdline → (%d,%v), want (0,false)", n, ok)
 	}
 }
 

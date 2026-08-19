@@ -14,6 +14,16 @@ import (
 // allow_comm = spamd child) as observed on the fleet.
 const DefaultSpamdChildComm = "spamd child"
 
+// DefaultSpamdMasterComm is the process COMM of the spamd MASTER (the parent that
+// carries the --max-children flag), as distinct from its "spamd child" workers.
+// Less strongly grounded than the child COMM above (which is fleet-cited in
+// configs/lsm.conf): the master's exact task name can vary by distro/launcher
+// (it may show truncated or as "perl" on some builds). The failure is safe — an
+// unmatched master COMM yields no --max-children → SatUnknown, never a false
+// number — but silent, so confirm `cat /proc/<spamd-master-pid>/comm` on a live
+// spamd box before relying on the spamd geometry there.
+const DefaultSpamdMasterComm = "spamd"
+
 // countComms counts how many entries equal target. Pure helper split out so the
 // matching is unit-testable without a live /proc.
 func countComms(comms []string, target string) int {

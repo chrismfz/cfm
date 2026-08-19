@@ -1,6 +1,15 @@
 package mailruntime
 
-import "os"
+import (
+	"io"
+	"os"
+)
+
+// maxEximConfBytes caps how much of an Exim config we read — a generous ceiling
+// (a cPanel-generated exim.conf is a few hundred KB at most), so a pathological
+// file can't be slurped whole on a periodic collector tick. smtp_accept_max sits
+// in the main-config section near the top; truncation at worst yields unknown.
+const maxEximConfBytes = 8 << 20 // 8 MiB
 
 // DefaultEximConfPaths are the standard locations of the ACTIVE Exim config,
 // tried in order. cPanel merges exim.conf.local into the generated /etc/exim.conf
@@ -27,7 +36,7 @@ func DiscoverEximMaxima() (EximMaxima, string) {
 
 func discoverEximMaximaIn(paths []string) (EximMaxima, string) {
 	for _, p := range paths {
-		raw, err := os.ReadFile(p)
+		raw, err := readCapped(p, maxEximConfBytes)
 		if err != nil {
 			continue // not present / not readable — try the next candidate
 		}
@@ -37,6 +46,17 @@ func discoverEximMaximaIn(paths []string) (EximMaxima, string) {
 		}
 	}
 	return EximMaxima{}, ""
+}
+
+// readCapped reads at most max bytes from path, so a pathological config can't be
+// slurped whole.
+func readCapped(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, max))
 }
 
 // DiscoverSpamdMaxChildren reads spamd's --max-children from the master spamd
@@ -49,7 +69,7 @@ func DiscoverSpamdMaxChildren() (int, bool) {
 }
 
 func discoverSpamdMaxChildrenIn(procRoot string) (int, bool) {
-	cmd, ok := firstCmdlineWithComm(procRoot, "spamd")
+	cmd, ok := firstCmdlineWithComm(procRoot, DefaultSpamdMasterComm)
 	if !ok {
 		return 0, false
 	}
