@@ -14,6 +14,16 @@ import (
 // allow_comm = spamd child) as observed on the fleet.
 const DefaultSpamdChildComm = "spamd child"
 
+// DefaultSpamdMasterComm is the process COMM of the spamd MASTER (the parent that
+// carries the --max-children flag), as distinct from its "spamd child" workers.
+// Less strongly grounded than the child COMM above (which is fleet-cited in
+// configs/lsm.conf): the master's exact task name can vary by distro/launcher
+// (it may show truncated or as "perl" on some builds). The failure is safe — an
+// unmatched master COMM yields no --max-children → SatUnknown, never a false
+// number — but silent, so confirm `cat /proc/<spamd-master-pid>/comm` on a live
+// spamd box before relying on the spamd geometry there.
+const DefaultSpamdMasterComm = "spamd"
+
 // countComms counts how many entries equal target. Pure helper split out so the
 // matching is unit-testable without a live /proc.
 func countComms(comms []string, target string) int {
@@ -48,6 +58,42 @@ func isPidDir(name string) bool {
 		}
 	}
 	return true
+}
+
+// firstCmdlineWithComm returns the joined command line of the first process
+// under procRoot whose COMM equals target (null argv separators become spaces).
+// Used to read the spamd MASTER's --max-children flag (comm "spamd", exact, so
+// the "spamd child" workers are not matched). Best effort: returns ("", false)
+// when no such process exists or its /proc files race away.
+func firstCmdlineWithComm(procRoot, target string) (string, bool) {
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return "", false
+	}
+	for _, e := range entries {
+		if !isPidDir(e.Name()) {
+			continue
+		}
+		comm, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "comm"))
+		if err != nil {
+			continue
+		}
+		if strings.TrimRight(string(comm), "\n") != target {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		return cmdlineToString(raw), true
+	}
+	return "", false
+}
+
+// cmdlineToString renders a /proc/<pid>/cmdline (NUL-separated argv, often with a
+// trailing NUL) as a space-joined string.
+func cmdlineToString(raw []byte) string {
+	return strings.TrimSpace(strings.ReplaceAll(string(raw), "\x00", " "))
 }
 
 // readCommsIn returns the COMM of every process directory under procRoot. Best
