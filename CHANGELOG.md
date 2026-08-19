@@ -25,6 +25,16 @@ back-filled here — see the git/PR history for that period.
   in `configs/logrotate-cfm`.
 
 ### Added
+- **mailruntime: config discovery for the saturation maxima (PR 1b-ii).**
+  `DiscoverEximMaxima` reads `smtp_accept_max` from the first standard Exim config
+  that explicitly sets it (`/etc/exim.conf`, `.local`, DA/exim4 layouts), and
+  `DiscoverSpamdMaxChildren` reads `--max-children` from the master spamd
+  process's command line (`/proc`, matching COMM `spamd` exactly so the workers
+  are skipped). Deliberately does NOT assume the built-in defaults (Exim 20 /
+  spamd 5) when a value isn't explicitly configured — a cPanel box routinely
+  raises them, so an un-found cap stays `unknown` (→ SatUnknown) rather than
+  risk a false 100% saturation. Both parameterized over their path/`/proc` root
+  for unit tests.
 - **mailruntime: current-count sources + snapshot assembler (PR 1b of the
   `mail_runtime` subsystem).** Adds the live-gauge half of the SMTP/spamd
   saturation picture, exec-free: inbound SMTP session count from ESTABLISHED
