@@ -18,9 +18,9 @@ type Snapshot struct {
 	Worst Saturation `json:"worst"`
 }
 
-// resolvedMax pairs a maximum with whether it was actually resolved from config;
+// ResolvedMax pairs a maximum with whether it was actually resolved from config;
 // an unresolved max flows through to Utilisation.Known == false → SatUnknown.
-type resolvedMax struct {
+type ResolvedMax struct {
 	Value int
 	Known bool
 }
@@ -30,7 +30,7 @@ type resolvedMax struct {
 // isolation; the live glue lives in Live below. An unresolved max yields an
 // Unknown resource (never a false OK), and an "unlimited" cap (Exim
 // smtp_accept_max = 0) is likewise Unknown — there is no ceiling to saturate.
-func buildSnapshot(smtpCur int, smtpMax resolvedMax, spamdCur int, spamdMax resolvedMax) Snapshot {
+func buildSnapshot(smtpCur int, smtpMax ResolvedMax, spamdCur int, spamdMax ResolvedMax) Snapshot {
 	smtp := resource("smtp_connections", smtpCur, smtpMax)
 	spamd := resource("spamd_children", spamdCur, spamdMax)
 	return Snapshot{
@@ -40,7 +40,7 @@ func buildSnapshot(smtpCur int, smtpMax resolvedMax, spamdCur int, spamdMax reso
 	}
 }
 
-func resource(name string, current int, max resolvedMax) Resource {
+func resource(name string, current int, max ResolvedMax) Resource {
 	var u Utilisation
 	if max.Known && max.Value > 0 {
 		u = NewUtilisation(current, max.Value)
@@ -75,21 +75,21 @@ func worst(a, b Saturation) Saturation {
 	return b
 }
 
-// EximMax turns parsed Exim maxima into a resolvedMax for the SMTP resource:
+// EximMax turns parsed Exim maxima into a ResolvedMax for the SMTP resource:
 // resolved only when smtp_accept_max was found AND is a real cap (not 0 =
 // unlimited).
-func (m EximMaxima) EximMax() resolvedMax {
+func (m EximMaxima) EximMax() ResolvedMax {
 	if !m.SMTPAcceptMaxFound || m.Unlimited {
-		return resolvedMax{Known: false}
+		return ResolvedMax{Known: false}
 	}
-	return resolvedMax{Value: m.SMTPAcceptMax, Known: true}
+	return ResolvedMax{Value: m.SMTPAcceptMax, Known: true}
 }
 
 // Live reads the current counts from /proc and assembles the snapshot against
 // the supplied maxima. smtpPorts defaults to DefaultSMTPPorts when nil. This is
 // the collector's core; config discovery (locating exim.conf / the spamd
 // command line to fill the maxima) is the caller's job.
-func Live(smtpPorts map[int]bool, smtpMax resolvedMax, spamdMax resolvedMax) Snapshot {
+func Live(smtpPorts map[int]bool, smtpMax ResolvedMax, spamdMax ResolvedMax) Snapshot {
 	if smtpPorts == nil {
 		smtpPorts = DefaultSMTPPorts
 	}
@@ -98,11 +98,11 @@ func Live(smtpPorts map[int]bool, smtpMax resolvedMax, spamdMax resolvedMax) Sna
 	return buildSnapshot(smtpCur, smtpMax, spamdCur, spamdMax)
 }
 
-// SpamdMax builds a resolvedMax for spamd children from a parsed --max-children
+// SpamdMax builds a ResolvedMax for spamd children from a parsed --max-children
 // value.
-func SpamdMax(n int, found bool) resolvedMax {
+func SpamdMax(n int, found bool) ResolvedMax {
 	if !found || n <= 0 {
-		return resolvedMax{Known: false}
+		return ResolvedMax{Known: false}
 	}
-	return resolvedMax{Value: n, Known: true}
+	return ResolvedMax{Value: n, Known: true}
 }

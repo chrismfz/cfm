@@ -3,7 +3,6 @@ package mailruntime
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -33,27 +32,38 @@ func countComms(comms []string, target string) int {
 // from /proc/<pid>/comm, which reflects the kernel task name (TASK_COMM), the
 // same source the LSM observes — so "spamd child" matches what runs on the box.
 func CountComm(target string) int {
-	comms := readAllComms()
-	return countComms(comms, target)
+	return countComms(readCommsIn("/proc"), target)
 }
 
-// readAllComms returns the COMM of every currently-visible process. Best effort:
-// unreadable/racing pids are skipped.
-func readAllComms() []string {
-	entries, err := os.ReadDir("/proc")
+// isPidDir reports whether a /proc entry name is a pid directory (all digits).
+// Split out (and pure) so the filter is unit-testable and can't silently drift
+// into matching a non-pid /proc entry such as "self", "net" or "sys".
+func isPidDir(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] < '0' || name[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// readCommsIn returns the COMM of every process directory under procRoot. Best
+// effort: unreadable/racing pids are skipped. procRoot is a parameter (not the
+// hardcoded "/proc") so the scan is unit-testable against a fixture tree.
+func readCommsIn(procRoot string) []string {
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return nil
 	}
 	comms := make([]string, 0, len(entries))
 	for _, e := range entries {
-		name := e.Name()
-		if name == "" || name[0] < '0' || name[0] > '9' {
-			continue // not a pid dir
-		}
-		if _, err := strconv.Atoi(name); err != nil {
+		if !isPidDir(e.Name()) {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join("/proc", name, "comm"))
+		raw, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "comm"))
 		if err != nil {
 			continue // pid exited mid-scan, or not permitted
 		}

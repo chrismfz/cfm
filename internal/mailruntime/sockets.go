@@ -11,6 +11,11 @@ import (
 // DefaultSMTPPorts are the inbound SMTP listener ports whose ESTABLISHED socket
 // count approximates the current inbound SMTP session count that Exim's
 // smtp_accept_max caps: 25 (smtp), 465 (smtps), 587 (submission).
+//
+// The count is process-agnostic (per local port), so it assumes Exim owns these
+// listeners — true on the cPanel fleet this package is scoped to. On a stack
+// where another daemon (e.g. a Dovecot submission proxy) also binds 465/587, the
+// numerator would over-count against Exim's cap; scope the port set accordingly.
 var DefaultSMTPPorts = map[int]bool{25: true, 465: true, 587: true}
 
 // CountEstablishedOnPorts counts ESTABLISHED TCP sockets whose LOCAL port is in

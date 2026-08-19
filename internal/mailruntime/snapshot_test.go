@@ -17,7 +17,7 @@ func TestCountComms(t *testing.T) {
 
 func TestBuildSnapshot(t *testing.T) {
 	// The regression shape: Exim 132/150 (88% → warn), spamd 10/10 (100% → crit).
-	s := buildSnapshot(132, resolvedMax{150, true}, 10, resolvedMax{10, true})
+	s := buildSnapshot(132, ResolvedMax{150, true}, 10, ResolvedMax{10, true})
 	if s.SMTP.Sat != SatWarn {
 		t.Errorf("smtp sat = %s, want warn", s.SMTP.Sat)
 	}
@@ -35,7 +35,7 @@ func TestBuildSnapshot(t *testing.T) {
 func TestBuildSnapshotUnknownMaxNeverOK(t *testing.T) {
 	// SMTP max unresolved, spamd healthy → SMTP Unknown, and Worst must be
 	// Unknown (not OK): an un-judged resource can't read as healthy.
-	s := buildSnapshot(50, resolvedMax{Known: false}, 1, resolvedMax{10, true})
+	s := buildSnapshot(50, ResolvedMax{Known: false}, 1, ResolvedMax{10, true})
 	if s.SMTP.Sat != SatUnknown {
 		t.Errorf("smtp sat = %s, want unknown", s.SMTP.Sat)
 	}
