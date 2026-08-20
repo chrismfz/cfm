@@ -179,6 +179,22 @@ Build it **staged, like `mailmeter`** (leaf → collector+store → endpoint+MCP
 - Lets `what's_wrong` emit: `CRITICAL mail: SMTP saturation — Exim 150/150,
   spamd 10/10, 41 timeouts/5m; likely root cause: SpamAssassin throughput`.
 
+**Status (as-built).** The staged build has landed through the collector:
+- *leaf* — `internal/mailruntime` geometry + `sig.go` classifier (PRs 1a…1a-sig),
+  grounded in verbatim fleet log lines.
+- *endpoint+MCP* — `GET /api/v1/mail/runtime` + the `mail_runtime` tool return the
+  current/max geometry (SMTP vs `smtp_accept_max`, spamd vs `--max-children`) as
+  utilisation% + saturation class, `unknown` when a cap is unresolved.
+- *`what's_wrong` integration* — a `mail` finding already fires on the geometry
+  (`warn` ≥80%, `critical` ≥95%).
+- *collector v1 (1a-sig)* — the endpoint now also carries a `signals` block: a
+  bounded Exim-mainlog tail tallied into `spamd_error` + `inbound_conn_refused`
+  counts over `window_seconds`. **Burn-in only** — the counts are exposed to
+  observe real fleet rates; no finding fires on them yet. The "N timeouts/5m"
+  half of the target emit above waits on that burn-in (a defensible threshold
+  needs the observed base rate) and on a second log source for
+  `spamd_child_killed` (it lives in the spamd/syslog stream, not exim_mainlog).
+
 ### 5b. Network / firewall operational pressure
 
 Signals exist (`nft_counters`, `firewall_blocks`, conntrack); correlation does

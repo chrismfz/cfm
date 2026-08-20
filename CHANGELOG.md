@@ -18,6 +18,18 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **mailruntime: 1a-sig collector v1 — mail_runtime now carries log-driven
+  saturation counts.** `GET /api/v1/mail/runtime` (and the `mail_runtime` MCP
+  tool) gains a `signals` block: a bounded tail of the Exim mainlog (20k lines)
+  tallied into `spamd_error` and `inbound_conn_refused` counts over the observed
+  `window_seconds`, plus `lines_scanned`/`log_file`. This is the log-driven half
+  of the geometry — spamd read-timeouts and inbound-cap rejections the
+  instantaneous current/max gauge can't see. **Burn-in only:** the counts are
+  exposed so their real fleet rates can be observed; no `whats_wrong` finding
+  fires on them yet. Degrades to a zeroed block (never an error) when the mainlog
+  is missing/empty/unreadable, so the gauge still stands on its own. New
+  `internal/mailruntime/counts.go` (pure classify+count) and
+  `internal/maillog.ScanTail` (uncapped streaming tail for counting callers).
 - **mailruntime: log-signature classifier (PR 1a-sig).** New `sig.go` pure
   classifier for the three mail saturation log signatures, grounded in verbatim
   fleet log lines (six cPanel nodes): `SigSpamdError` (Exim spam ACL "error

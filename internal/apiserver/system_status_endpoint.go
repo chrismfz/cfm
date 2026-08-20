@@ -1080,6 +1080,13 @@ func handleMailDNS(w http.ResponseWriter, r *http.Request) {
 // §3). This is the "mail is up but wedged" signal the queue summary can't see.
 // Backs the mail_runtime MCP tool. exim_conf reports which config the SMTP cap
 // came from ("" when smtp_accept_max wasn't found).
+//
+// The `signals` block is the 1a-sig collector (v1): a bounded tail of the Exim
+// mainlog tallied into saturation-event counts (spamd_error, inbound_conn_refused)
+// over the observed window_seconds. It's the LOG-driven half of the geometry —
+// events the instantaneous gauge can't see. Burn-in only: exposed for rate
+// observation, no whats_wrong finding fires on it yet. Degrades to a zeroed
+// block (never an error) when the mainlog is missing/empty/unreadable.
 func handleMailRuntime(w http.ResponseWriter, r *http.Request) {
 	if !webdet.RequireAdmin(w, r) {
 		return
@@ -1093,11 +1100,41 @@ func handleMailRuntime(w http.ResponseWriter, r *http.Request) {
 	eximMax, eximPath := mailruntime.DiscoverEximMaxima()
 	spamdN, spamdOK := mailruntime.DiscoverSpamdMaxChildren()
 	snap := mailruntime.Live(nil, eximMax.EximMax(), mailruntime.SpamdMax(spamdN, spamdOK))
+
+	// 1a-sig collector (v1): tally saturation-event signatures over a bounded
+	// tail of the Exim mainlog. This is the LOG-driven half of the geometry —
+	// spamd read-timeouts and inbound-cap rejections that the instantaneous
+	// current/max gauge can't see. Burn-in only for now: the counts are exposed
+	// so their real rates can be observed; no whats_wrong finding fires on them
+	// yet (docs/whats-wrong-rootcause.md §5a). A missing/empty mainlog yields a
+	// zeroed block with lines_scanned=0, never an error — the gauge above still
+	// stands on its own.
+	const sigTailLines = 20000
+	var counts mailruntime.SigCounts
+	var win mailruntime.EximWindow
+	sigLog, scanned, sigErr := maillog.ScanTail(r.Context(), "exim", sigTailLines, func(line string) {
+		counts.AddEximLine(line)
+		win.Observe(line)
+	})
+	signals := map[string]any{
+		"spamd_error":          counts.SpamdError,
+		"inbound_conn_refused": counts.InboundConnRefused,
+		"window_seconds":       win.Seconds(),
+		"lines_scanned":        scanned,
+		"log_file":             sigLog,
+	}
+	if sigErr != nil {
+		// A tail failure (timeout/unreadable) degrades the signals block only; the
+		// geometry snapshot is still returned. Surface the reason for observability.
+		signals["error"] = sigErr.Error()
+	}
+
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":        true,
 		"schema":    "system.mail_runtime.v1",
 		"snapshot":  snap,
 		"exim_conf": eximPath,
+		"signals":   signals,
 	})
 }
 

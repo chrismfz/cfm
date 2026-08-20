@@ -133,6 +133,46 @@ func Tail(ctx context.Context, which string, lines, limit int, grep string) (Res
 	return res, nil
 }
 
+// ScanTail streams the last `lines` lines of the `which` mail log to fn, with NO
+// result cap — for callers that COUNT/classify over the whole tail window rather
+// than return lines for display (Tail is the capped display variant). Returns the
+// resolved log file ("" when none exists, in which case fn is never called), the
+// number of lines scanned, and any error. Same bounded `tail -n N` backward read
+// + timeout as Tail; the log path comes from the fixed candidate allow-list,
+// never the caller.
+func ScanTail(ctx context.Context, which string, lines int, fn func(string)) (logFile string, scanned int, err error) {
+	which = strings.ToLower(strings.TrimSpace(which))
+	if which == "" {
+		which = "exim"
+	}
+	paths, ok := candidates[which]
+	if !ok {
+		return "", 0, fmt.Errorf("unknown mail log %q (want exim|dovecot|postfix)", which)
+	}
+	if lines <= 0 {
+		lines = DefaultLines
+	}
+	if lines > MaxLines {
+		lines = MaxLines
+	}
+	for _, p := range paths {
+		if fileExists(p) {
+			logFile = p
+			break
+		}
+	}
+	if logFile == "" {
+		return "", 0, nil // no candidate log → not an error
+	}
+	cctx, cancel := context.WithTimeout(ctx, scanTimeout)
+	defer cancel()
+	err = streamTail(cctx, logFile, lines, func(line string) {
+		scanned++
+		fn(line)
+	})
+	return logFile, scanned, err
+}
+
 func fileExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && fi.Mode().IsRegular()
