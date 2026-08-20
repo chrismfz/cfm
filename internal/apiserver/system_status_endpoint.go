@@ -1085,8 +1085,10 @@ func handleMailDNS(w http.ResponseWriter, r *http.Request) {
 // mainlog tallied into saturation-event counts (spamd_error, inbound_conn_refused)
 // over the observed window_seconds. It's the LOG-driven half of the geometry —
 // events the instantaneous gauge can't see. Burn-in only: exposed for rate
-// observation, no whats_wrong finding fires on it yet. Degrades to a zeroed
-// block (never an error) when the mainlog is missing/empty/unreadable.
+// observation, no whats_wrong finding fires on it yet. A missing/empty mainlog
+// yields a zeroed block; a FAILED tail (unreadable/rotated) is surfaced in
+// signals.error rather than a false-healthy zero (unknown never reads as OK).
+// Either way the geometry snapshot above is always returned.
 func handleMailRuntime(w http.ResponseWriter, r *http.Request) {
 	if !webdet.RequireAdmin(w, r) {
 		return
@@ -1107,8 +1109,9 @@ func handleMailRuntime(w http.ResponseWriter, r *http.Request) {
 	// current/max gauge can't see. Burn-in only for now: the counts are exposed
 	// so their real rates can be observed; no whats_wrong finding fires on them
 	// yet (docs/whats-wrong-rootcause.md §5a). A missing/empty mainlog yields a
-	// zeroed block with lines_scanned=0, never an error — the gauge above still
-	// stands on its own.
+	// zeroed block with lines_scanned=0; a FAILED tail is reported in
+	// signals.error (not a false-healthy zero). The gauge above always stands on
+	// its own regardless.
 	const sigTailLines = 20000
 	var counts mailruntime.SigCounts
 	var win mailruntime.EximWindow
@@ -1120,8 +1123,13 @@ func handleMailRuntime(w http.ResponseWriter, r *http.Request) {
 		"spamd_error":          counts.SpamdError,
 		"inbound_conn_refused": counts.InboundConnRefused,
 		"window_seconds":       win.Seconds(),
-		"lines_scanned":        scanned,
-		"log_file":             sigLog,
+		// window_known is false when fewer than two distinct Exim timestamps were
+		// parsed (all-crond-wrapped matches, a same-second burst, a single line) —
+		// window_seconds is then 0 even with non-zero counts. A rate consumer MUST
+		// gate on window_known && window_seconds>0 to avoid dividing by zero.
+		"window_known":  win.Seen,
+		"lines_scanned": scanned,
+		"log_file":      sigLog,
 	}
 	if sigErr != nil {
 		// A tail failure (timeout/unreadable) degrades the signals block only; the

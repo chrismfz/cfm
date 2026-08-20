@@ -96,8 +96,11 @@ func (w *EximWindow) Observe(line string) {
 	}
 }
 
-// Seconds returns the window span in whole seconds (0 when fewer than two
-// distinct timestamps were seen). Never negative.
+// Seconds returns the window span in whole seconds. It is 0 whenever fewer than
+// two distinct timestamps were seen — no lines parsed, a single line, or a burst
+// all in the same wall-clock second — so a positive count can legitimately pair
+// with a 0 span. Callers turning counts into a RATE must therefore gate on Seen
+// (exposed as window_known) AND Seconds()>0 before dividing. Never negative.
 func (w *EximWindow) Seconds() int {
 	if !w.Seen {
 		return 0
