@@ -10,14 +10,26 @@
 --   * only the `decision` kind trips it — telemetry never does (finding 2)
 --   * persistent hang: after the cooldown, probes re-accumulate a fresh 3-run
 --   * http_4xx/5xx/json never trip it; no-shdict = inert
+--   * throttled OPEN/CLOSED ngx.log lines on the transitions (MCP-observable)
 
 package.loaded["cjson.safe"] = { decode = function() return nil end, encode = function() return "{}" end }
 package.path = package.path .. ";configs/lua/?.lua;./?.lua"
 
 local NOW = 1000
+local LOGS = {}   -- captured ngx.log lines (for the observability test)
 _G.ngx = { WARN = 1, ERR = 2, INFO = 3, ctx = {}, header = {}, var = {},
-           now = function() return NOW end, log = function() end,
+           now = function() return NOW end,
+           log = function(_, ...) LOGS[#LOGS + 1] = table.concat({ ... }) end,
            escape_uri = function(s) return tostring(s or "") end }
+local function log_has(substr)
+  for _, l in ipairs(LOGS) do if l:find(substr, 1, true) then return true end end
+  return false
+end
+local function log_count(substr)
+  local n = 0
+  for _, l in ipairs(LOGS) do if l:find(substr, 1, true) then n = n + 1 end end
+  return n
+end
 
 local cfm_decision = require("cfm_decision")
 
@@ -208,6 +220,33 @@ do
   c:rpc("decision", "GET", "/x")                        -- one ISOLATED timeout
   check(val(alive, BRK_UNTIL) == nil, "a single stray timeout after the window does NOT re-trip")
   check(val(alive, BRK_FAILS) == 1, "it just starts a fresh consecutive count")
+end
+
+-- ── 9) observability: throttled OPEN/CLOSED logs on the transitions ───────────
+-- The breaker writes a greppable ngx.log line to the edge error.log so an
+-- operator can watch it via the MCP edge_error_tail tool.
+do
+  NOW = 8000
+  for i = #LOGS, 1, -1 do LOGS[i] = nil end            -- clear capture
+  local c, _, st, alive = new_client()
+  st.result = { nil, "timeout" }
+  for _ = 1, 3 do c:rpc("decision", "GET", "/x") end   -- trip → OPEN log
+  check(log_has("decision breaker OPEN"), "trip emits an OPEN log line")
+  check(log_count("decision breaker OPEN") == 1, "exactly one OPEN log on the transition")
+
+  -- Recovery clears + emits CLOSED.
+  NOW = 8003
+  st.result = { "BODY", nil }
+  c:rpc("decision", "GET", "/x")                        -- success → CLOSED log
+  check(log_has("decision breaker CLOSED"), "recovery emits a CLOSED log line")
+
+  -- Throttle (independent per type, no cross-reset): a re-trip within the 60s
+  -- window must NOT emit another OPEN line — the first OPEN's marker is still live.
+  for i = #LOGS, 1, -1 do LOGS[i] = nil end
+  st.result = { nil, "timeout" }
+  for _ = 1, 3 do c:rpc("decision", "GET", "/x") end   -- re-trip, still within 60s
+  check(type(val(alive, BRK_UNTIL)) == "number", "breaker did re-open (state)")
+  check(log_count("decision breaker OPEN") == 0, "re-trip within the window emits NO repeat OPEN log (throttled)")
 end
 
 if fails > 0 then

@@ -56,6 +56,17 @@ back-filled here — see the git/PR history for that period.
   the removed vBulletin runMaths rule.)
 
 ### Changed
+- **Decision breaker: observable OPEN/CLOSED logging.** The edge decision-RPC
+  circuit breaker was silent (it just failed fast). It now emits a **throttled**
+  `ngx.log(WARN)` line to the edge `error.log` on each transition — `[cfm]
+  decision breaker OPEN — cfm daemon unreachable …` when it trips and `[cfm]
+  decision breaker CLOSED — cfm daemon reachable again …` on recovery — so an
+  operator can watch it engage via the MCP **`edge_error_tail`** tool
+  (`grep "decision breaker"`). Each line type has its own **independent 60 s
+  throttle**, so at most one OPEN and one CLOSED per window even under a
+  persistent hang (re-trips ~once per cooldown) or a flapping daemon. No verdict
+  or timing change — logging only. Covered by an added case in
+  `cfm_decision_breaker_test.lua`.
 - **Edge TLS: `ssl_buffer_size 4k` (was the 16k default) for lower TTFB.** Both
   `openresty.conf` and `angie.conf` left `ssl_buffer_size` at nginx's 16k
   default, so the first TLS record of a response could be held until up to 16 KB
