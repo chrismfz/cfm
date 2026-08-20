@@ -46,6 +46,39 @@ back-filled here — see the git/PR history for that period.
   in `configs/logrotate-cfm`.
 
 ### Added
+- **mailruntime: log-signature classifier (PR 1a-sig).** New `sig.go` pure
+  classifier for the three mail saturation log signatures, grounded in verbatim
+  fleet log lines (six cPanel nodes): `SigSpamdError` (Exim spam ACL "error
+  reading from spamd … Connection timed out" / "cannot parse spamd … output" —
+  the smoking gun of spamd saturation), `SigInboundConnRefused` (this box's Exim
+  refusing an inbound connection at `smtp_accept_max`: matched on BOTH
+  "Connection from […]" and "refused: too many connections" — anchored to the
+  daemon's own line shape so a *remote* MX's 421 "Too many concurrent SMTP
+  connections" (deliverability, echoed verbatim into the mainlog) can never be
+  misread as our saturation), and `SigSpamdChildKilled` (spamd prefork "killing failed child",
+  ignoring routine state/adjust chatter). Pure/no-I/O; a later collector will
+  count these over a window to enrich the mail_runtime geometry.
+- **whats_wrong: SMTP/spamd runtime saturation (PR 1c — the mail_runtime blind
+  spot lands in triage).** `whats_wrong` now pulls `/api/v1/mail/runtime` and
+  raises a `mail` finding when the inbound SMTP connection pool or the spamd
+  scanner-children pool is saturating: `warn` (≥80% of the cap) → a warning,
+  `critical` (≥95% / at the cap) → a critical, each pointing at the `mail_runtime`
+  drill-down. This catches the "every mail daemon is up, queue looks fine, but
+  submission (587) is unavailable because spamd is saturated and SMTP sessions
+  hit smtp_accept_max" case that health/queue signals miss
+  (docs/whats-wrong-rootcause.md §5a). Conservative by design: an `ok` or
+  `unknown` pool (cap unresolved) raises nothing — unknown is not a problem and
+  is not surfaced as one.
+- **`mail_runtime` MCP tool + `GET /api/v1/mail/runtime` (PR 1b-iii).** Exposes
+  the SMTP/spamd saturation snapshot as a read-only, host-level, admin-only
+  endpoint and MCP tool: current inbound SMTP sessions vs `smtp_accept_max` and
+  active spamd children vs `--max-children`, each as current/max → utilisation%
+  → an `ok`/`warn`/`critical` class (rendered as a label), plus the worst of the
+  two and the resolved exim.conf path. A cap that can't be read from config shows
+  `unknown`, never a false `ok`. This is the "mail is up but wedged" signal the
+  queue summary can't see (spamd saturated → SMTP sessions pile up → Exim hits
+  its connection cap → 587 unavailable). Standalone read tool; the `what's_wrong`
+  finding that gates on it is the next step.
 - **mailruntime: config discovery for the saturation maxima (PR 1b-ii).**
   `DiscoverEximMaxima` reads `smtp_accept_max` from the first standard Exim config
   that explicitly sets it (`/etc/exim.conf`, `.local`, DA/exim4 layouts), and
