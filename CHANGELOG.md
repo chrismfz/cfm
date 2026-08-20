@@ -42,6 +42,25 @@ back-filled here — see the git/PR history for that period.
   the removed vBulletin runMaths rule.)
 
 ### Changed
+- **Edge log ingest: batch the per-request socket send (fewer timers &
+  syscalls).** `log-cfm.lua` (`log_by_lua`) previously armed one
+  `ngx.timer.at` + one Unix-socket connect/send **per request** — at 1000 rps
+  that is 1000 timers/s/worker, brushing nginx's `too many pending timers`
+  ceiling. It now buffers TSV lines per worker and a **single** timer drains
+  the whole buffer after at most 100 ms, or immediately once 64 lines
+  accumulate or 256 KB is buffered (hard caps 4096 lines / 8 MB → drop-to-bound-
+  memory if timers can't be scheduled at all, same best-effort loss class as the
+  old per-line drop; byte caps because URI/UA are attacker-influenced). The
+  ≤100 ms tail is dropped on worker shutdown (cosockets are disabled in a
+  premature timer), the same best-effort class as before. The receiver
+  already reads newline-delimited records in a loop
+  (`ingest_socket.go` `serveConn` → `handleLine` per `\n`), so a concatenated
+  batch parses as individual records with **no Go change**; batching also means
+  FEWER concurrent connections (kinder to the ingest connection cap). Record
+  bytes are unchanged; only delivery is batched, adding ≤100 ms of log latency
+  (negligible for the detector's seconds-to-minutes behavioural windows). New
+  `scripts/tests/cfm_log_batching_test.lua` covers single-drain, the 64-line
+  eager flush, snapshot-before-yield (no double-send/loss), and the cap.
 - **WAF: literal prefilters on two hot in-path detectors (CPU, no behaviour
   change).** Two detectors that run on ordinary request surfaces did expensive
   Lua *pattern* work before deciding they had nothing to match. Each now begins
