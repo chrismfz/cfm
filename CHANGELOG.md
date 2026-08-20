@@ -42,6 +42,19 @@ back-filled here — see the git/PR history for that period.
   the removed vBulletin runMaths rule.)
 
 ### Changed
+- **Panel listeners: revive the keepalive pool to the challenge service.** The
+  DNAT cPanel/WHM panel listeners (`cfm-panel-listeners.conf.in`) proxy their
+  internal `/__cfm_panel_decide`, `/__cfm_challenge` and `/__cfm_verify` hops to
+  the static `cfm_challenge` upstream (127.0.0.1:9098, `keepalive 8`), but all
+  21 of those locations were missing `proxy_http_version 1.1` + `Connection ""`,
+  so nginx closed the connection after each one — every panel challenge
+  decision/verify opened a fresh TCP connection to the challenge daemon. Added
+  the same idiom the web edge already uses on its `/__cfm_challenge` hop, so the
+  pool is actually used. Pure plumbing, no behaviour/security change. (The main
+  `location /` + acctxfer hops proxy to the `$cfm_pass` **variable**, which
+  nginx keepalive pools can't use, so they're unchanged — pooling the panel
+  origin itself would need a static upstream and is a separate, larger change.)
+  Found by the 2026-07 edge audit.
 - **Edge log ingest: batch the per-request socket send (fewer timers &
   syscalls).** `log-cfm.lua` (`log_by_lua`) previously armed one
   `ngx.timer.at` + one Unix-socket connect/send **per request** — at 1000 rps
