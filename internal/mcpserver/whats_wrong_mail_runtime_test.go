@@ -33,9 +33,9 @@ func TestEvalMailRuntimeWarnAndCritical(t *testing.T) {
 			t.Errorf("finding not keyed to mail/mail_runtime: %+v", f)
 		}
 		switch {
-		case f.Severity == sevWarning && f.Title == "SMTP connection pool warn":
+		case f.Severity == sevWarning && f.Title == "SMTP connection pool saturation":
 			sawSMTPWarn = true
-		case f.Severity == sevCritical && f.Title == "spamd scanner pool critical":
+		case f.Severity == sevCritical && f.Title == "spamd scanner pool saturation":
 			sawSpamdCrit = true
 		}
 	}
@@ -59,6 +59,18 @@ func TestEvalMailRuntimeOKAndUnknownEmitNothing(t *testing.T) {
 func TestEvalMailRuntimeMalformedBodyIsSafe(t *testing.T) {
 	if fs := evalMailRuntime(json.RawMessage(`not json`)); fs != nil {
 		t.Fatalf("malformed body must yield nil, got %+v", fs)
+	}
+}
+
+func TestWhatsWrongLoneWarnFlipsToIssues(t *testing.T) {
+	// A lone WARN (no critical) must still flip status to "issues" — covers the
+	// counts[sevWarning] branch, not just the critical path.
+	sections := map[string]json.RawMessage{
+		"mail_runtime": mailRuntimeBody(132, 150, 88, "warn", 2, 10, 20, "ok"),
+	}
+	res := evaluateWhatsWrong(sections)
+	if res.Status != "issues" || res.Counts[sevWarning] != 1 || res.Counts[sevCritical] != 0 {
+		t.Fatalf("lone warn: status=%q counts=%v, want issues / 1 warning / 0 critical", res.Status, res.Counts)
 	}
 }
 

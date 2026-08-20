@@ -46,8 +46,10 @@ type mailRuntimeResource struct {
 		Current int     `json:"current"`
 		Max     int     `json:"max"`
 		Pct     float64 `json:"pct"`
-		Known   bool    `json:"known"`
 	} `json:"util"`
+	// Sat is the single source of truth for whether this resource is a finding;
+	// the classifier only emits warn/critical for a resolved (Known) cap, so the
+	// eval keys off Sat alone (no need to re-read util.known here).
 	Sat string `json:"sat"`
 }
 
@@ -68,7 +70,7 @@ func mailRuntimeFinding(what string, r mailRuntimeResource, consequence string) 
 	return finding{
 		Severity: sev,
 		Category: "mail",
-		Title:    what + " pool " + r.Sat,
+		Title:    what + " pool saturation",
 		Detail: fmt.Sprintf("%s pool at %d/%d (%.0f%%, %s); %s.",
 			what, r.Util.Current, r.Util.Max, r.Util.Pct, phase, consequence),
 		Tool: "mail_runtime",
