@@ -39,3 +39,13 @@ func registerHTTP3Status(srv *mcp.Server, d Deps) {
 		return dispatchJSON(ctx, d, "/api/v1/http3/list", nil)
 	})
 }
+
+func registerMailRuntime(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "mail_runtime",
+		Description: "SMTP/spamd runtime SATURATION — the 'mail is up but wedged' signal the queue summary can't see. Reports current inbound SMTP sessions vs Exim's smtp_accept_max, and active spamd scanner children vs --max-children, each as current/max → utilisation% → a saturation class (ok/warn/critical), plus the worst of the two. Answers 'why is submission (587) timing out even though Exim and spamd are running?' — e.g. spamd saturated (10/10 children) backing up SMTP sessions until Exim hits its connection cap. A cap that can't be read from config shows 'unknown' (never a false 'ok'). Host-level, read-only.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
+		return dispatchJSON(ctx, d, "/api/v1/mail/runtime", nil)
+	})
+}
