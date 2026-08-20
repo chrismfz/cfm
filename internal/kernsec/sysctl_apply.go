@@ -176,19 +176,13 @@ func LoadSysctlTo(w io.Writer) error {
 	var failures []string
 	var advisories []string
 	for lineno, line := range strings.Split(string(content), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		eq := strings.IndexByte(line, '=')
-		if eq < 0 {
-			// Malformed line — sysctl --load would have skipped this
-			// silently too. Best-effort.
-			continue
-		}
-		key := strings.TrimSpace(line[:eq])
-		val := strings.TrimSpace(line[eq+1:])
-		if key == "" {
+		// parseSysctlAssignment is the single shared sysctl-line parser
+		// (see foreign_sysctl.go): it skips blank/comment/malformed lines
+		// and normalises the key, so this loader and the foreign-drop-in
+		// reconcile can never drift on how a line is read. ok==false for
+		// anything sysctl --load would also skip silently.
+		key, val, ok := parseSysctlAssignment(line)
+		if !ok {
 			continue
 		}
 		// Sticky one-way knobs (see stickyOneWaySysctls): if the live

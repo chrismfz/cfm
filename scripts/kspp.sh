@@ -58,7 +58,12 @@ KSPP_SYSCTL=(
   "fs.protected_hardlinks=1"
   "fs.protected_symlinks=1"
   "fs.protected_fifos=2"
-  "fs.protected_regular=2"
+  # fs.protected_regular is 1, NOT the stricter KSPP 2: value 2 also
+  # covers group-writable sticky dirs, which breaks cPanel's DNS Zone
+  # Editor. 1 still guards world-writable sticky dirs (/tmp, /var/tmp).
+  # Kept in sync with kernsec (internal/kernsec/profile.go) so this
+  # legacy script never re-introduces the =2 that kernsec reconciles.
+  "fs.protected_regular=1"
 
   "net.core.bpf_jit_harden=2"
 
