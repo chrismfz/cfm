@@ -14,6 +14,15 @@ import "strings"
 // this IP originate from hosting infrastructure rather than a consumer ISP?".
 // The good-bot FCrDNS exemption, allowlists, and log-only burn-in are what make
 // the signal safe to act on — never the ASN flag alone.
+//
+// HARD INVARIANT (docs/webdetector-refactor.md §4a): this is ADDITIVE-ONLY. A
+// "" result means "no cloud-scraper-origin hint" — it must NEVER be read as
+// "trusted", "normal", "safe", or "exempt". Origin is not innocence: the fleet's
+// real abuse is RESIDENTIAL (SQLi from consumer ISPs — Vodafone/OTE/Nova/
+// Starlink), already caught by the WAF regardless of ASN. A consumer-ISP IP must
+// keep exactly the WAF + rate/behaviour scrutiny it always had. This classifier
+// may only ADD suspicion to a scraping-shaped request; it may never subtract
+// from or short-circuit any other detector.
 
 // knownCloudASNs maps a hosting/cloud provider's ASN to a short, stable tag.
 // Exact ASN match is authoritative (org-name keywords are only a fallback).

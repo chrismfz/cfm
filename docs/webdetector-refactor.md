@@ -79,16 +79,23 @@ and feed the *existing* per-IP / per-subnet challenge once burned in. Each ships
 log-only, is measured against real fleet traffic + an FP register (§8), then
 promoted.
 
-- **Signal A — datacenter/hosting-ASN origin on content vhosts.** (First; §4.)
-- **Signal B — behavioral enumeration** (one IP walking many distinct
-  product/category paths in order, low repeat — catalog scraping). Reuses the
-  per-IP uniq-paths metering + path entropy.
-- **Signal C — per-entity rate outlier vs the vhost's own baseline** (an
-  IP/subnet whose rate is a large multiple of the vhost `median_per_ip_rps`;
-  `ip_skew` already exists). Solves dilution directly.
+**REPRIORITISED after the 2026-08-20 evidence (see §4a).** The fleet's real
+abuse is **residential**, so the ASN-agnostic signals lead:
+
+- **Signal C — per-entity rate/behaviour outlier vs the vhost's own baseline**
+  (an IP/subnet whose rate is a large multiple of the vhost `median_per_ip_rps`;
+  `ip_skew` already exists). ASN-agnostic → catches residential AND cloud.
+  Solves dilution directly. **← candidate first signal.**
+- **Signal B — behavioural enumeration** (one IP walking many distinct
+  product/category paths in order, low repeat — catalog scraping). ASN-agnostic.
+  Reuses the per-IP uniq-paths metering + path entropy.
+- **Signal A — datacenter/hosting-ASN origin — DEMOTED to a supplementary,
+  logged-only *feature*, not a primary trigger** (§4/§4a). Narrow: it hints at
+  cloud *scraping*, misses residential attacks entirely, and must never trust
+  consumer traffic.
 
 The **full-vhost fallback (B-side of the goal)** then arms on *concentration*
-(datacenter-share, ip_skew, ASN-concentration) rather than raw ratios.
+(ip_skew, ASN-concentration) rather than raw ratios.
 
 ## 4. Signal A: datacenter-ASN — and its false-positive minefield
 
@@ -133,6 +140,40 @@ a conservative org-name keyword fallback catches the long tail. It only answers
 "is this hosting infrastructure?" — the good-bot exemption and burn-in are what
 make it safe to act on. The curated list is intentionally non-exhaustive and
 grows from observed data (§9).
+
+## 4a. Reality check — abuse is RESIDENTIAL; datacenter-ASN is not the lens
+
+**Evidence (2026-08-20, fleet WAF_SQLI autoblock alerts).** The overwhelming
+majority of real attacks the fleet sees are SQLi/UNION-SELECT injection from
+**Greek consumer ISPs** — AS3329 Vodafone, AS6799 OTEnet, AS25472/AS1241 Nova,
+AS14593 Starlink, AS51505 ΔΕΗ — e.g. `89.44.94.244` (AS3329, PTR
+`ppp089044094244.access.hol.gr`, a residential DSL line) hitting
+`stereotiki.gr /store4/index.php?dispatch=1'%20AND%201=1%20UNION%20SELECT…`.
+These are already caught by the WAF (`WAF_SQLI` → autoblock), independent of ASN.
+
+Two consequences that reshape this whole effort:
+
+1. **A datacenter-ASN signal would MISS the fleet's actual threat.** Residential
+   attackers (botnets, compromised home machines, mobile NAT, VPS-free consumer
+   lines) are the norm. Cloud-origin abuse is real but narrower (scraping). So
+   datacenter-ASN is at best a supplementary *scraping* hint — never the primary
+   abuse lens.
+
+2. **THE HARD INVARIANT — additive-only, never trusting.** No signal here may
+   ever treat "consumer ISP / Greek / OTE / Vodafone" as legitimate,
+   safe, or a reason to lower suspicion. Origin is NOT innocence. Concretely:
+   - `DatacenterClass()==""` means "no cloud-scraper-origin hint" — it must NEVER
+     be read as "trusted", "normal", or "exempt". A residential IP gets exactly
+     the same WAF + rate/behaviour scrutiny it always did.
+   - The datacenter feature may only ADD a positive weight to a scraping-shaped
+     request. It may never SUBTRACT from, or short-circuit, any other detector.
+   - Any allowlist (§4) is keyed on **verified identity** (FCrDNS good-bot,
+     explicit operator opt-in), NEVER on "it's a consumer/Greek ASN".
+
+The detectors that actually catch residential abuse are ASN-agnostic and already
+exist or are Signals B/C: the **WAF signatures** (SQLi/RCE/etc.), **per-entity
+rate/behaviour outliers** (Signal C), and **enumeration** (Signal B). Those lead;
+datacenter-ASN rides along as a logged feature we measure, nothing more.
 
 ## 5. Telemetry contract — MCP-readable (hard requirement)
 
@@ -184,6 +225,14 @@ Format: `date | host | ip | asn (name) | ua | why-it's-legit | action`.
 
 ## 9. Progress log (append)
 
+- **2026-08-21 (course correction)** — Operator flagged, with WAF_SQLI evidence
+  (§4a), that the fleet's real abuse is RESIDENTIAL (consumer-ISP SQLi), so
+  datacenter-ASN is the wrong primary lens and "consumer/Greek ISP" must never
+  imply legit. Reprioritised: Signals C/B (ASN-agnostic) lead; datacenter-ASN
+  demoted to a logged supplementary feature under a hard additive-only invariant
+  (§3, §4a). Classifier header updated with the invariant. **Open decision: which
+  ASN-agnostic signal (C rate-outlier vs B enumeration) becomes the first I2
+  log-only shadow.**
 - **2026-08-21** — I0 doc + I1 classifier landed. Curated cloud-ASN set seeded
   from the fleet's own top-blocked ASNs (orion `firewall_blocks`: AS8075
   Microsoft, AS63949 Akamai/Linode, AS9009 M247, AS212238/60068 Datacamp,
