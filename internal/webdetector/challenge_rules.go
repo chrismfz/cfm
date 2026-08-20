@@ -229,7 +229,11 @@ func (e *Engine) hostChallengeExcluded(host string) bool {
 // the caller emits the would_suppress telemetry so the floor can be tuned first.
 func (e *Engine) tripReason(row SuspiciousRow) string {
     reason := e.tripReasonBase(row)
-    if reason != "" && e.cfg.ChallengeSuspiciousMinRPSEnforce && e.belowChallengeRPSFloor(row) {
+    // The floor gates ONLY the score path. The uniqIP modes (uniqip_max /
+    // uniqip_on) exist precisely to catch DISTRIBUTED attacks — many unique IPs
+    // at low per-vhost RPS — so an RPS floor must never veto them, or it would
+    // defeat the very mode built for that shape.
+    if reason == "score_on" && e.cfg.ChallengeSuspiciousMinRPSEnforce && e.belowChallengeRPSFloor(row) {
         return ""
     }
     return reason
@@ -1643,23 +1647,25 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
 			// below just apply + log the outcome tripReason already chose.
 			autoWhy = e.tripReason(row)
 
-			// Volume-floor telemetry: when the signals WOULD trip (base decision)
-			// but the vhost is below the RPS floor, record it — as an actual
-			// suppression when enforcing (autoWhy is already "" here), or as a
-			// would-be suppression in log-only mode (autoWhy still holds, arming
-			// proceeds below). Throttled per host so a candidate can't spam the
-			// log. This is what lets the floor be tuned from real numbers before it
-			// enforces (mirrors the WAF logonly→enforce discipline).
+			// Volume-floor telemetry: when the SCORE path would trip but the vhost
+			// is below the RPS floor, record it — as an actual suppression when
+			// enforcing (autoWhy is already "" here), or as a would-be suppression
+			// in log-only mode (autoWhy still holds, arming proceeds below).
+			// Scoped to base_reason=="score_on" for the same reason tripReason is:
+			// the floor never gates the uniqIP (distributed-attack) modes.
+			// Throttled per host so a candidate can't spam the log. This is what
+			// lets the floor be tuned from real numbers before it enforces (mirrors
+			// the WAF logonly→enforce discipline).
 			if e.cfg.ChallengeSuspiciousMinRPS > 0 && e.belowChallengeRPSFloor(row) &&
-				e.tripReasonBase(row) != "" && e.cfg.ChallengeLog &&
+				e.tripReasonBase(row) == "score_on" && e.cfg.ChallengeLog &&
 				e.shouldLogVhostSuppress("rpsfloor:"+host, now) {
 				act := "would_suppress_below_rps_floor"
 				if e.cfg.ChallengeSuspiciousMinRPSEnforce {
 					act = "suppressed_below_rps_floor"
 				}
 				logging.LogfCHALLENGES(
-					"[challenge][vhost] action=%s host=%s rps=%.2f floor=%.2f base_reason=%s score=%.2f uniqIP=%d reasons=%s",
-					act, host, row.RPS, e.cfg.ChallengeSuspiciousMinRPS, e.tripReasonBase(row), row.Score, row.UniqueIPs, strings.Join(row.Reasons, ","),
+					"[challenge][vhost] action=%s host=%s rps=%.2f floor=%.2f base_reason=score_on score=%.2f uniqIP=%d reasons=%s",
+					act, host, row.RPS, e.cfg.ChallengeSuspiciousMinRPS, row.Score, row.UniqueIPs, strings.Join(row.Reasons, ","),
 				)
 			}
 

@@ -21,7 +21,9 @@ back-filled here — see the git/PR history for that period.
 - **Challenge auto-arm: optional request-rate volume floor (log-only first).**
   New `CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS` (+ `…_MIN_RPS_ENFORCE`) adds the
   request-rate dimension the existing uniqIP floors don't cover — a vhost below
-  the floor cannot auto-arm a challenge however botty its ratios look (the
+  the floor cannot auto-arm a challenge **via the score path** however botty its
+  ratios look (the floor deliberately does NOT gate the uniqIP modes, which exist
+  to catch distributed attacks where low per-vhost rate is expected). The
   suspicious *score* is dominated by ratios at vhost scale because its reference
   volumes are server-scale, so a low-traffic site can score mid-range on
   redirects + bot UAs alone). Defaults **off** (`0`); with `…_ENFORCE=0` it is

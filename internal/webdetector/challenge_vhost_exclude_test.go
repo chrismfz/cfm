@@ -174,9 +174,32 @@ func TestTripReason_RPSFloor(t *testing.T) {
 	if why := e.tripReason(SuspiciousRow{UniqueIPs: 25, Score: 0.80, RPS: 5.0}); why != "score_on" {
 		t.Fatalf("above-floor row must still trip; got %q", why)
 	}
+	// Boundary: RPS exactly at the floor is NOT below it (strict <), so it trips.
+	if e.belowChallengeRPSFloor(SuspiciousRow{RPS: 2.0}) {
+		t.Fatalf("rps == floor must not count as below")
+	}
+	if why := e.tripReason(SuspiciousRow{UniqueIPs: 25, Score: 0.80, RPS: 2.0}); why != "score_on" {
+		t.Fatalf("row exactly at the floor must still trip; got %q", why)
+	}
 	// The base decision is always visible regardless of the floor.
 	if why := e.tripReasonBase(tripping); why != "score_on" {
 		t.Fatalf("tripReasonBase must ignore the floor; got %q", why)
+	}
+
+	// The floor must NEVER gate the uniqIP modes — they exist for distributed
+	// attacks (many IPs, low per-vhost rps), where a sub-floor rate is expected.
+	e.cfg.ChallengeSuspiciousUniqIP = true
+	e.cfg.ChallengeSuspiciousUniqIPOn = 150
+	e.cfg.ChallengeSuspiciousUniqIPMax = 260
+	e.cfg.ChallengeSuspiciousMinRPS = 2.0
+	e.cfg.ChallengeSuspiciousMinRPSEnforce = true
+	// 160 unique IPs at 0.3 rps (well below the floor) → uniqip_on must STILL fire.
+	if why := e.tripReason(SuspiciousRow{UniqueIPs: 160, Score: 0.10, RPS: 0.3}); why != "uniqip_on" {
+		t.Fatalf("floor must not gate uniqip_on; got %q", why)
+	}
+	// Hard cap likewise unaffected by the floor.
+	if why := e.tripReason(SuspiciousRow{UniqueIPs: 300, Score: 0.10, RPS: 0.3}); why != "uniqip_max" {
+		t.Fatalf("floor must not gate uniqip_max; got %q", why)
 	}
 }
 
