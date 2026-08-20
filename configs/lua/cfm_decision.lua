@@ -36,6 +36,47 @@ local cjson = require "cjson.safe"
 local lower = string.lower
 local function esc(s) return ngx.escape_uri(s or "") end
 
+-- ── Circuit breaker (bridge hung/down) ───────────────────────────────────────
+-- When the cfm daemon is HUNG (accepts the unix connection but never replies)
+-- or down, every uncached request otherwise pays the full decision_timeout_ms
+-- (~300ms) before self:fail() falls open — a hung daemon becomes a fleet-wide
+-- latency cliff. A shdict-gated breaker trips after BREAKER_FAIL_THRESHOLD
+-- daemon-unreachable failures in an unbroken CONSECUTIVE run (any success resets the count) and
+-- then SKIPS the RPC for BREAKER_COOLDOWN_SEC, so requests fail fast per policy
+-- instead of stacking timeouts. State lives in the shared cfm_decisions dict, so
+-- it is node-wide across workers. The VERDICT is unchanged — a hung/down daemon
+-- already fails open (or closed, under fail_open=0); the breaker only removes the
+-- latency.
+--
+-- Hard-won specifics (each closes a review finding):
+--   * ONLY the `decision` rpc kind drives the breaker. The best-effort telemetry
+--     RPCs (observe / ip_push / ok_touch / waf_stats) share this client but must
+--     NEVER trip it — a slow /nginx/ip autoblock push under a WAF flood must not
+--     disable the healthy /nginx/decision enforcement path.
+--   * ONLY `timeout`/`connect` classes count — an http_4xx/5xx or json error
+--     means the daemon RESPONDED, not the unreachable condition we protect.
+--   * The failure count is CONSECUTIVE — any success resets it — so on a busy
+--     healthy node an occasional timeout among many successes never accumulates;
+--     only an unbroken run of BREAKER_FAIL_THRESHOLD failures (a real outage)
+--     trips. A fixed-window init_ttl (from the first failure) backstops a stalled partial count.
+--   * NO single-flight probe lock and NO presence-based re-arm (both raced /
+--     mis-fired: a lock deadlocked get()'s own token-rotation retry; a
+--     presence-based re-arm let a lone stray timeout re-open on ONE blip). Once
+--     the cooldown lapses, concurrent cache-miss requests probe freely; a
+--     persistent hang simply re-accumulates a fresh 3-consecutive run (a few slow
+--     probes per cooldown), still orders of magnitude better than the un-broken
+--     cliff, while a recovered daemon's single stray timeout never re-trips.
+local BREAKER_FAIL_THRESHOLD  = 3    -- consecutive unreachable decision failures to trip
+local BREAKER_FAIL_WINDOW_SEC = 10   -- fixed-window TTL that decays a stalled partial count
+local BREAKER_COOLDOWN_SEC    = 3    -- seconds to skip the RPC once open (then probe)
+-- Key lifetime for BRK_UNTIL. The OPEN duration is the value comparison
+-- (until_ts > now); the key just needs to cover the open window and then vanish
+-- (there is no presence-based re-arm to keep alive), so a +1s guard suffices.
+-- Keeping it tight means nothing lingers into the recovery period.
+local BREAKER_OPEN_TTL_SEC    = BREAKER_COOLDOWN_SEC + 1
+local BRK_UNTIL = "cfm_dec_brk_until"   -- open while ngx.now() < this value
+local BRK_FAILS = "cfm_dec_brk_fails"   -- windowed failure counter
+
 local M = {}
 local Client = {}
 Client.__index = Client
@@ -110,7 +151,14 @@ function Client:http(method, path, body)
   -- (~300ms) on every such call — a per-push worker stall that amplifies under
   -- a WAF-tripping flood. The hot-path victim is the WAF autoblock push. [F04]
   elseif content_length == 0 then resp = ""
-  elseif content_length and content_length > 0 then resp = s:receive(content_length)
+  elseif content_length and content_length > 0 then
+    -- A daemon that sends 200 + Content-Length then HANGS mid-body times out
+    -- here. Return a real timeout error (not resp=nil with code==200, which the
+    -- caller would read as a success — masking the hang AND clearing the
+    -- breaker); this is a partial-reply variant of the hung-daemon condition.
+    local rb, rerr = s:receive(content_length)
+    if not rb then s:close(); return nil, "recv body: " .. (rerr or "timeout") end
+    resp = rb
   elseif is_chunked then
     local b, berr = read_chunked(s); if not b then s:close(); return nil, berr end; resp = b
   else resp = s:receive("*a") or "" end
@@ -134,17 +182,88 @@ end
 -- classify exposed so callers can key retry/log logic on the error class.
 M.classify_bridge_err = classify_bridge_err
 
+-- breaker_should_skip: should this RPC be short-circuited? true only for a
+-- `decision` RPC while the breaker is OPEN (BRK_UNTIL in the future). ONLY the
+-- decision kind is gated — it is the per-cache-miss blocking path; the
+-- lower-frequency best-effort telemetry RPCs (observe / ip_push / ok_touch /
+-- waf_stats / waf_excludes) must never be silenced by a decision-only trip (the
+-- daemon may still be able to serve a push). Once the cooldown lapses requests
+-- probe freely — deliberately NO single-flight lock: a probe lock raced with
+-- get()'s own token-rotation retry (the retry re-enters rpc() and would fail its
+-- own held lock) and left zombie half-open states on http-error probes. Without
+-- it, at a cooldown boundary the concurrent cache-miss requests probe (each pays
+-- one decision_timeout_ms) and the first failure re-arms for another cooldown —
+-- residual latency bounded to one cooldown's concurrent probes, still orders of
+-- magnitude better than every request paying the timeout. No shdict → false.
+--
+-- Trade-off (inherent to any breaker): once tripped it stays open for the whole
+-- cooldown even if the daemon recovers 50ms later — so a recovered daemon is not
+-- consulted for up to BREAKER_COOLDOWN_SEC. Under the default fail_open=1 that is
+-- a ≤3s window of allowing traffic a recovered daemon might have challenged (the
+-- WAF still runs uncached, nft autoblock still applies); under fail_open=0 it is
+-- ≤3s of fast-blocking after recovery — acceptable for a fail-CLOSED operator,
+-- who already blocks during the hang. The cooldown is kept short for this reason.
+function Client:breaker_should_skip(kind)
+  if kind ~= "decision" then return false end
+  local SH = self.sh
+  if not SH then return false end
+  local until_ts = SH:get(BRK_UNTIL)
+  return type(until_ts) == "number" and until_ts > ngx.now()
+end
+
+-- breaker_note: fold ONE decision-RPC outcome into the breaker. Gated to the
+-- `decision` kind up front: a telemetry outcome must neither trip the breaker
+-- NOR clear it (a telemetry success while /nginx/decision itself is deadlocked
+-- must not keep resetting the breaker and re-exposing the latency cliff). No
+-- request-scoped state on self (the client may be a per-worker singleton, and
+-- http() yields), so each decision reads shdict fresh.
+function Client:breaker_note(kind, err_class)
+  local SH = self.sh
+  if not SH or kind ~= "decision" then return end
+  if err_class == nil then
+    -- A decision SUCCESS breaks the consecutive-failure streak → reset the count
+    -- and clear any trip (this is also the half-open probe's success path).
+    -- Gated on presence so a clean node (both unset — the common case) does
+    -- reads but NO writes.
+    if SH:get(BRK_FAILS) ~= nil then SH:delete(BRK_FAILS) end
+    if SH:get(BRK_UNTIL) ~= nil then SH:delete(BRK_UNTIL) end
+    return
+  end
+  -- A responded-with-error (http 4xx/5xx, json) is not the unreachable condition
+  -- (and responds fast, so it has no latency cliff) — don't count it.
+  if err_class ~= "timeout" and err_class ~= "connect" then return end
+  -- CONSECUTIVE failure count: a success (above) resets it, so on a busy healthy
+  -- node an occasional timeout among many successes never accumulates — only an
+  -- unbroken run of BREAKER_FAIL_THRESHOLD failures (a real hang/outage) trips.
+  -- No presence-based re-arm: re-tripping after a cooldown requires a FRESH
+  -- 3-consecutive run (the counter is dropped on trip), so a single ISOLATED
+  -- timeout during a quiet recovery can never re-open on one blip. On a
+  -- persistent hang the post-cooldown probes simply re-accumulate to 3 (a few
+  -- slow requests per cooldown — still bounded and far below the un-broken cliff).
+  local n = SH:incr(BRK_FAILS, 1, 0, BREAKER_FAIL_WINDOW_SEC)
+  if n and n >= BREAKER_FAIL_THRESHOLD then
+    SH:set(BRK_UNTIL, ngx.now() + BREAKER_COOLDOWN_SEC, BREAKER_OPEN_TTL_SEC)
+    SH:delete(BRK_FAILS)   -- reset so the next trip needs a fresh 3-consecutive run
+  end
+end
+
 function Client:rpc(kind, method, path, body, req_ctx)
   local cfg = self.cfg
+  -- Circuit breaker: when the daemon is in a known hung/down window, skip the
+  -- socket round-trip entirely and return a fast error so the caller fails per
+  -- policy (fail-open) instead of paying decision_timeout_ms. Self-heals below.
+  if self:breaker_should_skip(kind) then
+    return nil, "breaker_open"
+  end
   local t0 = ngx.now()
   local resp, err = self:http(method, path, body)
+  local err_class = err and classify_bridge_err(err) or nil
   local elapsed_ms = math.floor((ngx.now() - t0) * 1000 + 0.5)
   if err then
     req_ctx = req_ctx or {}
     local ctx_ip = req_ctx.ip or (self.h.real_ip and self.h.real_ip())
     local ctx_host = req_ctx.host or (ngx.var.host or "-")
     local ctx_uri = req_ctx.uri or (ngx.var.request_uri or ngx.var.uri or "-")
-    local err_class = classify_bridge_err(err)
 
     if cfg.debug or cfg.debug_headers then
       ngx.ctx.cfm_bridge_error = err_class
@@ -165,6 +284,9 @@ function Client:rpc(kind, method, path, body, req_ctx)
         " uri=" .. tostring(ctx_uri or "-"))
     end
   end
+  -- Fold this outcome into the breaker: a success clears it; a decision-kind
+  -- timeout/connect failure counts toward tripping it.
+  self:breaker_note(kind, err_class)
   return resp, err
 end
 
