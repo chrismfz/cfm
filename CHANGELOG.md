@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Web-detector refactor kickoff: design/handoff doc + datacenter-ASN
+  classifier leaf (no behavior yet).** `docs/webdetector-refactor.md` is the
+  living anchor for making the challenge engine catch abuse it currently misses
+  and challenge the *abuser* (per-IP/subnet — machinery already exists but is
+  dormant) instead of the whole vhost, via three score-independent, log-only-
+  first entity signals (datacenter-ASN origin, behavioral enumeration, per-entity
+  rate outlier). It carries the false-positive minefield (Googlebot/Bingbot on
+  cloud ASNs, LLM/SEO crawlers, ecommerce import/export integrations), the
+  MCP-readable shadow-telemetry contract, and a running FP + progress register.
+  First code leaf: `internal/webdetector/asnclass.go` `DatacenterClass()` — a
+  pure, tested hosting/cloud-ASN classifier (curated ASN map + conservative
+  org-name fallback that deliberately avoids ambiguous tokens so consumer ISPs
+  don't misclassify). Nothing calls it yet; the log-only wiring + `abuse_shadow`
+  MCP tool are the next increments.
 - **Challenge auto-arm: optional request-rate volume floor (log-only first).**
   New `CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS` (+ `…_MIN_RPS_ENFORCE`) adds the
   request-rate dimension the existing uniqIP floors don't cover — a vhost below
