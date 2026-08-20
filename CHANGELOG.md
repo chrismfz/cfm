@@ -42,6 +42,25 @@ back-filled here — see the git/PR history for that period.
   the removed vBulletin runMaths rule.)
 
 ### Changed
+- **Edge workers: 4 → 6 workers + raise the connection/FD ceiling.** Both
+  `openresty.conf` and `angie.conf` hardcoded `worker_processes 4` and
+  `worker_connections 1024`. Now that ALL traffic is in-path (TLS termination +
+  Lua WAF/challenge are CPU-bound), 4×1024 connections — each proxied request
+  burning 2 (client + upstream) — throttled a busy edge under load. Bumped to
+  `worker_processes 6` (a deliberate fixed count, NOT `auto`: the edge is a
+  reverse proxy co-located with the origin web server — LiteSpeed/Apache, itself
+  ~2 workers — and MySQL, so it must not grab every core; `auto` counts host
+  cores, ignores cgroup CPU quotas, and would starve the co-located origin on a
+  high-core box), `worker_connections 16384`, and added `worker_rlimit_nofile
+  65535` so workers have the FDs to back the higher cap. This raises the
+  connection ceiling and never lowers it, and nginx/angie never refuse to start
+  over it — but the higher cap only pays off if the FD limit keeps up (with a low
+  `LimitNOFILE` a worker hits EMFILE under heavy load instead of a clean limit),
+  and it preallocates ~8 MB/worker of connection slots at startup (~48 MB across
+  6). **Operator note:** CFM doesn't manage the openresty/angie systemd unit — if
+  error.log shows `setrlimit(RLIMIT_NOFILE) failed` or `worker_connections exceed
+  open file resource limit`, raise `LimitNOFILE` in that unit. Found by the
+  2026-07 edge audit.
 - **Panel listeners: revive the keepalive pool to the challenge service.** The
   DNAT cPanel/WHM panel listeners (`cfm-panel-listeners.conf.in`) proxy their
   internal `/__cfm_panel_decide`, `/__cfm_challenge` and `/__cfm_verify` hops to
