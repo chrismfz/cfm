@@ -56,6 +56,17 @@ back-filled here — see the git/PR history for that period.
   the removed vBulletin runMaths rule.)
 
 ### Changed
+- **Edge TLS: `ssl_buffer_size 4k` (was the 16k default) for lower TTFB.** Both
+  `openresty.conf` and `angie.conf` left `ssl_buffer_size` at nginx's 16k
+  default, so the first TLS record of a response could be held until up to 16 KB
+  fills/flushes — adding a round-trip to time-to-first-byte for small first
+  responses (redirects, API JSON, the challenge page) over high-RTT (distant /
+  mobile) links. 4k emits the first bytes in a smaller record so they arrive ~1
+  RTT sooner. The only cost is marginally more TLS framing overhead on large
+  downloads (≈0.75 % on a 1 MB transfer — negligible for this redirect/API/
+  challenge-heavy edge; big media still streams). Standard nginx TTFB tuning,
+  instantly reversible, no behaviour change beyond record sizing. Found by the
+  2026-07 edge audit.
 - **Edge decision RPC: circuit breaker for a hung/down cfm daemon.** When the
   daemon is HUNG (accepts the unix connection but never replies), every uncached
   request paid the full `decision_timeout_ms` (~300 ms) before failing open — a
