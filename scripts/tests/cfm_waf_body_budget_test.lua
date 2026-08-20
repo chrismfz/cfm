@@ -338,7 +338,8 @@ end
 -- which then applies `body_scan_budget[ct]`. If the reader cap is smaller than
 -- the biggest budget (json = 32768), a JSON/multipart/xml payload past the cap
 -- escapes every body-aware rule regardless of the budget. Assert the invariant
--- against the LIVE budgets (via util.body_budget) and cfm.lua's actual default.
+-- against the LIVE budgets (via util.body_budget) and the actual default in
+-- cfm_cfg.lua (which cfm.lua loads and reads as CFG.waf_body_max_len).
 do
   local max_budget = 0
   for _, ct in ipairs({
@@ -355,12 +356,15 @@ do
     "max body_scan_budget expected 32768 (json); got " .. tostring(max_budget) ..
     " — if a budget was raised, raise cfm.lua waf_body_max_len to match")
 
-  local fh = assert(io.open("configs/lua/cfm.lua", "r"))
+  -- The default now lives in cfm_cfg.lua (the request-invariant CFG slice that
+  -- cfm.lua loads via require and reads as CFG.waf_body_max_len); the F08
+  -- invariant is unchanged, only its source file moved.
+  local fh = assert(io.open("configs/lua/cfm_cfg.lua", "r"))
   local src = fh:read("*a"); fh:close()
   local cap = tonumber(src:match('CFM_WAF_BODY_MAX_LEN"%)%s*or%s*"(%d+)"'))
-  check(cap ~= nil, "could not read waf_body_max_len default from cfm.lua")
+  check(cap ~= nil, "could not read waf_body_max_len default from cfm_cfg.lua")
   check(cap ~= nil and cap >= max_budget,
-    "F08: cfm.lua waf_body_max_len default (" .. tostring(cap) .. ") must be >= " ..
+    "F08: cfm_cfg.lua waf_body_max_len default (" .. tostring(cap) .. ") must be >= " ..
     "max body_scan_budget (" .. tostring(max_budget) .. "), else the WAF budget " ..
     "is never realised and a body payload past byte " .. tostring(cap) .. " escapes")
 end

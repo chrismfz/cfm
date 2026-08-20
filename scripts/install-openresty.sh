@@ -3,7 +3,7 @@ set -euo pipefail
 
 readonly CFM_SHARED_LUA_DIR="/var/lib/cfm/lua"
 readonly CFM_LUA_MANIFEST=(
-    cfm.lua cfm_panel.lua cfm_panel_tunnel.lua cfm_rules.lua cfm_stats.lua
+    cfm.lua cfm_cfg.lua cfm_panel.lua cfm_panel_tunnel.lua cfm_rules.lua cfm_stats.lua
     cfm_waf.lua cfm_waf_util.lua cfm_waf_detectors.lua cfm_waf_excl.lua
     cfm_clamav.lua cfm_cache_log.lua cfm_clearance.lua cfm_geo.lua cfm_purge.lua
     cfm_filecache.lua cfm_origin_ka.lua cfm_bridge_cfg.lua cfm_tlsfp.lua

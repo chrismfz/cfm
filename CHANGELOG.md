@@ -42,6 +42,25 @@ back-filled here — see the git/PR history for that period.
   the removed vBulletin runMaths rule.)
 
 ### Changed
+- **cfm.lua hot path: hoist the request-invariant CFG out of the per-request
+  chunk + skip a query-string parse.** `cfm.lua` is an `access_by_lua_file`, so
+  its whole body re-executes on every request. The inline `CFG` literal re-ran
+  **~21 `os.getenv()` reads** plus a couple of temp-table and closure allocations
+  per request, all for process-lifetime-constant values — and in fact none of
+  those `CFM_*` knobs is ever set (the systemd units export none, and nginx
+  strips env vars not declared with `env NAME;` — only 6 are declared, none set),
+  so `os.getenv()` always returns nil and the defaults always win. Those static
+  fields now live in a new `cfm_cfg.lua` built **once per worker** (via
+  `require`'s `package.loaded` cache); cfm.lua layers the four bridge-derived
+  fields (`token`, `ok_ttl_sec`, `clearance_refresh`, `origin_keepalive` — which
+  refresh on the bridge file's 10s TTL and must stay dynamic) onto it through a
+  metatable `__index`, so every `CFG.<field>` read and cfm_decision's in-place
+  `cfg.token` rotation are unchanged. Behaviour is byte-identical (env is
+  worker-constant); covered by `scripts/tests/cfm_cfg_test.lua`. Separately,
+  `try_apply_post_resume` now gates on the single-arg `ngx.var.arg_cfm_rt` before
+  calling `ngx.req.get_uri_args()`, skipping a full query-string parse + table
+  alloc on the overwhelming majority of GETs (which carry no `cfm_rt`). Found by
+  the 2026-07 edge Lua audit.
 - **Edge workers: 4 → 6 workers + raise the connection/FD ceiling.** Both
   `openresty.conf` and `angie.conf` hardcoded `worker_processes 4` and
   `worker_connections 1024`. Now that ALL traffic is in-path (TLS termination +
