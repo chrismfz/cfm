@@ -56,6 +56,36 @@ back-filled here — see the git/PR history for that period.
   the removed vBulletin runMaths rule.)
 
 ### Changed
+- **Edge decision RPC: circuit breaker for a hung/down cfm daemon.** When the
+  daemon is HUNG (accepts the unix connection but never replies), every uncached
+  request paid the full `decision_timeout_ms` (~300 ms) before failing open — a
+  hung daemon became a fleet-wide latency cliff. `cfm_decision.lua` now trips a
+  shdict-gated breaker after an **unbroken run of 3 `timeout`/`connect`
+  failures** and **skips the decision RPC for 3 s**, so cache-miss requests fail
+  fast per policy instead of stacking 300 ms waits. It self-heals: once the
+  cooldown lapses requests probe — a success clears the breaker, and a persistent
+  hang simply re-accumulates a fresh 3-run (a few slow probes per cooldown). The
+  **verdict is unchanged** — a hung/down daemon already failed open (or closed,
+  under `fail_open=0`); the breaker only removes the latency, and the WAF still
+  runs uncached on every request while existing nft autoblock bans stay
+  kernel-level. Hardened across five adversarial review rounds: the count is
+  **consecutive** (any decision success resets it), so a busy healthy node with
+  occasional timeouts never spuriously trips; **only the `decision` kind is
+  gated** — the best-effort telemetry RPCs (`observe`/`ip_push`/`ok_touch`/
+  `waf_stats`/`waf_excludes`) can neither trip the breaker nor clear it nor be
+  silenced by it (an autoblock push a healthy daemon can still serve is never
+  dropped by a decision-only trip); only `timeout`/`connect` count (an
+  `http_4xx/5xx`/json error means the daemon responded); a **partial-reply hang**
+  (200 + Content-Length, then hang mid-body) now returns a real body-timeout
+  error instead of a `(nil,nil)` that read as success; there is **no request-
+  scoped state** on the client across the socket yield, **no single-flight probe
+  lock** (it deadlocked the token-rotation retry), and **no presence-based
+  re-arm** (it let a lone stray timeout re-open on one blip) — so a recovered
+  daemon's isolated timeout can never re-trip. Accepted trade-off (inherent to
+  any breaker): a recovered daemon is not consulted for up to the 3 s cooldown —
+  kept short for that reason. State lives in the shared `cfm_decisions` dict
+  (node-wide across workers; the 2 tiny hot keys add no eviction pressure). New
+  `scripts/tests/cfm_decision_breaker_test.lua`. Found by the 2026-07 edge audit.
 - **Edge access logging: drop a dead map + document the panel double-write.**
   Removed the **dead `$log_main_request_nonpanel` map** (defined in both
   `openresty.conf` and `angie.conf`, never referenced — CLAUDE.md §5). It was an
