@@ -17,7 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-### Fixed
+### Added
+- **whats_wrong: SMTP/spamd runtime saturation (PR 1c — the mail_runtime blind
+  spot lands in triage).** `whats_wrong` now pulls `/api/v1/mail/runtime` and
+  raises a `mail` finding when the inbound SMTP connection pool or the spamd
+  scanner-children pool is saturating: `warn` (≥80% of the cap) → a warning,
+  `critical` (≥95% / at the cap) → a critical, each pointing at the `mail_runtime`
+  drill-down. This catches the "every mail daemon is up, queue looks fine, but
+  submission (587) is unavailable because spamd is saturated and SMTP sessions
+  hit smtp_accept_max" case that health/queue signals miss
+  (docs/whats-wrong-rootcause.md §5a). Conservative by design: an `ok` or
+  `unknown` pool (cap unresolved) raises nothing — unknown is not a problem and
+  is not surfaced as one.
 - **logrotate: cover the legacy flat `/var/log/cfm.api.log` fallback.** The
   primary `/var/log/cfm/cfm.api.log` was already rotated by the directory glob,
   but the flat fallback path `cfmlog.go` can write to had no rotation entry, so
