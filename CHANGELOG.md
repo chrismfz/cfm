@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **mailruntime: log-signature classifier (PR 1a-sig).** New `sig.go` pure
+  classifier for the three mail saturation log signatures, grounded in verbatim
+  fleet log lines (six cPanel nodes): `SigSpamdError` (Exim spam ACL "error
+  reading from spamd … Connection timed out" / "cannot parse spamd … output" —
+  the smoking gun of spamd saturation), `SigInboundConnRefused` (this box's Exim
+  refusing an inbound connection at `smtp_accept_max`: "Connection from […]
+  refused: too many connections" — deliberately distinct from a *remote* MX's
+  421 "Too many concurrent SMTP connections", which is deliverability, not our
+  saturation), and `SigSpamdChildKilled` (spamd prefork "killing failed child",
+  ignoring routine state/adjust chatter). Pure/no-I/O; a later collector will
+  count these over a window to enrich the mail_runtime geometry.
 - **whats_wrong: SMTP/spamd runtime saturation (PR 1c — the mail_runtime blind
   spot lands in triage).** `whats_wrong` now pulls `/api/v1/mail/runtime` and
   raises a `mail` finding when the inbound SMTP connection pool or the spamd
