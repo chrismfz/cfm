@@ -97,6 +97,7 @@ func TestPreflightSummary_RendersFiles(t *testing.T) {
 		[]ModuleRule{{Name: "ksmbd", ID: "Y"}},
 		HostProfile{},
 		nil,
+		nil,
 	)
 	out := w.String()
 	for _, want := range []string{SysctlPath, ModprobePath, "Apply",
@@ -107,6 +108,32 @@ func TestPreflightSummary_RendersFiles(t *testing.T) {
 		_ = want
 	}
 	for _, want := range []string{SysctlPath, ModprobePath, "--yes"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("preflight summary missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPreflightSummary_NamesForeignReconcileFiles asserts that when the
+// reconcile is about to rewrite a foreign drop-in, the safety gate names
+// that file and its backup — the operator must not confirm blind to a
+// mutation of a file kernsec does not own.
+func TestPreflightSummary_NamesForeignReconcileFiles(t *testing.T) {
+	var w bytes.Buffer
+	conflicts := []foreignConflict{
+		{File: "/etc/sysctl.d/99-kspp.conf", Line: 6, Key: "fs.protected_regular", Found: "2", Want: "1", Reason: "x"},
+	}
+	preflightSummary(&w, "APPLY",
+		[]SysctlRule{{ID: "X", Key: "k", Value: "v"}},
+		nil, nil, HostProfile{}, nil,
+		conflicts,
+	)
+	out := w.String()
+	for _, want := range []string{
+		"/etc/sysctl.d/99-kspp.conf",
+		"neutralise fs.protected_regular=2",
+		"/etc/sysctl.d/99-kspp.conf" + BackupSuffix,
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("preflight summary missing %q in:\n%s", want, out)
 		}

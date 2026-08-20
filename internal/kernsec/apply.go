@@ -200,6 +200,13 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	drift := computeDrift(sysctlContent, desiredCmdline, backend)
 	drift.BootReconcileReason = bootReconcileReason
 	drift.ModprobeDiffers, drift.ModprobeReadErr = modprobeDriftCheck(modprobeContent)
+	// Foreign drop-in conflicts: leftover copies of a reconcile-eligible
+	// key (e.g. fs.protected_regular=2 in the legacy 99-kspp.conf) that
+	// would override kernsec on the next reboot. Detected read-only here;
+	// neutralised in applyWrites. Folded into drift so `--check`/monitor
+	// flag the latent revert even when kernsec's own file already matches.
+	foreignConflicts := detectForeignSysctlConflicts(sysctls)
+	drift.ForeignSysctlConflicts = len(foreignConflicts)
 	loadedManaged := loadedAndManaged(modules)
 
 	fmt.Fprintln(w, "[Sysctl]")
@@ -209,9 +216,16 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 		fmt.Fprintf(w, "  status:  ERROR reading existing file: %v\n", drift.SysctlReadErr)
 	case drift.SysctlDiffers:
 		fmt.Fprintf(w, "  status:  DRIFT (would write %d bytes)\n", len(sysctlContent))
+	case len(foreignConflicts) > 0:
+		// The managed file itself matches, but a foreign drop-in still
+		// overrides it — scope the status so it doesn't read "in sync"
+		// on a line immediately above a listed conflict (and one that
+		// makes `apply --check` exit 1).
+		fmt.Fprintln(w, "  status:  managed file in sync; foreign drift below")
 	default:
 		fmt.Fprintln(w, "  status:  in sync")
 	}
+	reportForeignConflicts(w, foreignConflicts)
 
 	fmt.Fprintln(w, "[Boot args]")
 	switch {
@@ -302,9 +316,9 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 			}
 		}
 	}
-	mutating := drift.SysctlDiffers || drift.BootDiffers || drift.ModprobeDiffers || bootReconcileReason != "" || len(mountsToEnable) > 0
+	mutating := drift.SysctlDiffers || drift.BootDiffers || drift.ModprobeDiffers || bootReconcileReason != "" || len(mountsToEnable) > 0 || len(foreignConflicts) > 0
 	if mutating && !opts.AssumeYes {
-		preflightSummary(w, label, sysctls, bootArgs, modules, profile, mountsToEnable)
+		preflightSummary(w, label, sysctls, bootArgs, modules, profile, mountsToEnable, foreignConflicts)
 		ok, err := confirmApply(w, opts.Stdin)
 		if err != nil {
 			fmt.Fprintln(w, "kernsec apply: confirmation read error:", err)
@@ -373,6 +387,13 @@ func applyWrites(
 		return 1
 	}
 	fmt.Fprintf(w, "[Sysctl] wrote %s (not yet applied).\n", SysctlPath)
+
+	// 1b. Foreign drop-in reconcile. Neutralise conflicting copies of a
+	// reconcile-eligible key (e.g. fs.protected_regular=2 in the legacy
+	// 99-kspp.conf) so kernsec's value settles across reboot instead of
+	// being overridden by a later-sorting foreign file. Best-effort:
+	// never aborts apply (the loader below still sets the live value).
+	neutraliseForeignSysctls(w, detectForeignSysctlConflicts(resolved.ApplySysctls()))
 
 	// 2. Modprobe blacklist file.
 	if err := WriteModprobeFile(w, modprobeContent); err != nil {
@@ -531,6 +552,13 @@ type driftResult struct {
 	// ModprobeReadErr is non-nil when the existing managed modprobe
 	// file is unreadable for a reason other than absence.
 	ModprobeReadErr error
+	// ForeignSysctlConflicts is the count of active assignments in
+	// FOREIGN sysctl files (not kernsec's own drop-in) that set a
+	// reconcile-eligible key to a value kernsec doesn't accept — e.g.
+	// a leftover `fs.protected_regular=2` in the legacy 99-kspp.conf
+	// that would override kernsec on the next reboot. Non-zero is
+	// actionable drift: apply neutralises those lines.
+	ForeignSysctlConflicts int
 }
 
 // classifyCheckResult maps a driftResult to the `apply --check` exit
@@ -552,7 +580,7 @@ func classifyCheckResult(d driftResult) int {
 	switch {
 	case d.SysctlReadErr != nil, d.BootReadErr != nil, d.ModprobeReadErr != nil:
 		return 2
-	case d.SysctlDiffers, d.BootDiffers, d.ModprobeDiffers, d.BootReconcileReason != "":
+	case d.SysctlDiffers, d.BootDiffers, d.ModprobeDiffers, d.BootReconcileReason != "", d.ForeignSysctlConflicts > 0:
 		return 1
 	}
 	return 0

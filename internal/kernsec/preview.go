@@ -344,6 +344,23 @@ func printPreviewApplyPlan(w io.Writer, conf *Conf, rs ResolvedSet) bool {
 		printMutationStatus(w, "boot args", drift.BootDiffers, nil)
 		fmt.Fprintf(w, "      %s\n", strings.TrimSpace(desiredCmdline))
 	}
+
+	// Foreign drop-in reconcile: apply rewrites conflicting copies of a
+	// reconcile-eligible key (e.g. fs.protected_regular=2 in the legacy
+	// 99-kspp.conf) in files kernsec does not own. Surface them here so
+	// preview stays a faithful diff of apply — otherwise an operator sees
+	// nothing about the 99-kspp.conf rewrite + .cfm-kernsec.bak apply does.
+	foreignConflicts := detectForeignSysctlConflicts(sysctls)
+	fmt.Fprintln(w, "  foreign drop-in reconcile:")
+	if len(foreignConflicts) == 0 {
+		fmt.Fprintln(w, "    (none; no conflicting copies of a reconcile-eligible key in other sysctl files)")
+	} else {
+		for _, f := range uniqueForeignFiles(foreignConflicts) {
+			fmt.Fprintf(w, "    %s: neutralise %s (backup %s%s)\n",
+				f, foreignKeysFor(foreignConflicts, f), f, BackupSuffix)
+		}
+	}
+
 	fmt.Fprintln(w, "  (preview; nothing written and no refresh command run)")
 	fmt.Fprintln(w)
 	return readErr

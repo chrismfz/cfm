@@ -242,7 +242,7 @@ Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
 | Group | Tier | Rules / settings | Operator impact |
 |---|---:|---|---|
 | `kspp.kernel` | 1 | `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1`, `kernel.unprivileged_bpf_disabled=2` (accepts `=1`), `kernel.randomize_va_space=2`, `kernel.perf_event_paranoid=3` (accepts `=2` for mainline-vanilla kernels and `=4` for hardened forks), `kernel.yama.ptrace_scope=2`, `vm.mmap_min_addr=65536` (accepts `=131072` / `=262144`) | Restricts unprivileged kernel visibility, BPF, perf, and ptrace. Profiling/debug attach generally needs root. Mode 2 of `ptrace_scope` closes the same-uid `pidfd_getfd()` exit-window race against setuid helpers (ssh-keysign / chage `/etc/shadow` disclosure chain — Linus commit `31e62c2ebbfd`); `=1` was previously accepted as also-green but is no longer, because the residual race is a working exploit primitive. Hosts that need same-uid debuggability without sudo must `state = skip` `KSEC-SCT-kspp.kernel-006` in `kernsec.conf`. `vm.mmap_min_addr=65536` blocks NULL-deref-to-userspace exploit primitives and is the default on modern distros. |
-| `kspp.fs` | 1 | `fs.protected_hardlinks=1`, `fs.protected_symlinks=1`, `fs.protected_fifos=2`, `fs.protected_regular=1` | Protects sticky/world-writable directories; normally no production impact. `fs.protected_regular` is **1, not the stricter 2**: 1 still guards world-writable sticky dirs (`/tmp`, `/var/tmp`); 2 also covers group-writable sticky dirs, which breaks cPanel's DNS Zone Editor. |
+| `kspp.fs` | 1 | `fs.protected_hardlinks=1`, `fs.protected_symlinks=1`, `fs.protected_fifos=2`, `fs.protected_regular=1` | Protects sticky/world-writable directories; normally no production impact. `fs.protected_regular` is **1, not the stricter 2**: 1 still guards world-writable sticky dirs (`/tmp`, `/var/tmp`); 2 also covers group-writable sticky dirs, which breaks cPanel's DNS Zone Editor. A leftover `=2` in a foreign drop-in (the legacy `99-kspp.conf`, an operator file) is **auto-neutralised on apply** — see [Foreign drop-in reconcile](#foreign-drop-in-reconcile). |
 | `kspp.net` | 1 | `net.core.bpf_jit_harden=2` | Minor BPF JIT performance cost. |
 | `sysctl.mem.exploit` | 1 | `vm.unprivileged_userfaultfd=0`, `vm.mmap_rnd_bits=32`, `vm.mmap_rnd_compat_bits=16`, `kernel.warn_limit=10`, `kernel.oops_limit=10`, `fs.suid_dumpable=0` | Removes common LPE primitives; unusual debugging/checkpointing may need overrides. Unsupported keys are skipped. |
 | `tier2.oops` | 2 | `kernel.panic_on_oops=1`, `kernel.panic=10` | Any kernel oops can become a reboot; opt-in only. |
@@ -264,6 +264,51 @@ Audited keys are `net.ipv4.conf.all.rp_filter=1`,
 `net.ipv4.conf.all.accept_redirects=0`,
 `net.ipv4.conf.all.send_redirects=0`, `net.ipv4.tcp_syncookies=1`, and
 `net.ipv6.conf.all.accept_redirects=0`.
+
+### Foreign drop-in reconcile
+
+kernsec writes its sysctl values to `/etc/sysctl.d/99-cfm-kernsec.conf` and
+relies on the `99-` prefix to win the `sysctl --system` ordering race. But that
+race is **lexical by basename**, so a foreign drop-in that sorts *after*
+`99-cfm-kernsec.conf` — e.g. the legacy `/etc/sysctl.d/99-kspp.conf` the old
+`scripts/kspp.sh` shipped (`k` > `c`) — is applied **last** and silently
+overrides kernsec on the next reboot / `sysctl --system`. kernsec's live
+`sysctl -w` fixes the running kernel immediately, but the stale foreign line
+re-applies its value after a reboot, and `apply --check` (which only compares
+kernsec's own file + cmdline) never sees it.
+
+For a small allowlist of keys where that silent revert re-introduces a **known
+breakage**, `apply` reconciles the foreign files too: it scans every other
+sysctl config file in `/etc/sysctl.d/*.conf` plus the legacy `/etc/sysctl.conf`,
+and any active assignment of an allowlisted key whose value diverges from
+kernsec's is **commented out** (with a marker) so the key falls through to
+kernsec's value. The foreign file is backed up once to
+`<file>.cfm-kernsec.bak` before it is edited, and its original permissions are
+preserved. The pass is idempotent (an already-commented line is a no-op) and
+best-effort (a read/write failure on one foreign file is reported but never
+aborts apply). A pending conflict counts as drift, so `apply --check` /
+`cfm kernsec monitor` flag the latent revert until an `apply` defuses it, and
+both the interactive apply confirm prompt and `cfm kernsec preview` name the
+foreign file(s) about to be rewritten (plus their `.cfm-kernsec.bak` backups) so
+the operator never approves blind to a mutation of a file kernsec doesn't own.
+Keys are matched in normalised dotted form, so a foreign drop-in using the
+slash separator `sysctl.conf(5)` also accepts (`fs/protected_regular`) is caught
+too.
+
+Today the allowlist is a single key — **`fs.protected_regular`** — because
+kernsec deliberately ships `=1` (not the KSPP `=2`) for cPanel DNS Zone Editor
+compatibility, and a leftover foreign `=2` re-breaks it after a reboot. This is
+a narrow, curated list (`foreignReconcileKeys` in
+`internal/kernsec/foreign_sysctl.go`), **not** a blanket "kernsec overwrites any
+operator sysctl": only `/etc/sysctl.d/*.conf` and `/etc/sysctl.conf` are scanned
+and edited, and kernsec never rewrites operator values for keys outside the
+allowlist. Vendor-owned directories (`/usr/lib/sysctl.d`, `/run/sysctl.d`) are
+**neither scanned nor edited** — a conflict kernsec would refuse to fix must not
+be reported as never-converging drift, so an override placed there is left for
+the operator to resolve. A symlinked drop-in (Debian/Ubuntu ship
+`/etc/sysctl.d/99-sysctl.conf -> ../sysctl.conf`) is resolved to its real target
+before editing, so the symlink is preserved. `disable` (tier 0) does not run the
+reconcile — it leaves foreign files untouched.
 
 ### Boot-argument rules
 

@@ -203,7 +203,10 @@ var KSPPSysctls = []SysctlRule{
 		// owner). The marginal extra coverage of "2" is not worth that breakage
 		// on cPanel fleets. kernsec is declarative, so on the next `apply` any
 		// host currently at fs.protected_regular=2 is reconciled down to 1 (live
-		// `sysctl -w` + managed file rewrite).
+		// `sysctl -w` + managed file rewrite). A leftover =2 in a FOREIGN
+		// drop-in that sorts after ours (the legacy 99-kspp.conf, an operator
+		// file) would re-apply 2 on the next reboot; apply neutralises those
+		// too — see foreignReconcileKeys in foreign_sysctl.go.
 		Description: "Protect non-owned regular files in world-writable sticky dirs (1, not 2 — 2 breaks cPanel Zone Editor on group-writable sticky dirs).",
 		Affects:     "cPanel DNS Zone Editor works at 1; value 2 blocks it.",
 	},

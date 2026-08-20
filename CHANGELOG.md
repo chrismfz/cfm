@@ -17,6 +17,34 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **kernsec: reconcile a leftover `fs.protected_regular=2` in foreign sysctl
+  drop-ins.** kernsec pins `fs.protected_regular=1` (value 2 breaks cPanel's DNS
+  Zone Editor) in `99-cfm-kernsec.conf`, but a stale `=2` in a foreign drop-in
+  that sorts *after* it — notably the legacy `/etc/sysctl.d/99-kspp.conf` the old
+  `scripts/kspp.sh` shipped — was re-applied on the next reboot / `sysctl
+  --system` and silently re-broke the Zone Editor, even though the live value was
+  correct right after apply. `cfm kernsec apply` now scans the other
+  `/etc/sysctl.d/*.conf` files (plus the legacy `/etc/sysctl.conf`) for an active
+  `fs.protected_regular` set to anything other than kernsec's value and comments
+  it out (backing the file up once to `<file>.cfm-kernsec.bak`, preserving mode),
+  so the value settles everywhere. The pending conflict now also counts as drift,
+  so `apply --check` / `cfm kernsec monitor` flag the latent revert until an apply
+  defuses it. The interactive apply confirm prompt and `cfm kernsec preview` both
+  now name the foreign file(s) about to be rewritten and their `.cfm-kernsec.bak`
+  backups, so the operator never confirms blind to a mutation of a file kernsec
+  doesn't own. Narrow, curated allowlist (`foreignReconcileKeys`) — not a blanket
+  operator-sysctl overwrite; only `/etc` files are touched, vendor dirs
+  (`/usr/lib/sysctl.d`, `/run/sysctl.d`) are left alone, and `disable` skips the
+  reconcile. Slash-separated keys (`fs/protected_regular`, which sysctl.conf(5)
+  treats as equivalent) are matched too. The legacy `scripts/kspp.sh` now also
+  writes `fs.protected_regular=1` so it can no longer re-introduce the trap.
+- **logrotate: cover the legacy flat `/var/log/cfm.api.log` fallback.** The
+  primary `/var/log/cfm/cfm.api.log` was already rotated by the directory glob,
+  but the flat fallback path `cfmlog.go` can write to had no rotation entry, so
+  `check_logrotate_coverage` flagged it. Added it to the legacy top-level stanza
+  in `configs/logrotate-cfm`.
+
 ### Added
 - **mailruntime: 1a-sig collector v1 — mail_runtime now carries log-driven
   saturation counts.** `GET /api/v1/mail/runtime` (and the `mail_runtime` MCP
@@ -66,13 +94,6 @@ back-filled here — see the git/PR history for that period.
   (docs/whats-wrong-rootcause.md §5a). Conservative by design: an `ok` or
   `unknown` pool (cap unresolved) raises nothing — unknown is not a problem and
   is not surfaced as one.
-- **logrotate: cover the legacy flat `/var/log/cfm.api.log` fallback.** The
-  primary `/var/log/cfm/cfm.api.log` was already rotated by the directory glob,
-  but the flat fallback path `cfmlog.go` can write to had no rotation entry, so
-  `check_logrotate_coverage` flagged it. Added it to the legacy top-level stanza
-  in `configs/logrotate-cfm`.
-
-### Added
 - **`mail_runtime` MCP tool + `GET /api/v1/mail/runtime` (PR 1b-iii).** Exposes
   the SMTP/spamd saturation snapshot as a read-only, host-level, admin-only
   endpoint and MCP tool: current inbound SMTP sessions vs `smtp_accept_max` and
