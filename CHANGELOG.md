@@ -17,6 +17,30 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **WAF CVE detector: Elementor Pro Forms unauthenticated upload → RCE
+  (CVE-2026-32475), rule 10016, family `WAF_CVE`, edge `block` + autoblock-armed.**
+  Elementor Pro < 4.2.2's File Upload form field validates and moves an upload in
+  two loops that disagree about an empty (`UPLOAD_ERR_NO_FILE`) entry:
+  `validation()` `return`s on a blank-filename first part — abandoning the
+  extension blocklist for every later part — while `process_field()` only
+  `continue`s past it and still moves the next part. A two-part upload (empty
+  first part, then a `.php` payload) thus lands executable PHP in the public
+  `wp-content/uploads/elementor/forms/` directory, unauthenticated. The detector
+  keys on `POST admin-ajax.php` + the nopriv action `elementor_pro_forms_send_form`
+  + a php-executable upload filename, reusing the hardened rule-401 detector; it
+  runs before the generic upload rules so the hit is attributed as
+  `WAF/CVE-2026-32475` (6h nft ban + Slack/mail). The surviving file *extension*
+  is the vuln, so the rule keys on that exact shape (a content-bytes leg is
+  intentionally omitted — raw php content is already covered fleet-wide by the
+  armed generic rule 402). Near-zero FP — a legitimate Elementor form upload never
+  carries a php-executable file.
+  **Note:** the generic upload-filename rule (401, block + armed) already blocked
+  the straightforward `.php` upload fleet-wide; this rule adds CVE attribution and
+  covers the body-budget-evasion / uncommon-extension edges. Updating Elementor
+  Pro to ≥ 4.2.2 remains the actual fix. (Rule id 10015 is intentionally skipped —
+  the removed vBulletin runMaths rule.)
+
 ### Changed
 - **WAF: literal prefilters on two hot in-path detectors (CPU, no behaviour
   change).** Two detectors that run on ordinary request surfaces did expensive

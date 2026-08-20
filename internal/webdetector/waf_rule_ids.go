@@ -151,6 +151,9 @@ var wafRuleIDs = []WAFRule{
 	{ID: 10012, Name: "rule_cve_woocommerce_payments", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10013, Name: "rule_cve_gravity_smtp", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10014, Name: "rule_cve_sppagebuilder_upload", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	// 10015 intentionally skipped: the never-released, then removed vBulletin
+	// runMaths CVE-2026-61511 block rule (see WAF_CVE.md "Removed").
+	{ID: 10016, Name: "rule_cve_elementor_pro_form_upload", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.
