@@ -720,6 +720,10 @@ func init() {
 			ChallengeSuspiciousMinUniqIP: kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_MIN_UNIQIP", 0),
 			ChallengeSuspiciousHolddown:  kvDur(kv, "CHALLENGE_SUSPICIOUS_VHOST_HOLDDOWN", 0),
 
+			// Volume floor (request-rate). 0 disables; enforce=false = log-only burn-in.
+			ChallengeSuspiciousMinRPS:        kvFlt(kv, "CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS", 0),
+			ChallengeSuspiciousMinRPSEnforce: kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS_ENFORCE", false),
+
 			// Optional uniqIP-based vhost auto mode
 			ChallengeSuspiciousUniqIP:    kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP", false),
 			ChallengeSuspiciousUniqIPOn:  kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_ON", 0),
