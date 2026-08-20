@@ -158,133 +158,43 @@ local _bridge_cfg = _bridge.get()
 -- ─────────────────────────────────────────────────────────────────────────────
 -- CONFIG
 -- ─────────────────────────────────────────────────────────────────────────────
-local CFG = {
-  sock_path = "/var/run/cfm/cfm_nginx.sock",
-
-  token        = _bridge_token,
-  token_header = "X-CFM-Token",
-
-  -- Default 100ms: headroom for the first connect (no pooled socket yet),
-  -- plus the bridge's synchronous-state mutation. Hook-backed work (WAF
-  -- history, observations) is dispatched async on the Go side so this
-  -- budget only needs to cover state mutation + JSON (sub-millisecond).
-  decision_timeout_ms   = tonumber(os.getenv("CFM_DECISION_TIMEOUT_MS") or "300"),
-  -- Clean-allow verdicts are cached this long (90s) before the bridge is
-  -- re-consulted. This bounds enforcement lag: a newly flagged IP keeps a
-  -- cached allow for up to 90s. Deliberately NOT env-overridable (unlike its
-  -- neighbours) — a single hard-coded, reviewed value. Keep the doc-comments
-  -- that cite this window (header "Design principles", the static-asset and
-  -- geo-cache notes) in sync if you change it.
-  decision_cache_ttl_ms = 90000,
-  waf_excl_cache_ttl_ms = tonumber(os.getenv("CFM_WAF_EXCL_CACHE_TTL_MS") or "6000"),
-  waf_excl_meta_ttl_sec = tonumber(os.getenv("CFM_WAF_EXCL_META_TTL_SEC") or "15"),
-  waf_excl_refresh_sec  = tonumber(os.getenv("CFM_WAF_EXCL_REFRESH_SEC") or "10"),
-
-  block_code = 403,
-  fail_open  = (os.getenv("CFM_FAIL_OPEN") or "1") ~= "0",
-
-  debug         = (os.getenv("CFM_DEBUG") == "1"),
-  debug_headers = (os.getenv("CFM_DEBUG_HEADERS") == "1"),
-  log_allows    = (os.getenv("CFM_LOG_ALLOWS") == "1"),
-
-  -- Clearance/OK TTL, in priority order: explicit env override; the
-  -- daemon-published authoritative cookie life (cfm_bridge_config.lua
-  -- cookie_life_sec — the same CHALLENGE_COOKIE_LIFE chain the challenge
-  -- server mints tokens with, so sliding re-mints can't silently extend or
-  -- shorten the operator-configured clearance lifetime); historical 3600
-  -- fallback (upgrade lag: old daemon, new Lua). The published value is
-  -- honored only when > 0 — a sub-second configured life truncates to 0 in
-  -- the file, and 0 is truthy in Lua (Max-Age=0 would expire the cookie
-  -- immediately). Same guard cfm_panel.lua's clearance_cookie_ttl uses.
-  ok_ttl_sec         = tonumber(os.getenv("CFM_OK_TTL_SEC") or "")
-                         or (function()
-                              local pub = tonumber(_bridge_cfg.cookie_life_sec or "")
-                              if pub and pub > 0 then return pub end
-                              return nil
-                            end)()
-                         or 3600,
-  ok_touch_every_sec = tonumber(os.getenv("CFM_OK_TOUCH_EVERY_SEC") or "120"),
-
-  -- Sliding clearance: when true, accepted requests re-mint cfm_clearance
-  -- with exp = now + ok_ttl_sec so active panel/webmail users don't get
-  -- re-challenged mid-session. Sourced from [webdetector] CHALLENGE_COOKIE_REFRESH
-  -- via /var/lib/cfm/lua/cfm_bridge_config.lua. Defaults to true.
-  clearance_refresh  = _bridge_cfg.clearance_refresh,
-
-  keepalive_idle_ms = tonumber(os.getenv("CFM_BRIDGE_KA_IDLE_MS") or "60000"),
-  keepalive_pool    = tonumber(os.getenv("CFM_BRIDGE_KA_POOL")    or "512"),
-
-  -- Upper bound on the request-body bytes handed to the WAF (audit F08). This
-  -- must be >= the largest per-Content-Type budget in cfm_waf.lua's
-  -- `body_scan_budget` (json = 32768 today), otherwise this reader truncates
-  -- the body BEFORE the WAF applies its budget and the larger budgets are never
-  -- realised — a payload past byte 8192 in a JSON/multipart/xml body escaped
-  -- every body-aware rule. Kept at the max budget so the get_norm_ab rules'
-  -- per-type budget is the effective limit. (Raw-body detectors that ignore
-  -- body_budget — e.g. detect_upload_filename — are truncated directly by this
-  -- cap, so it also sets their scan window, now above the nominal multipart
-  -- budget.) The invariant is asserted by
-  -- scripts/tests/cfm_waf_body_budget_test.lua. Well within post_resume_max_len
-  -- = 65536, which already buffers the body for challenge replay.
-  --
-  -- OPERATORS: if you OVERRIDE CFM_WAF_BODY_MAX_LEN below the largest
-  -- body_scan_budget (e.g. to 8192 for memory) you REOPEN F08 — a JSON payload
-  -- past your value escapes the body rules. Keep it >= 32768. The CI guardrail
-  -- only checks this source default, not the runtime env override.
-  waf_body_max_len = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "32768"),
-
-  -- F07: on non-allowlisted paths the WAF body-read gate skips (does not read,
-  -- and so does not buffer) request bodies whose Content-Length exceeds this.
-  -- We would only ever scan the first waf_body_max_len bytes anyway, so
-  -- buffering a large upload just to peek would regress streaming on the
-  -- proxy_request_buffering=off media location. 1 MiB comfortably covers form /
-  -- JSON / API bodies; larger uploads stream. Allowlisted paths are unaffected
-  -- (they read regardless of size, as before).
-  waf_body_read_max_cl = tonumber(os.getenv("CFM_WAF_BODY_READ_MAX_CL") or "1048576"),
-
-  -- Challenge POST replay: a challenged POST's body is stashed (shared dict,
-  -- base64) and re-applied after the challenge solves, so form content is not
-  -- lost. Allowed content-types: urlencoded / json / text/plain / multipart
-  -- (see ct_allows_resume). max_len bounds the stored body — raising it
-  -- trades shared-dict memory for replaying bigger (e.g. attachment-bearing)
-  -- posts; a body over the cap falls back to the old lose-the-form behaviour.
-  post_resume_enable  = (os.getenv("CFM_POST_RESUME_ENABLE") or "1") == "1",
-  post_resume_max_len = tonumber(os.getenv("CFM_POST_RESUME_MAX_LEN") or "65536"),
-  post_resume_ttl_sec = tonumber(os.getenv("CFM_POST_RESUME_TTL_SEC") or "90"),
-
-  -- Post-clearance WAF policy. cfm_clearance proves the client passed the
-  -- challenge gate, NOT that the payload is safe. So when WAF wants to
-  -- challenge a request that already has clearance we must NOT re-challenge
-  -- (would loop), but we also must not silently allow. Convert via these
-  -- knobs: high-risk reason families escalate, the rest degrade to logonly.
-  -- Allowed values: "block" | "logonly". "challenge" is intentionally NOT
-  -- accepted here because it would re-introduce the loop.
-  waf_after_clearance_challenge =
-      ({ block = "block", logonly = "logonly" })[os.getenv("CFM_WAF_AFTER_CLEARANCE_CHALLENGE") or ""]
-      or "logonly",
-  waf_after_clearance_high_risk =
-      ({ block = "block", logonly = "logonly" })[os.getenv("CFM_WAF_AFTER_CLEARANCE_HIGH_RISK") or ""]
-      or "block",
-
-  -- Hit-rate counters: every WAF inspection increments a per-host bucketed
-  -- shdict counter; one worker periodically flushes the snapshot to Go via
-  -- /nginx/waf/stats. Required by the rollout playbook (gate promotions on
-  -- <0.01% hit-rate evidence). See docs/waf.md "Hit-rate measurement".
-  waf_stats_enable    = (os.getenv("CFM_WAF_STATS_ENABLE") or "1") == "1",
-  waf_stats_flush_sec = tonumber(os.getenv("CFM_WAF_STATS_FLUSH_SEC") or "60"),
-
+-- The request-INVARIANT fields (env reads + constants) are built ONCE per
+-- worker in cfm_cfg.lua (require'd, so its body runs once and persists in
+-- package.loaded). access_by_lua_file re-runs THIS chunk per request, so the old
+-- inline CFG literal re-read ~21 os.getenv() and re-allocated temp tables + a
+-- closure every request; those inputs are process-lifetime constants (and the
+-- CFM_* knobs are never set — nginx strips env vars not declared with `env` —
+-- so they always take the defaults), making the once-per-worker read
+-- byte-identical. See cfm_cfg.lua.
+--
+-- Only the four bridge-derived fields stay per-request: they refresh on the
+-- bridge file's 10s TTL (_bridge_token / _bridge_cfg via cfm_bridge_cfg), so an
+-- operator toggle (ORIGIN_KEEPALIVE, clearance refresh, cookie life) still takes
+-- effect within 10s instead of freezing at worker start. They ride a small
+-- per-request table whose metatable __index falls through to the static module,
+-- so every existing `CFG.<field>` read is unchanged. CFG is only ever
+-- field-READ (never iterated with pairs), and the single in-place mutation —
+-- cfm_decision's `cfg.token = fresh` on a token rotation — writes the `token`
+-- key that lives in THIS top table, so it never mutates the shared static module.
+local _cfg_static = require "cfm_cfg"
+local CFG = setmetatable({
+  token             = _bridge_token,
+  ok_ttl_sec        = _cfg_static.resolve_ok_ttl(_bridge_cfg.cookie_life_sec),
+  -- Sliding clearance: when true, accepted requests re-mint cfm_clearance with
+  -- exp = now + ok_ttl_sec so active panel/webmail users don't get re-challenged
+  -- mid-session. Sourced from [webdetector] CHALLENGE_COOKIE_REFRESH via
+  -- /var/lib/cfm/lua/cfm_bridge_config.lua. Defaults to true.
+  clearance_refresh = _bridge_cfg.clearance_refresh,
   -- Opt-in origin keepalive: route allow-traffic through the
-  -- cfm_origin_http/cfm_origin_https upstream blocks (balancer_by_lua +
-  -- pooled backend connections) instead of a fresh proxy_pass connection
-  -- per request. Single knob: detectors.conf [webdetector] ORIGIN_KEEPALIVE,
-  -- published via cfm_bridge_config.lua (field absent on older daemons =
-  -- off). Routing additionally requires the live proxy conf to declare the
-  -- cfm_origin_* upstreams — see the $cfm_origin_ka_conf sentinel check in
-  -- origin_pass_for(). Default OFF. See cfm_origin_ka.lua and
-  -- docs/proxy-performance.md.
-  origin_keepalive = (_bridge_cfg.origin_keepalive == true),
-
-}
+  -- cfm_origin_http/cfm_origin_https upstream blocks (pooled backend
+  -- connections) instead of a fresh proxy_pass connection per request. Single
+  -- knob: detectors.conf [webdetector] ORIGIN_KEEPALIVE, published via
+  -- cfm_bridge_config.lua (field absent on older daemons = off). Routing also
+  -- requires the live proxy conf to declare the cfm_origin_* upstreams — see the
+  -- $cfm_origin_ka_conf sentinel in origin_pass_for(). Default OFF. See
+  -- cfm_origin_ka.lua and docs/proxy-performance.md.
+  origin_keepalive  = (_bridge_cfg.origin_keepalive == true),
+}, { __index = _cfg_static })
 
 local clamav_ok, clamav = pcall(require, "cfm_clamav")
 if clamav_ok then
@@ -638,6 +548,14 @@ end
 local function try_apply_post_resume(ip, host)
   if not CFG.post_resume_enable or not SH then return false end
   if lower(ngx.req.get_method() or "") ~= "get" then return false end
+  -- Cheap presence gate BEFORE the full query-string parse: ngx.var.arg_cfm_rt
+  -- reads just this one arg without building the whole args table. The vast
+  -- majority of GETs carry no cfm_rt (it rides only on our post-challenge resume
+  -- redirect), so bail here before get_uri_args() parses+allocates. Behaviour-
+  -- identical: an absent/empty cfm_rt made the old code fall through to tok=""
+  -- and return false anyway; a raw non-empty value can only mean a present arg,
+  -- so this never skips a real resume token (exact value extraction stays below).
+  if (ngx.var.arg_cfm_rt or "") == "" then return false end
   local args = ngx.req.get_uri_args()
   local tok = args and args["cfm_rt"]
   if type(tok) == "table" then tok = tok[1] end
