@@ -23,6 +23,15 @@ func TestClassifyEximLine(t *testing.T) {
 			SigSpamdError,
 		},
 		{
+			// The other real socket-error suffix seen on the fleet (orion/earth).
+			// A grep for a distinct spamd connect-refused/ECONNREFUSED phrase found
+			// only this — it still begins "error reading from spamd", so every
+			// observed spamd-error form is covered by that substring (no gap).
+			"spamd connection reset by peer",
+			`2026-07-30 11:47:25 1wpMQG-00000005SFo-2c0N spam acl condition: error reading from spamd [127.0.0.1]:783, socket: Connection reset by peer`,
+			SigSpamdError,
+		},
+		{
 			"spamd error wrapped by crond",
 			`Aug 18 02:18:02 mars crond[303111]: 2026-08-18 02:18:02 1ww6Xm-00000001Gqt-0jpJ spam acl condition: error reading from spamd [127.0.0.1]:783, socket: Connection timed out`,
 			SigSpamdError,
