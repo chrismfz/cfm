@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Challenge auto-arm: optional request-rate volume floor (log-only first).**
+  New `CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS` (+ `…_MIN_RPS_ENFORCE`) adds the
+  request-rate dimension the existing uniqIP floors don't cover — a vhost below
+  the floor cannot auto-arm a challenge **via the score path** however botty its
+  ratios look (the floor deliberately does NOT gate the uniqIP modes, which exist
+  to catch distributed attacks where low per-vhost rate is expected). The
+  suspicious *score* is dominated by ratios at vhost scale because its reference
+  volumes are server-scale, so a low-traffic site can score mid-range on
+  redirects + bot UAs alone). Defaults **off** (`0`); with `…_ENFORCE=0` it is
+  **log-only** — arming is unchanged and every trip that *would* fall below the
+  floor is logged as `action=would_suppress_below_rps_floor host=… rps=… floor=…
+  base_reason=… score=… uniqIP=…`, so the floor can be tuned from real numbers
+  before `…_ENFORCE=1` makes it suppress. The trip decision stays single-sourced
+  through `tripReason`, so the audit path can't diverge from the real one.
 - **WAF CVE detector: Elementor Pro Forms unauthenticated upload → RCE
   (CVE-2026-32475), rule 10016, family `WAF_CVE`, edge `block` + autoblock-armed.**
   Elementor Pro < 4.2.2's File Upload form field validates and moves an upload in

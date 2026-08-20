@@ -174,6 +174,22 @@ type Config struct {
 	ChallengeSuspiciousMinUniqIP int           // CHALLENGE_SUSPICIOUS_VHOST_MIN_UNIQIP
 	ChallengeSuspiciousHolddown  time.Duration // CHALLENGE_SUSPICIOUS_VHOST_HOLDDOWN
 
+	// Volume floor: a vhost below this request-rate cannot auto-arm a challenge
+	// via the SCORE path, no matter how "botty" its ratios look — a site doing
+	// <N rps is not under a ratio-driven volume attack. It adds the request-rate
+	// dimension the score itself ignores at vhost scale (its refs are
+	// server-scale, so per-vhost RPS never moves it). It deliberately does NOT
+	// gate the uniqIP modes (uniqip_on/uniqip_max), which exist to catch
+	// DISTRIBUTED attacks — many unique IPs at low per-vhost RPS — where a low
+	// rate is expected and must still arm.
+	// 0 disables the floor (default). MinRPSEnforce=false makes it LOG-ONLY:
+	// arming is unchanged but every trip that WOULD fall below the floor is
+	// logged (action=would_suppress_below_rps_floor), so the floor can be tuned
+	// from real numbers before it enforces. Set MinRPSEnforce=true to actually
+	// suppress sub-floor trips.
+	ChallengeSuspiciousMinRPS        float64 // CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS (0=off)
+	ChallengeSuspiciousMinRPSEnforce bool    // CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS_ENFORCE (false=logonly)
+
 	// Optional: volume-based (uniqIP) auto under-attack mode with hysteresis.
 	// Useful for sophisticated crawlers that avoid errors but spray many unique IPs.
 	ChallengeSuspiciousUniqIP    bool // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP (1/0)

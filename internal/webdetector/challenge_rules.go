@@ -219,7 +219,29 @@ func (e *Engine) hostChallengeExcluded(host string) bool {
 // decision (CLAUDE.md §5: never keep a second copy of a matcher that can drift).
 // The conditions here MUST equal the scorer's; callers pass e.cfg fields, which
 // FillDefaults has already normalised (ScoreOn=0.70/MinUniqIP=80 when enabled).
+// tripReason is the single-sourced auto-arm decision (used by BOTH the real
+// arming path and the suppressed_by_exclude audit path, so they can never
+// disagree — CLAUDE.md §5). It layers the RPS volume floor on top of the base
+// signal decision: when the floor ENFORCES and the row is below it, no base
+// trip counts — a vhost below the request-rate floor is not under a volume
+// attack however botty its ratios look. In log-only mode (the default while the
+// floor is 0, or when MinRPSEnforce=false) the base decision stands unchanged;
+// the caller emits the would_suppress telemetry so the floor can be tuned first.
 func (e *Engine) tripReason(row SuspiciousRow) string {
+    reason := e.tripReasonBase(row)
+    // The floor gates ONLY the score path. The uniqIP modes (uniqip_max /
+    // uniqip_on) exist precisely to catch DISTRIBUTED attacks — many unique IPs
+    // at low per-vhost RPS — so an RPS floor must never veto them, or it would
+    // defeat the very mode built for that shape.
+    if reason == "score_on" && e.cfg.ChallengeSuspiciousMinRPSEnforce && e.belowChallengeRPSFloor(row) {
+        return ""
+    }
+    return reason
+}
+
+// tripReasonBase is the signal-only trip decision (uniqIP caps/hysteresis, then
+// score-with-min-uniqIP), before the RPS volume floor is applied.
+func (e *Engine) tripReasonBase(row SuspiciousRow) string {
     if e.cfg.ChallengeSuspiciousUniqIP {
         if e.cfg.ChallengeSuspiciousUniqIPMax > 0 && row.UniqueIPs >= e.cfg.ChallengeSuspiciousUniqIPMax {
             return "uniqip_max"
@@ -232,6 +254,13 @@ func (e *Engine) tripReason(row SuspiciousRow) string {
         return "score_on"
     }
     return ""
+}
+
+// belowChallengeRPSFloor reports whether the vhost's request-rate is under the
+// configured volume floor. A floor of 0 is "no floor" → never below.
+func (e *Engine) belowChallengeRPSFloor(row SuspiciousRow) bool {
+    f := e.cfg.ChallengeSuspiciousMinRPS
+    return f > 0 && row.RPS < f
 }
 
 // shouldLogVhostSuppress throttles the suppressed_by_exclude audit line to at
@@ -1617,6 +1646,29 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
 			// disagree with the real decision (CLAUDE.md §5). The three branches
 			// below just apply + log the outcome tripReason already chose.
 			autoWhy = e.tripReason(row)
+
+			// Volume-floor telemetry: when the SCORE path would trip but the vhost
+			// is below the RPS floor, record it — as an actual suppression when
+			// enforcing (autoWhy is already "" here), or as a would-be suppression
+			// in log-only mode (autoWhy still holds, arming proceeds below).
+			// Scoped to base_reason=="score_on" for the same reason tripReason is:
+			// the floor never gates the uniqIP (distributed-attack) modes.
+			// Throttled per host so a candidate can't spam the log. This is what
+			// lets the floor be tuned from real numbers before it enforces (mirrors
+			// the WAF logonly→enforce discipline).
+			if e.cfg.ChallengeSuspiciousMinRPS > 0 && e.belowChallengeRPSFloor(row) &&
+				e.tripReasonBase(row) == "score_on" && e.cfg.ChallengeLog &&
+				e.shouldLogVhostSuppress("rpsfloor:"+host, now) {
+				act := "would_suppress_below_rps_floor"
+				if e.cfg.ChallengeSuspiciousMinRPSEnforce {
+					act = "suppressed_below_rps_floor"
+				}
+				logging.LogfCHALLENGES(
+					"[challenge][vhost] action=%s host=%s rps=%.2f floor=%.2f base_reason=score_on score=%.2f uniqIP=%d reasons=%s",
+					act, host, row.RPS, e.cfg.ChallengeSuspiciousMinRPS, row.Score, row.UniqueIPs, strings.Join(row.Reasons, ","),
+				)
+			}
+
 			// 1) hard cap (if set): challenge immediately
 			if autoWhy == "uniqip_max" {
                             e.vhostUnderAttack[host] = true

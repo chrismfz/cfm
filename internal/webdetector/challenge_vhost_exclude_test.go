@@ -140,6 +140,69 @@ func TestTripReason(t *testing.T) {
 	}
 }
 
+func TestTripReason_RPSFloor(t *testing.T) {
+	e := &Engine{}
+	e.cfg.ChallengeSuspiciousUniqIP = false
+	e.cfg.ChallengeSuspiciousScoreOn = 0.70
+	e.cfg.ChallengeSuspiciousMinUniqIP = 20
+
+	// A row that trips score_on on signals alone.
+	tripping := SuspiciousRow{UniqueIPs: 25, Score: 0.80, RPS: 0.5}
+
+	// No floor configured → base decision stands.
+	if why := e.tripReason(tripping); why != "score_on" {
+		t.Fatalf("no floor: expected score_on, got %q", why)
+	}
+
+	// Floor set but LOG-ONLY (enforce=false): base decision is unchanged — the
+	// caller only logs the would-be suppression, arming still proceeds.
+	e.cfg.ChallengeSuspiciousMinRPS = 2.0
+	e.cfg.ChallengeSuspiciousMinRPSEnforce = false
+	if !e.belowChallengeRPSFloor(tripping) {
+		t.Fatalf("0.5 rps must be below a 2.0 floor")
+	}
+	if why := e.tripReason(tripping); why != "score_on" {
+		t.Fatalf("log-only floor must NOT suppress; got %q", why)
+	}
+
+	// Floor ENFORCING: a sub-floor row no longer trips.
+	e.cfg.ChallengeSuspiciousMinRPSEnforce = true
+	if why := e.tripReason(tripping); why != "" {
+		t.Fatalf("enforcing floor must suppress a sub-floor trip; got %q", why)
+	}
+	// A row above the floor still trips even when enforcing.
+	if why := e.tripReason(SuspiciousRow{UniqueIPs: 25, Score: 0.80, RPS: 5.0}); why != "score_on" {
+		t.Fatalf("above-floor row must still trip; got %q", why)
+	}
+	// Boundary: RPS exactly at the floor is NOT below it (strict <), so it trips.
+	if e.belowChallengeRPSFloor(SuspiciousRow{RPS: 2.0}) {
+		t.Fatalf("rps == floor must not count as below")
+	}
+	if why := e.tripReason(SuspiciousRow{UniqueIPs: 25, Score: 0.80, RPS: 2.0}); why != "score_on" {
+		t.Fatalf("row exactly at the floor must still trip; got %q", why)
+	}
+	// The base decision is always visible regardless of the floor.
+	if why := e.tripReasonBase(tripping); why != "score_on" {
+		t.Fatalf("tripReasonBase must ignore the floor; got %q", why)
+	}
+
+	// The floor must NEVER gate the uniqIP modes — they exist for distributed
+	// attacks (many IPs, low per-vhost rps), where a sub-floor rate is expected.
+	e.cfg.ChallengeSuspiciousUniqIP = true
+	e.cfg.ChallengeSuspiciousUniqIPOn = 150
+	e.cfg.ChallengeSuspiciousUniqIPMax = 260
+	e.cfg.ChallengeSuspiciousMinRPS = 2.0
+	e.cfg.ChallengeSuspiciousMinRPSEnforce = true
+	// 160 unique IPs at 0.3 rps (well below the floor) → uniqip_on must STILL fire.
+	if why := e.tripReason(SuspiciousRow{UniqueIPs: 160, Score: 0.10, RPS: 0.3}); why != "uniqip_on" {
+		t.Fatalf("floor must not gate uniqip_on; got %q", why)
+	}
+	// Hard cap likewise unaffected by the floor.
+	if why := e.tripReason(SuspiciousRow{UniqueIPs: 300, Score: 0.10, RPS: 0.3}); why != "uniqip_max" {
+		t.Fatalf("floor must not gate uniqip_max; got %q", why)
+	}
+}
+
 // The audit line is throttled to once per holddown window per host so a
 // sustained excluded-under-attack vhost doesn't spam the challenge log.
 func TestShouldLogVhostSuppress_Throttle(t *testing.T) {
