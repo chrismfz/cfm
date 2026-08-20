@@ -172,6 +172,7 @@ local CFG = {
   rule_cve_woocommerce_payments = "block", -- CVE-2023-28121: WooCommerce Payments (4.8.0–5.6.1) unauth auth-bypass->privesc. The X-WCPAY-Platform-Checkout-User request header is trusted as the current user id with no validation; an attacker sets it to 1 and mints an admin (POST /wp-json/wp/v2/users roles=administrator). Header is server-set by WooPay only — a client never sends it (near-zero FP); keyed on header presence, all methods. Exempt genuine WooPay source nets via waf_security ALLOW_NETS.
   rule_cve_gravity_smtp = "block", -- CVE-2026-4020: Gravity SMTP (<=2.1.4) unauth sensitive-info exposure. REST route /gravitysmtp/v1/tests/mock-data has permission_callback=true and dumps the full System Report (PHP/DB/server versions, paths, plugins, API keys/tokens). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate — the only legit caller is the wp-admin settings screen, which carries the logged-in cookie.
   rule_cve_sppagebuilder_upload = "block", -- CVE-2026-48908: Joomla SP Page Builder (com_sppagebuilder) asset.upload* (uploadCustomIcon/uploadImage/uploadFont) — unauth arbitrary file upload->RCE ("ANTONKILL", actively exploited 2026-07). Runs before rules 401/414 for CVE attribution. Keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content); reuses the hardened upload detectors. Near-zero FP (a legit icon/image/font upload never carries PHP). Body-budget caveat: a php entry past waf_body_max_len is ClamAV's backstop.
+  rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -555,6 +556,9 @@ local RULE_IDS = {
   rule_cve_woocommerce_payments = 10012,
   rule_cve_gravity_smtp = 10013,
   rule_cve_sppagebuilder_upload = 10014,
+  -- 10015 is intentionally skipped: it was the (never-released, then removed)
+  -- vBulletin runMaths CVE-2026-61511 block rule — see WAF_CVE.md "Removed".
+  rule_cve_elementor_pro_form_upload = 10016,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -1247,6 +1251,20 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_0740:NINJA_FORMS:" .. tag, ttl, mode, RULE_IDS.rule_cve_ninja_forms_fu_upload) then goto done end
+      end
+    end
+  end
+
+  -- Elementor Pro Forms unauth upload -> RCE (CVE-2026-32475). Runs BEFORE the
+  -- generic upload rules (17/18) so the CVE reason wins attribution over
+  -- WAF_UPLOAD_* for the same request.
+  do
+    local mode = rule_mode(CFG.rule_cve_elementor_pro_form_upload, "block")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_elementor_pro_form_upload(uri, m_lower, args, body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_32475:ELEMENTOR_PRO:" .. tag, ttl, mode, RULE_IDS.rule_cve_elementor_pro_form_upload) then goto done end
       end
     end
   end

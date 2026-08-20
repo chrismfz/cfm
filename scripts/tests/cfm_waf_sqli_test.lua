@@ -172,6 +172,11 @@ clean(get("q=trade+union+distinct+selection"),               "FP: 'trade union d
 clean(get("q=european+union+all+select+committee"),          "FP: 'european union all select committee'")
 clean(get("q=reunion+selected+tracks"),                      "FP: 'reunion selected'")
 
+-- Literal-prefilter fast path: digit/paren-heavy args with NO `union` literal
+-- take the early `return false` (no pattern scans) and must stay clean — the
+-- prefilter is a necessary-substring gate, not a behaviour change.
+clean(get("id=12345&cat=(shoes)&sort=price_asc&page=3&ref=(home)"), "prefilter: no 'union' literal → clean")
+
 -- Rule 319 must NOT double-fire on a plain adjacent `union select` (that is
 -- rule 301's job); and rule 301 must NOT fire on the obfuscated variants.
 clean(get("id=1+union+select+1,2,3"),                        "319 does not claim plain 'union select'")

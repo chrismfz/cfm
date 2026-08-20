@@ -32,6 +32,122 @@ back-filled here — see the git/PR history for that period.
   base_reason=… score=… uniqIP=…`, so the floor can be tuned from real numbers
   before `…_ENFORCE=1` makes it suppress. The trip decision stays single-sourced
   through `tripReason`, so the audit path can't diverge from the real one.
+- **WAF CVE detector: Elementor Pro Forms unauthenticated upload → RCE
+  (CVE-2026-32475), rule 10016, family `WAF_CVE`, edge `block` + autoblock-armed.**
+  Elementor Pro < 4.2.2's File Upload form field validates and moves an upload in
+  two loops that disagree about an empty (`UPLOAD_ERR_NO_FILE`) entry:
+  `validation()` `return`s on a blank-filename first part — abandoning the
+  extension blocklist for every later part — while `process_field()` only
+  `continue`s past it and still moves the next part. A two-part upload (empty
+  first part, then a `.php` payload) thus lands executable PHP in the public
+  `wp-content/uploads/elementor/forms/` directory, unauthenticated. The detector
+  keys on `POST admin-ajax.php` + the nopriv action `elementor_pro_forms_send_form`
+  + a php-executable upload filename, reusing the hardened rule-401 detector; it
+  runs before the generic upload rules so the hit is attributed as
+  `WAF/CVE-2026-32475` (6h nft ban + Slack/mail). The surviving file *extension*
+  is the vuln, so the rule keys on that exact shape (a content-bytes leg is
+  intentionally omitted — raw php content is already covered fleet-wide by the
+  armed generic rule 402). Near-zero FP — a legitimate Elementor form upload never
+  carries a php-executable file.
+  **Note:** the generic upload-filename rule (401, block + armed) already blocked
+  the straightforward `.php` upload fleet-wide; this rule adds CVE attribution and
+  covers the body-budget-evasion / uncommon-extension edges. Updating Elementor
+  Pro to ≥ 4.2.2 remains the actual fix. (Rule id 10015 is intentionally skipped —
+  the removed vBulletin runMaths rule.)
+
+### Changed
+- **cfm.lua hot path: hoist the request-invariant CFG out of the per-request
+  chunk + skip a query-string parse.** `cfm.lua` is an `access_by_lua_file`, so
+  its whole body re-executes on every request. The inline `CFG` literal re-ran
+  **~21 `os.getenv()` reads** plus a couple of temp-table and closure allocations
+  per request, all for process-lifetime-constant values — and in fact none of
+  those `CFM_*` knobs is ever set (the systemd units export none, and nginx
+  strips env vars not declared with `env NAME;` — only 6 are declared, none set),
+  so `os.getenv()` always returns nil and the defaults always win. Those static
+  fields now live in a new `cfm_cfg.lua` built **once per worker** (via
+  `require`'s `package.loaded` cache); cfm.lua layers the four bridge-derived
+  fields (`token`, `ok_ttl_sec`, `clearance_refresh`, `origin_keepalive` — which
+  refresh on the bridge file's 10s TTL and must stay dynamic) onto it through a
+  metatable `__index`, so every `CFG.<field>` read and cfm_decision's in-place
+  `cfg.token` rotation are unchanged. Behaviour is byte-identical (env is
+  worker-constant); covered by `scripts/tests/cfm_cfg_test.lua`. Separately,
+  `try_apply_post_resume` now gates on the single-arg `ngx.var.arg_cfm_rt` before
+  calling `ngx.req.get_uri_args()`, skipping a full query-string parse + table
+  alloc on the overwhelming majority of GETs (which carry no `cfm_rt`). Found by
+  the 2026-07 edge Lua audit.
+- **Edge workers: 4 → 6 workers + raise the connection/FD ceiling.** Both
+  `openresty.conf` and `angie.conf` hardcoded `worker_processes 4` and
+  `worker_connections 1024`. Now that ALL traffic is in-path (TLS termination +
+  Lua WAF/challenge are CPU-bound), 4×1024 connections — each proxied request
+  burning 2 (client + upstream) — throttled a busy edge under load. Bumped to
+  `worker_processes 6` (a deliberate fixed count, NOT `auto`: the edge is a
+  reverse proxy co-located with the origin web server — LiteSpeed/Apache, itself
+  ~2 workers — and MySQL, so it must not grab every core; `auto` counts host
+  cores, ignores cgroup CPU quotas, and would starve the co-located origin on a
+  high-core box), `worker_connections 16384`, and added `worker_rlimit_nofile
+  65535` so workers have the FDs to back the higher cap. This raises the
+  connection ceiling and never lowers it, and nginx/angie never refuse to start
+  over it — but the higher cap only pays off if the FD limit keeps up (with a low
+  `LimitNOFILE` a worker hits EMFILE under heavy load instead of a clean limit),
+  and it preallocates ~8 MB/worker of connection slots at startup (~48 MB across
+  6). **Operator note:** CFM doesn't manage the openresty/angie systemd unit — if
+  error.log shows `setrlimit(RLIMIT_NOFILE) failed` or `worker_connections exceed
+  open file resource limit`, raise `LimitNOFILE` in that unit. Found by the
+  2026-07 edge audit.
+- **Panel listeners: revive the keepalive pool to the challenge service.** The
+  DNAT cPanel/WHM panel listeners (`cfm-panel-listeners.conf.in`) proxy their
+  internal `/__cfm_panel_decide`, `/__cfm_challenge` and `/__cfm_verify` hops to
+  the static `cfm_challenge` upstream (127.0.0.1:9098, `keepalive 8`), but all
+  21 of those locations were missing `proxy_http_version 1.1` + `Connection ""`,
+  so nginx closed the connection after each one — every panel challenge
+  decision/verify opened a fresh TCP connection to the challenge daemon. Added
+  the same idiom the web edge already uses on its `/__cfm_challenge` hop, so the
+  pool is actually used. Pure plumbing, no behaviour/security change. (The main
+  `location /` + acctxfer hops proxy to the `$cfm_pass` **variable**, which
+  nginx keepalive pools can't use, so they're unchanged — pooling the panel
+  origin itself would need a static upstream and is a separate, larger change.)
+  Found by the 2026-07 edge audit.
+- **Edge log ingest: batch the per-request socket send (fewer timers &
+  syscalls).** `log-cfm.lua` (`log_by_lua`) previously armed one
+  `ngx.timer.at` + one Unix-socket connect/send **per request** — at 1000 rps
+  that is 1000 timers/s/worker, brushing nginx's `too many pending timers`
+  ceiling. It now buffers TSV lines per worker and a **single** timer drains
+  the whole buffer after at most 100 ms, or immediately once 64 lines
+  accumulate or 256 KB is buffered (hard caps 4096 lines / 8 MB → drop-to-bound-
+  memory if timers can't be scheduled at all, same best-effort loss class as the
+  old per-line drop; byte caps because URI/UA are attacker-influenced). The
+  ≤100 ms tail is dropped on worker shutdown (cosockets are disabled in a
+  premature timer), the same best-effort class as before. The receiver
+  already reads newline-delimited records in a loop
+  (`ingest_socket.go` `serveConn` → `handleLine` per `\n`), so a concatenated
+  batch parses as individual records with **no Go change**; batching also means
+  FEWER concurrent connections (kinder to the ingest connection cap). Record
+  bytes are unchanged; only delivery is batched, adding ≤100 ms of log latency
+  (negligible for the detector's seconds-to-minutes behavioural windows). New
+  `scripts/tests/cfm_log_batching_test.lua` covers single-drain, the 64-line
+  eager flush, snapshot-before-yield (no double-send/loss), and the cap.
+- **WAF: literal prefilters on two hot in-path detectors (CPU, no behaviour
+  change).** Two detectors that run on ordinary request surfaces did expensive
+  Lua *pattern* work before deciding they had nothing to match. Each now begins
+  with a cheap necessary-substring gate that provably cannot change any result:
+  - **rule 319 `WAF_SQLI_UNION_VARIANT`** — every target is `union<mid>select`,
+    so `union` must be present; a single `string.find(scw,"union",1,true)` now
+    guards the six mid-variants (24 unanchored pattern scans). On a clean
+    digit/paren-heavy query this detector dropped from ~25 µs to ~35 ns/call in a
+    LuaJIT microbench (the pattern engine backtracks hard on `[%d'"%)] ?union…`
+    over digits); it was the single most expensive SQLi detector on clean GETs.
+  - **`has_phpfuck_blob`** (feeds rule 405 script-obfuscation and rule 439
+    numeric-XOR) — a hit needs a run of ≥`min_caret` (≥1) `^` chars, so when the
+    body has no `^` at all the `gmatch` over every `[0-9().^]` run is skipped
+    (JSON-number-heavy bodies produce many runs). Guarded on `min_caret>=1` so it
+    stays correct for any caller.
+  Both gates are behaviour-identical (a battery parity check + the existing
+  rule-319/rule-439 TP/FP suites pass unchanged; a no-`union` and a no-caret
+  fast-path case were added). Found by the 2026-07 edge Lua audit; first of the
+  ranked prefilter items.
+_Nothing yet._
+
+## 2026.08.20
 
 ### Fixed
 - **kernsec: reconcile a leftover `fs.protected_regular=2` in foreign sysctl

@@ -758,6 +758,12 @@ end
 -- ridden on a SEPARATE rule at `logonly` for a real-traffic burn-in before any
 -- promotion to challenge/block (CLAUDE.md §6; docs/waf.md). Returns true/false.
 function _M.detect_sqli_union_variant(sc, scw)
+  -- Literal prefilter: every union_mid_hit target is `union<mid>select`, so the
+  -- literal `union` is a NECESSARY substring of scw for any hit. Bail before the
+  -- six (×4-alternation = 24) unanchored pattern scans when it is absent — the
+  -- overwhelming clean-traffic case. Behaviour-identical (all paths still need
+  -- `union`); this is the single most expensive SQLi detector on clean GETs.
+  if not has(scw, "union") then return false end
   if union_mid_hit(scw, " all ")      then return true end
   if union_mid_hit(scw, " distinct ") then return true end
   if union_mid_hit(scw, "%(")         then return true end -- union(select
@@ -2312,6 +2318,70 @@ function _M.detect_cve_ninja_forms_fu_upload(uri, method, args, body, headers)
   return nil
 end
 
+-- [CVE] Elementor Pro Forms unauthenticated arbitrary file upload -> RCE.
+-- CVE-2026-32475 (Elementor Pro < 4.2.2; File Upload form field). The plugin
+-- validates and moves an upload in two separate loops that disagree about an
+-- empty file entry: validation() `return`s on the first UPLOAD_ERR_NO_FILE
+-- (blank-filename) part — abandoning the extension blocklist for every LATER
+-- part — while process_field() only `continue`s past it and still moves the
+-- next part. A two-part upload (an empty first part, then a `.php` payload
+-- part) therefore skips the type check entirely and lands the `.php` in the
+-- public wp-content/uploads/elementor/forms/ directory = unauthenticated RCE.
+-- The action is nopriv (no cookie/nonce), so this is fully unauthenticated.
+--
+-- Source: Patchstack advisory + technical write-up (operator-supplied), NVD.
+--
+-- Exploit request:
+--   POST /wp-admin/admin-ajax.php   (multipart/form-data)
+--     action = elementor_pro_forms_send_form            (the nopriv form handler)
+--     post_id, form_id, ...
+--     form_fields[<FIELD_ID>][] = <empty part; filename="">    (UPLOAD_ERR_NO_FILE)
+--     form_fields[<FIELD_ID>][] = <file; filename="x.php"; PHP payload>
+--
+-- Keyed on the SPECIFIC action (elementor_pro_forms_send_form) — a bare
+-- admin-ajax.php match is deliberately NOT enough (form submissions are common)
+-- — plus the exploit marker: a php-executable UPLOAD FILENAME. For THIS CVE the
+-- surviving file EXTENSION is the whole game — process_field() builds the stored
+-- name as `uniqid() . '.' . pathinfo($file['name'], EXTENSION)`, discarding the
+-- rest of the client filename — so a php-exec extension in this endpoint's
+-- multipart body IS the exact exploit signature. Near-zero FP: an Elementor
+-- form's own blocklist rejects `.php` on the non-vulnerable path, so a legitimate
+-- submission never carries a php-executable file at all. Reuses the hardened
+-- rule-401 detector (multipart/form-data content-type gate + double-extension /
+-- alt-handler coverage come for free). `method` is m_lower from the caller.
+--
+-- We deliberately do NOT add a file-CONTENT leg here. The vuln is extension-based,
+-- not content-based, so a `<?php`-bytes scan would not track the CVE mechanism;
+-- worse, detect_upload_content scans the whole capped body (including non-file
+-- text FIELD values and non-PHP JSP/ImageMagick markers), so a content leg would
+-- mis-attribute a benign PHP-text paste — or a non-PHP payload — to this specific
+-- CVE. Raw php webshell CONTENT is already covered fleet-wide by the armed generic
+-- rule 402 (WAF_UPLOAD_CONTENT); we keep this rule to the exact extension shape.
+--
+-- We also do NOT require the empty-filename decoy part in the signature: it is the
+-- server-side mechanic, not a wire invariant an attacker must preserve, and the
+-- action + php-exec-filename pair is already near-zero FP. The generic rule 401
+-- (WAF_UPLOAD_FNAME) already blocks the same php upload; the check() call site
+-- runs this BEFORE 401 so the CVE reason wins attribution for the same request.
+function _M.detect_cve_elementor_pro_form_upload(uri, method, args, body, headers)
+  if method ~= "post" then return nil end
+  -- Cheap gate FIRST: the endpoint is admin-ajax.php (tiny), check it before
+  -- touching the (capped) body.
+  if not has(lower(uri or ""), "admin-ajax.php") then return nil end
+  -- The vulnerable nopriv action. admin-ajax dispatches on $_REQUEST['action'],
+  -- so it rides as a query param OR a multipart field
+  -- (name="action"\r\n\r\nelementor_pro_forms_send_form) — match the distinctive
+  -- value substring across args+body, not a `key=value` pair.
+  local scope = lower(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
+  if not has(scope, "elementor_pro_forms_send_form") then return nil end
+  -- Exploit marker: a php-executable file in the multipart upload (the RCE
+  -- payload). Also gates on multipart/form-data internally.
+  if _M.detect_upload_filename(body, headers) then
+    return "UPLOAD_PHP"
+  end
+  return nil
+end
+
 -- [CVE] LiteSpeed Cache (< 6.4) unauthenticated privilege escalation.
 -- CVE-2024-28000. The plugin's crawler "role simulation" validates a 6-char
 -- security hash (Str::rand(6) — only ~1M possible values) taken from the
@@ -3167,6 +3237,11 @@ local function has_phpfuck_blob(s, min_len, min_caret, min_concat)
   min_len    = min_len    or 40
   min_caret  = min_caret  or 3
   min_concat = min_concat or 3
+  -- Literal prefilter: a hit needs a run carrying min_caret (>=1) '^' chars, so
+  -- when the whole string has no '^' at all no run can qualify — skip the gmatch
+  -- over every [0-9().^] run (JSON-number-heavy bodies produce many). Guarded on
+  -- min_caret>=1 so it stays correct for any caller; behaviour-identical.
+  if min_caret >= 1 and not has(s, "^") then return false end
   for run in s:gmatch("[0-9%(%)%.%^]+") do
     if #run >= min_len then
       local carets = select(2, run:gsub("%^", ""))
