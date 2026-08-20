@@ -216,6 +216,12 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 		fmt.Fprintf(w, "  status:  ERROR reading existing file: %v\n", drift.SysctlReadErr)
 	case drift.SysctlDiffers:
 		fmt.Fprintf(w, "  status:  DRIFT (would write %d bytes)\n", len(sysctlContent))
+	case len(foreignConflicts) > 0:
+		// The managed file itself matches, but a foreign drop-in still
+		// overrides it — scope the status so it doesn't read "in sync"
+		// on a line immediately above a listed conflict (and one that
+		// makes `apply --check` exit 1).
+		fmt.Fprintln(w, "  status:  managed file in sync; foreign drift below")
 	default:
 		fmt.Fprintln(w, "  status:  in sync")
 	}

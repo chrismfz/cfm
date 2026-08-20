@@ -113,6 +113,15 @@ func detectForeignSysctlConflicts(applied []SysctlRule) []foreignConflict {
 			if isAcceptable(val, t.want, t.accept) {
 				continue
 			}
+			// Deliberately order-agnostic: a divergent copy is flagged
+			// regardless of whether it sorts before or after
+			// 99-cfm-kernsec.conf. A file that sorts BEFORE ours is
+			// harmless at THIS runtime (kernsec's later drop-in wins), but
+			// it is still a latent =2 that a future rename/reorder/removal
+			// of our file would resurrect — exactly the "make it stop
+			// coming back, settle everywhere" intent behind this feature.
+			// Neutralising it is always safe: kernsec's own active line
+			// supplies the value once the foreign line is commented out.
 			out = append(out, foreignConflict{
 				File:   path,
 				Line:   i + 1,
@@ -298,6 +307,17 @@ func neutraliseForeignSysctls(w io.Writer, conflicts []foreignConflict) {
 			fmt.Fprintf(w, "[Sysctl] foreign reconcile: cannot read %s: %v — skipped\n", path, err)
 			continue
 		}
+		// Capture the mode NOW, adjacent to the successful read, so the
+		// rewrite preserves the real permissions rather than a 0644
+		// fallback if the file is unlinked/replaced under us between here
+		// and the write. If it already vanished, skip rather than
+		// recreate a file kernsec doesn't own.
+		info, err := os.Stat(path)
+		if err != nil {
+			fmt.Fprintf(w, "[Sysctl] foreign reconcile: %s vanished before edit (%v) — skipped\n", path, err)
+			continue
+		}
+		mode := info.Mode().Perm()
 
 		lineHit := make(map[int]foreignConflict, len(cs))
 		for _, c := range cs {
@@ -339,7 +359,7 @@ func neutraliseForeignSysctls(w io.Writer, conflicts []foreignConflict) {
 			fmt.Fprintf(w, "[Sysctl] foreign reconcile: cannot back up %s: %v — skipped (not editing without a backup)\n", path, err)
 			continue
 		}
-		if err := AtomicWriteFile(path, []byte(strings.Join(out, "\n")), foreignFileMode(path)); err != nil {
+		if err := AtomicWriteFile(path, []byte(strings.Join(out, "\n")), mode); err != nil {
 			fmt.Fprintf(w, "[Sysctl] foreign reconcile: cannot rewrite %s: %v — left as-is\n", path, err)
 			continue
 		}
@@ -348,14 +368,4 @@ func neutraliseForeignSysctls(w io.Writer, conflicts []foreignConflict) {
 				c.File, c.Line, c.Key, c.Found, c.Key, c.Want, c.Reason, path+BackupSuffix)
 		}
 	}
-}
-
-// foreignFileMode returns the existing permission bits of path so a
-// rewrite preserves them, falling back to 0644 (the sysctl.d default)
-// if the file cannot be stat'd.
-func foreignFileMode(path string) os.FileMode {
-	if st, err := os.Stat(path); err == nil {
-		return st.Mode().Perm()
-	}
-	return 0o644
 }
