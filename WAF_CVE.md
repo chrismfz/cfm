@@ -155,7 +155,7 @@ entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
 (`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
 hosting mix changes.
 
-Fourteen implemented; the rest are WordPress/Joomla candidates awaiting a
+Fifteen implemented; the rest are WordPress/Joomla candidates awaiting a
 validated exact request shape:
 
 | Product / CVE | Status |
@@ -174,6 +174,7 @@ validated exact request shape:
 | WooCommerce Payments (`CVE-2023-28121`) | ✅ **implemented** (rule 10012) — `X-WCPAY-Platform-Checkout-User` request header trusted as the current user id (unauth auth-bypass→privesc); keyed on header presence, all methods. Server-set by WooPay only, so near-zero FP; exempt genuine WooPay nets via `ALLOW_NETS` |
 | Gravity SMTP (`CVE-2026-4020`) | ✅ **implemented** (rule 10013) — unauth REST route `/gravitysmtp/v1/tests/mock-data` (`permission_callback=true`) dumps the full System Report (versions/paths/plugins/API keys). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate (only legit caller is the wp-admin settings screen) |
 | SP Page Builder (Joomla, `CVE-2026-48908`) | ✅ **implemented** (rule 10014) — `com_sppagebuilder` + `task=asset.upload*` (uploadCustomIcon/uploadImage/uploadFont) unauth arbitrary upload→RCE ("ANTONKILL"). Runs before rules 401/414 for CVE attribution; keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content), reusing the hardened upload detectors. Body-budget caveat: a php entry past `waf_body_max_len` is ClamAV's backstop |
+| Elementor Pro Forms (`CVE-2026-32475`) | ✅ **implemented** (rule 10016) — Elementor Pro <4.2.2 File Upload field: `validation()` `return`s (vs `continue`) on an empty (`UPLOAD_ERR_NO_FILE`) first part, skipping the extension blocklist for a following `.php` part that `process_field()` still moves into public `wp-content/uploads/elementor/forms/`. POST `admin-ajax.php` `action=elementor_pro_forms_send_form` (nopriv) + a php-exec upload filename — the surviving file *extension* is the vuln (`process_field()` keeps `pathinfo($name, EXTENSION)`), so a content leg is intentionally omitted (it would mis-attribute benign php-text field pastes / non-PHP payloads; raw php content is already covered by the armed generic rule 402). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). The generic rule 401 already blocks the straightforward `.php` upload fleet-wide; this rule adds CVE attribution. Note: id **10015 is skipped** (the removed vBulletin rule below) |
 | vBulletin (`CVE-2026-61511`) | ⛔ **block rule REMOVED** (was rule 10015) — see the "Removed" note below. Only a **logonly** technique-level phpfuck detector (rule 439, `WAF_BACKDOOR`) remains; there is no CVE-attributed block/ban for this vector. |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 
