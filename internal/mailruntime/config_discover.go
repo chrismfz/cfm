@@ -3,6 +3,7 @@ package mailruntime
 import (
 	"io"
 	"os"
+	"strings"
 )
 
 // maxEximConfBytes caps how much of an Exim config we read — a generous ceiling
@@ -64,14 +65,28 @@ func readCapped(path string, max int64) ([]byte, error) {
 // AND carries an explicit --max-children/-m; otherwise (0, false) → unresolved →
 // SatUnknown. spamd's own default (5) is deliberately NOT assumed here for the
 // same reason as the Exim cap above.
+//
+// It matches on the CMDLINE, not the COMM: on cPanel the master runs under perl
+//
+//	/usr/local/cpanel/3rdparty/perl/…/bin/perl -T -w …/bin/spamd --max-children=10 …
+//
+// so its COMM is "perl", not "spamd" (only the workers rewrite their task name to
+// "spamd child"). Keying on COMM would silently miss the master fleet-wide. The
+// master is the one spamd-mentioning process carrying --max-children; the "spamd
+// child" workers mention spamd but have no such flag, so ParseSpamdMaxChildren
+// rejects them.
 func DiscoverSpamdMaxChildren() (int, bool) {
 	return discoverSpamdMaxChildrenIn("/proc")
 }
 
 func discoverSpamdMaxChildrenIn(procRoot string) (int, bool) {
-	cmd, ok := firstCmdlineWithComm(procRoot, DefaultSpamdMasterComm)
-	if !ok {
-		return 0, false
+	for _, cmd := range allCmdlines(procRoot) {
+		if !strings.Contains(strings.ToLower(cmd), "spamd") {
+			continue
+		}
+		if n, ok := ParseSpamdMaxChildren(cmd); ok {
+			return n, true
+		}
 	}
-	return ParseSpamdMaxChildren(cmd)
+	return 0, false
 }
