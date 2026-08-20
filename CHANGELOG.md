@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.20
+
 ### Fixed
 - **kernsec: reconcile a leftover `fs.protected_regular=2` in foreign sysctl
   drop-ins.** kernsec pins `fs.protected_regular=1` (value 2 breaks cPanel's DNS
