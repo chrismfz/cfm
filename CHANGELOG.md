@@ -37,6 +37,9 @@ back-filled here — see the git/PR history for that period.
   rule-319/rule-439 TP/FP suites pass unchanged; a no-`union` and a no-caret
   fast-path case were added). Found by the 2026-07 edge Lua audit; first of the
   ranked prefilter items.
+_Nothing yet._
+
+## 2026.08.20
 
 ### Fixed
 - **kernsec: reconcile a leftover `fs.protected_regular=2` in foreign sysctl
