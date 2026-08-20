@@ -45,6 +45,24 @@ func TestClassifyEximLine(t *testing.T) {
 			SigNone,
 		},
 		{
+			// More real remote-MX 421 variants (earth/rigel/titan) — all deliverability,
+			// all must stay SigNone. These pin the two-substring guard against a future
+			// loosening of the reject-phrase rule.
+			"remote MX 421 #4.4.5 to this listener — NOT ours",
+			`2026-07-24 13:32:20 1wnDCV-000000033gn-0kpU H=cloudmx2.spxs.net [212.211.181.135]: SMTP error from remote mail server after initial connection: 421 #4.4.5 Too many connections to this listener.`,
+			SigNone,
+		},
+		{
+			"remote MX 421 #4.4.5 from your host — NOT ours",
+			`2026-08-07 16:49:33 1wsKx0-00000009ez3-3TZz H=mx2.hc2362-53.eu.iphmx.com [23.90.116.161]: SMTP error from remote mail server after initial connection: 421 #4.4.5 Too many connections from your host.`,
+			SigNone,
+		},
+		{
+			"remote MX 421 hostname-prefixed concurrent — NOT ours",
+			`2026-08-11 20:56:08 1wtoQL-00000009SMR-0BV9 H=mx.qfilter.nl [217.18.64.80]: SMTP error from remote mail server after initial connection: 421 mx01.spam-filter.email: Too many concurrent SMTP connections; please try again later`,
+			SigNone,
+		},
+		{
 			"ordinary delivery line",
 			`2026-08-19 05:22:47 1abc-000-xy <= sender@example.com H=mail.example.com [1.2.3.4] P=esmtps`,
 			SigNone,

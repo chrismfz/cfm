@@ -59,16 +59,27 @@ func (k SigKind) String() string {
 // ClassifyEximLine classifies one Exim mainlog line (also matches a line wrapped
 // by crond[...], since the substrings are anchored on the Exim text, not the
 // line start).
+//
+// Matching is case-SENSITIVE on purpose: the phrases are Exim/SpamAssassin
+// compile-time constants, and the case difference is itself load-bearing — our
+// daemon writes lowercase "refused: too many connections" whereas a remote MX's
+// 421 says capital-T "Too many concurrent SMTP connections". Do NOT "harden"
+// this into case-insensitive matching; that would reintroduce the false positive
+// the two-substring guard below prevents.
 func ClassifyEximLine(line string) SigKind {
 	// spamd unreachable / unparseable (both mention "spamd" explicitly).
 	if strings.Contains(line, "error reading from spamd") ||
 		strings.Contains(line, "cannot parse spamd") {
 		return SigSpamdError
 	}
-	// Our own inbound cap rejection. The exact daemon phrase is
-	// "refused: too many connections"; the remote-MX 421 uses the different
-	// phrase "Too many concurrent SMTP connections", so it is not matched.
-	if strings.Contains(line, "refused: too many connections") {
+	// Our own inbound cap rejection. Require BOTH the daemon's own line shape
+	// ("Connection from [ip]:port …") AND its exact reject phrase, so a remote
+	// MX's 421 text echoed verbatim into the mainlog (which carries "H=… SMTP
+	// error from remote mail server …", never a leading "Connection from … ")
+	// can never be misread as our inbound saturation — even if some third-party
+	// banner happened to contain the lowercase phrase.
+	if strings.Contains(line, "Connection from ") &&
+		strings.Contains(line, "refused: too many connections") {
 		return SigInboundConnRefused
 	}
 	return SigNone
