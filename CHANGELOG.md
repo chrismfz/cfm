@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **kernsec: reconcile a leftover `fs.protected_regular=2` in foreign sysctl
+  drop-ins.** kernsec pins `fs.protected_regular=1` (value 2 breaks cPanel's DNS
+  Zone Editor) in `99-cfm-kernsec.conf`, but a stale `=2` in a foreign drop-in
+  that sorts *after* it — notably the legacy `/etc/sysctl.d/99-kspp.conf` the old
+  `scripts/kspp.sh` shipped — was re-applied on the next reboot / `sysctl
+  --system` and silently re-broke the Zone Editor, even though the live value was
+  correct right after apply. `cfm kernsec apply` now scans the other
+  `/etc/sysctl.d/*.conf` files (plus the legacy `/etc/sysctl.conf`) for an active
+  `fs.protected_regular` set to anything other than kernsec's value and comments
+  it out (backing the file up once to `<file>.cfm-kernsec.bak`, preserving mode),
+  so the value settles everywhere. The pending conflict now also counts as drift,
+  so `apply --check` / `cfm kernsec monitor` flag the latent revert until an apply
+  defuses it. Narrow, curated allowlist (`foreignReconcileKeys`) — not a blanket
+  operator-sysctl overwrite; only `/etc` files are touched and `disable` leaves
+  them alone. The legacy `scripts/kspp.sh` now also writes `fs.protected_regular=1`
+  so it can no longer re-introduce the trap.
 - **logrotate: cover the legacy flat `/var/log/cfm.api.log` fallback.** The
   primary `/var/log/cfm/cfm.api.log` was already rotated by the directory glob,
   but the flat fallback path `cfmlog.go` can write to had no rotation entry, so
