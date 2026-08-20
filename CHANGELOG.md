@@ -17,6 +17,26 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **WAF: literal prefilters on two hot in-path detectors (CPU, no behaviour
+  change).** Two detectors that run on ordinary request surfaces did expensive
+  Lua *pattern* work before deciding they had nothing to match. Each now begins
+  with a cheap necessary-substring gate that provably cannot change any result:
+  - **rule 319 `WAF_SQLI_UNION_VARIANT`** — every target is `union<mid>select`,
+    so `union` must be present; a single `string.find(scw,"union",1,true)` now
+    guards the six mid-variants (24 unanchored pattern scans). On a clean
+    digit/paren-heavy query this detector dropped from ~25 µs to ~35 ns/call in a
+    LuaJIT microbench (the pattern engine backtracks hard on `[%d'"%)] ?union…`
+    over digits); it was the single most expensive SQLi detector on clean GETs.
+  - **`has_phpfuck_blob`** (feeds rule 405 script-obfuscation and rule 439
+    numeric-XOR) — a hit needs a run of ≥`min_caret` (≥1) `^` chars, so when the
+    body has no `^` at all the `gmatch` over every `[0-9().^]` run is skipped
+    (JSON-number-heavy bodies produce many runs). Guarded on `min_caret>=1` so it
+    stays correct for any caller.
+  Both gates are behaviour-identical (a battery parity check + the existing
+  rule-319/rule-439 TP/FP suites pass unchanged; a no-`union` and a no-caret
+  fast-path case were added). Found by the 2026-07 edge Lua audit; first of the
+  ranked prefilter items.
 _Nothing yet._
 
 ## 2026.08.20

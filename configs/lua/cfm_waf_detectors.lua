@@ -758,6 +758,12 @@ end
 -- ridden on a SEPARATE rule at `logonly` for a real-traffic burn-in before any
 -- promotion to challenge/block (CLAUDE.md §6; docs/waf.md). Returns true/false.
 function _M.detect_sqli_union_variant(sc, scw)
+  -- Literal prefilter: every union_mid_hit target is `union<mid>select`, so the
+  -- literal `union` is a NECESSARY substring of scw for any hit. Bail before the
+  -- six (×4-alternation = 24) unanchored pattern scans when it is absent — the
+  -- overwhelming clean-traffic case. Behaviour-identical (all paths still need
+  -- `union`); this is the single most expensive SQLi detector on clean GETs.
+  if not has(scw, "union") then return false end
   if union_mid_hit(scw, " all ")      then return true end
   if union_mid_hit(scw, " distinct ") then return true end
   if union_mid_hit(scw, "%(")         then return true end -- union(select
@@ -3167,6 +3173,11 @@ local function has_phpfuck_blob(s, min_len, min_caret, min_concat)
   min_len    = min_len    or 40
   min_caret  = min_caret  or 3
   min_concat = min_concat or 3
+  -- Literal prefilter: a hit needs a run carrying min_caret (>=1) '^' chars, so
+  -- when the whole string has no '^' at all no run can qualify — skip the gmatch
+  -- over every [0-9().^] run (JSON-number-heavy bodies produce many). Guarded on
+  -- min_caret>=1 so it stays correct for any caller; behaviour-identical.
+  if min_caret >= 1 and not has(s, "^") then return false end
   for run in s:gmatch("[0-9%(%)%.%^]+") do
     if #run >= min_len then
       local carets = select(2, run:gsub("%^", ""))
