@@ -69,6 +69,11 @@ fires('{"q":"' .. PHPFUCK .. '"}', "phpfuck blob inside a JSON body", "applicati
 clean("page=2", "plain integer parameter")
 clean("expr=(1+2)^3", "short real arithmetic — below thresholds")
 clean("coords=(41.9).(12.5)", "a couple of parenthesised numbers, no ^ storm")
+-- Literal-prefilter fast path: a long digit/paren/dot run with NO `^` caret can
+-- never reach min_caret, so has_phpfuck_blob returns before the gmatch scan —
+-- a JSON-number-heavy body is the common case this skips. Must stay clean.
+clean('{"m":[(11).(22).(33).(44).(55).(66).(77).(88).(99).(1234567890)]}',
+      "prefilter: long digit/paren run, no caret → clean", "application/json")
 clean("body=hello world, this is ordinary text with (parentheses).", "ordinary prose")
 -- FP regressions (red-team 2026-08): legit code/math bodies must not log-flag.
 -- With the TIGHT `[0-9().^]` run charset, operators and spaces fragment the run,
