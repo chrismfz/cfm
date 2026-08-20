@@ -56,6 +56,21 @@ back-filled here — see the git/PR history for that period.
   the removed vBulletin runMaths rule.)
 
 ### Changed
+- **Edge access logging: drop a dead map + document the panel double-write.**
+  Removed the **dead `$log_main_request_nonpanel` map** (defined in both
+  `openresty.conf` and `angie.conf`, never referenced — CLAUDE.md §5). It was an
+  abandoned attempt to stop writing panel requests to `access.log`; activating it
+  would have been a regression, because `internal/edgelog` (the on-demand MCP
+  forensic tools `edge_access_tail` / `ip_forensics`) reads
+  `access.log`/`access.cfm.log` but **not** `access-panel.log` — so splitting
+  panel traffic out of `access.log` would have silently hidden it from those
+  tools. The panel double-write is therefore deliberate and is now documented as
+  such at the `access_log` lines. Also documented **why `access.log` is left
+  unbuffered** (a `buffer=`/`flush=` that the audit first proposed): it would
+  break the rotation policy (`configs/logrotate-cfm` uses `copytruncate` with no
+  reopen signal → a lost in-memory window and a sparse file) and would blind the
+  live forensic tools to the most recent traffic; the per-request `write()` lands
+  in the OS page cache and is cheap regardless. Found by the 2026-07 edge audit.
 - **cfm.lua hot path: hoist the request-invariant CFG out of the per-request
   chunk + skip a query-string parse.** `cfm.lua` is an `access_by_lua_file`, so
   its whole body re-executes on every request. The inline `CFG` literal re-ran
