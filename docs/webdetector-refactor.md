@@ -175,6 +175,64 @@ exist or are Signals B/C: the **WAF signatures** (SQLi/RCE/etc.), **per-entity
 rate/behaviour outliers** (Signal C), and **enumeration** (Signal B). Those lead;
 datacenter-ASN rides along as a logged feature we measure, nothing more.
 
+## 4b. TWO abuse classes — edge-visible vs edge-invisible (backend cost)
+
+**Evidence (2026-08-21, titan).** `evafeiadis` showed 15 lsphp workers @ ~70%
+CPU on `/home/evafeiadis/public_html/index.php` + mariadbd @ 266%, and
+`db_web_pressure` flagged it **#1 `few_hits_high_pressure`: 109,170 queries /
+120s (~900 q/s) with web_hits=0, web_rps=0**. Yet the edge web-detector saw
+`e-vafeiadis.gr` at **0.04 rps, 1 IP, 0 requests short-window**. The abuse is
+real and severe, and **completely invisible to the edge** — it's backend-direct
+(bypassing OpenResty/Angie) or expensive-per-request.
+
+This splits the problem in two, and they need DIFFERENT detectors/enforcement:
+
+- **Class 1 — edge-visible.** Requests flow through the edge access log.
+  Detected by the WAF (signatures) + the challenge engine + **Signal C/B**
+  (this doc). Enforceable at the edge (challenge/block).
+- **Class 2 — edge-invisible (backend cost).** Little/no edge traffic but heavy
+  CPU/DB. Detected by **`db_web_pressure` / `mysql_pressure` / `lve_cpu`**
+  (already exist as READ tools; `few_hits_high_pressure` already flags it).
+  NOT enforceable at the edge (the traffic isn't there) — enforcement is
+  backend: alert, LVE throttle, kill runaway procs, IP-block from the account's
+  own access log, or suspend.
+
+Consequences for this effort:
+- **Signal C (edge rate outlier) will NOT catch the evafeiadis class.** It is the
+  right tool for Class 1 only. Don't over-claim it.
+- The fleet's real, painful abuse in the observed cases is often **Class 2** —
+  which CFM already *detects* but does **not auto-act on** (`db_web_pressure` is
+  read-only; today it relies on CloudLinux LVE throttling + manual kill). The
+  higher-value gap may be **turning `few_hits_high_pressure` into an
+  alert/enforcement path**, parallel to the edge work here.
+- **Open question — RESOLVED (2026-08-21):** it was the **`www` vhost**, not
+  edge-bypass. The apex `e-vafeiadis.gr` was a red herring (0.04 rps);
+  `www.e-vafeiadis.gr` is edge-visible at 2.74 rps and drives the backend. So
+  this specific case is **Class 1** after all — Signal C catches it. (Lesson for
+  the tooling: drill BOTH apex and www; consider folding www↔apex in the
+  detector's host view.)
+
+### Signal C — reference validation case (`www.e-vafeiadis.gr`, 2026-08-21)
+The live shape Signal C must catch, and why it beats the vhost-aggregate score:
+- Vhost aggregate: rps 2.74, 70 IPs, score **0.585 (< 0.72 on-threshold)** → the
+  vhost-wide auto would NOT arm. Abuse hiding under the aggregate — exactly the
+  "περνάει αβέρτα" case.
+- But `ip_skew=11.56`, `median_per_ip_rps=0.008`, and TWO IPs
+  (`37.6.1.149`, `109.242.116.126`, both AS25472 Nova / Greek **residential**,
+  identical mobile UA) did **62 requests each in 120s ≈ 62× the vhost median**,
+  hammering `/product_info.php` (osCommerce, DB-heavy) with a 4xx storm — which
+  is the 109k-queries/900-qps backend pressure `db_web_pressure` flagged.
+- **Signal C = per-IP rps ≫ vhost `median_per_ip_rps` (large ratio), gated by
+  `ip_skew` and an absolute floor** flags exactly those two IPs, ASN-agnostically
+  (they're residential), and challenges only them — leaving the legit Google-Ads
+  shoppers (gclid referrers) and verified crawlers untouched. Candidate initial
+  shadow rule: `per_ip_rps >= max(FLOOR, K × median_per_ip_rps)` with `ip_skew ≥
+  S`; tune K/FLOOR/S from the shadow log.
+- **Datacenter additive-only, validated:** the SAME vhost carries verified
+  Googlebot (PTR `crawl-…googlebot.com`), Bingbot (`…search.msn.com`), Facebook
+  meta-agent, AdsBot — several on cloud ASNs (AS15169, AS8075). A datacenter
+  *trigger* would have hit these good bots; hence logged-only + FCrDNS exemption.
+
 ## 5. Telemetry contract — MCP-readable (hard requirement)
 
 Shadow signals must be **queryable over MCP**, not just greppable, so we can
