@@ -76,6 +76,21 @@ local BREAKER_COOLDOWN_SEC    = 3    -- seconds to skip the RPC once open (then 
 local BREAKER_OPEN_TTL_SEC    = BREAKER_COOLDOWN_SEC + 1
 local BRK_UNTIL = "cfm_dec_brk_until"   -- open while ngx.now() < this value
 local BRK_FAILS = "cfm_dec_brk_fails"   -- windowed failure counter
+-- Observability: the breaker is otherwise silent (it just fails fast). Emit a
+-- throttled ngx.log line to the edge error.log on the OPEN and CLOSED
+-- transitions so an operator can SEE it engage — greppable via the MCP
+-- `edge_error_tail` tool (grep "decision breaker"). Each line type has its own
+-- INDEPENDENT BRK_LOG_THROTTLE_SEC window, so at most one OPEN and one CLOSED
+-- per window regardless of a persistent hang (re-trips ~once per cooldown) OR a
+-- flapping daemon — both are coalesced, not spammed. This is an EVENT-HISTORY
+-- signal ("has the breaker been engaging, and roughly when"), not a real-time
+-- state readout: under coalescing the newest line can lag the live state by up
+-- to one window, and a recovery during a quiet gap (BRK_UNTIL already
+-- TTL-expired, so no success hits the CLOSED branch) may emit no CLOSED at all.
+-- The OPEN marker self-expires after the window, so nothing stays "stuck OPEN".
+local BRK_LOG_OPEN   = "cfm_dec_brk_log_open"
+local BRK_LOG_CLOSED = "cfm_dec_brk_log_closed"
+local BRK_LOG_THROTTLE_SEC = 60
 
 local M = {}
 local Client = {}
@@ -226,7 +241,14 @@ function Client:breaker_note(kind, err_class)
     -- Gated on presence so a clean node (both unset — the common case) does
     -- reads but NO writes.
     if SH:get(BRK_FAILS) ~= nil then SH:delete(BRK_FAILS) end
-    if SH:get(BRK_UNTIL) ~= nil then SH:delete(BRK_UNTIL) end
+    if SH:get(BRK_UNTIL) ~= nil then
+      SH:delete(BRK_UNTIL)
+      -- open → closed transition: the daemon answered again. Throttled log
+      -- (independent 60s window; no cross-reset, so a flapping daemon can't spam).
+      if SH:add(BRK_LOG_CLOSED, "1", BRK_LOG_THROTTLE_SEC) then
+        ngx.log(ngx.WARN, "[cfm] decision breaker CLOSED — cfm daemon reachable again; decision RPCs resumed")
+      end
+    end
     return
   end
   -- A responded-with-error (http 4xx/5xx, json) is not the unreachable condition
@@ -244,6 +266,16 @@ function Client:breaker_note(kind, err_class)
   if n and n >= BREAKER_FAIL_THRESHOLD then
     SH:set(BRK_UNTIL, ngx.now() + BREAKER_COOLDOWN_SEC, BREAKER_OPEN_TTL_SEC)
     SH:delete(BRK_FAILS)   -- reset so the next trip needs a fresh 3-consecutive run
+    -- closed → open transition (or a re-trip on a persistent hang). Throttled log
+    -- (independent 60s window) so a sustained outage or a flapping daemon can't
+    -- spam; visible via MCP edge_error_tail.
+    if SH:add(BRK_LOG_OPEN, "1", BRK_LOG_THROTTLE_SEC) then
+      ngx.log(ngx.WARN, "[cfm] decision breaker OPEN — cfm daemon unreachable (",
+        BREAKER_FAIL_THRESHOLD, " consecutive ", err_class,
+        "); skipping the decision RPC for ", BREAKER_COOLDOWN_SEC,
+        "s and failing ", (self.cfg and self.cfg.fail_open and "OPEN" or "CLOSED"),
+        " per policy. The WAF still runs uncached; nft autoblock still applies")
+    end
   end
 end
 
