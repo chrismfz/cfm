@@ -1,6 +1,10 @@
 package mailruntime
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestNewUtilisationAndClassify(t *testing.T) {
 	tests := []struct {
@@ -63,6 +67,33 @@ func TestUnknownIsNeverOK(t *testing.T) {
 	// unresolved cap must never read as ok.
 	if u.Classify() == SatOK {
 		t.Fatal("unknown collapsed to ok")
+	}
+}
+
+func TestSaturationMarshalJSON(t *testing.T) {
+	cases := map[Saturation]string{
+		SatUnknown:  `"unknown"`,
+		SatOK:       `"ok"`,
+		SatWarn:     `"warn"`,
+		SatCritical: `"critical"`,
+	}
+	for s, want := range cases {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatalf("marshal %v: %v", s, err)
+		}
+		if string(b) != want {
+			t.Errorf("Marshal(%d) = %s, want %s", int(s), b, want)
+		}
+	}
+	// And inside a Snapshot the class fields render as labels, not ints.
+	snap := buildSnapshot(10, ResolvedMax{10, true}, 0, ResolvedMax{5, true})
+	b, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"worst":"critical"`) {
+		t.Errorf("snapshot JSON should carry a label worst, got %s", b)
 	}
 }
 

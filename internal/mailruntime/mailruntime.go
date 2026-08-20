@@ -53,6 +53,13 @@ func (s Saturation) String() string {
 	}
 }
 
+// MarshalJSON renders the class as its human string ("ok"/"warn"/"critical"/
+// "unknown") rather than the raw int, so the served snapshot and any MCP/tool
+// consumer reads a label, not a magic number.
+func (s Saturation) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + s.String() + `"`), nil
+}
+
 // Saturation thresholds, as an integer percent of the configured maximum.
 // Conservative on purpose (under-flag): a resource is only "warn" once it is
 // genuinely close to its cap. Integer percents (not float fractions) so Classify

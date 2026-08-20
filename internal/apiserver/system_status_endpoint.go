@@ -28,6 +28,7 @@ import (
 	"cfm/internal/maillog"
 	"cfm/internal/mailmeter"
 	"cfm/internal/mailqueue"
+	"cfm/internal/mailruntime"
 	"cfm/internal/mailtraffic"
 	"cfm/internal/mysqllog"
 	"cfm/internal/netstat"
@@ -243,6 +244,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/mail-queue", handleSystemMailQueue)
 	m.HandleFunc("/api/v1/mail/traffic", handleMailTraffic)
 	m.HandleFunc("/api/v1/mail/dns", handleMailDNS)
+	m.HandleFunc("/api/v1/mail/runtime", handleMailRuntime)
 	m.HandleFunc("/api/v1/system/dnat", handleSystemDNAT)
 	m.HandleFunc("/api/v1/system/ssl/stats", handleSystemSSLStats)
 	m.HandleFunc("/api/v1/system/ssl/refresh", handleSystemSSLRefresh)
@@ -1066,6 +1068,36 @@ func handleMailDNS(w http.ResponseWriter, r *http.Request) {
 	rep := maildns.Check(ctx, net.DefaultResolver, domain, publicSendingIPs(mailSelfIP.LocalIPs()), selectors)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok": true, "schema": "system.mail_dns.v1", "report": rep,
+	})
+}
+
+// handleMailRuntime serves the SMTP/spamd runtime SATURATION snapshot
+// (GET /api/v1/mail/runtime). Host-level, admin-only, read-only: current inbound
+// SMTP sessions vs Exim's smtp_accept_max and active spamd children vs
+// --max-children, each as current/max → utilisation% → a saturation class
+// (ok/warn/critical), plus the worst of the two. A cap that can't be resolved
+// from config classifies "unknown", never "ok" (docs/whats-wrong-rootcause.md
+// §3). This is the "mail is up but wedged" signal the queue summary can't see.
+// Backs the mail_runtime MCP tool. exim_conf reports which config the SMTP cap
+// came from ("" when smtp_accept_max wasn't found).
+func handleMailRuntime(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	eximMax, eximPath := mailruntime.DiscoverEximMaxima()
+	spamdN, spamdOK := mailruntime.DiscoverSpamdMaxChildren()
+	snap := mailruntime.Live(nil, eximMax.EximMax(), mailruntime.SpamdMax(spamdN, spamdOK))
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":        true,
+		"schema":    "system.mail_runtime.v1",
+		"snapshot":  snap,
+		"exim_conf": eximPath,
 	})
 }
 

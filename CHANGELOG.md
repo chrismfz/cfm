@@ -25,6 +25,16 @@ back-filled here — see the git/PR history for that period.
   in `configs/logrotate-cfm`.
 
 ### Added
+- **`mail_runtime` MCP tool + `GET /api/v1/mail/runtime` (PR 1b-iii).** Exposes
+  the SMTP/spamd saturation snapshot as a read-only, host-level, admin-only
+  endpoint and MCP tool: current inbound SMTP sessions vs `smtp_accept_max` and
+  active spamd children vs `--max-children`, each as current/max → utilisation%
+  → an `ok`/`warn`/`critical` class (rendered as a label), plus the worst of the
+  two and the resolved exim.conf path. A cap that can't be read from config shows
+  `unknown`, never a false `ok`. This is the "mail is up but wedged" signal the
+  queue summary can't see (spamd saturated → SMTP sessions pile up → Exim hits
+  its connection cap → 587 unavailable). Standalone read tool; the `what's_wrong`
+  finding that gates on it is the next step.
 - **mailruntime: config discovery for the saturation maxima (PR 1b-ii).**
   `DiscoverEximMaxima` reads `smtp_accept_max` from the first standard Exim config
   that explicitly sets it (`/etc/exim.conf`, `.local`, DA/exim4 layouts), and
