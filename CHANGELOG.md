@@ -30,10 +30,15 @@ back-filled here — see the git/PR history for that period.
   it out (backing the file up once to `<file>.cfm-kernsec.bak`, preserving mode),
   so the value settles everywhere. The pending conflict now also counts as drift,
   so `apply --check` / `cfm kernsec monitor` flag the latent revert until an apply
-  defuses it. Narrow, curated allowlist (`foreignReconcileKeys`) — not a blanket
-  operator-sysctl overwrite; only `/etc` files are touched and `disable` leaves
-  them alone. The legacy `scripts/kspp.sh` now also writes `fs.protected_regular=1`
-  so it can no longer re-introduce the trap.
+  defuses it. The interactive apply confirm prompt and `cfm kernsec preview` both
+  now name the foreign file(s) about to be rewritten and their `.cfm-kernsec.bak`
+  backups, so the operator never confirms blind to a mutation of a file kernsec
+  doesn't own. Narrow, curated allowlist (`foreignReconcileKeys`) — not a blanket
+  operator-sysctl overwrite; only `/etc` files are touched, vendor dirs
+  (`/usr/lib/sysctl.d`, `/run/sysctl.d`) are left alone, and `disable` skips the
+  reconcile. Slash-separated keys (`fs/protected_regular`, which sysctl.conf(5)
+  treats as equivalent) are matched too. The legacy `scripts/kspp.sh` now also
+  writes `fs.protected_regular=1` so it can no longer re-introduce the trap.
 - **logrotate: cover the legacy flat `/var/log/cfm.api.log` fallback.** The
   primary `/var/log/cfm/cfm.api.log` was already rotated by the directory glob,
   but the flat fallback path `cfmlog.go` can write to had no rotation entry, so

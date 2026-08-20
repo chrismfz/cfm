@@ -200,6 +200,14 @@ func absOrSame(p string) string {
 // '-' on the key (the "ignore write errors" marker) is stripped; the
 // key/value split is on the first '='. ok is false for any
 // non-assignment line.
+//
+// The key is normalised to dotted form: sysctl.conf(5) accepts '/' and
+// '.' as interchangeable separators (e.g. `fs/protected_regular` ==
+// `fs.protected_regular`), so a foreign drop-in written with slashes
+// must still match the dotted allowlist. Normalising `/`→`.` is exact
+// for the reconcile keys (none carry a dotted component that would need
+// slash disambiguation); a non-allowlisted key that normalises
+// ambiguously simply fails to match any target and is ignored.
 func parseSysctlAssignment(raw string) (key, val string, ok bool) {
 	s := strings.TrimSpace(raw)
 	if s == "" || s[0] == '#' || s[0] == ';' {
@@ -210,11 +218,39 @@ func parseSysctlAssignment(raw string) (key, val string, ok bool) {
 		return "", "", false
 	}
 	key = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s[:eq]), "-"))
+	key = strings.ReplaceAll(key, "/", ".")
 	val = strings.TrimSpace(s[eq+1:])
 	if key == "" {
 		return "", "", false
 	}
 	return key, val, true
+}
+
+// uniqueForeignFiles returns the distinct file paths named by the
+// conflicts, in first-seen order — one entry per file kernsec will
+// rewrite (a file may carry several conflicting lines).
+func uniqueForeignFiles(conflicts []foreignConflict) []string {
+	seen := map[string]bool{}
+	var files []string
+	for _, c := range conflicts {
+		if !seen[c.File] {
+			seen[c.File] = true
+			files = append(files, c.File)
+		}
+	}
+	return files
+}
+
+// foreignKeysFor returns a compact "key=found[, key=found …]" summary of
+// the conflicts in one file, for the operator-facing preview/summary.
+func foreignKeysFor(conflicts []foreignConflict, file string) string {
+	var parts []string
+	for _, c := range conflicts {
+		if c.File == file {
+			parts = append(parts, c.Key+"="+c.Found)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // reportForeignConflicts prints the pending foreign-conflict lines in

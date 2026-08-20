@@ -63,6 +63,9 @@ func TestParseSysctlAssignment(t *testing.T) {
 		{"fs.protected_regular", "", "", false}, // no '='
 		{"= 2", "", "", false},                  // empty key
 		{"kernel.core_pattern=|/bin/false", "kernel.core_pattern", "|/bin/false", true},
+		// sysctl.conf(5): '/' and '.' separators are interchangeable —
+		// the key is normalised to dotted form so it matches the allowlist.
+		{"fs/protected_regular = 2", "fs.protected_regular", "2", true},
 	}
 	for _, tc := range tests {
 		k, v, ok := parseSysctlAssignment(tc.in)
@@ -93,6 +96,20 @@ func TestDetectForeignSysctlConflicts_KSPPConf(t *testing.T) {
 	}
 	if c.Line != 6 { // 1-based: fs.protected_regular=2 is the 6th line
 		t.Errorf("conflict line = %d, want 6", c.Line)
+	}
+}
+
+func TestDetectForeignSysctlConflicts_SlashSeparatorKey(t *testing.T) {
+	tmp := setupForeignScan(t)
+	// A foreign file using the slash separator sysctl.conf(5) accepts —
+	// must still be detected against the dotted allowlist.
+	if err := os.WriteFile(filepath.Join(tmp, "99-slash.conf"),
+		[]byte("fs/protected_regular = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conflicts := detectForeignSysctlConflicts([]SysctlRule{fsProtectedRegularRule})
+	if len(conflicts) != 1 || conflicts[0].Key != "fs.protected_regular" || conflicts[0].Found != "2" {
+		t.Fatalf("slash-separated key not detected: %+v", conflicts)
 	}
 }
 

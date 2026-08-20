@@ -35,6 +35,7 @@ func preflightSummary(
 	modules []ModuleRule,
 	profile HostProfile,
 	mountsToEnable []MountRule,
+	foreignConflicts []foreignConflict,
 ) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "[!] About to %s:\n", strings.ToLower(label))
@@ -48,6 +49,14 @@ func preflightSummary(
 		}
 		fmt.Fprintf(w, "    - mounts:    %-50s (+ %s on %s; %s)\n",
 			PathFstab, m.Recommended, m.MountPoint, liveNote)
+	}
+	// Foreign drop-ins the reconcile is about to REWRITE (comment out a
+	// conflicting key). These are files kernsec does not own, so name each
+	// one explicitly before the operator confirms — the safety gate
+	// promises "every file kernsec is about to mutate".
+	foreignFiles := uniqueForeignFiles(foreignConflicts)
+	for _, f := range foreignFiles {
+		fmt.Fprintf(w, "    - foreign:   %-50s (neutralise %s)\n", f, foreignKeysFor(foreignConflicts, f))
 	}
 
 	risks := boot_impacting_risks(bootArgs, modules, profile)
@@ -66,6 +75,9 @@ func preflightSummary(
 	fmt.Fprintf(w, "    - %s%s\n", ModprobePath, BackupSuffix)
 	if len(mountsToEnable) > 0 {
 		fmt.Fprintf(w, "    - %s%s\n", PathFstab, BackupSuffix)
+	}
+	for _, f := range foreignFiles {
+		fmt.Fprintf(w, "    - %s%s\n", f, BackupSuffix)
 	}
 	fmt.Fprintln(w, "    (timestamped per-run backups go alongside if a managed file already had operator edits)")
 

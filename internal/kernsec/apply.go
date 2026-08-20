@@ -312,7 +312,7 @@ func applyCore(w io.Writer, conf *Conf, opts ApplyOptions, label string) int {
 	}
 	mutating := drift.SysctlDiffers || drift.BootDiffers || drift.ModprobeDiffers || bootReconcileReason != "" || len(mountsToEnable) > 0 || len(foreignConflicts) > 0
 	if mutating && !opts.AssumeYes {
-		preflightSummary(w, label, sysctls, bootArgs, modules, profile, mountsToEnable)
+		preflightSummary(w, label, sysctls, bootArgs, modules, profile, mountsToEnable, foreignConflicts)
 		ok, err := confirmApply(w, opts.Stdin)
 		if err != nil {
 			fmt.Fprintln(w, "kernsec apply: confirmation read error:", err)

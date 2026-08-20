@@ -287,7 +287,13 @@ kernsec's value. The foreign file is backed up once to
 preserved. The pass is idempotent (an already-commented line is a no-op) and
 best-effort (a read/write failure on one foreign file is reported but never
 aborts apply). A pending conflict counts as drift, so `apply --check` /
-`cfm kernsec monitor` flag the latent revert until an `apply` defuses it.
+`cfm kernsec monitor` flag the latent revert until an `apply` defuses it, and
+both the interactive apply confirm prompt and `cfm kernsec preview` name the
+foreign file(s) about to be rewritten (plus their `.cfm-kernsec.bak` backups) so
+the operator never approves blind to a mutation of a file kernsec doesn't own.
+Keys are matched in normalised dotted form, so a foreign drop-in using the
+slash separator `sysctl.conf(5)` also accepts (`fs/protected_regular`) is caught
+too.
 
 Today the allowlist is a single key — **`fs.protected_regular`** — because
 kernsec deliberately ships `=1` (not the KSPP `=2`) for cPanel DNS Zone Editor
