@@ -46,6 +46,31 @@ back-filled here — see the git/PR history for that period.
   in `configs/logrotate-cfm`.
 
 ### Added
+- **mailruntime: 1a-sig collector v1 — mail_runtime now carries log-driven
+  saturation counts.** `GET /api/v1/mail/runtime` (and the `mail_runtime` MCP
+  tool) gains a `signals` block: a bounded tail of the Exim mainlog (20k lines)
+  tallied into `spamd_error` and `inbound_conn_refused` counts over the observed
+  `window_seconds`, plus `lines_scanned`/`log_file`. This is the log-driven half
+  of the geometry — spamd read-timeouts and inbound-cap rejections the
+  instantaneous current/max gauge can't see. **Burn-in only:** the counts are
+  exposed so their real fleet rates can be observed; no `whats_wrong` finding
+  fires on them yet. A missing/empty mainlog yields a zeroed block; a FAILED tail
+  (unreadable/rotated) is surfaced in `signals.error` rather than a false-healthy
+  zero (unknown never reads as OK). The block also carries `window_known` (false
+  when <2 distinct timestamps were parsed, so `window_seconds` is 0 even with
+  non-zero counts) — a future rate consumer gates on it to avoid dividing by
+  zero. The geometry snapshot always stands on its own regardless. New
+  `internal/mailruntime/counts.go` (pure classify+count) and
+  `internal/maillog.ScanTail` (uncapped streaming tail for counting callers).
+### Fixed
+- **maillog: a failed `tail` no longer masquerades as a clean empty read.**
+  `internal/maillog`'s bounded tailer swallowed the `tail` child's exit status,
+  so an unreadable/rotated log returned an empty result with no error — fine for
+  a display tail, but the new saturation collector would read that zero as
+  "healthy". It now surfaces a non-zero `tail` exit as an error (the timeout and
+  read-error paths keep priority), which the `mail_runtime` endpoint reports in
+  `signals.error`. Affects `mail_log_tail` too: an unreadable mail log now errors
+  instead of returning empty.
 - **mailruntime: log-signature classifier (PR 1a-sig).** New `sig.go` pure
   classifier for the three mail saturation log signatures, grounded in verbatim
   fleet log lines (six cPanel nodes): `SigSpamdError` (Exim spam ACL "error

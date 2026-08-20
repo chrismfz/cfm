@@ -17,6 +17,7 @@ package maillog
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -133,6 +134,46 @@ func Tail(ctx context.Context, which string, lines, limit int, grep string) (Res
 	return res, nil
 }
 
+// ScanTail streams the last `lines` lines of the `which` mail log to fn, with NO
+// result cap — for callers that COUNT/classify over the whole tail window rather
+// than return lines for display (Tail is the capped display variant). Returns the
+// resolved log file ("" when none exists, in which case fn is never called), the
+// number of lines scanned, and any error. Same bounded `tail -n N` backward read
+// + timeout as Tail; the log path comes from the fixed candidate allow-list,
+// never the caller.
+func ScanTail(ctx context.Context, which string, lines int, fn func(string)) (logFile string, scanned int, err error) {
+	which = strings.ToLower(strings.TrimSpace(which))
+	if which == "" {
+		which = "exim"
+	}
+	paths, ok := candidates[which]
+	if !ok {
+		return "", 0, fmt.Errorf("unknown mail log %q (want exim|dovecot|postfix)", which)
+	}
+	if lines <= 0 {
+		lines = DefaultLines
+	}
+	if lines > MaxLines {
+		lines = MaxLines
+	}
+	for _, p := range paths {
+		if fileExists(p) {
+			logFile = p
+			break
+		}
+	}
+	if logFile == "" {
+		return "", 0, nil // no candidate log → not an error
+	}
+	cctx, cancel := context.WithTimeout(ctx, scanTimeout)
+	defer cancel()
+	err = streamTail(cctx, logFile, lines, func(line string) {
+		scanned++
+		fn(line)
+	})
+	return logFile, scanned, err
+}
+
 func fileExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && fi.Mode().IsRegular()
@@ -142,8 +183,17 @@ func fileExists(p string) bool {
 // from EOF, so the read is bounded to the tail window regardless of file size.
 // Over-long lines are truncated (not fatal) via a bounded bufio.Reader — mirrors
 // mysqllog.streamTail (the fix for the bufio.Scanner "token too long" 502).
+//
+// A non-zero `tail` exit (file unreadable, or rotated/removed in the race window
+// between the caller's existence check and exec) is surfaced as an error rather
+// than swallowed: swallowing it would return a CLEAN EMPTY read, which a
+// saturation-signal caller (mailruntime's 1a-sig collector) would then read as
+// "log quiet, all healthy" — exactly the "unknown must never read as OK" trap
+// (CLAUDE.md §6). The timeout and read-error cases keep priority over it.
 func streamTail(ctx context.Context, file string, lines int, fn func(string)) error {
 	cmd := exec.CommandContext(ctx, tailPath(), "-n", fmt.Sprintf("%d", lines), file)
+	var stderr bytes.Buffer // tail writes a single short diagnostic line; no cap needed
+	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -155,11 +205,20 @@ func streamTail(ctx context.Context, file string, lines int, fn func(string)) er
 	r := bufio.NewReaderSize(stdout, readerBufSize)
 	readErr := scanBoundedLines(r, fn)
 	_, _ = io.Copy(io.Discard, stdout) // drain so tail can exit
-	_ = cmd.Wait()
+	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
 		return fmt.Errorf("scan timed out after %s", scanTimeout)
 	}
-	return readErr
+	if readErr != nil {
+		return readErr
+	}
+	if waitErr != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("tail failed: %v: %s", waitErr, msg)
+		}
+		return fmt.Errorf("tail failed: %v", waitErr)
+	}
+	return nil
 }
 
 // scanBoundedLines reads newline-delimited lines from r, emitting each via fn. A
