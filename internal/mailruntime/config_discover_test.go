@@ -67,15 +67,19 @@ func TestDiscoverSpamdMaxChildrenIn(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The worker gets the LOWER pid so os.ReadDir (lexical order) visits it
-	// first: the loop must actively reject the "spamd child" worker before it
-	// reaches the "spamd" master, so a contains/prefix COMM bug would fail here.
+	// Grounded in the operator's live `ps -o args= -C spamd` on a cPanel box:
+	// the MASTER runs under perl (COMM "perl", cmdline is the raw perl invocation
+	// of .../bin/spamd --max-children=N), and only the WORKERS rewrite COMM to
+	// "spamd child". Matching must therefore be on the cmdline, not the COMM.
+	// Workers get the lower pids so the scan sees them first and must reject them
+	// (they mention spamd but have no --max-children).
 	mkProc("300", "spamd child\n", "spamd child\x00")
-	mkProc("500", "spamd\n", "/usr/bin/spamd\x00--max-children=6\x00--daemonize\x00")
+	mkProc("301", "spamd child\n", "spamd child\x00")
+	mkProc("500", "perl\n", "/usr/local/cpanel/3rdparty/perl/542/bin/perl\x00-T\x00-w\x00/usr/local/cpanel/3rdparty/bin/spamd\x00--max-children=10\x00--timeout-child=30\x00--pidfile=/var/run/spamd.pid\x00")
 
 	n, ok := discoverSpamdMaxChildrenIn(root)
-	if !ok || n != 6 {
-		t.Fatalf("discoverSpamdMaxChildrenIn = (%d,%v), want (6,true)", n, ok)
+	if !ok || n != 10 {
+		t.Fatalf("discoverSpamdMaxChildrenIn = (%d,%v), want (10,true) — master under perl must be found by cmdline", n, ok)
 	}
 }
 

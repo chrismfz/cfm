@@ -29,8 +29,10 @@ back-filled here — see the git/PR history for that period.
   `DiscoverEximMaxima` reads `smtp_accept_max` from the first standard Exim config
   that explicitly sets it (`/etc/exim.conf`, `.local`, DA/exim4 layouts), and
   `DiscoverSpamdMaxChildren` reads `--max-children` from the master spamd
-  process's command line (`/proc`, matching COMM `spamd` exactly so the workers
-  are skipped). Deliberately does NOT assume the built-in defaults (Exim 20 /
+  process's command line (`/proc`) — matched by CMDLINE, since on cPanel the
+  master runs under perl (COMM `perl`, not `spamd`; only the workers rewrite
+  their name to `spamd child`), so a COMM match would miss it fleet-wide.
+  Deliberately does NOT assume the built-in defaults (Exim 20 /
   spamd 5) when a value isn't explicitly configured — a cPanel box routinely
   raises them, so an un-found cap stays `unknown` (→ SatUnknown) rather than
   risk a false 100% saturation. Both parameterized over their path/`/proc` root
