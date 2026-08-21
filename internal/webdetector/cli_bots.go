@@ -412,9 +412,12 @@ func leftDuration(t time.Time) string {
 }
 
 func httpStatusErr(resp *http.Response) error {
-	buf := make([]byte, 512)
-	n, _ := resp.Body.Read(buf)
-	body := strings.TrimSpace(string(buf[:n]))
+	// Read the whole (capped) body: a single Read can short-read a chunked or
+	// >1-packet error payload and truncate the diagnostic — or return nothing
+	// on a zero-length first read — which the callers that surface these errors
+	// rely on being intact.
+	buf, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	body := strings.TrimSpace(string(buf))
 	if body == "" {
 		return fmt.Errorf("http %s", resp.Status)
 	}

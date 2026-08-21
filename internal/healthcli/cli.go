@@ -854,6 +854,11 @@ func parseActiveEnterTimestamp(v string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("parse active enter timestamp")
 }
 
+// formatShortDuration renders an uptime/age for display: a "<1m" floor and a
+// two-unit d/h or h/m form, never seconds. Distinct on purpose from
+// nft.humanTimeout (nftables rule syntax) and webdetector.shortDur (second-
+// precision TTL remaining) — don't unify them. Pinned by
+// TestFormatShortDuration_Contract.
 func formatShortDuration(d time.Duration) string {
 	if d < time.Minute {
 		return "<1m"

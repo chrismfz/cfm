@@ -1331,6 +1331,11 @@ func (b *Backend) nftAddElementArgv(set, ip, ttl string) (string, error) {
 }
 
 // 90s/5m/1h/1d
+// humanTimeout renders d as a single nftables-parseable time unit (Ns/Nm/Nh/Nd)
+// for use INSIDE rule/set syntax — it is functional, not display. Keep it
+// single-unit and whole-seconds. Do NOT fold it into a display formatter
+// (healthcli.formatShortDuration, webdetector.shortDur): a multi-unit string
+// would break rule loading. Pinned by TestHumanTimeout_EmitsSingleUnitNftSyntax.
 func humanTimeout(d time.Duration) string {
 	sec := int(d.Seconds())
 	if sec <= 0 {

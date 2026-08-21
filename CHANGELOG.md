@@ -38,6 +38,33 @@ back-filled here — see the git/PR history for that period.
   any source that actively re-offends, though quiet/manually-curated entries
   stay unenforced until the apply lands. (Batching the per-IP apply to shrink
   that window to well under a second is tracked as a separate follow-up.)
+### Fixed
+- **`cfm webtop challenge` no longer misreports on a failed query.** The
+  `status`, `host`, `events`, and list commands decoded the HTTP body without
+  checking the status code, so a `403 forbidden` (token not admin-recognised)
+  parsed cleanly and printed `manual: inactive` — or a blank `VHOST:` row — with
+  exit 0, telling the operator a vhost was unprotected when the query had simply
+  failed. All four now surface a non-2xx as an error. `challenge host` treats a
+  `404` specially — that is the normal "this vhost has no challenge record"
+  answer, so it prints `(no active challenge)` and exits clean rather than
+  erroring.
+- **`cfm webtop live` now shows a manual challenge's time remaining, not a bare
+  clock.** The TUI badge sliced `HH:MM:SS` off the expiry timestamp and dropped
+  the date, so a manual challenge more than a day out (e.g. `--ttl 34h`) read as
+  if it expired in a few hours. It now renders the remaining window (`left=…`),
+  matching the CLI.
+- **The challenge query endpoints now resolve a mixed-case or port-bearing
+  host.** `/api/v1/challenge/vhost`, `/vhost/status`, and `/events` lowercased
+  the host only for the scope check but filtered/looked-up on the raw value, so
+  `?host=Example.com` reported `not found` (or empty events) for a vhost under a
+  live challenge. All now normalise the host the same way the store keys it
+  (trim + lowercase + strip `:port`).
+- **All challenge status views now agree on effective state.** A manual
+  challenge that lapsed without a later auto tick kept a stored `status: active`
+  with a past `expires_at`. `/challenge/vhost` served that raw (so the CLI could
+  print the contradictory `status=active … left=expired`), the `/vhost/status`
+  endpoint reported it as an active *auto* challenge, and `/challenge/vhosts?status=all`
+  still listed it active. All now fold a lapsed row to `inactive`.
 
 ## 2026.08.21
 
