@@ -63,6 +63,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerIPForensics(srv, d)
 	registerEdgeErrorTail(srv, d)
 	registerWAFFPHunt(srv, d)
+	registerAbuseShadow(srv, d)
 	registerLVECPU(srv, d)
 	registerMySQLPressure(srv, d)
 	registerDBWebPressure(srv, d)
@@ -443,6 +444,22 @@ func registerWAFFPHunt(srv *mcp.Server, d Deps) {
 		setInt(q, "lines", in.Lines)
 		setStr(q, "source", in.Source)
 		return dispatchJSON(ctx, d, "/api/v1/system/waf-fp-hunt", q)
+	})
+}
+
+type abuseShadowInput struct {
+	Lines int `json:"lines,omitempty" jsonschema:"how many trailing abuse-shadow log lines to scan (tail window); default 5000, max 200000"`
+}
+
+func registerAbuseShadow(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "abuse_shadow",
+		Description: "Aggregate the LOG-ONLY abuse-shadow burn-in log (/var/log/cfm/cfm.abuse_shadow.log) to answer 'what would the entity-abuse signals have challenged, and is it safe to enforce?'. Signal C flags a per-IP request-rate OUTLIER against the vhost's own median (the concentrated shape — a few IPs doing many× the site's normal per-IP rate, e.g. a scraper melting one shop's backend — that hides UNDER the vhost-aggregate score and is missed by the uniqIP path). This tool tails those log lines and returns: would_challenge vs exempt_goodbot counts, unique hosts/IPs, the top would-challenge (host,ip) outliers by peak ratio (with hits, max reqs, datacenter provider tag), and the by-provider (datacenter-ASN) and by-good-bot (FCrDNS-verified, e.g. Googlebot/Bingbot) splits. NOTHING here is enforced — it's the measurement view to tune ABUSE_SHADOW_RATE_* and confirm FPs (verified bots correctly land in exempt_goodbot) before promoting Signal C to a real per-IP challenge. Empty summary when the feature is off / the log doesn't exist yet. Bounded on-demand tail (default 5000 lines); costs nothing until called. See docs/webdetector-refactor.md.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in abuseShadowInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setInt(q, "lines", in.Lines)
+		return dispatchJSON(ctx, d, "/api/v1/system/abuse-shadow", q)
 	})
 }
 
