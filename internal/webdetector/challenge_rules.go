@@ -460,7 +460,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 
         haveVhostManual := len(e.cfg.ChallengeVHost) > 0
         haveVhostAuto   := e.cfg.ChallengeSuspiciousVHost
-        if !havePaths && !haveThr && !haveMalformed && !haveUniqUA && !haveUniqPathsIP && !haveUniqHostsIP && !haveUniqPathsVhost && !haveSubnet && !haveVhostManual && !haveVhostAuto { return }
+        if !havePaths && !haveThr && !haveMalformed && !haveUniqUA && !haveUniqPathsIP && !haveUniqHostsIP && !haveUniqPathsVhost && !haveSubnet && !haveVhostManual && !haveVhostAuto && !e.cfg.AbuseShadow { return }
 
 	const (
 		topN       = 50

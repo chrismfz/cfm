@@ -135,6 +135,15 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 	}
 	e.mu.RUnlock()
 
+	// Bound the enrichment/DNS work per tick. Each new outlier that clears the
+	// throttle does a cold reverse-DNS (and, for good-bot-looking PTRs, a 2s
+	// forward-confirm) synchronously in the ingest goroutine. Signal C's target
+	// shape is a botnet spraying MANY distinct outlier IPs, so without a cap that
+	// serial DNS could stall ingest past the run watchdog. Leftover outliers are
+	// picked up on later ticks (the per-(host,ip) throttle window is generous).
+	const maxShadowEnrichPerTick = 50
+	enriched := 0
+
 	for host, perIP := range snap {
 		if len(perIP) < 2 { // need a baseline population to be an "outlier"
 			continue
@@ -157,11 +166,17 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 			if e.isBypassed(ip) {
 				continue
 			}
+			// Per-tick enrich cap — checked BEFORE the throttle so hitting the cap
+			// doesn't consume a throttle token (the IP logs on a later tick).
+			if enriched >= maxShadowEnrichPerTick {
+				return
+			}
 			// Throttle BEFORE the (potentially DNS-bound) enrichment, so a
 			// persistent outlier doesn't do a good-bot forward-confirm every tick.
 			if !e.shouldLogVhostSuppress("abuseshadow:"+host+"|"+ip, now) {
 				continue
 			}
+			enriched++
 			var asn uint
 			var provider, goodBot string
 			if e.enr != nil {
@@ -238,7 +253,13 @@ func forwardConfirms(host, ip string) bool {
 	if err != nil {
 		return false
 	}
+	want := net.ParseIP(ip)
 	for _, a := range addrs {
+		// Compare as parsed IPs so a non-canonical IPv6 spelling still matches
+		// (raw string compare would false-negative a legit AAAA good bot).
+		if ap := net.ParseIP(a); ap != nil && want != nil && ap.Equal(want) {
+			return true
+		}
 		if a == ip {
 			return true
 		}

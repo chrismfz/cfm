@@ -312,6 +312,17 @@ watch them accumulate from the gateway. Contract:
 - [ ] **I6** — promote whatever the data justifies to per-IP/subnet challenge.
 - [ ] **I7** — smarter vhost-wide arm on concentration signals.
 
+### Deferred to the enforcement-promotion follow-up (from the I2 review)
+- **Throttle-map reaper.** `vhostSuppressLoggedAt` gains a per-`(host,ip)` key
+  and is never pruned → a slow accumulation over days when enabled. Fine for
+  burn-in (tiny entries), but add a reaper before enforcement.
+- **Cancellable DNS.** The good-bot reverse/forward lookups use
+  `context.Background()`, so the run watchdog can't interrupt them. The per-tick
+  cap (`maxShadowEnrichPerTick=50`) bounds the worst case for now; thread the run
+  ctx into the lookups when promoting to enforcement.
+- **IPv6 exemption compare** is now `net.IP.Equal`-based (fixed in I2), but the
+  broader per-IP challenge path should be audited for the same when C promotes.
+
 ## 8. False-positive register (append as found)
 
 Format: `date | host | ip | asn (name) | ua | why-it's-legit | action`.
