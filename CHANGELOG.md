@@ -17,6 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Faster startup: the `cfm.deny` block-list load no longer delays the
+  edge-critical services.** On a busy host the daemon spent tens of seconds at
+  boot applying `cfm.deny` (one nft element add per blocked IP — e.g. ~34s for
+  ~1,200 entries) *before* the API server, ingest socket, nginx bridge and
+  challenge engine came up, so `cfm webtop …` and the edge decision path were
+  unreachable for that whole window on every restart/upgrade. The `cfm.deny`
+  apply now runs **last** in startup, after every edge-critical subsystem (and
+  the DNAT failsafe / edge nudge) is already up; the cheap, protective
+  `cfm.allow` / `cfm.ignore` still load early. Nothing depends on the block
+  sets being populated before the edge starts — `EnsureBase` already installs
+  the enforcement chains. On a normal service restart the kernel nft sets
+  persist, so there is no enforcement gap at all; on a cold boot/reboot (empty
+  sets) the targeted `cfm.deny` entries are enforced within the deny-apply
+  window (seconds, up to tens of seconds on a large list). `cfm.deny` is a
+  blanket all-ports drop, so during that cold-boot window a denied IP is not
+  yet hard-dropped on any port — the general firewall (ports policy,
+  flood/connlimit/hardening) and the detectors are already active and re-block
+  any source that actively re-offends, though quiet/manually-curated entries
+  stay unenforced until the apply lands. (Batching the per-IP apply to shrink
+  that window to well under a second is tracked as a separate follow-up.)
 ### Fixed
 - **`cfm webtop challenge` no longer misreports on a failed query.** The
   `status`, `host`, `events`, and list commands decoded the HTTP body without

@@ -940,7 +940,18 @@ func runDaemon(args []string) {
 	}
 	// ignore end//
 
-	loadAll := func() {
+	// loadAll applies cfm.allow / cfm.deny / cfm.ignore, but only the files
+	// selected by the do* flags (and only when their contents changed). The
+	// scoping matters at boot: the heavy cfm.deny apply (one nft element add per
+	// blocked IP — the single most expensive startup step on a busy host) is
+	// deferred to the very end of startup so the edge-critical subsystems
+	// (sslcollector, apiserver, ingest socket, nginx bridge, challenge) never
+	// wait behind it, while the cheap, protective cfm.allow / cfm.ignore load
+	// early. filewatch.Changed() primes its baseline the first time it is
+	// called, so every file must be covered exactly once during boot
+	// (allow+ignore early, deny late); the tick loop then calls
+	// loadAll(true, true, true) every tick.
+	loadAll := func(doAllow, doDeny, doIgnore bool) {
 		if cfgDir == "" {
 			return
 		}
@@ -948,17 +959,17 @@ func runDaemon(args []string) {
 		// decide what changed (and avoid reapplying both if only one changed)
 		var allowChanged, denyChanged, ignChanged bool
 
-		if allowW != nil {
+		if doAllow && allowW != nil {
 			if _, ch := allowW.Changed(); ch {
 				allowChanged = true
 			}
 		}
-		if denyW != nil {
+		if doDeny && denyW != nil {
 			if _, ch := denyW.Changed(); ch {
 				denyChanged = true
 			}
 		}
-		if ignW != nil {
+		if doIgnore && ignW != nil {
 			if _, ch := ignW.Changed(); ch {
 				ignChanged = true
 			}
@@ -1359,9 +1370,13 @@ func runDaemon(args []string) {
 		applyCFMConfigRemaining(cfg)
 	}
 
-	// ── Initial load ─────────────────────────────────────────────────────────────
-	done = step("initial:loadAll")
-	loadAll()
+	// ── Initial load (allow + ignore only) ───────────────────────────────────────
+	// cfm.allow is a safety-net (protects management IPs from autoblock) and both
+	// files are cheap, so they load up front. The heavy cfm.deny apply is deferred
+	// to the end of startup — see "deferred deny load" just before the tick loop —
+	// so edge-critical services are never held hostage by a large block list.
+	done = step("initial:loadAll(allow+ignore)")
+	loadAll(true, false, true)
 	done()
 
 	// First boot sequencing:
@@ -1396,9 +1411,10 @@ func runDaemon(args []string) {
 	reloadBlocklists()
 	done()
 
-	if ignW != nil {
-		applyIgnoreFile(ignW.Path())
-	}
+	// cfm.ignore is already applied (and its watcher primed) by the initial
+	// loadAll(allow+ignore) above, so there is no separate re-apply here — the
+	// old unconditional applyIgnoreFile at this point was a redundant second
+	// parse+apply of the same file on every boot.
 	if os.Getenv("CFM_DEBUG") == "1" {
 		fmt.Printf("Starting MAD COW FIREWALL v2 Moooooooh Maf|[]z05 rulez\n")
 	}
@@ -1425,13 +1441,42 @@ func runDaemon(args []string) {
 	// No-op if disabled via env or if the edge started after us.
 	sslcollector.NudgeEdgeOnFirstReady(ctx, sslcol)
 
+	// ── Deferred deny load ───────────────────────────────────────────────────────
+	// cfm.deny is applied LAST, once every edge-critical subsystem (sslcollector,
+	// apiserver, ingest socket, nginx bridge, challenge) and the DNAT failsafe /
+	// edge nudge above are already up. On a busy host with a large block list this
+	// per-IP nft apply is the single most expensive startup step, and nothing
+	// above depends on the block sets being populated: EnsureBase already
+	// installed the enforcement chains, and block_v4/v6 simply fill in here.
+	//
+	// Trade-off, by design: on a normal service restart the kernel nft sets
+	// persist, so there is NO enforcement gap. On a COLD boot / reboot / after
+	// `cfm reset` the sets start empty, so for the duration of this apply
+	// (seconds, up to tens of seconds on a large list — until the batching
+	// follow-up lands) cfm.deny is not yet enforced at L3 while the services are
+	// already up. cfm.deny is a blanket all-ports `@block_v4 drop`, so this gap
+	// is NOT edge-only — a denied IP can also reach sshd/exim/dovecot/etc., which
+	// have no WAF/challenge in front. What IS already up by this point: the
+	// general firewall (ports policy, flood/connlimit/hardening applied by
+	// applyNFTRules above), plus the detectors, which re-block any source that
+	// actively re-offends in the window. That reactive net does NOT cover the
+	// quiet part of cfm.deny (manually-curated bans, slow-and-low sources that
+	// won't trip a detector in time) — those stay unenforced until this apply
+	// lands, which happens within the window above. This is the accepted cost of
+	// not holding the edge (and the rest of startup) hostage to the block list.
+	// (Idempotent per-IP apply, so re-running on a restart where the sets are
+	// already populated is safe.)
+	done = step("initial:loadAll(deny)")
+	loadAll(false, true, false)
+	done()
+
 	// ── Main tick loop ───────────────────────────────────────────────────────────
 	t := time.NewTicker(*interval)
 	defer t.Stop()
 	for range t.C {
-		reloadBlocklists() // only if cfm.blocklists changed
-		loadAll()          // only if cfm.allow / cfm.deny / cfm.ignore changed
-		onCFMConfChanged() // only if cfm.conf changed
+		reloadBlocklists()        // only if cfm.blocklists changed
+		loadAll(true, true, true) // only if cfm.allow / cfm.deny / cfm.ignore changed
+		onCFMConfChanged()        // only if cfm.conf changed
 
 		// cfm-lsm activation is gated by /etc/cfm/lsm.conf, which is
 		// independent of cfm.conf — so the cfm.conf-only path above
