@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.21
+
 ### Added
 - **`cfm webtop challenge` now shows the TTL of a manual challenge — granted
   total and time remaining.** The vhost list gained `TTL` and `LEFT` columns
@@ -30,8 +34,6 @@ back-filled here — see the git/PR history for that period.
   field of `/api/v1/challenge/vhosts` and `/api/v1/challenge/vhost`, and is
   persisted with the manual challenge snapshot so a restart reports the TTL the
   operator granted instead of whatever was left when the daemon came back.
-
-## 2026.08.21
 
 ### Fixed
 - **Manual vhost challenges now survive a daemon restart.** An operator-set
