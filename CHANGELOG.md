@@ -18,6 +18,15 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **`abuse_shadow` MCP tool + `/api/v1/system/abuse-shadow` endpoint (I3).**
+  New `internal/abuseshadow` tails the LOG-ONLY abuse-shadow log
+  (`/var/log/cfm/cfm.abuse_shadow.log`) and aggregates the Signal C rate-outlier
+  burn-in lines: would_challenge vs exempt_goodbot counts, unique hosts/IPs, the
+  top would-challenge `(host,ip)` outliers by peak ratio, and the
+  datacenter-provider + FCrDNS-good-bot splits — the "what would Signal C
+  challenge, and is it safe to enforce?" measurement view. Admin-only, bounded
+  on-demand tail, read-only. Reachable fleet-wide through the cfm-web gateway's
+  `node_call node="all"` with no gateway change. (46 MCP tools.)
 - **Abuse-shadow Signal C (per-IP rate outlier) — LOG-ONLY (I2).** New
   `internal/webdetector/abuse_shadow.go`: on the per-tick challenge eval, for
   every vhost it computes the vhost's own median per-IP request rate + `ip_skew`

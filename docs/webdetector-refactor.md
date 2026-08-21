@@ -307,7 +307,9 @@ watch them accumulate from the gateway. Contract:
   shadow emission, log-only, with good-bot FCrDNS exemption + datacenter tag +
   the dedicated `/var/log/cfm/cfm.abuse_shadow.log` (glob-rotated). All off by
   default. *(Signal A/datacenter is a logged tag here, not the trigger — per §4a.)*
-- [ ] **I3** — `abuse_shadow` MCP tool (node) + gateway `node="all"`.
+- [x] **I3** — `abuse_shadow` MCP tool + `/api/v1/system/abuse-shadow` endpoint
+  (`internal/abuseshadow` tail+aggregate). Fleet-wide via the gateway
+  `node_call node="all"` (no gateway change — passthrough). Admin-only, read-only.
 - [ ] **I4** — Signal B (enumeration) shadow. **I5** — Signal C (rate outlier).
 - [ ] **I6** — promote whatever the data justifies to per-IP/subnet challenge.
 - [ ] **I7** — smarter vhost-wide arm on concentration signals.

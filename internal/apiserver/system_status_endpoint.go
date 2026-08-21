@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"cfm/internal/abuseshadow"
 	"cfm/internal/cfmlog"
 	"cfm/internal/cputhrottle"
 	"cfm/internal/edgelog"
@@ -235,6 +236,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/ip-forensics", handleSystemIPForensics)
 	m.HandleFunc("/api/v1/system/edge-error-log", handleSystemEdgeErrorLog)
 	m.HandleFunc("/api/v1/system/waf-fp-hunt", handleSystemWAFFPHunt)
+	m.HandleFunc("/api/v1/system/abuse-shadow", handleSystemAbuseShadow)
 	m.HandleFunc("/api/v1/system/lve-cpu", handleSystemLVECPU)
 	m.HandleFunc("/api/v1/system/cpu-throttle", handleSystemCPUThrottle)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
@@ -610,6 +612,60 @@ func handleSystemWAFFPHunt(w http.ResponseWriter, r *http.Request) {
 		"truncated":      truncated,
 		"summary":        summary,
 		"available_logs": edgelog.AvailableErrorLogs(),
+	})
+}
+
+// handleSystemAbuseShadow aggregates the LOG-ONLY abuse-shadow log
+// (GET /api/v1/system/abuse-shadow?lines=N). Read-only, admin-only. Backs the
+// MCP abuse_shadow tool: it tails /var/log/cfm/cfm.abuse_shadow.log (the Signal C
+// rate-outlier burn-in lines, docs/webdetector-refactor.md) and returns
+// aggregates — would_challenge vs exempt_goodbot counts, top would-challenge
+// (host,ip) outliers by peak ratio, and the datacenter/good-bot splits — so an
+// operator can judge "what would Signal C have challenged, and how much is
+// verified-bot/datacenter?" before promoting it to a real challenge. Host-wide
+// (one shadow log per node) → admin-only. Bounded tail + timeout; a missing log
+// (feature off / never fired) returns an empty summary, not an error.
+func handleSystemAbuseShadow(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	lines := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("lines")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			lines = n
+		}
+	}
+
+	const maxCollect = 100000
+	collected := make([]string, 0, 1024)
+	truncated := false
+	logFile, scanned, err := abuseshadow.ScanTail(r.Context(), lines, func(line string) {
+		if len(collected) < maxCollect {
+			collected = append(collected, line)
+		} else {
+			truncated = true
+		}
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":            true,
+		"schema":        "system.abuse_shadow.v1",
+		"log_file":      logFile, // "" when the log doesn't exist yet
+		"lines_scanned": scanned,
+		"collected":     len(collected),
+		"truncated":     truncated,
+		"summary":       abuseshadow.Summarize(collected),
 	})
 }
 
