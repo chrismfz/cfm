@@ -163,10 +163,15 @@ func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry strin
 	if manualActive {
 		active = true
 		mode = "manual"
-		if len(expiresAt) > 19 {
-			expiry = expiresAt[11:19]
+		// Show the remaining window, not a bare HH:MM:SS. Slicing [11:19] off
+		// the RFC3339 string dropped the date, so a >24h manual TTL (e.g. 34h)
+		// read as "expires in a few hours" when it was actually tomorrow.
+		if t, perr := time.Parse(time.RFC3339, expiresAt); perr == nil {
+			expiry = leftDuration(t)
 		} else {
-			expiry = expiresAt
+			// Unparseable expiry: show "?" rather than an absolute timestamp,
+			// which the badge would mislabel as a remaining duration (left=).
+			expiry = "?"
 		}
 	} else if autoActive {
 		active = true
@@ -506,7 +511,7 @@ func RunLiveDrilldown(baseURL, host string) error {
 		if snap.ChallengeActive {
 			switch snap.ChallengeMode {
 			case "manual":
-				chalBadge = fmt.Sprintf("  [🔒 CHALLENGE manual expires=%s](fg:red,mod:bold)", snap.ChallengeExpiry)
+				chalBadge = fmt.Sprintf("  [🔒 CHALLENGE manual left=%s](fg:red,mod:bold)", snap.ChallengeExpiry)
 			case "auto":
 				chalBadge = "  [🔒 CHALLENGE auto](fg:yellow,mod:bold)"
 			default:

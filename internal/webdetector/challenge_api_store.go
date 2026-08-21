@@ -115,6 +115,10 @@ func (s *ChallengeAPIStore) addEvent(e ChallengeEvent) {
 	if len(s.events) == 0 {
 		return
 	}
+	// Store the host canonically (trim+lower+strip :port) so a normalized
+	// ?host= event filter matches regardless of the writer's casing. Idempotent
+	// for the manual path, which already passes normalized variants.
+	e.Host = normalizeHost(e.Host)
 	s.events[s.head] = e
 	s.head = (s.head + 1) % len(s.events)
 	if s.size < len(s.events) {
@@ -403,7 +407,14 @@ func (s *ChallengeAPIStore) ListVhosts(status, mode string, limit int) []Challen
 		if mode != "" && mode != "all" && v.Mode != mode {
 			continue
 		}
-		out = append(out, *v)
+		// Return the EFFECTIVE status, not the raw stored one: a lapsed manual
+		// row keeps Status=="active" with a past ExpiresAt, and status=all would
+		// otherwise report it active (and sort it among the live rows), while
+		// the single-vhost endpoint folds it to inactive. Copy first so the
+		// stored row is untouched.
+		row := *v
+		row.Status = eff
+		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		// active first, then score desc, then uniq desc
