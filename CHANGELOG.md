@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.21
+
 ### Added
 - **Abuse-shadow log lines now carry the source country (`cc=<ISO-2>`), and the
   `abuse_shadow` MCP tool reports a `by_country` split** (would-challenge only,
@@ -116,9 +120,6 @@ back-filled here — see the git/PR history for that period.
   re-arms the existing `MINREQ`/`FLOOR` gates, which the asset inflation had made
   vacuous. Enforcement is unchanged — Signal C is still log-only, and the
   enforced vhost `uniqIP` path deliberately still counts all requests.
-
-
-## 2026.08.21
 
 ### Added
 - **`cfm webtop challenge` now shows the TTL of a manual challenge — granted
