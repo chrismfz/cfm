@@ -43,6 +43,7 @@ type Entry struct {
 	Ratio    float64 `json:"ratio"`
 	Reqs     int     `json:"reqs"`
 	ASN      uint    `json:"asn"`
+	CC       string  `json:"cc"` // ISO-2 country of the source IP (space-free)
 	Provider string  `json:"provider"`
 	GoodBot  string  `json:"good_bot"`
 	Verdict  string  `json:"verdict"`
@@ -86,6 +87,8 @@ func Parse(line string) (Entry, bool) {
 			if n, err := strconv.ParseUint(v, 10, 32); err == nil {
 				e.ASN = uint(n)
 			}
+		case "cc":
+			e.CC = dash(v)
 		case "provider":
 			e.Provider = dash(v)
 		case "good_bot":
@@ -120,6 +123,7 @@ type topEntity struct {
 	Hits     int     `json:"hits"`      // shadow log lines for this (host,ip)
 	MaxRatio float64 `json:"max_ratio"` // peak rps/median seen
 	MaxReqs  int     `json:"max_reqs"`
+	CC       string  `json:"cc,omitempty"`
 	Provider string  `json:"provider,omitempty"`
 	GoodBot  string  `json:"good_bot,omitempty"`
 }
@@ -134,6 +138,7 @@ type Summary struct {
 	BySignal       []kv        `json:"by_signal"`
 	ByVerdict      []kv        `json:"by_verdict"`
 	ByProvider     []kv        `json:"by_provider"` // datacenter tag distribution (would_challenge only)
+	ByCountry      []kv        `json:"by_country"`  // ISO-2 country distribution (would_challenge only)
 	ByGoodbot      []kv        `json:"by_good_bot"` // which good bots were exempted
 	TopWouldBlock  []topEntity `json:"top_would_challenge"`
 }
@@ -146,6 +151,7 @@ func Summarize(lines []string) Summary {
 	bySignal := map[string]int{}
 	byVerdict := map[string]int{}
 	byProvider := map[string]int{}
+	byCountry := map[string]int{}
 	byGoodbot := map[string]int{}
 	hosts := map[string]struct{}{}
 	ips := map[string]struct{}{}
@@ -171,10 +177,13 @@ func Summarize(lines []string) Summary {
 			if e.Provider != "" {
 				byProvider[e.Provider]++
 			}
+			if e.CC != "" {
+				byCountry[e.CC]++
+			}
 			k := e.Host + "|" + e.IP
 			t := ent[k]
 			if t == nil {
-				t = &topEntity{Host: e.Host, IP: e.IP, Provider: e.Provider}
+				t = &topEntity{Host: e.Host, IP: e.IP, CC: e.CC, Provider: e.Provider}
 				ent[k] = t
 			}
 			t.Hits++
@@ -196,6 +205,7 @@ func Summarize(lines []string) Summary {
 	s.BySignal = topKV(bySignal, 20)
 	s.ByVerdict = topKV(byVerdict, 20)
 	s.ByProvider = topKV(byProvider, 20)
+	s.ByCountry = topKV(byCountry, 20)
 	s.ByGoodbot = topKV(byGoodbot, 20)
 
 	tops := make([]topEntity, 0, len(ent))

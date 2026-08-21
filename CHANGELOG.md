@@ -17,6 +17,12 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Abuse-shadow log lines now carry the source country (`cc=<ISO-2>`), and the
+  `abuse_shadow` MCP tool reports a `by_country` split** (would-challenge only,
+  alongside `by_provider`). Makes it obvious at a glance when a shadow burst is
+  domestic residential traffic (a likely false positive) versus foreign/hosting.
+
 ### Changed
 - **Faster startup: the `cfm.deny` block-list load no longer delays the
   edge-critical services.** On a busy host the daemon spent tens of seconds at
@@ -65,6 +71,19 @@ back-filled here — see the git/PR history for that period.
   print the contradictory `status=active … left=expired`), the `/vhost/status`
   endpoint reported it as an active *auto* challenge, and `/challenge/vhosts?status=all`
   still listed it active. All now fold a lapsed row to `inactive`.
+- **Abuse-shadow Signal C (LOG-ONLY) no longer counts static assets, killing a
+  large false-positive class.** The per-IP rate-outlier signal counted *every*
+  request per IP, including the CSS/JS/font fan-out of a single page view — 40–60
+  files on an asset-heavy WordPress/Woodmart/Elementor theme. A real shopper
+  browsing ~15 pages logged as ~900 requests → 300–900× the vhost median → a
+  "would_challenge" outlier (observed 2026-08 almost entirely on Greek
+  residential IPs hitting small shops). Signal C now reads a dynamic-only per-IP
+  counter (`isStaticAssetPath` excluded), so an ordinary page load's assets can't
+  inflate it; the median/skew are computed over dynamic requests too. This also
+  re-arms the existing `MINREQ`/`FLOOR` gates, which the asset inflation had made
+  vacuous. Enforcement is unchanged — Signal C is still log-only, and the
+  enforced vhost `uniqIP` path deliberately still counts all requests.
+
 
 ## 2026.08.21
 

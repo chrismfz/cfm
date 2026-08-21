@@ -1,6 +1,9 @@
 package webdetector
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestMedianInt(t *testing.T) {
 	cases := []struct {
@@ -88,5 +91,53 @@ func TestShadowRateCfgDefaults(t *testing.T) {
 	c = e.shadowRateCfg()
 	if c.K != 8 || c.Floor != 0.5 || c.SkewMin != 3 || c.MinReq != 40 {
 		t.Errorf("explicit = %+v, want K8/Floor0.5/Skew3/MinReq40", c)
+	}
+}
+
+// The 2026-08 false-positive fix: a human pageview on an asset-heavy theme pulls
+// dozens of static files (css/js/fonts), which must NOT count toward Signal C's
+// per-IP rate. ingest mirrors only DYNAMIC requests into bucketSW.ipsDyn (the
+// map Signal C reads), while the enforced uniqIP path keeps counting all
+// requests in ips. This asserts that split at the ingest layer.
+func TestIngest_IpsDynExcludesStaticAssets(t *testing.T) {
+	e := NewEngine(Config{Every: 1 * time.Second, Window: 2 * time.Minute})
+	now := float64(time.Now().Unix())
+	const ip, host = "5.203.174.86", "kirkikosmima.gr"
+
+	// One human page load: 1 dynamic HTML request + a burst of static assets,
+	// exactly the shape from the live access log that read as a 910× outlier.
+	e.ingest(LogRec{TS: now, IP: ip, Host: host, Method: "get",
+		URI: "/product-category/paidika-kosmimata/", Status: 200}, "raw")
+	assets := []string{
+		"/wp-content/themes/woodmart/css/parts/base.min.css?ver=8.4.1",
+		"/wp-includes/css/dist/block-library/style.min.css?ver=7.1",
+		"/wp-content/uploads/elementor/css/post-7.css?ver=1787293696",
+		"/wp-content/plugins/elementor/assets/lib/font-awesome/fonts/fa-solid-900.woff2",
+		"/wp-content/themes/woodmart/js/app.min.js?ver=8.4.1",
+		"/wp-content/uploads/2024/01/logo.png",
+	}
+	for i, u := range assets {
+		e.ingest(LogRec{TS: now + float64(i)*0.01, IP: ip, Host: host,
+			Method: "get", URI: u, Status: 200}, "raw")
+	}
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	hs := e.hosts[host]
+	if hs == nil {
+		t.Fatalf("host %s not recorded", host)
+	}
+	var ipsTotal, ipsDyn int
+	for i := range hs.buckets {
+		ipsTotal += hs.buckets[i].ips[ip]
+		ipsDyn += hs.buckets[i].ipsDyn[ip]
+	}
+	// ips counts every request (1 dynamic + 6 assets); ipsDyn counts the 1
+	// dynamic only — so a shopper's asset fan-out can't inflate Signal C.
+	if ipsTotal != 1+len(assets) {
+		t.Errorf("ips (all requests) = %d, want %d", ipsTotal, 1+len(assets))
+	}
+	if ipsDyn != 1 {
+		t.Errorf("ipsDyn (dynamic only) = %d, want 1 — static assets leaked into Signal C's counter", ipsDyn)
 	}
 }

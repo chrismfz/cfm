@@ -124,6 +124,15 @@ type bucketSW struct {
 
 	ips map[string]int
 
+	// ipsDyn counts DYNAMIC requests per IP only — static assets (css/js/img/
+	// fonts, isStaticAssetPath) excluded. Signal C (abuse_shadow rate outlier)
+	// reads this, NOT ips: one human pageview on an asset-heavy theme is 40-60
+	// static requests, so counting them made a normal shopper read as a rate
+	// outlier (the 2026-08 FP — Greek residential IPs on small WooCommerce shops
+	// logged at 300-900× the vhost median, almost entirely .css). The enforced
+	// uniqIP path deliberately keeps using ips (all requests).
+	ipsDyn map[string]int
+
 	// Keep a few representative raw lines per IP for alert samples.
 	// (We store the first line seen per IP per bucket.)
 	ipSample map[string]string
@@ -1237,6 +1246,15 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	}
 	if rec.IP != "" {
 		b.ips[rec.IP]++
+
+		// Dynamic-only mirror for Signal C — see bucketSW.ipsDyn. isStaticAssetPath
+		// tolerates a query string, so rec.URI (== p below) is safe here.
+		if !isStaticAssetPath(rec.URI) {
+			if b.ipsDyn == nil {
+				b.ipsDyn = make(map[string]int)
+			}
+			b.ipsDyn[rec.IP]++
+		}
 
 		if b.ipSample == nil {
 			b.ipSample = make(map[string]string)
@@ -3080,6 +3098,14 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 		b.ips = make(map[string]int)
 	}
 	b.ips[ip]++
+	// Dynamic-only mirror for Signal C (a 403 is a dynamic response; static
+	// assets almost never 403, but gate anyway for parity with the main ingest).
+	if !isStaticAssetPath(uri) {
+		if b.ipsDyn == nil {
+			b.ipsDyn = make(map[string]int)
+		}
+		b.ipsDyn[ip]++
+	}
 	if b.ipSample == nil {
 		b.ipSample = make(map[string]string)
 	}
