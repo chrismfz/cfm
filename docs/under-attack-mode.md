@@ -167,6 +167,25 @@ DRYRUN=1 stops after 6.0. Everything below is TTL'd and vhost-scoped.
   by replaying the predicate against the vhost's pre-attack traffic via the
   existing traffic-rules **simulate** endpoint. A predicate arms only above a
   coverage floor AND below a collision ceiling (proposed: ≥60% / ≤0.5%).
+  > **As built (I2, `internal/webdetector/under_attack_fingerprint.go`,
+  > shadow-only):** the substrate forced three adjustments, all confirmed against
+  > the code. (1) **The simulate-corpus collision mechanism does not exist** —
+  > `rules/simulate` answers the inverse question (one request → which rule
+  > fires) and the only per-request sample is a *global* 4096-entry ring that
+  > attack traffic evicts, so a pre-attack baseline can't be recovered from it
+  > mid-attack. Collision is instead measured against a **rolling per-vhost
+  > baseline histogram** (base-path + UA distributions of normal traffic,
+  > 30-min half-life, frozen while the vhost is under attack). Candidates are
+  > **single-feature** (one base-path, or the UA pool) so coverage/collision are
+  > exact marginal fractions; conjunction predicates need a joint distribution
+  > the engine doesn't retain (deferred). (2) **tls_fp can't be a deny predicate**
+  > — `TrafficRuleMatch` has no tls_fp field — so it's dropped as a candidate
+  > (would only ever be a diagnostic). (3) **query-shape is unavailable** — the
+  > query string is stripped before aggregation — so it's deferred (needs new
+  > ingest plumbing). Shipped candidates: **base-path** and **UA-pool** (with a
+  > UA-uniformity entropy signal); dynamic-fraction is reported alongside. Knobs:
+  > `UNDER_ATTACK_FINGERPRINT`, `UNDER_ATTACK_FP_COVERAGE_MIN`,
+  > `UNDER_ATTACK_FP_COLLISION_MAX`.
 - **6.3 Draft + notify** (I3): the winning predicate becomes a **draft**
   vhost-scoped traffic rule (`action=block`, `RULE_TTL`), delivered in the
   notification with a one-liner to apply:
@@ -231,6 +250,12 @@ DRYRUN=1 stops after 6.0. Everything below is TTL'd and vhost-scoped.
   `cfm webtop attack on|off` CLI wiring onto `SetVhostAttackOverride`.
 - **I2** — fingerprinter in the abuse-shadow harness: candidate predicates +
   coverage/collision logged, nothing enforced. Validate on e-athlos live.
+  **Landed** (`under_attack_fingerprint.go`, shadow-only): rolling per-vhost
+  baseline + base-path/UA-pool candidates scored `coverage × (1 − collision)`
+  with a would-arm verdict, logged to `cfm.challenges.log`. See the §6.2 as-built
+  note for the three substrate-forced adjustments (baseline-histogram collision
+  instead of the non-existent simulate-corpus; tls_fp dropped as a predicate;
+  query-shape and conjunction predicates deferred).
 - **I3** — draft rule + notification + `attack apply` command.
 - **I4** — auto-apply + harden actuator.
 - **I5** — repeat-offender nft escalation via the detector sink.

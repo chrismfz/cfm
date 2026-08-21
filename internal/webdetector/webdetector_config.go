@@ -224,6 +224,13 @@ type Config struct {
 	UnderAttackErrFloor     float64       // UNDER_ATTACK_ERR_FLOOR (leg 3 error-ratio floor)
 	UnderAttackBotCeil      float64       // UNDER_ATTACK_BOT_CEIL (leg 4 self-declared-bot ceiling)
 
+	// I2 campaign fingerprinter (shadow-only): proposes candidate deny predicates
+	// for under-attack vhosts and scores coverage × (1 − collision) against a
+	// rolling per-vhost baseline. Nothing enforced.
+	UnderAttackFingerprint    bool    // UNDER_ATTACK_FINGERPRINT (run the fingerprinter)
+	UnderAttackFPCoverageMin  float64 // UNDER_ATTACK_FP_COVERAGE_MIN (would-arm coverage floor)
+	UnderAttackFPCollisionMax float64 // UNDER_ATTACK_FP_COLLISION_MAX (would-arm collision ceiling)
+
 	// -------------------------------------------------------------------
 	// NEW: unique-based challenge filters (phase 1: challenge-only)
 	// -------------------------------------------------------------------
@@ -464,6 +471,12 @@ func (c *Config) FillDefaults() {
 		}
 		if c.UnderAttackBotCeil <= 0 {
 			c.UnderAttackBotCeil = 0.05
+		}
+		if c.UnderAttackFPCoverageMin <= 0 {
+			c.UnderAttackFPCoverageMin = 0.60
+		}
+		if c.UnderAttackFPCollisionMax <= 0 {
+			c.UnderAttackFPCollisionMax = 0.005
 		}
 	}
 

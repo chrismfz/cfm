@@ -2108,7 +2108,10 @@ if ha := short[host]; ha != nil {
         e.emitAbuseShadowRateOutliers(now)
     }
 
-
+    // ---- Under-Attack Mode campaign fingerprinter (I2, shadow-only) ----
+    // Maintains per-vhost baselines and logs candidate deny predicates for
+    // vhosts under attack. Internally throttled to ~once per Window.
+    e.runFingerprint(now)
 }
 
 
