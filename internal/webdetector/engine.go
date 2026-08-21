@@ -1247,9 +1247,11 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	if rec.IP != "" {
 		b.ips[rec.IP]++
 
-		// Dynamic-only mirror for Signal C — see bucketSW.ipsDyn. isStaticAssetPath
+		// Dynamic-only mirror for Signal C — maintained ONLY when the shadow
+		// signal that reads it is enabled (off by default), so it adds no map
+		// and no per-request work on the hot path otherwise. isStaticAssetPath
 		// tolerates a query string, so rec.URI (== p below) is safe here.
-		if !isStaticAssetPath(rec.URI) {
+		if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier && !isStaticAssetPath(rec.URI) {
 			if b.ipsDyn == nil {
 				b.ipsDyn = make(map[string]int)
 			}
@@ -3100,7 +3102,8 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 	b.ips[ip]++
 	// Dynamic-only mirror for Signal C (a 403 is a dynamic response; static
 	// assets almost never 403, but gate anyway for parity with the main ingest).
-	if !isStaticAssetPath(uri) {
+	// Only maintained when the shadow signal that reads it is enabled.
+	if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier && !isStaticAssetPath(uri) {
 		if b.ipsDyn == nil {
 			b.ipsDyn = make(map[string]int)
 		}

@@ -100,7 +100,8 @@ func TestShadowRateCfgDefaults(t *testing.T) {
 // map Signal C reads), while the enforced uniqIP path keeps counting all
 // requests in ips. This asserts that split at the ingest layer.
 func TestIngest_IpsDynExcludesStaticAssets(t *testing.T) {
-	e := NewEngine(Config{Every: 1 * time.Second, Window: 2 * time.Minute})
+	e := NewEngine(Config{Every: 1 * time.Second, Window: 2 * time.Minute,
+		AbuseShadow: true, AbuseShadowRateOutlier: true}) // ipsDyn is only maintained when Signal C is on
 	now := float64(time.Now().Unix())
 	const ip, host = "5.203.174.86", "kirkikosmima.gr"
 
@@ -139,5 +140,30 @@ func TestIngest_IpsDynExcludesStaticAssets(t *testing.T) {
 	}
 	if ipsDyn != 1 {
 		t.Errorf("ipsDyn (dynamic only) = %d, want 1 — static assets leaked into Signal C's counter", ipsDyn)
+	}
+}
+
+// When the shadow signal is off (the default), ipsDyn must not be maintained at
+// all — no extra map, no per-request work on the hot ingest path.
+func TestIngest_IpsDynSkippedWhenShadowDisabled(t *testing.T) {
+	e := NewEngine(Config{Every: 1 * time.Second, Window: 2 * time.Minute}) // AbuseShadow off
+	now := float64(time.Now().Unix())
+	const ip, host = "1.2.3.4", "shop.gr"
+	for i := 0; i < 5; i++ {
+		e.ingest(LogRec{TS: now + float64(i), IP: ip, Host: host,
+			Method: "get", URI: "/product/x", Status: 200}, "raw")
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	hs := e.hosts[host]
+	if hs == nil {
+		t.Fatalf("host not recorded")
+	}
+	var ipsDyn int
+	for i := range hs.buckets {
+		ipsDyn += hs.buckets[i].ipsDyn[ip]
+	}
+	if ipsDyn != 0 {
+		t.Errorf("ipsDyn = %d with shadow disabled, want 0 (counter must not run when unused)", ipsDyn)
 	}
 }
