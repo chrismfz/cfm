@@ -628,7 +628,7 @@ func init() {
 			// Deprecated: webdetector routes are now served by the shared apiserver.
 			APIListen: kvStrClean(kv, "API_LISTEN", ""),
 
-			ChallengeHTTPListen:  kvStrClean(kv, "CHALLENGE_HTTP_LISTEN", ""),
+			ChallengeHTTPListen: kvStrClean(kv, "CHALLENGE_HTTP_LISTEN", ""),
 
 			// Separate per-request access log for the challenge server ([challenge_http] lines).
 			ChallengeAccessLogPath: kvStrClean(kv, "CHALLENGE_ACCESS_LOG", "/var/log/cfm/challenge.access.log"),
@@ -723,6 +723,16 @@ func init() {
 			// Volume floor (request-rate). 0 disables; enforce=false = log-only burn-in.
 			ChallengeSuspiciousMinRPS:        kvFlt(kv, "CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS", 0),
 			ChallengeSuspiciousMinRPSEnforce: kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS_ENFORCE", false),
+
+			// Abuse-shadow (log-only entity signals). Master + Signal C off by default; good-bot exempt on.
+			AbuseShadow:              kvBool(kv, "ABUSE_SHADOW", false),
+			AbuseShadowRateOutlier:   kvBool(kv, "ABUSE_SHADOW_RATE_OUTLIER", false),
+			AbuseShadowDatacenter:    kvBool(kv, "ABUSE_SHADOW_DATACENTER", false),
+			AbuseShadowGoodbotExempt: kvBool(kv, "ABUSE_SHADOW_GOODBOT_EXEMPT", true),
+			AbuseShadowRateK:         kvFlt(kv, "ABUSE_SHADOW_RATE_K", 0),
+			AbuseShadowRateFloor:     kvFlt(kv, "ABUSE_SHADOW_RATE_FLOOR", 0),
+			AbuseShadowRateSkewMin:   kvFlt(kv, "ABUSE_SHADOW_RATE_SKEW_MIN", 0),
+			AbuseShadowRateMinReq:    kvInt(kv, "ABUSE_SHADOW_RATE_MINREQ", 0),
 
 			// Optional uniqIP-based vhost auto mode
 			ChallengeSuspiciousUniqIP:    kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP", false),
