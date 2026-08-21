@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Under-Attack Mode (I1b): cfm-admin surfacing.** The web-detector admin UI now
+  shows and controls the escalation state. The "Suspicious + challenged vhosts"
+  card (and the WebTop card) grow a 🚨 **under attack** pill next to the
+  challenged pill (`state === 'under_attack'`, carried through both the admin and
+  scoped-tenant data paths). The `/webdetector/controls/` per-vhost table gains an
+  **Under Attack** column between Challenge and WAF — a force-on/off operator
+  override (red while escalated; click to clear + suppress auto re-entry, or to
+  force it on), wired to the scoped `v1/challenge/vhost/attack` endpoint and
+  disabled when `UNDER_ATTACK` is globally off. The scoped `challenge/vhost/status`
+  and controls (`webdet/vhosts`) responses now carry the state so tenants see the
+  same badges/knob as admins.
 - **Under-Attack Mode (I1b): surfacing + operator override.** The per-vhost
   escalation state is now visible and controllable. The challenge-vhost API rows
   (`/api/v1/challenge/vhost`, `/vhosts`) and the web-detector drilldown carry an
