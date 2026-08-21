@@ -125,7 +125,9 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 		}
 		m := make(map[string]int)
 		for i := range hs.buckets {
-			for ip, n := range hs.buckets[i].ips {
+			// ipsDyn = dynamic requests only (static assets excluded), so a
+			// human's per-pageview asset fan-out doesn't read as a rate outlier.
+			for ip, n := range hs.buckets[i].ipsDyn {
 				m[ip] += n
 			}
 		}
@@ -178,10 +180,15 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 			}
 			enriched++
 			var asn uint
-			var provider, goodBot string
+			var provider, goodBot, cc string
 			if e.enr != nil {
 				r := e.enr.Lookup(ip)
 				asn = r.ASN
+				// Unconditional (no ABUSE_SHADOW_* gate, unlike provider/good_bot below):
+				// CountryISO is free from the Lookup already done for the ASN, and it is the
+				// primary FP-triage signal (domestic residential burst = likely FP). ISO-2
+				// is space-free, which the abuse_shadow parser (splits on spaces) requires.
+				cc = r.CountryISO
 				if e.cfg.AbuseShadowDatacenter {
 					provider = DatacenterClass(r.ASN, r.ASNName)
 				}
@@ -198,8 +205,8 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 				ratio = ipRPS / medianRPS
 			}
 			logging.LogfABUSESHADOW(
-				"[abuse-shadow] signal=rate_outlier host=%s ip=%s rps=%.3f median_rps=%.4f ratio=%.1f skew=%.1f reqs=%d asn=%d provider=%s good_bot=%s verdict=%s",
-				host, ip, ipRPS, medianRPS, ratio, skew, tot, asn, orDash(provider), orDash(goodBot), verdict,
+				"[abuse-shadow] signal=rate_outlier host=%s ip=%s rps=%.3f median_rps=%.4f ratio=%.1f skew=%.1f reqs=%d asn=%d cc=%s provider=%s good_bot=%s verdict=%s",
+				host, ip, ipRPS, medianRPS, ratio, skew, tot, asn, orDash(cc), orDash(provider), orDash(goodBot), verdict,
 			)
 		}
 	}

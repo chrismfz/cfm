@@ -5,10 +5,10 @@ import "testing"
 // Verbatim shadow-log line shapes as emitted by logging.LogfABUSESHADOW
 // (internal/webdetector/abuse_shadow.go), timestamp-prefixed.
 const (
-	lineOutlier1  = `2026-08-21 12:00:00 [abuse-shadow] signal=rate_outlier host=www.e-vafeiadis.gr ip=37.6.1.149 rps=0.517 median_rps=0.008 ratio=62.0 skew=62.0 reqs=62 asn=25472 provider=- good_bot=- verdict=would_challenge`
-	lineOutlier2  = `2026-08-21 12:00:30 [abuse-shadow] signal=rate_outlier host=www.e-vafeiadis.gr ip=37.6.1.149 rps=0.600 median_rps=0.008 ratio=72.0 skew=70.0 reqs=72 asn=25472 provider=- good_bot=- verdict=would_challenge`
-	lineDCOutlier = `2026-08-21 12:01:00 [abuse-shadow] signal=rate_outlier host=shop.example.gr ip=1.2.3.4 rps=2.0 median_rps=0.05 ratio=40.0 skew=30.0 reqs=240 asn=16509 provider=amazon-aws good_bot=- verdict=would_challenge`
-	lineGoodbot   = `2026-08-21 12:02:00 [abuse-shadow] signal=rate_outlier host=shop.example.gr ip=66.249.73.237 rps=1.0 median_rps=0.05 ratio=20.0 skew=25.0 reqs=120 asn=15169 provider=google good_bot=googlebot verdict=exempt_goodbot`
+	lineOutlier1  = `2026-08-21 12:00:00 [abuse-shadow] signal=rate_outlier host=www.e-vafeiadis.gr ip=37.6.1.149 rps=0.517 median_rps=0.008 ratio=62.0 skew=62.0 reqs=62 asn=25472 cc=GR provider=- good_bot=- verdict=would_challenge`
+	lineOutlier2  = `2026-08-21 12:00:30 [abuse-shadow] signal=rate_outlier host=www.e-vafeiadis.gr ip=37.6.1.149 rps=0.600 median_rps=0.008 ratio=72.0 skew=70.0 reqs=72 asn=25472 cc=GR provider=- good_bot=- verdict=would_challenge`
+	lineDCOutlier = `2026-08-21 12:01:00 [abuse-shadow] signal=rate_outlier host=shop.example.gr ip=1.2.3.4 rps=2.0 median_rps=0.05 ratio=40.0 skew=30.0 reqs=240 asn=16509 cc=US provider=amazon-aws good_bot=- verdict=would_challenge`
+	lineGoodbot   = `2026-08-21 12:02:00 [abuse-shadow] signal=rate_outlier host=shop.example.gr ip=66.249.73.237 rps=1.0 median_rps=0.05 ratio=20.0 skew=25.0 reqs=120 asn=15169 cc=US provider=google good_bot=googlebot verdict=exempt_goodbot`
 	lineNoise     = `2026-08-21 12:03:00 [challenge][vhost] action=auto_on host=x`
 )
 
@@ -23,6 +23,9 @@ func TestParse(t *testing.T) {
 	}
 	if e.Provider != "" || e.GoodBot != "" { // "-" normalizes to empty
 		t.Errorf("dash should normalize to empty: provider=%q good_bot=%q", e.Provider, e.GoodBot)
+	}
+	if e.CC != "GR" {
+		t.Errorf("cc = %q, want GR", e.CC)
 	}
 
 	dc, _ := Parse(lineDCOutlier)
@@ -76,5 +79,21 @@ func TestSummarize(t *testing.T) {
 	}
 	if len(s.ByGoodbot) != 1 || s.ByGoodbot[0].Key != "googlebot" {
 		t.Errorf("by_good_bot = %+v, want [{googlebot,1}]", s.ByGoodbot)
+	}
+
+	// Country split counts would_challenge only: GR twice (the two e-vafeiadis
+	// lines) and US once (the amazon-aws DC). The exempted googlebot (US) is an
+	// exemption, not a would_challenge, so it must NOT appear.
+	if len(s.ByCountry) != 2 {
+		t.Fatalf("by_country = %+v, want 2 entries (GR, US)", s.ByCountry)
+	}
+	if s.ByCountry[0].Key != "GR" || s.ByCountry[0].Count != 2 {
+		t.Errorf("by_country[0] = %+v, want {GR,2}", s.ByCountry[0])
+	}
+	if s.ByCountry[1].Key != "US" || s.ByCountry[1].Count != 1 {
+		t.Errorf("by_country[1] = %+v, want {US,1}", s.ByCountry[1])
+	}
+	if top.CC != "GR" {
+		t.Errorf("top entity cc = %q, want GR", top.CC)
 	}
 }

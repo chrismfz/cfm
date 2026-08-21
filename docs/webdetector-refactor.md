@@ -85,6 +85,13 @@ abuse is **residential**, so the ASN-agnostic signals lead:
 - **Signal C — per-entity rate/behaviour outlier vs the vhost's own baseline**
   (an IP/subnet whose rate is a large multiple of the vhost `median_per_ip_rps`;
   `ip_skew` already exists). ASN-agnostic → catches residential AND cloud.
+  **Counts DYNAMIC requests only** (`bucketSW.ipsDyn`, `isStaticAssetPath`
+  excluded): a single human page view pulls 40–60 static assets on an
+  asset-heavy theme, so counting them made a normal shopper read as a 300–900×
+  outlier (the 2026-08 Greek-residential FP class). The enforced `uniqIP` path
+  still counts all requests. Each shadow line also carries `cc=<ISO-2>`; the
+  `abuse_shadow` tool surfaces a `by_country` split so a domestic-residential
+  burst (likely FP) is obvious.
   Solves dilution directly. **← candidate first signal.**
 - **Signal B — behavioural enumeration** (one IP walking many distinct
   product/category paths in order, low repeat — catalog scraping). ASN-agnostic.
