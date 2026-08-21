@@ -233,6 +233,41 @@ The live shape Signal C must catch, and why it beats the vhost-aggregate score:
   meta-agent, AdsBot — several on cloud ASNs (AS15169, AS8075). A datacenter
   *trigger* would have hit these good bots; hence logged-only + FCrDNS exemption.
 
+### Signal C is NOT a silver bullet — two SHAPES of edge-visible abuse
+
+**Counter-example (2026-08-21, titan, `e-athlos.com`, live webtop).** score 0.37,
+err 11.5%, **uniqIP 140**, bot 2%, ~5–8 rps. Top IPs are FLAT: #1=43 reqs, #2=37,
+then a long slope to ~10 each; ASNs span South Africa, Brazil, Hong Kong,
+Colombia, Nigeria, Pakistan, Ethiopia, Iraq, Jordan, Algeria, Spain… all hitting
+`/shop/`, `/shop/page/2/`, `/product-category/`, product pages. A coordinated
+DISTRIBUTED catalog scrape of a Greek bike shop.
+
+- **Signal C would NOT catch this.** No per-IP outlier (top ≈ 4× median, not
+  62×), **`ip_skew` is low**. Lowering K to reach the pack FPs legit bursty
+  users; challenging the top 5 leaves 135 scraping. Wrong tool for this shape.
+- **It's already handled** by the existing **uniqIP path** (140 uniqIP → the
+  header shows `CHALLENGE auto` ON; `/__cfm_challenge` + `/__cfm_verify` are the
+  top paths).
+
+So edge-visible abuse has **two shapes**, needing different signals — Signal C is
+only the first:
+
+| shape | example | detector |
+|---|---|---|
+| **Concentrated** (few IPs, high per-IP rate) | e-vafeiadis (2 IPs @ 62× median) | **Signal C** (per-entity rate outlier) |
+| **Distributed** (many IPs, low per-IP rate) | e-athlos (140 IPs @ ~10 each) | **uniqIP aggregate** (exists) + **Signal B** (collective enumeration across the catalog) + **origin-dispersion anomaly** (a local shop lit up from 20+ unrelated countries/ASNs is itself the signal) |
+
+**Signal D idea (new, from e-athlos):** *origin-dispersion / audience anomaly* —
+flag a vhost whose live traffic's country/ASN entropy is wildly inconsistent
+with its baseline audience (a Greek shop does not normally get coordinated hits
+from Ethio Telecom + Pakistan Telecom + Jordan Data). Per-vhost, distributed-shape
+detector; complements the uniqIP path. Backlog.
+
+**Takeaway for scope:** don't sell Signal C as "the" abuse detector. It targets
+the concentrated shape. The distributed shape is (a) already partly covered by
+uniqIP and (b) needs Signal B / Signal D. Build C first (it's the clean gap:
+concentrated abuse under the aggregate score, like e-vafeiadis), measure, then B/D.
+
 ## 5. Telemetry contract — MCP-readable (hard requirement)
 
 Shadow signals must be **queryable over MCP**, not just greppable, so we can
