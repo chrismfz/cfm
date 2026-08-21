@@ -49,8 +49,12 @@ type Entry struct {
 }
 
 // Parse extracts an Entry from one log line. Returns ok=false for a line that
-// isn't an abuse-shadow marker. The marker's values contain no spaces (host/ip/
-// tags/numbers only), so a simple space-split of the `key=value` tail is exact.
+// isn't an abuse-shadow marker. This relies on a contract the emitter upholds:
+// every value is space-free (host/ip/tags/numbers only), so a plain space-split
+// of the `key=value` tail is exact. The one value derived from free-form ASN org
+// names — provider — is canonicalized space-free at the source (DatacenterClass
+// in internal/webdetector/asnclass.go strips interior spaces, e.g. "data center"
+// -> "datacenter"); a space would split the field and drop the tail here.
 func Parse(line string) (Entry, bool) {
 	i := strings.Index(line, "[abuse-shadow] ")
 	if i < 0 {

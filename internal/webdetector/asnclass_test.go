@@ -18,6 +18,11 @@ func TestDatacenterClass(t *testing.T) {
 		{"ovh by name", 99999, "OVH SAS", "ovh"},
 		{"leaseweb by name", 88888, "LeaseWeb Netherlands B.V.", "leaseweb"},
 		{"generic hosting by name", 77777, "Big Hosting LLC", "hosting"},
+		// "data center" (with a space) in an org name must canonicalize to a
+		// space-free tag — the abuse-shadow log line is space-delimited, so a
+		// tag with an interior space would split the provider= field and the
+		// parser would drop the tail.
+		{"data center org canonicalizes space-free", 66666, "Acme Data Center Ltd", "datacenter"},
 		// Consumer ISPs must NOT classify — the reason the keyword list avoids
 		// ambiguous tokens like "server"/"cloud"/"net"/"solutions".
 		{"greek isp", 6799, "Ote SA (Hellenic Telecommunications Organisation)", ""},

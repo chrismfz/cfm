@@ -78,7 +78,11 @@ func DatacenterClass(asn uint, asnName string) string {
 	name := strings.ToLower(asnName)
 	for _, kw := range cloudOrgKeywords {
 		if strings.Contains(name, kw) {
-			return kw
+			// Canonicalize to a space-free tag: the abuse-shadow log line is
+			// space-delimited (provider=%s), so a keyword like "data center"
+			// must never be emitted verbatim or it splits the field and the
+			// parser drops the tail. "data center" -> "datacenter".
+			return strings.ReplaceAll(kw, " ", "")
 		}
 	}
 	return ""
