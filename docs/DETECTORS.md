@@ -4,7 +4,7 @@ This guide explains how to configure CFM detectors safely in production, startin
 
 - Main runtime file: `/etc/cfm/detectors.conf`
 - Reference template/examples: [`../configs/detectors.conf`](../configs/detectors.conf)
-- Leniency companion sections: [`Detectors.Leniency.md`](Detectors.Leniency.md)
+- Leniency companion sections: [§6](#6-leniency-companion-sections)
 - Web UI / detectors settings page: [`cfm-admin-webtop.md`](cfm-admin-webtop.md)
 
 ---
@@ -577,6 +577,54 @@ Mitigation path:
 ## 5) Cross-links
 
 - Reference config and inline presets: [`../configs/detectors.conf`](../configs/detectors.conf)
-- Leniency companion docs: [`Detectors.Leniency.md`](Detectors.Leniency.md)
+- Leniency companion sections: [§6](#6-leniency-companion-sections)
 - Web UI / detector settings docs: [`cfm-admin-webtop.md`](cfm-admin-webtop.md)
 
+---
+
+## 6) Leniency companion sections
+
+`[<section>.leniency]` companion blocks let a detector apply a **softer block
+policy** to sources that match a country or ASN, and optionally keep those
+blocks off the shared fleet blocklist. Origin is never trusted: a match only
+*softens* the action (e.g. a temp-ban instead of permanent), it never skips
+enforcement — see `webdetector-refactor.md` §4a and CLAUDE.md §6 for why
+GeoIP/ASN must stay additive-only.
+
+**Where it runs.** The section sink (`internal/detectors/autoblock_sink.go`)
+checks leniency after enrichment and before the cooldown/block switch: on a
+match it swaps to the softer `effectivePol` and sets the API-report flag. No
+detector logic or `*_register.go` changes — leniency is purely a sink policy.
+
+**Config syntax:**
+```ini
+[exim_security.leniency]
+MATCH_COUNTRY  = "GR,CY"           ; ISO or full name, OR logic
+; MATCH_ASN   = "AS6799,AS6866"    ; optional, OR with country
+BLOCK          = "1h"              ; no | dryrun | permanent | <duration>
+BLOCK_COOLDOWN = "30m"
+SEND_TO_API       = YES            ; YES (default) | NO — report the block at all
+SEND_TO_BLOCKLIST = lenient        ; lenient | blacklist (default) — destination
+                                   ; list when SEND_TO_API=YES. "lenient" records
+                                   ; the block centrally for visibility (support /
+                                   ; unblock lookups) but is NEVER served to the
+                                   ; fleet, so a known-good origin is not propagated.
+```
+
+**Log output** — when leniency matches:
+```
+[leniency][exim_security] ip=94.68.43.7 matched (country=GR) → block=1h cooldown=30m0s send_to_api=false
+```
+plus `leniency=yes  leniency_reason=country=GR  send_to_api=no` on the alert.
+
+**Intended behaviour:**
+- GR/CY IP failing auth 6× → blocked 1h locally, NOT sent to the fleet API.
+- Non-domestic / datacenter IP failing auth 6× → normal permanent block, sent to API.
+- No `[<section>.leniency]`, or enricher disabled, or no `MATCH_*` → normal block (leniency silently skipped).
+- `BLOCK = no` in leniency → alert logged, no firewall action, no API.
+- Hot-reload picks up leniency edits on the next reload; `.leniency` sections do not appear in the "enabled sections" log line.
+
+**Multi-leniency (v2 — not built):** named instances
+(`[exim_security.leniency:domestic]`, `[…:trusted]`) for per-match policies
+would need `*leniencyPolicy` → `[]*leniencyPolicy` in the sink with
+first-match-wins (~20 lines on top of the current foundation).

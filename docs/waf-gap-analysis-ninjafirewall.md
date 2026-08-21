@@ -1,5 +1,7 @@
 # WAF gap analysis — CFM vs. an app-level PHP WAF (clean-room)
 
+> **DECISION RECORD (2026-06-27).** Final dispositions of the CFM-edge-WAF vs app-level-PHP-WAF gap analysis (1 shipped — rule 318; 4 dropped/deferred with rationale + the GPLv3/Apache licensing boundary). Kept so these decisions are not reopened without new evidence.
+
 Prompted by a real incident (2026-06-26): `myip.gr` migrated WordPress →
 Astro; the WHMCS billing app (`/clients/`) had been protected by an app-level
 PHP WAF (NinjaFirewall, `auto_prepend_file` "Full WAF") that was removed with

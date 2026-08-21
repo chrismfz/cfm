@@ -1,5 +1,7 @@
 # Edge / Lua / OpenResty audit — 2026-07-08
 
+> **HISTORICAL — audit closed 2026-07-14.** Every F01–F62 finding is fixed, an accepted/documented residual, or a tracked defer. Two carry-forwards remain: **F57** (perf, force-unblock scan) and **F10b** (low, bracket-class globs). For current edge/Lua state see `docs/edge-unification-plan.md` and `docs/waf.md`.
+
 > Tracking doc for the July-2026 edge audit. Companion to the machine-generated
 > report; **this file is the source of truth for progress**. Tick an item when its
 > fix lands and record the commit/PR next to it (see _How to use_ below).

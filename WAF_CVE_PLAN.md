@@ -1,5 +1,7 @@
 # WAF CVE Detection Plan
 
+> **DESIGN + BACKLOG — superseded by `WAF_CVE.md` for implemented state.** The phases, reason-format and `waf_security` autoblock defaults described here have shipped and are authoritatively documented as-built in `WAF_CVE.md` ("this doc and the code win"). This file is retained for the candidate backlog, the CVE-intelligence-source pipeline, and the feasibility/priority rubric.
+
 ## Purpose
 
 This document describes a safe, scalable plan for adding CVE-specific WAF coverage to CFM without turning CMS/plugin reconnaissance into broad blocking rules.

@@ -534,7 +534,7 @@ CFM detector runtime config lives at **`/etc/cfm/detectors.conf`** (packaged bas
 
 - Inline detector examples and templates: [`configs/detectors.conf`](configs/detectors.conf)
 - Detector model, built-ins, and custom detector how-to: [`docs/DETECTORS.md`](docs/DETECTORS.md)
-- Leniency tuning and `.leniency` companion sections: [`docs/Detectors.Leniency.md`](docs/Detectors.Leniency.md)
+- Leniency tuning and `.leniency` companion sections: [`docs/DETECTORS.md` §6](docs/DETECTORS.md#6-leniency-companion-sections)
 
 Capabilities at a glance:
 - Built-in detectors for SSH, mail, FTP, MySQL, cPanel, ModSecurity, health, web traffic, and API abuse.
