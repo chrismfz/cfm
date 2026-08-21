@@ -2,8 +2,10 @@ package blocklists
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 )
@@ -20,7 +22,10 @@ type Pruner interface {
 
 // ApplierFunc: βοηθητικό για να περάσεις σκέτη συνάρτηση ως Applier.
 type ApplierFunc func(ctx context.Context, f Feed, res *FetchResult) error
-func (fn ApplierFunc) ApplyFeed(ctx context.Context, f Feed, res *FetchResult) error { return fn(ctx, f, res) }
+
+func (fn ApplierFunc) ApplyFeed(ctx context.Context, f Feed, res *FetchResult) error {
+	return fn(ctx, f, res)
+}
 
 type Manager struct {
 	mu      sync.Mutex
@@ -44,7 +49,39 @@ type runner struct {
 	lastV4    int
 	lastV6    int
 	interval  time.Duration
+
+	// lastHash is the sha256 of the last content we successfully applied for this
+	// feed; haveHash guards the first fetch. lastApply is when that apply
+	// happened, used to force a periodic re-apply even when content is unchanged
+	// (see feedResyncInterval). All three are accessed only from the feed's
+	// single fetch goroutine (see fetchOnce), so no locking is needed — do NOT
+	// read them from Status() or any other goroutine without adding
+	// synchronization, as the fetch goroutine writes them lock-free.
+	lastHash  [32]byte
+	haveHash  bool
+	lastApply time.Time
 }
+
+// feedResyncInterval bounds how long the content-hash skip may suppress a
+// re-apply. Even when a feed's content is unchanged, we re-apply at least this
+// often so the per-feed sets and global unions self-heal if anything cleared
+// them out of band (e.g. an operator `cfm reset` without a daemon restart).
+// Feed intervals are ≥ 1h (ParseConfig rejects anything shorter), so this is at
+// most ~6 polls: it keeps the old per-tick re-apply's healing property within a
+// bounded window while still skipping the vast majority of redundant applies for
+// a frequently-polled feed. The check is consulted only at fetch time, so the
+// skip only benefits feeds polled more often than this; a feed whose interval
+// already exceeds feedResyncInterval re-applies on every poll (no skip), and its
+// heal window is one interval.
+//
+// NOTE: a same-named feed whose URL/TTL is edited in place is a pre-existing
+// limitation — startOneLocked keeps the running runner (and its captured Feed)
+// until the daemon restarts. That is unchanged by (and out of scope for) the
+// content-hash skip: the old source was already the one being applied, so the
+// skip does not alter which content is enforced. Restarting a runner safely on
+// an in-place edit needs to wait out the old goroutine's in-flight ApplyFeed
+// (which ignores ctx), so it belongs in its own change.
+const feedResyncInterval = 6 * time.Hour
 
 func NewManager(applier Applier) *Manager {
 	return &Manager{
@@ -87,7 +124,9 @@ func (m *Manager) Reload(feeds []Feed) {
 	defer m.mu.Unlock()
 
 	next := map[string]Feed{}
-	for _, f := range feeds { next[f.Name] = f }
+	for _, f := range feeds {
+		next[f.Name] = f
+	}
 
 	// stop removed runners
 	for name := range m.runs {
@@ -111,7 +150,6 @@ func (m *Manager) Reload(feeds []Feed) {
 		_ = pr.PruneExternalFeeds(active)
 	}
 }
-
 
 func (m *Manager) startOneLocked(name string) {
 	f, ok := m.feeds[name]
@@ -175,11 +213,54 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 		return
 	}
 	r.lastV4, r.lastV6 = len(res.V4), len(res.V6)
+
+	// Skip the (potentially very large) re-apply when the fetched content is
+	// identical to what we last applied for this feed. A feed is re-fetched on
+	// its interval but usually changes far less often; without this, every tick
+	// flushed the per-feed set and re-added all elements (and rebuilt the global
+	// unions) even when nothing changed — tens of thousands of nft element adds
+	// per hour for a large list. It is safe to skip because enforcement is via
+	// the permanent union sets (rebuilt from in-memory caches), which stay
+	// correct while the content is unchanged; there is no per-element TTL to
+	// refresh at the union layer. The hash is computed every poll — on a skip it
+	// confirms the content is identical, and on an apply it becomes the new
+	// baseline — so its cost (one sort + sha256) is not wasted on the apply path.
+	h := hashResult(res)
+	if r.haveHash && h == r.lastHash && time.Since(r.lastApply) < feedResyncInterval {
+		return
+	}
+
 	if err := m.applier.ApplyFeed(ctx, r.feed, res); err != nil {
 		r.lastErr = fmt.Errorf("apply feed %q: %w", r.feed.Name, err)
 		return
 	}
+	r.lastHash, r.haveHash = h, true
+	r.lastApply = time.Now() // start the resync clock at apply completion
 	r.lastErr = nil
+}
+
+// hashResult returns a content hash of a fetched feed that is independent of the
+// order in which the source lists its entries, so a feed that reshuffles its
+// lines but keeps the same set still hashes equal (and is skipped). It hashes
+// copies, never mutating the caller's slices.
+func hashResult(res *FetchResult) [32]byte {
+	v4 := append([]string(nil), res.V4...)
+	v6 := append([]string(nil), res.V6...)
+	sort.Strings(v4)
+	sort.Strings(v6)
+	h := sha256.New()
+	for _, s := range v4 {
+		_, _ = h.Write([]byte(s))
+		_, _ = h.Write([]byte{'\n'})
+	}
+	_, _ = h.Write([]byte{0}) // separator so v4/v6 boundary can't be shifted
+	for _, s := range v6 {
+		_, _ = h.Write([]byte(s))
+		_, _ = h.Write([]byte{'\n'})
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
 }
 
 // Προαιρετικό: για μελλοντικό `cfm status` να δείχνει κατάσταση feeds

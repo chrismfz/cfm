@@ -844,6 +844,19 @@ func runDaemon(args []string) {
 			fmt.Fprintln(os.Stderr, "read config error:", err)
 			return
 		}
+
+		// Fast path for cfm.deny: reconcile the permanent host entries in bulk nft
+		// transactions instead of forking nft twice per IP in the loop below (the
+		// single most expensive startup step on a large block list). Whatever it
+		// applies is marked seen so the loop then handles only the remainder —
+		// CIDRs, TTL'd entries and the allow list stay per-IP. See
+		// bulkPreapplyDenyHosts; backends without the bulk reconcile fall through.
+		if !isAllow {
+			if bb, ok := be.(manualBulkBlocker); ok {
+				bulkPreapplyDenyHosts(entries, seenBlock, bb)
+			}
+		}
+
 		for _, e := range entries {
 			spec := "perm"
 			if e.Until != nil {

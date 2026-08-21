@@ -52,8 +52,31 @@ back-filled here — see the git/PR history for that period.
   yet hard-dropped on any port — the general firewall (ports policy,
   flood/connlimit/hardening) and the detectors are already active and re-block
   any source that actively re-offends, though quiet/manually-curated entries
-  stay unenforced until the apply lands. (Batching the per-IP apply to shrink
-  that window to well under a second is tracked as a separate follow-up.)
+  stay unenforced until the apply lands. (The per-IP apply itself is now
+  batched — see the next entry — shrinking that window to well under a second.)
+- **`cfm.deny` now applies in batched nft transactions instead of one nft add
+  per IP.** The block list is reconciled against the live nft set — entries
+  already present are skipped and only the missing ones are added, in bulk — so
+  a warm restart (where the kernel sets persist) reads each block set once and
+  adds nothing, and a cold boot lands the whole list in a couple of `nft` calls
+  — instead of ~2 forks per IP either way (≈34s for ~1,200 entries). Permanent host entries take the bulk path;
+  CIDRs and TTL'd entries keep the per-IP path, and any bulk error falls back to
+  it, so the resulting block set is identical either way.
+- **Blocklist feeds are no longer re-applied when their content hasn't
+  changed.** Each feed is re-fetched on its interval, but most feeds change far
+  less often than they are polled; previously every poll flushed the per-feed
+  nft set and re-added every element (and rebuilt the global union sets) even
+  when nothing changed — tens of thousands of `nft` element operations per hour
+  for a large list. The manager now hashes the fetched content (order-
+  independently) and skips the re-apply when it matches what was last applied,
+  so an unchanged 100k-entry feed polled hourly costs one download and zero nft
+  work instead of a full flush + re-add. Safe because enforcement is via the
+  permanent union sets, which stay correct while the content is unchanged; a
+  changed feed still applies in full, and a failed apply is retried (the hash
+  only advances on success). An unchanged feed is still force-re-applied at
+  least every 6h, so if a feed's nft sets are ever cleared out of band (e.g. a
+  `cfm reset` without a daemon restart) they self-heal within that window.
+
 ### Fixed
 - **`cfm webtop challenge` no longer misreports on a failed query.** The
   `status`, `host`, `events`, and list commands decoded the HTTP body without
