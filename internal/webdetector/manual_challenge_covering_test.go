@@ -14,7 +14,7 @@ import (
 // manualChallengeCovering, tested here.
 func TestManualChallengeCovering(t *testing.T) {
 	e := &Engine{}
-	e.manualChal.init()
+	e.manualChal.init("")
 
 	ttl := 24 * time.Hour
 	e.manualChal.set("example.com", ttl, "manual")
@@ -89,7 +89,7 @@ func TestManualChallengeCovering(t *testing.T) {
 func TestManualChallengeCoversClear(t *testing.T) {
 	t.Run("apex clear is blocked by a www-only manual challenge", func(t *testing.T) {
 		e := &Engine{}
-		e.manualChal.init()
+		e.manualChal.init("")
 		e.manualChal.set("www.victim.com", 24*time.Hour, "manual")
 
 		// Clearing the apex would delete [victim.com, www.victim.com] —
@@ -111,7 +111,7 @@ func TestManualChallengeCoversClear(t *testing.T) {
 
 	t.Run("apex clear is blocked by an apex manual challenge", func(t *testing.T) {
 		e := &Engine{}
-		e.manualChal.init()
+		e.manualChal.init("")
 		e.manualChal.set("victim.com", 24*time.Hour, "manual")
 
 		if covered, _ := e.manualChallengeCoversClear("victim.com"); !covered {
@@ -125,7 +125,7 @@ func TestManualChallengeCoversClear(t *testing.T) {
 
 	t.Run("unrelated host clear is not blocked", func(t *testing.T) {
 		e := &Engine{}
-		e.manualChal.init()
+		e.manualChal.init("")
 		e.manualChal.set("victim.com", 24*time.Hour, "manual")
 
 		if covered, _ := e.manualChallengeCoversClear("other.com"); covered {

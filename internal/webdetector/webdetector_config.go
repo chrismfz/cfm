@@ -253,8 +253,13 @@ type Config struct {
 	HistoryMaxRows       int           // HISTORY_MAX_ROWS (row cap, newest kept; 0 = uncapped)
 
 	// Dynamic excludes persisted on disk (JSON) and editable via CLI/API.
-	ChallengeExcludeStorePath string        // CHALLENGE_EXCLUDE_STORE_PATH
-	WAFExcludeStorePath       string        // WAF_EXCLUDE_STORE_PATH
+	ChallengeExcludeStorePath string // CHALLENGE_EXCLUDE_STORE_PATH
+	WAFExcludeStorePath       string // WAF_EXCLUDE_STORE_PATH
+	// ChallengeManualStorePath persists operator-set MANUAL vhost challenges
+	// (host → expiry/reason) so a long TTL survives a daemon restart. Auto
+	// challenges are score-driven and self-restore, so they need no on-disk
+	// state; only the manual, operator-intended ones do.
+	ChallengeManualStorePath  string        // CHALLENGE_MANUAL_STORE_PATH
 	ClamScanOverrideStorePath string        // CLAM_SCAN_OVERRIDE_STORE_PATH (per-vhost ClamAV upload-scan opt-out)
 	ClamModeOverrideStorePath string        // CLAM_MODE_OVERRIDE_STORE_PATH (per-vhost async/inline mode flip)
 	ClamSigIgnoreStorePath    string        // CLAM_SIGIGNORE_STORE_PATH (per-signature ClamAV excludes, global + per-vhost)
@@ -297,6 +302,9 @@ func (c *Config) FillDefaults() {
 	}
 	if c.WAFExcludeStorePath == "" {
 		c.WAFExcludeStorePath = "/var/lib/cfm/webdetector_waf_excludes.json"
+	}
+	if c.ChallengeManualStorePath == "" {
+		c.ChallengeManualStorePath = "/var/lib/cfm/webdetector_manual_challenges.json"
 	}
 	if c.ClamScanOverrideStorePath == "" {
 		c.ClamScanOverrideStorePath = "/var/lib/cfm/webdetector_clam_overrides.json"

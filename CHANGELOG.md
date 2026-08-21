@@ -17,6 +17,23 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **Manual vhost challenges now survive a daemon restart.** An operator-set
+  manual challenge (e.g. `cfm webtop challenge add host --ttl 34h`, or the
+  cfm-admin button) was held only in memory, so every daemon restart — a `make
+  sync` upgrade, a crash, an OOM — silently wiped it and a long TTL dropped to
+  nothing hours early. The manual state is now persisted to a JSON snapshot
+  (`/var/lib/cfm/webdetector_manual_challenges.json`, `0600`, atomic
+  tmp+rename) on every add/remove and reloaded on startup: expired entries are
+  dropped, and each surviving challenge is re-pushed to the edge with its
+  **remaining** window (not a reset TTL), so a 34h challenge set this morning
+  keeps enforcing across an afternoon upgrade. Auto (score-driven) challenges
+  are intentionally NOT persisted — the scorer re-derives them from live traffic
+  within a tick — and per-vhost WAF on/off already persists via its own exclude
+  file; only the manual, operator-intended challenge state was missing durable
+  storage. New optional key `CHALLENGE_MANUAL_STORE_PATH` (defaults to the path
+  above).
+
 ### Added
 - **`abuse_shadow` MCP tool + `/api/v1/system/abuse-shadow` endpoint (I3).**
   New `internal/abuseshadow` tails the LOG-ONLY abuse-shadow log
