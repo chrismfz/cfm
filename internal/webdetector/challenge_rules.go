@@ -2168,6 +2168,9 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 	e.mu.RUnlock()
 
 	const cooldown = 10 * time.Second
+	// Per-tick budget for good-bot FCrDNS verification (bounds synchronous DNS
+	// during a distributed attack; see challenge_subnet_goodbot.go).
+	goodBotVerifyBudget := maxSubnetGoodBotVerifyPerTick
 
 	for pairKey, a := range pairs {
 		if a == nil || a.host == "" {
@@ -2192,6 +2195,17 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 		}
 		if e.hostBypassed(a.host) {
 			continue
+		}
+		// Good-bot exemption BEFORE the challenge fires: a /24 whose sampled
+		// members FCrDNS-verify as one crawler (Meta, Googlebot, ...) is a
+		// legitimate crawler farm, not a botnet — the exact live FP this guards
+		// against (Meta's 57.141.20.0/24, 2026-08-21). Fail-closed: spoofed or
+		// missing PTRs earn no exemption. The exemption is logged once per posTTL
+		// inside subnetVerifiedGoodBot (not per tick). See challenge_subnet_goodbot.go.
+		if e.cfg.ChallengeSubnetGoodBotExempt {
+			if _, ok := e.subnetVerifiedGoodBot(a.sub, sa.ips, &goodBotVerifyBudget, now); ok {
+				continue
+			}
 		}
 
 		e.emitMu.Lock()

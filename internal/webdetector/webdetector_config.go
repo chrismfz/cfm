@@ -235,15 +235,16 @@ type Config struct {
 	ChallengeVhostUniqPathsCap     int           // CHALLENGE_VHOST_UNIQPATHS_CAP (early stop)
 
 	// Subnet-based challenge mode (behavioral, low-and-slow rotators)
-	ChallengeSubnetEnabled     bool          // CHALLENGE_SUBNET_ENABLED
-	ChallengeSubnetPrefixV4    int           // CHALLENGE_SUBNET_PREFIX_V4 (default 24)
-	ChallengeSubnetMinIPs      int           // CHALLENGE_SUBNET_MIN_IPS
-	ChallengeSubnetMinReq      int           // CHALLENGE_SUBNET_MIN_REQ
-	ChallengeSubnetMinUniqPath int           // CHALLENGE_SUBNET_MIN_UNIQPATH
-	ChallengeSubnetMinUniqHost int           // CHALLENGE_SUBNET_MIN_UNIQHOST
-	ChallengeSubnetTTL         time.Duration // CHALLENGE_SUBNET_TTL
-	ChallengeSubnetCap         int           // CHALLENGE_SUBNET_CAP
-	ChallengeSubnetSameHost    bool          // CHALLENGE_SUBNET_SAME_HOST
+	ChallengeSubnetEnabled       bool          // CHALLENGE_SUBNET_ENABLED
+	ChallengeSubnetPrefixV4      int           // CHALLENGE_SUBNET_PREFIX_V4 (default 24)
+	ChallengeSubnetMinIPs        int           // CHALLENGE_SUBNET_MIN_IPS
+	ChallengeSubnetMinReq        int           // CHALLENGE_SUBNET_MIN_REQ
+	ChallengeSubnetMinUniqPath   int           // CHALLENGE_SUBNET_MIN_UNIQPATH
+	ChallengeSubnetMinUniqHost   int           // CHALLENGE_SUBNET_MIN_UNIQHOST
+	ChallengeSubnetTTL           time.Duration // CHALLENGE_SUBNET_TTL
+	ChallengeSubnetCap           int           // CHALLENGE_SUBNET_CAP
+	ChallengeSubnetSameHost      bool          // CHALLENGE_SUBNET_SAME_HOST
+	ChallengeSubnetGoodBotExempt bool          // CHALLENGE_SUBNET_GOODBOT_EXEMPT (default 1)
 
 	// Historical store (SQLite file; old JSONL file at same path is removed and recreated as SQLite)
 	HistoryEnabled       bool          // HISTORY_ENABLED

@@ -231,6 +231,11 @@ var goodBotPTRSuffixes = map[string]string{
 	".yandex.com":         "yandex",
 	".yandex.net":         "yandex",
 	".yandex.ru":          "yandex",
+	// Meta's crawler fleet (facebookexternalhit / meta-externalagent /
+	// meta-externalads) reverses to *.fbsv.net and forward-confirms. Added
+	// 2026-08-21 after CHALLENGE_SUBNET live-FP'd Meta's 57.141.20.0/24 on a
+	// shop vhost (60+ crawler IPs in one /24 tripped SUBNET_MIN_IPS).
+	".fbsv.net": "meta",
 }
 
 // verifiedGoodBot returns a good-bot name when ptr is a known good-bot host AND

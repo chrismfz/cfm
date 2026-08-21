@@ -17,7 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **`CHALLENGE_SUBNET` no longer challenges verified crawler fleets.** The
+  many-IPs-from-one-/24 heuristic is also the exact shape of a legitimate
+  crawler farm, and it was observed live challenging Meta's `57.141.20.0/24`
+  (60+ `meta-externalagent` fetchers on one shop vhost tripped
+  `SUBNET_MIN_IPS`). Before a subnet challenge fires, a small sample of the
+  /24's members is now FCrDNS-verified against the good-bot PTR registry —
+  a subnet whose members verify as the same crawler (3-of-4 sampled) is
+  exempt, with the verdict cached per subnet. Fail-closed: spoofed PTRs fail
+  forward-confirm and missing PTRs earn nothing, so botnet /24s are
+  unaffected. The registry also learned Meta (`*.fbsv.net`), which equally
+  benefits the abuse-shadow good-bot split. On by default
+  (`CHALLENGE_SUBNET_GOODBOT_EXEMPT = 1`) — existing installs inherit it on
+  upgrade; the direction is strictly fewer false positives, never more
+  blocking. Set it to `0` to challenge verified crawler /24s too.
 
 ## 2026.08.21
 
