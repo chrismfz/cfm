@@ -11,7 +11,7 @@ import (
 
 func newTestEngineForChallengeHandlers() *Engine {
 	e := &Engine{}
-	e.manualChal.init()
+	e.manualChal.init("")
 	return e
 }
 

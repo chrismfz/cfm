@@ -15,6 +15,10 @@
 package webdetector
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,15 +32,35 @@ type manualChalEntry struct {
 	Reason    string
 }
 
+// manualChalPersistEntry is the on-disk shape of one manual challenge. Kept
+// separate from manualChalEntry so the map key (host) is captured explicitly
+// in the JSON array and the format is stable/self-describing.
+type manualChalPersistEntry struct {
+	Host      string    `json:"host"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Reason    string    `json:"reason,omitempty"`
+}
+
 // manualChalState is embedded in Engine.
+//
+// It is persisted to disk (path, JSON) so an operator-set manual challenge with
+// a long TTL survives a daemon restart (upgrade via `make sync`, crash, OOM).
+// Without persistence the in-memory map was wiped on every restart and a 34h
+// manual challenge silently dropped to nothing. Auto challenges are NOT
+// persisted — they are score-driven and the scorer re-derives them from live
+// traffic within a tick, so only the manual, operator-intended state is durable.
 type manualChalState struct {
 	mu     sync.Mutex
 	vhosts map[string]manualChalEntry // host → entry
+	path   string                     // on-disk JSON snapshot ("" disables persistence)
 }
 
 // initManualChal must be called from NewEngine (already done via field init).
-func (s *manualChalState) init() {
+// path is the JSON snapshot file; "" keeps the store purely in-memory (tests).
+func (s *manualChalState) init(path string) {
 	s.vhosts = make(map[string]manualChalEntry)
+	s.path = strings.TrimSpace(path)
+	s.load()
 }
 
 // set adds or refreshes a manual challenge for host.
@@ -47,6 +71,7 @@ func (s *manualChalState) set(host string, ttl time.Duration, reason string) {
 		ExpiresAt: time.Now().Add(ttl),
 		Reason:    reason,
 	}
+	s.saveLocked()
 }
 
 // clear removes a manual challenge (returns whether it was present).
@@ -55,7 +80,85 @@ func (s *manualChalState) clear(host string) bool {
 	defer s.mu.Unlock()
 	_, ok := s.vhosts[host]
 	delete(s.vhosts, host)
+	s.saveLocked()
 	return ok
+}
+
+// load reads the persisted manual challenges, dropping any already-expired
+// entry. Best-effort: a missing/empty/corrupt file leaves the store empty
+// rather than failing daemon startup. Called from init before any concurrency.
+func (s *manualChalState) load() {
+	if s.path == "" {
+		return
+	}
+	b, err := os.ReadFile(s.path)
+	if err != nil || len(b) == 0 {
+		return
+	}
+	var arr []manualChalPersistEntry
+	if err := json.Unmarshal(b, &arr); err != nil {
+		logging.Logf("[challenge][vhost] manual persist load failed (%s): %v", s.path, err)
+		return
+	}
+	now := time.Now()
+	restored := 0
+	for _, e := range arr {
+		// Round-trips a key a prior set() wrote; the API/CLI already lowercased
+		// the host, and lowercasing again here is a safe no-op that also fixes a
+		// hand-edited file.
+		h := strings.ToLower(strings.TrimSpace(e.Host))
+		if h == "" || e.ExpiresAt.IsZero() || now.After(e.ExpiresAt) {
+			continue
+		}
+		reason := e.Reason
+		if reason == "" {
+			reason = "manual"
+		}
+		s.vhosts[h] = manualChalEntry{ExpiresAt: e.ExpiresAt, Reason: reason}
+		restored++
+	}
+	if restored > 0 {
+		logging.Logf("[challenge][vhost] restored %d manual challenge(s) from %s", restored, s.path)
+	}
+}
+
+// saveLocked atomically writes the current (non-expired) entries to disk. The
+// caller must hold s.mu. Persistence failure is logged, never fatal — the
+// in-memory operation always stands. Mirrors excludeStore.saveLocked (tmp +
+// rename + chmod 0600). Already-expired entries are skipped so the file stays
+// tidy; load() also time-filters, so a stale entry surviving a crash is inert.
+func (s *manualChalState) saveLocked() {
+	if s.path == "" {
+		return
+	}
+	now := time.Now()
+	arr := make([]manualChalPersistEntry, 0, len(s.vhosts))
+	for h, e := range s.vhosts {
+		if now.After(e.ExpiresAt) {
+			continue
+		}
+		arr = append(arr, manualChalPersistEntry{Host: h, ExpiresAt: e.ExpiresAt, Reason: e.Reason})
+	}
+	sort.Slice(arr, func(i, j int) bool { return arr[i].Host < arr[j].Host })
+	b, err := json.MarshalIndent(arr, "", "  ")
+	if err != nil {
+		logging.Logf("[challenge][vhost] manual persist marshal failed: %v", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o750); err != nil {
+		logging.Logf("[challenge][vhost] manual persist mkdir failed (%s): %v", s.path, err)
+		return
+	}
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		logging.Logf("[challenge][vhost] manual persist write failed (%s): %v", tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		logging.Logf("[challenge][vhost] manual persist rename failed (%s): %v", s.path, err)
+		return
+	}
+	_ = os.Chmod(s.path, 0o600)
 }
 
 // active returns true if host has a non-expired manual challenge.
@@ -203,4 +306,34 @@ func (e *Engine) manualChallengeCoversClear(host string) (bool, time.Time) {
 // ManualChallengeSnapshot returns all currently active manual challenges.
 func (e *Engine) ManualChallengeSnapshot() map[string]manualChalEntry {
 	return e.manualChal.snapshot()
+}
+
+// restoreManualChallenges re-asserts manual challenges that survived a daemon
+// restart. init() loads the in-memory manualChalState from disk, but the edge
+// bridge and the challenge API store both start empty every boot — so each
+// surviving (non-expired) manual challenge must be re-pushed to the bridge with
+// its REMAINING window (not the original TTL) and re-recorded in chalAPI, the
+// same shape the tick loop's keepManualOverSuppression uses. Called from
+// NewEngine after the bridge is wired.
+//
+// It does NOT append a history event: the original manual_on already lives in
+// the SQLite history (which persists across the restart), so re-adding one would
+// double-count. A manual_restore log marker records the re-assertion instead.
+func (e *Engine) restoreManualChallenges() {
+	for host, ent := range e.manualChal.snapshot() { // snapshot already drops expired
+		rem := time.Until(ent.ExpiresAt)
+		if rem <= 0 {
+			continue
+		}
+		logging.LogfCHALLENGES(
+			"[challenge][vhost] action=manual_restore host=%s ttl=%s reason=%s",
+			host, rem.Round(time.Second), ent.Reason,
+		)
+		if e.nginxBridge != nil {
+			e.nginxBridge.ChallengeVhostWithReason(host, rem, ent.Reason)
+		}
+		if e.chalAPI != nil {
+			e.chalAPI.RecordVhostManual(host, true, rem, ent.Reason)
+		}
+	}
 }

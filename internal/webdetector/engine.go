@@ -478,8 +478,10 @@ func NewEngine(cfg Config) *Engine {
 	e.http3Overrides = newHTTP3OverrideStore(cfg.HTTP3OverridesStorePath)
 	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
 	e.uaEmergency = NewUAEmergencyStore(cfg.UAEmergencyStorePath, cfg.UAEmergencyAuditLog)
-	// manual from api webtop challenge add//
-	e.manualChal.init()
+	// manual from api webtop challenge add// — init loads any persisted manual
+	// challenges from disk (filtering expired); restoreManualChallenges below
+	// re-pushes the survivors to the bridge once it is wired.
+	e.manualChal.init(cfg.ChallengeManualStorePath)
 
 	// Edge (OpenResty/Angie) decision bridge — always on. Edge mode is the
 	// only mode (docs/edge-unification-plan.md Phase 1); the old OPENRESTY_MODE
@@ -494,6 +496,11 @@ func NewEngine(cfg Config) *Engine {
 	e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
 	e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 	e.nginxBridge.ListTrafficRules = e.TrafficRuleList
+
+	// Re-assert manual vhost challenges that survived a restart (loaded from
+	// disk in manualChal.init above) now that the bridge exists — push each with
+	// its remaining window so a long manual TTL keeps enforcing across upgrades.
+	e.restoreManualChallenges()
 
 	// Register the bridge as the process-wide WAF cleaner so in-daemon
 	// unblock paths (the /unblock endpoint and the agent's pending-unblock

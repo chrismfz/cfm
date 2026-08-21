@@ -44,7 +44,7 @@ func TestHostChallengeExcluded(t *testing.T) {
 // exclude/ignore still MATCH the host, but manual coverage overrides the clear.
 func TestManualWinsOverExcludeDecision(t *testing.T) {
 	e := &Engine{}
-	e.manualChal.init()
+	e.manualChal.init("")
 	e.challengeExcludes = newExcludeStore(filepath.Join(t.TempDir(), "ch.json"))
 
 	// Operator: challenge-exclude the apex AND manual-challenge the apex.
@@ -87,7 +87,7 @@ func TestManualWinsOverExcludeDecision(t *testing.T) {
 // manually challenged and is excluded). This documents that split.
 func TestManualKeepSelfVsSiblingCoverage(t *testing.T) {
 	e := &Engine{}
-	e.manualChal.init()
+	e.manualChal.init("")
 	e.manualChal.set("www.only.gr", 24*time.Hour, "manual") // www-only manual
 
 	// Apex: clearing it WOULD delete the www manual entry → keep (don't clear)…
