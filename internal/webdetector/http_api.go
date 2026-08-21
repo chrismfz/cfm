@@ -91,6 +91,7 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/challenge/vhost/add", e.handleChallengeVhostAdd},
 		{"/api/v1/challenge/vhost/remove", e.handleChallengeVhostRemove},
 		{"/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus},
+		{"/api/v1/challenge/vhost/attack", e.handleChallengeVhostAttack}, // ?host=&on=1|0 (under-attack override)
 		{"/api/v1/challenge/exclude/list", e.handleChallengeExcludeList},
 		{"/api/v1/challenge/exclude/add", e.handleChallengeExcludeAdd},
 		{"/api/v1/challenge/exclude/remove", e.handleChallengeExcludeRemove},
@@ -357,16 +358,20 @@ func (e *Engine) handleDrilldown(w http.ResponseWriter, r *http.Request) {
 	}
 
 	d := e.HostDetail(host, topN)
+	now := time.Now()
+	resp := map[string]interface{}{"short": d}
 	if lr, ok := e.longwin.One(host); ok {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"short": d,
-			"long":  lr,
-		})
-		return
+		resp["long"] = lr
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"short": d,
-	})
+	// Under-Attack Mode (I1): carry the escalation state (and, when escalated,
+	// the since) so the CLI drilldown and MCP host_drilldown surface it without a
+	// second fetch. Single-sourced via deriveVhostState; normalizeHost keeps the
+	// attack-tracker lookup in lock-step with how the state helper keys it.
+	resp["state"] = e.deriveVhostStateForHost(host, now)
+	if on, since, _ := e.VhostAttackState(normalizeHost(host)); on && !since.IsZero() {
+		resp["attack_since"] = since
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (e *Engine) handleHotIPs(w http.ResponseWriter, r *http.Request) {

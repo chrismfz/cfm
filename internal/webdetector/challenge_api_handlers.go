@@ -22,6 +22,51 @@ func (e *Engine) handleChallengeSummary(w http.ResponseWriter, r *http.Request) 
 
 // handleChallengeVhosts lists all currently challenged vhosts.
 // Guard 3: lists cross-tenant vhost data — admin/loopback only.
+// deriveVhostState places a vhost on the escalation ladder for the API `state`
+// field: under_attack (the under-attack tracker has escalated it, incl. an
+// operator override) > challenged (a challenge is effectively armed) >
+// suspicious (score crossed the arm threshold but not yet armed) > normal.
+// Effectiveness is recomputed from the row (Status/Mode/ExpiresAt) via
+// vhostEffectivelyActive, so the helper works on a raw stored row and does not
+// depend on the caller pre-folding Status. Single-sourced on purpose — every
+// surface that reports `state` (handleChallengeVhosts, handleChallengeVhost,
+// deriveVhostStateForHost) calls this one helper so they can never drift
+// (CLAUDE.md §5).
+func (e *Engine) deriveVhostState(v *ChallengeVhostState, now time.Time) string {
+	if v == nil {
+		return "normal"
+	}
+	if e != nil {
+		if on, _, _ := e.VhostAttackState(v.Host); on {
+			return "under_attack"
+		}
+	}
+	if vhostEffectivelyActive(v, now) {
+		return "challenged"
+	}
+	if v.OnThresh > 0 && v.Score >= v.OnThresh {
+		return "suspicious"
+	}
+	return "normal"
+}
+
+// deriveVhostStateForHost resolves a host's escalation state from the challenge
+// store, for surfaces that have only a host name (the drilldown, the scoped
+// status endpoint). Normalizes the host so the exact-key store/tracker lookups
+// match how the rows are keyed (a "?host=Example.com:443" must resolve like the
+// stored "example.com"). Falls back to a bare row so an under-attack override
+// still shows even when the store has no challenge row for the host.
+func (e *Engine) deriveVhostStateForHost(host string, now time.Time) string {
+	host = normalizeHost(host)
+	cv := ChallengeVhostState{Host: host}
+	if e != nil && e.chalAPI != nil {
+		if v, ok := e.chalAPI.GetVhost(host); ok {
+			cv = v
+		}
+	}
+	return e.deriveVhostState(&cv, now)
+}
+
 func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
 	if !RequireAdmin(w, r) {
 		return
@@ -38,9 +83,15 @@ func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []ChallengeVhostState{})
 		return
 	}
+	// This list is store-driven, so a vhost forced UNDER_ATTACK by an operator
+	// override that has no challenge store row (never auto/manually challenged)
+	// does not appear here — it is still visible via the single-vhost endpoint
+	// and the drilldown. The normal path (auto escalation) always has a row.
 	rows := e.chalAPI.ListVhosts(status, mode, limit)
+	now := time.Now()
 	for i := range rows {
 		rows[i].SolverFarm = IsSolverFarm(rows[i].Host)
+		rows[i].State = e.deriveVhostState(&rows[i], now)
 	}
 	writeJSON(w, http.StatusOK, rows)
 }
@@ -74,6 +125,16 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 	}
 	v, ok := e.chalAPI.GetVhost(host)
 	if !ok {
+		// A vhost forced UNDER_ATTACK by an operator override may have no challenge
+		// store row (it was never auto/manually challenged). Report it rather than
+		// 404 so this surface agrees with the drilldown; otherwise it is a genuine
+		// "no active challenge" (the CLI relies on 404 for that).
+		if on, since, _ := e.VhostAttackState(host); on {
+			writeJSON(w, http.StatusOK, ChallengeVhostState{
+				Host: host, Status: "inactive", Mode: "auto", Since: since, State: "under_attack",
+			})
+			return
+		}
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
@@ -82,9 +143,12 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 	// rewrite the row keeps Status=="active" with a past ExpiresAt. ListVhosts
 	// filters those out via vhostEffectivelyActive; without the same fold here
 	// the two endpoints disagree and a caller sees status=active / left=expired.
-	if !vhostEffectivelyActive(&v, time.Now()) {
+	now := time.Now()
+	if !vhostEffectivelyActive(&v, now) {
 		v.Status = "inactive"
 	}
+	v.SolverFarm = IsSolverFarm(v.Host)
+	v.State = e.deriveVhostState(&v, now)
 	writeJSON(w, http.StatusOK, v)
 }
 

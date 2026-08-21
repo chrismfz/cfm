@@ -43,6 +43,13 @@ type ChallengeVhostState struct {
 	// into this store would leave two things to expire instead of one.
 	SolverFarm bool `json:"solver_farm"`
 
+	// State is the vhost's position on the escalation ladder
+	// (normal|suspicious|challenged|under_attack). Stamped by the handler via the
+	// single deriveVhostState() helper (like SolverFarm, not stored): the
+	// under_attack rung lives in the under-attack tracker with its own lifecycle.
+	// Omitted from JSON when empty so older readers are unaffected.
+	State string `json:"state,omitempty"`
+
 	// manualUntil tracks an active operator manual challenge on this host,
 	// independent of the auto scorer. Unexported on purpose: it is NOT part of
 	// the API JSON (the status list keeps its single Status/Mode shape) — it
