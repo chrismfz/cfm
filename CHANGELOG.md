@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.21
+
 ### Fixed
 - **Manual vhost challenges now survive a daemon restart.** An operator-set
   manual challenge (e.g. `cfm webtop challenge add host --ttl 34h`, or the
