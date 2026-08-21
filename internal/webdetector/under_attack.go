@@ -496,7 +496,10 @@ func (e *Engine) SetVhostAttackOverride(host string, on bool, now time.Time) {
 
 // VhostAttackState reports whether a vhost is currently in UNDER_ATTACK, since
 // when, and the last transition's evidence line (kept consistent with `on`).
-// Read path for the surfaces (I1b).
+// Read path for the surfaces (I1b). An operator override is reflected
+// immediately — a just-issued `attack on|off` sets only the intent (the auto
+// state flips on the next tick), so honouring the override here keeps the
+// surfaces consistent with the operator's action without waiting a tick.
 func (e *Engine) VhostAttackState(host string) (on bool, since time.Time, evidence string) {
 	if e == nil || e.attack == nil || host == "" {
 		return false, time.Time{}, ""
@@ -505,6 +508,12 @@ func (e *Engine) VhostAttackState(host string) (on bool, since time.Time, eviden
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if st := t.hosts[host]; st != nil {
+		switch st.override {
+		case +1:
+			return true, st.since, st.evidence
+		case -1:
+			return false, st.since, st.evidence
+		}
 		return st.on, st.since, st.evidence
 	}
 	return false, time.Time{}, ""

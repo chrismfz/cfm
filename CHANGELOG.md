@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Under-Attack Mode (I1b): surfacing + operator override.** The per-vhost
+  escalation state is now visible and controllable. The challenge-vhost API rows
+  (`/api/v1/challenge/vhost`, `/vhosts`) and the web-detector drilldown carry an
+  additive `state` field (`normal|suspicious|challenged|under_attack`), derived
+  by a single helper so every surface agrees. `cfm webtop challenge` shows an
+  `attack` STAT for escalated vhosts, `cfm webtop challenge host <H>` and
+  `cfm webtop <vhost>` show `state=…` (with `since`), and MCP `challenge_vhosts`
+  / `host_drilldown` carry it too. New operator override:
+  `cfm webtop attack on|off <vhost>` → `POST /api/v1/challenge/vhost/attack`
+  forces a vhost into UNDER_ATTACK or clears it (suppressing auto re-entry for
+  the holddown); it is scoped like manual-challenge add/remove (a cPanel tenant
+  may override only its own vhost) and returns `409` when `UNDER_ATTACK` is off.
+  (The cfm-admin card badge + controls knob follow in a companion change.)
 - **Under-Attack Mode (increment I1): per-vhost challenge-efficacy detector,
   detect-only.** The challenge engine now closes the loop "is the challenge
   actually working?". A vhost that is already challenge-armed **and** whose

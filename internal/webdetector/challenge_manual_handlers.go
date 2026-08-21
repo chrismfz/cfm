@@ -124,6 +124,77 @@ func (e *Engine) handleChallengeVhostRemove(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+type chalVhostAttackRequest struct {
+	Host string `json:"host"`
+	On   *bool  `json:"on"`
+}
+
+// parseAttackOn resolves the desired override state from the query value (or a
+// JSON body bool, which wins). Returns an error for a missing/unrecognised value
+// so the operator can't accidentally no-op.
+func parseAttackOn(q string, body *bool) (bool, error) {
+	if body != nil {
+		return *body, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(q)) {
+	case "1", "true", "on", "yes":
+		return true, nil
+	case "0", "false", "off", "no":
+		return false, nil
+	}
+	return false, errors.New("missing or invalid 'on' (use on=1 to force under-attack, on=0 to clear)")
+}
+
+// POST /api/v1/challenge/vhost/attack?host=example.gr&on=1
+// Operator override for Under-Attack Mode: on=1|true|on forces the vhost INTO
+// UNDER_ATTACK; on=0|false|off leaves it and suppresses auto re-entry for the
+// holddown. Body { "host": "...", "on": true } is also accepted. Scoped tokens
+// may only override their own vhosts (vhostAllowed), mirroring vhost/add|remove.
+func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Request) {
+	host := normalizeHost(r.URL.Query().Get("host"))
+	onStr := r.URL.Query().Get("on")
+
+	var onBody *bool
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		var body chalVhostAttackRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+		if body.Host != "" {
+			host = normalizeHost(body.Host)
+		}
+		onBody = body.On
+	}
+
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
+	on, err := parseAttackOn(onStr, onBody)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// Scope check: scoped tokens may only override their own vhosts.
+	if !vhostAllowed(host, vhostScopeFromContext(r.Context())) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
+	// The override only means anything while the detector is running. Fail loudly
+	// rather than silently no-op (SetVhostAttackOverride is nil-safe when off).
+	if e == nil || !e.cfg.UnderAttack {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "under-attack mode is disabled (UNDER_ATTACK=0)"})
+		return
+	}
+
+	e.SetVhostAttackOverride(host, on, time.Now())
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"host":   host,
+		"attack": on,
+	})
+}
+
 // GET /api/v1/challenge/vhost/status?host=example.gr
 // Returns whether host is manually challenged (and expiry if so).
 func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Request) {

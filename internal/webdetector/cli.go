@@ -97,6 +97,8 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge exclude list")
 	fmt.Println("  cfm webtop challenge exclude add <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop challenge exclude remove <host|path> [--type host|path]")
+	fmt.Println("  cfm webtop attack on <H>                  # force a vhost into UNDER_ATTACK (operator override)")
+	fmt.Println("  cfm webtop attack off <H>                 # clear it + suppress auto re-entry for the holddown")
 	fmt.Println("  cfm webtop waf engine [--hours 24 --limit 20 --top 10]")
 	fmt.Println("  cfm webtop waf exclude list")
 	fmt.Println("  cfm webtop waf exclude add <host|path> [--type host|path]")
@@ -207,6 +209,9 @@ func RunWebTop(baseURL string, args []string) error {
 			// cfm webtop challenge host <H>
 			// cfm webtop challenge events [N]
 			return runChallengeWebTop(baseURL, args[1:])
+		case "attack":
+			// cfm webtop attack on|off <vhost>  (Under-Attack Mode operator override)
+			return runAttackWebTop(baseURL, args[1:])
 		case "waf":
 			return runWafWebTop(baseURL, args[1:])
 		case "clam", "clamav":
@@ -582,6 +587,27 @@ func runTopDrilldown(baseURL, host string) error {
 		short.Host, short.WindowSec, short.TotalReq,
 		short.DirectPct, short.BotPct, short.ProcAvgSec,
 		short.ShortScore)
+
+	// Under-Attack Mode (I1): the drilldown response now carries the escalation
+	// state (and attack_since when escalated). Surface it when non-normal.
+	var stateStr string
+	if b, ok := payload["state"]; ok {
+		_ = json.Unmarshal(b, &stateStr)
+	}
+	if stateStr != "" && stateStr != "normal" {
+		since := ""
+		if b, ok := payload["attack_since"]; ok {
+			var t time.Time
+			if json.Unmarshal(b, &t) == nil && !t.IsZero() {
+				since = t.Format(time.RFC3339)
+			}
+		}
+		if since != "" {
+			fmt.Printf("  state=%s since=%s\n", strings.ToUpper(stateStr), since)
+		} else {
+			fmt.Printf("  state=%s\n", strings.ToUpper(stateStr))
+		}
+	}
 
 	fmt.Printf("  ua_div=%.3f (unique=%d) path_div=%.3f (unique=%d) post_ratio=%.3f\n",
 		short.UADiversity, short.UniqueUAs,
@@ -1112,6 +1138,17 @@ type chalVhost struct {
 	RPS        float64   `json:"rps"`
 	Reasons    []string  `json:"reasons"`
 	LastAction string    `json:"last_action"`
+	State      string    `json:"state"` // normal|suspicious|challenged|under_attack
+}
+
+// chalStatCol is the STAT column value: "attack" when the vhost is in
+// UNDER_ATTACK, otherwise the raw effective status (active|inactive). Kept
+// separate from Status so the list's active-first sort is unaffected.
+func chalStatCol(h chalVhost) string {
+	if h.State == "under_attack" {
+		return "attack"
+	}
+	return h.Status
 }
 
 // chalTTLCols renders the two TTL columns for one vhost row: the window the
@@ -1235,8 +1272,12 @@ func runChallengeWebTop(baseURL string, args []string) error {
 		}
 
 		ttl, left := chalTTLCols(vh)
-		fmt.Printf("VHOST: %s  status=%s mode=%s since=%s ttl=%s left=%s score=%.2f uniqIP=%d rps=%.2f action=%s\n",
-			vh.Host, vh.Status, vh.Mode, vh.Since, ttl, left, vh.Score, vh.UniqIP, vh.RPS, vh.LastAction)
+		state := vh.State
+		if state == "" {
+			state = "-"
+		}
+		fmt.Printf("VHOST: %s  state=%s status=%s mode=%s since=%s ttl=%s left=%s score=%.2f uniqIP=%d rps=%.2f action=%s\n",
+			vh.Host, state, vh.Status, vh.Mode, vh.Since, ttl, left, vh.Score, vh.UniqIP, vh.RPS, vh.LastAction)
 		if len(vh.Reasons) > 0 {
 			fmt.Printf("Reasons: %s\n", strings.Join(vh.Reasons, ","))
 		}
@@ -1286,7 +1327,53 @@ func runChallengeWebTop(baseURL string, args []string) error {
 		}
 		ttl, left := chalTTLCols(h)
 		fmt.Printf("%-35s %-6s %-6s %5.2f %6d %9s %10s  %s\n",
-			h.Host, h.Mode, h.Status, h.Score, h.UniqIP, ttl, left, rs)
+			h.Host, h.Mode, chalStatCol(h), h.Score, h.UniqIP, ttl, left, rs)
+	}
+	return nil
+}
+
+// runAttackWebTop handles: cfm webtop attack on|off <vhost>
+// Operator override for Under-Attack Mode: `on` forces the vhost into
+// UNDER_ATTACK; `off` clears it and suppresses auto re-entry for the holddown.
+func runAttackWebTop(baseURL string, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: cfm webtop attack on|off <vhost>")
+	}
+	var on bool
+	switch strings.ToLower(args[0]) {
+	case "on":
+		on = true
+	case "off":
+		on = false
+	default:
+		return fmt.Errorf("usage: cfm webtop attack on|off <vhost>")
+	}
+	host := args[1]
+	onVal := "0"
+	if on {
+		onVal = "1"
+	}
+	u := fmt.Sprintf("%s/api/v1/challenge/vhost/attack?host=%s&on=%s",
+		strings.TrimRight(baseURL, "/"), url.QueryEscape(host), onVal)
+	resp, err := clihttp.Post(u, "application/json", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	// Guard the status first (like the sibling challenge subcommands): a non-JSON
+	// proxy/auth error page must surface as the HTTP status, not an opaque decode
+	// error. The handler's own 400/403/409 bodies carry their JSON message here.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return httpStatusErr(resp)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	if on {
+		fmt.Printf("✓ Under-attack FORCED ON for %v\n", result["host"])
+	} else {
+		fmt.Printf("✓ Under-attack cleared for %v (auto re-entry suppressed for the holddown)\n", result["host"])
 	}
 	return nil
 }
