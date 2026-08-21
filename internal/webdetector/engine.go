@@ -387,6 +387,9 @@ type Engine struct {
 
 	// Subnet challenge emit cooldown
 	subnetLastChalEmit map[string]time.Time
+	// subnetGoodBot caches per-/24 FCrDNS good-bot verdicts for the subnet
+	// challenge exemption (challenge_subnet_goodbot.go).
+	subnetGoodBot subnetGoodBotState
 
 	// last context for an IP that matched a challenge rule (host/uri/pattern)
 	chalLast map[string]chalCtx
@@ -1649,6 +1652,7 @@ func (e *Engine) pruneShort(now time.Time) {
 // The cutoff is 2× the long horizon — conservative enough to avoid evicting
 // entries that are still within an active cooldown window.
 func (e *Engine) pruneEmitMaps(now time.Time) {
+	e.subnetGoodBot.prune(now)
 	horizon := e.cfg.LongHorizon()
 	if horizon <= 0 {
 		horizon = 20 * time.Minute
