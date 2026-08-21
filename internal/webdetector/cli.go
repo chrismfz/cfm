@@ -1255,7 +1255,7 @@ func runChallengeWebTop(baseURL string, args []string) error {
 		return err
 	}
 
-	fmt.Printf("%-35s %-6s %-6s %5s %6s %8s %9s  %s\n",
+	fmt.Printf("%-35s %-6s %-6s %5s %6s %9s %10s  %s\n",
 		"HOST", "MODE", "STAT", "SCORE", "UNIQ", "TTL", "LEFT", "REASONS")
 	for _, h := range vhs {
 		rs := ""
@@ -1263,7 +1263,7 @@ func runChallengeWebTop(baseURL string, args []string) error {
 			rs = strings.Join(h.Reasons, ",")
 		}
 		ttl, left := chalTTLCols(h)
-		fmt.Printf("%-35s %-6s %-6s %5.2f %6d %8s %9s  %s\n",
+		fmt.Printf("%-35s %-6s %-6s %5.2f %6d %9s %10s  %s\n",
 			h.Host, h.Mode, h.Status, h.Score, h.UniqIP, ttl, left, rs)
 	}
 	return nil

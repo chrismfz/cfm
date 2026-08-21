@@ -113,6 +113,7 @@ func (s *manualChalState) load() {
 	}
 	now := time.Now()
 	restored := 0
+	backfilled := 0
 	for _, e := range arr {
 		// Round-trips a key a prior set() wrote; the API/CLI already lowercased
 		// the host, and lowercasing again here is a safe no-op that also fixes a
@@ -125,15 +126,35 @@ func (s *manualChalState) load() {
 		if reason == "" {
 			reason = "manual"
 		}
+		ttl := time.Duration(e.TTLSec) * time.Second
+		if ttl <= 0 {
+			// Snapshot written before TTLs were persisted: the granted window
+			// is unrecoverable, so adopt what is LEFT of it — once. The
+			// write-back below is what makes it once: without it the entry
+			// would keep TTL=0 on disk and every later restart would re-adopt
+			// an ever-smaller "total", which is the shrinking this field exists
+			// to stop.
+			// Rounded to match what saveLocked persists, so the in-memory
+			// value and the next load agree to the second.
+			ttl = e.ExpiresAt.Sub(now).Round(time.Second)
+			backfilled++
+		}
 		s.vhosts[h] = manualChalEntry{
 			ExpiresAt: e.ExpiresAt,
 			Reason:    reason,
-			TTL:       time.Duration(e.TTLSec) * time.Second,
+			TTL:       ttl,
 		}
 		restored++
 	}
 	if restored > 0 {
 		logging.Logf("[challenge][vhost] restored %d manual challenge(s) from %s", restored, s.path)
+	}
+	if backfilled > 0 {
+		logging.Logf("[challenge][vhost] back-filled TTL for %d manual challenge(s) from a pre-TTL snapshot (%s)", backfilled, s.path)
+		// load() runs from init(), before the store is reachable by any other
+		// goroutine, so saveLocked's "caller holds s.mu" contract holds
+		// vacuously here.
+		s.saveLocked()
 	}
 }
 

@@ -157,8 +157,21 @@ func TestManualChalPersist_KeepsGrantedTTL(t *testing.T) {
 	if !ok {
 		t.Fatal("legacy entry not restored")
 	}
-	if ent.TTL != 0 {
-		t.Errorf("legacy TTL = %s, want 0 (unknown)", ent.TTL)
+	// The granted window is unrecoverable, so the remaining one is adopted...
+	if ent.TTL < 59*time.Minute || ent.TTL > time.Hour {
+		t.Errorf("legacy TTL = %s, want the ~1h remaining window", ent.TTL)
+	}
+	// ...and written back, so a later restart reports the SAME total instead of
+	// re-shrinking it to whatever is left then — the shrinking this field exists
+	// to stop, which the fallback alone would reintroduce for legacy entries.
+	var s4 manualChalState
+	s4.init(legacy)
+	again, ok := s4.snapshot()["old.gr"]
+	if !ok {
+		t.Fatal("legacy entry not restored on the second load")
+	}
+	if again.TTL != ent.TTL {
+		t.Errorf("TTL drifted across restarts: %s then %s, want it pinned after the back-fill", ent.TTL, again.TTL)
 	}
 }
 
