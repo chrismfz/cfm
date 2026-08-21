@@ -1,5 +1,7 @@
 # Production WAF log analysis — 2026-05-08
 
+> **HISTORICAL SNAPSHOT (2026-05-08).** A frozen per-rule triage of that day’s production WAF events; several recommendations have since been actioned into `docs/waf.md`. Kept as the known-FP-pattern corpus that `docs/waf.md` and the waf-triage runbook cite — for current WAF behaviour see `docs/waf.md`.
+
 ## Executive summary
 
 Five actionable findings from 11,088 WAF events across three production servers (orion, virgo, mars):

@@ -52,7 +52,7 @@
 -- in real modules (cfm_bridge_cfg) hoist their opts to module scope
 -- instead. Don't restructure cfm.lua's call sites around this without a
 -- measurement showing access-phase GC pressure; see
--- docs/roadmaps/edge-shared-loaders.md ("Explicitly NOT planned").
+-- docs/edge-unification-plan.md §10 ("Explicitly NOT planned").
 --
 -- NOT for files that must be re-read with sub-second freshness. Every
 -- current consumer tolerates seconds of staleness: the bridge token is

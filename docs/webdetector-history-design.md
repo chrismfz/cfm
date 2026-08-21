@@ -1,5 +1,7 @@
 # Webdetector historical data plan (vhost-centric)
 
+> **AS-BUILT — this design is implemented.** The store/API/CLI/retention it proposes now live in `internal/webdetector/history_store.go`, `history_api_handlers.go`, `cli_history.go`. The served API is under `/api/v1/webdet/history/…` (NOT the `/api/v1/webdetector/…` paths sketched below) — treat `history_api_handlers.go` as the authoritative endpoint list. Kept for the data-model + retention/VACUUM rationale.
+
 This document breaks the problem into a **webdetector-first** implementation, so we can deliver useful history/export quickly and expand later.
 
 ## Is it doable with current code?

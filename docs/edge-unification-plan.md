@@ -455,3 +455,34 @@ namespace before deleting it (verify first whether they are load-bearing).
 - **Phase 2**: panel port challenge honors bridge per-IP decisions; tls_fp
   populated for `scope=panel:*`; web↔panel navigation does not re-challenge;
   WHM transfer + Terminal + live-tail all pass under the fronted ports.
+
+
+---
+
+## 10. Edge shared loaders (completed follow-up, 2026-07)
+
+A follow-up unification that landed with the audit that surfaced it. Both work
+items are **done** — kept here as the record after folding in the former standalone
+`edge-shared-loaders` roadmap:
+
+- **Single edge bridge-token accessor.** `cfm_bridge_cfg.token()` (backed by
+  `cfm_filecache`, ≥32-char validation) is now the one loader; `cfm.lua`,
+  `cfm_panel`, `cfm_purge`, `cfm_h3_config` migrated to it (the `cfm_panel`
+  selftest hook intentionally still probes the raw file — an install preflight).
+  Wins: panel hot path stops paying `loadfile` per request; H3 picks up token
+  rotation within the cache TTL; the validity rule lives in one place.
+- **Single Go atomic Lua writer.** `writeLuaFileAtomic` in
+  `internal/sslcollector/token.go` backs all four `Write*Lua*` functions
+  (tmp-write → chmod 0640 → chown root:cfm → rename), so the enforced
+  ownership/mode contract (CLAUDE.md §5) can only be changed in one place.
+
+### Explicitly NOT planned (decision, not TODO)
+
+`cfm.lua` allocates small opts tables + transform closures for its
+`cfm_filecache.get()` calls on every request (a few hundred bytes of LuaJIT
+nursery garbage), because `access_by_lua_file` chunks re-execute per request.
+This is an **accepted trade-off**, documented in `cfm_filecache.lua`'s header:
+the alternative (a per-file accessor module or register-once API) adds a module
+per cached file for a nursery-GC cost that is noise next to the work already on
+that path (WAF regex battery, shdict ops). Do NOT "fix" this without a
+measurement showing GC pressure from the access phase.

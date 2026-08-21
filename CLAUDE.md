@@ -319,15 +319,20 @@ rather than advancing heartbeats on failure.
 | Topic | Doc |
 |---|---|
 | Roadmap (where CFM is going: in-flight + backlog) | `docs/ROADMAP.md` |
-| WAF behaviour & tuning | `docs/waf.md`, `docs/waf-analysis-2026-05-08.md` |
+| WAF behaviour & tuning | `docs/waf.md` (hub) |
 | Challenge/WAF release gate | `docs/challenge-waf-release-checklist.md` |
 | cPanel token transport | `docs/cpanel-plugin-token-transport.md` |
 | Scoped-mode post-deploy checks | `docs/scoped-postdeploy-verification.md` |
 | MFA rollout | `docs/mfa_rollout_regression_checklist.md` |
 | BPF LSM | `docs/cfm-lsm.md` · Kernel hardening: `docs/kernsec.md` |
-| Detectors | `docs/DETECTORS.md`, `docs/Detectors.Leniency.md` |
-| Web detector history design | `docs/webdetector-history-design.md` |
+| Detectors (incl. leniency §6) | `docs/DETECTORS.md` |
+| Web detector history (as-built) | `docs/webdetector-history-design.md` |
 | `what's_wrong` root-cause engine (contract + roadmap) | `docs/whats-wrong-rootcause.md` |
+| Challenge engine design (PoW/solver/TLS-fp) | `docs/roadmaps/challenge-engine.md` |
+| Web detector abuse-targeting refactor (living) | `docs/webdetector-refactor.md` |
+| Edge unification & shared Lua (angie/openresty) | `docs/edge-unification-plan.md` |
+| Scope/host-bound clearance model | `docs/security/challenge-scope-mapping.md` |
+| sslcollector (cert discovery + socket API) | `docs/ssl-collector.md` |
 | WAF → autoblock (`waf_security`) | `docs/waf-autoblock-design.md` |
 | WAF CVE detectors (`WAF_CVE`) | `WAF_CVE.md` (as-built + "CVE hunting" recipe) · `WAF_CVE_PLAN.md` (design + backlog) |
 | Admin/WebUI API | `docs/webui-api-curl-recipes.md`, `docs/webui-api-sample-responses.md` |
@@ -335,6 +340,12 @@ rather than advancing heartbeats on failure.
 | Proxy latency: measuring & origin keepalive | `docs/proxy-performance.md` |
 | Endpoint scope inventory | `docs/endpoint_scope_inventory.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
+
+**Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
+`docs/edge-lua-audit-2026-07-08.md` (audit closed) · `docs/waf-analysis-2026-05-08.md` (→ `docs/waf.md`) ·
+`docs/waf-gap-analysis-ninjafirewall.md` (decision record) · `WAF_CVE_PLAN.md` (→ `WAF_CVE.md`) ·
+`docs/webdetector-history-design.md` (as-built → `history_store.go`). Folded away: `Detectors.Leniency.md` → `docs/DETECTORS.md` §6;
+`docs/roadmaps/edge-shared-loaders.md` → `docs/edge-unification-plan.md` §10.
 
 ---
 

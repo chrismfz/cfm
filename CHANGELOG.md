@@ -24,6 +24,16 @@ back-filled here — see the git/PR history for that period.
   domestic residential traffic (a likely false positive) versus foreign/hosting.
 
 ### Changed
+- **Docs housekeeping (no runtime change).** Consolidated the webdetector/WAF/
+  challenge/edge doc set so the current source is obvious: folded
+  `Detectors.Leniency.md` into `docs/DETECTORS.md` (§6) and
+  `docs/roadmaps/edge-shared-loaders.md` into `docs/edge-unification-plan.md`
+  (§10); stamped five historical/as-built docs (`edge-lua-audit-2026-07-08`,
+  `waf-analysis-2026-05-08`, `waf-gap-analysis-ninjafirewall`, `WAF_CVE_PLAN`,
+  `webdetector-history-design`) with status banners pointing at the live doc;
+  and extended the CLAUDE.md §7 index with a "Historical / superseded" map.
+  Repointed the affected README/CLAUDE references and one `cfm_filecache.lua`
+  comment. No code behaviour changes.
 - **Faster startup: the `cfm.deny` block-list load no longer delays the
   edge-critical services.** On a busy host the daemon spent tens of seconds at
   boot applying `cfm.deny` (one nft element add per blocked IP — e.g. ~34s for
