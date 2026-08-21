@@ -99,8 +99,67 @@ func TestHandleChallengeVhost_LiveManualStaysActive(t *testing.T) {
 	}
 }
 
+// A LIVE manual challenge must report manual_active=true and auto_active=false:
+// while a manual challenge owns the chalAPI row it keeps Mode=="manual", so it
+// must not be mislabeled as an active AUTO challenge (which the CLI would print
+// as "auto: ACTIVE"). A port-bearing host must also resolve, matching the
+// sibling /challenge/vhost endpoint.
+func TestHandleChallengeVhostStatus_LiveManualNotAutoActive(t *testing.T) {
+	e, mux := newStep3Engine(t)
+	if e.chalAPI == nil {
+		t.Skip("engine has no challenge API store")
+	}
+	// Record through the engine so both the manual store and chalAPI are set,
+	// as a real operator add would.
+	e.ManualChallengeVhost("example.com", time.Hour, "manual")
+
+	for _, q := range []string{"example.com", "Example.COM", "example.com:443"} {
+		rr := get(mux, adminCtx(), "/api/v1/challenge/vhost/status?host="+q)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("host=%q: expected 200, got %d body=%s", q, rr.Code, rr.Body.String())
+		}
+		var res map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+			t.Fatalf("host=%q decode: %v", q, err)
+		}
+		if res["manual_active"] != true {
+			t.Errorf("host=%q: manual_active=%v, want true", q, res["manual_active"])
+		}
+		if res["auto_active"] == true {
+			t.Errorf("host=%q: auto_active=true for a manual challenge (mislabel)", q)
+		}
+	}
+}
+
 // runChallengeStatus must surface a non-2xx response instead of decoding the
 // error body and printing "manual: inactive / auto: inactive" with exit 0.
+// The live TUI must render a manual challenge's REMAINING time, not a bare
+// HH:MM:SS: the old code sliced [11:19] off the RFC3339 expiry and dropped the
+// date, so a >24h TTL read as "expires in a few hours" when it was tomorrow.
+func TestFetchChallengeStatus_ManualShowsRemainingNotClock(t *testing.T) {
+	expires := time.Now().Add(34 * time.Hour).UTC().Format(time.RFC3339)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"host":"x.gr","manual_active":true,"expires_at":"` + expires + `","reason":"manual"}`))
+	}))
+	defer ts.Close()
+
+	active, mode, expiry, err := fetchChallengeStatus(ts.URL, "x.gr")
+	if err != nil {
+		t.Fatalf("fetchChallengeStatus: %v", err)
+	}
+	if !active || mode != "manual" {
+		t.Fatalf("expected active/manual, got %v/%s", active, mode)
+	}
+	d, perr := time.ParseDuration(expiry)
+	if perr != nil {
+		t.Fatalf("expiry %q is not a duration — date-stripped clock regressed: %v", expiry, perr)
+	}
+	if d < 33*time.Hour {
+		t.Errorf("remaining = %s, want ~34h (the date must not be dropped)", d)
+	}
+}
+
 func TestRunChallengeStatus_ErrorStatusSurfaces(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

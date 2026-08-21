@@ -54,7 +54,7 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	req.Host = strings.TrimSpace(strings.ToLower(req.Host))
+	req.Host = normalizeHost(req.Host)
 	if req.Host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
 		return
@@ -104,7 +104,7 @@ func (e *Engine) handleChallengeVhostRemove(w http.ResponseWriter, r *http.Reque
 		host = body.Host
 	}
 
-	host = strings.TrimSpace(strings.ToLower(host))
+	host = normalizeHost(host)
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
 		return
@@ -127,7 +127,10 @@ func (e *Engine) handleChallengeVhostRemove(w http.ResponseWriter, r *http.Reque
 // GET /api/v1/challenge/vhost/status?host=example.gr
 // Returns whether host is manually challenged (and expiry if so).
 func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Request) {
-	host := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("host")))
+	// normalizeHost (trim+lower+strip :port), matching the store keying and the
+	// sibling /challenge/vhost endpoint — a raw or port-bearing host must not
+	// resolve differently across the two query endpoints.
+	host := normalizeHost(r.URL.Query().Get("host"))
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
 		return
@@ -146,7 +149,10 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 	autoActive := false
 	var autoSince time.Time
 	if e.chalAPI != nil {
-		if v, ok := e.chalAPI.GetVhost(host); ok && vhostEffectivelyActive(&v, time.Now()) {
+		// Gate on Mode=="auto": while a manual challenge owns the row the store
+		// keeps Mode=="manual" (manual outranks the scorer), so an effectively-
+		// active manual row must not be reported as an active AUTO challenge.
+		if v, ok := e.chalAPI.GetVhost(host); ok && v.Mode == "auto" && vhostEffectivelyActive(&v, time.Now()) {
 			autoActive = true
 			autoSince = v.Since
 		}

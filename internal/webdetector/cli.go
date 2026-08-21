@@ -1134,7 +1134,10 @@ func chalTTLCols(v chalVhost) (total, left string) {
 }
 
 // shortDur formats a whole-second duration without Go's trailing zero units
-// ("30m" not "30m0s", "6h" not "6h0m0s"), so the TTL column stays narrow.
+// ("30m" not "30m0s", "6h" not "6h0m0s"), so the TTL column stays narrow. It is
+// second-precision TTL-remaining display — distinct from nft.humanTimeout
+// (nftables rule syntax) and healthcli.formatShortDuration (coarse uptime
+// display); the three serve different jobs and are intentionally not shared.
 func shortDur(d time.Duration) string {
 	s := d.Round(time.Second).String()
 	if s != "0s" && strings.HasSuffix(s, "m0s") {

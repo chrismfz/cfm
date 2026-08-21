@@ -41,6 +41,11 @@ back-filled here — see the git/PR history for that period.
   `404` specially — that is the normal "this vhost has no challenge record"
   answer, so it prints `(no active challenge)` and exits clean rather than
   erroring.
+- **`cfm webtop live` now shows a manual challenge's time remaining, not a bare
+  clock.** The TUI badge sliced `HH:MM:SS` off the expiry timestamp and dropped
+  the date, so a manual challenge more than a day out (e.g. `--ttl 34h`) read as
+  if it expired in a few hours. It now renders the remaining window (`left=…`),
+  matching the CLI.
 - **A single-vhost challenge query now resolves a mixed-case host.** The
   `/api/v1/challenge/vhost` handler lowercased the host for the scope check but
   passed the raw case to the (lowercase-keyed) store, so `?host=Example.com`
