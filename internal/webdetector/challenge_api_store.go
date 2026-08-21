@@ -14,6 +14,19 @@ type ChallengeVhostState struct {
 	Since     time.Time `json:"since"`
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 
+	// TTLSec is the window an operator granted for a MANUAL challenge, in
+	// seconds — the "total" next to the remaining time (ExpiresAt - now).
+	// It cannot be derived from the row: Since is the start of the challenge,
+	// not of the current window, so a refreshed manual challenge would report
+	// a total longer than the one granted.
+	//
+	// Zero (and omitted from the JSON) for an auto challenge — those have no
+	// stored expiry, they live and die by the scorer — including when a lapsed
+	// manual row is flipped to Mode=="auto", which clears TTLSec. ExpiresAt is
+	// NOT cleared on that flip (vhostEffectivelyActive depends on it), so a
+	// reader still has to gate the remaining time on Mode=="manual".
+	TTLSec int `json:"ttl_sec,omitempty"`
+
 	Score     float64  `json:"score"`
 	OnThresh  float64  `json:"on_threshold"`
 	OffThresh float64  `json:"off_threshold"`
@@ -138,6 +151,12 @@ func (s *ChallengeAPIStore) RecordVhostAuto(host string, active bool, row Suspic
 		}
 	} else {
 		st.Mode = "auto"
+		// No manual challenge covers this row any more, so the granted TTL it
+		// may still carry from a lapsed one is meaningless — drop it rather
+		// than serve a stale window to API consumers that read the JSON raw
+		// (WebUI, MCP). ExpiresAt is deliberately NOT cleared here: see
+		// vhostEffectivelyActive, whose Mode check depends on it surviving.
+		st.TTLSec = 0
 		if active {
 			st.Status = "active"
 			if st.Since.IsZero() {
@@ -172,7 +191,29 @@ func (s *ChallengeAPIStore) RecordVhostAuto(host string, active bool, row Suspic
 	})
 }
 
+// RecordVhostManual records an operator manual challenge whose TTL starts now:
+// ttl is both the remaining window and the granted total.
 func (s *ChallengeAPIStore) RecordVhostManual(host string, active bool, ttl time.Duration, reason string) {
+	s.recordVhostManual(host, active, ttl, ttl, reason)
+}
+
+// RecordVhostManualRestored re-records a manual challenge that outlived a
+// daemon restart. remaining is what is left of the window (it drives
+// ExpiresAt); total is the TTL the operator originally granted (it drives
+// TTLSec). Passing remaining for both would shrink the reported "total" on
+// every restart, so a 24h challenge would read as e.g. "18h" after one.
+// total <= 0 (an entry restored from a snapshot written before TTLs were
+// persisted) falls back to remaining.
+func (s *ChallengeAPIStore) RecordVhostManualRestored(host string, remaining, total time.Duration, reason string) {
+	if total <= 0 {
+		total = remaining
+	}
+	s.recordVhostManual(host, true, remaining, total, reason)
+}
+
+// recordVhostManual is the shared body: window drives ExpiresAt, total drives
+// the reported TTL.
+func (s *ChallengeAPIStore) recordVhostManual(host string, active bool, window, total time.Duration, reason string) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -194,9 +235,10 @@ func (s *ChallengeAPIStore) RecordVhostManual(host string, active bool, ttl time
 			if st.Since.IsZero() {
 				st.Since = now
 			}
-			if ttl > 0 {
-				st.ExpiresAt = now.Add(ttl)
+			if window > 0 {
+				st.ExpiresAt = now.Add(window)
 				st.manualUntil = st.ExpiresAt
+				st.TTLSec = int(total.Round(time.Second) / time.Second)
 			}
 		} else {
 			st.Status = "inactive"
@@ -204,6 +246,7 @@ func (s *ChallengeAPIStore) RecordVhostManual(host string, active bool, ttl time
 			st.Since = now
 			st.ExpiresAt = time.Time{}
 			st.manualUntil = time.Time{}
+			st.TTLSec = 0
 		}
 		st.LastChanged = now
 		if len(st.Reasons) == 0 || st.Reasons[0] != reason {

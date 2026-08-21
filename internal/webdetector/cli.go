@@ -1101,15 +1101,49 @@ func runAnalyzeHost(baseURL, host, last string) error {
 // ---------------- Challenge webtop ----------------
 
 type chalVhost struct {
-	Host       string   `json:"host"`
-	Status     string   `json:"status"`
-	Mode       string   `json:"mode"`
-	Since      string   `json:"since"`
-	Score      float64  `json:"score"`
-	UniqIP     int      `json:"uniq_ip"`
-	RPS        float64  `json:"rps"`
-	Reasons    []string `json:"reasons"`
-	LastAction string   `json:"last_action"`
+	Host       string    `json:"host"`
+	Status     string    `json:"status"`
+	Mode       string    `json:"mode"`
+	Since      string    `json:"since"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	TTLSec     int       `json:"ttl_sec"`
+	Score      float64   `json:"score"`
+	UniqIP     int       `json:"uniq_ip"`
+	RPS        float64   `json:"rps"`
+	Reasons    []string  `json:"reasons"`
+	LastAction string    `json:"last_action"`
+}
+
+// chalTTLCols renders the two TTL columns for one vhost row: the window the
+// operator granted, and what is left of it.
+//
+// Only a MANUAL challenge carries a stored expiry; an auto challenge lives and
+// dies by the scorer, so both columns read "-" for it. The Mode gate is
+// load-bearing, not cosmetic: an auto row can still carry the stale ExpiresAt
+// of a lapsed manual challenge (see vhostEffectivelyActive), and printing that
+// would show a live auto challenge as "expired".
+func chalTTLCols(v chalVhost) (total, left string) {
+	if v.Mode != "manual" || v.ExpiresAt.IsZero() {
+		return "-", "-"
+	}
+	total = "-"
+	if v.TTLSec > 0 {
+		total = shortDur(time.Duration(v.TTLSec) * time.Second)
+	}
+	return total, leftDuration(v.ExpiresAt)
+}
+
+// shortDur formats a whole-second duration without Go's trailing zero units
+// ("30m" not "30m0s", "6h" not "6h0m0s"), so the TTL column stays narrow.
+func shortDur(d time.Duration) string {
+	s := d.Round(time.Second).String()
+	if s != "0s" && strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s") // 30m0s → 30m, 6h0m0s → 6h0m
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m") // 6h0m → 6h
+	}
+	return s
 }
 
 type chalEvent struct {
@@ -1184,8 +1218,9 @@ func runChallengeWebTop(baseURL string, args []string) error {
 			return err
 		}
 
-		fmt.Printf("VHOST: %s  status=%s mode=%s since=%s score=%.2f uniqIP=%d rps=%.2f action=%s\n",
-			vh.Host, vh.Status, vh.Mode, vh.Since, vh.Score, vh.UniqIP, vh.RPS, vh.LastAction)
+		ttl, left := chalTTLCols(vh)
+		fmt.Printf("VHOST: %s  status=%s mode=%s since=%s ttl=%s left=%s score=%.2f uniqIP=%d rps=%.2f action=%s\n",
+			vh.Host, vh.Status, vh.Mode, vh.Since, ttl, left, vh.Score, vh.UniqIP, vh.RPS, vh.LastAction)
 		if len(vh.Reasons) > 0 {
 			fmt.Printf("Reasons: %s\n", strings.Join(vh.Reasons, ","))
 		}
@@ -1220,13 +1255,16 @@ func runChallengeWebTop(baseURL string, args []string) error {
 		return err
 	}
 
-	fmt.Printf("%-35s %-6s %-6s %-5s %-6s %-s\n", "HOST", "MODE", "STAT", "SCORE", "UNIQ", "REASONS")
+	fmt.Printf("%-35s %-6s %-6s %5s %6s %8s %9s  %s\n",
+		"HOST", "MODE", "STAT", "SCORE", "UNIQ", "TTL", "LEFT", "REASONS")
 	for _, h := range vhs {
 		rs := ""
 		if len(h.Reasons) > 0 {
 			rs = strings.Join(h.Reasons, ",")
 		}
-		fmt.Printf("%-35s %-6s %-6s %5.2f %6d  %s\n", h.Host, h.Mode, h.Status, h.Score, h.UniqIP, rs)
+		ttl, left := chalTTLCols(h)
+		fmt.Printf("%-35s %-6s %-6s %5.2f %6d %8s %9s  %s\n",
+			h.Host, h.Mode, h.Status, h.Score, h.UniqIP, ttl, left, rs)
 	}
 	return nil
 }
@@ -1334,7 +1372,14 @@ func runChallengeStatus(baseURL string, args []string) error {
 
 	fmt.Printf("host: %s\n", host)
 	if manualActive {
-		fmt.Printf("  manual:  ACTIVE  expires=%s  reason=%s\n", expiresAt, reason)
+		// The status endpoint reports only the expiry, so "left" is derived
+		// here; an unparseable/absent timestamp degrades to "-" rather than
+		// hiding the line.
+		left := "-"
+		if t, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+			left = leftDuration(t)
+		}
+		fmt.Printf("  manual:  ACTIVE  expires=%s  left=%s  reason=%s\n", expiresAt, left, reason)
 	} else {
 		fmt.Println("  manual:  inactive")
 	}

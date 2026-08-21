@@ -30,6 +30,12 @@ import (
 type manualChalEntry struct {
 	ExpiresAt time.Time
 	Reason    string
+	// TTL is the window the operator granted at set() time. It is kept next to
+	// the expiry so the status list can report the granted total, not merely
+	// what was left when the daemon last restarted (restoreManualChallenges
+	// re-records with the REMAINING window). Zero for an entry loaded from a
+	// snapshot written before TTLs were persisted.
+	TTL time.Duration
 }
 
 // manualChalPersistEntry is the on-disk shape of one manual challenge. Kept
@@ -39,6 +45,10 @@ type manualChalPersistEntry struct {
 	Host      string    `json:"host"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Reason    string    `json:"reason,omitempty"`
+	// TTLSec is the originally granted TTL in seconds. Optional: a snapshot
+	// written by an older build has no such key and loads as 0, which callers
+	// treat as "unknown, fall back to the remaining window".
+	TTLSec int `json:"ttl_sec,omitempty"`
 }
 
 // manualChalState is embedded in Engine.
@@ -70,6 +80,7 @@ func (s *manualChalState) set(host string, ttl time.Duration, reason string) {
 	s.vhosts[host] = manualChalEntry{
 		ExpiresAt: time.Now().Add(ttl),
 		Reason:    reason,
+		TTL:       ttl,
 	}
 	s.saveLocked()
 }
@@ -114,7 +125,11 @@ func (s *manualChalState) load() {
 		if reason == "" {
 			reason = "manual"
 		}
-		s.vhosts[h] = manualChalEntry{ExpiresAt: e.ExpiresAt, Reason: reason}
+		s.vhosts[h] = manualChalEntry{
+			ExpiresAt: e.ExpiresAt,
+			Reason:    reason,
+			TTL:       time.Duration(e.TTLSec) * time.Second,
+		}
 		restored++
 	}
 	if restored > 0 {
@@ -137,7 +152,12 @@ func (s *manualChalState) saveLocked() {
 		if now.After(e.ExpiresAt) {
 			continue
 		}
-		arr = append(arr, manualChalPersistEntry{Host: h, ExpiresAt: e.ExpiresAt, Reason: e.Reason})
+		arr = append(arr, manualChalPersistEntry{
+			Host:      h,
+			ExpiresAt: e.ExpiresAt,
+			Reason:    e.Reason,
+			TTLSec:    int(e.TTL.Round(time.Second) / time.Second),
+		})
 	}
 	sort.Slice(arr, func(i, j int) bool { return arr[i].Host < arr[j].Host })
 	b, err := json.MarshalIndent(arr, "", "  ")
@@ -333,7 +353,9 @@ func (e *Engine) restoreManualChallenges() {
 			e.nginxBridge.ChallengeVhostWithReason(host, rem, ent.Reason)
 		}
 		if e.chalAPI != nil {
-			e.chalAPI.RecordVhostManual(host, true, rem, ent.Reason)
+			// rem drives the expiry; ent.TTL keeps the reported total the one
+			// the operator granted rather than what survived the restart.
+			e.chalAPI.RecordVhostManualRestored(host, rem, ent.TTL, ent.Reason)
 		}
 	}
 }

@@ -17,7 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **`cfm webtop challenge` now shows the TTL of a manual challenge — granted
+  total and time remaining.** The vhost list gained `TTL` and `LEFT` columns
+  (e.g. `6h` / `5h12m3s`), and `cfm webtop challenge host <vhost>` prints
+  `ttl=… left=…` on its header line; `cfm webtop challenge status <vhost>` adds
+  `left=…` next to the expiry it already printed. Previously the list showed a
+  manual challenge as `active` with no hint of when it lapses, so an operator
+  had to remember the TTL they set (or re-issue it blind). Auto (score-driven)
+  challenges have no stored expiry — they live and die by the scorer — so both
+  columns read `-` for them. The granted total is carried in the new `ttl_sec`
+  field of `/api/v1/challenge/vhosts` and `/api/v1/challenge/vhost`, and is
+  persisted with the manual challenge snapshot so a restart reports the TTL the
+  operator granted instead of whatever was left when the daemon came back.
 
 ## 2026.08.21
 
