@@ -330,6 +330,7 @@ rather than advancing heartbeats on failure.
 | `what's_wrong` root-cause engine (contract + roadmap) | `docs/whats-wrong-rootcause.md` |
 | Challenge engine design (PoW/solver/TLS-fp) | `docs/roadmaps/challenge-engine.md` |
 | Web detector abuse-targeting refactor (living) | `docs/webdetector-refactor.md` |
+| Under-Attack Mode (design: escalation state + campaign fingerprinter) | `docs/under-attack-mode.md` |
 | Edge unification & shared Lua (angie/openresty) | `docs/edge-unification-plan.md` |
 | Scope/host-bound clearance model | `docs/security/challenge-scope-mapping.md` |
 | sslcollector (cert discovery + socket API) | `docs/ssl-collector.md` |
