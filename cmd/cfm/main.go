@@ -21,6 +21,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -844,6 +845,64 @@ func runDaemon(args []string) {
 			fmt.Fprintln(os.Stderr, "read config error:", err)
 			return
 		}
+
+		// Fast path for the block list (cfm.deny): the per-IP loop below forks
+		// nft twice per address (RemoveBlock + add). For a large block list that
+		// is the single most expensive startup step. Reconcile the *permanent
+		// host* entries in a couple of batched nft transactions instead —
+		// skipping any already present. Entries that land are marked seen, so the
+		// loop below skips them and handles only the remainder (CIDRs, TTL'd
+		// entries, and any that failed to bulk-apply). CIDRs, TTL'd entries and
+		// the allow list never take this path. Backends without the bulk
+		// reconcile (e.g. nftlib, already fork-free) fall through to the per-IP
+		// loop unchanged.
+		if !isAllow {
+			// Only worth a full block-set read when many permanent hosts are new
+			// (boot / bulk import). A handful of new entries on an incremental
+			// reload stay on the cheap per-IP loop, which needs no set list.
+			const denyBulkMinBatch = 64
+			if bulkBE, ok := be.(interface {
+				AddManualBlocksBulk([]net.IP) ([]net.IP, error)
+			}); ok {
+				var bulk []net.IP
+				for _, e := range entries {
+					if e.Kind == allowlist.KindCIDR || e.Until != nil || e.TTL != nil {
+						continue
+					}
+					if _, seen := seenBlock["ip|"+e.IP.String()]; seen {
+						continue
+					}
+					bulk = append(bulk, e.IP)
+				}
+				// Duplicate-spec safety: the per-IP loop below still runs over
+				// every entry in file order, and its seen-check skips only an
+				// exact (key, spec) repeat. Pre-marking a bulk-applied IP as
+				// "perm" therefore only skips a redundant permanent duplicate
+				// (idempotent); a later TTL/until line for the same IP has a
+				// different spec, so the loop still applies it — the final state
+				// stays the spec of the last matching line, exactly as before.
+				if len(bulk) >= denyBulkMinBatch {
+					failed, berr := bulkBE.AddManualBlocksBulk(bulk)
+					if berr != nil {
+						fmt.Fprintln(os.Stderr, "bulk block apply (per-IP fallback for the rest):", berr)
+					}
+					skip := make(map[string]struct{}, len(failed))
+					for _, ip := range failed {
+						skip["ip|"+ip.String()] = struct{}{}
+					}
+					// Mark succeeded entries seen so the loop below skips them;
+					// anything that failed stays unseen and the loop re-applies
+					// it per-IP.
+					for _, ip := range bulk {
+						k := "ip|" + ip.String()
+						if _, bad := skip[k]; !bad {
+							seenBlock[k] = "perm"
+						}
+					}
+				}
+			}
+		}
+
 		for _, e := range entries {
 			spec := "perm"
 			if e.Until != nil {

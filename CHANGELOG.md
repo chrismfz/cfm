@@ -36,8 +36,17 @@ back-filled here — see the git/PR history for that period.
   yet hard-dropped on any port — the general firewall (ports policy,
   flood/connlimit/hardening) and the detectors are already active and re-block
   any source that actively re-offends, though quiet/manually-curated entries
-  stay unenforced until the apply lands. (Batching the per-IP apply to shrink
-  that window to well under a second is tracked as a separate follow-up.)
+  stay unenforced until the apply lands. (The per-IP apply itself is now
+  batched — see the next entry — shrinking that window to well under a second.)
+- **`cfm.deny` now applies in batched nft transactions instead of one nft add
+  per IP.** The block list is reconciled against the live nft set — entries
+  already present are skipped and only the missing ones are added, in bulk — so
+  a warm restart (where the kernel sets persist) does almost no work, and a cold
+  boot lands the whole list in a couple of `nft` calls instead of ~2 forks per
+  IP (≈34s for ~1,200 entries). Permanent host entries take the bulk path;
+  CIDRs and TTL'd entries keep the per-IP path, and any bulk error falls back to
+  it, so the resulting block set is identical either way.
+
 ### Fixed
 - **`cfm webtop challenge` no longer misreports on a failed query.** The
   `status`, `host`, `events`, and list commands decoded the HTTP body without
