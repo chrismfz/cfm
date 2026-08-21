@@ -170,6 +170,109 @@ func TestReconcileFamilyBlocks_BatchErrorFallsBackPerIP(t *testing.T) {
 	}
 }
 
+func TestReconcileFamilyBlocks_BulkRetryAfterRace(t *testing.T) {
+	// bulkAdd fails once (a raced element already exists); the re-list shows two
+	// of the three now present, so the retry bulk-adds only the still-missing one
+	// and no per-IP fallback is needed.
+	want := wantIPs("1.1.1.1", "2.2.2.2", "3.3.3.3")
+	listCalls := 0
+	list := func(string) ([]firewall.SetElementTimed, error) {
+		listCalls++
+		if listCalls == 1 {
+			return nil, nil // empty → all three missing
+		}
+		return []firewall.SetElementTimed{{Elem: "1.1.1.1"}, {Elem: "2.2.2.2"}}, nil
+	}
+	bulkCalls := 0
+	var lastBulk []string
+	bulk := func(_ string, elems []string) error {
+		bulkCalls++
+		lastBulk = append([]string(nil), elems...)
+		if bulkCalls == 1 {
+			return errors.New("File exists")
+		}
+		return nil
+	}
+	addOneCalls := 0
+	add := func(net.IP) error { addOneCalls++; return nil }
+
+	failed := reconcileFamilyBlocks("block_v4", want, list, bulk, add)
+	if len(failed) != 0 {
+		t.Fatalf("unexpected failures: %v", failed)
+	}
+	if bulkCalls != 2 {
+		t.Fatalf("bulkCalls=%d, want 2 (initial + retry)", bulkCalls)
+	}
+	if addOneCalls != 0 {
+		t.Fatalf("retry succeeded, so no per-IP fallback expected; addOneCalls=%d", addOneCalls)
+	}
+	if len(lastBulk) != 1 || lastBulk[0] != "3.3.3.3" {
+		t.Fatalf("retry bulk should carry only the still-missing IP, got %v", lastBulk)
+	}
+}
+
+func TestReconcileFamilyBlocks_RetryReassertsRacedTimed(t *testing.T) {
+	// bulkAdd fails; the re-list shows one wanted IP raced into a TIMED block. It
+	// must be re-asserted permanent per-IP (not left to expire), and the
+	// still-missing IP is bulk-retried.
+	want := wantIPs("1.1.1.1", "2.2.2.2")
+	listCalls := 0
+	list := func(string) ([]firewall.SetElementTimed, error) {
+		listCalls++
+		if listCalls == 1 {
+			return nil, nil // empty → both missing
+		}
+		return []firewall.SetElementTimed{{Elem: "1.1.1.1", Expires: 10 * time.Minute}}, nil
+	}
+	bulkCalls := 0
+	var lastBulk []string
+	bulk := func(_ string, elems []string) error {
+		bulkCalls++
+		lastBulk = append([]string(nil), elems...)
+		if bulkCalls == 1 {
+			return errors.New("File exists")
+		}
+		return nil
+	}
+	var reasserted []string
+	add := func(ip net.IP) error { reasserted = append(reasserted, ip.String()); return nil }
+
+	failed := reconcileFamilyBlocks("block_v4", want, list, bulk, add)
+	if len(failed) != 0 {
+		t.Fatalf("unexpected failures: %v", failed)
+	}
+	if len(reasserted) != 1 || reasserted[0] != "1.1.1.1" {
+		t.Fatalf("raced-timed IP should be re-asserted permanent per-IP, got %v", reasserted)
+	}
+	if len(lastBulk) != 1 || lastBulk[0] != "2.2.2.2" {
+		t.Fatalf("retry bulk should carry only the still-missing IP, got %v", lastBulk)
+	}
+}
+
+func TestReconcileFamilyBlocks_PerIPWhenRetryAlsoFails(t *testing.T) {
+	// Both the initial bulk and the retry fail → fall back per-IP over the
+	// still-missing set; a per-IP failure is reported.
+	want := wantIPs("1.1.1.1", "2.2.2.2")
+	list := func(string) ([]firewall.SetElementTimed, error) { return nil, nil } // always empty
+	bulk := func(string, []string) error { return errors.New("nope") }           // always fails
+	addOneCalls := 0
+	add := func(ip net.IP) error {
+		addOneCalls++
+		if ip.String() == "2.2.2.2" {
+			return errors.New("still failing")
+		}
+		return nil
+	}
+
+	failed := reconcileFamilyBlocks("block_v4", want, list, bulk, add)
+	if addOneCalls != 2 {
+		t.Fatalf("per-IP fallback should try both, got %d", addOneCalls)
+	}
+	if len(failed) != 1 || failed[0].String() != "2.2.2.2" {
+		t.Fatalf("failed=%v, want [2.2.2.2]", failed)
+	}
+}
+
 func TestReconcileFamilyBlocks_TimedOverlapReasserted(t *testing.T) {
 	// One desired IP is present as a timed element → it is re-asserted per-IP
 	// (overlap), the other is missing → bulk. Nothing fails.
