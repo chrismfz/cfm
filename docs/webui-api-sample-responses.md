@@ -209,6 +209,22 @@ Use this file to understand payload structure when building/testing WebUI compon
     "reasons": ["many_bot_user_agents", "scanner_like_path_diversity"],
     "last_action": "auto_on",
     "last_changed": "2026-03-16T20:46:38.748725035+02:00"
+  },
+  {
+    "host": "<vhost-e>",
+    "status": "active",
+    "mode": "manual",
+    "since": "2026-03-16T21:02:11.113401882+02:00",
+    "expires_at": "2026-03-17T03:02:11.113401882+02:00",
+    "ttl_sec": 21600,
+    "score": 0,
+    "on_threshold": 0,
+    "off_threshold": 0,
+    "uniq_ip": 0,
+    "rps": 0,
+    "reasons": ["manual"],
+    "last_action": "manual_on",
+    "last_changed": "2026-03-16T21:02:11.113401882+02:00"
   }
 ]
 ```
@@ -289,5 +305,11 @@ Keep samples redacted (`<vhost-x>`, `<ip-x>`) and preserve key names/types.
 - `reasons` may be `null` on some rows; treat as optional.
 - `ptr` is optional in IP/enrichment sections.
 - `expires_at` can be zero time (`0001-01-01T00:00:00Z`) for auto-mode records.
+- `ttl_sec` (challenge vhost rows) is the window an operator granted for a
+  **manual** challenge, in seconds; the remaining time is `expires_at - now`.
+  It is `omitempty`, so it is **absent** (not `0`) on auto rows — including a
+  row that flipped from a lapsed manual challenge to `mode: "auto"`. That flip
+  does NOT clear `expires_at`, so still gate the remaining time on
+  `mode == "manual"` or a live auto challenge reads as expired.
 - Number precision varies (float-heavy payloads); avoid strict string comparisons in tests.
 - For snapshot tests, compare selected fields/types (not exact full JSON string equality).
