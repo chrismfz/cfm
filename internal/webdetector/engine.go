@@ -407,6 +407,11 @@ type Engine struct {
 	vhostUniqPathsActive     map[string]bool
 	vhostUniqPathsLastChange map[string]time.Time
 
+	// Under-Attack Mode (I1): per-vhost efficacy detector state above CHALLENGED.
+	// nil unless UNDER_ATTACK is enabled. Own mutex inside (under_attack.go).
+	// Distinct from vhostUnderAttack above, which is the auto-challenge-armed flag.
+	attack *underAttackTracker
+
 	// --- ingest progress / stall logging (for "silent stops") ---
 	progMu            sync.Mutex
 	lastParsedAt      time.Time
@@ -536,6 +541,12 @@ func NewEngine(cfg Config) *Engine {
 
 	e.vhostUniqPathsActive = make(map[string]bool)
 	e.vhostUniqPathsLastChange = make(map[string]time.Time)
+
+	// Under-Attack Mode (I1): only allocated when the feature is on; the solve
+	// subscription in the register is likewise gated, so nil == fully inert.
+	if cfg.UnderAttack {
+		e.attack = newUnderAttackTracker()
+	}
 
 	if cfg.HistoryEnabled {
 		if hs, err := NewHistoryStore(cfg.HistoryDBPath, cfg.HistoryRetentionDays, cfg.HistoryPruneEvery, cfg.HistoryMaxRows); err != nil {
@@ -1653,6 +1664,7 @@ func (e *Engine) pruneShort(now time.Time) {
 // entries that are still within an active cooldown window.
 func (e *Engine) pruneEmitMaps(now time.Time) {
 	e.subnetGoodBot.prune(now)
+	e.attack.prune(now)
 	horizon := e.cfg.LongHorizon()
 	if horizon <= 0 {
 		horizon = 20 * time.Minute

@@ -212,6 +212,18 @@ type Config struct {
 	ChallengeSuspiciousUniqIPOff int  // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_OFF
 	ChallengeSuspiciousUniqIPMax int  // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_MAX (hard cap; optional)
 
+	// Under-Attack Mode (I1): per-vhost challenge-efficacy detector, log-only.
+	// Escalates a CHALLENGED vhost whose challenge is being defeated to
+	// UNDER_ATTACK and emits a notification. See docs/under-attack-mode.md.
+	UnderAttack             bool          // UNDER_ATTACK (master; detector runs when set)
+	UnderAttackDryRun       bool          // UNDER_ATTACK_DRYRUN (state+notify, no enforcement — I1 has none yet)
+	UnderAttackSolvesMin    int           // UNDER_ATTACK_SOLVES_MIN (distinct solving IPs/min = "farm solving")
+	UnderAttackConfirmTicks int           // UNDER_ATTACK_CONFIRM_TICKS (consecutive ticks before entering)
+	UnderAttackHolddown     time.Duration // UNDER_ATTACK_HOLDDOWN (pressure below floor this long to exit)
+	UnderAttackRuleTTL      time.Duration // UNDER_ATTACK_RULE_TTL (TTL of auto/draft rules; reserved for I3+)
+	UnderAttackErrFloor     float64       // UNDER_ATTACK_ERR_FLOOR (leg 3 error-ratio floor)
+	UnderAttackBotCeil      float64       // UNDER_ATTACK_BOT_CEIL (leg 4 self-declared-bot ceiling)
+
 	// -------------------------------------------------------------------
 	// NEW: unique-based challenge filters (phase 1: challenge-only)
 	// -------------------------------------------------------------------
@@ -427,6 +439,31 @@ func (c *Config) FillDefaults() {
 		// Max is optional (0 disables)
 		if c.ChallengeSuspiciousUniqIPMax < 0 {
 			c.ChallengeSuspiciousUniqIPMax = 0
+		}
+	}
+
+	// Defaults for Under-Attack Mode (only meaningful when enabled). A zero
+	// ConfirmTicks/Holddown/floor would make the detector fire on the first
+	// tick or never exit, so backstop them even if a partial config sets the
+	// master without the rest.
+	if c.UnderAttack {
+		if c.UnderAttackSolvesMin <= 0 {
+			c.UnderAttackSolvesMin = 15
+		}
+		if c.UnderAttackConfirmTicks <= 0 {
+			c.UnderAttackConfirmTicks = 3
+		}
+		if c.UnderAttackHolddown <= 0 {
+			c.UnderAttackHolddown = 30 * time.Minute
+		}
+		if c.UnderAttackRuleTTL <= 0 {
+			c.UnderAttackRuleTTL = 6 * time.Hour
+		}
+		if c.UnderAttackErrFloor <= 0 {
+			c.UnderAttackErrFloor = 0.5
+		}
+		if c.UnderAttackBotCeil <= 0 {
+			c.UnderAttackBotCeil = 0.05
 		}
 	}
 
