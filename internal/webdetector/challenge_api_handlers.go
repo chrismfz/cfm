@@ -66,7 +66,10 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e == nil || e.chalAPI == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		// Distinct from a genuine not-found: the CLI treats 404 as the normal
+		// "no active challenge" answer, so a disabled store must not read as
+		// "unchallenged" — surface it.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "challenge API unavailable"})
 		return
 	}
 	v, ok := e.chalAPI.GetVhost(host)

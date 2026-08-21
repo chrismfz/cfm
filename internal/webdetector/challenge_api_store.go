@@ -115,6 +115,10 @@ func (s *ChallengeAPIStore) addEvent(e ChallengeEvent) {
 	if len(s.events) == 0 {
 		return
 	}
+	// Store the host canonically (trim+lower+strip :port) so a normalized
+	// ?host= event filter matches regardless of the writer's casing. Idempotent
+	// for the manual path, which already passes normalized variants.
+	e.Host = normalizeHost(e.Host)
 	s.events[s.head] = e
 	s.head = (s.head + 1) % len(s.events)
 	if s.size < len(s.events) {

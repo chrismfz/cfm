@@ -166,7 +166,7 @@ func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry strin
 		// Show the remaining window, not a bare HH:MM:SS. Slicing [11:19] off
 		// the RFC3339 string dropped the date, so a >24h manual TTL (e.g. 34h)
 		// read as "expires in a few hours" when it was actually tomorrow.
-		if t, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+		if t, perr := time.Parse(time.RFC3339, expiresAt); perr == nil {
 			expiry = leftDuration(t)
 		} else {
 			// Unparseable expiry: show "?" rather than an absolute timestamp,

@@ -190,6 +190,40 @@ func TestListVhosts_LapsedManualInactiveInStatusAll(t *testing.T) {
 	}
 }
 
+// A 404 is the "no active challenge" answer, but a disabled challenge store must
+// NOT read as unchallenged — the handler returns 503, and the CLI surfaces it.
+func TestHandleChallengeVhost_StoreUnavailableIs503(t *testing.T) {
+	e := &Engine{} // no chalAPI
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/challenge/vhost?host=x.gr", nil).WithContext(adminCtx())
+	rr := httptest.NewRecorder()
+	e.handleChallengeVhost(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("chalAPI nil: want 503, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRunChallengeHost_StoreUnavailableSurfaces(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"challenge API unavailable"}`))
+	}))
+	defer ts.Close()
+	if err := runChallengeWebTop(ts.URL, []string{"host", "x.gr"}); err == nil {
+		t.Fatal("challenge host treated a 503 (store unavailable) as a clean answer")
+	}
+}
+
+// Events are stored canonically at the write chokepoint, so a normalized ?host=
+// filter matches an event a non-manual writer recorded under a raw-case host.
+func TestChallengeAPIStore_EventHostNormalizedForFilter(t *testing.T) {
+	s := NewChallengeAPIStore(100)
+	s.addEvent(ChallengeEvent{Ts: time.Now(), Type: "ip_challenge", Host: "Example.COM:443", IP: "1.2.3.4"})
+	if evs := s.Events("example.com", "", "", "", 50); len(evs) == 0 {
+		t.Fatal("event stored under a non-canonical host was not found by a normalized filter")
+	}
+}
+
 // runChallengeStatus must surface a non-2xx response instead of decoding the
 // error body and printing "manual: inactive / auto: inactive" with exit 0.
 // The live TUI must render a manual challenge's REMAINING time, not a bare
