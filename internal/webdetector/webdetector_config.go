@@ -190,6 +190,21 @@ type Config struct {
 	ChallengeSuspiciousMinRPS        float64 // CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS (0=off)
 	ChallengeSuspiciousMinRPSEnforce bool    // CHALLENGE_SUSPICIOUS_VHOST_MIN_RPS_ENFORCE (false=logonly)
 
+	// Abuse-shadow: LOG-ONLY entity-level abuse signals (docs/webdetector-
+	// refactor.md). Nothing here challenges/blocks — it writes structured lines to
+	// /var/log/cfm/cfm.abuse_shadow.log for burn-in, so thresholds can be tuned
+	// from real data before promoting to a real per-IP challenge.
+	AbuseShadow              bool // ABUSE_SHADOW (master; default off)
+	AbuseShadowRateOutlier   bool // ABUSE_SHADOW_RATE_OUTLIER (Signal C)
+	AbuseShadowDatacenter    bool // ABUSE_SHADOW_DATACENTER (log the DC-ASN feature alongside)
+	AbuseShadowGoodbotExempt bool // ABUSE_SHADOW_GOODBOT_EXEMPT (FCrDNS good-bot; default on)
+	// Signal C knobs: an IP is a rate outlier when its rps ≥ max(FLOOR, K×vhost
+	// median) on a vhost with ip_skew ≥ SKEW and ≥ MINREQ requests from that IP.
+	AbuseShadowRateK       float64 // ABUSE_SHADOW_RATE_K (multiplier vs vhost median)
+	AbuseShadowRateFloor   float64 // ABUSE_SHADOW_RATE_FLOOR (absolute rps floor)
+	AbuseShadowRateSkewMin float64 // ABUSE_SHADOW_RATE_SKEW_MIN (min max/median concentration)
+	AbuseShadowRateMinReq  int     // ABUSE_SHADOW_RATE_MINREQ (min per-IP requests)
+
 	// Optional: volume-based (uniqIP) auto under-attack mode with hysteresis.
 	// Useful for sophisticated crawlers that avoid errors but spray many unique IPs.
 	ChallengeSuspiciousUniqIP    bool // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP (1/0)

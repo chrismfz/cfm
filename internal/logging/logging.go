@@ -11,18 +11,19 @@ import (
 )
 
 var (
-	logFile           *os.File
-	apiLogFile        *os.File
-	detectorLogFile   *os.File
-	smtpLogFile       *os.File
-	challengesLogFile *os.File
-	wafLogFile *os.File
-	mysqlLogFile      *os.File // mysql enforcer
-	socketLogFile     *os.File
-	once              sync.Once
-	cfg               *config.LoggingConfig
-	clamLogFile       *os.File
-	lsmLogFile        *os.File // cfm-lsm DETECT + lifecycle lines
+	logFile            *os.File
+	apiLogFile         *os.File
+	detectorLogFile    *os.File
+	smtpLogFile        *os.File
+	challengesLogFile  *os.File
+	wafLogFile         *os.File
+	mysqlLogFile       *os.File // mysql enforcer
+	socketLogFile      *os.File
+	once               sync.Once
+	cfg                *config.LoggingConfig
+	clamLogFile        *os.File
+	lsmLogFile         *os.File // cfm-lsm DETECT + lifecycle lines
+	abuseShadowLogFile *os.File // log-only entity-abuse shadow signals (Signal C, …)
 )
 
 var debugEnabled = os.Getenv("CFM_DEBUG") == "1"
@@ -175,6 +176,14 @@ func Init(c *config.LoggingConfig) {
 			fmt.Printf("failed to open waf log file %s: %v\n", wafPath, err)
 		}
 
+		// Abuse-shadow log (log-only entity-abuse signals; Signal C, …).
+		abuseShadowPath := "/var/log/cfm/cfm.abuse_shadow.log"
+		if f, err := os.OpenFile(abuseShadowPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+			abuseShadowLogFile = f
+		} else {
+			fmt.Printf("failed to open abuse-shadow log file %s: %v\n", abuseShadowPath, err)
+		}
+
 		// MYSQL GOVERNOR log
 		mysqlPath := cfg.MYSQLFile
 		if mysqlPath == "" && cfg.File != "" {
@@ -276,6 +285,20 @@ func LogfCHALLENGES(format string, args ...interface{}) {
 	}
 }
 
+// LogfABUSESHADOW writes log-only entity-abuse shadow lines to
+// /var/log/cfm/cfm.abuse_shadow.log (Signal C rate outliers, …). Never stdout —
+// it can be chatty during burn-in; falls back to the main log if the dedicated
+// file could not be opened.
+func LogfABUSESHADOW(format string, args ...interface{}) {
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	line := fmt.Sprintf("%s %s\n", ts, fmt.Sprintf(format, args...))
+	if abuseShadowLogFile != nil {
+		_, _ = abuseShadowLogFile.WriteString(line)
+	} else if logFile != nil {
+		_, _ = logFile.WriteString(line)
+	}
+}
+
 // NEW: ξεχωριστό κανάλι για WAF Logs
 func LogfWAF(format string, args ...interface{}) {
 	ts := time.Now().Format("2006-01-02 15:04:05")
@@ -291,7 +314,6 @@ func LogfWAF(format string, args ...interface{}) {
 		_, _ = logFile.WriteString(line)
 	}
 }
-
 
 func LogfSMTP(format string, args ...interface{}) {
 	ts := time.Now().Format("2006-01-02 15:04:05")

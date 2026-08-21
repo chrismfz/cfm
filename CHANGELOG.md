@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Abuse-shadow Signal C (per-IP rate outlier) — LOG-ONLY (I2).** New
+  `internal/webdetector/abuse_shadow.go`: on the per-tick challenge eval, for
+  every vhost it computes the vhost's own median per-IP request rate + `ip_skew`
+  and logs each IP whose rate is a large multiple of that median
+  (`rps ≥ max(FLOOR, K×median)`, gated by `ip_skew ≥ SKEW` and a per-IP request
+  floor) to a new `/var/log/cfm/cfm.abuse_shadow.log`. It catches the
+  CONCENTRATED abuse shape that hides under the vhost-aggregate score (the
+  www.e-vafeiadis.gr case: two residential IPs at ~62× the vhost median melting
+  the backend, score only 0.585) while — by construction of the K×median rule —
+  ignoring the DISTRIBUTED shape the uniqIP path already handles. ASN-agnostic;
+  the datacenter-ASN tag rides along as an ADDITIVE logged feature only, and
+  FCrDNS-verified good bots (Googlebot/Bingbot) are marked `exempt_goodbot`.
+  **Nothing challenges or blocks** — it's a burn-in measurement to tune the
+  thresholds before promotion. All off by default (`ABUSE_SHADOW`,
+  `ABUSE_SHADOW_RATE_OUTLIER`; `ABUSE_SHADOW_GOODBOT_EXEMPT` on). See
+  `docs/webdetector-refactor.md`.
 - **Web-detector refactor kickoff: design/handoff doc + datacenter-ASN
   classifier leaf (no behavior yet).** `docs/webdetector-refactor.md` is the
   living anchor for making the challenge engine catch abuse it currently misses

@@ -2066,6 +2066,11 @@ if ha := short[host]; ha != nil {
         e.emitSubnetChallenges(now, out)
     }
 
+    // ---- log-only entity-abuse shadow signals (never challenges/blocks) ----
+    if e.cfg.AbuseShadow {
+        e.emitAbuseShadowRateOutliers(now)
+    }
+
 
 }
 

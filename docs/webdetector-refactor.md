@@ -303,8 +303,10 @@ watch them accumulate from the gateway. Contract:
 - [x] **I0** — this design/handoff doc.
 - [x] **I1** — datacenter ASN classifier (`asnclass.go`) + tests. *(pure, no
   behavior)*
-- [ ] **I2** — `ABUSE_SHADOW*` config + per-IP shadow emission (Signal A),
-  log-only, with good-bot FCrDNS exemption + logrotate entry.
+- [x] **I2** — `ABUSE_SHADOW*` config + per-IP **Signal C** (rate outlier)
+  shadow emission, log-only, with good-bot FCrDNS exemption + datacenter tag +
+  the dedicated `/var/log/cfm/cfm.abuse_shadow.log` (glob-rotated). All off by
+  default. *(Signal A/datacenter is a logged tag here, not the trigger — per §4a.)*
 - [ ] **I3** — `abuse_shadow` MCP tool (node) + gateway `node="all"`.
 - [ ] **I4** — Signal B (enumeration) shadow. **I5** — Signal C (rate outlier).
 - [ ] **I6** — promote whatever the data justifies to per-IP/subnet challenge.
