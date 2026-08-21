@@ -32,17 +32,18 @@ back-filled here — see the git/PR history for that period.
   the date, so a manual challenge more than a day out (e.g. `--ttl 34h`) read as
   if it expired in a few hours. It now renders the remaining window (`left=…`),
   matching the CLI.
-- **A single-vhost challenge query now resolves a mixed-case host.** The
-  `/api/v1/challenge/vhost` handler lowercased the host for the scope check but
-  passed the raw case to the (lowercase-keyed) store, so `?host=Example.com`
-  reported `not found` for a vhost under a live manual challenge. It now
-  normalises the host once, like the add/remove/status endpoints already did.
-- **The single-vhost endpoint now reports the same effective status as the
-  list.** A manual challenge that lapsed without a later auto tick kept a stored
-  `status: active` with a past `expires_at`; `/challenge/vhost` served that raw
-  while `/challenge/vhosts` filtered it out, so the CLI could print the
-  contradictory `status=active … left=expired`. The handler now folds a lapsed
-  row to `inactive`, matching the list.
+- **The challenge query endpoints now resolve a mixed-case or port-bearing
+  host.** `/api/v1/challenge/vhost`, `/vhost/status`, and `/events` lowercased
+  the host only for the scope check but filtered/looked-up on the raw value, so
+  `?host=Example.com` reported `not found` (or empty events) for a vhost under a
+  live challenge. All now normalise the host the same way the store keys it
+  (trim + lowercase + strip `:port`).
+- **All challenge status views now agree on effective state.** A manual
+  challenge that lapsed without a later auto tick kept a stored `status: active`
+  with a past `expires_at`. `/challenge/vhost` served that raw (so the CLI could
+  print the contradictory `status=active … left=expired`), the `/vhost/status`
+  endpoint reported it as an active *auto* challenge, and `/challenge/vhosts?status=all`
+  still listed it active. All now fold a lapsed row to `inactive`.
 
 ## 2026.08.21
 

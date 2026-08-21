@@ -131,6 +131,65 @@ func TestHandleChallengeVhostStatus_LiveManualNotAutoActive(t *testing.T) {
 	}
 }
 
+// The events endpoint must filter on the normalized host, so `challenge host
+// Example.COM` shows that vhost's events instead of an always-empty list.
+func TestHandleChallengeEvents_MixedCaseHostFilters(t *testing.T) {
+	e, mux := newStep3Engine(t)
+	if e.chalAPI == nil {
+		t.Skip("engine has no challenge API store")
+	}
+	// RecordVhostManual emits a manual_on event keyed to the canonical host.
+	e.chalAPI.RecordVhostManual("example.com", true, time.Hour, "manual")
+
+	rr := get(mux, adminCtx(), "/api/v1/challenge/events?host=Example.COM")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var evs []ChallengeEvent
+	if err := json.Unmarshal(rr.Body.Bytes(), &evs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(evs) == 0 {
+		t.Error("mixed-case host returned no events — host was not normalized before filtering")
+	}
+}
+
+// status=all on the list endpoint must report the EFFECTIVE status, matching
+// the single-vhost endpoint: a lapsed manual row must read inactive on both.
+func TestListVhosts_LapsedManualInactiveInStatusAll(t *testing.T) {
+	e, mux := newStep3Engine(t)
+	if e.chalAPI == nil {
+		t.Skip("engine has no challenge API store")
+	}
+	e.chalAPI.RecordVhostManual("stale.gr", true, time.Hour, "manual")
+	e.chalAPI.mu.Lock()
+	st := e.chalAPI.vhosts["stale.gr"]
+	st.ExpiresAt = time.Now().Add(-time.Minute)
+	st.manualUntil = st.ExpiresAt
+	e.chalAPI.mu.Unlock()
+
+	rr := get(mux, adminCtx(), "/api/v1/challenge/vhosts?status=all&limit=200")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var rows []ChallengeVhostState
+	if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	found := false
+	for _, r := range rows {
+		if r.Host == "stale.gr" {
+			found = true
+			if r.Status != "inactive" {
+				t.Errorf("status=all: stale.gr Status=%q, want inactive (must match single-vhost endpoint)", r.Status)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("stale.gr not present in status=all listing")
+	}
+}
+
 // runChallengeStatus must surface a non-2xx response instead of decoding the
 // error body and printing "manual: inactive / auto: inactive" with exit 0.
 // The live TUI must render a manual challenge's REMAINING time, not a bare

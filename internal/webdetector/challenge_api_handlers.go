@@ -4,7 +4,6 @@ package webdetector
 import (
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -137,7 +136,10 @@ func (e *Engine) handleChallengeEvents(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
-	host := r.URL.Query().Get("host")
+	// Normalize to the store's keying (events are recorded under the canonical
+	// host), so a mixed-case or port-bearing ?host= filters events instead of
+	// silently returning none — the same fix applied to the vhost endpoints.
+	host := normalizeHost(r.URL.Query().Get("host"))
 	scope := vhostScopeFromContext(r.Context())
 	if scope != nil {
 		// Scoped token: host is mandatory, and must be in allowlist.
@@ -145,7 +147,7 @@ func (e *Engine) handleChallengeEvents(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "host param required for scoped tokens"})
 			return
 		}
-		if !vhostAllowed(strings.ToLower(host), scope) {
+		if !vhostAllowed(host, scope) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 			return
 		}
