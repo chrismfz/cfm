@@ -17,6 +17,30 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Under-Attack Mode (increment I1): per-vhost challenge-efficacy detector,
+  detect-only.** The challenge engine now closes the loop "is the challenge
+  actually working?". A vhost that is already challenge-armed **and** whose
+  challenge is being *defeated* — a solver farm passing it at ≥ `SOLVES_MIN`
+  distinct solving IPs/min while pressure stays high (uniqIP ≥ the arm
+  threshold, error ratio ≥ `ERR_FLOOR`) and the population claims to be human
+  (bot ratio ≈ 0) — is escalated to an `UNDER_ATTACK` state after
+  `CONFIRM_TICKS` consecutive ticks, emitting a `WEB/VHOST_UNDER_ATTACK_ON` /
+  `_OFF` history event **and** operator notification with an evidence one-liner
+  ("challenge defeated: N solving IPs/min; uniqIP=… err=…% bot=…%"). The operator
+  learns "challenge defeated" from an alert instead of by reading logs. Reachable
+  only from CHALLENGED — it never challenges or blocks a vhost the existing paths
+  left alone; self-declared and FCrDNS good bots are exempt before anything is
+  counted. Ships **detect-only** (`UNDER_ATTACK_DRYRUN=1`); the enforcement ladder
+  (harden / campaign fingerprint / draft block rule / nft) lands in later
+  increments. **Off by code default** so existing installs are unchanged on
+  upgrade; the shipped reference `detectors.conf` turns it on (`UNDER_ATTACK=1`,
+  `DRYRUN=1`) for fresh installs. New knobs: `UNDER_ATTACK`, `UNDER_ATTACK_DRYRUN`,
+  `UNDER_ATTACK_SOLVES_MIN`, `UNDER_ATTACK_CONFIRM_TICKS`, `UNDER_ATTACK_HOLDDOWN`,
+  `UNDER_ATTACK_RULE_TTL`, `UNDER_ATTACK_ERR_FLOOR`, `UNDER_ATTACK_BOT_CEIL`.
+  Manual override (`cfm webtop attack on|off`) and the read surfaces
+  (CLI/API/MCP/admin badge) follow in I1b. See `docs/under-attack-mode.md`.
+
 ### Fixed
 - **`CHALLENGE_SUBNET` no longer challenges verified crawler fleets.** The
   many-IPs-from-one-/24 heuristic is also the exact shape of a legitimate

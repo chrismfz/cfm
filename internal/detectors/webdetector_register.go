@@ -751,6 +751,18 @@ func init() {
 			ChallengeSubnetSameHost:      kvBool(kv, "CHALLENGE_SUBNET_SAME_HOST", true),
 			ChallengeSubnetGoodBotExempt: kvBool(kv, "CHALLENGE_SUBNET_GOODBOT_EXEMPT", true),
 
+			// Under-Attack Mode (I1): detect-only. Code default OFF so an existing
+			// install is unchanged on upgrade; the shipped reference detectors.conf
+			// turns it on with DRYRUN=1 for fresh installs. See docs/under-attack-mode.md.
+			UnderAttack:             kvBool(kv, "UNDER_ATTACK", false),
+			UnderAttackDryRun:       kvBool(kv, "UNDER_ATTACK_DRYRUN", true),
+			UnderAttackSolvesMin:    kvInt(kv, "UNDER_ATTACK_SOLVES_MIN", 15),
+			UnderAttackConfirmTicks: kvInt(kv, "UNDER_ATTACK_CONFIRM_TICKS", 3),
+			UnderAttackHolddown:     kvDur(kv, "UNDER_ATTACK_HOLDDOWN", 30*time.Minute),
+			UnderAttackRuleTTL:      kvDur(kv, "UNDER_ATTACK_RULE_TTL", 6*time.Hour),
+			UnderAttackErrFloor:     kvFlt(kv, "UNDER_ATTACK_ERR_FLOOR", 0.5),
+			UnderAttackBotCeil:      kvFlt(kv, "UNDER_ATTACK_BOT_CEIL", 0.05),
+
 			ChallengeExcludeStorePath: kvStrClean(kv, "CHALLENGE_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_challenge_excludes.json"),
 			WAFExcludeStorePath:       kvStrClean(kv, "WAF_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_waf_excludes.json"),
 			ChallengeManualStorePath:  kvStrClean(kv, "CHALLENGE_MANUAL_STORE_PATH", "/var/lib/cfm/webdetector_manual_challenges.json"),
@@ -947,6 +959,16 @@ func init() {
 		}
 
 		engine := webdet.NewEngine(cfg)
+
+		// Under-Attack Mode (I1): feed the per-vhost solving-IP rate (entry leg 2
+		// of the efficacy detector) from the challenge solve stream. Subscribed
+		// only when the feature is on; the manager's ResetChallengeSolveSubscribers
+		// drops and the factory re-adds this on each reload, so it never leaks
+		// (same lifecycle as the solver-farm subscriber). The callback is cheap
+		// (one map insert; self-declared bot UAs skipped) — safe on the verify path.
+		if cfg.UnderAttack {
+			webdet.SubscribeChallengeSolveEvents(engine.RecordUnderAttackSolve)
+		}
 
 		// Persist ClamAV scan events (infections) into the webdetector history
 		// store so they are queryable, scoped, on the ClamAV insights page.

@@ -1,7 +1,7 @@
 # Under-Attack Mode — per-vhost escalation state (design)
 
-**Status: DESIGN — direction agreed 2026-08-21, nothing built yet.** Increment
-I1 (detector + state + notify, log-only) goes first. Siblings:
+**Status: I0 shipped; I1 (detector + state + notify, detect-only) landed —
+surfacing (I1b) + the RT-baseline clause (§3 leg 3) still open.** Siblings:
 `docs/webdetector-refactor.md` (entity signals), `docs/roadmaps/challenge-engine.md`
 §4 (actuators: harden/throttle) + §8 (level-2 gate), `docs/waf-autoblock-design.md`
 (the two-knob detect/persist split this reuses), `internal/webdetector/traffic_rules.go`
@@ -84,6 +84,13 @@ good-bot exemption (§5):
 3. **Pressure is sustained**: uniqIP still ≥ the arm threshold AND
    (err_ratio ≥ 0.5 OR backend RT ≥ 3× the vhost's baseline). The challenge
    was supposed to relieve this; it did not.
+   > **As built (I1):** the `err_ratio ≥ ERR_FLOOR` clause only. No per-vhost
+   > backend-RT baseline is retained today (`sumRT` is dropped before the long
+   > window), and a melting backend almost always errors (timeouts → 502/504/499),
+   > so err_ratio covers the reference incident (e-athlos erred ~100%). The RT
+   > clause — which additionally catches a slow-but-non-erroring backend — is a
+   > scoped follow-up needing new RT-baseline plumbing (`SumRT` in
+   > `MiniMetrics`/`bucket` + an EMA of `ProcAvgSec` while the vhost is unarmed).
 4. **The population claims to be human**: `bot_ratio ≈ 0` while uniqIP is
    exploding — the inversion tell. Thousands of "browsers" appearing at once
    is itself the signature; honest crawlers self-declare and are already out
@@ -205,8 +212,23 @@ DRYRUN=1 stops after 6.0. Everything below is TTL'd and vhost-scoped.
 - **I0** — good-bot fixes from §4: Meta in `goodBotPTRSuffixes` (FCrDNS),
   good-bot exemption in the subnet-challenge path, seed the partner allowlist
   (Skroutz/BestPrice/…). Independent, ships first, fixes a live FP.
-- **I1** — efficacy detector + state + surfacing + notify. Log-only
-  (`DRYRUN=1`). The operator stops discovering "challenge defeated" from logs.
+- **I1** — efficacy detector + state + notify. Detect-only (`DRYRUN=1`). The
+  operator stops discovering "challenge defeated" from logs. **Landed** as the
+  engine core (`internal/webdetector/under_attack.go`): state machine, solve-rate
+  feed, entry/exit legs (err_ratio clause; RT-baseline deferred per §3), the
+  `WEB/VHOST_UNDER_ATTACK_ON|OFF` history+notify event, config knobs, and the
+  `SetVhostAttackOverride` / `VhostAttackState` engine hooks. The hook runs on the
+  main auto/manual challenge path; a full edge suppression (bypass/exclude/ignore)
+  de-escalates from the suppress site. **Known I1 limitation:** a vhost challenged
+  *only* via an alternate branch that short-circuits before the hook — the
+  uniqpaths crawl-storm challenge, or a manual challenge kept over an
+  exclude/ignore — does not have its under-attack legs (re)evaluated, so it can
+  neither newly-enter nor exit UNDER_ATTACK via those ticks (it holds its last
+  state — conservative: over-alert, never a false "resolved"). Closing that needs
+  the hook reachable from every challenge branch. **Still open (I1b):** the read
+  surfaces — `state` field on `cfm webtop`, `/api/v1/challenge/vhosts`, MCP
+  `challenge_vhosts`/`host_drilldown`, and the cfm-admin badge — plus the
+  `cfm webtop attack on|off` CLI wiring onto `SetVhostAttackOverride`.
 - **I2** — fingerprinter in the abuse-shadow harness: candidate predicates +
   coverage/collision logged, nothing enforced. Validate on e-athlos live.
 - **I3** — draft rule + notification + `attack apply` command.

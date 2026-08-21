@@ -1308,6 +1308,12 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             for h := range e.vhostUnderAttack { candHosts[h] = struct{}{} }
         }()
 
+        // Keep UNDER_ATTACK vhosts (I1) in the candidate set so they keep being
+        // evaluated and can de-escalate even after their traffic drops off.
+        if e.attack != nil {
+            for _, h := range e.attack.activeHosts() { candHosts[h] = struct{}{} }
+        }
+
         if e.longwin != nil {
             for _, r := range e.longwin.All() {
                 if r.Host != "" {
@@ -1320,7 +1326,11 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         // Pre-compute the long-window sum ONCE here so the per-host
         // OneFromCache call below is O(1) instead of O(slots*hosts).
         var longSums map[string]bucket
-        if haveVhostAuto && e.longwin != nil {
+        if (haveVhostAuto || e.cfg.UnderAttack) && e.longwin != nil {
+            // Under-Attack (I1) needs the per-vhost pressure row even on a
+            // manual-only deployment (haveVhostAuto=false), where the auto block
+            // below never fills `row`. Computing the sum once here keeps the
+            // per-host OneFromCache lookups O(1).
             longSums = e.longwin.SumAll()
         }
 
@@ -1374,6 +1384,11 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         }
         if e.nginxBridge != nil {
             e.nginxBridge.ClearVhost(host, "host_bypass")
+        }
+        // Challenge fully cleared for this host → drop any UNDER_ATTACK state
+        // (I1). This suppress path continues before the main under-attack hook.
+        if e.cfg.UnderAttack {
+            e.deescalateUnderAttack(now, host, "challenge suppressed (bypass)", out)
         }
         continue
     }
@@ -1443,6 +1458,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         if e.nginxBridge != nil {
             e.nginxBridge.ClearVhost(host, "excluded")
         }
+        if e.cfg.UnderAttack {
+            e.deescalateUnderAttack(now, host, "challenge suppressed (excluded)", out)
+        }
         continue
     }
 
@@ -1478,6 +1496,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                         }
                         if e.nginxBridge != nil {
                             e.nginxBridge.ClearVhost(host, "ignored")
+                        }
+                        if e.cfg.UnderAttack {
+                            e.deescalateUnderAttack(now, host, "challenge suppressed (ignored)", out)
                         }
                         if e.cfg.ChallengeNotify {
                             a := core.Alert{
@@ -1904,6 +1925,23 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
             }
 
             effective := manual || autoActive
+
+            // Under-Attack Mode (I1): escalate a CHALLENGED vhost whose challenge
+            // is being defeated (solver farm) to UNDER_ATTACK, detect-only. Runs
+            // before the !effective early-out so a lingering state de-escalates
+            // when the challenge clears.
+            if e.cfg.UnderAttack {
+                uaRow := row
+                if uaRow.Host == "" && longSums != nil {
+                    // Manual-only deployment: the auto block above never filled
+                    // `row`. Fetch the pressure row so leg 3 can see real metrics.
+                    if r, ok := e.longwin.OneFromCache(longSums, host); ok {
+                        uaRow = r
+                    }
+                }
+                e.evalUnderAttack(now, host, effective, uaRow, out)
+            }
+
             if !effective {
                 continue
             }
@@ -2058,7 +2096,6 @@ if ha := short[host]; ha != nil {
 
 
     }
-
 
 
  // ---- subnet-based behavioral challenges ----
