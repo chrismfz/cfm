@@ -31,6 +31,28 @@ back-filled here — see the git/PR history for that period.
   persisted with the manual challenge snapshot so a restart reports the TTL the
   operator granted instead of whatever was left when the daemon came back.
 
+### Fixed
+- **`cfm webtop challenge` no longer misreports on a failed query.** The
+  `status`, `host`, `events`, and list commands decoded the HTTP body without
+  checking the status code, so a `403 forbidden` (token not admin-recognised)
+  parsed cleanly and printed `manual: inactive` — or a blank `VHOST:` row — with
+  exit 0, telling the operator a vhost was unprotected when the query had simply
+  failed. All four now surface a non-2xx as an error. `challenge host` treats a
+  `404` specially — that is the normal "this vhost has no challenge record"
+  answer, so it prints `(no active challenge)` and exits clean rather than
+  erroring.
+- **A single-vhost challenge query now resolves a mixed-case host.** The
+  `/api/v1/challenge/vhost` handler lowercased the host for the scope check but
+  passed the raw case to the (lowercase-keyed) store, so `?host=Example.com`
+  reported `not found` for a vhost under a live manual challenge. It now
+  normalises the host once, like the add/remove/status endpoints already did.
+- **The single-vhost endpoint now reports the same effective status as the
+  list.** A manual challenge that lapsed without a later auto tick kept a stored
+  `status: active` with a past `expires_at`; `/challenge/vhost` served that raw
+  while `/challenge/vhosts` filtered it out, so the CLI could print the
+  contradictory `status=active … left=expired`. The handler now folds a lapsed
+  row to `inactive`, matching the list.
+
 ## 2026.08.21
 
 ### Fixed

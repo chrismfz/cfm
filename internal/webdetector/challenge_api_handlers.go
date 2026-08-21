@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // handleChallengeSummary returns global challenge counts.
@@ -51,12 +52,17 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
-	host := r.URL.Query().Get("host")
+	// Normalise once via the store's own keying function (normalizeHost:
+	// trim + lowercase + strip :port), so the lookup stays in lock-step with
+	// how RecordVhost* keys the row. The lookup used to run on the raw case
+	// while only the scope check lowercased, so a live challenge on
+	// "example.com" was missed for a "?host=Example.com" query.
+	host := normalizeHost(r.URL.Query().Get("host"))
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
 		return
 	}
-	if !vhostAllowed(strings.ToLower(host), vhostScopeFromContext(r.Context())) {
+	if !vhostAllowed(host, vhostScopeFromContext(r.Context())) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
@@ -68,6 +74,14 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
+	}
+	// Report the EFFECTIVE status, matching the list endpoint. The store has no
+	// TTL sweeper, so a manual challenge that lapsed with no later auto tick to
+	// rewrite the row keeps Status=="active" with a past ExpiresAt. ListVhosts
+	// filters those out via vhostEffectivelyActive; without the same fold here
+	// the two endpoints disagree and a caller sees status=active / left=expired.
+	if !vhostEffectivelyActive(&v, time.Now()) {
+		v.Status = "inactive"
 	}
 	writeJSON(w, http.StatusOK, v)
 }

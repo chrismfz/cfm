@@ -1191,6 +1191,9 @@ func runChallengeWebTop(baseURL string, args []string) error {
 			return err
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return httpStatusErr(resp)
+		}
 		var ev []chalEvent
 		if err := json.NewDecoder(resp.Body).Decode(&ev); err != nil {
 			return err
@@ -1213,6 +1216,16 @@ func runChallengeWebTop(baseURL string, args []string) error {
 			return err
 		}
 		defer r1.Body.Close()
+		if r1.StatusCode == http.StatusNotFound {
+			// The endpoint 404s for any host with no challenge record — an
+			// unchallenged vhost is a normal answer, not a query failure, so
+			// say so plainly rather than erroring or printing a blank row.
+			fmt.Printf("VHOST: %s  (no active challenge)\n", host)
+			return nil
+		}
+		if r1.StatusCode < 200 || r1.StatusCode >= 300 {
+			return httpStatusErr(r1)
+		}
 		var vh chalVhost
 		if err := json.NewDecoder(r1.Body).Decode(&vh); err != nil {
 			return err
@@ -1230,6 +1243,9 @@ func runChallengeWebTop(baseURL string, args []string) error {
 			return err
 		}
 		defer r2.Body.Close()
+		if r2.StatusCode < 200 || r2.StatusCode >= 300 {
+			return httpStatusErr(r2)
+		}
 		var ev []chalEvent
 		if err := json.NewDecoder(r2.Body).Decode(&ev); err != nil {
 			return err
@@ -1250,6 +1266,9 @@ func runChallengeWebTop(baseURL string, args []string) error {
 		return err
 	}
 	defer r.Body.Close()
+	if r.StatusCode < 200 || r.StatusCode >= 300 {
+		return httpStatusErr(r)
+	}
 	var vhs []chalVhost
 	if err := json.NewDecoder(r.Body).Decode(&vhs); err != nil {
 		return err
@@ -1360,9 +1379,14 @@ func runChallengeStatus(baseURL string, args []string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return httpStatusErr(resp)
+	}
 
 	var result map[string]interface{}
-	_ = json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
 
 	manualActive, _ := result["manual_active"].(bool)
 	autoActive, _ := result["auto_active"].(bool)

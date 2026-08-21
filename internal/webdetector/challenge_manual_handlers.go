@@ -146,7 +146,7 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 	autoActive := false
 	var autoSince time.Time
 	if e.chalAPI != nil {
-		if v, ok := e.chalAPI.GetVhost(host); ok && v.Status == "active" {
+		if v, ok := e.chalAPI.GetVhost(host); ok && vhostEffectivelyActive(&v, time.Now()) {
 			autoActive = true
 			autoSince = v.Since
 		}
