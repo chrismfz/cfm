@@ -35,6 +35,7 @@ export const challengeMixin = {
           manual_active: mode === "manual" || mode === "manual+auto",
           auto_active: mode === "auto" || mode === "manual+auto",
           mode,
+          state: String(row.state || ""),
         };
       }
       return byHost;
@@ -53,6 +54,17 @@ export const challengeMixin = {
       if (s.auto_active) return "auto";
       return "";
     },
+    // Under-Attack Mode (I1b): true when the vhost has been escalated above
+    // CHALLENGED (the challenge is being defeated, or an operator forced it).
+    // Like the `challenged` pill this reads activeChallengeByHost, which on the
+    // admin path is store-driven (v1/challenge/vhosts, effectively-active only);
+    // a vhost force-escalated with no challenge row therefore badges via the
+    // controls knob and the scoped per-host path, but not this admin card — the
+    // same store-driven limitation the backend documents for the vhost list.
+    underAttackState(host) {
+      const s = this.activeChallengeByHost[host] || {};
+      return s.state === "under_attack";
+    },
     async fetchScopedActiveChallengeVhosts() {
       if (!this.hasScopedVhosts) return [];
       const checks = this.allowedVhosts.map(async (host) => {
@@ -60,7 +72,10 @@ export const challengeMixin = {
         if (!status || typeof status !== "object") return null;
         const manualActive = Boolean(status.manual_active);
         const autoActive = Boolean(status.auto_active);
-        if (!manualActive && !autoActive) return null;
+        const underAttack = String(status.state || "") === "under_attack";
+        // Keep an under-attack row even when no challenge is active (an operator
+        // may have forced it) so the badge still shows for scoped tenants.
+        if (!manualActive && !autoActive && !underAttack) return null;
         let mode = "";
         if (manualActive && autoActive) mode = "manual+auto";
         else if (manualActive) mode = "manual";
@@ -70,6 +85,7 @@ export const challengeMixin = {
           mode,
           manual_active: manualActive,
           auto_active: autoActive,
+          state: String(status.state || ""),
           reason: status.reason,
           expires_at: status.expires_at,
           auto_since: status.auto_since,

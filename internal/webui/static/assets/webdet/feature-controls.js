@@ -66,6 +66,9 @@ export const controlsMixin = {
         } else if (key === "clammode") {
           const cmp = boolOrder(Boolean(a?.clam_mode_inline)) - boolOrder(Boolean(b?.clam_mode_inline));
           if (cmp !== 0) return cmp * dir;
+        } else if (key === "underattack") {
+          const cmp = boolOrder(Boolean(a?.under_attack)) - boolOrder(Boolean(b?.under_attack));
+          if (cmp !== 0) return cmp * dir;
         } else {
           const cmpHost = String(a?.host || "").localeCompare(String(b?.host || ""), undefined, { sensitivity: "base" });
           if (cmpHost !== 0) return cmpHost * dir;
@@ -231,6 +234,37 @@ export const controlsMixin = {
       } catch (err) {
         this.actionMsg = `${kind.toUpperCase()} toggle failed for ${host}: ${err}`;
         console.error("[cfm-admin] vhost controls toggle failed", kind, host, err);
+      }
+    },
+
+    // ── Under-Attack Mode operator override ────────────────────────────
+    // Force-on/off, NOT an opt-out like Challenge/WAF: the button is red while
+    // the vhost is UNDER_ATTACK and clicking clears it; neutral (AUTO) otherwise
+    // and clicking forces it on. Both go through the same scoped endpoint the CLI
+    // uses (v1/challenge/vhost/attack); the vhost list refreshes to pick up the
+    // new state (VhostAttackState reflects the override immediately).
+    underAttackButtonTitle(row) {
+      if (!row?.under_attack_toggleable) return "Under-Attack Mode is globally off (UNDER_ATTACK=0) — nothing to override.";
+      if (row?.under_attack) return "This vhost is UNDER_ATTACK. Click to clear it (auto re-entry suppressed for the holddown).";
+      return "Force this vhost into UNDER_ATTACK (operator override).";
+    },
+    async toggleUnderAttack(row) {
+      const host = String(row?.host || "").trim();
+      if (!host) return;
+      if (!row?.under_attack_toggleable) {
+        this.actionMsg = `Under-Attack Mode is globally disabled (UNDER_ATTACK=0) — nothing to override for ${host}.`;
+        return;
+      }
+      const on = !row?.under_attack;
+      try {
+        await this.postJSON("v1/challenge/vhost/attack", { host, on });
+        this.actionMsg = on
+          ? `Forced UNDER_ATTACK for ${host}`
+          : `Cleared UNDER_ATTACK for ${host} (auto re-entry suppressed for the holddown)`;
+        await this.refreshVhostControls();
+      } catch (err) {
+        this.actionMsg = `Under-attack override failed for ${host}: ${err}`;
+        console.error("[cfm-admin] under-attack toggle failed", host, err);
       }
     },
 

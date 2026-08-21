@@ -110,6 +110,7 @@
               <tr>
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('host')">Vhost {{ controlsSortArrow('host') }}</button></th>
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('challenge')">Challenge {{ controlsSortArrow('challenge') }}</button></th>
+                <th><button class="btn-quiet btn-sm" @click="setControlsSort('underattack')">Under Attack {{ controlsSortArrow('underattack') }}</button></th>
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('waf')">WAF {{ controlsSortArrow('waf') }}</button></th>
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('http3')">HTTP/3 {{ controlsSortArrow('http3') }}</button></th>
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('clam')">Clam {{ controlsSortArrow('clam') }}</button></th>
@@ -121,6 +122,9 @@
                 <td><code>{{ row.host }}</code></td>
                 <td>
                   <button :class="vhostControlEnabled(row, 'challenge') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'challenge')" :disabled="loading || !vhostControlToggleable(row, 'challenge')" :title="vhostControlButtonTitle(row, 'challenge')">{{ vhostControlButtonLabel(row, 'challenge') }}</button>
+                </td>
+                <td>
+                  <button :class="row.under_attack ? 'btn-danger' : 'btn-quiet'" @click="toggleUnderAttack(row)" :disabled="loading || !row.under_attack_toggleable" :title="underAttackButtonTitle(row)">{{ row.under_attack ? '🚨 UNDER ATTACK' : 'AUTO' }}</button>
                 </td>
                 <td>
                   <button :class="vhostControlEnabled(row, 'waf') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')">{{ vhostControlButtonLabel(row, 'waf') }}</button>
@@ -135,7 +139,7 @@
                   <button :class="vhostControlEnabled(row, 'clammode') ? 'btn-quiet' : 'btn-muted'" @click="toggleVhostProtection(row, 'clammode')" :disabled="loading || !vhostControlToggleable(row, 'clammode')" :title="vhostControlButtonTitle(row, 'clammode')">{{ vhostControlButtonLabel(row, 'clammode') }}</button>
                 </td>
               </tr>
-              <tr v-if="!vhostControlsFiltered.length"><td colspan="6" class="muted">No vhosts matched current scope/filter.</td></tr>
+              <tr v-if="!vhostControlsFiltered.length"><td colspan="7" class="muted">No vhosts matched current scope/filter.</td></tr>
             </tbody>
           </table>
         </div>

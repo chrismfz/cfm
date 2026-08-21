@@ -21,6 +21,15 @@ type webdetVhostControlRow struct {
 	WAFMatchedExclude       string `json:"waf_matched_exclude,omitempty"`
 	HTTP3MatchedOptIn       string `json:"http3_matched_optin,omitempty"`
 
+	// Under-Attack Mode operator override (I1b). UnderAttack is the vhost's
+	// current escalation state (true = UNDER_ATTACK, including an operator force);
+	// the controls knob toggles it via /api/v1/challenge/vhost/attack. Unlike the
+	// Challenge/WAF columns this is a force-on/off override, not an opt-out.
+	// UnderAttackToggleable is false when the UNDER_ATTACK detector is globally
+	// disabled (there is nothing to override).
+	UnderAttack           bool `json:"under_attack"`
+	UnderAttackToggleable bool `json:"under_attack_toggleable"`
+
 	// ClamAV upload-scan (async, notify-only). Effective state is
 	// globallyEnabled && (scanDefault XOR override). ClamEnabled is that
 	// resolved decision; ClamOverridePresent says an EXACT per-vhost override
@@ -136,6 +145,9 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 		_, clamModePresent := clamModeOverride[normalizeControlHost(host)]
 		clamModeInline := clamEnabled && (clamInline != clamModePresent)
 
+		// Under-Attack override state (reflects a just-issued force immediately).
+		underAttack, _, _ := e.VhostAttackState(host)
+
 		rows = append(rows, webdetVhostControlRow{
 			Host:                    host,
 			ChallengeEnabled:        !challengeMatched,
@@ -153,6 +165,8 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 			ClamModeInline:          clamModeInline,
 			ClamModeToggleable:      clamGlobal && clamEnabled,
 			ClamModeOverridePresent: clamModePresent,
+			UnderAttack:             underAttack,
+			UnderAttackToggleable:   e.cfg.UnderAttack,
 		})
 	}
 
