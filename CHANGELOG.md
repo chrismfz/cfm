@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.22
+
 ### Added
 - **Under-Attack Mode (I1b): cfm-admin surfacing.** The web-detector admin UI now
   shows and controls the escalation state. The "Suspicious + challenged vhosts"
