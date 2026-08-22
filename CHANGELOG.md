@@ -17,7 +17,26 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **MCP `lsm_detections` tool + admin endpoint (`GET /api/v1/system/lsm-detections`).**
+  Aggregates the cfm-lsm DETECT lines from CFM's own lsm log into a triage view:
+  per-policy totals with the rate-cap suppression roll-up, and top repeat
+  offenders ranked by (policy, comm, exe) with last-seen, user, and a short
+  exe sha256. Answers "is cfm-lsm firing at anything real, or is this one noisy
+  false positive?" — e.g. hundreds of `CFML-CRED-002` hits from
+  sssd/sssd_kcm/cagefsctl/panel perl are uid-transition noise to silence via
+  `allow_comm=`/`allow_exe=` in `/etc/cfm/lsm.conf` (+ `cfm lsm restart`),
+  while an event whose exe is `(deleted)` or lives under /tmp,/dev/shm is the
+  dropper pattern worth escalating. Admin-only (kernel events carry no vhost
+  notion); bounded tail via the same family as `cfm_log_tail which=lsm`.
+- **MCP `lsm_status` tool + admin endpoint (`GET /api/v1/system/lsm-status`).**
+  The cfm-lsm kernel-side state in one read: preflight checks with remediation,
+  enabled/attached-vs-config mismatch, BTF drift picks, and per-policy mode vs
+  live runtime — the `cfm lsm status --json` wire format — plus an
+  `effective_allows` block listing the MERGED allow_exe/allow_comm/allow_path
+  set per policy (compiled-in defaults + operator entries), so allow-list
+  tuning starts from what is already allowed. Admin-only; pairs with
+  `lsm_detections` for the full "what could fire / what is firing" picture.
 
 ## 2026.08.22
 
