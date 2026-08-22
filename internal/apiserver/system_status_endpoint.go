@@ -24,6 +24,7 @@ import (
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 	"cfm/internal/kmsg"
+	"cfm/internal/lsm"
 	"cfm/internal/lsmdetect"
 	"cfm/internal/lvecpu"
 	"cfm/internal/maildns"
@@ -239,6 +240,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/waf-fp-hunt", handleSystemWAFFPHunt)
 	m.HandleFunc("/api/v1/system/abuse-shadow", handleSystemAbuseShadow)
 	m.HandleFunc("/api/v1/system/lsm-detections", handleSystemLSMDetections)
+	m.HandleFunc("/api/v1/system/lsm-status", handleSystemLSMStatus)
 	m.HandleFunc("/api/v1/system/lve-cpu", handleSystemLVECPU)
 	m.HandleFunc("/api/v1/system/cpu-throttle", handleSystemCPUThrottle)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
@@ -717,6 +719,63 @@ func handleSystemLSMDetections(w http.ResponseWriter, r *http.Request) {
 		"window_full":   res.WindowFull,
 		"summary":       summary,
 	})
+}
+
+// handleSystemLSMStatus exposes the cfm-lsm kernel-side state (GET
+// /api/v1/system/lsm-status). Read-only, admin-only. Backs the MCP lsm_status
+// tool. The body is exactly `cfm lsm status --json` (preflight checks, enabled
+// flag, pinned BPF state, per-policy mode/runtime) with one addition: an
+// "effective_allows" block listing, per policy, the merged allow_exe/allow_comm/
+// allow_path sets (compiled-in defaults + operator lsm.conf entries) — so a
+// triage caller can see what is ALREADY allowed before proposing more. Host-wide
+// kernel/daemon state → admin-only by construction.
+func handleSystemLSMStatus(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+
+	// RunStatus emits its own JSON (the CLI wire format) — capture it and fold
+	// in the effective allowlists rather than duplicating emitJSON here.
+	var buf bytes.Buffer
+	lsm.RunStatus(&buf, lsm.StatusOptions{JSON: true})
+
+	var body map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &body); err != nil {
+		_, _ = w.Write(buf.Bytes()) // unexpected — pass the CLI JSON through verbatim
+		return
+	}
+
+	conf, err := lsm.LoadConf(false)
+	if errors.Is(err, os.ErrNotExist) {
+		conf, err = lsm.DefaultConf(), nil // missing file → compiled-in defaults are the truth
+	}
+	if err == nil {
+		allows := make([]map[string]any, 0)
+		for _, p := range lsm.AllPolicies() {
+			exe := conf.AllowExeFor(p.ID)
+			comm := conf.AllowCommFor(p.ID)
+			path := conf.AllowPathFor(p.ID)
+			sort.Strings(exe)
+			sort.Strings(comm)
+			sort.Strings(path)
+			allows = append(allows, map[string]any{
+				"policy":     string(p.ID),
+				"mode":       conf.ModeFor(p.ID).String(),
+				"allow_exe":  exe,
+				"allow_comm": comm,
+				"allow_path": path,
+			})
+		}
+		body["effective_allows"] = allows
+	}
+
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // handleSystemLVECPU returns the per-tenant CPU pressure ranking on CloudLinux

@@ -29,6 +29,14 @@ back-filled here — see the git/PR history for that period.
   while an event whose exe is `(deleted)` or lives under /tmp,/dev/shm is the
   dropper pattern worth escalating. Admin-only (kernel events carry no vhost
   notion); bounded tail via the same family as `cfm_log_tail which=lsm`.
+- **MCP `lsm_status` tool + admin endpoint (`GET /api/v1/system/lsm-status`).**
+  The cfm-lsm kernel-side state in one read: preflight checks with remediation,
+  enabled/attached-vs-config mismatch, BTF drift picks, and per-policy mode vs
+  live runtime — the `cfm lsm status --json` wire format — plus an
+  `effective_allows` block listing the MERGED allow_exe/allow_comm/allow_path
+  set per policy (compiled-in defaults + operator entries), so allow-list
+  tuning starts from what is already allowed. Admin-only; pairs with
+  `lsm_detections` for the full "what could fire / what is firing" picture.
 
 ## 2026.08.22
 
