@@ -763,6 +763,10 @@ func init() {
 			UnderAttackErrFloor:     kvFlt(kv, "UNDER_ATTACK_ERR_FLOOR", 0.5),
 			UnderAttackBotCeil:      kvFlt(kv, "UNDER_ATTACK_BOT_CEIL", 0.05),
 
+			UnderAttackFingerprint:    kvBool(kv, "UNDER_ATTACK_FINGERPRINT", true),
+			UnderAttackFPCoverageMin:  kvFlt(kv, "UNDER_ATTACK_FP_COVERAGE_MIN", 0.60),
+			UnderAttackFPCollisionMax: kvFlt(kv, "UNDER_ATTACK_FP_COLLISION_MAX", 0.005),
+
 			ChallengeExcludeStorePath: kvStrClean(kv, "CHALLENGE_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_challenge_excludes.json"),
 			WAFExcludeStorePath:       kvStrClean(kv, "WAF_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_waf_excludes.json"),
 			ChallengeManualStorePath:  kvStrClean(kv, "CHALLENGE_MANUAL_STORE_PATH", "/var/lib/cfm/webdetector_manual_challenges.json"),

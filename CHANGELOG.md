@@ -22,6 +22,21 @@ _Nothing yet._
 ## 2026.08.22
 
 ### Added
+- **Under-Attack Mode (I2): campaign fingerprinter (shadow-only).** For a vhost
+  under attack, the detector now proposes candidate deny predicates from the
+  attacking population's common denominators — the dominant base-path(s) and the
+  UA pool (with a UA-uniformity entropy signal; dynamic-fraction reported
+  alongside) — and scores each `coverage(attack) × (1 − collision(baseline))`
+  against a rolling per-vhost baseline of normal traffic (frozen while under
+  attack so it stays pre-attack). Candidates, scores, and a "would-arm" verdict
+  (coverage ≥ `FP_COVERAGE_MIN`, collision ≤ `FP_COLLISION_MAX`) are logged to
+  `cfm.challenges.log` (`[under-attack][fingerprint]`); **nothing is enforced**
+  — drafting/applying a winning predicate is a later increment. The design's
+  simulate-corpus collision mechanism didn't exist, so collision is measured
+  against the baseline histogram instead; `tls_fp` (no predicate field) and
+  query-shape (stripped before aggregation) are deferred. Knobs:
+  `UNDER_ATTACK_FINGERPRINT`, `UNDER_ATTACK_FP_COVERAGE_MIN`,
+  `UNDER_ATTACK_FP_COLLISION_MAX`. See `docs/under-attack-mode.md` §6.2.
 - **Under-Attack Mode (I1b): cfm-admin surfacing.** The web-detector admin UI now
   shows and controls the escalation state. The "Suspicious + challenged vhosts"
   card (and the WebTop card) grow a 🚨 **under attack** pill next to the

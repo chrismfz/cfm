@@ -412,6 +412,10 @@ type Engine struct {
 	// Distinct from vhostUnderAttack above, which is the auto-challenge-armed flag.
 	attack *underAttackTracker
 
+	// Under-Attack Mode (I2): campaign fingerprinter state (rolling per-vhost
+	// baselines). nil unless UNDER_ATTACK && UNDER_ATTACK_FINGERPRINT. Shadow-only.
+	fp *fpState
+
 	// --- ingest progress / stall logging (for "silent stops") ---
 	progMu            sync.Mutex
 	lastParsedAt      time.Time
@@ -546,6 +550,9 @@ func NewEngine(cfg Config) *Engine {
 	// subscription in the register is likewise gated, so nil == fully inert.
 	if cfg.UnderAttack {
 		e.attack = newUnderAttackTracker()
+		if cfg.UnderAttackFingerprint {
+			e.fp = newFPState()
+		}
 	}
 
 	if cfg.HistoryEnabled {
