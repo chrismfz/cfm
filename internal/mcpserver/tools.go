@@ -64,6 +64,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerEdgeErrorTail(srv, d)
 	registerWAFFPHunt(srv, d)
 	registerAbuseShadow(srv, d)
+	registerLSMDetections(srv, d)
 	registerLVECPU(srv, d)
 	registerMySQLPressure(srv, d)
 	registerDBWebPressure(srv, d)

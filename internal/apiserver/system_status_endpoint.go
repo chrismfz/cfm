@@ -24,6 +24,7 @@ import (
 	"cfm/internal/healthmodel"
 	"cfm/internal/healthstore"
 	"cfm/internal/kmsg"
+	"cfm/internal/lsmdetect"
 	"cfm/internal/lvecpu"
 	"cfm/internal/maildns"
 	"cfm/internal/maillog"
@@ -237,6 +238,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/edge-error-log", handleSystemEdgeErrorLog)
 	m.HandleFunc("/api/v1/system/waf-fp-hunt", handleSystemWAFFPHunt)
 	m.HandleFunc("/api/v1/system/abuse-shadow", handleSystemAbuseShadow)
+	m.HandleFunc("/api/v1/system/lsm-detections", handleSystemLSMDetections)
 	m.HandleFunc("/api/v1/system/lve-cpu", handleSystemLVECPU)
 	m.HandleFunc("/api/v1/system/cpu-throttle", handleSystemCPUThrottle)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)
@@ -666,6 +668,54 @@ func handleSystemAbuseShadow(w http.ResponseWriter, r *http.Request) {
 		"collected":     len(collected),
 		"truncated":     truncated,
 		"summary":       abuseshadow.Summarize(collected),
+	})
+}
+
+// handleSystemLSMDetections aggregates the cfm-lsm DETECT lines from CFM's own
+// lsm log (GET /api/v1/system/lsm-detections?lines=N). Read-only, admin-only.
+// Backs the MCP lsm_detections tool: it tails the lsm log (the same source
+// /api/v1/system/cfm-log?which=lsm reads raw) and returns aggregates — per-policy
+// counts + rate-cap suppression roll-up, and top repeat offenders by
+// (policy, comm, exe) with last-seen + short sha256 — so an operator can tell a
+// real compromise from chatty false-positive noise (sssd/cagefsctl/panel-perl
+// class CRED-002 hits) and tune /etc/cfm/lsm.conf allow_exe/allow_comm.
+// Host-wide (kernel-level events are not per-vhost) → admin-only by construction.
+// Aggregation covers at most cfmlog.MaxLimit matched lines per call (the newest);
+// window_full says whether older lines exist beyond the scanned tail.
+func handleSystemLSMDetections(w http.ResponseWriter, r *http.Request) {
+	if !webdet.RequireAdmin(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	lines := 5000 // cfmlog's own default is 500; this view wants a wider window
+	if v := strings.TrimSpace(r.URL.Query().Get("lines")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			lines = n
+		}
+	}
+
+	res, err := cfmlog.TailFile(r.Context(), "lsm", lines, cfmlog.MaxLimit, "")
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	summary := lsmdetect.Summarize(res.Lines)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":            true,
+		"schema":        "system.lsm_detections.v1",
+		"found":         res.Found,
+		"log_file":      res.LogFile,
+		"lines_scanned": res.Scanned,
+		"aggregated":    len(res.Lines),
+		"truncated":     res.Truncated,
+		"window_full":   res.WindowFull,
+		"summary":       summary,
 	})
 }
 

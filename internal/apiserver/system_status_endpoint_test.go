@@ -75,6 +75,32 @@ func TestSystemStatusEndpoints_Authz(t *testing.T) {
 		}
 	})
 
+	t.Run("scoped token forbidden lsm-detections", func(t *testing.T) {
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/system/lsm-detections", scoped.Token, false)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+		}
+	})
+
+	// The lsm log is absent in the test environment; assert the envelope only
+	// (a runner that happens to have the file would legitimately set found=true).
+	t.Run("admin token can read lsm-detections", func(t *testing.T) {
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/system/lsm-detections?lines=100", "admin-secret", false)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		var body struct {
+			OK     bool   `json:"ok"`
+			Schema string `json:"schema"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v (%s)", err, rr.Body.String())
+		}
+		if !body.OK || body.Schema != "system.lsm_detections.v1" {
+			t.Fatalf("unexpected body: %s", rr.Body.String())
+		}
+	})
+
 	t.Run("admin token can read dnat", func(t *testing.T) {
 		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/system/dnat?cache_ttl=0", "admin-secret", false)
 		if rr.Code != http.StatusOK {
@@ -340,6 +366,11 @@ func TestSystemStatusEndpoints_MethodNotAllowed(t *testing.T) {
 	}
 
 	rr = doSystemStatusReq(h, http.MethodPost, "/api/v1/health/snapshot", "admin-secret", false)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusMethodNotAllowed, rr.Body.String())
+	}
+
+	rr = doSystemStatusReq(h, http.MethodPost, "/api/v1/system/lsm-detections", "admin-secret", false)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusMethodNotAllowed, rr.Body.String())
 	}
