@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.22
+
 ### Added
 - **MCP `lsm_detections` tool + admin endpoint (`GET /api/v1/system/lsm-detections`).**
   Aggregates the cfm-lsm DETECT lines from CFM's own lsm log into a triage view:
@@ -37,8 +41,6 @@ back-filled here — see the git/PR history for that period.
   set per policy (compiled-in defaults + operator entries), so allow-list
   tuning starts from what is already allowed. Admin-only; pairs with
   `lsm_detections` for the full "what could fire / what is firing" picture.
-
-## 2026.08.22
 
 ### Added
 - **Under-Attack Mode (I2): campaign fingerprinter (shadow-only).** For a vhost
