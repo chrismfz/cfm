@@ -1665,6 +1665,29 @@ Exit behavior:
 - With default `--strict=true`, command exits non-zero if report status is `fail`.
 - Warnings (`warn`) do not cause non-zero exit by themselves.
 
+### `cfm firewall path` (host-wide netfilter order)
+
+Use this read-only diagnostic when CFM DNAT/redirect rules interact with
+Imunify/WebShield, iptables-nft, or another nftables owner:
+
+```bash
+cfm firewall path
+cfm firewall path --hook prerouting --proto tcp --dport 443
+cfm firewall path --json
+```
+
+It lists base chains by actual numeric hook priority, then statically reachable
+DNAT/SNAT/redirect/masquerade/TProxy rules under each base-chain context.
+Findings flag same-priority ambiguity and configured-versus-runtime CFM
+priority drift;
+ordered CFM/Imunify overlap is reported as informational context. Collection
+uses `nft -j -t list ruleset`: terse mode omits set contents, so large IP
+blocklists are never copied into CLI/API/UI/MCP output. The same report is
+available at admin-only `GET /api/v1/firewall/path`, on the cfm-admin Firewall
+page, and through MCP `netfilter_path`.
+`--strict` exits non-zero only for warning/critical findings; informational
+ordered overlaps remain successful.
+
 ### `cfm health` (local-node health, federation later)
 
 `cfm health` currently reports health for the **local node** via the local API snapshot endpoint.

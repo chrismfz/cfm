@@ -197,8 +197,11 @@ Build it **staged, like `mailmeter`** (leaf → collector+store → endpoint+MCP
 
 ### 5b. Network / firewall operational pressure
 
-Signals exist (`nft_counters`, `firewall_blocks`, conntrack); correlation does
-not. Rule: surface **only** when it is an operational problem, never routine.
+Signals exist (`nft_counters`, `firewall_blocks`, conntrack). The host-wide
+`netfilter_path` source now contributes only actionable hook-order findings:
+equal-priority ambiguity and CFM runtime/config priority drift. Intentional
+ordered Imunify/CFM overlap remains visibility-only. Remaining correlation:
+surface **only** when it is an operational problem, never routine.
 
 - conntrack near cap → warn/crit (absolute %, easy).
 - SYN flood / portflood → **rate of change**, not absolutes: keep a previous

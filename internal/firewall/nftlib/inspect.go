@@ -16,6 +16,69 @@ import (
 	"cfm/internal/firewall"
 )
 
+// HostRulesetJSON gives diagnostics a complete cross-owner view. Runtime
+// enforcement remains zero-fork; this is an explicit on-demand CLI read.
+func (b *Backend) HostRulesetJSON() ([]byte, error) {
+	const maxRulesetJSON = 8 << 20
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "nft", "-j", "-t", "list", "ruleset")
+	stdout := diagnosticLimitedBuffer{max: maxRulesetJSON}
+	stderr := diagnosticTailBuffer{max: 64 << 10}
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("nft -j -t list ruleset: %w: %s", err, stderr.String())
+	}
+	if stdout.truncated {
+		return nil, fmt.Errorf("nft ruleset JSON exceeds %d bytes", maxRulesetJSON)
+	}
+	return stdout.Bytes(), nil
+}
+
+type diagnosticLimitedBuffer struct {
+	bytes.Buffer
+	max       int
+	truncated bool
+}
+
+type diagnosticTailBuffer struct {
+	buf []byte
+	max int
+}
+
+func (b *diagnosticTailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) >= b.max {
+		b.buf = append(b.buf[:0], p[len(p)-b.max:]...)
+		return n, nil
+	}
+	overflow := len(b.buf) + len(p) - b.max
+	if overflow > 0 {
+		copy(b.buf, b.buf[overflow:])
+		b.buf = b.buf[:len(b.buf)-overflow]
+	}
+	b.buf = append(b.buf, p...)
+	return n, nil
+}
+
+func (b *diagnosticTailBuffer) String() string { return string(b.buf) }
+
+func (b *diagnosticLimitedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := b.max - b.Len()
+	if remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		_, _ = b.Buffer.Write(p[:remaining])
+	}
+	if remaining < len(p) {
+		b.truncated = true
+	}
+	return n, nil
+}
+
 // ListBlocks returns all entries in the block_v4 and block_v6 sets.
 // Uses conn.GetSetElements — no subprocess, no fork.
 func (b *Backend) ListBlocks() ([]firewall.BlockedEntry, error) {

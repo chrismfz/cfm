@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -128,7 +129,7 @@ func TestBearerGateAcceptsAdminTokenAndListsTools(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("admin /mcp tools/list: status = %d, body %s", res.StatusCode, body)
 	}
-	for _, want := range []string{"security_overview", "waf_activity", "challenge_vhosts", "suspicious_hosts", "firewall_blocks", "detectors_status", "system_health"} {
+	for _, want := range []string{"security_overview", "waf_activity", "challenge_vhosts", "suspicious_hosts", "firewall_blocks", "netfilter_path", "detectors_status", "system_health"} {
 		if !strings.Contains(body, `"`+want+`"`) {
 			t.Errorf("tools/list missing %q: %s", want, body)
 		}
@@ -605,6 +606,34 @@ func TestFirewallSelfTestDispatches(t *testing.T) {
 	}
 	if !strings.Contains(body, "nftlib") {
 		t.Errorf("firewall_selftest result missing payload: %s", body)
+	}
+}
+
+func TestNetfilterPathDispatchesFilters(t *testing.T) {
+	fd := &fakeDispatch{body: []byte(`{"ok":true,"status":"warning","chains":[]}`)}
+	ts := newTestServer(t, fd)
+	_, body := mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"netfilter_path","arguments":{"hook":"prerouting","proto":"tcp","dport":443}}}`)
+	if fd.lastPath != "/api/v1/firewall/path" || fd.lastQuery.Get("hook") != "prerouting" || fd.lastQuery.Get("proto") != "tcp" || fd.lastQuery.Get("dport") != "443" {
+		t.Errorf("netfilter_path dispatch path=%q query=%v", fd.lastPath, fd.lastQuery)
+	}
+	if !strings.Contains(body, "warning") {
+		t.Errorf("netfilter_path result missing payload: %s", body)
+	}
+}
+
+func TestNetfilterPathRejectsInvalidFilter(t *testing.T) {
+	for _, port := range []int{-1, 0, 65536} {
+		fd := &fakeDispatch{}
+		ts := newTestServer(t, fd)
+		_, body := mcpPost(t, ts, testAdminToken, fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"netfilter_path","arguments":{"dport":%d}}}`, port))
+		if fd.lastPath != "" {
+			t.Fatalf("port %d dispatched to %q", port, fd.lastPath)
+		}
+		if !strings.Contains(body, `"isError":true`) {
+			t.Fatalf("port %d expected tool error: %s", port, body)
+		}
+		ts.Close()
 	}
 }
 

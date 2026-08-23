@@ -4,6 +4,7 @@
 // in the panel writes here-visible state; this page finally shows it:
 //
 //   GET  /api/v1/firewall/list      — blocked IPs + TTL + comment + GeoIP
+//   GET  /api/v1/firewall/path      — host-wide nft hook order + NAT conflicts
 //   POST /api/v1/firewall/block     — manual block (same as Quick controls)
 //   POST /unblock?ip=…              — cross-layer unblock (nft + WAF planes +
 //                                     CSF/Fail2Ban/Imunify background cleanup)
@@ -31,6 +32,12 @@
     blockTTL: document.getElementById('blockTTL'),
     blockReason: document.getElementById('blockReason'),
     blockBtn: document.getElementById('blockBtn'),
+    pathSummary: document.getElementById('pathSummary'),
+    pathHook: document.getElementById('pathHook'),
+    pathPort: document.getElementById('pathPort'),
+    pathFindings: document.getElementById('pathFindings'),
+    pathBody: document.getElementById('pathBody'),
+    natBody: document.getElementById('natBody'),
   };
 
   const st = {
@@ -39,6 +46,8 @@
     rows: [],
     total: 0,
     permanent: 0,
+    path: null,
+    pathError: '',
   };
 
   function escapeHTML(s) {
@@ -72,17 +81,30 @@
   }
 
   async function loadAll() {
-    try {
-      const res = await api('/v1/firewall/list');
+    const [blocksResult, pathResult] = await Promise.allSettled([
+      api('/v1/firewall/list'),
+      api('/v1/firewall/path'),
+    ]);
+    if (blocksResult.status === 'fulfilled') {
+      const res = blocksResult.value;
       st.rows = Array.isArray(res?.rows) ? res.rows : [];
       st.total = Number(res?.total || 0);
       st.permanent = Number(res?.permanent || 0);
       render();
       if (el.lastUpdated) el.lastUpdated.textContent = 'Updated ' + new Date().toLocaleTimeString();
-    } catch (err) {
+    } else {
+      const err = blocksResult.reason;
       console.error('[firewall] load failed', err);
-      flashMsg(`load failed: ${err.message || err}`, 'danger');
+      flashMsg(`block-list load failed: ${err.message || err}`, 'danger');
     }
+    if (pathResult.status === 'fulfilled') {
+      st.path = pathResult.value || null;
+      st.pathError = '';
+    } else {
+      st.path = null;
+      st.pathError = String(pathResult.reason?.message || pathResult.reason || 'unavailable');
+    }
+    renderNetfilterPath();
   }
 
   function visibleRows() {
@@ -104,7 +126,7 @@
     if (!el.body) return;
     const rows = visibleRows();
     if (!rows.length) {
-      el.body.innerHTML = '<tr><td colspan="6" class="muted">' + (st.total ? 'no rows match the filter' : 'no blocked IPs — all quiet') + '</td></tr>';
+      el.body.innerHTML = '<tr><td colspan="5" class="muted">' + (st.total ? 'no rows match the filter' : 'no blocked IPs — all quiet') + '</td></tr>';
       return;
     }
     el.body.innerHTML = rows.map((r) => {
@@ -126,6 +148,71 @@
     el.body.querySelectorAll('button[data-unblock]').forEach((btn) => {
       btn.addEventListener('click', () => unblockIP(btn.dataset.unblock));
     });
+  }
+
+  function renderNetfilterPath() {
+    const path = st.path;
+    if (!path) {
+      if (el.pathSummary) el.pathSummary.innerHTML = `<span class="pill danger">UNAVAILABLE</span> ${escapeHTML(st.pathError)}`;
+      if (el.pathBody) el.pathBody.innerHTML = '<tr><td colspan="6" class="muted">Netfilter topology unavailable; block management remains operational.</td></tr>';
+      if (el.natBody) el.natBody.innerHTML = '<tr><td colspan="5" class="muted">No topology data.</td></tr>';
+      if (el.pathFindings) el.pathFindings.innerHTML = '';
+      return;
+    }
+    const hook = el.pathHook?.value || '';
+    const port = Number(el.pathPort?.value || 0);
+    const chains = (Array.isArray(path.chains) ? path.chains : []).filter((c) => !hook || c.hook === hook);
+    const rules = (Array.isArray(path.nat_rules) ? path.nat_rules : []).filter((r) => {
+      if (hook && r.hook !== hook) return false;
+      const ports = Array.isArray(r.dports) ? r.dports.map(Number) : [];
+      const ranges = Array.isArray(r.dport_ranges) ? r.dport_ranges : [];
+      return !port || (!ports.length && !ranges.length) || ports.includes(port)
+        || ranges.some((x) => port >= Number(x.from) && port <= Number(x.to));
+    });
+    const findings = (Array.isArray(path.findings) ? path.findings : []).filter((f) => {
+      if (hook && f.hook && f.hook !== hook) return false;
+      const ports = Array.isArray(f.dports) ? f.dports.map(Number) : [];
+      return !port || !ports.length || ports.includes(port);
+    });
+    const status = findings.some((f) => f.level === 'warning' || f.level === 'critical') ? 'warning' : 'ok';
+    const statusClass = status === 'ok' ? 'ok' : status === 'warning' ? 'warn' : 'danger';
+    const exp = path.expected || {};
+    if (el.pathSummary) {
+      el.pathSummary.innerHTML = `<span class="pill ${statusClass}">${escapeHTML(status.toUpperCase())}</span> `
+        + `${chains.length} base chains, ${rules.length} NAT rules in this view; `
+        + `configured CFM priorities: input ${escapeHTML(exp.input_priority)}, web ${escapeHTML(exp.dnat_priority)}, panel ${escapeHTML(exp.panel_dnat_priority)}`
+        + (path.truncated ? ' — output capped; use CLI filters for a narrower view' : '');
+    }
+    if (el.pathFindings) {
+      if (!findings.length) {
+        el.pathFindings.innerHTML = '<p class="muted">No priority ambiguity or runtime/config drift detected.</p>';
+      } else {
+        el.pathFindings.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Severity</th><th>Finding</th><th>Detail</th></tr></thead><tbody>${findings.map((f) => {
+          const level = String(f.level || 'info').toLowerCase();
+          const cls = level === 'warning' ? 'warn' : level === 'critical' ? 'danger' : 'info';
+          return `<tr><td><span class="pill ${cls}">${escapeHTML(level)}</span></td><td><code>${escapeHTML(f.code)}</code></td><td>${escapeHTML(f.message)}</td></tr>`;
+        }).join('')}</tbody></table></div>`;
+      }
+    }
+    if (el.pathBody) {
+      el.pathBody.innerHTML = chains.length ? chains.map((c) => `<tr>
+        <td>${escapeHTML(c.hook)}</td><td><code>${escapeHTML(c.priority)}</code></td>
+        <td><code>${escapeHTML(c.family)} ${escapeHTML(c.table)}</code></td><td>${escapeHTML(c.chain)}</td>
+        <td>${escapeHTML(c.type || '-')} / ${escapeHTML(c.policy || '-')}</td><td>${escapeHTML(c.owner || 'other')}</td>
+      </tr>`).join('') : '<tr><td colspan="6" class="muted">No base chains match this hook.</td></tr>';
+    }
+    if (el.natBody) {
+      el.natBody.innerHTML = rules.length ? rules.map((r) => {
+        const ranges = (Array.isArray(r.dport_ranges) ? r.dport_ranges : []).map((x) => `${x.from}-${x.to}`);
+        const traffic = [...(r.dports || []), ...ranges].join(',') || '*';
+        return `<tr>
+        <td>${escapeHTML(r.hook || '-')} <code>${escapeHTML(r.priority)}</code></td><td>${escapeHTML(r.owner || 'other')}</td>
+        <td><code>${escapeHTML(r.family)} ${escapeHTML(r.table)}/${escapeHTML(r.chain)} #${escapeHTML(r.handle)}</code></td>
+        <td>${escapeHTML(r.protocol || '*')} / ${escapeHTML(traffic)}</td>
+        <td>${escapeHTML(r.action)} ${escapeHTML(r.target || '')}</td>
+      </tr>`;
+      }).join('') : '<tr><td colspan="5" class="muted">No NAT rules match this traffic filter.</td></tr>';
+    }
   }
 
   async function unblockIP(ip) {
@@ -179,6 +266,8 @@
   el.toggleAutoBtn?.addEventListener('click', () => setAuto(!st.auto));
   el.search?.addEventListener('input', render);
   el.onlyPermanent?.addEventListener('change', render);
+  el.pathHook?.addEventListener('change', renderNetfilterPath);
+  el.pathPort?.addEventListener('change', renderNetfilterPath);
   el.blockBtn?.addEventListener('click', blockIP);
   el.blockIP?.addEventListener('keydown', (e) => { if (e.key === 'Enter') blockIP(); });
 

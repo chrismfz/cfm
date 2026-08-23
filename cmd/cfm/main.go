@@ -435,6 +435,7 @@ Usage:
 
   cfm dnat
   cfm firewall status [--verbose] [--json] [--strict]
+  cfm firewall path [--hook prerouting] [--family inet] [--proto tcp] [--dport 443] [--json] [--strict]
 
   cfm webtop  <vhost> -- Live stats for specific vhost
   cfm bots             -- Webtop for bots only (UA-keyed, box-wide throttle/block); see "cfm bots help"
