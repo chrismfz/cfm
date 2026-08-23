@@ -101,7 +101,7 @@ func TestActiveConfigMissingDoesNotFallBackToInactiveEngine(t *testing.T) {
 	}
 }
 
-func TestPanelLuaSelftestScriptCoversSharedDictAndEnvPath(t *testing.T) {
+func TestPanelLuaSelftestScriptCoversSharedDictEnvPathAndHookContract(t *testing.T) {
 	s := panelLuaSelftestScript()
 	for _, want := range []string{
 		"CFM_PANEL_SELFTEST_PATH",
@@ -110,6 +110,9 @@ func TestPanelLuaSelftestScriptCoversSharedDictAndEnvPath(t *testing.T) {
 		"set=function() return true end",
 		"add=function() return true end",
 		"incr=function() return nil end",
+		"if a==true then return end",
+		"if type(cfm_panel_selftest)=='function' then",
+		"error('missing cfm_panel_selftest')",
 	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("selftest stub missing %q", want)
@@ -153,6 +156,37 @@ func TestCheckPanelLuaGuardLoadTimeSharedAccess(t *testing.T) {
 	}
 }
 
+func TestCheckPanelLuaGuardRejectsNilResultWithoutSelftestHook(t *testing.T) {
+	luaJIT, err := exec.LookPath("luajit")
+	if err != nil {
+		t.Skip("luajit not installed; CI installs it before Go tests")
+	}
+	tmp := t.TempDir()
+	luaPath := filepath.Join(tmp, "cfm_panel.lua")
+	src := "local shd = ngx.shared.cfm_decisions\n" +
+		"if type(shd) ~= 'table' then error('shared dict missing') end\n"
+	if err := os.WriteFile(luaPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLookPath := lookPath
+	t.Cleanup(func() { lookPath = oldLookPath })
+	lookPath = func(name string) (string, error) {
+		if name == "luajit" {
+			return luaJIT, nil
+		}
+		return "", exec.ErrNotFound
+	}
+
+	st := checkPanelLuaGuard(luaPath)
+	if st.LoadState != "false" {
+		t.Fatalf("LoadState=%q LoadError=%q", st.LoadState, st.LoadError)
+	}
+	if !strings.Contains(st.LoadError, "missing cfm_panel_selftest") {
+		t.Fatalf("expected missing selftest hook error, got %q", st.LoadError)
+	}
+}
+
 func TestInstallerPanelLuaSelftestsStayInSync(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -169,6 +203,9 @@ func TestInstallerPanelLuaSelftestsStayInSync(t *testing.T) {
 			"CFM_PANEL_SELFTEST_PATH",
 			"shared=setmetatable({},{__index=function(t,k)",
 			"CFM_PANEL_SELFTEST_ONLY=1 CFM_PANEL_SELFTEST_PATH=\"$lua_path\"",
+			"if a==true then return end",
+			"if type(cfm_panel_selftest)=='function' then",
+			"error('missing cfm_panel_selftest')",
 		} {
 			if !strings.Contains(s, want) {
 				t.Fatalf("%s selftest missing %q", rel, want)
