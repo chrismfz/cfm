@@ -18,13 +18,19 @@ type Status struct {
 var lookPath = exec.LookPath
 var command = exec.Command
 
-// Probe returns the current systemd state for unit. ok is false only when
-// systemctl itself is unavailable; an installed, disabled, inactive, failed,
-// or even missing unit still has a meaningful systemctl state and returns ok.
+// Probe returns the current systemd state for unit. ok is false when systemctl
+// itself is unavailable or when the local systemd manager cannot be reached
+// (for example inside WSL/chroots/containers that ship systemctl but do not run
+// systemd as PID 1). Missing, disabled, inactive, or failed units still return a
+// meaningful state with ok=true once the manager is reachable.
 func Probe(unit string) (Status, bool) {
 	if _, err := lookPath("systemctl"); err != nil {
 		return Status{}, false
 	}
+	if !managerReachable() {
+		return Status{}, false
+	}
+
 	activeState := strings.TrimSpace(string(combinedOutput(command("systemctl", "is-active", unit))))
 	enabledState := strings.TrimSpace(string(combinedOutput(command("systemctl", "is-enabled", unit))))
 	if activeState == "" {
@@ -39,6 +45,11 @@ func Probe(unit string) (Status, bool) {
 		ActiveState:  activeState,
 		EnabledState: enabledState,
 	}, true
+}
+
+func managerReachable() bool {
+	out, err := command("systemctl", "show", "--property=Version", "--value").CombinedOutput()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 func combinedOutput(cmd *exec.Cmd) []byte {
