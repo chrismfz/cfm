@@ -1,7 +1,8 @@
 import { lookupDetectorKeySchema, normalizeSchemaValue } from './detector-key-schema.js';
 import { runtimeBadge } from './runtime-badge.js';
+import { coverageBadge, coverageSummaryItems, unitStateText } from './detector-coverage.js';
 
-const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] }, runtime: { sections: [], summary: {}, inventory: {} }, catalog: [], configExists: true };
+const state = { original: null, draft: null, path: '', dirty: false, modes: {}, examples: [], exampleKind: 'core', inlineValidation: { bySection: {}, global: [] }, runtime: { sections: [], summary: {}, inventory: {} }, coverage: null, catalog: [], configExists: true };
 const byId = (id) => document.getElementById(id);
 const RUNTIME_REFRESH_INTERVAL_MS = 30_000;
 const RUNTIME_SKIP_NOTICE_THRESHOLD = 3;
@@ -58,26 +59,86 @@ function renderInventoryLists(inventory){
   }
 
   if(warning){
-    if(missing.length || unknown.length){
-      warning.textContent = `Config drift detected: ${missing.length} missing config type(s), ${unknown.length} unknown section(s).`;
+    // The Daemon-coverage card below is the authoritative "does this matter
+    // on this host?" view — keep this inventory line informational.
+    if(missing.length && unknown.length){
+      warning.textContent = `Inventory: ${missing.length} type(s) with no section, ${unknown.length} unknown section(s) — see Daemon coverage for what matters on this host.`;
+      warning.style.color = '#9ca3af';
+    } else if(missing.length){
+      warning.textContent = `Inventory: ${missing.length} detector type(s) have no config section — usually because the daemon is not on this host. Check Daemon coverage below.`;
+      warning.style.color = '#9ca3af';
+    } else if(unknown.length){
+      warning.textContent = `Config has ${unknown.length} unknown section(s) — likely a typo or an older binary.`;
       warning.style.color = '#fca5a5';
     } else {
-      warning.textContent = 'No detector config drift detected.';
-      warning.style.color = '#86efac';
+      warning.textContent = 'Inventory clean: every available detector type has a section.';
+      warning.style.color = '#9ca3af';
     }
   }
+}
+
+function renderCoverage(){
+  const body = byId('detectorsCoverageBody');
+  const summaryEl = byId('detectorsCoverageSummary');
+  if(!body) return;
+
+  if(summaryEl){
+    summaryEl.innerHTML = '';
+    (coverageSummaryItems(state.coverage?.summary)).forEach((item)=>{
+      const pill = document.createElement('span');
+      pill.className = item.cls;
+      pill.title = item.title || '';
+      pill.textContent = item.label;
+      summaryEl.appendChild(pill);
+    });
+  }
+
+  body.innerHTML = '';
+  const types = Array.isArray(state.coverage?.types) ? state.coverage.types : [];
+  if(types.length === 0){
+    body.innerHTML = '<tr><td colspan="5" class="muted">Coverage unavailable (endpoint unreachable or older binary).</td></tr>';
+    return;
+  }
+  types.forEach((t)=>{
+    const badge = coverageBadge(t.verdict);
+    const sections = Array.isArray(t.sections) ? t.sections : [];
+    const enabledCount = sections.filter((s)=>s.enabled).length;
+    const sectionsText = sections.length ? `${enabledCount}/${sections.length} enabled` : '—';
+    const unitsText = Array.isArray(t.units)
+      ? (t.units.map(unitStateText).join(', ') || '—')
+      : '—';
+    const noteParts = [];
+    if(t.note) noteParts.push(t.note);
+    const probeNotes = sections.filter((s)=>s.enabled && !s.source_probe_ok);
+    if(probeNotes.length) noteParts.push(`log source not found for: ${probeNotes.map((s)=>s.section).join(', ')}`);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><div class="detector-section-title">${safeText(t.type)}</div><div class="muted" style="margin-top:2px">${safeText(t.title||'')}</div></td>`+
+      `<td><span class="${badge.cls}" title="${safeText(badge.title)}">${safeText(badge.label)}</span></td>`+
+      `<td>${safeText(sectionsText)}</td>`+
+      `<td class="muted">${safeText(unitsText)}</td>`+
+      `<td class="muted">${safeText(noteParts.join(' — '))}</td>`;
+    body.appendChild(tr);
+  });
 }
 
 async function refreshRuntimeStatus(){
   if(runtimeRefreshState.inFlight) return;
   runtimeRefreshState.inFlight = true;
   try{
-    const j = await api('/api/v1/detectors/status');
-    state.runtime = j || { sections: [], summary: {}, inventory: {} };
+    // Coverage rides the same edit-aware refresh loop as runtime status; its
+    // failure must never take the status view down (allSettled, not all).
+    const [statusRes, coverageRes] = await Promise.allSettled([
+      api('/api/v1/detectors/status'),
+      api('/api/v1/detectors/coverage'),
+    ]);
+    if(statusRes.status === 'fulfilled'){
+      state.runtime = statusRes.value || { sections: [], summary: {}, inventory: {} };
+    }else{
+      setStatus(`Runtime status unavailable: ${statusRes.reason?.message || 'error'}`, true);
+    }
+    state.coverage = coverageRes.status === 'fulfilled' ? (coverageRes.value || null) : null;
     renderRuntimeOnly();
-  }catch(e){
-    setStatus(`Runtime status unavailable: ${e.message}`, true);
-  } finally {
+  }finally {
     runtimeRefreshState.inFlight = false;
   }
 }
@@ -592,6 +653,7 @@ function renderSectionEditor(container, sec){
 function renderRuntimeOnly(){
   setRuntimeSummary(state.runtime.summary, state.runtime.inventory);
   renderInventoryLists(state.runtime.inventory);
+  renderCoverage();
 
   const runtimeBySection = new Map((state.runtime.sections||[]).map((s)=>[String(s.section||''), s]));
   const coreRows = document.querySelectorAll('#detectorsCoreBody tr[data-section]');

@@ -63,6 +63,16 @@
       </section>
 
       <section class="card wide">
+        <h2>Stock vs live config drift</h2>
+        <p class="muted">Compares the packaged reference configs (<code>/usr/share/cfm/configs/</code>) against <code>/etc/cfm/</code>. Upgrades seed live configs once and never refresh them, so missing sections/keys are shipped features that never activated on this host. Read-only.</p>
+        <div class="toolbar wrap">
+          <button id="cfgDriftRefreshBtn">Check drift</button>
+          <span id="cfgDriftStatus" class="statusline" style="display:block"></span>
+        </div>
+        <div id="cfgDriftBody" style="margin-top:10px"><p class="muted">Not checked yet.</p></div>
+      </section>
+
+      <section class="card wide">
         <h2>Status</h2>
         <p id="settingsStatus" class="statusline" style="display:block"></p>
       </section>
