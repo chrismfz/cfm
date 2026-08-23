@@ -35,6 +35,18 @@ back-filled here — see the git/PR history for that period.
   reader) are shipped features that silently never activated on the host;
   cfm.conf reports stock-documented keys absent from the live text entirely.
   Values are informational only; nothing is modified.
+- **cfm-admin UI: Daemon-coverage panel on /detectors/ and stock-vs-live drift
+  card on /settings/.** The Detectors page now consumes
+  `/api/v1/detectors/coverage` (same edit-aware refresh loop as runtime
+  status): summary pills plus a per-type verdict table — `absent`
+  (daemon+detector both missing) renders as muted information instead of the
+  old inventory complaint, while GAP/dormant stand out. The inventory warning
+  line was reworded to match (red is reserved for genuinely unknown config
+  sections). The Settings page gained a read-only "Stock vs live config
+  drift" card over `/api/v1/system/config-drift` listing missing
+  sections/keys as actionable features, with graceful handling for hosts
+  without the packaged reference tree. Pure view helpers ship with node:test
+  coverage (`detector-coverage.test.js`, `settings.drift.test.cjs`).
 
 ## 2026.08.22
 

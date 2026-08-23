@@ -124,6 +124,127 @@
     return [];
   }
 
+  // ── Stock vs live config drift (GET /api/v1/system/config-drift) ──────────
+
+  function escapeHTML(v) {
+    return String(v ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // configDriftView shapes the endpoint payload into renderable blocks. Pure —
+  // exported for tests. tone: 'ok' | 'warn' | 'muted'
+  function configDriftView(payload) {
+    const p = payload || {};
+    const fileBlock = (f) => {
+      const out = { name: f?.name || 'file', stockFound: !!f?.stock_found, liveFound: f?.live_found !== false, lines: [], missingTotal: 0, tone: 'ok' };
+      if (!out.stockFound) {
+        out.tone = 'muted';
+        out.lines.push({ text: f?.note || 'Stock reference not found on this host.', tone: 'muted' });
+        return out;
+      }
+      const rep = f?.report;
+      if (!rep) {
+        out.tone = 'warn';
+        out.lines.push({ text: f?.error || 'Live config not readable.', tone: 'warn' });
+        return out;
+      }
+      const missingSections = Array.isArray(rep.missing_sections) ? rep.missing_sections : [];
+      const missingKeys = Array.isArray(rep.missing_keys) ? rep.missing_keys : [];
+      const extraSections = Array.isArray(rep.extra_sections) ? rep.extra_sections : [];
+      const extraKeys = Array.isArray(rep.extra_keys) ? rep.extra_keys : [];
+      const valueDiffs = Number(rep.value_diffs || 0);
+      const flatMissing = Array.isArray(rep.missing_keys) && typeof rep.missing_keys[0] === 'string' ? rep.missing_keys : null;
+
+      if (flatMissing) {
+        // cfm.conf shape: plain string list
+        out.missingTotal = flatMissing.length;
+        if (flatMissing.length) {
+          out.tone = 'warn';
+          out.lines.push({ text: `Missing keys (documented in stock, absent from live): ${flatMissing.join(', ')}`, tone: 'warn' });
+        } else {
+          out.lines.push({ text: `No missing keys (${Number(f?.report?.stock_keys || 0)} stock keys all present in live).`, tone: 'ok' });
+        }
+        return out;
+      }
+
+      out.missingTotal = missingSections.length + missingKeys.length;
+      if (missingSections.length) {
+        out.tone = 'warn';
+        out.lines.push({ text: `Missing sections (in stock, never added to live): ${missingSections.join(', ')}`, tone: 'warn' });
+      }
+      if (missingKeys.length) {
+        out.tone = 'warn';
+        out.lines.push({ text: 'Missing keys (section exists in live, newer knobs absent):', tone: 'warn' });
+        missingKeys.forEach((k) => out.lines.push({ text: `[${k.section}] ${k.key}`, tone: 'warn', indent: true }));
+      }
+      if (!missingSections.length && !missingKeys.length) {
+        out.lines.push({ text: 'Live config covers every stock section and key.', tone: 'ok' });
+      } else {
+        out.lines.push({ text: 'Copy the missing blocks from the stock file into /etc/cfm/, tune them, then reload detectors.', tone: 'muted', indent: true });
+      }
+      if (extraSections.length) out.lines.push({ text: `Extra live-only sections (fine): ${extraSections.join(', ')}`, tone: 'muted' });
+      if (extraKeys.length) out.lines.push({ text: `Extra live-only keys (fine): ${extraKeys.map((k) => `[${k.section}] ${k.key}`).join(', ')}`, tone: 'muted' });
+      if (valueDiffs) out.lines.push({ text: `${valueDiffs} key(s) differ in VALUE from stock — expected; per-host values are normal.`, tone: 'muted' });
+      return out;
+    };
+
+    const detectors = fileBlock(p.detectors_conf);
+    const cfm = fileBlock(p.cfm_conf);
+    const total = detectors.missingTotal + cfm.missingTotal;
+    return {
+      total,
+      headline:
+        !p.ok
+          ? 'Drift check failed.'
+          : total === 0
+            ? 'No drift: live configs cover every stock section/key.'
+            : `${total} missing feature(s) across ${[detectors.name, cfm.name].filter((n, i) => [detectors, cfm][i].missingTotal > 0).join(' + ')}.`,
+      headlineTone: !p.ok ? 'warn' : total === 0 ? 'ok' : 'warn',
+      files: [detectors, cfm],
+    };
+  }
+
+  function escapeHtml(v) {
+    return escapeHTML(v);
+  }
+
+  async function loadConfigDrift() {
+    const statusEl = document.getElementById('cfgDriftStatus');
+    const bodyEl = document.getElementById('cfgDriftBody');
+    const setStatusLocal = (msg, ok = true) => {
+      if (!statusEl) return;
+      statusEl.textContent = msg;
+      statusEl.style.color = ok ? '#4ade80' : '#f87171';
+    };
+    try {
+      setStatusLocal('Checking…', true);
+      const payload = await requestJSON('/cfm-admin/api/v1/system/config-drift', { method: 'GET' });
+      const view = configDriftView(payload);
+      if (!bodyEl) return view;
+
+      const esc = escapeHtml;
+      let html = `<p style="margin:4px 0;color:${view.headlineTone === 'ok' ? '#4ade80' : '#f59e0b'}">${esc(view.headline)}</p>`;
+      view.files.forEach((f) => {
+        html += `<details style="margin-top:8px"><summary><strong>${esc(f.name)}</strong> · <span class="${f.tone === 'warn' ? 'pill warn' : f.tone === 'muted' ? 'pill' : 'pill ok'}">${f.missingTotal} missing</span></summary><ul class="list-compact">`;
+        if (f.lines.length === 0) html += '<li class="muted">Nothing to report.</li>';
+        f.lines.forEach((l) => {
+          html += `<li${l.indent ? ' style="padding-left:18px"' : ''} class="${l.tone === 'warn' ? '' : 'muted'}">${esc(l.text)}</li>`;
+        });
+        html += '</ul></details>';
+      });
+      bodyEl.innerHTML = html;
+      setStatusLocal(`Checked ${new Date().toLocaleTimeString()}.`);
+      return view;
+    } catch (err) {
+      if (bodyEl) bodyEl.innerHTML = `<p class="muted">Drift check unavailable: ${escapeHtml(err.message)}</p>`;
+      setStatusLocal(err.message || 'Drift check failed.', false);
+      return null;
+    }
+  }
+
   function mountSettingsPage() {
     const status = document.getElementById('settingsStatus');
     const totpQRSurface = document.getElementById('totpQRSurface');
@@ -216,6 +337,11 @@
         showStatus(err.message || 'Failed to regenerate recovery codes.', false);
       }
     });
+    document.getElementById('cfgDriftRefreshBtn')?.addEventListener('click', () => {
+      loadConfigDrift().catch(() => {});
+    });
+    // Initial load is best-effort: the card shows its own error state.
+    loadConfigDrift().catch(() => {});
   }
 
   const api = {
@@ -225,6 +351,7 @@
     confirmTotpEnrollment,
     regenerateRecoveryCodes,
     getRecoveryCodes,
+    configDriftView,
     mountSettingsPage,
   };
 
