@@ -425,7 +425,7 @@ func detectActiveEdgeService() string {
 func detectActivePanelListenerService() string { return detectActiveEdgeService() }
 
 func panelListenerServiceCandidates(active string) [][]string {
-	if active == panelListenerServiceAmbiguous {
+	if active == panelListenerServiceAmbiguous || active == "" {
 		return nil
 	}
 	serviceCommands := func(service string) [][]string {
@@ -437,12 +437,12 @@ func panelListenerServiceCandidates(active string) [][]string {
 		}
 	}
 	if active == "angie" {
-		return append(serviceCommands("angie"), serviceCommands("openresty")...)
+		return serviceCommands("angie")
 	}
 	if active == "openresty" {
-		return append(serviceCommands("openresty"), serviceCommands("angie")...)
+		return serviceCommands("openresty")
 	}
-	return append(serviceCommands("angie"), serviceCommands("openresty")...)
+	return nil
 }
 
 type panelLuaGuardStatus struct {
