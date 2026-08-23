@@ -145,3 +145,41 @@ func TestValidateDetectorDraftCustomPerRuleErrors(t *testing.T) {
 		t.Fatalf("expected per-rule FAIL_REGEX errors, got %+v", errs)
 	}
 }
+
+// The save-time BLOCK validator must accept the SAME duration grammar the
+// runtime's parseBlockPolicy does — including the days extension ("7d",
+// "1d12h"). A stricter validator here turned a working config into a false
+// "invalid enum/duration for BLOCK" on every UI save.
+func TestValidateDetectorDraftBlockAcceptsDays(t *testing.T) {
+	mk := func(block string) detectorscfg.AdminConfig {
+		return detectorscfg.AdminConfig{
+			Global: map[string]string{},
+			Core: []detectorscfg.AdminSection{
+				{
+					Name: "postfix_security",
+					Keys: map[string]string{"ENABLED": "1", "BLOCK": block},
+				},
+			},
+		}
+	}
+	for _, good := range []string{"7d", "1d12h", "1.5d", "30m", "permanent"} {
+		errs := validateDetectorDraft(mk(good))
+		for _, e := range errs {
+			if strings.Contains(e.Path, ".BLOCK") || strings.Contains(e.Message, "BLOCK") {
+				t.Fatalf("BLOCK=%q rejected: %+v", good, errs)
+			}
+		}
+	}
+	for _, bad := range []string{"7x", "d7", ""} {
+		errs := validateDetectorDraft(mk(bad))
+		found := false
+		for _, e := range errs {
+			if strings.Contains(e.Path, ".BLOCK") {
+				found = true
+			}
+		}
+		if !found && bad != "" { // empty BLOCK may surface a required-key error instead
+			t.Fatalf("BLOCK=%q should be rejected, got %+v", bad, errs)
+		}
+	}
+}

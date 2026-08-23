@@ -51,6 +51,16 @@ _Nothing yet._
   sections/keys as actionable features, with graceful handling for hosts
   without the packaged reference tree. Pure view helpers ship with node:test
   coverage (`detector-coverage.test.js`, `settings.drift.test.cjs`).
+- **Fixed: UI/save-time validation rejected the days duration suffix ("7d")
+  that the detector runtime accepts.** The runtime's BLOCK parser
+  (`parseCfgDuration`) has supported Go-duration-plus-days since its
+  introduction, but the cfm-admin inline validator and the API save-time
+  BLOCK/duration checks used plain `time.ParseDuration` — so a perfectly
+  working `BLOCK = 7d` showed a permanent "invalid block mode" warning on the
+  Detectors page and could block UI saves. The parser now lives in
+  `internal/detconf` and is the single source both sides call; JS validator
+  mirrors it (`Nd → N*24h`), hint texts mention days, and regression tests
+  pin the shared grammar.
 
 ## 2026.08.22
 
