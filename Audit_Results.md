@@ -565,3 +565,103 @@ Source-confirmed, live credentialed proof still pending:
 3. **MEDIUM/HARDENING:** forwarded identity needs one canonical trusted-proxy implementation and live log correlation.
 
 The next most valuable audit activity is therefore **not more anonymous endpoint enumeration**. It is a controlled scoped/admin credential matrix plus browser-session method/CSRF checks and log correlation.
+
+---
+
+# Second live pass addendum — 2026-08-23
+
+Source snapshot reviewed before this pass: `main` at `2599147d2617a10e10a6e219350e96fa57326df4`.
+
+Audit mode remained active, low-volume and non-destructive. No production firewall, token, detector/notifier, history, MySQL, challenge, WAF, ClamAV or HTTP/3 state was changed; no pprof profile or trace was requested.
+
+## R04 second-live-pass update — forwarded XFF poisoning confirmed
+
+**Severity:** MEDIUM / HARDENING  
+**Status update:** CONFIRMED LIVE for proxied client-IP attribution  
+**Priority:** P1
+
+A controlled unauthenticated request was sent through the edge to:
+
+```text
+GET https://titan.myip.gr/cfm-admin/api/v1/system/processes
+X-Forwarded-For: 8.8.8.8
+X-Real-IP: 8.8.4.4
+CF-Connecting-IP: 1.1.1.1
+X-Forwarded-Proto: http
+```
+
+The request returned `401` as expected, but Titan's `cfm.api.log` recorded:
+
+```text
+2026-08-23 21:16:41 [apiserver] GET /api/v1/system/processes 401 ... ip=8.8.8.8, 84.54.49.6
+```
+
+The immediately following direct request to `https://titan.myip.gr:6061/api/v1/system/processes` with the same spoofed forwarding headers returned `401` and logged:
+
+```text
+2026-08-23 21:16:46 [apiserver] GET /api/v1/system/processes 401 ... ip=84.54.49.6
+```
+
+This closes the first-pass uncertainty: the edge path appends an attacker-supplied XFF value and Go's `realIPFromRequest()` consumes the complete comma-separated XFF string as the effective log/rate-limit identity when the immediate peer is loopback. Direct `:6061` correctly ignores the spoofed forwarding headers.
+
+No authentication bypass was observed. The confirmed impact is attacker influence over proxied client identity used by request logging and any limiter/anomaly path that reuses `realIPFromRequest()`.
+
+Affected source/design:
+
+- `internal/apiserver/request_log.go::realIPFromRequest`
+- CFM-admin edge proxy contract currently using append-style `X-Forwarded-For`
+
+Recommended remediation remains the design already documented in `Audit.md`: overwrite CFM control-plane XFF with the canonical edge client address and replace raw forwarded-header consumption with one trusted-immediate-peer helper that yields exactly one parseable client IP.
+
+Still unverified for R04:
+
+- effective scheme on edge -> loopback:6060, because current `cfm.api.log` records do not include scheme;
+- direct 6060 forwarded-header behavior.
+
+---
+
+## R10 — Authentication/cache response-header hardening gaps
+
+**Severity:** HARDENING  
+**Status:** CONFIRMED LIVE  
+**Priority:** P2
+
+Low-volume header-only checks found different hardening behavior between direct `:6061` and the edge.
+
+Observed direct `:6061`:
+
+- `GET /login` -> `200`, `Cache-Control: no-store`, `Vary: Cookie`;
+- `GET /login/verify` -> `200`, `Cache-Control: no-store`, `Vary: Cookie`;
+- anonymous `GET /api/v1/tokens/me` -> `401`, `Vary: Cookie`, but no `Cache-Control: no-store`;
+- anonymous `GET /api/v1/admin/authcheck` -> `401`, `Vary: Cookie`, but no `Cache-Control: no-store`;
+- invalid `GET /api/v1/embed/bootstrap?...` -> `401`, `Vary: Cookie`, but no `Cache-Control: no-store`.
+
+Observed through `/cfm-admin` edge:
+
+- the same anonymous API/bootstrap `401` responses received `Cache-Control: no-store` from the edge;
+- `/login` and `/login/verify` also returned `Cache-Control: no-store` (duplicated on the proxied login responses).
+
+The sampled login responses did not expose `Content-Security-Policy`, `X-Frame-Options`, `Referrer-Policy`, `Strict-Transport-Security` or `X-Content-Type-Options`. The sampled API `401` responses did include `X-Content-Type-Options: nosniff`.
+
+Source explains the direct identity-response cache discrepancy: `setAuthIdentityNoCacheHeaders()` is called inside `/api/v1/tokens/me` and `/api/v1/admin/authcheck`, but anonymous requests are rejected earlier by `TokenMiddleware`, before those endpoint-specific headers run.
+
+No concrete sensitive-response cache leak or cookie-attribute vulnerability was proven in this pass, so this remains hardening rather than a vulnerability.
+
+Recommended remediation:
+
+- set conservative no-store/cache identity headers on authentication failures at the outer auth middleware as well as successful identity handlers;
+- centralize browser security headers for both direct `:6061` and edge entry points so the direct control plane does not depend on edge-only policy;
+- add HSTS only where the intended direct/edge transport policy is finalized, especially while plaintext `:6060` remains a supported/degraded surface.
+
+---
+
+## Second-pass credential/tooling coverage notes
+
+No valid scoped token, admin bearer or authenticated admin browser session was available in the authorized audit environment. The persistent browser profile landed at the CFM sign-in page, and the managed identity store was empty. Consequently:
+
+- R02 scoped -> pprof remains **SOURCE CONFIRMED / LIVE PENDING**; current main still mounts pprof without an explicit admin gate;
+- R03 mutating-GET/CSRF remains **SOURCE CONFIRMED / LIVE AUTHENTICATED REPRO PENDING**; current main still lacks method guards on the listed Challenge/WAF/Clam mutators while HTTP/3 controls enforce POST;
+- scoped admin-only and in-scope/out-of-scope matrices remain live-unverified;
+- admin-token edge-vs-direct response equivalence remains live-unverified;
+- MCP-only and OAuth credential separation remains live-unverified, although current source keeps MCP client credentials separate from `/api/v1` authentication and the node's MCP read surface is operational;
+- TLS 1.3 with correct `titan.myip.gr` SNI remains confirmed, but the available scoped TLS probe could not force TLS 1.0/1.1/1.2 or arbitrary/no-SNI handshakes without widening target scope.
