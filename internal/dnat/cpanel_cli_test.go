@@ -184,6 +184,8 @@ func TestPanelChallengeOn_ForcedUpdatesActiveConfigAndReloadsAngie(t *testing.T)
 
 	var calls []string
 	origExec := execCommand
+	origDetect := panelListenerServiceDetector
+	panelListenerServiceDetector = func() string { return "angie" }
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
 		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "angie" {
@@ -191,7 +193,10 @@ func TestPanelChallengeOn_ForcedUpdatesActiveConfigAndReloadsAngie(t *testing.T)
 		}
 		return exec.Command("sh", "-c", "exit 1")
 	}
-	t.Cleanup(func() { execCommand = origExec })
+	t.Cleanup(func() {
+		execCommand = origExec
+		panelListenerServiceDetector = origDetect
+	})
 
 	if err := applyPanelChallengeModeToPaths("forced", []string{listenerPath}); err != nil {
 		t.Fatalf("apply forced mode: %v", err)
