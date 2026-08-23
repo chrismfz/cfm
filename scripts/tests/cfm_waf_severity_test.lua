@@ -81,12 +81,27 @@ do
   waf.set_rule("rule_bad_ua", "challenge")
 
   local hit, reason, _ttl, action = waf.check(fresh_ctx({
-    method = "HEAD",
+    uri = "/login",
+    method = "POST",
     headers = { ["User-Agent"] = "" },
   }))
   check(hit == true,                                "3: bad_ua challenge — hit=true")
   check(reason and reason:sub(1, 10) == "WAF_BAD_UA", "3: bad_ua challenge — reason prefix")
   check(action == "challenge",                      "3: bad_ua challenge — action=challenge")
+end
+
+-- ── Test 3b: HEAD / stays below bad-UA threshold ─────────────────────────────
+-- FP hardening intentionally suppresses missing-header scoring for ordinary
+-- GET/HEAD requests. Empty UA (+2) + HEAD (+1) = 3, below min_score=4.
+do
+  disable_all_rules()
+  waf.set_rule("rule_bad_ua", "challenge")
+
+  local hit = waf.check(fresh_ctx({
+    method = "HEAD",
+    headers = { ["User-Agent"] = "" },
+  }))
+  check(hit == false, "3b: bad_ua — HEAD / with empty UA stays below threshold")
 end
 
 -- ── Test 4: logonly first + block later → block (severity wins) ──────────────
@@ -116,7 +131,8 @@ do
 
   local hit, reason, _ttl, action, hits = waf.check(fresh_ctx({
     args    = "x=${jndi:ldap://",
-    method  = "HEAD",
+    uri     = "/login",
+    method  = "POST",
     headers = { ["User-Agent"] = "" },
   }))
   check(hit == true,        "5: challenge+block — hit=true")
@@ -221,7 +237,7 @@ do
 
   local _hit, _reason, _ttl, _action, hits = waf.check(fresh_ctx({
     uri     = "/foo/../wp-config",
-    method  = "HEAD",
+    method  = "POST",
     headers = { ["User-Agent"] = "" },
   }))
   check(#hits == 2,                          "12: hits — 2 entries")
