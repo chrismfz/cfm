@@ -17,7 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **`cfm dnat cpanel` status: two false diagnostics fixed.** (1) The Panel Lua
+  load check reported `false` with `attempt to index field 'shared'` on every
+  host: the selftest stub fed to `resty -e` had no `ngx.shared`, while
+  `cfm_panel.lua` resolves `ngx.shared.cfm_decisions` at load time (bridge
+  decision client, edge-unification Phase 2). The stub now provides a generic
+  per-dict fake (`shared=setmetatable(...)` with the common shdict methods);
+  validated against the real module under LuaJIT. Status-only — never gated
+  `dnat cpanel on`, and the running edge was always healthy. (2) On OpenResty
+  hosts with a leftover disabled Angie install, the status picked the Angie
+  paths first (hardcoded Angie-first lists) and reported Angie's stale
+  listener config as "Policy active file" / Lua guard / decision endpoint.
+  Path selection now goes through `detectActivePanelListenerService()` (same
+  source the reload path trusts) via a shared `orderedPanelListenerConfigPaths()`;
+  with no active or ambiguous service the original order is kept.
 
 ## 2026.08.23
 

@@ -718,7 +718,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		} else {
 			fmt.Println("State: OFF")
 		}
-		panelMode, luaLoaded, modePath := panelListenerGuardStateFromPaths(panelListenerChallengeConfigPaths)
+		panelMode, luaLoaded, modePath := panelListenerGuardStateFromPaths(orderedPanelListenerConfigPaths())
 		if panelMode == "unknown" {
 			if persisted := loadPersistedPanelChallengeMode(); persisted != "" {
 				panelMode = persisted
@@ -728,7 +728,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		panelLuaPath := panelLuaGuardPath()
 		panelLua := checkPanelLuaGuard(panelLuaPath)
-		panelDecision := probePanelDecisionEndpoint([]string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
+		panelDecision := probePanelDecisionEndpoint(orderedPanelListenerConfigPaths())
 		onProfile := buildPanelChallengeStatus(panelChallengeEnabledMode, panelMode, luaLoaded)
 		offProfile := buildPanelChallengeStatus(panelChallengeDisabledMode, panelChallengeDisabledMode, luaLoaded)
 		_ = offProfile // status always resolves both ON and OFF policy profiles.

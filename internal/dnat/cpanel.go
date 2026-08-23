@@ -221,8 +221,7 @@ func detectedImunifyMappings() []string {
 }
 
 func panelListenerGuardState() (string, bool) {
-	paths := []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"}
-	mode, loaded, _ := panelListenerGuardStateFromPaths(paths)
+	mode, loaded, _ := panelListenerGuardStateFromPaths(orderedPanelListenerConfigPaths())
 	return mode, loaded
 }
 
@@ -417,8 +416,30 @@ func cmdExists(name string) bool {
 	return err == nil
 }
 
+// orderedPanelListenerConfigPaths reorders the canonical listener-config
+// candidate list so the ACTIVE edge service's paths come first (detected via
+// panelListenerServiceDetector, same source the reload path trusts). Status
+// probes previously scanned a fixed Angie-first list, so an OpenResty host
+// with a leftover disabled Angie install reported Angie's stale config as the
+// live one ("Policy active file", Lua guard path, decision endpoint). With no
+// detected service (or an ambiguous dual-active state) the original order is
+// kept, which preserves the repo-relative fallback used by tests/dev.
+func orderedPanelListenerConfigPaths() []string {
+	active := panelListenerServiceDetector()
+	if active == "" || active == panelListenerServiceAmbiguous {
+		return panelListenerChallengeConfigPaths
+	}
+	ordered := panelListenerConfigPathsForService(active, panelListenerChallengeConfigPaths)
+	for _, p := range panelListenerChallengeConfigPaths {
+		if panelListenerConfigPathService(p) != active {
+			ordered = append(ordered, p)
+		}
+	}
+	return ordered
+}
+
 func panelLuaGuardPath() string {
-	for _, p := range []string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"} {
+	for _, p := range orderedPanelListenerConfigPaths() {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
@@ -473,8 +494,20 @@ type panelLuaProbe struct {
 	UseEnv bool
 }
 
+// panelLuaSelftestScript is the Lua chunk handed to `resty -e` (or the plain
+// lua interpreters) together with the module path: it builds a minimal ngx
+// stub, dofile()s the module under CFM_PANEL_SELFTEST_ONLY=1 and surfaces the
+// module's selftest result. The stub must provide `ngx.shared` (generic
+// per-dict fake with the common shdict methods): cfm_panel.lua resolves
+// ngx.shared.cfm_decisions at LOAD time for the bridge decision client, and a
+// stub without `shared` made every load check report a false
+// "attempt to index field 'shared'" failure.
+func panelLuaSelftestScript() string {
+	return `package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},shared=setmetatable({},{__index=function(t,k) local d={get=function() return nil end,set=function() return true end,add=function() return true end,replace=function() return false end,delete=function() return true end,incr=function() return nil end,len=function() return 0 end,touch=function() return true end,flush_all=function() return true end,flush_expired=function() return 0 end,capacity=function() return 0 end,free_space=function() return 0 end}; rawset(t,k,d); return d end}),req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,arg[1]); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; return`
+}
+
 func panelLuaGuardProbes() []panelLuaProbe {
-	selftest := `package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,arg[1]); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; return`
+	selftest := panelLuaSelftestScript()
 	return []panelLuaProbe{
 		{Name: "resty", Args: []string{"-e", selftest}, UseEnv: true},
 		{Name: "luajit", Args: []string{"-e", selftest}, UseEnv: true},
