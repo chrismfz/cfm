@@ -283,6 +283,9 @@ func reloadPanelListenerService() error {
 	if active == panelListenerServiceAmbiguous {
 		return fmt.Errorf("ambiguous active panel listener services: both angie and openresty are active/enabled; exactly one edge service must be active and enabled")
 	}
+	if active == "" {
+		return fmt.Errorf("no authoritative angie/openresty edge service detected; exactly one should be active+enabled (or uniquely enabled while stopped)")
+	}
 	candidates := panelListenerServiceCandidates(active)
 	var lastErr error
 	primary := active
@@ -360,9 +363,10 @@ func panelListenerConfigPathService(path string) string {
 
 // detectActiveEdgeService uses the same active/enabled systemd model surfaced
 // by `cfm health`. A normal node may have both engines installed, but exactly
-// one is expected to be active+enabled. If systemd is unavailable we fall back
-// to the running-process detector; stale config files are never used to decide
-// which engine is live. Both web DNAT and panel DNAT consume this resolver.
+// one is expected to be active+enabled. If neither is active, a unique enabled
+// service is the intended engine and may be restarted. If systemd is unavailable
+// we fall back to the running-process detector; stale config files are never used
+// to decide which engine is live. Both web DNAT and panel DNAT consume this resolver.
 func detectActiveEdgeService() string {
 	services := []string{"angie", "openresty"}
 	states := make(map[string]systemdunit.Status, len(services))
@@ -378,8 +382,12 @@ func detectActiveEdgeService() string {
 	if systemdAvailable {
 		var activeEnabled []string
 		var active []string
+		var enabled []string
 		for _, service := range services {
 			st := states[service]
+			if st.Enabled {
+				enabled = append(enabled, service)
+			}
 			if st.Active {
 				active = append(active, service)
 				if st.Enabled {
@@ -400,9 +408,11 @@ func detectActiveEdgeService() string {
 			return active[0]
 		case 2:
 			return panelListenerServiceAmbiguous
-		default:
-			return ""
 		}
+		if len(enabled) == 1 {
+			return enabled[0]
+		}
+		return ""
 	}
 
 	if service := panelListenerProcessDetector(); service == "angie" || service == "openresty" {
