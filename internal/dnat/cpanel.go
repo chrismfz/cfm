@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/systemdunit"
 )
 
 var panelMap = panelMappingMap()
@@ -280,7 +281,7 @@ func probePanelDecisionEndpoint(paths []string) panelDecisionEndpointProbe {
 func reloadPanelListenerService() error {
 	active := panelListenerServiceDetector()
 	if active == panelListenerServiceAmbiguous {
-		return fmt.Errorf("ambiguous active panel listener services: both angie and openresty are active and the loaded panel listener config is not unique")
+		return fmt.Errorf("ambiguous active panel listener services: both angie and openresty are active/enabled; exactly one edge service must be active and enabled")
 	}
 	candidates := panelListenerServiceCandidates(active)
 	var lastErr error
@@ -312,11 +313,21 @@ func reloadPanelListenerService() error {
 
 var panelListenerServiceDetector = detectActivePanelListenerService
 var panelListenerProcessDetector = detectEdgeService
+var panelSystemdUnitProbe = systemdunit.Probe
 
 const panelListenerServiceAmbiguous = "__ambiguous__"
 
+func panelServiceUnit(service string) string {
+	service = strings.TrimSpace(service)
+	if strings.HasSuffix(service, ".service") {
+		return service
+	}
+	return service + ".service"
+}
+
 func systemctlServiceIsActive(service string) bool {
-	return execCommand("systemctl", "is-active", "--quiet", service).Run() == nil
+	st, ok := panelSystemdUnitProbe(panelServiceUnit(service))
+	return ok && st.Active
 }
 
 func panelListenerServiceIsConfirmedActive(service string) bool {
@@ -324,16 +335,6 @@ func panelListenerServiceIsConfirmedActive(service string) bool {
 		return true
 	}
 	return panelListenerProcessDetector() == service
-}
-
-func activePanelListenerServicesFromSystemd() []string {
-	var active []string
-	for _, service := range []string{"angie", "openresty"} {
-		if systemctlServiceIsActive(service) {
-			active = append(active, service)
-		}
-	}
-	return active
 }
 
 func panelListenerConfigPathsForService(service string, paths []string) []string {
@@ -357,27 +358,57 @@ func panelListenerConfigPathService(path string) string {
 	}
 }
 
+// detectActivePanelListenerService uses the same active/enabled systemd model
+// surfaced by `cfm health`. A normal node may have both engines installed, but
+// exactly one is expected to be active+enabled. If systemd is unavailable we
+// fall back to the running-process detector; stale config files are never used
+// to decide which engine is live.
 func detectActivePanelListenerService() string {
-	active := activePanelListenerServicesFromSystemd()
-	switch len(active) {
-	case 1:
-		return active[0]
-	case 2:
-		var loadedServices []string
-		for _, service := range active {
-			_, loaded, _ := panelListenerGuardStateFromPaths(panelListenerConfigPathsForService(service, panelListenerChallengeConfigPaths))
-			if loaded {
-				loadedServices = append(loadedServices, service)
+	services := []string{"angie", "openresty"}
+	states := make(map[string]systemdunit.Status, len(services))
+	systemdAvailable := false
+	for _, service := range services {
+		st, ok := panelSystemdUnitProbe(panelServiceUnit(service))
+		if !ok {
+			continue
+		}
+		systemdAvailable = true
+		states[service] = st
+	}
+	if systemdAvailable {
+		var activeEnabled []string
+		var active []string
+		for _, service := range services {
+			st := states[service]
+			if st.Active {
+				active = append(active, service)
+				if st.Enabled {
+					activeEnabled = append(activeEnabled, service)
+				}
 			}
 		}
-		if len(loadedServices) == 1 {
-			return loadedServices[0]
+		switch len(activeEnabled) {
+		case 1:
+			return activeEnabled[0]
+		case 2:
+			return panelListenerServiceAmbiguous
 		}
-		return panelListenerServiceAmbiguous
+		switch len(active) {
+		case 1:
+			// Tolerate a manually-started service or a transient enable-state
+			// mismatch, but runtime activity still wins over stale files.
+			return active[0]
+		case 2:
+			return panelListenerServiceAmbiguous
+		default:
+			return ""
+		}
 	}
 
-	_, _, path := panelListenerGuardStateFromPaths(panelListenerChallengeConfigPaths)
-	return panelListenerConfigPathService(path)
+	if service := panelListenerProcessDetector(); service == "angie" || service == "openresty" {
+		return service
+	}
+	return ""
 }
 
 func panelListenerServiceCandidates(active string) [][]string {
@@ -416,26 +447,26 @@ func cmdExists(name string) bool {
 	return err == nil
 }
 
-// orderedPanelListenerConfigPaths reorders the canonical listener-config
-// candidate list so the ACTIVE edge service's paths come first (detected via
-// panelListenerServiceDetector, same source the reload path trusts). Status
-// probes previously scanned a fixed Angie-first list, so an OpenResty host
-// with a leftover disabled Angie install reported Angie's stale config as the
-// live one ("Policy active file", Lua guard path, decision endpoint). With no
-// detected service (or an ambiguous dual-active state) the original order is
-// kept, which preserves the repo-relative fallback used by tests/dev.
+// orderedPanelListenerConfigPaths is intentionally strict once the live edge
+// engine is known: diagnostics may inspect only that engine's listener config.
+// An installed-but-inactive peer must never become a fallback "active file".
+// When no service is detectable we retain only service-neutral repo/test paths;
+// an ambiguous dual-active state yields no authoritative config at all.
 func orderedPanelListenerConfigPaths() []string {
 	active := panelListenerServiceDetector()
-	if active == "" || active == panelListenerServiceAmbiguous {
-		return panelListenerChallengeConfigPaths
+	if active == "angie" || active == "openresty" {
+		return panelListenerConfigPathsForService(active, panelListenerChallengeConfigPaths)
 	}
-	ordered := panelListenerConfigPathsForService(active, panelListenerChallengeConfigPaths)
+	if active == panelListenerServiceAmbiguous {
+		return nil
+	}
+	var neutral []string
 	for _, p := range panelListenerChallengeConfigPaths {
-		if panelListenerConfigPathService(p) != active {
-			ordered = append(ordered, p)
+		if panelListenerConfigPathService(p) == "" {
+			neutral = append(neutral, p)
 		}
 	}
-	return ordered
+	return neutral
 }
 
 func panelLuaGuardPath() string {
@@ -451,7 +482,6 @@ func panelLuaGuardPath() string {
 				v := strings.TrimSpace(strings.TrimPrefix(line, "access_by_lua_file "))
 				return strings.TrimSuffix(v, ";")
 			}
-		}
 	}
 	return ""
 }
@@ -494,16 +524,14 @@ type panelLuaProbe struct {
 	UseEnv bool
 }
 
-// panelLuaSelftestScript is the Lua chunk handed to `resty -e` (or the plain
-// lua interpreters) together with the module path: it builds a minimal ngx
-// stub, dofile()s the module under CFM_PANEL_SELFTEST_ONLY=1 and surfaces the
-// module's selftest result. The stub must provide `ngx.shared` (generic
-// per-dict fake with the common shdict methods): cfm_panel.lua resolves
-// ngx.shared.cfm_decisions at LOAD time for the bridge decision client, and a
-// stub without `shared` made every load check report a false
-// "attempt to index field 'shared'" failure.
+// panelLuaSelftestScript is shared in contract with the two proxy installers.
+// The target module path is supplied via CFM_PANEL_SELFTEST_PATH instead of as
+// a positional Lua argument: plain lua/luajit otherwise auto-execute the file
+// after `-e`, and arg[] semantics differ from resty's runner. The generic
+// ngx.shared fake covers any load-time shared-dict access, not only the current
+// cfm_decisions dictionary.
 func panelLuaSelftestScript() string {
-	return `package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},shared=setmetatable({},{__index=function(t,k) local d={get=function() return nil end,set=function() return true end,add=function() return true end,replace=function() return false end,delete=function() return true end,incr=function() return nil end,len=function() return 0 end,touch=function() return true end,flush_all=function() return true end,flush_expired=function() return 0 end,capacity=function() return 0 end,free_space=function() return 0 end}; rawset(t,k,d); return d end}),req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,arg[1]); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; return`
+	return `package.path='/var/lib/cfm/lua/?.lua;'..package.path; local path=os.getenv('CFM_PANEL_SELFTEST_PATH'); if not path or path=='' then error('CFM_PANEL_SELFTEST_PATH missing') end; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},shared=setmetatable({},{__index=function(t,k) local d={get=function() return nil end,set=function() return true end,add=function() return true end,replace=function() return false end,delete=function() return true end,incr=function() return nil end,len=function() return 0 end,touch=function() return true end,flush_all=function() return true end,flush_expired=function() return 0 end,capacity=function() return 0 end,free_space=function() return 0 end}; rawset(t,k,d); return d end}),req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,path); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; return`
 }
 
 func panelLuaGuardProbes() []panelLuaProbe {
@@ -530,10 +558,13 @@ func runPanelLuaGuardProbe(st panelLuaGuardStatus, cmdPath string) panelLuaGuard
 		if !cmdExists(probe.Name) {
 			continue
 		}
-		args := append(append([]string{}, probe.Args...), cmdPath)
+		args := append([]string{}, probe.Args...)
+		if probe.Syntax {
+			args = append(args, cmdPath)
+		}
 		cmd := execCommand(probe.Name, args...)
 		if probe.UseEnv {
-			cmd.Env = append(os.Environ(), "CFM_PANEL_SELFTEST_ONLY=1")
+			cmd.Env = append(os.Environ(), "CFM_PANEL_SELFTEST_ONLY=1", "CFM_PANEL_SELFTEST_PATH="+cmdPath)
 		}
 		out, err := cmd.CombinedOutput()
 		msg := strings.TrimSpace(string(out))

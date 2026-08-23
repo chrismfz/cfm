@@ -6,6 +6,7 @@ import (
 	"cfm/internal/dnat"
 	"cfm/internal/firewall"
 	"cfm/internal/mailq"
+	"cfm/internal/systemdunit"
 	webdet "cfm/internal/webdetector"
 	"context"
 	"crypto/tls"
@@ -595,12 +596,11 @@ func buildAmbiguityWarning(candidates []frontendSignal) string {
 }
 
 func probeSystemdUnit(unit string) (active bool, enabled bool, ok bool) {
-	if _, err := exec.LookPath("systemctl"); err != nil {
+	st, ok := systemdunit.Probe(unit)
+	if !ok {
 		return false, false, false
 	}
-	activeState := strings.TrimSpace(string(mustCombinedOutput(exec.Command("systemctl", "is-active", unit))))
-	enabledState := strings.TrimSpace(string(mustCombinedOutput(exec.Command("systemctl", "is-enabled", unit))))
-	return activeState == "active", enabledState == "enabled", true
+	return st.Active, st.Enabled, true
 }
 
 var ssOwnerTupleRE = regexp.MustCompile(`\("([^"]+)",pid=([0-9]+),fd=[0-9]+\)`)
@@ -1190,14 +1190,11 @@ func probeCFMDaemonLive() (bool, *int) {
 }
 
 func probeSystemdServiceState(unit string) (string, bool) {
-	if _, err := exec.LookPath("systemctl"); err != nil {
+	st, ok := systemdunit.Probe(unit)
+	if !ok {
 		return "", false
 	}
-	state := strings.TrimSpace(string(mustCombinedOutput(exec.Command("systemctl", "is-active", unit))))
-	if state == "" {
-		state = "unknown"
-	}
-	return state, true
+	return st.ActiveState, true
 }
 
 func enrichHostMemoryAndLoad(host *HostSystem) {
@@ -1245,23 +1242,18 @@ func enrichHostMemoryAndLoad(host *HostSystem) {
 }
 
 func collectServiceStatuses() []ServiceStatus {
-	if _, err := exec.LookPath("systemctl"); err != nil {
-		return nil
-	}
 	units := []string{"cfm.service", "nginx.service", "openresty.service", "angie.service"}
 	out := make([]ServiceStatus, 0, len(units))
 	for _, unit := range units {
-		active := strings.TrimSpace(string(mustCombinedOutput(exec.Command("systemctl", "is-active", unit))))
-		enabled := strings.TrimSpace(string(mustCombinedOutput(exec.Command("systemctl", "is-enabled", unit))))
-		state := active
-		if state == "" {
-			state = "unknown"
+		st, ok := systemdunit.Probe(unit)
+		if !ok {
+			return nil
 		}
 		out = append(out, ServiceStatus{
 			Name:    strings.TrimSuffix(unit, ".service"),
-			Active:  active == "active",
-			Enabled: enabled == "enabled",
-			State:   state,
+			Active:  st.Active,
+			Enabled: st.Enabled,
+			State:   st.ActiveState,
 		})
 	}
 	return out

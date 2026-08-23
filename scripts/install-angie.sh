@@ -678,7 +678,7 @@ validate_panel_lua_guard_preflight() {
         warn "Panel Lua guard file is not readable by worker user cfm: $lua_path"
         return 1
     fi
-    local selftest="package.path='/var/lib/cfm/lua/?.lua;'..package.path; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,arg[1]); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; if a==true then return end; if type(cfm_panel_selftest)=='function' then local ok2,err=cfm_panel_selftest(); assert(ok2, err or 'selftest failed'); return end; error('missing cfm_panel_selftest')"
+    local selftest="package.path='/var/lib/cfm/lua/?.lua;'..package.path; local path=os.getenv('CFM_PANEL_SELFTEST_PATH'); if not path or path=='' then error('CFM_PANEL_SELFTEST_PATH missing') end; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},shared=setmetatable({},{__index=function(t,k) local d={get=function() return nil end,set=function() return true end,add=function() return true end,replace=function() return false end,delete=function() return true end,incr=function() return nil end,len=function() return 0 end,touch=function() return true end,flush_all=function() return true end,flush_expired=function() return 0 end,capacity=function() return 0 end,free_space=function() return 0 end}; rawset(t,k,d); return d end}),req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,path); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; if a==true then return end; if type(cfm_panel_selftest)=='function' then local ok2,err=cfm_panel_selftest(); assert(ok2, err or 'selftest failed'); return end; error('missing cfm_panel_selftest')"
     local interp=""
     for cand in resty luajit lua lua5.1 lua5.4 lua5.3 lua5.2; do
         if command -v "$cand" >/dev/null 2>&1; then
@@ -687,9 +687,9 @@ validate_panel_lua_guard_preflight() {
         fi
     done
     if [ -n "$interp" ]; then
-        if ! CFM_PANEL_SELFTEST_ONLY=1 "$interp" -e "$selftest" "$lua_path" >/dev/null 2>&1; then
+        if ! CFM_PANEL_SELFTEST_ONLY=1 CFM_PANEL_SELFTEST_PATH="$lua_path" "$interp" -e "$selftest" >/dev/null 2>&1; then
             warn "Panel Lua guard syntax/module selftest failed with $interp: $lua_path"
-            CFM_PANEL_SELFTEST_ONLY=1 "$interp" -e "$selftest" "$lua_path" >&2 || true
+            CFM_PANEL_SELFTEST_ONLY=1 CFM_PANEL_SELFTEST_PATH="$lua_path" "$interp" -e "$selftest" >&2 || true
             return 1
         fi
         log "Panel Lua guard preflight passed with $interp: $lua_path"

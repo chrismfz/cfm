@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -23,7 +24,7 @@ func withPanelListenerService(t *testing.T, service string, paths []string) {
 	}
 }
 
-func TestOrderedPanelListenerConfigPathsPrefersActiveService(t *testing.T) {
+func TestOrderedPanelListenerConfigPathsPrefersOnlyActiveService(t *testing.T) {
 	angie := "/etc/angie/cfm-panel-listeners.conf"
 	oresty := "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf"
 	fallback := "configs/cfm-panel-listeners.conf.in"
@@ -34,10 +35,10 @@ func TestOrderedPanelListenerConfigPathsPrefersActiveService(t *testing.T) {
 		svc  string
 		want []string
 	}{
-		{"openresty active", "openresty", []string{oresty, angie, fallback}},
-		{"angie active", "angie", []string{angie, oresty, fallback}},
-		{"ambiguous keeps order", panelListenerServiceAmbiguous, []string{angie, oresty, fallback}},
-		{"no service keeps order", "", []string{angie, oresty, fallback}},
+		{"openresty active", "openresty", []string{oresty}},
+		{"angie active", "angie", []string{angie}},
+		{"ambiguous has no authoritative config", panelListenerServiceAmbiguous, nil},
+		{"no service keeps only neutral fallback", "", []string{fallback}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,9 +80,31 @@ func TestPanelLuaGuardPathPrefersActiveServiceConfig(t *testing.T) {
 	}
 }
 
-func TestPanelLuaSelftestScriptCoversSharedDict(t *testing.T) {
+func TestActiveConfigMissingDoesNotFallBackToInactiveEngine(t *testing.T) {
+	tmp := t.TempDir()
+	angieConf := tmp + "/etc/angie/cfm-panel-listeners.conf"
+	orestyConf := tmp + "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf"
+	if err := os.MkdirAll(filepath.Dir(angieConf), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(angieConf, []byte("location = /__cfm_panel_decide { return 204; }\naccess_by_lua_file /stale/cfm_panel.lua;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	withPanelListenerService(t, "openresty", []string{angieConf, orestyConf})
+	if got := panelLuaGuardPath(); got != "" {
+		t.Fatalf("expected missing active OpenResty config to stay missing, got stale Lua path %q", got)
+	}
+	p := probePanelDecisionEndpoint(orderedPanelListenerConfigPaths())
+	if p.Status != "MISSING" || p.Path != "" {
+		t.Fatalf("expected missing active listener endpoint without stale fallback, got %+v", p)
+	}
+}
+
+func TestPanelLuaSelftestScriptCoversSharedDictAndEnvPath(t *testing.T) {
 	s := panelLuaSelftestScript()
 	for _, want := range []string{
+		"CFM_PANEL_SELFTEST_PATH",
 		"shared=setmetatable({},{__index=function(t,k)",
 		"get=function() return nil end",
 		"set=function() return true end",
@@ -89,12 +112,19 @@ func TestPanelLuaSelftestScriptCoversSharedDict(t *testing.T) {
 		"incr=function() return nil end",
 	} {
 		if !strings.Contains(s, want) {
-			t.Fatalf("selftest stub missing %q; a module touching ngx.shared.<dict> at load time would fail the guard check again", want)
+			t.Fatalf("selftest stub missing %q", want)
 		}
+	}
+	if strings.Contains(s, "dofile(arg[1])") {
+		t.Fatal("selftest must not depend on positional arg[1]; plain lua auto-executes trailing file arguments")
 	}
 }
 
 func TestCheckPanelLuaGuardLoadTimeSharedAccess(t *testing.T) {
+	luaJIT, err := exec.LookPath("luajit")
+	if err != nil {
+		t.Skip("luajit not installed; CI installs it before Go tests")
+	}
 	tmp := t.TempDir()
 	luaPath := filepath.Join(tmp, "cfm_panel.lua")
 	src := "local shd = ngx.shared.cfm_decisions\n" +
@@ -104,19 +134,15 @@ func TestCheckPanelLuaGuardLoadTimeSharedAccess(t *testing.T) {
 	if err := os.WriteFile(luaPath, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fakeResty := filepath.Join(tmp, "resty")
-	if err := os.WriteFile(fakeResty, []byte("#!/bin/sh\n[ \"$CFM_PANEL_SELFTEST_ONLY\" = 1 ] || exit 8\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 
-	oldPath := os.Getenv("PATH")
 	oldLookPath := lookPath
-	t.Cleanup(func() {
-		_ = os.Setenv("PATH", oldPath)
-		lookPath = oldLookPath
-	})
-	_ = os.Setenv("PATH", tmp)
-	lookPath = exec.LookPath
+	t.Cleanup(func() { lookPath = oldLookPath })
+	lookPath = func(name string) (string, error) {
+		if name == "luajit" {
+			return luaJIT, nil
+		}
+		return "", exec.ErrNotFound
+	}
 
 	st := checkPanelLuaGuard(luaPath)
 	if st.LoadState != "true" {
@@ -124,5 +150,32 @@ func TestCheckPanelLuaGuardLoadTimeSharedAccess(t *testing.T) {
 	}
 	if st.LoadError != "" {
 		t.Fatalf("unexpected LoadError=%q", st.LoadError)
+	}
+}
+
+func TestInstallerPanelLuaSelftestsStayInSync(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "../.."))
+	for _, rel := range []string{"scripts/install-openresty.sh", "scripts/install-angie.sh"} {
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		for _, want := range []string{
+			"CFM_PANEL_SELFTEST_PATH",
+			"shared=setmetatable({},{__index=function(t,k)",
+			"CFM_PANEL_SELFTEST_ONLY=1 CFM_PANEL_SELFTEST_PATH=\"$lua_path\"",
+		} {
+			if !strings.Contains(s, want) {
+				t.Fatalf("%s selftest missing %q", rel, want)
+			}
+		}
+		if strings.Contains(s, `-e "$selftest" "$lua_path"`) {
+			t.Fatalf("%s still passes the Lua module as a positional argument", rel)
+		}
 	}
 }
