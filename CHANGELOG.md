@@ -17,7 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **MCP `detector_coverage` tool + admin endpoint (`GET /api/v1/detectors/coverage`).**
+  Daemon-vs-detector coverage matrix: for every registered detector type it
+  probes whether the watched daemon's systemd unit exists and is active (new
+  curated type→units affinity table + svcstat), joins the live detectors.conf
+  state per section, and returns a host-reality verdict — ok; **gap** (daemon
+  running but detector unconfigured or all ENABLED=0); disabled; **dormant**
+  (enabled but daemon absent/stopped); absent (informational — daemon and
+  detector both missing is NOT a complaint); na (event-driven). Ends the
+  cfm-admin inventory habit of flagging detectors whose daemons don't exist
+  on the host.
+- **MCP `config_drift` tool + admin endpoint (`GET /api/v1/system/config-drift`).**
+  Compares the packaged reference configs (/usr/share/cfm/configs/) against
+  the live /etc/cfm/ conffiles, which upgrades seed once and never refresh:
+  missing sections/keys in detectors.conf (parsed with the daemon's own
+  reader) are shipped features that silently never activated on the host;
+  cfm.conf reports stock-documented keys absent from the live text entirely.
+  Values are informational only; nothing is modified.
 
 ## 2026.08.22
 

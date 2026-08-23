@@ -89,6 +89,39 @@ func TestSystemStatusEndpoints_Authz(t *testing.T) {
 		}
 	})
 
+	t.Run("scoped token forbidden config-drift", func(t *testing.T) {
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/system/config-drift", scoped.Token, false)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+		}
+	})
+
+	// Neither stock nor live configs exist in the test environment; the
+	// envelope must still be a clean 200 with per-file entries.
+	t.Run("admin token can read config-drift", func(t *testing.T) {
+		rr := doSystemStatusReq(h, http.MethodGet, "/api/v1/system/config-drift", "admin-secret", false)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		var body struct {
+			OK       bool   `json:"ok"`
+			Schema   string `json:"schema"`
+			Detectors struct {
+				Name string `json:"name"`
+			} `json:"detectors_conf"`
+			CFM struct {
+				Name string `json:"name"`
+			} `json:"cfm_conf"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v (%s)", err, rr.Body.String())
+		}
+		if !body.OK || body.Schema != "system.config_drift.v1" ||
+			body.Detectors.Name != "detectors.conf" || body.CFM.Name != "cfm.conf" {
+			t.Fatalf("unexpected body: %s", rr.Body.String())
+		}
+	})
+
 	// The lsm log is absent in the test environment; assert the envelope only
 	// (a runner that happens to have the file would legitimately set found=true).
 	t.Run("admin token can read lsm-detections", func(t *testing.T) {
@@ -414,6 +447,11 @@ func TestSystemStatusEndpoints_MethodNotAllowed(t *testing.T) {
 	}
 
 	rr = doSystemStatusReq(h, http.MethodPost, "/api/v1/system/lsm-status", "admin-secret", false)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusMethodNotAllowed, rr.Body.String())
+	}
+
+	rr = doSystemStatusReq(h, http.MethodPost, "/api/v1/system/config-drift", "admin-secret", false)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusMethodNotAllowed, rr.Body.String())
 	}

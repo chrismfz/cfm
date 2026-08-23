@@ -49,6 +49,9 @@ func RegisterDetectorsEndpoints(m *http.ServeMux, cfgDir string) {
 	m.Handle("/api/v1/detectors/catalog", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleDetectorsCatalog(w, r)
 	})))
+	m.Handle("/api/v1/detectors/coverage", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleDetectorsCoverage(w, r)
+	})))
 }
 
 func handleDetectorsConfig(w http.ResponseWriter, r *http.Request, cfgDir string) {
