@@ -31,7 +31,9 @@ back-filled here — see the git/PR history for that period.
   listener config as "Policy active file" / Lua guard / decision endpoint.
   Path selection now goes through `detectActivePanelListenerService()` (same
   source the reload path trusts) via a shared `orderedPanelListenerConfigPaths()`;
-  with no active or ambiguous service the original order is kept.
+  a resolved engine inspects only its own paths, an ambiguous dual-active state
+  has no authoritative config path, and unresolved detection keeps only
+  service-neutral repo/test fallbacks.
 
 ## 2026.08.23
 
