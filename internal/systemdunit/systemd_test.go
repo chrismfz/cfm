@@ -15,6 +15,8 @@ func TestProbeActiveEnabled(t *testing.T) {
 	lookPath = func(string) (string, error) { return "/usr/bin/systemctl", nil }
 	command = func(_ string, args ...string) *exec.Cmd {
 		switch args[0] {
+		case "show":
+			return exec.Command("sh", "-c", "printf '254.5'")
 		case "is-active":
 			return exec.Command("sh", "-c", "printf active")
 		case "is-enabled":
@@ -43,6 +45,8 @@ func TestProbePreservesInactiveDisabledStates(t *testing.T) {
 	lookPath = func(string) (string, error) { return "/usr/bin/systemctl", nil }
 	command = func(_ string, args ...string) *exec.Cmd {
 		switch args[0] {
+		case "show":
+			return exec.Command("sh", "-c", "printf '254.5'")
 		case "is-active":
 			return exec.Command("sh", "-c", "printf inactive; exit 3")
 		case "is-enabled":
@@ -58,5 +62,25 @@ func TestProbePreservesInactiveDisabledStates(t *testing.T) {
 	}
 	if st.Active || st.Enabled || st.ActiveState != "inactive" || st.EnabledState != "disabled" {
 		t.Fatalf("unexpected status: %+v", st)
+	}
+}
+
+func TestProbeSystemctlPresentButManagerUnavailable(t *testing.T) {
+	oldLookPath := lookPath
+	oldCommand := command
+	t.Cleanup(func() {
+		lookPath = oldLookPath
+		command = oldCommand
+	})
+	lookPath = func(string) (string, error) { return "/usr/bin/systemctl", nil }
+	command = func(_ string, args ...string) *exec.Cmd {
+		if args[0] == "show" {
+			return exec.Command("sh", "-c", "echo 'System has not been booted with systemd as init system (PID 1).' >&2; exit 1")
+		}
+		return exec.Command("sh", "-c", "exit 99")
+	}
+
+	if st, ok := Probe("angie.service"); ok {
+		t.Fatalf("expected unavailable manager to return ok=false, got %+v", st)
 	}
 }
