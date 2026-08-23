@@ -73,11 +73,13 @@ const loginHTML = `<!DOCTYPE html>
 <div class="card">
   <div class="logo"><span class="mark">⬡</span><h1>CFM</h1><p>FIREWALL MANAGER</p></div>
   <div class="err" id="err"></div>
-  <label for="u">Username</label>
-  <input type="text" id="u" autocomplete="username" autofocus>
-  <label for="p">Password</label>
-  <input type="password" id="p" autocomplete="current-password">
-  <button id="btn" onclick="go()">Sign in</button>
+  <form id="loginForm">
+    <label for="u">Username</label>
+    <input type="text" id="u" name="username" autocomplete="username" autofocus>
+    <label for="p">Password</label>
+    <input type="password" id="p" name="password" autocomplete="current-password">
+    <button id="btn" type="submit">Sign in</button>
+  </form>
 </div>
 <script>
 const basePath=__BASE_PATH__;
@@ -104,7 +106,7 @@ async function go(){
   }catch(e){showErr('Connection error.');}
   btn.disabled=false;btn.textContent='Sign in';
 }
-document.addEventListener('keydown',e=>{if(e.key==='Enter')go()});
+document.getElementById('loginForm').addEventListener('submit',e=>{e.preventDefault();go()});
 </script>
 </body>
 </html>`
