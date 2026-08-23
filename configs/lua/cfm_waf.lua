@@ -53,8 +53,8 @@ local CFG = {
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
-  rule_sqli_blind_lexical = "challenge", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted logonly→challenge 2026-07 after 188/188 TP, 0 FP across 6 servers (docs/waf.md)
-  rule_sqli_union_variant = "logonly",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; logonly for burn-in before any promotion (docs/waf.md)
+  rule_sqli_blind_lexical = "block", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted challenge→block 2026-08-23 after expanded fleet burn-in; prior 188/188 TP, 0 FP review (docs/waf.md)
+  rule_sqli_union_variant = "challenge",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23 after clean fleet review (docs/waf.md)
   rule_superglobal_override = "logonly", -- request param KEY named like a PHP superglobal (_GET/_SERVER/GLOBALS/…) = variable poisoning; observe-only pending FP review
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
@@ -75,9 +75,9 @@ local CFG = {
   rule_auth_wp_checks     = "challenge", -- HEAD wp-login (qualified/repeated), no UA+Referer POST wp-login
                                          -- rollout: start this rule in "logonly" to baseline HEAD noise,
                                          -- then promote to "challenge" after validating logs.
-  rule_xmlrpc_multicall   = "challenge", -- system.multicall in XML-RPC body
-  rule_xmlrpc_pingback    = "challenge", -- pingback.ping in XML-RPC body
-  rule_xmlrpc_post_burst  = "challenge", -- generic repeated POST /xmlrpc.php
+  rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
+  rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body
+  rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
   rule_cmd_params       = "challenge",   -- suspicious parameter keys: exec= passthru= shell_exec= eval= assert= system= cmd= command=
@@ -117,7 +117,7 @@ local CFG = {
   --          nginx_waf (MIT).  Promote individually after watching logs.
 
   -- [top-6]  Header vulnerability bundle
-  rule_bad_ua           = "challenge",  -- empty UA; known scanner/bot UAs (sqlmap, nikto, …)
+  rule_bad_ua           = "challenge",  -- mixed-mode: normal scored hits challenge; score >= 99 hard-blocks
   rule_shellshock       = "challenge",  -- Shellshock CVE-2014-6271 () { pattern in headers (CGI env vars)
   rule_header_vulns     = "challenge",  -- httpoxy (Proxy:), CVE-2017-7269 (Lock-Token:/If:),
                                       -- CVE-2025-24813 (Tomcat PUT /session + Content-Range)
@@ -825,8 +825,17 @@ function _M.check(ctx)
       local score, tag = det.detect_bad_ua_scored(headers, uri, method)
       local threshold = tonumber(CFG.bad_ua_min_score) or 4
       if score >= threshold then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, mode, RULE_IDS.rule_bad_ua) then goto done end
+        -- score >= 99 is reserved by detect_bad_ua_scored() for deterministic,
+        -- high-confidence scanner / synthetic-client identities. A challenge
+        -- has no security value for these hits, so challenge-tier rule 201
+        -- promotes this hit only to block. Keep an explicit logonly override
+        -- audit-only, and preserve an explicit block override for all scores.
+        local action = mode
+        if score >= 99 and mode ~= "logonly" then
+          action = "block"
+        end
+        local ttl = (action == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, action, RULE_IDS.rule_bad_ua) then goto done end
       end
     end
   end
@@ -1040,7 +1049,7 @@ function _M.check(ctx)
 
   -- ── 5) Traversal ──────────────────────────────────────────────────────────
   do
-    local mode = rule_mode(CFG.rule_traversal, "block")
+    local mode = rule_mode(CFG.rule_traversal, "challenge")
     if mode ~= "disabled" and det.detect_traversal(uri, args, get_scan_ua()) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
@@ -1158,7 +1167,7 @@ function _M.check(ctx)
 
   -- ── 13) SSRF protocol schemes + IP obfuscation ───────────────────────────
   do
-    local mode = rule_mode(CFG.rule_ssrf, "logonly")
+    local mode = rule_mode(CFG.rule_ssrf, "challenge")
     if mode ~= "disabled" then
       local tag = det.detect_ssrf_proto(args, body, get_norm_ab())
       -- WP All Import (`pmxi-*`), WPvivid, UpdraftPlus, BackWPup, and
@@ -1357,15 +1366,15 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 21b) SQLi blind-family lexical tokens (separate rule, logonly) ────────
+  -- ── 21b) SQLi blind-family lexical tokens (separate rule, block) ──────────
   -- benchmark( / extractvalue( / updatexml( / floor(rand( / randomblob( and
   -- "or sleep(" / "and sleep(" are valid SQLi primitives but also collide
   -- case-insensitively with legitimate code/content (XML parsers, PHP,
-  -- minified JS, shell prose). They ride this distinct rule at `logonly` —
-  -- observed, never challenged — so a weird app can't be broken; the WAF FP
-  -- review (docs/waf.md) decides promotion. Same uri+args then POST-body scan.
+  -- minified JS, shell prose). The rule completed logonly + challenge burn-in
+  -- cleanly and is block-tier as of 2026-08-23. Same uri+args then POST-body
+  -- scan; per-vhost exclusions and explicit operator overrides still apply.
   do
-    local mode = rule_mode(CFG.rule_sqli_blind_lexical, "logonly")
+    local mode = rule_mode(CFG.rule_sqli_blind_lexical, "block")
     if mode ~= "disabled" then
       local hit = det.detect_sqli_blind_lexical(get_sqli_ua())
       if not hit and body_inspect_ok then
@@ -1378,17 +1387,16 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 21bb) Obfuscated UNION variants (separate rule, logonly burn-in) ──────
+  -- ── 21bb) Obfuscated UNION variants (separate rule, challenge) ────────────
   -- rule 301's `union select` signature requires the two keywords ADJACENT, so
   -- it misses `union all select` / `union distinct select` (keyword between),
   -- `union(select` (paren), and `union/**/select` (comment-collapsed to
   -- `unionselect`) — `UNION ALL SELECT` is at least as common as plain UNION
   -- SELECT. This distinct rule catches them under the SAME value-terminator FP
-  -- guard, at `logonly` — observed, never blocked — so a real-traffic burn-in
-  -- (hit-rate + FP review, docs/waf.md) precedes any promotion to
-  -- challenge/block. Same uri+args then POST-body scan as the SQLi rules above.
+  -- guard. Its logonly burn-in completed cleanly, so it is challenge-tier as of
+  -- 2026-08-23. Same uri+args then POST-body scan as the SQLi rules above.
   do
-    local mode = rule_mode(CFG.rule_sqli_union_variant, "logonly")
+    local mode = rule_mode(CFG.rule_sqli_union_variant, "challenge")
     if mode ~= "disabled" then
       local hit = det.detect_sqli_union_variant(get_sqli_ua())
       if not hit and body_inspect_ok then
@@ -1480,13 +1488,13 @@ function _M.check(ctx)
     end
 
     if xtag == "AUTH_WP_XMLRPC_MULTICALL" then
-      local mode = rule_mode(CFG.rule_xmlrpc_multicall, "challenge")
+      local mode = rule_mode(CFG.rule_xmlrpc_multicall, "block")
       if mode ~= "disabled" then
         local ttl = CFG.auth_xmlrpc_multicall_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         if record("WAF_AUTH_BURST:" .. xtag, ttl, mode, RULE_IDS.rule_xmlrpc_multicall) then goto done end
       end
     elseif xtag == "AUTH_WP_XMLRPC_PINGBACK" then
-      local mode = rule_mode(CFG.rule_xmlrpc_pingback, "challenge")
+      local mode = rule_mode(CFG.rule_xmlrpc_pingback, "block")
       if mode ~= "disabled" then
         local ttl = CFG.auth_xmlrpc_pingback_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         if record("WAF_AUTH_BURST:" .. xtag, ttl, mode, RULE_IDS.rule_xmlrpc_pingback) then goto done end
@@ -1497,7 +1505,7 @@ function _M.check(ctx)
 
   -- ── 27) Generic XML-RPC POST burst ───────────────────────────────────────
   do
-    local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "challenge")
+    local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "block")
     if mode ~= "disabled" then
       local tag = det.detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, headers, body)
       if tag then
