@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.23
+
 ### Added
 - **MCP `detector_coverage` tool + admin endpoint (`GET /api/v1/detectors/coverage`).**
   Daemon-vs-detector coverage matrix: for every registered detector type it
