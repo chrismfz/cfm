@@ -485,6 +485,7 @@ func panelLuaGuardPath() string {
 				v := strings.TrimSpace(strings.TrimPrefix(line, "access_by_lua_file "))
 				return strings.TrimSuffix(v, ";")
 			}
+		}
 	}
 	return ""
 }
