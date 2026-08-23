@@ -1,12 +1,13 @@
 package dnat
 
 import (
-	"cfm/internal/systemdunit"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"cfm/internal/systemdunit"
 )
 
 func TestReloadPanelListenerService_OpenrestyActivePrefersOpenresty(t *testing.T) {
@@ -163,20 +164,20 @@ func TestDetectActivePanelListenerService_ActiveEnabledOpenrestyOverridesStaleAn
 	}
 }
 
-func TestDetectActivePanelListenerService_BothActivePrefersOnlyEnabledActive(t *testing.T) {
+func TestDetectActivePanelListenerService_BothActiveIsAmbiguous(t *testing.T) {
 	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{
-		"angie.service":      {Active: true, Enabled: false, ActiveState: "active", EnabledState: "disabled"},
+		"angie.service":     {Active: true, Enabled: false, ActiveState: "active", EnabledState: "disabled"},
 		"openresty.service": {Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"},
 	}, true, "", nil)
 
-	if got := detectActivePanelListenerService(); got != "openresty" {
-		t.Fatalf("service=%q, want openresty", got)
+	if got := detectActivePanelListenerService(); got != panelListenerServiceAmbiguous {
+		t.Fatalf("service=%q, want ambiguous sentinel", got)
 	}
 }
 
 func TestDetectActivePanelListenerService_BothActiveEnabledIsAmbiguous(t *testing.T) {
 	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{
-		"angie.service":      {Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"},
+		"angie.service":     {Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"},
 		"openresty.service": {Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"},
 	}, true, "", nil)
 
@@ -187,7 +188,7 @@ func TestDetectActivePanelListenerService_BothActiveEnabledIsAmbiguous(t *testin
 
 func TestDetectActivePanelListenerService_NoActiveUsesUniqueEnabledIntent(t *testing.T) {
 	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{
-		"angie.service":      {Active: false, Enabled: true, ActiveState: "inactive", EnabledState: "enabled"},
+		"angie.service":     {Active: false, Enabled: true, ActiveState: "inactive", EnabledState: "enabled"},
 		"openresty.service": {Active: false, Enabled: false, ActiveState: "inactive", EnabledState: "disabled"},
 	}, true, "", nil)
 
