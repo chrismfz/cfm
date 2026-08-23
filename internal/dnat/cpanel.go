@@ -485,7 +485,6 @@ func panelLuaGuardPath() string {
 				v := strings.TrimSpace(strings.TrimPrefix(line, "access_by_lua_file "))
 				return strings.TrimSuffix(v, ";")
 			}
-		}
 	}
 	return ""
 }
@@ -535,7 +534,7 @@ type panelLuaProbe struct {
 // ngx.shared fake covers any load-time shared-dict access, not only the current
 // cfm_decisions dictionary.
 func panelLuaSelftestScript() string {
-	return `package.path='/var/lib/cfm/lua/?.lua;'..package.path; local path=os.getenv('CFM_PANEL_SELFTEST_PATH'); if not path or path=='' then error('CFM_PANEL_SELFTEST_PATH missing') end; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},shared=setmetatable({},{__index=function(t,k) local d={get=function() return nil end,set=function() return true end,add=function() return true end,replace=function() return false end,delete=function() return true end,incr=function() return nil end,len=function() return 0 end,touch=function() return true end,flush_all=function() return true end,flush_expired=function() return 0 end,capacity=function() return 0 end,free_space=function() return 0 end}; rawset(t,k,d); return d end}),req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,path); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; return`
+	return `package.path='/var/lib/cfm/lua/?.lua;'..package.path; local path=os.getenv('CFM_PANEL_SELFTEST_PATH'); if not path or path=='' then error('CFM_PANEL_SELFTEST_PATH missing') end; ngx={log=function() end,ERR=3,WARN=4,NOTICE=5,INFO=6,HTTP_FORBIDDEN=403,HTTP_INTERNAL_SERVER_ERROR=500,HTTP_NOT_FOUND=404,time=os.time,now=os.time,escape_uri=function(s) return tostring(s or '') end,unescape_uri=function(s) return tostring(s or '') end,var={},header={},ctx={},shared=setmetatable({},{__index=function(t,k) local d={get=function() return nil end,set=function() return true end,add=function() return true end,replace=function() return false end,delete=function() return true end,incr=function() return nil end,len=function() return 0 end,touch=function() return true end,flush_all=function() return true end,flush_expired=function() return 0 end,capacity=function() return 0 end,free_space=function() return 0 end}; rawset(t,k,d); return d end}),req={get_method=function() return 'GET' end,is_internal=function() return true end},exit=function(code) return code end}; local ok,a,b=pcall(dofile,path); if not ok then error(a) end; if a==false then error(b or 'selftest failed') end; if a==true then return end; if type(cfm_panel_selftest)=='function' then local ok2,err=cfm_panel_selftest(); assert(ok2, err or 'selftest failed'); return end; error('missing cfm_panel_selftest')`
 }
 
 func panelLuaGuardProbes() []panelLuaProbe {
