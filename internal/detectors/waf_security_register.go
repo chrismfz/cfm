@@ -24,13 +24,6 @@ import (
 // rule yet, so it autoblocks the moment one of its rules (e.g. 438) is promoted
 // to block after that rule's own burn-in.
 //
-// WAF_BAD_UA is deliberately mixed-mode: rule 201's parent/default stays
-// `challenge`, but score >= 99 is reserved by the Lua classifier for
-// deterministic/high-confidence scanner or synthetic-client identities and
-// emits edge action `block`. Arm the family so those block hits can feed the
-// Phase-1 persistent blocker; ordinary BAD_UA challenge hits are still ignored
-// by the action="block" subscription gate below.
-//
 // WAF_CVE follows the normal block-rule rule: it has an edge-`block` rule
 // (10001, the Simple File List upload RCE) so it arms to 1 by default — the
 // operator explicitly wants CVE hits to nft-ban AND surface on Slack/mail (an
@@ -52,7 +45,7 @@ func wafSecurityFamilies(kv KV) map[string]int {
 	families := map[string]int{}
 	for _, fam := range webdetector.WAFReasonFamilies() {
 		def := 0
-		if webdetector.WAFFamilyHasBlockRule(fam) || fam == "WAF_BAD_UA" || fam == "WAF_BACKDOOR" {
+		if webdetector.WAFFamilyHasBlockRule(fam) || fam == "WAF_BACKDOOR" {
 			def = 1
 		}
 		key := strings.TrimPrefix(fam, "WAF_")
@@ -68,7 +61,7 @@ func init() {
 		Description: "Persistent cross-request nft block from in-path WAF hits, scored per reason-family.",
 		DefaultsTemplate: map[string]string{
 			"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0",
-			"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BAD_UA": "1", "BACKDOOR": "1",
+			"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BACKDOOR": "1",
 			"WEBSHELL": "1", // edge-block rule 413; armed by default (blocks webshell-probing scanners/bots). Exempt a source with ALLOW_UA_CONTAINS/ALLOW_NETS or hold with RULE_413=0.
 			"CVE": "1",      // named-vuln family; armed (rule 10001 is block). Hold a low-confidence CVE rule with RULE_<id>=0 when it lands.
 			"BLOCK": "6h",
