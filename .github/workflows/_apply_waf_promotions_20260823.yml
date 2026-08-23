@@ -1,15 +1,15 @@
-name: Apply validated WAF promotions (one-shot)
+name: Finalize validated WAF promotion tests (one-shot)
 
 on:
-  push:
+  pull_request:
     branches:
-      - waf/promote-validated-rules-20260823
+      - main
 
 permissions:
   contents: write
 
 jobs:
-  apply:
+  finalize:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -18,170 +18,95 @@ jobs:
           ref: waf/promote-validated-rules-20260823
           fetch-depth: 0
 
-      - name: Apply exact promotion patch
+      - name: Update BAD_UA and promotion regressions
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          def replace_once(text, old, new, label):
-              n = text.count(old)
-              if n != 1:
-                  raise SystemExit(f"{label}: expected exactly 1 match, got {n}")
-              return text.replace(old, new, 1)
-
-          # ------------------------------------------------------------------
-          # Lua runtime policy
-          # ------------------------------------------------------------------
-          p = Path('configs/lua/cfm_waf.lua')
-          s = p.read_text()
-
-          for old, new, label in [
-              ('rule_sqli_blind_lexical = "challenge",', 'rule_sqli_blind_lexical = "block",', '309 default mode'),
-              ('rule_sqli_union_variant = "logonly",', 'rule_sqli_union_variant = "challenge",', '319 default mode'),
-              ('rule_xmlrpc_multicall   = "challenge",', 'rule_xmlrpc_multicall   = "block",', '510 default mode'),
-              ('rule_xmlrpc_pingback    = "challenge",', 'rule_xmlrpc_pingback    = "block",', '511 default mode'),
-              ('rule_xmlrpc_post_burst  = "challenge",', 'rule_xmlrpc_post_burst  = "block",', '512 default mode'),
-              ('rule_bad_ua           = "challenge",  -- empty UA; known scanner/bot UAs (sqlmap, nikto, …)',
-               'rule_bad_ua           = "challenge",  -- mixed-mode: normal scored hits challenge; score >= 99 hard-blocks',
-               '201 mixed-mode comment'),
-              ('local mode = rule_mode(CFG.rule_traversal, "block")', 'local mode = rule_mode(CFG.rule_traversal, "challenge")', '101 legacy-boolean fallback'),
-              ('local mode = rule_mode(CFG.rule_ssrf, "logonly")', 'local mode = rule_mode(CFG.rule_ssrf, "challenge")', '701 legacy-boolean fallback'),
-              ('local mode = rule_mode(CFG.rule_sqli_blind_lexical, "logonly")', 'local mode = rule_mode(CFG.rule_sqli_blind_lexical, "block")', '309 legacy-boolean fallback'),
-              ('local mode = rule_mode(CFG.rule_sqli_union_variant, "logonly")', 'local mode = rule_mode(CFG.rule_sqli_union_variant, "challenge")', '319 legacy-boolean fallback'),
-              ('local mode = rule_mode(CFG.rule_xmlrpc_multicall, "challenge")', 'local mode = rule_mode(CFG.rule_xmlrpc_multicall, "block")', '510 legacy-boolean fallback'),
-              ('local mode = rule_mode(CFG.rule_xmlrpc_pingback, "challenge")', 'local mode = rule_mode(CFG.rule_xmlrpc_pingback, "block")', '511 legacy-boolean fallback'),
-              ('local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "challenge")', 'local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "block")', '512 legacy-boolean fallback'),
-              ('-- ── 21b) SQLi blind-family lexical tokens (separate rule, logonly) ────────', '-- ── 21b) SQLi blind-family lexical tokens (separate rule, block) ──────────', '309 engine comment'),
-              ('-- ── 21bb) Obfuscated UNION variants (separate rule, logonly burn-in) ──────', '-- ── 21bb) Obfuscated UNION variants (separate rule, challenge) ────────────', '319 engine comment'),
-          ]:
-              s = replace_once(s, old, new, label)
-
-          s = replace_once(
-              s,
-              'promoted logonly→challenge 2026-07 after 188/188 TP, 0 FP across 6 servers (docs/waf.md)',
-              'promoted challenge→block 2026-08-23 after the expanded fleet burn-in; prior review was 188/188 TP, 0 FP (docs/waf.md)',
-              '309 config history comment',
-          )
-          s = replace_once(
-              s,
-              'logonly for burn-in before any promotion (docs/waf.md)',
-              'promoted logonly→challenge 2026-08-23 after clean fleet review (docs/waf.md)',
-              '319 config history comment',
-          )
-
-          old_bad_ua = '''      if score >= threshold then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, mode, RULE_IDS.rule_bad_ua) then goto done end
-      end'''
-          new_bad_ua = '''      if score >= threshold then
-        -- score >= 99 is reserved by detect_bad_ua_scored() for deterministic,
-        -- high-confidence scanner / synthetic-client identities. A challenge
-        -- has no security value for these hits, so challenge-tier rule 201
-        -- promotes this hit only to block. Keep an explicit logonly override
-        -- audit-only, and preserve an explicit block override for all scores.
-        local action = mode
-        if score >= 99 and mode ~= "logonly" then
-          action = "block"
-        end
-        local ttl = (action == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, action, RULE_IDS.rule_bad_ua) then goto done end
-      end'''
-          s = replace_once(s, old_bad_ua, new_bad_ua, '201 score-99 enforcement')
-
-          # Keep the rollout prose honest after promotion.
-          s = replace_once(
-              s,
-              '''  -- benchmark( / extractvalue( / updatexml( / floor(rand( / randomblob( and
-  -- "or sleep(" / "and sleep(" are valid SQLi primitives but also collide
-  -- case-insensitively with legitimate code/content (XML parsers, PHP,
-  -- minified JS, shell prose). They ride this distinct rule at `logonly` —
-  -- observed, never challenged — so a weird app can't be broken; the WAF FP
-  -- review (docs/waf.md) decides promotion. Same uri+args then POST-body scan.''',
-              '''  -- benchmark( / extractvalue( / updatexml( / floor(rand( / randomblob( and
-  -- "or sleep(" / "and sleep(" are valid SQLi primitives but also collide
-  -- case-insensitively with legitimate code/content (XML parsers, PHP,
-  -- minified JS, shell prose). The rule completed logonly + challenge burn-in
-  -- cleanly and is block-tier as of 2026-08-23. Same uri+args then POST-body
-  -- scan; per-vhost exclusions and explicit operator overrides still apply.''',
-              '309 rollout prose',
-          )
-          s = replace_once(
-              s,
-              '''  -- SELECT. This distinct rule catches them under the SAME value-terminator FP
-  -- guard, at `logonly` — observed, never blocked — so a real-traffic burn-in
-  -- (hit-rate + FP review, docs/waf.md) precedes any promotion to
-  -- challenge/block. Same uri+args then POST-body scan as the SQLi rules above.''',
-              '''  -- SELECT. This distinct rule catches them under the SAME value-terminator FP
-  -- guard. Its logonly burn-in completed cleanly, so it is challenge-tier as of
-  -- 2026-08-23. Same uri+args then POST-body scan as the SQLi rules above.''',
-              '319 rollout prose',
-          )
-          p.write_text(s)
-
-          # ------------------------------------------------------------------
-          # Go-side rule metadata mirror (including already-promoted 101/701)
-          # ------------------------------------------------------------------
-          p = Path('internal/webdetector/waf_rule_ids.go')
-          s = p.read_text()
-          for old, new, label in [
-              ('{ID: 101, Name: "rule_traversal", ReasonFamily: "WAF_TRAVERSAL", DefaultMode: "logonly"}',
-               '{ID: 101, Name: "rule_traversal", ReasonFamily: "WAF_TRAVERSAL", DefaultMode: "challenge"}', '101 Go mirror'),
-              ('{ID: 309, Name: "rule_sqli_blind_lexical", ReasonFamily: "WAF_SQLI_LEXICAL", DefaultMode: "challenge"}',
-               '{ID: 309, Name: "rule_sqli_blind_lexical", ReasonFamily: "WAF_SQLI_LEXICAL", DefaultMode: "block"}', '309 Go mirror'),
-              ('{ID: 319, Name: "rule_sqli_union_variant", ReasonFamily: "WAF_SQLI_UNION_VARIANT", DefaultMode: "logonly"}',
-               '{ID: 319, Name: "rule_sqli_union_variant", ReasonFamily: "WAF_SQLI_UNION_VARIANT", DefaultMode: "challenge"}', '319 Go mirror'),
-              ('{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"}',
-               '{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"}', '510 Go mirror'),
-              ('{ID: 511, Name: "rule_xmlrpc_pingback", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"}',
-               '{ID: 511, Name: "rule_xmlrpc_pingback", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"}', '511 Go mirror'),
-              ('{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"}',
-               '{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"}', '512 Go mirror'),
-              ('{ID: 701, Name: "rule_ssrf", ReasonFamily: "WAF_SSRF", DefaultMode: "logonly"}',
-               '{ID: 701, Name: "rule_ssrf", ReasonFamily: "WAF_SSRF", DefaultMode: "challenge"}', '701 Go mirror'),
-          ]:
-              s = replace_once(s, old, new, label)
-          s = replace_once(
-              s,
-              '// 2xx client identity\n\t{ID: 201, Name: "rule_bad_ua", ReasonFamily: "WAF_BAD_UA", DefaultMode: "challenge"},',
-              '// 2xx client identity\n\t// Mixed-mode: challenge is the parent default; score >= 99 is hard-blocked in Lua.\n\t{ID: 201, Name: "rule_bad_ua", ReasonFamily: "WAF_BAD_UA", DefaultMode: "challenge"},',
-              '201 Go mixed-mode comment',
-          )
-          p.write_text(s)
-
-          # ------------------------------------------------------------------
-          # Lua regression tests: low-confidence remains challenge, score 99 blocks
-          # ------------------------------------------------------------------
           p = Path('scripts/tests/cfm_waf_severity_test.lua')
           s = p.read_text()
-          old = 'headers = { ["User-Agent"] = "sqlmap/1.5.0" },'
+
+          # The old severity tests used sqlmap as their generic challenge fixture.
+          # score=99 now intentionally blocks, so preserve those tests' original
+          # purpose with an ordinary score-4/5 BAD_UA challenge instead.
+          old = '    headers = { ["User-Agent"] = "sqlmap/1.5.0" },'
           n = s.count(old)
           if n != 3:
-              raise SystemExit(f'severity sqlmap fixtures: expected 3 matches, got {n}')
-          s = s.replace(old, 'method = "HEAD",\n    headers = { ["User-Agent"] = "" },')
+              raise SystemExit(f'expected exactly 3 old sqlmap challenge fixtures, got {n}')
+          s = s.replace(old, '    method = "HEAD",\n    headers = { ["User-Agent"] = "" },')
+
+          # Extend the fresh-default assertion with this promotion batch.
+          old_list = '''    "rule_ip_host",
+    "rule_ctrl_chars",
+    "rule_debug_toggles",
+    "rule_serialize",
+    "rule_cmd_payload_backtick",
+    "rule_header_flood",
+    "rule_cmd_payload",  -- fallback default, kept aligned with sub-rules
+  }'''
+          new_list = '''    "rule_ip_host",
+    "rule_ctrl_chars",
+    "rule_debug_toggles",
+    "rule_serialize",
+    "rule_cmd_payload_backtick",
+    "rule_header_flood",
+    "rule_cmd_payload",  -- fallback default, kept aligned with sub-rules
+    "rule_traversal",
+    "rule_sqli_union_variant",
+    "rule_ssrf",
+  }'''
+          if s.count(old_list) != 1:
+              raise SystemExit('promotion challenge-default list did not match exactly once')
+          s = s.replace(old_list, new_list, 1)
+
+          challenge_loop = '''  for _, name in ipairs(must_be_challenge) do
+    check(snap[name] == "challenge",
+          "71: " .. name .. " ships as 'challenge' (got " .. tostring(snap[name]) .. ")")
+  end
+end'''
+          challenge_plus_block = '''  for _, name in ipairs(must_be_challenge) do
+    check(snap[name] == "challenge",
+          "71: " .. name .. " ships as 'challenge' (got " .. tostring(snap[name]) .. ")")
+  end
+
+  local must_be_block = {
+    "rule_sqli_blind_lexical",
+    "rule_xmlrpc_multicall",
+    "rule_xmlrpc_pingback",
+    "rule_xmlrpc_post_burst",
+  }
+  for _, name in ipairs(must_be_block) do
+    check(snap[name] == "block",
+          "71: " .. name .. " ships as 'block' (got " .. tostring(snap[name]) .. ")")
+  end
+end'''
+          if s.count(challenge_loop) != 1:
+              raise SystemExit('promotion challenge assertion loop did not match exactly once')
+          s = s.replace(challenge_loop, challenge_plus_block, 1)
 
           marker = '\nif fails > 0 then\n'
           if s.count(marker) != 1:
-              raise SystemExit('severity final marker not unique')
+              raise SystemExit('final severity-test marker did not match exactly once')
           regression = r'''
 
--- ── Regression: BAD_UA score=99 hard-blocks while normal scored hits challenge ─
+-- ── Regression: BAD_UA score=99 hard-blocks, normal scoring stays challenge ──
 do
   disable_all_rules()
   waf.set_rule("rule_bad_ua", "challenge")
 
-  local hit, reason, ttl, action, hits, waf_rule_id = waf.check(fresh_ctx({
+  local hit, reason, ttl, action, hits, rule_id = waf.check(fresh_ctx({
     headers = { ["User-Agent"] = "sqlmap/1.5.0" },
   }))
-  check(hit == true,                                  "bad_ua score99 — hit=true")
-  check(reason == "WAF_BAD_UA:UA_SQLMAP:score=99",   "bad_ua score99 — deterministic reason")
-  check(action == "block",                           "bad_ua score99 — action=block")
-  check(ttl == waf.get_config().block_ttl_sec,        "bad_ua score99 — block ttl")
-  check(waf_rule_id == 201,                           "bad_ua score99 — rule id 201")
-  check(hits[1] and hits[1].action == "block",       "bad_ua score99 — hits entry is block")
+  check(hit == true,                                "bad_ua score99 — hit=true")
+  check(reason == "WAF_BAD_UA:UA_SQLMAP:score=99", "bad_ua score99 — exact reason")
+  check(action == "block",                         "bad_ua score99 — action=block")
+  check(ttl == waf.get_config().block_ttl_sec,      "bad_ua score99 — block ttl")
+  check(rule_id == 201,                             "bad_ua score99 — rule id 201")
+  check(hits and hits[1] and hits[1].action == "block", "bad_ua score99 — hit entry block")
 end
 
--- Explicit logonly remains an operator audit/kill-switch even for score=99.
+-- Explicit logonly remains the operator's audit/kill-switch for rule 201.
 do
   disable_all_rules()
   waf.set_rule("rule_bad_ua", "logonly")
@@ -189,83 +114,12 @@ do
   local hit, _reason, _ttl, action = waf.check(fresh_ctx({
     headers = { ["User-Agent"] = "sqlmap/1.5.0" },
   }))
-  check(hit == true,        "bad_ua score99 logonly — hit=true")
+  check(hit == true,         "bad_ua score99 logonly — hit=true")
   check(action == "logonly", "bad_ua score99 logonly — override preserved")
 end
 '''
           s = s.replace(marker, regression + marker, 1)
           p.write_text(s)
-
-          # ------------------------------------------------------------------
-          # Operator-facing documentation of the promotion evidence/semantics
-          # ------------------------------------------------------------------
-          p = Path('docs/waf.md')
-          s = p.read_text()
-          section = r'''
-
-## Promotion batch — 2026-08-23
-
-Fleet review across Titan, Earth, Orion, and Rigel promoted the following
-shipped defaults after clean false-positive review:
-
-- `309 rule_sqli_blind_lexical`: `challenge` → `block`
-- `510 rule_xmlrpc_multicall`: `challenge` → `block`
-- `511 rule_xmlrpc_pingback`: `challenge` → `block`
-- `512 rule_xmlrpc_post_burst`: `challenge` → `block`
-- `319 rule_sqli_union_variant`: `logonly` → `challenge`
-
-`101 rule_traversal` and `701 rule_ssrf` were already `challenge` in the Lua
-runtime; this batch also fixes their stale Go-side `DefaultMode` metadata.
-
-### BAD_UA mixed-mode score semantics
-
-Rule `201 rule_bad_ua` remains a mixed-mode rule. Its ordinary score threshold
-continues to challenge, while `score >= 99` is reserved for deterministic,
-high-confidence scanner or synthetic-client identities and hard-blocks the hit.
-This is intentionally scoped to `rule_bad_ua`; `99` is not a WAF-wide severity
-contract.
-
-The detector currently reserves score 99 for named scanner identities (for
-example sqlmap, nikto, nessus, masscan, zgrab, nuclei, dirbuster/gobuster,
-wfuzz, AWVS/AppScan and the Slowloris referer fingerprint) plus impossible
-legacy-browser identities. An explicit `rule_bad_ua=logonly` override remains
-log-only as an operator kill switch.
-
-The production burn-in that triggered this promotion contained no other
-`score=99` reason across the four reviewed nodes. For the dominant legacy/zgrab
-population the traffic was effectively distributed one-shot automation:
-Titan 13,075 events / 13,028 unique IPs; Earth 23,836 / 23,614; Orion 3,882 /
-3,864; Rigel 606 / 602.
-'''
-          if '## Promotion batch — 2026-08-23' in s:
-              raise SystemExit('docs promotion section already present')
-          p.write_text(s.rstrip() + section + '\n')
-          PY
-
-      - name: Verify patch invariants
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          lua = Path('configs/lua/cfm_waf.lua').read_text()
-          go = Path('internal/webdetector/waf_rule_ids.go').read_text()
-          expected = {
-              'rule_sqli_blind_lexical = "block",': 1,
-              'rule_sqli_union_variant = "challenge",': 1,
-              'rule_xmlrpc_multicall   = "block",': 1,
-              'rule_xmlrpc_pingback    = "block",': 1,
-              'rule_xmlrpc_post_burst  = "block",': 1,
-              'if score >= 99 and mode ~= "logonly" then': 1,
-          }
-          for needle, count in expected.items():
-              got = lua.count(needle)
-              if got != count:
-                  raise SystemExit(f'{needle}: expected {count}, got {got}')
-          for rid, mode in [(101,'challenge'),(309,'block'),(319,'challenge'),(510,'block'),(511,'block'),(512,'block'),(701,'challenge')]:
-              needle = f'ID: {rid}'
-              line = next((x for x in go.splitlines() if needle in x), None)
-              if not line or f'DefaultMode: "{mode}"' not in line:
-                  raise SystemExit(f'Go mirror {rid}: expected {mode}, line={line!r}')
           PY
 
       - name: Install Lua 5.1
@@ -273,22 +127,25 @@ Titan 13,075 events / 13,028 unique IPs; Earth 23,836 / 23,614; Orion 3,882 /
           sudo apt-get update -qq
           sudo apt-get install -y -qq lua5.1
 
-      - name: Run focused Lua regression tests
+      - name: Run focused Lua regression suite
         run: lua5.1 scripts/tests/cfm_waf_severity_test.lua
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
-      - name: Run Go webdetector tests
-        run: go test ./internal/webdetector
+      - name: Run Go WAF registry and detector tests
+        run: |
+          go test ./internal/webdetector
+          go test ./internal/detectors/...
 
-      - name: Commit patch and remove one-shot workflow
+      - name: Commit test updates and remove one-shot scaffolding
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm .github/workflows/_apply_waf_promotions_20260823.yml
-          git add configs/lua/cfm_waf.lua internal/webdetector/waf_rule_ids.go scripts/tests/cfm_waf_severity_test.lua docs/waf.md
-          git commit -m "waf: promote validated rules and hard-block BAD_UA score 99"
+          git rm .github/_waf_patch_trigger_20260823
+          git add scripts/tests/cfm_waf_severity_test.lua
+          git commit -m "test: cover promoted WAF modes and BAD_UA score 99"
           git push origin HEAD:waf/promote-validated-rules-20260823
