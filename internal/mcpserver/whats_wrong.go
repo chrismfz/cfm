@@ -444,8 +444,10 @@ var edgeEngineUnits = map[string]bool{"angie": true, "openresty": true, "nginx":
 // evalServices flags failed/inactive/flapping units. edgeService is the resolved
 // active edge engine (from the health snapshot, lowercased, no ".service"); when
 // non-empty it suppresses state faults for the IDLE alternate edge engine — the
-// classic false "openresty.service failed" on an Angie node. Pass "" to disable
-// the suppression (edge unknown → fail safe by flagging).
+// classic false "openresty.service failed" on an Angie node. Explicitly-disabled
+// non-edge services are also not treated as current state faults: systemd can keep
+// a stale failed state for a unit that is intentionally disabled. Edge engines
+// retain the stricter fail-safe behavior when the active engine is unresolved.
 func evalServices(body json.RawMessage, edgeService string) []finding {
 	var s struct {
 		Services []struct {
@@ -479,8 +481,20 @@ func evalServices(body json.RawMessage, edgeService string) []finding {
 		if edgeEngineUnits[edgeService] && edgeEngineUnits[unitBase] && unitBase != edgeService {
 			continue
 		}
+
+		failed := u.Active == "failed" || u.Sub == "failed"
+		// A disabled non-edge service is not expected to be running. systemd can
+		// retain active=failed after a previous/manual start, so treating that stale
+		// state as a current critical creates persistent false positives (e.g.
+		// memcached disabled on Orion). Keep failures critical when enablement is
+		// anything other than explicitly "disabled" (including unknown/static), and
+		// keep edge engines fail-safe: the resolved active edge is required even if
+		// disabled, while an unresolved edge still flags failed edge candidates.
+		reportFailed := u.Enabled != "disabled" ||
+			(edgeEngineUnits[unitBase] && (!edgeEngineUnits[edgeService] || unitBase == edgeService))
+
 		switch {
-		case u.Active == "failed" || u.Sub == "failed":
+		case failed && reportFailed:
 			fs = append(fs, finding{sevCritical, "service", "service failed: " + u.Unit,
 				fmt.Sprintf("%s active=%s sub=%s", u.Unit, u.Active, u.Sub), "service_status",
 				map[string]any{"units": u.Unit}})
