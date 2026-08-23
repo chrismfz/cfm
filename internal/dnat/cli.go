@@ -394,7 +394,11 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	}
 
 	fmt.Printf("DNAT table: %s %s\n", *family, *table)
-	edgeTarget := dnatTargetLabel(detectEdgeService())
+	edgeService := detectActivePanelListenerService()
+	edgeTarget := dnatTargetLabel(edgeService)
+	if edgeService == panelListenerServiceAmbiguous {
+		fmt.Println("WARNING: edge service is ambiguous: both Angie and OpenResty are active; exactly one should be active+enabled.")
+	}
 	if enabled {
 		fmt.Printf("State: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n\n", getenvInt("NFT_DNAT_PRIORITY", NFTDNATPriority), *httpPort, *httpsPort)
 		fmt.Println("Current rules:")
@@ -511,6 +515,9 @@ func dnatTargetLabel(edgeService string) string {
 	label := "CFM edge proxy ports"
 	if edgeService == "" {
 		return label
+	}
+	if edgeService == panelListenerServiceAmbiguous {
+		return label + " (ambiguous Angie/OpenResty runtime)"
 	}
 	return fmt.Sprintf("%s (%s)", label, edgeService)
 }
@@ -718,7 +725,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		} else {
 			fmt.Println("State: OFF")
 		}
-		panelMode, luaLoaded, modePath := panelListenerGuardStateFromPaths(panelListenerChallengeConfigPaths)
+		panelMode, luaLoaded, modePath := panelListenerGuardStateFromPaths(orderedPanelListenerConfigPaths())
 		if panelMode == "unknown" {
 			if persisted := loadPersistedPanelChallengeMode(); persisted != "" {
 				panelMode = persisted
@@ -728,7 +735,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		panelLuaPath := panelLuaGuardPath()
 		panelLua := checkPanelLuaGuard(panelLuaPath)
-		panelDecision := probePanelDecisionEndpoint([]string{"/etc/angie/cfm-panel-listeners.conf", "/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf", "configs/cfm-panel-listeners.conf.in"})
+		panelDecision := probePanelDecisionEndpoint(orderedPanelListenerConfigPaths())
 		onProfile := buildPanelChallengeStatus(panelChallengeEnabledMode, panelMode, luaLoaded)
 		offProfile := buildPanelChallengeStatus(panelChallengeDisabledMode, panelChallengeDisabledMode, luaLoaded)
 		_ = offProfile // status always resolves both ON and OFF policy profiles.

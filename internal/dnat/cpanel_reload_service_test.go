@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"cfm/internal/systemdunit"
 )
 
 func TestReloadPanelListenerService_OpenrestyActivePrefersOpenresty(t *testing.T) {
@@ -32,65 +34,28 @@ func TestReloadPanelListenerService_OpenrestyActivePrefersOpenresty(t *testing.T
 	if len(calls) == 0 || calls[0] != "systemctl reload openresty" {
 		t.Fatalf("expected first command to be openresty reload, got %v", calls)
 	}
-}
-
-func TestReloadPanelListenerService_StaleAngieDetectionAcceptsActiveOpenrestySuccess(t *testing.T) {
-	origExec := execCommand
-	origDetect := panelListenerServiceDetector
-	origProcDetect := panelListenerProcessDetector
-	t.Cleanup(func() {
-		execCommand = origExec
-		panelListenerServiceDetector = origDetect
-		panelListenerProcessDetector = origProcDetect
-	})
-
-	panelListenerServiceDetector = func() string { return "angie" }
-	panelListenerProcessDetector = func() string { return "" }
-	var calls []string
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
-		if name == "systemctl" && len(args) == 3 && args[0] == "is-active" && args[1] == "--quiet" && args[2] == "openresty" {
-			return exec.Command("sh", "-c", "exit 0")
+	for _, call := range calls {
+		if strings.Contains(call, "angie") {
+			t.Fatalf("resolved OpenResty must never fall through to Angie, got %v", calls)
 		}
-		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "openresty" {
-			return exec.Command("sh", "-c", "exit 0")
-		}
-		return exec.Command("sh", "-c", "exit 1")
-	}
-
-	if err := reloadPanelListenerService(); err != nil {
-		t.Fatalf("reload listener service: %v", err)
-	}
-	if len(calls) < 6 {
-		t.Fatalf("expected angie failures, openresty reload, and active check, got %v", calls)
-	}
-	if calls[0] != "systemctl reload angie" {
-		t.Fatalf("expected stale angie detection to try angie reload first, got %v", calls)
-	}
-	if calls[4] != "systemctl reload openresty" {
-		t.Fatalf("expected fallback openresty reload after angie failures, got %v", calls)
-	}
-	if calls[5] != "systemctl is-active --quiet openresty" {
-		t.Fatalf("expected active check before accepting fallback success, got %v", calls)
 	}
 }
 
-func TestReloadPanelListenerService_UnconfirmedFallbackSuccessFails(t *testing.T) {
+func TestReloadPanelListenerService_PrimaryFailureDoesNotStartInactivePeer(t *testing.T) {
 	origExec := execCommand
 	origDetect := panelListenerServiceDetector
-	origProcDetect := panelListenerProcessDetector
 	t.Cleanup(func() {
 		execCommand = origExec
 		panelListenerServiceDetector = origDetect
-		panelListenerProcessDetector = origProcDetect
 	})
 
 	panelListenerServiceDetector = func() string { return "angie" }
-	panelListenerProcessDetector = func() string { return "" }
 	var calls []string
 	execCommand = func(name string, args ...string) *exec.Cmd {
-		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
-		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "openresty" {
+		call := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		calls = append(calls, call)
+		if strings.Contains(call, "openresty") {
+			// This would succeed if the implementation incorrectly crossed over.
 			return exec.Command("sh", "-c", "exit 0")
 		}
 		return exec.Command("sh", "-c", "exit 1")
@@ -98,20 +63,19 @@ func TestReloadPanelListenerService_UnconfirmedFallbackSuccessFails(t *testing.T
 
 	err := reloadPanelListenerService()
 	if err == nil {
-		t.Fatalf("expected error when fallback service success is not confirmed active")
+		t.Fatal("expected Angie reload/restart failure to be returned")
 	}
-	if !strings.Contains(err.Error(), "unconfirmed fallback service") {
-		t.Fatalf("unexpected error: %v", err)
+	for _, call := range calls {
+		if strings.Contains(call, "openresty") {
+			t.Fatalf("must not start/reload inactive peer after Angie failure, got %v", calls)
+		}
 	}
-	if len(calls) < 6 {
-		t.Fatalf("expected openresty fallback and active check after angie failures, got %v", calls)
-	}
-	if calls[5] != "systemctl is-active --quiet openresty" {
-		t.Fatalf("expected active check before rejecting fallback success, got %v", calls)
+	if len(calls) != 4 {
+		t.Fatalf("expected only the four Angie reload/restart candidates, got %v", calls)
 	}
 }
 
-func TestReloadPanelListenerService_UnknownFallsBackAndAcceptsSuccess(t *testing.T) {
+func TestReloadPanelListenerService_NoAuthoritativeServiceFailsWithoutGuessing(t *testing.T) {
 	origExec := execCommand
 	origDetect := panelListenerServiceDetector
 	t.Cleanup(func() {
@@ -123,20 +87,18 @@ func TestReloadPanelListenerService_UnknownFallsBackAndAcceptsSuccess(t *testing
 	var calls []string
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
-		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "openresty" {
-			return exec.Command("sh", "-c", "exit 0")
-		}
-		return exec.Command("sh", "-c", "exit 1")
+		return exec.Command("sh", "-c", "exit 0")
 	}
 
-	if err := reloadPanelListenerService(); err != nil {
-		t.Fatalf("reload listener service: %v", err)
+	err := reloadPanelListenerService()
+	if err == nil {
+		t.Fatal("expected unknown edge service to fail rather than start Angie/OpenResty arbitrarily")
 	}
-	if len(calls) < 5 {
-		t.Fatalf("expected fallback commands to run, got %v", calls)
+	if !strings.Contains(err.Error(), "no authoritative angie/openresty edge service") {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if calls[0] != "systemctl reload angie" {
-		t.Fatalf("expected unknown detection to start with angie path, got %v", calls)
+	if len(calls) != 0 {
+		t.Fatalf("expected no reload/restart commands when service is unknown, got %v", calls)
 	}
 }
 
@@ -164,74 +126,91 @@ func writePanelListenerTestConfig(t *testing.T, path, content string) {
 	}
 }
 
-func withPanelServiceDetectionTest(t *testing.T, active map[string]bool, paths []string) {
+func withPanelServiceDetectionTest(t *testing.T, states map[string]systemdunit.Status, systemdAvailable bool, process string, paths []string) {
 	t.Helper()
-	origExec := execCommand
+	origProbe := panelSystemdUnitProbe
+	origProc := panelListenerProcessDetector
 	origPaths := panelListenerChallengeConfigPaths
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		if name == "systemctl" && len(args) == 3 && args[0] == "is-active" && args[1] == "--quiet" {
-			if active[args[2]] {
-				return exec.Command("sh", "-c", "exit 0")
-			}
-			return exec.Command("sh", "-c", "exit 3")
+	panelSystemdUnitProbe = func(unit string) (systemdunit.Status, bool) {
+		if !systemdAvailable {
+			return systemdunit.Status{}, false
 		}
-		return exec.Command("sh", "-c", "exit 1")
+		if st, ok := states[unit]; ok {
+			return st, true
+		}
+		return systemdunit.Status{ActiveState: "inactive", EnabledState: "disabled"}, true
 	}
+	panelListenerProcessDetector = func() string { return process }
 	panelListenerChallengeConfigPaths = paths
 	t.Cleanup(func() {
-		execCommand = origExec
+		panelSystemdUnitProbe = origProbe
+		panelListenerProcessDetector = origProc
 		panelListenerChallengeConfigPaths = origPaths
 	})
 }
 
-func TestDetectActivePanelListenerService_ActiveOpenrestyOverridesStaleAngieConfig(t *testing.T) {
+func TestDetectActivePanelListenerService_ActiveEnabledOpenrestyOverridesStaleAngieConfig(t *testing.T) {
 	tmp := t.TempDir()
 	angiePath := filepath.Join(tmp, "etc/angie/cfm-panel-listeners.conf")
 	openrestyPath := filepath.Join(tmp, "usr/local/openresty/nginx/conf/cfm-panel-listeners.conf")
 	writePanelListenerTestConfig(t, angiePath, `server { access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`)
 	writePanelListenerTestConfig(t, openrestyPath, `server { access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`)
-	withPanelServiceDetectionTest(t, map[string]bool{"openresty": true}, []string{angiePath, openrestyPath})
+	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{
+		"openresty.service": {Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"},
+	}, true, "", []string{angiePath, openrestyPath})
 
 	if got := detectActivePanelListenerService(); got != "openresty" {
 		t.Fatalf("service=%q, want openresty", got)
 	}
 }
 
-func TestDetectActivePanelListenerService_BothActiveUsesLoadedConfig(t *testing.T) {
-	tmp := t.TempDir()
-	angiePath := filepath.Join(tmp, "etc/angie/cfm-panel-listeners.conf")
-	openrestyPath := filepath.Join(tmp, "usr/local/openresty/nginx/conf/cfm-panel-listeners.conf")
-	writePanelListenerTestConfig(t, angiePath, `server { # stale config without panel lua guard }`)
-	writePanelListenerTestConfig(t, openrestyPath, `server { access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`)
-	withPanelServiceDetectionTest(t, map[string]bool{"angie": true, "openresty": true}, []string{angiePath, openrestyPath})
-
-	if got := detectActivePanelListenerService(); got != "openresty" {
-		t.Fatalf("service=%q, want openresty", got)
-	}
-}
-
-func TestDetectActivePanelListenerService_BothActiveAmbiguousLoadedConfigs(t *testing.T) {
-	tmp := t.TempDir()
-	angiePath := filepath.Join(tmp, "etc/angie/cfm-panel-listeners.conf")
-	openrestyPath := filepath.Join(tmp, "usr/local/openresty/nginx/conf/cfm-panel-listeners.conf")
-	writePanelListenerTestConfig(t, angiePath, `server { access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`)
-	writePanelListenerTestConfig(t, openrestyPath, `server { access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`)
-	withPanelServiceDetectionTest(t, map[string]bool{"angie": true, "openresty": true}, []string{angiePath, openrestyPath})
+func TestDetectActivePanelListenerService_BothActiveIsAmbiguous(t *testing.T) {
+	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{
+		"angie.service":     {Active: true, Enabled: false, ActiveState: "active", EnabledState: "disabled"},
+		"openresty.service": {Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"},
+	}, true, "", nil)
 
 	if got := detectActivePanelListenerService(); got != panelListenerServiceAmbiguous {
 		t.Fatalf("service=%q, want ambiguous sentinel", got)
 	}
 }
 
-func TestDetectActivePanelListenerService_NoActiveFallsBackToConfigPath(t *testing.T) {
-	tmp := t.TempDir()
-	angiePath := filepath.Join(tmp, "etc/angie/cfm-panel-listeners.conf")
-	openrestyPath := filepath.Join(tmp, "usr/local/openresty/nginx/conf/cfm-panel-listeners.conf")
-	writePanelListenerTestConfig(t, angiePath, `server { access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`)
-	writePanelListenerTestConfig(t, openrestyPath, `server { access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`)
-	withPanelServiceDetectionTest(t, map[string]bool{}, []string{angiePath, openrestyPath})
+func TestDetectActivePanelListenerService_BothActiveEnabledIsAmbiguous(t *testing.T) {
+	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{
+		"angie.service":     {Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"},
+		"openresty.service": {Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"},
+	}, true, "", nil)
+
+	if got := detectActivePanelListenerService(); got != panelListenerServiceAmbiguous {
+		t.Fatalf("service=%q, want ambiguous sentinel", got)
+	}
+}
+
+func TestDetectActivePanelListenerService_NoActiveUsesUniqueEnabledIntent(t *testing.T) {
+	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{
+		"angie.service":     {Active: false, Enabled: true, ActiveState: "inactive", EnabledState: "enabled"},
+		"openresty.service": {Active: false, Enabled: false, ActiveState: "inactive", EnabledState: "disabled"},
+	}, true, "", nil)
 
 	if got := detectActivePanelListenerService(); got != "angie" {
-		t.Fatalf("service=%q, want angie fallback", got)
+		t.Fatalf("service=%q, want enabled Angie as intended edge", got)
+	}
+}
+
+func TestDetectActivePanelListenerService_NoActiveDoesNotGuessFromConfig(t *testing.T) {
+	tmp := t.TempDir()
+	angiePath := filepath.Join(tmp, "etc/angie/cfm-panel-listeners.conf")
+	writePanelListenerTestConfig(t, angiePath, `server { access_by_lua_file /var/lib/cfm/lua/cfm_panel.lua; }`)
+	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{}, true, "", []string{angiePath})
+
+	if got := detectActivePanelListenerService(); got != "" {
+		t.Fatalf("service=%q, want none instead of stale-config guess", got)
+	}
+}
+
+func TestDetectActivePanelListenerService_NoSystemdFallsBackToProcess(t *testing.T) {
+	withPanelServiceDetectionTest(t, nil, false, "angie", nil)
+	if got := detectActivePanelListenerService(); got != "angie" {
+		t.Fatalf("service=%q, want angie process fallback", got)
 	}
 }
