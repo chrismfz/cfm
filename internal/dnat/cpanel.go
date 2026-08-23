@@ -311,7 +311,7 @@ func reloadPanelListenerService() error {
 	return fmt.Errorf("reload/restart listener service failed: %w", lastErr)
 }
 
-var panelListenerServiceDetector = detectActivePanelListenerService
+var panelListenerServiceDetector = detectActiveEdgeService
 var panelListenerProcessDetector = detectEdgeService
 var panelSystemdUnitProbe = systemdunit.Probe
 
@@ -358,12 +358,12 @@ func panelListenerConfigPathService(path string) string {
 	}
 }
 
-// detectActivePanelListenerService uses the same active/enabled systemd model
-// surfaced by `cfm health`. A normal node may have both engines installed, but
-// exactly one is expected to be active+enabled. If systemd is unavailable we
-// fall back to the running-process detector; stale config files are never used
-// to decide which engine is live.
-func detectActivePanelListenerService() string {
+// detectActiveEdgeService uses the same active/enabled systemd model surfaced
+// by `cfm health`. A normal node may have both engines installed, but exactly
+// one is expected to be active+enabled. If systemd is unavailable we fall back
+// to the running-process detector; stale config files are never used to decide
+// which engine is live. Both web DNAT and panel DNAT consume this resolver.
+func detectActiveEdgeService() string {
 	services := []string{"angie", "openresty"}
 	states := make(map[string]systemdunit.Status, len(services))
 	systemdAvailable := false
@@ -410,6 +410,9 @@ func detectActivePanelListenerService() string {
 	}
 	return ""
 }
+
+// Kept as a compatibility/test seam for the existing panel-specific callers.
+func detectActivePanelListenerService() string { return detectActiveEdgeService() }
 
 func panelListenerServiceCandidates(active string) [][]string {
 	if active == panelListenerServiceAmbiguous {
@@ -482,6 +485,7 @@ func panelLuaGuardPath() string {
 				v := strings.TrimSpace(strings.TrimPrefix(line, "access_by_lua_file "))
 				return strings.TrimSuffix(v, ";")
 			}
+		}
 	}
 	return ""
 }
