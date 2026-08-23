@@ -53,6 +53,8 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerFirewallSelfTest(srv, d)
 	registerIPLocate(srv, d)
 	registerDetectorsStatus(srv, d)
+	registerDetectorCoverage(srv, d)
+	registerConfigDrift(srv, d)
 	registerSystemHealth(srv, d)
 	registerProcessList(srv, d)
 	registerProcessHealth(srv, d)
