@@ -771,6 +771,114 @@ embed scoped cookie
 
 Record status/minimal response shape, not sensitive payloads.
 
+## Deferred GSC-MCP tooling for deeper audit
+
+The current GSC-MCP application-audit workbench already has browser-backed identities/sessions, captured-request replay, `app_request_replay_as`, `app_authz_compare`, API discovery, audit ledger/evidence and OAST. Two additional bounded primitives would materially deepen the CFM pass without turning the auditor into a generic Internet scanner/fuzzer.
+
+### Tool 1 — import API/bearer identities without a browser
+
+Add a narrow tool, working name:
+
+```text
+app_identity_import_headers
+```
+
+Purpose: create/refresh a managed audit identity from explicitly supplied credential-shaped HTTP headers for APIs that do not naturally authenticate through a browser flow. This is primarily to let `app_authz_compare` exercise CFM's admin/scoped bearer boundaries directly.
+
+Required safety/behaviour:
+
+- origin must already be operator-approved/in scope;
+- imported credentials are bound to the **exact scheme/host/port**;
+- secret values remain ephemeral/in-memory and are never returned by identity/session/detail/list/evidence tools;
+- outputs expose only non-secret metadata such as identity/role labels supplied by the tester, origin, credential header names and provenance;
+- never log or hash raw bearer values into ordinary audit output;
+- replacing an identity invalidates its previous imported session immediately;
+- `app_request_replay_as` must remove inherited credential-shaped headers first, then inject only the selected managed identity credentials;
+- do not support credential-bearing query parameters in the first version; headers are sufficient for CFM and avoid ambiguous URL-secret handling;
+- no target request is sent merely by importing the identity.
+
+Primary CFM identities for the deep pass:
+
+```text
+cfm-admin-bearer
+cfm-scoped-vhost-test
+cfm-scoped-db-only-test
+```
+
+Then use one retained baseline request with `app_authz_compare` rather than hand-building independent curls for every actor.
+
+Required CFM test matrix after the tool exists:
+
+- admin-only endpoint: admin bearer succeeds; scoped identities deny; anonymous/invalid bearer deny;
+- scoped endpoint: in-scope scoped bearer succeeds; out-of-scope scoped bearer denies/returns no foreign data;
+- DB-only scoped token cannot acquire vhost/global privileges through omitted parameters;
+- omitted scope/filter never turns a scoped request into global data;
+- an imported credential for `https://titan.myip.gr:6061` cannot be replayed automatically to `http://titan.myip.gr:6060` or `https://titan.myip.gr:443` merely because hostname matches;
+- switching from admin to scoped identity never retains the admin Authorization/Cookie/API-key material from the parent request;
+- response comparison records status/route/content type/body shape/hash evidence without copying sensitive payloads into the audit report.
+
+The result should make the authorization pass reproducible as:
+
+```text
+route inventory
+    -> capture one representative request per endpoint/family
+    -> replay same request as named actors
+    -> app_authz_compare
+    -> attach request/response evidence to audit ledger
+```
+
+### Tool 2 — bounded raw HTTP edge-vs-backend differential probe
+
+Add a separate explicit low-level primitive, working name:
+
+```text
+app_raw_http_probe
+```
+
+Purpose: compare request parsing/normalization at the public Angie/OpenResty edge versus the direct Go listener without Go's normal `net/http` client canonicalizing the test request first.
+
+This is for **parser/normalization differential checks**, not high-rate fuzzing, request-smuggling campaigns or load testing.
+
+Suggested bounds:
+
+- one operator-approved host/IP + port per call;
+- target re-authorized through the same app-audit scope/dial guard immediately before connect;
+- one TCP connection, one bounded request and one bounded response;
+- HTTP/1.0 or HTTP/1.1 only initially;
+- strict request-byte ceiling (for example <= 8 KiB) and bounded response/header/body retention;
+- explicit mode/effect gating; no hidden redirects/retries;
+- secrets redacted in normal output and audit evidence;
+- no automatic mutation corpus: the caller supplies the exact request being tested.
+
+CFM differential suite should send the **same logical case** to edge `:443` where practical and direct Go `:6061`, then compare status/redirect/selected headers/body fingerprint and whether each layer reaches the expected route.
+
+Low-volume cases worth retaining:
+
+```text
+normal canonical path
+/cfm-admin/api/v1/...
+/cfm-admin//api/v1/...
+percent-encoded slash/dot segments where the URI is legal to transmit
+trailing slash variants
+mixed-case/port-bearing Host forms
+absolute-form request target where accepted by HTTP/1.1
+single vs duplicate benign query parameters
+single vs duplicate forwarded headers
+conflicting X-Forwarded-For / X-Real-IP / X-Forwarded-Proto values
+```
+
+Specific security assertions:
+
+- edge and direct listener must not map two materially different raw paths onto different authorization semantics for the same protected operation;
+- direct `6061` must ignore spoofed forwarded client/scheme headers regardless of duplicate/header ordering;
+- edge must canonicalize client identity according to the trusted edge contract rather than preserve attacker-controlled XFF chains;
+- encoded/path variants must not bypass `/cfm-admin` prefix handling, login challenge, admin-only wrappers or scoped filters;
+- duplicate query/header forms must not make a scoped request global or select a more privileged interpretation in one layer;
+- direct Go and edge may legitimately differ in rejection/canonicalization status, but any difference that changes **which handler/authz policy executes** is a finding candidate;
+- keep production testing non-destructive and one-case-at-a-time; any ambiguous parser-desync/request-smuggling-style behaviour moves to disposable staging before further probing.
+
+This primitive should remain separate from `app_request_send`/replay: ordinary application requests should continue using the safe structured HTTP transport, while raw HTTP is an explicit opt-in capability for edge/parser differential evidence.
+
 ---
 
 # 8. Acceptance checklist / implementation order
@@ -834,6 +942,10 @@ Record status/minimal response shape, not sensitive payloads.
 - [ ] Generate route inventory from code.
 - [ ] Reconcile every route with `docs/endpoint_scope_inventory.md`.
 - [ ] Static proof for every admin/scoped/public/self-auth route.
+- [ ] Add GSC-MCP `app_identity_import_headers` (or equivalent exact-origin API identity import) before the credentialed differential pass.
+- [ ] Run admin/scoped/DB-only identity matrices with `app_authz_compare` and attach evidence to the audit ledger.
+- [ ] Add bounded GSC-MCP `app_raw_http_probe` before the edge-vs-direct parser/normalization pass.
+- [ ] Run the retained low-volume edge `:443` vs direct `:6061` raw HTTP differential suite; move any parser-desync follow-up to disposable staging.
 - [ ] Live low-volume differential checks with GSC-MCP.
 - [ ] Add missing authz integration tests.
 - [ ] Update this file with findings/fixes and exact commits/PRs.
