@@ -81,7 +81,8 @@ do
   waf.set_rule("rule_bad_ua", "challenge")
 
   local hit, reason, _ttl, action = waf.check(fresh_ctx({
-    headers = { ["User-Agent"] = "sqlmap/1.5.0" },
+    method = "HEAD",
+    headers = { ["User-Agent"] = "" },
   }))
   check(hit == true,                                "3: bad_ua challenge — hit=true")
   check(reason and reason:sub(1, 10) == "WAF_BAD_UA", "3: bad_ua challenge — reason prefix")
@@ -115,7 +116,8 @@ do
 
   local hit, reason, _ttl, action, hits = waf.check(fresh_ctx({
     args    = "x=${jndi:ldap://",
-    headers = { ["User-Agent"] = "sqlmap/1.5.0" },
+    method  = "HEAD",
+    headers = { ["User-Agent"] = "" },
   }))
   check(hit == true,        "5: challenge+block — hit=true")
   check(reason == "WAF_RCE", "5: challenge+block — final reason is WAF_RCE")
@@ -219,7 +221,8 @@ do
 
   local _hit, _reason, _ttl, _action, hits = waf.check(fresh_ctx({
     uri     = "/foo/../wp-config",
-    headers = { ["User-Agent"] = "sqlmap/1.5.0" },
+    method  = "HEAD",
+    headers = { ["User-Agent"] = "" },
   }))
   check(#hits == 2,                          "12: hits — 2 entries")
   -- Bad UA is rule 1; traversal is rule 5. So bad_ua should be hits[1].
@@ -393,7 +396,7 @@ do
   check(rule_id == 413,                        "20: webshell_path — routes to 413")
 end
 
--- ── Test 21: W1 webshell_path — non-matching path doesn't fire ───────────────
+-- ── Test 21: W1 webshell_path — non-matching path doesn't fire ────────────────
 do
   disable_all_rules()
   waf.set_rule("rule_webshell_path", "challenge")
@@ -745,7 +748,7 @@ do
   disable_all_rules()
   waf.set_rule("rule_php_webshell_body", "challenge")
 
-  -- c99shell (+3) + <?php (+2) + eval( (+3) = 8. Both ws_tag and the
+  -- c99shell (+3) + <?php (+2) + eval (+3) = 8. Both ws_tag and the
   -- callable would emit a tag; ws_tag wins per the design.
   local _hit, reason = waf.check(fresh_ctx({
     method  = "POST",
@@ -1489,13 +1492,11 @@ do
   end
 end
 
--- ── Test 71: logonly→challenge promotions hold in the default CFG ──────────
--- 2026-05 promotion batch: rule_ip_host, rule_ctrl_chars, rule_debug_toggles,
--- rule_serialize, rule_cmd_payload_backtick, rule_header_flood. These all
--- spent enough time in logonly to verify zero (or, for ip_host, clean)
--- FPs and were promoted to challenge in the default CFG. The test reads
--- a freshly-required module so earlier tests' disable_all_rules() calls
--- don't pollute the snapshot.
+-- ── Test 71: promotion defaults hold in the default CFG ────────────────────
+-- Earlier clean burn-ins promoted the original challenge batch; the 2026-08-23
+-- batch additionally promotes 101/319/701 to challenge and 309/510/511/512 to
+-- block. Read a freshly-required module so earlier set_rule() calls do not
+-- pollute the snapshot.
 do
   package.loaded["cfm_waf"] = nil
   package.loaded["cfm_waf_detectors"] = nil
@@ -1510,10 +1511,23 @@ do
     "rule_cmd_payload_backtick",
     "rule_header_flood",
     "rule_cmd_payload",  -- fallback default, kept aligned with sub-rules
+    "rule_traversal",
+    "rule_sqli_union_variant",
+    "rule_ssrf",
   }
   for _, name in ipairs(must_be_challenge) do
     check(snap[name] == "challenge",
           "71: " .. name .. " ships as 'challenge' (got " .. tostring(snap[name]) .. ")")
+  end
+  local must_be_block = {
+    "rule_sqli_blind_lexical",
+    "rule_xmlrpc_multicall",
+    "rule_xmlrpc_pingback",
+    "rule_xmlrpc_post_burst",
+  }
+  for _, name in ipairs(must_be_block) do
+    check(snap[name] == "block",
+          "71: " .. name .. " ships as 'block' (got " .. tostring(snap[name]) .. ")")
   end
 end
 
@@ -1973,6 +1987,30 @@ do
   check(hit == true,                                      "81: real PHP serialize — hit=true")
   check(reason and reason:sub(1, 13) == "WAF_SERIALIZE", "81: real PHP serialize — reason prefix")
   check(waf_rule_id == 306,                              "81: real PHP serialize — rule_id=306")
+end
+
+-- ── Regression: BAD_UA score=99 hard-blocks, explicit logonly stays audit ──
+do
+  disable_all_rules()
+  waf.set_rule("rule_bad_ua", "challenge")
+
+  local hit, reason, ttl, action, hits, rule_id = waf.check(fresh_ctx({
+    headers = { ["User-Agent"] = "sqlmap/1.5.0" },
+  }))
+  check(hit == true,                                "bad_ua score99 — hit=true")
+  check(reason == "WAF_BAD_UA:UA_SQLMAP:score=99", "bad_ua score99 — exact reason")
+  check(action == "block",                         "bad_ua score99 — action=block")
+  check(ttl == waf.get_config().block_ttl_sec,      "bad_ua score99 — block ttl")
+  check(rule_id == 201,                             "bad_ua score99 — rule id 201")
+  check(hits and hits[1] and hits[1].action == "block", "bad_ua score99 — hits entry block")
+
+  disable_all_rules()
+  waf.set_rule("rule_bad_ua", "logonly")
+  local hit2, _r2, _t2, action2 = waf.check(fresh_ctx({
+    headers = { ["User-Agent"] = "sqlmap/1.5.0" },
+  }))
+  check(hit2 == true,          "bad_ua score99 logonly — hit=true")
+  check(action2 == "logonly",  "bad_ua score99 logonly — override preserved")
 end
 
 if fails > 0 then
