@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"cfm/internal/detconf"
 	"cfm/internal/detectors/meta"
 	"cfm/internal/detectorstatus"
 	"encoding/json"
@@ -10,7 +11,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"cfm/internal/detectorscfg"
 )
@@ -110,10 +110,10 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 	allowedBool := map[string]struct{}{"0": {}, "1": {}, "no": {}, "yes": {}, "false": {}, "true": {}, "off": {}, "on": {}}
 	allowedBlockMode := map[string]struct{}{"0": {}, "no": {}, "off": {}, "dryrun": {}, "alert": {}, "permanent": {}, "perm": {}}
 	enumByKey := map[string]map[string]struct{}{
-		"ENABLED":     allowedBool,
-		"SEND_TO_API": allowedBool,
-		"ENRICH":      allowedBool,
-		"PTR":         allowedBool,
+		"ENABLED":           allowedBool,
+		"SEND_TO_API":       allowedBool,
+		"ENRICH":            allowedBool,
+		"PTR":               allowedBool,
 		"LOG_IGNORED":       allowedBool,
 		"DRY_RUN":           allowedBool,
 		"MODE":              {"journal": {}, "file": {}, "docker": {}},
@@ -124,6 +124,12 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 		// Enum keys are validated by value, never as durations — even when the
 		// name contains a token like BLOCK/TTL/WINDOW (e.g. SEND_TO_BLOCKLIST).
 		if _, ok := enumByKey[u]; ok {
+			return false
+		}
+		// BLOCK is duration_OR_enum: named modes (dryrun/permanent/alert) are
+		// legal, so plain duration checking here rejected every named mode as
+		// "invalid duration". validateKnownEnum owns the BLOCK grammar.
+		if u == "BLOCK" {
 			return false
 		}
 		return strings.Contains(u, "TIMEOUT") || strings.Contains(u, "COOLDOWN") || strings.Contains(u, "EVERY") || strings.Contains(u, "WINDOW") || strings.Contains(u, "TTL") || strings.Contains(u, "BLOCK")
@@ -155,10 +161,13 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 			if _, ok := allowedBlockMode[normalized]; ok {
 				return
 			}
-			if _, err := time.ParseDuration(normalized); err == nil {
+			// Same grammar the runtime's parseBlockPolicy accepts — including
+			// the days extension ("7d"). Plain time.ParseDuration here would
+			// reject values the detector runs fine on (false invalid-block-mode).
+			if _, err := detconf.ParseCfgDuration(normalized); err == nil {
 				return
 			}
-			push(path, "invalid enum/duration for BLOCK", "invalid_enum", "BLOCK expects one of no/off/0/dryrun/alert/permanent/perm or a Go duration like 30m")
+			push(path, "invalid enum/duration for BLOCK", "invalid_enum", "BLOCK expects one of no/off/0/dryrun/alert/permanent/perm or a duration like 30m / 7d")
 			return
 		}
 		allowed, ok := enumByKey[strings.ToUpper(strings.TrimSpace(key))]
@@ -173,9 +182,9 @@ func validateDetectorDraft(c detectorscfg.AdminConfig) []detectorValidationError
 		if strings.TrimSpace(v) == "" {
 			return
 		}
-		d, err := time.ParseDuration(strings.Trim(strings.TrimSpace(v), `"`))
+		d, err := detconf.ParseCfgDuration(strings.Trim(strings.TrimSpace(v), `"`))
 		if err != nil || d <= 0 {
-			push(path, "invalid duration", "invalid_duration", "positive Go duration, e.g. 30s, 10m, 1h30m")
+			push(path, "invalid duration", "invalid_duration", "positive duration, e.g. 30s, 10m, 1h30m, 7d")
 		}
 	}
 	for k, v := range c.Global {

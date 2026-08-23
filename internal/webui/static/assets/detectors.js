@@ -380,8 +380,11 @@ function parseDurationStrict(v){
   const s = normalizeSchemaValue(v);
   if(!s) return false;
   if(!/^[-+]?\d/.test(s)) return false;
+  // detectors.conf extends Go durations with a days unit ("7d", "1d12h") —
+  // mirror the server's detconf.ParseCfgDuration by expanding Nd -> N*24h.
+  const expanded = s.replace(/(\d+(?:\.\d+)?)d/g, (_, n) => `${Number(n) * 24}h`);
   const re = /^[-+]?((\d+(\.\d+)?)(ns|us|µs|ms|s|m|h))+$/;
-  return re.test(s);
+  return re.test(expanded);
 }
 
 function parsePositiveNumber(v){
@@ -436,14 +439,14 @@ function collectLocalValidation(){
     const schema = lookupDetectorKeySchema(k);
     const trimmed = String(v||'').trim();
     if(schema?.type === 'duration' && trimmed!=='' && !parseDurationStrict(v)){
-      errs.push({ path:`global.${k}`, message:'invalid duration format', expected:'Go duration, e.g. 30s, 5m, 1h30m' });
-      push(null, `global.${k}: invalid duration format (expected Go duration e.g. 30s, 5m, 1h30m)`);
+      errs.push({ path:`global.${k}`, message:'invalid duration format', expected:'duration, e.g. 30s, 5m, 1h30m, 7d' });
+      push(null, `global.${k}: invalid duration format (expected e.g. 30s, 5m, 1h30m, 7d)`);
     } else if(schema?.type === 'duration_or_enum' && trimmed!==''){
       const low = normalizeSchemaValue(trimmed).toLowerCase();
       const allowed = (schema.allowed||[]).some((item)=>String(item).toLowerCase() === low);
       if(!allowed && !parseDurationStrict(trimmed)){
-        errs.push({ path:`global.${k}`, message:'invalid block mode', expected:'named mode or Go duration, e.g. dryrun or 30m' });
-        push(null, `global.${k}: invalid block mode (expected dryrun/permanent/etc or Go duration like 30m)`);
+        errs.push({ path:`global.${k}`, message:'invalid block mode', expected:'named mode or duration, e.g. dryrun, 30m or 7d' });
+        push(null, `global.${k}: invalid block mode (expected dryrun/permanent/etc or duration like 30m / 7d)`);
       }
     }
   }
@@ -454,14 +457,14 @@ function collectLocalValidation(){
       const schema = lookupDetectorKeySchema(k);
       const trimmed = String(v||'').trim();
       if(schema?.type === 'duration' && trimmed!=='' && !parseDurationStrict(v)){
-        errs.push({ path:`${sec.name}.${k}`, message:'invalid duration format', expected:'Go duration, e.g. 30s, 5m, 1h30m' });
+        errs.push({ path:`${sec.name}.${k}`, message:'invalid duration format', expected:'duration, e.g. 30s, 5m, 1h30m, 7d' });
         push(sectionName, `${k}: invalid duration format`);
       } else if(schema?.type === 'duration_or_enum' && trimmed!==''){
         const low = normalizeSchemaValue(trimmed).toLowerCase();
         const allowed = (schema.allowed||[]).some((item)=>String(item).toLowerCase() === low);
         if(!allowed && !parseDurationStrict(trimmed)){
-          errs.push({ path:`${sec.name}.${k}`, message:'invalid block mode', expected:'named mode or Go duration, e.g. dryrun or 30m' });
-          push(sectionName, `${k}: invalid block mode (use dryrun/permanent/etc or Go duration like 30m)`);
+          errs.push({ path:`${sec.name}.${k}`, message:'invalid block mode', expected:'named mode or duration, e.g. dryrun, 30m or 7d' });
+          push(sectionName, `${k}: invalid block mode (use dryrun/permanent/etc or duration like 30m / 7d)`);
         }
       } else if(schema?.type === 'regex_multiline'){
         const lines = String(v||'').split('\n');
@@ -531,7 +534,7 @@ function buildTypedControl(key, value, onChange){
     if(schema.type === 'duration_or_enum'){
       const suggestions = Array.from(new Set([...(schema.allowed||[]), '30m', '1h', '24h', '1h30m']));
       const listId = `detectors-${String(key).toLowerCase().replace(/[^a-z0-9_-]/g,'-')}-duration-suggestions`;
-      wrap.innerHTML = `<label class="muted">${keyLabel}</label><input type="text" class="input input-wide" list="${listId}" value="${raw.replaceAll('"','&quot;')}"><datalist id="${listId}">${suggestions.map((s)=>`<option value="${safeText(s)}"></option>`).join('')}</datalist><div class="muted" style="font-size:11px">Go duration, e.g. 30m, 24h, 1h30m</div>${help}`;
+      wrap.innerHTML = `<label class="muted">${keyLabel}</label><input type="text" class="input input-wide" list="${listId}" value="${raw.replaceAll('"','&quot;')}"><datalist id="${listId}">${suggestions.map((s)=>`<option value="${safeText(s)}"></option>`).join('')}</datalist><div class="muted" style="font-size:11px">duration, e.g. 30m, 24h, 1h30m, 7d</div>${help}`;
       const input = wrap.querySelector('input');
       const inlineState = document.createElement('div');
       inlineState.className = 'muted';
@@ -552,7 +555,7 @@ function buildTypedControl(key, value, onChange){
           inlineState.style.color = '';
           return;
         }
-        inlineState.textContent = 'Invalid value: use a listed mode or Go duration, e.g. 30m, 24h, 1h30m';
+        inlineState.textContent = 'Invalid value: use a listed mode or duration, e.g. 30m, 24h, 1h30m, 7d';
         inlineState.style.color = '#fca5a5';
       };
       renderInline(raw);
