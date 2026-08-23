@@ -1,0 +1,71 @@
+name: Finalize WAF promotions (one-shot)
+
+on:
+  push:
+    branches:
+      - waf/promote-validated-rules-20260823
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: waf/promote-validated-rules-20260823
+          fetch-depth: 0
+
+      - name: Add changelog entry
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('CHANGELOG.md')
+          s = p.read_text()
+          old = '## [Unreleased]\n\n_Nothing yet._'
+          new = '''## [Unreleased]
+
+### Security
+- **Promoted fleet-validated WAF rules to stronger enforcement.** Rules 309
+  (`rule_sqli_blind_lexical`) and 510/511/512 (WordPress XML-RPC abuse) now
+  block at the edge; rules 101 (`rule_traversal`), 319
+  (`rule_sqli_union_variant`), and 701 (`rule_ssrf`) are challenge-tier. Rule
+  201 (`rule_bad_ua`) remains challenge by default, but deterministic
+  `score >= 99` hits hard-block per request while an explicit `logonly`
+  override remains audit-only. The BAD_UA persistent/nft autoblock policy is
+  unchanged.'''
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one empty Unreleased block, got {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq luajit
+
+      - name: Run focused Lua regression suite
+        run: luajit scripts/tests/cfm_waf_severity_test.lua
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run focused Go tests
+        run: |
+          go test ./internal/webdetector
+          go test ./internal/detectors/...
+
+      - name: Commit changelog and remove one-shot workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/_finalize_waf_promotions_20260823.yml
+          git add CHANGELOG.md
+          git commit -m "docs: record validated WAF promotions"
+          git push origin HEAD:waf/promote-validated-rules-20260823
