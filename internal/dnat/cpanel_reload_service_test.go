@@ -33,77 +33,28 @@ func TestReloadPanelListenerService_OpenrestyActivePrefersOpenresty(t *testing.T
 	if len(calls) == 0 || calls[0] != "systemctl reload openresty" {
 		t.Fatalf("expected first command to be openresty reload, got %v", calls)
 	}
-}
-
-func TestReloadPanelListenerService_StaleAngieDetectionAcceptsConfirmedOpenrestyFallback(t *testing.T) {
-	origExec := execCommand
-	origDetect := panelListenerServiceDetector
-	origProcDetect := panelListenerProcessDetector
-	origProbe := panelSystemdUnitProbe
-	t.Cleanup(func() {
-		execCommand = origExec
-		panelListenerServiceDetector = origDetect
-		panelListenerProcessDetector = origProcDetect
-		panelSystemdUnitProbe = origProbe
-	})
-
-	panelListenerServiceDetector = func() string { return "angie" }
-	panelListenerProcessDetector = func() string { return "" }
-	probeCalled := false
-	panelSystemdUnitProbe = func(unit string) (systemdunit.Status, bool) {
-		if unit == "openresty.service" {
-			probeCalled = true
-			return systemdunit.Status{Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"}, true
+	for _, call := range calls {
+		if strings.Contains(call, "angie") {
+			t.Fatalf("resolved OpenResty must never fall through to Angie, got %v", calls)
 		}
-		return systemdunit.Status{ActiveState: "inactive", EnabledState: "disabled"}, true
-	}
-	var calls []string
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
-		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "openresty" {
-			return exec.Command("sh", "-c", "exit 0")
-		}
-		return exec.Command("sh", "-c", "exit 1")
-	}
-
-	if err := reloadPanelListenerService(); err != nil {
-		t.Fatalf("reload listener service: %v", err)
-	}
-	if len(calls) < 5 {
-		t.Fatalf("expected angie failures then openresty reload, got %v", calls)
-	}
-	if calls[0] != "systemctl reload angie" {
-		t.Fatalf("expected stale angie detection to try angie reload first, got %v", calls)
-	}
-	if calls[4] != "systemctl reload openresty" {
-		t.Fatalf("expected fallback openresty reload after angie failures, got %v", calls)
-	}
-	if !probeCalled {
-		t.Fatal("expected shared systemd probe before accepting fallback service success")
 	}
 }
 
-func TestReloadPanelListenerService_UnconfirmedFallbackSuccessFails(t *testing.T) {
+func TestReloadPanelListenerService_PrimaryFailureDoesNotStartInactivePeer(t *testing.T) {
 	origExec := execCommand
 	origDetect := panelListenerServiceDetector
-	origProcDetect := panelListenerProcessDetector
-	origProbe := panelSystemdUnitProbe
 	t.Cleanup(func() {
 		execCommand = origExec
 		panelListenerServiceDetector = origDetect
-		panelListenerProcessDetector = origProcDetect
-		panelSystemdUnitProbe = origProbe
 	})
 
 	panelListenerServiceDetector = func() string { return "angie" }
-	panelListenerProcessDetector = func() string { return "" }
-	panelSystemdUnitProbe = func(string) (systemdunit.Status, bool) {
-		return systemdunit.Status{ActiveState: "inactive", EnabledState: "disabled"}, true
-	}
 	var calls []string
 	execCommand = func(name string, args ...string) *exec.Cmd {
-		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
-		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "openresty" {
+		call := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		calls = append(calls, call)
+		if strings.Contains(call, "openresty") {
+			// This would succeed if the implementation incorrectly crossed over.
 			return exec.Command("sh", "-c", "exit 0")
 		}
 		return exec.Command("sh", "-c", "exit 1")
@@ -111,16 +62,15 @@ func TestReloadPanelListenerService_UnconfirmedFallbackSuccessFails(t *testing.T
 
 	err := reloadPanelListenerService()
 	if err == nil {
-		t.Fatalf("expected error when fallback service success is not confirmed active")
+		t.Fatal("expected Angie reload/restart failure to be returned")
 	}
-	if !strings.Contains(err.Error(), "unconfirmed fallback service") {
-		t.Fatalf("unexpected error: %v", err)
+	for _, call := range calls {
+		if strings.Contains(call, "openresty") {
+			t.Fatalf("must not start/reload inactive peer after Angie failure, got %v", calls)
+		}
 	}
-	if len(calls) < 5 {
-		t.Fatalf("expected openresty fallback after angie failures, got %v", calls)
-	}
-	if calls[4] != "systemctl reload openresty" {
-		t.Fatalf("expected openresty fallback, got %v", calls)
+	if len(calls) != 4 {
+		t.Fatalf("expected only the four Angie reload/restart candidates, got %v", calls)
 	}
 }
 
