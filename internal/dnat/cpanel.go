@@ -380,7 +380,6 @@ func detectActiveEdgeService() string {
 		states[service] = st
 	}
 	if systemdAvailable {
-		var activeEnabled []string
 		var active []string
 		var enabled []string
 		for _, service := range services {
@@ -390,21 +389,12 @@ func detectActiveEdgeService() string {
 			}
 			if st.Active {
 				active = append(active, service)
-				if st.Enabled {
-					activeEnabled = append(activeEnabled, service)
-				}
 			}
-		}
-		switch len(activeEnabled) {
-		case 1:
-			return activeEnabled[0]
-		case 2:
-			return panelListenerServiceAmbiguous
 		}
 		switch len(active) {
 		case 1:
-			// Tolerate a manually-started service or a transient enable-state
-			// mismatch, but runtime activity still wins over stale files.
+			// Runtime activity wins over enable-state mismatches and stale
+			// config files. A second active edge is always ambiguous.
 			return active[0]
 		case 2:
 			return panelListenerServiceAmbiguous
