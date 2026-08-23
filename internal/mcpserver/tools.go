@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"cfm/internal/firewall/netfilterdiag"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -51,6 +53,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerFirewallBlocks(srv, d)
 	registerFirewallCounters(srv, d)
 	registerFirewallSelfTest(srv, d)
+	registerNetfilterPath(srv, d)
 	registerIPLocate(srv, d)
 	registerDetectorsStatus(srv, d)
 	registerDetectorCoverage(srv, d)
@@ -1136,6 +1139,38 @@ func registerFirewallSelfTest(srv *mcp.Server, d Deps) {
 		Description: "nftlib firewall self-diagnostics (read-only): the recent EnsureBase calls with their time split into lock_wait_ms (contention on the backend mutex), nl_work_ms (netlink add+flush — the shared connection's own health) and cli_work_ms (the `nft` CLI part), the worst call in the window, and the latest per-set feed writes (elems, dur, error). Use to root-cause an nftlib node whose EnsureBase duration climbs over a run (rising lock_wait ⇒ contention from a slow/failed feed write; rising nl_work ⇒ the netlink connection degrading) or a feed that never applies (a large set write erroring with 'message too long'). `available:false` on the exec-nft backend (it doesn't record this).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		return dispatchJSON(ctx, d, "/api/v1/firewall/selftest", nil)
+	})
+}
+
+type netfilterPathInput struct {
+	Hook   string `json:"hook,omitempty" jsonschema:"optional hook filter: ingress,prerouting,input,forward,output,postrouting,egress"`
+	Family string `json:"family,omitempty" jsonschema:"optional nftables family filter: ip,ip6,inet,bridge,arp,netdev"`
+	Proto  string `json:"proto,omitempty" jsonschema:"optional NAT-rule protocol filter: tcp or udp"`
+	DPort  *int   `json:"dport,omitempty" jsonschema:"optional destination-port filter (1-65535)"`
+}
+
+func registerNetfilterPath(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "netfilter_path",
+		Description: "Host-wide nftables hook-order and NAT/redirect view (read-only), including CFM, Imunify/WebShield, iptables-nft and other tables. Returns base chains sorted by actual numeric priority, statically reachable NAT/DNAT/redirect rules, configured-vs-runtime CFM priority drift, equal-priority ambiguity, and ordered overlaps for selected traffic. Safety bounds or unsupported verdict maps are explicit warnings. Uses terse nft JSON, so large blocklist SET ELEMENTS are never returned. Use hook=prerouting and proto/dport (for example tcp/443) to explain which base redirect chain runs first.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in netfilterPathInput) (*mcp.CallToolResult, any, error) {
+		filters := netfilterdiag.Filters{Hook: strings.ToLower(strings.TrimSpace(in.Hook)), Family: strings.ToLower(strings.TrimSpace(in.Family)), Proto: strings.ToLower(strings.TrimSpace(in.Proto))}
+		if in.DPort != nil {
+			if *in.DPort <= 0 {
+				return nil, nil, fmt.Errorf("invalid destination port %d", *in.DPort)
+			}
+			filters.DPort = *in.DPort
+		}
+		if err := netfilterdiag.ValidateFilters(filters); err != nil {
+			return nil, nil, err
+		}
+		q := url.Values{}
+		setStr(q, "hook", filters.Hook)
+		setStr(q, "family", filters.Family)
+		setStr(q, "proto", filters.Proto)
+		setInt(q, "dport", filters.DPort)
+		return dispatchJSON(ctx, d, "/api/v1/firewall/path", q)
 	})
 }
 

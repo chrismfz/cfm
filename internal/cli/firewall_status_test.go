@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -39,12 +40,23 @@ func (m mockDiagBE) CounterValue(name string) (int64, error) {
 	return 0, errors.New("missing counter")
 }
 
+var healthyDNATJSON = []byte(`{"nftables":[
+ {"chain":{"family":"inet","table":"cfm_redirect","name":"prerouting","type":"nat","hook":"prerouting","prio":-99}},
+ {"rule":{"family":"inet","table":"cfm_redirect","chain":"prerouting","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"dnat":{"port":9080}}]}},
+ {"rule":{"family":"inet","table":"cfm_redirect","chain":"prerouting","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"port":9043}}]}},
+ {"rule":{"family":"inet","table":"cfm_redirect","chain":"prerouting","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":443}},{"dnat":{"port":9043}}]}}
+]}`)
+
+type hostRulesetMock struct{ mockDiagBE }
+
+func (m hostRulesetMock) HostRulesetJSON() ([]byte, error) { return healthyDNATJSON, nil }
+
 func TestCollectFirewallStatusHealthy(t *testing.T) {
 	cfgDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cfgDir, "detectors.conf"), []byte("CHALLENGE_PATHS=1\n"), 0o644); err != nil {
 		t.Fatalf("write detectors.conf: %v", err)
 	}
-	be := mockDiagBE{dnat: true, dnatJSON: []byte(`{"nftables":[{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"dnat":{"addr":"","port":8080}}]}},{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"addr":"","port":8443}}]}}]}`), sets: map[string][]string{
+	be := mockDiagBE{dnat: true, dnatJSON: healthyDNATJSON, sets: map[string][]string{
 		"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
 		"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
 		"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
@@ -67,7 +79,15 @@ func TestCollectFirewallStatusHealthy(t *testing.T) {
 	}
 }
 
-
+func TestCollectFirewallStatusFallsBackToHostRuleset(t *testing.T) {
+	be := hostRulesetMock{mockDiagBE: mockDiagBE{dnat: true, tableErr: errors.New("backend table inspection unsupported"), sets: map[string][]string{}}}
+	r := collectFirewallStatus(be, t.TempDir(), "nftlib", "config", false)
+	for _, f := range r.Findings {
+		if f.Level == "fail" && strings.Contains(f.Message, "dnat redirect") {
+			t.Fatalf("host ruleset fallback failed: %+v", r.Findings)
+		}
+	}
+}
 
 func TestCollectFirewallStatusOpenRestyModeOnlyDNATEdgeOK(t *testing.T) {
 	cfgDir := t.TempDir()
@@ -75,8 +95,8 @@ func TestCollectFirewallStatusOpenRestyModeOnlyDNATEdgeOK(t *testing.T) {
 		t.Fatalf("write detectors.conf: %v", err)
 	}
 	be := mockDiagBE{
-		dnat: false,
-		dnatJSON: []byte(`{"nftables":[{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"dnat":{"addr":"","port":8080}}]}},{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"addr":"","port":8443}}]}}]}`),
+		dnat:     false,
+		dnatJSON: healthyDNATJSON,
 		sets: map[string][]string{
 			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
 			"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
@@ -111,8 +131,8 @@ func TestCollectFirewallStatusBothEnabledAndHealthy(t *testing.T) {
 		t.Fatalf("write detectors.conf: %v", err)
 	}
 	be := mockDiagBE{
-		dnat: true,
-		dnatJSON: []byte(`{"nftables":[{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"dnat":{"addr":"","port":8080}}]}},{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"addr":"","port":8443}}]}}]}`),
+		dnat:     true,
+		dnatJSON: healthyDNATJSON,
 		sets: map[string][]string{
 			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
 			"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
@@ -143,8 +163,8 @@ func TestCollectFirewallStatusChallengeChecksNeverPublished(t *testing.T) {
 		t.Fatalf("write detectors.conf: %v", err)
 	}
 	be := mockDiagBE{
-		dnat: true,
-		dnatJSON: []byte(`{"nftables":[{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"dnat":{"addr":"","port":8080}}]}},{"rule":{"chain":"prerouting","expr":[{"match":{"left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"addr":"","port":8443}}]}}]}`),
+		dnat:     true,
+		dnatJSON: healthyDNATJSON,
 		sets: map[string][]string{
 			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
 			"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},

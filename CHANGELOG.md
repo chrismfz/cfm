@@ -17,7 +17,17 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Host-wide netfilter path diagnostics for redirect collisions.** New
+  `cfm firewall path`, admin-only `/api/v1/firewall/path`, cfm-admin Firewall
+  view, and MCP `netfilter_path` show active nftables base chains in actual hook
+  priority order plus NAT/redirect rules across CFM, Imunify/WebShield and
+  iptables-nft. Equal-priority ambiguity and configured/runtime CFM priority
+  drift feed `whats_wrong`; intentional ordered overlap remains informational.
+  Collection uses terse nft JSON and hard output caps, so six-figure blocklist
+  set contents never enter the diagnostic response. The existing `cfm firewall
+  status` DNAT check now parses JSON structurally instead of false-failing on
+  nft output formatting.
 
 ## 2026.08.23
 

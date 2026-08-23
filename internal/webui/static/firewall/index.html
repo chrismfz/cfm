@@ -54,6 +54,53 @@
       </section>
 
       <section class="card wide">
+        <h2>Netfilter hook order</h2>
+        <p class="muted">Host-wide nftables execution order, including CFM, Imunify/WebShield, iptables-nft and other base chains. Lower numeric priorities run first; equal priorities are ambiguous.</p>
+        <p id="pathSummary" class="muted">Loading…</p>
+        <div class="toolbar wrap">
+          <label for="pathHook">Hook</label>
+          <select id="pathHook" class="input">
+            <option value="">all</option>
+            <option value="ingress">ingress</option>
+            <option value="prerouting">prerouting</option>
+            <option value="input">input</option>
+            <option value="forward">forward</option>
+            <option value="output">output</option>
+            <option value="postrouting">postrouting</option>
+            <option value="egress">egress</option>
+          </select>
+          <label for="pathPort">Traffic</label>
+          <select id="pathPort" class="input">
+            <option value="0">all NAT rules</option>
+            <option value="80">web port 80</option>
+            <option value="443">web port 443 (tcp/udp)</option>
+            <option value="2082">panel port 2082</option>
+            <option value="2083">panel port 2083</option>
+            <option value="2086">panel port 2086</option>
+            <option value="2087">panel port 2087</option>
+            <option value="2095">webmail port 2095</option>
+            <option value="2096">webmail port 2096</option>
+            <option value="2222">DirectAdmin port 2222</option>
+          </select>
+        </div>
+        <div id="pathFindings"></div>
+        <h3>Base chains</h3>
+        <div class="table-wrap wide-table-wrap">
+          <table>
+            <thead><tr><th>Hook</th><th>Priority</th><th>Family / table</th><th>Chain</th><th>Type / policy</th><th>Owner</th></tr></thead>
+            <tbody id="pathBody"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <h3>NAT / redirect rules</h3>
+        <div class="table-wrap wide-table-wrap">
+          <table>
+            <thead><tr><th>Order</th><th>Owner</th><th>Rule</th><th>Traffic</th><th>Action / target</th></tr></thead>
+            <tbody id="natBody"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
         <h2>Blocked IPs</h2>
         <p id="fwSummary" class="muted">Loading…</p>
         <div class="toolbar wrap">
@@ -67,7 +114,7 @@
               <tr><th>IP</th><th>Expires in</th><th>CC / ASN</th><th>Reason</th><th>Actions</th></tr>
             </thead>
             <tbody id="fwBody">
-              <tr><td colspan="6" class="muted">Loading…</td></tr>
+              <tr><td colspan="5" class="muted">Loading…</td></tr>
             </tbody>
           </table>
         </div>

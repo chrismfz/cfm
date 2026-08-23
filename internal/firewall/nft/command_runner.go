@@ -19,7 +19,14 @@ const defaultNFTCommandTimeout = 10 * time.Second
 // fork table. Operations that cannot acquire a slot wait until one is free.
 var nftSem = make(chan struct{}, 4)
 
-func acquireSem() { nftSem <- struct{}{} }
+func acquireSem(ctx context.Context) error {
+	select {
+	case nftSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 func releaseSem() { <-nftSem }
 
 type commandErrorMeta struct {
@@ -36,6 +43,10 @@ type commandResult struct {
 }
 
 func runCommand(ctx context.Context, timeout time.Duration, name string, args ...string) (commandResult, error) {
+	return runCommandLimited(ctx, timeout, 0, name, args...)
+}
+
+func runCommandLimited(ctx context.Context, timeout time.Duration, maxStdout int, name string, args ...string) (commandResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -48,16 +59,22 @@ func runCommand(ctx context.Context, timeout time.Duration, name string, args ..
 		defer cancel()
 	}
 
-	acquireSem()
+	if err := acquireSem(ctx); err != nil {
+		return commandResult{}, err
+	}
 	defer releaseSem()
 
 	cmd := exec.CommandContext(ctx, name, args...)
-	var stdout, stderr bytes.Buffer
+	stdout := limitedBuffer{max: maxStdout}
+	stderr := tailBuffer{max: 64 << 10}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 
 	res := commandResult{Stdout: stdout.String(), Stderr: stderr.String()}
+	if err == nil && stdout.truncated {
+		return res, fmt.Errorf("%s %s output exceeds %d bytes", name, strings.Join(args, " "), maxStdout)
+	}
 	if err == nil {
 		return res, nil
 	}
@@ -75,6 +92,56 @@ func runCommand(ctx context.Context, timeout time.Duration, name string, args ..
 	}
 	res.Meta = meta
 	return res, &commandExecError{Name: name, Args: args, Meta: meta, Err: err}
+}
+
+type limitedBuffer struct {
+	bytes.Buffer
+	max       int
+	truncated bool
+}
+
+type tailBuffer struct {
+	buf []byte
+	max int
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if b.max <= 0 {
+		return n, nil
+	}
+	if len(p) >= b.max {
+		b.buf = append(b.buf[:0], p[len(p)-b.max:]...)
+		return n, nil
+	}
+	overflow := len(b.buf) + len(p) - b.max
+	if overflow > 0 {
+		copy(b.buf, b.buf[overflow:])
+		b.buf = b.buf[:len(b.buf)-overflow]
+	}
+	b.buf = append(b.buf, p...)
+	return n, nil
+}
+
+func (b *tailBuffer) String() string { return string(b.buf) }
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if b.max <= 0 {
+		_, err := b.Buffer.Write(p)
+		return n, err
+	}
+	remaining := b.max - b.Len()
+	if remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		_, _ = b.Buffer.Write(p[:remaining])
+	}
+	if remaining < len(p) {
+		b.truncated = true
+	}
+	return n, nil
 }
 
 type commandExecError struct {
@@ -116,6 +183,23 @@ func runNFTCommand(ctx context.Context, args ...string) (commandResult, error) {
 	return runCommand(ctx, defaultNFTCommandTimeout, "nft", args...)
 }
 
+// ListRulesetJSON returns the host-wide nftables ruleset in terse JSON form.
+// It is intentionally fixed-argument: diagnostics need third-party tables,
+// but callers must not be able to turn this read path into arbitrary nft input.
+func ListRulesetJSON(ctx context.Context) ([]byte, error) {
+	const maxRulesetJSON = 8 << 20
+	res, err := runCommandLimited(ctx, defaultNFTCommandTimeout, maxRulesetJSON, "nft", "-j", "-t", "list", "ruleset")
+	if err != nil {
+		return nil, err
+	}
+	return []byte(res.Stdout), nil
+}
+
+// HostRulesetJSON implements the optional CLI diagnostic probe.
+func (b *Backend) HostRulesetJSON() ([]byte, error) {
+	return ListRulesetJSON(context.Background())
+}
+
 func runNFTCommandInput(ctx context.Context, input string, args ...string) (commandResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -126,7 +210,9 @@ func runNFTCommandInput(ctx context.Context, input string, args ...string) (comm
 		defer cancel()
 	}
 
-	acquireSem()
+	if err := acquireSem(ctx); err != nil {
+		return commandResult{}, err
+	}
 	defer releaseSem()
 
 	cmd := exec.CommandContext(ctx, "nft", args...)

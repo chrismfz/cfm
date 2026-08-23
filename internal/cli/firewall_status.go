@@ -13,6 +13,7 @@ import (
 	"cfm/internal/blocklists"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/firewall"
+	"cfm/internal/firewall/netfilterdiag"
 	"cfm/internal/firewall/setinventory"
 )
 
@@ -24,6 +25,10 @@ type fwDiagBackend interface {
 
 type counterProbe interface {
 	CounterValue(name string) (int64, error)
+}
+
+type hostRulesetProbe interface {
+	HostRulesetJSON() ([]byte, error)
 }
 
 func expectedCounterPatterns(cfg *cfgpkg.Config) []string {
@@ -52,6 +57,7 @@ func expectedCounterPatterns(cfg *cfgpkg.Config) []string {
 	}
 	return patterns
 }
+
 type dnatShowProbe interface {
 	DNATShow(family, table string) (string, error)
 }
@@ -182,8 +188,15 @@ type fwRuleDescriptor struct {
 }
 
 func RunFirewall(args []string, be firewall.Backend, cfgDir string, engine, source string) int {
-	if len(args) == 0 || args[0] != "status" {
-		fmt.Fprintln(os.Stderr, "usage: cfm firewall status [--verbose] [--json] [--strict]")
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: cfm firewall {status|path} ...")
+		return 2
+	}
+	if args[0] == "path" {
+		return RunNetfilterPath(args[1:], cfgDir)
+	}
+	if args[0] != "status" {
+		fmt.Fprintln(os.Stderr, "usage: cfm firewall {status|path} ...")
 		return 2
 	}
 	fs := flag.NewFlagSet("firewall status", flag.ExitOnError)
@@ -308,6 +321,11 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	if r.Features["dnat_edge"] {
 		tableJSON, err := be.ListTableJSON("inet", "cfm_redirect")
 		if err != nil {
+			if probe, ok := any(be).(hostRulesetProbe); ok {
+				tableJSON, err = probe.HostRulesetJSON()
+			}
+		}
+		if err != nil {
 			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing or unreadable (feature=dnat_edge expected source: cfm_redirect table): " + err.Error()})
 		} else if !hasExpectedDNATPreroutingRules(tableJSON) {
 			r.Findings = append(r.Findings, fwFinding{"fail", "dnat redirect table inet/cfm_redirect missing expected prerouting dnat rules (feature=dnat_edge expected source: cfm_redirect prerouting rules)"})
@@ -381,7 +399,6 @@ func loadConfiguredFeeds(cfgDir string) []blocklists.Feed {
 	}
 	return feeds
 }
-
 
 func printFirewallReport(r fwReport) {
 	fmt.Printf("Firewall diagnostics: %s (%s)\n", r.Engine, r.Status)
@@ -652,12 +669,7 @@ func evaluateFeatureChecks(r fwReport) map[string]fwFeatureCheck {
 }
 
 func hasExpectedDNATPreroutingRules(tableJSON []byte) bool {
-	raw := strings.ToLower(string(tableJSON))
-	return strings.Contains(raw, `"chain":"prerouting"`) &&
-		strings.Contains(raw, `"field":"dport"`) &&
-		strings.Contains(raw, `"right":80`) &&
-		strings.Contains(raw, `"right":443`) &&
-		strings.Contains(raw, `"dnat"`)
+	return netfilterdiag.HasWebDNATRules(tableJSON)
 }
 
 func collectPolicyDomains(tableJSON []byte) map[string][]fwRuleDescriptor {
