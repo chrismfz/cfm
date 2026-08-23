@@ -40,16 +40,17 @@ type WAFRule struct {
 // stable iteration order.
 var wafRuleIDs = []WAFRule{
 	// 1xx path / traversal
-	{ID: 101, Name: "rule_traversal", ReasonFamily: "WAF_TRAVERSAL", DefaultMode: "logonly"},
+	{ID: 101, Name: "rule_traversal", ReasonFamily: "WAF_TRAVERSAL", DefaultMode: "challenge"},
 	{ID: 102, Name: "rule_long_path_segment", ReasonFamily: "WAF_LONG_PATH", DefaultMode: "logonly"},
 
 	// 2xx client identity
+	// Mixed-mode: challenge is the parent default; score >= 99 is hard-blocked in Lua.
 	{ID: 201, Name: "rule_bad_ua", ReasonFamily: "WAF_BAD_UA", DefaultMode: "challenge"},
 
 	// 3xx injection
 	{ID: 301, Name: "rule_sqli", ReasonFamily: "WAF_SQLI", DefaultMode: "block"},
-	{ID: 309, Name: "rule_sqli_blind_lexical", ReasonFamily: "WAF_SQLI_LEXICAL", DefaultMode: "challenge"},
-	{ID: 319, Name: "rule_sqli_union_variant", ReasonFamily: "WAF_SQLI_UNION_VARIANT", DefaultMode: "logonly"},
+	{ID: 309, Name: "rule_sqli_blind_lexical", ReasonFamily: "WAF_SQLI_LEXICAL", DefaultMode: "block"},
+	{ID: 319, Name: "rule_sqli_union_variant", ReasonFamily: "WAF_SQLI_UNION_VARIANT", DefaultMode: "challenge"},
 	{ID: 318, Name: "rule_superglobal_override", ReasonFamily: "WAF_SUPERGLOBAL", DefaultMode: "logonly"},
 	{ID: 302, Name: "rule_xss", ReasonFamily: "WAF_XSS", DefaultMode: "challenge"},
 	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge"},
@@ -112,9 +113,9 @@ var wafRuleIDs = []WAFRule{
 	// 5xx auth abuse
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},
 	{ID: 502, Name: "rule_auth_wp_checks", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},
-	{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},
-	{ID: 511, Name: "rule_xmlrpc_pingback", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},
-	{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge"},
+	{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
+	{ID: 511, Name: "rule_xmlrpc_pingback", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
+	{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 
 	// 6xx header / protocol anomaly
 	{ID: 601, Name: "rule_ctrl_chars", ReasonFamily: "WAF_CTRL_CHARS", DefaultMode: "challenge"},
@@ -130,7 +131,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 611, Name: "rule_bad_utf8", ReasonFamily: "WAF_BAD_UTF8", DefaultMode: "logonly"},
 
 	// 7xx SSRF
-	{ID: 701, Name: "rule_ssrf", ReasonFamily: "WAF_SSRF", DefaultMode: "logonly"},
+	{ID: 701, Name: "rule_ssrf", ReasonFamily: "WAF_SSRF", DefaultMode: "challenge"},
 	{ID: 702, Name: "rule_c2_tunnel", ReasonFamily: "WAF_C2", DefaultMode: "logonly"},
 
 	// 8xx info disclosure / debug
