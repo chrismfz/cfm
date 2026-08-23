@@ -124,7 +124,7 @@ func TestReloadPanelListenerService_UnconfirmedFallbackSuccessFails(t *testing.T
 	}
 }
 
-func TestReloadPanelListenerService_UnknownFallsBackAndAcceptsSuccess(t *testing.T) {
+func TestReloadPanelListenerService_NoAuthoritativeServiceFailsWithoutGuessing(t *testing.T) {
 	origExec := execCommand
 	origDetect := panelListenerServiceDetector
 	t.Cleanup(func() {
@@ -136,20 +136,18 @@ func TestReloadPanelListenerService_UnknownFallsBackAndAcceptsSuccess(t *testing
 	var calls []string
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
-		if name == "systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "openresty" {
-			return exec.Command("sh", "-c", "exit 0")
-		}
-		return exec.Command("sh", "-c", "exit 1")
+		return exec.Command("sh", "-c", "exit 0")
 	}
 
-	if err := reloadPanelListenerService(); err != nil {
-		t.Fatalf("reload listener service: %v", err)
+	err := reloadPanelListenerService()
+	if err == nil {
+		t.Fatal("expected unknown edge service to fail rather than start Angie/OpenResty arbitrarily")
 	}
-	if len(calls) < 5 {
-		t.Fatalf("expected fallback commands to run, got %v", calls)
+	if !strings.Contains(err.Error(), "no authoritative angie/openresty edge service") {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if calls[0] != "systemctl reload angie" {
-		t.Fatalf("expected unknown detection to start with angie path, got %v", calls)
+	if len(calls) != 0 {
+		t.Fatalf("expected no reload/restart commands when service is unknown, got %v", calls)
 	}
 }
 
@@ -234,6 +232,17 @@ func TestDetectActivePanelListenerService_BothActiveEnabledIsAmbiguous(t *testin
 
 	if got := detectActivePanelListenerService(); got != panelListenerServiceAmbiguous {
 		t.Fatalf("service=%q, want ambiguous sentinel", got)
+	}
+}
+
+func TestDetectActivePanelListenerService_NoActiveUsesUniqueEnabledIntent(t *testing.T) {
+	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{
+		"angie.service":      {Active: false, Enabled: true, ActiveState: "inactive", EnabledState: "enabled"},
+		"openresty.service": {Active: false, Enabled: false, ActiveState: "inactive", EnabledState: "disabled"},
+	}, true, "", nil)
+
+	if got := detectActivePanelListenerService(); got != "angie" {
+		t.Fatalf("service=%q, want enabled Angie as intended edge", got)
 	}
 }
 
