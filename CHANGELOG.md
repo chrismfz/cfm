@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.23
+
 ### Fixed
 - **`cfm dnat cpanel` status: two false diagnostics fixed.** (1) The Panel Lua
   load check reported `false` with `attempt to index field 'shared'` on every
@@ -34,8 +38,6 @@ back-filled here — see the git/PR history for that period.
   a resolved engine inspects only its own paths, an ambiguous dual-active state
   has no authoritative config path, and unresolved detection keeps only
   service-neutral repo/test fallbacks.
-
-## 2026.08.23
 
 ### Added
 - **MCP `detector_coverage` tool + admin endpoint (`GET /api/v1/detectors/coverage`).**
