@@ -482,7 +482,7 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	}
 
 	res.FilesScanned = append(res.FilesScanned, logFile)
-	tailCapped, tailErr := streamTailMatches(cctx, logFile, tailLines, onLine)
+	tailCapped, tailErr := streamTailBounded(cctx, logFile, tailLines, onLine)
 	if tailCapped {
 		// The live file had MORE lines than the tail window: without the
 		// rotated siblings there is a silent hole between "now" and the

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -103,6 +104,119 @@ func TestGrepIP_IncludeRotated(t *testing.T) {
 	if strings.Contains(joined, "/nope") {
 		t.Errorf("unrelated other.log was scanned: %v", res2.Lines)
 	}
+}
+
+// TestStreamTailMatches_ExactWindowNoProbeLeak pins the N-probe contract:
+// exactly tailLines lines reach fn — when the file is longer, the OLDEST
+// lines are dropped and nothing extra (a "probe" line) leaks through.
+func TestStreamTailMatches_ExactWindowNoProbeLeak(t *testing.T) {
+	if _, err := exec.LookPath("tail"); err != nil {
+		t.Skip("tail not available")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "access.log")
+	var b strings.Builder
+	for i := 1; i <= 11; i++ { // 11 lines; window = newest 10
+		b.WriteString(fmt.Sprintf("line%d\n", i))
+	}
+	if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	capped, err := streamTailBounded(context.Background(), p, 10, func(line string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The probe answer must come from the counting helper, while the stream
+	// itself is exercised separately below.
+	if !capped {
+		t.Error("capped = false, want true (file has more than 10 lines)")
+	}
+
+	var got []string
+	if _, err := streamTailBounded(context.Background(), p, 10, func(line string) bool {
+		got = append(got, line)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 10 || got[0] != "line2" || got[9] != "line11" {
+		t.Errorf("got %d lines [%q..%q], want exactly line2..line11 (oldest dropped, no probe leak)",
+			len(got), first(got), last(got))
+	}
+}
+
+// TestStreamTailMatches_ExitStatusPropagated: a tail that starts but exits
+// non-zero (e.g. permission denied — stderr only, scanner sees clean EOF)
+// must surface as an error, never as an authoritative empty result.
+func TestStreamTailMatches_ExitStatusPropagated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake executable test needs a POSIX shell")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "tail")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'tail: cannot open' >&2\nexit 42\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := streamTailMatches(context.Background(), "/whatever.log", 10, func(string) bool { return true })
+	if err == nil || !strings.Contains(err.Error(), "exit status 42") {
+		t.Fatalf("err = %v, want wrapped exit status 42", err)
+	}
+	if _, err := tailHasMoreThan(context.Background(), "/whatever.log", 10); err == nil {
+		t.Error("probe must propagate the same failure")
+	}
+}
+
+func TestTailHasMoreThan(t *testing.T) {
+	if _, err := exec.LookPath("tail"); err != nil {
+		t.Skip("tail not available")
+	}
+	dir := t.TempDir()
+	write := func(name string, n int) string {
+		p := filepath.Join(dir, name)
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			b.WriteString(fmt.Sprintf("l%d\n", i))
+		}
+		if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := []struct {
+		lines, n int
+		want     bool
+	}{
+		{12, 10, true},
+		{11, 10, true},
+		{10, 10, false},
+		{9, 10, false},
+	}
+	for _, tc := range cases {
+		p := write(fmt.Sprintf("f%d.log", tc.lines), tc.lines)
+		got, err := tailHasMoreThan(context.Background(), p, tc.n)
+		if err != nil {
+			t.Fatalf("%d lines / n=%d: %v", tc.lines, tc.n, err)
+		}
+		if got != tc.want {
+			t.Errorf("%d lines / n=%d: capped=%v, want %v", tc.lines, tc.n, got, tc.want)
+		}
+	}
+}
+
+func first(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
+}
+
+func last(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[len(s)-1]
 }
 
 func TestGrepIP_TailAndFilter(t *testing.T) {

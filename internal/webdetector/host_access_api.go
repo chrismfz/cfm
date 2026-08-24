@@ -169,8 +169,11 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 		// Range-aware queries over EXACTLY the access scan's absolute window
 		// ([from,to)) — never an independently-sampled time.Now() — so the
 		// detector counts describe the same seconds as the traffic profile.
+		// The rule breakdown uses the OBSERVATION-only universe so its total
+		// reconciles with summary.waf_observed (a physical hit that emitted
+		// trigger+observation is not counted twice).
 		s, serr := e.history.SummarizeRange(h, "", res.WindowFromUnix, res.WindowToUnix)
-		rs, rerr := e.history.WAFByRuleRange(h, res.WindowFromUnix, res.WindowToUnix)
+		rs, rerr := e.history.WAFObservedByRuleRange(h, res.WindowFromUnix, res.WindowToUnix)
 		if serr != nil || rerr != nil {
 			v.failed = true
 			views[h] = v

@@ -64,6 +64,7 @@ func TestHistoryRangeQueries(t *testing.T) {
 		{base - 1, "waf_observed", "WAF_SQLI:1"}, // before window → excluded
 		{base, "waf_observed", "WAF_SQLI:2"},     // from → included (>=)
 		{base + 5, "block_trigger", ""},          // inside → included
+		{base + 6, "waf_trigger", "WAF_SQLI:2"},  // inside; SAME physical hit as the base observation
 		{base + 9, "suspicious", ""},             // inside → included
 		{base + 10, "waf_observed", "WAF_RCE:3"}, // to → excluded (< to)
 		{base + 11, "challenge_issued", ""},      // after window → excluded
@@ -79,19 +80,30 @@ func TestHistoryRangeQueries(t *testing.T) {
 	if sum.FromUnix != base || sum.ToUnix != base+10 {
 		t.Errorf("summary bounds = [%d,%d], want [%d,%d] echoed verbatim", sum.FromUnix, sum.ToUnix, base, base+10)
 	}
-	if sum.TotalEvents != 3 {
-		t.Errorf("total_events = %d, want 3 (from, +5, +9)", sum.TotalEvents)
+	if sum.TotalEvents != 4 {
+		t.Errorf("total_events = %d, want 4 (from, +5 block_trigger, +6 trigger, +9)", sum.TotalEvents)
 	}
 	if sum.WAFObserved != 1 || sum.BlockTriggers != 1 || sum.Suspicious != 1 {
-		t.Errorf("waf/block/suspicious = %d/%d/%d, want 1/1/1", sum.WAFObserved, sum.BlockTriggers, sum.Suspicious)
+		t.Errorf("waf/block/suspicious = %d/%d/%d, want 1/1/1 (the +6 waf_trigger is a separate universe)", sum.WAFObserved, sum.BlockTriggers, sum.Suspicious)
 	}
 
+	// Observation-only breakdown must reconcile with summary.waf_observed:
+	// one physical hit, one count — even though a waf_trigger row for it exists.
+	obsRules, err := hs.WAFObservedByRuleRange("ex.gr", base, base+10)
+	if err != nil {
+		t.Fatalf("WAFObservedByRuleRange: %v", err)
+	}
+	if len(obsRules) != 1 || obsRules[0].Rule != "WAF_SQLI:2" || obsRules[0].Count != 1 {
+		t.Errorf("observation rules = %+v, want [WAF_SQLI:2 ×1] — trigger must NOT double-count the hit", obsRules)
+	}
+
+	// The legacy dual-universe view deliberately counts both rows of that hit.
 	rules, err := hs.WAFByRuleRange("ex.gr", base, base+10)
 	if err != nil {
 		t.Fatalf("WAFByRuleRange: %v", err)
 	}
-	if len(rules) != 1 || rules[0].Rule != "WAF_SQLI:2" || rules[0].Count != 1 {
-		t.Errorf("rules = %+v, want exactly [WAF_SQLI:2 ×1] (boundary events excluded)", rules)
+	if len(rules) != 1 || rules[0].Rule != "WAF_SQLI:2" || rules[0].Count != 2 {
+		t.Errorf("dual-universe rules = %+v, want [WAF_SQLI:2 ×2] (observe + trigger, documented contract)", rules)
 	}
 
 	// The trailing-hours wrappers still work (now-anchored smoke check).

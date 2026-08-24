@@ -231,7 +231,7 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 	}
 
 	res.FilesScanned = append(res.FilesScanned, logFile)
-	tailCapped, err := streamTailMatches(cctx, logFile, tailLines, onLine)
+	tailCapped, err := streamTailBounded(cctx, logFile, tailLines, onLine)
 	if tailCapped {
 		// The live file had more lines than the tail window — a real reach
 		// bound between "now" and the rotated archives; never silent.
@@ -406,7 +406,7 @@ func TailError(ctx context.Context, grep, source string, tailLines, limit int) (
 	res := ErrorTailResult{LogFile: logFile, Grep: strings.TrimSpace(grep), TailLines: tailLines}
 	// Ring of the newest `limit` matches: append until full, then slide.
 	buf := make([]string, 0, limit)
-	_, err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
+	err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
 		res.Scanned++
 		if needle != "" && !strings.Contains(strings.ToLower(line), needle) {
 			return true
@@ -462,7 +462,7 @@ func ScanError(ctx context.Context, substrs []string, source string, tailLines i
 	cctx, cancel := context.WithTimeout(ctx, scanTimeout)
 	defer cancel()
 
-	_, err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
+	err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
 		scanned++
 		if len(lower) > 0 {
 			ll := strings.ToLower(line)
@@ -483,16 +483,12 @@ func ScanError(ctx context.Context, substrs []string, source string, tailLines i
 	return logFile, scanned, err
 }
 
-// streamTailMatches runs `tail -n <tailLines+1> <file>` and feeds each line to
-// fn. The +1 probe answers a question plain tail cannot: was the file LONGER
-// than the requested window? If more than tailLines lines come back, capped is
-// returned true — the caller can then flag truncated honestly instead of
-// silently leaving a hole between the live tail and the rotated archives.
-// tail reads backward from EOF but PRINTS file order (oldest→newest of the
-// selected window); disk read is bounded to the tail window regardless of the
-// file's total size. Output is streamed (never fully buffered).
-func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(line string) bool) (capped bool, err error) {
-	cmd := exec.CommandContext(ctx, tailPath(), "-n", fmt.Sprintf("%d", tailLines+1), file)
+// tailHasMoreThan reports whether file holds MORE than n lines, via a bounded
+// `tail -n n+1` probe whose output is only COUNTED — never handed to anyone —
+// so callers get the cap answer without any off-by-one line leaking into their
+// data (the reason a plain N+1 probe feeding the callback is wrong).
+func tailHasMoreThan(ctx context.Context, file string, n int) (bool, error) {
+	cmd := exec.CommandContext(ctx, tailPath(), "-n", fmt.Sprintf("%d", n+1), file)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return false, err
@@ -504,12 +500,55 @@ func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
 	seen := 0
+	capped := false
 	for sc.Scan() {
 		seen++
-		if seen > tailLines {
-			capped = true // the +1 probe line exists ⇒ the file had more than tailLines
+		if seen > n {
+			capped = true
+			break // answer known — drain below so tail can exit cleanly
 		}
+	}
+	scanErr := sc.Err()
+	_, _ = io.Copy(io.Discard, stdout)
+	waitErr := cmd.Wait()
+	if ctx.Err() != nil {
+		return capped, fmt.Errorf("tail scan timed out: %w", ctx.Err())
+	}
+	if scanErr != nil {
+		return capped, scanErr
+	}
+	// The early break above drains to EOF, so a non-nil waitErr here is a REAL
+	// failure (permission denied, missing file, …) — never swallow it into an
+	// authoritative-looking empty answer.
+	if waitErr != nil {
+		return capped, fmt.Errorf("tail %s: %w", file, waitErr)
+	}
+	return capped, nil
+}
+
+// streamTailMatches runs `tail -n <tailLines> <file>` and feeds each line to
+// fn — EXACTLY tailLines semantics: when the file is longer, the oldest lines
+// are dropped and fn never sees them; no probe line leaks through. tail reads
+// backward from EOF, so disk read is bounded to the tail window regardless of
+// total file size; output is streamed (never fully buffered). Callers that
+// ALSO need to know whether content was dropped pair this with tailHasMoreThan
+// via streamTailBounded.
+func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(line string) bool) error {
+	cmd := exec.CommandContext(ctx, tailPath(), "-n", fmt.Sprintf("%d", tailLines), file)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		stdout.Close() // Wait (which normally closes the pipe) is never reached on a Start failure
+		return err
+	}
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
+	stoppedEarly := false
+	for sc.Scan() {
 		if !fn(sc.Text()) {
+			stoppedEarly = true
 			break
 		}
 	}
@@ -518,11 +557,32 @@ func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(
 	// returning false) — otherwise it could block on a full pipe until the ctx
 	// SIGKILL. Harmless no-op on the normal full-drain-to-EOF path.
 	_, _ = io.Copy(io.Discard, stdout)
-	_ = cmd.Wait() // reap; status ignored (SIGPIPE on early stop, timeout surfaces via ctx)
+	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
-		return capped, fmt.Errorf("scan timed out after %s (log too large for the tail window)", scanTimeout)
+		return fmt.Errorf("tail scan timed out: %w", ctx.Err())
 	}
-	return capped, scanErr
+	if scanErr != nil {
+		return scanErr
+	}
+	// A non-zero tail exit WITHOUT our own early stop means the evidence this
+	// function would have returned is empty/partial for a real reason (e.g.
+	// permission-denied writes only to stderr, scanner sees clean EOF) — that
+	// must surface as an error, never as "zero lines, all good".
+	if waitErr != nil && !stoppedEarly {
+		return fmt.Errorf("tail %s: %w", file, waitErr)
+	}
+	return nil
+}
+
+// streamTailBounded pairs the cap probe with the exact-window stream for
+// callers that need both answers (capped ⇒ the caller flags truncation).
+func streamTailBounded(ctx context.Context, file string, tailLines int, fn func(line string) bool) (capped bool, err error) {
+	capped, perr := tailHasMoreThan(ctx, file, tailLines)
+	if perr != nil {
+		return false, perr
+	}
+	err = streamTailMatches(ctx, file, tailLines, fn)
+	return capped, err
 }
 
 // mentionsIP reports whether ip (already canonical) appears in line as a

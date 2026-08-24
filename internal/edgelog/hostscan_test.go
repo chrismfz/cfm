@@ -667,6 +667,45 @@ func TestScanHost_LiveTailCapTruncated(t *testing.T) {
 	if !res.Truncated || !res.LiveTailTruncated {
 		t.Fatalf("truncated=%v live_tail_truncated=%v, want both true (live file longer than tail window)", res.Truncated, res.LiveTailTruncated)
 	}
+	// Exactly the 10 newest live lines + the sibling line are consumed and
+	// counted — the cap probe must not add an 11th live line to the data.
+	if res.Scanned != 11 || res.Matched != 11 {
+		t.Errorf("scanned=%d matched=%d, want 11/11 (10 newest live + 1 sibling)", res.Scanned, res.Matched)
+	}
+}
+
+// The probe's extra line must never be AGGREGATED: with TailLines=10 over an
+// 11-line file whose OLDEST line is the only one for the target host, that
+// dropped line must stay invisible (matched=0) while the caps still fire.
+func TestScanHost_ProbeLineNotAggregated(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	lines := []string{
+		cfmline(now-30, "198.51.100.9", "target.gr", "GET", "/dropped-by-tail-window", 200, "-", 0),
+	}
+	for i := 0; i < 10; i++ {
+		lines = append(lines, cfmline(now-25+float64(i), "198.51.100.1", "other.gr", "GET", fmt.Sprintf("/p%d", i), 200, "-", 0))
+	}
+	writeLines(t, live, lines)
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
+
+	res, err := ScanHost(context.Background(), "target.gr", HostOpts{Hours: 1, TailLines: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Scanned != 10 {
+		t.Errorf("scanned = %d, want exactly 10 (probe line must not reach aggregation)", res.Scanned)
+	}
+	if res.Matched != 0 {
+		t.Errorf("matched = %d, want 0 — the only target line is outside the requested tail window", res.Matched)
+	}
+	if !res.LiveTailTruncated || !res.Truncated {
+		t.Error("cap flags must still be true")
+	}
 }
 
 func TestWWWTwin(t *testing.T) {

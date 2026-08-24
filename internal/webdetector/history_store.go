@@ -496,12 +496,38 @@ func (s *HistoryStore) WAFByRule(host string, hours int) ([]WAFRuleHit, error) {
 
 // WAFByRuleRange is WAFByRule over an EXPLICIT half-open [fromUnix, toUnix)
 // window.
+//
+// NOTE the event universe: this includes BOTH observations and triggers. The
+// WAF engine summary treats them as separate events too — but a block that
+// clears should_push emits a trigger AND an observation for ONE physical hit,
+// so summing these rows double-counts serious hits (see WAFObservedByRuleRange
+// for an observation-only view whose totals reconcile with Summarize's
+// waf_observed).
 func (s *HistoryStore) WAFByRuleRange(host string, fromUnix, toUnix int64) ([]WAFRuleHit, error) {
+	return s.wafByRuleTypes(host, fromUnix, toUnix,
+		[]string{"waf_observed", "waf_observe", "waf_trigger"})
+}
+
+// WAFObservedByRuleRange is the OBSERVATION-only counterpart: per-rule counts
+// over exactly the same event universe as HistorySummary.WAFObserved
+// ('waf_observed' + 'waf_observe'), so sum(rules[].count) reconciles with
+// summary.waf_observed for the same window. Triggers are excluded on purpose —
+// see WAFByRuleRange.
+func (s *HistoryStore) WAFObservedByRuleRange(host string, fromUnix, toUnix int64) ([]WAFRuleHit, error) {
+	return s.wafByRuleTypes(host, fromUnix, toUnix,
+		[]string{"waf_observed", "waf_observe"})
+}
+
+func (s *HistoryStore) wafByRuleTypes(host string, fromUnix, toUnix int64, types []string) ([]WAFRuleHit, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	quoted := make([]string, 0, len(types))
+	for _, typ := range types {
+		quoted = append(quoted, "'"+strings.ReplaceAll(typ, "'", "''")+"'")
+	}
 	clauses := []string{
-		"event_type IN ('waf_observed','waf_observe','waf_trigger')",
+		"event_type IN (" + strings.Join(quoted, ",") + ")",
 		"ts_unix >= ?",
 		"ts_unix < ?",
 		"reason IS NOT NULL",
