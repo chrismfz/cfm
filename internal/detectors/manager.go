@@ -165,22 +165,18 @@ func (m *manager) maybeReload(parent context.Context) {
 		return
 	}
 
-	secs, _, err := readSections(path)
+	secs, err, fallback := readSectionsForReload(path, m.running)
 	if err != nil {
-		if os.IsNotExist(err) {
+		switch {
+		case os.IsNotExist(err):
 			if m.running {
 				logging.Logf("[detectors] config removed; retaining built-in control-plane protection")
 			} else {
 				logging.Logf("[detectors] no detectors.conf at %s; starting built-in control-plane protection", path)
 			}
-			secs = Sections{
-				Global: make(KV),
-				ByName: map[string]KV{
-					"global": make(KV),
-				},
-				ByType: make(map[string][]string),
-			}
-		} else {
+		case fallback:
+			logging.Logf("[detectors] config read failed on first load (%s): %v — starting built-in control-plane protection in degraded mode; regular detectors retry automatically, restart after recovery to reapply start-once config consumers", path, err)
+		default:
 			// IMPORTANT: transient read/parse errors must NOT tear down running detectors.
 			// Common during atomic writes/editors: file replaced while we read.
 			logging.Logf("[detectors] config read failed (%s): %v — keeping current detectors", path, err)
@@ -637,6 +633,27 @@ func (m *manager) maybeReload(parent context.Context) {
 			}
 
 		}(secName, det)
+	}
+}
+
+func readSectionsForReload(path string, running bool) (Sections, error, bool) {
+	secs, _, err := readSections(path)
+	if err == nil {
+		return secs, nil, false
+	}
+	if os.IsNotExist(err) || !running {
+		return emptyDetectorSections(), err, true
+	}
+	return Sections{}, err, false
+}
+
+func emptyDetectorSections() Sections {
+	return Sections{
+		Global: make(KV),
+		ByName: map[string]KV{
+			"global": make(KV),
+		},
+		ByType: make(map[string][]string),
 	}
 }
 

@@ -34,11 +34,12 @@ type ipRateLimiter struct {
 }
 
 // allow records one attempt for key and reports whether it is within burst for
-// the current window. An empty key is always allowed (can't throttle what we
-// can't attribute). Memory is bounded by an opportunistic prune of idle keys.
+// the current window. Unattributed attempts share one fail-closed bucket rather
+// than bypassing the throttle. Memory is bounded by an opportunistic prune.
 func (l *ipRateLimiter) allow(key string, now time.Time, window time.Duration, burst int) bool {
-	if strings.TrimSpace(key) == "" {
-		return true
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = "unattributed"
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()

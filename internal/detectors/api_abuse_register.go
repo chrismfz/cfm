@@ -76,7 +76,7 @@ func cfmEndpointDefaults() KV {
 		"BLOCK_COOLDOWN":       "20m",
 		"DRY_RUN":              "0",
 		"ALLOW_IPS":            "127.0.0.1",
-		"ALLOW_NETS":           "10.0.0.0/8",
+		"ALLOW_NETS":           "",
 		"PATH_EXCEPTIONS":      "/api/v1/embed/bootstrap, /cfm-admin/api/v1/embed/bootstrap",
 	}
 }

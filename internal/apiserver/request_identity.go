@@ -39,9 +39,10 @@ func requestPeer(r *http.Request) RequestPeer {
 			// A proxy-marked request with an ambiguous/malformed client address
 			// must fail closed rather than inheriting loopback's trust.
 			peer.ClientIP = nil
+			peer.Entry = "edge"
 		}
 	}
-	if !peer.TrustedProxy {
+	if peer.Entry != "edge" {
 		peer.Entry = requestListenerEntry(r)
 	}
 	return peer

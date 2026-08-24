@@ -546,7 +546,23 @@ Capabilities at a glance:
 
 #### CFM endpoint protection guidance
 - Protection is built in and default-on; an optional `[cfm_endpoints]` section overrides the built-in values. Use an explicit `ENABLED=0` only when intentionally opting out.
-- Start with detect-only on a host that needs tuning by setting `[cfm_endpoints]` `BLOCK = no` and adjusting `STAGE1_THRESHOLD` from production logs.
+- With no readable `detectors.conf`, stage 1 and the stage-3 TTL policy remain
+  available, but stage-2 challenge requires the webdetector bridge and therefore
+  records a failed challenge until the normal config loads. A first-load read
+  error retries regular detectors automatically; restart after recovery to
+  reapply start-once config consumers such as the MySQL governor.
+- The built-in thresholds intentionally treat 10 direct invalid-token events in
+  two minutes as observe, 12 as challenge, and 16 as a 15-minute TTL-block
+  candidate. A stale automation token can reach those thresholds quickly.
+- Before rollout, inspect control-plane traffic for uptime monitors and trusted
+  automation, then add only their stable addresses to `[global]`
+  `IGNORE_IPS`/`IGNORE_NETS` (avoid broad shared-cloud ranges). Start the first
+  week with `[cfm_endpoints]` `BLOCK = dryrun` or `BLOCK = no` while validating
+  the baseline; section-policy `dryrun` covers both challenge and block stages.
+- The edge deliberately replaces control-plane XFF with one normalized client
+  address. If another reverse proxy sits in front, add only that proxy to the
+  edge real-IP trust configuration; the original multi-hop XFF chain is not
+  retained for later attribution.
 - Enable gradual mitigation next: keep stage 1 as observe, set `STAGE2_THRESHOLD` + `STAGE2_CHALLENGE_TTL` for temporary challenge responses.
 - Enable stage 3 only after baseline tuning: set `BLOCK = <short ttl>` (or `BLOCK=dryrun` first), then tune `STAGE3_THRESHOLD` and `BLOCK_COOLDOWN`.
 - Prefer `[global]` `IGNORE_IPS`/`IGNORE_NETS` or section `ALLOW_IPS`/`ALLOW_NETS`
@@ -554,7 +570,8 @@ Capabilities at a glance:
   `ALLOW_UA_CONTAINS` is attacker-controlled; the historical shipped
   `uptime,healthcheck,prometheus` list is removed on load unless retaining that
   exact list is acknowledged with `ALLOW_UA_CONTAINS_EXPLICIT=1`. Use
-  `PATH_EXCEPTIONS` only for expected probe-like paths.
+  `PATH_EXCEPTIONS` only suppresses generic unauthorized-burst noise on an
+  exact path; direct auth failures, fuzz and method probes still count.
 
 ### `notify.conf` — Notifier
 - Global on/off + JSONL audit log

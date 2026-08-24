@@ -304,6 +304,9 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 					next.ServeHTTP(w, r)
 					return
 				}
+				if _, supplied := extractToken(r); supplied {
+					auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "unavailable", AuthMech: "unknown", Status: http.StatusServiceUnavailable})
+				}
 				w.Header().Set("Content-Type", "application/json")
 				http.Error(w, `{"error":"server misconfigured: AUTH_TOKEN missing"}`, http.StatusServiceUnavailable)
 			})

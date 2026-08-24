@@ -81,6 +81,32 @@ func TestScopedTokenAuthAuditUsesSafeTokenID(t *testing.T) {
 	}
 }
 
+func TestSuccessfulTokenAuthAuditIsPerRequest(t *testing.T) {
+	lines := captureAuthAuditLines(t)
+	store := NewTokenStore()
+	st := store.Issue([]string{"example.test"}, nil, nil, "viewer", "panel-user", time.Hour)
+	if st == nil {
+		t.Fatal("token issue failed")
+	}
+	h := TokenMiddleware("admin-secret", store)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, token := range []string{"admin-secret", st.Token} {
+		for i := 0; i < 3; i++ {
+			req := httptest.NewRequest(http.MethodGet, "http://host/api/v1/webdet/vhosts", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			h.ServeHTTP(httptest.NewRecorder(), req)
+		}
+	}
+	if len(*lines) != 6 {
+		t.Fatalf("auth audit lines=%d, want one per token presentation: %v", len(*lines), *lines)
+	}
+	joined := strings.Join(*lines, "\n")
+	if strings.Count(joined, "auth_mech=token_admin") != 3 || strings.Count(joined, "auth_mech=token_scoped") != 3 {
+		t.Fatalf("successful token mechanisms were sampled or misclassified: %s", joined)
+	}
+}
+
 func TestMalformedExplicitAuthorizationDoesNotFallBackToSession(t *testing.T) {
 	lines := captureAuthAuditLines(t)
 	originalSessionAllowed := sessionAllowedRequest
@@ -152,6 +178,44 @@ func TestLoginAndMFAAuditDoNotLogSubmittedSecrets(t *testing.T) {
 	}
 	if !strings.Contains((*lines)[0], "kind=login result=fail") || !strings.Contains((*lines)[1], "kind=mfa_totp result=success") {
 		t.Fatalf("unexpected auth audit lines: %v", *lines)
+	}
+}
+
+func TestLoginAuditBoundsOverlongUsername(t *testing.T) {
+	lines := captureAuthAuditLines(t)
+	originalLimiter := globalLoginRateLimiter
+	globalLoginRateLimiter = newLoginRateLimiter()
+	t.Cleanup(func() { globalLoginRateLimiter = originalLimiter })
+	stubAuthHandlers(t,
+		func() http.HandlerFunc {
+			return func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
+			}
+		},
+		nil,
+	)
+
+	username := strings.Repeat("A", maxNormalizedLoginUsernameBytes+100)
+	req := httptest.NewRequest(http.MethodPost, "https://host/login", strings.NewReader(`{"username":"`+username+`","password":"secret"}`))
+	handleLogin(httptest.NewRecorder(), req)
+	if len(*lines) != 1 {
+		t.Fatalf("auth audit lines=%d, want one: %v", len(*lines), *lines)
+	}
+	if strings.Contains((*lines)[0], username) || !strings.Contains((*lines)[0], "user=overlong-sha256:") {
+		t.Fatalf("overlong username was not safely bounded: %q", (*lines)[0])
+	}
+}
+
+func TestAuthAuditBoundsRequestPath(t *testing.T) {
+	lines := captureAuthAuditLines(t)
+	longPath := "/" + strings.Repeat("a", maxAuthAuditPathBytes+500)
+	req := httptest.NewRequest(http.MethodGet, "https://host"+longPath, nil)
+	auditAuthAttempt(req, authAttemptAudit{Kind: "token", Result: "invalid", AuthMech: "unknown", Status: http.StatusUnauthorized})
+	if len(*lines) != 1 || len((*lines)[0]) > maxAuthAuditPathBytes+512 {
+		t.Fatalf("auth audit path was not bounded: line_len=%d", len((*lines)[0]))
+	}
+	if strings.Contains((*lines)[0], longPath) || !strings.Contains((*lines)[0], "...[truncated]") {
+		t.Fatalf("auth audit path truncation missing: %q", (*lines)[0])
 	}
 }
 

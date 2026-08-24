@@ -7,11 +7,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cfm/internal/logging"
 )
 
 type suppressAuthAuditKey struct{}
+
+const (
+	maxAuthAuditUserBytes = 256
+	maxAuthAuditPathBytes = 2048
+	maxAuthAuditUABytes   = 512
+	maxAuditFieldBytes    = 4096
+)
 
 type authAttemptAudit struct {
 	Kind     string
@@ -49,6 +57,8 @@ func auditAuthAttempt(r *http.Request, attempt authAttemptAudit) {
 			path = r.URL.Path
 		}
 	}
+	path = boundedAuditValue(path, maxAuthAuditPathBytes)
+	attempt.User = boundedAuditValue(attempt.User, maxAuthAuditUserBytes)
 	fields := []string{
 		"[apiserver]",
 		"event=auth_attempt",
@@ -91,6 +101,7 @@ func auditField(key, value string) string {
 	if value == "" {
 		value = "unknown"
 	}
+	value = boundedAuditValue(value, maxAuditFieldBytes)
 	for _, r := range value {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
 			(r >= '0' && r <= '9') || strings.ContainsRune("._:/@+-", r) {
@@ -99,6 +110,18 @@ func auditField(key, value string) string {
 		return key + "=" + strconv.Quote(value)
 	}
 	return key + "=" + value
+}
+
+func boundedAuditValue(value string, maxBytes int) string {
+	const marker = "...[truncated]"
+	if maxBytes <= len(marker) || len(value) <= maxBytes {
+		return value
+	}
+	end := maxBytes - len(marker)
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end] + marker
 }
 
 func publishRequestAnomaly(r *http.Request, reason string, status int) {

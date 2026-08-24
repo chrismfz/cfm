@@ -53,8 +53,22 @@ func TestRequestPeerRejectsNonCanonicalForwardedChainWithoutRealIP(t *testing.T)
 	r := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
 	r.RemoteAddr = "127.0.0.1:41000"
 	r.Header.Set("X-Forwarded-For", "8.8.8.8, 203.0.113.10")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r = withLocalAddr(r, "127.0.0.1:6060")
 	got := requestPeer(r)
 	if got.TrustedProxy || got.ClientIP != nil {
 		t.Fatalf("ambiguous XFF must not become client identity: %+v", got)
+	}
+	if got.Entry != "edge" || got.Scheme != "http" {
+		t.Fatalf("malformed edge identity must retain topology without trusting XFP: %+v", got)
+	}
+
+	r2 := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+	r2.RemoteAddr = "127.0.0.1:41000"
+	r2.Header.Set("X-Real-IP", "not-an-ip")
+	r2.Header.Set("X-Forwarded-For", "203.0.113.10")
+	r2 = withLocalAddr(r2, "127.0.0.1:6060")
+	if got := requestPeer(r2); got.TrustedProxy || got.ClientIP != nil || got.Entry != "edge" {
+		t.Fatalf("malformed higher-priority real IP must fail closed: %+v", got)
 	}
 }

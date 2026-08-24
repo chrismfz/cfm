@@ -2,6 +2,7 @@ package configdrift
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"cfm/internal/detconf"
@@ -67,6 +68,29 @@ func TestDiffDetectorsSectionsIdentical(t *testing.T) {
 	rep := DiffDetectorsSections(s, s)
 	if len(rep.MissingSections)+len(rep.MissingKeys)+len(rep.ExtraSections)+len(rep.ExtraKeys)+rep.ValueDiffs != 0 {
 		t.Fatalf("identical inputs produced drift: %+v", rep)
+	}
+}
+
+func TestDiffDetectorsSectionsIgnoringOptionalFamily(t *testing.T) {
+	stock := detconf.Sections{ByName: map[string]detconf.KV{
+		"global":            {},
+		"builtin":           {"NEW_KEY": "1"},
+		"builtin.leniency":  {"BLOCK": "5m"},
+		"required_detector": {"ENABLED": "1"},
+	}}
+	live := detconf.Sections{ByName: map[string]detconf.KV{
+		"global":         {},
+		"legacy_builtin": {"OLD_KEY": "1"},
+		"operator_extra": {"ENABLED": "1"},
+	}}
+	rep := DiffDetectorsSectionsIgnoring(stock, live, func(name string) bool {
+		return strings.HasPrefix(name, "builtin") || strings.HasPrefix(name, "legacy_builtin")
+	})
+	if !reflect.DeepEqual(rep.MissingSections, []string{"required_detector"}) {
+		t.Fatalf("MissingSections=%v, want required_detector only", rep.MissingSections)
+	}
+	if !reflect.DeepEqual(rep.ExtraSections, []string{"operator_extra"}) {
+		t.Fatalf("ExtraSections=%v, want operator_extra only", rep.ExtraSections)
 	}
 }
 

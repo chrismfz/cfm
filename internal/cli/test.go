@@ -283,7 +283,8 @@ func diffDetectorTypes(livePath string) (missing []string, extra []string, err e
 		if sec == "global" {
 			continue
 		}
-		typ, _ := detectors.SplitTypeInstance(sec)
+		base := strings.TrimSuffix(sec, ".leniency")
+		typ, _ := detectors.SplitTypeInstance(base)
 		if canonical, ok := detectors.CanonicalType(typ); ok {
 			if detectors.ConfigSectionOptional(canonical) {
 				continue

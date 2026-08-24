@@ -22,7 +22,7 @@ Implementation rule:
 
 - if `[cfm_endpoints]` exists, instantiate it with built-in defaults plus operator overrides;
 - if it does not exist, instantiate one implicit/synthetic `cfm_endpoints` detector with safe built-in defaults;
-- disabling it, if we decide to support that at all, should require an explicit opt-out rather than omission of config;
+- disabling it requires the explicit `ENABLED=0` opt-out rather than omission of config;
 - keep `[api_abuse]` temporarily as a deprecated compatibility alias/migration path, but do not run both detectors against the same event stream;
 - emit a one-time deprecation warning when `[api_abuse]` is used.
 
@@ -121,6 +121,12 @@ Rules:
 - for the global admin token, use `auth_mech=token_admin`; no secret-derived value is required unless a safe non-secret credential ID is introduced later;
 - invalid token attempts need no token fingerprint by default; IP + request metadata is enough for abuse detection;
 - log a supplied invalid token as an auth failure even if a valid browser session cookie also exists; invalid explicit bearer credentials must never silently fall back to session auth.
+- any non-Bearer explicit `Authorization` value fails hard with `401`; it does
+  not fall back to an otherwise-valid browser session;
+- successful admin/scoped bearer presentations are intentionally unsampled:
+  each one is an authentication attempt in the canonical audit contract. The
+  API log is bounded operationally by CFM's daily/200M logrotate policy rather
+  than by dropping credential-use evidence.
 
 ### Common fields
 
@@ -178,3 +184,14 @@ All nft enforcement should continue through the normal detector section sink so 
 - [x] Outcomes continue through `cfm.detector.log`, reporting and Slack/mail notification paths.
 - [x] XFF/effective-scheme regression tests cover edge, direct 6060 and direct 6061 entry points.
 - [x] `[global]` `IGNORE_IPS`/`IGNORE_NETS`, loopback and refreshed self IPs are discarded before detector counting.
+- [ ] Emit scoped authorization denials as credential-scoped observe/notify
+  events (`AUTH_SCOPED_DENIED`) rather than letting generic 403 aggregation
+  feed the unauthenticated IP-block policy.
+- [ ] Move the remaining cPanel API client-IP parser onto the same neutral
+  canonical identity helper as apiserver so the two trust definitions cannot
+  drift.
+- [ ] Sanitize edge access logs for control-plane bootstrap requests. The edge
+  `cfm` log format still writes `$request_uri`, so
+  `/cfm-admin/api/v1/embed/bootstrap?code=<secret>` can reach OpenResty/Angie
+  access logs even though daemon request/auth logs are path-only. Use `$uri` or
+  targeted argument redaction in a separate edge-affecting change.

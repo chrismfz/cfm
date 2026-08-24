@@ -2,6 +2,8 @@ package apiserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -27,6 +29,8 @@ const (
 
 	loginLockThreshold = 10
 	loginLockWindow    = 10 * time.Minute
+
+	maxNormalizedLoginUsernameBytes = 256
 )
 
 type loginRateLimitDecision struct {
@@ -42,6 +46,10 @@ type loginRateLimiter struct {
 	ipState    map[string]*bucketPair
 	acctState  map[string]*accountLimiterState
 	tupleState map[string]*bucketPair
+}
+
+var writeAuthDecisionLine = func(line string) {
+	logging.LogfAPI("%s", line)
 }
 
 type accountLimiterState struct {
@@ -238,7 +246,12 @@ func (l *loginRateLimiter) prune(now time.Time) {
 }
 
 func normalizeLoginUsername(s string) string {
-	return strings.ToLower(strings.TrimSpace(s))
+	normalized := strings.ToLower(strings.TrimSpace(s))
+	if len(normalized) <= maxNormalizedLoginUsernameBytes {
+		return normalized
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return "overlong-sha256:" + hex.EncodeToString(sum[:])
 }
 
 func loginIPAccountTuple(ip, account string) string {
@@ -333,6 +346,9 @@ func emitLoginLimiterAudit(r *http.Request, action, ip, account string, delay ti
 	if account == "" {
 		account = "unknown"
 	}
+	account = boundedAuditValue(account, maxAuthAuditUserBytes)
+	path = boundedAuditValue(path, maxAuthAuditPathBytes)
+	ua = boundedAuditValue(ua, maxAuthAuditUABytes)
 	status := "429"
 	if action == "backoff" {
 		status = "0"
@@ -352,7 +368,7 @@ func emitLoginLimiterAudit(r *http.Request, action, ip, account string, delay ti
 	if delay > 0 {
 		fields = append(fields, auditField("delay", delay.String()))
 	}
-	logging.LogfAPI("%s", strings.Join(fields, " "))
+	writeAuthDecisionLine(strings.Join(fields, " "))
 	if action == "backoff" {
 		return
 	}

@@ -19,18 +19,25 @@ back-filled here — see the git/PR history for that period.
 
 ### Security
 - **Default-on protection and canonical audit trail for CFM's own control plane.**
-  The new built-in `cfm_endpoints` detector runs with safe staged challenge and
-  15-minute TTL-block defaults even when the detector section or entire config
-  file is absent; optional config overrides those defaults, while deprecated
+  The new built-in `cfm_endpoints` detector runs with 10/12/16 staged thresholds
+  and a 15-minute TTL-block default even when the detector section or entire
+  config file is absent. Stage-2 challenge requires the webdetector bridge;
+  bridge-less degraded startup still observes and can apply stage 3. Optional
+  config overrides those defaults, while deprecated
   `[api_abuse]` and named instances are merged in memory without duplicate
   subscriptions. Login, MFA/passkey, API-token and MCP bearer/consent attempts
   now write one parse-friendly, secret-free `cfm.api.log` line, and failures
   publish directly into the normal detector sink/report/notification path.
   Internal MCP tool dispatches no longer create misleading loopback admin-token
-  records, and request logging omits query strings that can carry bootstrap
-  credentials. Canonical request identity distinguishes the edge, direct `6060`,
+  records, and daemon request logging omits query strings that can carry bootstrap
+  credentials; canonical auth paths/users and retained detector evidence are
+  length-bounded, and expired sub-threshold sources are pruned. Canonical
+  request identity distinguishes the edge, direct `6060`,
   and direct TLS `6061`; debug/unblock/MCP audits use it, and the edge overwrites
-  control-plane XFF while preserving the trusted effective scheme. The existing
+  control-plane XFF while preserving the trusted effective scheme. Legacy live
+  edge configs without XFP retain the narrow MCP HTTPS compatibility fallback.
+  Malformed edge identity remains visibly edge-originated, is rate-limited and
+  counted as unattributed, but can never enforce against an inferred IP. The existing
   admin-only `system/cfm-log?which=api` reader remains the bounded audit-log
   retrieval path.
   Global `IGNORE_IPS`/`IGNORE_NETS`, all local interface addresses and both
@@ -38,7 +45,11 @@ back-filled here — see the git/PR history for that period.
   sink. Built-in and persisted historical User-Agent exemptions are removed
   because UA strings are attacker-controlled; trusted monitors should use
   IP/CIDR ignores. Retaining the exact historical UA list requires an explicit
-  acknowledgement.
+  acknowledgement. The implicit detector no longer trusts all of `10/8`, starts
+  in degraded built-in-only mode on a first-load config read error, and only
+  applies bootstrap path exceptions to exact generic unauthorized-burst events.
+  Config-drift API/CLI output understands the optional canonical section, legacy
+  alias and leniency companions instead of reporting false drift.
 
 ## 2026.08.24
 

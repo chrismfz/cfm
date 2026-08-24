@@ -11,6 +11,10 @@ import (
 	core "cfm/internal/detectors/core"
 )
 
+const unattributedSourceKey = "unattributed"
+
+const maxEvidenceSampleBytes = 4096
+
 type Config struct {
 	Every              time.Duration
 	Window             time.Duration
@@ -31,11 +35,13 @@ type Detector struct {
 
 	name string
 
-	mu      sync.Mutex
-	events  []core.InputEvent
-	counts  *core.SlidingCounter
-	samples *core.SampleRing
-	stage   map[string]int
+	mu        sync.Mutex
+	events    []core.InputEvent
+	counts    *core.SlidingCounter
+	samples   *core.SampleRing
+	stage     map[string]int
+	lastSeen  map[string]time.Time
+	nextPrune time.Time
 
 	allowIPs  map[string]struct{}
 	allowNets []*net.IPNet
@@ -72,6 +78,7 @@ func New(cfg Config) *Detector {
 		counts:   core.NewSlidingCounter(cfg.Window, 256),
 		samples:  core.NewSampleRing(cfg.SampleLimit),
 		stage:    make(map[string]int),
+		lastSeen: make(map[string]time.Time),
 		allowIPs: make(map[string]struct{}),
 	}
 	for _, ip := range cfg.AllowIPs {
@@ -169,10 +176,12 @@ func (d *Detector) allowed(ev core.InputEvent) bool {
 		}
 	}
 	p := strings.ToLower(ev.Path)
-	for _, ex := range d.cfg.PathExceptions {
-		ex = strings.ToLower(strings.TrimSpace(ex))
-		if ex != "" && strings.HasPrefix(p, ex) {
-			return true
+	if ev.Reason == "api_unauthorized_burst" && ev.Signal == "unauthorized_burst" {
+		for _, ex := range d.cfg.PathExceptions {
+			ex = strings.ToLower(strings.TrimSpace(ex))
+			if ex != "" && p == ex {
+				return true
+			}
 		}
 	}
 	return false
@@ -191,47 +200,66 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			return ctx.Err()
 		default:
 		}
-		if ev.SrcIP == "" {
-			continue
+		srcIP := strings.TrimSpace(ev.SrcIP)
+		key := srcIP
+		attributed := net.ParseIP(srcIP) != nil
+		if !attributed {
+			key = unattributedSourceKey
 		}
-		count := d.counts.Add(ev.SrcIP, ev.When)
-		d.samples.Add(ev.SrcIP, fmt.Sprintf("[%s] reason=%s signal=%s method=%s path=%s status=%d ua=%q",
-			ev.Source, ev.Reason, ev.Signal, ev.Method, ev.Path, ev.Status, ev.UserAgent))
+		count := d.counts.Add(key, ev.When)
+		if ev.When.After(d.lastSeen[key]) {
+			d.lastSeen[key] = ev.When
+		}
+		sample := fmt.Sprintf("[%s] reason=%s signal=%s method=%s path=%q status=%d ua=%q",
+			ev.Source, ev.Reason, ev.Signal, ev.Method, ev.Path, ev.Status, ev.UserAgent)
+		d.samples.Add(key, boundedEvidenceSample(sample))
 		next := d.stageForCount(count)
-		if next <= d.stage[ev.SrcIP] {
+		if next <= d.stage[key] {
 			continue
 		}
-		d.stage[ev.SrcIP] = next
+		d.stage[key] = next
 
 		alert := core.Alert{
 			When:    now,
 			Kind:    core.AlertKind("CFM/ENDPOINTS"),
-			Key:     ev.SrcIP,
+			Key:     key,
 			Count:   count,
-			Samples: d.samples.GetAndClear(ev.SrcIP),
+			Samples: d.samples.GetAndClear(key),
 			Extra: map[string]string{
-				"ip":     ev.SrcIP,
 				"source": ev.Source,
 				"reason": ev.Reason,
 				"signal": ev.Signal,
 				"stage":  fmt.Sprintf("%d", next),
 			},
 		}
+		if attributed {
+			alert.Extra["ip"] = srcIP
+		} else {
+			alert.Extra["identity"] = "unattributed"
+			alert.Extra[core.ExtraIPScope] = core.IPScopeHost
+		}
 		if strings.TrimSpace(alert.Extra["reason"]) == "" {
 			alert.Extra["reason"] = "api_probe"
 		}
 
-		switch next {
-		case 1:
+		switch {
+		case !attributed && next == 1:
 			alert.Extra["enforcement"] = "observe"
 			alert.Extra["blocked"] = "no"
-		case 2:
+		case !attributed:
+			// Preserve evidence and notification at higher stages, but never
+			// challenge or block without an attributable source address.
+			alert.Extra["blocked"] = "no"
+		case next == 1:
+			alert.Extra["enforcement"] = "observe"
+			alert.Extra["blocked"] = "no"
+		case next == 2:
 			alert.Extra["action"] = "challenge"
 			alert.Extra["ttl"] = d.cfg.Stage2ChallengeTTL.String()
 			if d.cfg.DryRun {
 				alert.Extra["challenge_log"] = "1"
 			}
-		case 3:
+		case next == 3:
 			if d.cfg.DryRun {
 				alert.Extra["enforcement"] = "dryrun"
 			}
@@ -242,12 +270,35 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	for ip, stg := range d.stage {
 		if d.counts.Count(ip, now) == 0 {
 			delete(d.stage, ip)
+			delete(d.lastSeen, ip)
 			if stg > 0 {
 				d.samples.GetAndClear(ip)
 			}
 		}
 	}
+	if d.nextPrune.IsZero() || !now.Before(d.nextPrune) {
+		for key, seen := range d.lastSeen {
+			if now.Sub(seen) < d.cfg.Window || d.counts.Count(key, now) != 0 {
+				continue
+			}
+			delete(d.lastSeen, key)
+			d.samples.GetAndClear(key)
+		}
+		pruneEvery := d.cfg.Window / 2
+		if pruneEvery <= 0 || pruneEvery > 30*time.Second {
+			pruneEvery = 30 * time.Second
+		}
+		d.nextPrune = now.Add(pruneEvery)
+	}
 	return nil
+}
+
+func boundedEvidenceSample(sample string) string {
+	const marker = "...[truncated]"
+	if len(sample) <= maxEvidenceSampleBytes {
+		return sample
+	}
+	return sample[:maxEvidenceSampleBytes-len(marker)] + marker
 }
 
 func (d *Detector) stageForCount(n int) int {

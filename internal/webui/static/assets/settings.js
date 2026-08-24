@@ -181,7 +181,7 @@
         missingKeys.forEach((k) => out.lines.push({ text: `[${k.section}] ${k.key}`, tone: 'warn', indent: true }));
       }
       if (!missingSections.length && !missingKeys.length) {
-        out.lines.push({ text: 'Live config covers every stock section and key.', tone: 'ok' });
+        out.lines.push({ text: 'Live config covers every required stock section and key.', tone: 'ok' });
       } else {
         out.lines.push({ text: 'Copy the missing blocks from the stock file into /etc/cfm/, tune them, then reload detectors.', tone: 'muted', indent: true });
       }
@@ -200,7 +200,7 @@
         !p.ok
           ? 'Drift check failed.'
           : total === 0
-            ? 'No drift: live configs cover every stock section/key.'
+            ? 'No drift: live configs cover every required stock section/key.'
             : `${total} missing feature(s) across ${[detectors.name, cfm.name].filter((n, i) => [detectors, cfm][i].missingTotal > 0).join(' + ')}.`,
       headlineTone: !p.ok ? 'warn' : total === 0 ? 'ok' : 'warn',
       files: [detectors, cfm],

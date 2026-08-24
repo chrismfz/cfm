@@ -1,6 +1,12 @@
 package detectors
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+
+	core "cfm/internal/detectors/core"
+)
 
 func TestApplyBuiltinCFMEndpointsCreatesDefaultOnSyntheticSection(t *testing.T) {
 	secs := Sections{
@@ -19,6 +25,9 @@ func TestApplyBuiltinCFMEndpointsCreatesDefaultOnSyntheticSection(t *testing.T) 
 	}
 	if got := kvStrClean(kv, "BLOCK", ""); got != "15m" {
 		t.Fatalf("implicit BLOCK=%q, want 15m", got)
+	}
+	if got, ok := kv["ALLOW_NETS"]; !ok || got != "" {
+		t.Fatalf("implicit ALLOW_NETS=%q present=%t, want an empty override", got, ok)
 	}
 	if !kvBool(kv, cfmEndpointsSyntheticKey, false) {
 		t.Fatal("implicit section must be marked synthetic for runtime status")
@@ -63,6 +72,63 @@ func TestCFMEndpointsLegacyFactoryIsNotAdvertisedAsSeparateType(t *testing.T) {
 		if typ == cfmEndpointsLegacyType {
 			t.Fatal("legacy api_abuse alias must not appear as a second detector type")
 		}
+	}
+}
+
+func TestCFMEndpointsConfigSectionIsOptionalForCanonicalAndAlias(t *testing.T) {
+	if !ConfigSectionOptional(cfmEndpointsType) || !ConfigSectionOptional(cfmEndpointsLegacyType) {
+		t.Fatal("canonical and legacy CFM endpoint sections must both be optional")
+	}
+	if ConfigSectionOptional("ssh_auth") || ConfigSectionOptional("not_registered") {
+		t.Fatal("ordinary and unknown detector sections must remain required")
+	}
+}
+
+func TestCFMEndpointsDefaultInvalidTokenStagesAndTTLPolicy(t *testing.T) {
+	kv := cfmEndpointDefaults()
+	factory, ok := getFactory(cfmEndpointsType)
+	if !ok {
+		t.Fatal("cfm_endpoints factory is not registered")
+	}
+	detector, err := factory(cfmEndpointsType, kv, KV{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shutdown, ok := detector.(core.Shutdowner); ok {
+		defer shutdown.Shutdown()
+	}
+	enqueue, ok := detector.(interface{ Enqueue(core.InputEvent) })
+	if !ok {
+		t.Fatal("cfm_endpoints detector does not accept structured events")
+	}
+	now := time.Now()
+	for i := 0; i < 16; i++ {
+		enqueue.Enqueue(core.InputEvent{
+			When:   now,
+			Source: "apiserver",
+			Reason: "AUTH_TOKEN_INVALID",
+			Signal: "AUTH_TOKEN_INVALID",
+			SrcIP:  "203.0.113.50",
+		})
+	}
+	out := make(chan core.Alert, 3)
+	if err := detector.RunOnce(context.Background(), out); err != nil {
+		t.Fatal(err)
+	}
+	close(out)
+	alerts := make([]core.Alert, 0, 3)
+	for alert := range out {
+		alerts = append(alerts, alert)
+	}
+	if len(alerts) != 3 || alerts[0].Count != 10 || alerts[1].Count != 12 || alerts[2].Count != 16 {
+		t.Fatalf("default stage alerts=%+v, want counts 10/12/16", alerts)
+	}
+	if alerts[0].Extra["enforcement"] != "observe" || alerts[1].Extra["action"] != "challenge" || alerts[2].Extra["enforcement"] != "" {
+		t.Fatalf("unexpected default stage actions: %+v", alerts)
+	}
+	policy := parseBlockPolicy(kv)
+	if policy.Mode != "ttl" || policy.TTL != 15*time.Minute {
+		t.Fatalf("default stage-3 block policy=%+v, want 15m TTL", policy)
 	}
 }
 

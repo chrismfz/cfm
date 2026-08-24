@@ -1,17 +1,18 @@
 package detectors
 
 import (
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
 	"cfm/internal/clam"
 	"cfm/internal/detconf"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
-	"sort"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
 )
 
 type Options struct {
@@ -118,7 +119,7 @@ func CanonicalType(typ string) (string, bool) {
 // detectors.conf section and therefore must not be reported as config drift.
 func ConfigSectionOptional(typ string) bool {
 	canonical, ok := CanonicalType(typ)
-	return ok && canonical == "cfm_endpoints"
+	return ok && canonical == cfmEndpointsType
 }
 
 // RegisteredTypes returns a stable sorted list of registered detector section types.

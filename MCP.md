@@ -35,7 +35,11 @@ Key properties:
 - **Served through the edge under `/cfm-admin/mcp`.** No new port. The existing
   `location ^~ /cfm-admin/` already proxies `/cfm-admin/mcp`, `/cfm-admin/mcp/oauth/*`
   and `/cfm-admin/.well-known/*` to the daemon with the `X-Forwarded-Prefix`
-  header — **no edge config change** was required.
+  header. Current OpenResty/Angie reference configs also send canonical
+  `X-Forwarded-Proto`; package upgrades do not necessarily replace live edge
+  conffiles, so verify that header after upgrade. MCP preserves the historical
+  HTTPS fallback only for a valid loopback client identity plus trusted public
+  prefix when the old live config omits XFP; explicit `http` remains authoritative.
 - **Stateless streamable HTTP** (`Stateless + JSONResponse`): every tool call is a
   self-contained POST→JSON exchange, so there is no long-lived SSE stream to drop
   behind the proxy (which otherwise causes the connector to show "disconnected"
@@ -216,7 +220,9 @@ curl -sS https://<host>/cfm-admin/mcp \
   caller cannot spoof them. Consent rate limits and MCP auth audits use the same
   canonical client identity. Each supplied static/OAuth/consent credential emits
   one secret-free `cfm.api.log` auth attempt; internal admin-token dispatches are
-  suppressed so they cannot create misleading loopback records.
+  suppressed so they cannot create misleading loopback records. A malformed
+  forwarded identity is rate-limited in one unattributed bucket and may notify,
+  but can never challenge or block an inferred address.
 
 ---
 

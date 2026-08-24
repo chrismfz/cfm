@@ -246,11 +246,16 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 	}
 }
 
-// mcpRequestScheme reports the externally visible scheme. The loopback edge
-// supplies a canonical client identity and X-Forwarded-Proto; direct callers
-// cannot spoof either into the trusted request identity.
+// mcpRequestScheme reports the externally visible scheme. Current edge configs
+// send X-Forwarded-Proto. The narrow missing-header fallback preserves OAuth
+// URLs on upgraded hosts whose older live edge config still sends only the
+// trusted prefix; explicit http remains authoritative.
 func mcpRequestScheme(r *http.Request) string {
-	return requestPeer(r).Scheme
+	peer := requestPeer(r)
+	if peer.TrustedProxy && strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")) == "" && trustedProxyBase(r) != "" {
+		return "https"
+	}
+	return peer.Scheme
 }
 
 // DaemonVersion is the build version reported in the MCP initialize result. It is

@@ -335,6 +335,19 @@ func TestOAuthConsentRateLimited(t *testing.T) {
 	}
 }
 
+func TestConsentRateLimiterBucketsUnattributedAttempts(t *testing.T) {
+	limiter := &ipRateLimiter{}
+	now := time.Unix(1_700_000_000, 0)
+	for i := 0; i < consentRLBurst; i++ {
+		if !limiter.allow("", now, consentRLWindow, consentRLBurst) {
+			t.Fatalf("unattributed attempt %d was limited before burst", i+1)
+		}
+	}
+	if limiter.allow("   ", now, consentRLWindow, consentRLBurst) {
+		t.Fatal("unattributed attempts bypassed the consent throttle")
+	}
+}
+
 // TestMCPBehindProxyNonLoopbackHost pins DisableLocalhostProtection. The edge
 // upstreams to the daemon over loopback (127.0.0.1) while forwarding the public
 // Host header; the go-sdk DNS-rebinding guard (loopback LocalAddr + non-loopback
