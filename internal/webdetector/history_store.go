@@ -416,18 +416,27 @@ func (s *HistoryStore) CountEventsSince(typ, host string, hours int) (int, error
 	return n, nil
 }
 
+// Summarize aggregates detector events for the trailing `hours` window ending
+// now. For an absolute window that must ALIGN with another data source (e.g.
+// host_access_history aligning detector counts with its access-log scan), use
+// SummarizeRange — the hours variant samples time.Now() independently.
 func (s *HistoryStore) Summarize(host, ip string, hours int) (HistorySummary, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if hours <= 0 {
 		hours = 24
 	}
 	to := time.Now().Unix()
-	from := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
-	r := HistorySummary{FromUnix: from, ToUnix: to}
+	return s.SummarizeRange(host, ip, to-int64(hours)*3600, to)
+}
 
-	clauses := []string{"ts_unix >= ?", "ts_unix <= ?"}
-	args := []interface{}{from, to}
+// SummarizeRange is Summarize over an EXPLICIT half-open [fromUnix, toUnix)
+// window. HistorySummary.FromUnix/ToUnix echo exactly these bounds.
+func (s *HistoryStore) SummarizeRange(host, ip string, fromUnix, toUnix int64) (HistorySummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := HistorySummary{FromUnix: fromUnix, ToUnix: toUnix}
+
+	clauses := []string{"ts_unix >= ?", "ts_unix < ?"}
+	args := []interface{}{fromUnix, toUnix}
 	if host != "" {
 		clauses = append(clauses, "host = ?")
 		args = append(args, host)
@@ -474,23 +483,31 @@ GROUP BY event_type`, args...)
 }
 
 // WAFByRule returns WAF hit counts grouped by rule name (stored in the reason
-// column) for the given host and time window.
-// host="" returns the global breakdown (admin view).
+// column) for the given host over the trailing `hours` window ending now.
+// host="" returns the global breakdown (admin view). For an absolute window
+// aligned with another data source use WAFByRuleRange.
 func (s *HistoryStore) WAFByRule(host string, hours int) ([]WAFRuleHit, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if hours <= 0 {
 		hours = 24
 	}
-	from := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
+	to := time.Now().Unix()
+	return s.WAFByRuleRange(host, to-int64(hours)*3600, to)
+}
+
+// WAFByRuleRange is WAFByRule over an EXPLICIT half-open [fromUnix, toUnix)
+// window.
+func (s *HistoryStore) WAFByRuleRange(host string, fromUnix, toUnix int64) ([]WAFRuleHit, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	clauses := []string{
 		"event_type IN ('waf_observed','waf_observe','waf_trigger')",
 		"ts_unix >= ?",
+		"ts_unix < ?",
 		"reason IS NOT NULL",
 		"reason != ''",
 	}
-	args := []interface{}{from}
+	args := []interface{}{fromUnix, toUnix}
 	if host != "" {
 		clauses = append(clauses, "host = ?")
 		args = append(args, host)

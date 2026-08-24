@@ -166,8 +166,11 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 	views := make(map[string]histView, len(hosts))
 	for _, h := range hosts {
 		var v histView
-		s, serr := e.history.Summarize(h, "", hh)
-		rs, rerr := e.history.WAFByRule(h, hh)
+		// Range-aware queries over EXACTLY the access scan's absolute window
+		// ([from,to)) — never an independently-sampled time.Now() — so the
+		// detector counts describe the same seconds as the traffic profile.
+		s, serr := e.history.SummarizeRange(h, "", res.WindowFromUnix, res.WindowToUnix)
+		rs, rerr := e.history.WAFByRuleRange(h, res.WindowFromUnix, res.WindowToUnix)
 		if serr != nil || rerr != nil {
 			v.failed = true
 			views[h] = v
@@ -215,14 +218,17 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 	// Coverage honesty: the history store prunes on its own retention clock,
 	// so a 90-day request against a 30-day store would otherwise return
 	// partial counts that LOOK complete. Report the real retained span and a
-	// completeness flag next to every detector number.
+	// proven flag next to every detector number. NB the flag is conservative
+	// in one direction: false means "completeness cannot be PROVEN from the
+	// retained rows" (e.g. the first-ever event is newer than the window's
+	// start) — it is evidence of coverage, not a definite gap assertion.
 	oldest := e.history.OldestEventUnix()
 	out["detector_coverage"] = map[string]any{
 		"requested_from_unix": res.WindowFromUnix,
 		"requested_to_unix":   res.WindowToUnix,
 		"retention_days":      e.history.RetentionDays(),
 		"oldest_event_unix":   oldest,
-		"coverage_complete":   oldest > 0 && oldest <= res.WindowFromUnix,
+		"coverage_proven":     oldest > 0 && oldest <= res.WindowFromUnix,
 	}
 
 	if len(hosts) > 1 {

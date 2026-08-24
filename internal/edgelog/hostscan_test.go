@@ -506,9 +506,19 @@ func fromOf(now float64) float64 { return now - 3600 }
 // to a semantically wrong source.
 func TestScanHost_FullLogResolverContract(t *testing.T) {
 	requireTail(t)
-	for _, c := range fullAccessLogCandidates {
-		if strings.Contains(c, ".cfm.") {
-			t.Errorf("focused log %q must never be a full-traffic candidate", c)
+	// Exact allowed set: ONLY the two full-traffic access.logs. A future edit
+	// adding e.g. /var/log/nginx/access.log (distro combined format) or the
+	// focused access.cfm.log must fail here.
+	want := []string{
+		"/usr/local/openresty/nginx/logs/access.log",
+		"/var/log/angie/access.log",
+	}
+	if len(fullAccessLogCandidates) != len(want) {
+		t.Fatalf("fullAccessLogCandidates = %v, want exactly %v", fullAccessLogCandidates, want)
+	}
+	for i, c := range fullAccessLogCandidates {
+		if c != want[i] || strings.Contains(c, ".cfm.") {
+			t.Errorf("candidate[%d] = %q, want %q (focused/distro logs are never full-traffic candidates)", i, c, want[i])
 		}
 	}
 
@@ -626,6 +636,36 @@ func TestScanHost_ToUnixExclusive(t *testing.T) {
 	}
 	if res.OutsideWindow != 2 {
 		t.Errorf("outside_window = %d, want 2 (before + future)", res.OutsideWindow)
+	}
+}
+
+// TestScanHost_LiveTailCapTruncated pins the silent-hole fix: when the LIVE
+// file holds more lines than the tail window, that bound MUST surface as
+// truncated=true (+ live_tail_truncated=true) — otherwise rotations could make
+// coverage_oldest look complete while a mid-window hole exists.
+func TestScanHost_LiveTailCapTruncated(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	lines := make([]string, 0, 60)
+	for i := 0; i < 60; i++ { // 60 in-window lines, tail window = 10
+		lines = append(lines, cfmline(now-120+float64(i), "198.51.100.1", "ex.gr", "GET", fmt.Sprintf("/p%d", i), 200, "-", 0))
+	}
+	writeLines(t, live, lines)
+	writeGz(t, filepath.Join(dir, "access.log.1.gz"), []string{
+		cfmline(now-3600, "198.51.100.2", "ex.gr", "GET", "/yesterday", 200, "-", 0),
+	})
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
+
+	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 2, IncludeRotated: true, TailLines: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Truncated || !res.LiveTailTruncated {
+		t.Fatalf("truncated=%v live_tail_truncated=%v, want both true (live file longer than tail window)", res.Truncated, res.LiveTailTruncated)
 	}
 }
 

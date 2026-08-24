@@ -83,13 +83,13 @@ const (
 // Result is the outcome of an IP lookup.
 type Result struct {
 	IP           string   `json:"ip"`
-	LogFile      string   `json:"log_file"`             // the live log (default source)
-	FilesScanned []string `json:"files_scanned"`        // every file read: live first, then rotated newest→oldest
-	TailLines    int      `json:"tail_lines"`           // how many trailing lines were scanned in the LIVE file
-	Scanned      int      `json:"scanned"`              // lines actually read across all scanned files
-	Matched      int      `json:"matched"`              // total matches found (may exceed len(Lines))
-	Truncated    bool     `json:"truncated"`            // matches beyond the returned cap, or scan bound hit
-	Lines        []string `json:"lines"`                // raw matching log lines, newest file first
+	LogFile      string   `json:"log_file"`      // the live log (default source)
+	FilesScanned []string `json:"files_scanned"` // every file read: live first, then rotated newest→oldest
+	TailLines    int      `json:"tail_lines"`    // how many trailing lines were scanned in the LIVE file
+	Scanned      int      `json:"scanned"`       // lines actually read across all scanned files
+	Matched      int      `json:"matched"`       // total matches found (may exceed len(Lines))
+	Truncated    bool     `json:"truncated"`     // matches beyond the returned cap, or scan bound hit
+	Lines        []string `json:"lines"`         // raw matching log lines, newest file first
 }
 
 // Opts tunes an IP lookup. The zero value is the historical behaviour: scan only
@@ -231,7 +231,13 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 	}
 
 	res.FilesScanned = append(res.FilesScanned, logFile)
-	if err = streamTailMatches(cctx, logFile, tailLines, onLine); err != nil {
+	tailCapped, err := streamTailMatches(cctx, logFile, tailLines, onLine)
+	if tailCapped {
+		// The live file had more lines than the tail window — a real reach
+		// bound between "now" and the rotated archives; never silent.
+		res.Truncated = true
+	}
+	if err != nil {
 		return res, err
 	}
 
@@ -244,7 +250,10 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 			maxFiles = MaxRotatedFiles
 		}
 		budget := rotatedScanBudget
-		siblings, _ := rotatedSiblings(logFile, maxFiles)
+		siblings, siblingsFound := rotatedSiblings(logFile, maxFiles)
+		if siblingsFound > len(siblings) {
+			res.Truncated = true // the file cap hid older siblings
+		}
 		for _, rf := range siblings {
 			if cctx.Err() != nil || budget <= 0 {
 				// Ran out of time/budget before this file — mark it and any
@@ -397,7 +406,7 @@ func TailError(ctx context.Context, grep, source string, tailLines, limit int) (
 	res := ErrorTailResult{LogFile: logFile, Grep: strings.TrimSpace(grep), TailLines: tailLines}
 	// Ring of the newest `limit` matches: append until full, then slide.
 	buf := make([]string, 0, limit)
-	err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
+	_, err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
 		res.Scanned++
 		if needle != "" && !strings.Contains(strings.ToLower(line), needle) {
 			return true
@@ -453,7 +462,7 @@ func ScanError(ctx context.Context, substrs []string, source string, tailLines i
 	cctx, cancel := context.WithTimeout(ctx, scanTimeout)
 	defer cancel()
 
-	err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
+	_, err = streamTailMatches(cctx, logFile, tailLines, func(line string) bool {
 		scanned++
 		if len(lower) > 0 {
 			ll := strings.ToLower(line)
@@ -474,22 +483,32 @@ func ScanError(ctx context.Context, substrs []string, source string, tailLines i
 	return logFile, scanned, err
 }
 
-// streamTailMatches runs `tail -n <tailLines> <file>` and feeds each line to fn.
-// tail reads backward from EOF, so the disk read is bounded to the tail window
-// regardless of the file's total size. Output is streamed (never fully buffered).
-func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(line string) bool) error {
-	cmd := exec.CommandContext(ctx, tailPath(), "-n", fmt.Sprintf("%d", tailLines), file)
+// streamTailMatches runs `tail -n <tailLines+1> <file>` and feeds each line to
+// fn. The +1 probe answers a question plain tail cannot: was the file LONGER
+// than the requested window? If more than tailLines lines come back, capped is
+// returned true — the caller can then flag truncated honestly instead of
+// silently leaving a hole between the live tail and the rotated archives.
+// tail reads backward from EOF but PRINTS file order (oldest→newest of the
+// selected window); disk read is bounded to the tail window regardless of the
+// file's total size. Output is streamed (never fully buffered).
+func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(line string) bool) (capped bool, err error) {
+	cmd := exec.CommandContext(ctx, tailPath(), "-n", fmt.Sprintf("%d", tailLines+1), file)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := cmd.Start(); err != nil {
 		stdout.Close() // Wait (which normally closes the pipe) is never reached on a Start failure
-		return err
+		return false, err
 	}
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
+	seen := 0
 	for sc.Scan() {
+		seen++
+		if seen > tailLines {
+			capped = true // the +1 probe line exists ⇒ the file had more than tailLines
+		}
 		if !fn(sc.Text()) {
 			break
 		}
@@ -501,9 +520,9 @@ func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(
 	_, _ = io.Copy(io.Discard, stdout)
 	_ = cmd.Wait() // reap; status ignored (SIGPIPE on early stop, timeout surfaces via ctx)
 	if ctx.Err() != nil {
-		return fmt.Errorf("scan timed out after %s (log too large for the tail window)", scanTimeout)
+		return capped, fmt.Errorf("scan timed out after %s (log too large for the tail window)", scanTimeout)
 	}
-	return scanErr
+	return capped, scanErr
 }
 
 // mentionsIP reports whether ip (already canonical) appears in line as a

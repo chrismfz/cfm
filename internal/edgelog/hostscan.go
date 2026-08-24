@@ -22,10 +22,11 @@
 //   - unreadable/corrupt rotated files are reported in files_failed instead
 //     of failing (or silently shortening) the whole call.
 //
-// Lines are consumed in chronological ASCENDING order (tail prints file
-// order; rotated archives are streamed start→end), so pre-window lines are
+// Each INDIVIDUAL file is streamed oldest→newest (tail prints file order;
+// rotated archives stream start→end), so pre-window lines within a file are
 // simply not aggregated — there is NO early stop: everything is bounded by
-// the budget/timeout/file caps above.
+// the budget/timeout/file caps above. Across files the walk is live-log first
+// then rotated siblings newest-first, but aggregation is order-independent.
 //
 // Parsing expects the CFM `log_format cfm` family (`key=value` pairs incl.
 // `host=$host`, identical on OpenResty and Angie). Lines without a parsable
@@ -157,22 +158,24 @@ type HostScanResult struct {
 	CoverageNewestUnix int64 `json:"coverage_newest_unix,omitempty"`
 	FilesSkippedOlder  int   `json:"files_skipped_older,omitempty"` // rotated siblings skipped: mtime < window start
 
-	Scanned       int64 `json:"scanned"`                // lines read across all scanned files
-	SkippedNoHost int64 `json:"skipped_no_host"`        // lines without a parsable host= field
-	Matched       int64 `json:"matched"`                // in-window lines for the target host
-	MatchedNoTS   int64 `json:"matched_no_ts"`          // matched lines whose timestamp was unparsable
-	OutsideWindow int64 `json:"matched_outside_window"` // matched-host lines OLDER than the window (seen, not aggregated)
-	Truncated     bool  `json:"truncated"`              // a bound was hit: budget, timeout, tail window or file cap
+	Scanned           int64 `json:"scanned"`                       // lines read across all scanned files
+	SkippedNoHost     int64 `json:"skipped_no_host"`               // lines without a parsable host= field
+	Matched           int64 `json:"matched"`                       // in-window lines for the target host
+	MatchedNoTS       int64 `json:"matched_no_ts"`                 // matched lines whose timestamp was unparsable
+	OutsideWindow     int64 `json:"matched_outside_window"`        // matched-host lines outside [from,to) (seen, not aggregated)
+	Truncated         bool  `json:"truncated"`                     // a bound was hit: budget, timeout, live tail window or file cap
+	LiveTailTruncated bool  `json:"live_tail_truncated,omitempty"` // specifically: the LIVE file had more lines than the tail window
 
 	FilesFailed []HostFileError `json:"files_failed,omitempty"` // rotated files that could not be fully read
 
 	TotalRequests int64 `json:"total_requests"`
 	BytesTotal    int64 `json:"bytes_total"` // 0 unless the log carries bytes=$body_bytes_sent (added 2026-08; older logs lack it)
 
-	StatusClasses  map[string]int64 `json:"status_classes"`
-	Methods        map[string]int64 `json:"methods,omitempty"`
-	MethodsCapped  bool             `json:"methods_capped,omitempty"`
-	TopStatusCodes []HostKV         `json:"top_status_codes,omitempty"`
+	StatusClasses     map[string]int64 `json:"status_classes"`
+	Methods           map[string]int64 `json:"methods,omitempty"`
+	MethodsCapped     bool             `json:"methods_capped,omitempty"`
+	TopStatusCodes    []HostKV         `json:"top_status_codes,omitempty"`
+	StatusCodesCapped bool             `json:"status_codes_capped,omitempty"`
 
 	UniqueIPs int      `json:"unique_ips"`
 	TopIPs    []HostKV `json:"top_ips"`
@@ -184,11 +187,12 @@ type HostScanResult struct {
 	// UA classification is a HEURISTIC (browser-envelope vs automation/bot-like
 	// via the injected classifier), NOT bot verification: any non-Mozilla-envelope
 	// UA counts as automation. BotRatioPct = BotRequests / (bot+human+empty).
-	UAFamilies    []HostKV `json:"ua_families,omitempty"` // ClassifyUA-normalized, classified per line
-	BotRequests   int64    `json:"bot_requests,omitempty"`
-	HumanRequests int64    `json:"human_requests,omitempty"` // browser-envelope UAs
-	EmptyUAReqs   int64    `json:"empty_ua_requests,omitempty"`
-	BotRatioPct   float64  `json:"bot_ratio_pct,omitempty"`
+	UAFamilies     []HostKV `json:"ua_families,omitempty"` // ClassifyUA-normalized, classified per line
+	FamiliesCapped bool     `json:"ua_families_capped,omitempty"`
+	BotRequests    int64    `json:"bot_requests,omitempty"`
+	HumanRequests  int64    `json:"human_requests,omitempty"` // browser-envelope UAs
+	EmptyUAReqs    int64    `json:"empty_ua_requests,omitempty"`
+	BotRatioPct    float64  `json:"bot_ratio_pct,omitempty"`
 
 	TopPaths    []HostKV `json:"top_paths"`
 	PathsCapped bool     `json:"paths_capped,omitempty"`
@@ -463,9 +467,10 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	// onLine is shared by the live tail and every sibling scan so budget /
 	// counters / truncation accounting stay uniform. feed() owns ALL per-line
 	// parsing (a single walk per line, including the skipped_no_host count).
-	// Lines arrive oldest→newest; out-of-window lines are aggregated nowhere
-	// but still consume budget — there is deliberately NO early stop, since a
-	// stop on ascending input would truncate right BEFORE the in-window tail.
+	// Each individual file is streamed oldest→newest; out-of-window lines are
+	// aggregated nowhere but still consume budget — there is deliberately NO
+	// early stop, since a stop inside a file would truncate right BEFORE its
+	// in-window tail.
 	onLine := func(line string) bool {
 		res.Scanned++
 		if res.Scanned > budget {
@@ -477,10 +482,17 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	}
 
 	res.FilesScanned = append(res.FilesScanned, logFile)
-	err = streamTailMatches(cctx, logFile, tailLines, onLine)
-	if err != nil {
+	tailCapped, tailErr := streamTailMatches(cctx, logFile, tailLines, onLine)
+	if tailCapped {
+		// The live file had MORE lines than the tail window: without the
+		// rotated siblings there is a silent hole between "now" and the
+		// oldest kept archive — exactly what coverage honesty must never do.
+		res.Truncated = true
+		res.LiveTailTruncated = true
+	}
+	if tailErr != nil {
 		finalize(agg, &res, topN)
-		return res, err
+		return res, tailErr
 	}
 
 	if !o.IncludeRotated {
@@ -567,6 +579,7 @@ func finalize(agg *hostAgg, res *HostScanResult, topN int) {
 		"2xx": s2, "3xx": s3, "4xx": s4, "5xx": s5, "other": so,
 	}
 	res.TopStatusCodes = topK(agg.codes, maxCodeKeys)
+	res.StatusCodesCapped = agg.codeOverflow > 0
 
 	res.Methods = agg.methods
 	res.MethodsCapped = agg.methodOverflow > 0
@@ -578,6 +591,7 @@ func finalize(agg *hostAgg, res *HostScanResult, topN int) {
 	if len(agg.fams) > 0 {
 		res.UAFamilies = topK(agg.fams, topN)
 	}
+	res.FamiliesCapped = agg.famOverflow > 0
 	res.BotRequests = agg.botReqs
 	res.HumanRequests = agg.humanReqs
 	res.EmptyUAReqs = agg.emptyUAReqs

@@ -73,15 +73,18 @@ back-filled here — see the git/PR history for that period.
   challenge/block `access.cfm.log` is never a source. Bounded like
   `ip_forensics`: shared line budget across all scanned files, one timeout,
   key-capped accumulators, mtime-based skip of siblings older than the window;
-  corrupt/unreadable rotated files are reported in `files_failed`, every reach
-  bound (line budget, max_files cap) sets `truncated=true`, and
+  corrupt/unreadable rotated files are reported in `files_failed`, EVERY reach
+  bound (line budget incl. the live tail window via `live_tail_truncated`,
+  max_files cap) sets `truncated=true` so silent mid-window holes cannot pass
+  as complete coverage, and
   `coverage_oldest_unix` reports how far back the kept rotation actually
-  reaches. Optional `combine=1` joins the detector history store for the same
-  host/window (challenge issued/solved, block triggers, suspicious, WAF
-  observed + per-rule breakdown); with `merge_www`
+  reaches. Optional `combine=1` joins the detector history store over exactly
+  the same absolute window as the access scan (challenge issued/solved, block
+  triggers, suspicious, WAF observed + per-rule breakdown); with `merge_www`
   the twins get a combined view plus a per-host breakdown so security-event
   provenance stays visible, and `detector_coverage` exposes the store's real
-  retention/oldest retained event so partial history never looks complete.
+  retention/oldest retained event (`coverage_proven`) so partial history never
+  looks complete.
   Because one call may decompress tens of millions of lines, archive scans are
   capped at TWO concurrent per node (`429` +
   `Retry-After` beyond) and `hours` is clamped to ≤90 days at the API boundary.
