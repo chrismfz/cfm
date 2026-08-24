@@ -359,6 +359,18 @@ func TestEnableMount_TmpRefusedWhenUnitExistsButNotMounted(t *testing.T) {
 func TestEnableMount_VarTmpBindWhenNotSeparate(t *testing.T) {
 	// /var/tmp lives on /. Enable must add a bind fstab line so
 	// /var/tmp inherits /tmp's hardening at reboot.
+	// Simulate an ambient cPanel host and prove withFakeFstab isolates it.
+	ambientRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ambientRoot, "usr"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ambientRoot, "usr/tmpDSK"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	origRoot := hostProfileProbeRoot
+	hostProfileProbeRoot = ambientRoot
+	t.Cleanup(func() { hostProfileProbeRoot = origRoot })
+
 	fstabPath := withFakeFstab(t, `UUID=abc / ext4 defaults 0 1
 `)
 	origFinder := realSystemdUnitFinderWithDropins

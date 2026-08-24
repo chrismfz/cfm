@@ -15,6 +15,9 @@ import (
 func withFakeFstab(t *testing.T, content string) string {
 	t.Helper()
 	useMountFSProbes(t, stubFS{})
+	origProbeRoot := hostProfileProbeRoot
+	hostProfileProbeRoot = t.TempDir()
+	t.Cleanup(func() { hostProfileProbeRoot = origProbeRoot })
 	origProc := readProcMounts
 	readProcMounts = func() string {
 		return "rootfs / rootfs rw 0 0\n" +
