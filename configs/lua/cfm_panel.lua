@@ -828,8 +828,7 @@ end
 
 local function clearance_cookie_state(ip, host, scope)
     local token = read_clearance_cookie(scope)
-    local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET")
-    if not secret or secret == "" then secret = panel_bridge_token end
+    local secret = panel_bridge_token
     if not secret or secret == "" then
         ngx.log(ngx.ERR, "[cfm_panel_clearance_debug] reason=missing_clearance_secret ip=", tostring(ip or "-"), " host=", tostring(host or "-"), " scope=", tostring(scope or "-"), " has_cookie=", token and "true" or "false")
         return false, "missing_clearance_secret"
@@ -948,8 +947,7 @@ local function refresh_clearance_cookie(ip, host, scope)
     if cfm_clearance then
         local out_val = tostring(cfm_clearance)
         if panel_bridge_cfg.clearance_refresh and ip and host and ok_clearance and clearance_validator and type(clearance_validator.mint) == "function" then
-            local secret = os.getenv("CFM_CLEARANCE_HMAC_SECRET")
-            if not secret or secret == "" then secret = panel_bridge_token end
+            local secret = panel_bridge_token
             if secret and secret ~= "" then
                 local fresh, mint_err = clearance_validator.mint(ip, host, scope or "", secret, ttl)
                 if fresh and fresh ~= "" then

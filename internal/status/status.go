@@ -636,7 +636,7 @@ type luaTokenProbe struct {
 }
 
 var (
-	luaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+["']([^"']+)["']\s*$`)
+	luaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+("(\\.|[^"\\])*")\s*$`)
 	badTokenRe  = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
 )
 
@@ -706,7 +706,11 @@ func readLuaToken(path string) luaTokenProbe {
 	if len(m) < 2 {
 		return luaTokenProbe{Present: true}
 	}
-	tok := strings.TrimSpace(string(m[1]))
+	literal := string(m[1])
+	tok, err := strconv.Unquote(literal)
+	if err != nil || strconv.Quote(tok) != literal {
+		return luaTokenProbe{Present: true}
+	}
 	return luaTokenProbe{
 		Token:   tok,
 		Present: true,
@@ -725,8 +729,15 @@ func resolveLuaToken(paths []string) luaTokenProbe {
 }
 
 func isStrongToken(tok string) bool {
-	t := strings.TrimSpace(tok)
-	return len(t) >= 32 && !badTokenRe.MatchString(t)
+	if len(tok) < 32 || strings.TrimSpace(tok) != tok || badTokenRe.MatchString(tok) {
+		return false
+	}
+	for i := 0; i < len(tok); i++ {
+		if tok[i] < 0x21 || tok[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func tokenHealth(t luaTokenProbe) string {
@@ -834,16 +845,7 @@ func readDetectorSectionKV(path, section string) map[string]string {
 }
 
 func readBridgeTokenProbe() luaTokenProbe {
-	if t := readLuaToken(canonicalBridgeTokenPath); t.Present {
-		return t
-	}
-	if tok := strings.TrimSpace(os.Getenv("OPENRESTY_TOKEN")); tok != "" {
-		return luaTokenProbe{Token: tok, Present: true, Valid: isStrongToken(tok)}
-	}
-	if tok := strings.TrimSpace(os.Getenv("BRIDGE_TOKEN")); tok != "" {
-		return luaTokenProbe{Token: tok, Present: true, Valid: isStrongToken(tok)}
-	}
-	return luaTokenProbe{}
+	return readLuaToken(canonicalBridgeTokenPath)
 }
 
 func readChallengeTokenProbe() luaTokenProbe {

@@ -166,8 +166,6 @@ func TestProbeChallengeFlowReadinessBranches(t *testing.T) {
 		_ = os.Unsetenv("CHALLENGE_HTTP_LISTEN")
 		_ = os.Unsetenv("OPENRESTY_SOCK")
 		_ = os.Unsetenv("CHALLENGE_TOKEN")
-		_ = os.Unsetenv("OPENRESTY_TOKEN")
-		_ = os.Unsetenv("BRIDGE_TOKEN")
 	})
 
 	challengeDialTimeout = func(network, addr string, timeout time.Duration) (net.Conn, error) {
@@ -221,13 +219,9 @@ func TestProbeChallengeFlowReadinessUsesConfigAndTokenFile(t *testing.T) {
 		challengeFlowDetectorsConfigPath = oldDetectorsConfigPath
 		challengeFlowBridgeTokenPath = oldBridgeTokenPath
 		_ = os.Unsetenv("CHALLENGE_TOKEN")
-		_ = os.Unsetenv("OPENRESTY_TOKEN")
-		_ = os.Unsetenv("BRIDGE_TOKEN")
 		_ = os.Unsetenv("OPENRESTY_SOCK")
 	})
 	_ = os.Unsetenv("CHALLENGE_TOKEN")
-	_ = os.Unsetenv("OPENRESTY_TOKEN")
-	_ = os.Unsetenv("BRIDGE_TOKEN")
 	_ = os.Unsetenv("OPENRESTY_SOCK")
 
 	challengeToken := "abcdefghijklmnopqrstuvwxyz012345"
