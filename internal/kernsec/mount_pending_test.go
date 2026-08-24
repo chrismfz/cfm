@@ -281,17 +281,12 @@ func TestEnableMount_VarTmpSymlinkIsNoop(t *testing.T) {
 		systemdSystemEtcDir = origEtc
 		realSystemdUnitFinderWithDropins = origFinder
 	})
-	origProc, origLstat, origReadlink := readProcMounts, realLstat, realReadlink
+	origProc := readProcMounts
 	readProcMounts = func() string {
 		return "tmpfs /tmp tmpfs rw,nosuid,nodev,noexec 0 0\n"
 	}
-	realLstat = stubFS{links: map[string]string{"/var/tmp": "/tmp"}}.lstat
-	realReadlink = stubFS{links: map[string]string{"/var/tmp": "/tmp"}}.readlink
-	t.Cleanup(func() {
-		readProcMounts = origProc
-		realLstat = origLstat
-		realReadlink = origReadlink
-	})
+	useMountFSProbes(t, stubFS{links: map[string]string{"/var/tmp": "/tmp"}})
+	t.Cleanup(func() { readProcMounts = origProc })
 
 	stub := &stubExec{}
 	stub.install(t)

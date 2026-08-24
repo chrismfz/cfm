@@ -391,16 +391,6 @@ func hasAllMountOptions(current, recommended string) bool {
 	return len(missing) == 0
 }
 
-// checkMountFromProc preserves the legacy two-arg signature relied on
-// by older tests / callers. Computes MountDetail internally and
-// projects down to (state, current). Persistence sources are nil so
-// the result will never surface MountPending — callers that need PEND
-// detection must use CheckMountDetail / checkMountDetail directly.
-func checkMountFromProc(procMounts string, rule MountRule) (MountState, string) {
-	d := checkMountDetail(procMounts, rule, Tier1Mounts, realLstat, realReadlink, nil, nil)
-	return d.State, d.CurrentOptions
-}
-
 // readProcMounts returns /proc/mounts contents (or "" on read error).
 // Variable so tests can substitute fixture data.
 var readProcMounts = func() string {

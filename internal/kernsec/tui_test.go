@@ -297,7 +297,10 @@ func TestBuildAuditRows_ForceOverrideReasonVisibleAgainstHostingPanelGate(t *tes
 		if row.ID != "KSEC-SCT-tier2.namespace-001" {
 			continue
 		}
-		if row.Decision != Apply || row.Reason != "forced by conf" || row.State == StateSKIP || row.State == StateOFF {
+		// Live state is host-dependent: kernels such as WSL may not expose
+		// user.max_user_namespaces and correctly render SKIP. This test only
+		// verifies that the force override defeats the hosting-panel gate.
+		if row.Decision != Apply || row.Reason != "forced by conf" || row.State == StateOFF {
 			t.Fatalf("row decision=%v state=%v reason=%q, want forced Apply visibility", row.Decision, row.State, row.Reason)
 		}
 		return
