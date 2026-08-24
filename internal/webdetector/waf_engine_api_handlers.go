@@ -221,6 +221,9 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		if action = strings.TrimSpace(action); action == "" {
 			action = strings.TrimSpace(ev.Mode)
 		}
+		if action == "" && ev.Type == "waf_observe" && ev.Status == http.StatusForbidden {
+			action = "block"
+		}
 		row := wafEngineEvent{
 			TsUnix:    ev.TsUnix,
 			EventType: ev.Type,

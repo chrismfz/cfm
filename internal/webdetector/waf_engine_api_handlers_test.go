@@ -155,7 +155,7 @@ func TestWAFEngineSummaryUAFilterIncludesObservations(t *testing.T) {
 	}
 	now := time.Now().Unix()
 	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "shop.example", IP: "1.1.1.1", Reason: "WAF_SQLI", Payload: map[string]interface{}{"ua": "Mozilla/5.0 Legit", "waf_rule_id": 320}})
-	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_observe", Host: "shop.example", IP: "1.1.1.1", Mode: "block", Status: http.StatusForbidden, Reason: "WAF_SQLI", Payload: map[string]interface{}{"action": "block", "ua": "Mozilla/5.0 Legit", "waf_rule_id": 320}})
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_observe", Host: "shop.example", IP: "1.1.1.1", Status: http.StatusForbidden, Reason: "WAF_SQLI", Payload: map[string]interface{}{"ua": "Mozilla/5.0 Legit", "waf_rule_id": 320}})
 
 	e := &Engine{history: hs}
 	rr := httptest.NewRecorder()

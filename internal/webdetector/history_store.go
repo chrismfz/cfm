@@ -546,10 +546,12 @@ ON CONFLICT(hour_unix, host) DO UPDATE SET count = excluded.count`,
 	return err
 }
 
-// WAFHitsByRuleID returns hit counts grouped by the waf_rule_id stored in
+// WAFHitsByRuleID returns trigger counts grouped by the waf_rule_id stored in
 // payload_json. Reason-string aggregation (WAFByRule) is too coarse for the
 // rollout-gate use case because several distinct rules share a reason family
-// (e.g. all WAF_AUTH_BURST tags). Per-ID precision needs json_extract.
+// (e.g. all WAF_AUTH_BURST tags). Per-ID precision needs json_extract. Observe
+// rows are deliberately excluded: a block that clears should_push emits both a
+// trigger and an observation, and counting both would inflate rollout hit rates.
 //
 // Events emitted before PR A's rule-id plumbing have NULL/missing
 // waf_rule_id and are excluded.
@@ -564,7 +566,7 @@ func (s *HistoryStore) WAFHitsByRuleID(host string, hours int) (map[int]int, err
 	defer s.mu.Unlock()
 	from := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
 	clauses := []string{
-		"event_type IN ('waf_observed','waf_observe','waf_trigger')",
+		"event_type = 'waf_trigger'",
 		"ts_unix >= ?",
 		"payload_json IS NOT NULL",
 		"json_extract(payload_json, '$.waf_rule_id') IS NOT NULL",

@@ -77,8 +77,8 @@ func TestWAFInspected_IgnoresInvalid(t *testing.T) {
 	}
 }
 
-// TestWAFHitsByRuleID_JSONExtract asserts the json_extract aggregation works.
-// Inserts a few synthetic waf_trigger rows and verifies the per-id count.
+// TestWAFHitsByRuleID_JSONExtract asserts the json_extract aggregation works
+// and excludes the observation paired with a trigger for the same block.
 func TestWAFHitsByRuleID_JSONExtract(t *testing.T) {
 	hs := newTestHistoryStore(t)
 
@@ -100,6 +100,7 @@ func TestWAFHitsByRuleID_JSONExtract(t *testing.T) {
 	hs.Append(mk("example.com", 320))
 	hs.Append(mk("example.com", 101))
 	hs.Append(mk("other.com", 320))
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_observe", Host: "example.com", IP: "1.2.3.4", Reason: "WAF_RCE", Mode: "block", Payload: map[string]interface{}{"waf_rule_id": 320}})
 
 	got, err := hs.WAFHitsByRuleID("", 24)
 	if err != nil {
@@ -201,11 +202,11 @@ func TestHandleWAFHitRates_Smoke(t *testing.T) {
 // TestHitRatePromotionHint covers the boundary mapping directly.
 func TestHitRatePromotionHint(t *testing.T) {
 	cases := []struct {
-		name       string
-		ratePct    float64
-		hits       int
-		inspected  int
-		want       string
+		name      string
+		ratePct   float64
+		hits      int
+		inspected int
+		want      string
 	}{
 		{"no inspections", 0, 0, 0, "n_a"},
 		{"silent with inspections", 0, 0, 1000, "silent"},
