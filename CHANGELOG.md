@@ -59,6 +59,27 @@ back-filled here — see the git/PR history for that period.
    request (MIME-canonicalized map keys) and was silently ignored, and a bogus
    `X-CFM-Token` alongside an assertion now fails hard as an invalid token.
 
+### Added
+- **`host_access_history` — archival per-vhost traffic profile (MCP tool + `GET /api/v1/webdet/host-access-history`).**
+  Answers "this domain's traffic jumped — is it crawlers, and since when?" for
+  windows older than any live view retains: `edgelog.ScanHost` reconstructs ONE
+  vhost's traffic from the edge access log plus its rotated siblings
+  (`access.log.1`, `.N.gz`, `-YYYYMMDD.gz`; OpenResty and Angie candidates both
+  resolved automatically), aggregating requests/hour with peaks-vs-median,
+  status-class mix, top client IPs, top user-agents with an exact bot/human
+  split via the existing UA normalizer, top paths and method mix. Bounded like
+  `ip_forensics`: shared line budget across all scanned files, one timeout,
+  key-capped accumulators, mtime-based skip of siblings older than the window
+  and early stop once chronological lines fall below the window floor;
+  `coverage_oldest_unix` reports how far back the kept rotation actually
+  reaches. Optional `combine=1` joins the detector history store for the same
+  host/window (challenge issued/solved, block triggers, suspicious, WAF
+  observed + per-rule breakdown). Scoped tokens may profile only their own
+  vhosts (`vhostAllowed`, same model as `analyze-host`). The `log_format cfm`
+  edge format gains an append-only trailing `bytes=$body_bytes_sent` so future
+  archives also carry response volume; older logs simply lack the field and all
+  readers treat it as 0.
+
 ## 2026.08.24
 
 ### Added

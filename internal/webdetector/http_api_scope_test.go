@@ -173,6 +173,36 @@ func TestMonitoring_AnalyzeHost_ScopeCheck(t *testing.T) {
 	}
 }
 
+func TestMonitoring_HostAccessHistory_ScopeCheck(t *testing.T) {
+	_, mux := newMonitoringTestEngine(t)
+
+	// Admin: passes (result may be empty but not forbidden)
+	rr := get(mux, adminCtx(), "/api/v1/webdet/host-access-history?host=any.com")
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("admin host-access-history: should not be 403")
+	}
+
+	// Scoped: own host passes the scope gate (a non-403 error is fine here —
+	// the test engine has no edge access log for ScanHost to read)
+	rr = get(mux, scopedCtx("mysite.com"), "/api/v1/webdet/host-access-history?host=mysite.com")
+	if rr.Code == http.StatusForbidden {
+		t.Fatalf("scoped host-access-history own: expected not-403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Scoped: other host blocked (fail-closed)
+	rr = get(mux, scopedCtx("mysite.com"), "/api/v1/webdet/host-access-history?host=competitor.com")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("scoped host-access-history other: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Scoped + merge_www: the www/bare TWIN is a separate vhost key and must
+	// be in scope too — otherwise merge would leak an out-of-scope host's data.
+	rr = get(mux, scopedCtx("mysite.com"), "/api/v1/webdet/host-access-history?host=mysite.com&merge_www=1")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("scoped host-access-history merge_www out-of-scope twin: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 // ── Guard 1: list endpoints filter rows for scoped tokens ────────────────────
 
 func TestMonitoring_TopShort_ScopedFilters(t *testing.T) {

@@ -24,6 +24,7 @@ than being mistaken for admin. Code that reads `CtxScopeKey{}` **directly**
 - `/api/v1/webdet/long-top` (`parseVhostFilter`)
 - `/api/v1/webdet/drilldown` (`vhostAllowed` + `parseVhostFilter`)
 - `/api/v1/webdet/analyze-host` (`vhostAllowed`)
+- `/api/v1/webdet/host-access-history` (`host_access_api.go`, `vhostAllowed`) — bounded ARCHIVAL traffic profile of one vhost from the edge access log (live file + rotated siblings via `edgelog.ScanHost`; optional `combine` section joins history-store challenge/WAF stats for the SAME host). Result is keyed to a single vhost, so a scoped token may profile only its own hosts — same host-param scope model as `analyze-host`; with `merge_www=1` the www/bare TWIN is a separate vhost key and must also be in scope (fail-closed 403). Backs the MCP `host_access_history` tool.
 - `/api/v1/webdet/vhosts` (`parseVhostFilterWithAliases` + `vhostAllowed`)
 - `/api/v1/webdet/rules*` (scope helpers in `traffic_rules_api_handlers.go`)
 - `/api/v1/webdet/history/events|summary|challenge-outcomes|waf-by-rule|vhost-overview` (`scopeCheckHost`)

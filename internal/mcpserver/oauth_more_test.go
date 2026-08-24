@@ -328,6 +328,28 @@ func TestIPForensicsRouting(t *testing.T) {
 	}
 }
 
+func TestHostAccessHistoryRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"host_access_history","arguments":{"host":"ex.gr","hours":720,"merge_www":true,"top":30}}}`)
+	if fd.lastPath != "/api/v1/webdet/host-access-history" {
+		t.Errorf("host_access_history routed to %q, want /api/v1/webdet/host-access-history", fd.lastPath)
+	}
+	if got := fd.lastQuery.Get("host"); got != "ex.gr" {
+		t.Errorf("host = %q, want ex.gr", got)
+	}
+	if got := fd.lastQuery.Get("hours"); got != "720" {
+		t.Errorf("hours = %q, want 720", got)
+	}
+	if got := fd.lastQuery.Get("merge_www"); got != "1" {
+		t.Errorf("merge_www = %q, want 1", got)
+	}
+	if got := fd.lastQuery.Get("include_rotated"); got != "" {
+		t.Errorf("include_rotated must stay unset when omitted (handler default is true), got %q", got)
+	}
+}
+
 // The consent page must disclose where the grant is delivered and warn on a
 // non-first-party redirect (anti-phishing).
 func TestConsentPageShowsRedirectAndWarns(t *testing.T) {
