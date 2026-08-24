@@ -136,7 +136,7 @@ func TestBlockBatch_PerIPOutcomes(t *testing.T) {
 }
 
 // Behind the edge proxy (loopback RemoteAddr) the caller guard must use the
-// first X-Forwarded-For hop.
+// canonical single X-Forwarded-For value written by the edge.
 func TestBlockBatch_CallerIPBehindProxy(t *testing.T) {
 	be := &blockRecorderBackend{}
 	h := makeBlockBatchHandler(be, stubSelfIPs{})
@@ -144,7 +144,7 @@ func TestBlockBatch_CallerIPBehindProxy(t *testing.T) {
 	_, out := doBatch(t, h, map[string]any{
 		"ips": []string{"198.51.100.20", "203.0.113.50"},
 		"ttl": "1h",
-	}, "127.0.0.1:9999", "203.0.113.50, 10.0.0.1")
+	}, "127.0.0.1:9999", "203.0.113.50")
 
 	if reasons := skipReasons(out.Skipped); reasons["203.0.113.50"] != "caller_ip" {
 		t.Fatalf("expected caller_ip skip via XFF, got skipped=%v blocked=%v", out.Skipped, out.Blocked)

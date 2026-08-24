@@ -284,12 +284,20 @@ func diffDetectorTypes(livePath string) (missing []string, extra []string, err e
 			continue
 		}
 		typ, _ := detectors.SplitTypeInstance(sec)
-		if typ != "" {
+		if canonical, ok := detectors.CanonicalType(typ); ok {
+			if detectors.ConfigSectionOptional(canonical) {
+				continue
+			}
+			liveTypes[canonical] = struct{}{}
+		} else if typ != "" {
 			liveTypes[typ] = struct{}{}
 		}
 	}
 	regTypes := map[string]struct{}{}
 	for _, typ := range detectors.RegisteredTypes() {
+		if detectors.ConfigSectionOptional(typ) {
+			continue
+		}
 		regTypes[typ] = struct{}{}
 	}
 	return setDiff(regTypes, liveTypes), setDiff(liveTypes, regTypes), nil

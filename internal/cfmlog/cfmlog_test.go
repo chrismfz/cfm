@@ -71,6 +71,21 @@ func TestTailFile_ReadsAndGreps(t *testing.T) {
 	}
 }
 
+func TestTailFileReadsCanonicalAPILogSource(t *testing.T) {
+	logp := filepath.Join(t.TempDir(), "cfm.api.log")
+	if err := os.WriteFile(logp, []byte("event=auth_attempt result=success\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := fileCandidates["api"]
+	fileCandidates["api"] = []string{logp}
+	t.Cleanup(func() { fileCandidates["api"] = old })
+
+	res, err := TailFile(context.Background(), "api", 10, 10, "auth_attempt")
+	if err != nil || !res.Found || res.Kind != "api" || len(res.Lines) != 1 {
+		t.Fatalf("api log tail failed: result=%+v err=%v", res, err)
+	}
+}
+
 func TestTailJournal_AllowlistAndNormalize(t *testing.T) {
 	// Unknown unit → error.
 	if _, err := TailJournal(context.Background(), "totally-not-allowed", 0, 0, ""); err == nil {

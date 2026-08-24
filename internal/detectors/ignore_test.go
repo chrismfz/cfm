@@ -9,6 +9,13 @@ import (
 	"testing"
 )
 
+func TestIPIgnoreCanonicalizesExactIPv6(t *testing.T) {
+	ig := newIPIgnoreFromGlobal(KV{"IGNORE_IPS": "2001:0db8:0:0:0:0:0:1"})
+	if ig == nil || !ig.ShouldIgnore("2001:db8::1") {
+		t.Fatal("equivalent IPv6 representation did not match IGNORE_IPS")
+	}
+}
+
 func TestIPIgnore_WriteLuaCache_EmptyReceiver(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfm_ignore_nets.lua")

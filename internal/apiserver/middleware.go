@@ -32,7 +32,10 @@ type apiAnomalyReasonSetter interface {
 	SetAPIAnomalyReason(reason string)
 }
 
-func setAPIAnomalyReason(w http.ResponseWriter, reason string) {
+func setAPIAnomalyReason(w http.ResponseWriter, r *http.Request, reason string) {
+	if state := anomalyStateFromRequest(r); state != nil {
+		state.setReason(reason)
+	}
 	if s, ok := w.(apiAnomalyReasonSetter); ok {
 		s.SetAPIAnomalyReason(reason)
 	}
@@ -145,13 +148,7 @@ func normalizePathPrefix(raw string) string {
 }
 
 func isPublicPath(r *http.Request) bool {
-	path := r.URL.Path
-	if strings.HasPrefix(path, "/cfm-admin/") {
-		path = strings.TrimPrefix(path, "/cfm-admin")
-		if path == "" || path[0] != '/' {
-			path = "/" + path
-		}
-	}
+	path := authMiddlewarePath(r)
 	if isPublicAssetPath(r, path) {
 		return true
 	}
@@ -163,13 +160,32 @@ func isPublicPath(r *http.Request) bool {
 	// MCP surface: the /mcp endpoint, its OAuth endpoints (/mcp/oauth/*) and the
 	// OAuth discovery documents are self-authenticating (mcpserver's own bearer /
 	// OAuth gate), so they bypass session/token auth here. See internal/mcpserver.
-	if path == "/mcp" || strings.HasPrefix(path, "/mcp/") ||
-		path == "/.well-known/oauth-protected-resource" ||
-		path == "/.well-known/oauth-authorization-server" ||
-		path == "/.well-known/openid-configuration" {
+	if isMCPPublicPath(r) {
 		return true
 	}
 	return false
+}
+
+func isMCPPublicPath(r *http.Request) bool {
+	path := authMiddlewarePath(r)
+	return path == "/mcp" || strings.HasPrefix(path, "/mcp/") ||
+		path == "/.well-known/oauth-protected-resource" ||
+		path == "/.well-known/oauth-authorization-server" ||
+		path == "/.well-known/openid-configuration"
+}
+
+func authMiddlewarePath(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/cfm-admin/") {
+		path = strings.TrimPrefix(path, "/cfm-admin")
+		if path == "" || path[0] != '/' {
+			path = "/" + path
+		}
+	}
+	return path
 }
 
 func isPublicAssetPath(r *http.Request, normalizedPath string) bool {
@@ -298,22 +314,35 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			embedded := isCpanelEmbeddedRequest(r)
 
-			// ── 1. Public paths ────────────────────────────────────────────
-			if isPublicPath(r) || isCpanelPluginSelfServicePath(r) {
+			// MCP owns its bearer/OAuth namespace. Its gate performs the canonical
+			// audit and must see MCP_TOKEN values that are intentionally invalid here.
+			if isMCPPublicPath(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
+			publicPath := isPublicPath(r) || isCpanelPluginSelfServicePath(r)
 
-			// ── 2. Bearer / X-CFM-Token / Token header ────────────────────
+			// ── 1. Bearer / X-CFM-Token / Token header ────────────────────
 			tok, tokenHeaderSupplied := extractToken(r)
 			if suspicious, detail := suspiciousAuthHeader(r); suspicious {
 				logging.LogfAPI("[apiserver] event=api_anomaly src_ip=%s reason=suspicious_auth_header count=1 method=%s path=%q status=0 detail=%q ua=%q",
 					realIPFromRequest(r), r.Method, r.URL.Path, detail, strings.TrimSpace(r.UserAgent()))
+				auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "malformed", AuthMech: "unknown", Status: http.StatusUnauthorized})
+				publishRequestAnomaly(r, "AUTH_TOKEN_MALFORMED", http.StatusUnauthorized)
+				setAPIAnomalyReason(w, r, "token_malformed")
+				rejectTokenAuth(w)
+				return
+			}
+			if tokenHeaderSupplied && tok == "" {
+				auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "malformed", AuthMech: "unknown", Status: http.StatusUnauthorized})
+				publishRequestAnomaly(r, "AUTH_TOKEN_MALFORMED", http.StatusUnauthorized)
+				setAPIAnomalyReason(w, r, "token_malformed")
+				rejectTokenAuth(w)
+				return
 			}
 			if tok != "" {
 				if tokenMatch(tok, adminToken) {
-					logging.LogfAPI("[apiserver] auth_source=token_admin src_ip=%s method=%s path=%q ua=%q",
-						realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
+					auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "success", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusOK})
 					ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 					ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
 					ctx = withAuthnMechanism(ctx, authnMechanismTokenAdmin)
@@ -321,13 +350,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 					return
 				}
 				if st, ok := store.Lookup(tok); ok {
-					if embedded {
-						logging.LogfAPI("[apiserver] auth_source=token_scoped_embedded src_ip=%s method=%s path=%q ua=%q",
-							realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
-					} else {
-						logging.LogfAPI("[apiserver] auth_source=token_scoped src_ip=%s method=%s path=%q ua=%q",
-							realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
-					}
+					auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "success", AuthMech: string(authnMechanismTokenScoped), TokenID: st.ID, Status: http.StatusOK})
 					ctx := context.WithValue(r.Context(), webdet.CtxScopeKey{}, st.Vhosts)
 					ctx = context.WithValue(ctx, webdet.CtxDBScopeKey{}, webdet.ScopedDBScope{
 						Users:     st.DBUsers,
@@ -339,16 +362,18 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
-				if embedded {
-					logging.LogfAPI("[apiserver] auth_reject=invalid_scoped_embedded")
-				}
-				w.Header().Set("Content-Type", "application/json")
-				setAPIAnomalyReason(w, "token_invalid")
-				http.Error(w, `{"error":"invalid or expired token"}`, http.StatusUnauthorized)
+				auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "invalid", AuthMech: "unknown", Status: http.StatusUnauthorized})
+				publishRequestAnomaly(r, "AUTH_TOKEN_INVALID", http.StatusUnauthorized)
+				setAPIAnomalyReason(w, r, "token_invalid")
+				rejectTokenAuth(w)
+				return
+			}
+			if publicPath {
+				next.ServeHTTP(w, r)
 				return
 			}
 
-			// ── 3. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
+			// ── 2. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
 			if !tokenHeaderSupplied {
 				if ctx, ok := embedScopedContextFromCookie(w, r, store); ok {
 					ctx = withAuthnMechanism(ctx, authnMechanismEmbedCookie)
@@ -361,17 +386,17 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				}
 			}
 
-			// ── 4. Embedded requests require token or embed bootstrap cookie ─
+			// ── 3. Embedded requests require token or embed bootstrap cookie ─
 			if embedded {
 				logging.LogfAPI("[apiserver] auth_reject=missing_scoped_embedded")
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
-				setAPIAnomalyReason(w, "auth_missing")
+				setAPIAnomalyReason(w, r, "auth_missing")
 				http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
 				return
 			}
 
-			// ── 5. Valid goauth session (fallback when no token header) ───
+			// ── 4. Valid goauth session (fallback when no token header) ───
 			if !tokenHeaderSupplied && sessionAllowedRequest(r) {
 				if shouldLogSessionCookieAuth(time.Now()) {
 					logging.LogfAPI("[apiserver] auth_source=session_cookie src_ip=%s method=%s path=%q ua=%q (sampled_every=60s)",
@@ -384,14 +409,14 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				return
 			}
 
-			// ── 6. No token — redirect browsers, 401 API clients ──────────
+			// ── 5. No token — redirect browsers, 401 API clients ──────────
 			if strings.Contains(r.Header.Get("Accept"), "text/html") {
 				if isEmbedShellBootstrapRequest(r) {
 					logging.LogfAPI("[apiserver] auth_source=embed_shell_bootstrap")
 					next.ServeHTTP(w, r)
 					return
 				}
-				setAPIAnomalyReason(w, "auth_missing")
+				setAPIAnomalyReason(w, r, "auth_missing")
 				base := cfmBase(r)
 				next := r.URL.RequestURI()
 				if base != "" && !strings.HasPrefix(next, base+"/") && next != base {
@@ -405,7 +430,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
-			setAPIAnomalyReason(w, "auth_missing")
+			setAPIAnomalyReason(w, r, "auth_missing")
 			http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
 		})
 	}
@@ -416,8 +441,12 @@ func tokenMatch(a, b string) bool {
 }
 
 func extractToken(r *http.Request) (string, bool) {
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		return strings.TrimSpace(auth[7:]), true
+	if _, ok := r.Header["Authorization"]; ok {
+		parts := strings.Fields(strings.TrimSpace(r.Header.Get("Authorization")))
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			return strings.TrimSpace(parts[1]), true
+		}
+		return "", true
 	}
 	if _, ok := r.Header["X-CFM-Token"]; ok {
 		return strings.TrimSpace(r.Header.Get("X-CFM-Token")), true
@@ -429,6 +458,7 @@ func extractToken(r *http.Request) (string, bool) {
 }
 
 func suspiciousAuthHeader(r *http.Request) (bool, string) {
+	_, hasAuthorization := r.Header["Authorization"]
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	hasXCFM := len(r.Header["X-CFM-Token"]) > 0
 	hasToken := len(r.Header["Token"]) > 0
@@ -436,6 +466,9 @@ func suspiciousAuthHeader(r *http.Request) (bool, string) {
 		return true, "multiple_auth_schemes"
 	}
 	if auth == "" {
+		if hasAuthorization {
+			return true, "authorization_header_empty"
+		}
 		if hasXCFM && hasToken {
 			return true, "multiple_token_headers"
 		}
@@ -456,4 +489,10 @@ func suspiciousAuthHeader(r *http.Request) (bool, string) {
 		return true, "multiple_auth_schemes"
 	}
 	return false, ""
+}
+
+func rejectTokenAuth(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
+	http.Error(w, `{"error":"invalid or expired token"}`, http.StatusUnauthorized)
 }

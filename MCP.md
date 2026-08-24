@@ -53,9 +53,10 @@ Key properties:
   `TokenMiddleware(admin-token)(mux)`), so it reuses every existing handler and
   its scope/admin gate verbatim and tracks the hot-swappable webdetector engine.
   The tool never controls the path, so the surface stays read-only and bounded.
-- **The admin token never leaves the process.** It is used only for the in-process
-  dispatch. The MCP client only ever holds a read-only OAuth token (below), which
-  is **inert against `/api/v1`** — it is honoured *only* at the `/mcp` gate.
+- **CFM never exposes the admin token.** It uses the token for in-process dispatch;
+  a trusted fleet gateway may independently present the admin token it already
+  stores. Other clients use static `MCP_TOKEN` or a read-only OAuth token, both
+  **inert against `/api/v1`** and honoured only at the `/mcp` gate.
 
 Code: `internal/mcpserver/` (`server.go`, `oauth.go`, `tools.go`) +
 `internal/apiserver/mcp_wire.go` (wiring) + a `/mcp` entry in `isPublicPath`.
@@ -68,8 +69,9 @@ Code: `internal/mcpserver/` (`server.go`, `oauth.go`, `tools.go`) +
 
 The MCP server has its **own** credential, `MCP_TOKEN`, kept separate from the
 admin/API `AUTH_TOKEN` (which CFM also uses for `/cfm-admin` and the Laravel
-API). The MCP client only ever sees `MCP_TOKEN`; the admin token is used solely
-for the in-process read dispatch and never leaves the daemon.
+API). Interactive and direct MCP clients should use `MCP_TOKEN`. The trusted
+fleet gateway may reuse the `AUTH_TOKEN` it already holds as a static `/mcp`
+bearer; CFM itself never returns or exposes that admin token to an MCP client.
 
 As of 2026-08 the server is **default-ON**. It mounts when:
 
@@ -182,17 +184,20 @@ curl -sS https://<host>/cfm-admin/mcp \
 - **Read-only by construction.** Only GET, only a fixed allow-list of `/api/v1`
   read paths, only read tools are registered. The tool never chooses the HTTP verb
   or an arbitrary path.
-- **Dedicated, least-exposure credential.** MCP clients authenticate with
-  `MCP_TOKEN`, never the admin `AUTH_TOKEN`. The OAuth access token minted from it
+- **Dedicated, least-exposure credential.** Interactive/direct MCP clients use
+  `MCP_TOKEN`; the trusted fleet gateway may authenticate with the admin token it
+  already holds. The OAuth access token minted from `MCP_TOKEN`
   is audience-bound to `https://<host>/cfm-admin/mcp` and validated *only* at the
   `/mcp` gate; it does not authenticate against `/api/v1`. So a leaked MCP token
   grants read-only MCP access — not admin API access, and not `/cfm-admin`/Laravel
   API access (those use `AUTH_TOKEN`).
-- **Admin/scoped boundary preserved.** The admin token is used purely in-process
-  for the read dispatch; it is never handed to a client. (See `CLAUDE.md` §5 —
-  scoped-vs-admin is a hard boundary.)
-- **Weak-token fail-closed.** A missing or <24-char `MCP_TOKEN` leaves the server
-  unmounted rather than exposing a guessable internet-facing credential.
+- **Admin/scoped boundary preserved.** CFM uses the admin token in-process for
+  read dispatch and never hands it to a client. A gateway that already stores
+  that token may present it at `/mcp`; scoped tokens do not gain that access.
+  (See `CLAUDE.md` §5 — scoped-vs-admin is a hard boundary.)
+- **Weak-token fail-closed.** An explicitly configured <24-char `MCP_TOKEN`
+  leaves the server unmounted; an absent token is generated securely and
+  persisted rather than exposing a guessable internet-facing credential.
 - **PKCE S256 mandatory**, dynamic client registration restricted to `https` (or
   `http://localhost`) redirect URIs, consent page is frame-denied (clickjacking),
   and all OAuth/discovery responses are CORS-open but credential-less (Bearer-only,
@@ -208,7 +213,10 @@ curl -sS https://<host>/cfm-admin/mcp \
   outside the session-cookie CSRF check.
 - **Forwarded-header trust:** the advertised scheme/prefix are taken from
   `X-Forwarded-*` **only** when the peer is the loopback edge; a direct non-loopback
-  caller cannot spoof them.
+  caller cannot spoof them. Consent rate limits and MCP auth audits use the same
+  canonical client identity. Each supplied static/OAuth/consent credential emits
+  one secret-free `cfm.api.log` auth attempt; internal admin-token dispatches are
+  suppressed so they cannot create misleading loopback records.
 
 ---
 

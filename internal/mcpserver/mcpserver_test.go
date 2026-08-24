@@ -72,6 +72,10 @@ func (f *fakeDispatch) sawPath(path string) bool {
 const testAdminToken = "ADMINTOK"
 
 func newTestServer(t *testing.T, fd *fakeDispatch) *httptest.Server {
+	return newTestServerWithAudit(t, fd, nil)
+}
+
+func newTestServerWithAudit(t *testing.T, fd *fakeDispatch, audit func(*http.Request, AuthAuditEvent)) *httptest.Server {
 	t.Helper()
 	if fd == nil {
 		fd = &fakeDispatch{}
@@ -83,13 +87,70 @@ func newTestServer(t *testing.T, fd *fakeDispatch) *httptest.Server {
 		BaseURL:       func(r *http.Request) string { return "https://" + r.Host + "/cfm-admin" },
 		Authenticate:  func(cred string) (string, bool) { return "", cred == testAdminToken },
 		SigningSecret: testAdminToken,
-		StaticBearer:  func(tok string) bool { return tok == testAdminToken },
+		StaticBearer:  func(tok string) (string, bool) { return "mcp_static", tok == testAdminToken },
+		AuditAuth:     audit,
 	})
 	mux := http.NewServeMux()
 	h.Register(mux)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return ts
+}
+
+func TestImmediateIPFromRequestMCPIgnoresForwardedHeaders(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "http://localhost/mcp/oauth/authorize", nil)
+	r.RemoteAddr = "198.51.100.30:42000"
+	r.Header.Set("X-Real-IP", "127.0.0.1")
+	r.Header.Set("X-Forwarded-For", "127.0.0.1")
+	if got := immediateIPFromRequestMCP(r); got != "198.51.100.30" {
+		t.Fatalf("immediate peer = %q, want %q", got, "198.51.100.30")
+	}
+}
+
+func TestMCPBearerAuditIsExactOnceAndSecretFree(t *testing.T) {
+	const valid = "valid-mcp-token-that-must-not-leak"
+	var events []AuthAuditEvent
+	h := New(Deps{
+		Version:       "test",
+		MCPPath:       "/mcp",
+		Dispatch:      (&fakeDispatch{}).fn,
+		BaseURL:       func(r *http.Request) string { return "https://" + r.Host + "/cfm-admin" },
+		Authenticate:  func(cred string) (string, bool) { return "", cred == valid },
+		SigningSecret: valid,
+		StaticBearer:  func(tok string) (string, bool) { return "mcp_static", tok == valid },
+		AuditAuth:     func(_ *http.Request, event AuthAuditEvent) { events = append(events, event) },
+	})
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := h.requireMCPBearer(next)
+
+	for _, tc := range []struct {
+		name       string
+		authHeader string
+		wantStatus int
+		wantResult string
+	}{
+		{name: "valid", authHeader: "Bearer " + valid, wantStatus: http.StatusNoContent, wantResult: "success"},
+		{name: "invalid", authHeader: "Bearer attacker-secret", wantStatus: http.StatusUnauthorized, wantResult: "invalid"},
+		{name: "malformed", authHeader: "Basic attacker-secret", wantStatus: http.StatusUnauthorized, wantResult: "malformed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events = nil
+			r := httptest.NewRequest(http.MethodPost, "https://host/mcp", nil)
+			r.Header.Set("Authorization", tc.authHeader)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status=%d, want %d", w.Code, tc.wantStatus)
+			}
+			if len(events) != 1 || events[0].Result != tc.wantResult {
+				t.Fatalf("audit events=%+v, want one %q", events, tc.wantResult)
+			}
+			serialized := fmt.Sprintf("%+v", events)
+			if strings.Contains(serialized, "attacker-secret") || strings.Contains(serialized, valid) {
+				t.Fatalf("credential leaked in audit event: %+v", events)
+			}
+		})
+	}
 }
 
 // mcpPost sends a JSON-RPC body to the stateless streamable endpoint.
@@ -218,7 +279,10 @@ func TestOAuthOIDCMetadataAlias(t *testing.T) {
 // IP: after consentRLBurst submissions in the window, further attempts get 429
 // (defence-in-depth against brute-forcing MCP_TOKEN through the form).
 func TestOAuthConsentRateLimited(t *testing.T) {
-	ts := newTestServer(t, nil)
+	var events []AuthAuditEvent
+	ts := newTestServerWithAudit(t, nil, func(_ *http.Request, event AuthAuditEvent) {
+		events = append(events, event)
+	})
 	client := ts.Client()
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
@@ -265,6 +329,9 @@ func TestOAuthConsentRateLimited(t *testing.T) {
 	// The next one exceeds the burst → 429.
 	if code := post(); code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 after %d attempts, got %d", consentRLBurst, code)
+	}
+	if len(events) != consentRLBurst+1 || events[len(events)-1].Result != "rate_limited" {
+		t.Fatalf("consent audit events=%+v, want one per submission ending in rate_limited", events)
 	}
 }
 
@@ -361,7 +428,7 @@ func TestOAuthFlowMintsUsableToken(t *testing.T) {
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 
-	// 3. authorize consent submit (admin token) → 302 with ?code=
+	// 3. authorize consent submit (MCP token) → 302 with ?code=
 	form := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {reg.ClientID},

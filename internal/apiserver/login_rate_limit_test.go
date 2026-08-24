@@ -40,6 +40,23 @@ func TestLoginRateLimiterBackoffAndLock(t *testing.T) {
 	}
 }
 
+func TestLoginBackoffDoesNotPublishRateLimitEvent(t *testing.T) {
+	var events []APIAnomalyEvent
+	unsubscribe := SubscribeAPIAnomalyEvents(func(event APIAnomalyEvent) { events = append(events, event) })
+	t.Cleanup(unsubscribe)
+	r := httptest.NewRequest(http.MethodPost, "https://host/login", nil)
+	r.RemoteAddr = "198.51.100.40:42000"
+
+	emitLoginLimiterAudit(r, "backoff", "198.51.100.40", "alice", 100*time.Millisecond)
+	if len(events) != 0 {
+		t.Fatalf("backoff published detector event: %+v", events)
+	}
+	emitLoginLimiterAudit(r, "throttle", "198.51.100.40", "alice", 0)
+	if len(events) != 1 || events[0].Reason != "AUTH_LOGIN_RATE_LIMIT" {
+		t.Fatalf("throttle events=%+v, want one AUTH_LOGIN_RATE_LIMIT", events)
+	}
+}
+
 func TestProtectLoginAttemptReturnsGenericError(t *testing.T) {
 	orig := globalLoginRateLimiter
 	globalLoginRateLimiter = newLoginRateLimiter()

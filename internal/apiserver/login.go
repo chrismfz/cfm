@@ -66,7 +66,7 @@ const loginHTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CFM — Sign in</title>
-`+loginFaviconLink+`
+` + loginFaviconLink + `
 <style>` + loginCSS + `</style>
 </head>
 <body>
@@ -117,7 +117,7 @@ const verifyHTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CFM — Two-Factor Auth</title>
-`+loginFaviconLink+`
+` + loginFaviconLink + `
 <style>` + loginCSS + `</style>
 </head>
 <body>
@@ -195,11 +195,13 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		username := loginAttemptUsername(r)
 		if !protectLoginAttempt(w, r, username) {
+			auditAuthAttempt(r, authAttemptAudit{Kind: "login", Result: "rate_limited", AuthMech: "password", User: normalizeLoginUsername(username), Status: http.StatusTooManyRequests})
 			return
 		}
 
 		h := authLoginHandler()
 		if h == nil {
+			auditAuthAttempt(r, authAttemptAudit{Kind: "login", Result: "unavailable", AuthMech: "password", User: normalizeLoginUsername(username), Status: http.StatusServiceUnavailable})
 			http.Error(w, `{"error":"auth not configured"}`, http.StatusServiceUnavailable)
 			return
 		}
@@ -207,8 +209,19 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		rec := httptest.NewRecorder()
 		h(rec, r)
 		recordLoginLimiterResult(r, username, rec.Code)
+		mfaRequired := isMFARequiredResponse(rec.Body.Bytes())
+		result := authAttemptResult(rec.Code)
+		attempt := authAttemptAudit{Kind: "login", Result: result, AuthMech: "password", User: normalizeLoginUsername(username), Status: rec.Code}
+		if mfaRequired {
+			attempt.MFA = "required"
+		}
+		auditAuthAttempt(r, attempt)
+		if result == "fail" {
+			setAPIAnomalyReason(w, r, "login_failed")
+			publishRequestAnomaly(r, "AUTH_LOGIN_FAIL", rec.Code)
+		}
 
-		if isBrowser(r) && mfaLoginVerifyEnabled() && isMFARequiredResponse(rec.Body.Bytes()) {
+		if isBrowser(r) && mfaLoginVerifyEnabled() && mfaRequired {
 			base := cfmBase(r)
 			next := loginRedirectNext(r, base)
 			http.Redirect(w, r, fmt.Sprintf("%s/login/verify?next=%s", base, url.QueryEscape(next)), http.StatusSeeOther)
@@ -250,15 +263,26 @@ func handleLoginVerify(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(page))
 	case http.MethodPost:
 		if !mfaLoginVerifyEnabled() {
+			auditAuthAttempt(r, authAttemptAudit{Kind: mfaAttemptKind(r), Result: "unavailable", AuthMech: "session_cookie", Status: http.StatusNotFound})
 			http.Error(w, `{"error":"mfa verify disabled by rollout"}`, http.StatusNotFound)
 			return
 		}
 		h := authLoginMFAVerifyHandler()
 		if h == nil {
+			auditAuthAttempt(r, authAttemptAudit{Kind: mfaAttemptKind(r), Result: "unavailable", AuthMech: "session_cookie", Status: http.StatusNotFound})
 			http.Error(w, `{"error":"mfa verify not supported"}`, http.StatusNotFound)
 			return
 		}
-		h(w, r)
+		kind := mfaAttemptKind(r)
+		rec := httptest.NewRecorder()
+		h(rec, r)
+		result := authAttemptResult(rec.Code)
+		auditAuthAttempt(r, authAttemptAudit{Kind: kind, Result: result, AuthMech: "session_cookie", Status: rec.Code})
+		if result == "fail" {
+			setAPIAnomalyReason(w, r, "mfa_failed")
+			publishRequestAnomaly(r, "AUTH_MFA_FAIL", rec.Code)
+		}
+		copyRecorderResponse(w, rec)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -276,10 +300,23 @@ func handleLoginWebAuthnBegin(w http.ResponseWriter, r *http.Request) {
 func handleLoginWebAuthnFinish(w http.ResponseWriter, r *http.Request) {
 	h := authLoginWebAuthnFinish()
 	if h == nil {
+		if r.Method == http.MethodPost {
+			auditAuthAttempt(r, authAttemptAudit{Kind: "mfa_passkey", Result: "unavailable", AuthMech: "session_cookie", Status: http.StatusNotFound})
+		}
 		http.NotFound(w, r)
 		return
 	}
-	h(w, r)
+	rec := httptest.NewRecorder()
+	h(rec, r)
+	if r.Method == http.MethodPost {
+		result := authAttemptResult(rec.Code)
+		auditAuthAttempt(r, authAttemptAudit{Kind: "mfa_passkey", Result: result, AuthMech: "session_cookie", Status: rec.Code})
+		if result == "fail" {
+			setAPIAnomalyReason(w, r, "mfa_failed")
+			publishRequestAnomaly(r, "AUTH_MFA_FAIL", rec.Code)
+		}
+	}
+	copyRecorderResponse(w, rec)
 }
 
 func authHandlerByName(name string) http.HandlerFunc {
@@ -325,6 +362,47 @@ func isMFARequiredResponse(body []byte) bool {
 		}
 	}
 	return false
+}
+
+func authAttemptResult(status int) string {
+	if status >= 200 && status < 400 {
+		return "success"
+	}
+	if status >= 400 && status < 500 {
+		return "fail"
+	}
+	return "error"
+}
+
+func mfaAttemptKind(r *http.Request) string {
+	method := strings.ToLower(strings.TrimSpace(requestBodyField(r, "method")))
+	switch method {
+	case "recovery_code", "recovery":
+		return "recovery_code"
+	case "totp", "":
+		return "mfa_totp"
+	default:
+		return "mfa_unknown"
+	}
+}
+
+func requestBodyField(r *http.Request, field string) string {
+	if r == nil || r.Body == nil {
+		return ""
+	}
+	buf, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	if err != nil {
+		return ""
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(strings.NewReader(string(buf)))
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(buf, &payload); err != nil {
+		return ""
+	}
+	var value string
+	_ = json.Unmarshal(payload[field], &value)
+	return value
 }
 
 func loginRedirectNext(r *http.Request, base string) string {

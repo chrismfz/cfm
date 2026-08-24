@@ -39,6 +39,9 @@ type Detector struct {
 
 	allowIPs  map[string]struct{}
 	allowNets []*net.IPNet
+	unsub     []func()
+	bypassMu  sync.RWMutex
+	bypass    func(string) bool
 }
 
 func New(cfg Config) *Detector {
@@ -94,9 +97,35 @@ func (d *Detector) Name() string {
 	if d.name != "" {
 		return d.name
 	}
-	return "api_abuse"
+	return "cfm_endpoints"
 }
 func (d *Detector) Every() time.Duration { return d.cfg.Every }
+
+func (d *Detector) SetBypassFunc(fn func(string) bool) {
+	d.bypassMu.Lock()
+	d.bypass = fn
+	d.bypassMu.Unlock()
+}
+
+func (d *Detector) AddUnsubscribe(fn func()) {
+	if fn == nil {
+		return
+	}
+	d.mu.Lock()
+	d.unsub = append(d.unsub, fn)
+	d.mu.Unlock()
+}
+
+func (d *Detector) Shutdown() error {
+	d.mu.Lock()
+	unsub := d.unsub
+	d.unsub = nil
+	d.mu.Unlock()
+	for _, fn := range unsub {
+		fn()
+	}
+	return nil
+}
 
 func (d *Detector) Enqueue(ev core.InputEvent) {
 	if ev.When.IsZero() {
@@ -111,6 +140,17 @@ func (d *Detector) Enqueue(ev core.InputEvent) {
 }
 
 func (d *Detector) allowed(ev core.InputEvent) bool {
+	if ip := net.ParseIP(strings.TrimSpace(ev.SrcIP)); ip != nil {
+		if ip.IsLoopback() || core.IsSelfIP(ip.String()) {
+			return true
+		}
+	}
+	d.bypassMu.RLock()
+	bypass := d.bypass
+	d.bypassMu.RUnlock()
+	if bypass != nil && bypass(ev.SrcIP) {
+		return true
+	}
 	if _, ok := d.allowIPs[ev.SrcIP]; ok && ev.SrcIP != "" {
 		return true
 	}
@@ -165,7 +205,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
 		alert := core.Alert{
 			When:    now,
-			Kind:    core.AlertKind("API/ABUSE"),
+			Kind:    core.AlertKind("CFM/ENDPOINTS"),
 			Key:     ev.SrcIP,
 			Count:   count,
 			Samples: d.samples.GetAndClear(ev.SrcIP),

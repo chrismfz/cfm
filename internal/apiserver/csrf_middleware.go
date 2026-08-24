@@ -36,6 +36,8 @@ func CSRFMiddleware(next http.Handler) http.Handler {
 		if ok, reason := validateCSRFSameOrigin(r); !ok {
 			logging.LogfAPI("[apiserver] event=csrf_reject path=%q method=%s src_ip=%s reason=%s",
 				r.URL.Path, r.Method, realIPFromRequest(r), reason)
+			setAPIAnomalyReason(w, r, "csrf_reject")
+			publishRequestAnomaly(r, "CSRF_REJECT", http.StatusForbidden)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"error":"forbidden"}`))

@@ -165,7 +165,7 @@ WAF/SQLI  ip=185.199.197.32  rule=301 reason=WAF_SQLI  host=alexandras.gr
 `Kind` is a free string; if per-rule grouping is ever wanted at the top level,
 it can be `WAF/SQLI/309`. Default recommendation: **family in `Kind`
 (one counter/threshold per family), `rule_id` in `Extra`** (full per-hit
-attribution) — the same split `api_abuse` uses for its stages.
+attribution) — the same split `cfm_endpoints` uses for its stages.
 
 ## Config schema — mirrors `exim_security`
 
@@ -233,7 +233,7 @@ BAD_UTF8        = 0      ; WAF_BAD_UTF8 (611, logonly) — observe-only
 ;RULE_501 = 25          ; generic auth-burst: extra-lenient (bulk-admin devs)
 ;RULE_411 = 1           ; webshell-ping fingerprint: instant
 
-; False-positive escape hatch (same keys api_abuse uses). For a KNOWN legit
+; False-positive escape hatch (same keys cfm_endpoints uses). For a KNOWN legit
 ; source (e.g. that bulk-update developer's box) this is the sharpest tool —
 ; allow the IP and skip scoring entirely.
 ALLOW_IPS  = ""         ; never block these IPs (+ the GLOBAL NET/IP ignore list)
@@ -300,7 +300,7 @@ So the leniency design lands as:
    hand attackers a bypass by renting GR-geolocated space; a temp-ban + surface
    does not.
 
-`meta.Register(... LeniencySupported: true)` (as `api_abuse` does) is what
+`meta.Register(... LeniencySupported: true)` (as `cfm_endpoints` does) is what
 activates the `[waf_security.leniency]` section — no extra code.
 
 ## What already exists vs. what to build

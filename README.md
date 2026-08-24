@@ -523,8 +523,8 @@ internal/
 - `[global]` defaults: `DEFAULT_EVERY`, `DEFAULT_TIMEOUT`, `DEFAULT_COOLDOWN`
 - Global ignores: `IGNORE_IPS`, `IGNORE_NETS`, `LOG_IGNORED`
   - When panel routes use the shared `cfm_challenge` backend (`127.0.0.1:9098`), these global ignore lists affect both web and panel challenge decisions.
-- Per-detector sections: `[ssh_auth]`, `[mysql]`, `[mysql_governor]`, `[ftpd]`, `[cpanel]`, `[exim_*]`, `[dovecot_*]`, `[postfix_*]`, `[modsec]`, `[health]`, `[webdetector]`
-- API anomaly detector section: `[api_abuse]` (apiserver-origin anomalies with staged observe/challenge/block mitigation)
+- Per-detector sections: `[cfm_endpoints]`, `[ssh_auth]`, `[mysql]`, `[mysql_governor]`, `[ftpd]`, `[cpanel]`, `[exim_*]`, `[dovecot_*]`, `[postfix_*]`, `[modsec]`, `[health]`, `[webdetector]`
+- CFM control-plane detector: `[cfm_endpoints]` (default-on even when the section is absent; apiserver auth/probe anomalies with staged observe/challenge/TTL-block mitigation). The old `[api_abuse]` name is a deprecated compatibility alias.
 - Webdetector history knobs live in `[webdetector]` here (not in `cfm.conf`): `HISTORY_ENABLED`, `HISTORY_DB_PATH`, `HISTORY_RETENTION_DAYS`, `HISTORY_PRUNE_EVERY`
 - Per-section block policy: `BLOCK = no|dryrun|permanent|<duration>` + `BLOCK_COOLDOWN`
 
@@ -537,18 +537,24 @@ CFM detector runtime config lives at **`/etc/cfm/detectors.conf`** (packaged bas
 - Leniency tuning and `.leniency` companion sections: [`docs/DETECTORS.md` §6](docs/DETECTORS.md#6-leniency-companion-sections)
 
 Capabilities at a glance:
-- Built-in detectors for SSH, mail, FTP, MySQL, cPanel, ModSecurity, health, web traffic, and API abuse.
+- Built-in detectors for CFM's own control plane, SSH, mail, FTP, MySQL, cPanel, ModSecurity, health, and web traffic.
 - Per-section block modes: `off`/`no`, `dryrun`, `permanent`, or duration TTL (for example `30m`, `2h`).
 - Multiple log sources by detector: `file`, `journal`, and `docker` where supported.
 - Custom regex detectors via `[custom:<name>]` sections (and expanding UI support as it becomes available).
 
 > **Start safe:** set `BLOCK = dryrun` while tuning thresholds, regexes, and ignore lists; switch to TTL or `permanent` only after validation.
 
-#### API abuse rollout guidance
-- Start with detect-only by setting `[api_abuse]` `BLOCK = no` and tuning `STAGE1_THRESHOLD` from production logs.
+#### CFM endpoint protection guidance
+- Protection is built in and default-on; an optional `[cfm_endpoints]` section overrides the built-in values. Use an explicit `ENABLED=0` only when intentionally opting out.
+- Start with detect-only on a host that needs tuning by setting `[cfm_endpoints]` `BLOCK = no` and adjusting `STAGE1_THRESHOLD` from production logs.
 - Enable gradual mitigation next: keep stage 1 as observe, set `STAGE2_THRESHOLD` + `STAGE2_CHALLENGE_TTL` for temporary challenge responses.
 - Enable stage 3 only after baseline tuning: set `BLOCK = <short ttl>` (or `BLOCK=dryrun` first), then tune `STAGE3_THRESHOLD` and `BLOCK_COOLDOWN`.
-- Use `ALLOW_IPS`, `ALLOW_NETS`, `ALLOW_UA_CONTAINS`, and `PATH_EXCEPTIONS` to exempt known monitors, proxies, and expected probe-like paths.
+- Prefer `[global]` `IGNORE_IPS`/`IGNORE_NETS` or section `ALLOW_IPS`/`ALLOW_NETS`
+  for trusted monitors and proxies; these are discarded before detector counting.
+  `ALLOW_UA_CONTAINS` is attacker-controlled; the historical shipped
+  `uptime,healthcheck,prometheus` list is removed on load unless retaining that
+  exact list is acknowledged with `ALLOW_UA_CONTAINS_EXPLICIT=1`. Use
+  `PATH_EXCEPTIONS` only for expected probe-like paths.
 
 ### `notify.conf` — Notifier
 - Global on/off + JSONL audit log

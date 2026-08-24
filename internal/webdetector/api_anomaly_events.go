@@ -40,21 +40,32 @@ func (e APIAnomalyEvent) InputEvent() core.InputEvent {
 
 var (
 	apiAnomalySubsMu sync.RWMutex
-	apiAnomalySubs   []func(APIAnomalyEvent)
+	apiAnomalySubs   = map[uint64]func(APIAnomalyEvent){}
+	apiAnomalySubID  uint64
 )
 
-func SubscribeAPIAnomalyEvents(fn func(APIAnomalyEvent)) {
+func SubscribeAPIAnomalyEvents(fn func(APIAnomalyEvent)) func() {
 	if fn == nil {
-		return
+		return func() {}
 	}
 	apiAnomalySubsMu.Lock()
-	apiAnomalySubs = append(apiAnomalySubs, fn)
+	apiAnomalySubID++
+	id := apiAnomalySubID
+	apiAnomalySubs[id] = fn
 	apiAnomalySubsMu.Unlock()
+	return func() {
+		apiAnomalySubsMu.Lock()
+		delete(apiAnomalySubs, id)
+		apiAnomalySubsMu.Unlock()
+	}
 }
 
 func publishAPIAnomalyEvent(ev APIAnomalyEvent) {
 	apiAnomalySubsMu.RLock()
-	subs := append([]func(APIAnomalyEvent){}, apiAnomalySubs...)
+	subs := make([]func(APIAnomalyEvent), 0, len(apiAnomalySubs))
+	for _, fn := range apiAnomalySubs {
+		subs = append(subs, fn)
+	}
 	apiAnomalySubsMu.RUnlock()
 	for _, fn := range subs {
 		fn(ev)

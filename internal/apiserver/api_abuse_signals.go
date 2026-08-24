@@ -55,7 +55,7 @@ func (c *apiAbuseSignalClassifier) Evaluate(r *http.Request, status int, reason 
 	if looksLikeFuzzPath(path) && c.crossed("fuzz|"+ipUA, 30*time.Second, 3) {
 		events = append(events, apiAbuseEvent{Name: "api_fuzz", Signal: "path_entropy_or_fuzz", Count: c.count("fuzz|" + ipUA), Scope: "ip+ua"})
 	}
-	if (status == http.StatusUnauthorized || status == http.StatusForbidden) && c.crossed("unauth|"+ipUA, 30*time.Second, 5) {
+	if reason != "direct_auth_event" && (status == http.StatusUnauthorized || status == http.StatusForbidden) && c.crossed("unauth|"+ipUA, 30*time.Second, 5) {
 		events = append(events, apiAbuseEvent{Name: "api_unauthorized_burst", Signal: "unauthorized_burst", Count: c.count("unauth|" + ipUA), Scope: "ip+ua"})
 	}
 

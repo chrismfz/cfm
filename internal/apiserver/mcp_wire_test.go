@@ -22,20 +22,20 @@ func TestMCPRequestSchemeForwardedProtoTrust(t *testing.T) {
 	if got := mcpRequestScheme(r); got != "http" {
 		t.Errorf("non-loopback XFP spoof: scheme=%q, want http", got)
 	}
-	// loopback edge (sets prefix header) with XFP=https → https
+	// loopback edge (sets canonical client identity) with XFP=https → https
 	r2 := httptest.NewRequest("GET", "/mcp", nil)
 	r2.RemoteAddr = "127.0.0.1:5555"
-	r2.Header.Set("X-Forwarded-Prefix", "/cfm-admin")
+	r2.Header.Set("X-Real-IP", "198.51.100.10")
 	r2.Header.Set("X-Forwarded-Proto", "https")
 	if got := mcpRequestScheme(r2); got != "https" {
 		t.Errorf("loopback edge XFP: scheme=%q, want https", got)
 	}
-	// loopback edge, no XFP → https (edge terminates TLS)
+	// Missing XFP cannot distinguish the HTTP and HTTPS edge listeners.
 	r3 := httptest.NewRequest("GET", "/mcp", nil)
 	r3.RemoteAddr = "127.0.0.1:5555"
-	r3.Header.Set("X-Forwarded-Prefix", "/cfm-admin")
-	if got := mcpRequestScheme(r3); got != "https" {
-		t.Errorf("loopback edge no-XFP: scheme=%q, want https", got)
+	r3.Header.Set("X-Real-IP", "198.51.100.10")
+	if got := mcpRequestScheme(r3); got != "http" {
+		t.Errorf("loopback edge no-XFP: scheme=%q, want http", got)
 	}
 }
 
@@ -70,16 +70,16 @@ func TestMCPStaticBearer(t *testing.T) {
 	const adminTok = "cfm-admin-1a2b3c4d5e6f7a8b9c0d1e2f"
 
 	cases := []struct {
-		name          string
-		tok, m, a     string
-		want          bool
+		name      string
+		tok, m, a string
+		want      bool
 	}{
 		{"mcp token", mcpTok, mcpTok, adminTok, true},
 		{"admin token", adminTok, mcpTok, adminTok, true},
 		{"wrong token", "nope", mcpTok, adminTok, false},
 		{"empty bearer", "", mcpTok, adminTok, false},
-		{"empty bearer, empty mcp", "", "", adminTok, false},   // must not match "" vs ""
-		{"empty bearer, both empty", "", "", "", false},        // defensive
+		{"empty bearer, empty mcp", "", "", adminTok, false}, // must not match "" vs ""
+		{"empty bearer, both empty", "", "", "", false},      // defensive
 		{"admin accepted when mcp unset", adminTok, "", adminTok, true},
 	}
 	for _, c := range cases {
@@ -97,7 +97,7 @@ func TestMCPStaticBearer(t *testing.T) {
 // the server disabled.
 func TestMCPArmToken(t *testing.T) {
 	const strong = "cfm-mcp-3f9a2b7c8d1e4f6a9b0c2d5e" // >= 24
-	const gen = "auto-generated-abcdefghijklmnop"      // 31 chars, >= 24
+	const gen = "auto-generated-abcdefghijklmnop"     // 31 chars, >= 24
 	okLoader := func() (string, error) { return gen, nil }
 	failLoader := func() (string, error) { return "", errors.New("boom") }
 	panicLoader := func() (string, error) { t.Fatal("loader must not be called when MCP_TOKEN is set"); return "", nil }

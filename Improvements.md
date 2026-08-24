@@ -8,7 +8,7 @@ This file records product/security improvements that should remain visible even 
 
 Evolve/rename the existing `api_abuse` detector into a first-class **`cfm_endpoints`** detector that protects CFM's own admin/API surface through the same detector/sink/enforcement/notification pipeline used for Exim, Dovecot, cPanel, WAF, etc.
 
-This protection is a **built-in product safety feature and must be ON by default even when no `[cfm_endpoints]` section exists in `detectors.conf`.**
+This protection is a **built-in product safety feature and must be ON by default even when no `[cfm_endpoints]` section or entire `detectors.conf` file exists.**
 
 Desired config semantics:
 
@@ -162,18 +162,19 @@ All nft enforcement should continue through the normal detector section sink so 
 
 ## Acceptance checklist
 
-- [ ] `cfm_endpoints` exists as the canonical detector name.
-- [ ] Protection runs with built-in defaults even when no detector section is present.
-- [ ] `[api_abuse]` is a deprecated alias/migration path and does not create duplicate subscriptions/double counting.
-- [ ] Every login credential attempt writes exactly one parse-friendly `cfm.api.log` auth-attempt line.
-- [ ] MFA/passkey verification failures/successes have safe one-line audit records where applicable.
-- [ ] Every supplied API token authentication attempt writes exactly one auth-attempt line.
-- [ ] No secrets/passwords/codes/session IDs/tokens are written to the log.
-- [ ] Structured events, not log tailing, feed `cfm_endpoints` enforcement.
-- [ ] Login failures are fed into the detector pipeline.
-- [ ] Existing login throttle/account-lock behavior is preserved.
+- [x] `cfm_endpoints` exists as the canonical detector name.
+- [x] Protection runs with built-in defaults even when no detector section is present.
+- [x] `[api_abuse]` is a deprecated alias/migration path and does not create duplicate subscriptions/double counting.
+- [x] Every login credential attempt writes exactly one parse-friendly `cfm.api.log` auth-attempt line.
+- [x] MFA/passkey verification failures/successes have safe one-line audit records where applicable.
+- [x] Every supplied API token authentication attempt writes exactly one auth-attempt line.
+- [x] No secrets/passwords/codes/session IDs/tokens are written to the log.
+- [x] Structured events, not log tailing, feed `cfm_endpoints` enforcement.
+- [x] Login failures are fed into the detector pipeline.
+- [x] Existing login throttle/account-lock behavior is preserved.
 - [ ] Existing `auth_autoblock` is removed only after detector enforcement parity is proven.
-- [ ] Invalid-token bursts can produce detector notifications and a bounded TTL nft block.
+- [x] Invalid-token bursts can produce detector notifications and a bounded TTL nft block.
 - [ ] Valid-token high-rate abuse is rate-limited by credential/mechanism before considering IP blocking.
-- [ ] Outcomes continue through `cfm.detector.log`, reporting and Slack/mail notification paths.
-- [ ] XFF/effective-scheme regression tests cover edge, direct 6060 and direct 6061 entry points.
+- [x] Outcomes continue through `cfm.detector.log`, reporting and Slack/mail notification paths.
+- [x] XFF/effective-scheme regression tests cover edge, direct 6060 and direct 6061 entry points.
+- [x] `[global]` `IGNORE_IPS`/`IGNORE_NETS`, loopback and refreshed self IPs are discarded before detector counting.

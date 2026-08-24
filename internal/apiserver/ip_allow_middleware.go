@@ -21,9 +21,8 @@ var ipAllowLookupIP = func(ctx context.Context, host string) ([]net.IP, error) {
 
 // IPAllowMiddleware enforces source IP allowlisting for the API server.
 //
-// Trust model for client IP extraction mirrors request logging helpers:
-// if the direct peer is loopback, the first X-Forwarded-For hop is treated
-// as the effective client IP.
+// Trust model for client IP extraction mirrors request logging helpers: only a
+// loopback edge hop may supply one canonical X-Real-IP/X-Forwarded-For address.
 func IPAllowMiddleware(cfg *cfgpkg.Config, cfgDir string) func(http.Handler) http.Handler {
 	apiURL := ""
 	if cfg != nil {
@@ -55,7 +54,7 @@ func IPAllowMiddleware(cfg *cfgpkg.Config, cfgDir string) func(http.Handler) htt
 }
 
 func rejectIP(w http.ResponseWriter, r *http.Request, reason, srcIP string) {
-	setAPIAnomalyReason(w, reason)
+	setAPIAnomalyReason(w, r, reason)
 	logging.LogfAPI("[apiserver] event=api_audit method=%s path=%q src_ip=%s reason=%s status=%d",
 		r.Method, r.URL.Path, srcIP, reason, http.StatusForbidden)
 	w.Header().Set("Content-Type", "application/json")
@@ -64,23 +63,11 @@ func rejectIP(w http.ResponseWriter, r *http.Request, reason, srcIP string) {
 }
 
 func effectiveClientIP(r *http.Request) (net.IP, bool) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = strings.TrimSpace(r.RemoteAddr)
-	}
-	direct := net.ParseIP(host)
-	if direct == nil {
+	ip := requestPeer(r).ClientIP
+	if ip == nil {
 		return nil, false
 	}
-	if direct.IsLoopback() {
-		if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
-			first := strings.TrimSpace(strings.Split(xff, ",")[0])
-			if parsed := net.ParseIP(first); parsed != nil {
-				return parsed, true
-			}
-		}
-	}
-	return direct, true
+	return ip, true
 }
 
 func allowImmediate(ip net.IP) bool {

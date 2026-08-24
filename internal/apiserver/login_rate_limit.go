@@ -3,7 +3,6 @@ package apiserver
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -334,16 +333,38 @@ func emitLoginLimiterAudit(r *http.Request, action, ip, account string, delay ti
 	if account == "" {
 		account = "unknown"
 	}
-	detail := ""
-	if delay > 0 {
-		detail = fmt.Sprintf(" delay=%s", delay)
+	status := "429"
+	if action == "backoff" {
+		status = "0"
 	}
-	logging.LogfAPI("[apiserver] event=login_rate_limit action=%s src_ip=%s account=%s method=%s path=%q ua=%q%s", action, ip, account, method, path, ua, detail)
+	fields := []string{
+		"[apiserver]",
+		"event=auth_decision",
+		"kind=login",
+		auditField("result", action),
+		auditField("src_ip", ip),
+		auditField("user", account),
+		auditField("method", method),
+		auditField("path", path),
+		"status=" + status,
+		auditField("ua", ua),
+	}
+	if delay > 0 {
+		fields = append(fields, auditField("delay", delay.String()))
+	}
+	logging.LogfAPI("%s", strings.Join(fields, " "))
+	if action == "backoff" {
+		return
+	}
+	reason := "AUTH_LOGIN_RATE_LIMIT"
+	if action == "lock" {
+		reason = "AUTH_ACCOUNT_LOCK"
+	}
 	publishAPIAnomalyEvent(APIAnomalyEvent{
 		When:      time.Now(),
 		Source:    "apiserver",
-		Reason:    "login_rate_limit_" + action,
-		Signal:    "login_rate_limit_" + action,
+		Reason:    reason,
+		Signal:    reason,
 		Scope:     "login",
 		Count:     1,
 		SrcIP:     ip,

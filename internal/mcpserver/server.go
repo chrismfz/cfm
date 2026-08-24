@@ -15,8 +15,9 @@
 //     daemon's own admin token). This reuses every existing handler + scope check
 //     verbatim, tracks the hot-swappable webdetector engine, and is read-only by
 //     construction (only GET, only allow-listed paths, only read tools).
-//   - Auth is OAuth 2.1 (oauth.go) minting a read-only, audience-bound token that
-//     is inert against /api/v1 — the admin token never leaves the operator.
+//   - Auth is static MCP/admin bearer or OAuth 2.1 (oauth.go); minted OAuth tokens
+//     are read-only and inert against /api/v1. CFM never sends the admin token to
+//     an MCP client.
 package mcpserver
 
 import (
@@ -39,6 +40,15 @@ import (
 // an HTTP-level failure is conveyed via status + body.
 type DispatchFunc func(ctx context.Context, path string, query url.Values) (status int, body []byte, err error)
 
+// AuthAuditEvent is a secret-free authentication decision produced by the MCP
+// bearer or OAuth-consent gate. The embedding apiserver owns log/event policy.
+type AuthAuditEvent struct {
+	Kind     string
+	Result   string
+	AuthMech string
+	Status   int
+}
+
 // Deps is everything the apiserver injects to stand the MCP server up. The
 // mcpserver package deliberately knows nothing about apiserver internals.
 type Deps struct {
@@ -51,8 +61,17 @@ type Deps struct {
 	// OAuth URL and the token audience.
 	BaseURL func(*http.Request) string
 
-	// Authenticate validates the consent-page credential (the CFM admin API
-	// token). SigningSecret keys the stateless OAuth artifacts (rotating it
+	// ClientIP returns the canonical source identity for rate limiting and audit.
+	// The embedding server owns proxy trust; forwarded headers must not be parsed
+	// independently here. The fallback uses only the immediate network peer.
+	ClientIP func(*http.Request) string
+
+	// AuditAuth receives exactly one decision for each supplied MCP bearer or
+	// consent credential. It must not receive raw credential material.
+	AuditAuth func(*http.Request, AuthAuditEvent)
+
+	// Authenticate validates the consent-page MCP_TOKEN. SigningSecret keys the
+	// stateless OAuth artifacts (rotating it
 	// revokes all issued MCP tokens).
 	Authenticate  Authenticator
 	SigningSecret string
@@ -64,7 +83,8 @@ type Deps struct {
 	// AUTH_TOKEN, so a fleet gateway that already holds AUTH_TOKEN can reach /mcp
 	// without a separate MCP_TOKEN. This gate never grants /api/v1 access; the MCP
 	// tool surface is read-only regardless of which token authenticated.
-	StaticBearer func(string) bool
+	// authMech is a safe classifier such as mcp_static or token_admin.
+	StaticBearer func(string) (authMech string, ok bool)
 }
 
 // Handler is the mounted MCP surface: the OAuth authorization server plus the
@@ -104,6 +124,9 @@ func New(deps Deps) *Handler {
 	if deps.MCPPath == "" {
 		deps.MCPPath = "/mcp"
 	}
+	if deps.ClientIP == nil {
+		deps.ClientIP = immediateIPFromRequestMCP
+	}
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    "cfm-mcp",
 		Title:   "CFM security telemetry (read-only)",
@@ -116,7 +139,7 @@ func New(deps Deps) *Handler {
 
 	return &Handler{
 		deps:  deps,
-		oauth: newOAuthServer(deps.BaseURL, deps.MCPPath, deps.SigningSecret, deps.Authenticate),
+		oauth: newOAuthServer(deps.BaseURL, deps.ClientIP, deps.AuditAuth, deps.MCPPath, deps.SigningSecret, deps.Authenticate),
 		mcpHTTP: mcp.NewStreamableHTTPHandler(
 			func(*http.Request) *mcp.Server { return srv }, statelessMCP),
 	}
@@ -130,8 +153,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle(h.deps.MCPPath, h.requireMCPBearer(h.mcpHTTP))
 }
 
-// requireMCPBearer gates /mcp on either the static admin token or an OAuth access
-// token this server minted. An unauthenticated request gets a 401 whose
+// requireMCPBearer gates /mcp on a static MCP/admin token or an OAuth access token
+// this server minted. An unauthenticated request gets a 401 whose
 // WWW-Authenticate points at the protected-resource metadata — the discovery
 // entrypoint the claude.ai connector follows (RFC 9728 §5.1).
 func (h *Handler) requireMCPBearer(next http.Handler) http.Handler {
@@ -139,15 +162,33 @@ func (h *Handler) requireMCPBearer(next http.Handler) http.Handler {
 		if oauthCORS(w, r) {
 			return
 		}
-		if tok := extractBearer(r); tok != "" {
-			if (h.deps.StaticBearer != nil && h.deps.StaticBearer(tok)) || h.oauth.validAccessToken(tok, r) {
+		tok := extractBearer(r)
+		if tok != "" {
+			if h.deps.StaticBearer != nil {
+				if authMech, ok := h.deps.StaticBearer(tok); ok {
+					h.auditAuth(r, AuthAuditEvent{Kind: "mcp_token", Result: "success", AuthMech: authMech, Status: http.StatusOK})
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			if h.oauth.validAccessToken(tok, r) {
+				h.auditAuth(r, AuthAuditEvent{Kind: "mcp_token", Result: "success", AuthMech: "mcp_oauth", Status: http.StatusOK})
 				next.ServeHTTP(w, r)
 				return
 			}
+			h.auditAuth(r, AuthAuditEvent{Kind: "mcp_token", Result: "invalid", AuthMech: "unknown", Status: http.StatusUnauthorized})
+		} else if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+			h.auditAuth(r, AuthAuditEvent{Kind: "mcp_token", Result: "malformed", AuthMech: "unknown", Status: http.StatusUnauthorized})
 		}
 		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+h.oauth.resourceMetadataURL(r)+`"`)
 		oauthWriteErr(w, http.StatusUnauthorized, "invalid_token", "authorization required")
 	})
+}
+
+func (h *Handler) auditAuth(r *http.Request, event AuthAuditEvent) {
+	if h.deps.AuditAuth != nil {
+		h.deps.AuditAuth(r, event)
+	}
 }
 
 // ── tool dispatch + result helpers ────────────────────────────────────────────
@@ -184,10 +225,7 @@ func extractBearer(r *http.Request) string {
 	return ""
 }
 
-func realIPFromRequestMCP(r *http.Request) string {
-	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
-	}
+func immediateIPFromRequestMCP(r *http.Request) string {
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
 	}

@@ -19,10 +19,10 @@ package mcpserver
 //     token audience) therefore carries that prefix, and the claude.ai connector
 //     discovers it via the WWW-Authenticate resource_metadata pointer (RFC 9728
 //     §5.1) — no /.well-known routing at the host root is required.
-//   - Consent is proven by pasting the CFM admin API token (constant-time compare
+//   - Consent is proven by pasting MCP_TOKEN (constant-time compare
 //     via the Authenticate hook). The minted access_token is a read-only MCP
 //     credential that is inert against /api/v1 (only the /mcp bearer gate honours
-//     it); the admin token itself never leaves the operator's browser.
+//     it); neither MCP_TOKEN nor the admin token is handed to the OAuth client.
 
 import (
 	"crypto/hmac"
@@ -66,12 +66,14 @@ type Authenticator func(credential string) (subject string, ok bool)
 
 // oauthServer is the in-binary OAuth authorization + resource-metadata provider.
 type oauthServer struct {
-	baseFn  func(*http.Request) string // externally reachable origin+prefix, per request
-	mcpPath string                     // MCP endpoint path under the prefix, e.g. "/mcp"
-	auth    Authenticator
-	prompt  string
-	key     []byte // HMAC signing key derived from the server secret
-	tpl     *template.Template
+	baseFn    func(*http.Request) string // externally reachable origin+prefix, per request
+	clientIP  func(*http.Request) string // canonical identity supplied by the embedding server
+	auditAuth func(*http.Request, AuthAuditEvent)
+	mcpPath   string // MCP endpoint path under the prefix, e.g. "/mcp"
+	auth      Authenticator
+	prompt    string
+	key       []byte // HMAC signing key derived from the server secret
+	tpl       *template.Template
 
 	accessTTL  time.Duration
 	refreshTTL time.Duration
@@ -90,9 +92,11 @@ type oauthServer struct {
 	consentRL *ipRateLimiter
 }
 
-func newOAuthServer(baseFn func(*http.Request) string, mcpPath, signingSecret string, auth Authenticator) *oauthServer {
+func newOAuthServer(baseFn, clientIP func(*http.Request) string, auditAuth func(*http.Request, AuthAuditEvent), mcpPath, signingSecret string, auth Authenticator) *oauthServer {
 	return &oauthServer{
 		baseFn:     baseFn,
+		clientIP:   clientIP,
+		auditAuth:  auditAuth,
 		mcpPath:    mcpPath,
 		auth:       auth,
 		prompt:     "Paste your MCP_TOKEN to approve read-only access.",
@@ -334,20 +338,29 @@ func (s *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// entropy (>=24 chars) is the primary defence, this is defence-in-depth
 	// against brute-forcing it through the form and against mcp_oauth_consent_*
 	// log spam. A legitimate operator submits once, well under the burst.
-	ip := realIPFromRequestMCP(r)
+	ip := s.clientIP(r)
 	if !s.consentRL.allow(ip, time.Now(), consentRLWindow, consentRLBurst) {
+		if s.auditAuth != nil {
+			s.auditAuth(r, AuthAuditEvent{Kind: "mcp_consent", Result: "rate_limited", AuthMech: "unknown", Status: http.StatusTooManyRequests})
+		}
 		logging.LogfAPI("[apiserver] event=mcp_oauth_consent_ratelimited src_ip=%s window=%s burst=%d", ip, consentRLWindow, consentRLBurst)
 		w.Header().Set("Retry-After", "300")
 		http.Error(w, "too many consent attempts; try again later", http.StatusTooManyRequests)
 		return
 	}
 
-	// POST: the consent submit. The credential is validated by the Authenticator.
+	// POST: the MCP_TOKEN consent credential is validated by the Authenticator.
 	_, ok = s.auth(get("token"))
 	if !ok {
+		if s.auditAuth != nil {
+			s.auditAuth(r, AuthAuditEvent{Kind: "mcp_consent", Result: "invalid", AuthMech: "mcp_static", Status: http.StatusUnauthorized})
+		}
 		logging.LogfAPI("[apiserver] event=mcp_oauth_consent_denied src_ip=%s", ip)
 		s.renderAuthorize(w, view, "Invalid token.")
 		return
+	}
+	if s.auditAuth != nil {
+		s.auditAuth(r, AuthAuditEvent{Kind: "mcp_consent", Result: "success", AuthMech: "mcp_static", Status: http.StatusFound})
 	}
 	code := s.sign(oauthClaims{
 		Kind:      "code",
@@ -485,9 +498,9 @@ type oauthClaims struct {
 
 var oauthB64 = base64.RawURLEncoding
 
-// deriveOAuthKey derives the HMAC signing key from the server secret (the admin
-// API token). Domain-separated so it can never collide with any other use of that
-// secret. Rotating the admin token invalidates every issued artifact.
+// deriveOAuthKey derives the HMAC signing key from MCP_TOKEN. Domain-separated
+// so it can never collide with any other use of that secret. Rotating MCP_TOKEN
+// invalidates every issued artifact.
 func deriveOAuthKey(secret string) []byte {
 	m := hmac.New(sha256.New, []byte(secret))
 	m.Write([]byte("cfm-mcp-oauth-signing-v1"))
@@ -642,7 +655,7 @@ const authorizeHTML = `<!doctype html>
  <input type="hidden" name="code_challenge_method" value="S256">
  <input type="hidden" name="resource" value="{{.Resource}}">
  <input type="hidden" name="scope" value="{{.Scope}}">
- <label for="token">Admin API token</label>
+ <label for="token">MCP token</label>
  <input id="token" type="password" name="token" autocomplete="off" autofocus>
  <button type="submit">Approve</button>
 </form>

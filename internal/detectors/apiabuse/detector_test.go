@@ -77,3 +77,34 @@ func TestDetectorAlertReasonUsesEventReason(t *testing.T) {
 		t.Fatal("expected alert")
 	}
 }
+
+func TestDetectorBypassesGlobalIgnoreBeforeCounting(t *testing.T) {
+	d := New(Config{Stage1Threshold: 1})
+	d.SetBypassFunc(func(ip string) bool { return ip == "84.54.49.20" })
+	out := make(chan core.Alert, 1)
+	d.Enqueue(core.InputEvent{Source: "apiserver", Reason: "AUTH_TOKEN_INVALID", SrcIP: "84.54.49.20"})
+	if err := d.RunOnce(context.Background(), out); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	select {
+	case alert := <-out:
+		t.Fatalf("global-ignore IP reached detector counter: %+v", alert)
+	default:
+	}
+}
+
+func TestDetectorAlwaysBypassesLoopback(t *testing.T) {
+	d := New(Config{Stage1Threshold: 1})
+	out := make(chan core.Alert, 2)
+	for _, ip := range []string{"127.0.0.2", "::1"} {
+		d.Enqueue(core.InputEvent{Source: "apiserver", Reason: "AUTH_TOKEN_INVALID", SrcIP: ip})
+	}
+	if err := d.RunOnce(context.Background(), out); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	select {
+	case alert := <-out:
+		t.Fatalf("loopback reached detector counter: %+v", alert)
+	default:
+	}
+}

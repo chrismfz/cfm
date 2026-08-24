@@ -17,7 +17,28 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **Default-on protection and canonical audit trail for CFM's own control plane.**
+  The new built-in `cfm_endpoints` detector runs with safe staged challenge and
+  15-minute TTL-block defaults even when the detector section or entire config
+  file is absent; optional config overrides those defaults, while deprecated
+  `[api_abuse]` and named instances are merged in memory without duplicate
+  subscriptions. Login, MFA/passkey, API-token and MCP bearer/consent attempts
+  now write one parse-friendly, secret-free `cfm.api.log` line, and failures
+  publish directly into the normal detector sink/report/notification path.
+  Internal MCP tool dispatches no longer create misleading loopback admin-token
+  records, and request logging omits query strings that can carry bootstrap
+  credentials. Canonical request identity distinguishes the edge, direct `6060`,
+  and direct TLS `6061`; debug/unblock/MCP audits use it, and the edge overwrites
+  control-plane XFF while preserving the trusted effective scheme. The existing
+  admin-only `system/cfm-log?which=api` reader remains the bounded audit-log
+  retrieval path.
+  Global `IGNORE_IPS`/`IGNORE_NETS`, all local interface addresses and both
+  loopback families are discarded before detector counting as well as at the
+  sink. Built-in and persisted historical User-Agent exemptions are removed
+  because UA strings are attacker-controlled; trusted monitors should use
+  IP/CIDR ignores. Retaining the exact historical UA list requires an explicit
+  acknowledgement.
 
 ## 2026.08.24
 
