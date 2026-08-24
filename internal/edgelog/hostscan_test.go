@@ -126,9 +126,9 @@ func TestScanHost_LiveAndRotated(t *testing.T) {
 	writeLines(t, filepath.Join(dir, "access.log.1"), rot1)
 	writeGz(t, filepath.Join(dir, "access.log.2.gz"), rot2gz)
 
-	old := accessLogCandidates
-	accessLogCandidates = append([]string{live}, old...)
-	defer func() { accessLogCandidates = old }()
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
 
 	classify := func(raw string) string {
 		switch raw {
@@ -219,9 +219,9 @@ func TestScanHost_MergeWWW(t *testing.T) {
 		cfmline(now-10, "198.51.100.1", "example.gr", "GET", "/", 200, "Mozilla/5.0", 0),
 		cfmline(now-20, "198.51.100.2", "www.example.gr", "GET", "/", 200, "Mozilla/5.0", 0),
 	})
-	old := accessLogCandidates
-	accessLogCandidates = append([]string{live}, old...)
-	defer func() { accessLogCandidates = old }()
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
 
 	noMerge, err := ScanHost(context.Background(), "example.gr", HostOpts{Hours: 1})
 	if err != nil {
@@ -255,9 +255,9 @@ func TestScanHost_BudgetTruncates(t *testing.T) {
 		lines = append(lines, cfmline(float64(time.Now().Unix()-50+int64(i)), fmt.Sprintf("198.51.100.%d", i%5), "ex.gr", "GET", fmt.Sprintf("/p%d", i), 200, "bot/1", 0))
 	}
 	writeLines(t, live, lines)
-	old := accessLogCandidates
-	accessLogCandidates = append([]string{live}, old...)
-	defer func() { accessLogCandidates = old }()
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
 
 	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 1, MaxLines: 10})
 	if err != nil {
@@ -307,9 +307,9 @@ func TestScanHost_SkipsOlderSiblings(t *testing.T) {
 	futureProof(rotOld, from.Add(-24*time.Hour)) // last written BEFORE window start → skipped by mtime
 	futureProof(rotAncient, from.Add(-72*time.Hour))
 
-	old := accessLogCandidates
-	accessLogCandidates = append([]string{live}, old...)
-	defer func() { accessLogCandidates = old }()
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
 
 	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 1, IncludeRotated: true})
 	if err != nil {
@@ -373,9 +373,9 @@ func TestScanHost_OldPrefixDoesNotStopScan(t *testing.T) {
 	dir := t.TempDir()
 	live := filepath.Join(dir, "access.log")
 	writeLines(t, live, lines)
-	old := accessLogCandidates
-	accessLogCandidates = append([]string{live}, old...)
-	defer func() { accessLogCandidates = old }()
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
 
 	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 1})
 	if err != nil {
@@ -414,9 +414,9 @@ func TestScanHost_GzOldPrefixThenRecent(t *testing.T) {
 	gzf := filepath.Join(dir, "access.log.1.gz")
 	writeGz(t, gzf, sib)
 
-	old := accessLogCandidates
-	accessLogCandidates = append([]string{live}, old...)
-	defer func() { accessLogCandidates = old }()
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
 
 	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 1, IncludeRotated: true})
 	if err != nil {
@@ -452,9 +452,9 @@ func TestScanHost_CorruptGzReported(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("this is definitely not a gzip stream"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	old := accessLogCandidates
-	accessLogCandidates = append([]string{live}, old...)
-	defer func() { accessLogCandidates = old }()
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
 
 	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 48, IncludeRotated: true})
 	if err != nil {
@@ -484,7 +484,7 @@ func TestScanHost_MethodCardinalityCapped(t *testing.T) {
 		if i == 39 {
 			line = strings.Replace(line, "method=EXT39", "method="+long, 1)
 		}
-		a.feed(line, int64(fromOf(now)))
+		a.feed(line, int64(fromOf(now)), int64(now)+10)
 	}
 	if len(a.methods) > maxMethodKeys {
 		t.Errorf("methods keys = %d, want <= %d", len(a.methods), maxMethodKeys)
@@ -498,6 +498,136 @@ func TestScanHost_MethodCardinalityCapped(t *testing.T) {
 
 // fromOf mirrors the hour-truncation trick tests use to stay inside windows.
 func fromOf(now float64) float64 { return now - 3600 }
+
+// TestScanHost_FullLogResolverContract pins the semantic-source contract of
+// the full-log resolver: the focused access.cfm.log (challenge/block routing
+// only) is NEVER a candidate — not "a candidate that loses ties", simply not
+// one. If no full access.log exists, the scan must fail rather than fall back
+// to a semantically wrong source.
+func TestScanHost_FullLogResolverContract(t *testing.T) {
+	requireTail(t)
+	for _, c := range fullAccessLogCandidates {
+		if strings.Contains(c, ".cfm.") {
+			t.Errorf("focused log %q must never be a full-traffic candidate", c)
+		}
+	}
+
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	focused := filepath.Join(dir, "access.cfm.log")
+	writeLines(t, focused, []string{
+		cfmline(now-10, "198.51.100.2", "ex.gr", "GET", "/focused", 403, "bot/1", 0),
+	})
+	// No full access.log anywhere — an empty candidate set models exactly that.
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = nil
+	defer func() { fullAccessLogCandidates = old }()
+
+	if _, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 1}); err == nil {
+		t.Fatal("scan succeeded with no full access.log — focused fallback must not happen")
+	}
+}
+
+// A max_files cap that hides existing siblings is a real reach bound and must
+// set truncated=true.
+func TestScanHost_MaxFilesCapTruncated(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	writeLines(t, live, []string{
+		cfmline(now-30, "198.51.100.1", "ex.gr", "GET", "/live", 200, "Mozilla/5.0", 0),
+	})
+	sibLine := func(tag string) []string {
+		return []string{cfmline(now-90, "198.51.100.2", "ex.gr", "GET", tag, 200, "bot/1", 0)}
+	}
+	writeGz(t, filepath.Join(dir, "access.log.1.gz"), sibLine("/sib1"))
+	writeGz(t, filepath.Join(dir, "access.log.2.gz"), sibLine("/sib2"))
+	writeGz(t, filepath.Join(dir, "access.log.3.gz"), sibLine("/sib3"))
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
+
+	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 1, IncludeRotated: true, MaxFiles: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Truncated {
+		t.Error("max_files cap hid sibling(s): truncated must be true")
+	}
+	if got := len(res.FilesScanned); got != 3 {
+		t.Errorf("files_scanned = %d, want 3 (live + 2 allowed siblings)", got)
+	}
+}
+
+// Budget dying INSIDE the last scanned sibling must also surface truncated=true
+// (scanWholeForIP returns a nil error on budget exhaustion — previously silent).
+func TestScanHost_BudgetDiesMidLastSibling(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	liveLines := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		liveLines = append(liveLines, cfmline(now-100+float64(i), "198.51.100.1", "ex.gr", "GET", fmt.Sprintf("/l%d", i), 200, "-", 0))
+	}
+	writeLines(t, live, liveLines)
+	sib1 := make([]string, 0, 10)
+	for i := 0; i < 10; i++ {
+		sib1 = append(sib1, cfmline(now-50+float64(i), "198.51.100.2", "ex.gr", "GET", fmt.Sprintf("/a%d", i), 200, "-", 0))
+	}
+	writeGz(t, filepath.Join(dir, "access.log.1.gz"), sib1)
+	sib2 := make([]string, 0, 30)
+	for i := 0; i < 30; i++ {
+		sib2 = append(sib2, cfmline(now-600+float64(i), "198.51.100.3", "ex.gr", "GET", fmt.Sprintf("/b%d", i), 200, "-", 0))
+	}
+	writeGz(t, filepath.Join(dir, "access.log.2.gz"), sib2)
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
+
+	// Budget: 5 live + 10 sib1 fit; sib2 dies halfway through.
+	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 48, IncludeRotated: true, MaxLines: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Truncated {
+		t.Error("budget exhausted inside the last sibling: truncated must be true")
+	}
+	if res.Scanned != 20 {
+		t.Errorf("scanned = %d, want exactly the 20-line budget", res.Scanned)
+	}
+}
+
+// The [FromUnix, ToUnix) contract is enforced per line: pre-window AND
+// future-skewed entries are seen but never aggregated.
+func TestScanHost_ToUnixExclusive(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	from := int64(now - 3600)
+	to := from + 10
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	writeLines(t, live, []string{
+		cfmline(float64(from-5), "198.51.100.1", "ex.gr", "GET", "/before", 200, "-", 0),
+		cfmline(float64(from+5), "198.51.100.2", "ex.gr", "GET", "/inside", 200, "-", 0),
+		cfmline(float64(to+300), "198.51.100.3", "ex.gr", "GET", "/future-skew", 200, "-", 0),
+	})
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
+
+	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{FromUnix: from, ToUnix: to})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Matched != 1 || res.TotalRequests != 1 {
+		t.Fatalf("matched=%d total=%d, want 1/1 (only /inside)", res.Matched, res.TotalRequests)
+	}
+	if res.OutsideWindow != 2 {
+		t.Errorf("outside_window = %d, want 2 (before + future)", res.OutsideWindow)
+	}
+}
 
 func TestWWWTwin(t *testing.T) {
 	cases := [][2]string{

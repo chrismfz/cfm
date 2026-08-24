@@ -126,7 +126,7 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"ok":             false,
 			"error":          err.Error(),
-			"available_logs": edgelog.AvailableLogs(),
+			"available_logs": edgelog.AvailableFullLogs(),
 		})
 		return
 	}
@@ -167,44 +167,33 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 	for _, h := range hosts {
 		var v histView
 		s, serr := e.history.Summarize(h, "", hh)
-		r, rerr := e.history.WAFByRule(h, hh)
+		rs, rerr := e.history.WAFByRule(h, hh)
 		if serr != nil || rerr != nil {
 			v.failed = true
 			views[h] = v
 			continue
 		}
-		v.summary, v.rules = s, r
+		v.summary, v.rules = s, rs
 		views[h] = v
 	}
 
-	first := views[hosts[0]]
-	if first.failed {
-		// History unavailable: omit the whole detector section rather than
-		// returning half of it (the access section stands alone).
-		writeJSON(w, http.StatusOK, out)
-		return
-	}
-
-	if len(hosts) == 1 {
-		out["detector_summary"] = first.summary
-		out["detector_waf_by_rule"] = map[string]any{"rules": first.rules}
-		writeJSON(w, http.StatusOK, out)
-		return
-	}
-
-	// Merged view: totals across the twins, PLUS the per-host breakdown so
-	// provenance of the security activity stays visible.
-	combined := first.summary
-	combinedRules := append([]WAFRuleHit(nil), first.rules...)
+	started := false
+	anyFailed := false
+	var combined HistorySummary
+	var combinedRules []WAFRuleHit
 	byHost := make(map[string]any, len(hosts))
-	for i, h := range hosts {
+	for _, h := range hosts {
 		v := views[h]
-		_ = i
 		if v.failed {
+			anyFailed = true
 			byHost[h] = map[string]any{"unavailable": true}
 			continue
 		}
-		if i > 0 {
+		if !started {
+			combined = v.summary
+			combinedRules = append([]WAFRuleHit(nil), v.rules...)
+			started = true
+		} else {
 			combined = sumHistorySummaries(combined, v.summary)
 			combinedRules = mergeWAFRuleHits(combinedRules, v.rules)
 		}
@@ -213,9 +202,37 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 			"waf_by_rule": map[string]any{"rules": v.rules},
 		}
 	}
+	if !started {
+		// History completely unavailable — omit the whole detector section;
+		// the access section stands alone.
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+
 	out["detector_summary"] = combined
 	out["detector_waf_by_rule"] = map[string]any{"rules": combinedRules}
-	out["detector_by_host"] = byHost
+
+	// Coverage honesty: the history store prunes on its own retention clock,
+	// so a 90-day request against a 30-day store would otherwise return
+	// partial counts that LOOK complete. Report the real retained span and a
+	// completeness flag next to every detector number.
+	oldest := e.history.OldestEventUnix()
+	out["detector_coverage"] = map[string]any{
+		"requested_from_unix": res.WindowFromUnix,
+		"requested_to_unix":   res.WindowToUnix,
+		"retention_days":      e.history.RetentionDays(),
+		"oldest_event_unix":   oldest,
+		"coverage_complete":   oldest > 0 && oldest <= res.WindowFromUnix,
+	}
+
+	if len(hosts) > 1 {
+		out["detector_by_host"] = byHost
+	}
+	if anyFailed {
+		// At least one twin's history query failed: the top-level "combined"
+		// view is really combined-over-available. Never let it pass as full.
+		out["detector_partial"] = true
+	}
 
 	writeJSON(w, http.StatusOK, out)
 }

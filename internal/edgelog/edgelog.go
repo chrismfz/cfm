@@ -244,7 +244,8 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 			maxFiles = MaxRotatedFiles
 		}
 		budget := rotatedScanBudget
-		for _, rf := range rotatedSiblings(logFile, maxFiles) {
+		siblings, _ := rotatedSiblings(logFile, maxFiles)
+		for _, rf := range siblings {
 			if cctx.Err() != nil || budget <= 0 {
 				// Ran out of time/budget before this file — mark it and any
 				// remaining files as unscanned reach.
@@ -273,15 +274,17 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 
 // rotatedSiblings returns the rotated variants of live (same directory, name
 // starting with "<base>." or "<base>-": .1, .1.gz, -20260810.gz, …), most
-// recently modified FIRST, capped at maxFiles. The live file itself, empty
-// files, and non-regular entries are excluded. A directory it can't read yields
-// nothing (best-effort — the live result still stands).
-func rotatedSiblings(live string, maxFiles int) []string {
+// recently modified FIRST, capped at maxFiles. The second return is the TOTAL
+// number of siblings found, so a caller can detect that the file cap silently
+// hid some (found > len(paths)). The live file itself, empty files, and
+// non-regular entries are excluded. A directory it can't read yields nothing
+// (best-effort — the live result still stands).
+func rotatedSiblings(live string, maxFiles int) ([]string, int) {
 	dir := filepath.Dir(live)
 	base := filepath.Base(live)
 	ents, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	type fe struct {
 		path string
@@ -305,6 +308,7 @@ func rotatedSiblings(live string, maxFiles int) []string {
 		}
 		out = append(out, fe{filepath.Join(dir, name), info.ModTime()})
 	}
+	total := len(out)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].mod.After(out[j].mod) })
 	if len(out) > maxFiles {
 		out = out[:maxFiles]
@@ -313,7 +317,7 @@ func rotatedSiblings(live string, maxFiles int) []string {
 	for i, e := range out {
 		paths[i] = e.path
 	}
-	return paths
+	return paths, total
 }
 
 // scanWholeForIP streams a rotated file from the start (gz-transparent) feeding

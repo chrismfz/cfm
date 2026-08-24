@@ -770,6 +770,33 @@ func (s *HistoryStore) String() string {
 	return fmt.Sprintf("history(sqlite path=%s retention_days=%d prune_every=%s)", s.path, s.retentionDays, s.pruneEvery)
 }
 
+// OldestEventUnix returns the oldest event timestamp actually retained in the
+// store (0 when empty). Read views use it to answer "does the data really span
+// the requested window?" — a 90-day query against a 30-day retention must be
+// able to say so instead of silently returning partial counts.
+func (s *HistoryStore) OldestEventUnix() int64 {
+	if s == nil || s.db == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var min sql.NullInt64
+	if err := s.db.QueryRow(`SELECT MIN(ts_unix) FROM history_events`).Scan(&min); err != nil || !min.Valid {
+		return 0
+	}
+	return min.Int64
+}
+
+// RetentionDays returns the configured time retention (pruning horizon).
+func (s *HistoryStore) RetentionDays() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.retentionDays
+}
+
 func scanHistoryRows(rows *sql.Rows) ([]HistoryEvent, error) {
 	out := make([]HistoryEvent, 0, 128)
 	for rows.Next() {

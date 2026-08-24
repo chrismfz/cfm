@@ -68,17 +68,22 @@ back-filled here — see the git/PR history for that period.
   resolved automatically), aggregating requests/hour with peaks-vs-median,
   status-class mix, top client IPs, top user-agents with a browser-envelope vs
   automation/bot-like split (heuristic UA normalization via the existing
-  normalizer — not bot verification), top paths and method mix. Bounded like
+  normalizer — not bot verification), top paths and method mix. Profiles are
+  built ONLY from the full access log (`if=$log_main_request`) — the focused
+  challenge/block `access.cfm.log` is never a source. Bounded like
   `ip_forensics`: shared line budget across all scanned files, one timeout,
   key-capped accumulators, mtime-based skip of siblings older than the window;
-  corrupt/unreadable rotated files are reported in `files_failed` instead of
-  silently shortening coverage, and `coverage_oldest_unix` reports how far back
-  the kept rotation actually reaches. Optional `combine=1` joins the detector
-  history store for the same host/window (challenge issued/solved, block
-  triggers, suspicious, WAF observed + per-rule breakdown); with `merge_www`
+  corrupt/unreadable rotated files are reported in `files_failed`, every reach
+  bound (line budget, max_files cap) sets `truncated=true`, and
+  `coverage_oldest_unix` reports how far back the kept rotation actually
+  reaches. Optional `combine=1` joins the detector history store for the same
+  host/window (challenge issued/solved, block triggers, suspicious, WAF
+  observed + per-rule breakdown); with `merge_www`
   the twins get a combined view plus a per-host breakdown so security-event
-  provenance stays visible. Because one call may decompress tens of millions
-  of lines, archive scans are capped at TWO concurrent per node (`429` +
+  provenance stays visible, and `detector_coverage` exposes the store's real
+  retention/oldest retained event so partial history never looks complete.
+  Because one call may decompress tens of millions of lines, archive scans are
+  capped at TWO concurrent per node (`429` +
   `Retry-After` beyond) and `hours` is clamped to ≤90 days at the API boundary.
   Scoped tokens may profile only their own vhosts (`vhostAllowed`, same model
   as `analyze-host`; the www/bare twin must be in scope too). The

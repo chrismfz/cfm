@@ -81,12 +81,32 @@ const (
 	maxPeakHours       = 10
 )
 
+// fullAccessLogCandidates are the FULL edge ACCESS logs only — the
+// `log_format cfm ... if=$log_main_request` logs holding EVERY vhost's total
+// traffic. The focused `access.cfm.log` (challenge/block routing traffic,
+// if=$log_cfm_nonempty) and any distro combined-format access.log are
+// deliberately NOT candidates: ScanHost promises TOTAL per-vhost traffic and
+// requires the key=value `host=` field, so a semantically wrong source must
+// never be selected just because its mtime is newest (unlike GrepIP, where any
+// raw-line source is fair game).
+var fullAccessLogCandidates = []string{
+	"/usr/local/openresty/nginx/logs/access.log",
+	"/var/log/angie/access.log",
+}
+
+// AvailableFullLogs returns the FULL access-log candidates that currently
+// exist, so callers can surface what was considered.
+func AvailableFullLogs() []string { return availableFrom(fullAccessLogCandidates) }
+
+func resolveFullAccessLog() (string, error) {
+	return resolveFrom(fullAccessLogCandidates, "", "access")
+}
+
 // HostOpts tunes a host scan.
 type HostOpts struct {
-	Source         string                  // which allow-listed access log to treat as live; "" = most-recent
 	Hours          int                     // trailing window ending now (ignored when FromUnix>0)
 	FromUnix       int64                   // explicit window start (epoch sec); ToUnix=0 → now
-	ToUnix         int64                   // explicit window end (epoch sec)
+	ToUnix         int64                   // explicit window end (epoch sec); [FromUnix, ToUnix) is enforced per line
 	TailLines      int                     // live-file tail window (0 → DefaultHostTailLines)
 	MaxLines       int                     // shared line budget across all files (0 → DefaultHostMaxLines)
 	IncludeRotated bool                    // also scan rotated siblings (the archival reach)
@@ -219,10 +239,11 @@ func (a *hostAgg) noteTS(ts float64) {
 }
 
 // feed parses one access-log line and aggregates it when it belongs to the
-// target host. Lines arrive in chronological ASCENDING order; pre-window
-// lines are simply not aggregated — there is deliberately NO early stop
-// (a stop would truncate the scan right before the in-window lines).
-func (a *hostAgg) feed(line string, from int64) {
+// target host AND its timestamp lies inside [from, to). Lines arrive in
+// chronological ASCENDING order; out-of-window lines are simply not
+// aggregated — there is deliberately NO early stop (a stop would truncate the
+// scan right before the in-window lines).
+func (a *hostAgg) feed(line string, from, to int64) {
 	var (
 		tsVal, hostVal, clientVal                     string
 		statusVal, uaVal, uriVal, bytesVal, methodVal string
@@ -266,7 +287,7 @@ func (a *hostAgg) feed(line string, from int64) {
 		return
 	}
 
-	if ts > 0 && ts < float64(from) {
+	if ts > 0 && (ts < float64(from) || ts >= float64(to)) {
 		a.outsideWindow++
 		return
 	}
@@ -418,7 +439,7 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 		topN = 50
 	}
 
-	logFile, err := resolveLog(o.Source)
+	logFile, err := resolveFullAccessLog()
 	if err != nil {
 		return res, err
 	}
@@ -442,8 +463,8 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	// onLine is shared by the live tail and every sibling scan so budget /
 	// counters / truncation accounting stay uniform. feed() owns ALL per-line
 	// parsing (a single walk per line, including the skipped_no_host count).
-	// Lines arrive oldest→newest; pre-window lines are aggregated nowhere but
-	// still consume budget — there is deliberately NO early stop, since a
+	// Lines arrive oldest→newest; out-of-window lines are aggregated nowhere
+	// but still consume budget — there is deliberately NO early stop, since a
 	// stop on ascending input would truncate right BEFORE the in-window tail.
 	onLine := func(line string) bool {
 		res.Scanned++
@@ -451,7 +472,7 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 			res.Truncated = true
 			return false
 		}
-		agg.feed(line, from)
+		agg.feed(line, from, to)
 		return true
 	}
 
@@ -474,7 +495,13 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	if maxFiles > MaxRotatedFiles {
 		maxFiles = MaxRotatedFiles
 	}
-	for _, rf := range rotatedSiblings(logFile, maxFiles) {
+	siblings, siblingsFound := rotatedSiblings(logFile, maxFiles)
+	if siblingsFound > len(siblings) {
+		// The file cap silently hid older siblings — that is a real reach
+		// bound and MUST show up as truncated (coverage honesty).
+		res.Truncated = true
+	}
+	for _, rf := range siblings {
 		remaining := int(budget - res.Scanned)
 		if cctx.Err() != nil || remaining <= 0 {
 			res.Truncated = true
@@ -495,6 +522,12 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 				File:   rf,
 				Reason: truncateStr(serr.Error(), 128),
 			})
+		}
+		if remaining <= 0 {
+			// Budget died inside this file — everything after it (including
+			// the rest of it) is unreached. Never report truncated=false here.
+			res.Truncated = true
+			break
 		}
 	}
 	if cctx.Err() != nil {
