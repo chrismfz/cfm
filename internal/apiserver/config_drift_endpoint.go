@@ -6,7 +6,9 @@ package apiserver
 // /etc/cfm/ files, so an operator sees which features a release added that
 // never reached their conffile (upgrades seed /etc/cfm once and never touch it
 // again). detectors.conf is diffed section-by-section and key-by-key with the
-// same parser the daemon's manager uses (internal/detconf.ReadSectionsFile);
+// same parser the daemon's manager uses (internal/detconf.ReadSectionsFile),
+// excluding the optional default-on cfm_endpoints/api_abuse family whose
+// absence from a live conffile is not runtime drift;
 // cfm.conf is checked for stock-documented keys absent from the live text
 // entirely. Values are informational only — live values legitimately differ
 // per host.
@@ -19,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"cfm/internal/config"
 	"cfm/internal/configdrift"
@@ -97,7 +100,7 @@ func handleSystemConfigDrift(w http.ResponseWriter, r *http.Request) {
 		case errLive != nil:
 			det["error"] = "parse live: " + errLive.Error()
 		default:
-			rep := configdrift.DiffDetectorsSections(stockSec, liveSec)
+			rep := diffDetectorsConfig(stockSec, liveSec)
 			det["report"] = rep
 			det["summary"] = map[string]any{
 				"missing_sections": len(rep.MissingSections),
@@ -130,6 +133,14 @@ func handleSystemConfigDrift(w http.ResponseWriter, r *http.Request) {
 	resp["cfm_conf"] = cf
 
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func diffDetectorsConfig(stock, live detconf.Sections) configdrift.DetectorsReport {
+	return configdrift.DiffDetectorsSectionsIgnoring(stock, live, func(section string) bool {
+		base := strings.TrimSuffix(strings.TrimSpace(section), ".leniency")
+		typ, _ := detconf.SplitTypeInstance(base)
+		return typ == "cfm_endpoints" || typ == "api_abuse"
+	})
 }
 
 func fileReadable(p string) bool {

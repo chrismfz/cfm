@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	core "cfm/internal/detectors/core"
 	cfgpkg "cfm/internal/config"
+	core "cfm/internal/detectors/core"
 )
 
 var stdoutCaptureMu sync.Mutex
@@ -182,8 +182,8 @@ func TestIPAllowMiddleware_ProxyTrustBoundary(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
-	t.Run("loopback peer honors first XFF hop", func(t *testing.T) {
-		rr := runIPAllowRequest(t, next, "127.0.0.1:12345", "198.51.100.10, 127.0.0.1")
+	t.Run("loopback peer honors canonical XFF", func(t *testing.T) {
+		rr := runIPAllowRequest(t, next, "127.0.0.1:12345", "198.51.100.10")
 		if rr.Code != http.StatusNoContent {
 			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 		}
@@ -234,10 +234,10 @@ func TestIPAllowMiddleware_LogsStableRejectionReasonCode(t *testing.T) {
 	}
 }
 
-func TestEffectiveClientIP_TrustsFirstXFFOnLoopbackPeer(t *testing.T) {
+func TestEffectiveClientIP_TrustsCanonicalXFFOnLoopbackPeer(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "127.0.0.1:12345"
-	r.Header.Set("X-Forwarded-For", "198.51.100.10, 127.0.0.1")
+	r.Header.Set("X-Forwarded-For", "198.51.100.10")
 
 	ip, ok := effectiveClientIP(r)
 	if !ok {

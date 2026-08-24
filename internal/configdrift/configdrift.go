@@ -62,10 +62,20 @@ const valueSampleCap = 10
 // Keys are compared case-insensitively (the parser uppercases both sides, so
 // this is belt-and-braces for direct callers).
 func DiffDetectorsSections(stock, live detconf.Sections) DetectorsReport {
+	return DiffDetectorsSectionsIgnoring(stock, live, nil)
+}
+
+// DiffDetectorsSectionsIgnoring applies the normal semantic comparison while
+// omitting section families whose runtime defaults make their conffile entries
+// optional. The caller owns product-specific alias policy.
+func DiffDetectorsSectionsIgnoring(stock, live detconf.Sections, ignore func(string) bool) DetectorsReport {
 	var r DetectorsReport
 
 	stockNames := sortedSectionNames(stock)
 	for _, name := range stockNames {
+		if ignore != nil && ignore(name) {
+			continue
+		}
 		liveKV, ok := live.ByName[name]
 		if !ok {
 			r.MissingSections = append(r.MissingSections, name)
@@ -90,6 +100,9 @@ func DiffDetectorsSections(stock, live detconf.Sections) DetectorsReport {
 
 	liveNames := sortedSectionNames(live)
 	for _, name := range liveNames {
+		if ignore != nil && ignore(name) {
+			continue
+		}
 		if _, ok := stock.ByName[name]; !ok {
 			r.ExtraSections = append(r.ExtraSections, name)
 			continue

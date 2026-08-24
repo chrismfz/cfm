@@ -22,20 +22,47 @@ func TestMCPRequestSchemeForwardedProtoTrust(t *testing.T) {
 	if got := mcpRequestScheme(r); got != "http" {
 		t.Errorf("non-loopback XFP spoof: scheme=%q, want http", got)
 	}
-	// loopback edge (sets prefix header) with XFP=https → https
+	// loopback edge (sets canonical client identity) with XFP=https → https
 	r2 := httptest.NewRequest("GET", "/mcp", nil)
 	r2.RemoteAddr = "127.0.0.1:5555"
-	r2.Header.Set("X-Forwarded-Prefix", "/cfm-admin")
+	r2.Header.Set("X-Real-IP", "198.51.100.10")
 	r2.Header.Set("X-Forwarded-Proto", "https")
 	if got := mcpRequestScheme(r2); got != "https" {
 		t.Errorf("loopback edge XFP: scheme=%q, want https", got)
 	}
-	// loopback edge, no XFP → https (edge terminates TLS)
+	// An old live edge config with the trusted public prefix but no XFP keeps
+	// advertising HTTPS for OAuth compatibility.
 	r3 := httptest.NewRequest("GET", "/mcp", nil)
 	r3.RemoteAddr = "127.0.0.1:5555"
+	r3.Header.Set("X-Real-IP", "198.51.100.10")
 	r3.Header.Set("X-Forwarded-Prefix", "/cfm-admin")
 	if got := mcpRequestScheme(r3); got != "https" {
-		t.Errorf("loopback edge no-XFP: scheme=%q, want https", got)
+		t.Errorf("legacy loopback edge no-XFP: scheme=%q, want https", got)
+	}
+	// The fallback is narrow: no trusted public prefix means plain HTTP.
+	r4 := httptest.NewRequest("GET", "/mcp", nil)
+	r4.RemoteAddr = "127.0.0.1:5555"
+	r4.Header.Set("X-Real-IP", "198.51.100.10")
+	if got := mcpRequestScheme(r4); got != "http" {
+		t.Errorf("loopback request no-prefix/no-XFP: scheme=%q, want http", got)
+	}
+	// Explicit HTTP from the current edge config remains authoritative.
+	r5 := httptest.NewRequest("GET", "/mcp", nil)
+	r5.RemoteAddr = "127.0.0.1:5555"
+	r5.Header.Set("X-Real-IP", "198.51.100.10")
+	r5.Header.Set("X-Forwarded-Prefix", "/cfm-admin")
+	r5.Header.Set("X-Forwarded-Proto", "http")
+	if got := mcpRequestScheme(r5); got != "http" {
+		t.Errorf("explicit edge HTTP: scheme=%q, want http", got)
+	}
+	// Malformed client identity cannot unlock forwarded scheme trust.
+	r6 := httptest.NewRequest("GET", "/mcp", nil)
+	r6.RemoteAddr = "127.0.0.1:5555"
+	r6.Header.Set("X-Forwarded-For", "198.51.100.10, 203.0.113.10")
+	r6.Header.Set("X-Forwarded-Prefix", "/cfm-admin")
+	r6.Header.Set("X-Forwarded-Proto", "https")
+	if got := mcpRequestScheme(r6); got != "http" {
+		t.Errorf("malformed edge identity: scheme=%q, want http", got)
 	}
 }
 
@@ -70,16 +97,16 @@ func TestMCPStaticBearer(t *testing.T) {
 	const adminTok = "cfm-admin-1a2b3c4d5e6f7a8b9c0d1e2f"
 
 	cases := []struct {
-		name          string
-		tok, m, a     string
-		want          bool
+		name      string
+		tok, m, a string
+		want      bool
 	}{
 		{"mcp token", mcpTok, mcpTok, adminTok, true},
 		{"admin token", adminTok, mcpTok, adminTok, true},
 		{"wrong token", "nope", mcpTok, adminTok, false},
 		{"empty bearer", "", mcpTok, adminTok, false},
-		{"empty bearer, empty mcp", "", "", adminTok, false},   // must not match "" vs ""
-		{"empty bearer, both empty", "", "", "", false},        // defensive
+		{"empty bearer, empty mcp", "", "", adminTok, false}, // must not match "" vs ""
+		{"empty bearer, both empty", "", "", "", false},      // defensive
 		{"admin accepted when mcp unset", adminTok, "", adminTok, true},
 	}
 	for _, c := range cases {
@@ -97,7 +124,7 @@ func TestMCPStaticBearer(t *testing.T) {
 // the server disabled.
 func TestMCPArmToken(t *testing.T) {
 	const strong = "cfm-mcp-3f9a2b7c8d1e4f6a9b0c2d5e" // >= 24
-	const gen = "auto-generated-abcdefghijklmnop"      // 31 chars, >= 24
+	const gen = "auto-generated-abcdefghijklmnop"     // 31 chars, >= 24
 	okLoader := func() (string, error) { return gen, nil }
 	failLoader := func() (string, error) { return "", errors.New("boom") }
 	panicLoader := func() (string, error) { t.Fatal("loader must not be called when MCP_TOKEN is set"); return "", nil }

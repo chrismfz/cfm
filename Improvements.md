@@ -8,7 +8,7 @@ This file records product/security improvements that should remain visible even 
 
 Evolve/rename the existing `api_abuse` detector into a first-class **`cfm_endpoints`** detector that protects CFM's own admin/API surface through the same detector/sink/enforcement/notification pipeline used for Exim, Dovecot, cPanel, WAF, etc.
 
-This protection is a **built-in product safety feature and must be ON by default even when no `[cfm_endpoints]` section exists in `detectors.conf`.**
+This protection is a **built-in product safety feature and must be ON by default even when no `[cfm_endpoints]` section or entire `detectors.conf` file exists.**
 
 Desired config semantics:
 
@@ -22,7 +22,7 @@ Implementation rule:
 
 - if `[cfm_endpoints]` exists, instantiate it with built-in defaults plus operator overrides;
 - if it does not exist, instantiate one implicit/synthetic `cfm_endpoints` detector with safe built-in defaults;
-- disabling it, if we decide to support that at all, should require an explicit opt-out rather than omission of config;
+- disabling it requires the explicit `ENABLED=0` opt-out rather than omission of config;
 - keep `[api_abuse]` temporarily as a deprecated compatibility alias/migration path, but do not run both detectors against the same event stream;
 - emit a one-time deprecation warning when `[api_abuse]` is used.
 
@@ -121,6 +121,12 @@ Rules:
 - for the global admin token, use `auth_mech=token_admin`; no secret-derived value is required unless a safe non-secret credential ID is introduced later;
 - invalid token attempts need no token fingerprint by default; IP + request metadata is enough for abuse detection;
 - log a supplied invalid token as an auth failure even if a valid browser session cookie also exists; invalid explicit bearer credentials must never silently fall back to session auth.
+- any non-Bearer explicit `Authorization` value fails hard with `401`; it does
+  not fall back to an otherwise-valid browser session;
+- successful admin/scoped bearer presentations are intentionally unsampled:
+  each one is an authentication attempt in the canonical audit contract. The
+  API log is bounded operationally by CFM's daily/200M logrotate policy rather
+  than by dropping credential-use evidence.
 
 ### Common fields
 
@@ -162,18 +168,30 @@ All nft enforcement should continue through the normal detector section sink so 
 
 ## Acceptance checklist
 
-- [ ] `cfm_endpoints` exists as the canonical detector name.
-- [ ] Protection runs with built-in defaults even when no detector section is present.
-- [ ] `[api_abuse]` is a deprecated alias/migration path and does not create duplicate subscriptions/double counting.
-- [ ] Every login credential attempt writes exactly one parse-friendly `cfm.api.log` auth-attempt line.
-- [ ] MFA/passkey verification failures/successes have safe one-line audit records where applicable.
-- [ ] Every supplied API token authentication attempt writes exactly one auth-attempt line.
-- [ ] No secrets/passwords/codes/session IDs/tokens are written to the log.
-- [ ] Structured events, not log tailing, feed `cfm_endpoints` enforcement.
-- [ ] Login failures are fed into the detector pipeline.
-- [ ] Existing login throttle/account-lock behavior is preserved.
+- [x] `cfm_endpoints` exists as the canonical detector name.
+- [x] Protection runs with built-in defaults even when no detector section is present.
+- [x] `[api_abuse]` is a deprecated alias/migration path and does not create duplicate subscriptions/double counting.
+- [x] Every login credential attempt writes exactly one parse-friendly `cfm.api.log` auth-attempt line.
+- [x] MFA/passkey verification failures/successes have safe one-line audit records where applicable.
+- [x] Every supplied API token authentication attempt writes exactly one auth-attempt line.
+- [x] No secrets/passwords/codes/session IDs/tokens are written to the log.
+- [x] Structured events, not log tailing, feed `cfm_endpoints` enforcement.
+- [x] Login failures are fed into the detector pipeline.
+- [x] Existing login throttle/account-lock behavior is preserved.
 - [ ] Existing `auth_autoblock` is removed only after detector enforcement parity is proven.
-- [ ] Invalid-token bursts can produce detector notifications and a bounded TTL nft block.
+- [x] Invalid-token bursts can produce detector notifications and a bounded TTL nft block.
 - [ ] Valid-token high-rate abuse is rate-limited by credential/mechanism before considering IP blocking.
-- [ ] Outcomes continue through `cfm.detector.log`, reporting and Slack/mail notification paths.
-- [ ] XFF/effective-scheme regression tests cover edge, direct 6060 and direct 6061 entry points.
+- [x] Outcomes continue through `cfm.detector.log`, reporting and Slack/mail notification paths.
+- [x] XFF/effective-scheme regression tests cover edge, direct 6060 and direct 6061 entry points.
+- [x] `[global]` `IGNORE_IPS`/`IGNORE_NETS`, loopback and refreshed self IPs are discarded before detector counting.
+- [ ] Emit scoped authorization denials as credential-scoped observe/notify
+  events (`AUTH_SCOPED_DENIED`) rather than letting generic 403 aggregation
+  feed the unauthenticated IP-block policy.
+- [ ] Move the remaining cPanel API client-IP parser onto the same neutral
+  canonical identity helper as apiserver so the two trust definitions cannot
+  drift.
+- [ ] Sanitize edge access logs for control-plane bootstrap requests. The edge
+  `cfm` log format still writes `$request_uri`, so
+  `/cfm-admin/api/v1/embed/bootstrap?code=<secret>` can reach OpenResty/Angie
+  access logs even though daemon request/auth logs are path-only. Use `$uri` or
+  targeted argument redaction in a separate edge-affecting change.

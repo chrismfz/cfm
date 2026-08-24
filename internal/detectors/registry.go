@@ -1,17 +1,18 @@
 package detectors
 
 import (
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
 	"cfm/internal/clam"
 	"cfm/internal/detconf"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
-	"sort"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
 )
 
 type Options struct {
@@ -65,9 +66,15 @@ func TryWireClamBridge() bool {
 type Factory func(sectionName string, kv KV, global KV) (core.PeriodicDetector, error)
 
 var (
-	regMu    sync.RWMutex
-	registry = map[string]Factory{}
+	regMu           sync.RWMutex
+	registry        = map[string]Factory{}
+	registryAliases = map[string]registryAlias{}
 )
+
+type registryAlias struct {
+	canonical string
+	factory   Factory
+}
 
 func Register(typ string, f Factory) {
 	regMu.Lock()
@@ -75,11 +82,44 @@ func Register(typ string, f Factory) {
 	registry[typ] = f
 }
 
+// RegisterAlias keeps a legacy section type loadable without advertising it as
+// a separate detector in the catalog/inventory.
+func RegisterAlias(typ, canonical string, f Factory) {
+	regMu.Lock()
+	defer regMu.Unlock()
+	registryAliases[typ] = registryAlias{canonical: canonical, factory: f}
+}
+
 func getFactory(typ string) (Factory, bool) {
 	regMu.RLock()
 	defer regMu.RUnlock()
 	f, ok := registry[typ]
+	if !ok {
+		alias, aliasOK := registryAliases[typ]
+		f, ok = alias.factory, aliasOK
+	}
 	return f, ok
+}
+
+// CanonicalType resolves an accepted detector section type, including aliases.
+func CanonicalType(typ string) (string, bool) {
+	regMu.RLock()
+	defer regMu.RUnlock()
+	if _, ok := registry[typ]; ok {
+		return typ, true
+	}
+	alias, ok := registryAliases[typ]
+	if !ok {
+		return typ, false
+	}
+	return alias.canonical, true
+}
+
+// ConfigSectionOptional reports built-in detector types that run without a
+// detectors.conf section and therefore must not be reported as config drift.
+func ConfigSectionOptional(typ string) bool {
+	canonical, ok := CanonicalType(typ)
+	return ok && canonical == cfmEndpointsType
 }
 
 // RegisteredTypes returns a stable sorted list of registered detector section types.

@@ -2,7 +2,6 @@ package apiserver
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -123,20 +122,7 @@ func handleDebugExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func logDebugAudit(r *http.Request, action, result, detail string) {
-	srcIP := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if srcIP != "" {
-		if i := strings.Index(srcIP, ","); i >= 0 {
-			srcIP = strings.TrimSpace(srcIP[:i])
-		}
-	}
-	if srcIP == "" {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err == nil {
-			srcIP = host
-		} else {
-			srcIP = r.RemoteAddr
-		}
-	}
+	srcIP := realIPFromRequest(r)
 	role, _ := r.Context().Value(webdet.CtxRoleKey{}).(string)
 	role = strings.TrimSpace(role)
 	if role == "" {

@@ -40,6 +40,68 @@ func TestLoginRateLimiterBackoffAndLock(t *testing.T) {
 	}
 }
 
+func TestNormalizeLoginUsernameBoundsOverlongValues(t *testing.T) {
+	if got := normalizeLoginUsername("  Alice  "); got != "alice" {
+		t.Fatalf("normal username=%q, want alice", got)
+	}
+
+	prefix := strings.Repeat("A", maxNormalizedLoginUsernameBytes+1)
+	got := normalizeLoginUsername("  " + prefix + "X  ")
+	if len(got) > maxNormalizedLoginUsernameBytes || !strings.HasPrefix(got, "overlong-sha256:") {
+		t.Fatalf("overlong normalized username is not bounded: len=%d value=%q", len(got), got)
+	}
+	if got != normalizeLoginUsername("  "+strings.ToLower(prefix)+"x  ") {
+		t.Fatal("case/space variants must share one overlong identity")
+	}
+	if got != normalizeLoginUsername(got) {
+		t.Fatal("overlong normalization must be idempotent")
+	}
+	if got == normalizeLoginUsername(prefix+"Y") {
+		t.Fatal("different overlong suffixes must not collide by truncation")
+	}
+}
+
+func TestLoginBackoffDoesNotPublishRateLimitEvent(t *testing.T) {
+	var events []APIAnomalyEvent
+	unsubscribe := SubscribeAPIAnomalyEvents(func(event APIAnomalyEvent) { events = append(events, event) })
+	t.Cleanup(unsubscribe)
+	r := httptest.NewRequest(http.MethodPost, "https://host/login", nil)
+	r.RemoteAddr = "198.51.100.40:42000"
+
+	emitLoginLimiterAudit(r, "backoff", "198.51.100.40", "alice", 100*time.Millisecond)
+	if len(events) != 0 {
+		t.Fatalf("backoff published detector event: %+v", events)
+	}
+	emitLoginLimiterAudit(r, "throttle", "198.51.100.40", "alice", 0)
+	if len(events) != 1 || events[0].Reason != "AUTH_LOGIN_RATE_LIMIT" {
+		t.Fatalf("throttle events=%+v, want one AUTH_LOGIN_RATE_LIMIT", events)
+	}
+}
+
+func TestLoginLimiterAuditBoundsAttackerControlledFields(t *testing.T) {
+	original := writeAuthDecisionLine
+	line := ""
+	writeAuthDecisionLine = func(got string) { line = got }
+	t.Cleanup(func() { writeAuthDecisionLine = original })
+
+	longAccount := strings.Repeat("a", maxAuthAuditUserBytes+100)
+	longPath := "/" + strings.Repeat("p", maxAuthAuditPathBytes+100)
+	longUA := strings.Repeat("u", maxAuthAuditUABytes+100)
+	r := httptest.NewRequest(http.MethodPost, "https://host"+longPath, nil)
+	r.Header.Set("User-Agent", longUA)
+	emitLoginLimiterAudit(r, "backoff", "198.51.100.40", longAccount, 0)
+
+	if len(line) > maxAuthAuditUserBytes+maxAuthAuditPathBytes+maxAuthAuditUABytes+512 {
+		t.Fatalf("auth decision line is not bounded: len=%d", len(line))
+	}
+	if strings.Contains(line, longAccount) || strings.Contains(line, longPath) || strings.Contains(line, longUA) {
+		t.Fatalf("auth decision retained an unbounded field: len=%d", len(line))
+	}
+	if strings.Count(line, "...[truncated]") != 3 {
+		t.Fatalf("auth decision did not mark every truncated field: %q", line)
+	}
+}
+
 func TestProtectLoginAttemptReturnsGenericError(t *testing.T) {
 	orig := globalLoginRateLimiter
 	globalLoginRateLimiter = newLoginRateLimiter()

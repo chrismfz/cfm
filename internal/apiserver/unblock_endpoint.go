@@ -128,17 +128,7 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 
 		// ── 2. Capture requester identity for the audit log ───────────────
 		// Done first, on the handler goroutine, since it reads the request.
-		requester := func() string {
-			if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
-				parts := strings.Split(xf, ",")
-				return strings.TrimSpace(parts[0])
-			}
-			host, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				return r.RemoteAddr
-			}
-			return host
-		}()
+		requester := realIPFromRequest(r)
 
 		// ── 3. Bounded fast path ──────────────────────────────────────────
 		// The nft check+remove and the WAF clear both run in goroutines under a

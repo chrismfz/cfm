@@ -14,7 +14,6 @@ package apiserver
 
 import (
 	"fmt"
-	"net"
 	"net/http"
 	"time"
 
@@ -44,23 +43,6 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
-// realIPFromRequest extracts the client IP for logging.
-// Mirrors the middleware's isLoopbackDirect logic — if direct peer is loopback,
-// trust X-Forwarded-For for the real client IP.
-func realIPFromRequest(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	if ip != nil && ip.IsLoopback() {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			return xff
-		}
-	}
-	return host
-}
-
 // RequestLogMiddleware logs all requests with status >= 400 and recovers panics.
 // Wire it as the outermost layer (after LoadAndSave, before serving).
 func RequestLogMiddleware(next http.Handler) http.Handler {
@@ -75,7 +57,7 @@ func RequestLogMiddleware(next http.Handler) http.Handler {
 			if p := recover(); p != nil {
 				rec.status = http.StatusInternalServerError
 				logging.LogfAPI("[apiserver] PANIC %s %s ip=%s: %v",
-					r.Method, r.URL.RequestURI(), ip, p)
+					r.Method, requestLogPath(r), ip, p)
 				if !rec.wrote {
 					http.Error(w, `{"error":"internal server error"}`,
 						http.StatusInternalServerError)
@@ -93,11 +75,21 @@ func RequestLogMiddleware(next http.Handler) http.Handler {
 		isAsset := len(path) > 8 && path[:8] == "/assets/"
 		if rec.status >= 400 || (rec.status >= 500) {
 			logging.LogfAPI("[apiserver] %s %s %d %s ip=%s",
-				r.Method, r.URL.RequestURI(), rec.status, ms, ip)
+				r.Method, requestLogPath(r), rec.status, ms, ip)
 		} else if !isAsset && logging.DebugEnabled() {
 			// Full request log only in debug mode to avoid noise.
 			logging.LogfAPI("[apiserver] %s %s %d %s ip=%s",
-				r.Method, r.URL.RequestURI(), rec.status, ms, ip)
+				r.Method, requestLogPath(r), rec.status, ms, ip)
 		}
 	})
+}
+
+func requestLogPath(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return "/"
+	}
+	if path := r.URL.EscapedPath(); path != "" {
+		return path
+	}
+	return "/"
 }

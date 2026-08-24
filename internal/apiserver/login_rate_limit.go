@@ -2,8 +2,9 @@ package apiserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -28,6 +29,8 @@ const (
 
 	loginLockThreshold = 10
 	loginLockWindow    = 10 * time.Minute
+
+	maxNormalizedLoginUsernameBytes = 256
 )
 
 type loginRateLimitDecision struct {
@@ -43,6 +46,10 @@ type loginRateLimiter struct {
 	ipState    map[string]*bucketPair
 	acctState  map[string]*accountLimiterState
 	tupleState map[string]*bucketPair
+}
+
+var writeAuthDecisionLine = func(line string) {
+	logging.LogfAPI("%s", line)
 }
 
 type accountLimiterState struct {
@@ -239,7 +246,12 @@ func (l *loginRateLimiter) prune(now time.Time) {
 }
 
 func normalizeLoginUsername(s string) string {
-	return strings.ToLower(strings.TrimSpace(s))
+	normalized := strings.ToLower(strings.TrimSpace(s))
+	if len(normalized) <= maxNormalizedLoginUsernameBytes {
+		return normalized
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return "overlong-sha256:" + hex.EncodeToString(sum[:])
 }
 
 func loginIPAccountTuple(ip, account string) string {
@@ -334,16 +346,41 @@ func emitLoginLimiterAudit(r *http.Request, action, ip, account string, delay ti
 	if account == "" {
 		account = "unknown"
 	}
-	detail := ""
-	if delay > 0 {
-		detail = fmt.Sprintf(" delay=%s", delay)
+	account = boundedAuditValue(account, maxAuthAuditUserBytes)
+	path = boundedAuditValue(path, maxAuthAuditPathBytes)
+	ua = boundedAuditValue(ua, maxAuthAuditUABytes)
+	status := "429"
+	if action == "backoff" {
+		status = "0"
 	}
-	logging.LogfAPI("[apiserver] event=login_rate_limit action=%s src_ip=%s account=%s method=%s path=%q ua=%q%s", action, ip, account, method, path, ua, detail)
+	fields := []string{
+		"[apiserver]",
+		"event=auth_decision",
+		"kind=login",
+		auditField("result", action),
+		auditField("src_ip", ip),
+		auditField("user", account),
+		auditField("method", method),
+		auditField("path", path),
+		"status=" + status,
+		auditField("ua", ua),
+	}
+	if delay > 0 {
+		fields = append(fields, auditField("delay", delay.String()))
+	}
+	writeAuthDecisionLine(strings.Join(fields, " "))
+	if action == "backoff" {
+		return
+	}
+	reason := "AUTH_LOGIN_RATE_LIMIT"
+	if action == "lock" {
+		reason = "AUTH_ACCOUNT_LOCK"
+	}
 	publishAPIAnomalyEvent(APIAnomalyEvent{
 		When:      time.Now(),
 		Source:    "apiserver",
-		Reason:    "login_rate_limit_" + action,
-		Signal:    "login_rate_limit_" + action,
+		Reason:    reason,
+		Signal:    reason,
 		Scope:     "login",
 		Count:     1,
 		SrcIP:     ip,

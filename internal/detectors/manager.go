@@ -165,28 +165,25 @@ func (m *manager) maybeReload(parent context.Context) {
 		return
 	}
 
-	secs, _, err := readSections(path)
+	secs, err, fallback := readSectionsForReload(path, m.running)
 	if err != nil {
-		availableTypes := RegisteredTypes()
-		detectorstatus.SetLoadedTypes(len(availableTypes))
-
-		// If the config is missing, stop everything (detectors disabled).
-		if os.IsNotExist(err) {
+		switch {
+		case os.IsNotExist(err):
 			if m.running {
-				logging.Logf("[detectors] stopping (cfg removed)")
+				logging.Logf("[detectors] config removed; retaining built-in control-plane protection")
 			} else {
-				logging.Logf("[detectors] no detections.conf at %s — disabled", path)
+				logging.Logf("[detectors] no detectors.conf at %s; starting built-in control-plane protection", path)
 			}
-			detectorstatus.ResetConfiguredSections(nil)
-			detectorstatus.SetInventory(availableTypes, nil, 0)
-			m.stopAll()
+		case fallback:
+			logging.Logf("[detectors] config read failed on first load (%s): %v — starting built-in control-plane protection in degraded mode; regular detectors retry automatically, restart after recovery to reapply start-once config consumers", path, err)
+		default:
+			// IMPORTANT: transient read/parse errors must NOT tear down running detectors.
+			// Common during atomic writes/editors: file replaced while we read.
+			logging.Logf("[detectors] config read failed (%s): %v — keeping current detectors", path, err)
 			return
 		}
-		// IMPORTANT: transient read/parse errors must NOT tear down running detectors.
-		// Common during atomic writes/editors: file replaced while we read.
-		logging.Logf("[detectors] config read failed (%s): %v — keeping current detectors", path, err)
-		return
 	}
+	applyBuiltinCFMEndpoints(&secs)
 	sig := cfgSig(&secs)
 	configured := make([]detectorstatus.SectionConfig, 0, len(secs.ByName))
 	configuredSections := make([]string, 0, len(secs.ByName))
@@ -198,10 +195,13 @@ func (m *manager) maybeReload(parent context.Context) {
 		typ, _ := splitTypeInstance(secName)
 		enabled := kvBool(kv, "ENABLED", true)
 		sourceOK, sourceMsg := probeSourceStatus(kv)
+		if typ == cfmEndpointsType {
+			sourceOK, sourceMsg = true, "in-process control-plane security events"
+		}
 		configured = append(configured, detectorstatus.SectionConfig{
 			Section:            secName,
 			Type:               typ,
-			Configured:         true,
+			Configured:         !kvBool(kv, cfmEndpointsSyntheticKey, false),
 			Enabled:            enabled,
 			SourceProbeOK:      sourceOK,
 			SourceProbeMessage: sourceMsg,
@@ -633,6 +633,27 @@ func (m *manager) maybeReload(parent context.Context) {
 			}
 
 		}(secName, det)
+	}
+}
+
+func readSectionsForReload(path string, running bool) (Sections, error, bool) {
+	secs, _, err := readSections(path)
+	if err == nil {
+		return secs, nil, false
+	}
+	if os.IsNotExist(err) || !running {
+		return emptyDetectorSections(), err, true
+	}
+	return Sections{}, err, false
+}
+
+func emptyDetectorSections() Sections {
+	return Sections{
+		Global: make(KV),
+		ByName: map[string]KV{
+			"global": make(KV),
+		},
+		ByType: make(map[string][]string),
 	}
 }
 

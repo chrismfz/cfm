@@ -138,7 +138,7 @@ func TestOAuthRefreshIsSingleUse(t *testing.T) {
 
 func TestValidAccessTokenExpiryAndAudience(t *testing.T) {
 	base := "https://panel.example.com/cfm-admin"
-	s := newOAuthServer(func(*http.Request) string { return base }, "/mcp",
+	s := newOAuthServer(func(*http.Request) string { return base }, immediateIPFromRequestMCP, nil, "/mcp",
 		"signing-secret-long-enough-xxxxx", func(string) (string, bool) { return "", true })
 	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	r.Host = "panel.example.com"

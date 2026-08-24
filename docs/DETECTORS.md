@@ -80,7 +80,7 @@ Typical defaults below are representative from the shipped template and should b
 
 | Detector key | What it detects | Key knobs | Typical defaults |
 |---|---|---|---|
-| `api_abuse` | API path abuse / anomaly stages | `STAGE1/2/3_THRESHOLD`, `STAGE2_CHALLENGE_TTL`, `BLOCK`, allowlists | `EVERY=2s`, `WINDOW=2m`, `BLOCK=15m` |
+| `cfm_endpoints` | CFM login/token/API abuse stages; built in and active even without the config file | `STAGE1/2/3_THRESHOLD`, `STAGE2_CHALLENGE_TTL`, `BLOCK`, IP/network allowlists | `EVERY=2s`, `WINDOW=2m`, `BLOCK=15m` |
 | `ssh_auth` | SSH auth failures / brute-force | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `DDOS_IP`, `BLOCK` | `MODE=journal`, `WINDOW=15m`, `BLOCK=permanent` |
 | `dovecot_auth` | Dovecot auth abuse | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK` | `MODE=journal`, `WINDOW=15m`, `BLOCK=permanent` |
 | `ftpd` | FTP auth failures | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent` |

@@ -9,8 +9,9 @@ package apiserver
 // daemon's own admin token, run through TokenMiddleware(adminToken)(mux). That
 // reuses every existing /api/v1 read handler and its scope/admin gate verbatim,
 // tracks the hot-swappable webdetector engine, and can only ever perform the
-// allow-listed GETs the tools issue. The admin token is used purely in-process;
-// the MCP client only ever holds a read-only OAuth token that is inert here.
+// allow-listed GETs the tools issue. CFM never exposes the admin token; trusted
+// fleet gateways may present one they already hold, while other clients use a
+// static MCP_TOKEN or a read-only OAuth token that is inert against /api/v1.
 
 import (
 	"bytes"
@@ -146,8 +147,9 @@ func loadOrCreateMCPToken(path string) (string, error) {
 
 // registerMCPServer mounts the MCP + OAuth endpoints on m. It is a no-op (with a
 // warning) unless BOTH are true: an admin API token is configured (needed for the
-// in-process read dispatch) AND a strong, distinct MCP_TOKEN is set (the
-// client-facing credential). The admin token is never exposed to MCP clients.
+// in-process read dispatch) AND a strong MCP_TOKEN is configured or generated
+// (the client-facing credential). The admin token is never exposed by CFM;
+// trusted fleet gateways may still present the admin token directly at /mcp.
 func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) {
 	adminTok := strings.TrimSpace(cfg.API.AuthToken)
 
@@ -185,6 +187,7 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 			return 0, nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+adminTok)
+		req = req.WithContext(suppressAuthAudit(req.Context()))
 		req.RemoteAddr = "127.0.0.1:0" // loopback: satisfies trusted-proxy checks
 		rec := &mcpRecorder{status: http.StatusOK, hdr: http.Header{}}
 		dispatchHandler.ServeHTTP(rec, req)
@@ -205,13 +208,35 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 	// mcpStaticBearer for why that doesn't widen the boundary. The admin token is
 	// used for the in-process dispatch above and is never handed to an MCP client.
 	h := mcpserver.New(mcpserver.Deps{
-		Version:       daemonVersion(),
-		MCPPath:       "/mcp",
-		Dispatch:      dispatch,
-		BaseURL:       func(r *http.Request) string { return mcpRequestScheme(r) + "://" + r.Host + cfmBase(r) },
+		Version:  daemonVersion(),
+		MCPPath:  "/mcp",
+		Dispatch: dispatch,
+		BaseURL:  func(r *http.Request) string { return mcpRequestScheme(r) + "://" + r.Host + cfmBase(r) },
+		ClientIP: realIPFromRequest,
+		AuditAuth: func(r *http.Request, event mcpserver.AuthAuditEvent) {
+			auditAuthAttempt(r, authAttemptAudit{
+				Kind: event.Kind, Result: event.Result, AuthMech: event.AuthMech, Status: event.Status,
+			})
+			switch event.Result {
+			case "invalid", "malformed":
+				markDirectAuthAnomaly(r)
+				publishRequestAnomaly(r, "AUTH_MCP_TOKEN_INVALID", event.Status)
+			case "rate_limited":
+				publishRequestAnomaly(r, "AUTH_MCP_CONSENT_RATE_LIMIT", event.Status)
+			}
+		},
 		Authenticate:  func(cred string) (string, bool) { return "", tokenMatch(cred, mcpTok) },
 		SigningSecret: mcpTok,
-		StaticBearer:  func(tok string) bool { return mcpStaticBearer(tok, mcpTok, adminTok) },
+		StaticBearer: func(tok string) (string, bool) {
+			switch {
+			case tokenMatch(tok, mcpTok):
+				return "mcp_static", true
+			case tokenMatch(tok, adminTok):
+				return string(authnMechanismTokenAdmin), true
+			default:
+				return "", false
+			}
+		},
 	})
 	h.Register(m)
 	if autogen {
@@ -221,22 +246,16 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 	}
 }
 
-// mcpRequestScheme reports the externally visible scheme. Behind the TLS-
-// terminating edge the daemon sees plain HTTP on loopback, so a trusted (loopback)
-// proxy hop implies https. Forwarded headers are honoured ONLY from the loopback
-// edge — the same trust rule as the prefix headers — so a direct non-loopback
-// caller cannot spoof the advertised scheme.
+// mcpRequestScheme reports the externally visible scheme. Current edge configs
+// send X-Forwarded-Proto. The narrow missing-header fallback preserves OAuth
+// URLs on upgraded hosts whose older live edge config still sends only the
+// trusted prefix; explicit http remains authoritative.
 func mcpRequestScheme(r *http.Request) string {
-	if r.TLS != nil {
+	peer := requestPeer(r)
+	if peer.TrustedProxy && strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")) == "" && trustedProxyBase(r) != "" {
 		return "https"
 	}
-	if trustedProxyBase(r) != "" {
-		if p := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); p != "" {
-			return strings.ToLower(strings.TrimSpace(strings.Split(p, ",")[0]))
-		}
-		return "https"
-	}
-	return "http"
+	return peer.Scheme
 }
 
 // DaemonVersion is the build version reported in the MCP initialize result. It is

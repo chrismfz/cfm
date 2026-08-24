@@ -150,12 +150,9 @@ type cpanelAuthFailTracker struct {
 var pluginAuthFailTracker cpanelAuthFailTracker
 
 func authorizePluginAssertion(r *http.Request) (string, int, error, string) {
+	// Assertions travel only in the dedicated header; Authorization: Bearer is
+	// the CFM admin/scoped token namespace and never carries an assertion.
 	raw := strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion"))
-	if raw == "" {
-		if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(auth, "Bearer ") {
-			raw = strings.TrimSpace(auth[7:])
-		}
-	}
 	if raw == "" {
 		return "", http.StatusUnauthorized, fmt.Errorf("%s", "authorization required"), "token_missing"
 	}
@@ -297,11 +294,6 @@ func cpanelClientIP(r *http.Request) string {
 
 func assertionSubjectHint(r *http.Request) string {
 	raw := strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion"))
-	if raw == "" {
-		if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(auth, "Bearer ") {
-			raw = strings.TrimSpace(auth[7:])
-		}
-	}
 	parts := strings.Split(raw, ".")
 	if len(parts) != 3 {
 		return ""

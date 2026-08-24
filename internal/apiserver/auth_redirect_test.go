@@ -196,6 +196,7 @@ func TestTokenMiddlewareAdminTokenSetsAdminAuthMarkers(t *testing.T) {
 
 func TestTokenMiddlewareMissingAdminTokenRejectsPrivilegedRoutes(t *testing.T) {
 	withSessionAllowedStub(t, true)
+	lines := captureAuthAuditLines(t)
 
 	called := false
 	h := TokenMiddleware("", NewTokenStore())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -205,6 +206,7 @@ func TestTokenMiddlewareMissingAdminTokenRejectsPrivilegedRoutes(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "https://host/api/v1/tokens/list", nil)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer supplied-secret")
 	rr := httptest.NewRecorder()
 
 	h.ServeHTTP(rr, req)
@@ -217,6 +219,9 @@ func TestTokenMiddlewareMissingAdminTokenRejectsPrivilegedRoutes(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `server misconfigured: AUTH_TOKEN missing`) {
 		t.Fatalf("expected clear misconfiguration error, got body=%q", rr.Body.String())
+	}
+	if len(*lines) != 1 || !strings.Contains((*lines)[0], "kind=token result=unavailable") || strings.Contains((*lines)[0], "supplied-secret") {
+		t.Fatalf("missing-token audit=%v, want one secret-free unavailable event", *lines)
 	}
 }
 

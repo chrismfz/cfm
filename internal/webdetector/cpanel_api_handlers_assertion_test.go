@@ -50,6 +50,31 @@ func TestAuthorizePluginAssertionAcceptsDerivedKey(t *testing.T) {
 	}
 }
 
+func TestAuthorizePluginAssertionIgnoresBearerAuthorization(t *testing.T) {
+	dir := t.TempDir()
+	writeCFMConf(t, dir, "AUTH_TOKEN=shared-secret\n")
+	setConfigDir(t, dir)
+
+	derivedKey, err := panelauth.DerivePluginAssertionKey()
+	if err != nil {
+		t.Fatalf("derive key: %v", err)
+	}
+	token := signedAssertionForTest(t, "alice", "nonce-bearer-1", derivedKey, time.Now().UTC())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cpanel/user-info", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	user, status, authErr, reason := authorizePluginAssertion(req)
+	if authErr == nil {
+		t.Fatal("Bearer must not carry a plugin assertion")
+	}
+	if status != http.StatusUnauthorized || reason != "token_missing" {
+		t.Fatalf("expected 401/token_missing, got status=%d reason=%q", status, reason)
+	}
+	if user != "" {
+		t.Fatalf("expected empty user, got %q", user)
+	}
+}
+
 func TestAuthorizePluginAssertionRejectsMismatchedAuthToken(t *testing.T) {
 	dir := t.TempDir()
 	writeCFMConf(t, dir, "AUTH_TOKEN=server-token\n")
