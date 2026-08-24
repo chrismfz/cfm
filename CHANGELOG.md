@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.24
+
 ### Added
 - **Host-wide netfilter path diagnostics for redirect collisions.** New
   `cfm firewall path`, admin-only `/api/v1/firewall/path`, cfm-admin Firewall
