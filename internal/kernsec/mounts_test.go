@@ -43,6 +43,39 @@ func (s stubFS) readlink(p string) (string, error) {
 	return "", &fs.PathError{Op: "readlink", Path: p, Err: errors.New("not a link")}
 }
 
+func useMountFSProbes(t *testing.T, fs stubFS) {
+	t.Helper()
+	origLstat, origReadlink := realLstat, realReadlink
+	realLstat, realReadlink = fs.lstat, fs.readlink
+	t.Cleanup(func() {
+		realLstat, realReadlink = origLstat, origReadlink
+	})
+}
+
+func useMountPersistenceProbes(
+	t *testing.T,
+	readFstab func() ([]fstabLine, error),
+	findUnit func(string) (string, string, bool),
+) {
+	t.Helper()
+	origFstab, origFinder := realFstabReader, realSystemdUnitFinderWithDropins
+	realFstabReader, realSystemdUnitFinderWithDropins = readFstab, findUnit
+	t.Cleanup(func() {
+		realFstabReader, realSystemdUnitFinderWithDropins = origFstab, origFinder
+	})
+}
+
+func noMountUnit(string) (string, string, bool) { return "", "", false }
+
+// checkMountFromProc is the legacy fixture helper used by the table tests
+// below. It deliberately supplies a non-symlink filesystem so the synthetic
+// /proc/mounts text is the complete input, regardless of the host layout.
+func checkMountFromProc(procMounts string, rule MountRule) (MountState, string) {
+	fs := stubFS{}
+	d := checkMountDetail(procMounts, rule, Tier1Mounts, fs.lstat, fs.readlink, nil, nil)
+	return d.State, d.CurrentOptions
+}
+
 func TestHasAllMountOptions(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -112,6 +145,9 @@ func TestSplitMountOptions(t *testing.T) {
 }
 
 func TestCheckMountFromProc(t *testing.T) {
+	// Even an injected host-like /dev/shm symlink must not override this
+	// legacy helper's synthetic /proc/mounts input.
+	useMountFSProbes(t, stubFS{links: map[string]string{"/dev/shm": "/run/shm"}})
 	procMounts := `rootfs / rootfs rw 0 0
 sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
 proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
@@ -343,6 +379,8 @@ func TestMountRowStateForDecision(t *testing.T) {
 func TestBuildAuditRows_IncludesMountRows(t *testing.T) {
 	// Substitute a fixture /proc/mounts so the test is deterministic
 	// across host filesystems.
+	useMountFSProbes(t, stubFS{})
+	useMountPersistenceProbes(t, func() ([]fstabLine, error) { return nil, nil }, noMountUnit)
 	origReader := readProcMounts
 	readProcMounts = func() string {
 		return `tmpfs /tmp tmpfs rw,nosuid,nodev,noexec,seclabel 0 0

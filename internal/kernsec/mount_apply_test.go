@@ -9,11 +9,21 @@ import (
 	"testing"
 )
 
-// withFakeFstab redirects PathFstab to a temp file containing the
-// supplied content and registers a cleanup that restores the path.
-// Returns the temp path so tests can re-read the post-apply state.
+// withFakeFstab redirects mount discovery to deterministic fixtures and
+// PathFstab to a temp file containing the supplied content. Returns the temp
+// path so tests can re-read the post-apply state.
 func withFakeFstab(t *testing.T, content string) string {
 	t.Helper()
+	useMountFSProbes(t, stubFS{})
+	origProbeRoot := hostProfileProbeRoot
+	hostProfileProbeRoot = t.TempDir()
+	t.Cleanup(func() { hostProfileProbeRoot = origProbeRoot })
+	origProc := readProcMounts
+	readProcMounts = func() string {
+		return "rootfs / rootfs rw 0 0\n" +
+			"tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n"
+	}
+	t.Cleanup(func() { readProcMounts = origProc })
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fstab")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -22,6 +32,13 @@ func withFakeFstab(t *testing.T, content string) string {
 	orig := PathFstab
 	PathFstab = path
 	t.Cleanup(func() { PathFstab = orig })
+	useMountPersistenceProbes(t, func() ([]fstabLine, error) {
+		b, err := os.ReadFile(PathFstab)
+		if err != nil {
+			return nil, err
+		}
+		return parseFstab(string(b)), nil
+	}, noMountUnit)
 	return path
 }
 
