@@ -73,7 +73,9 @@ back-filled here — see the git/PR history for that period.
   challenge/block `access.cfm.log` is never a source — and the
   malformed/aborted traffic the edge keeps OUT of that log (400/408/414/431/
   494/499 in access.bad_request.log) is profiled as a separate `bad_requests`
-  provenance section (`total_requests_with_bad` = combined headline), so
+  provenance section (`total_requests_with_bad` = combined headline over
+  attributable malformed requests; the sidecar always pairs with whichever
+  engine the main log resolved to), so
   attack-shaped floods of garbage probes, header abuse or client-aborts are
   neither invisible nor silently mixed into valid-traffic totals. Bounded like
   `ip_forensics`: shared line budget across all scanned files, one timeout,
@@ -81,7 +83,9 @@ back-filled here — see the git/PR history for that period.
   corrupt/unreadable rotated files are reported in `files_failed`, EVERY reach
   bound (line budget incl. the live tail window via `live_tail_truncated`,
   max_files cap) sets `truncated=true`, `log_changed_during_scan=true` flags a
-  copytruncate/rotation observed mid-read (re-run), and
+  copytruncate/rotation observed mid-read — including a rotation-set change
+  after the live read, where sibling scanning is skipped entirely to avoid
+  double counting — and
   `coverage_oldest_unix` reports how far back the kept rotation actually
   reaches. Optional `combine=1` joins the detector history store over exactly
   the same absolute window as the access scan (challenge issued/solved, block

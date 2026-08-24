@@ -741,9 +741,8 @@ func TestScanHost_BadRequestSectionSeparate(t *testing.T) {
 	oldFull := fullAccessLogCandidates
 	fullAccessLogCandidates = append([]string{live}, oldFull...)
 	defer func() { fullAccessLogCandidates = oldFull }()
-	oldBad := badRequestLogCandidates
-	badRequestLogCandidates = append([]string{badLog}, oldBad...)
-	defer func() { badRequestLogCandidates = oldBad }()
+	// NOTE no resolver override for the sidecar: it is DERIVED from the main
+	// log's directory (same-engine pairing guarantee).
 
 	res, err := ScanHost(context.Background(), "EX.gr", HostOpts{Hours: 1})
 	if err != nil {
@@ -775,15 +774,17 @@ func TestScanHost_BadRequestSectionSeparate(t *testing.T) {
 		t.Error("truncated must be false on this clean run")
 	}
 
-	// Without the source file present, the section is nil (documented meaning:
-	// node has no bad-request log) and totals stay consistent.
-	badRequestLogCandidates = nil
+	// Without the sidecar on disk, the section is nil (documented meaning:
+	// this engine has no bad-request log) and totals stay consistent.
+	if err := os.Remove(badLog); err != nil {
+		t.Fatal(err)
+	}
 	res2, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res2.BadRequests != nil {
-		t.Error("bad_requests must be nil when the node has no such log")
+		t.Error("bad_requests must be nil when the engine has no such log")
 	}
 	if res2.TotalRequestsWithBad != res2.TotalRequests {
 		t.Errorf("with_bad = %d, want %d (no bad source)", res2.TotalRequestsWithBad, res2.TotalRequests)
@@ -804,6 +805,93 @@ func TestSizeMutationDetection(t *testing.T) {
 	}
 	if !sizeChanged(100, 250) {
 		t.Error("growth during a rotated-file read must flag too (copytruncate fill)")
+	}
+}
+
+// TestScanHost_SharedBudgetAcrossChains pins single-source-of-truth budget
+// accounting: exactly max_lines lines consumed across live + rotated siblings,
+// an EXACT fit never reports truncated, and every source is reached.
+func TestScanHost_SharedBudgetAcrossChains(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	liveLines := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		liveLines = append(liveLines, cfmline(now-100+float64(i), "198.51.100.1", "ex.gr", "GET", fmt.Sprintf("/l%d", i), 200, "-", 0))
+	}
+	writeLines(t, live, liveLines)
+	gzLines := func(tag string) []string {
+		out := make([]string, 0, 5)
+		for i := 0; i < 5; i++ {
+			out = append(out, cfmline(now-50+float64(i), "198.51.100.2", "ex.gr", "GET", fmt.Sprintf("%s%d", tag, i), 200, "-", 0))
+		}
+		return out
+	}
+	writeGz(t, filepath.Join(dir, "access.log.1.gz"), gzLines("/a"))
+	writeGz(t, filepath.Join(dir, "access.log.2.gz"), gzLines("/b"))
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
+
+	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 48, IncludeRotated: true, MaxLines: 15})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Scanned != 15 {
+		t.Errorf("scanned = %d, want exactly 15 (each line charged once)", res.Scanned)
+	}
+	if res.Truncated {
+		t.Error("exact budget fit must NOT report truncated")
+	}
+	if got := len(res.FilesScanned); got != 3 {
+		t.Errorf("files_scanned = %d (%v), want 3 — all sources reached", got, res.FilesScanned)
+	}
+}
+
+func TestBadRequestLogFor(t *testing.T) {
+	cases := [][2]string{
+		{"/var/log/angie/access.log", "/var/log/angie/access.bad_request.log"},
+		{"/usr/local/openresty/nginx/logs/access.log", "/usr/local/openresty/nginx/logs/access.bad_request.log"},
+	}
+	for _, c := range cases {
+		if got := badRequestLogFor(c[0]); got != c[1] {
+			t.Errorf("badRequestLogFor(%q) = %q, want %q (sidecar always pairs with the resolved engine)", c[0], got, c[1])
+		}
+	}
+}
+
+func TestRotatedGenerationChanged(t *testing.T) {
+	base := map[string]rotatedSnapshot{
+		"/v/a.1.gz": {path: "/v/a.1.gz", size: 10, mod: time.Unix(1000, 0)},
+	}
+	same := func() map[string]rotatedSnapshot {
+		return map[string]rotatedSnapshot{
+			"/v/a.1.gz": {path: "/v/a.1.gz", size: 10, mod: time.Unix(1000, 0)},
+		}
+	}
+	if rotatedGenerationChanged(base, same()) {
+		t.Error("identical generations must not flag")
+	}
+	appeared := same()
+	appeared["/v/a.2.gz"] = rotatedSnapshot{path: "/v/a.2.gz", size: 5, mod: time.Unix(1001, 0)}
+	if !rotatedGenerationChanged(base, appeared) {
+		t.Error("new sibling must flag")
+	}
+	replaced := same()
+	delete(replaced, "/v/a.1.gz")
+	if !rotatedGenerationChanged(base, replaced) {
+		t.Error("removed sibling must flag")
+	}
+	moved := same()
+	moved["/v/a.1.gz"] = rotatedSnapshot{path: "/v/a.1.gz", size: 11, mod: time.Unix(1000, 0)}
+	if !rotatedGenerationChanged(base, moved) {
+		t.Error("size change must flag")
+	}
+	touched := same()
+	touched["/v/a.1.gz"] = rotatedSnapshot{path: "/v/a.1.gz", size: 10, mod: time.Unix(1002, 0)}
+	if !rotatedGenerationChanged(base, touched) {
+		t.Error("mtime change must flag")
 	}
 }
 
