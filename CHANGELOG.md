@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.24
+
 ### Added
 - **Country-aware WAF false-positive evidence in MCP.** `waf_activity` now
   accepts combinable country, reason/rule, IP, vhost, URL/path and user-agent
