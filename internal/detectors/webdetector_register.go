@@ -362,12 +362,13 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			if b := w.eng.NginxBridge(); b != nil {
 				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType string) {
 					var asn uint
-					var asnName, country string
+					var asnName, country, countryISO string
 					if enr := w.eng.Enricher(); enr != nil {
 						r := enr.LookupGeoFast(ip) // Country/ASN only; avoid blocking PTR rDNS
 						asn = r.ASN
 						asnName = r.ASNName
 						country = r.Country
+						countryISO = r.CountryISO
 					}
 
 					// One JSON object per trigger to cfm.waf.log. The
@@ -390,21 +391,22 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 						"asn":         asn,
 						"asn_name":    asnName,
 						"country":     country,
+						"country_iso": countryISO,
 					}
 					if buf, err := json.Marshal(entry); err == nil {
 						logging.LogfWAF("%s", string(buf))
 					}
 
-					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country, wafRuleID, ua, referer, contentType)
+					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country, countryISO, wafRuleID, ua, referer, contentType)
 				})
 
 				// NEW: Hook per-request observations (e.g. OpenResty WAF returned 403)
 				// into the webdetector engine so the existing "403 after X tries"
 				// logic can escalate to firewall blocks normally (no double log parsing).
-				b.SetObserveHook(func(ip, host, uri, method string, status int, reason string) {
+				b.SetObserveHook(func(ip, host, uri, method string, status int, reason string, wafRuleID int, ua string) {
 					// Non-blocking: InjectObserved takes e.mu.Lock but returns fast.
 					// Called from bridge's HTTP handler goroutine; must not block.
-					w.eng.InjectObserved(ip, host, uri, method, status, reason)
+					w.eng.InjectObserved(ip, host, uri, method, status, reason, wafRuleID, ua)
 				})
 
 				// Hit-rate denominator persistence: Lua periodically flushes

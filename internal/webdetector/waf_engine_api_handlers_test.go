@@ -43,19 +43,22 @@ func TestWAFEngineSummaryIncludesTriggerEvents(t *testing.T) {
 	}
 }
 
-// TestWAFEngineSummaryCountryAndRuleFilters asserts the country= and rule=
-// filters apply BEFORE aggregation, so totals, blocked counts and top lists
-// reflect only the matching events (the false-positive-hunting contract).
-func TestWAFEngineSummaryCountryAndRuleFilters(t *testing.T) {
+// TestWAFEngineSummaryForensicFilters asserts all filters apply BEFORE
+// aggregation, so totals, blocked counts and top lists reflect only the
+// matching events (the false-positive-hunting contract).
+func TestWAFEngineSummaryForensicFilters(t *testing.T) {
 	dir := t.TempDir()
 	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("NewHistoryStore: %v", err)
 	}
 	now := time.Now().Unix()
-	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "a.com", IP: "1.1.1.1", Mode: "block", Reason: "WAF_SQLI:42", Payload: map[string]interface{}{"uri": "/x", "method": "get", "country": "CN"}})
-	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "b.com", IP: "2.2.2.2", Mode: "logonly", Reason: "WAF_XSS:7", Payload: map[string]interface{}{"uri": "/y", "method": "get", "country": "US"}})
-	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "c.com", IP: "3.3.3.3", Mode: "block", Reason: "WAF_SQLI:42", Payload: map[string]interface{}{"uri": "/z", "method": "get", "country": "US"}})
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "a.com", IP: "1.1.1.1", Mode: "block", Reason: "WAF_SQLI:42", Payload: map[string]interface{}{"uri": "/x", "method": "get", "country": "China", "country_iso": "CN"}})
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "b.com", IP: "2.2.2.2", Mode: "logonly", Reason: "WAF_XSS:SEG_320", Payload: map[string]interface{}{"uri": "/y", "method": "get", "country": "United States", "country_iso": "US", "waf_rule_id": 302}})
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "c.com", IP: "3.3.3.3", Mode: "block", Reason: "WAF_SQLI:42", Payload: map[string]interface{}{
+		"uri": "/checkout?step=pay", "method": "post", "country": "United States", "country_iso": "US", "waf_rule_id": 320,
+		"action": "block", "ua": "Mozilla/5.0 Legit Browser", "referer": "https://c.com/Cart?OAuthToken=secret&%74oken=also-secret&View=Full", "ct": "application/x-www-form-urlencoded",
+	}})
 
 	e := &Engine{history: hs}
 	call := func(query string) wafEngineSummary {
@@ -90,7 +93,10 @@ func TestWAFEngineSummaryCountryAndRuleFilters(t *testing.T) {
 		t.Fatalf("histogram sums %d/%d != totals %d/%d", histTotal, histBlocked, all.TotalEvents, all.BlockedEvents)
 	}
 	if len(all.TopCountries) != 2 {
-		t.Fatalf("unfiltered top_countries=%v, want CN+US", all.TopCountries)
+		t.Fatalf("unfiltered top_countries=%v, want China and United States", all.TopCountries)
+	}
+	if all.TopCountries[0].Key != "United States" || all.TopCountries[0].Count != 2 {
+		t.Fatalf("unfiltered top_countries=%v, want one full-name US bucket with count 2", all.TopCountries)
 	}
 
 	// Country filter: only the CN event; blocked count follows, and so
@@ -118,11 +124,99 @@ func TestWAFEngineSummaryCountryAndRuleFilters(t *testing.T) {
 	if sqli.TotalEvents != 2 || len(sqli.Rows) != 2 {
 		t.Fatalf("rule=waf_sqli: total=%d rows=%d, want 2/2", sqli.TotalEvents, len(sqli.Rows))
 	}
+	numeric := call("&rule=320")
+	if numeric.TotalEvents != 1 || len(numeric.Rows) != 1 || numeric.Rows[0].Host != "c.com" {
+		t.Fatalf("rule=320: %+v", numeric)
+	}
 
-	// Combined: SQLI from US only.
-	both := call("&rule=waf_sqli&country=US")
+	// Combined forensic drill-down: one SQLI hit from the requested Greek-style
+	// country/IP/vhost/path/UA facet. The row carries the raw evidence needed to
+	// correlate it with the bounded access-log tools.
+	both := call("&rule=waf_sqli&country=US&ip=3.3.3.3&host=C.COM&path=CHECKOUT&ua=legit%20browser")
 	if both.TotalEvents != 1 || both.Rows[0].Host != "c.com" {
 		t.Fatalf("combined filter: %+v", both)
+	}
+	row := both.Rows[0]
+	if row.EventType != "waf_trigger" || row.Country != "United States" || row.CountryISO != "US" ||
+		row.WAFRuleID != 320 || row.Action != "block" || row.UA != "Mozilla/5.0 Legit Browser" ||
+		row.Referer != "https://c.com/Cart?OAuthToken=[redacted]&%74oken=[redacted]&View=Full" || row.ContentType != "application/x-www-form-urlencoded" {
+		t.Fatalf("forensic row fields missing: %+v", row)
+	}
+	if both.IPFilter != "3.3.3.3" || both.HostFilter != "c.com" || both.PathFilter != "checkout" || both.UAFilter != "legit browser" {
+		t.Fatalf("filter echo mismatch: %+v", both)
+	}
+}
+
+func TestWAFEngineSummaryUAFilterIncludesObservations(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	now := time.Now().Unix()
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "shop.example", IP: "1.1.1.1", Reason: "WAF_SQLI", Payload: map[string]interface{}{"ua": "Mozilla/5.0 Legit", "waf_rule_id": 320}})
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_observe", Host: "shop.example", IP: "1.1.1.1", Status: http.StatusForbidden, Reason: "WAF_SQLI", Payload: map[string]interface{}{"ua": "Mozilla/5.0 Legit", "waf_rule_id": 320}})
+
+	e := &Engine{history: hs}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/waf/engine/summary?ua=mozilla&rule=320", nil).WithContext(adminCtx())
+	e.handleWAFEngineSummary(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out wafEngineSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.TotalEvents != 2 || len(out.Rows) != 2 {
+		t.Fatalf("UA/rule-filtered total=%d rows=%d, want trigger + observation", out.TotalEvents, len(out.Rows))
+	}
+	for _, row := range out.Rows {
+		if row.WAFRuleID != 320 {
+			t.Fatalf("row %+v missing numeric WAF rule ID", row)
+		}
+		if row.EventType == "waf_observe" && row.Action != "block" {
+			t.Fatalf("observed block action=%q, want block", row.Action)
+		}
+	}
+}
+
+func TestWAFEngineSummaryIPFilterCanonicalizesIPv6(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	hs.Append(HistoryEvent{TsUnix: time.Now().Unix(), Type: "waf_trigger", Host: "a.com", IP: "2001:0db8:0:0:0:0:0:1", Reason: "WAF_SQLI"})
+
+	e := &Engine{history: hs}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/waf/engine/summary?ip=2001:db8::1", nil).WithContext(adminCtx())
+	e.handleWAFEngineSummary(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out wafEngineSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.TotalEvents != 1 {
+		t.Fatalf("canonical IPv6 filter returned %d events, want 1", out.TotalEvents)
+	}
+}
+
+func TestWAFEngineSummaryRejectsNonPositiveRuleID(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	e := &Engine{history: hs}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/waf/engine/summary?rule=0", nil).WithContext(adminCtx())
+	e.handleWAFEngineSummary(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", rr.Code, rr.Body.String())
 	}
 }
 

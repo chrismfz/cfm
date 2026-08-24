@@ -227,21 +227,33 @@ func section(ctx context.Context, d Deps, path string, q url.Values) json.RawMes
 // ── WAF ───────────────────────────────────────────────────────────────────────
 
 type wafActivityInput struct {
-	Hours int `json:"hours,omitempty" jsonschema:"look-back window in hours; default 24"`
-	Limit int `json:"limit,omitempty" jsonschema:"max recent hit rows to return; default server-side"`
-	Top   int `json:"top,omitempty" jsonschema:"how many top rules/IPs to rank; default server-side"`
+	Hours   int    `json:"hours,omitempty" jsonschema:"look-back window in hours; default 24"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"max recent hit rows to return; default server-side"`
+	Top     int    `json:"top,omitempty" jsonschema:"how many top rules/IPs to rank; default server-side"`
+	Country string `json:"country,omitempty" jsonschema:"ISO-2 country code filter; comma-separated for several, e.g. GR or GR,CY"`
+	Rule    string `json:"rule,omitempty" jsonschema:"case-insensitive WAF reason/family substring or exact positive numeric rule ID, e.g. WAF_SQLI or 320"`
+	IP      string `json:"ip,omitempty" jsonschema:"exact source IPv4 or IPv6 address"`
+	Host    string `json:"host,omitempty" jsonschema:"exact virtual host"`
+	Path    string `json:"path,omitempty" jsonschema:"case-insensitive URL/path substring"`
+	UA      string `json:"ua,omitempty" jsonschema:"case-insensitive user-agent substring"`
 }
 
 func registerWAFActivity(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "waf_activity",
-		Description: "WAF engine summary: recent in-path WAF hits, the top firing rules, top source IPs (GeoIP-enriched), and a per-hour histogram over the window. Answers \"is the WAF firing, on what rules, from where?\".",
+		Description: "WAF engine summary and false-positive evidence: recent in-path hits with timestamp, event type, IP, country/ISO/ASN, host, URL, method, action, WAF reason/rule ID and available UA/referer/content type; plus filtered totals, top rules/IPs and an hourly histogram. Filters combine, so country=GR with path/ua/rule narrows the same result set. Correlate a row with edge_access_tail using its ip/host/path (recent ring), or ip_forensics using its ip (older logs). Older observation rows may lack optional forensic fields; request bodies are never included, and secret-looking referer parameters are redacted.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in wafActivityInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{"enrich": {"1"}}
 		setInt(q, "hours", in.Hours)
 		setInt(q, "limit", in.Limit)
 		setInt(q, "top", in.Top)
+		setStr(q, "country", in.Country)
+		setStr(q, "rule", in.Rule)
+		setStr(q, "ip", in.IP)
+		setStr(q, "host", in.Host)
+		setStr(q, "path", in.Path)
+		setStr(q, "ua", in.UA)
 		return dispatchJSON(ctx, d, "/api/v1/waf/engine/summary", q)
 	})
 }

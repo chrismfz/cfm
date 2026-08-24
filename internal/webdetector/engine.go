@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -773,7 +774,7 @@ func (e *Engine) appendHistory(ev HistoryEvent) {
 // ua, referer, contentType are the per-request forensic fields already
 // captured by the Lua bridge (see cfm.waf.log). They are persisted into
 // payload_json only when non-empty so older rows stay compact.
-func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country string, wafRuleID int, ua, referer, contentType string) {
+func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country, countryISO string, wafRuleID int, ua, referer, contentType string) {
 	if e == nil {
 		return
 	}
@@ -784,12 +785,13 @@ func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, 
 		action = "triggered"
 	}
 	payload := map[string]interface{}{
-		"uri":      uri,
-		"method":   method,
-		"action":   action,
-		"asn":      asn,
-		"asn_name": strings.TrimSpace(asnName),
-		"country":  strings.TrimSpace(country),
+		"uri":         uri,
+		"method":      method,
+		"action":      action,
+		"asn":         asn,
+		"asn_name":    strings.TrimSpace(asnName),
+		"country":     strings.TrimSpace(country),
+		"country_iso": strings.ToUpper(strings.TrimSpace(countryISO)),
 	}
 	if wafRuleID > 0 {
 		payload["waf_rule_id"] = wafRuleID
@@ -3033,7 +3035,7 @@ func uaMatchAny(ua string, subs []string) bool {
 // therefore never appeared in the access log.
 //
 // Thread-safe. Non-blocking.
-func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason string) {
+func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason string, wafRuleID int, ua string) {
 	if ip == "" {
 		return
 	}
@@ -3056,7 +3058,19 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 
 	now := time.Now()
 	rawLine := fmt.Sprintf("[WAF403] ip=%s host=%s method=%s uri=%s reason=%s", ip, host, method, uri, reason)
-	e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "waf_observe", Host: host, IP: ip, Reason: reason, Status: status, Payload: map[string]interface{}{"uri": uri, "method": method}})
+	payload := map[string]interface{}{"uri": uri, "method": method}
+	mode := ""
+	if status == http.StatusForbidden {
+		mode = "block"
+		payload["action"] = mode
+	}
+	if wafRuleID > 0 {
+		payload["waf_rule_id"] = wafRuleID
+	}
+	if ua = strings.TrimSpace(ua); ua != "" {
+		payload["ua"] = boundStr(ua, accessMaxUA)
+	}
+	e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "waf_observe", Host: host, IP: ip, Reason: reason, Mode: mode, Status: status, Payload: payload})
 
 	rec := LogRec{
 		TS:     float64(now.UnixNano()) / 1e9,

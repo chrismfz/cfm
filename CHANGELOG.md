@@ -17,7 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Country-aware WAF false-positive evidence in MCP.** `waf_activity` now
+  accepts combinable country, reason/rule, IP, vhost, URL/path and user-agent
+  filters, and returns available numeric rule ID, action, bounded UA, redacted
+  referer and content type alongside its existing timestamp, IP, GeoIP, host and
+  URL. New events retain both the country name and ISO-2 code, while GeoIP fills
+  the code for older rows so `country=GR` works against production data. Numeric
+  rule IDs are directly filterable, and per-block observations now retain UA so
+  UA-filtered totals do not drop requests between de-duplicated trigger pushes;
+  observe UAs are bounded to the same 256-byte forensic limit before transport
+  and persistence. Observations also retain the numeric rule ID and explicit
+  block action, so exact rule-ID totals cover every block rather than only
+  de-duplicated trigger pushes.
+  Rows can be correlated directly with `edge_access_tail` for recent traffic or
+  `ip_forensics` for older access-log evidence.
 
 ## 2026.08.24
 
