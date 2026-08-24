@@ -47,6 +47,13 @@ func TestNginxBridgeHandlerBodyCaps(t *testing.T) {
 			bigBody: fmt.Sprintf(`{"ip":"203.0.113.5","action":"block","uri":"/%s"}`, pad(300*1024)),
 		},
 		{
+			name:    "observe",
+			pick:    func(b *NginxBridge) func(http.ResponseWriter, *http.Request) { return b.handleObserve },
+			path:    "/nginx/observe",
+			okBody:  fmt.Sprintf(`{"ip":"203.0.113.5","status":403,"ua":"%s"}`, pad(64*1024)),
+			bigBody: fmt.Sprintf(`{"ip":"203.0.113.5","status":403,"ua":"%s"}`, pad(300*1024)),
+		},
+		{
 			name:    "ip_clear",
 			pick:    func(b *NginxBridge) func(http.ResponseWriter, *http.Request) { return b.handleIPClear },
 			path:    "/nginx/ip/clear",

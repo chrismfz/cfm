@@ -25,7 +25,9 @@ back-filled here — see the git/PR history for that period.
   URL. New events retain both the country name and ISO-2 code, while GeoIP fills
   the code for older rows so `country=GR` works against production data. Numeric
   rule IDs are directly filterable, and per-block observations now retain UA so
-  UA-filtered totals do not drop requests between de-duplicated trigger pushes.
+  UA-filtered totals do not drop requests between de-duplicated trigger pushes;
+  observe UAs are bounded to the same 256-byte forensic limit before transport
+  and persistence.
   Rows can be correlated directly with `edge_access_tail` for recent traffic or
   `ip_forensics` for older access-log evidence.
 

@@ -54,7 +54,7 @@ func TestWAFEngineSummaryForensicFilters(t *testing.T) {
 	}
 	now := time.Now().Unix()
 	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "a.com", IP: "1.1.1.1", Mode: "block", Reason: "WAF_SQLI:42", Payload: map[string]interface{}{"uri": "/x", "method": "get", "country": "China", "country_iso": "CN"}})
-	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "b.com", IP: "2.2.2.2", Mode: "logonly", Reason: "WAF_XSS:7", Payload: map[string]interface{}{"uri": "/y", "method": "get", "country": "United States", "country_iso": "US"}})
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "b.com", IP: "2.2.2.2", Mode: "logonly", Reason: "WAF_XSS:SEG_320", Payload: map[string]interface{}{"uri": "/y", "method": "get", "country": "United States", "country_iso": "US", "waf_rule_id": 302}})
 	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "c.com", IP: "3.3.3.3", Mode: "block", Reason: "WAF_SQLI:42", Payload: map[string]interface{}{
 		"uri": "/checkout?step=pay", "method": "post", "country": "United States", "country_iso": "US", "waf_rule_id": 320,
 		"action": "block", "ua": "Mozilla/5.0 Legit Browser", "referer": "https://c.com/Cart?OAuthToken=secret&%74oken=also-secret&View=Full", "ct": "application/x-www-form-urlencoded",

@@ -126,6 +126,12 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	}
 	ruleFilter := strings.ToLower(strings.TrimSpace(q.Get("rule")))
 	res.RuleFilter = ruleFilter
+	ruleIDFilter, numericRuleFilter := 0, false
+	if ruleFilter != "" {
+		if n, err := strconv.Atoi(ruleFilter); err == nil {
+			ruleIDFilter, numericRuleFilter = n, true
+		}
+	}
 	ipFilter := strings.TrimSpace(q.Get("ip"))
 	hostFilter := strings.ToLower(cleanHost(q.Get("host")))
 	pathFilter := strings.ToLower(strings.TrimSpace(q.Get("path")))
@@ -283,10 +289,12 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 		if ruleFilter != "" {
-			reasonMatch := strings.Contains(strings.ToLower(rule), ruleFilter) ||
-				strings.Contains(strings.ToLower(ruleBase), ruleFilter)
-			idMatch := wafRuleID > 0 && ruleFilter == strconv.Itoa(wafRuleID)
-			if !reasonMatch && !idMatch {
+			if numericRuleFilter && wafRuleID != ruleIDFilter {
+				continue
+			}
+			if !numericRuleFilter &&
+				!strings.Contains(strings.ToLower(rule), ruleFilter) &&
+				!strings.Contains(strings.ToLower(ruleBase), ruleFilter) {
 				continue
 			}
 		}

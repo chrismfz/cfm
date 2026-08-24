@@ -2018,7 +2018,7 @@ func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Defensive: cap body size (avoid abuse over the socket)
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	r.Body = http.MaxBytesReader(w, r.Body, 256*1024)
 
 	var msg nginxObserveMsg
 	dec := json.NewDecoder(bufio.NewReader(r.Body))
@@ -2038,7 +2038,7 @@ func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
 	method := strings.ToLower(strings.TrimSpace(msg.Method))
 	status := msg.Status
 	reason := strings.TrimSpace(msg.Reason)
-	ua := strings.TrimSpace(msg.UA)
+	ua := boundStr(strings.TrimSpace(msg.UA), accessMaxUA)
 
 	// Sanity: allow 100..599
 	if status < 100 || status > 599 {
@@ -2129,7 +2129,7 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 				status = 0
 			}
 			reason := strings.TrimSpace(msg.Reason)
-			ua := strings.TrimSpace(msg.UA)
+			ua := boundStr(strings.TrimSpace(msg.UA), accessMaxUA)
 			if b.OnObserve != nil {
 				b.dispatchHook(func() {
 					b.OnObserve(ip, host, uri, method, status, reason, ua)

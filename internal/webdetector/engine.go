@@ -3059,7 +3059,7 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 	rawLine := fmt.Sprintf("[WAF403] ip=%s host=%s method=%s uri=%s reason=%s", ip, host, method, uri, reason)
 	payload := map[string]interface{}{"uri": uri, "method": method}
 	if ua = strings.TrimSpace(ua); ua != "" {
-		payload["ua"] = ua
+		payload["ua"] = boundStr(ua, accessMaxUA)
 	}
 	e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "waf_observe", Host: host, IP: ip, Reason: reason, Status: status, Payload: payload})
 
