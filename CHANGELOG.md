@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.24
+
 ### Added
 - **Country-aware WAF false-positive evidence in MCP.** `waf_activity` now
   accepts combinable country, reason/rule, IP, vhost, URL/path and user-agent
@@ -32,8 +36,6 @@ back-filled here — see the git/PR history for that period.
   de-duplicated trigger pushes.
   Rows can be correlated directly with `edge_access_tail` for recent traffic or
   `ip_forensics` for older access-log evidence.
-
-## 2026.08.24
 
 ### Added
 - **Host-wide netfilter path diagnostics for redirect collisions.** New
