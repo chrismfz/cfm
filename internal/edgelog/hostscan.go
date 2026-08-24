@@ -713,7 +713,11 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	var bad *logChain
 	var preGenBad map[string]rotatedSnapshot
 	badFile := badRequestLogFor(logFile)
-	if fi, ferr := os.Stat(badFile); ferr == nil && fi.Mode().IsRegular() && fi.Size() > 0 {
+	if fi, ferr := os.Stat(badFile); ferr == nil && fi.Mode().IsRegular() {
+		// An EMPTY live sidecar is a valid live source with zero CURRENT
+		// entries — copytruncate+notifempty rotation leaves it 0 bytes while
+		// the .1/.N.gz archives still hold the history. Gating on Size()>0
+		// here would hide exactly those archives (archival false negative).
 		preGenBad = snapshotRotated(badFile)
 		remaining := budget - budgetUsed
 		if remaining <= 0 {

@@ -887,6 +887,67 @@ func TestScanHost_LastSiblingBudgetBoundary(t *testing.T) {
 	}
 }
 
+// TestScanHost_EmptyBadLiveStillScansArchives: copytruncate+notifempty leaves
+// an EMPTY live access.bad_request.log right after rotation — that is a valid
+// live source with zero current entries, NOT "source absent". The rotated
+// archives (.1.gz holding yesterday's malformed attacks) must still be scanned.
+func TestScanHost_EmptyBadLiveStillScansArchives(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	writeLines(t, live, []string{
+		cfmline(now-30, "198.51.100.1", "ex.gr", "GET", "/ok", 200, "Mozilla/5.0", 50),
+	})
+	badLog := filepath.Join(dir, "access.bad_request.log")
+	if err := os.WriteFile(badLog, nil, 0o644); err != nil { // ZERO bytes, exists
+		t.Fatal(err)
+	}
+	badGz := filepath.Join(dir, "access.bad_request.log.1.gz")
+	writeGz(t, badGz, []string{
+		cfmbadline(now-3600, "198.51.100.7", "ex.gr", "GET", "/hugeheaders", 431, "-", 0),
+		cfmbadline(now-3500, "198.51.100.7", "ex.gr", "GET", "/garbage", 431, "-", 0),
+	})
+
+	oldFull := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, oldFull...)
+	defer func() { fullAccessLogCandidates = oldFull }()
+
+	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 48, IncludeRotated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.BadRequests == nil {
+		t.Fatal("bad_requests=nil with an existing (empty) live sidecar — archival false negative")
+	}
+	bad := res.BadRequests
+	if bad.TotalRequests != 2 {
+		t.Errorf("bad total = %d, want 2 (both archived 431s)", bad.TotalRequests)
+	}
+	if res.TotalRequestsWithBad != 3 {
+		t.Errorf("total_with_bad = %d, want 3 (1 valid + 2 archived malformed)", res.TotalRequestsWithBad)
+	}
+	found := false
+	for _, f := range bad.FilesScanned {
+		if f == badGz {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("bad archive not scanned: %v", bad.FilesScanned)
+	}
+
+	// Without rotated reach the section still EXISTS (live source present),
+	// just empty for the current generation.
+	res2, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 48, IncludeRotated: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.BadRequests == nil || res2.BadRequests.TotalRequests != 0 {
+		t.Errorf("include_rotated=false: section=%v, want present with 0 requests", res2.BadRequests)
+	}
+}
+
 func TestBadRequestLogFor(t *testing.T) {
 	cases := [][2]string{
 		{"/var/log/angie/access.log", "/var/log/angie/access.bad_request.log"},
