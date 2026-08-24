@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -3034,7 +3035,7 @@ func uaMatchAny(ua string, subs []string) bool {
 // therefore never appeared in the access log.
 //
 // Thread-safe. Non-blocking.
-func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason, ua string) {
+func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason string, wafRuleID int, ua string) {
 	if ip == "" {
 		return
 	}
@@ -3058,10 +3059,18 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 	now := time.Now()
 	rawLine := fmt.Sprintf("[WAF403] ip=%s host=%s method=%s uri=%s reason=%s", ip, host, method, uri, reason)
 	payload := map[string]interface{}{"uri": uri, "method": method}
+	mode := ""
+	if status == http.StatusForbidden {
+		mode = "block"
+		payload["action"] = mode
+	}
+	if wafRuleID > 0 {
+		payload["waf_rule_id"] = wafRuleID
+	}
 	if ua = strings.TrimSpace(ua); ua != "" {
 		payload["ua"] = boundStr(ua, accessMaxUA)
 	}
-	e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "waf_observe", Host: host, IP: ip, Reason: reason, Status: status, Payload: payload})
+	e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "waf_observe", Host: host, IP: ip, Reason: reason, Mode: mode, Status: status, Payload: payload})
 
 	rec := LogRec{
 		TS:     float64(now.UnixNano()) / 1e9,

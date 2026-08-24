@@ -129,6 +129,10 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	ruleIDFilter, numericRuleFilter := 0, false
 	if ruleFilter != "" {
 		if n, err := strconv.Atoi(ruleFilter); err == nil {
+			if n <= 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "numeric rule ID must be positive"})
+				return
+			}
 			ruleIDFilter, numericRuleFilter = n, true
 		}
 	}

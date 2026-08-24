@@ -98,24 +98,41 @@ func TestNginxBridgeHandlerBodyCaps(t *testing.T) {
 }
 
 func TestNginxBridgeObserveCarriesUA(t *testing.T) {
-	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
-	var gotUA string
-	b.SetObserveHook(func(_, _, _, _ string, _ int, _, ua string) {
-		gotUA = ua
-	})
-
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/nginx/observe", strings.NewReader(
-		`{"ip":"203.0.113.5","host":"shop.example","uri":"/checkout","method":"post","status":403,"reason":"WAF_SQLI","ua":"Mozilla/5.0 Legit"}`,
-	))
-	req.Header.Set("X-CFM-Token", "tok")
-	b.handleObserve(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("observe status=%d body=%s", rr.Code, rr.Body.String())
+	payload := `{"ip":"203.0.113.5","host":"shop.example","uri":"/checkout","method":"post","status":403,"reason":"WAF_SQLI","waf_rule_id":320,"ua":"Mozilla/5.0 Legit"}`
+	cases := []struct {
+		name string
+		path string
+		body string
+		pick func(*NginxBridge) func(http.ResponseWriter, *http.Request)
+	}{
+		{name: "direct", path: "/nginx/observe", body: payload, pick: func(b *NginxBridge) func(http.ResponseWriter, *http.Request) { return b.handleObserve }},
+		{name: "batch", path: "/nginx/events/batch", body: fmt.Sprintf(`{"events":[{"p":"/nginx/observe","b":%q}]}`, payload), pick: func(b *NginxBridge) func(http.ResponseWriter, *http.Request) { return b.handleEventsBatch }},
 	}
-	if gotUA != "Mozilla/5.0 Legit" {
-		t.Fatalf("observe UA=%q, want propagated user agent", gotUA)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+			var gotUA string
+			var gotRuleID int
+			b.SetObserveHook(func(_, _, _, _ string, _ int, _ string, wafRuleID int, ua string) {
+				gotRuleID = wafRuleID
+				gotUA = ua
+			})
+
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("X-CFM-Token", "tok")
+			tc.pick(b)(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("observe status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if gotUA != "Mozilla/5.0 Legit" {
+				t.Fatalf("observe UA=%q, want propagated user agent", gotUA)
+			}
+			if gotRuleID != 320 {
+				t.Fatalf("observe waf_rule_id=%d, want 320", gotRuleID)
+			}
+		})
 	}
 }
 

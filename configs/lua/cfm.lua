@@ -602,11 +602,12 @@ local decision
 -- HELPERS
 -- ─────────────────────────────────────────────────────────────────────────────
 
-local function observe_waf(ip, host, uri, method, status, reason)
+local function observe_waf(ip, host, uri, method, status, reason, waf_rule_id)
   if not ip or ip == "" then return end
   decision:rpc("observe", "POST", "/nginx/observe", cjson.encode({
     ip = ip, host = host or "", uri = uri or "/",
     method = method or "", status = status or 403, reason = reason or "",
+    waf_rule_id = waf_rule_id,
     ua = string.sub(ngx.var.http_user_agent or "", 1, 256),
   }), { ip = ip, host = host, uri = uri, method = method })
 end
@@ -1307,12 +1308,12 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       elseif waf_action == "block" then
         ngx.header["X-CFM-Action"] = converted_from_challenge and "block_pc" or "block"
         ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
-        observe_waf(ip, host, p_uri, p_meth, 403, reason)
+        observe_waf(ip, host, p_uri, p_meth, 403, reason, waf_rule_id)
       else -- challenge (only reachable when clearance_allow == false)
         if ngx.ctx.cfm_resumed_post then
           ngx.header["X-CFM-Action"] = "block_replayed"
           ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
-          observe_waf(ip, host, p_uri, p_meth, 403, "REPLAYED_POST_RECHALLENGED")
+          observe_waf(ip, host, p_uri, p_meth, 403, "REPLAYED_POST_RECHALLENGED", waf_rule_id)
           return ngx.exit(CFG.block_code)
         end
         local rtok, rerr = store_post_resume(ip, host, ngx.var.request_uri or uri, method)

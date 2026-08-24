@@ -154,12 +154,12 @@ func TestWAFEngineSummaryUAFilterIncludesObservations(t *testing.T) {
 		t.Fatalf("NewHistoryStore: %v", err)
 	}
 	now := time.Now().Unix()
-	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "shop.example", IP: "1.1.1.1", Reason: "WAF_SQLI", Payload: map[string]interface{}{"ua": "Mozilla/5.0 Legit"}})
-	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_observe", Host: "shop.example", IP: "1.1.1.1", Status: http.StatusForbidden, Reason: "WAF_SQLI", Payload: map[string]interface{}{"ua": "Mozilla/5.0 Legit"}})
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "shop.example", IP: "1.1.1.1", Reason: "WAF_SQLI", Payload: map[string]interface{}{"ua": "Mozilla/5.0 Legit", "waf_rule_id": 320}})
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_observe", Host: "shop.example", IP: "1.1.1.1", Mode: "block", Status: http.StatusForbidden, Reason: "WAF_SQLI", Payload: map[string]interface{}{"action": "block", "ua": "Mozilla/5.0 Legit", "waf_rule_id": 320}})
 
 	e := &Engine{history: hs}
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/waf/engine/summary?ua=mozilla", nil).WithContext(adminCtx())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/waf/engine/summary?ua=mozilla&rule=320", nil).WithContext(adminCtx())
 	e.handleWAFEngineSummary(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
@@ -169,7 +169,15 @@ func TestWAFEngineSummaryUAFilterIncludesObservations(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if out.TotalEvents != 2 || len(out.Rows) != 2 {
-		t.Fatalf("UA-filtered total=%d rows=%d, want trigger + observation", out.TotalEvents, len(out.Rows))
+		t.Fatalf("UA/rule-filtered total=%d rows=%d, want trigger + observation", out.TotalEvents, len(out.Rows))
+	}
+	for _, row := range out.Rows {
+		if row.WAFRuleID != 320 {
+			t.Fatalf("row %+v missing numeric WAF rule ID", row)
+		}
+		if row.EventType == "waf_observe" && row.Action != "block" {
+			t.Fatalf("observed block action=%q, want block", row.Action)
+		}
 	}
 }
 
@@ -194,6 +202,21 @@ func TestWAFEngineSummaryIPFilterCanonicalizesIPv6(t *testing.T) {
 	}
 	if out.TotalEvents != 1 {
 		t.Fatalf("canonical IPv6 filter returned %d events, want 1", out.TotalEvents)
+	}
+}
+
+func TestWAFEngineSummaryRejectsNonPositiveRuleID(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	e := &Engine{history: hs}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/waf/engine/summary?rule=0", nil).WithContext(adminCtx())
+	e.handleWAFEngineSummary(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", rr.Code, rr.Body.String())
 	}
 }
 

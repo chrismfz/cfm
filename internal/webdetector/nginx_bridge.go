@@ -102,7 +102,7 @@ type NginxBridge struct {
 	// OnObserve is called when OpenResty (or others) reports an observed request outcome.
 	// Typical use: WAF returns 403, but we want webdetector to "see" that 403 and escalate.
 	// Called without b.mu held.
-	OnObserve func(ip, host, uri, method string, status int, reason, ua string)
+	OnObserve func(ip, host, uri, method string, status int, reason string, wafRuleID int, ua string)
 
 	// IsWAFExcluded is queried by Lua via /nginx/waf/excluded for per-request
 	// pre-WAF bypass checks based on dynamic exclude rules.
@@ -385,15 +385,16 @@ type okStateKey struct {
 
 // Observation from OpenResty/WAF: "I returned status X for this request"
 // POST /nginx/observe
-// { "ip":"1.2.3.4", "host":"example.com", "uri":"/x?y=1", "method":"get", "status":403, "reason":"PAY_SHELL", "ua":"Mozilla/5.0" }
+// { "ip":"1.2.3.4", "host":"example.com", "uri":"/x?y=1", "method":"get", "status":403, "reason":"PAY_SHELL", "waf_rule_id":320, "ua":"Mozilla/5.0" }
 type nginxObserveMsg struct {
-	IP     string `json:"ip"`
-	Host   string `json:"host,omitempty"`
-	URI    string `json:"uri,omitempty"` // request_uri preferred (includes query)
-	Method string `json:"method,omitempty"`
-	Status int    `json:"status"`
-	Reason string `json:"reason,omitempty"`
-	UA     string `json:"ua,omitempty"`
+	IP        string `json:"ip"`
+	Host      string `json:"host,omitempty"`
+	URI       string `json:"uri,omitempty"` // request_uri preferred (includes query)
+	Method    string `json:"method,omitempty"`
+	Status    int    `json:"status"`
+	Reason    string `json:"reason,omitempty"`
+	WAFRuleID int    `json:"waf_rule_id,omitempty"`
+	UA        string `json:"ua,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -894,7 +895,7 @@ func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time
 }
 
 // SetObserveHook registers a callback for observation events (WAF 403, etc).
-func (b *NginxBridge) SetObserveHook(fn func(ip, host, uri, method string, status int, reason, ua string)) {
+func (b *NginxBridge) SetObserveHook(fn func(ip, host, uri, method string, status int, reason string, wafRuleID int, ua string)) {
 	if b == nil {
 		return
 	}
@@ -2038,6 +2039,7 @@ func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
 	method := strings.ToLower(strings.TrimSpace(msg.Method))
 	status := msg.Status
 	reason := strings.TrimSpace(msg.Reason)
+	wafRuleID := msg.WAFRuleID
 	ua := boundStr(strings.TrimSpace(msg.UA), accessMaxUA)
 
 	// Sanity: allow 100..599
@@ -2050,7 +2052,7 @@ func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
 	// can spike well past the Lua client's decision_timeout_ms.
 	if b.OnObserve != nil {
 		b.dispatchHook(func() {
-			b.OnObserve(ip, host, uri, method, status, reason, ua)
+			b.OnObserve(ip, host, uri, method, status, reason, wafRuleID, ua)
 		})
 	}
 
@@ -2129,10 +2131,11 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 				status = 0
 			}
 			reason := strings.TrimSpace(msg.Reason)
+			wafRuleID := msg.WAFRuleID
 			ua := boundStr(strings.TrimSpace(msg.UA), accessMaxUA)
 			if b.OnObserve != nil {
 				b.dispatchHook(func() {
-					b.OnObserve(ip, host, uri, method, status, reason, ua)
+					b.OnObserve(ip, host, uri, method, status, reason, wafRuleID, ua)
 				})
 			}
 			processed++

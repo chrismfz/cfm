@@ -231,7 +231,7 @@ type wafActivityInput struct {
 	Limit   int    `json:"limit,omitempty" jsonschema:"max recent hit rows to return; default server-side"`
 	Top     int    `json:"top,omitempty" jsonschema:"how many top rules/IPs to rank; default server-side"`
 	Country string `json:"country,omitempty" jsonschema:"ISO-2 country code filter; comma-separated for several, e.g. GR or GR,CY"`
-	Rule    string `json:"rule,omitempty" jsonschema:"case-insensitive WAF reason/family substring or exact numeric rule ID, e.g. WAF_SQLI or 320"`
+	Rule    string `json:"rule,omitempty" jsonschema:"case-insensitive WAF reason/family substring or exact positive numeric rule ID, e.g. WAF_SQLI or 320"`
 	IP      string `json:"ip,omitempty" jsonschema:"exact source IPv4 or IPv6 address"`
 	Host    string `json:"host,omitempty" jsonschema:"exact virtual host"`
 	Path    string `json:"path,omitempty" jsonschema:"case-insensitive URL/path substring"`
