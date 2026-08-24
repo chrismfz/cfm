@@ -3,6 +3,7 @@ package webdetector
 import (
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -10,19 +11,26 @@ import (
 )
 
 type wafEngineEvent struct {
-	TsUnix   int64  `json:"ts_unix"`
-	Host     string `json:"host"`
-	IP       string `json:"ip"`
-	URI      string `json:"uri"`
-	Method   string `json:"method"`
-	Status   int    `json:"status"`
-	Reason   string `json:"reason"`
-	Rule     string `json:"rule"`
-	RuleBase string `json:"rule_base"`
-	Result   string `json:"result"`
-	Country  string `json:"country,omitempty"`
-	ASN      uint   `json:"asn,omitempty"`
-	ASNName  string `json:"asn_name,omitempty"`
+	TsUnix      int64  `json:"ts_unix"`
+	EventType   string `json:"event_type"`
+	Host        string `json:"host"`
+	IP          string `json:"ip"`
+	URI         string `json:"uri"`
+	Method      string `json:"method"`
+	Status      int    `json:"status"`
+	Reason      string `json:"reason"`
+	Rule        string `json:"rule"`
+	RuleBase    string `json:"rule_base"`
+	WAFRuleID   int    `json:"waf_rule_id,omitempty"`
+	Action      string `json:"action,omitempty"`
+	Result      string `json:"result"`
+	Country     string `json:"country,omitempty"`
+	CountryISO  string `json:"country_iso,omitempty"`
+	ASN         uint   `json:"asn,omitempty"`
+	ASNName     string `json:"asn_name,omitempty"`
+	UA          string `json:"ua,omitempty"`
+	Referer     string `json:"referer,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 type wafTopValue struct {
@@ -46,18 +54,18 @@ type wafHistBucket struct {
 }
 
 type wafEngineSummary struct {
-	FromUnix      int64            `json:"from_unix"`
-	ToUnix        int64            `json:"to_unix"`
-	Hours         int              `json:"hours"`
-	TotalEvents   int              `json:"total_events"`
-	UniqueHosts   int              `json:"unique_hosts"`
-	UniqueIPs     int              `json:"unique_ips"`
-	BlockedEvents int              `json:"blocked_events"`
-	TopRules      []wafTopValue    `json:"top_rules"`
-	TopRuleBases  []wafTopValue    `json:"top_rule_bases"`
-	TopHosts      []wafTopValue    `json:"top_hosts"`
-	TopIPs        []wafTopIPValue  `json:"top_ips"`
-	TopCountries  []wafTopValue    `json:"top_countries,omitempty"`
+	FromUnix      int64           `json:"from_unix"`
+	ToUnix        int64           `json:"to_unix"`
+	Hours         int             `json:"hours"`
+	TotalEvents   int             `json:"total_events"`
+	UniqueHosts   int             `json:"unique_hosts"`
+	UniqueIPs     int             `json:"unique_ips"`
+	BlockedEvents int             `json:"blocked_events"`
+	TopRules      []wafTopValue   `json:"top_rules"`
+	TopRuleBases  []wafTopValue   `json:"top_rule_bases"`
+	TopHosts      []wafTopValue   `json:"top_hosts"`
+	TopIPs        []wafTopIPValue `json:"top_ips"`
+	TopCountries  []wafTopValue   `json:"top_countries,omitempty"`
 	// Histogram buckets the (filtered) events per hour across the window,
 	// oldest first — feeds the hits-over-time chart in the UI.
 	Histogram []wafHistBucket  `json:"histogram,omitempty"`
@@ -65,6 +73,10 @@ type wafEngineSummary struct {
 	// Echo of the applied filters so the UI can show what the numbers cover.
 	CountryFilter []string `json:"country_filter,omitempty"`
 	RuleFilter    string   `json:"rule_filter,omitempty"`
+	IPFilter      string   `json:"ip_filter,omitempty"`
+	HostFilter    string   `json:"host_filter,omitempty"`
+	PathFilter    string   `json:"path_filter,omitempty"`
+	UAFilter      string   `json:"ua_filter,omitempty"`
 }
 
 func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +126,14 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	}
 	ruleFilter := strings.ToLower(strings.TrimSpace(q.Get("rule")))
 	res.RuleFilter = ruleFilter
+	ipFilter := strings.TrimSpace(q.Get("ip"))
+	hostFilter := strings.ToLower(cleanHost(q.Get("host")))
+	pathFilter := strings.ToLower(strings.TrimSpace(q.Get("path")))
+	uaFilter := strings.ToLower(strings.TrimSpace(q.Get("ua")))
+	res.IPFilter = ipFilter
+	res.HostFilter = hostFilter
+	res.PathFilter = pathFilter
+	res.UAFilter = uaFilter
 	// Country filtering needs the country even when the caller didn't ask
 	// for enriched rows.
 	needCountry := enrichEnabled || len(countryFilter) > 0
@@ -170,22 +190,41 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 			rule = "WAF_UNKNOWN"
 			ruleBase = "WAF_UNKNOWN"
 		}
-		var method, uri string
+		var method, uri, ua, referer, contentType, action string
+		var wafRuleID int
 		if ev.Payload != nil {
 			method, _ = ev.Payload["method"].(string)
 			uri, _ = ev.Payload["uri"].(string)
+			ua, _ = ev.Payload["ua"].(string)
+			referer, _ = ev.Payload["referer"].(string)
+			contentType, _ = ev.Payload["ct"].(string)
+			action, _ = ev.Payload["action"].(string)
+			if id, ok := ev.Payload["waf_rule_id"]; ok {
+				switch v := id.(type) {
+				case float64:
+					wafRuleID = int(v)
+				case int:
+					wafRuleID = v
+				}
+			}
+		}
+		if action = strings.TrimSpace(action); action == "" {
+			action = strings.TrimSpace(ev.Mode)
 		}
 		row := wafEngineEvent{
-			TsUnix:   ev.TsUnix,
-			Host:     ev.Host,
-			IP:       ev.IP,
-			URI:      uri,
-			Method:   method,
-			Status:   ev.Status,
-			Reason:   rule,
-			Rule:     rule,
-			RuleBase: ruleBase,
-			Result:   "observed",
+			TsUnix:    ev.TsUnix,
+			EventType: ev.Type,
+			Host:      ev.Host,
+			IP:        ev.IP,
+			URI:       uri,
+			Method:    method,
+			Status:    ev.Status,
+			Reason:    rule,
+			Rule:      rule,
+			RuleBase:  ruleBase,
+			WAFRuleID: wafRuleID,
+			Action:    action,
+			Result:    "observed",
 		}
 		if ev.Type == "waf_trigger" {
 			if mode := strings.TrimSpace(ev.Mode); mode != "" {
@@ -199,6 +238,9 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		if ev.Payload != nil {
 			if c, ok := ev.Payload["country"].(string); ok && strings.TrimSpace(c) != "" {
 				row.Country = c
+			}
+			if c, ok := ev.Payload["country_iso"].(string); ok && strings.TrimSpace(c) != "" {
+				row.CountryISO = strings.ToUpper(strings.TrimSpace(c))
 			}
 			if n, ok := ev.Payload["asn_name"].(string); ok && strings.TrimSpace(n) != "" {
 				row.ASNName = n
@@ -214,11 +256,9 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 		}
-		if needCountry && (row.Country == "" || row.ASN == 0 || row.ASNName == "") {
+		if needCountry && (row.Country == "" || row.CountryISO == "" || row.ASN == 0 || row.ASNName == "") {
 			if info, ok := enrichCache[row.IP]; ok {
-				row.Country = info.Country
-				row.ASN = info.ASN
-				row.ASNName = info.ASNName
+				mergeWAFEnrichment(&row, info)
 			} else if row.IP != "" && e.enr != nil {
 				// LookupGeoFast, NOT Lookup: this per-row branch reads only
 				// Country/ASN/ASNName (mmdb, microseconds) and discards PTR, but
@@ -230,14 +270,15 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 				// the fast path is behaviour-identical here. (top_ips still uses
 				// Lookup in toSortedTopIPs, where PTR IS shown and is bounded to N.)
 				r := e.enr.LookupGeoFast(row.IP)
-				row.Country = r.Country
-				row.ASN = r.ASN
-				row.ASNName = r.ASNName
-				enrichCache[row.IP] = wafEngineEvent{Country: row.Country, ASN: row.ASN, ASNName: row.ASNName}
+				info := wafEngineEvent{Country: r.Country, CountryISO: r.CountryISO, ASN: r.ASN, ASNName: r.ASNName}
+				enrichCache[row.IP] = info
+				mergeWAFEnrichment(&row, info)
 			}
 		}
 		if len(countryFilter) > 0 {
-			if _, ok := countryFilter[strings.ToUpper(strings.TrimSpace(row.Country))]; !ok {
+			_, nameMatch := countryFilter[strings.ToUpper(strings.TrimSpace(row.Country))]
+			_, isoMatch := countryFilter[strings.ToUpper(strings.TrimSpace(row.CountryISO))]
+			if !nameMatch && !isoMatch {
 				continue
 			}
 		}
@@ -245,6 +286,24 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 			!strings.Contains(strings.ToLower(rule), ruleFilter) &&
 			!strings.Contains(strings.ToLower(ruleBase), ruleFilter) {
 			continue
+		}
+		if ipFilter != "" && !sameIP(row.IP, ipFilter) {
+			continue
+		}
+		if hostFilter != "" && !strings.EqualFold(cleanHost(row.Host), hostFilter) {
+			continue
+		}
+		if pathFilter != "" && !strings.Contains(strings.ToLower(row.URI), pathFilter) {
+			continue
+		}
+		if uaFilter != "" {
+			filterUA := ua
+			if len(filterUA) > accessMaxUA {
+				filterUA = filterUA[:accessMaxUA]
+			}
+			if !strings.Contains(strings.ToLower(filterUA), uaFilter) {
+				continue
+			}
 		}
 
 		res.TotalEvents++
@@ -275,11 +334,16 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		}
 		ruleCount[rule]++
 		ruleBaseCount[ruleBase]++
-		if c := strings.ToUpper(strings.TrimSpace(row.Country)); c != "" {
+		if c := strings.TrimSpace(row.Country); c != "" {
+			countryCount[c]++
+		} else if c := strings.ToUpper(strings.TrimSpace(row.CountryISO)); c != "" {
 			countryCount[c]++
 		}
 
 		if len(rows) < limit {
+			row.UA = boundStr(ua, accessMaxUA)
+			row.Referer = boundStr(redactForensicQuery(referer), accessMaxRef)
+			row.ContentType = boundStr(contentType, accessMaxUA)
 			rows = append(rows, row)
 		}
 	}
@@ -295,6 +359,59 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	res.Rows = rows
 
 	writeJSON(w, http.StatusOK, res)
+}
+
+func sameIP(a, b string) bool {
+	aIP, bIP := net.ParseIP(strings.TrimSpace(a)), net.ParseIP(strings.TrimSpace(b))
+	if aIP != nil && bIP != nil {
+		return aIP.Equal(bIP)
+	}
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+func mergeWAFEnrichment(row *wafEngineEvent, info wafEngineEvent) {
+	if row.Country == "" {
+		row.Country = info.Country
+	}
+	if row.CountryISO == "" {
+		row.CountryISO = info.CountryISO
+	}
+	if row.ASN == 0 {
+		row.ASN = info.ASN
+	}
+	if row.ASNName == "" {
+		row.ASNName = info.ASNName
+	}
+}
+
+// redactForensicQuery preserves the referer's case while hiding values whose
+// parameter names look secret-bearing. Unlike the hot access-ingest helper,
+// this runs only on bounded summary output, so it can favor robust mixed-case
+// matching over an allocation-free fast path.
+func redactForensicQuery(uri string) string {
+	q := strings.IndexByte(uri, '?')
+	if q < 0 || q == len(uri)-1 {
+		return uri
+	}
+	parts := strings.Split(uri[q+1:], "&")
+	for i, p := range parts {
+		eq := strings.IndexByte(p, '=')
+		if eq <= 0 {
+			continue
+		}
+		key, err := url.QueryUnescape(p[:eq])
+		if err != nil {
+			key = p[:eq]
+		}
+		key = strings.ToLower(key)
+		for _, hint := range secretParamHints {
+			if strings.Contains(key, hint) {
+				parts[i] = p[:eq+1] + "[redacted]"
+				break
+			}
+		}
+	}
+	return uri[:q+1] + strings.Join(parts, "&")
 }
 
 func toSortedTopIPs(m map[string]int, n int, enrichEnabled bool, e *Engine) []wafTopIPValue {

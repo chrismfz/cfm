@@ -773,7 +773,7 @@ func (e *Engine) appendHistory(ev HistoryEvent) {
 // ua, referer, contentType are the per-request forensic fields already
 // captured by the Lua bridge (see cfm.waf.log). They are persisted into
 // payload_json only when non-empty so older rows stay compact.
-func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country string, wafRuleID int, ua, referer, contentType string) {
+func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country, countryISO string, wafRuleID int, ua, referer, contentType string) {
 	if e == nil {
 		return
 	}
@@ -784,12 +784,13 @@ func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, 
 		action = "triggered"
 	}
 	payload := map[string]interface{}{
-		"uri":      uri,
-		"method":   method,
-		"action":   action,
-		"asn":      asn,
-		"asn_name": strings.TrimSpace(asnName),
-		"country":  strings.TrimSpace(country),
+		"uri":         uri,
+		"method":      method,
+		"action":      action,
+		"asn":         asn,
+		"asn_name":    strings.TrimSpace(asnName),
+		"country":     strings.TrimSpace(country),
+		"country_iso": strings.ToUpper(strings.TrimSpace(countryISO)),
 	}
 	if wafRuleID > 0 {
 		payload["waf_rule_id"] = wafRuleID

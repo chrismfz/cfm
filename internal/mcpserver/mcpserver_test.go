@@ -476,14 +476,17 @@ func TestToolCallDispatchesToAllowlistedEndpoint(t *testing.T) {
 		t.Errorf("firewall_blocks result missing summary (by_country): %s", body)
 	}
 
-	// waf_activity with hours → /api/v1/waf/engine/summary?enrich=1&hours=6
+	// waf_activity forwards combinable FP-triage filters to the summary endpoint.
 	mcpPost(t, ts, testAdminToken,
-		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"waf_activity","arguments":{"hours":6}}}`)
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"waf_activity","arguments":{"hours":6,"country":"GR","rule":"WAF_SQLI","ip":"2001:db8::1","host":"shop.example","path":"/checkout","ua":"Mozilla"}}}`)
 	if fd.lastPath != "/api/v1/waf/engine/summary" {
 		t.Errorf("waf_activity dispatched to %q", fd.lastPath)
 	}
-	if fd.lastQuery.Get("hours") != "6" || fd.lastQuery.Get("enrich") != "1" {
-		t.Errorf("waf_activity query = %v, want hours=6 enrich=1", fd.lastQuery)
+	if fd.lastQuery.Get("hours") != "6" || fd.lastQuery.Get("enrich") != "1" ||
+		fd.lastQuery.Get("country") != "GR" || fd.lastQuery.Get("rule") != "WAF_SQLI" ||
+		fd.lastQuery.Get("ip") != "2001:db8::1" || fd.lastQuery.Get("host") != "shop.example" ||
+		fd.lastQuery.Get("path") != "/checkout" || fd.lastQuery.Get("ua") != "Mozilla" {
+		t.Errorf("waf_activity query = %v, filters were not forwarded", fd.lastQuery)
 	}
 }
 

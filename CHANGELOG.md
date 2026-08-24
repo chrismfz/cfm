@@ -18,6 +18,14 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Country-aware WAF false-positive evidence in MCP.** `waf_activity` now
+  accepts combinable country, reason/rule, IP, vhost, URL/path and user-agent
+  filters, and returns available numeric rule ID, action, bounded UA, redacted
+  referer and content type alongside its existing timestamp, IP, GeoIP, host and
+  URL. New events retain both the country name and ISO-2 code, while GeoIP fills
+  the code for older rows so `country=GR` works against production data.
+  Rows can be correlated directly with `edge_access_tail` for recent traffic or
+  `ip_forensics` for older access-log evidence.
 - **Host-wide netfilter path diagnostics for redirect collisions.** New
   `cfm firewall path`, admin-only `/api/v1/firewall/path`, cfm-admin Firewall
   view, and MCP `netfilter_path` show active nftables base chains in actual hook
