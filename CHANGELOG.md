@@ -17,10 +17,6 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
-
-## 2026.08.24
-
 ### Added
 - **Country-aware WAF false-positive evidence in MCP.** `waf_activity` now
   accepts combinable country, reason/rule, IP, vhost, URL/path and user-agent
@@ -32,6 +28,10 @@ _Nothing yet._
   UA-filtered totals do not drop requests between de-duplicated trigger pushes.
   Rows can be correlated directly with `edge_access_tail` for recent traffic or
   `ip_forensics` for older access-log evidence.
+
+## 2026.08.24
+
+### Added
 - **Host-wide netfilter path diagnostics for redirect collisions.** New
   `cfm firewall path`, admin-only `/api/v1/firewall/path`, cfm-admin Firewall
   view, and MCP `netfilter_path` show active nftables base chains in actual hook
