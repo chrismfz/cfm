@@ -274,7 +274,11 @@ func isEmbedShellBootstrapRequest(r *http.Request) bool {
 }
 
 // cPanel plugin actor-assertion route: allow request through auth middleware
-// and let the endpoint perform strict assertion validation.
+// and let the endpoint perform strict assertion validation. One credential
+// namespace per header: only X-CFM-Actor-Assertion carries plugin assertions;
+// Authorization: Bearer is exclusively the CFM admin/scoped token namespace,
+// so a Bearer-only request falls through to normal token validation instead
+// of being mistaken for an assertion bearer.
 func isCpanelPluginSelfServicePath(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
@@ -282,16 +286,7 @@ func isCpanelPluginSelfServicePath(r *http.Request) bool {
 	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/cpanel/user-info" {
 		return false
 	}
-	// Require actor assertion so this bypass is narrow.
-	hasActorAssertion := strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion")) != ""
-	hasBearer := false
-	if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(auth, "Bearer ") && strings.TrimSpace(auth[7:]) != "" {
-		hasBearer = true
-	}
-	if !hasActorAssertion && !hasBearer {
-		return false
-	}
-	return true
+	return strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion")) != ""
 }
 
 // TokenMiddleware enforces auth on all non-public routes.
@@ -444,27 +439,31 @@ func tokenMatch(a, b string) bool {
 }
 
 func extractToken(r *http.Request) (string, bool) {
-	if _, ok := r.Header["Authorization"]; ok {
+	if len(r.Header.Values("Authorization")) > 0 {
 		parts := strings.Fields(strings.TrimSpace(r.Header.Get("Authorization")))
 		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
 			return strings.TrimSpace(parts[1]), true
 		}
 		return "", true
 	}
-	if _, ok := r.Header["X-CFM-Token"]; ok {
-		return strings.TrimSpace(r.Header.Get("X-CFM-Token")), true
+	// Values()/Get() match case-insensitively; the header map itself stores
+	// MIME-canonicalized keys ("X-Cfm-Token"), which a literal index misses.
+	if vals := r.Header.Values("X-CFM-Token"); len(vals) > 0 {
+		return strings.TrimSpace(vals[0]), true
 	}
-	if _, ok := r.Header["Token"]; ok {
-		return strings.TrimSpace(r.Header.Get("Token")), true
+	if vals := r.Header.Values("Token"); len(vals) > 0 {
+		return strings.TrimSpace(vals[0]), true
 	}
 	return "", false
 }
 
 func suspiciousAuthHeader(r *http.Request) (bool, string) {
-	_, hasAuthorization := r.Header["Authorization"]
+	hasAuthorization := len(r.Header.Values("Authorization")) > 0
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
-	hasXCFM := len(r.Header["X-CFM-Token"]) > 0
-	hasToken := len(r.Header["Token"]) > 0
+	// Case-insensitive lookups: the header map stores MIME-canonicalized keys,
+	// which a literal "X-CFM-Token" index never matches.
+	hasXCFM := len(r.Header.Values("X-CFM-Token")) > 0
+	hasToken := len(r.Header.Values("Token")) > 0
 	if auth != "" && (hasXCFM || hasToken) {
 		return true, "multiple_auth_schemes"
 	}

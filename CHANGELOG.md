@@ -48,8 +48,16 @@ back-filled here — see the git/PR history for that period.
   acknowledgement. The implicit detector no longer trusts all of `10/8`, starts
   in degraded built-in-only mode on a first-load config read error, and only
   applies bootstrap path exceptions to exact generic unauthorized-burst events.
-  Config-drift API/CLI output understands the optional canonical section, legacy
-  alias and leniency companions instead of reporting false drift.
+   Config-drift API/CLI output understands the optional canonical section, legacy
+   alias and leniency companions instead of reporting false drift. The cPanel
+   plugin self-service endpoint accepts actor assertions only through the
+   dedicated `X-CFM-Actor-Assertion` header; `Authorization: Bearer` remains
+   exclusively the CFM admin/scoped token namespace, so an assertion-shaped
+   bearer credential is rejected as an unknown token instead of depending on a
+   dead fallback path. Token-header detection also matches case-insensitively:
+   the documented `X-CFM-Token` transport previously never matched a parsed
+   request (MIME-canonicalized map keys) and was silently ignored, and a bogus
+   `X-CFM-Token` alongside an assertion now fails hard as an invalid token.
 
 ## 2026.08.24
 
