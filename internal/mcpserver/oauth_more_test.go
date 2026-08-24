@@ -348,6 +348,20 @@ func TestHostAccessHistoryRouting(t *testing.T) {
 	if got := fd.lastQuery.Get("include_rotated"); got != "" {
 		t.Errorf("include_rotated must stay unset when omitted (handler default is true), got %q", got)
 	}
+	if got := fd.lastQuery.Get("combine"); got != "" {
+		t.Errorf("combine must stay unset when omitted (handler default is on), got %q", got)
+	}
+
+	fd = &fakeDispatch{}
+	ts = newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"host_access_history","arguments":{"host":"ex.gr","combine":false}}}`)
+	if fd.lastPath != "/api/v1/webdet/host-access-history" {
+		t.Errorf("host_access_history routed to %q", fd.lastPath)
+	}
+	if got := fd.lastQuery.Get("combine"); got != "0" {
+		t.Errorf("combine=false must map to combine=0, got %q", got)
+	}
 }
 
 // The consent page must disclose where the grant is delivered and warn on a

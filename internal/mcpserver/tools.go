@@ -430,8 +430,9 @@ func registerIPForensics(srv *mcp.Server, d Deps) {
 type hostAccessHistoryInput struct {
 	Host           string `json:"host" jsonschema:"the vhost to profile, exactly as logged in host=$host (e.g. example.gr); use merge_www to fold in the www./bare twin"`
 	Hours          int    `json:"hours,omitempty" jsonschema:"trailing window ending now; default 168 (7 days), max 2160 (90 days)"`
-	MergeWWW       bool   `json:"merge_www,omitempty" jsonschema:"also count the www./bare twin of host (e.g. example.gr together with www.example.gr); scoped tokens must have BOTH hosts in scope"`
+	MergeWWW       bool   `json:"merge_www,omitempty" jsonschema:"also count the www./bare twin of host (e.g. example.gr together with www.example.gr); scoped tokens must have BOTH hosts in scope; detector history is then merged across twins with a per-host breakdown"`
 	IncludeRotated *bool  `json:"include_rotated,omitempty" jsonschema:"scan rotated siblings too (access.log.1, .N.gz, -YYYYMMDD.gz) — DEFAULT TRUE here (archival reach is this tool's purpose); pass false for live log only"`
+	Combine        *bool  `json:"combine,omitempty" jsonschema:"also join detector-side history for the same host/window (challenge issued/solved, block triggers, WAF observed + per-rule breakdown) — DEFAULT TRUE; pass false to skip the SQLite work"`
 	MaxFiles       int    `json:"max_files,omitempty" jsonschema:"cap how many rotated siblings are scanned (default 40, max 60)"`
 	Lines          int    `json:"lines,omitempty" jsonschema:"live-file tail window in lines (default 1000000)"`
 	MaxLines       int    `json:"max_lines,omitempty" jsonschema:"shared line budget across ALL scanned files (default 8000000, max 60000000); when hit, truncated=true and coverage_* show what was actually reached"`
@@ -442,7 +443,7 @@ func registerHostAccessHistory(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "host_access_history",
-		Description: "On-demand ARCHIVAL traffic profile of ONE VHOST: total requests, per-hour series with peaks-vs-median, status mix, top client IPs, top user-agents with a bot/human split, top paths and method mix — reconstructed from the edge ACCESS log (live file plus rotated siblings, OpenResty and Angie alike) so it reaches far beyond host_drilldown/edge_access_tail's short live retention. Bounded like ip_forensics: a shared line budget across all scanned files, one timeout, key-capped accumulators; gz streamed, never buffered whole. Rotated reach is ON by default (include_rotated=false to limit to the live log). HONEST COVERAGE: nodes keep limited rotation (days, not months), so always report window_from/window_to vs coverage_oldest_unix — data older than the oldest kept rotation simply is not in the logs anymore. bytes_total is present only on logs written after the bytes= format addition (2026-08). When combine=1 the reply also joins the detector history store for the same host/window: challenge issued/solved, WAF observed hits (with per-rule breakdown via detector_waf_by_rule), block triggers and suspicious events — access volume AND security events in one call. Companion tools: host_drilldown (live scored state, short window), ip_forensics (raw lines for ONE IP over the same archives).",
+		Description: "On-demand ARCHIVAL traffic profile of ONE VHOST: total requests, per-hour series with peaks-vs-median, status mix, top client IPs, top user-agents with a browser-envelope vs automation/bot-like UA split (heuristic UA normalization, not bot verification), top paths and method mix — reconstructed from the edge ACCESS log (live file plus rotated siblings, OpenResty and Angie alike) so it reaches far beyond host_drilldown/edge_access_tail's short live retention. Bounded like ip_forensics: a shared line budget across all scanned files, one timeout, key-capped accumulators; gz streamed, never buffered whole; corrupt/unreadable siblings are listed in files_failed instead of failing the call. At most TWO archive scans run concurrently per node — beyond that you get an HTTP 429 + Retry-After, so retry shortly rather than hammering. Rotated reach is ON by default (include_rotated=false to limit to the live log). HONEST COVERAGE: nodes keep limited rotation (days, not months), so always report window_from/window_to vs coverage_oldest_unix — data older than the oldest kept rotation simply is not in the logs anymore. bytes_total is present only on logs written after the bytes= format addition (2026-08). When combine=1 the reply also joins the detector history store for the same host/window: challenge issued/solved, WAF observed hits (with per-rule breakdown via detector_waf_by_rule), block triggers and suspicious events — access volume AND security events in one call; with merge_www the twins get a COMBINED view plus detector_by_host provenance. Companion tools: host_drilldown (live scored state, short window), ip_forensics (raw lines for ONE IP over the same archives).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in hostAccessHistoryInput) (*mcp.CallToolResult, any, error) {
 		if strings.TrimSpace(in.Host) == "" {
 			return nil, nil, errRequired("host")
@@ -455,6 +456,9 @@ func registerHostAccessHistory(srv *mcp.Server, d Deps) {
 		}
 		if in.IncludeRotated != nil && !*in.IncludeRotated {
 			q.Set("include_rotated", "0")
+		}
+		if in.Combine != nil && !*in.Combine {
+			q.Set("combine", "0")
 		}
 		setInt(q, "max_files", in.MaxFiles)
 		setInt(q, "lines", in.Lines)

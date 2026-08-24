@@ -66,19 +66,25 @@ back-filled here — see the git/PR history for that period.
   vhost's traffic from the edge access log plus its rotated siblings
   (`access.log.1`, `.N.gz`, `-YYYYMMDD.gz`; OpenResty and Angie candidates both
   resolved automatically), aggregating requests/hour with peaks-vs-median,
-  status-class mix, top client IPs, top user-agents with an exact bot/human
-  split via the existing UA normalizer, top paths and method mix. Bounded like
+  status-class mix, top client IPs, top user-agents with a browser-envelope vs
+  automation/bot-like split (heuristic UA normalization via the existing
+  normalizer — not bot verification), top paths and method mix. Bounded like
   `ip_forensics`: shared line budget across all scanned files, one timeout,
-  key-capped accumulators, mtime-based skip of siblings older than the window
-  and early stop once chronological lines fall below the window floor;
-  `coverage_oldest_unix` reports how far back the kept rotation actually
-  reaches. Optional `combine=1` joins the detector history store for the same
-  host/window (challenge issued/solved, block triggers, suspicious, WAF
-  observed + per-rule breakdown). Scoped tokens may profile only their own
-  vhosts (`vhostAllowed`, same model as `analyze-host`). The `log_format cfm`
-  edge format gains an append-only trailing `bytes=$body_bytes_sent` so future
-  archives also carry response volume; older logs simply lack the field and all
-  readers treat it as 0.
+  key-capped accumulators, mtime-based skip of siblings older than the window;
+  corrupt/unreadable rotated files are reported in `files_failed` instead of
+  silently shortening coverage, and `coverage_oldest_unix` reports how far back
+  the kept rotation actually reaches. Optional `combine=1` joins the detector
+  history store for the same host/window (challenge issued/solved, block
+  triggers, suspicious, WAF observed + per-rule breakdown); with `merge_www`
+  the twins get a combined view plus a per-host breakdown so security-event
+  provenance stays visible. Because one call may decompress tens of millions
+  of lines, archive scans are capped at TWO concurrent per node (`429` +
+  `Retry-After` beyond) and `hours` is clamped to ≤90 days at the API boundary.
+  Scoped tokens may profile only their own vhosts (`vhostAllowed`, same model
+  as `analyze-host`; the www/bare twin must be in scope too). The
+  `log_format cfm` edge format gains an append-only trailing
+  `bytes=$body_bytes_sent` so future archives also carry response volume; older
+  logs simply lack the field and all readers treat it as 0.
 
 ## 2026.08.24
 

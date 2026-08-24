@@ -110,7 +110,8 @@ func TestScanHost_LiveAndRotated(t *testing.T) {
 		cfmline(base, "198.51.100.7", "ex.gr", "GET", "/index.php", 200, "Googlebot/2.1", 1200),
 		cfmline(base+60, "198.51.100.8", "other.gr", "GET", "/nope", 200, "Mozilla/5.0", 10),
 		cfmline(base+120, "198.51.100.7", "ex.gr", "POST", "/login", 404, "curl/8.0", 300),
-		"<combined-format garbage without kv fields>", // skipped_no_host
+		cfmline(base+180, "198.51.100.7", "ex.gr", "GET", "/ping", 200, "-", 0), // empty UA
+		"<combined-format garbage without kv fields>",                           // skipped_no_host
 	}
 	rot1 := []string{
 		cfmline(base-3600, "198.51.100.9", "ex.gr", "GET", "/media/k2/a.jpg?w=2", 200, "facebookexternalhit/1.1", 80000),
@@ -158,31 +159,37 @@ func TestScanHost_LiveAndRotated(t *testing.T) {
 	if len(res.FilesScanned) != 3 {
 		t.Errorf("files_scanned = %v, want 3 (live+.1+.2.gz)", res.FilesScanned)
 	}
-	// matched: 2 live ex.gr lines + 1 rot1 (the www.ex.gr rot2gz line is NOT
-	// merged without MergeWWW); other.gr and the garbage line excluded.
-	if res.Matched != 3 {
-		t.Errorf("matched = %d, want 3", res.Matched)
+	// matched: 3 live ex.gr lines (googlebot, curl, empty-UA) + 1 rot1
+	// facebookexternalhit (the www.ex.gr rot2gz line is NOT merged without
+	// MergeWWW); other.gr and the garbage line excluded.
+	if res.Matched != 4 {
+		t.Errorf("matched = %d, want 4", res.Matched)
 	}
 	if res.SkippedNoHost != 1 {
 		t.Errorf("skipped_no_host = %d, want 1", res.SkippedNoHost)
 	}
-	if res.TotalRequests != 3 {
-		t.Errorf("total_requests = %d, want 3", res.TotalRequests)
+	if res.TotalRequests != 4 {
+		t.Errorf("total_requests = %d, want 4 (must equal matched: no double subtract)", res.TotalRequests)
+	}
+	if res.OutsideWindow != 0 {
+		t.Errorf("outside_window = %d, want 0", res.OutsideWindow)
 	}
 	if res.BytesTotal != 1200+300+80000 {
 		t.Errorf("bytes_total = %d, want %d", res.BytesTotal, 1200+300+80000)
 	}
-	if res.StatusClasses["2xx"] != 2 || res.StatusClasses["4xx"] != 1 || res.StatusClasses["5xx"] != 0 {
+	if res.StatusClasses["2xx"] != 3 || res.StatusClasses["4xx"] != 1 || res.StatusClasses["5xx"] != 0 {
 		t.Errorf("status_classes = %v", res.StatusClasses)
 	}
 	if res.UniqueIPs != 2 {
 		t.Errorf("unique_ips = %d, want 2 (198.51.100.7/.9)", res.UniqueIPs)
 	}
-	if len(res.TopIPs) == 0 || res.TopIPs[0].Key != "198.51.100.7" || res.TopIPs[0].Count != 2 {
-		t.Errorf("top_ips[0] = %+v, want 198.51.100.7×2", res.TopIPs)
+	if len(res.TopIPs) == 0 || res.TopIPs[0].Key != "198.51.100.7" || res.TopIPs[0].Count != 3 {
+		t.Errorf("top_ips[0] = %+v, want 198.51.100.7×3", res.TopIPs)
 	}
-	if res.BotRequests != 3 || res.HumanRequests != 0 || res.EmptyUAReqs != 0 {
-		t.Errorf("bot/human/empty = %d/%d/%d, want 3/0/0 (googlebot+curl+facebook all classified bot)",
+	// googlebot + curl + facebookexternalhit = automation; Mozilla line is
+	// another host; the "-" UA counts ONLY as empty.
+	if res.BotRequests != 3 || res.HumanRequests != 0 || res.EmptyUAReqs != 1 {
+		t.Errorf("bot/human/empty = %d/%d/%d, want 3/0/1",
 			res.BotRequests, res.HumanRequests, res.EmptyUAReqs)
 	}
 	// Path normalization: query stripped.
@@ -347,6 +354,150 @@ func TestPeakStats(t *testing.T) {
 		t.Errorf("empty hours → (%v,%v), want zeros", m, p)
 	}
 }
+
+// TestScanHost_OldPrefixDoesNotStopScan is the forward-scan regression: files
+// are consumed oldest→newest (tail prints file order; archives stream from
+// the start), so a pre-window PREFIX must never stop the scan — the in-window
+// lines follow AFTER it. 150 old lines then 5 recent ⇒ recent 5 MUST count.
+func TestScanHost_OldPrefixDoesNotStopScan(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	from := now - 3600
+	lines := make([]string, 0, 155)
+	for i := 0; i < 150; i++ {
+		lines = append(lines, cfmline(from-1800+float64(i), "198.51.100.9", "ex.gr", "GET", "/ancient", 200, "bot/1", 0))
+	}
+	for i := 0; i < 5; i++ {
+		lines = append(lines, cfmline(now-60+float64(i), "198.51.100.1", "ex.gr", "GET", fmt.Sprintf("/recent%d", i), 200, "Mozilla/5.0", 0))
+	}
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	writeLines(t, live, lines)
+	old := accessLogCandidates
+	accessLogCandidates = append([]string{live}, old...)
+	defer func() { accessLogCandidates = old }()
+
+	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Matched != 5 || res.TotalRequests != 5 {
+		t.Fatalf("matched=%d total=%d, want 5/5 — pre-window prefix must not stop an ascending scan",
+			res.Matched, res.TotalRequests)
+	}
+	if res.OutsideWindow != 150 {
+		t.Errorf("outside_window = %d, want 150", res.OutsideWindow)
+	}
+	if res.Truncated {
+		t.Error("truncated must not be set")
+	}
+}
+
+// Same shape as TestScanHost_OldPrefixDoesNotStopScan but inside a gz rotated
+// sibling streamed start→end.
+func TestScanHost_GzOldPrefixThenRecent(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	from := now - 3600
+	sib := make([]string, 0, 105)
+	for i := 0; i < 100; i++ {
+		sib = append(sib, cfmline(from-600+float64(i), "198.51.100.9", "ex.gr", "GET", "/old", 200, "bot/1", 0))
+	}
+	for i := 0; i < 5; i++ {
+		sib = append(sib, cfmline(from+60+float64(i), "198.51.100.8", "ex.gr", "GET", fmt.Sprintf("/inwin%d", i), 200, "bot/2", 10))
+	}
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	writeLines(t, live, []string{
+		cfmline(now-30, "198.51.100.1", "ex.gr", "GET", "/live", 200, "Mozilla/5.0", 0),
+	})
+	gzf := filepath.Join(dir, "access.log.1.gz")
+	writeGz(t, gzf, sib)
+
+	old := accessLogCandidates
+	accessLogCandidates = append([]string{live}, old...)
+	defer func() { accessLogCandidates = old }()
+
+	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 1, IncludeRotated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 5 in-window sibling lines + 1 live line; the 100-line old prefix of the
+	// sibling must NOT have stopped the scan.
+	if res.Matched != 6 || res.TotalRequests != 6 {
+		t.Fatalf("matched=%d total=%d, want 6/6 (gz old-prefix must not stop the scan)", res.Matched, res.TotalRequests)
+	}
+	found := false
+	for _, f := range res.FilesScanned {
+		if f == gzf {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("gz sibling not scanned: %v", res.FilesScanned)
+	}
+}
+
+// A corrupt rotated file is reported (files_failed) instead of silently
+// shortening coverage or failing the whole call.
+func TestScanHost_CorruptGzReported(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	writeLines(t, live, []string{
+		cfmline(now-30, "198.51.100.1", "ex.gr", "GET", "/live", 200, "Mozilla/5.0", 0),
+	})
+	bad := filepath.Join(dir, "access.log.1.gz")
+	if err := os.WriteFile(bad, []byte("this is definitely not a gzip stream"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := accessLogCandidates
+	accessLogCandidates = append([]string{live}, old...)
+	defer func() { accessLogCandidates = old }()
+
+	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 48, IncludeRotated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.FilesFailed) != 1 || !strings.HasSuffix(res.FilesFailed[0].File, "access.log.1.gz") {
+		t.Errorf("files_failed = %+v, want exactly the corrupt sibling", res.FilesFailed)
+	}
+	if res.Matched != 1 {
+		t.Errorf("matched = %d, want 1 (live unaffected by corrupt sibling)", res.Matched)
+	}
+}
+
+// HTTP methods are client-controlled: cardinality AND key length are capped.
+func TestScanHost_MethodCardinalityCapped(t *testing.T) {
+	now := float64(time.Now().Unix())
+	a := &hostAgg{
+		targets: map[string]struct{}{"ex.gr": {}},
+		ips:     map[string]int64{}, uas: map[string]int64{}, fams: map[string]int64{},
+		paths: map[string]int64{}, codes: map[string]int64{}, methods: map[string]int64{},
+		hours: map[int64]*hostHour{},
+	}
+	long := strings.Repeat("M", 500)
+	for i := 0; i < 40; i++ {
+		line := cfmline(now-60+float64(i), "198.51.100.1", "ex.gr", fmt.Sprintf("EXT%d", i), "/", 200, "-", 0)
+		// cfmline writes method unquoted; inject one oversized method too.
+		if i == 39 {
+			line = strings.Replace(line, "method=EXT39", "method="+long, 1)
+		}
+		a.feed(line, int64(fromOf(now)))
+	}
+	if len(a.methods) > maxMethodKeys {
+		t.Errorf("methods keys = %d, want <= %d", len(a.methods), maxMethodKeys)
+	}
+	for k := range a.methods {
+		if len(k) > maxFieldLen {
+			t.Errorf("method key longer than cap: %d", len(k))
+		}
+	}
+}
+
+// fromOf mirrors the hour-truncation trick tests use to stay inside windows.
+func fromOf(now float64) float64 { return now - 3600 }
 
 func TestWWWTwin(t *testing.T) {
 	cases := [][2]string{

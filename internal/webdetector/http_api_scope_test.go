@@ -201,6 +201,31 @@ func TestMonitoring_HostAccessHistory_ScopeCheck(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("scoped host-access-history merge_www out-of-scope twin: expected 403, got %d body=%s", rr.Code, rr.Body.String())
 	}
+
+	// Malformed hours is a client error, never a silent default (the same
+	// normalized value feeds ScanHost AND the detector history sections).
+	rr = get(mux, adminCtx(), "/api/v1/webdet/host-access-history?host=any.com&hours=abc")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("malformed hours: expected 400, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// Archive scans are expensive (up to 60M lines / 120s each): they are capped
+// node-wide and saturate with 429 + Retry-After instead of stacking.
+func TestMonitoring_HostAccessHistory_AdmissionLimit(t *testing.T) {
+	_, mux := newMonitoringTestEngine(t)
+
+	hostAccessScanSlots <- struct{}{}
+	hostAccessScanSlots <- struct{}{}
+	defer func() { <-hostAccessScanSlots; <-hostAccessScanSlots }()
+
+	rr := get(mux, adminCtx(), "/api/v1/webdet/host-access-history?host=any.com")
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("saturated slots: expected 429, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Error("429 must carry Retry-After")
+	}
 }
 
 // ── Guard 1: list endpoints filter rows for scoped tokens ────────────────────

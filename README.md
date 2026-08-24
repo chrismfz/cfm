@@ -1756,7 +1756,7 @@ The Web Detector exposes a local API used by the CLI and integrations (`API_LIST
 | `GET /api/v1/webdet/ip-drilldown?ip=<ip>` | IP drilldown |
 | `GET /api/v1/webdet/analyze-ip?ip=<ip>[&last=<duration>]` | Analyze IP (forensics; optional `last`) |
 | `GET /api/v1/webdet/analyze-host?host=<vhost>[&last=<duration>]` | Analyze vhost (forensics; optional `last`) |
-| `GET /api/v1/webdet/host-access-history?host=<vhost>[&hours=][&merge_www=1][&include_rotated=0]` | Archival vhost traffic profile from edge access logs incl. rotated (requests/hour peaks, top IPs/UAs/paths, bot split; optional `combine=1` detector history) |
+| `GET /api/v1/webdet/host-access-history?host=<vhost>[&hours=][&merge_www=1][&include_rotated=0]` | Archival vhost traffic profile from edge access logs incl. rotated (requests/hour peaks, top IPs/UAs/paths, automation-vs-browser UA split; optional `combine=1` detector history) |
 | `GET /api/v1/webdet/rules` | List traffic rules |
 | `GET /api/v1/webdet/rules/get?id=<id>` | Get single traffic rule |
 | `POST /api/v1/webdet/rules/add` | Add traffic rule (JSON body) |

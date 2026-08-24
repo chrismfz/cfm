@@ -18,8 +18,14 @@
 //   - every accumulator map is key-capped, so worst-case memory is bounded
 //     regardless of what the logs contain;
 //   - a rotated file whose mtime predates the window start is skipped without
-//     being opened, and once a chronological file's lines fall below the
-//     window start, scanning stops early for it AND every older sibling.
+//     being opened;
+//   - unreadable/corrupt rotated files are reported in files_failed instead
+//     of failing (or silently shortening) the whole call.
+//
+// Lines are consumed in chronological ASCENDING order (tail prints file
+// order; rotated archives are streamed start→end), so pre-window lines are
+// simply not aggregated — there is NO early stop: everything is bounded by
+// the budget/timeout/file caps above.
 //
 // Parsing expects the CFM `log_format cfm` family (`key=value` pairs incl.
 // `host=$host`, identical on OpenResty and Angie). Lines without a parsable
@@ -67,13 +73,9 @@ const (
 	maxFamilyKeys = 2_000
 	maxPathKeys   = 10_000
 	maxCodeKeys   = 32
+	maxMethodKeys = 16
 	maxPathLen    = 256
 	maxFieldLen   = 64
-
-	// Consecutive below-window lines before a chronological file is declared
-	// fully older than the requested window. Guards against clock skew
-	// truncating a scan on a handful of out-of-order lines.
-	belowWindowStreak = 100
 
 	peakVsMedianFactor = 3.0
 	maxPeakHours       = 10
@@ -108,6 +110,13 @@ type HostKV struct {
 	Count int64  `json:"count"`
 }
 
+// HostFileError reports a rotated file that could not be fully read (e.g. a
+// corrupt gz stream). The call continues with the remaining siblings.
+type HostFileError struct {
+	File   string `json:"file"`
+	Reason string `json:"reason"`
+}
+
 // HostPeak flags an hour whose request volume towers over the window median.
 type HostPeak struct {
 	HourUnix int64   `json:"hour_unix"`
@@ -130,16 +139,19 @@ type HostScanResult struct {
 
 	Scanned       int64 `json:"scanned"`                // lines read across all scanned files
 	SkippedNoHost int64 `json:"skipped_no_host"`        // lines without a parsable host= field
-	Matched       int64 `json:"matched"`                // lines for the target host
+	Matched       int64 `json:"matched"`                // in-window lines for the target host
 	MatchedNoTS   int64 `json:"matched_no_ts"`          // matched lines whose timestamp was unparsable
-	OutsideWindow int64 `json:"matched_outside_window"` // matched lines older than the window (skewed clocks)
+	OutsideWindow int64 `json:"matched_outside_window"` // matched-host lines OLDER than the window (seen, not aggregated)
 	Truncated     bool  `json:"truncated"`              // a bound was hit: budget, timeout, tail window or file cap
+
+	FilesFailed []HostFileError `json:"files_failed,omitempty"` // rotated files that could not be fully read
 
 	TotalRequests int64 `json:"total_requests"`
 	BytesTotal    int64 `json:"bytes_total"` // 0 unless the log carries bytes=$body_bytes_sent (added 2026-08; older logs lack it)
 
 	StatusClasses  map[string]int64 `json:"status_classes"`
 	Methods        map[string]int64 `json:"methods,omitempty"`
+	MethodsCapped  bool             `json:"methods_capped,omitempty"`
 	TopStatusCodes []HostKV         `json:"top_status_codes,omitempty"`
 
 	UniqueIPs int      `json:"unique_ips"`
@@ -149,7 +161,10 @@ type HostScanResult struct {
 	TopUARaw  []HostKV `json:"top_uas_raw"`
 	UAsCapped bool     `json:"uas_capped,omitempty"`
 
-	UAFamilies    []HostKV `json:"ua_families,omitempty"` // ClassifyUA-normalized, classified per line (exact)
+	// UA classification is a HEURISTIC (browser-envelope vs automation/bot-like
+	// via the injected classifier), NOT bot verification: any non-Mozilla-envelope
+	// UA counts as automation. BotRatioPct = BotRequests / (bot+human+empty).
+	UAFamilies    []HostKV `json:"ua_families,omitempty"` // ClassifyUA-normalized, classified per line
 	BotRequests   int64    `json:"bot_requests,omitempty"`
 	HumanRequests int64    `json:"human_requests,omitempty"` // browser-envelope UAs
 	EmptyUAReqs   int64    `json:"empty_ua_requests,omitempty"`
@@ -184,7 +199,7 @@ type hostAgg struct {
 	methods map[string]int64
 	hours   map[int64]*hostHour
 
-	ipOverflow, uaOverflow, famOverflow, pathOverflow, codeOverflow int64
+	ipOverflow, uaOverflow, famOverflow, pathOverflow, codeOverflow, methodOverflow int64
 
 	matched, matchedNoTS, outsideWindow int64
 	skippedNoHost                       int64
@@ -192,7 +207,6 @@ type hostAgg struct {
 	botReqs, humanReqs, emptyUAReqs     int64
 
 	oldestTS, newestTS float64
-	belowStreak        int
 }
 
 func (a *hostAgg) noteTS(ts float64) {
@@ -205,10 +219,10 @@ func (a *hostAgg) noteTS(ts float64) {
 }
 
 // feed parses one access-log line and aggregates it when it belongs to the
-// target host. below reports whether the consecutive below-window streak
-// (belowWindowStreak) has been reached, letting the caller stop scanning
-// chronologically older files early.
-func (a *hostAgg) feed(line string, from int64) (below bool) {
+// target host. Lines arrive in chronological ASCENDING order; pre-window
+// lines are simply not aggregated — there is deliberately NO early stop
+// (a stop would truncate the scan right before the in-window lines).
+func (a *hostAgg) feed(line string, from int64) {
 	var (
 		tsVal, hostVal, clientVal                     string
 		statusVal, uaVal, uriVal, bytesVal, methodVal string
@@ -241,28 +255,20 @@ func (a *hostAgg) feed(line string, from int64) (below bool) {
 	ts := parseLineTS(tsVal)
 	if ts > 0 {
 		a.noteTS(ts)
-		if float64(from)-ts >= 1 {
-			a.belowStreak++
-		} else {
-			a.belowStreak = 0
-		}
-	}
-	if a.belowStreak >= belowWindowStreak {
-		below = true
 	}
 
 	if hostVal == "" {
 		a.skippedNoHost++
-		return below
+		return
 	}
 	hostVal = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(hostVal)), ".")
 	if _, ok := a.targets[hostVal]; !ok {
-		return below
+		return
 	}
 
 	if ts > 0 && ts < float64(from) {
 		a.outsideWindow++
-		return below
+		return
 	}
 	a.matched++
 	if ts <= 0 {
@@ -296,7 +302,9 @@ func (a *hostAgg) feed(line string, from int64) (below bool) {
 	bumpCapped(a.codes, statusVal, maxCodeKeys, &a.codeOverflow)
 
 	if methodVal != "" {
-		a.methods[methodVal]++
+		// Client-controlled token: cap cardinality AND key length so the
+		// declared memory bound holds even against hostile extension methods.
+		bumpCapped(a.methods, truncateStr(methodVal, maxFieldLen), maxMethodKeys, &a.methodOverflow)
 	}
 	if clientVal = strings.TrimSpace(clientVal); clientVal != "" {
 		bumpCapped(a.ips, clientVal, maxIPKeys, &a.ipOverflow)
@@ -305,32 +313,31 @@ func (a *hostAgg) feed(line string, from int64) (below bool) {
 		bumpCapped(a.paths, p, maxPathKeys, &a.pathOverflow)
 	}
 
-	fam := ""
+	// UA classification: empty UA counts once (emptyUAReqs); a present UA is
+	// either browser-envelope ("mozilla", or no classifier attached) or
+	// automation/bot-like (any other family). bot+human+empty == matched.
 	if uaVal == "" || uaVal == "-" {
 		a.emptyUAReqs++
 	} else {
+		fam := "mozilla"
 		bumpCapped(a.uas, truncateStr(uaVal, maxFieldLen), maxUAKeys, &a.uaOverflow)
 		if a.classify != nil {
 			fam = a.classify(uaVal)
 			if fam == "" {
-				fam = "-"
+				fam = "-" // classifier produced nothing: no bot evidence either way
 			}
 			bumpCapped(a.fams, truncateStr(fam, maxFieldLen), maxFamilyKeys, &a.famOverflow)
 		}
-	}
-	switch {
-	case fam == "-":
-		// already counted in emptyUAReqs above
-	case fam == "" || fam == "mozilla":
-		a.humanReqs++ // browser envelope (or no classifier): no bot evidence
-	default:
-		a.botReqs++
+		if fam == "mozilla" || fam == "-" || fam == "" {
+			a.humanReqs++
+		} else {
+			a.botReqs++
+		}
 	}
 
 	if b, err := strconv.ParseInt(bytesVal, 10, 64); err == nil && b > 0 {
 		a.bytesTotal += b
 	}
-	return below
 }
 
 // WWWTwin returns the www./bare counterpart of h (trimmed, lowercased,
@@ -435,15 +442,16 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	// onLine is shared by the live tail and every sibling scan so budget /
 	// counters / truncation accounting stay uniform. feed() owns ALL per-line
 	// parsing (a single walk per line, including the skipped_no_host count).
+	// Lines arrive oldest→newest; pre-window lines are aggregated nowhere but
+	// still consume budget — there is deliberately NO early stop, since a
+	// stop on ascending input would truncate right BEFORE the in-window tail.
 	onLine := func(line string) bool {
 		res.Scanned++
 		if res.Scanned > budget {
 			res.Truncated = true
 			return false
 		}
-		if agg.feed(line, from) {
-			return false // window floor reached inside a chronological file
-		}
+		agg.feed(line, from)
 		return true
 	}
 
@@ -478,18 +486,15 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 			continue
 		}
 		res.FilesScanned = append(res.FilesScanned, rf)
-		stoppedEarly := false
-		_ = scanWholeForIP(cctx, rf, &remaining, func(line string) bool {
-			keep := onLine(line)
-			if !keep {
-				stoppedEarly = true
-			}
-			return keep
-		})
-		if stoppedEarly {
-			// Below-window floor reached (or onLine cut us off): every older
-			// sibling is older still — no point opening them.
-			break
+		if serr := scanWholeForIP(cctx, rf, &remaining, onLine); serr != nil && cctx.Err() == nil {
+			// A corrupt/unreadable sibling must not fail (or silently shorten,
+			// unreported) the whole archival lookup: record it and go on. A
+			// budget stop inside scanWholeForIP returns a nil error, so this
+			// only fires for real read/gzip failures.
+			res.FilesFailed = append(res.FilesFailed, HostFileError{
+				File:   rf,
+				Reason: truncateStr(serr.Error(), 128),
+			})
 		}
 	}
 	if cctx.Err() != nil {
@@ -506,10 +511,9 @@ func finalize(agg *hostAgg, res *HostScanResult, topN int) {
 	res.MatchedNoTS = agg.matchedNoTS
 	res.OutsideWindow = agg.outsideWindow
 	res.SkippedNoHost = agg.skippedNoHost
-	res.TotalRequests = agg.matched - agg.outsideWindow
-	if res.TotalRequests < 0 {
-		res.TotalRequests = 0
-	}
+	// matched already counts ONLY in-window lines (outsideWindow ones return
+	// before matched++ in feed), so total == matched by construction.
+	res.TotalRequests = agg.matched
 	res.BytesTotal = agg.bytesTotal
 	if agg.newestTS > 0 {
 		res.CoverageNewestUnix = int64(agg.newestTS)
@@ -532,6 +536,7 @@ func finalize(agg *hostAgg, res *HostScanResult, topN int) {
 	res.TopStatusCodes = topK(agg.codes, maxCodeKeys)
 
 	res.Methods = agg.methods
+	res.MethodsCapped = agg.methodOverflow > 0
 	res.UniqueIPs = len(agg.ips)
 	res.IPsCapped = agg.ipOverflow > 0
 	res.TopIPs = topK(agg.ips, topN)
