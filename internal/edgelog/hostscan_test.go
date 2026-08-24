@@ -708,6 +708,105 @@ func TestScanHost_ProbeLineNotAggregated(t *testing.T) {
 	}
 }
 
+// cfmbadline builds one log_format cfm_bad_request line (escape=json style:
+// method/uri quoted) as written to access.bad_request.log.
+func cfmbadline(ts float64, client, host, method, uri string, status int, ua string, nbytes int64) string {
+	tl := time.Unix(int64(ts), 0).UTC().Format("02/Jan/2006:15:04:05 -0700")
+	return fmt.Sprintf(
+		`ts="%s" msec=%.3f client=%s peer=%s host=%s method="%s" uri="%s" proto="HTTP/1.1" req_line="%s / HTTP/1.1" status=%d bytes=%d req_len=300 sch=https dst=203.0.113.1:443 ua="%s"`,
+		tl, ts, client, client, host, method, uri, method, status, nbytes, ua,
+	)
+}
+
+// TestScanHost_BadRequestSectionSeparate pins the malformed/aborted
+// provenance contract: 400/408/414/431/494/499 traffic lives in its OWN log
+// and is reported in its own section — never mixed into valid-traffic totals,
+// never invisible.
+func TestScanHost_BadRequestSectionSeparate(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	writeLines(t, live, []string{
+		cfmline(now-30, "198.51.100.1", "ex.gr", "GET", "/ok", 200, "Mozilla/5.0", 50),
+		cfmline(now-20, "198.51.100.2", "ex.gr", "GET", "/also-ok", 404, "bot/1", 60),
+	})
+	badLog := filepath.Join(dir, "access.bad_request.log")
+	writeLines(t, badLog, []string{
+		cfmbadline(now-25, "198.51.100.7", "ex.gr", "GET", "/junk", 400, "-", 0),
+		cfmbadline(now-15, "198.51.100.7", "ex.gr", "GET", "/hugeheaders", 431, "-", 0),
+		cfmbadline(now-10, "198.51.100.8", "other.gr", "GET", "/x", 400, "-", 0),
+	})
+
+	oldFull := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, oldFull...)
+	defer func() { fullAccessLogCandidates = oldFull }()
+	oldBad := badRequestLogCandidates
+	badRequestLogCandidates = append([]string{badLog}, oldBad...)
+	defer func() { badRequestLogCandidates = oldBad }()
+
+	res, err := ScanHost(context.Background(), "EX.gr", HostOpts{Hours: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TotalRequests != 2 {
+		t.Errorf("total_requests = %d, want 2 (valid only)", res.TotalRequests)
+	}
+	if res.StatusClasses["4xx"] != 1 {
+		t.Errorf("valid-side 4xx = %d, want 1 (the /also-ok)", res.StatusClasses["4xx"])
+	}
+	if res.BadRequests == nil {
+		t.Fatal("bad_requests section missing — malformed traffic went blind")
+	}
+	bad := res.BadRequests
+	if bad.TotalRequests != 2 {
+		t.Errorf("bad total = %d, want 2 (ex.gr rows only)", bad.TotalRequests)
+	}
+	if bad.StatusClasses["4xx"] != 2 {
+		t.Errorf("bad 4xx = %d, want 2 (400 + 431)", bad.StatusClasses["4xx"])
+	}
+	if bad.LogFile != badLog {
+		t.Errorf("bad logfile = %q", bad.LogFile)
+	}
+	if res.TotalRequestsWithBad != 4 {
+		t.Errorf("total_with_bad = %d, want 4", res.TotalRequestsWithBad)
+	}
+	if res.Truncated || bad.Truncated {
+		t.Error("truncated must be false on this clean run")
+	}
+
+	// Without the source file present, the section is nil (documented meaning:
+	// node has no bad-request log) and totals stay consistent.
+	badRequestLogCandidates = nil
+	res2, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.BadRequests != nil {
+		t.Error("bad_requests must be nil when the node has no such log")
+	}
+	if res2.TotalRequestsWithBad != res2.TotalRequests {
+		t.Errorf("with_bad = %d, want %d (no bad source)", res2.TotalRequestsWithBad, res2.TotalRequests)
+	}
+}
+
+// TestSizeMutationDetection pins the copytruncate/rotation honesty helpers: a
+// shrink or ANY size movement between pre/post stats flags the read.
+func TestSizeMutationDetection(t *testing.T) {
+	if sizeChanged(100, 100) {
+		t.Error("equal sizes must not flag")
+	}
+	if !sizeShrank(100, 90) {
+		t.Error("shrink must flag")
+	}
+	if sizeShrank(90, 100) {
+		t.Error("growth is not a shrink")
+	}
+	if !sizeChanged(100, 250) {
+		t.Error("growth during a rotated-file read must flag too (copytruncate fill)")
+	}
+}
+
 func TestWWWTwin(t *testing.T) {
 	cases := [][2]string{
 		{"ex.gr", "www.ex.gr"},

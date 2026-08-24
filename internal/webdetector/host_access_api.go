@@ -209,8 +209,10 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if !started {
-		// History completely unavailable — omit the whole detector section;
-		// the access section stands alone.
+		// History completely unavailable — omit the detector numbers but say
+		// so explicitly; combine=1 must never degrade into a silent
+		// access-only response.
+		out["detector_unavailable"] = true
 		writeJSON(w, http.StatusOK, out)
 		return
 	}

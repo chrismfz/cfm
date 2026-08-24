@@ -263,12 +263,14 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 			}
 			res.FilesScanned = append(res.FilesScanned, rf)
 			// A single unreadable/corrupt rotated file must not fail the whole
-			// lookup — the live-file result is already in hand; skip and go on.
+			// lookup — the live-file result is already in hand; skip and go on,
+			// but NEVER silently: coverage is shorter than it looks.
 			if scanErr := scanWholeForIP(cctx, rf, &budget, onLine); scanErr != nil {
 				if cctx.Err() != nil {
 					res.Truncated = true
 					break
 				}
+				res.Truncated = true // corrupt sibling = evidence hole
 				continue
 			}
 			// Budget exhausted mid-file (possibly the last one, where the

@@ -70,13 +70,18 @@ back-filled here — see the git/PR history for that period.
   automation/bot-like split (heuristic UA normalization via the existing
   normalizer — not bot verification), top paths and method mix. Profiles are
   built ONLY from the full access log (`if=$log_main_request`) — the focused
-  challenge/block `access.cfm.log` is never a source. Bounded like
+  challenge/block `access.cfm.log` is never a source — and the
+  malformed/aborted traffic the edge keeps OUT of that log (400/408/414/431/
+  494/499 in access.bad_request.log) is profiled as a separate `bad_requests`
+  provenance section (`total_requests_with_bad` = combined headline), so
+  attack-shaped floods of garbage probes, header abuse or client-aborts are
+  neither invisible nor silently mixed into valid-traffic totals. Bounded like
   `ip_forensics`: shared line budget across all scanned files, one timeout,
   key-capped accumulators, mtime-based skip of siblings older than the window;
   corrupt/unreadable rotated files are reported in `files_failed`, EVERY reach
   bound (line budget incl. the live tail window via `live_tail_truncated`,
-  max_files cap) sets `truncated=true` so silent mid-window holes cannot pass
-  as complete coverage, and
+  max_files cap) sets `truncated=true`, `log_changed_during_scan=true` flags a
+  copytruncate/rotation observed mid-read (re-run), and
   `coverage_oldest_unix` reports how far back the kept rotation actually
   reaches. Optional `combine=1` joins the detector history store over exactly
   the same absolute window as the access scan (challenge issued/solved, block
@@ -84,7 +89,7 @@ back-filled here — see the git/PR history for that period.
   the twins get a combined view plus a per-host breakdown so security-event
   provenance stays visible, and `detector_coverage` exposes the store's real
   retention/oldest retained event (`coverage_proven`) so partial history never
-  looks complete.
+  looks complete (`detector_unavailable` when history is unreadable).
   Because one call may decompress tens of millions of lines, archive scans are
   capped at TWO concurrent per node (`429` +
   `Retry-After` beyond) and `hours` is clamped to ≤90 days at the API boundary.

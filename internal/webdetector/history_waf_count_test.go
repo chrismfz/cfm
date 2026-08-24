@@ -65,6 +65,7 @@ func TestHistoryRangeQueries(t *testing.T) {
 		{base, "waf_observed", "WAF_SQLI:2"},     // from → included (>=)
 		{base + 5, "block_trigger", ""},          // inside → included
 		{base + 6, "waf_trigger", "WAF_SQLI:2"},  // inside; SAME physical hit as the base observation
+		{base + 7, "waf_observe", ""},            // inside; UNLABELLED observation (empty reason)
 		{base + 9, "suspicious", ""},             // inside → included
 		{base + 10, "waf_observed", "WAF_RCE:3"}, // to → excluded (< to)
 		{base + 11, "challenge_issued", ""},      // after window → excluded
@@ -80,15 +81,18 @@ func TestHistoryRangeQueries(t *testing.T) {
 	if sum.FromUnix != base || sum.ToUnix != base+10 {
 		t.Errorf("summary bounds = [%d,%d], want [%d,%d] echoed verbatim", sum.FromUnix, sum.ToUnix, base, base+10)
 	}
-	if sum.TotalEvents != 4 {
-		t.Errorf("total_events = %d, want 4 (from, +5 block_trigger, +6 trigger, +9)", sum.TotalEvents)
+	if sum.TotalEvents != 5 {
+		t.Errorf("total_events = %d, want 5 (from, +5 block_trigger, +6 trigger, +7 observe-empty, +9)", sum.TotalEvents)
 	}
-	if sum.WAFObserved != 1 || sum.BlockTriggers != 1 || sum.Suspicious != 1 {
-		t.Errorf("waf/block/suspicious = %d/%d/%d, want 1/1/1 (the +6 waf_trigger is a separate universe)", sum.WAFObserved, sum.BlockTriggers, sum.Suspicious)
+	// summary.waf_observed counts ALL observations incl. unlabelled ones…
+	if sum.WAFObserved != 2 || sum.BlockTriggers != 1 || sum.Suspicious != 1 {
+		t.Errorf("waf/block/suspicious = %d/%d/%d, want 2/1/1 (+7 has empty reason)",
+			sum.WAFObserved, sum.BlockTriggers, sum.Suspicious)
 	}
 
-	// Observation-only breakdown must reconcile with summary.waf_observed:
-	// one physical hit, one count — even though a waf_trigger row for it exists.
+	// …while the observation-only RULE breakdown necessarily excludes the
+	// empty-reason row — documented divergence: Σrules may be < waf_observed
+	// when unlabelled observations exist. Triggers still never leak in here.
 	obsRules, err := hs.WAFObservedByRuleRange("ex.gr", base, base+10)
 	if err != nil {
 		t.Fatalf("WAFObservedByRuleRange: %v", err)

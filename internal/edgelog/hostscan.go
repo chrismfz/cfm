@@ -103,6 +103,22 @@ func resolveFullAccessLog() (string, error) {
 	return resolveFrom(fullAccessLogCandidates, "", "access")
 }
 
+// badRequestLogCandidates hold the MALFORMED/ABORTED traffic the edge filters
+// OUT of the full access.log: 400/408/414/431/494/499 land here instead (same
+// key=value family via log_format cfm_bad_request). A "total traffic" profile
+// that ignores this file is blind to entire attack classes (header-abuse 431s,
+// garbage-probe 400 floods, client-abort 499 storms), so ScanHost reads it as
+// a SEPARATE provenance section rather than mixing it into the valid-traffic
+// totals.
+var badRequestLogCandidates = []string{
+	"/usr/local/openresty/nginx/logs/access.bad_request.log",
+	"/var/log/angie/access.bad_request.log",
+}
+
+func resolveBadRequestLog() (string, error) {
+	return resolveFrom(badRequestLogCandidates, "", "access")
+}
+
 // HostOpts tunes a host scan.
 type HostOpts struct {
 	Hours          int                     // trailing window ending now (ignored when FromUnix>0)
@@ -168,8 +184,23 @@ type HostScanResult struct {
 
 	FilesFailed []HostFileError `json:"files_failed,omitempty"` // rotated files that could not be fully read
 
+	// LogChangedDuringScan: the underlying log file was truncated or mutated
+	// WHILE being read (logrotate copytruncate is the classic case). The scan
+	// result for that file may overlap with a rotated sibling (double-count
+	// risk) or contain a hole — Truncated is set too, and the affected sibling
+	// also appears in files_failed. Treat the call as suspect and re-run.
+	LogChangedDuringScan bool `json:"log_changed_during_scan,omitempty"`
+
 	TotalRequests int64 `json:"total_requests"`
 	BytesTotal    int64 `json:"bytes_total"` // 0 unless the log carries bytes=$body_bytes_sent (added 2026-08; older logs lack it)
+
+	// BadRequests profiles the malformed/aborted traffic (400/408/414/431/494/
+	// 499) from access.bad_request.log — traffic the edge deliberately keeps
+	// OUT of the full access.log. Kept SEPARATE so valid-traffic totals keep
+	// their provenance; nil when the node has no bad-request log at all.
+	// TotalRequestsWithBad = TotalRequests + BadRequests.TotalRequests.
+	BadRequests          *HostScanResult `json:"bad_requests,omitempty"`
+	TotalRequestsWithBad int64           `json:"total_requests_with_bad"`
 
 	StatusClasses     map[string]int64 `json:"status_classes"`
 	Methods           map[string]int64 `json:"methods,omitempty"`
@@ -377,6 +408,114 @@ func WWWTwin(h string) string {
 	return "www." + h
 }
 
+// logChain scans ONE live log plus (optionally) its rotated siblings into a
+// single aggregator, tracking per-source evidence. budgetUsed/budgetCap are
+// SHARED across chains (main + bad-request) so "shared line budget across all
+// files" is literal: the counter is checked BEFORE counting a line and every
+// consumed line increments it exactly once.
+type logChain struct {
+	agg           *hostAgg
+	from, to      int64
+	budgetUsed    *int64
+	budgetCap     int64
+	files         []string
+	failed        []HostFileError
+	skippedOlder  int
+	truncated     bool
+	liveTruncated bool
+	changed       bool // underlying file truncated/mutated while being read
+	scanned       int64
+}
+
+func (lc *logChain) onLine() func(string) bool {
+	return func(line string) bool {
+		if *lc.budgetUsed >= lc.budgetCap {
+			lc.truncated = true
+			return false
+		}
+		*lc.budgetUsed++
+		lc.scanned++
+		lc.agg.feed(line, lc.from, lc.to)
+		return true
+	}
+}
+
+// scanLive reads the live file's tail with rotation-change detection: a size
+// SHRINK between our two stats means copytruncate/rotation happened under us,
+// so this read may overlap a rotated sibling or contain a hole — flagged, so
+// the caller can treat the result as suspect instead of authoritative.
+func (lc *logChain) scanLive(ctx context.Context, file string, tailLines int) error {
+	st0, _ := os.Stat(file)
+	capped, err := streamTailBounded(ctx, file, tailLines, lc.onLine())
+	st1, _ := os.Stat(file)
+	if capped {
+		lc.truncated = true
+		lc.liveTruncated = true
+	}
+	if st0 != nil && st1 != nil && sizeShrank(st0.Size(), st1.Size()) {
+		lc.changed = true
+		lc.truncated = true
+	}
+	return err
+}
+
+// sizeShrank / sizeChanged are the cheap rotation/copytruncate signals: a
+// shrink between pre/post stats means the live file was truncated under us;
+// ANY size movement on an already-rotated file means it is still being filled.
+func sizeShrank(before, after int64) bool  { return after < before }
+func sizeChanged(before, after int64) bool { return before != after }
+
+// scanSiblings reads the rotated siblings (newest-first, capped at maxFiles).
+// A sibling that CHANGES SIZE while being read is mid-copytruncate-fill or
+// otherwise unstable — it must not be presented as completed evidence: it gets
+// a files_failed entry AND sets truncated/changed.
+func (lc *logChain) scanSiblings(ctx context.Context, live string, maxFiles int, from int64) {
+	siblings, found := rotatedSiblings(live, maxFiles)
+	if found > len(siblings) {
+		lc.truncated = true // the file cap silently hid older siblings
+	}
+	for _, rf := range siblings {
+		if ctx.Err() != nil || *lc.budgetUsed >= lc.budgetCap {
+			lc.truncated = true
+			break
+		}
+		fi0, serr0 := os.Stat(rf)
+		if serr0 == nil && fi0.ModTime().Before(time.Unix(from, 0)) {
+			// Last written before the window opened: nothing inside can be in-window.
+			lc.skippedOlder++
+			continue
+		}
+		lc.files = append(lc.files, rf)
+		remaining := int(lc.budgetCap - *lc.budgetUsed)
+		before := remaining
+		serr := scanWholeForIP(ctx, rf, &remaining, lc.onLine())
+		*lc.budgetUsed += int64(before - remaining) // lines actually consumed here
+		fi1, _ := os.Stat(rf)
+		if serr != nil && ctx.Err() == nil {
+			// A corrupt/unreadable sibling must not fail (or silently shorten,
+			// unreported) the whole archival lookup: record it and go on. A
+			// budget stop inside scanWholeForIP returns a nil error, so this
+			// only fires for real read/gzip failures.
+			lc.failed = append(lc.failed, HostFileError{
+				File:   rf,
+				Reason: truncateStr(serr.Error(), 128),
+			})
+		}
+		if fi0 != nil && fi1 != nil && sizeChanged(fi0.Size(), fi1.Size()) {
+			lc.changed = true
+			lc.truncated = true
+			lc.failed = append(lc.failed, HostFileError{
+				File:   rf,
+				Reason: fmt.Sprintf("mutated during scan (size %d→%d)", fi0.Size(), fi1.Size()),
+			})
+		}
+		if *lc.budgetUsed >= lc.budgetCap {
+			lc.truncated = true
+			break
+		}
+	}
+}
+
 // ScanHost profiles ONE host's traffic across the resolved edge access log
 // (and optionally its rotated siblings) inside [FromUnix, ToUnix). See the
 // package doc for the bounding discipline. The result is a pure aggregate —
@@ -442,6 +581,11 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	if topN > 50 {
 		topN = 50
 	}
+	// The live tail window can never exceed the shared budget — otherwise the
+	// claimed "shared line budget across ALL files" would not bound live I/O.
+	if int64(tailLines) > budget {
+		tailLines = int(budget)
+	}
 
 	logFile, err := resolveFullAccessLog()
 	if err != nil {
@@ -464,40 +608,52 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 		hours:    map[int64]*hostHour{},
 	}
 
-	// onLine is shared by the live tail and every sibling scan so budget /
-	// counters / truncation accounting stay uniform. feed() owns ALL per-line
-	// parsing (a single walk per line, including the skipped_no_host count).
-	// Each individual file is streamed oldest→newest; out-of-window lines are
-	// aggregated nowhere but still consume budget — there is deliberately NO
-	// early stop, since a stop inside a file would truncate right BEFORE its
-	// in-window tail.
-	onLine := func(line string) bool {
-		res.Scanned++
-		if res.Scanned > budget {
-			res.Truncated = true
-			return false
-		}
-		agg.feed(line, from, to)
-		return true
-	}
+	// Two chains over ONE shared line budget: valid traffic (access.log) and
+	// the malformed/aborted sidecar (access.bad_request.log). Keeping them as
+	// separate provenance sections preserves the valid-vs-malformed split that
+	// "crawler or attack?" reasoning needs, while neither class stays invisible.
+	budgetUsed := int64(0)
+	main := &logChain{agg: agg, from: from, to: to, budgetUsed: &budgetUsed, budgetCap: budget}
 
-	res.FilesScanned = append(res.FilesScanned, logFile)
-	tailCapped, tailErr := streamTailBounded(cctx, logFile, tailLines, onLine)
-	if tailCapped {
-		// The live file had MORE lines than the tail window: without the
-		// rotated siblings there is a silent hole between "now" and the
-		// oldest kept archive — exactly what coverage honesty must never do.
-		res.Truncated = true
-		res.LiveTailTruncated = true
-	}
+	main.files = append(main.files, logFile)
+	tailErr := main.scanLive(cctx, logFile, tailLines)
 	if tailErr != nil {
-		finalize(agg, &res, topN)
-		return res, tailErr
+		// Real read failure on the primary evidence file (permission denied,
+		// vanished mid-scan, …): never present as a clean zero-traffic result.
+		main.truncated = true
+		main.failed = append(main.failed, HostFileError{
+			File:   logFile,
+			Reason: truncateStr(tailErr.Error(), 128),
+		})
 	}
 
-	if !o.IncludeRotated {
-		finalize(agg, &res, topN)
-		return res, nil
+	var bad *logChain
+	badFile, badErr := resolveBadRequestLog()
+	if badErr == nil {
+		bad = &logChain{agg: &hostAgg{
+			classify: o.ClassifyUA,
+			targets:  targets,
+			ips:      map[string]int64{}, uas: map[string]int64{}, fams: map[string]int64{},
+			paths: map[string]int64{}, codes: map[string]int64{}, methods: map[string]int64{},
+			hours: map[int64]*hostHour{},
+		}, from: from, to: to, budgetUsed: &budgetUsed, budgetCap: budget}
+		bad.files = append(bad.files, badFile)
+		if berr := bad.scanLive(cctx, badFile, tailLines); berr != nil && ctx.Err() == nil {
+			bad.failed = append(bad.failed, HostFileError{
+				File:   badFile,
+				Reason: truncateStr(berr.Error(), 128),
+			})
+			bad.truncated = true
+		}
+	}
+
+	if !o.IncludeRotated || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			main.truncated = true
+		}
+		finalizeChain(main, agg, &res, topN)
+		finalizeBad(bad, &res, topN)
+		return res, tailErr
 	}
 
 	maxFiles := o.MaxFiles
@@ -507,47 +663,68 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	if maxFiles > MaxRotatedFiles {
 		maxFiles = MaxRotatedFiles
 	}
-	siblings, siblingsFound := rotatedSiblings(logFile, maxFiles)
-	if siblingsFound > len(siblings) {
-		// The file cap silently hid older siblings — that is a real reach
-		// bound and MUST show up as truncated (coverage honesty).
-		res.Truncated = true
+	main.scanSiblings(cctx, logFile, maxFiles, from)
+	if tailErr == nil && bad != nil {
+		bad.scanSiblings(cctx, badFile, maxFiles, from)
 	}
-	for _, rf := range siblings {
-		remaining := int(budget - res.Scanned)
-		if cctx.Err() != nil || remaining <= 0 {
-			res.Truncated = true
-			break
+	if ctx.Err() != nil {
+		main.truncated = true
+		if bad != nil {
+			bad.truncated = true
 		}
-		if fi, serr := os.Stat(rf); serr == nil && fi.ModTime().Before(time.Unix(from, 0)) {
-			// Last written before the window opened: nothing inside can be in-window.
-			res.FilesSkippedOlder++
-			continue
-		}
-		res.FilesScanned = append(res.FilesScanned, rf)
-		if serr := scanWholeForIP(cctx, rf, &remaining, onLine); serr != nil && cctx.Err() == nil {
-			// A corrupt/unreadable sibling must not fail (or silently shorten,
-			// unreported) the whole archival lookup: record it and go on. A
-			// budget stop inside scanWholeForIP returns a nil error, so this
-			// only fires for real read/gzip failures.
-			res.FilesFailed = append(res.FilesFailed, HostFileError{
-				File:   rf,
-				Reason: truncateStr(serr.Error(), 128),
-			})
-		}
-		if remaining <= 0 {
-			// Budget died inside this file — everything after it (including
-			// the rest of it) is unreached. Never report truncated=false here.
-			res.Truncated = true
-			break
-		}
-	}
-	if cctx.Err() != nil {
-		res.Truncated = true
 	}
 
-	finalize(agg, &res, topN)
-	return res, nil
+	finalizeChain(main, agg, &res, topN)
+	finalizeBad(bad, &res, topN)
+	return res, tailErr
+}
+
+// finalizeChain folds a chain's accumulators + evidence into res.
+func finalizeChain(lc *logChain, agg *hostAgg, res *HostScanResult, topN int) {
+	res.LogFile = lc.files[0]
+	res.FilesScanned = lc.files
+	res.FilesFailed = append(res.FilesFailed, lc.failed...)
+	res.FilesSkippedOlder += lc.skippedOlder
+	if lc.truncated {
+		res.Truncated = true
+	}
+	if lc.liveTruncated {
+		res.LiveTailTruncated = true
+	}
+	if lc.changed {
+		res.LogChangedDuringScan = true
+	}
+	res.Scanned = lc.scanned
+	finalize(agg, res, topN)
+}
+
+// finalizeBad attaches the bad-request section (nil when the node has no
+// such log) and computes the combined headline total.
+func finalizeBad(bad *logChain, res *HostScanResult, topN int) {
+	if bad == nil {
+		res.TotalRequestsWithBad = res.TotalRequests
+		return
+	}
+	badRes := HostScanResult{
+		Host:                 res.Host,
+		MatchedHosts:         res.MatchedHosts,
+		LogFile:              bad.files[0],
+		FilesScanned:         bad.files,
+		WindowFromUnix:       res.WindowFromUnix,
+		WindowToUnix:         res.WindowToUnix,
+		Truncated:            bad.truncated,
+		LiveTailTruncated:    bad.liveTruncated,
+		LogChangedDuringScan: bad.changed,
+		Scanned:              bad.scanned,
+		SkippedNoHost:        bad.agg.skippedNoHost,
+	}
+	finalize(bad.agg, &badRes, topN)
+	badRes.FilesFailed = append(badRes.FilesFailed, bad.failed...)
+	res.BadRequests = &badRes
+	res.Truncated = res.Truncated || bad.truncated
+	res.LogChangedDuringScan = res.LogChangedDuringScan || bad.changed
+	res.Scanned += bad.scanned // top-level Scanned covers BOTH chains
+	res.TotalRequestsWithBad = res.TotalRequests + badRes.TotalRequests
 }
 
 // finalize folds the accumulators into ranked lists and derived statistics.
