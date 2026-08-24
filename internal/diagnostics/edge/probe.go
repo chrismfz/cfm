@@ -40,7 +40,7 @@ func (p BridgeRuntimeProbe) Summary() string {
 
 const CanonicalBridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 
-var luaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+["']([^"']+)["']\s*$`)
+var luaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+("(\\.|[^"\\])*")\s*$`)
 var badTokenRe = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
 
 func ResolveLuaToken(paths []string) LuaTokenProbe {
@@ -61,12 +61,23 @@ func ReadLuaToken(path string) LuaTokenProbe {
 	if len(m) < 2 {
 		return LuaTokenProbe{Present: true}
 	}
-	tok := strings.TrimSpace(string(m[1]))
+	literal := string(m[1])
+	tok, err := strconv.Unquote(literal)
+	if err != nil || strconv.Quote(tok) != literal {
+		return LuaTokenProbe{Present: true}
+	}
 	return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
 }
 func IsStrongToken(tok string) bool {
-	t := strings.TrimSpace(tok)
-	return len(t) >= 32 && !badTokenRe.MatchString(t)
+	if len(tok) < 32 || strings.TrimSpace(tok) != tok || badTokenRe.MatchString(tok) {
+		return false
+	}
+	for i := 0; i < len(tok); i++ {
+		if tok[i] < 0x21 || tok[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 func TokenHealth(t LuaTokenProbe) string {
 	if !t.Present {
@@ -127,16 +138,7 @@ func ReadChallengeTokenProbe(path string) LuaTokenProbe {
 }
 
 func ReadBridgeTokenProbe(path string) LuaTokenProbe {
-	if t := ReadLuaToken(path); t.Present {
-		return t
-	}
-	if tok := strings.TrimSpace(os.Getenv("OPENRESTY_TOKEN")); tok != "" {
-		return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
-	}
-	if tok := strings.TrimSpace(os.Getenv("BRIDGE_TOKEN")); tok != "" {
-		return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
-	}
-	return LuaTokenProbe{}
+	return ReadLuaToken(path)
 }
 
 func ResolveBridgeRuntimeConfig(path string) BridgeRuntimeConfig {

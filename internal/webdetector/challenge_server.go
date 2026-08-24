@@ -1666,17 +1666,14 @@ func secretKey() []byte {
 }
 
 var clearanceTokenWarnOnce sync.Once
-var clearanceLuaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+["']([^"']+)["']\s*$`)
+var clearanceLuaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+("(\\.|[^"\\])*")\s*$`)
 
 func clearanceSecretKey() []byte {
 	if tok, ok := readBridgeTokenSecret(clearanceBridgeTokenPath); ok {
 		return []byte(tok)
 	}
-	if tok := strings.TrimSpace(os.Getenv("OPENRESTY_TOKEN")); tok != "" {
-		return []byte(tok)
-	}
 	clearanceTokenWarnOnce.Do(func() {
-		logging.LogfCHALLENGES("[challenge] ERROR: no canonical clearance secret available (missing bridge token file and OPENRESTY_TOKEN env); refusing to issue/validate cfm_clearance")
+		logging.LogfCHALLENGES("[challenge] ERROR: canonical bridge token file missing or invalid; refusing to issue/validate cfm_clearance")
 	})
 	return nil
 }
@@ -1690,9 +1687,18 @@ func readBridgeTokenSecret(path string) (string, bool) {
 	if len(m) < 2 {
 		return "", false
 	}
-	tok := strings.TrimSpace(string(m[1]))
-	if tok == "" {
+	literal := string(m[1])
+	tok, err := strconv.Unquote(literal)
+	if err != nil || strconv.Quote(tok) != literal {
 		return "", false
+	}
+	if len(tok) < 32 || strings.TrimSpace(tok) != tok {
+		return "", false
+	}
+	for i := 0; i < len(tok); i++ {
+		if tok[i] < 0x21 || tok[i] > 0x7e {
+			return "", false
+		}
 	}
 	return tok, true
 }

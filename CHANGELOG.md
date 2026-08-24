@@ -29,6 +29,16 @@ back-filled here — see the git/PR history for that period.
   status` DNAT check now parses JSON structurally instead of false-failing on
   nft output formatting.
 
+### Removed
+- **Legacy bridge-token process-environment fallbacks.** Clearance signing and
+  edge health/status now read only the canonical
+  `/var/lib/cfm/lua/cfm_bridge_token.lua` generated from `OPENRESTY_TOKEN` in
+  `[webdetector]`; stale `OPENRESTY_TOKEN`, `BRIDGE_TOKEN`, or
+  `CFM_CLEARANCE_HMAC_SECRET` process variables can no longer mask a missing or
+  rotated file, and the edge proxy configs no longer pass the unused token
+  environment variable to workers. Go consumers now decode the manager's
+  escaped Lua string format and enforce the same 32-character minimum as Lua.
+
 ## 2026.08.23
 
 ### Fixed

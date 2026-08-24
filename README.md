@@ -832,9 +832,9 @@ on daemon start.
 Client → OpenResty or Angie (cfm decision socket) → (challenge/block/pass) → upstream
 ```
 
-No DNAT required. CFM exposes a unix socket (`OPENRESTY_SOCK`) — the env var name is
-historical and is read identically by Lua whether the front-end is OpenResty or Angie.
-The Lua layer queries it per-request.
+No DNAT required. CFM exposes a unix socket configured by `OPENRESTY_SOCK` in
+`[webdetector]`; the historical key name applies identically whether the
+front-end is OpenResty or Angie.
 
 ### Webdetector bridge token file (`OPENRESTY_TOKEN`)
 
@@ -845,6 +845,8 @@ the bridge module to one fixed shared path:
 
 Both OpenResty and Angie include `/var/lib/cfm/lua/?.lua` in `lua_package_path`,
 so no per-stack token copy is needed during migrations.
+Clearance signing and edge health probes read only this canonical file; there is
+no process-environment fallback for the bridge token.
 
 ### OpenResty vs Angie — choosing a backend
 

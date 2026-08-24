@@ -12,6 +12,14 @@
 -- mirroring the real HMAC scope binding without crypto.
 
 local panel_path = "configs/lua/cfm_panel.lua"
+local canonical_secret = "canonical-bridge-secret-0123456789abcdef"
+local real_getenv = os.getenv
+os.getenv = function(name)
+  if name == "CFM_CLEARANCE_HMAC_SECRET" then
+    return "stale-environment-secret-0123456789abcdef"
+  end
+  return real_getenv(name)
+end
 
 local function run_case(c)
   local actions = {}
@@ -66,11 +74,13 @@ local function run_case(c)
   -- Fake modules: scope-bound token validation without crypto.
   package.loaded["cfm_clearance"] = {
     validate = function(token, ip, host, scope, secret)
+      if secret ~= canonical_secret then return false, "wrong_secret" end
       if not token or token == "" then return false, "missing_cookie" end
       if token == ("TOK_" .. tostring(scope)) then return true, "ok" end
       return false, "scope_mismatch"
     end,
     mint = function(ip, host, scope, secret, ttl)
+      if secret ~= canonical_secret then return nil, "wrong_secret" end
       return "MINTED_" .. tostring(scope), nil
     end,
     normalize_host = function(h) return tostring(h or ""):lower() end,
@@ -82,7 +92,7 @@ local function run_case(c)
   }
   package.loaded["cfm_bridge_cfg"] = {
     get = function() return { clearance_refresh = true, cookie_life_sec = 2700 } end,
-    token = function() return "test-secret" end,
+    token = function() return canonical_secret end,
   }
   package.loaded["cfm_panel_hosts"] = nil -- let the inline fallback list run
 
@@ -160,4 +170,5 @@ local _, r6 = run_case({
 })
 assert_eq(r6 and r6.action, "redirect", "another port's scoped cookie must not clear this port")
 
+os.getenv = real_getenv
 print("ok: cfm_panel per-scope clearance cookie tests")
