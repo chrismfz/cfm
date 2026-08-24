@@ -36,6 +36,7 @@ package edgelog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -197,7 +198,7 @@ type HostScanResult struct {
 	// requests (bad-request lines whose host parses to this vhost — lines with
 	// no usable host cannot be attributed and live only in skipped_no_host).
 	BadRequests          *HostScanResult `json:"bad_requests,omitempty"`
-	TotalRequestsWithBad int64           `json:"total_requests_with_bad,omitempty"`
+	TotalRequestsWithBad int64           `json:"total_requests_with_bad"`
 
 	StatusClasses     map[string]int64 `json:"status_classes"`
 	Methods           map[string]int64 `json:"methods,omitempty"`
@@ -454,13 +455,15 @@ func (lc *logChain) scanLive(ctx context.Context, file string, tailLines int) er
 	if postCapped, perr := tailHasMoreThan(ctx, file, tailLines); perr == nil && postCapped {
 		capped = true
 	}
-	st1, _ := os.Stat(file)
+	st1, statErr := os.Stat(file)
 	if capped {
 		lc.truncated = true
 		lc.liveTruncated = true
 	}
-	if st0 != nil && st1 != nil {
-		if !os.SameFile(st0, st1) || sizeShrank(st0.Size(), st1.Size()) {
+	if st0 != nil {
+		// Conservative on BOTH failure modes: a file that vanished after a
+		// successful read is treated as changed too (fail honest).
+		if statErr != nil || !os.SameFile(st0, st1) || sizeShrank(st0.Size(), st1.Size()) {
 			lc.changed = true
 			lc.truncated = true
 		}
@@ -534,6 +537,15 @@ func (lc *logChain) scanSiblings(ctx context.Context, live string, maxFiles int,
 		lc.files = append(lc.files, rf)
 		remaining := int(lc.budgetCap - *lc.budgetUsed)
 		serr := scanWholeForIP(ctx, rf, &remaining, lc.onLine())
+		if errors.Is(serr, errScanBudgetExceeded) {
+			// The shared budget ran out while THIS file still had unread
+			// lines — including the critical last-sibling case where no loop
+			// iteration would notice afterwards. Not a corrupt file: flag
+			// truncation, no files_failed entry.
+			lc.budgetStopped = true
+			lc.truncated = true
+			break
+		}
 		fi1, _ := os.Stat(rf)
 		if serr != nil && ctx.Err() == nil {
 			// A corrupt/unreadable sibling must not fail (or silently shorten,
@@ -559,6 +571,27 @@ func (lc *logChain) scanSiblings(ctx context.Context, live string, maxFiles int,
 			// already set by onLine.
 			break
 		}
+	}
+}
+
+// siblingPhase guards the sibling-scan phase with generation fingerprints:
+//   - BEFORE scanning: if the rotation set moved since the caller's pre-live
+//     snapshot, skip scanning entirely — a freshly appeared/replaced sibling
+//     may hold lines already counted from the live tail (clean double-count).
+//   - AFTER scanning: re-fingerprint; a movement DURING the phase (rotation
+//     slipping past the first check) still cannot leave the result clean.
+//
+// Either way: changed+truncated, operator retries.
+func (lc *logChain) siblingPhase(ctx context.Context, live string, preGen map[string]rotatedSnapshot, maxFiles int, from int64) {
+	if rotatedGenerationChanged(preGen, snapshotRotated(live)) {
+		lc.changed = true
+		lc.truncated = true
+		return
+	}
+	lc.scanSiblings(ctx, live, maxFiles, from)
+	if rotatedGenerationChanged(preGen, snapshotRotated(live)) {
+		lc.changed = true
+		lc.truncated = true
 	}
 }
 
@@ -663,7 +696,7 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	// mid-scan is detected instead of double-counted.
 	budgetUsed := int64(0)
 	main := &logChain{agg: agg, from: from, to: to, budgetUsed: &budgetUsed, budgetCap: budget}
-	preGen := snapshotRotated(logFile)
+	preGenMain := snapshotRotated(logFile)
 
 	main.files = append(main.files, logFile)
 	tailErr := main.scanLive(cctx, logFile, tailLines)
@@ -678,8 +711,10 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	}
 
 	var bad *logChain
+	var preGenBad map[string]rotatedSnapshot
 	badFile := badRequestLogFor(logFile)
 	if fi, ferr := os.Stat(badFile); ferr == nil && fi.Mode().IsRegular() && fi.Size() > 0 {
+		preGenBad = snapshotRotated(badFile)
 		remaining := budget - budgetUsed
 		if remaining <= 0 {
 			// Shared budget already exhausted by the main chain: do not start
@@ -730,22 +765,11 @@ func ScanHost(ctx context.Context, host string, o HostOpts) (HostScanResult, err
 	if maxFiles > MaxRotatedFiles {
 		maxFiles = MaxRotatedFiles
 	}
-	if rotatedGenerationChanged(preGen, snapshotRotated(logFile)) {
-		// The rotation set moved WHILE we were reading the live logs — the
-		// clean double-count case: a freshly appeared/replaced sibling may
-		// hold lines already counted from the live tail. Fail honest: skip
-		// sibling scanning entirely this call (operator retries).
-		main.changed = true
-		main.truncated = true
-		if bad != nil {
-			bad.changed = true
-			bad.truncated = true
-		}
-	} else {
-		main.scanSiblings(cctx, logFile, maxFiles, from)
-		if bad != nil && tailErr == nil {
-			bad.scanSiblings(cctx, badFile, maxFiles, from)
-		}
+
+	// Sibling phase per chain, each guarded by its own generation fingerprints.
+	main.siblingPhase(cctx, logFile, preGenMain, maxFiles, from)
+	if bad != nil && tailErr == nil {
+		bad.siblingPhase(cctx, badFile, preGenBad, maxFiles, from)
 	}
 	if ctx.Err() != nil {
 		main.truncated = true
@@ -795,11 +819,15 @@ func finalizeBad(bad *logChain, res *HostScanResult, topN int) {
 		Truncated:            bad.truncated,
 		LiveTailTruncated:    bad.liveTruncated,
 		LogChangedDuringScan: bad.changed,
+		FilesSkippedOlder:    bad.skippedOlder,
 		Scanned:              bad.scanned,
 		SkippedNoHost:        bad.agg.skippedNoHost,
 	}
 	finalize(bad.agg, &badRes, topN)
 	badRes.FilesFailed = append(badRes.FilesFailed, bad.failed...)
+	// Nested section is its own universe: the "with bad" headline only makes
+	// sense at top level, so inside it mirrors TotalRequests.
+	badRes.TotalRequestsWithBad = badRes.TotalRequests
 	res.BadRequests = &badRes
 	res.Truncated = res.Truncated || bad.truncated
 	res.LogChangedDuringScan = res.LogChangedDuringScan || bad.changed

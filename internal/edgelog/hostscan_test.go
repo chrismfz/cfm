@@ -849,6 +849,44 @@ func TestScanHost_SharedBudgetAcrossChains(t *testing.T) {
 	}
 }
 
+// TestScanHost_LastSiblingBudgetBoundary pins the sentinel contract: when the
+// shared budget runs out while the LAST scanned sibling still has unread
+// lines, truncated MUST be true (no files_failed — the file is fine) even
+// though no later loop iteration exists to notice.
+func TestScanHost_LastSiblingBudgetBoundary(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	liveLines := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		liveLines = append(liveLines, cfmline(now-100+float64(i), "198.51.100.1", "ex.gr", "GET", fmt.Sprintf("/l%d", i), 200, "-", 0))
+	}
+	writeLines(t, live, liveLines)
+	sib := make([]string, 0, 6) // one MORE line than the remaining budget (5)
+	for i := 0; i < 6; i++ {
+		sib = append(sib, cfmline(now-50+float64(i), "198.51.100.2", "ex.gr", "GET", fmt.Sprintf("/s%d", i), 200, "-", 0))
+	}
+	writeGz(t, filepath.Join(dir, "access.log.1.gz"), sib)
+	old := fullAccessLogCandidates
+	fullAccessLogCandidates = append([]string{live}, old...)
+	defer func() { fullAccessLogCandidates = old }()
+
+	res, err := ScanHost(context.Background(), "ex.gr", HostOpts{Hours: 48, IncludeRotated: true, MaxLines: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Scanned != 10 {
+		t.Errorf("scanned = %d, want exactly 10", res.Scanned)
+	}
+	if !res.Truncated {
+		t.Error("budget exhausted mid-LAST-sibling must set truncated")
+	}
+	if len(res.FilesFailed) != 0 {
+		t.Errorf("files_failed = %v, want empty (budget cut is not corruption)", res.FilesFailed)
+	}
+}
+
 func TestBadRequestLogFor(t *testing.T) {
 	cases := [][2]string{
 		{"/var/log/angie/access.log", "/var/log/angie/access.bad_request.log"},
@@ -892,6 +930,54 @@ func TestRotatedGenerationChanged(t *testing.T) {
 	touched["/v/a.1.gz"] = rotatedSnapshot{path: "/v/a.1.gz", size: 10, mod: time.Unix(1002, 0)}
 	if !rotatedGenerationChanged(base, touched) {
 		t.Error("mtime change must flag")
+	}
+}
+
+// TestScanHost_SiblingGenerationGuard replays the reviewer's sequence
+// deterministically: fingerprint -> live read -> NEW rotated sibling appears ->
+// sibling phase must flag changed/truncated and SKIP scanning (no clean
+// double-count of lines already aggregated from the live tail).
+func TestScanHost_SiblingGenerationGuard(t *testing.T) {
+	requireTail(t)
+	now := float64(time.Now().Unix())
+	dir := t.TempDir()
+	live := filepath.Join(dir, "access.log")
+	writeLines(t, live, []string{
+		cfmline(now-30, "198.51.100.1", "ex.gr", "GET", "/live", 200, "-", 0),
+	})
+
+	used := int64(0)
+	lc := &logChain{
+		agg: &hostAgg{targets: map[string]struct{}{"ex.gr": {}},
+			ips: map[string]int64{}, uas: map[string]int64{}, fams: map[string]int64{},
+			paths: map[string]int64{}, codes: map[string]int64{}, methods: map[string]int64{},
+			hours: map[int64]*hostHour{},
+		},
+		from: int64(now - 3600), to: int64(now),
+		budgetUsed: &used, budgetCap: 1000,
+	}
+
+	// 1) stable generation BEFORE the live read...
+	preGen := snapshotRotated(live)
+	// 2) ...live read happens here (nothing to simulate)...
+
+	// 3)-4) rotation slips in AFTER the fingerprint: new .1.gz with lines that
+	// overlap what a live tail would already have counted.
+	writeGz(t, filepath.Join(dir, "access.log.1.gz"), []string{
+		cfmline(now-60, "198.51.100.2", "ex.gr", "GET", "/just-rotated", 200, "-", 0),
+	})
+
+	// 5)+6) sibling phase: guard must fire and scan NOTHING.
+	lc.siblingPhase(context.Background(), live, preGen, 40, int64(now-3600))
+
+	if !lc.changed || !lc.truncated {
+		t.Fatalf("changed=%v truncated=%v, want both true", lc.changed, lc.truncated)
+	}
+	if len(lc.files) != 0 {
+		t.Errorf("files scanned under guard = %v, want none", lc.files)
+	}
+	if used != 0 {
+		t.Errorf("budget used = %d, want 0 (no sibling lines consumed)", used)
 	}
 }
 

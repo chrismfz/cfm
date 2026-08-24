@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -331,6 +332,12 @@ func rotatedSiblings(live string, maxFiles int) ([]string, int) {
 	return paths, total
 }
 
+// errScanBudgetExceeded is returned by scanWholeForIP when the scanner found
+// MORE lines while the private countdown was already at zero — i.e. the file
+// was cut short by the budget, not by EOF. Callers translate it into
+// truncation flags (never into files_failed: the file is fine).
+var errScanBudgetExceeded = errors.New("scan budget exceeded")
+
 // scanWholeForIP streams a rotated file from the start (gz-transparent) feeding
 // each line to fn, decrementing the shared budget. Unlike the live tail this
 // reads the whole file, but the caller's budget + ctx timeout bound the work,
@@ -353,7 +360,13 @@ func scanWholeForIP(ctx context.Context, path string, budget *int, fn func(line 
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
 	for sc.Scan() {
-		if *budget <= 0 || ctx.Err() != nil {
+		if *budget <= 0 {
+			// The caller's budget is spent but the file has MORE lines: this
+			// distinction (budget-cut vs clean EOF) must reach the caller so
+			// truncation can be flagged even on the LAST scanned file.
+			return errScanBudgetExceeded
+		}
+		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		*budget--
