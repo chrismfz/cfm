@@ -607,6 +607,7 @@ local function observe_waf(ip, host, uri, method, status, reason)
   decision:rpc("observe", "POST", "/nginx/observe", cjson.encode({
     ip = ip, host = host or "", uri = uri or "/",
     method = method or "", status = status or 403, reason = reason or "",
+    ua = ngx.var.http_user_agent or "",
   }), { ip = ip, host = host, uri = uri, method = method })
 end
 

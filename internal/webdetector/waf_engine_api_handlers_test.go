@@ -124,6 +124,10 @@ func TestWAFEngineSummaryForensicFilters(t *testing.T) {
 	if sqli.TotalEvents != 2 || len(sqli.Rows) != 2 {
 		t.Fatalf("rule=waf_sqli: total=%d rows=%d, want 2/2", sqli.TotalEvents, len(sqli.Rows))
 	}
+	numeric := call("&rule=320")
+	if numeric.TotalEvents != 1 || len(numeric.Rows) != 1 || numeric.Rows[0].Host != "c.com" {
+		t.Fatalf("rule=320: %+v", numeric)
+	}
 
 	// Combined forensic drill-down: one SQLI hit from the requested Greek-style
 	// country/IP/vhost/path/UA facet. The row carries the raw evidence needed to
@@ -140,6 +144,32 @@ func TestWAFEngineSummaryForensicFilters(t *testing.T) {
 	}
 	if both.IPFilter != "3.3.3.3" || both.HostFilter != "c.com" || both.PathFilter != "checkout" || both.UAFilter != "legit browser" {
 		t.Fatalf("filter echo mismatch: %+v", both)
+	}
+}
+
+func TestWAFEngineSummaryUAFilterIncludesObservations(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	now := time.Now().Unix()
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_trigger", Host: "shop.example", IP: "1.1.1.1", Reason: "WAF_SQLI", Payload: map[string]interface{}{"ua": "Mozilla/5.0 Legit"}})
+	hs.Append(HistoryEvent{TsUnix: now, Type: "waf_observe", Host: "shop.example", IP: "1.1.1.1", Status: http.StatusForbidden, Reason: "WAF_SQLI", Payload: map[string]interface{}{"ua": "Mozilla/5.0 Legit"}})
+
+	e := &Engine{history: hs}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/waf/engine/summary?ua=mozilla", nil).WithContext(adminCtx())
+	e.handleWAFEngineSummary(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out wafEngineSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.TotalEvents != 2 || len(out.Rows) != 2 {
+		t.Fatalf("UA-filtered total=%d rows=%d, want trigger + observation", out.TotalEvents, len(out.Rows))
 	}
 }
 

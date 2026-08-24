@@ -102,7 +102,7 @@ type NginxBridge struct {
 	// OnObserve is called when OpenResty (or others) reports an observed request outcome.
 	// Typical use: WAF returns 403, but we want webdetector to "see" that 403 and escalate.
 	// Called without b.mu held.
-	OnObserve func(ip, host, uri, method string, status int, reason string)
+	OnObserve func(ip, host, uri, method string, status int, reason, ua string)
 
 	// IsWAFExcluded is queried by Lua via /nginx/waf/excluded for per-request
 	// pre-WAF bypass checks based on dynamic exclude rules.
@@ -385,7 +385,7 @@ type okStateKey struct {
 
 // Observation from OpenResty/WAF: "I returned status X for this request"
 // POST /nginx/observe
-// { "ip":"1.2.3.4", "host":"example.com", "uri":"/x?y=1", "method":"get", "status":403, "reason":"PAY_SHELL" }
+// { "ip":"1.2.3.4", "host":"example.com", "uri":"/x?y=1", "method":"get", "status":403, "reason":"PAY_SHELL", "ua":"Mozilla/5.0" }
 type nginxObserveMsg struct {
 	IP     string `json:"ip"`
 	Host   string `json:"host,omitempty"`
@@ -393,6 +393,7 @@ type nginxObserveMsg struct {
 	Method string `json:"method,omitempty"`
 	Status int    `json:"status"`
 	Reason string `json:"reason,omitempty"`
+	UA     string `json:"ua,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -893,7 +894,7 @@ func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time
 }
 
 // SetObserveHook registers a callback for observation events (WAF 403, etc).
-func (b *NginxBridge) SetObserveHook(fn func(ip, host, uri, method string, status int, reason string)) {
+func (b *NginxBridge) SetObserveHook(fn func(ip, host, uri, method string, status int, reason, ua string)) {
 	if b == nil {
 		return
 	}
@@ -2037,6 +2038,7 @@ func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
 	method := strings.ToLower(strings.TrimSpace(msg.Method))
 	status := msg.Status
 	reason := strings.TrimSpace(msg.Reason)
+	ua := strings.TrimSpace(msg.UA)
 
 	// Sanity: allow 100..599
 	if status < 100 || status > 599 {
@@ -2048,7 +2050,7 @@ func (b *NginxBridge) handleObserve(w http.ResponseWriter, r *http.Request) {
 	// can spike well past the Lua client's decision_timeout_ms.
 	if b.OnObserve != nil {
 		b.dispatchHook(func() {
-			b.OnObserve(ip, host, uri, method, status, reason)
+			b.OnObserve(ip, host, uri, method, status, reason, ua)
 		})
 	}
 
@@ -2127,9 +2129,10 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 				status = 0
 			}
 			reason := strings.TrimSpace(msg.Reason)
+			ua := strings.TrimSpace(msg.UA)
 			if b.OnObserve != nil {
 				b.dispatchHook(func() {
-					b.OnObserve(ip, host, uri, method, status, reason)
+					b.OnObserve(ip, host, uri, method, status, reason, ua)
 				})
 			}
 			processed++

@@ -3034,7 +3034,7 @@ func uaMatchAny(ua string, subs []string) bool {
 // therefore never appeared in the access log.
 //
 // Thread-safe. Non-blocking.
-func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason string) {
+func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason, ua string) {
 	if ip == "" {
 		return
 	}
@@ -3057,7 +3057,11 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 
 	now := time.Now()
 	rawLine := fmt.Sprintf("[WAF403] ip=%s host=%s method=%s uri=%s reason=%s", ip, host, method, uri, reason)
-	e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "waf_observe", Host: host, IP: ip, Reason: reason, Status: status, Payload: map[string]interface{}{"uri": uri, "method": method}})
+	payload := map[string]interface{}{"uri": uri, "method": method}
+	if ua = strings.TrimSpace(ua); ua != "" {
+		payload["ua"] = ua
+	}
+	e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "waf_observe", Host: host, IP: ip, Reason: reason, Status: status, Payload: payload})
 
 	rec := LogRec{
 		TS:     float64(now.UnixNano()) / 1e9,

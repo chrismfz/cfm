@@ -403,10 +403,10 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 				// NEW: Hook per-request observations (e.g. OpenResty WAF returned 403)
 				// into the webdetector engine so the existing "403 after X tries"
 				// logic can escalate to firewall blocks normally (no double log parsing).
-				b.SetObserveHook(func(ip, host, uri, method string, status int, reason string) {
+				b.SetObserveHook(func(ip, host, uri, method string, status int, reason, ua string) {
 					// Non-blocking: InjectObserved takes e.mu.Lock but returns fast.
 					// Called from bridge's HTTP handler goroutine; must not block.
-					w.eng.InjectObserved(ip, host, uri, method, status, reason)
+					w.eng.InjectObserved(ip, host, uri, method, status, reason, ua)
 				})
 
 				// Hit-rate denominator persistence: Lua periodically flushes

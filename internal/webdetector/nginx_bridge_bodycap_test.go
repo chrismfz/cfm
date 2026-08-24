@@ -90,6 +90,28 @@ func TestNginxBridgeHandlerBodyCaps(t *testing.T) {
 	}
 }
 
+func TestNginxBridgeObserveCarriesUA(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	var gotUA string
+	b.SetObserveHook(func(_, _, _, _ string, _ int, _, ua string) {
+		gotUA = ua
+	})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/nginx/observe", strings.NewReader(
+		`{"ip":"203.0.113.5","host":"shop.example","uri":"/checkout","method":"post","status":403,"reason":"WAF_SQLI","ua":"Mozilla/5.0 Legit"}`,
+	))
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleObserve(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("observe status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if gotUA != "Mozilla/5.0 Legit" {
+		t.Fatalf("observe UA=%q, want propagated user agent", gotUA)
+	}
+}
+
 // TestNginxBridgeWAFStatsRowGuard verifies the per-push row-count ceiling added
 // for F49: the /nginx/waf/stats handler fans out one persistence hook per row,
 // so it caps the fan-out at maxWAFStatsRows regardless of how many rows a

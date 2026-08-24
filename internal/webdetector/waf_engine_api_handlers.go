@@ -282,10 +282,13 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 		}
-		if ruleFilter != "" &&
-			!strings.Contains(strings.ToLower(rule), ruleFilter) &&
-			!strings.Contains(strings.ToLower(ruleBase), ruleFilter) {
-			continue
+		if ruleFilter != "" {
+			reasonMatch := strings.Contains(strings.ToLower(rule), ruleFilter) ||
+				strings.Contains(strings.ToLower(ruleBase), ruleFilter)
+			idMatch := wafRuleID > 0 && ruleFilter == strconv.Itoa(wafRuleID)
+			if !reasonMatch && !idMatch {
+				continue
+			}
 		}
 		if ipFilter != "" && !sameIP(row.IP, ipFilter) {
 			continue

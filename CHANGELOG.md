@@ -23,7 +23,9 @@ back-filled here — see the git/PR history for that period.
   filters, and returns available numeric rule ID, action, bounded UA, redacted
   referer and content type alongside its existing timestamp, IP, GeoIP, host and
   URL. New events retain both the country name and ISO-2 code, while GeoIP fills
-  the code for older rows so `country=GR` works against production data.
+  the code for older rows so `country=GR` works against production data. Numeric
+  rule IDs are directly filterable, and per-block observations now retain UA so
+  UA-filtered totals do not drop requests between de-duplicated trigger pushes.
   Rows can be correlated directly with `edge_access_tail` for recent traffic or
   `ip_forensics` for older access-log evidence.
 - **Host-wide netfilter path diagnostics for redirect collisions.** New
