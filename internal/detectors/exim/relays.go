@@ -408,8 +408,7 @@ func (d *Relays) enrichDisplay(kindKey, alertKey, rawKey string) string {
 // ---- helpers ----
 
 func autoDetectEximLog() string {
-	paths := []string{"/var/log/exim_mainlog", "/var/log/exim4/mainlog", "/var/log/exim/mainlog"}
-	for _, p := range paths {
+	for _, p := range MainlogCandidates {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}

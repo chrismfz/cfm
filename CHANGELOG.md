@@ -104,6 +104,27 @@ _Nothing yet._
    `X-CFM-Token` alongside an assertion now fails hard as an invalid token.
 
 ### Changed
+- **The exim/postfix detectors now auto-detect their log source and self-disable
+  without their MTA.** `postfix_security`/`postfix_relays` gain `MODE = auto`
+  on the shared resolver: journald units chosen by a postfix *signature* check
+  (recent entries must carry the `postfix/...[pid]:` tag — journald attributes
+  by cgroup, so mere entry existence can be another service's lines) → docker
+  container discovery (mailcow) → `/var/log/maillog`/`mail.log`.
+  `exim_security`/`exim_relays` auto-resolve `LOG_PATH` from the standard
+  mainlog locations — with **no journald candidates at all**: exim writes its
+  own mainlog and never syslogs it, so `journalctl -u exim` carries only stray
+  child-process output (live fleet evidence: dovecot LDA lines attributed to
+  exim.service). All six mail sections (incl. both `*_queues`) self-disable
+  cleanly when their MTA is absent — postfix sections check binary/unit/
+  discovered container/log and stay alive provisionally when the docker CLI
+  exists but no container answered yet (a slow dockerd at boot cannot
+  permanently disable them; the cfm unit is now also ordered after
+  docker.service), exim sections check binary/unit (+ mainlog) — so
+  postfix-only and exim-only boxes no longer need hand-set `ENABLED=0`; and
+  `postfix_queues` auto-wraps its queue commands in `docker exec` when postfix
+  lives only in a discovered container. Explicit
+  `MODE`/`LOG_PATH`/`JOURNAL_UNIT`/`JOURNAL_MATCHES`/`DOCKER_CONTAINER`/
+  `TOTAL_CMD`/`LIST_CMD` keep working unchanged and always win.
 - **`ssh_auth` / `dovecot_auth` now auto-detect their log source (`MODE = auto`).**
   The new shared resolver (`internal/detectors/srcresolve`) tries journald
   units with entries → active units (alias-resolved to the canonical name) →

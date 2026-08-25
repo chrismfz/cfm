@@ -185,9 +185,10 @@ func (q *Queues) frozenCountAndSamples(ctx context.Context) (int, []string, stri
 	return frozen, samples, string(out), nil
 }
 
-// eximMainlogCandidates are the standard exim mainlog locations (mirrors the
-// exim/relays resolver).
-var eximMainlogCandidates = []string{
+// MainlogCandidates are the standard exim mainlog locations (cPanel, Debian
+// exim4, DA/EL) — the single list shared by the package's internal resolvers
+// and the registers' srcresolve specs.
+var MainlogCandidates = []string{
 	"/var/log/exim_mainlog", "/var/log/exim4/mainlog", "/var/log/exim/mainlog",
 }
 
@@ -199,7 +200,7 @@ const mainlogTailLines = 4000
 // read backward, not whole.
 func (q *Queues) tailMainlog(ctx context.Context) []string {
 	path := ""
-	for _, p := range eximMainlogCandidates {
+	for _, p := range MainlogCandidates {
 		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
 			path = p
 			break

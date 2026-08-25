@@ -66,6 +66,16 @@ type Spec struct {
 	JournalCandidates []string // tried in order; first = historical default
 	FileCandidates    []string // tried in order; first = historical default
 	DockerPatterns    []string // case-insensitive substrings of container names
+
+	// JournalSignature (RE2 source, optional) makes the journal-candidate
+	// entries check content-aware: instead of "the unit has ANY entry", a
+	// candidate passes only when recent entries match this pattern (probed
+	// against the same short-unix framing the tailer feeds the parser).
+	// Guards against journald's cgroup attribution — a unit's journal can
+	// carry OTHER services' lines (e.g. dovecot LDA spawned by exim lands
+	// under exim.service) — and against startup-only noise. See
+	// docs/detectors-config-unification.md §3a.
+	JournalSignature string
 }
 
 // Probes abstracts the environment checks so Resolve stays pure. A nil
@@ -75,11 +85,15 @@ type Spec struct {
 // reads identity.
 type Probes struct {
 	JournalHasEntries func(unit string) bool // journal has ≥1 entry for unit
-	UnitActive        func(unit string) bool // systemd reports the unit active
-	CanonicalUnit     func(unit string) string // resolve Alias= to the real unit name ("" = unknown)
-	JournalReadable   func() bool            // journalctl exists and can read the journal at all
-	FileExists        func(path string) bool // path is an existing regular file
-	ListContainers    func() []string        // names of running docker containers
+	// JournalMatches reports whether recent journal entries for unit match
+	// the signature regex. Used instead of JournalHasEntries when
+	// Spec.JournalSignature is set.
+	JournalMatches  func(unit, signature string) bool
+	UnitActive      func(unit string) bool   // systemd reports the unit active
+	CanonicalUnit   func(unit string) string // resolve Alias= to the real unit name ("" = unknown)
+	JournalReadable func() bool              // journalctl exists and can read the journal at all
+	FileExists      func(path string) bool   // path is an existing regular file
+	ListContainers  func() []string          // names of running docker containers
 }
 
 // Result is the resolved source. Exactly one of Unit/Path/Container is set
@@ -211,7 +225,16 @@ func journalReadable(p Probes) bool {
 // sshd.service` succeeds through the Alias= while journalctl indexes only
 // ssh.service — accepting the alias would tail an empty stream forever.
 func journalCandidate(s Spec, p Probes) (Result, bool) {
-	if p.JournalHasEntries != nil {
+	if s.JournalSignature != "" {
+		if p.JournalMatches != nil {
+			for _, u := range s.JournalCandidates {
+				if p.JournalMatches(u, s.JournalSignature) {
+					return Result{Kind: KindJournal, Unit: u,
+						Reason: "journal entries for " + u + " match the service signature"}, true
+				}
+			}
+		}
+	} else if p.JournalHasEntries != nil {
 		for _, u := range s.JournalCandidates {
 			if p.JournalHasEntries(u) {
 				return Result{Kind: KindJournal, Unit: u, Reason: "journal entries found for " + u}, true
@@ -257,6 +280,21 @@ func fileCandidate(s Spec, p Probes) (Result, bool) {
 		}
 	}
 	return Result{}, false
+}
+
+// DiscoverContainer exposes docker discovery alone (no journal/file chain) for
+// callers that need a container name rather than a tail source — e.g. wrapping
+// a queue-inspection command in `docker exec`. Same no-guessing rule: ok only
+// on exactly one match; reason explains none/ambiguous.
+func DiscoverContainer(patterns []string, p Probes) (name string, ok bool, reason string) {
+	r, hit := discoverDocker(Spec{DockerPatterns: patterns}, p)
+	if !hit {
+		return "", false, fmt.Sprintf("no running container matches %v", patterns)
+	}
+	if r.Kind != KindDocker {
+		return "", false, r.Reason // ambiguous
+	}
+	return r.Container, true, r.Reason
 }
 
 // discoverDocker matches running container names against DockerPatterns.

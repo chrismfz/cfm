@@ -277,6 +277,50 @@ func TestResolveJournalUnreadable(t *testing.T) {
 	}
 }
 
+// TestResolveJournalSignature: with a JournalSignature set, a unit passes the
+// entries step only when its recent entries match the service pattern — mere
+// entry existence (e.g. another service's lines attributed to the unit via
+// cgroup, or startup noise) is NOT enough.
+func TestResolveJournalSignature(t *testing.T) {
+	spec := Spec{
+		Service: "postfix_security", Mode: "auto",
+		JournalCandidates: []string{"postfix@-.service", "postfix.service"},
+		JournalSignature:  `postfix(/[a-z0-9-]+)?\[\d+\]:`,
+		FileCandidates:    []string{"/var/log/maillog", "/var/log/mail.log"},
+		DockerPatterns:    []string{"postfix"},
+	}
+
+	// Second candidate matches the signature → chosen over the first, which
+	// has entries (would win an existence-only probe) but no service lines.
+	p := fakeProbes([]string{"postfix@-.service"}, nil, nil, nil)
+	p.JournalMatches = func(unit, sig string) bool { return unit == "postfix.service" }
+	got := Resolve(spec, p)
+	if got.Kind != KindJournal || got.Unit != "postfix.service" {
+		t.Fatalf("signature probe should pick the matching unit, got %+v", got)
+	}
+	if !strings.Contains(got.Reason, "signature") {
+		t.Fatalf("signature reason expected, got %q", got.Reason)
+	}
+
+	// No unit matches the signature → active pass still applies (service runs
+	// but has not logged since boot), then files.
+	p = fakeProbes([]string{"postfix.service"}, []string{"postfix.service"}, nil, nil)
+	p.JournalMatches = func(unit, sig string) bool { return false }
+	got = Resolve(spec, p)
+	if got.Kind != KindJournal || got.Unit != "postfix.service" {
+		t.Fatalf("active fallback with signature set: got %+v", got)
+	}
+
+	// Signature set but JournalMatches probe nil → entries step skipped
+	// entirely (existence is NOT trusted as a substitute), falls through.
+	p = fakeProbes([]string{"postfix.service"}, nil, []string{"/var/log/maillog"}, nil)
+	p.JournalMatches = nil
+	got = Resolve(spec, p)
+	if got.Kind != KindFile || got.Path != "/var/log/maillog" {
+		t.Fatalf("nil JournalMatches with signature: want file fallback, got %+v", got)
+	}
+}
+
 func TestResolveDockerAmbiguity(t *testing.T) {
 	two := []string{"dovecot-a", "dovecot-b"}
 
