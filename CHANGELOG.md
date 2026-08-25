@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.25
+
 ### Added
 - **`cfm webtop live` TUI now surfaces the abuse_shadow signals.** The live
   dashboard gains a compact **SIG** column in the top vhost table — a fixed-slot
@@ -30,8 +34,6 @@ back-filled here — see the git/PR history for that period.
   the same unified "who needs attention and why" view cfm-admin already shows
   (cfm-admin and `cfm webtop challenge` already carry these badges). Pure
   visibility of already-collected data — no enforcement, no new signals.
-
-## 2026.08.25
 
 ### Added
 - **abuse_shadow datacenter-fraction signal (Signal H): vhost-level cloud-ASN
