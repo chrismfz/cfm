@@ -375,8 +375,20 @@ Class-2 burst.
       never false-positive); the `RPS5XX` floor is the partial backstop. **Before
       this graduates to any enforcement**, switch to a dynamic-only 5xx denominator
       (needs a per-bucket dynamic counter, like facet's `facetTotal`).
-- [ ] Add remaining per-vhost feature: datacenter-ASN-frac (verified-gated).
-      (query-cardinality, URL-repeat, cost/5xx done above.)
+- [x] **DONE — abuse_shadow datacenter-fraction signal (Signal H, verified-gated).**
+      Branch `claude/webdet-dcfrac-shadow`: per-vhost fraction of requests from
+      datacenter/cloud ASNs that are NOT FCrDNS-verified good bots, flagged when
+      `dc_reqs/total ≥ MIN_FRAC(0.5)` over `≥ MIN_IPS(5)` distinct datacenter IPs
+      and `≥ MIN_REQ(50)` requests. Verified crawlers excluded via FCrDNS (else a
+      crawled shop reads ~100% datacenter — the techking/shopzy trap). **Origin is
+      never innocence**: datacenter-ASN alone drives NO decision — corroborating
+      feature only. Cost-bounded (CLAUDE.md §6): cheap mmdb ASN class for all IPs,
+      capped FCrDNS only for datacenter+good-bot-PTR candidates, per-tick IP budget
+      with a logged deferral (no silent cap); every budget edge errs toward not
+      flagging. Log-only: `dc_fraction` badge (`dc N%` pill / `dc=N%` CLI) +
+      `signal=dc_fraction` line. Own mark store + TTL. Default-ON under
+      `ABUSE_SHADOW`; knobs `ABUSE_SHADOW_DCFRAC[_MIN_FRAC|_MIN_REQ|_MIN_IPS]`. NO
+      score contribution, NO enforcement.
 - [ ] Add missing per-client features: header-coherence, solve-latency; route
       cookie_discard / solver_farm / abuse_shadow as contributors into
       `IPSignals.Score` / `SuspiciousRow.Score` (they stop being independent

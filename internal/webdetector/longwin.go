@@ -74,6 +74,11 @@ type SuspiciousRow struct {
 	// Stamped by the API handlers, not the scorer (external verdict). See
 	// abuse_shadow_cost_marks.go.
 	CostPressure int `json:"cost_pressure"`
+
+	// DCFraction is the live abuse_shadow unverified-datacenter percent for this
+	// vhost (Signal H). Stamped by the API handlers, not the scorer (external
+	// verdict). See abuse_shadow_dcfrac_marks.go.
+	DCFraction int `json:"dc_fraction"`
 }
 
 // LongRow is the raw long-window aggregate without scoring.

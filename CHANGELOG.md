@@ -18,6 +18,31 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **abuse_shadow datacenter-fraction signal (Signal H): vhost-level cloud-ASN
+  share, verified-gated, log-only.** Records what fraction of a vhost's requests
+  come from datacenter/cloud ASNs that are NOT verified good bots — a
+  corroborating feature for cloud-hosted scraper / proxy floods. **Verified-gated:**
+  FCrDNS-verified crawlers (Google/Meta/Bing…) are datacenter but legitimate and
+  are excluded from the suspicious count, so a heavily-crawled shop does not read
+  as ~100% datacenter. Origin is never innocence: this is a FEATURE only —
+  datacenter-ASN alone NEVER drives an adverse decision, and nothing here
+  challenges or blocks. It stamps a per-vhost `dc_fraction` badge (`dc N%` pill in
+  cfm-admin, `dc=N%` in `cfm webtop challenge`) and writes a `signal=dc_fraction`
+  line to `cfm.abuse_shadow.log`. Cost-bounded per CLAUDE.md §6: ASN class is a
+  cheap inline mmdb lookup (no DNS), the FCrDNS good-bot confirm runs only for the
+  rare datacenter IP whose cached PTR looks like a good bot and is capped per
+  tick, and a per-tick IP budget defers (and logs — no silent cap) the overflow
+  to a later tick. Budget-exhaustion edges err toward NOT flagging; the one edge
+  the other way is a cold PTR (a datacenter IP whose reverse DNS has not warmed
+  yet is counted, since a real flood usually has no good-bot PTR and excluding
+  cold IPs would blind the signal), which transiently over-counts a
+  freshly-observed verified crawler until its PTR caches — self-correcting. Gated
+  under the `ABUSE_SHADOW` master, default-ON with it;
+  tunable via `ABUSE_SHADOW_DCFRAC`, `ABUSE_SHADOW_DCFRAC_MIN_FRAC` (0.5),
+  `ABUSE_SHADOW_DCFRAC_MIN_REQ` (50) and `ABUSE_SHADOW_DCFRAC_MIN_IPS` (5, a
+  spread of datacenter IPs, not one chatty host). Phase 1 of the
+  traffic-classifier plan (`docs/traffic-classifier.md`); no score contribution
+  and no enforcement yet.
 - **abuse_shadow cost-pressure signal (Signal G): vhost-level origin 5xx
   pressure, log-only.** Where facet (Signal F) sees the request-shape *cause* of
   a flood, Signal G sees its *symptom* — the origin buckling (the 256k×500

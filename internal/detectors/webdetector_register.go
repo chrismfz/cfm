@@ -752,6 +752,13 @@ func init() {
 			AbuseShadowCostMinReq:  kvInt(kv, "ABUSE_SHADOW_COST_MIN_REQ", 0),
 			AbuseShadowCostMinRPS:  kvFlt(kv, "ABUSE_SHADOW_COST_MIN_RPS5XX", 0),
 
+			// Signal H (datacenter-ASN fraction, verified-gated). Default-on under the
+			// master; thresholds resolve to safe defaults in dcFracShadowCfg() when 0.
+			AbuseShadowDCFrac:        kvBool(kv, "ABUSE_SHADOW_DCFRAC", true),
+			AbuseShadowDCFracMinFrac: kvFlt(kv, "ABUSE_SHADOW_DCFRAC_MIN_FRAC", 0),
+			AbuseShadowDCFracMinReq:  kvInt(kv, "ABUSE_SHADOW_DCFRAC_MIN_REQ", 0),
+			AbuseShadowDCFracMinIPs:  kvInt(kv, "ABUSE_SHADOW_DCFRAC_MIN_IPS", 0),
+
 			// Optional uniqIP-based vhost auto mode
 			ChallengeSuspiciousUniqIP:    kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP", false),
 			ChallengeSuspiciousUniqIPOn:  kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_ON", 0),

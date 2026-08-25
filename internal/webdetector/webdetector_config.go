@@ -232,6 +232,20 @@ type Config struct {
 	AbuseShadowCostMinReq  int     // ABUSE_SHADOW_COST_MIN_REQ (min requests, guards tiny vhosts)
 	AbuseShadowCostMinRPS  float64 // ABUSE_SHADOW_COST_MIN_RPS5XX (absolute 5xx rps floor)
 
+	// Abuse-shadow Signal H (datacenter-ASN fraction, verified-gated): a vhost-level
+	// LOG-ONLY signal for the fraction of a vhost's requests coming from datacenter/
+	// cloud ASNs that are NOT verified good bots — a corroborating feature for
+	// cloud-hosted scraper/proxy floods. VERIFIED-GATED: FCrDNS-verified crawlers
+	// (Google/Meta/Bing…) are datacenter but legitimate, so they are excluded from
+	// the suspicious count — without this a heavily-Googlebot-crawled shop would read
+	// as ~100% datacenter. This is a FEATURE only: origin is never innocence and
+	// datacenter-ASN alone NEVER drives an adverse decision (CLAUDE.md §6). Nothing
+	// here challenges or blocks. Gated under AbuseShadow, default-on with it.
+	AbuseShadowDCFrac        bool    // ABUSE_SHADOW_DCFRAC (default on under ABUSE_SHADOW)
+	AbuseShadowDCFracMinFrac float64 // ABUSE_SHADOW_DCFRAC_MIN_FRAC (dc reqs / total must be ≥ this)
+	AbuseShadowDCFracMinReq  int     // ABUSE_SHADOW_DCFRAC_MIN_REQ (min total requests, guards tiny vhosts)
+	AbuseShadowDCFracMinIPs  int     // ABUSE_SHADOW_DCFRAC_MIN_IPS (min distinct datacenter IPs — a spread, not one)
+
 	// Optional: volume-based (uniqIP) auto under-attack mode with hysteresis.
 	// Useful for sophisticated crawlers that avoid errors but spray many unique IPs.
 	ChallengeSuspiciousUniqIP    bool // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP (1/0)

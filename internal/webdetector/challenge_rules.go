@@ -2108,6 +2108,7 @@ if ha := short[host]; ha != nil {
         e.emitAbuseShadowRateOutliers(now)
         e.emitAbuseShadowFacetOutliers(now)
         e.emitAbuseShadowCostPressure(now)
+        e.emitAbuseShadowDatacenterFrac(now)
     }
 
     // ---- Under-Attack Mode campaign fingerprinter (I2, shadow-only) ----

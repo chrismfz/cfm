@@ -261,6 +261,12 @@ type ShortRow struct {
 	// a flood (Signal G, shadow/log-only). Stamped onto the row, not an input to
 	// Score — see abuse_shadow_cost_marks.go. 0 when not flagged / expired.
 	CostPressure int `json:"cost_pressure"`
+
+	// DCFraction is the live unverified-datacenter percent (1–100) on this vhost when
+	// the abuse_shadow datacenter-fraction signal has flagged it (Signal H, verified-
+	// gated, shadow/log-only). A corroborating feature, NEVER an adverse decision on
+	// its own — see abuse_shadow_dcfrac_marks.go. 0 when not flagged / expired.
+	DCFraction int `json:"dc_fraction"`
 }
 
 // TopKV for drilldown views.

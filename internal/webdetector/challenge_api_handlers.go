@@ -104,6 +104,7 @@ func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
 		rows[i].ShadowOutliers = AbuseShadowOutliers(rows[i].Host)
 		rows[i].QueryCardinality = FacetShadowCardinality(rows[i].Host)
 		rows[i].CostPressure = CostShadowPressure(rows[i].Host)
+		rows[i].DCFraction = DCFracShadowPercent(rows[i].Host)
 		rows[i].State = e.deriveVhostState(&rows[i], now)
 	}
 	writeJSON(w, http.StatusOK, rows)
@@ -164,6 +165,7 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 	v.ShadowOutliers = AbuseShadowOutliers(v.Host)
 	v.QueryCardinality = FacetShadowCardinality(v.Host)
 	v.CostPressure = CostShadowPressure(v.Host)
+	v.DCFraction = DCFracShadowPercent(v.Host)
 	v.State = e.deriveVhostState(&v, now)
 	writeJSON(w, http.StatusOK, v)
 }
