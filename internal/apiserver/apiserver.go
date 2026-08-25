@@ -322,6 +322,11 @@ func Start(
 	// Registered last so its in-process dispatch can reach every /api/v1 route.
 	registerMCPServer(m, cfg, store)
 
+	// Record the actual listener ports so requestPeer's Entry classification (and
+	// thus AdminTransportRedirect) tracks a non-default PORT/TLS_PORT instead of
+	// hardcoded 6060/6061. Set before the listeners below begin serving.
+	setListenerPorts(cfg.Debug.Port, cfg.Debug.TLSPort)
+
 	// tlsReadyFlag becomes true only once the :6061 TLS listener has actually
 	// bound (below). AdminTransportRedirect reads it to decide whether a direct
 	// external plaintext :6060 browser request can be upgraded to :6061 (R01).
