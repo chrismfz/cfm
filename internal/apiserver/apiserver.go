@@ -349,7 +349,7 @@ func Start(
 	// opts in explicitly (audit R01). An explicit "0.0.0.0"/"::" is honoured as-is
 	// — that is the deliberate escape hatch, upgraded per-request to :6061 by
 	// AdminTransportRedirect.
-	httpAddr := fmt.Sprintf("%s:%d", httpBindAddr(cfg.Debug.ListenAddress), cfg.Debug.Port)
+	httpAddr := fmt.Sprintf("%s:%d", HTTPBindAddr(cfg.Debug.ListenAddress), cfg.Debug.Port)
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           handler,

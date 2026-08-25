@@ -71,8 +71,8 @@ untouched.
 | 1 | immediate peer is **loopback** (local CLI/curl) | **pass through** — loopback plaintext is not a wire risk |
 | 2 | external, **not** a browser admin route (`/api/v1/*`, `/debug/*`, `/mcp`, assets) | **pass through** (default) — see §6a machine-API decision |
 | 3 | external, browser admin route, **GET/HEAD**, `tlsReady` | **redirect** → `https://<host>:<TLSPort><uri>` (§5) |
-| 4 | external, browser admin route, **unsafe method** (POST/PUT/PATCH/DELETE), `tlsReady` | **reject** — `HTTPS required`, *not* processed then redirected (`Audit.md` §2, spec pt 4) |
-| 5 | external, browser admin route, **`tlsReady == false`** | **degraded**: pass through over HTTP, log `event=admin_http_fallback` (§6b) |
+| 4 | external, browser admin route, **unsafe method** (POST/PUT/PATCH/DELETE/…), **any TLS state** | **reject** — `HTTPS required`, *not* processed then redirected (`Audit.md` §2, spec pt 4). Refused **before** the redirect/degraded split, so a write is never processed over plaintext even in the degraded window or on a crafted empty-Host request. |
+| 5 | external, browser admin route, **GET/HEAD**, `tlsReady == false` (or no usable Host / TLS port) | **degraded**: pass through over HTTP (read-only — writes were refused by row 4), log `event=admin_http_fallback` (§6b) |
 
 Rows 3 and 4 are the R01 fix. Row 4 matters because a plain redirect on a login
 `POST` would have **accepted the credential body over plaintext first**; the
@@ -126,13 +126,16 @@ is **Step 4** (reusable pre-auth challenge + login gate), which is **on hold**
 after the item-8 decision (challenge identity unification was declined, PR #1342).
 Therefore Step 5 ships:
 
-- redirect (TLS ready) + reject-unsafe (TLS ready) + **degraded pass-through with
-  `event=admin_http_fallback` logging** (TLS down).
+- redirect GET/HEAD (TLS ready) + **reject-unsafe unconditionally** (any TLS state)
+  + **degraded pass-through of GET/HEAD only, with `event=admin_http_fallback`
+  logging** (TLS down). Writes are refused *before* the redirect/degraded split, so
+  the degraded window is **read-only** — no plaintext write is ever processed.
 
-The **challenge-gating** of the degraded fallback is **deferred to Step 4**. The
-degraded state is rare (TLS genuinely unavailable); serving HTTP + a visible log
-is the Step-5 deliverable, and full challenge-gating waits for Step 4. This keeps
-Step 5 independent of the on-hold challenge work.
+The **challenge-gating** of the degraded (read-only) fallback is **deferred to
+Step 4**. The degraded state is rare (TLS genuinely unavailable); serving GET/HEAD
+over HTTP + a visible log is the Step-5 deliverable, and challenge-gating that
+read traffic waits for Step 4. This keeps Step 5 independent of the on-hold
+challenge work.
 
 ### 6c. Alternative / complementary hardening — bind `:6060` to loopback
 
@@ -253,11 +256,12 @@ middleware directly (pattern: `auth_redirect_test.go`).
   (§6a decision). R01 closure for the machine API therefore rests entirely on the loopback
   bind default above, **not** on `AdminTransportRedirect`. A stricter machine-API transport
   stance is a separate, explicit follow-up.
-- **The TLS-down degraded fallback** processes all methods (including a browser login POST)
-  over plaintext while `:6060` is exposed and TLS is genuinely unavailable (§6b). Serving
-  HTTP + a visible `event=admin_http_fallback` log is the Phase-5a deliverable;
-  **challenge-gating that window is deferred to Step 4** (Phase 5c). Realistic exposure
-  requires a non-default `LISTEN_ADDRESS=0.0.0.0` **and** TLS down simultaneously.
+- **The TLS-down degraded fallback** serves **GET/HEAD only** over plaintext while `:6060`
+  is exposed and TLS is genuinely unavailable (§6b) — writes are refused with `403`
+  regardless of TLS state, so no plaintext write is processed. Serving that read traffic +
+  a visible `event=admin_http_fallback` log is the Phase-5a deliverable; **challenge-gating
+  the read-only window is deferred to Step 4** (Phase 5c). Realistic exposure requires a
+  non-default `LISTEN_ADDRESS=0.0.0.0` **and** TLS down simultaneously.
 
 ## 13. Done when (from the spec, mapped)
 

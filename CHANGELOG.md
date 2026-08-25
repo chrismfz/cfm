@@ -89,9 +89,10 @@ back-filled here — see the git/PR history for that period.
   — so credentials are never handled over cleartext, and a redirect never re-sends a
   leaked body. The edge backend hop, the `:6061` listener, the loopback CLI, and machine
   `/api/v1` traffic are all untouched (machine-API R01 closure rests on the loopback bind
-  above, not this middleware); a genuine TLS-down state serves a logged
-  (`event=admin_http_fallback`) degraded fallback — hardening that plaintext window is
-  tracked for audit Step 4. See `docs/security/direct-6060-transport-policy.md`.
+  above, not this middleware). Writes are refused regardless of TLS state, so a genuine
+  TLS-down state serves only a logged (`event=admin_http_fallback`) **read-only** degraded
+  fallback (GET/HEAD) — challenge-gating that read window is tracked for audit Step 4. See
+  `docs/security/direct-6060-transport-policy.md`.
 
 ## 2026.08.25
 

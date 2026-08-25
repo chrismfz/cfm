@@ -50,11 +50,24 @@ func AdminTransportRedirect(next http.Handler, tlsPort int, tlsReady func() bool
 			return
 		}
 
+		// A state-changing request arrived over direct plaintext. Never process it
+		// (no session/credential handling over cleartext) and never auto-redirect it
+		// (a method-preserving redirect would re-send the already-leaked body). Refuse
+		// UNCONDITIONALLY — independent of TLS state and of Host — so the invariant
+		// "plaintext admin writes are never processed" holds even in the degraded
+		// window and for a crafted empty-Host request. Only GET/HEAD can be safely
+		// upgraded (TLS ready) or degraded-served (TLS down).
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeHTTPSRequired(w, tlsPort)
+			return
+		}
+
 		host := hostOnly(r.Host)
 
 		// TLS not (yet) usable, port invalid, or no usable Host to build a target →
-		// explicit degraded HTTP fallback, logged. (Challenge-gating of this state
-		// is deferred to Step 4 — see the design doc.)
+		// explicit degraded HTTP fallback for safe GET/HEAD navigation, logged. Writes
+		// were already refused above, so this window is read-only. (Challenge-gating of
+		// this read-only window is deferred to Step 4 — see the design doc.)
 		if !tlsReady() || !validTLSPort(tlsPort) || host == "" {
 			logging.LogfAPI("[apiserver] event=admin_http_fallback src_ip=%s method=%s path=%q reason=%s",
 				realIPFromRequest(r), r.Method, r.URL.Path, tlsFallbackReason(tlsReady(), tlsPort, host))
@@ -62,19 +75,9 @@ func AdminTransportRedirect(next http.Handler, tlsPort int, tlsReady func() bool
 			return
 		}
 
-		// TLS ready: upgrade safe browser navigation; refuse unsafe methods.
-		switch r.Method {
-		case http.MethodGet, http.MethodHead:
-			target := "https://" + net.JoinHostPort(host, strconv.Itoa(tlsPort)) + r.URL.RequestURI()
-			http.Redirect(w, r, target, http.StatusFound)
-		default:
-			// A state-changing request arrived over plaintext. Do NOT process it
-			// (no HTTP session/credential handling) and do NOT auto-redirect it (a
-			// method-preserving redirect would re-send the already-leaked body).
-			// Refuse so the operator re-submits from an HTTPS page.
-			w.Header().Set("Content-Type", "application/json")
-			http.Error(w, `{"error":"HTTPS required for admin writes — use the TLS port :`+strconv.Itoa(tlsPort)+`"}`, http.StatusForbidden)
-		}
+		// TLS ready: upgrade safe browser navigation to the TLS port.
+		target := "https://" + net.JoinHostPort(host, strconv.Itoa(tlsPort)) + r.URL.RequestURI()
+		http.Redirect(w, r, target, http.StatusFound)
 	})
 }
 
@@ -89,13 +92,29 @@ func isBrowserAdminRequest(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
-// httpBindAddr resolves the plaintext :6060 bind address, applying R01's secure
+// writeHTTPSRequired refuses a state-changing plaintext admin request with 403 and
+// a JSON body (kept application/json — http.Error would rewrite it to text/plain).
+// It points at the TLS port when that port is valid; otherwise it stays generic
+// (the operator has exposed :6060 with no usable TLS port — a misconfiguration, so
+// naming ":0" would be worse than useless).
+func writeHTTPSRequired(w http.ResponseWriter, tlsPort int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	body := `{"error":"HTTPS required for admin writes"}`
+	if validTLSPort(tlsPort) {
+		body = `{"error":"HTTPS required for admin writes — use the TLS port :` + strconv.Itoa(tlsPort) + `"}`
+	}
+	_, _ = w.Write([]byte(body))
+}
+
+// HTTPBindAddr resolves the plaintext :6060 bind address, applying R01's secure
 // default: an unset LISTEN_ADDRESS binds loopback (127.0.0.1), never the wildcard
 // — the plaintext control plane must not reach the Internet unless the operator
 // opts in explicitly. An explicit "0.0.0.0"/"::" is returned unchanged: that is
 // the deliberate opt-in escape hatch (then upgraded per-request by
 // AdminTransportRedirect), so we must NOT silently fold it to loopback here.
-func httpBindAddr(listenAddr string) string {
+// Exported so the daemon's startup log reports the real bind, not the raw config.
+func HTTPBindAddr(listenAddr string) string {
 	if strings.TrimSpace(listenAddr) == "" {
 		return "127.0.0.1"
 	}

@@ -345,8 +345,9 @@ external `:6060` browser GET/HEAD → `:6061` once a bind-verified `tlsReady` is
 state-changing plaintext admin (`403`, not processed-then-redirected), and logs a degraded
 HTTP fallback when TLS is down. Edge/`:6061`/loopback-CLI/machine-`/api/v1` untouched.
 **Residuals (tracked, → Step 4):** machine-`/api/v1` writes on a re-exposed `:6060` stay
-plaintext (their R01 closure rests on the loopback bind); challenge-gating the TLS-down
-degraded window is deferred to Step 4 — both realistic only under an explicit `0.0.0.0`.
+plaintext (their R01 closure rests on the loopback bind); the TLS-down degraded window is
+**read-only** (writes refused with `403` regardless of TLS state) with challenge-gating of
+the remaining GET/HEAD deferred to Step 4 — both realistic only under an explicit `0.0.0.0`.
 Tests: `transport_redirect_test.go` (incl. all-unsafe-methods `403`, machine-API write
 pass-through, edge write pass-through, `httpBindAddr` default). Live retest → Step 10. The
 `## Update` glance list and `Audit_Results.md` R01 reflect this.

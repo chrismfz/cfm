@@ -41,8 +41,10 @@ bind-verified `tlsReady` is set, refuses state-changing plaintext admin requests
 (never processed-then-redirected), and serves a logged degraded fallback when TLS is
 genuinely down. Edge/`:6061`/loopback CLI/machine-`/api/v1` are untouched. **Residuals
 (tracked):** machine-`/api/v1` writes on a re-exposed `:6060` stay plaintext (R01 closure
-for them rests on the loopback bind, not this middleware), and challenge-gating the TLS-down
-degraded window is deferred to Step 4 — both realistic only with an explicit `0.0.0.0`.
+for them rests on the loopback bind, not this middleware), and the TLS-down degraded window
+is **read-only** (writes are refused with `403` regardless of TLS state) with challenge-gating
+of the remaining GET/HEAD traffic deferred to Step 4 — both realistic only with an explicit
+`0.0.0.0`.
 Tests: `transport_redirect_test.go`. Design + operator decisions:
 `docs/security/direct-6060-transport-policy.md`. Live retest (§below) rolls up to Step 10.
 

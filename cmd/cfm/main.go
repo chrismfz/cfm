@@ -1270,7 +1270,7 @@ func runDaemon(args []string) {
 		go apiserver.Start(ctx, cfg, be, cfgDir, gov, sslcol)
 
 		_ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
-		logging.Logf("[apiserver] http server on %s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
+		logging.Logf("[apiserver] http server on %s:%d", apiserver.HTTPBindAddr(cfg.Debug.ListenAddress), cfg.Debug.Port)
 	}
 
 	// ── applyNFTRules ────────────────────────────────────────────────────────────

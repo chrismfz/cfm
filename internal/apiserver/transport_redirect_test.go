@@ -68,6 +68,37 @@ func TestAdminTransportRedirect_RejectsDirectExternalUnsafeMethod(t *testing.T) 
 	if rr.Header().Get("Location") != "" {
 		t.Fatalf("unsafe method must not be redirected, got Location=%q", rr.Header().Get("Location"))
 	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("403 Content-Type = %q, want application/json", ct)
+	}
+}
+
+func TestAdminTransportRedirect_RefusesUnsafeEvenWhenDegraded(t *testing.T) {
+	// LOW-1 hardening: a plaintext admin WRITE must be refused regardless of TLS
+	// state or Host — it must never slip into the degraded pass-through and be
+	// processed over cleartext. Covers the three ways the degraded branch is
+	// reachable: empty Host (even with TLS ready), TLS not ready, invalid TLS port.
+	newPOST := func() *http.Request {
+		return transportReq(http.MethodPost, "http://host:6060/cfm-admin/login", "0.0.0.0:6060", "198.51.100.5:5000",
+			map[string]string{"Accept": htmlAccept})
+	}
+
+	// (a) empty Host, TLS ready — previously slipped through to next as plaintext.
+	ra := newPOST()
+	ra.Host = ""
+	if rr, nextCalled := runTransport(6061, true, ra); nextCalled || rr.Code != http.StatusForbidden {
+		t.Fatalf("empty-Host POST must be 403 not processed (next=%v code=%d)", nextCalled, rr.Code)
+	}
+
+	// (b) TLS not ready.
+	if rr, nextCalled := runTransport(6061, false, newPOST()); nextCalled || rr.Code != http.StatusForbidden {
+		t.Fatalf("TLS-down POST must be 403 not processed (next=%v code=%d)", nextCalled, rr.Code)
+	}
+
+	// (c) invalid TLS port (TLS effectively disabled) — still refuse, generic body.
+	if rr, nextCalled := runTransport(0, true, newPOST()); nextCalled || rr.Code != http.StatusForbidden {
+		t.Fatalf("invalid-TLS-port POST must be 403 not processed (next=%v code=%d)", nextCalled, rr.Code)
+	}
 }
 
 func TestAdminTransportRedirect_RejectsAllUnsafeMethods(t *testing.T) {
@@ -221,8 +252,8 @@ func TestHTTPBindAddr(t *testing.T) {
 		{"192.0.2.7", "192.0.2.7"},
 	}
 	for _, c := range cases {
-		if got := httpBindAddr(c.in); got != c.want {
-			t.Fatalf("httpBindAddr(%q) = %q, want %q", c.in, got, c.want)
+		if got := HTTPBindAddr(c.in); got != c.want {
+			t.Fatalf("HTTPBindAddr(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
