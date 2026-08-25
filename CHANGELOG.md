@@ -203,6 +203,12 @@ back-filled here — see the git/PR history for that period.
   `internal/detconf` and is the single source both sides call; JS validator
   mirrors it (`Nd → N*24h`), hint texts mention days, and regression tests
   pin the shared grammar.
+- **`cfm webtop attack` (no args) now shows Under-Attack status.** Bare
+  `cfm webtop attack` reports whether Under-Attack Mode is enabled and lists the
+  vhosts currently in UNDER_ATTACK (mirroring `cfm webtop challenge`), then prints
+  the `on|off <vhost>` override usage — instead of erroring with a bare usage
+  string. The challenge summary API (`/api/v1/challenge/summary`) carries two
+  additive fields, `under_attack_enabled` and `under_attack_vhosts`, to back it.
 
 ## 2026.08.22
 
