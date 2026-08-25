@@ -24,7 +24,7 @@ Do not skip dependency steps merely because a later change looks small. In parti
 6.  ✅ Automatic request-aware session-cookie transport policy               — Secure automatic from effective scheme; distinct cfm-sid-http-fallback for degraded :6060; no global-cookie race; AUTH_SECURE_COOKIE deprecated (+ :6061 self-signed fallback so a fresh/by-IP box isn't locked out)
 7.  ✅ cfm.api.log auth-attempt schema + api_abuse -> cfm_endpoints default-on  — done (#1338); auth_autoblock.go removal pending
 8.  ✅ Per-auth-mechanism / route-cost API rate limiting                   — enforcing limiter shipped (identity×route buckets, honest-high code-default ceilings, 429+Retry-After, never nft); ceiling tuning + alert-only detector event are operator-driven follow-ups
-9.  ◑  Direct control-plane response/cache/security-header hardening       — safe subset done (nosniff/Referrer-Policy + no-store on auth failures); CSP/frame (cPanel-iframe) + HSTS deferred
+9.  ◑  Direct control-plane response/cache/security-header hardening       — safe subset done (nosniff/Referrer-Policy + no-store on auth failures); CSP/frame + HSTS ⛔ DECLINED (too risky for P2 — breaks inline-script UI / cPanel iframe / self-signed :6061; operator can add at edge; see docs/security/control-plane-csp-frame-hsts.md)
 10. ☐  Controlled credentialed regression + close Audit_Results findings
 ```
 
@@ -643,10 +643,15 @@ Important policy:
 response, and `no-store` is now set on `TokenMiddleware` auth-failure `401`s
 (`internal/apiserver/security_headers.go`, `middleware.go`; tests
 `security_headers_test.go`; doc `docs/security/control-plane-headers.md`).
-**Deferred (deliberate):** CSP + frame policy must be cPanel-iframe-aware
-(per-install panel origin — a blanket `DENY` breaks the embed), and HSTS is host-wide
-so a `:6061` HSTS would strand the supported plaintext `:6060` (R01/Step 5). Live
-direct-vs-edge retest → Step 10.
+**CSP + frame policy + HSTS: ⛔ DECLINED** (operator decision, 2026-08-25 — too risky
+for a P2 gain, leave it completely out): a full `script-src` CSP breaks the inline-script
+admin UI (needs nonce/hash templating of the static UI — a build change); a blanket
+`frame-ancestors`/`DENY` breaks the cPanel iframe embed, and the panel origin is
+client-provided (`sanitizeExpectedParentOrigin`) so it can't be trust-derived; HSTS is
+host-wide so a `:6061` HSTS strands the supported plaintext `:6060` and breaks the
+self-signed `:6061` bootstrap (#1356). Operators wanting these add them at their own
+edge/reverse proxy. Rationale + safe opt-in shape: `docs/security/control-plane-csp-frame-hsts.md`.
+Live direct-vs-edge retest of the shipped subset → Step 10.
 
 ## Problem
 
