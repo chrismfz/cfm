@@ -17,6 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **`abuse_shadow` rate-outlier count surfaced per vhost (webtop / API / cfm-admin).**
+  The log-only abuse_shadow signal now also stamps a live per-vhost count of
+  rate-outlier IPs (concentration vs the vhost median), exposed as a
+  `shadow_outliers` field on the challenge-vhost, top-short and suspicious API
+  rows, shown as `shadow=N` in `cfm webtop challenge` and a `shadow N` pill in
+  cfm-admin — mirroring the existing `farm` badge. Like the solver-farm mark it
+  is an external verdict stamped onto rows (never a scoring input), maintained by
+  the per-tick emit with its own short TTL (no un-mark path), and cleared on
+  detector reload. The count is the cheap DNS-free concentration signal (complete
+  even when the detailed-line budget throttles) and may include verified crawlers;
+  the good/bad split stays in `cfm.abuse_shadow.log`.
+
 ### Fixed
 - **Verified good bots are no longer served a score/vhost-driven challenge.** A
   would-be per-IP *or* vhost-wide challenge is now downgraded to allow for an

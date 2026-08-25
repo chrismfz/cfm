@@ -59,6 +59,11 @@ type SuspiciousRow struct {
 	// by the long-window scorer: it is an external verdict, not a scoring
 	// input. See solverfarm_marks.go.
 	SolverFarm bool `json:"solver_farm"`
+
+	// ShadowOutliers is the live abuse_shadow rate-outlier count for this vhost.
+	// Stamped by the API handlers, not the scorer (external verdict). See
+	// abuse_shadow_marks.go.
+	ShadowOutliers int `json:"shadow_outliers"`
 }
 
 // LongRow is the raw long-window aggregate without scoring.

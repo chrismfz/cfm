@@ -146,6 +146,11 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 	const maxShadowEnrichPerTick = 50
 	enriched := 0
 
+	// Per-vhost live outlier count for the UI badge / API field (abuse_shadow_marks.go).
+	// Counted from the cheap rateOutlier check (no DNS), so it is COMPLETE even when
+	// the enrich/log budget below throttles the detailed lines.
+	marks := make(map[string]int)
+
 	for host, perIP := range snap {
 		if len(perIP) < 2 { // need a baseline population to be an "outlier"
 			continue
@@ -168,10 +173,16 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 			if e.isBypassed(ip) {
 				continue
 			}
+			// Count every non-bypassed outlier for the badge (cheap, uncapped) —
+			// BEFORE the enrich cap, so the count is complete even under a large
+			// distributed burst that exhausts the per-tick DNS budget.
+			marks[host]++
 			// Per-tick enrich cap — checked BEFORE the throttle so hitting the cap
 			// doesn't consume a throttle token (the IP logs on a later tick).
+			// `continue` (not `return`): the detailed line is skipped past the cap,
+			// but the cheap counting above must keep visiting the remaining vhosts.
 			if enriched >= maxShadowEnrichPerTick {
-				return
+				continue
 			}
 			// Throttle BEFORE the (potentially DNS-bound) enrichment, so a
 			// persistent outlier doesn't do a good-bot forward-confirm every tick.
@@ -209,6 +220,19 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 				host, ip, ipRPS, medianRPS, ratio, skew, tot, asn, orDash(cc), orDash(provider), orDash(goodBot), verdict,
 			)
 		}
+	}
+
+	// Stamp the per-vhost live outlier count for the badge / API field, in one
+	// batch (a single prune pass regardless of how many vhosts are flagged). TTL
+	// is a small multiple of the traffic window so the mark survives eval jitter
+	// and clears on its own within one TTL once the burst stops (no un-mark path);
+	// the 90s floor also covers a zero/unset window.
+	if len(marks) > 0 {
+		ttl := 3 * e.cfg.Window
+		if ttl < 90*time.Second {
+			ttl = 90 * time.Second
+		}
+		MarkAbuseShadowBulk(marks, ttl)
 	}
 }
 

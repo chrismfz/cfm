@@ -222,6 +222,11 @@ type ShortRow struct {
 	// distributed solver farm on this vhost. It is an external verdict stamped
 	// onto the row, not an input to Score — see solverfarm_marks.go.
 	SolverFarm bool `json:"solver_farm"`
+
+	// ShadowOutliers is the live count of abuse_shadow rate-outlier IPs on this
+	// vhost right now (concentration signal, shadow/log-only). Stamped onto the
+	// row, not an input to Score — see abuse_shadow_marks.go. 0 when none/expired.
+	ShadowOutliers int `json:"shadow_outliers"`
 }
 
 // TopKV for drilldown views.
