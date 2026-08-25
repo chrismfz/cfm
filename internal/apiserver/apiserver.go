@@ -344,7 +344,12 @@ func Start(
 	handler = RequestLogMiddleware(handler)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	httpAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
+	// Secure default: an unset LISTEN_ADDRESS binds loopback, never the wildcard,
+	// so the plaintext control plane is not Internet-reachable unless the operator
+	// opts in explicitly (audit R01). An explicit "0.0.0.0"/"::" is honoured as-is
+	// — that is the deliberate escape hatch, upgraded per-request to :6061 by
+	// AdminTransportRedirect.
+	httpAddr := fmt.Sprintf("%s:%d", httpBindAddr(cfg.Debug.ListenAddress), cfg.Debug.Port)
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           handler,

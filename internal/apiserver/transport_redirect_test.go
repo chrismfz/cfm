@@ -70,6 +70,54 @@ func TestAdminTransportRedirect_RejectsDirectExternalUnsafeMethod(t *testing.T) 
 	}
 }
 
+func TestAdminTransportRedirect_RejectsAllUnsafeMethods(t *testing.T) {
+	// Every non-safe method on a direct external plaintext admin route must be
+	// refused with 403 and never redirected — guards against someone widening the
+	// GET/HEAD redirect case to include a body-bearing method.
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		r := transportReq(m, "http://host:6060/cfm-admin/x", "0.0.0.0:6060", "198.51.100.5:5000",
+			map[string]string{"Accept": htmlAccept})
+		rr, nextCalled := runTransport(6061, true, r)
+		if nextCalled {
+			t.Fatalf("%s: next ran; an unsafe plaintext admin request must not be processed", m)
+		}
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("%s: code = %d, want 403", m, rr.Code)
+		}
+		if rr.Header().Get("Location") != "" {
+			t.Fatalf("%s: unsafe method must not be redirected, got Location=%q", m, rr.Header().Get("Location"))
+		}
+	}
+}
+
+func TestAdminTransportRedirect_MachineAPIWriteLeftAsIs(t *testing.T) {
+	// Design §6a: a direct-external machine /api/v1 WRITE (no Accept: text/html) is
+	// not a browser admin route, so it passes through untouched — R01 closure for
+	// the machine API rests on the loopback bind default, not this middleware. This
+	// pins that boundary so an accidental flip in either direction is caught.
+	r := transportReq(http.MethodPost, "http://host:6060/api/v1/firewall/block", "0.0.0.0:6060", "198.51.100.5:5000",
+		map[string]string{"Accept": "*/*"})
+	rr, nextCalled := runTransport(6061, true, r)
+	if !nextCalled || rr.Code != http.StatusOK {
+		t.Fatalf("machine /api/v1 write must pass through (next=%v code=%d)", nextCalled, rr.Code)
+	}
+	if rr.Header().Get("Location") != "" {
+		t.Fatalf("machine /api/v1 write must not be redirected, got Location=%q", rr.Header().Get("Location"))
+	}
+}
+
+func TestAdminTransportRedirect_EdgeBackendWriteNeverRedirected(t *testing.T) {
+	// A legitimate admin WRITE arriving via the edge (loopback peer + forwarded id →
+	// Entry "edge") must be served, never 403'd — the public :443 admin UI does POSTs
+	// and they must not be broken by the transport guard.
+	r := transportReq(http.MethodPost, "http://host/cfm-admin/waf/exclude/add", "0.0.0.0:6060", "127.0.0.1:41000",
+		map[string]string{"Accept": htmlAccept, "X-Real-IP": "203.0.113.9", "X-Forwarded-Proto": "https"})
+	rr, nextCalled := runTransport(6061, true, r)
+	if !nextCalled || rr.Code != http.StatusOK {
+		t.Fatalf("edge admin write must be served (next=%v code=%d)", nextCalled, rr.Code)
+	}
+}
+
 func TestAdminTransportRedirect_EdgeBackendNeverRedirected(t *testing.T) {
 	// The public :443 browser via the edge arrives at loopback:6060 with forwarded
 	// identity → Entry "edge" → must be served, never bounced to :6061.
@@ -158,5 +206,23 @@ func TestAdminTransportRedirect_IPv6HostTarget(t *testing.T) {
 	rr, _ := runTransport(6061, true, r)
 	if got := rr.Header().Get("Location"); got != "https://[2001:db8::1]:6061/cfm-admin/" {
 		t.Fatalf("Location = %q, want bracketed IPv6 host with :6061", got)
+	}
+}
+
+func TestHTTPBindAddr(t *testing.T) {
+	// The secure default (R01): an unset LISTEN_ADDRESS binds loopback, never the
+	// wildcard; an explicit value — including the 0.0.0.0/:: opt-in — is unchanged.
+	cases := []struct{ in, want string }{
+		{"", "127.0.0.1"},
+		{"   ", "127.0.0.1"},
+		{"0.0.0.0", "0.0.0.0"},
+		{"::", "::"},
+		{"127.0.0.1", "127.0.0.1"},
+		{"192.0.2.7", "192.0.2.7"},
+	}
+	for _, c := range cases {
+		if got := httpBindAddr(c.in); got != c.want {
+			t.Fatalf("httpBindAddr(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

@@ -335,15 +335,21 @@ Preserve regression coverage for the historical failures where Lua selected chal
 **Finding:** `Audit_Results.md` R01, HIGH CONFIRMED LIVE  
 **Dependencies:** Step 1; integrates with Step 4  
 **Status:** ✅ SOURCE FIXED (defence in depth) — `docs/security/direct-6060-transport-policy.md`.
-Two defences shipped: (1) `LISTEN_ADDRESS` defaults to `127.0.0.1` (loopback-only `:6060`;
-edge + CLI both loopback; `:6061` stays public), so no Internet-reachable plaintext admin
-plane by default; (2) pre-auth `AdminTransportRedirect` (`internal/apiserver/transport_redirect.go`,
-outside `TokenMiddleware`) upgrades direct external `:6060` browser GET/HEAD → `:6061`
-once a bind-verified `tlsReady` is set, refuses state-changing plaintext admin (`403`,
-not processed-then-redirected), and logs a degraded HTTP fallback when TLS is down (its
-challenge-gating deferred to Step 4). Edge/`:6061`/loopback-CLI/machine-`/api/v1` untouched.
-Tests: `transport_redirect_test.go`. Live retest → Step 10. The `## Update` glance list and
-`Audit_Results.md` R01 reflect this.
+Two defences shipped: (1) `:6060` is loopback-only by default — **code-enforced** (`httpBindAddr`
+resolves an unset `LISTEN_ADDRESS` to `127.0.0.1`, not just the reference-conf value; explicit
+`0.0.0.0` stays the opt-in), edge + CLI both loopback, `:6061` stays public (keep
+`TLS_LISTEN_ADDRESS=0.0.0.0` — it inherits `LISTEN_ADDRESS` when unset), so no
+Internet-reachable plaintext admin plane by default; (2) pre-auth `AdminTransportRedirect`
+(`internal/apiserver/transport_redirect.go`, outside `TokenMiddleware`) upgrades direct
+external `:6060` browser GET/HEAD → `:6061` once a bind-verified `tlsReady` is set, refuses
+state-changing plaintext admin (`403`, not processed-then-redirected), and logs a degraded
+HTTP fallback when TLS is down. Edge/`:6061`/loopback-CLI/machine-`/api/v1` untouched.
+**Residuals (tracked, → Step 4):** machine-`/api/v1` writes on a re-exposed `:6060` stay
+plaintext (their R01 closure rests on the loopback bind); challenge-gating the TLS-down
+degraded window is deferred to Step 4 — both realistic only under an explicit `0.0.0.0`.
+Tests: `transport_redirect_test.go` (incl. all-unsafe-methods `403`, machine-API write
+pass-through, edge write pass-through, `httpBindAddr` default). Live retest → Step 10. The
+`## Update` glance list and `Audit_Results.md` R01 reflect this.
 
 ## Problem
 

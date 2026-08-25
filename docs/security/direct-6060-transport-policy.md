@@ -147,6 +147,15 @@ design implements the redirect — but the operator should confirm whether exter
 complementary (loopback-bind removes the attack surface; the redirect handles the
 case where it stays public).
 
+**As built** this is **code-enforced**, not just a reference-config value: `httpBindAddr`
+(`transport_redirect.go`) resolves an **unset** `LISTEN_ADDRESS` to `127.0.0.1` at the
+bind site, so even a config that omits the key binds loopback rather than the wildcard.
+An explicit `0.0.0.0`/`::` is honoured unchanged (the opt-in escape hatch). **Caveat:**
+`:6061` inherits `LISTEN_ADDRESS` when `TLS_LISTEN_ADDRESS` is unset (`apiserver.go`), so
+an install that sets only `LISTEN_ADDRESS=127.0.0.1` and relies on the TLS fallback would
+make `:6061` loopback-only too — keep `TLS_LISTEN_ADDRESS=0.0.0.0` (the reference
+`cfm.conf` does) for remote admin over TLS.
+
 ## 7. `tlsReady` plumbing
 
 Introduce an `atomic.Bool` (package-level in `apiserver`, or a field on a shared
@@ -230,10 +239,25 @@ middleware directly (pattern: `auth_redirect_test.go`).
    transport policy is scoped to browser admin routes; a stricter machine stance stays
    a separate follow-up.
 2. **§6c** — is external `:6060` required? **No by default → both defences shipped:**
-   `LISTEN_ADDRESS` defaults to `127.0.0.1` (no external plaintext), AND the redirect
-   middleware remains as a safety net for anyone who deliberately re-exposes `:6060`.
+   `LISTEN_ADDRESS` defaults to `127.0.0.1` — **code-enforced** (an unset key binds
+   loopback, not the wildcard), not merely a reference-config value — so there is no
+   external plaintext, AND the redirect middleware remains as a safety net for anyone who
+   deliberately re-exposes `:6060`. Keep `TLS_LISTEN_ADDRESS=0.0.0.0` for remote TLS admin
+   (see §6c caveat: `:6061` inherits `LISTEN_ADDRESS` when unset).
 3. **§5** — redirect status code: **`302 Found`** (avoids `301`'s sticky caching of a
    non-standard port).
+
+### Residuals (deliberately out of Phase 5a scope)
+
+- **Machine `/api/v1` writes on a re-exposed `:6060`** are still processed over plaintext
+  (§6a decision). R01 closure for the machine API therefore rests entirely on the loopback
+  bind default above, **not** on `AdminTransportRedirect`. A stricter machine-API transport
+  stance is a separate, explicit follow-up.
+- **The TLS-down degraded fallback** processes all methods (including a browser login POST)
+  over plaintext while `:6060` is exposed and TLS is genuinely unavailable (§6b). Serving
+  HTTP + a visible `event=admin_http_fallback` log is the Phase-5a deliverable;
+  **challenge-gating that window is deferred to Step 4** (Phase 5c). Realistic exposure
+  requires a non-default `LISTEN_ADDRESS=0.0.0.0` **and** TLS down simultaneously.
 
 ## 13. Done when (from the spec, mapped)
 

@@ -89,6 +89,19 @@ func isBrowserAdminRequest(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
+// httpBindAddr resolves the plaintext :6060 bind address, applying R01's secure
+// default: an unset LISTEN_ADDRESS binds loopback (127.0.0.1), never the wildcard
+// — the plaintext control plane must not reach the Internet unless the operator
+// opts in explicitly. An explicit "0.0.0.0"/"::" is returned unchanged: that is
+// the deliberate opt-in escape hatch (then upgraded per-request by
+// AdminTransportRedirect), so we must NOT silently fold it to loopback here.
+func httpBindAddr(listenAddr string) string {
+	if strings.TrimSpace(listenAddr) == "" {
+		return "127.0.0.1"
+	}
+	return listenAddr
+}
+
 func validTLSPort(p int) bool { return p > 0 && p <= 65535 }
 
 func tlsFallbackReason(ready bool, port int, host string) string {
