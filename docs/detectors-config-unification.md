@@ -1,6 +1,9 @@
 # Detectors config unification — auto-detected sources, layered overrides, fleet-converged defaults
 
-**Status: DESIGN (2026-08-25) — implementation not started.**
+**Status: DESIGN (2026-08-25) — PR 2 (`srcresolve` + ssh/dovecot) in flight
+on `claude/detectors-srcresolve`; amended same day for the journald
+reliability trap (§3a) and the `[api_abuse]` → `cfm_endpoints` deprecation
+(§6.1).**
 Evidence base: a 10-server fleet audit of live `/etc/cfm/detectors.conf`
 (3deers, earth, mailcowdocker, mars, orion, rigel, saf, speedhost, titan,
 virgo) diffed against the stock reference with `detconf`-identical parsing.
@@ -19,8 +22,10 @@ reach the fleet**. The audit found the failure mode live:
 - ~10 newer stock keys (`PANEL_DECISION_MODE`, `PANEL_WAF_MODE`,
   `*_GOODBOT_EXEMPT`, `UNDER_ATTACK_FP_*`, `HISTORY_MAX_ROWS`, …) exist on no
   server.
-- The reverse also happens — the fleet is *ahead* of stock: `[api_abuse]`
-  exists in code and on 3 servers but not in the reference; `webdetector`
+- The reverse also happens — the fleet diverges *around* stock: 3 servers
+  still run the deprecated `[api_abuse]` section (superseded by the built-in
+  `cfm_endpoints`, which their configs predate — drift in both directions at
+  once); `webdetector`
   `MODE=folder`/`LOG_DIR`/`GLOB`/`RECURSIVE` run live (saf) but are
   undocumented in stock; `waf_security BLOCK` is `7d` on all 7 holders while
   stock says `6h`.
@@ -89,11 +94,41 @@ Candidate tables (from the audit + current code):
 |---|---|---|---|
 | ssh | `sshd.service`, `ssh.service` (Debian — live on saf) | `/var/log/secure` (EL), `/var/log/auth.log` (Debian) | — |
 | dovecot | `dovecot.service` | `/var/log/maillog`, `/var/log/mail.log`, `/var/log/dovecot.log` | `*dovecot-mailcow*` |
-| exim | `exim.service` (future-proofing; no current host uses it) | `/var/log/exim_mainlog` (cPanel), `/var/log/exim4/mainlog` (Debian), `/var/log/exim/mainlog` (DA/EL — live on saf; **already in code's list**, saf's explicit value is redundant) + rejectlog siblings | — |
+| exim | **none — deliberately** (see §3a: exim writes its own files and never syslogs the mainlog; `journalctl -u exim` carries only child-process noise, so journal is explicit-`JOURNAL_UNIT` opt-in only) | `/var/log/exim_mainlog` (cPanel), `/var/log/exim4/mainlog` (Debian), `/var/log/exim/mainlog` (DA/EL — live on saf; **already in code's list**, saf's explicit value is redundant) + rejectlog siblings | — |
 | postfix | `postfix@-.service`, `postfix.service` | `/var/log/maillog` (EL), `/var/log/mail.log` (Debian) | `*postfix-mailcow*`; queue cmds become `docker exec <c> postqueue …` automatically |
 | modsec | — (file-only) | `/usr/local/apache/logs/error_log` (cPanel EA4), `/var/log/httpd/error_log` (EL), `/var/log/apache2/error_log` (Debian) — stock drops its hard-coded apache2 path | — |
 | webdetector edge log | — | derive from the daemon's own edge knowledge: OpenResty/Angie/apache tsv (`/var/log/apache2/access_cfm_tsv.log`), nginx combined (`/var/log/nginx/access_cfm_combined.log` — earth), DirectAdmin per-domain folder → `MODE=folder LOG_DIR=/var/log/nginx/domains GLOB=*.log` (saf) | — |
 | cpanel detector | n/a — presence check `/usr/local/cpanel` | | |
+
+### 3a. Journald is not a trustworthy source for every service
+
+Live fleet evidence (titan, cPanel, 2026-08-25): `journalctl -xeu exim` shows
+almost nothing of exim's — the visible lines are **dovecot LDA** entries.
+Two distinct traps, and both must shape the resolver:
+
+1. **Daemons that write their own log files never populate their journal.**
+   Exim logs `mainlog`/`rejectlog` directly to disk on every install we run
+   (cPanel, Debian exim4, DA); it does not syslog its mainlog. Its unit's
+   journal holds only startup stderr and stray child output — "the journal
+   has entries for exim.service" is TRUE and useless.
+2. **Journald attributes by cgroup, not by daemon.** Exim spawns dovecot's
+   LDA binary for local delivery, so those dovecot lines land under
+   `_SYSTEMD_UNIT=exim.service`. A unit's journal can therefore contain
+   *other services'* lines (and miss its own children's the same way).
+
+Consequences, encoded in the resolver policy:
+
+- A service **known to file-log natively** (exim) gets **no journal
+  candidates at all** — file candidates only; journald is available solely by
+  explicit `JOURNAL_UNIT` (operator opt-in).
+- A service that genuinely syslogs (sshd, dovecot, postfix) keeps journal
+  candidates: for those, "unit has entries" is real signal. Where content
+  ambiguity remains (postfix in PR 3, shared syslog files), the probe becomes
+  **signature-aware** — match daemon/failure patterns in the recent journal,
+  the way the ftpd autodetect already scores candidates — instead of
+  existence-only.
+- The startup log line always prints the resolved source + reason, and
+  `detectors_status` surfaces it, so a wrong resolution is one look away.
 
 Self-disable rules (kills the biggest section-presence divergence): exim
 detectors auto-disable where exim isn't installed (mailcowdocker sets
@@ -204,7 +239,7 @@ Legend: **bold** = change stock; ⚠ = needs operator sign-off in review;
 | `[exim_security] RCPT_REJECT` | 12 | 0 / 0 / 6 / 0 | **0 (off)** ⚠ — same pattern |
 | `[exim_security] SESSION_ALL_FAILED` | 6 | 50 / (typo) / (typo) / 50 | **50** ⚠ — earth+titan are the only heavy nodes where the knob works; both raised it deliberately |
 | `[exim_security] SLOW_FAIL_BLOCK` | 6 | 20 / (typo) / (typo) / 20 | **20** ⚠ |
-| `[api_abuse]` | *missing from stock* | live on 3deers/titan/virgo | **add section**: `ENABLED=1`, `STAGE1_THRESHOLD=10`, `ALLOW_IPS=127.0.0.1`, `ALLOW_NETS=10.0.0.0/8`, `PATH_EXCEPTIONS=/api/v1/embed/bootstrap, /cfm-admin/api/v1/embed/bootstrap` |
+| `[api_abuse]` → `[cfm_endpoints]` | stock ships `[cfm_endpoints]` | `[api_abuse]` live on 3deers/titan/virgo | **do NOT add `[api_abuse]` to stock — it is deprecated** (superseded by the built-in `cfm_endpoints` detector, which runs with staged defaults even with no config section and merges legacy `[api_abuse]` in memory; see CHANGELOG Unreleased). Migration: move the 3 hosts' `ALLOW_IPS`/`ALLOW_NETS`/`PATH_EXCEPTIONS`/threshold overrides into `[cfm_endpoints]` overlay keys and delete `[api_abuse]`. |
 | `[health] CONN_EST/SYN/TOTAL_SPIKE` | 5.0 | 5.0 / 5.0 / 3.0 / 5.0 | keep **5.0** (orion 3.0 → overlay) |
 | `[leniency]` (new global) | — | 15m/15m dominant (earth+titan dovecot 1h/30m) | **MATCH_COUNTRY=GR,CY · BLOCK=15m · BLOCK_COOLDOWN=15m · SEND_TO_API=yes · SEND_TO_BLOCKLIST=lenient** |
 
@@ -277,11 +312,16 @@ servers, absent from stock); webdetector folder mode
 
 1. **PR 1 — this doc** (+ CLAUDE.md §7 row, ROADMAP index entry).
 2. **PR 2 — `srcresolve` package** + adopt in `ssh_auth`/`dovecot_auth`
-   (journal-unit candidates, `MODE=auto` default, self-disable). Unit tests
-   with fake FS/unit probes; parity tests (journal-first == today).
+   (journal-unit candidates with canonical-alias resolution, `MODE=auto`
+   default, docker discovery for dovecot). **In flight**
+   (`claude/detectors-srcresolve`). As shipped: nothing-confirmed falls back
+   to the historical blind default (provisional, self-healing) — true
+   self-disable arrives with MTA-flavor detection in PR 3.
 3. **PR 3 — exim/postfix on srcresolve** incl. docker discovery and
    docker-ized queue commands; MTA-flavor self-disable (kills the
-   postfix-vs-exim section divergence).
+   postfix-vs-exim section divergence). Per §3a: exim gets file candidates
+   ONLY (journal is explicit opt-in); postfix keeps journal candidates with a
+   signature-aware entries probe.
 4. **PR 4 — webdetector edge-source auto** (engine-derived path, folder mode
    for DA) + modsec candidate cleanup.
 5. **PR 5 — `detconf` layering** (`ReadLayered`, `+=`, StampNS, parity
