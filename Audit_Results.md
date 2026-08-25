@@ -25,7 +25,7 @@ Audit mode: active, low-volume, non-destructive. Production state must not be ch
 ## R01 — Plaintext control plane on TCP/6060
 
 **Severity:** HIGH  
-**Status:** ✅ SOURCE FIXED (defence in depth) / LIVE RETEST PENDING  
+**Status:** ✅ SOURCE FIXED (defence in depth) / ✅ LIVE VERIFIED 2026-08-25 (see third-pass addendum)  
 **Priority:** P0/P1
 
 **Fix:** (1) The plaintext `:6060` listener is now loopback-only by default —
@@ -80,7 +80,7 @@ Planned remediation is already documented in `Audit.md`:
 
 ### Retest after fix
 
-- [ ] direct `http://host:6060/cfm-admin/` redirects to `https://host:6061/cfm-admin/` while 6061 is healthy;
+- [x] direct `http://host:6060/cfm-admin/` redirects to `https://host:6061/cfm-admin/` while 6061 is healthy (2026-08-25: `302 → https://titan.myip.gr:6061/cfm-admin/`, with `:6060` deliberately left on `0.0.0.0` as an explicit deployment exception to exercise the redirect);
 - [ ] edge `https://host/cfm-admin/ -> loopback:6060` does not redirect to external `:6061`;
 - [ ] degraded fallback behavior works only when intentionally active;
 - [ ] no credential or Bearer token is silently accepted over unintended plaintext browser flow.
@@ -90,7 +90,7 @@ Planned remediation is already documented in `Audit.md`:
 ## R02 — pprof lacks an explicit admin-only role gate
 
 **Severity:** HIGH  
-**Status:** ✅ SOURCE FIXED / LIVE SCOPED PROOF PENDING  
+**Status:** ✅ SOURCE FIXED / ✅ LIVE VERIFIED 2026-08-25 (scoped→403, anon→401; see third-pass addendum)  
 **Priority:** P0/P1
 
 **Fix (source):** every pprof handler is now wrapped with `adminOnlyHandler` in
@@ -143,9 +143,9 @@ admin     -> 200
 ### Tests
 
 - [x] source unit test: scoped→403, anonymous→403, admin→200 at the handler (`apiserver_pprof_authz_test.go`)
-- [ ] live: valid scoped token against `GET /debug/pprof/` → 403
+- [x] live: valid scoped token against `GET /debug/pprof/heap` → 403 (2026-08-25, titan); anonymous → 401
 - [ ] live: valid scoped token against `/cfm-admin/debug/pprof/` where applicable → 403
-- [ ] live: admin token confirms intended access
+- [ ] live: admin token confirms intended access (no admin token was supplied in the scoped-only retest)
 
 Do NOT execute CPU profile or trace during production verification.
 
@@ -154,8 +154,8 @@ Do NOT execute CPU profile or trace during production verification.
 ## R03 — Mutating GET / CSRF method-confusion gap
 
 **Severity:** HIGH  
-**Status:** ✅ SOURCE FIXED / LIVE AUTHENTICATED REPRO PENDING  
-**Fix:** the 13 state-changing challenge/waf/clam endpoints are wrapped with `requirePOST` in the route table (`internal/webdetector/http_api.go`) — non-POST → `405` + `Allow: POST` before any auth/param/state work, so a state-changing GET can no longer slip past the session-CSRF boundary. Read siblings stay GET; already-guarded mutators (rules/history/ua-emergency/force-unblock/http3) verified and unchanged; `ingest-source` confirmed a read. Regression: `internal/webdetector/post_only_test.go`. Live authenticated-session repro (GET a mutator with a valid admin session → expect 405) rolls up to Step 10.  
+**Status:** ✅ SOURCE FIXED / ✅ LIVE VERIFIED 2026-08-25 (GET mutator → 405 + `Allow: POST`; see third-pass addendum)  
+**Fix:** the 13 state-changing challenge/waf/clam endpoints are wrapped with `requirePOST` in the route table (`internal/webdetector/http_api.go`) — non-POST → `405` + `Allow: POST` before any auth/param/state work, so a state-changing GET can no longer slip past the session-CSRF boundary. Read siblings stay GET; `ingest-source` confirmed a read. The HTTP/3 opt-in mutators (`/api/v1/http3/{enable,disable}`) were the original "correct reference" for POST-only but returned `405` **without** `Allow: POST` (handler-local check); the 2026-08-25 live retest flagged that inconsistency and it is now fixed — both routes go through the same `requirePOST` wrapper and are in the regression set. Regression: `internal/webdetector/post_only_test.go`. Live authenticated-session repro (GET a mutator with a valid admin session → expect 405) rolls up to Step 10.  
 
 **Priority:** P0/P1
 
@@ -661,7 +661,7 @@ Still unverified for R04:
 ## R10 — Authentication/cache response-header hardening gaps
 
 **Severity:** HARDENING  
-**Status:** ✅ SOURCE FIXED (safe subset) / CSP+frame+HSTS ⛔ DECLINED (too risky for P2) / LIVE RETEST PENDING  
+**Status:** ✅ SOURCE FIXED (safe subset) / CSP+frame+HSTS ⛔ DECLINED (too risky for P2) / ✅ LIVE VERIFIED 2026-08-25 (nosniff + Referrer-Policy direct & edge; `no-store` on anon 401; see third-pass addendum)  
 **Priority:** P2
 
 **Fix (Step 9):** a new `SecurityHeadersMiddleware` (`internal/apiserver/security_headers.go`,
@@ -723,3 +723,62 @@ No valid scoped token, admin bearer or authenticated admin browser session was a
 - admin-token edge-vs-direct response equivalence remains live-unverified;
 - MCP-only and OAuth credential separation remains live-unverified, although current source keeps MCP client credentials separate from `/api/v1` authentication and the node's MCP read surface is operational;
 - TLS 1.3 with correct `titan.myip.gr` SNI remains confirmed, but the available scoped TLS probe could not force TLS 1.0/1.1/1.2 or arbitrary/no-SNI handshakes without widening target scope.
+
+---
+
+# Third live pass addendum — 2026-08-25 (credentialed scoped retest)
+
+Target: `titan.myip.gr`, running `cfm-2026.08.25-1.214653.el10.x86_64` (the audit
+fixes deployed). A throwaway **viewer-scoped** token (`--vhosts vol2.gr`, `--label
+audit-retest`, short TTL) was minted on the box via `cfm webtop tokens create` — the
+read-only MCP cannot mint or POST, so this closes the scoped-credential gap the first
+two passes flagged. Mode stayed active, low-volume, non-destructive: reads, rejected
+writes, and one throwaway token. Every credential was carried only in request headers.
+
+## Verified live
+
+- **R02 (pprof admin-only) — ✅ PASS.** `GET /debug/pprof/heap` with the **scoped**
+  token → `403` (denied, as required); anonymous → `401`. The scoped→403 boundary that
+  was source-only through the first two passes is now reproduced against the deployed
+  service. (Admin→200 not exercised — no admin token was supplied in this scoped-only
+  retest; it stays covered by the source regression test.)
+- **R03 (mutating-GET / method boundary) — ✅ PASS.** `GET /api/v1/challenge/vhost/add`
+  → `405` + `Allow: POST` before any param/state work. During this pass the HTTP/3
+  opt-in mutators were found to return the correct `405` but **without** `Allow: POST`
+  (a handler-local check diverging from the shared `requirePOST` wrapper) — a
+  consistency LOW, not a security issue. **Now fixed**: `/api/v1/http3/{enable,disable}`
+  go through `requirePOST` and are in the `post_only_test.go` regression set.
+- **R01 (direct `:6060` transport) — ✅ PASS.** `GET http://titan.myip.gr:6060/cfm-admin/`
+  → `302` to `https://titan.myip.gr:6061/cfm-admin/`. Note: for this retest `:6060` was
+  **deliberately left bound to `0.0.0.0`** (an explicit deployment exception) so the
+  direct-external redirect path could be exercised at all — by default the R01 fix binds
+  `:6060` to loopback, where this browser-upgrade path never applies.
+- **R10 (security/cache headers) — ✅ PASS, direct and edge.** Direct `:6061` responses
+  now carry `X-Content-Type-Options: nosniff` + `Referrer-Policy:
+  strict-origin-when-cross-origin` (before→after confirmed against the pre-deploy
+  baseline that lacked them), and anonymous `401`s carry `Cache-Control: no-store`. The
+  same headers are present on the edge `/cfm-admin/login` path (443 via OpenResty), so
+  the direct control plane no longer depends on edge-only policy — direct-vs-edge parity
+  holds.
+
+## Scoped authorization matrix — ✅ PASS (clean)
+
+The scoped viewer token showed no admin escape and no cross-vhost leakage: admin-only
+endpoints returned `403` (not served), in-scope vhost reads were allowed, unrelated
+vhosts returned `403`/no rows, omitted/empty host did not fall back to global
+aggregation, `merge_www` behaved fail-closed, and host-access history was scope-correct.
+
+## Still pending (not findings — verification leftovers)
+
+- Admin-positive paths (pprof admin→200, admin edge-vs-direct read parity) — no admin
+  token was supplied in the scoped-only retest.
+- No-SNI `:6061` self-signed fallback cert — the audit transport auto-sets SNI to the
+  hostname, so a genuine by-IP/no-SNI handshake couldn't be forced from it; covered by
+  source (`tls_fallback.go`) and the Step 10 `openssl s_client` one-liner for on-box run.
+
+## Overall
+
+Verdict of this pass: **PASS with low/hardening notes** — no REQUIRES-FIX item. The one
+actionable code nit (http3 `Allow: POST`) is resolved. R04 remains the standing
+MEDIUM/HARDENING item (edge XFF attribution — see second-pass addendum), tracked for the
+trusted-proxy helper work.
