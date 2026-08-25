@@ -134,7 +134,9 @@ Do NOT execute CPU profile or trace during production verification.
 ## R03 — Mutating GET / CSRF method-confusion gap
 
 **Severity:** HIGH  
-**Status:** SOURCE CONFIRMED / LIVE AUTHENTICATED REPRO PENDING  
+**Status:** ✅ SOURCE FIXED / LIVE AUTHENTICATED REPRO PENDING  
+**Fix:** the 13 state-changing challenge/waf/clam endpoints are wrapped with `requirePOST` in the route table (`internal/webdetector/http_api.go`) — non-POST → `405` + `Allow: POST` before any auth/param/state work, so a state-changing GET can no longer slip past the session-CSRF boundary. Read siblings stay GET; already-guarded mutators (rules/history/ua-emergency/force-unblock/http3) verified and unchanged; `ingest-source` confirmed a read. Regression: `internal/webdetector/post_only_test.go`. Live authenticated-session repro (GET a mutator with a valid admin session → expect 405) rolls up to Step 10.  
+
 **Priority:** P0/P1
 
 Several handlers documented as POST mutators do not enforce `r.Method == POST` before mutation logic.

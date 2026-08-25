@@ -16,17 +16,20 @@ Do not skip dependency steps merely because a later change looks small. In parti
 # Execution order at a glance
 
 ```text
-1. Trusted request identity + effective scheme (XFF/XFP)
-2. pprof explicit admin-only authorization
-3. POST-only enforcement for every mutating endpoint
-4. Reusable Go pre-auth challenge + interactive login gate
-5. Direct :6060 browser transport policy -> :6061 when TLS ready
-6. Automatic request-aware session-cookie transport policy
-7. cfm.api.log auth-attempt schema + api_abuse -> cfm_endpoints default-on
-8. Per-auth-mechanism / route-cost API rate limiting
-9. Direct control-plane response/cache/security-header hardening
-10. Controlled credentialed regression + close Audit_Results findings
+1.  ✅ Trusted request identity + effective scheme (XFF/XFP)   — apiserver done (#1338); challenge item 8 declined
+2.  ✅ pprof explicit admin-only authorization                 — done (#1341); live scoped proof -> Step 10
+3.  ✅ POST-only enforcement for every mutating endpoint       — done (this change)
+4.  ☐  Reusable Go pre-auth challenge + interactive login gate
+5.  ☐  Direct :6060 browser transport policy -> :6061 when TLS ready
+6.  ☐  Automatic request-aware session-cookie transport policy
+7.  ✅ cfm.api.log auth-attempt schema + api_abuse -> cfm_endpoints default-on  — done (#1338); auth_autoblock.go removal pending
+8.  ☐  Per-auth-mechanism / route-cost API rate limiting
+9.  ☐  Direct control-plane response/cache/security-header hardening
+10. ☐  Controlled credentialed regression + close Audit_Results findings
 ```
+
+Status legend: ✅ source-complete · ☐ open. Live credentialed verification for the
+done items (R02 scoped→403, etc.) rolls up to Step 10.
 
 The first three are intentionally small, separately reviewable security fixes. Steps 4-6 are the interconnected browser transport/challenge/session work. Steps 7-9 harden abuse detection and response policy after identity/transport semantics are trustworthy. Step 10 proves the final boundaries live.
 
@@ -173,7 +176,17 @@ non-admin. Production regression must never execute `profile` or `trace`; `GET
 # Step 3 — POST-only enforcement for every mutating endpoint
 
 **Priority:** P0/P1  
-**Finding:** `Audit_Results.md` R03, HIGH source-confirmed
+**Finding:** `Audit_Results.md` R03, HIGH source-confirmed  
+**Status:** ✅ SOURCE FIXED — the 13 state-changing challenge/waf/clam endpoints
+(`{challenge/vhost,challenge/exclude,waf/exclude,clam/override,clam/mode,clam/sigignore}/…`)
+are wrapped with `requirePOST` in the single-source-of-truth route table
+(`internal/webdetector/http_api.go`): non-POST → `405` + `Allow: POST` before any
+auth/param/state work. Read siblings (`list`/`status`) stay GET; the already-guarded
+mutators (`webdet/rules/*`, `history/{prune,truncate}`, `ua-emergency`,
+`force-unblock-ip`, `http3/{enable,disable}`) were verified and left as-is; `ingest-source`
+is a read despite its name. Regression tests: `internal/webdetector/post_only_test.go`
+(reject non-POST / allow POST / reads stay GET). Live authenticated-session repro of a
+state-changing GET rolls up to Step 10.
 
 ## Problem
 
@@ -623,6 +636,29 @@ MCP-only credential / OAuth access token where available
 ```
 
 Never print credential values in audit output.
+
+## Obtaining the test credentials (prerequisite — read before Step 10)
+
+The scoped token is **not** a missing capability — CFM can already mint one. The
+read-only MCP cannot (it only observes), so the authorization probes run over
+curl/HTTP with a token minted here:
+
+- **Admin bearer:** the node's `AUTH_TOKEN` from `/etc/cfm/cfm.conf`. The `cfm`
+  CLI reads it automatically when run locally as root.
+- **Scoped viewer token — CLI (on the node):**
+  `cfm webtop tokens create --vhosts <host[,host2]> --label audit-scoped --ttl 1h`
+  → prints the token value (role defaults to `viewer` = scoped). List/clean up with
+  `cfm webtop tokens` and `cfm webtop tokens revoke <id>`.
+- **Scoped viewer token — API (admin-only):**
+  `POST /api/v1/auth/token` with
+  `{"vhosts":["example.com"],"role":"viewer","ttl":"1h","label":"audit-scoped"}`
+  → returns `{id, token, …}`. Revoke via `POST /api/v1/tokens/revoke`.
+
+Prefer a short TTL so test tokens self-expire. Prior audit passes stalled at this
+step only because they ran from **outside** the node with no admin credential —
+with the admin token (or a root shell on the node) the scoped token is one
+command. This is the concrete unblock for the R02/R03/R04 "live scoped /
+authenticated proof pending" items.
 
 ## Authorization regression
 
