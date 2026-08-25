@@ -113,7 +113,12 @@ Use this helper everywhere identity/scheme matters:
 # Step 2 — make pprof explicitly admin-only
 
 **Priority:** P0/P1  
-**Finding:** `Audit_Results.md` R02, HIGH source-confirmed / scoped live proof pending
+**Finding:** `Audit_Results.md` R02, HIGH source-confirmed / scoped live proof pending  
+**Status:** ✅ SOURCE FIXED — every pprof handler now wrapped with `adminOnlyHandler`
+(`internal/apiserver/apiserver_debug.go`); scoped→403 / admin→200 regression test
+added (`internal/apiserver/apiserver_pprof_authz_test.go`). Live credentialed
+scoped→403 proof still pending (Step 10) — no scoped token was available in the
+audit environment.
 
 ## Problem
 
@@ -140,13 +145,20 @@ Keep the existing pprof write-timeout/capture protections.
 ## Done when
 
 ```text
-anonymous -> 401
-invalid   -> 401
-scoped    -> 403
-admin     -> expected handler response
+anonymous -> 401   (TokenMiddleware, unchanged)
+invalid   -> 401   (TokenMiddleware, unchanged)
+scoped    -> 403   (adminOnlyHandler)   ✅ source + unit test
+admin     -> expected handler response  ✅ source + unit test
 ```
 
-Production regression must never execute `profile` or `trace`; `GET /debug/pprof/` is enough to verify the role boundary.
+- [x] every pprof handler wrapped with the shared admin-role gate (`adminOnlyHandler`)
+- [x] scoped→403 / anonymous→403 / admin→200 regression test (`apiserver_pprof_authz_test.go`)
+- [x] existing pprof write-timeout/capture protections kept (`PprofWriteTimeoutMiddleware` unchanged)
+- [ ] live credentialed scoped→403 proof (deferred to Step 10; needs a scoped token in the audit env)
+
+The unit test asserts scoped→403 at the handler, so the profiler never runs for a
+non-admin. Production regression must never execute `profile` or `trace`; `GET
+/debug/pprof/` is enough to verify the role boundary.
 
 ---
 
