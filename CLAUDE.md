@@ -326,6 +326,7 @@ rather than advancing heartbeats on failure.
 | MFA rollout | `docs/mfa_rollout_regression_checklist.md` |
 | BPF LSM | `docs/cfm-lsm.md` · Kernel hardening: `docs/kernsec.md` |
 | Detectors (incl. leniency §6) | `docs/DETECTORS.md` |
+| Detectors config unification (design: srcresolve / detectors.d overlays / converged defaults) | `docs/detectors-config-unification.md` |
 | Web detector history (as-built) | `docs/webdetector-history-design.md` |
 | `what's_wrong` root-cause engine (contract + roadmap) | `docs/whats-wrong-rootcause.md` |
 | Challenge engine design (PoW/solver/TLS-fp) | `docs/roadmaps/challenge-engine.md` |
