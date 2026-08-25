@@ -17,8 +17,8 @@
 //
 // Handler stack (outermost → innermost — see Start()):
 //   RequestLog → SecurityHeaders → AdminTransportRedirect → APISecurityAnomaly
-//   → PprofWriteTimeout → Auth.LoadAndSave → TokenMiddleware → CSRF → RateLimit
-//   → MFARollout → mux
+//   → PprofWriteTimeout → SessionCookieTransport → Auth.LoadAndSave → TokenMiddleware
+//   → CSRF → RateLimit → MFARollout → mux
 // SecurityHeaders (R10) sits outside AdminTransportRedirect so redirects/refusals
 // carry the baseline headers too, and gives the direct :6060/:6061 listeners the
 // same nosniff/Referrer-Policy the edge adds.
@@ -280,11 +280,18 @@ func Start(
 		if cookieName == "" {
 			cookieName = "cfm-sid"
 		}
+		// Cookie Secure is now AUTOMATIC (audit Step 6): the goauth manager always
+		// emits a Secure cfm-sid; SessionCookieTransportMiddleware translates it to a
+		// distinct non-Secure fallback cookie ONLY in the degraded plaintext :6060
+		// window. AUTH_SECURE_COOKIE is parsed for fleet compatibility but ignored.
+		if cfg.Debug.SecureCookieExplicit {
+			logging.LogfAPI("[apiserver] NOTE: AUTH_SECURE_COOKIE is deprecated and ignored — the session cookie's Secure flag is now automatic from the effective request scheme (edge or the :%d TLS listener ⇒ Secure). Remove it from cfm.conf.", cfg.Debug.TLSPort)
+		}
 		authCfg := goauth.Config{
 			DBPath:           cfg.Debug.AuthDBPath,
 			SessionTTL:       sessionTTL,
 			CookieName:       cookieName,
-			SecureCookie:     cfg.Debug.SecureCookie,
+			SecureCookie:     true, // always Secure; the degraded HTTP path uses a distinct fallback cookie
 			SameSite:         http.SameSiteLaxMode,
 			MFAEncryptionKey: resolveMFAEncryptionKey(cfg),
 			MFAIssuer:        "cfm-admin",
@@ -306,11 +313,11 @@ func Start(
 				logging.LogfAPI("[apiserver] auth db permission hardening warning: %v", err)
 			}
 			if cfg.Debug.AuthSessionDBPath != "" {
-				logging.LogfAPI("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
-					cfg.Debug.AuthDBPath, cfg.Debug.AuthSessionDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)
+				logging.LogfAPI("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=auto",
+					cfg.Debug.AuthDBPath, cfg.Debug.AuthSessionDBPath, sessionTTL, cookieName)
 			} else {
-				logging.LogfAPI("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=%v",
-					cfg.Debug.AuthDBPath, cfg.Debug.AuthDBPath, sessionTTL, cookieName, cfg.Debug.SecureCookie)
+				logging.LogfAPI("[apiserver] goauth store: auth_db=%s session_db=%s ttl=%s cookie=%s secure=auto",
+					cfg.Debug.AuthDBPath, cfg.Debug.AuthDBPath, sessionTTL, cookieName)
 			}
 		}
 	} else {
@@ -336,8 +343,11 @@ func Start(
 	// ── Build handler stack ───────────────────────────────────────────────────
 	// Execution order (outermost → innermost):
 	//   RequestLog → SecurityHeaders → AdminTransportRedirect → APISecurityAnomaly
-	//   → PprofWriteTimeout → LoadAndSave → TokenMiddleware → CSRF → RateLimit
-	//   → MFARollout → mux
+	//   → PprofWriteTimeout → SessionCookieTransport → LoadAndSave → TokenMiddleware
+	//   → CSRF → RateLimit → MFARollout → mux
+	// SessionCookieTransport (Step 6) wraps LoadAndSave so the session cookie's Secure
+	// flag is automatic: goauth always emits Secure; the middleware translates to a
+	// distinct non-Secure fallback cookie only in the degraded plaintext :6060 window.
 	// SecurityHeaders (R10) sets baseline nosniff/Referrer-Policy on every response.
 	// RateLimit (Step 8) runs INSIDE TokenMiddleware so it keys buckets on the
 	// authenticated identity; anonymous requests were already rejected upstream.
@@ -358,6 +368,15 @@ func Start(
 	handler = TokenMiddleware(cfg.API.AuthToken, store)(handler)
 	if Auth != nil {
 		handler = Auth.LoadAndSave(handler)
+		// Session-cookie transport (Step 6) wraps LoadAndSave from OUTSIDE so it can
+		// rename the request cookie before goauth reads it and rewrite the Set-Cookie
+		// after goauth writes it (Secure canonical cookie ⇄ non-Secure fallback in the
+		// degraded plaintext :6060 window only).
+		canonicalCookie := cfg.Debug.CookieName
+		if canonicalCookie == "" {
+			canonicalCookie = "cfm-sid"
+		}
+		handler = SessionCookieTransportMiddleware(canonicalCookie)(handler)
 	}
 	handler = PprofWriteTimeoutMiddleware(handler)
 	handler = APISecurityAnomalyMiddleware(handler)

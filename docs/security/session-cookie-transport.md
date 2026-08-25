@@ -1,6 +1,9 @@
 # Automatic request-aware session-cookie transport (audit Step 6)
 
-**Status:** 🎨 DESIGN — awaiting review before implementation.
+**Status:** ✅ IMPLEMENTED — `internal/apiserver/session_cookie_transport.go` +
+always-`Secure` goauth manager + `AUTH_SECURE_COOKIE` deprecation. Tests:
+`session_cookie_transport_test.go`. Live verification → Step 10. (Prerequisite: the
+`:6061` self-signed fallback, PR #1356, so a fresh/by-IP box is reachable over TLS.)
 
 Finding/spec: `Audit_Fix_Order.md` Step 6 (P1). Make the session cookie's `Secure`
 flag automatic from the **effective trusted scheme** (not `AUTH_SECURE_COOKIE`, not
@@ -54,9 +57,17 @@ is a separate credential — the `Secure` cookie is never overwritten/downgraded
   `Set-Cookie` header(s) at `WriteHeader`/first `Write` time: find the session
   cookie by name, rename it, strip `; Secure`. Only touches the one cookie; all other
   headers pass untouched.
-- **Guard:** rewrite only when `peer.Entry == "6060"` && `peer.Scheme == "http"` &&
-  the peer is non-loopback external (a local CLI on `:6060` doesn't do browser
-  sessions). Everywhere else: pass through, goauth's native `cfm-sid; Secure` stands.
+- **Guard:** rewrite only when `peer.Entry == "6060"` && `peer.Scheme == "http"` — any
+  effective-plaintext `:6060` session, **including loopback**. This is deliberate: with
+  R01/Step 5, `AdminTransportRedirect` *refuses* a direct-external `:6060` login POST
+  and exempts loopback, so the real beneficiary of the fallback cookie is a
+  **loopback/tunnelled** admin (e.g. an SSH tunnel to `http://127.0.0.1:6060`), not
+  just a TLS-down degraded window — both are effective-http `:6060` and both must get a
+  valid non-Secure cookie. A local CLI carries no session cookie, so it is unaffected.
+  Everywhere else: pass through, goauth's native `cfm-sid; Secure` stands. The inbound
+  rename also **drops** any canonical `cfm-sid` seen over plaintext (it can only be
+  injected — the real Secure cookie is never sent over http), preventing session
+  shadowing.
 
 ## 4. `AUTH_SECURE_COOKIE` deprecation (staged, per spec)
 

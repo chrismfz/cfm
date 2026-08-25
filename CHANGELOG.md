@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Session-cookie `Secure` is now automatic from the effective request scheme (audit
+  Step 6); `AUTH_SECURE_COOKIE` deprecated.** The goauth session cookie (`cfm-sid`) is
+  always `Secure`, and a new `SessionCookieTransportMiddleware` translates it on the
+  wire to a **distinct** non-Secure `cfm-sid-http-fallback` cookie **only** in the
+  TLS-down degraded plaintext `:6060` window (the sole place a session is written over
+  real cleartext, since a healthy `:6060` redirects browser admin to `:6061`). One
+  goauth session store is shared — the translation is per-request on the wire, so there
+  is **no manager-global cookie mutation and no race**. A browser holding `cfm-sid;
+  Secure` never sends it over http, so that Secure cookie is never downgraded or
+  overwritten. The effective scheme is spoof-safe (`X-Forwarded-Proto` is trusted only
+  from a loopback edge peer), so a direct `:6060` client cannot forge a Secure cookie.
+  `AUTH_SECURE_COOKIE` is now **parsed but ignored** with a one-time startup deprecation
+  warning when present. See `docs/security/session-cookie-transport.md`.
 - **The direct TLS admin port `:6061` now always completes a handshake via a
   self-signed fallback.** Previously `sslcollector`'s `GetCertificate` returned an
   error when it had discovered no certificate yet (fresh system) or when a client
