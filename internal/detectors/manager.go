@@ -681,6 +681,8 @@ func (m *manager) stopAll() {
 	// disables or retunes challenge_solver_farm would otherwise leave the last
 	// marks to age out with nothing left running to refresh or correct them.
 	webdet.ResetSolverFarmMarks()
+	// Same for the abuse_shadow rate-outlier marks the WebUI badges from.
+	webdet.ResetAbuseShadowMarks()
 
 	// Wait outside the mutex.
 	m.wg.Wait()

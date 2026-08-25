@@ -43,6 +43,11 @@ type ChallengeVhostState struct {
 	// into this store would leave two things to expire instead of one.
 	SolverFarm bool `json:"solver_farm"`
 
+	// ShadowOutliers is the live abuse_shadow rate-outlier count for this vhost.
+	// Stamped by the handler, not stored (the mark lives in abuse_shadow_marks.go
+	// with its own TTL). 0 when none/expired.
+	ShadowOutliers int `json:"shadow_outliers"`
+
 	// State is the vhost's position on the escalation ladder
 	// (normal|suspicious|challenged|under_attack). Stamped by the handler via the
 	// single deriveVhostState() helper (like SolverFarm, not stored): the

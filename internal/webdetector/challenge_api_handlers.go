@@ -101,6 +101,7 @@ func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	for i := range rows {
 		rows[i].SolverFarm = IsSolverFarm(rows[i].Host)
+		rows[i].ShadowOutliers = AbuseShadowOutliers(rows[i].Host)
 		rows[i].State = e.deriveVhostState(&rows[i], now)
 	}
 	writeJSON(w, http.StatusOK, rows)
@@ -158,6 +159,7 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 		v.Status = "inactive"
 	}
 	v.SolverFarm = IsSolverFarm(v.Host)
+	v.ShadowOutliers = AbuseShadowOutliers(v.Host)
 	v.State = e.deriveVhostState(&v, now)
 	writeJSON(w, http.StatusOK, v)
 }

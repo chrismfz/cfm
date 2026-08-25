@@ -970,6 +970,11 @@ func RunLiveTop(baseURL string, limit int) error {
 			if row.SolverFarm {
 				suspCell = "F" + suspCell[1:]
 			}
+			// NOTE: row.ShadowOutliers (abuse_shadow rate-outlier count) is
+			// deliberately NOT rendered in this compact TUI — the SUP cell has a
+			// single reserved indicator slot (taken by the farm "F"). The count is
+			// surfaced in `cfm webtop challenge` (shadow=N), cfm-admin, and the
+			// abuse_shadow MCP tool instead.
 
 			tableRows = append(tableRows, []string{
 				host,

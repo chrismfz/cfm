@@ -250,7 +250,7 @@ func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows := decorateSolverFarmShort(applyShortFilter(e.TopShort(limit), parseVhostFilter(r)))
+	rows := decorateShadowShort(decorateSolverFarmShort(applyShortFilter(e.TopShort(limit), parseVhostFilter(r))))
 
 	resp := topShortResponse{
 		WindowSec:      e.cfg.Window.Seconds(),
@@ -296,7 +296,7 @@ func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
 	if minScore <= 0 {
 		minScore = 0.50
 	}
-	rows := decorateSolverFarmSuspicious(applySuspiciousFilter(e.longwin.SuspiciousTop(limit, minScore), parseVhostFilter(r)))
+	rows := decorateShadowSuspicious(decorateSolverFarmSuspicious(applySuspiciousFilter(e.longwin.SuspiciousTop(limit, minScore), parseVhostFilter(r))))
 	writeJSON(w, http.StatusOK, rows)
 }
 
@@ -322,7 +322,7 @@ func (e *Engine) handleLongTop(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows := decorateSolverFarmSuspicious(applySuspiciousFilter(e.longwin.SuspiciousTop(limit, 0), parseVhostFilter(r)))
+	rows := decorateShadowSuspicious(decorateSolverFarmSuspicious(applySuspiciousFilter(e.longwin.SuspiciousTop(limit, 0), parseVhostFilter(r))))
 	resp := longTopResponse{
 		LongHorizonSec: e.cfg.LongHorizon().Seconds(),
 		Rows:           rows,

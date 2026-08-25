@@ -165,6 +165,10 @@ export const liveMixin = {
           // farmed AND auto-challenged is the common case, and it must not lose
           // the badge just because the merge picked the other side.
           solver_farm: Boolean(existing.solver_farm || row.solver_farm),
+          // Same merge hazard for the abuse_shadow outlier count: it can ride in
+          // on either source, so take whichever side has it rather than losing it
+          // when the merge picks the other.
+          shadow_outliers: existing.shadow_outliers || row.shadow_outliers || 0,
           fromSuspicious: Boolean(existing.fromSuspicious),
           fromChallenge: true,
           source: existing.fromSuspicious ? "both" : "challenged",
