@@ -75,33 +75,12 @@ func init() {
 			EnrichDirs: dirs,
 		}
 
-		res := srcresolve.Resolve(srcresolve.Spec{
-			Service:           section,
-			Mode:              cfg.Mode,
-			JournalUnit:       cfg.JournalUnit,
-			LogPath:           cfg.LogPath,
-			JournalCandidates: sshJournalUnits,
-			FileCandidates:    sshLogFiles,
-		}, srcresolve.DefaultProbes())
-
-		if res.Kind == srcresolve.KindNone {
-			// Nothing confirmed right now. Tail the historical blind default
-			// anyway (the pre-srcresolve register always did): resolution runs
-			// only at registration, so an inert detector would stay dead until
-			// the next config reload, while a blind tailer self-heals the
-			// moment the source starts producing. An explicit MODE=file keeps
-			// its old blind default (/var/log/secure); everything else falls
-			// back to the journal default.
-			why := res.Reason
-			if strings.EqualFold(strings.TrimSpace(cfg.Mode), "file") {
-				res = srcresolve.Result{Kind: srcresolve.KindFile, Path: sshLogFiles[0],
-					Reason: "provisional default (nothing confirmed)"}
-			} else {
-				res = srcresolve.Result{Kind: srcresolve.KindJournal, Unit: sshJournalUnits[0],
-					Reason: "provisional default (nothing confirmed)"}
-			}
-			logging.Logf("[detectors][%s] no log source confirmed (%s); tailing default %s%s provisionally — set MODE/JOURNAL_UNIT/LOG_PATH to override",
-				section, why, res.Unit, res.Path)
+		// Resolution + provisional policy live in planSSHSource
+		// (source_report.go), shared with the dry-run source report.
+		plan := planSSHSource(section, kv, srcresolve.DefaultProbes())
+		res := plan.res
+		if plan.note != "" {
+			logging.Logf("[detectors][%s] %s — set MODE/JOURNAL_UNIT/LOG_PATH to override", section, plan.note)
 		}
 
 		// Reflect the resolved source into cfg BEFORE NewAuth so alert extras

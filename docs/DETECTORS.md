@@ -66,6 +66,13 @@ With `auto` available you normally set nothing; pin explicit keys only for
 custom layouts. If a detector supports multiple source backends and you do pin
 one, choose exactly one clear path in each section (comment the others out).
 
+**Preview before trusting it:** `cfm detectors-srcresolve` (alias
+`detectors-resolve`), the cfm-admin Detectors page "Source resolution" card,
+`GET /api/v1/detectors/source-resolution`, and the `detectors_srcresolve` MCP
+tool all show the dry-run resolution for every section on the host — same
+planners the daemon runs, probes live, nothing changes. Check it per node
+before removing hand-set source pins from a config.
+
 ### Threshold / window / cooldown semantics
 
 Most detectors use this model:

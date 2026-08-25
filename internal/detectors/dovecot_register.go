@@ -88,27 +88,12 @@ func init() {
 			}
 		}
 
-		res := srcresolve.Resolve(srcresolve.Spec{
-			Service:           section,
-			Mode:              cfg.Mode,
-			JournalUnit:       cfg.JournalUnit,
-			LogPath:           cfg.LogPath,
-			DockerContainer:   cfg.DockerContainer,
-			JournalCandidates: dovecotJournalUnits,
-			FileCandidates:    dovecotLogFiles,
-			DockerPatterns:    dovecotDockerPatterns,
-		}, srcresolve.DefaultProbes())
-
-		if res.Kind == srcresolve.KindNone {
-			// Nothing confirmed right now. Tail the historical blind default
-			// anyway (the pre-srcresolve register always ended on a source):
-			// resolution runs only at registration, so an inert detector would
-			// stay dead until the next config reload, while a blind tailer
-			// self-heals the moment the log appears.
-			logging.Logf("[detectors][%s] no log source confirmed (%s); tailing default mail log %s provisionally — set MODE/JOURNAL_UNIT/LOG_PATH/DOCKER_CONTAINER to override",
-				section, res.Reason, dovecotLogFiles[0])
-			res = srcresolve.Result{Kind: srcresolve.KindFile, Path: dovecotLogFiles[0],
-				Reason: "provisional default (nothing confirmed)"}
+		// Resolution + provisional policy live in planDovecotSource
+		// (source_report.go), shared with the dry-run source report.
+		plan := planDovecotSource(section, kv, srcresolve.DefaultProbes())
+		res := plan.res
+		if plan.note != "" {
+			logging.Logf("[detectors][%s] %s — set MODE/JOURNAL_UNIT/LOG_PATH/DOCKER_CONTAINER to override", section, plan.note)
 		}
 
 		// Reflect the resolved source into cfg BEFORE NewAuth so alert extras

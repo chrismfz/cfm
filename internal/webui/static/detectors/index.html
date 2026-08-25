@@ -55,6 +55,14 @@
     <p class="muted" style="margin:6px 0 8px">Reality-check per detector type: does its daemon even exist on this host? <span class="pill">absent</span> is informational (nothing to watch, nothing forgotten) — only <span class="pill danger">GAP</span> and <span class="pill warn">dormant</span> deserve attention.</p>
     <div class="table-wrap"><table><thead><tr><th>Type</th><th>Verdict</th><th>Sections</th><th>Units</th><th>Note</th></tr></thead><tbody id="detectorsCoverageBody"></tbody></table></div>
   </section>
+  <section class="card wide">
+    <div class="toolbar wrap" style="justify-content:space-between;align-items:center">
+      <h2 style="margin:0">Source resolution (dry run)</h2>
+      <div class="toolbar wrap"><span id="detectorsSrcResolveNote" class="muted"></span><button id="detectorsSrcResolveBtn" class="btn-quiet">Re-run</button></div>
+    </div>
+    <p class="muted" style="margin:6px 0 8px">Which log source each section would tail on <em>this</em> host right now, and why — the same resolution the daemon performs at detector start (probes run; nothing changes). <span class="pill">as-configured</span> = explicit keys used verbatim · <span class="pill warn">provisional</span> = blind historical default, self-heals when the source appears · <span class="pill danger">self-disable</span> = the section's MTA is absent on this host. On-demand only (runs journalctl/systemctl/docker probes) — use Re-run after changing sources.</p>
+    <div class="table-wrap"><table><thead><tr><th>Section</th><th>On</th><th>Source</th><th>Target</th><th>Why</th></tr></thead><tbody id="detectorsSrcResolveBody"></tbody></table></div>
+  </section>
   <section class="card wide"><h2>Global</h2><div id="detectorsGlobal" class="summary-grid"></div></section>
   <section class="card wide" id="detectorsInitCard" style="display:none"><h2>Initialize detectors.conf</h2><p class="muted">No detectors.conf was found. You can initialize a safe starter config from built-in catalog defaults.</p><div class="toolbar wrap"><button id="detectorsInitFromCatalogBtn">Initialize config from catalog defaults</button></div></section>
   <section class="card wide"><div class="toolbar wrap" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Core detectors</h2><div class="toolbar wrap"><select id="detectorsCatalogType" class="input"></select><button id="detectorsAddCatalogBtn" class="btn-quiet">Add detector section</button><select id="detectorsPresetSelect" class="input"></select><button id="detectorsCreatePresetBtn" class="btn-quiet">Create from preset</button><button id="detectorsAddCoreFromExampleBtn" class="btn-quiet">Insert from template/example</button></div></div><div class="table-wrap"><table><thead><tr><th>Section</th><th>Status</th><th>Enabled</th><th>Key settings (JSON)</th></tr></thead><tbody id="detectorsCoreBody"></tbody></table></div></section>

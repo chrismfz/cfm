@@ -391,3 +391,38 @@ func runResolveCases(t *testing.T, cases []struct {
 		})
 	}
 }
+
+// TestMemoProbes: each underlying probe runs at most once per distinct
+// question, and results are stable across repeats.
+func TestMemoProbes(t *testing.T) {
+	calls := map[string]int{}
+	p := MemoProbes(Probes{
+		JournalHasEntries: func(u string) bool { calls["entries:"+u]++; return u == "a" },
+		JournalMatches:    func(u, sig string) bool { calls["match:"+u+":"+sig]++; return true },
+		UnitActive:        func(u string) bool { calls["active:"+u]++; return false },
+		CanonicalUnit:     func(u string) string { calls["canon:"+u]++; return u },
+		JournalReadable:   func() bool { calls["readable"]++; return true },
+		FileExists:        func(f string) bool { calls["file:"+f]++; return false },
+		ListContainers:    func() []string { calls["containers"]++; return []string{"c1"} },
+	})
+	for i := 0; i < 3; i++ {
+		if !p.JournalHasEntries("a") || p.JournalHasEntries("b") {
+			t.Fatal("memo changed results")
+		}
+		p.JournalMatches("u", "sig")
+		p.UnitActive("x")
+		p.CanonicalUnit("x")
+		p.JournalReadable()
+		p.FileExists("/f")
+		p.ListContainers()
+	}
+	for k, n := range calls {
+		if n != 1 {
+			t.Fatalf("probe %s ran %d times, want 1", k, n)
+		}
+	}
+	// Nil probes stay nil.
+	if mp := MemoProbes(Probes{}); mp.JournalHasEntries != nil || mp.ListContainers != nil {
+		t.Fatal("nil probes must stay nil")
+	}
+}

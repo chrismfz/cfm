@@ -57,6 +57,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerIPLocate(srv, d)
 	registerDetectorsStatus(srv, d)
 	registerDetectorCoverage(srv, d)
+	registerDetectorSources(srv, d)
 	registerConfigDrift(srv, d)
 	registerSystemHealth(srv, d)
 	registerProcessList(srv, d)
