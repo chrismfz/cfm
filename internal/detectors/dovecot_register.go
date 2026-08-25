@@ -1,24 +1,35 @@
 package detectors
 
 import (
+	"strings"
+	"time"
+
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectors/dovecot"
 	"cfm/internal/detectors/meta"
+	"cfm/internal/detectors/srcresolve"
 	"cfm/internal/logging"
-	"os"
-	"strings"
-	"time"
 )
 
 // shared state for detectors
 var dovecotState, _ = core.LoadState("")
+
+// dovecot_auth source candidates for srcresolve (first = historical default).
+// File candidates mirror the old guessMailLog() order (syslog mail logs — the
+// parser expects syslog-framed lines, so dovecot's native log file is NOT a
+// candidate); the docker pattern matches mailcow-style container names.
+var (
+	dovecotJournalUnits   = []string{"dovecot.service"}
+	dovecotLogFiles       = []string{"/var/log/maillog", "/var/log/mail.log"}
+	dovecotDockerPatterns = []string{"dovecot"}
+)
 
 func init() {
 	meta.Register(meta.DetectorMeta{
 		TypeKey:           "dovecot_auth",
 		Title:             "Dovecot authentication",
 		Description:       "Detect abusive IMAP/POP authentication attempts.",
-		DefaultsTemplate:  map[string]string{"ENABLED": "1", "MODE": "journal", "JOURNAL_UNIT": "dovecot.service", "EVERY": "2s", "WINDOW": "15m", "COOLDOWN": "20m", "BLOCK": "dryrun"},
+		DefaultsTemplate:  map[string]string{"ENABLED": "1", "MODE": "auto", "EVERY": "2s", "WINDOW": "15m", "COOLDOWN": "20m", "BLOCK": "dryrun"},
 		ExamplePresets:    []meta.Preset{{ID: "mailcow", Title: "mailcow", Description: "Use container logs.", Template: map[string]string{"MODE": "docker", "DOCKER_CONTAINER": "dovecot-mailcow"}}},
 		LeniencySupported: true,
 	})
@@ -44,9 +55,9 @@ func init() {
 		usePTR := kvBool(kv, "PTR", kvBool(global, "PTR", true))
 
 		cfg := dovecot.Config{
-			Mode:            kvStrClean(kv, "MODE", "journal"),
+			Mode:            kvStrClean(kv, "MODE", "auto"), // auto|journal|file|docker; explicit values win
 			LogPath:         kvStrClean(kv, "LOG_PATH", ""),
-			JournalUnit:     kvStrClean(kv, "JOURNAL_UNIT", "dovecot.service"),
+			JournalUnit:     kvStrClean(kv, "JOURNAL_UNIT", ""),
 			DockerContainer: kvStrClean(kv, "DOCKER_CONTAINER", ""),
 			Every:           kvDur(kv, "EVERY", defEvery),
 			Window:          kvDur(kv, "WINDOW", defWindow),
@@ -77,150 +88,71 @@ func init() {
 			}
 		}
 
-		// Αν δώσεις DOCKER_CONTAINER και δεν έχεις βάλει ρητά MODE,
-		// γύρνα σε docker mode (αντί για default "journal").
-		if cfg.DockerContainer != "" && strings.EqualFold(cfg.Mode, "journal") {
-			cfg.Mode = "docker"
+		res := srcresolve.Resolve(srcresolve.Spec{
+			Service:           section,
+			Mode:              cfg.Mode,
+			JournalUnit:       cfg.JournalUnit,
+			LogPath:           cfg.LogPath,
+			DockerContainer:   cfg.DockerContainer,
+			JournalCandidates: dovecotJournalUnits,
+			FileCandidates:    dovecotLogFiles,
+			DockerPatterns:    dovecotDockerPatterns,
+		}, srcresolve.DefaultProbes())
+
+		if res.Kind == srcresolve.KindNone {
+			// Nothing confirmed right now. Tail the historical blind default
+			// anyway (the pre-srcresolve register always ended on a source):
+			// resolution runs only at registration, so an inert detector would
+			// stay dead until the next config reload, while a blind tailer
+			// self-heals the moment the log appears.
+			logging.Logf("[detectors][%s] no log source confirmed (%s); tailing default mail log %s provisionally — set MODE/JOURNAL_UNIT/LOG_PATH/DOCKER_CONTAINER to override",
+				section, res.Reason, dovecotLogFiles[0])
+			res = srcresolve.Result{Kind: srcresolve.KindFile, Path: dovecotLogFiles[0],
+				Reason: "provisional default (nothing confirmed)"}
+		}
+
+		// Reflect the resolved source into cfg BEFORE NewAuth so alert extras
+		// (mode/log/unit/container) report what is actually tailed. (The old
+		// register mutated cfg after NewAuth, which never reached the detector.)
+		switch res.Kind {
+		case srcresolve.KindJournal:
+			cfg.Mode, cfg.JournalUnit = "journal", res.Unit
+		case srcresolve.KindFile:
+			cfg.Mode, cfg.LogPath = "file", res.Path
+		case srcresolve.KindDocker:
+			cfg.Mode, cfg.DockerContainer = "docker", res.Container
 		}
 
 		det := dovecot.NewAuth(cfg)
 		det.SetName(section)
 
-		// choose source based on MODE, with autodetect + fallback
-		mode := strings.ToLower(cfg.Mode)
-
-		switch mode {
-		case "file":
-			// autodetect file path if blank
-			logPath := cfg.LogPath
-			if strings.TrimSpace(logPath) == "" {
-				logPath = guessMailLog()
-			}
-			src := core.NewFileTailer(logPath)
-			det.SetSource(src)
+		switch res.Kind {
+		case srcresolve.KindJournal:
+			det.SetSource(core.NewJournalTailer(res.Unit))
 			if dovecotState != nil {
-				key := core.FileStateKey(section, logPath)
-				det.SetState(dovecotState, key)
+				det.SetState(dovecotState, core.FileStateKey(section, "journal:"+res.Unit))
 			}
-			logging.Logf("[detectors][%s] using file log: %s", section, logPath)
-			cfg.LogPath = logPath
-
-		case "docker":
-
-			// docker logs mode (με fallback αν δεν έχει container)
-			container := strings.TrimSpace(cfg.DockerContainer)
-			if container == "" {
-				// αν δεν έδωσες container, πέφτουμε πίσω σε journal/file
-				logging.Logf("[detectors][%s] MODE=docker αλλά DOCKER_CONTAINER είναι κενό – falling back to journal/file", section)
-
-				// Try journal first; if unavailable, fall back to file
-				j := core.NewJournalTailer(cfg.JournalUnit)
-				if err := j.Open(); err == nil {
-					if cerr := j.Close(); cerr != nil {
-						// Not fatal: we only probed availability; detector will reopen later.
-						logging.Logf("[detectors][%s] journal probe close error (unit=%s): %v", section, cfg.JournalUnit, cerr)
-					}
-					det.SetSource(j)
-					if dovecotState != nil {
-						key := core.FileStateKey(section, "journal:"+cfg.JournalUnit)
-						det.SetState(dovecotState, key)
-					}
-					logging.Logf("[detectors][%s] using journal: unit=%s", section, cfg.JournalUnit)
-					cfg.Mode = "journal"
-				} else {
-					// Fallback to file
-					logPath := cfg.LogPath
-					if strings.TrimSpace(logPath) == "" {
-						logPath = guessMailLog()
-					}
-					src := core.NewFileTailer(logPath)
-					det.SetSource(src)
-					if dovecotState != nil {
-						key := core.FileStateKey(section, logPath)
-						det.SetState(dovecotState, key)
-					}
-					logging.Logf("[detectors][%s] journal unavailable (unit=%s): %v — falling back to file log: %s",
-						section, cfg.JournalUnit, err, logPath)
-					cfg.Mode = "file"
-					cfg.LogPath = logPath
-				}
-			} else {
-				src := core.NewDockerTailer(container, cfg.DockerArgs...)
-				det.SetSource(src)
-				if dovecotState != nil {
-					key := core.FileStateKey(section, "docker:"+container)
-					det.SetState(dovecotState, key)
-				}
-				logging.Logf("[detectors][%s] using docker logs (container=%s, args=%v)", section, container, cfg.DockerArgs)
-			}
-
-		default: // "journal"
-
-			// Try journal first; if unavailable, fall back to file
-			j := core.NewJournalTailer(cfg.JournalUnit)
-			if err := j.Open(); err == nil {
-				if cerr := j.Close(); cerr != nil {
-					// Not fatal: we only probed availability; detector will reopen later.
-					logging.Logf("[detectors][%s] journal probe close error (unit=%s): %v", section, cfg.JournalUnit, cerr)
-				}
-				det.SetSource(j)
-				if dovecotState != nil {
-					key := core.FileStateKey(section, "journal:"+cfg.JournalUnit)
-					det.SetState(dovecotState, key)
-				}
-				logging.Logf("[detectors][%s] using journal: unit=%s", section, cfg.JournalUnit)
-			} else {
-				// Fallback to file
-				logPath := cfg.LogPath
-				if strings.TrimSpace(logPath) == "" {
-					logPath = guessMailLog()
-				}
-				src := core.NewFileTailer(logPath)
-				det.SetSource(src)
-				if dovecotState != nil {
-					key := core.FileStateKey(section, logPath)
-					det.SetState(dovecotState, key)
-				}
-				logging.Logf("[detectors][%s] journal unavailable (unit=%s): %v — falling back to file log: %s",
-					section, cfg.JournalUnit, err, logPath)
-				cfg.Mode = "file"
-				cfg.LogPath = logPath
-			}
-
-		}
-
-		// pretty start line
-
-		switch strings.ToLower(cfg.Mode) {
-		case "file":
-
-			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=file log=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
-				section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.LogPath, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
-		case "docker":
-			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=docker container=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
-				section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.DockerContainer, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
-		default: // journal
+			logging.Logf("[detectors][%s] source=journal unit=%s (%s)", section, res.Unit, res.Reason)
 			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=journal unit=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
-				section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.JournalUnit, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
+				section, cfg.Every, cfg.Window, cfg.Cooldown, res.Unit, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
+		case srcresolve.KindFile:
+			det.SetSource(core.NewFileTailer(res.Path))
+			if dovecotState != nil {
+				det.SetState(dovecotState, core.FileStateKey(section, res.Path))
+			}
+			logging.Logf("[detectors][%s] source=file path=%s (%s)", section, res.Path, res.Reason)
+			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=file log=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
+				section, cfg.Every, cfg.Window, cfg.Cooldown, res.Path, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
+		case srcresolve.KindDocker:
+			det.SetSource(core.NewDockerTailer(res.Container, cfg.DockerArgs...))
+			if dovecotState != nil {
+				det.SetState(dovecotState, core.FileStateKey(section, "docker:"+res.Container))
+			}
+			logging.Logf("[detectors][%s] source=docker container=%s args=%v (%s)", section, res.Container, cfg.DockerArgs, res.Reason)
+			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=docker container=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
+				section, cfg.Every, cfg.Window, cfg.Cooldown, res.Container, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
 		}
+
 		return det, nil
-
 	})
-}
-
-// ---- helpers ---------------------------------------------------------------
-func guessMailLog() string {
-	// Prefer /var/log/maillog (RHEL/cPanel), else /var/log/mail.log (Debian/Ubuntu)
-	if fileExists("/var/log/maillog") {
-		return "/var/log/maillog"
-	}
-	if fileExists("/var/log/mail.log") {
-		return "/var/log/mail.log"
-	}
-	// last resort: dovecot’s own default in Auth.NewAuth will use /var/log/maillog
-	return "/var/log/maillog"
-}
-func fileExists(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && !fi.IsDir()
 }

@@ -59,6 +59,24 @@ back-filled here — see the git/PR history for that period.
    request (MIME-canonicalized map keys) and was silently ignored, and a bogus
    `X-CFM-Token` alongside an assertion now fails hard as an invalid token.
 
+### Changed
+- **`ssh_auth` / `dovecot_auth` now auto-detect their log source (`MODE = auto`).**
+  The new shared resolver (`internal/detectors/srcresolve`) tries journald
+  units with entries → active units (alias-resolved to the canonical name) →
+  (dovecot) docker container discovery → known log files, so one
+  `detectors.conf` works across EL/cPanel, Debian/DirectAdmin and mailcow
+  hosts without hand-set `MODE`/`LOG_PATH`/`JOURNAL_UNIT`. Explicit values
+  keep working and win (a pinned `MODE=journal` unit now additionally falls
+  back to the mail-log file where journalctl cannot run at all, as dovecot
+  already did). Fixes the silent no-op ssh detector on Debian for configs that
+  omit the source keys — journald does not resolve the `sshd.service` alias,
+  so auto picks `ssh.service`; live configs that PIN `JOURNAL_UNIT =
+  sshd.service` keep their explicit value and need the pin dropped (see
+  `docs/detectors-config-unification.md` migration). Dovecot alerts now report
+  the source actually tailed after a fallback. When nothing is confirmed the
+  detector tails its historical default provisionally (self-heals when the
+  source appears) and logs the full resolution trace.
+
 ### Added
 - **`host_access_history` — archival per-vhost traffic profile (MCP tool + `GET /api/v1/webdet/host-access-history`).**
   Answers "this domain's traffic jumped — is it crawlers, and since when?" for
