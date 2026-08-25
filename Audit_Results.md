@@ -287,7 +287,11 @@ Observed TLS:
 
 ### Remaining tests
 
-- [ ] unknown/wrong SNI behavior
+- [x] unknown/wrong/absent SNI behavior — now **defined**: `:6061` serves a
+      lazily-generated self-signed fallback cert when the real-cert path has nothing
+      (no discovered cert, or no SNI on a by-IP client), so the handshake always
+      completes instead of aborting (Step 6 prerequisite; CHANGELOG Unreleased). A
+      real discovered cert is still always preferred. Never paired with HSTS.
 - [ ] TLS 1.2 minimum / legacy protocol rejection
 - [ ] direct `:6061/cfm-admin/` challenge behavior after challenge work is implemented
 - [ ] headers/cookie policy after automatic effective-scheme work lands

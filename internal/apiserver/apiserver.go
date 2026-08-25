@@ -399,9 +399,13 @@ func Start(
 		fullTLSAddr := fmt.Sprintf("%s:%d", tlsAddr, cfg.Debug.TLSPort)
 
 		tlsCfg := &tls.Config{
-			MinVersion:     tls.VersionTLS12,
-			NextProtos:     []string{"h2", "http/1.1"},
-			GetCertificate: ssl.GetCertificate, // SNI-based, auto-rotates
+			MinVersion: tls.VersionTLS12,
+			NextProtos: []string{"h2", "http/1.1"},
+			// SNI-based, auto-rotating real certs from sslcollector, with a self-signed
+			// fallback so :6061 always completes a handshake (fresh system with no
+			// discovered cert, or a by-IP client with no SNI) instead of locking the
+			// operator out. Self-signed only; never paired with HSTS.
+			GetCertificate: withSelfSignedFallback(ssl.GetCertificate),
 		}
 
 		ln, err := net.Listen("tcp", fullTLSAddr)
