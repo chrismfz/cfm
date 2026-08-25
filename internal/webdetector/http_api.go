@@ -56,6 +56,7 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/webdet/analyze-ip", e.handleAnalyzeIP},
 		{"/api/v1/webdet/force-unblock-ip", e.handleForceUnblockIP},
 		{"/api/v1/webdet/analyze-host", e.handleAnalyzeHost},
+		{"/api/v1/webdet/host-access-history", e.handleHostAccessHistory},
 		{"/api/v1/webdet/summary", e.handleWebdetSummary},
 		{"/api/v1/webdet/ingest-source", e.handleIngestSource},
 		{"/api/v1/webdet/vhosts", e.handleWebdetVhosts},

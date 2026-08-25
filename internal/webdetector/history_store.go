@@ -416,18 +416,27 @@ func (s *HistoryStore) CountEventsSince(typ, host string, hours int) (int, error
 	return n, nil
 }
 
+// Summarize aggregates detector events for the trailing `hours` window ending
+// now. For an absolute window that must ALIGN with another data source (e.g.
+// host_access_history aligning detector counts with its access-log scan), use
+// SummarizeRange — the hours variant samples time.Now() independently.
 func (s *HistoryStore) Summarize(host, ip string, hours int) (HistorySummary, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if hours <= 0 {
 		hours = 24
 	}
 	to := time.Now().Unix()
-	from := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
-	r := HistorySummary{FromUnix: from, ToUnix: to}
+	return s.SummarizeRange(host, ip, to-int64(hours)*3600, to)
+}
 
-	clauses := []string{"ts_unix >= ?", "ts_unix <= ?"}
-	args := []interface{}{from, to}
+// SummarizeRange is Summarize over an EXPLICIT half-open [fromUnix, toUnix)
+// window. HistorySummary.FromUnix/ToUnix echo exactly these bounds.
+func (s *HistoryStore) SummarizeRange(host, ip string, fromUnix, toUnix int64) (HistorySummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := HistorySummary{FromUnix: fromUnix, ToUnix: toUnix}
+
+	clauses := []string{"ts_unix >= ?", "ts_unix < ?"}
+	args := []interface{}{fromUnix, toUnix}
 	if host != "" {
 		clauses = append(clauses, "host = ?")
 		args = append(args, host)
@@ -474,23 +483,57 @@ GROUP BY event_type`, args...)
 }
 
 // WAFByRule returns WAF hit counts grouped by rule name (stored in the reason
-// column) for the given host and time window.
-// host="" returns the global breakdown (admin view).
+// column) for the given host over the trailing `hours` window ending now.
+// host="" returns the global breakdown (admin view). For an absolute window
+// aligned with another data source use WAFByRuleRange.
 func (s *HistoryStore) WAFByRule(host string, hours int) ([]WAFRuleHit, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if hours <= 0 {
 		hours = 24
 	}
-	from := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
+	to := time.Now().Unix()
+	return s.WAFByRuleRange(host, to-int64(hours)*3600, to)
+}
 
+// WAFByRuleRange is WAFByRule over an EXPLICIT half-open [fromUnix, toUnix)
+// window.
+//
+// NOTE the event universe: this includes BOTH observations and triggers. The
+// WAF engine summary treats them as separate events too — but a block that
+// clears should_push emits a trigger AND an observation for ONE physical hit,
+// so summing these rows double-counts serious hits (see WAFObservedByRuleRange
+// for an observation-only view whose totals reconcile with Summarize's
+// waf_observed).
+func (s *HistoryStore) WAFByRuleRange(host string, fromUnix, toUnix int64) ([]WAFRuleHit, error) {
+	return s.wafByRuleTypes(host, fromUnix, toUnix,
+		[]string{"waf_observed", "waf_observe", "waf_trigger"})
+}
+
+// WAFObservedByRuleRange is the OBSERVATION-only counterpart: per-rule counts
+// over exactly the same event universe as HistorySummary.WAFObserved
+// ('waf_observed' + 'waf_observe'), so sum(rules[].count) reconciles with
+// summary.waf_observed for the same window. Triggers are excluded on purpose —
+// see WAFByRuleRange.
+func (s *HistoryStore) WAFObservedByRuleRange(host string, fromUnix, toUnix int64) ([]WAFRuleHit, error) {
+	return s.wafByRuleTypes(host, fromUnix, toUnix,
+		[]string{"waf_observed", "waf_observe"})
+}
+
+func (s *HistoryStore) wafByRuleTypes(host string, fromUnix, toUnix int64, types []string) ([]WAFRuleHit, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	quoted := make([]string, 0, len(types))
+	for _, typ := range types {
+		quoted = append(quoted, "'"+strings.ReplaceAll(typ, "'", "''")+"'")
+	}
 	clauses := []string{
-		"event_type IN ('waf_observed','waf_observe','waf_trigger')",
+		"event_type IN (" + strings.Join(quoted, ",") + ")",
 		"ts_unix >= ?",
+		"ts_unix < ?",
 		"reason IS NOT NULL",
 		"reason != ''",
 	}
-	args := []interface{}{from}
+	args := []interface{}{fromUnix, toUnix}
 	if host != "" {
 		clauses = append(clauses, "host = ?")
 		args = append(args, host)
@@ -768,6 +811,33 @@ func (s *HistoryStore) Stats() (HistoryStats, error) {
 
 func (s *HistoryStore) String() string {
 	return fmt.Sprintf("history(sqlite path=%s retention_days=%d prune_every=%s)", s.path, s.retentionDays, s.pruneEvery)
+}
+
+// OldestEventUnix returns the oldest event timestamp actually retained in the
+// store (0 when empty). Read views use it to answer "does the data really span
+// the requested window?" — a 90-day query against a 30-day retention must be
+// able to say so instead of silently returning partial counts.
+func (s *HistoryStore) OldestEventUnix() int64 {
+	if s == nil || s.db == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var min sql.NullInt64
+	if err := s.db.QueryRow(`SELECT MIN(ts_unix) FROM history_events`).Scan(&min); err != nil || !min.Valid {
+		return 0
+	}
+	return min.Int64
+}
+
+// RetentionDays returns the configured time retention (pruning horizon).
+func (s *HistoryStore) RetentionDays() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.retentionDays
 }
 
 func scanHistoryRows(rows *sql.Rows) ([]HistoryEvent, error) {

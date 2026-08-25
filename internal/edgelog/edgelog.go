@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -83,13 +84,13 @@ const (
 // Result is the outcome of an IP lookup.
 type Result struct {
 	IP           string   `json:"ip"`
-	LogFile      string   `json:"log_file"`             // the live log (default source)
-	FilesScanned []string `json:"files_scanned"`        // every file read: live first, then rotated newest→oldest
-	TailLines    int      `json:"tail_lines"`           // how many trailing lines were scanned in the LIVE file
-	Scanned      int      `json:"scanned"`              // lines actually read across all scanned files
-	Matched      int      `json:"matched"`              // total matches found (may exceed len(Lines))
-	Truncated    bool     `json:"truncated"`            // matches beyond the returned cap, or scan bound hit
-	Lines        []string `json:"lines"`                // raw matching log lines, newest file first
+	LogFile      string   `json:"log_file"`      // the live log (default source)
+	FilesScanned []string `json:"files_scanned"` // every file read: live first, then rotated newest→oldest
+	TailLines    int      `json:"tail_lines"`    // how many trailing lines were scanned in the LIVE file
+	Scanned      int      `json:"scanned"`       // lines actually read across all scanned files
+	Matched      int      `json:"matched"`       // total matches found (may exceed len(Lines))
+	Truncated    bool     `json:"truncated"`     // matches beyond the returned cap, or scan bound hit
+	Lines        []string `json:"lines"`         // raw matching log lines, newest file first
 }
 
 // Opts tunes an IP lookup. The zero value is the historical behaviour: scan only
@@ -231,7 +232,13 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 	}
 
 	res.FilesScanned = append(res.FilesScanned, logFile)
-	if err = streamTailMatches(cctx, logFile, tailLines, onLine); err != nil {
+	tailCapped, err := streamTailBounded(cctx, logFile, tailLines, onLine)
+	if tailCapped {
+		// The live file had more lines than the tail window — a real reach
+		// bound between "now" and the rotated archives; never silent.
+		res.Truncated = true
+	}
+	if err != nil {
 		return res, err
 	}
 
@@ -244,7 +251,11 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 			maxFiles = MaxRotatedFiles
 		}
 		budget := rotatedScanBudget
-		for _, rf := range rotatedSiblings(logFile, maxFiles) {
+		siblings, siblingsFound := rotatedSiblings(logFile, maxFiles)
+		if siblingsFound > len(siblings) {
+			res.Truncated = true // the file cap hid older siblings
+		}
+		for _, rf := range siblings {
 			if cctx.Err() != nil || budget <= 0 {
 				// Ran out of time/budget before this file — mark it and any
 				// remaining files as unscanned reach.
@@ -253,12 +264,14 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 			}
 			res.FilesScanned = append(res.FilesScanned, rf)
 			// A single unreadable/corrupt rotated file must not fail the whole
-			// lookup — the live-file result is already in hand; skip and go on.
+			// lookup — the live-file result is already in hand; skip and go on,
+			// but NEVER silently: coverage is shorter than it looks.
 			if scanErr := scanWholeForIP(cctx, rf, &budget, onLine); scanErr != nil {
 				if cctx.Err() != nil {
 					res.Truncated = true
 					break
 				}
+				res.Truncated = true // corrupt sibling = evidence hole
 				continue
 			}
 			// Budget exhausted mid-file (possibly the last one, where the
@@ -273,15 +286,17 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 
 // rotatedSiblings returns the rotated variants of live (same directory, name
 // starting with "<base>." or "<base>-": .1, .1.gz, -20260810.gz, …), most
-// recently modified FIRST, capped at maxFiles. The live file itself, empty
-// files, and non-regular entries are excluded. A directory it can't read yields
-// nothing (best-effort — the live result still stands).
-func rotatedSiblings(live string, maxFiles int) []string {
+// recently modified FIRST, capped at maxFiles. The second return is the TOTAL
+// number of siblings found, so a caller can detect that the file cap silently
+// hid some (found > len(paths)). The live file itself, empty files, and
+// non-regular entries are excluded. A directory it can't read yields nothing
+// (best-effort — the live result still stands).
+func rotatedSiblings(live string, maxFiles int) ([]string, int) {
 	dir := filepath.Dir(live)
 	base := filepath.Base(live)
 	ents, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	type fe struct {
 		path string
@@ -305,6 +320,7 @@ func rotatedSiblings(live string, maxFiles int) []string {
 		}
 		out = append(out, fe{filepath.Join(dir, name), info.ModTime()})
 	}
+	total := len(out)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].mod.After(out[j].mod) })
 	if len(out) > maxFiles {
 		out = out[:maxFiles]
@@ -313,8 +329,14 @@ func rotatedSiblings(live string, maxFiles int) []string {
 	for i, e := range out {
 		paths[i] = e.path
 	}
-	return paths
+	return paths, total
 }
+
+// errScanBudgetExceeded is returned by scanWholeForIP when the scanner found
+// MORE lines while the private countdown was already at zero — i.e. the file
+// was cut short by the budget, not by EOF. Callers translate it into
+// truncation flags (never into files_failed: the file is fine).
+var errScanBudgetExceeded = errors.New("scan budget exceeded")
 
 // scanWholeForIP streams a rotated file from the start (gz-transparent) feeding
 // each line to fn, decrementing the shared budget. Unlike the live tail this
@@ -338,7 +360,13 @@ func scanWholeForIP(ctx context.Context, path string, budget *int, fn func(line 
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
 	for sc.Scan() {
-		if *budget <= 0 || ctx.Err() != nil {
+		if *budget <= 0 {
+			// The caller's budget is spent but the file has MORE lines: this
+			// distinction (budget-cut vs clean EOF) must reach the caller so
+			// truncation can be flagged even on the LAST scanned file.
+			return errScanBudgetExceeded
+		}
+		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		*budget--
@@ -470,9 +498,56 @@ func ScanError(ctx context.Context, substrs []string, source string, tailLines i
 	return logFile, scanned, err
 }
 
-// streamTailMatches runs `tail -n <tailLines> <file>` and feeds each line to fn.
-// tail reads backward from EOF, so the disk read is bounded to the tail window
-// regardless of the file's total size. Output is streamed (never fully buffered).
+// tailHasMoreThan reports whether file holds MORE than n lines, via a bounded
+// `tail -n n+1` probe whose output is only COUNTED — never handed to anyone —
+// so callers get the cap answer without any off-by-one line leaking into their
+// data (the reason a plain N+1 probe feeding the callback is wrong).
+func tailHasMoreThan(ctx context.Context, file string, n int) (bool, error) {
+	cmd := exec.CommandContext(ctx, tailPath(), "-n", fmt.Sprintf("%d", n+1), file)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return false, err
+	}
+	if err := cmd.Start(); err != nil {
+		stdout.Close() // Wait (which normally closes the pipe) is never reached on a Start failure
+		return false, err
+	}
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
+	seen := 0
+	capped := false
+	for sc.Scan() {
+		seen++
+		if seen > n {
+			capped = true
+			break // answer known — drain below so tail can exit cleanly
+		}
+	}
+	scanErr := sc.Err()
+	_, _ = io.Copy(io.Discard, stdout)
+	waitErr := cmd.Wait()
+	if ctx.Err() != nil {
+		return capped, fmt.Errorf("tail scan timed out: %w", ctx.Err())
+	}
+	if scanErr != nil {
+		return capped, scanErr
+	}
+	// The early break above drains to EOF, so a non-nil waitErr here is a REAL
+	// failure (permission denied, missing file, …) — never swallow it into an
+	// authoritative-looking empty answer.
+	if waitErr != nil {
+		return capped, fmt.Errorf("tail %s: %w", file, waitErr)
+	}
+	return capped, nil
+}
+
+// streamTailMatches runs `tail -n <tailLines> <file>` and feeds each line to
+// fn — EXACTLY tailLines semantics: when the file is longer, the oldest lines
+// are dropped and fn never sees them; no probe line leaks through. tail reads
+// backward from EOF, so disk read is bounded to the tail window regardless of
+// total file size; output is streamed (never fully buffered). Callers that
+// ALSO need to know whether content was dropped pair this with tailHasMoreThan
+// via streamTailBounded.
 func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(line string) bool) error {
 	cmd := exec.CommandContext(ctx, tailPath(), "-n", fmt.Sprintf("%d", tailLines), file)
 	stdout, err := cmd.StdoutPipe()
@@ -485,8 +560,10 @@ func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(
 	}
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
+	stoppedEarly := false
 	for sc.Scan() {
 		if !fn(sc.Text()) {
+			stoppedEarly = true
 			break
 		}
 	}
@@ -495,11 +572,32 @@ func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(
 	// returning false) — otherwise it could block on a full pipe until the ctx
 	// SIGKILL. Harmless no-op on the normal full-drain-to-EOF path.
 	_, _ = io.Copy(io.Discard, stdout)
-	_ = cmd.Wait() // reap; status ignored (SIGPIPE on early stop, timeout surfaces via ctx)
+	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
-		return fmt.Errorf("scan timed out after %s (log too large for the tail window)", scanTimeout)
+		return fmt.Errorf("tail scan timed out: %w", ctx.Err())
 	}
-	return scanErr
+	if scanErr != nil {
+		return scanErr
+	}
+	// A non-zero tail exit WITHOUT our own early stop means the evidence this
+	// function would have returned is empty/partial for a real reason (e.g.
+	// permission-denied writes only to stderr, scanner sees clean EOF) — that
+	// must surface as an error, never as "zero lines, all good".
+	if waitErr != nil && !stoppedEarly {
+		return fmt.Errorf("tail %s: %w", file, waitErr)
+	}
+	return nil
+}
+
+// streamTailBounded pairs the cap probe with the exact-window stream for
+// callers that need both answers (capped ⇒ the caller flags truncation).
+func streamTailBounded(ctx context.Context, file string, tailLines int, fn func(line string) bool) (capped bool, err error) {
+	capped, perr := tailHasMoreThan(ctx, file, tailLines)
+	if perr != nil {
+		return false, perr
+	}
+	err = streamTailMatches(ctx, file, tailLines, fn)
+	return capped, err
 }
 
 // mentionsIP reports whether ip (already canonical) appears in line as a

@@ -43,3 +43,78 @@ func TestCountWAFEventsSince(t *testing.T) {
 		t.Fatalf("count(90s) = %d, want 1 (only the now-60 trigger)", n90)
 	}
 }
+
+// TestHistoryRangeQueries pin the EXPLICIT-window variants used by
+// host_access_history: the detector counts must describe exactly the same
+// absolute [from,to) seconds as the access-log scan, half-open on both SQL
+// sides, and echo the bounds back so responses are self-describing.
+func TestHistoryRangeQueries(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.jsonl"), 30, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	base := int64(1_800_000_000) // fixed epoch: boundary math must be exact
+
+	events := []struct {
+		ts   int64
+		typ  string
+		rule string
+	}{
+		{base - 1, "waf_observed", "WAF_SQLI:1"}, // before window → excluded
+		{base, "waf_observed", "WAF_SQLI:2"},     // from → included (>=)
+		{base + 5, "block_trigger", ""},          // inside → included
+		{base + 6, "waf_trigger", "WAF_SQLI:2"},  // inside; SAME physical hit as the base observation
+		{base + 7, "waf_observe", ""},            // inside; UNLABELLED observation (empty reason)
+		{base + 9, "suspicious", ""},             // inside → included
+		{base + 10, "waf_observed", "WAF_RCE:3"}, // to → excluded (< to)
+		{base + 11, "challenge_issued", ""},      // after window → excluded
+	}
+	for _, ev := range events {
+		hs.Append(HistoryEvent{TsUnix: ev.ts, Type: ev.typ, Host: "ex.gr", IP: "1.2.3.4", Reason: ev.rule})
+	}
+
+	sum, err := hs.SummarizeRange("ex.gr", "", base, base+10)
+	if err != nil {
+		t.Fatalf("SummarizeRange: %v", err)
+	}
+	if sum.FromUnix != base || sum.ToUnix != base+10 {
+		t.Errorf("summary bounds = [%d,%d], want [%d,%d] echoed verbatim", sum.FromUnix, sum.ToUnix, base, base+10)
+	}
+	if sum.TotalEvents != 5 {
+		t.Errorf("total_events = %d, want 5 (from, +5 block_trigger, +6 trigger, +7 observe-empty, +9)", sum.TotalEvents)
+	}
+	// summary.waf_observed counts ALL observations incl. unlabelled ones…
+	if sum.WAFObserved != 2 || sum.BlockTriggers != 1 || sum.Suspicious != 1 {
+		t.Errorf("waf/block/suspicious = %d/%d/%d, want 2/1/1 (+7 has empty reason)",
+			sum.WAFObserved, sum.BlockTriggers, sum.Suspicious)
+	}
+
+	// …while the observation-only RULE breakdown necessarily excludes the
+	// empty-reason row — documented divergence: Σrules may be < waf_observed
+	// when unlabelled observations exist. Triggers still never leak in here.
+	obsRules, err := hs.WAFObservedByRuleRange("ex.gr", base, base+10)
+	if err != nil {
+		t.Fatalf("WAFObservedByRuleRange: %v", err)
+	}
+	if len(obsRules) != 1 || obsRules[0].Rule != "WAF_SQLI:2" || obsRules[0].Count != 1 {
+		t.Errorf("observation rules = %+v, want [WAF_SQLI:2 ×1] — trigger must NOT double-count the hit", obsRules)
+	}
+
+	// The legacy dual-universe view deliberately counts both rows of that hit.
+	rules, err := hs.WAFByRuleRange("ex.gr", base, base+10)
+	if err != nil {
+		t.Fatalf("WAFByRuleRange: %v", err)
+	}
+	if len(rules) != 1 || rules[0].Rule != "WAF_SQLI:2" || rules[0].Count != 2 {
+		t.Errorf("dual-universe rules = %+v, want [WAF_SQLI:2 ×2] (observe + trigger, documented contract)", rules)
+	}
+
+	// The trailing-hours wrappers still work (now-anchored smoke check).
+	if _, err := hs.Summarize("ex.gr", "", 1); err != nil {
+		t.Errorf("Summarize wrapper: %v", err)
+	}
+	if _, err := hs.WAFByRule("ex.gr", 1); err != nil {
+		t.Errorf("WAFByRule wrapper: %v", err)
+	}
+}

@@ -66,6 +66,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerServiceStatus(srv, d)
 	registerEdgeAccessTail(srv, d)
 	registerIPForensics(srv, d)
+	registerHostAccessHistory(srv, d)
 	registerEdgeErrorTail(srv, d)
 	registerWAFFPHunt(srv, d)
 	registerAbuseShadow(srv, d)
@@ -423,6 +424,47 @@ func registerIPForensics(srv *mcp.Server, d Deps) {
 		}
 		setInt(q, "max_files", in.MaxFiles)
 		return dispatchJSON(ctx, d, "/api/v1/system/ip-forensics", q)
+	})
+}
+
+type hostAccessHistoryInput struct {
+	Host           string `json:"host" jsonschema:"the vhost to profile, exactly as logged in host=$host (e.g. example.gr); use merge_www to fold in the www./bare twin"`
+	Hours          int    `json:"hours,omitempty" jsonschema:"trailing window ending now; default 168 (7 days), max 2160 (90 days)"`
+	MergeWWW       bool   `json:"merge_www,omitempty" jsonschema:"also count the www./bare twin of host (e.g. example.gr together with www.example.gr); scoped tokens must have BOTH hosts in scope; detector history is then merged across twins with a per-host breakdown"`
+	IncludeRotated *bool  `json:"include_rotated,omitempty" jsonschema:"scan rotated siblings too (access.log.1, .N.gz, -YYYYMMDD.gz) — DEFAULT TRUE here (archival reach is this tool's purpose); pass false for live log only"`
+	Combine        *bool  `json:"combine,omitempty" jsonschema:"also join detector-side history for the same host/window (challenge issued/solved, block triggers, WAF observed + per-rule breakdown) — DEFAULT TRUE; pass false to skip the SQLite work"`
+	MaxFiles       int    `json:"max_files,omitempty" jsonschema:"cap how many rotated siblings are scanned (default 40, max 60)"`
+	Lines          int    `json:"lines,omitempty" jsonschema:"live-file tail window in lines (default 1000000)"`
+	MaxLines       int    `json:"max_lines,omitempty" jsonschema:"shared line budget across ALL scanned files (default 8000000, max 60000000); when hit, truncated=true and coverage_* show what was actually reached"`
+	Top            int    `json:"top,omitempty" jsonschema:"entries per top-list (default 20, max 50)"`
+}
+
+func registerHostAccessHistory(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "host_access_history",
+		Description: "On-demand ARCHIVAL traffic profile of ONE VHOST: total requests, per-hour series with peaks-vs-median, status mix, top client IPs, top user-agents with a browser-envelope vs automation/bot-like UA split (heuristic UA normalization, not bot verification), top paths and method mix — reconstructed from the edge's FULL ACCESS log (log_format cfm, every vhost; the focused access.cfm.log is never used) plus its rotated siblings, OpenResty and Angie alike, so it reaches far beyond host_drilldown/edge_access_tail's short live retention. MALFORMED/ABORTED TRAFFIC IS NOT MISSED: statuses 400/408/414/431/494/499 are excluded by the edge from access.log and land in access.bad_request.log — that file is scanned as a SEPARATE provenance section (bad_requests.* incl. its own totals/status/top lists) and total_requests_with_bad gives the combined headline over ATTRIBUTABLE malformed requests; the sidecar always pairs with whichever engine the main log resolved to (same directory), and bad_requests=nil means that engine has no such live FILE (an existing but empty sidecar is a valid zero-current-entries source — its rotated archives are still scanned). Bounded like ip_forensics: a shared line budget across ALL files of both sections, one timeout, key-capped accumulators; gz streamed, never buffered whole; corrupt/unreadable siblings are listed in files_failed instead of failing the call; EVERY reach bound surfaces as truncated=true (line budget incl. mid-file exhaustion, max_files cap hiding siblings, and live_tail_truncated=true when the LIVE file alone was longer than its tail window — a silent mid-window hole is exactly what this prevents); log_changed_during_scan=true flags copytruncate/rotation/replacement observed mid-read or a rotation-set change after the live read (sibling scanning is then SKIPPED — treat as suspect and re-run). At most TWO archive scans run concurrently per node — beyond that you get an HTTP 429 + Retry-After, so retry shortly rather than hammering. Rotated reach is ON by default (include_rotated=false to limit to the live logs). HONEST COVERAGE: nodes keep limited rotation (days, not months), so always report window_from/window_to vs coverage_oldest_unix — data older than the oldest kept rotation simply is not in the logs anymore. bytes_total is present only on logs written after the bytes= format addition (2026-08). When combine=1 the reply also joins the detector history store over EXACTLY the same absolute [from,to) seconds as the access scan: challenge issued/solved, WAF observed hits with per-rule breakdown (detector_waf_by_rule counts OBSERVATION events only, so its total reconciles with detector_summary.waf_observed — a hit that also emitted a trigger is not double-counted), block triggers and suspicious events — access volume AND security events in one call; detector_coverage reports the store's real retention/oldest retained event so partial history never looks complete (coverage_proven=false means completeness cannot be proven from retained rows; detector_partial=true when a twin query failed; detector_unavailable=true when history could not be read at all); with merge_www the twins get a COMBINED view plus detector_by_host provenance. Companion tools: host_drilldown (live scored state, short window), ip_forensics (raw lines for ONE IP over the same archives).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in hostAccessHistoryInput) (*mcp.CallToolResult, any, error) {
+		if strings.TrimSpace(in.Host) == "" {
+			return nil, nil, errRequired("host")
+		}
+		q := url.Values{}
+		setStr(q, "host", in.Host)
+		setInt(q, "hours", in.Hours)
+		if in.MergeWWW {
+			q.Set("merge_www", "1")
+		}
+		if in.IncludeRotated != nil && !*in.IncludeRotated {
+			q.Set("include_rotated", "0")
+		}
+		if in.Combine != nil && !*in.Combine {
+			q.Set("combine", "0")
+		}
+		setInt(q, "max_files", in.MaxFiles)
+		setInt(q, "lines", in.Lines)
+		setInt(q, "max_lines", in.MaxLines)
+		setInt(q, "top", in.Top)
+		return dispatchJSON(ctx, d, "/api/v1/webdet/host-access-history", q)
 	})
 }
 
