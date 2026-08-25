@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.25
+
 ### Added
 - **`abuse_shadow` rate-outlier count surfaced per vhost (webtop / API / cfm-admin).**
   The log-only abuse_shadow signal now also stamps a live per-vhost count of
