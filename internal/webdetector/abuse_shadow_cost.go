@@ -110,6 +110,17 @@ func (e *Engine) emitAbuseShadowCostPressure(now time.Time) {
 		if !costOutlier(a.total, a.c5xx, rps5xx, cfg) {
 			continue
 		}
+		// frac is 5xx over the vhost's WHOLE response mix — edge-served static/
+		// cached 200s and 3xx/4xx included, matching the engine's existing ErrRatio
+		// convention. It is well-defined (c5xx ≤ total, so frac ∈ [0,1]), but on a
+		// cache-heavy vhost where the edge serves most requests and only a slice
+		// reaches the origin, a FULL origin collapse can still sit under MinFrac and
+		// not flag. That dilution is in the SAFE (false-negative) direction for a
+		// log-only signal, but it means operators tuning MIN_FRAC from fleet logs
+		// will see systematically low fractions on cached vhosts — and it must be
+		// revisited (a dynamic-only denominator, at the cost of a per-bucket counter)
+		// before this signal ever feeds enforcement. The absolute rps5xx floor is the
+		// partial backstop: high raw 5xx volume still clears even when diluted.
 		frac := float64(a.c5xx) / float64(a.total)
 		// Badge value is the 5xx percent (1–100), never 0 for a flagged vhost
 		// (MinFrac > 0), so 0 unambiguously means "not flagged" like the other
@@ -121,10 +132,10 @@ func (e *Engine) emitAbuseShadowCostPressure(now time.Time) {
 		}
 		marks[host] = pct
 
-		rtAvg := 0.0
-		if a.total > 0 {
-			rtAvg = a.sumRT / float64(a.total)
-		}
+		// rt_avg is over ALL requests, not 5xx-only — like frac it is diluted by fast
+		// static 200s, so treat it as a coarse whole-vhost latency hint, not an
+		// origin-slowness proxy. Logged for correlation, never a gate.
+		rtAvg := a.sumRT / float64(a.total)
 		if !e.shouldLogVhostSuppress("abuseshadowcost:"+host, now) {
 			continue
 		}

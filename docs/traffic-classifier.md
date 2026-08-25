@@ -367,7 +367,14 @@ Class-2 burst.
       `cost=N%` CLI flag) + a `signal=cost_pressure` line (with avg RT as a second,
       non-gating cost dimension) in `cfm.abuse_shadow.log`. Own mark store + TTL.
       Default-ON under `ABUSE_SHADOW`; knobs `ABUSE_SHADOW_COST[_MIN_FRAC|_MIN_REQ|
-      _MIN_RPS5XX]`. NO score contribution, NO enforcement.
+      _MIN_RPS5XX]`. NO score contribution, NO enforcement. **Known tuning caveat**
+      (adversarial review): `5xx/total` is over the whole response mix (static/
+      cached 200s included, per the engine's `ErrRatio` convention), so a
+      cache-heavy vhost shows a diluted fraction — a full origin collapse behind
+      mostly-cached traffic can sit under `MIN_FRAC`. Safe direction (false-negative,
+      never false-positive); the `RPS5XX` floor is the partial backstop. **Before
+      this graduates to any enforcement**, switch to a dynamic-only 5xx denominator
+      (needs a per-bucket dynamic counter, like facet's `facetTotal`).
 - [ ] Add remaining per-vhost feature: datacenter-ASN-frac (verified-gated).
       (query-cardinality, URL-repeat, cost/5xx done above.)
 - [ ] Add missing per-client features: header-coherence, solve-latency; route
