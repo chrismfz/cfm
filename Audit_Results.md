@@ -25,8 +25,21 @@ Audit mode: active, low-volume, non-destructive. Production state must not be ch
 ## R01 — Plaintext control plane on TCP/6060
 
 **Severity:** HIGH  
-**Status:** CONFIRMED LIVE  
+**Status:** ✅ SOURCE FIXED (defence in depth) / LIVE RETEST PENDING  
 **Priority:** P0/P1
+
+**Fix:** (1) `configs/cfm.conf` `LISTEN_ADDRESS` now defaults to `127.0.0.1` — the
+plaintext `:6060` listener is loopback-only out of the box (edge + CLI both reach it
+over loopback; `:6061` stays public via `TLS_LISTEN_ADDRESS`), so there is no
+Internet-reachable plaintext admin plane by default. (2) A new pre-auth
+`AdminTransportRedirect` middleware (`internal/apiserver/transport_redirect.go`, wired
+in `Start()` outside `TokenMiddleware`) upgrades direct external `:6060` browser
+GET/HEAD admin routes to `:6061` once a bind-verified `tlsReady` is set, refuses
+state-changing plaintext admin requests with `403` (never processed-then-redirected),
+and serves a logged degraded fallback when TLS is genuinely down. Edge/`:6061`/loopback
+CLI/machine-`/api/v1` are untouched. Tests: `transport_redirect_test.go`. Design +
+operator decisions: `docs/security/direct-6060-transport-policy.md`. Live retest (§below)
+rolls up to Step 10.
 
 `84.54.49.200:6060` is Internet reachable and serves the real CFM HTTP handler over plaintext.
 

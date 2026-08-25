@@ -334,13 +334,16 @@ Preserve regression coverage for the historical failures where Lua selected chal
 **Priority:** P0/P1  
 **Finding:** `Audit_Results.md` R01, HIGH CONFIRMED LIVE  
 **Dependencies:** Step 1; integrates with Step 4  
-**Status:** 🎨 DESIGN landed — `docs/security/direct-6060-transport-policy.md`
-(pre-auth `AdminTransportRedirect` keyed on `requestPeer(r).Entry` + loopback: direct
-external `:6060` browser GET/HEAD → `:6061` when a new bind-verified `tlsReady` is set,
-unsafe methods rejected, edge/CLI/loopback exempt; degraded HTTP fallback logged, its
-challenge-gating deferred to Step 4). Awaiting review before implementation. Two operator
-decisions surfaced in the doc §12 (machine-API stance; whether external `:6060` is needed
-at all — loopback-bind is a simpler complementary fix).
+**Status:** ✅ SOURCE FIXED (defence in depth) — `docs/security/direct-6060-transport-policy.md`.
+Two defences shipped: (1) `LISTEN_ADDRESS` defaults to `127.0.0.1` (loopback-only `:6060`;
+edge + CLI both loopback; `:6061` stays public), so no Internet-reachable plaintext admin
+plane by default; (2) pre-auth `AdminTransportRedirect` (`internal/apiserver/transport_redirect.go`,
+outside `TokenMiddleware`) upgrades direct external `:6060` browser GET/HEAD → `:6061`
+once a bind-verified `tlsReady` is set, refuses state-changing plaintext admin (`403`,
+not processed-then-redirected), and logs a degraded HTTP fallback when TLS is down (its
+challenge-gating deferred to Step 4). Edge/`:6061`/loopback-CLI/machine-`/api/v1` untouched.
+Tests: `transport_redirect_test.go`. Live retest → Step 10. The `## Update` glance list and
+`Audit_Results.md` R01 reflect this.
 
 ## Problem
 

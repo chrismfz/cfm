@@ -1,7 +1,10 @@
 # Direct `:6060` browser transport policy (Audit Step 5 / R01)
 
-**Status:** DESIGN — no behavioural code in this document. Design-first for the
-`:6060` plaintext control-plane hardening; implementation follows review.
+**Status:** ✅ IMPLEMENTED (Phase 5a). Operator decisions below resolved
+(2026-08-25): **both** defences — loopback-bind `:6060` by default **and** the
+`AdminTransportRedirect` safety net; machine `/api/v1` left as-is; redirect status
+`302`. Code: `internal/apiserver/transport_redirect.go` + `Start()` wiring +
+`configs/cfm.conf` `LISTEN_ADDRESS=127.0.0.1`; tests `transport_redirect_test.go`.
 **Finding:** `Audit_Results.md` R01 (HIGH, CONFIRMED LIVE) · **Spec:**
 `Audit_Fix_Order.md` Step 5 · `Audit.md` §2.
 
@@ -221,11 +224,16 @@ middleware directly (pattern: `auth_redirect_test.go`).
 - **Separate follow-up:** machine-API-on-plaintext-`:6060` stance (§6a); and/or
   the loopback-bind hardening (§6c).
 
-## 12. Open decisions for the operator
+## 12. Operator decisions — RESOLVED (2026-08-25)
 
-1. **§6a** — machine `/api/v1` over external plaintext `:6060`: leave (recommended) vs reject.
-2. **§6c** — is external `:6060` actually required? If not, loopback-binding is a simpler/stronger R01 fix (complementary to the redirect).
-3. **§5** — redirect status code: `302`/`307` (recommended) vs `301`.
+1. **§6a** — machine `/api/v1` over external plaintext `:6060`: **leave as-is**. The
+   transport policy is scoped to browser admin routes; a stricter machine stance stays
+   a separate follow-up.
+2. **§6c** — is external `:6060` required? **No by default → both defences shipped:**
+   `LISTEN_ADDRESS` defaults to `127.0.0.1` (no external plaintext), AND the redirect
+   middleware remains as a safety net for anyone who deliberately re-exposes `:6060`.
+3. **§5** — redirect status code: **`302 Found`** (avoids `301`'s sticky caching of a
+   non-standard port).
 
 ## 13. Done when (from the spec, mapped)
 

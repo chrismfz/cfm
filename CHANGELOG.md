@@ -71,6 +71,23 @@ back-filled here — see the git/PR history for that period.
   detector tails its historical default provisionally (self-heals when the
   source appears) and logs the full resolution trace.
 
+### Security
+- **Direct plaintext `:6060` control plane hardened (audit R01), defence in depth.**
+  (1) `LISTEN_ADDRESS` now defaults to `127.0.0.1` in the reference `cfm.conf`, so the
+  plaintext `:6060` listener is **loopback-only** out of the box — the OpenResty/Angie
+  edge and the `cfm` CLI both reach it over loopback, so nothing legitimate changes and
+  there is no Internet-reachable plaintext admin plane. *Existing installs should set
+  `LISTEN_ADDRESS = "127.0.0.1"` in `/etc/cfm/cfm.conf`;* `:6061` stays public via
+  `TLS_LISTEN_ADDRESS`. (2) A new **pre-auth `AdminTransportRedirect`** safety net: if
+  `:6060` is deliberately re-exposed, a direct external browser `GET`/`HEAD` of an admin
+  route is `302`-upgraded to the TLS port `:6061` (only once the TLS listener has actually
+  bound), and a state-changing plaintext admin request is refused with `403` rather than
+  processed — so credentials are never handled over cleartext, and a redirect never
+  re-sends a leaked body. The edge backend hop, the `:6061` listener, the loopback CLI,
+  and machine `/api/v1` traffic are all untouched; a genuine TLS-down state serves a
+  logged (`event=admin_http_fallback`) degraded fallback. See
+  `docs/security/direct-6060-transport-policy.md`.
+
 ## 2026.08.25
 
 ### Added

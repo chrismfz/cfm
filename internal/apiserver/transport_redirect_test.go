@@ -1,0 +1,162 @@
+package apiserver
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+type transportNextSpy struct{ called bool }
+
+func (n *transportNextSpy) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		n.called = true
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+// transportReq builds a request as if it arrived on the given local listener
+// address from the given remote peer, with optional headers.
+func transportReq(method, rawurl, localAddr, remoteAddr string, hdr map[string]string) *http.Request {
+	r := httptest.NewRequest(method, rawurl, nil)
+	r.RemoteAddr = remoteAddr
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	return withLocalAddr(r, localAddr)
+}
+
+func runTransport(tlsPort int, tlsReady bool, r *http.Request) (*httptest.ResponseRecorder, bool) {
+	spy := &transportNextSpy{}
+	h := AdminTransportRedirect(spy.handler(), tlsPort, func() bool { return tlsReady })
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	return rr, spy.called
+}
+
+const htmlAccept = "text/html,application/xhtml+xml"
+
+func TestAdminTransportRedirect_UpgradesDirectExternalBrowserGET(t *testing.T) {
+	for _, m := range []string{http.MethodGet, http.MethodHead} {
+		r := transportReq(m, "http://host:6060/cfm-admin/x?q=1", "0.0.0.0:6060", "198.51.100.5:5000",
+			map[string]string{"Accept": htmlAccept})
+		rr, nextCalled := runTransport(6061, true, r)
+		if nextCalled {
+			t.Fatalf("%s: next ran; request should have been redirected", m)
+		}
+		if rr.Code != http.StatusFound {
+			t.Fatalf("%s: code = %d, want 302", m, rr.Code)
+		}
+		if got := rr.Header().Get("Location"); got != "https://host:6061/cfm-admin/x?q=1" {
+			t.Fatalf("%s: Location = %q, want https://host:6061/cfm-admin/x?q=1 (URI preserved)", m, got)
+		}
+	}
+}
+
+func TestAdminTransportRedirect_RejectsDirectExternalUnsafeMethod(t *testing.T) {
+	// A login POST over direct plaintext must be refused, not processed and not
+	// method-redirected (which would re-send the already-leaked body).
+	r := transportReq(http.MethodPost, "http://host:6060/cfm-admin/login", "0.0.0.0:6060", "198.51.100.5:5000",
+		map[string]string{"Accept": htmlAccept})
+	rr, nextCalled := runTransport(6061, true, r)
+	if nextCalled {
+		t.Fatal("next ran; an unsafe plaintext admin request must not be processed")
+	}
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("code = %d, want 403", rr.Code)
+	}
+	if rr.Header().Get("Location") != "" {
+		t.Fatalf("unsafe method must not be redirected, got Location=%q", rr.Header().Get("Location"))
+	}
+}
+
+func TestAdminTransportRedirect_EdgeBackendNeverRedirected(t *testing.T) {
+	// The public :443 browser via the edge arrives at loopback:6060 with forwarded
+	// identity → Entry "edge" → must be served, never bounced to :6061.
+	r := transportReq(http.MethodGet, "http://host/cfm-admin/", "0.0.0.0:6060", "127.0.0.1:41000",
+		map[string]string{"Accept": htmlAccept, "X-Real-IP": "203.0.113.9", "X-Forwarded-Proto": "https"})
+	rr, nextCalled := runTransport(6061, true, r)
+	if !nextCalled || rr.Code != http.StatusOK {
+		t.Fatalf("edge request must be served (next=%v code=%d)", nextCalled, rr.Code)
+	}
+}
+
+func TestAdminTransportRedirect_LoopbackDirectExempt(t *testing.T) {
+	// Local CLI/curl to loopback:6060 (no forwarded id) — plaintext never hits the
+	// wire, so it is served, not redirected.
+	r := transportReq(http.MethodGet, "http://127.0.0.1:6060/cfm-admin/", "127.0.0.1:6060", "127.0.0.1:5000",
+		map[string]string{"Accept": htmlAccept})
+	rr, nextCalled := runTransport(6061, true, r)
+	if !nextCalled || rr.Code != http.StatusOK {
+		t.Fatalf("loopback direct must be served (next=%v code=%d)", nextCalled, rr.Code)
+	}
+}
+
+func TestAdminTransportRedirect_MachineAPILeftAsIs(t *testing.T) {
+	// Direct external /api/v1 without Accept: text/html (a machine client) is not a
+	// browser admin route → left as-is (design §6a).
+	r := transportReq(http.MethodGet, "http://host:6060/api/v1/system/status", "0.0.0.0:6060", "198.51.100.5:5000", nil)
+	rr, nextCalled := runTransport(6061, true, r)
+	if !nextCalled || rr.Code != http.StatusOK {
+		t.Fatalf("machine /api/v1 must be served (next=%v code=%d)", nextCalled, rr.Code)
+	}
+}
+
+func TestAdminTransportRedirect_TLSListenerNeverRedirected(t *testing.T) {
+	// A request already on the :6061 TLS listener (Entry "6061") passes through.
+	r := transportReq(http.MethodGet, "https://host:6061/cfm-admin/", "0.0.0.0:6061", "198.51.100.5:5000",
+		map[string]string{"Accept": htmlAccept})
+	rr, nextCalled := runTransport(6061, true, r)
+	if !nextCalled || rr.Code != http.StatusOK {
+		t.Fatalf(":6061 request must be served (next=%v code=%d)", nextCalled, rr.Code)
+	}
+}
+
+func TestAdminTransportRedirect_DegradedWhenTLSNotReady(t *testing.T) {
+	// TLS not yet bound → serve over HTTP (degraded), don't redirect to a dead port.
+	r := transportReq(http.MethodGet, "http://host:6060/cfm-admin/", "0.0.0.0:6060", "198.51.100.5:5000",
+		map[string]string{"Accept": htmlAccept})
+	rr, nextCalled := runTransport(6061, false, r)
+	if !nextCalled || rr.Code != http.StatusOK {
+		t.Fatalf("degraded fallback must serve over HTTP (next=%v code=%d)", nextCalled, rr.Code)
+	}
+	if rr.Header().Get("Location") != "" {
+		t.Fatal("must not redirect when TLS is not ready")
+	}
+}
+
+func TestAdminTransportRedirect_DegradedWhenTLSPortInvalidOrNoHost(t *testing.T) {
+	// Invalid TLS port → no trustworthy target → degraded serve.
+	r := transportReq(http.MethodGet, "http://host:6060/cfm-admin/", "0.0.0.0:6060", "198.51.100.5:5000",
+		map[string]string{"Accept": htmlAccept})
+	if rr, nextCalled := runTransport(0, true, r); !nextCalled || rr.Header().Get("Location") != "" {
+		t.Fatalf("invalid TLS port must degrade, not redirect (next=%v loc=%q)", nextCalled, rr.Header().Get("Location"))
+	}
+
+	// Empty Host → cannot build a target → degraded serve.
+	r2 := transportReq(http.MethodGet, "http://host:6060/cfm-admin/", "0.0.0.0:6060", "198.51.100.5:5000",
+		map[string]string{"Accept": htmlAccept})
+	r2.Host = ""
+	if rr, nextCalled := runTransport(6061, true, r2); !nextCalled || rr.Header().Get("Location") != "" {
+		t.Fatalf("empty Host must degrade, not redirect (next=%v loc=%q)", nextCalled, rr.Header().Get("Location"))
+	}
+}
+
+func TestAdminTransportRedirect_IgnoresForwardedHostFromDirectClient(t *testing.T) {
+	// The redirect target host comes from r.Host, never a forged X-Forwarded-Host.
+	r := transportReq(http.MethodGet, "http://real.example:6060/cfm-admin/", "0.0.0.0:6060", "198.51.100.5:5000",
+		map[string]string{"Accept": htmlAccept, "X-Forwarded-Host": "evil.example"})
+	rr, _ := runTransport(6061, true, r)
+	if got := rr.Header().Get("Location"); got != "https://real.example:6061/cfm-admin/" {
+		t.Fatalf("Location = %q, want the real Host, not the forged X-Forwarded-Host", got)
+	}
+}
+
+func TestAdminTransportRedirect_IPv6HostTarget(t *testing.T) {
+	r := transportReq(http.MethodGet, "http://[2001:db8::1]:6060/cfm-admin/", "0.0.0.0:6060", "198.51.100.5:5000",
+		map[string]string{"Accept": htmlAccept})
+	rr, _ := runTransport(6061, true, r)
+	if got := rr.Header().Get("Location"); got != "https://[2001:db8::1]:6061/cfm-admin/" {
+		t.Fatalf("Location = %q, want bracketed IPv6 host with :6061", got)
+	}
+}
