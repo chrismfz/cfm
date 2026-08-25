@@ -19,13 +19,13 @@ Do not skip dependency steps merely because a later change looks small. In parti
 1.  ✅ Trusted request identity + effective scheme (XFF/XFP)   — apiserver done (#1338); challenge item 8 declined
 2.  ✅ pprof explicit admin-only authorization                 — done (#1341); live scoped proof -> Step 10
 3.  ✅ POST-only enforcement for every mutating endpoint       — done (this change)
-4.  ☐  Reusable Go pre-auth challenge + interactive login gate
+4.  🎨 Reusable Go pre-auth challenge + interactive login gate               — DESIGNED, ready to implement (login-stays-Go redirect gate + RegisterHandlers reuse + explicit per-listener trust; references every past incident #246/#316-318/#1222/#1225/#1227/#659/#1342). See docs/security/challenge-login-gate-design.md
 5.  ✅ Direct :6060 browser transport policy -> :6061 when TLS ready       — done (#1351, defence in depth)
-6.  ☐  Automatic request-aware session-cookie transport policy
+6.  ✅ Automatic request-aware session-cookie transport policy               — Secure automatic from effective scheme; distinct cfm-sid-http-fallback for degraded :6060; no global-cookie race; AUTH_SECURE_COOKIE deprecated (+ :6061 self-signed fallback so a fresh/by-IP box isn't locked out)
 7.  ✅ cfm.api.log auth-attempt schema + api_abuse -> cfm_endpoints default-on  — done (#1338); auth_autoblock.go removal pending
 8.  ✅ Per-auth-mechanism / route-cost API rate limiting                   — enforcing limiter shipped (identity×route buckets, honest-high code-default ceilings, 429+Retry-After, never nft); ceiling tuning + alert-only detector event are operator-driven follow-ups
-9.  ◑  Direct control-plane response/cache/security-header hardening       — safe subset done (nosniff/Referrer-Policy + no-store on auth failures); CSP/frame (cPanel-iframe) + HSTS deferred
-10. ☐  Controlled credentialed regression + close Audit_Results findings
+9.  ◑  Direct control-plane response/cache/security-header hardening       — safe subset done (nosniff/Referrer-Policy + no-store on auth failures); CSP/frame + HSTS ⛔ DECLINED (too risky for P2 — breaks inline-script UI / cPanel iframe / self-signed :6061; operator can add at edge; see docs/security/control-plane-csp-frame-hsts.md)
+10. ☐  Controlled credentialed regression + close Audit_Results findings     — runnable checklist ready: docs/security/step10-credentialed-regression.md (CLI-minted scoped token; read-only MCP can't mint/POST)
 ```
 
 Status legend: ✅ source-complete · ◑ partial (safe subset shipped, rest deferred) ·
@@ -260,7 +260,17 @@ Prefer method-aware mux registration where practical, but do not make that refac
 # Step 4 — reusable Go pre-auth challenge + interactive login gate
 
 **Priority:** P1  
-**Dependency:** Step 1 first
+**Dependency:** Step 1 first  
+**Status:** 🎨 DESIGNED, ready to implement (design-first agreed) —
+`docs/security/challenge-login-gate-design.md`. Encodes the login-stays-Go redirect
+gate, `RegisterHandlers` reuse (one PoW/verifier/secret/safe-next), explicit
+per-listener trust, and a repeat-avoidance map of every past incident
+(#246/#316-318 routing+prefix, #1222/#1225 firewall-hang, #1227 cookie collision,
+#659 secret mismatch, #1342 trust narrowing). Two historical landmines are already
+neutralized in current code (firewall-free solve `challenge_server.go:308-322`;
+scoped `clearanceCookieName`). The one genuinely new risk is integration with the
+Step 5/6/8 middleware stack (§6 of the design). Implement staged + run
+`docs/challenge-waf-release-checklist.md`, test edge AND DNAT.
 
 > **Identity constraint (2026-08-25).** Mounting the challenge handlers on the public
 > `:6060`/`:6061` control plane needs the challenge server to resolve client identity/scheme
@@ -395,7 +405,17 @@ Machine/API compatibility on plaintext 6060 must be an explicit product decision
 # Step 6 — automatic request-aware session-cookie transport policy
 
 **Priority:** P1  
-**Dependencies:** Steps 1 and 5
+**Dependencies:** Steps 1 and 5  
+**Status:** ✅ SOURCE COMPLETE — goauth is always-`Secure` `cfm-sid`;
+`SessionCookieTransportMiddleware` (`internal/apiserver/session_cookie_transport.go`,
+wrapping `LoadAndSave` from outside) translates to a distinct non-Secure
+`cfm-sid-http-fallback` only in the degraded plaintext `:6060` window (effective-http
+via spoof-safe `requestPeer.Scheme`), sharing one goauth store with no global mutation
+/ no race. `AUTH_SECURE_COOKIE` parsed-but-ignored + one-time deprecation warning.
+Prerequisite shipped separately: `:6061` self-signed fallback (#1356) so a fresh/by-IP
+box is reachable over TLS. Out of scope per spec: SameSite / `__Host-`. Tests
+`session_cookie_transport_test.go`; design `docs/security/session-cookie-transport.md`.
+Live verification (edge/`:6061` Secure, degraded fallback) rolls up to Step 10.
 
 ## Decision
 
@@ -633,10 +653,15 @@ Important policy:
 response, and `no-store` is now set on `TokenMiddleware` auth-failure `401`s
 (`internal/apiserver/security_headers.go`, `middleware.go`; tests
 `security_headers_test.go`; doc `docs/security/control-plane-headers.md`).
-**Deferred (deliberate):** CSP + frame policy must be cPanel-iframe-aware
-(per-install panel origin — a blanket `DENY` breaks the embed), and HSTS is host-wide
-so a `:6061` HSTS would strand the supported plaintext `:6060` (R01/Step 5). Live
-direct-vs-edge retest → Step 10.
+**CSP + frame policy + HSTS: ⛔ DECLINED** (operator decision, 2026-08-25 — too risky
+for a P2 gain, leave it completely out): a full `script-src` CSP breaks the inline-script
+admin UI (needs nonce/hash templating of the static UI — a build change); a blanket
+`frame-ancestors`/`DENY` breaks the cPanel iframe embed, and the panel origin is
+client-provided (`sanitizeExpectedParentOrigin`) so it can't be trust-derived; HSTS is
+host-wide so a `:6061` HSTS strands the supported plaintext `:6060` and breaks the
+self-signed `:6061` bootstrap (#1356). Operators wanting these add them at their own
+edge/reverse proxy. Rationale + safe opt-in shape: `docs/security/control-plane-csp-frame-hsts.md`.
+Live direct-vs-edge retest of the shipped subset → Step 10.
 
 ## Problem
 
