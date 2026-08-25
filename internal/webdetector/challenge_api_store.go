@@ -95,6 +95,11 @@ type ChallengeSummary struct {
 	Now          time.Time `json:"now"`
 	ActiveVhosts int       `json:"active_vhosts"`
 	ActiveIPs    int       `json:"active_ips"`
+
+	// Under-Attack Mode status (stamped by the handler, not stored): whether the
+	// detector is enabled and how many vhosts are currently in UNDER_ATTACK.
+	UnderAttackEnabled bool `json:"under_attack_enabled"`
+	UnderAttackVhosts  int  `json:"under_attack_vhosts"`
 }
 
 type ChallengeAPIStore struct {

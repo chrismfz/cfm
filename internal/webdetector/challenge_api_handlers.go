@@ -13,11 +13,21 @@ func (e *Engine) handleChallengeSummary(w http.ResponseWriter, r *http.Request) 
 	if !RequireAdmin(w, r) {
 		return
 	}
-	if e == nil || e.chalAPI == nil {
-		writeJSON(w, http.StatusOK, ChallengeSummary{})
-		return
+	var sum ChallengeSummary
+	if e != nil && e.chalAPI != nil {
+		sum = e.chalAPI.Summary()
 	}
-	writeJSON(w, http.StatusOK, e.chalAPI.Summary())
+	// Stamp Under-Attack status even when the challenge store is not wired yet
+	// (early startup / chalAPI==nil), so under_attack_enabled never falsely
+	// reads disabled. The count is a single locked pass (underAttackHosts is
+	// nil-safe, so len() is fine even if the tracker was never created).
+	if e != nil {
+		sum.UnderAttackEnabled = e.cfg.UnderAttack
+		if e.cfg.UnderAttack {
+			sum.UnderAttackVhosts = len(e.attack.underAttackHosts())
+		}
+	}
+	writeJSON(w, http.StatusOK, sum)
 }
 
 // handleChallengeVhosts lists all currently challenged vhosts.

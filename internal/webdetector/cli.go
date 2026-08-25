@@ -97,6 +97,7 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge exclude list")
 	fmt.Println("  cfm webtop challenge exclude add <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop challenge exclude remove <host|path> [--type host|path]")
+	fmt.Println("  cfm webtop attack                         # Under-Attack status + vhosts currently under attack")
 	fmt.Println("  cfm webtop attack on <H>                  # force a vhost into UNDER_ATTACK (operator override)")
 	fmt.Println("  cfm webtop attack off <H>                 # clear it + suppress auto re-entry for the holddown")
 	fmt.Println("  cfm webtop waf engine [--hours 24 --limit 20 --top 10]")
@@ -1332,12 +1333,16 @@ func runChallengeWebTop(baseURL string, args []string) error {
 	return nil
 }
 
-// runAttackWebTop handles: cfm webtop attack on|off <vhost>
-// Operator override for Under-Attack Mode: `on` forces the vhost into
-// UNDER_ATTACK; `off` clears it and suppresses auto re-entry for the holddown.
+// runAttackWebTop handles:
+//
+//	cfm webtop attack               → status + vhosts currently under attack
+//	cfm webtop attack on|off <vhost> → operator override
+//
+// `on` forces the vhost into UNDER_ATTACK; `off` clears it and suppresses auto
+// re-entry for the holddown.
 func runAttackWebTop(baseURL string, args []string) error {
-	if len(args) < 2 {
-		return fmt.Errorf("usage: cfm webtop attack on|off <vhost>")
+	if len(args) == 0 {
+		return runAttackStatus(baseURL)
 	}
 	var on bool
 	switch strings.ToLower(args[0]) {
@@ -1346,7 +1351,10 @@ func runAttackWebTop(baseURL string, args []string) error {
 	case "off":
 		on = false
 	default:
-		return fmt.Errorf("usage: cfm webtop attack on|off <vhost>")
+		return fmt.Errorf("usage: cfm webtop attack [on|off <vhost>]")
+	}
+	if len(args) < 2 {
+		return fmt.Errorf("usage: cfm webtop attack %s <vhost>", strings.ToLower(args[0]))
 	}
 	host := args[1]
 	onVal := "0"
@@ -1375,6 +1383,85 @@ func runAttackWebTop(baseURL string, args []string) error {
 	} else {
 		fmt.Printf("✓ Under-attack cleared for %v (auto re-entry suppressed for the holddown)\n", result["host"])
 	}
+	return nil
+}
+
+// runAttackStatus prints whether Under-Attack Mode is enabled, the vhosts
+// currently in UNDER_ATTACK, and the override usage — the bare `cfm webtop
+// attack` view (mirrors `cfm webtop challenge`'s list).
+func runAttackStatus(baseURL string) error {
+	base := strings.TrimRight(baseURL, "/")
+
+	// Feature status + authoritative under-attack count (best-effort; admin-only
+	// endpoint). `known` separates "probe failed" from "disabled" so a 403/500/
+	// transport error is never reported as a definitive UNDER_ATTACK=0. The count
+	// is the source of truth for the total (it also counts forced-on overrides
+	// with no challenge row, which the store-driven list below cannot surface).
+	enabled, known := false, false
+	attackCount := 0
+	if r, err := clihttp.Get(base + "/api/v1/challenge/summary"); err == nil {
+		if r.StatusCode >= 200 && r.StatusCode < 300 {
+			var s struct {
+				UnderAttackEnabled bool `json:"under_attack_enabled"`
+				UnderAttackVhosts  int  `json:"under_attack_vhosts"`
+			}
+			if json.NewDecoder(r.Body).Decode(&s) == nil {
+				enabled, attackCount, known = s.UnderAttackEnabled, s.UnderAttackVhosts, true
+			}
+		}
+		r.Body.Close()
+	}
+	switch {
+	case !known:
+		fmt.Println("Under-Attack Mode: unknown (could not query challenge summary)")
+	case enabled:
+		fmt.Println("Under-Attack Mode: enabled")
+	default:
+		fmt.Println("Under-Attack Mode: disabled (UNDER_ATTACK=0)")
+	}
+
+	// Detail rows carry score/uniq/reasons. Query status=all (not just active)
+	// so a vhost the server marks under_attack on a lapsed/inactive challenge
+	// row is still shown; the summary count above stays authoritative for the
+	// grand total.
+	r, err := clihttp.Get(base + "/api/v1/challenge/vhosts?status=all&mode=all&limit=500")
+	if err != nil {
+		return err
+	}
+	defer r.Body.Close()
+	if r.StatusCode < 200 || r.StatusCode >= 300 {
+		return httpStatusErr(r)
+	}
+	var vhs []chalVhost
+	if err := json.NewDecoder(r.Body).Decode(&vhs); err != nil {
+		return err
+	}
+	var under []chalVhost
+	for _, v := range vhs {
+		if v.State == "under_attack" {
+			under = append(under, v)
+		}
+	}
+
+	total := len(under)
+	if known && attackCount > total {
+		total = attackCount // authoritative; includes rowless forced-on overrides
+	}
+	if total == 0 {
+		fmt.Println("No vhosts currently under attack.")
+	} else {
+		fmt.Printf("\nVhosts under attack (%d):\n", total)
+		fmt.Printf("%-35s %-6s %5s %6s  %s\n", "HOST", "MODE", "SCORE", "UNIQ", "REASONS")
+		for _, v := range under {
+			fmt.Printf("%-35s %-6s %5.2f %6d  %s\n", v.Host, v.Mode, v.Score, v.UniqIP, strings.Join(v.Reasons, ","))
+		}
+		if extra := total - len(under); extra > 0 {
+			fmt.Printf("(%d more forced on via override, no challenge activity to list)\n", extra)
+		}
+	}
+	fmt.Println("\nUsage:")
+	fmt.Println("  cfm webtop attack on <vhost>   force a vhost into UNDER_ATTACK")
+	fmt.Println("  cfm webtop attack off <vhost>  clear it + suppress auto re-entry for the holddown")
 	return nil
 }
 
