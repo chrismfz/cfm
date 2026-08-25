@@ -17,7 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **`cfm webtop live` TUI now surfaces the abuse_shadow signals.** The live
+  dashboard gains a compact **SIG** column in the top vhost table — a fixed-slot
+  `f`/`c`/`d`/`s` presence cell for facet (query-cardinality), cost (5xx origin
+  pressure), dc (unverified-datacenter fraction) and the rate-outlier shadow
+  count — so an operator can see at a glance which vhosts are lighting up which
+  signal. The `x`-toggle bottom panel is broadened from "Suspicious" to
+  **"Suspicious + Challenged"**: it now merges the challenged vhosts (auto/manual,
+  with a CH column) into the suspicious list and appends the signal values
+  (`farm` / `facet=N` / `cost=N%` / `dc=N%` / `shadow=N`) to the REASONS column —
+  the same unified "who needs attention and why" view cfm-admin already shows
+  (cfm-admin and `cfm webtop challenge` already carry these badges). Pure
+  visibility of already-collected data — no enforcement, no new signals.
 
 ## 2026.08.25
 
