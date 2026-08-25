@@ -49,6 +49,36 @@ func TestRequestPeerEntryTopologies(t *testing.T) {
 	}
 }
 
+func TestRequestListenerEntryHonoursConfiguredPorts(t *testing.T) {
+	// With a non-default PORT/TLS_PORT, a request on the CONFIGURED listener port
+	// must still classify as the "6060"/"6061" tag (else AdminTransportRedirect
+	// would go inert). The old hardcoded 6060/6061 become just "other".
+	setListenerPorts(8080, 8443)
+	t.Cleanup(func() { setListenerPorts(0, 0) }) // restore unset (defaults) for other tests
+
+	entryFor := func(localAddr string) string {
+		r := httptest.NewRequest(http.MethodGet, "http://host/cfm-admin/", nil)
+		r.RemoteAddr = "198.51.100.7:5000" // external, non-loopback -> not "edge"
+		return requestPeer(withLocalAddr(r, localAddr)).Entry
+	}
+	for _, c := range []struct{ addr, want string }{
+		{"0.0.0.0:8080", "6060"},  // configured HTTP port -> HTTP tag
+		{"0.0.0.0:8443", "6061"},  // configured TLS port  -> TLS tag
+		{"0.0.0.0:6060", "other"}, // old hardcoded port is no longer special
+		{"0.0.0.0:9999", "other"},
+	} {
+		if got := entryFor(c.addr); got != c.want {
+			t.Fatalf("localAddr %s: Entry = %q, want %q", c.addr, got, c.want)
+		}
+	}
+
+	// Unset (0) falls back to the historical 6060/6061 defaults.
+	setListenerPorts(0, 0)
+	if got := entryFor("0.0.0.0:6060"); got != "6060" {
+		t.Fatalf("unset config: :6060 Entry = %q, want 6060 default", got)
+	}
+}
+
 func TestRequestPeerRejectsNonCanonicalForwardedChainWithoutRealIP(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
 	r.RemoteAddr = "127.0.0.1:41000"

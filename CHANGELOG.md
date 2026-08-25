@@ -17,7 +17,13 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **`AdminTransportRedirect` now tracks a non-default `PORT` (audit R01 / Step 5 follow-up).**
+  `requestPeer`'s listener classification keyed on hardcoded `6060`/`6061`, so running the
+  control plane on a non-default `PORT`/`TLS_PORT` classified every request as `other` and
+  silently disabled the direct-`:6060`→`:6061` transport guard. It now records the actual
+  configured listener ports at startup and classifies against them (falling back to
+  `6060`/`6061` when unset), so the guard works on any port. No effect on default-port installs.
 
 ## 2026.08.25
 

@@ -240,6 +240,27 @@ func TestAdminTransportRedirect_IPv6HostTarget(t *testing.T) {
 	}
 }
 
+func TestAdminTransportRedirect_HonoursNonDefaultPort(t *testing.T) {
+	// The middleware must not go inert when the control plane runs on a non-default
+	// PORT: a direct external browser GET on the configured HTTP port is classified
+	// "6060" (via setListenerPorts) and upgraded to the configured TLS port.
+	setListenerPorts(8080, 8443)
+	t.Cleanup(func() { setListenerPorts(0, 0) })
+
+	r := transportReq(http.MethodGet, "http://host:8080/cfm-admin/x", "0.0.0.0:8080", "198.51.100.5:5000",
+		map[string]string{"Accept": htmlAccept})
+	rr, nextCalled := runTransport(8443, true, r)
+	if nextCalled {
+		t.Fatal("next ran; a non-default-port admin GET should have been redirected")
+	}
+	if rr.Code != http.StatusFound {
+		t.Fatalf("code = %d, want 302", rr.Code)
+	}
+	if got := rr.Header().Get("Location"); got != "https://host:8443/cfm-admin/x" {
+		t.Fatalf("Location = %q, want https://host:8443/cfm-admin/x", got)
+	}
+}
+
 func TestHTTPBindAddr(t *testing.T) {
 	// The secure default (R01): an unset LISTEN_ADDRESS binds loopback, never the
 	// wildcard; an explicit value — including the 0.0.0.0/:: opt-in — is unchanged.
