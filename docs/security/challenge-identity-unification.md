@@ -106,12 +106,17 @@ handlers are mounted publicly (Step 2).
   the point of the change for Step 2.
 - **Blast-radius guard (defense-in-depth):** `rlFirewallBlock` now escalates a
   self-protection ban to nft only for a **public** address (`firewallBlockableIP`
-  excludes loopback / RFC1918 / IPv6 ULA / link-local / unspecified). So even if
-  identity ever resolves a "client" to an infrastructure address — a misconfigured
-  non-loopback front-end reaching `9098`, or a fail-closed identity — the ban is
-  not applied to the edge, a load balancer, or the host. In-memory rate limiting
-  still applies; only the firewall escalation is skipped. This makes the
-  loopback-only narrowing safe-by-construction rather than safe-by-assumption.
+  excludes loopback / RFC1918 / IPv6 ULA / link-local / unspecified). This bounds
+  the realistic misconfiguration — a non-loopback front-end on a **private**
+  address (a LAN load balancer) reaching `9098`, or a fail-closed identity — so
+  the ban never lands on the edge, a private LB, or the host. In-memory rate
+  limiting still applies; only the firewall escalation is skipped. **Limitation:**
+  the guard cannot cover a **public-IP** front-end proxying to `9098`, because a
+  public proxy is indistinguishable from a real public client by address alone —
+  that topology collapses every client to the proxy IP and one abuser could get
+  the proxy nft-banned. That case is out of the model by design (loopback-only,
+  `proxy_bind 127.0.0.1`, audited externally-closed by R06); the guard covers the
+  accidental private case, and the operational invariant covers the public one.
 - **Residual assumption (operator-owned):** every deployment reaches `9098` from
   loopback only. Keep `9098` externally closed (audit R06 regression) and keep
   the edge `proxy_bind 127.0.0.1`. The blast-radius guard above bounds the impact
