@@ -124,6 +124,21 @@ Not code — operator actions tracked so they aren't forgotten.
 
 - **Rotate `MCP_TOKEN` + remove `MCPGODEBUG`** — [next, operator]. Post-rollout
   hygiene on the live nodes.
+- **Fleet detectors.conf immediate fixes** — [next, operator]. The quote-typo
+  (`SESSION_ALL_FAILED"`) on 5 nodes, 3deers' missing panel `CHALLENGE_VHOST`
+  patterns, speedhost's `permanent` leniency, dead `.leniency` threshold keys.
+  List: `docs/detectors-config-unification.md` §7.
+
+## 8. Detectors config unification
+
+Design: `docs/detectors-config-unification.md` (2026-08-25 10-server audit).
+Auto-detected sources (`srcresolve`), `/etc/cfm/detectors.d/` overlays so the
+base conffile stays package-updateable (no more `.rpmnew`), global
+`[leniency]`, persisted auto-tokens, fleet-converged defaults.
+
+- **PR sequence** — [next]. §9 of the doc: srcresolve → ssh/dovecot →
+  exim/postfix+docker → webdetector edge source → detconf layering (WebUI
+  editor writes overlays) → global leniency + tokens → converged stock values.
 
 ---
 
