@@ -23,7 +23,7 @@ Do not skip dependency steps merely because a later change looks small. In parti
 5.  ✅ Direct :6060 browser transport policy -> :6061 when TLS ready       — done (#1351, defence in depth)
 6.  ☐  Automatic request-aware session-cookie transport policy
 7.  ✅ cfm.api.log auth-attempt schema + api_abuse -> cfm_endpoints default-on  — done (#1338); auth_autoblock.go removal pending
-8.  ☐  Per-auth-mechanism / route-cost API rate limiting
+8.  ✅ Per-auth-mechanism / route-cost API rate limiting                   — enforcing limiter shipped (identity×route buckets, honest-high code-default ceilings, 429+Retry-After, never nft); ceiling tuning + alert-only detector event are operator-driven follow-ups
 9.  ◑  Direct control-plane response/cache/security-header hardening       — safe subset done (nosniff/Referrer-Policy + no-store on auth failures); CSP/frame (cPanel-iframe) + HSTS deferred
 10. ☐  Controlled credentialed regression + close Audit_Results findings
 ```
@@ -557,7 +557,18 @@ Signals for `cfm_endpoints` should include login failures/locks, invalid/malform
 # Step 8 — per-auth-mechanism / route-cost API rate limiting
 
 **Priority:** P2  
-**Dependencies:** Steps 1 and preferably 7
+**Dependencies:** Steps 1 and preferably 7  
+**Status:** ✅ SOURCE COMPLETE — `RateLimitMiddleware` (`internal/apiserver/ratelimit.go`,
+wired inside `TokenMiddleware`) bounds the authenticated API per identity class ×
+route class, keyed by a non-secret subject (admin constant / scoped+embed `st.ID` /
+`user:<name>` session) threaded via `withAuthnSubject`. **Enforcing by default in
+code** with honestly-high ceilings (secure-fleet: no `cfm.conf` change needed);
+trips are self-healing `429`+`Retry-After`, logged `event=ratelimit_trip`, and
+**never** nft-blocked. Optional `RATE_LIMIT_MODE` (enforce/shadow/off) +
+`RATE_LIMIT_SCALE`. Tests `ratelimit_test.go`; design/decisions
+`docs/security/control-plane-rate-limiting.md`. **Operator-driven follow-ups:** tune
+individual ceilings from log/API signal; an alert-only (never-nft) `cfm_endpoints`
+event. Live verification rolls up to Step 10.
 
 ## Goal
 
