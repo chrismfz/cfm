@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.25
+
 ### Added
 - **Source-resolution preview across all four surfaces: `cfm
   detectors-srcresolve` (alias `detectors-resolve`), `GET
@@ -93,8 +97,6 @@ back-filled here — see the git/PR history for that period.
   TLS-down state serves only a logged (`event=admin_http_fallback`) **read-only** degraded
   fallback (GET/HEAD) — challenge-gating that read window is tracked for audit Step 4. See
   `docs/security/direct-6060-transport-policy.md`.
-
-## 2026.08.25
 
 ### Added
 - **`abuse_shadow` rate-outlier count surfaced per vhost (webtop / API / cfm-admin).**
