@@ -333,7 +333,14 @@ Preserve regression coverage for the historical failures where Lua selected chal
 
 **Priority:** P0/P1  
 **Finding:** `Audit_Results.md` R01, HIGH CONFIRMED LIVE  
-**Dependencies:** Step 1; integrates with Step 4
+**Dependencies:** Step 1; integrates with Step 4  
+**Status:** 🎨 DESIGN landed — `docs/security/direct-6060-transport-policy.md`
+(pre-auth `AdminTransportRedirect` keyed on `requestPeer(r).Entry` + loopback: direct
+external `:6060` browser GET/HEAD → `:6061` when a new bind-verified `tlsReady` is set,
+unsafe methods rejected, edge/CLI/loopback exempt; degraded HTTP fallback logged, its
+challenge-gating deferred to Step 4). Awaiting review before implementation. Two operator
+decisions surfaced in the doc §12 (machine-API stance; whether external `:6060` is needed
+at all — loopback-bind is a simpler complementary fix).
 
 ## Problem
 
