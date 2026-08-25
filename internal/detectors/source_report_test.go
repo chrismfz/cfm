@@ -5,9 +5,55 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cfm/internal/detectors/srcresolve"
 )
+
+// A provisional mail plan flags a boot-race retry ONLY when the docker CLI is
+// present (a container may still be coming up); with no docker there is nothing
+// to wait for, and a non-provisional plan never flags one.
+func TestNotePlanBootRace(t *testing.T) {
+	prov := sourcePlan{provisional: true}
+	resolved := sourcePlan{} // provisional == false
+
+	swapPresence(t, false, false, true) // docker present
+	resetBootRacePending()
+	notePlanBootRace(resolved)
+	if bootRacePending() {
+		t.Fatal("a non-provisional plan must not flag a boot-race retry")
+	}
+	notePlanBootRace(prov)
+	if !bootRacePending() {
+		t.Fatal("provisional + docker present must flag a boot-race retry")
+	}
+	resetBootRacePending()
+	if bootRacePending() {
+		t.Fatal("reset must clear the flag")
+	}
+
+	swapPresence(t, false, false, false) // no docker
+	notePlanBootRace(prov)
+	if bootRacePending() {
+		t.Fatal("provisional without docker must NOT flag a retry (nothing will appear)")
+	}
+}
+
+func TestBootRaceRetryDue(t *testing.T) {
+	m := &manager{}
+	now := time.Unix(1_700_000_000, 0)
+	if m.bootRaceRetryDue(now) {
+		t.Fatal("zero reprobeAt is never due")
+	}
+	m.reprobeAt = now.Add(30 * time.Second)
+	if m.bootRaceRetryDue(now) {
+		t.Fatal("future reprobeAt is not yet due")
+	}
+	m.reprobeAt = now.Add(-time.Second)
+	if !m.bootRaceRetryDue(now) {
+		t.Fatal("past reprobeAt is due")
+	}
+}
 
 // planProbes builds fake srcresolve probes from simple sets.
 func planProbes(entries, active, files, containers []string) srcresolve.Probes {

@@ -56,8 +56,9 @@ Depending on detector type, sources can be:
   postfix-only hosts and vice versa without hand-set `ENABLED=0`. What each
   checks before disabling: postfix sections probe binary/unit/discovered
   container/log (and stay alive provisionally when the docker CLI exists but
-  no container was found — the daemon may not be up yet at boot;
-  `cfm detector reload` re-resolves); exim sections probe binary/unit (plus
+  no container was found — the container may not be up yet at boot; the manager
+  re-resolves automatically on a bounded retry once it appears); exim sections
+  probe binary/unit (plus
   the mainlog for `exim_security`/`exim_relays`) — exim-in-docker is not
   probed. `postfix_queues` also auto-wraps its queue commands in
   `docker exec` when postfix lives only in a discovered container (mailcow).

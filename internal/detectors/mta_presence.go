@@ -3,9 +3,11 @@ package detectors
 // mta_presence.go — cached "is this MTA installed here?" probes shared by the
 // exim and postfix registers' self-disable decisions. Results are cached
 // briefly so one registration sweep (several sections probing the same MTA
-// back-to-back) runs the exec probes once; a later hot reload re-probes, so
-// installing the MTA and running `cfm detector reload` enables the sections
-// without a daemon restart.
+// back-to-back) runs the exec probes once. A containerized MTA that is not up
+// yet at boot resolves provisionally and is re-resolved automatically by the
+// manager's boot-race retry (see markBootRacePending). Installing a host MTA
+// after startup is picked up on the next config change or daemon restart
+// (nothing re-probes on host-binary appearance alone).
 
 import (
 	"os"
@@ -97,10 +99,11 @@ func dockerCLIPresent() bool {
 // of the same units). The memo is scoped to ONE sweep — the manager calls
 // resetRegistrationProbes() at the start of each (re)build, so a config reload
 // re-probes current host state (a daemon/container that appeared since the last
-// build is seen, honouring the "cfm detector reload re-resolves" contract),
-// while sections within a sweep still share probes. Never a cross-sweep TTL
-// cache: that would reuse stale host state across reloads (MemoProbes is
-// explicitly "not safe for reuse across runs").
+// build is seen, so a mail daemon/container that appeared since the last build
+// is re-resolved on the next rebuild), while sections within a sweep still
+// share probes. Never a cross-sweep TTL cache: that would reuse stale host
+// state across reloads (MemoProbes is explicitly "not safe for reuse across
+// runs").
 var regProbes struct {
 	mu  sync.Mutex
 	p   srcresolve.Probes
@@ -123,4 +126,51 @@ func registrationProbes() srcresolve.Probes {
 		regProbes.set = true
 	}
 	return regProbes.p
+}
+
+// bootRace is a sweep-scoped flag: a mail register sets it (markBootRacePending)
+// when its section resolved PROVISIONALLY while the docker CLI is present — the
+// mailcow container is expected but not up yet at boot. The manager resets it
+// before each build and, if set afterwards, schedules a forced re-resolution
+// (a container appearing moves no config file, so cfgSig alone would never
+// trigger one). Touched from the build goroutine only, but guarded anyway.
+var bootRace struct {
+	mu      sync.Mutex
+	pending bool
+}
+
+func resetBootRacePending() {
+	bootRace.mu.Lock()
+	bootRace.pending = false
+	bootRace.mu.Unlock()
+}
+
+// markBootRacePending records that the current section resolved provisionally
+// and a docker container may still be coming up. It is a no-op when the docker
+// CLI is absent (no container will ever appear, so retrying is pointless — the
+// provisional default is the final answer). Uses the swappable
+// dockerCLIPresentFn so tests can drive it.
+func markBootRacePending() {
+	if !dockerCLIPresentFn() {
+		return
+	}
+	bootRace.mu.Lock()
+	bootRace.pending = true
+	bootRace.mu.Unlock()
+}
+
+func bootRacePending() bool {
+	bootRace.mu.Lock()
+	defer bootRace.mu.Unlock()
+	return bootRace.pending
+}
+
+// notePlanBootRace flags a provisional mail-source plan for boot-race retry.
+// Only the containerizable MTAs (postfix, dovecot) call it; exim's provisional
+// (log location unknown) is not a docker boot race, and markBootRacePending is
+// itself a no-op without the docker CLI.
+func notePlanBootRace(plan sourcePlan) {
+	if plan.provisional {
+		markBootRacePending()
+	}
 }

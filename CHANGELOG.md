@@ -96,6 +96,23 @@ back-filled here — see the git/PR history for that period.
   configured listener ports at startup and classifies against them (falling back to
   `6060`/`6061` when unset), so the guard works on any port. No effect on default-port installs.
 
+### Fixed
+- **Mailcow boot race no longer silently kills postfix/dovecot monitoring.** When
+  CFM started before the mailcow docker stack was up, the postfix/dovecot detectors
+  resolved provisionally (tailing an empty host `/var/log/mail.log`) and — because a
+  container appearing changes no config file — never re-resolved, so brute-force/relay/
+  queue monitoring stayed silently dead until the next daemon restart. The manager now
+  schedules a bounded re-resolution (every 30s, up to 4 min) whenever a mail section is
+  provisional while the docker CLI is present, so the container's appearance is picked up
+  automatically. Stale references to a non-existent `cfm detector reload` in comments/
+  notes were corrected (recovery is automatic, or on restart).
+- **`cfm detectors-srcresolve` / the source-resolution preview** no longer mislabels
+  `custom` and `proxmox_auth` sections as "n/a (command/API/collector-based)" — both tail
+  a log source and are now shown with their own resolution note.
+- **`/api/v1/detectors/source-resolution` reclassified to the heavy-read rate bucket.**
+  Each call forks `journalctl`/`systemctl`/`docker ps`/`stat`; it was bucketed with cheap
+  JSON reads, so a fan-out loop could pile up subprocesses on a wedged host.
+
 ## 2026.08.25
 
 ### Added

@@ -84,6 +84,13 @@ func planDovecotSource(section string, kv KV, p srcresolve.Probes) sourcePlan {
 	if res.Kind != srcresolve.KindNone {
 		return sourcePlan{res: res}
 	}
+	// Unlike postfix, dovecot deliberately falls back to the FILE default even
+	// under an explicit MODE=journal that resolved nothing: dovecot logs to
+	// syslog, so /var/log/maillog actually carries its lines (an empty journal
+	// would not). It also has no package-internal autodetect/passthrough path,
+	// so it must resolve to a concrete kind. This intentional cross-to-file is
+	// safe here precisely because the file has the data — do not "align" it
+	// with postfix's strict never-cross rule.
 	return sourcePlan{
 		res:         srcresolve.Result{Kind: srcresolve.KindFile, Path: dovecotLogFiles[0], Reason: "provisional default (nothing confirmed)"},
 		provisional: true,
@@ -176,7 +183,7 @@ func planPostfixLogSource(section string, kv KV, p srcresolve.Probes) sourcePlan
 			return sourcePlan{
 				res:         srcresolve.Result{Kind: srcresolve.KindFile, Path: postfixLogFiles[1], Reason: "provisional default (docker present, container not found yet)"},
 				provisional: true,
-				note:        "no postfix found but docker is present (container may not be up yet); `cfm detector reload` re-resolves (" + res.Reason + ")",
+				note:        "no postfix found but docker is present (container may not be up yet); auto re-resolves once it appears (" + res.Reason + ")",
 			}
 		}
 		return sourcePlan{res: res, disable: true,
@@ -218,7 +225,7 @@ func planPostfixQueues(section string, kv KV, p srcresolve.Probes) (pl sourcePla
 		return sourcePlan{
 			res:         srcresolve.Result{Kind: srcresolve.KindNone, Reason: why},
 			passthrough: true, provisional: true,
-			note: "no postfix found but docker is present (container may not be up yet); keeping host defaults — `cfm detector reload` re-resolves",
+			note: "no postfix found but docker is present (container may not be up yet); keeping host defaults — auto re-resolves once it appears",
 		}, "", ""
 	default:
 		return sourcePlan{
@@ -236,12 +243,17 @@ var sourceConfiguredKeys = []string{
 	"DOCKER_CONTAINER", "TOTAL_CMD", "LIST_CMD",
 }
 
-// legacyAutoTypes still carry their own pre-srcresolve autodetect.
+// legacyAutoTypes still carry their own pre-srcresolve autodetect. These ARE
+// log-source-based detectors that srcresolve has not (yet) adopted — listing
+// them here keeps the preview honest (they tail a file/journal), rather than
+// mislabelling them "n/a — command/API/collector-based".
 var legacyAutoTypes = map[string]string{
-	"ftpd":        "own autodetect (journal probe + file scoring); resolution in its startup log",
-	"modsec":      "own autodetect (LOG_PATH=auto candidates); resolution in its startup log",
-	"mysql":       "own autodetect (LOG_PATH=auto error-log discovery); resolution in its startup log",
-	"webdetector": "edge log configured/derived (MODE=file|folder); see its startup log",
+	"ftpd":         "own autodetect (journal probe + file scoring); resolution in its startup log",
+	"modsec":       "own autodetect (LOG_PATH=auto candidates); resolution in its startup log",
+	"mysql":        "own autodetect (LOG_PATH=auto error-log discovery); resolution in its startup log",
+	"webdetector":  "edge log configured/derived (MODE=file|folder); see its startup log",
+	"custom":       "own MODE/LOG_PATH/JOURNAL_UNIT resolution (per-section); see its startup log",
+	"proxmox_auth": "own journal/file tailer; resolution in its startup log",
 }
 
 // SourceReport answers "which log source would every section in cfgPath use

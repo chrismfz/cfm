@@ -33,6 +33,16 @@ type manager struct {
 	pendingSince time.Time
 	hasPending   bool
 
+	// Boot-race re-resolution: a mail section that resolved provisionally
+	// while the docker CLI is present (mailcow container not up yet at boot)
+	// leaves reprobeAt set, so maybeReload forces a rebuild on a slow cadence
+	// even when cfgSig is unchanged — the container's later appearance moves
+	// no config file, so nothing else would trigger re-resolution. Cleared
+	// once resolution succeeds, or abandoned past bootRaceUntil. These fields
+	// are touched only inside maybeReload (single poll goroutine).
+	reprobeAt     time.Time
+	bootRaceUntil time.Time
+
 	running bool
 	state   *core.State
 
@@ -43,6 +53,21 @@ type manager struct {
 type initDiagnosticsError interface {
 	error
 	Diagnostics() []string
+}
+
+// Boot-race re-resolution cadence: how often to retry a provisional mail
+// source while its docker container may still be coming up, and how long to
+// keep trying before accepting the provisional default (a host where the
+// container never appears must stop churning through full rebuilds).
+const (
+	bootRaceRetryEvery = 30 * time.Second
+	bootRaceMaxWait    = 4 * time.Minute
+)
+
+// bootRaceRetryDue reports whether a scheduled boot-race re-resolution has come
+// due (reprobeAt set and reached). Poll-goroutine only, like the debounce state.
+func (m *manager) bootRaceRetryDue(now time.Time) bool {
+	return !m.reprobeAt.IsZero() && !now.Before(m.reprobeAt)
 }
 
 func probeSourceStatus(kv KV) (bool, string) {
@@ -222,15 +247,19 @@ func (m *manager) maybeReload(parent context.Context) {
 	detectorstatus.UpsertConfiguredSections(configured)
 	detectorstatus.SetLoadedTypes(len(availableTypes))
 	detectorstatus.SetInventory(availableTypes, configuredSections, enabledCount)
-	// No change from current running config: clear any pending reload.
-	if sig == m.lastSig && m.running {
+	now := time.Now()
+	// No change from current running config: clear any pending reload — UNLESS
+	// a boot-race re-resolution is due. A provisional mail section waiting for
+	// its docker container (mailcow) sees no config-file change when the
+	// container finally appears, so cfgSig stays equal; only this timer forces
+	// the re-resolve.
+	if sig == m.lastSig && m.running && !m.bootRaceRetryDue(now) {
 		m.hasPending = false
 		return
 	}
 
 	// Debounce: require the new signature to remain stable for debounceDur
 	// before we actually reload (prevents flapping / transient states).
-	now := time.Now()
 
 	// On first-ever load (nothing running yet), do NOT debounce.
 	// We want config to be available immediately for consumers in main().
@@ -476,6 +505,7 @@ func (m *manager) maybeReload(parent context.Context) {
 	// rebuild re-probes host state so a reload sees a daemon/container that
 	// appeared since the last build (srcresolve register path).
 	resetRegistrationProbes()
+	resetBootRacePending()
 
 	// instantiate + run all enabled sections
 	for secName, kv := range secs.ByName {
@@ -667,6 +697,27 @@ func (m *manager) maybeReload(parent context.Context) {
 			}
 
 		}(secName, det)
+	}
+
+	// Boot-race re-resolution schedule. A mail register set the pending flag if
+	// its section resolved provisionally while the docker CLI is present — the
+	// mailcow container is expected but not up yet. Since the container later
+	// appearing changes no config file (cfgSig stays equal), schedule a forced
+	// re-resolution on a slow cadence until it resolves, bounded by
+	// bootRaceMaxWait so a host whose container never comes stops churning.
+	nowB := time.Now()
+	switch {
+	case !bootRacePending():
+		m.reprobeAt, m.bootRaceUntil = time.Time{}, time.Time{} // resolved (or nothing pending)
+	case m.bootRaceUntil.IsZero() || nowB.Before(m.bootRaceUntil):
+		if m.bootRaceUntil.IsZero() {
+			m.bootRaceUntil = nowB.Add(bootRaceMaxWait)
+		}
+		m.reprobeAt = nowB.Add(bootRaceRetryEvery)
+		logging.Logf("[detectors] mail source resolved provisionally (docker container not up yet) — re-resolving in %s", bootRaceRetryEvery)
+	default:
+		m.reprobeAt = time.Time{} // gave up: container never appeared within bootRaceMaxWait
+		logging.Logf("[detectors] mail source still provisional after %s; keeping provisional default (docker container never appeared)", bootRaceMaxWait)
 	}
 }
 

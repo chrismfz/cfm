@@ -42,6 +42,7 @@ func TestClassifyRoute(t *testing.T) {
 		{"GET", "/api/v1/host/drilldown/status", rcHeavyRead}, // trailing /status must NOT downgrade a heavy route
 		{"GET", "/debug/pprof/heap", rcCaptureStream},
 		{"GET", "/api/v1/detectors", rcNormalRead},
+		{"GET", "/api/v1/detectors/source-resolution", rcHeavyRead}, // forks journalctl/systemctl/docker per call
 	}
 	for _, c := range cases {
 		if got := classifyRoute(c.method, c.path); got != c.want {
