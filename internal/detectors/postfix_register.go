@@ -53,70 +53,33 @@ func explicitSourceKeys(vals ...string) int {
 	return n
 }
 
-// applyPostfixSourceResolution resolves the log source for a log-based postfix
-// detector and rewrites the three source fields so exactly one is set (the
-// postfix package wires whichever is non-empty, journald > docker > file).
-// Returns disable=true when postfix is nowhere to be found — the register
-// should return (nil, nil) so the manager skips the section cleanly.
-func applyPostfixSourceResolution(section, mode string, unit, container, path *string) (disable bool) {
-	// More than one explicit source key: the package's historical precedence
-	// (journald > docker > file) decides, exactly as before the resolver —
-	// never silently reorder an existing config's source choice.
-	if explicitSourceKeys(*unit, *container, *path) > 1 {
-		logging.Logf("[detectors][%s] multiple explicit source keys set; using them as-is (journald > docker > file)", section)
+// applyPostfixSourcePlan applies planPostfixLogSource's outcome to a config's
+// three source fields so exactly one is set (the postfix package wires
+// whichever is non-empty, journald > docker > file). Returns disable=true
+// when the plan says the section self-disables (register returns nil, nil).
+// All policy lives in the planner (source_report.go) — shared with the
+// dry-run source-resolution report — this is only the wiring glue.
+func applyPostfixSourcePlan(section string, plan sourcePlan, unit, container, path *string) (disable bool) {
+	if plan.disable {
+		logging.Logf("[detectors][%s] %s (%s)", section, plan.note, plan.res.Reason)
+		return true
+	}
+	if plan.note != "" {
+		logging.Logf("[detectors][%s] %s", section, plan.note)
+	}
+	if plan.passthrough {
 		return false
 	}
-
-	res := srcresolve.Resolve(srcresolve.Spec{
-		Service:           section,
-		Mode:              mode,
-		JournalUnit:       *unit,
-		LogPath:           *path,
-		DockerContainer:   *container,
-		JournalCandidates: postfixJournalUnits,
-		JournalSignature:  postfixJournalSignature,
-		FileCandidates:    postfixLogFiles,
-		DockerPatterns:    postfixDockerPatterns,
-	}, srcresolve.DefaultProbes())
-
-	switch res.Kind {
+	switch plan.res.Kind {
 	case srcresolve.KindJournal:
-		*unit, *container, *path = res.Unit, "", ""
-		logging.Logf("[detectors][%s] source=journal unit=%s (%s)", section, res.Unit, res.Reason)
+		*unit, *container, *path = plan.res.Unit, "", ""
+		logging.Logf("[detectors][%s] source=journal unit=%s (%s)", section, plan.res.Unit, plan.res.Reason)
 	case srcresolve.KindDocker:
-		*unit, *container, *path = "", res.Container, ""
-		logging.Logf("[detectors][%s] source=docker container=%s (%s)", section, res.Container, res.Reason)
+		*unit, *container, *path = "", plan.res.Container, ""
+		logging.Logf("[detectors][%s] source=docker container=%s (%s)", section, plan.res.Container, plan.res.Reason)
 	case srcresolve.KindFile:
-		*unit, *container, *path = "", "", res.Path
-		logging.Logf("[detectors][%s] source=file path=%s (%s)", section, res.Path, res.Reason)
-	default:
-		if !strings.EqualFold(strings.TrimSpace(mode), "auto") && strings.TrimSpace(mode) != "" {
-			// Explicit mode that resolved nothing: never cross modes and never
-			// self-disable — keep the operator's config exactly as written
-			// (pre-resolver semantics: the package wires whatever keys exist).
-			logging.Logf("[detectors][%s] %s; keeping explicit config as-is", section, res.Reason)
-			return false
-		}
-		if !postfixPresent() {
-			if dockerCLIPresent() {
-				// Docker exists but no postfix container was discovered — the
-				// daemon or the container may simply not be up yet (boot
-				// ordering). Inconclusive: stay alive on the blind default
-				// rather than permanently self-disabling, and say how to
-				// re-resolve.
-				*unit, *container = "", ""
-				*path = postfixLogFiles[1] // /var/log/mail.log
-				logging.Logf("[detectors][%s] no postfix found but docker is present (container may not be up yet); tailing default %s provisionally — `cfm detector reload` re-resolves (%s)", section, *path, res.Reason)
-				return false
-			}
-			logging.Logf("[detectors][%s] postfix not present (no binary/unit/container/log); detector disabled (auto) — %s", section, res.Reason)
-			return true
-		}
-		// Postfix runs but nothing was confirmed: tail the historical stock
-		// default blind — self-heals the moment the log appears.
-		*unit, *container = "", ""
-		*path = postfixLogFiles[1] // /var/log/mail.log
-		logging.Logf("[detectors][%s] no log source confirmed (%s); tailing default %s provisionally", section, res.Reason, *path)
+		*unit, *container, *path = "", "", plan.res.Path
+		logging.Logf("[detectors][%s] source=file path=%s (%s)", section, plan.res.Path, plan.res.Reason)
 	}
 	return false
 }
@@ -253,13 +216,9 @@ func init() {
 			}
 		}
 
-		// JOURNAL_MATCHES is a raw journalctl match expression the resolver has
-		// no notion of — explicit journal config, passed through verbatim.
-		if cfg.JournalMatch == "" {
-			mode := strings.ToLower(kvStrClean(kv, "MODE", "auto"))
-			if applyPostfixSourceResolution(section, mode, &cfg.JournalUnit, &cfg.DockerContainer, &cfg.LogPath) {
-				return nil, nil
-			}
+		if applyPostfixSourcePlan(section, planPostfixLogSource(section, kv, srcresolve.DefaultProbes()),
+			&cfg.JournalUnit, &cfg.DockerContainer, &cfg.LogPath) {
+			return nil, nil
 		}
 
 		sec := postfix.NewSecurity(cfg)
@@ -274,30 +233,22 @@ func init() {
 		defTimeout := kvDur(global, "DEFAULT_TIMEOUT", 8*time.Second)
 		defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 10*time.Minute)
 
-		// Queue commands: explicit values are the operator's word, used
-		// verbatim. With both absent, resolve the environment: host postfix →
-		// leave them empty so postfix.NewQueues fills its exact header-count
-		// defaults; postfix only in a discovered container (mailcow) → the
-		// same commands wrapped in `docker exec` (only the first pipeline
-		// segment runs in the container; the pipes stay host-side); neither →
-		// the section self-disables instead of failing `mailq` every tick —
-		// unless the docker CLI exists (daemon/container may not be up yet at
-		// boot: inconclusive, keep the section alive on the host defaults and
-		// let `cfm detector reload` re-resolve).
-		totalCmd := kvStrClean(kv, "TOTAL_CMD", "")
-		listCmd := kvStrClean(kv, "LIST_CMD", "")
-		if totalCmd == "" && listCmd == "" && !postfixPresent() {
-			name, ok, why := srcresolve.DiscoverContainer(postfixDockerPatterns, srcresolve.DefaultProbes())
-			switch {
-			case ok:
-				totalCmd, listCmd = dockerizePostfixQueueCmds(name)
-				logging.Logf("[detectors][%s] using docker container %s for queue commands (%s)", section, name, why)
-			case dockerCLIPresent():
-				logging.Logf("[detectors][%s] no postfix found but docker is present (container may not be up yet; %s); keeping host defaults — `cfm detector reload` re-resolves", section, why)
-			default:
-				logging.Logf("[detectors][%s] postfix not present (no binary/unit; %s); detector disabled (auto)", section, why)
-				return nil, nil
-			}
+		// Queue command plan (shared with the source-resolution report):
+		// explicit commands verbatim; host postfix → empty so NewQueues fills
+		// its exact header-count defaults; postfix only in a discovered
+		// container (mailcow) → the commands wrapped in `docker exec`; neither
+		// → self-disable, unless the docker CLI exists (daemon/container may
+		// not be up yet at boot — stay alive, `cfm detector reload` re-resolves).
+		plan, totalCmd, listCmd := planPostfixQueues(section, kv, srcresolve.DefaultProbes())
+		if plan.disable {
+			logging.Logf("[detectors][%s] %s (%s)", section, plan.note, plan.res.Reason)
+			return nil, nil
+		}
+		if plan.note != "" {
+			logging.Logf("[detectors][%s] %s", section, plan.note)
+		}
+		if plan.res.Kind == srcresolve.KindDocker {
+			logging.Logf("[detectors][%s] using docker container %s for queue commands (%s)", section, plan.res.Container, plan.res.Reason)
 		}
 
 		cfg := postfix.QueuesConfig{
@@ -375,13 +326,11 @@ func init() {
 			}
 		}
 
-		// Same source resolution as postfix_security (JOURNAL_MATCHES passes
-		// through verbatim; nil,nil = postfix absent, section auto-disabled).
-		if cfg.JournalMatch == "" {
-			mode := strings.ToLower(kvStrClean(kv, "MODE", "auto"))
-			if applyPostfixSourceResolution(section, mode, &cfg.JournalUnit, &cfg.DockerContainer, &cfg.LogPath) {
-				return nil, nil
-			}
+		// Same source plan as postfix_security (JOURNAL_MATCHES passes through
+		// verbatim; nil,nil = postfix absent, section auto-disabled).
+		if applyPostfixSourcePlan(section, planPostfixLogSource(section, kv, srcresolve.DefaultProbes()),
+			&cfg.JournalUnit, &cfg.DockerContainer, &cfg.LogPath) {
+			return nil, nil
 		}
 
 		rr := postfix.NewRelays(cfg)

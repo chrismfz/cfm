@@ -16,6 +16,7 @@ import (
 	"cfm/internal/mailtraffic"
 	"cfm/internal/notify"
 	"cfm/internal/panelauth"
+	"cfm/internal/srcreportcli"
 	status "cfm/internal/status"
 	"cfm/internal/sysctl"
 	"context"
@@ -351,6 +352,14 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "detectors-srcresolve", "detectors-resolve", "srcresolve":
+		addr := apiBaseURL()
+		clihttp.SetToken(apiAuthToken())
+		if err := srcreportcli.RunCLI(addr, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "detectors-srcresolve error:", err)
+			os.Exit(1)
+		}
+
 	case "clam", "clamd", "clamav":
 		// `cfm clam override|sigignore|infections …` hit the webdetector API,
 		// so they need the API base URL + auth token, unlike the clamd-socket
@@ -448,6 +457,9 @@ Usage:
   cfm lve                         -- CloudLinux per-tenant CPU ranking (hottest first); non-CloudLinux hosts show nothing
   cfm lve top <N>                 -- top N tenants by CPU
   cfm lve --json                  -- raw JSON passthrough
+
+  cfm detectors-srcresolve        -- dry run: which log source each detector section would tail here, and why (alias: detectors-resolve)
+  cfm detectors-srcresolve --wide -- + configured source keys; --json for raw JSON
 
   cfm kernsec                     -- interactive TUI for kernel hardening audit (TTY); auto-falls back to text
   cfm kernsec live                -- force the TUI

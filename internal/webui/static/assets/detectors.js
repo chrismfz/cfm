@@ -742,8 +742,45 @@ async function saveFlow(){
   byId('detectorsDiff').textContent=p.diff||''; byId('detectorsSaveModal').style.display='flex';
 }
 
+// Source-resolution dry run (GET /api/v1/detectors/source-resolution): which
+// log source each section would tail right now, per the daemon's shared
+// resolver. On-demand only — the endpoint runs journalctl/systemctl/docker
+// probes, so it is fetched once at page open and via the Re-run button, never
+// on the auto-refresh interval. Rows are built with textContent (XSS-safe).
+async function refreshSourceResolution(){
+  const body = byId('detectorsSrcResolveBody');
+  const note = byId('detectorsSrcResolveNote');
+  if(!body) return;
+  if(note) note.textContent = 'Resolving…';
+  try{
+    const j = await api('/api/v1/detectors/source-resolution');
+    body.innerHTML='';
+    (j.rows||[]).forEach((r)=>{
+      const tr=document.createElement('tr');
+      const td=(t)=>{ const c=document.createElement('td'); c.textContent=t; tr.appendChild(c); return c; };
+      td(r.section);
+      td(r.enabled?'yes':'no');
+      const srcCell=document.createElement('td');
+      const pill=document.createElement('span');
+      pill.className='pill';
+      if(r.would_disable){ pill.classList.add('danger'); pill.textContent='self-disable'; }
+      else if(r.provisional){ pill.classList.add('warn'); pill.textContent=`${r.kind} · provisional`; }
+      else pill.textContent=r.kind||'';
+      srcCell.appendChild(pill);
+      tr.appendChild(srcCell);
+      td(r.target||'');
+      td([r.reason, r.note].filter(Boolean).join(' · ')).className='muted';
+      body.appendChild(tr);
+    });
+    if(note) note.textContent = `${(j.rows||[]).length} sections · dry run, nothing changed`;
+  }catch(e){
+    if(note) note.textContent = `Unavailable: ${e.message}`;
+  }
+}
+
 function init(){
   byId('detectorsSaveBtn').onclick=saveFlow;
+  byId('detectorsSrcResolveBtn').onclick=refreshSourceResolution;
   byId('detectorsDiscardBtn').onclick=()=>{ state.draft=clone(state.original); renderConfigEditors(); setDirty(false); setStatus('Draft reverted'); };
   byId('detectorsReloadBtn').onclick=async()=>{ await api('/api/v1/detectors/reload',{method:'POST'}); setStatus('Detectors reload requested'); await refreshRuntimeStatus(); };
   byId('detectorsConfirmSave').onclick=async()=>{ await api('/api/v1/detectors/config',{method:'PUT',body:JSON.stringify({config:state.draft})}); byId('detectorsSaveModal').style.display='none'; setStatus('Saved detectors config'); await load(); };
@@ -765,6 +802,7 @@ function init(){
   document.addEventListener('visibilitychange',()=>{ if(!document.hidden) triggerRuntimeRefreshAfterEditing(); });
   window.setInterval(refreshRuntimeStatusIfSafe, RUNTIME_REFRESH_INTERVAL_MS);
   load().catch((e)=>setStatus(e.message,true));
+  refreshSourceResolution().catch(()=>{});
 }
 
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init,{once:true}); else init();

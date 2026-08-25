@@ -17,7 +17,59 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Source-resolution preview across all four surfaces: `cfm
+  detectors-srcresolve` (alias `detectors-resolve`), `GET
+  /api/v1/detectors/source-resolution`, a cfm-admin "Source resolution" card,
+  and the `detectors_srcresolve` MCP tool.** A dry run of the shared detector
+  source resolver: per detectors.conf section, which journald unit / log file
+  / docker container it would tail on this host RIGHT NOW and why — including
+  provisional (blind default, self-heals) and would-self-disable (MTA absent)
+  verdicts, plus the configured source keys. The registers and the report run
+  the SAME planner functions (`internal/detectors/source_report.go`), so the
+  preview cannot drift from what the daemon actually does. Built for the
+  fleet-unification rollout: check every node (MCP fan-out via cfm-web) before
+  removing hand-set `MODE`/`LOG_PATH`/`JOURNAL_UNIT`/`DOCKER_CONTAINER` pins.
+  Read-only; probes run, nothing starts or changes.
+
+### Changed
+- **The exim/postfix detectors now auto-detect their log source and self-disable
+  without their MTA.** `postfix_security`/`postfix_relays` gain `MODE = auto`
+  on the shared resolver: journald units chosen by a postfix *signature* check
+  (recent entries must carry the `postfix/...[pid]:` tag — journald attributes
+  by cgroup, so mere entry existence can be another service's lines) → docker
+  container discovery (mailcow) → `/var/log/maillog`/`mail.log`.
+  `exim_security`/`exim_relays` auto-resolve `LOG_PATH` from the standard
+  mainlog locations — with **no journald candidates at all**: exim writes its
+  own mainlog and never syslogs it, so `journalctl -u exim` carries only stray
+  child-process output (live fleet evidence: dovecot LDA lines attributed to
+  exim.service). All six mail sections (incl. both `*_queues`) self-disable
+  cleanly when their MTA is absent — postfix sections check binary/unit/
+  discovered container/log and stay alive provisionally when the docker CLI
+  exists but no container answered yet (a slow dockerd at boot cannot
+  permanently disable them; the cfm unit is now also ordered after
+  docker.service), exim sections check binary/unit (+ mainlog) — so
+  postfix-only and exim-only boxes no longer need hand-set `ENABLED=0`; and
+  `postfix_queues` auto-wraps its queue commands in `docker exec` when postfix
+  lives only in a discovered container. Explicit
+  `MODE`/`LOG_PATH`/`JOURNAL_UNIT`/`JOURNAL_MATCHES`/`DOCKER_CONTAINER`/
+  `TOTAL_CMD`/`LIST_CMD` keep working unchanged and always win.
+- **`ssh_auth` / `dovecot_auth` now auto-detect their log source (`MODE = auto`).**
+  The new shared resolver (`internal/detectors/srcresolve`) tries journald
+  units with entries → active units (alias-resolved to the canonical name) →
+  (dovecot) docker container discovery → known log files, so one
+  `detectors.conf` works across EL/cPanel, Debian/DirectAdmin and mailcow
+  hosts without hand-set `MODE`/`LOG_PATH`/`JOURNAL_UNIT`. Explicit values
+  keep working and win (a pinned `MODE=journal` unit now additionally falls
+  back to the mail-log file where journalctl cannot run at all, as dovecot
+  already did). Fixes the silent no-op ssh detector on Debian for configs that
+  omit the source keys — journald does not resolve the `sshd.service` alias,
+  so auto picks `ssh.service`; live configs that PIN `JOURNAL_UNIT =
+  sshd.service` keep their explicit value and need the pin dropped (see
+  `docs/detectors-config-unification.md` migration). Dovecot alerts now report
+  the source actually tailed after a fallback. When nothing is confirmed the
+  detector tails its historical default provisionally (self-heals when the
+  source appears) and logs the full resolution trace.
 
 ## 2026.08.25
 
@@ -102,45 +154,6 @@ _Nothing yet._
    the documented `X-CFM-Token` transport previously never matched a parsed
    request (MIME-canonicalized map keys) and was silently ignored, and a bogus
    `X-CFM-Token` alongside an assertion now fails hard as an invalid token.
-
-### Changed
-- **The exim/postfix detectors now auto-detect their log source and self-disable
-  without their MTA.** `postfix_security`/`postfix_relays` gain `MODE = auto`
-  on the shared resolver: journald units chosen by a postfix *signature* check
-  (recent entries must carry the `postfix/...[pid]:` tag — journald attributes
-  by cgroup, so mere entry existence can be another service's lines) → docker
-  container discovery (mailcow) → `/var/log/maillog`/`mail.log`.
-  `exim_security`/`exim_relays` auto-resolve `LOG_PATH` from the standard
-  mainlog locations — with **no journald candidates at all**: exim writes its
-  own mainlog and never syslogs it, so `journalctl -u exim` carries only stray
-  child-process output (live fleet evidence: dovecot LDA lines attributed to
-  exim.service). All six mail sections (incl. both `*_queues`) self-disable
-  cleanly when their MTA is absent — postfix sections check binary/unit/
-  discovered container/log and stay alive provisionally when the docker CLI
-  exists but no container answered yet (a slow dockerd at boot cannot
-  permanently disable them; the cfm unit is now also ordered after
-  docker.service), exim sections check binary/unit (+ mainlog) — so
-  postfix-only and exim-only boxes no longer need hand-set `ENABLED=0`; and
-  `postfix_queues` auto-wraps its queue commands in `docker exec` when postfix
-  lives only in a discovered container. Explicit
-  `MODE`/`LOG_PATH`/`JOURNAL_UNIT`/`JOURNAL_MATCHES`/`DOCKER_CONTAINER`/
-  `TOTAL_CMD`/`LIST_CMD` keep working unchanged and always win.
-- **`ssh_auth` / `dovecot_auth` now auto-detect their log source (`MODE = auto`).**
-  The new shared resolver (`internal/detectors/srcresolve`) tries journald
-  units with entries → active units (alias-resolved to the canonical name) →
-  (dovecot) docker container discovery → known log files, so one
-  `detectors.conf` works across EL/cPanel, Debian/DirectAdmin and mailcow
-  hosts without hand-set `MODE`/`LOG_PATH`/`JOURNAL_UNIT`. Explicit values
-  keep working and win (a pinned `MODE=journal` unit now additionally falls
-  back to the mail-log file where journalctl cannot run at all, as dovecot
-  already did). Fixes the silent no-op ssh detector on Debian for configs that
-  omit the source keys — journald does not resolve the `sshd.service` alias,
-  so auto picks `ssh.service`; live configs that PIN `JOURNAL_UNIT =
-  sshd.service` keep their explicit value and need the pin dropped (see
-  `docs/detectors-config-unification.md` migration). Dovecot alerts now report
-  the source actually tailed after a fallback. When nothing is confirmed the
-  detector tails its historical default provisionally (self-heals when the
-  source appears) and logs the full resolution trace.
 
 ### Added
 - **`host_access_history` — archival per-vhost traffic profile (MCP tool + `GET /api/v1/webdet/host-access-history`).**

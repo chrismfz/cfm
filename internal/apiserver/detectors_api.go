@@ -11,11 +11,69 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"cfm/internal/detectorscfg"
 )
 
+// DetectorSourceRow is one section's dry-run source resolution: which log
+// source (journald unit / file / docker container) the section would use on
+// this host right now, and why. Rows are computed by the detectors package
+// via the SAME planners its registers use (injected below — the detectors
+// package imports apiserver, so apiserver cannot import it back).
+type DetectorSourceRow struct {
+	Section    string            `json:"section"`
+	Type       string            `json:"type"`
+	Enabled    bool              `json:"enabled"`
+	Engine     string            `json:"engine"` // srcresolve | legacy-auto | n/a
+	Configured map[string]string `json:"configured,omitempty"`
+	// Kind: journal|file|docker (resolved), as-configured (explicit keys /
+	// package-internal resolution used verbatim), provisional targets keep
+	// their resolved kind with provisional=true, disabled (section would
+	// self-disable), unreported (legacy-auto), none.
+	Kind         string `json:"kind"`
+	Target       string `json:"target,omitempty"` // unit / path / container
+	Reason       string `json:"reason,omitempty"`
+	Provisional  bool   `json:"provisional,omitempty"`
+	WouldDisable bool   `json:"would_disable,omitempty"`
+	Note         string `json:"note,omitempty"`
+}
+
+// detectorSourceReport is injected by the detectors package at init.
+var detectorSourceReport func(cfgDir string) ([]DetectorSourceRow, time.Time, error)
+
+// SetDetectorSourceReport wires the detectors package's dry-run source
+// resolution into GET /api/v1/detectors/source-resolution.
+func SetDetectorSourceReport(fn func(cfgDir string) ([]DetectorSourceRow, time.Time, error)) {
+	detectorSourceReport = fn
+}
+
 func RegisterDetectorsEndpoints(m *http.ServeMux, cfgDir string) {
+	// GET /api/v1/detectors/source-resolution — admin-only, read-only dry run:
+	// per section, which log source would resolve right now and why (probes
+	// run; nothing starts or changes). Backs `cfm detectors-srcresolve`, the
+	// cfm-admin card and the detectors_srcresolve MCP tool.
+	m.Handle("/api/v1/detectors/source-resolution", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if detectorSourceReport == nil {
+			http.Error(w, `{"error":"source resolution not available"}`, http.StatusServiceUnavailable)
+			return
+		}
+		rows, at, err := detectorSourceReport(cfgDir)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "generated_at": at, "rows": rows,
+		})
+	})))
 	m.Handle("/api/v1/detectors/config", adminOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleDetectorsConfig(w, r, cfgDir)
 	})))
