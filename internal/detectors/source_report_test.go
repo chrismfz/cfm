@@ -10,32 +10,51 @@ import (
 	"cfm/internal/detectors/srcresolve"
 )
 
-// A provisional mail plan flags a boot-race retry ONLY when the docker CLI is
-// present (a container may still be coming up); with no docker there is nothing
-// to wait for, and a non-provisional plan never flags one.
+// Only a plan with bootRace set flags a retry — NOT every provisional plan.
+// bootRace is the narrow "docker present, container not up yet" case; a plain
+// provisional (host MTA present-but-unconfirmed, or a non-docker blind default)
+// has no container coming, so retrying it would be pure churn.
 func TestNotePlanBootRace(t *testing.T) {
-	prov := sourcePlan{provisional: true}
-	resolved := sourcePlan{} // provisional == false
-
-	swapPresence(t, false, false, true) // docker present
 	resetBootRacePending()
-	notePlanBootRace(resolved)
+	notePlanBootRace(sourcePlan{provisional: true}) // provisional but NOT bootRace
 	if bootRacePending() {
-		t.Fatal("a non-provisional plan must not flag a boot-race retry")
+		t.Fatal("a plain provisional plan (no container coming) must not flag a retry")
 	}
-	notePlanBootRace(prov)
+	notePlanBootRace(sourcePlan{}) // neither
+	if bootRacePending() {
+		t.Fatal("a resolved plan must not flag a retry")
+	}
+	notePlanBootRace(sourcePlan{provisional: true, bootRace: true})
 	if !bootRacePending() {
-		t.Fatal("provisional + docker present must flag a boot-race retry")
+		t.Fatal("a bootRace plan must flag a retry")
 	}
 	resetBootRacePending()
 	if bootRacePending() {
 		t.Fatal("reset must clear the flag")
 	}
+}
 
-	swapPresence(t, false, false, false) // no docker
-	notePlanBootRace(prov)
-	if bootRacePending() {
-		t.Fatal("provisional without docker must NOT flag a retry (nothing will appear)")
+// The planners set bootRace ONLY in the genuine container-not-up-yet case, and
+// never for host-MTA-present or non-docker provisional defaults.
+func TestPlannerBootRaceArmingScope(t *testing.T) {
+	// postfix: no host postfix + docker present + nothing resolved → bootRace.
+	swapPresence(t, false, false, true)
+	if p := planPostfixLogSource("postfix_security", KV{}, planProbes(nil, nil, nil, nil)); !p.bootRace {
+		t.Fatalf("postfix container-not-found must arm bootRace: %+v", p)
+	}
+	// postfix installed on the host but not confirmed → provisional, NOT bootRace.
+	swapPresence(t, false, true, true)
+	if p := planPostfixLogSource("postfix_security", KV{}, planProbes(nil, nil, nil, nil)); p.bootRace || !p.provisional {
+		t.Fatalf("host-postfix-present must be provisional but NOT bootRace: %+v", p)
+	}
+	// dovecot: docker present, no container → bootRace; no docker → not.
+	swapPresence(t, false, false, true)
+	if p := planDovecotSource("dovecot_auth", KV{}, planProbes(nil, nil, nil, nil)); !p.bootRace {
+		t.Fatalf("dovecot container-not-found (docker present) must arm bootRace: %+v", p)
+	}
+	swapPresence(t, false, false, false)
+	if p := planDovecotSource("dovecot_auth", KV{}, planProbes(nil, nil, nil, nil)); p.bootRace || !p.provisional {
+		t.Fatalf("dovecot without docker must be provisional but NOT bootRace: %+v", p)
 	}
 }
 

@@ -102,10 +102,14 @@ back-filled here — see the git/PR history for that period.
   resolved provisionally (tailing an empty host `/var/log/mail.log`) and — because a
   container appearing changes no config file — never re-resolved, so brute-force/relay/
   queue monitoring stayed silently dead until the next daemon restart. The manager now
-  schedules a bounded re-resolution (every 30s, up to 4 min) whenever a mail section is
-  provisional while the docker CLI is present, so the container's appearance is picked up
-  automatically. Stale references to a non-existent `cfm detector reload` in comments/
-  notes were corrected (recovery is automatic, or on restart).
+  schedules a bounded re-resolution (every 60s, up to 5 min) for the SPECIFIC case where
+  the docker CLI is present but the expected mail container was not found yet, so the
+  container's appearance is picked up automatically. The retry is deliberately narrow
+  (not every provisional default — a host with postfix installed-but-unconfirmed, or any
+  non-docker default, has no container coming and is left alone) and gentle, so a
+  non-mail docker host pays only a few boot-time rebuilds before it stops for good. Stale
+  references to a non-existent `cfm detector reload` in comments/notes were corrected
+  (recovery is automatic, or on restart).
 - **`cfm detectors-srcresolve` / the source-resolution preview** no longer mislabels
   `custom` and `proxmox_auth` sections as "n/a (command/API/collector-based)" — both tail
   a log source and are now shown with their own resolution note.

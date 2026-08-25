@@ -145,15 +145,11 @@ func resetBootRacePending() {
 	bootRace.mu.Unlock()
 }
 
-// markBootRacePending records that the current section resolved provisionally
-// and a docker container may still be coming up. It is a no-op when the docker
-// CLI is absent (no container will ever appear, so retrying is pointless — the
-// provisional default is the final answer). Uses the swappable
-// dockerCLIPresentFn so tests can drive it.
+// markBootRacePending records that a mail section resolved into the boot-race
+// case (docker present, expected container not up yet). The planner already
+// made that precise determination (sourcePlan.bootRace), so this just sets the
+// sweep flag.
 func markBootRacePending() {
-	if !dockerCLIPresentFn() {
-		return
-	}
 	bootRace.mu.Lock()
 	bootRace.pending = true
 	bootRace.mu.Unlock()
@@ -165,12 +161,14 @@ func bootRacePending() bool {
 	return bootRace.pending
 }
 
-// notePlanBootRace flags a provisional mail-source plan for boot-race retry.
-// Only the containerizable MTAs (postfix, dovecot) call it; exim's provisional
-// (log location unknown) is not a docker boot race, and markBootRacePending is
-// itself a no-op without the docker CLI.
+// notePlanBootRace flags a mail-source plan for boot-race retry, but ONLY for
+// the narrow bootRace case (docker present, container not found yet) — NOT every
+// provisional plan. A host with postfix installed-but-not-logging, or any
+// non-docker blind default, is provisional yet has no container coming, so
+// retrying it is pure churn. Only the containerizable MTAs (postfix, dovecot)
+// set plan.bootRace; exim never does.
 func notePlanBootRace(plan sourcePlan) {
-	if plan.provisional {
+	if plan.bootRace {
 		markBootRacePending()
 	}
 }

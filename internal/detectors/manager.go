@@ -57,11 +57,14 @@ type initDiagnosticsError interface {
 
 // Boot-race re-resolution cadence: how often to retry a provisional mail
 // source while its docker container may still be coming up, and how long to
-// keep trying before accepting the provisional default (a host where the
-// container never appears must stop churning through full rebuilds).
+// keep trying before accepting the provisional default. Each retry is a full
+// detector rebuild, so the cadence is deliberately gentle: it recovers a real
+// mailcow host within ~a minute of its container appearing, while a host whose
+// container never comes (the irreducibly-ambiguous docker-but-no-mail case)
+// pays only a handful of boot-time rebuilds before it stops for good.
 const (
-	bootRaceRetryEvery = 30 * time.Second
-	bootRaceMaxWait    = 4 * time.Minute
+	bootRaceRetryEvery = 60 * time.Second
+	bootRaceMaxWait    = 5 * time.Minute
 )
 
 // bootRaceRetryDue reports whether a scheduled boot-race re-resolution has come
@@ -716,7 +719,15 @@ func (m *manager) maybeReload(parent context.Context) {
 		m.reprobeAt = nowB.Add(bootRaceRetryEvery)
 		logging.Logf("[detectors] mail source resolved provisionally (docker container not up yet) — re-resolving in %s", bootRaceRetryEvery)
 	default:
-		m.reprobeAt = time.Time{} // gave up: container never appeared within bootRaceMaxWait
+		// Gave up: the container never appeared within bootRaceMaxWait. Clear
+		// reprobeAt (no more forced rebuilds) but deliberately KEEP the now-past
+		// bootRaceUntil: it pins this host as "already tried", so a later
+		// config-change rebuild that is still provisional re-hits this branch
+		// (a one-line re-log) instead of re-arming a fresh 5-min retry episode
+		// on every edit — important on a genuinely non-mail docker host that
+		// carries the stock (enabled) mail sections. A real resolve zeroes both
+		// via the first case, so a container that does appear still clears it.
+		m.reprobeAt = time.Time{}
 		logging.Logf("[detectors] mail source still provisional after %s; keeping provisional default (docker container never appeared)", bootRaceMaxWait)
 	}
 }

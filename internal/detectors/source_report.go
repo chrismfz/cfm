@@ -31,7 +31,14 @@ type sourcePlan struct {
 	passthrough bool // keep configured keys / package-internal resolution as-is
 	disable     bool // section self-disables (register returns nil, nil)
 	provisional bool // blind default in use; self-heals when the source appears
-	note        string
+	// bootRace marks the SPECIFIC provisional case that warrants a forced
+	// re-resolution retry: docker is present but the expected mail CONTAINER
+	// was not found yet (mailcow mid-boot). It is deliberately NARROWER than
+	// provisional — a host that has postfix installed but not logging where
+	// expected, or any non-docker blind default, is provisional but NOT a
+	// boot race (no container is coming, so retrying is pure churn).
+	bootRace bool
+	note     string
 }
 
 // Presence probes as swappable vars so planner tests never exec
@@ -91,11 +98,21 @@ func planDovecotSource(section string, kv KV, p srcresolve.Probes) sourcePlan {
 	// so it must resolve to a concrete kind. This intentional cross-to-file is
 	// safe here precisely because the file has the data — do not "align" it
 	// with postfix's strict never-cross rule.
-	return sourcePlan{
+	pl := sourcePlan{
 		res:         srcresolve.Result{Kind: srcresolve.KindFile, Path: dovecotLogFiles[0], Reason: "provisional default (nothing confirmed)"},
 		provisional: true,
 		note:        "nothing confirmed (" + res.Reason + "); tailing the historical default mail log provisionally",
 	}
+	// Boot-race retry ONLY when docker is present and no dovecot container was
+	// found: a mailcow dovecot container may still be coming up (and can start
+	// slightly after postfix, so dovecot must keep the retry alive on its own).
+	// Without docker there is nothing to wait for — provisional-on-file is the
+	// final answer, so it is not flagged.
+	if dockerCLIPresentFn() {
+		pl.bootRace = true
+		pl.res.Reason = "provisional default (docker present, dovecot container not found yet)"
+	}
+	return pl
 }
 
 // planEximLogSource: file-only (docs/detectors-config-unification.md §3a —
@@ -183,6 +200,7 @@ func planPostfixLogSource(section string, kv KV, p srcresolve.Probes) sourcePlan
 			return sourcePlan{
 				res:         srcresolve.Result{Kind: srcresolve.KindFile, Path: postfixLogFiles[1], Reason: "provisional default (docker present, container not found yet)"},
 				provisional: true,
+				bootRace:    true, // docker present, no postfix container yet → retry
 				note:        "no postfix found but docker is present (container may not be up yet); auto re-resolves once it appears (" + res.Reason + ")",
 			}
 		}
@@ -224,7 +242,7 @@ func planPostfixQueues(section string, kv KV, p srcresolve.Probes) (pl sourcePla
 	case dockerCLIPresentFn():
 		return sourcePlan{
 			res:         srcresolve.Result{Kind: srcresolve.KindNone, Reason: why},
-			passthrough: true, provisional: true,
+			passthrough: true, provisional: true, bootRace: true, // docker present, no postfix container yet → retry
 			note: "no postfix found but docker is present (container may not be up yet); keeping host defaults — auto re-resolves once it appears",
 		}, "", ""
 	default:
