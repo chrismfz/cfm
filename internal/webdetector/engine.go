@@ -171,6 +171,15 @@ type bucketSW struct {
 	refs  map[string]int
 	paths map[string]int
 
+	// fullURIs is a capped set of hash(full URI incl. query string), maintained
+	// ONLY when the abuse-shadow facet signal is enabled (Signal F). It is what
+	// `paths` (base-path only) cannot see: a faceted-URL flood has few distinct
+	// base paths but a huge distinct-full-URL count. Static assets are excluded at
+	// ingest (their URL variety is not a facet attack), so this stays small on
+	// normal vhosts and only fills toward the cap under a real query-cardinality
+	// flood. Off by default → nil map, zero hot-path cost.
+	fullURIs map[uint64]struct{}
+
 	// Normalized-UA aggregation for the bot-top / UA emergency surface.
 	// Keys are NormalizeUA(rawUA). uasNormReqs is the per-bucket request
 	// count; uasNormIPs is a capped IP set and uasNormPaths a capped
@@ -227,6 +236,13 @@ type ShortRow struct {
 	// vhost right now (concentration signal, shadow/log-only). Stamped onto the
 	// row, not an input to Score — see abuse_shadow_marks.go. 0 when none/expired.
 	ShadowOutliers int `json:"shadow_outliers"`
+
+	// QueryCardinality is the live distinct-full-URL count (path+query) on this
+	// vhost when the abuse_shadow facet signal has flagged it — the query-cardinality
+	// expansion that PathDiversity is blind to (Signal F, shadow/log-only). Stamped
+	// onto the row, not an input to Score — see abuse_shadow_facet_marks.go. 0 when
+	// not flagged / expired.
+	QueryCardinality int `json:"query_cardinality"`
 }
 
 // TopKV for drilldown views.
@@ -1425,6 +1441,25 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		b.paths = make(map[string]int)
 	}
 	b.paths[p]++
+
+	// Signal F (abuse-shadow facet): retain distinct FULL URLs (path+query) so the
+	// per-tick emit can measure query-cardinality expansion — the blind spot in
+	// PathDiversity, which counts base paths only. Gated + capped; static assets
+	// are excluded (isStaticAssetPath tolerates a query string, so rec.URI is safe)
+	// because their URL variety is not a facet flood. Off by default → no map, no
+	// per-request work.
+	if e.cfg.AbuseShadow && e.cfg.AbuseShadowFacet && rec.URI != "" && !isStaticAssetPath(rec.URI) {
+		capN := e.cfg.AbuseShadowFacetCap
+		if capN <= 0 {
+			capN = facetURICapDefault
+		}
+		if b.fullURIs == nil {
+			b.fullURIs = make(map[uint64]struct{}, 16)
+		}
+		if len(b.fullURIs) < capN {
+			b.fullURIs[hash64(rec.URI)] = struct{}{}
+		}
+	}
 
 	// ------------------------------------------------------------
 	// NEW: unique-based challenge signals (phase 1)

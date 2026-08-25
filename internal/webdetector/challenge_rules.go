@@ -2106,6 +2106,7 @@ if ha := short[host]; ha != nil {
     // ---- log-only entity-abuse shadow signals (never challenges/blocks) ----
     if e.cfg.AbuseShadow {
         e.emitAbuseShadowRateOutliers(now)
+        e.emitAbuseShadowFacetOutliers(now)
     }
 
     // ---- Under-Attack Mode campaign fingerprinter (I2, shadow-only) ----

@@ -169,6 +169,8 @@ export const liveMixin = {
           // on either source, so take whichever side has it rather than losing it
           // when the merge picks the other.
           shadow_outliers: existing.shadow_outliers || row.shadow_outliers || 0,
+          // Same merge hazard for the facet query-cardinality count.
+          query_cardinality: existing.query_cardinality || row.query_cardinality || 0,
           fromSuspicious: Boolean(existing.fromSuspicious),
           fromChallenge: true,
           source: existing.fromSuspicious ? "both" : "challenged",

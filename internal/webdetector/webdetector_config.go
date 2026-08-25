@@ -205,6 +205,21 @@ type Config struct {
 	AbuseShadowRateSkewMin float64 // ABUSE_SHADOW_RATE_SKEW_MIN (min max/median concentration)
 	AbuseShadowRateMinReq  int     // ABUSE_SHADOW_RATE_MINREQ (min per-IP requests)
 
+	// Abuse-shadow Signal F (facet / query-cardinality expansion): a vhost-level
+	// LOG-ONLY signal that sees what PathDiversity is blind to. PathDiversity =
+	// distinct BASE paths / total, so a faceted-URL flood (few base paths, huge
+	// distinct query strings — e.g. 805k `?filter_category=` URLs on 2 base paths)
+	// collapses to unique_paths≈2 and reads as "benign". This signal counts
+	// distinct FULL URLs (path+query) and flags a vhost whose distinct-URL count is
+	// large AND dwarfs its distinct base-path count (facet expansion). Nothing here
+	// challenges/blocks — it stamps a per-vhost badge and writes a structured line.
+	// Gated under AbuseShadow (master), default-on with it so no per-node edit is
+	// needed to start collecting once ABUSE_SHADOW=1 is already set.
+	AbuseShadowFacet             bool    // ABUSE_SHADOW_FACET (default on under ABUSE_SHADOW)
+	AbuseShadowFacetMinURLs      int     // ABUSE_SHADOW_FACET_MIN_URLS (floor on distinct full URLs)
+	AbuseShadowFacetMinExpansion float64 // ABUSE_SHADOW_FACET_MIN_EXPANSION (distinct URLs / distinct paths)
+	AbuseShadowFacetCap          int     // ABUSE_SHADOW_FACET_CAP (per-bucket distinct-URL set cap)
+
 	// Optional: volume-based (uniqIP) auto under-attack mode with hysteresis.
 	// Useful for sophisticated crawlers that avoid errors but spray many unique IPs.
 	ChallengeSuspiciousUniqIP    bool // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP (1/0)

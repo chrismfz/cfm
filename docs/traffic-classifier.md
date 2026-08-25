@@ -332,8 +332,22 @@ Class-2 burst.
       techking/shopzy. Knob `CHALLENGE_GOODBOT_EXEMPT` (default on, like the
       subnet exemption — provably safe, so not gated behind shadow). Adversarial
       review folded in (RWMutex fast path, single-sourced matcher, log-once).
-- [ ] Add missing per-vhost features: query-cardinality, URL-repeat-ratio,
-      cost/5xx-trend, datacenter-ASN-frac (verified-gated).
+- [x] **DONE (query-cardinality half) — abuse_shadow facet signal (Signal F).**
+      Branch `claude/webdet-query-cardinality-shadow`: per-vhost distinct-full-URL
+      count (`bucket.fullURIs`, a capped hash-set filled only when enabled, static
+      assets excluded) vs distinct base paths, flagged when
+      `distinct_URLs ≥ MIN_URLS(300)` AND `distinct_URLs/distinct_paths ≥
+      MIN_EXPANSION(20)` — exactly the `path_diversity` blind spot (§ "805,746
+      distinct query strings → path_diversity 0.058"). Log-only: a per-vhost
+      `query_cardinality` badge (webtop/suspicious/challenge rows, `facet` pill in
+      cfm-admin, `facet=N` in `cfm webtop challenge`) + a `signal=facet_expansion`
+      line in `cfm.abuse_shadow.log`. Own mark store + TTL, mirroring the
+      rate-outlier mark. Default-ON under `ABUSE_SHADOW` (no per-node edit to start
+      collecting); knobs `ABUSE_SHADOW_FACET[_MIN_URLS|_MIN_EXPANSION|_CAP]`. NO
+      score contribution, NO enforcement. `URL-repeat-ratio` is logged as
+      corroboration on the same line but not yet a gate.
+- [ ] Add remaining per-vhost features: cost/5xx-trend, datacenter-ASN-frac
+      (verified-gated). (query-cardinality + URL-repeat done above.)
 - [ ] Add missing per-client features: header-coherence, solve-latency; route
       cookie_discard / solver_farm / abuse_shadow as contributors into
       `IPSignals.Score` / `SuspiciousRow.Score` (they stop being independent

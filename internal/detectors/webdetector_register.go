@@ -736,6 +736,15 @@ func init() {
 			AbuseShadowRateSkewMin:   kvFlt(kv, "ABUSE_SHADOW_RATE_SKEW_MIN", 0),
 			AbuseShadowRateMinReq:    kvInt(kv, "ABUSE_SHADOW_RATE_MINREQ", 0),
 
+			// Signal F (facet / query-cardinality expansion). Default-on under the
+			// AbuseShadow master, so an already-deployed ABUSE_SHADOW=1 starts
+			// collecting on the next binary upgrade with no per-node config edit.
+			// Thresholds resolve to safe defaults in facetShadowCfg() when 0.
+			AbuseShadowFacet:             kvBool(kv, "ABUSE_SHADOW_FACET", true),
+			AbuseShadowFacetMinURLs:      kvInt(kv, "ABUSE_SHADOW_FACET_MIN_URLS", 0),
+			AbuseShadowFacetMinExpansion: kvFlt(kv, "ABUSE_SHADOW_FACET_MIN_EXPANSION", 0),
+			AbuseShadowFacetCap:          kvInt(kv, "ABUSE_SHADOW_FACET_CAP", 0),
+
 			// Optional uniqIP-based vhost auto mode
 			ChallengeSuspiciousUniqIP:    kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP", false),
 			ChallengeSuspiciousUniqIPOn:  kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_ON", 0),

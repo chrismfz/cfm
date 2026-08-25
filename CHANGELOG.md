@@ -17,6 +17,29 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **abuse_shadow facet signal (Signal F): vhost-level query-cardinality
+  visibility, log-only.** Surfaces the one traffic shape `path_diversity` is
+  structurally blind to. `path_diversity` counts distinct BASE paths / total, so
+  a faceted-URL flood — few base paths, an enormous distinct-query fan-out (the
+  observed e-athlos shape: ~805k `?filter_category=…` URLs riding on 2 base
+  paths) — collapses to `unique_paths≈2` and reads as the most benign vhost on
+  the board. Signal F counts distinct FULL URLs (path+query) per vhost and flags
+  one whose distinct-URL count is large AND dwarfs its distinct base-path count
+  (facet expansion). It NEVER challenges or blocks: it stamps a per-vhost badge
+  (new `query_cardinality` field on webtop/suspicious/challenge rows, a `facet`
+  pill in cfm-admin, a `facet=N` flag in `cfm webtop challenge`) and writes one
+  structured `signal=facet_expansion` line per flagged vhost to the existing
+  `cfm.abuse_shadow.log` (no new log file). Gated under the `ABUSE_SHADOW`
+  master and default-ON with it, so a node already running `ABUSE_SHADOW = 1`
+  starts collecting on upgrade with no config edit; tunable via
+  `ABUSE_SHADOW_FACET`, `ABUSE_SHADOW_FACET_MIN_URLS` (300),
+  `ABUSE_SHADOW_FACET_MIN_EXPANSION` (20) and `ABUSE_SHADOW_FACET_CAP` (3000,
+  per-bucket memory bound). Static assets are excluded at ingest, and the
+  distinct-URL set is only maintained when the signal is enabled, so it is
+  zero-cost when off. Phase 1 of the traffic-classifier plan
+  (`docs/traffic-classifier.md`); no score contribution and no enforcement yet.
+
 ### Changed
 - **Explicit `JOURNAL_UNIT` pins are now alias-normalized to the canonical
   systemd unit on the srcresolve-adopted detectors** (`ssh_auth`,

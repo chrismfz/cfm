@@ -689,6 +689,8 @@ func (m *manager) stopAll() {
 	webdet.ResetSolverFarmMarks()
 	// Same for the abuse_shadow rate-outlier marks the WebUI badges from.
 	webdet.ResetAbuseShadowMarks()
+	// …and the abuse_shadow facet (query-cardinality) marks.
+	webdet.ResetFacetShadowMarks()
 
 	// Wait outside the mutex.
 	m.wg.Wait()
