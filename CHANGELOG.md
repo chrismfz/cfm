@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **`/debug/pprof/*` is now explicitly admin-only.** The Go profiler endpoints
+  (`/debug/pprof/`, `cmdline`, `profile`, `symbol`, `trace`) were mounted behind
+  mux-wide authentication only, which accepts a valid *scoped* per-vhost
+  cPanel/DA viewer token as readily as an admin token — so a scoped tenant could
+  reach host-global heap/goroutine/cmdline dumps and CPU/trace captures. Every
+  pprof handler is now wrapped with the same `adminOnlyHandler` role gate already
+  used by `/api/v1/debug/*`, `/unblock` and `/search`: scoped → `403`, admin →
+  `200`, anonymous/invalid → `401` (unchanged). The `/cfm-admin/debug/pprof/`
+  prefix re-dispatches onto the same mux and inherits the gate. Admin profiling
+  workflows and the existing pprof write-timeout/capture protections are
+  unaffected. (Audit finding R02.)
 - **Default-on protection and canonical audit trail for CFM's own control plane.**
   The new built-in `cfm_endpoints` detector runs with 10/12/16 staged thresholds
   and a 15-minute TTL-block default even when the detector section or entire

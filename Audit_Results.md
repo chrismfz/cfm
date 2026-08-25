@@ -70,10 +70,19 @@ Planned remediation is already documented in `Audit.md`:
 ## R02 — pprof lacks an explicit admin-only role gate
 
 **Severity:** HIGH  
-**Status:** SOURCE CONFIRMED / LIVE SCOPED TEST PENDING  
+**Status:** ✅ SOURCE FIXED / LIVE SCOPED PROOF PENDING  
 **Priority:** P0/P1
 
-Current registration attaches:
+**Fix (source):** every pprof handler is now wrapped with `adminOnlyHandler` in
+`internal/apiserver/apiserver_debug.go::registerPprofHandlers`, mirroring the gate
+already used for `/api/v1/debug/*`, `/unblock` and `/search`. A regression test
+(`internal/apiserver/apiserver_pprof_authz_test.go`) asserts scoped→403,
+anonymous→403 and admin→200 at the handler, so the profiler never runs for a
+non-admin. The `/cfm-admin/debug/pprof/` prefix re-dispatches onto the same mux,
+so it inherits the same gate. Live credentialed scoped→403 proof is still pending
+(no scoped token was available in the audit environment — see Step 10).
+
+Original finding (pre-fix): registration attached:
 
 ```text
 /debug/pprof/
@@ -85,7 +94,7 @@ Current registration attaches:
 
 to the shared mux without `adminOnlyHandler` / `RequireAdmin` around the pprof handlers.
 
-The global authentication middleware accepts both admin and valid scoped tokens. Therefore a scoped token appears able to reach pprof even though pprof exposes host-global debugging/process information.
+The global authentication middleware accepts both admin and valid scoped tokens. Therefore a scoped token appeared able to reach pprof even though pprof exposes host-global debugging/process information.
 
 Live results so far:
 
@@ -111,11 +120,12 @@ scoped    -> 403
 admin     -> 200
 ```
 
-### Remaining test
+### Tests
 
-- [ ] valid scoped token against `GET /debug/pprof/`
-- [ ] valid scoped token against `/cfm-admin/debug/pprof/` where applicable
-- [ ] admin token confirms intended access
+- [x] source unit test: scoped→403, anonymous→403, admin→200 at the handler (`apiserver_pprof_authz_test.go`)
+- [ ] live: valid scoped token against `GET /debug/pprof/` → 403
+- [ ] live: valid scoped token against `/cfm-admin/debug/pprof/` where applicable → 403
+- [ ] live: admin token confirms intended access
 
 Do NOT execute CPU profile or trace during production verification.
 
@@ -560,7 +570,9 @@ Confirmed live:
 
 Source-confirmed, live credentialed proof still pending:
 
-1. **HIGH:** scoped-token access to pprof likely lacks admin-role enforcement.
+1. **HIGH — SOURCE FIXED:** scoped-token access to pprof now blocked by an explicit
+   `adminOnlyHandler` gate on every pprof handler, with a scoped→403 / admin→200
+   regression test. Live credentialed scoped→403 proof still pending.
 2. **HIGH:** multiple mutating handlers accept GET at the handler level, bypassing unsafe-method CSRF protection.
 3. **MEDIUM/HARDENING:** forwarded identity needs one canonical trusted-proxy implementation and live log correlation.
 
@@ -659,7 +671,7 @@ Recommended remediation:
 
 No valid scoped token, admin bearer or authenticated admin browser session was available in the authorized audit environment. The persistent browser profile landed at the CFM sign-in page, and the managed identity store was empty. Consequently:
 
-- R02 scoped -> pprof remains **SOURCE CONFIRMED / LIVE PENDING**; current main still mounts pprof without an explicit admin gate;
+- R02 scoped -> pprof was **SOURCE CONFIRMED / LIVE PENDING** at this pass; at the time, main still mounted pprof without an explicit admin gate. _[update: source-fixed after this pass — every pprof handler now behind `adminOnlyHandler` with a scoped→403 regression test; live scoped proof still pending]_
 - R03 mutating-GET/CSRF remains **SOURCE CONFIRMED / LIVE AUTHENTICATED REPRO PENDING**; current main still lacks method guards on the listed Challenge/WAF/Clam mutators while HTTP/3 controls enforce POST;
 - scoped admin-only and in-scope/out-of-scope matrices remain live-unverified;
 - admin-token edge-vs-direct response equivalence remains live-unverified;
