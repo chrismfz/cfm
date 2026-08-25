@@ -35,7 +35,15 @@ The first three are intentionally small, separately reviewable security fixes. S
 # Step 1 — trusted request identity + effective scheme
 
 **Priority:** P1 prerequisite  
-**Findings:** `Audit_Results.md` R04, CONFIRMED LIVE
+**Findings:** `Audit_Results.md` R04, CONFIRMED LIVE  
+**Status:** ✅ SOURCE COMPLETE (this section's "Done when" met) — canonical identity/scheme
+helper `internal/apiserver/request_identity.go` (`requestPeer`), edge configs forward
+`$remote_addr` + `$cf_xfp` on every apiserver `:6060` control-plane block (both engines),
+and regression tests cover all three entry topologies (`TestRequestPeerEntryTopologies`)
+plus the login forged-XFF path (`TestLoginLimiterIgnoresForgedXFFForPerIPBucket`). Landed
+via #1338 + this branch. The broader Step-1 acceptance list in `Audit.md` keeps ONE box
+open — ChallengeServer identity/scheme unification — deferred to the challenge direct-mount
+work (Step 2); the challenge upstream still forwards `$scheme` and uses its own `clientIP()`.
 
 ## Problem
 

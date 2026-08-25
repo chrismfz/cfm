@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -124,6 +125,111 @@ func TestProtectLoginAttemptReturnsGenericError(t *testing.T) {
 	}
 	if got := rr.Body.String(); !strings.Contains(got, "Invalid credentials") {
 		t.Fatalf("unexpected response body: %s", got)
+	}
+}
+
+// TestLoginLimiterIgnoresForgedXFFForPerIPBucket is the Audit Step 1 item-7
+// forged-XFF regression: a direct (non-loopback) client must not be able to
+// evade the per-IP login limiter by rotating a spoofed X-Forwarded-For header.
+//
+// protectLoginAttempt keys the limiter on realIPFromRequest(r), which trusts
+// forwarded identity only across the loopback edge hop (see request_identity.go
+// / TestRequestPeerEntryTopologies). For a direct peer, forwarded headers are
+// ignored, so every attempt from one real peer address shares ONE per-IP bucket
+// regardless of the forged header. If realIPFromRequest ever regressed to trust
+// a direct client's XFF, each rotated value would mint a fresh per-IP bucket and
+// this test's overflow request would be allowed instead of throttled.
+func TestLoginLimiterIgnoresForgedXFFForPerIPBucket(t *testing.T) {
+	orig := globalLoginRateLimiter
+	lim := newLoginRateLimiter()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	lim.now = func() time.Time { return now }
+	globalLoginRateLimiter = lim
+	t.Cleanup(func() { globalLoginRateLimiter = orig })
+
+	const attacker = "198.51.100.77:5000"
+
+	// Fresh account names + a rotating forged XFF on every call keep the
+	// per-account, per-tuple and account-lock paths out of the picture (each is
+	// hit at most once), isolating the per-IP dimension. Drain the per-IP short
+	// bucket exactly to capacity; all of these must be allowed.
+	for i := 0; i < loginRateLimitPerIPShortTokens; i++ {
+		req := httptest.NewRequest(http.MethodPost, "https://host/login", nil)
+		req.RemoteAddr = attacker
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("10.0.0.%d", i+1))
+		rr := httptest.NewRecorder()
+		if ok := protectLoginAttempt(rr, req, fmt.Sprintf("acct-%d", i)); !ok {
+			t.Fatalf("attempt %d from real peer %s was throttled early (code=%d)", i, attacker, rr.Code)
+		}
+	}
+
+	// One more from the SAME real peer, with yet another forged XFF and a fresh
+	// account, must be throttled: all attempts landed in one per-IP bucket keyed
+	// by the real RemoteAddr, not by the rotating forged header.
+	req := httptest.NewRequest(http.MethodPost, "https://host/login", nil)
+	req.RemoteAddr = attacker
+	req.Header.Set("X-Forwarded-For", "10.0.0.250")
+	rr := httptest.NewRecorder()
+	if ok := protectLoginAttempt(rr, req, "acct-overflow"); ok {
+		t.Fatalf("forged XFF rotation evaded the per-IP limiter: overflow attempt from %s was allowed", attacker)
+	}
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 for throttled attempt, got %d", rr.Code)
+	}
+
+	// Control: a genuinely different real peer still has its own per-IP bucket,
+	// proving the throttle above was IP-scoped rather than a global limit. Reuse
+	// a forged XFF value from the drained set to show the header is not the key.
+	other := httptest.NewRequest(http.MethodPost, "https://host/login", nil)
+	other.RemoteAddr = "203.0.113.50:5000"
+	other.Header.Set("X-Forwarded-For", "10.0.0.1")
+	rrOther := httptest.NewRecorder()
+	if ok := protectLoginAttempt(rrOther, other, "acct-other"); !ok {
+		t.Fatalf("a different real peer was wrongly throttled (code=%d)", rrOther.Code)
+	}
+}
+
+// TestLoginLimiterPerIPKeyIsRealPeerNotForgedXFF complements the rotation test:
+// it proves the per-IP bucket key is the real socket peer, not the forwarded
+// header and not a constant. Two distinct real peers send the IDENTICAL forged
+// X-Forwarded-For; exhausting one peer's bucket must not throttle the other. A
+// regression where realIPFromRequest keyed on the (shared) XFF, or returned a
+// constant for every request, would collapse both peers onto one bucket and
+// fail the final assertion.
+func TestLoginLimiterPerIPKeyIsRealPeerNotForgedXFF(t *testing.T) {
+	orig := globalLoginRateLimiter
+	lim := newLoginRateLimiter()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	lim.now = func() time.Time { return now }
+	globalLoginRateLimiter = lim
+	t.Cleanup(func() { globalLoginRateLimiter = orig })
+
+	const sharedForgedXFF = "203.0.113.99"
+	const peerA = "198.51.100.10:1"
+	const peerB = "198.51.100.20:1"
+
+	attempt := func(remoteAddr, account string) bool {
+		req := httptest.NewRequest(http.MethodPost, "https://host/login", nil)
+		req.RemoteAddr = remoteAddr
+		req.Header.Set("X-Forwarded-For", sharedForgedXFF)
+		return protectLoginAttempt(httptest.NewRecorder(), req, account)
+	}
+
+	// Exhaust peer A's per-IP short bucket (fresh account per call keeps the
+	// per-account/tuple paths clear). All should be allowed.
+	for i := 0; i < loginRateLimitPerIPShortTokens; i++ {
+		if !attempt(peerA, fmt.Sprintf("a-%d", i)) {
+			t.Fatalf("draining peer A throttled early at attempt %d", i)
+		}
+	}
+	// Peer A is now throttled...
+	if attempt(peerA, "a-final") {
+		t.Fatal("peer A should be throttled after draining its per-IP bucket")
+	}
+	// ...but peer B — same forged XFF, different real socket — still has a full
+	// bucket on its very first attempt. Proves the key tracks the real peer.
+	if !attempt(peerB, "b-first") {
+		t.Fatal("peer B (identical forged XFF, different real peer) was wrongly throttled — per-IP key is not the real socket peer")
 	}
 }
 

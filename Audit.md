@@ -885,14 +885,16 @@ This primitive should remain separate from `app_request_send`/replay: ordinary a
 
 ## Step 1 — trusted request identity + effective scheme
 
-- [ ] Replace CFM-admin `$proxy_add_x_forwarded_for` with canonical `$remote_addr` at Angie/OpenResty -> Go boundary.
-- [ ] Add `X-Forwarded-Proto $cf_xfp` to **every** CFM control-plane proxy block that terminates at Go.
-- [ ] Add one Go trusted-peer/client-IP/effective-scheme helper.
-- [ ] `realIPFromRequest` returns one validated IP, never arbitrary XFF text.
-- [ ] Direct `6060/6061` ignores forged forwarded client/scheme headers.
-- [ ] Edge HTTPS -> loopback HTTP is still classified `scheme=https`.
-- [ ] Login rate-limit tests include forged XFF regression.
-- [ ] ChallengeServer consumes the same identity/scheme rules before direct mounting.
+- [x] Replace CFM-admin `$proxy_add_x_forwarded_for` with canonical `$remote_addr` at Angie/OpenResty -> Go boundary. — every Go control-plane block (`:6060` apiserver, `cfm_challenge`, panel-listeners) sets `X-Forwarded-For $remote_addr` in both `configs/openresty.conf` and `configs/angie.conf`; `$proxy_add_x_forwarded_for` survives only in tenant vhost blocks (`$cfm_pass`/`$server_addr`), which is correct.
+- [x] Add `X-Forwarded-Proto $cf_xfp` to every CFM **apiserver** (`:6060`) control-plane proxy block that terminates at Go — login, `/cfm-admin/`, embed bootstrap, authcheck; all 8 blocks per config, both engines. **Not yet on the `cfm_challenge` Go upstream**, which still forwards `$scheme` (main configs) / a fixed per-port literal (panel-listeners); unifying the challenge path's scheme is item 8 below (its acceptance box, not this one). The original criterion said "every … block that terminates at Go"; this box is checked for the apiserver plane only, with the challenge plane explicitly carved out to item 8.
+- [x] Add one Go trusted-peer/client-IP/effective-scheme helper. — `internal/apiserver/request_identity.go` (`requestPeer` → `RequestPeer{ImmediateIP, ClientIP, TrustedProxy, Scheme, Entry}`).
+- [x] `realIPFromRequest` returns one validated IP, never arbitrary XFF text. — returns `requestPeer(r).ClientIP.String()` (a parsed `net.IP`) or `""`; multi-hop/comma XFF and unparseable values fail closed to `nil`.
+- [x] Direct `6060/6061` ignores forged forwarded client/scheme headers. — forwarded identity/scheme trusted only when the immediate peer is loopback; covered by `TestRequestPeerEntryTopologies` (direct 6060/6061 keep the real peer IP + `r.TLS` scheme, `TrustedProxy=false`).
+- [x] Edge HTTPS -> loopback HTTP is still classified `scheme=https`. — loopback peer + `X-Forwarded-Proto: https` → `Scheme=https`; covered by `TestRequestPeerEntryTopologies` edge case.
+- [x] Login rate-limit tests include forged XFF regression. — the limiter keys on `realIPFromRequest` (`login_rate_limit.go`); `TestLoginLimiterIgnoresForgedXFFForPerIPBucket` proves a direct client cannot mint fresh per-IP buckets by rotating a spoofed `X-Forwarded-For`.
+- [ ] ChallengeServer consumes the same identity/scheme rules before direct mounting. — **still pending.** `internal/webdetector/challenge_server.go` keeps its own `clientIP()` (CF-Connecting-IP, XFF-first-element, trusts private peers via `isTrustedProxyPeer`) and its own `X-Forwarded-Proto` handling; the edge feeds it `$scheme`, and it is not yet directly mounted in apiserver. This is the natural companion to Step 2 ("Mount `/__cfm_challenge` and `/__cfm_verify` in apiserver").
+
+> **Status (2026-08-25).** Items 1–7 landed at source via #1338 (canonical request identity / XFF-overwrite / effective scheme) and this branch (item-7 regression test). Verified against `main` at the current head: edge configs (both engines) audited block-by-block; Go identity in `request_identity.go` with `TestRequestPeerEntryTopologies`; login regression in `TestLoginLimiterIgnoresForgedXFFForPerIPBucket`. Item 8 (ChallengeServer identity/scheme unification) is deliberately deferred to the challenge direct-mount work (Step 2) and remains the one open Step 1 box.
 
 ## Step 2 — reusable Go challenge handler + login gate
 
