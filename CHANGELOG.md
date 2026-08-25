@@ -17,6 +17,25 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **The direct TLS admin port `:6061` now always completes a handshake via a
+  self-signed fallback.** Previously `sslcollector`'s `GetCertificate` returned an
+  error when it had discovered no certificate yet (fresh system) or when a client
+  connected by IP with no SNI (`https://<ip>:6061`) — the handshake aborted. Combined
+  with the R01/Step 5 behaviour (a healthy `:6060` redirects browser admin to `:6061`
+  and refuses plaintext login), that could lock an operator out of a fresh box. CFM
+  now serves its own lazily-generated, cached self-signed certificate whenever the
+  real cert path has nothing to offer, so `:6061` still completes a handshake (the
+  browser warns and the operator clicks through). It is edge-independent (no
+  OpenResty/Angie or `/cfm-admin` required) and the apiserver pairs it with no HSTS,
+  so a by-IP client (`https://<ip>:6061` — the primary lockout scenario; IP literals
+  are exempt from HSTS) can always click through; a by-hostname client can too unless
+  that hostname was HSTS-pinned by another path on the host. A real discovered cert is
+  always preferred and used unchanged. This fallback is a trust-on-first-use
+  break-glass path — like an SSH first-connect or an appliance's first-boot cert it is
+  MITM-able by an active attacker, so install a real certificate promptly; it is not a
+  steady state.
+
 ### Changed
 - **Explicit `JOURNAL_UNIT` pins are now alias-normalized to the canonical
   systemd unit on the srcresolve-adopted detectors** (`ssh_auth`,
