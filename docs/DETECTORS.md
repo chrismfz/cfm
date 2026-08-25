@@ -29,9 +29,11 @@ Depending on detector type, sources can be:
 - `file`: tail a log file (`LOG_PATH`)
 - `journal`: read systemd journald (`JOURNAL_UNIT` / `JOURNAL_MATCHES`)
 - `docker`: read container logs (`DOCKER_CONTAINER`, optional `DOCKER_ARGS`) where supported
-- `auto`: resolve the source automatically. `ssh_auth` and `dovecot_auth` use
-  the shared resolver (`internal/detectors/srcresolve`; more detectors migrate
-  per `docs/detectors-config-unification.md` — `ftpd`/`modsec`/`mysql` still
+- `auto`: resolve the source automatically. `ssh_auth`, `dovecot_auth`,
+  `postfix_security`/`postfix_relays`/`postfix_queues` and
+  `exim_security`/`exim_relays`/`exim_queues` use the shared resolver
+  (`internal/detectors/srcresolve`; more detectors migrate per
+  `docs/detectors-config-unification.md` — `ftpd`/`modsec`/`mysql` still
   carry their own older autodetects with different semantics). The shared
   resolver tries, in order: journald units with entries → merely-active units
   (resolved to their canonical name, so a Debian `sshd.service` alias picks
@@ -40,9 +42,25 @@ Depending on detector type, sources can be:
   beats a stale host log) → known log-file locations. **Explicit values
   always win**: a concrete `MODE`, `JOURNAL_UNIT`, `LOG_PATH`, or
   `DOCKER_CONTAINER` short-circuits auto and is used verbatim (precedence:
-  container → unit → path). If nothing is confirmed, the detector tails its
-  historical default source provisionally (self-heals when it appears) and
-  logs the resolution trace (`no log source confirmed (...)`).
+  container → unit → path; postfix `JOURNAL_MATCHES` also passes through
+  verbatim). If nothing is confirmed, the detector tails its historical
+  default source provisionally (self-heals when it appears) and logs the
+  resolution trace (`no log source confirmed (...)`). Two service-specific
+  rules (design doc §3a): **exim has no journal candidates at all** — exim
+  writes its own mainlog and never syslogs it, so its unit's journal carries
+  only stray child-process noise; and **postfix journal candidates are
+  signature-checked** (recent entries must carry the `postfix/...[pid]:` tag,
+  guarding against journald's cgroup attribution). The **mail detectors
+  self-disable** ("detector disabled (auto)" in the log, section skipped)
+  when their MTA is nowhere to be found, so exim sections go quiet on
+  postfix-only hosts and vice versa without hand-set `ENABLED=0`. What each
+  checks before disabling: postfix sections probe binary/unit/discovered
+  container/log (and stay alive provisionally when the docker CLI exists but
+  no container was found — the daemon may not be up yet at boot;
+  `cfm detector reload` re-resolves); exim sections probe binary/unit (plus
+  the mainlog for `exim_security`/`exim_relays`) — exim-in-docker is not
+  probed. `postfix_queues` also auto-wraps its queue commands in
+  `docker exec` when postfix lives only in a discovered container (mailcow).
 
 With `auto` available you normally set nothing; pin explicit keys only for
 custom layouts. If a detector supports multiple source backends and you do pin
@@ -103,12 +121,12 @@ Typical defaults below are representative from the shipped template and should b
 | `cpanel` | cPanel auth/root login anomalies | `AUTHFAIL_IP`, `AUTHFAIL_USER`, `ROOT_IP`, `BLOCK` | `WINDOW=10m`, `BLOCK=1h` |
 | `mysql` | MySQL/MariaDB auth failures / scans | `LOG_PATH`, `DENIED_IP`, `DENIED_USER`, `ROOT_IP`, `SCAN_IP`, `BLOCK` | `WINDOW=10m`, `LOG_PATH=auto`, `BLOCK=permanent` |
 | `mysql_governor` | Processlist pressure, long query, conn cap enforcement | `MODE`, `POLL_EVERY`, `QUERY_RULES`, `CONN_RULES`, kill limits | `MODE=enforce`, `POLL_EVERY=5s` |
-| `exim_security` | Exim security/auth/reject patterns | `LOG_PATH`, `REJECT_LOG_PATH`, per-rule thresholds, `BLOCK` | `WINDOW=30m`, `BLOCK=12h` |
-| `exim_relays` | Exim relay/throughput abuse | `LOCAL_USER_MAX`, `AUTH_*`, `UNAUTH_IP_MAX`, `BLOCK` | `WINDOW=15m`, `BLOCK=dryrun` |
+| `exim_security` | Exim security/auth/reject patterns | `LOG_PATH` (auto-resolved; self-disables without exim), `REJECT_LOG_PATH`, per-rule thresholds, `BLOCK` | `WINDOW=30m`, `BLOCK=12h` |
+| `exim_relays` | Exim relay/throughput abuse | `LOG_PATH` (auto-resolved; self-disables without exim), `LOCAL_USER_MAX`, `AUTH_*`, `UNAUTH_IP_MAX`, `BLOCK` | `WINDOW=15m`, `BLOCK=dryrun` |
 | `exim_queues` | Exim queue growth/frozen queue pressure | `QUEUE_TOTAL_MAX`, `QUEUE_FROZEN_MAX`, `COOLDOWN` | `EVERY=60s`, alerting focus; also publishes the queue count to the health snapshot (`cfm health` / dashboard Mail queue tile) via `internal/mailq` |
-| `postfix_security` | Postfix auth/reject/rbl/tls anomalies | `MODE` or Docker/Journal source keys, thresholds, `BLOCK` | `WINDOW=30m`, `BLOCK=permanent` |
-| `postfix_relays` | Postfix relay-style abuse counters | threshold family similar to Exim relays, `BLOCK` | `WINDOW=15m` |
-| `postfix_queues` | Postfix queue saturation | `TOTAL_CMD`, `LIST_CMD`, queue thresholds | `EVERY=60s`, alerting focus; also publishes the queue count to the health snapshot (`cfm health` / dashboard Mail queue tile) via `internal/mailq` |
+| `postfix_security` | Postfix auth/reject/rbl/tls anomalies | `MODE` (source auto-resolved; self-disables without postfix) or explicit Docker/Journal source keys, thresholds, `BLOCK` | `MODE=auto`, `WINDOW=30m`, `BLOCK=permanent` |
+| `postfix_relays` | Postfix relay-style abuse counters | `MODE` (source auto-resolved; self-disables without postfix), threshold family similar to Exim relays, `BLOCK` | `MODE=auto`, `WINDOW=15m` |
+| `postfix_queues` | Postfix queue saturation | `TOTAL_CMD`, `LIST_CMD` (auto: host mailq, or `docker exec` into a discovered postfix container; self-disables without postfix), queue thresholds | `EVERY=60s`, alerting focus; also publishes the queue count to the health snapshot (`cfm health` / dashboard Mail queue tile) via `internal/mailq` |
 | `modsec` | ModSecurity denial bursts per IP | `LOG_PATH`, `MODSEC_IP`, `BLOCK` | `WINDOW=15m`, `BLOCK=permanent` |
 | `outbound` | outbound abuse sentinel (per-uid SMTP/scan/HTTP bursts) | `OUTBOUND_*` thresholds, allow users/groups, dedupe | `WINDOW=60s`, alerting focus |
 | `health` | host health anomalies (CPU/RAM/disk/temp/net spikes) | `% thresholds`, spike multipliers, watch lists | `EVERY=20s`, mostly alerting |

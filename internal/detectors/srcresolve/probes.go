@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -22,6 +23,7 @@ const probeTimeout = 3 * time.Second
 func DefaultProbes() Probes {
 	return Probes{
 		JournalHasEntries: journalHasEntries,
+		JournalMatches:    journalMatches,
 		UnitActive:        unitActive,
 		CanonicalUnit:     canonicalUnit,
 		JournalReadable:   journalReadableProbe,
@@ -44,6 +46,30 @@ func journalHasEntries(unit string) bool {
 		return false
 	}
 	return strings.TrimSpace(string(out)) != ""
+}
+
+// journalMatchWindow bounds how many recent entries the signature probe reads.
+const journalMatchWindow = "200"
+
+// journalMatches reports whether any of the unit's recent journal entries
+// match the signature regex. Probed in short-unix format — the same framing
+// JournalTailer feeds the parsers, syslog identifier included — so "matches"
+// means "the parser would actually see service lines". This is the
+// content-aware defence against journald's cgroup attribution (a unit's
+// journal carrying other services' lines) and startup-only noise.
+func journalMatches(unit, signature string) bool {
+	re, err := regexp.Compile(signature)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "journalctl",
+		"-u", unit, "-n", journalMatchWindow, "--no-pager", "--quiet", "-o", "short-unix").Output()
+	if err != nil {
+		return false
+	}
+	return re.Match(out)
 }
 
 // unitActive reports whether systemd considers the unit active.

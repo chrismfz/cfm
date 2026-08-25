@@ -4,6 +4,8 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectors/exim"
 	"cfm/internal/detectors/meta"
+	"cfm/internal/detectors/srcresolve"
+	"cfm/internal/logging"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,11 +15,39 @@ import (
 // Shared state for Exim detectors
 var eximState, _ = core.LoadState("")
 
+// resolveEximMainlog resolves LOG_PATH for the file-based exim detectors. Per
+// docs/detectors-config-unification.md §3a exim gets NO journal candidates:
+// exim writes its own mainlog and never syslogs it, so `journalctl -u exim`
+// carries only stray child-process output (e.g. dovecot LDA spawned by exim)
+// — journald would be a confidently-wrong source. An explicit LOG_PATH passes
+// through verbatim; ok=false means no mainlog was confirmed.
+func resolveEximMainlog(section, logPath string) (string, bool) {
+	res := srcresolve.Resolve(srcresolve.Spec{
+		Service:        section,
+		Mode:           "auto",
+		LogPath:        logPath,
+		FileCandidates: exim.MainlogCandidates,
+	}, srcresolve.DefaultProbes())
+	if res.Kind == srcresolve.KindFile {
+		logging.Logf("[detectors][%s] source=file path=%s (%s)", section, res.Path, res.Reason)
+		return res.Path, true
+	}
+	return "", false
+}
+
 func init() {
 	meta.Register(meta.DetectorMeta{TypeKey: "exim_queues", Title: "Exim queues", Description: "Monitor Exim queue pressure.", DefaultsTemplate: map[string]string{"ENABLED": "1", "EVERY": "60s"}})
 	meta.Register(meta.DetectorMeta{TypeKey: "exim_security", Title: "Exim security", Description: "Detect Exim auth/security anomalies.", DefaultsTemplate: map[string]string{"ENABLED": "1", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "BLOCK": "dryrun"}, LeniencySupported: true})
 	meta.Register(meta.DetectorMeta{TypeKey: "exim_relays", Title: "Exim relays", Description: "Detect suspicious Exim relay behavior.", DefaultsTemplate: map[string]string{"ENABLED": "1", "EVERY": "2s", "WINDOW": "15m", "COOLDOWN": "20m", "BLOCK": "dryrun"}, LeniencySupported: true})
 	Register("exim_queues", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
+		// Self-disable on exim-less hosts (postfix-only / mailcow boxes hand-set
+		// ENABLED=0 today) instead of failing `exim -bpc` every tick. Explicitly
+		// customized queue commands are the operator's word and keep it running.
+		if kvStrClean(kv, "TOTAL_CMD", "") == "" && kvStrClean(kv, "LIST_CMD", "") == "" && !eximPresent() {
+			logging.Logf("[detectors][%s] exim not present (no binary/unit); detector disabled (auto)", section)
+			return nil, nil
+		}
+
 		// defaults από global, με fallback στα defaults του detector
 		defEvery := kvDur(global, "DEFAULT_EVERY", 60*time.Second)
 		defTimeout := kvDur(global, "DEFAULT_TIMEOUT", 8*time.Second)
@@ -133,6 +163,19 @@ func init() {
 			}
 		}
 
+		// Source resolution (file-only, §3a): explicit LOG_PATH verbatim, else
+		// the standard mainlog candidates. Nothing confirmed + exim present →
+		// leave LOG_PATH empty so the detector's own deeper autodetect (incl.
+		// the /var/log walk) keeps the old blind, self-healing behaviour.
+		if path, ok := resolveEximMainlog(section, cfg.LogPath); ok {
+			cfg.LogPath = path
+		} else if !eximPresent() {
+			logging.Logf("[detectors][%s] exim not present (no binary/unit) and no mainlog found; detector disabled (auto)", section)
+			return nil, nil
+		} else {
+			logging.Logf("[detectors][%s] no mainlog confirmed at the standard locations; deferring to internal autodetect (provisional)", section)
+		}
+
 		sec := exim.NewSecurity(cfg) // ✅ correct constructor
 		sec.SetName(section)         // ensure unique persistence key
 		if eximState != nil {
@@ -179,6 +222,16 @@ func init() {
 			UseEnrich:  useEnrich,
 			UsePTR:     usePTR,
 			EnrichDirs: dirs,
+		}
+
+		// Same source resolution as exim_security (file-only, §3a).
+		if path, ok := resolveEximMainlog(section, cfg.LogPath); ok {
+			cfg.LogPath = path
+		} else if !eximPresent() {
+			logging.Logf("[detectors][%s] exim not present (no binary/unit) and no mainlog found; detector disabled (auto)", section)
+			return nil, nil
+		} else {
+			logging.Logf("[detectors][%s] no mainlog confirmed at the standard locations; deferring to internal autodetect (provisional)", section)
 		}
 
 		rr := exim.NewRelays(cfg) // rr is *exim.Relays

@@ -1,6 +1,9 @@
 [Unit]
 Description=CFM daemon
-After=network-online.target
+# docker.service is ordering-only (no dependency; ignored where docker is not
+# installed): on container-mail hosts (mailcow) detector source resolution
+# runs at startup and must see the containers.
+After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
