@@ -92,6 +92,67 @@ back-filled here — see the git/PR history for that period.
   holds two capped hash-sets per sliding-window bucket. Phase 1 of the
   traffic-classifier plan
   (`docs/traffic-classifier.md`); no score contribution and no enforcement yet.
+- **`/etc/cfm/detectors.d/` overlay layer — the base `detectors.conf` becomes
+  pristine and package-updateable again.** The daemon now reads the base
+  conffile and merges every `detectors.d/*.conf` over it in lexicographic
+  order: same key replaces, new `KEY += value` syntax appends to list keys
+  (`IGNORE_NETS += …`) and stacks multiline rule blocks, overlay-only sections
+  are added whole, and hot reload watches overlays like the base — including
+  files added, removed, or renamed (the reload signature hashes the overlay
+  set, so `cp -p`/`rsync -a` installs with old mtimes still trigger). Put
+  deliberate per-host overrides there (e.g. `10-mysql.conf`, `20-ssh.conf`)
+  and upgrades update the base file in place — ending the
+  `.rpmnew`/`.dpkg-dist` drift (design: docs/detectors-config-unification.md
+  §4). Packages ship the directory empty and never install files into it. The
+  source-resolution preview (CLI/API/card/MCP), `cfm status` probes and `cfm
+  test` report the merged view; `config_drift` computes missing sections/keys
+  against the merged view (a feature adopted via an overlay stops being
+  reported missing) while value diffs stay stock-vs-BASE, with overlays
+  summarized separately (per-file section/key counts); the cfm-admin editor
+  still edits the base and shows a notice when overlays exist (overlay
+  editing from the UI is a follow-up). Only real, regular `*.conf` files are
+  read — hidden files, symlinks of any kind, directories and other special
+  entries are ignored (one stray entry never drops the other overlays). A
+  regular `*.conf` overlay that fails to read or parse is a logged error, never
+  silently applied half-merged: a hot reload keeps the current detectors, and a
+  daemon start falls back to the base config only (builtin-only mode stays
+  reserved for the base file itself being unreadable). The auto-managed tokens
+  `CHALLENGE_TOKEN`/`OPENRESTY_TOKEN` are base-owned and NOT overridable via an
+  overlay (they are generated into, and read from, the base — avoiding a
+  rotate-every-reload loop and keeping `cfm_bridge_token.lua` in lockstep).
+  Effective-config probes read through the same layered reader, so `cfm status`,
+  `cfm health` and `whats_wrong` never disagree with the running daemon.
+### Security
+- **Session-cookie `Secure` is now automatic from the effective request scheme (audit
+  Step 6); `AUTH_SECURE_COOKIE` deprecated.** The goauth session cookie (`cfm-sid`) is
+  always `Secure`, and a new `SessionCookieTransportMiddleware` translates it on the
+  wire to a **distinct** non-Secure `cfm-sid-http-fallback` cookie **only** in the
+  TLS-down degraded plaintext `:6060` window (the sole place a session is written over
+  real cleartext, since a healthy `:6060` redirects browser admin to `:6061`). One
+  goauth session store is shared — the translation is per-request on the wire, so there
+  is **no manager-global cookie mutation and no race**. A browser holding `cfm-sid;
+  Secure` never sends it over http, so that Secure cookie is never downgraded or
+  overwritten. The effective scheme is spoof-safe (`X-Forwarded-Proto` is trusted only
+  from a loopback edge peer), so a direct `:6060` client cannot forge a Secure cookie.
+  `AUTH_SECURE_COOKIE` is now **parsed but ignored** with a one-time startup deprecation
+  warning when present. See `docs/security/session-cookie-transport.md`.
+- **The direct TLS admin port `:6061` now always completes a handshake via a
+  self-signed fallback.** Previously `sslcollector`'s `GetCertificate` returned an
+  error when it had discovered no certificate yet (fresh system) or when a client
+  connected by IP with no SNI (`https://<ip>:6061`) — the handshake aborted. Combined
+  with the R01/Step 5 behaviour (a healthy `:6060` redirects browser admin to `:6061`
+  and refuses plaintext login), that could lock an operator out of a fresh box. CFM
+  now serves its own lazily-generated, cached self-signed certificate whenever the
+  real cert path has nothing to offer, so `:6061` still completes a handshake (the
+  browser warns and the operator clicks through). It is edge-independent (no
+  OpenResty/Angie or `/cfm-admin` required) and the apiserver pairs it with no HSTS,
+  so a by-IP client (`https://<ip>:6061` — the primary lockout scenario; IP literals
+  are exempt from HSTS) can always click through; a by-hostname client can too unless
+  that hostname was HSTS-pinned by another path on the host. A real discovered cert is
+  always preferred and used unchanged. This fallback is a trust-on-first-use
+  break-glass path — like an SSH first-connect or an appliance's first-boot cert it is
+  MITM-able by an active attacker, so install a real certificate promptly; it is not a
+  steady state.
 
 ### Changed
 - **Explicit `JOURNAL_UNIT` pins are now alias-normalized to the canonical
@@ -139,6 +200,27 @@ back-filled here — see the git/PR history for that period.
   silently disabled the direct-`:6060`→`:6061` transport guard. It now records the actual
   configured listener ports at startup and classifies against them (falling back to
   `6060`/`6061` when unset), so the guard works on any port. No effect on default-port installs.
+
+### Fixed
+- **Mailcow boot race no longer silently kills postfix/dovecot monitoring.** When
+  CFM started before the mailcow docker stack was up, the postfix/dovecot detectors
+  resolved provisionally (tailing an empty host `/var/log/mail.log`) and — because a
+  container appearing changes no config file — never re-resolved, so brute-force/relay/
+  queue monitoring stayed silently dead until the next daemon restart. The manager now
+  schedules a bounded re-resolution (every 60s, up to 5 min) for the SPECIFIC case where
+  the docker CLI is present but the expected mail container was not found yet, so the
+  container's appearance is picked up automatically. The retry is deliberately narrow
+  (not every provisional default — a host with postfix installed-but-unconfirmed, or any
+  non-docker default, has no container coming and is left alone) and gentle, so a
+  non-mail docker host pays only a few boot-time rebuilds before it stops for good. Stale
+  references to a non-existent `cfm detector reload` in comments/notes were corrected
+  (recovery is automatic, or on restart).
+- **`cfm detectors-srcresolve` / the source-resolution preview** no longer mislabels
+  `custom` and `proxmox_auth` sections as "n/a (command/API/collector-based)" — both tail
+  a log source and are now shown with their own resolution note.
+- **`/api/v1/detectors/source-resolution` reclassified to the heavy-read rate bucket.**
+  Each call forks `journalctl`/`systemctl`/`docker ps`/`stat`; it was bucketed with cheap
+  JSON reads, so a fan-out loop could pile up subprocesses on a wedged host.
 
 ## 2026.08.25
 

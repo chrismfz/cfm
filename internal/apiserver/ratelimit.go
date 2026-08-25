@@ -88,7 +88,11 @@ func classifyRoute(method, path string) routeClass {
 	// segment (e.g. /…/drilldown/status).
 	case strings.Contains(p, "/search") || strings.Contains(p, "/history") ||
 		strings.Contains(p, "/forensics") || strings.Contains(p, "/drilldown") ||
-		strings.Contains(p, "/whats") || strings.Contains(p, "/logs"):
+		strings.Contains(p, "/whats") || strings.Contains(p, "/logs") ||
+		// source-resolution forks journalctl/systemctl/docker/stat per call
+		// (a fresh probe set, no cross-request memo) — bound it like other
+		// expensive reads, not the cheap-JSON default.
+		strings.Contains(p, "/source-resolution"):
 		return rcHeavyRead
 
 	// Cheap, high-frequency reads (health/status polling). Anchored to specific

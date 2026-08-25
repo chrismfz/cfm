@@ -78,7 +78,8 @@ type DebugConfig struct {
 	AuthMFATOTPEnrollEnabled   bool          // AUTH_MFA_TOTP_ENROLL_ENABLED (default false)
 	AuthMFATOTPPilotUsers      []string      // AUTH_MFA_TOTP_PILOT_USERS (comma-separated usernames)
 	SessionTTL                 time.Duration // AUTH_SESSION_TTL (default 8h)
-	SecureCookie               bool          // AUTH_SECURE_COOKIE
+	SecureCookie               bool          // AUTH_SECURE_COOKIE (DEPRECATED — Secure is now automatic from effective scheme; parsed for compat, ignored)
+	SecureCookieExplicit       bool          // true if AUTH_SECURE_COOKIE was present in the config (drives a one-time deprecation warning)
 	CookieName                 string        // AUTH_COOKIE_NAME (default cfm-sid)
 	DebugCaptureEnabled        bool          // DEBUG_CAPTURE_ENABLED
 	DebugCaptureDir            string        // DEBUG_CAPTURE_DIR
@@ -880,6 +881,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			}
 		case "AUTH_SECURE_COOKIE":
 			cfg.Debug.SecureCookie = val == "1" || strings.EqualFold(val, "true")
+			cfg.Debug.SecureCookieExplicit = true
 		case "AUTH_COOKIE_NAME":
 			cfg.Debug.CookieName = val
 		case "DEBUG_CAPTURE_ENABLED":

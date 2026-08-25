@@ -5,9 +5,74 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cfm/internal/detectors/srcresolve"
 )
+
+// Only a plan with bootRace set flags a retry — NOT every provisional plan.
+// bootRace is the narrow "docker present, container not up yet" case; a plain
+// provisional (host MTA present-but-unconfirmed, or a non-docker blind default)
+// has no container coming, so retrying it would be pure churn.
+func TestNotePlanBootRace(t *testing.T) {
+	resetBootRacePending()
+	notePlanBootRace(sourcePlan{provisional: true}) // provisional but NOT bootRace
+	if bootRacePending() {
+		t.Fatal("a plain provisional plan (no container coming) must not flag a retry")
+	}
+	notePlanBootRace(sourcePlan{}) // neither
+	if bootRacePending() {
+		t.Fatal("a resolved plan must not flag a retry")
+	}
+	notePlanBootRace(sourcePlan{provisional: true, bootRace: true})
+	if !bootRacePending() {
+		t.Fatal("a bootRace plan must flag a retry")
+	}
+	resetBootRacePending()
+	if bootRacePending() {
+		t.Fatal("reset must clear the flag")
+	}
+}
+
+// The planners set bootRace ONLY in the genuine container-not-up-yet case, and
+// never for host-MTA-present or non-docker provisional defaults.
+func TestPlannerBootRaceArmingScope(t *testing.T) {
+	// postfix: no host postfix + docker present + nothing resolved → bootRace.
+	swapPresence(t, false, false, true)
+	if p := planPostfixLogSource("postfix_security", KV{}, planProbes(nil, nil, nil, nil)); !p.bootRace {
+		t.Fatalf("postfix container-not-found must arm bootRace: %+v", p)
+	}
+	// postfix installed on the host but not confirmed → provisional, NOT bootRace.
+	swapPresence(t, false, true, true)
+	if p := planPostfixLogSource("postfix_security", KV{}, planProbes(nil, nil, nil, nil)); p.bootRace || !p.provisional {
+		t.Fatalf("host-postfix-present must be provisional but NOT bootRace: %+v", p)
+	}
+	// dovecot: docker present, no container → bootRace; no docker → not.
+	swapPresence(t, false, false, true)
+	if p := planDovecotSource("dovecot_auth", KV{}, planProbes(nil, nil, nil, nil)); !p.bootRace {
+		t.Fatalf("dovecot container-not-found (docker present) must arm bootRace: %+v", p)
+	}
+	swapPresence(t, false, false, false)
+	if p := planDovecotSource("dovecot_auth", KV{}, planProbes(nil, nil, nil, nil)); p.bootRace || !p.provisional {
+		t.Fatalf("dovecot without docker must be provisional but NOT bootRace: %+v", p)
+	}
+}
+
+func TestBootRaceRetryDue(t *testing.T) {
+	m := &manager{}
+	now := time.Unix(1_700_000_000, 0)
+	if m.bootRaceRetryDue(now) {
+		t.Fatal("zero reprobeAt is never due")
+	}
+	m.reprobeAt = now.Add(30 * time.Second)
+	if m.bootRaceRetryDue(now) {
+		t.Fatal("future reprobeAt is not yet due")
+	}
+	m.reprobeAt = now.Add(-time.Second)
+	if !m.bootRaceRetryDue(now) {
+		t.Fatal("past reprobeAt is due")
+	}
+}
 
 // planProbes builds fake srcresolve probes from simple sets.
 func planProbes(entries, active, files, containers []string) srcresolve.Probes {
@@ -210,6 +275,16 @@ MATCH_COUNTRY = "GR"
 	if err := os.WriteFile(cfg, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The report reads the LAYERED view: an overlay overriding ssh_auth's
+	// LOG_PATH must be what resolution sees.
+	if err := os.Mkdir(filepath.Join(dir, "detectors.d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "detectors.d", "10-local.conf"),
+		[]byte("[ssh_auth]\nLOG_PATH = /overlay/ssh.log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	rows, err := SourceReport(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -222,10 +297,10 @@ MATCH_COUNTRY = "GR"
 		t.Fatalf("leniency sections must not appear in the report")
 	}
 	ssh := rows[byName["ssh_auth"]]
-	if ssh.Engine != "srcresolve" || ssh.Kind != "file" || ssh.Target != "/custom/ssh.log" {
-		t.Fatalf("ssh row: %+v", ssh)
+	if ssh.Engine != "srcresolve" || ssh.Kind != "file" || ssh.Target != "/overlay/ssh.log" {
+		t.Fatalf("ssh row must reflect the overlay-merged view: %+v", ssh)
 	}
-	if ssh.Configured["MODE"] != "file" || ssh.Configured["LOG_PATH"] != "/custom/ssh.log" {
+	if ssh.Configured["MODE"] != "file" || ssh.Configured["LOG_PATH"] != "/overlay/ssh.log" {
 		t.Fatalf("ssh configured echo: %+v", ssh.Configured)
 	}
 	if ftpd := rows[byName["ftpd"]]; ftpd.Engine != "legacy-auto" {

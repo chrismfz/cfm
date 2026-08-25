@@ -31,7 +31,14 @@ type sourcePlan struct {
 	passthrough bool // keep configured keys / package-internal resolution as-is
 	disable     bool // section self-disables (register returns nil, nil)
 	provisional bool // blind default in use; self-heals when the source appears
-	note        string
+	// bootRace marks the SPECIFIC provisional case that warrants a forced
+	// re-resolution retry: docker is present but the expected mail CONTAINER
+	// was not found yet (mailcow mid-boot). It is deliberately NARROWER than
+	// provisional — a host that has postfix installed but not logging where
+	// expected, or any non-docker blind default, is provisional but NOT a
+	// boot race (no container is coming, so retrying is pure churn).
+	bootRace bool
+	note     string
 }
 
 // Presence probes as swappable vars so planner tests never exec
@@ -84,11 +91,28 @@ func planDovecotSource(section string, kv KV, p srcresolve.Probes) sourcePlan {
 	if res.Kind != srcresolve.KindNone {
 		return sourcePlan{res: res}
 	}
-	return sourcePlan{
+	// Unlike postfix, dovecot deliberately falls back to the FILE default even
+	// under an explicit MODE=journal that resolved nothing: dovecot logs to
+	// syslog, so /var/log/maillog actually carries its lines (an empty journal
+	// would not). It also has no package-internal autodetect/passthrough path,
+	// so it must resolve to a concrete kind. This intentional cross-to-file is
+	// safe here precisely because the file has the data — do not "align" it
+	// with postfix's strict never-cross rule.
+	pl := sourcePlan{
 		res:         srcresolve.Result{Kind: srcresolve.KindFile, Path: dovecotLogFiles[0], Reason: "provisional default (nothing confirmed)"},
 		provisional: true,
 		note:        "nothing confirmed (" + res.Reason + "); tailing the historical default mail log provisionally",
 	}
+	// Boot-race retry ONLY when docker is present and no dovecot container was
+	// found: a mailcow dovecot container may still be coming up (and can start
+	// slightly after postfix, so dovecot must keep the retry alive on its own).
+	// Without docker there is nothing to wait for — provisional-on-file is the
+	// final answer, so it is not flagged.
+	if dockerCLIPresentFn() {
+		pl.bootRace = true
+		pl.res.Reason = "provisional default (docker present, dovecot container not found yet)"
+	}
+	return pl
 }
 
 // planEximLogSource: file-only (docs/detectors-config-unification.md §3a —
@@ -176,7 +200,8 @@ func planPostfixLogSource(section string, kv KV, p srcresolve.Probes) sourcePlan
 			return sourcePlan{
 				res:         srcresolve.Result{Kind: srcresolve.KindFile, Path: postfixLogFiles[1], Reason: "provisional default (docker present, container not found yet)"},
 				provisional: true,
-				note:        "no postfix found but docker is present (container may not be up yet); `cfm detector reload` re-resolves (" + res.Reason + ")",
+				bootRace:    true, // docker present, no postfix container yet → retry
+				note:        "no postfix found but docker is present (container may not be up yet); auto re-resolves once it appears (" + res.Reason + ")",
 			}
 		}
 		return sourcePlan{res: res, disable: true,
@@ -217,8 +242,8 @@ func planPostfixQueues(section string, kv KV, p srcresolve.Probes) (pl sourcePla
 	case dockerCLIPresentFn():
 		return sourcePlan{
 			res:         srcresolve.Result{Kind: srcresolve.KindNone, Reason: why},
-			passthrough: true, provisional: true,
-			note: "no postfix found but docker is present (container may not be up yet); keeping host defaults — `cfm detector reload` re-resolves",
+			passthrough: true, provisional: true, bootRace: true, // docker present, no postfix container yet → retry
+			note: "no postfix found but docker is present (container may not be up yet); keeping host defaults — auto re-resolves once it appears",
 		}, "", ""
 	default:
 		return sourcePlan{
@@ -236,12 +261,17 @@ var sourceConfiguredKeys = []string{
 	"DOCKER_CONTAINER", "TOTAL_CMD", "LIST_CMD",
 }
 
-// legacyAutoTypes still carry their own pre-srcresolve autodetect.
+// legacyAutoTypes still carry their own pre-srcresolve autodetect. These ARE
+// log-source-based detectors that srcresolve has not (yet) adopted — listing
+// them here keeps the preview honest (they tail a file/journal), rather than
+// mislabelling them "n/a — command/API/collector-based".
 var legacyAutoTypes = map[string]string{
-	"ftpd":        "own autodetect (journal probe + file scoring); resolution in its startup log",
-	"modsec":      "own autodetect (LOG_PATH=auto candidates); resolution in its startup log",
-	"mysql":       "own autodetect (LOG_PATH=auto error-log discovery); resolution in its startup log",
-	"webdetector": "edge log configured/derived (MODE=file|folder); see its startup log",
+	"ftpd":         "own autodetect (journal probe + file scoring); resolution in its startup log",
+	"modsec":       "own autodetect (LOG_PATH=auto candidates); resolution in its startup log",
+	"mysql":        "own autodetect (LOG_PATH=auto error-log discovery); resolution in its startup log",
+	"webdetector":  "edge log configured/derived (MODE=file|folder); see its startup log",
+	"custom":       "own MODE/LOG_PATH/JOURNAL_UNIT resolution (per-section); see its startup log",
+	"proxmox_auth": "own journal/file tailer; resolution in its startup log",
 }
 
 // SourceReport answers "which log source would every section in cfgPath use
@@ -250,7 +280,9 @@ var legacyAutoTypes = map[string]string{
 // started or changed. Sections with ENABLED=0 are still planned so the
 // operator previews what enabling would do.
 func SourceReport(cfgPath string) ([]apiserver.DetectorSourceRow, error) {
-	secs, err := ReadSectionsFile(cfgPath)
+	// Layered read — the report must preview the same merged view the manager
+	// runs on, overlays included.
+	secs, err := ReadLayeredFile(cfgPath)
 	if err != nil {
 		return nil, err
 	}

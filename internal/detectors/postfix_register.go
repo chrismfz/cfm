@@ -64,6 +64,7 @@ func applyPostfixSourcePlan(section string, plan sourcePlan, unit, container, pa
 		logging.Logf("[detectors][%s] %s (%s)", section, plan.note, plan.res.Reason)
 		return true
 	}
+	notePlanBootRace(plan) // provisional + docker present (mailcow not up yet) → boot-race retry
 	if plan.note != "" {
 		logging.Logf("[detectors][%s] %s", section, plan.note)
 	}
@@ -238,12 +239,14 @@ func init() {
 		// its exact header-count defaults; postfix only in a discovered
 		// container (mailcow) → the commands wrapped in `docker exec`; neither
 		// → self-disable, unless the docker CLI exists (daemon/container may
-		// not be up yet at boot — stay alive, `cfm detector reload` re-resolves).
+		// not be up yet at boot — stay alive; the manager's boot-race retry
+		// re-resolves automatically once the container appears).
 		plan, totalCmd, listCmd := planPostfixQueues(section, kv, registrationProbes())
 		if plan.disable {
 			logging.Logf("[detectors][%s] %s (%s)", section, plan.note, plan.res.Reason)
 			return nil, nil
 		}
+		notePlanBootRace(plan) // provisional + docker present (mailcow not up yet) → boot-race retry
 		if plan.note != "" {
 			logging.Logf("[detectors][%s] %s", section, plan.note)
 		}

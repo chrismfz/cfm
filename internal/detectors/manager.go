@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"cfm/internal/detconf"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectorstatus"
 	"cfm/internal/enrich"
@@ -32,6 +33,16 @@ type manager struct {
 	pendingSince time.Time
 	hasPending   bool
 
+	// Boot-race re-resolution: a mail section that resolved provisionally
+	// while the docker CLI is present (mailcow container not up yet at boot)
+	// leaves reprobeAt set, so maybeReload forces a rebuild on a slow cadence
+	// even when cfgSig is unchanged — the container's later appearance moves
+	// no config file, so nothing else would trigger re-resolution. Cleared
+	// once resolution succeeds, or abandoned past bootRaceUntil. These fields
+	// are touched only inside maybeReload (single poll goroutine).
+	reprobeAt     time.Time
+	bootRaceUntil time.Time
+
 	running bool
 	state   *core.State
 
@@ -42,6 +53,24 @@ type manager struct {
 type initDiagnosticsError interface {
 	error
 	Diagnostics() []string
+}
+
+// Boot-race re-resolution cadence: how often to retry a provisional mail
+// source while its docker container may still be coming up, and how long to
+// keep trying before accepting the provisional default. Each retry is a full
+// detector rebuild, so the cadence is deliberately gentle: it recovers a real
+// mailcow host within ~a minute of its container appearing, while a host whose
+// container never comes (the irreducibly-ambiguous docker-but-no-mail case)
+// pays only a handful of boot-time rebuilds before it stops for good.
+const (
+	bootRaceRetryEvery = 60 * time.Second
+	bootRaceMaxWait    = 5 * time.Minute
+)
+
+// bootRaceRetryDue reports whether a scheduled boot-race re-resolution has come
+// due (reprobeAt set and reached). Poll-goroutine only, like the debounce state.
+func (m *manager) bootRaceRetryDue(now time.Time) bool {
+	return !m.reprobeAt.IsZero() && !now.Before(m.reprobeAt)
 }
 
 func probeSourceStatus(kv KV) (bool, string) {
@@ -64,12 +93,18 @@ func probeSourceStatus(kv KV) (bool, string) {
 	return true, "log file readable"
 }
 
-// cfgSig changes when either detections.conf changes (StampNS) OR any watched
-// LOG_PATH is rotated (inode/dev changes). Prevents tailers sticking to deleted FD.
+// cfgSig changes when detectors.conf or an overlay changes (StampNS = the BASE
+// file's mtime, so a base edit always moves it, never masked by a newer
+// overlay; LayerSig = the overlay set's name+mtime+size hash, the independent
+// signal for an overlay edited/removed/renamed/added-with-an-older-mtime) OR
+// any watched LOG_PATH is rotated (inode/dev changes — prevents tailers
+// sticking to a deleted FD).
 func cfgSig(secs *Sections) uint64 {
 	h := fnv.New64a()
 	var b [8]byte
 	binary.LittleEndian.PutUint64(b[:], uint64(secs.StampNS))
+	_, _ = h.Write(b[:])
+	binary.LittleEndian.PutUint64(b[:], secs.LayerSig)
 	_, _ = h.Write(b[:])
 
 	// IMPORTANT: map iteration order is random -> must hash in stable order,
@@ -215,15 +250,19 @@ func (m *manager) maybeReload(parent context.Context) {
 	detectorstatus.UpsertConfiguredSections(configured)
 	detectorstatus.SetLoadedTypes(len(availableTypes))
 	detectorstatus.SetInventory(availableTypes, configuredSections, enabledCount)
-	// No change from current running config: clear any pending reload.
-	if sig == m.lastSig && m.running {
+	now := time.Now()
+	// No change from current running config: clear any pending reload — UNLESS
+	// a boot-race re-resolution is due. A provisional mail section waiting for
+	// its docker container (mailcow) sees no config-file change when the
+	// container finally appears, so cfgSig stays equal; only this timer forces
+	// the re-resolve.
+	if sig == m.lastSig && m.running && !m.bootRaceRetryDue(now) {
 		m.hasPending = false
 		return
 	}
 
 	// Debounce: require the new signature to remain stable for debounceDur
 	// before we actually reload (prevents flapping / transient states).
-	now := time.Now()
 
 	// On first-ever load (nothing running yet), do NOT debounce.
 	// We want config to be available immediately for consumers in main().
@@ -332,27 +371,48 @@ func (m *manager) maybeReload(parent context.Context) {
 	// absent, too short (<32 chars), or a known placeholder.  The new value is
 	// written back to detectors.conf and into the in-memory KV so the detector
 	// starts with the correct token on the very first load.
-	if wdKV, ok := secs.ByName["webdetector"]; ok {
+	// Tokens are BASE-owned: ValidateOrGenerateTokenKey persists into cfgPath
+	// (the base detectors.conf). Read the current values from the BASE
+	// [webdetector] — NOT the merged base+overlay view we run on — because the
+	// value read must be the value the generator rewrites. A weak/empty
+	// CHALLENGE_TOKEN/OPENRESTY_TOKEN supplied by an OVERLAY would otherwise be
+	// "healed" into the base on every reload while the merged read keeps
+	// returning the overlay's value: an endless regenerate → rewrite-base →
+	// re-challenge loop. Gating on the BASE section also preserves the
+	// pre-layering behaviour (this ran only when the base had [webdetector]), so
+	// an overlay-only [webdetector] never triggers a blind token append into a
+	// base that lacks the section. Overriding these two keys from an overlay is
+	// intentionally unsupported (PR6 moves generation out of the conffile); the
+	// runtime is pinned to the base-managed token so it stays in lockstep with
+	// the cfm_bridge_token.lua written below. Every OTHER [webdetector] knob
+	// below still uses the merged wdKV.
+	baseWD, baseHasWD := KV(nil), false
+	if bs, berr := ReadSectionsFile(m.opts.CfgPath); berr == nil {
+		baseWD, baseHasWD = bs.ByName["webdetector"]
+	}
+	if wdKV, ok := secs.ByName["webdetector"]; ok && baseHasWD {
 		cfgPath := m.opts.CfgPath // absolute path to detectors.conf
 
-		// F2: CHALLENGE_TOKEN
-		chalTok := kvStrClean(wdKV, "CHALLENGE_TOKEN", "")
+		// F2: CHALLENGE_TOKEN (value read from BASE, generator writes BASE)
+		chalTok := kvStrClean(baseWD, "CHALLENGE_TOKEN", "")
 		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "CHALLENGE_TOKEN", chalTok); err != nil {
 			logging.Logf("[detectors] CHALLENGE_TOKEN generation failed: %v", err)
-		} else if newTok != chalTok {
-			logging.Logf("[detectors] CHALLENGE_TOKEN was weak — rotated and persisted to %s", cfgPath)
-			wdKV["CHALLENGE_TOKEN"] = newTok
+		} else {
+			if newTok != chalTok {
+				logging.Logf("[detectors] CHALLENGE_TOKEN was weak — rotated and persisted to %s", cfgPath)
+			}
+			wdKV["CHALLENGE_TOKEN"] = newTok // pin runtime to the base-managed token
 		}
 
 		// F4: OPENRESTY_TOKEN — also writes cfm_bridge_token.lua for cfm.lua
-		bridgeTok := kvStrClean(wdKV, "OPENRESTY_TOKEN", "")
+		bridgeTok := kvStrClean(baseWD, "OPENRESTY_TOKEN", "")
 		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "OPENRESTY_TOKEN", bridgeTok); err != nil {
 			logging.Logf("[detectors] OPENRESTY_TOKEN generation failed: %v", err)
 		} else {
 			if newTok != bridgeTok {
 				logging.Logf("[detectors] OPENRESTY_TOKEN was weak — rotated and persisted to %s", cfgPath)
-				wdKV["OPENRESTY_TOKEN"] = newTok
 			}
+			wdKV["OPENRESTY_TOKEN"] = newTok // pin runtime to the base-managed token
 			cfmGID := sslcollector.CfmGroupID()
 			const bridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 			if err := sslcollector.WriteLuaTokenWithMkdir(bridgeTokenPath, newTok, cfmGID); err != nil {
@@ -448,6 +508,7 @@ func (m *manager) maybeReload(parent context.Context) {
 	// rebuild re-probes host state so a reload sees a daemon/container that
 	// appeared since the last build (srcresolve register path).
 	resetRegistrationProbes()
+	resetBootRacePending()
 
 	// instantiate + run all enabled sections
 	for secName, kv := range secs.ByName {
@@ -640,16 +701,64 @@ func (m *manager) maybeReload(parent context.Context) {
 
 		}(secName, det)
 	}
+
+	// Boot-race re-resolution schedule. A mail register set the pending flag if
+	// its section resolved provisionally while the docker CLI is present — the
+	// mailcow container is expected but not up yet. Since the container later
+	// appearing changes no config file (cfgSig stays equal), schedule a forced
+	// re-resolution on a slow cadence until it resolves, bounded by
+	// bootRaceMaxWait so a host whose container never comes stops churning.
+	nowB := time.Now()
+	switch {
+	case !bootRacePending():
+		m.reprobeAt, m.bootRaceUntil = time.Time{}, time.Time{} // resolved (or nothing pending)
+	case m.bootRaceUntil.IsZero() || nowB.Before(m.bootRaceUntil):
+		if m.bootRaceUntil.IsZero() {
+			m.bootRaceUntil = nowB.Add(bootRaceMaxWait)
+		}
+		m.reprobeAt = nowB.Add(bootRaceRetryEvery)
+		logging.Logf("[detectors] mail source resolved provisionally (docker container not up yet) — re-resolving in %s", bootRaceRetryEvery)
+	default:
+		// Gave up: the container never appeared within bootRaceMaxWait. Clear
+		// reprobeAt (no more forced rebuilds) but deliberately KEEP the now-past
+		// bootRaceUntil: it pins this host as "already tried", so a later
+		// config-change rebuild that is still provisional re-hits this branch
+		// (a one-line re-log) instead of re-arming a fresh 5-min retry episode
+		// on every edit — important on a genuinely non-mail docker host that
+		// carries the stock (enabled) mail sections. A real resolve zeroes both
+		// via the first case, so a container that does appear still clears it.
+		m.reprobeAt = time.Time{}
+		logging.Logf("[detectors] mail source still provisional after %s; keeping provisional default (docker container never appeared)", bootRaceMaxWait)
+	}
 }
 
 func readSectionsForReload(path string, running bool) (Sections, error, bool) {
-	secs, _, err := readSections(path)
+	// Layered read: base conffile + /etc/cfm/detectors.d/*.conf overlays
+	// (docs/detectors-config-unification.md §4). cfgSig sees base edits via
+	// StampNS (the base mtime) and every overlay change via LayerSig.
+	secs, _, err := readLayered(path, detconf.DefaultDropinDir(path))
 	if err == nil {
 		return secs, nil, false
 	}
-	if os.IsNotExist(err) || !running {
+	// The BASE conffile missing keeps its historical meaning (deconfigured →
+	// built-in control-plane protection only). Overlay errors never match
+	// here: readLayered wraps them, and os.IsNotExist does not unwrap.
+	if os.IsNotExist(err) {
 		return emptyDetectorSections(), err, true
 	}
+	if !running {
+		// First load with an unreadable overlay (or dropin dir) must not cost
+		// the whole detector layer: if the base conffile reads on its own,
+		// start base-only. Builtin-only degraded mode stays reserved for a
+		// base file that itself cannot be read. Once the overlay is fixed its
+		// LayerSig differs from the base-only sig, so hot reload applies it.
+		if base, berr := ReadSectionsFile(path); berr == nil {
+			logging.Logf("[detectors] overlay read failed on first load: %v — starting with the base config ONLY; fix the overlay and it hot-reloads", err)
+			return base, nil, false
+		}
+		return emptyDetectorSections(), err, true
+	}
+	// Hot reload: never half-apply — keep the current detectors.
 	return Sections{}, err, false
 }
 
