@@ -90,11 +90,17 @@ linchpin of the whole design.
   is invisible to the vhost score today. (Raw query IS retained in the access
   ring — `redactQuery` only strips secret params — so the signal is derivable,
   just not computed.)
-- **`solver_farm` is effectively dark in production.** `solver_farm: false` on
-  **every** flagged host across all 7 nodes. Thresholds (`MIN_SUBNETS=40`,
-  `MIN_SOLVES=40` in a 60s window) are far above real fleets (the Meta /24 on
-  techking/shopzy is ~11 IPs over 15 min). The detector purpose-built for the
-  distributed-solver signature never fires.
+- **`solver_farm` is quiet, but correctly so (corrected).** `solver_farm: false`
+  on every flagged host during the audit — NOT because it is mis-tuned, but
+  because **no many-subnet flood was live**. `MinSubnets=40` is deliberately
+  calibrated (`solverfarm/detector.go:17-28`): on the 23h capture the farm vhost
+  showed **median 73 distinct /24 per 60s window** (p01 49, max 122) while every
+  other vhost maxed at 27 — so 40 flags 2758/2761 farm windows and 0/3212 legit,
+  a 1.5× margin. That is the **e-athlos residential-proxy flood** shape (544k IPs
+  → thousands of /24s). The Meta /24 (`57.141.20.0/24`) is a **single** subnet →
+  correctly NOT a "farm"; it is the CHALLENGE_SUBNET path (+ good-bot exemption),
+  a complementary detector. **Do not lower solver_farm thresholds** — it will
+  fire when a real many-subnet flood is live.
 
 ### Finding 4 — a live false positive to fix regardless
 
@@ -139,6 +145,33 @@ challenge (`nginxBridge.ChallengeIP` → ipState) / nft block (`fw.AddBlock` via
 `enforcement=observe|dryrun`, `ttl`, `block_ttl`. solver_farm deliberately lands
 in the **observe** branch (alert only); wafsec emits `core.Alert` only and lets
 the sink enforce. **This is exactly the seam a converged score plugs into.**
+
+### Verified-crawler + datacenter classification ALREADY EXIST (reuse, don't rebuild)
+
+Both features the design leans on are already implemented and battle-tested —
+they are simply not wired into the vhost score:
+
+- **FCrDNS verified-crawler** — `verifiedGoodBot(ptr, ip)` +
+  `goodBotPTRSuffixes` (`abuse_shadow.go:222-258`): forward-confirmed reverse DNS
+  over the `internal/enrich` PTR subsystem. Registry today: **googlebot, google,
+  bingbot, yahoo, applebot, yandex, meta (`.fbsv.net`)**. A spoofed PTR fails
+  forward-confirm → earns nothing. Used in exactly TWO places: abuse_shadow
+  (`ABUSE_SHADOW_GOODBOT_EXEMPT`, default on) and the subnet-challenge exemption
+  (`subnetVerifiedGoodBot`, `CHALLENGE_SUBNET_GOODBOT_EXEMPT`, default on,
+  30-min posTTL cache, DNS-budgeted per tick).
+- **Datacenter-ASN classifier** — `DatacenterClass(asn, name)` / `IsDatacenter`
+  (`asnclass.go`): curated `knownCloudASNs` (AWS/GCP/Azure/DO/Hetzner/OVH/M247/
+  Datacamp/Leaseweb/…) + strong org-keyword fallback. Header documents the exact
+  guardrail we adopted: **datacenter ≠ malicious, additive-only, good-bot
+  exemption runs first, ASN flag alone is never a trigger.**
+
+**Consequence / the gap:** the good-bot exemption guards only the SUBNET signal,
+NOT the vhost suspicious score. That is why techking/shopzy (verified
+Google/Meta) are still **vhost-challenged** (score 0.81/0.74 from
+`bot%`+`err`+`path_div`). So "verified-crawler first" is **wiring an existing
+verifier into the vhost/decision path** — small — not building rDNS from scratch.
+Likewise `datacenter-ASN-frac` reuses `DatacenterClass`; only
+**query-cardinality/URL-repeat/cost** is genuinely new substrate.
 
 ### Throttle is already a solved primitive (matters for Class 2)
 
@@ -249,17 +282,45 @@ never reaches deny — only rate/budget.
 
 ## Plan (measure-first, mechanism-agnostic)
 
-### Phase 0 — audit + zero-code hardening (in progress)
+### Phase 0 — audit + zero-code (operator config; in progress)
+
+Decisions locked (2026-08-25): **Meta → rate-limit** (Phase 2 surface-throttle;
+until then leave it challenge-exempt, never hard-challenge — challenging a
+crawler is pointless/harmful). **AI crawlers (GPTBot/ClaudeBot/bytespider/
+tiktokspider) → free for a start** (no special handling). Google/Bing → keep,
+crawl-budget on expensive surfaces later. **verified-crawler is the first CODE
+task** (Phase 1 lead).
+
+Zero-code = live `/etc/cfm/detectors.conf` on the 7 web nodes (operator-applied;
+MCP is read-only). `solver_farm` stays as-is (correctly calibrated — see audit).
+Target block for **data collection** (all log-only, no enforcement):
+
+```ini
+[web_detector]                 ; or the section carrying these keys on the box
+ABUSE_SHADOW                = 1   ; was 0 — turn the shadow log ON
+ABUSE_SHADOW_RATE_OUTLIER   = 1   ; per-IP rate outlier vs vhost median
+ABUSE_SHADOW_DATACENTER     = 1   ; log the DatacenterClass tag (additive)
+ABUSE_SHADOW_GOODBOT_EXEMPT = 1   ; already default; keep
+UNDER_ATTACK_FINGERPRINT    = 1   ; ensure present (drifts out on upgraded boxes)
+; UNDER_ATTACK must be on for the fingerprinter; it ships DRYRUN=1 (safe)
+```
+
+Verify current live state with the `config_drift` MCP tool / Detectors page
+before/after. Then let it accumulate `cfm.abuse_shadow.log` + fingerprint
+would-arm lines through a real Class-2 burst.
+
 - [x] Fleet audit → three-class model + separation table (this doc).
+- [x] Confirm verified-crawler + datacenter substrate exists (reuse path found).
+- [ ] Operator: apply the shadow config block above on the 7 web nodes.
 - [ ] Capture query-cardinality/repeat live during the next Class-2 burst
       (`edge_access_tail`) to fix that weight.
-- [ ] Turn on the shadow keys already asked for (`UNDER_ATTACK_FINGERPRINT`,
-      `FP_*`) + `ABUSE_SHADOW*`; let them accumulate.
-- [ ] Right-size `solver_farm` thresholds to real fleets (it is dark today).
-- [ ] Add **verified-crawler classification** (rDNS Google/Bing/Meta/Apple; AS
-      15169/32934/…). This is the linchpin and also fixes the live Googlebot FP.
 
 ### Phase 1 — converge into the two scores, SHADOW-only
+- [ ] **FIRST: wire `verifiedGoodBot` into the vhost/challenge decision.** Reuse
+      the existing FCrDNS verifier so a verified crawler (Google/Bing/Meta/Apple/
+      Yandex) is not vhost-challenged; log the would-suppress in shadow first,
+      then apply. Fixes the live Googlebot `CHALLENGE_ERR_RATIO` FP and stops
+      hard-challenging Meta on techking/shopzy. Small, self-contained PR.
 - [ ] Add missing per-vhost features: query-cardinality, URL-repeat-ratio,
       cost/5xx-trend, datacenter-ASN-frac (verified-gated).
 - [ ] Add missing per-client features: header-coherence, solve-latency; route
