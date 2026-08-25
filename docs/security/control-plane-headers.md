@@ -53,10 +53,13 @@ embedded-missing and missing-token), matching what the success handlers already 
 - a rejected identity response can no longer be cached and replayed as another
   identity.
 
-## 4. Deliberately deferred (do NOT ship blindly)
+## 4. CSP + frame policy + HSTS — ⛔ DECLINED (not shipping)
 
-Both are called out by R10's remediation and Step 9's ordering rule as decisions,
-not mechanical header adds:
+**Decision (2026-08-25):** these are **not** added to CFM's default control plane —
+the P2 hardening isn't worth the fleet-wide breakage risk. Full rationale and the safe
+opt-in shape (if ever revisited) are in `docs/security/control-plane-csp-frame-hsts.md`;
+operators who want them add them at their own edge/reverse proxy. The reasons, in
+brief (they were originally "deferred", now consciously declined):
 
 - **CSP + frame policy (`X-Frame-Options` / `frame-ancestors`).** CFM's admin UI is
   embedded in the **cPanel iframe** (CLAUDE.md §6), whose origin is per-install and

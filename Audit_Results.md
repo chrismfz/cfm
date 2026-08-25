@@ -661,7 +661,7 @@ Still unverified for R04:
 ## R10 — Authentication/cache response-header hardening gaps
 
 **Severity:** HARDENING  
-**Status:** ✅ SOURCE FIXED (safe subset) / CSP+frame+HSTS deferred / LIVE RETEST PENDING  
+**Status:** ✅ SOURCE FIXED (safe subset) / CSP+frame+HSTS ⛔ DECLINED (too risky for P2) / LIVE RETEST PENDING  
 **Priority:** P2
 
 **Fix (Step 9):** a new `SecurityHeadersMiddleware` (`internal/apiserver/security_headers.go`,
@@ -673,12 +673,16 @@ nosniff` and `Referrer-Policy: strict-origin-when-cross-origin` on **every** dir
 `setAuthIdentityNoCacheHeaders()` is now called at the `TokenMiddleware` auth-failure points
 (`rejectTokenAuth` + the two inline `401`s), so anonymous/invalid `401`s carry
 `Cache-Control: no-store` + `Vary` — they were previously rejected before the endpoint
-headers ran. **Deliberately deferred** (product decisions, not header constants):
-CSP + frame policy must be **cPanel-iframe-aware** (per-install panel origin — a blanket
-`DENY` breaks the embed), and HSTS is host-wide so a `:6061` HSTS would force HTTPS on the
-supported plaintext `:6060` (R01/Step 5) — both tracked in
-`docs/security/control-plane-headers.md`. Tests: `security_headers_test.go`. Live retest
-(direct-vs-edge parity with a credentialed session) → Step 10.
+headers ran. **CSP + frame policy + HSTS: ⛔ DECLINED** (operator decision — too risky
+for a P2 gain): a full `script-src` CSP breaks the inline-script admin UI; a blanket
+`frame-ancestors`/`DENY` breaks the cPanel iframe embed (and the panel origin is
+client-provided, so it cannot be trust-derived); and HSTS is host-wide so a `:6061`
+HSTS would force HTTPS on the supported plaintext `:6060` and break the self-signed
+`:6061` bootstrap. An operator who wants these adds them at their own edge/reverse
+proxy where the trusted origins + TLS posture are known. Full rationale + the safe
+opt-in shape (if ever revisited): `docs/security/control-plane-csp-frame-hsts.md`.
+Tests: `security_headers_test.go`. Live retest (direct-vs-edge parity with a
+credentialed session) → Step 10.
 
 Low-volume header-only checks found different hardening behavior between direct `:6061` and the edge.
 
