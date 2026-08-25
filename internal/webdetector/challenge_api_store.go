@@ -48,6 +48,21 @@ type ChallengeVhostState struct {
 	// with its own TTL). 0 when none/expired.
 	ShadowOutliers int `json:"shadow_outliers"`
 
+	// QueryCardinality is the live abuse_shadow facet distinct-full-URL count for
+	// this vhost (Signal F). Stamped by the handler, not stored (the mark lives in
+	// abuse_shadow_facet_marks.go with its own TTL). 0 when not flagged/expired.
+	QueryCardinality int `json:"query_cardinality"`
+
+	// CostPressure is the live abuse_shadow 5xx percent for this vhost (Signal G).
+	// Stamped by the handler, not stored (the mark lives in abuse_shadow_cost_marks.go
+	// with its own TTL). 0 when not flagged/expired.
+	CostPressure int `json:"cost_pressure"`
+
+	// DCFraction is the live abuse_shadow unverified-datacenter percent for this
+	// vhost (Signal H). Stamped by the handler, not stored (the mark lives in
+	// abuse_shadow_dcfrac_marks.go with its own TTL). 0 when not flagged/expired.
+	DCFraction int `json:"dc_fraction"`
+
 	// State is the vhost's position on the escalation ladder
 	// (normal|suspicious|challenged|under_attack). Stamped by the handler via the
 	// single deriveVhostState() helper (like SolverFarm, not stored): the

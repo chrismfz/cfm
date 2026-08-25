@@ -332,8 +332,76 @@ Class-2 burst.
       techking/shopzy. Knob `CHALLENGE_GOODBOT_EXEMPT` (default on, like the
       subnet exemption — provably safe, so not gated behind shadow). Adversarial
       review folded in (RWMutex fast path, single-sourced matcher, log-once).
-- [ ] Add missing per-vhost features: query-cardinality, URL-repeat-ratio,
-      cost/5xx-trend, datacenter-ASN-frac (verified-gated).
+- [x] **DONE (query-cardinality half) — abuse_shadow facet signal (Signal F).**
+      Branch `claude/webdet-query-cardinality-shadow`: per-vhost distinct-full-URL
+      count (`bucket.fullURIs`, a capped hash-set filled only when enabled, static
+      assets excluded) vs distinct base paths, flagged when
+      `distinct_URLs ≥ MIN_URLS(300)` AND `distinct_URLs/distinct_paths ≥
+      MIN_EXPANSION(20)` — exactly the `path_diversity` blind spot (§ "805,746
+      distinct query strings → path_diversity 0.058"). Log-only: a per-vhost
+      `query_cardinality` badge (webtop/suspicious/challenge rows, `facet` pill in
+      cfm-admin, `facet=N` in `cfm webtop challenge`) + a `signal=facet_expansion`
+      line in `cfm.abuse_shadow.log`. Own mark store + TTL, mirroring the
+      rate-outlier mark. Default-ON under `ABUSE_SHADOW` (no per-node edit to start
+      collecting); knobs `ABUSE_SHADOW_FACET[_MIN_URLS|_MIN_EXPANSION|_CAP]`. NO
+      score contribution, NO enforcement. `URL-repeat-ratio` is logged as
+      corroboration on the same line but not yet a gate. Numerator, denominator
+      and total share ONE universe (dynamic, static-excluded) so the ratio is
+      comparable across vhosts — the fix from the adversarial review, which had
+      flagged `distinctPaths` (from `b.paths`, static-inclusive) as diluting the
+      per-vhost threshold. **Expected burn-in noise:** the signal deliberately
+      also badges *legit* single-endpoint high-cardinality shapes — analytics
+      pixels (`/collect?v=UUID`), plain-permalink WordPress (`/?p=N`), calendars
+      (`/cal?date=…`) — because they are the exact facet shape at the metric level.
+      That is why it is log-only: the `facet` badge means "high query cardinality
+      here", not "malicious". Multi-path catalogues (a news site's 4000 distinct
+      article paths) correctly stay clear (ratio ≈ 1). The would-be discriminator
+      for the malicious case is the enforcement-time context (verified-crawler
+      fork, cost/5xx, repeat ≈ 1), added later — never the badge alone.
+- [x] **DONE (cost/5xx half) — abuse_shadow cost-pressure signal (Signal G).**
+      Branch `claude/webdet-cost-pressure-shadow`: per-vhost 5xx-pressure, flagged
+      when `5xx/total ≥ MIN_FRAC(0.15)` AND `reqs ≥ MIN_REQ(50)` AND
+      `5xx_rps ≥ MIN_RPS5XX(1.0)` — the *symptom* of the flood (origin collapse),
+      complementing facet's *cause*. Reuses the per-bucket 5xx counters (no ingest
+      cost). Log-only: a `cost_pressure` badge (5xx percent — `cost N%` pill /
+      `cost=N%` CLI flag) + a `signal=cost_pressure` line (with avg RT as a second,
+      non-gating cost dimension) in `cfm.abuse_shadow.log`. Own mark store + TTL.
+      Default-ON under `ABUSE_SHADOW`; knobs `ABUSE_SHADOW_COST[_MIN_FRAC|_MIN_REQ|
+      _MIN_RPS5XX]`. NO score contribution, NO enforcement. **Known tuning caveat**
+      (adversarial review): `5xx/total` is over the whole response mix (static/
+      cached 200s included, per the engine's `ErrRatio` convention), so a
+      cache-heavy vhost shows a diluted fraction — a full origin collapse behind
+      mostly-cached traffic can sit under `MIN_FRAC`. Safe direction (false-negative,
+      never false-positive); the `RPS5XX` floor is the partial backstop. **Before
+      this graduates to any enforcement**, switch to a dynamic-only 5xx denominator
+      (needs a per-bucket dynamic counter, like facet's `facetTotal`).
+- [x] **DONE — abuse_shadow datacenter-fraction signal (Signal H, verified-gated).**
+      Branch `claude/webdet-dcfrac-shadow`: per-vhost fraction of requests from
+      datacenter/cloud ASNs that are NOT FCrDNS-verified good bots, flagged when
+      `dc_reqs/total ≥ MIN_FRAC(0.5)` over `≥ MIN_IPS(5)` distinct datacenter IPs
+      and `≥ MIN_REQ(50)` requests. Verified crawlers excluded via FCrDNS (else a
+      crawled shop reads ~100% datacenter — the techking/shopzy trap). **Origin is
+      never innocence**: datacenter-ASN alone drives NO decision — corroborating
+      feature only. Cost-bounded (CLAUDE.md §6): cheap mmdb ASN class for all IPs
+      under a per-tick IP budget (logged deferral, no silent cap; a single
+      over-budget vhost is processed anyway so the biggest floods stay visible);
+      the good-bot exclusion runs through a shared FCrDNS **verdict cache**
+      (`dcFracGoodBot`, the same non-blocking cached machinery as the verified-
+      crawler exemption) — a verified crawler is a DNS-free cache hit, only a miss
+      kicks a bounded/deduped/async confirm, so a stable crawler is confirmed once
+      per TTL not every tick and the verdict survives geo-cache eviction. **Two
+      adversarial-review MAJORs fixed** in the same PR: (1) the original synchronous
+      per-tick FCrDNS was a per-tick DNS storm on crawled shops — replaced by the
+      verdict cache; (2) a vhost with more distinct IPs than the whole per-tick
+      budget was deferred forever — now processed. **Residual, pre-enforcement:**
+      a cold good-bot verdict (chiefly the first ticks after a restart) counts the
+      IP as datacenter until the async confirm lands (~2–3 ticks) — deliberate
+      (excluding the unknown would blind the signal to generic/absent-PTR floods),
+      but "count-on-unknown / exclude-on-verified" must be closed before this
+      feeds any decision. Log-only: `dc_fraction` badge (`dc N%` pill / `dc=N%`
+      CLI) + `signal=dc_fraction` line. Own mark store + TTL. Default-ON under
+      `ABUSE_SHADOW`; knobs `ABUSE_SHADOW_DCFRAC[_MIN_FRAC|_MIN_REQ|_MIN_IPS]`. NO
+      score contribution, NO enforcement.
 - [ ] Add missing per-client features: header-coherence, solve-latency; route
       cookie_discard / solver_farm / abuse_shadow as contributors into
       `IPSignals.Score` / `SuspiciousRow.Score` (they stop being independent

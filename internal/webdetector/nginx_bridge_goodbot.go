@@ -77,6 +77,13 @@ type bridgeGoodBotState struct {
 	// cacheable. cacheable=false means inconclusive (a transient resolver
 	// failure) and must NOT be pinned in the cache. Injectable for tests.
 	verify func(ptr, ip string) (name string, cacheable bool)
+	// logVerified is called once per bot TYPE the first time a positive verdict is
+	// stored, for operator visibility. It is instance-specific because the SAME
+	// cache is used by two subsystems that mean different things: the edge bridge
+	// actually challenge-exempts the crawler, while the log-only dcfrac signal only
+	// excludes it from a datacenter-fraction count — so each sets a message that
+	// matches what it did (never claim a challenge decision the caller didn't make).
+	logVerified func(name, ip string)
 }
 
 func newBridgeGoodBotState() *bridgeGoodBotState {
@@ -86,6 +93,11 @@ func newBridgeGoodBotState() *bridgeGoodBotState {
 		logged:   make(map[string]struct{}),
 		sem:      make(chan struct{}, goodBotIPMaxInflight),
 		verify:   verifyGoodBotIP,
+		// Default = the edge bridge's meaning (this verdict grants a challenge
+		// exemption). Other callers (dcfrac) override this after construction.
+		logVerified: func(name, ip string) {
+			logging.LogfCHALLENGES("[challenge][goodbot] verified crawler %q is challenge-exempt (per-IP FCrDNS; e.g. ip=%s)", name, ip)
+		},
 	}
 }
 
@@ -192,9 +204,9 @@ func (s *bridgeGoodBotState) resolveInto(ip, ptr string, now time.Time) {
 		return
 	}
 	s.store(ip, name, now)
-	if name != "" && s.logFirst(name) {
+	if name != "" && s.logFirst(name) && s.logVerified != nil {
 		// Once per bot TYPE (a crawler fleet has thousands of IPs), not per IP.
-		logging.LogfCHALLENGES("[challenge][goodbot] verified crawler %q is challenge-exempt (per-IP FCrDNS; e.g. ip=%s)", name, ip)
+		s.logVerified(name, ip)
 	}
 }
 

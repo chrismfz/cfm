@@ -171,6 +171,27 @@ type bucketSW struct {
 	refs  map[string]int
 	paths map[string]int
 
+	// Facet (Signal F) accounting, maintained ONLY when the abuse-shadow facet
+	// signal is enabled, over ONE consistent universe: dynamic requests with
+	// static assets excluded. All three move together in the same ingest branch so
+	// the emit's expansion ratio (fullURIs/facetPaths) and repeat ratio
+	// (facetTotal/fullURIs) are internally consistent — the numerator, denominator
+	// and total never straddle the static/dynamic boundary. Off by default → nil
+	// maps, zero hot-path cost.
+	//
+	//   fullURIs   — distinct FULL URLs (path+query): what `paths` (base-path only)
+	//                cannot see. A faceted-URL flood has few distinct base paths but
+	//                a huge distinct-full-URL count. Capped, so it stays small on
+	//                normal vhosts and only fills toward the cap under a real flood.
+	//   facetPaths — distinct BASE paths over the SAME dynamic universe (NOT
+	//                b.paths, which also counts static assets and would dilute the
+	//                denominator by a per-vhost amount, shifting the effective
+	//                expansion threshold between vhosts).
+	//   facetTotal — dynamic request count (with repeats) for the repeat ratio.
+	fullURIs   map[uint64]struct{}
+	facetPaths map[uint64]struct{}
+	facetTotal int
+
 	// Normalized-UA aggregation for the bot-top / UA emergency surface.
 	// Keys are NormalizeUA(rawUA). uasNormReqs is the per-bucket request
 	// count; uasNormIPs is a capped IP set and uasNormPaths a capped
@@ -227,6 +248,25 @@ type ShortRow struct {
 	// vhost right now (concentration signal, shadow/log-only). Stamped onto the
 	// row, not an input to Score — see abuse_shadow_marks.go. 0 when none/expired.
 	ShadowOutliers int `json:"shadow_outliers"`
+
+	// QueryCardinality is the live distinct-full-URL count (path+query) on this
+	// vhost when the abuse_shadow facet signal has flagged it — the query-cardinality
+	// expansion that PathDiversity is blind to (Signal F, shadow/log-only). Stamped
+	// onto the row, not an input to Score — see abuse_shadow_facet_marks.go. 0 when
+	// not flagged / expired.
+	QueryCardinality int `json:"query_cardinality"`
+
+	// CostPressure is the live 5xx percent (1–100) on this vhost when the
+	// abuse_shadow cost signal has flagged it — origin cost pressure, the symptom of
+	// a flood (Signal G, shadow/log-only). Stamped onto the row, not an input to
+	// Score — see abuse_shadow_cost_marks.go. 0 when not flagged / expired.
+	CostPressure int `json:"cost_pressure"`
+
+	// DCFraction is the live unverified-datacenter percent (1–100) on this vhost when
+	// the abuse_shadow datacenter-fraction signal has flagged it (Signal H, verified-
+	// gated, shadow/log-only). A corroborating feature, NEVER an adverse decision on
+	// its own — see abuse_shadow_dcfrac_marks.go. 0 when not flagged / expired.
+	DCFraction int `json:"dc_fraction"`
 }
 
 // TopKV for drilldown views.
@@ -1425,6 +1465,42 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		b.paths = make(map[string]int)
 	}
 	b.paths[p]++
+
+	// Signal F (abuse-shadow facet): retain distinct FULL URLs (path+query), the
+	// distinct base paths over the SAME universe, and the dynamic request count, so
+	// the per-tick emit can measure query-cardinality expansion — the blind spot in
+	// PathDiversity, which counts base paths only. Gated + capped; static assets are
+	// excluded (the file variety of a page's asset fan-out is not a facet flood).
+	// The static check keys on the query-stripped path `p` (isStaticAssetPath's
+	// documented contract), so a dynamic endpoint whose query happens to end in a
+	// static-looking tail — /api?redirect=/x.css — is NOT misdropped. Off by
+	// default → no maps, no per-request work; when on, up to TWO hash64 per dynamic
+	// request under cap (the URL and its base path).
+	if e.cfg.AbuseShadow && e.cfg.AbuseShadowFacet && rec.URI != "" && !isStaticAssetPath(p) {
+		capN := e.cfg.AbuseShadowFacetCap
+		if capN <= 0 {
+			capN = facetURICapDefault
+		}
+		b.facetTotal++
+		if b.fullURIs == nil {
+			b.fullURIs = make(map[uint64]struct{}, 16)
+		}
+		if len(b.fullURIs) < capN {
+			b.fullURIs[hash64(rec.URI)] = struct{}{}
+		}
+		// facetPaths (the expansion denominator) shares fullURIs' cap ON PURPOSE:
+		// distinctPaths ≤ distinctURLs always (each base path carries ≥1 URL), so
+		// facetPaths can only reach the cap once fullURIs has too. In that regime
+		// both are pinned at capN and the ratio collapses toward 1 — i.e. a dropped
+		// base path can never inflate distinctURLs/distinctPaths into a spurious
+		// facet flag. Keep the two caps equal if you ever retune capN.
+		if b.facetPaths == nil {
+			b.facetPaths = make(map[uint64]struct{}, 16)
+		}
+		if len(b.facetPaths) < capN {
+			b.facetPaths[hash64(p)] = struct{}{}
+		}
+	}
 
 	// ------------------------------------------------------------
 	// NEW: unique-based challenge signals (phase 1)

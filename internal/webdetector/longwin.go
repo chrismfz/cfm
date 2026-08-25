@@ -64,6 +64,21 @@ type SuspiciousRow struct {
 	// Stamped by the API handlers, not the scorer (external verdict). See
 	// abuse_shadow_marks.go.
 	ShadowOutliers int `json:"shadow_outliers"`
+
+	// QueryCardinality is the live abuse_shadow facet distinct-full-URL count for
+	// this vhost (Signal F). Stamped by the API handlers, not the scorer (external
+	// verdict). See abuse_shadow_facet_marks.go.
+	QueryCardinality int `json:"query_cardinality"`
+
+	// CostPressure is the live abuse_shadow 5xx percent for this vhost (Signal G).
+	// Stamped by the API handlers, not the scorer (external verdict). See
+	// abuse_shadow_cost_marks.go.
+	CostPressure int `json:"cost_pressure"`
+
+	// DCFraction is the live abuse_shadow unverified-datacenter percent for this
+	// vhost (Signal H). Stamped by the API handlers, not the scorer (external
+	// verdict). See abuse_shadow_dcfrac_marks.go.
+	DCFraction int `json:"dc_fraction"`
 }
 
 // LongRow is the raw long-window aggregate without scoring.

@@ -205,6 +205,47 @@ type Config struct {
 	AbuseShadowRateSkewMin float64 // ABUSE_SHADOW_RATE_SKEW_MIN (min max/median concentration)
 	AbuseShadowRateMinReq  int     // ABUSE_SHADOW_RATE_MINREQ (min per-IP requests)
 
+	// Abuse-shadow Signal F (facet / query-cardinality expansion): a vhost-level
+	// LOG-ONLY signal that sees what PathDiversity is blind to. PathDiversity =
+	// distinct BASE paths / total, so a faceted-URL flood (few base paths, huge
+	// distinct query strings — e.g. 805k `?filter_category=` URLs on 2 base paths)
+	// collapses to unique_paths≈2 and reads as "benign". This signal counts
+	// distinct FULL URLs (path+query) and flags a vhost whose distinct-URL count is
+	// large AND dwarfs its distinct base-path count (facet expansion). Nothing here
+	// challenges/blocks — it stamps a per-vhost badge and writes a structured line.
+	// Gated under AbuseShadow (master), default-on with it so no per-node edit is
+	// needed to start collecting once ABUSE_SHADOW=1 is already set.
+	AbuseShadowFacet             bool    // ABUSE_SHADOW_FACET (default on under ABUSE_SHADOW)
+	AbuseShadowFacetMinURLs      int     // ABUSE_SHADOW_FACET_MIN_URLS (floor on distinct full URLs)
+	AbuseShadowFacetMinExpansion float64 // ABUSE_SHADOW_FACET_MIN_EXPANSION (distinct URLs / distinct paths)
+	AbuseShadowFacetCap          int     // ABUSE_SHADOW_FACET_CAP (per-bucket distinct-URL set cap)
+
+	// Abuse-shadow Signal G (origin cost pressure): a vhost-level LOG-ONLY signal
+	// that flags a vhost whose origin is returning a high fraction of 5xx under real
+	// load — the SYMPTOM of the malicious flood (the 256k×500 origin collapse), as
+	// opposed to facet which sees the request-shape cause. Reuses the per-bucket 5xx
+	// counters already collected (no ingest cost), so it is effectively free to
+	// compute. Vhost-level, badge-only (`cost_pressure` field / `cost` pill); NEVER
+	// challenges or blocks. Gated under AbuseShadow, default-on with it.
+	AbuseShadowCost        bool    // ABUSE_SHADOW_COST (default on under ABUSE_SHADOW)
+	AbuseShadowCostMinFrac float64 // ABUSE_SHADOW_COST_MIN_FRAC (5xx / total must be ≥ this)
+	AbuseShadowCostMinReq  int     // ABUSE_SHADOW_COST_MIN_REQ (min requests, guards tiny vhosts)
+	AbuseShadowCostMinRPS  float64 // ABUSE_SHADOW_COST_MIN_RPS5XX (absolute 5xx rps floor)
+
+	// Abuse-shadow Signal H (datacenter-ASN fraction, verified-gated): a vhost-level
+	// LOG-ONLY signal for the fraction of a vhost's requests coming from datacenter/
+	// cloud ASNs that are NOT verified good bots — a corroborating feature for
+	// cloud-hosted scraper/proxy floods. VERIFIED-GATED: FCrDNS-verified crawlers
+	// (Google/Meta/Bing…) are datacenter but legitimate, so they are excluded from
+	// the suspicious count — without this a heavily-Googlebot-crawled shop would read
+	// as ~100% datacenter. This is a FEATURE only: origin is never innocence and
+	// datacenter-ASN alone NEVER drives an adverse decision (CLAUDE.md §6). Nothing
+	// here challenges or blocks. Gated under AbuseShadow, default-on with it.
+	AbuseShadowDCFrac        bool    // ABUSE_SHADOW_DCFRAC (default on under ABUSE_SHADOW)
+	AbuseShadowDCFracMinFrac float64 // ABUSE_SHADOW_DCFRAC_MIN_FRAC (dc reqs / total must be ≥ this)
+	AbuseShadowDCFracMinReq  int     // ABUSE_SHADOW_DCFRAC_MIN_REQ (min total requests, guards tiny vhosts)
+	AbuseShadowDCFracMinIPs  int     // ABUSE_SHADOW_DCFRAC_MIN_IPS (min distinct datacenter IPs — a spread, not one)
+
 	// Optional: volume-based (uniqIP) auto under-attack mode with hysteresis.
 	// Useful for sophisticated crawlers that avoid errors but spray many unique IPs.
 	ChallengeSuspiciousUniqIP    bool // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP (1/0)

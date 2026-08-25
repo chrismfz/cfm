@@ -1128,20 +1128,23 @@ func runAnalyzeHost(baseURL, host, last string) error {
 // ---------------- Challenge webtop ----------------
 
 type chalVhost struct {
-	Host           string    `json:"host"`
-	Status         string    `json:"status"`
-	Mode           string    `json:"mode"`
-	Since          string    `json:"since"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	TTLSec         int       `json:"ttl_sec"`
-	Score          float64   `json:"score"`
-	UniqIP         int       `json:"uniq_ip"`
-	RPS            float64   `json:"rps"`
-	Reasons        []string  `json:"reasons"`
-	LastAction     string    `json:"last_action"`
-	State          string    `json:"state"`           // normal|suspicious|challenged|under_attack
-	SolverFarm     bool      `json:"solver_farm"`     // live solver-farm mark
-	ShadowOutliers int       `json:"shadow_outliers"` // live abuse_shadow rate-outlier count
+	Host             string    `json:"host"`
+	Status           string    `json:"status"`
+	Mode             string    `json:"mode"`
+	Since            string    `json:"since"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	TTLSec           int       `json:"ttl_sec"`
+	Score            float64   `json:"score"`
+	UniqIP           int       `json:"uniq_ip"`
+	RPS              float64   `json:"rps"`
+	Reasons          []string  `json:"reasons"`
+	LastAction       string    `json:"last_action"`
+	State            string    `json:"state"`             // normal|suspicious|challenged|under_attack
+	SolverFarm       bool      `json:"solver_farm"`       // live solver-farm mark
+	ShadowOutliers   int       `json:"shadow_outliers"`   // live abuse_shadow rate-outlier count
+	QueryCardinality int       `json:"query_cardinality"` // live abuse_shadow facet distinct-URL count
+	CostPressure     int       `json:"cost_pressure"`     // live abuse_shadow 5xx-pressure percent
+	DCFraction       int       `json:"dc_fraction"`       // live abuse_shadow unverified-datacenter percent
 }
 
 // appendFlag joins a flag token onto a comma-separated reasons string.
@@ -1337,13 +1340,26 @@ func runChallengeWebTop(baseURL string, args []string) error {
 			rs = strings.Join(h.Reasons, ",")
 		}
 		// Surface live external verdicts alongside the score reasons: the
-		// solver-farm mark and the abuse_shadow rate-outlier count (shadow/
-		// log-only concentration signal). Both clear on their own TTL.
+		// solver-farm mark, the abuse_shadow rate-outlier count (shadow/log-only
+		// concentration signal), the facet distinct-URL cardinality (Signal F, the
+		// query-expansion PathDiversity can't see), the 5xx cost pressure
+		// (Signal G, origin collapse) and the verified-gated datacenter fraction
+		// (Signal H, corroborating feature — never a decision alone). All clear on
+		// their own TTL.
 		if h.SolverFarm {
 			rs = appendFlag(rs, "farm")
 		}
 		if h.ShadowOutliers > 0 {
 			rs = appendFlag(rs, fmt.Sprintf("shadow=%d", h.ShadowOutliers))
+		}
+		if h.QueryCardinality > 0 {
+			rs = appendFlag(rs, fmt.Sprintf("facet=%d", h.QueryCardinality))
+		}
+		if h.CostPressure > 0 {
+			rs = appendFlag(rs, fmt.Sprintf("cost=%d%%", h.CostPressure))
+		}
+		if h.DCFraction > 0 {
+			rs = appendFlag(rs, fmt.Sprintf("dc=%d%%", h.DCFraction))
 		}
 		ttl, left := chalTTLCols(h)
 		fmt.Printf("%-35s %-6s %-6s %5.2f %6d %9s %10s  %s\n",

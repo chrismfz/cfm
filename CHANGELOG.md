@@ -18,6 +18,80 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **abuse_shadow datacenter-fraction signal (Signal H): vhost-level cloud-ASN
+  share, verified-gated, log-only.** Records what fraction of a vhost's requests
+  come from datacenter/cloud ASNs that are NOT verified good bots — a
+  corroborating feature for cloud-hosted scraper / proxy floods. **Verified-gated:**
+  FCrDNS-verified crawlers (Google/Meta/Bing…) are datacenter but legitimate and
+  are excluded from the suspicious count, so a heavily-crawled shop does not read
+  as ~100% datacenter. Origin is never innocence: this is a FEATURE only —
+  datacenter-ASN alone NEVER drives an adverse decision, and nothing here
+  challenges or blocks. It stamps a per-vhost `dc_fraction` badge (`dc N%` pill in
+  cfm-admin, `dc=N%` in `cfm webtop challenge`) and writes a `signal=dc_fraction`
+  line to `cfm.abuse_shadow.log`. Cost-bounded per CLAUDE.md §6: ASN class is a
+  cheap inline mmdb lookup (no DNS) under a per-tick IP budget that defers (and
+  logs — no silent cap) the overflow, while never skipping a single vhost so large
+  it can't fit a full budget (the biggest floods stay visible); the good-bot
+  exclusion goes through a shared FCrDNS verdict cache, so a verified crawler is a
+  DNS-free cache hit and only a cache miss kicks a bounded, deduped, async
+  forward-confirm — a stable crawler is confirmed once per TTL, not every tick, and
+  the verdict outlives geo-cache eviction. Residual log-only limitation, honestly
+  documented: an IP whose good-bot verdict is still cold (mainly the first ticks
+  after a daemon restart) counts as datacenter until the async confirm lands
+  (~2–3 ticks), so a freshly-restarted heavily-crawled shop can briefly over-read
+  — counting the unknown is deliberate (a real cloud flood is mostly generic/absent
+  PTR IPs that "exclude-on-unknown" would blind the signal to), and it must be
+  closed before Signal H feeds any enforcement. Gated under the `ABUSE_SHADOW`
+  master, default-ON with it;
+  tunable via `ABUSE_SHADOW_DCFRAC`, `ABUSE_SHADOW_DCFRAC_MIN_FRAC` (0.5),
+  `ABUSE_SHADOW_DCFRAC_MIN_REQ` (50) and `ABUSE_SHADOW_DCFRAC_MIN_IPS` (5, a
+  spread of datacenter IPs, not one chatty host). Phase 1 of the
+  traffic-classifier plan (`docs/traffic-classifier.md`); no score contribution
+  and no enforcement yet.
+- **abuse_shadow cost-pressure signal (Signal G): vhost-level origin 5xx
+  pressure, log-only.** Where facet (Signal F) sees the request-shape *cause* of
+  a flood, Signal G sees its *symptom* — the origin buckling (the 256k×500
+  collapse). It flags a vhost whose 5xx fraction is high under real request
+  volume AND whose absolute 5xx rate clears a floor (so a tiny idle vhost with a
+  single 500 does not read as "under pressure"). It NEVER challenges or blocks:
+  it stamps a per-vhost `cost_pressure` badge (the 5xx percent — `cost N%` pill
+  in cfm-admin, `cost=N%` flag in `cfm webtop challenge`) and writes one
+  structured `signal=cost_pressure` line per flagged vhost to the shared
+  `cfm.abuse_shadow.log` (with the average response time as a second, non-gating
+  cost dimension). Reuses the per-bucket 5xx counters the engine already
+  maintains, so there is **no ingest cost** — only a cheap per-tick aggregation.
+  Gated under the `ABUSE_SHADOW` master and default-ON with it (no config edit to
+  start collecting); tunable via `ABUSE_SHADOW_COST`,
+  `ABUSE_SHADOW_COST_MIN_FRAC` (0.15), `ABUSE_SHADOW_COST_MIN_REQ` (50) and
+  `ABUSE_SHADOW_COST_MIN_RPS5XX` (1.0). Phase 1 of the traffic-classifier plan
+  (`docs/traffic-classifier.md`); no score contribution and no enforcement yet.
+- **abuse_shadow facet signal (Signal F): vhost-level query-cardinality
+  visibility, log-only.** Surfaces the one traffic shape `path_diversity` is
+  structurally blind to. `path_diversity` counts distinct BASE paths / total, so
+  a faceted-URL flood — few base paths, an enormous distinct-query fan-out (the
+  observed e-athlos shape: ~805k `?filter_category=…` URLs riding on 2 base
+  paths) — collapses to `unique_paths≈2` and reads as the most benign vhost on
+  the board. Signal F counts distinct FULL URLs (path+query) per vhost and flags
+  one whose distinct-URL count is large AND dwarfs its distinct base-path count
+  (facet expansion). It NEVER challenges or blocks: it stamps a per-vhost badge
+  (new `query_cardinality` field on webtop/suspicious/challenge rows, a `facet`
+  pill in cfm-admin, a `facet=N` flag in `cfm webtop challenge`) and writes one
+  structured `signal=facet_expansion` line per flagged vhost to the existing
+  `cfm.abuse_shadow.log` (no new log file). Gated under the `ABUSE_SHADOW`
+  master and default-ON with it, so a node already running `ABUSE_SHADOW = 1`
+  starts collecting on upgrade with no config edit; tunable via
+  `ABUSE_SHADOW_FACET`, `ABUSE_SHADOW_FACET_MIN_URLS` (300),
+  `ABUSE_SHADOW_FACET_MIN_EXPANSION` (20) and `ABUSE_SHADOW_FACET_CAP` (3000,
+  per-bucket memory bound). Distinct URLs, distinct base paths and the request
+  total are all measured over ONE universe — dynamic requests with static assets
+  excluded — so the expansion ratio means the same thing on every vhost (a
+  static-heavy vhost cannot dilute its own denominator and silently raise its
+  effective threshold). Zero hot-path cost when the master is off (nil maps, no
+  hashing); when it is on, the cost is up to two `hash64` per dynamic request (the
+  URL and its base path) plus a bounded per-eval snapshot, and each active vhost
+  holds two capped hash-sets per sliding-window bucket. Phase 1 of the
+  traffic-classifier plan
+  (`docs/traffic-classifier.md`); no score contribution and no enforcement yet.
 - **`/etc/cfm/detectors.d/` overlay layer — the base `detectors.conf` becomes
   pristine and package-updateable again.** The daemon now reads the base
   conffile and merges every `detectors.d/*.conf` over it in lexicographic

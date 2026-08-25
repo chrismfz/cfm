@@ -736,6 +736,29 @@ func init() {
 			AbuseShadowRateSkewMin:   kvFlt(kv, "ABUSE_SHADOW_RATE_SKEW_MIN", 0),
 			AbuseShadowRateMinReq:    kvInt(kv, "ABUSE_SHADOW_RATE_MINREQ", 0),
 
+			// Signal F (facet / query-cardinality expansion). Default-on under the
+			// AbuseShadow master, so an already-deployed ABUSE_SHADOW=1 starts
+			// collecting on the next binary upgrade with no per-node config edit.
+			// Thresholds resolve to safe defaults in facetShadowCfg() when 0.
+			AbuseShadowFacet:             kvBool(kv, "ABUSE_SHADOW_FACET", true),
+			AbuseShadowFacetMinURLs:      kvInt(kv, "ABUSE_SHADOW_FACET_MIN_URLS", 0),
+			AbuseShadowFacetMinExpansion: kvFlt(kv, "ABUSE_SHADOW_FACET_MIN_EXPANSION", 0),
+			AbuseShadowFacetCap:          kvInt(kv, "ABUSE_SHADOW_FACET_CAP", 0),
+
+			// Signal G (origin cost pressure). Default-on under the master; thresholds
+			// resolve to safe defaults in costShadowCfg() when 0.
+			AbuseShadowCost:        kvBool(kv, "ABUSE_SHADOW_COST", true),
+			AbuseShadowCostMinFrac: kvFlt(kv, "ABUSE_SHADOW_COST_MIN_FRAC", 0),
+			AbuseShadowCostMinReq:  kvInt(kv, "ABUSE_SHADOW_COST_MIN_REQ", 0),
+			AbuseShadowCostMinRPS:  kvFlt(kv, "ABUSE_SHADOW_COST_MIN_RPS5XX", 0),
+
+			// Signal H (datacenter-ASN fraction, verified-gated). Default-on under the
+			// master; thresholds resolve to safe defaults in dcFracShadowCfg() when 0.
+			AbuseShadowDCFrac:        kvBool(kv, "ABUSE_SHADOW_DCFRAC", true),
+			AbuseShadowDCFracMinFrac: kvFlt(kv, "ABUSE_SHADOW_DCFRAC_MIN_FRAC", 0),
+			AbuseShadowDCFracMinReq:  kvInt(kv, "ABUSE_SHADOW_DCFRAC_MIN_REQ", 0),
+			AbuseShadowDCFracMinIPs:  kvInt(kv, "ABUSE_SHADOW_DCFRAC_MIN_IPS", 0),
+
 			// Optional uniqIP-based vhost auto mode
 			ChallengeSuspiciousUniqIP:    kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP", false),
 			ChallengeSuspiciousUniqIPOn:  kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_ON", 0),
