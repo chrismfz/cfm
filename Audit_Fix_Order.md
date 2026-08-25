@@ -42,8 +42,13 @@ helper `internal/apiserver/request_identity.go` (`requestPeer`), edge configs fo
 and regression tests cover all three entry topologies (`TestRequestPeerEntryTopologies`)
 plus the login forged-XFF path (`TestLoginLimiterIgnoresForgedXFFForPerIPBucket`). Landed
 via #1338 + this branch. The broader Step-1 acceptance list in `Audit.md` keeps ONE box
-open — ChallengeServer identity/scheme unification — deferred to the challenge direct-mount
-work (Step 2); the challenge upstream still forwards `$scheme` and uses its own `clientIP()`.
+open — ChallengeServer identity/scheme unification — the challenge upstream still forwards
+`$scheme` and uses its own `clientIP()`. A loopback-only unification of that helper was
+attempted and **deliberately declined** (PR #1342 closed unmerged, 2026-08-25): narrowing the
+challenge server to loopback-only trust removed its tolerance for non-loopback front-ends and
+was judged too risky fleet-wide. Any future challenge direct-mount (Step 4 below) must handle
+identity with an **explicit per-listener trust policy**, not a fleet-wide narrowing — see the
+decision note under item 8 in `Audit.md`.
 
 ## Problem
 
@@ -242,6 +247,15 @@ Prefer method-aware mux registration where practical, but do not make that refac
 
 **Priority:** P1  
 **Dependency:** Step 1 first
+
+> **Identity constraint (2026-08-25).** Mounting the challenge handlers on the public
+> `:6060`/`:6061` control plane needs the challenge server to resolve client identity/scheme
+> safely on a public listener. The obvious route — unifying it onto the apiserver's fleet-wide
+> loopback-only rule — was attempted and **declined** (PR #1342, closed unmerged) because it
+> removed the challenge server's tolerance for non-loopback front-ends. Do this instead with an
+> **explicit per-listener trust policy**: the loopback-only rule applies to the request only
+> when it arrived on the direct `:6060`/`:6061` mount, while the existing `9098` edge path keeps
+> its current behavior. See the item-8 decision note in `Audit.md`.
 
 ## Goal
 
