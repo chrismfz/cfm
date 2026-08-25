@@ -1223,6 +1223,20 @@ func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
 		return
 	}
 
+	// Never escalate a self-protection ban to the firewall for a non-public
+	// address. The challenge server is reached only from the loopback edge, so a
+	// loopback / private / link-local / unspecified "client" means identity did
+	// not resolve to a real remote client (e.g. a misconfigured non-loopback
+	// front-end reaching 9098, or a fail-closed forwarded identity) — nft-banning
+	// it would take out shared infrastructure (the edge, a load balancer) rather
+	// than an abuser. In-memory rate limiting still applies; only the firewall
+	// escalation is skipped. This bounds the blast radius of the loopback-only
+	// identity rule (internal/reqident): a real abuser always presents a public
+	// address here.
+	if !firewallBlockableIP(ip) {
+		return
+	}
+
 	// Pick TTL and comment by endpoint kind
 	var ttl time.Duration
 	comment := "cfm:challenge_selfprotect:page"
@@ -1251,6 +1265,21 @@ func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
 	s.rlMu.Unlock()
 
 	_ = s.fw.AddBlock(ip, comment, &ttl)
+}
+
+// firewallBlockableIP reports whether ip is a public address that it is safe to
+// escalate to an nft firewall block. It excludes nil and every non-public
+// unicast range (loopback, RFC1918 / IPv6 ULA, link-local, unspecified) so a
+// self-protection ban can never take out the edge, a load balancer, or the
+// host itself if client identity ever resolves to an infrastructure address.
+func firewallBlockableIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	return true
 }
 
 // ---------------- helpers ----------------

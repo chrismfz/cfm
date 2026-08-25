@@ -104,9 +104,18 @@ handlers are mounted publicly (Step 2).
 - **Removed non-loopback trust:** a non-loopback peer forging `X-Real-IP` /
   `CF-Connecting-IP` / `X-Forwarded-Proto` is now ignored. Dead for live traffic;
   the point of the change for Step 2.
+- **Blast-radius guard (defense-in-depth):** `rlFirewallBlock` now escalates a
+  self-protection ban to nft only for a **public** address (`firewallBlockableIP`
+  excludes loopback / RFC1918 / IPv6 ULA / link-local / unspecified). So even if
+  identity ever resolves a "client" to an infrastructure address — a misconfigured
+  non-loopback front-end reaching `9098`, or a fail-closed identity — the ban is
+  not applied to the edge, a load balancer, or the host. In-memory rate limiting
+  still applies; only the firewall escalation is skipped. This makes the
+  loopback-only narrowing safe-by-construction rather than safe-by-assumption.
 - **Residual assumption (operator-owned):** every deployment reaches `9098` from
   loopback only. Keep `9098` externally closed (audit R06 regression) and keep
-  the edge `proxy_bind 127.0.0.1`.
+  the edge `proxy_bind 127.0.0.1`. The blast-radius guard above bounds the impact
+  if this is ever violated.
 
 ## 5. Scope — what this change does NOT do
 

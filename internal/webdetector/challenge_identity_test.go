@@ -1,10 +1,48 @@
 package webdetector
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+// TestFirewallBlockableIP guards the blast-radius rule for rlFirewallBlock: a
+// self-protection ban is escalated to nft only for public addresses. If the
+// loopback-only identity rule ever resolves a "client" to an infrastructure
+// address (a misconfigured non-loopback front-end, a fail-closed identity), the
+// escalation is skipped so we never nft-ban the edge / an LB / the host itself.
+func TestFirewallBlockableIP(t *testing.T) {
+	cases := []struct {
+		ip   string
+		want bool
+	}{
+		{"203.0.113.7", true},     // public v4
+		{"2606:4700::1111", true}, // public v6
+		{"100.64.0.1", true},      // CGNAT — a real client behind carrier NAT
+		{"127.0.0.1", false},      // loopback
+		{"::1", false},            // loopback v6
+		{"10.0.0.1", false},       // RFC1918
+		{"172.16.5.4", false},     // RFC1918
+		{"192.168.1.1", false},    // RFC1918
+		{"fd00::1", false},        // IPv6 ULA
+		{"169.254.1.1", false},    // link-local
+		{"fe80::1", false},        // link-local v6
+		{"0.0.0.0", false},        // unspecified
+	}
+	for _, tc := range cases {
+		ip := net.ParseIP(tc.ip)
+		if ip == nil {
+			t.Fatalf("test setup: unparseable IP %q", tc.ip)
+		}
+		if got := firewallBlockableIP(ip); got != tc.want {
+			t.Errorf("firewallBlockableIP(%s) = %v, want %v", tc.ip, got, tc.want)
+		}
+	}
+	if firewallBlockableIP(nil) {
+		t.Error("firewallBlockableIP(nil) = true, want false")
+	}
+}
 
 // These tests pin the challenge server to the shared loopback-only identity /
 // scheme rule (internal/reqident). The exhaustive branch coverage lives in the

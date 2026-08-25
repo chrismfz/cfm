@@ -36,6 +36,11 @@ type Peer struct {
 	// TrustedProxy is true iff a loopback edge supplied a canonical forwarded
 	// client IP that ClientIP now reflects.
 	TrustedProxy bool
+	// HadForwardedIdentity is true iff the request carried any proxy
+	// client-identity header (X-Real-IP or X-Forwarded-For), regardless of
+	// whether it resolved to a canonical IP. Lets callers classify the request
+	// entry point without re-scanning the headers.
+	HadForwardedIdentity bool
 	// Scheme is the effective client-facing scheme, "http" or "https". A
 	// forwarded X-Forwarded-Proto is applied only together with a canonical
 	// forwarded client IP (i.e. when TrustedProxy is true) — the CFM edge always
@@ -54,6 +59,7 @@ func FromRequest(r *http.Request) Peer {
 		peer.Scheme = "https"
 	}
 
+	peer.HadForwardedIdentity = HasForwardedClientIdentity(r)
 	peer.ImmediateIP = remoteIP(r.RemoteAddr)
 	peer.ClientIP = peer.ImmediateIP
 	if peer.ImmediateIP != nil && peer.ImmediateIP.IsLoopback() {
@@ -67,7 +73,7 @@ func FromRequest(r *http.Request) Peer {
 			if scheme := canonicalForwardedScheme(r.Header.Get("X-Forwarded-Proto")); scheme != "" {
 				peer.Scheme = scheme
 			}
-		} else if HasForwardedClientIdentity(r) {
+		} else if peer.HadForwardedIdentity {
 			// A proxy-marked request with an ambiguous/malformed client address
 			// must fail closed rather than inheriting loopback's trust.
 			peer.ClientIP = nil

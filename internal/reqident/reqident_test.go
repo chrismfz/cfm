@@ -23,6 +23,9 @@ func TestFromRequest_LoopbackEdgeTrustsForwarded(t *testing.T) {
 	if !p.TrustedProxy {
 		t.Fatal("TrustedProxy should be true for a loopback edge with a canonical forwarded IP")
 	}
+	if !p.HadForwardedIdentity {
+		t.Fatal("HadForwardedIdentity should be true when X-Real-IP/X-Forwarded-For is present")
+	}
 	if p.Scheme != "https" {
 		t.Fatalf("Scheme = %q, want https", p.Scheme)
 	}
@@ -95,8 +98,8 @@ func TestFromRequest_LoopbackNoForwardedIsLoopbackItself(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "http://host/", nil)
 	r.RemoteAddr = "127.0.0.1:5000"
 	p := FromRequest(r)
-	if p.ClientIP == nil || !p.ClientIP.IsLoopback() || p.TrustedProxy {
-		t.Fatalf("loopback with no forwarded identity = %+v, want loopback ClientIP, TrustedProxy=false", p)
+	if p.ClientIP == nil || !p.ClientIP.IsLoopback() || p.TrustedProxy || p.HadForwardedIdentity {
+		t.Fatalf("loopback with no forwarded identity = %+v, want loopback ClientIP, TrustedProxy=false, HadForwardedIdentity=false", p)
 	}
 	if HasForwardedClientIdentity(r) {
 		t.Fatal("HasForwardedClientIdentity should be false with no X-Real-IP/X-Forwarded-For")

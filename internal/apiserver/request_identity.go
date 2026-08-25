@@ -36,7 +36,7 @@ func requestPeer(r *http.Request) RequestPeer {
 	// it resolved to a canonical client IP (TrustedProxy) or failed closed on an
 	// ambiguous/malformed one. Otherwise the request arrived directly on a known
 	// listener port (6060/6061) or somewhere unrecognized ("other").
-	if p.ImmediateIP != nil && p.ImmediateIP.IsLoopback() && (p.TrustedProxy || reqident.HasForwardedClientIdentity(r)) {
+	if p.ImmediateIP != nil && p.ImmediateIP.IsLoopback() && (p.TrustedProxy || p.HadForwardedIdentity) {
 		peer.Entry = "edge"
 	} else {
 		peer.Entry = requestListenerEntry(r)
