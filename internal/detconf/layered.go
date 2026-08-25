@@ -13,11 +13,14 @@ package detconf
 //     extending common lists (IGNORE_NETS, CHALLENGE_VHOST_IGNORE, ALLOW_*)
 //     without forking them
 //   - section only in overlay → added whole (named instances, host extras)
-//   - StampNS                 → max mtime across ALL read files
+//   - StampNS                 → the BASE file's mtime (unchanged from the plain
+//     read); NOT max'd up by a newer overlay, so a base edit always moves it
 //   - LayerSig                → hash of the overlay set (name+mtime+size per
-//     file), so hot-reload signatures also change when an overlay is added,
-//     removed, or renamed — cases max-mtime alone cannot see (mv / cp -p /
-//     rsync -a install files with their ORIGINAL mtime)
+//     file), the sole overlay-change signal: it changes when an overlay is
+//     edited, added, removed, or renamed — including files installed with an
+//     ORIGINAL (older) mtime (mv / cp -p / rsync -a), which a max-mtime scheme
+//     cannot see. The two signals are independent, so an overlay can never
+//     shadow a base change nor vice-versa.
 //
 // The point: /etc/cfm/detectors.conf stays a pristine, package-updateable
 // conffile; deliberate per-host deltas live in /etc/cfm/detectors.d/ which
@@ -86,10 +89,20 @@ func ReadLayeredFile(basePath string) (Sections, error) {
 }
 
 // ListDropins returns the overlay filenames in dropinDir, sorted
-// lexicographically (the merge order). A missing directory returns nil, nil;
-// only "*.conf" entries count, and hidden files are skipped (systemd .d
-// convention — editor lock/temp files like emacs' ".#10-ssh.conf" are often
-// dangling symlinks that would otherwise fail the whole layered read).
+// lexicographically (the merge order). A missing directory returns nil, nil.
+//
+// Only real, REGULAR "*.conf" files count. Everything else is ignored, not an
+// error, so one stray entry never drops the other overlays:
+//   - non-".conf" names (.bak, .txt, case-mismatched .CONF) — not overlays
+//   - hidden files (".#…" editor locks, ".foo.conf") — systemd .d convention
+//   - symlinks of ANY kind — a config dir for a security daemon does not follow
+//     links out to arbitrary (mutable, possibly dangling) targets; put a real
+//     file here, not a link
+//   - directories, device nodes, other special files
+//
+// e.Type() is lstat-like (it never follows a symlink), so a symlink reports
+// ModeSymlink and fails IsRegular. A regular *.conf file that then fails to
+// READ or PARSE is still a hard error (never silently skipped).
 func ListDropins(dropinDir string) ([]string, error) {
 	if dropinDir == "" {
 		return nil, nil
@@ -104,7 +117,10 @@ func ListDropins(dropinDir string) ([]string, error) {
 	var names []string
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".conf") {
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".conf") {
+			continue
+		}
+		if !e.Type().IsRegular() {
 			continue
 		}
 		names = append(names, name)
@@ -140,7 +156,7 @@ func mergeLayer(dst *Sections, layer Sections) {
 			v := kv[k]
 			if layer.AppendKeys[name][k] {
 				if prev, ok := dkv[k]; ok && prev != "" {
-					dkv[k] = joinAppend(prev, v)
+					dkv[k] = joinAppend(k, prev, v)
 					continue
 				}
 			}
@@ -153,21 +169,44 @@ func mergeLayer(dst *Sections, layer Sections) {
 	if g, ok := dst.ByName["global"]; ok {
 		dst.Global = g
 	}
-	if layer.StampNS > dst.StampNS {
-		dst.StampNS = layer.StampNS
-	}
+	// StampNS deliberately stays the BASE file's mtime — it is NOT raised to
+	// the overlay's. A max would let a newer overlay MASK a base edit deployed
+	// with an older preserved mtime (rsync -a / cp -p): StampNS would not move
+	// and the base change would never hot-reload. Overlay changes are carried
+	// by LayerSig instead, so the two signals never shadow each other.
 }
 
-// joinAppend joins an overlay "+=" value onto the earlier layers' value:
-// multiline rule blocks stack with a newline, list scalars with ", ".
+// multilineAppendKeys are the detectors.conf keys whose values are RULE BLOCKS
+// read one line at a time (internal/detectors kvLines splits on "\n"), NOT
+// comma/space lists. A "+=" onto one of these MUST join with a newline: a
+// comma-joined block collapses into a single line that the reader either can't
+// parse or truncates at the first inline ";"/"#", silently dropping every rule.
+// The choice cannot be a content heuristic — a rule ("user:5m:kill") is
+// indistinguishable from an IPv6 CIDR list ("2001:db8::/32") by content — so it
+// is keyed by NAME. This set MUST track the kvLines() call sites in
+// internal/detectors: QUERY_RULES/CONN_RULES (mysql_register.go),
+// FAIL_REGEX/RULES/IGNORE_REGEX (custom_register.go). Keys are compared
+// upper-cased (the parser upper-cases every key).
+var multilineAppendKeys = map[string]bool{
+	"QUERY_RULES":  true,
+	"CONN_RULES":   true,
+	"FAIL_REGEX":   true,
+	"RULES":        true,
+	"IGNORE_REGEX": true,
+}
+
+// joinAppend joins an overlay "+=" value onto the earlier layers' value.
+// Rule-block keys (multilineAppendKeys), and any value that already spans
+// lines, stack with a newline; list scalars join with ", ".
 //
 // On the scalar path any inline ";"/"#" comment carried by the EARLIER value
 // is dropped first: scalar readers cut at the first ";"/"#" (cleanScalar,
 // CLAUDE.md §5), so "10.0.0.0/8 ; office" + "203.0.113.0/24" must merge to
 // "10.0.0.0/8, 203.0.113.0/24" — appending after the comment would silently
-// discard the appended value at read time.
-func joinAppend(prev, add string) string {
-	if strings.Contains(prev, "\n") || strings.Contains(add, "\n") {
+// discard the appended value at read time. The newline path needs no such
+// strip: kvLines strips each line's inline comment as it reads it.
+func joinAppend(key, prev, add string) string {
+	if multilineAppendKeys[strings.ToUpper(key)] || strings.Contains(prev, "\n") || strings.Contains(add, "\n") {
 		return prev + "\n" + add
 	}
 	if i := strings.IndexAny(prev, ";#"); i >= 0 {

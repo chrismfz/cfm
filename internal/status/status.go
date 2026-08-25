@@ -830,12 +830,27 @@ func resolveDetectorsConfigPath() string {
 	return detectorsConfigPath
 }
 
+// readDetectorSectionKV returns a section from the EFFECTIVE (merged) detector
+// config — base detectors.conf + detectors.d overlays — for overlay-tunable
+// knobs like OPENRESTY_SOCK, so the probe matches what the daemon runs (a
+// base-only read false-alarms when such a key moved into an overlay). NOTE:
+// this is NOT the right source for CHALLENGE_TOKEN / OPENRESTY_TOKEN — those
+// are base-owned (the daemon ignores overlay overrides, see the manager token
+// block); read them base-only (readBaseDetectorSectionKV).
 func readDetectorSectionKV(path, section string) map[string]string {
+	return sectionKV(detectors.ReadLayeredFile, path, section)
+}
+
+// readBaseDetectorSectionKV reads a section from the BASE conffile only — for
+// the base-owned token keys, so a probe reports the token the daemon actually
+// uses rather than an overlay override the daemon ignores.
+func readBaseDetectorSectionKV(path, section string) map[string]string {
+	return sectionKV(detectors.ReadSectionsFile, path, section)
+}
+
+func sectionKV(read func(string) (detectors.Sections, error), path, section string) map[string]string {
 	out := map[string]string{}
-	// Layered read: these probes (OPENRESTY_SOCK, CHALLENGE_TOKEN) must see
-	// the same effective config the daemon runs, including detectors.d
-	// overlays — a base-only read false-alarms when a key moved to an overlay.
-	sections, err := detectors.ReadLayeredFile(path)
+	sections, err := read(path)
 	if err != nil {
 		return out
 	}
@@ -856,7 +871,9 @@ func readChallengeTokenProbe() luaTokenProbe {
 	if tok != "" {
 		return luaTokenProbe{Token: tok, Present: true, Valid: isStrongToken(tok)}
 	}
-	kv := readDetectorSectionKV(resolveDetectorsConfigPath(), "webdetector")
+	// CHALLENGE_TOKEN is base-owned (the daemon pins the runtime token to the
+	// base value and ignores overlay overrides), so probe the BASE section.
+	kv := readBaseDetectorSectionKV(resolveDetectorsConfigPath(), "webdetector")
 	if v, ok := kv["CHALLENGE_TOKEN"]; ok {
 		clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`)
 		if clean != "" {

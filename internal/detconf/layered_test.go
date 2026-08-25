@@ -302,6 +302,52 @@ func TestListDropinsSkipsHiddenFiles(t *testing.T) {
 	}
 }
 
+// Only real regular *.conf files are read. Directories, symlinks of ANY kind
+// (including to a real *.conf file), dangling links and special files are
+// ignored — not an error: one stray entry must never drop the other overlays,
+// and the reader must never follow a link out to an arbitrary target.
+func TestListDropinsRegularFilesOnly(t *testing.T) {
+	base, dropin := layeredFixture(t, map[string]string{"10-ok.conf": "[ssh_auth]\nBLOCK = 1h\n"})
+	// A directory named like an overlay.
+	if err := os.Mkdir(filepath.Join(dropin, "20-dir.conf"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink to that directory.
+	if err := os.Symlink(filepath.Join(dropin, "20-dir.conf"), filepath.Join(dropin, "30-link-to-dir.conf")); err != nil {
+		t.Fatal(err)
+	}
+	// A dangling (non-hidden) symlink.
+	if err := os.Symlink(filepath.Join(dropin, "does-not-exist"), filepath.Join(dropin, "40-dangling.conf")); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink to a REAL overlay file — ignored too (we do not follow links).
+	realTarget := filepath.Join(t.TempDir(), "real.conf")
+	writeFile(t, realTarget, "[ssh_auth]\nAUTHFAIL_IP = 3\n")
+	if err := os.Symlink(realTarget, filepath.Join(dropin, "50-link-to-file.conf")); err != nil {
+		t.Fatal(err)
+	}
+
+	names, err := ListDropins(dropin)
+	if err != nil {
+		t.Fatalf("stray non-regular entries must not error the listing: %v", err)
+	}
+	if len(names) != 1 || names[0] != "10-ok.conf" {
+		t.Fatalf("ListDropins = %v, want [10-ok.conf] only (symlinks/dirs ignored)", names)
+	}
+	s, _, err := ReadLayered(base, dropin)
+	if err != nil {
+		t.Fatalf("stray non-regular entries must not abort the read: %v", err)
+	}
+	if got := s.ByName["ssh_auth"]["BLOCK"]; got != "1h" {
+		t.Fatalf("regular overlay lost: BLOCK=%q", got)
+	}
+	// The base sets AUTHFAIL_IP=8; the symlink-to-file overlay would set 3.
+	// It must NOT be followed, so the base value stands.
+	if got := s.ByName["ssh_auth"]["AUTHFAIL_IP"]; got != "8" {
+		t.Fatalf("symlink-to-file overlay must NOT be followed/applied: AUTHFAIL_IP=%q", got)
+	}
+}
+
 // A later plain "=" in the SAME overlay converts an append into a replace: the
 // += mark must not survive it.
 func TestReadLayeredAppendThenReplace(t *testing.T) {
@@ -317,7 +363,47 @@ func TestReadLayeredAppendThenReplace(t *testing.T) {
 	}
 }
 
-func TestReadLayeredStampNS(t *testing.T) {
+// StampNS is the BASE file's mtime and is NEVER raised to a newer overlay's:
+// a max would let a newer overlay mask a base edit deployed with an older
+// preserved mtime (rsync -a / cp -p), so the base change would not hot-reload.
+// The newer overlay is instead reflected in LayerSig.
+// A rule-block key (kvLines-read, e.g. QUERY_RULES) appended via "+=" in the
+// INLINE single-rule form across overlays must join with NEWLINES, not ", " —
+// a comma-joined block collapses into one line the rule reader can't split, so
+// every rule is silently lost. The decision is by KEY NAME (a rule
+// "u:5m:kill" is indistinguishable from an IPv6 CIDR by content).
+func TestReadLayeredAppendRuleBlockInline(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "detectors.conf")
+	writeFile(t, base, "[mysql_governor]\nENABLED = 1\n")
+	dropin := filepath.Join(dir, "detectors.d")
+	if err := os.Mkdir(dropin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Two overlays each contributing ONE inline rule (no newline on either).
+	writeFile(t, filepath.Join(dropin, "10-a.conf"), "[mysql_governor]\nQUERY_RULES += appA : 5m : notify\n")
+	writeFile(t, filepath.Join(dropin, "20-b.conf"), "[mysql_governor]\nQUERY_RULES += appB : 10m : kill_query\n")
+	s, _, err := ReadLayered(base, dropin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.ByName["mysql_governor"]["QUERY_RULES"]
+	if got != "appA : 5m : notify\nappB : 10m : kill_query" {
+		t.Fatalf("rule-block += must newline-join, not comma-join: %q", got)
+	}
+	// A list key (comma-read) with the same inline shape still comma-joins.
+	writeFile(t, filepath.Join(dropin, "30-nets.conf"), "[global]\nIGNORE_NETS += 10.0.0.0/8\n")
+	writeFile(t, filepath.Join(dropin, "40-nets.conf"), "[global]\nIGNORE_NETS += 192.0.2.0/24\n")
+	s, _, err = ReadLayered(base, dropin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Global["IGNORE_NETS"]; got != "10.0.0.0/8, 192.0.2.0/24" {
+		t.Fatalf("list key must comma-join: %q", got)
+	}
+}
+
+func TestReadLayeredStampNSIsBaseMtime(t *testing.T) {
 	base, dropin := layeredFixture(t, map[string]string{"10-x.conf": "[ssh_auth]\nBLOCK = 1h\n"})
 	// Make the overlay decisively newer than the base.
 	future := time.Now().Add(2 * time.Hour)
@@ -329,8 +415,11 @@ func TestReadLayeredStampNS(t *testing.T) {
 		t.Fatal(err)
 	}
 	plain, _ := ReadSectionsFile(base)
-	if s.StampNS <= plain.StampNS {
-		t.Fatalf("StampNS must be the max across layers: layered=%d base=%d", s.StampNS, plain.StampNS)
+	if s.StampNS != plain.StampNS {
+		t.Fatalf("StampNS must equal the base mtime, not be raised by a newer overlay: layered=%d base=%d", s.StampNS, plain.StampNS)
+	}
+	if s.LayerSig == 0 {
+		t.Fatal("a present overlay must set LayerSig (the overlay-change signal)")
 	}
 }
 

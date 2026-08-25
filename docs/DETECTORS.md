@@ -111,14 +111,31 @@ more `.rpmnew`/`.dpkg-dist`). Merge semantics:
   added, removed, or renamed (the reload signature hashes the overlay set,
   not just mtimes — an overlay installed with `cp -p`/`rsync -a` still
   triggers)
-- hidden files (`.#…` editor locks, `.foo.conf`) are ignored, systemd-style;
-  only `*.conf` counts
+- only **real, regular `*.conf` files** are read. Hidden files (`.#…` editor
+  locks, `.foo.conf`), **symlinks of any kind**, directories and other special
+  entries are ignored — one stray entry never drops the other overlays, and the
+  daemon never follows a link out to an arbitrary target (put a real file here,
+  not a link). Note the corollary: a misnamed file (`10-ssh.CONF`,
+  `10-ssh.conf.bak`, `10-ssh.txt`) is simply not seen, and a typo'd key/section
+  inside a valid file is skipped by the lenient parser exactly as in the base
+  file — verify what actually applied with `cfm detectors-srcresolve`.
 
 The package ships `detectors.d/` **empty** and never installs files into it.
-A broken/unreadable overlay is a read error — never silently ignored
-configuration: on a hot reload the running detectors are kept (and the error
-logged); at daemon start the base config alone is applied (base-only start,
-loudly logged) rather than degrading to builtin-only protection. Verify the
+A regular `*.conf` overlay that fails to **read or parse** is a hard read
+error — never silently applied half-merged: on a hot reload the running
+detectors are kept (and the error logged); at daemon start the base config
+alone is applied (base-only start, loudly logged) rather than degrading to
+builtin-only protection (which stays reserved for the base file itself being
+unreadable).
+
+**Not overridable via overlay:** the auto-managed tokens `CHALLENGE_TOKEN` and
+`OPENRESTY_TOKEN` are **base-owned** — the daemon generates/persists them into
+the base `detectors.conf` and pins the runtime to the base value, ignoring an
+overlay override (an overlay value would otherwise be re-healed into the base
+every reload, an endless rotate loop, and would desync the `cfm_bridge_token.lua`
+the daemon writes). Set these in the base file if you set them at all; PR6 moves
+their generation out of the conffile entirely. Every other `[webdetector]` knob
+(`OPENRESTY_SOCK`, `LOG_PATH`, thresholds, …) is overlay-tunable as normal. Verify the
 merged result with `cfm detectors-srcresolve` and the cfm-admin "Source
 resolution" card. `config_drift` computes `missing_sections`/`missing_keys`
 against the MERGED view — a feature you adopt via an overlay stops being

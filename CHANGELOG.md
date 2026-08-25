@@ -36,9 +36,18 @@ back-filled here — see the git/PR history for that period.
   reported missing) while value diffs stay stock-vs-BASE, with overlays
   summarized separately (per-file section/key counts); the cfm-admin editor
   still edits the base and shows a notice when overlays exist (overlay
-  editing from the UI is a follow-up). A broken overlay is a logged read
-  error, never silently ignored config: a hot reload keeps the current
-  detectors, and a daemon start falls back to the base config only.
+  editing from the UI is a follow-up). Only real, regular `*.conf` files are
+  read — hidden files, symlinks of any kind, directories and other special
+  entries are ignored (one stray entry never drops the other overlays). A
+  regular `*.conf` overlay that fails to read or parse is a logged error, never
+  silently applied half-merged: a hot reload keeps the current detectors, and a
+  daemon start falls back to the base config only (builtin-only mode stays
+  reserved for the base file itself being unreadable). The auto-managed tokens
+  `CHALLENGE_TOKEN`/`OPENRESTY_TOKEN` are base-owned and NOT overridable via an
+  overlay (they are generated into, and read from, the base — avoiding a
+  rotate-every-reload loop and keeping `cfm_bridge_token.lua` in lockstep).
+  Effective-config probes read through the same layered reader, so `cfm status`,
+  `cfm health` and `whats_wrong` never disagree with the running daemon.
 
 ### Changed
 - **Explicit `JOURNAL_UNIT` pins are now alias-normalized to the canonical

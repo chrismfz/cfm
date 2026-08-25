@@ -65,11 +65,12 @@ func probeSourceStatus(kv KV) (bool, string) {
 	return true, "log file readable"
 }
 
-// cfgSig changes when detectors.conf or an overlay changes (StampNS = max
-// mtime across layers; LayerSig = the overlay set's name+mtime+size hash,
-// covering an overlay removed/renamed/added-with-an-older-mtime, which max
-// mtime alone cannot see) OR any watched LOG_PATH is rotated (inode/dev
-// changes — prevents tailers sticking to a deleted FD).
+// cfgSig changes when detectors.conf or an overlay changes (StampNS = the BASE
+// file's mtime, so a base edit always moves it, never masked by a newer
+// overlay; LayerSig = the overlay set's name+mtime+size hash, the independent
+// signal for an overlay edited/removed/renamed/added-with-an-older-mtime) OR
+// any watched LOG_PATH is rotated (inode/dev changes — prevents tailers
+// sticking to a deleted FD).
 func cfgSig(secs *Sections) uint64 {
 	h := fnv.New64a()
 	var b [8]byte
@@ -338,27 +339,48 @@ func (m *manager) maybeReload(parent context.Context) {
 	// absent, too short (<32 chars), or a known placeholder.  The new value is
 	// written back to detectors.conf and into the in-memory KV so the detector
 	// starts with the correct token on the very first load.
-	if wdKV, ok := secs.ByName["webdetector"]; ok {
+	// Tokens are BASE-owned: ValidateOrGenerateTokenKey persists into cfgPath
+	// (the base detectors.conf). Read the current values from the BASE
+	// [webdetector] — NOT the merged base+overlay view we run on — because the
+	// value read must be the value the generator rewrites. A weak/empty
+	// CHALLENGE_TOKEN/OPENRESTY_TOKEN supplied by an OVERLAY would otherwise be
+	// "healed" into the base on every reload while the merged read keeps
+	// returning the overlay's value: an endless regenerate → rewrite-base →
+	// re-challenge loop. Gating on the BASE section also preserves the
+	// pre-layering behaviour (this ran only when the base had [webdetector]), so
+	// an overlay-only [webdetector] never triggers a blind token append into a
+	// base that lacks the section. Overriding these two keys from an overlay is
+	// intentionally unsupported (PR6 moves generation out of the conffile); the
+	// runtime is pinned to the base-managed token so it stays in lockstep with
+	// the cfm_bridge_token.lua written below. Every OTHER [webdetector] knob
+	// below still uses the merged wdKV.
+	baseWD, baseHasWD := KV(nil), false
+	if bs, berr := ReadSectionsFile(m.opts.CfgPath); berr == nil {
+		baseWD, baseHasWD = bs.ByName["webdetector"]
+	}
+	if wdKV, ok := secs.ByName["webdetector"]; ok && baseHasWD {
 		cfgPath := m.opts.CfgPath // absolute path to detectors.conf
 
-		// F2: CHALLENGE_TOKEN
-		chalTok := kvStrClean(wdKV, "CHALLENGE_TOKEN", "")
+		// F2: CHALLENGE_TOKEN (value read from BASE, generator writes BASE)
+		chalTok := kvStrClean(baseWD, "CHALLENGE_TOKEN", "")
 		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "CHALLENGE_TOKEN", chalTok); err != nil {
 			logging.Logf("[detectors] CHALLENGE_TOKEN generation failed: %v", err)
-		} else if newTok != chalTok {
-			logging.Logf("[detectors] CHALLENGE_TOKEN was weak — rotated and persisted to %s", cfgPath)
-			wdKV["CHALLENGE_TOKEN"] = newTok
+		} else {
+			if newTok != chalTok {
+				logging.Logf("[detectors] CHALLENGE_TOKEN was weak — rotated and persisted to %s", cfgPath)
+			}
+			wdKV["CHALLENGE_TOKEN"] = newTok // pin runtime to the base-managed token
 		}
 
 		// F4: OPENRESTY_TOKEN — also writes cfm_bridge_token.lua for cfm.lua
-		bridgeTok := kvStrClean(wdKV, "OPENRESTY_TOKEN", "")
+		bridgeTok := kvStrClean(baseWD, "OPENRESTY_TOKEN", "")
 		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "OPENRESTY_TOKEN", bridgeTok); err != nil {
 			logging.Logf("[detectors] OPENRESTY_TOKEN generation failed: %v", err)
 		} else {
 			if newTok != bridgeTok {
 				logging.Logf("[detectors] OPENRESTY_TOKEN was weak — rotated and persisted to %s", cfgPath)
-				wdKV["OPENRESTY_TOKEN"] = newTok
 			}
+			wdKV["OPENRESTY_TOKEN"] = newTok // pin runtime to the base-managed token
 			cfmGID := sslcollector.CfmGroupID()
 			const bridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 			if err := sslcollector.WriteLuaTokenWithMkdir(bridgeTokenPath, newTok, cfmGID); err != nil {
@@ -650,8 +672,8 @@ func (m *manager) maybeReload(parent context.Context) {
 
 func readSectionsForReload(path string, running bool) (Sections, error, bool) {
 	// Layered read: base conffile + /etc/cfm/detectors.d/*.conf overlays
-	// (docs/detectors-config-unification.md §4). cfgSig sees overlay changes
-	// via StampNS (edits) and LayerSig (files added/removed/renamed).
+	// (docs/detectors-config-unification.md §4). cfgSig sees base edits via
+	// StampNS (the base mtime) and every overlay change via LayerSig.
 	secs, _, err := readLayered(path, detconf.DefaultDropinDir(path))
 	if err == nil {
 		return secs, nil, false

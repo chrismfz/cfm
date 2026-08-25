@@ -56,8 +56,9 @@ type Sections struct {
 	// LayerSig identifies the overlay SET a layered read merged: a hash of
 	// each overlay's filename, mtime and size, 0 when no overlays were read
 	// (plain ReadSections always leaves it 0, preserving layered/plain
-	// parity). Reload signatures must fold it in — StampNS alone (max mtime
-	// across layers) cannot see an overlay being removed, renamed, or added
+	// parity). It is the sole overlay-change signal — StampNS stays the BASE
+	// file's mtime so a base edit is never masked — and reload signatures must
+	// fold it in, since it is what sees an overlay removed, renamed, or added
 	// with an older mtime (mv / cp -p / rsync -a all preserve one).
 	LayerSig uint64
 }
@@ -123,7 +124,7 @@ func ReadSections(path string) (Sections, []byte, error) {
 				v := strings.Trim(strings.TrimSpace(line[i+1:]), `"`)
 				if appendOp {
 					if prev, ok := s.ByName[cur][k]; ok && prev != "" {
-						v = joinAppend(prev, v)
+						v = joinAppend(k, prev, v)
 					}
 					if s.AppendKeys == nil {
 						s.AppendKeys = make(map[string]map[string]bool)
