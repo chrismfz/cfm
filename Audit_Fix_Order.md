@@ -19,13 +19,13 @@ Do not skip dependency steps merely because a later change looks small. In parti
 1.  ✅ Trusted request identity + effective scheme (XFF/XFP)   — apiserver done (#1338); challenge item 8 declined
 2.  ✅ pprof explicit admin-only authorization                 — done (#1341); live scoped proof -> Step 10
 3.  ✅ POST-only enforcement for every mutating endpoint       — done (this change)
-4.  ☐  Reusable Go pre-auth challenge + interactive login gate
+4.  🎨 Reusable Go pre-auth challenge + interactive login gate               — DESIGNED, ready to implement (login-stays-Go redirect gate + RegisterHandlers reuse + explicit per-listener trust; references every past incident #246/#316-318/#1222/#1225/#1227/#659/#1342). See docs/security/challenge-login-gate-design.md
 5.  ✅ Direct :6060 browser transport policy -> :6061 when TLS ready       — done (#1351, defence in depth)
 6.  ✅ Automatic request-aware session-cookie transport policy               — Secure automatic from effective scheme; distinct cfm-sid-http-fallback for degraded :6060; no global-cookie race; AUTH_SECURE_COOKIE deprecated (+ :6061 self-signed fallback so a fresh/by-IP box isn't locked out)
 7.  ✅ cfm.api.log auth-attempt schema + api_abuse -> cfm_endpoints default-on  — done (#1338); auth_autoblock.go removal pending
 8.  ✅ Per-auth-mechanism / route-cost API rate limiting                   — enforcing limiter shipped (identity×route buckets, honest-high code-default ceilings, 429+Retry-After, never nft); ceiling tuning + alert-only detector event are operator-driven follow-ups
 9.  ◑  Direct control-plane response/cache/security-header hardening       — safe subset done (nosniff/Referrer-Policy + no-store on auth failures); CSP/frame + HSTS ⛔ DECLINED (too risky for P2 — breaks inline-script UI / cPanel iframe / self-signed :6061; operator can add at edge; see docs/security/control-plane-csp-frame-hsts.md)
-10. ☐  Controlled credentialed regression + close Audit_Results findings
+10. ☐  Controlled credentialed regression + close Audit_Results findings     — runnable checklist ready: docs/security/step10-credentialed-regression.md (CLI-minted scoped token; read-only MCP can't mint/POST)
 ```
 
 Status legend: ✅ source-complete · ◑ partial (safe subset shipped, rest deferred) ·
@@ -260,7 +260,17 @@ Prefer method-aware mux registration where practical, but do not make that refac
 # Step 4 — reusable Go pre-auth challenge + interactive login gate
 
 **Priority:** P1  
-**Dependency:** Step 1 first
+**Dependency:** Step 1 first  
+**Status:** 🎨 DESIGNED, ready to implement (design-first agreed) —
+`docs/security/challenge-login-gate-design.md`. Encodes the login-stays-Go redirect
+gate, `RegisterHandlers` reuse (one PoW/verifier/secret/safe-next), explicit
+per-listener trust, and a repeat-avoidance map of every past incident
+(#246/#316-318 routing+prefix, #1222/#1225 firewall-hang, #1227 cookie collision,
+#659 secret mismatch, #1342 trust narrowing). Two historical landmines are already
+neutralized in current code (firewall-free solve `challenge_server.go:308-322`;
+scoped `clearanceCookieName`). The one genuinely new risk is integration with the
+Step 5/6/8 middleware stack (§6 of the design). Implement staged + run
+`docs/challenge-waf-release-checklist.md`, test edge AND DNAT.
 
 > **Identity constraint (2026-08-25).** Mounting the challenge handlers on the public
 > `:6060`/`:6061` control plane needs the challenge server to resolve client identity/scheme
