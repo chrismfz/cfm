@@ -21,7 +21,7 @@ Do not skip dependency steps merely because a later change looks small. In parti
 3.  ✅ POST-only enforcement for every mutating endpoint       — done (this change)
 4.  ☐  Reusable Go pre-auth challenge + interactive login gate
 5.  ✅ Direct :6060 browser transport policy -> :6061 when TLS ready       — done (#1351, defence in depth)
-6.  ☐  Automatic request-aware session-cookie transport policy
+6.  ✅ Automatic request-aware session-cookie transport policy               — Secure automatic from effective scheme; distinct cfm-sid-http-fallback for degraded :6060; no global-cookie race; AUTH_SECURE_COOKIE deprecated (+ :6061 self-signed fallback so a fresh/by-IP box isn't locked out)
 7.  ✅ cfm.api.log auth-attempt schema + api_abuse -> cfm_endpoints default-on  — done (#1338); auth_autoblock.go removal pending
 8.  ✅ Per-auth-mechanism / route-cost API rate limiting                   — enforcing limiter shipped (identity×route buckets, honest-high code-default ceilings, 429+Retry-After, never nft); ceiling tuning + alert-only detector event are operator-driven follow-ups
 9.  ◑  Direct control-plane response/cache/security-header hardening       — safe subset done (nosniff/Referrer-Policy + no-store on auth failures); CSP/frame (cPanel-iframe) + HSTS deferred
@@ -395,7 +395,17 @@ Machine/API compatibility on plaintext 6060 must be an explicit product decision
 # Step 6 — automatic request-aware session-cookie transport policy
 
 **Priority:** P1  
-**Dependencies:** Steps 1 and 5
+**Dependencies:** Steps 1 and 5  
+**Status:** ✅ SOURCE COMPLETE — goauth is always-`Secure` `cfm-sid`;
+`SessionCookieTransportMiddleware` (`internal/apiserver/session_cookie_transport.go`,
+wrapping `LoadAndSave` from outside) translates to a distinct non-Secure
+`cfm-sid-http-fallback` only in the degraded plaintext `:6060` window (effective-http
+via spoof-safe `requestPeer.Scheme`), sharing one goauth store with no global mutation
+/ no race. `AUTH_SECURE_COOKIE` parsed-but-ignored + one-time deprecation warning.
+Prerequisite shipped separately: `:6061` self-signed fallback (#1356) so a fresh/by-IP
+box is reachable over TLS. Out of scope per spec: SameSite / `__Host-`. Tests
+`session_cookie_transport_test.go`; design `docs/security/session-cookie-transport.md`.
+Live verification (edge/`:6061` Secure, degraded fallback) rolls up to Step 10.
 
 ## Decision
 
