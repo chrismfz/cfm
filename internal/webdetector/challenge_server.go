@@ -3,6 +3,7 @@ package webdetector
 import (
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
+	"cfm/internal/reqident"
 	"cfm/internal/tlsfp"
 	"cfm/internal/uaplausible"
 	"context"
@@ -253,17 +254,16 @@ func (s *ChallengeServer) wrapAccessLog(next http.Handler) http.Handler {
 			path = "/"
 		}
 		if sw.status >= 400 || path == verifyPath || path == verifyPathOld {
-			ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))
-			if ip == "" {
-				ip = strings.TrimSpace(r.Header.Get("X-Real-IP"))
-			}
-			if ip == "" {
-				host, _, _ := net.SplitHostPort(r.RemoteAddr)
-				if host != "" {
-					ip = host
-				} else {
-					ip = r.RemoteAddr
-				}
+			// Same loopback-only identity rule as the security path (clientIP),
+			// with the raw socket peer as a fallback so a fail-closed forwarded
+			// identity still logs a non-empty source.
+			ip := ""
+			if cip := clientIP(r); cip != nil {
+				ip = cip.String()
+			} else if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && host != "" {
+				ip = host
+			} else {
+				ip = r.RemoteAddr
 			}
 			host := r.Host
 			uri := path
@@ -909,7 +909,12 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				Path:     "/",
 				MaxAge:   300,
 				HttpOnly: false, // JS reads it
-				Secure:   (r.TLS != nil),
+				// Follow the effective client scheme, not raw r.TLS: the edge
+				// terminates TLS and reaches the challenge server over loopback
+				// HTTP, so r.TLS is always nil here. Match the solved/clearance
+				// cookies (which use trustedForwardedProto) so the in-progress
+				// nonce is Secure on an HTTPS client too.
+				Secure:   trustedForwardedProto(r) == "https",
 				SameSite: http.SameSiteLaxMode,
 			})
 		}
@@ -1382,108 +1387,25 @@ func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status in
 	)
 }
 
-// Cloudflare IP ranges (keep in sync with nginx trusted_proxies.conf).
-// Source: https://www.cloudflare.com/ips/
-var cloudflareNets []*net.IPNet
-var cloudflareNetsOnce sync.Once
-
-func initCloudflareNets() {
-	cidrs := []string{
-		"173.245.48.0/20",
-		"103.21.244.0/22",
-		"103.22.200.0/22",
-		"103.31.4.0/22",
-		"141.101.64.0/18",
-		"108.162.192.0/18",
-		"190.93.240.0/20",
-		"188.114.96.0/20",
-		"197.234.240.0/22",
-		"198.41.128.0/17",
-		"162.158.0.0/15",
-		"104.16.0.0/13",
-		"104.24.0.0/14",
-		"172.64.0.0/13",
-		"131.0.72.0/22",
-		// IPv6
-		"2400:cb00::/32",
-		"2606:4700::/32",
-		"2803:f800::/32",
-		"2405:b500::/32",
-		"2405:8100::/32",
-		"2a06:98c0::/29",
-		"2c0f:f248::/32",
-	}
-	for _, c := range cidrs {
-		_, n, err := net.ParseCIDR(c)
-		if err == nil && n != nil {
-			cloudflareNets = append(cloudflareNets, n)
-		}
-	}
-}
-
-func isCloudflareIP(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
-	cloudflareNetsOnce.Do(initCloudflareNets)
-	for _, n := range cloudflareNets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-func isTrustedProxyPeer(peer net.IP) bool {
-	if peer == nil {
-		return false
-	}
-	if peer.IsLoopback() || peer.IsPrivate() || peer.IsLinkLocalUnicast() {
-		return true
-	}
-	return isCloudflareIP(peer)
-}
-
+// clientIP returns the effective client IP for r using the shared, loopback-only
+// identity rule (internal/reqident): forwarded identity is trusted only when the
+// immediate socket peer is loopback. Every live path reaches the challenge
+// server from 127.0.0.1 via the edge (OpenResty/Angie or the cPanel panel
+// listeners), which authors X-Real-IP / X-Forwarded-For after its own realip
+// normalization, so this is the same value the old helper resolved. A direct
+// (non-loopback) peer's forwarded headers are ignored, and a loopback edge that
+// forwarded an ambiguous/malformed address yields nil — callers treat that as
+// "bad client ip". Returns nil if no client IP can be established.
+//
+// This deliberately drops the older, broader trust surface (private /
+// link-local / Cloudflare peers; CF-Connecting-IP; X-Forwarded-For chains) that
+// existed for the retired per-IP "challenge DNAT" topology, where the daemon's
+// own listener was hit directly by public clients. That path is gone (the edge
+// always proxies plain HTTP to the loopback 9098 upstream), so the narrower rule
+// is behavior-preserving for live traffic and is the prerequisite for mounting
+// the challenge handlers on the public control plane (audit Step 2).
 func clientIP(r *http.Request) net.IP {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	peer := net.ParseIP(strings.TrimSpace(host))
-	if peer == nil {
-		return nil
-	}
-
-	// Trust proxy headers ONLY when the immediate peer is local/trusted
-	// (OpenResty connects from 127.0.0.1 or private addr). In DNAT mode
-	// peer is the real public client -> ignore spoofable headers.
-	if isTrustedProxyPeer(peer) {
-		// 1) Cloudflare real IP (if present)
-		if h := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); h != "" {
-			if ip := net.ParseIP(h); ip != nil {
-				return ip
-			}
-		}
-		// 2) X-Real-IP
-		if h := strings.TrimSpace(r.Header.Get("X-Real-IP")); h != "" {
-			if ip := net.ParseIP(h); ip != nil {
-				return ip
-			}
-		}
-		// 3) X-Forwarded-For: take first
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			if len(parts) > 0 {
-				first := strings.TrimSpace(parts[0])
-				if ip := net.ParseIP(first); ip != nil {
-					return ip
-				}
-			}
-		}
-	}
-
-	return peer
-
+	return reqident.FromRequest(r).ClientIP
 }
 
 func (s *ChallengeServer) shouldIgnoreIP(ip net.IP) bool {
@@ -1763,15 +1685,19 @@ func trustedForwardedHost(r *http.Request) string {
 	return normalizeClearanceHost(h)
 }
 
+// trustedForwardedProto returns the effective client-facing scheme ("http" or
+// "https") for r using the shared, loopback-only rule (internal/reqident):
+// X-Forwarded-Proto is honored only across the loopback edge hop AND only
+// together with a canonical forwarded client IP (the edge sends both together);
+// otherwise the scheme comes from r.TLS. Live challenge traffic arrives from the
+// loopback edge carrying X-Forwarded-Proto ($scheme on the web edge, a fixed
+// per-port literal on the panel listeners) paired with X-Real-IP, so this is the
+// same value the old helper resolved — but a direct client can no longer
+// downgrade/upgrade the scheme by forging the header (audit F44). Callers set
+// cookies (cfm_chal/cfm_ok/clearance) only after clientIP(r) resolves non-nil,
+// so a fail-closed identity never reaches a Secure-flag decision here.
 func trustedForwardedProto(r *http.Request) string {
-	xfProto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
-	if xfProto == "http" || xfProto == "https" {
-		return xfProto
-	}
-	if r.TLS != nil {
-		return "https"
-	}
-	return "http"
+	return reqident.FromRequest(r).Scheme
 }
 
 func clearanceScope(r *http.Request) string {

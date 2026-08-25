@@ -41,9 +41,14 @@ helper `internal/apiserver/request_identity.go` (`requestPeer`), edge configs fo
 `$remote_addr` + `$cf_xfp` on every apiserver `:6060` control-plane block (both engines),
 and regression tests cover all three entry topologies (`TestRequestPeerEntryTopologies`)
 plus the login forged-XFF path (`TestLoginLimiterIgnoresForgedXFFForPerIPBucket`). Landed
-via #1338 + this branch. The broader Step-1 acceptance list in `Audit.md` keeps ONE box
-open — ChallengeServer identity/scheme unification — deferred to the challenge direct-mount
-work (Step 2); the challenge upstream still forwards `$scheme` and uses its own `clientIP()`.
+via #1338 + this branch. The last Step-1 box — ChallengeServer identity/scheme
+unification — has since landed: the shared `internal/reqident` rule is consumed by both
+the apiserver and the challenge server (loopback-only forwarded trust), so **all eight
+Step-1 boxes in `Audit.md` are now closed**. See
+`docs/security/challenge-identity-unification.md`. The challenge upstream still forwards
+`$scheme` at the edge (safe — trusted only across the loopback hop); the remaining work is
+Step 2 (actually mounting the challenge handlers in the apiserver), for which this was the
+prerequisite.
 
 ## Problem
 

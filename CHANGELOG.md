@@ -18,6 +18,23 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Challenge server now uses one canonical, loopback-only request-identity &
+  scheme rule (shared with the apiserver).** A new leaf package
+  `internal/reqident` holds the single rule — forwarded `X-Real-IP` /
+  `X-Forwarded-For` / `X-Forwarded-Proto` are trusted only across the loopback
+  edge hop; a direct peer's forged headers are ignored and an ambiguous forwarded
+  chain fails closed. The challenge server's own `clientIP` / `trustedForwardedProto`
+  (which trusted private/link-local/Cloudflare peers, `CF-Connecting-IP`, and
+  ungated `X-Forwarded-Proto` — a holdover from the retired per-IP challenge-DNAT
+  topology) now delegate to it, and the dead Cloudflare-CIDR trust table is
+  removed. Behavior-preserving for all live traffic (every path reaches the
+  challenge server from loopback via the edge, which authors those headers from
+  `$remote_addr`), while removing the latent header-trust that would become
+  exploitable once the challenge handlers are mounted on a public listener. Also
+  fixes the in-progress `cfm_chal` cookie `Secure` flag to follow the effective
+  scheme (matching the clearance/`cfm_ok` cookies) instead of raw `r.TLS`. This
+  is the prerequisite for the challenge direct-mount work (audit Step 1 item 8 /
+  Step 2). See `docs/security/challenge-identity-unification.md`.
 - **`/debug/pprof/*` is now explicitly admin-only.** The Go profiler endpoints
   (`/debug/pprof/`, `cmdline`, `profile`, `symbol`, `trace`) were mounted behind
   mux-wide authentication only, which accepts a valid *scoped* per-vhost
