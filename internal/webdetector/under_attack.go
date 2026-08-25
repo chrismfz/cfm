@@ -233,6 +233,32 @@ func (t *underAttackTracker) activeHosts() []string {
 	return out
 }
 
+// underAttackHosts returns, in a single locked pass, the vhosts that are
+// EFFECTIVELY under attack — the same truth VhostAttackState reports: an
+// operator `on` override (override==+1), or the auto state (st.on) when not
+// overridden. A forced-off override (override==-1) is excluded even if st.on.
+// Callers that need the count (handleChallengeSummary) use this instead of
+// activeHosts()+VhostAttackState (N+1 lock acquisitions over a set that can
+// shift between them); activeHosts() keeps its wider "on OR any override"
+// membership because the emit loop must also re-evaluate forced-off hosts.
+func (t *underAttackTracker) underAttackHosts() []string {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []string
+	for host, st := range t.hosts {
+		if st == nil {
+			continue
+		}
+		if st.override == +1 || (st.override == 0 && st.on) {
+			out = append(out, host)
+		}
+	}
+	return out
+}
+
 // RecordUnderAttackSolve feeds the solve-rate tracker from the challenge solve
 // stream (subscribed in the webdetector register when UNDER_ATTACK is on).
 // Nil-safe and cheap; self-declared bot UAs are excluded (§5).
