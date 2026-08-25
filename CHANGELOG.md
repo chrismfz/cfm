@@ -89,6 +89,14 @@ back-filled here — see the git/PR history for that period.
   (`enforce`/`shadow`/`off`) and `RATE_LIMIT_SCALE` tune without a code change; invalid
   credentials still get the normal `401` before the limiter, so limiter behaviour never
   leaks credential validity. See `docs/security/control-plane-rate-limiting.md`.
+- **`/api/v1/http3/{enable,disable}` now emit `Allow: POST` on a rejected non-POST
+  request (audit R03 consistency).** The two HTTP/3 opt-in mutators already rejected
+  non-POST with `405`, but via a handler-local method check that omitted the `Allow`
+  header — diverging from the shared `requirePOST` wrapper every other control-plane
+  mutator uses. They now go through `requirePOST` (same method-before-auth ordering, so
+  no behaviour change beyond the added header), the divergent local checks are removed,
+  and both routes join the `TestMutatorsRejectNonPOST`/`AllowPOST` regression set. No
+  functional change for POST callers.
 - **`AdminTransportRedirect` now tracks a non-default `PORT` (audit R01 / Step 5 follow-up).**
   `requestPeer`'s listener classification keyed on hardcoded `6060`/`6061`, so running the
   control plane on a non-default `PORT`/`TLS_PORT` classified every request as `other` and
