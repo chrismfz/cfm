@@ -40,8 +40,10 @@ back-filled here — see the git/PR history for that period.
   excluded — so the expansion ratio means the same thing on every vhost (a
   static-heavy vhost cannot dilute its own denominator and silently raise its
   effective threshold). Zero hot-path cost when the master is off (nil maps, no
-  hashing); when it is on, the cost is one `hash64` per dynamic request plus a
-  bounded per-eval snapshot. Phase 1 of the traffic-classifier plan
+  hashing); when it is on, the cost is up to two `hash64` per dynamic request (the
+  URL and its base path) plus a bounded per-eval snapshot, and each active vhost
+  holds two capped hash-sets per sliding-window bucket. Phase 1 of the
+  traffic-classifier plan
   (`docs/traffic-classifier.md`); no score contribution and no enforcement yet.
 
 ### Changed

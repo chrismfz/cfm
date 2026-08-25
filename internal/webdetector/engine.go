@@ -1462,7 +1462,8 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	// The static check keys on the query-stripped path `p` (isStaticAssetPath's
 	// documented contract), so a dynamic endpoint whose query happens to end in a
 	// static-looking tail — /api?redirect=/x.css — is NOT misdropped. Off by
-	// default → no maps, no per-request work.
+	// default → no maps, no per-request work; when on, up to TWO hash64 per dynamic
+	// request under cap (the URL and its base path).
 	if e.cfg.AbuseShadow && e.cfg.AbuseShadowFacet && rec.URI != "" && !isStaticAssetPath(p) {
 		capN := e.cfg.AbuseShadowFacetCap
 		if capN <= 0 {
@@ -1475,6 +1476,12 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		if len(b.fullURIs) < capN {
 			b.fullURIs[hash64(rec.URI)] = struct{}{}
 		}
+		// facetPaths (the expansion denominator) shares fullURIs' cap ON PURPOSE:
+		// distinctPaths ≤ distinctURLs always (each base path carries ≥1 URL), so
+		// facetPaths can only reach the cap once fullURIs has too. In that regime
+		// both are pinned at capN and the ratio collapses toward 1 — i.e. a dropped
+		// base path can never inflate distinctURLs/distinctPaths into a spurious
+		// facet flag. Keep the two caps equal if you ever retune capN.
 		if b.facetPaths == nil {
 			b.facetPaths = make(map[uint64]struct{}, 16)
 		}
