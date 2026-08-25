@@ -90,7 +90,7 @@ func init() {
 
 		// Resolution + provisional policy live in planDovecotSource
 		// (source_report.go), shared with the dry-run source report.
-		plan := planDovecotSource(section, kv, srcresolve.DefaultProbes())
+		plan := planDovecotSource(section, kv, registrationProbes())
 		res := plan.res
 		if plan.note != "" {
 			logging.Logf("[detectors][%s] %s — set MODE/JOURNAL_UNIT/LOG_PATH/DOCKER_CONTAINER to override", section, plan.note)

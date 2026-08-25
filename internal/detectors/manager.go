@@ -443,6 +443,12 @@ func (m *manager) maybeReload(parent context.Context) {
 		)
 	}
 
+	// Fresh source-resolution probes for THIS sweep: sections share the memo
+	// (no repeated docker ps / journal / canonicalization execs), but every
+	// rebuild re-probes host state so a reload sees a daemon/container that
+	// appeared since the last build (srcresolve register path).
+	resetRegistrationProbes()
+
 	// instantiate + run all enabled sections
 	for secName, kv := range secs.ByName {
 		if secName == "global" {

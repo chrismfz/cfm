@@ -216,7 +216,7 @@ func init() {
 			}
 		}
 
-		if applyPostfixSourcePlan(section, planPostfixLogSource(section, kv, srcresolve.DefaultProbes()),
+		if applyPostfixSourcePlan(section, planPostfixLogSource(section, kv, registrationProbes()),
 			&cfg.JournalUnit, &cfg.DockerContainer, &cfg.LogPath) {
 			return nil, nil
 		}
@@ -239,7 +239,7 @@ func init() {
 		// container (mailcow) → the commands wrapped in `docker exec`; neither
 		// → self-disable, unless the docker CLI exists (daemon/container may
 		// not be up yet at boot — stay alive, `cfm detector reload` re-resolves).
-		plan, totalCmd, listCmd := planPostfixQueues(section, kv, srcresolve.DefaultProbes())
+		plan, totalCmd, listCmd := planPostfixQueues(section, kv, registrationProbes())
 		if plan.disable {
 			logging.Logf("[detectors][%s] %s (%s)", section, plan.note, plan.res.Reason)
 			return nil, nil
@@ -328,7 +328,7 @@ func init() {
 
 		// Same source plan as postfix_security (JOURNAL_MATCHES passes through
 		// verbatim; nil,nil = postfix absent, section auto-disabled).
-		if applyPostfixSourcePlan(section, planPostfixLogSource(section, kv, srcresolve.DefaultProbes()),
+		if applyPostfixSourcePlan(section, planPostfixLogSource(section, kv, registrationProbes()),
 			&cfg.JournalUnit, &cfg.DockerContainer, &cfg.LogPath) {
 			return nil, nil
 		}

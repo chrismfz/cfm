@@ -17,6 +17,32 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Explicit `JOURNAL_UNIT` pins are now alias-normalized to the canonical
+  systemd unit on the srcresolve-adopted detectors** (`ssh_auth`,
+  `dovecot_auth`, `postfix_security`/`postfix_relays`). Live-fleet finding: a
+  config pinning `JOURNAL_UNIT = sshd.service` dropped onto a Debian host
+  tails an EMPTY journal forever — `sshd.service` is an `Alias=` of
+  `ssh.service` there and journald indexes only the canonical name (verified:
+  `journalctl -u sshd.service` → "No entries" while `ssh.service` carries the
+  real sshd log). The resolver now canonicalizes explicit units via
+  `systemctl show -p Id` — same service, corrected name, operator intent
+  preserved; unknown units and non-systemd hosts keep the given name
+  verbatim, and detectors still on their own tailing (`ftpd`, `proxmox_auth`,
+  `custom`) are unchanged until they migrate. The resolution log/report shows
+  the rewrite (`explicit JOURNAL_UNIT sshd.service → canonical ssh.service`).
+  Registers also now share one memoized probe set per registration sweep, so
+  resolving many sections repeats no identical systemctl/journalctl/docker
+  exec.
+- **`cfm detectors-srcresolve` now joins daemon coverage into one table.** New
+  DAEMON column per section (watched unit active/stopped/absent, from
+  `/api/v1/detectors/coverage`), extra `<type> (not in config)` rows for GAP
+  (a daemon RUNS here but nothing watches it — the forgotten-ftp case) and
+  dormant verdicts, and a trailing ok/GAP/dormant/disabled/absent summary —
+  one command answering "does the daemon exist, did I detect it, am I
+  following it". `--json` returns the combined document; a coverage fetch
+  failure degrades the column to `?` instead of failing the command.
+
 ### Security
 - **`AdminTransportRedirect` now tracks a non-default `PORT` (audit R01 / Step 5 follow-up).**
   `requestPeer`'s listener classification keyed on hardcoded `6060`/`6061`, so running the
