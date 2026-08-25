@@ -5,33 +5,34 @@ import (
 	"time"
 )
 
-// dcIPCountsAsDatacenter is the pure per-IP gating decision: count iff the IP is
-// on a datacenter/cloud ASN AND is not an FCrDNS-verified good bot. The good-bot
-// verdict is computed once by the emit (via the shared verdict cache) and passed
-// in as a boolean, so this stays a trivially-testable rule with no DNS.
+// dcIPCountsAsDatacenter is the pure per-IP gating rule: count iff the IP is on a
+// datacenter/cloud ASN AND is not an FCrDNS-verified good bot. Both inputs are
+// booleans the emit computes once, so this is a trivially-testable 2×2 truth table
+// with no DNS.
 func TestDCIPCountsAsDatacenter(t *testing.T) {
-	// AS16509 = AMAZON-02 (in the curated cloud map); AS3215 = a telco/residential
-	// org name with no cloud keyword.
-	const dcASN, dcName = 16509, "AMAZON-02"
-	const resASN, resName = 3215, "Orange S.A."
-
 	cases := []struct {
-		name       string
-		asn        uint
-		asnName    string
-		verifiedGB bool
-		want       bool
+		isDC, verifiedGB, want bool
 	}{
-		{"residential never counts", resASN, resName, false, false},
-		{"residential is not rescued by a bot flag", resASN, resName, true, false},
-		{"datacenter, not a verified bot, counts", dcASN, dcName, false, true},
-		{"datacenter, verified good bot, excluded", dcASN, dcName, true, false},
+		{false, false, false}, // residential → never
+		{false, true, false},  // residential + (nonsensical) bot flag → still never
+		{true, false, true},   // datacenter, not a verified bot → counts
+		{true, true, false},   // datacenter, verified good bot → excluded
 	}
 	for _, tc := range cases {
-		got := dcIPCountsAsDatacenter(tc.asn, tc.asnName, tc.verifiedGB)
-		if got != tc.want {
-			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		if got := dcIPCountsAsDatacenter(tc.isDC, tc.verifiedGB); got != tc.want {
+			t.Errorf("dcIPCountsAsDatacenter(%v,%v)=%v, want %v", tc.isDC, tc.verifiedGB, got, tc.want)
 		}
+	}
+}
+
+// The emit feeds dcIPCountsAsDatacenter with IsDatacenter's verdict; guard the ASN
+// values Signal H relies on so a curated-map change can't silently flip the class.
+func TestDCFrac_IsDatacenterAnchors(t *testing.T) {
+	if !IsDatacenter(16509, "AMAZON-02") { // AWS — must classify as datacenter
+		t.Error("AS16509 AMAZON-02 should be datacenter")
+	}
+	if IsDatacenter(3215, "Orange S.A.") { // a residential/telco org — must not
+		t.Error("AS3215 Orange S.A. should NOT be datacenter")
 	}
 }
 

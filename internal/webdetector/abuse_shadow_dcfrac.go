@@ -86,17 +86,27 @@ const maxDCFracIPEnrichPerTick = 8000
 // verdict (positive for posTTL, negative for negTTL), so a crawler is confirmed
 // once per posTTL rather than every 5s tick, and the verdict outlives geo-cache
 // eviction. Separate from the edge bridge's instance (different subsystem), same
-// battle-tested machinery.
-var dcFracGoodBot = newBridgeGoodBotState()
+// battle-tested machinery — but its verified-crawler visibility line goes to the
+// abuse_shadow log and says "excluded from the datacenter count", NOT the bridge's
+// "challenge-exempt" (this signal grants no exemption).
+var dcFracGoodBot = newDCFracGoodBot()
+
+func newDCFracGoodBot() *bridgeGoodBotState {
+	s := newBridgeGoodBotState()
+	s.logVerified = func(name, ip string) {
+		logging.LogfABUSESHADOW("[abuse-shadow] signal=dc_fraction verified_crawler=%q excluded_from_datacenter_count (per-IP FCrDNS; e.g. ip=%s)", name, ip)
+	}
+	return s
+}
 
 // dcIPCountsAsDatacenter is the pure per-IP verdict: an IP counts toward the
 // vhost's "unverified datacenter" numerator iff it is on a datacenter/cloud ASN
-// AND is not an FCrDNS-verified good bot. Single-sourced (the emit computes
-// verifiedGoodBot once, via the verdict cache, and hands the boolean here) so the
-// datacenter/good-bot rule lives in exactly one place, and unit-testable without
-// an Enricher.
-func dcIPCountsAsDatacenter(asn uint, asnName string, verifiedGoodBot bool) bool {
-	return IsDatacenter(asn, asnName) && !verifiedGoodBot
+// AND is not an FCrDNS-verified good bot. Both inputs are computed ONCE by the emit
+// (the ASN class and the verdict-cache lookup) and handed in as booleans, so the
+// hot loop never re-runs either and the datacenter/good-bot rule lives in exactly
+// one place. Unit-testable without an Enricher.
+func dcIPCountsAsDatacenter(isDatacenter, verifiedGoodBot bool) bool {
+	return isDatacenter && !verifiedGoodBot
 }
 
 // emitAbuseShadowDatacenterFrac runs Signal H in log-only mode. Called from the
@@ -110,12 +120,25 @@ func (e *Engine) emitAbuseShadowDatacenterFrac(now time.Time) {
 	cfg := e.dcFracShadowCfg()
 
 	// Snapshot per-vhost per-IP request totals (all requests — datacenter is a
-	// property of the client, and we want the fraction of the whole load).
+	// property of the client, and we want the fraction of the whole load). Apply the
+	// cheap pre-filters UNDER the lock so a vhost too small to ever flag is skipped
+	// BEFORE its per-IP map is copied — otherwise the snapshot would allocate every
+	// vhost's full IP set every tick regardless of the budget, which on a large fleet
+	// dwarfs the mmdb work the budget bounds. bucket.total ≥ the per-IP sum (IP-less
+	// requests still bump total), so gating on it can only over-admit, never wrongly
+	// drop a qualifying vhost; the main loop re-checks on the precise per-IP total.
 	snap := make(map[string]map[string]int)
 	e.mu.RLock()
 	for host, hs := range e.hosts {
 		if hs == nil {
 			continue
+		}
+		total := 0
+		for i := range hs.buckets {
+			total += hs.buckets[i].total
+		}
+		if total < cfg.MinReq {
+			continue // can't reach MinReq — don't copy its IPs
 		}
 		m := make(map[string]int)
 		for i := range hs.buckets {
@@ -123,7 +146,7 @@ func (e *Engine) emitAbuseShadowDatacenterFrac(now time.Time) {
 				m[ip] += n
 			}
 		}
-		if len(m) > 0 {
+		if len(m) >= cfg.MinIPs { // needs a spread of IPs to ever flag
 			snap[host] = m
 		}
 	}
@@ -167,7 +190,8 @@ func (e *Engine) emitAbuseShadowDatacenterFrac(now time.Time) {
 		dcReqs, dcIPs := 0, 0
 		for ip, n := range perIP {
 			r := e.enr.LookupCachedOrAsync(ip) // inline mmdb (no blocking DNS)
-			if !IsDatacenter(r.ASN, r.ASNName) {
+			isDC := IsDatacenter(r.ASN, r.ASNName)
+			if !isDC {
 				continue // residential/unknown — skip the good-bot check entirely
 			}
 			// Verified-gating through the shared good-bot verdict cache: a cache HIT
@@ -179,7 +203,7 @@ func (e *Engine) emitAbuseShadowDatacenterFrac(now time.Time) {
 			// only called on a cache miss.
 			ptr := r.PTR
 			bot := dcFracGoodBot.verified(ip, func() string { return ptr }, now) != ""
-			if dcIPCountsAsDatacenter(r.ASN, r.ASNName, bot) {
+			if dcIPCountsAsDatacenter(isDC, bot) {
 				dcReqs += n
 				dcIPs++
 			}
@@ -192,6 +216,9 @@ func (e *Engine) emitAbuseShadowDatacenterFrac(now time.Time) {
 		if frac < cfg.MinFrac {
 			continue
 		}
+		// Badge = datacenter percent, floored to 1 so a flagged vhost never badges 0
+		// (0 means "not flagged"). Not dead at the 0.5 default, but reachable: an
+		// operator can set MIN_FRAC below 0.005, where frac*100 rounds to 0.
 		pct := int(frac*100 + 0.5)
 		if pct < 1 {
 			pct = 1
