@@ -92,6 +92,7 @@ export const challengeMixin = {
           solver_farm: Boolean(status.solver_farm),
           shadow_outliers: Number(status.shadow_outliers) || 0,
           query_cardinality: Number(status.query_cardinality) || 0,
+          cost_pressure: Number(status.cost_pressure) || 0,
         };
       });
       const rows = await Promise.all(checks);

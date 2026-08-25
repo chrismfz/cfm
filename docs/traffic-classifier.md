@@ -358,8 +358,18 @@ Class-2 burst.
       article paths) correctly stay clear (ratio ≈ 1). The would-be discriminator
       for the malicious case is the enforcement-time context (verified-crawler
       fork, cost/5xx, repeat ≈ 1), added later — never the badge alone.
-- [ ] Add remaining per-vhost features: cost/5xx-trend, datacenter-ASN-frac
-      (verified-gated). (query-cardinality + URL-repeat done above.)
+- [x] **DONE (cost/5xx half) — abuse_shadow cost-pressure signal (Signal G).**
+      Branch `claude/webdet-cost-pressure-shadow`: per-vhost 5xx-pressure, flagged
+      when `5xx/total ≥ MIN_FRAC(0.15)` AND `reqs ≥ MIN_REQ(50)` AND
+      `5xx_rps ≥ MIN_RPS5XX(1.0)` — the *symptom* of the flood (origin collapse),
+      complementing facet's *cause*. Reuses the per-bucket 5xx counters (no ingest
+      cost). Log-only: a `cost_pressure` badge (5xx percent — `cost N%` pill /
+      `cost=N%` CLI flag) + a `signal=cost_pressure` line (with avg RT as a second,
+      non-gating cost dimension) in `cfm.abuse_shadow.log`. Own mark store + TTL.
+      Default-ON under `ABUSE_SHADOW`; knobs `ABUSE_SHADOW_COST[_MIN_FRAC|_MIN_REQ|
+      _MIN_RPS5XX]`. NO score contribution, NO enforcement.
+- [ ] Add remaining per-vhost feature: datacenter-ASN-frac (verified-gated).
+      (query-cardinality, URL-repeat, cost/5xx done above.)
 - [ ] Add missing per-client features: header-coherence, solve-latency; route
       cookie_discard / solver_farm / abuse_shadow as contributors into
       `IPSignals.Score` / `SuspiciousRow.Score` (they stop being independent

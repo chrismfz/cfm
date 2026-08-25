@@ -237,12 +237,13 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"auto_active":   autoActive,
 		"auto_since":    autoSince,
 		// Scoped tokens reach the vhost list only through this endpoint, so the
-		// farm mark, the shadow outlier count, the facet cardinality and the
-		// escalation state have to ride along here too, or the badges would be
-		// admin-only. Single-sourced via deriveVhostState / the mark stores.
+		// farm mark, the shadow outlier count, the facet cardinality, the cost
+		// pressure and the escalation state have to ride along here too, or the
+		// badges would be admin-only. Single-sourced via deriveVhostState / marks.
 		"solver_farm":       IsSolverFarm(host),
 		"shadow_outliers":   AbuseShadowOutliers(host),
 		"query_cardinality": FacetShadowCardinality(host),
+		"cost_pressure":     CostShadowPressure(host),
 		"state":             e.deriveVhostStateForHost(host, time.Now()),
 	})
 }

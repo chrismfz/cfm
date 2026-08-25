@@ -53,6 +53,11 @@ type ChallengeVhostState struct {
 	// abuse_shadow_facet_marks.go with its own TTL). 0 when not flagged/expired.
 	QueryCardinality int `json:"query_cardinality"`
 
+	// CostPressure is the live abuse_shadow 5xx percent for this vhost (Signal G).
+	// Stamped by the handler, not stored (the mark lives in abuse_shadow_cost_marks.go
+	// with its own TTL). 0 when not flagged/expired.
+	CostPressure int `json:"cost_pressure"`
+
 	// State is the vhost's position on the escalation ladder
 	// (normal|suspicious|challenged|under_attack). Stamped by the handler via the
 	// single deriveVhostState() helper (like SolverFarm, not stored): the

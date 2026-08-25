@@ -745,6 +745,13 @@ func init() {
 			AbuseShadowFacetMinExpansion: kvFlt(kv, "ABUSE_SHADOW_FACET_MIN_EXPANSION", 0),
 			AbuseShadowFacetCap:          kvInt(kv, "ABUSE_SHADOW_FACET_CAP", 0),
 
+			// Signal G (origin cost pressure). Default-on under the master; thresholds
+			// resolve to safe defaults in costShadowCfg() when 0.
+			AbuseShadowCost:        kvBool(kv, "ABUSE_SHADOW_COST", true),
+			AbuseShadowCostMinFrac: kvFlt(kv, "ABUSE_SHADOW_COST_MIN_FRAC", 0),
+			AbuseShadowCostMinReq:  kvInt(kv, "ABUSE_SHADOW_COST_MIN_REQ", 0),
+			AbuseShadowCostMinRPS:  kvFlt(kv, "ABUSE_SHADOW_COST_MIN_RPS5XX", 0),
+
 			// Optional uniqIP-based vhost auto mode
 			ChallengeSuspiciousUniqIP:    kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP", false),
 			ChallengeSuspiciousUniqIPOn:  kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_ON", 0),

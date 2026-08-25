@@ -18,6 +18,23 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **abuse_shadow cost-pressure signal (Signal G): vhost-level origin 5xx
+  pressure, log-only.** Where facet (Signal F) sees the request-shape *cause* of
+  a flood, Signal G sees its *symptom* — the origin buckling (the 256k×500
+  collapse). It flags a vhost whose 5xx fraction is high under real request
+  volume AND whose absolute 5xx rate clears a floor (so a tiny idle vhost with a
+  single 500 does not read as "under pressure"). It NEVER challenges or blocks:
+  it stamps a per-vhost `cost_pressure` badge (the 5xx percent — `cost N%` pill
+  in cfm-admin, `cost=N%` flag in `cfm webtop challenge`) and writes one
+  structured `signal=cost_pressure` line per flagged vhost to the shared
+  `cfm.abuse_shadow.log` (with the average response time as a second, non-gating
+  cost dimension). Reuses the per-bucket 5xx counters the engine already
+  maintains, so there is **no ingest cost** — only a cheap per-tick aggregation.
+  Gated under the `ABUSE_SHADOW` master and default-ON with it (no config edit to
+  start collecting); tunable via `ABUSE_SHADOW_COST`,
+  `ABUSE_SHADOW_COST_MIN_FRAC` (0.15), `ABUSE_SHADOW_COST_MIN_REQ` (50) and
+  `ABUSE_SHADOW_COST_MIN_RPS5XX` (1.0). Phase 1 of the traffic-classifier plan
+  (`docs/traffic-classifier.md`); no score contribution and no enforcement yet.
 - **abuse_shadow facet signal (Signal F): vhost-level query-cardinality
   visibility, log-only.** Surfaces the one traffic shape `path_diversity` is
   structurally blind to. `path_diversity` counts distinct BASE paths / total, so

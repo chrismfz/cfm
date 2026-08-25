@@ -691,6 +691,8 @@ func (m *manager) stopAll() {
 	webdet.ResetAbuseShadowMarks()
 	// …and the abuse_shadow facet (query-cardinality) marks.
 	webdet.ResetFacetShadowMarks()
+	// …and the abuse_shadow cost-pressure (5xx) marks.
+	webdet.ResetCostShadowMarks()
 
 	// Wait outside the mutex.
 	m.wg.Wait()

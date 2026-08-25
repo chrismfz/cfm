@@ -255,6 +255,12 @@ type ShortRow struct {
 	// onto the row, not an input to Score — see abuse_shadow_facet_marks.go. 0 when
 	// not flagged / expired.
 	QueryCardinality int `json:"query_cardinality"`
+
+	// CostPressure is the live 5xx percent (1–100) on this vhost when the
+	// abuse_shadow cost signal has flagged it — origin cost pressure, the symptom of
+	// a flood (Signal G, shadow/log-only). Stamped onto the row, not an input to
+	// Score — see abuse_shadow_cost_marks.go. 0 when not flagged / expired.
+	CostPressure int `json:"cost_pressure"`
 }
 
 // TopKV for drilldown views.

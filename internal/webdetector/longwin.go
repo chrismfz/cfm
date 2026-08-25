@@ -69,6 +69,11 @@ type SuspiciousRow struct {
 	// this vhost (Signal F). Stamped by the API handlers, not the scorer (external
 	// verdict). See abuse_shadow_facet_marks.go.
 	QueryCardinality int `json:"query_cardinality"`
+
+	// CostPressure is the live abuse_shadow 5xx percent for this vhost (Signal G).
+	// Stamped by the API handlers, not the scorer (external verdict). See
+	// abuse_shadow_cost_marks.go.
+	CostPressure int `json:"cost_pressure"`
 }
 
 // LongRow is the raw long-window aggregate without scoring.

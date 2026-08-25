@@ -1143,6 +1143,7 @@ type chalVhost struct {
 	SolverFarm       bool      `json:"solver_farm"`       // live solver-farm mark
 	ShadowOutliers   int       `json:"shadow_outliers"`   // live abuse_shadow rate-outlier count
 	QueryCardinality int       `json:"query_cardinality"` // live abuse_shadow facet distinct-URL count
+	CostPressure     int       `json:"cost_pressure"`     // live abuse_shadow 5xx-pressure percent
 }
 
 // appendFlag joins a flag token onto a comma-separated reasons string.
@@ -1339,8 +1340,9 @@ func runChallengeWebTop(baseURL string, args []string) error {
 		}
 		// Surface live external verdicts alongside the score reasons: the
 		// solver-farm mark, the abuse_shadow rate-outlier count (shadow/log-only
-		// concentration signal) and the facet distinct-URL cardinality (Signal F,
-		// the query-expansion PathDiversity can't see). All clear on their own TTL.
+		// concentration signal), the facet distinct-URL cardinality (Signal F, the
+		// query-expansion PathDiversity can't see) and the 5xx cost pressure
+		// (Signal G, origin collapse). All clear on their own TTL.
 		if h.SolverFarm {
 			rs = appendFlag(rs, "farm")
 		}
@@ -1349,6 +1351,9 @@ func runChallengeWebTop(baseURL string, args []string) error {
 		}
 		if h.QueryCardinality > 0 {
 			rs = appendFlag(rs, fmt.Sprintf("facet=%d", h.QueryCardinality))
+		}
+		if h.CostPressure > 0 {
+			rs = appendFlag(rs, fmt.Sprintf("cost=%d%%", h.CostPressure))
 		}
 		ttl, left := chalTTLCols(h)
 		fmt.Printf("%-35s %-6s %-6s %5.2f %6d %9s %10s  %s\n",

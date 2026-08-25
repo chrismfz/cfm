@@ -220,6 +220,18 @@ type Config struct {
 	AbuseShadowFacetMinExpansion float64 // ABUSE_SHADOW_FACET_MIN_EXPANSION (distinct URLs / distinct paths)
 	AbuseShadowFacetCap          int     // ABUSE_SHADOW_FACET_CAP (per-bucket distinct-URL set cap)
 
+	// Abuse-shadow Signal G (origin cost pressure): a vhost-level LOG-ONLY signal
+	// that flags a vhost whose origin is returning a high fraction of 5xx under real
+	// load — the SYMPTOM of the malicious flood (the 256k×500 origin collapse), as
+	// opposed to facet which sees the request-shape cause. Reuses the per-bucket 5xx
+	// counters already collected (no ingest cost), so it is effectively free to
+	// compute. Vhost-level, badge-only (`cost_pressure` field / `cost` pill); NEVER
+	// challenges or blocks. Gated under AbuseShadow, default-on with it.
+	AbuseShadowCost        bool    // ABUSE_SHADOW_COST (default on under ABUSE_SHADOW)
+	AbuseShadowCostMinFrac float64 // ABUSE_SHADOW_COST_MIN_FRAC (5xx / total must be ≥ this)
+	AbuseShadowCostMinReq  int     // ABUSE_SHADOW_COST_MIN_REQ (min requests, guards tiny vhosts)
+	AbuseShadowCostMinRPS  float64 // ABUSE_SHADOW_COST_MIN_RPS5XX (absolute 5xx rps floor)
+
 	// Optional: volume-based (uniqIP) auto under-attack mode with hysteresis.
 	// Useful for sophisticated crawlers that avoid errors but spray many unique IPs.
 	ChallengeSuspiciousUniqIP    bool // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP (1/0)

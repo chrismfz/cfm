@@ -171,6 +171,8 @@ export const liveMixin = {
           shadow_outliers: existing.shadow_outliers || row.shadow_outliers || 0,
           // Same merge hazard for the facet query-cardinality count.
           query_cardinality: existing.query_cardinality || row.query_cardinality || 0,
+          // …and the cost-pressure 5xx percent.
+          cost_pressure: existing.cost_pressure || row.cost_pressure || 0,
           fromSuspicious: Boolean(existing.fromSuspicious),
           fromChallenge: true,
           source: existing.fromSuspicious ? "both" : "challenged",
