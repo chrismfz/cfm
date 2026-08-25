@@ -322,11 +322,16 @@ Class-2 burst.
       (`edge_access_tail`) to fix that weight.
 
 ### Phase 1 — converge into the two scores, SHADOW-only
-- [ ] **FIRST: wire `verifiedGoodBot` into the vhost/challenge decision.** Reuse
-      the existing FCrDNS verifier so a verified crawler (Google/Bing/Meta/Apple/
-      Yandex) is not vhost-challenged; log the would-suppress in shadow first,
-      then apply. Fixes the live Googlebot `CHALLENGE_ERR_RATIO` FP and stops
-      hard-challenging Meta on techking/shopzy. Small, self-contained PR.
+- [x] **DONE — wire `verifiedGoodBot` into the challenge decision.** Branch
+      `claude/verified-crawler-vhost-exempt`: a per-IP good-bot exemption at
+      `handleDecision` downgrades a would-be challenge (per-IP OR vhost-wide) to
+      allow for an FCrDNS-verified crawler (Google/Bing/Meta/Apple/Yandex),
+      reusing the existing verifier. Cache-only on the hot path (lazy PTR + async
+      forward-confirm), fail-closed, never softens a `block`. Fixes the live
+      Googlebot `CHALLENGE_ERR_RATIO` FP and stops hard-challenging Meta on
+      techking/shopzy. Knob `CHALLENGE_GOODBOT_EXEMPT` (default on, like the
+      subnet exemption — provably safe, so not gated behind shadow). Adversarial
+      review folded in (RWMutex fast path, single-sourced matcher, log-once).
 - [ ] Add missing per-vhost features: query-cardinality, URL-repeat-ratio,
       cost/5xx-trend, datacenter-ASN-frac (verified-gated).
 - [ ] Add missing per-client features: header-coherence, solve-latency; route
