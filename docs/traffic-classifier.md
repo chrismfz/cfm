@@ -382,11 +382,24 @@ Class-2 burst.
       and `≥ MIN_REQ(50)` requests. Verified crawlers excluded via FCrDNS (else a
       crawled shop reads ~100% datacenter — the techking/shopzy trap). **Origin is
       never innocence**: datacenter-ASN alone drives NO decision — corroborating
-      feature only. Cost-bounded (CLAUDE.md §6): cheap mmdb ASN class for all IPs,
-      capped FCrDNS only for datacenter+good-bot-PTR candidates, per-tick IP budget
-      with a logged deferral (no silent cap); every budget edge errs toward not
-      flagging. Log-only: `dc_fraction` badge (`dc N%` pill / `dc=N%` CLI) +
-      `signal=dc_fraction` line. Own mark store + TTL. Default-ON under
+      feature only. Cost-bounded (CLAUDE.md §6): cheap mmdb ASN class for all IPs
+      under a per-tick IP budget (logged deferral, no silent cap; a single
+      over-budget vhost is processed anyway so the biggest floods stay visible);
+      the good-bot exclusion runs through a shared FCrDNS **verdict cache**
+      (`dcFracGoodBot`, the same non-blocking cached machinery as the verified-
+      crawler exemption) — a verified crawler is a DNS-free cache hit, only a miss
+      kicks a bounded/deduped/async confirm, so a stable crawler is confirmed once
+      per TTL not every tick and the verdict survives geo-cache eviction. **Two
+      adversarial-review MAJORs fixed** in the same PR: (1) the original synchronous
+      per-tick FCrDNS was a per-tick DNS storm on crawled shops — replaced by the
+      verdict cache; (2) a vhost with more distinct IPs than the whole per-tick
+      budget was deferred forever — now processed. **Residual, pre-enforcement:**
+      a cold good-bot verdict (chiefly the first ticks after a restart) counts the
+      IP as datacenter until the async confirm lands (~2–3 ticks) — deliberate
+      (excluding the unknown would blind the signal to generic/absent-PTR floods),
+      but "count-on-unknown / exclude-on-verified" must be closed before this
+      feeds any decision. Log-only: `dc_fraction` badge (`dc N%` pill / `dc=N%`
+      CLI) + `signal=dc_fraction` line. Own mark store + TTL. Default-ON under
       `ABUSE_SHADOW`; knobs `ABUSE_SHADOW_DCFRAC[_MIN_FRAC|_MIN_REQ|_MIN_IPS]`. NO
       score contribution, NO enforcement.
 - [ ] Add missing per-client features: header-coherence, solve-latency; route

@@ -22,18 +22,27 @@ import (
 //
 // Cost discipline (CLAUDE.md §6 — do not create a per-tick DNS storm): ASN
 // classification is a cheap inline mmdb lookup (LookupCachedOrAsync, no DNS) done
-// for every IP under a per-tick IP budget; the expensive FCrDNS forward-confirm
-// runs ONLY for the rare datacenter IP whose already-cached PTR looks like a good
-// bot, and is itself capped per tick. When a BUDGET is exhausted the code errs
-// toward NOT flagging (a deferred vhost is logged, not dropped; an unverifiable
-// good-bot candidate is given the benefit of the doubt). The one edge that goes
-// the OTHER way is a cold PTR: LookupCachedOrAsync returns the ASN but no PTR on a
-// cache miss, so a datacenter IP whose PTR has not warmed yet is not recognisable
-// as a good bot and IS counted — deliberately, because a real datacenter flood
-// usually has a generic/absent PTR and excluding cold IPs would make the signal
-// blind to a fresh flood. The cost is a transient over-count of a freshly-observed
-// verified crawler (e.g. Meta on a cloud ASN) until its PTR caches a tick or two
-// later, then it drops out. All of it is log-only; nothing here blocks/challenges.
+// for every IP under a per-tick IP budget (vhosts past the budget are deferred and
+// logged, never silently dropped; a single vhost that alone exceeds a full budget
+// is processed anyway so the largest floods are never invisible). The good-bot
+// exclusion goes through a shared FCrDNS VERDICT CACHE (dcFracGoodBot): a verified
+// crawler is a lock-free cache hit with NO DNS, and only a cache MISS on a
+// good-bot-suffix PTR kicks a bounded, deduped, async forward-confirm — so a
+// stable crawler is confirmed once per posTTL, not every 5s tick, and the verdict
+// outlives geo-cache eviction. This is the fix for the earlier per-tick-storm and
+// per-eviction-FP designs.
+//
+// Residual, documented, log-only limitation: on a COLD good-bot verdict (a crawler
+// IP not yet in the verdict cache — chiefly the first ticks after a daemon
+// restart), the IP counts as datacenter until the async confirm lands (~2–3
+// ticks), so a freshly-restarted, heavily-crawled shop can briefly over-read its
+// datacenter fraction. Counting the unknown is deliberate: a real cloud flood is
+// mostly generic/absent-PTR IPs that would be excluded if "unknown ⇒ not counted",
+// blinding the signal to its primary target; and every steady-state good bot is
+// remembered by the verdict cache, so the FP is a startup transient, not ongoing.
+// This asymmetry (count-on-unknown, exclude-on-verified) is safe for a log-only
+// feature but must be closed before Signal H feeds any enforcement (e.g. a warmup
+// grace period, or a synchronous confirm for the candidate subset).
 
 // dcFracShadowCfg is the resolved Signal-H threshold set (defaults applied).
 type dcFracShadowCfg struct {
@@ -62,42 +71,32 @@ func (e *Engine) dcFracShadowCfg() dcFracShadowCfg {
 	return c
 }
 
-// dcFracBudgets bounds the per-tick enrichment work.
-const (
-	// maxDCFracIPEnrichPerTick caps how many IPs the signal mmdb-classifies per
-	// tick across all vhosts. mmdb is cheap, but this keeps a fleet with millions
-	// of distinct IPs from doing unbounded work under one eval; vhosts past the
-	// budget are deferred (and logged) to a later tick, not silently dropped.
-	maxDCFracIPEnrichPerTick = 8000
-	// maxDCFracFCrDNSPerTick caps the expensive FCrDNS forward-confirms. Only
-	// datacenter IPs whose cached PTR looks like a good bot are ever candidates, so
-	// this is rarely reached; past it, a candidate is given the benefit of the doubt
-	// (excluded — the safe direction).
-	maxDCFracFCrDNSPerTick = 30
-)
+// maxDCFracIPEnrichPerTick caps how many IPs the signal mmdb-classifies per tick
+// across all vhosts. mmdb is cheap, but this keeps a fleet with millions of
+// distinct IPs from doing unbounded work under one eval; vhosts past the budget
+// are deferred (and logged) to a later tick, not silently dropped. There is no
+// separate FCrDNS budget: the good-bot verdict cache (dcFracGoodBot) already
+// bounds and dedups the forward-confirms internally, and a confirmed crawler is
+// then a lock-free cache hit — so DNS is not per-tick work to budget here.
+const maxDCFracIPEnrichPerTick = 8000
 
-// dcIPClass is the per-IP verdict: does this IP count toward the vhost's
-// "unverified datacenter" numerator? Pure given a resolved Result and a verifier,
-// so the gating logic is unit-testable without an Enricher.
-//
-//	verify == nil  → FCrDNS budget exhausted; a good-bot-looking PTR is given the
-//	                 benefit of the doubt (excluded). Safe (false-negative).
-//	verify != nil  → run FCrDNS: a real crawler is excluded, a spoofed googlebot
-//	                 PTR fails forward-confirm and IS counted as datacenter.
-func dcIPCountsAsDatacenter(asn uint, asnName, ptr, ip string, verify func(ptr, ip string) bool) bool {
-	if !IsDatacenter(asn, asnName) {
-		return false
-	}
-	if ptr != "" && looksLikeGoodBotPTR(ptr) {
-		if verify == nil {
-			return false // can't confirm this tick → don't count (benefit of the doubt)
-		}
-		if verify(ptr, ip) {
-			return false // verified good bot → not suspicious
-		}
-		// spoofed good-bot PTR that fails forward-confirm → falls through, counted.
-	}
-	return true
+// dcFracGoodBot is the shared FCrDNS good-bot verdict cache for Signal H. A cache
+// hit (the steady state for a stable crawler) is DNS-free; a miss on a good-bot-
+// suffix PTR kicks a bounded, deduped, async forward-confirm and caches the
+// verdict (positive for posTTL, negative for negTTL), so a crawler is confirmed
+// once per posTTL rather than every 5s tick, and the verdict outlives geo-cache
+// eviction. Separate from the edge bridge's instance (different subsystem), same
+// battle-tested machinery.
+var dcFracGoodBot = newBridgeGoodBotState()
+
+// dcIPCountsAsDatacenter is the pure per-IP verdict: an IP counts toward the
+// vhost's "unverified datacenter" numerator iff it is on a datacenter/cloud ASN
+// AND is not an FCrDNS-verified good bot. Single-sourced (the emit computes
+// verifiedGoodBot once, via the verdict cache, and hands the boolean here) so the
+// datacenter/good-bot rule lives in exactly one place, and unit-testable without
+// an Enricher.
+func dcIPCountsAsDatacenter(asn uint, asnName string, verifiedGoodBot bool) bool {
+	return IsDatacenter(asn, asnName) && !verifiedGoodBot
 }
 
 // emitAbuseShadowDatacenterFrac runs Signal H in log-only mode. Called from the
@@ -135,7 +134,6 @@ func (e *Engine) emitAbuseShadowDatacenterFrac(now time.Time) {
 	}
 
 	ipBudget := maxDCFracIPEnrichPerTick
-	fcrdnsBudget := maxDCFracFCrDNSPerTick
 	deferred := 0
 
 	// Iterate in Go's randomized map order ON PURPOSE: when the per-tick IP budget
@@ -169,14 +167,19 @@ func (e *Engine) emitAbuseShadowDatacenterFrac(now time.Time) {
 		dcReqs, dcIPs := 0, 0
 		for ip, n := range perIP {
 			r := e.enr.LookupCachedOrAsync(ip) // inline mmdb (no blocking DNS)
-			var verify func(ptr, ip string) bool
-			// Only pay for the good-bot verifier for actual candidates, and only
-			// while the FCrDNS budget lasts.
-			if IsDatacenter(r.ASN, r.ASNName) && r.PTR != "" && looksLikeGoodBotPTR(r.PTR) && fcrdnsBudget > 0 {
-				fcrdnsBudget--
-				verify = forwardConfirmGoodBot
+			if !IsDatacenter(r.ASN, r.ASNName) {
+				continue // residential/unknown — skip the good-bot check entirely
 			}
-			if dcIPCountsAsDatacenter(r.ASN, r.ASNName, r.PTR, ip, verify) {
+			// Verified-gating through the shared good-bot verdict cache: a cache HIT
+			// (the steady state for a stable crawler) returns instantly with NO DNS; a
+			// miss on a good-bot-suffix PTR kicks a bounded, deduped, ASYNC forward-
+			// confirm and returns "" for now. So a crawler is FCrDNS'd once per posTTL,
+			// not every tick (kills the per-tick DNS storm), and the verdict survives
+			// geo-cache eviction. r.PTR is already fetched, so ptrFn is a cheap closure
+			// only called on a cache miss.
+			ptr := r.PTR
+			bot := dcFracGoodBot.verified(ip, func() string { return ptr }, now) != ""
+			if dcIPCountsAsDatacenter(r.ASN, r.ASNName, bot) {
 				dcReqs += n
 				dcIPs++
 			}
@@ -216,12 +219,4 @@ func (e *Engine) emitAbuseShadowDatacenterFrac(now time.Time) {
 		}
 		MarkDCFracShadowBulk(marks, ttl)
 	}
-}
-
-// forwardConfirmGoodBot is the FCrDNS verifier passed into dcIPCountsAsDatacenter:
-// the PTR host is re-resolved and must forward-confirm back to ip. Wraps the
-// shared verifiedGoodBot so a spoofed PTR (claims a good bot, fails forward-confirm)
-// returns false and the IP is counted as datacenter.
-func forwardConfirmGoodBot(ptr, ip string) bool {
-	return verifiedGoodBot(ptr, ip) != ""
 }

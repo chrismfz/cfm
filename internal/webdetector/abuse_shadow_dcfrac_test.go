@@ -5,40 +5,30 @@ import (
 	"time"
 )
 
-// dcIPCountsAsDatacenter is the pure per-IP gating decision. A well-known cloud
-// ASN counts; a residential ASN never does; a good-bot PTR is excluded per the
-// FCrDNS verifier's verdict; and when the verifier is nil (budget exhausted) a
-// good-bot-looking PTR is given the benefit of the doubt (excluded, safe).
+// dcIPCountsAsDatacenter is the pure per-IP gating decision: count iff the IP is
+// on a datacenter/cloud ASN AND is not an FCrDNS-verified good bot. The good-bot
+// verdict is computed once by the emit (via the shared verdict cache) and passed
+// in as a boolean, so this stays a trivially-testable rule with no DNS.
 func TestDCIPCountsAsDatacenter(t *testing.T) {
 	// AS16509 = AMAZON-02 (in the curated cloud map); AS3215 = a telco/residential
 	// org name with no cloud keyword.
 	const dcASN, dcName = 16509, "AMAZON-02"
 	const resASN, resName = 3215, "Orange S.A."
 
-	always := func(string, string) bool { return true } // FCrDNS says "verified good bot"
-	never := func(string, string) bool { return false } // FCrDNS says "spoofed / not a bot"
-
 	cases := []struct {
-		name    string
-		asn     uint
-		asnName string
-		ptr     string
-		verify  func(string, string) bool
-		want    bool
+		name       string
+		asn        uint
+		asnName    string
+		verifiedGB bool
+		want       bool
 	}{
-		{"residential never counts", resASN, resName, "", never, false},
-		{"datacenter plain counts", dcASN, dcName, "host.compute.amazonaws.com", never, true},
-		{"datacenter no ptr counts", dcASN, dcName, "", nil, true},
-		// A good-bot-looking PTR on a datacenter IP, verified → excluded.
-		{"verified good bot excluded", dcASN, dcName, "crawl-66-x.googlebot.com", always, false},
-		// Same, but FCrDNS fails (spoofed PTR) → counted as datacenter.
-		{"spoofed good bot counted", dcASN, dcName, "fake.googlebot.com", never, true},
-		// Good-bot-looking PTR but no budget to verify (verify==nil) → benefit of
-		// the doubt, excluded (false-negative safe direction).
-		{"unverifiable good bot excluded", dcASN, dcName, "crawl-66-x.googlebot.com", nil, false},
+		{"residential never counts", resASN, resName, false, false},
+		{"residential is not rescued by a bot flag", resASN, resName, true, false},
+		{"datacenter, not a verified bot, counts", dcASN, dcName, false, true},
+		{"datacenter, verified good bot, excluded", dcASN, dcName, true, false},
 	}
 	for _, tc := range cases {
-		got := dcIPCountsAsDatacenter(tc.asn, tc.asnName, tc.ptr, "1.2.3.4", tc.verify)
+		got := dcIPCountsAsDatacenter(tc.asn, tc.asnName, tc.verifiedGB)
 		if got != tc.want {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}

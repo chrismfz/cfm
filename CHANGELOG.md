@@ -29,15 +29,20 @@ back-filled here — see the git/PR history for that period.
   challenges or blocks. It stamps a per-vhost `dc_fraction` badge (`dc N%` pill in
   cfm-admin, `dc=N%` in `cfm webtop challenge`) and writes a `signal=dc_fraction`
   line to `cfm.abuse_shadow.log`. Cost-bounded per CLAUDE.md §6: ASN class is a
-  cheap inline mmdb lookup (no DNS), the FCrDNS good-bot confirm runs only for the
-  rare datacenter IP whose cached PTR looks like a good bot and is capped per
-  tick, and a per-tick IP budget defers (and logs — no silent cap) the overflow
-  to a later tick. Budget-exhaustion edges err toward NOT flagging; the one edge
-  the other way is a cold PTR (a datacenter IP whose reverse DNS has not warmed
-  yet is counted, since a real flood usually has no good-bot PTR and excluding
-  cold IPs would blind the signal), which transiently over-counts a
-  freshly-observed verified crawler until its PTR caches — self-correcting. Gated
-  under the `ABUSE_SHADOW` master, default-ON with it;
+  cheap inline mmdb lookup (no DNS) under a per-tick IP budget that defers (and
+  logs — no silent cap) the overflow, while never skipping a single vhost so large
+  it can't fit a full budget (the biggest floods stay visible); the good-bot
+  exclusion goes through a shared FCrDNS verdict cache, so a verified crawler is a
+  DNS-free cache hit and only a cache miss kicks a bounded, deduped, async
+  forward-confirm — a stable crawler is confirmed once per TTL, not every tick, and
+  the verdict outlives geo-cache eviction. Residual log-only limitation, honestly
+  documented: an IP whose good-bot verdict is still cold (mainly the first ticks
+  after a daemon restart) counts as datacenter until the async confirm lands
+  (~2–3 ticks), so a freshly-restarted heavily-crawled shop can briefly over-read
+  — counting the unknown is deliberate (a real cloud flood is mostly generic/absent
+  PTR IPs that "exclude-on-unknown" would blind the signal to), and it must be
+  closed before Signal H feeds any enforcement. Gated under the `ABUSE_SHADOW`
+  master, default-ON with it;
   tunable via `ABUSE_SHADOW_DCFRAC`, `ABUSE_SHADOW_DCFRAC_MIN_FRAC` (0.5),
   `ABUSE_SHADOW_DCFRAC_MIN_REQ` (50) and `ABUSE_SHADOW_DCFRAC_MIN_IPS` (5, a
   spread of datacenter IPs, not one chatty host). Phase 1 of the
