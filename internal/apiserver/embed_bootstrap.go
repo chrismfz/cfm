@@ -365,6 +365,7 @@ func embedScopedContextFromCookie(w http.ResponseWriter, r *http.Request, store 
 	ctx = context.WithValue(ctx, webdet.CtxAuthnKey{}, true)
 	ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleScoped)
 	ctx = context.WithValue(ctx, embedCookieTokenIDKey{}, st.ID)
+	ctx = withAuthnSubject(ctx, st.ID) // per-embed-token rate-limit bucket (Step 8)
 	return ctx, true
 }
 

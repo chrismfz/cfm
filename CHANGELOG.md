@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Control-plane API rate limiting, enforcing by default (audit Step 8).** The
+  authenticated `:6060`/`:6061` API is now bounded per **identity** (admin token /
+  scoped token / session / embed) × **route class** (cheap/normal/heavy read, write,
+  privileged write, capture/stream), keyed by a non-secret subject so one scoped
+  token cannot drain another's bucket. Ceilings are **honestly high** and baked into
+  code — a "secure fleet" upgrade protects with no `cfm.conf` change — so only genuine
+  runaway (orders of magnitude above real fan-out) trips them. A trip is a self-healing
+  `429` + `Retry-After` and is logged to `cfm.api.log` (`event=ratelimit_trip`);
+  crucially it is **never** turned into an nft block of the caller's IP (the admin
+  token is the fleet controller). Optional knobs `RATE_LIMIT_MODE`
+  (`enforce`/`shadow`/`off`) and `RATE_LIMIT_SCALE` tune without a code change; invalid
+  credentials still get the normal `401` before the limiter, so limiter behaviour never
+  leaks credential validity. See `docs/security/control-plane-rate-limiting.md`.
 - **`AdminTransportRedirect` now tracks a non-default `PORT` (audit R01 / Step 5 follow-up).**
   `requestPeer`'s listener classification keyed on hardcoded `6060`/`6061`, so running the
   control plane on a non-default `PORT`/`TLS_PORT` classified every request as `other` and

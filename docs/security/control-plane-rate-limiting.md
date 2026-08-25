@@ -1,7 +1,8 @@
 # Control-plane rate limiting (audit Step 8)
 
-**Status:** 🎨 DESIGN — awaiting review before implementation. Ships **enforcing by
-default** (`429`) with **honestly high ceilings** + full log/API observability.
+**Status:** ✅ IMPLEMENTED — `internal/apiserver/ratelimit.go` + `withAuthnSubject`
+threading. Ships **enforcing by default** (`429`) with **honestly high ceilings** +
+full log/API observability. Tests: `ratelimit_test.go`. Live verification → Step 10.
 
 Finding/spec: `Audit_Fix_Order.md` Step 8 (P2). Goal: bound already-authenticated
 control-plane abuse without treating every caller equally, keyed by identity class
@@ -43,7 +44,7 @@ one caller from draining another's bucket, and is always a stable non-secret:
 | `token_admin` | `""` (one shared admin bucket) | there is a single admin token; a runaway admin is throttled + alerted, **not** nft-blocked (§6) |
 | `token_scoped` | the token **ID** (`TokenStore` `st.ID`) | already the non-secret id used in `auth_attempt` audit; must be threaded into context (small add) |
 | `embed_bootstrap_cookie` | the embed session id | the embed context already carries a stable non-secret id |
-| `session_cookie` | `sha256(session token)[:16]` | never the raw session token |
+| `session_cookie` | `user:<username>` | the authenticated goauth username (non-secret; never the session cookie); `key_kind=session_user` in the log |
 
 Raw tokens/cookies never appear in a key or a log line. IP is **not** the primary
 key for authenticated callers (the fleet controller and the admin UI share IPs);
@@ -105,8 +106,10 @@ measurement pass): a legitimate caller that ever trips shows up immediately and 
 ceiling gets raised. Trips are rate-limited in the log too (no log flood).
 
 **The one hard line from the spec, kept exactly:** a runaway trip is
-**credential-level throttling** (a self-healing `429`) **plus a high-severity alert**,
-and is **never** turned into an nft block of the caller's IP. The admin token is the
+**credential-level throttling** (a self-healing `429`) plus a high-severity signal —
+today that signal is the `severity=high` line in `cfm.api.log` (a real notifier
+event is the deferred operator follow-up) — and is **never** turned into an nft block
+of the caller's IP. The admin token is the
 fleet controller (cfm-web); nft-banning its IP would take out fleet management. So
 rate-limit trips are **deliberately NOT wired into the `cfm_endpoints`/wafsec → nft
 path** — they log and alert only. (This is also why admin ceilings are the most

@@ -86,6 +86,8 @@ type DebugConfig struct {
 	DebugCaptureMaxDuration    time.Duration // DEBUG_CAPTURE_MAX_DURATION
 	DebugCaptureRetentionCount int           // DEBUG_CAPTURE_RETENTION_COUNT
 	DebugCaptureRetentionAge   time.Duration // DEBUG_CAPTURE_RETENTION_AGE
+	RateLimitMode              string        // RATE_LIMIT_MODE (enforce[default]/shadow/off)
+	RateLimitScale             float64       // RATE_LIMIT_SCALE (optional multiplier on code-default ceilings; default 1.0)
 }
 
 // SMTPBlockConfig — CSF-like outbound SMTP control (no INI sections, flat keys only)
@@ -195,10 +197,10 @@ type APIConfig struct {
 	AuthToken       string
 	MCPToken        string // MCP_TOKEN — client-facing auth for the read-only MCP server; kept separate from AuthToken so the MCP credential is not the admin/API token
 	MCPEnabled      *bool  // MCP / MCP_ENABLED (on/off) kill-switch; nil = unset = default ON (arm when AUTH_TOKEN is present, auto-generating an MCP_TOKEN if none is set)
-	AutoBlockSend   bool // AUTOBLOCK_SEND_TO_API
-	ManualBlockSend bool // MANUAL_BLOCK_SEND_TO_API
-	UnblockSend     bool // UNBLOCK_SEND_TO_API
-	DetectorsSend   bool // DETECTORS_SEND_TO_API (optional, falls back to AutoBlockSend if false)
+	AutoBlockSend   bool   // AUTOBLOCK_SEND_TO_API
+	ManualBlockSend bool   // MANUAL_BLOCK_SEND_TO_API
+	UnblockSend     bool   // UNBLOCK_SEND_TO_API
+	DetectorsSend   bool   // DETECTORS_SEND_TO_API (optional, falls back to AutoBlockSend if false)
 }
 
 type FirewallConfig struct {
@@ -854,6 +856,12 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			}
 		case "TLS_LISTEN_ADDRESS":
 			cfg.Debug.TLSAddress = val
+		case "RATE_LIMIT_MODE":
+			cfg.Debug.RateLimitMode = val
+		case "RATE_LIMIT_SCALE":
+			if f, err := strconv.ParseFloat(strings.TrimSpace(val), 64); err == nil && f > 0 {
+				cfg.Debug.RateLimitScale = f
+			}
 		case "AUTH_DB_PATH":
 			cfg.Debug.AuthDBPath = val
 		case "AUTH_SESSION_DB_PATH":

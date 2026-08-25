@@ -70,6 +70,27 @@ func authnMechanismFromContext(ctx context.Context) authnMechanism {
 	return v
 }
 
+// authnSubjectCtxKey carries a stable NON-SECRET per-identity subject (admin
+// constant, scoped/embed token ID, or a session-cookie hash) used only to key
+// rate-limit buckets so one caller cannot drain another's (audit Step 8). It must
+// never hold raw credential material.
+type authnSubjectCtxKey struct{}
+
+func withAuthnSubject(ctx context.Context, subject string) context.Context {
+	if subject == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, authnSubjectCtxKey{}, subject)
+}
+
+func authnSubjectFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(authnSubjectCtxKey{}).(string)
+	return v
+}
+
 var (
 	embedBootstrapAuthLogMu   sync.Mutex
 	embedBootstrapAuthLastLog time.Time
@@ -344,6 +365,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 					ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 					ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
 					ctx = withAuthnMechanism(ctx, authnMechanismTokenAdmin)
+					ctx = withAuthnSubject(ctx, "admin") // single admin bucket (rate limit, Step 8)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -357,6 +379,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 					ctx = context.WithValue(ctx, webdet.CtxAuthnKey{}, true)
 					ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleScoped)
 					ctx = withAuthnMechanism(ctx, authnMechanismTokenScoped)
+					ctx = withAuthnSubject(ctx, st.ID) // per-token bucket: one scoped token can't drain another (Step 8)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -404,6 +427,9 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 				ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
 				ctx = withAuthnMechanism(ctx, authnMechanismSession)
+				if u, ok := authUserFromContext(r.Context()); ok && u != nil && u.Username != "" {
+					ctx = withAuthnSubject(ctx, "user:"+u.Username) // per-user session bucket (Step 8)
+				}
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}

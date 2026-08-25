@@ -17,7 +17,8 @@
 //
 // Handler stack (outermost → innermost — see Start()):
 //   RequestLog → SecurityHeaders → AdminTransportRedirect → APISecurityAnomaly
-//   → PprofWriteTimeout → Auth.LoadAndSave → TokenMiddleware → CSRF → MFARollout → mux
+//   → PprofWriteTimeout → Auth.LoadAndSave → TokenMiddleware → CSRF → RateLimit
+//   → MFARollout → mux
 // SecurityHeaders (R10) sits outside AdminTransportRedirect so redirects/refusals
 // carry the baseline headers too, and gives the direct :6060/:6061 listeners the
 // same nosniff/Referrer-Policy the edge adds.
@@ -335,13 +336,24 @@ func Start(
 	// ── Build handler stack ───────────────────────────────────────────────────
 	// Execution order (outermost → innermost):
 	//   RequestLog → SecurityHeaders → AdminTransportRedirect → APISecurityAnomaly
-	//   → PprofWriteTimeout → LoadAndSave → TokenMiddleware → CSRF → MFARollout → mux
+	//   → PprofWriteTimeout → LoadAndSave → TokenMiddleware → CSRF → RateLimit
+	//   → MFARollout → mux
 	// SecurityHeaders (R10) sets baseline nosniff/Referrer-Policy on every response.
+	// RateLimit (Step 8) runs INSIDE TokenMiddleware so it keys buckets on the
+	// authenticated identity; anonymous requests were already rejected upstream.
 	// AdminTransportRedirect sits OUTSIDE TokenMiddleware (pre-auth) so a direct
 	// plaintext admin request is upgraded/refused before any credential is
 	// processed, and INSIDE RequestLog so the transport decision is logged.
+	rlScale := cfg.Debug.RateLimitScale
+	if rlScale <= 0 {
+		rlScale = 1.0
+	}
+	rlMode := parseRateLimitMode(cfg.Debug.RateLimitMode)
+	logging.LogfAPI("[apiserver] rate limiting: mode=%s scale=%.2g", rlModeName(rlMode), rlScale)
+
 	var handler http.Handler
 	handler = MFARolloutMiddleware(m)
+	handler = RateLimitMiddleware(rlMode, rlScale)(handler)
 	handler = CSRFMiddleware(handler)
 	handler = TokenMiddleware(cfg.API.AuthToken, store)(handler)
 	if Auth != nil {
