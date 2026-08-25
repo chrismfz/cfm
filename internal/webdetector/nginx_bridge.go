@@ -74,6 +74,14 @@ type NginxBridge struct {
 	hostBypassFunc func(string) bool           // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
 	stats          bridgeStatsState
 
+	// goodBotExempt: when set (CHALLENGE_GOODBOT_EXEMPT, default on), a would-be
+	// challenge is downgraded to allow for an FCrDNS-verified good bot (it cannot
+	// solve a challenge; challenging it breaks crawl). goodBot is the per-IP
+	// verdict cache consulted on the hot path — see nginx_bridge_goodbot.go.
+	// Written once at startup (before serving), so no lock needed for the flag.
+	goodBotExempt bool
+	goodBot       *bridgeGoodBotState
+
 	// decisionSem caps concurrent in-flight handleDecision goroutines.
 	// Without it, the http.Server is goroutine-per-connection with no
 	// upper bound; under attack or a thundering-herd burst it can spawn
@@ -815,6 +823,7 @@ func NewNginxBridge(sockPath, token string, defaultTTL, okIPTTL time.Duration) *
 			timeoutByMinute: make(map[int64]int64),
 		},
 		decisionSem: make(chan struct{}, decisionConcurrencyCap()),
+		goodBot:     newBridgeGoodBotState(),
 	}
 
 	if b.cfg.Enabled {
@@ -1785,6 +1794,27 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	// caught. isChallengeExemptEndpoint is deliberately narrow (see there).
 	if vhAction == "challenge" && ipAction == "allow" && isChallengeExemptEndpoint(uri) {
 		vhAction = "allow"
+	}
+
+	// Verified good-bot challenge exemption (per-IP scope; mirrors the subnet
+	// exemption in challenge_subnet_goodbot.go). Never serve a challenge to an
+	// FCrDNS-verified crawler: it cannot solve one, so challenging it silently
+	// breaks legitimate crawl/SEO/social (observed live: real Googlebot getting
+	// CHALLENGE_ERR_RATIO; Meta vhost-challenged on shop vhosts). Cache-only on
+	// this hot path — a miss for a good-bot-suffix PTR kicks a bounded async
+	// forward-confirm that exempts the crawler on a later request. Runs only when
+	// a challenge would otherwise be served, so the verify work is limited to
+	// challenged clients. Downgrades "challenge" only; a per-IP "block" is never
+	// softened, and the WAF / traffic-rule engine below still applies.
+	if b.goodBotExempt && b.goodBot != nil && ip != "" && b.enr != nil &&
+		ipAction != "block" && (ipAction == "challenge" || vhAction == "challenge") {
+		// ptrFn is lazy: the enrich/PTR lookup happens only on a good-bot cache
+		// miss, so a verified crawler (cache hit) adds just one RLock. Skipped
+		// entirely when the IP is already blocked (block wins regardless).
+		ptrFn := func() string { return b.enr.LookupCachedOrAsync(ip).PTR }
+		if bot := b.goodBot.verified(ip, ptrFn, now); bot != "" {
+			ipAction, vhAction = goodBotDowngrade(ipAction, vhAction, bot)
+		}
 	}
 
 	resp := map[string]any{

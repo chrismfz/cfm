@@ -242,39 +242,63 @@ var goodBotPTRSuffixes = map[string]string{
 // forward-confirms back to ip (FCrDNS); "" otherwise. A PTR that claims a good
 // bot but fails forward-confirm returns "" (spoofed → not exempt).
 func verifiedGoodBot(ptr, ip string) string {
-	p := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(ptr), "."))
-	if p == "" {
+	name, host, ok := goodBotSuffixName(ptr)
+	if !ok {
 		return ""
 	}
-	for suf, name := range goodBotPTRSuffixes {
-		if strings.HasSuffix(p, suf) {
-			if forwardConfirms(p, ip) {
-				return name
-			}
-			return ""
-		}
+	if forwardConfirms(host, ip) {
+		return name
 	}
 	return ""
 }
 
+// goodBotSuffixName reports the good-bot name whose canonical PTR suffix matches
+// ptr, plus the normalised host (trimmed, lowercased, no trailing dot) used for
+// the forward-confirm. This is the MATCH only — membership is never trust; a
+// caller that needs trust must forward-confirm (verifiedGoodBot). Single-sourced
+// so the candidate pre-check (looksLikeGoodBotPTR) and the verifier can never
+// drift (CLAUDE.md §6).
+func goodBotSuffixName(ptr string) (name, host string, ok bool) {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(ptr), "."))
+	if host == "" {
+		return "", "", false
+	}
+	for suf, nm := range goodBotPTRSuffixes {
+		if strings.HasSuffix(host, suf) {
+			return nm, host, true
+		}
+	}
+	return "", host, false
+}
+
 // forwardConfirms resolves host and reports whether any A/AAAA equals ip (FCrDNS).
 func forwardConfirms(host, ip string) bool {
+	ok, _ := forwardConfirmsE(host, ip)
+	return ok
+}
+
+// forwardConfirmsE is forwardConfirms with the resolver error exposed, so a
+// caller can distinguish a definitive non-match (spoofed / wrong IP → a real
+// negative) from a transient lookup failure (err != nil → inconclusive). The
+// good-bot verdict cache uses this so a DNS blip on a real crawler's
+// forward-confirm is not pinned as "not a bot" for the negative TTL.
+func forwardConfirmsE(host, ip string) (matched bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
 	if err != nil {
-		return false
+		return false, err
 	}
 	want := net.ParseIP(ip)
 	for _, a := range addrs {
 		// Compare as parsed IPs so a non-canonical IPv6 spelling still matches
 		// (raw string compare would false-negative a legit AAAA good bot).
 		if ap := net.ParseIP(a); ap != nil && want != nil && ap.Equal(want) {
-			return true
+			return true, nil
 		}
 		if a == ip {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }

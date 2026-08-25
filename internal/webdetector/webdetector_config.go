@@ -264,6 +264,7 @@ type Config struct {
 	ChallengeSubnetCap           int           // CHALLENGE_SUBNET_CAP
 	ChallengeSubnetSameHost      bool          // CHALLENGE_SUBNET_SAME_HOST
 	ChallengeSubnetGoodBotExempt bool          // CHALLENGE_SUBNET_GOODBOT_EXEMPT (default 1)
+	ChallengeGoodBotExempt       bool          // CHALLENGE_GOODBOT_EXEMPT (default 1): never serve a challenge to an FCrDNS-verified good bot
 
 	// Historical store (SQLite file; old JSONL file at same path is removed and recreated as SQLite)
 	HistoryEnabled       bool          // HISTORY_ENABLED

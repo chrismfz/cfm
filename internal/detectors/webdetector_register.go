@@ -752,6 +752,7 @@ func init() {
 			ChallengeSubnetCap:           kvInt(kv, "CHALLENGE_SUBNET_CAP", 2048),
 			ChallengeSubnetSameHost:      kvBool(kv, "CHALLENGE_SUBNET_SAME_HOST", true),
 			ChallengeSubnetGoodBotExempt: kvBool(kv, "CHALLENGE_SUBNET_GOODBOT_EXEMPT", true),
+			ChallengeGoodBotExempt:       kvBool(kv, "CHALLENGE_GOODBOT_EXEMPT", true),
 
 			// Under-Attack Mode (I1): detect-only. Code default OFF so an existing
 			// install is unchanged on upgrade; the shipped reference detectors.conf
