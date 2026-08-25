@@ -510,6 +510,7 @@ func NewEngine(cfg Config) *Engine {
 	// toggle is deprecated and ignored.
 	e.nginxBridge = NewNginxBridge(cfg.OpenRestySock, cfg.OpenRestyToken, cfg.ChallengePathsTTL, cfg.OpenRestyOkIPTTL)
 	e.nginxBridge.cfg.Trace = cfg.OpenRestyBridgeTrace
+	e.nginxBridge.goodBotExempt = cfg.ChallengeGoodBotExempt
 	e.nginxBridge.IsWAFExcluded = e.isWAFExcluded
 	e.nginxBridge.HasWAFExcludes = e.WAFExcludeHasAny
 	e.nginxBridge.ListWAFExcludes = e.WAFExcludeList

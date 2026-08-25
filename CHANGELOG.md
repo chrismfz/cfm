@@ -17,6 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **Verified good bots are no longer served a score/vhost-driven challenge.** A
+  would-be per-IP *or* vhost-wide challenge is now downgraded to allow for an
+  FCrDNS-verified crawler (Googlebot/Bingbot/Meta/Applebot/Yandex) at the
+  decision hot path — mirroring the existing subnet good-bot exemption at per-IP
+  scope. A crawler cannot solve a JS/PoW challenge, so challenging it silently
+  broke legitimate crawl/SEO/social (observed live: a real Googlebot IP
+  repeatedly issued `CHALLENGE_ERR_RATIO`; Meta's `meta-externalagent`
+  vhost-challenged on shop vhosts). The check is cache-only on the hot path (a
+  miss for a good-bot-suffix PTR kicks a bounded, deduped async forward-confirm),
+  fail-closed against spoofed PTRs and transient DNS failures, runs only when a
+  challenge would otherwise be served, and never softens a per-IP `block`. An
+  explicit operator traffic-rule challenge still applies (deliberate config is
+  not overridden). New knob `CHALLENGE_GOODBOT_EXEMPT` (default on; `0`
+  challenges verified bots too).
+
 ### Security
 - **`/debug/pprof/*` is now explicitly admin-only.** The Go profiler endpoints
   (`/debug/pprof/`, `cmdline`, `profile`, `symbol`, `trace`) were mounted behind
