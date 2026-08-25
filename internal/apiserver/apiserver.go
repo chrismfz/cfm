@@ -16,8 +16,11 @@
 //   /api/v1/mysql/                  — MySQL governor (registered when gov != nil)
 //
 // Handler stack (outermost → innermost — see Start()):
-//   RequestLog → AdminTransportRedirect → APISecurityAnomaly → PprofWriteTimeout
-//   → Auth.LoadAndSave → TokenMiddleware → CSRF → MFARollout → mux
+//   RequestLog → SecurityHeaders → AdminTransportRedirect → APISecurityAnomaly
+//   → PprofWriteTimeout → Auth.LoadAndSave → TokenMiddleware → CSRF → MFARollout → mux
+// SecurityHeaders (R10) sits outside AdminTransportRedirect so redirects/refusals
+// carry the baseline headers too, and gives the direct :6060/:6061 listeners the
+// same nosniff/Referrer-Policy the edge adds.
 // AdminTransportRedirect (R01) sits outside TokenMiddleware so a direct plaintext
 // :6060 admin request is upgraded to :6061 / refused before any auth runs.
 //
@@ -326,8 +329,9 @@ func Start(
 
 	// ── Build handler stack ───────────────────────────────────────────────────
 	// Execution order (outermost → innermost):
-	//   RequestLog → AdminTransportRedirect → APISecurityAnomaly → PprofWriteTimeout
-	//   → LoadAndSave → TokenMiddleware → CSRF → MFARollout → mux
+	//   RequestLog → SecurityHeaders → AdminTransportRedirect → APISecurityAnomaly
+	//   → PprofWriteTimeout → LoadAndSave → TokenMiddleware → CSRF → MFARollout → mux
+	// SecurityHeaders (R10) sets baseline nosniff/Referrer-Policy on every response.
 	// AdminTransportRedirect sits OUTSIDE TokenMiddleware (pre-auth) so a direct
 	// plaintext admin request is upgraded/refused before any credential is
 	// processed, and INSIDE RequestLog so the transport decision is logged.
@@ -341,6 +345,7 @@ func Start(
 	handler = PprofWriteTimeoutMiddleware(handler)
 	handler = APISecurityAnomalyMiddleware(handler)
 	handler = AdminTransportRedirect(handler, cfg.Debug.TLSPort, tlsReadyFlag.Load)
+	handler = SecurityHeadersMiddleware(handler)
 	handler = RequestLogMiddleware(handler)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────

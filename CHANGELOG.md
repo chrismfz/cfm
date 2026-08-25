@@ -93,6 +93,17 @@ back-filled here — see the git/PR history for that period.
   TLS-down state serves only a logged (`event=admin_http_fallback`) **read-only** degraded
   fallback (GET/HEAD) — challenge-gating that read window is tracked for audit Step 4. See
   `docs/security/direct-6060-transport-policy.md`.
+- **Direct control-plane security/cache response headers (audit R10, Step 9).** The direct
+  `:6060`/`:6061` listeners now carry their own baseline headers instead of relying on the
+  edge: a new `SecurityHeadersMiddleware` sets `X-Content-Type-Options: nosniff` and
+  `Referrer-Policy: strict-origin-when-cross-origin` on **every** response (closing the gap
+  where direct `/login` HTML had neither), and anonymous/invalid `401`s from the auth layer
+  now carry `Cache-Control: no-store` + `Vary` so a rejected identity response can't be
+  cached as another. `Referrer-Policy` is intentionally the browser default rather than
+  `no-referrer`, which would strip the same-origin `Referer` that CSRF falls back to.
+  Frame/CSP policy (must stay compatible with the cPanel iframe embed) and HSTS (host-wide,
+  would strand the supported plaintext `:6060`) are **deliberately deferred** — see
+  `docs/security/control-plane-headers.md`.
 
 ## 2026.08.25
 

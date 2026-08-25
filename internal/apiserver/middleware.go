@@ -387,6 +387,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			// ── 3. Embedded requests require token or embed bootstrap cookie ─
 			if embedded {
 				logging.LogfAPI("[apiserver] auth_reject=missing_scoped_embedded")
+				setAuthIdentityNoCacheHeaders(w) // identity-sensitive 401 (audit R10)
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
 				setAPIAnomalyReason(w, r, "auth_missing")
@@ -426,6 +427,7 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				return
 			}
 
+			setAuthIdentityNoCacheHeaders(w) // identity-sensitive 401 (audit R10)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
 			setAPIAnomalyReason(w, r, "auth_missing")
@@ -494,6 +496,11 @@ func suspiciousAuthHeader(r *http.Request) (bool, string) {
 }
 
 func rejectTokenAuth(w http.ResponseWriter) {
+	// An auth failure is identity-sensitive and must never be cached as another
+	// identity — set no-store here at the outer auth layer, not only in the
+	// success handlers, because anonymous/invalid requests are rejected before any
+	// endpoint-specific headers run (audit R10).
+	setAuthIdentityNoCacheHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
 	http.Error(w, `{"error":"invalid or expired token"}`, http.StatusUnauthorized)

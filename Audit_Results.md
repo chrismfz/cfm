@@ -657,8 +657,24 @@ Still unverified for R04:
 ## R10 — Authentication/cache response-header hardening gaps
 
 **Severity:** HARDENING  
-**Status:** CONFIRMED LIVE  
+**Status:** ✅ SOURCE FIXED (safe subset) / CSP+frame+HSTS deferred / LIVE RETEST PENDING  
 **Priority:** P2
+
+**Fix (Step 9):** a new `SecurityHeadersMiddleware` (`internal/apiserver/security_headers.go`,
+wired outside `AdminTransportRedirect`, inside `RequestLog`) sets `X-Content-Type-Options:
+nosniff` and `Referrer-Policy: strict-origin-when-cross-origin` on **every** direct
+`:6060`/`:6061` response, so the direct control plane no longer depends on edge-only headers
+(closes the `/login`-missing-`nosniff` gap; `strict-origin-when-cross-origin` chosen over
+`no-referrer` so `CSRFMiddleware`'s `Referer` fallback keeps working). Separately,
+`setAuthIdentityNoCacheHeaders()` is now called at the `TokenMiddleware` auth-failure points
+(`rejectTokenAuth` + the two inline `401`s), so anonymous/invalid `401`s carry
+`Cache-Control: no-store` + `Vary` — they were previously rejected before the endpoint
+headers ran. **Deliberately deferred** (product decisions, not header constants):
+CSP + frame policy must be **cPanel-iframe-aware** (per-install panel origin — a blanket
+`DENY` breaks the embed), and HSTS is host-wide so a `:6061` HSTS would force HTTPS on the
+supported plaintext `:6060` (R01/Step 5) — both tracked in
+`docs/security/control-plane-headers.md`. Tests: `security_headers_test.go`. Live retest
+(direct-vs-edge parity with a credentialed session) → Step 10.
 
 Low-volume header-only checks found different hardening behavior between direct `:6061` and the edge.
 

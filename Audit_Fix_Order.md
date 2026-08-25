@@ -20,16 +20,17 @@ Do not skip dependency steps merely because a later change looks small. In parti
 2.  ✅ pprof explicit admin-only authorization                 — done (#1341); live scoped proof -> Step 10
 3.  ✅ POST-only enforcement for every mutating endpoint       — done (this change)
 4.  ☐  Reusable Go pre-auth challenge + interactive login gate
-5.  ☐  Direct :6060 browser transport policy -> :6061 when TLS ready
+5.  ✅ Direct :6060 browser transport policy -> :6061 when TLS ready       — done (#1351, defence in depth)
 6.  ☐  Automatic request-aware session-cookie transport policy
 7.  ✅ cfm.api.log auth-attempt schema + api_abuse -> cfm_endpoints default-on  — done (#1338); auth_autoblock.go removal pending
 8.  ☐  Per-auth-mechanism / route-cost API rate limiting
-9.  ☐  Direct control-plane response/cache/security-header hardening
+9.  ◑  Direct control-plane response/cache/security-header hardening       — safe subset done (nosniff/Referrer-Policy + no-store on auth failures); CSP/frame (cPanel-iframe) + HSTS deferred
 10. ☐  Controlled credentialed regression + close Audit_Results findings
 ```
 
-Status legend: ✅ source-complete · ☐ open. Live credentialed verification for the
-done items (R02 scoped→403, etc.) rolls up to Step 10.
+Status legend: ✅ source-complete · ◑ partial (safe subset shipped, rest deferred) ·
+☐ open. Live credentialed verification for the done items (R02 scoped→403, etc.)
+rolls up to Step 10.
 
 The first three are intentionally small, separately reviewable security fixes. Steps 4-6 are the interconnected browser transport/challenge/session work. Steps 7-9 harden abuse detection and response policy after identity/transport semantics are trustworthy. Step 10 proves the final boundaries live.
 
@@ -615,7 +616,16 @@ Important policy:
 # Step 9 — direct control-plane response/cache/security-header hardening
 
 **Priority:** P2  
-**Finding:** `Audit_Results.md` R10, CONFIRMED LIVE hardening gap
+**Finding:** `Audit_Results.md` R10, CONFIRMED LIVE hardening gap  
+**Status:** ◑ SAFE SUBSET SHIPPED — `SecurityHeadersMiddleware` sets `nosniff` +
+`Referrer-Policy: strict-origin-when-cross-origin` on every direct `:6060`/`:6061`
+response, and `no-store` is now set on `TokenMiddleware` auth-failure `401`s
+(`internal/apiserver/security_headers.go`, `middleware.go`; tests
+`security_headers_test.go`; doc `docs/security/control-plane-headers.md`).
+**Deferred (deliberate):** CSP + frame policy must be cPanel-iframe-aware
+(per-install panel origin — a blanket `DENY` breaks the embed), and HSTS is host-wide
+so a `:6061` HSTS would strand the supported plaintext `:6060` (R01/Step 5). Live
+direct-vs-edge retest → Step 10.
 
 ## Problem
 
