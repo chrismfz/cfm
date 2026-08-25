@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -690,6 +691,68 @@ func RunLiveDrilldown(baseURL, host string) error {
 
 var sortKeys = []string{"rps", "uniq", "err", "bot", "score", "4xx", "5xx", "rt"}
 
+// challLite is the subset of a /challenge/vhosts row the live TUI needs: the CH
+// indicator up top, and — merged with the suspicious list — a challenged vhost's
+// row (auto or manual) in the bottom attention panel, carrying its shadow signals.
+type challLite struct {
+	host    string // original-case host (the map key is lowercased)
+	mode    string // auto|manual
+	score   float64
+	rps     float64
+	uniq    int
+	reasons []string
+	facet   int // query_cardinality
+	cost    int // cost_pressure (5xx %)
+	dc      int // dc_fraction (%)
+	shadow  int // shadow_outliers
+	farm    bool
+}
+
+// sigLetters renders a compact fixed-slot facet/cost/dc/shadow presence cell for
+// the top panel's SIG column: each slot is the signal's letter when active, else
+// '·', so the column scans vertically (a signal is always in the same position).
+func sigLetters(facet, cost, dc, shadow int) string {
+	// []rune, not []byte: '·' (U+00B7) is 2 bytes in UTF-8, so byte-indexing would
+	// corrupt the cell — write runes by position instead.
+	r := []rune("····")
+	if facet > 0 {
+		r[0] = 'f'
+	}
+	if cost > 0 {
+		r[1] = 'c'
+	}
+	if dc > 0 {
+		r[2] = 'd'
+	}
+	if shadow > 0 {
+		r[3] = 's'
+	}
+	return string(r)
+}
+
+// sigTokens returns the shadow-signal reason tokens for the bottom attention
+// panel's REASONS column (farm + the three new signals + the rate-outlier count),
+// appended after the score reasons. Empty slice when nothing is active.
+func sigTokens(facet, cost, dc, shadow int, farm bool) []string {
+	var t []string
+	if farm {
+		t = append(t, "farm")
+	}
+	if facet > 0 {
+		t = append(t, fmt.Sprintf("facet=%d", facet))
+	}
+	if cost > 0 {
+		t = append(t, fmt.Sprintf("cost=%d%%", cost))
+	}
+	if dc > 0 {
+		t = append(t, fmt.Sprintf("dc=%d%%", dc))
+	}
+	if shadow > 0 {
+		t = append(t, fmt.Sprintf("shadow=%d", shadow))
+	}
+	return t
+}
+
 func RunLiveTop(baseURL string, limit int) error {
 	if limit <= 0 {
 		limit = 25
@@ -757,7 +820,7 @@ func RunLiveTop(baseURL string, limit int) error {
 
 	var (
 		rows         []ShortRow
-		challenged   map[string]string
+		challenged   map[string]challLite
 		globalIPs    []map[string]string
 		suspicious   []SuspiciousRow
 		suspMap      map[string]SuspiciousRow
@@ -772,7 +835,7 @@ func RunLiveTop(baseURL string, limit int) error {
 	ipCursor = -1
 	bottomMode = "ips"
 
-	fetchChallenged := func() (map[string]string, error) {
+	fetchChallenged := func() (map[string]challLite, error) {
 		u := fmt.Sprintf("%s/api/v1/challenge/vhosts?status=active&limit=500", baseURL)
 		r, err := clihttp.Get(u)
 		if err != nil {
@@ -784,15 +847,31 @@ func RunLiveTop(baseURL string, limit int) error {
 		}
 
 		var vhs []struct {
-			Host string `json:"host"`
-			Mode string `json:"mode"`
+			Host             string   `json:"host"`
+			Mode             string   `json:"mode"`
+			Score            float64  `json:"score"`
+			RPS              float64  `json:"rps"`
+			UniqIP           int      `json:"uniq_ip"`
+			Reasons          []string `json:"reasons"`
+			QueryCardinality int      `json:"query_cardinality"`
+			CostPressure     int      `json:"cost_pressure"`
+			DCFraction       int      `json:"dc_fraction"`
+			ShadowOutliers   int      `json:"shadow_outliers"`
+			SolverFarm       bool     `json:"solver_farm"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&vhs); err != nil {
 			return nil, err
 		}
-		m := make(map[string]string, len(vhs))
+		// Keyed lowercase to join cleanly with suspMap (also lowercased) — a
+		// case-inconsistent join here would double-list a challenged vhost in the
+		// bottom panel (CLAUDE.md §6). The original-case host rides along for display.
+		m := make(map[string]challLite, len(vhs))
 		for _, v := range vhs {
-			m[v.Host] = v.Mode
+			m[strings.ToLower(v.Host)] = challLite{
+				host: v.Host, mode: v.Mode, score: v.Score, rps: v.RPS, uniq: v.UniqIP,
+				reasons: v.Reasons, facet: v.QueryCardinality, cost: v.CostPressure,
+				dc: v.DCFraction, shadow: v.ShadowOutliers, farm: v.SolverFarm,
+			}
 		}
 		return m, nil
 	}
@@ -911,7 +990,7 @@ func RunLiveTop(baseURL string, limit int) error {
 
 	buildTableRows := func() {
 		colW := W - 2
-		metricsW := 92
+		metricsW := 98 // +6 for the SIG column
 		hostW := colW - metricsW
 		if hostW < 15 {
 			hostW = 15
@@ -921,6 +1000,7 @@ func RunLiveTop(baseURL string, limit int) error {
 			padRight(" VHOST", hostW),
 			" CH ",
 			"SUP ",
+			" SIG  ",
 			"  RPS ",
 			" 2xx  ",
 			" 4xx  ",
@@ -935,7 +1015,7 @@ func RunLiveTop(baseURL string, limit int) error {
 		table.RowStyles = map[int]ui.Style{}
 
 		for i, row := range rows {
-			chalMode := challenged[row.Host]
+			chalMode := challenged[strings.ToLower(row.Host)].mode
 
 			host := row.Host
 			maxHost := hostW - 1
@@ -970,16 +1050,17 @@ func RunLiveTop(baseURL string, limit int) error {
 			if row.SolverFarm {
 				suspCell = "F" + suspCell[1:]
 			}
-			// NOTE: row.ShadowOutliers (abuse_shadow rate-outlier count) is
-			// deliberately NOT rendered in this compact TUI — the SUP cell has a
-			// single reserved indicator slot (taken by the farm "F"). The count is
-			// surfaced in `cfm webtop challenge` (shadow=N), cfm-admin, and the
-			// abuse_shadow MCP tool instead.
+			// SIG: a compact fixed-slot presence cell for the shadow signals —
+			// f=facet(query_cardinality) c=cost(5xx) d=dc(datacenter frac)
+			// s=shadow(rate-outlier). The exact numbers are in the bottom
+			// Suspicious+Challenged panel, `cfm webtop challenge`, and cfm-admin.
+			sigCell := " " + sigLetters(row.QueryCardinality, row.CostPressure, row.DCFraction, row.ShadowOutliers) + " "
 
 			tableRows = append(tableRows, []string{
 				host,
 				chalCell,
 				suspCell,
+				sigCell,
 				fmt.Sprintf("%6.2f", row.RPS),
 				fmt.Sprintf("%6.2f", row.R2xx),
 				fmt.Sprintf("%6.2f", row.R4xx),
@@ -1007,74 +1088,117 @@ func RunLiveTop(baseURL string, limit int) error {
 		}
 
 		table.RowStyles[0] = ui.NewStyle(ui.ColorBlack, ui.ColorWhite)
-		table.ColumnWidths = []int{hostW, 5, 4, 7, 7, 7, 7, 7, 7, 7, 7, 7}
+		table.ColumnWidths = []int{hostW, 5, 4, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7}
 		table.Rows = tableRows
 	}
 
 	buildSuspiciousPanel := func() {
 		panelW := W - 2
 		hostW := 28
+		chW := 3
 		scoreW := 6
 		errW := 6
 		botW := 6
 		uniqW := 6
-		reasonW := panelW - hostW - scoreW - errW - botW - uniqW - 12
+		reasonW := panelW - hostW - chW - scoreW - errW - botW - uniqW - 14
 		if reasonW < 18 {
 			reasonW = 18
 		}
 
-		rows2 := [][]string{
-			{"HOST", "SCORE", "ERR%", "BOT%", "UNIQ", "REASONS"},
+		// Unified attention list: suspicious ∪ challenged (auto/manual), deduped by
+		// lowercased host — the same merge cfm-admin's "Suspicious + challenged" card
+		// does. A challenged-only vhost (not scored suspicious) still appears, with
+		// its shadow signals; it has no err/bot sample of its own, shown as "-".
+		type attn struct {
+			host                    string
+			chal                    string // "", auto, manual
+			score, errPct, botPct   float64
+			hasEB                   bool // err/bot known (suspicious rows only)
+			uniq                    int
+			reasons                 []string
+			facet, cost, dc, shadow int
+			farm                    bool
 		}
+		seen := make(map[string]bool, len(suspicious))
+		list := make([]attn, 0, len(suspicious)+len(challenged))
+		for _, s := range suspicious {
+			lc := strings.ToLower(s.Host)
+			seen[lc] = true
+			list = append(list, attn{
+				host: s.Host, chal: challenged[lc].mode, score: s.Score,
+				errPct: s.ErrRatio * 100, botPct: s.BotRatio * 100, hasEB: true,
+				uniq: s.UniqueIPs, reasons: s.Reasons, facet: s.QueryCardinality,
+				cost: s.CostPressure, dc: s.DCFraction, shadow: s.ShadowOutliers, farm: s.SolverFarm,
+			})
+		}
+		for lc, c := range challenged {
+			if seen[lc] {
+				continue
+			}
+			list = append(list, attn{
+				host: c.host, chal: c.mode, score: c.score, hasEB: false,
+				uniq: c.uniq, reasons: c.reasons, facet: c.facet, cost: c.cost,
+				dc: c.dc, shadow: c.shadow, farm: c.farm,
+			})
+		}
+		sort.SliceStable(list, func(i, j int) bool { return list[i].score > list[j].score })
 
+		rows2 := [][]string{
+			{"HOST", "CH", "SCORE", "ERR%", "BOT%", "UNIQ", "REASONS"},
+		}
 		maxRows := bottomPanelLim
-		for i, s := range suspicious {
+		for i, a := range list {
 			if i >= maxRows {
 				break
 			}
-
-			host := s.Host
+			host := a.host
 			if len(host) > hostW {
 				host = host[:hostW-2] + ".."
 			}
-
-			rs := joinReasons(s.Reasons)
+			ch := ""
+			switch a.chal {
+			case "manual":
+				ch = "M"
+			case "auto":
+				ch = "A"
+			}
+			errStr, botStr := "-", "-"
+			if a.hasEB {
+				errStr = fmt.Sprintf("%.1f", a.errPct)
+				botStr = fmt.Sprintf("%.1f", a.botPct)
+			}
+			// score reasons first, then the shadow-signal tokens (farm/facet/cost/dc/shadow).
+			merged := append(append([]string{}, a.reasons...), sigTokens(a.facet, a.cost, a.dc, a.shadow, a.farm)...)
+			rs := joinReasons(merged)
 			if len(rs) > reasonW {
 				rs = rs[:reasonW-2] + ".."
 			}
-
 			rows2 = append(rows2, []string{
-				host,
-				fmt.Sprintf("%.2f", s.Score),
-				fmt.Sprintf("%.1f", s.ErrRatio*100),
-				fmt.Sprintf("%.1f", s.BotRatio*100),
-				fmt.Sprintf("%d", s.UniqueIPs),
-				rs,
+				host, ch, fmt.Sprintf("%.2f", a.score), errStr, botStr,
+				fmt.Sprintf("%d", a.uniq), rs,
 			})
 		}
-
 		for len(rows2) < maxRows+1 {
-			rows2 = append(rows2, []string{"", "", "", "", "", ""})
+			rows2 = append(rows2, []string{"", "", "", "", "", "", ""})
 		}
 
-		bottomPanel.Title = " ⚠ Suspicious Vhosts — x=toggle "
+		bottomPanel.Title = " ⚠ Suspicious + Challenged — x=toggle "
 		bottomPanel.Rows = rows2
-		bottomPanel.ColumnWidths = []int{hostW, scoreW, errW, botW, uniqW, reasonW}
+		bottomPanel.ColumnWidths = []int{hostW, chW, scoreW, errW, botW, uniqW, reasonW}
 		bottomPanel.RowStyles = map[int]ui.Style{
 			0: ui.NewStyle(ui.ColorBlack, ui.ColorYellow),
 		}
-
-		for i := 1; i < len(rows2); i++ {
-			if i-1 < len(suspicious) {
-				s := suspicious[i-1]
-				switch {
-				case s.Score >= 0.70 || s.ErrRatio >= 0.50:
-					bottomPanel.RowStyles[i] = ui.NewStyle(ui.ColorRed)
-				case s.Score >= 0.40 || s.ErrRatio >= 0.20:
-					bottomPanel.RowStyles[i] = ui.NewStyle(ui.ColorYellow)
-				default:
-					bottomPanel.RowStyles[i] = ui.NewStyle(ui.ColorWhite)
-				}
+		for i, a := range list {
+			if i >= maxRows {
+				break
+			}
+			switch {
+			case a.score >= 0.70 || (a.hasEB && a.errPct >= 50):
+				bottomPanel.RowStyles[i+1] = ui.NewStyle(ui.ColorRed)
+			case a.score >= 0.40 || (a.hasEB && a.errPct >= 20):
+				bottomPanel.RowStyles[i+1] = ui.NewStyle(ui.ColorYellow)
+			default:
+				bottomPanel.RowStyles[i+1] = ui.NewStyle(ui.ColorWhite)
 			}
 		}
 	}
@@ -1091,7 +1215,7 @@ func RunLiveTop(baseURL string, limit int) error {
 		selectedChal := ""
 		if len(rows) > 0 && cursor < len(rows) {
 			selectedHost = rows[cursor].Host
-			selectedChal = challenged[selectedHost]
+			selectedChal = challenged[strings.ToLower(selectedHost)].mode
 		}
 
 		chalBadge := ""
@@ -1140,7 +1264,7 @@ func RunLiveTop(baseURL string, limit int) error {
 			blockLine = "  │  " + lastBlockMsg
 		}
 
-		legend := "[cyan]=selected  [yellow]=warn/challenged  [red]=high-risk  SUP: !=suspect  !!=strong  F=solver farm"
+		legend := "[cyan]=selected  [yellow]=warn/challenged  [red]=high-risk  SUP: !=suspect !!=strong F=farm  SIG: f=facet c=cost d=dc s=shadow"
 		statusBar.Text = fmt.Sprintf(
 			" [↑↓] vhosts  [Enter] drill  [%s]  [s] sort(%s)  [x] bottom(%s)  │  %s%s  [q] quit\n %s",
 			chalHint, sortKey, bottomMode, ipHint, blockLine, legend,
@@ -1155,7 +1279,7 @@ func RunLiveTop(baseURL string, limit int) error {
 			return
 		}
 		h := rows[cursor].Host
-		mode := challenged[h]
+		mode := challenged[strings.ToLower(h)].mode
 		if mode == "manual" {
 			u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s", baseURL, url.QueryEscape(h))
 			_, _ = clihttp.Post(u, "application/json", nil)
