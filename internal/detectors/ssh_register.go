@@ -77,7 +77,7 @@ func init() {
 
 		// Resolution + provisional policy live in planSSHSource
 		// (source_report.go), shared with the dry-run source report.
-		plan := planSSHSource(section, kv, srcresolve.DefaultProbes())
+		plan := planSSHSource(section, kv, registrationProbes())
 		res := plan.res
 		if plan.note != "" {
 			logging.Logf("[detectors][%s] %s — set MODE/JOURNAL_UNIT/LOG_PATH to override", section, plan.note)

@@ -7,11 +7,14 @@
 //
 //   - Explicit beats auto. A concrete MODE restricts resolution to that source
 //     kind, and a concrete DOCKER_CONTAINER / JOURNAL_UNIT / LOG_PATH (checked
-//     in that precedence order) short-circuits MODE=auto and is used verbatim,
-//     never probed — the operator's word is final. The one exception: an
-//     explicit unit under MODE=journal falls back to the file chain when
-//     journalctl itself is unusable on the host (JournalReadable), matching
-//     the historical dovecot register.
+//     in that precedence order) short-circuits MODE=auto — the operator's word
+//     is final. Two deliberate refinements: an explicit JOURNAL_UNIT is
+//     normalized to its CANONICAL systemd name when it is an alias (same
+//     service, but journald indexes only the canonical Id — a pinned
+//     sshd.service on Debian would otherwise tail an empty stream forever),
+//     and an explicit unit under MODE=journal falls back to the file chain
+//     when journalctl itself is unusable on the host (JournalReadable),
+//     matching the historical dovecot register.
 //   - MODE auto (or absent): explicit container/unit/path → journal candidates
 //     (units with journal entries, then merely-active units resolved to their
 //     canonical name) → docker discovery → file candidates → none. Discovery
@@ -131,7 +134,7 @@ func Resolve(s Spec, p Probes) Result {
 			return Result{Kind: KindDocker, Container: container, Reason: "explicit DOCKER_CONTAINER"}
 		}
 		if unit != "" {
-			return Result{Kind: KindJournal, Unit: unit, Reason: "explicit JOURNAL_UNIT"}
+			return explicitJournal(p, unit)
 		}
 		if path != "" {
 			return Result{Kind: KindFile, Path: path, Reason: "explicit LOG_PATH"}
@@ -169,7 +172,7 @@ func Resolve(s Spec, p Probes) Result {
 				"journal mode: journalctl unavailable and no log file found (tried %v)", s.FileCandidates)}
 		}
 		if unit != "" {
-			return Result{Kind: KindJournal, Unit: unit, Reason: "explicit JOURNAL_UNIT"}
+			return explicitJournal(p, unit)
 		}
 		if r, ok := journalCandidate(s, p); ok {
 			return r
@@ -216,6 +219,24 @@ func journalReadable(p Probes) bool {
 		return true
 	}
 	return p.JournalReadable()
+}
+
+// explicitJournal returns the operator's explicit unit as a journal source,
+// normalized to its CANONICAL name when it is an alias: journald indexes only
+// the canonical Id, so a pinned sshd.service on Debian (Alias= of
+// ssh.service) would tail an empty stream forever while the daemon logs on.
+// The canonical unit is the SAME service — only the name changes — so the
+// operator's intent is preserved; a unit systemd doesn't know keeps its given
+// name verbatim (systemctl echoes it back, and non-systemd hosts have no
+// canonicalizer at all).
+func explicitJournal(p Probes, unit string) Result {
+	if p.CanonicalUnit != nil {
+		if c := strings.TrimSpace(p.CanonicalUnit(unit)); c != "" && c != unit {
+			return Result{Kind: KindJournal, Unit: c,
+				Reason: "explicit JOURNAL_UNIT " + unit + " → canonical " + c + " (journald indexes only the canonical name)"}
+		}
+	}
+	return Result{Kind: KindJournal, Unit: unit, Reason: "explicit JOURNAL_UNIT"}
 }
 
 // journalCandidate picks a journal unit from the candidates: first the units

@@ -71,7 +71,24 @@ one, choose exactly one clear path in each section (comment the others out).
 `GET /api/v1/detectors/source-resolution`, and the `detectors_srcresolve` MCP
 tool all show the dry-run resolution for every section on the host — same
 planners the daemon runs, probes live, nothing changes. Check it per node
-before removing hand-set source pins from a config.
+before removing hand-set source pins from a config. The CLI additionally
+joins **daemon coverage** (`/api/v1/detectors/coverage`): a DAEMON column per
+row (unit active/stopped/absent), extra `<type> (not in config)` rows for GAP
+(a daemon runs here but nothing watches it) and dormant verdicts, and a
+summary count — one command answering "does the daemon exist, did I detect
+it, am I following it".
+
+**Explicit `JOURNAL_UNIT` pins are alias-normalized on the
+srcresolve-adopted detectors** (`ssh_auth`, `dovecot_auth`,
+`postfix_security`/`postfix_relays`): a pinned unit is resolved to its
+canonical systemd name (`systemctl show -p Id`) before tailing — journald
+indexes only the canonical Id, so a config carrying `JOURNAL_UNIT =
+sshd.service` dropped onto a Debian host (where that is an `Alias=` of
+`ssh.service`) now tails the real journal instead of an empty stream. Same
+service, corrected name; the resolution line shows the rewrite (`explicit
+JOURNAL_UNIT sshd.service → canonical ssh.service`). Detectors still on
+their own tailing (`ftpd`, `proxmox_auth`, `custom`) use the pinned name
+verbatim until they migrate to the shared resolver.
 
 ### Threshold / window / cooldown semantics
 

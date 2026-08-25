@@ -164,7 +164,7 @@ func init() {
 			}
 		}
 
-		if applyEximLogPlan(section, planEximLogSource(section, kv, srcresolve.DefaultProbes()), &cfg.LogPath) {
+		if applyEximLogPlan(section, planEximLogSource(section, kv, registrationProbes()), &cfg.LogPath) {
 			return nil, nil
 		}
 
@@ -217,7 +217,7 @@ func init() {
 		}
 
 		// Same source plan as exim_security (file-only, §3a).
-		if applyEximLogPlan(section, planEximLogSource(section, kv, srcresolve.DefaultProbes()), &cfg.LogPath) {
+		if applyEximLogPlan(section, planEximLogSource(section, kv, registrationProbes()), &cfg.LogPath) {
 			return nil, nil
 		}
 

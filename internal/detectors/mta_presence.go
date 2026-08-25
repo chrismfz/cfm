@@ -90,3 +90,37 @@ func dockerCLIPresent() bool {
 	_, err := exec.LookPath("docker")
 	return err == nil
 }
+
+// registrationProbes returns the current registration sweep's shared memoized
+// srcresolve probe set: one sweep resolves many sections back-to-back and must
+// not repeat identical execs (docker ps, journal probes, unit canonicalization
+// of the same units). The memo is scoped to ONE sweep — the manager calls
+// resetRegistrationProbes() at the start of each (re)build, so a config reload
+// re-probes current host state (a daemon/container that appeared since the last
+// build is seen, honouring the "cfm detector reload re-resolves" contract),
+// while sections within a sweep still share probes. Never a cross-sweep TTL
+// cache: that would reuse stale host state across reloads (MemoProbes is
+// explicitly "not safe for reuse across runs").
+var regProbes struct {
+	mu  sync.Mutex
+	p   srcresolve.Probes
+	set bool
+}
+
+// resetRegistrationProbes drops the memoized sweep probes so the next
+// registrationProbes() rebuilds them against current host state.
+func resetRegistrationProbes() {
+	regProbes.mu.Lock()
+	regProbes.p, regProbes.set = srcresolve.Probes{}, false
+	regProbes.mu.Unlock()
+}
+
+func registrationProbes() srcresolve.Probes {
+	regProbes.mu.Lock()
+	defer regProbes.mu.Unlock()
+	if !regProbes.set {
+		regProbes.p = srcresolve.MemoProbes(srcresolve.DefaultProbes())
+		regProbes.set = true
+	}
+	return regProbes.p
+}

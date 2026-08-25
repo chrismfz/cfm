@@ -142,6 +142,39 @@ func TestResolveAuto(t *testing.T) {
 	runResolveCases(t, cases)
 }
 
+// TestResolveExplicitUnitCanonicalized: an EXPLICIT pin to an alias unit is
+// normalized to the canonical name (the live-fleet case: detectors.conf pins
+// JOURNAL_UNIT=sshd.service, the config lands on a Debian host where that is
+// an Alias= of ssh.service, and journald indexes only the canonical name —
+// without normalization the detector tails an empty journal forever).
+func TestResolveExplicitUnitCanonicalized(t *testing.T) {
+	canon := func(unit string) string {
+		if unit == "sshd.service" {
+			return "ssh.service"
+		}
+		return unit
+	}
+	for _, mode := range []string{"auto", "journal"} {
+		p := fakeProbes(nil, nil, nil, nil)
+		p.CanonicalUnit = canon
+		got := Resolve(sshSpec(mode, "sshd.service", ""), p)
+		if got.Kind != KindJournal || got.Unit != "ssh.service" {
+			t.Fatalf("mode=%s: want canonical ssh.service, got %+v", mode, got)
+		}
+		if !strings.Contains(got.Reason, "sshd.service") || !strings.Contains(got.Reason, "canonical") {
+			t.Fatalf("mode=%s: reason should show the rewrite, got %q", mode, got.Reason)
+		}
+	}
+	// A unit that is already canonical (or unknown to systemd — systemctl
+	// echoes the queried name) stays verbatim with the plain reason.
+	p := fakeProbes(nil, nil, nil, nil)
+	p.CanonicalUnit = canon
+	got := Resolve(sshSpec("journal", "ssh.service", ""), p)
+	if got.Unit != "ssh.service" || got.Reason != "explicit JOURNAL_UNIT" {
+		t.Fatalf("canonical pin must stay verbatim: %+v", got)
+	}
+}
+
 // TestResolveDebianAliasActive covers the alias trap with an EMPTY journal:
 // is-active succeeds for both names via Alias=, but only the canonical unit
 // is indexed by journald — the resolver must return the canonical name.

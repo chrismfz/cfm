@@ -458,8 +458,8 @@ Usage:
   cfm lve top <N>                 -- top N tenants by CPU
   cfm lve --json                  -- raw JSON passthrough
 
-  cfm detectors-srcresolve        -- dry run: which log source each detector section would tail here, and why (alias: detectors-resolve)
-  cfm detectors-srcresolve --wide -- + configured source keys; --json for raw JSON
+  cfm detectors-srcresolve        -- per detector: does the daemon exist here, did resolution find its log source, and are we following it (alias: detectors-resolve)
+  cfm detectors-srcresolve --wide -- + configured source keys; --json for combined JSON (source resolution + daemon coverage)
 
   cfm kernsec                     -- interactive TUI for kernel hardening audit (TTY); auto-falls back to text
   cfm kernsec live                -- force the TUI
