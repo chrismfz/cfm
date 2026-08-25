@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.25
+
 ### Added
 - **abuse_shadow datacenter-fraction signal (Signal H): vhost-level cloud-ASN
   share, verified-gated, log-only.** Records what fraction of a vhost's requests
@@ -221,8 +225,6 @@ back-filled here — see the git/PR history for that period.
 - **`/api/v1/detectors/source-resolution` reclassified to the heavy-read rate bucket.**
   Each call forks `journalctl`/`systemctl`/`docker ps`/`stat`; it was bucketed with cheap
   JSON reads, so a fan-out loop could pile up subprocesses on a wedged host.
-
-## 2026.08.25
 
 ### Added
 - **Source-resolution preview across all four surfaces: `cfm
