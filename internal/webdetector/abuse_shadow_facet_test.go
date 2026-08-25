@@ -123,18 +123,23 @@ func TestFacet_IngestEmit_DynamicUniverseAndBadge(t *testing.T) {
 		e.ingest(LogRec{TS: now + float64(i)*0.001, IP: "9.9.9.9", Host: host,
 			Method: "get", URI: "/shop?filter_category=" + ipKeyForTest(i), Status: 200}, "raw")
 	}
-	// A page's static-asset fan-out on distinct static paths — these must be
-	// excluded from every facet counter (numerator, denominator AND total), or the
-	// static paths would dilute the /shop-only denominator.
-	statics := []string{
-		"/wp-content/themes/x/base.css?ver=1",
-		"/wp-content/themes/x/app.js?ver=1",
-		"/wp-content/uploads/logo.png",
-		"/api?redirect=/trap.css", // dynamic endpoint whose query ends .css — must NOT be dropped
-	}
-	for i, u := range statics {
-		e.ingest(LogRec{TS: now + 1 + float64(i)*0.001, IP: "9.9.9.9", Host: host,
-			Method: "get", URI: u, Status: 200}, "raw")
+	// One dynamic endpoint whose query ends in a static-looking tail — its stripped
+	// path /api is NOT static, so it must count in the dynamic universe (this guards
+	// the p-vs-rec.URI static check).
+	e.ingest(LogRec{TS: now + 1, IP: "9.9.9.9", Host: host,
+		Method: "get", URI: "/api?redirect=/trap.css", Status: 200}, "raw")
+
+	// A large static-asset fan-out on MANY DISTINCT static base paths. These must be
+	// excluded from every facet counter (numerator, denominator AND total). Crucially
+	// there are enough of them that the OLD (buggy) denominator b.paths — which
+	// counts static paths — would push the expansion ratio BELOW MinExpansion, while
+	// the correct facetPaths denominator (2 dynamic paths) keeps it well above. That
+	// is what makes the emit badge below actually depend on the dynamic-universe fix:
+	// revert the emit denominator to b.paths and the vhost stops flagging (badge 0).
+	const nStatic = 60
+	for i := 0; i < nStatic; i++ {
+		e.ingest(LogRec{TS: now + 1 + float64(i+1)*0.001, IP: "9.9.9.9", Host: host,
+			Method: "get", URI: "/static/" + ipKeyForTest(i) + ".css", Status: 200}, "raw")
 	}
 
 	// Inspect the bucket accounting directly.
@@ -177,19 +182,29 @@ func TestFacet_IngestEmit_DynamicUniverseAndBadge(t *testing.T) {
 	if len(fpaths) != 2 {
 		t.Errorf("distinct facetPaths = %d, want 2 (/shop + /api; static excluded)", len(fpaths))
 	}
-	// b.paths (the OLD denominator) includes the static paths — proving why the fix
-	// matters: using it would dilute the ratio from 51/2 down to 51/5.
-	if len(bpaths) <= len(fpaths) {
-		t.Errorf("b.paths (%d) should include static paths beyond facetPaths (%d)", len(bpaths), len(fpaths))
+	// The discriminating property: with the CORRECT denominator the expansion clears
+	// MinExpansion, but with the OLD (static-polluted) b.paths denominator it does
+	// NOT — so the emit's flag decision depends on which denominator it uses. If this
+	// invariant doesn't hold, the badge assertion below is not actually guarding the
+	// fix (the exact bug this test exists to catch), so fail loudly here.
+	const minExp = 5.0
+	correctRatio := float64(nDyn) / float64(len(fpaths))
+	dilutedRatio := float64(nDyn) / float64(len(bpaths))
+	if !(correctRatio >= minExp && dilutedRatio < minExp) {
+		t.Fatalf("test can't discriminate the fix: correct=%.2f (want ≥%.1f), diluted=%.2f (want <%.1f) — add more static paths",
+			correctRatio, minExp, dilutedRatio, minExp)
 	}
 	if bTotal <= facetTotal {
 		t.Errorf("b.total (%d) should exceed facetTotal (%d) by the static hits", bTotal, facetTotal)
 	}
 
 	// The emit badges the vhost with the distinct-URL count over the dynamic universe.
+	// Because dilutedRatio < MinExpansion above, a badge of nDyn here can ONLY happen
+	// with the correct facetPaths denominator — reverting the emit to b.paths would
+	// stop the flag and this would read 0.
 	e.emitAbuseShadowFacetOutliers(time.Now())
 	if got := FacetShadowCardinality(host); got != nDyn {
-		t.Errorf("badge cardinality = %d, want %d", got, nDyn)
+		t.Errorf("badge cardinality = %d, want %d (0 would mean the emit used the static-polluted denominator)", got, nDyn)
 	}
 }
 

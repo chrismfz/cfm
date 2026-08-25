@@ -137,13 +137,20 @@ func (e *Engine) emitAbuseShadowFacetOutliers(now time.Time) {
 		expansion := float64(distinctURLs) / float64(distinctPaths)
 		// A vhost-level signal has nothing per-IP to bypass here (per-IP leniency /
 		// good-bot exemption is Signal C's job); record the cardinality for the badge.
+		// NOTE distinctURLs (and so this badge / the QueryCardinality field) is a
+		// union of per-bucket sets each capped at AbuseShadowFacetCap, so under a very
+		// large fan-out it is a FLOOR ("≥"), not the exact distinct-URL count — enough
+		// to flag and rank, not an exact tally.
 		marks[host] = distinctURLs
 
 		// urlRepeatRatio ≈ 1.0 means each distinct URL was hit ~once (enumeration /
 		// crawl), which is the facet-flood shape; a cache/refresh workload re-serves
 		// URLs and sits well above 1. Both terms are dynamic-only (a.total is
-		// facetTotal, not b.total), so static asset fan-out can't inflate it away
-		// from the enumeration signal. Logged as corroboration, not a gate.
+		// facetTotal, not b.total), so static asset fan-out can't inflate it. CAVEAT:
+		// facetTotal is uncapped but distinctURLs is a capped union, so once the cap is
+		// saturated (a huge fan-out) repeat drifts upward and can read like "re-serve"
+		// even for a pure enumeration — trust it only while distinctURLs is below the
+		// cap. Logged as corroboration, never a gate.
 		repeat := 0.0
 		if distinctURLs > 0 {
 			repeat = float64(a.total) / float64(distinctURLs)
