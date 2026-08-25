@@ -292,22 +292,28 @@ crawl-budget on expensive surfaces later. **verified-crawler is the first CODE
 task** (Phase 1 lead).
 
 Zero-code = live `/etc/cfm/detectors.conf` on the 7 web nodes (operator-applied;
-MCP is read-only). `solver_farm` stays as-is (correctly calibrated — see audit).
-Target block for **data collection** (all log-only, no enforcement):
+MCP is read-only). Verified live state on titan via `config_drift`:
+`solver_farm` is **already** operator-tuned to `MIN_SUBNETS=30 / MIN_SOLVES=30`,
+`ACTION=logonly` (leave it — harmless at logonly; still targets the many-subnet
+flood). The `UNDER_ATTACK_FINGERPRINT` / `FP_*` keys are **missing** live, and
+the code defaults are `UNDER_ATTACK=false`, `ABUSE_SHADOW*=false` — so the
+shadow surfaces are OFF and must be set explicitly. Target block for **data
+collection** (all detect/log-only, no enforcement):
 
 ```ini
-[web_detector]                 ; or the section carrying these keys on the box
-ABUSE_SHADOW                = 1   ; was 0 — turn the shadow log ON
-ABUSE_SHADOW_RATE_OUTLIER   = 1   ; per-IP rate outlier vs vhost median
-ABUSE_SHADOW_DATACENTER     = 1   ; log the DatacenterClass tag (additive)
-ABUSE_SHADOW_GOODBOT_EXEMPT = 1   ; already default; keep
-UNDER_ATTACK_FINGERPRINT    = 1   ; ensure present (drifts out on upgraded boxes)
-; UNDER_ATTACK must be on for the fingerprinter; it ships DRYRUN=1 (safe)
+[webdetector]
+UNDER_ATTACK               = 1   ; master (default OFF) — needed for the fingerprinter; detect-only, ships DRYRUN=1
+UNDER_ATTACK_DRYRUN        = 1   ; keep dry (no enforcement) during burn-in
+UNDER_ATTACK_FINGERPRINT   = 1   ; missing live → add (shadow "would-arm" lines)
+ABUSE_SHADOW               = 1   ; default OFF — turn the shadow log ON
+ABUSE_SHADOW_RATE_OUTLIER  = 1   ; per-IP rate outlier vs vhost median
+ABUSE_SHADOW_DATACENTER    = 1   ; log the DatacenterClass tag (additive)
+; ABUSE_SHADOW_GOODBOT_EXEMPT / CHALLENGE_SUBNET_GOODBOT_EXEMPT default ON — no action
 ```
 
-Verify current live state with the `config_drift` MCP tool / Detectors page
-before/after. Then let it accumulate `cfm.abuse_shadow.log` + fingerprint
-would-arm lines through a real Class-2 burst.
+Reload after editing; verify with `config_drift` / the Detectors page. Then let
+it accumulate `cfm.abuse_shadow.log` + fingerprint would-arm lines through a real
+Class-2 burst.
 
 - [x] Fleet audit → three-class model + separation table (this doc).
 - [x] Confirm verified-crawler + datacenter substrate exists (reuse path found).
