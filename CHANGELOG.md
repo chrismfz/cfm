@@ -35,9 +35,13 @@ back-filled here — see the git/PR history for that period.
   starts collecting on upgrade with no config edit; tunable via
   `ABUSE_SHADOW_FACET`, `ABUSE_SHADOW_FACET_MIN_URLS` (300),
   `ABUSE_SHADOW_FACET_MIN_EXPANSION` (20) and `ABUSE_SHADOW_FACET_CAP` (3000,
-  per-bucket memory bound). Static assets are excluded at ingest, and the
-  distinct-URL set is only maintained when the signal is enabled, so it is
-  zero-cost when off. Phase 1 of the traffic-classifier plan
+  per-bucket memory bound). Distinct URLs, distinct base paths and the request
+  total are all measured over ONE universe — dynamic requests with static assets
+  excluded — so the expansion ratio means the same thing on every vhost (a
+  static-heavy vhost cannot dilute its own denominator and silently raise its
+  effective threshold). Zero hot-path cost when the master is off (nil maps, no
+  hashing); when it is on, the cost is one `hash64` per dynamic request plus a
+  bounded per-eval snapshot. Phase 1 of the traffic-classifier plan
   (`docs/traffic-classifier.md`); no score contribution and no enforcement yet.
 
 ### Changed

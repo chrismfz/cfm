@@ -100,6 +100,99 @@ func TestFacetMarks_CapBounded(t *testing.T) {
 	}
 }
 
+// End-to-end at the ingest+emit layer: a facet flood on ONE dynamic base path,
+// mixed with a page's static-asset fan-out, must (a) count only the dynamic
+// universe into fullURIs/facetPaths/facetTotal and (b) badge the vhost with the
+// distinct-URL count. This locks in the "consistent dynamic universe" fix: the
+// denominator must NOT come from b.paths (which also counts the static assets and
+// would dilute the expansion ratio per-vhost).
+func TestFacet_IngestEmit_DynamicUniverseAndBadge(t *testing.T) {
+	ResetFacetShadowMarks()
+	defer ResetFacetShadowMarks()
+	e := NewEngine(Config{
+		Every: 1 * time.Second, Window: 2 * time.Minute,
+		AbuseShadow: true, AbuseShadowFacet: true,
+		AbuseShadowFacetMinURLs: 10, AbuseShadowFacetMinExpansion: 5,
+	})
+	now := float64(time.Now().Unix())
+	const host = "flood.example"
+
+	// 50 distinct facet URLs on ONE base path /shop (the query is the whole fan-out).
+	const nFacet = 50
+	for i := 0; i < nFacet; i++ {
+		e.ingest(LogRec{TS: now + float64(i)*0.001, IP: "9.9.9.9", Host: host,
+			Method: "get", URI: "/shop?filter_category=" + ipKeyForTest(i), Status: 200}, "raw")
+	}
+	// A page's static-asset fan-out on distinct static paths — these must be
+	// excluded from every facet counter (numerator, denominator AND total), or the
+	// static paths would dilute the /shop-only denominator.
+	statics := []string{
+		"/wp-content/themes/x/base.css?ver=1",
+		"/wp-content/themes/x/app.js?ver=1",
+		"/wp-content/uploads/logo.png",
+		"/api?redirect=/trap.css", // dynamic endpoint whose query ends .css — must NOT be dropped
+	}
+	for i, u := range statics {
+		e.ingest(LogRec{TS: now + 1 + float64(i)*0.001, IP: "9.9.9.9", Host: host,
+			Method: "get", URI: u, Status: 200}, "raw")
+	}
+
+	// Inspect the bucket accounting directly.
+	e.mu.RLock()
+	hs := e.hosts[host]
+	if hs == nil {
+		e.mu.RUnlock()
+		t.Fatalf("host not recorded")
+	}
+	urls := map[uint64]struct{}{}
+	fpaths := map[uint64]struct{}{}
+	bpaths := map[string]struct{}{}
+	facetTotal, bTotal := 0, 0
+	for i := range hs.buckets {
+		b := &hs.buckets[i]
+		facetTotal += b.facetTotal
+		bTotal += b.total
+		for h := range b.fullURIs {
+			urls[h] = struct{}{}
+		}
+		for h := range b.facetPaths {
+			fpaths[h] = struct{}{}
+		}
+		for p := range b.paths {
+			bpaths[p] = struct{}{}
+		}
+	}
+	e.mu.RUnlock()
+
+	// /api?redirect=/trap.css is dynamic (its stripped path /api is not static), so
+	// the dynamic universe is the 50 facet hits + that one = 51.
+	const nDyn = nFacet + 1
+	if facetTotal != nDyn {
+		t.Errorf("facetTotal = %d, want %d (static assets must be excluded)", facetTotal, nDyn)
+	}
+	if len(urls) != nDyn {
+		t.Errorf("distinct fullURIs = %d, want %d", len(urls), nDyn)
+	}
+	// Dynamic base paths: /shop and /api = 2. The static paths must NOT appear here.
+	if len(fpaths) != 2 {
+		t.Errorf("distinct facetPaths = %d, want 2 (/shop + /api; static excluded)", len(fpaths))
+	}
+	// b.paths (the OLD denominator) includes the static paths — proving why the fix
+	// matters: using it would dilute the ratio from 51/2 down to 51/5.
+	if len(bpaths) <= len(fpaths) {
+		t.Errorf("b.paths (%d) should include static paths beyond facetPaths (%d)", len(bpaths), len(fpaths))
+	}
+	if bTotal <= facetTotal {
+		t.Errorf("b.total (%d) should exceed facetTotal (%d) by the static hits", bTotal, facetTotal)
+	}
+
+	// The emit badges the vhost with the distinct-URL count over the dynamic universe.
+	e.emitAbuseShadowFacetOutliers(time.Now())
+	if got := FacetShadowCardinality(host); got != nDyn {
+		t.Errorf("badge cardinality = %d, want %d", got, nDyn)
+	}
+}
+
 // The API decoration stamps the live cardinality onto rows (global store path).
 func TestDecorateFacet_StampsRows(t *testing.T) {
 	ResetFacetShadowMarks()

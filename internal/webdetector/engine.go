@@ -171,14 +171,26 @@ type bucketSW struct {
 	refs  map[string]int
 	paths map[string]int
 
-	// fullURIs is a capped set of hash(full URI incl. query string), maintained
-	// ONLY when the abuse-shadow facet signal is enabled (Signal F). It is what
-	// `paths` (base-path only) cannot see: a faceted-URL flood has few distinct
-	// base paths but a huge distinct-full-URL count. Static assets are excluded at
-	// ingest (their URL variety is not a facet attack), so this stays small on
-	// normal vhosts and only fills toward the cap under a real query-cardinality
-	// flood. Off by default → nil map, zero hot-path cost.
-	fullURIs map[uint64]struct{}
+	// Facet (Signal F) accounting, maintained ONLY when the abuse-shadow facet
+	// signal is enabled, over ONE consistent universe: dynamic requests with
+	// static assets excluded. All three move together in the same ingest branch so
+	// the emit's expansion ratio (fullURIs/facetPaths) and repeat ratio
+	// (facetTotal/fullURIs) are internally consistent — the numerator, denominator
+	// and total never straddle the static/dynamic boundary. Off by default → nil
+	// maps, zero hot-path cost.
+	//
+	//   fullURIs   — distinct FULL URLs (path+query): what `paths` (base-path only)
+	//                cannot see. A faceted-URL flood has few distinct base paths but
+	//                a huge distinct-full-URL count. Capped, so it stays small on
+	//                normal vhosts and only fills toward the cap under a real flood.
+	//   facetPaths — distinct BASE paths over the SAME dynamic universe (NOT
+	//                b.paths, which also counts static assets and would dilute the
+	//                denominator by a per-vhost amount, shifting the effective
+	//                expansion threshold between vhosts).
+	//   facetTotal — dynamic request count (with repeats) for the repeat ratio.
+	fullURIs   map[uint64]struct{}
+	facetPaths map[uint64]struct{}
+	facetTotal int
 
 	// Normalized-UA aggregation for the bot-top / UA emergency surface.
 	// Keys are NormalizeUA(rawUA). uasNormReqs is the per-bucket request
@@ -1442,22 +1454,32 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	}
 	b.paths[p]++
 
-	// Signal F (abuse-shadow facet): retain distinct FULL URLs (path+query) so the
-	// per-tick emit can measure query-cardinality expansion — the blind spot in
-	// PathDiversity, which counts base paths only. Gated + capped; static assets
-	// are excluded (isStaticAssetPath tolerates a query string, so rec.URI is safe)
-	// because their URL variety is not a facet flood. Off by default → no map, no
-	// per-request work.
-	if e.cfg.AbuseShadow && e.cfg.AbuseShadowFacet && rec.URI != "" && !isStaticAssetPath(rec.URI) {
+	// Signal F (abuse-shadow facet): retain distinct FULL URLs (path+query), the
+	// distinct base paths over the SAME universe, and the dynamic request count, so
+	// the per-tick emit can measure query-cardinality expansion — the blind spot in
+	// PathDiversity, which counts base paths only. Gated + capped; static assets are
+	// excluded (the file variety of a page's asset fan-out is not a facet flood).
+	// The static check keys on the query-stripped path `p` (isStaticAssetPath's
+	// documented contract), so a dynamic endpoint whose query happens to end in a
+	// static-looking tail — /api?redirect=/x.css — is NOT misdropped. Off by
+	// default → no maps, no per-request work.
+	if e.cfg.AbuseShadow && e.cfg.AbuseShadowFacet && rec.URI != "" && !isStaticAssetPath(p) {
 		capN := e.cfg.AbuseShadowFacetCap
 		if capN <= 0 {
 			capN = facetURICapDefault
 		}
+		b.facetTotal++
 		if b.fullURIs == nil {
 			b.fullURIs = make(map[uint64]struct{}, 16)
 		}
 		if len(b.fullURIs) < capN {
 			b.fullURIs[hash64(rec.URI)] = struct{}{}
+		}
+		if b.facetPaths == nil {
+			b.facetPaths = make(map[uint64]struct{}, 16)
+		}
+		if len(b.facetPaths) < capN {
+			b.facetPaths[hash64(p)] = struct{}{}
 		}
 	}
 

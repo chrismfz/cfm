@@ -82,12 +82,16 @@ func (e *Engine) emitAbuseShadowFacetOutliers(now time.Time) {
 	cfg := e.facetShadowCfg()
 
 	type facetAgg struct {
-		urls  map[uint64]struct{}
-		paths map[string]struct{}
-		total int
+		urls  map[uint64]struct{} // distinct full URLs (dynamic)
+		paths map[uint64]struct{} // distinct base paths (SAME dynamic universe)
+		total int                 // dynamic request count (with repeats)
 	}
 
 	// Snapshot under the read lock; do the (lock-free) verdict + logging after.
+	// urls, paths and total all come from the facet accounting (dynamic, static
+	// excluded), never from b.paths/b.total (which include static assets) — keeping
+	// the numerator, denominator and total in one universe so the ratio means the
+	// same thing on every vhost.
 	snap := make(map[string]*facetAgg)
 	e.mu.RLock()
 	for host, hs := range e.hosts {
@@ -104,15 +108,15 @@ func (e *Engine) emitAbuseShadowFacetOutliers(now time.Time) {
 		if !seenFacet {
 			continue // vhost carries no facet data this window — skip allocation
 		}
-		a := &facetAgg{urls: make(map[uint64]struct{}), paths: make(map[string]struct{})}
+		a := &facetAgg{urls: make(map[uint64]struct{}), paths: make(map[uint64]struct{})}
 		for i := range hs.buckets {
 			b := &hs.buckets[i]
-			a.total += b.total
+			a.total += b.facetTotal
 			for h := range b.fullURIs {
 				a.urls[h] = struct{}{}
 			}
-			for p := range b.paths {
-				a.paths[p] = struct{}{}
+			for h := range b.facetPaths {
+				a.paths[h] = struct{}{}
 			}
 		}
 		snap[host] = a
@@ -137,7 +141,9 @@ func (e *Engine) emitAbuseShadowFacetOutliers(now time.Time) {
 
 		// urlRepeatRatio ≈ 1.0 means each distinct URL was hit ~once (enumeration /
 		// crawl), which is the facet-flood shape; a cache/refresh workload re-serves
-		// URLs and sits well above 1. Logged as corroboration, not a gate.
+		// URLs and sits well above 1. Both terms are dynamic-only (a.total is
+		// facetTotal, not b.total), so static asset fan-out can't inflate it away
+		// from the enumeration signal. Logged as corroboration, not a gate.
 		repeat := 0.0
 		if distinctURLs > 0 {
 			repeat = float64(a.total) / float64(distinctURLs)

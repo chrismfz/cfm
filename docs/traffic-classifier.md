@@ -345,7 +345,19 @@ Class-2 burst.
       rate-outlier mark. Default-ON under `ABUSE_SHADOW` (no per-node edit to start
       collecting); knobs `ABUSE_SHADOW_FACET[_MIN_URLS|_MIN_EXPANSION|_CAP]`. NO
       score contribution, NO enforcement. `URL-repeat-ratio` is logged as
-      corroboration on the same line but not yet a gate.
+      corroboration on the same line but not yet a gate. Numerator, denominator
+      and total share ONE universe (dynamic, static-excluded) so the ratio is
+      comparable across vhosts — the fix from the adversarial review, which had
+      flagged `distinctPaths` (from `b.paths`, static-inclusive) as diluting the
+      per-vhost threshold. **Expected burn-in noise:** the signal deliberately
+      also badges *legit* single-endpoint high-cardinality shapes — analytics
+      pixels (`/collect?v=UUID`), plain-permalink WordPress (`/?p=N`), calendars
+      (`/cal?date=…`) — because they are the exact facet shape at the metric level.
+      That is why it is log-only: the `facet` badge means "high query cardinality
+      here", not "malicious". Multi-path catalogues (a news site's 4000 distinct
+      article paths) correctly stay clear (ratio ≈ 1). The would-be discriminator
+      for the malicious case is the enforcement-time context (verified-crawler
+      fork, cost/5xx, repeat ≈ 1), added later — never the badge alone.
 - [ ] Add remaining per-vhost features: cost/5xx-trend, datacenter-ASN-frac
       (verified-gated). (query-cardinality + URL-repeat done above.)
 - [ ] Add missing per-client features: header-coherence, solve-latency; route
