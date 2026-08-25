@@ -91,6 +91,7 @@ func init() {
 		// Resolution + provisional policy live in planDovecotSource
 		// (source_report.go), shared with the dry-run source report.
 		plan := planDovecotSource(section, kv, registrationProbes())
+		notePlanBootRace(plan) // provisional + docker present (mailcow not up yet) → boot-race retry
 		res := plan.res
 		if plan.note != "" {
 			logging.Logf("[detectors][%s] %s — set MODE/JOURNAL_UNIT/LOG_PATH/DOCKER_CONTAINER to override", section, plan.note)

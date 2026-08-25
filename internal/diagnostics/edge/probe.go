@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"cfm/internal/detconf"
 )
 
 type LuaTokenProbe struct {
@@ -89,37 +91,27 @@ func TokenHealth(t LuaTokenProbe) string {
 	return "OK"
 }
 
+// ReadDetectorSectionKV returns one section's key/value map from the EFFECTIVE
+// detector config — the base detectors.conf merged with its /etc/cfm/detectors.d
+// overlays — parsed by the SAME reader the daemon's manager uses (detconf), so
+// these edge/health probes never disagree with what the daemon actually runs
+// for overlay-tunable knobs (OPENRESTY_SOCK, LOG_PATH). It previously hand-
+// parsed the base file only — a second config parser that both false-alarmed
+// once a key moved into an overlay and could drift from the daemon's semantics
+// (CLAUDE.md §5, "never keep a second copy that drifts"). Keys are uppercased
+// and surrounding quotes stripped by the parser; callers still strip any inline
+// ;/# comment (stripInlineComment). NOT for the base-owned token keys — see
+// ReadChallengeTokenProbe.
 func ReadDetectorSectionKV(path, section string) map[string]string {
 	out := map[string]string{}
-	b, err := os.ReadFile(path)
+	secs, err := detconf.ReadLayeredFile(path)
 	if err != nil {
 		return out
 	}
-	want := strings.ToLower(strings.TrimSpace(section))
-	current := ""
-	for _, raw := range strings.Split(string(b), "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "//") {
-			continue
+	if kv, ok := secs.ByName[strings.TrimSpace(section)]; ok {
+		for k, v := range kv {
+			out[strings.ToUpper(strings.TrimSpace(k))] = v
 		}
-		if strings.HasPrefix(line, "[") {
-			if end := strings.Index(line, "]"); end > 1 {
-				current = strings.ToLower(strings.TrimSpace(line[1:end]))
-			}
-			continue
-		}
-		if current != want {
-			continue
-		}
-		i := strings.Index(line, "=")
-		if i <= 0 {
-			continue
-		}
-		key := strings.ToUpper(strings.TrimSpace(line[:i]))
-		if key == "" {
-			continue
-		}
-		out[key] = strings.TrimSpace(line[i+1:])
 	}
 	return out
 }
@@ -128,10 +120,19 @@ func ReadChallengeTokenProbe(path string) LuaTokenProbe {
 	if tok := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN")); tok != "" {
 		return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
 	}
-	kv := ReadDetectorSectionKV(path, "webdetector")
-	if v, ok := kv["CHALLENGE_TOKEN"]; ok {
-		if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
-			return LuaTokenProbe{Token: clean, Present: true, Valid: IsStrongToken(clean)}
+	// CHALLENGE_TOKEN is BASE-owned: the daemon pins the runtime token to the
+	// base value and ignores any overlay override (see the manager token
+	// block), so probe the BASE section — a merged read would report an
+	// overlay token the daemon never uses.
+	base, err := detconf.ReadSectionsFile(path)
+	if err != nil {
+		return LuaTokenProbe{}
+	}
+	if kv, ok := base.ByName["webdetector"]; ok {
+		if v, ok := kv["CHALLENGE_TOKEN"]; ok {
+			if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
+				return LuaTokenProbe{Token: clean, Present: true, Valid: IsStrongToken(clean)}
+			}
 		}
 	}
 	return LuaTokenProbe{}

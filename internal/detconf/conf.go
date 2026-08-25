@@ -44,6 +44,23 @@ type Sections struct {
 	ByName  map[string]KV
 	ByType  map[string][]string
 	StampNS int64
+
+	// AppendKeys marks keys written with "+=" in THIS file's parse
+	// (section → KEY → true). Within one file "+=" behaves like "=" (plus
+	// self-append when the key repeats); its real meaning is for the layer
+	// merger: ReadLayered appends a marked overlay value onto the earlier
+	// layers' value (list keys join with ", ", multiline blocks with a
+	// newline) instead of replacing it. Nil when no "+=" was used.
+	AppendKeys map[string]map[string]bool
+
+	// LayerSig identifies the overlay SET a layered read merged: a hash of
+	// each overlay's filename, mtime and size, 0 when no overlays were read
+	// (plain ReadSections always leaves it 0, preserving layered/plain
+	// parity). It is the sole overlay-change signal — StampNS stays the BASE
+	// file's mtime so a base edit is never masked — and reload signatures must
+	// fold it in, since it is what sees an overlay removed, renamed, or added
+	// with an older mtime (mv / cp -p / rsync -a all preserve one).
+	LayerSig uint64
 }
 
 // ReadSections parses one detectors.conf file. Returns the parsed sections,
@@ -95,9 +112,33 @@ func ReadSections(path string) (Sections, []byte, error) {
 
 		if i := strings.Index(line, "="); i > 0 {
 			candidate := strings.TrimSpace(line[:i])
+			// "KEY += value" append syntax (overlay layering). Historically a
+			// "+=" line fell through to continuation handling — no shipped or
+			// fleet config ever used it — so claiming it is safe.
+			appendOp := false
+			if trimmed := strings.TrimSpace(strings.TrimSuffix(candidate, "+")); strings.HasSuffix(candidate, "+") && isConfigKey(trimmed) {
+				candidate, appendOp = trimmed, true
+			}
 			if isConfigKey(candidate) {
 				k := strings.ToUpper(candidate)
 				v := strings.Trim(strings.TrimSpace(line[i+1:]), `"`)
+				if appendOp {
+					if prev, ok := s.ByName[cur][k]; ok && prev != "" {
+						v = joinAppend(k, prev, v)
+					}
+					if s.AppendKeys == nil {
+						s.AppendKeys = make(map[string]map[string]bool)
+					}
+					if s.AppendKeys[cur] == nil {
+						s.AppendKeys[cur] = make(map[string]bool)
+					}
+					s.AppendKeys[cur][k] = true
+				} else {
+					// A later plain "=" reassignment is a REPLACE: it must also
+					// clear an earlier "+=" mark, or the merger would append the
+					// final value onto the earlier layers' one.
+					delete(s.AppendKeys[cur], k)
+				}
 				s.ByName[cur][k] = v
 				lastKey = k
 				if cur == "global" {

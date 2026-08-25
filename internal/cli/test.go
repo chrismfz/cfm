@@ -254,7 +254,10 @@ func isSimpleKey(k string) bool {
 }
 
 func diffDetectorsGlobalKeys(livePath, refPath string) (missing, extra []string, err error) {
-	liveSecs, err := detectors.ReadSectionsFile(livePath)
+	// Live side is the LAYERED view (base + detectors.d overlays): a global
+	// key supplied by an overlay is present, not missing. The reference is a
+	// plain file.
+	liveSecs, err := detectors.ReadLayeredFile(livePath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -274,7 +277,9 @@ func diffDetectorsGlobalKeys(livePath, refPath string) (missing, extra []string,
 }
 
 func diffDetectorTypes(livePath string) (missing []string, extra []string, err error) {
-	liveSecs, err := detectors.ReadSectionsFile(livePath)
+	// Layered view: a detector type configured only via an overlay file is
+	// configured, not missing.
+	liveSecs, err := detectors.ReadLayeredFile(livePath)
 	if err != nil {
 		return nil, nil, err
 	}

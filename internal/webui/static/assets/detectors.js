@@ -721,7 +721,20 @@ async function load(){
   state.original=clone(j.config); state.draft=clone(j.config); state.path=j.path||''; state.examples=clone(j.config?.examples||[]); state.configExists = j.exists !== false; state.catalog = clone(c.catalog||[]); state.modes={};
   refreshCatalogUI();
   byId('detectorsInitCard').style.display = state.configExists ? 'none' : 'block';
+  renderOverlayNotice(j.overlay_files||[]);
   renderConfigEditors(); setDirty(false); setStatus(`Loaded ${state.path}`); await Promise.all([refreshBackups(), refreshRuntimeStatus()]);
+}
+
+// Overlay notice: this editor reads/writes the BASE detectors.conf, while the
+// daemon runs base + /etc/cfm/detectors.d overlays merged. When overlays
+// exist, say so — otherwise an edit that an overlay overrides looks like it
+// "didn't take". Built with textContent (XSS-safe).
+function renderOverlayNotice(files){
+  const el = byId('detectorsOverlayNotice');
+  if(!el) return;
+  if(!files.length){ el.style.display='none'; el.textContent=''; return; }
+  el.style.display='block';
+  el.textContent = `${files.length} overlay file(s) in detectors.d override values shown here: ${files.join(', ')} — this editor edits the BASE file; the daemon runs the merged view (see the Source resolution card for the effective sources).`;
 }
 
 async function refreshBackups(){ const j=await api('/api/v1/detectors/backups'); const ul=byId('detectorsBackupsList'); ul.innerHTML=''; (j.backups||[]).forEach((b)=>{ const li=document.createElement('li'); li.textContent=`${b.id} (${b.size} bytes)`; ul.appendChild(li); }); }
