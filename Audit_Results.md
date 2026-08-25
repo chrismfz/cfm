@@ -25,8 +25,28 @@ Audit mode: active, low-volume, non-destructive. Production state must not be ch
 ## R01 — Plaintext control plane on TCP/6060
 
 **Severity:** HIGH  
-**Status:** CONFIRMED LIVE  
+**Status:** ✅ SOURCE FIXED (defence in depth) / LIVE RETEST PENDING  
 **Priority:** P0/P1
+
+**Fix:** (1) The plaintext `:6060` listener is now loopback-only by default —
+**code-enforced**: `httpBindAddr` resolves an unset `LISTEN_ADDRESS` to `127.0.0.1` at
+the bind site (not just the reference `cfm.conf` value), so no config binds the wildcard
+implicitly; an explicit `0.0.0.0` stays the opt-in escape hatch. Edge + CLI both reach
+`:6060` over loopback; `:6061` stays public via `TLS_LISTEN_ADDRESS` (keep it `0.0.0.0` —
+`:6061` inherits `LISTEN_ADDRESS` when that key is unset). So there is no Internet-reachable
+plaintext admin plane by default. (2) A new pre-auth `AdminTransportRedirect` middleware
+(`internal/apiserver/transport_redirect.go`, wired in `Start()` outside `TokenMiddleware`)
+upgrades direct external `:6060` browser GET/HEAD admin routes to `:6061` once a
+bind-verified `tlsReady` is set, refuses state-changing plaintext admin requests with `403`
+(never processed-then-redirected), and serves a logged degraded fallback when TLS is
+genuinely down. Edge/`:6061`/loopback CLI/machine-`/api/v1` are untouched. **Residuals
+(tracked):** machine-`/api/v1` writes on a re-exposed `:6060` stay plaintext (R01 closure
+for them rests on the loopback bind, not this middleware), and the TLS-down degraded window
+is **read-only** (writes are refused with `403` regardless of TLS state) with challenge-gating
+of the remaining GET/HEAD traffic deferred to Step 4 — both realistic only with an explicit
+`0.0.0.0`.
+Tests: `transport_redirect_test.go`. Design + operator decisions:
+`docs/security/direct-6060-transport-policy.md`. Live retest (§below) rolls up to Step 10.
 
 `84.54.49.200:6060` is Internet reachable and serves the real CFM HTTP handler over plaintext.
 

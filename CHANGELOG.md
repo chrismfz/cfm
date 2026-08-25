@@ -71,6 +71,29 @@ back-filled here — see the git/PR history for that period.
   detector tails its historical default provisionally (self-heals when the
   source appears) and logs the full resolution trace.
 
+### Security
+- **Direct plaintext `:6060` control plane hardened (audit R01), defence in depth.**
+  (1) The plaintext `:6060` listener is now **loopback-only by default**: an unset
+  `LISTEN_ADDRESS` binds `127.0.0.1` in code (not the wildcard), and the reference
+  `cfm.conf` sets it explicitly. The OpenResty/Angie edge and the `cfm` CLI both reach
+  `:6060` over loopback, so nothing legitimate changes and there is no Internet-reachable
+  plaintext admin plane by default; an explicit `LISTEN_ADDRESS = "0.0.0.0"` stays the
+  opt-in escape hatch. *Existing installs that were on `0.0.0.0` should set
+  `LISTEN_ADDRESS = "127.0.0.1"` in `/etc/cfm/cfm.conf` — and, because `:6061` inherits
+  `LISTEN_ADDRESS` when `TLS_LISTEN_ADDRESS` is unset, also set `TLS_LISTEN_ADDRESS =
+  "0.0.0.0"` so the TLS admin plane stays remotely reachable* (the reference `cfm.conf`
+  already sets it). (2) A new **pre-auth `AdminTransportRedirect`** safety net: if `:6060`
+  is deliberately re-exposed, a direct external browser `GET`/`HEAD` of an admin route is
+  `302`-upgraded to the TLS port `:6061` (only once the TLS listener has actually bound),
+  and a state-changing plaintext admin request is refused with `403` rather than processed
+  — so credentials are never handled over cleartext, and a redirect never re-sends a
+  leaked body. The edge backend hop, the `:6061` listener, the loopback CLI, and machine
+  `/api/v1` traffic are all untouched (machine-API R01 closure rests on the loopback bind
+  above, not this middleware). Writes are refused regardless of TLS state, so a genuine
+  TLS-down state serves only a logged (`event=admin_http_fallback`) **read-only** degraded
+  fallback (GET/HEAD) — challenge-gating that read window is tracked for audit Step 4. See
+  `docs/security/direct-6060-transport-policy.md`.
+
 ## 2026.08.25
 
 ### Added

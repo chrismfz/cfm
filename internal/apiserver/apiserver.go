@@ -15,13 +15,15 @@
 //   /api/v1/challenge/              — challenge API (registered by webdetector package)
 //   /api/v1/mysql/                  — MySQL governor (registered when gov != nil)
 //
-// Auth stack (outermost → innermost):
-//   Auth.LoadAndSave()   — loads/saves goauth session on every request
-//   TokenMiddleware()   — loopback bypass | session | Bearer/Token/X-CFM-Token
-//   mux                — routes
+// Handler stack (outermost → innermost — see Start()):
+//   RequestLog → AdminTransportRedirect → APISecurityAnomaly → PprofWriteTimeout
+//   → Auth.LoadAndSave → TokenMiddleware → CSRF → MFARollout → mux
+// AdminTransportRedirect (R01) sits outside TokenMiddleware so a direct plaintext
+// :6060 admin request is upgraded to :6061 / refused before any auth runs.
 //
 // Two listeners:
-//   HTTP  :6060  (PORT / LISTEN_ADDRESS)            — always started
+//   HTTP  :6060  (PORT / LISTEN_ADDRESS)            — always started; LISTEN_ADDRESS
+//                                                     defaults to 127.0.0.1 (loopback)
 //   HTTPS :6061  (TLS_PORT / TLS_LISTEN_ADDRESS)    — started when TLS_PORT > 0 and ssl != nil
 //
 // The same handler stack is shared by both listeners.
@@ -44,6 +46,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chrismfz/goauth"
@@ -193,7 +196,7 @@ func Start(
 	RegisterFirewallList(m, be)
 	RegisterFirewallCounters(m, be) // read-only nft named-counter view (rule match volume)
 	RegisterFirewallSelfTest(m, be) // read-only nftlib self-diagnostics
-	RegisterNetfilterPath(m, cfg)    // read-only host-wide hook order and NAT conflicts
+	RegisterNetfilterPath(m, cfg)   // read-only host-wide hook order and NAT conflicts
 	RegisterSearch(m, be, cfgDir)   // read-only multi-source IP lookup
 
 	// ── System status ─────────────────────────────────────────────────────────
@@ -316,9 +319,18 @@ func Start(
 	// Registered last so its in-process dispatch can reach every /api/v1 route.
 	registerMCPServer(m, cfg, store)
 
+	// tlsReadyFlag becomes true only once the :6061 TLS listener has actually
+	// bound (below). AdminTransportRedirect reads it to decide whether a direct
+	// external plaintext :6060 browser request can be upgraded to :6061 (R01).
+	var tlsReadyFlag atomic.Bool
+
 	// ── Build handler stack ───────────────────────────────────────────────────
-	// Innermost → outermost:
-	//   mux → TokenMiddleware → LoadAndSave
+	// Execution order (outermost → innermost):
+	//   RequestLog → AdminTransportRedirect → APISecurityAnomaly → PprofWriteTimeout
+	//   → LoadAndSave → TokenMiddleware → CSRF → MFARollout → mux
+	// AdminTransportRedirect sits OUTSIDE TokenMiddleware (pre-auth) so a direct
+	// plaintext admin request is upgraded/refused before any credential is
+	// processed, and INSIDE RequestLog so the transport decision is logged.
 	var handler http.Handler
 	handler = MFARolloutMiddleware(m)
 	handler = CSRFMiddleware(handler)
@@ -328,10 +340,16 @@ func Start(
 	}
 	handler = PprofWriteTimeoutMiddleware(handler)
 	handler = APISecurityAnomalyMiddleware(handler)
+	handler = AdminTransportRedirect(handler, cfg.Debug.TLSPort, tlsReadyFlag.Load)
 	handler = RequestLogMiddleware(handler)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	httpAddr := fmt.Sprintf("%s:%d", cfg.Debug.ListenAddress, cfg.Debug.Port)
+	// Secure default: an unset LISTEN_ADDRESS binds loopback, never the wildcard,
+	// so the plaintext control plane is not Internet-reachable unless the operator
+	// opts in explicitly (audit R01). An explicit "0.0.0.0"/"::" is honoured as-is
+	// — that is the deliberate escape hatch, upgraded per-request to :6061 by
+	// AdminTransportRedirect.
+	httpAddr := fmt.Sprintf("%s:%d", HTTPBindAddr(cfg.Debug.ListenAddress), cfg.Debug.Port)
 	httpSrv := &http.Server{
 		Addr:              httpAddr,
 		Handler:           handler,
@@ -378,6 +396,9 @@ func Start(
 				IdleTimeout:       60 * time.Second,
 				MaxHeaderBytes:    1 << 20,
 			}
+			// TLS is now bound and serving; direct :6060 browser admin traffic may
+			// be upgraded to :6061 (AdminTransportRedirect / R01).
+			tlsReadyFlag.Store(true)
 			go func() {
 				if err := tlsSrv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && err != http.ErrServerClosed {
 					logging.LogfAPI("[apiserver] TLS error: %v", err)
