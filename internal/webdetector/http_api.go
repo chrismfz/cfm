@@ -89,25 +89,25 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/challenge/ips", e.handleChallengeIPs},
 		{"/api/v1/challenge/ip", e.handleChallengeIP}, // ?ip=
 		{"/api/v1/challenge/events", e.handleChallengeEvents},
-		{"/api/v1/challenge/vhost/add", e.handleChallengeVhostAdd},
-		{"/api/v1/challenge/vhost/remove", e.handleChallengeVhostRemove},
+		{"/api/v1/challenge/vhost/add", requirePOST(e.handleChallengeVhostAdd)},
+		{"/api/v1/challenge/vhost/remove", requirePOST(e.handleChallengeVhostRemove)},
 		{"/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus},
-		{"/api/v1/challenge/vhost/attack", e.handleChallengeVhostAttack}, // ?host=&on=1|0 (under-attack override)
+		{"/api/v1/challenge/vhost/attack", requirePOST(e.handleChallengeVhostAttack)}, // ?host=&on=1|0 (under-attack override)
 		{"/api/v1/challenge/exclude/list", e.handleChallengeExcludeList},
-		{"/api/v1/challenge/exclude/add", e.handleChallengeExcludeAdd},
-		{"/api/v1/challenge/exclude/remove", e.handleChallengeExcludeRemove},
+		{"/api/v1/challenge/exclude/add", requirePOST(e.handleChallengeExcludeAdd)},
+		{"/api/v1/challenge/exclude/remove", requirePOST(e.handleChallengeExcludeRemove)},
 		{"/api/v1/waf/exclude/list", e.handleWAFExcludeList},
-		{"/api/v1/waf/exclude/add", e.handleWAFExcludeAdd},
-		{"/api/v1/waf/exclude/remove", e.handleWAFExcludeRemove},
+		{"/api/v1/waf/exclude/add", requirePOST(e.handleWAFExcludeAdd)},
+		{"/api/v1/waf/exclude/remove", requirePOST(e.handleWAFExcludeRemove)},
 		{"/api/v1/clam/override/list", e.handleClamOverrideList},
-		{"/api/v1/clam/override/add", e.handleClamOverrideAdd},
-		{"/api/v1/clam/override/remove", e.handleClamOverrideRemove},
+		{"/api/v1/clam/override/add", requirePOST(e.handleClamOverrideAdd)},
+		{"/api/v1/clam/override/remove", requirePOST(e.handleClamOverrideRemove)},
 		{"/api/v1/clam/mode/list", e.handleClamModeList},
-		{"/api/v1/clam/mode/add", e.handleClamModeAdd},
-		{"/api/v1/clam/mode/remove", e.handleClamModeRemove},
+		{"/api/v1/clam/mode/add", requirePOST(e.handleClamModeAdd)},
+		{"/api/v1/clam/mode/remove", requirePOST(e.handleClamModeRemove)},
 		{"/api/v1/clam/sigignore/list", e.handleClamSigIgnoreList},
-		{"/api/v1/clam/sigignore/add", e.handleClamSigIgnoreAdd},
-		{"/api/v1/clam/sigignore/remove", e.handleClamSigIgnoreRemove},
+		{"/api/v1/clam/sigignore/add", requirePOST(e.handleClamSigIgnoreAdd)},
+		{"/api/v1/clam/sigignore/remove", requirePOST(e.handleClamSigIgnoreRemove)},
 		{"/api/v1/clam/health", e.handleClamHealth},
 		{"/api/v1/http3/list", e.handleHTTP3List},
 		{"/api/v1/http3/enable", e.handleHTTP3Enable},
@@ -126,6 +126,31 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 	}
 	for _, rt := range e.apiRoutes() {
 		mux.HandleFunc(rt.path, rt.handler)
+	}
+}
+
+// requirePOST wraps a state-changing handler so only POST reaches it. A non-POST
+// request is rejected with 405 + Allow: POST before the handler parses params or
+// touches state (authentication is still applied mux-wide by the apiserver
+// first). Mutating control-plane endpoints must be POST so the session-CSRF
+// boundary (which correctly treats GET/HEAD as safe) actually covers them — a GET
+// mutator would change state outside that boundary. Applied in the apiRoutes table
+// so the method policy lives with the route (audit R03). Read endpoints stay
+// unwrapped.
+//
+// This is the canonical place to declare a mutator's method. A few older mutators
+// keep a handler-local method check instead — force-unblock checks auth before
+// method, and ua-emergency serves BOTH GET (list) and POST (mutate) — so hoisting
+// them here would change their auth/response ordering; they are intentionally left
+// as-is. New mutators should use requirePOST in the table.
+func requirePOST(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		h(w, r)
 	}
 }
 

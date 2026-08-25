@@ -103,6 +103,18 @@ back-filled here — see the git/PR history for that period.
   challenges verified bots too).
 
 ### Security
+- **State-changing control-plane endpoints are now POST-only.** The 13 mutating
+  challenge/WAF/ClamAV endpoints (`challenge/vhost/{add,remove,attack}`,
+  `challenge/exclude/{add,remove}`, `waf/exclude/{add,remove}`,
+  `clam/{override,mode,sigignore}/{add,remove}`) accepted any method, so a
+  state-changing **GET** slipped past the browser session-CSRF boundary (which
+  correctly treats GET/HEAD as safe). They are now wrapped with `requirePOST` in
+  the single route table: a non-POST request gets `405` + `Allow: POST` before the
+  handler parses parameters or changes any state. Read siblings (`…/list`, `vhost/status`)
+  stay GET; endpoints that already enforced POST (traffic rules, history
+  prune/truncate, UA-emergency, force-unblock, HTTP/3 enable/disable) are unchanged.
+  All callers (the `cfm` CLI and the admin UI) already POST, so nothing legitimate
+  breaks. (Audit finding R03.)
 - **`/debug/pprof/*` is now explicitly admin-only.** The Go profiler endpoints
   (`/debug/pprof/`, `cmdline`, `profile`, `symbol`, `trace`) were mounted behind
   mux-wide authentication only, which accepts a valid *scoped* per-vhost
