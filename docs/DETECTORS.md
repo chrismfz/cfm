@@ -29,8 +29,24 @@ Depending on detector type, sources can be:
 - `file`: tail a log file (`LOG_PATH`)
 - `journal`: read systemd journald (`JOURNAL_UNIT` / `JOURNAL_MATCHES`)
 - `docker`: read container logs (`DOCKER_CONTAINER`, optional `DOCKER_ARGS`) where supported
+- `auto`: resolve the source automatically. `ssh_auth` and `dovecot_auth` use
+  the shared resolver (`internal/detectors/srcresolve`; more detectors migrate
+  per `docs/detectors-config-unification.md` — `ftpd`/`modsec`/`mysql` still
+  carry their own older autodetects with different semantics). The shared
+  resolver tries, in order: journald units with entries → merely-active units
+  (resolved to their canonical name, so a Debian `sshd.service` alias picks
+  `ssh.service`) → docker container discovery by name pattern (exactly one
+  match, never a guess — and checked before files, so a containerized service
+  beats a stale host log) → known log-file locations. **Explicit values
+  always win**: a concrete `MODE`, `JOURNAL_UNIT`, `LOG_PATH`, or
+  `DOCKER_CONTAINER` short-circuits auto and is used verbatim (precedence:
+  container → unit → path). If nothing is confirmed, the detector tails its
+  historical default source provisionally (self-heals when it appears) and
+  logs the resolution trace (`no log source confirmed (...)`).
 
-If a detector supports multiple source backends, choose exactly one clear path in each section (comment the others out).
+With `auto` available you normally set nothing; pin explicit keys only for
+custom layouts. If a detector supports multiple source backends and you do pin
+one, choose exactly one clear path in each section (comment the others out).
 
 ### Threshold / window / cooldown semantics
 
@@ -81,8 +97,8 @@ Typical defaults below are representative from the shipped template and should b
 | Detector key | What it detects | Key knobs | Typical defaults |
 |---|---|---|---|
 | `cfm_endpoints` | CFM login/token/API abuse stages; built in and active even without the config file | `STAGE1/2/3_THRESHOLD`, `STAGE2_CHALLENGE_TTL`, `BLOCK`, IP/network allowlists | `EVERY=2s`, `WINDOW=2m`, `BLOCK=15m` |
-| `ssh_auth` | SSH auth failures / brute-force | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `DDOS_IP`, `BLOCK` | `MODE=journal`, `WINDOW=15m`, `BLOCK=permanent` |
-| `dovecot_auth` | Dovecot auth abuse | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK` | `MODE=journal`, `WINDOW=15m`, `BLOCK=permanent` |
+| `ssh_auth` | SSH auth failures / brute-force | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `DDOS_IP`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent` |
+| `dovecot_auth` | Dovecot auth abuse | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent` |
 | `ftpd` | FTP auth failures | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent` |
 | `cpanel` | cPanel auth/root login anomalies | `AUTHFAIL_IP`, `AUTHFAIL_USER`, `ROOT_IP`, `BLOCK` | `WINDOW=10m`, `BLOCK=1h` |
 | `mysql` | MySQL/MariaDB auth failures / scans | `LOG_PATH`, `DENIED_IP`, `DENIED_USER`, `ROOT_IP`, `SCAN_IP`, `BLOCK` | `WINDOW=10m`, `LOG_PATH=auto`, `BLOCK=permanent` |
@@ -547,8 +563,9 @@ Symptoms:
 
 Checks:
 - `MODE=file`: verify `LOG_PATH` path/permissions.
-- `MODE=journal`: verify unit name (`sshd.service` vs `ssh.service` distro difference).
+- `MODE=journal`: verify unit name (`sshd.service` vs `ssh.service` distro difference — `MODE=auto` handles this itself where supported).
 - `MODE=docker`: verify container name and that daemon user can read `docker logs`.
+- `MODE=auto`: read the startup resolution line (`source=… (reason)` or `no log source confirmed (...)` in the detector log) — it lists exactly what was tried.
 
 ### Regex compiles but no matches
 
