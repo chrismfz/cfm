@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// mutatorRoutes are the state-changing challenge/waf/clam endpoints that must be
-// POST-only (audit R03). Their read siblings (list/status) are intentionally NOT
-// here — they stay reachable via GET.
+// mutatorRoutes are the state-changing challenge/waf/clam/http3 endpoints that
+// must be POST-only (audit R03). Their read siblings (list/status) are
+// intentionally NOT here — they stay reachable via GET.
 var mutatorRoutes = []string{
 	"/api/v1/challenge/vhost/add",
 	"/api/v1/challenge/vhost/remove",
@@ -22,6 +22,8 @@ var mutatorRoutes = []string{
 	"/api/v1/clam/mode/remove",
 	"/api/v1/clam/sigignore/add",
 	"/api/v1/clam/sigignore/remove",
+	"/api/v1/http3/enable",
+	"/api/v1/http3/disable",
 }
 
 // TestMutatorsRejectNonPOST is the audit R03 regression: every state-changing

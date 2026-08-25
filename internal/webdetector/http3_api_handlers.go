@@ -69,16 +69,11 @@ func (e *Engine) handleHTTP3List(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/http3/enable?host=example.com
 //
-// Method is enforced as POST so credentialed cross-origin GETs (e.g.
-// <img src=...> on a third-party page loaded by a logged-in admin) cannot
-// silently toggle opt-ins. The existing WAF/Challenge exclude endpoints
-// have the same CSRF-via-GET gap; that's tracked separately. New surface
-// here ships safer.
+// Method is enforced as POST (via requirePOST in the apiRoutes table, which
+// also emits Allow: POST on a non-POST request) so credentialed cross-origin
+// GETs (e.g. <img src=...> on a third-party page loaded by a logged-in admin)
+// cannot silently toggle opt-ins.
 func (e *Engine) handleHTTP3Enable(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed (use POST)"})
-		return
-	}
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
@@ -103,10 +98,6 @@ func (e *Engine) handleHTTP3Enable(w http.ResponseWriter, r *http.Request) {
 //
 // See handleHTTP3Enable for the POST-only rationale.
 func (e *Engine) handleHTTP3Disable(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed (use POST)"})
-		return
-	}
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
