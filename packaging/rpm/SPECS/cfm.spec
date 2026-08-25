@@ -57,6 +57,11 @@ if [ -d "%{pkgroot}/var" ]; then
   cp -a "%{pkgroot}/var" "%{buildroot}/"
 fi
 
+# detectors.conf overlay directory: shipped EMPTY (package never installs
+# files into it) so per-host overrides in it survive upgrades while the base
+# detectors.conf conffile stays pristine and updateable.
+mkdir -p %{buildroot}/etc/cfm/detectors.d
+
 
 # ensure canonical shared assets are always shipped, even if %{pkgroot} staging omitted them
 mkdir -p "%{buildroot}%{_datadir}/cfm"
@@ -89,6 +94,7 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %{_bindir}/cfm
 %{_unitdir}/cfm.service
 %attr(0700,root,root) %dir /etc/cfm
+%attr(0700,root,root) %dir /etc/cfm/detectors.d
 %config(noreplace) /etc/cfm/cfm.conf
 %config(noreplace) /etc/cfm/detectors.conf
 %attr(0600,root,root) %config(noreplace) /etc/cfm/kernsec.conf

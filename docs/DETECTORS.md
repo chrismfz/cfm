@@ -90,6 +90,43 @@ JOURNAL_UNIT sshd.service → canonical ssh.service`). Detectors still on
 their own tailing (`ftpd`, `proxmox_auth`, `custom`) use the pinned name
 verbatim until they migrate to the shared resolver.
 
+### Overlay files (`/etc/cfm/detectors.d/`)
+
+The daemon reads `/etc/cfm/detectors.conf` (the base, package-owned conffile)
+and then merges every `/etc/cfm/detectors.d/*.conf` over it in lexicographic
+filename order (`10-…` before `20-…`). Put deliberate per-host overrides in
+overlays — one file per concern works well (`10-mysql.conf`, `20-ssh.conf`) —
+so the base file stays pristine and package upgrades update it in place (no
+more `.rpmnew`/`.dpkg-dist`). Merge semantics:
+
+- same section + key → the overlay value **replaces** the base value
+- `KEY += value` → **appends** to the earlier value (list keys join with
+  `", "`, multiline rule blocks stack line-by-line) — extend common lists
+  like `IGNORE_NETS` or `CHALLENGE_VHOST_IGNORE` without forking them; an
+  inline `;`/`#` comment on the earlier value is dropped before joining (the
+  scalar readers cut at the first `;`/`#`, so appending after it would
+  silently discard the addition)
+- a section only in an overlay is added whole (named instances, host extras)
+- hot reload watches overlays like the base: edits, and also files being
+  added, removed, or renamed (the reload signature hashes the overlay set,
+  not just mtimes — an overlay installed with `cp -p`/`rsync -a` still
+  triggers)
+- hidden files (`.#…` editor locks, `.foo.conf`) are ignored, systemd-style;
+  only `*.conf` counts
+
+The package ships `detectors.d/` **empty** and never installs files into it.
+A broken/unreadable overlay is a read error — never silently ignored
+configuration: on a hot reload the running detectors are kept (and the error
+logged); at daemon start the base config alone is applied (base-only start,
+loudly logged) rather than degrading to builtin-only protection. Verify the
+merged result with `cfm detectors-srcresolve` and the cfm-admin "Source
+resolution" card. `config_drift` computes `missing_sections`/`missing_keys`
+against the MERGED view — a feature you adopt via an overlay stops being
+reported missing — while value diffs stay stock-vs-BASE (overlay values are
+intentional per-host state, summarized as counts). Note: the cfm-admin config
+editor currently edits the BASE file and shows a notice when overlays exist;
+editing overlays from the UI is planned.
+
 ### Threshold / window / cooldown semantics
 
 Most detectors use this model:

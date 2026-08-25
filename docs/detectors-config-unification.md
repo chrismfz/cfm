@@ -1,9 +1,15 @@
 # Detectors config unification — auto-detected sources, layered overrides, fleet-converged defaults
 
-**Status: DESIGN (2026-08-25) — PR 2 (`srcresolve` + ssh/dovecot) in flight
-on `claude/detectors-srcresolve`; amended same day for the journald
-reliability trap (§3a) and the `[api_abuse]` → `cfm_endpoints` deprecation
-(§6.1).**
+**Status (2026-08-25): PRs 1–4 LANDED** — srcresolve + ssh/dovecot (#1346),
+exim/postfix families + MTA self-disable (#1348), the source-resolution
+preview across CLI/API/cfm-admin/MCP (#1347), canonical-unit normalization +
+daemon-coverage CLI join (#1354). **PR 5 (Mechanism B — `detectors.d/`
+layering) in flight** on `claude/detectors-layering`; the WebUI editor still
+writes the BASE file (shows an overlay notice; overlay-editing UI is a
+follow-up). Same-day §3a (journald reliability trap) and §6.1
+(`[api_abuse]` → `cfm_endpoints`) amendments folded in. Remaining: PR 6
+(global `[leniency]` + persisted tokens), PR 7 (converged stock defaults —
+deliberately last, gathering burn-in data).**
 Evidence base: a 10-server fleet audit of live `/etc/cfm/detectors.conf`
 (3deers, earth, mailcowdocker, mars, orion, rigel, saf, speedhost, titan,
 virgo) diffed against the stock reference with `detconf`-identical parsing.
@@ -160,8 +166,10 @@ conffile "modified" and resurrects `.rpmnew`. So deliberate deltas move out:
   `IGNORE_IPS`, `CHALLENGE_VHOST_IGNORE`, `ALLOW_*`, so hosts extend the
   common base instead of forking the whole list.
 - Sections may exist only in an overlay (named instances, host-local extras).
-- `Sections.StampNS` becomes max mtime across all read files, so hot-reload
-  and drift stamps stay correct.
+- `Sections.StampNS` becomes max mtime across all read files, and a
+  `LayerSig` (hash of the overlay set: name+mtime+size per file) covers what
+  max-mtime cannot see — an overlay removed, renamed, or installed with an
+  older mtime (`mv`/`cp -p`/`rsync -a`) — so hot reload always notices.
 - `detconf` grows `ReadLayered(basePath, dropinDir)`; all consumers move to
   it (manager, admin editor read path, configdrift live side, detector
   coverage endpoint). With no overlay present, output is byte-identical to
@@ -172,9 +180,12 @@ conffile "modified" and resurrects `.rpmnew`. So deliberate deltas move out:
   The editor shows the merged view with per-key provenance (base/overlay).
 - Packaging ships the empty `detectors.d/` directory and **never** installs
   files into it (that would recreate the conffile problem one level down).
-- `config_drift` (API + MCP) keeps comparing stock vs **base** — overlays are
-  intentional per-host state, not drift. It additionally reports
-  `overlay_files`/`overlay_keys` counts so an audit sees the overlay exists.
+- `config_drift` (API + MCP) compares VALUES stock vs **base** — overlay
+  values are intentional per-host state, not drift — but computes
+  `missing_sections`/`missing_keys` against the **merged** view, since the
+  recommended way to adopt a missing feature is exactly an overlay (it must
+  stop being reported missing once added). Overlays are additionally
+  summarized as per-file section/key counts so an audit sees they exist.
 
 End state: `/etc/cfm/detectors.conf` is pristine → upgrades update it in
 place; every new stock knob reaches every host on the next upgrade; a host's

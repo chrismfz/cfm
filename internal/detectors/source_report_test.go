@@ -210,6 +210,16 @@ MATCH_COUNTRY = "GR"
 	if err := os.WriteFile(cfg, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The report reads the LAYERED view: an overlay overriding ssh_auth's
+	// LOG_PATH must be what resolution sees.
+	if err := os.Mkdir(filepath.Join(dir, "detectors.d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "detectors.d", "10-local.conf"),
+		[]byte("[ssh_auth]\nLOG_PATH = /overlay/ssh.log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	rows, err := SourceReport(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -222,10 +232,10 @@ MATCH_COUNTRY = "GR"
 		t.Fatalf("leniency sections must not appear in the report")
 	}
 	ssh := rows[byName["ssh_auth"]]
-	if ssh.Engine != "srcresolve" || ssh.Kind != "file" || ssh.Target != "/custom/ssh.log" {
-		t.Fatalf("ssh row: %+v", ssh)
+	if ssh.Engine != "srcresolve" || ssh.Kind != "file" || ssh.Target != "/overlay/ssh.log" {
+		t.Fatalf("ssh row must reflect the overlay-merged view: %+v", ssh)
 	}
-	if ssh.Configured["MODE"] != "file" || ssh.Configured["LOG_PATH"] != "/custom/ssh.log" {
+	if ssh.Configured["MODE"] != "file" || ssh.Configured["LOG_PATH"] != "/overlay/ssh.log" {
 		t.Fatalf("ssh configured echo: %+v", ssh.Configured)
 	}
 	if ftpd := rows[byName["ftpd"]]; ftpd.Engine != "legacy-auto" {

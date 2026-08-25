@@ -250,7 +250,9 @@ var legacyAutoTypes = map[string]string{
 // started or changed. Sections with ENABLED=0 are still planned so the
 // operator previews what enabling would do.
 func SourceReport(cfgPath string) ([]apiserver.DetectorSourceRow, error) {
-	secs, err := ReadSectionsFile(cfgPath)
+	// Layered read — the report must preview the same merged view the manager
+	// runs on, overlays included.
+	secs, err := ReadLayeredFile(cfgPath)
 	if err != nil {
 		return nil, err
 	}

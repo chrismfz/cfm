@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"cfm/internal/detconf"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectorstatus"
 	"cfm/internal/enrich"
@@ -64,12 +65,17 @@ func probeSourceStatus(kv KV) (bool, string) {
 	return true, "log file readable"
 }
 
-// cfgSig changes when either detections.conf changes (StampNS) OR any watched
-// LOG_PATH is rotated (inode/dev changes). Prevents tailers sticking to deleted FD.
+// cfgSig changes when detectors.conf or an overlay changes (StampNS = max
+// mtime across layers; LayerSig = the overlay set's name+mtime+size hash,
+// covering an overlay removed/renamed/added-with-an-older-mtime, which max
+// mtime alone cannot see) OR any watched LOG_PATH is rotated (inode/dev
+// changes — prevents tailers sticking to a deleted FD).
 func cfgSig(secs *Sections) uint64 {
 	h := fnv.New64a()
 	var b [8]byte
 	binary.LittleEndian.PutUint64(b[:], uint64(secs.StampNS))
+	_, _ = h.Write(b[:])
+	binary.LittleEndian.PutUint64(b[:], secs.LayerSig)
 	_, _ = h.Write(b[:])
 
 	// IMPORTANT: map iteration order is random -> must hash in stable order,
@@ -643,13 +649,32 @@ func (m *manager) maybeReload(parent context.Context) {
 }
 
 func readSectionsForReload(path string, running bool) (Sections, error, bool) {
-	secs, _, err := readSections(path)
+	// Layered read: base conffile + /etc/cfm/detectors.d/*.conf overlays
+	// (docs/detectors-config-unification.md §4). cfgSig sees overlay changes
+	// via StampNS (edits) and LayerSig (files added/removed/renamed).
+	secs, _, err := readLayered(path, detconf.DefaultDropinDir(path))
 	if err == nil {
 		return secs, nil, false
 	}
-	if os.IsNotExist(err) || !running {
+	// The BASE conffile missing keeps its historical meaning (deconfigured →
+	// built-in control-plane protection only). Overlay errors never match
+	// here: readLayered wraps them, and os.IsNotExist does not unwrap.
+	if os.IsNotExist(err) {
 		return emptyDetectorSections(), err, true
 	}
+	if !running {
+		// First load with an unreadable overlay (or dropin dir) must not cost
+		// the whole detector layer: if the base conffile reads on its own,
+		// start base-only. Builtin-only degraded mode stays reserved for a
+		// base file that itself cannot be read. Once the overlay is fixed its
+		// LayerSig differs from the base-only sig, so hot reload applies it.
+		if base, berr := ReadSectionsFile(path); berr == nil {
+			logging.Logf("[detectors] overlay read failed on first load: %v — starting with the base config ONLY; fix the overlay and it hot-reloads", err)
+			return base, nil, false
+		}
+		return emptyDetectorSections(), err, true
+	}
+	// Hot reload: never half-apply — keep the current detectors.
 	return Sections{}, err, false
 }
 

@@ -6,9 +6,12 @@ package apiserver
 // /etc/cfm/ files, so an operator sees which features a release added that
 // never reached their conffile (upgrades seed /etc/cfm once and never touch it
 // again). detectors.conf is diffed section-by-section and key-by-key with the
-// same parser the daemon's manager uses (internal/detconf.ReadSectionsFile),
-// excluding the optional default-on cfm_endpoints/api_abuse family whose
-// absence from a live conffile is not runtime drift;
+// same parser the daemon's manager uses (internal/detconf), excluding the
+// optional default-on cfm_endpoints/api_abuse family whose absence from a live
+// conffile is not runtime drift. missing_sections/missing_keys are computed
+// against the MERGED view (base + /etc/cfm/detectors.d overlays) — a feature
+// adopted via an overlay is active, not missing — while value_diffs/extras
+// stay base-vs-stock (overlay values are intentional per-host state);
 // cfm.conf is checked for stock-documented keys absent from the live text
 // entirely. Values are informational only — live values legitimately differ
 // per host.
@@ -100,7 +103,10 @@ func handleSystemConfigDrift(w http.ResponseWriter, r *http.Request) {
 		case errLive != nil:
 			det["error"] = "parse live: " + errLive.Error()
 		default:
-			rep := diffDetectorsConfig(stockSec, liveSec)
+			rep, overlayErr := detectorsDriftReport(stockSec, liveSec, livePath)
+			if overlayErr != "" {
+				det["overlay_error"] = overlayErr // missing_* fell back to base-only
+			}
 			det["report"] = rep
 			det["summary"] = map[string]any{
 				"missing_sections": len(rep.MissingSections),
@@ -110,6 +116,13 @@ func handleSystemConfigDrift(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp["detectors_conf"] = det
+
+	// ── detectors.d overlays ──────────────────────────────────────────────────
+	// Overlays are deliberate per-host state, not drift: their VALUES never
+	// enter the diff (value_diffs/extras stay base-vs-stock; only missing_*
+	// above consults the merged view). They are summarized here so an audit
+	// sees they exist and how much they carry.
+	resp["detectors_overlays"] = summarizeDetectorOverlays(detconf.DefaultDropinDir(livePath))
 
 	// ── cfm.conf ──────────────────────────────────────────────────────────────
 	cf := map[string]any{"name": "cfm.conf"}
@@ -133,6 +146,61 @@ func handleSystemConfigDrift(w http.ResponseWriter, r *http.Request) {
 	resp["cfm_conf"] = cf
 
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// summarizeDetectorOverlays counts what /etc/cfm/detectors.d carries: per
+// file, its section and key totals. Values are never included.
+func summarizeDetectorOverlays(dropinDir string) map[string]any {
+	out := map[string]any{"dir": dropinDir, "files": []any{}, "total_keys": 0}
+	names, err := detconf.ListDropins(dropinDir)
+	if err != nil {
+		out["error"] = err.Error()
+		return out
+	}
+	files := make([]any, 0, len(names))
+	totalKeys := 0
+	for _, name := range names {
+		f := map[string]any{"name": name}
+		secs, err := detconf.ReadSectionsFile(filepath.Join(dropinDir, name))
+		if err != nil {
+			f["error"] = err.Error()
+			files = append(files, f)
+			continue
+		}
+		sections, keys := 0, 0
+		for sec, kv := range secs.ByName {
+			if sec == "global" && len(kv) == 0 {
+				continue // parser always seeds an empty global
+			}
+			sections++
+			keys += len(kv)
+		}
+		f["sections"], f["keys"] = sections, keys
+		totalKeys += keys
+		files = append(files, f)
+	}
+	out["files"] = files
+	out["total_keys"] = totalKeys
+	return out
+}
+
+// detectorsDriftReport builds the stock-vs-live detectors.conf report.
+// Values/extras compare stock against the BASE conffile (overlay values are
+// deliberate per-host state, not drift). missing_sections/missing_keys answer
+// "is this feature reaching the runtime?", so they are computed against the
+// MERGED view (base + detectors.d overlays): the recommended way to adopt a
+// missing feature IS an overlay, and it must stop being reported missing once
+// added. If the merged read fails, missing_* stay base-only and the error is
+// returned for the response.
+func detectorsDriftReport(stockSec, liveSec detconf.Sections, livePath string) (configdrift.DetectorsReport, string) {
+	rep := diffDetectorsConfig(stockSec, liveSec)
+	merged, err := detconf.ReadLayeredFile(livePath)
+	if err != nil {
+		return rep, err.Error()
+	}
+	mrep := diffDetectorsConfig(stockSec, merged)
+	rep.MissingSections, rep.MissingKeys = mrep.MissingSections, mrep.MissingKeys
+	return rep, ""
 }
 
 func diffDetectorsConfig(stock, live detconf.Sections) configdrift.DetectorsReport {

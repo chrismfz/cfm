@@ -121,7 +121,15 @@ func handleDetectorsConfig(w http.ResponseWriter, r *http.Request, cfgDir string
 			return
 		}
 		_, statErr := os.Stat(path)
-		writeNotifierJSON(w, http.StatusOK, map[string]any{"config": cfg, "path": path, "exists": statErr == nil})
+		// overlay_files: /etc/cfm/detectors.d entries. The editor edits the
+		// BASE file; the daemon runs the merged view — the UI shows a notice
+		// when overlays exist so an edit that an overlay overrides is not a
+		// mystery. Listing failure is non-fatal (empty list).
+		overlays, _ := detconf.ListDropins(detconf.DefaultDropinDir(path))
+		if overlays == nil {
+			overlays = []string{}
+		}
+		writeNotifierJSON(w, http.StatusOK, map[string]any{"config": cfg, "path": path, "exists": statErr == nil, "overlay_files": overlays})
 	case http.MethodPut:
 		var req struct {
 			Config detectorscfg.AdminConfig `json:"config"`

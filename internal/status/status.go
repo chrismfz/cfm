@@ -832,7 +832,10 @@ func resolveDetectorsConfigPath() string {
 
 func readDetectorSectionKV(path, section string) map[string]string {
 	out := map[string]string{}
-	sections, err := detectors.ReadSectionsFile(path)
+	// Layered read: these probes (OPENRESTY_SOCK, CHALLENGE_TOKEN) must see
+	// the same effective config the daemon runs, including detectors.d
+	// overlays — a base-only read false-alarms when a key moved to an overlay.
+	sections, err := detectors.ReadLayeredFile(path)
 	if err != nil {
 		return out
 	}

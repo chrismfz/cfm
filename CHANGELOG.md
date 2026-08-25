@@ -17,6 +17,29 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **`/etc/cfm/detectors.d/` overlay layer — the base `detectors.conf` becomes
+  pristine and package-updateable again.** The daemon now reads the base
+  conffile and merges every `detectors.d/*.conf` over it in lexicographic
+  order: same key replaces, new `KEY += value` syntax appends to list keys
+  (`IGNORE_NETS += …`) and stacks multiline rule blocks, overlay-only sections
+  are added whole, and hot reload watches overlays like the base — including
+  files added, removed, or renamed (the reload signature hashes the overlay
+  set, so `cp -p`/`rsync -a` installs with old mtimes still trigger). Put
+  deliberate per-host overrides there (e.g. `10-mysql.conf`, `20-ssh.conf`)
+  and upgrades update the base file in place — ending the
+  `.rpmnew`/`.dpkg-dist` drift (design: docs/detectors-config-unification.md
+  §4). Packages ship the directory empty and never install files into it. The
+  source-resolution preview (CLI/API/card/MCP), `cfm status` probes and `cfm
+  test` report the merged view; `config_drift` computes missing sections/keys
+  against the merged view (a feature adopted via an overlay stops being
+  reported missing) while value diffs stay stock-vs-BASE, with overlays
+  summarized separately (per-file section/key counts); the cfm-admin editor
+  still edits the base and shows a notice when overlays exist (overlay
+  editing from the UI is a follow-up). A broken overlay is a logged read
+  error, never silently ignored config: a hot reload keeps the current
+  detectors, and a daemon start falls back to the base config only.
+
 ### Changed
 - **Explicit `JOURNAL_UNIT` pins are now alias-normalized to the canonical
   systemd unit on the srcresolve-adopted detectors** (`ssh_auth`,
