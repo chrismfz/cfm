@@ -25,15 +25,20 @@ func TestSecurityHeadersMiddleware_SetsBaselineHeaders(t *testing.T) {
 }
 
 func TestSecurityHeadersMiddleware_DoesNotOverrideExisting(t *testing.T) {
-	// A handler that deliberately chooses a stricter policy keeps it.
+	// A handler that deliberately chooses its own policy for BOTH headers keeps them
+	// (only-if-absent must apply to each header independently).
 	h := SecurityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "custom-sniff-policy")
 		w.WriteHeader(http.StatusOK)
 	}))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "https://host/x", nil))
 	if got := rr.Header().Get("Referrer-Policy"); got != "no-referrer" {
 		t.Fatalf("Referrer-Policy = %q, want the handler's own no-referrer preserved", got)
+	}
+	if got := rr.Header().Get("X-Content-Type-Options"); got != "custom-sniff-policy" {
+		t.Fatalf("X-Content-Type-Options = %q, want the handler's own value preserved", got)
 	}
 }
 
@@ -73,6 +78,13 @@ func TestTokenMiddleware_AuthFailuresAreNoStore(t *testing.T) {
 		{"invalid token 401", func() *http.Request {
 			r := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/status", nil)
 			r.Header.Set("Authorization", "Bearer wrong-secret")
+			return r
+		}},
+		{"embedded missing-auth 401", func() *http.Request {
+			// cPanel-embedded request with no token and no bootstrap cookie hits the
+			// separate inline 401 site (middleware.go ~line 390).
+			r := httptest.NewRequest(http.MethodGet, "https://host/api/v1/system/status", nil)
+			r.Header.Set("X-CFM-Embedded", "1")
 			return r
 		}},
 	}
