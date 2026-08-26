@@ -17,7 +17,33 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **Admin-token source-IP binding (`ADMIN_TOKEN_IP_BINDING`, default off) —
+  part (A).** New opt-in gate on the admin `AUTH_TOKEN` auth branch: it can
+  require the request's real source IP (via `requestPeer().ClientIP`, correct
+  behind the loopback edge hop) to be **loopback ∪ this host's own IPs ∪
+  `cfm.allow`/`cfm.dyndns` ∪ the `API_URL` host**, so a leaked admin token
+  **cannot be replayed from a foreign IP against the direct API or SSO-code
+  minting** even if the firewall is off — a fail-safe that lives in the API
+  itself. The admin token is only ever presented server-to-server (cfm-web at the
+  `API_URL` host) or over loopback (the WHM plugin), so this leaves the browser
+  SSO, session and scoped-token paths untouched. Modes: `off` (default —
+  behaviour unchanged), `logonly` (burn-in: logs `admin_token_source_ip
+  logonly=would_block …`, still allows), `enforce` (403 + `blocked_source_ip`
+  audit + an `ADMIN_TOKEN_FOREIGN_IP` anomaly so a single foreign-IP use alerts).
+  The resolved mode is logged at startup, and an unrecognized value warns instead
+  of silently disabling. Reuses the (previously unwired) `ip_allow_middleware`
+  allowlist helpers. Recommended rollout: `enforce` on one node, confirm SSO + API
+  still work (loopback + `API_URL` host are always allowed, so you cannot lock
+  yourself out), then fleet-wide.
+  **Scope — (A) alone does NOT fully neutralize a leaked `AUTH_TOKEN`:** the
+  embed-admin **cookie** is signed with a key derived from `AUTH_TOKEN`, so a leak
+  can still **forge** it and reach full admin from any IP until the companion
+  **(B)** lands (decouple the cookie signing key from `AUTH_TOKEN`); and `/mcp`
+  accepts the admin token for **read-only** telemetry, unaffected by this gate
+  (fix: a dedicated `MCP_TOKEN`). Enable `enforce` for defence-in-depth, not as a
+  complete leaked-token containment. Design, live evidence and the full threat
+  map: `docs/security/admin-token-source-ip-binding.md`.
 
 ## 2026.08.26
 

@@ -327,8 +327,16 @@ func isCpanelPluginSelfServicePath(r *http.Request) bool {
 	return strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion")) != ""
 }
 
-// TokenMiddleware enforces auth on all non-public routes.
-func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) http.Handler {
+// TokenMiddleware enforces auth on all non-public routes. Optional
+// TokenMiddlewareOption knobs (e.g. WithAdminTokenIPBinding) default to off, so
+// existing two-arg callers are unaffected.
+func TokenMiddleware(adminToken string, store *TokenStore, opts ...TokenMiddlewareOption) func(http.Handler) http.Handler {
+	var mwCfg tokenMiddlewareConfig
+	for _, o := range opts {
+		if o != nil {
+			o(&mwCfg)
+		}
+	}
 	if adminToken == "" {
 		logging.LogfAPI("[apiserver] auth_reject=server_misconfigured_missing_auth_token")
 		return func(next http.Handler) http.Handler {
@@ -378,6 +386,39 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			}
 			if tok != "" {
 				if tokenMatch(tok, adminToken) {
+					// Optional source-IP binding: the admin token is only ever
+					// presented server-to-server (cfm-web at the API_URL host) or
+					// over loopback (WHM plugin). A match from any other IP is a
+					// leaked-token signal.
+					if mwCfg.adminIP.active() && !adminTokenSourceAllowed(r, mwCfg.adminIP) {
+						if mwCfg.adminIP.mode == adminIPModeEnforce {
+							auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "blocked_source_ip", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusForbidden})
+							// Publish a structured anomaly (enforce ONLY — logonly must
+							// stay observe-only so burn-in never blocks/challenges the
+							// source) so a leaked admin token used even ONCE from a foreign
+							// IP alerts, instead of needing a 5-in-30s forbidden burst.
+							// classifierReason() lists "admin_token_source_ip" as a direct
+							// event so the generic burst signal does not double-count this.
+							publishRequestAnomaly(r, "ADMIN_TOKEN_FOREIGN_IP", http.StatusForbidden)
+							logging.LogfAPI("[apiserver] event=api_audit reason=admin_token_source_ip src_ip=%s method=%s path=%q status=%d",
+								realIPFromRequest(r), r.Method, r.URL.Path, http.StatusForbidden)
+							setAPIAnomalyReason(w, r, "admin_token_source_ip")
+							setAuthIdentityNoCacheHeaders(w) // identity-sensitive rejection
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(http.StatusForbidden)
+							// Opaque body (matches rejectIP) — do not confirm to the caller
+							// that the token they presented is the valid admin token.
+							_, _ = w.Write(mustJSON(map[string]string{"error": "forbidden: source IP not allowed"}))
+							return
+						}
+						// logonly (burn-in): record what enforce WOULD block, then allow.
+						// Unsampled by design — expected volume is ~zero (only cfm-web and
+						// the WHM plugin present the admin token, both allowlisted) and each
+						// line is security evidence; a leaked-token spray in logonly is the
+						// one case that could make this chatty.
+						logging.LogfAPI("[apiserver] admin_token_source_ip logonly=would_block src_ip=%s method=%s path=%q",
+							realIPFromRequest(r), r.Method, r.URL.Path)
+					}
 					auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "success", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusOK})
 					ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 					ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)

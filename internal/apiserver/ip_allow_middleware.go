@@ -116,6 +116,19 @@ func loadAllowedSources(ctx context.Context, cfgDir, apiURL string) allowlist.Sn
 	snapshot, err := allowlist.BuildSnapshot(ctx, opts)
 	if err != nil {
 		logging.LogfAPI("[apiserver] allowlist snapshot load failed: %v", err)
+		// A failing file source (e.g. an unreadable cfm.allow) aborts BuildSnapshot
+		// before ExtraTokens resolve — which would also drop cfm-web's own IP (the
+		// API_URL host) and 403 it under enforce. Fall back to resolving that host
+		// alone so a file-permission blip cannot lock cfm-web out of a node.
+		if host := apiURLHost(apiURL); host != "" {
+			if fb, ferr := allowlist.BuildSnapshot(ctx, allowlist.SnapshotOptions{
+				ResolverTimeout: 2 * time.Second,
+				LookupHost:      ipAllowLookupIP,
+				ExtraTokens:     []string{host},
+			}); ferr == nil {
+				return fb
+			}
+		}
 		return allowlist.Snapshot{ExactIPs: map[string]struct{}{}}
 	}
 	return snapshot

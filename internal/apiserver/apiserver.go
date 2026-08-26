@@ -366,7 +366,13 @@ func Start(
 	handler = MFARolloutMiddleware(m)
 	handler = RateLimitMiddleware(rlMode, rlScale)(handler)
 	handler = CSRFMiddleware(handler)
-	handler = TokenMiddleware(cfg.API.AuthToken, store)(handler)
+	if adminIPMode, adminIPKnown := normalizeAdminIPMode(cfg.API.AdminTokenIPBinding); !adminIPKnown {
+		logging.LogfAPI("[apiserver] WARNING: unrecognized ADMIN_TOKEN_IP_BINDING=%q — admin-token source-IP binding DISABLED (treated as off)", cfg.API.AdminTokenIPBinding)
+	} else {
+		logging.LogfAPI("[apiserver] admin-token source-IP binding: mode=%s", adminIPMode)
+	}
+	handler = TokenMiddleware(cfg.API.AuthToken, store,
+		WithAdminTokenIPBinding(cfg.API.AdminTokenIPBinding, cfgDir, cfg.API.URL))(handler)
 	if Auth != nil {
 		handler = Auth.LoadAndSave(handler)
 		// Session-cookie transport (Step 6) wraps LoadAndSave from OUTSIDE so it can

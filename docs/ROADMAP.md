@@ -128,6 +128,22 @@ Not code — operator actions tracked so they aren't forgotten.
   (`SESSION_ALL_FAILED"`) on 5 nodes, 3deers' missing panel `CHALLENGE_VHOST`
   patterns, speedhost's `permanent` leniency, dead `.leniency` threshold keys.
   List: `docs/detectors-config-unification.md` §7.
+- **Neutralize a leaked admin `AUTH_TOKEN`** — two-part, so a leaked token (e.g.
+  from a cfm-web DB leak) is useless without credentials:
+  **(A) SHIPPED (default off).** `ADMIN_TOKEN_IP_BINDING = off|logonly|enforce`
+  gates the `token_admin` branch to {loopback, selfIPs, `cfm.allow`/`cfm.dyndns`,
+  the API_URL host} — closes direct-API use and SSO-code minting from any other IP
+  (browser SSO/scoped/session/MCP untouched; fail-safe, independent of the
+  firewall). **Operator action:** roll `enforce` per-node (see the doc's rollout
+  note). **(B) still [design, code]:** decouple the embed cookie signing key from
+  `AUTH_TOKEN` (per-node secret, or a stateful admin session — recommended, reuses
+  `authstore`/`auth.db`), else a leaked token forges a `cfm-embed-admin` cookie and
+  walks in from any IP, bypassing (A). **Also residual:** `/mcp` accepts the admin
+  token (read-only telemetry) from any IP — close with a dedicated `MCP_TOKEN` so
+  `auth_token` stops being an MCP credential. Live evidence 2026-08-27: token presented
+  only from cfm-web `84.54.49.4` (= `cfm.myip.gr`) and loopback; `:6060`/`:6061`
+  Internet-bound with no nft gate. Full design (traces, cookie-forgery gap,
+  caveats): `docs/security/admin-token-source-ip-binding.md`.
 
 ## 8. Detectors config unification
 
