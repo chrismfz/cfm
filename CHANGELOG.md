@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.26
+
 ### Security
 - **Admin-token source-IP binding (`ADMIN_TOKEN_IP_BINDING`, default off) —
   part (A).** New opt-in gate on the admin `AUTH_TOKEN` auth branch: it can
@@ -44,8 +48,6 @@ back-filled here — see the git/PR history for that period.
   (fix: a dedicated `MCP_TOKEN`). Enable `enforce` for defence-in-depth, not as a
   complete leaked-token containment. Design, live evidence and the full threat
   map: `docs/security/admin-token-source-ip-binding.md`.
-
-## 2026.08.26
 
 ### Added
 - **Admin SSO bootstrap for the admin UI** (`/api/v1/embed/admin-code` +
