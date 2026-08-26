@@ -78,6 +78,42 @@ the API itself, so it holds even if the firewall is disabled (`cfm disable`), th
 port is opened later, or the nft ruleset drifts. An nft port lock on `:6061` is a
 good **bonus** L3/L4 layer, but not the thing to rely on.
 
+## Live evidence (2026-08-27)
+
+Two real SSO logins, captured from `cfm.api.log`, confirm the model end to end.
+
+**Login to `orion` from the cfm-web "Login" button** (`cfm-admin`):
+
+```
+event=auth_attempt kind=token result=success src_ip=84.54.49.4 peer_ip=84.54.49.4 \
+  entry=6061 scheme=https auth_mech=token_admin path=/api/v1/embed/admin-code status=200
+embed admin-code minted   src_ip=84.54.49.4        next=/cfm-admin/
+embed admin bootstrap ok  src_ip=94.68.121.123     next=/cfm-admin/
+auth_source=embed_admin_cookie src_ip=94.68.121.123 path="/api/v1/system/dnat" ua="…Firefox/154.0"
+```
+
+**Login to `earth` from the WHM plugin:**
+
+```
+event=auth_attempt kind=token result=success src_ip=127.0.0.1 peer_ip=127.0.0.1 \
+  entry=6060 scheme=http auth_mech=token_admin path=/api/v1/embed/admin-code status=200
+embed admin-code minted   src_ip=127.0.0.1         next=/cfm-admin/
+embed admin bootstrap ok  src_ip=94.68.121.123     next=/cfm-admin/
+auth_source=embed_admin_cookie src_ip=94.68.121.123 path="/" ua="…Firefox/154.0"
+```
+
+Reading:
+
+- The **admin token** (`auth_mech=token_admin`) is presented only from
+  **`84.54.49.4`** (cfm-web, direct `:6061`) or **`127.0.0.1`** (WHM plugin,
+  loopback `:6060`) — never from the operator's browser.
+- The operator's browser (**`94.68.121.123`**, an arbitrary home IP) redeems the
+  one-time code and then drives every `/cfm-admin/` call with the
+  `embed_admin_cookie` — **not** the token.
+- So the allowlist `{ loopback, selfIPs, 84.54.49.4 }` admits every legitimate
+  token presentation and blocks a leaked token from any other IP, while the
+  browser session (different IP, different credential) is untouched.
+
 ## Design
 
 Add a source-IP gate **only** at the admin-token branch of `TokenMiddleware`
@@ -107,12 +143,15 @@ path — no collateral.
 
 ## Caveats / must-verify before enforcing
 
-1. **cfm-web egress IP ≠ API_URL host.** `API_URL` is cfm-web's *ingress*; the
-   *source* IP when cfm-web calls back into a node may differ (NAT/multi-homing),
-   so allowlisting the API_URL host may not admit cfm-web. **Verify** from the
-   node's logs: the `src_ip` on `/api/v1/embed/admin-code` mints
-   (`embed_admin_bootstrap.go:164`) is cfm-web's real egress IP — add it
-   explicitly to `cfm.allow` if it isn't covered.
+1. **cfm-web egress IP vs API_URL host — VERIFIED (2026-08-27), covered.** The
+   concern was that `API_URL` names cfm-web's *ingress*, while its *egress* source
+   IP (when it calls back into a node) could differ under NAT. The live trace
+   above shows cfm-web's egress is **`84.54.49.4`**, and `cfm.myip.gr` (the
+   `API_URL` host) resolves to **`84.54.49.4`** — they match, so the
+   `apiURLHost(API_URL)` allowlist entry admits cfm-web automatically; no extra
+   `cfm.allow` line is needed today. Re-verify if cfm-web moves or becomes
+   multi-homed (egress ≠ the A record); the check is the `src_ip` on
+   `/api/v1/embed/admin-code` mints (`embed_admin_bootstrap.go:164`).
 2. **Lock-out risk → dry-run first.** A wrong allowlist locks cfm-web out of the
    whole admin plane. Ship behind a config toggle **default-off**, with a
    **logonly/dry-run** phase (log would-be-blocked admin-token requests with
