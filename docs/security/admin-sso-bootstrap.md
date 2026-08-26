@@ -78,5 +78,9 @@ admin API. The guardrails mirror the scoped flow:
   browser to the node's `admin-bootstrap`. cfm-web restricts that action to its
   **super_admin** role (it yields a full-admin node session), independent of the
   node-side guardrails here.
-- **WHM plugin** (future) — the `whm` mode can mint a code against the local
-  admin API and redirect instead of the bare `/cfm-admin/` meta-refresh.
+- **WHM plugin** — `cfm_bootstrap('whm')` (`plugins/cfm-plugin-cpanel/lib/bootstrap.php`)
+  mints a code against the local admin API (loopback, using `AUTH_TOKEN` — the WHM
+  CGI runs as root and reads it from the `cfm.api.conf` overlay via
+  `cfm_admin_token()`) and redirects root to the `admin-bootstrap` endpoint. If the
+  mint is unavailable (older daemon, unreadable token) it falls back to the bare
+  `/cfm-admin/` meta-refresh — the pre-SSO behaviour, so no regression.

@@ -27,9 +27,44 @@ function cfm_bootstrap(string $mode): void
         exit;
     }
 
-    // WHM / root — redirect straight to the full admin UI.
+    // WHM / root — redirect into the full admin UI. When we can mint an admin
+    // SSO code against the local daemon (the WHM CGI runs as root, so it can read
+    // AUTH_TOKEN), root lands already-authenticated via the admin-bootstrap
+    // endpoint. Otherwise we fall back to the plain /cfm-admin/ redirect, which
+    // relies on an existing admin session (the pre-SSO behaviour).
     if ($mode === 'whm') {
-        $adminUrl = cfm_whm_base_url() . '/cfm-admin/';
+        // $adminBase follows the request/forwarded host (cfm_whm_base_url). The
+        // one-time SSO code below is only valid against THIS node's daemon, so a
+        // spoofed X-Forwarded-Host must come only from a trusted proxy — reaching
+        // this CGI already requires WHM/root auth.
+        $adminBase = cfm_whm_base_url();
+        $next = '/cfm-admin/';
+        $adminUrl = $adminBase . $next; // fallback target
+
+        $adminToken = cfm_admin_token();
+        if ($adminToken !== '') {
+            try {
+                $codeResp = cfm_api_request('/api/v1/embed/admin-code?next=' . rawurlencode($next), 'GET', null, [
+                    'Authorization: Bearer ' . $adminToken,
+                ]);
+                $code = trim((string)($codeResp['code'] ?? ''));
+                if ($code !== '') {
+                    $adminUrl = $adminBase . '/cfm-admin/api/v1/embed/admin-bootstrap'
+                        . '?code=' . rawurlencode($code)
+                        . '&next=' . rawurlencode($next);
+                    cfm_debug_log('whm_sso_code_minted', ['next' => $next]);
+                } else {
+                    cfm_debug_log('whm_sso_no_code_returned', []);
+                }
+            } catch (Throwable $e) {
+                // Older daemon without the admin-code endpoint, or a transient
+                // error — fall back to the plain redirect. No regression.
+                cfm_debug_log('whm_sso_mint_failed', ['error' => trim($e->getMessage())]);
+            }
+        } else {
+            cfm_debug_log('whm_sso_admin_token_unavailable', []);
+        }
+
         cgi_send_headers();
         echo '<!doctype html><html><head><meta charset=utf-8>'
             . '<meta http-equiv="refresh" content="0;url=' . htmlspecialchars($adminUrl, ENT_QUOTES, 'UTF-8') . '">'

@@ -322,8 +322,37 @@ function cfm_socket_auth_path(): string
     return '/var/run/cfm-auth.sock';
 }
 
+function cfm_running_as_root(): bool
+{
+    if (function_exists('posix_geteuid')) {
+        return posix_geteuid() === 0;
+    }
+    // Fallback when ext-posix is unavailable: the WHM CGI sets REMOTE_USER=root.
+    $u = strtolower(trim((string)($_SERVER['REMOTE_USER'] ?? getenv('REMOTE_USER') ?? '')));
+    return $u === 'root';
+}
+
 function cfm_admin_token(): string
 {
+    // AUTH_TOKEN lives in the cfm.api.conf SECRETS overlay (base cfm.conf is
+    // secret-free), so mirror the daemon's OverlayAPIAuthToken precedence:
+    // overlay wins, base is the fallback.
+    //
+    // Read the secrets overlay ONLY when running as root (the WHM/root CGI). The
+    // jailed cPanel-USER runtime must never touch the admin-secrets file — and it
+    // does not need it (it authenticates via the unix-socket assertion flow, and
+    // only ever reads this token to log whether it is missing). This keeps the
+    // hard scoped/admin boundary: a scoped process never reaches the admin token.
+    if (cfm_running_as_root()) {
+        static $overlayToken = null;
+        if ($overlayToken === null) {
+            $overlay = cfm_parse_conf('/etc/cfm/cfm.api.conf');
+            $overlayToken = trim((string)($overlay['AUTH_TOKEN'] ?? $overlay['TOKEN'] ?? ''));
+        }
+        if ($overlayToken !== '') {
+            return $overlayToken;
+        }
+    }
     $cfg = cfm_conf();
     return trim((string)($cfg['AUTH_TOKEN'] ?? $cfg['TOKEN'] ?? ''));
 }
