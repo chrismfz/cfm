@@ -168,10 +168,19 @@ with **decoupling the cookie signing key from `AUTH_TOKEN`**:
 
 - **(B1)** Sign embed cookies with a **separate per-node secret** generated on the
   node and never stored in cfm-web's DB. Smallest change (swap the HKDF input);
-  a cfm-web DB leak then cannot forge cookies.
-- **(B2)** Make the admin cookie **stateful** — a random session id stored on the
-  node, created only by redeeming an IP-gated mint — so forgery is impossible
-  regardless of any leaked secret. Cleaner, needs session storage.
+  a cfm-web DB leak then cannot forge cookies — but the cookie stays a stateless
+  HMAC token, so it is only as safe as that new secret and cannot be revoked.
+- **(B2, recommended)** Make the admin cookie **stateful** — a random session id
+  stored on the node, created only by redeeming an IP-gated mint — so forgery is
+  **structurally impossible** (nothing to sign: you need a real stored session),
+  immune even if a signing secret later leaks, and **revocable** (drop the row →
+  instant logout; enables an active-admin-sessions list). The daemon already
+  ships `modernc.org/sqlite` (pure-Go) and a **hardened auth store**
+  (`authstore` → `/var/lib/cfm/auth.db`, `HardenSQLiteFiles`), and goauth already
+  keeps server-side sessions (`session_cookie_transport.go`), so a stateful admin
+  session **reuses existing, hardened infrastructure** and matches how `cfm-sid`
+  already works — no new dependency. This makes B2 both the safer design and,
+  given the infra, the cheaper one.
 
 Root cause: `AUTH_TOKEN` is overloaded — it is simultaneously the API bearer, the
 SSO-mint credential, and the seed for cookie-signing keys, so one leak exposes all
@@ -193,11 +202,21 @@ store is hashed.
    `cfm.allow` line is needed today. Re-verify if cfm-web moves or becomes
    multi-homed (egress ≠ the A record); the check is the `src_ip` on
    `/api/v1/embed/admin-code` mints (`embed_admin_bootstrap.go:164`).
-2. **Lock-out risk → dry-run first.** A wrong allowlist locks cfm-web out of the
-   whole admin plane. Ship behind a config toggle **default-off**, with a
-   **logonly/dry-run** phase (log would-be-blocked admin-token requests with
-   `src_ip`) for burn-in, then enforce — the same `logonly → block` promotion the
-   WAF uses. Always keep loopback + selfIPs in the set.
+2. **Roll out per-node; a long burn-in is not required.** The legitimate token
+   source IPs are already known exactly (live trace: `84.54.49.4` cfm-web + the
+   `127.0.0.1` loopback WHM path), so the usual reason for a long logonly phase —
+   uncertainty about who calls — is largely gone. Because the allowlist **always
+   includes loopback + selfIPs**, a wrong entry can never hard-lock you: WHM-plugin
+   SSO (loopback), local username/password, and SSH + `cfm disable`/config edit all
+   still work. So the safe-and-fast path is: **enforce on one node**, actively test
+   the real paths (SSO from cfm-web via the browser/gsc-mcp; MCP telemetry via the
+   cfm MCP — note MCP bypasses `token_admin`, so it is unaffected), then roll to the
+   fleet. Keep the **logonly toggle** available anyway — not as a mandatory long
+   phase but as (a) a cheap kill-switch and (b) a short "watch for a surprise
+   caller" net for any infrequent cfm-web→node admin-API path that active testing
+   would not exercise (a nightly job, an IPv6 source, a second egress IP). Worst
+   case of a wrong allowlist is "cfm-web login to that one node fails until you add
+   the IP" — visible immediately, non-bricking.
 3. **Edge real_ip trust.** The bound IP is only as trustworthy as the edge's
    `real_ip` config; on Cloudflare-fronted vhosts `X-Real-IP` is forgeable via
    `CF-Connecting-IP` unless CF is the genuine edge (`configs/openresty.conf`).
