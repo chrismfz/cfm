@@ -238,6 +238,9 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	if Auth != nil {
 		Auth.Destroy(r)
 	}
+	// Embed bootstrap cookies (admin SSO + scoped) are independent of the goauth
+	// session — expire them here so Logout ends a full-admin SSO session too.
+	clearEmbedBootstrapCookies(w)
 	base := cfmBase(r)
 	http.Redirect(w, r, fmt.Sprintf("%s/login", base), http.StatusSeeOther)
 }

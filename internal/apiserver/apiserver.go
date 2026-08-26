@@ -262,6 +262,7 @@ func Start(
 	RegisterTokenEndpoint(m, store)
 	RegisterTokenManagementEndpoints(m, store)
 	RegisterEmbedBootstrapEndpoint(m, store)
+	RegisterEmbedAdminBootstrapEndpoint(m)
 
 	// ── goauth → autoblock bridge (FAIL/RATELIMIT tail) ──────────────────────
 	startAuthAutoblock(ctx, cfg, be)

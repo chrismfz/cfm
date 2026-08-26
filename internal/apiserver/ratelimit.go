@@ -113,7 +113,7 @@ func classifyRoute(method, path string) routeClass {
 // trusted and get much higher ceilings than the per-vhost scoped/embed viewers.
 func identityTier(mech authnMechanism) string {
 	switch mech {
-	case authnMechanismTokenAdmin, authnMechanismSession:
+	case authnMechanismTokenAdmin, authnMechanismSession, authnMechanismEmbedAdminCookie:
 		return "trusted"
 	default: // token_scoped, embed_bootstrap_cookie, unknown
 		return "scoped"
@@ -377,6 +377,8 @@ func subjectKind(mech authnMechanism) string {
 		return "token_id"
 	case authnMechanismEmbedCookie:
 		return "embed_token_id"
+	case authnMechanismEmbedAdminCookie:
+		return "admin"
 	case authnMechanismSession:
 		return "session_user"
 	default:

@@ -23,7 +23,8 @@ an nft block of the caller's IP (§6).
 
 - **Identity classes are already classified.** `middleware.go` sets an
   `authnMechanism` into the request context for every authenticated request:
-  `token_admin`, `token_scoped`, `embed_bootstrap_cookie`, `session_cookie`
+  `token_admin`, `token_scoped`, `embed_bootstrap_cookie`, `embed_admin_cookie`,
+  `session_cookie`
   (MCP is authenticated in its own layer and is out of scope here). Phase 1 reads
   this straight from context — no new auth logic.
 - **A token-bucket limiter already exists.** `login_rate_limit.go` has
@@ -44,6 +45,7 @@ one caller from draining another's bucket, and is always a stable non-secret:
 | `token_admin` | `""` (one shared admin bucket) | there is a single admin token; a runaway admin is throttled + alerted, **not** nft-blocked (§6) |
 | `token_scoped` | the token **ID** (`TokenStore` `st.ID`) | already the non-secret id used in `auth_attempt` audit; must be threaded into context (small add) |
 | `embed_bootstrap_cookie` | the embed session id | the embed context already carries a stable non-secret id |
+| `embed_admin_cookie` | `admin` (shared admin bucket) | the admin SSO cookie authenticates the full-admin role; it shares the single `token_admin` bucket and is a **trusted**-tier identity, not scoped |
 | `session_cookie` | `user:<username>` | the authenticated goauth username (non-secret; never the session cookie); `key_kind=session_user` in the log |
 
 Raw tokens/cookies never appear in a key or a log line. IP is **not** the primary
@@ -74,7 +76,8 @@ R01's code-enforced loopback bind). They are set **honestly high** — above rea
 legitimate fan-out (cfm-web multi-node polling, the admin UI's auto-refresh,
 panel/plugin polling) with generous margin — so a normal upgrade never starts
 `429`-ing real traffic; only genuine runaway (orders of magnitude above normal) trips
-them. `token_admin`/`session_cookie` (interactive admin + the fleet controller) get
+them. `token_admin`/`session_cookie`/`embed_admin_cookie` (interactive admin + the
+fleet controller + admin SSO sessions) get
 **much** higher ceilings than `token_scoped`/`embed_bootstrap_cookie`;
 `capture_stream` also gets a small concurrency cap. Per-route-class overrides are
 **optional** `cfm.conf` knobs (§5) — documented but never required.
