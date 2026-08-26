@@ -10,6 +10,21 @@ const (
 	lineDCOutlier = `2026-08-21 12:01:00 [abuse-shadow] signal=rate_outlier host=shop.example.gr ip=1.2.3.4 rps=2.0 median_rps=0.05 ratio=40.0 skew=30.0 reqs=240 asn=16509 cc=US provider=amazon-aws good_bot=- verdict=would_challenge`
 	lineGoodbot   = `2026-08-21 12:02:00 [abuse-shadow] signal=rate_outlier host=shop.example.gr ip=66.249.73.237 rps=1.0 median_rps=0.05 ratio=20.0 skew=25.0 reqs=120 asn=15169 cc=US provider=google good_bot=googlebot verdict=exempt_goodbot`
 	lineNoise     = `2026-08-21 12:03:00 [challenge][vhost] action=auto_on host=x`
+
+	// Per-vhost signal lines (facet/cost/dc). Verbatim shapes from
+	// abuse_shadow_facet.go / _cost.go / _dcfrac.go — no ip= field, verdict=would_shadow.
+	lineFacet1 = `2026-08-21 12:04:00 [abuse-shadow] signal=facet_expansion host=shop.example.gr urls=805 paths=12 expansion=67.1 repeat=1.05 reqs=830 verdict=would_shadow`
+	lineFacet2 = `2026-08-21 12:04:30 [abuse-shadow] signal=facet_expansion host=shop.example.gr urls=910 paths=13 expansion=70.5 repeat=1.08 reqs=940 verdict=would_shadow`
+	lineCost1  = `2026-08-21 12:05:00 [abuse-shadow] signal=cost_pressure host=slow.example.gr rps5xx=1.200 frac5xx=0.450 rt_avg=2.100 reqs=300 fails=135 verdict=would_shadow`
+	lineCost2  = `2026-08-21 12:05:30 [abuse-shadow] signal=cost_pressure host=slow.example.gr rps5xx=1.500 frac5xx=0.600 rt_avg=2.400 reqs=350 fails=210 verdict=would_shadow`
+	lineDC1    = `2026-08-21 12:06:00 [abuse-shadow] signal=dc_fraction host=dc.example.gr dc_frac=0.900 dc_reqs=540 dc_ips=18 total_reqs=600 total_ips=20 verdict=would_shadow`
+	lineDC2    = `2026-08-21 12:06:30 [abuse-shadow] signal=dc_fraction host=dc.example.gr dc_frac=0.950 dc_reqs=570 dc_ips=19 total_reqs=600 total_ips=20 verdict=would_shadow`
+
+	// dc_fraction ALSO emits two verdict-less OPERATIONAL lines to the same log.
+	// They must NOT be counted (they carry no decision): the verified_crawler note
+	// even parses a malformed ip=…) with a trailing paren.
+	lineDCVerified = `2026-08-21 12:07:00 [abuse-shadow] signal=dc_fraction verified_crawler="googlebot.com" excluded_from_datacenter_count (per-IP FCrDNS; e.g. ip=66.249.73.237)`
+	lineDCDeferred = `2026-08-21 12:07:30 [abuse-shadow] signal=dc_fraction deferred_vhosts=4 reason=ip_enrich_budget`
 )
 
 func TestParse(t *testing.T) {
@@ -95,5 +110,132 @@ func TestSummarize(t *testing.T) {
 	}
 	if top.CC != "GR" {
 		t.Errorf("top entity cc = %q, want GR", top.CC)
+	}
+}
+
+// TestParsePerSignal locks the per-vhost signal line shapes: the facet/cost/dc
+// keys parse and the ip/ratio/provider keys stay zero (these lines carry none).
+func TestParsePerSignal(t *testing.T) {
+	f, ok := Parse(lineFacet1)
+	if !ok || f.Signal != "facet_expansion" {
+		t.Fatalf("facet parse: %+v ok=%v", f, ok)
+	}
+	if f.Urls != 805 || f.Paths != 12 || f.Expansion != 67.1 || f.Reqs != 830 || f.Verdict != "would_shadow" {
+		t.Errorf("facet fields = %+v, want urls805 paths12 expansion67.1 reqs830 would_shadow", f)
+	}
+	if f.IP != "" || f.Ratio != 0 || f.Provider != "" {
+		t.Errorf("facet line must not carry ip/ratio/provider: %+v", f)
+	}
+
+	c, _ := Parse(lineCost1)
+	if c.Signal != "cost_pressure" || c.Frac5xx != 0.450 || c.Reqs != 300 {
+		t.Errorf("cost fields = %+v, want cost_pressure frac5xx0.45 reqs300", c)
+	}
+
+	d, _ := Parse(lineDC1)
+	if d.Signal != "dc_fraction" || d.DCFrac != 0.900 || d.DCReqs != 540 || d.DCIPs != 18 {
+		t.Errorf("dc fields = %+v, want dc_fraction dc_frac0.9 dc_reqs540 dc_ips18", d)
+	}
+}
+
+// TestSummarizePerSignal locks the per-vhost top lists: each signal groups by
+// host and keeps the PEAK metric across the window's firings (two lines each,
+// the second stronger).
+func TestSummarizePerSignal(t *testing.T) {
+	s := Summarize([]string{
+		lineFacet1, lineFacet2, lineCost1, lineCost2, lineDC1, lineDC2, lineNoise,
+	})
+
+	// would_shadow lines still parse (Total) but are neither would_challenge nor
+	// exempt_goodbot, so those counters stay zero.
+	if s.Total != 6 {
+		t.Fatalf("total = %d, want 6", s.Total)
+	}
+	if s.WouldChallenge != 0 || s.ExemptGoodbot != 0 {
+		t.Errorf("would_shadow lines must not count as challenge/exempt: would=%d exempt=%d", s.WouldChallenge, s.ExemptGoodbot)
+	}
+	if s.UniqueIPs != 0 {
+		t.Errorf("per-signal lines carry no ip=, unique_ips = %d, want 0", s.UniqueIPs)
+	}
+
+	if len(s.TopFacet) != 1 {
+		t.Fatalf("top_facet = %+v, want 1 host", s.TopFacet)
+	}
+	if f := s.TopFacet[0]; f.Host != "shop.example.gr" || f.Hits != 2 || f.Expansion != 70.5 || f.Urls != 910 {
+		t.Errorf("top_facet[0] = %+v, want shop hits2 expansion70.5 urls910 (peak)", f)
+	}
+
+	if len(s.TopCost) != 1 || s.TopCost[0].Frac5xx != 0.600 || s.TopCost[0].Hits != 2 {
+		t.Errorf("top_cost = %+v, want slow frac5xx0.6 hits2 (peak)", s.TopCost)
+	}
+
+	if len(s.TopDC) != 1 {
+		t.Fatalf("top_dc = %+v, want 1 host", s.TopDC)
+	}
+	if d := s.TopDC[0]; d.DCFrac != 0.950 || d.DCReqs != 570 || d.DCIPs != 19 || d.Hits != 2 {
+		t.Errorf("top_dc[0] = %+v, want dc_frac0.95 dc_reqs570 dc_ips19 hits2 (peak)", d)
+	}
+}
+
+// TestSummarizeDropsOperationalLines locks the verdict gate: dc_fraction's
+// verdict-less operational lines must not inflate Total/unique_ips/by_signal and
+// must not leak an empty-key by_verdict row (and the malformed ip=…) must not
+// count as a unique IP).
+func TestSummarizeDropsOperationalLines(t *testing.T) {
+	s := Summarize([]string{lineDCVerified, lineDCDeferred, lineDC1})
+
+	if s.Total != 1 {
+		t.Fatalf("total = %d, want 1 (only the real decision line)", s.Total)
+	}
+	if s.UniqueIPs != 0 {
+		t.Errorf("unique_ips = %d, want 0 — the operational ip=…) must not count", s.UniqueIPs)
+	}
+	for _, kv := range s.ByVerdict {
+		if kv.Key == "" {
+			t.Errorf("by_verdict leaked an empty-key row: %+v", s.ByVerdict)
+		}
+	}
+	// by_signal counts only the decision line, not the two operational ones.
+	for _, kv := range s.BySignal {
+		if kv.Key == "dc_fraction" && kv.Count != 1 {
+			t.Errorf("by_signal dc_fraction = %d, want 1 (decision only)", kv.Count)
+		}
+	}
+	// The real decision still populates the per-vhost breakdown.
+	if len(s.TopDC) != 1 || s.TopDC[0].DCFrac != 0.900 {
+		t.Errorf("top_dc = %+v, want the one real dc.example.gr firing", s.TopDC)
+	}
+}
+
+// TestSummarizePerSignalRanking locks sort DIRECTION (descending by the ranking
+// metric) and the tiebreaks — single-host cases can't, since a 1-element slice
+// sorts identically under a reversed comparator.
+func TestSummarizePerSignalRanking(t *testing.T) {
+	const (
+		// facet: bbb & ccc tie on expansion=90 (ccc higher urls → ranks first);
+		// aaa is weaker (expansion=50) → last. A reversed comparator would flip this.
+		fa = `t [abuse-shadow] signal=facet_expansion host=aaa.gr urls=999 paths=99 expansion=50.0 repeat=1.0 reqs=999 verdict=would_shadow`
+		fb = `t [abuse-shadow] signal=facet_expansion host=bbb.gr urls=300 paths=3 expansion=90.0 repeat=1.0 reqs=300 verdict=would_shadow`
+		fc = `t [abuse-shadow] signal=facet_expansion host=ccc.gr urls=800 paths=8 expansion=90.0 repeat=1.0 reqs=800 verdict=would_shadow`
+		// cost: high frac must rank first.
+		ca = `t [abuse-shadow] signal=cost_pressure host=slowA.gr rps5xx=1.0 frac5xx=0.300 rt_avg=1.0 reqs=100 fails=30 verdict=would_shadow`
+		cb = `t [abuse-shadow] signal=cost_pressure host=slowB.gr rps5xx=1.0 frac5xx=0.700 rt_avg=1.0 reqs=100 fails=70 verdict=would_shadow`
+		// dc: dcB & dcC tie on frac=0.60 (dcC higher reqs → first); dcA strongest (0.95).
+		da = `t [abuse-shadow] signal=dc_fraction host=dcA.gr dc_frac=0.950 dc_reqs=100 dc_ips=5 total_reqs=105 total_ips=6 verdict=would_shadow`
+		db = `t [abuse-shadow] signal=dc_fraction host=dcB.gr dc_frac=0.600 dc_reqs=100 dc_ips=5 total_reqs=166 total_ips=8 verdict=would_shadow`
+		dc = `t [abuse-shadow] signal=dc_fraction host=dcC.gr dc_frac=0.600 dc_reqs=500 dc_ips=9 total_reqs=833 total_ips=15 verdict=would_shadow`
+	)
+	s := Summarize([]string{fa, fb, fc, ca, cb, da, db, dc})
+
+	gotF := []string{s.TopFacet[0].Host, s.TopFacet[1].Host, s.TopFacet[2].Host}
+	if gotF[0] != "ccc.gr" || gotF[1] != "bbb.gr" || gotF[2] != "aaa.gr" {
+		t.Errorf("top_facet order = %v, want [ccc bbb aaa] (desc expansion, urls tiebreak)", gotF)
+	}
+	if s.TopCost[0].Host != "slowB.gr" {
+		t.Errorf("top_cost[0] = %q, want slowB.gr (desc frac5xx)", s.TopCost[0].Host)
+	}
+	gotD := []string{s.TopDC[0].Host, s.TopDC[1].Host, s.TopDC[2].Host}
+	if gotD[0] != "dcA.gr" || gotD[1] != "dcC.gr" || gotD[2] != "dcB.gr" {
+		t.Errorf("top_dc order = %v, want [dcA dcC dcB] (desc frac, dc_reqs tiebreak)", gotD)
 	}
 }
