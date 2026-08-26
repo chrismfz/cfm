@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -87,19 +89,41 @@ func TestAdminTokenIPBinding_OffIsUnchanged(t *testing.T) {
 }
 
 func TestNormalizeAdminIPMode(t *testing.T) {
-	cases := map[string]string{
-		"":         adminIPModeOff,
-		"off":      adminIPModeOff,
-		"nonsense": adminIPModeOff,
-		"logonly":  adminIPModeLogonly,
-		"dryrun":   adminIPModeLogonly,
-		"enforce":  adminIPModeEnforce,
-		"ENFORCE":  adminIPModeEnforce,
-		"on":       adminIPModeEnforce,
+	cases := []struct {
+		in        string
+		wantMode  string
+		wantKnown bool
+	}{
+		{"", adminIPModeOff, true},
+		{"off", adminIPModeOff, true},
+		{"nonsense", adminIPModeOff, false}, // unknown → off, but flagged so we WARN
+		{"enfroce", adminIPModeOff, false},  // the footgun typo must not read as recognized
+		{"logonly", adminIPModeLogonly, true},
+		{"dryrun", adminIPModeLogonly, true},
+		{"enforce", adminIPModeEnforce, true},
+		{"ENFORCE", adminIPModeEnforce, true},
+		{"on", adminIPModeEnforce, true},
 	}
-	for in, want := range cases {
-		if got := normalizeAdminIPMode(in); got != want {
-			t.Errorf("normalizeAdminIPMode(%q) = %q, want %q", in, got, want)
+	for _, c := range cases {
+		gotMode, gotKnown := normalizeAdminIPMode(c.in)
+		if gotMode != c.wantMode || gotKnown != c.wantKnown {
+			t.Errorf("normalizeAdminIPMode(%q) = (%q,%v), want (%q,%v)", c.in, gotMode, gotKnown, c.wantMode, c.wantKnown)
 		}
+	}
+}
+
+func TestAdminTokenIPBinding_EnforceAllowsCfmAllowEntry(t *testing.T) {
+	// A cfm.allow file entry is honored under enforce (not just loopback + the
+	// resolved API_URL host) — and is the DNS-independent way to admit cfm-web.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cfm.allow"), []byte("# mgmt\n203.0.113.9\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := adminIPHandler("enforce", dir, "")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, adminIPRequest("203.0.113.9:5555"))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("an IP in cfm.allow must be allowed under enforce; got %d", rr.Code)
 	}
 }

@@ -393,15 +393,29 @@ func TokenMiddleware(adminToken string, store *TokenStore, opts ...TokenMiddlewa
 					if mwCfg.adminIP.active() && !adminTokenSourceAllowed(r, mwCfg.adminIP) {
 						if mwCfg.adminIP.mode == adminIPModeEnforce {
 							auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "blocked_source_ip", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusForbidden})
+							// Publish a structured anomaly (enforce ONLY — logonly must
+							// stay observe-only so burn-in never blocks/challenges the
+							// source) so a leaked admin token used even ONCE from a foreign
+							// IP alerts, instead of needing a 5-in-30s forbidden burst.
+							// classifierReason() lists "admin_token_source_ip" as a direct
+							// event so the generic burst signal does not double-count this.
+							publishRequestAnomaly(r, "ADMIN_TOKEN_FOREIGN_IP", http.StatusForbidden)
 							logging.LogfAPI("[apiserver] event=api_audit reason=admin_token_source_ip src_ip=%s method=%s path=%q status=%d",
 								realIPFromRequest(r), r.Method, r.URL.Path, http.StatusForbidden)
 							setAPIAnomalyReason(w, r, "admin_token_source_ip")
+							setAuthIdentityNoCacheHeaders(w) // identity-sensitive rejection
 							w.Header().Set("Content-Type", "application/json")
 							w.WriteHeader(http.StatusForbidden)
-							_, _ = w.Write(mustJSON(map[string]string{"error": "forbidden: admin token source IP not allowed"}))
+							// Opaque body (matches rejectIP) — do not confirm to the caller
+							// that the token they presented is the valid admin token.
+							_, _ = w.Write(mustJSON(map[string]string{"error": "forbidden: source IP not allowed"}))
 							return
 						}
 						// logonly (burn-in): record what enforce WOULD block, then allow.
+						// Unsampled by design — expected volume is ~zero (only cfm-web and
+						// the WHM plugin present the admin token, both allowlisted) and each
+						// line is security evidence; a leaked-token spray in logonly is the
+						// one case that could make this chatty.
 						logging.LogfAPI("[apiserver] admin_token_source_ip logonly=would_block src_ip=%s method=%s path=%q",
 							realIPFromRequest(r), r.Method, r.URL.Path)
 					}

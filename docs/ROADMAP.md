@@ -138,7 +138,9 @@ Not code — operator actions tracked so they aren't forgotten.
   note). **(B) still [design, code]:** decouple the embed cookie signing key from
   `AUTH_TOKEN` (per-node secret, or a stateful admin session — recommended, reuses
   `authstore`/`auth.db`), else a leaked token forges a `cfm-embed-admin` cookie and
-  walks in from any IP, bypassing (A). Live evidence 2026-08-27: token presented
+  walks in from any IP, bypassing (A). **Also residual:** `/mcp` accepts the admin
+  token (read-only telemetry) from any IP — close with a dedicated `MCP_TOKEN` so
+  `auth_token` stops being an MCP credential. Live evidence 2026-08-27: token presented
   only from cfm-web `84.54.49.4` (= `cfm.myip.gr`) and loopback; `:6060`/`:6061`
   Internet-bound with no nft gate. Full design (traces, cookie-forgery gap,
   caveats): `docs/security/admin-token-source-ip-binding.md`.

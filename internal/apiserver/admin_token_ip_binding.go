@@ -40,16 +40,20 @@ func (p adminIPPolicy) active() bool {
 	return p.mode == adminIPModeLogonly || p.mode == adminIPModeEnforce
 }
 
-// normalizeAdminIPMode maps a config value to a known mode, defaulting to off
-// (fail-open on an unknown value: an admin never wants a typo to lock the plane).
-func normalizeAdminIPMode(s string) string {
+// normalizeAdminIPMode maps a config value to a known mode. It fails OPEN on an
+// unrecognized value (a typo must never lock the plane), but returns
+// recognized=false so the caller can WARN — otherwise `ADMIN_TOKEN_IP_BINDING =
+// enfroce` would silently disable the gate.
+func normalizeAdminIPMode(s string) (mode string, recognized bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "off", "0", "false", "no", "disable", "disabled":
+		return adminIPModeOff, true
 	case adminIPModeLogonly, "dryrun", "dry-run", "log", "log-only":
-		return adminIPModeLogonly
+		return adminIPModeLogonly, true
 	case adminIPModeEnforce, "on", "block", "true", "1":
-		return adminIPModeEnforce
+		return adminIPModeEnforce, true
 	default:
-		return adminIPModeOff
+		return adminIPModeOff, false
 	}
 }
 
@@ -67,8 +71,9 @@ type TokenMiddlewareOption func(*tokenMiddlewareConfig)
 // off|logonly|enforce (see ADMIN_TOKEN_IP_BINDING); cfgDir and apiURL feed the
 // allowlist (cfm.allow / cfm.dyndns / the API_URL host).
 func WithAdminTokenIPBinding(mode, cfgDir, apiURL string) TokenMiddlewareOption {
+	m, _ := normalizeAdminIPMode(mode)
 	return func(c *tokenMiddlewareConfig) {
-		c.adminIP = adminIPPolicy{mode: normalizeAdminIPMode(mode), cfgDir: cfgDir, apiURL: apiURL}
+		c.adminIP = adminIPPolicy{mode: m, cfgDir: cfgDir, apiURL: apiURL}
 	}
 }
 

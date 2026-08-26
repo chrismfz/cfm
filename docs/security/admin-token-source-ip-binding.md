@@ -8,11 +8,25 @@
 default `off`) gates the `token_admin` branch of `TokenMiddleware` on
 `requestPeer().ClientIP` against loopback ∪ selfIPs ∪ `cfm.allow`/`cfm.dyndns` ∪
 the API_URL host — reusing the allowlist helpers from `ip_allow_middleware.go`.
-`logonly` logs `admin_token_source_ip logonly=would_block …`; `enforce` returns
-403 and audits `blocked_source_ip`. Scoped tokens, embed cookies, sessions and
-MCP are untouched. Part **(B)** (decouple the embed-cookie signing key from
-`AUTH_TOKEN`) is not built yet — until it is, a leaked token can still forge the
-admin cookie (see below).
+`logonly` logs `admin_token_source_ip logonly=would_block …` and still allows;
+`enforce` returns 403, audits `blocked_source_ip`, and **publishes an
+`ADMIN_TOKEN_FOREIGN_IP` anomaly** (enforce only) so a single foreign-IP use
+alerts without needing a forbidden-burst (`classifierReason` lists the reason as a
+direct event to avoid double-counting). The resolved mode is logged at startup and
+an unrecognized value **warns** instead of silently disabling. An unreadable
+`cfm.allow` no longer drops the API_URL host (a fallback resolves it alone).
+Scoped tokens, embed cookies, sessions and MCP are untouched.
+
+**Scope — (A) alone does NOT fully neutralize a leaked `AUTH_TOKEN`.** Two other
+paths derive from the same secret and this gate does not cover them (enable
+`enforce` as defence-in-depth, not complete containment):
+1. **Embed-admin cookie forgery → full admin from any IP** (needs part **(B)** —
+   see "Necessary companion" below). The severe one: mutation-capable.
+2. **`/mcp` accepts the admin token → read-only telemetry from any IP.** The MCP
+   endpoint bypasses `TokenMiddleware` (`isMCPPublicPath`) and its `StaticBearer`
+   accepts `AUTH_TOKEN` (`mcp_wire.go`). A leaked token still reaches the read-only
+   fleet/node MCP tools from a foreign IP. Fix: a dedicated `MCP_TOKEN` so the
+   admin token stops being an MCP credential (caveat #4).
 
 ## Problem / threat model
 
@@ -230,10 +244,13 @@ store is hashed.
 3. **Edge real_ip trust.** The bound IP is only as trustworthy as the edge's
    `real_ip` config; on Cloudflare-fronted vhosts `X-Real-IP` is forgeable via
    `CF-Connecting-IP` unless CF is the genuine edge (`configs/openresty.conf`).
-4. **MCP is separate.** `MCP_TOKEN` auth bypasses `TokenMiddleware`, so this
-   change does not cover the MCP surface. Introducing a dedicated `MCP_TOKEN` on
-   the cfm-web side (so `auth_token` stops being an MCP fallback credential) is
-   the clean complementary fix.
+4. **MCP is separate — and it accepts the admin token.** `/mcp` bypasses
+   `TokenMiddleware` (`isMCPPublicPath`), and its `StaticBearer` accepts
+   `AUTH_TOKEN` (`mcp_wire.go`), so a leaked admin token still reaches the
+   **read-only** fleet/node MCP tools from a foreign IP — this gate does not cover
+   it (dispatch is GET-only, so no mutations). The clean fix is a dedicated
+   `MCP_TOKEN` so the admin token stops being an accepted MCP credential; until
+   then, treat `/mcp` as part of the leaked-token surface (read-only).
 5. **`enforce` depends on resolving the API_URL host — prefer a static
    `cfm.allow` entry for cfm-web.** The allowlist includes `apiURLHost(API_URL)`,
    resolved live per request. If DNS for `cfm.myip.gr` blips, cfm-web's IP drops
@@ -249,6 +266,14 @@ store is hashed.
    a leaked-token flood causing repeated (resolver-cached) DNS lookups, not an
    unauthenticated amplifier. If that becomes a concern, cache the snapshot with a
    short TTL (mirroring `core.SelfIPSet`).
+7. **Loopback trust is the floor.** `allowImmediate` treats loopback (and this
+   host's own IPs) as always-allowed, and `requestPeer` trusts `X-Real-IP` /
+   `X-Forwarded-For` from a loopback peer. So any actor that can open a **loopback**
+   connection to `:6060` (a local process, or an SSRF primitive on the node) and
+   present `X-Real-IP: 127.0.0.1` + the leaked bearer is treated as allowed. This is
+   outside the "foreign IP only" threat model (it needs a local/SSRF foothold on the
+   node), but it means the gate is only as strong as local access control to the
+   admin port — enforce does not replace hardening the node itself.
 
 ## Optional companion: nft port-lock on `:6061`
 

@@ -111,7 +111,7 @@ func classifierReason(reason string, direct bool) string {
 		return "direct_auth_event"
 	}
 	switch reason {
-	case "token_invalid", "token_malformed", "login_failed", "mfa_failed", "csrf_reject":
+	case "token_invalid", "token_malformed", "admin_token_source_ip", "login_failed", "mfa_failed", "csrf_reject":
 		// These paths publish one structured event per attempt/decision directly.
 		// Suppress the generic 401/403 burst event to avoid double counting.
 		return "direct_auth_event"
