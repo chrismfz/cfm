@@ -141,6 +141,47 @@ path — no collateral.
 - `internal/detectors/core/selfip.go:74` — `IsSelfIP`.
 - `allowlist.BuildSnapshot` / `ipAllowed()` — exact-IP + CIDR + hostname resolve.
 
+## Necessary companion: the embed cookie is forgeable from a leaked token
+
+The `token_admin` IP gate alone does **not** fully neutralize a leaked
+`AUTH_TOKEN`. A leaked token grants three capabilities; the IP gate closes two:
+
+1. Direct API (`Authorization: Bearer`) → `token_admin` branch → **gated**.
+2. Mint an SSO code (`/api/v1/embed/admin-code` requires admin role) →
+   `token_admin` → **gated**.
+3. **Forge a session cookie → NOT gated.** Both embed cookies are HMAC-signed
+   with a key HKDF-derived **solely from `AUTH_TOKEN`** with in-code (public)
+   salt/info:
+   - `deriveEmbedAdminCookieSigningKey` (`embed_admin_bootstrap.go:391-404`) —
+     `hkdf.Key(sha256, AUTH_TOKEN, "…admin-cookie-salt-v1", "…admin-cookie-v1")`.
+   - `deriveEmbedCookieSigningKey` (`embed_bootstrap.go:597-605`) — same, scoped.
+
+   So an attacker who leaked `AUTH_TOKEN` can derive the key offline, mint a valid
+   `cfm-embed-admin` cookie (`typ=admin`, fresh `exp`, own UA-hash) and present it
+   to `/cfm-admin/` **from any IP**. That is the `embed_admin_cookie` mechanism,
+   not `token_admin`, so the IP gate above misses it — and it **cannot** be
+   IP-gated, because the legitimate operator presents that same cookie from an
+   arbitrary browser IP.
+
+To make a leaked `AUTH_TOKEN` truly useless without credentials, pair the IP gate
+with **decoupling the cookie signing key from `AUTH_TOKEN`**:
+
+- **(B1)** Sign embed cookies with a **separate per-node secret** generated on the
+  node and never stored in cfm-web's DB. Smallest change (swap the HKDF input);
+  a cfm-web DB leak then cannot forge cookies.
+- **(B2)** Make the admin cookie **stateful** — a random session id stored on the
+  node, created only by redeeming an IP-gated mint — so forgery is impossible
+  regardless of any leaked secret. Cleaner, needs session storage.
+
+Root cause: `AUTH_TOKEN` is overloaded — it is simultaneously the API bearer, the
+SSO-mint credential, and the seed for cookie-signing keys, so one leak exposes all
+three. The durable direction is a **separate secret per job** (same rationale as
+splitting out a dedicated `MCP_TOKEN`).
+
+The username/password login path (`session_cookie` / goauth) is inherently
+token-leak-safe — it needs the password, not the token — provided the password
+store is hashed.
+
 ## Caveats / must-verify before enforcing
 
 1. **cfm-web egress IP vs API_URL host — VERIFIED (2026-08-27), covered.** The
