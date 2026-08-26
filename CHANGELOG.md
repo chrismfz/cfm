@@ -17,7 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Admin SSO bootstrap for the admin UI** (`/api/v1/embed/admin-code` +
+  `/api/v1/embed/admin-bootstrap`). A caller that already holds the node's admin
+  credential (the cfm-web fleet controller's "Login" button, or the root WHM
+  plugin) can mint a one-time code and hand an operator a one-click login into
+  `/cfm-admin/` — no re-typing that node's password + MFA. Mirrors the scoped
+  cPanel embed flow but mints a **full-admin** browser session: the code
+  endpoint is non-public and rejects any non-admin role, the code is 160-bit,
+  single-use and 45s-lived, and it sets a short-lived (10 min, rolling-renewed),
+  HMAC-signed, host+UA-bound `cfm-embed-admin` cookie scoped to `/cfm-admin/`
+  (SameSite=Lax; domain-separated signing key from the scoped embed cookie).
+  Grants nothing the admin-token holder did not already have. Design:
+  `docs/security/admin-sso-bootstrap.md`.
 
 ## 2026.08.25
 

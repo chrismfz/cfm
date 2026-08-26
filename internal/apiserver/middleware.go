@@ -3,13 +3,14 @@
 // Bearer token middleware for the cfm apiserver.
 //
 // Auth order per request:
-//  1. Public path (/login, /logout, /api/v1/embed/bootstrap) → pass through
+//  1. Public path (/login, /logout, /api/v1/embed/{,admin-}bootstrap) → pass through
 //  2. Authorization: Bearer / X-CFM-Token / Token            → validate admin or scoped token
-//  3. Scoped bootstrap cookie (cfm-embed-scope; /cfm-admin)  → allow scoped embedded/admin UI request
-//  4. Embedded request without valid token/cookie             → 401 (no session fallback)
-//  5. Valid goauth session cookie                             → allow (only if no token header, non-embedded)
-//  6. Browser request (Accept: text/html)                     → redirect to /login
-//  7. Everything else                                         → 401 / 403
+//  3. Admin SSO bootstrap cookie (cfm-embed-admin; /cfm-admin) → allow full-admin UI request
+//  4. Scoped bootstrap cookie (cfm-embed-scope; /cfm-admin)  → allow scoped embedded/admin UI request
+//  5. Embedded request without valid token/cookie             → 401 (no session fallback)
+//  6. Valid goauth session cookie                             → allow (only if no token header, non-embedded)
+//  7. Browser request (Accept: text/html)                     → redirect to /login
+//  8. Everything else                                         → 401 / 403
 //
 
 package apiserver
@@ -46,11 +47,12 @@ var sessionAllowedRequest = sessionAllowed
 type authnMechanism string
 
 const (
-	authnMechanismUnknown     authnMechanism = ""
-	authnMechanismSession     authnMechanism = "session_cookie"
-	authnMechanismTokenAdmin  authnMechanism = "token_admin"
-	authnMechanismTokenScoped authnMechanism = "token_scoped"
-	authnMechanismEmbedCookie authnMechanism = "embed_bootstrap_cookie"
+	authnMechanismUnknown          authnMechanism = ""
+	authnMechanismSession          authnMechanism = "session_cookie"
+	authnMechanismTokenAdmin       authnMechanism = "token_admin"
+	authnMechanismTokenScoped      authnMechanism = "token_scoped"
+	authnMechanismEmbedCookie      authnMechanism = "embed_bootstrap_cookie"
+	authnMechanismEmbedAdminCookie authnMechanism = "embed_admin_cookie"
 )
 
 type authnMechanismCtxKey struct{}
@@ -94,6 +96,8 @@ func authnSubjectFromContext(ctx context.Context) string {
 var (
 	embedBootstrapAuthLogMu   sync.Mutex
 	embedBootstrapAuthLastLog time.Time
+	embedAdminAuthLogMu       sync.Mutex
+	embedAdminAuthLastLog     time.Time
 	sessionCookieAuthLogMu    sync.Mutex
 	sessionCookieAuthLastLog  time.Time
 )
@@ -105,6 +109,19 @@ func shouldLogEmbedBootstrapAuth(now time.Time) bool {
 		return false
 	}
 	embedBootstrapAuthLastLog = now
+	return true
+}
+
+// shouldLogEmbedAdminAuth throttles the admin-SSO auth-source line on its OWN
+// timestamp, so busy scoped-embed traffic can't starve the (higher-privilege,
+// far rarer) admin audit line by sharing one window.
+func shouldLogEmbedAdminAuth(now time.Time) bool {
+	embedAdminAuthLogMu.Lock()
+	defer embedAdminAuthLogMu.Unlock()
+	if !embedAdminAuthLastLog.IsZero() && now.Sub(embedAdminAuthLastLog) < 15*time.Second {
+		return false
+	}
+	embedAdminAuthLastLog = now
 	return true
 }
 
@@ -173,7 +190,7 @@ func isPublicPath(r *http.Request) bool {
 	if isPublicAssetPath(r, path) {
 		return true
 	}
-	for _, p := range []string{"/login", "/logout", "/api/v1/embed/bootstrap"} {
+	for _, p := range []string{"/login", "/logout", "/api/v1/embed/bootstrap", "/api/v1/embed/admin-bootstrap"} {
 		if path == p || strings.HasPrefix(path, p+"/") {
 			return true
 		}
@@ -394,7 +411,22 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 				return
 			}
 
-			// ── 2. Scoped bootstrap cookie (HTML under /cfm-admin only) ─────
+			// ── 2a. Admin SSO bootstrap cookie (HTML under /cfm-admin only) ─
+			// Checked before the scoped cookie: it grants the full-admin role,
+			// and an SSO'd admin browser only ever carries this cookie.
+			if !tokenHeaderSupplied {
+				if ctx, ok := embedAdminContextFromCookie(w, r); ok {
+					ctx = withAuthnMechanism(ctx, authnMechanismEmbedAdminCookie)
+					if shouldLogEmbedAdminAuth(time.Now()) {
+						logging.LogfAPI("[apiserver] auth_source=embed_admin_cookie src_ip=%s method=%s path=%q ua=%q (sampled_every=15s)",
+							realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
+					}
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+
+			// ── 2b. Scoped bootstrap cookie (HTML under /cfm-admin only) ────
 			if !tokenHeaderSupplied {
 				if ctx, ok := embedScopedContextFromCookie(w, r, store); ok {
 					ctx = withAuthnMechanism(ctx, authnMechanismEmbedCookie)
