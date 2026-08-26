@@ -366,7 +366,8 @@ func Start(
 	handler = MFARolloutMiddleware(m)
 	handler = RateLimitMiddleware(rlMode, rlScale)(handler)
 	handler = CSRFMiddleware(handler)
-	handler = TokenMiddleware(cfg.API.AuthToken, store)(handler)
+	handler = TokenMiddleware(cfg.API.AuthToken, store,
+		WithAdminTokenIPBinding(cfg.API.AdminTokenIPBinding, cfgDir, cfg.API.URL))(handler)
 	if Auth != nil {
 		handler = Auth.LoadAndSave(handler)
 		// Session-cookie transport (Step 6) wraps LoadAndSave from OUTSIDE so it can

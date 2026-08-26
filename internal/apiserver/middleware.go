@@ -327,8 +327,16 @@ func isCpanelPluginSelfServicePath(r *http.Request) bool {
 	return strings.TrimSpace(r.Header.Get("X-CFM-Actor-Assertion")) != ""
 }
 
-// TokenMiddleware enforces auth on all non-public routes.
-func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) http.Handler {
+// TokenMiddleware enforces auth on all non-public routes. Optional
+// TokenMiddlewareOption knobs (e.g. WithAdminTokenIPBinding) default to off, so
+// existing two-arg callers are unaffected.
+func TokenMiddleware(adminToken string, store *TokenStore, opts ...TokenMiddlewareOption) func(http.Handler) http.Handler {
+	var mwCfg tokenMiddlewareConfig
+	for _, o := range opts {
+		if o != nil {
+			o(&mwCfg)
+		}
+	}
 	if adminToken == "" {
 		logging.LogfAPI("[apiserver] auth_reject=server_misconfigured_missing_auth_token")
 		return func(next http.Handler) http.Handler {
@@ -378,6 +386,25 @@ func TokenMiddleware(adminToken string, store *TokenStore) func(http.Handler) ht
 			}
 			if tok != "" {
 				if tokenMatch(tok, adminToken) {
+					// Optional source-IP binding: the admin token is only ever
+					// presented server-to-server (cfm-web at the API_URL host) or
+					// over loopback (WHM plugin). A match from any other IP is a
+					// leaked-token signal.
+					if mwCfg.adminIP.active() && !adminTokenSourceAllowed(r, mwCfg.adminIP) {
+						if mwCfg.adminIP.mode == adminIPModeEnforce {
+							auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "blocked_source_ip", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusForbidden})
+							logging.LogfAPI("[apiserver] event=api_audit reason=admin_token_source_ip src_ip=%s method=%s path=%q status=%d",
+								realIPFromRequest(r), r.Method, r.URL.Path, http.StatusForbidden)
+							setAPIAnomalyReason(w, r, "admin_token_source_ip")
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(http.StatusForbidden)
+							_, _ = w.Write(mustJSON(map[string]string{"error": "forbidden: admin token source IP not allowed"}))
+							return
+						}
+						// logonly (burn-in): record what enforce WOULD block, then allow.
+						logging.LogfAPI("[apiserver] admin_token_source_ip logonly=would_block src_ip=%s method=%s path=%q",
+							realIPFromRequest(r), r.Method, r.URL.Path)
+					}
 					auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "success", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusOK})
 					ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
 					ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)

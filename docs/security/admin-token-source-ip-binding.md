@@ -1,8 +1,18 @@
 # Admin-token source-IP binding (control-plane hardening)
 
-**Status:** design / not implemented. Effort ≈ M.
+**Status:** part **(A)** implemented (default `off`); part **(B)** still design.
 **Scope:** CFM daemon apiserver (`internal/apiserver`). No cfm-web change required
 (but see the egress-IP caveat below).
+
+**(A) as built:** `ADMIN_TOKEN_IP_BINDING = off|logonly|enforce` (`cfm.conf`,
+default `off`) gates the `token_admin` branch of `TokenMiddleware` on
+`requestPeer().ClientIP` against loopback ∪ selfIPs ∪ `cfm.allow`/`cfm.dyndns` ∪
+the API_URL host — reusing the allowlist helpers from `ip_allow_middleware.go`.
+`logonly` logs `admin_token_source_ip logonly=would_block …`; `enforce` returns
+403 and audits `blocked_source_ip`. Scoped tokens, embed cookies, sessions and
+MCP are untouched. Part **(B)** (decouple the embed-cookie signing key from
+`AUTH_TOKEN`) is not built yet — until it is, a leaked token can still forge the
+admin cookie (see below).
 
 ## Problem / threat model
 
@@ -224,6 +234,21 @@ store is hashed.
    change does not cover the MCP surface. Introducing a dedicated `MCP_TOKEN` on
    the cfm-web side (so `auth_token` stops being an MCP fallback credential) is
    the clean complementary fix.
+5. **`enforce` depends on resolving the API_URL host — prefer a static
+   `cfm.allow` entry for cfm-web.** The allowlist includes `apiURLHost(API_URL)`,
+   resolved live per request. If DNS for `cfm.myip.gr` blips, cfm-web's IP drops
+   out of the set and its SSO minting 403s until DNS recovers (loopback/WHM SSO and
+   local login keep working throughout — no hard lock). To make `enforce`
+   DNS-independent, add cfm-web's IP (`84.54.49.4`) to `cfm.allow` statically; it
+   is then allowed via the file regardless of resolution.
+6. **Per-request snapshot (as-built limitation).** The gate rebuilds the allowlist
+   snapshot (file reads + a DNS lookup of the API_URL host) on each admin-token
+   request that is not loopback/selfIP — reusing `loadAllowedSources`, which does
+   not cache. Loopback/selfIP short-circuit before any load, and the load only
+   runs for a request already carrying the *valid* admin token, so the exposure is
+   a leaked-token flood causing repeated (resolver-cached) DNS lookups, not an
+   unauthenticated amplifier. If that becomes a concern, cache the snapshot with a
+   short TTL (mirroring `core.SelfIPSet`).
 
 ## Optional companion: nft port-lock on `:6061`
 
