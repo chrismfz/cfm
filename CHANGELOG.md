@@ -66,6 +66,26 @@ _Nothing yet._
   strongest firing (not a per-field max stitched across windows) and rank
   deterministically on ties.
 
+### Changed
+- **`cfm webtop live` bottom panel: signals moved out of REASONS into their own
+  `SIGNALS` column.** Appending the signal tokens to REASONS (the initial
+  approach) let the score reasons push them past truncation, so the signal words
+  were often invisible; a dedicated column keeps them legible and de-clutters
+  REASONS. Ordered before REASONS so a narrow terminal squeezes REASONS, not the
+  signals.
+
+### Fixed
+- **`abuse_shadow` aggregation no longer counts dc_fraction's operational lines.**
+  The dc_fraction signal writes two verdict-less bookkeeping lines to the shadow
+  log (a `verified_crawler=… excluded` FCrDNS note and a `deferred_vhosts=…`
+  budget line); the aggregator was counting them as events, inflating `total` and
+  `unique_ips` (with a malformed `ip=…)` from the note — ironically the very
+  verified-crawler IPs the signal excludes) and adding a junk empty-key row to the
+  `by_verdict` split. The aggregator now counts only real decision lines (those
+  carrying a `verdict=`). Per-signal top lists also now report each host's single
+  strongest firing (not a per-field max stitched across windows) and rank
+  deterministically on ties.
+
 ### Added
 - **abuse_shadow datacenter-fraction signal (Signal H): vhost-level cloud-ASN
   share, verified-gated, log-only.** Records what fraction of a vhost's requests
