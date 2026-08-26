@@ -1,0 +1,142 @@
+# Admin-token source-IP binding (control-plane hardening)
+
+**Status:** design / not implemented. Effort ≈ M.
+**Scope:** CFM daemon apiserver (`internal/apiserver`). No cfm-web change required
+(but see the egress-IP caveat below).
+
+## Problem / threat model
+
+`cfm-web` holds every node's **long-lived admin token** (`AUTH_TOKEN` / `TOKEN`,
+`internal/config/config.go:643-644`) so it can drive each node's control plane
+(SSO code minting, `node_call`, scoped-token minting). The WHM plugin holds the
+same secret to reach the local daemon.
+
+If `cfm-web`'s database leaks, **every node's admin token leaks with it**, and an
+attacker could drive the admin API of the whole fleet from anywhere. Token
+at-rest hashing on the cfm-web side reduces the leak's value; this document is
+the complementary daemon-side control: **make a leaked admin token unusable from
+any IP that is not us.**
+
+### Live exposure (verified 2026-08-26, node `orion.myip.gr`)
+
+- `6060/tcp` (admin HTTP) → `cfm`, bound to `*` (0.0.0.0) — **internet-facing**.
+- `6061/tcp` (admin TLS) → `cfm`, bound to `*` — **internet-facing**.
+- `9098/tcp` (edge challenge) → `cfm`, bound to `127.0.0.1`/`::1` — loopback only.
+- `netfilter_path` (input, dport 6060/6061): base chain `inet cfm input`
+  (priority -50, policy accept) exists; **no per-port allowlist rule**, findings 0.
+- No committed CFM nft rule gates 6060/6061 to selfIPs/`cfm.allow`/`cfm.dyndns`.
+
+So today the admin plane is Internet-reachable and protected **only** by
+app-layer auth (as `Audit.md` acknowledges: "listeners must be safe when
+Internet-reachable"). Both the app-layer binding below and any L3/L4 nft port
+lock are currently **absent**.
+
+## Why this is safe to do (the key insight)
+
+The long-lived admin token is **never presented by an end-user's browser.** It is
+presented only:
+
+- by `cfm-web`, server-to-server, from its egress IP; and
+- by the WHM plugin / `panelauth`, over **loopback** (`127.0.0.1:6060`).
+
+Browser SSO uses **ephemeral** credentials instead, so restricting the token does
+not touch anyone's interactive access:
+
+| Credential | Who presents it | Source IP | Restrict? |
+|---|---|---|---|
+| **Long-lived admin token** (`token_admin`, `middleware.go:379-388`) | cfm-web (server→node); WHM/panelauth (loopback) | cfm-web egress **or** loopback | ✅ **yes** |
+| One-time admin SSO code (45s, single-use, `embed_admin_bootstrap.go`) | minted server-side; **redeemed by operator browser** | mint: known; redeem: arbitrary | ❌ leave |
+| `cfm-embed-admin` cookie (600s, HKDF from AUTH_TOKEN) | operator browser | arbitrary | ❌ leave |
+| Scoped viewer token / `cfm-embed-scope` cookie | cPanel user's browser | arbitrary | ❌ leave |
+| goauth session (`cfm-sid`) | operator browser | arbitrary | ❌ leave |
+| `MCP_TOKEN` (separate namespace, bypasses `TokenMiddleware`) | MCP clients (cfm-web) | known | separate policy |
+
+Because the operator/cPanel browser authenticates with a **cookie / scoped token
+/ session** — not the admin token — binding the admin token to known IPs leaves
+all interactive access untouched. This is why the check must be **per-credential**
+(only the `token_admin` branch), NOT a blanket gate over the mux (a blanket gate
+would break scoped, SSO-browser and login flows).
+
+## The three doors (and what guards each)
+
+The admin API is reachable three ways; a leaked token can be tried on each:
+
+1. **Direct `:6060`** — HTTP. (Loopback-only by config default, but live nodes
+   bind `*`.) Attacker token here → app-layer `token_admin` IP check rejects.
+2. **Direct `:6061`** — TLS; what cfm-web uses server-to-server. Attacker token
+   here → app-layer check rejects; an nft port-lock would also drop the packet.
+3. **Public edge `:443` → `/cfm-admin/` → loopback → `:6060`** — the browser
+   front door, reachable from everywhere. nft cannot help (arrives from
+   loopback), but the daemon sees the real client IP in `X-Real-IP` (trusted only
+   across the loopback hop, multi-hop rejected — `request_identity.go:106-121`),
+   so the app-layer check still rejects a token presented from a non-allowlisted
+   IP.
+
+The app-layer check covers **all three** because both listeners share the same
+`TokenMiddleware` (`apiserver.go`). It is the **fail-safe** control: it lives in
+the API itself, so it holds even if the firewall is disabled (`cfm disable`), the
+port is opened later, or the nft ruleset drifts. An nft port lock on `:6061` is a
+good **bonus** L3/L4 layer, but not the thing to rely on.
+
+## Design
+
+Add a source-IP gate **only** at the admin-token branch of `TokenMiddleware`
+(`internal/apiserver/middleware.go:379-388`): when the presented credential
+matches the admin token, additionally require
+
+```
+requestPeer(r).ClientIP ∈ allowlist
+allowlist = { loopback, selfIPs, cfm.allow, cfm.dyndns, cfm-web egress IP }
+```
+
+else return 403. Key on `requestPeer(r).ClientIP` (the forwarded real IP behind
+the edge), **never** `r.RemoteAddr` (which is loopback behind the edge and would
+make everything "trusted").
+
+Scoped tokens, embed cookies, sessions and MCP stay on their current IP-agnostic
+path — no collateral.
+
+### Reuse (already written, currently unwired)
+
+- `internal/apiserver/ip_allow_middleware.go` — `IPAllowMiddleware` already
+  composes loopback ∪ selfIPs ∪ `cfm.allow`/`cfm.dyndns` ∪ API_URL-host, keyed on
+  `requestPeer().ClientIP`, unit-tested — but **not mounted**. Lift its allowlist
+  logic into the admin-token branch (do **not** mount it blanket).
+- `internal/detectors/core/selfip.go:74` — `IsSelfIP`.
+- `allowlist.BuildSnapshot` / `ipAllowed()` — exact-IP + CIDR + hostname resolve.
+
+## Caveats / must-verify before enforcing
+
+1. **cfm-web egress IP ≠ API_URL host.** `API_URL` is cfm-web's *ingress*; the
+   *source* IP when cfm-web calls back into a node may differ (NAT/multi-homing),
+   so allowlisting the API_URL host may not admit cfm-web. **Verify** from the
+   node's logs: the `src_ip` on `/api/v1/embed/admin-code` mints
+   (`embed_admin_bootstrap.go:164`) is cfm-web's real egress IP — add it
+   explicitly to `cfm.allow` if it isn't covered.
+2. **Lock-out risk → dry-run first.** A wrong allowlist locks cfm-web out of the
+   whole admin plane. Ship behind a config toggle **default-off**, with a
+   **logonly/dry-run** phase (log would-be-blocked admin-token requests with
+   `src_ip`) for burn-in, then enforce — the same `logonly → block` promotion the
+   WAF uses. Always keep loopback + selfIPs in the set.
+3. **Edge real_ip trust.** The bound IP is only as trustworthy as the edge's
+   `real_ip` config; on Cloudflare-fronted vhosts `X-Real-IP` is forgeable via
+   `CF-Connecting-IP` unless CF is the genuine edge (`configs/openresty.conf`).
+4. **MCP is separate.** `MCP_TOKEN` auth bypasses `TokenMiddleware`, so this
+   change does not cover the MCP surface. Introducing a dedicated `MCP_TOKEN` on
+   the cfm-web side (so `auth_token` stops being an MCP fallback credential) is
+   the clean complementary fix.
+
+## Optional companion: nft port-lock on `:6061`
+
+An `inet cfm input` rule that accepts `:6061` (and direct `:6060`) only from
+{selfIPs, loopback, `cfm.allow`, `cfm.dyndns`} drops attacker packets at L3/L4
+before auth. It does **not** cover the `:443`→loopback→`:6060` edge path (that is
+the app-layer check's job), and it can be disabled — so it is defence-in-depth,
+not the primary control. Currently absent (see live exposure above).
+
+## Relationship to other work
+
+- **Complementary to cfm-web token-at-rest hashing:** hashing protects the token
+  *at rest*; this makes a leaked token unusable *in use* from the wrong IP.
+- References: `docs/security/admin-sso-bootstrap.md`,
+  `docs/security/direct-6060-transport-policy.md`, `Audit.md`.

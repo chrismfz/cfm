@@ -128,6 +128,14 @@ Not code — operator actions tracked so they aren't forgotten.
   (`SESSION_ALL_FAILED"`) on 5 nodes, 3deers' missing panel `CHALLENGE_VHOST`
   patterns, speedhost's `permanent` leniency, dead `.leniency` threshold keys.
   List: `docs/detectors-config-unification.md` §7.
+- **Admin-token source-IP binding** — [design, code]. Bind the long-lived admin
+  `AUTH_TOKEN` to {loopback, selfIPs, `cfm.allow`/`cfm.dyndns`, cfm-web egress IP}
+  at the `token_admin` branch only, so a leaked token (e.g. from a cfm-web DB
+  leak) is unusable from any other IP — browser SSO/scoped/session paths
+  untouched. Fail-safe (independent of the firewall). Live check 2026-08-26:
+  `:6060`/`:6061` are Internet-bound (`*`) with **no** nft gate today, so this and
+  an optional nft `:6061` port-lock are both absent. Design + caveats (verify
+  cfm-web egress IP; dry-run first): `docs/security/admin-token-source-ip-binding.md`.
 
 ## 8. Detectors config unification
 
