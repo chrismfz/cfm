@@ -39,6 +39,17 @@ back-filled here — see the git/PR history for that period.
   redirect if the mint is unavailable (older daemon / unreadable token) — no
   regression.
 
+### Changed
+- **cPanel/WHM plugin code now refreshes on package upgrade.** When cPanel is
+  present and the plugin is already installed, the deb/rpm post-install refreshes
+  only the plugin **code** files (`bootstrap.php`, `cfm_api.php`, the two CGIs and
+  the template) in place, so plugin fixes (e.g. the WHM direct-login change) ride
+  a normal `apt`/`yum` upgrade instead of requiring a manual re-install. It never
+  installs the plugin where it was not already present and deliberately does **not**
+  `register_appconfig` / `install_plugin` / restart `cpsrvd` — first-time install
+  (and any appconfig/icon change) still goes through
+  `plugins/cfm-plugin-cpanel/install.sh`.
+
 ## 2026.08.25
 
 ### Added

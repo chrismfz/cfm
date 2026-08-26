@@ -143,6 +143,14 @@ else
     echo "WARNING: packaged lua source path missing: /usr/share/cfm/configs/lua (and /usr/share/cfm/lua)"
 fi
 
+# cPanel/WHM plugin: refresh the live plugin CODE on upgrade (non-disruptive;
+# no register_appconfig / install_plugin / cpsrvd restart). Acts only when cPanel
+# is present and the plugin is already installed. Shared with the rpm %post via
+# scripts/cpanel-plugin-refresh.sh so the two packaging scripts can't drift.
+if [ -x /usr/share/cfm/scripts/cpanel-plugin-refresh.sh ]; then
+    /usr/share/cfm/scripts/cpanel-plugin-refresh.sh || true
+fi
+
 # nginx temp dirs — must be owned by the cfm worker user
 # (default OpenResty paths are root-owned; workers running as cfm can't write them)
 for d in /var/lib/cfm/nginx/client_body_temp /var/lib/cfm/nginx/proxy_temp; do
