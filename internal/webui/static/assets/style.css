@@ -586,6 +586,15 @@ code { cursor: copy; }
 }
 .raw-json summary { cursor: pointer; color: var(--accent-strong); margin-bottom: .4rem; }
 
+/* Signal legend — the small "what does each pill mean" toolbox above the
+   WebTop / Suspicious tables. Defined once (PARTIALS.SIGNAL_LEGEND). */
+.signal-legend { margin: .2rem 0 .7rem; }
+.signal-legend > summary { color: var(--accent-strong); font-weight: 600; }
+.signal-legend .legend-list { list-style: none; margin: .5rem 0 .4rem; padding: 0; display: grid; gap: .45rem; }
+.signal-legend .legend-list li { display: flex; align-items: baseline; gap: .55rem; line-height: 1.4; font-size: .85rem; }
+.signal-legend .legend-list .pill { flex: 0 0 auto; }
+.signal-legend .legend-foot { margin: .2rem 0 0; font-size: .8rem; }
+
 pre {
   margin: 0;
   max-height: 320px;

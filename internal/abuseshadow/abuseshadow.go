@@ -47,6 +47,17 @@ type Entry struct {
 	Provider string  `json:"provider"`
 	GoodBot  string  `json:"good_bot"`
 	Verdict  string  `json:"verdict"`
+
+	// Vhost-level signal metrics (facet/cost/dc). These lines carry
+	// verdict=would_shadow and their own keys instead of the rate-outlier's
+	// ip/ratio/provider; zero when the line is a different signal.
+	Urls      int     `json:"urls,omitempty"`      // facet: distinct full URLs
+	Paths     int     `json:"paths,omitempty"`     // facet: distinct base paths
+	Expansion float64 `json:"expansion,omitempty"` // facet: urls/paths
+	Frac5xx   float64 `json:"frac5xx,omitempty"`   // cost: 5xx fraction
+	DCFrac    float64 `json:"dc_frac,omitempty"`   // dc: unverified-datacenter fraction
+	DCReqs    int     `json:"dc_reqs,omitempty"`   // dc: datacenter requests
+	DCIPs     int     `json:"dc_ips,omitempty"`    // dc: distinct datacenter IPs
 }
 
 // Parse extracts an Entry from one log line. Returns ok=false for a line that
@@ -95,6 +106,20 @@ func Parse(line string) (Entry, bool) {
 			e.GoodBot = dash(v)
 		case "verdict":
 			e.Verdict = v
+		case "urls":
+			e.Urls, _ = strconv.Atoi(v)
+		case "paths":
+			e.Paths, _ = strconv.Atoi(v)
+		case "expansion":
+			e.Expansion, _ = strconv.ParseFloat(v, 64)
+		case "frac5xx":
+			e.Frac5xx, _ = strconv.ParseFloat(v, 64)
+		case "dc_frac":
+			e.DCFrac, _ = strconv.ParseFloat(v, 64)
+		case "dc_reqs":
+			e.DCReqs, _ = strconv.Atoi(v)
+		case "dc_ips":
+			e.DCIPs, _ = strconv.Atoi(v)
 		}
 	}
 	if !got || e.Signal == "" {
@@ -128,6 +153,24 @@ type topEntity struct {
 	GoodBot  string  `json:"good_bot,omitempty"`
 }
 
+// sigHost is one vhost flagged by a per-vhost signal (facet/cost/dc): the values
+// from its STRONGEST firing (facet ranked by expansion, dc by datacenter
+// fraction; cost has one metric) plus how many windows fired (Hits). Reporting a
+// real firing's row — not a per-field max stitched across windows — keeps the row
+// truthful. Fields are per-signal (only the relevant ones are non-zero), so the
+// same struct serves all three top lists.
+type sigHost struct {
+	Host      string  `json:"host"`
+	Hits      int     `json:"hits"`
+	Urls      int     `json:"urls,omitempty"`
+	Paths     int     `json:"paths,omitempty"`
+	Expansion float64 `json:"expansion,omitempty"`
+	Frac5xx   float64 `json:"frac5xx,omitempty"`
+	DCFrac    float64 `json:"dc_frac,omitempty"`
+	DCReqs    int     `json:"dc_reqs,omitempty"`
+	DCIPs     int     `json:"dc_ips,omitempty"`
+}
+
 // Summary is the aggregate the endpoint returns.
 type Summary struct {
 	Total          int         `json:"total"`
@@ -141,6 +184,14 @@ type Summary struct {
 	ByCountry      []kv        `json:"by_country"`  // ISO-2 country distribution (would_challenge only)
 	ByGoodbot      []kv        `json:"by_good_bot"` // which good bots were exempted
 	TopWouldBlock  []topEntity `json:"top_would_challenge"`
+
+	// Per-vhost signal breakdowns — which hosts each new signal flagged, ranked by
+	// its own peak metric. This is what answers "is facet flagging real floods or a
+	// legit ?id= site?" and "which vhosts are datacenter-heavy?". Omitted when a
+	// signal never fired in the window.
+	TopFacet []sigHost `json:"top_facet,omitempty"` // by expansion (urls/paths)
+	TopCost  []sigHost `json:"top_cost,omitempty"`  // by 5xx fraction
+	TopDC    []sigHost `json:"top_dc,omitempty"`    // by datacenter fraction
 }
 
 // Summarize aggregates parsed lines. It ranks the top would_challenge entities
@@ -156,10 +207,23 @@ func Summarize(lines []string) Summary {
 	hosts := map[string]struct{}{}
 	ips := map[string]struct{}{}
 	ent := map[string]*topEntity{} // key host|ip, would_challenge only
+	facetHosts := map[string]*sigHost{}
+	costHosts := map[string]*sigHost{}
+	dcHosts := map[string]*sigHost{}
 
 	for _, ln := range lines {
 		e, ok := Parse(ln)
 		if !ok {
+			continue
+		}
+		// Only DECISION lines are aggregated. dc_fraction also emits verdict-less
+		// OPERATIONAL lines to the same log — a `verified_crawler=… excluded` FCrDNS
+		// note (whose `ip=%s)` even carries a trailing paren) and a `deferred_vhosts=…
+		// ip_enrich_budget` line. Counting those inflated Total/unique_ips/by_signal
+		// and added a junk empty-key row to by_verdict; every real decision line
+		// (rate_outlier would_challenge/exempt_goodbot, facet/cost/dc would_shadow)
+		// carries a verdict and these two don't, so gate on it.
+		if e.Verdict == "" {
 			continue
 		}
 		s.Total++
@@ -170,6 +234,48 @@ func Summarize(lines []string) Summary {
 		}
 		if e.IP != "" {
 			ips[e.IP] = struct{}{}
+		}
+		// Per-vhost signal breakdowns, keyed by host, tracking the PEAK metric seen
+		// across the window's firings (each line is one throttle window).
+		if e.Host != "" {
+			switch e.Signal {
+			case "facet_expansion":
+				h := facetHosts[e.Host]
+				if h == nil {
+					h = &sigHost{Host: e.Host}
+					facetHosts[e.Host] = h
+				}
+				h.Hits++
+				// Keep the single STRONGEST firing's row (ranked by expansion), not a
+				// per-field max that could stitch urls/paths from different windows
+				// into a row that never actually happened.
+				if e.Expansion > h.Expansion {
+					h.Expansion = e.Expansion
+					h.Urls = e.Urls
+					h.Paths = e.Paths
+				}
+			case "cost_pressure":
+				h := costHosts[e.Host]
+				if h == nil {
+					h = &sigHost{Host: e.Host}
+					costHosts[e.Host] = h
+				}
+				h.Hits++
+				h.Frac5xx = max(h.Frac5xx, e.Frac5xx) // single metric — no synthetic-row risk
+			case "dc_fraction":
+				h := dcHosts[e.Host]
+				if h == nil {
+					h = &sigHost{Host: e.Host}
+					dcHosts[e.Host] = h
+				}
+				h.Hits++
+				// Strongest firing's row, ranked by datacenter fraction (see facet).
+				if e.DCFrac > h.DCFrac {
+					h.DCFrac = e.DCFrac
+					h.DCReqs = e.DCReqs
+					h.DCIPs = e.DCIPs
+				}
+			}
 		}
 		switch e.Verdict {
 		case "would_challenge":
@@ -222,7 +328,52 @@ func Summarize(lines []string) Summary {
 		tops = tops[:25]
 	}
 	s.TopWouldBlock = tops
+
+	// Every comparator ends on Host (unique per map key) so the order — and thus
+	// which host is dropped at the 25-cap — is deterministic across calls even when
+	// the ranking metrics tie (sort.Slice is not stable).
+	s.TopFacet = topSigHosts(facetHosts, func(a, b *sigHost) bool {
+		if a.Expansion != b.Expansion {
+			return a.Expansion > b.Expansion
+		}
+		if a.Urls != b.Urls {
+			return a.Urls > b.Urls
+		}
+		return a.Host < b.Host
+	})
+	s.TopCost = topSigHosts(costHosts, func(a, b *sigHost) bool {
+		if a.Frac5xx != b.Frac5xx {
+			return a.Frac5xx > b.Frac5xx
+		}
+		return a.Host < b.Host
+	})
+	s.TopDC = topSigHosts(dcHosts, func(a, b *sigHost) bool {
+		if a.DCFrac != b.DCFrac {
+			return a.DCFrac > b.DCFrac
+		}
+		if a.DCReqs != b.DCReqs {
+			return a.DCReqs > b.DCReqs
+		}
+		return a.Host < b.Host
+	})
 	return s
+}
+
+// topSigHosts flattens a per-host signal map, sorts by the given less func, and
+// caps at 25.
+func topSigHosts(m map[string]*sigHost, less func(a, b *sigHost) bool) []sigHost {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]sigHost, 0, len(m))
+	for _, h := range m {
+		out = append(out, *h)
+	}
+	sort.Slice(out, func(i, j int) bool { return less(&out[i], &out[j]) })
+	if len(out) > 25 {
+		out = out[:25]
+	}
+	return out
 }
 
 func topKV(m map[string]int, limit int) []kv {

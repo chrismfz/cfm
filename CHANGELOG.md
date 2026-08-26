@@ -25,11 +25,42 @@ back-filled here — see the git/PR history for that period.
   count — so an operator can see at a glance which vhosts are lighting up which
   signal. The `x`-toggle bottom panel is broadened from "Suspicious" to
   **"Suspicious + Challenged"**: it now merges the challenged vhosts (auto/manual,
-  with a CH column) into the suspicious list and appends the signal values
-  (`farm` / `facet=N` / `cost=N%` / `dc=N%` / `shadow=N`) to the REASONS column —
-  the same unified "who needs attention and why" view cfm-admin already shows
-  (cfm-admin and `cfm webtop challenge` already carry these badges). Pure
+  with a CH column) into the suspicious list, and gives the signals their **own
+  `SIGNALS` column** (`farm` / `facet=N` / `cost=N%` / `dc=N%` / `shadow=N` as
+  words) — the same unified "who needs attention and why" view cfm-admin already
+  shows (cfm-admin and `cfm webtop challenge` already carry these badges). Pure
   visibility of already-collected data — no enforcement, no new signals.
+- **cfm-admin: a "what the signal pills mean" legend** above the WebTop and
+  Suspicious+Challenged tables — a collapsible toolbox explaining each shadow
+  signal (`farm`/`shadow`/`facet`/`cost`/`dc`) in plain language, so an operator
+  no longer has to hover each pill's tooltip to learn what it is. Defined once and
+  shared by both cards.
+- **`abuse_shadow` MCP tool: per-vhost breakdowns for the three vhost-level
+  signals** — `top_facet` (hosts by URL/path expansion), `top_cost` (by 5xx
+  fraction) and `top_dc` (by unverified-datacenter fraction), each ranked by its
+  own peak metric. Answers "which vhosts is facet/cost/dc actually flagging?"
+  during burn-in, alongside the existing Signal-C rate-outlier view. Read-only
+  aggregation over the same log; no new data collected.
+
+### Changed
+- **`cfm webtop live` bottom panel: signals moved out of REASONS into their own
+  `SIGNALS` column.** Appending the signal tokens to REASONS (the initial
+  approach) let the score reasons push them past truncation, so the signal words
+  were often invisible; a dedicated column keeps them legible and de-clutters
+  REASONS. Ordered before REASONS so a narrow terminal squeezes REASONS, not the
+  signals.
+
+### Fixed
+- **`abuse_shadow` aggregation no longer counts dc_fraction's operational lines.**
+  The dc_fraction signal writes two verdict-less bookkeeping lines to the shadow
+  log (a `verified_crawler=… excluded` FCrDNS note and a `deferred_vhosts=…`
+  budget line); the aggregator was counting them as events, inflating `total` and
+  `unique_ips` (with a malformed `ip=…)` from the note — ironically the very
+  verified-crawler IPs the signal excludes) and adding a junk empty-key row to the
+  `by_verdict` split. The aggregator now counts only real decision lines (those
+  carrying a `verdict=`). Per-signal top lists also now report each host's single
+  strongest firing (not a per-field max stitched across windows) and rank
+  deterministically on ties.
 
 ## 2026.08.25
 
