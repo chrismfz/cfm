@@ -1094,15 +1094,20 @@ func RunLiveTop(baseURL string, limit int) error {
 
 	buildSuspiciousPanel := func() {
 		panelW := W - 2
-		hostW := 28
+		hostW := 26
 		chW := 3
 		scoreW := 6
 		errW := 6
 		botW := 6
 		uniqW := 6
-		reasonW := panelW - hostW - chW - scoreW - errW - botW - uniqW - 14
-		if reasonW < 18 {
-			reasonW = 18
+		// Shadow signals get their OWN column (words: farm/facet=/cost=%/dc=%/shadow=)
+		// instead of being appended to REASONS, where the score reasons pushed them
+		// past the truncation and they were never visible. SIGNALS sits before REASONS
+		// so on a narrow terminal REASONS is what gets squeezed off, not the signals.
+		sigW := 26
+		reasonW := panelW - hostW - chW - scoreW - errW - botW - uniqW - sigW - 16
+		if reasonW < 12 {
+			reasonW = 12
 		}
 
 		// Unified attention list: suspicious ∪ challenged (auto/manual), deduped by
@@ -1144,7 +1149,7 @@ func RunLiveTop(baseURL string, limit int) error {
 		sort.SliceStable(list, func(i, j int) bool { return list[i].score > list[j].score })
 
 		rows2 := [][]string{
-			{"HOST", "CH", "SCORE", "ERR%", "BOT%", "UNIQ", "REASONS"},
+			{"HOST", "CH", "SCORE", "ERR%", "BOT%", "UNIQ", "SIGNALS", "REASONS"},
 		}
 		maxRows := bottomPanelLim
 		for i, a := range list {
@@ -1167,24 +1172,32 @@ func RunLiveTop(baseURL string, limit int) error {
 				errStr = fmt.Sprintf("%.1f", a.errPct)
 				botStr = fmt.Sprintf("%.1f", a.botPct)
 			}
-			// score reasons first, then the shadow-signal tokens (farm/facet/cost/dc/shadow).
-			merged := append(append([]string{}, a.reasons...), sigTokens(a.facet, a.cost, a.dc, a.shadow, a.farm)...)
-			rs := joinReasons(merged)
+			// Shadow signals as words in their own column — the top panel shows the
+			// compact f/c/d/s letters, here they read out in full (all ASCII, so byte
+			// truncation is safe). REASONS carries only the score reasons now.
+			sig := strings.Join(sigTokens(a.facet, a.cost, a.dc, a.shadow, a.farm), " ")
+			if sig == "" {
+				sig = "-"
+			}
+			if len(sig) > sigW {
+				sig = sig[:sigW-2] + ".."
+			}
+			rs := joinReasons(a.reasons)
 			if len(rs) > reasonW {
 				rs = rs[:reasonW-2] + ".."
 			}
 			rows2 = append(rows2, []string{
 				host, ch, fmt.Sprintf("%.2f", a.score), errStr, botStr,
-				fmt.Sprintf("%d", a.uniq), rs,
+				fmt.Sprintf("%d", a.uniq), sig, rs,
 			})
 		}
 		for len(rows2) < maxRows+1 {
-			rows2 = append(rows2, []string{"", "", "", "", "", "", ""})
+			rows2 = append(rows2, []string{"", "", "", "", "", "", "", ""})
 		}
 
 		bottomPanel.Title = " ⚠ Suspicious + Challenged — x=toggle "
 		bottomPanel.Rows = rows2
-		bottomPanel.ColumnWidths = []int{hostW, chW, scoreW, errW, botW, uniqW, reasonW}
+		bottomPanel.ColumnWidths = []int{hostW, chW, scoreW, errW, botW, uniqW, sigW, reasonW}
 		bottomPanel.RowStyles = map[int]ui.Style{
 			0: ui.NewStyle(ui.ColorBlack, ui.ColorYellow),
 		}

@@ -622,14 +622,15 @@ func handleSystemWAFFPHunt(w http.ResponseWriter, r *http.Request) {
 
 // handleSystemAbuseShadow aggregates the LOG-ONLY abuse-shadow log
 // (GET /api/v1/system/abuse-shadow?lines=N). Read-only, admin-only. Backs the
-// MCP abuse_shadow tool: it tails /var/log/cfm/cfm.abuse_shadow.log (the Signal C
-// rate-outlier burn-in lines, docs/webdetector-refactor.md) and returns
+// MCP abuse_shadow tool: it tails /var/log/cfm/cfm.abuse_shadow.log (the
+// entity-abuse burn-in lines, docs/webdetector-refactor.md) and returns
 // aggregates — would_challenge vs exempt_goodbot counts, top would-challenge
-// (host,ip) outliers by peak ratio, and the datacenter/good-bot splits — so an
-// operator can judge "what would Signal C have challenged, and how much is
-// verified-bot/datacenter?" before promoting it to a real challenge. Host-wide
-// (one shadow log per node) → admin-only. Bounded tail + timeout; a missing log
-// (feature off / never fired) returns an empty summary, not an error.
+// (host,ip) outliers by peak ratio, the datacenter/good-bot splits, and per-vhost
+// breakdowns for the vhost-level signals (top_facet/top_cost/top_dc) — so an
+// operator can judge "what would each signal have challenged, and how much is
+// verified-bot/datacenter?" before promoting any of them to a real challenge.
+// Host-wide (one shadow log per node) → admin-only. Bounded tail + timeout; a
+// missing log (feature off / never fired) returns an empty summary, not an error.
 func handleSystemAbuseShadow(w http.ResponseWriter, r *http.Request) {
 	if !webdet.RequireAdmin(w, r) {
 		return
