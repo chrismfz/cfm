@@ -30,6 +30,14 @@ back-filled here — see the git/PR history for that period.
   (SameSite=Lax; domain-separated signing key from the scoped embed cookie).
   Grants nothing the admin-token holder did not already have. Design:
   `docs/security/admin-sso-bootstrap.md`.
+- **WHM plugin: direct login into the admin UI.** Opening CFM from WHM now mints
+  an admin SSO code against the local daemon and lands root **already
+  authenticated** in `/cfm-admin/`, instead of the bare redirect that showed the
+  login page whenever no admin session existed. The WHM CGI runs as root, so it
+  reads `AUTH_TOKEN` from the `cfm.api.conf` overlay (`cfm_admin_token()` now
+  checks the overlay, not just base `cfm.conf`). Falls back to the previous plain
+  redirect if the mint is unavailable (older daemon / unreadable token) — no
+  regression.
 
 ## 2026.08.25
 
