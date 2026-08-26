@@ -17,7 +17,23 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **Admin SSO cookie signing key is now a random per-node secret, not derived
+  from `AUTH_TOKEN`.** The `cfm-embed-admin` cookie was HMAC-signed with a key
+  HKDF-derived from `AUTH_TOKEN`, which made it **forgeable from a cfm-web
+  database leak**: cfm-web holds every node's `AUTH_TOKEN`, so a leak let an
+  attacker derive the (public-salt) key and mint a valid admin cookie, reaching
+  full admin from any IP — bypassing the admin-token source-IP gate (which only
+  covers the token branch). The key is now random, generated on the node,
+  persisted `0600` root-only at `/var/lib/cfm/embed-admin-cookie.key`, and never
+  sent to cfm-web — so a cfm-web DB leak can no longer forge an admin session
+  cookie. No config: the key auto-generates on first use (mirrors the MCP-token /
+  MFA-key persistence). **Effect on upgrade:** any open admin SSO session is
+  invalidated once (a one-time re-login; the ~10-minute cookie TTL bounds it).
+  Rotate/recover by deleting the key file and restarting `cfm`. This is the
+  companion (part B) to the admin-token source-IP binding; it closes the
+  cookie-forgery path that binding alone left open. Design:
+  `docs/security/admin-token-source-ip-binding.md`.
 
 ## 2026.08.26
 

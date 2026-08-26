@@ -20,9 +20,11 @@ package apiserver
 //     and expires in embedExchangeCodeTTL (45s).
 //   - /api/v1/embed/admin-bootstrap consumes the code and sets a short-lived,
 //     HMAC-signed, host+UA-bound admin cookie scoped to /cfm-admin/. The cookie
-//     is domain-separated from the scoped embed cookie (distinct name AND a
-//     distinct HKDF-derived signing key), so neither can be replayed as the
-//     other.
+//     is signed with a RANDOM, per-node key (see embed_admin_cookie_key.go) — NOT
+//     derived from AUTH_TOKEN — so a cfm-web DB leak (which exposes AUTH_TOKEN)
+//     cannot forge it. It is also domain-separated from the scoped embed cookie
+//     (distinct name AND a distinct signing key), so neither can be replayed as
+//     the other.
 //   - Unlike the scoped embed cookie (SameSite=None, because it lives in a
 //     cross-site cPanel iframe), the admin session is a top-level navigation and
 //     same-origin thereafter, so it uses SameSite=Lax to shrink CSRF surface for
@@ -30,7 +32,6 @@ package apiserver
 
 import (
 	"context"
-	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -52,12 +53,10 @@ import (
 const (
 	embedAdminCookieName              = "cfm-embed-admin"
 	embedAdminBootstrapTTL            = 600 * time.Second
-	embedAdminCookieHKDFInfo          = "cfm-apiserver-embed-admin-cookie-v1"
-	embedAdminCookieHKDFSalt          = "cfm-apiserver-embed-admin-cookie-salt-v1"
 	embedAdminBootstrapRenewThreshold = embedAdminBootstrapTTL / 2
 )
 
-var embedAdminCookieSigningKeyProvider = deriveEmbedAdminCookieSigningKey
+var embedAdminCookieSigningKeyProvider = loadOrCreateEmbedAdminCookieSigningKey
 
 type embedAdminExchangeRecord struct {
 	nextPath string
@@ -386,19 +385,4 @@ func decodeEmbedAdminCookie(r *http.Request, v string) (bool, time.Time) {
 		}
 	}
 	return true, expiry
-}
-
-func deriveEmbedAdminCookieSigningKey() ([]byte, error) {
-	authToken, err := loadAuthTokenFromRuntimeConfig()
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(authToken) == "" {
-		return nil, errors.New("auth token missing")
-	}
-	key, err := hkdf.Key(sha256.New, []byte(authToken), []byte(embedAdminCookieHKDFSalt), embedAdminCookieHKDFInfo, 32)
-	if err != nil {
-		return nil, fmt.Errorf("derive embed admin cookie key: %w", err)
-	}
-	return key, nil
 }
