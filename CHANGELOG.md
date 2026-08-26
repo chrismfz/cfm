@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.26
+
 ### Security
 - **Admin SSO cookie signing key is now a random per-node secret, not derived
   from `AUTH_TOKEN`.** The `cfm-embed-admin` cookie was HMAC-signed with a key
@@ -34,8 +38,6 @@ back-filled here — see the git/PR history for that period.
   companion (part B) to the admin-token source-IP binding; it closes the
   cookie-forgery path that binding alone left open. Design:
   `docs/security/admin-token-source-ip-binding.md`.
-
-## 2026.08.26
 
 ### Security
 - **Admin-token source-IP binding (`ADMIN_TOKEN_IP_BINDING`, default off) —
