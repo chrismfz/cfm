@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.26
+
 ### Added
 - **Admin SSO bootstrap for the admin UI** (`/api/v1/embed/admin-code` +
   `/api/v1/embed/admin-bootstrap`). A caller that already holds the node's admin
