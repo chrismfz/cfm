@@ -17,7 +17,66 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Origin keepalive (`ORIGIN_KEEPALIVE=1`) no longer causes Apache `421
+  Misdirected Request` on shared-vhost HTTPS.** Routing allow-traffic through
+  the shared `cfm_origin_https` named upstream let a backend TLS connection
+  handshaked with `SNI=hostA` be reused for a request to `hostB` on the same
+  origin IP — Apache answers `AH02032 … 421 Misdirected Request`. On one
+  production box (OpenResty 1.31.1.1 → Apache) this produced ~17.5 k
+  `status=421` over a week, on warm (`uct=0.000`) connections carrying the
+  wrong SNI, across dozens of vhosts hitting real browsers and crawlers alike.
+  Backend connection/TLS reuse can come from **three** independent layers, and
+  the first was the trap that an audit for a `keepalive` *directive* misses:
+  1. **nginx-core's native upstream keepalive — ON BY DEFAULT since nginx
+     1.29.7** (this OpenResty ships nginx 1.31.1), `keepalive 32 local`, and
+     **SNI-blind**: it reuses by peer IP:port and ignores SNI, and `local`
+     separates pools only by *location*, not by `$host`. An earlier revision of
+     this fix that only skipped the *Lua* balancer pool left this default-on
+     native pool active and did **not** stop the 421s.
+  2. the Lua balancer keepalive (`ngx.balancer.enable_keepalive`).
+  3. `proxy_ssl_session_reuse` (default on) — the upstream SSL-session cache is
+     peer-keyed, not SNI-keyed, so a resumed session can carry hostA's TLS
+     identity into a hostB request.
+  **Fix: HTTPS (port 443) is prohibited from reuse at every layer** — `keepalive
+  0` on both `cfm_origin_*` upstreams in `openresty.conf` (disables the native
+  pool), the Lua balancer never pools 443, and `proxy_ssl_session_reuse off` on
+  every 443 origin location — so each 443 request is a fresh TCP + fresh TLS/SNI
+  (`proxy_ssl_name $host`). Engine/version notes: the `keepalive 0` guard uses
+  nginx **1.29.7+** disable semantics (older nginx/OpenResty rejects `keepalive
+  0` and doesn't need it — native keepalive was off there), so this reference
+  `openresty.conf` targets OpenResty shipping nginx ≥ 1.29.7; `angie.conf` omits
+  `keepalive 0` entirely because Angie keeps native upstream keepalive off by
+  default AND its parser rejects `keepalive 0` outright (confirmed on Angie
+  1.12.1: `angie -t` → `[emerg] invalid value "0" in "keepalive"`), so adding it
+  would break every Angie reload for no benefit. The invariant ("443 never
+  natively pooled") holds on both engines by different means, and the config
+  gate enforces the split. Port 80 stays pooled and is now the **only** pooled
+  port (Lua-owned); the balancer's dispatch is fail-safe (`port == 80` pools,
+  every other port defaults to unpooled), so a future origin port can't
+  silently pool a TLS backend. Scope of the retained benefit: cfm.lua routes to
+  the origin by the client's scheme, so HTTPS clients take the per-request 443
+  path — the port-80 pool mainly helps plain-HTTP origin traffic (HTTP→HTTPS
+  redirects, ACME/`.well-known` DCV, plain-HTTP sites); the bulk 443 handshake
+  saving is given up until a **proven** SNI-keyed 443 pool lands (gated by a
+  two-vhost same-IP integration test on the deployed engine, not a unit test).
+  The knob is now safe to run fleet-wide; operators do **not** need to disable
+  it. **Deploying this fix needs an edge reload** (`openresty -s reload` /
+  `angie -s reload`): the balancer module is `require`d and `lua_code_cache`
+  is on, so running workers keep the old code until fresh workers spawn —
+  unlike toggling `ORIGIN_KEEPALIVE` itself, which the edge re-reads within
+  ~10 s with no reload. To stop the 421s *immediately* without a reload, set
+  `ORIGIN_KEEPALIVE = 0` (rolls back within ~10 s), then deploy + reload the
+  code fix and re-enable. See `docs/proxy-performance.md`.
+- **Origin keepalive activity is now visible in error.log.** The module's
+  diagnostic messages were logged at `NOTICE`, but `error_log` runs at
+  `warn`, so they were never written — operators grepping `[cfm_origin_ka]`
+  after enabling saw nothing, the log blind spot that hid the 421 root cause
+  for a week. Each worker now logs its effective state at `WARN` the first
+  time it routes on each port: `[cfm_origin_ka] HTTP(80) origin pooling active`
+  (or a degraded WARN when the engine lacks `enable_keepalive`) and
+  `[cfm_origin_ka] origin port 443: per-request connection, never pooled …`.
+  These are expected once-per-worker lines, not error conditions.
 
 ## 2026.08.26
 
