@@ -16,8 +16,9 @@
 #       (disables the default-on, SNI-blind native pool; Lua owns the 80 pool).
 #   angie.conf
 #     * neither cfm_origin_* upstream carries a `keepalive` directive — Angie
-#       keeps native upstream keepalive OFF by default and does not document `0`
-#       as a disable, so `keepalive 0` there is unneeded and an `angie -t` risk.
+#       keeps native upstream keepalive OFF by default AND rejects `keepalive 0`
+#       (confirmed Angie 1.12.1: `angie -t` -> invalid value "0"), so `keepalive
+#       0` there is both unneeded and a hard config-load failure.
 #   both confs
 #     * every 443 origin SNI line (`proxy_ssl_name $host;`) is immediately
 #       followed by `proxy_ssl_session_reuse off;` (no cross-SNI TLS session
@@ -80,7 +81,7 @@ for up in cfm_origin_http cfm_origin_https; do
   st=$(upstream_keepalive_state "$ANG" "$up")
   case "$st" in
     no)      ;;  # no keepalive directive — expected on Angie
-    yes)     err "$ANG: upstream '$up' has a 'keepalive' directive — remove it: Angie defaults native keepalive off and may reject 'keepalive 0' in 'angie -t'." ;;
+    yes)     err "$ANG: upstream '$up' has a 'keepalive' directive — remove it: Angie defaults native keepalive off AND its parser rejects 'keepalive 0' (confirmed Angie 1.12.1: 'angie -t' -> invalid value \"0\"), so any keepalive directive here risks breaking the reload." ;;
     absent)  err "$ANG: upstream '$up' block not found — did the origin upstreams get renamed/removed?" ;;
   esac
 done

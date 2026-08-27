@@ -47,8 +47,11 @@ back-filled here — see the git/PR history for that period.
   0` and doesn't need it — native keepalive was off there), so this reference
   `openresty.conf` targets OpenResty shipping nginx ≥ 1.29.7; `angie.conf` omits
   `keepalive 0` entirely because Angie keeps native upstream keepalive off by
-  default and does not document `0` as a disable (adding it risks an `angie -t`
-  failure for no benefit). Port 80 stays pooled and is now the **only** pooled
+  default AND its parser rejects `keepalive 0` outright (confirmed on Angie
+  1.12.1: `angie -t` → `[emerg] invalid value "0" in "keepalive"`), so adding it
+  would break every Angie reload for no benefit. The invariant ("443 never
+  natively pooled") holds on both engines by different means, and the config
+  gate enforces the split. Port 80 stays pooled and is now the **only** pooled
   port (Lua-owned); the balancer's dispatch is fail-safe (`port == 80` pools,
   every other port defaults to unpooled), so a future origin port can't
   silently pool a TLS backend. Scope of the retained benefit: cfm.lua routes to
