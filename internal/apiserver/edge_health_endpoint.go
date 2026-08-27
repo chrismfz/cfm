@@ -15,7 +15,9 @@ package apiserver
 // Tier 1 (this iteration) — the checks that would have caught the incident in
 // minutes:
 //   A. engine + version + native-keepalive-default-on trap flag
-//   B. 421 / SNI-mismatch fingerprint from the edge access log (warm-reuse shape)
+//   B. 421 / SNI-mismatch fingerprint from the edge access log (warm-reuse shape),
+//      RECENCY-AWARE: only 421s inside a freshness window drive `critical`, so a
+//      resolved storm still in the file tail reads `warn`, not a stale `critical`.
 //   C. [cfm_origin_ka] activation/degradation tiers from the edge error log
 //   D. ORIGIN_KEEPALIVE knob state (from the published bridge config)
 // See docs/edge-health.md for the design and the Tier-2/3 follow-ups (live
@@ -35,6 +37,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"cfm/internal/edgeengine"
 	"cfm/internal/edgelog"
@@ -51,6 +54,8 @@ var (
 	edgeHealthScanError  = edgelog.ScanError
 	// Where the daemon publishes the ORIGIN_KEEPALIVE knob for the edge.
 	edgeHealthBridgeConfigPaths = []string{"/var/lib/cfm/lua/cfm_bridge_config.lua"}
+	// Wall-clock seam (tests stub it) so the 421 recency verdict is deterministic.
+	edgeHealthNow = func() int64 { return time.Now().Unix() }
 )
 
 var (
@@ -64,6 +69,10 @@ var (
 	ehUctZeroRe = regexp.MustCompile(`uct="0\.000"`)
 	ehKnobRe    = regexp.MustCompile(`origin_keepalive\s*=\s*(true|false)`)
 	ehDigitsRe  = regexp.MustCompile(`^(\d+)`)
+	// The edge writes msec=<unix epoch with millis> on every access line
+	// (log_format cfm). We use the integer seconds to age a 421 against now,
+	// which is timezone-proof (unlike the human ts="…" field).
+	ehMsecRe = regexp.MustCompile(`(?:^|\s)msec=(\d+)`)
 )
 
 // nativeKeepaliveDefaultVer is the first nginx version where upstream keepalive
@@ -74,6 +83,12 @@ const (
 	edgeHealthDefaultWindow = 50_000
 	edgeHealthMaxWindow     = 500_000
 	edgeHealthErrWindow     = 20_000
+	// A warm-reuse 421 older than this, with NONE newer, reads as a resolved
+	// incident (warn) rather than a live one (critical). A real cross-SNI storm
+	// under load emits many 421s/min, so 5 min can't miss a live one; keeping it
+	// this short means the verdict flips to `warn` within ~5 min of a fix instead
+	// of lingering `critical` while the pre-fix storm sits in the file tail.
+	edgeHealth421FreshWindowSec int64 = 300 // 5 minutes
 )
 
 func handleSystemEdgeHealth(w http.ResponseWriter, r *http.Request) {
@@ -110,7 +125,15 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	findings := []map[string]any{}
 
 	// ── Check B: 421 / SNI-mismatch fingerprint (access log) ────────────────────
-	total421, warm421 := 0, 0
+	// Recency-aware: an edge restart/reload wipes the upstream keepalive pool, so
+	// a cross-SNI 421 can only recur once pooling rebuilds. We therefore drive the
+	// LIVE verdict off warm-reuse 421s inside a freshness window (msec epoch), not
+	// the raw count — else a wide file-tail scan keeps re-reading the pre-fix 421
+	// storm and reads `critical` for minutes after the fix already took hold.
+	now := edgeHealthNow()
+	freshCutoff := now - edgeHealth421FreshWindowSec
+	total421, warm421, recentWarm421 := 0, 0, 0
+	var newestWarmTS int64 // 0 ⇒ no warm 421 carried a parseable msec
 	hostCounts := map[string]int{}
 	accLog, accScanned, accErr := edgeHealthScanAccess(ctx, []string{"status=421"}, "", window, func(line string) {
 		if !ehStatus421Re.MatchString(line) {
@@ -120,6 +143,14 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 		warm := strings.Contains(line, "cfm_origin_https") && ehUctZeroRe.MatchString(line)
 		if warm {
 			warm421++
+			if ts := parseMsecUnix(line); ts > 0 {
+				if ts > newestWarmTS {
+					newestWarmTS = ts
+				}
+				if ts >= freshCutoff {
+					recentWarm421++
+				}
+			}
 		}
 		if m := ehHostRe.FindStringSubmatch(line); m != nil {
 			h := strings.Trim(m[1], `",`)
@@ -132,20 +163,45 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 			}
 		}
 	})
+	// A warm 421 is LIVE if one is inside the freshness window, OR if we could not
+	// parse a timestamp from ANY warm line (newestWarmTS==0) — fail-safe toward
+	// flagging rather than silently downgrading a real storm on a log format that
+	// lacks msec. `warm421Live` also gates the engine-version-trap critical below.
+	warm421Live := warm421 > 0 && (recentWarm421 > 0 || newestWarmTS == 0)
+	warmEv := func() map[string]any {
+		ev := map[string]any{
+			"status_421_total": total421, "warm_reuse_421": warm421,
+			"recent_warm_421": recentWarm421, "fresh_window_sec": edgeHealth421FreshWindowSec,
+			"scanned_lines": accScanned, "log_file": accLog,
+			"top_hosts": topHosts(hostCounts, 8),
+		}
+		if newestWarmTS > 0 {
+			ev["newest_warm_421_unix"] = newestWarmTS
+			ev["newest_warm_421_age_sec"] = now - newestWarmTS
+		}
+		return ev
+	}
 	switch {
 	case accErr != nil:
 		findings = append(findings, sev.add("origin-421-fingerprint", "unknown",
 			"could not read the edge access log", map[string]any{
 				"error": accErr.Error(), "available_logs": edgelog.AvailableLogs(),
 			}, "check edge access-log presence/permissions"))
-	case warm421 > 0:
+	case warm421Live:
+		note := ""
+		if newestWarmTS == 0 {
+			note = " (timestamps unavailable — treating as live)"
+		}
 		findings = append(findings, sev.add("origin-421-fingerprint", "critical",
-			itoa(warm421)+" warm-reuse 421s (uct≈0 via cfm_origin_https) in the last "+itoa(accScanned)+" access lines — the cross-SNI 443-reuse signature",
-			map[string]any{
-				"status_421_total": total421, "warm_reuse_421": warm421,
-				"scanned_lines": accScanned, "log_file": accLog,
-				"top_hosts": topHosts(hostCounts, 8),
-			}, "verify 443 origin reuse is off at every layer (origin-config-invariant, edge_error_tail)"))
+			itoa(warm421)+" warm-reuse 421s (uct≈0 via cfm_origin_https) in the last "+itoa(accScanned)+" access lines — the cross-SNI 443-reuse signature; "+itoa(recentWarm421)+" in the last "+itoa(int(edgeHealth421FreshWindowSec/60))+"m"+note,
+			warmEv(), "verify 443 origin reuse is off at every layer (origin-config-invariant, edge_error_tail)"))
+	case warm421 > 0:
+		// Warm-reuse 421s exist but ALL are older than the freshness window: the
+		// incident is in the file tail but has stopped (fix/restart took hold).
+		// Report `warn` — visible, decays to ok as they scroll out — not `critical`.
+		findings = append(findings, sev.add("origin-421-fingerprint", "warn",
+			itoa(warm421)+" warm-reuse 421s in the scanned window but NONE in the last "+itoa(int(edgeHealth421FreshWindowSec/60))+"m (newest "+itoa(int((now-newestWarmTS)/60))+"m ago) — the cross-SNI 443-reuse incident appears resolved; confirm keepalive 0 + proxy_ssl_session_reuse off is live so it can't recur",
+			warmEv(), "confirm the origin-hop SNI-safety config is applied + reloaded (check_origin_ka_config.sh, edge_error_tail)"))
 	case total421 > 0:
 		findings = append(findings, sev.add("origin-421-fingerprint", "warn",
 			itoa(total421)+" status=421 in the last "+itoa(accScanned)+" access lines, but none with the warm-reuse signature — may be a genuinely misconfigured vhost, not pooling",
@@ -177,19 +233,20 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 		findings = append(findings, sev.add("engine-version-trap", "unknown",
 			engineLabel(engine, version)+": version unreadable — cannot confirm whether native upstream keepalive is default-on (nginx ≥ 1.29.7); the 443-reuse trap cannot be ruled out",
 			aEv, "check the edge binary path / `-v` output; verify `keepalive 0` on cfm_origin_* regardless"))
-	case trap && knob == "true" && warm421 > 0:
+	case trap && knob == "true" && warm421Live:
 		findings = append(findings, sev.add("engine-version-trap", "critical",
-			engineLabel(engine, version)+": native upstream keepalive is ON by default and SNI-blind, ORIGIN_KEEPALIVE is on, and warm-reuse 421s are present — classic 443 cross-SNI reuse",
+			engineLabel(engine, version)+": native upstream keepalive is ON by default and SNI-blind, ORIGIN_KEEPALIVE is on, and LIVE warm-reuse 421s are present — classic 443 cross-SNI reuse",
 			aEv, "ensure `keepalive 0` on cfm_origin_* (OpenResty) + proxy_ssl_session_reuse off; deploy + edge reload"))
 	case trap && knob == "true":
-		// Knob on, no warm-reuse 421s. The 443-reuse CLASS applies, but Tier-1
-		// cannot verify the SNI-safety config invariant (keepalive 0 /
-		// proxy_ssl_session_reuse off) — that is the CI gate + Tier-2's job.
-		// Report the exposure informatively, NOT as `warn`: warning here would
-		// fire forever on every correctly-configured node (cry wolf), and any
-		// whats_wrong wiring on `overall` with it.
+		// Knob on, no LIVE warm-reuse 421s (either none at all, or only a resolved
+		// storm still in the file tail — Check B reports that separately). The
+		// 443-reuse CLASS applies, but Tier-1 cannot verify the SNI-safety config
+		// invariant (keepalive 0 / proxy_ssl_session_reuse off) — that is the CI
+		// gate + Tier-2's job. Report the exposure informatively, NOT as `warn`:
+		// warning here would fire forever on every correctly-configured node (cry
+		// wolf), and anything wiring whats_wrong on `overall` would too.
 		findings = append(findings, sev.add("engine-version-trap", "ok",
-			engineLabel(engine, version)+": native keepalive default-on & SNI-blind, ORIGIN_KEEPALIVE on, no warm-reuse 421s — the SNI-safety config MUST be present; this Tier-1 check does not verify it (check_origin_ka_config.sh / edge_health Tier-2 does)",
+			engineLabel(engine, version)+": native keepalive default-on & SNI-blind, ORIGIN_KEEPALIVE on, no live cross-SNI 421s — the SNI-safety config MUST be present; this Tier-1 check does not verify it (check_origin_ka_config.sh / edge_health Tier-2 does)",
 			aEv, ""))
 	case trap && knob == "false":
 		findings = append(findings, sev.add("engine-version-trap", "ok",
@@ -359,6 +416,21 @@ func engineLabel(engine, version string) string {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// parseMsecUnix extracts the integer Unix seconds from an edge access line's
+// msec=<epoch> field. Returns 0 when absent/unparseable so the caller can
+// fail-safe (treat unknown recency as live).
+func parseMsecUnix(line string) int64 {
+	m := ehMsecRe.FindStringSubmatch(line)
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
 
 func topHosts(counts map[string]int, n int) []map[string]any {
 	type kv struct {

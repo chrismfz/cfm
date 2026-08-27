@@ -4,8 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
+
+func itoa64(n int64) string { return strconv.FormatInt(n, 10) }
 
 // TestNativeKeepaliveTrap pins the engine/version → trap logic that names the
 // 421 root cause (nginx >=1.29.7 native keepalive default-on & SNI-blind).
@@ -252,13 +255,123 @@ func TestEdgeHealthReport_KnobUnknownNotOk(t *testing.T) {
 	}
 }
 
+// TestEdgeHealthReport_WarmReuseResolved: a warm-reuse 421 storm sits in the
+// scanned window but every hit predates the freshness window (the fix/restart
+// took hold minutes ago). It must read `warn` (resolved, decays out), NOT
+// `critical`, and must not escalate the engine-version-trap check either — this
+// is the exact "the default wide window kept crying critical for minutes after
+// the fix" regression that motivated the recency gate.
+func TestEdgeHealthReport_WarmReuseResolved(t *testing.T) {
+	restore := stubEdgeHealth(t)
+	defer restore()
+	const now = int64(1_800_000_000)
+	edgeHealthNow = func() int64 { return now }
+	edgeHealthDetect = func(context.Context) (string, string, bool) {
+		return "openresty", "openresty/1.31.1.1", true
+	}
+	old := now - 1200 // 20 min ago (> the 10-min fresh window)
+	edgeHealthScanAccess = func(_ context.Context, _ []string, _ string, _ int, fn func(string)) (string, int, error) {
+		line := `msec=` + itoa64(old) + ` host=rokas.com status=421 uct="0.000" pass=https://cfm_origin_https`
+		fn(line)
+		fn(line)
+		fn(line)
+		return "/log/access.log", 200000, nil
+	}
+	edgeHealthScanError = func(_ context.Context, _ []string, _ string, _ int, _ func(string)) (string, int, error) {
+		return "/log/error.log", 100, nil
+	}
+	dir := t.TempDir()
+	bridge := filepath.Join(dir, "b.lua")
+	_ = os.WriteFile(bridge, []byte("origin_keepalive = true"), 0o600)
+	edgeHealthBridgeConfigPaths = []string{bridge}
+
+	rep := buildEdgeHealthReport(context.Background(), 200000)
+	if rep["overall"] != "warn" {
+		t.Fatalf("overall = %v, want warn (resolved storm ≠ live critical)", rep["overall"])
+	}
+	f := findFinding(t, rep, "origin-421-fingerprint")
+	if f["severity"] != "warn" {
+		t.Errorf("origin-421-fingerprint = %v, want warn", f["severity"])
+	}
+	ev := f["evidence"].(map[string]any)
+	if ev["warm_reuse_421"] != 3 || ev["recent_warm_421"] != 0 {
+		t.Errorf("counts = warm %v / recent %v, want 3 / 0", ev["warm_reuse_421"], ev["recent_warm_421"])
+	}
+	if f := findFinding(t, rep, "engine-version-trap"); f["severity"] != "ok" {
+		t.Errorf("engine-version-trap = %v, want ok (no LIVE 421 ⇒ not critical)", f["severity"])
+	}
+}
+
+// TestEdgeHealthReport_WarmReuseLiveByTimestamp: a warm-reuse 421 inside the
+// freshness window is a LIVE incident ⇒ critical, with recent_warm_421 > 0.
+func TestEdgeHealthReport_WarmReuseLiveByTimestamp(t *testing.T) {
+	restore := stubEdgeHealth(t)
+	defer restore()
+	const now = int64(1_800_000_000)
+	edgeHealthNow = func() int64 { return now }
+	edgeHealthDetect = func(context.Context) (string, string, bool) {
+		return "openresty", "openresty/1.31.1.1", true
+	}
+	fresh := now - 60 // 1 min ago (inside the 10-min fresh window)
+	edgeHealthScanAccess = func(_ context.Context, _ []string, _ string, _ int, fn func(string)) (string, int, error) {
+		fn(`msec=` + itoa64(now-1200) + ` host=a.gr status=421 uct="0.000" pass=https://cfm_origin_https`) // old
+		fn(`msec=` + itoa64(fresh) + ` host=b.gr status=421 uct="0.000" pass=https://cfm_origin_https`)    // live
+		return "/log/access.log", 50000, nil
+	}
+	edgeHealthScanError = func(_ context.Context, _ []string, _ string, _ int, _ func(string)) (string, int, error) {
+		return "/log/error.log", 0, nil
+	}
+	dir := t.TempDir()
+	bridge := filepath.Join(dir, "b.lua")
+	_ = os.WriteFile(bridge, []byte("origin_keepalive = true"), 0o600)
+	edgeHealthBridgeConfigPaths = []string{bridge}
+
+	rep := buildEdgeHealthReport(context.Background(), 50000)
+	if rep["overall"] != "critical" {
+		t.Fatalf("overall = %v, want critical (a warm 421 inside the fresh window is live)", rep["overall"])
+	}
+	f := findFinding(t, rep, "origin-421-fingerprint")
+	ev := f["evidence"].(map[string]any)
+	if ev["warm_reuse_421"] != 2 || ev["recent_warm_421"] != 1 {
+		t.Errorf("counts = warm %v / recent %v, want 2 / 1", ev["warm_reuse_421"], ev["recent_warm_421"])
+	}
+}
+
+// TestEdgeHealthReport_WarmReuseNoTimestampFailsafe: warm 421s with no parseable
+// msec (an older log format) must FAIL SAFE to critical — never silently
+// downgrade a real storm just because recency can't be judged.
+func TestEdgeHealthReport_WarmReuseNoTimestampFailsafe(t *testing.T) {
+	restore := stubEdgeHealth(t)
+	defer restore()
+	edgeHealthNow = func() int64 { return 1_800_000_000 }
+	edgeHealthDetect = func(context.Context) (string, string, bool) {
+		return "openresty", "openresty/1.31.1.1", true
+	}
+	edgeHealthScanAccess = func(_ context.Context, _ []string, _ string, _ int, fn func(string)) (string, int, error) {
+		fn(`host=a.gr status=421 uct="0.000" pass=https://cfm_origin_https`) // no msec field
+		return "/log/access.log", 50000, nil
+	}
+	edgeHealthScanError = func(_ context.Context, _ []string, _ string, _ int, _ func(string)) (string, int, error) {
+		return "/log/error.log", 0, nil
+	}
+	dir := t.TempDir()
+	bridge := filepath.Join(dir, "b.lua")
+	_ = os.WriteFile(bridge, []byte("origin_keepalive = true"), 0o600)
+	edgeHealthBridgeConfigPaths = []string{bridge}
+
+	rep := buildEdgeHealthReport(context.Background(), 50000)
+	if rep["overall"] != "critical" {
+		t.Fatalf("overall = %v, want critical (unparseable recency must fail safe)", rep["overall"])
+	}
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func stubEdgeHealth(t *testing.T) func() {
 	t.Helper()
-	oDet, oAcc, oErr, oBridge := edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths
+	oDet, oAcc, oErr, oBridge, oNow := edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow
 	return func() {
-		edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths = oDet, oAcc, oErr, oBridge
+		edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow = oDet, oAcc, oErr, oBridge, oNow
 	}
 }
 
