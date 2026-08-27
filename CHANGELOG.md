@@ -23,7 +23,7 @@ back-filled here — see the git/PR history for that period.
   with the live engine version — something the raw tails (`edge_access_tail` /
   `edge_error_tail`) and generic `config_drift` can't do in one call — to catch
   the class of bug behind the 2026-08 cross-SNI `421` incident before it hides
-  for a week. Severity-ranked Tier-1 findings (`overall` ok/warn/critical):
+  for a week. Severity-ranked Tier-1 findings (`overall` ok/warn/critical/unknown):
   (A) engine + version + the **native-keepalive-default-on trap** (nginx ≥ 1.29.7,
   e.g. OpenResty 1.31.x, turns native upstream keepalive ON by default and
   SNI-blind; Angie keeps it off); (B) the **421 warm-reuse fingerprint**

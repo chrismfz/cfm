@@ -27,53 +27,47 @@ live config and the engine version directly — not wait for the symptom.
 Read-only: it never blocks, reloads, or changes config. It may run
 `openresty -v` / `angie -v` (and, when asked, `-t`) — validation only.
 
-## Scope: Tier 1 (this iteration)
+## Scope: Tier 1 (as shipped)
 
-The four checks that, together, would have caught the 421 incident in minutes:
+Four correlated checks that, together, would have caught the 421 incident in
+minutes. Each finding carries a `severity`; the tool's `overall` is the max of
+them — **`ok | warn | critical | unknown`**, where `unknown` means a log/version
+couldn't be read and is NEVER silently downgraded to `ok`.
 
-### 1. Origin 421 / SNI-mismatch fingerprint
-- Count `status=421` in the edge access log over a window (default last N lines /
-  since T). Correlate each with `pass=…cfm_origin_https` + `uct≈0.000` (the
-  warm-reuse signature) and surface the offending `host` values.
-- Scan the **origin** error log (Apache `AH02032` / "Misdirected Request", or the
-  LiteSpeed equivalent) for SNI↔Host mismatch lines, and pair them with the
-  access-log 421s by IP/timestamp when possible.
-- **Verdict:** any recent 421 with the warm-reuse signature ⇒ `critical` (this is
-  the incident's exact shape). 421s without it ⇒ `warn` (could be a genuinely
-  misconfigured vhost, not a pooling bug) with the sample lines.
+### A. Origin 421 / warm-reuse fingerprint (edge access log)
+- Count the real `status=421` field — anchored, so a URI/param containing
+  `status=421` doesn't inflate it — over a bounded window. Flag the **warm-reuse**
+  shape: a single `uct="0.000"` via `cfm_origin_https` (a retry list
+  `uct="0.000, 0.052"` is a genuine fresh connect and is deliberately excluded).
+  Surface the top `host`s.
+- **Verdict:** any warm-reuse 421 ⇒ `critical` (the incident's exact shape);
+  `status=421` without it ⇒ `warn` (possibly a genuinely misconfigured origin
+  vhost, not pooling); none ⇒ `ok`.
 
-### 2. Live-config origin-hop invariant (the runtime twin of the CI gate)
-Re-checks, against the **live** edge config (not the shipped reference — catches
-`/etc/cfm` drift), the exact invariant `scripts/tests/check_origin_ka_config.sh`
-enforces at build time:
-- OpenResty: both `cfm_origin_*` upstreams carry `keepalive 0;`.
-- Angie: neither carries a `keepalive` directive.
-- Both: every HTTPS-origin location (inside an `ssl` server, proxying via
-  `$cfm_pass` or any `proxy_pass https://…`) carries the full trio
-  `proxy_ssl_server_name on` / `proxy_ssl_name $host` / `proxy_ssl_session_reuse off`.
-- **Verdict:** any violation ⇒ `critical` — 443 backend reuse is possible.
+### B. Engine + version trap (the root-cause namer)
+- Report engine (OpenResty / Angie) and version, and the key gotcha: **nginx ≥
+  1.29.7 (e.g. OpenResty 1.31.x) turns native upstream keepalive ON by default
+  and SNI-blind**; Angie keeps it off (and rejects `keepalive 0`).
+- **Verdict:** trap engine + knob on + warm-reuse 421s ⇒ `critical`. Trap engine
+  + knob on + **no** 421s ⇒ `ok` (informative) — the class applies, but this
+  Tier-1 check does NOT verify the `keepalive 0` config invariant (the CI gate
+  `check_origin_ka_config.sh` and the future Tier-2 config check do); warning
+  here would cry wolf on every healthy node forever. Knob off ⇒ `ok`. Engine
+  known but its version, or the knob, unreadable ⇒ `unknown` (never all-clear).
 
-### 3. Engine + version awareness (the trap detector)
-- Report engine (OpenResty / Angie) and exact version.
-- Flag the version-specific gotchas: **nginx ≥ 1.29.7 ⇒ native upstream keepalive
-  is ON by default and SNI-blind**, so `keepalive 0` MUST be present on the
-  balancer upstreams (cross-checks with #2); Angie keeps it off by default and
-  **rejects** `keepalive 0` (so it must be absent there).
-- **Verdict:** engine/version + invariant mismatch (e.g. nginx ≥ 1.29.7 but a
-  `cfm_origin_*` upstream without `keepalive 0`) ⇒ `critical`; this is the single
-  check that most directly names the incident's root cause.
+### C. `[cfm_origin_ka]` tiers (edge error log)
+- Classify the per-worker lines: `[cfm_origin_ka] ngx.balancer unavailable`
+  (every origin request fails) and `[cfm] cfm_origin_ka load failed`
+  (balancer_by_lua fell back to inline set_current_peer) ⇒ `critical`;
+  `enable_keepalive` degradation / no-retry ⇒ `warn`.
+- Absence of the once-per-worker activation lines is **not** a problem — they age
+  out of the live error log on a healthy edge — so an empty classification is
+  `ok`, never a false "module inactive" warning.
 
-### 4. ORIGIN_KEEPALIVE knob vs. reality
-- Is the knob on (`detectors.conf [webdetector] ORIGIN_KEEPALIVE`)?
-- Does the live proxy conf declare the `cfm_origin_*` upstreams + the
-  `$cfm_origin_ka_conf` sentinel? (Arming the knob against a conf without them is
-  a silent no-op — worth surfacing.)
-- Are the `[cfm_origin_ka]` per-worker WARN lines present in the edge error log,
-  and which tier did each worker land on (pooling active / 443 per-request /
-  degraded / retry-unavailable)? This confirms the module is actually doing what
-  the config says.
-- **Verdict:** knob on but upstreams/sentinel absent, or degraded-tier WARNs ⇒
-  `warn`.
+### D. ORIGIN_KEEPALIVE knob (published bridge config)
+- Read `origin_keepalive` from `/var/lib/cfm/lua/cfm_bridge_config.lua`
+  (true/false/unknown); it drives the B and C correlations. Unreadable ⇒ feeds
+  `unknown` into B rather than an all-clear.
 
 ## Output shape
 
@@ -83,7 +77,7 @@ way:
 ```jsonc
 {
   "engine": "openresty", "version": "1.31.1.1", "nginx": "1.31.1",
-  "overall": "critical",              // ok | warn | critical
+  "overall": "critical",              // ok | warn | critical | unknown
   "findings": [
     {
       "check": "origin-421-fingerprint",
@@ -132,8 +126,14 @@ is the max severity.
 
 ## Not in Tier 1 (follow-up)
 
-- Tier 2: Lua module-load failures (`[cfm] cfm_origin_ka load failed`, aborted
-  lua threads), `openresty -t`/`angie -t` + reload-freshness (conf edited but not
+- Tier 2: the **live-config origin-hop invariant** — parse the live
+  `openresty.conf`/`angie.conf` and assert the trio the CI gate checks in the
+  *reference* config (OpenResty `keepalive 0` on the 443 origin upstream,
+  `proxy_ssl_session_reuse off` on the `proxy_ssl_name $host` locations, Angie
+  *without* `keepalive 0`), turning Check A's "the class applies" into a
+  positive/negative config verdict without waiting for a 421. Also: the
+  **Apache-side AH02032** `421` fingerprint (origin error log), aborted lua
+  threads, `openresty -t`/`angie -t` + reload-freshness (conf edited but not
   reloaded — the deployment gotcha), WAF/challenge Lua errors.
 - Tier 3: latency split distribution (`uct`/`uht`/`luams`/`sslr`), 5xx/502/499
   rates, worker respawns, cert/SSL edge errors.

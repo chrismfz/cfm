@@ -169,6 +169,89 @@ func TestEdgeHealthReport_UnknownVersion(t *testing.T) {
 	}
 }
 
+// TestEdgeHealthReport_HealthyKnobOnNoWolf: a correctly-configured node (trap
+// engine, knob ON, no 421s, activation lines aged out of the window) must NOT
+// escalate — overall ok, no permanent warn (the cry-wolf regression).
+func TestEdgeHealthReport_HealthyKnobOnNoWolf(t *testing.T) {
+	restore := stubEdgeHealth(t)
+	defer restore()
+	edgeHealthDetect = func(context.Context) (string, string, bool) {
+		return "openresty", "openresty/1.31.1.1", true
+	}
+	edgeHealthScanAccess = func(_ context.Context, _ []string, _ string, _ int, _ func(string)) (string, int, error) {
+		return "/log/access.log", 50000, nil // no 421s
+	}
+	edgeHealthScanError = func(_ context.Context, _ []string, _ string, _ int, _ func(string)) (string, int, error) {
+		return "/log/error.log", 20000, nil // no [cfm_origin_ka] lines (aged out)
+	}
+	dir := t.TempDir()
+	bridge := filepath.Join(dir, "b.lua")
+	_ = os.WriteFile(bridge, []byte("origin_keepalive = true"), 0o600)
+	edgeHealthBridgeConfigPaths = []string{bridge}
+
+	rep := buildEdgeHealthReport(context.Background(), 1000)
+	if rep["overall"] != "ok" {
+		t.Fatalf("overall = %v, want ok (healthy knob-on node must not cry wolf)", rep["overall"])
+	}
+	if f := findFinding(t, rep, "engine-version-trap"); f["severity"] != "ok" {
+		t.Errorf("engine-version-trap = %v, want ok (trap+knob-on+no-421 is not a warn)", f["severity"])
+	}
+	if f := findFinding(t, rep, "origin-ka-tier"); f["severity"] != "ok" {
+		t.Errorf("origin-ka-tier = %v, want ok (empty tiers ≠ inactive)", f["severity"])
+	}
+}
+
+// TestEdgeHealthReport_CriticalErrorTiers: the fatal error-log lines each map to
+// a reachable critical tier (the load-failure line is `[cfm]`-tagged; the
+// balancer-unavailable line matched no tier before).
+func TestEdgeHealthReport_CriticalErrorTiers(t *testing.T) {
+	for _, tc := range []struct{ name, line string }{
+		{"module load failed", `2026/08/27 [error] 1#1: *5 [cfm] cfm_origin_ka load failed: nil, ...`},
+		{"balancer unavailable", `2026/08/27 [error] 1#1: *5 [cfm_origin_ka] ngx.balancer unavailable: nil`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := stubEdgeHealth(t)
+			defer restore()
+			edgeHealthDetect = func(context.Context) (string, string, bool) { return "openresty", "openresty/1.31.1.1", true }
+			edgeHealthScanAccess = func(_ context.Context, _ []string, _ string, _ int, _ func(string)) (string, int, error) {
+				return "/log/access.log", 100, nil
+			}
+			line := tc.line
+			edgeHealthScanError = func(_ context.Context, _ []string, _ string, _ int, fn func(string)) (string, int, error) {
+				fn(line)
+				return "/log/error.log", 1, nil
+			}
+			edgeHealthBridgeConfigPaths = []string{filepath.Join(t.TempDir(), "absent.lua")}
+
+			rep := buildEdgeHealthReport(context.Background(), 1000)
+			f := findFinding(t, rep, "origin-ka-tier")
+			if f["severity"] != "critical" {
+				t.Errorf("origin-ka-tier = %v, want critical for %q", f["severity"], tc.name)
+			}
+		})
+	}
+}
+
+// TestEdgeHealthReport_KnobUnknownNotOk: trap engine but the bridge config is
+// unreadable (knob unknown) must be "unknown" on the trap check, never "ok".
+func TestEdgeHealthReport_KnobUnknownNotOk(t *testing.T) {
+	restore := stubEdgeHealth(t)
+	defer restore()
+	edgeHealthDetect = func(context.Context) (string, string, bool) { return "openresty", "openresty/1.31.1.1", true }
+	edgeHealthScanAccess = func(_ context.Context, _ []string, _ string, _ int, _ func(string)) (string, int, error) {
+		return "/log/access.log", 100, nil
+	}
+	edgeHealthScanError = func(_ context.Context, _ []string, _ string, _ int, _ func(string)) (string, int, error) {
+		return "/log/error.log", 0, nil
+	}
+	edgeHealthBridgeConfigPaths = []string{filepath.Join(t.TempDir(), "absent.lua")} // knob unreadable
+
+	rep := buildEdgeHealthReport(context.Background(), 1000)
+	if f := findFinding(t, rep, "engine-version-trap"); f["severity"] != "unknown" {
+		t.Errorf("engine-version-trap = %v, want unknown (knob unreadable, can't all-clear)", f["severity"])
+	}
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func stubEdgeHealth(t *testing.T) func() {
