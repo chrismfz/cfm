@@ -182,12 +182,12 @@ check(log_matching("degrading to per-request connections") == 1,
       "keepalive_broken warns exactly once")
 check(log_matching("HTTP(80) origin pooling active") == 0,
       "no false 'pooling active' claim when enable_keepalive raised")
--- Once port 80 has degraded to per-request (keepalive_broken), the
--- keepalive-race retry must NOT be armed anymore — otherwise it doubles
--- connect load against a failing origin, the anti-pattern the 443 path avoids.
--- Armed once (request 1, before we learned keepalive was broken), then never.
-check(s3_more_tries == 1,
-      "degraded port-80 path stops arming set_more_tries after the latch")
+-- The keepalive-race retry is armed only from enable_pool()'s success path,
+-- so a worker that never pools (enable_keepalive raises) must NEVER arm
+-- set_more_tries — not even on the first request. This is the connect-doubling
+-- anti-pattern the 443 path avoids, now closed on the degraded-80 path too.
+check(s3_more_tries == 0,
+      "unpooled (raising) port-80 path never arms set_more_tries")
 
 -- ── Scenario 4: enable_keepalive absent entirely → latch + one WARN ─────────
 -- The no-enable_keepalive path must NOT be silent (it previously returned with
@@ -214,10 +214,11 @@ check(log_matching("HTTP(80) origin pooling active") == 0,
 -- and enable_keepalive keeps being attempted every request.
 package.loaded["cfm_origin_ka"] = nil
 local ek_calls_4b = 0
+local s4b_more_tries = 0
 package.loaded["ngx.balancer"] = {
   set_current_peer = function(addr, port) return true end,
   enable_keepalive = function() ek_calls_4b = ek_calls_4b + 1; return nil, "no memory" end,
-  set_more_tries = function() return true end,
+  set_more_tries = function() s4b_more_tries = s4b_more_tries + 1; return true end,
   get_last_failure = function() return nil end,
 }
 local ka4b = require "cfm_origin_ka"
@@ -230,6 +231,8 @@ check(log_matching("enable_keepalive failed") == 1,
       "non-raise enable_keepalive failure warns exactly once/worker (no flood)")
 check(log_matching("HTTP(80) origin pooling active") == 0,
       "no false 'pooling active' claim while enable_keepalive keeps failing")
+check(s4b_more_tries == 0,
+      "unpooled (non-raise-failure) port-80 path never arms set_more_tries")
 
 -- ── Scenario 5: hostless 443 request → unpooled 2-arg set_peer, no error ────
 -- $host may be "" (server_name '_' didn't resolve a Host). 443 is unpooled

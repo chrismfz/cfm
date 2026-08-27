@@ -110,6 +110,32 @@ end
 local keepalive_broken = false
 local pool80_announced = false
 local ka_fail_warned = false
+local more_tries_warned = false
+
+-- Arm exactly ONE keepalive-race retry on the FIRST attempt of a request that
+-- is actually being POOLED. balancer_by_lua disables nginx's default upstream
+-- retries, so without this a pooled connection Apache closed in the idle
+-- window turns into a client-facing 502; one retry re-runs the balancer on a
+-- fresh connection. get_last_failure() is nil only on the initial attempt, so
+-- retries never stack. Called ONLY from enable_pool()'s success path, so it
+-- never arms on an unpooled request (443, keepalive_broken, or a transient
+-- enable_keepalive failure) — a retry with no pool to race against would just
+-- double connect load against an already-failing origin during an outage. The
+-- (rare) set_more_tries failure is throttled to once/worker like the other
+-- degradation WARNs, so it can't flood error.log at request rate.
+local function arm_keepalive_retry()
+  if type(balancer.get_last_failure) ~= "function"
+     or type(balancer.set_more_tries) ~= "function"
+     or balancer.get_last_failure() ~= nil then
+    return
+  end
+  local ok, err = balancer.set_more_tries(1)
+  if not ok and not more_tries_warned then
+    more_tries_warned = true
+    ngx.log(ngx.WARN, "[cfm_origin_ka] set_more_tries failed: ", tostring(err),
+            " (warned once/worker)")
+  end
+end
 
 local function enable_pool()
   if keepalive_broken then return end
@@ -145,12 +171,16 @@ local function enable_pool()
     end
     return
   end
-  -- Success: report the TRUE pooled state once per worker (WARN, so it shows
-  -- at the default `error_log warn` level) — the signal operators grep for.
+  -- Success: this request IS pooled. Arm the keepalive-race retry now (only
+  -- here, so no unpooled path ever arms it), and report the pooled state once
+  -- per worker at WARN — visible at the default `error_log warn` level, the
+  -- signal operators grep for. We log that pooling is active, not the live
+  -- idle/max_reqs values: those follow ORIGIN_KEEPALIVE_* in detectors.conf
+  -- and update within ~10s, so a once-per-worker line would go stale.
+  arm_keepalive_retry()
   if not pool80_announced then
     pool80_announced = true
-    ngx.log(ngx.WARN, "[cfm_origin_ka] HTTP(80) origin pooling active ",
-            "(idle=", idle, "s max_reqs=", reqs, ")")
+    ngx.log(ngx.WARN, "[cfm_origin_ka] HTTP(80) origin pooling active")
   end
 end
 
@@ -178,30 +208,6 @@ end
 -- policy before it is established, so the log can never claim "pooled" on an
 -- engine that turned out unable to pool.
 local announced_443 = false
-
--- Arm exactly ONE keepalive-race retry on the FIRST attempt of a POOLED
--- (port 80) request. balancer_by_lua disables nginx's default upstream
--- retries, so without this a pooled connection Apache closed in the idle
--- window turns into a client-facing 502; one retry re-runs the balancer on a
--- fresh connection. get_last_failure() is nil only on the initial attempt, so
--- retries never stack. NOT armed when there is no pool to race against: the
--- unpooled 443 path never calls this, and once port 80 has degraded to
--- per-request (keepalive_broken) we bail here too — otherwise a blanket retry
--- would just double connect load against an already-failing origin during an
--- outage. (A keepalive-broken worker only learns it is broken inside
--- enable_pool(), so at most the very first port-80 request arms one retry
--- before the latch takes; every request after that bails here.)
-local function arm_keepalive_retry()
-  if keepalive_broken then return end
-  if type(balancer.get_last_failure) == "function"
-     and type(balancer.set_more_tries) == "function"
-     and balancer.get_last_failure() == nil then
-    local ok, err = balancer.set_more_tries(1)
-    if not ok then
-      ngx.log(ngx.WARN, "[cfm_origin_ka] set_more_tries failed: ", tostring(err))
-    end
-  end
-end
 
 -- balance(port) — entry point called from the balancer_by_lua_block of
 -- the cfm_origin_http (80) / cfm_origin_https (443) upstreams.
@@ -234,8 +240,8 @@ function _M.balance(port)
   end
 
   -- Plain-HTTP origin (port 80): Host-header vhost routing, always safe to
-  -- pool per (addr, port).
-  arm_keepalive_retry()
+  -- pool per (addr, port). enable_pool() arms the keepalive-race retry itself,
+  -- but only on the request it actually pools.
   if not set_peer(addr, port) then
     return ngx.exit(ngx.ERROR)
   end

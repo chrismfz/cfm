@@ -167,8 +167,9 @@ When the knob is on, each worker logs its effective state once per worker,
 the first time it routes a request on each port — two separate lines, so a
 worker serving only one port logs only one of them:
 
-* `[cfm_origin_ka] HTTP(80) origin pooling active (idle=Ns max_reqs=M)` on
-  the first port-80 request — or, on the degraded tier above, a WARN naming
+* `[cfm_origin_ka] HTTP(80) origin pooling active` on the first port-80
+  request (the line confirms pooling is on; the live idle/max_reqs follow
+  `ORIGIN_KEEPALIVE_*` in detectors.conf) — or, on the degraded tier above, a WARN naming
   the reason: `engine lacks balancer.enable_keepalive` (API absent) or
   `enable_keepalive raised (…) — … degrading to per-request` (FFI shim
   present but throws), and `enable_keepalive failed: …` (a non-raising error
