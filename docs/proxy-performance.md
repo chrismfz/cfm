@@ -106,32 +106,54 @@ not, until safe host-keyed 443 pooling lands (see the box).
 > connection, so a cross-vhost reuse makes Apache answer `AH02032 …
 > 421 Misdirected Request` on shared-IP vhosts.
 >
-> lua-resty-core's `balancer.enable_keepalive` keys its pool by the **peer
-> address** only — the default pool name is `"<peer_addr>:<port>"` (e.g.
-> `"84.54.49.35:443"`), which does **not** include the SNI. The third
-> `host` argument to `set_current_peer` sets the SNI for the *handshake*
-> but does **not** change the pool name (and lua-resty-core advises against
-> combining that arg with `proxy_ssl_name`). An earlier version of
-> `cfm_origin_ka.lua` assumed the 3-arg form keyed the pool by host; it does
-> not. On `server.speedhost.gr` (OpenResty 1.31.1.1 → Apache) that produced
-> ~17.5 k `status=421` responses over a week — warm (`uct=0.000`)
-> connections carrying the wrong SNI, across dozens of vhosts, hitting real
-> browsers and Googlebot/Bingbot alike.
+> On `server.speedhost.gr` (OpenResty 1.31.1.1 → Apache) this produced
+> ~17.5 k `status=421` responses over a week — warm (`uct=0.000`) connections
+> carrying the wrong SNI, across dozens of vhosts, hitting real browsers and
+> Googlebot/Bingbot alike — all through the shared `cfm_origin_https` named
+> upstream.
 >
-> The fix does not depend on any version-specific pool-naming behaviour: 443
-> is simply not pooled. The knob is therefore safe to run fleet-wide as-is;
-> the safe HTTP (port 80) origin pool is retained (see the scope note above
-> for what that actually covers).
+> **There are three independent reuse layers, and all three must be off on 443
+> — or the invariant is unproven.** The first is the one an audit for a
+> `keepalive` *directive* misses, because it is a runtime *default*:
 >
-> **Future (not yet implemented):** safe 443 pooling is possible by giving
-> each pool a host-scoped name (fold the SNI into the `pool` option of
-> `set_current_peer`) so `hostA` and `hostB` never share a pool. Because the
-> exact API shape is version-specific and a wrong assumption here is what
-> caused this incident, it must be gated behind an integration self-test
-> that deliberately drives `hostA` → pooled connection → immediate `hostB`
-> request against the **deployed** engine and proves the second request does
-> **not** reuse `hostA`'s TLS connection (assert `uct > 0` for `hostB`), not
-> merely a unit test with a stubbed balancer.
+> 1. **nginx-core native upstream keepalive.** As of **nginx 1.29.7** (this
+>    OpenResty ships nginx 1.31.1) it is **ON by default** — `keepalive 32
+>    local` — and is **SNI-blind**: it reuses by peer `IP:port` and ignores the
+>    SNI extension (lua-resty-core's own docs: native reuse "only considers the
+>    IP and port … fails to consider the SNI extension"). The `local` parameter
+>    separates pools only by *location*, **not** by `$host`, so every vhost
+>    routed through one origin `location` shares the pool. This is the most
+>    likely layer behind the incident. Disabled with **`keepalive 0`** on both
+>    `cfm_origin_*` upstreams. (Angie keeps native keepalive off by default, so
+>    `keepalive 0` is an explicit no-op there — kept for a robust,
+>    engine-independent invariant.)
+> 2. **The Lua balancer keepalive** (`ngx.balancer.enable_keepalive`) — simply
+>    never called for 443.
+> 3. **TLS session reuse** (`proxy_ssl_session_reuse`, default **on**). The
+>    upstream SSL-session cache is peer-keyed, not SNI-keyed, so a resumed
+>    session can carry hostA's TLS identity into a hostB request (nginx docs:
+>    "If the errors 'digest check failed' appear … try disabling session
+>    reuse"). Disabled with **`proxy_ssl_session_reuse off`** on every 443
+>    origin location.
+>
+> With 1 + 2 + 3 off, every 443 request is a **fresh TCP + fresh TLS/SNI**
+> (`proxy_ssl_name $host`) — provably SNI-safe, independent of engine version.
+> An earlier revision of this fix relied only on not calling
+> `enable_keepalive`; that left the default-on **native** pool active and did
+> **not** actually stop the 421s. The knob is now safe to run fleet-wide.
+>
+> **Future (not yet implemented):** safe 443 pooling is possible only if the
+> pool key includes the SNI (e.g. a host-scoped `pool` name for the Lua
+> balancer, with native keepalive kept off). Because a wrong assumption here is
+> exactly what caused this incident, it MUST be gated behind an integration
+> self-test against the **deployed** engine — two strict backend vhosts on one
+> IP with different TLS identities, driven `hostA → hostB → hostA → hostB …`,
+> asserting for **every** request: backend-observed SNI == HTTP `Host`, no TCP
+> connection crosses `Host`, no TLS session crosses SNI, `uct > 0`, and zero
+> `421`. A stubbed-balancer unit test (like the 38 in
+> `scripts/tests/cfm_origin_ka_test.lua`) proves the Lua state machine, **not**
+> this runtime invariant — the incident is precisely why that distinction
+> matters.
 
 > **Deploying a change to `cfm_origin_ka.lua` needs an edge reload.** The
 > balancer module is `require`d and `lua_code_cache` is on (the default), so

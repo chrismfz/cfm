@@ -16,12 +16,16 @@
 --     proxy_ssl_name $host at the location level, not from the balancer.
 --   * port 80 IS pooled (enable_keepalive) with the bridge-config idle/
 --     max_reqs knobs (built-in defaults when absent).
+--   * dispatch is fail-safe: ONLY port 80 pools; 443 and any other port
+--     default to unpooled (correctness-first), so a future balance(<port>)
+--     can't silently pool a TLS origin.
 --   * the keepalive-race retry arms set_more_tries(1) on the first POOLED
---     (port 80) attempt only — never on the unpooled 443 path.
+--     (port 80) attempt only — never on any unpooled path.
 --   * each path reports its TRUE effective state once per worker at WARN
---     (visible at the default error_log level): 443 "per-request TLS by
---     design", 80 "origin pooling active" (or a degraded WARN when the
---     engine lacks enable_keepalive).
+--     (visible at the default error_log level): unpooled ports "origin port
+--     <n>: per-request", 80 "origin pooling active" (or a degraded WARN when
+--     the engine lacks enable_keepalive, or a tier-2 WARN when it pools but
+--     can't arm the retry).
 
 package.path = package.path .. ";configs/lua/?.lua;./?.lua"
 
@@ -98,7 +102,7 @@ check(#calls.keepalive == 0,
       "443: NEVER pooled — enable_keepalive not called (no cross-SNI reuse)")
 check(#calls.more_tries == 0,
       "443: keepalive-race retry NOT armed on the unpooled path")
-check(log_matching("HTTPS(443) origin: per-request TLS by") == 1,
+check(log_matching("origin port 443: per-request") == 1,
       "visibility: 443 per-request policy WARN emitted once on first 443 balance")
 
 ka.balance(80)
@@ -276,8 +280,55 @@ check(exited == ngx.ERROR, "443: a hard set_current_peer failure exits with ngx.
 check(log_matching("set_current_peer(203.0.113.7:443) failed") == 1,
       "443: the set_current_peer failure is logged")
 
+-- ── Scenario 7: fail-safe dispatch — only port 80 pools ─────────────────────
+-- Dispatch is `if port == 80 then pool else unpooled`, NOT a `port == 443`
+-- special case. So any OTHER port a future caller might pass (e.g. 8443) must
+-- default to unpooled: never enable_keepalive, never set_more_tries. This
+-- prevents a new balance(<port>) from silently pooling a TLS origin.
+package.loaded["cfm_origin_ka"] = nil
+local s7 = { keepalive = 0, more_tries = 0, set_peer = {} }
+package.loaded["ngx.balancer"] = {
+  set_current_peer = function(addr, port)
+    s7.set_peer[#s7.set_peer + 1] = port; return true
+  end,
+  enable_keepalive = function() s7.keepalive = s7.keepalive + 1; return true end,
+  set_more_tries = function() s7.more_tries = s7.more_tries + 1; return true end,
+  get_last_failure = function() return nil end,
+}
+local ka7 = require "cfm_origin_ka"
+logs = {}
+ka7.balance(8443)   -- some future TLS port
+check(s7.keepalive == 0, "fail-safe: a non-80 port is NEVER pooled (no enable_keepalive)")
+check(s7.more_tries == 0, "fail-safe: a non-80 port never arms set_more_tries")
+check(s7.set_peer[1] == 8443, "fail-safe: the peer is still set (request served, just unpooled)")
+check(log_matching("origin port 8443: per-request") == 1,
+      "fail-safe: the unpooled announce names the actual port")
+-- Port 80 through the SAME worker still pools (dispatch didn't break 80).
+ka7.balance(80)
+check(s7.keepalive == 1, "fail-safe: port 80 still pools alongside the unpooled default")
+
+-- ── Scenario 8: pooled but keepalive-race retry capability missing (tier 2) ─
+-- enable_keepalive works (port 80 pools) but the engine lacks get_last_failure/
+-- set_more_tries. arm_keepalive_retry() can't arm, so a stale pooled connection
+-- could 502 with no retry — a distinct middle tier that must be surfaced with
+-- its own once-per-worker WARN, not hidden behind "pooling active".
+package.loaded["cfm_origin_ka"] = nil
+package.loaded["ngx.balancer"] = {
+  set_current_peer = function(addr, port) return true end,
+  enable_keepalive = function() return true end,
+  -- get_last_failure / set_more_tries intentionally ABSENT
+}
+local ka8 = require "cfm_origin_ka"
+logs = {}
+ka8.balance(80)
+ka8.balance(80)
+check(log_matching("keepalive-race retry is unavailable") == 1,
+      "tier 2: pooled-without-retry warns exactly once/worker")
+check(log_matching("HTTP(80) origin pooling active") == 1,
+      "tier 2: pooling-active is still reported (it IS pooled, just no retry)")
+
 if failures > 0 then
   print(string.format("%d failure(s)", failures))
   os.exit(1)
 end
-print("OK: cfm_origin_ka never pools HTTPS(443), pools HTTP(80), arms retries only on 80, latches keepalive failures, and reports each path's true state")
+print("OK: cfm_origin_ka pools ONLY port 80 (fail-safe default), never pools 443/other, arms retries only on a real pool, latches/throttles keepalive failures, and reports each path's true state")

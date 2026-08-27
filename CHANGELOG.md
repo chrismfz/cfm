@@ -19,34 +19,46 @@ back-filled here — see the git/PR history for that period.
 
 ### Fixed
 - **Origin keepalive (`ORIGIN_KEEPALIVE=1`) no longer causes Apache `421
-  Misdirected Request` on shared-vhost HTTPS.** The edge balancer
-  (`cfm_origin_ka.lua`) assumed the 3-arg `set_current_peer(addr, port,
-  host)` form both set the upstream SNI *and* keyed the keepalive pool by
-  host. It does not: lua-resty-core keys the pool by peer address only (pool
-  name `"<peer_addr>:<port>"`), and the `host` arg only sets the handshake
-  SNI. So a pooled 443 connection handshaked with `SNI=hostA` was reused for
-  a request to `hostB` on the same origin IP, and Apache answered `AH02032 …
-  421 Misdirected Request`. On one production box (OpenResty 1.31.1.1 →
-  Apache) this produced ~17.5 k `status=421` over a week, hitting real
-  browsers and search-engine crawlers across dozens of vhosts. **Fix: HTTPS
-  (port 443) origin connections are never pooled** — each 443 request gets a
-  per-request TLS connection whose SNI comes from `proxy_ssl_name $host`
-  (the lua-resty-core-sanctioned way; it advises against combining that arg
-  with `proxy_ssl_name` anyway). HTTP (port 80) origin pooling is unchanged,
-  but note its scope: cfm.lua routes to the origin by the client's scheme, so
-  HTTPS clients (the bulk of traffic on a TLS-terminated panel) now take the
-  per-request 443 path — the retained port-80 pool mainly benefits plain-HTTP
-  origin requests (HTTP→HTTPS redirects, ACME/`.well-known` DCV, plain-HTTP
-  sites). The knob is now safe to run fleet-wide; operators do **not** need to
-  disable it (doing so would also drop the safe HTTP pooling). The upstream
-  TLS handshake cost returns on 443 until safe host-keyed 443 pooling lands.
-  **Deploying this fix needs an edge reload** (`openresty -s reload` /
+  Misdirected Request` on shared-vhost HTTPS.** Routing allow-traffic through
+  the shared `cfm_origin_https` named upstream let a backend TLS connection
+  handshaked with `SNI=hostA` be reused for a request to `hostB` on the same
+  origin IP — Apache answers `AH02032 … 421 Misdirected Request`. On one
+  production box (OpenResty 1.31.1.1 → Apache) this produced ~17.5 k
+  `status=421` over a week, on warm (`uct=0.000`) connections carrying the
+  wrong SNI, across dozens of vhosts hitting real browsers and crawlers alike.
+  Backend connection/TLS reuse can come from **three** independent layers, and
+  the first was the trap that an audit for a `keepalive` *directive* misses:
+  1. **nginx-core's native upstream keepalive — ON BY DEFAULT since nginx
+     1.29.7** (this OpenResty ships nginx 1.31.1), `keepalive 32 local`, and
+     **SNI-blind**: it reuses by peer IP:port and ignores SNI, and `local`
+     separates pools only by *location*, not by `$host`. An earlier revision of
+     this fix that only skipped the *Lua* balancer pool left this default-on
+     native pool active and did **not** stop the 421s.
+  2. the Lua balancer keepalive (`ngx.balancer.enable_keepalive`).
+  3. `proxy_ssl_session_reuse` (default on) — the upstream SSL-session cache is
+     peer-keyed, not SNI-keyed, so a resumed session can carry hostA's TLS
+     identity into a hostB request.
+  **Fix: HTTPS (port 443) is prohibited from reuse at every layer** — `keepalive
+  0` on both `cfm_origin_*` upstreams (disables the native pool), the Lua
+  balancer never pools 443, and `proxy_ssl_session_reuse off` on every 443
+  origin location — so each 443 request is a fresh TCP + fresh TLS/SNI
+  (`proxy_ssl_name $host`). Port 80 stays pooled and is now the **only** pooled
+  port (Lua-owned); the balancer's dispatch is fail-safe (`port == 80` pools,
+  every other port defaults to unpooled), so a future origin port can't
+  silently pool a TLS backend. Scope of the retained benefit: cfm.lua routes to
+  the origin by the client's scheme, so HTTPS clients take the per-request 443
+  path — the port-80 pool mainly helps plain-HTTP origin traffic (HTTP→HTTPS
+  redirects, ACME/`.well-known` DCV, plain-HTTP sites); the bulk 443 handshake
+  saving is given up until a **proven** SNI-keyed 443 pool lands (gated by a
+  two-vhost same-IP integration test on the deployed engine, not a unit test).
+  The knob is now safe to run fleet-wide; operators do **not** need to disable
+  it. **Deploying this fix needs an edge reload** (`openresty -s reload` /
   `angie -s reload`): the balancer module is `require`d and `lua_code_cache`
   is on, so running workers keep the old code until fresh workers spawn —
   unlike toggling `ORIGIN_KEEPALIVE` itself, which the edge re-reads within
-  ~10 s with no reload. To stop the 421s *immediately* without waiting for a
-  reload, set `ORIGIN_KEEPALIVE = 0` (rolls back within ~10 s), then deploy +
-  reload the code fix and re-enable. See `docs/proxy-performance.md`.
+  ~10 s with no reload. To stop the 421s *immediately* without a reload, set
+  `ORIGIN_KEEPALIVE = 0` (rolls back within ~10 s), then deploy + reload the
+  code fix and re-enable. See `docs/proxy-performance.md`.
 - **Origin keepalive activity is now visible in error.log.** The module's
   diagnostic messages were logged at `NOTICE`, but `error_log` runs at
   `warn`, so they were never written — operators grepping `[cfm_origin_ka]`

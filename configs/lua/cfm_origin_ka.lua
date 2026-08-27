@@ -22,46 +22,57 @@
 -- this module sets the real peer per request ($server_addr keeps
 -- dedicated-IP routing intact):
 --
---   * port 80  — POOLED. HTTP/1.1 keepalive + Host-header vhost routing is
---     standard; Apache serves different vhosts over ONE connection
---     natively, so reusing a pooled HTTP connection across vhosts is always
---     correct.
---   * port 443 — NEVER POOLED. Each request gets its own upstream TLS
---     connection; the SNI comes from `proxy_ssl_name $host` at the location
---     level. Functionally identical to the pre-keepalive 443 behaviour.
+--   * port 80  — POOLED (the ONLY pooled port). HTTP/1.1 keepalive +
+--     Host-header vhost routing is standard; Apache serves different vhosts
+--     over ONE connection natively, so reusing a pooled HTTP connection across
+--     vhosts is always correct. The Lua balancer owns this pool.
+--   * everything else (443 today, any port added later) — NEVER POOLED, at
+--     any layer. Each request gets its own upstream connection; on 443 the SNI
+--     comes from `proxy_ssl_name $host`. This is the fail-safe DEFAULT branch,
+--     not a `port==443` special case, so a new port can never silently pool a
+--     TLS origin.
 --
--- WHY 443 IS NOT POOLED  (the 421 incident — 2026-08)
+-- WHY HTTPS(443) IS NEVER POOLED  (the 421 incident — 2026-08)
 --
--- An HTTPS origin keepalive pool is only safe if a connection handshaked
--- with SNI=hostA is NEVER reused for a request to hostB: the SNI is baked
--- into the established TLS connection at handshake time and cannot change,
--- so a cross-vhost reuse makes Apache answer `AH02032 ... 421 Misdirected
--- Request` (SNI/Host mismatch) on shared-IP vhosts.
+-- An HTTPS origin keepalive pool is only safe if a connection handshaked with
+-- SNI=hostA is NEVER reused for a request to hostB: the SNI is baked into the
+-- established TLS connection at handshake time, so a cross-vhost reuse makes
+-- Apache answer `AH02032 ... 421 Misdirected Request` on shared-IP vhosts.
+-- Production evidence on OpenResty 1.31.1.1 → Apache: thousands of 421s across
+-- dozens of vhosts sharing one origin IP, on warm (uct=0.000) connections
+-- carrying the wrong SNI, all through the shared `cfm_origin_https` upstream.
 --
--- lua-resty-core's `balancer.enable_keepalive` keys its connection pool by
--- the PEER ADDRESS only: the default pool name is "<peer_addr>:<port>"
--- (e.g. "203.0.113.7:443"), which does NOT include the SNI. The third
--- `host` argument to `set_current_peer` sets the SNI for the *handshake*
--- but does NOT alter the pool name — and lua-resty-core advises against
--- combining that `host` arg with `proxy_ssl_name` anyway. This module
--- previously (wrongly) assumed the 3-arg form keyed the pool by host;
--- production evidence on OpenResty 1.31.1.1 proved it does not — thousands
--- of 421s across dozens of vhosts sharing one Apache origin IP, warm
--- (uct=0.000) connections carrying the wrong SNI.
+-- There are THREE independent connection/TLS reuse layers, and ALL THREE must
+-- be off on 443 or the invariant is unproven:
+--   1. nginx-core NATIVE upstream keepalive. As of nginx 1.29.7 (this
+--      OpenResty ships nginx 1.31.1) it is ON BY DEFAULT (`keepalive 32
+--      local`) and SNI-BLIND — it reuses by peer IP:port and ignores SNI
+--      (lua-resty-core: native reuse "only considers the IP and port ... fails
+--      to consider the SNI extension"). `local` separates only by *location*,
+--      not by $host, so every vhost through one origin location shares the
+--      pool. This is the most likely layer behind the incident — and the one a
+--      `keepalive`-directive audit misses, because it is a *default*, not a
+--      directive. Disabled with `keepalive 0` on both cfm_origin_* upstreams.
+--   2. The Lua balancer keepalive (`balancer.enable_keepalive`) — simply never
+--      called for 443 here.
+--   3. TLS session reuse (`proxy_ssl_session_reuse`, default on). The upstream
+--      SSL session cache is peer-keyed, not SNI-keyed, so a resumed session can
+--      carry hostA's TLS identity into a hostB request. Disabled with
+--      `proxy_ssl_session_reuse off` on every 443 origin location.
+-- With 1+2+3 off, 443 is "fresh TCP + fresh TLS/SNI per request" — provably
+-- SNI-safe. (An earlier version of this module relied ONLY on not calling
+-- enable_keepalive, which left the default-on native pool active and did NOT
+-- actually prevent 443 reuse — the lesson that a runtime *default* is as
+-- dangerous as an explicit directive.)
 --
--- Rather than depend on an unverified, version-specific pool-naming API to
--- fold the SNI into the pool key, HTTPS origin connections are simply not
--- pooled. The entire cross-SNI 421 class is gone and the knob stays safe to
--- run fleet-wide. Note the scope of what pooling remains: cfm.lua's
--- origin_pass_for() routes by the CLIENT scheme, so an HTTPS client goes to
--- cfm_origin_https:443 (now per-request) and an HTTP client to
--- cfm_origin_http:80 (pooled). On a TLS-everywhere panel most traffic is
--- HTTPS, so the retained port-80 pool mainly benefits plain-HTTP origin
--- requests (HTTP→HTTPS redirects, ACME/.well-known HTTP DCV, plain-HTTP
--- sites) — the bulk 443 handshake saving is given up until safe host-keyed
--- 443 pooling lands. docs/proxy-performance.md records that (future) path
--- (a per-host `pool` name proven by an integration test against the deployed
--- engine).
+-- Scope of the retained port-80 pool: cfm.lua's origin_pass_for() routes by the
+-- CLIENT scheme, so HTTPS clients go to cfm_origin_https:443 (per-request) and
+-- HTTP clients to cfm_origin_http:80 (pooled). On a TLS-everywhere panel most
+-- traffic is HTTPS, so the port-80 pool mainly benefits plain-HTTP origin
+-- requests (redirects, ACME/.well-known DCV, plain-HTTP sites); the bulk 443
+-- handshake saving is given up until a proven SNI-keyed 443 pool lands
+-- (docs/proxy-performance.md — which must be gated by a two-vhost same-IP
+-- integration test on the deployed engine, not a stubbed unit test).
 --
 -- FAIL-SAFETY
 --
@@ -111,6 +122,7 @@ local keepalive_broken = false
 local pool80_announced = false
 local ka_fail_warned = false
 local more_tries_warned = false
+local retry_unavailable_warned = false
 
 -- Arm exactly ONE keepalive-race retry on the FIRST attempt of a request that
 -- is actually being POOLED. balancer_by_lua disables nginx's default upstream
@@ -125,10 +137,21 @@ local more_tries_warned = false
 -- degradation WARNs, so it can't flood error.log at request rate.
 local function arm_keepalive_retry()
   if type(balancer.get_last_failure) ~= "function"
-     or type(balancer.set_more_tries) ~= "function"
-     or balancer.get_last_failure() ~= nil then
+     or type(balancer.set_more_tries) ~= "function" then
+    -- Pooled, but this engine cannot arm a keepalive-race retry: a pooled
+    -- connection Apache closed in the idle window will surface as a 502 with no
+    -- retry. Surface this middle tier (pooled, no retry) with its own
+    -- once-per-worker WARN so it does not hide behind "pooling active".
+    if not retry_unavailable_warned then
+      retry_unavailable_warned = true
+      ngx.log(ngx.WARN, "[cfm_origin_ka] HTTP(80) pooling active but the ",
+              "keepalive-race retry is unavailable (engine lacks ",
+              "get_last_failure/set_more_tries) — a stale pooled connection may ",
+              "surface as a 502 for this worker")
+    end
     return
   end
+  if balancer.get_last_failure() ~= nil then return end   -- retry attempt: never stack
   local ok, err = balancer.set_more_tries(1)
   if not ok and not more_tries_warned then
     more_tries_warned = true
@@ -203,11 +226,11 @@ end
 -- had no way to confirm from logs what this module was actually doing, the
 -- blind spot that hid the 421 root cause for a week. Each path reports its
 -- TRUE effective state exactly once per worker at WARN: port 80 from
--- enable_pool() above (pooled, or degraded), port 443 from the 443 branch
--- below (always per-request by design). We deliberately never pre-announce a
--- policy before it is established, so the log can never claim "pooled" on an
--- engine that turned out unable to pool.
-local announced_443 = false
+-- enable_pool() above (pooled, or degraded), the unpooled ports (443 and any
+-- other) from the default branch below (always per-request by design). We
+-- deliberately never pre-announce a policy before it is established, so the log
+-- can never claim "pooled" on an engine that turned out unable to pool.
+local announced_unpooled = false
 
 -- balance(port) — entry point called from the balancer_by_lua_block of
 -- the cfm_origin_http (80) / cfm_origin_https (443) upstreams.
@@ -220,32 +243,35 @@ function _M.balance(port)
   local addr = ngx.var.server_addr
   if not addr or addr == "" then addr = "127.0.0.1" end
 
-  if port == 443 then
-    -- SNI-safe per-request connection: set the peer but do NOT pool. Each
-    -- 443 request gets its own connection whose SNI is proxy_ssl_name $host
-    -- — no cross-vhost reuse is possible, so Apache never sees an SNI/Host
-    -- mismatch. Identical to the pre-keepalive behaviour.
-    if not announced_443 then
-      announced_443 = true
-      ngx.log(ngx.WARN, "[cfm_origin_ka] HTTPS(443) origin: per-request TLS by ",
-              "design (SNI from proxy_ssl_name $host; not pooled — backend ",
-              "keepalive pools key on peer addr:port, not SNI, so pooling 443 ",
-              "would risk Apache 421 Misdirected Request). ",
-              "See docs/proxy-performance.md.")
-    end
-    if not set_peer(addr, 443) then
+  -- Fail-safe dispatch: port 80 is the ONLY port we pool. HTTP/1.1 keepalive +
+  -- Host-header vhost routing is safe to reuse across vhosts on one connection,
+  -- so pooling it is a pure optimisation. enable_pool() arms the keepalive-race
+  -- retry itself, only on the request it actually pools.
+  if port == 80 then
+    if not set_peer(addr, 80) then
       return ngx.exit(ngx.ERROR)
     end
+    enable_pool()
     return
   end
 
-  -- Plain-HTTP origin (port 80): Host-header vhost routing, always safe to
-  -- pool per (addr, port). enable_pool() arms the keepalive-race retry itself,
-  -- but only on the request it actually pools.
+  -- EVERYTHING ELSE (443 today, and any port added later) is correctness-first:
+  -- a per-request connection, never pooled. This is deliberately the default
+  -- branch, not a `port == 443` special case, so a future balance(<newport>)
+  -- can never silently pool a TLS origin. SNI for 443 comes from
+  -- proxy_ssl_name $host at the location level; nginx-core's native pool is
+  -- disabled on these upstreams (keepalive 0) and proxy_ssl_session_reuse is
+  -- off, so no layer can reuse a 443 connection or TLS session across vhosts.
+  if not announced_unpooled then
+    announced_unpooled = true
+    ngx.log(ngx.WARN, "[cfm_origin_ka] origin port ", port, ": per-request ",
+            "connection, never pooled (SNI-safe by design). Pooling a TLS ",
+            "origin across vhosts on a shared IP risks Apache 421 Misdirected ",
+            "Request. See docs/proxy-performance.md.")
+  end
   if not set_peer(addr, port) then
     return ngx.exit(ngx.ERROR)
   end
-  enable_pool()
 end
 
 return _M
