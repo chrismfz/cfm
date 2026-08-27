@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.27
+
 ### Changed
 - **`edge_health`: the 421 fingerprint is now recency-aware.** Because an edge
   restart/reload wipes the upstream keepalive pool, a cross-SNI 421 can only
@@ -29,8 +33,6 @@ back-filled here — see the git/PR history for that period.
   it scrolls out; no parseable timestamp ⇒ fail-safe `critical`. Evidence gains
   `recent_warm_421`, `newest_warm_421_age_sec`, and `fresh_window_sec`. The
   engine-version-trap check keys its `critical` on the same *live* signal.
-
-## 2026.08.27
 
 ### Added
 - **`edge_health` — a focused edge origin-hop correctness MCP tool** (read-only,
