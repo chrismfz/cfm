@@ -80,12 +80,23 @@ Once on, cfm.lua's `origin_pass_for()` routes allow-traffic through the
 `cfm_origin_ka.lua` (balancer_by_lua) sets the peer to `$server_addr`
 per request — dedicated-IP routing is preserved:
 
+`origin_pass_for()` picks the upstream by the **client's scheme**: an HTTPS
+client is proxied to `cfm_origin_https:443`, an HTTP client to
+`cfm_origin_http:80`.
+
 * **Port 80** — pooled. HTTP/1.1 keepalive + Host-header vhost routing is
   standard Apache behaviour: one connection serves many vhosts, so reuse is
   always correct.
 * **Port 443** — **never pooled** (per-request TLS connection, SNI from
   `proxy_ssl_name $host`). See the box below for why. Only the upstream TLS
   handshake returns on 443; everything else the edge does is unchanged.
+
+Because the split is by client scheme, on a TLS-everywhere panel **most**
+traffic is HTTPS and therefore takes the per-request 443 path; the retained
+port-80 pool mainly benefits plain-HTTP origin requests (HTTP→HTTPS
+redirects, ACME/`.well-known` HTTP DCV, plain-HTTP sites). Don't assume the
+knob still eliminates the handshake for your HTTPS document traffic — it does
+not, until safe host-keyed 443 pooling lands (see the box).
 
 > ### Why HTTPS origin connections are not pooled (the 421 incident, 2026-08)
 >
@@ -99,8 +110,8 @@ per request — dedicated-IP routing is preserved:
 > address** only — the default pool name is `"<peer_addr>:<port>"` (e.g.
 > `"84.54.49.35:443"`), which does **not** include the SNI. The third
 > `host` argument to `set_current_peer` sets the SNI for the *handshake*
-> but does **not** change the pool name (and lua-resty-core explicitly
-> forbids combining that arg with `proxy_ssl_name`). An earlier version of
+> but does **not** change the pool name (and lua-resty-core advises against
+> combining that arg with `proxy_ssl_name`). An earlier version of
 > `cfm_origin_ka.lua` assumed the 3-arg form keyed the pool by host; it does
 > not. On `server.speedhost.gr` (OpenResty 1.31.1.1 → Apache) that produced
 > ~17.5 k `status=421` responses over a week — warm (`uct=0.000`)
@@ -108,9 +119,9 @@ per request — dedicated-IP routing is preserved:
 > browsers and Googlebot/Bingbot alike.
 >
 > The fix does not depend on any version-specific pool-naming behaviour: 443
-> is simply not pooled. The knob is therefore safe to run fleet-wide as-is —
-> HTTP (80) pooling, which covers the HTML document path on edge-terminated
-> TLS, is retained.
+> is simply not pooled. The knob is therefore safe to run fleet-wide as-is;
+> the safe HTTP (port 80) origin pool is retained (see the scope note above
+> for what that actually covers).
 >
 > **Future (not yet implemented):** safe 443 pooling is possible by giving
 > each pool a host-scoped name (fold the SNI into the `pool` option of
@@ -157,16 +168,22 @@ the first time it routes a request on each port — two separate lines, so a
 worker serving only one port logs only one of them:
 
 * `[cfm_origin_ka] HTTP(80) origin pooling active (idle=Ns max_reqs=M)` on
-  the first port-80 request (or, on the degraded tier above,
-  `[cfm_origin_ka] engine lacks balancer.enable_keepalive; …`);
+  the first port-80 request — or, on the degraded tier above, a WARN naming
+  the reason: `engine lacks balancer.enable_keepalive` (API absent) or
+  `enable_keepalive raised (…) — … degrading to per-request` (FFI shim
+  present but throws), and `enable_keepalive failed: …` (a non-raising error
+  return, warned once/worker);
 * `[cfm_origin_ka] HTTPS(443) origin: per-request TLS by design …` on the
   first port-443 request.
 
 These are intentionally at WARN, not NOTICE: `error_log` runs at `warn`, so
 a NOTICE would never be written — that log blind spot is what hid this
-incident's root cause for a week. After enabling, `grep '\[cfm_origin_ka\]'
-error.log` to confirm the module is active and see which tier the box
-landed on.
+incident's root cause for a week. **They are expected, once-per-worker
+activation lines, not error conditions** — a healthy box re-emits them on
+every proxy reload (one set per worker), so exclude `[cfm_origin_ka]` from
+any warn-count alerting rather than paging on them. After enabling,
+`grep '\[cfm_origin_ka\]' error.log` to confirm the module is active and see
+which tier the box landed on.
 
 Prerequisites & rollout:
 

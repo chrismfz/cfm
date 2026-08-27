@@ -42,7 +42,7 @@
 -- the PEER ADDRESS only: the default pool name is "<peer_addr>:<port>"
 -- (e.g. "203.0.113.7:443"), which does NOT include the SNI. The third
 -- `host` argument to `set_current_peer` sets the SNI for the *handshake*
--- but does NOT alter the pool name — and lua-resty-core explicitly forbids
+-- but does NOT alter the pool name — and lua-resty-core advises against
 -- combining that `host` arg with `proxy_ssl_name` anyway. This module
 -- previously (wrongly) assumed the 3-arg form keyed the pool by host;
 -- production evidence on OpenResty 1.31.1.1 proved it does not — thousands
@@ -51,12 +51,17 @@
 --
 -- Rather than depend on an unverified, version-specific pool-naming API to
 -- fold the SNI into the pool key, HTTPS origin connections are simply not
--- pooled. The upstream TLS handshake cost returns on 443, but HTTP (80)
--- pooling — the HTML document path on panels that terminate TLS at the edge
--- — is retained, and the entire cross-SNI 421 class is gone. The knob stays
--- safe to run fleet-wide. docs/proxy-performance.md records the (future)
--- path to safe host-scoped 443 pooling (a per-host `pool` name proven by an
--- integration test against the deployed engine).
+-- pooled. The entire cross-SNI 421 class is gone and the knob stays safe to
+-- run fleet-wide. Note the scope of what pooling remains: cfm.lua's
+-- origin_pass_for() routes by the CLIENT scheme, so an HTTPS client goes to
+-- cfm_origin_https:443 (now per-request) and an HTTP client to
+-- cfm_origin_http:80 (pooled). On a TLS-everywhere panel most traffic is
+-- HTTPS, so the retained port-80 pool mainly benefits plain-HTTP origin
+-- requests (HTTP→HTTPS redirects, ACME/.well-known HTTP DCV, plain-HTTP
+-- sites) — the bulk 443 handshake saving is given up until safe host-keyed
+-- 443 pooling lands. docs/proxy-performance.md records that (future) path
+-- (a per-host `pool` name proven by an integration test against the deployed
+-- engine).
 --
 -- FAIL-SAFETY
 --
@@ -104,6 +109,7 @@ end
 -- instead of re-checking (and re-warning) every request.
 local keepalive_broken = false
 local pool80_announced = false
+local ka_fail_warned = false
 
 local function enable_pool()
   if keepalive_broken then return end
@@ -128,7 +134,15 @@ local function enable_pool()
     return
   end
   if not ok then
-    ngx.log(ngx.WARN, "[cfm_origin_ka] enable_keepalive failed: ", tostring(err))
+    -- A NON-raising failure return (e.g. a transient "no memory", or an
+    -- engine that reports an error code instead of raising). Do NOT latch —
+    -- the next request may pool fine — but throttle the WARN to once per
+    -- worker so a deterministic failure can't flood error.log at request rate.
+    if not ka_fail_warned then
+      ka_fail_warned = true
+      ngx.log(ngx.WARN, "[cfm_origin_ka] enable_keepalive failed: ", tostring(err),
+              " (warned once/worker; port 80 stays unpooled while this recurs)")
+    end
     return
   end
   -- Success: report the TRUE pooled state once per worker (WARN, so it shows
@@ -142,7 +156,7 @@ end
 
 -- Always the plain 2-arg form: the SNI for 443 comes from proxy_ssl_name
 -- $host at the location level, never from set_current_peer's `host` arg
--- (lua-resty-core forbids setting both, and the arg would not key the pool
+-- (lua-resty-core advises against setting both, and the arg would not key the pool
 -- anyway — see the header comment).
 local function set_peer(addr, port)
   local ok, err = balancer.set_current_peer(addr, port)
@@ -174,7 +188,9 @@ local announced_443 = false
 -- unpooled 443 path never calls this, and once port 80 has degraded to
 -- per-request (keepalive_broken) we bail here too — otherwise a blanket retry
 -- would just double connect load against an already-failing origin during an
--- outage.
+-- outage. (A keepalive-broken worker only learns it is broken inside
+-- enable_pool(), so at most the very first port-80 request arms one retry
+-- before the latch takes; every request after that bails here.)
 local function arm_keepalive_retry()
   if keepalive_broken then return end
   if type(balancer.get_last_failure) == "function"

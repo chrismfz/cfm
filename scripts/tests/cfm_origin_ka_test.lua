@@ -208,6 +208,29 @@ check(log_matching("engine lacks balancer.enable_keepalive") == 1,
 check(log_matching("HTTP(80) origin pooling active") == 0,
       "no false 'pooling active' claim when enable_keepalive is absent")
 
+-- ── Scenario 4b: enable_keepalive returns nil,err (non-raise) → warn once ───
+-- A deterministic error RETURN (not a raise) must NOT latch (the next request
+-- may pool fine) but must NOT flood: the WARN is throttled to once per worker,
+-- and enable_keepalive keeps being attempted every request.
+package.loaded["cfm_origin_ka"] = nil
+local ek_calls_4b = 0
+package.loaded["ngx.balancer"] = {
+  set_current_peer = function(addr, port) return true end,
+  enable_keepalive = function() ek_calls_4b = ek_calls_4b + 1; return nil, "no memory" end,
+  set_more_tries = function() return true end,
+  get_last_failure = function() return nil end,
+}
+local ka4b = require "cfm_origin_ka"
+logs = {}
+ka4b.balance(80)
+ka4b.balance(80)
+ka4b.balance(80)
+check(ek_calls_4b == 3, "non-raise enable_keepalive failure does NOT latch (keeps attempting)")
+check(log_matching("enable_keepalive failed") == 1,
+      "non-raise enable_keepalive failure warns exactly once/worker (no flood)")
+check(log_matching("HTTP(80) origin pooling active") == 0,
+      "no false 'pooling active' claim while enable_keepalive keeps failing")
+
 -- ── Scenario 5: hostless 443 request → unpooled 2-arg set_peer, no error ────
 -- $host may be "" (server_name '_' didn't resolve a Host). 443 is unpooled
 -- either way; the empty host is irrelevant because the balancer never keys or

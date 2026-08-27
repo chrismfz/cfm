@@ -31,19 +31,25 @@ back-filled here — see the git/PR history for that period.
   browsers and search-engine crawlers across dozens of vhosts. **Fix: HTTPS
   (port 443) origin connections are never pooled** — each 443 request gets a
   per-request TLS connection whose SNI comes from `proxy_ssl_name $host`
-  (the lua-resty-core-sanctioned way; it forbids combining that arg with
-  `proxy_ssl_name` anyway). HTTP (port 80) pooling — the edge-terminated
-  HTML document path — is unchanged. The knob is now safe to run fleet-wide;
-  operators do **not** need to disable it (doing so would also drop the safe
-  HTTP pooling). Only the upstream TLS handshake cost returns on 443. See
-  `docs/proxy-performance.md`.
+  (the lua-resty-core-sanctioned way; it advises against combining that arg
+  with `proxy_ssl_name` anyway). HTTP (port 80) origin pooling is unchanged,
+  but note its scope: cfm.lua routes to the origin by the client's scheme, so
+  HTTPS clients (the bulk of traffic on a TLS-terminated panel) now take the
+  per-request 443 path — the retained port-80 pool mainly benefits plain-HTTP
+  origin requests (HTTP→HTTPS redirects, ACME/`.well-known` DCV, plain-HTTP
+  sites). The knob is now safe to run fleet-wide; operators do **not** need to
+  disable it (doing so would also drop the safe HTTP pooling). The upstream
+  TLS handshake cost returns on 443 until safe host-keyed 443 pooling lands.
+  See `docs/proxy-performance.md`.
 - **Origin keepalive activity is now visible in error.log.** The module's
   diagnostic messages were logged at `NOTICE`, but `error_log` runs at
   `warn`, so they were never written — operators grepping `[cfm_origin_ka]`
   after enabling saw nothing, the log blind spot that hid the 421 root cause
-  for a week. Each worker now logs one `WARN` line the first time it routes
-  an origin request, stating the effective policy (`HTTP(80) pooled;
-  HTTPS(443) per-request …`).
+  for a week. Each worker now logs its effective state at `WARN` the first
+  time it routes on each port: `[cfm_origin_ka] HTTP(80) origin pooling active
+  (…)` (or a degraded WARN when the engine lacks `enable_keepalive`) and
+  `[cfm_origin_ka] HTTPS(443) origin: per-request TLS by design …`. These are
+  expected once-per-worker lines, not error conditions.
 
 ## 2026.08.26
 
