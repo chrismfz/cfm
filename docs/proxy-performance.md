@@ -227,13 +227,22 @@ which tier the box landed on.
 
 Prerequisites & rollout:
 
-1. Apache `KeepAlive On` (cPanel default). If an operator lowered
+1. **OpenResty shipping nginx ≥ 1.29.7** (the supported floor for this
+   reference config). CFM installs track the official OpenResty and Angie repos
+   (always latest), so this is satisfied in practice — the fleet is on OpenResty
+   1.31.1.1. The 443 SNI-safety guard uses `keepalive 0` to disable nginx-core's
+   native pool, which is 1.29.7+ disable semantics; older OpenResty/nginx
+   rejects `keepalive 0` at `openresty -t` (and doesn't need it, since native
+   keepalive was off by default there). Angie needs no such directive. Only a
+   deliberately pinned pre-1.29.7 OpenResty would need version-aware config
+   generation — not done here.
+2. Apache `KeepAlive On` (cPanel default). If an operator lowered
    `KeepAliveTimeout` below 3 s, lower `ORIGIN_KEEPALIVE_IDLE_SEC` to match.
-2. Enable on one box, watch `uct=` in the access log collapse toward 0 on
+3. Enable on one box, watch `uct=` in the access log collapse toward 0 on
    warm **HTTP (port 80)** traffic, and grep error.log for the
    `[cfm_origin_ka]` activation lines (above). 443 keeps its per-request
    handshake (`uct > 0`) by design and cannot produce a cross-SNI `421`.
-3. The static-asset and streaming bypass locations keep their direct
+4. The static-asset and streaming bypass locations keep their direct
    `proxy_pass` (they intentionally skip cfm.lua); the pooled path covers
    `location /` and the PHP/admin no-buffer location — i.e. the HTML
    document path that dominates TTFB.
