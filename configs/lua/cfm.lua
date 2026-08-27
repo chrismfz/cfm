@@ -1022,9 +1022,14 @@ local function origin_pass_for(s_in)
     ngx.var.cfm_lua_ms = string.format("%.1f", (ngx.now() - ngx.req.start_time()) * 1000)
   end
   -- Opt-in origin keepalive (detectors.conf [webdetector] ORIGIN_KEEPALIVE):
-  -- route through the cfm_origin_* upstream blocks so backend connections
-  -- are pooled instead of opening a fresh TCP (+TLS on 443) connection to
-  -- Apache per request. See cfm_origin_ka.lua for the SNI-safety rules.
+  -- route through the cfm_origin_* upstream blocks. This routes by CLIENT
+  -- scheme (below): HTTP goes to cfm_origin_http:80, which cfm_origin_ka.lua
+  -- POOLS (reused TCP to Apache). HTTPS goes to cfm_origin_https:443, which is
+  -- deliberately NOT pooled — a fresh TCP + TLS/SNI connection per request, to
+  -- avoid cross-vhost 443 reuse (Apache 421). So only the HTTP origin hop saves
+  -- a connection here; 443 keeps its per-request handshake by design. See
+  -- cfm_origin_ka.lua for the full SNI-safety rules (native keepalive off,
+  -- Lua pool off on 443, TLS session reuse off).
   --
   -- $cfm_origin_ka_conf is a sentinel set ONLY by proxy confs that declare
   -- the cfm_origin_* upstream blocks. The knob travels the fast channel

@@ -21,14 +21,18 @@
 #       0` there is both unneeded and a hard config-load failure.
 #   both confs
 #     * every HTTPS-origin location — a location INSIDE an `ssl` server block
-#       that proxies to the origin via `proxy_pass $cfm_pass` or
-#       `proxy_pass https://$server_addr` — carries the full trio
+#       that proxies over HTTPS to the origin, i.e. `proxy_pass $cfm_pass` or
+#       ANY `proxy_pass https://…` — carries the full trio
 #       `proxy_ssl_server_name on; proxy_ssl_name $host;
 #       proxy_ssl_session_reuse off;` (SNI + no cross-SNI TLS session reuse; the
-#       upstream SSL-session cache is peer-keyed, not SNI-keyed). Checked
-#       per-location, so deleting the whole trio from one location is caught
-#       (a plain count/adjacency check would not). The plain-HTTP server's
-#       $cfm_pass locations correctly need none of these and are not flagged.
+#       upstream SSL-session cache is peer-keyed, not SNI-keyed). Detection is
+#       anchored on the `proxy_pass` scheme, NOT on the proxy_ssl_* lines, so a
+#       NEW https origin location that omits the whole trio is still caught
+#       (a count/adjacency check anchored on proxy_ssl_name would miss it). The
+#       plain-HTTP server's $cfm_pass locations proxy over http and are not
+#       flagged. (An intentional non-origin https upstream in the ssl server
+#       would trip this too — that is by design: it forces a conscious SNI/
+#       session-reuse decision + a gate update rather than silently passing.)
 #
 # It does NOT replace the live two-vhost integration test (which needs the
 # deployed engine) — it just stops the trivial "someone deleted a line" regress.
@@ -98,7 +102,7 @@ done
 # location still "passes" (fewer proxy_ssl_name, remaining ones still paired).
 # So we identify each origin-proxy location INSIDE the ssl server block
 # (`listen ... ssl`) — one that proxies to the HTTPS origin via
-# `proxy_pass $cfm_pass` or `proxy_pass https://$server_addr` — and require ALL
+# `proxy_pass $cfm_pass` or ANY `proxy_pass https://…` — and require ALL
 # THREE of: proxy_ssl_server_name on; proxy_ssl_name $host;
 # proxy_ssl_session_reuse off;. The plain-HTTP (non-ssl) server's $cfm_pass
 # locations correctly need none of these and are not flagged.
@@ -113,12 +117,12 @@ for f in "$ORT" "$ANG"; do
     !loc && /^[[:space:]]*location[[:space:]].*\{/ {
       loc=1; body=$0 "\n"; isorigin=0; locline=NR
       t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d=o-c
-      if ($0 ~ /proxy_pass[[:space:]]+\$cfm_pass/ || $0 ~ /proxy_pass[[:space:]]+https:\/\/\$server_addr/) isorigin=1
+      if ($0 ~ /proxy_pass[[:space:]]+\$cfm_pass/ || $0 ~ /proxy_pass[[:space:]]+https:\/\//) isorigin=1
       next
     }
     loc {
       body=body $0 "\n"
-      if ($0 ~ /proxy_pass[[:space:]]+\$cfm_pass/ || $0 ~ /proxy_pass[[:space:]]+https:\/\/\$server_addr/) isorigin=1
+      if ($0 ~ /proxy_pass[[:space:]]+\$cfm_pass/ || $0 ~ /proxy_pass[[:space:]]+https:\/\//) isorigin=1
       t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d+=o-c
       if (d<=0) {
         if (in_ssl && isorigin) {
