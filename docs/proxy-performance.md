@@ -147,13 +147,16 @@ not, until safe host-keyed 443 pooling lands (see the box).
 > balancer, with native keepalive kept off). Because a wrong assumption here is
 > exactly what caused this incident, it MUST be gated behind an integration
 > self-test against the **deployed** engine — two strict backend vhosts on one
-> IP with different TLS identities, driven `hostA → hostB → hostA → hostB …`,
-> asserting for **every** request: backend-observed SNI == HTTP `Host`, no TCP
-> connection crosses `Host`, no TLS session crosses SNI, `uct > 0`, and zero
-> `421`. A stubbed-balancer unit test (like the 38 in
-> `scripts/tests/cfm_origin_ka_test.lua`) proves the Lua state machine, **not**
-> this runtime invariant — the incident is precisely why that distinction
-> matters.
+> IP with different TLS identities, driven `hostA → hostB → hostA → hostB …`.
+> The **hard** assertions are backend-observed, for every request:
+> backend-seen SNI == HTTP `Host`, no backend connection id crosses `Host`, no
+> TLS session is resumed across SNI, and zero `421`. Treat `uct > 0` as a
+> *supporting* signal only, not a hard assertion — `$upstream_connect_time` has
+> coarse resolution and a very fast loopback handshake can round to `0.000`
+> even on a genuinely fresh connection. A stubbed-balancer unit test (like the
+> ones in `scripts/tests/cfm_origin_ka_test.lua`) proves the Lua state machine,
+> **not** this runtime invariant — the incident is precisely why that
+> distinction matters.
 
 > **Deploying a change to `cfm_origin_ka.lua` needs an edge reload.** The
 > balancer module is `require`d and `lua_code_cache` is on (the default), so
@@ -209,8 +212,9 @@ worker serving only one port logs only one of them:
   `enable_keepalive raised (…) — … degrading to per-request` (FFI shim
   present but throws), and `enable_keepalive failed: …` (a non-raising error
   return, warned once/worker);
-* `[cfm_origin_ka] HTTPS(443) origin: per-request TLS by design …` on the
-  first port-443 request.
+* `[cfm_origin_ka] origin port 443: per-request connection, never pooled …`
+  on the first port-443 request (and, for any other unpooled port, an
+  equivalent `origin port <n>: …` line, once per port).
 
 These are intentionally at WARN, not NOTICE: `error_log` runs at `warn`, so
 a NOTICE would never be written — that log blind spot is what hid this

@@ -303,6 +303,13 @@ check(s7.more_tries == 0, "fail-safe: a non-80 port never arms set_more_tries")
 check(s7.set_peer[1] == 8443, "fail-safe: the peer is still set (request served, just unpooled)")
 check(log_matching("origin port 8443: per-request") == 1,
       "fail-safe: the unpooled announce names the actual port")
+-- Per-port announce: a worker that saw 8443 first still announces 443 when it
+-- appears (announced_unpooled is keyed by port, not a single flag).
+ka7.balance(443)
+check(log_matching("origin port 443: per-request") == 1,
+      "fail-safe: a second unpooled port (443) announces once on its own")
+check(log_matching("origin port 8443: per-request") == 1,
+      "fail-safe: the 8443 announce stayed once (not re-emitted)")
 -- Port 80 through the SAME worker still pools (dispatch didn't break 80).
 ka7.balance(80)
 check(s7.keepalive == 1, "fail-safe: port 80 still pools alongside the unpooled default")

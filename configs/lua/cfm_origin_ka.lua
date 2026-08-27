@@ -207,10 +207,11 @@ local function enable_pool()
   end
 end
 
--- Always the plain 2-arg form: the SNI for 443 comes from proxy_ssl_name
--- $host at the location level, never from set_current_peer's `host` arg
--- (lua-resty-core advises against setting both, and the arg would not key the pool
--- anyway — see the header comment).
+-- Always the plain 2-arg form. SNI for HTTPS comes from proxy_ssl_name $host at
+-- the location level. We deliberately do NOT use set_current_peer's host arg
+-- (the SNI-aware Lua pooling path) here, because HTTPS pooling is disabled by
+-- policy — see the header comment. (lua-resty-core also advises against setting
+-- both the host arg and proxy_ssl_name at once.)
 local function set_peer(addr, port)
   local ok, err = balancer.set_current_peer(addr, port)
   if not ok then
@@ -230,7 +231,9 @@ end
 -- other) from the default branch below (always per-request by design). We
 -- deliberately never pre-announce a policy before it is established, so the log
 -- can never claim "pooled" on an engine that turned out unable to pool.
-local announced_unpooled = false
+-- Keyed by port so each unpooled port a worker serves announces once (a worker
+-- that saw 8443 first still announces 443 when it appears).
+local announced_unpooled = {}
 
 -- balance(port) — entry point called from the balancer_by_lua_block of
 -- the cfm_origin_http (80) / cfm_origin_https (443) upstreams.
@@ -262,8 +265,8 @@ function _M.balance(port)
   -- proxy_ssl_name $host at the location level; nginx-core's native pool is
   -- disabled on these upstreams (keepalive 0) and proxy_ssl_session_reuse is
   -- off, so no layer can reuse a 443 connection or TLS session across vhosts.
-  if not announced_unpooled then
-    announced_unpooled = true
+  if not announced_unpooled[port] then
+    announced_unpooled[port] = true
     ngx.log(ngx.WARN, "[cfm_origin_ka] origin port ", port, ": per-request ",
             "connection, never pooled (SNI-safe by design). Pooling a TLS ",
             "origin across vhosts on a shared IP risks Apache 421 Misdirected ",

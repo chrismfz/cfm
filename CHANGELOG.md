@@ -39,10 +39,16 @@ back-filled here — see the git/PR history for that period.
      peer-keyed, not SNI-keyed, so a resumed session can carry hostA's TLS
      identity into a hostB request.
   **Fix: HTTPS (port 443) is prohibited from reuse at every layer** — `keepalive
-  0` on both `cfm_origin_*` upstreams (disables the native pool), the Lua
-  balancer never pools 443, and `proxy_ssl_session_reuse off` on every 443
-  origin location — so each 443 request is a fresh TCP + fresh TLS/SNI
-  (`proxy_ssl_name $host`). Port 80 stays pooled and is now the **only** pooled
+  0` on both `cfm_origin_*` upstreams in `openresty.conf` (disables the native
+  pool), the Lua balancer never pools 443, and `proxy_ssl_session_reuse off` on
+  every 443 origin location — so each 443 request is a fresh TCP + fresh TLS/SNI
+  (`proxy_ssl_name $host`). Engine/version notes: the `keepalive 0` guard uses
+  nginx **1.29.7+** disable semantics (older nginx/OpenResty rejects `keepalive
+  0` and doesn't need it — native keepalive was off there), so this reference
+  `openresty.conf` targets OpenResty shipping nginx ≥ 1.29.7; `angie.conf` omits
+  `keepalive 0` entirely because Angie keeps native upstream keepalive off by
+  default and does not document `0` as a disable (adding it risks an `angie -t`
+  failure for no benefit). Port 80 stays pooled and is now the **only** pooled
   port (Lua-owned); the balancer's dispatch is fail-safe (`port == 80` pools,
   every other port defaults to unpooled), so a future origin port can't
   silently pool a TLS backend. Scope of the retained benefit: cfm.lua routes to
@@ -66,8 +72,8 @@ back-filled here — see the git/PR history for that period.
   for a week. Each worker now logs its effective state at `WARN` the first
   time it routes on each port: `[cfm_origin_ka] HTTP(80) origin pooling active`
   (or a degraded WARN when the engine lacks `enable_keepalive`) and
-  `[cfm_origin_ka] HTTPS(443) origin: per-request TLS by design …`. These are
-  expected once-per-worker lines, not error conditions.
+  `[cfm_origin_ka] origin port 443: per-request connection, never pooled …`.
+  These are expected once-per-worker lines, not error conditions.
 
 ## 2026.08.26
 
