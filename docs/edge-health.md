@@ -40,9 +40,20 @@ couldn't be read and is NEVER silently downgraded to `ok`.
   shape: a single `uct="0.000"` via `cfm_origin_https` (a retry list
   `uct="0.000, 0.052"` is a genuine fresh connect and is deliberately excluded).
   Surface the top `host`s.
-- **Verdict:** any warm-reuse 421 ⇒ `critical` (the incident's exact shape);
-  `status=421` without it ⇒ `warn` (possibly a genuinely misconfigured origin
-  vhost, not pooling); none ⇒ `ok`.
+- **Recency-aware.** An edge restart/reload wipes the upstream keepalive pool, so
+  a cross-SNI 421 can only recur once pooling rebuilds. The verdict is therefore
+  driven off warm-reuse 421s **inside a freshness window** (the `msec` epoch on
+  each line, 5 min), not the raw count — otherwise a wide file-tail scan keeps
+  re-reading the *pre-fix* storm and reads `critical` for minutes after the fix
+  already took hold (exactly what we saw on the first live node). Evidence carries
+  `recent_warm_421`, `newest_warm_421_age_sec`, and `fresh_window_sec`.
+- **Verdict:** a warm-reuse 421 **inside the freshness window** ⇒ `critical` (a
+  *live* incident); warm-reuse 421s present but **all older** than the window ⇒
+  `warn` (a storm that has stopped — the fix/restart took hold; decays to `ok` as
+  the lines scroll out); `status=421` without the warm-reuse shape ⇒ `warn`
+  (possibly a genuinely misconfigured origin vhost, not pooling); none ⇒ `ok`.
+  **Fail-safe:** if no warm line carries a parseable `msec`, recency is unknown
+  and it reads `critical` — never silently downgraded.
 
 ### B. Engine + version trap (the root-cause namer)
 - Report engine (OpenResty / Angie) and version, and the key gotcha: **nginx ≥

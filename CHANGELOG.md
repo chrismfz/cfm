@@ -17,7 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **`edge_health`: the 421 fingerprint is now recency-aware.** Because an edge
+  restart/reload wipes the upstream keepalive pool, a cross-SNI 421 can only
+  recur once pooling rebuilds — so a *wide* file-tail scan kept re-reading the
+  pre-fix 421 storm and read `critical` for minutes after the fix had already
+  taken hold (seen on the first live node right after deploy). The verdict now
+  keys on warm-reuse 421s **inside a 5-min freshness window** (the `msec` epoch
+  on each access line): a warm 421 inside the window ⇒ `critical` (live); a storm
+  that has stopped (all hits older than the window) ⇒ `warn`, decaying to `ok` as
+  it scrolls out; no parseable timestamp ⇒ fail-safe `critical`. Evidence gains
+  `recent_warm_421`, `newest_warm_421_age_sec`, and `fresh_window_sec`. The
+  engine-version-trap check keys its `critical` on the same *live* signal.
 
 ## 2026.08.27
 
