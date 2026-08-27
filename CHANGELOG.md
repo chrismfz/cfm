@@ -17,6 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **`edge_health` — a focused edge origin-hop correctness MCP tool** (read-only,
+  `GET /api/v1/system/edge-health`). It correlates the edge access/error logs
+  with the live engine version — something the raw tails (`edge_access_tail` /
+  `edge_error_tail`) and generic `config_drift` can't do in one call — to catch
+  the class of bug behind the 2026-08 cross-SNI `421` incident before it hides
+  for a week. Severity-ranked Tier-1 findings (`overall` ok/warn/critical):
+  (A) engine + version + the **native-keepalive-default-on trap** (nginx ≥ 1.29.7,
+  e.g. OpenResty 1.31.x, turns native upstream keepalive ON by default and
+  SNI-blind; Angie keeps it off); (B) the **421 warm-reuse fingerprint**
+  (`status=421` + `uct≈0` via `cfm_origin_https`) with top hosts; (C) the
+  `[cfm_origin_ka]` activation/degradation tiers from the error log; (D) the
+  `ORIGIN_KEEPALIVE` knob state. Read-only: reads logs and runs the edge binary's
+  `-v` (never `-t`/reload). Adds `edgelog.ScanAccess` (access-log twin of
+  `ScanError`). Design + Tier-2/3 roadmap: `docs/edge-health.md`.
+
 ### Fixed
 - **Origin keepalive (`ORIGIN_KEEPALIVE=1`) no longer causes Apache `421
   Misdirected Request` on shared-vhost HTTPS.** Routing allow-traffic through
