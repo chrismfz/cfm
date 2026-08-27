@@ -152,14 +152,21 @@ them. Two per-worker tiers:
    one WARN, the worker permanently degrades to per-request connections on
    port 80 too (no per-request errors). Never worse than the knob being off.
 
-When the knob is on, each worker logs one WARN line the first time it
-routes an origin request — `[cfm_origin_ka] origin keepalive active: …` —
-stating the effective policy (port 80 pooled, port 443 per-request). This
-is intentionally at WARN, not NOTICE: `error_log` runs at `warn`, so a
-NOTICE would never be written — that log blind spot is what hid this
-incident's root cause for a week. After enabling, grep error.log for
-`[cfm_origin_ka]` to confirm the module is active and see which tier the
-box landed on.
+When the knob is on, each worker logs its effective state once per worker,
+the first time it routes a request on each port — two separate lines, so a
+worker serving only one port logs only one of them:
+
+* `[cfm_origin_ka] HTTP(80) origin pooling active (idle=Ns max_reqs=M)` on
+  the first port-80 request (or, on the degraded tier above,
+  `[cfm_origin_ka] engine lacks balancer.enable_keepalive; …`);
+* `[cfm_origin_ka] HTTPS(443) origin: per-request TLS by design …` on the
+  first port-443 request.
+
+These are intentionally at WARN, not NOTICE: `error_log` runs at `warn`, so
+a NOTICE would never be written — that log blind spot is what hid this
+incident's root cause for a week. After enabling, `grep '\[cfm_origin_ka\]'
+error.log` to confirm the module is active and see which tier the box
+landed on.
 
 Prerequisites & rollout:
 
@@ -167,8 +174,8 @@ Prerequisites & rollout:
    `KeepAliveTimeout` below 3 s, lower `ORIGIN_KEEPALIVE_IDLE_SEC` to match.
 2. Enable on one box, watch `uct=` in the access log collapse toward 0 on
    warm **HTTP (port 80)** traffic, and grep error.log for the
-   `[cfm_origin_ka]` activation line. 443 keeps its per-request handshake
-   (`uct > 0`) by design and cannot produce a cross-SNI `421`.
+   `[cfm_origin_ka]` activation lines (above). 443 keeps its per-request
+   handshake (`uct > 0`) by design and cannot produce a cross-SNI `421`.
 3. The static-asset and streaming bypass locations keep their direct
    `proxy_pass` (they intentionally skip cfm.lua); the pooled path covers
    `location /` and the PHP/admin no-buffer location — i.e. the HTML

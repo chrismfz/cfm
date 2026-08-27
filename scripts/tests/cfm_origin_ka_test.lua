@@ -162,13 +162,14 @@ check(ka2_host_seen == false, "still never passes a 3rd host arg")
 -- ── Scenario 3: enable_keepalive raises → keepalive_broken latch (port 80) ──
 package.loaded["cfm_origin_ka"] = nil
 local ek_raises = 0
+local s3_more_tries = 0
 package.loaded["ngx.balancer"] = {
   set_current_peer = function(addr, port) return true end,
   enable_keepalive = function()
     ek_raises = ek_raises + 1
     error("missing FFI symbol ngx_http_lua_ffi_balancer_enable_keepalive")
   end,
-  set_more_tries = function() return true end,
+  set_more_tries = function() s3_more_tries = s3_more_tries + 1; return true end,
   get_last_failure = function() return nil end,
 }
 local ka3 = require "cfm_origin_ka"
@@ -181,6 +182,12 @@ check(log_matching("degrading to per-request connections") == 1,
       "keepalive_broken warns exactly once")
 check(log_matching("HTTP(80) origin pooling active") == 0,
       "no false 'pooling active' claim when enable_keepalive raised")
+-- Once port 80 has degraded to per-request (keepalive_broken), the
+-- keepalive-race retry must NOT be armed anymore — otherwise it doubles
+-- connect load against a failing origin, the anti-pattern the 443 path avoids.
+-- Armed once (request 1, before we learned keepalive was broken), then never.
+check(s3_more_tries == 1,
+      "degraded port-80 path stops arming set_more_tries after the latch")
 
 -- ── Scenario 4: enable_keepalive absent entirely → latch + one WARN ─────────
 -- The no-enable_keepalive path must NOT be silent (it previously returned with

@@ -170,10 +170,13 @@ local announced_443 = false
 -- retries, so without this a pooled connection Apache closed in the idle
 -- window turns into a client-facing 502; one retry re-runs the balancer on a
 -- fresh connection. get_last_failure() is nil only on the initial attempt, so
--- retries never stack. NOT armed on the unpooled 443 path: there is no
--- stale-pool race there, and a blanket retry would just double connect load
--- against an already-failing origin during an outage.
+-- retries never stack. NOT armed when there is no pool to race against: the
+-- unpooled 443 path never calls this, and once port 80 has degraded to
+-- per-request (keepalive_broken) we bail here too — otherwise a blanket retry
+-- would just double connect load against an already-failing origin during an
+-- outage.
 local function arm_keepalive_retry()
+  if keepalive_broken then return end
   if type(balancer.get_last_failure) == "function"
      and type(balancer.set_more_tries) == "function"
      and balancer.get_last_failure() == nil then
