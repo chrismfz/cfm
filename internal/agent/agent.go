@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"cfm/internal/dnat"
+	"cfm/internal/edgeengine"
 	"cfm/internal/firewall"
 	"cfm/internal/locate"
 	"cfm/internal/logging"
@@ -200,7 +201,7 @@ func (r *Runner) doHeartbeat(ctx context.Context) {
 			hb.DNATEnabled = &on
 		}
 	}
-	if edge, edgeVer, ok := detectEdge(ctx); ok {
+	if edge, edgeVer, ok := edgeengine.Detect(ctx); ok {
 		hb.Edge = &edge
 		hb.EdgeVersion = &edgeVer
 	}

@@ -242,6 +242,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/system/lsm-detections", handleSystemLSMDetections)
 	m.HandleFunc("/api/v1/system/lsm-status", handleSystemLSMStatus)
 	m.HandleFunc("/api/v1/system/config-drift", handleSystemConfigDrift)
+	m.HandleFunc("/api/v1/system/edge-health", handleSystemEdgeHealth)
 	m.HandleFunc("/api/v1/system/lve-cpu", handleSystemLVECPU)
 	m.HandleFunc("/api/v1/system/cpu-throttle", handleSystemCPUThrottle)
 	m.HandleFunc("/api/v1/system/mysql-log", handleSystemMySQLLog)

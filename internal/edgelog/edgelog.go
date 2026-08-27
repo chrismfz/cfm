@@ -455,11 +455,20 @@ func TailError(ctx context.Context, grep, source string, tailLines, limit int) (
 // panel-logonly FP hunt) that must count all hits, not just the most recent.
 // The caller bounds its own memory by what it accumulates in fn.
 func ScanError(ctx context.Context, substrs []string, source string, tailLines int, fn func(line string)) (logFile string, scanned int, err error) {
+	return scanLog(ctx, errorLogCandidates, source, "error", tailLines, DefaultErrorTailLines, MaxErrorTailLines, substrs, fn)
+}
+
+// scanLog is the shared engine behind ScanError/ScanAccess: resolve one
+// allow-listed log, tail the last tailLines (clamped to [_, maxTail], defTail
+// when unset), and invoke fn for every line containing ANY of substrs
+// (case-insensitive; empty substrs matches every line), each truncated to the
+// per-line cap. Bounded by the tail window + a context timeout.
+func scanLog(ctx context.Context, candidates []string, source, kind string, tailLines, defTail, maxTail int, substrs []string, fn func(line string)) (logFile string, scanned int, err error) {
 	if tailLines <= 0 {
-		tailLines = DefaultErrorTailLines
+		tailLines = defTail
 	}
-	if tailLines > MaxErrorTailLines {
-		tailLines = MaxErrorTailLines
+	if tailLines > maxTail {
+		tailLines = maxTail
 	}
 	lower := make([]string, 0, len(substrs))
 	for _, s := range substrs {
@@ -469,7 +478,7 @@ func ScanError(ctx context.Context, substrs []string, source string, tailLines i
 		}
 	}
 
-	logFile, err = resolveFrom(errorLogCandidates, source, "error")
+	logFile, err = resolveFrom(candidates, source, kind)
 	if err != nil {
 		return "", 0, err
 	}
@@ -496,6 +505,16 @@ func ScanError(ctx context.Context, substrs []string, source string, tailLines i
 		return true
 	})
 	return logFile, scanned, err
+}
+
+// ScanAccess is the access-log twin of ScanError: it streams the last tailLines
+// of the resolved edge ACCESS log and invokes fn for every line containing ANY
+// of substrs (case-insensitive; empty substrs matches every line). Same
+// allow-listed resolution, tail-window bound, context timeout and per-line
+// truncation. Used by aggregators that must COUNT every match in the window
+// (e.g. edge_health's 421 fingerprint), not just keep the newest few.
+func ScanAccess(ctx context.Context, substrs []string, source string, tailLines int, fn func(line string)) (logFile string, scanned int, err error) {
+	return scanLog(ctx, accessLogCandidates, source, "access", tailLines, DefaultTailLines, MaxTailLines, substrs, fn)
 }
 
 // tailHasMoreThan reports whether file holds MORE than n lines, via a bounded

@@ -59,6 +59,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerDetectorCoverage(srv, d)
 	registerDetectorSources(srv, d)
 	registerConfigDrift(srv, d)
+	registerEdgeHealth(srv, d)
 	registerSystemHealth(srv, d)
 	registerProcessList(srv, d)
 	registerProcessHealth(srv, d)
