@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.27
+
 ### Added
 - **`edge_health` — a focused edge origin-hop correctness MCP tool** (read-only,
   `GET /api/v1/system/edge-health`). It correlates the edge access/error logs
