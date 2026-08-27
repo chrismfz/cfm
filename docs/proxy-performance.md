@@ -26,8 +26,10 @@ rt=0.081 urt="0.041" uct="0.012" uht="0.040" sslr="." luams=1.4
 ```
 
 * `uct` (`$upstream_connect_time`) — TCP connect **+ upstream TLS
-  handshake** to Apache. This is what origin keepalive eliminates; on a
-  pooled connection it drops to ~0.000–0.001.
+  handshake** to Apache. Origin keepalive eliminates this on the pooled
+  **port-80** path (drops to ~0.000–0.001 on a warm connection); the 443
+  path keeps a per-request connection by design (see Knob 2), so `uct`
+  stays non-zero there.
 * `uht` (`$upstream_header_time`) — `uct` + request send + Apache TTFB.
   `uht - uct` ≈ genuine application time (PHP etc.), not CFM's fault.
 * `luams` (`$cfm_lua_ms`) — wall-clock ms from request start to the end of
@@ -76,18 +78,49 @@ no-op (direct proxying continues) instead of a fleet-wide 502 from
 Once on, cfm.lua's `origin_pass_for()` routes allow-traffic through the
 `cfm_origin_http` / `cfm_origin_https` upstream blocks, where
 `cfm_origin_ka.lua` (balancer_by_lua) sets the peer to `$server_addr`
-per request — dedicated-IP routing is preserved — and pools connections:
+per request — dedicated-IP routing is preserved:
 
-* **Port 80** — always pooled. HTTP/1.1 keepalive + Host-header vhost
-  routing is standard Apache behaviour.
-* **Port 443** — pooled **only** when lua-resty-core's
-  `balancer.set_current_peer(addr, port, host)` accepts the third `host`
-  argument (OpenResty 1.27.1.1+), which sets the upstream SNI *and* keys
-  the pool by it, so a connection handshaked for `hostA` is never reused
-  for `hostB`. On older cores the module logs one NOTICE per worker and
-  keeps per-request connections for HTTPS (identical to the knob being
-  off) — never risking Apache `421 Misdirected Request` on shared-vhost
-  boxes.
+* **Port 80** — pooled. HTTP/1.1 keepalive + Host-header vhost routing is
+  standard Apache behaviour: one connection serves many vhosts, so reuse is
+  always correct.
+* **Port 443** — **never pooled** (per-request TLS connection, SNI from
+  `proxy_ssl_name $host`). See the box below for why. Only the upstream TLS
+  handshake returns on 443; everything else the edge does is unchanged.
+
+> ### Why HTTPS origin connections are not pooled (the 421 incident, 2026-08)
+>
+> An HTTPS origin keepalive pool would only be safe if a connection
+> handshaked with `SNI=hostA` were never reused for a request to `hostB`:
+> the SNI is fixed in the TLS handshake and cannot change on an established
+> connection, so a cross-vhost reuse makes Apache answer `AH02032 …
+> 421 Misdirected Request` on shared-IP vhosts.
+>
+> lua-resty-core's `balancer.enable_keepalive` keys its pool by the **peer
+> address** only — the default pool name is `"<peer_addr>:<port>"` (e.g.
+> `"84.54.49.35:443"`), which does **not** include the SNI. The third
+> `host` argument to `set_current_peer` sets the SNI for the *handshake*
+> but does **not** change the pool name (and lua-resty-core explicitly
+> forbids combining that arg with `proxy_ssl_name`). An earlier version of
+> `cfm_origin_ka.lua` assumed the 3-arg form keyed the pool by host; it does
+> not. On `server.speedhost.gr` (OpenResty 1.31.1.1 → Apache) that produced
+> ~17.5 k `status=421` responses over a week — warm (`uct=0.000`)
+> connections carrying the wrong SNI, across dozens of vhosts, hitting real
+> browsers and Googlebot/Bingbot alike.
+>
+> The fix does not depend on any version-specific pool-naming behaviour: 443
+> is simply not pooled. The knob is therefore safe to run fleet-wide as-is —
+> HTTP (80) pooling, which covers the HTML document path on edge-terminated
+> TLS, is retained.
+>
+> **Future (not yet implemented):** safe 443 pooling is possible by giving
+> each pool a host-scoped name (fold the SNI into the `pool` option of
+> `set_current_peer`) so `hostA` and `hostB` never share a pool. Because the
+> exact API shape is version-specific and a wrong assumption here is what
+> caused this incident, it must be gated behind an integration self-test
+> that deliberately drives `hostA` → pooled connection → immediate `hostB`
+> request against the **deployed** engine and proves the second request does
+> **not** reuse `hostA`'s TLS connection (assert `uct > 0` for `hostB`), not
+> merely a unit test with a stubbed balancer.
 
 Tuning — all in `[webdetector]`; fields absent (older daemon) fall back to
 the built-in defaults below:
@@ -95,40 +128,47 @@ the built-in defaults below:
 | detectors.conf key | Default | Meaning |
 |---|---|---|
 | `ORIGIN_KEEPALIVE` | `0` | `1` routes allow-traffic through the pooled upstreams |
-| `ORIGIN_KEEPALIVE_IDLE_SEC` | `3` | Idle seconds before a pooled connection is retired. **Keep below Apache's `KeepAliveTimeout`** (EA4/cPanel default 5 s) so Apache never closes a connection nginx still considers fresh. Clamped to 1–60. |
-| `ORIGIN_KEEPALIVE_MAX_REQS` | `1000` | Requests served per pooled connection before recycling |
+| `ORIGIN_KEEPALIVE_IDLE_SEC` | `3` | Idle seconds before a pooled **port-80** connection is retired. **Keep below Apache's `KeepAliveTimeout`** (EA4/cPanel default 5 s) so Apache never closes a connection nginx still considers fresh. Clamped to 1–60. |
+| `ORIGIN_KEEPALIVE_MAX_REQS` | `1000` | Requests served per pooled port-80 connection before recycling |
+
+(The idle/max-reqs knobs govern the port-80 pool only; 443 is never
+pooled.)
 
 Keepalive races are handled: `balancer_by_lua` disables nginx's default
 upstream retries, so `cfm_origin_ka.lua` arms exactly one retry
 (`set_more_tries(1)`) on each request's first attempt — a pooled
-connection that Apache closed in the idle window is transparently retried
-on a fresh connection instead of surfacing a 502.
+port-80 connection that Apache closed in the idle window is transparently
+retried on a fresh connection instead of surfacing a 502.
 
 Engine support (OpenResty vs Angie): the code path is identical — both
 load the same lua-nginx-module + lua-resty-core stack, and
 `cfm_origin_ka.lua` detects capabilities at runtime rather than assuming
-them. Three graceful degradation tiers, checked per worker:
+them. Two per-worker tiers:
 
-1. `set_current_peer` accepts the SNI `host` argument → full pooling
-   (80 + 443).
-2. No SNI-keyed pools (older lua-resty-core, likely on some Angie
-   `angie-module-lua` builds) → one NOTICE in error.log, port 80 pooled,
-   443 stays per-request. Never worse than the knob being off.
-3. `enable_keepalive` missing or its FFI shim absent from the engine's
-   lua module build → one WARN, the worker permanently degrades to
-   per-request connections (no per-request errors).
+1. `enable_keepalive` works → port 80 pooled, port 443 per-request
+   (SNI-safe). This is the normal case on OpenResty and current Angie.
+2. `enable_keepalive` missing or its FFI shim absent from the engine's
+   lua module build (possible on some Angie `angie-module-lua` versions) →
+   one WARN, the worker permanently degrades to per-request connections on
+   port 80 too (no per-request errors). Never worse than the knob being off.
 
-After enabling on an Angie box, grep error.log for `[cfm_origin_ka]` to
-see which tier you landed on.
+When the knob is on, each worker logs one WARN line the first time it
+routes an origin request — `[cfm_origin_ka] origin keepalive active: …` —
+stating the effective policy (port 80 pooled, port 443 per-request). This
+is intentionally at WARN, not NOTICE: `error_log` runs at `warn`, so a
+NOTICE would never be written — that log blind spot is what hid this
+incident's root cause for a week. After enabling, grep error.log for
+`[cfm_origin_ka]` to confirm the module is active and see which tier the
+box landed on.
 
 Prerequisites & rollout:
 
 1. Apache `KeepAlive On` (cPanel default). If an operator lowered
-   `KeepAliveTimeout` below 3 s, lower `CFM_ORIGIN_KA_IDLE_SEC` to match.
+   `KeepAliveTimeout` below 3 s, lower `ORIGIN_KEEPALIVE_IDLE_SEC` to match.
 2. Enable on one box, watch `uct=` in the access log collapse toward 0 on
-   warm traffic, and check error.log for `[cfm_origin_ka]` warnings and
-   for any 421/400 SNI-mismatch responses (`ust=421`) before fleet-wide
-   rollout.
+   warm **HTTP (port 80)** traffic, and grep error.log for the
+   `[cfm_origin_ka]` activation line. 443 keeps its per-request handshake
+   (`uct > 0`) by design and cannot produce a cross-SNI `421`.
 3. The static-asset and streaming bypass locations keep their direct
    `proxy_pass` (they intentionally skip cfm.lua); the pooled path covers
    `location /` and the PHP/admin no-buffer location — i.e. the HTML

@@ -17,7 +17,33 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Origin keepalive (`ORIGIN_KEEPALIVE=1`) no longer causes Apache `421
+  Misdirected Request` on shared-vhost HTTPS.** The edge balancer
+  (`cfm_origin_ka.lua`) assumed the 3-arg `set_current_peer(addr, port,
+  host)` form both set the upstream SNI *and* keyed the keepalive pool by
+  host. It does not: lua-resty-core keys the pool by peer address only (pool
+  name `"<peer_addr>:<port>"`), and the `host` arg only sets the handshake
+  SNI. So a pooled 443 connection handshaked with `SNI=hostA` was reused for
+  a request to `hostB` on the same origin IP, and Apache answered `AH02032 …
+  421 Misdirected Request`. On one production box (OpenResty 1.31.1.1 →
+  Apache) this produced ~17.5 k `status=421` over a week, hitting real
+  browsers and search-engine crawlers across dozens of vhosts. **Fix: HTTPS
+  (port 443) origin connections are never pooled** — each 443 request gets a
+  per-request TLS connection whose SNI comes from `proxy_ssl_name $host`
+  (the lua-resty-core-sanctioned way; it forbids combining that arg with
+  `proxy_ssl_name` anyway). HTTP (port 80) pooling — the edge-terminated
+  HTML document path — is unchanged. The knob is now safe to run fleet-wide;
+  operators do **not** need to disable it (doing so would also drop the safe
+  HTTP pooling). Only the upstream TLS handshake cost returns on 443. See
+  `docs/proxy-performance.md`.
+- **Origin keepalive activity is now visible in error.log.** The module's
+  diagnostic messages were logged at `NOTICE`, but `error_log` runs at
+  `warn`, so they were never written — operators grepping `[cfm_origin_ka]`
+  after enabling saw nothing, the log blind spot that hid the 421 root cause
+  for a week. Each worker now logs one `WARN` line the first time it routes
+  an origin request, stating the effective policy (`HTTP(80) pooled;
+  HTTPS(443) per-request …`).
 
 ## 2026.08.26
 

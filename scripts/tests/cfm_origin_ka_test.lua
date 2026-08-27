@@ -8,10 +8,20 @@
 -- balancer phase of production workers with ORIGIN_KEEPALIVE=1.
 --
 -- Stubs ngx + ngx.balancer. The fake balancer records calls so we can
--- assert: SNI-keyed pooling on 3-param cores, keepalive-race retry via
--- set_more_tries(1) on first attempt only, the per-worker latch when the
--- 3-arg call fails, and the keepalive_broken latch when enable_keepalive
--- raises (missing FFI shim, e.g. some Angie module builds).
+-- assert the module's invariants after the 2026-08 421 fix:
+--
+--   * port 443 is NEVER pooled and NEVER passes a 3rd (SNI host) argument to
+--     set_current_peer — this is what makes cross-SNI reuse (Apache 421
+--     Misdirected Request) impossible. SNI on 443 comes from
+--     proxy_ssl_name $host at the location level, not from the balancer.
+--   * port 80 IS pooled (enable_keepalive) with the bridge-config idle/
+--     max_reqs knobs (built-in defaults when absent).
+--   * the keepalive-race retry arms set_more_tries(1) on the first POOLED
+--     (port 80) attempt only — never on the unpooled 443 path.
+--   * each path reports its TRUE effective state once per worker at WARN
+--     (visible at the default error_log level): 443 "per-request TLS by
+--     design", 80 "origin pooling active" (or a degraded WARN when the
+--     engine lacks enable_keepalive).
 
 package.path = package.path .. ";configs/lua/?.lua;./?.lua"
 
@@ -53,17 +63,22 @@ package.loaded["cfm_bridge_cfg"] = {
   get = function() return { clearance_refresh = true } end,
 }
 
--- ── Scenario 1: modern core (3-param set_current_peer, keepalive OK) ────────
+-- ── Scenario 1: modern core (set_current_peer + enable_keepalive OK) ────────
 local calls = { set_peer = {}, keepalive = {}, more_tries = {} }
+local peer_by_port = {}      -- port -> count of enable_keepalive calls at that port
+local host_arg_seen = false  -- true if set_current_peer ever got a non-nil 3rd arg
 local last_failure = nil
+local cur_port = nil
 package.loaded["ngx.balancer"] = {
-  -- 3 declared params → nparams=3 → SNI pools detected as supported
   set_current_peer = function(addr, port, host)
     calls.set_peer[#calls.set_peer + 1] = { addr = addr, port = port, host = host }
+    if host ~= nil then host_arg_seen = true end
+    cur_port = port
     return true
   end,
   enable_keepalive = function(idle, reqs)
-    calls.keepalive[#calls.keepalive + 1] = { idle = idle, reqs = reqs }
+    calls.keepalive[#calls.keepalive + 1] = { idle = idle, reqs = reqs, port = cur_port }
+    peer_by_port[cur_port] = (peer_by_port[cur_port] or 0) + 1
     return true
   end,
   set_more_tries = function(n)
@@ -74,48 +89,62 @@ package.loaded["ngx.balancer"] = {
 }
 
 local ka = require "cfm_origin_ka"
-check(ka.sni_pool_supported() == true, "3-param core detected as SNI-pool capable")
 
 ka.balance(443)
-check(#calls.set_peer == 1 and calls.set_peer[1].host == "example.com"
-      and calls.set_peer[1].port == 443,
-      "443: peer set with SNI host (pool keyed per vhost)")
-check(#calls.keepalive == 1 and calls.keepalive[1].idle == 3 and calls.keepalive[1].reqs == 1000,
-      "443: keepalive enabled with built-in defaults when bridge fields absent")
-check(#calls.more_tries == 1 and calls.more_tries[1] == 1,
-      "first attempt arms exactly one keepalive-race retry (set_more_tries(1))")
-
--- Retry attempt: get_last_failure ~= nil → no additional tries stacked.
-last_failure = "failed"
-ka.balance(443)
-check(#calls.more_tries == 1, "retry attempt does not stack more tries")
-last_failure = nil
+check(#calls.set_peer == 1 and calls.set_peer[1].port == 443
+      and calls.set_peer[1].host == nil,
+      "443: peer set with the 2-arg form (no SNI host passed to the balancer)")
+check(#calls.keepalive == 0,
+      "443: NEVER pooled — enable_keepalive not called (no cross-SNI reuse)")
+check(#calls.more_tries == 0,
+      "443: keepalive-race retry NOT armed on the unpooled path")
+check(log_matching("HTTPS(443) origin: per-request TLS by") == 1,
+      "visibility: 443 per-request policy WARN emitted once on first 443 balance")
 
 ka.balance(80)
 check(calls.set_peer[#calls.set_peer].host == nil and calls.set_peer[#calls.set_peer].port == 80,
       "80: peer set without SNI arg")
-check(#calls.keepalive >= 3, "80: pooling enabled")
+check((peer_by_port[80] or 0) == 1, "80: pooling enabled (enable_keepalive at port 80)")
+check(#calls.more_tries == 1 and calls.more_tries[1] == 1,
+      "80: first attempt arms exactly one keepalive-race retry (set_more_tries(1))")
+check(log_matching("HTTP(80) origin pooling active") == 1,
+      "visibility: 80 pooled-active WARN emitted once on first 80 balance")
 
--- Bridge-config knob override + memoisation on table identity.
+-- Retry attempt on port 80: get_last_failure ~= nil → no additional tries.
+last_failure = "failed"
+ka.balance(80)
+check(#calls.more_tries == 1, "80 retry attempt does not stack more tries")
+check(log_matching("HTTP(80) origin pooling active") == 1,
+      "80 pooled-active WARN stays once-per-worker across requests")
+last_failure = nil
+
+check((peer_by_port[443] or 0) == 0, "443 stayed unpooled across all calls")
+check(host_arg_seen == false,
+      "set_current_peer is NEVER called with a 3rd host arg (proxy_ssl_name owns SNI)")
+
+-- Bridge-config knob override + memoisation on table identity (port-80 pool).
 local cfg_tbl = { clearance_refresh = true, origin_ka_idle_sec = 2, origin_ka_max_reqs = 500 }
 package.loaded["cfm_bridge_cfg"].get = function() return cfg_tbl end
 ka.balance(80)
 local last_ka = calls.keepalive[#calls.keepalive]
 check(last_ka.idle == 2 and last_ka.reqs == 500,
-      "bridge-config idle/max-reqs override the built-in defaults")
+      "bridge-config idle/max-reqs override the built-in defaults on the 80 pool")
 
--- ── Scenario 2: 3-arg call raises → per-worker latch, no per-request spam ──
+-- ── Scenario 2: 2-arg-only core → identical behaviour (443 unpooled, 80 pooled)
+-- With the capability probe removed, the module never passes a 3rd arg, so a
+-- core whose set_current_peer takes only (addr, port) behaves identically. No
+-- "lacks SNI-keyed" NOTICE exists anymore (that whole path is gone).
 package.loaded["cfm_origin_ka"] = nil
-local raise_count = 0
+local ka2_ek = 0
+local ka2_host_seen = false
 package.loaded["ngx.balancer"] = {
-  set_current_peer = function(addr, port, host)
-    if host ~= nil then
-      raise_count = raise_count + 1
-      error("bad argument: opts table expected")
-    end
+  -- Represents an older/plainer core (2 fixed params). The varargs capture
+  -- lets us assert the module never passes a 3rd (SNI host) arg.
+  set_current_peer = function(addr, port, ...)
+    if select("#", ...) > 0 then ka2_host_seen = true end
     return true
   end,
-  enable_keepalive = function() return true end,
+  enable_keepalive = function() ka2_ek = ka2_ek + 1; return true end,
   set_more_tries = function() return true end,
   get_last_failure = function() return nil end,
 }
@@ -123,35 +152,18 @@ local ka2 = require "cfm_origin_ka"
 logs = {}
 ka2.balance(443)
 ka2.balance(443)
-ka2.balance(443)
-check(raise_count == 1, "3-arg failure latches: raised once, then 2-arg only")
-check(ka2.sni_pool_supported() == false, "latch demotes sni_pool_supported()")
-check(log_matching("disabling HTTPS pooling") == 1, "latch warns exactly once")
+check(ka2_ek == 0, "443: never pooled regardless of core capability")
+check(log_matching("lacks SNI-keyed") == 0,
+      "the old 'lacks SNI-keyed' NOTICE path is gone")
+ka2.balance(80)
+check(ka2_ek == 1, "80: still pooled")
+check(ka2_host_seen == false, "still never passes a 3rd host arg")
 
--- ── Scenario 3: 2-param core → HTTPS unpooled, HTTP pooled, NOTICE once ────
-package.loaded["cfm_origin_ka"] = nil
-local ka_calls = 0
-package.loaded["ngx.balancer"] = {
-  set_current_peer = function(addr, port) return true end, -- nparams=2
-  enable_keepalive = function() ka_calls = ka_calls + 1; return true end,
-  set_more_tries = function() return true end,
-  get_last_failure = function() return nil end,
-}
-local ka3 = require "cfm_origin_ka"
-check(ka3.sni_pool_supported() == false, "2-param core detected as unsupported")
-logs = {}
-ka3.balance(443)
-ka3.balance(443)
-check(ka_calls == 0, "443 on 2-param core: never pooled (no cross-SNI reuse)")
-check(log_matching("lacks SNI-keyed") == 1, "no-SNI NOTICE logged exactly once")
-ka3.balance(80)
-check(ka_calls == 1, "80 on 2-param core: still pooled")
-
--- ── Scenario 4: enable_keepalive raises → keepalive_broken latch ───────────
+-- ── Scenario 3: enable_keepalive raises → keepalive_broken latch (port 80) ──
 package.loaded["cfm_origin_ka"] = nil
 local ek_raises = 0
 package.loaded["ngx.balancer"] = {
-  set_current_peer = function(addr, port, host) return true end,
+  set_current_peer = function(addr, port) return true end,
   enable_keepalive = function()
     ek_raises = ek_raises + 1
     error("missing FFI symbol ngx_http_lua_ffi_balancer_enable_keepalive")
@@ -159,67 +171,80 @@ package.loaded["ngx.balancer"] = {
   set_more_tries = function() return true end,
   get_last_failure = function() return nil end,
 }
+local ka3 = require "cfm_origin_ka"
+logs = {}
+ka3.balance(80)
+ka3.balance(80)
+ka3.balance(80)
+check(ek_raises == 1, "enable_keepalive raise latches after first attempt")
+check(log_matching("degrading to per-request connections") == 1,
+      "keepalive_broken warns exactly once")
+check(log_matching("HTTP(80) origin pooling active") == 0,
+      "no false 'pooling active' claim when enable_keepalive raised")
+
+-- ── Scenario 4: enable_keepalive absent entirely → latch + one WARN ─────────
+-- The no-enable_keepalive path must NOT be silent (it previously returned with
+-- no log, so port 80 ran per-request while the logs claimed nothing).
+package.loaded["cfm_origin_ka"] = nil
+package.loaded["ngx.balancer"] = {
+  set_current_peer = function(addr, port) return true end,
+  -- enable_keepalive intentionally ABSENT (not a function)
+  set_more_tries = function() return true end,
+  get_last_failure = function() return nil end,
+}
 local ka4 = require "cfm_origin_ka"
 logs = {}
 ka4.balance(80)
 ka4.balance(80)
-ka4.balance(80)
-check(ek_raises == 1, "enable_keepalive raise latches after first attempt")
-check(log_matching("degrading to per-request connections") == 1,
-      "keepalive_broken warns exactly once")
+check(log_matching("engine lacks balancer.enable_keepalive") == 1,
+      "no-enable_keepalive path warns exactly once (not silent)")
+check(log_matching("HTTP(80) origin pooling active") == 0,
+      "no false 'pooling active' claim when enable_keepalive is absent")
 
--- ── Scenario 5: modern core but empty $host → unpooled, no FALSE NOTICE ────
--- A 443 request whose $host resolves to "" (e.g. server_name '_' didn't fill
--- a Host) on an SNI-pool-capable worker must NOT log the "needs OpenResty
--- 1.27.1.1+" NOTICE and must NOT burn the one-shot latch: pooling is supported,
--- the request just can't key a pool without a host. Pre-F60 the `elseif`
--- conflated this with a genuine lack of support (misled operators grepping
--- [cfm_origin_ka]).
+-- ── Scenario 5: hostless 443 request → unpooled 2-arg set_peer, no error ────
+-- $host may be "" (server_name '_' didn't resolve a Host). 443 is unpooled
+-- either way; the empty host is irrelevant because the balancer never keys or
+-- SNIs on it.
 package.loaded["cfm_origin_ka"] = nil
-local s5 = { set_peer = {}, keepalive = {} }
-local s5_fail_3arg = false   -- flip to force a 3-arg runtime failure (demotion)
+local s5 = { set_peer = {}, keepalive = 0 }
 package.loaded["ngx.balancer"] = {
   set_current_peer = function(addr, port, host)
     s5.set_peer[#s5.set_peer + 1] = { addr = addr, port = port, host = host }
-    if host ~= nil and s5_fail_3arg then return nil, "forced 3-arg failure" end
     return true
   end,
-  enable_keepalive = function() s5.keepalive[#s5.keepalive + 1] = true; return true end,
+  enable_keepalive = function() s5.keepalive = s5.keepalive + 1; return true end,
   set_more_tries = function() return true end,
   get_last_failure = function() return nil end,
 }
 local ka5 = require "cfm_origin_ka"
-check(ka5.sni_pool_supported() == true, "scenario 5: modern 3-param core is SNI-pool capable")
-logs = {}
-ngx.var.host = ""            -- hostless 443 request
+ngx.var.host = ""
 ka5.balance(443)
-check(log_matching("lacks SNI-keyed") == 0,
-      "F60: empty $host does NOT emit the false 'no SNI support' NOTICE")
-check(#s5.keepalive == 0,
-      "F60: empty $host serves unpooled (cannot key a pool without a host)")
-check(#s5.set_peer == 1 and s5.set_peer[1].host == nil and s5.set_peer[1].port == 443,
-      "F60: empty $host falls through to the 2-arg unpooled set_peer")
--- A later request WITH a Host is still SNI-pooled (empty-host didn't disable pooling).
+check(#s5.set_peer == 1 and s5.set_peer[1].port == 443 and s5.set_peer[1].host == nil,
+      "hostless 443: 2-arg set_peer, no 3rd arg")
+check(s5.keepalive == 0, "hostless 443: not pooled")
 ngx.var.host = "example.com"
-ka5.balance(443)
-check(#s5.set_peer == 2 and s5.set_peer[2].host == "example.com",
-      "F60: a subsequent request with a Host is SNI-pooled (pooling not disabled)")
-check(#s5.keepalive == 1, "F60: pooling enabled once a Host is present again")
--- Prove the one-shot NOTICE latch was NOT consumed by the empty-host request:
--- demote the worker (force a 3-arg runtime failure), then the GENUINE 'no SNI
--- support' NOTICE must still fire. Reset logs first so we count only
--- post-demotion output. Pre-F60 the empty-host request already burned the latch,
--- so this NOTICE was suppressed (count 0) — `== 1` is the real discriminator.
-s5_fail_3arg = true
-ka5.balance(443)             -- 3-arg fails → sni_pool_ok=false, WARN (no NOTICE yet)
-check(ka5.sni_pool_supported() == false, "F60: forced 3-arg runtime failure demotes the worker")
+
+-- ── Scenario 6: set_current_peer fails on 443 → clean 502 (ngx.exit ERROR) ──
+package.loaded["cfm_origin_ka"] = nil
+local exited = nil
+package.loaded["ngx.balancer"] = {
+  set_current_peer = function() return nil, "connect refused" end,
+  enable_keepalive = function() return true end,
+  set_more_tries = function() return true end,
+  get_last_failure = function() return nil end,
+}
+local prev_exit = ngx.exit
+ngx.exit = function(code) exited = code; return code end
+local ka6 = require "cfm_origin_ka"
 logs = {}
-ka5.balance(443)             -- not sni_pool_ok → NOTICE iff the one-shot latch is intact
-check(log_matching("lacks SNI-keyed") == 1,
-      "F60: latch intact — genuine 'no SNI support' NOTICE fires after demotion (empty-host did not consume it)")
+ka6.balance(443)
+ngx.exit = prev_exit
+check(exited == ngx.ERROR, "443: a hard set_current_peer failure exits with ngx.ERROR (502)")
+check(log_matching("set_current_peer(203.0.113.7:443) failed") == 1,
+      "443: the set_current_peer failure is logged")
 
 if failures > 0 then
   print(string.format("%d failure(s)", failures))
   os.exit(1)
 end
-print("OK: cfm_origin_ka capability detection, pooling, retry arming and failure latches behave as specified")
+print("OK: cfm_origin_ka never pools HTTPS(443), pools HTTP(80), arms retries only on 80, latches keepalive failures, and reports each path's true state")
