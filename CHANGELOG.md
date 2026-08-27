@@ -46,8 +46,8 @@ back-filled here — see the git/PR history for that period.
   `warn`, so they were never written — operators grepping `[cfm_origin_ka]`
   after enabling saw nothing, the log blind spot that hid the 421 root cause
   for a week. Each worker now logs its effective state at `WARN` the first
-  time it routes on each port: `[cfm_origin_ka] HTTP(80) origin pooling active
-  (…)` (or a degraded WARN when the engine lacks `enable_keepalive`) and
+  time it routes on each port: `[cfm_origin_ka] HTTP(80) origin pooling active`
+  (or a degraded WARN when the engine lacks `enable_keepalive`) and
   `[cfm_origin_ka] HTTPS(443) origin: per-request TLS by design …`. These are
   expected once-per-worker lines, not error conditions.
 
