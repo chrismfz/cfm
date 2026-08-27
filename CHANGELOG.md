@@ -40,7 +40,13 @@ back-filled here — see the git/PR history for that period.
   sites). The knob is now safe to run fleet-wide; operators do **not** need to
   disable it (doing so would also drop the safe HTTP pooling). The upstream
   TLS handshake cost returns on 443 until safe host-keyed 443 pooling lands.
-  See `docs/proxy-performance.md`.
+  **Deploying this fix needs an edge reload** (`openresty -s reload` /
+  `angie -s reload`): the balancer module is `require`d and `lua_code_cache`
+  is on, so running workers keep the old code until fresh workers spawn —
+  unlike toggling `ORIGIN_KEEPALIVE` itself, which the edge re-reads within
+  ~10 s with no reload. To stop the 421s *immediately* without waiting for a
+  reload, set `ORIGIN_KEEPALIVE = 0` (rolls back within ~10 s), then deploy +
+  reload the code fix and re-enable. See `docs/proxy-performance.md`.
 - **Origin keepalive activity is now visible in error.log.** The module's
   diagnostic messages were logged at `NOTICE`, but `error_log` runs at
   `warn`, so they were never written — operators grepping `[cfm_origin_ka]`

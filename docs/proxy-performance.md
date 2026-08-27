@@ -133,6 +133,19 @@ not, until safe host-keyed 443 pooling lands (see the box).
 > **not** reuse `hostA`'s TLS connection (assert `uct > 0` for `hostB`), not
 > merely a unit test with a stubbed balancer.
 
+> **Deploying a change to `cfm_origin_ka.lua` needs an edge reload.** The
+> balancer module is `require`d and `lua_code_cache` is on (the default), so
+> running workers hold the compiled module for their lifetime — a new
+> `cfm_origin_ka.lua` on disk does **not** take effect until fresh workers
+> spawn (`openresty -s reload` / `angie -s reload`). This is unlike the
+> `ORIGIN_KEEPALIVE` *knob*, which travels the bridge-config file and is
+> re-read within ~10 s with no reload. So the two levers have different
+> latencies: to stop a cross-SNI 421 storm **immediately**, set
+> `ORIGIN_KEEPALIVE = 0` (rolls back within ~10 s); to ship the code fix that
+> makes the knob safe to leave on, deploy the file **and reload** the edge.
+> Validate the Lua first (`docs/challenge-waf-release-checklist.md`) — a
+> module that fails to load takes the WAF/challenge layer down on reload.
+
 Tuning — all in `[webdetector]`; fields absent (older daemon) fall back to
 the built-in defaults below:
 
