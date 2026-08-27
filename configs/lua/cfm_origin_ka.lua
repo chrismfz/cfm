@@ -52,7 +52,10 @@
 --      not by $host, so every vhost through one origin location shares the
 --      pool. This is the most likely layer behind the incident — and the one a
 --      `keepalive`-directive audit misses, because it is a *default*, not a
---      directive. Disabled with `keepalive 0` on both cfm_origin_* upstreams.
+--      directive. Engine-specific: OpenResty disables it explicitly with
+--      `keepalive 0` on both cfm_origin_* upstreams; Angie keeps native
+--      upstream keepalive OFF by engine default and REJECTS `keepalive 0`
+--      (`angie -t` -> invalid value "0"), so it carries no such directive.
 --   2. The Lua balancer keepalive (`balancer.enable_keepalive`) — simply never
 --      called for 443 here.
 --   3. TLS session reuse (`proxy_ssl_session_reuse`, default on). The upstream

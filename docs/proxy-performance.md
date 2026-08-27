@@ -123,10 +123,12 @@ not, until safe host-keyed 443 pooling lands (see the box).
 >    IP and port … fails to consider the SNI extension"). The `local` parameter
 >    separates pools only by *location*, **not** by `$host`, so every vhost
 >    routed through one origin `location` shares the pool. This is the most
->    likely layer behind the incident. Disabled with **`keepalive 0`** on both
->    `cfm_origin_*` upstreams. (Angie keeps native keepalive off by default, so
->    `keepalive 0` is an explicit no-op there — kept for a robust,
->    engine-independent invariant.)
+>    likely layer behind the incident. **OpenResty** disables it explicitly
+>    with **`keepalive 0`** on both `cfm_origin_*` upstreams. **Angie** keeps
+>    native upstream keepalive off by engine default AND rejects `keepalive 0`
+>    (`angie -t` → `invalid value "0"`, confirmed on Angie 1.12.1), so on Angie
+>    the directive is deliberately absent — `keepalive 0` must NOT be added
+>    there. The native pool is off on both engines, by different means.
 > 2. **The Lua balancer keepalive** (`ngx.balancer.enable_keepalive`) — simply
 >    never called for 443.
 > 3. **TLS session reuse** (`proxy_ssl_session_reuse`, default **on**). The

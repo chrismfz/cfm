@@ -20,9 +20,15 @@
 #       (confirmed Angie 1.12.1: `angie -t` -> invalid value "0"), so `keepalive
 #       0` there is both unneeded and a hard config-load failure.
 #   both confs
-#     * every 443 origin SNI line (`proxy_ssl_name $host;`) is immediately
-#       followed by `proxy_ssl_session_reuse off;` (no cross-SNI TLS session
-#       reuse; the upstream SSL-session cache is peer-keyed, not SNI-keyed).
+#     * every HTTPS-origin location — a location INSIDE an `ssl` server block
+#       that proxies to the origin via `proxy_pass $cfm_pass` or
+#       `proxy_pass https://$server_addr` — carries the full trio
+#       `proxy_ssl_server_name on; proxy_ssl_name $host;
+#       proxy_ssl_session_reuse off;` (SNI + no cross-SNI TLS session reuse; the
+#       upstream SSL-session cache is peer-keyed, not SNI-keyed). Checked
+#       per-location, so deleting the whole trio from one location is caught
+#       (a plain count/adjacency check would not). The plain-HTTP server's
+#       $cfm_pass locations correctly need none of these and are not flagged.
 #
 # It does NOT replace the live two-vhost integration test (which needs the
 # deployed engine) — it just stops the trivial "someone deleted a line" regress.
@@ -86,25 +92,69 @@ for up in cfm_origin_http cfm_origin_https; do
   esac
 done
 
-# ── Both confs: every proxy_ssl_name $host is paired with session-reuse off ───
+# ── Both confs: every HTTPS-origin location carries the full SNI-safe trio ────
+# A pure count/adjacency check has a blind spot: deleting BOTH the
+# proxy_ssl_name and proxy_ssl_session_reuse lines from one HTTPS-origin
+# location still "passes" (fewer proxy_ssl_name, remaining ones still paired).
+# So we identify each origin-proxy location INSIDE the ssl server block
+# (`listen ... ssl`) — one that proxies to the HTTPS origin via
+# `proxy_pass $cfm_pass` or `proxy_pass https://$server_addr` — and require ALL
+# THREE of: proxy_ssl_server_name on; proxy_ssl_name $host;
+# proxy_ssl_session_reuse off;. The plain-HTTP (non-ssl) server's $cfm_pass
+# locations correctly need none of these and are not flagged.
+#
+# Assumes CFM config style: `location ... {` opens on one line and location
+# match patterns contain no literal '{'. True for the whole current config.
 for f in "$ORT" "$ANG"; do
-  # (a) adjacency: each `proxy_ssl_name $host;` directive line is immediately
-  #     followed by `proxy_ssl_session_reuse off;`.
+  # (a) location-aware completeness (the real regression guard).
+  missing=$(awk '
+    /^[[:space:]]*server[[:space:]]*\{/          { in_ssl=0 }                 # new server: reset
+    /^[[:space:]]*listen[[:space:]].*[[:space:]]ssl([[:space:];]|$)/ { in_ssl=1 }  # ssl listener => HTTPS server
+    !loc && /^[[:space:]]*location[[:space:]].*\{/ {
+      loc=1; body=$0 "\n"; isorigin=0; locline=NR
+      t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d=o-c
+      if ($0 ~ /proxy_pass[[:space:]]+\$cfm_pass/ || $0 ~ /proxy_pass[[:space:]]+https:\/\/\$server_addr/) isorigin=1
+      next
+    }
+    loc {
+      body=body $0 "\n"
+      if ($0 ~ /proxy_pass[[:space:]]+\$cfm_pass/ || $0 ~ /proxy_pass[[:space:]]+https:\/\/\$server_addr/) isorigin=1
+      t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d+=o-c
+      if (d<=0) {
+        if (in_ssl && isorigin) {
+          m=""
+          if (body !~ /proxy_ssl_server_name[[:space:]]+on[[:space:]]*;/)  m=m " proxy_ssl_server_name-on"
+          if (body !~ /proxy_ssl_name[[:space:]]+\$host[[:space:]]*;/)     m=m " proxy_ssl_name-$host"
+          if (body !~ /proxy_ssl_session_reuse[[:space:]]+off[[:space:]]*;/) m=m " proxy_ssl_session_reuse-off"
+          if (m!="") print "location@line" locline ":" m
+        }
+        loc=0; body=""; isorigin=0
+      }
+    }
+  ' "$f")
+  if [ -n "$missing" ]; then
+    while IFS= read -r linfo; do
+      err "$f: HTTPS-origin $linfo — missing required 443 SNI-safety directive(s)."
+    done <<< "$missing"
+  fi
+
+  # (b) presence: the conf must actually carry each directive at least once
+  #     (guards a wholesale deletion, or a conf with no ssl origin locations).
+  for d in 'proxy_ssl_server_name[[:space:]]+on' 'proxy_ssl_name[[:space:]]+\$host' 'proxy_ssl_session_reuse[[:space:]]+off'; do
+    if ! grep -Eq "^[[:space:]]*$d[[:space:]]*;" "$f"; then
+      err "$f: no '$(echo "$d" | sed 's/\[\[:space:\]\]+/ /g');' directive anywhere — 443 origin SNI-safety config missing?"
+    fi
+  done
+
+  # (c) ordering nicety: each proxy_ssl_name $host is immediately followed by
+  #     proxy_ssl_session_reuse off (keeps the pair visibly together).
   unpaired=$(awk '
     prev { if ($0 !~ /^[[:space:]]*proxy_ssl_session_reuse[[:space:]]+off[[:space:]]*;/) print pn; prev=0 }
     /^[[:space:]]*proxy_ssl_name[[:space:]]+\$host[[:space:]]*;/ { prev=1; pn=NR }
-    END { if (prev) print pn }   # trailing proxy_ssl_name with no following line
+    END { if (prev) print pn }
   ' "$f")
   if [ -n "$unpaired" ]; then
-    err "$f: proxy_ssl_name \$host at line(s) [$(echo "$unpaired" | tr '\n' ' ')] NOT immediately followed by 'proxy_ssl_session_reuse off;' — 443 could reuse a cross-SNI TLS session."
-  fi
-  # (b) count parity: as many session-reuse-off as proxy_ssl_name directives.
-  n_name=$(grep -Ec '^[[:space:]]*proxy_ssl_name[[:space:]]+\$host[[:space:]]*;' "$f" || true)
-  n_reuse=$(grep -Ec '^[[:space:]]*proxy_ssl_session_reuse[[:space:]]+off[[:space:]]*;' "$f" || true)
-  if [ "$n_name" -eq 0 ]; then
-    err "$f: no 'proxy_ssl_name \$host;' directives found — 443 origin SNI config missing?"
-  elif [ "$n_reuse" -lt "$n_name" ]; then
-    err "$f: $n_name proxy_ssl_name directive(s) but only $n_reuse proxy_ssl_session_reuse off — every 443 origin location needs session reuse off."
+    err "$f: proxy_ssl_name \$host at line(s) [$(echo "$unpaired" | tr '\n' ' ')] NOT immediately followed by 'proxy_ssl_session_reuse off;'."
   fi
 done
 
