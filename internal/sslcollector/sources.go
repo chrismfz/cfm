@@ -6,11 +6,17 @@ import (
 	"strings"
 )
 
+const defaultMailcowSSLRoot = "/opt/mailcow-dockerized/data/assets/ssl"
+
 func (c *Collector) discoverPairs() []Pair {
 	out := make([]Pair, 0, 1024)
 
 	// LetsEncrypt
 	out = append(out, scanLetsEncrypt("/etc/letsencrypt/live")...)
+
+	// Mailcow: only the active TLS store and its immediate SNI host directories.
+	// Deliberately never walk acme/ or backups/ (account keys and stale certs).
+	out = append(out, scanMailcow(defaultMailcowSSLRoot)...)
 
 	// cPanel
 	out = append(out, scanCPanel("/var/cpanel/ssl/apache_tls")...)
@@ -163,6 +169,52 @@ func scanLetsEncrypt(liveDir string) []Pair {
 	return out
 }
 
+
+// mailcowExcludedDir identifies Mailcow TLS-store trees that hold ACME
+// account keys or historical certificates rather than active serving material.
+func mailcowExcludedDir(name string) bool {
+	switch name {
+	case "acme", "backups":
+		return true
+	default:
+		return false
+	}
+}
+
+// mailcowActiveDirs returns only the active root and immediate SNI host
+// directories. It is shared by discovery and the shallow watcher setup so the
+// watch set cannot drift wider than the scan set.
+func mailcowActiveDirs(root string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	out := []string{root}
+	for _, entry := range entries {
+		if !entry.IsDir() || mailcowExcludedDir(entry.Name()) {
+			continue
+		}
+		out = append(out, filepath.Join(root, entry.Name()))
+	}
+	return out
+}
+
+// scanMailcow discovers the active Mailcow certificate pair plus immediate
+// per-host SNI pairs. The shared mailcowActiveDirs policy makes the scan
+// deliberately non-recursive, so stale/private ACME material can never enter
+// the serving inventory.
+func scanMailcow(root string) []Pair {
+	out := make([]Pair, 0, 4)
+	for _, dir := range mailcowActiveDirs(root) {
+		cert := filepath.Join(dir, "cert.pem")
+		key := filepath.Join(dir, "key.pem")
+		if fileOK(cert) && fileOK(key) {
+			// Mailcow cert.pem is the served full chain, so no separate ChainPath.
+			out = append(out, Pair{Source: SrcMailcow, CertPath: cert, KeyPath: key})
+		}
+	}
+	return out
+}
 
 
 func scanCPanel(root string) []Pair {

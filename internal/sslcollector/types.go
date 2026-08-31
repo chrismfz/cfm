@@ -10,6 +10,7 @@ type Source string
 
 const (
 	SrcLetsEncrypt Source = "lets_encrypt"
+	SrcMailcow     Source = "mailcow"
 	SrcCPanel      Source = "cpanel"
 	SrcDirectAdmin Source = "directadmin"
 	SrcVirtualmin  Source = "virtualmin"

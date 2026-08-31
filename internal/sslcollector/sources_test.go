@@ -502,3 +502,65 @@ func TestGetCertificateLoadsChain(t *testing.T) {
 		t.Fatal("GetCertificate did not reload after ChainMTime change — TLS cache invalidation regression")
 	}
 }
+
+
+// TestScanMailcowActiveStoreOnly pins the deliberately narrow Mailcow layout:
+// the active root pair and immediate SNI host pairs are discovered, while ACME
+// account material, backups, deeper trees, and incomplete pairs are ignored.
+func TestScanMailcowActiveStoreOnly(t *testing.T) {
+	root := t.TempDir()
+	writePair := func(dir, cn string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		_, _, certPEM, keyPEM := genTestCert(t, cn, nil, nil)
+		if err := os.WriteFile(filepath.Join(dir, "cert.pem"), certPEM, 0o644); err != nil {
+			t.Fatalf("write cert in %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "key.pem"), keyPEM, 0o600); err != nil {
+			t.Fatalf("write key in %s: %v", dir, err)
+		}
+	}
+
+	writePair(root, "mail.example.com")
+	sniDir := filepath.Join(root, "sni.example.com")
+	writePair(sniDir, "sni.example.com")
+
+	// These contain valid-looking pairs but must never be served.
+	writePair(filepath.Join(root, "acme"), "account-key.example")
+	writePair(filepath.Join(root, "backups"), "old.example.com")
+	writePair(filepath.Join(root, "nested", "too-deep.example"), "too-deep.example")
+
+	incomplete := filepath.Join(root, "incomplete.example")
+	if err := os.MkdirAll(incomplete, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(incomplete, "cert.pem"), []byte("cert only"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pairs := scanMailcow(root)
+	if len(pairs) != 2 {
+		t.Fatalf("expected root + one SNI pair, got %d: %+v", len(pairs), pairs)
+	}
+
+	got := make(map[string]Pair, len(pairs))
+	for _, pair := range pairs {
+		if pair.Source != SrcMailcow {
+			t.Errorf("source = %q, want %q", pair.Source, SrcMailcow)
+		}
+		if pair.ChainPath != "" {
+			t.Errorf("ChainPath = %q, want empty (cert.pem is fullchain)", pair.ChainPath)
+		}
+		got[pair.CertPath] = pair
+	}
+	for _, certPath := range []string{
+		filepath.Join(root, "cert.pem"),
+		filepath.Join(sniDir, "cert.pem"),
+	} {
+		if _, ok := got[certPath]; !ok {
+			t.Errorf("missing active Mailcow pair %s", certPath)
+		}
+	}
+}

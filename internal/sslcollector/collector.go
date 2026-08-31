@@ -251,6 +251,10 @@ func (c *Collector) Run(ctx context.Context) error {
 		"/etc/ssl",
 	}
 
+	// Mailcow is intentionally NOT a recursive root: acme/ and backups/ live
+	// below its active store. mailcowActiveDirs adds only the store root and
+	// immediate SNI host directories as shallow watches below.
+	//
 	// Per-user home cert material (Virtualmin: <home>/<user>/domains/
 	// <domain>/ssl.{key,cert}) is covered by the SHALLOW watch points in
 	// homeShallowWatchDirs() below, not by recursive roots here — watching
@@ -264,7 +268,9 @@ func (c *Collector) Run(ctx context.Context) error {
 		// Shallow (non-recursive) watch points so brand-new reseller
 		// accounts and newly-created per-user ssl dirs are detected in
 		// seconds instead of waiting for the DiscoveryEvery fallback.
-		w.SetShallowRoots(homeShallowWatchDirs())
+		shallowRoots := homeShallowWatchDirs()
+		shallowRoots = append(shallowRoots, mailcowActiveDirs(defaultMailcowSSLRoot)...)
+		w.SetShallowRoots(shallowRoots)
 		_ = w.Start(ctx, roots)
 	} else {
 		logging.Logf("[sslcollector] watcher disabled: %v", err)

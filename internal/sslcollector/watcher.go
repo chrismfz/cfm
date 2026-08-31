@@ -269,6 +269,15 @@ var certRootPrefixes = []string{
 // (homeMounts / homeShallowWatchDirs) so the policy cannot drift.
 var homeMountTopRE = regexp.MustCompile(`^/home[0-9]*$`)
 
+// isMailcowActiveChild allows only an immediate SNI host directory below the
+// active Mailcow store. ACME account material and historical backups stay
+// completely outside the watch set.
+func isMailcowActiveChild(path string) bool {
+	path = filepath.Clean(path)
+	return filepath.Dir(path) == defaultMailcowSSLRoot &&
+		!mailcowExcludedDir(filepath.Base(path))
+}
+
 func underCertRoot(path string) bool {
 	for _, r := range certRootPrefixes {
 		if path == r || strings.HasPrefix(path, r+"/") {
@@ -296,8 +305,9 @@ const (
 //     are read by discoverPairs (LE /etc/letsencrypt, cPanel
 //     /var/cpanel/ssl, DA /usr/local/directadmin, /etc/ssl) — safe and
 //     desirable to watch fully.
-//   - actionShallow: home-layout containers one level above per-domain
-//     cert material — a brand-new user home (under a /home* mount), a
+//   - actionShallow: Mailcow SNI host directories and home-layout containers
+//     one level above per-domain cert material — a brand-new user home (under a
+//     /home* mount), a
 //     user's "domains" container, or an individual domain dir. Watched
 //     shallowly so the eventual ssl.key/ssl.cert file creation fires an
 //     event, WITHOUT recursing whole home/web trees (public_html,
@@ -316,6 +326,8 @@ func classifyNewDir(path string) newDirAction {
 	switch {
 	case underCertRoot(path):
 		return actionRecursive
+	case isMailcowActiveChild(path):
+		return actionShallow
 	case homeMountTopRE.MatchString(filepath.Dir(path)), // new user home
 		base == "domains",       // user's domains container
 		parentBase == "domains": // an individual domain dir
