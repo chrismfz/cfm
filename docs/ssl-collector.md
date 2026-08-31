@@ -126,7 +126,9 @@ chain (`ssl.ca` / `ssl.combined`) so workers ship a complete chain.
 Non-home cert sources are unchanged and fully covered: Let's Encrypt
 (`/etc/letsencrypt`), cPanel (`/var/cpanel/ssl`, incl. hostname/service
 bundles), DirectAdmin (`/usr/local/directadmin`), Virtualmin/Webmin
-(`/etc/ssl/virtualmin`, `/etc/webmin/miniserv.pem`), and system/service
+(`/etc/ssl/virtualmin`, `/etc/webmin/miniserv.pem`), Mailcow's active store
+(`/opt/mailcow-dockerized/data/assets/ssl`, root pair plus immediate SNI host
+directories; `acme/` and `backups/` are never scanned), and system/service
 hostname certs such as Exim (`/etc/exim.*`).
 
 **2. Workers pull the new cert (`configs/lua/sslcollector.lua`):**
