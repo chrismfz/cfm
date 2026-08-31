@@ -51,6 +51,12 @@ func TestClassifyNewDir(t *testing.T) {
 		{"/home5/newreseller", actionShallow},
 		{"/home/bob/domains", actionShallow},
 		{"/home/bob/domains/site.gr", actionShallow},
+		// Mailcow: immediate SNI host dirs are watched shallowly; account
+		// material, backups, and deeper backup snapshots stay excluded.
+		{defaultMailcowSSLRoot + "/mymail.myip.gr", actionShallow},
+		{defaultMailcowSSLRoot + "/acme", actionIgnore},
+		{defaultMailcowSSLRoot + "/backups", actionIgnore},
+		{defaultMailcowSSLRoot + "/backups/mymail.myip.gr", actionIgnore},
 		// Per-user ~/ssl, ~/certs, ~/letsencrypt are NOT escalated: no
 		// scanner reads them, so watching them would only burn inotify
 		// watches and fire no-op rescans.
