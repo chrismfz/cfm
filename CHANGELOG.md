@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.08.31
+
 ### Added
 - **SSLCollector discovers Mailcow's active TLS certificates.** The collector now
   reads the primary `/opt/mailcow-dockerized/data/assets/ssl/{cert,key}.pem`
