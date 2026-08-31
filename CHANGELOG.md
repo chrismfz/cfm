@@ -17,7 +17,15 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **SSLCollector discovers Mailcow's active TLS certificates.** The collector now
+  reads the primary `/opt/mailcow-dockerized/data/assets/ssl/{cert,key}.pem`
+  pair and immediate per-host SNI directories, and watches that active store for
+  renewals. The scan is deliberately non-recursive and explicitly excludes
+  `acme/` and `backups/`, so account keys and stale historical certificates
+  can never enter the serving inventory. This gives the direct `:6061` control
+  plane a real CA-signed hostname certificate on Mailcow-only nodes while
+  retaining the existing self-signed fallback for break-glass availability.
 
 ## 2026.08.27
 
