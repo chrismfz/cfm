@@ -249,6 +249,7 @@ func (c *Collector) Run(ctx context.Context) error {
 		"/var/cpanel/ssl",
 		"/usr/local/directadmin",
 		"/etc/ssl",
+		defaultMailcowSSLRoot,
 	}
 
 	// Per-user home cert material (Virtualmin: <home>/<user>/domains/
