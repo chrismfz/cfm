@@ -6,11 +6,17 @@ import (
 	"strings"
 )
 
+const defaultMailcowSSLRoot = "/opt/mailcow-dockerized/data/assets/ssl"
+
 func (c *Collector) discoverPairs() []Pair {
 	out := make([]Pair, 0, 1024)
 
 	// LetsEncrypt
 	out = append(out, scanLetsEncrypt("/etc/letsencrypt/live")...)
+
+	// Mailcow: only the active TLS store and its immediate SNI host directories.
+	// Deliberately never walk acme/ or backups/ (account keys and stale certs).
+	out = append(out, scanMailcow(defaultMailcowSSLRoot)...)
 
 	// cPanel
 	out = append(out, scanCPanel("/var/cpanel/ssl/apache_tls")...)
@@ -159,6 +165,45 @@ func scanLetsEncrypt(liveDir string) []Pair {
 		if fileOK(cert) && fileOK(key) {
 			out = append(out, Pair{Source: SrcLetsEncrypt, CertPath: cert, KeyPath: key})
 		}
+	}
+	return out
+}
+
+
+// scanMailcow discovers the active Mailcow certificate pair plus immediate
+// per-host SNI pairs. Mailcow keeps account material and historical certificates
+// below acme/ and backups/; those trees are excluded explicitly and the scan is
+// intentionally non-recursive so stale/private ACME material can never enter the
+// serving inventory.
+func scanMailcow(root string) []Pair {
+	out := make([]Pair, 0, 4)
+
+	appendPair := func(dir string) {
+		cert := filepath.Join(dir, "cert.pem")
+		key := filepath.Join(dir, "key.pem")
+		if fileOK(cert) && fileOK(key) {
+			// Mailcow cert.pem is the served full chain, so no separate ChainPath.
+			out = append(out, Pair{Source: SrcMailcow, CertPath: cert, KeyPath: key})
+		}
+	}
+
+	// Primary active certificate.
+	appendPair(root)
+
+	// Optional ENABLE_SSL_SNI layout: <root>/<hostname>/{cert,key}.pem.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return out
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		switch entry.Name() {
+		case "acme", "backups":
+			continue
+		}
+		appendPair(filepath.Join(root, entry.Name()))
 	}
 	return out
 }
