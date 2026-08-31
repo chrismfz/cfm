@@ -170,15 +170,42 @@ func scanLetsEncrypt(liveDir string) []Pair {
 }
 
 
+// mailcowExcludedDir identifies Mailcow TLS-store trees that hold ACME
+// account keys or historical certificates rather than active serving material.
+func mailcowExcludedDir(name string) bool {
+	switch name {
+	case "acme", "backups":
+		return true
+	default:
+		return false
+	}
+}
+
+// mailcowActiveDirs returns only the active root and immediate SNI host
+// directories. It is shared by discovery and the shallow watcher setup so the
+// watch set cannot drift wider than the scan set.
+func mailcowActiveDirs(root string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	out := []string{root}
+	for _, entry := range entries {
+		if !entry.IsDir() || mailcowExcludedDir(entry.Name()) {
+			continue
+		}
+		out = append(out, filepath.Join(root, entry.Name()))
+	}
+	return out
+}
+
 // scanMailcow discovers the active Mailcow certificate pair plus immediate
-// per-host SNI pairs. Mailcow keeps account material and historical certificates
-// below acme/ and backups/; those trees are excluded explicitly and the scan is
-// intentionally non-recursive so stale/private ACME material can never enter the
-// serving inventory.
+// per-host SNI pairs. The shared mailcowActiveDirs policy makes the scan
+// deliberately non-recursive, so stale/private ACME material can never enter
+// the serving inventory.
 func scanMailcow(root string) []Pair {
 	out := make([]Pair, 0, 4)
-
-	appendPair := func(dir string) {
+	for _, dir := range mailcowActiveDirs(root) {
 		cert := filepath.Join(dir, "cert.pem")
 		key := filepath.Join(dir, "key.pem")
 		if fileOK(cert) && fileOK(key) {
@@ -186,28 +213,8 @@ func scanMailcow(root string) []Pair {
 			out = append(out, Pair{Source: SrcMailcow, CertPath: cert, KeyPath: key})
 		}
 	}
-
-	// Primary active certificate.
-	appendPair(root)
-
-	// Optional ENABLE_SSL_SNI layout: <root>/<hostname>/{cert,key}.pem.
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return out
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		switch entry.Name() {
-		case "acme", "backups":
-			continue
-		}
-		appendPair(filepath.Join(root, entry.Name()))
-	}
 	return out
 }
-
 
 
 func scanCPanel(root string) []Pair {
