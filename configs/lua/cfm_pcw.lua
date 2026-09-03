@@ -36,6 +36,11 @@ local LOG_EVERY  = 300  -- re-log one (ip, verdict) at most this often
 --     we most want to measure — it ships no Sec-Fetch), fall back to Accept:
 --     text/html. JSON/API AJAX (Accept: application/json) and static assets (which
 --     bypass cfm.lua anyway) are still excluded.
+-- KNOWN BLIND SPOT: a scraper that pulls page HTML via fetch()/XHR sends
+-- Sec-Fetch-Dest: empty (or a non-text/html Accept), so it is NOT counted. This
+-- signal only catches FULL-NAVIGATION scraping; a signal-aware farm can dodge by
+-- fetching pages as sub-resources. Acceptable for a log-only burn-in — the intent
+-- is to size the naive-navigation cadence, not to be evasion-proof.
 local function is_nav(method, accept, dest, purpose)
   method = string.lower(method or "")
   if method ~= "get" and method ~= "head" then return false end

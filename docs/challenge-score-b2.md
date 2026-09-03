@@ -121,6 +121,15 @@ asset-silence, once we choose.
   (`env CFM_PCW;` in both confs). Thresholds/window are in-code burn-in constants.
 - `docs/challenge-score.md` §1/§4/§10 updated; the asset-silence tell is retired.
 
+**Known blind spot (false-negative).** Because `is_nav` counts only top-level
+document navigations, a scraper that pulls page HTML via `fetch()`/XHR
+(`Sec-Fetch-Dest: empty`, or a non-`text/html` Accept) is **not** counted — a
+common scraping pattern, so a signal-aware farm dodges trivially. This is inherent
+to the "count navs, not AJAX, to avoid FP" tradeoff and acceptable for a log-only
+burn-in that sizes naive-navigation cadence. The daemon's log-driven `rate_outlier`
+still sees such clients (all requests are in the access log); B2's role is the
+edge-local per-cleared-identity accumulator, not an evasion-proof detector.
+
 B3 (the hybrid seed map) later fuses this edge accumulator with the daemon seed
 (Stage-1a `challenge_score` + B1 `WAF_FETCH_METADATA` + `cookie_discard` +
 `solver_farm`) into one edge-local per-client score.
