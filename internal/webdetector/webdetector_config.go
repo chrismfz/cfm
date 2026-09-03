@@ -336,6 +336,16 @@ type Config struct {
 	UAEmergencyAuditLog  string // UA_EMERGENCY_AUDIT_LOG
 }
 
+// Effective arm defaults for the auto suspicious-vhost mode. Named so the
+// log-only Track-1 fused score (abuse_shadow_fused.go) can fall back to the SAME
+// values when it evaluates a shadow-only config where these are left at 0 (the
+// FillDefaults normalization below only sets them when the live arm is enabled) —
+// no divergent literal (CLAUDE.md §5).
+const (
+	defaultChallengeSuspiciousScoreOn   = 0.70
+	defaultChallengeSuspiciousMinUniqIP = 80
+)
+
 // FillDefaults ensures sane defaults if some fields are zero.
 func (c *Config) FillDefaults() {
 	if c.Every <= 0 {
@@ -454,7 +464,7 @@ func (c *Config) FillDefaults() {
 	// Defaults for auto suspicious vhost mode (only meaningful when enabled).
 	if c.ChallengeSuspiciousVHost {
 		if c.ChallengeSuspiciousScoreOn <= 0 {
-			c.ChallengeSuspiciousScoreOn = 0.70
+			c.ChallengeSuspiciousScoreOn = defaultChallengeSuspiciousScoreOn
 		}
 		// If OFF not set, default to ON-0.10 (but never below 0).
 		if c.ChallengeSuspiciousScoreOff <= 0 {
@@ -465,7 +475,7 @@ func (c *Config) FillDefaults() {
 			c.ChallengeSuspiciousScoreOff = off
 		}
 		if c.ChallengeSuspiciousMinUniqIP <= 0 {
-			c.ChallengeSuspiciousMinUniqIP = 80
+			c.ChallengeSuspiciousMinUniqIP = defaultChallengeSuspiciousMinUniqIP
 		}
 		if c.ChallengeSuspiciousHolddown <= 0 {
 			c.ChallengeSuspiciousHolddown = 10 * time.Minute

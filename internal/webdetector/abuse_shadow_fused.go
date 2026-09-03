@@ -195,11 +195,19 @@ func (e *Engine) emitAbuseShadowFusedScore(now time.Time) {
 	fusedLastRun = now
 	fusedRunMu.Unlock()
 
+	// In the shadow-only burn-in config the live arm is disabled, so FillDefaults
+	// leaves ScoreOn / MinUniqIP at 0; fall back to the SAME effective arm defaults
+	// so the fused would_arm mirrors a real arm (a fused score over the line on a
+	// vhost below the uniqIP floor could never actually fire). Shared constants,
+	// no divergent literal.
 	on := e.cfg.ChallengeSuspiciousScoreOn
 	if on <= 0 {
-		on = 0.70
+		on = defaultChallengeSuspiciousScoreOn
 	}
 	minUniq := e.cfg.ChallengeSuspiciousMinUniqIP
+	if minUniq <= 0 {
+		minUniq = defaultChallengeSuspiciousMinUniqIP
+	}
 
 	sums := e.longwin.SumAll()
 	for host := range sums {
