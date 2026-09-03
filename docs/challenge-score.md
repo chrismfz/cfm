@@ -225,7 +225,9 @@ shared with the vhost lane:
       shared egress (CGNAT/NAT) where many real users are cleared for the same host
       pools — a known FP class B3 must handle NAT-aware before enforcement. Edge-local
       (fills the Step-2b decision-skip blind spot), log-only, `pcall`-guarded,
-      dedicated bounded `cfm_pcw` dict, `CFM_PCW=0` kill-switch. Feeds the seed map.
+      dedicated bounded `cfm_pcw` dict, config toggle
+      (`detectors.conf [webdetector] POST_CLEARANCE_CADENCE = 0`, published to the
+      edge on the 10s bridge TTL, no proxy reload). Feeds the seed map.
     - **B3 — hybrid seed map (last).** Daemon publishes the Stage-1a score +
       `cookie_discard`/`solver_farm` as a per-IP seed the edge reads (the
       `root:cfm 0640` token-file pattern); edge fuses seed + edge tells into one

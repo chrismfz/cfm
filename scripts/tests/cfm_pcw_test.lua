@@ -133,26 +133,31 @@ do
   check(pcw.observe(full, "7.7.7.7|h|web", "GET", "text/html") == nil, "dict full (incr nil) → nil, no throw")
 end
 
--- ── conf wiring: both edge confs declare the dict AND the env kill-switch ─────
+-- ── conf wiring: both edge confs declare the dict; the toggle is NO LONGER env ─
+-- (it moved to the bridge config — [webdetector] POST_CLEARANCE_CADENCE).
+local function slurp(p)
+  local fh = assert(io.open(p, "r"), "cannot open " .. p)
+  local s = fh:read("*a"); fh:close(); return s
+end
 for _, conf in ipairs({ "configs/openresty.conf", "configs/angie.conf" }) do
-  local fh = assert(io.open(conf, "r"), "cannot open " .. conf)
-  local src = fh:read("*a"); fh:close()
+  local src = slurp(conf)
   check(src:find("lua_shared_dict%s+cfm_pcw%s") ~= nil, conf .. " declares lua_shared_dict cfm_pcw")
-  check(src:find("env%s+CFM_PCW%s*;") ~= nil, conf .. " declares `env CFM_PCW;` (else the kill-switch is inert in workers)")
+  check(src:find("env%s+CFM_PCW%s*;") == nil, conf .. " no longer declares `env CFM_PCW;` (toggle moved to config)")
 end
 
--- ── cfm_cfg kill-switch: default ON; CFM_PCW=0 disables ───────────────────────
-do
-  package.loaded["cfm_cfg"] = nil
-  check(require("cfm_cfg").pcw_enabled == true, "pcw_enabled defaults ON when CFM_PCW unset")
-  package.loaded["cfm_cfg"] = nil
-  local real = os.getenv
-  os.getenv = function(k) if k == "CFM_PCW" then return "0" end return real(k) end
-  local ok, cfg2 = pcall(require, "cfm_cfg")
-  os.getenv = real
-  package.loaded["cfm_cfg"] = nil
-  check(ok and cfg2.pcw_enabled == false, "CFM_PCW=0 disables pcw_enabled")
-end
+-- ── config-driven toggle wiring: bridge-cfg exposes it, cfm.lua reads it, the
+--    reference detectors.conf documents the [webdetector] key, and the env read
+--    is gone from cfm_cfg.
+check(slurp("configs/lua/cfm_bridge_cfg.lua"):find("post_clearance_cadence", 1, true) ~= nil,
+      "cfm_bridge_cfg exposes post_clearance_cadence")
+check(slurp("configs/lua/cfm.lua"):find("CFG.post_clearance_cadence", 1, true) ~= nil,
+      "cfm.lua Step 2b gates on CFG.post_clearance_cadence")
+check(slurp("configs/lua/cfm.lua"):find("CFG.pcw_enabled", 1, true) == nil,
+      "cfm.lua no longer reads the removed CFG.pcw_enabled")
+check(slurp("configs/lua/cfm_cfg.lua"):find("CFM_PCW", 1, true) == nil,
+      "cfm_cfg no longer reads the CFM_PCW env var")
+check(slurp("configs/detectors.conf"):find("POST_CLEARANCE_CADENCE", 1, true) ~= nil,
+      "reference detectors.conf documents [webdetector] POST_CLEARANCE_CADENCE")
 
 if fails > 0 then
   io.stderr:write(("cfm_pcw tests: %d FAILED\n"):format(fails))

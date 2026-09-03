@@ -27,6 +27,8 @@
 --                       daemon predates the field → cfm_panel.lua defaults it to
 --                       "enforce")
 --   panel_decision_mode string  or nil (same shape as panel_waf_mode)
+--   post_clearance_cadence boolean (default true when file/field missing; the
+--                       cfm_pcw B2 shadow toggle — [webdetector] POST_CLEARANCE_CADENCE)
 
 local fc = require "cfm_filecache"
 
@@ -67,6 +69,10 @@ local OPTS = {
     if type(val.panel_decision_mode) == "string" then
       out.panel_decision_mode = val.panel_decision_mode
     end
+    -- Post-clearance nav-cadence shadow (cfm_pcw, B2). Default TRUE (nil on an
+    -- older daemon's file → on), off only when explicitly published false — same
+    -- fail-safe idiom as clearance_refresh.
+    out.post_clearance_cadence = (val.post_clearance_cadence ~= false)
     return out
   end,
 }

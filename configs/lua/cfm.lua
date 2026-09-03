@@ -194,6 +194,10 @@ local CFG = setmetatable({
   -- $cfm_origin_ka_conf sentinel in origin_pass_for(). Default OFF. See
   -- cfm_origin_ka.lua and docs/proxy-performance.md.
   origin_keepalive  = (_bridge_cfg.origin_keepalive == true),
+  -- Post-clearance nav-cadence shadow (cfm_pcw, B2). Bridge-derived so it
+  -- refreshes on the 10s TTL — flip [webdetector] POST_CLEARANCE_CADENCE with no
+  -- proxy reload. Default on (nil/absent → true), matching the fail-safe idiom.
+  post_clearance_cadence = (_bridge_cfg.post_clearance_cadence ~= false),
 }, { __index = _cfg_static })
 
 local clamav_ok, clamav = pcall(require, "cfm_clamav")
@@ -1399,7 +1403,7 @@ if clearance_allow then
   -- /nginx/decision RPC), so we measure its nav rate here. pcall-guarded so a bug
   -- in the observer can NEVER break the clearance fast-path — the bulk of real
   -- production traffic. observe() returns a verdict ONLY when a line is due.
-  if pcw_ok and pcw and CFG.pcw_enabled and PCW_SH then
+  if pcw_ok and pcw and CFG.post_clearance_cadence and PCW_SH then
     -- Key at the clearance grain (ip|host|scope) so a shared egress isn't pooled
     -- across hosts, and pass the fetch-metadata headers so is_nav counts only a
     -- top-level document nav (not iframes / prefetch).

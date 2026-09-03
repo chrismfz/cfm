@@ -76,8 +76,9 @@ Two viable paths; both are defensible, pick by appetite:
   `[cfm_pcw] post_clearance_burst … verdict=would_harden|would_deny` to the edge
   error log (read via `edge_error_tail`). Shadow-only, cache-immune, no asset-path
   change, `pcall`-guarded so it can never break the clearance fast-path, behind a
-  `CFM_PCW` kill-switch. It fills the decision-skip blind spot edge-locally and is
-  the direct groundwork for the Stage-E edge actuator. Small, single-concern.
+  config toggle (`[webdetector] POST_CLEARANCE_CADENCE`). It fills the decision-skip
+  blind spot edge-locally and is the direct groundwork for the Stage-E edge
+  actuator. Small, single-concern.
 
 - **B2-skip → go to B3 (the hybrid seed map).** Since the cadence overlaps
   `rate_outlier`, an alternative is to skip a standalone B2 and invest in **B3**:
@@ -117,8 +118,10 @@ asset-silence, once we choose.
 - **Safety:** never blocks/challenges/changes flow; the Step-2b call is
   `pcall`-guarded so a bug can't break the clearance fast-path (an adversarial
   review confirmed no path alters flow or adds latency); the shared dict is bounded
-  + short-TTL (self-cleaning); default ON with a `CFM_PCW=0` kill-switch
-  (`env CFM_PCW;` in both confs). Thresholds/window are in-code burn-in constants.
+  + short-TTL (self-cleaning); default ON with a config toggle
+  (`detectors.conf [webdetector] POST_CLEARANCE_CADENCE = 0` disables it, published
+  to the edge via `cfm_bridge_config.lua` on the 10s bridge TTL — no proxy reload).
+  Thresholds/window are in-code burn-in constants.
 - `docs/challenge-score.md` §1/§4/§10 updated; the asset-silence tell is retired.
 
 **Known blind spot (false-negative).** Because `is_nav` counts only top-level

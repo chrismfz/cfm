@@ -444,6 +444,11 @@ func (m *manager) maybeReload(parent context.Context) {
 				// too). kvStrClean tolerates an inline ;/# comment (§5).
 				PanelWAFMode:      kvStrClean(wdKV, "PANEL_WAF_MODE", "enforce"),
 				PanelDecisionMode: kvStrClean(wdKV, "PANEL_DECISION_MODE", "enforce"),
+				// Post-clearance nav-cadence shadow (cfm_pcw, Track-2 B2). Edge
+				// LOG-ONLY measurement; default on. Replaces the CFM_PCW env
+				// kill-switch so the toggle is config-driven (POST_CLEARANCE_CADENCE=0
+				// disables) and applies within ~10s without a proxy reload.
+				PostClearanceCadence: kvBool(wdKV, "POST_CLEARANCE_CADENCE", true),
 			}
 			// Guard nonsense values; the Lua side re-guards but keep the
 			// published file sane. Idle must stay below Apache's
@@ -460,8 +465,8 @@ func (m *manager) maybeReload(parent context.Context) {
 			if err := sslcollector.WriteWebdetectorBridgeConfig(bridgeConfigPath, bridgeCfg, cfmGID); err != nil {
 				logging.Logf("[detectors] cfm_bridge_config.lua write failed path=%s err=%v", bridgeConfigPath, err)
 			} else {
-				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s",
-					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode)
+				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s post_clearance_cadence=%v",
+					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PostClearanceCadence)
 			}
 		}
 	}

@@ -39,8 +39,11 @@ back-filled here — see the git/PR history for that period.
   browser caching would break it anyway (`docs/challenge-score-b2.md`); nav cadence
   is cache-immune and fully observable. Pure measurement: never blocks / challenges
   / changes flow, `pcall`-guarded so a bug can't break the clearance fast-path,
-  bounded dedicated `cfm_pcw` shared dict, default ON with a `CFM_PCW=0`
-  kill-switch. Feeds the per-client challenge score (B3 seed map) later.
+  bounded dedicated `cfm_pcw` shared dict, default ON with a config toggle —
+  `detectors.conf [webdetector] POST_CLEARANCE_CADENCE = 0` disables it, published
+  to the edge via `cfm_bridge_config.lua` and applied within ~10s with no proxy
+  reload (same channel as `CHALLENGE_COOKIE_REFRESH` / `ORIGIN_KEEPALIVE`). Feeds
+  the per-client challenge score (B3 seed map) later.
 - **Track-2 Stage 1b (edge tell #1): a "fetch-metadata missing" headless WAF rule
   (rule 612, `WAF_FETCH_METADATA`; logonly SHADOW).** Fires only when a request
   *claims* a modern Sec-Fetch-capable browser (Chrome ≥ 76 / Firefox ≥ 90) yet
