@@ -1,0 +1,191 @@
+# Challenge-abuse score (per-client) — design notes
+
+> **Status:** WORKING NOTES (design, pre-code). The per-client half of the
+> traffic-classifier convergence — **Track 2**. Targets the *challenge-defeat*
+> problem (headless browsers that SOLVE the challenge), which is structurally
+> invisible to the daemon. Read `docs/traffic-classifier.md` first (the master
+> plan and Track 1). Owner: challenge/webdetector. Last updated: 2026-08-27.
+
+---
+
+## 1. The problem this scores
+
+The pain is not "a vhost is under a flood" (that is **Track 1**, the vhost
+anomaly fusion over facet/cost/dc). The pain here is: **the challenge was issued,
+the client solved it, and it kept abusing** — a headless/solver-farm pipeline
+(Playwright / lightpanda / a hosted PoW solver) that answers the proof-of-work
+and then re-solves per request or per short window.
+
+Each per-IP tell is individually **below** its own threshold; together they are
+categorical:
+
+| Tell | What it means | Who sees it today |
+|---|---|---|
+| **re-solve ≤45 m** (canonical host collapsed) | headless keeps no cookie → asks for a fresh challenge | daemon — `cookie_discard` |
+| **issuance cadence** > K/h | same IP pulls many fresh challenges | **edge only** |
+| **solve-time < human floor** for the PoW difficulty | native/GPU solver answers faster than a real browser | daemon — challenge-solved history (`solve_ms`) |
+| **cleared & then silent** T s (no follow-up asset/nav) | a real browser fetches assets after solving; a farm does not | **edge only** (post-clearance) |
+| **claims-browser, no `Sec-Fetch-*` / `Accept-Language`** on a `text/html` nav | automation stack (lightpanda ships almost no modern headers) | **edge only** |
+| **farm subnet-spread** | this IP is a member of a many-`/24` solving swarm | daemon — `solver_farm` mark (vhost-level) |
+
+No current actuator **sums** these. `cookie_discard` sees only the first,
+`solver_farm` only the spread (vhost-level), `under_attack` needs sustained
+pressure on top. The gap the traffic-classifier doc names: **there is no
+per-client score in the challenge domain.**
+
+## 2. Why the daemon can't own this alone (the linchpin constraint)
+
+`cfm.lua` Step 2b: when the clearance cookie is valid AND the WAF passed, the
+`/nginx/decision` RPC is **skipped entirely** — a solved client is waved through
+for the cookie lifetime (~45 m). So **issuance cadence, post-clearance silence,
+and the Sec-Fetch tell are only observable at the EDGE**, and any actuation for a
+post-clearance abuser must also be **edge-local** (the daemon decision path never
+runs for that request). See `docs/traffic-classifier.md` § "clearance
+short-circuits the decision".
+
+## 3. Architecture — hybrid (recommended), not pure edge-Lua
+
+The original sketch (chat, "Option A") put the whole score in edge-Lua. We
+recommend a **hybrid** split instead, so the scoring logic stays testable in Go
+and the edge does only what it *must* do locally:
+
+```
+ daemon (Go, testable)                         edge (cfm.lua, ngx.shared)
+ ─────────────────────                         ──────────────────────────
+ cookie_discard re-solve  ─┐                    issuance cadence   ─┐
+ solve_ms anomaly          ├─► SEED map ──────► post-clearance     ├─► per-IP
+ solver_farm membership   ─┘   (edge-read,      Sec-Fetch tell     ─┘   decayed
+                                like the token   (edge-only tells)       SCORE
+                                Lua files)                                │
+                                                        T1/T2 ladder ◄────┘
+                                                     (harden / 403, edge-local)
+```
+
+- **Daemon side** computes the signals it already holds best (it owns the
+  challenge-solve event stream via `RecordChallengeSolved`, the `cookie_discard`
+  detector, and the `solver_farm` marks) and publishes a **seed weight per IP**
+  into an edge-consumed map — the same proven pattern as the generated Lua token
+  files (`root:cfm 0640`) and the proposed edge-deny channel.
+- **Edge side** keeps only the tells it alone can see in an `ngx.shared` dict
+  with time-decay, adds the daemon seed, and applies the ladder **locally** so it
+  survives valid clearance.
+- **Alternative (flagged, not chosen):** pure edge-Lua score (all tells in Lua).
+  Rejected as the default because it moves scoring logic into an untestable layer
+  and duplicates signals the daemon already computes; kept as a fallback if the
+  seed-map latency proves too coarse.
+
+Any change to `cfm.lua` / `cfm_waf.lua` here goes through
+`docs/challenge-waf-release-checklist.md` — shipping a Lua file that fails to load
+takes the challenge/WAF layer down.
+
+## 4. Score skeleton (indicative weights — tune in shadow)
+
+Per-IP, decay **30 m half-life**, per-signal caps, `ALLOW_NETS` / `IGNORE_IPS`
+bypass, NAT-aware. Weights are config knobs.
+
+| Signal | Weight | Source | Note |
+|---|---|---|---|
+| re-solve ≤45 m (canonical host collapsed) | +40 | daemon seed | the `cookie_discard` signal |
+| issuance cadence > K/h | +10 / hit | edge | absorbs the "issuance throttle" idea as a contributor |
+| solve-time < human floor for PoW `n` | +15 | daemon seed | native/GPU solvers answer too fast |
+| cleared & total silence T=60 s | +25 | edge | post-clearance tripwire |
+| claims-browser + no fetch-metadata on `text/html` nav | +20 | edge | the Sec-Fetch tell as a score component, not a standalone deny |
+| farm subnet-spread (member this window) | +5 / solve | daemon seed | bridge from `solver_farm`; spreads guilt to the swarm's solving IPs |
+
+**De-correlation (carry the Track-1 guardrail):** re-solve / issuance / solve-time
+partly measure the same "re-solve rate" — **group them under one capped weight**,
+don't triple-count. Never feed the *consequence* of our own challenge
+(challenge → re-solve) back as if it were independent evidence.
+
+## 5. The ladder (shadow → T1 → T2), mirroring BAD_UA's score philosophy
+
+| Band | Action | Notes |
+|---|---|---|
+| **shadow** (burn-in) | log only — `[cfm_challenge_score]` would-lines | measure would-act vs baseline before any enforcement |
+| **≥ T1 (soft)** | **harden the NEXT challenge** for this IP | PoW `n`↑ **or** a harder interactive challenge (see §6) |
+| **≥ T2 (hard)** | **403 deny** (edge) | 403, not nft — HTTP-layer, per-vhost, residential-FP-friendlier |
+| **≥ 99 (reserved)** | deterministic jump | confirmed repeat-solver with canonical-host collapse — the job `cookie_discard` does today |
+
+**Shadow-first is mandatory** (like `abuse_shadow` / the fingerprinter): a
+`[cfm_challenge_score]` shadow log with `verdict=would_harden` / `would_deny`,
+compared to baseline, before T1/T2 are ever armed. `logonly → challenge/harden →
+deny` promotion, never straight to deny.
+
+## 6. Actuator menu (Stage E — the last decision, shared with Track 1)
+
+This score chooses *who*; the **actuator is a separate, later decision** and is
+shared with the vhost lane:
+
+- **Soft rung — harden.** PoW difficulty `n` 16→20 (`pow.go PowConfig.Difficulty`,
+  today hardcoded 16; the knob is Phase A groundwork). ⚠️ `n=20` already loses
+  ~⅓ of mobile clients to **expiry** — so the challenge expiry window MUST scale
+  with `n` in the same change, or we self-DoS.
+  - **ChallengeV2 (interactive: drag-image / puzzle)** is the stronger soft rung
+    *specifically against headless*: PoW is pure CPU (a farm solves it trivially),
+    while a drag/puzzle needs real interaction/rendering. Prefer ChallengeV2 over
+    PoW-harden for the solver-farm class; keep PoW-harden for cost-based hardening.
+- **Hard rung — deny.** 403 static (leaning this, residential-proxy mercy — the
+  innocent sees *something* and can refresh) **/** tarpit (delayed-empty 200,
+  steals attacker concurrency, hides detection) **/** nft drop (silent, but
+  reveals nothing and is harsher on FPs). Deny-shape = master-plan Open Question #1.
+- **Manual challenge** stays an operator tool throughout.
+
+## 7. Guardrails
+
+- **Shadow-first**, `logonly → harden → deny`, never straight to deny.
+- **Never** an adverse decision on country/ASN alone (house rule).
+- `ALLOW_NETS` / `IGNORE_IPS` bypass + **NAT awareness** — a shared corporate/NAT
+  egress must not be locked out by one member's solver.
+- Respect existing challenge/WAF **excludes & bypass** (e.g. `/acctxfer*`,
+  `/.well-known/`) so we never gate transfers or ACME.
+- Edge-Lua changes follow `docs/challenge-waf-release-checklist.md`.
+- **Absorbs, doesn't duplicate:** long-term this score subsumes `cookie_discard`
+  as a *contributor*; keep the `cookie_discard` / `solver_farm` alerts running as
+  dual signals during burn-in, retire once the score leads.
+
+## 8. Wiring anchors (grounded, from the 2026-08-27 code map)
+
+- Clearance short-circuit: `cfm.lua` Step 2b (the reason the edge must own it).
+- Challenge-solve event stream: `RecordChallengeSolved` → history store
+  (`solve_ms`, `ua_impossible` already persisted).
+- `cookie_discard` detector: `internal/detectors/cookiediscard` +
+  `challenge_cookie_discard_register.go` (`BLOCK` is operator config).
+- `solver_farm` marks: `IsSolverFarm(host)` (`solverfarm_marks.go`).
+- PoW difficulty: `internal/webdetector/pow.go` — `PowConfig.Difficulty`,
+  `defaultPowDifficulty = 16`; the `n=20 → ⅓ mobile expiry` note lives here.
+- Edge-consumed map precedent: the generated Lua token files (`root:cfm`, `0640`).
+
+## 9. Open questions (resolve before T-band code)
+
+1. **Deny shape**: 403 vs tarpit vs nft drop (shared with the master plan).
+2. **Client subject**: pure IP (simplest) vs `(IP, vhost)` (fairer multi-tenant)
+   vs `/24` rollup (solver farms). Lean **IP-primary + a `/24` density feature**.
+3. **Aggregation site**: the hybrid seed-map (recommended) vs pure edge-Lua.
+4. **Burn-in log**: a new `[cfm_challenge_score]` shadow log (like `abuse_shadow`)
+   vs folding into an existing surface. Lean **new dedicated log** (the daemon
+   emits the seed side; the edge emits the edge-tell side — two writers, one
+   schema), surfaced by an MCP tool like `abuse_shadow`.
+5. **Dual signals**: retire `cookie_discard` / `solver_farm` alerts once the score
+   leads, or keep as belt-and-suspenders?
+
+## 10. Phased plan
+
+- **Stage 0 — zero-code (operator):** `BLOCK = 6h` on `cookie_discard` +
+  `UNDER_ATTACK_FINGERPRINT` / `FP_*` keys (data collection). Covers ~80% of the
+  re-solver case today with no code.
+- **Stage 1 — shadow scorer + aggregation view:** daemon seed map + edge-tell
+  counters + `[cfm_challenge_score]` would-lines + an MCP reader. No enforcement.
+- **Stage 2 — T1 harden:** wire the soft rung (POWN knob **Phase A manual** first
+  — `CHALLENGE_POWN` + per-vhost + expiry scaling + cfm-admin button; then
+  **Phase B auto governor** from `IsSolverFarm` / challenged / suspicious), and/or
+  ChallengeV2.
+- **Stage 3 — T2 deny:** the edge-deny (403) channel, after burn-in shows a clean
+  would-deny set.
+
+**Standalone building blocks (value on their own, feed this score):**
+- **POWN difficulty knob** (Phase A manual) — also the I3 "harden" groundwork.
+- **Sec-Fetch headless-tell WAF rule** — `logonly` first (watch `waf_fp_hunt`),
+  then promote; only ever fires when the UA *claims* a browser, so honest
+  `curl`/`wget`/`Python-requests` never match. A stacked weak-signal rule
+  (claims-browser AND missing `Sec-Fetch-Site` AND missing `Accept-Language` AND
+  `text/html` nav), not a single-header deny.
