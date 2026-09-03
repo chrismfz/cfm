@@ -407,6 +407,12 @@ type WebdetectorBridgeConfig struct {
 	// "absent → enforce" anyway.
 	PanelWAFMode      string
 	PanelDecisionMode string
+	// PostClearanceCadence enables the edge post-clearance nav-cadence shadow
+	// (cfm_pcw, Track-2 B2 — cfm.lua Step 2b). Log-only measurement, default on;
+	// detectors.conf [webdetector] POST_CLEARANCE_CADENCE. This replaces the former
+	// CFM_PCW env kill-switch so the toggle lives in config like the others and
+	// applies within ~10s without a proxy reload.
+	PostClearanceCadence bool
 }
 
 // WriteWebdetectorBridgeConfig atomically writes a Lua module exposing
@@ -447,6 +453,7 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 			"  cookie_life_sec = %d,\n"+
 			"  panel_waf_mode = %q,\n"+
 			"  panel_decision_mode = %q,\n"+
+			"  post_clearance_cadence = %s,\n"+
 			"}\n",
 		luaBool(cfg.ClearanceRefresh),
 		luaBool(cfg.OriginKeepalive),
@@ -455,6 +462,7 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 		cfg.CookieLifeSec,
 		panelMode(cfg.PanelWAFMode),
 		panelMode(cfg.PanelDecisionMode),
+		luaBool(cfg.PostClearanceCadence),
 	)
 	return writeLuaFileAtomic(luaPath, content, cfmGID, "sslcollector", "[sslcollector]", "webdetector bridge config")
 }
