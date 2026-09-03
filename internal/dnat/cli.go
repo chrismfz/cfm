@@ -743,7 +743,16 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		on, rules, _ := panelStatusWithBackend(backend)
 		fmt.Println("DNAT table: inet cfm_panel_redirect")
 		if on {
-			fmt.Printf("State: ON\nSelected priority: %d\nSelected mode: %s\n", *priority, selected)
+			// Report the priority CFM actually installed, via the persisted
+			// operator choice (PanelStartupPriority) — the engine-independent
+			// source of truth that `panel on` writes and failsafe/restore
+			// re-installs. The old line printed the `priority` flag default (-101
+			// for every invocation), so it misreported a panel enabled at any
+			// other priority (e.g. -99 via fallback mode or an explicit flag).
+			// We deliberately do NOT parse the rule text here: the nftlib backend
+			// synthesizes that text from a recomputed value rather than the live
+			// chain, so it is unreliable there.
+			fmt.Printf("State: ON\nInstalled priority: %d\nSelected mode: %s\n", PanelStartupPriority(), selected)
 		} else {
 			fmt.Println("State: OFF")
 		}
