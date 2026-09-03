@@ -79,6 +79,16 @@ clean(req("GET", CHROME, { ["sec-fetch-mode"] = "navigate" }),
       "Chrome with a Sec-Fetch header present (any one stands the rule down)")
 clean(req("GET", CHROME, { ["sec-fetch-user"] = "?1" }),
       "Sec-Fetch-User present is enough to stand down")
+-- Presence, not value: a present-but-EMPTY Accept-Language counts as "sent"
+-- (uniform with the Sec-Fetch treatment) and stands the rule down.
+clean(req("GET", CHROME, { ["accept-language"] = "" }),
+      "present-but-empty Accept-Language stands down (presence, not value)")
+-- A real Chromium in-app WebView (Android `; wv`) IS Sec-Fetch-capable and sends
+-- both headers on a navigation, so it never trips the tell.
+clean(req("GET", "Mozilla/5.0 (Linux; Android 13; Pixel 7; wv) AppleWebKit/537.36 " ..
+                 "(KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36",
+          { ["sec-fetch-site"] = "none", ["accept-language"] = "en-US" }),
+      "real Android WebView with fetch metadata + Accept-Language")
 
 -- ── Negatives: honest non-browser clients (never claim a browser) ────────────
 clean(req("GET", "curl/8.4.0"), "curl does not claim a browser")

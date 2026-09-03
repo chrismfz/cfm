@@ -1978,6 +1978,14 @@ end
 -- verified-bot exemption for any future ENFORCEMENT is the challenge/PTR layer's
 -- job (a UA token is spoofable, so it must never gate an adverse action). The set
 -- is a curated in-code constant of tokens that never appear in a real browser UA.
+-- Named crawlers only — tokens that never appear in a REAL browser UA and that
+-- unambiguously identify a specific known crawler / link-preview / AI bot. The
+-- bare generic "bot" is deliberately NOT here: it collides with real device names
+-- (e.g. CUBOT phones) and hands an attacker a one-token skip, while the named set
+-- below already covers the crawlers we want to keep out of the measurement. The
+-- generic "crawler"/"spider" ARE kept (no real browser or device carries them). An
+-- unlisted "…bot" that isn't one of these is treated like any other header-poor
+-- browser-claimer — measuring it in the logonly shadow is fine.
 local CRAWLER_UA_TOKENS = {
   "googlebot", "bingbot", "slurp", "duckduckbot", "baiduspider", "yandex",
   "applebot", "petalbot", "bytespider", "facebookexternalhit", "facebot",
@@ -1986,8 +1994,18 @@ local CRAWLER_UA_TOKENS = {
   "ahrefsbot", "semrushbot", "mj12bot", "dotbot", "dataforseobot",
   "gptbot", "oai-searchbot", "chatgpt-user", "claudebot", "anthropic-ai",
   "claude-web", "ccbot", "google-extended", "perplexitybot", "amazonbot",
-  "meta-externalagent", "bot", "crawler", "spider",
+  "meta-externalagent", "crawler", "spider",
 }
+-- ua_is_declared_crawler: true when the UA self-identifies as a known crawler /
+-- link-preview / AI bot. These legitimately ship sparse headers (no Sec-Fetch,
+-- often no Accept-Language) yet also carry a `Chrome/` token for render-compat,
+-- so they would trip the fetch-metadata tell below. They are a SEPARATE, known
+-- category — kept out of that shadow measurement so it reflects browser-CLAIMING
+-- automation, not honest bots. This is logonly hygiene, NOT a security boundary:
+-- verified-bot exemption for any future ENFORCEMENT is the challenge/PTR layer's
+-- job (a UA token is spoofable, so it must never gate an adverse action). The skip
+-- only ever SUPPRESSES a fire — it can never cause one — so a loose match here is
+-- safe (it just exempts, never accuses).
 local function ua_is_declared_crawler(ua)
   -- ua is already lowercased by the caller.
   for i = 1, #CRAWLER_UA_TOKENS do
@@ -2002,18 +2020,29 @@ end
 -- navigation is an automation stack that only spoofed its User-Agent.
 --
 -- Stacked, deliberately conservative (logonly SHADOW — measure the FP rate via
--- waf_fp_hunt before this weight ever feeds a score):
+-- waf_fp_hunt before this weight ever feeds a score). ALL of:
 --   1. method GET|HEAD and Accept contains text/html  → a top-level page
 --      navigation (assets/XHR carry their own Sec-Fetch-Dest, out of scope).
---   2. UA claims Chrome >= 76 or Firefox >= 90         → a browser that WOULD
+--   2. NO Sec-Fetch-* header at all.
+--   3. NO Accept-Language.
+--   4. UA claims Chrome >= 76 or Firefox >= 90         → a browser that WOULD
 --      send Sec-Fetch (Chrome 76+/FF 90+). Safari is intentionally excluded:
 --      Sec-Fetch is only Safari 16.4+ (Mar 2023) and old iOS is a live FP
 --      population — and headless stacks overwhelmingly spoof Chrome anyway.
---   3. NOT a self-declared crawler (ua_is_declared_crawler).
---   4. NO Sec-Fetch-* header at all.
---   5. NO Accept-Language.
--- A real browser satisfies 1+2 but never 4+5 together; an honest curl/wget/python
--- client fails 2 (it doesn't claim a browser). Returns a single tag or nil.
+--   5. NOT a self-declared crawler (ua_is_declared_crawler).
+-- A real browser satisfies 1+4 but never 2+3 together; an honest curl/wget/python
+-- client fails 4 (it doesn't claim a browser). Returns a single tag or nil.
+--
+-- ⚠️ LOAD-BEARING INVARIANT — the "no Accept-Language" clause (3) is NOT optional.
+-- Sec-Fetch is HTTPS-only (fetch-metadata spec), and this WAF also runs on the
+-- plain-HTTP :80 vhost, where a REAL browser sends NO Sec-Fetch either — so on
+-- HTTP clause (2) is satisfied by every real browser and Accept-Language is the
+-- ONLY thing separating them from automation. Dropping clause (3) to "strengthen"
+-- the rule would mass-false-positive on real HTTP browser traffic. Keep both.
+--
+-- Cheap-first ordering: the Sec-Fetch/Accept-Language checks stand down the common
+-- case (a real browser, which sends both) before the ~40-token crawler scan, so
+-- that loop only runs for the tiny set that already looks header-poor.
 function _M.detect_fetch_metadata_missing(headers, method)
   headers = headers or {}
   method = lower(method or "get")
@@ -2023,13 +2052,27 @@ function _M.detect_fetch_metadata_missing(headers, method)
   local accept = lower(headers["accept"] or headers["Accept"] or "")
   if not has(accept, "text/html") then return nil end
 
+  -- (2) Any Sec-Fetch-* present → a real browser (or a stack that bothers to send
+  -- them); stand down. Presence, not value — a present-but-empty header still
+  -- counts as "sent". This eliminates the common case (real HTTPS browsers) first.
+  if headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]
+     or headers["sec-fetch-mode"] or headers["Sec-Fetch-Mode"]
+     or headers["sec-fetch-dest"] or headers["Sec-Fetch-Dest"]
+     or headers["sec-fetch-user"] or headers["Sec-Fetch-User"] then
+    return nil
+  end
+
+  -- (3) A real browser always sends its language preferences. Presence, not value
+  -- (matches the Sec-Fetch treatment above): a present-but-empty Accept-Language
+  -- still counts as "sent". This is the load-bearing HTTP clause (see header note).
+  if headers["accept-language"] ~= nil or headers["Accept-Language"] ~= nil then
+    return nil
+  end
+
   local ua = lower(headers["user-agent"] or headers["User-Agent"] or "")
   if ua == "" then return nil end -- empty UA is rule_bad_ua's job, not this tell
 
-  -- (3) Known crawlers are a separate category — never part of this measurement.
-  if ua_is_declared_crawler(ua) then return nil end
-
-  -- (2) UA must claim a Sec-Fetch-capable browser, else it isn't "lying".
+  -- (4) UA must claim a Sec-Fetch-capable browser, else it isn't "lying".
   local claims = false
   local cver = ua:match("chrome/(%d+)")
   if cver and tonumber(cver) >= 76 then
@@ -2040,18 +2083,9 @@ function _M.detect_fetch_metadata_missing(headers, method)
   end
   if not claims then return nil end
 
-  -- (4) Any Sec-Fetch-* present → a real browser (or a stack that bothers to send
-  -- them); stand down. A present-but-empty value still counts as "sent".
-  if headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]
-     or headers["sec-fetch-mode"] or headers["Sec-Fetch-Mode"]
-     or headers["sec-fetch-dest"] or headers["Sec-Fetch-Dest"]
-     or headers["sec-fetch-user"] or headers["Sec-Fetch-User"] then
-    return nil
-  end
-
-  -- (5) A real browser always sends its language preferences.
-  local al = lower(headers["accept-language"] or headers["Accept-Language"] or "")
-  if al ~= "" then return nil end
+  -- (5) Known crawlers are a separate category — never part of this measurement.
+  -- Last, so its ~40-token scan runs only for the already-header-poor tiny set.
+  if ua_is_declared_crawler(ua) then return nil end
 
   return "NO_FETCH_META_NO_ACCEPT_LANG"
 end

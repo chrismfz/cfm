@@ -27,9 +27,14 @@ back-filled here — see the git/PR history for that period.
   Stacked weak signals, categorical together: honest `curl`/`wget`/`python`
   clients never match (they don't claim a browser), self-declared crawlers
   (Googlebot, bingbot, AI crawlers, …) are skipped, and Safari is out of scope
-  (Sec-Fetch is 16.4+ only, old iOS is a live FP pool). **logonly only** — pure
-  edge shadow, surfaced by `waf_fp_hunt`/`waf_activity`, promote past logonly only
-  after burn-in. Its `WAF_FETCH_METADATA` family has no edge-block rule so it stays
+  (Sec-Fetch is 16.4+ only, old iOS is a live FP pool). The `Accept-Language`
+  clause is load-bearing: Sec-Fetch is HTTPS-only, so on the plain-HTTP :80 vhost a
+  real browser also sends no Sec-Fetch and only Accept-Language separates it from
+  automation. The shadow population is therefore *header-poor browser-claimers*
+  broadly — expect mail link-scanners/SafeLinks prefetchers, link unfurlers not in
+  the crawler list, and apps fetching HTML with a spoofed Chrome UA in
+  `waf_fp_hunt`, which is exactly why it is **logonly only** — pure edge shadow,
+  promote past logonly only after burn-in. Its `WAF_FETCH_METADATA` family has no edge-block rule so it stays
   un-armed in `waf_security`. Runs LAST in the WAF pipeline so this weak signal
   never masks a stronger finding's headline reason. Feeds the per-client challenge
   score (Stage 1b seed map) later. See `docs/challenge-score.md`.
