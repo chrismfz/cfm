@@ -24,7 +24,7 @@ categorical:
 | **re-solve ≤45 m** (canonical host collapsed) | headless keeps no cookie → asks for a fresh challenge | daemon — `cookie_discard` |
 | **issuance cadence** > K/h | same IP pulls many fresh challenges | **edge only** |
 | **solve-time < human floor** for the PoW difficulty | native/GPU solver answers faster than a real browser | daemon — challenge-solved history (`solve_ms`) |
-| **cleared & then silent** T s (no follow-up asset/nav) | a real browser fetches assets after solving; a farm does not | **edge only** (post-clearance) |
+| **cleared, then high nav cadence** (page after page) | a solver-farm keeps pulling pages after clearing; the in-path decision path can't see it (Step 2b skips the RPC) | **edge only** (post-clearance) — `cfm_pcw`, B2. (The original "no follow-up asset" framing was retired: assets bypass `cfm.lua`; see `docs/challenge-score-b2.md`.) |
 | **claims-browser, no `Sec-Fetch-*` / `Accept-Language`** on a `text/html` nav | automation stack (lightpanda ships almost no modern headers) | **edge only** |
 | **farm subnet-spread** | this IP is a member of a many-`/24` solving swarm | daemon — `solver_farm` mark (vhost-level) |
 
@@ -88,7 +88,7 @@ bypass, NAT-aware. Weights are config knobs.
 | re-solve ≤45 m (canonical host collapsed) | +40 | daemon seed | the `cookie_discard` signal |
 | issuance cadence > K/h | +10 / hit | edge | absorbs the "issuance throttle" idea as a contributor |
 | solve-time < human floor for PoW `n` | +15 | daemon seed | native/GPU solvers answer too fast |
-| cleared & total silence T=60 s | +25 | edge | post-clearance tripwire |
+| cleared + high nav cadence (≥30–60 navs/60 s) | +25 | edge | post-clearance cadence (`cfm_pcw`, B2) — replaces the unobservable "no-asset silence" |
 | claims-browser + no fetch-metadata on `text/html` nav | +20 | edge | the Sec-Fetch tell as a score component, not a standalone deny |
 | farm subnet-spread (member this window) | +5 / solve | daemon seed | bridge from `solver_farm`; spreads guilt to the swarm's solving IPs |
 
@@ -207,12 +207,25 @@ shared with the vhost lane:
       a UA claims a Sec-Fetch-capable browser (Chrome ≥ 76 / Firefox ≥ 90) but a
       `text/html` `GET`|`HEAD` nav carries no `Sec-Fetch-*` AND no `Accept-Language`;
       honest CLI clients and self-declared crawlers never match; Safari excluded
-      (16.4+ only). logonly SHADOW — surfaced by `waf_fp_hunt`, un-armed in
+      (16.4+ only). logonly SHADOW — surfaced by `waf_activity` (filter
+      `rule=WAF_FETCH_METADATA`; `waf_fp_hunt` is panel-WAF-only), un-armed in
       `waf_security` (no edge-block rule), placed LAST so it never masks a stronger
       reason. Stateless, no `ngx.shared`. Feeds the score later via the seed map.
-    - **B2 — post-clearance silence tripwire (next).** `cfm.lua` Step 2b: an
-      `ngx.shared` tripwire that flags a cleared client that then goes silent (no
-      follow-up asset/nav) for T ≈ 60 s. Stateful; own PR.
+    - **B2 — DONE (post-clearance nav-cadence shadow, `cfm_pcw`).** `cfm.lua` Step 2b
+      calls `cfm_pcw.observe` for each CLEARED request: it counts a cleared
+      identity's **top-level** navigations (GET|HEAD document loads —
+      `Sec-Fetch-Dest: document`, else `Accept: text/html`; iframes and prefetch
+      excluded) per fixed 60s window, keyed `(ip, host, scope)` (the clearance
+      grain), and logs `[cfm_pcw] post_clearance_burst … verdict=would_harden|would_deny`
+      (≥30/min / ≥60/min) to the edge error log, read via `edge_error_tail`. **The
+      design's "no-asset silence" tell was retired** — static assets bypass `cfm.lua`
+      entirely, so asset fetches aren't observable here, and browser caching would
+      break it (see `docs/challenge-score-b2.md`); nav cadence is cache-immune. It is
+      **per-IP-per-host, not per-browser** (the cookie is `HMAC(ip,host,scope)`), so a
+      shared egress (CGNAT/NAT) where many real users are cleared for the same host
+      pools — a known FP class B3 must handle NAT-aware before enforcement. Edge-local
+      (fills the Step-2b decision-skip blind spot), log-only, `pcall`-guarded,
+      dedicated bounded `cfm_pcw` dict, `CFM_PCW=0` kill-switch. Feeds the seed map.
     - **B3 — hybrid seed map (last).** Daemon publishes the Stage-1a score +
       `cookie_discard`/`solver_farm` as a per-IP seed the edge reads (the
       `root:cfm 0640` token-file pattern); edge fuses seed + edge tells into one
