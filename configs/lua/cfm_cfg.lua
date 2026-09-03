@@ -112,6 +112,13 @@ local M = {
   -- <0.01% hit-rate evidence). See docs/waf.md "Hit-rate measurement".
   waf_stats_enable    = (os.getenv("CFM_WAF_STATS_ENABLE") or "1") == "1",
   waf_stats_flush_sec = tonumber(os.getenv("CFM_WAF_STATS_FLUSH_SEC") or "60"),
+
+  -- Post-clearance cadence shadow (Track-2 B2). At Step 2b, cfm_pcw counts a
+  -- CLEARED client's nav rate and logs `[cfm_pcw]` would-lines when it sustains a
+  -- human-implausible rate — pure edge-local measurement, never blocks. Default
+  -- ON; CFM_PCW=0 disables it (declare `env CFM_PCW;` in the edge conf or a worker
+  -- never sees the override). See cfm_pcw.lua / docs/challenge-score-b2.md.
+  pcw_enabled = (os.getenv("CFM_PCW") or "1") ~= "0",
 }
 
 -- ok_ttl_sec resolution, in priority order: explicit env override; the

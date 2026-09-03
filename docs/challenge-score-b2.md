@@ -89,3 +89,25 @@ Two viable paths; both are defensible, pick by appetite:
 Either way, the asset-silence tell is retired. `docs/challenge-score.md` §1/§4
 should be updated to reflect that the edge post-clearance tell is **cadence**, not
 asset-silence, once we choose.
+
+## 6. Decision & as-built (B2-lean)
+
+**Chosen: B2-lean.** Shipped as `configs/lua/cfm_pcw.lua` (pure logic) wired at
+`cfm.lua` Step 2b, log-only:
+
+- Counts a cleared client's **navigations** (`is_nav` = GET|HEAD + `Accept:
+  text/html`) per fixed 60 s window in a dedicated bounded `cfm_pcw` shared dict
+  (declared in both edge confs). AJAX/JSON and static assets never count.
+- Emits `[cfm_pcw] post_clearance_burst ip=… host=… navs=… window=60 verdict=…`
+  to the edge error log at ≥30 navs/window (`would_harden`) and ≥60
+  (`would_deny`), throttled to one line per `(ip, verdict)` per 5 min. Read via
+  `edge_error_tail`.
+- **Safety:** never blocks/challenges/changes flow; the Step-2b call is
+  `pcall`-guarded so a bug can't break the clearance fast-path; the shared dict is
+  bounded + short-TTL (self-cleaning); default ON with a `CFM_PCW=0` kill-switch
+  (`env CFM_PCW;` in both confs). Thresholds/window are in-code burn-in constants.
+- `docs/challenge-score.md` §1/§4/§10 updated; the asset-silence tell is retired.
+
+B3 (the hybrid seed map) later fuses this edge accumulator with the daemon seed
+(Stage-1a `challenge_score` + B1 `WAF_FETCH_METADATA` + `cookie_discard` +
+`solver_farm`) into one edge-local per-client score.

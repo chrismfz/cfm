@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Track-2 Stage 1b/B2 (edge tell #2): a post-clearance nav-cadence shadow
+  counter (`cfm_pcw`, edge, LOG-ONLY).** A cleared client is waved to origin at
+  `cfm.lua` Step 2b **without** the in-path decision RPC, so a scraper that solved
+  the challenge and keeps pulling pages is invisible to enforcement. `cfm_pcw`
+  measures it edge-locally: it counts a cleared client's **navigations** (GET|HEAD
+  asking for `text/html`) per fixed 60s window and, when one sustains a
+  human-implausible rate (≥30/min → `would_harden`, ≥60/min → `would_deny`), logs
+  one `[cfm_pcw] post_clearance_burst … verdict=…` line per (ip, verdict) per 5 min
+  to the edge error log (read via `edge_error_tail`). **The design's original
+  "no-asset silence" tell was dropped** — static assets bypass `cfm.lua` entirely
+  (the static-asset location is Lua-free) so asset fetches are invisible here, and
+  browser caching would break it anyway (`docs/challenge-score-b2.md`); nav cadence
+  is cache-immune and fully observable. Pure measurement: never blocks / challenges
+  / changes flow, `pcall`-guarded so a bug can't break the clearance fast-path,
+  bounded dedicated `cfm_pcw` shared dict, default ON with a `CFM_PCW=0`
+  kill-switch. Feeds the per-client challenge score (B3 seed map) later.
 - **Track-2 Stage 1b (edge tell #1): a "fetch-metadata missing" headless WAF rule
   (rule 612, `WAF_FETCH_METADATA`; logonly SHADOW).** Fires only when a request
   *claims* a modern Sec-Fetch-capable browser (Chrome ≥ 76 / Firefox ≥ 90) yet
