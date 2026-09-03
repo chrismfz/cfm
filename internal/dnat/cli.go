@@ -194,6 +194,11 @@ func workerInCFMGroup() bool {
 	return false
 }
 
+// getenvInt reads a POSITIVE integer env var (ports, timeouts): a non-positive
+// value falls back to def. Do NOT use it for signed values such as nft priorities
+// (which are legitimately negative, e.g. -99/-101) — the n<=0 guard would clamp
+// every negative priority to the default. Priorities resolve via
+// ConfiguredWebDNATPriority / the backend's dnatPriority() instead.
 func getenvInt(key string, def int) int {
 	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
@@ -322,8 +327,13 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	defHTTPS := getenvInt("HTTPS_PORT", 9043)
 	httpPort := fs.Int("http-port", defHTTP, "DNAT target port for tcp/80 (env HTTP_PORT)")
 	httpsPort := fs.Int("https-port", defHTTPS, "DNAT target port for tcp+udp/443 (env HTTPS_PORT)")
-	defPrio := getenvInt("NFT_DNAT_PRIORITY", NFTDNATPriority)
-	priority := fs.Int("priority", defPrio, "DNAT prerouting priority (default: -99)")
+	// Default the priority from cfm.conf's NFT_DNAT_PRIORITY (what the daemon
+	// applies), NOT from the process environment: cfm.conf is a file and is never
+	// exported to this CLI's env, so the old env read always fell through to -99
+	// and silently ignored the operator's configured value. An explicit
+	// --priority still overrides this.
+	defPrio := ConfiguredWebDNATPriority()
+	priority := fs.Int("priority", defPrio, "DNAT prerouting priority (default: cfm.conf NFT_DNAT_PRIORITY, else -99)")
 
 	sub := "" // default = report
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -347,7 +357,11 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	}
 	switch sub {
 	case "on":
-		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(*priority)); err != nil {
+		// Clamp to the backend's accepted range so the confirmation below reports
+		// exactly what gets installed (the backend clamps too; an unclamped echo of
+		// an out-of-range --priority would misreport the real chain priority).
+		effPrio := clampNFTPriority(*priority)
+		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(effPrio)); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat on failed:", err)
 			return 1
 		}
@@ -359,7 +373,7 @@ func RunCLI(args []string, backend firewall.Backend) int {
 			fmt.Fprintln(os.Stderr, "dnat on: warning: persist intent:", err)
 		}
 		LogTransition(ScopeWeb, "ON", "manual", "")
-		fmt.Printf("DNAT: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n", *priority, *httpPort, *httpsPort)
+		fmt.Printf("DNAT: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n", effPrio, *httpPort, *httpsPort)
 		// DNATOn installs the scoped `ct status dnat` accepts internally; report
 		// them the way `cfm dnat cpanel on` reports its scoped accepts so the
 		// operator can confirm the listener ports were opened without needing
@@ -400,13 +414,21 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		fmt.Println("WARNING: edge service is ambiguous: both Angie and OpenResty are active; exactly one should be active+enabled.")
 	}
 	if enabled {
-		fmt.Printf("State: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n\n", getenvInt("NFT_DNAT_PRIORITY", NFTDNATPriority), *httpPort, *httpsPort)
-		fmt.Println("Current rules:")
 		s, err := backend.DNATShow(*family, *table)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "dnat show failed:", err)
 			return 1
 		}
+		// Report the ACTUAL priority parsed from the live rule (nft may render it
+		// symbolically, e.g. "dstnat + 1" == -99), falling back to the configured
+		// default. Reading the rule — not an env var — is what makes config/rule
+		// drift visible instead of always printing -99.
+		prio := defPrio
+		if p, ok := parseDNATChainPriority(s); ok {
+			prio = p
+		}
+		fmt.Printf("State: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n\n", prio, *httpPort, *httpsPort)
+		fmt.Println("Current rules:")
 		fmt.Print(s)
 		if !strings.HasSuffix(s, "\n") {
 			fmt.Println()

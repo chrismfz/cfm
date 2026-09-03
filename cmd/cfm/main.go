@@ -298,6 +298,11 @@ func main() {
 		// (which is invisible to this CLI process otherwise).
 		dnat.SetAPIBase(apiBaseURL())
 		clihttp.SetToken(apiAuthToken())
+		// Give the one-shot CLI the live config dir so `cfm dnat on` resolves
+		// NFT_DNAT_PRIORITY from cfm.conf (the CLI backend carries no config;
+		// only the daemon populates it). Without this the CLI ignored the file
+		// and always applied the -99 default.
+		dnat.SetConfigDir(cfgDir())
 		os.Exit(dnat.RunCLI(os.Args[2:], mustBackend()))
 	case "firewall":
 		be := mustBackend()
