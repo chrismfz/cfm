@@ -89,6 +89,15 @@ clean(req("GET", "Mozilla/5.0 (Linux; Android 13; Pixel 7; wv) AppleWebKit/537.3
                  "(KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36",
           { ["sec-fetch-site"] = "none", ["accept-language"] = "en-US" }),
       "real Android WebView with fetch metadata + Accept-Language")
+-- Duplicate Accept-Language arrives as a TABLE from ngx.req.get_headers(); the
+-- presence check (~= nil) must stand the rule down on it (pins the fold-in).
+clean(req("GET", CHROME, { ["accept-language"] = { "en-US", "en" } }),
+      "duplicate Accept-Language (table value) stands down via presence check")
+-- Chrome-on-iOS uses the CriOS token, NOT chrome/, so it's a WebKit engine and is
+-- correctly out of scope (same rationale as Safari) — pins the exclusion.
+clean(req("GET", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 " ..
+                 "(KHTML, like Gecko) CriOS/120.0.0.0 Mobile/15E148 Safari/604.1"),
+      "Chrome-on-iOS (CriOS, WebKit engine) is out of scope like Safari")
 
 -- ── Negatives: honest non-browser clients (never claim a browser) ────────────
 clean(req("GET", "curl/8.4.0"), "curl does not claim a browser")

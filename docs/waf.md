@@ -760,6 +760,7 @@ Current assignments:
                                        609  rule_header_flood
                                        610  rule_range_abuse
                                        611  rule_bad_utf8
+                                       612  rule_fetch_metadata_missing (logonly; headless "Sec-Fetch tell")
 
 7xx — SSRF / external interaction
   701  rule_ssrf
