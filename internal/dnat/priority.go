@@ -50,13 +50,31 @@ func ConfiguredWebDNATPriority() int {
 	}
 	defer f.Close()
 	cfg, err := config.ParseCFMConf(f)
-	// DNATPriority == 0 means the key was absent: ParseCFMConf leaves it 0 and
-	// the daemon's Validate() maps 0 → -99. Mirror that fallback here. A present
-	// key is already clamped to [-300,300] by ParseCFMConf.
-	if err != nil || cfg == nil || cfg.NFT.DNATPriority == 0 {
+	if err != nil || cfg == nil {
+		return NFTDNATPriority
+	}
+	// ParseCFMConf runs SetDefaults()+Validate() internally, which map an
+	// absent/zero NFT_DNAT_PRIORITY to -99 and clamp any present value to
+	// [-300,300] — so cfg.NFT.DNATPriority is already the exact value the daemon
+	// would use, never 0. The ==0 guard is belt-and-suspenders against a future
+	// change to that normalization.
+	if cfg.NFT.DNATPriority == 0 {
 		return NFTDNATPriority
 	}
 	return cfg.NFT.DNATPriority
+}
+
+// clampNFTPriority bounds a priority to nftables' accepted range, matching the
+// backend's own clamp (nft/dnat.go, nftlib/challenge.go) so the CLI never
+// reports a value the backend would silently adjust before installing.
+func clampNFTPriority(p int) int {
+	if p < -300 {
+		return -300
+	}
+	if p > 300 {
+		return 300
+	}
+	return p
 }
 
 // nftBaseChainPriorityAnchors maps nftables' symbolic base-chain priority names
@@ -64,13 +82,16 @@ func ConfiguredWebDNATPriority() int {
 // when it matches a well-known anchor (a -99 NAT prerouting chain prints as
 // "dstnat + 1", -100 as "dstnat", -101 as "dstnat - 1"), so the status report
 // must translate the symbol back to a number to show the ACTUAL installed value.
+// These are nft's standard base-chain priority names (std_prios): raw, mangle,
+// dstnat, filter, security, srcnat. (conntrack/-200 is a hook priority but not an
+// nft-displayed name, so it is intentionally absent.)
 var nftBaseChainPriorityAnchors = map[string]int{
-	"raw":       -300,
-	"conntrack": -200,
-	"dstnat":    -100,
-	"filter":    0,
-	"security":  50,
-	"srcnat":    100,
+	"raw":      -300,
+	"mangle":   -150,
+	"dstnat":   -100,
+	"filter":   0,
+	"security": 50,
+	"srcnat":   100,
 }
 
 // parseDNATChainPriority extracts the numeric prerouting base-chain priority from

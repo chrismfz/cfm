@@ -71,6 +71,11 @@ func TestParseDNATChainPriority(t *testing.T) {
 			want: -100, ok: true,
 		},
 		{
+			name: "mangle anchor with offset",
+			show: "    type nat hook prerouting priority mangle + 2; policy accept;",
+			want: -148, ok: true,
+		},
+		{
 			name: "raw numeric priority",
 			show: "    type nat hook prerouting priority -101; policy accept;",
 			want: -101, ok: true,
@@ -103,5 +108,23 @@ func TestParseDNATChainPriority(t *testing.T) {
 				t.Fatalf("parseDNATChainPriority() = (%d, %v), want (%d, %v)", got, ok, tc.want, tc.ok)
 			}
 		})
+	}
+}
+
+func TestClampNFTPriority(t *testing.T) {
+	tests := []struct {
+		in, want int
+	}{
+		{-101, -101}, // in range
+		{-99, -99},
+		{300, 300}, // upper bound
+		{-300, -300}, // lower bound
+		{99999, 300}, // clamped down
+		{-99999, -300}, // clamped up
+	}
+	for _, tc := range tests {
+		if got := clampNFTPriority(tc.in); got != tc.want {
+			t.Errorf("clampNFTPriority(%d) = %d, want %d", tc.in, got, tc.want)
+		}
 	}
 }

@@ -357,7 +357,11 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	}
 	switch sub {
 	case "on":
-		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(*priority)); err != nil {
+		// Clamp to the backend's accepted range so the confirmation below reports
+		// exactly what gets installed (the backend clamps too; an unclamped echo of
+		// an out-of-range --priority would misreport the real chain priority).
+		effPrio := clampNFTPriority(*priority)
+		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(effPrio)); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat on failed:", err)
 			return 1
 		}
@@ -369,7 +373,7 @@ func RunCLI(args []string, backend firewall.Backend) int {
 			fmt.Fprintln(os.Stderr, "dnat on: warning: persist intent:", err)
 		}
 		LogTransition(ScopeWeb, "ON", "manual", "")
-		fmt.Printf("DNAT: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n", *priority, *httpPort, *httpsPort)
+		fmt.Printf("DNAT: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n", effPrio, *httpPort, *httpsPort)
 		// DNATOn installs the scoped `ct status dnat` accepts internally; report
 		// them the way `cfm dnat cpanel on` reports its scoped accepts so the
 		// operator can confirm the listener ports were opened without needing
