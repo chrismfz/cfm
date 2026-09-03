@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Track-2 Stage 1b (edge tell #1): a "fetch-metadata missing" headless WAF rule
+  (rule 612, `WAF_FETCH_METADATA`; logonly SHADOW).** Fires only when a request
+  *claims* a modern Sec-Fetch-capable browser (Chrome ≥ 76 / Firefox ≥ 90) yet
+  sends a `text/html` `GET`|`HEAD` navigation with **no** `Sec-Fetch-*` **and no**
+  `Accept-Language` — headers a real browser always emits on a page load, so this
+  is a UA that only spoofed its identity (lightpanda/Playwright-class automation).
+  Stacked weak signals, categorical together: honest `curl`/`wget`/`python`
+  clients never match (they don't claim a browser), self-declared crawlers
+  (Googlebot, bingbot, AI crawlers, …) are skipped, and Safari is out of scope
+  (Sec-Fetch is 16.4+ only, old iOS is a live FP pool). **logonly only** — pure
+  edge shadow, surfaced by `waf_fp_hunt`/`waf_activity`, promote past logonly only
+  after burn-in. Its `WAF_FETCH_METADATA` family has no edge-block rule so it stays
+  un-armed in `waf_security`. Runs LAST in the WAF pipeline so this weak signal
+  never masks a stronger finding's headline reason. Feeds the per-client challenge
+  score (Stage 1b seed map) later. See `docs/challenge-score.md`.
 - **Track-2 Stage 1a: a daemon-side per-IP challenge-abuse score (SHADOW /
   log-only).** Folds the *discriminating* challenge-time tells CFM already
   records — an implausibly-fast solve, a self-contradictory (UA-lie) solve, and a

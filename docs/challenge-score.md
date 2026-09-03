@@ -198,9 +198,25 @@ shared with the vhost lane:
     row, +40, canonical-host collapsed) and edge issuance cadence — the only
     volume-shaped tells that genuinely discriminate a re-solving headless from a
     busy NAT.
-  - **Stage 1b — edge-Lua tells (later).** The two signals only the edge sees —
+  - **Stage 1b — edge-Lua tells.** The two signals only the edge sees —
     post-clearance silence (tripwire) + Sec-Fetch — plus the hybrid seed map, per
-    the architecture in §3. Follows the challenge-waf-release-checklist.
+    the architecture in §3. Follows the challenge-waf-release-checklist. Sliced:
+    - **B1 — DONE (Sec-Fetch headless tell, logonly WAF rule).** Rule 612
+      (`WAF_FETCH_METADATA`) in `cfm_waf.lua` + `cfm_waf_detectors.lua`
+      (`detect_fetch_metadata_missing`), Go-parity in `waf_rule_ids.go`. Fires when
+      a UA claims a Sec-Fetch-capable browser (Chrome ≥ 76 / Firefox ≥ 90) but a
+      `text/html` `GET`|`HEAD` nav carries no `Sec-Fetch-*` AND no `Accept-Language`;
+      honest CLI clients and self-declared crawlers never match; Safari excluded
+      (16.4+ only). logonly SHADOW — surfaced by `waf_fp_hunt`, un-armed in
+      `waf_security` (no edge-block rule), placed LAST so it never masks a stronger
+      reason. Stateless, no `ngx.shared`. Feeds the score later via the seed map.
+    - **B2 — post-clearance silence tripwire (next).** `cfm.lua` Step 2b: an
+      `ngx.shared` tripwire that flags a cleared client that then goes silent (no
+      follow-up asset/nav) for T ≈ 60 s. Stateful; own PR.
+    - **B3 — hybrid seed map (last).** Daemon publishes the Stage-1a score +
+      `cookie_discard`/`solver_farm` as a per-IP seed the edge reads (the
+      `root:cfm 0640` token-file pattern); edge fuses seed + edge tells into one
+      decayed per-IP score. The convergence piece.
 - **Stage 2 — T1 harden:** wire the soft rung (POWN knob **Phase A manual** first
   — `CHALLENGE_POWN` + per-vhost + expiry scaling + cfm-admin button; then
   **Phase B auto governor** from `IsSolverFarm` / challenged / suspicious), and/or
@@ -210,8 +226,8 @@ shared with the vhost lane:
 
 **Standalone building blocks (value on their own, feed this score):**
 - **POWN difficulty knob** (Phase A manual) — also the I3 "harden" groundwork.
-- **Sec-Fetch headless-tell WAF rule** — `logonly` first (watch `waf_fp_hunt`),
-  then promote; only ever fires when the UA *claims* a browser, so honest
-  `curl`/`wget`/`Python-requests` never match. A stacked weak-signal rule
-  (claims-browser AND missing `Sec-Fetch-Site` AND missing `Accept-Language` AND
-  `text/html` nav), not a single-header deny.
+- **Sec-Fetch headless-tell WAF rule — DONE (Stage 1b/B1, rule 612).** `logonly`
+  first (watch `waf_fp_hunt`), then promote; only ever fires when the UA *claims* a
+  browser, so honest `curl`/`wget`/`Python-requests` never match. A stacked
+  weak-signal rule (claims-browser AND missing `Sec-Fetch-*` AND missing
+  `Accept-Language` AND `text/html` nav), not a single-header deny.
