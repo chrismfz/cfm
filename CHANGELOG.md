@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Track-2 Stage 1a: a daemon-side per-IP challenge-abuse score (SHADOW /
+  log-only).** Folds the challenge-time signals CFM already records — an IP's
+  re-solve cadence, implausibly-fast solves, self-contradictory (UA-lie) solves,
+  and solves from a solver-farm vhost — into one decaying per-IP score, and logs
+  `signal=challenge_score … verdict=would_harden|would_deny` to
+  `cfm.abuse_shadow.log` where a solver's score crosses a threshold. Targets the
+  headless / solver-farm class ("the challenge was solved and the abuse
+  continued"). Event-fed from the existing challenge-solve stream
+  (`SubscribeChallengeSolveEvents`), 30-min decay half-life. Rides the existing
+  `ABUSE_SHADOW` master — **no new config knob** (weights/thresholds are in-code
+  burn-in constants; the raw per-solve `solve_ms` is already in
+  `cfm.challenges.log` for calibrating the "fast" floor); surfaced by the
+  `abuse_shadow` tool's by-signal/by-verdict counts. The two edge-only tells
+  (post-clearance silence, Sec-Fetch) + any enforcement come in a later edge-Lua
+  stage (`docs/challenge-score.md`).
 - **Track-1 score fusion (SHADOW / log-only): facet/cost/dc now feed a parallel
   fused vhost score.** Uses the robust-z baseline to score each shadow signal's
   spike against the vhost's own recent history, sums the corroborated ones into a

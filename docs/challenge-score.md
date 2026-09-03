@@ -173,8 +173,23 @@ shared with the vhost lane:
 - **Stage 0 — zero-code (operator):** `BLOCK = 6h` on `cookie_discard` +
   `UNDER_ATTACK_FINGERPRINT` / `FP_*` keys (data collection). Covers ~80% of the
   re-solver case today with no code.
-- **Stage 1 — shadow scorer + aggregation view:** daemon seed map + edge-tell
-  counters + `[cfm_challenge_score]` would-lines + an MCP reader. No enforcement.
+- **Stage 1 — shadow scorer + aggregation view.** Split daemon-first (a code check
+  found most signals are already recorded daemon-side, so the risky edge-Lua is not
+  needed to start collecting):
+  - **Stage 1a — DONE (daemon-side, Go, log-only).** `internal/webdetector/
+    challenge_score.go`: a decaying per-IP score fed from the existing
+    `SubscribeChallengeSolveEvents` stream — re-solve cadence (accumulation +
+    30-min decay), implausibly-fast solve (`SolveLatencyMS`), UA-lie
+    (`UAImpossible`), solver-farm vhost (`IsSolverFarm`) — emitting
+    `signal=challenge_score … verdict=would_harden|would_deny` via `LogfABUSESHADOW`
+    (into `cfm.abuse_shadow.log`, no new log/logrotate). Rides `ABUSE_SHADOW`, no
+    new config; weights/thresholds are in-code burn-in constants. Surfaced by the
+    `abuse_shadow` MCP tool's by-signal/by-verdict counts (no dedicated reader
+    needed yet). Covers everything the daemon can see; issuance cadence is deferred
+    (would hook `RecordIPChallenge`) as a secondary signal.
+  - **Stage 1b — edge-Lua tells (later).** The two signals only the edge sees —
+    post-clearance silence (tripwire) + Sec-Fetch — plus the hybrid seed map, per
+    the architecture in §3. Follows the challenge-waf-release-checklist.
 - **Stage 2 — T1 harden:** wire the soft rung (POWN knob **Phase A manual** first
   — `CHALLENGE_POWN` + per-vhost + expiry scaling + cfm-admin button; then
   **Phase B auto governor** from `IsSolverFarm` / challenged / suspicious), and/or
