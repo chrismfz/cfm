@@ -245,6 +245,26 @@ func TestPrune(t *testing.T) {
 	}
 }
 
+func TestTouch(t *testing.T) {
+	b := newVhostBaseline(vhostBaselineConfig{Window: 10, MinSamples: 3})
+	t0 := time.Now()
+	// Unknown host → no-op, no entry created.
+	if b.Touch("ghost", t0) {
+		t.Errorf("Touch reported a refresh for an unknown host")
+	}
+	if b.hostCount() != 0 {
+		t.Errorf("Touch created an entry for an unknown host (hostCount=%d)", b.hostCount())
+	}
+	// Known host → lastSeen advances, so a prune before the touch time keeps it.
+	b.Observe("h", "f", 1, t0)
+	if !b.Touch("h", t0.Add(time.Hour)) {
+		t.Errorf("Touch did not refresh a known host")
+	}
+	if got := b.Prune(t0.Add(30 * time.Minute)); got != 0 || b.hostCount() != 1 {
+		t.Errorf("touched host pruned: removed=%d hostCount=%d, want 0/1", got, b.hostCount())
+	}
+}
+
 func TestMaxHosts_LRUEviction(t *testing.T) {
 	b := newVhostBaseline(vhostBaselineConfig{Window: 10, MinSamples: 3, MaxHosts: 2})
 	t0 := time.Now()

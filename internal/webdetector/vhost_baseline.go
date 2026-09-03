@@ -201,6 +201,21 @@ func (b *vhostBaseline) RobustZ(host, feature string, x, madFloor float64) (z fl
 	return z, r.n
 }
 
+// Touch refreshes an existing host's lastSeen without recording a sample, so a
+// host deliberately not Observed for a while (e.g. frozen during a sustained
+// event) is not pruned out from under its learned baseline. It is a no-op
+// (returns false) for an unknown host — it never creates an empty entry.
+func (b *vhostBaseline) Touch(host string, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	hb := b.hosts[host]
+	if hb == nil {
+		return false
+	}
+	hb.lastSeen = now
+	return true
+}
+
 // Prune drops every host not Observed since `before` and returns how many were
 // removed. The caller runs it periodically (the store has no timer of its own).
 func (b *vhostBaseline) Prune(before time.Time) int {
