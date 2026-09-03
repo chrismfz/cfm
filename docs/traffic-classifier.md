@@ -478,10 +478,14 @@ Class-2 burst.
 - [x] **DONE — fused shadow score + `verdict=would_*` lines.**
       `internal/webdetector/abuse_shadow_fused.go`: `fused = clamp01(base + Δ)`,
       Δ = capped Σ weighted robust-z of facet/cost/dc/shadow against each vhost's
-      own baseline, emitted from the per-tick shadow block. **Corroboration-gated**
-      (≥2 signals co-fire → the planetgym facet-alone / dc-alone guard) and
-      **baseline-frozen while corroborated** (an active flood never trains itself
-      in). Logs `signal=fused_score … verdict=would_arm|confirm` only; the live
+      own baseline, emitted from the shadow block (throttled to ~1 pass/2 min so
+      baseline samples stay independent). **Corroboration is over the vhost-level
+      shapes {facet, cost, dc}** — ≥2 must co-fire (rate-outlier feeds Δ but not the
+      gate, since one aggressive IP trips both facet and rate-outlier) → the
+      planetgym facet-alone / dc-alone guard; the would-arm also inherits the live
+      uniqIP floor. **Baseline-frozen while corroborated** (an active flood never
+      trains itself in; frozen hosts are Touch()'d so a sustained flood isn't
+      pruned). Logs `signal=fused_score … verdict=would_arm|confirm` only; the live
       `raw/6, ON 0.70` arm is never read from the fused value. Rides `ABUSE_SHADOW`,
       no new config; weights are in-code burn-in constants.
 
