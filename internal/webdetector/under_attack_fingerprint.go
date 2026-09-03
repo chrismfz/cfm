@@ -165,7 +165,7 @@ func (e *Engine) runFingerprint(now time.Time) {
 	e.fp.mu.Unlock()
 
 	snaps := e.snapshotFingerprint()
-	decay := math.Pow(0.5, interval.Seconds()/fpBaselineHalfLife.Seconds())
+	decay := halfLifeDecayFactor(interval, fpBaselineHalfLife)
 	for host, snap := range snaps {
 		if on, _, _ := e.VhostAttackState(host); on {
 			e.fingerprintVhost(now, host, snap)

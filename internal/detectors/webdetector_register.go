@@ -1000,6 +1000,14 @@ func init() {
 			webdet.SubscribeChallengeSolveEvents(engine.RecordUnderAttackSolve)
 		}
 
+		// Track-2 challenge-abuse score (Stage 1a, log-only): fold each solve into a
+		// decaying per-IP score. Same lifecycle/cheap-callback contract as above;
+		// gated on the ABUSE_SHADOW master, re-added per reload after the manager's
+		// ResetChallengeSolveSubscribers.
+		if cfg.AbuseShadow {
+			webdet.SubscribeChallengeSolveEvents(engine.RecordChallengeScoreSolve)
+		}
+
 		// Persist ClamAV scan events (infections) into the webdetector history
 		// store so they are queryable, scoped, on the ClamAV insights page.
 		// A settable sink (replace, not append) keeps this pointed at the

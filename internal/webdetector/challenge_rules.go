@@ -2113,6 +2113,10 @@ if ha := short[host]; ha != nil {
         // a parallel shadow score and logs where it WOULD arm; reads their marks,
         // so it runs last. Log-only, never touches the live arm.
         e.emitAbuseShadowFusedScore(now)
+        // Track-2 per-IP challenge-abuse score (Stage 1a): logs where a solver's
+        // decaying score would_harden/would_deny. Event-fed (solve stream); this is
+        // just the throttled emit. Log-only.
+        e.emitChallengeScoreShadow(now)
     }
 
     // ---- Under-Attack Mode campaign fingerprinter (I2, shadow-only) ----

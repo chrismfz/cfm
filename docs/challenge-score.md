@@ -173,8 +173,34 @@ shared with the vhost lane:
 - **Stage 0 — zero-code (operator):** `BLOCK = 6h` on `cookie_discard` +
   `UNDER_ATTACK_FINGERPRINT` / `FP_*` keys (data collection). Covers ~80% of the
   re-solver case today with no code.
-- **Stage 1 — shadow scorer + aggregation view:** daemon seed map + edge-tell
-  counters + `[cfm_challenge_score]` would-lines + an MCP reader. No enforcement.
+- **Stage 1 — shadow scorer + aggregation view.** Split daemon-first (a code check
+  found most signals are already recorded daemon-side, so the risky edge-Lua is not
+  needed to start collecting):
+  - **Stage 1a — DONE (daemon-side, Go, log-only).** `internal/webdetector/
+    challenge_score.go`: a decaying per-IP score (30-min half-life) fed from the
+    existing `SubscribeChallengeSolveEvents` stream. It scores only the
+    *discriminating* per-solve tells — UA-lie (`UAImpossible`) and solver-farm vhost
+    (`IsSolverFarm`) OPEN a score; implausibly-fast solve (`SolveLatencyMS`) is a
+    corroborating AMPLIFIER only — emitting
+    `signal=challenge_score … verdict=would_harden|would_deny` via `LogfABUSESHADOW`
+    (into `cfm.abuse_shadow.log`, no new log/logrotate). **NAT/CGNAT-safe by
+    construction** (honouring the §7 guardrail): raw solve VOLUME is not scored (no
+    flat per-solve weight); the fast tell can't convict alone — ~15-23% of *honest*
+    browser solves are "fast" at the default PoW difficulty (`pow.go`: median 1.3 s,
+    exponentially distributed), so fast alone would light up a busy egress, hence it
+    only adds weight to a solve that already carries a strong tell; and `IGNORE_IPS`/
+    `IGNORE_NETS` IPs are skipped. So a benign shared egress (many users each solving
+    once, fast or not) can't accumulate to a false farm. Rides
+    `ABUSE_SHADOW`, no new config; weights/thresholds are in-code burn-in constants.
+    Surfaced by the `abuse_shadow` MCP tool's by-signal/by-verdict counts (no
+    dedicated reader needed yet). Deferred to a **daemon seed** (not proxied by
+    counting solves here): the `cookie_discard` re-solve-cadence signal (§4 table
+    row, +40, canonical-host collapsed) and edge issuance cadence — the only
+    volume-shaped tells that genuinely discriminate a re-solving headless from a
+    busy NAT.
+  - **Stage 1b — edge-Lua tells (later).** The two signals only the edge sees —
+    post-clearance silence (tripwire) + Sec-Fetch — plus the hybrid seed map, per
+    the architecture in §3. Follows the challenge-waf-release-checklist.
 - **Stage 2 — T1 harden:** wire the soft rung (POWN knob **Phase A manual** first
   — `CHALLENGE_POWN` + per-vhost + expiry scaling + cfm-admin button; then
   **Phase B auto governor** from `IsSolverFarm` / challenged / suspicious), and/or

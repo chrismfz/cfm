@@ -804,6 +804,8 @@ func (m *manager) stopAll() {
 	webdet.ResetCostShadowMarks()
 	// …and the abuse_shadow datacenter-fraction marks.
 	webdet.ResetDCFracShadowMarks()
+	// …and the Track-2 per-IP challenge-abuse score store + emit throttle.
+	webdet.ResetChallengeScoreMarks()
 
 	// Wait outside the mutex.
 	m.wg.Wait()
