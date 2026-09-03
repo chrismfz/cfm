@@ -19,16 +19,22 @@ back-filled here — see the git/PR history for that period.
 
 ### Added
 - **Track-2 Stage 1a: a daemon-side per-IP challenge-abuse score (SHADOW /
-  log-only).** Folds the challenge-time signals CFM already records — an IP's
-  re-solve cadence, implausibly-fast solves, self-contradictory (UA-lie) solves,
-  and solves from a solver-farm vhost — into one decaying per-IP score, and logs
+  log-only).** Folds the *discriminating* challenge-time tells CFM already
+  records — an implausibly-fast solve, a self-contradictory (UA-lie) solve, and a
+  solve from a solver-farm vhost — into one decaying per-IP score, and logs
   `signal=challenge_score … verdict=would_harden|would_deny` to
   `cfm.abuse_shadow.log` where a solver's score crosses a threshold. Targets the
   headless / solver-farm class ("the challenge was solved and the abuse
   continued"). Event-fed from the existing challenge-solve stream
-  (`SubscribeChallengeSolveEvents`), 30-min decay half-life. Rides the existing
-  `ABUSE_SHADOW` master — **no new config knob** (weights/thresholds are in-code
-  burn-in constants; the raw per-solve `solve_ms` is already in
+  (`SubscribeChallengeSolveEvents`), 30-min decay half-life. **Raw solve VOLUME
+  is deliberately NOT scored** (no flat per-solve weight) and operator-trusted IPs
+  (`IGNORE_IPS`/`IGNORE_NETS`) are skipped, so a benign shared egress (CGNAT /
+  corporate NAT) where many real users each solve once can't accumulate to a false
+  "solver farm"; the one volume-shaped tell that genuinely discriminates —
+  re-solve cadence with canonical-host collapse — arrives later as the
+  cookie-discard detector's daemon seed, not by counting solves here. Rides the
+  existing `ABUSE_SHADOW` master — **no new config knob** (weights/thresholds are
+  in-code burn-in constants; the raw per-solve `solve_ms` is already in
   `cfm.challenges.log` for calibrating the "fast" floor); surfaced by the
   `abuse_shadow` tool's by-signal/by-verdict counts. The two edge-only tells
   (post-clearance silence, Sec-Fetch) + any enforcement come in a later edge-Lua

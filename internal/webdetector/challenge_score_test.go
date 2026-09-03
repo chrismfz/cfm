@@ -9,31 +9,37 @@ import (
 )
 
 func TestChalSolveDelta(t *testing.T) {
-	base := ChallengeSolve{IP: "1.2.3.4", Host: "h"} // SolveMS 0 = unknown, UA ok
-	if d, fast, ua := chalSolveDelta(base, false); d != chalScoreWSolve || fast || ua {
-		t.Errorf("plain solve = %v fast=%v ua=%v, want %v/false/false", d, fast, ua, chalScoreWSolve)
+	// A no-tell solve scores NOTHING now (no flat per-solve base): a benign NAT
+	// where every user solves once must never accumulate.
+	base := ChallengeSolve{IP: "1.2.3.4", Host: "h"} // SolveMS 0 = unknown, UA ok, no farm
+	if d, fast, ua := chalSolveDelta(base, false); d != 0 || fast || ua {
+		t.Errorf("plain solve = %v fast=%v ua=%v, want 0/false/false", d, fast, ua)
 	}
-	// A fast solve adds wFast; unknown latency (<=0) must NOT count as fast.
+	// A fast solve scores wFast alone; unknown latency (<=0) must NOT count as fast.
 	fastS := ChallengeSolve{IP: "1.2.3.4", SolveMS: chalScoreFastMS - 1}
-	if d, fast, _ := chalSolveDelta(fastS, false); !fast || d != chalScoreWSolve+chalScoreWFast {
-		t.Errorf("fast solve = %v fast=%v, want %v/true", d, fast, chalScoreWSolve+chalScoreWFast)
+	if d, fast, _ := chalSolveDelta(fastS, false); !fast || d != chalScoreWFast {
+		t.Errorf("fast solve = %v fast=%v, want %v/true", d, fast, chalScoreWFast)
 	}
 	if _, fast, _ := chalSolveDelta(ChallengeSolve{SolveMS: 0}, false); fast {
 		t.Errorf("unknown latency counted as fast")
 	}
-	// Exactly at the floor is NOT fast (strict <).
-	if _, fast, _ := chalSolveDelta(ChallengeSolve{SolveMS: chalScoreFastMS}, false); fast {
-		t.Errorf("solve exactly at fast floor counted as fast")
+	// Exactly at the floor is NOT fast (strict <), so a lone at-floor solve scores 0.
+	if d, fast, _ := chalSolveDelta(ChallengeSolve{SolveMS: chalScoreFastMS}, false); fast || d != 0 {
+		t.Errorf("solve exactly at fast floor = %v fast=%v, want 0/false", d, fast)
+	}
+	// Farm alone (no other tell) scores wFarm.
+	if d, _, _ := chalSolveDelta(ChallengeSolve{IP: "1.2.3.4"}, true); d != chalScoreWFarm {
+		t.Errorf("farm-only = %v, want %v", d, chalScoreWFarm)
 	}
 	// UA-impossible + farm stack.
 	imp := ChallengeSolve{IP: "1.2.3.4", UAImpossible: true}
-	if d, _, ua := chalSolveDelta(imp, true); !ua || d != chalScoreWSolve+chalScoreWUAImp+chalScoreWFarm {
-		t.Errorf("ua+farm = %v ua=%v, want %v", d, ua, chalScoreWSolve+chalScoreWUAImp+chalScoreWFarm)
+	if d, _, ua := chalSolveDelta(imp, true); !ua || d != chalScoreWUAImp+chalScoreWFarm {
+		t.Errorf("ua+farm = %v ua=%v, want %v", d, ua, chalScoreWUAImp+chalScoreWFarm)
 	}
 	// Everything at once.
 	all := ChallengeSolve{IP: "1.2.3.4", SolveMS: 100, UAImpossible: true}
-	if d, _, _ := chalSolveDelta(all, true); d != chalScoreWSolve+chalScoreWFast+chalScoreWUAImp+chalScoreWFarm {
-		t.Errorf("all-signals delta = %v, want %v", d, chalScoreWSolve+chalScoreWFast+chalScoreWUAImp+chalScoreWFarm)
+	if d, _, _ := chalSolveDelta(all, true); d != chalScoreWFast+chalScoreWUAImp+chalScoreWFarm {
+		t.Errorf("all-signals delta = %v, want %v", d, chalScoreWFast+chalScoreWUAImp+chalScoreWFarm)
 	}
 }
 
@@ -65,13 +71,14 @@ func TestChalScoreVerdict(t *testing.T) {
 	}
 }
 
-// Re-solves accumulate (each solve adds, the decay fades a lone one) — the core
-// cookie-discard signal expressed as a climbing score.
+// Store mechanic: tell-bearing solves accumulate (each adds its delta, the decay
+// fades a lone one). The store just sums the deltas it is fed; which solves EARN a
+// delta is chalSolveDelta's job (tested above — a no-tell solve is never bumped).
 func TestChalScoreBump_AccumulateAndDecay(t *testing.T) {
 	ResetChallengeScoreMarks()
 	t0 := time.Now()
 	for i := 0; i < 3; i++ {
-		challengeScoreMarks.bump("9.9.9.9", chalScoreWSolve, false, false, false, t0.Add(time.Duration(i)*time.Second))
+		challengeScoreMarks.bump("9.9.9.9", 10.0, false, false, false, t0.Add(time.Duration(i)*time.Second))
 	}
 	rows := challengeScoreMarks.collectDue(t0.Add(3*time.Second), 0, 0)
 	if len(rows) != 1 || rows[0].solves != 3 || math.Abs(rows[0].score-30) > 0.1 {
@@ -132,7 +139,7 @@ func TestChalScoreCapRejection(t *testing.T) {
 	ResetChallengeScoreMarks()
 	now := time.Now()
 	for i := 0; i < maxChalScoreMarks; i++ {
-		challengeScoreMarks.bump(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256), chalScoreWSolve, false, false, false, now)
+		challengeScoreMarks.bump(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256), 10.0, false, false, false, now)
 	}
 	challengeScoreMarks.mu.Lock()
 	full := len(challengeScoreMarks.ips)
@@ -141,7 +148,7 @@ func TestChalScoreCapRejection(t *testing.T) {
 		t.Fatalf("store holds %d, want cap %d", full, maxChalScoreMarks)
 	}
 	// A brand-new IP at the cap is rejected…
-	challengeScoreMarks.bump("203.0.113.1", chalScoreWSolve, false, false, false, now)
+	challengeScoreMarks.bump("203.0.113.1", 10.0, false, false, false, now)
 	challengeScoreMarks.mu.Lock()
 	after := len(challengeScoreMarks.ips)
 	challengeScoreMarks.mu.Unlock()
@@ -149,7 +156,7 @@ func TestChalScoreCapRejection(t *testing.T) {
 		t.Errorf("cap breached: %d, want %d", after, maxChalScoreMarks)
 	}
 	// …but an EXISTING IP still accumulates (not blocked by the cap).
-	challengeScoreMarks.bump("10.0.0.0", chalScoreWSolve, false, false, false, now)
+	challengeScoreMarks.bump("10.0.0.0", 10.0, false, false, false, now)
 	rows := challengeScoreMarks.collectDue(now, 0, 0)
 	var got *chalScoreRow
 	for i := range rows {
@@ -173,7 +180,7 @@ func TestChalScoreConcurrent(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			for i := 0; i < 500; i++ {
-				challengeScoreMarks.bump(fmt.Sprintf("192.168.%d.%d", g, i%64), chalScoreWSolve, i%2 == 0, i%3 == 0, i%5 == 0, now.Add(time.Duration(i)*time.Millisecond))
+				challengeScoreMarks.bump(fmt.Sprintf("192.168.%d.%d", g, i%64), 10.0, i%2 == 0, i%3 == 0, i%5 == 0, now.Add(time.Duration(i)*time.Millisecond))
 				if i%50 == 0 {
 					_ = challengeScoreMarks.collectDue(now.Add(time.Duration(i)*time.Millisecond), chalScoreT1, 0)
 				}

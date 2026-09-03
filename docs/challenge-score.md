@@ -177,16 +177,22 @@ shared with the vhost lane:
   found most signals are already recorded daemon-side, so the risky edge-Lua is not
   needed to start collecting):
   - **Stage 1a — DONE (daemon-side, Go, log-only).** `internal/webdetector/
-    challenge_score.go`: a decaying per-IP score fed from the existing
-    `SubscribeChallengeSolveEvents` stream — re-solve cadence (accumulation +
-    30-min decay), implausibly-fast solve (`SolveLatencyMS`), UA-lie
-    (`UAImpossible`), solver-farm vhost (`IsSolverFarm`) — emitting
+    challenge_score.go`: a decaying per-IP score (30-min half-life) fed from the
+    existing `SubscribeChallengeSolveEvents` stream. It scores only the
+    *discriminating* per-solve tells — implausibly-fast solve (`SolveLatencyMS`),
+    UA-lie (`UAImpossible`), solver-farm vhost (`IsSolverFarm`) — emitting
     `signal=challenge_score … verdict=would_harden|would_deny` via `LogfABUSESHADOW`
-    (into `cfm.abuse_shadow.log`, no new log/logrotate). Rides `ABUSE_SHADOW`, no
-    new config; weights/thresholds are in-code burn-in constants. Surfaced by the
-    `abuse_shadow` MCP tool's by-signal/by-verdict counts (no dedicated reader
-    needed yet). Covers everything the daemon can see; issuance cadence is deferred
-    (would hook `RecordIPChallenge`) as a secondary signal.
+    (into `cfm.abuse_shadow.log`, no new log/logrotate). **Raw solve VOLUME is
+    deliberately NOT scored** (no flat per-solve weight) and `IGNORE_IPS`/
+    `IGNORE_NETS` IPs are skipped, honouring the §7 NAT guardrail so a benign shared
+    egress (many users each solving once) can't accumulate to a false farm. Rides
+    `ABUSE_SHADOW`, no new config; weights/thresholds are in-code burn-in constants.
+    Surfaced by the `abuse_shadow` MCP tool's by-signal/by-verdict counts (no
+    dedicated reader needed yet). Deferred to a **daemon seed** (not proxied by
+    counting solves here): the `cookie_discard` re-solve-cadence signal (§4 table
+    row, +40, canonical-host collapsed) and edge issuance cadence — the only
+    volume-shaped tells that genuinely discriminate a re-solving headless from a
+    busy NAT.
   - **Stage 1b — edge-Lua tells (later).** The two signals only the edge sees —
     post-clearance silence (tripwire) + Sec-Fetch — plus the hybrid seed map, per
     the architecture in §3. Follows the challenge-waf-release-checklist.
