@@ -244,8 +244,11 @@ this IP re-solves → client; aggregate re-solve rate → "challenge defeated he
   (iForest/HBOS over IPs) structurally miss it.
 - Method: **robust per-feature deviation** (median/MAD → robust-z vs the vhost's
   own decayed baseline) summed into an anomaly score. Explainable per feature
-  (the reason string writes itself), cheap, online, decays. The
-  fingerprinter's `fpBaseline` (30m half-life) is the substrate.
+  (the reason string writes itself), cheap, online, decays. **CORRECTION
+  (2026-08-27, see "Two tracks → one ladder" below):** `fpBaseline` is a
+  categorical path/UA histogram, NOT a median/MAD substrate — robust-z is net-new
+  and reuses only `fpState`'s *pattern* (per-vhost keying + 30 m decay + prune),
+  not its data.
 - Graduate to **HBOS/eHBOS** only if a feature proves multimodal. **iForest:
   no** (opaque, needs rebuild, no graceful online decay).
 - **Feature engineering ≫ model choice.** The verified-crawler fork +
@@ -279,6 +282,67 @@ never reaches deny — only rate/budget.
   (challenge → re-solve) back into the score.
 
 ---
+
+## Two tracks → one ladder (2026-08-27 reconciliation)
+
+The convergence has **two independent tracks** that feed **one shared actuation
+ladder**. They answer different problems and live in different layers; keeping
+them separate (but pointed at the same actuators) is the plan of record.
+
+| | **Track 1 — vhost anomaly fusion** | **Track 2 — per-client challenge-abuse score** |
+|---|---|---|
+| Problem | Class-2 **distributed flood** (facet/cost/dc) | **headless solver-farm** — "the challenge was defeated" |
+| Layer | **Go**, log-driven, per-vhost | **edge-Lua (hybrid: daemon-seeded)**, per-IP |
+| Why separate | the engine *sees* the flood | the engine is **blind post-clearance** (`/nginx/decision` skipped for cleared clients, § above) → those tells are edge-only |
+| Feeds | `SuspiciousRow.Score` (shadow-parallel) | a per-IP score with the T1/T2/≥99 ladder |
+| Design doc | this file | **`docs/challenge-score.md`** |
+
+**Shared Stage E (actuation ladder / deny-shape) — the LAST decision**, after the
+scores say *who*: soft rung = **harden PoW** (16→20 + expiry scaling) *or* a
+**harder interactive challenge (ChallengeV2 drag/puzzle**, which beats headless
+better than PoW — PoW is pure CPU a farm solves trivially); hard rung = **403 /
+tarpit / nft drop** (Open Question #1, leaning 403 for residential mercy); vhost
+lane = surface-throttle / gate-before-origin / crawler-rate. Manual challenge
+stays an operator tool throughout.
+
+### Track-1 shadow fusion — the concrete build (grounded 2026-08-27)
+
+Shadow-only: a **parallel** fused score, never mutating the live arm.
+`fused = clamp01(base_score + Δ)`, where `Δ` is a capped, de-correlated sum of
+weighted **robust-z** deviations of facet/cost/dc against each vhost's own decayed
+baseline. Emit `signal=fused_score … verdict=would_arm|would_relax` when `fused`
+crosses the arm line but `base` did not (net-new catch) or vice-versa (FP-relax
+candidate). `facet` contributes **only** when `paths ≥ 2` **and** corroborated
+(the `planetgym.gr` 402-URLs-on-1-path benign-single-endpoint guard), `dc` stays
+verified-crawler-gated, and cost/dc/facet/shadow share **one capped group weight**
+(don't triple-count the same rate/cost shape). Reads the shadow magnitudes at
+score time via the package accessors (`FacetShadowCardinality(host)` etc.),
+emitting from a new `emitAbuseShadowFusedScore(now)` in the existing per-tick
+`if e.cfg.AbuseShadow` block (`challenge_rules.go`, after the dc-frac emitter).
+
+### Three corrections the code forced (supersede earlier prose in this doc)
+
+1. **`fpBaseline` is NOT a robust-z / median-MAD substrate** — it is an
+   EWMA-decayed **categorical path/UA histogram** for the fingerprinter
+   (`under_attack_fingerprint.go`). No median/MAD/robust-z code exists in the repo.
+   The robust-z substrate and the per-vhost per-feature scalar baseline are
+   **net-new** (a new sibling store modeled on `fpState`'s *pattern* — per-vhost
+   keying, 30 m half-life decay, cap/prune, copy-under-lock — not an extension of
+   `fpBaseline`). This corrects the "Self-baseline" note above.
+2. **Arm thresholds are 0.70 arm / 0.60 disarm (hysteresis)** — not "0.72".
+   `ChallengeSuspiciousScoreOn = 0.70`, `…ScoreOff = 0.60`
+   (`webdetector_config.go`); a per-node config may override on_threshold.
+3. **The `/6.0` divisor is a bare constant** (`scoring.go`), unrelated to the sum
+   of weights — so adding *any* positive term into `Score()` silently rescales
+   **every** vhost across the 0.70 line. ⟹ the fused term MUST be a separate
+   parallel computation expressed as a normalized score-delta, **never** an added
+   term inside `heuristicScorer.Score`. (This is exactly the "shadow protects the
+   existing raw/6, ON 0.70 arm" guardrail — now with the mechanism named.)
+
+> The Phase-1 checklist item below — "add per-client features … route
+> cookie_discard / solver_farm / abuse_shadow into `IPSignals.Score`" — is **Track
+> 2**, and belongs in `docs/challenge-score.md` (edge-Lua hybrid), NOT a direct
+> `IPSignals.Score` edit, precisely because of the post-clearance blindness above.
 
 ## Plan (measure-first, mechanism-agnostic)
 
