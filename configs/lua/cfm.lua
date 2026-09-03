@@ -1400,7 +1400,13 @@ if clearance_allow then
   -- in the observer can NEVER break the clearance fast-path — the bulk of real
   -- production traffic. observe() returns a verdict ONLY when a line is due.
   if pcw_ok and pcw and CFG.pcw_enabled and PCW_SH then
-    local ok, v, navs = pcall(pcw.observe, PCW_SH, ip, method, ngx.var.http_accept)
+    -- Key at the clearance grain (ip|host|scope) so a shared egress isn't pooled
+    -- across hosts, and pass the fetch-metadata headers so is_nav counts only a
+    -- top-level document nav (not iframes / prefetch).
+    local keyid = ip .. "|" .. (host or "-") .. "|" .. clearance_scope
+    local ok, v, navs = pcall(pcw.observe, PCW_SH, keyid, method,
+      ngx.var.http_accept, ngx.var.http_sec_fetch_dest,
+      ngx.var.http_sec_purpose or ngx.var.http_purpose)
     if ok and v then
       log_ev(ngx.WARN, "[cfm_pcw] post_clearance_burst ip=", ip, " host=", host or "-",
         " navs=", navs, " window=", pcw.WINDOW_SEC, " verdict=", v)

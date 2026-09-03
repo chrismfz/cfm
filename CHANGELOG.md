@@ -22,11 +22,18 @@ back-filled here — see the git/PR history for that period.
   counter (`cfm_pcw`, edge, LOG-ONLY).** A cleared client is waved to origin at
   `cfm.lua` Step 2b **without** the in-path decision RPC, so a scraper that solved
   the challenge and keeps pulling pages is invisible to enforcement. `cfm_pcw`
-  measures it edge-locally: it counts a cleared client's **navigations** (GET|HEAD
-  asking for `text/html`) per fixed 60s window and, when one sustains a
-  human-implausible rate (≥30/min → `would_harden`, ≥60/min → `would_deny`), logs
-  one `[cfm_pcw] post_clearance_burst … verdict=…` line per (ip, verdict) per 5 min
-  to the edge error log (read via `edge_error_tail`). **The design's original
+  measures it edge-locally: it counts a cleared identity's **top-level
+  navigations** — GET|HEAD document loads (`Sec-Fetch-Dest: document`, or, when the
+  header is absent, `Accept: text/html`; iframes and prefetch/prerender excluded) —
+  per fixed 60s window, keyed at the clearance grain `(ip, host, scope)`, and when
+  one sustains a human-implausible rate (≥30/min → `would_harden`, ≥60/min →
+  `would_deny`) logs one `[cfm_pcw] post_clearance_burst … verdict=…` line per
+  `(ip, host, verdict)` per 5 min to the edge error log (read via `edge_error_tail`).
+  It is **per-IP-per-host, not per-browser** — the clearance cookie is
+  `HMAC(ip, host, scope)`, so a shared egress (CGNAT / office NAT) where many real
+  users are cleared for the same host can pool into one counter; that is a known
+  burn-in FP class the seed map (B3) must handle NAT-aware before this ever gates
+  traffic, and is why it stays log-only. **The design's original
   "no-asset silence" tell was dropped** — static assets bypass `cfm.lua` entirely
   (the static-asset location is Lua-free) so asset fetches are invisible here, and
   browser caching would break it anyway (`docs/challenge-score-b2.md`); nav cadence

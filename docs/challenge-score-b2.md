@@ -95,16 +95,29 @@ asset-silence, once we choose.
 **Chosen: B2-lean.** Shipped as `configs/lua/cfm_pcw.lua` (pure logic) wired at
 `cfm.lua` Step 2b, log-only:
 
-- Counts a cleared client's **navigations** (`is_nav` = GET|HEAD + `Accept:
-  text/html`) per fixed 60 s window in a dedicated bounded `cfm_pcw` shared dict
-  (declared in both edge confs). AJAX/JSON and static assets never count.
+- Counts a cleared identity's **top-level navigations** per fixed 60 s window in a
+  dedicated bounded `cfm_pcw` shared dict (declared in both edge confs). `is_nav` =
+  GET|HEAD, not prefetch/prerender (`Sec-Purpose`/`Purpose`), and — when
+  `Sec-Fetch-Dest` is present — `document` only (same-origin iframes/embeds and
+  every asset dest excluded); header absent (older browsers + the headless
+  automation we most want to measure) falls back to `Accept: text/html`. AJAX/JSON
+  and static assets never count.
+- **Keyed `(ip, host, scope)`** — the grain clearance is minted at
+  (`HMAC(ip,host,scope)`), so counting is per-IP-per-host and one IP's traffic to
+  different hosts does not pool. **Known FP class:** the cookie is not a per-browser
+  identity, so a shared egress (CGNAT / office NAT) where many real users are
+  cleared for the SAME host still pools into one counter and can exceed the
+  thresholds from legitimate traffic — acceptable for a log-only shadow, but **B3
+  must make the score NAT-aware** (the §7 `ALLOW_NETS`/`IGNORE_IPS` + NAT guardrail)
+  before this gates traffic. It is a per-IP-per-host signal, **not** "per-client".
 - Emits `[cfm_pcw] post_clearance_burst ip=… host=… navs=… window=60 verdict=…`
   to the edge error log at ≥30 navs/window (`would_harden`) and ≥60
-  (`would_deny`), throttled to one line per `(ip, verdict)` per 5 min. Read via
-  `edge_error_tail`.
+  (`would_deny`), throttled to one line per `(ip, host, verdict)` per 5 min. Read
+  via `edge_error_tail`.
 - **Safety:** never blocks/challenges/changes flow; the Step-2b call is
-  `pcall`-guarded so a bug can't break the clearance fast-path; the shared dict is
-  bounded + short-TTL (self-cleaning); default ON with a `CFM_PCW=0` kill-switch
+  `pcall`-guarded so a bug can't break the clearance fast-path (an adversarial
+  review confirmed no path alters flow or adds latency); the shared dict is bounded
+  + short-TTL (self-cleaning); default ON with a `CFM_PCW=0` kill-switch
   (`env CFM_PCW;` in both confs). Thresholds/window are in-code burn-in constants.
 - `docs/challenge-score.md` §1/§4/§10 updated; the asset-silence tell is retired.
 

@@ -212,14 +212,19 @@ shared with the vhost lane:
       `waf_security` (no edge-block rule), placed LAST so it never masks a stronger
       reason. Stateless, no `ngx.shared`. Feeds the score later via the seed map.
     - **B2 — DONE (post-clearance nav-cadence shadow, `cfm_pcw`).** `cfm.lua` Step 2b
-      calls `cfm_pcw.observe` for each CLEARED request: it counts a cleared client's
-      navigations (GET|HEAD text/html) per fixed 60s window and logs
-      `[cfm_pcw] post_clearance_burst … verdict=would_harden|would_deny` (≥30/min /
-      ≥60/min) to the edge error log, read via `edge_error_tail`. **The design's
-      "no-asset silence" tell was retired** — static assets bypass `cfm.lua`
+      calls `cfm_pcw.observe` for each CLEARED request: it counts a cleared
+      identity's **top-level** navigations (GET|HEAD document loads —
+      `Sec-Fetch-Dest: document`, else `Accept: text/html`; iframes and prefetch
+      excluded) per fixed 60s window, keyed `(ip, host, scope)` (the clearance
+      grain), and logs `[cfm_pcw] post_clearance_burst … verdict=would_harden|would_deny`
+      (≥30/min / ≥60/min) to the edge error log, read via `edge_error_tail`. **The
+      design's "no-asset silence" tell was retired** — static assets bypass `cfm.lua`
       entirely, so asset fetches aren't observable here, and browser caching would
-      break it (see `docs/challenge-score-b2.md`); nav cadence is cache-immune. Edge-
-      local (fills the Step-2b decision-skip blind spot), log-only, `pcall`-guarded,
+      break it (see `docs/challenge-score-b2.md`); nav cadence is cache-immune. It is
+      **per-IP-per-host, not per-browser** (the cookie is `HMAC(ip,host,scope)`), so a
+      shared egress (CGNAT/NAT) where many real users are cleared for the same host
+      pools — a known FP class B3 must handle NAT-aware before enforcement. Edge-local
+      (fills the Step-2b decision-skip blind spot), log-only, `pcall`-guarded,
       dedicated bounded `cfm_pcw` dict, `CFM_PCW=0` kill-switch. Feeds the seed map.
     - **B3 — hybrid seed map (last).** Daemon publishes the Stage-1a score +
       `cookie_discard`/`solver_farm` as a per-IP seed the edge reads (the
