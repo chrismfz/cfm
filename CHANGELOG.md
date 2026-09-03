@@ -28,6 +28,12 @@ back-filled here — see the git/PR history for that period.
   reports the **actual** installed priority parsed from the live nft rule — so a
   config↔rule mismatch is visible — instead of a hard-coded `-99`. `NFT_INPUT_PRIORITY`
   was never affected: it is applied only by the daemon, which reads the file correctly.
+- **`cfm dnat cpanel status` now reports the actual installed panel priority.** It
+  printed `Selected priority` from the CLI flag default (`-101`) regardless of what
+  was really installed, so a panel DNAT enabled at another priority (e.g. `-99` via
+  `fallback` mode or an explicit `--priority`) was misreported. It now parses the
+  live `cfm_panel_redirect` rule (falling back to the persisted operator choice) and
+  labels it `Installed priority`.
 
 ## 2026.08.31
 
