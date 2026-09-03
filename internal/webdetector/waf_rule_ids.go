@@ -129,6 +129,10 @@ var wafRuleIDs = []WAFRule{
 	{ID: 609, Name: "rule_header_flood", ReasonFamily: "WAF_HEADER_FLOOD", DefaultMode: "challenge"},
 	{ID: 610, Name: "rule_range_abuse", ReasonFamily: "WAF_RANGE_ABUSE", DefaultMode: "logonly"},
 	{ID: 611, Name: "rule_bad_utf8", ReasonFamily: "WAF_BAD_UTF8", DefaultMode: "logonly"},
+	// Fetch-metadata missing (headless / automation "Sec-Fetch tell") — Track-2
+	// Stage 1b. logonly SHADOW: no edge-block rule, so its WAF_FETCH_METADATA
+	// family stays un-armed in waf_security (WAFFamilyHasBlockRule == false).
+	{ID: 612, Name: "rule_fetch_metadata_missing", ReasonFamily: "WAF_FETCH_METADATA", DefaultMode: "logonly"},
 
 	// 7xx SSRF
 	{ID: 701, Name: "rule_ssrf", ReasonFamily: "WAF_SSRF", DefaultMode: "challenge"},

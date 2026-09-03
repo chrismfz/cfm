@@ -46,9 +46,10 @@ end
 -- and the `hit ~= true` assertions clear.
 local function h(extra)
   local base = {
-    ["User-Agent"] = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
-    ["Accept"]     = "text/html,application/xhtml+xml",
-    ["Referer"]    = "https://example.com/",
+    ["User-Agent"]      = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+    ["Accept"]          = "text/html,application/xhtml+xml",
+    ["Accept-Language"] = "en-US,en;q=0.9",  -- a real browser always sends this;
+    ["Referer"]         = "https://example.com/",  -- keeps rule 612 (fetch-metadata) silent
   }
   if extra then for k, v in pairs(extra) do base[k] = v end end
   return base

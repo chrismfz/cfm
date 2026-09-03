@@ -127,6 +127,16 @@ local CFG = {
                                             -- (all observed hits POST `/` against webmail / MX hosts
                                             --  with non-string CT — never legitimate browser traffic)
 
+  -- Fetch-metadata missing (headless / automation tell) — logonly SHADOW.
+  -- Fires ONLY when a UA CLAIMS a Sec-Fetch-capable browser (Chrome >= 76 /
+  -- Firefox >= 90) yet a text/html GET|HEAD navigation carries NO Sec-Fetch-*
+  -- AND NO Accept-Language — a stacked weak signal, categorical together, that a
+  -- real browser never trips (Track-2 Stage 1b; docs/challenge-score.md). Honest
+  -- curl/wget/python clients never claim a browser, so they never match; self-
+  -- declared crawlers are skipped in the detector. logonly-only for burn-in —
+  -- promote past logonly only after watching waf_fp_hunt.
+  rule_fetch_metadata_missing = "logonly",
+
   -- [top-8]  Proxy header integrity
   rule_proxy_header_sqli = "challenge",  -- single-quote / non-string in XFF, X-Real-IP, Client-IP
 
@@ -531,6 +541,7 @@ local RULE_IDS = {
   rule_header_flood            = 609,
   rule_range_abuse             = 610,
   rule_bad_utf8                = 611,
+  rule_fetch_metadata_missing  = 612,
 
   -- 7xx SSRF
   rule_ssrf                    = 701,
@@ -2091,6 +2102,31 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_numeric_xor_obfuscation) then goto done end
+      end
+    end
+  end
+
+  -- ── LAST) Fetch-metadata missing (headless / automation tell) — logonly ───
+  -- Track-2 Stage 1b, the edge-only "Sec-Fetch tell": a UA that CLAIMS a modern
+  -- Sec-Fetch-capable browser (Chrome >= 76 / Firefox >= 90) but sends a text/html
+  -- GET|HEAD navigation with NO Sec-Fetch-* AND NO Accept-Language. Stacked weak
+  -- signals — a real browser always emits both — so honest CLI clients (they don't
+  -- claim a browser) and self-declared crawlers (skipped in the detector) never
+  -- match. Shadow-only for burn-in; feeds the per-client challenge score later.
+  --
+  -- Placed LAST on purpose: it is the WEAKEST signal here, so it must never become
+  -- the headline `final_reason` ahead of a real finding. record() keeps the strongest
+  -- action (highest severity wins) and, among equal-severity logonly hits, the FIRST
+  -- to fire owns the headline — so running this after every other rule means it only
+  -- surfaces as the primary reason when nothing stronger matched. All hits are still
+  -- recorded in `hits`, so nothing is lost either way.
+  do
+    local mode = rule_mode(CFG.rule_fetch_metadata_missing, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_fetch_metadata_missing(headers, method)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_FETCH_METADATA:" .. tag, ttl, mode, RULE_IDS.rule_fetch_metadata_missing) then goto done end
       end
     end
   end
