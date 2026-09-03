@@ -156,6 +156,44 @@ base conffile stays package-updateable (no more `.rpmnew`), global
   exim/postfix+docker → webdetector edge source → detconf layering (WebUI
   editor writes overlays) → global leniency + tokens → converged stock values.
 
+## 9. Traffic classifier (distributed-scraper / challenge-defeat defense)
+
+Mechanism-agnostic per-client + per-vhost classification for scrapers that evade
+UA detection (headless browsers, AI crawlers, faceted-URL floods, solver farms).
+Design: `docs/traffic-classifier.md` (master plan, two tracks → one ladder),
+`docs/challenge-score.md` (Track-2 per-client), `docs/challenge-score-b2.md`
+(B2 as-built). All signals ship **shadow/log-only** first; `logonly → challenge/
+harden → deny`, never straight to deny; never an adverse decision on country/ASN
+alone; NAT-aware.
+
+- **Track-1 vhost-anomaly fusion** — DONE (shadow). Robust-z baseline + fused
+  facet/cost/dc score → `cfm.abuse_shadow.log`; surfaced by `abuse_shadow` MCP +
+  per-vhost webtop pills.
+- **Track-2 Stage 1a — per-IP challenge-abuse score** — DONE (shadow). Daemon-side
+  `challenge_score` from the solve stream (fast/UA-lie/farm tells; NAT-safe).
+- **Track-2 Stage 1b/B1 — Sec-Fetch headless tell** — DONE (shadow). WAF rule 612
+  `WAF_FETCH_METADATA` (logonly); visible in the cfm-admin WAF analytics.
+- **Track-2 Stage 1b/B2 — post-clearance nav-cadence** — DONE (shadow). `cfm_pcw`
+  at `cfm.lua` Step 2b; `[cfm_pcw]` edge-log; config toggle
+  `[webdetector] POST_CLEARANCE_CADENCE`.
+- **Burn-in** — [in flight]. Deploy 1a+B1+B2; watch `abuse_shadow` /
+  `waf_activity rule=WAF_FETCH_METADATA` / `edge_error_tail [cfm_pcw]`; tune the
+  fused-score weights before B3.
+- **Track-2 Stage 1b/B3 — hybrid seed map** — [next]. Daemon publishes a per-IP
+  seed (`challenge_score` + `cookie_discard` + `solver_farm`) the edge reads and
+  fuses with the edge tells (B1 + B2) into one decayed per-client score. Weights
+  tuned from burn-in.
+- **Webtop visibility for the per-IP / edge-log shadow signals** — [post-burn-in].
+  `challenge_score` (per-IP) and `cfm_pcw` (edge error log) don't map to the
+  existing per-vhost webtop pills or the WAF-history analytics, so they're
+  currently MCP-only (`abuse_shadow` / `edge_error_tail`). Once burn-in confirms
+  the signals are worth keeping, add a webtop pane (per-IP would_harden/would_deny
+  from the shadow log; `cfm_pcw` aggregates). Deferred deliberately — don't build
+  UI for a signal that may be retuned or dropped.
+- **Stage E actuation ladder** — [track]. Shared per-client + per-vhost actuator:
+  PoW-harden / ChallengeV2 puzzle / 403 / tarpit / drop, edge-local (the cleared
+  path skips the in-path decision). Only after burn-in shows a clean would-act set.
+
 ---
 
 _Larger design docs live under `docs/`; this roadmap only indexes them. See
