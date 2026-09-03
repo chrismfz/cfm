@@ -179,13 +179,18 @@ shared with the vhost lane:
   - **Stage 1a — DONE (daemon-side, Go, log-only).** `internal/webdetector/
     challenge_score.go`: a decaying per-IP score (30-min half-life) fed from the
     existing `SubscribeChallengeSolveEvents` stream. It scores only the
-    *discriminating* per-solve tells — implausibly-fast solve (`SolveLatencyMS`),
-    UA-lie (`UAImpossible`), solver-farm vhost (`IsSolverFarm`) — emitting
+    *discriminating* per-solve tells — UA-lie (`UAImpossible`) and solver-farm vhost
+    (`IsSolverFarm`) OPEN a score; implausibly-fast solve (`SolveLatencyMS`) is a
+    corroborating AMPLIFIER only — emitting
     `signal=challenge_score … verdict=would_harden|would_deny` via `LogfABUSESHADOW`
-    (into `cfm.abuse_shadow.log`, no new log/logrotate). **Raw solve VOLUME is
-    deliberately NOT scored** (no flat per-solve weight) and `IGNORE_IPS`/
-    `IGNORE_NETS` IPs are skipped, honouring the §7 NAT guardrail so a benign shared
-    egress (many users each solving once) can't accumulate to a false farm. Rides
+    (into `cfm.abuse_shadow.log`, no new log/logrotate). **NAT/CGNAT-safe by
+    construction** (honouring the §7 guardrail): raw solve VOLUME is not scored (no
+    flat per-solve weight); the fast tell can't convict alone — ~15-23% of *honest*
+    browser solves are "fast" at the default PoW difficulty (`pow.go`: median 1.3 s,
+    exponentially distributed), so fast alone would light up a busy egress, hence it
+    only adds weight to a solve that already carries a strong tell; and `IGNORE_IPS`/
+    `IGNORE_NETS` IPs are skipped. So a benign shared egress (many users each solving
+    once, fast or not) can't accumulate to a false farm. Rides
     `ABUSE_SHADOW`, no new config; weights/thresholds are in-code burn-in constants.
     Surfaced by the `abuse_shadow` MCP tool's by-signal/by-verdict counts (no
     dedicated reader needed yet). Deferred to a **daemon seed** (not proxied by

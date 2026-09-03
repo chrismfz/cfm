@@ -9,29 +9,40 @@ import (
 )
 
 func TestChalSolveDelta(t *testing.T) {
-	// A no-tell solve scores NOTHING now (no flat per-solve base): a benign NAT
-	// where every user solves once must never accumulate.
+	// A no-tell solve scores NOTHING (no flat per-solve base): a benign NAT where
+	// every user solves once must never accumulate.
 	base := ChallengeSolve{IP: "1.2.3.4", Host: "h"} // SolveMS 0 = unknown, UA ok, no farm
 	if d, fast, ua := chalSolveDelta(base, false); d != 0 || fast || ua {
 		t.Errorf("plain solve = %v fast=%v ua=%v, want 0/false/false", d, fast, ua)
 	}
-	// A fast solve scores wFast alone; unknown latency (<=0) must NOT count as fast.
-	fastS := ChallengeSolve{IP: "1.2.3.4", SolveMS: chalScoreFastMS - 1}
-	if d, fast, _ := chalSolveDelta(fastS, false); !fast || d != chalScoreWFast {
-		t.Errorf("fast solve = %v fast=%v, want %v/true", d, fast, chalScoreWFast)
+	// CORROBORATION GATE: a fast solve with NO strong tell scores 0 — fast is an
+	// amplifier, not an opener. (~15-23% of honest browser solves are fast at
+	// difficulty 16, so fast alone would light up a busy NAT egress.) fast=true is
+	// still reported so the caller sees the tell fired, but it adds no weight alone.
+	fastOnly := ChallengeSolve{IP: "1.2.3.4", SolveMS: chalScoreFastMS - 1}
+	if d, fast, _ := chalSolveDelta(fastOnly, false); !fast || d != 0 {
+		t.Errorf("fast-only = %v fast=%v, want 0/true (amplifier, no strong tell)", d, fast)
 	}
 	if _, fast, _ := chalSolveDelta(ChallengeSolve{SolveMS: 0}, false); fast {
 		t.Errorf("unknown latency counted as fast")
 	}
-	// Exactly at the floor is NOT fast (strict <), so a lone at-floor solve scores 0.
+	// Exactly at the floor is NOT fast (strict <).
 	if d, fast, _ := chalSolveDelta(ChallengeSolve{SolveMS: chalScoreFastMS}, false); fast || d != 0 {
 		t.Errorf("solve exactly at fast floor = %v fast=%v, want 0/false", d, fast)
 	}
-	// Farm alone (no other tell) scores wFarm.
+	// Farm alone (a strong tell) opens a score: wFarm.
 	if d, _, _ := chalSolveDelta(ChallengeSolve{IP: "1.2.3.4"}, true); d != chalScoreWFarm {
 		t.Errorf("farm-only = %v, want %v", d, chalScoreWFarm)
 	}
-	// UA-impossible + farm stack.
+	// Fast AMPLIFIES a strong tell: farm+fast = wFarm+wFast.
+	if d, fast, _ := chalSolveDelta(ChallengeSolve{SolveMS: chalScoreFastMS - 1}, true); !fast || d != chalScoreWFarm+chalScoreWFast {
+		t.Errorf("farm+fast = %v fast=%v, want %v", d, fast, chalScoreWFarm+chalScoreWFast)
+	}
+	// UA-lie + fast = wUAImp+wFast.
+	if d, _, ua := chalSolveDelta(ChallengeSolve{UAImpossible: true, SolveMS: 100}, false); !ua || d != chalScoreWUAImp+chalScoreWFast {
+		t.Errorf("ua+fast = %v ua=%v, want %v", d, ua, chalScoreWUAImp+chalScoreWFast)
+	}
+	// UA-impossible + farm stack (both strong, no fast).
 	imp := ChallengeSolve{IP: "1.2.3.4", UAImpossible: true}
 	if d, _, ua := chalSolveDelta(imp, true); !ua || d != chalScoreWUAImp+chalScoreWFarm {
 		t.Errorf("ua+farm = %v ua=%v, want %v", d, ua, chalScoreWUAImp+chalScoreWFarm)
@@ -212,5 +223,39 @@ func TestRecordChallengeScoreSolve_Gate(t *testing.T) {
 	off.RecordChallengeScoreSolve(ChallengeSolve{IP: "5.5.5.5"})
 	if n := len(challengeScoreMarks.collectDue(time.Now(), 0, 0)); n != 0 {
 		t.Errorf("master off still recorded (%d rows)", n)
+	}
+}
+
+// The NAT/CGNAT guardrail, end-to-end: a busy shared egress that produces a heavy
+// stream of HONEST FAST solves (no UA-lie, not on a solver-farm vhost) must NEVER be
+// recorded — let alone reach a verdict — because fast is amplifier-only. This is the
+// scenario the 3rd review flagged: ~15-23% of honest solves are fast at difficulty
+// 16, so without the corroboration gate this egress would climb to would_deny.
+func TestRecordChallengeScoreSolve_FastOnlyNATNeverConvicts(t *testing.T) {
+	ResetChallengeScoreMarks()
+	e := &Engine{cfg: Config{AbuseShadow: true}}
+	now := time.Now()
+	for i := 0; i < 500; i++ { // a flood of honest fast solves from one CGNAT egress
+		e.RecordChallengeScoreSolve(ChallengeSolve{IP: "100.64.0.1", SolveMS: 50})
+	}
+	if rows := challengeScoreMarks.collectDue(now, 0, 0); len(rows) != 0 {
+		t.Fatalf("fast-only NAT egress recorded/convicted: %+v", rows)
+	}
+}
+
+// Operator-trusted IPs (IGNORE_IPS / IGNORE_NETS via bypassFunc) are skipped before
+// any store work, even when the solve carries a strong tell.
+func TestRecordChallengeScoreSolve_BypassSkipped(t *testing.T) {
+	ResetChallengeScoreMarks()
+	e := &Engine{cfg: Config{AbuseShadow: true}}
+	e.SetBypassFunc(func(ip string) bool { return ip == "9.9.9.9" })
+	e.RecordChallengeScoreSolve(ChallengeSolve{IP: "9.9.9.9", UAImpossible: true}) // strong tell, but trusted
+	if n := len(challengeScoreMarks.collectDue(time.Now(), 0, 0)); n != 0 {
+		t.Errorf("bypassed IP still recorded (%d rows)", n)
+	}
+	// A non-bypassed IP with the same tell IS recorded (proves the skip is selective).
+	e.RecordChallengeScoreSolve(ChallengeSolve{IP: "8.8.8.8", UAImpossible: true})
+	if n := len(challengeScoreMarks.collectDue(time.Now(), 0, 0)); n != 1 {
+		t.Errorf("non-bypassed IP not recorded (%d rows)", n)
 	}
 }

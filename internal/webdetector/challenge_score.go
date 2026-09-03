@@ -21,8 +21,13 @@ import (
 // would make a benign shared egress (CGNAT / corporate NAT), where many real users
 // each solve once, accumulate to would_deny — the exact false "solver farm" the
 // design's §7 guardrail warns about. So only the discriminating tells score, and
-// operator-trusted IPs (IGNORE_IPS/IGNORE_NETS) are skipped entirely. The one
-// signal that genuinely needs to tell a re-solving headless from a busy NAT —
+// operator-trusted IPs (IGNORE_IPS/IGNORE_NETS) are skipped entirely. Crucially the
+// fast-solve tell is a weak AMPLIFIER, not an opener (chalSolveDelta): ~15-23% of
+// HONEST browser solves land under the fast floor at difficulty 16 (pow.go), so if
+// fast could open a score the same NAT egress would accumulate its honest fast tail
+// to would_deny — the guardrail re-entered through fast. A score is opened only by a
+// strong tell (UA-lie / solver-farm vhost); fast merely adds weight on top. The one
+// volume-shaped signal that genuinely tells a re-solving headless from a busy NAT —
 // re-solve cadence with canonical-host collapse — is the cookie_discard detector's
 // job and joins later as a daemon seed, not proxied here by counting solves.
 //
@@ -50,15 +55,20 @@ const (
 
 	// Per-solve tell weights (burn-in STARTING values, tuned from the logged
 	// distribution — not config). NO flat per-solve base (see the volume note above):
-	// only these discriminating tells score.
-	chalScoreWFast  = 10.0 // solve latency below the human floor (native/GPU); noisy per-event, so low
+	// only these discriminating tells score, and the weakest (fast) only AMPLIFIES a
+	// solve that already carries a strong tell — it never opens a score on its own
+	// (chalSolveDelta corroboration gate).
+	chalScoreWFast  = 10.0 // fast solve — a weak AMPLIFIER only (see chalSolveDelta); common among honest clients
 	chalScoreWUAImp = 30.0 // self-contradictory User-Agent — a lie, not just old — the strongest tell
 	chalScoreWFarm  = 15.0 // the solve's vhost currently looks like a solver farm
 
-	// chalScoreFastMS: an issue→submit gap below this is "too fast". It includes HTML
-	// delivery + browser startup + POST RTT, so it is deliberately low; a lone lucky
-	// browser barely trips it and the weight is small — the real signal is the COUNT
-	// of fast solves from one IP. Calibrate from cfm.challenges.log solve_ms.
+	// chalScoreFastMS: an issue→submit gap below this is "too fast" — native/GPU
+	// territory, under the PoW+HTML+RTT budget an honest browser normally needs. But
+	// PoW solve time is exponentially distributed (pow.go), so at difficulty 16 a
+	// large minority (~15-23%) of HONEST browser solves also land under this floor —
+	// which is exactly why the fast tell can never convict alone (a busy shared
+	// egress would otherwise accumulate fast-tail solves to would_deny). It only
+	// amplifies a corroborated solve. Calibrate from cfm.challenges.log solve_ms.
 	chalScoreFastMS = 800
 
 	// Shadow thresholds on the decayed score.
@@ -87,9 +97,12 @@ func halfLifeDecayFactor(dt, halfLife time.Duration) float64 {
 // burn-in shows WHY an IP scored) and its last-logged time (the per-IP log throttle,
 // bounded by the store's own cap/prune).
 type chalScoreMark struct {
-	score                     float64
-	last                      time.Time
-	lastLogged                time.Time
+	score      float64
+	last       time.Time
+	lastLogged time.Time
+	// Lifetime tell counters (NOT decayed) — logged so burn-in shows WHY an IP
+	// scored. They can outpace the decayed score (e.g. solves=100 on a faded
+	// score=51); the score is the live signal, the counts are the ledger.
 	solves, fast, uaImp, farm int
 }
 
@@ -111,17 +124,30 @@ func chalDecay(score float64, last, now time.Time) float64 {
 
 // chalSolveDelta is the PURE per-solve score contribution and which tells fired.
 // Returns 0 when a solve carries no discriminating tell (that solve is not scored).
+//
+// Corroboration gate: the STRONG per-solve tells — a self-contradictory UA (a lie)
+// and a solver-farm vhost — OPEN a score. The fast-solve tell only AMPLIFIES: it
+// adds its weight solely when a strong tell already fired on the same solve. Fast is
+// far too common among honest clients to convict alone — at PoW difficulty 16 a
+// large minority (~15-23%) of HONEST browser solves land under the fast floor (PoW
+// solve time is exponentially distributed; see pow.go). If fast could open a score,
+// a busy shared egress (CGNAT / corporate NAT) would accumulate its honest fast-tail
+// solves to would_deny — the exact §7 NAT false-positive the base-weight removal was
+// meant to close, re-entered through the fast tell. Gating fast to amplifier-only
+// closes that path and keeps the store free of pure-fast benign IPs.
 func chalSolveDelta(s ChallengeSolve, farm bool) (delta float64, fast, uaImp bool) {
-	if ms, ok := s.SolveLatencyMS(); ok && ms < chalScoreFastMS {
-		fast = true
-		delta += chalScoreWFast
-	}
 	if s.UAImpossible {
 		uaImp = true
 		delta += chalScoreWUAImp
 	}
 	if farm {
 		delta += chalScoreWFarm
+	}
+	if ms, ok := s.SolveLatencyMS(); ok && ms < chalScoreFastMS {
+		fast = true
+		if delta > 0 { // corroborated by a strong tell — amplify; never open alone
+			delta += chalScoreWFast
+		}
 	}
 	return delta, fast, uaImp
 }

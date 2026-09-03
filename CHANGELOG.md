@@ -26,13 +26,18 @@ back-filled here — see the git/PR history for that period.
   `cfm.abuse_shadow.log` where a solver's score crosses a threshold. Targets the
   headless / solver-farm class ("the challenge was solved and the abuse
   continued"). Event-fed from the existing challenge-solve stream
-  (`SubscribeChallengeSolveEvents`), 30-min decay half-life. **Raw solve VOLUME
-  is deliberately NOT scored** (no flat per-solve weight) and operator-trusted IPs
-  (`IGNORE_IPS`/`IGNORE_NETS`) are skipped, so a benign shared egress (CGNAT /
-  corporate NAT) where many real users each solve once can't accumulate to a false
-  "solver farm"; the one volume-shaped tell that genuinely discriminates —
-  re-solve cadence with canonical-host collapse — arrives later as the
-  cookie-discard detector's daemon seed, not by counting solves here. Rides the
+  (`SubscribeChallengeSolveEvents`), 30-min decay half-life. **NAT/CGNAT-safe by
+  construction:** raw solve VOLUME is not scored (no flat per-solve weight); the
+  fast-solve tell is a corroborating AMPLIFIER only (a score is opened solely by a
+  strong tell — UA-lie or solver-farm vhost — because ~15-23% of *honest* browser
+  solves are "fast" at the default PoW difficulty, so fast alone would light up a
+  busy shared egress); and operator-trusted IPs (`IGNORE_IPS`/`IGNORE_NETS`) are
+  skipped entirely. So a benign shared egress (CGNAT / corporate NAT) where many
+  real users each solve once — fast or not — can't accumulate to a false "solver
+  farm". The one volume-shaped tell that genuinely discriminates a re-solving
+  headless from a busy NAT — re-solve cadence with canonical-host collapse —
+  arrives later as the cookie-discard detector's daemon seed, not by counting
+  solves here. Rides the
   existing `ABUSE_SHADOW` master — **no new config knob** (weights/thresholds are
   in-code burn-in constants; the raw per-solve `solve_ms` is already in
   `cfm.challenges.log` for calibrating the "fast" floor); surfaced by the
