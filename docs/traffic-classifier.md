@@ -470,8 +470,20 @@ Class-2 burst.
       cookie_discard / solver_farm / abuse_shadow as contributors into
       `IPSignals.Score` / `SuspiciousRow.Score` (they stop being independent
       actuators; alerts stay during burn-in).
-- [ ] Self-baseline (robust-z) on the vhost feature vector.
-- [ ] Emit `verdict=would_*` shadow lines; compare vs baseline.
+- [x] **DONE (PR #1377) — self-baseline (robust-z) primitive.**
+      `internal/webdetector/vhost_baseline.go`: a bounded per-`(vhost,feature)`
+      recency ring → modified robust-z (median/MAD, so the spike we hunt does not
+      poison its own baseline), per-feature `madFloor`, cold-start guard, non-finite
+      guard, `MaxHosts` LRU + `Prune`. Pure/unwired; two adversarial reviews folded.
+- [x] **DONE — fused shadow score + `verdict=would_*` lines.**
+      `internal/webdetector/abuse_shadow_fused.go`: `fused = clamp01(base + Δ)`,
+      Δ = capped Σ weighted robust-z of facet/cost/dc/shadow against each vhost's
+      own baseline, emitted from the per-tick shadow block. **Corroboration-gated**
+      (≥2 signals co-fire → the planetgym facet-alone / dc-alone guard) and
+      **baseline-frozen while corroborated** (an active flood never trains itself
+      in). Logs `signal=fused_score … verdict=would_arm|confirm` only; the live
+      `raw/6, ON 0.70` arm is never read from the fused value. Rides `ABUSE_SHADOW`,
+      no new config; weights are in-code burn-in constants.
 
 ### Phase 2 — actuation ladder (under_attack I3)
 - [ ] **Surface-throttle**: add a URI-pattern-keyed counter (mirror

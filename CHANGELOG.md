@@ -18,6 +18,18 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Track-1 score fusion (SHADOW / log-only): facet/cost/dc now feed a parallel
+  fused vhost score.** Uses the robust-z baseline to score each shadow signal's
+  spike against the vhost's own recent history, sums the corroborated ones into a
+  capped delta on top of the live suspicious score, and writes
+  `signal=fused_score … verdict=would_arm` to `cfm.abuse_shadow.log` wherever the
+  fused score WOULD arm a vhost the live score alone did not. **Corroboration-gated**
+  (≥2 signals must co-fire, so a lone facet — e.g. a single-IP `?p=N` enumerator —
+  or a lone datacenter-fraction never moves it) and the **live 0.70 arm is
+  untouched**: pure measurement to size the weights before any enforcement. Rides
+  the existing `ABUSE_SHADOW` master — **no new config knob** (weights/baseline are
+  in-code constants, tuned from burn-in data). Surfaced by the existing
+  `abuse_shadow` tool's by-signal/by-verdict counts.
 - **Track-1 fusion groundwork: a robust-z rolling-baseline primitive** for the
   web detector (`internal/webdetector/vhost_baseline.go`). Keeps a bounded
   recency window of scalar per-`(vhost, feature)` values and answers a modified

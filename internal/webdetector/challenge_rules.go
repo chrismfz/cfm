@@ -2109,6 +2109,10 @@ if ha := short[host]; ha != nil {
         e.emitAbuseShadowFacetOutliers(now)
         e.emitAbuseShadowCostPressure(now)
         e.emitAbuseShadowDatacenterFrac(now)
+        // Fuses the three vhost signals above (facet/cost/dc) + rate-outliers into
+        // a parallel shadow score and logs where it WOULD arm; reads their marks,
+        // so it runs last. Log-only, never touches the live arm.
+        e.emitAbuseShadowFusedScore(now)
     }
 
     // ---- Under-Attack Mode campaign fingerprinter (I2, shadow-only) ----
