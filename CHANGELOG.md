@@ -17,6 +17,15 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Track-1 fusion groundwork: a robust-z rolling-baseline primitive** for the
+  web detector (`internal/webdetector/vhost_baseline.go`). Keeps a bounded
+  recency window of scalar per-`(vhost, feature)` values and answers a modified
+  robust-z (median/MAD) of a value against the vhost's own recent history —
+  robust to the very spikes we want to detect. **Unwired: no runtime behaviour
+  change** — this is the substrate the shadow score fusion (see
+  `docs/traffic-classifier.md`) will read in a later change.
+
 ### Fixed
 - **`cfm dnat on` now honours `NFT_DNAT_PRIORITY` from `cfm.conf`.** The one-shot
   CLI built an unconfigured firewall backend, so it never read the file and always
