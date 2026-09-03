@@ -17,7 +17,17 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **`cfm dnat on` now honours `NFT_DNAT_PRIORITY` from `cfm.conf`.** The one-shot
+  CLI built an unconfigured firewall backend, so it never read the file and always
+  applied the `-99` default — editing `NFT_DNAT_PRIORITY = -101` (CFM-first, ahead
+  of Imunify/WebShield's `dstnat`/`-100` NAT chain) had no effect, even across
+  `cfm dnat off/on` and a daemon restart, unless you passed `--priority` explicitly.
+  The CLI now resolves the priority from `cfm.conf` the same way the daemon does
+  (an explicit `--priority` still overrides it). The `cfm dnat` status line also
+  reports the **actual** installed priority parsed from the live nft rule — so a
+  config↔rule mismatch is visible — instead of a hard-coded `-99`. `NFT_INPUT_PRIORITY`
+  was never affected: it is applied only by the daemon, which reads the file correctly.
 
 ## 2026.08.31
 
