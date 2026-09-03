@@ -113,16 +113,20 @@ func newVhostBaseline(cfg vhostBaselineConfig) *vhostBaseline {
 // the host seen at now. The caller decides when NOT to call this (e.g. while the
 // vhost is armed) so an attack does not poison its own baseline.
 func (b *vhostBaseline) Observe(host, feature string, v float64, now time.Time) {
-	// Never store a non-finite sample: a caller computing e.g. a 5xx fraction as
-	// 0/0 on a zero-request tick would otherwise poison median/MAD with NaN for a
-	// whole window (NaN ≤ 0 is false, so it would slip past RobustZ's scale guard).
-	if math.IsNaN(v) || math.IsInf(v, 0) {
-		return
-	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// A non-finite sample (e.g. a caller's 0/0 fraction on a zero-request tick)
+	// must never enter a window — it would poison median/MAD with NaN for a whole
+	// window (NaN ≤ 0 is false, so it would slip past RobustZ's scale guard). But
+	// an EXISTING vhost still refreshes lastSeen, so a transient non-finite value
+	// does not get its valid rolling window pruned / LRU-evicted out from under it;
+	// a brand-new host is simply not created from a bad first sample.
+	nonFinite := math.IsNaN(v) || math.IsInf(v, 0)
 	hb := b.hosts[host]
 	if hb == nil {
+		if nonFinite {
+			return
+		}
 		if b.cfg.MaxHosts > 0 && len(b.hosts) >= b.cfg.MaxHosts {
 			b.evictLRULocked()
 		}
@@ -130,6 +134,9 @@ func (b *vhostBaseline) Observe(host, feature string, v float64, now time.Time) 
 		b.hosts[host] = hb
 	}
 	hb.lastSeen = now
+	if nonFinite {
+		return
+	}
 	r := hb.feats[feature]
 	if r == nil {
 		r = &featureRing{buf: make([]float64, b.cfg.Window)}
@@ -183,7 +190,15 @@ func (b *vhostBaseline) RobustZ(host, feature string, x, madFloor float64) (z fl
 	if scale <= 0 {
 		return 0, r.n
 	}
-	return robustZScale * (x - med) / scale, r.n
+	z = robustZScale * (x - med) / scale
+	// Final finiteness backstop on the OUTPUT: a non-finite madFloor makes
+	// scale = Max(mad, NaN) = NaN, which slips past scale <= 0; an absurdly tiny
+	// madFloor (~1e-308) overflows z to ±Inf. Either way, never hand a non-finite
+	// z into scoring — the whole point of the guards above.
+	if math.IsNaN(z) || math.IsInf(z, 0) {
+		return 0, r.n
+	}
+	return z, r.n
 }
 
 // Prune drops every host not Observed since `before` and returns how many were
@@ -201,8 +216,12 @@ func (b *vhostBaseline) Prune(before time.Time) int {
 	return removed
 }
 
-// evictLRULocked removes the least-recently-seen host. Caller holds b.mu. Runs
-// only when MaxHosts is exceeded, so the O(hosts) scan is rare.
+// evictLRULocked removes the least-recently-seen host. Caller holds b.mu. The
+// O(hosts) scan runs ONLY when the host count is at MaxHosts; the intended
+// keyspace is configured vhosts (a bounded set), so set MaxHosts above that
+// count and the scan is a genuine backstop while Prune is the primary bound. Do
+// NOT key the store on attacker-controlled names (see the hostBaseline.feats
+// note) — at cap that would turn this scan into a per-request cost.
 func (b *vhostBaseline) evictLRULocked() {
 	var oldestHost string
 	var oldest time.Time
@@ -224,7 +243,11 @@ func (b *vhostBaseline) hostCount() int {
 	return len(b.hosts)
 }
 
-// medianSorted returns the median of an already-sorted slice (0 for empty).
+// medianSorted returns the median of an ALREADY-SORTED slice (0 for empty). Kept
+// separate from the package's medianInt (abuse_shadow.go), which takes an
+// unsorted []int and sorts a copy internally: different element type and a
+// different (pre-sorted) contract, so sharing would cost more than the tiny
+// duplicated odd/even arithmetic.
 func medianSorted(sorted []float64) float64 {
 	n := len(sorted)
 	if n == 0 {

@@ -149,8 +149,8 @@ func TestRobustZ_NonFiniteGuard(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		b.Observe("h", "f", 10, now)
 	}
-	b.Observe("h", "f", math.NaN(), now)           // dropped
-	b.Observe("h", "f", math.Inf(1), now)          // dropped
+	b.Observe("h", "f", math.NaN(), now)  // dropped
+	b.Observe("h", "f", math.Inf(1), now) // dropped
 	if z, n := b.RobustZ("h", "f", 10, 1); z != 0 || n != 12 {
 		t.Errorf("non-finite samples leaked: z=%v n=%d, want 0/12", z, n)
 	}
@@ -160,6 +160,39 @@ func TestRobustZ_NonFiniteGuard(t *testing.T) {
 	}
 	if z, _ := b.RobustZ("h", "f", math.Inf(1), 1); z != 0 {
 		t.Errorf("Inf query z=%v, want 0", z)
+	}
+	// A non-finite madFloor must not slip a NaN z out (Max(mad, NaN) = NaN passes
+	// the scale<=0 guard) — the output finiteness backstop catches it.
+	if z, _ := b.RobustZ("h", "f", 25, math.NaN()); z != 0 || math.IsNaN(z) {
+		t.Errorf("NaN madFloor z=%v, want 0", z)
+	}
+	// An absurdly tiny madFloor overflows z to +Inf on a large deviation; the
+	// backstop returns 0 rather than a non-finite score.
+	if z, _ := b.RobustZ("h", "f", 1e300, 1e-309); z != 0 || math.IsInf(z, 0) {
+		t.Errorf("tiny-madFloor overflow z=%v, want 0", z)
+	}
+}
+
+// A transient non-finite sample must NOT cost an existing vhost its rolling window
+// via a prune/LRU: Observe refreshes lastSeen for a known host even when it drops
+// the bad value, and does not create a brand-new host from a non-finite sample.
+func TestObserve_NonFiniteRefreshesLastSeen(t *testing.T) {
+	b := newVhostBaseline(vhostBaselineConfig{Window: 10, MinSamples: 3})
+	t0 := time.Now()
+	b.Observe("h", "f", 10, t0)                        // creates host, lastSeen = t0
+	b.Observe("h", "f", math.NaN(), t0.Add(time.Hour)) // dropped, but lastSeen → t0+1h
+	// Prune with a cutoff between t0 and t0+1h: the host must survive because its
+	// lastSeen advanced past the bad sample.
+	if got := b.Prune(t0.Add(30 * time.Minute)); got != 0 {
+		t.Errorf("pruned %d, want 0 — lastSeen should have advanced on the NaN tick", got)
+	}
+	if b.hostCount() != 1 {
+		t.Errorf("hostCount=%d, want 1 (host kept)", b.hostCount())
+	}
+	// A brand-new host whose first-ever sample is non-finite is not created.
+	b.Observe("nan-only", "f", math.Inf(1), t0)
+	if b.hostCount() != 1 {
+		t.Errorf("hostCount=%d, want 1 — a NaN/Inf first sample must not create a host", b.hostCount())
 	}
 }
 
