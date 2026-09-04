@@ -23,8 +23,13 @@ Code: `internal/mcpserver/whats_wrong.go` (evaluator + handler),
 `what's_wrong` is already more than a health dump. What ships today:
 
 - **Severity-ranked findings.** `critical | warning | info`, with a stable
-  secondary sort by category (`edge, service, process, disk, memory, load,
-  network, …`). Most-severe first.
+  secondary sort by category (`edge, hardware, service, process, disk, memory,
+  load, network, …`). Most-severe first.
+- **Memory ECC / hardware errors.** `evalHardware` reads the health snapshot's
+  `hardware.ecc` block (cumulative EDAC counters, per-DIMM, with a kernel-ring
+  fallback): any **uncorrected** ECC error → `critical`, **corrected** errors →
+  `warning`, drilling in via `dmesg_tail`. Closes the gap where a failing DIMM's
+  corrected DRAM ECC errors passed an otherwise-green health check.
 - **Conservative, named thresholds.** Every threshold is a constant grounded in
   a field the source endpoint already computes (disk/inode %, load÷threads,
   mem-available %, conntrack %, MySQL conn %, frozen-queue count, systemd

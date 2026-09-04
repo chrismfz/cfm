@@ -17,7 +17,40 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Memory ECC / hardware-error visibility in health + `whats_wrong`.** The host
+  health snapshot (`system_health` / `/api/v1/health/snapshot`) previously carried
+  disk SMART, mdadm and NVMe wearout but was **blind to memory errors** — a node
+  could log corrected DRAM ECC errors from a failing DIMM (kernel `[Hardware Error]`
+  machine-check lines) while every health field stayed green. The snapshot now
+  includes a `hardware.ecc` block: cumulative-since-boot corrected/uncorrected
+  counts, per-controller and per-DIMM breakdown (label/location), read from the
+  kernel EDAC subsystem (`/sys/devices/system/edac/mc`), with a rate-limited
+  kernel-ring fallback for boxes whose corrected errors only reach the machine-check
+  log (e.g. `amd64_edac` not loaded). `whats_wrong` now flags it: **any uncorrected
+  ECC error → critical** (data-integrity risk / imminent DIMM failure), **corrected
+  ECC errors → warning** (a single flip is benign, but a rising count is the classic
+  DIMM pre-failure signal), each drilling in via `dmesg_tail`. When neither EDAC nor
+  the ring fallback yields data the block reports `present:false` — surfaced as
+  unreadable, never as "healthy".
+- **Durable persistence of memory-ECC events (`detection_history` type
+  `hardware_ecc`).** The live counters are ephemeral — a reboot resets EDAC to 0
+  and the dmesg ring wraps (as seen on orion, where an OOM trace pushed the
+  hardware-error lines out of the default window) — so a point-in-time check the
+  next day could read "all clear" after real errors. The health detector now
+  tracks the cumulative counters across cycles and, on growth, publishes a durable
+  event into the webdetector history store (a baseline marker at startup for
+  pre-existing counts, then one event per delta; a reboot/ring-wrap that moves the
+  counters backwards re-seeds silently rather than emitting a bogus negative). The
+  events are queryable from any later session via `detection_history`
+  (`type=hardware_ecc`) and carry the corrected/uncorrected totals, the delta, the
+  worst-attributed DIMM, and the source. Wired as an ECC sink mirroring the ClamAV
+  scan-event sink.
+- **Alerting on ECC growth** (`HEALTH/ECC_UNCORRECTED` critical,
+  `HEALTH/ECC_CORRECTED` warning) via the detector framework, so a developing DIMM
+  fault reaches the operator's notifier — gated by `ECC_ALERT` (default on, mirrors
+  `SMART_FAIL_ALERT`) and fired on delta growth (cooldown-spaced), not on the
+  static cumulative count.
 
 ## 2026.09.04
 
