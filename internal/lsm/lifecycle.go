@@ -17,6 +17,26 @@ import (
 	"cfm/internal/logging"
 )
 
+// lsmActivationClock returns the current time for activation-backoff
+// bookkeeping. A package var so tests can drive backoff transitions
+// deterministically without sleeping.
+var lsmActivationClock = time.Now
+
+// errActivationBackoff is returned by openOrCreateLoader when the fresh
+// auto-enable path is deferred by backoff. ApplyConfig treats it like
+// any other activation error (stay dormant) but it is deliberately
+// unlogged — the failure that armed the backoff already logged once.
+var errActivationBackoff = errors.New("fresh activation deferred by backoff")
+
+const (
+	// activationBackoffInitial is the wait after the first failed fresh
+	// auto-enable attempt; it doubles on each subsequent failure.
+	activationBackoffInitial = 1 * time.Minute
+	// activationBackoffMax caps the fresh-path retry interval so a
+	// permanently-incompatible kernel logs at most this often.
+	activationBackoffMax = 30 * time.Minute
+)
+
 // Lifecycle owns the daemon-side activation of cfm-lsm. Mirrors the
 // shape of internal/outbound's Lifecycle: created once in
 // cmd/cfm/main.go, ApplyConfig is called on every config-reload tick,
@@ -81,6 +101,20 @@ type Lifecycle struct {
 	// stat support, platform anomalies). In that case drift detection
 	// is a no-op and the start-once invariant holds.
 	pinnedRingbufIno uint64
+
+	// activationBackoff / nextActivationAttempt implement exponential
+	// backoff for the FRESH auto-enable path (preflight + NewLoader).
+	// A permanently-incompatible kernel — e.g. CloudLinux 8 lve, which
+	// passes bpf-lsm-program-type but lacks task-local storage maps, so
+	// the shared BPF object never loads — would otherwise re-run
+	// preflight and log a FAIL on every reload tick. On each fresh-path
+	// failure the wait doubles from activationBackoffInitial up to
+	// activationBackoffMax; any successful activation (fresh or adopt)
+	// resets it. The adopt path is never gated, so an operator's
+	// `cfm lsm enable` (which creates pins the daemon then adopts) is
+	// still picked up on the very next tick regardless of backoff state.
+	activationBackoff     time.Duration
+	nextActivationAttempt time.Time
 }
 
 // NewLifecycle returns a fresh lifecycle. Safe to call before any
@@ -219,7 +253,11 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	loader, fresh, err := l.openOrCreateLoader(conf)
 	if err != nil {
 		l.mu.Unlock()
-		return // openOrCreateLoader already logged + emitted to kmsg
+		// openOrCreateLoader already surfaced the reason (log, and kmsg
+		// for load/attach failures); a backoff-deferred attempt returns
+		// errActivationBackoff silently by design. Either way we stay
+		// dormant this tick.
+		return
 	}
 
 	drainCtx, drainCancel := context.WithCancel(ctx)
@@ -272,9 +310,12 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 // openOrCreateLoader is the activation core: either adopt existing
 // pinned state, or run preflight + NewLoader to create fresh pins.
 // Returns the loader, a `fresh` boolean indicating which path was
-// taken, and any error. On error the caller stays dormant — every
-// failure path here also logs and emits to kmsg so the operator
-// sees what happened.
+// taken, and any error. On error the caller stays dormant. Every
+// failure path here logs (and, for load/attach failures, emits to
+// kmsg) so the operator sees what happened — with one deliberate
+// exception: a fresh attempt deferred by activation backoff returns
+// errActivationBackoff silently, because the failure that armed the
+// backoff already logged once.
 //
 // The fresh path is what makes "enabled = true" survive a reboot:
 // bpffs is RAM-only, so on every boot the daemon comes up to find
@@ -313,6 +354,9 @@ func (l *Lifecycle) openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, 
 				KmsgStatef("ISSUE", "adopt pinned state at %s failed: %v", DefaultPinDir, err)
 				return nil, false, err
 			}
+			// Healthy adopt clears any fresh-path backoff so a later
+			// pin loss re-enters the fresh path without an inherited wait.
+			l.resetActivationBackoff()
 			return lr, false, nil
 		}
 		// Stale pin → unpin so the fresh path below has a clean slate.
@@ -328,14 +372,40 @@ func (l *Lifecycle) openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, 
 		}
 	}
 
+	// Fresh auto-enable path. Gate repeated attempts behind exponential
+	// backoff: a kernel that will never load our BPF (e.g. CloudLinux 8
+	// lve, which passes bpf-lsm-program-type but lacks task-local
+	// storage maps) would otherwise re-run preflight + NewLoader and log
+	// on every reload tick. The adopt branch above is deliberately
+	// outside this gate, so a CLI `cfm lsm enable` is still adopted next
+	// tick. Deferred attempts return errActivationBackoff, which
+	// ApplyConfig handles like any dormant outcome — silently.
+	now := lsmActivationClock()
+	if !l.freshActivationDue(now) {
+		return nil, false, errActivationBackoff
+	}
+
 	// No pinned state — auto-enable. Run preflight first; if it
 	// fails (kernel too old, CONFIG_BPF_LSM not set, `bpf` not in
-	// /sys/kernel/security/lsm, BTF missing, caps missing, bpffs
-	// not mounted) we stay dormant and the daemon continues
-	// normally. `cfm lsm status` will report the failing checks.
+	// /sys/kernel/security/lsm, BTF missing, task-local storage maps
+	// unsupported, caps missing, bpffs not mounted) we stay dormant and
+	// the daemon continues normally. `cfm lsm status` reports the
+	// failing checks.
 	pf := RunPreflight()
 	if !pf.OK {
-		logging.LogfLSM("[lsm] auto-enable skipped: kernel preflight FAIL (run `cfm lsm status` for details)")
+		// Escalate the backoff only on a PERMANENT FAIL (a kernel/config
+		// problem that won't clear without a reboot — e.g. task-storage
+		// unsupported). A recoverable FAIL (bpffs mounting late at boot)
+		// or an inconclusive UNKNOWN (a briefly-unreadable /proc file)
+		// may heal on its own, so retry it on a short fixed interval
+		// rather than marching a genuinely-supported host toward the
+		// 30-minute cap. HasPermanentFail encodes that distinction.
+		if pf.HasPermanentFail() {
+			l.noteFreshActivationFailure(now)
+		} else {
+			l.armTransientRetry(now)
+		}
+		logging.LogfLSM("[lsm] auto-enable skipped: kernel preflight not satisfied (run `cfm lsm status` for details); next retry in %s", l.activationBackoff)
 		return nil, false, errors.New("preflight failed")
 	}
 
@@ -368,7 +438,8 @@ func (l *Lifecycle) openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, 
 	}
 
 	if len(policies) == 0 {
-		logging.LogfLSM("[lsm] auto-enable skipped: no configured policies are available on this kernel")
+		l.noteFreshActivationFailure(now)
+		logging.LogfLSM("[lsm] auto-enable skipped: no configured policies are available on this kernel; next retry in %s", l.activationBackoff)
 		return nil, false, errors.New("no configured policies available")
 	}
 
@@ -380,7 +451,8 @@ func (l *Lifecycle) openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, 
 		PinDir:                DefaultPinDir,
 	})
 	if lerr != nil {
-		logging.LogfLSM("[lsm] auto-enable failed: %v", lerr)
+		l.noteFreshActivationFailure(now)
+		logging.LogfLSM("[lsm] auto-enable failed: %v (next retry in %s)", lerr, l.activationBackoff)
 		KmsgStatef("ISSUE", "auto-enable failed: %v", lerr)
 		// Try to clean up any partial pin state so the next reload
 		// tick starts from scratch rather than half-pinned.
@@ -398,7 +470,56 @@ func (l *Lifecycle) openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, 
 		logging.LogfLSM("[lsm] version marker stamped: %q at %s",
 			l.build.String(), DefaultBuildVersionMarker)
 	}
+	l.resetActivationBackoff()
 	return lr, true, nil
+}
+
+// freshActivationDue reports whether the fresh auto-enable path may run
+// at time now. Called with l.mu held.
+func (l *Lifecycle) freshActivationDue(now time.Time) bool {
+	return !now.Before(l.nextActivationAttempt)
+}
+
+// noteFreshActivationFailure grows the fresh-path backoff after a failed
+// auto-enable attempt and arms the next-attempt gate. The first failure
+// waits activationBackoffInitial; each subsequent failure doubles the
+// wait up to activationBackoffMax. Called with l.mu held.
+func (l *Lifecycle) noteFreshActivationFailure(now time.Time) {
+	switch {
+	case l.activationBackoff <= 0:
+		l.activationBackoff = activationBackoffInitial
+	default:
+		l.activationBackoff *= 2
+		if l.activationBackoff > activationBackoffMax {
+			l.activationBackoff = activationBackoffMax
+		}
+	}
+	l.nextActivationAttempt = now.Add(l.activationBackoff)
+}
+
+// armTransientRetry arms a short retry after a recoverable-FAIL or
+// inconclusive-UNKNOWN preflight result. It neither escalates the
+// backoff (a transient condition should heal soon, not push a
+// genuinely-supported host toward activationBackoffMax) nor SHORTENS an
+// escalation already accumulated from prior permanent-fail / load
+// failures (a transient blip mid-escalation must not reset spam
+// suppression and let doomed attempts resume at the 1-minute floor).
+// It therefore arms the next attempt at the larger of the fixed floor
+// and the current backoff. Called with l.mu held.
+func (l *Lifecycle) armTransientRetry(now time.Time) {
+	wait := activationBackoffInitial
+	if l.activationBackoff > wait {
+		wait = l.activationBackoff
+	}
+	l.activationBackoff = wait
+	l.nextActivationAttempt = now.Add(wait)
+}
+
+// resetActivationBackoff clears the fresh-path backoff after a
+// successful activation. Called with l.mu held.
+func (l *Lifecycle) resetActivationBackoff() {
+	l.activationBackoff = 0
+	l.nextActivationAttempt = time.Time{}
 }
 
 // Stop tears down the activation goroutine and releases the userspace

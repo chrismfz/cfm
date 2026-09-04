@@ -3,7 +3,9 @@
 package lsm
 
 import (
+	"errors"
 	"testing"
+	"time"
 )
 
 func TestAnyEnabled(t *testing.T) {
@@ -146,5 +148,162 @@ func TestLifecycle_DriftDetected_TearsDownStaleState(t *testing.T) {
 	}
 	if lc.loader != nil {
 		t.Error("drift teardown should have cleared the loader")
+	}
+}
+
+// TestLifecycle_ActivationBackoff_DueImmediatelyWhenFresh confirms a
+// brand-new lifecycle has no backoff armed — the fresh path may run on
+// the first tick.
+func TestLifecycle_ActivationBackoff_DueImmediatelyWhenFresh(t *testing.T) {
+	lc := NewLifecycle(BuildMarker{})
+	now := time.Unix(1_700_000_000, 0)
+	if !lc.freshActivationDue(now) {
+		t.Fatal("fresh lifecycle must allow a fresh activation attempt immediately")
+	}
+}
+
+// TestLifecycle_ActivationBackoff_GrowsAndGates walks the exponential
+// backoff: each failure doubles the wait from the initial value up to
+// the cap, the gate blocks inside the window and reopens after it, and
+// a reset clears the arming.
+func TestLifecycle_ActivationBackoff_GrowsAndGates(t *testing.T) {
+	lc := NewLifecycle(BuildMarker{})
+	base := time.Unix(1_700_000_000, 0)
+
+	// First failure → wait = initial.
+	lc.noteFreshActivationFailure(base)
+	if lc.activationBackoff != activationBackoffInitial {
+		t.Fatalf("after first failure: backoff=%s, want %s", lc.activationBackoff, activationBackoffInitial)
+	}
+	// Gate blocks anywhere before base+initial, and just before it.
+	if lc.freshActivationDue(base) {
+		t.Error("gate must block at the instant of the arming failure")
+	}
+	if lc.freshActivationDue(base.Add(activationBackoffInitial - time.Nanosecond)) {
+		t.Error("gate must block until the backoff window elapses")
+	}
+	// Gate reopens exactly at the window boundary.
+	dueAt := base.Add(activationBackoffInitial)
+	if !lc.freshActivationDue(dueAt) {
+		t.Error("gate must reopen once the backoff window elapses")
+	}
+
+	// Second failure → wait doubles.
+	lc.noteFreshActivationFailure(dueAt)
+	if want := activationBackoffInitial * 2; lc.activationBackoff != want {
+		t.Fatalf("after second failure: backoff=%s, want %s", lc.activationBackoff, want)
+	}
+
+	// Many more failures saturate at the cap and never exceed it.
+	at := dueAt
+	for i := 0; i < 20; i++ {
+		at = at.Add(lc.activationBackoff)
+		lc.noteFreshActivationFailure(at)
+		if lc.activationBackoff > activationBackoffMax {
+			t.Fatalf("backoff %s exceeded cap %s", lc.activationBackoff, activationBackoffMax)
+		}
+	}
+	if lc.activationBackoff != activationBackoffMax {
+		t.Fatalf("backoff should saturate at cap %s; got %s", activationBackoffMax, lc.activationBackoff)
+	}
+
+	// A successful activation clears everything.
+	lc.resetActivationBackoff()
+	if lc.activationBackoff != 0 || !lc.nextActivationAttempt.IsZero() {
+		t.Fatalf("reset must clear backoff state; got backoff=%s next=%v", lc.activationBackoff, lc.nextActivationAttempt)
+	}
+	if !lc.freshActivationDue(at) {
+		t.Error("after reset the fresh path must be due again")
+	}
+}
+
+// TestLifecycle_ArmTransientRetry_DoesNotEscalate confirms that a
+// recoverable/inconclusive preflight result retries on a fixed short
+// interval and never marches toward the escalating cap — the fix for
+// backing off a genuinely-supported host on a transient boot condition.
+func TestLifecycle_ArmTransientRetry_DoesNotEscalate(t *testing.T) {
+	lc := NewLifecycle(BuildMarker{})
+	base := time.Unix(1_700_000_000, 0)
+	for i := 0; i < 6; i++ {
+		lc.armTransientRetry(base)
+		if lc.activationBackoff != activationBackoffInitial {
+			t.Fatalf("transient retry #%d escalated: got %s, want fixed %s", i, lc.activationBackoff, activationBackoffInitial)
+		}
+		if lc.freshActivationDue(base.Add(activationBackoffInitial - time.Nanosecond)) {
+			t.Error("transient retry must block until the fixed interval elapses")
+		}
+		if !lc.freshActivationDue(base.Add(activationBackoffInitial)) {
+			t.Error("transient retry must reopen after the fixed interval")
+		}
+	}
+}
+
+// TestLifecycle_ArmTransientRetry_PreservesAccumulatedBackoff guards the
+// second-review finding: a transient blip mid-escalation must not RESET
+// an already-accumulated backoff back to the 1-minute floor (which would
+// let doomed attempts + their kmsg "ISSUE" spam resume at the floor).
+func TestLifecycle_ArmTransientRetry_PreservesAccumulatedBackoff(t *testing.T) {
+	lc := NewLifecycle(BuildMarker{})
+	base := time.Unix(1_700_000_000, 0)
+
+	// Accumulate escalation from permanent/load failures.
+	lc.noteFreshActivationFailure(base) // → initial
+	at := base.Add(lc.activationBackoff)
+	lc.noteFreshActivationFailure(at) // → 2×
+	at = at.Add(lc.activationBackoff)
+	lc.noteFreshActivationFailure(at) // → 4×
+	accumulated := lc.activationBackoff
+	if accumulated <= activationBackoffInitial {
+		t.Fatalf("test setup: expected accumulated backoff > initial; got %s", accumulated)
+	}
+
+	// A transient result now must NOT shrink the accumulated backoff.
+	at = at.Add(accumulated)
+	lc.armTransientRetry(at)
+	if lc.activationBackoff != accumulated {
+		t.Errorf("transient retry shortened accumulated backoff: got %s, want preserved %s", lc.activationBackoff, accumulated)
+	}
+	if !lc.nextActivationAttempt.Equal(at.Add(accumulated)) {
+		t.Errorf("transient retry must arm next attempt at now+accumulated; got %v", lc.nextActivationAttempt)
+	}
+}
+
+// TestLifecycle_openOrCreateLoader_BackoffGateReturnsSentinelSilently
+// exercises the real ApplyConfig→openOrCreateLoader integration: when
+// the fresh-path backoff window is closed, the loader path must return
+// errActivationBackoff without running preflight/NewLoader or mutating
+// backoff state (the silent-dormant contract ApplyConfig relies on).
+func TestLifecycle_openOrCreateLoader_BackoffGateReturnsSentinelSilently(t *testing.T) {
+	// The fresh gate is only reached when no pinned state exists. On a
+	// developer host with cfm-lsm actually running, the adopt branch
+	// short-circuits first — skip there.
+	if p := InspectPinned(DefaultPinDir); p.Exists && len(p.Links) > 0 {
+		t.Skip("pinned cfm-lsm state present on this host; test needs the no-pins fresh path")
+	}
+
+	base := time.Unix(1_700_000_000, 0)
+	prevClock := lsmActivationClock
+	lsmActivationClock = func() time.Time { return base }
+	t.Cleanup(func() { lsmActivationClock = prevClock })
+
+	lc := NewLifecycle(BuildMarker{})
+	// Arm the backoff into the future so the gate is closed.
+	lc.activationBackoff = activationBackoffMax
+	lc.nextActivationAttempt = base.Add(time.Hour)
+
+	conf := &Conf{Enabled: true, Modes: map[PolicyID]Mode{PolicyMemfdExec: ModeMonitor}}
+	loader, fresh, err := lc.openOrCreateLoader(conf)
+	if !errors.Is(err, errActivationBackoff) {
+		t.Fatalf("gated fresh path must return errActivationBackoff; got loader=%v fresh=%v err=%v", loader, fresh, err)
+	}
+	if loader != nil || fresh {
+		t.Errorf("gated fresh path must return no loader and fresh=false; got loader=%v fresh=%v", loader, fresh)
+	}
+	// The gate must not have escalated or altered backoff state.
+	if lc.activationBackoff != activationBackoffMax {
+		t.Errorf("gated path must not change backoff; got %s want %s", lc.activationBackoff, activationBackoffMax)
+	}
+	if !lc.nextActivationAttempt.Equal(base.Add(time.Hour)) {
+		t.Errorf("gated path must not move nextActivationAttempt; got %v", lc.nextActivationAttempt)
 	}
 }

@@ -17,6 +17,26 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **cfm-lsm: partial-BPF-LSM EL8 kernels (e.g. CloudLinux 8 lve, 4.18) no longer
+  spam the kernel log with a doomed load retry.** These kernels backport
+  `BPF_PROG_TYPE_LSM` (so they passed the `bpf-lsm-program-type` preflight probe)
+  but **not** task-local storage maps (`BPF_MAP_TYPE_TASK_STORAGE`, upstream 5.11),
+  which cfm-lsm's shared BPF object embeds (`cfm_cred_transition_tasks`, used by
+  CFML-CRED-002/003). Because every map is created in one `LoadAndAssign`, the
+  whole object failed with `map create: invalid argument` and **no policy
+  attached** — yet the daemon re-attempted the load on every config-reload tick,
+  filling `dmesg`. Two changes: (1) a new **`bpf-task-storage-map`** preflight
+  check feature-probes the map type and FAILs cleanly when it is unsupported, so
+  the host stays dormant and `cfm lsm status` reports exactly why; (2) the
+  daemon's fresh auto-enable path now uses **exponential backoff** (1 min → 30 min
+  cap) instead of retrying every tick. Only a *permanent* preflight FAIL (a kernel
+  incapability that needs a reboot) escalates the backoff; a recoverable FAIL
+  (bpffs mounting late) or an inconclusive probe retries on a short fixed interval,
+  so a genuinely-supported host is never marched toward the cap. The adopt path is
+  never gated, so a CLI `cfm lsm enable` is still picked up on the next tick. This restores clean, quiet
+  behaviour on these kernels; a follow-up will load a task-storage-free policy
+  subset so the other ~15 policies can still attach there.
 ### Added
 - **Memory ECC / hardware-error visibility in health + `whats_wrong`.** The host
   health snapshot (`system_health` / `/api/v1/health/snapshot`) previously carried
