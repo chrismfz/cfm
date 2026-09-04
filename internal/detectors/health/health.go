@@ -157,6 +157,15 @@ type Detector struct {
 	// a DELIVERED publish, and only a definite-healthy reading re-arms it.
 	lastSmartFailed   map[string]bool
 	lastMdadmDegraded bool
+	lastZfsDegraded   map[string]bool
+
+	// dead/removed-disk detection: a device seen healthy in this process that
+	// then vanishes from the SMART enumeration. Reset on daemon restart (so
+	// /dev renumbering across a reboot never false-fires — it compares only
+	// within one process lifetime, where names are stable).
+	smartEverHealthy   map[string]bool // device seen PASS at least once
+	smartMissingStreak map[string]int  // consecutive cycles absent
+	smartDeadPublished map[string]bool // disk_dead already emitted for this device
 }
 
 func New(cfg Config) *Detector {
@@ -195,11 +204,15 @@ func New(cfg Config) *Detector {
 	}
 
 	d := &Detector{
-		cfg:             cfg,
-		last:            make(map[string]time.Time),
-		base:            make(map[string]float64),
-		smartProbeCache: make(map[string]string),
-		lastSmartFailed: make(map[string]bool),
+		cfg:                cfg,
+		last:               make(map[string]time.Time),
+		base:               make(map[string]float64),
+		smartProbeCache:    make(map[string]string),
+		lastSmartFailed:    make(map[string]bool),
+		lastZfsDegraded:    make(map[string]bool),
+		smartEverHealthy:   make(map[string]bool),
+		smartMissingStreak: make(map[string]int),
+		smartDeadPublished: make(map[string]bool),
 	}
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -1527,12 +1540,35 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 	}
 	if d.cfg.ZfsAlert {
 		for name, info := range s.Zfs {
-			if info.State != "HEALTHY" && info.State != "ONLINE" {
-				emit("HEALTH/ZFS_"+info.State, "zfs."+name)
-				continue
-			}
-			if info.UnhealthyVdevs > 0 {
+			// An empty/unparsed state is "unknown", not degraded — never turn a
+			// parse glitch into a critical fault or a malformed "HEALTH/ZFS_" name.
+			state := strings.TrimSpace(info.State)
+			badState := state != "" && state != "HEALTHY" && state != "ONLINE"
+			degraded := badState || info.UnhealthyVdevs > 0
+			if badState {
+				emit("HEALTH/ZFS_"+state, "zfs."+name)
+			} else if info.UnhealthyVdevs > 0 {
 				emit("HEALTH/ZFS_VDEV_DEGRADED", "zfs."+name)
+			}
+			// Durable, edge-triggered per pool (see mdadm above): publish once on
+			// entry into a degraded state, advancing the edge only on delivery.
+			if degraded {
+				if !d.lastZfsDegraded[name] && publishNodeFaultEvent(NodeFaultEvent{
+					Type: "disk_zfs_degraded", Severity: "critical", Host: s.Host,
+					Key: name, When: s.Time, Message: zfsFaultMessage(name, info),
+				}) {
+					d.lastZfsDegraded[name] = true
+				}
+			} else {
+				d.lastZfsDegraded[name] = false
+			}
+		}
+		// A pool that vanished from the snapshot (exported / transiently unlisted)
+		// must re-arm, so a later degraded reappearance fires again rather than
+		// being suppressed forever.
+		for name := range d.lastZfsDegraded {
+			if _, ok := s.Zfs[name]; !ok {
+				delete(d.lastZfsDegraded, name)
 			}
 		}
 	}
@@ -1573,6 +1609,44 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 					emitExtra("HEALTH/SMART_WEAR_CRIT", "smart.wear."+dev, extra)
 				case *info.WearoutPctUsed >= d.cfg.SmartWearWarnPct:
 					emitExtra("HEALTH/SMART_WEAR_WARN", "smart.wear."+dev, extra)
+				}
+			}
+		}
+
+		// Dead/removed disk: a device seen healthy in this process that has
+		// vanished from the SMART enumeration. Guarded to keep false positives low:
+		//   - only when the current scan produced results (len>0), so a transient
+		//     whole-scan failure never mass-fires;
+		//   - only for a device previously seen PASS (a real, healthy disk), so a
+		//     flaky-from-start probe isn't counted (it'd fire SMART_FAIL instead);
+		//   - only after a sustained absence streak, which also filters a brief
+		//     partial-scan omission of a single busy device;
+		//   - once per disappearance; any REAPPEARANCE (whatever its health)
+		//     re-arms, so a same-name replacement that later dies fires again.
+		// A deliberate hot-swap removal fires this too — acknowledge it. State is
+		// per-process, so /dev renumbering across a reboot never false-fires.
+		if len(s.Smart) > 0 {
+			for dev, info := range s.Smart {
+				// Present this cycle → re-arm the disappearance edge regardless of
+				// health (the name is back in use and can die anew).
+				d.smartMissingStreak[dev] = 0
+				d.smartDeadPublished[dev] = false
+				if strings.ToUpper(strings.TrimSpace(info.Health)) == "PASS" {
+					d.smartEverHealthy[dev] = true
+				}
+			}
+			for dev := range d.smartEverHealthy {
+				if _, present := s.Smart[dev]; present {
+					continue // handled above
+				}
+				d.smartMissingStreak[dev]++
+				if d.smartMissingStreak[dev] >= diskDeadMissingCycles && !d.smartDeadPublished[dev] {
+					if publishNodeFaultEvent(NodeFaultEvent{
+						Type: "disk_dead", Severity: "critical", Host: s.Host, Key: dev, When: s.Time,
+						Message: fmt.Sprintf("disk %s disappeared from the system (no longer enumerable) — dead or removed", dev),
+					}) {
+						d.smartDeadPublished[dev] = true
+					}
 				}
 			}
 		}

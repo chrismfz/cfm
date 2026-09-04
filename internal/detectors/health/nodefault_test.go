@@ -115,6 +115,111 @@ func TestDetectorNoFaultWhenHealthy(t *testing.T) {
 	}
 }
 
+// ZFS pool degraded fires once on entry and re-fires after a recovery.
+func TestDetectorZfsFaultPublish(t *testing.T) {
+	var events []NodeFaultEvent
+	SetNodeFaultEventSink(func(ev NodeFaultEvent) { events = append(events, ev) })
+	defer SetNodeFaultEventSink(nil)
+
+	d := New(Config{ZfsAlert: true, Cooldown: time.Millisecond})
+	base := time.Now()
+	bad := map[string]ZpoolStatus{"tank": {Pool: "tank", State: "DEGRADED", UnhealthyVdevs: 1}}
+
+	d.evaluate(Snapshot{Time: base, Host: "h", Zfs: bad})                                                                                  // fire
+	d.evaluate(Snapshot{Time: base.Add(time.Minute), Host: "h", Zfs: bad})                                                                 // no refire
+	d.evaluate(Snapshot{Time: base.Add(2 * time.Minute), Host: "h", Zfs: map[string]ZpoolStatus{"tank": {Pool: "tank", State: "ONLINE"}}}) // recover
+	d.evaluate(Snapshot{Time: base.Add(3 * time.Minute), Host: "h", Zfs: bad})                                                             // refire
+
+	n := 0
+	var first NodeFaultEvent
+	for _, e := range events {
+		if e.Type == "disk_zfs_degraded" {
+			if n == 0 {
+				first = e
+			}
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("zfs should fire on entry and re-fire after recovery, got %d", n)
+	}
+	if first.Key != "tank" || first.Severity != "critical" || !strings.Contains(first.Message, "tank") {
+		t.Errorf("zfs event wrong: %+v", first)
+	}
+}
+
+// A previously-healthy disk that disappears fires disk_dead — after a short
+// streak, once, re-armed on reappearance; a whole-scan failure never fires.
+func TestDetectorDiskDeadPublish(t *testing.T) {
+	var events []NodeFaultEvent
+	SetNodeFaultEventSink(func(ev NodeFaultEvent) { events = append(events, ev) })
+	defer SetNodeFaultEventSink(nil)
+	deadCount := func() int {
+		n := 0
+		for _, e := range events {
+			if e.Type == "disk_dead" {
+				n++
+			}
+		}
+		return n
+	}
+
+	d := New(Config{SmartAlert: true, Cooldown: time.Millisecond})
+	base := time.Now()
+	two := map[string]SmartInfo{"/dev/sda": {Health: "PASS"}, "/dev/sdb": {Health: "PASS"}}
+	one := map[string]SmartInfo{"/dev/sda": {Health: "PASS"}}
+
+	d.evaluate(Snapshot{Time: base, Host: "h", Smart: two}) // seed both healthy
+	// sdb gone; must not fire until it has been absent for diskDeadMissingCycles.
+	for i := 1; i < diskDeadMissingCycles; i++ {
+		d.evaluate(Snapshot{Time: base.Add(time.Duration(i) * time.Minute), Host: "h", Smart: one})
+		if deadCount() != 0 {
+			t.Fatalf("must not fire before %d missing cycles (fired at %d)", diskDeadMissingCycles, i)
+		}
+	}
+	d.evaluate(Snapshot{Time: base.Add(time.Duration(diskDeadMissingCycles) * time.Minute), Host: "h", Smart: one}) // streak == threshold → fire
+	if deadCount() != 1 || events[len(events)-1].Key != "/dev/sdb" {
+		t.Fatalf("expected 1 disk_dead for /dev/sdb, got %d: %+v", deadCount(), events)
+	}
+
+	// whole-scan failure (empty) must NOT fire disk_dead for the remaining disk
+	d.evaluate(Snapshot{Time: base.Add(20 * time.Minute), Host: "h", Smart: map[string]SmartInfo{}})
+	d.evaluate(Snapshot{Time: base.Add(21 * time.Minute), Host: "h", Smart: map[string]SmartInfo{}})
+	if deadCount() != 1 {
+		t.Fatalf("an empty scan must not mass-fire disk_dead, got %d", deadCount())
+	}
+
+	// sdb returns healthy (re-arm), then vanishes again → fires again
+	d.evaluate(Snapshot{Time: base.Add(30 * time.Minute), Host: "h", Smart: two})
+	for i := 1; i <= diskDeadMissingCycles; i++ {
+		d.evaluate(Snapshot{Time: base.Add(time.Duration(30+i) * time.Minute), Host: "h", Smart: one})
+	}
+	if deadCount() != 2 {
+		t.Fatalf("disk_dead should re-fire after reappear+revanish, got %d", deadCount())
+	}
+}
+
+// A device that was never healthy (only ever FAIL / errored) does not fire
+// disk_dead when it vanishes — it would have fired disk_smart_fail instead.
+func TestDiskDeadIgnoresNeverHealthyDevice(t *testing.T) {
+	var dead int
+	SetNodeFaultEventSink(func(ev NodeFaultEvent) {
+		if ev.Type == "disk_dead" {
+			dead++
+		}
+	})
+	defer SetNodeFaultEventSink(nil)
+
+	d := New(Config{SmartAlert: true, Cooldown: time.Millisecond})
+	base := time.Now()
+	d.evaluate(Snapshot{Time: base, Host: "h", Smart: map[string]SmartInfo{"/dev/sda": {Health: "PASS"}, "/dev/sdc": {Health: "FAIL"}}})
+	d.evaluate(Snapshot{Time: base.Add(1 * time.Minute), Host: "h", Smart: map[string]SmartInfo{"/dev/sda": {Health: "PASS"}}})
+	d.evaluate(Snapshot{Time: base.Add(2 * time.Minute), Host: "h", Smart: map[string]SmartInfo{"/dev/sda": {Health: "PASS"}}})
+	if dead != 0 {
+		t.Fatalf("never-healthy device must not fire disk_dead, got %d", dead)
+	}
+}
+
 func TestMdadmFaultMessage(t *testing.T) {
 	m := MdstatSummary{Status: "DEGRADED", Arrays: []MdArrayInfo{
 		{Name: "md0", ExpectedMembers: 2, ActiveMembers: 2},                   // healthy — excluded

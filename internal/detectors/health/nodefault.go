@@ -88,3 +88,32 @@ func mdadmFaultMessage(m MdstatSummary) string {
 	}
 	return "mdadm array degraded"
 }
+
+// diskDeadMissingCycles is how many consecutive health cycles a previously-
+// healthy disk must be absent from the SMART enumeration before it is reported
+// dead/removed — filters a brief partial-scan omission (with the default
+// EVERY=10s, ~30s of continuous absence).
+const diskDeadMissingCycles = 3
+
+// zfsFaultMessage summarizes a degraded ZFS pool.
+func zfsFaultMessage(name string, info ZpoolStatus) string {
+	state := strings.TrimSpace(info.State)
+	msg := "ZFS pool " + name
+	if state != "" {
+		msg += " " + state
+	} else {
+		msg += " unhealthy"
+	}
+	if info.UnhealthyVdevs > 0 {
+		msg += fmt.Sprintf(" (%d unhealthy vdev(s))", info.UnhealthyVdevs)
+	}
+	if info.Resilvering {
+		p := strings.TrimSpace(info.ResilverPercent)
+		if p != "" {
+			msg += " — resilvering " + p
+		} else {
+			msg += " — resilvering"
+		}
+	}
+	return msg
+}
