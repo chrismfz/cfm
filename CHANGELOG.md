@@ -38,6 +38,17 @@ back-filled here — see the git/PR history for that period.
   behaviour on these kernels; a follow-up will load a task-storage-free policy
   subset so the other ~15 policies can still attach there.
 ### Added
+- **Durable persistence of SMART-fail and mdadm-degraded as node hard-faults.**
+  The health detector already alerted on a failed SMART device
+  (`HEALTH/SMART_FAIL`) and a degraded mdadm array (`HEALTH/MDADM_DEGRADED`), but
+  those signals were ephemeral (notifier-only). They are now ALSO written to the
+  durable `detection_history` as `disk_smart_fail` / `disk_mdadm_degraded`
+  events, edge-triggered — one event when a device/array ENTERS the fault state
+  (including once at first sight if already faulted at startup), no re-fire while
+  it persists, and re-armed after recovery. This lets the fleet manager pull them
+  (like `hardware_ecc`) and pin them as unacknowledged criticals. Published via a
+  general `NodeFaultEvent` sink mirroring the ECC/clam sinks; gated by the
+  existing `SMART_FAIL_ALERT` / `MDADM_ALERT` knobs.
 - **Memory ECC / hardware-error visibility in health + `whats_wrong`.** The host
   health snapshot (`system_health` / `/api/v1/health/snapshot`) previously carried
   disk SMART, mdadm and NVMe wearout but was **blind to memory errors** — a node

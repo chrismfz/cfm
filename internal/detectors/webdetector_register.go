@@ -1019,6 +1019,9 @@ func init() {
 		// or a dmesg ring wrap and stay queryable via detection_history. Same
 		// replace-not-append sink shape as the clam wiring above.
 		health.SetECCEventSink(engine.RecordHardwareECCEvent)
+		// Same for boolean STATE hard-faults (failed SMART device, degraded mdadm
+		// array): edge-triggered, persisted durably, pinned/ack'd fleet-side.
+		health.SetNodeFaultEventSink(engine.RecordNodeFaultEvent)
 		// Runtime per-signature/per-vhost excludes: the scanner consults the
 		// engine's sig-ignore store on every infected verdict (after the
 		// CLAM_SIG_IGNORE config baseline). Same replace-not-append shape.
