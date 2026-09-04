@@ -104,10 +104,10 @@ type Lifecycle struct {
 
 	// activationBackoff / nextActivationAttempt implement exponential
 	// backoff for the FRESH auto-enable path (preflight + NewLoader).
-	// A permanently-incompatible kernel — e.g. CloudLinux 8 lve, which
-	// passes bpf-lsm-program-type but lacks task-local storage maps, so
-	// the shared BPF object never loads — would otherwise re-run
-	// preflight and log a FAIL on every reload tick. On each fresh-path
+	// A permanently-incompatible kernel — e.g. one that rejects
+	// BPF_PROG_TYPE_LSM outright, or ships without CONFIG_BPF_LSM — would
+	// otherwise re-run preflight and log a FAIL on every reload tick. On
+	// each fresh-path
 	// failure the wait doubles from activationBackoffInitial up to
 	// activationBackoffMax; any successful activation (fresh or adopt)
 	// resets it. The adopt path is never gated, so an operator's
@@ -373,10 +373,12 @@ func (l *Lifecycle) openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, 
 	}
 
 	// Fresh auto-enable path. Gate repeated attempts behind exponential
-	// backoff: a kernel that will never load our BPF (e.g. CloudLinux 8
-	// lve, which passes bpf-lsm-program-type but lacks task-local
-	// storage maps) would otherwise re-run preflight + NewLoader and log
-	// on every reload tick. The adopt branch above is deliberately
+	// backoff: a kernel that will never load our BPF (one that rejects
+	// BPF_PROG_TYPE_LSM, or lacks CONFIG_BPF_LSM / BTF) would otherwise
+	// re-run preflight + NewLoader and log on every reload tick. (A
+	// kernel that merely lacks task-local storage is NOT such a case —
+	// NewLoader downgrades and loads the rest; see
+	// selectTaskStorageVariant.) The adopt branch above is deliberately
 	// outside this gate, so a CLI `cfm lsm enable` is still adopted next
 	// tick. Deferred attempts return errActivationBackoff, which
 	// ApplyConfig handles like any dormant outcome — silently.
@@ -387,15 +389,16 @@ func (l *Lifecycle) openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, 
 
 	// No pinned state — auto-enable. Run preflight first; if it
 	// fails (kernel too old, CONFIG_BPF_LSM not set, `bpf` not in
-	// /sys/kernel/security/lsm, BTF missing, task-local storage maps
-	// unsupported, caps missing, bpffs not mounted) we stay dormant and
-	// the daemon continues normally. `cfm lsm status` reports the
-	// failing checks.
+	// /sys/kernel/security/lsm, BTF missing, caps missing, bpffs not
+	// mounted) we stay dormant and the daemon continues normally.
+	// `cfm lsm status` reports the failing checks. (Task-local storage
+	// is NOT a preflight gate — a kernel lacking it still loads the
+	// other policies via NewLoader's downgrade.)
 	pf := RunPreflight()
 	if !pf.OK {
 		// Escalate the backoff only on a PERMANENT FAIL (a kernel/config
-		// problem that won't clear without a reboot — e.g. task-storage
-		// unsupported). A recoverable FAIL (bpffs mounting late at boot)
+		// problem that won't clear without a reboot — e.g. the kernel
+		// rejects BPF_PROG_TYPE_LSM). A recoverable FAIL (bpffs mounting late at boot)
 		// or an inconclusive UNKNOWN (a briefly-unreadable /proc file)
 		// may heal on its own, so retry it on a short fixed interval
 		// rather than marching a genuinely-supported host toward the

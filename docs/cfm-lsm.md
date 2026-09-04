@@ -1383,8 +1383,8 @@ explicit `cfm lsm disable` detaches.
 
 ### Kernel preflight
 
-Before any load attempt, eight things must hold. `cfm lsm status`
-runs all eight and reports each one with a pass/fail/unknown verdict
+Before any load attempt, seven things must hold. `cfm lsm status`
+runs all seven and reports each one with a pass/fail/unknown verdict
 and a specific remediation hint:
 
 1. **Kernel version (informational).** Read from `/proc/version`.
@@ -1423,22 +1423,32 @@ and a specific remediation hint:
    `CONFIG_BPF_LSM=y` for the kernel-internal subsystem but do not
    expose the program type to userspace; this probe is the only
    way to tell those hosts apart from genuinely capable ones.
-8. **`BPF_MAP_TYPE_TASK_STORAGE` accepted by the bpf() syscall.** A
-   second capability gate, distinct from (7): attempts a task-local
-   storage map create via `features.HaveMapType(ebpf.TaskStorage)`.
-   Task-local storage merged upstream in **5.11**; cfm-lsm's single
-   shared BPF object embeds one such map (`cfm_cred_transition_tasks`,
-   correlating `task_fix_setuid` with the following `commit_creds` for
-   CFML-CRED-002/003). Because cilium/ebpf creates every map in the
-   object in one `LoadAndAssign`, a kernel that rejects this map type
-   fails the **whole** load with `map create: invalid argument` — no
-   policy attaches, not even the ones that never touch the map.
-   Required because some partial backports (notably CloudLinux 8's lve
-   4.18 kernel) accept `BPF_PROG_TYPE_LSM` (passing (7)) but lack
-   task-local storage, so this is the only preflight signal that keeps
-   those hosts cleanly dormant instead of retrying a doomed load. When
-   it FAILs, a future CFM release aims to load a task-storage-free
-   policy subset so the remaining policies can still attach there.
+
+**Task-local storage — a per-policy degrade, not a component gate.**
+cfm-lsm's shared BPF object embeds **two** task-local storage maps
+(upstream **5.11**): `cfm_cred_transition_tasks` (used by
+CFML-CRED-002/003 to correlate a `task_fix_setuid` transition with the
+following `commit_creds`) and `cfm_web_origin_tasks` (CFML-FS-005's
+web-origin enrichment, gated by the `cfm_fs005_web_origin_monitor`
+constant). Because cilium/ebpf creates every map named by the object in
+one `LoadAndAssign`, a kernel that rejects this map type would fail the
+**whole** load with `map create: invalid argument`. Some partial
+backports (notably CloudLinux 8's lve 4.18 kernel) accept
+`BPF_PROG_TYPE_LSM` (passing (7)) but lack task-local storage. Rather
+than gate the whole component on it, `NewLoader` probes
+`features.HaveMapType(ebpf.TaskStorage)` and, when it is unsupported,
+**degrades** (`selectTaskStorageVariant`): it downgrades **both** maps to
+tiny HASH placeholders and removes every loaded reference to them —
+neutralising `cfm_cred002`/`cfm_cred003` (dropping CFML-CRED-002/003) and
+forcing `cfm_fs005_web_origin_monitor = 0` so the verifier
+dead-code-eliminates FS-005's `bpf_task_storage_get` calls. The object
+then loads and the remaining ~15 policies attach normally, including
+FS-005's core inode hooks (only its web-origin enrichment tag is lost).
+CFML-CRED-002 and CFML-CRED-003 are reported **unavailable** as optional
+per-policy probes (see below), not as a component FAIL — the host runs
+cfm-lsm with those two credential-transition policies absent instead of
+no protection at all. (An *inconclusive* probe — EPERM without caps — is
+treated as supported; the loader makes the final call.)
 
 When a fresh auto-enable attempt fails (preflight FAIL, or a load/attach
 error), the daemon backs off exponentially before retrying — 1 min,
@@ -1450,11 +1460,17 @@ operator-driven enable still takes effect on the next tick.
 
 Preflight is read-only and can be run by anyone at any time —
 it does not touch the kernel. Optional per-policy probes are reported
-separately from component-wide preflight. Today that means
-`CFML-CRED-003` checks whether `commit_creds` is visible as a tracing
-target; if it is unavailable, `cfm lsm status` and `cfm lsm probe` report
-that policy as unavailable but do not mark the whole LSM component failed
-or prevent other enabled policies from attaching.
+separately from component-wide preflight; if one is unavailable,
+`cfm lsm status` and `cfm lsm probe` report that policy as unavailable
+but do not mark the whole LSM component failed or prevent other enabled
+policies from attaching. Today they are:
+- **`CFML-CRED-003`** — whether `commit_creds` is visible as a tracing
+  target.
+- **`CFML-CRED-002` and `CFML-CRED-003`** — whether the kernel supports
+  task-local storage maps (`BPF_MAP_TYPE_TASK_STORAGE`, upstream 5.11);
+  both depend on `cfm_cred_transition_tasks` and are dropped on partial
+  backports that lack it (see "Task-local storage" above).
+- **`CFML-EXEC-008`** — whether the kexec syscall tracepoints are exposed.
 
 ### CLI surface
 

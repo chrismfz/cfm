@@ -35,25 +35,32 @@ back-filled here — see the git/PR history for that period.
     knobs.
 
 ### Fixed
-- **cfm-lsm: partial-BPF-LSM EL8 kernels (e.g. CloudLinux 8 lve, 4.18) no longer
-  spam the kernel log with a doomed load retry.** These kernels backport
-  `BPF_PROG_TYPE_LSM` (so they passed the `bpf-lsm-program-type` preflight probe)
-  but **not** task-local storage maps (`BPF_MAP_TYPE_TASK_STORAGE`, upstream 5.11),
-  which cfm-lsm's shared BPF object embeds (`cfm_cred_transition_tasks`, used by
-  CFML-CRED-002/003). Because every map is created in one `LoadAndAssign`, the
-  whole object failed with `map create: invalid argument` and **no policy
-  attached** — yet the daemon re-attempted the load on every config-reload tick,
-  filling `dmesg`. Two changes: (1) a new **`bpf-task-storage-map`** preflight
-  check feature-probes the map type and FAILs cleanly when it is unsupported, so
-  the host stays dormant and `cfm lsm status` reports exactly why; (2) the
-  daemon's fresh auto-enable path now uses **exponential backoff** (1 min → 30 min
-  cap) instead of retrying every tick. Only a *permanent* preflight FAIL (a kernel
-  incapability that needs a reboot) escalates the backoff; a recoverable FAIL
-  (bpffs mounting late) or an inconclusive probe retries on a short fixed interval,
-  so a genuinely-supported host is never marched toward the cap. The adopt path is
-  never gated, so a CLI `cfm lsm enable` is still picked up on the next tick. This restores clean, quiet
-  behaviour on these kernels; a follow-up will load a task-storage-free policy
-  subset so the other ~15 policies can still attach there.
+- **cfm-lsm: partial-BPF-LSM EL8 kernels (e.g. CloudLinux 8 lve, 4.18) now load the
+  task-storage-independent policies instead of failing outright.** These kernels
+  backport `BPF_PROG_TYPE_LSM` but **not** task-local storage maps
+  (`BPF_MAP_TYPE_TASK_STORAGE`, upstream 5.11), which cfm-lsm's shared BPF object
+  embeds (`cfm_cred_transition_tasks`, used only by CFML-CRED-002/003). Because
+  every map is created in one `LoadAndAssign`, the whole object used to fail with
+  `map create: invalid argument` — **no policy attached at all** — and the daemon
+  re-attempted the doomed load on every config-reload tick, filling `dmesg`. Now:
+  - **Graceful degrade.** On a kernel without task-local storage, `NewLoader`
+    downgrades **both** embedded task-storage maps (`cfm_cred_transition_tasks` and
+    `cfm_web_origin_tasks`) to HASH placeholders and removes every loaded reference
+    to them — neutralising the two cred-transition programs and forcing
+    `cfm_fs005_web_origin_monitor = 0` so the verifier dead-code-eliminates FS-005's
+    task-storage access — so the object loads and the remaining ~15 policies attach
+    normally (FS-005's core inode hooks included; only its web-origin enrichment tag
+    is lost). CFML-CRED-002 and CFML-CRED-003 are reported **unavailable** as optional
+    per-policy probes (`cfm lsm status`), not as a component FAIL. An inconclusive
+    probe (EPERM without caps) is treated as supported — the loader makes the final
+    call — rather than pre-emptively dropping two policies.
+  - **Exponential backoff** (1 min → 30 min cap) on the fresh auto-enable path, so a
+    genuinely-incompatible kernel (one that rejects `BPF_PROG_TYPE_LSM`, or lacks
+    `CONFIG_BPF_LSM`/BTF) stops re-attempting + logging every tick. Only a
+    *permanent* preflight FAIL escalates the backoff; a recoverable FAIL (bpffs
+    mounting late) or an inconclusive probe retries on a short fixed interval, so a
+    supported host is never marched toward the cap. The adopt path is never gated,
+    so a CLI `cfm lsm enable` is still picked up on the next tick.
 ### Added
 - **Durable persistence of SMART-fail and mdadm-degraded as node hard-faults.**
   The health detector already alerted on a failed SMART device

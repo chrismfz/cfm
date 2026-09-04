@@ -38,11 +38,13 @@ var preflightProgramTypeProbe = func() error {
 	return features.HaveProgramType(ebpf.LSM)
 }
 
-// preflightTaskStorageMapProbe is the function used by
-// checkBPFTaskStorageMap to verify that the running kernel accepts
-// BPF_MAP_TYPE_TASK_STORAGE (task-local storage) map creation.
-// Declared as a var so tests can stub it out without performing a real
-// syscall. The default delegates to cilium/ebpf's feature probe, which
+// preflightTaskStorageMapProbe reports whether the running kernel
+// accepts BPF_MAP_TYPE_TASK_STORAGE (task-local storage) map creation.
+// Used by the per-policy availability checks (checkCredEscalAvailability,
+// checkDirectCredInstallAvailability) and by the loader's
+// selectTaskStorageVariant. Declared as a var so tests can stub it out
+// without performing a real syscall. The default delegates to
+// cilium/ebpf's feature probe, which
 // attempts a task-storage map create with a deliberately-invalid BTF
 // fd: a supporting kernel gets past the map-type check and returns
 // EBADF (probe treats that as "supported"), while a kernel that does
@@ -146,8 +148,8 @@ type Preflight struct {
 // is a service restart, which starts a fresh Lifecycle with backoff
 // already reset. Escalating on it is therefore both harmless and
 // correct. Every other FAIL (missing CONFIG_BPF_LSM, `bpf` not in the
-// LSM list, no BTF, program-type or task-storage unsupported) is a
-// permanent property of the running kernel.
+// LSM list, no BTF, program-type unsupported) is a permanent property
+// of the running kernel.
 var retryableCheckNames = map[string]bool{
 	"bpffs-mounted": true,
 }
@@ -155,8 +157,8 @@ var retryableCheckNames = map[string]bool{
 // HasPermanentFail reports whether any check FAILed for a permanent
 // reason — a kernel/config incapability that will not clear without a
 // reboot or a different kernel (missing CONFIG_BPF_LSM, `bpf` absent
-// from the LSM list, no BTF, BPF_PROG_TYPE_LSM or task-storage
-// unsupported, missing caps). It excludes recoverable environmental
+// from the LSM list, no BTF, BPF_PROG_TYPE_LSM unsupported, missing
+// caps). It excludes recoverable environmental
 // FAILs (see retryableCheckNames) and inconclusive UNKNOWN results,
 // both of which the daemon retries on a short fixed interval rather
 // than escalating its activation backoff. A genuinely-supported host
@@ -172,10 +174,12 @@ func (p Preflight) HasPermanentFail() bool {
 }
 
 // RunPreflight runs all kernel checks and returns the aggregate
-// result. Reads from /proc and /sys, and performs two tiny bpf()
-// feature-probe syscalls — checkBPFLSMProgramType (verifier accepts
-// BPF_PROG_TYPE_LSM) and checkBPFTaskStorageMap (kernel accepts a
-// task-local storage map create); no writes are made.
+// result. Reads from /proc and /sys, and performs a tiny bpf()
+// feature-probe syscall via checkBPFLSMProgramType (verifier accepts
+// BPF_PROG_TYPE_LSM); no writes are made. Task-local storage support is
+// probed separately, as a per-policy availability signal for
+// CFML-CRED-002/003 rather than a component-wide gate — a kernel that
+// lacks it still loads the other policies (see selectTaskStorageVariant).
 func RunPreflight() Preflight {
 	checks := []CheckResult{
 		checkKernelVersion(),
@@ -185,7 +189,6 @@ func RunPreflight() Preflight {
 		checkCapabilities(),
 		checkBPFFSMounted(),
 		checkBPFLSMProgramType(),
-		checkBPFTaskStorageMap(),
 	}
 	ok := true
 	for _, c := range checks {
@@ -199,9 +202,33 @@ func RunPreflight() Preflight {
 
 func checkPolicyAvailability() []PolicyAvailability {
 	return []PolicyAvailability{
+		checkCredEscalAvailability(),
 		checkDirectCredInstallAvailability(),
 		checkKexecLoadAvailability(),
 	}
+}
+
+// checkCredEscalAvailability reports whether CFML-CRED-002 can attach.
+// Its BPF program (cfm_cred002, lsm/task_fix_setuid) uses the
+// task-local storage map cfm_cred_transition_tasks; a kernel without
+// BPF_MAP_TYPE_TASK_STORAGE (upstream 5.11) cannot create it, so the
+// loader downgrades the map to a placeholder and drops this policy (the
+// other ~15 still attach). Reported as an optional per-policy probe,
+// NOT a component-wide FAIL. An inconclusive probe (EPERM etc.) is
+// treated as available — the loader's own probe makes the final call.
+func checkCredEscalAvailability() PolicyAvailability {
+	pa := PolicyAvailability{PolicyID: PolicyCredEscal, Available: true}
+	err := preflightTaskStorageMapProbe()
+	switch {
+	case err == nil:
+		pa.Reason = "task-local storage (BPF_MAP_TYPE_TASK_STORAGE) supported"
+	case errors.Is(err, ebpf.ErrNotSupported):
+		pa.Available = false
+		pa.Reason = "kernel lacks task-local storage maps (BPF_MAP_TYPE_TASK_STORAGE, upstream 5.11) — e.g. CloudLinux 8 lve 4.18; loaded task-storage-free"
+	default:
+		pa.Reason = fmt.Sprintf("task-storage probe inconclusive (%v); assuming available", err)
+	}
+	return pa
 }
 
 // checkKexecLoadAvailability reports whether the kexec syscall tracepoints
@@ -248,7 +275,15 @@ func checkDirectCredInstallAvailability() PolicyAvailability {
 		pa.Reason = "commit_creds is not visible in /proc/kallsyms; CFML-CRED-003 fentry telemetry unavailable"
 		return pa
 	}
-	pa.Reason = "commit_creds fentry target visible in /proc/kallsyms"
+	// CFML-CRED-003 (cfm_cred003) reads the task-local storage map
+	// cfm_cred_transition_tasks to de-dup against CFML-CRED-002, so it is
+	// dropped on the same task-storage-free kernels as CRED-002.
+	if terr := preflightTaskStorageMapProbe(); terr != nil && errors.Is(terr, ebpf.ErrNotSupported) {
+		pa.Available = false
+		pa.Reason = "kernel lacks task-local storage maps (BPF_MAP_TYPE_TASK_STORAGE, upstream 5.11) — e.g. CloudLinux 8 lve 4.18; loaded task-storage-free"
+		return pa
+	}
+	pa.Reason = "commit_creds fentry target visible and task-local storage supported"
 	return pa
 }
 
@@ -326,56 +361,6 @@ func checkBPFLSMProgramType() CheckResult {
 	}
 	res.Status = CheckUnknown
 	res.Detail = fmt.Sprintf("program-type probe inconclusive: %v", err)
-	res.Remediation = "ensure /sys/fs/bpf is mounted and the process has CAP_SYS_ADMIN " +
-		"(or CAP_BPF + CAP_PERFMON); rerun `cfm lsm status`"
-	return res
-}
-
-// checkBPFTaskStorageMap gates on the running kernel supporting
-// BPF_MAP_TYPE_TASK_STORAGE (task-local storage), merged upstream in
-// 5.11. cfm-lsm's single shared BPF object embeds one such map
-// (cfm_cred_transition_tasks), used by CFML-CRED-002 / CFML-CRED-003 to
-// correlate a task_fix_setuid transition with the following
-// commit_creds. Because cilium/ebpf creates every map in the object in
-// one LoadAndAssign, a kernel that rejects this map type fails the
-// WHOLE load with "map create: invalid argument" — no policy attaches
-// at all, not even the fourteen that never touch the map.
-//
-// This is a distinct failure mode from checkBPFLSMProgramType: some
-// RHEL-family vendor kernels (notably CloudLinux 8 lve, 4.18) backport
-// BPF_PROG_TYPE_LSM but NOT task-local storage, so they PASS
-// bpf-lsm-program-type yet still cannot load the object. Without this
-// gate the daemon re-attempts the doomed load on every reload tick and
-// spams the kernel log with the EINVAL. Failing preflight here keeps
-// the host cleanly dormant (and `cfm lsm status` reports why) instead.
-//
-// The three outcomes mirror checkBPFLSMProgramType:
-//   - nil → task-storage supported (PASS).
-//   - ebpf.ErrNotSupported → kernel rejects the map type (FAIL).
-//   - any other error → ambiguous, typically EPERM without caps (UNKNOWN).
-func checkBPFTaskStorageMap() CheckResult {
-	res := CheckResult{
-		Name:        "bpf-task-storage-map",
-		Description: "kernel accepts BPF_MAP_TYPE_TASK_STORAGE (task-local storage; upstream 5.11)",
-	}
-	err := preflightTaskStorageMapProbe()
-	if err == nil {
-		res.Status = CheckPass
-		res.Detail = "BPF_MAP_TYPE_TASK_STORAGE accepted (task-storage map create probe loaded)"
-		return res
-	}
-	if errors.Is(err, ebpf.ErrNotSupported) {
-		res.Status = CheckFail
-		res.Detail = "kernel rejected BPF_MAP_TYPE_TASK_STORAGE at map create (invalid argument)"
-		res.Remediation = "the running kernel exposes BPF LSM programs but not task-local storage maps, so " +
-			"cfm-lsm's shared BPF object cannot load (CFML-CRED-002 / CFML-CRED-003 depend on it). Observed " +
-			"on CloudLinux 8 (lve) 4.18 kernels, which partially backport BPF LSM. Supported targets ship " +
-			"task-storage support (upstream 5.11+): AlmaLinux 8.6+ / 9+ / 10, CloudLinux 9+, RHEL 9+, " +
-			"Debian 12+, Ubuntu 22.04+."
-		return res
-	}
-	res.Status = CheckUnknown
-	res.Detail = fmt.Sprintf("task-storage map probe inconclusive: %v", err)
 	res.Remediation = "ensure /sys/fs/bpf is mounted and the process has CAP_SYS_ADMIN " +
 		"(or CAP_BPF + CAP_PERFMON); rerun `cfm lsm status`"
 	return res
