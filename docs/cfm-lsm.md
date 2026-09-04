@@ -1383,8 +1383,8 @@ explicit `cfm lsm disable` detaches.
 
 ### Kernel preflight
 
-Before any load attempt, seven things must hold. `cfm lsm status`
-runs all seven and reports each one with a pass/fail/unknown verdict
+Before any load attempt, eight things must hold. `cfm lsm status`
+runs all eight and reports each one with a pass/fail/unknown verdict
 and a specific remediation hint:
 
 1. **Kernel version (informational).** Read from `/proc/version`.
@@ -1423,6 +1423,30 @@ and a specific remediation hint:
    `CONFIG_BPF_LSM=y` for the kernel-internal subsystem but do not
    expose the program type to userspace; this probe is the only
    way to tell those hosts apart from genuinely capable ones.
+8. **`BPF_MAP_TYPE_TASK_STORAGE` accepted by the bpf() syscall.** A
+   second capability gate, distinct from (7): attempts a task-local
+   storage map create via `features.HaveMapType(ebpf.TaskStorage)`.
+   Task-local storage merged upstream in **5.11**; cfm-lsm's single
+   shared BPF object embeds one such map (`cfm_cred_transition_tasks`,
+   correlating `task_fix_setuid` with the following `commit_creds` for
+   CFML-CRED-002/003). Because cilium/ebpf creates every map in the
+   object in one `LoadAndAssign`, a kernel that rejects this map type
+   fails the **whole** load with `map create: invalid argument` — no
+   policy attaches, not even the ones that never touch the map.
+   Required because some partial backports (notably CloudLinux 8's lve
+   4.18 kernel) accept `BPF_PROG_TYPE_LSM` (passing (7)) but lack
+   task-local storage, so this is the only preflight signal that keeps
+   those hosts cleanly dormant instead of retrying a doomed load. When
+   it FAILs, a future CFM release aims to load a task-storage-free
+   policy subset so the remaining policies can still attach there.
+
+When a fresh auto-enable attempt fails (preflight FAIL, or a load/attach
+error), the daemon backs off exponentially before retrying — 1 min,
+doubling to a 30 min cap — rather than re-running on every config-reload
+tick. This stops a permanently-incompatible kernel (like the CloudLinux 8
+case above) from repeating the same failure into the logs. The adopt path
+(picking up pins a CLI `cfm lsm enable` created) is never gated, so
+operator-driven enable still takes effect on the next tick.
 
 Preflight is read-only and can be run by anyone at any time —
 it does not touch the kernel. Optional per-policy probes are reported

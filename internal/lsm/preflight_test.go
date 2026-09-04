@@ -1,6 +1,7 @@
 package lsm
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,6 +47,14 @@ type stubProc struct {
 	// where the kernel rejects the program type at the bpf() syscall
 	// (e.g. CloudLinux 8 lve kernels).
 	programTypeProbeErr error
+
+	// taskStorageProbeErr is the value the stubbed
+	// preflightTaskStorageMapProbe will return. nil (the default)
+	// models a host that accepts BPF_MAP_TYPE_TASK_STORAGE (upstream
+	// 5.11+). Set to ebpf.ErrNotSupported to model a partial-backport
+	// kernel (e.g. CloudLinux 8 lve 4.18) that loads BPF LSM programs
+	// but rejects task-local storage maps.
+	taskStorageProbeErr error
 }
 
 func (s stubProc) install(t *testing.T) {
@@ -116,6 +125,7 @@ func (s stubProc) install(t *testing.T) {
 	prevBPFFSPath := preflightBPFFSPath
 	prevKallsyms := preflightProcKallsyms
 	prevProbe := preflightProgramTypeProbe
+	prevTaskStorageProbe := preflightTaskStorageMapProbe
 
 	preflightProcVersionPath = procVerPath
 	preflightProcConfigGzPath = configGzPath
@@ -130,6 +140,8 @@ func (s stubProc) install(t *testing.T) {
 	}
 	probeErr := s.programTypeProbeErr
 	preflightProgramTypeProbe = func() error { return probeErr }
+	taskStorageErr := s.taskStorageProbeErr
+	preflightTaskStorageMapProbe = func() error { return taskStorageErr }
 
 	t.Cleanup(func() {
 		preflightProcVersionPath = prevVersion
@@ -142,6 +154,7 @@ func (s stubProc) install(t *testing.T) {
 		preflightBPFFSPath = prevBPFFSPath
 		preflightProcKallsyms = prevKallsyms
 		preflightProgramTypeProbe = prevProbe
+		preflightTaskStorageMapProbe = prevTaskStorageProbe
 	})
 }
 
@@ -369,6 +382,108 @@ func TestPreflight_BPFLSMProgramTypeNotSupported(t *testing.T) {
 		}
 	}
 	t.Error("bpf-lsm-program-type check not found in results")
+}
+
+func TestPreflight_TaskStorageMapNotSupported(t *testing.T) {
+	// Models CloudLinux 8 (lve) 4.18 kernels: CONFIG_BPF_LSM=y, `bpf`
+	// in /sys/kernel/security/lsm, BTF present, and the bpf() syscall
+	// ACCEPTS BPF_PROG_TYPE_LSM (partial backport) — but it rejects
+	// BPF_MAP_TYPE_TASK_STORAGE at map create. The bpf-task-storage-map
+	// check must FAIL with a remediation, and overall preflight must be
+	// not-OK so the daemon stays cleanly dormant instead of retrying a
+	// doomed whole-object load on every reload tick.
+	stub := stubProc{
+		procVersion:         "Linux version 4.18.0-553.123.2.lve.el8.x86_64 (mockbuild) #1 SMP",
+		bootConfig:          "CONFIG_BPF_LSM=y\n",
+		lsmList:             "capability,yama,bpf",
+		btfPresent:          true,
+		procStatus:          "CapEff:\t000001ffffffffff\n",
+		bpffsMountpoint:     "/sys/fs/bpf",
+		programTypeProbeErr: nil, // program type IS accepted on this partial backport
+		taskStorageProbeErr: ebpf.ErrNotSupported,
+	}
+	stub.install(t)
+
+	pf := RunPreflight()
+	if pf.OK {
+		t.Fatal("expected preflight to FAIL when BPF_MAP_TYPE_TASK_STORAGE is unsupported")
+	}
+	// The program-type check must still PASS — this is a distinct gate.
+	var sawProgType, sawTaskStorage bool
+	for _, c := range pf.Checks {
+		switch c.Name {
+		case "bpf-lsm-program-type":
+			sawProgType = true
+			if c.Status != CheckPass {
+				t.Errorf("bpf-lsm-program-type: got %s, want PASS (program type is accepted on this backport)", c.Status)
+			}
+		case "bpf-task-storage-map":
+			sawTaskStorage = true
+			if c.Status != CheckFail {
+				t.Errorf("bpf-task-storage-map: got %s, want FAIL", c.Status)
+			}
+			if c.Remediation == "" {
+				t.Error("FAIL must carry operator-facing remediation")
+			}
+		}
+	}
+	if !sawProgType {
+		t.Error("bpf-lsm-program-type check not found in results")
+	}
+	if !sawTaskStorage {
+		t.Error("bpf-task-storage-map check not found in results")
+	}
+}
+
+func TestPreflight_TaskStorageMapProbeInconclusive(t *testing.T) {
+	// A non-ErrNotSupported probe error (e.g. EPERM without caps) must
+	// be UNKNOWN, not FAIL — matching checkBPFLSMProgramType's handling.
+	stub := stubProc{
+		procVersion:         "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
+		bootConfig:          "CONFIG_BPF_LSM=y\nCONFIG_DEBUG_INFO_BTF=y\n",
+		lsmList:             "lockdown,capability,landlock,yama,apparmor,bpf",
+		btfPresent:          true,
+		procStatus:          "CapEff:\t000001ffffffffff\n",
+		bpffsMountpoint:     "/sys/fs/bpf",
+		taskStorageProbeErr: errors.New("operation not permitted"),
+	}
+	stub.install(t)
+
+	pf := RunPreflight()
+	if pf.OK {
+		t.Fatal("expected preflight to be not-OK when task-storage probe is inconclusive")
+	}
+	for _, c := range pf.Checks {
+		if c.Name == "bpf-task-storage-map" {
+			if c.Status != CheckUnknown {
+				t.Errorf("bpf-task-storage-map: got %s, want UNKNOWN", c.Status)
+			}
+			return
+		}
+	}
+	t.Error("bpf-task-storage-map check not found in results")
+}
+
+func TestPreflight_HasHardFail(t *testing.T) {
+	cases := []struct {
+		name   string
+		checks []CheckResult
+		want   bool
+	}{
+		{"all pass", []CheckResult{{Status: CheckPass}, {Status: CheckPass}}, false},
+		{"unknown but no fail", []CheckResult{{Status: CheckPass}, {Status: CheckUnknown}}, false},
+		{"one hard fail", []CheckResult{{Status: CheckPass}, {Status: CheckFail}}, true},
+		{"fail and unknown mixed", []CheckResult{{Status: CheckUnknown}, {Status: CheckFail}}, true},
+		{"no checks", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Preflight{Checks: tc.checks}
+			if got := p.HasHardFail(); got != tc.want {
+				t.Errorf("HasHardFail: got %t, want %t", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestPreflight_BPFNotInLSMList(t *testing.T) {
