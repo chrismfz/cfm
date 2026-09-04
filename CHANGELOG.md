@@ -17,6 +17,23 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **ZFS-degraded and dead/removed-disk join the durable node hard-faults.**
+  Building on the SMART-fail / mdadm-degraded persistence, the health detector
+  now also writes two more storage faults to `detection_history` (edge-triggered,
+  via the same `NodeFaultEvent` sink) so the fleet can pin/acknowledge them:
+  - `disk_zfs_degraded` — a ZFS pool that is not HEALTHY/ONLINE or has unhealthy
+    vdevs; one event per pool on entry, re-armed after recovery (mirrors mdadm).
+  - `disk_dead` — a disk seen healthy in this process that then **disappears**
+    from the SMART enumeration (dead or removed). Conservative to avoid false
+    positives: only when the current scan produced results (a transient
+    whole-scan failure never mass-fires), only for a device previously seen
+    PASS, only after a short absence streak, once per disappearance, and
+    re-armed if the device returns healthy. State is per-process so a `/dev`
+    renumber across reboot can't false-fire; a deliberate hot-swap will fire it
+    (acknowledge it). Both gated by the existing `ZFS_ALERT` / `SMART_FAIL_ALERT`
+    knobs.
+
 ### Fixed
 - **cfm-lsm: partial-BPF-LSM EL8 kernels (e.g. CloudLinux 8 lve, 4.18) no longer
   spam the kernel log with a doomed load retry.** These kernels backport
