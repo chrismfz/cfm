@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.04
+
 ### Added
 - **ZFS-degraded and dead/removed-disk join the durable node hard-faults.**
   Building on the SMART-fail / mdadm-degraded persistence, the health detector
@@ -106,8 +110,6 @@ back-filled here — see the git/PR history for that period.
   fault reaches the operator's notifier — gated by `ECC_ALERT` (default on, mirrors
   `SMART_FAIL_ALERT`) and fired on delta growth (cooldown-spaced), not on the
   static cumulative count.
-
-## 2026.09.04
 
 ### Added
 - **Track-2 Stage 1b/B2 (edge tell #2): a post-clearance nav-cadence shadow
