@@ -910,7 +910,7 @@ func registerDetectionHistory(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "detection_history",
-		Description: "Durable, time-ordered log of detection events (WAF hits, challenge arm/pass/fail, ClamAV infections, autoblocks, …), GeoIP-enriched. The forensic timeline: \"what has CFM detected/done over time?\". Pass ip=<addr> to attribute one IP — the WAF/detector/challenge events behind why CFM acted on it (a firewall_blocks ban with no comment: check here for its origin; note manual/blocklist bans leave no detection event).",
+		Description: "Durable, time-ordered log of detection events (WAF hits, challenge arm/pass/fail, ClamAV infections, autoblocks, memory ECC/hardware errors [type=hardware_ecc], …), GeoIP-enriched. The forensic timeline: \"what has CFM detected/done over time?\". Because it is persisted, it answers questions the live snapshot can't — e.g. a corrected DRAM ECC error recorded today is still here tomorrow even after a reboot resets the EDAC counters or the dmesg ring wraps. Pass ip=<addr> to attribute one IP — the WAF/detector/challenge events behind why CFM acted on it (a firewall_blocks ban with no comment: check here for its origin; note manual/blocklist bans leave no detection event).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in detectionHistoryInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{"enrich": {"1"}}
 		setInt(q, "limit", in.Limit)

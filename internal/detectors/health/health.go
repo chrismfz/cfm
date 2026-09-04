@@ -26,6 +26,7 @@ import (
 	//	"cfm/internal/logging"
 	"cfm/internal/enrich"
 	"cfm/internal/healthstore"
+	"cfm/internal/kmsg"
 )
 
 var (
@@ -34,7 +35,50 @@ var (
 
 	snapshotCollectorMu sync.Mutex
 	snapshotCollector   *Detector
+
+	// edacMCRoot is the EDAC memory-controller sysfs root (var for tests).
+	edacMCRoot = "/sys/devices/system/edac/mc"
+
+	// Kernel-ring ECC fallback cache: only consulted when EDAC sysfs is absent,
+	// and rate-limited so an EDAC-less box does not spawn dmesg every cycle.
+	mceFallbackMu  sync.Mutex
+	mceFallbackAt  time.Time
+	mceFallbackCE  uint64
+	mceFallbackUE  uint64
+	mceFallbackOK  bool
+	mceFallbackTTL = 60 * time.Second
 )
+
+// cachedMCEFallback derives corrected/uncorrected ECC event counts from the
+// kernel ring buffer, caching the result for mceFallbackTTL so it costs at most
+// one `dmesg` spawn per minute. Used only when EDAC sysfs exposes no controller.
+func cachedMCEFallback() (uint64, uint64, bool) {
+	mceFallbackMu.Lock()
+	if mceFallbackOK && time.Since(mceFallbackAt) < mceFallbackTTL {
+		ce, ue := mceFallbackCE, mceFallbackUE
+		mceFallbackMu.Unlock()
+		return ce, ue, true
+	}
+	mceFallbackMu.Unlock()
+
+	// Run the dmesg probe WITHOUT holding the lock, so concurrent snapshot
+	// callers don't serialize behind the (up to 5s) subprocess. Concurrent
+	// cache-misses may each probe once (rare); last write wins.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	lines, _, err := kmsg.Tail(ctx, kmsg.MaxLines, "Hardware Error")
+
+	mceFallbackMu.Lock()
+	defer mceFallbackMu.Unlock()
+	if err != nil {
+		// Keep the last good reading (if any); don't advance the timestamp so we
+		// retry next cycle rather than caching a failure for a full TTL.
+		return mceFallbackCE, mceFallbackUE, mceFallbackOK
+	}
+	mceFallbackCE, mceFallbackUE = parseECCFromKmsg(lines)
+	mceFallbackOK, mceFallbackAt = true, time.Now()
+	return mceFallbackCE, mceFallbackUE, true
+}
 
 type Config struct {
 	Every, Window, Cooldown time.Duration
@@ -53,6 +97,7 @@ type Config struct {
 	SmartWearCritPct     int
 
 	SmartAlert, MdadmAlert, ZfsAlert bool
+	ECCAlert                         bool
 
 	// Minimum absolute counts required for spike-style alerts to fire
 	ConnTotalMin   int // default 50
@@ -98,6 +143,12 @@ type Detector struct {
 	// disk I/O deltas (/proc/diskstats)
 	lastDiskIO  map[string]diskIOCounters
 	lastDiskIOT time.Time
+
+	// memory ECC deltas: cumulative-since-boot counters tracked across cycles so
+	// only NEW errors are alerted/persisted. eccSeeded guards the first cycle.
+	lastECCCorr uint64
+	lastECCUnc  uint64
+	eccSeeded   bool
 }
 
 func New(cfg Config) *Detector {
@@ -235,6 +286,7 @@ type Snapshot struct {
 	Mdadm    MdstatSummary
 	Zfs      map[string]ZpoolStatus
 	Smart    map[string]SmartInfo
+	ECC      ECCReport
 
 	// Host detail (see host_detail.go). CPUUtil/DiskIO/NICRates are
 	// delta-based: zero/empty on the first (seeding) call in a process.
@@ -384,6 +436,9 @@ func (d *Detector) snapshot() Snapshot {
 	// smartctl (optional, minimal)
 	s.Smart = d.readSmartSummary()
 
+	// memory ECC error counters (EDAC sysfs, with a kernel-ring fallback)
+	s.ECC = readECC(edacMCRoot, cachedMCEFallback)
+
 	// pretty JSON for sinks/alert body
 	body := map[string]any{
 		"hostname": s.Host, "time": s.Time.Format(time.RFC3339),
@@ -391,8 +446,8 @@ func (d *Detector) snapshot() Snapshot {
 		"ram_used_pct": s.RamUsedPct, "disk_root_pct": s.DiskRootPct, "disk_tmp_pct": s.DiskTmpPct,
 		"disk_stats": s.DiskStats,
 		"tcp":        s.TCP,
-		"rx_mbps": s.RxMbps, "tx_mbps": s.TxMbps,
-		"temp_max_c": s.TempMaxC, "mdadm": s.Mdadm, "zfs": s.Zfs, "smart": s.Smart,
+		"rx_mbps":    s.RxMbps, "tx_mbps": s.TxMbps,
+		"temp_max_c": s.TempMaxC, "mdadm": s.Mdadm, "zfs": s.Zfs, "smart": s.Smart, "ecc": s.ECC,
 	}
 	if b, _ := json.MarshalIndent(body, "", "  "); b != nil {
 		s.RawJSON = string(b)
@@ -1478,6 +1533,60 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 					emitExtra("HEALTH/SMART_WEAR_WARN", "smart.wear."+dev, extra)
 				}
 			}
+		}
+	}
+
+	// Memory ECC errors. Counters are cumulative-since-boot, so we track deltas
+	// across cycles (this detector-loop instance is stable) and publish a durable
+	// event on growth — the health snapshot alone is point-in-time and is lost to a
+	// reboot (EDAC resets) or a dmesg ring wrap. Persistence is unconditional when
+	// we have data; the email/Slack ALERT is gated by ECCAlert.
+	if s.ECC.Present {
+		corr, unc := s.ECC.CorrectedTotal, s.ECC.UncorrectedTotal
+		switch {
+		case !d.eccSeeded:
+			d.eccSeeded, d.lastECCCorr, d.lastECCUnc = true, corr, unc
+			// Baseline marker: record pre-existing counts once so errors that
+			// predate this daemon start are still visible to a later session.
+			if corr > 0 || unc > 0 {
+				publishECCEvent(ECCEvent{Kind: "baseline", Host: s.Host, When: s.Time,
+					Corrected: corr, Uncorrected: unc, Source: s.ECC.Source, WorstDIMM: worstECCDimm(s.ECC)})
+			}
+		case corr < d.lastECCCorr || unc < d.lastECCUnc:
+			// Counters went backwards: reboot (EDAC reset to 0) or ring wrap.
+			// Re-baseline silently so we never emit a bogus negative delta.
+			d.lastECCCorr, d.lastECCUnc = corr, unc
+		default:
+			dc, du := corr-d.lastECCCorr, unc-d.lastECCUnc
+			d.lastECCCorr, d.lastECCUnc = corr, unc
+			if dc == 0 && du == 0 {
+				break
+			}
+			extra := map[string]string{
+				"ecc_corrected_total":   strconv.FormatUint(corr, 10),
+				"ecc_uncorrected_total": strconv.FormatUint(unc, 10),
+				"ecc_source":            s.ECC.Source,
+			}
+			if wd := worstECCDimm(s.ECC); wd != "" {
+				extra["ecc_worst_dimm"] = wd
+			}
+			// A new uncorrected error subsumes a same-cycle corrected bump: emit the
+			// critical alert only, not both (the critical already says "replace it").
+			if d.cfg.ECCAlert {
+				switch {
+				case du > 0:
+					emitExtra("HEALTH/ECC_UNCORRECTED", "hw.ecc.ue", extra)
+				case dc > 0:
+					emitExtra("HEALTH/ECC_CORRECTED", "hw.ecc.ce", extra)
+				}
+			}
+			kind := "corrected"
+			if du > 0 {
+				kind = "uncorrected"
+			}
+			publishECCEvent(ECCEvent{Kind: kind, Host: s.Host, When: s.Time,
+				Corrected: corr, Uncorrected: unc, DeltaCorrected: dc, DeltaUncorrected: du,
+				Source: s.ECC.Source, WorstDIMM: worstECCDimm(s.ECC)})
 		}
 	}
 
