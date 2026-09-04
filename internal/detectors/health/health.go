@@ -149,6 +149,14 @@ type Detector struct {
 	lastECCCorr uint64
 	lastECCUnc  uint64
 	eccSeeded   bool
+
+	// edge-tracking for boolean STATE hard-faults, so a durable fault event is
+	// published once on entry (incl. at first sight if already faulted), not
+	// every cycle. A missing/zero-value entry means "not currently in a fault we
+	// have published", so a first-cycle fault still fires. State only advances on
+	// a DELIVERED publish, and only a definite-healthy reading re-arms it.
+	lastSmartFailed   map[string]bool
+	lastMdadmDegraded bool
 }
 
 func New(cfg Config) *Detector {
@@ -191,6 +199,7 @@ func New(cfg Config) *Detector {
 		last:            make(map[string]time.Time),
 		base:            make(map[string]float64),
 		smartProbeCache: make(map[string]string),
+		lastSmartFailed: make(map[string]bool),
 	}
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -1496,8 +1505,25 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 	}
 
 	// RAID / ZFS / SMART
-	if d.cfg.MdadmAlert && s.Mdadm.Status == "DEGRADED" {
-		emit("HEALTH/MDADM_DEGRADED", "disk.raid")
+	if d.cfg.MdadmAlert {
+		mdadmDegraded := s.Mdadm.Status == "DEGRADED"
+		if mdadmDegraded {
+			emit("HEALTH/MDADM_DEGRADED", "disk.raid")
+			// Durable, edge-triggered: publish once when the array enters DEGRADED
+			// (incl. at first sight if already degraded). Advance the edge only on
+			// a delivered publish, so a fault present before the sink is registered
+			// is retried rather than dropped.
+			if !d.lastMdadmDegraded && publishNodeFaultEvent(NodeFaultEvent{
+				Type: "disk_mdadm_degraded", Severity: "critical", Host: s.Host,
+				When: s.Time, Message: mdadmFaultMessage(s.Mdadm),
+			}) {
+				d.lastMdadmDegraded = true
+			}
+		} else {
+			// mdadm state comes from /proc/mdstat (always one of the known
+			// statuses), so any non-DEGRADED reading is a definite re-arm.
+			d.lastMdadmDegraded = false
+		}
 	}
 	if d.cfg.ZfsAlert {
 		for name, info := range s.Zfs {
@@ -1512,9 +1538,25 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 	}
 	if d.cfg.SmartAlert {
 		for dev, info := range s.Smart {
-			health := strings.ToUpper(info.Health)
-			if strings.Contains(health, "FAIL") || strings.Contains(health, "CRIT") {
+			// parseSmartInfo only ever yields "PASS", "FAIL" or "" (probe error /
+			// not read). Treat FAIL as the fault, PASS as a definite re-arm, and ""
+			// as unknown — crucially NOT a re-arm, since a dying drive with flaky
+			// SMART reads would otherwise reset the edge and re-publish the fault
+			// every cycle.
+			health := strings.ToUpper(strings.TrimSpace(info.Health))
+			switch {
+			case strings.Contains(health, "FAIL"):
 				emit("HEALTH/SMART_FAIL", "smart."+dev)
+				// Durable, edge-triggered per device (see mdadm above); advance the
+				// edge only on a delivered publish.
+				if !d.lastSmartFailed[dev] && publishNodeFaultEvent(NodeFaultEvent{
+					Type: "disk_smart_fail", Severity: "critical", Host: s.Host,
+					Key: dev, When: s.Time, Message: smartFaultMessage(dev, info),
+				}) {
+					d.lastSmartFailed[dev] = true
+				}
+			case health == "PASS":
+				d.lastSmartFailed[dev] = false
 			}
 			if info.WearoutPctUsed != nil {
 				extra := map[string]string{
