@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.04
+
 ### Added
 - **Track-2 Stage 1b/B2 (edge tell #2): a post-clearance nav-cadence shadow
   counter (`cfm_pcw`, edge, LOG-ONLY).** A cleared client is waved to origin at
