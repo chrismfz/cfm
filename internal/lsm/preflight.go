@@ -38,11 +38,13 @@ var preflightProgramTypeProbe = func() error {
 	return features.HaveProgramType(ebpf.LSM)
 }
 
-// preflightTaskStorageMapProbe is the function used by
-// checkBPFTaskStorageMap to verify that the running kernel accepts
-// BPF_MAP_TYPE_TASK_STORAGE (task-local storage) map creation.
-// Declared as a var so tests can stub it out without performing a real
-// syscall. The default delegates to cilium/ebpf's feature probe, which
+// preflightTaskStorageMapProbe reports whether the running kernel
+// accepts BPF_MAP_TYPE_TASK_STORAGE (task-local storage) map creation.
+// Used by the per-policy availability checks (checkCredEscalAvailability,
+// checkDirectCredInstallAvailability) and by the loader's
+// selectTaskStorageVariant. Declared as a var so tests can stub it out
+// without performing a real syscall. The default delegates to
+// cilium/ebpf's feature probe, which
 // attempts a task-storage map create with a deliberately-invalid BTF
 // fd: a supporting kernel gets past the map-type check and returns
 // EBADF (probe treats that as "supported"), while a kernel that does

@@ -1425,24 +1425,30 @@ and a specific remediation hint:
    way to tell those hosts apart from genuinely capable ones.
 
 **Task-local storage — a per-policy degrade, not a component gate.**
-cfm-lsm's single shared BPF object embeds one task-local storage map
-(`cfm_cred_transition_tasks`, upstream **5.11**), used only by
-CFML-CRED-002 / CFML-CRED-003 to correlate a `task_fix_setuid`
-transition with the following `commit_creds`. Because cilium/ebpf
-creates every map in the object in one `LoadAndAssign`, a kernel that
-rejects this map type would fail the **whole** load with
-`map create: invalid argument`. Some partial backports (notably
-CloudLinux 8's lve 4.18 kernel) accept `BPF_PROG_TYPE_LSM` (passing (7))
-but lack task-local storage. Rather than gate the whole component on it,
-`NewLoader` probes `features.HaveMapType(ebpf.TaskStorage)` and, when it
-is unsupported, **downgrades** the map to a tiny HASH placeholder and
-neutralises its two users, so the object loads and the remaining ~15
-policies attach normally (`selectTaskStorageVariant`). CFML-CRED-002 and
-CFML-CRED-003 are then reported **unavailable** as optional per-policy
-probes (see below), not as a component FAIL — the host runs cfm-lsm with
-those two credential-transition policies absent instead of no protection
-at all. (An *inconclusive* probe — EPERM without caps — is treated as
-supported; the loader makes the final call.)
+cfm-lsm's shared BPF object embeds **two** task-local storage maps
+(upstream **5.11**): `cfm_cred_transition_tasks` (used by
+CFML-CRED-002/003 to correlate a `task_fix_setuid` transition with the
+following `commit_creds`) and `cfm_web_origin_tasks` (CFML-FS-005's
+web-origin enrichment, gated by the `cfm_fs005_web_origin_monitor`
+constant). Because cilium/ebpf creates every map named by the object in
+one `LoadAndAssign`, a kernel that rejects this map type would fail the
+**whole** load with `map create: invalid argument`. Some partial
+backports (notably CloudLinux 8's lve 4.18 kernel) accept
+`BPF_PROG_TYPE_LSM` (passing (7)) but lack task-local storage. Rather
+than gate the whole component on it, `NewLoader` probes
+`features.HaveMapType(ebpf.TaskStorage)` and, when it is unsupported,
+**degrades** (`selectTaskStorageVariant`): it downgrades **both** maps to
+tiny HASH placeholders and removes every loaded reference to them —
+neutralising `cfm_cred002`/`cfm_cred003` (dropping CFML-CRED-002/003) and
+forcing `cfm_fs005_web_origin_monitor = 0` so the verifier
+dead-code-eliminates FS-005's `bpf_task_storage_get` calls. The object
+then loads and the remaining ~15 policies attach normally, including
+FS-005's core inode hooks (only its web-origin enrichment tag is lost).
+CFML-CRED-002 and CFML-CRED-003 are reported **unavailable** as optional
+per-policy probes (see below), not as a component FAIL — the host runs
+cfm-lsm with those two credential-transition policies absent instead of
+no protection at all. (An *inconclusive* probe — EPERM without caps — is
+treated as supported; the loader makes the final call.)
 
 When a fresh auto-enable attempt fails (preflight FAIL, or a load/attach
 error), the daemon backs off exponentially before retrying — 1 min,

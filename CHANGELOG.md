@@ -27,9 +27,13 @@ back-filled here — see the git/PR history for that period.
   `map create: invalid argument` — **no policy attached at all** — and the daemon
   re-attempted the doomed load on every config-reload tick, filling `dmesg`. Now:
   - **Graceful degrade.** On a kernel without task-local storage, `NewLoader`
-    downgrades `cfm_cred_transition_tasks` to a HASH placeholder and neutralises its
-    two users, so the object loads and the remaining ~15 policies attach normally.
-    CFML-CRED-002 and CFML-CRED-003 are reported **unavailable** as optional
+    downgrades **both** embedded task-storage maps (`cfm_cred_transition_tasks` and
+    `cfm_web_origin_tasks`) to HASH placeholders and removes every loaded reference
+    to them — neutralising the two cred-transition programs and forcing
+    `cfm_fs005_web_origin_monitor = 0` so the verifier dead-code-eliminates FS-005's
+    task-storage access — so the object loads and the remaining ~15 policies attach
+    normally (FS-005's core inode hooks included; only its web-origin enrichment tag
+    is lost). CFML-CRED-002 and CFML-CRED-003 are reported **unavailable** as optional
     per-policy probes (`cfm lsm status`), not as a component FAIL. An inconclusive
     probe (EPERM without caps) is treated as supported — the loader makes the final
     call — rather than pre-emptively dropping two policies.
