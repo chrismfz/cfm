@@ -217,8 +217,8 @@ func TestLifecycle_ActivationBackoff_GrowsAndGates(t *testing.T) {
 	}
 }
 
-// TestLifecycle_ArmTransientRetry_DoesNotEscalate confirms that an
-// inconclusive (UNKNOWN-only) preflight result retries on a fixed short
+// TestLifecycle_ArmTransientRetry_DoesNotEscalate confirms that a
+// recoverable/inconclusive preflight result retries on a fixed short
 // interval and never marches toward the escalating cap — the fix for
 // backing off a genuinely-supported host on a transient boot condition.
 func TestLifecycle_ArmTransientRetry_DoesNotEscalate(t *testing.T) {
@@ -235,6 +235,36 @@ func TestLifecycle_ArmTransientRetry_DoesNotEscalate(t *testing.T) {
 		if !lc.freshActivationDue(base.Add(activationBackoffInitial)) {
 			t.Error("transient retry must reopen after the fixed interval")
 		}
+	}
+}
+
+// TestLifecycle_ArmTransientRetry_PreservesAccumulatedBackoff guards the
+// second-review finding: a transient blip mid-escalation must not RESET
+// an already-accumulated backoff back to the 1-minute floor (which would
+// let doomed attempts + their kmsg "ISSUE" spam resume at the floor).
+func TestLifecycle_ArmTransientRetry_PreservesAccumulatedBackoff(t *testing.T) {
+	lc := NewLifecycle(BuildMarker{})
+	base := time.Unix(1_700_000_000, 0)
+
+	// Accumulate escalation from permanent/load failures.
+	lc.noteFreshActivationFailure(base) // → initial
+	at := base.Add(lc.activationBackoff)
+	lc.noteFreshActivationFailure(at) // → 2×
+	at = at.Add(lc.activationBackoff)
+	lc.noteFreshActivationFailure(at) // → 4×
+	accumulated := lc.activationBackoff
+	if accumulated <= activationBackoffInitial {
+		t.Fatalf("test setup: expected accumulated backoff > initial; got %s", accumulated)
+	}
+
+	// A transient result now must NOT shrink the accumulated backoff.
+	at = at.Add(accumulated)
+	lc.armTransientRetry(at)
+	if lc.activationBackoff != accumulated {
+		t.Errorf("transient retry shortened accumulated backoff: got %s, want preserved %s", lc.activationBackoff, accumulated)
+	}
+	if !lc.nextActivationAttempt.Equal(at.Add(accumulated)) {
+		t.Errorf("transient retry must arm next attempt at now+accumulated; got %v", lc.nextActivationAttempt)
 	}
 }
 

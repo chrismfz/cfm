@@ -393,13 +393,14 @@ func (l *Lifecycle) openOrCreateLoader(conf *Conf) (loader *Loader, fresh bool, 
 	// failing checks.
 	pf := RunPreflight()
 	if !pf.OK {
-		// Escalate the backoff only on a definitive FAIL (a permanent
-		// kernel/config problem — e.g. task-storage unsupported). An
-		// UNKNOWN-only result is inconclusive and may clear on its own
-		// (bpffs mounting late at boot, a briefly-unreadable /proc
-		// file), so retry it on a short fixed interval rather than
-		// marching a genuinely-supported host toward the 30-minute cap.
-		if pf.HasHardFail() {
+		// Escalate the backoff only on a PERMANENT FAIL (a kernel/config
+		// problem that won't clear without a reboot — e.g. task-storage
+		// unsupported). A recoverable FAIL (bpffs mounting late at boot)
+		// or an inconclusive UNKNOWN (a briefly-unreadable /proc file)
+		// may heal on its own, so retry it on a short fixed interval
+		// rather than marching a genuinely-supported host toward the
+		// 30-minute cap. HasPermanentFail encodes that distinction.
+		if pf.HasPermanentFail() {
 			l.noteFreshActivationFailure(now)
 		} else {
 			l.armTransientRetry(now)
@@ -496,14 +497,22 @@ func (l *Lifecycle) noteFreshActivationFailure(now time.Time) {
 	l.nextActivationAttempt = now.Add(l.activationBackoff)
 }
 
-// armTransientRetry arms a short FIXED retry after an inconclusive
-// (UNKNOWN-only) preflight result, without escalating the backoff. A
-// transient condition should heal on the next attempt, not push a
-// genuinely-supported host toward activationBackoffMax. Called with
-// l.mu held.
+// armTransientRetry arms a short retry after a recoverable-FAIL or
+// inconclusive-UNKNOWN preflight result. It neither escalates the
+// backoff (a transient condition should heal soon, not push a
+// genuinely-supported host toward activationBackoffMax) nor SHORTENS an
+// escalation already accumulated from prior permanent-fail / load
+// failures (a transient blip mid-escalation must not reset spam
+// suppression and let doomed attempts resume at the 1-minute floor).
+// It therefore arms the next attempt at the larger of the fixed floor
+// and the current backoff. Called with l.mu held.
 func (l *Lifecycle) armTransientRetry(now time.Time) {
-	l.activationBackoff = activationBackoffInitial
-	l.nextActivationAttempt = now.Add(activationBackoffInitial)
+	wait := activationBackoffInitial
+	if l.activationBackoff > wait {
+		wait = l.activationBackoff
+	}
+	l.activationBackoff = wait
+	l.nextActivationAttempt = now.Add(wait)
 }
 
 // resetActivationBackoff clears the fresh-path backoff after a

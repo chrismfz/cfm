@@ -132,18 +132,39 @@ type Preflight struct {
 	OK bool
 }
 
-// HasHardFail reports whether any check returned a definitive CheckFail
-// (a permanent, operator-actionable problem: kernel too old, `bpf` not
-// in the LSM list, task-storage unsupported, missing caps, …) as
-// opposed to CheckUnknown (an inconclusive probe that may clear on its
-// own — an unreadable /proc file early in boot, bpffs mounting late).
-// The daemon's activation backoff escalates only on a hard fail;
-// UNKNOWN-only results retry on a short fixed interval so a
-// genuinely-supported host is not pushed toward the backoff cap by a
-// transient condition.
-func (p Preflight) HasHardFail() bool {
+// retryableCheckNames names the preflight checks whose CheckFail is a
+// recoverable/environmental condition rather than a permanent kernel
+// incapability, so the daemon retries them on a short fixed interval
+// instead of escalating its activation backoff toward the cap.
+//
+// Only `bpffs-mounted` qualifies: /sys/fs/bpf can appear late (systemd
+// mounts it early but a boot-ordering race, a non-systemd host, or an
+// operator remount can leave it briefly absent), and once it appears
+// the very next attempt succeeds. `capabilities` is deliberately NOT
+// here: a process's effective caps are fixed at exec, so a caps FAIL
+// cannot clear under the running daemon — the operator fix (grant caps)
+// is a service restart, which starts a fresh Lifecycle with backoff
+// already reset. Escalating on it is therefore both harmless and
+// correct. Every other FAIL (missing CONFIG_BPF_LSM, `bpf` not in the
+// LSM list, no BTF, program-type or task-storage unsupported) is a
+// permanent property of the running kernel.
+var retryableCheckNames = map[string]bool{
+	"bpffs-mounted": true,
+}
+
+// HasPermanentFail reports whether any check FAILed for a permanent
+// reason — a kernel/config incapability that will not clear without a
+// reboot or a different kernel (missing CONFIG_BPF_LSM, `bpf` absent
+// from the LSM list, no BTF, BPF_PROG_TYPE_LSM or task-storage
+// unsupported, missing caps). It excludes recoverable environmental
+// FAILs (see retryableCheckNames) and inconclusive UNKNOWN results,
+// both of which the daemon retries on a short fixed interval rather
+// than escalating its activation backoff. A genuinely-supported host
+// hitting a transient condition is therefore never marched toward the
+// backoff cap.
+func (p Preflight) HasPermanentFail() bool {
 	for _, c := range p.Checks {
-		if c.Status == CheckFail {
+		if c.Status == CheckFail && !retryableCheckNames[c.Name] {
 			return true
 		}
 	}
@@ -151,9 +172,10 @@ func (p Preflight) HasHardFail() bool {
 }
 
 // RunPreflight runs all kernel checks and returns the aggregate
-// result. Reads from /proc and /sys, and performs one tiny bpf()
-// syscall via checkBPFLSMProgramType to feature-probe the verifier;
-// no writes are made.
+// result. Reads from /proc and /sys, and performs two tiny bpf()
+// feature-probe syscalls — checkBPFLSMProgramType (verifier accepts
+// BPF_PROG_TYPE_LSM) and checkBPFTaskStorageMap (kernel accepts a
+// task-local storage map create); no writes are made.
 func RunPreflight() Preflight {
 	checks := []CheckResult{
 		checkKernelVersion(),

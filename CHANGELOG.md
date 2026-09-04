@@ -30,8 +30,11 @@ back-filled here — see the git/PR history for that period.
   check feature-probes the map type and FAILs cleanly when it is unsupported, so
   the host stays dormant and `cfm lsm status` reports exactly why; (2) the
   daemon's fresh auto-enable path now uses **exponential backoff** (1 min → 30 min
-  cap) instead of retrying every tick. The adopt path is never gated, so a CLI
-  `cfm lsm enable` is still picked up on the next tick. This restores clean, quiet
+  cap) instead of retrying every tick. Only a *permanent* preflight FAIL (a kernel
+  incapability that needs a reboot) escalates the backoff; a recoverable FAIL
+  (bpffs mounting late) or an inconclusive probe retries on a short fixed interval,
+  so a genuinely-supported host is never marched toward the cap. The adopt path is
+  never gated, so a CLI `cfm lsm enable` is still picked up on the next tick. This restores clean, quiet
   behaviour on these kernels; a follow-up will load a task-storage-free policy
   subset so the other ~15 policies can still attach there.
 

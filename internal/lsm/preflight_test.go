@@ -464,23 +464,29 @@ func TestPreflight_TaskStorageMapProbeInconclusive(t *testing.T) {
 	t.Error("bpf-task-storage-map check not found in results")
 }
 
-func TestPreflight_HasHardFail(t *testing.T) {
+func TestPreflight_HasPermanentFail(t *testing.T) {
 	cases := []struct {
 		name   string
 		checks []CheckResult
 		want   bool
 	}{
-		{"all pass", []CheckResult{{Status: CheckPass}, {Status: CheckPass}}, false},
-		{"unknown but no fail", []CheckResult{{Status: CheckPass}, {Status: CheckUnknown}}, false},
-		{"one hard fail", []CheckResult{{Status: CheckPass}, {Status: CheckFail}}, true},
-		{"fail and unknown mixed", []CheckResult{{Status: CheckUnknown}, {Status: CheckFail}}, true},
+		{"all pass", []CheckResult{{Name: "kernel-config", Status: CheckPass}, {Name: "btf-available", Status: CheckPass}}, false},
+		{"unknown but no fail", []CheckResult{{Name: "kernel-config", Status: CheckPass}, {Name: "kernel-config", Status: CheckUnknown}}, false},
+		{"permanent kernel fail", []CheckResult{{Name: "bpf-task-storage-map", Status: CheckFail}}, true},
+		{"permanent fail mixed with unknown", []CheckResult{{Name: "kernel-config", Status: CheckUnknown}, {Name: "bpf-lsm-program-type", Status: CheckFail}}, true},
+		// A bpffs-mounted FAIL is recoverable (mount can appear late), so
+		// it must NOT count as permanent — the daemon retries it fast.
+		{"bpffs-mounted fail is retryable", []CheckResult{{Name: "bpffs-mounted", Status: CheckFail}}, false},
+		{"bpffs retryable but a real kernel fail present", []CheckResult{{Name: "bpffs-mounted", Status: CheckFail}, {Name: "btf-available", Status: CheckFail}}, true},
+		// capabilities is deliberately permanent (caps fixed at exec).
+		{"capabilities fail is permanent", []CheckResult{{Name: "capabilities", Status: CheckFail}}, true},
 		{"no checks", nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := Preflight{Checks: tc.checks}
-			if got := p.HasHardFail(); got != tc.want {
-				t.Errorf("HasHardFail: got %t, want %t", got, tc.want)
+			if got := p.HasPermanentFail(); got != tc.want {
+				t.Errorf("HasPermanentFail: got %t, want %t", got, tc.want)
 			}
 		})
 	}
