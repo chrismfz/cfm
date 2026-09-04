@@ -12,6 +12,7 @@ type HealthSnapshotV1 struct {
 	Error         string            `json:"error,omitempty"`
 	Host          HostSystem        `json:"host"`
 	Disk          DiskSnapshot      `json:"disk"`
+	Hardware      HardwareHealth    `json:"hardware"`
 	Services      []ServiceStatus   `json:"services"`
 	CFM           CFMMetrics        `json:"cfm_metrics"`
 	Network       NetworkThroughput `json:"network"`
@@ -182,6 +183,41 @@ type ZFSPoolState struct {
 	ResilverPercent string `json:"resilver_progress,omitempty"`
 }
 
+// HardwareHealth carries host hardware-fault signals that the disk/SMART block
+// doesn't cover. Today that is memory ECC errors (EDAC); the block always
+// serialises so consumers can rely on the key.
+type HardwareHealth struct {
+	ECC ECCHealth `json:"ecc"`
+}
+
+// ECCHealth mirrors the detector's memory-ECC counters into the snapshot. All
+// counts are cumulative since boot. Present is false when neither EDAC sysfs nor
+// the kernel-ring fallback yielded data (reported honestly, not as "healthy").
+type ECCHealth struct {
+	Present          bool            `json:"present"`
+	Source           string          `json:"source,omitempty"` // "edac_sysfs" | "kernel_ring"
+	CorrectedTotal   uint64          `json:"corrected_total"`
+	UncorrectedTotal uint64          `json:"uncorrected_total"`
+	Controllers      []ECCController `json:"controllers,omitempty"`
+	DIMMs            []ECCDimm       `json:"dimms,omitempty"`
+	Note             string          `json:"note,omitempty"`
+}
+
+type ECCController struct {
+	Name             string `json:"name"`
+	MCName           string `json:"mc_name,omitempty"`
+	CorrectedCount   uint64 `json:"corrected_count"`
+	UncorrectedCount uint64 `json:"uncorrected_count"`
+}
+
+type ECCDimm struct {
+	ID               string `json:"id"`
+	Label            string `json:"label,omitempty"`
+	Location         string `json:"location,omitempty"`
+	CorrectedCount   uint64 `json:"corrected_count"`
+	UncorrectedCount uint64 `json:"uncorrected_count"`
+}
+
 type ServiceStatus struct {
 	Name      string `json:"name"`
 	Active    bool   `json:"active"`
@@ -198,20 +234,20 @@ type CFMMetrics struct {
 }
 
 type NetworkThroughput struct {
-	BandwidthInBytesPerSec  uint64  `json:"bandwidth_in_bps"`
-	BandwidthOutBytesPerSec uint64  `json:"bandwidth_out_bps"`
-	ConntrackCount          int     `json:"conntrack_count,omitempty"`
-	ConntrackMax            int     `json:"conntrack_max,omitempty"`
-	ConntrackUsagePct       float64 `json:"conntrack_usage_pct,omitempty"`
+	BandwidthInBytesPerSec  uint64          `json:"bandwidth_in_bps"`
+	BandwidthOutBytesPerSec uint64          `json:"bandwidth_out_bps"`
+	ConntrackCount          int             `json:"conntrack_count,omitempty"`
+	ConntrackMax            int             `json:"conntrack_max,omitempty"`
+	ConntrackUsagePct       float64         `json:"conntrack_usage_pct,omitempty"`
 	NICs                    []NICThroughput `json:"nics,omitempty"`
 }
 
 // NICThroughput is per-interface throughput (loopback excluded),
 // busiest first, capped at the collector; delta-based like bandwidth.
 type NICThroughput struct {
-	Name   string `json:"name"`
-	RxBps  uint64 `json:"rx_bps"`
-	TxBps  uint64 `json:"tx_bps"`
+	Name  string `json:"name"`
+	RxBps uint64 `json:"rx_bps"`
+	TxBps uint64 `json:"tx_bps"`
 }
 
 type CounterSnapshot struct {

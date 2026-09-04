@@ -72,6 +72,7 @@ func init() {
 			SmartAlert: kvBool(kv, "SMART_FAIL_ALERT", true),
 			MdadmAlert: kvBool(kv, "MDADM_ALERT", true),
 			ZfsAlert:   kvBool(kv, "ZFS_ALERT", true),
+			ECCAlert:   kvBool(kv, "ECC_ALERT", true),
 
 			// enrichment
 			SpikeProbeTopN: spikeTopN,

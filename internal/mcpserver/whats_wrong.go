@@ -67,24 +67,36 @@ const (
 
 	wwAPIAnomalyWarnCount = 10 // >= this many API-abuse anomaly events → warning, else info
 	wwMailAnomalyCap      = 5  // max individual mail-anomaly findings to emit
+
+	// Memory ECC (EDAC) — cumulative-since-boot counters from the health snapshot.
+	// An uncorrected error is a data-integrity/imminent-crash event → critical at
+	// the first one. Corrected errors are surfaced as a warning at the first one:
+	// a single corrected flip is benign, but a rising count is the classic DIMM
+	// pre-failure signal, and this operator's stated priority is to SEE hardware
+	// errors rather than have them silently pass a green health check. The finding
+	// carries the raw count and points at dmesg_tail for the rate/timing; raise
+	// wwECCCorrectedWarn if lifetime one-offs prove noisy across a fleet.
+	wwECCUncorrectedCrit = 1
+	wwECCCorrectedWarn   = 1
 )
 
 // categoryOrder gives a stable secondary sort within a severity tier.
 var categoryOrder = map[string]int{
 	"edge":       0,
-	"service":    1,
-	"process":    2,
-	"disk":       3,
-	"memory":     4,
-	"load":       5,
-	"network":    6,
-	"firewall":   7,
-	"mysql":      8,
-	"mail_queue": 9,
-	"mail":       10,
-	"panel":      11,
-	"abuse":      12,
-	"health":     13,
+	"hardware":   1,
+	"service":    2,
+	"process":    3,
+	"disk":       4,
+	"memory":     5,
+	"load":       6,
+	"network":    7,
+	"firewall":   8,
+	"mysql":      9,
+	"mail_queue": 10,
+	"mail":       11,
+	"panel":      12,
+	"abuse":      13,
+	"health":     14,
 }
 
 // finding is one ranked triage item.
@@ -110,7 +122,7 @@ func registerWhatsWrong(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "whats_wrong",
-		Description: "Triage in one call: pulls host health, process-health anomalies, systemd services, netfilter priority diagnostics, MySQL saturation, mail/runtime anomalies, API abuse, and panel burn-in together, then returns a SEVERITY-RANKED list of concrete problems with the drill-down tool. Deliberately conservative: it flags equal-priority netfilter ambiguity and CFM runtime/config priority drift, but not intentional ordered Imunify/CFM overlap or routine WAF/firewall activity. `status:\"ok\"` means no problems among readable signals; `sources` shows unavailable/degraded/error inputs.",
+		Description: "Triage in one call: pulls host health, memory ECC/hardware errors, process-health anomalies, systemd services, netfilter priority diagnostics, MySQL saturation, mail/runtime anomalies, API abuse, and panel burn-in together, then returns a SEVERITY-RANKED list of concrete problems with the drill-down tool. Deliberately conservative: it flags equal-priority netfilter ambiguity and CFM runtime/config priority drift, but not intentional ordered Imunify/CFM overlap or routine WAF/firewall activity. `status:\"ok\"` means no problems among readable signals; `sources` shows unavailable/degraded/error inputs.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		secs := []struct {
 			key, path string
@@ -200,6 +212,7 @@ func evaluateWhatsWrong(sections map[string]json.RawMessage) whatsWrongResult {
 
 	if body, ok := sections["health"]; ok && usable("health", body) {
 		fs = append(fs, evalHealth(body)...)
+		fs = append(fs, evalHardware(body)...)
 	}
 	if body, ok := sections["process_health"]; ok && usable("process_health", body) {
 		fs = append(fs, evalProcessHealth(body, sources)...)
@@ -438,6 +451,99 @@ func evalHealth(body json.RawMessage) []finding {
 	}
 
 	return fs
+}
+
+// eccDimmView is one DIMM's counters as carried in the health snapshot's
+// hardware.ecc.dimms array.
+type eccDimmView struct {
+	ID               string `json:"id"`
+	Label            string `json:"label"`
+	Location         string `json:"location"`
+	CorrectedCount   uint64 `json:"corrected_count"`
+	UncorrectedCount uint64 `json:"uncorrected_count"`
+}
+
+// evalHardware flags memory ECC errors from the health snapshot's hardware
+// block. Uncorrected errors are critical (data-integrity / imminent crash);
+// corrected errors are a warning (pre-failure signal). Both point at dmesg_tail
+// for the timing/rate behind the cumulative counters. When ECC info is absent
+// (present=false and no ring-buffer fallback), nothing is flagged — the signal
+// is unreadable here, not proven healthy.
+func evalHardware(body json.RawMessage) []finding {
+	var h struct {
+		Hardware struct {
+			ECC struct {
+				Present          bool          `json:"present"`
+				Source           string        `json:"source"`
+				CorrectedTotal   uint64        `json:"corrected_total"`
+				UncorrectedTotal uint64        `json:"uncorrected_total"`
+				DIMMs            []eccDimmView `json:"dimms"`
+			} `json:"ecc"`
+		} `json:"hardware"`
+	}
+	if json.Unmarshal(body, &h) != nil {
+		return nil
+	}
+	ecc := h.Hardware.ECC
+	if !ecc.Present {
+		return nil
+	}
+	// EDAC sysfs gives durable cumulative counters; the kernel-ring fallback only
+	// sees machine-check messages still in the ring, so note that caveat.
+	src := ""
+	if ecc.Source == "kernel_ring" {
+		src = " (counted from the kernel ring buffer; EDAC sysfs unavailable)"
+	}
+	// Each finding gets its own Args map (never a shared instance) so a later
+	// annotation pass can't mutate one finding's drilldown via another's.
+	drill := func() map[string]any { return map[string]any{"grep": "Hardware Error"} }
+	var fs []finding
+	if ecc.UncorrectedTotal >= wwECCUncorrectedCrit {
+		fs = append(fs, finding{sevCritical, "hardware", "uncorrected memory errors (ECC)",
+			fmt.Sprintf("%d uncorrected ECC error(s) since boot%s — data-integrity risk / imminent DIMM failure; replace the affected module%s",
+				ecc.UncorrectedTotal, eccDimmSuffix(eccWorstDimm(ecc.DIMMs, true)), src), "dmesg_tail", drill()})
+		// The critical already tells the operator to replace the module; the
+		// corrected warning would be redundant noise on the same box, so suppress it.
+		return fs
+	}
+	if ecc.CorrectedTotal >= wwECCCorrectedWarn {
+		fs = append(fs, finding{sevWarning, "hardware", "corrected memory errors (ECC)",
+			fmt.Sprintf("%d corrected ECC error(s) since boot%s — a single flip is benign but a rising count predicts DIMM failure; check the rate/timing%s",
+				ecc.CorrectedTotal, eccDimmSuffix(eccWorstDimm(ecc.DIMMs, false)), src), "dmesg_tail", drill()})
+	}
+	return fs
+}
+
+// eccWorstDimm returns a label for the DIMM with the highest count of the
+// requested kind (uncorrected when unc=true, else corrected), or "" when none
+// is attributed — AMD often reports "noinfo" errors it can't pin to a module.
+func eccWorstDimm(dimms []eccDimmView, unc bool) string {
+	best, bestN := "", uint64(0)
+	for _, d := range dimms {
+		n := d.CorrectedCount
+		if unc {
+			n = d.UncorrectedCount
+		}
+		if n > bestN {
+			bestN = n
+			switch {
+			case strings.TrimSpace(d.Label) != "":
+				best = d.Label
+			case strings.TrimSpace(d.Location) != "":
+				best = d.Location
+			default:
+				best = d.ID
+			}
+		}
+	}
+	return best
+}
+
+func eccDimmSuffix(dimm string) string {
+	if strings.TrimSpace(dimm) == "" {
+		return ""
+	}
+	return " (worst: " + dimm + ")"
 }
 
 // edgeEngineUnits are the mutually-exclusive edge proxies: a node fronts its

@@ -52,6 +52,7 @@ func FromDetectorSnapshot(src health.Snapshot, nodeID string, collectedAt time.T
 			ZFSHealth:    zfsHealth(src.Zfs),
 			ZFSPools:     mapZFSPools(src.Zfs),
 		},
+		Hardware: HardwareHealth{ECC: mapECC(src.ECC)},
 		Network: NetworkThroughput{
 			BandwidthInBytesPerSec:  mbpsToBytesPerSec(src.RxMbps),
 			BandwidthOutBytesPerSec: mbpsToBytesPerSec(src.TxMbps),
@@ -148,6 +149,34 @@ func normalizeSMARTHealth(s health.SmartInfo) string {
 		return "unknown"
 	}
 	return "ok"
+}
+
+func mapECC(in health.ECCReport) ECCHealth {
+	out := ECCHealth{
+		Present:          in.Present,
+		Source:           in.Source,
+		CorrectedTotal:   in.CorrectedTotal,
+		UncorrectedTotal: in.UncorrectedTotal,
+		Note:             in.Note,
+	}
+	for _, c := range in.Controllers {
+		out.Controllers = append(out.Controllers, ECCController{
+			Name:             c.Name,
+			MCName:           c.MCName,
+			CorrectedCount:   c.CorrectedCount,
+			UncorrectedCount: c.UncorrectedCount,
+		})
+	}
+	for _, d := range in.DIMMs {
+		out.DIMMs = append(out.DIMMs, ECCDimm{
+			ID:               d.ID,
+			Label:            d.Label,
+			Location:         d.Location,
+			CorrectedCount:   d.CorrectedCount,
+			UncorrectedCount: d.UncorrectedCount,
+		})
+	}
+	return out
 }
 
 func mapMDADM(in health.MdstatSummary) MDADMStatus {
