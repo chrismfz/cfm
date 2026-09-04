@@ -386,12 +386,12 @@ func TestPreflight_BPFLSMProgramTypeNotSupported(t *testing.T) {
 
 func TestPreflight_TaskStorageMapNotSupported(t *testing.T) {
 	// Models CloudLinux 8 (lve) 4.18 kernels: CONFIG_BPF_LSM=y, `bpf`
-	// in /sys/kernel/security/lsm, BTF present, and the bpf() syscall
-	// ACCEPTS BPF_PROG_TYPE_LSM (partial backport) — but it rejects
-	// BPF_MAP_TYPE_TASK_STORAGE at map create. The bpf-task-storage-map
-	// check must FAIL with a remediation, and overall preflight must be
-	// not-OK so the daemon stays cleanly dormant instead of retrying a
-	// doomed whole-object load on every reload tick.
+	// in /sys/kernel/security/lsm, BTF present, the bpf() syscall ACCEPTS
+	// BPF_PROG_TYPE_LSM (partial backport) — but it rejects
+	// BPF_MAP_TYPE_TASK_STORAGE. Task-storage is NOT a component gate:
+	// preflight must be OK (the loader degrades and loads the other ~15
+	// policies), and CFML-CRED-002/003 must be reported unavailable via
+	// the optional per-policy probes.
 	stub := stubProc{
 		procVersion:         "Linux version 4.18.0-553.123.2.lve.el8.x86_64 (mockbuild) #1 SMP",
 		bootConfig:          "CONFIG_BPF_LSM=y\n",
@@ -405,39 +405,67 @@ func TestPreflight_TaskStorageMapNotSupported(t *testing.T) {
 	stub.install(t)
 
 	pf := RunPreflight()
-	if pf.OK {
-		t.Fatal("expected preflight to FAIL when BPF_MAP_TYPE_TASK_STORAGE is unsupported")
+	if !pf.OK {
+		t.Fatalf("task-storage must not gate the component; expected preflight OK, got: %+v", pf)
 	}
-	// The program-type check must still PASS — this is a distinct gate.
-	var sawProgType, sawTaskStorage bool
+	// There must be no task-storage component check any more.
 	for _, c := range pf.Checks {
-		switch c.Name {
-		case "bpf-lsm-program-type":
-			sawProgType = true
-			if c.Status != CheckPass {
-				t.Errorf("bpf-lsm-program-type: got %s, want PASS (program type is accepted on this backport)", c.Status)
-			}
-		case "bpf-task-storage-map":
-			sawTaskStorage = true
-			if c.Status != CheckFail {
-				t.Errorf("bpf-task-storage-map: got %s, want FAIL", c.Status)
-			}
-			if c.Remediation == "" {
-				t.Error("FAIL must carry operator-facing remediation")
-			}
+		if c.Name == "bpf-task-storage-map" {
+			t.Error("task-storage must no longer be a component-wide check")
 		}
 	}
-	if !sawProgType {
-		t.Error("bpf-lsm-program-type check not found in results")
+	// CRED-002 and CRED-003 must be reported unavailable.
+	want := map[PolicyID]bool{PolicyCredEscal: false, PolicyDirectCredInstall: false}
+	seen := map[PolicyID]bool{}
+	for _, pa := range pf.PolicyAvailability {
+		if _, ok := want[pa.PolicyID]; !ok {
+			continue
+		}
+		seen[pa.PolicyID] = true
+		if pa.Available {
+			t.Errorf("%s: expected unavailable on a task-storage-free kernel", pa.PolicyID)
+		}
+		if pa.Reason == "" {
+			t.Errorf("%s: unavailable entry must carry a reason", pa.PolicyID)
+		}
 	}
-	if !sawTaskStorage {
-		t.Error("bpf-task-storage-map check not found in results")
+	for id := range want {
+		if !seen[id] {
+			t.Errorf("no PolicyAvailability entry for %s", id)
+		}
 	}
 }
 
-func TestPreflight_TaskStorageMapProbeInconclusive(t *testing.T) {
+func TestPreflight_TaskStorageMapSupported_CredPoliciesAvailable(t *testing.T) {
+	// The positive case: a modern kernel that supports task-storage must
+	// report CFML-CRED-002/003 available (commit_creds is present in the
+	// default kallsyms fixture).
+	stub := stubProc{
+		procVersion:         "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
+		bootConfig:          "CONFIG_BPF_LSM=y\nCONFIG_DEBUG_INFO_BTF=y\n",
+		lsmList:             "lockdown,capability,landlock,yama,apparmor,bpf",
+		btfPresent:          true,
+		procStatus:          "CapEff:\t000001ffffffffff\n",
+		bpffsMountpoint:     "/sys/fs/bpf",
+		taskStorageProbeErr: nil,
+	}
+	stub.install(t)
+
+	pf := RunPreflight()
+	for _, pa := range pf.PolicyAvailability {
+		if pa.PolicyID == PolicyCredEscal || pa.PolicyID == PolicyDirectCredInstall {
+			if !pa.Available {
+				t.Errorf("%s: expected available on a task-storage-capable kernel; reason=%q", pa.PolicyID, pa.Reason)
+			}
+		}
+	}
+}
+
+func TestPreflight_TaskStorageProbeInconclusive_CredPoliciesAssumedAvailable(t *testing.T) {
 	// A non-ErrNotSupported probe error (e.g. EPERM without caps) must
-	// be UNKNOWN, not FAIL — matching checkBPFLSMProgramType's handling.
+	// NOT drop the CRED policies — the loader's own probe makes the final
+	// call, so preflight assumes available rather than pre-emptively
+	// dropping two policies on an ambiguous signal.
 	stub := stubProc{
 		procVersion:         "Linux version 6.8.0-31-generic (buildd) #32-Ubuntu SMP",
 		bootConfig:          "CONFIG_BPF_LSM=y\nCONFIG_DEBUG_INFO_BTF=y\n",
@@ -450,18 +478,14 @@ func TestPreflight_TaskStorageMapProbeInconclusive(t *testing.T) {
 	stub.install(t)
 
 	pf := RunPreflight()
-	if pf.OK {
-		t.Fatal("expected preflight to be not-OK when task-storage probe is inconclusive")
+	if !pf.OK {
+		t.Fatalf("an inconclusive task-storage probe must not make the component not-OK; got: %+v", pf)
 	}
-	for _, c := range pf.Checks {
-		if c.Name == "bpf-task-storage-map" {
-			if c.Status != CheckUnknown {
-				t.Errorf("bpf-task-storage-map: got %s, want UNKNOWN", c.Status)
-			}
-			return
+	for _, pa := range pf.PolicyAvailability {
+		if pa.PolicyID == PolicyCredEscal && !pa.Available {
+			t.Errorf("CRED-002 must be assumed available on an inconclusive probe; reason=%q", pa.Reason)
 		}
 	}
-	t.Error("bpf-task-storage-map check not found in results")
 }
 
 func TestPreflight_HasPermanentFail(t *testing.T) {
@@ -472,7 +496,7 @@ func TestPreflight_HasPermanentFail(t *testing.T) {
 	}{
 		{"all pass", []CheckResult{{Name: "kernel-config", Status: CheckPass}, {Name: "btf-available", Status: CheckPass}}, false},
 		{"unknown but no fail", []CheckResult{{Name: "kernel-config", Status: CheckPass}, {Name: "kernel-config", Status: CheckUnknown}}, false},
-		{"permanent kernel fail", []CheckResult{{Name: "bpf-task-storage-map", Status: CheckFail}}, true},
+		{"permanent kernel fail", []CheckResult{{Name: "kernel-config", Status: CheckFail}}, true},
 		{"permanent fail mixed with unknown", []CheckResult{{Name: "kernel-config", Status: CheckUnknown}, {Name: "bpf-lsm-program-type", Status: CheckFail}}, true},
 		// A bpffs-mounted FAIL is recoverable (mount can appear late), so
 		// it must NOT count as permanent — the daemon retries it fast.
@@ -674,9 +698,15 @@ func TestPreflight_DirectCredPolicyUnavailableDoesNotFailComponent(t *testing.T)
 	if len(pf.PolicyAvailability) == 0 {
 		t.Fatal("expected per-policy availability results")
 	}
-	got := pf.PolicyAvailability[0]
-	if got.PolicyID != PolicyDirectCredInstall {
-		t.Fatalf("availability policy = %s, want %s", got.PolicyID, PolicyDirectCredInstall)
+	var got *PolicyAvailability
+	for i := range pf.PolicyAvailability {
+		if pf.PolicyAvailability[i].PolicyID == PolicyDirectCredInstall {
+			got = &pf.PolicyAvailability[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("no PolicyAvailability entry for %s", PolicyDirectCredInstall)
 	}
 	if got.Available {
 		t.Fatal("CFML-CRED-003 should be unavailable when commit_creds is absent from kallsyms")

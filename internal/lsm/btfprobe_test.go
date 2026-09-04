@@ -121,3 +121,114 @@ func TestEmitLoadFailureHint(t *testing.T) {
 		})
 	}
 }
+
+// newTaskStorageTestSpec builds a minimal in-memory spec with the
+// task-storage map and its two users plus one unrelated program, so we
+// can assert selectTaskStorageVariant's surgery without a real kernel.
+func newTaskStorageTestSpec() *ebpf.CollectionSpec {
+	realInsns := asm.Instructions{
+		asm.Mov.Imm(asm.R1, 1),
+		asm.Mov.Imm(asm.R2, 2),
+		asm.Mov.Imm(asm.R0, 0),
+		asm.Return(),
+	}
+	return &ebpf.CollectionSpec{
+		Maps: map[string]*ebpf.MapSpec{
+			cfmlsmMapCfmCredTransitionTasks: {
+				Name:       cfmlsmMapCfmCredTransitionTasks,
+				Type:       ebpf.TaskStorage,
+				Flags:      1, // BPF_F_NO_PREALLOC
+				KeySize:    4,
+				ValueSize:  8,
+				MaxEntries: 0,
+			},
+		},
+		Programs: map[string]*ebpf.ProgramSpec{
+			"cfm_cred002": {Name: "cfm_cred002", Type: ebpf.LSM, Instructions: append(asm.Instructions{}, realInsns...)},
+			"cfm_cred003": {Name: "cfm_cred003", Type: ebpf.Tracing, Instructions: append(asm.Instructions{}, realInsns...)},
+			"cfm_other":   {Name: "cfm_other", Type: ebpf.LSM, Instructions: append(asm.Instructions{}, realInsns...)},
+		},
+	}
+}
+
+func TestSelectTaskStorageVariant_NativeWhenSupported(t *testing.T) {
+	prev := preflightTaskStorageMapProbe
+	preflightTaskStorageMapProbe = func() error { return nil }
+	t.Cleanup(func() { preflightTaskStorageMapProbe = prev })
+
+	spec := newTaskStorageTestSpec()
+	shape, err := selectTaskStorageVariant(spec)
+	if err != nil {
+		t.Fatalf("selectTaskStorageVariant: %v", err)
+	}
+	if shape != "native" {
+		t.Errorf("shape: got %q, want native", shape)
+	}
+	if got := spec.Maps[cfmlsmMapCfmCredTransitionTasks].Type; got != ebpf.TaskStorage {
+		t.Errorf("map type must be untouched when supported; got %v", got)
+	}
+	if got := len(spec.Programs["cfm_cred002"].Instructions); got != 4 {
+		t.Errorf("cfm_cred002 must be untouched when supported; got %d insns", got)
+	}
+	if got := len(spec.Programs["cfm_cred003"].Instructions); got != 4 {
+		t.Errorf("cfm_cred003 must be untouched when supported; got %d insns", got)
+	}
+}
+
+func TestSelectTaskStorageVariant_DowngradesWhenUnsupported(t *testing.T) {
+	prev := preflightTaskStorageMapProbe
+	preflightTaskStorageMapProbe = func() error { return ebpf.ErrNotSupported }
+	t.Cleanup(func() { preflightTaskStorageMapProbe = prev })
+
+	spec := newTaskStorageTestSpec()
+	shape, err := selectTaskStorageVariant(spec)
+	if err != nil {
+		t.Fatalf("selectTaskStorageVariant: %v", err)
+	}
+	if shape != "downgraded" {
+		t.Fatalf("shape: got %q, want downgraded", shape)
+	}
+	// Map must be rewritten to a creatable HASH placeholder.
+	m := spec.Maps[cfmlsmMapCfmCredTransitionTasks]
+	if m.Type != ebpf.Hash {
+		t.Errorf("map type: got %v, want Hash", m.Type)
+	}
+	if m.MaxEntries == 0 || m.KeySize == 0 || m.ValueSize == 0 {
+		t.Errorf("placeholder must have non-zero key/value/max_entries; got key=%d val=%d max=%d", m.KeySize, m.ValueSize, m.MaxEntries)
+	}
+	if m.Flags != 0 {
+		t.Errorf("placeholder flags must be cleared; got %d", m.Flags)
+	}
+	if m.Key != nil || m.Value != nil {
+		t.Error("placeholder BTF key/value must be cleared")
+	}
+	// The two map users must be neutralised to r0=0; exit (2 insns).
+	if got := len(spec.Programs["cfm_cred002"].Instructions); got != 2 {
+		t.Errorf("cfm_cred002 must be neutralised; got %d insns, want 2", got)
+	}
+	if got := len(spec.Programs["cfm_cred003"].Instructions); got != 2 {
+		t.Errorf("cfm_cred003 must be neutralised; got %d insns, want 2", got)
+	}
+	// An unrelated program must be left intact.
+	if got := len(spec.Programs["cfm_other"].Instructions); got != 4 {
+		t.Errorf("cfm_other must be untouched; got %d insns, want 4", got)
+	}
+}
+
+func TestSelectTaskStorageVariant_NativeOnAmbiguousProbeError(t *testing.T) {
+	prev := preflightTaskStorageMapProbe
+	preflightTaskStorageMapProbe = func() error { return errors.New("operation not permitted") }
+	t.Cleanup(func() { preflightTaskStorageMapProbe = prev })
+
+	spec := newTaskStorageTestSpec()
+	shape, err := selectTaskStorageVariant(spec)
+	if err != nil {
+		t.Fatalf("selectTaskStorageVariant: %v", err)
+	}
+	if shape != "native" {
+		t.Errorf("an ambiguous probe error must leave the spec native; got shape %q", shape)
+	}
+	if got := spec.Maps[cfmlsmMapCfmCredTransitionTasks].Type; got != ebpf.TaskStorage {
+		t.Errorf("map must be untouched on ambiguous error; got %v", got)
+	}
+}

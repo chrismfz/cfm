@@ -159,6 +159,14 @@ type Loader struct {
 	// mode.
 	credCapShape string
 
+	// taskStorageShape records whether the task-local storage map loaded
+	// natively or was downgraded. One of "native" (kernel supports
+	// BPF_MAP_TYPE_TASK_STORAGE), "downgraded" (kernel lacks it — the
+	// cfm_cred_transition_tasks map was rewritten to a HASH placeholder
+	// and CFML-CRED-002 / CFML-CRED-003 neutralised + not attached), or
+	// "" in AdoptPinned mode. See selectTaskStorageVariant.
+	taskStorageShape string
+
 	// pinned is true when the loader is in pinned-load or
 	// pinned-adopt mode. Close() then skips link/map detach so the
 	// kernel-side state survives the loader's lifetime.
@@ -301,11 +309,39 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 				ErrBPFLSMUnavailable, nerr)
 		}
 	}
+	// Probe task-local storage support. On kernels that backport BPF LSM
+	// programs but not BPF_MAP_TYPE_TASK_STORAGE (upstream 5.11) — e.g.
+	// CloudLinux 8 lve 4.18 — the shared object embeds one task-storage
+	// map (cfm_cred_transition_tasks) whose creation fails the WHOLE
+	// LoadAndAssign with "map create: invalid argument". This downgrades
+	// that map to a HASH placeholder and neutralises its two users
+	// (cfm_cred002/003) so the remaining policies still load. The
+	// probe/downgrade never errors on an unsupported kernel; a hard error
+	// here means the spec surgery itself failed, which is fatal.
+	shape, terr := selectTaskStorageVariant(spec)
+	if terr != nil {
+		return nil, fmt.Errorf("%w: prepare task-storage variant: %v", ErrBPFLSMUnavailable, terr)
+	}
+	l.taskStorageShape = shape
 	if err := spec.LoadAndAssign(&l.objs, nil); err != nil {
 		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)
 	}
 
 	for _, id := range wanted {
+		// On a task-storage-downgraded load, CFML-CRED-002/003 were
+		// neutralised to no-ops (their map is a HASH placeholder), so
+		// attaching them would hook dead programs. Record them as
+		// unavailable and skip. Belt-and-suspenders: the daemon and CLI
+		// enable paths normally drop them from `wanted` via
+		// PolicyAvailability (which reads the same memoized task-storage
+		// probe this loader used, so the two agree), leaving this guard
+		// to catch a direct NewLoader caller — or the rare case where
+		// preflight saw an inconclusive probe (assumed available) that
+		// later resolved to unsupported.
+		if l.taskStorageShape == "downgraded" && (id == PolicyCredEscal || id == PolicyDirectCredInstall) {
+			l.attach.Failed[id] = errors.New("unavailable: kernel lacks task-local storage maps (BPF_MAP_TYPE_TASK_STORAGE, upstream 5.11); loaded task-storage-free subset")
+			continue
+		}
 		entries := l.programsFor(id)
 		if len(entries) == 0 {
 			// Unknown ID or programs absent from this build. Treat
@@ -1034,6 +1070,13 @@ func (l *Loader) DriftPicks() map[string]string {
 // "probe-failed", or "" (AdoptPinned mode). See loader.go field doc.
 func (l *Loader) CredCapShape() string {
 	return l.credCapShape
+}
+
+// TaskStorageShape returns whether the task-local storage map loaded
+// natively or was downgraded — "native", "downgraded", or ""
+// (AdoptPinned mode). See the loader.go field doc.
+func (l *Loader) TaskStorageShape() string {
+	return l.taskStorageShape
 }
 
 // pickedDriftProgram returns the *ebpf.Program for the variant of a

@@ -278,6 +278,96 @@ func credCapAmbientShape() (string, error) {
 	}
 }
 
+// errMapNotInSpec is returned by downgradeTaskStorageMapSpec when the
+// map it was asked to rewrite is absent from the spec. The selector
+// treats it as non-fatal — there is nothing to downgrade.
+var errMapNotInSpec = errors.New("map not in spec")
+
+// downgradeTaskStorageMapSpec rewrites the cfm_cred_transition_tasks map
+// spec from BPF_MAP_TYPE_TASK_STORAGE to a tiny, universally-creatable
+// BPF_MAP_TYPE_HASH placeholder. Used only on kernels that backport BPF
+// LSM programs but not task-local storage (upstream 5.11) — e.g.
+// CloudLinux 8 lve 4.18. The map is referenced only by cfm_cred002 /
+// cfm_cred003 (via bpf_task_storage_get); those are neutralised in the
+// same pass, so the placeholder is created but never used.
+//
+// Rewriting (rather than deleting) the map is required because the
+// bpf2go-generated cfmlsmObjects struct has a field tagged for this map,
+// and LoadAndAssign fails the whole load if a struct field has no
+// matching spec entry. A 1-entry HASH with cleared BTF creates on every
+// kernel that supports BPF LSM at all.
+func downgradeTaskStorageMapSpec(spec *ebpf.CollectionSpec) error {
+	ms, ok := spec.Maps[cfmlsmMapCfmCredTransitionTasks]
+	if !ok {
+		return errMapNotInSpec
+	}
+	ms.Type = ebpf.Hash
+	ms.Flags = 0
+	ms.KeySize = 4
+	ms.ValueSize = 8
+	ms.MaxEntries = 1
+	// Clear BTF + static contents so the placeholder carries no
+	// task-storage-specific type info the downgraded kernel might reject.
+	ms.Key = nil
+	ms.Value = nil
+	ms.Contents = nil
+	return nil
+}
+
+// selectTaskStorageVariant makes the shared BPF object loadable on
+// kernels without task-local storage maps. When the map-type probe
+// reports BPF_MAP_TYPE_TASK_STORAGE unsupported, it neutralises the two
+// programs that use the map (cfm_cred002 / cfm_cred003 → CFML-CRED-002 /
+// CFML-CRED-003) and downgrades the map spec to a HASH placeholder, so
+// LoadAndAssign succeeds and the remaining policies attach instead of
+// the whole object failing with "map create: invalid argument".
+//
+// Returns the shape for logging/diagnostics:
+//   - "native"     → task-storage supported; spec untouched.
+//   - "downgraded" → map + its two programs neutralised.
+//
+// Only a definitive ErrNotSupported triggers the downgrade. Any other
+// probe error (EPERM without caps, a transient failure) leaves the spec
+// native: the load then fails cleanly and preflight/caps surface the
+// real reason, rather than silently dropping two policies on an
+// ambiguous signal.
+//
+// The probe (features.HaveMapType) is memoized process-wide by
+// cilium/ebpf, so the preflight per-policy probes and this loader probe
+// share one syscall result and cannot disagree on a definitive answer.
+//
+// Scope note: this downgrade only addresses the task-storage MAP. The
+// object also embeds two fentry/commit_creds programs (cfm_cred003 —
+// neutralised here — and cfm_cred004), which LoadAndAssign still loads
+// eagerly; a kernel that supports BPF-LSM but not BPF trampolines
+// (fentry) would still fail the whole load. That is not a regression
+// (such a host previously stayed dormant and now falls back to the same
+// dormant + backoff state), and the target kernels — RHEL 8-based
+// CloudLinux 8 lve, where the specific gap is task-storage (5.11), not
+// fentry (5.5, backported to EL8) — are expected to load the fentry
+// programs. If a kernel lacking both surfaces, dropping the fentry
+// programs from the load is a separate follow-up.
+func selectTaskStorageVariant(spec *ebpf.CollectionSpec) (string, error) {
+	err := preflightTaskStorageMapProbe()
+	if err == nil {
+		return "native", nil
+	}
+	if !errors.Is(err, ebpf.ErrNotSupported) {
+		return "native", nil
+	}
+	for _, name := range []string{"cfm_cred002", "cfm_cred003"} {
+		if nerr := neutraliseProgramSpec(spec, name); nerr != nil &&
+			!errors.Is(nerr, errProgramNotInSpec) {
+			return "", fmt.Errorf("neutralise %s for task-storage downgrade: %w", name, nerr)
+		}
+	}
+	if derr := downgradeTaskStorageMapSpec(spec); derr != nil &&
+		!errors.Is(derr, errMapNotInSpec) {
+		return "", fmt.Errorf("downgrade task-storage map: %w", derr)
+	}
+	return "downgraded", nil
+}
+
 // selectCredCapVariant neutralises cfm_cred004 if the kernel exposes
 // neither the modern nor the legacy cap_ambient layout. The BPF
 // program already handles both known shapes at load time via
