@@ -29,9 +29,8 @@ func TestWhatsWrong_ECCWireContract(t *testing.T) {
 	}
 	fs := evalHardware(body)
 	c := findBy(fs, "hardware", sevCritical)
-	w := findBy(fs, "hardware", sevWarning)
-	if c == nil || w == nil {
-		t.Fatalf("wire contract broken: crit=%v warn=%v from %s", c, w, body)
+	if c == nil {
+		t.Fatalf("wire contract broken: no critical from %s", body)
 	}
 	if !strings.Contains(c.Detail, "2 uncorrected") || !strings.Contains(c.Detail, "mc#0ch#1") {
 		t.Errorf("critical detail from real snapshot wrong: %q", c.Detail)
@@ -71,8 +70,10 @@ func TestWhatsWrong_ECCUncorrectedCritical(t *testing.T) {
 	if !strings.Contains(c.Detail, "1 uncorrected") || !strings.Contains(c.Detail, "mc#0channel#1slot#0") {
 		t.Errorf("critical detail wrong: %q", c.Detail)
 	}
-	if findBy(fs, "hardware", sevWarning) == nil {
-		t.Errorf("corrected warning should also fire: %+v", fs)
+	// The critical subsumes the corrected warning — no redundant warning on the
+	// same box (it already says "replace the module").
+	if findBy(fs, "hardware", sevWarning) != nil {
+		t.Errorf("corrected warning should be suppressed when a critical fires: %+v", fs)
 	}
 }
 
@@ -112,8 +113,8 @@ func TestWhatsWrong_ECCRankingEndToEnd(t *testing.T) {
 	if got.Status != "issues" {
 		t.Fatalf("status=%q want issues", got.Status)
 	}
-	if len(got.Findings) < 2 || got.Findings[0].Severity != sevCritical || got.Findings[0].Category != "hardware" {
-		t.Fatalf("critical hardware should rank first: %+v", got.Findings)
+	if len(got.Findings) != 1 || got.Findings[0].Severity != sevCritical || got.Findings[0].Category != "hardware" {
+		t.Fatalf("expected exactly one critical hardware finding (corrected subsumed): %+v", got.Findings)
 	}
 	if got.Sources["health"] != "ok" {
 		t.Errorf("health source=%q", got.Sources["health"])

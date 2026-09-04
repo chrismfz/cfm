@@ -35,13 +35,13 @@ const (
 // (neither EDAC sysfs nor the kernel-ring fallback) — reported honestly rather
 // than as "healthy".
 type ECCReport struct {
-	Present          bool           `json:"present"`
-	Source           string         `json:"source,omitempty"` // "edac_sysfs" | "kernel_ring"
-	CorrectedTotal   uint64         `json:"corrected_total"`
-	UncorrectedTotal uint64         `json:"uncorrected_total"`
+	Present          bool            `json:"present"`
+	Source           string          `json:"source,omitempty"` // "edac_sysfs" | "kernel_ring"
+	CorrectedTotal   uint64          `json:"corrected_total"`
+	UncorrectedTotal uint64          `json:"uncorrected_total"`
 	Controllers      []ECCController `json:"controllers,omitempty"`
-	DIMMs            []ECCDimm      `json:"dimms,omitempty"` // only DIMMs with non-zero counts
-	Note             string         `json:"note,omitempty"`
+	DIMMs            []ECCDimm       `json:"dimms,omitempty"` // only DIMMs with non-zero counts
+	Note             string          `json:"note,omitempty"`
 }
 
 // ECCController is one memory controller's cumulative counters.
@@ -156,32 +156,40 @@ func readEDACDimms(mcPath, mcName string, alreadyHave int) []ECCDimm {
 	return out
 }
 
-// parseECCFromKmsg counts corrected MEMORY ECC events in kernel-ring lines, as a
-// best-effort fallback for boxes with no EDAC sysfs. It keys ONLY on the AMD
-// mce_amd decoder's memory-specific "DRAM ECC error" line — exactly one per
-// memory machine-check — deliberately NOT on:
+// parseECCFromKmsg counts MEMORY ECC events in kernel-ring lines, as a
+// best-effort fallback for boxes with no EDAC sysfs. It keys on the memory-
+// specific "DRAM ECC error" marker (one line per memory machine-check — on AMD
+// this is the "Unified Memory Controller … DRAM ECC error." line), deliberately
+// NOT on:
 //   - the generic "Corrected error, no action required." summary the decoder
 //     also emits for cache/bus/other banks (would misattribute a non-memory MCE
 //     as memory), nor
 //   - a bare "uncorrect" substring, which also appears on PCIe AER / GHES events
 //     (would raise a false "imminent DIMM failure" critical for a non-memory
-//     fault), nor
-//   - the co-printed "Unified Memory Controller …" line (would double-count).
+//     fault).
 //
-// Uncorrected memory errors are intentionally not inferred from the ring: they
-// usually panic (so they aren't sitting in the ring on a later triage) and are
-// reported authoritatively by EDAC sysfs when it is present. The ring fallback
-// therefore biases to the SAFE direction — a real memory error shows at worst as
-// a corrected (warning), never a false uncorrected (critical) for a non-memory
-// machine-check. Returns uncorrected=0 by construction.
+// A DRAM line that ALSO carries an uncorrected marker on the same line counts as
+// uncorrected; otherwise it counts as corrected. This is memory-scoped either
+// way (the "dram ecc" marker gates both), so a PCIe/cache uncorrected event is
+// never mistaken for a DIMM failure. AMD often prints the severity on a SEPARATE
+// line from the "DRAM ECC error." line, in which case the ring can't attribute
+// it and the event falls to corrected — a deliberate SAFE bias (an uncorrected
+// memory error that lingers in the ring is better shown as a warning than a real
+// PCIe fault shown as a false critical); EDAC sysfs, when present, reports
+// uncorrected authoritatively and takes precedence over this fallback.
 func parseECCFromKmsg(lines []string) (corrected, uncorrected uint64) {
 	for _, ln := range lines {
 		low := strings.ToLower(ln)
-		if strings.Contains(low, "hardware error") && strings.Contains(low, "dram ecc") {
-			corrected++
+		if !strings.Contains(low, "hardware error") || !strings.Contains(low, "dram ecc") {
+			continue
 		}
+		if strings.Contains(low, "uncorrect") { // memory-scoped: "dram ecc" already required
+			uncorrected++
+			continue
+		}
+		corrected++
 	}
-	return corrected, 0
+	return corrected, uncorrected
 }
 
 func isMCDir(name string) bool {

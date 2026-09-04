@@ -46,6 +46,39 @@ func TestDetectorECCDeltaPublish(t *testing.T) {
 	}
 }
 
+// When a cycle grows BOTH corrected and uncorrected, only the critical
+// (uncorrected) alert fires — the corrected alert is subsumed — while the durable
+// event records the cycle as uncorrected and still carries both deltas.
+func TestDetectorECCCombinedCycleAlertsExclusive(t *testing.T) {
+	var last ECCEvent
+	var n int
+	SetECCEventSink(func(ev ECCEvent) { last = ev; n++ })
+	defer SetECCEventSink(nil)
+
+	d := New(Config{ECCAlert: true, Cooldown: time.Millisecond})
+	base := time.Now()
+	d.evaluate(Snapshot{Time: base, Host: "h", ECC: ECCReport{Present: true, CorrectedTotal: 1}})
+	alerts := d.evaluate(Snapshot{Time: base.Add(time.Second), Host: "h",
+		ECC: ECCReport{Present: true, CorrectedTotal: 3, UncorrectedTotal: 1}})
+
+	var ce, ue int
+	for _, a := range alerts {
+		switch string(a.Kind) {
+		case "HEALTH/ECC_CORRECTED":
+			ce++
+		case "HEALTH/ECC_UNCORRECTED":
+			ue++
+		}
+	}
+	if ue != 1 || ce != 0 {
+		t.Fatalf("combined-growth cycle must emit only the uncorrected alert: ue=%d ce=%d", ue, ce)
+	}
+	if last.Kind != "uncorrected" || last.DeltaCorrected != 2 || last.DeltaUncorrected != 1 {
+		t.Fatalf("event should record uncorrected with both deltas: %+v", last)
+	}
+	_ = n
+}
+
 // A clean box (ECC present, zero counts) never seeds a baseline event.
 func TestDetectorECCNoBaselineWhenClean(t *testing.T) {
 	var n int
@@ -199,17 +232,20 @@ func TestParseECCFromKmsg(t *testing.T) {
 		"[Fri Sep  4 16:23:08 2026] [Hardware Error]: Unified Memory Controller Ext. Error Code: 0, DRAM ECC error.",
 		"some unrelated kernel line",
 		// A NON-memory machine-check (cache) and a PCIe AER event must NOT be
-		// counted as memory ECC — this is the false-attribution guard.
+		// counted as memory ECC — this is the false-attribution guard: both carry
+		// "corrected"/"uncorrect" but neither carries the "dram ecc" marker.
 		"[Hardware Error]: Corrected error, no action required.",
 		"[Hardware Error]: cache level: L2, tx: DATA, mem-tx: EV",
 		"[Hardware Error]: Uncorrected, software restartable error. (PCIe Bus Error)",
+		// An inline uncorrected DRAM line IS memory-scoped → counts as uncorrected.
+		"[Hardware Error]: Uncorrectable DRAM ECC error on memory read",
 	}
 	ce, ue := parseECCFromKmsg(lines)
 	if ce != 2 {
-		t.Errorf("corrected = %d, want 2 (only DRAM ECC lines)", ce)
+		t.Errorf("corrected = %d, want 2 (DRAM ECC lines without an uncorrected marker)", ce)
 	}
-	if ue != 0 {
-		t.Errorf("uncorrected = %d, want 0 (ring fallback biases corrected; EDAC owns UE)", ue)
+	if ue != 1 {
+		t.Errorf("uncorrected = %d, want 1 (inline uncorrected DRAM line; PCIe uncorrected excluded)", ue)
 	}
 }
 

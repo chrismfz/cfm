@@ -446,7 +446,7 @@ func (d *Detector) snapshot() Snapshot {
 		"ram_used_pct": s.RamUsedPct, "disk_root_pct": s.DiskRootPct, "disk_tmp_pct": s.DiskTmpPct,
 		"disk_stats": s.DiskStats,
 		"tcp":        s.TCP,
-		"rx_mbps": s.RxMbps, "tx_mbps": s.TxMbps,
+		"rx_mbps":    s.RxMbps, "tx_mbps": s.TxMbps,
 		"temp_max_c": s.TempMaxC, "mdadm": s.Mdadm, "zfs": s.Zfs, "smart": s.Smart, "ecc": s.ECC,
 	}
 	if b, _ := json.MarshalIndent(body, "", "  "); b != nil {
@@ -1570,11 +1570,13 @@ func (d *Detector) evaluate(s Snapshot) []core.Alert {
 			if wd := worstECCDimm(s.ECC); wd != "" {
 				extra["ecc_worst_dimm"] = wd
 			}
+			// A new uncorrected error subsumes a same-cycle corrected bump: emit the
+			// critical alert only, not both (the critical already says "replace it").
 			if d.cfg.ECCAlert {
-				if du > 0 {
+				switch {
+				case du > 0:
 					emitExtra("HEALTH/ECC_UNCORRECTED", "hw.ecc.ue", extra)
-				}
-				if dc > 0 {
+				case dc > 0:
 					emitExtra("HEALTH/ECC_CORRECTED", "hw.ecc.ce", extra)
 				}
 			}

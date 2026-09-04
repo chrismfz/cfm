@@ -198,7 +198,7 @@ type ECCHealth struct {
 	Source           string          `json:"source,omitempty"` // "edac_sysfs" | "kernel_ring"
 	CorrectedTotal   uint64          `json:"corrected_total"`
 	UncorrectedTotal uint64          `json:"uncorrected_total"`
-	Controllers      []ECCController  `json:"controllers,omitempty"`
+	Controllers      []ECCController `json:"controllers,omitempty"`
 	DIMMs            []ECCDimm       `json:"dimms,omitempty"`
 	Note             string          `json:"note,omitempty"`
 }
@@ -234,20 +234,20 @@ type CFMMetrics struct {
 }
 
 type NetworkThroughput struct {
-	BandwidthInBytesPerSec  uint64  `json:"bandwidth_in_bps"`
-	BandwidthOutBytesPerSec uint64  `json:"bandwidth_out_bps"`
-	ConntrackCount          int     `json:"conntrack_count,omitempty"`
-	ConntrackMax            int     `json:"conntrack_max,omitempty"`
-	ConntrackUsagePct       float64 `json:"conntrack_usage_pct,omitempty"`
+	BandwidthInBytesPerSec  uint64          `json:"bandwidth_in_bps"`
+	BandwidthOutBytesPerSec uint64          `json:"bandwidth_out_bps"`
+	ConntrackCount          int             `json:"conntrack_count,omitempty"`
+	ConntrackMax            int             `json:"conntrack_max,omitempty"`
+	ConntrackUsagePct       float64         `json:"conntrack_usage_pct,omitempty"`
 	NICs                    []NICThroughput `json:"nics,omitempty"`
 }
 
 // NICThroughput is per-interface throughput (loopback excluded),
 // busiest first, capped at the collector; delta-based like bandwidth.
 type NICThroughput struct {
-	Name   string `json:"name"`
-	RxBps  uint64 `json:"rx_bps"`
-	TxBps  uint64 `json:"tx_bps"`
+	Name  string `json:"name"`
+	RxBps uint64 `json:"rx_bps"`
+	TxBps uint64 `json:"tx_bps"`
 }
 
 type CounterSnapshot struct {

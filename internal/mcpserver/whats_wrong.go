@@ -502,6 +502,9 @@ func evalHardware(body json.RawMessage) []finding {
 		fs = append(fs, finding{sevCritical, "hardware", "uncorrected memory errors (ECC)",
 			fmt.Sprintf("%d uncorrected ECC error(s) since boot%s — data-integrity risk / imminent DIMM failure; replace the affected module%s",
 				ecc.UncorrectedTotal, eccDimmSuffix(eccWorstDimm(ecc.DIMMs, true)), src), "dmesg_tail", drill()})
+		// The critical already tells the operator to replace the module; the
+		// corrected warning would be redundant noise on the same box, so suppress it.
+		return fs
 	}
 	if ecc.CorrectedTotal >= wwECCCorrectedWarn {
 		fs = append(fs, finding{sevWarning, "hardware", "corrected memory errors (ECC)",
