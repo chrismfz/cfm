@@ -60,7 +60,7 @@ CGO_ENABLED ?= 0
 # -------------------------------
 # Phony targets
 # -------------------------------
-.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua test-lua verify-bpf-bindings
+.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua test-lua test-js verify-bpf-bindings
 
 # -------------------------------
 # Help
@@ -98,6 +98,14 @@ lua: ## Syntax-check production Lua configs under configs/lua/
 	@echo "✅ Lua syntax checks passed."
 
 LUA_TESTS := $(wildcard scripts/tests/*_test.lua)
+
+JS_TESTS := $(shell find internal/webui/static/assets -type f \( -name '*.test.js' -o -name '*.test.cjs' \) 2>/dev/null | sort)
+
+test-js: ## Run cfm-admin JS unit tests (internal/webui/static/assets/**/*.test.{js,cjs}) with node --test
+	@command -v node >/dev/null 2>&1 || { echo "❌ node is required for 'make test-js' but was not found in PATH."; exit 1; }
+	@[ -n "$(JS_TESTS)" ] || { echo "❌ No JS tests found under internal/webui/static/assets/"; exit 1; }
+	@echo "→ Running JS tests (node --test, $(words $(JS_TESTS)) files):"
+	@node --test $(JS_TESTS)
 
 test-lua: ## Run Lua unit tests under scripts/tests/*_test.lua
 	@command -v luajit >/dev/null 2>&1 || { echo "❌ luajit is required for 'make test-lua' but was not found in PATH."; exit 1; }

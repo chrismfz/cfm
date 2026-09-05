@@ -22,89 +22,219 @@
 
     <main class="layout">
       <section class="card wide">
-        <h2>Traffic Rules (Cloudflare-style)</h2>
+        <h2>Traffic Rules</h2>
         <p class="muted">
-          Build per-vhost rules for <code>allow</code>, <code>block</code>, <code>challenge</code>, and <code>throttle</code>.
-          Start with disabled rules or presets, then test with simulation before enabling.
+          Per-vhost rules that <code>allow</code>, <code>block</code>, <code>challenge</code> or <code>throttle</code> requests at the edge.
+          Rules are checked in <strong>priority order (lowest number first) and the first match wins</strong>; a rule with no conditions matches every request.
           Per-vhost protection toggles live on the <a href="/cfm-admin/webdetector/controls/">Vhost controls</a> page.
         </p>
+        <div class="callout-row">
+          <div class="callout warn">
+            <strong>“Allow” is not an exemption.</strong> It only stops the rules below it from being evaluated. It does <em>not</em> bypass the WAF, a vhost-wide challenge or an IP block.
+            To keep the challenge or WAF off an API / webhook path, use <a href="/cfm-admin/webdetector/waf/">Challenge / WAF excludes</a>.
+          </div>
+          <div class="callout">
+            <strong>Cleared browsers skip the rules.</strong> A client holding a valid clearance cookie for the vhost goes straight to the origin until it expires — so testing with your own browser after solving a challenge shows nothing.
+          </div>
+          <div class="callout">
+            <strong>In-path edge only.</strong> Rules are enforced by the OpenResty / Angie edge. On a server in DNAT mode they are stored but never applied.
+          </div>
+        </div>
       </section>
 
       <section class="card wide" v-if="shouldShow('rules')">
-        <h2>Rules</h2>
         <datalist id="cfm-vhost-list"><option v-for="h in knownVhosts" :key="h" :value="h"></option></datalist>
 
-        <div class="toolbar">
+        <div class="toolbar wrap">
+          <button :class="editorMode === 'editor' ? '' : 'btn-quiet'" @click="setEditorMode('editor')">{{ ruleEditID ? 'Edit rule' : 'New rule' }}</button>
+          <button :class="editorMode === 'recipes' ? '' : 'btn-quiet'" @click="setEditorMode('recipes')">Recipes</button>
+          <span class="toolbar-gap"></span>
+          <label for="rules-vhost-filter">Vhost</label>
+          <select id="rules-vhost-filter" class="input" v-model="rulesVhostFilter" title="Show only rules scoped to this vhost">
+            <option value="">all vhosts</option>
+            <option v-for="h in ruleVhostOptions" :key="h" :value="h">{{ h }}</option>
+          </select>
           <label for="rules-search">Search</label>
-          <input id="rules-search" class="input input-wide" type="text" v-model.trim="rulesSearch" placeholder="Filter by id / vhost / action / note" />
+          <input id="rules-search" class="input input-wide" type="text" v-model.trim="rulesSearch" placeholder="id / vhost / action / note / recipe:name" />
           <span class="muted">{{ rulesFiltered.length }} / {{ rules.length }} shown</span>
-        </div>
-
-        <div class="toolbar">
-          <span class="muted">Quick presets:</span>
-          <button class="btn-quiet btn-sm" v-for="p in presets" :key="p.key" @click="applyPreset(p.key)" :title="p.hint">{{ p.label }}</button>
         </div>
 
         <p class="statusline" v-if="actionMsg">{{ actionMsg }}</p>
 
-        <div class="exclude-grid">
-          <section class="mini-card">
-            <h3>{{ ruleEditID ? 'Edit rule ' + ruleEditID : 'Create rule' }}</h3>
-            <div class="form-grid">
-              <div class="form-section-title">Scope</div>
-              <label for="rule-vhosts">Vhosts</label>
-              <input id="rule-vhosts" class="input" type="text" v-model.trim="ruleForm.vhosts" placeholder="example.com, *.example.com" />
+        <!-- ── Recipes ─────────────────────────────────────────────────── -->
+        <div v-if="editorMode === 'recipes'" class="recipes-pane">
+          <p class="muted">A recipe creates a small set of rules whose <em>relative priorities</em> make the composition correct — the thing that is easy to get wrong by hand. Enforcing rules are created disabled; test, then enable them from the table.</p>
+          <div class="recipe-grid">
+            <button v-for="r in recipes" :key="r.key" class="recipe-card" :class="{ selected: recipeKey === r.key, link: r.kind === 'link' }" @click="selectRecipe(r.key)">
+              <span class="recipe-title">{{ r.title }}</span>
+              <span class="recipe-desc muted">{{ r.description }}</span>
+              <span class="recipe-kind pill" v-if="r.kind === 'multi'">multi-rule</span>
+              <span class="recipe-kind pill" v-else-if="r.kind === 'single'">single rule</span>
+              <span class="recipe-kind pill info" v-else>not a rule</span>
+            </button>
+          </div>
 
-              <div class="form-section-title">Match — empty fields match everything</div>
-              <label for="rule-countries">Countries</label>
-              <input id="rule-countries" class="input" type="text" v-model.trim="ruleForm.countries" placeholder="US, CA" />
-              <label for="rule-methods">Methods</label>
-              <input id="rule-methods" class="input" type="text" v-model.trim="ruleForm.methods" placeholder="GET, POST" />
-              <label for="rule-uas">UA patterns</label>
-              <input id="rule-uas" class="input" type="text" v-model.trim="ruleForm.uas" placeholder="*facebookexternalhit*, *meta-externalagent*" />
-              <label for="rule-paths">Path patterns</label>
-              <input id="rule-paths" class="input" type="text" v-model.trim="ruleForm.paths" placeholder="/wp-login.php, /forum/ucp.php?mode=register" />
-              <p class="muted form-hint">Prefix / <code>*</code>-glob match. A <code>?query</code> suffix matches per query parameter (each <code>key=value</code> must be present; a bare <code>key</code> matches any value), e.g. <code>/forum/ucp.php?mode=register</code>.</p>
-              <label for="rule-hasqs">Query string</label>
-              <label class="muted form-check"><input id="rule-hasqs" type="checkbox" v-model="ruleForm.hasQS" /> only match requests that HAVE a query string</label>
-              <label for="rule-qsnotrx" title="Requests whose query string matches this regex are NOT matched by the rule.">QS pass-through</label>
-              <input id="rule-qsnotrx" class="input" type="text" v-model.trim="ruleForm.qsNotRx"
-                placeholder="(?:fbclid|export|xml)(?:=|[&amp;;]|$)" :disabled="!ruleForm.hasQS" />
+          <section class="mini-card recipe-detail" v-if="selectedRecipe">
+            <h3>{{ selectedRecipe.title }}</h3>
+            <p class="muted">{{ selectedRecipe.description }}</p>
 
-              <div class="form-section-title">Action</div>
-              <label for="rule-action">Action</label>
-              <select id="rule-action" class="input" v-model="ruleForm.actionType" title="Action when rule matches.">
-                <option value="allow">allow</option>
-                <option value="block">block</option>
-                <option value="challenge">challenge</option>
-                <option value="throttle">throttle</option>
-              </select>
-              <template v-if="ruleForm.actionType === 'throttle'">
-                <label for="rule-profile">Throttle profile</label>
-                <input id="rule-profile" class="input" type="text" v-model.trim="ruleForm.throttleProfile" placeholder="soft_bot / medium_bot / hard_bot" />
-              </template>
-              <label for="rule-priority" title="Lower number runs first.">Priority</label>
-              <input id="rule-priority" class="input input-small" type="number" min="1" max="100000" step="1" v-model.number="ruleForm.priority" />
-              <label for="rule-enabled">Enabled</label>
-              <label class="muted form-check"><input id="rule-enabled" type="checkbox" v-model="ruleForm.enabled" /> rule is active immediately after save</label>
+            <template v-if="selectedRecipe.kind === 'link'">
+              <a class="btn-link" :href="selectedRecipe.href">{{ selectedRecipe.linkLabel }}</a>
+            </template>
 
-              <label for="rule-note">Note</label>
-              <input id="rule-note" class="input" type="text" v-model.trim="ruleForm.note" placeholder="Short rule description" />
+            <template v-else>
+              <div class="form-grid">
+                <template v-for="v in selectedRecipe.vars" :key="v.key">
+                  <label :for="'recipe-var-' + v.key">{{ v.label }}</label>
+                  <select v-if="v.type === 'select'" :id="'recipe-var-' + v.key" class="input" v-model="recipeVars[v.key]">
+                    <option v-for="o in v.options" :key="o" :value="o">{{ o }}</option>
+                  </select>
+                  <input v-else :id="'recipe-var-' + v.key" class="input" type="text" v-model.trim="recipeVars[v.key]"
+                    :placeholder="v.placeholder || v.default || ''" :list="v.type === 'vhosts' ? 'cfm-vhost-list' : null" />
+                </template>
+              </div>
+              <ul class="msg-list errors" v-if="recipeVarErrors.length"><li v-for="e in recipeVarErrors" :key="e">{{ e }}</li></ul>
+
+              <div class="table-wrap" v-if="recipePreview.length">
+                <table class="mini-table">
+                  <thead><tr><th>#</th><th>Prio</th><th>On</th><th>Action</th><th>What it does</th><th>Note</th></tr></thead>
+                  <tbody>
+                    <tr v-for="(p, i) in recipePreview" :key="i">
+                      <td>{{ i + 1 }}</td>
+                      <td>{{ p.priority }}</td>
+                      <td><span class="pill" :class="p.enabled ? 'ok' : 'warn'">{{ p.enabled ? 'on' : 'off' }}</span></td>
+                      <td><span class="pill" :class="actionTone(p.action.type)">{{ p.action.type }}</span><span class="muted" v-if="p.action.profile"> {{ p.action.profile }}</span></td>
+                      <td>{{ recipeRuleSentence(p) }}</td>
+                      <td class="muted">{{ recipeRuleNote(p) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <ul class="msg-list errors" v-if="recipePreviewWarnings.length"><li v-for="w in recipePreviewWarnings" :key="w">{{ w }}</li></ul>
+              <ul class="msg-list warnings" v-if="selectedRecipe.warnings && selectedRecipe.warnings.length">
+                <li v-for="w in selectedRecipe.warnings" :key="w">{{ w }}</li>
+              </ul>
+              <div class="toolbar">
+                <button v-if="selectedRecipe.kind === 'multi'" :disabled="rulesBusy || !recipePreview.length" @click="createRecipeRules">Create {{ recipePreview.length }} rule(s)</button>
+                <button v-else :disabled="!recipePreview.length" @click="loadRecipeIntoEditor">Load into editor</button>
+              </div>
+            </template>
+          </section>
+        </div>
+
+        <!-- ── Editor + simulator ───────────────────────────────────────── -->
+        <div class="exclude-grid" v-else>
+          <section class="mini-card rule-editor">
+            <h3>{{ ruleEditID ? 'Edit rule ' + ruleEditID : 'Create a rule' }}</h3>
+
+            <!-- Step 1 -->
+            <div class="step-title">1 · What should happen?</div>
+            <div class="action-cards">
+              <button v-for="a in ruleActions" :key="a.key" class="action-card" :class="[a.tone, { selected: ruleForm.actionType === a.key }]" @click="setAction(a.key)" type="button">
+                <span class="action-label">{{ a.label }}</span>
+                <span class="action-summary">{{ a.summary }}</span>
+              </button>
             </div>
+            <p class="callout compact warn" v-if="chosenAction && chosenAction.caveat">{{ chosenAction.caveat }}</p>
+            <div class="form-grid" v-if="ruleForm.actionType === 'throttle'">
+              <label for="rule-profile">Profile</label>
+              <select id="rule-profile" class="input" v-model="ruleForm.throttleProfile">
+                <option v-for="p in throttleProfiles" :key="p.key" :value="p.key">{{ p.label }}</option>
+              </select>
+              <p class="muted form-hint">Per client IP, per vhost. Requests over the limit get <code>429</code> with <code>Retry-After</code>.</p>
+            </div>
+
+            <!-- Step 2 -->
+            <div class="step-title">2 · Which requests?</div>
+            <div class="chip-row">
+              <span class="muted">Add a condition:</span>
+              <button type="button" class="chip" :class="{ on: ruleChips.paths }" @click="toggleChip('paths')">Endpoint / path</button>
+              <button type="button" class="chip" :class="{ on: ruleChips.uas }" @click="toggleChip('uas')">User-Agent / bot</button>
+              <button type="button" class="chip" :class="{ on: ruleChips.countries }" @click="toggleChip('countries')">Country</button>
+              <button type="button" class="chip" :class="{ on: ruleChips.methods }" @click="toggleChip('methods')">Method</button>
+              <button type="button" class="chip" :class="{ on: ruleChips.qs }" @click="toggleChip('qs')">Query string</button>
+            </div>
+            <p class="callout compact" :class="ruleForm.actionType && ruleForm.actionType !== 'allow' ? 'danger' : ''" v-if="ruleHasNoMatch && ruleForm.actionType">
+              No conditions yet — this rule matches <strong>every request</strong> on the selected vhosts. Conditions are combined with AND; values inside one condition with OR.
+            </p>
+
+            <div class="form-grid">
+              <template v-if="ruleChips.paths">
+                <label for="rule-paths">Paths</label>
+                <input id="rule-paths" class="input" type="text" v-model.trim="ruleForm.paths" placeholder="/wp-login.php, /api/*, /forum/ucp.php?mode=register" />
+                <p class="muted form-hint">Comma-separated. A plain value is a <strong>prefix</strong> (<code>/wp-admin/</code> matches everything below it); use <code>*</code> for globs. A <code>?key=value</code> suffix matches per query parameter (a bare <code>?key</code> matches any value).</p>
+              </template>
+
+              <template v-if="ruleChips.uas">
+                <label for="rule-uas">User-Agent</label>
+                <input id="rule-uas" class="input" type="text" v-model.trim="ruleForm.uas" placeholder="*Googlebot*, *python-requests*, -" />
+                <p class="muted form-hint">
+                  Case-insensitive; a value without <code>*</code> is a substring match; a lone <code>-</code> matches only requests that send <em>no</em> User-Agent header. Quick add:
+                  <button type="button" class="chip mini" v-for="g in botGroups" :key="g.key" @click="addBotGroup(g.key)" :title="g.hint">+ {{ g.label }}</button>
+                </p>
+              </template>
+
+              <template v-if="ruleChips.countries">
+                <label for="rule-countries">Countries</label>
+                <input id="rule-countries" class="input" type="text" v-model.trim="ruleForm.countries" placeholder="GR, CY" />
+                <p class="muted form-hint">ISO 3166-1 alpha-2 codes, comma-separated. There is no “not in” yet — for “everyone except …” use the <em>Allow only these countries</em> recipe (allow first, block everything after).</p>
+              </template>
+
+              <template v-if="ruleChips.methods">
+                <label>Methods</label>
+                <div class="chip-row">
+                  <button type="button" class="chip mini" v-for="m in knownMethods" :key="m" :class="{ on: methodOn(m) }" @click="toggleMethod(m)">{{ m }}</button>
+                </div>
+              </template>
+
+              <template v-if="ruleChips.qs">
+                <label for="rule-hasqs">Query string</label>
+                <label class="muted form-check"><input id="rule-hasqs" type="checkbox" v-model="ruleForm.hasQS" /> only requests that HAVE a query string</label>
+                <label for="rule-qsnotrx" title="Requests whose query string matches this regex are NOT matched by the rule.">Pass-through</label>
+                <input id="rule-qsnotrx" class="input" type="text" v-model.trim="ruleForm.qsNotRx" placeholder="(?:fbclid|export|xml)(?:=|[&amp;;]|$)" />
+                <p class="muted form-hint">Regular expression; a request whose query string matches it does <em>not</em> match this rule (e.g. let <code>fbclid</code> links through while blocking other query-string loops). Applies whenever a query string is present, with or without the checkbox above.</p>
+              </template>
+            </div>
+
+            <!-- Step 3 -->
+            <div class="step-title">3 · Where?</div>
+            <div class="form-grid">
+              <label for="rule-vhosts">Vhosts</label>
+              <input id="rule-vhosts" class="input" type="text" v-model.trim="ruleForm.vhosts" placeholder="example.com, *.example.com" list="cfm-vhost-list" />
+              <label for="rule-priority" title="Lower number runs first.">Priority</label>
+              <div class="inline-field">
+                <input id="rule-priority" class="input input-small" type="number" min="1" max="100000" step="1" v-model.number="ruleForm.priority" @input="onPriorityInput" />
+                <span class="muted">{{ priorityAuto && !ruleEditID ? 'suggested from the action band; ' : '' }}{{ rulePositionText }}</span>
+              </div>
+              <label for="rule-enabled">Enabled</label>
+              <label class="muted form-check"><input id="rule-enabled" type="checkbox" v-model="ruleForm.enabled" /> enforce immediately after save <span v-if="!ruleForm.enabled">(off: saved, visible to the simulator as “would match”, not enforced)</span></label>
+              <label for="rule-note">Note</label>
+              <input id="rule-note" class="input" type="text" v-model.trim="ruleForm.note" placeholder="Why this rule exists" />
+            </div>
+
+            <!-- Review -->
+            <div class="review-box" v-if="ruleForm.actionType">
+              <div class="rule-sentence"><span class="pill" :class="actionTone(ruleForm.actionType)">{{ ruleForm.actionType }}</span> {{ ruleSentence }}</div>
+              <ul class="msg-list errors" v-if="ruleValidation.errors.length"><li v-for="e in ruleValidation.errors" :key="e">{{ e }}</li></ul>
+              <ul class="msg-list warnings" v-if="ruleValidation.warnings.length"><li v-for="w in ruleValidation.warnings" :key="w">{{ w }}</li></ul>
+              <ul class="msg-list hints" v-if="ruleValidation.hints.length"><li v-for="h in ruleValidation.hints" :key="h">{{ h }}</li></ul>
+            </div>
+
             <div class="toolbar">
-              <button @click="saveRule">{{ ruleEditID ? 'Update rule' : 'Add rule' }}</button>
+              <button :disabled="!canSaveRule" @click="saveRule">{{ ruleEditID ? 'Update rule' : (ruleForm.enabled ? 'Save & enable' : 'Save disabled') }}</button>
+              <button class="btn-quiet" :disabled="!ruleForm.actionType" @click="prefillSimulatorFromDraft" title="Fill the simulator with a request this rule should match and run it">Test in simulator</button>
               <button class="btn-quiet" @click="resetRuleForm">Clear</button>
             </div>
           </section>
 
           <section class="mini-card">
-            <h3>Rule simulation</h3>
-            <p class="muted">Test a request shape against the rule set before enforcement.</p>
+            <h3>Simulator</h3>
+            <p class="muted">Runs the exact evaluation the edge uses on a request shape. Disabled rules are reported separately as “would match if enabled”.</p>
             <div class="form-grid">
               <label for="sim-host">Host</label>
               <input id="sim-host" class="input" type="text" v-model.trim="simulateForm.host" placeholder="example.com" list="cfm-vhost-list" />
               <label for="sim-ip">IP</label>
-              <input id="sim-ip" class="input" type="text" v-model.trim="simulateForm.ip" placeholder="1.2.3.4" />
+              <input id="sim-ip" class="input" type="text" v-model.trim="simulateForm.ip" placeholder="1.2.3.4 (fills country when left empty)" />
               <label for="sim-country">Country</label>
               <input id="sim-country" class="input input-small" type="text" v-model.trim="simulateForm.country" placeholder="US" />
               <label for="sim-method">Method</label>
@@ -119,44 +249,47 @@
             <div class="toolbar">
               <button @click="runRuleSimulation">Run simulation</button>
             </div>
-            <p v-if="simulateResult" class="muted">
-              matched={{ simulateResult.matched ? 'yes' : 'no' }}
-              <span v-if="simulateResult.matched"> |
-                action={{ simulateResult.action || '-' }} |
-                rule={{ simulateResult.rule?.id || '-' }} |
-                profile={{ simulateResult.profile || '-' }}
-              </span>
-            </p>
+            <p class="muted" v-if="simulateNote">{{ simulateNote }}</p>
+            <div class="sim-result" v-if="simulateVerdict">
+              <div><span class="pill" :class="simulateVerdict.tone">{{ simulateResult.matched ? 'verdict' : 'no match' }}</span> {{ simulateVerdict.text }}</div>
+              <div class="sim-disabled" v-if="simulateDisabledText"><span class="pill warn">disabled</span> {{ simulateDisabledText }}</div>
+            </div>
           </section>
         </div>
 
+        <!-- ── Rule table ───────────────────────────────────────────────── -->
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>ID</th><th>Enabled</th><th>Priority</th><th>Action</th><th>Vhosts</th><th>Filters</th><th>Note</th><th>Actions</th>
+                <th>Prio</th><th>On</th><th>Action</th><th>Vhosts</th><th>What it matches</th><th>Note</th><th>ID</th><th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in rulesFiltered" :key="row.id">
-                <td><code>{{ row.id }}</code></td>
-                <td><span class="pill" :class="row.enabled ? '' : 'warn'">{{ row.enabled ? 'on' : 'off' }}</span></td>
+              <tr v-for="row in rulesFiltered" :key="row.id" :class="{ 'row-off': !row.enabled, 'row-editing': ruleEditID === row.id }">
                 <td>{{ row.priority }}</td>
                 <td>
-                  <span class="pill" :class="row.action?.type === 'block' ? 'danger' : (row.action?.type === 'challenge' ? 'warn' : '')">
-                    {{ row.action?.type || '-' }}
-                  </span>
-                  <span class="muted" v-if="row.action?.profile">({{ row.action.profile }})</span>
+                  <button class="btn-quiet btn-sm" :class="row.enabled ? 'toggle-on' : 'toggle-off'" :disabled="rulesBusy" @click="toggleRuleEnabled(row)" :title="row.enabled ? 'Enforced — click to disable' : 'Not enforced — click to enable'">{{ row.enabled ? 'on' : 'off' }}</button>
+                </td>
+                <td>
+                  <span class="pill" :class="actionTone(row.action?.type)">{{ row.action?.type || '-' }}</span>
+                  <span class="muted" v-if="row.action?.profile" :title="throttleProfileLabel(row.action.profile)">{{ row.action.profile }}</span>
                 </td>
                 <td><code>{{ (row.scope?.vhosts || []).join(', ') }}</code></td>
                 <td>{{ ruleMatchSummary(row) }}</td>
-                <td>{{ row.note || '-' }}</td>
+                <td>
+                  <span class="pill info" v-if="ruleRecipe(row)" :title="'Created by recipe ' + ruleRecipe(row)">recipe:{{ ruleRecipe(row) }}</span>
+                  {{ ruleNoteText(row) || (ruleRecipe(row) ? '' : '-') }}
+                </td>
+                <td><code class="muted">{{ row.id }}</code></td>
                 <td class="actions-cell">
+                  <button class="btn-quiet btn-sm" @click="testRule(row)" title="Run the simulator with a request this rule should match">Test</button>
                   <button class="btn-quiet btn-sm" @click="loadRuleIntoForm(row)">Edit</button>
-                  <button class="btn-quiet btn-sm" @click="removeRule(row)">Delete</button>
+                  <button class="btn-quiet btn-sm" @click="duplicateRule(row)">Duplicate</button>
+                  <button class="btn-quiet btn-sm btn-danger" :disabled="rulesBusy" @click="removeRule(row)">Delete</button>
                 </td>
               </tr>
-              <tr v-if="!rulesFiltered.length"><td colspan="8" class="muted">No rules configured.</td></tr>
+              <tr v-if="!rulesFiltered.length"><td colspan="8" class="muted">{{ rules.length ? 'No rules match the filter.' : 'No rules configured.' }}</td></tr>
             </tbody>
           </table>
         </div>

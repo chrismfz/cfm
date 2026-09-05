@@ -255,13 +255,17 @@ func runRulesSimulate(baseURL string, in TrafficRuleEvalInput) error {
 	}
 	if !out.Matched {
 		fmt.Println("No rule matched.")
-		return nil
+	} else {
+		fmt.Printf("Matched rule id=%s priority=%d action=%s", out.Rule.ID, out.Rule.Priority, out.Action)
+		if out.Profile != "" {
+			fmt.Printf(" profile=%s", out.Profile)
+		}
+		fmt.Println()
 	}
-	fmt.Printf("Matched rule id=%s priority=%d action=%s", out.Rule.ID, out.Rule.Priority, out.Action)
-	if out.Profile != "" {
-		fmt.Printf(" profile=%s", out.Profile)
+	if d := out.DisabledMatch; d != nil {
+		fmt.Printf("Disabled rule id=%s priority=%d action=%s would match if enabled (not enforced).\n",
+			d.ID, d.Priority, d.Action.Type)
 	}
-	fmt.Println()
 	return nil
 }
 

@@ -9,6 +9,7 @@
 // same order the monolith ran them.
 
 import { expandPartials } from "./partials.js";
+import { csvSplit } from "./rules-model.js";
 
 export function createWebdetApp(config) {
   const pageMode = String(config.pageMode || "overview");
@@ -231,10 +232,7 @@ export function createWebdetApp(config) {
         return row?.reasons || row?.reason || "-";
       },
       csvSplit(v) {
-        return String(v || "")
-          .split(",")
-          .map((x) => x.trim())
-          .filter(Boolean);
+        return csvSplit(v);
       },
       formatApiError(err) {
         const parts = [];

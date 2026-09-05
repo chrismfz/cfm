@@ -229,3 +229,112 @@ func TestTrafficRuleQueryParamPrecision(t *testing.T) {
 		})
 	}
 }
+
+// TestTrafficRuleSimulate_DisabledRulesNeverEnforce pins the contract that
+// Simulate — which is ALSO the nginx bridge's enforcement path (RuleDecision) —
+// never returns a disabled rule as the verdict. Before this test a "block
+// CN,RU (disabled)" preset blocked live traffic, because the loop only looked
+// at host + filters. The disabled would-be match is surfaced separately via
+// DisabledMatch so the simulator can say "would match if enabled".
+func TestTrafficRuleSimulate_DisabledRulesNeverEnforce(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+
+	blockAll, err := s.Add(TrafficRule{
+		Enabled:  false,
+		Priority: 10,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Action:   TrafficRuleAction{Type: TrafficActionBlock},
+		Note:     "disabled block-all",
+	})
+	if err != nil {
+		t.Fatalf("add disabled rule: %v", err)
+	}
+
+	// Only a disabled rule matches → no enforcement, but it is reported.
+	got := s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET"})
+	if got.Matched {
+		t.Fatalf("disabled rule must never be the verdict: %+v", got)
+	}
+	if got.DisabledMatch == nil || got.DisabledMatch.ID != blockAll.ID {
+		t.Fatalf("expected disabled_match=%s, got %+v", blockAll.ID, got.DisabledMatch)
+	}
+
+	// An enabled rule ranked BELOW the disabled one wins the verdict; the
+	// disabled one is still reported because it precedes the live match.
+	thr, err := s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 100,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Action:   TrafficRuleAction{Type: TrafficActionThrottle, Profile: "soft_bot"},
+	})
+	if err != nil {
+		t.Fatalf("add throttle rule: %v", err)
+	}
+	got = s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET"})
+	if !got.Matched || got.Rule.ID != thr.ID || got.Action != TrafficActionThrottle {
+		t.Fatalf("expected enabled throttle verdict, got %+v", got)
+	}
+	if got.DisabledMatch == nil || got.DisabledMatch.ID != blockAll.ID {
+		t.Fatalf("expected preceding disabled rule to be reported, got %+v", got.DisabledMatch)
+	}
+
+	// A disabled rule ranked AFTER the live match is irrelevant → not reported.
+	if _, err := s.Add(TrafficRule{
+		Enabled:  false,
+		Priority: 500,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Action:   TrafficRuleAction{Type: TrafficActionChallenge},
+	}); err != nil {
+		t.Fatalf("add trailing disabled rule: %v", err)
+	}
+	if ok := s.Remove(blockAll.ID); !ok {
+		t.Fatalf("remove disabled block-all")
+	}
+	got = s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET"})
+	if !got.Matched || got.Rule.ID != thr.ID {
+		t.Fatalf("expected throttle verdict, got %+v", got)
+	}
+	if got.DisabledMatch != nil {
+		t.Fatalf("disabled rule shadowed by the live match must not be reported: %+v", got.DisabledMatch)
+	}
+
+	// Persisted + reloaded: the enabled flag survives and the contract holds.
+	s2 := newTrafficRuleStore(s.path)
+	got = s2.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET"})
+	if !got.Matched || got.Action != TrafficActionThrottle {
+		t.Fatalf("reloaded store: expected throttle verdict, got %+v", got)
+	}
+}
+
+// TestTrafficRuleUA_DashMeansNoUserAgent: a lone "-" UA pattern matches only a
+// request WITHOUT a User-Agent (the edge sends "" for a missing header; "-" is
+// the access-log spelling operators type). It must not act as a substring
+// match for every hyphenated UA.
+func TestTrafficRuleUA_DashMeansNoUserAgent(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	if _, err := s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 10,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:    TrafficRuleMatch{UAAny: []string{"-"}},
+		Action:   TrafficRuleAction{Type: TrafficActionBlock},
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	cases := []struct {
+		ua   string
+		want bool
+	}{
+		{"", true},
+		{"-", true},
+		{"python-requests/2.31", false},
+		{"meta-externalagent/1.1", false},
+		{"Mozilla/5.0 (X11; Linux x86_64) Firefox/128.0", false},
+	}
+	for _, tc := range cases {
+		got := s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", UA: tc.ua}).Matched
+		if got != tc.want {
+			t.Fatalf("ua=%q matched=%v want=%v", tc.ua, got, tc.want)
+		}
+	}
+}

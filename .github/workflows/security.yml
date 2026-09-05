@@ -58,6 +58,8 @@ jobs:
         run: make lua
       - name: Lua unit tests (scripts/tests/*_test.lua)
         run: make test-lua
+      - name: cfm-admin JS unit tests (node --test)
+        run: make test-js
       # go vet catches mutex copies, duplicate JSON tags, atomic copies,
       # and similar correctness issues at no cost.
       - name: go vet
