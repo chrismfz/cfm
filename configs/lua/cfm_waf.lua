@@ -2128,13 +2128,17 @@ function _M.check(ctx)
   -- headline and the ban; a traversal-only request still blocks at the edge.
   -- If WAF_TRAVERSAL is ever armed by default this ordering is merely harmless.
   --
-  -- Known limits of fixing this by ORDER (docs/waf-autoblock-design.md, open
-  -- item "push every block-tier hit"): the order encodes the SHIPPED arming
-  -- state only — an operator who arms TRAVERSAL and un-arms an earlier family
+  -- Known limits of fixing this by ORDER (decision record in
+  -- docs/waf-autoblock-design.md): the order encodes the SHIPPED arming state
+  -- only — an operator who arms TRAVERSAL and un-arms an earlier family
   -- (RCE = 0 after an FP) gets the mirror image; and a traversal-only scanner
-  -- request now runs the remaining detectors before blocking instead of
+  -- request runs the remaining detectors before blocking instead of
   -- short-circuiting at step 5 (~11.5k such requests/week fleet-wide — a few
-  -- string scans each, negligible). The real fix is at the push boundary.
+  -- string scans each, negligible). Pushing every block-tier hit instead was
+  -- considered and REJECTED: it needs the block short-circuit removed, and
+  -- cheap-first with the heavy scanners skipped on blocked requests is the
+  -- design. Revisit only if a second held family appears, and then by letting
+  -- record() continue past a HELD family's block only.
   do
     local mode = rule_mode(CFG.rule_traversal, "block")
     if mode ~= "disabled" and det.detect_traversal(uri, args, get_scan_ua()) then

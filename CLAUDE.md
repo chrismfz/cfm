@@ -328,9 +328,13 @@ points:
   only the headline), the traversal step runs **after every armed block-tier
   family** in `cfm_waf.lua` — keep it there, or arm the family, if you touch
   the order. That order fix covers the shipped arming state only (an operator
-  who arms `TRAVERSAL` and un-arms another family gets the mirror image); the
-  proper fix is to push every block-tier hit and let `wafsec` pick the armed
-  family — open item in `docs/waf-autoblock-design.md`. Block tier is also what
+  who arms `TRAVERSAL` and un-arms another family gets the mirror image).
+  "Push every block-tier hit" was considered and rejected: it needs the block
+  short-circuit removed (cheap rules first, heavy scanners skipped on blocked
+  requests — a design feature, not an accident) for a case that does not
+  occur; decision record in `docs/waf-autoblock-design.md`. Revisit only if a
+  second held family ever appears, and then by letting `record()` continue
+  past a HELD family's block only. Block tier is also what
   the panel-port gate (`cfm_panel.lua`) enforces, so promoting a rule to block
   arms it on `:2083/:2087/:2096` too — check the `waf_rule_detail` panel
   section for that rule in the same review.
