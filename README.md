@@ -1773,6 +1773,7 @@ See ready-to-use files under `docs/examples/`:
 - `traffic-rule-allow-office-ips.json` (`ip_any`)
 - `traffic-rule-block-country.json` (`country_in`)
 - `traffic-rule-block-outside-countries.json` (`country_not_in` geo-fence)
+- `traffic-rule-block-geedo.json` (`ua_any` — block the Geedo shop scraper; also the one-click "Block the Geedo shop scraper" recipe in cfm-admin)
 - `traffic-rule-challenge-login.json`
 - `traffic-rule-throttle-meta.json`
 
