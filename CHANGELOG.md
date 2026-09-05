@@ -18,6 +18,12 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **IP enrichment: a failed reverse-DNS lookup was pinned empty for 24 h.**
+  `Lookup` cached the whole Result (with `PTR: ""`) for the geo TTL after a
+  resolver timeout, so every PTR-dependent consumer — the good-bot challenge
+  exemption, the new `verified_bot` traffic rules — saw that IP as
+  unverifiable for a day after one blip. A cached PTR miss is now retried after
+  5 minutes (inline on `Lookup`, async on the hot-path `LookupCachedOrAsync`).
 - **Traffic rules: a DISABLED rule was enforced at the edge.** `Simulate()` —
   which is also the nginx bridge's `RuleDecision` path — never looked at
   `enabled`, so the "start disabled, validate first" workflow the presets
@@ -45,20 +51,25 @@ back-filled here — see the git/PR history for that period.
   and *Tame bots* recipes no longer open the fence to anyone who types
   `Googlebot` into a User-Agent; bots with no verifiable reverse DNS
   (DuckDuckGo, Baidu, X, LinkedIn, Slack, WhatsApp, Telegram previews) keep a
-  separate, explicitly weaker UA-based allow in those recipes. On the decision
+  separate, explicitly weaker UA-based allow in those recipes — which also
+  keeps Meta's one-shot preview fetchers, whose ever-changing fleet rarely has
+  a verdict in time. On the decision
   hot path the verdict is cache-only and consulted only for hosts an enabled
   `verified_bot` rule covers and only when the IP is not already blocked (a
   first-seen crawler IP kicks the existing bounded async forward-confirm and
   matches on a later request — never a DNS wait per request). The good-bot
   cache now serves an **expired positive verdict stale while it re-verifies**
-  (24 h grace, honoured by cache-cap pruning too, dropped at once if the IP's
-  PTR no longer looks like a crawler),
+  (24 h grace, honoured by cache-cap pruning too — a full cache evicts the
+  oldest expired positive for a new one — and dropped at once if the IP's PTR
+  no longer looks like a crawler),
   so a real crawler no longer loses its exemption/allow for one request per
   30-minute TTL — tolerable when that meant a challenge page, not when a rule
   turns it into a 403. The cache is in-memory, so after a daemon restart each
   crawler IP is first-seen again (the recipe warnings say so). The simulate
   API — and only it, never the bridge's decision path — resolves the verdict
-  inline (bounded by the same verify-slot semaphore and the request context),
+  inline (its own small slot bound so it cannot starve hot-path verification,
+  the request context, and a direct reverse lookup that never populates the
+  shared enrich caches),
   echoes it as `verified_bot` (`verified_bot_excluded` for the generic google
   verdict, `verified_bot_inconclusive` when it could not tell — slots busy,
   resolver blip, enrichment off), and accepts a caller-supplied name as an override so

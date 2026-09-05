@@ -82,6 +82,10 @@ const (
 	// cap concurrent in-flight forward-confirms so a burst of first-seen crawler
 	// IPs cannot spawn unbounded DNS goroutines.
 	goodBotIPMaxInflight = 32
+	// the simulate API's inline verifies (verifiedSync) have their OWN, smaller
+	// bound so a burst of simulate calls (reachable by scoped tokens) can never
+	// take the hot path's slots and starve real crawler verification.
+	goodBotSyncMaxInflight = 4
 )
 
 type goodBotIPVerdict struct {
@@ -97,7 +101,8 @@ type bridgeGoodBotState struct {
 	cache    map[string]goodBotIPVerdict
 	inflight map[string]struct{}
 	logged   map[string]struct{} // bot names already logged (visibility, once per TYPE)
-	sem      chan struct{}       // bounds concurrent forward-confirms
+	sem      chan struct{}       // bounds concurrent async forward-confirms (hot path)
+	syncSem  chan struct{}       // bounds concurrent inline verifies (simulate API)
 	// verify returns the good-bot name (or "") and whether the result is
 	// cacheable. cacheable=false means inconclusive (a transient resolver
 	// failure) and must NOT be pinned in the cache. Injectable for tests.
@@ -117,6 +122,7 @@ func newBridgeGoodBotState() *bridgeGoodBotState {
 		inflight: make(map[string]struct{}),
 		logged:   make(map[string]struct{}),
 		sem:      make(chan struct{}, goodBotIPMaxInflight),
+		syncSem:  make(chan struct{}, goodBotSyncMaxInflight),
 		verify:   verifyGoodBotIP,
 		// Default = the edge bridge's meaning (this verdict grants a challenge
 		// exemption). Other callers (dcfrac) override this after construction.
@@ -190,13 +196,29 @@ type goodBotLookup struct {
 }
 
 func (s *bridgeGoodBotState) lookup(ip string, ptrFn func() string, now time.Time) goodBotLookup {
+	if l, done := s.cached(ip, now); done {
+		return l
+	}
+	// Miss/expired: resolve the PTR now (lazy). On the hot path an EMPTY ptr
+	// is an enrich-cache miss, not evidence — hence definitive=false.
+	ptr := ""
+	if ptrFn != nil {
+		ptr = ptrFn()
+	}
+	return s.lookupPTR(ip, ptr, false, now)
+}
+
+// cached is the cache-only half of lookup(): a fresh hit returns done=true.
+// Otherwise the returned lookup carries the stale positive (if any) and the
+// caller decides how to obtain the PTR.
+func (s *bridgeGoodBotState) cached(ip string, now time.Time) (goodBotLookup, bool) {
 	// Fast path: cache hit under a read lock (the common case for a busy crawler
 	// and — as a fresh negative — for a re-seen spoofer).
 	s.mu.RLock()
 	v, ok := s.cache[ip]
 	s.mu.RUnlock()
 	if ok && now.Before(v.until) {
-		return goodBotLookup{name: v.name, fresh: true}
+		return goodBotLookup{name: v.name, fresh: true}, true
 	}
 	l := goodBotLookup{}
 	// Stale positive (expired, within grace): keep serving it while a
@@ -205,19 +227,25 @@ func (s *bridgeGoodBotState) lookup(ip string, ptrFn func() string, now time.Tim
 	if ok && v.name != "" && now.Before(v.until.Add(goodBotIPStaleGrace)) {
 		l.stale = v.name
 	}
-	// Miss/expired: resolve the PTR now (lazy) and only spend a verify on a
-	// good-bot-suffix candidate. A plain attacker IP takes no write lock.
-	if ptrFn != nil {
-		l.ptr = ptrFn()
+	return l, false
+}
+
+// lookupPTR completes a lookup with an already-resolved PTR. definitive says
+// whether an EMPTY ptr is real evidence ("this IP has no PTR", as a completed
+// NXDOMAIN answer is) or just unknown-yet (an enrich-cache miss). Only a
+// good-bot-suffix candidate is worth a forward-confirm. A stale positive is
+// dropped on the spot when the (definitive) PTR no longer looks like a
+// crawler — the IP was reassigned.
+func (s *bridgeGoodBotState) lookupPTR(ip, ptr string, definitive bool, now time.Time) goodBotLookup {
+	l, done := s.cached(ip, now)
+	if done {
+		return l
 	}
-	l.candidate = looksLikeGoodBotPTR(l.ptr)
-	if l.stale != "" && l.ptr != "" && !l.candidate {
-		// Definitive evidence the IP is no longer a crawler (its PTR resolved
-		// to something else): drop the stale verdict instead of serving it for
-		// the rest of the grace. An EMPTY ptr is an enrich-cache miss, not
-		// evidence, so the stale positive stands until the PTR is known.
+	l.ptr = ptr
+	l.candidate = looksLikeGoodBotPTR(ptr)
+	if l.stale != "" && !l.candidate && (ptr != "" || definitive) {
 		s.mu.Lock()
-		if cur, still := s.cache[ip]; still && cur.until == v.until {
+		if cur, still := s.cache[ip]; still && cur.name == l.stale && !now.Before(cur.until) {
 			delete(s.cache, ip)
 		}
 		s.mu.Unlock()
@@ -271,26 +299,30 @@ const (
 	verifiedInconclusiveTransient = "transient" // resolver failed; nothing cached
 )
 
-// verifiedSync is the SIMULATE-API variant of verified(): same lookup prelude,
-// same verifier, same verify-slot bound — but it WAITS for a slot (bounded by
-// ctx and verifiedSyncMaxWait) and runs the reverse lookup AND the
-// forward-confirm inline (DNS-bound, seconds at worst) so an operator's "test
-// this rule" gets a definitive answer now instead of "not yet". The PTR is
-// resolved only after a slot is held, so a burst of simulate calls (the
-// endpoint is reachable by scoped tokens) is bounded to goodBotIPMaxInflight
-// resolver operations daemon-wide, same as the async path. A stale positive is
+// verifiedSync is the SIMULATE-API variant of verified(): same cache, same
+// verifier — but it runs the reverse lookup AND the forward-confirm inline
+// (DNS-bound, seconds at worst) so an operator's "test this rule" gets a
+// definitive answer now instead of "not yet". It is bounded by its OWN small
+// semaphore (goodBotSyncMaxInflight) plus ctx / verifiedSyncMaxWait, so a burst
+// of simulate calls (the endpoint is reachable by scoped tokens) can neither
+// fan out resolver work nor take the hot path's verify slots. ptrFn reports
+// whether the reverse lookup COMPLETED (ok=false → resolver failure), so a
+// crawler behind a DNS blip is "inconclusive", never "not a crawler"; a
+// completed empty answer (no PTR) IS definitive. A stale positive is
 // re-verified inline too, so the answer reflects the PTR as it is now.
 //
 // Returns the verdict and an inconclusive reason: name=="" with reason=="" is a
-// definitive negative; a non-empty reason means "could not tell" (the UI must
-// not present it as "did not forward-confirm"). Never call it on the decision
-// hot path — TrafficRuleSimulateForAPI is its only caller.
-func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn func() string, now time.Time) (name, inconclusive string) {
+// definitive negative; a non-empty reason means "could not tell" (a non-empty
+// name WITH a reason is a stale verdict whose re-verify did not complete).
+// Never call it on the decision hot path — TrafficRuleSimulateForAPI is its
+// only caller.
+func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn func() (ptr string, ok bool), now time.Time) (name, inconclusive string) {
 	if s == nil || ip == "" {
 		return "", ""
 	}
 	// Cache-only first pass (no PTR): a fresh verdict needs no slot at all.
-	if l := s.lookup(ip, nil, now); l.fresh {
+	l, done := s.cached(ip, now)
+	if done {
 		return l.name, ""
 	}
 	if ctx == nil {
@@ -299,19 +331,24 @@ func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn 
 	wait, cancel := context.WithTimeout(ctx, verifiedSyncMaxWait)
 	defer cancel()
 	select {
-	case s.sem <- struct{}{}:
+	case s.syncSem <- struct{}{}:
 	case <-wait.Done():
-		return "", verifiedInconclusiveTimeout
+		return l.stale, verifiedInconclusiveTimeout
 	}
-	defer func() { <-s.sem }()
-	// Slot held: now the (blocking) reverse lookup, then the candidate test —
-	// which also drops a stale positive whose PTR no longer looks like a crawler.
-	l := s.lookup(ip, ptrFn, now)
+	defer func() { <-s.syncSem }()
+	ptr, ok := "", false
+	if ptrFn != nil {
+		ptr, ok = ptrFn()
+	}
+	if !ok {
+		return l.stale, verifiedInconclusiveTransient // reverse lookup did not complete
+	}
+	l = s.lookupPTR(ip, ptr, true, now)
 	if l.fresh { // raced with an async verify that just landed
 		return l.name, ""
 	}
 	if !l.candidate {
-		return "", "" // definitive: no good-bot suffix on the PTR (or no PTR at all)
+		return "", "" // definitive: no good-bot suffix (or no PTR at all)
 	}
 	name, cacheable := s.resolveInto(ip, l.ptr, now)
 	if !cacheable {
@@ -377,7 +414,12 @@ func (s *bridgeGoodBotState) store(ip, name string, now time.Time) {
 			// rotating fake-PTR attack) crowd it out: evict one negative to admit a
 			// positive. A new negative is simply dropped (it re-mints cheaply on the
 			// IP's next request), so growth stays strictly bounded either way.
-			if name == "" || !s.evictOneNegativeLocked() {
+			// With the stale grace, positives now linger ~24.5 h; a busy
+			// multi-tenant host can fill the cache with them. Then a NEW
+			// positive evicts the oldest EXPIRED positive (already past its
+			// TTL, only being served stale) rather than being dropped and
+			// re-verified on every request.
+			if name == "" || (!s.evictOneNegativeLocked() && !s.evictOldestStalePositiveLocked(now)) {
 				s.mu.Unlock()
 				return
 			}
@@ -398,6 +440,27 @@ func (s *bridgeGoodBotState) evictOneNegativeLocked() bool {
 		}
 	}
 	return false
+}
+
+// evictOldestStalePositiveLocked removes the expired positive with the oldest
+// until (i.e. the one deepest into its stale grace); caller holds s.mu. Returns
+// false when every positive is still fresh.
+func (s *bridgeGoodBotState) evictOldestStalePositiveLocked(now time.Time) bool {
+	victim := ""
+	var oldest time.Time
+	for k, v := range s.cache {
+		if v.name == "" || now.Before(v.until) {
+			continue
+		}
+		if victim == "" || v.until.Before(oldest) {
+			victim, oldest = k, v.until
+		}
+	}
+	if victim == "" {
+		return false
+	}
+	delete(s.cache, victim)
+	return true
 }
 
 // pruneLocked drops expired entries. A POSITIVE is kept for its stale grace

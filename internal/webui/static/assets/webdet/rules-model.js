@@ -279,6 +279,16 @@ export const UNVERIFIABLE_BOT_UAS = Object.freeze(
   [...botGroup("search").patterns, ...botGroup("social").patterns].filter((g) => !VERIFIABLE_UA_GLOBS.has(g)),
 );
 
+// Verifiable in principle, but their fetches are ONE-SHOT link previews from a
+// huge, rarely-repeating IP fleet: the cache-only verified_bot verdict almost
+// never exists in time (first two or three requests from an IP get the fence's
+// action), so a fence would break most Facebook / Instagram / Messenger
+// previews. Recipes therefore keep these in the UA-based allow as well (same
+// forgeable trust as before this field existed) until verdicts are persisted /
+// pre-seeded.
+export const PREVIEW_ONE_SHOT_UAS = Object.freeze([...VERIFIED_BOT_UA_GLOBS.meta]);
+export const UA_ALLOW_ALONGSIDE_VERIFIED = Object.freeze([...UNVERIFIABLE_BOT_UAS, ...PREVIEW_ONE_SHOT_UAS]);
+
 // ── Form ⇄ payload ────────────────────────────────────────────────────────
 export function emptyForm(overrides = {}) {
   return {
@@ -726,7 +736,7 @@ export const RECIPES = Object.freeze([
     warnings: [
       "The block rule is created DISABLED. Test with the simulator, then enable it from the table.",
       `Rule #10 allows crawlers by reverse-DNS verification (${VERIFIED_BOT_LABEL}) — cannot be forged. A crawler IP seen for the first time (and every crawler IP right after a cfm restart) is verified in the background and gets the fence's action for its first two or three requests before it passes.`,
-      "Rule #11 allows the search/social bots that have no verifiable reverse DNS (DuckDuckGo, Baidu, X/Twitter, LinkedIn, Slack, WhatsApp, Telegram previews) by User-Agent only — forgeable; delete it if you would rather fence those too.",
+      "Rule #11 allows by User-Agent only (forgeable) the search/social bots with no verifiable reverse DNS (DuckDuckGo, Baidu, X/Twitter, LinkedIn, Slack, WhatsApp, Telegram) AND Meta's preview fetchers, whose one-shot requests from an ever-changing fleet rarely have a verdict in time. Delete it if you would rather fence those too.",
       "Visitors whose country cannot be resolved are NOT blocked (the fence fails open, so a geo outage never locks everyone out). Office/monitoring ranges are still worth listing: they skip every rule below.",
       "Browsers that already hold a clearance cookie for the vhost keep access until it expires.",
     ],
@@ -737,7 +747,7 @@ export const RECIPES = Object.freeze([
       const k = "geo_fence";
       const out = [
         rule(k, { enabled: true, priority: 10, vhosts, match: { verified_bot: true }, action: { type: "allow" }, text: "verified crawlers (FCrDNS) pass the fence" }),
-        rule(k, { enabled: true, priority: 11, vhosts, match: { ua_any: [...UNVERIFIABLE_BOT_UAS] }, action: { type: "allow" }, text: "search/social bots without verifiable reverse DNS pass by User-Agent (forgeable)" }),
+        rule(k, { enabled: true, priority: 11, vhosts, match: { ua_any: [...UA_ALLOW_ALONGSIDE_VERIFIED] }, action: { type: "allow" }, text: "search/social bots without a verdict in time (unverifiable ones + Meta previews) pass by User-Agent (forgeable)" }),
       ];
       if (ips.length) {
         out.push(rule(k, { enabled: true, priority: 15, vhosts, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass the fence" }));
@@ -802,13 +812,13 @@ export const RECIPES = Object.freeze([
     title: "Tame bots",
     description: "Let verified search/social crawlers through, rate-limit SEO and AI crawlers, block requests without a User-Agent.",
     vars: [VAR_VHOSTS],
-    warnings: ["Throttles are enabled (low collateral). The no-User-Agent block is created DISABLED: uptime monitors and health checks sometimes send no UA — check the simulator/logs, then enable.", "Rule #11 allows the search/social bots with no verifiable reverse DNS by User-Agent only (forgeable)."],
+    warnings: ["Throttles are enabled (low collateral). The no-User-Agent block is created DISABLED: uptime monitors and health checks sometimes send no UA — check the simulator/logs, then enable.", "Rule #11 allows by User-Agent only (forgeable) the bots with no verifiable reverse DNS plus Meta's one-shot preview fetchers."],
     build(vars) {
       const vhosts = vhostsVar(vars);
       const k = "tame_bots";
       return [
         rule(k, { enabled: true, priority: 10, vhosts, match: { verified_bot: true }, action: { type: "allow" }, text: "verified crawlers (FCrDNS) first" }),
-        rule(k, { enabled: true, priority: 11, vhosts, match: { ua_any: [...UNVERIFIABLE_BOT_UAS] }, action: { type: "allow" }, text: "search/social bots without verifiable reverse DNS by User-Agent (forgeable)" }),
+        rule(k, { enabled: true, priority: 11, vhosts, match: { ua_any: [...UA_ALLOW_ALONGSIDE_VERIFIED] }, action: { type: "allow" }, text: "search/social bots without a verdict in time (unverifiable ones + Meta previews) by User-Agent (forgeable)" }),
         rule(k, { enabled: true, priority: 110, vhosts, match: { ua_any: botGroup("ai").patterns, methods: ["GET"] }, action: { type: "throttle", profile: "medium_bot" }, text: "AI crawlers at medium_bot" }),
         rule(k, { enabled: true, priority: 130, vhosts, match: { ua_any: botGroup("seo").patterns, methods: ["GET"] }, action: { type: "throttle", profile: "soft_bot" }, text: "SEO crawlers at soft_bot" }),
         rule(k, { enabled: false, priority: 320, vhosts, match: { ua_any: ["-"] }, action: { type: "block" }, text: "block requests with no User-Agent — ENABLE after checking monitors" }),

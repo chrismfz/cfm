@@ -248,6 +248,10 @@ func parseRulesSimulateFlags(args []string) (TrafficRuleEvalInput, error) {
 		case strings.HasPrefix(a, "--verified-bot="):
 			in.VerifiedBot = strings.TrimPrefix(a, "--verified-bot=")
 		default:
+			switch a {
+			case "--host", "--ip", "--ua", "--path", "--method", "--country", "--qs":
+				return TrafficRuleEvalInput{}, fmt.Errorf("missing value for %s", a)
+			}
 			if strings.HasPrefix(a, "-") {
 				return TrafficRuleEvalInput{}, fmt.Errorf("unknown flag %q", a)
 			}
@@ -281,8 +285,12 @@ func runRulesSimulate(baseURL string, in TrafficRuleEvalInput) error {
 			d.ID, d.Priority, d.Action.Type)
 	}
 	switch {
+	case out.VerifiedBot != "" && out.VerifiedBotInconclusive != "":
+		fmt.Printf("Verified crawler: %s — STALE cached verdict; the inline re-verify did not complete (%s).\n", out.VerifiedBot, out.VerifiedBotInconclusive)
 	case out.VerifiedBot != "":
 		fmt.Printf("Verified crawler: %s (verified_bot rules can match).\n", out.VerifiedBot)
+	case out.VerifiedBotInconclusive == "not_checked":
+		// no verified_bot rule exists → nothing was resolved; say nothing definitive
 	case out.VerifiedBotExcluded != "":
 		fmt.Printf("Verified crawler: reverse DNS forward-confirmed as %q, which is deliberately NOT a crawler for rules (Google user-driven fetchers: Translate/AMP proxies); verified_bot rules do not match.\n", out.VerifiedBotExcluded)
 	case out.VerifiedBotInconclusive != "":

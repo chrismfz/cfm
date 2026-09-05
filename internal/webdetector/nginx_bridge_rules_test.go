@@ -441,7 +441,7 @@ func TestNginxBridgeDecision_VerifiedBotFromCache(t *testing.T) {
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
 	// Wire through the Engine exactly as production does (engine.go), so the
 	// hot-path assertions below cover Engine.TrafficRuleSimulate, not just the store.
-	eng := &Engine{trafficRules: store, nginxBridge: b, simulatePTRFn: func(ip string) string { return "crawl.googlebot.com." }}
+	eng := &Engine{trafficRules: store, nginxBridge: b, simulatePTRFn: func(ip string) (string, bool) { return "crawl.googlebot.com.", true }}
 	b.RuleDecision = eng.TrafficRuleSimulate
 	gateCalls := 0
 	b.RuleNeedsVerifiedBot = func(host string) bool { gateCalls++; return store.NeedsVerifiedBotFor(host) }
@@ -502,6 +502,20 @@ func TestNginxBridgeDecision_VerifiedBotFromCache(t *testing.T) {
 	nr := noEnr.TrafficRuleSimulateForAPI(context.Background(), TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: "66.249.70.9"})
 	if nr.VerifiedBot != "" || nr.VerifiedBotInconclusive != "no_resolver" {
 		t.Fatalf("no resolver must be reported as inconclusive: %+v", nr)
+	}
+	// A stale verdict whose inline re-verify did not complete keeps BOTH the
+	// (stale) name and the reason, so the UI does not present it as fresh.
+	b.goodBot.store("66.249.70.7", "googlebot", time.Now().Add(-goodBotIPPosTTL-time.Minute))
+	failing := &Engine{trafficRules: store, nginxBridge: b, simulatePTRFn: func(ip string) (string, bool) { return "", false }}
+	st := failing.TrafficRuleSimulateForAPI(context.Background(), TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: "66.249.70.7"})
+	if st.VerifiedBot != "googlebot" || st.VerifiedBotInconclusive != verifiedInconclusiveTransient {
+		t.Fatalf("stale + failed re-verify must carry both: %+v", st)
+	}
+	// No verified_bot rule at all → nothing resolved → "not_checked", not "no".
+	empty := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	nc := (&Engine{trafficRules: empty, nginxBridge: b}).TrafficRuleSimulateForAPI(context.Background(), TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: "66.249.70.9"})
+	if nc.VerifiedBotInconclusive != "not_checked" {
+		t.Fatalf("no verified_bot rules must report not_checked: %+v", nc)
 	}
 
 	// A rule on ANOTHER host must not make this host pay for good-bot lookups.

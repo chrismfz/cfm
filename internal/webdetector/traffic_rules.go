@@ -52,9 +52,10 @@ type TrafficRuleMatch struct {
 	// (IPv4/IPv6 CIDR; a bare address is a /32 or /128). Stored canonical
 	// (netip.Prefix.Masked().String()). An unparsable request IP never matches.
 	IPAny []string `json:"ip_any,omitempty"`
-	// VerifiedBot restricts the rule to requests from an FCrDNS-verified good
-	// bot (the goodBotPTRSuffixes registry: Googlebot, Google, Bing, Yahoo,
-	// Applebot, Yandex, Meta). "Verified" means the PTR forward-confirmed to the
+	// VerifiedBot restricts the rule to requests from an FCrDNS-verified
+	// CRAWLER (the goodBotPTRSuffixes registry — Googlebot, Bing, Yahoo,
+	// Applebot, Yandex, Meta — minus the generic "google" verdict that also
+	// covers Translate/AMP proxies; see verifiedBotForRules). "Verified" means the PTR forward-confirmed to the
 	// requesting IP — a User-Agent string earns nothing. On the decision hot
 	// path the verdict is CACHE-ONLY (a first-seen crawler IP kicks a bounded
 	// async forward-confirm and matches on a later request), so a
@@ -133,11 +134,14 @@ type TrafficRuleEvalResult struct {
 	// "verified, but excluded" instead of "did not forward-confirm".
 	VerifiedBot         string `json:"verified_bot,omitempty"`
 	VerifiedBotExcluded string `json:"verified_bot_excluded,omitempty"`
-	// VerifiedBotInconclusive (simulate API only) says WHY no verdict could be
-	// established when VerifiedBot is empty: "timeout" (no verify slot within
-	// the wait), "transient" (resolver failure), "no_resolver" (enrichment off:
-	// verified_bot rules cannot match live traffic either), "no_bridge". Empty
-	// with an empty VerifiedBot means a definitive "not a verified crawler".
+	// VerifiedBotInconclusive (simulate API only) says WHY the check did not
+	// complete: "timeout" (no verify slot within the wait), "transient"
+	// (resolver failure), "no_resolver" (enrichment off: verified_bot rules
+	// cannot match live traffic either), "no_bridge", "not_checked" (no
+	// verified_bot rule exists, so nothing was resolved). With a non-empty
+	// VerifiedBot it means the verdict shown is a STALE cached one whose
+	// inline re-verify did not complete. Empty with an empty VerifiedBot means
+	// a definitive "not a verified crawler".
 	VerifiedBotInconclusive string `json:"verified_bot_inconclusive,omitempty"`
 }
 

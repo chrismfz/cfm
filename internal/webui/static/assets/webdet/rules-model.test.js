@@ -7,6 +7,7 @@ import {
   LIMITS,
   RECIPES,
   THROTTLE_PROFILES,
+  UA_ALLOW_ALONGSIDE_VERIFIED,
   UNVERIFIABLE_BOT_UAS,
   VERIFIED_BOT_LABEL,
   VERIFIED_BOT_NAMES,
@@ -187,9 +188,12 @@ test("geo_fence: verified crawlers → (office IPs) → disabled block of everyo
   assert.deepEqual(rules[0].match.ua_any, []);
   // the bots FCrDNS cannot verify keep a (weaker, UA-based) allow of their own
   assert.equal(rules[1].action.type, "allow");
-  assert.deepEqual(rules[1].match.ua_any, [...UNVERIFIABLE_BOT_UAS]);
+  assert.deepEqual(rules[1].match.ua_any, [...UA_ALLOW_ALONGSIDE_VERIFIED]);
   assert.ok(UNVERIFIABLE_BOT_UAS.includes("*Twitterbot*") && UNVERIFIABLE_BOT_UAS.includes("*DuckDuckBot*"));
   assert.ok(!UNVERIFIABLE_BOT_UAS.includes("*Googlebot*") && !UNVERIFIABLE_BOT_UAS.includes("*facebookexternalhit*"));
+  // Meta previews are one-shot from a huge fleet: kept in the UA allow on purpose; Googlebot is not.
+  assert.ok(UA_ALLOW_ALONGSIDE_VERIFIED.includes("*facebookexternalhit*") && UA_ALLOW_ALONGSIDE_VERIFIED.includes("*meta-externalagent*"));
+  assert.ok(!UA_ALLOW_ALONGSIDE_VERIFIED.includes("*Googlebot*") && !UA_ALLOW_ALONGSIDE_VERIFIED.includes("*bingbot*"));
   assert.equal(rules[2].action.type, "block");
   assert.deepEqual(rules[2].match.country_not_in, ["GR", "CY"]);
   assert.deepEqual(rules[2].match.country_in, []);
@@ -333,5 +337,5 @@ test("verified_bot: payload, round-trip, description, sample request, hints", ()
   const tb = recipe("tame_bots").build({ vhosts: "a.com" });
   assert.equal(tb[0].match.verified_bot, true);
   assert.deepEqual(tb[0].match.ua_any, []);
-  assert.deepEqual(tb[1].match.ua_any, [...UNVERIFIABLE_BOT_UAS]);
+  assert.deepEqual(tb[1].match.ua_any, [...UA_ALLOW_ALONGSIDE_VERIFIED]);
 });

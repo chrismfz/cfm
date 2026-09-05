@@ -4,6 +4,7 @@ package webdetector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -420,9 +421,10 @@ type Engine struct {
 	longwin *LongWindow
 	scorer  Scorer
 	enr     *enrich.Enricher
-	// simulatePTRFn overrides the PTR resolver used by TrafficRuleSimulateForAPI
-	// (tests only; nil = enrich.Lookup).
-	simulatePTRFn func(ip string) string
+	// simulatePTRFn overrides the reverse-DNS resolver used by
+	// TrafficRuleSimulateForAPI (tests only; nil = direct LookupAddr). ok=false
+	// means the lookup did not complete (resolver failure).
+	simulatePTRFn func(ip string) (ptr string, ok bool)
 
 	lastFeed time.Time  // last time we fed long-window
 	ipLong   *ipLongMem // long-window IP aggregates (EMA)
@@ -3995,9 +3997,11 @@ func (e *Engine) TrafficRuleSimulateForAPI(ctx context.Context, in TrafficRuleEv
 		return TrafficRuleEvalResult{Matched: false}
 	}
 	inconclusive := ""
-	if strings.TrimSpace(in.VerifiedBot) == "" && strings.TrimSpace(in.IP) != "" && e.trafficRules.HasVerifiedBotRules() {
+	if strings.TrimSpace(in.VerifiedBot) == "" && strings.TrimSpace(in.IP) != "" {
 		ip := strings.TrimSpace(in.IP)
 		switch {
+		case !e.trafficRules.HasVerifiedBotRules():
+			inconclusive = "not_checked" // nothing to gain; say so rather than "no"
 		case e.nginxBridge == nil || e.nginxBridge.goodBot == nil:
 			inconclusive = "no_bridge"
 		default:
@@ -4012,21 +4016,41 @@ func (e *Engine) TrafficRuleSimulateForAPI(ctx context.Context, in TrafficRuleEv
 		}
 	}
 	res := e.TrafficRuleSimulate(in)
-	if res.VerifiedBot == "" && res.VerifiedBotExcluded == "" {
+	if res.VerifiedBotExcluded == "" {
+		// Kept even alongside a (stale) VerifiedBot: the UI must say "stale
+		// verdict, re-verify did not complete", not "forward-confirmed now".
 		res.VerifiedBotInconclusive = inconclusive
 	}
 	return res
 }
 
-// simulatePTRLookup returns the lazy PTR resolver the simulate API uses for the
-// verified_bot check: the injectable hook when set (tests), else the enrich
-// layer's synchronous Lookup, else nil (no resolver → verdict stays "").
-func (e *Engine) simulatePTRLookup(ip string) func() string {
+// simulatePTRLookup returns the lazy reverse-DNS resolver the simulate API uses
+// for the verified_bot check: the injectable hook when set (tests), else a
+// direct, timeout-bounded LookupAddr — NOT the enrich cache, so an operator's
+// (or a scoped tenant's) arbitrary test IPs never populate the shared enrich /
+// persistent PTR stores, and a resolver failure is distinguishable from "no
+// PTR" (ok=false vs ok=true with ""). nil when PTR enrichment is off.
+func (e *Engine) simulatePTRLookup(ip string) func() (string, bool) {
 	if e.simulatePTRFn != nil {
-		return func() string { return e.simulatePTRFn(ip) }
+		return func() (string, bool) { return e.simulatePTRFn(ip) }
 	}
-	if e.enr == nil {
+	if e.enr == nil || !e.enr.PTREnabled() {
 		return nil
 	}
-	return func() string { return e.enr.Lookup(ip).PTR }
+	return func() (string, bool) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		names, err := net.DefaultResolver.LookupAddr(ctx, ip)
+		if err != nil {
+			var dnsErr *net.DNSError
+			if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+				return "", true // completed: this IP has no PTR
+			}
+			return "", false // timeout / SERVFAIL / network: did not complete
+		}
+		if len(names) == 0 {
+			return "", true
+		}
+		return strings.TrimSuffix(names[0], "."), true
+	}
 }

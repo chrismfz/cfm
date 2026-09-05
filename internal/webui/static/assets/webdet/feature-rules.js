@@ -85,6 +85,7 @@ export const rulesMixin = {
       simulateForm: { host: "", ip: "", ua: "", path: "/", method: "GET", country: "", qs: "", verifiedBot: "" },
       verifiedBotLabel: VERIFIED_BOT_LABEL,
       simulateResult: null,
+      simulateRequest: null, // the request that produced simulateResult (not the live form)
       simulateNote: "",
     };
   },
@@ -195,11 +196,13 @@ export const rulesMixin = {
       if (!r) return "";
       const anyRule = this.rules.some((x) => x?.match?.verified_bot);
       if (!anyRule && !r.verified_bot) return "";
+      const req = this.simulateRequest || {};
       if (r.verified_bot) {
-        return this.simulateForm.verifiedBot
-          ? `Treated as a verified crawler (${r.verified_bot}) because the override is ticked.`
-          : `IP verified as crawler "${r.verified_bot}" (reverse DNS forward-confirmed).`;
+        if (req.verified_bot) return `Treated as a verified crawler (${r.verified_bot}) because the override was ticked for this run.`;
+        if (r.verified_bot_inconclusive) return `Cached (stale) verdict "${r.verified_bot}" was used: the inline re-verify did not complete (${r.verified_bot_inconclusive}). Live traffic from this IP is still treated as a crawler until the verdict ages out.`;
+        return `IP verified as crawler "${r.verified_bot}" (reverse DNS forward-confirmed).`;
       }
+      if (r.verified_bot_inconclusive === "not_checked") return "";
       if (r.verified_bot_excluded) {
         return `Reverse DNS forward-confirmed as "${r.verified_bot_excluded}", which is deliberately NOT a crawler for rules (Google's user-driven fetchers: Translate / AMP proxies). verified_bot rules do not match it — by design, not a DNS problem.`;
       }
@@ -212,7 +215,7 @@ export const rulesMixin = {
         }[r.verified_bot_inconclusive] || r.verified_bot_inconclusive;
         return `Crawler verification was NOT completed (${why}). This is not a negative: the rule set was evaluated with the IP treated as unverified. Retry, or tick the override to test the crawler path.`;
       }
-      if (!String(this.simulateForm.ip || "").trim()) {
+      if (!String(req.ip || "").trim()) {
         return "No IP in the sample, so crawler verification was not attempted: verified_bot rules cannot match it. Add the crawler's IP, or tick the override.";
       }
       return "Not a verified crawler: the IP's reverse DNS did not forward-confirm to a known good bot, so verified_bot rules do not match. Tick the override to test the crawler path.";
@@ -527,6 +530,7 @@ export const rulesMixin = {
       }
       try {
         this.simulateResult = await this.postJSON("v1/webdet/rules/simulate", req);
+        this.simulateRequest = req;
         this.actionMsg = this.simulateResult?.matched
           ? `Simulation: ${this.simulateResult.action} by rule ${this.simulateResult?.rule?.id || ""}`
           : (this.simulateResult?.disabled_match
