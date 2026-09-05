@@ -551,9 +551,27 @@ test("shadowingRules: an earlier enabled allow or throttle that covers the row's
   assert.equal(shadowingRules(noQS, [qsThrottle]).length, 1);
   assert.equal(shadowingRules({ ...noQS, match: { ...noQS.match, has_qs: false } }, [qsThrottle]).length, 0);
   assert.deepEqual(shadowingRules(social, [{ ...uaAllow, action: { type: "block" } }, { ...uaAllow, action: { type: "challenge" } }]), []);
+  // conditions AND in the daemon: verified_bot + ua_any only covers the UAs it names, and a
+  // pass-through regex on the earlier rule lets queries fall through to the row
+  assert.deepEqual(shadowingRules(social, [{ ...verifiedAllow, match: { verified_bot: true, ua_any: ["*Googlebot*"] } }]), [], "verified Googlebot-only allow leaves every social UA for the row");
+  assert.equal(shadowingRules(social, [{ ...verifiedAllow, match: { verified_bot: true, ua_any: ["*meta-externalagent*"] } }]).length, 1);
+  assert.equal(shadowingRules(noQS, [{ ...qsThrottle, match: { ...qsThrottle.match, qs_not_rx: "page=" } }]).length, 0);
+  assert.equal(shadowingRules({ ...noQS, match: { ...noQS.match, qs_not_rx: "page=" } }, [{ ...qsThrottle, match: { ...qsThrottle.match, qs_not_rx: "page=" } }]).length, 1);
   // allows never shadow allows; rows without UA patterns are out of scope
   assert.deepEqual(shadowingRules({ ...social, action: { type: "allow" } }, [verifiedAllow]), []);
   assert.deepEqual(shadowingRules({ ...social, match: { ...social.match, ua_any: [] } }, [verifiedAllow]), []);
+});
+
+test("recipe var defaults are the build() fallbacks: an empty required var builds what the form shows", () => {
+  for (const key of ["geo_fence", "geo_fence_admin", "lock_panel_subdomains", "geo_challenge", "throttle_hot_path", "lock_dev_sites", "bots_read_only", "bots_no_qs"]) {
+    const rcp = recipe(key);
+    const withDefaults = rcp.build(recipeVarsDefaults(rcp, { vhosts: "a.com" }));
+    const emptied = { ...recipeVarsDefaults(rcp, { vhosts: "a.com" }) };
+    for (const v of rcp.vars) if (v.required && v.key !== "vhosts" && v.type !== "select") emptied[v.key] = "";
+    // web_vhosts is optional and "" means none there, so compare only the rules the defaults produce
+    const built = rcp.build(emptied).map((r) => JSON.stringify(r));
+    for (const r of withDefaults) if (!(key === "lock_panel_subdomains" && r.scope.vhosts[0] === "cpanel.*")) assert.ok(built.includes(JSON.stringify(r)), `${key}: ${r.note}`);
+  }
 });
 
 test("validateRuleForm counts the note in bytes like the daemon", () => {

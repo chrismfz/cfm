@@ -707,14 +707,16 @@ func jsStringList(t *testing.T, src, name string) []string {
 	if start < 0 {
 		t.Fatalf("rules-model.js has no %s", name)
 	}
+	// The list ends at the `])` that closes Object.freeze([...]) — not at the
+	// first ']' — so a pattern carrying a character class survives the parse.
 	open := strings.Index(src[start:], "[")
-	end := strings.Index(src[start:], "]")
+	end := strings.Index(src[start:], "])")
 	if open < 0 || end < 0 || end < open {
 		t.Fatalf("%s not a bracketed list", name)
 	}
 	var out []string
-	for _, m := range regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(src[start+open:start+end], -1) {
-		out = append(out, m[1])
+	for _, m := range regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`).FindAllStringSubmatch(src[start+open:start+end], -1) {
+		out = append(out, jsUnescape(t, m[1]))
 	}
 	if len(out) == 0 {
 		t.Fatalf("%s is empty", name)
@@ -728,7 +730,42 @@ func jsStringConst(t *testing.T, src, name string) string {
 	if m == nil {
 		t.Fatalf("rules-model.js has no string constant %s", name)
 	}
-	return m[1]
+	return jsUnescape(t, m[1])
+}
+
+// jsUnescape turns the SOURCE text of a JS double-quoted string literal into
+// its runtime value, so the parity tests exercise what the browser actually
+// sends (a regex written as "\\d" in the source is `\d` at runtime). Only the
+// escapes a recipe constant could plausibly carry are supported; anything
+// else fails loudly rather than silently testing a different string.
+func jsUnescape(t *testing.T, src string) string {
+	t.Helper()
+	if !strings.Contains(src, `\`) {
+		return src
+	}
+	var b strings.Builder
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		if c != '\\' {
+			b.WriteByte(c)
+			continue
+		}
+		i++
+		if i >= len(src) {
+			t.Fatalf("dangling backslash in %q", src)
+		}
+		switch src[i] {
+		case '\\', '"', '\'', '/':
+			b.WriteByte(src[i])
+		case 'n':
+			b.WriteByte('\n')
+		case 't':
+			b.WriteByte('\t')
+		default:
+			t.Fatalf("unsupported JS escape \\%c in %q — extend jsUnescape", src[i], src)
+		}
+	}
+	return b.String()
 }
 
 // TestRecipeProbePathsMatchScannerPaths runs the cfm-admin "Block secret /
@@ -839,5 +876,15 @@ func TestTrafficRuleExamplesNormalize(t *testing.T) {
 		if _, err := normalizeTrafficRule(in, true); err != nil {
 			t.Errorf("%s: rules/add would reject it: %v", filepath.Base(f), err)
 		}
+	}
+}
+
+func TestJSStringHelpersUnescape(t *testing.T) {
+	src := "export const A = \"(?:x|\\\\d+)\";\nexport const L = Object.freeze([\n  \"/a[.]b\",\n  \"/c\\\\d\",\n]);\n"
+	if got, want := jsStringConst(t, src, "A"), `(?:x|\d+)`; got != want {
+		t.Errorf("jsStringConst = %q, want %q", got, want)
+	}
+	if got, want := jsStringList(t, src, "L"), []string{"/a[.]b", `/c\d`}; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("jsStringList = %q, want %q (a ']' inside a class must not end the list)", got, want)
 	}
 }

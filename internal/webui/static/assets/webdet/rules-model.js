@@ -719,9 +719,15 @@ function clampNote(s) {
   if (byteLen(v) <= LIMITS.noteLen) return v;
   const ellipsis = "…";
   const budget = LIMITS.noteLen - byteLen(ellipsis);
+  // Walk code points with their UTF-8 width (1/2/3/4 bytes) so a multi-byte
+  // character is never cut in half and nothing is re-encoded per keystroke.
   let out = "";
+  let used = 0;
   for (const ch of v) {
-    if (byteLen(out + ch) > budget) break;
+    const cp = ch.codePointAt(0);
+    const w = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    if (used + w > budget) break;
+    used += w;
     out += ch;
   }
   return out + ellipsis;
@@ -850,15 +856,22 @@ export function shadowingRules(row, rules = []) {
     // narrower than the row → only a subset of its clients is shadowed; skip
     if ((m.path_any || []).length || (m.ip_any || []).length || (m.country_in || []).length || (m.country_not_in || []).length) return false;
     if (m.has_qs && !row.match?.has_qs) return false;
+    // a pass-through regex on the earlier rule lets some queries fall through
+    // to the row unless the row carries the very same one
+    if (m.qs_not_rx && m.qs_not_rx !== row.match?.qs_not_rx) return false;
     const theirMethods = (m.methods || []).map((x) => String(x).toUpperCase());
     if (theirMethods.length && (!rowMethods.length || !rowMethods.every((x) => theirMethods.includes(x)))) return false;
-    if (m.verified_bot && verifiable) return true;
     const theirs = (m.ua_any || []).map((u) => String(u).toLowerCase());
+    // conditions are AND-ed in the daemon: verified_bot + ua_any only covers
+    // the row's verifiable UAs that the earlier rule also names
+    if (m.verified_bot) return theirs.length ? theirs.some((u) => uas.includes(u) && VERIFIABLE_UA_GLOBS_LC.has(u)) : verifiable;
     return theirs.some((u) => uas.includes(u));
   });
 }
-// ACME / CA DCV validators fetch these; a pattern that the matcher would
-// resolve onto either of them must never become a rule target.
+// ACME / CA DCV validators fetch these. cfm.lua Step 0a1 routes the whole
+// /.well-known/ prefix to the origin before traffic rules run, so no rule can
+// reach them at the edge; the refusal below is defence-in-depth plus a
+// catch-all detector (a pattern the matcher resolves onto these is "/"-wide).
 const WELL_KNOWN_PROBES = Object.freeze(["/.well-known/acme-challenge/token", "/.well-known/pki-validation/fileauth.txt"]);
 function patternHitsWellKnown(p) {
   // Two guards: anything the matcher would resolve onto a real probe path
@@ -872,6 +885,18 @@ function patternHitsWellKnown(p) {
 
 const VAR_VHOSTS = { key: "vhosts", label: "Vhosts", type: "vhosts", placeholder: "example.com, *.example.com", required: true };
 const VAR_GROUPS = Object.freeze({ key: "groups", label: `Bot groups (${BOT_GROUPS.map((g) => g.key).join(", ")})`, type: "botgroups", default: "social, ai, seo", required: true });
+// Recipe vars whose `default` is also the build() fallback: defined once so
+// the two can never drift (varDefault reads the fallback off the var itself).
+const VAR_COUNTRIES_HOME = Object.freeze({ key: "countries", label: "Allowed countries", type: "countries", default: "GR, CY", required: true });
+const VAR_COUNTRIES_GR = Object.freeze({ key: "countries", label: "Allowed countries", type: "countries", default: "GR", required: true });
+const VAR_ADMIN_PATHS = Object.freeze({ key: "paths", label: "Admin paths", type: "paths", default: "/wp-admin/, /wp-login.php" });
+const VAR_PANEL_SVC = Object.freeze({ key: "svc_vhosts", label: "Service subdomains (block outside)", type: "vhosts", default: "cpcalendars.*, cpcontacts.*, webdisk.*, autodiscover.*, autoconfig.*", required: true });
+const VAR_PANEL_WEB = Object.freeze({ key: "web_vhosts", label: "Browser panel subdomains (challenge outside)", type: "vhosts", default: "cpanel.*, webmail.*" });
+const VAR_GEO_CHALLENGE_COUNTRIES = Object.freeze({ key: "countries", label: "Countries", type: "countries", default: "SG, RU", required: true });
+const VAR_HOT_PATHS = Object.freeze({ key: "paths", label: "Paths (a /path?param form matches the parameter on any path)", type: "paths", default: "/wp-admin/admin-ajax.php, /?wc-ajax, /forum/download/file.php", required: true });
+function varDefault(v) {
+  return csvSplit(v?.default);
+}
 const VAR_IPS_OPTIONAL = Object.freeze({ key: "ips", label: "Always allow these IPs / ranges (office, monitors — optional)", type: "ips", placeholder: "203.0.113.0/24, 2001:db8::/48" });
 
 // Bot-facing rules that create real collateral if enabled blindly: the
@@ -913,7 +938,7 @@ export const RECIPES = Object.freeze([
     description: "Serve the site to visitors from the listed countries, to FCrDNS-verified crawlers and to your own IP ranges; block everyone else with one country_not_in rule.",
     vars: [
       VAR_VHOSTS,
-      { key: "countries", label: "Allowed countries", type: "countries", default: "GR, CY", required: true },
+      VAR_COUNTRIES_HOME,
       VAR_IPS_OPTIONAL,
     ],
     warnings: [
@@ -925,7 +950,7 @@ export const RECIPES = Object.freeze([
     ],
     build(vars) {
       const vhosts = vhostsVar(vars);
-      const cc = countriesVar(vars, ["GR", "CY"]);
+      const cc = countriesVar(vars, varDefault(VAR_COUNTRIES_HOME));
       const ips = ipsVar(vars);
       const k = "geo_fence";
       const out = [
@@ -946,15 +971,15 @@ export const RECIPES = Object.freeze([
     description: "One rule: visitors outside the listed countries get the challenge (or a block) on the admin/login paths. The rest of the site is untouched.",
     vars: [
       VAR_VHOSTS,
-      { key: "countries", label: "Allowed countries", type: "countries", default: "GR", required: true },
-      { key: "paths", label: "Admin paths", type: "paths", default: "/wp-admin/, /wp-login.php" },
+      VAR_COUNTRIES_GR,
+      VAR_ADMIN_PATHS,
       { key: "action", label: "Everyone else gets", type: "select", options: ["challenge", "block"], default: "challenge" },
     ],
     warnings: ["Loaded disabled; enable after a simulator run.", "Challenge cannot be passed by non-browser clients (apps, integrations) hitting these paths.", "Visitors whose country cannot be resolved are not matched (fail-open)."],
     build(vars) {
       const vhosts = vhostsVar(vars);
-      const cc = countriesVar(vars, ["GR"]);
-      const paths = pathsVar(vars, ["/wp-admin/", "/wp-login.php"]);
+      const cc = countriesVar(vars, varDefault(VAR_COUNTRIES_GR));
+      const paths = pathsVar(vars, varDefault(VAR_ADMIN_PATHS));
       const act = vars?.action === "block" ? "block" : "challenge";
       const k = "geo_fence_admin";
       return [
@@ -1066,7 +1091,7 @@ export const RECIPES = Object.freeze([
     vars: [VAR_VHOSTS, { key: "paths", label: "Extra paths (optional)", type: "paths", placeholder: "/backup/, /old/" }],
     warnings: [
       "Created ENABLED: nothing legitimate lives on these paths. Review the list once — a site that really serves .sql or .bak downloads needs those two patterns removed.",
-      "/.well-known/ must never be added here: ACME / CA validation for SSL issuance fetches it (the recipe refuses it).",
+      "/.well-known/ is refused: ACME / CA validation for SSL issuance fetches it. The edge already exempts that prefix from traffic rules (cfm.lua Step 0a1), so this is defence-in-depth against a pattern wide enough to cover it.",
       "Scope it to * (admin) to cover every vhost on the server.",
       "Path matching is case-sensitive at the edge: a /.ENV or /PHPINFO.php probe slips past this rule (rare in the wild; the challenge engine still catches the sweep).",
     ],
@@ -1089,7 +1114,7 @@ export const RECIPES = Object.freeze([
     build(vars) {
       const vhosts = vhostsVar(vars);
       const k = "bots_read_only";
-      return groupsVar(vars, ["social", "ai", "seo"]).map((g, i) => {
+      return groupsVar(vars, varDefault(VAR_GROUPS)).map((g, i) => {
         const risky = GROUPS_WITH_COLLATERAL.has(g.key) || g.key === "search";
         return rule(k, { enabled: !risky, priority: 350 + i, vhosts, match: { ua_any: g.patterns.slice(), methods: [...WRITE_METHODS] }, action: { type: "block" }, text: `${g.phrase} never write${risky ? " (disabled — legitimate writers may match)" : ""}` });
       });
@@ -1117,7 +1142,7 @@ export const RECIPES = Object.freeze([
       // An empty regex means "nothing passes": the rule then matches every bot
       // GET that carries a query string (qs_not_rx omitted, has_qs alone).
       const qsOK = String(vars?.qs_ok ?? "").trim() || undefined;
-      return groupsVar(vars, ["social", "ai", "seo"]).map((g, i) =>
+      return groupsVar(vars, varDefault(VAR_GROUPS)).map((g, i) =>
         rule(k, {
           enabled: false,
           priority: (throttle ? 170 : 360) + i,
@@ -1135,9 +1160,9 @@ export const RECIPES = Object.freeze([
     title: "Lock panel service subdomains to your countries",
     description: "The cPanel proxy subdomains are brute-force and scanner targets (cpcalendars.* at 9 rps of 401s from one IP, webdisk.*, autodiscover.*/autoconfig.* uniq-path sweeps from Google Cloud). DAV / mail-autodiscovery subdomains get a BLOCK for visitors outside the listed countries (those clients cannot solve a challenge); the browser ones (cpanel.*, webmail.*) get the challenge.",
     vars: [
-      { key: "svc_vhosts", label: "Service subdomains (block outside)", type: "vhosts", default: "cpcalendars.*, cpcontacts.*, webdisk.*, autodiscover.*, autoconfig.*", required: true },
-      { key: "web_vhosts", label: "Browser panel subdomains (challenge outside)", type: "vhosts", default: "cpanel.*, webmail.*" },
-      { key: "countries", label: "Allowed countries", type: "countries", default: "GR, CY", required: true },
+      VAR_PANEL_SVC,
+      VAR_PANEL_WEB,
+      VAR_COUNTRIES_HOME,
       VAR_IPS_OPTIONAL,
     ],
     warnings: [
@@ -1147,9 +1172,10 @@ export const RECIPES = Object.freeze([
       "Visitors whose country cannot be resolved are NOT matched (fail-open).",
     ],
     build(vars) {
-      const svc = hostsVar(vars, "svc_vhosts", ["cpcalendars.*", "cpcontacts.*", "webdisk.*", "autodiscover.*", "autoconfig.*"]);
-      const web = hostsVar(vars, "web_vhosts", []);
-      const cc = countriesVar(vars, ["GR", "CY"]);
+      const svc = hostsVar(vars, VAR_PANEL_SVC.key, varDefault(VAR_PANEL_SVC));
+      // web_vhosts is optional: an emptied field means "no browser subdomains", not the default
+      const web = hostsVar(vars, VAR_PANEL_WEB.key, []);
+      const cc = countriesVar(vars, varDefault(VAR_COUNTRIES_HOME));
       const ips = ipsVar(vars);
       const k = "lock_panel_subdomains";
       const out = [];
@@ -1170,7 +1196,7 @@ export const RECIPES = Object.freeze([
     vars: [
       VAR_VHOSTS,
       { key: "mode", label: "Challenge visitors…", type: "select", options: ["from", "outside"], default: "from" },
-      { key: "countries", label: "Countries", type: "countries", default: "SG, RU", required: true },
+      VAR_GEO_CHALLENGE_COUNTRIES,
       { key: "paths", label: "Only on these paths (optional; empty = whole site)", type: "paths", placeholder: "/product/, /category/" },
       VAR_IPS_OPTIONAL,
     ],
@@ -1182,7 +1208,7 @@ export const RECIPES = Object.freeze([
     ],
     build(vars) {
       const vhosts = vhostsVar(vars);
-      const cc = countriesVar(vars, ["SG", "RU"]);
+      const cc = countriesVar(vars, varDefault(VAR_GEO_CHALLENGE_COUNTRIES));
       const outside = vars?.mode === "outside";
       const paths = pathsVar(vars, []);
       const ips = ipsVar(vars);
@@ -1221,7 +1247,7 @@ export const RECIPES = Object.freeze([
     description: "A per-IP rate limit on one or more paths, with no User-Agent condition: admin-ajax.php bursts (20 POST/s from one visitor), WooCommerce ?wc-ajax= fragments, forum attachment downloads. The fix for the \"a few IPs at many times the site's per-IP median\" shape that hides under the vhost score.",
     vars: [
       VAR_VHOSTS,
-      { key: "paths", label: "Paths (a /path?param form matches the parameter on any path)", type: "paths", default: "/wp-admin/admin-ajax.php, /?wc-ajax, /forum/download/file.php", required: true },
+      VAR_HOT_PATHS,
       { key: "profile", label: "Profile", type: "select", options: THROTTLE_PROFILES.map((p) => p.key), default: "soft_bot" },
     ],
     warnings: [
@@ -1229,7 +1255,7 @@ export const RECIPES = Object.freeze([
       "\"/?wc-ajax\" means: any path, when the query carries wc-ajax (so /en/?wc-ajax=… is covered too).",
     ],
     build(vars) {
-      const paths = pathsVar(vars, ["/wp-admin/admin-ajax.php", "/?wc-ajax", "/forum/download/file.php"]);
+      const paths = pathsVar(vars, varDefault(VAR_HOT_PATHS));
       const profile = throttleProfile(vars?.profile) ? String(vars.profile) : "soft_bot";
       return [rule("throttle_hot_path", { enabled: false, priority: 180, vhosts: vhostsVar(vars), match: { path_any: paths }, action: { type: "throttle", profile }, text: `throttle ${shortList(paths)} for everyone at ${profile} (disabled — validate first)` })];
     },
@@ -1241,7 +1267,7 @@ export const RECIPES = Object.freeze([
     description: "Nobody outside your country (and your office ranges) should see a dev site: they are the first stop of phpinfo / .env sweeps and they get indexed by mistake. Everyone outside the listed countries gets the challenge; office ranges pass.",
     vars: [
       { key: "vhosts", label: "Vhosts", type: "vhosts", placeholder: "dev.*, staging.*, test.*, dev.example.com", required: true },
-      { key: "countries", label: "Allowed countries", type: "countries", default: "GR", required: true },
+      VAR_COUNTRIES_GR,
       VAR_IPS_OPTIONAL,
     ],
     warnings: [
@@ -1250,7 +1276,7 @@ export const RECIPES = Object.freeze([
     ],
     build(vars) {
       const vhosts = vhostsVar(vars);
-      const cc = countriesVar(vars, ["GR"]);
+      const cc = countriesVar(vars, varDefault(VAR_COUNTRIES_GR));
       const ips = ipsVar(vars);
       const k = "lock_dev_sites";
       const out = [];
@@ -1341,8 +1367,8 @@ export function validateRecipeVars(rcp, vars) {
       for (const key of csvSplit(raw)) if (!botGroup(key.toLowerCase())) errors.push(`"${key}" is not a bot group (use ${BOT_GROUPS.map((g) => g.key).join(", ")}).`);
     }
     if (v.type === "paths") {
-      const ps = csvSplit(raw).map((p) => (p.startsWith("/") ? p : "/" + p));
-      for (const p of ps) if (patternHitsWellKnown(p)) errors.push(`"${p}" would match /.well-known/ — ACME/DCV validation lives there, so it is never a rule target (a bare "/" or "/*" matches everything).`);
+      const ps = pathsVar({ paths: raw }, []);
+      for (const p of ps) if (patternHitsWellKnown(p)) errors.push(`"${p}" would also match /.well-known/ (ACME/DCV validation). The edge exempts that prefix from rules, but a pattern this wide is not what a path recipe is for — a bare "/" or "/*" matches everything; use the site-wide recipes for that.`);
       // The daemon counts raw entries (len(in) > max runs before its dedupe).
       // block_probe_paths prepends its fixed list and drops extras it already
       // carries; every other recipe sends the operator's list as typed.
