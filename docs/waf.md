@@ -1571,7 +1571,9 @@ block-path holes — 301 still blocks the adjacent form.
 > (`TRAVERSAL = 0` in `detectors.conf`, held in code): at threshold 1 the
 > volume above is ~330 six-hour bans and alerts a day, which the operator arms
 > deliberately with `TRAVERSAL = 1` (`DRY_RUN = 1` to preview). Operators who
-> pinned `rule_traversal` in `/etc/cfm/*` keep their setting.
+> pinned `rule_traversal` to a string mode in `/etc/cfm/*` keep their setting;
+> a legacy boolean `rule_traversal = true` pin means "enabled at the built-in
+> tier" and follows the new default, i.e. it now blocks.
 >
 > ### ✅ FP review — DONE 2026-07 (promoted)
 > A 6-server `cfm.waf.log` review (titan, virgo, orion, rigel, earth, mars)

@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"strings"
 	"testing"
 
 	"cfm/internal/webdetector"
@@ -34,15 +35,19 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	for _, f := range fams {
 		def := cov[f]
 		block := webdetector.WAFFamilyHasBlockRule(f)
+		_, held := heldAutoblockFamilies[f]
 		switch {
-		case f == "WAF_TRAVERSAL":
-			// Rule 101 is edge-block (promoted 2026-09-05) but the family is
-			// deliberately HELD at 0 through its burn-in — see the register.
+		case held:
+			// A held family has an edge-block rule (otherwise the hold is
+			// meaningless) but is deliberately kept at 0 through its burn-in.
 			if !block {
-				t.Errorf("expected WAF_TRAVERSAL to have an edge-block rule (101)")
+				t.Errorf("%s is in heldAutoblockFamilies but has no edge-block rule — drop the hold", f)
 			}
 			if def != 0 {
-				t.Errorf("WAF_TRAVERSAL is held through burn-in but defaults to %d, want 0", def)
+				t.Errorf("%s is held through burn-in but defaults to %d, want 0", f, def)
+			}
+			if tmpl := wafSecurityDefaultsTemplate()[strings.TrimPrefix(f, "WAF_")]; tmpl != "0" {
+				t.Errorf("%s is held but the rendered detectors.conf default is %q, want \"0\"", f, tmpl)
 			}
 		case block && def != 1:
 			t.Errorf("%s has an edge-block rule but defaults to %d, want 1", f, def)
@@ -52,6 +57,12 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	}
 	if cov["WAF_BACKDOOR"] != 1 {
 		t.Errorf("WAF_BACKDOOR should be armed to 1, got %d", cov["WAF_BACKDOOR"])
+	}
+	// The hold is a conscious, dated decision: WAF_TRAVERSAL (rule 101, block
+	// since 2026-09-05) is the one family held today. Arming it is a deletion
+	// from heldAutoblockFamilies — and this assertion.
+	if _, held := heldAutoblockFamilies["WAF_TRAVERSAL"]; !held {
+		t.Errorf("WAF_TRAVERSAL is no longer held — if that is deliberate, update the reference detectors.conf, CLAUDE.md §6 and this test")
 	}
 	// WAF_WEBSHELL and WAF_CVE both have edge-block rules (413 / 10001) — assert it,
 	// so if someone later removes them this test's premise is rechecked.

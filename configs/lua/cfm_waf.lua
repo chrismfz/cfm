@@ -900,8 +900,10 @@ function _M.check(ctx)
   end
 
   -- ── 3c) Slider Revolution virtual-patch (CVE-2015-1579 LFI + upload RCE) ────
-  -- Runs before rule 5 (traversal) so the REVSLIDER:LFI attribution wins over a
-  -- generic WAF_TRAVERSAL hit for the same request. Behavioural, all-methods.
+  -- Runs before the traversal step (rule 101 — evaluated after every armed
+  -- block-tier family, just before the LAST step) so the REVSLIDER:LFI
+  -- attribution wins over a generic WAF_TRAVERSAL hit for the same request.
+  -- Behavioural, all-methods.
   do
     local mode = rule_mode(CFG.rule_cve_revslider, "block")
     if mode ~= "disabled" then

@@ -60,7 +60,11 @@ back-filled here — see the git/PR history for that period.
   scanner IPs a week fleet-wide (~330 six-hour bans + alerts a day) that the
   edge already answers with 403; arm with `TRAVERSAL = 1` (or preview with
   `DRY_RUN = 1`) when that volume is acceptable. Operators who pinned
-  `rule_traversal` in `/etc/cfm/*` keep their setting. New
+  `rule_traversal` to a string mode in `/etc/cfm/*` keep their setting; a
+  legacy boolean `rule_traversal = true` pin ("enabled at the built-in tier")
+  follows the new default and now blocks. The traversal step also moves to
+  run **after every armed block-tier family** so the held family can never
+  shadow their bans on a request that carries both (see `docs/waf.md`). New
   `scripts/tests/cfm_waf_traversal_test.lua` pins the block tier and the
   detector's positives/negatives.
 - **WAF `WAF_FETCH_METADATA` (rule 612) hygiene, round 2: two more honest

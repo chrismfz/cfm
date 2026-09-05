@@ -52,6 +52,15 @@ import (
 // The edge already returns 403 to every hit; the ban adds cross-request
 // persistence and notification, which the operator arms with `TRAVERSAL = 1`
 // once the alert volume is judged acceptable (or with DRY_RUN = 1 first).
+//
+// heldAutoblockFamilies is the ONE source for that hold: the default loop,
+// the DefaultsTemplate rendered into a fresh detectors.conf and
+// TestWAFSecurityFamilyCoverage all read it, so arming a family later is a
+// one-line deletion here (plus the reference detectors.conf comment).
+var heldAutoblockFamilies = map[string]string{
+	"WAF_TRAVERSAL": "rule 101 is edge-block since 2026-09-05 but the family is HELD un-armed for burn-in (volume: ~2 300 scanner IPs/week). Set 1 to ban.",
+}
+
 func wafSecurityFamilies(kv KV) map[string]int {
 	families := map[string]int{}
 	for _, fam := range webdetector.WAFReasonFamilies() {
@@ -59,8 +68,8 @@ func wafSecurityFamilies(kv KV) map[string]int {
 		if webdetector.WAFFamilyHasBlockRule(fam) || fam == "WAF_BACKDOOR" {
 			def = 1
 		}
-		if fam == "WAF_TRAVERSAL" {
-			def = 0 // held through burn-in, see above
+		if _, held := heldAutoblockFamilies[fam]; held {
+			def = 0
 		}
 		key := strings.TrimPrefix(fam, "WAF_")
 		families[fam] = kvInt(kv, key, def)
@@ -68,19 +77,30 @@ func wafSecurityFamilies(kv KV) map[string]int {
 	return families
 }
 
+// wafSecurityDefaultsTemplate is the [waf_security] block a fresh
+// detectors.conf is rendered from; held families are added from
+// heldAutoblockFamilies so the rendered default can never drift from the
+// code default.
+func wafSecurityDefaultsTemplate() map[string]string {
+	t := map[string]string{
+		"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0",
+		"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BACKDOOR": "1",
+		"WEBSHELL": "1", // edge-block rule 413; armed by default (blocks webshell-probing scanners/bots). Exempt a source with ALLOW_UA_CONTAINS/ALLOW_NETS or hold with RULE_413=0.
+		"CVE":      "1", // named-vuln family; armed (rule 10001 is block). Hold a low-confidence CVE rule with RULE_<id>=0 when it lands.
+		"BLOCK":    "6h",
+	}
+	for fam := range heldAutoblockFamilies {
+		t[strings.TrimPrefix(fam, "WAF_")] = "0"
+	}
+	return t
+}
+
 func init() {
 	meta.Register(meta.DetectorMeta{
-		TypeKey:     "waf_security",
-		Title:       "WAF security",
-		Description: "Persistent cross-request nft block from in-path WAF hits, scored per reason-family.",
-		DefaultsTemplate: map[string]string{
-			"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0",
-			"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BACKDOOR": "1",
-			"WEBSHELL":  "1", // edge-block rule 413; armed by default (blocks webshell-probing scanners/bots). Exempt a source with ALLOW_UA_CONTAINS/ALLOW_NETS or hold with RULE_413=0.
-			"CVE":       "1", // named-vuln family; armed (rule 10001 is block). Hold a low-confidence CVE rule with RULE_<id>=0 when it lands.
-			"TRAVERSAL": "0", // rule 101 is edge-block since 2026-09-05 but the family is HELD un-armed for burn-in (volume: ~2 300 scanner IPs/week). Set 1 to ban.
-			"BLOCK":     "6h",
-		},
+		TypeKey:             "waf_security",
+		Title:               "WAF security",
+		Description:         "Persistent cross-request nft block from in-path WAF hits, scored per reason-family.",
+		DefaultsTemplate:    wafSecurityDefaultsTemplate(),
 		LeniencySupported:   true,
 		LeniencyRecommended: true,
 	})
