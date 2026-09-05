@@ -151,6 +151,7 @@
               <button type="button" class="chip" :class="{ on: ruleChips.paths }" @click="toggleChip('paths')">Endpoint / path</button>
               <button type="button" class="chip" :class="{ on: ruleChips.uas }" @click="toggleChip('uas')">User-Agent / bot</button>
               <button type="button" class="chip" :class="{ on: ruleChips.countries }" @click="toggleChip('countries')">Country</button>
+              <button type="button" class="chip" :class="{ on: ruleChips.ips }" @click="toggleChip('ips')">IP / range</button>
               <button type="button" class="chip" :class="{ on: ruleChips.methods }" @click="toggleChip('methods')">Method</button>
               <button type="button" class="chip" :class="{ on: ruleChips.qs }" @click="toggleChip('qs')">Query string</button>
             </div>
@@ -175,9 +176,21 @@
               </template>
 
               <template v-if="ruleChips.countries">
-                <label for="rule-countries">Countries</label>
-                <input id="rule-countries" class="input" type="text" v-model.trim="ruleForm.countries" placeholder="GR, CY" />
-                <p class="muted form-hint">ISO 3166-1 alpha-2 codes, comma-separated. There is no “not in” yet — for “everyone except …” use the <em>Allow only these countries</em> recipe (allow first, block everything after).</p>
+                <label for="rule-countries">Country</label>
+                <div class="inline-field">
+                  <select id="rule-countries-mode" class="input input-mode" v-model="ruleForm.countriesMode" title="is: match visitors FROM these countries · is not: match visitors from anywhere ELSE">
+                    <option value="in">is one of</option>
+                    <option value="not_in">is NOT one of</option>
+                  </select>
+                  <input id="rule-countries" class="input" type="text" v-model.trim="ruleForm.countries" placeholder="GR, CY" />
+                </div>
+                <p class="muted form-hint">ISO 3166-1 alpha-2 codes, comma-separated. <strong>is NOT one of</strong> also matches visitors whose IP has no country in the geo database — add an <em>IP / range</em> allow above the rule for office and monitoring addresses.</p>
+              </template>
+
+              <template v-if="ruleChips.ips">
+                <label for="rule-ips">IP / range</label>
+                <input id="rule-ips" class="input" type="text" v-model.trim="ruleForm.ips" placeholder="203.0.113.0/24, 198.51.100.7, 2001:db8::/48" />
+                <p class="muted form-hint">IPv4 / IPv6 addresses or CIDR ranges, comma-separated; the client IP must be inside one of them. Typical use: an <em>allow</em> for your office or uptime monitors placed above a country block.</p>
               </template>
 
               <template v-if="ruleChips.methods">

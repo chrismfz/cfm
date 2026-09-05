@@ -36,6 +36,25 @@ back-filled here — see the git/PR history for that period.
   that block disabled so monitors without a UA can be checked first.
 
 ### Added
+- **Traffic rules: `country_not_in` and `ip_any` match fields** (Phase 2 of the
+  Traffic Rules UX proposal). A geo-fence is now ONE rule — `block` with
+  `country_not_in: [GR, CY]` — instead of an allow/block pair, and an operator
+  can finally say "my office / uptime monitors always pass" with an `allow` on
+  `ip_any` (IPv4/IPv6 CIDR or bare address, stored masked + canonical). Rules:
+  `country_in` and `country_not_in` are mutually exclusive; an unknown country
+  (`""` — the edge's fail-open sentinel for geo-not-resolved / geo module down /
+  panel requests) does **not** match `country_not_in`, so a geo hiccup never turns
+  a fence into a block of every visitor (documented in the UI hint and README
+  §15); a missing or invalid client IP never matches `ip_any`, and v4-mapped v6
+  entries are canonicalised to plain v4 so they can actually match. cfm-admin gains an *is / is NOT one
+  of* switch on the Country condition and an *IP / range* condition; the *Allow
+  only these countries* recipe shrinks to good-bots-allow + (optional office
+  ranges allow) + one disabled `country_not_in` block, *Admin area only from
+  these countries* becomes a single rule, and a new *Always allow office /
+  monitoring IPs* recipe is added. `cfm rules list` shows `cc!=` / `ip=` in the
+  match summary. Go tests cover both fields incl. IPv6, v4-mapped addresses and
+  the geo-fence composition; the JS model mirror validates CIDR syntax before
+  save. README §15 gains a match-field reference table.
 - **cfm-admin Traffic Rules: guided editor + recipes.** The flat form is
   replaced by a three-step builder — *what should happen* (action cards with
   the real consequence spelled out, throttle profiles as a select with their

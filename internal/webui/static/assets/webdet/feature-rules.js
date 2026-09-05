@@ -40,13 +40,14 @@ import {
   validateRuleForm,
 } from "./rules-model.js";
 
-const CHIP_KEYS = ["paths", "uas", "countries", "methods", "qs"];
+const CHIP_KEYS = ["paths", "uas", "countries", "ips", "methods", "qs"];
 
 function chipsFromForm(form) {
   return {
     paths: Boolean(form.paths),
     uas: Boolean(form.uas),
     countries: Boolean(form.countries),
+    ips: Boolean(form.ips),
     methods: Boolean(form.methods),
     qs: Boolean(form.hasQS || form.qsNotRx),
   };
@@ -229,6 +230,7 @@ export const rulesMixin = {
       // Turning a chip off clears its condition so the review sentence and
       // the saved rule never carry a hidden field.
       if (key === "qs") { this.ruleForm.hasQS = false; this.ruleForm.qsNotRx = ""; }
+      else if (key === "countries") { this.ruleForm.countries = ""; this.ruleForm.countriesMode = "in"; }
       else this.ruleForm[key] = "";
     },
     addBotGroup(key) {

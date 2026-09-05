@@ -252,6 +252,8 @@ export function emptyForm(overrides = {}) {
     priority: 0, // 0 → suggestPriority() at save/review time
     vhosts: "",
     countries: "",
+    countriesMode: "in", // "in" | "not_in"
+    ips: "",
     uas: "",
     paths: "",
     methods: "",
@@ -284,7 +286,9 @@ export function buildRulePayload(form) {
     priority: Number.isFinite(prio) && prio > 0 ? Math.floor(prio) : 0,
     scope: { vhosts: csvSplit(f.vhosts).map((h) => h.toLowerCase()) },
     match: {
-      country_in: csvSplit(f.countries).map((x) => x.toUpperCase()),
+      country_in: f.countriesMode === "not_in" ? [] : csvSplit(f.countries).map((x) => x.toUpperCase()),
+      country_not_in: f.countriesMode === "not_in" ? csvSplit(f.countries).map((x) => x.toUpperCase()) : [],
+      ip_any: csvSplit(f.ips),
       ua_any: csvSplit(f.uas),
       path_any: csvSplit(f.paths).map((p) => (p.startsWith("/") ? p : "/" + p)),
       methods: csvSplit(f.methods).map((x) => x.toUpperCase()),
@@ -309,7 +313,9 @@ export function formFromRule(row) {
     enabled: Boolean(r.enabled),
     priority: Number(r.priority || 0),
     vhosts: list(r?.scope?.vhosts),
-    countries: list(r?.match?.country_in),
+    countries: list(r?.match?.country_not_in?.length ? r.match.country_not_in : r?.match?.country_in),
+    countriesMode: r?.match?.country_not_in?.length ? "not_in" : "in",
+    ips: list(r?.match?.ip_any),
     uas: list(r?.match?.ua_any),
     paths: list(r?.match?.path_any),
     methods: list(r?.match?.methods),
@@ -327,11 +333,47 @@ export function hasAnyMatch(match) {
   const m = match || {};
   return Boolean(
     (m.country_in && m.country_in.length) ||
+      (m.country_not_in && m.country_not_in.length) ||
+      (m.ip_any && m.ip_any.length) ||
       (m.ua_any && m.ua_any.length) ||
       (m.path_any && m.path_any.length) ||
       (m.methods && m.methods.length) ||
       m.has_qs,
   );
+}
+
+// isIPOrCIDR mirrors normalizeIPList's acceptance: an IPv4/IPv6 address, or
+// one with a /prefix within range. Syntax-only — canonicalisation (masking) is
+// the daemon's job and is reflected back after save.
+export function isIPOrCIDR(v) {
+  const s = String(v || "").trim();
+  if (!s) return false;
+  const [addr, bits, extra] = s.split("/");
+  if (extra !== undefined) return false;
+  const OCTET = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
+  const V4 = new RegExp(`^${OCTET}(\\.${OCTET}){3}$`);
+  let is4 = false;
+  if (V4.test(addr)) {
+    is4 = true;
+  } else {
+    // IPv6: hex groups with at most one "::"; a dotted quad only as the LAST group.
+    if (!/^[0-9a-f:.]+$/i.test(addr) || !addr.includes(":")) return false;
+    const parts = addr.split("::");
+    if (parts.length > 2) return false;
+    const groups = parts.flatMap((part) => (part === "" ? [] : part.split(":")));
+    if (!groups.length && parts.length !== 2) return false;
+    let width = 0;
+    for (let i = 0; i < groups.length; i += 1) {
+      const g = groups[i];
+      if (/^[0-9a-f]{1,4}$/i.test(g)) { width += 1; continue; }
+      if (i === groups.length - 1 && V4.test(g)) { width += 2; continue; }
+      return false;
+    }
+    if (parts.length === 2 ? width > 7 : width !== 8) return false;
+  }
+  if (bits === undefined) return true;
+  if (!/^(0|[1-9]\d{0,2})$/.test(bits)) return false;
+  return Number(bits) <= (is4 ? 32 : 128);
 }
 
 // ── Validation (mirrors normalizeTrafficRule; stricter only where the server
@@ -363,9 +405,14 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
     if (/[\s/:@]/.test(h)) errors.push(`Vhost "${h}" is not a hostname — use just the host part (no scheme, path or port).`);
   }
 
-  if (p.match.country_in.length > LIMITS.countriesPerRule) errors.push(`Too many countries (max ${LIMITS.countriesPerRule}).`);
-  for (const cc of p.match.country_in) {
+  const countries = p.match.country_in.length ? p.match.country_in : p.match.country_not_in;
+  if (countries.length > LIMITS.countriesPerRule) errors.push(`Too many countries (max ${LIMITS.countriesPerRule}).`);
+  for (const cc of countries) {
     if (!/^[A-Z]{2}$/.test(cc)) errors.push(`"${cc}" is not a 2-letter country code (use ISO codes like GR, CY, US).`);
+  }
+  if (p.match.ip_any.length > LIMITS.patternsPerField) errors.push(`Too many IPs / ranges (max ${LIMITS.patternsPerField}).`);
+  for (const ip of p.match.ip_any) {
+    if (!isIPOrCIDR(ip)) errors.push(`"${ip}" is not an IPv4/IPv6 address or CIDR range (e.g. 203.0.113.0/24, 2001:db8::/48).`);
   }
   for (const [name, list] of [["UA patterns", p.match.ua_any], ["Path patterns", p.match.path_any], ["Methods", p.match.methods]]) {
     if (list.length > LIMITS.patternsPerField) errors.push(`${name}: too many values (max ${LIMITS.patternsPerField}).`);
@@ -422,6 +469,12 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
   if (p.match.country_in.length) {
     hints.push("Requests whose IP the geo database cannot resolve have no country and never match a country condition.");
   }
+  if (p.match.country_not_in.length) {
+    hints.push("Requests whose country is unknown (geo not resolved, or the geo module down) do NOT match — the fence fails open rather than blocking everyone during a geo hiccup.");
+  }
+  if (p.match.ip_any.length) {
+    hints.push("Ranges are stored canonically (a bare address becomes /32 or /128; host bits are masked off). Behind a proxy the edge must see the real client IP for this to match.");
+  }
 
   return { errors, warnings, hints, payload: p };
 }
@@ -440,11 +493,15 @@ export function describeMatch(match, { max = 3 } = {}) {
   const parts = [];
   const methods = Array.isArray(m.methods) ? m.methods : [];
   const countries = Array.isArray(m.country_in) ? m.country_in : [];
+  const countriesNot = Array.isArray(m.country_not_in) ? m.country_not_in : [];
+  const ips = Array.isArray(m.ip_any) ? m.ip_any : [];
   const uas = Array.isArray(m.ua_any) ? m.ua_any : [];
   const paths = Array.isArray(m.path_any) ? m.path_any : [];
 
   parts.push(methods.length ? `${joinList(methods, max)} requests` : (hasAnyMatch(m) ? "requests" : "every request"));
+  if (ips.length) parts.push(`from IP ${joinList(ips, max)}`);
   if (countries.length) parts.push(`from ${joinList(countries, max)}`);
+  if (countriesNot.length) parts.push(`from outside ${joinList(countriesNot, max)}`);
   if (uas.length) {
     const groups = BOT_GROUPS.filter((g) => g.patterns.every((p) => uas.includes(p)));
     const covered = new Set(groups.flatMap((g) => g.patterns));
@@ -507,14 +564,39 @@ export function simulateInputFromRule(row) {
   const ua = uaName((m.ua_any || [])[0] || "") || "Mozilla/5.0 (X11; Linux x86_64) Firefox/128.0";
   return {
     host,
-    ip: "",
+    ip: sampleIPFromPrefix((m.ip_any || [])[0] || ""),
     // "-" means "no User-Agent": send an empty UA, exactly what the edge sends.
     ua: (m.ua_any || [])[0] === "-" ? "" : ua,
     path,
     method: String((m.methods || [])[0] || "GET"),
-    country: String((m.country_in || [])[0] || ""),
+    country: (m.country_in || [])[0] || sampleCountryOutside(m.country_not_in || []),
     qs,
   };
+}
+
+// sampleIPFromPrefix: a concrete address inside the first ip_any entry
+// ("203.0.113.0/24" → "203.0.113.1", "198.51.100.7/32" → "198.51.100.7",
+// "2001:db8::/48" → "2001:db8::1").
+function sampleIPFromPrefix(entry) {
+  const [addr, bits] = String(entry || "").split("/");
+  if (!addr) return "";
+  if (bits === undefined) return addr;
+  if (addr.includes(":")) {
+    if (Number(bits) >= 128) return addr;
+    return addr.endsWith("::") ? `${addr}1` : addr;
+  }
+  if (Number(bits) >= 32) return addr;
+  const o = addr.split(".").map(Number);
+  if (o.length === 4 && o[3] === 0) o[3] = 1;
+  return o.join(".");
+}
+
+// sampleCountryOutside: a country code the not_in list does NOT contain, so
+// the sample request exercises the rule. "" when the rule has no not_in.
+function sampleCountryOutside(list) {
+  if (!Array.isArray(list) || !list.length) return "";
+  for (const cc of ["US", "DE", "CN", "BR", "IN"]) if (!list.includes(cc)) return cc;
+  return "ZZ";
 }
 
 // ── Recipes ───────────────────────────────────────────────────────────────
@@ -538,6 +620,8 @@ function rule(key, { enabled, priority, vhosts, match = {}, action, text }) {
     scope: { vhosts: vhosts.slice() },
     match: {
       country_in: match.country_in || [],
+      country_not_in: match.country_not_in || [],
+      ip_any: match.ip_any || [],
       ua_any: match.ua_any || [],
       path_any: match.path_any || [],
       methods: match.methods || [],
@@ -555,6 +639,9 @@ function countriesVar(vars, fallback) {
   const cc = csvSplit(vars?.countries).map((c) => c.toUpperCase());
   return cc.length ? cc : fallback;
 }
+function ipsVar(vars) {
+  return csvSplit(vars?.ips);
+}
 function pathsVar(vars, fallback) {
   const ps = csvSplit(vars?.paths).map((p) => (p.startsWith("/") ? p : "/" + p));
   return ps.length ? ps : fallback;
@@ -567,37 +654,45 @@ export const RECIPES = Object.freeze([
     key: "geo_fence",
     kind: "multi",
     title: "Allow only these countries",
-    description: "Serve the site to visitors from the listed countries and to search/social crawlers; block everyone else.",
-    vars: [VAR_VHOSTS, { key: "countries", label: "Allowed countries", type: "countries", default: "GR, CY", required: true }],
+    description: "Serve the site to visitors from the listed countries, to search/social crawlers and to your own IP ranges; block everyone else with one country_not_in rule.",
+    vars: [
+      VAR_VHOSTS,
+      { key: "countries", label: "Allowed countries", type: "countries", default: "GR, CY", required: true },
+      { key: "ips", label: "Always allow these IPs / ranges (office, monitors — optional)", type: "ips", placeholder: "203.0.113.0/24, 2001:db8::/48" },
+    ],
     warnings: [
       "The block rule is created DISABLED. Test with the simulator, then enable it from the table.",
       "Crawlers are allowed by User-Agent, which anyone can forge. A verified-bot (FCrDNS) match is a planned follow-up.",
-      "Visitors whose IP has no country in the geo database are blocked too (no country never matches an allow). Add an allow for office/monitoring ranges when IP matching lands.",
+      "Visitors whose country cannot be resolved are NOT blocked (the fence fails open, so a geo outage never locks everyone out). Office/monitoring ranges are still worth listing: they skip every rule below.",
       "Browsers that already hold a clearance cookie for the vhost keep access until it expires.",
     ],
     build(vars) {
       const vhosts = vhostsVar(vars);
       const cc = countriesVar(vars, ["GR", "CY"]);
+      const ips = ipsVar(vars);
       const k = "geo_fence";
-      return [
+      const out = [
         rule(k, { enabled: true, priority: 10, vhosts, match: { ua_any: GOOD_BOT_UAS }, action: { type: "allow" }, text: "let search/social crawlers through before the fence (UA-based)" }),
-        rule(k, { enabled: true, priority: 20, vhosts, match: { country_in: cc }, action: { type: "allow" }, text: `visitors from ${cc.join(", ")} skip the fence` }),
-        rule(k, { enabled: false, priority: 900, vhosts, action: { type: "block" }, text: "block everyone else — ENABLE after testing" }),
       ];
+      if (ips.length) {
+        out.push(rule(k, { enabled: true, priority: 15, vhosts, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass the fence" }));
+      }
+      out.push(rule(k, { enabled: false, priority: 900, vhosts, match: { country_not_in: cc }, action: { type: "block" }, text: `block everyone outside ${cc.join(", ")} — ENABLE after testing` }));
+      return out;
     },
   },
   {
     key: "geo_fence_admin",
-    kind: "multi",
+    kind: "single",
     title: "Admin area only from these countries",
-    description: "Visitors from the listed countries reach the admin/login paths normally; everyone else gets the challenge there. The rest of the site is untouched.",
+    description: "One rule: visitors outside the listed countries get the challenge (or a block) on the admin/login paths. The rest of the site is untouched.",
     vars: [
       VAR_VHOSTS,
       { key: "countries", label: "Allowed countries", type: "countries", default: "GR", required: true },
       { key: "paths", label: "Admin paths", type: "paths", default: "/wp-admin/, /wp-login.php" },
       { key: "action", label: "Everyone else gets", type: "select", options: ["challenge", "block"], default: "challenge" },
     ],
-    warnings: ["The enforcing rule is created DISABLED; enable it after a simulator run.", "Challenge cannot be passed by non-browser clients (apps, integrations) hitting these paths."],
+    warnings: ["Loaded disabled; enable after a simulator run.", "Challenge cannot be passed by non-browser clients (apps, integrations) hitting these paths.", "Visitors whose country cannot be resolved are not matched (fail-open)."],
     build(vars) {
       const vhosts = vhostsVar(vars);
       const cc = countriesVar(vars, ["GR"]);
@@ -605,9 +700,19 @@ export const RECIPES = Object.freeze([
       const act = vars?.action === "block" ? "block" : "challenge";
       const k = "geo_fence_admin";
       return [
-        rule(k, { enabled: true, priority: 100, vhosts, match: { country_in: cc, path_any: paths }, action: { type: "allow" }, text: `${cc.join(", ")} reach the admin paths normally` }),
-        rule(k, { enabled: false, priority: 101, vhosts, match: { path_any: paths }, action: { type: act }, text: `${act} the admin paths for everyone else — ENABLE after testing` }),
+        rule(k, { enabled: false, priority: act === "block" ? 310 : 250, vhosts, match: { country_not_in: cc, path_any: paths }, action: { type: act }, text: `${act} the admin paths for visitors outside ${cc.join(", ")}` }),
       ];
+    },
+  },
+  {
+    key: "allow_office_ips",
+    kind: "single",
+    title: "Always allow office / monitoring IPs",
+    description: "Your own ranges skip every rule below this one (a country block, a UA throttle…). Does not bypass WAF, challenge or IP blocks.",
+    vars: [VAR_VHOSTS, { key: "ips", label: "IPs / ranges", type: "ips", placeholder: "203.0.113.0/24, 198.51.100.7, 2001:db8::/48", required: true }],
+    build(vars) {
+      const ips = ipsVar(vars);
+      return [rule("allow_office_ips", { enabled: true, priority: 15, vhosts: vhostsVar(vars), match: { ip_any: ips }, action: { type: "allow" }, text: `office / monitoring ranges (${ips.length}) skip the rules below` })];
     },
   },
   {
@@ -718,6 +823,9 @@ export function validateRecipeVars(rcp, vars) {
       for (const cc of csvSplit(raw)) if (!/^[A-Za-z]{2}$/.test(cc)) errors.push(`"${cc}" is not a 2-letter country code.`);
     }
     if (v.type === "vhosts" && csvSplit(raw).length > LIMITS.vhostsPerRule) errors.push(`Too many vhosts (max ${LIMITS.vhostsPerRule}).`);
+    if (v.type === "ips") {
+      for (const ip of csvSplit(raw)) if (!isIPOrCIDR(ip)) errors.push(`"${ip}" is not an IPv4/IPv6 address or CIDR range.`);
+    }
   }
   return errors;
 }

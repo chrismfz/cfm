@@ -862,6 +862,8 @@ code {
 .chip.on { border-style: solid; border-color: var(--accent); color: var(--accent-strong); background: var(--accent-soft); }
 .chip.mini { padding: .1rem .5rem; font-size: .74rem; margin: .1rem .1rem; }
 .inline-field { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; font-size: .84rem; }
+.inline-field .input-mode { width: auto; flex: none; }
+.inline-field > .input:not(.input-mode):not(.input-small) { flex: 1 1 160px; }
 .review-box {
   border: 1px solid var(--border-soft); border-radius: 8px;
   background: var(--card); padding: .55rem .7rem; margin: .4rem 0 .6rem;
