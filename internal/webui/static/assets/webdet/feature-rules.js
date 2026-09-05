@@ -35,6 +35,7 @@ import {
   recipe as recipeByKey,
   recipeOf,
   recipeVarsDefaults,
+  shadowingAllows,
   simulateInputFromRule,
   suggestPriority,
   validateRecipeVars,
@@ -170,6 +171,8 @@ export const rulesMixin = {
       for (const p of rows) {
         const tie = priorityTie(p.priority, p.scope.vhosts, this.rules);
         if (tie) out.push(`Rule #${p.priority} ties with existing ${tie.id} (${tie.action?.type || "?"}) — ties are resolved by id order, which is not predictable.`);
+        const shadow = shadowingAllows(p, this.rules);
+        if (shadow.length) out.push(`Rule #${p.priority} (${p.action?.type}) is shadowed by existing allow ${shadow.map((r) => `${r.id} (#${r.priority})`).join(", ")}: first match wins, so the crawlers that allow covers (verified / listed User-Agents) never reach it. Disable that allow on this vhost or accept that those crawlers pass.`);
       }
       return [...new Set(out)];
     },

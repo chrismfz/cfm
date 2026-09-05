@@ -799,14 +799,45 @@ func TestRecipeProbePathsMatchScannerPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BOT_QS_PASSTHROUGH is not RE2: %v", err)
 	}
-	for _, ok := range []string{"page=2", "fbclid=IwAR0", "utm_source=fb&x=1", "a=1&paged=3", "gclid=abc"} {
+	for _, ok := range []string{"page=2", "fbclid=IwAR0", "utm_source=fb&utm_medium=cpc", "paged=3&lang=el", "gclid=abc", "PAGE=2"} {
 		if !rx.MatchString(ok) {
 			t.Errorf("pass-through %q should match BOT_QS_PASSTHROUGH", ok)
 		}
 	}
-	for _, facet := range []string{"min_price=120&filter_color=red", "ind=k&ind=n", "orderby=price", "pageless=1", "lg-min=10&lv-max=-380"} {
+	// Every parameter must be exempt: a facet grid walked page by page still
+	// carries the facet, so page=N next to filter_color=red must NOT pass.
+	for _, facet := range []string{"min_price=120&filter_color=red", "ind=k&ind=n", "orderby=price", "pageless=1", "lg-min=10&lv-max=-380", "filter_color=red&page=3", "page=2&orderby=price", "utm_source=fb&x=1"} {
 		if rx.MatchString(facet) {
 			t.Errorf("facet %q must not match BOT_QS_PASSTHROUGH", facet)
+		}
+	}
+}
+
+// TestTrafficRuleExamplesNormalize posts every shipped docs/examples/
+// traffic-rule-*.json through the same normaliser rules/add uses, so a
+// "ready-to-use" example can never ship with a note over the byte limit, an
+// unknown action, or a pattern the daemon rejects (bots-read-only shipped at
+// 271 bytes once — nothing loaded the files).
+func TestTrafficRuleExamplesNormalize(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("..", "..", "docs", "examples", "traffic-rule-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no docs/examples/traffic-rule-*.json found")
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var in TrafficRule
+		if err := json.Unmarshal(raw, &in); err != nil {
+			t.Errorf("%s: not a TrafficRule: %v", filepath.Base(f), err)
+			continue
+		}
+		if _, err := normalizeTrafficRule(in, true); err != nil {
+			t.Errorf("%s: rules/add would reject it: %v", filepath.Base(f), err)
 		}
 	}
 }

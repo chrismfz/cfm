@@ -100,6 +100,7 @@ export const VERIFIED_BOT_UA_GLOBS = Object.freeze({
   meta: ["*facebookexternalhit*", "*meta-externalagent*"],
 });
 const VERIFIABLE_UA_GLOBS = new Set(Object.values(VERIFIED_BOT_UA_GLOBS).flat());
+const VERIFIABLE_UA_GLOBS_LC = new Set([...VERIFIABLE_UA_GLOBS].map((u) => u.toLowerCase()));
 
 
 // ── Priority bands ────────────────────────────────────────────────────────
@@ -525,7 +526,7 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
       }
     }
   }
-  if (p.note.length > LIMITS.noteLen) errors.push(`Note too long (max ${LIMITS.noteLen} characters).`);
+  if (byteLen(p.note) > LIMITS.noteLen) errors.push(`Note too long (max ${LIMITS.noteLen} bytes — the daemon counts UTF-8 bytes, not characters).`);
 
   if (p.priority && (p.priority < LIMITS.priorityMin || p.priority > LIMITS.priorityMax)) {
     errors.push(`Priority must be between ${LIMITS.priorityMin} and ${LIMITS.priorityMax}.`);
@@ -706,9 +707,22 @@ function note(key, text) {
 // clampNote keeps a recipe note within LIMITS.noteLen no matter how long the
 // operator's lists are (shortList caps the count, this caps the bytes): the
 // daemon rejects a longer note and a multi-rule recipe would abort half-applied.
+// The daemon measures the note in BYTES (Go len()), and every recipe note
+// carries a multi-byte em dash, so the cap is applied to the UTF-8 length.
+export function byteLen(s) {
+  return new TextEncoder().encode(String(s || "")).length;
+}
 function clampNote(s) {
   const v = String(s || "");
-  return v.length <= LIMITS.noteLen ? v : `${v.slice(0, LIMITS.noteLen - 1)}…`;
+  if (byteLen(v) <= LIMITS.noteLen) return v;
+  const ellipsis = "…";
+  const budget = LIMITS.noteLen - byteLen(ellipsis);
+  let out = "";
+  for (const ch of v) {
+    if (byteLen(out + ch) > budget) break;
+    out += ch;
+  }
+  return out + ellipsis;
 }
 function rule(key, { enabled, priority, vhosts, match = {}, action, text }) {
   return {
@@ -765,9 +779,10 @@ function shortList(items, max = 3) {
   return xs.length > max ? `${xs.slice(0, max).join(", ")} +${xs.length - max} more` : xs.join(", ");
 }
 // pathPatternMatches mirrors traffic_rules.go for one path_any pattern: the
-// part before the first '?' matches the request path (a wildcard pattern —
-// '*' matches anything INCLUDING '/', '?' one char — is a full match, a
-// wildcard-free one a literal prefix); the part after it, when present, is
+// part before the first '?' matches the request path (a '*' pattern — '*'
+// matches anything INCLUDING '/' — is a full match, a wildcard-free one a
+// literal prefix; '?' can never be a path wildcard because it always splits
+// off the query part first); the part after it, when present, is
 // matched per parameter against the request query ("key" = any value,
 // "key=value" = that value, case-insensitive). Used only for UI guidance (the
 // /.well-known/ refusal, the simulator sample); enforcement is the daemon.
@@ -778,8 +793,8 @@ export function pathPatternMatches(pattern, path, qs = "") {
   const pq = qi < 0 ? null : raw.slice(qi + 1).trim();
   const v = String(path || "");
   let pathOK = !p;
-  if (!pathOK && /[*?]/.test(p)) {
-    const rx = new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+  if (!pathOK && p.includes("*")) {
+    const rx = new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
     pathOK = rx.test(v);
   } else if (!pathOK) {
     pathOK = v.startsWith(p);
@@ -811,10 +826,35 @@ export function pathPatternMatches(pattern, path, qs = "") {
       return req.some(([k, val]) => k === pk && (pv === null || val === pv));
     });
 }
+// shadowingAllows lists the EXISTING enabled allow rules that run before
+// `row` on an overlapping vhost and already cover its User-Agents — a
+// verified_bot allow (Meta's crawler, Googlebot… are FCrDNS-verified) or a
+// UA allow sharing a pattern. First match wins, so such a row never runs for
+// those clients: tame_bots / geo_fence / geo_challenge put verified + Meta
+// preview allows at 10/11, which silently neutralise a later bots_read_only or
+// bots_no_qs block for exactly the crawler those recipes exist to stop.
+export function shadowingAllows(row, rules = []) {
+  const uas = (row?.match?.ua_any || []).map((u) => String(u).toLowerCase());
+  if (!uas.length || row?.action?.type === "allow") return [];
+  const verifiable = uas.some((u) => VERIFIABLE_UA_GLOBS_LC.has(u));
+  return (rules || []).filter((r) => {
+    if (!r?.enabled || r.action?.type !== "allow" || !(Number(r.priority) < Number(row.priority))) return false;
+    if (!(r.scope?.vhosts || []).some((a) => (row.scope?.vhosts || []).some((b) => vhostPatternsOverlap(a, b)))) return false;
+    if (r.match?.verified_bot && verifiable) return true;
+    const theirs = (r.match?.ua_any || []).map((u) => String(u).toLowerCase());
+    return theirs.some((u) => uas.includes(u));
+  });
+}
 // ACME / CA DCV validators fetch these; a pattern that the matcher would
 // resolve onto either of them must never become a rule target.
 const WELL_KNOWN_PROBES = Object.freeze(["/.well-known/acme-challenge/token", "/.well-known/pki-validation/fileauth.txt"]);
 function patternHitsWellKnown(p) {
+  // Two guards: anything the matcher would resolve onto a real probe path
+  // ("/", "/*", "/.we", "/*acme*"), and anything literally inside the
+  // namespace ("/.well-known/acme-challenge/A" is a prefix of ~1/64 of the
+  // tokens a CA issues, "/.well-known/openid" is not a probe but is not ours).
+  const pathPart = String(p || "").split("?")[0].trim().toLowerCase();
+  if (pathPart === "/.well-known" || pathPart.startsWith("/.well-known/")) return true;
   return WELL_KNOWN_PROBES.some((probe) => pathPatternMatches(p, probe));
 }
 
@@ -847,7 +887,11 @@ export const WRITE_METHODS = Object.freeze(["POST", "PUT", "PATCH", "DELETE"]);
 // Query parameters a crawler legitimately carries: click ids, campaign tags,
 // pagination, feeds/exports. Everything else on a bot request is a facet /
 // filter permutation (min_price, filter_color, orderby, ind=…).
-export const BOT_QS_PASSTHROUGH = "(?:^|[&;])(?:fbclid|gclid|utm_[a-z]+|page|paged|export|xml|feed|lang)(?:=|[&;]|$)";
+// Every parameter must be on the list: qs_not_rx exempts the WHOLE query when
+// it matches, so a "one exempt key anywhere" regex would let a facet grid
+// through as soon as it carries page=N — which is exactly how crawlers walk a
+// grid. An empty parameter (a stray "&") is tolerated.
+export const BOT_QS_PASSTHROUGH = "^(?:(?:fbclid|gclid|utm_[a-z]+|page|paged|export|xml|feed|lang)(?:=[^&;]*)?(?:[&;]+|$))+$";
 
 export const RECIPES = Object.freeze([
   {
@@ -1043,7 +1087,7 @@ export const RECIPES = Object.freeze([
     key: "bots_no_qs",
     kind: "multi",
     title: "Bots stay off filter / facet URLs",
-    description: "Block (or hard-throttle) social, AI and SEO crawlers on pages with a query string, except click ids, UTM tags, pagination and feeds. The generalisation of the Meta-only recipe: ladyfox.gr got its whole ?min_price/filter_color grid crawled by Meta, bet-prognostika its ?lg-min/lv-max permutations by Meta + GPTBot, villakirki its ?ind=k&ind=n… by SemrushBot.",
+    description: "Block (or hard-throttle) social, AI and SEO crawlers on pages with a query string, unless every parameter is a click id, UTM tag, pagination, feed or language switch (a facet grid that also carries page=N is still a facet grid). The generalisation of the Meta-only recipe: ladyfox.gr got its whole ?min_price/filter_color grid crawled by Meta, bet-prognostika its ?lg-min/lv-max permutations by Meta + GPTBot, villakirki its ?ind=k&ind=n… by SemrushBot.",
     vars: [
       VAR_VHOSTS,
       VAR_GROUPS,
@@ -1085,6 +1129,7 @@ export const RECIPES = Object.freeze([
     warnings: [
       "Wildcard vhosts (cpanel.*) need an admin session. Both enforcing rules are created DISABLED; enable after a simulator run.",
       "A customer syncing calendars/contacts or using Web Disk from abroad is blocked — list their range in the always-allow IPs, or drop the country they travel to into the allowed list.",
+      "autodiscover.* is not always fetched by the customer's own device: Outlook for iOS/Android and Microsoft 365 resolve it through Microsoft's cloud (AutoDetect), so the request arrives from Microsoft ranges abroad even for a customer in Athens. If customers use Outlook mobile, take autodiscover.*/autoconfig.* out of the service list or add Microsoft's ranges to the always-allow IPs.",
       "Visitors whose country cannot be resolved are NOT matched (fail-open).",
     ],
     build(vars) {

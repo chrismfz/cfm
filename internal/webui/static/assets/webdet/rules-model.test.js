@@ -18,6 +18,7 @@ import {
   VERIFIED_BOT_UA_GLOBS,
   botGroup,
   buildRulePayload,
+  byteLen,
   describeMatch,
   describeRule,
   emptyForm,
@@ -31,6 +32,7 @@ import {
   re2Rejects,
   recipeOf,
   recipeVarsDefaults,
+  shadowingAllows,
   simulateInputFromRule,
   suggestPriority,
   validateRecipeVars,
@@ -440,8 +442,9 @@ test("bots_no_qs: per-group has_qs rule with the pass-through regex, block or ha
   }
   // pagination / click ids pass, a facet does not
   const rx = new RegExp(BOT_QS_PASSTHROUGH, "i");
-  for (const ok of ["page=2", "fbclid=abc", "utm_source=fb&x=1", "a=1&paged=3"]) assert.ok(rx.test(ok), ok);
-  for (const facet of ["min_price=120&filter_color=red", "ind=k&ind=n", "orderby=price", "pageless=1"]) assert.ok(!rx.test(facet), facet);
+  for (const ok of ["page=2", "fbclid=abc", "utm_source=fb&utm_medium=cpc", "paged=3&lang=el", "feed", "page=2&", "PAGE=2"]) assert.ok(rx.test(ok), ok);
+  // every parameter must be on the list: a facet grid walked page by page is still a facet grid
+  for (const facet of ["min_price=120&filter_color=red", "ind=k&ind=n", "orderby=price", "pageless=1", "filter_color=red&page=3", "page=2&orderby=price", "utm_source=fb&x=1"]) assert.ok(!rx.test(facet), facet);
   const th = rcp.build({ vhosts: "shop.gr", groups: "seo", action: "throttle", qs_ok: "(?:^|&)lang=" });
   assert.equal(th.length, 1);
   assert.deepEqual(th[0].action, { type: "throttle", profile: "hard_bot" });
@@ -503,12 +506,47 @@ test("pathPatternMatches mirrors the daemon: prefix without wildcards, full matc
   for (const ok of ["/.well-known-ish-but-not", "/wellknown/", "/acme/", "/*/token.txt"]) {
     assert.ok(!validateRecipeVars(rcp, { ...base, paths: ok }).some((e) => /well-known/.test(e)), ok);
   }
-  // a wildcard-free pattern is a prefix of the ACME path only when it is one
-  assert.ok(!validateRecipeVars(rcp, { ...base, paths: "/.well-known/acme-challenge/token/extra" }).some((e) => /well-known/.test(e)));
+  // inside the namespace the literal guard applies even when the matcher would not hit a probe path
+  assert.ok(validateRecipeVars(rcp, { ...base, paths: "/.well-known/acme-challenge/token/extra" }).some((e) => /well-known/.test(e)));
   // path count: non-probe recipes send the raw list, so exactly the limit is fine
   const atLimit = Array.from({ length: LIMITS.patternsPerField }, (_, i) => `/p${i}/`).join(", ");
   assert.equal(validateRecipeVars(rcp, { ...base, paths: atLimit }).filter((e) => /too many paths/.test(e)).length, 0);
   assert.ok(validateRecipeVars(rcp, { ...base, paths: `${atLimit}, /p-extra/` }).some((e) => /too many paths/.test(e)));
+});
+
+test("anything literally under /.well-known is refused even when it is not a prefix of a probe path", () => {
+  const rcp = recipe("block_probe_paths");
+  const base = recipeVarsDefaults(rcp, { vhosts: "a.com" });
+  for (const bad of ["/.well-known/acme-challenge/A", "/.well-known/acme-challenge/token/", "/.well-known/openid", "/.WELL-KNOWN/x", "/.well-known/x?y=1"]) {
+    assert.ok(validateRecipeVars(rcp, { ...base, paths: bad }).some((e) => /well-known/.test(e)), bad);
+  }
+});
+
+test("shadowingAllows: an earlier enabled allow that covers the row's crawlers (verified or by UA) neutralises it", () => {
+  const rcp = recipe("bots_read_only");
+  const [social] = rcp.build({ vhosts: "shop.gr", groups: "social" });
+  const verifiedAllow = { id: "r_v", enabled: true, priority: 10, scope: { vhosts: ["shop.gr"] }, match: { verified_bot: true }, action: { type: "allow" } };
+  const uaAllow = { id: "r_u", enabled: true, priority: 11, scope: { vhosts: ["*.gr"] }, match: { ua_any: [...UA_ALLOW_ALONGSIDE_VERIFIED] }, action: { type: "allow" } };
+  const otherVhost = { ...verifiedAllow, id: "r_o", scope: { vhosts: ["other.com"] } };
+  const disabled = { ...verifiedAllow, id: "r_d", enabled: false };
+  const later = { ...verifiedAllow, id: "r_l", priority: 400 };
+  const ipAllow = { id: "r_i", enabled: true, priority: 15, scope: { vhosts: ["shop.gr"] }, match: { ip_any: ["203.0.113.0/24"] }, action: { type: "allow" } };
+  const got = shadowingAllows(social, [verifiedAllow, uaAllow, otherVhost, disabled, later, ipAllow]);
+  assert.deepEqual(got.map((r) => r.id), ["r_v", "r_u"], "Meta is FCrDNS-verified AND in the UA allow; other vhost / disabled / later / IP allows do not shadow");
+  // an AI-group block is not shadowed by a verified allow (none of those crawlers is verifiable) but is by a UA allow naming it
+  const [ai] = rcp.build({ vhosts: "shop.gr", groups: "ai" });
+  assert.deepEqual(shadowingAllows(ai, [verifiedAllow]), []);
+  assert.equal(shadowingAllows(ai, [{ ...uaAllow, match: { ua_any: ["*GPTBot*"] } }]).length, 1);
+  // allows never shadow allows; rows without UA patterns are out of scope
+  assert.deepEqual(shadowingAllows({ ...social, action: { type: "allow" } }, [verifiedAllow]), []);
+  assert.deepEqual(shadowingAllows({ ...social, match: { ...social.match, ua_any: [] } }, [verifiedAllow]), []);
+});
+
+test("validateRuleForm counts the note in bytes like the daemon", () => {
+  const ascii = "a".repeat(LIMITS.noteLen);
+  assert.ok(!validateRuleForm(emptyForm({ vhosts: "a.com", uas: "*Evil*", actionType: "block", priority: 300, note: ascii })).errors.some((e) => /Note too long/.test(e)));
+  const dashes = "—".repeat(100); // 300 bytes, 100 chars
+  assert.ok(validateRuleForm(emptyForm({ vhosts: "a.com", uas: "*Evil*", actionType: "block", priority: 300, note: dashes })).errors.some((e) => /Note too long/.test(e)));
 });
 
 test("re2Rejects: lookaround / backreferences only, shared by the form and the recipe validators", () => {
@@ -526,7 +564,8 @@ test("recipe notes are clamped to LIMITS.noteLen even for one-entry lists that a
   const rcp = recipe("throttle_hot_path");
   const longPath = "/" + "a".repeat(600);
   const [r] = rcp.build({ ...recipeVarsDefaults(rcp, { vhosts: "a.com" }), paths: longPath });
-  assert.equal(r.note.length, LIMITS.noteLen);
+  assert.ok(byteLen(r.note) <= LIMITS.noteLen && byteLen(r.note) >= LIMITS.noteLen - 3, `${byteLen(r.note)} bytes`);
+  assert.ok(r.note.length < LIMITS.noteLen, "the em dash and the ellipsis are multi-byte: the daemon counts bytes (Go len)");
   assert.ok(r.note.startsWith("recipe:throttle_hot_path"));
   assert.ok(r.note.endsWith("…"));
   assert.deepEqual(r.match.path_any, [longPath], "the rule itself keeps the full pattern");
