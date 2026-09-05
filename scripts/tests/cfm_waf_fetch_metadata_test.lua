@@ -50,11 +50,12 @@ end
 
 local WANT = "WAF_FETCH_METADATA:NO_FETCH_META_NO_ACCEPT_LANG"
 
-local function fires_as(c, want, label)
+local function fires_as(c, want, label, want_action)
+  want_action = want_action or "logonly"
   local hit, reason, _, action = waf.check(c)
   check(hit == true, label .. " — hit=true (got " .. tostring(hit) .. ")")
   check(reason == want, label .. " — reason (got " .. tostring(reason) .. ", want " .. want .. ")")
-  check(action == "logonly", label .. " — action=logonly (got " .. tostring(action) .. ")")
+  check(action == want_action, label .. " — action=" .. want_action .. " (got " .. tostring(action) .. ")")
 end
 local function fires(c, label) return fires_as(c, WANT, label) end
 local function clean(c, label)
@@ -194,6 +195,19 @@ clean(at("/.well-known/acme-challenge/x", TIKTOK), "in-app UA on /.well-known/ �
 fires(req("GET", "Mozilla/5.0 (Linux; Android 15; 23124RA7EO Build/AQ3A.240829.003) AppleWebKit/537.36 " ..
                  "(KHTML, like Gecko) Chrome/151.0.7922.199 Mobile Safari/537.36"),
       "same Android Chrome UA without an in-app token still trips the tell")
+
+-- ── Promotion clamp: the in-app tag never escalates past logonly ─────────────
+-- The rule's mode is per-rule. If 612 is ever promoted, only the tell proper
+-- may enforce; the known real-person pool stays measurement-only.
+set_only({ rule_fetch_metadata_missing = "challenge" })
+fires_as(req("GET", CHROME), WANT, "promoted to challenge: the tell proper escalates", "challenge")
+fires_as(req("GET", TIKTOK), IN_APP, "promoted to challenge: in-app tag stays logonly (clamp)", "logonly")
+set_only({ rule_fetch_metadata_missing = "block" })
+fires_as(req("GET", CHROME), WANT, "promoted to block: the tell proper escalates", "block")
+fires_as(req("GET", TIKTOK), IN_APP, "promoted to block: in-app tag stays logonly (clamp)", "logonly")
+set_only({ rule_fetch_metadata_missing = "disabled" })
+clean(req("GET", TIKTOK), "disabled: nothing fires, in-app included")
+set_only({ rule_fetch_metadata_missing = "logonly" })
 
 if fails > 0 then
   io.stderr:write(("cfm_waf fetch-metadata tests: %d FAILED\n"):format(fails))

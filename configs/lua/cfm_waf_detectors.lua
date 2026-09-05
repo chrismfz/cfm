@@ -2095,7 +2095,9 @@ end
 --   NO_FETCH_META_NO_ACCEPT_LANG — the tell proper (browser-claiming automation);
 --   NO_FETCH_META_IN_APP         — clause 6: a named in-app browser
 --                                  (IN_APP_UA_TOKENS) that satisfies 1-5; still
---                                  recorded, separable, weighted on its own.
+--                                  recorded, separable, weighted on its own, and
+--                                  clamped to logonly by the caller (cfm_waf.lua)
+--                                  whatever the rule's mode — measurement only.
 --
 -- Two suppress-only carve-outs return nil instead of measuring (they can only
 -- stand the rule down, never accuse): infrastructure paths (`/robots.txt`,

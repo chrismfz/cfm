@@ -135,9 +135,11 @@ local CFG = {
   -- Honest curl/wget/python clients never claim a browser, so they never match;
   -- self-declared crawlers and infra paths are skipped in the detector, and the
   -- known real-browser exception (in-app WebViews of social apps, e.g. TikTok)
-  -- is recorded under its own NO_FETCH_META_IN_APP tag so it stays separable.
-  -- logonly-only for burn-in — promote past logonly only after watching
-  -- waf_activity per tag, never on "no real browser trips it" alone.
+  -- is recorded under its own NO_FETCH_META_IN_APP tag so it stays separable,
+  -- and that tag is CLAMPED to logonly at the record() call: a promotion here
+  -- only ever escalates the tell proper (NO_FETCH_META_NO_ACCEPT_LANG), never
+  -- the in-app pool. logonly-only for burn-in — promote past logonly only after
+  -- watching waf_activity per tag, never on "no real browser trips it" alone.
   rule_fetch_metadata_missing = "logonly",
 
   -- [top-8]  Proxy header integrity
@@ -2116,8 +2118,9 @@ function _M.check(ctx)
   -- signals — a real browser normally emits both — so honest CLI clients (they
   -- don't claim a browser) and self-declared crawlers (skipped in the detector)
   -- never match; the one real-browser exception, in-app WebViews of social apps,
-  -- gets its own NO_FETCH_META_IN_APP tag. Shadow-only for burn-in; feeds the
-  -- per-client challenge score later, per tag.
+  -- gets its own NO_FETCH_META_IN_APP tag, clamped to logonly below whatever the
+  -- rule's mode is. Shadow-only for burn-in; feeds the per-client challenge
+  -- score later, per tag.
   --
   -- Placed LAST on purpose: it is the WEAKEST signal here, so it must never become
   -- the headline `final_reason` ahead of a real finding. record() keeps the strongest
@@ -2130,8 +2133,15 @@ function _M.check(ctx)
     if mode ~= "disabled" then
       local tag = det.detect_fetch_metadata_missing(headers, method, uri)
       if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_FETCH_METADATA:" .. tag, ttl, mode, RULE_IDS.rule_fetch_metadata_missing) then goto done end
+        -- The in-app tag (a real person inside TikTok & co., header-poor by the
+        -- app's stack) is measurement-only: the rule's mode is per-rule, so a
+        -- promotion of the tell proper would otherwise enforce on that known
+        -- real-person pool exactly as on automation. Clamp it to logonly here —
+        -- it is recorded, counted and separable, but never challenged/blocked
+        -- whatever rule_fetch_metadata_missing is set to.
+        local eff_mode = (tag == "NO_FETCH_META_IN_APP") and "logonly" or mode
+        local ttl = (eff_mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_FETCH_METADATA:" .. tag, ttl, eff_mode, RULE_IDS.rule_fetch_metadata_missing) then goto done end
       end
     end
   end

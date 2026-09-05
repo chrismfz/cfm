@@ -64,7 +64,9 @@ back-filled here — see the git/PR history for that period.
   substring-matches the full reason: `rule=NO_FETCH_META_IN_APP`) and
   its future challenge-score weight is decided on data — deliberately not a
   suppress, since a spoofable in-app token must never buy a silent skip of the
-  shadow. The edge push cooldown (`should_push`) keeps the tag in its key for
+  shadow. The in-app tag is clamped to logonly at the record() call, so a later
+  promotion of rule 612 only ever escalates the tell proper, never the
+  real-person pool (the rule's mode is per-rule; the tag is the lever). The edge push cooldown (`should_push`) keeps the tag in its key for
   this family (`PUSH_KEY_KEEPS_TAG`): the two tags share CGNAT mobile IPs, and
   a family-keyed 60 s window would have dropped whichever fired second per IP
   and biased the very comparison the tags exist for — safe because the family
