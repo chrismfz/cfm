@@ -101,8 +101,10 @@ export function suggestPriority(actionType, rules = [], vhosts = []) {
   return p;
 }
 
-// hostPatternMatch mirrors Go ruleHostMatch: exact host, a `*`/`?` glob, or a
-// "*.suffix" pattern matching any host that ends in ".suffix".
+// hostPatternMatch mirrors Go ruleHostMatch: exact host, a filepath.Match-style
+// glob (`*` spans any run of characters — hosts never contain "/" — `?` one
+// character, `[..]` classes passed through), or a "*.suffix" pattern matching
+// any host that ends in ".suffix".
 export function hostPatternMatch(pattern, host) {
   const pat = String(pattern || "").toLowerCase().trim();
   const h = String(host || "").toLowerCase().trim();
@@ -112,9 +114,13 @@ export function hostPatternMatch(pattern, host) {
     const suf = pat.slice(1);
     if (h.endsWith(suf) && h.length > suf.length) return true;
   }
-  if (/[*?]/.test(pat)) {
-    const rx = new RegExp(`^${pat.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^.]*").replace(/\?/g, ".")}$`);
-    return rx.test(h);
+  if (/[*?[]/.test(pat)) {
+    try {
+      const rx = new RegExp(`^${pat.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+      return rx.test(h);
+    } catch {
+      return false; // malformed class — Go's filepath.Match errors too (→ no match)
+    }
   }
   return false;
 }
@@ -376,7 +382,9 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
     // so only reject what RE2 definitely rejects (lookaround, backreferences)
     // and treat a JS parse failure as a warning — the server has the final say.
     const rx = p.match.qs_not_rx;
-    if (/\(\?<?[=!]/.test(rx) || /\\[1-9]/.test(rx)) {
+    // A backreference is an UNESCAPED backslash followed by a digit; "a\\1"
+    // (escaped backslash, then a literal 1) compiles fine in RE2.
+    if (/\(\?<?[=!]/.test(rx) || /(^|[^\\])(\\\\)*\\[1-9]/.test(rx)) {
       errors.push("QS pass-through: lookahead/lookbehind and backreferences are not supported (Go RE2 syntax).");
     } else {
       try {

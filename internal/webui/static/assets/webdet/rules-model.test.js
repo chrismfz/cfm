@@ -214,6 +214,8 @@ test("qs_not_rx validation follows Go RE2, not JavaScript", () => {
   assert.ok(look.errors.some((e) => /lookahead/.test(e)));
   const backref = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", hasQS: true, qsNotRx: "(a)\\1" }));
   assert.ok(backref.errors.some((e) => /backreferences/.test(e)));
+  const escaped = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", hasQS: true, qsNotRx: "a\\\\1" }));
+  assert.equal(escaped.errors.length, 0, "an escaped backslash followed by a digit is not a backreference");
   const broken = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", hasQS: true, qsNotRx: "(" }));
   assert.equal(broken.errors.length, 0);
   assert.ok(broken.warnings.some((w) => /could not be parsed/.test(w)));
@@ -224,6 +226,16 @@ test("vhost overlap mirrors ruleHostMatch: *.suffix only overlaps its own domain
   assert.equal(hostPatternMatch("*.shop-a.gr", "shop-a.gr"), false);
   assert.equal(hostPatternMatch("*.shop-a.gr", "blog-b.com"), false);
   assert.equal(hostPatternMatch("a.com", "a.com"), true);
+  // filepath.Match semantics: `*` crosses dots, `?` is one char, classes work
+  assert.equal(hostPatternMatch("*example.com", "www.example.com"), true);
+  assert.equal(hostPatternMatch("shop*.gr", "shop.foo.gr"), true);
+  assert.equal(hostPatternMatch("[ab].example.com", "a.example.com"), true);
+  assert.equal(hostPatternMatch("[ab].example.com", "c.example.com"), false);
+  assert.equal(hostPatternMatch("w?w.a.com", "www.a.com"), true);
+  assert.equal(hostPatternMatch("[x.a.com", "x.a.com"), false);
+  const wild = [{ id: "r_g", priority: 50, scope: { vhosts: ["*example.com"] }, action: { type: "allow" }, match: {} }];
+  assert.equal(priorityTie(50, ["www.example.com"], wild)?.id, "r_g");
+  assert.equal(suggestPriority("allow", wild, ["www.example.com"]), 51);
   assert.equal(vhostPatternsOverlap("*.shop-a.gr", "blog-b.com"), false);
   assert.equal(vhostPatternsOverlap("*.shop-a.gr", "x.shop-a.gr"), true);
   assert.equal(vhostPatternsOverlap("*.shop-a.gr", "*.eu.shop-a.gr"), true);

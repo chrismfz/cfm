@@ -1799,7 +1799,10 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 > evaluated; it does not bypass the WAF, a vhost-wide challenge or a per-IP
 > block (use challenge/WAF excludes for that). Clients holding a valid clearance
 > cookie never reach the rule evaluation, and rules are not applied at all in
-> DNAT mode. `simulate` runs the exact enforcement evaluation and additionally
+> DNAT mode. The edge's short-TTL decision cache is keyed on ip/host/path (+query)
+> but deliberately NOT on User-Agent, so a UA-keyed rule can be masked for up to
+> one cache TTL by a clean-allow the same IP just earned with a different UA.
+> `simulate` runs the exact enforcement evaluation and additionally
 > returns `disabled_match` — the highest-priority *disabled* rule that would
 > have matched had it been enabled — so a rule can be saved disabled, tested,
 > then enabled from the cfm-admin table.

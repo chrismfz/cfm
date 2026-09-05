@@ -58,7 +58,8 @@ back-filled here — see the git/PR history for that period.
 
 ### Changed
 - README §15 no longer claims `allow` is "enforced"; it documents first-match /
-  enabled-only semantics, the `allow` caveat and `disabled_match`.
+  enabled-only semantics, the `allow` caveat, `disabled_match`, and that the
+  edge decision cache (not keyed on UA) can mask a UA-keyed rule for one TTL.
 - **CI now runs the cfm-admin JS unit tests** (`make test-js`, `node --test` over
   `internal/webui/static/assets/**/*.test.{js,cjs}`); previously the existing
   runtime-badge / governor / settings / detector-coverage tests and the new

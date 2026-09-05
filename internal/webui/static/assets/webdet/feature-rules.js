@@ -447,22 +447,27 @@ export const rulesMixin = {
     },
     // explainTestOutcome says, for the rule the operator clicked Test on,
     // whether the sample request actually REACHED it. Only assert "shadowed"
-    // when a higher-priority rule demonstrably won; otherwise the honest
-    // answer is that the sample did not match this rule (the simulator reports
-    // only the FIRST disabled match, so a second disabled rule is invisible).
+    // when a rule demonstrably ran first — lower priority, or equal priority
+    // with a lower id (the daemon's tie-break) — otherwise the honest answer is
+    // that the sample did not match this rule. The simulator reports only the
+    // FIRST disabled match, so for a disabled rule an earlier disabled match
+    // hides it regardless of whether an enabled rule won later.
     explainTestOutcome(row) {
       const id = String(row?.id || "");
       const prio = Number(row?.priority);
       const r = this.simulateResult;
       if (!id || !r) return "";
+      const runsBefore = (other) => Number.isFinite(prio) && other &&
+        (Number(other.priority) < prio || (Number(other.priority) === prio && String(other.id) < id));
       if (r.matched && r.rule?.id === id) return `Rule ${id} is the verdict for this request.`;
       if (r.disabled_match?.id === id) return `Rule ${id} is disabled: it would be the verdict if enabled.`;
       const winner = r.matched ? r.rule : null;
-      if (winner && Number.isFinite(prio) && Number(winner.priority) < prio) {
-        return `Rule ${id} was NOT reached: enabled rule ${winner.id} (priority ${winner.priority}) wins first for requests shaped like this one, so enabling or editing ${id} changes nothing for them.`;
+      if (winner && runsBefore(winner)) {
+        const tie = Number(winner.priority) === prio ? " (same priority — ties are resolved by id order)" : "";
+        return `Rule ${id} was NOT reached: enabled rule ${winner.id} (priority ${winner.priority})${tie} wins first for requests shaped like this one, so enabling or editing ${id} changes nothing for them.`;
       }
-      if (!winner && r.disabled_match && Number.isFinite(prio) && Number(r.disabled_match.priority) < prio) {
-        return `Rule ${id} did not produce a verdict: disabled rule ${r.disabled_match.id} (priority ${r.disabled_match.priority}) precedes it and the simulator reports only the first disabled match. Enable or test ${id} alone to see whether the sample matches it.`;
+      if (row?.enabled === false && r.disabled_match && runsBefore(r.disabled_match)) {
+        return `Rule ${id} is hidden here: disabled rule ${r.disabled_match.id} (priority ${r.disabled_match.priority}) precedes it and the simulator reports only the first disabled match. Enable ${id}, or test with a request the earlier rule does not match, to see whether ${id} matches.`;
       }
       return `The sample request did not match rule ${id}'s conditions (${winner ? `rule ${winner.id} matched instead` : "no rule matched"}). Adjust the simulator fields to a request the rule should catch and run again.`;
     },
