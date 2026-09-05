@@ -49,11 +49,11 @@ back-filled here — see the git/PR history for that period.
 
 ### Changed
 - **Traffic-rules "AI crawlers" bot group** now also lists OAI-SearchBot,
-  ReflectionBot and ExaSearchBot (seen fleet-wide). Claude-User /
-  Claude-SearchBot are deliberately left out: Claude-User is also the
-  User-Agent of the claude.ai MCP connector behind `/cfm-admin/mcp`, so a
-  `*`-scoped bot rule carrying it would throttle or block cfm-admin itself
-  (guarded by a test).
+  Claude-User, Claude-SearchBot, ReflectionBot and ExaSearchBot (seen
+  fleet-wide). Claude-User is also the User-Agent of the claude.ai MCP
+  connector behind `/cfm-admin/mcp`; that is safe because traffic rules never
+  run for `/cfm-admin/` (the edge configs exempt it from cfm.lua), so a
+  `*`-scoped bot rule cannot lock the operator out.
 
 ## 2026.09.05
 

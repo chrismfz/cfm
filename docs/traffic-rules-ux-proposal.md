@@ -154,7 +154,7 @@ drift (CLAUDE.md §5: never keep a second copy of a list):
 
 - **Search engines** — Googlebot, bingbot, DuckDuckBot, Applebot, YandexBot, Baiduspider
 - **Social previews** — facebookexternalhit, meta-externalagent, Twitterbot, LinkedInBot, Slackbot, WhatsApp, TelegramBot
-- **AI crawlers** — GPTBot, ChatGPT-User, OAI-SearchBot, ClaudeBot, anthropic-ai, Bytespider, CCBot, Amazonbot, PerplexityBot, Google-Extended, ReflectionBot, ExaSearchBot. Deliberately **not** Claude-User / Claude-SearchBot: Claude-User is also the User-Agent of the claude.ai MCP connector behind `/cfm-admin/mcp`, so a `*`-scoped bot rule carrying it would throttle or block cfm-admin itself.
+- **AI crawlers** — GPTBot, ChatGPT-User, OAI-SearchBot, ClaudeBot, Claude-User, Claude-SearchBot, anthropic-ai, Bytespider, CCBot, Amazonbot, PerplexityBot, Google-Extended, ReflectionBot, ExaSearchBot. Claude-User is also the User-Agent of the claude.ai MCP connector behind `/cfm-admin/mcp`; that is safe because `location ^~ /cfm-admin/` is `access_by_lua_block { return; }` in both edge configs, so traffic rules (cfm.lua Step 3) never run for it.
 - **SEO tools** — AhrefsBot, SemrushBot, MJ12bot, DotBot, BLEXBot, PetalBot, DataForSeoBot
 - **Script tools** — python-requests, python-urllib, Go-http-client, curl, wget, libwww-perl, Java/, okhttp. Also what webhooks, IoT posters and integrations announce, so recipes create rules for this group **disabled**.
 - **Dataset / anonymous crawlers** (2026-09) — `Mozilla/5.0 (compatible; crawler)`, img2dataset / imagebot, eurovl-fetch, `*DatasetCrawler`, VelenPublicWebCrawler — bulk harvesters with no benefit to the site.

@@ -246,12 +246,14 @@ export const BOT_GROUPS = Object.freeze([
     key: "ai",
     phrase: "AI crawlers",
     label: "AI crawlers",
-    hint: "GPTBot, ChatGPT-User, OAI-SearchBot, ClaudeBot, anthropic-ai, Bytespider, CCBot, Amazonbot, PerplexityBot, Google-Extended, ReflectionBot, ExaSearchBot",
-    // Deliberately NOT here: Claude-User / Claude-SearchBot — Claude-User is
-    // also the User-Agent of the claude.ai MCP connector that drives
-    // /cfm-admin/mcp, so a "*" scoped bot rule would throttle/block cfm-admin
-    // itself. Match those explicitly per vhost if you must.
-    patterns: ["*GPTBot*", "*ChatGPT-User*", "*OAI-SearchBot*", "*ClaudeBot*", "*anthropic-ai*", "*Bytespider*", "*CCBot*", "*Amazonbot*", "*PerplexityBot*", "*Google-Extended*", "*ReflectionBot*", "*ExaSearchBot*"],
+    hint: "GPTBot, ChatGPT-User, OAI-SearchBot, ClaudeBot, Claude-User, Claude-SearchBot, anthropic-ai, Bytespider, CCBot, Amazonbot, PerplexityBot, Google-Extended, ReflectionBot, ExaSearchBot",
+    // Claude-User is also the User-Agent of the claude.ai MCP connector behind
+    // /cfm-admin/mcp, and that is fine: traffic rules never see cfm-admin —
+    // `location ^~ /cfm-admin/` is `access_by_lua_block { return; }` in both
+    // openresty.conf and angie.conf, so cfm.lua Step 3 is skipped for it (only
+    // /cfm-admin/login runs through cfm.lua). A "*"-scoped bot rule carrying
+    // Claude-User cannot lock the operator out.
+    patterns: ["*GPTBot*", "*ChatGPT-User*", "*OAI-SearchBot*", "*ClaudeBot*", "*Claude-User*", "*Claude-SearchBot*", "*anthropic-ai*", "*Bytespider*", "*CCBot*", "*Amazonbot*", "*PerplexityBot*", "*Google-Extended*", "*ReflectionBot*", "*ExaSearchBot*"],
   },
   {
     key: "seo",
@@ -826,22 +828,32 @@ export function pathPatternMatches(pattern, path, qs = "") {
       return req.some(([k, val]) => k === pk && (pv === null || val === pv));
     });
 }
-// shadowingAllows lists the EXISTING enabled allow rules that run before
-// `row` on an overlapping vhost and already cover its User-Agents — a
-// verified_bot allow (Meta's crawler, Googlebot… are FCrDNS-verified) or a
-// UA allow sharing a pattern. First match wins, so such a row never runs for
-// those clients: tame_bots / geo_fence / geo_challenge put verified + Meta
-// preview allows at 10/11, which silently neutralise a later bots_read_only or
-// bots_no_qs block for exactly the crawler those recipes exist to stop.
-export function shadowingAllows(row, rules = []) {
+// shadowingRules lists the EXISTING enabled rules that run before `row` on an
+// overlapping vhost, let the client through (allow, or a throttle — both end
+// evaluation: Simulate is first-match), cover the row's User-Agents (a
+// verified_bot allow for FCrDNS-verifiable UAs, or a shared UA pattern) and
+// are not narrower than the row (no path / IP / country condition of their
+// own, has_qs only if the row has it, methods a superset). Such a rule means
+// the row never runs for those clients: tame_bots / geo_fence / geo_challenge
+// put verified + Meta preview allows at 10/11 and AI/SEO GET throttles at
+// 110/130, which silently neutralise a later bots_read_only or bots_no_qs
+// block for exactly the crawler those recipes exist to stop.
+export function shadowingRules(row, rules = []) {
   const uas = (row?.match?.ua_any || []).map((u) => String(u).toLowerCase());
   if (!uas.length || row?.action?.type === "allow") return [];
   const verifiable = uas.some((u) => VERIFIABLE_UA_GLOBS_LC.has(u));
+  const rowMethods = (row.match?.methods || []).map((m) => String(m).toUpperCase());
   return (rules || []).filter((r) => {
-    if (!r?.enabled || r.action?.type !== "allow" || !(Number(r.priority) < Number(row.priority))) return false;
+    const m = r?.match || {};
+    if (!r?.enabled || !["allow", "throttle"].includes(r.action?.type) || !(Number(r.priority) < Number(row.priority))) return false;
     if (!(r.scope?.vhosts || []).some((a) => (row.scope?.vhosts || []).some((b) => vhostPatternsOverlap(a, b)))) return false;
-    if (r.match?.verified_bot && verifiable) return true;
-    const theirs = (r.match?.ua_any || []).map((u) => String(u).toLowerCase());
+    // narrower than the row → only a subset of its clients is shadowed; skip
+    if ((m.path_any || []).length || (m.ip_any || []).length || (m.country_in || []).length || (m.country_not_in || []).length) return false;
+    if (m.has_qs && !row.match?.has_qs) return false;
+    const theirMethods = (m.methods || []).map((x) => String(x).toUpperCase());
+    if (theirMethods.length && (!rowMethods.length || !rowMethods.every((x) => theirMethods.includes(x)))) return false;
+    if (m.verified_bot && verifiable) return true;
+    const theirs = (m.ua_any || []).map((u) => String(u).toLowerCase());
     return theirs.some((u) => uas.includes(u));
   });
 }
@@ -1087,12 +1099,12 @@ export const RECIPES = Object.freeze([
     key: "bots_no_qs",
     kind: "multi",
     title: "Bots stay off filter / facet URLs",
-    description: "Block (or hard-throttle) social, AI and SEO crawlers on pages with a query string, unless every parameter is a click id, UTM tag, pagination, feed or language switch (a facet grid that also carries page=N is still a facet grid). The generalisation of the Meta-only recipe: ladyfox.gr got its whole ?min_price/filter_color grid crawled by Meta, bet-prognostika its ?lg-min/lv-max permutations by Meta + GPTBot, villakirki its ?ind=k&ind=n… by SemrushBot.",
+    description: "Block (or hard-throttle) social, AI and SEO crawlers on pages with a query string, unless every parameter is a click id, UTM tag, pagination, feed or language switch (a facet grid that also carries page=N is still a facet grid). The generalisation of the Meta-only recipe: seen fleet-wide as a shop's whole ?min_price/filter_color grid crawled by Meta, a sports site's ?lg-min/lv-max permutations by Meta + GPTBot, and a listings site's ?ind=k&ind=n… by SemrushBot.",
     vars: [
       VAR_VHOSTS,
       VAR_GROUPS,
       { key: "action", label: "Action", type: "select", options: ["block", "throttle"], default: "block" },
-      { key: "qs_ok", label: "Query params that pass (Go RE2 regex, optional)", type: "regex", default: BOT_QS_PASSTHROUGH },
+      { key: "qs_ok", label: "Query params that pass (Go RE2 regex; clear it to block every bot GET with a query string)", type: "regex", default: BOT_QS_PASSTHROUGH },
     ],
     warnings: [
       "Created DISABLED — run the simulator with a real filter URL of the site first, then enable.",
@@ -1102,7 +1114,9 @@ export const RECIPES = Object.freeze([
       const vhosts = vhostsVar(vars);
       const k = "bots_no_qs";
       const throttle = vars?.action === "throttle";
-      const qsOK = String(vars?.qs_ok ?? "").trim() || BOT_QS_PASSTHROUGH;
+      // An empty regex means "nothing passes": the rule then matches every bot
+      // GET that carries a query string (qs_not_rx omitted, has_qs alone).
+      const qsOK = String(vars?.qs_ok ?? "").trim() || undefined;
       return groupsVar(vars, ["social", "ai", "seo"]).map((g, i) =>
         rule(k, {
           enabled: false,

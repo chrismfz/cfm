@@ -32,7 +32,7 @@ import {
   re2Rejects,
   recipeOf,
   recipeVarsDefaults,
-  shadowingAllows,
+  shadowingRules,
   simulateInputFromRule,
   suggestPriority,
   validateRecipeVars,
@@ -181,7 +181,7 @@ test("recipes: every multi recipe is ordered by priority, tagged, and only enabl
       assert.equal(recipeOf(r), rcp.key);
       if (scopesOwnVhosts) assert.deepEqual(r.scope.vhosts, ["a.com"]);
       else assert.ok(r.scope.vhosts.length >= 1, `${rcp.key}: every rule is scoped`);
-      assert.ok(r.note.length <= LIMITS.noteLen, `${rcp.key}: note fits`);
+      assert.ok(byteLen(r.note) <= LIMITS.noteLen, `${rcp.key}: note fits (bytes, like the daemon)`);
       // every built rule passes the same validation the editor applies
       const v = validateRuleForm(formFromRule(r));
       assert.deepEqual(v.errors, [], `${rcp.key}: ${v.errors.join(" | ")}`);
@@ -369,15 +369,13 @@ test("verified_bot: payload, round-trip, description, sample request, hints", ()
 
 // ── recipes distilled from fleet traffic (2026-09) ───────────────────────
 
-test("bot groups: dataset group exists, AI group grew, Claude-User stays out, every group fits one rule", () => {
+test("bot groups: dataset group exists, AI group grew (incl. Claude-User), every group fits one rule", () => {
   const ds = botGroup("dataset");
   assert.ok(ds && ds.patterns.includes("*(compatible; crawler)*") && ds.patterns.includes("*img2dataset*"));
-  assert.ok(botGroup("ai").patterns.includes("*OAI-SearchBot*"));
+  for (const ua of ["*OAI-SearchBot*", "*Claude-User*", "*Claude-SearchBot*"]) assert.ok(botGroup("ai").patterns.includes(ua), ua);
   for (const g of BOT_GROUPS) {
     assert.ok(g.patterns.length <= LIMITS.patternsPerField, `${g.key} fits in ua_any`);
-    // Claude-User is the claude.ai MCP connector's UA (drives /cfm-admin/mcp): a
-    // "*" scoped bot rule carrying it would throttle/block cfm-admin itself.
-    assert.ok(!g.patterns.some((p) => /claude-user|claude-searchbot/i.test(p)), `${g.key} must not match Claude-User`);
+    assert.equal(new Set(g.patterns.map((p) => p.toLowerCase())).size, g.patterns.length, `${g.key} has no duplicate patterns`);
   }
   assert.equal(describeMatch({ ua_any: ds.patterns }), "requests with a User-Agent matching dataset / anonymous crawlers");
 });
@@ -430,13 +428,13 @@ test("bots_read_only: no verified allow, one write-method block per group, searc
 
 test("bots_no_qs: per-group has_qs rule with the pass-through regex, block or hard throttle, disabled", () => {
   const rcp = recipe("bots_no_qs");
-  const blocks = rcp.build({ vhosts: "shop.gr", groups: "social, ai", action: "block", qs_ok: "" });
+  const blocks = rcp.build({ ...recipeVarsDefaults(rcp, { vhosts: "shop.gr" }), groups: "social, ai", action: "block" });
   assert.equal(blocks.length, 2);
   for (const r of blocks) {
     assert.equal(r.enabled, false);
     assert.equal(r.action.type, "block");
     assert.equal(r.match.has_qs, true);
-    assert.equal(r.match.qs_not_rx, BOT_QS_PASSTHROUGH, "empty override falls back to the default pass-through");
+    assert.equal(r.match.qs_not_rx, BOT_QS_PASSTHROUGH, "the default pass-through is the var's default");
     assert.deepEqual(r.match.methods, ["GET"]);
     assert.ok(r.priority >= PRIORITY_BANDS.block.from && r.priority <= PRIORITY_BANDS.block.to);
   }
@@ -445,6 +443,11 @@ test("bots_no_qs: per-group has_qs rule with the pass-through regex, block or ha
   for (const ok of ["page=2", "fbclid=abc", "utm_source=fb&utm_medium=cpc", "paged=3&lang=el", "feed", "page=2&", "PAGE=2"]) assert.ok(rx.test(ok), ok);
   // every parameter must be on the list: a facet grid walked page by page is still a facet grid
   for (const facet of ["min_price=120&filter_color=red", "ind=k&ind=n", "orderby=price", "pageless=1", "filter_color=red&page=3", "page=2&orderby=price", "utm_source=fb&x=1"]) assert.ok(!rx.test(facet), facet);
+  // an emptied regex means nothing passes: has_qs alone, no qs_not_rx
+  const strict = rcp.build({ vhosts: "shop.gr", groups: "social", action: "block", qs_ok: "" });
+  assert.equal(strict[0].match.has_qs, true);
+  assert.equal(strict[0].match.qs_not_rx, undefined);
+  assert.equal(validateRecipeVars(rcp, { vhosts: "shop.gr", groups: "social", action: "block", qs_ok: "" }).length, 0, "clearing the regex is allowed");
   const th = rcp.build({ vhosts: "shop.gr", groups: "seo", action: "throttle", qs_ok: "(?:^|&)lang=" });
   assert.equal(th.length, 1);
   assert.deepEqual(th[0].action, { type: "throttle", profile: "hard_bot" });
@@ -522,7 +525,7 @@ test("anything literally under /.well-known is refused even when it is not a pre
   }
 });
 
-test("shadowingAllows: an earlier enabled allow that covers the row's crawlers (verified or by UA) neutralises it", () => {
+test("shadowingRules: an earlier enabled allow or throttle that covers the row's crawlers and is not narrower neutralises it", () => {
   const rcp = recipe("bots_read_only");
   const [social] = rcp.build({ vhosts: "shop.gr", groups: "social" });
   const verifiedAllow = { id: "r_v", enabled: true, priority: 10, scope: { vhosts: ["shop.gr"] }, match: { verified_bot: true }, action: { type: "allow" } };
@@ -531,15 +534,26 @@ test("shadowingAllows: an earlier enabled allow that covers the row's crawlers (
   const disabled = { ...verifiedAllow, id: "r_d", enabled: false };
   const later = { ...verifiedAllow, id: "r_l", priority: 400 };
   const ipAllow = { id: "r_i", enabled: true, priority: 15, scope: { vhosts: ["shop.gr"] }, match: { ip_any: ["203.0.113.0/24"] }, action: { type: "allow" } };
-  const got = shadowingAllows(social, [verifiedAllow, uaAllow, otherVhost, disabled, later, ipAllow]);
-  assert.deepEqual(got.map((r) => r.id), ["r_v", "r_u"], "Meta is FCrDNS-verified AND in the UA allow; other vhost / disabled / later / IP allows do not shadow");
+  const pathAllow = { ...verifiedAllow, id: "r_p", match: { verified_bot: true, path_any: ["/feed/"] } };
+  const got = shadowingRules(social, [verifiedAllow, uaAllow, otherVhost, disabled, later, ipAllow, pathAllow]);
+  assert.deepEqual(got.map((r) => r.id), ["r_v", "r_u"], "Meta is FCrDNS-verified AND in the UA allow; other vhost / disabled / later / IP / path-scoped allows do not shadow");
   // an AI-group block is not shadowed by a verified allow (none of those crawlers is verifiable) but is by a UA allow naming it
   const [ai] = rcp.build({ vhosts: "shop.gr", groups: "ai" });
-  assert.deepEqual(shadowingAllows(ai, [verifiedAllow]), []);
-  assert.equal(shadowingAllows(ai, [{ ...uaAllow, match: { ua_any: ["*GPTBot*"] } }]).length, 1);
+  assert.deepEqual(shadowingRules(ai, [verifiedAllow]), []);
+  assert.equal(shadowingRules(ai, [{ ...uaAllow, match: { ua_any: ["*GPTBot*"] } }]).length, 1);
+  // tame_bots' AI GET throttle (110) shadows a bots_no_qs GET block (360) but not a write-method block (350)
+  const tame = recipe("tame_bots").build({ vhosts: "shop.gr" }).map((r, i) => ({ ...r, id: `t${i}` }));
+  const [noQS] = recipe("bots_no_qs").build({ vhosts: "shop.gr", groups: "ai", action: "block", qs_ok: "" });
+  assert.deepEqual(shadowingRules(noQS, tame).map((r) => r.priority), [110]);
+  assert.deepEqual(shadowingRules(ai, tame), [], "GET-only throttle does not cover POST/PUT/PATCH/DELETE");
+  // a has_qs throttle only shadows a has_qs row; earlier blocks / challenges are not pass-through and are not reported
+  const qsThrottle = { ...tame[2], id: "q", match: { ...tame[2].match, has_qs: true } };
+  assert.equal(shadowingRules(noQS, [qsThrottle]).length, 1);
+  assert.equal(shadowingRules({ ...noQS, match: { ...noQS.match, has_qs: false } }, [qsThrottle]).length, 0);
+  assert.deepEqual(shadowingRules(social, [{ ...uaAllow, action: { type: "block" } }, { ...uaAllow, action: { type: "challenge" } }]), []);
   // allows never shadow allows; rows without UA patterns are out of scope
-  assert.deepEqual(shadowingAllows({ ...social, action: { type: "allow" } }, [verifiedAllow]), []);
-  assert.deepEqual(shadowingAllows({ ...social, match: { ...social.match, ua_any: [] } }, [verifiedAllow]), []);
+  assert.deepEqual(shadowingRules({ ...social, action: { type: "allow" } }, [verifiedAllow]), []);
+  assert.deepEqual(shadowingRules({ ...social, match: { ...social.match, ua_any: [] } }, [verifiedAllow]), []);
 });
 
 test("validateRuleForm counts the note in bytes like the daemon", () => {
