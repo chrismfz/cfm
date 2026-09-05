@@ -56,9 +56,10 @@ import (
 // heldAutoblockFamilies is the ONE source for that hold: the default loop,
 // the DefaultsTemplate rendered into a fresh detectors.conf and
 // TestWAFSecurityFamilyCoverage all read it, so arming a family later is a
-// one-line deletion here (plus the reference detectors.conf comment).
-var heldAutoblockFamilies = map[string]string{
-	"WAF_TRAVERSAL": "rule 101 is edge-block since 2026-09-05 but the family is HELD un-armed for burn-in (volume: ~2 300 scanner IPs/week). Set 1 to ban.",
+// one-line deletion here (plus the reference detectors.conf comment). The
+// rationale for each entry lives in the comment above, not in the map.
+var heldAutoblockFamilies = map[string]struct{}{
+	"WAF_TRAVERSAL": {}, // rule 101, block since 2026-09-05; held for burn-in (~2 300 scanner IPs/week)
 }
 
 func wafSecurityFamilies(kv KV) map[string]int {
@@ -78,19 +79,22 @@ func wafSecurityFamilies(kv KV) map[string]int {
 }
 
 // wafSecurityDefaultsTemplate is the [waf_security] block a fresh
-// detectors.conf is rendered from; held families are added from
-// heldAutoblockFamilies so the rendered default can never drift from the
-// code default.
+// detectors.conf is rendered from. The family keys are DERIVED from
+// wafSecurityFamilies (every armed family as 1, every held family as 0), so
+// the rendered default can never drift from the code default — promoting a
+// rule to block, or holding its family, shows up in a fresh config without a
+// second hand-typed list. Families that default to 0 because they have no
+// block rule are left out: they are inert in Phase 1 and the reference
+// detectors.conf documents that an unlisted family takes its code default.
 func wafSecurityDefaultsTemplate() map[string]string {
 	t := map[string]string{
-		"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0",
-		"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BACKDOOR": "1",
-		"WEBSHELL": "1", // edge-block rule 413; armed by default (blocks webshell-probing scanners/bots). Exempt a source with ALLOW_UA_CONTAINS/ALLOW_NETS or hold with RULE_413=0.
-		"CVE":      "1", // named-vuln family; armed (rule 10001 is block). Hold a low-confidence CVE rule with RULE_<id>=0 when it lands.
-		"BLOCK":    "6h",
+		"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0", "BLOCK": "6h",
 	}
-	for fam := range heldAutoblockFamilies {
-		t[strings.TrimPrefix(fam, "WAF_")] = "0"
+	for fam, def := range wafSecurityFamilies(KV{}) {
+		_, held := heldAutoblockFamilies[fam]
+		if def == 1 || held {
+			t[strings.TrimPrefix(fam, "WAF_")] = strconv.Itoa(def)
+		}
 	}
 	return t
 }

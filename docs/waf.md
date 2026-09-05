@@ -1573,7 +1573,11 @@ block-path holes — 301 still blocks the adjacent form.
 > deliberately with `TRAVERSAL = 1` (`DRY_RUN = 1` to preview). Operators who
 > pinned `rule_traversal` to a string mode in `/etc/cfm/*` keep their setting;
 > a legacy boolean `rule_traversal = true` pin means "enabled at the built-in
-> tier" and follows the new default, i.e. it now blocks.
+> tier" and follows the new default, i.e. it now blocks. An operator who keeps
+> `rule_traversal = "challenge"` also sees an attribution shift: a request that
+> trips traversal *and* an earlier challenge-tier rule is now logged, pushed and
+> counted under that other rule (first recorded hit wins among equal severity),
+> where before it was `WAF_TRAVERSAL` / rule 101.
 >
 > ### ✅ FP review — DONE 2026-07 (promoted)
 > A 6-server `cfm.waf.log` review (titan, virgo, orion, rigel, earth, mars)

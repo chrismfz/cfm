@@ -46,9 +46,6 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 			if def != 0 {
 				t.Errorf("%s is held through burn-in but defaults to %d, want 0", f, def)
 			}
-			if tmpl := wafSecurityDefaultsTemplate()[strings.TrimPrefix(f, "WAF_")]; tmpl != "0" {
-				t.Errorf("%s is held but the rendered detectors.conf default is %q, want \"0\"", f, tmpl)
-			}
 		case block && def != 1:
 			t.Errorf("%s has an edge-block rule but defaults to %d, want 1", f, def)
 		case !block && f != "WAF_BACKDOOR" && def != 0:
@@ -58,6 +55,29 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	if cov["WAF_BACKDOOR"] != 1 {
 		t.Errorf("WAF_BACKDOOR should be armed to 1, got %d", cov["WAF_BACKDOOR"])
 	}
+	// The rendered detectors.conf template is derived from the same defaults:
+	// every armed family appears as "1", every held one as "0", and a family
+	// that is 0 only because it has no block rule is not listed at all.
+	tmpl := wafSecurityDefaultsTemplate()
+	for _, f := range fams {
+		key := strings.TrimPrefix(f, "WAF_")
+		_, held := heldAutoblockFamilies[f]
+		got, listed := tmpl[key]
+		switch {
+		case cov[f] == 1 && got != "1":
+			t.Errorf("template: armed family %s should render as 1, got %q (listed=%v)", f, got, listed)
+		case held && got != "0":
+			t.Errorf("template: held family %s should render as 0, got %q", f, got)
+		case cov[f] == 0 && !held && listed:
+			t.Errorf("template: inert family %s should not be listed, got %q", f, got)
+		}
+	}
+	for _, scalar := range []string{"ENABLED", "EVERY", "WINDOW", "DRY_RUN", "BLOCK"} {
+		if _, ok := tmpl[scalar]; !ok {
+			t.Errorf("template: scalar %s missing", scalar)
+		}
+	}
+
 	// The hold is a conscious, dated decision: WAF_TRAVERSAL (rule 101, block
 	// since 2026-09-05) is the one family held today. Arming it is a deletion
 	// from heldAutoblockFamilies — and this assertion.

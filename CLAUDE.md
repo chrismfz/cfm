@@ -260,11 +260,16 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   alone: a family spans edge tiers — `WAF_BACKDOOR` (430-438) has **no**
   block-tier rule, and `WAF_RCE` mixes block 320 with logonly 322-327, so
   family-only keying autoblocks logonly recon. Families with an edge-`block`
-  rule today: `WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME`/`WAF_UPLOAD_CONTENT`, plus
-  `WAF_WEBSHELL` since 2026-07-03 (rule 413, the proper-noun drop-path subset),
-  `WAF_CVE` (rule 10001) and `WAF_PHP_WRAPPER` (305) — all armed to 1 — plus
-  `WAF_TRAVERSAL` since 2026-09-05 (rule 101, **held at 0** through its burn-in,
-  see below) — those are the only ones that can fire in Phase 1.
+  rule today (the Go registry, `DefaultMode: "block"`, is the source — check it
+  before editing this list): `WAF_SQLI` (301), `WAF_SQLI_LEXICAL` (309, since
+  2026-08-23), `WAF_RCE` (320, 329), `WAF_UPLOAD_FNAME` (401, 414),
+  `WAF_UPLOAD_CONTENT` (402), `WAF_WEBSHELL` since 2026-07-03 (413, the
+  proper-noun drop-path subset), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305)
+  and `WAF_AUTH_BURST` (510-512, the xmlrpc multicall / pingback / burst
+  rules) — all armed to 1 — plus `WAF_TRAVERSAL` since 2026-09-05 (rule 101,
+  **held at 0** through its burn-in, see below) — those are the only ones that
+  can fire in Phase 1. The rendered `[waf_security]` template is derived from
+  the same code defaults, so a fresh `detectors.conf` lists exactly these.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
   default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and
   existing `/etc/cfm/detectors.conf` files don't list the family, so they inherit

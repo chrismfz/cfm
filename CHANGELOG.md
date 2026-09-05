@@ -64,7 +64,12 @@ back-filled here — see the git/PR history for that period.
   legacy boolean `rule_traversal = true` pin ("enabled at the built-in tier")
   follows the new default and now blocks. The traversal step also moves to
   run **after every armed block-tier family** so the held family can never
-  shadow their bans on a request that carries both (see `docs/waf.md`). New
+  shadow their bans on a request that carries both (see `docs/waf.md`). One
+  visible side effect for an operator who keeps `rule_traversal = "challenge"`:
+  a request that trips traversal *and* an earlier challenge-tier rule (XSS,
+  bad-UA score, content-type anomaly, UNION variant…) is now attributed to that
+  other rule in `cfm.waf.log`, the push reason and the per-rule hit rates —
+  among equal-severity hits the first recorded owns the headline. New
   `scripts/tests/cfm_waf_traversal_test.lua` pins the block tier and the
   detector's positives/negatives.
 - **WAF `WAF_FETCH_METADATA` (rule 612) hygiene, round 2: two more honest
