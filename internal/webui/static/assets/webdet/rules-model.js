@@ -245,8 +245,12 @@ export const BOT_GROUPS = Object.freeze([
     key: "ai",
     phrase: "AI crawlers",
     label: "AI crawlers",
-    hint: "GPTBot, ChatGPT-User, ClaudeBot, anthropic-ai, Bytespider, CCBot, Amazonbot, PerplexityBot, Google-Extended",
-    patterns: ["*GPTBot*", "*ChatGPT-User*", "*ClaudeBot*", "*anthropic-ai*", "*Bytespider*", "*CCBot*", "*Amazonbot*", "*PerplexityBot*", "*Google-Extended*"],
+    hint: "GPTBot, ChatGPT-User, OAI-SearchBot, ClaudeBot, anthropic-ai, Bytespider, CCBot, Amazonbot, PerplexityBot, Google-Extended, ReflectionBot, ExaSearchBot",
+    // Deliberately NOT here: Claude-User / Claude-SearchBot — Claude-User is
+    // also the User-Agent of the claude.ai MCP connector that drives
+    // /cfm-admin/mcp, so a "*" scoped bot rule would throttle/block cfm-admin
+    // itself. Match those explicitly per vhost if you must.
+    patterns: ["*GPTBot*", "*ChatGPT-User*", "*OAI-SearchBot*", "*ClaudeBot*", "*anthropic-ai*", "*Bytespider*", "*CCBot*", "*Amazonbot*", "*PerplexityBot*", "*Google-Extended*", "*ReflectionBot*", "*ExaSearchBot*"],
   },
   {
     key: "seo",
@@ -261,6 +265,13 @@ export const BOT_GROUPS = Object.freeze([
     label: "Script tools",
     hint: "python-requests, python-urllib, Go-http-client, curl, wget, libwww-perl, okhttp",
     patterns: ["*python-requests*", "*python-urllib*", "*Go-http-client*", "*curl*", "*wget*", "*libwww-perl*", "*okhttp*"],
+  },
+  {
+    key: "dataset",
+    phrase: "dataset / anonymous crawlers",
+    label: "Dataset / anonymous crawlers",
+    hint: "the anonymous \"Mozilla/5.0 (compatible; crawler)\", img2dataset / imagebot, eurovl-fetch, *DatasetCrawler, VelenPublicWebCrawler — bulk image/text harvesters with no benefit to the site",
+    patterns: ["*(compatible; crawler)*", "*img2dataset*", "*imagebot*", "*eurovl-fetch*", "*DatasetCrawler*", "*VelenPublicWebCrawler*"],
   },
   {
     key: "empty",
@@ -719,8 +730,61 @@ function pathsVar(vars, fallback) {
   const ps = csvSplit(vars?.paths).map((p) => (p.startsWith("/") ? p : "/" + p));
   return ps.length ? ps : fallback;
 }
+// groupsVar resolves a "botgroups" var (comma-separated BOT_GROUPS keys) to the
+// group objects, in BOT_GROUPS order so the rules a recipe builds get stable,
+// predictable priorities whatever order the operator typed the keys in.
+function groupsVar(vars, fallback) {
+  const keys = new Set(csvSplit(vars?.groups).map((k) => k.toLowerCase()));
+  const want = keys.size ? keys : new Set(fallback);
+  return BOT_GROUPS.filter((g) => want.has(g.key));
+}
+// hostsVar: like vhostsVar but for a var of another key (recipes that scope
+// two different vhost sets, e.g. DAV vs browser panel subdomains).
+function hostsVar(vars, key, fallback) {
+  const hs = csvSplit(vars?.[key]).map((h) => h.toLowerCase());
+  return hs.length ? hs : fallback.slice();
+}
+// shortList keeps a recipe note under LIMITS.noteLen when the operator pastes
+// a long path list: the first few entries, then a count.
+function shortList(items, max = 3) {
+  const xs = (items || []).map(String);
+  return xs.length > max ? `${xs.slice(0, max).join(", ")} +${xs.length - max} more` : xs.join(", ");
+}
+function isWellKnownPath(p) {
+  const v = String(p || "").toLowerCase();
+  return v === "/.well-known" || v.startsWith("/.well-known/") || v === "/.well-known/*";
+}
 
 const VAR_VHOSTS = { key: "vhosts", label: "Vhosts", type: "vhosts", placeholder: "example.com, *.example.com", required: true };
+const VAR_GROUPS = Object.freeze({ key: "groups", label: `Bot groups (${BOT_GROUPS.map((g) => g.key).join(", ")})`, type: "botgroups", default: "social, ai, seo", required: true });
+const VAR_IPS_OPTIONAL = Object.freeze({ key: "ips", label: "Always allow these IPs / ranges (office, monitors — optional)", type: "ips", placeholder: "203.0.113.0/24, 2001:db8::/48" });
+
+// Bot-facing rules that create real collateral if enabled blindly: the
+// "scripts" group is also what webhooks, IoT posters and integrations announce
+// (python-requests, Go-http-client, curl…), and "empty" (no User-Agent) is what
+// some uptime monitors send. Recipes create the rules for these groups
+// DISABLED and say so.
+const GROUPS_WITH_COLLATERAL = Object.freeze(new Set(["scripts", "empty"]));
+
+// PROBE_PATHS: what the /.env / phpinfo / VCS-metadata sweeps seen across the
+// fleet actually request. Prefix match unless the pattern has a wildcard, and
+// '*' also matches '/' (traffic_rules.go wildcardMatch), so "/*phpinfo.php"
+// covers "/wp-admin/phpinfo.php", "/*/.env" the "/bin/.env" variant and
+// "/*.php.bak" a leftover anywhere.
+// NEVER put /.well-known/ here — ACME/DCV validation lives there (see the
+// isWellKnownPath guard in validateRecipeVars).
+export const PROBE_PATHS = Object.freeze([
+  "/.env", "/*/.env", "/.git/", "/.svn/", "/.hg/", "/.aws/", "/.ssh/", "/.htpasswd", "/.DS_Store",
+  "/*phpinfo.php", "/*.php.bak", "/*.php.old", "/*.php.save", "/*.php~", "/*.sql",
+  "/_profiler/", "/server-status",
+]);
+// The HTTP methods a crawler has no business sending. GET/HEAD/OPTIONS stay
+// open (link previews, robots, CORS preflight).
+export const WRITE_METHODS = Object.freeze(["POST", "PUT", "PATCH", "DELETE"]);
+// Query parameters a crawler legitimately carries: click ids, campaign tags,
+// pagination, feeds/exports. Everything else on a bot request is a facet /
+// filter permutation (min_price, filter_color, orderby, ind=…).
+export const BOT_QS_PASSTHROUGH = "(?:^|[&;])(?:fbclid|gclid|utm_[a-z]+|page|paged|export|xml|feed|lang)(?:=|[&;]|$)";
 
 export const RECIPES = Object.freeze([
   {
@@ -874,6 +938,234 @@ export const RECIPES = Object.freeze([
       return [rule("block_geedo", { enabled: false, priority: 345, vhosts: vhostsVar(vars), match: { ua_any: ["*GeedoShopProductFinder*"] }, action: { type: "block" }, text: "block the Geedo shop scraper by User-Agent (disabled — validate first)" })];
     },
   },
+  // ── recipes distilled from fleet traffic (2026-09, titan/rigel/orion) ──
+  {
+    key: "block_probe_paths",
+    kind: "single",
+    title: "Block secret / dev-file probes",
+    description: "One block rule for the paths only scanners ask for: /.env*, /.git/, /.svn/, /.aws/, phpinfo.php in any directory, *.php.bak / *.php~ leftovers, *.sql dumps, /_profiler/, /server-status. Stops a sweep at its first request instead of feeding the challenge engine and the detection history.",
+    vars: [VAR_VHOSTS, { key: "paths", label: "Extra paths (optional)", type: "paths", placeholder: "/backup/, /old/" }],
+    warnings: [
+      "Created ENABLED: nothing legitimate lives on these paths. Review the list once — a site that really serves .sql or .bak downloads needs those two patterns removed.",
+      "/.well-known/ must never be added here: ACME / CA validation for SSL issuance fetches it (the recipe refuses it).",
+      "Scope it to * (admin) to cover every vhost on the server.",
+    ],
+    build(vars) {
+      const extra = pathsVar(vars, []);
+      const paths = [...PROBE_PATHS, ...extra.filter((p) => !PROBE_PATHS.includes(p))];
+      return [rule("block_probe_paths", { enabled: true, priority: 305, vhosts: vhostsVar(vars), match: { path_any: paths }, action: { type: "block" }, text: "block secret/dev-file probes (.env, .git, phpinfo, *.bak, *.sql…)" })];
+    },
+  },
+  {
+    key: "bots_read_only",
+    kind: "multi",
+    title: "Crawlers are read-only",
+    description: "Block POST / PUT / PATCH / DELETE from social, AI and SEO crawlers. Seen fleet-wide: Meta's crawler re-POSTing forms (including a delete-tip=1 URL) and WooCommerce ajax fragments. Verified search crawlers keep POSTing (Googlebot renders pages), by FCrDNS, not User-Agent.",
+    vars: [VAR_VHOSTS, VAR_GROUPS],
+    warnings: [
+      "The social / AI / SEO rules are created ENABLED: a preview or index crawler never needs to write. Add \"scripts\" (curl, python-requests, Go-http-client…) only if no webhook, IoT poster or integration on the vhost announces itself that way — that rule is created DISABLED.",
+      `Rule #10 allows ${VERIFIED_BOT_LABEL} by reverse-DNS verification; anyone can send their User-Agent, nobody can forge their FCrDNS.`,
+    ],
+    build(vars) {
+      const vhosts = vhostsVar(vars);
+      const k = "bots_read_only";
+      const out = [rule(k, { enabled: true, priority: 10, vhosts, match: { verified_bot: true }, action: { type: "allow" }, text: "verified crawlers (FCrDNS) may still POST (page rendering)" })];
+      groupsVar(vars, ["social", "ai", "seo"]).forEach((g, i) => {
+        const risky = GROUPS_WITH_COLLATERAL.has(g.key);
+        out.push(rule(k, { enabled: !risky, priority: 350 + i, vhosts, match: { ua_any: g.patterns.slice(), methods: [...WRITE_METHODS] }, action: { type: "block" }, text: `${g.phrase} never write${risky ? " (disabled — integrations may match)" : ""}` }));
+      });
+      return out;
+    },
+  },
+  {
+    key: "bots_no_qs",
+    kind: "multi",
+    title: "Bots stay off filter / facet URLs",
+    description: "Block (or hard-throttle) social, AI and SEO crawlers on pages with a query string, except click ids, UTM tags, pagination and feeds. The generalisation of the Meta-only recipe: ladyfox.gr got its whole ?min_price/filter_color grid crawled by Meta, bet-prognostika its ?lg-min/lv-max permutations by Meta + GPTBot, villakirki its ?ind=k&ind=n… by SemrushBot.",
+    vars: [
+      VAR_VHOSTS,
+      VAR_GROUPS,
+      { key: "action", label: "Action", type: "select", options: ["block", "throttle"], default: "block" },
+      { key: "qs_ok", label: "Query params that pass (Go RE2 regex, optional)", type: "regex", default: BOT_QS_PASSTHROUGH },
+    ],
+    warnings: [
+      "Created DISABLED — run the simulator with a real filter URL of the site first, then enable.",
+      "Do not add \"search\" unless you accept de-indexing filtered listings: Googlebot crawling ?page= keeps working (pagination passes), ?filter_color= will not.",
+    ],
+    build(vars) {
+      const vhosts = vhostsVar(vars);
+      const k = "bots_no_qs";
+      const throttle = vars?.action === "throttle";
+      const qsOK = String(vars?.qs_ok ?? "").trim() || BOT_QS_PASSTHROUGH;
+      return groupsVar(vars, ["social", "ai", "seo"]).map((g, i) =>
+        rule(k, {
+          enabled: false,
+          priority: (throttle ? 170 : 360) + i,
+          vhosts,
+          match: { ua_any: g.patterns.slice(), methods: ["GET"], has_qs: true, qs_not_rx: qsOK },
+          action: throttle ? { type: "throttle", profile: "hard_bot" } : { type: "block" },
+          text: `${g.phrase} on filter/facet query strings (disabled — validate first)`,
+        }),
+      );
+    },
+  },
+  {
+    key: "lock_panel_subdomains",
+    kind: "multi",
+    title: "Lock panel service subdomains to your countries",
+    description: "The cPanel proxy subdomains are brute-force and scanner targets (cpcalendars.* at 9 rps of 401s from one IP, webdisk.*, autodiscover.*/autoconfig.* uniq-path sweeps from Google Cloud). DAV / mail-autodiscovery subdomains get a BLOCK for visitors outside the listed countries (those clients cannot solve a challenge); the browser ones (cpanel.*, webmail.*) get the challenge.",
+    vars: [
+      { key: "svc_vhosts", label: "Service subdomains (block outside)", type: "vhosts", default: "cpcalendars.*, cpcontacts.*, webdisk.*, autodiscover.*, autoconfig.*", required: true },
+      { key: "web_vhosts", label: "Browser panel subdomains (challenge outside)", type: "vhosts", default: "cpanel.*, webmail.*" },
+      { key: "countries", label: "Allowed countries", type: "countries", default: "GR, CY", required: true },
+      VAR_IPS_OPTIONAL,
+    ],
+    warnings: [
+      "Wildcard vhosts (cpanel.*) need an admin session. Both enforcing rules are created DISABLED; enable after a simulator run.",
+      "A customer syncing calendars/contacts or using Web Disk from abroad is blocked — list their range in the always-allow IPs, or drop the country they travel to into the allowed list.",
+      "Visitors whose country cannot be resolved are NOT matched (fail-open).",
+    ],
+    build(vars) {
+      const svc = hostsVar(vars, "svc_vhosts", ["cpcalendars.*", "cpcontacts.*", "webdisk.*", "autodiscover.*", "autoconfig.*"]);
+      const web = hostsVar(vars, "web_vhosts", []);
+      const cc = countriesVar(vars, ["GR", "CY"]);
+      const ips = ipsVar(vars);
+      const k = "lock_panel_subdomains";
+      const out = [];
+      if (ips.length) out.push(rule(k, { enabled: true, priority: 15, vhosts: [...svc, ...web], match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass" }));
+      if (web.length) out.push(rule(k, { enabled: false, priority: 252, vhosts: web, match: { country_not_in: cc }, action: { type: "challenge" }, text: `challenge the browser panel subdomains outside ${cc.join(", ")} — ENABLE after testing` }));
+      out.push(rule(k, { enabled: false, priority: 312, vhosts: svc, match: { country_not_in: cc }, action: { type: "block" }, text: `block DAV / autodiscover subdomains outside ${cc.join(", ")} — ENABLE after testing` }));
+      return out;
+    },
+  },
+  {
+    key: "geo_challenge",
+    kind: "multi",
+    title: "Challenge visitors from (or outside) these countries",
+    description: "The softer geo-fence for a shop that cannot block the world: visitors from the listed countries (or everyone outside them) get the challenge, optionally only on catalogue paths. Verified crawlers pass first. Built for the Singapore-datacenter scraper that hit one shop from 130 IPs behind three browser User-Agents.",
+    vars: [
+      VAR_VHOSTS,
+      { key: "mode", label: "Challenge visitors…", type: "select", options: ["from", "outside"], default: "from" },
+      { key: "countries", label: "Countries", type: "countries", default: "SG, RU", required: true },
+      { key: "paths", label: "Only on these paths (optional; empty = whole site)", type: "paths", placeholder: "/product/, /category/" },
+      VAR_IPS_OPTIONAL,
+    ],
+    warnings: [
+      "The challenge rule is created DISABLED. Test with the simulator, then enable it from the table.",
+      "Non-browser clients from the matched countries (apps, feeds, payment callbacks) cannot solve a challenge — narrow with paths or list their IPs.",
+      `Rule #10 allows crawlers by reverse-DNS verification (${VERIFIED_BOT_LABEL}); rule #11 allows the unverifiable search/social bots and Meta previews by User-Agent (forgeable).`,
+      "Visitors whose country cannot be resolved are not matched (fail-open).",
+    ],
+    build(vars) {
+      const vhosts = vhostsVar(vars);
+      const cc = countriesVar(vars, ["SG", "RU"]);
+      const outside = vars?.mode === "outside";
+      const paths = pathsVar(vars, []);
+      const ips = ipsVar(vars);
+      const k = "geo_challenge";
+      const out = [
+        rule(k, { enabled: true, priority: 10, vhosts, match: { verified_bot: true }, action: { type: "allow" }, text: "verified crawlers (FCrDNS) pass" }),
+        rule(k, { enabled: true, priority: 11, vhosts, match: { ua_any: [...UA_ALLOW_ALONGSIDE_VERIFIED] }, action: { type: "allow" }, text: "unverifiable search/social bots + Meta previews pass by User-Agent (forgeable)" }),
+      ];
+      if (ips.length) out.push(rule(k, { enabled: true, priority: 15, vhosts, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass" }));
+      out.push(rule(k, {
+        enabled: false,
+        priority: 260,
+        vhosts,
+        match: outside ? { country_not_in: cc, path_any: paths } : { country_in: cc, path_any: paths },
+        action: { type: "challenge" },
+        text: `challenge visitors ${outside ? "outside" : "from"} ${cc.join(", ")}${paths.length ? " on " + shortList(paths) : ""} — ENABLE after testing`,
+      }));
+      return out;
+    },
+  },
+  {
+    key: "block_dataset_crawlers",
+    kind: "single",
+    title: "Block dataset / anonymous crawlers",
+    description: "Block the bulk harvesters that bring nothing back: the anonymous \"Mozilla/5.0 (compatible; crawler)\" fleet on residential proxies, img2dataset / imagebot image scrapers, eurovl-fetch, *DatasetCrawler, VelenPublicWebCrawler.",
+    vars: [VAR_VHOSTS],
+    warnings: ["Created ENABLED: none of these User-Agents is a search engine, a preview fetcher or a monitor. Scope it to * (admin) to cover every vhost."],
+    build(vars) {
+      return [rule("block_dataset_crawlers", { enabled: true, priority: 335, vhosts: vhostsVar(vars), match: { ua_any: botGroup("dataset").patterns.slice() }, action: { type: "block" }, text: "block dataset / anonymous crawlers by User-Agent" })];
+    },
+  },
+  {
+    key: "throttle_hot_path",
+    kind: "single",
+    title: "Throttle an expensive endpoint for everyone",
+    description: "A per-IP rate limit on one or more paths, with no User-Agent condition: admin-ajax.php bursts (20 POST/s from one visitor), WooCommerce ?wc-ajax= fragments, forum attachment downloads. The fix for the \"a few IPs at many times the site's per-IP median\" shape that hides under the vhost score.",
+    vars: [
+      VAR_VHOSTS,
+      { key: "paths", label: "Paths (a /path?param form matches the parameter on any path)", type: "paths", default: "/wp-admin/admin-ajax.php, /?wc-ajax, /forum/download/file.php", required: true },
+      { key: "profile", label: "Profile", type: "select", options: THROTTLE_PROFILES.map((p) => p.key), default: "soft_bot" },
+    ],
+    warnings: [
+      "Loaded DISABLED — this throttles humans too. A real WooCommerce page load fires 2-5 ajax POSTs, so soft_bot (2 req/s, burst 20) is the safe start; go harder only from the simulator and the access log.",
+      "\"/?wc-ajax\" means: any path, when the query carries wc-ajax (so /en/?wc-ajax=… is covered too).",
+    ],
+    build(vars) {
+      const paths = pathsVar(vars, ["/wp-admin/admin-ajax.php", "/?wc-ajax", "/forum/download/file.php"]);
+      const profile = throttleProfile(vars?.profile) ? String(vars.profile) : "soft_bot";
+      return [rule("throttle_hot_path", { enabled: false, priority: 180, vhosts: vhostsVar(vars), match: { path_any: paths }, action: { type: "throttle", profile }, text: `throttle ${shortList(paths)} for everyone at ${profile} (disabled — validate first)` })];
+    },
+  },
+  {
+    key: "lock_dev_sites",
+    kind: "multi",
+    title: "Lock dev / staging subdomains",
+    description: "Nobody outside your country (and your office ranges) should see a dev site: they are the first stop of phpinfo / .env sweeps and they get indexed by mistake. Everyone outside the listed countries gets the challenge; office ranges pass.",
+    vars: [
+      { key: "vhosts", label: "Vhosts", type: "vhosts", placeholder: "dev.*, staging.*, test.*, dev.example.com", required: true },
+      { key: "countries", label: "Allowed countries", type: "countries", default: "GR", required: true },
+      VAR_IPS_OPTIONAL,
+    ],
+    warnings: [
+      "The challenge rule is created DISABLED; enable after a simulator run. Wildcard vhosts (dev.*) need an admin session.",
+      "A catch-all challenge cannot be saved enabled (the engine refuses a rule with no match condition), which is why this recipe keys on country: keep at least one country listed.",
+    ],
+    build(vars) {
+      const vhosts = vhostsVar(vars);
+      const cc = countriesVar(vars, ["GR"]);
+      const ips = ipsVar(vars);
+      const k = "lock_dev_sites";
+      const out = [];
+      if (ips.length) out.push(rule(k, { enabled: true, priority: 15, vhosts, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass" }));
+      out.push(rule(k, { enabled: false, priority: 255, vhosts, match: { country_not_in: cc }, action: { type: "challenge" }, text: `challenge everyone outside ${cc.join(", ")} on the dev site — ENABLE after testing` }));
+      return out;
+    },
+  },
+  {
+    key: "xmlrpc_lockdown",
+    kind: "multi",
+    title: "Lock down xmlrpc.php server-wide",
+    description: "Block xmlrpc.php POSTs on every WordPress vhost, with an optional allow for the Jetpack / WordPress.com ranges. Catches the slow brute-forcer (one POST every 25 s behind rotating browser User-Agents) that stays under the WAF's burst threshold.",
+    vars: [
+      { key: "vhosts", label: "Vhosts", type: "vhosts", default: "*", placeholder: "* (admin) or the WordPress vhosts", required: true },
+      { key: "ips", label: "Jetpack / WordPress.com ranges to keep allowed (optional)", type: "ips", placeholder: "the ranges Jetpack publishes on its IP-allowlist support page" },
+    ],
+    warnings: [
+      "Jetpack, the WordPress mobile app and some publishing tools talk to xmlrpc.php. The block is created DISABLED: list the Jetpack ranges (copy them from Jetpack's allowlist page, they are not hard-coded here on purpose) or leave sites that need it out of the scope, then enable.",
+      "The per-site \"Protect login endpoints\" recipe is the same block without the fleet-wide scope.",
+    ],
+    build(vars) {
+      const vhosts = vhostsVar(vars);
+      const ips = ipsVar(vars);
+      const k = "xmlrpc_lockdown";
+      const out = [];
+      if (ips.length) out.push(rule(k, { enabled: true, priority: 16, vhosts, match: { ip_any: ips, path_any: ["/xmlrpc.php"] }, action: { type: "allow" }, text: "Jetpack / WordPress.com ranges may use xmlrpc.php" }));
+      out.push(rule(k, { enabled: false, priority: 315, vhosts, match: { path_any: ["/xmlrpc.php"], methods: ["POST"] }, action: { type: "block" }, text: "block xmlrpc.php POSTs — ENABLE after listing Jetpack ranges" }));
+      return out;
+    },
+  },
+  {
+    key: "monitoring_probes",
+    kind: "link",
+    title: "Keep the challenge off your uptime monitor",
+    description: "An `allow` rule does NOT stop the challenge: it only ends rule evaluation, and the challenge decision is OR'd in separately. A monitor that gets the challenge page reports the site as up while customers see a puzzle — or as down. Add its IP / User-Agent as a Challenge exclude instead.",
+    href: "/cfm-admin/webdetector/waf/",
+    linkLabel: "Open Challenge / WAF excludes",
+  },
   {
     key: "block_scraper",
     kind: "single",
@@ -895,7 +1187,9 @@ export function recipe(key) {
 // applied, vhosts prefilled from the page context when given).
 export function recipeVarsDefaults(rcp, { vhosts = "" } = {}) {
   const out = {};
-  for (const v of rcp?.vars || []) out[v.key] = v.key === "vhosts" ? String(vhosts || "") : String(v.default ?? "");
+  // The page context (vhost filter / editor vhost) wins for "vhosts"; a recipe
+  // default (e.g. "*" for a server-wide lockdown) applies when there is none.
+  for (const v of rcp?.vars || []) out[v.key] = v.key === "vhosts" ? String(vhosts || v.default || "") : String(v.default ?? "");
   return out;
 }
 
@@ -913,6 +1207,24 @@ export function validateRecipeVars(rcp, vars) {
       const ips = csvSplit(raw);
       if (ips.length > LIMITS.patternsPerField) errors.push(`${v.label}: too many entries (max ${LIMITS.patternsPerField}).`);
       for (const ip of ips) if (!isIPOrCIDR(ip)) errors.push(`"${ip}" is not an IPv4/IPv6 address or CIDR range.`);
+    }
+    if (v.type === "regex" && raw) {
+      // Same RE2-vs-JS split as validateRuleForm: reject what RE2 definitely
+      // rejects, let the daemon have the final say on the rest.
+      if (/\(\?<?[=!]/.test(raw) || /(^|[^\\])(\\\\)*\\[1-9]/.test(raw)) errors.push(`${v.label}: lookahead/lookbehind and backreferences are not supported (Go RE2 syntax).`);
+    }
+    if (v.type === "botgroups") {
+      for (const key of csvSplit(raw)) if (!botGroup(key.toLowerCase())) errors.push(`"${key}" is not a bot group (use ${BOT_GROUPS.map((g) => g.key).join(", ")}).`);
+    }
+    if (v.type === "paths") {
+      const ps = csvSplit(raw).map((p) => (p.startsWith("/") ? p : "/" + p));
+      for (const p of ps) if (isWellKnownPath(p)) errors.push(`"${p}": /.well-known/ is never a rule target — ACME/DCV validation lives there.`);
+      // A recipe that already carries a fixed path list (block_probe_paths) must
+      // stay within the per-field limit once the operator's extras are added.
+      const fixed = rcp?.key === "block_probe_paths" ? PROBE_PATHS.length : 0;
+      if (fixed + ps.filter((p) => !PROBE_PATHS.includes(p)).length > LIMITS.patternsPerField) {
+        errors.push(`${v.label}: too many paths (the rule may carry ${LIMITS.patternsPerField}, ${fixed} are built in).`);
+      }
     }
   }
   return errors;

@@ -129,6 +129,24 @@ field, §3).
 | **Exempt an integration endpoint** | *not a rule* — deep-links to Challenge excludes with the path pre-filled | This is what F1 says the screenshot rule needed. Putting it in the recipe list is how we stop `allow` misuse. |
 | **Block a scraper (from an incident)** | `block` UA glob(s) + optional country/ASN, prio 300, **on** | Entry point from Forensics / IP drilldown ("Block this UA pattern as a rule") so the match is pasted, not retyped. |
 
+**Landed 2026-09 from a fleet traffic review** (titan / rigel / orion, 24 h of
+`waf_activity`, `top_talkers`, `hot_ips`, `abuse_shadow`, `edge_access_tail`).
+Each row names the shape that motivated it; the value order is the order in
+the recipe grid.
+
+| Recipe (key) | Rules created (in priority order) | Motivating traffic |
+|---|---|---|
+| **Block secret / dev-file probes** (`block_probe_paths`) | `block` path ∈ `PROBE_PATHS` (`/.env`, `/.git/`, `/*phpinfo.php`, `/*.php.bak`, `/*.sql`, `/_profiler/`, `/server-status`…) + operator extras, prio 305, **on** | Google-Cloud sweeps of `/.env*` and `/phpinfo.php` in 40 directories (200+ hits / 2 min per IP, dozens of IPs). Refuses `/.well-known/` (ACME/DCV). |
+| **Crawlers are read-only** (`bots_read_only`) | 1. `allow` verified crawlers (10) 2. one `block` POST/PUT/PATCH/DELETE per bot group (350+), social/AI/SEO **on**, scripts/empty **off** | meta-externalagent POSTing `gui-todaytips.php?delete-tip=1&dir=…` and `?wc-ajax=get_refreshed_fragments`; Googlebot's rendering POSTs keep working by FCrDNS. |
+| **Bots stay off filter / facet URLs** (`bots_no_qs`) | one `block` (360+) or `throttle hard_bot` (170+) per bot group, `has_qs` + `qs_not_rx` = `BOT_QS_PASSTHROUGH` (click ids, UTM, pagination, feeds), **off** | ladyfox.gr `?min_price&filter_color` grid crawled by Meta; bet-prognostika `?lg-min/lv-max` permutations by Meta + GPTBot; SemrushBot on `?ind=k&ind=n…`. Generalises `block_meta_qs`. |
+| **Lock panel service subdomains** (`lock_panel_subdomains`) | (`allow` office IPs 15) · `challenge` `cpanel.*, webmail.*` outside \<GR, CY\> (252, off) · `block` `cpcalendars.*, cpcontacts.*, webdisk.*, autodiscover.*, autoconfig.*` outside (312, off) | 401 brute-force at 9 rps on `cpcalendars.*`, uniq-path sweeps on `autodiscover.*`/`autoconfig.*`. DAV / autodiscovery clients cannot solve a challenge, hence block. |
+| **Challenge visitors from / outside countries** (`geo_challenge`) | 1. `allow` verified (10) 2. `allow` unverifiable + Meta previews by UA (11) 3. (`allow` office IPs 15) 4. `challenge` `country_in` **or** `country_not_in`, optional paths (260, off) | 130 Singapore-datacenter IPs (Byteplus / Zenlayer) behind three browser UAs on one shop, 18 579 distinct URLs — the case `asn_in` (§3) would key on directly. |
+| **Block dataset / anonymous crawlers** (`block_dataset_crawlers`) | `block` UA ∈ new **dataset** group, prio 335, **on** | `Mozilla/5.0 (compatible; crawler)` from residential proxies, `imagebot/img2dataset`, `eurovl-fetch`, `*DatasetCrawler`. |
+| **Throttle an expensive endpoint** (`throttle_hot_path`) | `throttle` path ∈ \<admin-ajax.php, /?wc-ajax, forum download\> for everyone, prio 180, **off** | 20 admin-ajax POST/s from one visitor; 4 803 `rate_outlier` would-challenge rows in `abuse_shadow` (a few IPs at many× the vhost's per-IP median). |
+| **Lock dev / staging subdomains** (`lock_dev_sites`) | (`allow` office IPs 15) · `challenge` outside \<GR\> (255, off) | `dev.*` hosts are the first stop of phpinfo / `.env` sweeps. Keyed on country because a catch-all challenge cannot be saved enabled. |
+| **Lock down xmlrpc.php server-wide** (`xmlrpc_lockdown`) | (`allow` Jetpack ranges on `/xmlrpc.php` 16) · `block` POST `/xmlrpc.php` (315, off), vhosts default `*` | One xmlrpc POST every 25 s behind rotating browser UAs, 200 OK — under the WAF burst threshold. Jetpack ranges are an operator var, never hard-coded. |
+| **Keep the challenge off your uptime monitor** (`monitoring_probes`) | *not a rule* — link to Challenge excludes | The fleet's own `uptime-kuma` probe was being served the challenge page on an auto-challenged vhost. |
+
 ### 2.3 Bot picker groups (for the User-agent chip and recipes)
 
 Curated, versioned in one JS module so the UI, recipes and docs never
@@ -136,9 +154,10 @@ drift (CLAUDE.md §5: never keep a second copy of a list):
 
 - **Search engines** — Googlebot, bingbot, DuckDuckBot, Applebot, YandexBot, Baiduspider
 - **Social previews** — facebookexternalhit, meta-externalagent, Twitterbot, LinkedInBot, Slackbot, WhatsApp, TelegramBot
-- **AI crawlers** — GPTBot, ChatGPT-User, ClaudeBot, anthropic-ai, Bytespider, CCBot, Amazonbot, PerplexityBot, Google-Extended
+- **AI crawlers** — GPTBot, ChatGPT-User, OAI-SearchBot, ClaudeBot, anthropic-ai, Bytespider, CCBot, Amazonbot, PerplexityBot, Google-Extended, ReflectionBot, ExaSearchBot. Deliberately **not** Claude-User / Claude-SearchBot: Claude-User is also the User-Agent of the claude.ai MCP connector behind `/cfm-admin/mcp`, so a `*`-scoped bot rule carrying it would throttle or block cfm-admin itself.
 - **SEO tools** — AhrefsBot, SemrushBot, MJ12bot, DotBot, BLEXBot, PetalBot, DataForSeoBot
-- **Script tools** — python-requests, python-urllib, Go-http-client, curl, wget, libwww-perl, Java/, okhttp
+- **Script tools** — python-requests, python-urllib, Go-http-client, curl, wget, libwww-perl, Java/, okhttp. Also what webhooks, IoT posters and integrations announce, so recipes create rules for this group **disabled**.
+- **Dataset / anonymous crawlers** (2026-09) — `Mozilla/5.0 (compatible; crawler)`, img2dataset / imagebot, eurovl-fetch, `*DatasetCrawler`, VelenPublicWebCrawler — bulk harvesters with no benefit to the site.
 - **Empty / dash UA** — `-`
 
 Each group shows its glob expansion and a "UA is spoofable — prefer

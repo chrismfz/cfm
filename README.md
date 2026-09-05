@@ -1774,8 +1774,17 @@ See ready-to-use files under `docs/examples/`:
 - `traffic-rule-block-country.json` (`country_in`)
 - `traffic-rule-block-outside-countries.json` (`country_not_in` geo-fence)
 - `traffic-rule-block-geedo.json` (`ua_any` — block the Geedo shop scraper; also the one-click "Block the Geedo shop scraper" recipe in cfm-admin)
+- `traffic-rule-block-probe-paths.json` (`path_any` — block `/.env`, `/.git/`, phpinfo, `*.php.bak`, `*.sql` probes; the "Block secret / dev-file probes" recipe. `*` also matches `/`, so `/*phpinfo.php` covers any directory)
+- `traffic-rule-bots-read-only.json` (`ua_any` + `methods` — social crawlers never POST/PUT/PATCH/DELETE; one rule of the "Crawlers are read-only" recipe, which also adds a `verified_bot` allow first)
 - `traffic-rule-challenge-login.json`
 - `traffic-rule-throttle-meta.json`
+
+The cfm-admin **Recipes** tab (Traffic rules → Recipes) builds these and the
+other multi-rule bundles (geo-fence, geo-challenge, tame bots, bots off facet
+URLs, panel-subdomain lock, dev-site lock, xmlrpc lockdown, expensive-endpoint
+throttle) with the right relative priorities; each created rule carries a
+`recipe:<key>` note so the group can be found again. Source of truth:
+`internal/webui/static/assets/webdet/rules-model.js` (`RECIPES`, `BOT_GROUPS`).
 
 Match fields (all optional; set fields are AND'd, values inside a list are OR'd;
 an empty `match` matches every request on the scoped vhosts):

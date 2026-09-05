@@ -1,0 +1,30 @@
+{
+  "enabled": true,
+  "priority": 350,
+  "scope": {
+    "vhosts": [
+      "shop.example.com"
+    ]
+  },
+  "match": {
+    "ua_any": [
+      "*facebookexternalhit*",
+      "*meta-externalagent*",
+      "*Twitterbot*",
+      "*LinkedInBot*",
+      "*Slackbot*",
+      "*WhatsApp*",
+      "*TelegramBot*"
+    ],
+    "methods": [
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE"
+    ]
+  },
+  "action": {
+    "type": "block"
+  },
+  "note": "recipe:bots_read_only - social preview bots never write. Pair with a priority-10 verified_bot allow (see traffic-rule-allow-verified-crawler.json) so Googlebot's page-rendering POSTs keep working."
+}

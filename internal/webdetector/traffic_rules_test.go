@@ -2,6 +2,7 @@ package webdetector
 
 import (
 	"encoding/json"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -692,6 +693,120 @@ func TestVerifiedBotNamesListedInRulesModel(t *testing.T) {
 	for name := range jsNames {
 		if !want[name] {
 			t.Errorf("rules-model.js VERIFIED_BOT_NAMES lists %q, which the daemon cannot verify for rules (not in goodBotPTRSuffixes, or excluded)", name)
+		}
+	}
+}
+
+// jsStringList extracts the string literals of one exported JS array constant
+// from rules-model.js (`NAME = Object.freeze([ "a", "b" ])`), so a Go test can
+// exercise the recipe lists against the real matcher without keeping a second
+// copy of them (CLAUDE.md §5: one source, never a drifting twin).
+func jsStringList(t *testing.T, src, name string) []string {
+	t.Helper()
+	start := strings.Index(src, "export const "+name+" ")
+	if start < 0 {
+		t.Fatalf("rules-model.js has no %s", name)
+	}
+	open := strings.Index(src[start:], "[")
+	end := strings.Index(src[start:], "]")
+	if open < 0 || end < 0 || end < open {
+		t.Fatalf("%s not a bracketed list", name)
+	}
+	var out []string
+	for _, m := range regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(src[start+open:start+end], -1) {
+		out = append(out, m[1])
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s is empty", name)
+	}
+	return out
+}
+
+func jsStringConst(t *testing.T, src, name string) string {
+	t.Helper()
+	m := regexp.MustCompile(`export const ` + name + ` = "((?:[^"\\]|\\.)*)";`).FindStringSubmatch(src)
+	if m == nil {
+		t.Fatalf("rules-model.js has no string constant %s", name)
+	}
+	return m[1]
+}
+
+// TestRecipeProbePathsMatchScannerPaths runs the cfm-admin "Block secret /
+// dev-file probes" recipe list (rules-model.js PROBE_PATHS) through the SAME
+// matcher the edge enforces (ruleMatchFilters → pathPatternMatch): every path
+// the 2026-09 Google-Cloud sweeps requested must match, /.well-known/ (ACME /
+// DCV) and ordinary catalogue paths must not, and the recipes' query-keyed
+// pattern "/?wc-ajax" must mean "any path whose query carries wc-ajax".
+func TestRecipeProbePathsMatchScannerPaths(t *testing.T) {
+	js, err := os.ReadFile(filepath.Join("..", "webui", "static", "assets", "webdet", "rules-model.js"))
+	if err != nil {
+		t.Skipf("rules-model.js not found: %v", err)
+	}
+	src := string(js)
+	probe := jsStringList(t, src, "PROBE_PATHS")
+	if len(probe) > maxPatternsPerField {
+		t.Fatalf("PROBE_PATHS has %d entries, the rule field allows %d", len(probe), maxPatternsPerField)
+	}
+	if _, err := normalizePatternList(probe, maxPatternsPerField, true); err != nil {
+		t.Fatalf("PROBE_PATHS rejected by normalizePatternList: %v", err)
+	}
+	m := TrafficRuleMatch{PathAny: probe}
+	hit := func(path string) bool {
+		return ruleMatchFilters(m, netip.MustParseAddr("203.0.113.9"), true, "US", "Mozilla/5.0", path, "GET", "", "")
+	}
+	for _, p := range []string{
+		"/.env", "/.env.local", "/.env.production", "/bin/.env", // prefix on the file, wildcard-free
+		"/.git/config", "/.svn/entries", "/.aws/credentials", "/.ssh/id_rsa", "/.htpasswd", "/.DS_Store",
+		"/phpinfo.php", "/wp-admin/phpinfo.php", "/mail/phpinfo.php", "/old_phpinfo.php", "/_profiler/phpinfo",
+		"/phpinfo.php.bak", "/wp-config.php.bak", "/index.php.old", "/config.php.save", "/phpinfo.php~", "/backup/site.sql",
+		"/server-status", "/server-status.php",
+	} {
+		if !hit(p) {
+			t.Errorf("probe path %q must match PROBE_PATHS", p)
+		}
+	}
+	for _, p := range []string{
+		"/", "/.well-known/acme-challenge/token", "/.well-known/pki-validation/x.txt", "/product/ring-19003w/",
+		"/wp-content/uploads/2025/12/photo.jpg", "/environment/", "/gitlab/", "/servers/", "/info.php", "/assets/app.php",
+		"/wp-admin/admin-ajax.php", "/xmlrpc.php", "/server-information/", "/environment.php",
+	} {
+		if hit(p) {
+			t.Errorf("legitimate path %q must NOT match PROBE_PATHS", p)
+		}
+	}
+	if strings.HasPrefix("/bin/.env", "/.env") {
+		t.Fatalf("test premise: /bin/.env is not a prefix match")
+	}
+
+	// "/?wc-ajax": the path part "/" prefix-matches every path, the query part
+	// requires a wc-ajax parameter (any value) — WooCommerce fragments on every
+	// locale prefix, nothing else.
+	wc := TrafficRuleMatch{PathAny: []string{"/?wc-ajax"}}
+	hitWC := func(path, qs string) bool {
+		return ruleMatchFilters(wc, netip.MustParseAddr("203.0.113.9"), true, "GR", "Mozilla/5.0", path, "POST", qs, "")
+	}
+	if !hitWC("/", "wc-ajax=get_refreshed_fragments") || !hitWC("/en/", "wc-ajax=xoo_wsc_refresh_fragments") {
+		t.Errorf("/?wc-ajax must match a wc-ajax query on any path")
+	}
+	if hitWC("/", "") || hitWC("/shop/", "min_price=120&filter_color=red") {
+		t.Errorf("/?wc-ajax must not match without the parameter")
+	}
+
+	// The bot query-string pass-through must be valid Go RE2 with the "(?i)"
+	// prefix normalizeTrafficRule adds, and must let pagination / click ids
+	// through while catching a facet grid.
+	rx, err := regexp.Compile("(?i)" + jsStringConst(t, src, "BOT_QS_PASSTHROUGH"))
+	if err != nil {
+		t.Fatalf("BOT_QS_PASSTHROUGH is not RE2: %v", err)
+	}
+	for _, ok := range []string{"page=2", "fbclid=IwAR0", "utm_source=fb&x=1", "a=1&paged=3", "gclid=abc"} {
+		if !rx.MatchString(ok) {
+			t.Errorf("pass-through %q should match BOT_QS_PASSTHROUGH", ok)
+		}
+	}
+	for _, facet := range []string{"min_price=120&filter_color=red", "ind=k&ind=n", "orderby=price", "pageless=1", "lg-min=10&lv-max=-380"} {
+		if rx.MatchString(facet) {
+			t.Errorf("facet %q must not match BOT_QS_PASSTHROUGH", facet)
 		}
 	}
 }

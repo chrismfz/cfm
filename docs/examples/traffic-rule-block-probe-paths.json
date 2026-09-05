@@ -1,0 +1,34 @@
+{
+  "enabled": true,
+  "priority": 305,
+  "scope": {
+    "vhosts": [
+      "*"
+    ]
+  },
+  "match": {
+    "path_any": [
+      "/.env",
+      "/*/.env",
+      "/.git/",
+      "/.svn/",
+      "/.hg/",
+      "/.aws/",
+      "/.ssh/",
+      "/.htpasswd",
+      "/.DS_Store",
+      "/*phpinfo.php",
+      "/*.php.bak",
+      "/*.php.old",
+      "/*.php.save",
+      "/*.php~",
+      "/*.sql",
+      "/_profiler/",
+      "/server-status"
+    ]
+  },
+  "action": {
+    "type": "block"
+  },
+  "note": "recipe:block_probe_paths - block secret/dev-file probes (.env, .git, phpinfo, *.bak, *.sql...). Prefix match unless the pattern has a wildcard; '*' also matches '/'. Never add /.well-known/ (ACME/DCV). [\"*\"] needs an admin session."
+}

@@ -17,7 +17,41 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **cfm-admin traffic rules: nine new recipes + a "dataset crawlers" bot group,
+  distilled from a 24 h review of live traffic on three fleet nodes.** In value
+  order: *Block secret / dev-file probes* (one enabled `path_any` block for the
+  `/.env*`, `/.git/`, `/*phpinfo.php`, `/*.php.bak`, `/*.sql`, `/_profiler/`,
+  `/server-status` sweeps Google-Cloud scanners run against every vhost — stops
+  them at request one instead of feeding the challenge engine; `/.well-known/`
+  is refused), *Crawlers are read-only* (verified-crawler allow, then a
+  POST/PUT/PATCH/DELETE block per social/AI/SEO group — Meta's crawler was
+  re-POSTing forms including a `delete-tip=1` URL), *Bots stay off filter /
+  facet URLs* (the Meta-only query-string recipe generalised to any bot group,
+  block or `hard_bot` throttle, click ids / UTM / pagination / feeds pass),
+  *Lock panel service subdomains to your countries* (block on
+  `cpcalendars.* / cpcontacts.* / webdisk.* / autodiscover.* / autoconfig.*`,
+  challenge on `cpanel.* / webmail.*`), *Challenge visitors from / outside
+  these countries* (the softer geo-fence, optional paths), *Block dataset /
+  anonymous crawlers* (new `dataset` group: the anonymous
+  `Mozilla/5.0 (compatible; crawler)` fleet, img2dataset / imagebot,
+  eurovl-fetch, `*DatasetCrawler`), *Throttle an expensive endpoint for everyone*
+  (path-only per-IP throttle: admin-ajax.php, `?wc-ajax`, forum downloads),
+  *Lock dev / staging subdomains*, *Lock down xmlrpc.php server-wide* (Jetpack
+  ranges as an operator var), and a link recipe pointing an uptime monitor at
+  the Challenge excludes (an `allow` rule never bypasses the challenge). Two
+  new CLI/API examples: `docs/examples/traffic-rule-block-probe-paths.json`,
+  `docs/examples/traffic-rule-bots-read-only.json`. Enforcing geo / challenge
+  rules are still created disabled; only UA- and probe-path-keyed blocks start
+  enabled.
+
+### Changed
+- **Traffic-rules "AI crawlers" bot group** now also lists OAI-SearchBot,
+  ReflectionBot and ExaSearchBot (seen fleet-wide). Claude-User /
+  Claude-SearchBot are deliberately left out: Claude-User is also the
+  User-Agent of the claude.ai MCP connector behind `/cfm-admin/mcp`, so a
+  `*`-scoped bot rule carrying it would throttle or block cfm-admin itself
+  (guarded by a test).
 
 ## 2026.09.05
 
