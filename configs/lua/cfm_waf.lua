@@ -45,10 +45,15 @@ local CFG = {
   --   "block"     -> return 403 immediately
 
   -- ── Core request-side protections ─────────────────────────────────────────
-  rule_traversal       = "challenge",  -- ../, null bytes, basic traversal markers
+  rule_traversal       = "block",      -- ../, null bytes, basic traversal markers
                                        -- (signal-confirmed: encoded forms, null bytes,
                                        --  multi-hop, or single ../ paired with a
-                                       --  sensitive sink — see detect_traversal)
+                                       --  sensitive sink — see detect_traversal).
+                                       -- Promoted challenge→block 2026-09-05 after a
+                                       -- clean 6-server FP review: 11 507 hits/7 d,
+                                       -- 0 from GR, every sampled hit a scanner
+                                       -- payload (.env / /proc/self/environ / pearcmd
+                                       -- / .git/config / /etc/passwd) — docs/waf.md.
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
@@ -1063,15 +1068,9 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 5) Traversal ──────────────────────────────────────────────────────────
-  do
-    local mode = rule_mode(CFG.rule_traversal, "challenge")
-    if mode ~= "disabled" and det.detect_traversal(uri, args, get_scan_ua()) then
-      local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      ttl, mode = mode_ttl_action(mode, ttl)
-      if record("WAF_TRAVERSAL", ttl, mode, RULE_IDS.rule_traversal) then goto done end
-    end
-  end
+  -- ── 5) Traversal — moved to run after every armed block-tier family ────────
+  -- (see "Traversal" just before the LAST step). Kept here as a signpost so the
+  -- step numbering in the comments and docs still resolves.
 
   -- ── 6) RCE ────────────────────────────────────────────────────────────────
   -- RCE scans the RAW surface (get_scan_ua), NOT the data:-stripped one. Its
@@ -2108,6 +2107,29 @@ function _M.check(ctx)
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_numeric_xor_obfuscation) then goto done end
       end
+    end
+  end
+
+  -- ── Traversal (rule 101) — AFTER every armed block-tier family on purpose ──
+  -- rule_traversal is block-tier since 2026-09-05, but its autoblock family
+  -- (WAF_TRAVERSAL) is HELD un-armed for burn-in (waf_security_register.go).
+  -- record() hands the headline reason to the FIRST block hit and `goto done`
+  -- ends evaluation there, and cfm.lua pushes only that headline. Evaluated at
+  -- its old position (step 5) a block-tier traversal hit would therefore
+  -- SHADOW WAF_RCE / WAF_PHP_WRAPPER / WAF_SQLI / WAF_UPLOAD_* / WAF_CVE on any
+  -- request that carries both a traversal marker and their payload (wrapper LFI
+  -- `php://filter/...resource=../../etc/passwd`, LFI→RCE `../../proc/self/
+  -- environ;wget …`, `${jndi:…}&f=../../etc/passwd`) — and because the
+  -- traversal family is held, those requests would lose the 6h nft ban and the
+  -- alert the armed family gave them. Running last, the armed family owns the
+  -- headline and the ban; a traversal-only request still blocks at the edge.
+  -- If WAF_TRAVERSAL is ever armed by default this ordering is merely harmless.
+  do
+    local mode = rule_mode(CFG.rule_traversal, "block")
+    if mode ~= "disabled" and det.detect_traversal(uri, args, get_scan_ua()) then
+      local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+      ttl, mode = mode_ttl_action(mode, ttl)
+      if record("WAF_TRAVERSAL", ttl, mode, RULE_IDS.rule_traversal) then goto done end
     end
   end
 

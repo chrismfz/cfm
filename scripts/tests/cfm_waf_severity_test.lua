@@ -105,16 +105,20 @@ do
 end
 
 -- ── Test 4: logonly first + block later → block (severity wins) ──────────────
--- Traversal (rule 5, logonly) fires first; RCE (rule 6, block) fires next.
+-- Bad UA (rule 1, logonly) fires first; RCE (rule 6, block) fires next.
 -- A first-match WAF would have returned logonly. We return block.
+-- (Traversal used to play the "fires first" role here; since 2026-09-05 it runs
+-- AFTER every armed block-tier family, so it can no longer precede RCE.)
 do
   disable_all_rules()
-  waf.set_rule("rule_traversal", "logonly")
-  waf.set_rule("rule_rce",       "block")
+  waf.set_rule("rule_bad_ua", "logonly")
+  waf.set_rule("rule_rce",    "block")
 
   local hit, reason, _ttl, action, hits = waf.check(fresh_ctx({
-    uri  = "/foo/../wp-config",
-    args = "x=${jndi:ldap://",
+    args    = "x=${jndi:ldap://",
+    uri     = "/login",
+    method  = "POST",
+    headers = { ["User-Agent"] = "" },
   }))
   check(hit == true,        "4: logonly+block — hit=true")
   check(reason == "WAF_RCE", "4: logonly+block — final reason is WAF_RCE")
@@ -282,21 +286,47 @@ do
 end
 
 -- ── Test 15: severity-wins picks the strongest rule's ID, not first-match ────
+-- Bad UA (201, logonly) records first; RCE (320, block) records next and owns
+-- the final ID. (Traversal moved after the armed block families 2026-09-05.)
 do
   disable_all_rules()
-  waf.set_rule("rule_traversal", "logonly")  -- ID 101
-  waf.set_rule("rule_rce",       "block")     -- ID 320
+  waf.set_rule("rule_bad_ua", "logonly")  -- ID 201
+  waf.set_rule("rule_rce",    "block")    -- ID 320
 
   local hit, _reason, _ttl, _action, hits, waf_rule_id = waf.check(fresh_ctx({
+    args    = "x=${jndi:ldap://",
+    uri     = "/login",
+    method  = "POST",
+    headers = { ["User-Agent"] = "" },
+  }))
+  check(hit == true,                                 "15: combo — hit=true")
+  check(waf_rule_id == 320,                          "15: combo — final waf_rule_id is RCE (320), not BAD_UA (201)")
+  check(#hits == 2,                                  "15: combo — both hits recorded")
+  -- Iteration order at call sites: bad UA records before RCE.
+  check(hits[1].waf_rule_id == 201,                  "15: combo — hits[1] is bad UA (201)")
+  check(hits[2].waf_rule_id == 320,                  "15: combo — hits[2] is rce (320)")
+end
+
+-- ── Test 15b: a held block family never shadows an armed one ──────────────────
+-- Traversal (101, block, family held un-armed) runs AFTER RCE (320, block,
+-- armed): a request carrying both markers is attributed to RCE — the headline
+-- cfm.lua pushes and wafsec bans on — and evaluation stops there.
+do
+  disable_all_rules()
+  waf.set_rule("rule_traversal", "block")
+  waf.set_rule("rule_rce",       "block")
+
+  local hit, reason, _ttl, action, hits, waf_rule_id = waf.check(fresh_ctx({
     uri  = "/foo/../wp-config",
     args = "x=${jndi:ldap://",
   }))
-  check(hit == true,                                 "15: combo — hit=true")
-  check(waf_rule_id == 320,                          "15: combo — final waf_rule_id is RCE (320), not TRAVERSAL (101)")
-  check(#hits == 2,                                  "15: combo — both hits recorded")
-  -- Iteration order at call sites: traversal records before RCE.
-  check(hits[1].waf_rule_id == 101,                  "15: combo — hits[1] is traversal (101)")
-  check(hits[2].waf_rule_id == 320,                  "15: combo — hits[2] is rce (320)")
+  check(hit == true and action == "block",           "15b: traversal+RCE — blocks")
+  check(reason == "WAF_RCE" and waf_rule_id == 320,  "15b: traversal+RCE — RCE owns the headline (got " .. tostring(reason) .. ")")
+  check(#hits == 1,                                  "15b: traversal+RCE — RCE short-circuits before traversal runs")
+  -- and traversal alone still blocks under its own name
+  hit, reason, _ttl, action, _hits, waf_rule_id = waf.check(fresh_ctx({ uri = "/foo/../wp-config" }))
+  check(hit == true and reason == "WAF_TRAVERSAL" and action == "block" and waf_rule_id == 101,
+        "15b: traversal alone — WAF_TRAVERSAL block, rule 101")
 end
 
 -- ── Test 16: cmd_payload sub-rule IDs map per tag ─────────────────────────────
@@ -1527,7 +1557,6 @@ do
     "rule_cmd_payload_backtick",
     "rule_header_flood",
     "rule_cmd_payload",  -- fallback default, kept aligned with sub-rules
-    "rule_traversal",
     "rule_sqli_union_variant",
     "rule_ssrf",
   }
@@ -1536,6 +1565,7 @@ do
           "71: " .. name .. " ships as 'challenge' (got " .. tostring(snap[name]) .. ")")
   end
   local must_be_block = {
+    "rule_traversal",  -- promoted challenge→block 2026-09-05 (clean 6-server FP review, docs/waf.md)
     "rule_sqli_blind_lexical",
     "rule_xmlrpc_multicall",
     "rule_xmlrpc_pingback",

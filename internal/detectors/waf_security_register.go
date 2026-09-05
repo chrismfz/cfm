@@ -41,12 +41,26 @@ import (
 // scanners/scrapers/bots with acceptable collateral, so it is now armed by
 // default (2026-07-18). Narrow the scope per-rule with `RULE_413 = 0` or
 // exempt sources with `ALLOW_UA_CONTAINS` / `ALLOW_NETS` if a scanner matters.
+//
+// WAF_TRAVERSAL is the deliberate exception the other way: rule 101 was
+// promoted to edge-`block` on 2026-09-05 (clean 6-server FP review), which
+// would auto-arm the family, but it is HELD at 0 for its own burn-in
+// (CLAUDE.md §6: arming a newly block-promoted family is an opt-in decision).
+// The volume is the reason: ~11 500 hits and ~2 300 distinct source IPs per
+// week fleet-wide, almost all Google-Cloud `.env` / `/proc/self/environ`
+// sweeps — armed at threshold 1 that is ~330 six-hour bans and alerts per day.
+// The edge already returns 403 to every hit; the ban adds cross-request
+// persistence and notification, which the operator arms with `TRAVERSAL = 1`
+// once the alert volume is judged acceptable (or with DRY_RUN = 1 first).
 func wafSecurityFamilies(kv KV) map[string]int {
 	families := map[string]int{}
 	for _, fam := range webdetector.WAFReasonFamilies() {
 		def := 0
 		if webdetector.WAFFamilyHasBlockRule(fam) || fam == "WAF_BACKDOOR" {
 			def = 1
+		}
+		if fam == "WAF_TRAVERSAL" {
+			def = 0 // held through burn-in, see above
 		}
 		key := strings.TrimPrefix(fam, "WAF_")
 		families[fam] = kvInt(kv, key, def)
@@ -62,9 +76,10 @@ func init() {
 		DefaultsTemplate: map[string]string{
 			"ENABLED": "1", "EVERY": "20s", "WINDOW": "30m", "DRY_RUN": "0",
 			"SQLI": "1", "RCE": "1", "UPLOAD_FNAME": "1", "UPLOAD_CONTENT": "1", "BACKDOOR": "1",
-			"WEBSHELL": "1", // edge-block rule 413; armed by default (blocks webshell-probing scanners/bots). Exempt a source with ALLOW_UA_CONTAINS/ALLOW_NETS or hold with RULE_413=0.
-			"CVE": "1",      // named-vuln family; armed (rule 10001 is block). Hold a low-confidence CVE rule with RULE_<id>=0 when it lands.
-			"BLOCK": "6h",
+			"WEBSHELL":  "1", // edge-block rule 413; armed by default (blocks webshell-probing scanners/bots). Exempt a source with ALLOW_UA_CONTAINS/ALLOW_NETS or hold with RULE_413=0.
+			"CVE":       "1", // named-vuln family; armed (rule 10001 is block). Hold a low-confidence CVE rule with RULE_<id>=0 when it lands.
+			"TRAVERSAL": "0", // rule 101 is edge-block since 2026-09-05 but the family is HELD un-armed for burn-in (volume: ~2 300 scanner IPs/week). Set 1 to ban.
+			"BLOCK":     "6h",
 		},
 		LeniencySupported:   true,
 		LeniencyRecommended: true,

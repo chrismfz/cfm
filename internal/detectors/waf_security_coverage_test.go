@@ -10,7 +10,9 @@ import (
 // WAF reason-family from the code registry — so adding a new WAF family can
 // never leave it silently unconfigurable — and that the ON-by-default set is
 // exactly the families that have an edge-`block` rule (the only ones that can
-// autoblock in Phase 1), plus WAF_BACKDOOR armed for a future promotion.
+// autoblock in Phase 1), plus WAF_BACKDOOR armed for a future promotion, minus
+// WAF_TRAVERSAL, whose block rule (101) landed 2026-09-05 and is held through
+// its burn-in (see waf_security_register.go).
 func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	fams := webdetector.WAFReasonFamilies()
 	if len(fams) < 20 {
@@ -33,6 +35,15 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 		def := cov[f]
 		block := webdetector.WAFFamilyHasBlockRule(f)
 		switch {
+		case f == "WAF_TRAVERSAL":
+			// Rule 101 is edge-block (promoted 2026-09-05) but the family is
+			// deliberately HELD at 0 through its burn-in — see the register.
+			if !block {
+				t.Errorf("expected WAF_TRAVERSAL to have an edge-block rule (101)")
+			}
+			if def != 0 {
+				t.Errorf("WAF_TRAVERSAL is held through burn-in but defaults to %d, want 0", def)
+			}
 		case block && def != 1:
 			t.Errorf("%s has an edge-block rule but defaults to %d, want 1", f, def)
 		case !block && f != "WAF_BACKDOOR" && def != 0:
@@ -69,9 +80,12 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	}
 
 	// Config overrides are honored, and the key is the family name minus WAF_.
-	over := wafSecurityFamilies(KV{"SQLI": "0", "WEBSHELL": "3"})
+	over := wafSecurityFamilies(KV{"SQLI": "0", "WEBSHELL": "3", "TRAVERSAL": "1"})
 	if over["WAF_SQLI"] != 0 {
 		t.Errorf("SQLI=0 override not applied: got %d", over["WAF_SQLI"])
+	}
+	if over["WAF_TRAVERSAL"] != 1 {
+		t.Errorf("TRAVERSAL=1 must arm the held family: got %d", over["WAF_TRAVERSAL"])
 	}
 	if over["WAF_WEBSHELL"] != 3 {
 		t.Errorf("WEBSHELL=3 override not applied: got %d", over["WAF_WEBSHELL"])

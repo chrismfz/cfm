@@ -699,7 +699,7 @@ Current assignments:
 
 ```
 1xx — Path / traversal
-  101  rule_traversal
+  101  rule_traversal                  (block; promoted challenge→block 2026-09-05, see FP review below)
   102  rule_long_path_segment
 
 2xx — Client identity
@@ -1542,6 +1542,37 @@ are rarer stacked obfuscations; and a **value-leading** `?p=union all select…`
 (same trade-off as rule 301). These are burn-in-visibility gaps, not new
 block-path holes — 301 still blocks the adjacent form.
 
+> ### ✅ FP review — DONE 2026-09-05 (rule 101 promoted)
+> A 6-server, 7-day review of `WAF_TRAVERSAL` (rule 101, `detect_traversal`)
+> on titan / rigel / orion / earth / mars / virgo via `waf_rule_detail` and
+> `waf_activity` (per country, per node):
+> - **11 507 hits**, ~2 300 distinct source IPs; per host: earth 4 510, orion
+>   2 421, titan 1 740, mars 1 361, virgo 1 214, rigel 261.
+> - **0 hits from Greece on every node** (`waf_activity country=GR` fan-out) —
+>   the customer population never trips it.
+> - Sources: Google Cloud (US/TW/NL/JP/BE/SG regions) is >95 % of every node,
+>   and a 200-row earth sample was **200/200 scanner payloads** — Vite
+>   `/@fs/..%252f…/root/.env?raw??` (80), `/@fs/..%252f…/proc/self/environ`
+>   (32), Astro `/_image?href=/../../../.env` (27), `/assets../.env` and the
+>   `/static../`, `/img../`, `/uploads../` variants (168/200 target `.env`).
+>   Every minority-country row was pulled and read: Vodafone Qatar `pearcmd` /
+>   `/etc/passwd%00` sweep, Techoff `..%5c…var/log/apache2/access.log`,
+>   DataWagon LumiaBot `.env` + `/proc/self/environ`, Bucklog `curl`
+>   `/static../var/www/html/.env`, a fake Applebot-Extended on Cloudflare
+>   (`/@fs/..%252f`), Turk Telekom GitConfigScanner `/js../.git/config`,
+>   `libredtail-http` pearcmd RCE, a FortiGate CVE-2018-13379 probe, an AWS
+>   credentials probe. **0 FP.**
+> - Half the hits land on panel subdomains (`cpanel.* webmail.* whm.*
+>   webdisk.* autodiscover.*`) and the bare server IPs — no app there to
+>   false-positive on.
+>
+> **Promoted `challenge` → `block`** (Lua default + Go registry). The
+> `WAF_TRAVERSAL` autoblock family is **held at 0** through its own burn-in
+> (`TRAVERSAL = 0` in `detectors.conf`, held in code): at threshold 1 the
+> volume above is ~330 six-hour bans and alerts a day, which the operator arms
+> deliberately with `TRAVERSAL = 1` (`DRY_RUN = 1` to preview). Operators who
+> pinned `rule_traversal` in `/etc/cfm/*` keep their setting.
+>
 > ### ✅ FP review — DONE 2026-07 (promoted)
 > A 6-server `cfm.waf.log` review (titan, virgo, orion, rigel, earth, mars)
 > found the two SQLi families **100% clean**:

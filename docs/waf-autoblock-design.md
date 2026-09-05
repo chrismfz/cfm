@@ -187,10 +187,13 @@ COOLDOWN = "20m"
 ; `block`, and the config key for a family is its name minus WAF_ (so the
 ; grouped `UPLOAD_EXPLOIT` below is really two keys, UPLOAD_FNAME + UPLOAD_
 ; CONTENT). Because only edge-`block` hits feed, only families that HAVE a
-; block-tier rule can ever fire in Phase 1 — today five: WAF_SQLI (301),
-; WAF_RCE (320), WAF_UPLOAD_FNAME (401), WAF_UPLOAD_CONTENT (402), and
-; WAF_WEBSHELL (413, the proper-noun drop-path subset, added 2026-07-03). All
-; five default to 1. WAF_WEBSHELL was HELD at 0 through burn-in — a webshell
+; block-tier rule can ever fire in Phase 1 — as of 2026-09-05: WAF_SQLI (301),
+; WAF_RCE (320), WAF_UPLOAD_FNAME (401), WAF_UPLOAD_CONTENT (402),
+; WAF_WEBSHELL (413, the proper-noun drop-path subset, added 2026-07-03),
+; WAF_CVE (10001+), WAF_PHP_WRAPPER (305) and WAF_TRAVERSAL (101, promoted
+; 2026-09-05). All default to 1 except WAF_TRAVERSAL, held at 0 through its
+; burn-in (volume: ~2 300 scanner IPs/week fleet-wide); its step runs after every
+; armed block family in cfm_waf.lua so it cannot shadow their bans. WAF_WEBSHELL was HELD at 0 through burn-in — a webshell
 ; GET-probe (`/c99.php`) is also what benign scanners (Shodan/Censys/monitors)
 ; do — but as of 2026-07-18 the operator runs it armed fleet-wide and confirms it
 ; cleanly bans malicious scanners/scrapers/bots, so it now arms to 1 by default

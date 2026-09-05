@@ -48,6 +48,21 @@ back-filled here — see the git/PR history for that period.
   enabled.
 
 ### Changed
+- **WAF: `rule_traversal` (101, `WAF_TRAVERSAL`) promoted `challenge` →
+  `block`** after a clean 6-server, 7-day FP review (titan / rigel / orion /
+  earth / mars / virgo): 11 507 hits, **0 from Greece on any node**, >95 %
+  Google-Cloud sweeps, a 200-row sample 200/200 scanner payloads (`.env`,
+  `/proc/self/environ`, `pearcmd`, `.git/config`, `/etc/passwd`), every
+  minority-country row read and confirmed an attack — 0 FP (record in
+  `docs/waf.md`). The `WAF_TRAVERSAL` autoblock family is deliberately **held
+  un-armed** (`TRAVERSAL = 0`, held in code and in the reference
+  `detectors.conf`) for its own burn-in — at threshold 1 it would ban ~2 300
+  scanner IPs a week fleet-wide (~330 six-hour bans + alerts a day) that the
+  edge already answers with 403; arm with `TRAVERSAL = 1` (or preview with
+  `DRY_RUN = 1`) when that volume is acceptable. Operators who pinned
+  `rule_traversal` in `/etc/cfm/*` keep their setting. New
+  `scripts/tests/cfm_waf_traversal_test.lua` pins the block tier and the
+  detector's positives/negatives.
 - **WAF `WAF_FETCH_METADATA` (rule 612) hygiene, round 2: two more honest
   header-poor categories leave the shadow.** (a) `GeedoShopProductFinder`
   (geedo.com product search, PTR `product-search-*.geedo.com`) self-declares
