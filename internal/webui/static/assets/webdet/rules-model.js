@@ -453,6 +453,15 @@ export function isIPOrCIDR(v) {
   return true;
 }
 
+// re2Rejects: the constructs Go RE2 definitely refuses — lookahead/lookbehind
+// and backreferences. A backreference is an UNESCAPED backslash followed by a
+// digit; "a\\1" (escaped backslash, then a literal 1) compiles fine in RE2.
+// Shared by the rule form and the recipe vars so the two never drift.
+export function re2Rejects(rx) {
+  const v = String(rx || "");
+  return /\(\?<?[=!]/.test(v) || /(^|[^\\])(\\\\)*\\[1-9]/.test(v);
+}
+
 // ── Validation (mirrors normalizeTrafficRule; stricter only where the server
 //    would silently do something surprising) ───────────────────────────────
 // Returns { errors, warnings, hints }. `errors` block the save; `warnings`
@@ -506,9 +515,7 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
     // so only reject what RE2 definitely rejects (lookaround, backreferences)
     // and treat a JS parse failure as a warning — the server has the final say.
     const rx = p.match.qs_not_rx;
-    // A backreference is an UNESCAPED backslash followed by a digit; "a\\1"
-    // (escaped backslash, then a literal 1) compiles fine in RE2.
-    if (/\(\?<?[=!]/.test(rx) || /(^|[^\\])(\\\\)*\\[1-9]/.test(rx)) {
+    if (re2Rejects(rx)) {
       errors.push("QS pass-through: lookahead/lookbehind and backreferences are not supported (Go RE2 syntax).");
     } else {
       try {
@@ -696,6 +703,13 @@ function sampleCountryOutside(list) {
 function note(key, text) {
   return `recipe:${key} — ${text}`;
 }
+// clampNote keeps a recipe note within LIMITS.noteLen no matter how long the
+// operator's lists are (shortList caps the count, this caps the bytes): the
+// daemon rejects a longer note and a multi-rule recipe would abort half-applied.
+function clampNote(s) {
+  const v = String(s || "");
+  return v.length <= LIMITS.noteLen ? v : `${v.slice(0, LIMITS.noteLen - 1)}…`;
+}
 function rule(key, { enabled, priority, vhosts, match = {}, action, text }) {
   return {
     enabled: Boolean(enabled),
@@ -713,11 +727,11 @@ function rule(key, { enabled, priority, vhosts, match = {}, action, text }) {
       qs_not_rx: match.qs_not_rx || undefined,
     },
     action,
-    note: note(key, text),
+    note: clampNote(note(key, text)),
   };
 }
 function vhostsVar(vars) {
-  return csvSplit(vars?.vhosts).map((h) => h.toLowerCase());
+  return hostsVar(vars, "vhosts", []);
 }
 function countriesVar(vars, fallback) {
   const cc = csvSplit(vars?.countries).map((c) => c.toUpperCase());
@@ -750,9 +764,58 @@ function shortList(items, max = 3) {
   const xs = (items || []).map(String);
   return xs.length > max ? `${xs.slice(0, max).join(", ")} +${xs.length - max} more` : xs.join(", ");
 }
-function isWellKnownPath(p) {
-  const v = String(p || "").toLowerCase();
-  return v === "/.well-known" || v.startsWith("/.well-known/") || v === "/.well-known/*";
+// pathPatternMatches mirrors traffic_rules.go for one path_any pattern: the
+// part before the first '?' matches the request path (a wildcard pattern —
+// '*' matches anything INCLUDING '/', '?' one char — is a full match, a
+// wildcard-free one a literal prefix); the part after it, when present, is
+// matched per parameter against the request query ("key" = any value,
+// "key=value" = that value, case-insensitive). Used only for UI guidance (the
+// /.well-known/ refusal, the simulator sample); enforcement is the daemon.
+export function pathPatternMatches(pattern, path, qs = "") {
+  const raw = String(pattern || "").trim();
+  const qi = raw.indexOf("?");
+  const p = (qi < 0 ? raw : raw.slice(0, qi)).trim();
+  const pq = qi < 0 ? null : raw.slice(qi + 1).trim();
+  const v = String(path || "");
+  let pathOK = !p;
+  if (!pathOK && /[*?]/.test(p)) {
+    const rx = new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+    pathOK = rx.test(v);
+  } else if (!pathOK) {
+    pathOK = v.startsWith(p);
+  }
+  if (!pathOK) return false;
+  if (pq === null || pq === "") return true;
+  const dec = (x) => {
+    try {
+      return decodeURIComponent(String(x).replace(/\+/g, " ")).toLowerCase();
+    } catch {
+      return String(x).toLowerCase();
+    }
+  };
+  const req = String(qs || "")
+    .split("&")
+    .filter(Boolean)
+    .map((kv) => {
+      const eq = kv.indexOf("=");
+      return eq < 0 ? [dec(kv), ""] : [dec(kv.slice(0, eq)), dec(kv.slice(eq + 1))];
+    });
+  return pq
+    .split("&")
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .every((tok) => {
+      const eq = tok.indexOf("=");
+      const pk = eq < 0 ? dec(tok) : dec(tok.slice(0, eq));
+      const pv = eq < 0 ? null : dec(tok.slice(eq + 1));
+      return req.some(([k, val]) => k === pk && (pv === null || val === pv));
+    });
+}
+// ACME / CA DCV validators fetch these; a pattern that the matcher would
+// resolve onto either of them must never become a rule target.
+const WELL_KNOWN_PROBES = Object.freeze(["/.well-known/acme-challenge/token", "/.well-known/pki-validation/fileauth.txt"]);
+function patternHitsWellKnown(p) {
+  return WELL_KNOWN_PROBES.some((probe) => pathPatternMatches(p, probe));
 }
 
 const VAR_VHOSTS = { key: "vhosts", label: "Vhosts", type: "vhosts", placeholder: "example.com, *.example.com", required: true };
@@ -772,7 +835,7 @@ const GROUPS_WITH_COLLATERAL = Object.freeze(new Set(["scripts", "empty"]));
 // covers "/wp-admin/phpinfo.php", "/*/.env" the "/bin/.env" variant and
 // "/*.php.bak" a leftover anywhere.
 // NEVER put /.well-known/ here — ACME/DCV validation lives there (see the
-// isWellKnownPath guard in validateRecipeVars).
+// patternHitsWellKnown guard in validateRecipeVars).
 export const PROBE_PATHS = Object.freeze([
   "/.env", "/*/.env", "/.git/", "/.svn/", "/.hg/", "/.aws/", "/.ssh/", "/.htpasswd", "/.DS_Store",
   "/*phpinfo.php", "/*.php.bak", "/*.php.old", "/*.php.save", "/*.php~", "/*.sql",
@@ -795,7 +858,7 @@ export const RECIPES = Object.freeze([
     vars: [
       VAR_VHOSTS,
       { key: "countries", label: "Allowed countries", type: "countries", default: "GR, CY", required: true },
-      { key: "ips", label: "Always allow these IPs / ranges (office, monitors — optional)", type: "ips", placeholder: "203.0.113.0/24, 2001:db8::/48" },
+      VAR_IPS_OPTIONAL,
     ],
     warnings: [
       "The block rule is created DISABLED. Test with the simulator, then enable it from the table.",
@@ -949,6 +1012,7 @@ export const RECIPES = Object.freeze([
       "Created ENABLED: nothing legitimate lives on these paths. Review the list once — a site that really serves .sql or .bak downloads needs those two patterns removed.",
       "/.well-known/ must never be added here: ACME / CA validation for SSL issuance fetches it (the recipe refuses it).",
       "Scope it to * (admin) to cover every vhost on the server.",
+      "Path matching is case-sensitive at the edge: a /.ENV or /PHPINFO.php probe slips past this rule (rare in the wild; the challenge engine still catches the sweep).",
     ],
     build(vars) {
       const extra = pathsVar(vars, []);
@@ -960,21 +1024,19 @@ export const RECIPES = Object.freeze([
     key: "bots_read_only",
     kind: "multi",
     title: "Crawlers are read-only",
-    description: "Block POST / PUT / PATCH / DELETE from social, AI and SEO crawlers. Seen fleet-wide: Meta's crawler re-POSTing forms (including a delete-tip=1 URL) and WooCommerce ajax fragments. Verified search crawlers keep POSTing (Googlebot renders pages), by FCrDNS, not User-Agent.",
+    description: "Block POST / PUT / PATCH / DELETE from social, AI and SEO crawlers. Seen fleet-wide: Meta's crawler re-POSTing forms (including a delete-tip=1 URL) and WooCommerce ajax fragments. Search engines are not in the default set: Googlebot POSTs while rendering pages.",
     vars: [VAR_VHOSTS, VAR_GROUPS],
     warnings: [
       "The social / AI / SEO rules are created ENABLED: a preview or index crawler never needs to write. Add \"scripts\" (curl, python-requests, Go-http-client…) only if no webhook, IoT poster or integration on the vhost announces itself that way — that rule is created DISABLED.",
-      `Rule #10 allows ${VERIFIED_BOT_LABEL} by reverse-DNS verification; anyone can send their User-Agent, nobody can forge their FCrDNS.`,
+      "No verified-crawler allow is put in front on purpose: Meta's crawler IS a verified crawler (FCrDNS to fbsv.net), and an allow would let exactly the POSTs this recipe exists to stop through. Add \"search\" only if you accept blocking Googlebot's rendering POSTs — that rule is created DISABLED.",
     ],
     build(vars) {
       const vhosts = vhostsVar(vars);
       const k = "bots_read_only";
-      const out = [rule(k, { enabled: true, priority: 10, vhosts, match: { verified_bot: true }, action: { type: "allow" }, text: "verified crawlers (FCrDNS) may still POST (page rendering)" })];
-      groupsVar(vars, ["social", "ai", "seo"]).forEach((g, i) => {
-        const risky = GROUPS_WITH_COLLATERAL.has(g.key);
-        out.push(rule(k, { enabled: !risky, priority: 350 + i, vhosts, match: { ua_any: g.patterns.slice(), methods: [...WRITE_METHODS] }, action: { type: "block" }, text: `${g.phrase} never write${risky ? " (disabled — integrations may match)" : ""}` }));
+      return groupsVar(vars, ["social", "ai", "seo"]).map((g, i) => {
+        const risky = GROUPS_WITH_COLLATERAL.has(g.key) || g.key === "search";
+        return rule(k, { enabled: !risky, priority: 350 + i, vhosts, match: { ua_any: g.patterns.slice(), methods: [...WRITE_METHODS] }, action: { type: "block" }, text: `${g.phrase} never write${risky ? " (disabled — legitimate writers may match)" : ""}` });
       });
-      return out;
     },
   },
   {
@@ -1032,7 +1094,10 @@ export const RECIPES = Object.freeze([
       const ips = ipsVar(vars);
       const k = "lock_panel_subdomains";
       const out = [];
-      if (ips.length) out.push(rule(k, { enabled: true, priority: 15, vhosts: [...svc, ...web], match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass" }));
+      // One allow per scope: the two vhost lists are validated separately
+      // against the 32-vhost limit, so their union must never travel in one rule.
+      if (ips.length) out.push(rule(k, { enabled: true, priority: 15, vhosts: svc, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass (service subdomains)" }));
+      if (ips.length && web.length) out.push(rule(k, { enabled: true, priority: 16, vhosts: web, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass (browser panel subdomains)" }));
       if (web.length) out.push(rule(k, { enabled: false, priority: 252, vhosts: web, match: { country_not_in: cc }, action: { type: "challenge" }, text: `challenge the browser panel subdomains outside ${cc.join(", ")} — ENABLE after testing` }));
       out.push(rule(k, { enabled: false, priority: 312, vhosts: svc, match: { country_not_in: cc }, action: { type: "block" }, text: `block DAV / autodiscover subdomains outside ${cc.join(", ")} — ENABLE after testing` }));
       return out;
@@ -1122,7 +1187,7 @@ export const RECIPES = Object.freeze([
     ],
     warnings: [
       "The challenge rule is created DISABLED; enable after a simulator run. Wildcard vhosts (dev.*) need an admin session.",
-      "A catch-all challenge cannot be saved enabled (the engine refuses a rule with no match condition), which is why this recipe keys on country: keep at least one country listed.",
+      "This recipe keys on country so the rule can be enabled from the table: cfm-admin refuses to save an ENABLED rule with no match condition (the daemon itself accepts one via the API). The price is fail-open — a visitor whose country cannot be resolved (some datacenter / proxy ranges) is not challenged. If the dev site must be fail-closed, add a catch-all challenge through the API or CLI on top.",
     ],
     build(vars) {
       const vhosts = vhostsVar(vars);
@@ -1211,19 +1276,22 @@ export function validateRecipeVars(rcp, vars) {
     if (v.type === "regex" && raw) {
       // Same RE2-vs-JS split as validateRuleForm: reject what RE2 definitely
       // rejects, let the daemon have the final say on the rest.
-      if (/\(\?<?[=!]/.test(raw) || /(^|[^\\])(\\\\)*\\[1-9]/.test(raw)) errors.push(`${v.label}: lookahead/lookbehind and backreferences are not supported (Go RE2 syntax).`);
+      if (re2Rejects(raw)) errors.push(`${v.label}: lookahead/lookbehind and backreferences are not supported (Go RE2 syntax).`);
     }
     if (v.type === "botgroups") {
       for (const key of csvSplit(raw)) if (!botGroup(key.toLowerCase())) errors.push(`"${key}" is not a bot group (use ${BOT_GROUPS.map((g) => g.key).join(", ")}).`);
     }
     if (v.type === "paths") {
       const ps = csvSplit(raw).map((p) => (p.startsWith("/") ? p : "/" + p));
-      for (const p of ps) if (isWellKnownPath(p)) errors.push(`"${p}": /.well-known/ is never a rule target — ACME/DCV validation lives there.`);
-      // A recipe that already carries a fixed path list (block_probe_paths) must
-      // stay within the per-field limit once the operator's extras are added.
-      const fixed = rcp?.key === "block_probe_paths" ? PROBE_PATHS.length : 0;
-      if (fixed + ps.filter((p) => !PROBE_PATHS.includes(p)).length > LIMITS.patternsPerField) {
-        errors.push(`${v.label}: too many paths (the rule may carry ${LIMITS.patternsPerField}, ${fixed} are built in).`);
+      for (const p of ps) if (patternHitsWellKnown(p)) errors.push(`"${p}" would match /.well-known/ — ACME/DCV validation lives there, so it is never a rule target (a bare "/" or "/*" matches everything).`);
+      // The daemon counts raw entries (len(in) > max runs before its dedupe).
+      // block_probe_paths prepends its fixed list and drops extras it already
+      // carries; every other recipe sends the operator's list as typed.
+      const probeRecipe = rcp?.key === "block_probe_paths";
+      const fixed = probeRecipe ? PROBE_PATHS.length : 0;
+      const sent = probeRecipe ? ps.filter((p) => !PROBE_PATHS.includes(p)).length : ps.length;
+      if (fixed + sent > LIMITS.patternsPerField) {
+        errors.push(`${v.label}: too many paths (the rule may carry ${LIMITS.patternsPerField}${fixed ? `, ${fixed} are built in` : ""}).`);
       }
     }
   }

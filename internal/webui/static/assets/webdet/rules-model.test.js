@@ -24,9 +24,11 @@ import {
   formFromRule,
   hostPatternMatch,
   isIPOrCIDR,
+  pathPatternMatches,
   positionText,
   priorityTie,
   recipe,
+  re2Rejects,
   recipeOf,
   recipeVarsDefaults,
   simulateInputFromRule,
@@ -399,22 +401,23 @@ test("block_probe_paths: one ENABLED block on the probe list, extras appended, /
   assert.equal(simulateInputFromRule(rules[0]).path, "/.env");
 });
 
-test("bots_read_only: verified allow first, one write-method block per group, scripts/empty start disabled", () => {
+test("bots_read_only: no verified allow, one write-method block per group, search/scripts/empty start disabled", () => {
   const rcp = recipe("bots_read_only");
   const rules = rcp.build({ vhosts: "a.com", groups: "" });
-  assert.equal(rules[0].match.verified_bot, true);
-  assert.equal(rules[0].action.type, "allow");
-  assert.equal(rules.length, 4, "default social + ai + seo");
-  for (const r of rules.slice(1)) {
+  assert.equal(rules.length, 3, "default social + ai + seo");
+  for (const r of rules) {
     assert.equal(r.action.type, "block");
+    assert.equal(r.match.verified_bot, false, "Meta's crawler is FCrDNS-verified: a verified allow would let its POSTs through");
     assert.deepEqual(r.match.methods, [...WRITE_METHODS]);
     assert.ok(!r.match.methods.includes("GET"));
     assert.equal(r.enabled, true, "preview / index crawlers never need to write");
   }
-  assert.deepEqual(rules[1].match.ua_any, botGroup("social").patterns);
+  assert.ok(!rules.some((r) => r.action.type === "allow"));
+  assert.deepEqual(rules[0].match.ua_any, botGroup("social").patterns);
   // order follows BOT_GROUPS regardless of how the operator typed the keys
-  const custom = rcp.build({ vhosts: "a.com", groups: "scripts, SEO, empty" });
-  assert.deepEqual(custom.slice(1).map((r) => r.match.ua_any[0]), [botGroup("seo").patterns[0], botGroup("scripts").patterns[0], "-"]);
+  const custom = rcp.build({ vhosts: "a.com", groups: "scripts, SEO, empty, search" });
+  assert.deepEqual(custom.map((r) => r.match.ua_any[0]), [botGroup("search").patterns[0], botGroup("seo").patterns[0], botGroup("scripts").patterns[0], "-"]);
+  assert.equal(custom[0].enabled, false, "Googlebot POSTs while rendering");
   assert.equal(custom[1].enabled, true);
   assert.equal(custom[2].enabled, false, "scripts group = webhooks / IoT posters too");
   assert.equal(custom[3].enabled, false, "no-UA block starts disabled (monitors)");
@@ -457,12 +460,76 @@ test("lock_panel_subdomains: DAV subdomains get a disabled geo block, browser on
   assert.deepEqual(rules[1].scope.vhosts, ["cpcalendars.*", "cpcontacts.*", "webdisk.*", "autodiscover.*", "autoconfig.*"]);
   assert.equal(rules[1].enabled, false);
   const withIPs = rcp.build({ svc_vhosts: "webdisk.*", web_vhosts: "", countries: "gr", ips: "203.0.113.0/24" });
-  assert.equal(withIPs.length, 2);
+  assert.equal(withIPs.length, 2, "no browser subdomains → no challenge and no second allow");
   assert.equal(withIPs[0].action.type, "allow");
   assert.deepEqual(withIPs[0].scope.vhosts, ["webdisk.*"]);
   assert.deepEqual(withIPs[0].match.ip_any, ["203.0.113.0/24"]);
   assert.deepEqual(withIPs[1].match.country_not_in, ["GR"]);
   assert.ok(withIPs[0].priority < withIPs[1].priority);
+  // one allow per scope: the two vhost lists are each bounded by vhostsPerRule,
+  // so their union never travels in a single rule
+  const both = rcp.build({ ...recipeVarsDefaults(rcp), ips: "203.0.113.0/24" });
+  assert.equal(both.length, 4);
+  assert.deepEqual(both.slice(0, 2).map((r) => r.action.type), ["allow", "allow"]);
+  assert.deepEqual(both[0].scope.vhosts, ["cpcalendars.*", "cpcontacts.*", "webdisk.*", "autodiscover.*", "autoconfig.*"]);
+  assert.deepEqual(both[1].scope.vhosts, ["cpanel.*", "webmail.*"]);
+  assert.ok(both[0].priority < both[1].priority && both[1].priority < both[2].priority);
+  const many = Array.from({ length: LIMITS.vhostsPerRule }, (_, i) => `h${i}.*`).join(", ");
+  assert.equal(validateRecipeVars(rcp, { ...recipeVarsDefaults(rcp), svc_vhosts: many }).length, 0, "each list is validated on its own");
+  assert.ok(validateRecipeVars(rcp, { ...recipeVarsDefaults(rcp), svc_vhosts: `${many}, one-more.*` }).some((e) => /Too many vhosts/.test(e)));
+});
+
+test("pathPatternMatches mirrors the daemon: prefix without wildcards, full match with; /.well-known/ is refused with matcher semantics", () => {
+  assert.ok(pathPatternMatches("/.env", "/.env"));
+  assert.ok(pathPatternMatches("/.env", "/.environment"), "wildcard-free = prefix");
+  assert.ok(pathPatternMatches("/*/.env", "/bin/.env"), "'*' crosses '/'");
+  assert.ok(!pathPatternMatches("/*phpinfo.php", "/phpinfo.php/x"), "wildcard pattern is a full match");
+  assert.ok(pathPatternMatches("/wp-admin/admin-ajax.php?action", "/wp-admin/admin-ajax.php", "action=heartbeat"), "the ?query part is matched against the query, not the path");
+  assert.ok(pathPatternMatches("/a.b", "/a.b"));
+  assert.ok(!pathPatternMatches("/a.b*", "/aXb"), "'.' is literal");
+  // the query part is matched per parameter, like queryPatternMatch in Go
+  assert.ok(pathPatternMatches("/?wc-ajax", "/", "wc-ajax=get_refreshed_fragments"), "bare key = any value");
+  assert.ok(!pathPatternMatches("/?wc-ajax", "/", "page=2"), "the key must be present");
+  assert.ok(!pathPatternMatches("/?wc-ajax", "/.well-known/acme-challenge/token"), "no query → a pattern with a query part never matches");
+  assert.ok(pathPatternMatches("/x.php?a=b", "/x.php", "c=1&A=B"), "key and value are case-insensitive");
+  assert.ok(!pathPatternMatches("/x.php?a=b", "/x.php", "a=bb"), "value is exact, not a prefix");
+  assert.ok(pathPatternMatches("/x?mode=%72egister", "/x", "mode=register"), "both sides are URL-decoded");
+  assert.ok(pathPatternMatches("/x?", "/xyz", ""), "a bare '?' suffix matches any query");
+  const rcp = recipe("throttle_hot_path");
+  const base = recipeVarsDefaults(rcp, { vhosts: "a.com" });
+  for (const bad of ["/", "/*", "/.we", "/.well-known", "/.well-known*", "/*acme*", "/.well-known/pki-validation/", ".well-known/"]) {
+    assert.ok(validateRecipeVars(rcp, { ...base, paths: bad }).some((e) => /well-known/.test(e)), bad);
+  }
+  for (const ok of ["/.well-known-ish-but-not", "/wellknown/", "/acme/", "/*/token.txt"]) {
+    assert.ok(!validateRecipeVars(rcp, { ...base, paths: ok }).some((e) => /well-known/.test(e)), ok);
+  }
+  // a wildcard-free pattern is a prefix of the ACME path only when it is one
+  assert.ok(!validateRecipeVars(rcp, { ...base, paths: "/.well-known/acme-challenge/token/extra" }).some((e) => /well-known/.test(e)));
+  // path count: non-probe recipes send the raw list, so exactly the limit is fine
+  const atLimit = Array.from({ length: LIMITS.patternsPerField }, (_, i) => `/p${i}/`).join(", ");
+  assert.equal(validateRecipeVars(rcp, { ...base, paths: atLimit }).filter((e) => /too many paths/.test(e)).length, 0);
+  assert.ok(validateRecipeVars(rcp, { ...base, paths: `${atLimit}, /p-extra/` }).some((e) => /too many paths/.test(e)));
+});
+
+test("re2Rejects: lookaround / backreferences only, shared by the form and the recipe validators", () => {
+  for (const bad of ["(?=x)", "(?!x)", "(?<=x)", "(?<!x)", "(a)\\1"]) assert.ok(re2Rejects(bad), bad);
+  for (const ok of ["(?:^|&)lang=", "(?i)utm_[a-z]+", "a{2,3}", "[^&]+", "\\d+", "(?P<n>x)"]) assert.ok(!re2Rejects(ok), ok);
+  const rcp = recipe("bots_no_qs");
+  const base = recipeVarsDefaults(rcp, { vhosts: "a.com" });
+  assert.ok(validateRecipeVars(rcp, { ...base, qs_ok: "(?<=a)b" }).some((e) => /RE2/.test(e)));
+  assert.equal(validateRecipeVars(rcp, { ...base, qs_ok: "(?:^|&)lang=" }).length, 0);
+  const form = validateRuleForm(emptyForm({ vhosts: "a.com", hasQS: true, qsNotRx: "(?!x)", actionType: "block", priority: 300, paths: "/x" }));
+  assert.ok(form.errors.some((e) => /RE2/.test(e)));
+});
+
+test("recipe notes are clamped to LIMITS.noteLen even for one-entry lists that are themselves too long", () => {
+  const rcp = recipe("throttle_hot_path");
+  const longPath = "/" + "a".repeat(600);
+  const [r] = rcp.build({ ...recipeVarsDefaults(rcp, { vhosts: "a.com" }), paths: longPath });
+  assert.equal(r.note.length, LIMITS.noteLen);
+  assert.ok(r.note.startsWith("recipe:throttle_hot_path"));
+  assert.ok(r.note.endsWith("…"));
+  assert.deepEqual(r.match.path_any, [longPath], "the rule itself keeps the full pattern");
 });
 
 test("geo_challenge: crawlers first, then a disabled challenge from / outside the countries, optional paths", () => {

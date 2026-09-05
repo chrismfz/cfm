@@ -26,5 +26,5 @@
   "action": {
     "type": "block"
   },
-  "note": "recipe:bots_read_only - social preview bots never write. Pair with a priority-10 verified_bot allow (see traffic-rule-allow-verified-crawler.json) so Googlebot's page-rendering POSTs keep working."
+  "note": "recipe:bots_read_only - social preview bots never write. Deliberately NO verified_bot allow in front: Meta's crawler is FCrDNS-verified too, so an allow would let exactly these POSTs through. Search engines are not in the default groups (Googlebot POSTs while rendering)."
 }

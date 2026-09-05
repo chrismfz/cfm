@@ -162,7 +162,9 @@ export const rulesMixin = {
       const rows = this.recipePreview;
       if (!rcp || !rows.length) return [];
       const out = [];
-      const vhosts = rows[0].scope.vhosts.map((h) => h.toLowerCase());
+      // Union of every row's scope: a recipe may scope its rules to different
+      // vhost sets (lock_panel_subdomains), so rows[0] alone would miss a re-apply.
+      const vhosts = [...new Set(rows.flatMap((p) => (p.scope?.vhosts || []).map((h) => String(h).toLowerCase())))];
       const already = this.rules.filter((r) => recipeOf(r) === rcp.key && (r.scope?.vhosts || []).some((h) => vhosts.includes(String(h).toLowerCase())));
       if (already.length) out.push(`This recipe was already applied to ${vhosts.join(", ")} (${already.map((r) => r.id).join(", ")}). Creating it again duplicates those rules.`);
       for (const p of rows) {

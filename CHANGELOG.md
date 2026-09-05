@@ -24,9 +24,11 @@ back-filled here — see the git/PR history for that period.
   `/.env*`, `/.git/`, `/*phpinfo.php`, `/*.php.bak`, `/*.sql`, `/_profiler/`,
   `/server-status` sweeps Google-Cloud scanners run against every vhost — stops
   them at request one instead of feeding the challenge engine; `/.well-known/`
-  is refused), *Crawlers are read-only* (verified-crawler allow, then a
-  POST/PUT/PATCH/DELETE block per social/AI/SEO group — Meta's crawler was
-  re-POSTing forms including a `delete-tip=1` URL), *Bots stay off filter /
+  is refused), *Crawlers are read-only* (a POST/PUT/PATCH/DELETE block per social/AI/SEO
+  group — Meta's crawler was re-POSTing forms including a `delete-tip=1` URL;
+  no verified-crawler allow in front, since Meta's crawler is FCrDNS-verified
+  too, and search engines stay out of the default set because Googlebot POSTs
+  while rendering), *Bots stay off filter /
   facet URLs* (the Meta-only query-string recipe generalised to any bot group,
   block or `hard_bot` throttle, click ids / UTM / pagination / feeds pass),
   *Lock panel service subdomains to your countries* (block on
