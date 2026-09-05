@@ -327,7 +327,13 @@ points:
   owns the headline `record()`, `goto done` ends evaluation, and `cfm.lua` pushes
   only the headline), the traversal step runs **after every armed block-tier
   family** in `cfm_waf.lua` — keep it there, or arm the family, if you touch
-  the order.
+  the order. That order fix covers the shipped arming state only (an operator
+  who arms `TRAVERSAL` and un-arms another family gets the mirror image); the
+  proper fix is to push every block-tier hit and let `wafsec` pick the armed
+  family — open item in `docs/waf-autoblock-design.md`. Block tier is also what
+  the panel-port gate (`cfm_panel.lua`) enforces, so promoting a rule to block
+  arms it on `:2083/:2087/:2096` too — check the `waf_rule_detail` panel
+  section for that rule in the same review.
 - **Lua↔Go id parity is enforced.** A new `10xxx` id needs matching entries in
   `configs/lua/cfm_waf.lua` `RULE_IDS` **and** `internal/webdetector/waf_rule_ids.go`
   (`TestWAFRuleIDs_LuaParity`), plus positive+negative Lua tests. Key the

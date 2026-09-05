@@ -54,7 +54,11 @@ back-filled here — see the git/PR history for that period.
   Google-Cloud sweeps, a 200-row sample 200/200 scanner payloads (`.env`,
   `/proc/self/environ`, `pearcmd`, `.git/config`, `/etc/passwd`), every
   minority-country row read and confirmed an attack — 0 FP (record in
-  `docs/waf.md`). The `WAF_TRAVERSAL` autoblock family is deliberately **held
+  `docs/waf.md`). Block tier is also what the **panel-port gate**
+  (`cfm_panel.lua`, `PANEL_WAF_MODE = enforce` by default) enforces, so
+  traversal now denies on `:2083/:2087/:2096` as well — the same 7-day panel
+  burn-in showed 0 hits on all six servers; watch `waf_fp_hunt` after
+  release. The `WAF_TRAVERSAL` autoblock family is deliberately **held
   un-armed** (`TRAVERSAL = 0`, held in code and in the reference
   `detectors.conf`) for its own burn-in — at threshold 1 it would ban ~2 300
   scanner IPs a week fleet-wide (~330 six-hour bans + alerts a day) that the

@@ -1563,10 +1563,18 @@ block-path holes — 301 still blocks the adjacent form.
 >   `libredtail-http` pearcmd RCE, a FortiGate CVE-2018-13379 probe, an AWS
 >   credentials probe. **0 FP.**
 > - Half the hits land on panel subdomains (`cpanel.* webmail.* whm.*
->   webdisk.* autodiscover.*`) and the bare server IPs — no app there to
->   false-positive on.
+>   webdisk.* autodiscover.*`) and the bare server IPs — those are web-edge
+>   vhosts that proxy nothing but the scanner's 404s.
+> - **Panel ports** (`:2083/:2087/:2096`, `cfm_panel.lua`): the panel gate runs
+>   the same ruleset and enforces **block-tier hits only** under the default
+>   `PANEL_WAF_MODE = enforce`, so this promotion also turns traversal from
+>   `logonly=would_challenge` into a deny there. The `waf_rule_detail` panel
+>   section for the same 7 days: **0 hits on all six servers** (scanner and
+>   non-scanner), so nothing cPanel / WHM / Roundcube does legitimately trips
+>   `detect_traversal`; `waf_fp_hunt` is the panel-side watch after release.
 >
-> **Promoted `challenge` → `block`** (Lua default + Go registry). The
+> **Promoted `challenge` → `block`** (Lua default + Go registry; the panel
+> gate therefore denies too — see above). The
 > `WAF_TRAVERSAL` autoblock family is **held at 0** through its own burn-in
 > (`TRAVERSAL = 0` in `detectors.conf`, held in code): at threshold 1 the
 > volume above is ~330 six-hour bans and alerts a day, which the operator arms

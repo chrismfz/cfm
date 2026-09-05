@@ -96,7 +96,7 @@ check(hit == true and action == "block", "LFI→RCE combo blocks")
 check(reason == "WAF_RCE", "LFI→RCE combo: headline is the armed WAF_RCE, not the held WAF_TRAVERSAL (got " .. tostring(reason) .. ")")
 hit, reason, action, hits = headline(req("/", "page=php://filter/convert.base64-encode/resource=../../../../etc/passwd"))
 check(hit == true and action == "block", "wrapper-LFI combo blocks")
-check(reason == "WAF_PHP_WRAPPER:PHP_FILTER" or (reason or ""):match("^WAF_PHP_WRAPPER"), "wrapper-LFI combo: headline is WAF_PHP_WRAPPER (got " .. tostring(reason) .. ")")
+check(reason == "WAF_PHP_WRAPPER:WRAP_PHP", "wrapper-LFI combo: headline is WAF_PHP_WRAPPER:WRAP_PHP (got " .. tostring(reason) .. ")")
 hit, reason, action = headline(req("/assets../.env"))
 check(hit == true and reason == "WAF_TRAVERSAL" and action == "block", "traversal-only request still blocks as WAF_TRAVERSAL")
 

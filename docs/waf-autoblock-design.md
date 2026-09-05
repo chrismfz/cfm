@@ -348,6 +348,24 @@ so a rotating swarm (the lexima.de pattern: ~180 IPs, each 1-2 hits) escalates
 to a range/ASN block instead of whack-a-mole per IP. Per-IP instant block
 already handles each swarm IP on its first hit; this is an optimisation.
 
+## Open item — push every block-tier hit (post rule-101 promotion, 2026-09-05)
+
+`record()` gives the headline to the FIRST block-tier hit and `goto done` ends
+evaluation; `cfm.lua` pushes only that headline, so the family `wafsec` sees on
+a request that trips two block families is whichever ran first. That was
+harmless while every block family was armed. Rule 101 (`WAF_TRAVERSAL`) is the
+first block family HELD at 0, and a held family evaluated first would have
+shadowed `WAF_RCE` / `WAF_PHP_WRAPPER` / … on wrapper-LFI and LFI→RCE requests
+and cost them their ban. The shipped fix is ORDER: the traversal step runs after
+every armed block family in `cfm_waf.lua`. That encodes the default arming state
+only — an operator who arms `TRAVERSAL` and un-arms another family gets the
+mirror image — and it costs the early short-circuit on the highest-volume block
+rule. The proper fix is at the push boundary: carry every block-tier entry of
+`hits` (family + rule id) in the `ip_push` payload and let `wafsec` feed each
+armed family, so attribution stops depending on evaluation order. Needs the Lua
+push, the Go `/nginx/ip` handler and `wafsec` ingest in one change with its own
+review; until then, keep the traversal step last.
+
 ## Open questions (decide before Phase 1)
 
 - **Detector name:** `waf_security` (sibling of `exim_security`,

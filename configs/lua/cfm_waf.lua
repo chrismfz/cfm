@@ -54,6 +54,11 @@ local CFG = {
                                        -- 0 from GR, every sampled hit a scanner
                                        -- payload (.env / /proc/self/environ / pearcmd
                                        -- / .git/config / /etc/passwd) — docs/waf.md.
+                                       -- Block tier also means the panel-port gate
+                                       -- (cfm_panel.lua, enforces block hits only under
+                                       -- PANEL_WAF_MODE=enforce) now DENIES traversal
+                                       -- on :2083/:2087/:2096 — 7-day panel burn-in
+                                       -- on all six servers: 0 hits.
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
@@ -1069,10 +1074,6 @@ function _M.check(ctx)
       end
     end
   end
-
-  -- ── 5) Traversal — moved to run after every armed block-tier family ────────
-  -- (see "Traversal" just before the LAST step). Kept here as a signpost so the
-  -- step numbering in the comments and docs still resolves.
 
   -- ── 6) RCE ────────────────────────────────────────────────────────────────
   -- RCE scans the RAW surface (get_scan_ua), NOT the data:-stripped one. Its
@@ -2126,6 +2127,14 @@ function _M.check(ctx)
   -- alert the armed family gave them. Running last, the armed family owns the
   -- headline and the ban; a traversal-only request still blocks at the edge.
   -- If WAF_TRAVERSAL is ever armed by default this ordering is merely harmless.
+  --
+  -- Known limits of fixing this by ORDER (docs/waf-autoblock-design.md, open
+  -- item "push every block-tier hit"): the order encodes the SHIPPED arming
+  -- state only — an operator who arms TRAVERSAL and un-arms an earlier family
+  -- (RCE = 0 after an FP) gets the mirror image; and a traversal-only scanner
+  -- request now runs the remaining detectors before blocking instead of
+  -- short-circuiting at step 5 (~11.5k such requests/week fleet-wide — a few
+  -- string scans each, negligible). The real fix is at the push boundary.
   do
     local mode = rule_mode(CFG.rule_traversal, "block")
     if mode ~= "disabled" and det.detect_traversal(uri, args, get_scan_ua()) then
