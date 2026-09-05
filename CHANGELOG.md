@@ -60,11 +60,18 @@ back-filled here — see the git/PR history for that period.
   neither `Sec-Fetch-*` nor `Accept-Language`; a new named-token
   `IN_APP_UA_TOKENS` list records them under their **own tag**
   (`WAF_FETCH_METADATA:NO_FETCH_META_IN_APP`) instead of the tell proper, so the
-  pool stays measurable and separable in `waf_activity` (filter by reason) and
+  pool stays measurable and separable in `waf_activity` (its `rule=` filter
+  substring-matches the full reason: `rule=NO_FETCH_META_IN_APP`) and
   its future challenge-score weight is decided on data — deliberately not a
   suppress, since a spoofable in-app token must never buy a silent skip of the
-  shadow. Lua tests cover both, the in-app tag, and a same-Android-Chrome
-  control that still gets the tell proper.
+  shadow. The edge push cooldown (`should_push`) keeps the tag in its key for
+  this family (`PUSH_KEY_KEEPS_TAG`): the two tags share CGNAT mobile IPs, and
+  a family-keyed 60 s window would have dropped whichever fired second per IP
+  and biased the very comparison the tags exist for — safe because the family
+  is logonly-only with a fixed two-tag set. Lua tests cover both carve-outs,
+  the in-app tag, its ordering behind the crawler and infra-path checks, the
+  per-tag cooldown, and a same-Android-Chrome control that still gets the tell
+  proper.
 - **Traffic-rules "AI crawlers" bot group** now also lists OAI-SearchBot,
   Claude-User, Claude-SearchBot, ReflectionBot and ExaSearchBot (seen
   fleet-wide). Claude-User is also the User-Agent of the claude.ai MCP

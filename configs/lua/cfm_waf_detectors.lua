@@ -2029,8 +2029,9 @@ local CRAWLER_UA_TOKENS = {
 -- than a crawler name (a stack appending "musical_ly" would pass as a person
 -- everywhere else, not as a bot), which is exactly why it must not buy a
 -- silent skip of the shadow. The edge log formats carry no X-Requested-With,
--- so an app-package header gate could not be verified from captures; never
--- add one from memory (CLAUDE.md §6).
+-- so an app-package header gate could not be verified from captures; add one
+-- only from a capture that shows the header on these navigations, not from
+-- memory of what Android WebViews "usually" send.
 local IN_APP_UA_TOKENS = {
   "musical_ly",
 }
@@ -2071,6 +2072,8 @@ end
 -- waf_fp_hunt before this weight ever feeds a score). ALL of:
 --   1. method GET|HEAD and Accept contains text/html  → a top-level page
 --      navigation (assets/XHR carry their own Sec-Fetch-Dest, out of scope).
+--   1a. NOT an infrastructure path (`/robots.txt`, `/.well-known/*`) — those are
+--      fetched header-poor by crawlers and ACME/DCV/security validators.
 --   2. NO Sec-Fetch-* header at all.
 --   3. NO Accept-Language.
 --   4. UA claims Chrome >= 76 or Firefox >= 90         → a browser that WOULD
@@ -2078,6 +2081,10 @@ end
 --      Sec-Fetch is only Safari 16.4+ (Mar 2023) and old iOS is a live FP
 --      population — and headless stacks overwhelmingly spoof Chrome anyway.
 --   5. NOT a self-declared crawler (ua_is_declared_crawler).
+--   6. A named in-app browser (ua_is_in_app_browser) that satisfies 1-5 gets
+--      NO_FETCH_META_IN_APP instead of the tell proper — checked LAST, so a UA
+--      that is also a declared crawler, or a fetch of an infra path, never
+--      reaches it.
 -- A real browser NORMALLY satisfies 1+4 but never 2+3 together; an honest
 -- curl/wget/python client fails 4 (it doesn't claim a browser). The known
 -- exceptions — a real Chromium WebView inside a social app ships neither header

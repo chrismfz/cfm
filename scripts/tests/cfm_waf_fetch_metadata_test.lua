@@ -183,6 +183,12 @@ fires_as(at("/product/asimenio-dachtylidi/", TIKTOK), IN_APP, "TikTok in-app bro
 -- The in-app tag never overrides a stand-down: with Accept-Language present the
 -- request is a plain real browser and nothing fires.
 clean(req("GET", TIKTOK, { ["accept-language"] = "el-GR,el;q=0.9" }), "TikTok in-app browser WITH Accept-Language is clean")
+-- Ordering invariants clause 6 depends on (enforced by statement order only):
+-- a declared-crawler token wins over the in-app token (suppress, not tag), and
+-- the infra-path carve-out applies to in-app UAs too.
+clean(req("GET", TIKTOK .. " bytespider"), "crawler token + in-app token → crawler skip wins (no IN_APP tag)")
+clean(at("/robots.txt", TIKTOK), "in-app UA on /robots.txt → infra carve-out wins (no IN_APP tag)")
+clean(at("/.well-known/acme-challenge/x", TIKTOK), "in-app UA on /.well-known/ → infra carve-out wins")
 -- Control: the same Android Chrome build WITHOUT the in-app token gets the tell
 -- proper, so the tag is keyed on the named token, not "any Android Chrome".
 fires(req("GET", "Mozilla/5.0 (Linux; Android 15; 23124RA7EO Build/AQ3A.240829.003) AppleWebKit/537.36 " ..

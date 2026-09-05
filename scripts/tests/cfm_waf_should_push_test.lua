@@ -70,6 +70,30 @@ check(push(sh2, IP, "WAF_RCE:REVERSE_SHELL", "block") == false,
 check(push(sh2, IP, "WAF_RCE:PERSISTENCE", "logonly") == false,
       "second logonly WAF_RCE (same family+tier) -> deduped")
 
+-- ── WAF_FETCH_METADATA keeps its tag in the key (PUSH_KEY_KEEPS_TAG) ──────────
+-- Its two tags are populations to be compared (tell proper vs in-app browser)
+-- and share CGNAT mobile IPs, so a family-keyed window would drop whichever
+-- fires second and bias the comparison. Per-tag flood still collapses.
+local sh4 = new_shdict()
+check(push(sh4, IP, "WAF_FETCH_METADATA:NO_FETCH_META_IN_APP", "logonly") == true,
+      "612: in-app tag pushes")
+check(push(sh4, IP, "WAF_FETCH_METADATA:NO_FETCH_META_NO_ACCEPT_LANG", "logonly") == true,
+      "612: the tell proper STILL pushes after an in-app hit from the same IP (per-tag key)")
+check(push(sh4, IP, "WAF_FETCH_METADATA:NO_FETCH_META_NO_ACCEPT_LANG", "logonly") == false,
+      "612: same tag repeated -> deduped (flood still collapses per tag)")
+check(push(sh4, IP, "WAF_FETCH_METADATA:NO_FETCH_META_IN_APP", "logonly") == false,
+      "612: in-app tag repeated -> deduped")
+check(sh4._store["wafpush|WAF_FETCH_METADATA:NO_FETCH_META_IN_APP|logonly|" .. IP] ~= nil,
+      "612: cooldown key carries the tag")
+check(sh4._store["wafpush|WAF_FETCH_METADATA|logonly|" .. IP] == nil,
+      "612: no family-only key for this family")
+-- A colon-less reason of a tag-keeping family falls back to the family.
+check(push(sh4, "203.0.113.8", "WAF_FETCH_METADATA", "logonly") == true, "612: bare family reason pushes")
+check(sh4._store["wafpush|WAF_FETCH_METADATA|logonly|203.0.113.8"] ~= nil, "612: bare family reason keys on the family")
+-- Other families are unaffected: the score/tag suffix is still dropped.
+check(push(sh4, IP, "WAF_BAD_UA:emptyua:score=6", "logonly") == true, "other family: first hit pushes")
+check(push(sh4, IP, "WAF_BAD_UA:othertag:score=4", "logonly") == false, "other family: tag/score still collapsed")
+
 -- ── Different families push independently ────────────────────────────────────
 check(push(sh, IP, "WAF_TRAVERSAL", "challenge") == true, "different family (WAF_TRAVERSAL) pushes")
 

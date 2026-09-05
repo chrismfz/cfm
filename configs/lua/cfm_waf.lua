@@ -2143,6 +2143,13 @@ function _M.check(ctx)
   return true, final_reason, final_ttl, final_action, hits, final_rule_id
 end
 
+-- Reason families whose first ":"-tag stays in the should_push cooldown key —
+-- see the comment inside should_push. Add a family here ONLY if its tag set is
+-- fixed and small and the family has no block tier.
+local PUSH_KEY_KEEPS_TAG = {
+  WAF_FETCH_METADATA = true,
+}
+
 function _M.should_push(shdict, ip, reason, action)
   if not shdict or not ip or ip == "" then return true end
   -- Dedup on (ip, reason FAMILY, action tier).
@@ -2167,7 +2174,20 @@ function _M.should_push(shdict, ip, reason, action)
   -- while the family stays armed, a block hit of the suppressed rule could consume
   -- this window and mask the armed rule's push — revisit the key (add rule_id) then.
   local fam = (reason and reason:match("^([^:]+)")) or "WAF"
-  local k  = "wafpush|" .. fam .. "|" .. (action or "na") .. "|" .. ip
+  local key_reason = fam
+  if PUSH_KEY_KEEPS_TAG[fam] then
+    -- Families whose tags are a FIXED, small set of categories that are meant to
+    -- be compared against each other (not a volatile per-hit score/tag) keep the
+    -- tag in the key: WAF_FETCH_METADATA's NO_FETCH_META_NO_ACCEPT_LANG vs
+    -- NO_FETCH_META_IN_APP are two populations whose per-tag counts decide the
+    -- in-app challenge-score weight, and they share CGNAT mobile IPs — a
+    -- family-keyed window would drop whichever tag fires second per IP per
+    -- minute and bias exactly that comparison. Safe here because the family is
+    -- logonly-only (no block rule, no autoblock feed) and has two tags, so a
+    -- per-IP flood still collapses to at most two pushes per window.
+    key_reason = (reason and reason:match("^[^:]+:[^:]+")) or fam
+  end
+  local k  = "wafpush|" .. key_reason .. "|" .. (action or "na") .. "|" .. ip
   local ok = shdict:add(k, 1, CFG.push_cooldown_sec)
   return ok == true
 end
