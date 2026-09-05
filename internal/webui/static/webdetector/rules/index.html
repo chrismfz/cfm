@@ -152,6 +152,7 @@
               <button type="button" class="chip" :class="{ on: ruleChips.uas }" @click="toggleChip('uas')">User-Agent / bot</button>
               <button type="button" class="chip" :class="{ on: ruleChips.countries }" @click="toggleChip('countries')">Country</button>
               <button type="button" class="chip" :class="{ on: ruleChips.ips }" @click="toggleChip('ips')">IP / range</button>
+              <button type="button" class="chip" :class="{ on: ruleChips.vbot }" @click="toggleChip('vbot')">Verified crawler</button>
               <button type="button" class="chip" :class="{ on: ruleChips.methods }" @click="toggleChip('methods')">Method</button>
               <button type="button" class="chip" :class="{ on: ruleChips.qs }" @click="toggleChip('qs')">Query string</button>
             </div>
@@ -185,6 +186,11 @@
                   <input id="rule-countries" class="input" type="text" v-model.trim="ruleForm.countries" placeholder="GR, CY" />
                 </div>
                 <p class="muted form-hint">ISO 3166-1 alpha-2 codes, comma-separated. Neither mode matches a visitor whose country is <em>unknown</em> (geo not resolved, geo module down): <strong>is NOT one of</strong> fails open rather than blocking everyone during a geo hiccup. Use an <em>IP / range</em> allow above the rule for office and monitoring addresses.</p>
+              </template>
+
+              <template v-if="ruleChips.vbot">
+                <label>Verified crawler</label>
+                <p class="muted form-hint" style="grid-column: 2">Only requests whose IP reverse-DNS forward-confirms as {{ verifiedBotLabel }}. This is what the client <em>is</em>, not what it says: a <code>Googlebot</code> User-Agent from an unverified IP does not match. On live traffic a crawler IP seen for the first time is verified in the background and matches on a later request; Google's Translate/AMP proxies do not count. Bots without verifiable reverse DNS (DuckDuckGo, Baidu, X, LinkedIn…) need a User-Agent condition instead.</p>
               </template>
 
               <template v-if="ruleChips.ips">
@@ -258,6 +264,8 @@
               <input id="sim-ua" class="input" type="text" v-model.trim="simulateForm.ua" placeholder="facebookexternalhit/1.1" />
               <label for="sim-qs">QS</label>
               <input id="sim-qs" class="input" type="text" v-model.trim="simulateForm.qs" placeholder="page=2&amp;sort=title" />
+              <label for="sim-vbot">Crawler</label>
+              <label class="muted form-check"><input id="sim-vbot" type="checkbox" :checked="Boolean(simulateForm.verifiedBot)" @change="simulateForm.verifiedBot = $event.target.checked ? 'googlebot' : ''" /> treat as a verified crawler (override; unticked = resolve the IP's real reverse DNS)</label>
             </div>
             <div class="toolbar">
               <button @click="runRuleSimulation">Run simulation</button>
@@ -266,6 +274,7 @@
             <div class="sim-result" v-if="simulateVerdict">
               <div><span class="pill" :class="simulateVerdict.tone">{{ simulateResult.matched ? 'verdict' : 'no match' }}</span> {{ simulateVerdict.text }}</div>
               <div class="sim-disabled" v-if="simulateDisabledText"><span class="pill warn">disabled</span> {{ simulateDisabledText }}</div>
+              <div class="sim-disabled" v-if="simulateVerifiedBotText"><span class="pill" :class="simulateResult.verified_bot ? 'ok' : ''">crawler</span> {{ simulateVerifiedBotText }}</div>
             </div>
           </section>
         </div>

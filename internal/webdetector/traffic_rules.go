@@ -51,10 +51,18 @@ type TrafficRuleMatch struct {
 	// IPAny matches when the client IP is inside any of these prefixes
 	// (IPv4/IPv6 CIDR; a bare address is a /32 or /128). Stored canonical
 	// (netip.Prefix.Masked().String()). An unparsable request IP never matches.
-	IPAny   []string `json:"ip_any,omitempty"`
-	UAAny   []string `json:"ua_any,omitempty"`
-	PathAny []string `json:"path_any,omitempty"`
-	Methods []string `json:"methods,omitempty"`
+	IPAny []string `json:"ip_any,omitempty"`
+	// VerifiedBot restricts the rule to requests from an FCrDNS-verified good
+	// bot (the goodBotPTRSuffixes registry: Googlebot, Google, Bing, Yahoo,
+	// Applebot, Yandex, Meta). "Verified" means the PTR forward-confirmed to the
+	// requesting IP — a User-Agent string earns nothing. On the decision hot
+	// path the verdict is CACHE-ONLY (a first-seen crawler IP kicks a bounded
+	// async forward-confirm and matches on a later request), so a
+	// verified_bot allow is eventual, never a DNS wait per request.
+	VerifiedBot bool     `json:"verified_bot,omitempty"`
+	UAAny       []string `json:"ua_any,omitempty"`
+	PathAny     []string `json:"path_any,omitempty"`
+	Methods     []string `json:"methods,omitempty"`
 	// Query-string guards (both optional, evaluated only when set)
 	HasQS   bool   `json:"has_qs,omitempty"`    // true → rule only fires when QS is present
 	QSNotRx string `json:"qs_not_rx,omitempty"` // if set, pass-through when QS matches this pattern
@@ -93,6 +101,11 @@ type TrafficRuleEvalInput struct {
 	Method      string `json:"method,omitempty"`
 	Country     string `json:"country,omitempty"`
 	QueryString string `json:"qs,omitempty"` // raw query string, no leading '?'
+	// VerifiedBot is the FCrDNS-verified good-bot name for IP ("" = none).
+	// The bridge fills it from the good-bot verdict cache when at least one
+	// rule uses verified_bot; the simulate API resolves it synchronously from
+	// the IP, or accepts it verbatim as an override ("simulate as a crawler").
+	VerifiedBot string `json:"verified_bot,omitempty"`
 }
 
 // TrafficRuleEvalResult is the verdict for one request shape. Matched/Rule/
@@ -112,6 +125,10 @@ type TrafficRuleEvalResult struct {
 	Action        string       `json:"action,omitempty"`
 	Profile       string       `json:"profile,omitempty"`
 	DisabledMatch *TrafficRule `json:"disabled_match,omitempty"`
+	// VerifiedBot echoes the good-bot verdict the evaluation used ("" = the
+	// request was not treated as a verified crawler), so the simulator can say
+	// why a verified_bot rule did or did not match.
+	VerifiedBot string `json:"verified_bot,omitempty"`
 }
 
 type trafficRuleStore struct {
@@ -122,6 +139,74 @@ type trafficRuleStore struct {
 	// (unknown match/scope keys). They are persisted back byte-for-byte so a
 	// downgrade never rewrites — and thereby widens — a newer rule.
 	frozen map[string]json.RawMessage
+	// verifiedBotScopes lists the vhost scopes of ENABLED verified_bot rules,
+	// so the bridge spends a good-bot cache lookup only for a host such a rule
+	// can apply to. verifiedBotAny counts every non-frozen verified_bot rule
+	// (enabled or not) for the simulate API, which must also be able to test a
+	// rule saved disabled.
+	verifiedBotScopes [][]string
+	verifiedBotAny    int
+}
+
+// NeedsVerifiedBotFor reports whether an ENABLED verified_bot rule is scoped to
+// host — the bridge's per-decision gate. One RLock plus a few host matches.
+func (s *trafficRuleStore) NeedsVerifiedBotFor(host string) bool {
+	if s == nil {
+		return false
+	}
+	host = normalizeControlHost(host)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, vhosts := range s.verifiedBotScopes {
+		if ruleHostMatch(vhosts, host) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasVerifiedBotRules reports whether ANY (enabled or disabled, non-frozen)
+// rule uses verified_bot — the simulate API's gate for resolving the verdict,
+// so a rule saved disabled can still be tested against a real crawler IP.
+func (s *trafficRuleStore) HasVerifiedBotRules() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.verifiedBotAny > 0
+}
+
+// recountLocked refreshes the derived indexes after a mutation (caller holds mu).
+func (s *trafficRuleStore) recountLocked() {
+	scopes := make([][]string, 0, 4)
+	any := 0
+	for _, r := range s.rules {
+		if r.Unsupported || !r.Match.VerifiedBot {
+			continue
+		}
+		any++
+		if r.Enabled {
+			scopes = append(scopes, r.Scope.Vhosts)
+		}
+	}
+	s.verifiedBotScopes = scopes
+	s.verifiedBotAny = any
+}
+
+// verifiedBotForRules narrows an FCrDNS verdict to names a traffic rule may
+// trust as a CRAWLER. The registry's generic ".google.com" suffix also covers
+// Google's user-driven fetchers (Translate proxy, AMP cache, Feedfetcher,
+// Gmail image proxy): fine for a challenge exemption, but as an ALLOW it would
+// let anyone traverse a geo-fence via translate.google.com. Excluded here.
+var verifiedBotExcludedForRules = map[string]bool{"google": true}
+
+func verifiedBotForRules(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if verifiedBotExcludedForRules[name] {
+		return ""
+	}
+	return name
 }
 
 func newTrafficRuleStore(path string) *trafficRuleStore {
@@ -150,6 +235,7 @@ func (s *trafficRuleStore) Add(in TrafficRule) (TrafficRule, error) {
 		return TrafficRule{}, errors.New("rule id already exists")
 	}
 	s.rules[norm.ID] = norm
+	s.recountLocked()
 	if err := s.saveLocked(); err != nil {
 		return TrafficRule{}, err
 	}
@@ -182,6 +268,7 @@ func (s *trafficRuleStore) Update(id string, in TrafficRule) (TrafficRule, error
 		return TrafficRule{}, err
 	}
 	s.rules[id] = norm
+	s.recountLocked()
 	if err := s.saveLocked(); err != nil {
 		return TrafficRule{}, err
 	}
@@ -200,6 +287,7 @@ func (s *trafficRuleStore) Remove(id string) bool {
 	}
 	delete(s.rules, id)
 	delete(s.frozen, id)
+	s.recountLocked()
 	_ = s.saveLocked()
 	return true
 }
@@ -244,6 +332,7 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 	if ipOK {
 		ipAddr = ipAddr.Unmap()
 	}
+	verifiedBot := verifiedBotForRules(in.VerifiedBot)
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -269,7 +358,7 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 		if !ruleHostMatch(r.Scope.Vhosts, host) {
 			continue
 		}
-		if !ruleMatchFilters(r.Match, ipAddr, ipOK, country, ua, path, method, in.QueryString) {
+		if !ruleMatchFilters(r.Match, ipAddr, ipOK, country, ua, path, method, in.QueryString, verifiedBot) {
 			continue
 		}
 		if !r.Enabled {
@@ -288,9 +377,10 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 			Action:        r.Action.Type,
 			Profile:       r.Action.Profile,
 			DisabledMatch: disabled,
+			VerifiedBot:   verifiedBot,
 		}
 	}
-	return TrafficRuleEvalResult{Matched: false, DisabledMatch: disabled}
+	return TrafficRuleEvalResult{Matched: false, DisabledMatch: disabled, VerifiedBot: verifiedBot}
 }
 
 func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) {
@@ -568,7 +658,11 @@ func ruleHostMatch(vhosts []string, host string) bool {
 
 // ruleMatchFilters evaluates one rule's match block. ip/ipOK come from a single
 // parse in Simulate (the client IP is the same for every rule).
-func ruleMatchFilters(m TrafficRuleMatch, ip netip.Addr, ipOK bool, country, ua, path, method, qs string) bool {
+// verifiedBot is the FCrDNS good-bot name for the request ("" = none).
+func ruleMatchFilters(m TrafficRuleMatch, ip netip.Addr, ipOK bool, country, ua, path, method, qs, verifiedBot string) bool {
+	if m.VerifiedBot && verifiedBot == "" {
+		return false // only a forward-confirmed crawler satisfies verified_bot
+	}
 	if len(m.CountryIn) > 0 {
 		ok := false
 		for _, cc := range m.CountryIn {
@@ -872,6 +966,7 @@ func (s *trafficRuleStore) load() {
 			s.frozen[norm.ID] = append(json.RawMessage(nil), raw...)
 		}
 	}
+	s.recountLocked()
 }
 
 // decodeStoredRule decodes one persisted rule. It reports unknown=true when

@@ -238,11 +238,17 @@ func parseRulesSimulateFlags(args []string) (TrafficRuleEvalInput, error) {
 			i++
 		case strings.HasPrefix(a, "--qs="):
 			in.QueryString = strings.TrimPrefix(a, "--qs=")
+		case a == "--verified-bot":
+			// Override: evaluate as if the IP were an FCrDNS-verified crawler
+			// (default name googlebot; --verified-bot=<name> to pick another).
+			in.VerifiedBot = "googlebot"
+		case strings.HasPrefix(a, "--verified-bot="):
+			in.VerifiedBot = strings.TrimPrefix(a, "--verified-bot=")
 
 		}
 	}
 	if strings.TrimSpace(in.Host) == "" {
-		return TrafficRuleEvalInput{}, fmt.Errorf("usage: cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US] [--qs 'key=value']")
+		return TrafficRuleEvalInput{}, fmt.Errorf("usage: cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US] [--qs 'key=value'] [--verified-bot[=name]]")
 	}
 	return in, nil
 }
@@ -266,6 +272,11 @@ func runRulesSimulate(baseURL string, in TrafficRuleEvalInput) error {
 		fmt.Printf("Disabled rule id=%s priority=%d action=%s would match if enabled (not enforced).\n",
 			d.ID, d.Priority, d.Action.Type)
 	}
+	if out.VerifiedBot != "" {
+		fmt.Printf("Verified crawler: %s (verified_bot rules can match).\n", out.VerifiedBot)
+	} else if strings.TrimSpace(in.IP) != "" {
+		fmt.Println("Verified crawler: no (verified_bot rules do not match; pass --verified-bot to test the crawler path).")
+	}
 	return nil
 }
 
@@ -279,6 +290,9 @@ func rulesMatchSummary(m TrafficRuleMatch) string {
 	}
 	if len(m.IPAny) > 0 {
 		parts = append(parts, "ip="+strings.Join(m.IPAny, ","))
+	}
+	if m.VerifiedBot {
+		parts = append(parts, "verified_bot")
 	}
 	if len(m.Methods) > 0 {
 		parts = append(parts, "m="+strings.Join(m.Methods, ","))

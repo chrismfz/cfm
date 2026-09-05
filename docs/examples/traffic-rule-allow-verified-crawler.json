@@ -5,11 +5,10 @@
     "vhosts": ["example.com", "*.example.com"]
   },
   "match": {
-    "ua_any": ["*googlebot*", "*bingbot*"],
-    "methods": ["GET", "HEAD"]
+    "verified_bot": true
   },
   "action": {
     "type": "allow"
   },
-  "note": "Allow verified crawler traffic; pair with ASN/PTR validation policy"
+  "note": "FCrDNS-verified crawlers (Googlebot, Bing, Yahoo, Applebot, Yandex, Meta) skip the rules below; a User-Agent string alone never matches"
 }

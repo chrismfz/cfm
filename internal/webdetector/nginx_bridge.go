@@ -141,6 +141,12 @@ type NginxBridge struct {
 	// RuleDecision evaluates dynamic traffic rules for the current request
 	// shape (host/ip/ua/path/method/country) and returns the matched action.
 	RuleDecision func(TrafficRuleEvalInput) TrafficRuleEvalResult
+	// RuleNeedsVerifiedBot reports whether an enabled traffic rule scoped to
+	// host matches on verified_bot, so the FCrDNS good-bot cache is consulted
+	// for the rule input only when a rule for THIS host can use it
+	// (cache-only; see goodBot). Keeps a single verified_bot rule on one shop
+	// from costing a PTR lookup per visitor IP fleet-wide.
+	RuleNeedsVerifiedBot func(host string) bool
 
 	// ListTrafficRules returns normalized, ordered traffic rules used for
 	// local snapshot enforcement in OpenResty Lua.
@@ -1806,14 +1812,23 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	// a challenge would otherwise be served, so the verify work is limited to
 	// challenged clients. Downgrades "challenge" only; a per-IP "block" is never
 	// softened, and the WAF / traffic-rule engine below still applies.
+	// verifiedBot is computed at most once per decision and shared by the
+	// challenge exemption below and the verified_bot traffic rules further
+	// down. ptrFn is lazy: the enrich/PTR lookup happens only on a good-bot
+	// cache miss, so a verified crawler (cache hit) adds just one RLock.
+	verifiedBot, verifiedBotChecked := "", false
+	ptrFn := func() string {
+		if b.enr == nil {
+			return ""
+		}
+		return b.enr.LookupCachedOrAsync(ip).PTR
+	}
 	if b.goodBotExempt && b.goodBot != nil && ip != "" && b.enr != nil &&
 		ipAction != "block" && (ipAction == "challenge" || vhAction == "challenge") {
-		// ptrFn is lazy: the enrich/PTR lookup happens only on a good-bot cache
-		// miss, so a verified crawler (cache hit) adds just one RLock. Skipped
-		// entirely when the IP is already blocked (block wins regardless).
-		ptrFn := func() string { return b.enr.LookupCachedOrAsync(ip).PTR }
-		if bot := b.goodBot.verified(ip, ptrFn, now); bot != "" {
-			ipAction, vhAction = goodBotDowngrade(ipAction, vhAction, bot)
+		// Skipped entirely when the IP is already blocked (block wins regardless).
+		verifiedBot, verifiedBotChecked = b.goodBot.verified(ip, ptrFn, now), true
+		if verifiedBot != "" {
+			ipAction, vhAction = goodBotDowngrade(ipAction, vhAction, verifiedBot)
 		}
 	}
 
@@ -1822,6 +1837,14 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		"vhost_action": vhAction, // "allow" | "challenge"
 	}
 	if b.RuleDecision != nil {
+		// verified_bot rules: reuse the verdict the exemption block already
+		// fetched; otherwise consult the cache only when an enabled rule scoped
+		// to THIS host can use it and the IP is not already blocked (a rule
+		// allow never softens an IP block). Independent of the exemption toggle.
+		if !verifiedBotChecked && b.goodBot != nil && ip != "" && ipAction != "block" &&
+			b.RuleNeedsVerifiedBot != nil && b.RuleNeedsVerifiedBot(host) {
+			verifiedBot = b.goodBot.verified(ip, ptrFn, now)
+		}
 		rr := b.RuleDecision(TrafficRuleEvalInput{
 			Host:        host,
 			IP:          ip,
@@ -1830,6 +1853,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 			Method:      method,
 			Country:     country,
 			QueryString: qs,
+			VerifiedBot: verifiedBot,
 		})
 		if rr.Matched {
 			resp["rule_action"] = rr.Action

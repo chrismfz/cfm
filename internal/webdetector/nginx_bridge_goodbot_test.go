@@ -58,10 +58,21 @@ func TestGoodBotState_VerifiedCacheHit(t *testing.T) {
 	if got := s.verified("66.249.74.1", ptrFn, base.Add(time.Minute)); got != "googlebot" {
 		t.Fatalf("fresh positive verdict: got %q, want googlebot", got)
 	}
-	// After posTTL the verdict is stale; verified() no longer returns it (it would
-	// re-kick a verify, which returns "" immediately on the hot path).
-	if got := s.verified("66.249.74.1", ptrFn, base.Add(goodBotIPPosTTL+time.Minute)); got != "" {
-		t.Fatalf("expired verdict must not be served, got %q", got)
+	// After posTTL the positive is STALE: it is still served (within the grace)
+	// while an async re-verify is kicked, so a crawler never loses its verdict
+	// for one request per TTL. Beyond the grace it is a plain miss.
+	if got := s.verified("66.249.74.1", ptrFn, base.Add(goodBotIPPosTTL+time.Minute)); got != "googlebot" {
+		t.Fatalf("stale positive within grace must still be served, got %q", got)
+	}
+	if got := s.verified("66.249.74.1", ptrFn, base.Add(goodBotIPPosTTL+goodBotIPStaleGrace+time.Minute)); got != "" {
+		t.Fatalf("positive beyond the stale grace must not be served, got %q", got)
+	}
+	// A stale NEGATIVE is never served: it is a miss that re-verifies.
+	n := newBridgeGoodBotState()
+	n.verify = func(ptr, ip string) (string, bool) { return "", true }
+	n.store("5.5.5.5", "", base)
+	if got := n.verified("5.5.5.5", func() string { return "spoof.googlebot.com" }, base.Add(goodBotIPNegTTL+time.Minute)); got != "" {
+		t.Fatalf("expired negative must not be served as anything, got %q", got)
 	}
 }
 
@@ -211,4 +222,87 @@ func TestGoodBotState_PositiveEvictsNegativeAtCap(t *testing.T) {
 
 func ipKeyForTest(i int) string {
 	return fmt.Sprintf("10.%d.%d.%d", i/65536%256, i/256%256, i%256)
+}
+
+// TestGoodBotState_VerifiedSync: the simulate-API variant resolves inline —
+// a candidate PTR is verified now (not on a later request), a non-candidate
+// PTR costs no verify, a cached verdict is served, and an inconclusive verify
+// (transient DNS failure) leaves nothing cached.
+func TestGoodBotState_VerifiedSync(t *testing.T) {
+	now := time.Now()
+	calls := 0
+	s := newBridgeGoodBotState()
+	s.verify = func(ptr, ip string) (string, bool) {
+		calls++
+		if ip == "66.249.66.1" {
+			return "googlebot", true
+		}
+		if ip == "9.9.9.9" {
+			return "", false // transient
+		}
+		return "", true
+	}
+	ptrCalls := 0
+	ptr := func(v string) func() string { return func() string { ptrCalls++; return v } }
+	if got := s.verifiedSync("66.249.66.1", ptr("crawl-66-249-66-1.googlebot.com."), now); got != "googlebot" {
+		t.Fatalf("sync verify: got %q", got)
+	}
+	if calls != 1 || ptrCalls != 1 {
+		t.Fatalf("expected one verify + one PTR call, got verify=%d ptr=%d", calls, ptrCalls)
+	}
+	// Cached now: neither verified() nor verifiedSync() resolves the PTR again.
+	if got := s.verified("66.249.66.1", func() string { t.Errorf("ptrFn must not run on a cache hit"); return "" }, now); got != "googlebot" {
+		t.Fatalf("cache hit: got %q", got)
+	}
+	if got := s.verifiedSync("66.249.66.1", func() string { t.Errorf("ptrFn must not run on a cache hit"); return "" }, now); got != "googlebot" {
+		t.Fatalf("sync cache hit: got %q", got)
+	}
+	if got := s.verifiedSync("1.2.3.4", ptr("1-2-3-4.some-isp.example."), now); got != "" || calls != 1 {
+		t.Fatalf("non-candidate PTR must not verify: got %q calls=%d", got, calls)
+	}
+	if got := s.verifiedSync("9.9.9.9", ptr("x.googlebot.com."), now); got != "" || calls != 2 {
+		t.Fatalf("transient: got %q calls=%d", got, calls)
+	}
+	s.mu.RLock()
+	_, cached := s.cache["9.9.9.9"]
+	s.mu.RUnlock()
+	if cached {
+		t.Fatalf("inconclusive verify must not be cached")
+	}
+	if got := s.verifiedSync("5.5.5.5", ptr("spoof.googlebot.com."), now); got != "" {
+		t.Fatalf("spoofed PTR must not verify: %q", got)
+	}
+	// The verdict is reported from the verifier, not re-read from a cache that
+	// may have dropped the insert at its cap.
+	full := newBridgeGoodBotState()
+	full.verify = func(ptr, ip string) (string, bool) { return "googlebot", true }
+	for i := 0; i < goodBotIPCacheCap; i++ {
+		full.store(fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255), "googlebot", now)
+	}
+	if got := full.verifiedSync("66.249.99.9", ptr("x.googlebot.com."), now); got != "googlebot" {
+		t.Fatalf("verdict must survive a full cache: got %q", got)
+	}
+	// Verify slots are bounded: with every slot taken, verifiedSync waits
+	// instead of fanning out, and proceeds once a slot frees.
+	bounded := newBridgeGoodBotState()
+	bounded.verify = func(ptr, ip string) (string, bool) { return "googlebot", true }
+	for i := 0; i < goodBotIPMaxInflight; i++ {
+		bounded.sem <- struct{}{}
+	}
+	done := make(chan string, 1)
+	go func() { done <- bounded.verifiedSync("66.249.77.7", ptr("x.googlebot.com."), now) }()
+	select {
+	case got := <-done:
+		t.Fatalf("verifiedSync must wait for a slot, returned %q", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	<-bounded.sem
+	select {
+	case got := <-done:
+		if got != "googlebot" {
+			t.Fatalf("after a slot freed: got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("verifiedSync did not proceed after a slot freed")
+	}
 }

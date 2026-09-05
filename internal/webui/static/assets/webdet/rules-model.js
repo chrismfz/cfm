@@ -72,6 +72,26 @@ export function throttleProfile(key) {
 
 export const KNOWN_METHODS = Object.freeze(["GET", "POST", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS"]);
 
+// Crawlers a `verified_bot` rule can match: the daemon's FCrDNS registry
+// (goodBotPTRSuffixes in internal/webdetector/abuse_shadow.go) minus the
+// generic "google" verdict, which covers Google's user-driven fetchers
+// (Translate proxy, AMP cache) and is deliberately excluded for rules.
+// TestVerifiedBotNamesListedInRulesModel asserts this list equals that set.
+// Matching is by reverse DNS that forward-confirms to the IP — never by
+// User-Agent string.
+export const VERIFIED_BOT_NAMES = Object.freeze(["googlebot", "bingbot", "yahoo", "applebot", "yandex", "meta"]);
+const VERIFIED_BOT_DISPLAY = Object.freeze({
+  googlebot: "Googlebot", bingbot: "Bingbot", yahoo: "Yahoo Slurp", applebot: "Applebot", yandex: "YandexBot", meta: "Meta (facebookexternalhit / meta-externalagent)",
+});
+export const VERIFIED_BOT_LABEL = VERIFIED_BOT_NAMES.map((n) => VERIFIED_BOT_DISPLAY[n] || n).join(", ");
+
+// UA globs of the well-known search/social bots the daemon CANNOT verify by
+// reverse DNS (no registry suffix). Recipes that allow verified crawlers add a
+// second, explicitly weaker UA-based allow for these so link previews and
+// indexing from them keep working — forgeable, and said so in the warning.
+const VERIFIABLE_UA_GLOBS = new Set(["*Googlebot*", "*bingbot*", "*Applebot*", "*YandexBot*", "*facebookexternalhit*", "*meta-externalagent*"]);
+
+
 // ── Priority bands ────────────────────────────────────────────────────────
 // First match wins, lower priority number runs first. The bands only seed the
 // default so that allows land before throttles before challenges before
@@ -245,6 +265,10 @@ export function botGroup(key) {
   return BOT_GROUPS.find((g) => g.key === key) || null;
 }
 
+export const UNVERIFIABLE_BOT_UAS = Object.freeze(
+  [...botGroup("search").patterns, ...botGroup("social").patterns].filter((g) => !VERIFIABLE_UA_GLOBS.has(g)),
+);
+
 // ── Form ⇄ payload ────────────────────────────────────────────────────────
 export function emptyForm(overrides = {}) {
   return {
@@ -254,6 +278,7 @@ export function emptyForm(overrides = {}) {
     countries: "",
     countriesMode: "in", // "in" | "not_in"
     ips: "",
+    verifiedBot: false,
     uas: "",
     paths: "",
     methods: "",
@@ -289,6 +314,7 @@ export function buildRulePayload(form) {
       country_in: f.countriesMode === "not_in" ? [] : csvSplit(f.countries).map((x) => x.toUpperCase()),
       country_not_in: f.countriesMode === "not_in" ? csvSplit(f.countries).map((x) => x.toUpperCase()) : [],
       ip_any: csvSplit(f.ips),
+      verified_bot: Boolean(f.verifiedBot),
       ua_any: csvSplit(f.uas),
       path_any: csvSplit(f.paths).map((p) => (p.startsWith("/") ? p : "/" + p)),
       methods: csvSplit(f.methods).map((x) => x.toUpperCase()),
@@ -316,6 +342,7 @@ export function formFromRule(row) {
     countries: list(r?.match?.country_not_in?.length ? r.match.country_not_in : r?.match?.country_in),
     countriesMode: r?.match?.country_not_in?.length ? "not_in" : "in",
     ips: list(r?.match?.ip_any),
+    verifiedBot: Boolean(r?.match?.verified_bot),
     uas: list(r?.match?.ua_any),
     paths: list(r?.match?.path_any),
     methods: list(r?.match?.methods),
@@ -335,6 +362,7 @@ export function hasAnyMatch(match) {
     (m.country_in && m.country_in.length) ||
       (m.country_not_in && m.country_not_in.length) ||
       (m.ip_any && m.ip_any.length) ||
+      m.verified_bot ||
       (m.ua_any && m.ua_any.length) ||
       (m.path_any && m.path_any.length) ||
       (m.methods && m.methods.length) ||
@@ -482,7 +510,11 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
   }
   if (act?.caveat) hints.push(act.caveat);
   if (p.match.ua_any.length && p.action.type === "allow") {
-    hints.push("User-Agent is client-controlled: anyone can send this string. Prefer an allow keyed on something the client cannot forge.");
+    hints.push("User-Agent is client-controlled: anyone can send this string. For crawlers use the Verified crawler condition instead (FCrDNS, cannot be forged).");
+  }
+  if (p.match.verified_bot) {
+    hints.push(`Verified crawler = the IP's reverse DNS forward-confirms to ${VERIFIED_BOT_LABEL}. On live traffic the verdict is cache-only: a crawler IP seen for the first time matches on a later request (never a DNS wait per request), then stays verified across refreshes. Other bots (DuckDuckGo, Baidu, X, LinkedIn…) cannot be verified and need a User-Agent condition.`);
+    if (p.match.ua_any.length) warnings.push("Verified crawler already proves who the client is; the User-Agent condition only narrows it further (and can be forged).");
   }
   if (p.match.country_in.length) {
     hints.push("Requests whose IP the geo database cannot resolve have no country and never match a country condition.");
@@ -517,6 +549,7 @@ export function describeMatch(match, { max = 3 } = {}) {
   const paths = Array.isArray(m.path_any) ? m.path_any : [];
 
   parts.push(methods.length ? `${joinList(methods, max)} requests` : (hasAnyMatch(m) ? "requests" : "every request"));
+  if (m.verified_bot) parts.push("from a verified crawler (FCrDNS)");
   if (ips.length) parts.push(`from IP ${joinList(ips, max)}`);
   if (countries.length) parts.push(`from ${joinList(countries, max)}`);
   if (countriesNot.length) parts.push(`from outside ${joinList(countriesNot, max)}`);
@@ -589,6 +622,9 @@ export function simulateInputFromRule(row) {
     method: String((m.methods || [])[0] || "GET"),
     country: (m.country_in || [])[0] || sampleCountryOutside(m.country_not_in || []),
     qs,
+    // A verified_bot rule is exercised with the override: the sample IP is not
+    // a real crawler, so the daemon's inline FCrDNS check would say "no".
+    verifiedBot: m.verified_bot ? "googlebot" : "",
   };
 }
 
@@ -626,8 +662,6 @@ function sampleCountryOutside(list) {
 // `vars` are the free variables asked from the operator. `build(vars)` returns
 // an ordered array of API payloads; every note starts with "recipe:<key>" so
 // the group can be found again (recipeOf).
-const GOOD_BOT_UAS = [...botGroup("search").patterns, ...botGroup("social").patterns];
-
 function note(key, text) {
   return `recipe:${key} — ${text}`;
 }
@@ -640,6 +674,7 @@ function rule(key, { enabled, priority, vhosts, match = {}, action, text }) {
       country_in: match.country_in || [],
       country_not_in: match.country_not_in || [],
       ip_any: match.ip_any || [],
+      verified_bot: Boolean(match.verified_bot),
       ua_any: match.ua_any || [],
       path_any: match.path_any || [],
       methods: match.methods || [],
@@ -672,7 +707,7 @@ export const RECIPES = Object.freeze([
     key: "geo_fence",
     kind: "multi",
     title: "Allow only these countries",
-    description: "Serve the site to visitors from the listed countries, to search/social crawlers and to your own IP ranges; block everyone else with one country_not_in rule.",
+    description: "Serve the site to visitors from the listed countries, to FCrDNS-verified crawlers and to your own IP ranges; block everyone else with one country_not_in rule.",
     vars: [
       VAR_VHOSTS,
       { key: "countries", label: "Allowed countries", type: "countries", default: "GR, CY", required: true },
@@ -680,7 +715,8 @@ export const RECIPES = Object.freeze([
     ],
     warnings: [
       "The block rule is created DISABLED. Test with the simulator, then enable it from the table.",
-      "Crawlers are allowed by User-Agent, which anyone can forge. A verified-bot (FCrDNS) match is a planned follow-up.",
+      `Rule #10 allows crawlers by reverse-DNS verification (${VERIFIED_BOT_LABEL}) — cannot be forged. A crawler IP seen for the first time is verified in the background and may get the fence's action once before it passes.`,
+      "Rule #11 allows the search/social bots that have no verifiable reverse DNS (DuckDuckGo, Baidu, X/Twitter, LinkedIn, Slack, WhatsApp, Telegram previews) by User-Agent only — forgeable; delete it if you would rather fence those too.",
       "Visitors whose country cannot be resolved are NOT blocked (the fence fails open, so a geo outage never locks everyone out). Office/monitoring ranges are still worth listing: they skip every rule below.",
       "Browsers that already hold a clearance cookie for the vhost keep access until it expires.",
     ],
@@ -690,7 +726,8 @@ export const RECIPES = Object.freeze([
       const ips = ipsVar(vars);
       const k = "geo_fence";
       const out = [
-        rule(k, { enabled: true, priority: 10, vhosts, match: { ua_any: GOOD_BOT_UAS }, action: { type: "allow" }, text: "let search/social crawlers through before the fence (UA-based)" }),
+        rule(k, { enabled: true, priority: 10, vhosts, match: { verified_bot: true }, action: { type: "allow" }, text: "verified crawlers (FCrDNS) pass the fence" }),
+        rule(k, { enabled: true, priority: 11, vhosts, match: { ua_any: [...UNVERIFIABLE_BOT_UAS] }, action: { type: "allow" }, text: "search/social bots without verifiable reverse DNS pass by User-Agent (forgeable)" }),
       ];
       if (ips.length) {
         out.push(rule(k, { enabled: true, priority: 15, vhosts, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass the fence" }));
@@ -753,14 +790,15 @@ export const RECIPES = Object.freeze([
     key: "tame_bots",
     kind: "multi",
     title: "Tame bots",
-    description: "Let search/social crawlers through, rate-limit SEO and AI crawlers, block requests without a User-Agent.",
+    description: "Let verified search/social crawlers through, rate-limit SEO and AI crawlers, block requests without a User-Agent.",
     vars: [VAR_VHOSTS],
-    warnings: ["Throttles are enabled (low collateral). The no-User-Agent block is created DISABLED: uptime monitors and health checks sometimes send no UA — check the simulator/logs, then enable."],
+    warnings: ["Throttles are enabled (low collateral). The no-User-Agent block is created DISABLED: uptime monitors and health checks sometimes send no UA — check the simulator/logs, then enable.", "Rule #11 allows the search/social bots with no verifiable reverse DNS by User-Agent only (forgeable)."],
     build(vars) {
       const vhosts = vhostsVar(vars);
       const k = "tame_bots";
       return [
-        rule(k, { enabled: true, priority: 10, vhosts, match: { ua_any: GOOD_BOT_UAS }, action: { type: "allow" }, text: "search/social crawlers first" }),
+        rule(k, { enabled: true, priority: 10, vhosts, match: { verified_bot: true }, action: { type: "allow" }, text: "verified crawlers (FCrDNS) first" }),
+        rule(k, { enabled: true, priority: 11, vhosts, match: { ua_any: [...UNVERIFIABLE_BOT_UAS] }, action: { type: "allow" }, text: "search/social bots without verifiable reverse DNS by User-Agent (forgeable)" }),
         rule(k, { enabled: true, priority: 110, vhosts, match: { ua_any: botGroup("ai").patterns, methods: ["GET"] }, action: { type: "throttle", profile: "medium_bot" }, text: "AI crawlers at medium_bot" }),
         rule(k, { enabled: true, priority: 130, vhosts, match: { ua_any: botGroup("seo").patterns, methods: ["GET"] }, action: { type: "throttle", profile: "soft_bot" }, text: "SEO crawlers at soft_bot" }),
         rule(k, { enabled: false, priority: 320, vhosts, match: { ua_any: ["-"] }, action: { type: "block" }, text: "block requests with no User-Agent — ENABLE after checking monitors" }),

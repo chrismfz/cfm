@@ -563,6 +563,7 @@ func NewEngine(cfg Config) *Engine {
 	e.nginxBridge.ListClamModeOverrides = e.ClamModeOverrideList
 	e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
 	e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
+	e.nginxBridge.RuleNeedsVerifiedBot = e.trafficRules.NeedsVerifiedBotFor
 	e.nginxBridge.ListTrafficRules = e.TrafficRuleList
 
 	// Re-assert manual vhost challenges that survived a restart (loaded from
@@ -3971,6 +3972,19 @@ func (e *Engine) TrafficRuleSimulate(in TrafficRuleEvalInput) TrafficRuleEvalRes
 		if geo := e.enr.LookupGeoFast(strings.TrimSpace(in.IP)); strings.TrimSpace(geo.CountryISO) != "" {
 			in.Country = geo.CountryISO
 		}
+	}
+	// verified_bot: resolve synchronously for the API caller (an operator
+	// testing a rule wants a definitive answer, and this path is not the
+	// decision hot path). A caller-supplied value is honoured verbatim so the
+	// UI can "simulate as a verified crawler" for an IP that is not one. The
+	// bridge's own decisions never reach this branch: they fill VerifiedBot
+	// from the cache-only verified() before calling RuleDecision.
+	// Gated on ANY verified_bot rule (a rule saved disabled must be testable
+	// too); the PTR is resolved lazily, only on a good-bot cache miss.
+	if strings.TrimSpace(in.VerifiedBot) == "" && strings.TrimSpace(in.IP) != "" &&
+		e.trafficRules.HasVerifiedBotRules() && e.nginxBridge != nil && e.nginxBridge.goodBot != nil && e.enr != nil {
+		ip := strings.TrimSpace(in.IP)
+		in.VerifiedBot = e.nginxBridge.goodBot.verifiedSync(ip, func() string { return e.enr.Lookup(ip).PTR }, time.Now())
 	}
 	return e.trafficRules.Simulate(in)
 }

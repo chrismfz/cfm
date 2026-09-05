@@ -1,6 +1,6 @@
 # Traffic Rules (cfm-admin) — UX review & redesign proposal
 
-Status: **Phase 1 landed** (guided editor, recipes, banners, simulator pre-fill, docs fix — plus the F12 engine fix below). **Phase 2 partially landed:** `country_not_in` and `ip_any` (engine + editor chips + recipes). Remaining Phase 2 (`asn_in`, `verified_bot`, simulate `draft`/`trace`, `group`) and Phase 3 are still proposals. Scope: the
+Status: **Phase 1 landed** (guided editor, recipes, banners, simulator pre-fill, docs fix — plus the F12 engine fix below). **Phase 2 partially landed:** `country_not_in`, `ip_any` and `verified_bot` (engine + editor chips + recipes). Remaining Phase 2 (`asn_in`, simulate `draft`/`trace`, `group`) and Phase 3 are still proposals. Scope: the
 `/cfm-admin/webdetector/rules/` page (`internal/webui/static/webdetector/rules/`,
 `assets/webdet/feature-rules.js`), the rule model in
 `internal/webdetector/traffic_rules.go`, and the edge application path in
@@ -171,7 +171,7 @@ All additive JSON fields; absent = current behaviour. Each ships with
 | `match.country_not_in []string` — **landed** | "is not" toggle; single-rule geo-fence | Empty country (`""`) does **not** match `not_in`: it is the edge's fail-open sentinel (geo down, cache miss, `cfm_panel.lua`), so the fence fails open instead of 403-ing everyone during a geo hiccup. Mutually exclusive with `country_in`. |
 | `match.ip_any []string` (IPv4/IPv6 CIDR) — **landed** | allow office/monitor IPs; block a range as a rule instead of an nft ban | `net/netip` prefixes, masked + canonical, cap 20; v4-mapped v6 unmapped; no/invalid client IP never matches. |
 | `match.asn_in []uint` | block/throttle a hosting ASN per vhost | Cache-only lookup via `b.enr.LookupCachedOrAsync(ip)` on the hot path, same pattern as the good-bot check; a miss = no match (fail-open) and an async fill. |
-| `match.verified_bot bool` | the good-bot allow in recipes must not be UA-glob based (F7) | Reuse `b.goodBot.verified(ip, ptrFn, now)`; matches only FCrDNS-confirmed crawlers. |
+| `match.verified_bot bool` — **landed** | the good-bot allow in recipes must not be UA-glob based (F7) | Reuses `b.goodBot.verified(ip, ptrFn, now)` (cache-only on the hot path, consulted only while an enabled rule uses the field); the simulate API resolves inline via `verifiedSync` and honours a caller override. |
 | `POST rules/simulate` accepts `draft` (an unsaved rule) and returns `trace []` | "Test this draft" and shadowing hints | Trace row: `{id, priority, matched, skipped_by: "country"|"path"|…}`. Scope check: `draft.scope.vhosts` must pass `scopeAllowsVhosts`. |
 | `group string` on the rule | list/toggle/remove a recipe as a unit | Phase 1 uses `note` prefix; promote when the recipes stabilise. |
 | `rule_id` on the challenge route log line | hit counters (F11) | one-line `cfm.lua` change. |
@@ -194,8 +194,9 @@ fix for F1 is to say what `allow` does and route operators to excludes.
    match column; README §15 `allow` note corrected. Fixes the screenshot
    class of mistake outright.
 2. **Phase 2 — engine additions** from §3 in single-concern PRs:
-   `country_not_in` + `ip_any` **landed** (editor chips, recipes, README field
-   table); next `simulate draft/trace`, then `verified_bot`/`asn_in`.
+   `country_not_in` + `ip_any` **landed**, `verified_bot` **landed** (editor
+   chips, recipes, README field table); next `simulate draft/trace`, then
+   `asn_in`.
 3. **Phase 3 — hit counters, shadowing hints, incident entry points**
    (Forensics → "block this UA as a rule").
 

@@ -36,6 +36,29 @@ back-filled here — see the git/PR history for that period.
   that block disabled so monitors without a UA can be checked first.
 
 ### Added
+- **Traffic rules: `verified_bot` match field — allow crawlers by FCrDNS, not
+  by User-Agent.** A rule with `match.verified_bot: true` matches only when the
+  client IP forward-confirms as a known good bot (Googlebot, Google, Bing,
+  Yahoo, Applebot, Yandex, Meta — the same `goodBotPTRSuffixes` registry and
+  verifier the challenge exemption uses, minus the generic `google` verdict
+  that also covers Translate/AMP proxies), so the *Allow only these countries*
+  and *Tame bots* recipes no longer open the fence to anyone who types
+  `Googlebot` into a User-Agent; bots with no verifiable reverse DNS
+  (DuckDuckGo, Baidu, X, LinkedIn, Slack, WhatsApp, Telegram previews) keep a
+  separate, explicitly weaker UA-based allow in those recipes. On the decision
+  hot path the verdict is cache-only and consulted only for hosts an enabled
+  `verified_bot` rule covers and only when the IP is not already blocked (a
+  first-seen crawler IP kicks the existing bounded async forward-confirm and
+  matches on a later request — never a DNS wait per request). The good-bot
+  cache now serves an **expired positive verdict stale while it re-verifies**
+  (24 h grace), so a real crawler no longer loses its exemption/allow for one
+  request per 30-minute TTL — tolerable when that meant a challenge page, not
+  when a rule turns it into a 403. The simulate API resolves the verdict inline
+  (bounded by the same verify-slot semaphore), echoes it as `verified_bot`,
+  and accepts a caller-supplied name as an override so cfm-admin and `cfm
+  webtop rules simulate --verified-bot` can test the crawler path. Editor gains
+  a *Verified crawler* condition; `cfm webtop rules list` shows
+  `verified_bot`; a Go test keeps the UI's crawler list equal to the registry.
 - **Traffic rules: `country_not_in` and `ip_any` match fields** (Phase 2 of the
   Traffic Rules UX proposal). A geo-fence is now ONE rule — `block` with
   `country_not_in: [GR, CY]` — instead of an allow/block pair, and an operator

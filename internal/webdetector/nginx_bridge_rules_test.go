@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -409,5 +410,92 @@ func TestNginxBridgeDecisionDoesNotUseOkStateWhenOkIPTTLZero(t *testing.T) {
 	}
 	if payload["vhost_action"] != "challenge" {
 		t.Fatalf("expected challenge with OkIPTTL=0; payload=%+v", payload)
+	}
+}
+
+// TestNginxBridgeDecision_VerifiedBotFromCache: the bridge fills the rule
+// input's verified_bot from the good-bot verdict cache (cache-only, never DNS
+// on the hot path) and only when a rule needs it. A crawler IP with a cached
+// positive verdict hits the verified_bot allow; the same UA from an unverified
+// IP falls through to the fence.
+func TestNginxBridgeDecision_VerifiedBotFromCache(t *testing.T) {
+	store := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	if _, err := store.Add(TrafficRule{
+		ID: "r_bots", Enabled: true, Priority: 10,
+		Scope:  TrafficRuleScope{Vhosts: []string{"shop.gr"}},
+		Match:  TrafficRuleMatch{VerifiedBot: true},
+		Action: TrafficRuleAction{Type: TrafficActionAllow},
+	}); err != nil {
+		t.Fatalf("add allow: %v", err)
+	}
+	if _, err := store.Add(TrafficRule{
+		ID: "r_fence", Enabled: true, Priority: 900,
+		Scope:  TrafficRuleScope{Vhosts: []string{"shop.gr"}},
+		Match:  TrafficRuleMatch{UAAny: []string{"*Googlebot*"}}, // stands in for a country fence (no geo in tests)
+		Action: TrafficRuleAction{Type: TrafficActionBlock},
+	}); err != nil {
+		t.Fatalf("add fence: %v", err)
+	}
+
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.RuleDecision = store.Simulate
+	gateCalls := 0
+	b.RuleNeedsVerifiedBot = func(host string) bool { gateCalls++; return store.NeedsVerifiedBotFor(host) }
+	var inlineVerify atomic.Bool
+	b.goodBot.verify = func(ptr, ip string) (string, bool) { inlineVerify.Store(true); return "", true }
+	b.goodBot.store("66.249.66.1", "googlebot", time.Now()) // verdict already cached
+	b.goodBot.store("74.125.1.1", "google", time.Now())     // generic *.google.com: NOT a crawler for rules
+
+	decide := func(ip string) map[string]any {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet,
+			"/nginx/decision?ip="+ip+"&host=shop.gr&uri=%2F&method=GET&ua=Mozilla%2F5.0+(compatible%3B+Googlebot%2F2.1)", nil)
+		req.Header.Set("X-CFM-Token", "tok")
+		b.handleDecision(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return payload
+	}
+
+	if p := decide("66.249.66.1"); p["rule_action"] != TrafficActionAllow || p["rule_id"] != "r_bots" {
+		t.Fatalf("cached verified crawler must hit the verified_bot allow: %+v", p)
+	}
+	if p := decide("203.0.113.9"); p["rule_action"] != TrafficActionBlock || p["rule_id"] != "r_fence" {
+		t.Fatalf("unverified IP with a Googlebot UA must fall through to the fence: %+v", p)
+	}
+	// The generic "google" verdict (Translate proxy, AMP cache…) is a challenge
+	// exemption, not a crawler: it must not open the fence.
+	if p := decide("74.125.1.1"); p["rule_action"] != TrafficActionBlock || p["rule_id"] != "r_fence" {
+		t.Fatalf("generic google verdict must not satisfy verified_bot: %+v", p)
+	}
+	if gateCalls == 0 {
+		t.Fatalf("the per-host gate must be consulted")
+	}
+	if inlineVerify.Load() {
+		t.Fatalf("hot path must never verify inline")
+	}
+
+	// A rule on ANOTHER host must not make this host pay for good-bot lookups.
+	if !store.Remove("r_bots") {
+		t.Fatalf("remove")
+	}
+	if _, err := store.Add(TrafficRule{
+		ID: "r_other", Enabled: true, Priority: 10,
+		Scope:  TrafficRuleScope{Vhosts: []string{"other.gr"}},
+		Match:  TrafficRuleMatch{VerifiedBot: true},
+		Action: TrafficRuleAction{Type: TrafficActionAllow},
+	}); err != nil {
+		t.Fatalf("add other: %v", err)
+	}
+	if store.NeedsVerifiedBotFor("shop.gr") || !store.NeedsVerifiedBotFor("other.gr") {
+		t.Fatalf("gate must be per host: shop=%v other=%v", store.NeedsVerifiedBotFor("shop.gr"), store.NeedsVerifiedBotFor("other.gr"))
+	}
+	if p := decide("66.249.66.1"); p["rule_action"] != TrafficActionBlock {
+		t.Fatalf("without a verified_bot rule for this host the cached verdict must not matter: %+v", p)
 	}
 }
