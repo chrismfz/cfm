@@ -2039,7 +2039,7 @@ end
 -- A real browser satisfies 1+4 but never 2+3 together; an honest curl/wget/python
 -- client fails 4 (it doesn't claim a browser). Returns a single tag or nil.
 --
--- Two suppress-only carve-outs return nil BEFORE any measurement (they can only
+-- Two suppress-only carve-outs return nil instead of measuring (they can only
 -- stand the rule down, never accuse): infrastructure paths (`/robots.txt`,
 -- `/.well-known/*` — hit by crawlers + ACME/DCV/security validators that claim
 -- `text/html` yet ship no other browser headers) and self-declared bots
@@ -2060,17 +2060,20 @@ function _M.detect_fetch_metadata_missing(headers, method, path)
   method = lower(method or "get")
   if method ~= "get" and method ~= "head" then return nil end
 
-  -- (0) Infrastructure paths that legitimate crawlers and ACME/DCV/security
-  -- validators fetch (header-poor by nature) are a separate category: measuring
-  -- the tell there is noise, not signal — the same client's real page fetches
-  -- still trip it. Suppress-only (path is spoofable, but this can only stand the
-  -- rule DOWN). `path` is the request path only (no query); nil is treated as "".
-  local p = lower(path or "")
-  if p == "/robots.txt" or begins(p, "/.well-known/") then return nil end
-
   -- (1) HTML navigation only.
   local accept = lower(headers["accept"] or headers["Accept"] or "")
   if not has(accept, "text/html") then return nil end
+
+  -- (1a) Infrastructure paths that legitimate crawlers and ACME/DCV/security
+  -- validators fetch (they claim text/html but ship no other browser headers)
+  -- are a separate category: measuring the tell there is noise, not signal — the
+  -- same client's real page fetches still trip it. Suppress-only (path is
+  -- spoofable, but this can only stand the rule DOWN). Placed AFTER the text/html
+  -- gate so lower(path) runs only for the nav set, not every asset/XHR GET (the
+  -- cheap-first ordering this detector documents). `path` is the request path
+  -- only (no query); nil is treated as "".
+  local p = lower(path or "")
+  if p == "/robots.txt" or begins(p, "/.well-known/") then return nil end
 
   -- (2) Any Sec-Fetch-* present → a real browser (or a stack that bothers to send
   -- them); stand down. Presence, not value — a present-but-empty header still
