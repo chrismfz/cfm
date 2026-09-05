@@ -13,6 +13,7 @@ import {
   emptyForm,
   formFromRule,
   hostPatternMatch,
+  isIPOrCIDR,
   positionText,
   priorityTie,
   recipe,
@@ -56,7 +57,7 @@ test("formFromRule → buildRulePayload round-trips a stored rule", () => {
   };
   const p = buildRulePayload(formFromRule(row));
   assert.deepEqual(p.scope, row.scope);
-  assert.deepEqual(p.match, row.match);
+  assert.deepEqual(p.match, { ...row.match, country_not_in: [], ip_any: [] });
   assert.deepEqual(p.action, row.action);
   assert.equal(p.note, "n");
   assert.equal(p.priority, 120);
@@ -156,6 +157,7 @@ test("recipes: every multi recipe is ordered by priority, tagged, and only enabl
   for (const rcp of RECIPES.filter((r) => r.kind !== "link")) {
     const vars = recipeVarsDefaults(rcp, { vhosts: "a.com" });
     if (rcp.key === "block_scraper") vars.uas = "*Evil*";
+    if (rcp.key === "allow_office_ips") vars.ips = "203.0.113.0/24";
     assert.equal(validateRecipeVars(rcp, vars).length, 0, `${rcp.key} defaults validate`);
     const rules = rcp.build(vars);
     assert.ok(rules.length >= 1, rcp.key);
@@ -172,31 +174,76 @@ test("recipes: every multi recipe is ordered by priority, tagged, and only enabl
   }
 });
 
-test("geo_fence: good bots → allowed countries → disabled block-all", () => {
+test("geo_fence: good bots → (office IPs) → disabled block of everyone outside", () => {
   const rcp = recipe("geo_fence");
-  const rules = rcp.build({ vhosts: "shop.gr, www.shop.gr", countries: "gr, cy" });
-  assert.equal(rules.length, 3);
+  const rules = rcp.build({ vhosts: "shop.gr, www.shop.gr", countries: "gr, cy", ips: "" });
+  assert.equal(rules.length, 2);
   assert.equal(rules[0].action.type, "allow");
   assert.ok(rules[0].match.ua_any.includes("*Googlebot*"));
-  assert.deepEqual(rules[1].match.country_in, ["GR", "CY"]);
-  assert.equal(rules[1].action.type, "allow");
-  assert.equal(rules[2].action.type, "block");
-  assert.equal(rules[2].enabled, false);
-  assert.deepEqual(rules[2].scope.vhosts, ["shop.gr", "www.shop.gr"]);
+  assert.equal(rules[1].action.type, "block");
+  assert.deepEqual(rules[1].match.country_not_in, ["GR", "CY"]);
+  assert.deepEqual(rules[1].match.country_in, []);
+  assert.equal(rules[1].enabled, false);
+  assert.deepEqual(rules[1].scope.vhosts, ["shop.gr", "www.shop.gr"]);
+
+  const withIPs = rcp.build({ vhosts: "shop.gr", countries: "GR", ips: "203.0.113.0/24, 2001:db8::/48" });
+  assert.equal(withIPs.length, 3);
+  assert.equal(withIPs[1].action.type, "allow");
+  assert.deepEqual(withIPs[1].match.ip_any, ["203.0.113.0/24", "2001:db8::/48"]);
+  assert.ok(withIPs[0].priority < withIPs[1].priority && withIPs[1].priority < withIPs[2].priority);
 });
 
-test("geo_fence_admin honours the action choice and paths", () => {
+test("geo_fence_admin is one country_not_in rule honouring action and paths", () => {
   const rules = recipe("geo_fence_admin").build({ vhosts: "a.com", countries: "GR", paths: "admin/", action: "block" });
+  assert.equal(rules.length, 1);
   assert.deepEqual(rules[0].match.path_any, ["/admin/"]);
-  assert.deepEqual(rules[0].match.country_in, ["GR"]);
-  assert.equal(rules[1].action.type, "block");
-  assert.equal(rules[1].enabled, false);
+  assert.deepEqual(rules[0].match.country_not_in, ["GR"]);
+  assert.equal(rules[0].action.type, "block");
+  assert.equal(rules[0].enabled, false);
+  const ch = recipe("geo_fence_admin").build({ vhosts: "a.com", countries: "GR" });
+  assert.equal(ch[0].action.type, "challenge");
+  assert.ok(ch[0].priority < rules[0].priority, "challenge band precedes block band");
+});
+
+test("country mode + ip_any: payload, round-trip, description, sample request", () => {
+  const p = buildRulePayload(emptyForm({ actionType: "block", vhosts: "a.com", countries: "gr, cy", countriesMode: "not_in", ips: "203.0.113.0/24, 2001:db8::/48" }));
+  assert.deepEqual(p.match.country_in, []);
+  assert.deepEqual(p.match.country_not_in, ["GR", "CY"]);
+  assert.deepEqual(p.match.ip_any, ["203.0.113.0/24", "2001:db8::/48"]);
+  const f = formFromRule({ match: { country_not_in: ["GR"], ip_any: ["198.51.100.7/32"] }, scope: { vhosts: ["a.com"] }, action: { type: "allow" } });
+  assert.equal(f.countriesMode, "not_in");
+  assert.equal(f.countries, "GR");
+  assert.equal(f.ips, "198.51.100.7/32");
+  assert.equal(describeMatch({ country_not_in: ["GR", "CY"] }), "requests from outside GR, CY");
+  assert.equal(describeMatch({ ip_any: ["203.0.113.0/24"], methods: ["GET"] }), "GET requests from IP 203.0.113.0/24");
+  const sim = simulateInputFromRule({ scope: { vhosts: ["a.com"] }, match: { country_not_in: ["US", "DE"], ip_any: ["203.0.113.0/24"] } });
+  assert.equal(sim.ip, "203.0.113.1");
+  assert.equal(sim.country, "CN");
+  assert.equal(simulateInputFromRule({ scope: { vhosts: ["a.com"] }, match: { ip_any: ["2001:db8::/48"] } }).ip, "2001:db8::1");
+  assert.equal(simulateInputFromRule({ scope: { vhosts: ["a.com"] }, match: { ip_any: ["198.51.100.7/32"] } }).ip, "198.51.100.7");
+  const v = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", countries: "GR", countriesMode: "not_in" }));
+  assert.equal(v.errors.length, 0);
+  assert.ok(v.hints.some((h) => /do NOT match/.test(h)), "unknown country is fail-open");
+  const bad = validateRuleForm(emptyForm({ actionType: "allow", vhosts: "a.com", ips: "203.0.113.0/33, example.com" }));
+  assert.equal(bad.errors.filter((e) => /not an IPv4\/IPv6/.test(e)).length, 2);
+});
+
+test("isIPOrCIDR accepts what normalizeIPList accepts", () => {
+  for (const ok of ["203.0.113.0/24", "198.51.100.7", "0.0.0.0/0", "2001:db8::/48", "2001:db8::1", "::1", "::", "::ffff:203.0.113.9", "::ffff:203.0.113.0/120", "::ffff:c0a8:1/96", "0:0:0:0:0:ffff:1.2.3.4/120", "fe80::1/128", "1:2:3:4:5:6:7:8", "::1.2.3.4", "::1.2.3.4/64"]) {
+    assert.equal(isIPOrCIDR(ok), true, ok);
+  }
+  for (const bad of ["203.0.113.0/33", "256.1.1.1", "1.2.3", "2001:db8::/129", "2001:db8:::1", "1:2:3:4:5:6:7:8:9", "example.com", "", "1.2.3.4/24/1", "gggg::1",
+    "01.2.3.4", "1.2.3.4/024", "1.2.3.4::1", "1.2.3.4::", "a:b:1.2.3.4::", "::ffff:1.2.3.4/64", "::ffff:c0a8:1/64", "0:0:0:0:0:ffff:1.2.3.4/64"]) {
+    assert.equal(isIPOrCIDR(bad), false, bad);
+  }
 });
 
 test("validateRecipeVars: required + country shape", () => {
   const rcp = recipe("geo_fence");
   assert.ok(validateRecipeVars(rcp, { vhosts: "", countries: "GR" }).some((e) => /Vhosts is required/.test(e)));
   assert.ok(validateRecipeVars(rcp, { vhosts: "a.com", countries: "Greece" }).some((e) => /not a 2-letter/.test(e)));
+  const many = Array.from({ length: LIMITS.patternsPerField + 1 }, (_, i) => `203.0.${i}.0/24`).join(", ");
+  assert.ok(validateRecipeVars(rcp, { vhosts: "a.com", countries: "GR", ips: many }).some((e) => /too many entries/.test(e)));
 });
 
 test("static tables are consistent", () => {

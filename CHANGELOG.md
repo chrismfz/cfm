@@ -24,7 +24,7 @@ back-filled here — see the git/PR history for that period.
   recommended (e.g. *Block countries (disabled)*) silently blocked live
   traffic. Disabled rules are now skipped for the verdict; the simulator
   reports the highest-priority disabled would-be match separately as
-  `disabled_match` ("would match if enabled"), and `cfm rules simulate` prints
+  `disabled_match` ("would match if enabled"), and `cfm webtop rules simulate` prints
   it. Regression test pins the contract (`TestTrafficRuleSimulate_DisabledRulesNeverEnforce`).
 - **Traffic rules: a lone `-` User-Agent pattern now means "no User-Agent".**
   The *Block empty UA* preset stored `ua_any: ["-"]`, which the matcher treated
@@ -36,6 +36,37 @@ back-filled here — see the git/PR history for that period.
   that block disabled so monitors without a UA can be checked first.
 
 ### Added
+- **Traffic rules: `country_not_in` and `ip_any` match fields** (Phase 2 of the
+  Traffic Rules UX proposal). A geo-fence is now ONE rule — `block` with
+  `country_not_in: [GR, CY]` — instead of an allow/block pair, and an operator
+  can finally say "my office / uptime monitors always pass" with an `allow` on
+  `ip_any` (IPv4/IPv6 CIDR or bare address, stored masked + canonical). Rules:
+  `country_in` and `country_not_in` are mutually exclusive; an unknown country
+  (`""` — the edge's fail-open sentinel for geo-not-resolved / geo module down /
+  panel requests) does **not** match `country_not_in`, so a geo hiccup never turns
+  a fence into a block of every visitor (documented in the UI hint and README
+  §15); a missing or invalid client IP never matches `ip_any`, and v4-mapped v6
+  entries are canonicalised to plain v4 so they can actually match. cfm-admin gains an *is / is NOT one
+  of* switch on the Country condition and an *IP / range* condition; the *Allow
+  only these countries* recipe shrinks to good-bots-allow + (optional office
+  ranges allow) + one disabled `country_not_in` block, *Admin area only from
+  these countries* becomes a single rule, and a new *Always allow office /
+  monitoring IPs* recipe is added. `cfm webtop rules list` shows `cc!=` / `ip=` in the
+  match summary. Go tests cover both fields incl. IPv6, v4-mapped addresses and
+  the geo-fence composition; the JS model mirror validates CIDR syntax before
+  save. README §15 gains a match-field reference table.
+  **Downgrade note:** a cfm older than this release does not know these two
+  fields and silently drops them when loading `rules.json`, which *widens* such
+  a rule (an `allow` keyed only on `ip_any` becomes allow-everything, a `block`
+  keyed only on `country_not_in` blocks every visitor). Disable or delete those
+  rules before rolling back below this version. Going forward this build lists
+  any rule whose `match` / `scope` carries a key it does not know as disabled +
+  `unsupported`, never evaluates it, refuses to edit or enable it, and writes it
+  back to `rules.json` **verbatim** (original bytes, original `enabled`), so a
+  future field addition can neither widen a rule on downgrade nor be lost by an
+  intervening save. Also fixed: the simulator resolved an IP-only request to the
+  country *name* (`Greece`) instead of the ISO code the rules and the live edge
+  path use (`GR`), which with `country_not_in` would have shown a false block.
 - **cfm-admin Traffic Rules: guided editor + recipes.** The flat form is
   replaced by a three-step builder — *what should happen* (action cards with
   the real consequence spelled out, throttle profiles as a select with their

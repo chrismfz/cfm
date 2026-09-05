@@ -2,12 +2,12 @@ package webdetector
 
 import (
 	"bytes"
+	"cfm/internal/clihttp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"cfm/internal/clihttp"
 	"net/url"
 	"os"
 	"strconv"
@@ -233,11 +233,11 @@ func parseRulesSimulateFlags(args []string) (TrafficRuleEvalInput, error) {
 			i++
 		case strings.HasPrefix(a, "--country="):
 			in.Country = strings.ToUpper(strings.TrimPrefix(a, "--country="))
-case a == "--qs" && next != "":
-    in.QueryString = next
-    i++
-case strings.HasPrefix(a, "--qs="):
-    in.QueryString = strings.TrimPrefix(a, "--qs=")
+		case a == "--qs" && next != "":
+			in.QueryString = next
+			i++
+		case strings.HasPrefix(a, "--qs="):
+			in.QueryString = strings.TrimPrefix(a, "--qs=")
 
 		}
 	}
@@ -273,6 +273,12 @@ func rulesMatchSummary(m TrafficRuleMatch) string {
 	parts := []string{}
 	if len(m.CountryIn) > 0 {
 		parts = append(parts, "cc="+strings.Join(m.CountryIn, ","))
+	}
+	if len(m.CountryNotIn) > 0 {
+		parts = append(parts, "cc!="+strings.Join(m.CountryNotIn, ","))
+	}
+	if len(m.IPAny) > 0 {
+		parts = append(parts, "ip="+strings.Join(m.IPAny, ","))
 	}
 	if len(m.Methods) > 0 {
 		parts = append(parts, "m="+strings.Join(m.Methods, ","))

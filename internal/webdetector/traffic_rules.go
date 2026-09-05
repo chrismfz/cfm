@@ -1,11 +1,14 @@
 package webdetector
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -38,14 +41,26 @@ type TrafficRuleScope struct {
 
 type TrafficRuleMatch struct {
 	CountryIn []string `json:"country_in,omitempty"`
-	UAAny     []string `json:"ua_any,omitempty"`
-	PathAny   []string `json:"path_any,omitempty"`
-	Methods   []string `json:"methods,omitempty"`
+	// CountryNotIn matches when the request's country is known AND not one
+	// of these. An empty country ("") is the edge's fail-open sentinel — geo
+	// module down, DB mid-reload, enrich-cache miss, or cfm_panel.lua which
+	// always sends "" — so it deliberately does NOT match (same fail-open
+	// contract as CountryIn): a geo hiccup must never turn a not_in fence into
+	// a block of every visitor. Mutually exclusive with CountryIn.
+	CountryNotIn []string `json:"country_not_in,omitempty"`
+	// IPAny matches when the client IP is inside any of these prefixes
+	// (IPv4/IPv6 CIDR; a bare address is a /32 or /128). Stored canonical
+	// (netip.Prefix.Masked().String()). An unparsable request IP never matches.
+	IPAny   []string `json:"ip_any,omitempty"`
+	UAAny   []string `json:"ua_any,omitempty"`
+	PathAny []string `json:"path_any,omitempty"`
+	Methods []string `json:"methods,omitempty"`
 	// Query-string guards (both optional, evaluated only when set)
-	HasQS    bool   `json:"has_qs,omitempty"`    // true → rule only fires when QS is present
-	QSNotRx  string `json:"qs_not_rx,omitempty"` // if set, pass-through when QS matches this pattern
+	HasQS   bool   `json:"has_qs,omitempty"`    // true → rule only fires when QS is present
+	QSNotRx string `json:"qs_not_rx,omitempty"` // if set, pass-through when QS matches this pattern
 
 	qsNotRxCompiled *regexp.Regexp // pre-compiled from QSNotRx; set by normalizeTrafficRule
+	ipAnyCompiled   []netip.Prefix // parsed from IPAny; set by normalizeTrafficRule
 }
 
 type TrafficRuleAction struct {
@@ -63,15 +78,20 @@ type TrafficRule struct {
 	Note      string            `json:"note,omitempty"`
 	CreatedAt time.Time         `json:"created_at"`
 	UpdatedAt time.Time         `json:"updated_at"`
+	// Unsupported is set in memory only: the stored rule carries match/scope
+	// keys this build does not understand (written by a newer cfm). Such a
+	// rule is never evaluated, cannot be edited or enabled here, and is
+	// written back to disk verbatim so nothing is lost for the upgrade.
+	Unsupported bool `json:"unsupported,omitempty"`
 }
 
 type TrafficRuleEvalInput struct {
-	Host    string `json:"host"`
-	IP      string `json:"ip,omitempty"`
-	UA      string `json:"ua,omitempty"`
-	Path    string `json:"path,omitempty"`
-	Method  string `json:"method,omitempty"`
-	Country string `json:"country,omitempty"`
+	Host        string `json:"host"`
+	IP          string `json:"ip,omitempty"`
+	UA          string `json:"ua,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Method      string `json:"method,omitempty"`
+	Country     string `json:"country,omitempty"`
 	QueryString string `json:"qs,omitempty"` // raw query string, no leading '?'
 }
 
@@ -98,18 +118,24 @@ type trafficRuleStore struct {
 	mu    sync.RWMutex
 	path  string
 	rules map[string]TrafficRule // key=id
+	// frozen holds the verbatim JSON of rules this build cannot fully decode
+	// (unknown match/scope keys). They are persisted back byte-for-byte so a
+	// downgrade never rewrites — and thereby widens — a newer rule.
+	frozen map[string]json.RawMessage
 }
 
 func newTrafficRuleStore(path string) *trafficRuleStore {
 	s := &trafficRuleStore{
-		path:  strings.TrimSpace(path),
-		rules: make(map[string]TrafficRule),
+		path:   strings.TrimSpace(path),
+		rules:  make(map[string]TrafficRule),
+		frozen: make(map[string]json.RawMessage),
 	}
 	s.load()
 	return s
 }
 
 func (s *trafficRuleStore) Add(in TrafficRule) (TrafficRule, error) {
+	in.Unsupported = false // in-memory marker only; never client-settable
 	norm, err := normalizeTrafficRule(in, true)
 	if err != nil {
 		return TrafficRule{}, err
@@ -142,7 +168,11 @@ func (s *trafficRuleStore) Update(id string, in TrafficRule) (TrafficRule, error
 	if !ok {
 		return TrafficRule{}, errors.New("rule not found")
 	}
+	if cur.Unsupported {
+		return TrafficRule{}, errors.New("rule uses match fields this cfm build does not understand; upgrade cfm to edit or enable it")
+	}
 
+	in.Unsupported = false
 	in.ID = id
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = cur.CreatedAt
@@ -169,6 +199,7 @@ func (s *trafficRuleStore) Remove(id string) bool {
 		return false
 	}
 	delete(s.rules, id)
+	delete(s.frozen, id)
 	_ = s.saveLocked()
 	return true
 }
@@ -206,6 +237,13 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 	ua := strings.ToLower(strings.TrimSpace(in.UA))
 	method := strings.ToUpper(strings.TrimSpace(in.Method))
 	country := strings.ToUpper(strings.TrimSpace(in.Country))
+	// Parse the client IP once; Unmap so a v4-mapped v6 address ("::ffff:a.b.c.d")
+	// matches v4 prefixes, mirroring normalizeIPList's canonical form.
+	ipAddr, ipErr := netip.ParseAddr(strings.Trim(strings.TrimSpace(in.IP), "[]"))
+	ipOK := ipErr == nil
+	if ipOK {
+		ipAddr = ipAddr.Unmap()
+	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -223,10 +261,15 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 
 	var disabled *TrafficRule
 	for _, r := range rows {
+		if r.Unsupported {
+			// Its real conditions are unknown to this build: neither a
+			// verdict nor a "would match if enabled" can be stated honestly.
+			continue
+		}
 		if !ruleHostMatch(r.Scope.Vhosts, host) {
 			continue
 		}
-		if !ruleMatchFilters(r.Match, country, ua, path, method, in.QueryString) {
+		if !ruleMatchFilters(r.Match, ipAddr, ipOK, country, ua, path, method, in.QueryString) {
 			continue
 		}
 		if !r.Enabled {
@@ -306,6 +349,22 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 	}
 	r.Match.CountryIn = countries
 
+	countriesNot, err := normalizeCodeList(r.Match.CountryNotIn, maxCountriesPerRule, true)
+	if err != nil {
+		return TrafficRule{}, fmt.Errorf("country_not_in: %w", err)
+	}
+	r.Match.CountryNotIn = countriesNot
+	if len(r.Match.CountryIn) > 0 && len(r.Match.CountryNotIn) > 0 {
+		return TrafficRule{}, errors.New("country_in and country_not_in are mutually exclusive")
+	}
+
+	ips, prefixes, err := normalizeIPList(r.Match.IPAny, maxPatternsPerField)
+	if err != nil {
+		return TrafficRule{}, fmt.Errorf("ip_any: %w", err)
+	}
+	r.Match.IPAny = ips
+	r.Match.ipAnyCompiled = prefixes
+
 	uas, err := normalizePatternList(r.Match.UAAny, maxPatternsPerField, false)
 	if err != nil {
 		return TrafficRule{}, fmt.Errorf("ua_any: %w", err)
@@ -324,14 +383,14 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 	}
 	r.Match.Methods = methods
 
-if rx := strings.TrimSpace(r.Match.QSNotRx); rx != "" {
-	compiled, err := regexp.Compile("(?i)" + rx)
-	if err != nil {
-		return TrafficRule{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
+	if rx := strings.TrimSpace(r.Match.QSNotRx); rx != "" {
+		compiled, err := regexp.Compile("(?i)" + rx)
+		if err != nil {
+			return TrafficRule{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
+		}
+		r.Match.QSNotRx = rx
+		r.Match.qsNotRxCompiled = compiled
 	}
-	r.Match.QSNotRx = rx
-	r.Match.qsNotRxCompiled = compiled
-}
 
 	r.Action.Type = strings.ToLower(strings.TrimSpace(r.Action.Type))
 	r.Action.Profile = strings.TrimSpace(r.Action.Profile)
@@ -373,6 +432,64 @@ func normalizeCodeList(in []string, max int, forceUpper bool) ([]string, error) 
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// normalizeIPList parses IPv4/IPv6 addresses and CIDR prefixes into canonical
+// masked prefixes ("1.2.3.4" → "1.2.3.4/32", "2a02:587::1/64" → "2a02:587::/64"),
+// de-duplicated, capped at max. Returns both the strings to persist and the
+// parsed prefixes for matching.
+func normalizeIPList(in []string, max int) ([]string, []netip.Prefix, error) {
+	if len(in) == 0 {
+		return nil, nil, nil
+	}
+	if len(in) > max {
+		return nil, nil, fmt.Errorf("too many values (max %d)", max)
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	prefixes := make([]netip.Prefix, 0, len(in))
+	for _, raw := range in {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		var pfx netip.Prefix
+		if strings.Contains(v, "/") {
+			p, err := netip.ParsePrefix(v)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid CIDR %q", raw)
+			}
+			pfx = p
+			// A v4-mapped v6 prefix ("::ffff:203.0.113.0/120") can never match
+			// (request addresses are Unmap()ed to v4): canonicalise it to the
+			// v4 prefix when it covers whole v4 bits, else reject it.
+			if pfx.Addr().Is4In6() {
+				if pfx.Bits() < 96 {
+					return nil, nil, fmt.Errorf("invalid CIDR %q: v4-mapped prefix shorter than /96", raw)
+				}
+				pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()-96)
+			}
+		} else {
+			a, err := netip.ParseAddr(v)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid IP %q", raw)
+			}
+			a = a.Unmap() // "::ffff:203.0.113.9" → 203.0.113.9/32
+			pfx = netip.PrefixFrom(a, a.BitLen())
+		}
+		pfx = pfx.Masked()
+		key := pfx.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+		prefixes = append(prefixes, pfx)
+	}
+	if len(out) == 0 {
+		return nil, nil, nil
+	}
+	return out, prefixes, nil
 }
 
 func normalizePatternList(in []string, max int, ensurePath bool) ([]string, error) {
@@ -449,14 +566,40 @@ func ruleHostMatch(vhosts []string, host string) bool {
 	return false
 }
 
-
-
-
-func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) bool {
+// ruleMatchFilters evaluates one rule's match block. ip/ipOK come from a single
+// parse in Simulate (the client IP is the same for every rule).
+func ruleMatchFilters(m TrafficRuleMatch, ip netip.Addr, ipOK bool, country, ua, path, method, qs string) bool {
 	if len(m.CountryIn) > 0 {
 		ok := false
 		for _, cc := range m.CountryIn {
 			if country == cc {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	if len(m.CountryNotIn) > 0 {
+		// Unknown country ("") never matches — see the CountryNotIn field
+		// comment: "" is the fail-open sentinel, not "definitely elsewhere".
+		if country == "" {
+			return false
+		}
+		for _, cc := range m.CountryNotIn {
+			if country == cc {
+				return false
+			}
+		}
+	}
+	if len(m.ipAnyCompiled) > 0 {
+		if !ipOK {
+			return false // no/invalid client IP → an IP condition cannot match
+		}
+		ok := false
+		for _, pfx := range m.ipAnyCompiled {
+			if pfx.Contains(ip) { // false across families (v4 addr vs v6 prefix)
 				ok = true
 				break
 			}
@@ -550,12 +693,6 @@ func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) 
 	}
 	return true
 }
-
-
-
-
-
-
 
 // pathPatternMatch applies the two path-matching rules used by ruleMatchFilters
 // to the path portion of a pattern (the segment before any '?'): a wildcard
@@ -700,14 +837,30 @@ func (s *trafficRuleStore) load() {
 	if err != nil || len(b) == 0 {
 		return
 	}
-	var arr []TrafficRule
-	if err := json.Unmarshal(b, &arr); err != nil {
+	var raws []json.RawMessage
+	if err := json.Unmarshal(b, &raws); err != nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, e := range arr {
-		norm, err := normalizeTrafficRule(e, false)
+	for _, raw := range raws {
+		e, unknown := decodeStoredRule(raw)
+		if e == nil {
+			continue
+		}
+		e.Unsupported = false
+		if unknown {
+			// A rule carrying match/scope keys THIS binary does not know was
+			// written by a newer cfm. Dropping the keys would WIDEN the rule
+			// (an allow keyed only on that field becomes allow-everything, a
+			// block becomes block-everything). So: keep the original bytes
+			// (written back verbatim by saveLocked), list it as disabled +
+			// unsupported, never evaluate it, and refuse Update() on it.
+			log.Printf("[webdet][rules] rule %s uses match/scope fields this cfm build does not understand; kept on disk verbatim, not enforced, not editable here (upgrade cfm)", e.ID)
+			e.Enabled = false
+			e.Unsupported = true
+		}
+		norm, err := normalizeTrafficRule(*e, false)
 		if err != nil {
 			continue
 		}
@@ -715,24 +868,83 @@ func (s *trafficRuleStore) load() {
 			norm.CreatedAt = time.Now().UTC()
 		}
 		s.rules[norm.ID] = norm
+		if unknown {
+			s.frozen[norm.ID] = append(json.RawMessage(nil), raw...)
+		}
 	}
+}
+
+// decodeStoredRule decodes one persisted rule. It reports unknown=true when
+// the stored `match` or `scope` block carries a key this build does not
+// define — the signal that a newer cfm wrote a selector we cannot honour (see
+// load()). Only the two selector blocks are probed: a whole-rule check would
+// trip on harmless future metadata (hit counters, tags). Rules that fail to
+// decode at all return nil.
+func decodeStoredRule(raw json.RawMessage) (*TrafficRule, bool) {
+	var e TrafficRule
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return nil, false
+	}
+	var probe struct {
+		Match json.RawMessage `json:"match"`
+		Scope json.RawMessage `json:"scope"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return &e, false
+	}
+	if len(probe.Match) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(probe.Match))
+		dec.DisallowUnknownFields()
+		var m TrafficRuleMatch
+		if err := dec.Decode(&m); err != nil {
+			return &e, true
+		}
+	}
+	if len(probe.Scope) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(probe.Scope))
+		dec.DisallowUnknownFields()
+		var sc TrafficRuleScope
+		if err := dec.Decode(&sc); err != nil {
+			return &e, true
+		}
+	}
+	return &e, false
 }
 
 func (s *trafficRuleStore) saveLocked() error {
 	if s == nil || s.path == "" {
 		return nil
 	}
-	arr := make([]TrafficRule, 0, len(s.rules))
-	for _, e := range s.rules {
-		arr = append(arr, e)
+	type stored struct {
+		prio int
+		id   string
+		raw  json.RawMessage
+	}
+	arr := make([]stored, 0, len(s.rules))
+	for id, e := range s.rules {
+		if raw, ok := s.frozen[id]; ok {
+			// Written by a newer cfm: persist the ORIGINAL bytes so the
+			// selectors this build cannot decode survive until the upgrade.
+			arr = append(arr, stored{prio: e.Priority, id: id, raw: raw})
+			continue
+		}
+		b, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		arr = append(arr, stored{prio: e.Priority, id: id, raw: b})
 	}
 	sort.Slice(arr, func(i, j int) bool {
-		if arr[i].Priority != arr[j].Priority {
-			return arr[i].Priority < arr[j].Priority
+		if arr[i].prio != arr[j].prio {
+			return arr[i].prio < arr[j].prio
 		}
-		return arr[i].ID < arr[j].ID
+		return arr[i].id < arr[j].id
 	})
-	b, err := json.MarshalIndent(arr, "", "  ")
+	raws := make([]json.RawMessage, 0, len(arr))
+	for _, e := range arr {
+		raws = append(raws, e.raw)
+	}
+	b, err := json.MarshalIndent(raws, "", "  ")
 	if err != nil {
 		return err
 	}

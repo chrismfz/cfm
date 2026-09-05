@@ -151,6 +151,7 @@
               <button type="button" class="chip" :class="{ on: ruleChips.paths }" @click="toggleChip('paths')">Endpoint / path</button>
               <button type="button" class="chip" :class="{ on: ruleChips.uas }" @click="toggleChip('uas')">User-Agent / bot</button>
               <button type="button" class="chip" :class="{ on: ruleChips.countries }" @click="toggleChip('countries')">Country</button>
+              <button type="button" class="chip" :class="{ on: ruleChips.ips }" @click="toggleChip('ips')">IP / range</button>
               <button type="button" class="chip" :class="{ on: ruleChips.methods }" @click="toggleChip('methods')">Method</button>
               <button type="button" class="chip" :class="{ on: ruleChips.qs }" @click="toggleChip('qs')">Query string</button>
             </div>
@@ -175,9 +176,21 @@
               </template>
 
               <template v-if="ruleChips.countries">
-                <label for="rule-countries">Countries</label>
-                <input id="rule-countries" class="input" type="text" v-model.trim="ruleForm.countries" placeholder="GR, CY" />
-                <p class="muted form-hint">ISO 3166-1 alpha-2 codes, comma-separated. There is no “not in” yet — for “everyone except …” use the <em>Allow only these countries</em> recipe (allow first, block everything after).</p>
+                <label for="rule-countries">Country</label>
+                <div class="inline-field">
+                  <select id="rule-countries-mode" class="input input-mode" v-model="ruleForm.countriesMode" title="is one of: match visitors FROM these countries · is NOT one of: match visitors whose country is known and elsewhere (unknown country never matches)">
+                    <option value="in">is one of</option>
+                    <option value="not_in">is NOT one of</option>
+                  </select>
+                  <input id="rule-countries" class="input" type="text" v-model.trim="ruleForm.countries" placeholder="GR, CY" />
+                </div>
+                <p class="muted form-hint">ISO 3166-1 alpha-2 codes, comma-separated. Neither mode matches a visitor whose country is <em>unknown</em> (geo not resolved, geo module down): <strong>is NOT one of</strong> fails open rather than blocking everyone during a geo hiccup. Use an <em>IP / range</em> allow above the rule for office and monitoring addresses.</p>
+              </template>
+
+              <template v-if="ruleChips.ips">
+                <label for="rule-ips">IP / range</label>
+                <input id="rule-ips" class="input" type="text" v-model.trim="ruleForm.ips" placeholder="203.0.113.0/24, 198.51.100.7, 2001:db8::/48" />
+                <p class="muted form-hint">IPv4 / IPv6 addresses or CIDR ranges, comma-separated; the client IP must be inside one of them. Typical use: an <em>allow</em> for your office or uptime monitors placed above a country block.</p>
               </template>
 
               <template v-if="ruleChips.methods">
@@ -269,7 +282,8 @@
               <tr v-for="row in rulesFiltered" :key="row.id" :class="{ 'row-off': !row.enabled, 'row-editing': ruleEditID === row.id }">
                 <td>{{ row.priority }}</td>
                 <td>
-                  <button class="btn-quiet btn-sm" :class="row.enabled ? 'toggle-on' : 'toggle-off'" :disabled="rulesBusy" @click="toggleRuleEnabled(row)" :title="row.enabled ? 'Enforced — click to disable' : 'Not enforced — click to enable'">{{ row.enabled ? 'on' : 'off' }}</button>
+                  <span class="pill warn" v-if="row.unsupported" title="Written by a newer cfm: uses match fields this build does not understand. Kept on disk unchanged, not enforced, not editable until cfm is upgraded.">needs newer cfm</span>
+                  <button v-else class="btn-quiet btn-sm" :class="row.enabled ? 'toggle-on' : 'toggle-off'" :disabled="rulesBusy" @click="toggleRuleEnabled(row)" :title="row.enabled ? 'Enforced — click to disable' : 'Not enforced — click to enable'">{{ row.enabled ? 'on' : 'off' }}</button>
                 </td>
                 <td>
                   <span class="pill" :class="actionTone(row.action?.type)">{{ row.action?.type || '-' }}</span>
@@ -283,9 +297,9 @@
                 </td>
                 <td><code class="muted">{{ row.id }}</code></td>
                 <td class="actions-cell">
-                  <button class="btn-quiet btn-sm" @click="testRule(row)" title="Run the simulator with a request this rule should match">Test</button>
-                  <button class="btn-quiet btn-sm" @click="loadRuleIntoForm(row)">Edit</button>
-                  <button class="btn-quiet btn-sm" @click="duplicateRule(row)">Duplicate</button>
+                  <button class="btn-quiet btn-sm" :disabled="row.unsupported" @click="testRule(row)" title="Run the simulator with a request this rule should match">Test</button>
+                  <button class="btn-quiet btn-sm" :disabled="row.unsupported" @click="loadRuleIntoForm(row)">Edit</button>
+                  <button class="btn-quiet btn-sm" :disabled="row.unsupported" @click="duplicateRule(row)">Duplicate</button>
                   <button class="btn-quiet btn-sm btn-danger" :disabled="rulesBusy" @click="removeRule(row)">Delete</button>
                 </td>
               </tr>

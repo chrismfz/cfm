@@ -1,7 +1,10 @@
 package webdetector
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -210,9 +213,9 @@ func TestTrafficRuleQueryParamPrecision(t *testing.T) {
 	}{
 		{"exact", "id=5", true},
 		{"exact", "id=5&x=1", true},
-		{"exact", "id=50", false},      // value superstring
-		{"exact", "userid=5", false},   // key superstring
-		{"exact", "id=6", false},       // wrong value
+		{"exact", "id=50", false},    // value superstring
+		{"exact", "userid=5", false}, // key superstring
+		{"exact", "id=6", false},     // wrong value
 		{"keyonly", "token=anything", true},
 		{"keyonly", "token=", true},
 		{"keyonly", "other=1", false},
@@ -336,5 +339,241 @@ func TestTrafficRuleUA_DashMeansNoUserAgent(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("ua=%q matched=%v want=%v", tc.ua, got, tc.want)
 		}
+	}
+}
+
+// TestTrafficRuleCountryNotIn: "everyone except GR/CY" as ONE rule. An empty
+// country ("") is the edge's fail-open sentinel (geo down / cache miss /
+// cfm_panel.lua) and must NOT match, or a geo hiccup would 403 every visitor.
+func TestTrafficRuleCountryNotIn(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	if _, err := s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 900,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:    TrafficRuleMatch{CountryNotIn: []string{"gr", "CY"}},
+		Action:   TrafficRuleAction{Type: TrafficActionBlock},
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	for _, tc := range []struct {
+		cc   string
+		want bool
+	}{{"GR", false}, {"cy", false}, {"US", true}, {"", false}} {
+		got := s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", Country: tc.cc}).Matched
+		if got != tc.want {
+			t.Fatalf("country=%q matched=%v want=%v", tc.cc, got, tc.want)
+		}
+	}
+	// Persisted upper-cased, and the two country fields are mutually exclusive.
+	rows := newTrafficRuleStore(s.path).List()
+	if len(rows) != 1 || len(rows[0].Match.CountryNotIn) != 2 || rows[0].Match.CountryNotIn[0] != "GR" {
+		t.Fatalf("unexpected persisted not_in: %#v", rows)
+	}
+	if _, err := s.Add(TrafficRule{
+		Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:  TrafficRuleMatch{CountryIn: []string{"GR"}, CountryNotIn: []string{"US"}},
+		Action: TrafficRuleAction{Type: TrafficActionBlock},
+	}); err == nil {
+		t.Fatalf("expected country_in + country_not_in to be rejected")
+	}
+	if _, err := s.Add(TrafficRule{
+		Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:  TrafficRuleMatch{CountryNotIn: []string{"GRE"}},
+		Action: TrafficRuleAction{Type: TrafficActionBlock},
+	}); err == nil {
+		t.Fatalf("expected 3-letter code in country_not_in to be rejected")
+	}
+}
+
+// TestTrafficRuleIPAny: IPv4/IPv6 CIDR + bare-address matching, canonical
+// storage, and the fail-closed behaviour for a missing/invalid client IP.
+func TestTrafficRuleIPAny(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	r, err := s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 15,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:    TrafficRuleMatch{IPAny: []string{"203.0.113.0/24", " 198.51.100.7 ", "2001:db8:abcd::1/48", "203.0.113.128/25", "::ffff:192.0.2.9", "::ffff:192.0.2.0/120"}},
+		Action:   TrafficRuleAction{Type: TrafficActionAllow},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	// v4-mapped entries are canonicalised to plain v4 so they can actually match.
+	want := []string{"203.0.113.0/24", "198.51.100.7/32", "2001:db8:abcd::/48", "203.0.113.128/25", "192.0.2.9/32", "192.0.2.0/24"}
+	if len(r.Match.IPAny) != len(want) {
+		t.Fatalf("stored ip_any %#v want %#v", r.Match.IPAny, want)
+	}
+	for i := range want {
+		if r.Match.IPAny[i] != want[i] {
+			t.Fatalf("stored ip_any[%d]=%q want %q", i, r.Match.IPAny[i], want[i])
+		}
+	}
+	cases := []struct {
+		ip   string
+		want bool
+	}{
+		{"203.0.113.9", true},
+		{"203.0.113.200", true},
+		{"198.51.100.7", true},
+		{"198.51.100.8", false},
+		{"2001:db8:abcd:1::5", true},
+		{"2001:db8:abce::1", false},
+		{"::ffff:203.0.113.9", true}, // v4-mapped v6 is unmapped before matching
+		{"192.0.2.9", true},          // stored from "::ffff:192.0.2.9"
+		{"192.0.2.77", true},         // stored from "::ffff:192.0.2.0/120" → /24
+		{"[2001:db8:abcd::7]", true}, // bracketed v6 tolerated
+		{"", false},
+		{"not-an-ip", false},
+	}
+	for _, sto := range []*trafficRuleStore{s, newTrafficRuleStore(s.path)} {
+		for _, tc := range cases {
+			got := sto.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", IP: tc.ip}).Matched
+			if got != tc.want {
+				t.Fatalf("ip=%q matched=%v want=%v", tc.ip, got, tc.want)
+			}
+		}
+	}
+	for _, bad := range []string{"203.0.113.0/33", "1.2.3", "2001:db8::/129", "example.com", "::ffff:192.0.2.0/95", "01.2.3.4", "1.2.3.4/024"} {
+		if _, err := s.Add(TrafficRule{
+			Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+			Match:  TrafficRuleMatch{IPAny: []string{bad}},
+			Action: TrafficRuleAction{Type: TrafficActionAllow},
+		}); err == nil {
+			t.Fatalf("expected %q to be rejected", bad)
+		}
+	}
+}
+
+// TestTrafficRuleIPAny_ComposesWithGeoFence: office range allow (15) → good bots
+// allow (10 already) → block country_not_in (900): the Phase-2 geo-fence recipe.
+func TestTrafficRuleIPAny_ComposesWithGeoFence(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	add := func(pr int, m TrafficRuleMatch, act string) {
+		if _, err := s.Add(TrafficRule{Enabled: true, Priority: pr, Scope: TrafficRuleScope{Vhosts: []string{"shop.gr"}}, Match: m, Action: TrafficRuleAction{Type: act}}); err != nil {
+			t.Fatalf("add %d: %v", pr, err)
+		}
+	}
+	add(15, TrafficRuleMatch{IPAny: []string{"203.0.113.0/24"}}, TrafficActionAllow)
+	add(900, TrafficRuleMatch{CountryNotIn: []string{"GR", "CY"}}, TrafficActionBlock)
+	for _, tc := range []struct {
+		ip, cc, want string
+	}{
+		{"203.0.113.5", "US", TrafficActionAllow}, // office from abroad
+		{"198.51.100.1", "US", TrafficActionBlock},
+		{"198.51.100.1", "GR", ""},
+		{"198.51.100.1", "", ""}, // unknown geo is fail-open: never fenced out
+	} {
+		res := s.Simulate(TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: tc.ip, Country: tc.cc})
+		if res.Action != tc.want {
+			t.Fatalf("ip=%s cc=%q action=%q want %q", tc.ip, tc.cc, res.Action, tc.want)
+		}
+	}
+}
+
+// TestTrafficRuleLoad_UnknownFieldsFrozen: a rules.json written by a NEWER cfm
+// may carry match/scope keys this build does not know. Ignoring them would
+// widen the rule (an allow keyed only on the unknown field becomes
+// allow-everything), so such a rule is listed disabled+unsupported, never
+// evaluated, refused by Update, and — crucially — written back to disk
+// VERBATIM on the next save so the upgrade finds it intact.
+func TestTrafficRuleLoad_UnknownFieldsFrozen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.json")
+	data := `[
+	  {"id":"r_future","enabled":true,"priority":15,"scope":{"vhosts":["example.com"]},
+	   "match":{"asn_in":[16509]},"action":{"type":"allow"},"note":"written by a newer cfm"},
+	  {"id":"r_scope","enabled":true,"priority":20,"scope":{"vhosts":["*.example.com"],"exclude_vhosts":["admin.example.com"]},
+	   "match":{"country_in":["US"]},"action":{"type":"block"}},
+	  {"id":"r_known","enabled":true,"priority":900,"scope":{"vhosts":["example.com"]},
+	   "match":{"country_not_in":["GR"]},"action":{"type":"block"}}
+	]`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s := newTrafficRuleStore(path)
+	for _, id := range []string{"r_future", "r_scope"} {
+		r, ok := s.Get(id)
+		if !ok {
+			t.Fatalf("%s must still load", id)
+		}
+		if r.Enabled || !r.Unsupported {
+			t.Fatalf("%s must load disabled+unsupported, got enabled=%v unsupported=%v", id, r.Enabled, r.Unsupported)
+		}
+	}
+	known, ok := s.Get("r_known")
+	if !ok || !known.Enabled || known.Unsupported {
+		t.Fatalf("known-field rule must load enabled: ok=%v %+v", ok, known)
+	}
+
+	// Never evaluated: neither verdict nor disabled_match.
+	res := s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", Country: "US"})
+	if !res.Matched || res.Rule.ID != "r_known" {
+		t.Fatalf("expected the known block to win, got %+v", res)
+	}
+	if res.DisabledMatch != nil {
+		t.Fatalf("unsupported rule must not surface as disabled_match: %+v", res.DisabledMatch)
+	}
+
+	// Cannot be enabled/edited here.
+	fut, _ := s.Get("r_future")
+	fut.Enabled = true
+	if _, err := s.Update("r_future", fut); err == nil {
+		t.Fatalf("Update on an unsupported rule must be refused")
+	}
+
+	// A save triggered by ANY other write keeps the unknown selectors verbatim.
+	if _, err := s.Add(TrafficRule{
+		Enabled: true, Priority: 500,
+		Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:  TrafficRuleMatch{Methods: []string{"POST"}},
+		Action: TrafficRuleAction{Type: TrafficActionChallenge},
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, needle := range []string{`"asn_in"`, `16509`, `"exclude_vhosts"`, `"admin.example.com"`} {
+		if !strings.Contains(string(b), needle) {
+			t.Fatalf("rules.json lost %s after save:\n%s", needle, b)
+		}
+	}
+	if strings.Contains(string(b), `"unsupported"`) {
+		t.Fatalf("in-memory marker must not be persisted:\n%s", b)
+	}
+	// The frozen rule keeps its ORIGINAL enabled:true on disk (the newer build
+	// will honour it again), while this build still sees it disabled.
+	s2 := newTrafficRuleStore(path)
+	if r, _ := s2.Get("r_future"); r.Enabled || !r.Unsupported {
+		t.Fatalf("reloaded frozen rule: %+v", r)
+	}
+	var back []map[string]any
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("unmarshal saved file: %v", err)
+	}
+	for _, m := range back {
+		if m["id"] == "r_future" && m["enabled"] != true {
+			t.Fatalf("frozen rule's on-disk enabled flag must stay as written by the newer cfm: %v", m)
+		}
+	}
+	// Removing a frozen rule removes its bytes too.
+	if !s2.Remove("r_scope") {
+		t.Fatalf("remove frozen")
+	}
+	b, _ = os.ReadFile(path)
+	if strings.Contains(string(b), `"exclude_vhosts"`) {
+		t.Fatalf("removed frozen rule still on disk")
+	}
+	// A client cannot mark a rule unsupported through the API.
+	added, err := s2.Add(TrafficRule{
+		Unsupported: true, Enabled: true, Priority: 600,
+		Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:  TrafficRuleMatch{Methods: []string{"PUT"}},
+		Action: TrafficRuleAction{Type: TrafficActionBlock},
+	})
+	if err != nil || added.Unsupported {
+		t.Fatalf("Add must clear the in-memory marker: err=%v %+v", err, added)
 	}
 }
