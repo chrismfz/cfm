@@ -3994,14 +3994,28 @@ func (e *Engine) TrafficRuleSimulateForAPI(ctx context.Context, in TrafficRuleEv
 	if e == nil || e.trafficRules == nil {
 		return TrafficRuleEvalResult{Matched: false}
 	}
-	if strings.TrimSpace(in.VerifiedBot) == "" && strings.TrimSpace(in.IP) != "" &&
-		e.trafficRules.HasVerifiedBotRules() && e.nginxBridge != nil && e.nginxBridge.goodBot != nil {
+	inconclusive := ""
+	if strings.TrimSpace(in.VerifiedBot) == "" && strings.TrimSpace(in.IP) != "" && e.trafficRules.HasVerifiedBotRules() {
 		ip := strings.TrimSpace(in.IP)
-		if ptrFn := e.simulatePTRLookup(ip); ptrFn != nil {
-			in.VerifiedBot = e.nginxBridge.goodBot.verifiedSync(ctx, ip, ptrFn, time.Now())
+		switch {
+		case e.nginxBridge == nil || e.nginxBridge.goodBot == nil:
+			inconclusive = "no_bridge"
+		default:
+			ptrFn := e.simulatePTRLookup(ip)
+			if ptrFn == nil {
+				// Enrichment off: no reverse DNS anywhere, so verified_bot rules
+				// cannot match live traffic either — say so, not "not a crawler".
+				inconclusive = "no_resolver"
+			} else {
+				in.VerifiedBot, inconclusive = e.nginxBridge.goodBot.verifiedSync(ctx, ip, ptrFn, time.Now())
+			}
 		}
 	}
-	return e.TrafficRuleSimulate(in)
+	res := e.TrafficRuleSimulate(in)
+	if res.VerifiedBot == "" && res.VerifiedBotExcluded == "" {
+		res.VerifiedBotInconclusive = inconclusive
+	}
+	return res
 }
 
 // simulatePTRLookup returns the lazy PTR resolver the simulate API uses for the

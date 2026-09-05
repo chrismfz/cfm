@@ -203,6 +203,15 @@ export const rulesMixin = {
       if (r.verified_bot_excluded) {
         return `Reverse DNS forward-confirmed as "${r.verified_bot_excluded}", which is deliberately NOT a crawler for rules (Google's user-driven fetchers: Translate / AMP proxies). verified_bot rules do not match it — by design, not a DNS problem.`;
       }
+      if (r.verified_bot_inconclusive) {
+        const why = {
+          timeout: "all crawler-verification slots were busy for the whole wait",
+          transient: "the DNS resolver failed mid-check",
+          no_resolver: "IP enrichment is OFF on this daemon (ENRICH), so nothing can be verified — verified_bot rules cannot match live traffic here either",
+          no_bridge: "the in-path edge bridge is not running on this daemon",
+        }[r.verified_bot_inconclusive] || r.verified_bot_inconclusive;
+        return `Crawler verification was NOT completed (${why}). This is not a negative: the rule set was evaluated with the IP treated as unverified. Retry, or tick the override to test the crawler path.`;
+      }
       if (!String(this.simulateForm.ip || "").trim()) {
         return "No IP in the sample, so crawler verification was not attempted: verified_bot rules cannot match it. Add the crawler's IP, or tick the override.";
       }

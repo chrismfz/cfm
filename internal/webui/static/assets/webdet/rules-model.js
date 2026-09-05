@@ -523,7 +523,7 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
     hints.push("User-Agent is client-controlled: anyone can send this string. For crawlers use the Verified crawler condition instead (FCrDNS, cannot be forged).");
   }
   if (p.match.verified_bot) {
-    hints.push(`Verified crawler = the IP's reverse DNS forward-confirms to ${VERIFIED_BOT_LABEL}. On live traffic the verdict is cache-only: a crawler IP seen for the first time matches on a later request (never a DNS wait per request), then stays verified across refreshes. Other bots (DuckDuckGo, Baidu, X, LinkedIn…) cannot be verified and need a User-Agent condition.`);
+    hints.push(`Verified crawler = the IP's reverse DNS forward-confirms to ${VERIFIED_BOT_LABEL}. On live traffic the verdict is cache-only: a crawler IP seen for the first time matches from about its third request (never a DNS wait per request), then stays verified across refreshes. Other bots (DuckDuckGo, Baidu, X, LinkedIn…) cannot be verified and need a User-Agent condition.`);
     if (p.match.ua_any.length) warnings.push("Verified crawler already proves who the client is; the User-Agent condition only narrows it further (and can be forged).");
   }
   if (p.match.country_in.length) {
@@ -725,7 +725,7 @@ export const RECIPES = Object.freeze([
     ],
     warnings: [
       "The block rule is created DISABLED. Test with the simulator, then enable it from the table.",
-      `Rule #10 allows crawlers by reverse-DNS verification (${VERIFIED_BOT_LABEL}) — cannot be forged. A crawler IP seen for the first time (and every crawler IP right after a cfm restart) is verified in the background and may get the fence's action once before it passes.`,
+      `Rule #10 allows crawlers by reverse-DNS verification (${VERIFIED_BOT_LABEL}) — cannot be forged. A crawler IP seen for the first time (and every crawler IP right after a cfm restart) is verified in the background and gets the fence's action for its first two or three requests before it passes.`,
       "Rule #11 allows the search/social bots that have no verifiable reverse DNS (DuckDuckGo, Baidu, X/Twitter, LinkedIn, Slack, WhatsApp, Telegram previews) by User-Agent only — forgeable; delete it if you would rather fence those too.",
       "Visitors whose country cannot be resolved are NOT blocked (the fence fails open, so a geo outage never locks everyone out). Office/monitoring ranges are still worth listing: they skip every rule below.",
       "Browsers that already hold a clearance cookie for the vhost keep access until it expires.",

@@ -190,7 +190,7 @@
 
               <template v-if="ruleChips.vbot">
                 <label>Verified crawler</label>
-                <p class="muted form-hint" style="grid-column: 2">Only requests whose IP reverse-DNS forward-confirms as {{ verifiedBotLabel }}. This is what the client <em>is</em>, not what it says: a <code>Googlebot</code> User-Agent from an unverified IP does not match. On live traffic a crawler IP seen for the first time is verified in the background and matches on a later request; Google's Translate/AMP proxies do not count. Bots without verifiable reverse DNS (DuckDuckGo, Baidu, X, LinkedIn…) need a User-Agent condition instead.</p>
+                <p class="muted form-hint" style="grid-column: 2">Only requests whose IP reverse-DNS forward-confirms as {{ verifiedBotLabel }}. This is what the client <em>is</em>, not what it says: a <code>Googlebot</code> User-Agent from an unverified IP does not match. On live traffic a crawler IP seen for the first time is verified in the background and matches from about its third request; Google's Translate/AMP proxies do not count. Bots without verifiable reverse DNS (DuckDuckGo, Baidu, X, LinkedIn…) need a User-Agent condition instead.</p>
               </template>
 
               <template v-if="ruleChips.ips">

@@ -133,6 +133,12 @@ type TrafficRuleEvalResult struct {
 	// "verified, but excluded" instead of "did not forward-confirm".
 	VerifiedBot         string `json:"verified_bot,omitempty"`
 	VerifiedBotExcluded string `json:"verified_bot_excluded,omitempty"`
+	// VerifiedBotInconclusive (simulate API only) says WHY no verdict could be
+	// established when VerifiedBot is empty: "timeout" (no verify slot within
+	// the wait), "transient" (resolver failure), "no_resolver" (enrichment off:
+	// verified_bot rules cannot match live traffic either), "no_bridge". Empty
+	// with an empty VerifiedBot means a definitive "not a verified crawler".
+	VerifiedBotInconclusive string `json:"verified_bot_inconclusive,omitempty"`
 }
 
 type trafficRuleStore struct {
@@ -184,18 +190,18 @@ func (s *trafficRuleStore) HasVerifiedBotRules() bool {
 // recountLocked refreshes the derived indexes after a mutation (caller holds mu).
 func (s *trafficRuleStore) recountLocked() {
 	scopes := make([][]string, 0, 4)
-	any := 0
+	total := 0
 	for _, r := range s.rules {
 		if r.Unsupported || !r.Match.VerifiedBot {
 			continue
 		}
-		any++
+		total++
 		if r.Enabled {
 			scopes = append(scopes, r.Scope.Vhosts)
 		}
 	}
 	s.verifiedBotScopes = scopes
-	s.verifiedBotAny = any
+	s.verifiedBotAny = total
 }
 
 // verifiedBotForRules narrows an FCrDNS verdict to names a traffic rule may

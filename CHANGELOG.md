@@ -51,15 +51,17 @@ back-filled here — see the git/PR history for that period.
   first-seen crawler IP kicks the existing bounded async forward-confirm and
   matches on a later request — never a DNS wait per request). The good-bot
   cache now serves an **expired positive verdict stale while it re-verifies**
-  (24 h grace, dropped at once if the IP's PTR no longer looks like a crawler),
+  (24 h grace, honoured by cache-cap pruning too, dropped at once if the IP's
+  PTR no longer looks like a crawler),
   so a real crawler no longer loses its exemption/allow for one request per
   30-minute TTL — tolerable when that meant a challenge page, not when a rule
   turns it into a 403. The cache is in-memory, so after a daemon restart each
   crawler IP is first-seen again (the recipe warnings say so). The simulate
   API — and only it, never the bridge's decision path — resolves the verdict
   inline (bounded by the same verify-slot semaphore and the request context),
-  echoes it as `verified_bot` (or `verified_bot_excluded` for the generic
-  google verdict), and accepts a caller-supplied name as an override so
+  echoes it as `verified_bot` (`verified_bot_excluded` for the generic google
+  verdict, `verified_bot_inconclusive` when it could not tell — slots busy,
+  resolver blip, enrichment off), and accepts a caller-supplied name as an override so
   cfm-admin and `cfm webtop rules simulate --verified-bot [name]` can test the
   crawler path. Editor gains
   a *Verified crawler* condition; `cfm webtop rules list` shows

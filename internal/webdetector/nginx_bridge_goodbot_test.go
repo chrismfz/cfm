@@ -245,7 +245,7 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 	}
 	ptrCalls := 0
 	ptr := func(v string) func() string { return func() string { ptrCalls++; return v } }
-	if got := s.verifiedSync(context.Background(), "66.249.66.1", ptr("crawl-66-249-66-1.googlebot.com."), now); got != "googlebot" {
+	if got, why := s.verifiedSync(context.Background(), "66.249.66.1", ptr("crawl-66-249-66-1.googlebot.com."), now); got != "googlebot" || why != "" {
 		t.Fatalf("sync verify: got %q", got)
 	}
 	if calls != 1 || ptrCalls != 1 {
@@ -255,13 +255,13 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 	if got := s.verified("66.249.66.1", func() string { t.Errorf("ptrFn must not run on a cache hit"); return "" }, now); got != "googlebot" {
 		t.Fatalf("cache hit: got %q", got)
 	}
-	if got := s.verifiedSync(context.Background(), "66.249.66.1", func() string { t.Errorf("ptrFn must not run on a cache hit"); return "" }, now); got != "googlebot" {
+	if got, _ := s.verifiedSync(context.Background(), "66.249.66.1", func() string { t.Errorf("ptrFn must not run on a cache hit"); return "" }, now); got != "googlebot" {
 		t.Fatalf("sync cache hit: got %q", got)
 	}
-	if got := s.verifiedSync(context.Background(), "1.2.3.4", ptr("1-2-3-4.some-isp.example."), now); got != "" || calls != 1 {
+	if got, why := s.verifiedSync(context.Background(), "1.2.3.4", ptr("1-2-3-4.some-isp.example."), now); got != "" || why != "" || calls != 1 {
 		t.Fatalf("non-candidate PTR must not verify: got %q calls=%d", got, calls)
 	}
-	if got := s.verifiedSync(context.Background(), "9.9.9.9", ptr("x.googlebot.com."), now); got != "" || calls != 2 {
+	if got, why := s.verifiedSync(context.Background(), "9.9.9.9", ptr("x.googlebot.com."), now); got != "" || why != verifiedInconclusiveTransient || calls != 2 {
 		t.Fatalf("transient: got %q calls=%d", got, calls)
 	}
 	s.mu.RLock()
@@ -270,7 +270,7 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 	if cached {
 		t.Fatalf("inconclusive verify must not be cached")
 	}
-	if got := s.verifiedSync(context.Background(), "5.5.5.5", ptr("spoof.googlebot.com."), now); got != "" {
+	if got, why := s.verifiedSync(context.Background(), "5.5.5.5", ptr("spoof.googlebot.com."), now); got != "" || why != "" {
 		t.Fatalf("spoofed PTR must not verify: %q", got)
 	}
 	// The verdict is reported from the verifier, not re-read from a cache that
@@ -280,7 +280,7 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 	for i := 0; i < goodBotIPCacheCap; i++ {
 		full.store(fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255), "googlebot", now)
 	}
-	if got := full.verifiedSync(context.Background(), "66.249.99.9", ptr("x.googlebot.com."), now); got != "googlebot" {
+	if got, _ := full.verifiedSync(context.Background(), "66.249.99.9", ptr("x.googlebot.com."), now); got != "googlebot" {
 		t.Fatalf("verdict must survive a full cache: got %q", got)
 	}
 	// Verify slots are bounded: with every slot taken, verifiedSync waits
@@ -293,7 +293,8 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 	}
 	done := make(chan string, 1)
 	go func() {
-		done <- bounded.verifiedSync(context.Background(), "66.249.77.7", ptr("x.googlebot.com."), now)
+		n, _ := bounded.verifiedSync(context.Background(), "66.249.77.7", ptr("x.googlebot.com."), now)
+		done <- n
 	}()
 	select {
 	case got := <-done:
@@ -314,8 +315,12 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 	short, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if got := bounded.verifiedSync(short, "66.249.88.8", ptr("y.googlebot.com."), now); got != "" {
-		t.Fatalf("cancelled wait must be inconclusive, got %q", got)
+	ptrCallsBefore := ptrCalls
+	if got, why := bounded.verifiedSync(short, "66.249.88.8", ptr("y.googlebot.com."), now); got != "" || why != verifiedInconclusiveTimeout {
+		t.Fatalf("cancelled wait must be inconclusive/timeout, got %q/%q", got, why)
+	}
+	if ptrCalls != ptrCallsBefore {
+		t.Fatalf("the reverse lookup must not run before a slot is held")
 	}
 	if time.Since(start) > time.Second {
 		t.Fatalf("cancelled wait must return promptly")
@@ -354,7 +359,35 @@ func TestGoodBotState_StaleDroppedWhenPTRChanged(t *testing.T) {
 	s2 := newBridgeGoodBotState()
 	s2.verify = func(ptr, ip string) (string, bool) { return "", true } // spoofed now
 	s2.store("66.249.74.2", "googlebot", base)
-	if got := s2.verifiedSync(context.Background(), "66.249.74.2", func() string { return "x.googlebot.com." }, expired); got != "" {
-		t.Fatalf("simulate must re-verify a stale candidate inline and report the current verdict, got %q", got)
+	if got, why := s2.verifiedSync(context.Background(), "66.249.74.2", func() string { return "x.googlebot.com." }, expired); got != "" || why != "" {
+		t.Fatalf("simulate must re-verify a stale candidate inline and report the current verdict, got %q/%q", got, why)
+	}
+}
+
+// TestGoodBotState_PruneKeepsStalePositives: at the cache cap, pruning drops
+// expired negatives but keeps an expired positive that is still inside the
+// stale grace — otherwise a fake-PTR flood (cheap negatives) would evict a real
+// crawler's verdict while starving its re-verify, and the stale grace would be
+// worthless exactly when it matters.
+func TestGoodBotState_PruneKeepsStalePositives(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	s := newBridgeGoodBotState()
+	s.store("66.249.74.1", "googlebot", base) // positive, expires at +posTTL
+	s.store("5.5.5.5", "", base)              // negative, expires at +negTTL
+	later := base.Add(goodBotIPPosTTL + time.Minute)
+	s.mu.Lock()
+	s.pruneLocked(later)
+	_, posKept := s.cache["66.249.74.1"]
+	_, negKept := s.cache["5.5.5.5"]
+	s.mu.Unlock()
+	if !posKept || negKept {
+		t.Fatalf("prune: expired positive within grace kept=%v (want true), expired negative kept=%v (want false)", posKept, negKept)
+	}
+	s.mu.Lock()
+	s.pruneLocked(base.Add(goodBotIPPosTTL + goodBotIPStaleGrace + time.Minute))
+	_, posKept = s.cache["66.249.74.1"]
+	s.mu.Unlock()
+	if posKept {
+		t.Fatalf("positive past the stale grace must be pruned")
 	}
 }

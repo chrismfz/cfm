@@ -47,8 +47,12 @@ package webdetector
 // is in-memory: after a daemon restart every crawler IP is first-seen again
 // (recipe warnings say so; persisting positives is a tracked follow-up).
 //
-// The simulate API uses verifiedSync (inline forward-confirm, bounded wait) —
-// never the decision hot path, which stays cache-only.
+// The simulate API uses verifiedSync (inline reverse lookup + forward-confirm
+// under the same slot bound, bounded wait) — never the decision hot path, which
+// stays cache-only. Note the hot path's first sight of a crawler IP costs it
+// more than one request: the enrich PTR itself is fetched async, so request 1
+// has no PTR (nothing to verify), request 2 kicks the forward-confirm, and the
+// verdict is there from request 3 or so.
 
 import (
 	"context"
@@ -261,44 +265,59 @@ func (s *bridgeGoodBotState) kickAsyncVerify(ip, ptr string, now time.Time) {
 // path): past it the answer is "inconclusive" rather than a hung handler.
 const verifiedSyncMaxWait = 3 * time.Second
 
+// Inconclusive reasons verifiedSync can report (empty = the answer is final).
+const (
+	verifiedInconclusiveTimeout   = "timeout"   // no verify slot within ctx / verifiedSyncMaxWait
+	verifiedInconclusiveTransient = "transient" // resolver failed; nothing cached
+)
+
 // verifiedSync is the SIMULATE-API variant of verified(): same lookup prelude,
-// same verifier, same verify-slot bound (it WAITS for a slot, bounded by ctx
-// and verifiedSyncMaxWait, instead of giving up), but the forward-confirm runs
-// inline (DNS-bound, seconds at worst) so an operator's "test this rule" gets a
-// definitive answer now instead of "not yet". A stale positive is re-verified
-// inline too, so the answer reflects the PTR as it is now. Never call it on
-// the decision hot path — TrafficRuleSimulateForAPI is its only caller.
-func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn func() string, now time.Time) string {
+// same verifier, same verify-slot bound — but it WAITS for a slot (bounded by
+// ctx and verifiedSyncMaxWait) and runs the reverse lookup AND the
+// forward-confirm inline (DNS-bound, seconds at worst) so an operator's "test
+// this rule" gets a definitive answer now instead of "not yet". The PTR is
+// resolved only after a slot is held, so a burst of simulate calls (the
+// endpoint is reachable by scoped tokens) is bounded to goodBotIPMaxInflight
+// resolver operations daemon-wide, same as the async path. A stale positive is
+// re-verified inline too, so the answer reflects the PTR as it is now.
+//
+// Returns the verdict and an inconclusive reason: name=="" with reason=="" is a
+// definitive negative; a non-empty reason means "could not tell" (the UI must
+// not present it as "did not forward-confirm"). Never call it on the decision
+// hot path — TrafficRuleSimulateForAPI is its only caller.
+func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn func() string, now time.Time) (name, inconclusive string) {
 	if s == nil || ip == "" {
-		return ""
+		return "", ""
 	}
-	l := s.lookup(ip, ptrFn, now)
-	if l.fresh {
-		return l.name
-	}
-	if !l.candidate {
-		return ""
+	// Cache-only first pass (no PTR): a fresh verdict needs no slot at all.
+	if l := s.lookup(ip, nil, now); l.fresh {
+		return l.name, ""
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	wait, cancel := context.WithTimeout(ctx, verifiedSyncMaxWait)
 	defer cancel()
-	// Bounded like the async path: at most goodBotIPMaxInflight forward-confirms
-	// in flight daemon-wide, so a burst of simulate calls (the endpoint is
-	// reachable by scoped tokens for their own vhosts) cannot fan out
-	// unbounded resolver work — and a client that went away stops waiting.
 	select {
 	case s.sem <- struct{}{}:
 	case <-wait.Done():
-		return l.stale // inconclusive: report what we still knew, if anything
+		return "", verifiedInconclusiveTimeout
+	}
+	defer func() { <-s.sem }()
+	// Slot held: now the (blocking) reverse lookup, then the candidate test —
+	// which also drops a stale positive whose PTR no longer looks like a crawler.
+	l := s.lookup(ip, ptrFn, now)
+	if l.fresh { // raced with an async verify that just landed
+		return l.name, ""
+	}
+	if !l.candidate {
+		return "", "" // definitive: no good-bot suffix on the PTR (or no PTR at all)
 	}
 	name, cacheable := s.resolveInto(ip, l.ptr, now)
-	<-s.sem
 	if !cacheable {
-		return l.stale
+		return l.stale, verifiedInconclusiveTransient
 	}
-	return name
+	return name, ""
 }
 
 // resolveInto performs the (DNS-bound) forward-confirm and stores the verdict.
@@ -381,9 +400,17 @@ func (s *bridgeGoodBotState) evictOneNegativeLocked() bool {
 	return false
 }
 
+// pruneLocked drops expired entries. A POSITIVE is kept for its stale grace
+// (goodBotIPStaleGrace) past until: a fake-PTR flood that fills the cache with
+// cheap negatives must not be able to evict a real crawler's expired-but-
+// still-serviceable verdict while the same flood starves its re-verify slot.
 func (s *bridgeGoodBotState) pruneLocked(now time.Time) {
 	for k, v := range s.cache {
-		if now.After(v.until) {
+		limit := v.until
+		if v.name != "" {
+			limit = v.until.Add(goodBotIPStaleGrace)
+		}
+		if now.After(limit) {
 			delete(s.cache, k)
 		}
 	}

@@ -493,8 +493,15 @@ func TestNginxBridgeDecision_VerifiedBotFromCache(t *testing.T) {
 	}
 	// …and the excluded generic verdict is reported as such, not as "not verified".
 	excl := eng.TrafficRuleSimulateForAPI(context.Background(), TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: "74.125.1.1", UA: "Mozilla/5.0 (compatible; Googlebot/2.1)"})
-	if excl.VerifiedBot != "" || excl.VerifiedBotExcluded != "google" || excl.Rule.ID != "r_fence" {
+	if excl.VerifiedBot != "" || excl.VerifiedBotExcluded != "google" || excl.Rule.ID != "r_fence" || excl.VerifiedBotInconclusive != "" {
 		t.Fatalf("excluded verdict must be echoed: %+v", excl)
+	}
+	// Enrichment off (no resolver): the API says "inconclusive: no_resolver",
+	// never a definitive "not a crawler".
+	noEnr := &Engine{trafficRules: store, nginxBridge: b}
+	nr := noEnr.TrafficRuleSimulateForAPI(context.Background(), TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: "66.249.70.9"})
+	if nr.VerifiedBot != "" || nr.VerifiedBotInconclusive != "no_resolver" {
+		t.Fatalf("no resolver must be reported as inconclusive: %+v", nr)
 	}
 
 	// A rule on ANOTHER host must not make this host pay for good-bot lookups.
