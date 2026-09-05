@@ -48,6 +48,19 @@ back-filled here — see the git/PR history for that period.
   enabled.
 
 ### Changed
+- **WAF `WAF_FETCH_METADATA` (rule 612) hygiene, round 2: two more honest
+  header-poor categories leave the shadow.** (a) `GeedoShopProductFinder`
+  (geedo.com product search, PTR `product-search-*.geedo.com`) self-declares
+  inside the KHTML comment while carrying a `Chrome/142` token and was ~2/3 of
+  the fleet-wide 612 volume (10 208 of 15 349 hits/48 h on one host); it joins
+  the named crawler-skip list. Whether Geedo may crawl a shop stays a
+  traffic-rule decision (`block_geedo` recipe). (b) In-app browsers of social
+  apps — TikTok's (`musical_ly` token), the only true-positive-looking hits from
+  Greek residential IPs — are real people whose app ships a navigation with
+  neither `Sec-Fetch-*` nor `Accept-Language`; a new named-token
+  `IN_APP_UA_TOKENS` list stands the rule down for them (suppress-only, like the
+  crawler list). Lua tests cover both plus a same-Android-Chrome control that
+  still fires.
 - **Traffic-rules "AI crawlers" bot group** now also lists OAI-SearchBot,
   Claude-User, Claude-SearchBot, ReflectionBot and ExaSearchBot (seen
   fleet-wide). Claude-User is also the User-Agent of the claude.ai MCP

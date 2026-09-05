@@ -1995,13 +1995,49 @@ local CRAWLER_UA_TOKENS = {
   "gptbot", "oai-searchbot", "chatgpt-user", "claudebot", "anthropic-ai",
   "claude-web", "ccbot", "google-extended", "perplexitybot", "amazonbot",
   "meta-externalagent", "crawler", "spider",
-  -- Monitoring / SEO bots that carry a `Chrome/` token yet self-declare (so they
-  -- would otherwise trip the fetch-metadata tell): named here, evasion-resistant.
-  -- Add more by name as burn-in surfaces them — deliberately NOT a generic
-  -- escape token (a bare "+http"/"bot" match would hand an attacker a one-token
-  -- skip of the shadow, the same reason bare "bot" is excluded above).
+  -- Monitoring / SEO / product-search bots that carry a `Chrome/` token yet
+  -- self-declare (so they would otherwise trip the fetch-metadata tell): named
+  -- here, evasion-resistant. Add more by name as burn-in surfaces them —
+  -- deliberately NOT a generic escape token (a bare "+http"/"bot" match would
+  -- hand an attacker a one-token skip of the shadow, the same reason bare "bot"
+  -- is excluded above).
   "sleepbot",
+  -- GeedoShopProductFinder (geedo.com price/product search; PTR
+  -- product-search-*.geedo.com): "(KHTML, like Gecko; GeedoShopProductFinder)
+  -- Chrome/142…" — an honest, self-declared crawler that was ~2/3 of the 612
+  -- shadow fleet-wide (2026-09-05: 10 208 of 15 349 hits/48 h on one host).
+  -- Keeping it OUT of the measurement is hygiene only; whether Geedo may crawl
+  -- a shop is a traffic-rule decision (the `block_geedo` recipe), not this
+  -- rule's.
+  "geedoshopproductfinder",
 }
+-- IN_APP_UA_TOKENS: in-app browsers of social apps — a real person tapping a
+-- link or an ad inside the app. These are genuine Chromium WebViews (they carry
+-- the `Chrome/NNN` token) but the embedding app's network stack ships a page
+-- navigation with neither Sec-Fetch-* nor Accept-Language, so they trip the
+-- tell exactly like headless automation while being the opposite of it. Named
+-- tokens only (same evasion argument as CRAWLER_UA_TOKENS): a loose match can
+-- only stand the rule DOWN. Observed 2026-09-05 (GR residential, product and
+-- article pages): TikTok's in-app browser ("… Mobile Safari/537.36
+-- musical_ly_46.7.3 … AppName/musical_ly …"). Add others (Facebook/Instagram
+-- in-app, Android `; wv)` WebViews) by name only once burn-in shows them firing —
+-- a plain Android WebView sends both headers and never trips the tell.
+local IN_APP_UA_TOKENS = {
+  "musical_ly",
+}
+-- ua_has_token: plain-substring scan of a lowercased UA against one of the
+-- named-token lists above (shared by the crawler and in-app checks so the two
+-- can never drift).
+local function ua_has_token(ua, list)
+  for i = 1, #list do
+    if has(ua, list[i]) then return true end
+  end
+  return false
+end
+local function ua_is_in_app_browser(ua)
+  -- ua is already lowercased by the caller.
+  return ua_has_token(ua, IN_APP_UA_TOKENS)
+end
 -- ua_is_declared_crawler: true when the UA self-identifies as a known crawler /
 -- link-preview / AI bot. These legitimately ship sparse headers (no Sec-Fetch,
 -- often no Accept-Language) yet also carry a `Chrome/` token for render-compat,
@@ -2014,10 +2050,7 @@ local CRAWLER_UA_TOKENS = {
 -- safe (it just exempts, never accuses).
 local function ua_is_declared_crawler(ua)
   -- ua is already lowercased by the caller.
-  for i = 1, #CRAWLER_UA_TOKENS do
-    if has(ua, CRAWLER_UA_TOKENS[i]) then return true end
-  end
-  return false
+  return ua_has_token(ua, CRAWLER_UA_TOKENS)
 end
 
 -- detect_fetch_metadata_missing: the edge-only "Sec-Fetch tell" (Track-2 Stage 1b,
@@ -2036,14 +2069,17 @@ end
 --      Sec-Fetch is only Safari 16.4+ (Mar 2023) and old iOS is a live FP
 --      population — and headless stacks overwhelmingly spoof Chrome anyway.
 --   5. NOT a self-declared crawler (ua_is_declared_crawler).
+--   6. NOT an in-app browser of a social app (ua_is_in_app_browser).
 -- A real browser satisfies 1+4 but never 2+3 together; an honest curl/wget/python
 -- client fails 4 (it doesn't claim a browser). Returns a single tag or nil.
 --
--- Two suppress-only carve-outs return nil instead of measuring (they can only
+-- Three suppress-only carve-outs return nil instead of measuring (they can only
 -- stand the rule down, never accuse): infrastructure paths (`/robots.txt`,
 -- `/.well-known/*` — hit by crawlers + ACME/DCV/security validators that claim
--- `text/html` yet ship no other browser headers) and self-declared bots
--- (clause 5's named tokens). A flagged client's real page fetches still trip it.
+-- `text/html` yet ship no other browser headers), self-declared bots (clause
+-- 5's named tokens) and in-app browsers of social apps (clause 6's named
+-- tokens — a person tapping a link inside TikTok; the app's stack ships neither
+-- header). A flagged client's real page fetches still trip it.
 --
 -- ⚠️ LOAD-BEARING INVARIANT — the "no Accept-Language" clause (3) is NOT optional.
 -- Sec-Fetch is HTTPS-only (fetch-metadata spec), and this WAF also runs on the
@@ -2107,8 +2143,14 @@ function _M.detect_fetch_metadata_missing(headers, method, path)
   if not claims then return nil end
 
   -- (5) Known crawlers are a separate category — never part of this measurement.
-  -- Last, so its ~40-token scan runs only for the already-header-poor tiny set.
+  -- After every cheap gate, so this ~40-token scan (and clause 6's) runs only
+  -- for the already-header-poor tiny set.
   if ua_is_declared_crawler(ua) then return nil end
+
+  -- (6) In-app browsers (a person inside TikTok & co.) are real navigations that
+  -- happen to ship header-poor; they are the tell's known false-positive pool,
+  -- not automation. Suppress-only, named tokens (see IN_APP_UA_TOKENS).
+  if ua_is_in_app_browser(ua) then return nil end
 
   return "NO_FETCH_META_NO_ACCEPT_LANG"
 end

@@ -4,8 +4,9 @@
 -- The tell: a request that CLAIMS a modern Sec-Fetch-capable browser
 -- (Chrome >= 76 / Firefox >= 90) yet sends a text/html GET|HEAD navigation with
 -- NO Sec-Fetch-* AND NO Accept-Language — headers a real browser always emits on
--- a page load. Stacked so honest CLI clients (they don't claim a browser) and
--- self-declared crawlers (skipped) never match. See docs/challenge-score.md.
+-- a page load. Stacked so honest CLI clients (they don't claim a browser),
+-- self-declared crawlers and named in-app browsers (both skipped) never match.
+-- See docs/challenge-score.md.
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -156,6 +157,29 @@ fires(at("/product/asimenio-dachtylidi/", CHROME), "a normal page path still tri
 clean(req("GET", "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; " ..
                  "SleepBot/1.0; +http://sleepbot.com/) Chrome/131.0.0.0 Safari/537.36"),
       "SleepBot self-declares (named token) — kept out of the shadow")
+
+-- GeedoShopProductFinder self-declares inside the KHTML comment and carries a
+-- Chrome/142 token; it was ~2/3 of the fleet-wide shadow. Named token, same
+-- rationale as SleepBot. Whether it may crawl is a traffic-rule decision.
+clean(req("GET", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " ..
+                 "(KHTML, like Gecko; GeedoShopProductFinder) Chrome/142.0.0.0 Safari/537.36"),
+      "GeedoShopProductFinder self-declares (named token) — kept out of the shadow")
+
+-- ── Negatives: in-app browsers (IN_APP_UA_TOKENS, suppress-only) ─────────────
+-- TikTok's in-app browser is a real Chromium WebView carrying a person, but the
+-- app's network stack ships neither Sec-Fetch-* nor Accept-Language on the
+-- navigation — the tell's known false-positive pool, so it is a separate
+-- category like the crawlers. The exact UA shape seen 2026-09-05 (GR residential).
+local TIKTOK = "Mozilla/5.0 (Linux; Android 15; 23124RA7EO Build/AQ3A.240829.003) AppleWebKit/537.36 " ..
+               "(KHTML, like Gecko) Chrome/151.0.7922.199 Mobile Safari/537.36 musical_ly_46.7.3 " ..
+               "musical_ly_2024607030 JsSdk/1.0 NetType/WIFI Channel/googleplay AppName/musical_ly app_version/46.7.3"
+clean(req("GET", TIKTOK), "TikTok in-app browser (musical_ly token), header-poor nav — kept out of the shadow")
+clean(at("/product/asimenio-dachtylidi/", TIKTOK), "TikTok in-app browser on a normal page path")
+-- Control: the same Android Chrome build WITHOUT the in-app token is still measured,
+-- so the carve-out is the named token, not "any Android Chrome".
+fires(req("GET", "Mozilla/5.0 (Linux; Android 15; 23124RA7EO Build/AQ3A.240829.003) AppleWebKit/537.36 " ..
+                 "(KHTML, like Gecko) Chrome/151.0.7922.199 Mobile Safari/537.36"),
+      "same Android Chrome UA without an in-app token still trips the tell")
 
 if fails > 0 then
   io.stderr:write(("cfm_waf fetch-metadata tests: %d FAILED\n"):format(fails))
