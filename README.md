@@ -1791,7 +1791,18 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
   -d '{"host":"example.com","ua":"facebookexternalhit/1.1","path":"/","method":"GET","country":"US"}' | jq
 ```
 
-> Note: Rule simulation is exposed through API/CLI. In the Lua request path (OpenResty or Angie), `rule_action` is enforced for `allow`, `challenge`, `block`, and `throttle` (with `throttle_profile` for throttles).
+> **Semantics (verified against `cfm.lua` Step 3):** rules are evaluated in
+> priority order (lowest first) and the **first match wins**; **only enabled
+> rules are enforced**. In the in-path request path (OpenResty or Angie) the
+> edge enforces `block`, `challenge` and `throttle` (with `throttle_profile`).
+> **`allow` is NOT an exemption** — it only stops the remaining rules from being
+> evaluated; it does not bypass the WAF, a vhost-wide challenge or a per-IP
+> block (use challenge/WAF excludes for that). Clients holding a valid clearance
+> cookie never reach the rule evaluation, and rules are not applied at all in
+> DNAT mode. `simulate` runs the exact enforcement evaluation and additionally
+> returns `disabled_match` — the highest-priority *disabled* rule that would
+> have matched had it been enabled — so a rule can be saved disabled, tested,
+> then enabled from the cfm-admin table.
 
 
 

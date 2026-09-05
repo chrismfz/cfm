@@ -17,7 +17,40 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Traffic rules: a DISABLED rule was enforced at the edge.** `Simulate()` —
+  which is also the nginx bridge's `RuleDecision` path — never looked at
+  `enabled`, so the "start disabled, validate first" workflow the presets
+  recommended (e.g. *Block countries (disabled)*) silently blocked live
+  traffic. Disabled rules are now skipped for the verdict; the simulator
+  reports the highest-priority disabled would-be match separately as
+  `disabled_match` ("would match if enabled"), and `cfm rules simulate` prints
+  it. Regression test pins the contract (`TestTrafficRuleSimulate_DisabledRulesNeverEnforce`).
+
+### Added
+- **cfm-admin Traffic Rules: guided editor + recipes.** The flat form is
+  replaced by a three-step builder — *what should happen* (action cards with
+  the real consequence spelled out, throttle profiles as a select with their
+  rate/burst), *which requests* (add-a-condition chips for path / User-Agent /
+  country / method / query string, bot-group quick-add, inline validation
+  mirroring the daemon's rule normalisation), *where* (vhost type-ahead,
+  auto-suggested priority with "runs after #… before #…" placement) — ending in
+  a plain-language review sentence and a one-click "Test in simulator".
+  Enforcing actions default to *saved disabled*; an enabled block/challenge
+  with no conditions is refused. **Recipes** replace single-field presets with
+  correctly-ordered multi-rule bundles (*Allow only these countries*, *Admin
+  area only from these countries*, *Protect login endpoints*, *Tame bots*),
+  shown as a preview table before creation and tagged `recipe:<name>` so they
+  can be found together; the page also states the three facts that produced
+  wrong rules before: `allow` is not an exemption, clearance-cookie holders
+  skip the rules, rules run only on the in-path edge. Table gains an inline
+  on/off toggle, Test / Duplicate actions, a plain-language "what it matches"
+  column and a vhost filter; deletes ask for confirmation. Logic lives in
+  `assets/webdet/rules-model.js` with node tests.
+
+### Changed
+- README §15 no longer claims `allow` is "enforced"; it documents first-match /
+  enabled-only semantics, the `allow` caveat and `disabled_match`.
 
 ## 2026.09.04
 

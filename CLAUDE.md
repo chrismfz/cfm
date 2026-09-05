@@ -228,6 +228,17 @@ DNAT mode, where the flagged IP is redirected before the in-path carve-out
 runs. Any path-based challenge exemption likely needs the same both-sides
 treatment.
 
+### Traffic rules — `Simulate` IS the enforcement path
+`trafficRuleStore.Simulate` is wired as the nginx bridge's `RuleDecision`, so
+whatever it returns is what the edge enforces; the `/rules/simulate` API just
+exposes the same call. It ignored `Enabled` for months — every "start disabled,
+validate first" preset was live (fixed 2026-09; `disabled_match` now carries the
+would-be match for the UI). Also: a rule `allow` only ends rule evaluation — it
+never bypasses WAF / vhost challenge / IP block (those are OR'd in `cfm.lua`
+Step 3) — and clearance-cookie holders return at Step 2b before rules run.
+Rule semantics live in `rules-model.js` on the UI side; change it in the same PR
+as `traffic_rules.go`. Design + open items: `docs/traffic-rules-ux-proposal.md`.
+
 ### cfm-lsm — signal, then noise
 Built in a one-week May burst (~55 PRs) and immediately needed extensive
 false-positive silencing (CRED/OBS/FS noise from systemd-per-user, bwrap,

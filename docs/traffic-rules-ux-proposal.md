@@ -1,6 +1,6 @@
 # Traffic Rules (cfm-admin) — UX review & redesign proposal
 
-Status: **proposal** (nothing here is implemented yet). Scope: the
+Status: **Phase 1 landed** (guided editor, recipes, banners, simulator pre-fill, docs fix — plus the F12 engine fix below); Phases 2–3 remain proposals. Scope: the
 `/cfm-admin/webdetector/rules/` page (`internal/webui/static/webdetector/rules/`,
 `assets/webdet/feature-rules.js`), the rule model in
 `internal/webdetector/traffic_rules.go`, and the edge application path in
@@ -32,8 +32,9 @@ the direct cause of wrong rules.
 | F9 | **Simulation tests the saved set, not the draft**, and needs the operator to retype host/path/UA. Result is one muted line. The vhost input of the editor has no `list="cfm-vhost-list"` (the simulator's does). | `runRuleSimulation`, `index.html` | Test-before-enable is the stated workflow but the UI makes it a separate manual exercise, so it is skipped. |
 | F10 | **Validation happens only server-side on save.** Country codes must be exactly 2 letters (`normalizeCodeList`); UA patterns are case-insensitive glob **or** substring when no `*`; path patterns are prefix unless they contain `*`/`?`; `?k=v` is per-parameter. Throttle profile is free text (`soft_bot` 2 r/s burst 20, `medium_bot` 1/10, `hard_bot` 0.5/5). | `traffic_rules.go`, `cfm_rules.lua PROFILES` | Operators learn the grammar from error messages after the fact; a typo'd profile silently falls back to `soft_bot` at the edge (`PROFILES[k] or PROFILES.soft_bot`). |
 | F11 | **Rules have no hit counters / last-hit.** `rule_id` is logged on block and throttle route lines but not on challenge. | `cfm.lua log_route` | No way to see whether a rule ever fired, or which rule is producing collateral. |
+| F12 | **Disabled rules were enforced.** `Simulate` (also the bridge's `RuleDecision`) never checked `Enabled`. Found while implementing Phase 1; fixed in the same PR — disabled rules are skipped for the verdict and reported as `disabled_match`. | `traffic_rules.go Simulate` | Every "start disabled, validate first" preset was live. |
 
-Items F1–F3 and F7 are the ones that produce *silently wrong* configurations
+Items F1–F3, F7 and F12 are the ones that produce *silently wrong* configurations
 and must be surfaced in the UI regardless of which redesign option is taken.
 
 ---
@@ -184,7 +185,7 @@ fix for F1 is to say what `allow` does and route operators to excludes.
 
 ## 4. Phasing
 
-1. **Phase 1 — no engine changes (UI + docs only).** Facts F1/F2/F3/F8/F9
+1. **Phase 1 — LANDED (UI + docs, plus the F12 fix).** Facts F1/F2/F3/F8/F9
    surfaced as banners/help; vhost datalist on the editor; profile select;
    inline validation mirroring `normalizeTrafficRule`; presets converted to
    recipes that create the correctly-ordered rules (geo-fence uses the
