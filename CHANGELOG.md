@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.05
+
 ### Added
 - **cfm-admin traffic rules: a ready-made "Block the Geedo shop scraper" recipe.**
   Geedo (`GeedoShopProductFinder`) is a price-comparison crawler that visits
@@ -38,8 +42,6 @@ back-filled here — see the git/PR history for that period.
   self-identifies), added by name to the crawler-skip list. Cuts non-target
   noise from the burn-in shadow so it reflects browser-claiming automation; a
   flagged client's real page fetches still trip the tell.
-
-## 2026.09.05
 
 ### Fixed
 - **IP enrichment: a failed reverse-DNS lookup was pinned empty for 24 h.**
