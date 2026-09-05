@@ -5,15 +5,17 @@ import (
 	"time"
 )
 
-// TestPTRRetryDue: a cached Result whose PTR fetch failed is retried after
-// ptrRetryInterval — not pinned empty for the 24h geo TTL — but only when PTR
-// resolution is enabled, the IP is routable, and the entry really has no PTR.
+// TestPTRRetryDue: a cached Result whose PTR fetch FAILED (timeout/SERVFAIL) is
+// retried after ptrRetryInterval — not pinned empty for the 24h geo TTL — but
+// only when PTR resolution is enabled and the IP is routable. A definitive
+// "no PTR" (NXDOMAIN) is never retried.
 func TestPTRRetryDue(t *testing.T) {
 	now := time.Now()
 	e := &Enricher{enablePTR: true}
-	fresh := Result{PTR: "", ts: now.Add(-time.Minute)}
-	old := Result{PTR: "", ts: now.Add(-ptrRetryInterval - time.Second)}
+	fresh := Result{PTR: "", ptrFailed: true, ts: now.Add(-time.Minute)}
+	old := Result{PTR: "", ptrFailed: true, ts: now.Add(-ptrRetryInterval - time.Second)}
 	resolved := Result{PTR: "crawl.googlebot.com", ts: now.Add(-time.Hour)}
+	noPTR := Result{PTR: "", ptrFailed: false, ts: now.Add(-time.Hour)} // definitive NXDOMAIN
 
 	if e.ptrRetryDue(fresh, "66.249.66.1", now) {
 		t.Fatalf("a recent PTR miss must not be retried yet")
@@ -23,6 +25,9 @@ func TestPTRRetryDue(t *testing.T) {
 	}
 	if e.ptrRetryDue(resolved, "66.249.66.1", now) {
 		t.Fatalf("a resolved PTR is never retried by this path")
+	}
+	if e.ptrRetryDue(noPTR, "203.0.113.9", now) {
+		t.Fatalf("a definitive no-PTR (NXDOMAIN) must NOT be retried — it is the common case and would cost sync callers a lookup every few minutes")
 	}
 	if e.ptrRetryDue(old, "10.0.0.5", now) {
 		t.Fatalf("non-routable IPs are never resolved")

@@ -22,8 +22,10 @@ back-filled here — see the git/PR history for that period.
   `Lookup` cached the whole Result (with `PTR: ""`) for the geo TTL after a
   resolver timeout, so every PTR-dependent consumer — the good-bot challenge
   exemption, the new `verified_bot` traffic rules — saw that IP as
-  unverifiable for a day after one blip. A cached PTR miss is now retried after
-  5 minutes (inline on `Lookup`, async on the hot-path `LookupCachedOrAsync`).
+  unverifiable for a day after one blip. A cached PTR *failure* (timeout /
+  SERVFAIL — not a definitive NXDOMAIN "no PTR", which stays cached for the
+  full TTL) is now retried after 5 minutes (inline on `Lookup`, async on the
+  hot-path `LookupCachedOrAsync`).
 - **Traffic rules: a DISABLED rule was enforced at the edge.** `Simulate()` —
   which is also the nginx bridge's `RuleDecision` path — never looked at
   `enabled`, so the "start disabled, validate first" workflow the presets

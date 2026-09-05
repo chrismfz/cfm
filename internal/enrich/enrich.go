@@ -1,6 +1,7 @@
 package enrich
 
 import (
+	"errors"
 	"context"
 	"net"
 	"os"
@@ -38,10 +39,13 @@ const (
 	// possible follow-up, low-value now that no hot path blocks on PTR.
 	ptrCacheTTL = 30 * 24 * time.Hour
 	// ptrRetryInterval: a cached Result whose PTR resolution FAILED (timeout /
-	// SERVFAIL → PTR "") is retried this often instead of sitting empty for the
-	// whole 24h geo TTL. Matters since verified_bot traffic rules and the
-	// good-bot challenge exemption key on the PTR: one resolver blip must not
-	// make a crawler IP unverifiable for a day.
+	// SERVFAIL → PTR "", ptrFailed=true) is retried this often instead of
+	// sitting empty for the whole 24h geo TTL. Matters since verified_bot
+	// traffic rules and the good-bot challenge exemption key on the PTR: one
+	// resolver blip must not make a crawler IP unverifiable for a day. A
+	// definitive "no PTR" (NXDOMAIN) is NOT retried — it is the common case and
+	// would otherwise cost every synchronous Lookup caller a reverse lookup
+	// per IP every few minutes.
 	ptrRetryInterval = 5 * time.Minute
 	statEvery        = 300 * time.Second // πόσο συχνά θα ελέγχουμε για αλλαγές στα mmdb αρχεία
 
@@ -72,6 +76,13 @@ type Result struct {
 	CountryISO string // ISO-2 "GR" (rule matching)
 	City       string
 	ts         time.Time
+	// ptrFailed: the reverse lookup did NOT complete (timeout / SERVFAIL /
+	// network), as opposed to a definitive "this IP has no PTR" (NXDOMAIN).
+	// Only a failed lookup is retried before the geo TTL (ptrRetryDue); an IP
+	// that simply has no PTR — the common case — stays cached for the full TTL
+	// so the many synchronous Lookup callers (detectors, notify, ipquery) do
+	// not pay a reverse lookup every few minutes for it.
+	ptrFailed bool
 }
 
 type Enricher struct {
@@ -214,11 +225,16 @@ func (e *Enricher) Lookup(ipStr string) Result {
 		if r.PTR == "" {
 			// Cold in both layers → resolve, then populate L1 and (async) L2.
 			ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
-			names, _ := net.DefaultResolver.LookupAddr(ctx, ipStr)
+			names, err := net.DefaultResolver.LookupAddr(ctx, ipStr)
 			cancel()
 			if len(names) > 0 {
 				// καθάρισε τυχόν τελεία στο τέλος
 				r.PTR = strings.TrimSuffix(names[0], ".")
+			} else if err != nil {
+				// NXDOMAIN is a definitive "no PTR"; anything else (timeout,
+				// SERVFAIL, network) did not complete → eligible for retry.
+				var dnsErr *net.DNSError
+				r.ptrFailed = !(errors.As(err, &dnsErr) && dnsErr.IsNotFound)
 			}
 			// Cache only a real PTR; a miss/timeout is left uncached so it is
 			// retried next time rather than pinned empty for ptrCacheTTL.
@@ -379,10 +395,11 @@ func (e *Enricher) dispatchAsyncLookup(ipStr string) {
 }
 
 // ptrRetryDue reports whether a cached Result should have its PTR re-resolved:
-// PTR resolution is enabled, the IP is routable, the cached PTR is empty
-// (earlier miss/timeout) and ptrRetryInterval has passed since it was cached.
+// PTR resolution is enabled, the IP is routable, the earlier reverse lookup
+// FAILED (ptrFailed — not a definitive NXDOMAIN) and ptrRetryInterval has
+// passed since it was cached.
 func (e *Enricher) ptrRetryDue(r Result, ipStr string, now time.Time) bool {
-	if e == nil || !e.enablePTR || r.PTR != "" {
+	if e == nil || !e.enablePTR || r.PTR != "" || !r.ptrFailed {
 		return false
 	}
 	if now.Sub(r.ts) < ptrRetryInterval {
