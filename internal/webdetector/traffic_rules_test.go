@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -210,9 +211,9 @@ func TestTrafficRuleQueryParamPrecision(t *testing.T) {
 	}{
 		{"exact", "id=5", true},
 		{"exact", "id=5&x=1", true},
-		{"exact", "id=50", false},      // value superstring
-		{"exact", "userid=5", false},   // key superstring
-		{"exact", "id=6", false},       // wrong value
+		{"exact", "id=50", false},    // value superstring
+		{"exact", "userid=5", false}, // key superstring
+		{"exact", "id=6", false},     // wrong value
 		{"keyonly", "token=anything", true},
 		{"keyonly", "token=", true},
 		{"keyonly", "other=1", false},
@@ -418,9 +419,9 @@ func TestTrafficRuleIPAny(t *testing.T) {
 		{"2001:db8:abcd:1::5", true},
 		{"2001:db8:abce::1", false},
 		{"::ffff:203.0.113.9", true}, // v4-mapped v6 is unmapped before matching
-		{"192.0.2.9", true},           // stored from "::ffff:192.0.2.9"
-		{"192.0.2.77", true},          // stored from "::ffff:192.0.2.0/120" → /24
-		{"[2001:db8:abcd::7]", true},  // bracketed v6 tolerated
+		{"192.0.2.9", true},          // stored from "::ffff:192.0.2.9"
+		{"192.0.2.77", true},         // stored from "::ffff:192.0.2.0/120" → /24
+		{"[2001:db8:abcd::7]", true}, // bracketed v6 tolerated
 		{"", false},
 		{"not-an-ip", false},
 	}
@@ -466,5 +467,43 @@ func TestTrafficRuleIPAny_ComposesWithGeoFence(t *testing.T) {
 		if res.Action != tc.want {
 			t.Fatalf("ip=%s cc=%q action=%q want %q", tc.ip, tc.cc, res.Action, tc.want)
 		}
+	}
+}
+
+// TestTrafficRuleLoad_UnknownMatchFieldLoadsDisabled: a rules.json written by
+// a NEWER cfm may carry match keys this build does not know. Ignoring them
+// would widen the rule (an allow keyed only on the unknown field becomes
+// allow-everything), so such rules load disabled; known-field rules are
+// untouched.
+func TestTrafficRuleLoad_UnknownMatchFieldLoadsDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.json")
+	data := `[
+	  {"id":"r_future","enabled":true,"priority":15,"scope":{"vhosts":["example.com"]},
+	   "match":{"asn_in":[16509]},"action":{"type":"allow"},"note":"written by a newer cfm"},
+	  {"id":"r_known","enabled":true,"priority":900,"scope":{"vhosts":["example.com"]},
+	   "match":{"country_not_in":["GR"]},"action":{"type":"block"}}
+	]`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s := newTrafficRuleStore(path)
+	fut, ok := s.Get("r_future")
+	if !ok {
+		t.Fatalf("future rule must still load (disabled)")
+	}
+	if fut.Enabled {
+		t.Fatalf("rule with unknown match field must load DISABLED, got enabled")
+	}
+	known, ok := s.Get("r_known")
+	if !ok || !known.Enabled {
+		t.Fatalf("known-field rule must load enabled: ok=%v %+v", ok, known)
+	}
+	// And it must not enforce: the would-be allow-everything is not the verdict.
+	res := s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", Country: "US"})
+	if !res.Matched || res.Rule.ID != "r_known" {
+		t.Fatalf("expected the known block to win, got %+v", res)
+	}
+	if res.DisabledMatch == nil || res.DisabledMatch.ID != "r_future" {
+		t.Fatalf("expected the future rule to surface as disabled_match, got %+v", res.DisabledMatch)
 	}
 }

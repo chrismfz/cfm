@@ -363,17 +363,25 @@ export function isIPOrCIDR(v) {
     const groups = parts.flatMap((part) => (part === "" ? [] : part.split(":")));
     if (!groups.length && parts.length !== 2) return false;
     let width = 0;
+    let quadTail = false;
     for (let i = 0; i < groups.length; i += 1) {
       const g = groups[i];
       if (/^[0-9a-f]{1,4}$/i.test(g)) { width += 1; continue; }
-      if (i === groups.length - 1 && V4.test(g)) { width += 2; continue; }
+      if (i === groups.length - 1 && V4.test(g)) { width += 2; quadTail = true; continue; }
       return false;
     }
+    // A dotted quad must be the absolute tail: "1.2.3.4::" is not an address.
+    if (quadTail && parts.length === 2 && parts[1] === "") return false;
     if (parts.length === 2 ? width > 7 : width !== 8) return false;
   }
   if (bits === undefined) return true;
   if (!/^(0|[1-9]\d{0,2})$/.test(bits)) return false;
-  return Number(bits) <= (is4 ? 32 : 128);
+  const n = Number(bits);
+  if (n > (is4 ? 32 : 128)) return false;
+  // A v4-mapped prefix shorter than /96 is rejected by the daemon (it can never
+  // match an Unmap()ed request address).
+  if (!is4 && /^::ffff:\d/i.test(addr) && n < 96) return false;
+  return true;
 }
 
 // ── Validation (mirrors normalizeTrafficRule; stricter only where the server

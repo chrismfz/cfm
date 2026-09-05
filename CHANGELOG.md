@@ -24,7 +24,7 @@ back-filled here — see the git/PR history for that period.
   recommended (e.g. *Block countries (disabled)*) silently blocked live
   traffic. Disabled rules are now skipped for the verdict; the simulator
   reports the highest-priority disabled would-be match separately as
-  `disabled_match` ("would match if enabled"), and `cfm rules simulate` prints
+  `disabled_match` ("would match if enabled"), and `cfm webtop rules simulate` prints
   it. Regression test pins the contract (`TestTrafficRuleSimulate_DisabledRulesNeverEnforce`).
 - **Traffic rules: a lone `-` User-Agent pattern now means "no User-Agent".**
   The *Block empty UA* preset stored `ua_any: ["-"]`, which the matcher treated
@@ -51,10 +51,17 @@ back-filled here — see the git/PR history for that period.
   only these countries* recipe shrinks to good-bots-allow + (optional office
   ranges allow) + one disabled `country_not_in` block, *Admin area only from
   these countries* becomes a single rule, and a new *Always allow office /
-  monitoring IPs* recipe is added. `cfm rules list` shows `cc!=` / `ip=` in the
+  monitoring IPs* recipe is added. `cfm webtop rules list` shows `cc!=` / `ip=` in the
   match summary. Go tests cover both fields incl. IPv6, v4-mapped addresses and
   the geo-fence composition; the JS model mirror validates CIDR syntax before
   save. README §15 gains a match-field reference table.
+  **Downgrade note:** a cfm older than this release does not know these two
+  fields and silently drops them when loading `rules.json`, which *widens* such
+  a rule (an `allow` keyed only on `ip_any` becomes allow-everything, a `block`
+  keyed only on `country_not_in` blocks every visitor). Disable or delete those
+  rules before rolling back below this version. Going forward this build loads
+  any rule whose `match` carries a key it does not know **disabled** (logged),
+  so future field additions cannot widen a rule on downgrade.
 - **cfm-admin Traffic Rules: guided editor + recipes.** The flat form is
   replaced by a three-step builder — *what should happen* (action cards with
   the real consequence spelled out, throttle profiles as a select with their

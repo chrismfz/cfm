@@ -1,11 +1,13 @@
 package webdetector
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/netip"
 	"net/url"
 	"os"
@@ -814,14 +816,29 @@ func (s *trafficRuleStore) load() {
 	if err != nil || len(b) == 0 {
 		return
 	}
-	var arr []TrafficRule
-	if err := json.Unmarshal(b, &arr); err != nil {
+	var raws []json.RawMessage
+	if err := json.Unmarshal(b, &raws); err != nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, e := range arr {
-		norm, err := normalizeTrafficRule(e, false)
+	for _, raw := range raws {
+		e, unknown := decodeStoredRule(raw)
+		if e == nil {
+			continue
+		}
+		if unknown {
+			// A rule carrying a match field THIS binary does not know was
+			// written by a newer cfm. Dropping the field would WIDEN the rule
+			// (an allow keyed only on that field becomes allow-everything, a
+			// block becomes block-everything), so the rule is loaded but
+			// forced disabled until the binary is upgraded again.
+			if e.Enabled {
+				log.Printf("[webdet][rules] rule %s uses match fields this build does not understand; loading it DISABLED (upgrade cfm to re-enable)", e.ID)
+			}
+			e.Enabled = false
+		}
+		norm, err := normalizeTrafficRule(*e, false)
 		if err != nil {
 			continue
 		}
@@ -830,6 +847,30 @@ func (s *trafficRuleStore) load() {
 		}
 		s.rules[norm.ID] = norm
 	}
+}
+
+// decodeStoredRule decodes one persisted rule. It reports unknown=true when
+// the stored `match` block carries a key this build does not define — the
+// signal that a newer cfm wrote it (see load()). Rules that fail to decode at
+// all return nil.
+func decodeStoredRule(raw json.RawMessage) (*TrafficRule, bool) {
+	var e TrafficRule
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return nil, false
+	}
+	var probe struct {
+		Match json.RawMessage `json:"match"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || len(probe.Match) == 0 {
+		return &e, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(probe.Match))
+	dec.DisallowUnknownFields()
+	var m TrafficRuleMatch
+	if err := dec.Decode(&m); err != nil {
+		return &e, true
+	}
+	return &e, false
 }
 
 func (s *trafficRuleStore) saveLocked() error {

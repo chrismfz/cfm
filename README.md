@@ -1789,6 +1789,11 @@ an empty `match` matches every request on the scoped vhosts):
 | `methods` | the HTTP method is listed | |
 | `has_qs` / `qs_not_rx` | a query string is present / the query does **not** match the RE2 regex | `qs_not_rx` applies whenever a query is present, independently of `has_qs` |
 
+A rule whose `match` carries a key the running binary does not know (written by
+a newer cfm) is loaded **disabled** and logged, never widened; conversely a cfm
+older than 2026-09 drops `country_not_in` / `ip_any` silently — disable such
+rules before downgrading below that version.
+
 Quick API examples:
 
 ```bash

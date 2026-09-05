@@ -178,13 +178,13 @@
               <template v-if="ruleChips.countries">
                 <label for="rule-countries">Country</label>
                 <div class="inline-field">
-                  <select id="rule-countries-mode" class="input input-mode" v-model="ruleForm.countriesMode" title="is: match visitors FROM these countries · is not: match visitors from anywhere ELSE">
+                  <select id="rule-countries-mode" class="input input-mode" v-model="ruleForm.countriesMode" title="is one of: match visitors FROM these countries · is NOT one of: match visitors whose country is known and elsewhere (unknown country never matches)">
                     <option value="in">is one of</option>
                     <option value="not_in">is NOT one of</option>
                   </select>
                   <input id="rule-countries" class="input" type="text" v-model.trim="ruleForm.countries" placeholder="GR, CY" />
                 </div>
-                <p class="muted form-hint">ISO 3166-1 alpha-2 codes, comma-separated. <strong>is NOT one of</strong> also matches visitors whose IP has no country in the geo database — add an <em>IP / range</em> allow above the rule for office and monitoring addresses.</p>
+                <p class="muted form-hint">ISO 3166-1 alpha-2 codes, comma-separated. Neither mode matches a visitor whose country is <em>unknown</em> (geo not resolved, geo module down): <strong>is NOT one of</strong> fails open rather than blocking everyone during a geo hiccup. Use an <em>IP / range</em> allow above the rule for office and monitoring addresses.</p>
               </template>
 
               <template v-if="ruleChips.ips">
