@@ -28,6 +28,17 @@ back-filled here — see the git/PR history for that period.
   so an operator can scope it to their own vhost (or `*`, admin-only) and enable
   it after a simulator run.
 
+### Changed
+- **WAF `WAF_FETCH_METADATA` (rule 612) hygiene: stop measuring two honest
+  header-poor categories.** The log-only Sec-Fetch headless-tell now stands down
+  (suppress-only — it can never cause a new fire) on: infrastructure paths
+  (`/robots.txt`, `/.well-known/*`, hit by crawlers and ACME/DCV/security
+  validators that claim `text/html` but ship no other browser headers) and the
+  self-declared monitoring bot SleepBot (carries a `Chrome/` token yet
+  self-identifies), added by name to the crawler-skip list. Cuts non-target
+  noise from the burn-in shadow so it reflects browser-claiming automation; a
+  flagged client's real page fetches still trip the tell.
+
 ## 2026.09.05
 
 ### Fixed

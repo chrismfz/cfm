@@ -2123,7 +2123,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_fetch_metadata_missing, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_fetch_metadata_missing(headers, method)
+      local tag = det.detect_fetch_metadata_missing(headers, method, uri)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_FETCH_METADATA:" .. tag, ttl, mode, RULE_IDS.rule_fetch_metadata_missing) then goto done end

@@ -1995,6 +1995,12 @@ local CRAWLER_UA_TOKENS = {
   "gptbot", "oai-searchbot", "chatgpt-user", "claudebot", "anthropic-ai",
   "claude-web", "ccbot", "google-extended", "perplexitybot", "amazonbot",
   "meta-externalagent", "crawler", "spider",
+  -- Monitoring / SEO bots that carry a `Chrome/` token yet self-declare (so they
+  -- would otherwise trip the fetch-metadata tell): named here, evasion-resistant.
+  -- Add more by name as burn-in surfaces them — deliberately NOT a generic
+  -- escape token (a bare "+http"/"bot" match would hand an attacker a one-token
+  -- skip of the shadow, the same reason bare "bot" is excluded above).
+  "sleepbot",
 }
 -- ua_is_declared_crawler: true when the UA self-identifies as a known crawler /
 -- link-preview / AI bot. These legitimately ship sparse headers (no Sec-Fetch,
@@ -2033,6 +2039,12 @@ end
 -- A real browser satisfies 1+4 but never 2+3 together; an honest curl/wget/python
 -- client fails 4 (it doesn't claim a browser). Returns a single tag or nil.
 --
+-- Two suppress-only carve-outs return nil BEFORE any measurement (they can only
+-- stand the rule down, never accuse): infrastructure paths (`/robots.txt`,
+-- `/.well-known/*` — hit by crawlers + ACME/DCV/security validators that claim
+-- `text/html` yet ship no other browser headers) and self-declared bots
+-- (clause 5's named tokens). A flagged client's real page fetches still trip it.
+--
 -- ⚠️ LOAD-BEARING INVARIANT — the "no Accept-Language" clause (3) is NOT optional.
 -- Sec-Fetch is HTTPS-only (fetch-metadata spec), and this WAF also runs on the
 -- plain-HTTP :80 vhost, where a REAL browser sends NO Sec-Fetch either — so on
@@ -2043,10 +2055,18 @@ end
 -- Cheap-first ordering: the Sec-Fetch/Accept-Language checks stand down the common
 -- case (a real browser, which sends both) before the ~40-token crawler scan, so
 -- that loop only runs for the tiny set that already looks header-poor.
-function _M.detect_fetch_metadata_missing(headers, method)
+function _M.detect_fetch_metadata_missing(headers, method, path)
   headers = headers or {}
   method = lower(method or "get")
   if method ~= "get" and method ~= "head" then return nil end
+
+  -- (0) Infrastructure paths that legitimate crawlers and ACME/DCV/security
+  -- validators fetch (header-poor by nature) are a separate category: measuring
+  -- the tell there is noise, not signal — the same client's real page fetches
+  -- still trip it. Suppress-only (path is spoofable, but this can only stand the
+  -- rule DOWN). `path` is the request path only (no query); nil is treated as "".
+  local p = lower(path or "")
+  if p == "/robots.txt" or begins(p, "/.well-known/") then return nil end
 
   -- (1) HTML navigation only.
   local accept = lower(headers["accept"] or headers["Accept"] or "")
