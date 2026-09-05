@@ -134,6 +134,29 @@ clean({ uri = "/api/x", args = "", method = "GET", ip = "203.0.113.51", body = "
         headers = { ["user-agent"] = CHROME, ["accept"] = "application/json" } },
       "GET asking for application/json (API/XHR, not a text/html nav)")
 
+-- ── Negatives: infrastructure paths (suppress-only path carve-out) ───────────
+-- Legit crawlers + ACME/DCV/security validators fetch these header-poor; the
+-- tell there is noise. A flagged client's real page fetches still trip it.
+local function at(p, ua, hdr)
+  local c = req("GET", ua, hdr)
+  c.uri = p
+  return c
+end
+clean(at("/robots.txt", CHROME), "/robots.txt is a header-poor legit fetch — exempt")
+clean(at("/.well-known/acme-challenge/tokenXYZ", CHROME), "/.well-known/ (ACME/DCV) is exempt")
+clean(at("/.well-known/security.txt", CHROME), "/.well-known/security.txt is exempt")
+-- Control: a normal page path is still measured (the carve-out is path-scoped,
+-- NOT a blanket disable of the tell).
+fires(at("/product/asimenio-dachtylidi/", CHROME), "a normal page path still trips the tell")
+
+-- ── Negatives: self-declared monitoring bot named in CRAWLER_UA_TOKENS ───────
+-- SleepBot carries a Chrome/ token (so it would trip the tell) but self-declares
+-- as SleepBot; it is exempted by its NAMED token, not a generic +http escape
+-- (which would hand an attacker a one-substring skip of the shadow).
+clean(req("GET", "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; " ..
+                 "SleepBot/1.0; +http://sleepbot.com/) Chrome/131.0.0.0 Safari/537.36"),
+      "SleepBot self-declares (named token) — kept out of the shadow")
+
 if fails > 0 then
   io.stderr:write(("cfm_waf fetch-metadata tests: %d FAILED\n"):format(fails))
   os.exit(1)

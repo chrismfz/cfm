@@ -206,7 +206,8 @@ shared with the vhost lane:
       (`detect_fetch_metadata_missing`), Go-parity in `waf_rule_ids.go`. Fires when
       a UA claims a Sec-Fetch-capable browser (Chrome ≥ 76 / Firefox ≥ 90) but a
       `text/html` `GET`|`HEAD` nav carries no `Sec-Fetch-*` AND no `Accept-Language`;
-      honest CLI clients and self-declared crawlers never match; Safari excluded
+      honest CLI clients, self-declared crawlers (named tokens) and infra paths
+      (`/robots.txt`, `/.well-known/*`) never match; Safari excluded
       (16.4+ only). logonly SHADOW — surfaced by `waf_activity` (filter
       `rule=WAF_FETCH_METADATA`; `waf_fp_hunt` is panel-WAF-only), un-armed in
       `waf_security` (no edge-block rule), placed LAST so it never masks a stronger
