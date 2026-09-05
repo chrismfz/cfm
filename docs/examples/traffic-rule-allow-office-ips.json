@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "priority": 15,
+  "scope": {
+    "vhosts": ["shop.example.com"]
+  },
+  "match": {
+    "ip_any": ["203.0.113.0/24", "198.51.100.7", "2001:db8::/48"]
+  },
+  "action": {
+    "type": "allow"
+  },
+  "note": "Office / monitoring ranges skip the rules below (does not bypass WAF, challenge or IP blocks)"
+}

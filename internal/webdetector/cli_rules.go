@@ -274,6 +274,12 @@ func rulesMatchSummary(m TrafficRuleMatch) string {
 	if len(m.CountryIn) > 0 {
 		parts = append(parts, "cc="+strings.Join(m.CountryIn, ","))
 	}
+	if len(m.CountryNotIn) > 0 {
+		parts = append(parts, "cc!="+strings.Join(m.CountryNotIn, ","))
+	}
+	if len(m.IPAny) > 0 {
+		parts = append(parts, "ip="+strings.Join(m.IPAny, ","))
+	}
 	if len(m.Methods) > 0 {
 		parts = append(parts, "m="+strings.Join(m.Methods, ","))
 	}

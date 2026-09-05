@@ -338,3 +338,133 @@ func TestTrafficRuleUA_DashMeansNoUserAgent(t *testing.T) {
 		}
 	}
 }
+
+// TestTrafficRuleCountryNotIn: "everyone except GR/CY" as ONE rule. An empty
+// country ("") is the edge's fail-open sentinel (geo down / cache miss /
+// cfm_panel.lua) and must NOT match, or a geo hiccup would 403 every visitor.
+func TestTrafficRuleCountryNotIn(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	if _, err := s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 900,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:    TrafficRuleMatch{CountryNotIn: []string{"gr", "CY"}},
+		Action:   TrafficRuleAction{Type: TrafficActionBlock},
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	for _, tc := range []struct {
+		cc   string
+		want bool
+	}{{"GR", false}, {"cy", false}, {"US", true}, {"", false}} {
+		got := s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", Country: tc.cc}).Matched
+		if got != tc.want {
+			t.Fatalf("country=%q matched=%v want=%v", tc.cc, got, tc.want)
+		}
+	}
+	// Persisted upper-cased, and the two country fields are mutually exclusive.
+	rows := newTrafficRuleStore(s.path).List()
+	if len(rows) != 1 || len(rows[0].Match.CountryNotIn) != 2 || rows[0].Match.CountryNotIn[0] != "GR" {
+		t.Fatalf("unexpected persisted not_in: %#v", rows)
+	}
+	if _, err := s.Add(TrafficRule{
+		Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:  TrafficRuleMatch{CountryIn: []string{"GR"}, CountryNotIn: []string{"US"}},
+		Action: TrafficRuleAction{Type: TrafficActionBlock},
+	}); err == nil {
+		t.Fatalf("expected country_in + country_not_in to be rejected")
+	}
+	if _, err := s.Add(TrafficRule{
+		Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:  TrafficRuleMatch{CountryNotIn: []string{"GRE"}},
+		Action: TrafficRuleAction{Type: TrafficActionBlock},
+	}); err == nil {
+		t.Fatalf("expected 3-letter code in country_not_in to be rejected")
+	}
+}
+
+// TestTrafficRuleIPAny: IPv4/IPv6 CIDR + bare-address matching, canonical
+// storage, and the fail-closed behaviour for a missing/invalid client IP.
+func TestTrafficRuleIPAny(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	r, err := s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 15,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:    TrafficRuleMatch{IPAny: []string{"203.0.113.0/24", " 198.51.100.7 ", "2001:db8:abcd::1/48", "203.0.113.128/25", "::ffff:192.0.2.9", "::ffff:192.0.2.0/120"}},
+		Action:   TrafficRuleAction{Type: TrafficActionAllow},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	// v4-mapped entries are canonicalised to plain v4 so they can actually match.
+	want := []string{"203.0.113.0/24", "198.51.100.7/32", "2001:db8:abcd::/48", "203.0.113.128/25", "192.0.2.9/32", "192.0.2.0/24"}
+	if len(r.Match.IPAny) != len(want) {
+		t.Fatalf("stored ip_any %#v want %#v", r.Match.IPAny, want)
+	}
+	for i := range want {
+		if r.Match.IPAny[i] != want[i] {
+			t.Fatalf("stored ip_any[%d]=%q want %q", i, r.Match.IPAny[i], want[i])
+		}
+	}
+	cases := []struct {
+		ip   string
+		want bool
+	}{
+		{"203.0.113.9", true},
+		{"203.0.113.200", true},
+		{"198.51.100.7", true},
+		{"198.51.100.8", false},
+		{"2001:db8:abcd:1::5", true},
+		{"2001:db8:abce::1", false},
+		{"::ffff:203.0.113.9", true}, // v4-mapped v6 is unmapped before matching
+		{"192.0.2.9", true},           // stored from "::ffff:192.0.2.9"
+		{"192.0.2.77", true},          // stored from "::ffff:192.0.2.0/120" → /24
+		{"[2001:db8:abcd::7]", true},  // bracketed v6 tolerated
+		{"", false},
+		{"not-an-ip", false},
+	}
+	for _, sto := range []*trafficRuleStore{s, newTrafficRuleStore(s.path)} {
+		for _, tc := range cases {
+			got := sto.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", IP: tc.ip}).Matched
+			if got != tc.want {
+				t.Fatalf("ip=%q matched=%v want=%v", tc.ip, got, tc.want)
+			}
+		}
+	}
+	for _, bad := range []string{"203.0.113.0/33", "1.2.3", "2001:db8::/129", "example.com", "::ffff:192.0.2.0/95", "01.2.3.4", "1.2.3.4/024"} {
+		if _, err := s.Add(TrafficRule{
+			Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+			Match:  TrafficRuleMatch{IPAny: []string{bad}},
+			Action: TrafficRuleAction{Type: TrafficActionAllow},
+		}); err == nil {
+			t.Fatalf("expected %q to be rejected", bad)
+		}
+	}
+}
+
+// TestTrafficRuleIPAny_ComposesWithGeoFence: office range allow (15) → good bots
+// allow (10 already) → block country_not_in (900): the Phase-2 geo-fence recipe.
+func TestTrafficRuleIPAny_ComposesWithGeoFence(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	add := func(pr int, m TrafficRuleMatch, act string) {
+		if _, err := s.Add(TrafficRule{Enabled: true, Priority: pr, Scope: TrafficRuleScope{Vhosts: []string{"shop.gr"}}, Match: m, Action: TrafficRuleAction{Type: act}}); err != nil {
+			t.Fatalf("add %d: %v", pr, err)
+		}
+	}
+	add(15, TrafficRuleMatch{IPAny: []string{"203.0.113.0/24"}}, TrafficActionAllow)
+	add(900, TrafficRuleMatch{CountryNotIn: []string{"GR", "CY"}}, TrafficActionBlock)
+	for _, tc := range []struct {
+		ip, cc, want string
+	}{
+		{"203.0.113.5", "US", TrafficActionAllow}, // office from abroad
+		{"198.51.100.1", "US", TrafficActionBlock},
+		{"198.51.100.1", "GR", ""},
+		{"198.51.100.1", "", ""}, // unknown geo is fail-open: never fenced out
+	} {
+		res := s.Simulate(TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: tc.ip, Country: tc.cc})
+		if res.Action != tc.want {
+			t.Fatalf("ip=%s cc=%q action=%q want %q", tc.ip, tc.cc, res.Action, tc.want)
+		}
+	}
+}

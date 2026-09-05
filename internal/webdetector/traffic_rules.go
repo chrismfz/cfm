@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -38,14 +39,26 @@ type TrafficRuleScope struct {
 
 type TrafficRuleMatch struct {
 	CountryIn []string `json:"country_in,omitempty"`
-	UAAny     []string `json:"ua_any,omitempty"`
-	PathAny   []string `json:"path_any,omitempty"`
-	Methods   []string `json:"methods,omitempty"`
+	// CountryNotIn matches when the request's country is known AND not one
+	// of these. An empty country ("") is the edge's fail-open sentinel — geo
+	// module down, DB mid-reload, enrich-cache miss, or cfm_panel.lua which
+	// always sends "" — so it deliberately does NOT match (same fail-open
+	// contract as CountryIn): a geo hiccup must never turn a not_in fence into
+	// a block of every visitor. Mutually exclusive with CountryIn.
+	CountryNotIn []string `json:"country_not_in,omitempty"`
+	// IPAny matches when the client IP is inside any of these prefixes
+	// (IPv4/IPv6 CIDR; a bare address is a /32 or /128). Stored canonical
+	// (netip.Prefix.Masked().String()). An unparsable request IP never matches.
+	IPAny   []string `json:"ip_any,omitempty"`
+	UAAny   []string `json:"ua_any,omitempty"`
+	PathAny []string `json:"path_any,omitempty"`
+	Methods []string `json:"methods,omitempty"`
 	// Query-string guards (both optional, evaluated only when set)
-	HasQS    bool   `json:"has_qs,omitempty"`    // true → rule only fires when QS is present
-	QSNotRx  string `json:"qs_not_rx,omitempty"` // if set, pass-through when QS matches this pattern
+	HasQS   bool   `json:"has_qs,omitempty"`    // true → rule only fires when QS is present
+	QSNotRx string `json:"qs_not_rx,omitempty"` // if set, pass-through when QS matches this pattern
 
 	qsNotRxCompiled *regexp.Regexp // pre-compiled from QSNotRx; set by normalizeTrafficRule
+	ipAnyCompiled   []netip.Prefix // parsed from IPAny; set by normalizeTrafficRule
 }
 
 type TrafficRuleAction struct {
@@ -66,12 +79,12 @@ type TrafficRule struct {
 }
 
 type TrafficRuleEvalInput struct {
-	Host    string `json:"host"`
-	IP      string `json:"ip,omitempty"`
-	UA      string `json:"ua,omitempty"`
-	Path    string `json:"path,omitempty"`
-	Method  string `json:"method,omitempty"`
-	Country string `json:"country,omitempty"`
+	Host        string `json:"host"`
+	IP          string `json:"ip,omitempty"`
+	UA          string `json:"ua,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Method      string `json:"method,omitempty"`
+	Country     string `json:"country,omitempty"`
 	QueryString string `json:"qs,omitempty"` // raw query string, no leading '?'
 }
 
@@ -206,6 +219,13 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 	ua := strings.ToLower(strings.TrimSpace(in.UA))
 	method := strings.ToUpper(strings.TrimSpace(in.Method))
 	country := strings.ToUpper(strings.TrimSpace(in.Country))
+	// Parse the client IP once; Unmap so a v4-mapped v6 address ("::ffff:a.b.c.d")
+	// matches v4 prefixes, mirroring normalizeIPList's canonical form.
+	ipAddr, ipErr := netip.ParseAddr(strings.Trim(strings.TrimSpace(in.IP), "[]"))
+	ipOK := ipErr == nil
+	if ipOK {
+		ipAddr = ipAddr.Unmap()
+	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -226,7 +246,7 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 		if !ruleHostMatch(r.Scope.Vhosts, host) {
 			continue
 		}
-		if !ruleMatchFilters(r.Match, country, ua, path, method, in.QueryString) {
+		if !ruleMatchFilters(r.Match, ipAddr, ipOK, country, ua, path, method, in.QueryString) {
 			continue
 		}
 		if !r.Enabled {
@@ -306,6 +326,22 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 	}
 	r.Match.CountryIn = countries
 
+	countriesNot, err := normalizeCodeList(r.Match.CountryNotIn, maxCountriesPerRule, true)
+	if err != nil {
+		return TrafficRule{}, fmt.Errorf("country_not_in: %w", err)
+	}
+	r.Match.CountryNotIn = countriesNot
+	if len(r.Match.CountryIn) > 0 && len(r.Match.CountryNotIn) > 0 {
+		return TrafficRule{}, errors.New("country_in and country_not_in are mutually exclusive")
+	}
+
+	ips, prefixes, err := normalizeIPList(r.Match.IPAny, maxPatternsPerField)
+	if err != nil {
+		return TrafficRule{}, fmt.Errorf("ip_any: %w", err)
+	}
+	r.Match.IPAny = ips
+	r.Match.ipAnyCompiled = prefixes
+
 	uas, err := normalizePatternList(r.Match.UAAny, maxPatternsPerField, false)
 	if err != nil {
 		return TrafficRule{}, fmt.Errorf("ua_any: %w", err)
@@ -324,14 +360,14 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 	}
 	r.Match.Methods = methods
 
-if rx := strings.TrimSpace(r.Match.QSNotRx); rx != "" {
-	compiled, err := regexp.Compile("(?i)" + rx)
-	if err != nil {
-		return TrafficRule{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
+	if rx := strings.TrimSpace(r.Match.QSNotRx); rx != "" {
+		compiled, err := regexp.Compile("(?i)" + rx)
+		if err != nil {
+			return TrafficRule{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
+		}
+		r.Match.QSNotRx = rx
+		r.Match.qsNotRxCompiled = compiled
 	}
-	r.Match.QSNotRx = rx
-	r.Match.qsNotRxCompiled = compiled
-}
 
 	r.Action.Type = strings.ToLower(strings.TrimSpace(r.Action.Type))
 	r.Action.Profile = strings.TrimSpace(r.Action.Profile)
@@ -373,6 +409,64 @@ func normalizeCodeList(in []string, max int, forceUpper bool) ([]string, error) 
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// normalizeIPList parses IPv4/IPv6 addresses and CIDR prefixes into canonical
+// masked prefixes ("1.2.3.4" → "1.2.3.4/32", "2a02:587::1/64" → "2a02:587::/64"),
+// de-duplicated, capped at max. Returns both the strings to persist and the
+// parsed prefixes for matching.
+func normalizeIPList(in []string, max int) ([]string, []netip.Prefix, error) {
+	if len(in) == 0 {
+		return nil, nil, nil
+	}
+	if len(in) > max {
+		return nil, nil, fmt.Errorf("too many values (max %d)", max)
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	prefixes := make([]netip.Prefix, 0, len(in))
+	for _, raw := range in {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		var pfx netip.Prefix
+		if strings.Contains(v, "/") {
+			p, err := netip.ParsePrefix(v)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid CIDR %q", raw)
+			}
+			pfx = p
+			// A v4-mapped v6 prefix ("::ffff:203.0.113.0/120") can never match
+			// (request addresses are Unmap()ed to v4): canonicalise it to the
+			// v4 prefix when it covers whole v4 bits, else reject it.
+			if pfx.Addr().Is4In6() {
+				if pfx.Bits() < 96 {
+					return nil, nil, fmt.Errorf("invalid CIDR %q: v4-mapped prefix shorter than /96", raw)
+				}
+				pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()-96)
+			}
+		} else {
+			a, err := netip.ParseAddr(v)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid IP %q", raw)
+			}
+			a = a.Unmap() // "::ffff:203.0.113.9" → 203.0.113.9/32
+			pfx = netip.PrefixFrom(a, a.BitLen())
+		}
+		pfx = pfx.Masked()
+		key := pfx.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+		prefixes = append(prefixes, pfx)
+	}
+	if len(out) == 0 {
+		return nil, nil, nil
+	}
+	return out, prefixes, nil
 }
 
 func normalizePatternList(in []string, max int, ensurePath bool) ([]string, error) {
@@ -449,14 +543,40 @@ func ruleHostMatch(vhosts []string, host string) bool {
 	return false
 }
 
-
-
-
-func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) bool {
+// ruleMatchFilters evaluates one rule's match block. ip/ipOK come from a single
+// parse in Simulate (the client IP is the same for every rule).
+func ruleMatchFilters(m TrafficRuleMatch, ip netip.Addr, ipOK bool, country, ua, path, method, qs string) bool {
 	if len(m.CountryIn) > 0 {
 		ok := false
 		for _, cc := range m.CountryIn {
 			if country == cc {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	if len(m.CountryNotIn) > 0 {
+		// Unknown country ("") never matches — see the CountryNotIn field
+		// comment: "" is the fail-open sentinel, not "definitely elsewhere".
+		if country == "" {
+			return false
+		}
+		for _, cc := range m.CountryNotIn {
+			if country == cc {
+				return false
+			}
+		}
+	}
+	if len(m.ipAnyCompiled) > 0 {
+		if !ipOK {
+			return false // no/invalid client IP → an IP condition cannot match
+		}
+		ok := false
+		for _, pfx := range m.ipAnyCompiled {
+			if pfx.Contains(ip) { // false across families (v4 addr vs v6 prefix)
 				ok = true
 				break
 			}
@@ -550,12 +670,6 @@ func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) 
 	}
 	return true
 }
-
-
-
-
-
-
 
 // pathPatternMatch applies the two path-matching rules used by ruleMatchFilters
 // to the path portion of a pattern (the segment before any '?'): a wildcard

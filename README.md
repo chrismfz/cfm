@@ -1770,9 +1770,24 @@ The Web Detector exposes a local API used by the CLI and integrations (`API_LIST
 See ready-to-use files under `docs/examples/`:
 
 - `traffic-rule-allow-verified-crawler.json`
-- `traffic-rule-block-country.json`
+- `traffic-rule-allow-office-ips.json` (`ip_any`)
+- `traffic-rule-block-country.json` (`country_in`)
+- `traffic-rule-block-outside-countries.json` (`country_not_in` geo-fence)
 - `traffic-rule-challenge-login.json`
 - `traffic-rule-throttle-meta.json`
+
+Match fields (all optional; set fields are AND'd, values inside a list are OR'd;
+an empty `match` matches every request on the scoped vhosts):
+
+| Field | Matches when… | Notes |
+|---|---|---|
+| `country_in` | the client's country is one of the codes | ISO 3166-1 alpha-2, ≤20 |
+| `country_not_in` | the client's country is known and **not** one of the codes | mutually exclusive with `country_in`; an unknown country (`""` — geo not resolved / geo module down / panel requests) does **not** match, so a geo hiccup never turns the fence into a block of everyone |
+| `ip_any` | the client IP is inside one of the IPv4/IPv6 CIDRs | a bare address is `/32` / `/128`; stored masked+canonical (v4-mapped v6 becomes plain v4); no/invalid client IP never matches |
+| `ua_any` | the User-Agent matches a case-insensitive `*`-glob, or contains the value when it has no wildcard | a lone `-` means "no User-Agent header" |
+| `path_any` | the decoded path has the value as a prefix (or matches the glob); a `?k=v` suffix matches per query parameter | |
+| `methods` | the HTTP method is listed | |
+| `has_qs` / `qs_not_rx` | a query string is present / the query does **not** match the RE2 regex | `qs_not_rx` applies whenever a query is present, independently of `has_qs` |
 
 Quick API examples:
 

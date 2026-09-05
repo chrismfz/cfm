@@ -1,0 +1,14 @@
+{
+  "enabled": false,
+  "priority": 900,
+  "scope": {
+    "vhosts": ["shop.example.com"]
+  },
+  "match": {
+    "country_not_in": ["GR", "CY"]
+  },
+  "action": {
+    "type": "block"
+  },
+  "note": "Geo-fence: block everyone outside GR/CY (start disabled; an unknown country never matches, so a geo outage fails open)"
+}
