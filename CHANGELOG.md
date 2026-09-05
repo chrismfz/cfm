@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.05
+
 ### Fixed
 - **IP enrichment: a failed reverse-DNS lookup was pinned empty for 24 h.**
   `Lookup` cached the whole Result (with `PTR: ""`) for the geo TTL after a
