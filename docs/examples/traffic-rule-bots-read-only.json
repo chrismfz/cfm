@@ -1,0 +1,30 @@
+{
+  "enabled": true,
+  "priority": 350,
+  "scope": {
+    "vhosts": [
+      "shop.example.com"
+    ]
+  },
+  "match": {
+    "ua_any": [
+      "*facebookexternalhit*",
+      "*meta-externalagent*",
+      "*Twitterbot*",
+      "*LinkedInBot*",
+      "*Slackbot*",
+      "*WhatsApp*",
+      "*TelegramBot*"
+    ],
+    "methods": [
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE"
+    ]
+  },
+  "action": {
+    "type": "block"
+  },
+  "note": "recipe:bots_read_only - social preview bots never write. No verified_bot allow in front on purpose: Meta's crawler is FCrDNS-verified too and would slip through. Search engines are out of the default groups (Googlebot POSTs while rendering)."
+}
