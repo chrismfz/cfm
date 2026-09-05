@@ -2,6 +2,7 @@ package webdetector
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -438,11 +439,14 @@ func TestNginxBridgeDecision_VerifiedBotFromCache(t *testing.T) {
 	}
 
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
-	b.RuleDecision = store.Simulate
+	// Wire through the Engine exactly as production does (engine.go), so the
+	// hot-path assertions below cover Engine.TrafficRuleSimulate, not just the store.
+	eng := &Engine{trafficRules: store, nginxBridge: b, simulatePTRFn: func(ip string) string { return "crawl.googlebot.com." }}
+	b.RuleDecision = eng.TrafficRuleSimulate
 	gateCalls := 0
 	b.RuleNeedsVerifiedBot = func(host string) bool { gateCalls++; return store.NeedsVerifiedBotFor(host) }
 	var inlineVerify atomic.Bool
-	b.goodBot.verify = func(ptr, ip string) (string, bool) { inlineVerify.Store(true); return "", true }
+	b.goodBot.verify = func(ptr, ip string) (string, bool) { inlineVerify.Store(true); return "googlebot", true }
 	b.goodBot.store("66.249.66.1", "googlebot", time.Now()) // verdict already cached
 	b.goodBot.store("74.125.1.1", "google", time.Now())     // generic *.google.com: NOT a crawler for rules
 
@@ -476,8 +480,21 @@ func TestNginxBridgeDecision_VerifiedBotFromCache(t *testing.T) {
 	if gateCalls == 0 {
 		t.Fatalf("the per-host gate must be consulted")
 	}
+	// A cache-miss IP on the hot path: no enricher (b.enr nil) → ptr "" → no
+	// verify; and even with a PTR it would be async. Either way: never inline.
+	time.Sleep(20 * time.Millisecond)
 	if inlineVerify.Load() {
 		t.Fatalf("hot path must never verify inline")
+	}
+	// The simulate API entry point DOES resolve inline (bounded) for the same IP.
+	api := eng.TrafficRuleSimulateForAPI(context.Background(), TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: "66.249.70.5"})
+	if !inlineVerify.Load() || api.VerifiedBot != "googlebot" || api.Rule.ID != "r_bots" {
+		t.Fatalf("simulate API must resolve the verdict inline: %+v inline=%v", api, inlineVerify.Load())
+	}
+	// …and the excluded generic verdict is reported as such, not as "not verified".
+	excl := eng.TrafficRuleSimulateForAPI(context.Background(), TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: "74.125.1.1", UA: "Mozilla/5.0 (compatible; Googlebot/2.1)"})
+	if excl.VerifiedBot != "" || excl.VerifiedBotExcluded != "google" || excl.Rule.ID != "r_fence" {
+		t.Fatalf("excluded verdict must be echoed: %+v", excl)
 	}
 
 	// A rule on ANOTHER host must not make this host pay for good-bot lookups.

@@ -238,12 +238,20 @@ func parseRulesSimulateFlags(args []string) (TrafficRuleEvalInput, error) {
 			i++
 		case strings.HasPrefix(a, "--qs="):
 			in.QueryString = strings.TrimPrefix(a, "--qs=")
-		case a == "--verified-bot":
+		case a == "--verified-bot" && next != "" && !strings.HasPrefix(next, "--"):
 			// Override: evaluate as if the IP were an FCrDNS-verified crawler
-			// (default name googlebot; --verified-bot=<name> to pick another).
-			in.VerifiedBot = "googlebot"
+			// of the given name (--verified-bot googlebot / --verified-bot=meta).
+			in.VerifiedBot = next
+			i++
+		case a == "--verified-bot":
+			in.VerifiedBot = "googlebot" // bare flag: the common case
 		case strings.HasPrefix(a, "--verified-bot="):
 			in.VerifiedBot = strings.TrimPrefix(a, "--verified-bot=")
+		default:
+			if strings.HasPrefix(a, "-") {
+				return TrafficRuleEvalInput{}, fmt.Errorf("unknown flag %q", a)
+			}
+			return TrafficRuleEvalInput{}, fmt.Errorf("unexpected argument %q", a)
 
 		}
 	}
@@ -272,9 +280,12 @@ func runRulesSimulate(baseURL string, in TrafficRuleEvalInput) error {
 		fmt.Printf("Disabled rule id=%s priority=%d action=%s would match if enabled (not enforced).\n",
 			d.ID, d.Priority, d.Action.Type)
 	}
-	if out.VerifiedBot != "" {
+	switch {
+	case out.VerifiedBot != "":
 		fmt.Printf("Verified crawler: %s (verified_bot rules can match).\n", out.VerifiedBot)
-	} else if strings.TrimSpace(in.IP) != "" {
+	case out.VerifiedBotExcluded != "":
+		fmt.Printf("Verified crawler: reverse DNS forward-confirmed as %q, which is deliberately NOT a crawler for rules (Google user-driven fetchers: Translate/AMP proxies); verified_bot rules do not match.\n", out.VerifiedBotExcluded)
+	case strings.TrimSpace(in.IP) != "":
 		fmt.Println("Verified crawler: no (verified_bot rules do not match; pass --verified-bot to test the crawler path).")
 	}
 	return nil

@@ -127,8 +127,12 @@ type TrafficRuleEvalResult struct {
 	DisabledMatch *TrafficRule `json:"disabled_match,omitempty"`
 	// VerifiedBot echoes the good-bot verdict the evaluation used ("" = the
 	// request was not treated as a verified crawler), so the simulator can say
-	// why a verified_bot rule did or did not match.
-	VerifiedBot string `json:"verified_bot,omitempty"`
+	// why a verified_bot rule did or did not match. VerifiedBotExcluded carries
+	// a verdict that forward-confirmed but is deliberately NOT a crawler for
+	// rules (the generic "google" — Translate/AMP proxies), so the UI can say
+	// "verified, but excluded" instead of "did not forward-confirm".
+	VerifiedBot         string `json:"verified_bot,omitempty"`
+	VerifiedBotExcluded string `json:"verified_bot_excluded,omitempty"`
 }
 
 type trafficRuleStore struct {
@@ -332,7 +336,12 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 	if ipOK {
 		ipAddr = ipAddr.Unmap()
 	}
-	verifiedBot := verifiedBotForRules(in.VerifiedBot)
+	rawVerifiedBot := strings.ToLower(strings.TrimSpace(in.VerifiedBot))
+	verifiedBot := verifiedBotForRules(rawVerifiedBot)
+	verifiedBotExcluded := ""
+	if rawVerifiedBot != "" && verifiedBot == "" {
+		verifiedBotExcluded = rawVerifiedBot
+	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -372,15 +381,16 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 			continue
 		}
 		return TrafficRuleEvalResult{
-			Matched:       true,
-			Rule:          r,
-			Action:        r.Action.Type,
-			Profile:       r.Action.Profile,
-			DisabledMatch: disabled,
-			VerifiedBot:   verifiedBot,
+			Matched:             true,
+			Rule:                r,
+			Action:              r.Action.Type,
+			Profile:             r.Action.Profile,
+			DisabledMatch:       disabled,
+			VerifiedBot:         verifiedBot,
+			VerifiedBotExcluded: verifiedBotExcluded,
 		}
 	}
-	return TrafficRuleEvalResult{Matched: false, DisabledMatch: disabled, VerifiedBot: verifiedBot}
+	return TrafficRuleEvalResult{Matched: false, DisabledMatch: disabled, VerifiedBot: verifiedBot, VerifiedBotExcluded: verifiedBotExcluded}
 }
 
 func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) {

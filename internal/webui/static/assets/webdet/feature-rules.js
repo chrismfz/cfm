@@ -200,6 +200,9 @@ export const rulesMixin = {
           ? `Treated as a verified crawler (${r.verified_bot}) because the override is ticked.`
           : `IP verified as crawler "${r.verified_bot}" (reverse DNS forward-confirmed).`;
       }
+      if (r.verified_bot_excluded) {
+        return `Reverse DNS forward-confirmed as "${r.verified_bot_excluded}", which is deliberately NOT a crawler for rules (Google's user-driven fetchers: Translate / AMP proxies). verified_bot rules do not match it — by design, not a DNS problem.`;
+      }
       if (!String(this.simulateForm.ip || "").trim()) {
         return "No IP in the sample, so crawler verification was not attempted: verified_bot rules cannot match it. Add the crawler's IP, or tick the override.";
       }

@@ -174,6 +174,7 @@ All additive JSON fields; absent = current behaviour. Each ships with
 | `match.verified_bot bool` — **landed** | the good-bot allow in recipes must not be UA-glob based (F7) | Reuses `b.goodBot.verified(ip, ptrFn, now)` (cache-only on the hot path, consulted only while an enabled rule uses the field); the simulate API resolves inline via `verifiedSync` and honours a caller override. |
 | `POST rules/simulate` accepts `draft` (an unsaved rule) and returns `trace []` | "Test this draft" and shadowing hints | Trace row: `{id, priority, matched, skipped_by: "country"|"path"|…}`. Scope check: `draft.scope.vhosts` must pass `scopeAllowsVhosts`. |
 | `group string` on the rule | list/toggle/remove a recipe as a unit | Phase 1 uses `note` prefix; promote when the recipes stabilise. |
+| Persist positive good-bot verdicts across restarts | with `verified_bot` a first-seen crawler IP gets the fence's action once; after a daemon restart that is every crawler IP again | The enrich layer already has a persistent PTR store (`sharedPTRStore`); seed the good-bot cache from it or persist `(ip, name, until)` for positives. Follow-up to Phase 2b. |
 | `rule_id` on the challenge route log line | hit counters (F11) | one-line `cfm.lua` change. |
 
 Deliberately **not** proposed: making `allow` bypass challenge/WAF. That

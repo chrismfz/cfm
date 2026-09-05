@@ -10,6 +10,7 @@ import {
   UNVERIFIABLE_BOT_UAS,
   VERIFIED_BOT_LABEL,
   VERIFIED_BOT_NAMES,
+  VERIFIED_BOT_UA_GLOBS,
   buildRulePayload,
   describeMatch,
   describeRule,
@@ -324,6 +325,8 @@ test("verified_bot: payload, round-trip, description, sample request, hints", ()
   assert.equal(on.errors.length, 0);
   assert.ok(VERIFIED_BOT_NAMES.includes("googlebot") && VERIFIED_BOT_NAMES.includes("meta"));
   assert.ok(!VERIFIED_BOT_NAMES.includes("google"), "generic google verdict is excluded for rules");
+  assert.deepEqual(Object.keys(VERIFIED_BOT_UA_GLOBS).sort(), [...VERIFIED_BOT_NAMES].sort(), "every verifiable crawler has its UA globs listed (single source for the unverifiable set)");
+  for (const globs of Object.values(VERIFIED_BOT_UA_GLOBS)) for (const g of globs) assert.ok(!UNVERIFIABLE_BOT_UAS.includes(g), `${g} is verifiable`);
   for (const n of VERIFIED_BOT_NAMES) assert.ok(VERIFIED_BOT_LABEL.length && !VERIFIED_BOT_LABEL.includes(`, ${n},`), `label uses display names, not raw key ${n}`);
   assert.match(VERIFIED_BOT_LABEL, /Googlebot/);
   // tame_bots allows crawlers by FCrDNS too, plus the unverifiable ones by UA

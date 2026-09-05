@@ -263,6 +263,6 @@ func (e *Engine) handleWebdetRulesSimulate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	res := e.TrafficRuleSimulate(req)
+	res := e.TrafficRuleSimulateForAPI(r.Context(), req)
 	writeJSON(w, http.StatusOK, res)
 }

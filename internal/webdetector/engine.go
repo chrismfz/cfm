@@ -420,6 +420,9 @@ type Engine struct {
 	longwin *LongWindow
 	scorer  Scorer
 	enr     *enrich.Enricher
+	// simulatePTRFn overrides the PTR resolver used by TrafficRuleSimulateForAPI
+	// (tests only; nil = enrich.Lookup).
+	simulatePTRFn func(ip string) string
 
 	lastFeed time.Time  // last time we fed long-window
 	ipLong   *ipLongMem // long-window IP aggregates (EMA)
@@ -3973,18 +3976,43 @@ func (e *Engine) TrafficRuleSimulate(in TrafficRuleEvalInput) TrafficRuleEvalRes
 			in.Country = geo.CountryISO
 		}
 	}
-	// verified_bot: resolve synchronously for the API caller (an operator
-	// testing a rule wants a definitive answer, and this path is not the
-	// decision hot path). A caller-supplied value is honoured verbatim so the
-	// UI can "simulate as a verified crawler" for an IP that is not one. The
-	// bridge's own decisions never reach this branch: they fill VerifiedBot
-	// from the cache-only verified() before calling RuleDecision.
-	// Gated on ANY verified_bot rule (a rule saved disabled must be testable
-	// too); the PTR is resolved lazily, only on a good-bot cache miss.
-	if strings.TrimSpace(in.VerifiedBot) == "" && strings.TrimSpace(in.IP) != "" &&
-		e.trafficRules.HasVerifiedBotRules() && e.nginxBridge != nil && e.nginxBridge.goodBot != nil && e.enr != nil {
-		ip := strings.TrimSpace(in.IP)
-		in.VerifiedBot = e.nginxBridge.goodBot.verifiedSync(ip, func() string { return e.enr.Lookup(ip).PTR }, time.Now())
-	}
+	// verified_bot is NOT resolved here: this function is the nginx bridge's
+	// RuleDecision (decision hot path), which fills in.VerifiedBot from the
+	// cache-only good-bot check before calling. The inline FCrDNS resolution
+	// for operators lives in TrafficRuleSimulateForAPI only.
 	return e.trafficRules.Simulate(in)
+}
+
+// TrafficRuleSimulateForAPI is the /api/v1/webdet/rules/simulate entry point:
+// TrafficRuleSimulate plus an inline (bounded) FCrDNS resolution of the
+// verified_bot verdict, so an operator testing a rule gets a definitive answer
+// instead of "not verified yet". A caller-supplied verified_bot is honoured
+// verbatim ("simulate as a crawler"). Gated on ANY verified_bot rule — a rule
+// saved disabled must be testable too — and the PTR is resolved lazily, only on
+// a good-bot cache miss. Never wire this as the bridge's RuleDecision.
+func (e *Engine) TrafficRuleSimulateForAPI(ctx context.Context, in TrafficRuleEvalInput) TrafficRuleEvalResult {
+	if e == nil || e.trafficRules == nil {
+		return TrafficRuleEvalResult{Matched: false}
+	}
+	if strings.TrimSpace(in.VerifiedBot) == "" && strings.TrimSpace(in.IP) != "" &&
+		e.trafficRules.HasVerifiedBotRules() && e.nginxBridge != nil && e.nginxBridge.goodBot != nil {
+		ip := strings.TrimSpace(in.IP)
+		if ptrFn := e.simulatePTRLookup(ip); ptrFn != nil {
+			in.VerifiedBot = e.nginxBridge.goodBot.verifiedSync(ctx, ip, ptrFn, time.Now())
+		}
+	}
+	return e.TrafficRuleSimulate(in)
+}
+
+// simulatePTRLookup returns the lazy PTR resolver the simulate API uses for the
+// verified_bot check: the injectable hook when set (tests), else the enrich
+// layer's synchronous Lookup, else nil (no resolver → verdict stays "").
+func (e *Engine) simulatePTRLookup(ip string) func() string {
+	if e.simulatePTRFn != nil {
+		return func() string { return e.simulatePTRFn(ip) }
+	}
+	if e.enr == nil {
+		return nil
+	}
+	return func() string { return e.enr.Lookup(ip).PTR }
 }

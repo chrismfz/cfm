@@ -85,11 +85,21 @@ const VERIFIED_BOT_DISPLAY = Object.freeze({
 });
 export const VERIFIED_BOT_LABEL = VERIFIED_BOT_NAMES.map((n) => VERIFIED_BOT_DISPLAY[n] || n).join(", ");
 
-// UA globs of the well-known search/social bots the daemon CANNOT verify by
-// reverse DNS (no registry suffix). Recipes that allow verified crawlers add a
-// second, explicitly weaker UA-based allow for these so link previews and
-// indexing from them keep working — forgeable, and said so in the warning.
-const VERIFIABLE_UA_GLOBS = new Set(["*Googlebot*", "*bingbot*", "*Applebot*", "*YandexBot*", "*facebookexternalhit*", "*meta-externalagent*"]);
+// The User-Agent globs each VERIFIABLE crawler announces itself with (keyed by
+// VERIFIED_BOT_NAMES, so it cannot drift from the registry: the test asserts
+// the keys match). Everything else in the search/social bot groups is a bot the
+// daemon CANNOT verify by reverse DNS; recipes that allow verified crawlers add
+// a second, explicitly weaker UA-based allow for those so link previews and
+// indexing keep working — forgeable, and said so in the warning.
+export const VERIFIED_BOT_UA_GLOBS = Object.freeze({
+  googlebot: ["*Googlebot*"],
+  bingbot: ["*bingbot*"],
+  yahoo: ["*Slurp*"],
+  applebot: ["*Applebot*"],
+  yandex: ["*YandexBot*"],
+  meta: ["*facebookexternalhit*", "*meta-externalagent*"],
+});
+const VERIFIABLE_UA_GLOBS = new Set(Object.values(VERIFIED_BOT_UA_GLOBS).flat());
 
 
 // ── Priority bands ────────────────────────────────────────────────────────
@@ -715,7 +725,7 @@ export const RECIPES = Object.freeze([
     ],
     warnings: [
       "The block rule is created DISABLED. Test with the simulator, then enable it from the table.",
-      `Rule #10 allows crawlers by reverse-DNS verification (${VERIFIED_BOT_LABEL}) — cannot be forged. A crawler IP seen for the first time is verified in the background and may get the fence's action once before it passes.`,
+      `Rule #10 allows crawlers by reverse-DNS verification (${VERIFIED_BOT_LABEL}) — cannot be forged. A crawler IP seen for the first time (and every crawler IP right after a cfm restart) is verified in the background and may get the fence's action once before it passes.`,
       "Rule #11 allows the search/social bots that have no verifiable reverse DNS (DuckDuckGo, Baidu, X/Twitter, LinkedIn, Slack, WhatsApp, Telegram previews) by User-Agent only — forgeable; delete it if you would rather fence those too.",
       "Visitors whose country cannot be resolved are NOT blocked (the fence fails open, so a geo outage never locks everyone out). Office/monitoring ranges are still worth listing: they skip every rule below.",
       "Browsers that already hold a clearance cookie for the vhost keep access until it expires.",

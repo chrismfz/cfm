@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -244,7 +245,7 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 	}
 	ptrCalls := 0
 	ptr := func(v string) func() string { return func() string { ptrCalls++; return v } }
-	if got := s.verifiedSync("66.249.66.1", ptr("crawl-66-249-66-1.googlebot.com."), now); got != "googlebot" {
+	if got := s.verifiedSync(context.Background(), "66.249.66.1", ptr("crawl-66-249-66-1.googlebot.com."), now); got != "googlebot" {
 		t.Fatalf("sync verify: got %q", got)
 	}
 	if calls != 1 || ptrCalls != 1 {
@@ -254,13 +255,13 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 	if got := s.verified("66.249.66.1", func() string { t.Errorf("ptrFn must not run on a cache hit"); return "" }, now); got != "googlebot" {
 		t.Fatalf("cache hit: got %q", got)
 	}
-	if got := s.verifiedSync("66.249.66.1", func() string { t.Errorf("ptrFn must not run on a cache hit"); return "" }, now); got != "googlebot" {
+	if got := s.verifiedSync(context.Background(), "66.249.66.1", func() string { t.Errorf("ptrFn must not run on a cache hit"); return "" }, now); got != "googlebot" {
 		t.Fatalf("sync cache hit: got %q", got)
 	}
-	if got := s.verifiedSync("1.2.3.4", ptr("1-2-3-4.some-isp.example."), now); got != "" || calls != 1 {
+	if got := s.verifiedSync(context.Background(), "1.2.3.4", ptr("1-2-3-4.some-isp.example."), now); got != "" || calls != 1 {
 		t.Fatalf("non-candidate PTR must not verify: got %q calls=%d", got, calls)
 	}
-	if got := s.verifiedSync("9.9.9.9", ptr("x.googlebot.com."), now); got != "" || calls != 2 {
+	if got := s.verifiedSync(context.Background(), "9.9.9.9", ptr("x.googlebot.com."), now); got != "" || calls != 2 {
 		t.Fatalf("transient: got %q calls=%d", got, calls)
 	}
 	s.mu.RLock()
@@ -269,7 +270,7 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 	if cached {
 		t.Fatalf("inconclusive verify must not be cached")
 	}
-	if got := s.verifiedSync("5.5.5.5", ptr("spoof.googlebot.com."), now); got != "" {
+	if got := s.verifiedSync(context.Background(), "5.5.5.5", ptr("spoof.googlebot.com."), now); got != "" {
 		t.Fatalf("spoofed PTR must not verify: %q", got)
 	}
 	// The verdict is reported from the verifier, not re-read from a cache that
@@ -279,18 +280,21 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 	for i := 0; i < goodBotIPCacheCap; i++ {
 		full.store(fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255), "googlebot", now)
 	}
-	if got := full.verifiedSync("66.249.99.9", ptr("x.googlebot.com."), now); got != "googlebot" {
+	if got := full.verifiedSync(context.Background(), "66.249.99.9", ptr("x.googlebot.com."), now); got != "googlebot" {
 		t.Fatalf("verdict must survive a full cache: got %q", got)
 	}
 	// Verify slots are bounded: with every slot taken, verifiedSync waits
-	// instead of fanning out, and proceeds once a slot frees.
+	// (bounded by ctx) instead of fanning out, proceeds once a slot frees, and
+	// gives up — returning inconclusive — when the caller's context ends.
 	bounded := newBridgeGoodBotState()
 	bounded.verify = func(ptr, ip string) (string, bool) { return "googlebot", true }
 	for i := 0; i < goodBotIPMaxInflight; i++ {
 		bounded.sem <- struct{}{}
 	}
 	done := make(chan string, 1)
-	go func() { done <- bounded.verifiedSync("66.249.77.7", ptr("x.googlebot.com."), now) }()
+	go func() {
+		done <- bounded.verifiedSync(context.Background(), "66.249.77.7", ptr("x.googlebot.com."), now)
+	}()
 	select {
 	case got := <-done:
 		t.Fatalf("verifiedSync must wait for a slot, returned %q", got)
@@ -304,5 +308,53 @@ func TestGoodBotState_VerifiedSync(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("verifiedSync did not proceed after a slot freed")
+	}
+	// slots full again + a client that gives up: returns promptly, no verdict.
+	bounded.sem <- struct{}{}
+	short, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if got := bounded.verifiedSync(short, "66.249.88.8", ptr("y.googlebot.com."), now); got != "" {
+		t.Fatalf("cancelled wait must be inconclusive, got %q", got)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("cancelled wait must return promptly")
+	}
+}
+
+// TestGoodBotState_StaleDroppedWhenPTRChanged: a stale positive is served only
+// while the IP still LOOKS like a crawler. A resolved PTR that no longer has a
+// good-bot suffix is definitive evidence of reassignment: the stale verdict is
+// dropped on the spot (both hot path and simulate). An empty PTR (enrich cache
+// miss) is not evidence, so the stale positive stands.
+func TestGoodBotState_StaleDroppedWhenPTRChanged(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	expired := base.Add(goodBotIPPosTTL + time.Minute)
+	s := newBridgeGoodBotState()
+	s.verify = func(ptr, ip string) (string, bool) { return "", true }
+	s.store("66.249.74.1", "googlebot", base)
+	// empty PTR → still stale-served
+	if got := s.verified("66.249.74.1", func() string { return "" }, expired); got != "googlebot" {
+		t.Fatalf("empty PTR must keep the stale positive, got %q", got)
+	}
+	// reassigned: PTR is some ISP now → dropped, and gone for good
+	if got := s.verified("66.249.74.1", func() string { return "dyn-1.some-isp.example." }, expired); got != "" {
+		t.Fatalf("non-candidate PTR must drop the stale positive, got %q", got)
+	}
+	s.mu.RLock()
+	_, still := s.cache["66.249.74.1"]
+	s.mu.RUnlock()
+	if still {
+		t.Fatalf("stale entry must be deleted once the PTR changed")
+	}
+	if got := s.verified("66.249.74.1", func() string { return "" }, expired.Add(time.Second)); got != "" {
+		t.Fatalf("dropped verdict must not come back, got %q", got)
+	}
+	// verifiedSync on a stale candidate re-verifies inline and reports NOW's answer.
+	s2 := newBridgeGoodBotState()
+	s2.verify = func(ptr, ip string) (string, bool) { return "", true } // spoofed now
+	s2.store("66.249.74.2", "googlebot", base)
+	if got := s2.verifiedSync(context.Background(), "66.249.74.2", func() string { return "x.googlebot.com." }, expired); got != "" {
+		t.Fatalf("simulate must re-verify a stale candidate inline and report the current verdict, got %q", got)
 	}
 }
