@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -575,5 +576,122 @@ func TestTrafficRuleLoad_UnknownFieldsFrozen(t *testing.T) {
 	})
 	if err != nil || added.Unsupported {
 		t.Fatalf("Add must clear the in-memory marker: err=%v %+v", err, added)
+	}
+}
+
+// TestTrafficRuleVerifiedBot: match.verified_bot is satisfied ONLY by a
+// non-empty FCrDNS verdict on the input; a User-Agent never counts. The verdict
+// is echoed in the result so the simulator can explain the outcome, and the
+// store's HasVerifiedBotRules counter follows enabled rules only.
+func TestTrafficRuleVerifiedBot(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	if s.HasVerifiedBotRules() {
+		t.Fatalf("empty store must not need verified-bot lookups")
+	}
+	allow, err := s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 10,
+		Scope:    TrafficRuleScope{Vhosts: []string{"shop.gr"}},
+		Match:    TrafficRuleMatch{VerifiedBot: true},
+		Action:   TrafficRuleAction{Type: TrafficActionAllow},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 900,
+		Scope:    TrafficRuleScope{Vhosts: []string{"shop.gr"}},
+		Match:    TrafficRuleMatch{CountryNotIn: []string{"GR"}},
+		Action:   TrafficRuleAction{Type: TrafficActionBlock},
+	}); err != nil {
+		t.Fatalf("add block: %v", err)
+	}
+	if !s.HasVerifiedBotRules() || !s.NeedsVerifiedBotFor("shop.gr") || !s.NeedsVerifiedBotFor("SHOP.GR.") {
+		t.Fatalf("store must report a verified_bot rule for shop.gr")
+	}
+	if s.NeedsVerifiedBotFor("other.gr") {
+		t.Fatalf("the per-host gate must not fire for a host no verified_bot rule covers")
+	}
+
+	// Googlebot UA from the US without a verdict → the fence blocks it.
+	res := s.Simulate(TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: "66.249.66.1", Country: "US", UA: "Mozilla/5.0 (compatible; Googlebot/2.1)"})
+	if res.Action != TrafficActionBlock || res.VerifiedBot != "" {
+		t.Fatalf("UA alone must not satisfy verified_bot: %+v", res)
+	}
+	// With a verdict → the allow wins and the verdict is echoed (lower-cased).
+	res = s.Simulate(TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: "66.249.66.1", Country: "US", VerifiedBot: " GoogleBot "})
+	if res.Action != TrafficActionAllow || res.Rule.ID != allow.ID || res.VerifiedBot != "googlebot" {
+		t.Fatalf("verified crawler must hit the allow: %+v", res)
+	}
+	// The generic "google" verdict (*.google.com: Translate proxy, AMP cache,
+	// Feedfetcher) is excluded for rules — otherwise translate.google.com
+	// would traverse any geo-fence.
+	res = s.Simulate(TrafficRuleEvalInput{Host: "shop.gr", Path: "/", Method: "GET", IP: "74.125.1.1", Country: "US", VerifiedBot: "google"})
+	if res.Action != TrafficActionBlock || res.VerifiedBot != "" {
+		t.Fatalf("generic google verdict must not satisfy verified_bot: %+v", res)
+	}
+
+	// Disabling the rule: the bridge's per-host gate drops (no more lookups on
+	// the hot path) but the simulate API can still test the disabled rule.
+	allow.Enabled = false
+	if _, err := s.Update(allow.ID, allow); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if s.NeedsVerifiedBotFor("shop.gr") {
+		t.Fatalf("disabled verified_bot rule must not gate the hot path")
+	}
+	if !s.HasVerifiedBotRules() {
+		t.Fatalf("a disabled verified_bot rule must still be testable via the simulate API")
+	}
+	if !s.Remove(allow.ID) {
+		t.Fatalf("remove")
+	}
+	// Persisted + reloaded counter.
+	if _, err := s.Add(TrafficRule{Enabled: true, Priority: 11, Scope: TrafficRuleScope{Vhosts: []string{"shop.gr"}}, Match: TrafficRuleMatch{VerifiedBot: true}, Action: TrafficRuleAction{Type: TrafficActionAllow}}); err != nil {
+		t.Fatalf("re-add: %v", err)
+	}
+	if re := newTrafficRuleStore(s.path); !re.HasVerifiedBotRules() || !re.NeedsVerifiedBotFor("shop.gr") {
+		t.Fatalf("reloaded store must rebuild the verified_bot indexes")
+	}
+}
+
+// TestVerifiedBotNamesListedInRulesModel keeps the cfm-admin display list of
+// verifiable crawlers (rules-model.js VERIFIED_BOT_NAMES) in step with the Go
+// registry goodBotPTRSuffixes — the JS copy is for display only, but a name
+// missing there misleads the operator about what verified_bot covers.
+func TestVerifiedBotNamesListedInRulesModel(t *testing.T) {
+	js, err := os.ReadFile(filepath.Join("..", "webui", "static", "assets", "webdet", "rules-model.js"))
+	if err != nil {
+		t.Skipf("rules-model.js not found: %v", err)
+	}
+	src := string(js)
+	start := strings.Index(src, "VERIFIED_BOT_NAMES")
+	if start < 0 {
+		t.Fatalf("rules-model.js has no VERIFIED_BOT_NAMES")
+	}
+	end := strings.Index(src[start:], "]")
+	if end < 0 {
+		t.Fatalf("VERIFIED_BOT_NAMES not terminated")
+	}
+	jsNames := map[string]bool{}
+	for _, m := range regexp.MustCompile(`"([a-z0-9_-]+)"`).FindAllStringSubmatch(src[start:start+end], -1) {
+		jsNames[m[1]] = true
+	}
+	want := map[string]bool{}
+	for _, name := range goodBotPTRSuffixes {
+		if !verifiedBotExcludedForRules[name] {
+			want[name] = true
+		}
+	}
+	for name := range want {
+		if !jsNames[name] {
+			t.Errorf("good-bot %q (goodBotPTRSuffixes) is missing from rules-model.js VERIFIED_BOT_NAMES", name)
+		}
+	}
+	for name := range jsNames {
+		if !want[name] {
+			t.Errorf("rules-model.js VERIFIED_BOT_NAMES lists %q, which the daemon cannot verify for rules (not in goodBotPTRSuffixes, or excluded)", name)
+		}
 	}
 }

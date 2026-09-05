@@ -238,11 +238,29 @@ func parseRulesSimulateFlags(args []string) (TrafficRuleEvalInput, error) {
 			i++
 		case strings.HasPrefix(a, "--qs="):
 			in.QueryString = strings.TrimPrefix(a, "--qs=")
+		case a == "--verified-bot" && next != "" && !strings.HasPrefix(next, "--"):
+			// Override: evaluate as if the IP were an FCrDNS-verified crawler
+			// of the given name (--verified-bot googlebot / --verified-bot=meta).
+			in.VerifiedBot = next
+			i++
+		case a == "--verified-bot":
+			in.VerifiedBot = "googlebot" // bare flag: the common case
+		case strings.HasPrefix(a, "--verified-bot="):
+			in.VerifiedBot = strings.TrimPrefix(a, "--verified-bot=")
+		default:
+			switch a {
+			case "--host", "--ip", "--ua", "--path", "--method", "--country", "--qs":
+				return TrafficRuleEvalInput{}, fmt.Errorf("missing value for %s", a)
+			}
+			if strings.HasPrefix(a, "-") {
+				return TrafficRuleEvalInput{}, fmt.Errorf("unknown flag %q", a)
+			}
+			return TrafficRuleEvalInput{}, fmt.Errorf("unexpected argument %q", a)
 
 		}
 	}
 	if strings.TrimSpace(in.Host) == "" {
-		return TrafficRuleEvalInput{}, fmt.Errorf("usage: cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US] [--qs 'key=value']")
+		return TrafficRuleEvalInput{}, fmt.Errorf("usage: cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US] [--qs 'key=value'] [--verified-bot[=name]]")
 	}
 	return in, nil
 }
@@ -266,6 +284,20 @@ func runRulesSimulate(baseURL string, in TrafficRuleEvalInput) error {
 		fmt.Printf("Disabled rule id=%s priority=%d action=%s would match if enabled (not enforced).\n",
 			d.ID, d.Priority, d.Action.Type)
 	}
+	switch {
+	case out.VerifiedBot != "" && out.VerifiedBotInconclusive != "":
+		fmt.Printf("Verified crawler: %s — STALE cached verdict; the inline re-verify did not complete (%s).\n", out.VerifiedBot, out.VerifiedBotInconclusive)
+	case out.VerifiedBot != "":
+		fmt.Printf("Verified crawler: %s (verified_bot rules can match).\n", out.VerifiedBot)
+	case out.VerifiedBotInconclusive == "not_checked":
+		// no verified_bot rule exists → nothing was resolved; say nothing definitive
+	case out.VerifiedBotExcluded != "":
+		fmt.Printf("Verified crawler: reverse DNS forward-confirmed as %q, which is deliberately NOT a crawler for rules (Google user-driven fetchers: Translate/AMP proxies); verified_bot rules do not match.\n", out.VerifiedBotExcluded)
+	case out.VerifiedBotInconclusive != "":
+		fmt.Printf("Verified crawler: could not tell (%s) — the IP's reverse DNS was not checked to completion, so this is NOT a negative; verified_bot rules were evaluated as unverified. Pass --verified-bot to test the crawler path.\n", out.VerifiedBotInconclusive)
+	case strings.TrimSpace(in.IP) != "":
+		fmt.Println("Verified crawler: no (verified_bot rules do not match; pass --verified-bot to test the crawler path).")
+	}
 	return nil
 }
 
@@ -279,6 +311,9 @@ func rulesMatchSummary(m TrafficRuleMatch) string {
 	}
 	if len(m.IPAny) > 0 {
 		parts = append(parts, "ip="+strings.Join(m.IPAny, ","))
+	}
+	if m.VerifiedBot {
+		parts = append(parts, "verified_bot")
 	}
 	if len(m.Methods) > 0 {
 		parts = append(parts, "m="+strings.Join(m.Methods, ","))

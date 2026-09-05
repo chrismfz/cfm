@@ -7,6 +7,11 @@ import {
   LIMITS,
   RECIPES,
   THROTTLE_PROFILES,
+  UA_ALLOW_ALONGSIDE_VERIFIED,
+  UNVERIFIABLE_BOT_UAS,
+  VERIFIED_BOT_LABEL,
+  VERIFIED_BOT_NAMES,
+  VERIFIED_BOT_UA_GLOBS,
   buildRulePayload,
   describeMatch,
   describeRule,
@@ -57,7 +62,7 @@ test("formFromRule → buildRulePayload round-trips a stored rule", () => {
   };
   const p = buildRulePayload(formFromRule(row));
   assert.deepEqual(p.scope, row.scope);
-  assert.deepEqual(p.match, { ...row.match, country_not_in: [], ip_any: [] });
+  assert.deepEqual(p.match, { ...row.match, country_not_in: [], ip_any: [], verified_bot: false });
   assert.deepEqual(p.action, row.action);
   assert.equal(p.note, "n");
   assert.equal(p.priority, 120);
@@ -146,7 +151,7 @@ test("simulateInputFromRule builds a request the rule matches (glob → concrete
     scope: { vhosts: ["*.example.com"] },
     match: { path_any: ["/forum/ucp.php?mode=register"], methods: ["POST"], country_in: ["US"], ua_any: ["*GPTBot*"] },
   });
-  assert.deepEqual(s, { host: "www.example.com", ip: "", ua: "GPTBot", path: "/forum/ucp.php", method: "POST", country: "US", qs: "mode=register" });
+  assert.deepEqual(s, { host: "www.example.com", ip: "", ua: "GPTBot", path: "/forum/ucp.php", method: "POST", country: "US", qs: "mode=register", verifiedBot: "" });
   const e = simulateInputFromRule({ scope: { vhosts: ["a.com"] }, match: { ua_any: ["-"], has_qs: true } });
   assert.equal(e.ua, "", "a '-' rule is tested with an EMPTY UA, which is what the edge sends");
   assert.equal(e.qs, "page=2");
@@ -174,23 +179,32 @@ test("recipes: every multi recipe is ordered by priority, tagged, and only enabl
   }
 });
 
-test("geo_fence: good bots → (office IPs) → disabled block of everyone outside", () => {
+test("geo_fence: verified crawlers → (office IPs) → disabled block of everyone outside", () => {
   const rcp = recipe("geo_fence");
   const rules = rcp.build({ vhosts: "shop.gr, www.shop.gr", countries: "gr, cy", ips: "" });
-  assert.equal(rules.length, 2);
+  assert.equal(rules.length, 3);
   assert.equal(rules[0].action.type, "allow");
-  assert.ok(rules[0].match.ua_any.includes("*Googlebot*"));
-  assert.equal(rules[1].action.type, "block");
-  assert.deepEqual(rules[1].match.country_not_in, ["GR", "CY"]);
-  assert.deepEqual(rules[1].match.country_in, []);
-  assert.equal(rules[1].enabled, false);
-  assert.deepEqual(rules[1].scope.vhosts, ["shop.gr", "www.shop.gr"]);
+  assert.equal(rules[0].match.verified_bot, true, "crawlers are allowed by FCrDNS, not by UA");
+  assert.deepEqual(rules[0].match.ua_any, []);
+  // the bots FCrDNS cannot verify keep a (weaker, UA-based) allow of their own
+  assert.equal(rules[1].action.type, "allow");
+  assert.deepEqual(rules[1].match.ua_any, [...UA_ALLOW_ALONGSIDE_VERIFIED]);
+  assert.ok(UNVERIFIABLE_BOT_UAS.includes("*Twitterbot*") && UNVERIFIABLE_BOT_UAS.includes("*DuckDuckBot*"));
+  assert.ok(!UNVERIFIABLE_BOT_UAS.includes("*Googlebot*") && !UNVERIFIABLE_BOT_UAS.includes("*facebookexternalhit*"));
+  // Meta previews are one-shot from a huge fleet: kept in the UA allow on purpose; Googlebot is not.
+  assert.ok(UA_ALLOW_ALONGSIDE_VERIFIED.includes("*facebookexternalhit*") && UA_ALLOW_ALONGSIDE_VERIFIED.includes("*meta-externalagent*"));
+  assert.ok(!UA_ALLOW_ALONGSIDE_VERIFIED.includes("*Googlebot*") && !UA_ALLOW_ALONGSIDE_VERIFIED.includes("*bingbot*"));
+  assert.equal(rules[2].action.type, "block");
+  assert.deepEqual(rules[2].match.country_not_in, ["GR", "CY"]);
+  assert.deepEqual(rules[2].match.country_in, []);
+  assert.equal(rules[2].enabled, false);
+  assert.deepEqual(rules[2].scope.vhosts, ["shop.gr", "www.shop.gr"]);
 
   const withIPs = rcp.build({ vhosts: "shop.gr", countries: "GR", ips: "203.0.113.0/24, 2001:db8::/48" });
-  assert.equal(withIPs.length, 3);
-  assert.equal(withIPs[1].action.type, "allow");
-  assert.deepEqual(withIPs[1].match.ip_any, ["203.0.113.0/24", "2001:db8::/48"]);
-  assert.ok(withIPs[0].priority < withIPs[1].priority && withIPs[1].priority < withIPs[2].priority);
+  assert.equal(withIPs.length, 4);
+  assert.equal(withIPs[2].action.type, "allow");
+  assert.deepEqual(withIPs[2].match.ip_any, ["203.0.113.0/24", "2001:db8::/48"]);
+  for (let i = 1; i < withIPs.length; i += 1) assert.ok(withIPs[i - 1].priority < withIPs[i].priority);
 });
 
 test("geo_fence_admin is one country_not_in rule honouring action and paths", () => {
@@ -293,4 +307,35 @@ test("vhost overlap mirrors ruleHostMatch: *.suffix only overlaps its own domain
   assert.equal(priorityTie(50, ["blog-b.com"], rules), null);
   assert.equal(priorityTie(50, ["www.shop-a.gr"], rules)?.id, "r_w");
   assert.equal(priorityTie(50, ["www.shop-a.gr"], rules, "r_w"), null);
+});
+
+test("verified_bot: payload, round-trip, description, sample request, hints", () => {
+  const p = buildRulePayload(emptyForm({ actionType: "allow", vhosts: "a.com", verifiedBot: true }));
+  assert.equal(p.match.verified_bot, true);
+  const f = formFromRule({ match: { verified_bot: true }, scope: { vhosts: ["a.com"] }, action: { type: "allow" } });
+  assert.equal(f.verifiedBot, true);
+  assert.equal(describeMatch({ verified_bot: true }), "requests from a verified crawler (FCrDNS)");
+  assert.equal(describeMatch({ verified_bot: true, methods: ["GET"] }), "GET requests from a verified crawler (FCrDNS)");
+  const sim = simulateInputFromRule({ scope: { vhosts: ["a.com"] }, match: { verified_bot: true } });
+  assert.equal(sim.verifiedBot, "googlebot", "the sample exercises the crawler path via the override");
+  assert.equal(simulateInputFromRule({ scope: { vhosts: ["a.com"] }, match: { methods: ["GET"] } }).verifiedBot, "");
+  const v = validateRuleForm(emptyForm({ actionType: "allow", vhosts: "a.com", verifiedBot: true }));
+  assert.equal(v.errors.length, 0);
+  assert.ok(v.hints.some((h) => /cache-only/.test(h)));
+  const both = validateRuleForm(emptyForm({ actionType: "allow", vhosts: "a.com", verifiedBot: true, uas: "*Googlebot*" }));
+  assert.ok(both.warnings.some((w) => /already proves/.test(w)));
+  // an enabled allow keyed only on verified_bot is a narrowed rule, not a catch-all
+  const on = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", verifiedBot: true, enabled: true }));
+  assert.equal(on.errors.length, 0);
+  assert.ok(VERIFIED_BOT_NAMES.includes("googlebot") && VERIFIED_BOT_NAMES.includes("meta"));
+  assert.ok(!VERIFIED_BOT_NAMES.includes("google"), "generic google verdict is excluded for rules");
+  assert.deepEqual(Object.keys(VERIFIED_BOT_UA_GLOBS).sort(), [...VERIFIED_BOT_NAMES].sort(), "every verifiable crawler has its UA globs listed (single source for the unverifiable set)");
+  for (const globs of Object.values(VERIFIED_BOT_UA_GLOBS)) for (const g of globs) assert.ok(!UNVERIFIABLE_BOT_UAS.includes(g), `${g} is verifiable`);
+  for (const n of VERIFIED_BOT_NAMES) assert.ok(VERIFIED_BOT_LABEL.length && !VERIFIED_BOT_LABEL.includes(`, ${n},`), `label uses display names, not raw key ${n}`);
+  assert.match(VERIFIED_BOT_LABEL, /Googlebot/);
+  // tame_bots allows crawlers by FCrDNS too, plus the unverifiable ones by UA
+  const tb = recipe("tame_bots").build({ vhosts: "a.com" });
+  assert.equal(tb[0].match.verified_bot, true);
+  assert.deepEqual(tb[0].match.ua_any, []);
+  assert.deepEqual(tb[1].match.ua_any, [...UA_ALLOW_ALONGSIDE_VERIFIED]);
 });

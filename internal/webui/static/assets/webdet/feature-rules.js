@@ -21,6 +21,7 @@ import {
   KNOWN_METHODS,
   RECIPES,
   THROTTLE_PROFILES,
+  VERIFIED_BOT_LABEL,
   actionInfo,
   buildRulePayload,
   csvSplit,
@@ -40,7 +41,7 @@ import {
   validateRuleForm,
 } from "./rules-model.js";
 
-const CHIP_KEYS = ["paths", "uas", "countries", "ips", "methods", "qs"];
+const CHIP_KEYS = ["paths", "uas", "countries", "ips", "vbot", "methods", "qs"];
 
 function chipsFromForm(form) {
   return {
@@ -48,6 +49,7 @@ function chipsFromForm(form) {
     uas: Boolean(form.uas),
     countries: Boolean(form.countries),
     ips: Boolean(form.ips),
+    vbot: Boolean(form.verifiedBot),
     methods: Boolean(form.methods),
     qs: Boolean(form.hasQS || form.qsNotRx),
   };
@@ -80,8 +82,10 @@ export const rulesMixin = {
       recipeVars: {},
 
       // Simulator
-      simulateForm: { host: "", ip: "", ua: "", path: "/", method: "GET", country: "", qs: "" },
+      simulateForm: { host: "", ip: "", ua: "", path: "/", method: "GET", country: "", qs: "", verifiedBot: "" },
+      verifiedBotLabel: VERIFIED_BOT_LABEL,
       simulateResult: null,
+      simulateRequest: null, // the request that produced simulateResult (not the live form)
       simulateNote: "",
     };
   },
@@ -184,6 +188,38 @@ export const rulesMixin = {
       if (!d) return "";
       return `Disabled rule ${d.id} would ${d.action?.type || "match"} this request if enabled — ${describeRule(d, { max: 3 })}`;
     },
+    // What the evaluation assumed about the client being a verified crawler.
+    // Shown whenever a rule in the set uses verified_bot, so a "did not match"
+    // on such a rule is explained by the verdict rather than left to guesswork.
+    simulateVerifiedBotText() {
+      const r = this.simulateResult;
+      if (!r) return "";
+      const anyRule = this.rules.some((x) => x?.match?.verified_bot);
+      if (!anyRule && !r.verified_bot) return "";
+      const req = this.simulateRequest || {};
+      if (r.verified_bot) {
+        if (req.verified_bot) return `Treated as a verified crawler (${r.verified_bot}) because the override was ticked for this run.`;
+        if (r.verified_bot_inconclusive) return `Cached (stale) verdict "${r.verified_bot}" was used: the inline re-verify did not complete (${r.verified_bot_inconclusive}). Live traffic from this IP is still treated as a crawler until the verdict ages out.`;
+        return `IP verified as crawler "${r.verified_bot}" (reverse DNS forward-confirmed).`;
+      }
+      if (r.verified_bot_inconclusive === "not_checked") return "";
+      if (r.verified_bot_excluded) {
+        return `Reverse DNS forward-confirmed as "${r.verified_bot_excluded}", which is deliberately NOT a crawler for rules (Google's user-driven fetchers: Translate / AMP proxies). verified_bot rules do not match it — by design, not a DNS problem.`;
+      }
+      if (r.verified_bot_inconclusive) {
+        const why = {
+          timeout: "all crawler-verification slots were busy for the whole wait",
+          transient: "the DNS resolver failed mid-check",
+          no_resolver: "IP enrichment is OFF on this daemon (ENRICH), so nothing can be verified — verified_bot rules cannot match live traffic here either",
+          no_bridge: "the in-path edge bridge is not running on this daemon",
+        }[r.verified_bot_inconclusive] || r.verified_bot_inconclusive;
+        return `Crawler verification was NOT completed (${why}). This is not a negative: the rule set was evaluated with the IP treated as unverified. Retry, or tick the override to test the crawler path.`;
+      }
+      if (!String(req.ip || "").trim()) {
+        return "No IP in the sample, so crawler verification was not attempted: verified_bot rules cannot match it. Add the crawler's IP, or tick the override.";
+      }
+      return "Not a verified crawler: the IP's reverse DNS did not forward-confirm to a known good bot, so verified_bot rules do not match. Tick the override to test the crawler path.";
+    },
   },
 
   watch: {
@@ -226,6 +262,8 @@ export const rulesMixin = {
       if (!CHIP_KEYS.includes(key)) return;
       const on = !this.ruleChips[key];
       this.ruleChips[key] = on;
+      // Verified crawler is a boolean condition: the chip IS the switch.
+      if (key === "vbot") { this.ruleForm.verifiedBot = on; return; }
       if (on) return;
       // Turning a chip off clears its condition so the review sentence and
       // the saved rule never carry a hidden field.
@@ -483,12 +521,16 @@ export const rulesMixin = {
         country: String(this.simulateForm.country || "").trim().toUpperCase(),
         qs: String(this.simulateForm.qs || "").trim(),
       };
+      // Override: "test as a verified crawler". Left empty, the daemon
+      // resolves the real FCrDNS verdict for the IP (inline, simulate only).
+      if (this.simulateForm.verifiedBot) req.verified_bot = String(this.simulateForm.verifiedBot);
       if (!req.host) {
         this.actionMsg = "Simulation host is required.";
         return;
       }
       try {
         this.simulateResult = await this.postJSON("v1/webdet/rules/simulate", req);
+        this.simulateRequest = req;
         this.actionMsg = this.simulateResult?.matched
           ? `Simulation: ${this.simulateResult.action} by rule ${this.simulateResult?.rule?.id || ""}`
           : (this.simulateResult?.disabled_match
