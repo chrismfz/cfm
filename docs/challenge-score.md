@@ -207,10 +207,12 @@ shared with the vhost lane:
       a UA claims a Sec-Fetch-capable browser (Chrome ≥ 76 / Firefox ≥ 90) but a
       `text/html` `GET`|`HEAD` nav carries no `Sec-Fetch-*` AND no `Accept-Language`;
       honest CLI clients, self-declared crawlers (named tokens, incl. SleepBot and
-      GeedoShopProductFinder), in-app browsers of social apps (named tokens,
+      GeedoShopProductFinder) and infra paths (`/robots.txt`, `/.well-known/*`)
+      never match; in-app browsers of social apps (named tokens,
       `IN_APP_UA_TOKENS` — TikTok's `musical_ly`; a real person, header-poor by
-      the app's stack) and infra paths (`/robots.txt`, `/.well-known/*`) never
-      match; Safari excluded
+      the app's stack) are the known real-browser exception and get their own
+      tag `NO_FETCH_META_IN_APP` (recorded, separable, weighted on its own —
+      not suppressed, so the spoofable token buys no silent skip); Safari excluded
       (16.4+ only). logonly SHADOW — surfaced by `waf_activity` (filter
       `rule=WAF_FETCH_METADATA`; `waf_fp_hunt` is panel-WAF-only), un-armed in
       `waf_security` (no edge-block rule), placed LAST so it never masks a stronger

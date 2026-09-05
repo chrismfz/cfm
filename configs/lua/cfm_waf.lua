@@ -131,10 +131,13 @@ local CFG = {
   -- Fires ONLY when a UA CLAIMS a Sec-Fetch-capable browser (Chrome >= 76 /
   -- Firefox >= 90) yet a text/html GET|HEAD navigation carries NO Sec-Fetch-*
   -- AND NO Accept-Language — a stacked weak signal, categorical together, that a
-  -- real browser never trips (Track-2 Stage 1b; docs/challenge-score.md). Honest
-  -- curl/wget/python clients never claim a browser, so they never match; self-
-  -- declared crawlers are skipped in the detector. logonly-only for burn-in —
-  -- promote past logonly only after watching waf_fp_hunt.
+  -- real browser normally never trips (Track-2 Stage 1b; docs/challenge-score.md).
+  -- Honest curl/wget/python clients never claim a browser, so they never match;
+  -- self-declared crawlers and infra paths are skipped in the detector, and the
+  -- known real-browser exception (in-app WebViews of social apps, e.g. TikTok)
+  -- is recorded under its own NO_FETCH_META_IN_APP tag so it stays separable.
+  -- logonly-only for burn-in — promote past logonly only after watching
+  -- waf_activity per tag, never on "no real browser trips it" alone.
   rule_fetch_metadata_missing = "logonly",
 
   -- [top-8]  Proxy header integrity
@@ -2110,9 +2113,11 @@ function _M.check(ctx)
   -- Track-2 Stage 1b, the edge-only "Sec-Fetch tell": a UA that CLAIMS a modern
   -- Sec-Fetch-capable browser (Chrome >= 76 / Firefox >= 90) but sends a text/html
   -- GET|HEAD navigation with NO Sec-Fetch-* AND NO Accept-Language. Stacked weak
-  -- signals — a real browser always emits both — so honest CLI clients (they don't
-  -- claim a browser) and self-declared crawlers (skipped in the detector) never
-  -- match. Shadow-only for burn-in; feeds the per-client challenge score later.
+  -- signals — a real browser normally emits both — so honest CLI clients (they
+  -- don't claim a browser) and self-declared crawlers (skipped in the detector)
+  -- never match; the one real-browser exception, in-app WebViews of social apps,
+  -- gets its own NO_FETCH_META_IN_APP tag. Shadow-only for burn-in; feeds the
+  -- per-client challenge score later, per tag.
   --
   -- Placed LAST on purpose: it is the WEAKEST signal here, so it must never become
   -- the headline `final_reason` ahead of a real finding. record() keeps the strongest

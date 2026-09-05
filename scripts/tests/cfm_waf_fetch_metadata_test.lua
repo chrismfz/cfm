@@ -4,9 +4,10 @@
 -- The tell: a request that CLAIMS a modern Sec-Fetch-capable browser
 -- (Chrome >= 76 / Firefox >= 90) yet sends a text/html GET|HEAD navigation with
 -- NO Sec-Fetch-* AND NO Accept-Language — headers a real browser always emits on
--- a page load. Stacked so honest CLI clients (they don't claim a browser),
--- self-declared crawlers and named in-app browsers (both skipped) never match.
--- See docs/challenge-score.md.
+-- a page load. Stacked so honest CLI clients (they don't claim a browser) and
+-- self-declared crawlers (skipped) never match; named in-app browsers (a person
+-- inside TikTok, header-poor by the app's stack) are recorded under their own
+-- tag instead of the tell proper. See docs/challenge-score.md.
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -49,12 +50,13 @@ end
 
 local WANT = "WAF_FETCH_METADATA:NO_FETCH_META_NO_ACCEPT_LANG"
 
-local function fires(c, label)
+local function fires_as(c, want, label)
   local hit, reason, _, action = waf.check(c)
   check(hit == true, label .. " — hit=true (got " .. tostring(hit) .. ")")
-  check(reason == WANT, label .. " — reason (got " .. tostring(reason) .. ")")
+  check(reason == want, label .. " — reason (got " .. tostring(reason) .. ", want " .. want .. ")")
   check(action == "logonly", label .. " — action=logonly (got " .. tostring(action) .. ")")
 end
+local function fires(c, label) return fires_as(c, WANT, label) end
 local function clean(c, label)
   local hit = waf.check(c)
   check(hit ~= true, label .. " — must NOT fire (got hit=" .. tostring(hit) .. ")")
@@ -165,18 +167,24 @@ clean(req("GET", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " ..
                  "(KHTML, like Gecko; GeedoShopProductFinder) Chrome/142.0.0.0 Safari/537.36"),
       "GeedoShopProductFinder self-declares (named token) — kept out of the shadow")
 
--- ── Negatives: in-app browsers (IN_APP_UA_TOKENS, suppress-only) ─────────────
+-- ── In-app browsers (IN_APP_UA_TOKENS): recorded under their OWN tag ─────────
 -- TikTok's in-app browser is a real Chromium WebView carrying a person, but the
 -- app's network stack ships neither Sec-Fetch-* nor Accept-Language on the
--- navigation — the tell's known false-positive pool, so it is a separate
--- category like the crawlers. The exact UA shape seen 2026-09-05 (GR residential).
+-- navigation — the tell's known false-positive pool. It is NOT suppressed (a
+-- spoofable "musical_ly" must never buy a silent skip of the shadow); it is
+-- tagged NO_FETCH_META_IN_APP so the pool stays measurable and separable. The
+-- exact UA shape seen 2026-09-05 (GR residential).
+local IN_APP = "WAF_FETCH_METADATA:NO_FETCH_META_IN_APP"
 local TIKTOK = "Mozilla/5.0 (Linux; Android 15; 23124RA7EO Build/AQ3A.240829.003) AppleWebKit/537.36 " ..
                "(KHTML, like Gecko) Chrome/151.0.7922.199 Mobile Safari/537.36 musical_ly_46.7.3 " ..
                "musical_ly_2024607030 JsSdk/1.0 NetType/WIFI Channel/googleplay AppName/musical_ly app_version/46.7.3"
-clean(req("GET", TIKTOK), "TikTok in-app browser (musical_ly token), header-poor nav — kept out of the shadow")
-clean(at("/product/asimenio-dachtylidi/", TIKTOK), "TikTok in-app browser on a normal page path")
--- Control: the same Android Chrome build WITHOUT the in-app token is still measured,
--- so the carve-out is the named token, not "any Android Chrome".
+fires_as(req("GET", TIKTOK), IN_APP, "TikTok in-app browser (musical_ly token), header-poor nav — own tag, still logonly")
+fires_as(at("/product/asimenio-dachtylidi/", TIKTOK), IN_APP, "TikTok in-app browser on a normal page path — own tag")
+-- The in-app tag never overrides a stand-down: with Accept-Language present the
+-- request is a plain real browser and nothing fires.
+clean(req("GET", TIKTOK, { ["accept-language"] = "el-GR,el;q=0.9" }), "TikTok in-app browser WITH Accept-Language is clean")
+-- Control: the same Android Chrome build WITHOUT the in-app token gets the tell
+-- proper, so the tag is keyed on the named token, not "any Android Chrome".
 fires(req("GET", "Mozilla/5.0 (Linux; Android 15; 23124RA7EO Build/AQ3A.240829.003) AppleWebKit/537.36 " ..
                  "(KHTML, like Gecko) Chrome/151.0.7922.199 Mobile Safari/537.36"),
       "same Android Chrome UA without an in-app token still trips the tell")

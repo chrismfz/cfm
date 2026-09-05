@@ -55,12 +55,16 @@ back-filled here — see the git/PR history for that period.
   the fleet-wide 612 volume (10 208 of 15 349 hits/48 h on one host); it joins
   the named crawler-skip list. Whether Geedo may crawl a shop stays a
   traffic-rule decision (`block_geedo` recipe). (b) In-app browsers of social
-  apps — TikTok's (`musical_ly` token), the only true-positive-looking hits from
-  Greek residential IPs — are real people whose app ships a navigation with
+  apps — TikTok's (`musical_ly` token), the only false-positive pool in the
+  Greek residential sample — are real people whose app ships a navigation with
   neither `Sec-Fetch-*` nor `Accept-Language`; a new named-token
-  `IN_APP_UA_TOKENS` list stands the rule down for them (suppress-only, like the
-  crawler list). Lua tests cover both plus a same-Android-Chrome control that
-  still fires.
+  `IN_APP_UA_TOKENS` list records them under their **own tag**
+  (`WAF_FETCH_METADATA:NO_FETCH_META_IN_APP`) instead of the tell proper, so the
+  pool stays measurable and separable in `waf_activity` (filter by reason) and
+  its future challenge-score weight is decided on data — deliberately not a
+  suppress, since a spoofable in-app token must never buy a silent skip of the
+  shadow. Lua tests cover both, the in-app tag, and a same-Android-Chrome
+  control that still gets the tell proper.
 - **Traffic-rules "AI crawlers" bot group** now also lists OAI-SearchBot,
   Claude-User, Claude-SearchBot, ReflectionBot and ExaSearchBot (seen
   fleet-wide). Claude-User is also the User-Agent of the claude.ai MCP
