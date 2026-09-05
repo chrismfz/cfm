@@ -75,11 +75,23 @@ type TrafficRuleEvalInput struct {
 	QueryString string `json:"qs,omitempty"` // raw query string, no leading '?'
 }
 
+// TrafficRuleEvalResult is the verdict for one request shape. Matched/Rule/
+// Action/Profile describe what the edge ENFORCES: only enabled rules are
+// considered, first match by (priority, id). It is the same result the nginx
+// bridge acts on, so what the simulator shows is what production does.
+//
+// DisabledMatch is simulator-only context: the highest-priority DISABLED rule
+// that would have won had it been enabled (nil when none precedes the live
+// verdict). It lets the "start disabled → test → enable" workflow show
+// "rule X would match if enabled" without that rule ever being enforced. A
+// disabled rule ranked below the live match is not reported — enabling it
+// would change nothing.
 type TrafficRuleEvalResult struct {
-	Matched bool        `json:"matched"`
-	Rule    TrafficRule `json:"rule,omitempty"`
-	Action  string      `json:"action,omitempty"`
-	Profile string      `json:"profile,omitempty"`
+	Matched       bool         `json:"matched"`
+	Rule          TrafficRule  `json:"rule,omitempty"`
+	Action        string       `json:"action,omitempty"`
+	Profile       string       `json:"profile,omitempty"`
+	DisabledMatch *TrafficRule `json:"disabled_match,omitempty"`
 }
 
 type trafficRuleStore struct {
@@ -209,6 +221,7 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 		return rows[i].ID < rows[j].ID
 	})
 
+	var disabled *TrafficRule
 	for _, r := range rows {
 		if !ruleHostMatch(r.Scope.Vhosts, host) {
 			continue
@@ -216,14 +229,25 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 		if !ruleMatchFilters(r.Match, country, ua, path, method, in.QueryString) {
 			continue
 		}
+		if !r.Enabled {
+			// Never enforce a disabled rule (this function IS the bridge's
+			// enforcement path). Remember the first one for the simulator and
+			// keep looking for the live verdict.
+			if disabled == nil {
+				rr := r
+				disabled = &rr
+			}
+			continue
+		}
 		return TrafficRuleEvalResult{
-			Matched: true,
-			Rule:    r,
-			Action:  r.Action.Type,
-			Profile: r.Action.Profile,
+			Matched:       true,
+			Rule:          r,
+			Action:        r.Action.Type,
+			Profile:       r.Action.Profile,
+			DisabledMatch: disabled,
 		}
 	}
-	return TrafficRuleEvalResult{Matched: false}
+	return TrafficRuleEvalResult{Matched: false, DisabledMatch: disabled}
 }
 
 func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) {
