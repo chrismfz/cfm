@@ -5,7 +5,9 @@
 -- (Chrome >= 76 / Firefox >= 90) yet sends a text/html GET|HEAD navigation with
 -- NO Sec-Fetch-* AND NO Accept-Language — headers a real browser always emits on
 -- a page load. Stacked so honest CLI clients (they don't claim a browser) and
--- self-declared crawlers (skipped) never match. See docs/challenge-score.md.
+-- self-declared crawlers (skipped) never match; named in-app browsers (a person
+-- inside TikTok, header-poor by the app's stack) are recorded under their own
+-- tag instead of the tell proper. See docs/challenge-score.md.
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -48,12 +50,14 @@ end
 
 local WANT = "WAF_FETCH_METADATA:NO_FETCH_META_NO_ACCEPT_LANG"
 
-local function fires(c, label)
+local function fires_as(c, want, label, want_action)
+  want_action = want_action or "logonly"
   local hit, reason, _, action = waf.check(c)
   check(hit == true, label .. " — hit=true (got " .. tostring(hit) .. ")")
-  check(reason == WANT, label .. " — reason (got " .. tostring(reason) .. ")")
-  check(action == "logonly", label .. " — action=logonly (got " .. tostring(action) .. ")")
+  check(reason == want, label .. " — reason (got " .. tostring(reason) .. ", want " .. want .. ")")
+  check(action == want_action, label .. " — action=" .. want_action .. " (got " .. tostring(action) .. ")")
 end
+local function fires(c, label) return fires_as(c, WANT, label) end
 local function clean(c, label)
   local hit = waf.check(c)
   check(hit ~= true, label .. " — must NOT fire (got hit=" .. tostring(hit) .. ")")
@@ -156,6 +160,54 @@ fires(at("/product/asimenio-dachtylidi/", CHROME), "a normal page path still tri
 clean(req("GET", "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; " ..
                  "SleepBot/1.0; +http://sleepbot.com/) Chrome/131.0.0.0 Safari/537.36"),
       "SleepBot self-declares (named token) — kept out of the shadow")
+
+-- GeedoShopProductFinder self-declares inside the KHTML comment and carries a
+-- Chrome/142 token; it was ~2/3 of the fleet-wide shadow. Named token, same
+-- rationale as SleepBot. Whether it may crawl is a traffic-rule decision.
+clean(req("GET", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " ..
+                 "(KHTML, like Gecko; GeedoShopProductFinder) Chrome/142.0.0.0 Safari/537.36"),
+      "GeedoShopProductFinder self-declares (named token) — kept out of the shadow")
+
+-- ── In-app browsers (IN_APP_UA_TOKENS): recorded under their OWN tag ─────────
+-- TikTok's in-app browser is a real Chromium WebView carrying a person, but the
+-- app's network stack ships neither Sec-Fetch-* nor Accept-Language on the
+-- navigation — the tell's known false-positive pool. It is NOT suppressed (a
+-- spoofable "musical_ly" must never buy a silent skip of the shadow); it is
+-- tagged NO_FETCH_META_IN_APP so the pool stays measurable and separable. The
+-- exact UA shape seen 2026-09-05 (GR residential).
+local IN_APP = "WAF_FETCH_METADATA:NO_FETCH_META_IN_APP"
+local TIKTOK = "Mozilla/5.0 (Linux; Android 15; 23124RA7EO Build/AQ3A.240829.003) AppleWebKit/537.36 " ..
+               "(KHTML, like Gecko) Chrome/151.0.7922.199 Mobile Safari/537.36 musical_ly_46.7.3 " ..
+               "musical_ly_2024607030 JsSdk/1.0 NetType/WIFI Channel/googleplay AppName/musical_ly app_version/46.7.3"
+fires_as(req("GET", TIKTOK), IN_APP, "TikTok in-app browser (musical_ly token), header-poor nav — own tag, still logonly")
+fires_as(at("/product/asimenio-dachtylidi/", TIKTOK), IN_APP, "TikTok in-app browser on a normal page path — own tag")
+-- The in-app tag never overrides a stand-down: with Accept-Language present the
+-- request is a plain real browser and nothing fires.
+clean(req("GET", TIKTOK, { ["accept-language"] = "el-GR,el;q=0.9" }), "TikTok in-app browser WITH Accept-Language is clean")
+-- Ordering invariants clause 6 depends on (enforced by statement order only):
+-- a declared-crawler token wins over the in-app token (suppress, not tag), and
+-- the infra-path carve-out applies to in-app UAs too.
+clean(req("GET", TIKTOK .. " bytespider"), "crawler token + in-app token → crawler skip wins (no IN_APP tag)")
+clean(at("/robots.txt", TIKTOK), "in-app UA on /robots.txt → infra carve-out wins (no IN_APP tag)")
+clean(at("/.well-known/acme-challenge/x", TIKTOK), "in-app UA on /.well-known/ → infra carve-out wins")
+-- Control: the same Android Chrome build WITHOUT the in-app token gets the tell
+-- proper, so the tag is keyed on the named token, not "any Android Chrome".
+fires(req("GET", "Mozilla/5.0 (Linux; Android 15; 23124RA7EO Build/AQ3A.240829.003) AppleWebKit/537.36 " ..
+                 "(KHTML, like Gecko) Chrome/151.0.7922.199 Mobile Safari/537.36"),
+      "same Android Chrome UA without an in-app token still trips the tell")
+
+-- ── Promotion clamp: the in-app tag never escalates past logonly ─────────────
+-- The rule's mode is per-rule. If 612 is ever promoted, only the tell proper
+-- may enforce; the known real-person pool stays measurement-only.
+set_only({ rule_fetch_metadata_missing = "challenge" })
+fires_as(req("GET", CHROME), WANT, "promoted to challenge: the tell proper escalates", "challenge")
+fires_as(req("GET", TIKTOK), IN_APP, "promoted to challenge: in-app tag stays logonly (clamp)", "logonly")
+set_only({ rule_fetch_metadata_missing = "block" })
+fires_as(req("GET", CHROME), WANT, "promoted to block: the tell proper escalates", "block")
+fires_as(req("GET", TIKTOK), IN_APP, "promoted to block: in-app tag stays logonly (clamp)", "logonly")
+set_only({ rule_fetch_metadata_missing = "disabled" })
+clean(req("GET", TIKTOK), "disabled: nothing fires, in-app included")
+set_only({ rule_fetch_metadata_missing = "logonly" })
 
 if fails > 0 then
   io.stderr:write(("cfm_waf fetch-metadata tests: %d FAILED\n"):format(fails))

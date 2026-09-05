@@ -131,10 +131,15 @@ local CFG = {
   -- Fires ONLY when a UA CLAIMS a Sec-Fetch-capable browser (Chrome >= 76 /
   -- Firefox >= 90) yet a text/html GET|HEAD navigation carries NO Sec-Fetch-*
   -- AND NO Accept-Language — a stacked weak signal, categorical together, that a
-  -- real browser never trips (Track-2 Stage 1b; docs/challenge-score.md). Honest
-  -- curl/wget/python clients never claim a browser, so they never match; self-
-  -- declared crawlers are skipped in the detector. logonly-only for burn-in —
-  -- promote past logonly only after watching waf_fp_hunt.
+  -- real browser normally never trips (Track-2 Stage 1b; docs/challenge-score.md).
+  -- Honest curl/wget/python clients never claim a browser, so they never match;
+  -- self-declared crawlers and infra paths are skipped in the detector, and the
+  -- known real-browser exception (in-app WebViews of social apps, e.g. TikTok)
+  -- is recorded under its own NO_FETCH_META_IN_APP tag so it stays separable,
+  -- and that tag is CLAMPED to logonly at the record() call: a promotion here
+  -- only ever escalates the tell proper (NO_FETCH_META_NO_ACCEPT_LANG), never
+  -- the in-app pool. logonly-only for burn-in — promote past logonly only after
+  -- watching waf_activity per tag, never on "no real browser trips it" alone.
   rule_fetch_metadata_missing = "logonly",
 
   -- [top-8]  Proxy header integrity
@@ -2110,9 +2115,12 @@ function _M.check(ctx)
   -- Track-2 Stage 1b, the edge-only "Sec-Fetch tell": a UA that CLAIMS a modern
   -- Sec-Fetch-capable browser (Chrome >= 76 / Firefox >= 90) but sends a text/html
   -- GET|HEAD navigation with NO Sec-Fetch-* AND NO Accept-Language. Stacked weak
-  -- signals — a real browser always emits both — so honest CLI clients (they don't
-  -- claim a browser) and self-declared crawlers (skipped in the detector) never
-  -- match. Shadow-only for burn-in; feeds the per-client challenge score later.
+  -- signals — a real browser normally emits both — so honest CLI clients (they
+  -- don't claim a browser) and self-declared crawlers (skipped in the detector)
+  -- never match; the one real-browser exception, in-app WebViews of social apps,
+  -- gets its own NO_FETCH_META_IN_APP tag, clamped to logonly below whatever the
+  -- rule's mode is. Shadow-only for burn-in; feeds the per-client challenge
+  -- score later, per tag.
   --
   -- Placed LAST on purpose: it is the WEAKEST signal here, so it must never become
   -- the headline `final_reason` ahead of a real finding. record() keeps the strongest
@@ -2125,8 +2133,15 @@ function _M.check(ctx)
     if mode ~= "disabled" then
       local tag = det.detect_fetch_metadata_missing(headers, method, uri)
       if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_FETCH_METADATA:" .. tag, ttl, mode, RULE_IDS.rule_fetch_metadata_missing) then goto done end
+        -- The in-app tag (a real person inside TikTok & co., header-poor by the
+        -- app's stack) is measurement-only: the rule's mode is per-rule, so a
+        -- promotion of the tell proper would otherwise enforce on that known
+        -- real-person pool exactly as on automation. Clamp it to logonly here —
+        -- it is recorded, counted and separable, but never challenged/blocked
+        -- whatever rule_fetch_metadata_missing is set to.
+        local eff_mode = (tag == "NO_FETCH_META_IN_APP") and "logonly" or mode
+        local ttl = (eff_mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_FETCH_METADATA:" .. tag, ttl, eff_mode, RULE_IDS.rule_fetch_metadata_missing) then goto done end
       end
     end
   end
@@ -2137,6 +2152,13 @@ function _M.check(ctx)
   end
   return true, final_reason, final_ttl, final_action, hits, final_rule_id
 end
+
+-- Reason families whose first ":"-tag stays in the should_push cooldown key —
+-- see the comment inside should_push. Add a family here ONLY if its tag set is
+-- fixed and small and the family has no block tier.
+local PUSH_KEY_KEEPS_TAG = {
+  WAF_FETCH_METADATA = true,
+}
 
 function _M.should_push(shdict, ip, reason, action)
   if not shdict or not ip or ip == "" then return true end
@@ -2162,7 +2184,20 @@ function _M.should_push(shdict, ip, reason, action)
   -- while the family stays armed, a block hit of the suppressed rule could consume
   -- this window and mask the armed rule's push — revisit the key (add rule_id) then.
   local fam = (reason and reason:match("^([^:]+)")) or "WAF"
-  local k  = "wafpush|" .. fam .. "|" .. (action or "na") .. "|" .. ip
+  local key_reason = fam
+  if PUSH_KEY_KEEPS_TAG[fam] then
+    -- Families whose tags are a FIXED, small set of categories that are meant to
+    -- be compared against each other (not a volatile per-hit score/tag) keep the
+    -- tag in the key: WAF_FETCH_METADATA's NO_FETCH_META_NO_ACCEPT_LANG vs
+    -- NO_FETCH_META_IN_APP are two populations whose per-tag counts decide the
+    -- in-app challenge-score weight, and they share CGNAT mobile IPs — a
+    -- family-keyed window would drop whichever tag fires second per IP per
+    -- minute and bias exactly that comparison. Safe here because the family is
+    -- logonly-only (no block rule, no autoblock feed) and has two tags, so a
+    -- per-IP flood still collapses to at most two pushes per window.
+    key_reason = (reason and reason:match("^[^:]+:[^:]+")) or fam
+  end
+  local k  = "wafpush|" .. key_reason .. "|" .. (action or "na") .. "|" .. ip
   local ok = shdict:add(k, 1, CFG.push_cooldown_sec)
   return ok == true
 end

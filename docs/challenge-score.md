@@ -206,8 +206,14 @@ shared with the vhost lane:
       (`detect_fetch_metadata_missing`), Go-parity in `waf_rule_ids.go`. Fires when
       a UA claims a Sec-Fetch-capable browser (Chrome ≥ 76 / Firefox ≥ 90) but a
       `text/html` `GET`|`HEAD` nav carries no `Sec-Fetch-*` AND no `Accept-Language`;
-      honest CLI clients, self-declared crawlers (named tokens) and infra paths
-      (`/robots.txt`, `/.well-known/*`) never match; Safari excluded
+      honest CLI clients, self-declared crawlers (named tokens, incl. SleepBot and
+      GeedoShopProductFinder) and infra paths (`/robots.txt`, `/.well-known/*`)
+      never match; in-app browsers of social apps (named tokens,
+      `IN_APP_UA_TOKENS` — TikTok's `musical_ly`; a real person, header-poor by
+      the app's stack) are the known real-browser exception and get their own
+      tag `NO_FETCH_META_IN_APP` (recorded, separable, weighted on its own,
+      clamped to logonly in `cfm_waf.lua` whatever the rule's mode — not
+      suppressed, so the spoofable token buys no silent skip); Safari excluded
       (16.4+ only). logonly SHADOW — surfaced by `waf_activity` (filter
       `rule=WAF_FETCH_METADATA`; `waf_fp_hunt` is panel-WAF-only), un-armed in
       `waf_security` (no edge-block rule), placed LAST so it never masks a stronger
