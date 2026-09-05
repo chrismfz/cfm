@@ -1,8 +1,8 @@
 package enrich
 
 import (
-	"errors"
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
