@@ -342,6 +342,7 @@ rather than advancing heartbeats on failure.
 | DNAT bypass | `docs/dnat-bypass.md` · Debug capture: `docs/debug-capture-runbook.md` |
 | Proxy latency: measuring & origin keepalive | `docs/proxy-performance.md` |
 | Endpoint scope inventory | `docs/endpoint_scope_inventory.md` |
+| Traffic Rules UX review & redesign proposal (cfm-admin rules builder / recipes) | `docs/traffic-rules-ux-proposal.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
 
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
