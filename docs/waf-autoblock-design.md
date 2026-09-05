@@ -187,10 +187,14 @@ COOLDOWN = "20m"
 ; `block`, and the config key for a family is its name minus WAF_ (so the
 ; grouped `UPLOAD_EXPLOIT` below is really two keys, UPLOAD_FNAME + UPLOAD_
 ; CONTENT). Because only edge-`block` hits feed, only families that HAVE a
-; block-tier rule can ever fire in Phase 1 — today five: WAF_SQLI (301),
-; WAF_RCE (320), WAF_UPLOAD_FNAME (401), WAF_UPLOAD_CONTENT (402), and
-; WAF_WEBSHELL (413, the proper-noun drop-path subset, added 2026-07-03). All
-; five default to 1. WAF_WEBSHELL was HELD at 0 through burn-in — a webshell
+; block-tier rule can ever fire in Phase 1 — as of 2026-09-05 (source: the Go
+; registry, DefaultMode "block"): WAF_SQLI (301), WAF_SQLI_LEXICAL (309),
+; WAF_RCE (320, 329), WAF_UPLOAD_FNAME (401, 414), WAF_UPLOAD_CONTENT (402),
+; WAF_WEBSHELL (413, the proper-noun drop-path subset, added 2026-07-03),
+; WAF_CVE (10001+), WAF_PHP_WRAPPER (305), WAF_AUTH_BURST (510-512) and
+; WAF_TRAVERSAL (101, promoted 2026-09-05). All default to 1 except WAF_TRAVERSAL, held at 0 through its
+; burn-in (volume: ~2 300 scanner IPs/week fleet-wide); its step runs after every
+; armed block family in cfm_waf.lua so it cannot shadow their bans. WAF_WEBSHELL was HELD at 0 through burn-in — a webshell
 ; GET-probe (`/c99.php`) is also what benign scanners (Shodan/Censys/monitors)
 ; do — but as of 2026-07-18 the operator runs it armed fleet-wide and confirms it
 ; cleanly bans malicious scanners/scrapers/bots, so it now arms to 1 by default
@@ -343,6 +347,24 @@ counting) once the nft path is trusted; until then the two coexist harmlessly
 so a rotating swarm (the lexima.de pattern: ~180 IPs, each 1-2 hits) escalates
 to a range/ASN block instead of whack-a-mole per IP. Per-IP instant block
 already handles each swarm IP on its first hit; this is an optimisation.
+
+## Open item — push every block-tier hit (post rule-101 promotion, 2026-09-05)
+
+`record()` gives the headline to the FIRST block-tier hit and `goto done` ends
+evaluation; `cfm.lua` pushes only that headline, so the family `wafsec` sees on
+a request that trips two block families is whichever ran first. That was
+harmless while every block family was armed. Rule 101 (`WAF_TRAVERSAL`) is the
+first block family HELD at 0, and a held family evaluated first would have
+shadowed `WAF_RCE` / `WAF_PHP_WRAPPER` / … on wrapper-LFI and LFI→RCE requests
+and cost them their ban. The shipped fix is ORDER: the traversal step runs after
+every armed block family in `cfm_waf.lua`. That encodes the default arming state
+only — an operator who arms `TRAVERSAL` and un-arms another family gets the
+mirror image — and it costs the early short-circuit on the highest-volume block
+rule. The proper fix is at the push boundary: carry every block-tier entry of
+`hits` (family + rule id) in the `ip_push` payload and let `wafsec` feed each
+armed family, so attribution stops depending on evaluation order. Needs the Lua
+push, the Go `/nginx/ip` handler and `wafsec` ingest in one change with its own
+review; until then, keep the traversal step last.
 
 ## Open questions (decide before Phase 1)
 

@@ -34,7 +34,10 @@ func TestWAFSecurityConfigParses(t *testing.T) {
 	// an inline comment sneaked onto the value line).
 	ints := map[string]int{
 		"SQLI": 1, "RCE": 1, "UPLOAD_FNAME": 1, "UPLOAD_CONTENT": 1,
-		"BACKDOOR": 1, "SAMPLE_LIMIT": 10,
+		"BACKDOOR": 1, "WEBSHELL": 1, "CVE": 1, "PHP_WRAPPER": 1,
+		"SQLI_LEXICAL": 1, "AUTH_BURST": 1,
+		"TRAVERSAL":    0, // held through burn-in (2026-09-05) — 0 written explicitly, not a fallback
+		"SAMPLE_LIMIT": 10,
 	}
 	for key, want := range ints {
 		if got := kvInt(kv, key, 999); got != want {

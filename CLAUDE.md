@@ -260,10 +260,16 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   alone: a family spans edge tiers — `WAF_BACKDOOR` (430-438) has **no**
   block-tier rule, and `WAF_RCE` mixes block 320 with logonly 322-327, so
   family-only keying autoblocks logonly recon. Families with an edge-`block`
-  rule today: `WAF_SQLI`/`WAF_RCE`/`WAF_UPLOAD_FNAME`/`WAF_UPLOAD_CONTENT`, plus
-  `WAF_WEBSHELL` since 2026-07-03 (rule 413, the proper-noun drop-path subset) and
-  `WAF_CVE` (rule 10001) — all armed to 1 — those are the only ones that can fire
-  in Phase 1.
+  rule today (the Go registry, `DefaultMode: "block"`, is the source — check it
+  before editing this list): `WAF_SQLI` (301), `WAF_SQLI_LEXICAL` (309, since
+  2026-08-23), `WAF_RCE` (320, 329), `WAF_UPLOAD_FNAME` (401, 414),
+  `WAF_UPLOAD_CONTENT` (402), `WAF_WEBSHELL` since 2026-07-03 (413, the
+  proper-noun drop-path subset), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305)
+  and `WAF_AUTH_BURST` (510-512, the xmlrpc multicall / pingback / burst
+  rules) — all armed to 1 — plus `WAF_TRAVERSAL` since 2026-09-05 (rule 101,
+  **held at 0** through its burn-in, see below) — those are the only ones that
+  can fire in Phase 1. The rendered `[waf_security]` template is derived from
+  the same code defaults, so a fresh `detectors.conf` lists exactly these.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
   default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and
   existing `/etc/cfm/detectors.conf` files don't list the family, so they inherit
@@ -310,9 +316,24 @@ points:
   rule ships with a per-rule `RULE_<id> = 0`** (hold the rule, not the family);
   `DRY_RUN = 1` gives a watch-first burn-in. `TestWAFSecurityFamilyCoverage`
   asserts `WAF_CVE` defaults to `1`. (As of 2026-07-18 `WAF_WEBSHELL` is also
-  armed by default — every family with an edge-`block` rule now arms to `1`, no
-  exceptions; exempt a benign `/c99.php` scanner with `ALLOW_UA_CONTAINS`/
-  `ALLOW_NETS` or hold rule 413 with `RULE_413 = 0`.)
+  armed by default; exempt a benign `/c99.php` scanner with `ALLOW_UA_CONTAINS`/
+  `ALLOW_NETS` or hold rule 413 with `RULE_413 = 0`.) The one family held the
+  other way is **`WAF_TRAVERSAL`**: rule 101 was promoted to block on 2026-09-05
+  after a clean 6-server review, but the family is held at `0` in code
+  (`wafSecurityFamilies`), in the reference `detectors.conf` and in the coverage
+  test — at threshold 1 its ~2 300 scanner IPs/week would be ~330 six-hour bans
+  and notifications a day. Arming it is the operator's `TRAVERSAL = 1`. Because
+  a held block family would otherwise **shadow** armed ones (the first block hit
+  owns the headline `record()`, `goto done` ends evaluation, and `cfm.lua` pushes
+  only the headline), the traversal step runs **after every armed block-tier
+  family** in `cfm_waf.lua` — keep it there, or arm the family, if you touch
+  the order. That order fix covers the shipped arming state only (an operator
+  who arms `TRAVERSAL` and un-arms another family gets the mirror image); the
+  proper fix is to push every block-tier hit and let `wafsec` pick the armed
+  family — open item in `docs/waf-autoblock-design.md`. Block tier is also what
+  the panel-port gate (`cfm_panel.lua`) enforces, so promoting a rule to block
+  arms it on `:2083/:2087/:2096` too — check the `waf_rule_detail` panel
+  section for that rule in the same review.
 - **Lua↔Go id parity is enforced.** A new `10xxx` id needs matching entries in
   `configs/lua/cfm_waf.lua` `RULE_IDS` **and** `internal/webdetector/waf_rule_ids.go`
   (`TestWAFRuleIDs_LuaParity`), plus positive+negative Lua tests. Key the

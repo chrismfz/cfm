@@ -7,10 +7,15 @@
 --   4) Everything else: pass to cpsrvd.
 --
 -- Important:
---   - The WAF here is LOGONLY (Phase 2e): it records would-be hits on
---     human-entry/generic requests and never blocks or alters the flow. Do NOT
---     turn it into an enforcing in-path WAF without the burn-in + enforce step
---     (see docs/edge-unification-plan.md).
+--   - The WAF here runs the same ruleset as the web edge with a reduced
+--     profile (no body). Under PANEL_WAF_MODE = enforce (the shipped default,
+--     detectors.conf) it DENIES block-tier hits only; challenge/logonly-tier
+--     hits are observe-only (`logonly=would_<action>`, parsed by waf_fp_hunt).
+--     Consequence: promoting a rule to block on the web edge also arms it
+--     here — check the waf_rule_detail panel section (or waf_fp_hunt) for
+--     that rule before promoting (rule 101 traversal did so 2026-09-05: 0
+--     panel hits in 7 days on six servers). PANEL_WAF_MODE = logonly keeps
+--     the historical observe-only behaviour (docs/edge-unification-plan.md).
 --   - Do not validate WHM/API auth here. cpsrvd does that.
 --   - Do not require User-Agent or Authorization for API passthrough.
 

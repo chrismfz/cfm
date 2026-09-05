@@ -40,7 +40,12 @@ type WAFRule struct {
 // stable iteration order.
 var wafRuleIDs = []WAFRule{
 	// 1xx path / traversal
-	{ID: 101, Name: "rule_traversal", ReasonFamily: "WAF_TRAVERSAL", DefaultMode: "challenge"},
+	// 101 promoted challenge→block 2026-09-05 after a clean 6-server FP review
+	// (docs/waf.md). Its autoblock family (WAF_TRAVERSAL) is deliberately HELD at
+	// 0 for a burn-in — see waf_security_register.go. Block tier is also what the
+	// panel-port gate (cfm_panel.lua) enforces, so traversal now denies on the
+	// cPanel/WHM/webmail ports too (7-day panel burn-in: 0 hits, six servers).
+	{ID: 101, Name: "rule_traversal", ReasonFamily: "WAF_TRAVERSAL", DefaultMode: "block"},
 	{ID: 102, Name: "rule_long_path_segment", ReasonFamily: "WAF_LONG_PATH", DefaultMode: "logonly"},
 
 	// 2xx client identity
