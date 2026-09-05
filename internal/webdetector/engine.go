@@ -3964,8 +3964,12 @@ func (e *Engine) TrafficRuleSimulate(in TrafficRuleEvalInput) TrafficRuleEvalRes
 		return TrafficRuleEvalResult{Matched: false}
 	}
 	if strings.TrimSpace(in.Country) == "" && strings.TrimSpace(in.IP) != "" && e.enr != nil {
-		if geo := e.enr.LookupGeoFast(strings.TrimSpace(in.IP)); strings.TrimSpace(geo.Country) != "" { // Country only; avoid blocking PTR rDNS
-			in.Country = geo.Country
+		// ISO-2 code ("GR"), NOT the English name ("Greece"): rules compare
+		// against country_in / country_not_in codes, and the bridge's live
+		// path (handleDecision) uses CountryISO too. Geo only; avoid blocking
+		// PTR rDNS.
+		if geo := e.enr.LookupGeoFast(strings.TrimSpace(in.IP)); strings.TrimSpace(geo.CountryISO) != "" {
+			in.Country = geo.CountryISO
 		}
 	}
 	return e.trafficRules.Simulate(in)

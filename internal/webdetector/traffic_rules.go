@@ -78,6 +78,11 @@ type TrafficRule struct {
 	Note      string            `json:"note,omitempty"`
 	CreatedAt time.Time         `json:"created_at"`
 	UpdatedAt time.Time         `json:"updated_at"`
+	// Unsupported is set in memory only: the stored rule carries match/scope
+	// keys this build does not understand (written by a newer cfm). Such a
+	// rule is never evaluated, cannot be edited or enabled here, and is
+	// written back to disk verbatim so nothing is lost for the upgrade.
+	Unsupported bool `json:"unsupported,omitempty"`
 }
 
 type TrafficRuleEvalInput struct {
@@ -113,18 +118,24 @@ type trafficRuleStore struct {
 	mu    sync.RWMutex
 	path  string
 	rules map[string]TrafficRule // key=id
+	// frozen holds the verbatim JSON of rules this build cannot fully decode
+	// (unknown match/scope keys). They are persisted back byte-for-byte so a
+	// downgrade never rewrites — and thereby widens — a newer rule.
+	frozen map[string]json.RawMessage
 }
 
 func newTrafficRuleStore(path string) *trafficRuleStore {
 	s := &trafficRuleStore{
-		path:  strings.TrimSpace(path),
-		rules: make(map[string]TrafficRule),
+		path:   strings.TrimSpace(path),
+		rules:  make(map[string]TrafficRule),
+		frozen: make(map[string]json.RawMessage),
 	}
 	s.load()
 	return s
 }
 
 func (s *trafficRuleStore) Add(in TrafficRule) (TrafficRule, error) {
+	in.Unsupported = false // in-memory marker only; never client-settable
 	norm, err := normalizeTrafficRule(in, true)
 	if err != nil {
 		return TrafficRule{}, err
@@ -157,7 +168,11 @@ func (s *trafficRuleStore) Update(id string, in TrafficRule) (TrafficRule, error
 	if !ok {
 		return TrafficRule{}, errors.New("rule not found")
 	}
+	if cur.Unsupported {
+		return TrafficRule{}, errors.New("rule uses match fields this cfm build does not understand; upgrade cfm to edit or enable it")
+	}
 
+	in.Unsupported = false
 	in.ID = id
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = cur.CreatedAt
@@ -184,6 +199,7 @@ func (s *trafficRuleStore) Remove(id string) bool {
 		return false
 	}
 	delete(s.rules, id)
+	delete(s.frozen, id)
 	_ = s.saveLocked()
 	return true
 }
@@ -245,6 +261,11 @@ func (s *trafficRuleStore) Simulate(in TrafficRuleEvalInput) TrafficRuleEvalResu
 
 	var disabled *TrafficRule
 	for _, r := range rows {
+		if r.Unsupported {
+			// Its real conditions are unknown to this build: neither a
+			// verdict nor a "would match if enabled" can be stated honestly.
+			continue
+		}
 		if !ruleHostMatch(r.Scope.Vhosts, host) {
 			continue
 		}
@@ -827,16 +848,17 @@ func (s *trafficRuleStore) load() {
 		if e == nil {
 			continue
 		}
+		e.Unsupported = false
 		if unknown {
-			// A rule carrying a match field THIS binary does not know was
-			// written by a newer cfm. Dropping the field would WIDEN the rule
+			// A rule carrying match/scope keys THIS binary does not know was
+			// written by a newer cfm. Dropping the keys would WIDEN the rule
 			// (an allow keyed only on that field becomes allow-everything, a
-			// block becomes block-everything), so the rule is loaded but
-			// forced disabled until the binary is upgraded again.
-			if e.Enabled {
-				log.Printf("[webdet][rules] rule %s uses match fields this build does not understand; loading it DISABLED (upgrade cfm to re-enable)", e.ID)
-			}
+			// block becomes block-everything). So: keep the original bytes
+			// (written back verbatim by saveLocked), list it as disabled +
+			// unsupported, never evaluate it, and refuse Update() on it.
+			log.Printf("[webdet][rules] rule %s uses match/scope fields this cfm build does not understand; kept on disk verbatim, not enforced, not editable here (upgrade cfm)", e.ID)
 			e.Enabled = false
+			e.Unsupported = true
 		}
 		norm, err := normalizeTrafficRule(*e, false)
 		if err != nil {
@@ -846,13 +868,18 @@ func (s *trafficRuleStore) load() {
 			norm.CreatedAt = time.Now().UTC()
 		}
 		s.rules[norm.ID] = norm
+		if unknown {
+			s.frozen[norm.ID] = append(json.RawMessage(nil), raw...)
+		}
 	}
 }
 
 // decodeStoredRule decodes one persisted rule. It reports unknown=true when
-// the stored `match` block carries a key this build does not define — the
-// signal that a newer cfm wrote it (see load()). Rules that fail to decode at
-// all return nil.
+// the stored `match` or `scope` block carries a key this build does not
+// define — the signal that a newer cfm wrote a selector we cannot honour (see
+// load()). Only the two selector blocks are probed: a whole-rule check would
+// trip on harmless future metadata (hit counters, tags). Rules that fail to
+// decode at all return nil.
 func decodeStoredRule(raw json.RawMessage) (*TrafficRule, bool) {
 	var e TrafficRule
 	if err := json.Unmarshal(raw, &e); err != nil {
@@ -860,15 +887,26 @@ func decodeStoredRule(raw json.RawMessage) (*TrafficRule, bool) {
 	}
 	var probe struct {
 		Match json.RawMessage `json:"match"`
+		Scope json.RawMessage `json:"scope"`
 	}
-	if err := json.Unmarshal(raw, &probe); err != nil || len(probe.Match) == 0 {
+	if err := json.Unmarshal(raw, &probe); err != nil {
 		return &e, false
 	}
-	dec := json.NewDecoder(bytes.NewReader(probe.Match))
-	dec.DisallowUnknownFields()
-	var m TrafficRuleMatch
-	if err := dec.Decode(&m); err != nil {
-		return &e, true
+	if len(probe.Match) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(probe.Match))
+		dec.DisallowUnknownFields()
+		var m TrafficRuleMatch
+		if err := dec.Decode(&m); err != nil {
+			return &e, true
+		}
+	}
+	if len(probe.Scope) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(probe.Scope))
+		dec.DisallowUnknownFields()
+		var sc TrafficRuleScope
+		if err := dec.Decode(&sc); err != nil {
+			return &e, true
+		}
 	}
 	return &e, false
 }
@@ -877,17 +915,36 @@ func (s *trafficRuleStore) saveLocked() error {
 	if s == nil || s.path == "" {
 		return nil
 	}
-	arr := make([]TrafficRule, 0, len(s.rules))
-	for _, e := range s.rules {
-		arr = append(arr, e)
+	type stored struct {
+		prio int
+		id   string
+		raw  json.RawMessage
+	}
+	arr := make([]stored, 0, len(s.rules))
+	for id, e := range s.rules {
+		if raw, ok := s.frozen[id]; ok {
+			// Written by a newer cfm: persist the ORIGINAL bytes so the
+			// selectors this build cannot decode survive until the upgrade.
+			arr = append(arr, stored{prio: e.Priority, id: id, raw: raw})
+			continue
+		}
+		b, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		arr = append(arr, stored{prio: e.Priority, id: id, raw: b})
 	}
 	sort.Slice(arr, func(i, j int) bool {
-		if arr[i].Priority != arr[j].Priority {
-			return arr[i].Priority < arr[j].Priority
+		if arr[i].prio != arr[j].prio {
+			return arr[i].prio < arr[j].prio
 		}
-		return arr[i].ID < arr[j].ID
+		return arr[i].id < arr[j].id
 	})
-	b, err := json.MarshalIndent(arr, "", "  ")
+	raws := make([]json.RawMessage, 0, len(arr))
+	for _, e := range arr {
+		raws = append(raws, e.raw)
+	}
+	b, err := json.MarshalIndent(raws, "", "  ")
 	if err != nil {
 		return err
 	}

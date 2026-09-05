@@ -229,11 +229,11 @@ test("country mode + ip_any: payload, round-trip, description, sample request", 
 });
 
 test("isIPOrCIDR accepts what normalizeIPList accepts", () => {
-  for (const ok of ["203.0.113.0/24", "198.51.100.7", "0.0.0.0/0", "2001:db8::/48", "2001:db8::1", "::1", "::", "::ffff:203.0.113.9", "::ffff:203.0.113.0/120", "fe80::1/128", "1:2:3:4:5:6:7:8", "::1.2.3.4"]) {
+  for (const ok of ["203.0.113.0/24", "198.51.100.7", "0.0.0.0/0", "2001:db8::/48", "2001:db8::1", "::1", "::", "::ffff:203.0.113.9", "::ffff:203.0.113.0/120", "::ffff:c0a8:1/96", "0:0:0:0:0:ffff:1.2.3.4/120", "fe80::1/128", "1:2:3:4:5:6:7:8", "::1.2.3.4", "::1.2.3.4/64"]) {
     assert.equal(isIPOrCIDR(ok), true, ok);
   }
   for (const bad of ["203.0.113.0/33", "256.1.1.1", "1.2.3", "2001:db8::/129", "2001:db8:::1", "1:2:3:4:5:6:7:8:9", "example.com", "", "1.2.3.4/24/1", "gggg::1",
-    "01.2.3.4", "1.2.3.4/024", "1.2.3.4::1", "1.2.3.4::", "a:b:1.2.3.4::", "::ffff:1.2.3.4/64"]) {
+    "01.2.3.4", "1.2.3.4/024", "1.2.3.4::1", "1.2.3.4::", "a:b:1.2.3.4::", "::ffff:1.2.3.4/64", "::ffff:c0a8:1/64", "0:0:0:0:0:ffff:1.2.3.4/64"]) {
     assert.equal(isIPOrCIDR(bad), false, bad);
   }
 });
@@ -242,6 +242,8 @@ test("validateRecipeVars: required + country shape", () => {
   const rcp = recipe("geo_fence");
   assert.ok(validateRecipeVars(rcp, { vhosts: "", countries: "GR" }).some((e) => /Vhosts is required/.test(e)));
   assert.ok(validateRecipeVars(rcp, { vhosts: "a.com", countries: "Greece" }).some((e) => /not a 2-letter/.test(e)));
+  const many = Array.from({ length: LIMITS.patternsPerField + 1 }, (_, i) => `203.0.${i}.0/24`).join(", ");
+  assert.ok(validateRecipeVars(rcp, { vhosts: "a.com", countries: "GR", ips: many }).some((e) => /too many entries/.test(e)));
 });
 
 test("static tables are consistent", () => {

@@ -282,7 +282,8 @@
               <tr v-for="row in rulesFiltered" :key="row.id" :class="{ 'row-off': !row.enabled, 'row-editing': ruleEditID === row.id }">
                 <td>{{ row.priority }}</td>
                 <td>
-                  <button class="btn-quiet btn-sm" :class="row.enabled ? 'toggle-on' : 'toggle-off'" :disabled="rulesBusy" @click="toggleRuleEnabled(row)" :title="row.enabled ? 'Enforced — click to disable' : 'Not enforced — click to enable'">{{ row.enabled ? 'on' : 'off' }}</button>
+                  <span class="pill warn" v-if="row.unsupported" title="Written by a newer cfm: uses match fields this build does not understand. Kept on disk unchanged, not enforced, not editable until cfm is upgraded.">needs newer cfm</span>
+                  <button v-else class="btn-quiet btn-sm" :class="row.enabled ? 'toggle-on' : 'toggle-off'" :disabled="rulesBusy" @click="toggleRuleEnabled(row)" :title="row.enabled ? 'Enforced — click to disable' : 'Not enforced — click to enable'">{{ row.enabled ? 'on' : 'off' }}</button>
                 </td>
                 <td>
                   <span class="pill" :class="actionTone(row.action?.type)">{{ row.action?.type || '-' }}</span>
@@ -296,9 +297,9 @@
                 </td>
                 <td><code class="muted">{{ row.id }}</code></td>
                 <td class="actions-cell">
-                  <button class="btn-quiet btn-sm" @click="testRule(row)" title="Run the simulator with a request this rule should match">Test</button>
-                  <button class="btn-quiet btn-sm" @click="loadRuleIntoForm(row)">Edit</button>
-                  <button class="btn-quiet btn-sm" @click="duplicateRule(row)">Duplicate</button>
+                  <button class="btn-quiet btn-sm" :disabled="row.unsupported" @click="testRule(row)" title="Run the simulator with a request this rule should match">Test</button>
+                  <button class="btn-quiet btn-sm" :disabled="row.unsupported" @click="loadRuleIntoForm(row)">Edit</button>
+                  <button class="btn-quiet btn-sm" :disabled="row.unsupported" @click="duplicateRule(row)">Duplicate</button>
                   <button class="btn-quiet btn-sm btn-danger" :disabled="rulesBusy" @click="removeRule(row)">Delete</button>
                 </td>
               </tr>

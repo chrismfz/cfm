@@ -1,8 +1,10 @@
 package webdetector
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -470,16 +472,19 @@ func TestTrafficRuleIPAny_ComposesWithGeoFence(t *testing.T) {
 	}
 }
 
-// TestTrafficRuleLoad_UnknownMatchFieldLoadsDisabled: a rules.json written by
-// a NEWER cfm may carry match keys this build does not know. Ignoring them
-// would widen the rule (an allow keyed only on the unknown field becomes
-// allow-everything), so such rules load disabled; known-field rules are
-// untouched.
-func TestTrafficRuleLoad_UnknownMatchFieldLoadsDisabled(t *testing.T) {
+// TestTrafficRuleLoad_UnknownFieldsFrozen: a rules.json written by a NEWER cfm
+// may carry match/scope keys this build does not know. Ignoring them would
+// widen the rule (an allow keyed only on the unknown field becomes
+// allow-everything), so such a rule is listed disabled+unsupported, never
+// evaluated, refused by Update, and — crucially — written back to disk
+// VERBATIM on the next save so the upgrade finds it intact.
+func TestTrafficRuleLoad_UnknownFieldsFrozen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rules.json")
 	data := `[
 	  {"id":"r_future","enabled":true,"priority":15,"scope":{"vhosts":["example.com"]},
 	   "match":{"asn_in":[16509]},"action":{"type":"allow"},"note":"written by a newer cfm"},
+	  {"id":"r_scope","enabled":true,"priority":20,"scope":{"vhosts":["*.example.com"],"exclude_vhosts":["admin.example.com"]},
+	   "match":{"country_in":["US"]},"action":{"type":"block"}},
 	  {"id":"r_known","enabled":true,"priority":900,"scope":{"vhosts":["example.com"]},
 	   "match":{"country_not_in":["GR"]},"action":{"type":"block"}}
 	]`
@@ -487,23 +492,88 @@ func TestTrafficRuleLoad_UnknownMatchFieldLoadsDisabled(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	s := newTrafficRuleStore(path)
-	fut, ok := s.Get("r_future")
-	if !ok {
-		t.Fatalf("future rule must still load (disabled)")
-	}
-	if fut.Enabled {
-		t.Fatalf("rule with unknown match field must load DISABLED, got enabled")
+	for _, id := range []string{"r_future", "r_scope"} {
+		r, ok := s.Get(id)
+		if !ok {
+			t.Fatalf("%s must still load", id)
+		}
+		if r.Enabled || !r.Unsupported {
+			t.Fatalf("%s must load disabled+unsupported, got enabled=%v unsupported=%v", id, r.Enabled, r.Unsupported)
+		}
 	}
 	known, ok := s.Get("r_known")
-	if !ok || !known.Enabled {
+	if !ok || !known.Enabled || known.Unsupported {
 		t.Fatalf("known-field rule must load enabled: ok=%v %+v", ok, known)
 	}
-	// And it must not enforce: the would-be allow-everything is not the verdict.
+
+	// Never evaluated: neither verdict nor disabled_match.
 	res := s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", Country: "US"})
 	if !res.Matched || res.Rule.ID != "r_known" {
 		t.Fatalf("expected the known block to win, got %+v", res)
 	}
-	if res.DisabledMatch == nil || res.DisabledMatch.ID != "r_future" {
-		t.Fatalf("expected the future rule to surface as disabled_match, got %+v", res.DisabledMatch)
+	if res.DisabledMatch != nil {
+		t.Fatalf("unsupported rule must not surface as disabled_match: %+v", res.DisabledMatch)
+	}
+
+	// Cannot be enabled/edited here.
+	fut, _ := s.Get("r_future")
+	fut.Enabled = true
+	if _, err := s.Update("r_future", fut); err == nil {
+		t.Fatalf("Update on an unsupported rule must be refused")
+	}
+
+	// A save triggered by ANY other write keeps the unknown selectors verbatim.
+	if _, err := s.Add(TrafficRule{
+		Enabled: true, Priority: 500,
+		Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:  TrafficRuleMatch{Methods: []string{"POST"}},
+		Action: TrafficRuleAction{Type: TrafficActionChallenge},
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, needle := range []string{`"asn_in"`, `16509`, `"exclude_vhosts"`, `"admin.example.com"`} {
+		if !strings.Contains(string(b), needle) {
+			t.Fatalf("rules.json lost %s after save:\n%s", needle, b)
+		}
+	}
+	if strings.Contains(string(b), `"unsupported"`) {
+		t.Fatalf("in-memory marker must not be persisted:\n%s", b)
+	}
+	// The frozen rule keeps its ORIGINAL enabled:true on disk (the newer build
+	// will honour it again), while this build still sees it disabled.
+	s2 := newTrafficRuleStore(path)
+	if r, _ := s2.Get("r_future"); r.Enabled || !r.Unsupported {
+		t.Fatalf("reloaded frozen rule: %+v", r)
+	}
+	var back []map[string]any
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("unmarshal saved file: %v", err)
+	}
+	for _, m := range back {
+		if m["id"] == "r_future" && m["enabled"] != true {
+			t.Fatalf("frozen rule's on-disk enabled flag must stay as written by the newer cfm: %v", m)
+		}
+	}
+	// Removing a frozen rule removes its bytes too.
+	if !s2.Remove("r_scope") {
+		t.Fatalf("remove frozen")
+	}
+	b, _ = os.ReadFile(path)
+	if strings.Contains(string(b), `"exclude_vhosts"`) {
+		t.Fatalf("removed frozen rule still on disk")
+	}
+	// A client cannot mark a rule unsupported through the API.
+	added, err := s2.Add(TrafficRule{
+		Unsupported: true, Enabled: true, Priority: 600,
+		Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:  TrafficRuleMatch{Methods: []string{"PUT"}},
+		Action: TrafficRuleAction{Type: TrafficActionBlock},
+	})
+	if err != nil || added.Unsupported {
+		t.Fatalf("Add must clear the in-memory marker: err=%v %+v", err, added)
 	}
 }

@@ -59,9 +59,14 @@ back-filled here — see the git/PR history for that period.
   fields and silently drops them when loading `rules.json`, which *widens* such
   a rule (an `allow` keyed only on `ip_any` becomes allow-everything, a `block`
   keyed only on `country_not_in` blocks every visitor). Disable or delete those
-  rules before rolling back below this version. Going forward this build loads
-  any rule whose `match` carries a key it does not know **disabled** (logged),
-  so future field additions cannot widen a rule on downgrade.
+  rules before rolling back below this version. Going forward this build lists
+  any rule whose `match` / `scope` carries a key it does not know as disabled +
+  `unsupported`, never evaluates it, refuses to edit or enable it, and writes it
+  back to `rules.json` **verbatim** (original bytes, original `enabled`), so a
+  future field addition can neither widen a rule on downgrade nor be lost by an
+  intervening save. Also fixed: the simulator resolved an IP-only request to the
+  country *name* (`Greece`) instead of the ISO code the rules and the live edge
+  path use (`GR`), which with `country_not_in` would have shown a false block.
 - **cfm-admin Traffic Rules: guided editor + recipes.** The flat form is
   replaced by a three-step builder — *what should happen* (action cards with
   the real consequence spelled out, throttle profiles as a select with their

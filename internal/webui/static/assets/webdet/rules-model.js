@@ -353,6 +353,7 @@ export function isIPOrCIDR(v) {
   const OCTET = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
   const V4 = new RegExp(`^${OCTET}(\\.${OCTET}){3}$`);
   let is4 = false;
+  let is4in6 = false;
   if (V4.test(addr)) {
     is4 = true;
   } else {
@@ -373,6 +374,15 @@ export function isIPOrCIDR(v) {
     // A dotted quad must be the absolute tail: "1.2.3.4::" is not an address.
     if (quadTail && parts.length === 2 && parts[1] === "") return false;
     if (parts.length === 2 ? width > 7 : width !== 8) return false;
+    // Expand to 8 groups to recognise a v4-mapped address in ANY spelling
+    // ("::ffff:1.2.3.4", "::ffff:c0a8:1", "0:0:0:0:0:ffff:1.2.3.4").
+    const head = parts[0] === "" ? [] : parts[0].split(":");
+    const tail = parts.length === 2 && parts[1] !== "" ? parts[1].split(":") : [];
+    const expand = (gs) => gs.flatMap((g) => (g.includes(".") ? g.split(".").map(Number).reduce((acc, o, i) => { acc[i >> 1] = ((acc[i >> 1] || 0) << 8) | o; return acc; }, []).map((n) => n.toString(16)) : [g]));
+    const eh = expand(head);
+    const et = expand(tail);
+    const full = parts.length === 2 ? [...eh, ...Array(8 - eh.length - et.length).fill("0"), ...et] : eh;
+    is4in6 = full.length === 8 && full.slice(0, 5).every((g) => parseInt(g, 16) === 0) && parseInt(full[5], 16) === 0xffff;
   }
   if (bits === undefined) return true;
   if (!/^(0|[1-9]\d{0,2})$/.test(bits)) return false;
@@ -380,7 +390,7 @@ export function isIPOrCIDR(v) {
   if (n > (is4 ? 32 : 128)) return false;
   // A v4-mapped prefix shorter than /96 is rejected by the daemon (it can never
   // match an Unmap()ed request address).
-  if (!is4 && /^::ffff:\d/i.test(addr) && n < 96) return false;
+  if (is4in6 && n < 96) return false;
   return true;
 }
 
@@ -832,7 +842,9 @@ export function validateRecipeVars(rcp, vars) {
     }
     if (v.type === "vhosts" && csvSplit(raw).length > LIMITS.vhostsPerRule) errors.push(`Too many vhosts (max ${LIMITS.vhostsPerRule}).`);
     if (v.type === "ips") {
-      for (const ip of csvSplit(raw)) if (!isIPOrCIDR(ip)) errors.push(`"${ip}" is not an IPv4/IPv6 address or CIDR range.`);
+      const ips = csvSplit(raw);
+      if (ips.length > LIMITS.patternsPerField) errors.push(`${v.label}: too many entries (max ${LIMITS.patternsPerField}).`);
+      for (const ip of ips) if (!isIPOrCIDR(ip)) errors.push(`"${ip}" is not an IPv4/IPv6 address or CIDR range.`);
     }
   }
   return errors;
