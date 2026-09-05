@@ -865,6 +865,16 @@ export const RECIPES = Object.freeze([
     },
   },
   {
+    key: "block_geedo",
+    kind: "single",
+    title: "Block the Geedo shop scraper",
+    description: "Block the Geedo price-comparison crawler (User-Agent GeedoShopProductFinder), which crawls product/category pages across shops. Allowed by default; created disabled — set your vhost(s) (or * for the whole server, admin only) and enable after a simulator run.",
+    vars: [VAR_VHOSTS],
+    build(vars) {
+      return [rule("block_geedo", { enabled: false, priority: 345, vhosts: vhostsVar(vars), match: { ua_any: ["*GeedoShopProductFinder*"] }, action: { type: "block" }, text: "block the Geedo shop scraper by User-Agent (disabled — validate first)" })];
+    },
+  },
+  {
     key: "block_scraper",
     kind: "single",
     title: "Block a scraper by User-Agent",

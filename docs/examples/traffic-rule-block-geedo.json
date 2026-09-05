@@ -1,0 +1,14 @@
+{
+  "enabled": false,
+  "priority": 345,
+  "scope": {
+    "vhosts": ["shop.example.com"]
+  },
+  "match": {
+    "ua_any": ["*GeedoShopProductFinder*"]
+  },
+  "action": {
+    "type": "block"
+  },
+  "note": "Block the Geedo price-comparison crawler (GeedoShopProductFinder). Allowed by default; starts disabled - set your vhost(s) (or [\"*\"] for the whole server, admin only), then enable after a simulator run."
+}

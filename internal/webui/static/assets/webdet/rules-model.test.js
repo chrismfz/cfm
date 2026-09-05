@@ -219,6 +219,15 @@ test("geo_fence_admin is one country_not_in rule honouring action and paths", ()
   assert.ok(ch[0].priority < rules[0].priority, "challenge band precedes block band");
 });
 
+test("block_geedo blocks the Geedo shop scraper by UA, created disabled", () => {
+  const rules = recipe("block_geedo").build({ vhosts: "shop.gr" });
+  assert.equal(rules.length, 1);
+  assert.equal(rules[0].action.type, "block");
+  assert.deepEqual(rules[0].match.ua_any, ["*GeedoShopProductFinder*"]);
+  assert.equal(rules[0].enabled, false, "block starts disabled — validate first");
+  assert.deepEqual(rules[0].scope.vhosts, ["shop.gr"]);
+});
+
 test("country mode + ip_any: payload, round-trip, description, sample request", () => {
   const p = buildRulePayload(emptyForm({ actionType: "block", vhosts: "a.com", countries: "gr, cy", countriesMode: "not_in", ips: "203.0.113.0/24, 2001:db8::/48" }));
   assert.deepEqual(p.match.country_in, []);

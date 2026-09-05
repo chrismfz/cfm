@@ -17,7 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **cfm-admin traffic rules: a ready-made "Block the Geedo shop scraper" recipe.**
+  Geedo (`GeedoShopProductFinder`) is a price-comparison crawler that visits
+  product/category pages across e-shops without `Sec-Fetch-*` or
+  `Accept-Language` (so it trips the log-only `WAF_FETCH_METADATA` tell). It
+  stays allowed by default; the new one-click recipe — and the
+  `docs/examples/traffic-rule-block-geedo.json` example for the CLI/API — builds
+  a `ua_any: ["*GeedoShopProductFinder*"]` **block** rule, created **disabled**
+  so an operator can scope it to their own vhost (or `*`, admin-only) and enable
+  it after a simulator run.
 
 ## 2026.09.05
 
