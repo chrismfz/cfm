@@ -12,7 +12,9 @@ import {
   describeRule,
   emptyForm,
   formFromRule,
+  hostPatternMatch,
   positionText,
+  priorityTie,
   recipe,
   recipeOf,
   recipeVarsDefaults,
@@ -20,6 +22,7 @@ import {
   suggestPriority,
   validateRecipeVars,
   validateRuleForm,
+  vhostPatternsOverlap,
 } from "./rules-model.js";
 
 const baseRules = [
@@ -96,7 +99,7 @@ test("validateRuleForm: priority tie with an existing rule on the same vhost war
   const tie = validateRuleForm(emptyForm({ actionType: "challenge", vhosts: "example.com", paths: "/x", priority: 20 }), { rules: baseRules });
   assert.ok(tie.warnings.some((w) => /Priority 20 is already used by r_b/.test(w)));
   const rx = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", hasQS: true, qsNotRx: "(" }));
-  assert.ok(rx.errors.some((e) => /not a valid regular expression/.test(e)));
+  assert.ok(rx.warnings.some((w) => /could not be parsed/.test(w)), "JS parse failure is a warning: the daemon validates as Go RE2");
   const rxLimit = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", uas: Array.from({ length: LIMITS.patternsPerField + 1 }, (_, i) => `*bot${i}*`).join(",") }));
   assert.ok(rxLimit.errors.some((e) => /UA patterns: too many/.test(e)));
 });
@@ -124,7 +127,7 @@ test("describeMatch / describeRule read like English and collapse bot groups", (
   assert.equal(describeMatch({ country_in: ["CN", "RU"] }), "requests from CN, RU");
   const search = BOT_GROUPS.find((g) => g.key === "search").patterns;
   assert.equal(describeMatch({ ua_any: [...search, "*Foo*"] }), "requests with a User-Agent matching search engines, Foo");
-  assert.equal(describeMatch({ ua_any: ["-"] }), "requests with a User-Agent matching an empty User-Agent");
+  assert.equal(describeMatch({ ua_any: ["-"] }), "requests with a User-Agent matching no User-Agent at all");
   assert.equal(describeMatch({ has_qs: true, qs_not_rx: "fbclid" }), "requests that carry a query string (except when the query matches /fbclid/)");
   assert.equal(
     describeRule({ scope: { vhosts: ["ksilokosmos.gr"] }, match: { methods: ["POST"], path_any: ["/ws_vtrack/json_v2.php"] }, action: { type: "allow" } }),
@@ -144,7 +147,7 @@ test("simulateInputFromRule builds a request the rule matches (glob → concrete
   });
   assert.deepEqual(s, { host: "www.example.com", ip: "", ua: "GPTBot", path: "/forum/ucp.php", method: "POST", country: "US", qs: "mode=register" });
   const e = simulateInputFromRule({ scope: { vhosts: ["a.com"] }, match: { ua_any: ["-"], has_qs: true } });
-  assert.equal(e.ua, "-");
+  assert.equal(e.ua, "", "a '-' rule is tested with an EMPTY UA, which is what the edge sends");
   assert.equal(e.qs, "page=2");
   assert.equal(e.path, "/");
 });
@@ -164,6 +167,7 @@ test("recipes: every multi recipe is ordered by priority, tagged, and only enabl
       const v = validateRuleForm(formFromRule(r));
       assert.deepEqual(v.errors, [], `${rcp.key}: ${v.errors.join(" | ")}`);
       if (r.action.type === "block" && !r.match.ua_any.length) assert.equal(r.enabled, false, `${rcp.key}: catch-all block must start disabled`);
+      if (r.action.type === "block" && r.match.ua_any.includes("-")) assert.equal(r.enabled, false, `${rcp.key}: no-UA block must start disabled (monitors)`);
     }
   }
 });
@@ -201,4 +205,33 @@ test("static tables are consistent", () => {
   assert.ok(RECIPES.some((r) => r.kind === "link" && /exclude/i.test(r.title + r.description)));
   assert.equal(recipeOf({ note: "hand-written" }), "");
   assert.equal(recipeOf({ note: "recipe:tame_bots — x" }), "tame_bots");
+});
+
+test("qs_not_rx validation follows Go RE2, not JavaScript", () => {
+  const goFlags = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", hasQS: true, qsNotRx: "(?i)fbclid" }));
+  assert.equal(goFlags.errors.length, 0, "a leading Go inline-flag group is valid");
+  const look = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", hasQS: true, qsNotRx: "(?=fbclid)" }));
+  assert.ok(look.errors.some((e) => /lookahead/.test(e)));
+  const backref = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", hasQS: true, qsNotRx: "(a)\\1" }));
+  assert.ok(backref.errors.some((e) => /backreferences/.test(e)));
+  const broken = validateRuleForm(emptyForm({ actionType: "block", vhosts: "a.com", hasQS: true, qsNotRx: "(" }));
+  assert.equal(broken.errors.length, 0);
+  assert.ok(broken.warnings.some((w) => /could not be parsed/.test(w)));
+});
+
+test("vhost overlap mirrors ruleHostMatch: *.suffix only overlaps its own domain", () => {
+  assert.equal(hostPatternMatch("*.shop-a.gr", "www.shop-a.gr"), true);
+  assert.equal(hostPatternMatch("*.shop-a.gr", "shop-a.gr"), false);
+  assert.equal(hostPatternMatch("*.shop-a.gr", "blog-b.com"), false);
+  assert.equal(hostPatternMatch("a.com", "a.com"), true);
+  assert.equal(vhostPatternsOverlap("*.shop-a.gr", "blog-b.com"), false);
+  assert.equal(vhostPatternsOverlap("*.shop-a.gr", "x.shop-a.gr"), true);
+  assert.equal(vhostPatternsOverlap("*.shop-a.gr", "*.eu.shop-a.gr"), true);
+  assert.equal(vhostPatternsOverlap("*.shop-a.gr", "*.other.gr"), false);
+  // guidance for blog-b.com is not driven by a *.shop-a.gr rule
+  const rules = [{ id: "r_w", priority: 50, scope: { vhosts: ["*.shop-a.gr"] }, action: { type: "allow" }, match: {} }];
+  assert.equal(suggestPriority("allow", rules, ["blog-b.com"]), 50);
+  assert.equal(priorityTie(50, ["blog-b.com"], rules), null);
+  assert.equal(priorityTie(50, ["www.shop-a.gr"], rules)?.id, "r_w");
+  assert.equal(priorityTie(50, ["www.shop-a.gr"], rules, "r_w"), null);
 });

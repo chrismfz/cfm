@@ -169,7 +169,7 @@
                 <label for="rule-uas">User-Agent</label>
                 <input id="rule-uas" class="input" type="text" v-model.trim="ruleForm.uas" placeholder="*Googlebot*, *python-requests*, -" />
                 <p class="muted form-hint">
-                  Case-insensitive; a value without <code>*</code> is a substring match; a single <code>-</code> means “no User-Agent”. Quick add:
+                  Case-insensitive; a value without <code>*</code> is a substring match; a lone <code>-</code> matches only requests that send <em>no</em> User-Agent header. Quick add:
                   <button type="button" class="chip mini" v-for="g in botGroups" :key="g.key" @click="addBotGroup(g.key)" :title="g.hint">+ {{ g.label }}</button>
                 </p>
               </template>
@@ -183,7 +183,7 @@
               <template v-if="ruleChips.methods">
                 <label>Methods</label>
                 <div class="chip-row">
-                  <button type="button" class="chip mini" v-for="m in ['GET','POST','HEAD','PUT','PATCH','DELETE','OPTIONS']" :key="m" :class="{ on: methodOn(m) }" @click="toggleMethod(m)">{{ m }}</button>
+                  <button type="button" class="chip mini" v-for="m in knownMethods" :key="m" :class="{ on: methodOn(m) }" @click="toggleMethod(m)">{{ m }}</button>
                 </div>
               </template>
 

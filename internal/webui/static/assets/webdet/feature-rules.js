@@ -18,6 +18,7 @@
 import {
   ACTIONS,
   BOT_GROUPS,
+  KNOWN_METHODS,
   RECIPES,
   THROTTLE_PROFILES,
   actionInfo,
@@ -29,6 +30,7 @@ import {
   formFromRule,
   hasAnyMatch,
   positionText,
+  priorityTie,
   recipe as recipeByKey,
   recipeOf,
   recipeVarsDefaults,
@@ -62,6 +64,7 @@ export const rulesMixin = {
       ruleActions: ACTIONS,
       botGroups: BOT_GROUPS,
       throttleProfiles: THROTTLE_PROFILES,
+      knownMethods: KNOWN_METHODS,
       recipes: RECIPES,
 
       // Editor
@@ -158,8 +161,8 @@ export const rulesMixin = {
       const already = this.rules.filter((r) => recipeOf(r) === rcp.key && (r.scope?.vhosts || []).some((h) => vhosts.includes(String(h).toLowerCase())));
       if (already.length) out.push(`This recipe was already applied to ${vhosts.join(", ")} (${already.map((r) => r.id).join(", ")}). Creating it again duplicates those rules.`);
       for (const p of rows) {
-        const v = validateRuleForm(formFromRule(p), { rules: this.rules });
-        for (const w of v.warnings) if (/Priority \d+ is already used/.test(w)) out.push(`Rule #${p.priority}: ${w}`);
+        const tie = priorityTie(p.priority, p.scope.vhosts, this.rules);
+        if (tie) out.push(`Rule #${p.priority} ties with existing ${tie.id} (${tie.action?.type || "?"}) — ties are resolved by id order, which is not predictable.`);
       }
       return [...new Set(out)];
     },
@@ -427,7 +430,14 @@ export const rulesMixin = {
         return;
       }
       await this.runRuleSimulation();
-      if (this.ruleEditID) this.simulateNote = this.explainTestOutcome({ id: this.ruleEditID });
+      if (!this.ruleEditID) return;
+      // Editing: the daemon evaluated the SAVED rule, not this draft. Only
+      // attribute the outcome to the rule when the draft is unchanged.
+      const saved = this.rules.find((r) => String(r?.id) === this.ruleEditID);
+      const unchanged = saved && JSON.stringify(buildRulePayload(formFromRule(saved))) === JSON.stringify(p);
+      this.simulateNote = unchanged
+        ? this.explainTestOutcome(saved)
+        : `This draft has unsaved changes, so the verdict reflects the SAVED version of ${this.ruleEditID} (and the other saved rules). Update the rule, then test again.`;
     },
     async testRule(row) {
       this.simulateForm = simulateInputFromRule(row);
@@ -436,16 +446,25 @@ export const rulesMixin = {
       this.simulateNote = this.explainTestOutcome(row);
     },
     // explainTestOutcome says, for the rule the operator clicked Test on,
-    // whether the sample request actually REACHED it: a rule can be perfectly
-    // valid and still never fire because a higher-priority rule wins first.
+    // whether the sample request actually REACHED it. Only assert "shadowed"
+    // when a higher-priority rule demonstrably won; otherwise the honest
+    // answer is that the sample did not match this rule (the simulator reports
+    // only the FIRST disabled match, so a second disabled rule is invisible).
     explainTestOutcome(row) {
       const id = String(row?.id || "");
+      const prio = Number(row?.priority);
       const r = this.simulateResult;
       if (!id || !r) return "";
       if (r.matched && r.rule?.id === id) return `Rule ${id} is the verdict for this request.`;
       if (r.disabled_match?.id === id) return `Rule ${id} is disabled: it would be the verdict if enabled.`;
-      const winner = r.matched ? `enabled rule ${r.rule?.id}` : (r.disabled_match ? "no enabled rule" : "no rule");
-      return `Rule ${id} was NOT reached for this request — ${winner} wins first${r.matched ? ` (priority ${r.rule?.priority})` : ""}. Enabling or editing ${id} changes nothing for requests shaped like this one.`;
+      const winner = r.matched ? r.rule : null;
+      if (winner && Number.isFinite(prio) && Number(winner.priority) < prio) {
+        return `Rule ${id} was NOT reached: enabled rule ${winner.id} (priority ${winner.priority}) wins first for requests shaped like this one, so enabling or editing ${id} changes nothing for them.`;
+      }
+      if (!winner && r.disabled_match && Number.isFinite(prio) && Number(r.disabled_match.priority) < prio) {
+        return `Rule ${id} did not produce a verdict: disabled rule ${r.disabled_match.id} (priority ${r.disabled_match.priority}) precedes it and the simulator reports only the first disabled match. Enable or test ${id} alone to see whether the sample matches it.`;
+      }
+      return `The sample request did not match rule ${id}'s conditions (${winner ? `rule ${winner.id} matched instead` : "no rule matched"}). Adjust the simulator fields to a request the rule should catch and run again.`;
     },
     async runRuleSimulation() {
       const req = {

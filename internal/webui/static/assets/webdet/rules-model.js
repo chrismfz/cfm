@@ -101,11 +101,58 @@ export function suggestPriority(actionType, rules = [], vhosts = []) {
   return p;
 }
 
+// hostPatternMatch mirrors Go ruleHostMatch: exact host, a `*`/`?` glob, or a
+// "*.suffix" pattern matching any host that ends in ".suffix".
+export function hostPatternMatch(pattern, host) {
+  const pat = String(pattern || "").toLowerCase().trim();
+  const h = String(host || "").toLowerCase().trim();
+  if (!pat || !h) return false;
+  if (pat === h) return true;
+  if (pat.startsWith("*.")) {
+    const suf = pat.slice(1);
+    if (h.endsWith(suf) && h.length > suf.length) return true;
+  }
+  if (/[*?]/.test(pat)) {
+    const rx = new RegExp(`^${pat.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^.]*").replace(/\?/g, ".")}$`);
+    return rx.test(h);
+  }
+  return false;
+}
+
+// vhostPatternsOverlap: can the two scope entries ever select the same host?
+// Two literals: equal. Literal vs pattern: the pattern matches the literal.
+// Two "*.suffix" patterns: one suffix ends with the other. Used only for UI
+// guidance (priority suggestion, neighbours, tie warnings) — never for
+// enforcement, which is the daemon's job.
+export function vhostPatternsOverlap(a, b) {
+  const pa = String(a || "").toLowerCase().trim();
+  const pb = String(b || "").toLowerCase().trim();
+  if (!pa || !pb) return false;
+  if (pa === pb) return true;
+  if (hostPatternMatch(pa, pb) || hostPatternMatch(pb, pa)) return true;
+  if (pa.startsWith("*.") && pb.startsWith("*.")) {
+    const sa = pa.slice(1);
+    const sb = pb.slice(1);
+    return sa.endsWith(sb) || sb.endsWith(sa);
+  }
+  return false;
+}
+
 function rulesOverlapVhosts(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b) || !a.length || !b.length) return true;
-  const la = a.map((h) => String(h).toLowerCase());
-  const lb = b.map((h) => String(h).toLowerCase());
-  return la.some((h) => lb.includes(h) || h.includes("*") || lb.some((x) => x.includes("*")));
+  return a.some((x) => b.some((y) => vhostPatternsOverlap(x, y)));
+}
+
+// priorityTie returns the first existing rule (other than excludeId) that uses
+// the same priority on an overlapping vhost, or null. Shared by the editor
+// validation and the recipe preview so both warn identically.
+export function priorityTie(priority, vhosts, rules = [], excludeId = "") {
+  const p = Number(priority);
+  if (!Number.isFinite(p) || p <= 0) return null;
+  return (rules || []).find(
+    (r) => String(r?.id || "") !== String(excludeId || "") && Number(r?.priority) === p &&
+      rulesOverlapVhosts(r?.scope?.vhosts || [], vhosts),
+  ) || null;
 }
 
 // positionText describes where a priority lands among existing rules for the
@@ -181,9 +228,9 @@ export const BOT_GROUPS = Object.freeze([
   },
   {
     key: "empty",
-    phrase: "an empty User-Agent",
-    label: "Empty / missing UA",
-    hint: "nginx logs a missing User-Agent as a single dash",
+    phrase: "no User-Agent at all",
+    label: "No User-Agent",
+    hint: "a lone dash matches ONLY requests without a User-Agent header (the access-log spelling); it is not a substring match",
     patterns: ["-"],
   },
 ]);
@@ -325,10 +372,18 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
     if (ua.length < 3 && ua !== "-") warnings.push(`UA pattern "${ua}" is very short and will match a lot (substring match).`);
   }
   if (p.match.qs_not_rx) {
-    try {
-      new RegExp(p.match.qs_not_rx, "i");
-    } catch (err) {
-      errors.push(`QS pass-through is not a valid regular expression: ${err.message}`);
+    // The daemon compiles Go RE2 ("(?i)" + rx). JavaScript's dialect differs,
+    // so only reject what RE2 definitely rejects (lookaround, backreferences)
+    // and treat a JS parse failure as a warning — the server has the final say.
+    const rx = p.match.qs_not_rx;
+    if (/\(\?<?[=!]/.test(rx) || /\\[1-9]/.test(rx)) {
+      errors.push("QS pass-through: lookahead/lookbehind and backreferences are not supported (Go RE2 syntax).");
+    } else {
+      try {
+        new RegExp(rx.replace(/^\(\?[imsU]+\)/, ""), "i");
+      } catch (err) {
+        warnings.push(`QS pass-through could not be parsed as a JavaScript regex (${err.message}); the daemon validates it as Go RE2 on save.`);
+      }
     }
   }
   if (p.note.length > LIMITS.noteLen) errors.push(`Note too long (max ${LIMITS.noteLen} characters).`);
@@ -337,10 +392,7 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
     errors.push(`Priority must be between ${LIMITS.priorityMin} and ${LIMITS.priorityMax}.`);
   }
   if (p.priority) {
-    const tie = (rules || []).find(
-      (r) => String(r?.id || "") !== String(editId || "") && Number(r?.priority) === p.priority &&
-        rulesOverlapVhosts(r?.scope?.vhosts || [], p.scope.vhosts),
-    );
+    const tie = priorityTie(p.priority, p.scope.vhosts, rules, editId);
     if (tie) warnings.push(`Priority ${p.priority} is already used by ${tie.id} — ties are resolved by id order, which is not predictable.`);
   }
 
@@ -399,8 +451,9 @@ export function describeMatch(match, { max = 3 } = {}) {
 }
 
 function uaName(glob) {
+  if (glob === "-") return "no User-Agent at all";
   const s = String(glob || "").replace(/^\*+|\*+$/g, "");
-  return s === "" ? (glob === "-" ? "an empty UA" : glob) : s;
+  return s === "" ? glob : s;
 }
 
 // describeAction: "block" · "throttle (soft_bot — 2 req/s, burst 20)".
@@ -447,7 +500,8 @@ export function simulateInputFromRule(row) {
   return {
     host,
     ip: "",
-    ua: (m.ua_any || [])[0] === "-" ? "-" : ua,
+    // "-" means "no User-Agent": send an empty UA, exactly what the edge sends.
+    ua: (m.ua_any || [])[0] === "-" ? "" : ua,
     path,
     method: String((m.methods || [])[0] || "GET"),
     country: String((m.country_in || [])[0] || ""),
@@ -570,7 +624,7 @@ export const RECIPES = Object.freeze([
     title: "Tame bots",
     description: "Let search/social crawlers through, rate-limit SEO and AI crawlers, block requests without a User-Agent.",
     vars: [VAR_VHOSTS],
-    warnings: ["Throttles are enabled (low collateral). The empty-UA block is enabled too: legitimate clients always send a User-Agent."],
+    warnings: ["Throttles are enabled (low collateral). The no-User-Agent block is created DISABLED: uptime monitors and health checks sometimes send no UA — check the simulator/logs, then enable."],
     build(vars) {
       const vhosts = vhostsVar(vars);
       const k = "tame_bots";
@@ -578,7 +632,7 @@ export const RECIPES = Object.freeze([
         rule(k, { enabled: true, priority: 10, vhosts, match: { ua_any: GOOD_BOT_UAS }, action: { type: "allow" }, text: "search/social crawlers first" }),
         rule(k, { enabled: true, priority: 110, vhosts, match: { ua_any: botGroup("ai").patterns, methods: ["GET"] }, action: { type: "throttle", profile: "medium_bot" }, text: "AI crawlers at medium_bot" }),
         rule(k, { enabled: true, priority: 130, vhosts, match: { ua_any: botGroup("seo").patterns, methods: ["GET"] }, action: { type: "throttle", profile: "soft_bot" }, text: "SEO crawlers at soft_bot" }),
-        rule(k, { enabled: true, priority: 320, vhosts, match: { ua_any: ["-"] }, action: { type: "block" }, text: "block requests with no User-Agent" }),
+        rule(k, { enabled: false, priority: 320, vhosts, match: { ua_any: ["-"] }, action: { type: "block" }, text: "block requests with no User-Agent — ENABLE after checking monitors" }),
       ];
     },
   },

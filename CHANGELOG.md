@@ -26,6 +26,14 @@ back-filled here — see the git/PR history for that period.
   reports the highest-priority disabled would-be match separately as
   `disabled_match` ("would match if enabled"), and `cfm rules simulate` prints
   it. Regression test pins the contract (`TestTrafficRuleSimulate_DisabledRulesNeverEnforce`).
+- **Traffic rules: a lone `-` User-Agent pattern now means "no User-Agent".**
+  The *Block empty UA* preset stored `ua_any: ["-"]`, which the matcher treated
+  as a plain substring: it matched every UA containing a hyphen
+  (`python-requests`, `meta-externalagent`, `Go-http-client`…) and never the
+  actually-empty UA, because the edge sends `""` for a missing header, not `-`.
+  `-` now matches only an absent/empty User-Agent
+  (`TestTrafficRuleUA_DashMeansNoUserAgent`); the *Tame bots* recipe creates
+  that block disabled so monitors without a UA can be checked first.
 
 ### Added
 - **cfm-admin Traffic Rules: guided editor + recipes.** The flat form is
@@ -51,6 +59,11 @@ back-filled here — see the git/PR history for that period.
 ### Changed
 - README §15 no longer claims `allow` is "enforced"; it documents first-match /
   enabled-only semantics, the `allow` caveat and `disabled_match`.
+- **CI now runs the cfm-admin JS unit tests** (`make test-js`, `node --test` over
+  `internal/webui/static/assets/**/*.test.{js,cjs}`); previously the existing
+  runtime-badge / governor / settings / detector-coverage tests and the new
+  `rules-model.test.js` (which pins the UI ↔ `traffic_rules.go` mirror) ran only
+  by hand.
 
 ## 2026.09.04
 

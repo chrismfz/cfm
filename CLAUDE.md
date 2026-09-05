@@ -36,6 +36,7 @@ make build          # builds ./bin/cfm  (runs verify-bpf-bindings first)
 make run            # build + run
 make lua            # syntax-check configs/lua/*.lua
 make test-lua       # Lua unit tests under scripts/tests/*_test.lua
+make test-js        # cfm-admin JS unit tests (node --test; e.g. webdet/rules-model.test.js mirrors traffic_rules.go)
 make release        # bpf + deb + rpm (contributors; needs clang + libbpf-dev for `bpf`)
 ```
 
@@ -61,6 +62,7 @@ go build ./...
 go test -race ./...
 make lua
 make test-lua
+make test-js                                     # node --test on internal/webui/static/assets/**/*.test.{js,cjs}
 ./scripts/tests/check_cli_transport.sh          # CLI transport guardrail (see §5)
 ./scripts/tests/check_cfm_clearance_require.sh   # Lua clearance module load check
 ./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf bounds + generator tests

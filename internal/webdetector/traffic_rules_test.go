@@ -305,3 +305,36 @@ func TestTrafficRuleSimulate_DisabledRulesNeverEnforce(t *testing.T) {
 		t.Fatalf("reloaded store: expected throttle verdict, got %+v", got)
 	}
 }
+
+// TestTrafficRuleUA_DashMeansNoUserAgent: a lone "-" UA pattern matches only a
+// request WITHOUT a User-Agent (the edge sends "" for a missing header; "-" is
+// the access-log spelling operators type). It must not act as a substring
+// match for every hyphenated UA.
+func TestTrafficRuleUA_DashMeansNoUserAgent(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	if _, err := s.Add(TrafficRule{
+		Enabled:  true,
+		Priority: 10,
+		Scope:    TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:    TrafficRuleMatch{UAAny: []string{"-"}},
+		Action:   TrafficRuleAction{Type: TrafficActionBlock},
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	cases := []struct {
+		ua   string
+		want bool
+	}{
+		{"", true},
+		{"-", true},
+		{"python-requests/2.31", false},
+		{"meta-externalagent/1.1", false},
+		{"Mozilla/5.0 (X11; Linux x86_64) Firefox/128.0", false},
+	}
+	for _, tc := range cases {
+		got := s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", UA: tc.ua}).Matched
+		if got != tc.want {
+			t.Fatalf("ua=%q matched=%v want=%v", tc.ua, got, tc.want)
+		}
+	}
+}

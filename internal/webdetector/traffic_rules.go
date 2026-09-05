@@ -484,6 +484,20 @@ func ruleMatchFilters(m TrafficRuleMatch, country, ua, path, method, qs string) 
 			if p == "" {
 				continue
 			}
+			// A lone "-" is the access-log spelling of "no User-Agent header"
+			// and is what operators type to mean exactly that. Match it ONLY
+			// against an absent/empty UA (the edge sends "" — cfm.lua's
+			// `http_user_agent or ""` — never "-"): as a plain substring it
+			// would instead match every UA containing a hyphen
+			// ("python-requests", "meta-externalagent", …) and never the
+			// empty one.
+			if p == "-" {
+				if ua == "" || ua == "-" {
+					ok = true
+					break
+				}
+				continue
+			}
 			if wildcardMatch(p, ua) {
 				ok = true
 				break
