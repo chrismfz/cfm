@@ -4052,6 +4052,7 @@ func (e *Engine) ChallengeAccessSimulate(ctx context.Context, in ChallengeAccess
 	}
 
 	verifiedBot := strings.TrimSpace(in.VerifiedBot)
+	override := verifiedBot != "" // caller said "treat as a crawler" — no FCrDNS done
 	inconclusive := ""
 	if verifiedBot == "" && ip != "" && e.challengeAccess.NeedsVerifiedBotFor(host) {
 		switch {
@@ -4085,6 +4086,7 @@ func (e *Engine) ChallengeAccessSimulate(ctx context.Context, in ChallengeAccess
 		Country:                 country,
 		ASN:                     asn,
 		VerifiedBot:             verifiedBot,
+		VerifiedBotOverride:     override,
 		VerifiedBotInconclusive: inconclusive,
 	}
 	if ok {

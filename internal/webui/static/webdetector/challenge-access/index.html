@@ -236,8 +236,9 @@
               </div>
               <div class="rule-sentence" v-else>
                 <span class="pill warn">challenged</span> no exemption matches this request.
+                <span class="muted">Only <strong>saved + enabled</strong> exemptions are evaluated — save / enable an entry first if you just added or disabled it.</span>
               </div>
-              <p class="muted" v-if="!caSimResult.exempted && caSimResult.verified_bot">This IP verifies as <code>{{ caSimResult.verified_bot }}</code> — the edge's built-in verified-crawler exemption would still let it through (applied separately, not shown here).</p>
+              <p class="muted" v-if="!caSimResult.exempted && caSimResult.verified_bot && !caSimResult.verified_bot_override">This IP verifies as <code>{{ caSimResult.verified_bot }}</code> — the edge's built-in verified-crawler exemption would still let it through (applied separately, not shown here).</p>
               <p class="muted">Resolved: country <code>{{ caSimResult.country || '—' }}</code>, ASN <code>{{ caSimResult.asn ? 'AS' + caSimResult.asn : '—' }}</code>, crawler <code>{{ caSimResult.verified_bot || '—' }}</code><span v-if="caSimResult.verified_bot_inconclusive"> ({{ caSimResult.verified_bot_inconclusive }})</span>.</p>
             </div>
             <p class="muted" style="margin-top:10px">Verified-crawler defaults (Googlebot / Bing / Meta via FCrDNS) live in <code>/etc/cfm/webdetector_challenge_exclude.txt</code>. To keep a WAF rule off a path instead, use <a href="/cfm-admin/webdetector/waf/">WAF excludes</a>.</p>

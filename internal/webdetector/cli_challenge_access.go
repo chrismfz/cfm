@@ -235,7 +235,7 @@ func runCASimulate(baseURL string, in ChallengeAccessSimInput) error {
 	if out.VerifiedBotInconclusive != "" {
 		fmt.Printf("verified-crawler check: %s (not a definitive negative)\n", out.VerifiedBotInconclusive)
 	}
-	if !out.Exempted && out.VerifiedBot != "" {
+	if !out.Exempted && out.VerifiedBot != "" && !out.VerifiedBotOverride {
 		fmt.Println("note: this IP verifies as a crawler; the edge's built-in verified-crawler exemption would let it through separately.")
 	}
 	return nil

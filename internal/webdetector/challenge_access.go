@@ -125,12 +125,16 @@ type ChallengeAccessSimInput struct {
 // evaluation resolved (so the UI can show "we treated this IP as GR / AS15169 /
 // googlebot"). VerifiedBotInconclusive says why an FCrDNS check did not complete.
 type ChallengeAccessSimResult struct {
-	Exempted                bool                  `json:"exempted"`
-	Entry                   *ChallengeAccessEntry `json:"entry,omitempty"`
-	Country                 string                `json:"country,omitempty"`
-	ASN                     uint32                `json:"asn,omitempty"`
-	VerifiedBot             string                `json:"verified_bot,omitempty"`
-	VerifiedBotInconclusive string                `json:"verified_bot_inconclusive,omitempty"`
+	Exempted bool                  `json:"exempted"`
+	Entry    *ChallengeAccessEntry `json:"entry,omitempty"`
+	Country  string                `json:"country,omitempty"`
+	ASN      uint32                `json:"asn,omitempty"`
+	// VerifiedBot is the crawler name used in evaluation. VerifiedBotOverride is
+	// true when it came from the caller ("treat as a crawler") rather than a real
+	// FCrDNS check — so the UI must NOT claim the IP "verifies" as a crawler.
+	VerifiedBot             string `json:"verified_bot,omitempty"`
+	VerifiedBotOverride     bool   `json:"verified_bot_override,omitempty"`
+	VerifiedBotInconclusive string `json:"verified_bot_inconclusive,omitempty"`
 }
 
 type challengeAccessStore struct {
@@ -307,9 +311,11 @@ func (s *challengeAccessStore) MatchExempt(in ChallengeAccessInput, asnFn func()
 	return ok
 }
 
-// matchExemptEntry returns the first ENABLED entry that exempts this request
-// from the challenge (the simulate API wants the winning entry, not just a
-// bool). Fast-paths on the enabled-count gate. asnFn lazily resolves the
+// matchExemptEntry returns an ENABLED entry that exempts this request from the
+// challenge (the simulate API wants the winning entry, not just a bool).
+// Entries are stored in a map, so when several match, WHICH one is returned is
+// unspecified — harmless for the bool verdict, and every match equally exempts.
+// Fast-paths on the enabled-count gate. asnFn lazily resolves the
 // client's origin ASN and is invoked (at most once, memoized) ONLY when a
 // candidate entry uses asn_in, so a cold-IP mmdb read is spent only when it can
 // change the outcome; nil asnFn (or a 0 return) means "unresolved" and never

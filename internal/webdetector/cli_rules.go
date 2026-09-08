@@ -90,21 +90,23 @@ func doJSON(method, rawURL string, reqBody any, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return err
-		}
-	} else {
-		_, _ = io.Copy(io.Discard, resp.Body)
-	}
+	raw, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode >= 400 {
-		if m, ok := out.(map[string]any); ok {
-			if e, ok := m["error"].(string); ok && strings.TrimSpace(e) != "" {
-				return errors.New(e)
-			}
+		// Surface the server's {"error":"…"} message regardless of the caller's
+		// out type (a struct out previously fell through to a bare status code).
+		var e struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(raw, &e) == nil && strings.TrimSpace(e.Error) != "" {
+			return errors.New(e.Error)
 		}
 		return fmt.Errorf("request failed with status %d", resp.StatusCode)
+	}
+	if out != nil && len(raw) > 0 {
+		if err := json.Unmarshal(raw, out); err != nil {
+			return err
+		}
 	}
 	return nil
 }
