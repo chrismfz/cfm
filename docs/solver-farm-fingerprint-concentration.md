@@ -141,11 +141,12 @@ exactly as they are (the L2 high-rate path). Both paths raise the **same**
 
 Flag a `(host)` when **some single fingerprint** in the window satisfies **all**:
 
-- `fp.subnets  ≥ MIN_FP_SUBNETS`   (proposal: **8** — calibrate in shadow)
-- `fp.countries ≥ MIN_FP_COUNTRIES` (proposal: **6** — the FP-guard; calibrate)
+- `fp.subnets  ≥ MIN_FP_SUBNETS`   (**8** — calibrated, §5.3)
+- `fp.countries ≥ MIN_FP_COUNTRIES` (**6** — the load-bearing FP-guard, §5.3)
 - `fp` is **usable**: non-truncated and GREASE-normalised (§7); the empty/`-`
   fingerprint (edge could not stamp one) is **never** a group key — it would pool
-  unrelated clients into a phantom "farm".
+  unrelated clients into a phantom "farm". (Confirmed necessary: a real
+  no-fingerprint group `ligaapola.gr × (none)` reached 3 countries in the capture.)
 
 Corroborating stats carried on the alert (never in the threshold): `max_fp_share`
 = top-fp solves ÷ window solves, `distinct_fps`, `solves_per_ip`, top UA share,
@@ -155,6 +156,42 @@ Corroborating stats carried on the alert (never in the threshold): `max_fp_share
 The two thresholds are **AND**ed on purpose: subnet-spread rules out a single
 busy client; country-spread rules out a single-country CGNAT/proxy that happens
 to share a client stack (§6).
+
+### 5.3 Calibration — measured fleet-wide (2026-09-08)
+
+Two fleet snapshots of the `challenge_solved` stream (titan single-node, 172 min,
+2000 solves; and an 11-node fan-out) aggregated per `(host, fp)` with a 60 s
+sliding-window peak. Distinct **countries under one fingerprint per 60 s** is the
+separating axis:
+
+| `(host, fp)` | class | /24 (60 s peak) | **countries (60 s peak)** | solves/IP |
+|---|---|---:|---:|---:|
+| `techking.gr × c28caa00` | farm | 33 | **22** | 1.00 |
+| `karol.gr × c28caa00` | farm | 10 | **10** | 1.00 |
+| `www.mathematica.gr × 95070673` | farm (2nd fp) | 4 | 3 | 1.04 |
+| `www.anastasiadi.gr × ba6b4aad` | **legit near-FP** | 17 *(over 5 min)* | **2** | 1.05 |
+| `* × 77a50fbb` (common iOS) | legit | ≤2 | **≤1 per host** | ~1.3 |
+
+**Farms sit at 10–22 countries/60 s; every legitimate group observed sits at
+≤3.** `MIN_FP_COUNTRIES = 6` splits them with a ~2× margin — the same
+methodology and margin the parent's `MIN_SUBNETS = 40` was set with.
+`MIN_FP_SUBNETS = 8` is a floor against a trickle; it is **not** the
+discriminator — `www.anastasiadi.gr × ba6b4aad` reached **17 `/24`s** yet is
+legitimate, and only the country guard (2 countries) excludes it.
+
+**Fingerprint-agnostic, vindicated by the data:** the capture holds **two**
+distinct farm fingerprints — `c28caa00` (60 vhosts, ~58 countries fleet-wide)
+**and** `95070673` (36 vhosts, 15 countries). A rule keyed on `c28caa00` would
+already be blind to `95070673`; the concentration metric flags both by shape.
+
+**Known low-rate residue (Phase 2):** `95070673` is spread so thin *per vhost*
+(≈3 countries/60 s on its busiest host) that the per-`(host, fp)`/60 s test does
+not reach `MIN_FP_COUNTRIES` there, even though the fingerprint is unmistakably a
+farm **fleet-wide** (36 vhosts, 15 countries). Catching that regime needs a
+**cross-host, per-fingerprint** aggregation — a fleet-global fp tracker, a bigger
+change deferred to §11. The first cut catches the aggressive, single-vhost-heavy
+farm (`c28caa00` on its main targets) cleanly; the thin cross-host farm is a
+documented follow-up, not a reason to hold the first shadow deploy.
 
 ## 6. False-positive analysis (the load-bearing part)
 
@@ -166,8 +203,12 @@ CGNAT where many users egress the same in-app-browser stack.
 - **Country-spread is the guard.** A corporate fleet or a carrier CGNAT is
   **one country** (or a small handful). A residential-proxy farm is **dozens**.
   `MIN_FP_COUNTRIES` is precisely the axis a legitimate shared-fingerprint
-  population cannot cross. The `c28caa00` capture crossed ~40 countries in 7 min;
-  no honest shared-fp population does.
+  population cannot cross. **Observed, not hypothetical:** the 2026-09-08 capture
+  contains exactly this near-FP — `www.anastasiadi.gr × ba6b4aad` spread across
+  **17 `/24`s** (it would clear any subnet-only bar) yet stayed at **2
+  countries**, and the common iOS fingerprint `77a50fbb` appeared on 17 vhosts but
+  never exceeded ~1 country *per host*. Both are excluded by the country guard;
+  the `c28caa00` farm crossed 22 countries in a single 60 s window.
 - **Verified good bots** are already excluded upstream by the challenge/PTR layer
   (they are exempted from the challenge, so they do not appear in the solve
   stream), and the parent detector's `ALLOW_HOSTS/IPS/NETS/UA_CONTAINS` still
@@ -222,12 +263,14 @@ predating them inherits the defaults, so no upgrade prompt churn:
 | `FP_TRACK` | `1` | enable the concentration track (kill-switch) |
 | `ALLOW_FPS` | *(empty)* | fingerprints exempt from the track (known-legit shared stacks) |
 
-The numbers are **shadow-calibration proposals**, not final. The calibration job
-mirrors the parent's: replay the `c28caa00` capture at its original timestamps
-(the detector already supports an injectable `nowFn` for exactly this) as the
-labelled positive, and a busy legitimate vhost as the negative, then set the
-thresholds at a ≥1.5× margin — the same methodology and the same margin the
-`MIN_SUBNETS = 40` figure was set with.
+These defaults are **calibrated on the 2026-09-08 fleet capture** (§5.3), not
+guesses: farms measured 10–22 countries/60 s under one fingerprint, every
+legitimate group ≤3, so `MIN_FP_COUNTRIES = 6` carries a ~2× margin. The unit
+test replays that capture at its original timestamps (the detector already
+supports an injectable `nowFn`) as the labelled positive, with the
+`ba6b4aad`/`77a50fbb` groups as the negatives — the same methodology the
+`MIN_SUBNETS = 40` figure was set with. Re-confirm against a fresh capture before
+the numbers ever gate enforcement.
 
 ## 9. Test plan
 
