@@ -4028,6 +4028,73 @@ func (e *Engine) ChallengeAccessList() []ChallengeAccessEntry {
 	return e.challengeAccess.List()
 }
 
+// ChallengeAccessSimulate is the /api/v1/challenge/access/simulate entry point:
+// resolve country/ASN from the IP (geo only, no PTR) when not supplied, resolve
+// the verified_bot verdict inline (bounded FCrDNS) when an enabled entry for the
+// host uses it and the caller did not override it, then report whether — and by
+// which entry — the request would be exempted from the challenge.
+func (e *Engine) ChallengeAccessSimulate(ctx context.Context, in ChallengeAccessSimInput) ChallengeAccessSimResult {
+	if e == nil || e.challengeAccess == nil {
+		return ChallengeAccessSimResult{}
+	}
+	host := normalizeControlHost(in.Host)
+	ip := strings.TrimSpace(in.IP)
+	country := strings.ToUpper(strings.TrimSpace(in.Country))
+	asn := in.ASN
+	if ip != "" && e.enr != nil && (country == "" || asn == 0) {
+		geo := e.enr.LookupGeoFast(ip) // mmdb only; no reverse DNS
+		if country == "" {
+			country = strings.ToUpper(strings.TrimSpace(geo.CountryISO))
+		}
+		if asn == 0 {
+			asn = uint32(geo.ASN)
+		}
+	}
+
+	verifiedBot := strings.TrimSpace(in.VerifiedBot)
+	override := verifiedBot != "" // caller said "treat as a crawler" — no FCrDNS done
+	inconclusive := ""
+	if verifiedBot == "" && ip != "" && e.challengeAccess.NeedsVerifiedBotFor(host) {
+		switch {
+		case e.nginxBridge == nil || e.nginxBridge.goodBot == nil:
+			inconclusive = "no_bridge"
+		default:
+			ptrFn := e.simulatePTRLookup(ip)
+			if ptrFn == nil {
+				inconclusive = "no_resolver"
+			} else {
+				// Keeps the generic "google" verdict (challenge exemption), unlike
+				// the traffic-rules simulate which filters it via verifiedBotForRules.
+				verifiedBot, inconclusive = e.nginxBridge.goodBot.verifiedSync(ctx, ip, ptrFn, time.Now())
+			}
+		}
+	}
+
+	entry, ok := e.challengeAccess.matchExemptEntry(ChallengeAccessInput{
+		Host:        host,
+		IP:          ip,
+		UA:          in.UA,
+		Path:        in.Path,
+		Method:      in.Method,
+		Country:     country,
+		QueryString: in.QueryString,
+		VerifiedBot: verifiedBot,
+	}, func() uint32 { return asn })
+
+	res := ChallengeAccessSimResult{
+		Exempted:                ok,
+		Country:                 country,
+		ASN:                     asn,
+		VerifiedBot:             verifiedBot,
+		VerifiedBotOverride:     override,
+		VerifiedBotInconclusive: inconclusive,
+	}
+	if ok {
+		res.Entry = &entry
+	}
+	return res
+}
+
 // TrafficRuleSimulateForAPI is the /api/v1/webdet/rules/simulate entry point:
 // TrafficRuleSimulate plus an inline (bounded) FCrDNS resolution of the
 // verified_bot verdict, so an operator testing a rule gets a definitive answer

@@ -104,6 +104,39 @@ type ChallengeAccessInput struct {
 	VerifiedBot string
 }
 
+// ChallengeAccessSimInput is the /api/v1/challenge/access/simulate request: a
+// request shape to test against the allow-list. Country/ASN are resolved from IP
+// when left empty/0; verified_bot is resolved inline (FCrDNS) or accepted as an
+// override ("treat as a verified crawler").
+type ChallengeAccessSimInput struct {
+	Host        string `json:"host"`
+	IP          string `json:"ip,omitempty"`
+	UA          string `json:"ua,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Method      string `json:"method,omitempty"`
+	Country     string `json:"country,omitempty"`
+	QueryString string `json:"qs,omitempty"`
+	ASN         uint32 `json:"asn,omitempty"`
+	VerifiedBot string `json:"verified_bot,omitempty"`
+}
+
+// ChallengeAccessSimResult is the verdict: whether the request is exempted from
+// the challenge, and by which entry. Country/ASN/VerifiedBot echo what the
+// evaluation resolved (so the UI can show "we treated this IP as GR / AS15169 /
+// googlebot"). VerifiedBotInconclusive says why an FCrDNS check did not complete.
+type ChallengeAccessSimResult struct {
+	Exempted bool                  `json:"exempted"`
+	Entry    *ChallengeAccessEntry `json:"entry,omitempty"`
+	Country  string                `json:"country,omitempty"`
+	ASN      uint32                `json:"asn,omitempty"`
+	// VerifiedBot is the crawler name used in evaluation. VerifiedBotOverride is
+	// true when it came from the caller ("treat as a crawler") rather than a real
+	// FCrDNS check — so the UI must NOT claim the IP "verifies" as a crawler.
+	VerifiedBot             string `json:"verified_bot,omitempty"`
+	VerifiedBotOverride     bool   `json:"verified_bot_override,omitempty"`
+	VerifiedBotInconclusive string `json:"verified_bot_inconclusive,omitempty"`
+}
+
 type challengeAccessStore struct {
 	mu      sync.RWMutex
 	path    string
@@ -271,23 +304,34 @@ func (s *challengeAccessStore) NeedsVerifiedBotFor(host string) bool {
 }
 
 // MatchExempt reports whether any ENABLED entry exempts this request from the
-// challenge. Fast-paths on the enabled-count gate. asnFn lazily resolves the
+// challenge (the bridge hot-path caller). See matchExemptEntry for the asnFn
+// contract.
+func (s *challengeAccessStore) MatchExempt(in ChallengeAccessInput, asnFn func() uint32) bool {
+	_, ok := s.matchExemptEntry(in, asnFn)
+	return ok
+}
+
+// matchExemptEntry returns an ENABLED entry that exempts this request from the
+// challenge (the simulate API wants the winning entry, not just a bool).
+// Entries are stored in a map, so when several match, WHICH one is returned is
+// unspecified — harmless for the bool verdict, and every match equally exempts.
+// Fast-paths on the enabled-count gate. asnFn lazily resolves the
 // client's origin ASN and is invoked (at most once, memoized) ONLY when a
 // candidate entry uses asn_in, so a cold-IP mmdb read is spent only when it can
 // change the outcome; nil asnFn (or a 0 return) means "unresolved" and never
 // matches an asn_in entry (fail-open).
-func (s *challengeAccessStore) MatchExempt(in ChallengeAccessInput, asnFn func() uint32) bool {
+func (s *challengeAccessStore) matchExemptEntry(in ChallengeAccessInput, asnFn func() uint32) (ChallengeAccessEntry, bool) {
 	if s == nil {
-		return false
+		return ChallengeAccessEntry{}, false
 	}
 	host := normalizeControlHost(in.Host)
 	if host == "" {
-		return false
+		return ChallengeAccessEntry{}, false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.enabledCount == 0 {
-		return false
+		return ChallengeAccessEntry{}, false
 	}
 
 	path := strings.TrimSpace(in.Path)
@@ -344,9 +388,9 @@ func (s *challengeAccessStore) MatchExempt(in ChallengeAccessInput, asnFn func()
 		if !ruleMatchFilters(e.Match.TrafficRuleMatch, ipAddr, ipOK, country, ua, path, method, in.QueryString, verifiedBot) {
 			continue
 		}
-		return true
+		return e, true
 	}
-	return false
+	return ChallengeAccessEntry{}, false
 }
 
 func normalizeChallengeAccess(in ChallengeAccessEntry, generateID bool) (ChallengeAccessEntry, error) {

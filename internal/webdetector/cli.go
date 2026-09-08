@@ -115,6 +115,11 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop rules update <id> --file rule.json")
 	fmt.Println("  cfm webtop rules remove <id>")
 	fmt.Println("  cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US]")
+	fmt.Println("  cfm webtop challenge-access list                         # challenge exemptions (allow-list)")
+	fmt.Println("  cfm webtop challenge-access add --file entry.json        # add an exemption")
+	fmt.Println("  cfm webtop challenge-access update <id> --file entry.json")
+	fmt.Println("  cfm webtop challenge-access remove <id>")
+	fmt.Println("  cfm webtop challenge-access simulate --host <vhost> [--ip <ip>] [--path </x>] [--asn 15169] [--verified-bot]")
 	fmt.Println("  cfm webtop history [events|summary|outcomes] [--host H] [--ip IP]")
 
 	fmt.Println("  cfm webtop history prune [days]")
@@ -232,6 +237,8 @@ func RunWebTop(baseURL string, args []string) error {
 			return runHTTP3WebTop(baseURL, args[1:])
 		case "rules":
 			return runRulesWebTop(baseURL, args[1:])
+		case "challenge-access", "access":
+			return runChallengeAccessWebTop(baseURL, args[1:])
 		case "history":
 			return runHistoryWebTop(baseURL, args[1:])
 		case "tokens":

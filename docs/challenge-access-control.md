@@ -5,9 +5,10 @@ Phase 2 (Challenge-Recipes) LANDED.** As-built notes are inline in §3/§6; the 
 lives at `/cfm-admin/webdetector/challenge-access/`
 (`internal/webui/static/webdetector/challenge-access/`,
 `assets/webdet/feature-challenge-access.js`,
-`challenge-access-model.js`, `challenge-access-recipes.js`). Remaining
-follow-ups: a `challenge/access/simulate` endpoint for a "Test" button, CLI
-verbs, and the arming-time suppression (§2.4 B).
+`challenge-access-model.js`, `challenge-access-recipes.js`). The
+`challenge/access/simulate` endpoint + "Test" button and the
+`cfm webtop challenge-access` CLI landed too. Remaining follow-up: the
+arming-time suppression (§2.4 B).
 
 The ask (operator): *"If a client is auto-arm challenged by some rule, and I
 want to allow/bypass a specific **UA / IP / ASN / Country / URL path**, how do
@@ -318,11 +319,11 @@ to this new Challenge Access page.
    (`/api/v1/challenge/access/*`) with the scoped tenant boundary + Go tests
    (per-dimension match, block-never-softened, disk round-trip, scope filter) +
    CHANGELOG. Fixes the google-xrawler class of incident immediately via the API.
-   **Deferred to follow-ups** (each its own PR): the CLI verbs (§3.4), a
-   `challenge/access/simulate` endpoint for the UI "Test" button, the arming-time
-   suppression (§2.4 B; decision-time downgrade is the shipped mechanism), and
-   migrating the legacy host-only challenge excludes (§3.5 — the new store is
-   additive, so M3 keeps working meanwhile). Forward-compat for unknown future
+   **Landed since as follow-ups:** the CLI verbs (§3.4, `cli_challenge_access.go`)
+   and the `challenge/access/simulate` endpoint + UI "Test" button. **Still
+   deferred:** the arming-time suppression (§2.4 B; decision-time downgrade is the
+   shipped mechanism) and migrating the legacy host-only challenge excludes (§3.5
+   — the new store is additive, so M3 keeps working meanwhile). Forward-compat for unknown future
    match/scope keys IS implemented (post-review hardening): the store mirrors the
    traffic-rules `frozen` mechanism — an entry a newer cfm wrote with a key this
    build cannot decode loads as disabled+unsupported (never enforced, so a

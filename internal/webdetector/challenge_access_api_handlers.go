@@ -191,3 +191,46 @@ func (e *Engine) handleChallengeAccessRemove(w http.ResponseWriter, r *http.Requ
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// POST /api/v1/challenge/access/simulate
+// Read-only: reports whether a request shape would be exempted from the
+// challenge, and by which entry. Scoped tokens may only simulate their own hosts.
+func (e *Engine) handleChallengeAccessSimulate(w http.ResponseWriter, r *http.Request) {
+	if e == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine unavailable"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req ChallengeAccessSimInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json: " + err.Error()})
+		return
+	}
+	host := strings.TrimSpace(req.Host)
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
+	if !scopeAllowsVhosts(r, []string{host}) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
+	res := e.ChallengeAccessSimulate(r.Context(), req)
+	// Redact cross-tenant vhosts from the echoed entry for a scoped caller: an
+	// admin entry can span several tenants, and a scoped caller whose host
+	// merely matched it must not learn another tenant's vhost name. Build a NEW
+	// slice — the entry's Scope.Vhosts shares its backing array with the store.
+	if scope := vhostScopeFromContext(r.Context()); scope != nil && res.Entry != nil {
+		inScope := make([]string, 0, len(res.Entry.Scope.Vhosts))
+		for _, h := range res.Entry.Scope.Vhosts {
+			if vhostAllowed(strings.ToLower(h), scope) {
+				inScope = append(inScope, h)
+			}
+		}
+		res.Entry.Scope.Vhosts = inScope
+	}
+	writeJSON(w, http.StatusOK, res)
+}
