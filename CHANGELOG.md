@@ -17,6 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **Challenge Access-Control store: forward-compat preservation of unknown match
+  keys (prevents an allow-list from silently WIDENING on a downgrade).** The
+  daemon store (`challenge_access.go`) now mirrors the traffic-rules `frozen`
+  mechanism: an exemption a newer cfm wrote with a match/scope key this build
+  cannot decode is loaded as **disabled + unsupported** (never enforced — so a
+  narrowing condition the newer cfm meant to apply can never be lost and thereby
+  turn a scoped exemption into a broad one), kept **verbatim on disk** (so
+  nothing is lost for the upgrade), and refused for edit/enable here. Previously
+  `load()` plain-decoded and `saveLocked()` re-marshalled from memory, so an
+  unknown key was dropped on load and permanently stripped on the next write.
+  The fix also closes the analog gap the traffic-rules `frozen` mechanism still
+  has (a frozen entry whose known-field normalization fails is NOT dropped).
+  Backend-only; the cfm-admin UI already preserved unknown keys on its own
+  round-trip (`_preserved`).
+
 ### Added
 - **Solver-farm detection now catches the low-and-slow farm** via a
   fingerprint-concentration track on the `challenge_solver_farm` detector. The
@@ -69,6 +85,16 @@ back-filled here — see the git/PR history for that period.
   and shares the traffic-rule grammar (`node --test` parity in
   `challenge-access-model.test.js`); scoped tokens manage only their own vhosts
   (same boundary as the exclude/rules APIs).
+- **cfm-admin: Challenge-Recipes (Phase 2).** A "Recipes" pane on the Challenge
+  Access page (same front-end-only pattern as the traffic-rules recipes): pick a
+  common case, fill the blanks, review a preview, create the exemption in one
+  click (tagged `recipe:<name>` so it groups in the list). Seed set:
+  *Let product-feed fetchers reach feeds* (the google-xrawler / AS15169 + feed
+  path case), *Let verified search / social crawlers through* (FCrDNS
+  verified_bot), *Exempt an uptime monitor* (ip_any), *Exempt a machine /
+  integration endpoint* (path + optional methods), *Exempt an office ASN /
+  country*. Catalog + helpers in `challenge-access-recipes.js` with `node --test`
+  coverage; a recipe can also be loaded into the editor to tweak before saving.
 - **cfm-admin traffic rules: nine new recipes + a "dataset crawlers" bot group,
   distilled from a 24 h review of live traffic on three fleet nodes.** In value
   order: *Block secret / dev-file probes* (one enabled `path_any` block for the

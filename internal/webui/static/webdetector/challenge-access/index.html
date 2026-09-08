@@ -51,7 +51,58 @@
       <section class="card wide" v-if="shouldShow('challenge_access')">
         <datalist id="cfm-vhost-list"><option v-for="h in knownVhosts" :key="h" :value="h"></option></datalist>
 
-        <div class="exclude-grid">
+        <div class="toolbar wrap">
+          <button :class="caEditorMode === 'editor' ? '' : 'btn-quiet'" @click="setCAEditorMode('editor')">{{ caEditID ? 'Edit exemption' : 'New exemption' }}</button>
+          <button :class="caEditorMode === 'recipes' ? '' : 'btn-quiet'" @click="setCAEditorMode('recipes')">Recipes</button>
+        </div>
+
+        <!-- ── Recipes ─────────────────────────────────────────────────── -->
+        <div v-if="caEditorMode === 'recipes'" class="recipes-pane">
+          <p class="muted">A recipe creates a ready-made exemption for a common case — pick one, fill the blanks, review, create. Created entries are tagged <code>recipe:&lt;name&gt;</code> so they group in the list.</p>
+          <div class="recipe-grid">
+            <button v-for="r in caRecipes" :key="r.key" class="recipe-card" :class="{ selected: caRecipeKey === r.key }" @click="selectCARecipe(r.key)">
+              <span class="recipe-title">{{ r.title }}</span>
+              <span class="recipe-desc muted">{{ r.description }}</span>
+            </button>
+          </div>
+
+          <section class="mini-card recipe-detail" v-if="caSelectedRecipe">
+            <h3>{{ caSelectedRecipe.title }}</h3>
+            <p class="muted">{{ caSelectedRecipe.description }}</p>
+            <div class="form-grid">
+              <template v-for="v in caSelectedRecipe.vars" :key="v.key">
+                <label :for="'ca-recipe-var-' + v.key">{{ v.label }}</label>
+                <input :id="'ca-recipe-var-' + v.key" class="input" type="text" v-model.trim="caRecipeVars[v.key]"
+                  :placeholder="v.placeholder || v.default || ''" :list="v.type === 'vhosts' ? 'cfm-vhost-list' : null" />
+              </template>
+            </div>
+            <ul class="msg-list errors" v-if="caRecipeVarErrors.length"><li v-for="e in caRecipeVarErrors" :key="e">{{ e }}</li></ul>
+
+            <div class="table-wrap" v-if="caRecipePreview.length">
+              <table class="mini-table">
+                <thead><tr><th>#</th><th>On</th><th>Vhosts</th><th>Exempts</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr v-for="(p, i) in caRecipePreview" :key="i">
+                    <td>{{ i + 1 }}</td>
+                    <td><span class="pill ok">on</span></td>
+                    <td><code>{{ caScopeLabel(p.scope.vhosts) }}</code></td>
+                    <td>{{ caMatchSummary(p) }}</td>
+                    <td class="muted">{{ p.note }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <ul class="msg-list warnings" v-if="caSelectedRecipe.warnings && caSelectedRecipe.warnings.length">
+              <li v-for="w in caSelectedRecipe.warnings" :key="w">{{ w }}</li>
+            </ul>
+            <div class="toolbar">
+              <button :disabled="caBusy || !caRecipePreview.length" @click="createCARecipe">Create exemption</button>
+              <button class="btn-quiet" :disabled="caRecipePreview.length !== 1" @click="loadCARecipeIntoEditor">Load into editor</button>
+            </div>
+          </section>
+        </div>
+
+        <div class="exclude-grid" v-if="caEditorMode === 'editor'">
           <!-- ── Editor ─────────────────────────────────────────────────── -->
           <section class="mini-card rule-editor">
             <h3>{{ caEditID ? 'Edit exemption ' + caEditID : 'New exemption' }}</h3>
@@ -197,7 +248,10 @@
                 </td>
                 <td><code>{{ caScopeLabel(row.scope?.vhosts) }}</code></td>
                 <td>{{ caMatchSummary(row) }}</td>
-                <td>{{ row.note || '-' }}</td>
+                <td>
+                  <span class="pill info" v-if="caRecipeOf(row)" :title="'Created by recipe ' + caRecipeOf(row)">recipe:{{ caRecipeOf(row) }}</span>
+                  {{ caNoteText(row) || (caRecipeOf(row) ? '' : '-') }}
+                </td>
                 <td><code class="muted">{{ row.id }}</code></td>
                 <td class="actions-cell">
                   <button class="btn-quiet btn-sm" @click="loadCAIntoForm(row)">Edit</button>
