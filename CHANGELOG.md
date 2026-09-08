@@ -104,6 +104,10 @@ back-filled here — see the git/PR history for that period.
   the current draft), and a per-row "Test". Read-only and scope-checked (scoped
   tokens simulate only their own hosts). `MatchExempt` was refactored to expose
   the winning entry (`matchExemptEntry`).
+- **Challenge Access-Control: `cfm webtop challenge-access` CLI** (list / get /
+  add --file / update --file / remove / simulate), over the same
+  `/api/v1/challenge/access/*` API via the sanctioned `clihttp` transport —
+  mirrors `cfm webtop rules`.
 - **cfm-admin traffic rules: nine new recipes + a "dataset crawlers" bot group,
   distilled from a 24 h review of live traffic on three fleet nodes.** In value
   order: *Block secret / dev-file probes* (one enabled `path_any` block for the
