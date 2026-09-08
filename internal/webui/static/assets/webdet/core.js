@@ -83,6 +83,7 @@ export function createWebdetApp(config) {
       isWAFPage() { return this.pageMode === "waf"; },
       isControlsPage() { return this.pageMode === "controls"; },
       isRulesPage() { return this.pageMode === "rules"; },
+      isChallengeAccessPage() { return this.pageMode === "challenge-access"; },
       isTokensPage() { return this.pageMode === "tokens"; },
       lastRefreshLabel() {
         if (!this.lastRefreshAt) return "";
@@ -94,6 +95,7 @@ export function createWebdetApp(config) {
         if (this.isWAFPage) return "WebDetector / WAF engine";
         if (this.isControlsPage) return "WebDetector / vhost controls";
         if (this.isRulesPage) return "WebDetector / traffic rules";
+        if (this.isChallengeAccessPage) return "WebDetector / challenge access";
         if (this.isTokensPage) return "System / API tokens";
         return "WebDetector / overview";
       },
@@ -283,7 +285,7 @@ export function createWebdetApp(config) {
         const p = String(path);
         const vhostSelfService = ["v1/challenge/vhost/", "v1/http3/", "v1/webdet/rules/"];
         if (vhostSelfService.some((prefix) => p.startsWith(prefix))) return true;
-        const excludeSelfService = ["v1/challenge/exclude/", "v1/waf/exclude/"];
+        const excludeSelfService = ["v1/challenge/exclude/", "v1/challenge/access/", "v1/waf/exclude/"];
         if (this.scopedExcludeManagementAllowed && excludeSelfService.some((prefix) => p.startsWith(prefix))) return true;
         return false;
       },
