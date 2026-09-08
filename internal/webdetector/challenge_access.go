@@ -157,7 +157,10 @@ func (s *challengeAccessStore) Add(in ChallengeAccessEntry) (ChallengeAccessEntr
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.entries) >= maxChallengeAccessEntries {
+	// Frozen (newer-cfm) entries the operator cannot edit here must not count
+	// toward the cap, or a downgrade full of unsupported entries would lock the
+	// operator out of adding any working exemption.
+	if len(s.entries)-len(s.frozen) >= maxChallengeAccessEntries {
 		return ChallengeAccessEntry{}, fmt.Errorf("too many challenge-access entries (max %d)", maxChallengeAccessEntries)
 	}
 	if _, exists := s.entries[norm.ID]; exists {
@@ -442,10 +445,14 @@ func (s *challengeAccessStore) load() {
 			// We do NOT normalize it here — a newer version may relax a field
 			// this build still requires, and a normalize failure must not drop
 			// (and thereby delete on next save) a frozen entry.
-			log.Printf("[webdet][challenge-access] entry %s uses match/scope fields this cfm build does not understand; kept on disk verbatim, not enforced, not editable here (upgrade cfm)", e.ID)
+			log.Printf("[webdet][challenge-access] entry %s uses fields this cfm build does not understand; kept on disk verbatim, not enforced, not editable here (upgrade cfm)", strings.TrimSpace(e.ID))
 			stub := *e
+			stub.ID = strings.TrimSpace(stub.ID) // key consistently with Get/Update/Remove (which trim)
 			stub.Enabled = false
 			stub.Unsupported = true
+			if stub.CreatedAt.IsZero() {
+				stub.CreatedAt = time.Now().UTC()
+			}
 			s.entries[stub.ID] = stub
 			s.frozen[stub.ID] = append(json.RawMessage(nil), raw...)
 			continue
@@ -462,39 +469,32 @@ func (s *challengeAccessStore) load() {
 	s.recountLocked()
 }
 
-// decodeStoredCA decodes one persisted entry. It reports unknown=true when the
-// stored `match` or `scope` block carries a key this build does not define — the
-// signal that a newer cfm wrote a selector we cannot honour (see load()). Only
-// those two selector blocks are probed: a whole-entry check would trip on
-// harmless future metadata (hit counters, tags). An entry that fails to decode
-// at all returns nil. Mirrors decodeStoredRule in traffic_rules.go.
+// decodeStoredCA decodes one persisted entry and reports unknown=true when the
+// stored JSON carries ANY key this build does not define — a future selector, a
+// nested match/scope key, OR a top-level field (metadata like hit counters, or a
+// whole new selector block). An entry that fails to decode at all returns nil.
+//
+// This deliberately diverges from decodeStoredRule (traffic_rules.go), which
+// probes only the match/scope blocks so harmless future metadata does not freeze
+// a rule. For an ALLOW-LIST the trade-off inverts: freezing an entry means NOT
+// enforcing it, which fails CLOSED (the request is challenged, not exempted) —
+// the safe direction — whereas a partial decode that silently drops an unknown
+// key would WIDEN the exemption into a challenge bypass. So we probe the WHOLE
+// entry: a whole-entry re-marshal would also destroy unrecognised top-level
+// bytes, so anything we cannot fully model is frozen and re-emitted verbatim.
+// The cost — a benign metadata field a newer cfm adds freezes every entry on a
+// downgrade, disabling exemptions until upgrade — is acceptable because it fails
+// safe (over-challenge) and a downgrade is rare and operator-driven.
 func decodeStoredCA(raw json.RawMessage) (*ChallengeAccessEntry, bool) {
 	var e ChallengeAccessEntry
 	if err := json.Unmarshal(raw, &e); err != nil {
 		return nil, false
 	}
-	var probe struct {
-		Match json.RawMessage `json:"match"`
-		Scope json.RawMessage `json:"scope"`
-	}
-	if err := json.Unmarshal(raw, &probe); err != nil {
-		return &e, false
-	}
-	if len(probe.Match) > 0 {
-		dec := json.NewDecoder(bytes.NewReader(probe.Match))
-		dec.DisallowUnknownFields()
-		var m challengeAccessMatch
-		if err := dec.Decode(&m); err != nil {
-			return &e, true
-		}
-	}
-	if len(probe.Scope) > 0 {
-		dec := json.NewDecoder(bytes.NewReader(probe.Scope))
-		dec.DisallowUnknownFields()
-		var sc TrafficRuleScope
-		if err := dec.Decode(&sc); err != nil {
-			return &e, true
-		}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var strict ChallengeAccessEntry
+	if err := dec.Decode(&strict); err != nil {
+		return &e, true // any unknown key (top-level or nested) → freeze
 	}
 	return &e, false
 }

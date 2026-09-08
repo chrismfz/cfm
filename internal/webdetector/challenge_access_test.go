@@ -225,6 +225,8 @@ func TestChallengeAccessForwardCompat(t *testing.T) {
 	raw := `[
 	  {"id":"ca_future","enabled":true,"scope":{"vhosts":["shop.gr"]},
 	   "match":{"path_any":["/feed"],"header_in":["X-Api-Key: secret"]},"note":"future"},
+	  {"id":"ca_meta","enabled":true,"scope":{"vhosts":["m.gr"]},
+	   "match":{"path_any":["/z"]},"hits":42},
 	  {"id":"ca_known","enabled":true,"scope":{"vhosts":["ok.gr"]},
 	   "match":{"path_any":["/x"]},"created_at":"2020-01-01T00:00:00Z"}
 	]`
@@ -237,9 +239,16 @@ func TestChallengeAccessForwardCompat(t *testing.T) {
 	if !ok || !fut.Unsupported || fut.Enabled {
 		t.Fatalf("future entry should load as unsupported+disabled: %+v ok=%v", fut, ok)
 	}
+	// A top-level unknown key (metadata / future selector) also freezes the entry.
+	if meta, ok := s.Get("ca_meta"); !ok || !meta.Unsupported {
+		t.Fatalf("entry with an unknown TOP-LEVEL key should freeze: %+v ok=%v", meta, ok)
+	}
 	// Never enforced — even though its known path matches, it is disabled.
 	if s.MatchExempt(ChallengeAccessInput{Host: "shop.gr", Path: "/feed"}, func() uint32 { return 0 }) {
 		t.Fatal("unsupported entry must never exempt (would widen the allow-list)")
+	}
+	if s.MatchExempt(ChallengeAccessInput{Host: "m.gr", Path: "/z"}, func() uint32 { return 0 }) {
+		t.Fatal("top-level-unknown entry must never exempt")
 	}
 	// Editing it is refused.
 	if _, err := s.Update("ca_future", fut); err == nil {
@@ -256,7 +265,10 @@ func TestChallengeAccessForwardCompat(t *testing.T) {
 	}
 	b, _ := os.ReadFile(path)
 	if !strings.Contains(string(b), "header_in") || !strings.Contains(string(b), "X-Api-Key: secret") {
-		t.Fatalf("unknown key dropped on save (allow-list widened):\n%s", b)
+		t.Fatalf("unknown match key dropped on save (allow-list widened):\n%s", b)
+	}
+	if !strings.Contains(string(b), `"hits"`) {
+		t.Fatalf("unknown top-level key dropped on save:\n%s", b)
 	}
 
 	// Reload: the known entry still enforces; the future one stays frozen.
