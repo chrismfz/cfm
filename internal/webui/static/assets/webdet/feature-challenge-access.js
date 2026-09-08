@@ -15,6 +15,7 @@ import {
   VERIFIED_BOT_LABEL,
   CA_METHODS,
 } from "./challenge-access-model.js";
+import { hostPatternMatch } from "./rules-model.js";
 
 export const challengeAccessMixin = {
   data() {
@@ -43,7 +44,10 @@ export const challengeAccessMixin = {
       const vf = this.caVhostFilter;
       const q = this.caSearch.toLowerCase();
       return this.caEntries.filter((e) => {
-        if (vf && !(e.scope?.vhosts || []).includes(vf)) return false;
+        // Match the filter host against each scope PATTERN, so a Global ("*") or
+        // wildcard ("*.shop.gr") entry that actually applies to the chosen vhost
+        // is shown — not hidden by a literal-equality check.
+        if (vf && !(e.scope?.vhosts || []).some((pat) => pat === vf || hostPatternMatch(pat, vf))) return false;
         if (!q) return true;
         const hay = [
           e.id,

@@ -20,6 +20,15 @@ export const CA_METHODS = Object.freeze(["GET", "POST", "HEAD", "PUT", "PATCH", 
 // the editor and a clause in the plain-language summary.
 export const CA_DIMENSIONS = Object.freeze(["paths", "uas", "countries", "ips", "asns", "methods", "vbot"]);
 
+// The match keys the editor form OWNS (builds from its fields). Any other key an
+// entry carries — has_qs / qs_not_rx today, a newer cfm's field tomorrow — is
+// NOT modelled here; caFormFromEntry stashes it and buildCAPayload merges it
+// back so an Edit / Duplicate / enable-toggle never silently DROPS a condition
+// (which would broaden the exemption — a security control).
+export const CA_FORM_MATCH_KEYS = Object.freeze([
+  "country_in", "country_not_in", "ip_any", "asn_in", "ua_any", "path_any", "methods", "verified_bot",
+]);
+
 export function emptyCAForm() {
   return {
     enabled: true,
@@ -33,6 +42,8 @@ export function emptyCAForm() {
     methods: "",
     verifiedBot: false,
     note: "",
+    // Match keys the form does not model, carried through a round-trip verbatim.
+    _preserved: {},
   };
 }
 
@@ -76,9 +87,16 @@ export function buildCAPayload(form) {
   if (methods.length) match.methods = methods;
   if (form.verifiedBot) match.verified_bot = true;
 
+  // Carry through any match key the form does not model (e.g. qs_not_rx set via
+  // the API) so a round-trip never drops — and thereby broadens — a condition.
+  const preserved = (form && form._preserved) || {};
+  for (const k of Object.keys(preserved)) {
+    if (!(k in match) && !CA_FORM_MATCH_KEYS.includes(k)) match[k] = preserved[k];
+  }
+
   return {
     enabled: Boolean(form.enabled),
-    scope: { vhosts: csvSplit(form.vhosts) },
+    scope: { vhosts: csvSplit(form.vhosts).map((h) => h.toLowerCase()) },
     match,
     note: String(form.note || "").trim(),
   };
@@ -89,6 +107,10 @@ export function buildCAPayload(form) {
 export function caFormFromEntry(entry) {
   const m = (entry && entry.match) || {};
   const notIn = Array.isArray(m.country_not_in) && m.country_not_in.length > 0;
+  const preserved = {};
+  for (const k of Object.keys(m)) {
+    if (!CA_FORM_MATCH_KEYS.includes(k)) preserved[k] = m[k];
+  }
   return {
     enabled: entry ? Boolean(entry.enabled) : true,
     vhosts: joinList(entry && entry.scope && entry.scope.vhosts),
@@ -101,6 +123,7 @@ export function caFormFromEntry(entry) {
     methods: joinList(m.methods),
     verifiedBot: Boolean(m.verified_bot),
     note: String((entry && entry.note) || ""),
+    _preserved: preserved,
   };
 }
 
@@ -143,7 +166,7 @@ export function validateCAForm(form) {
   if (!csvSplit(form.vhosts).length) errors.push("At least one vhost is required.");
 
   const codes = csvSplit(form.countries);
-  const badCodes = codes.filter((c) => c.trim().length !== 2);
+  const badCodes = codes.filter((c) => !/^[A-Za-z]{2}$/.test(c.trim()));
   if (badCodes.length) errors.push(`Country codes must be 2 letters: ${badCodes.join(", ")}`);
 
   const badASN = invalidASNTokens(form.asns);

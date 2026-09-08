@@ -110,6 +110,34 @@ test("validateCAForm flags missing vhost, bad codes, bad ASN, whole-vhost", () =
   assert.ok(vw.warnings.some((w) => /EVERY request/i.test(w)));
 });
 
+test("buildCAPayload lowercases vhosts", () => {
+  const f = emptyCAForm();
+  f.vhosts = "Shop.GR, WWW.Shop.GR";
+  assert.deepEqual(buildCAPayload(f).scope.vhosts, ["shop.gr", "www.shop.gr"]);
+});
+
+test("round-trip preserves unmodeled match keys (no silent broadening)", () => {
+  const entry = {
+    id: "ca_qs",
+    enabled: true,
+    scope: { vhosts: ["shop.gr"] },
+    match: { path_any: ["/x"], qs_not_rx: "(?:fbclid)(?:=|$)", has_qs: true },
+  };
+  const form = caFormFromEntry(entry);
+  // The form does not model qs — but a toggle/edit must not drop it.
+  const rebuilt = buildCAPayload(form);
+  assert.equal(rebuilt.match.qs_not_rx, "(?:fbclid)(?:=|$)");
+  assert.equal(rebuilt.match.has_qs, true);
+  assert.deepEqual(rebuilt.match.path_any, ["/x"]);
+});
+
+test("validateCAForm rejects non-letter country codes", () => {
+  const f = emptyCAForm();
+  f.vhosts = "a.gr";
+  f.countries = "G1, 12";
+  assert.ok(validateCAForm(f).errors.some((e) => /2 letters/i.test(e)));
+});
+
 test("caScopeLabel shows Global for wildcard-all", () => {
   assert.equal(caScopeLabel([]), "Global");
   assert.equal(caScopeLabel(["*"]), "Global");
