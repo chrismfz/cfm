@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.08
+
 ### Security
 - **Challenge Access-Control store: forward-compat preservation of unknown match
   keys (prevents an allow-list from silently WIDENING on a downgrade).** The
