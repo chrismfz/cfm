@@ -44,7 +44,7 @@ export const challengeAccessMixin = {
       caRecipeKey: "",
       caRecipeVars: {},
       // Simulator.
-      caSim: { host: "", ip: "", ua: "", path: "", method: "", country: "", asn: "", verifiedBot: false },
+      caSim: { host: "", ip: "", ua: "", path: "", method: "", country: "", asn: "", qs: "", verifiedBot: false },
       caSimResult: null,
       caSimNote: "",
     };
@@ -184,6 +184,7 @@ export const challengeAccessMixin = {
         method: this.caFirst(f.methods) || "GET",
         country: this.caFirst(f.countries).toUpperCase(),
         asn: this.caFirst(f.asns).replace(/^as/i, ""),
+        qs: this.caSim.qs || "",
         verifiedBot: Boolean(f.verifiedBot),
       };
       this.caSimResult = null;
@@ -201,6 +202,7 @@ export const challengeAccessMixin = {
         method: (m.methods && m.methods[0]) || "GET",
         country: (m.country_in && m.country_in[0]) || "",
         asn: m.asn_in && m.asn_in[0] ? String(m.asn_in[0]) : "",
+        qs: "",
         verifiedBot: Boolean(m.verified_bot),
       };
       this.runCASimulation();
@@ -220,7 +222,7 @@ export const challengeAccessMixin = {
         path: String(s.path || "").trim(),
         method: String(s.method || "").trim(),
         country: String(s.country || "").trim(),
-        qs: "",
+        qs: String(s.qs || "").trim(),
         asn: Number(String(s.asn || "").replace(/^as/i, "")) || 0,
         verified_bot: s.verifiedBot ? "googlebot" : "",
       };

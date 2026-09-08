@@ -205,7 +205,7 @@
           <!-- ── Simulator ──────────────────────────────────────────────── -->
           <section class="mini-card">
             <h3>Simulator</h3>
-            <p class="muted">Runs the exact check the edge uses. Country / ASN are resolved from the IP when left blank; the verified-crawler verdict is FCrDNS-checked (or override it below). A flat allow-list: <strong>any enabled entry that matches wins</strong> (conditions AND'd, values OR'd).</p>
+            <p class="muted">Checks a request against <strong>your Challenge Access exemptions</strong> (a flat allow-list: any enabled entry that matches wins; conditions AND'd, values OR'd). Country / ASN are resolved from the IP when left blank; the verified-crawler verdict is FCrDNS-checked (or override it below). Note: the edge <em>also</em> applies the built-in verified-crawler exemption before these, so a real crawler may pass even with no entry here.</p>
             <div class="form-grid">
               <label for="ca-sim-host">Host</label>
               <input id="ca-sim-host" class="input" type="text" v-model.trim="caSim.host" placeholder="shop.example.com" list="cfm-vhost-list" />
@@ -221,6 +221,8 @@
               <input id="ca-sim-country" class="input input-small" type="text" v-model.trim="caSim.country" placeholder="US" />
               <label for="ca-sim-asn">ASN</label>
               <input id="ca-sim-asn" class="input input-small" type="text" v-model.trim="caSim.asn" placeholder="15169 (or from IP)" />
+              <label for="ca-sim-qs">Query</label>
+              <input id="ca-sim-qs" class="input" type="text" v-model.trim="caSim.qs" placeholder="a=b&amp;c=d (for has_qs / qs entries)" />
               <label for="ca-sim-vbot">Crawler</label>
               <label class="muted form-check"><input id="ca-sim-vbot" type="checkbox" v-model="caSim.verifiedBot" /> treat as a verified crawler (override; unticked = resolve the IP's reverse DNS)</label>
             </div>
@@ -235,6 +237,7 @@
               <div class="rule-sentence" v-else>
                 <span class="pill warn">challenged</span> no exemption matches this request.
               </div>
+              <p class="muted" v-if="!caSimResult.exempted && caSimResult.verified_bot">This IP verifies as <code>{{ caSimResult.verified_bot }}</code> — the edge's built-in verified-crawler exemption would still let it through (applied separately, not shown here).</p>
               <p class="muted">Resolved: country <code>{{ caSimResult.country || '—' }}</code>, ASN <code>{{ caSimResult.asn ? 'AS' + caSimResult.asn : '—' }}</code>, crawler <code>{{ caSimResult.verified_bot || '—' }}</code><span v-if="caSimResult.verified_bot_inconclusive"> ({{ caSimResult.verified_bot_inconclusive }})</span>.</p>
             </div>
             <p class="muted" style="margin-top:10px">Verified-crawler defaults (Googlebot / Bing / Meta via FCrDNS) live in <code>/etc/cfm/webdetector_challenge_exclude.txt</code>. To keep a WAF rule off a path instead, use <a href="/cfm-admin/webdetector/waf/">WAF excludes</a>.</p>
