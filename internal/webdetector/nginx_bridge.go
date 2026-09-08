@@ -1715,6 +1715,23 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	ua := strings.TrimSpace(r.URL.Query().Get("ua"))
 	country := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("country")))
 
+	// Memoized enrich lookup, shared by the country fallback here and the
+	// Challenge Access-Control asn_in check further down, so a challenged fresh
+	// IP that needs both resolves the mmdb read ONCE. LookupCachedOrAsync does
+	// not cache a partial miss, so two separate calls would repeat the cold
+	// read + async dispatch; this closure collapses them.
+	var geoResult enrich.Result
+	geoLoaded := false
+	lookupGeo := func() enrich.Result {
+		if !geoLoaded {
+			if b.enr != nil && ip != "" {
+				geoResult = b.enr.LookupCachedOrAsync(ip)
+			}
+			geoLoaded = true
+		}
+		return geoResult
+	}
+
 	if country == "" && ip != "" && b.enr != nil {
 		// LookupCachedOrAsync returns immediately: cache hit gives the real
 		// CountryISO, cache miss returns "" and warms the cache async. We
@@ -1722,7 +1739,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		// "every request blocks up to ~1s on PTR DNS + mmdb cold reads".
 		// Subsequent requests from that IP (typically the next one, ms
 		// later under load) will see the populated cache.
-		if geo := b.enr.LookupCachedOrAsync(ip); geo.CountryISO != "" {
+		if geo := lookupGeo(); geo.CountryISO != "" {
 			country = geo.CountryISO // "GR" not "Greece"
 		}
 	}
@@ -1860,12 +1877,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 			b.ChallengeAccessNeedsVerifiedBot != nil && b.ChallengeAccessNeedsVerifiedBot(host) {
 			verifiedBot, verifiedBotChecked = b.goodBot.verified(ip, ptrFn, now), true
 		}
-		asnFn := func() uint32 {
-			if b.enr == nil || ip == "" {
-				return 0
-			}
-			return uint32(b.enr.LookupCachedOrAsync(ip).ASN)
-		}
+		asnFn := func() uint32 { return uint32(lookupGeo().ASN) }
 		if b.ChallengeAccessExempt(ChallengeAccessInput{
 			Host:        host,
 			IP:          ip,

@@ -797,6 +797,7 @@ func init() {
 			ChallengeExcludeStorePath: kvStrClean(kv, "CHALLENGE_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_challenge_excludes.json"),
 			WAFExcludeStorePath:       kvStrClean(kv, "WAF_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_waf_excludes.json"),
 			ChallengeManualStorePath:  kvStrClean(kv, "CHALLENGE_MANUAL_STORE_PATH", "/var/lib/cfm/webdetector_manual_challenges.json"),
+			ChallengeAccessStorePath:  kvStrClean(kv, "CHALLENGE_ACCESS_STORE_PATH", "/var/lib/cfm/webdetector_challenge_access.json"),
 			HistoryEnabled:            kvBool(kv, "HISTORY_ENABLED", true),
 			HistoryDBPath:             kvStrClean(kv, "HISTORY_DB_PATH", "/var/lib/cfm/webdetector-history.db"),
 			HistoryRetentionDays:      kvInt(kv, "HISTORY_RETENTION_DAYS", 30),

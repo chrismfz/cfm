@@ -14,6 +14,9 @@ var mutatorRoutes = []string{
 	"/api/v1/challenge/vhost/attack",
 	"/api/v1/challenge/exclude/add",
 	"/api/v1/challenge/exclude/remove",
+	"/api/v1/challenge/access/add",
+	"/api/v1/challenge/access/update",
+	"/api/v1/challenge/access/remove",
 	"/api/v1/waf/exclude/add",
 	"/api/v1/waf/exclude/remove",
 	"/api/v1/clam/override/add",
@@ -72,6 +75,8 @@ func TestReadSiblingsStayGET(t *testing.T) {
 	reads := []string{
 		"/api/v1/challenge/vhost/status?host=x.gr",
 		"/api/v1/challenge/exclude/list",
+		"/api/v1/challenge/access",
+		"/api/v1/challenge/access/get?id=x",
 		"/api/v1/waf/exclude/list",
 		"/api/v1/clam/override/list",
 		"/api/v1/clam/mode/list",
