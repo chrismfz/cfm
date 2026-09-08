@@ -96,6 +96,12 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/challenge/exclude/list", e.handleChallengeExcludeList},
 		{"/api/v1/challenge/exclude/add", requirePOST(e.handleChallengeExcludeAdd)},
 		{"/api/v1/challenge/exclude/remove", requirePOST(e.handleChallengeExcludeRemove)},
+		// Challenge Access-Control (challenge exemption allow-list; see challenge_access.go)
+		{"/api/v1/challenge/access", e.handleChallengeAccessList},
+		{"/api/v1/challenge/access/get", e.handleChallengeAccessGet},
+		{"/api/v1/challenge/access/add", requirePOST(e.handleChallengeAccessAdd)},
+		{"/api/v1/challenge/access/update", requirePOST(e.handleChallengeAccessUpdate)},
+		{"/api/v1/challenge/access/remove", requirePOST(e.handleChallengeAccessRemove)},
 		{"/api/v1/waf/exclude/list", e.handleWAFExcludeList},
 		{"/api/v1/waf/exclude/add", requirePOST(e.handleWAFExcludeAdd)},
 		{"/api/v1/waf/exclude/remove", requirePOST(e.handleWAFExcludeRemove)},

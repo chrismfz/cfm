@@ -429,78 +429,17 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 		}
 	}
 
-	if len(r.Scope.Vhosts) == 0 {
-		return TrafficRule{}, errors.New("scope.vhosts is required")
-	}
-	if len(r.Scope.Vhosts) > maxVhostsPerRule {
-		return TrafficRule{}, fmt.Errorf("too many vhosts in rule (max %d)", maxVhostsPerRule)
-	}
-	vhosts := make([]string, 0, len(r.Scope.Vhosts))
-	seenVhosts := map[string]struct{}{}
-	for _, h := range r.Scope.Vhosts {
-		h = normalizeControlHost(h)
-		if h == "" {
-			continue
-		}
-		if _, ok := seenVhosts[h]; ok {
-			continue
-		}
-		seenVhosts[h] = struct{}{}
-		vhosts = append(vhosts, h)
-	}
-	if len(vhosts) == 0 {
-		return TrafficRule{}, errors.New("scope.vhosts is required")
-	}
-	r.Scope.Vhosts = vhosts
-
-	countries, err := normalizeCodeList(r.Match.CountryIn, maxCountriesPerRule, true)
+	scope, err := normalizeScopeVhosts(r.Scope)
 	if err != nil {
-		return TrafficRule{}, fmt.Errorf("country_in: %w", err)
+		return TrafficRule{}, err
 	}
-	r.Match.CountryIn = countries
+	r.Scope = scope
 
-	countriesNot, err := normalizeCodeList(r.Match.CountryNotIn, maxCountriesPerRule, true)
+	m, err := normalizeMatch(r.Match)
 	if err != nil {
-		return TrafficRule{}, fmt.Errorf("country_not_in: %w", err)
+		return TrafficRule{}, err
 	}
-	r.Match.CountryNotIn = countriesNot
-	if len(r.Match.CountryIn) > 0 && len(r.Match.CountryNotIn) > 0 {
-		return TrafficRule{}, errors.New("country_in and country_not_in are mutually exclusive")
-	}
-
-	ips, prefixes, err := normalizeIPList(r.Match.IPAny, maxPatternsPerField)
-	if err != nil {
-		return TrafficRule{}, fmt.Errorf("ip_any: %w", err)
-	}
-	r.Match.IPAny = ips
-	r.Match.ipAnyCompiled = prefixes
-
-	uas, err := normalizePatternList(r.Match.UAAny, maxPatternsPerField, false)
-	if err != nil {
-		return TrafficRule{}, fmt.Errorf("ua_any: %w", err)
-	}
-	r.Match.UAAny = uas
-
-	paths, err := normalizePatternList(r.Match.PathAny, maxPatternsPerField, true)
-	if err != nil {
-		return TrafficRule{}, fmt.Errorf("path_any: %w", err)
-	}
-	r.Match.PathAny = paths
-
-	methods, err := normalizeMethods(r.Match.Methods, maxPatternsPerField)
-	if err != nil {
-		return TrafficRule{}, fmt.Errorf("methods: %w", err)
-	}
-	r.Match.Methods = methods
-
-	if rx := strings.TrimSpace(r.Match.QSNotRx); rx != "" {
-		compiled, err := regexp.Compile("(?i)" + rx)
-		if err != nil {
-			return TrafficRule{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
-		}
-		r.Match.QSNotRx = rx
-		r.Match.qsNotRxCompiled = compiled
-	}
+	r.Match = m
 
 	r.Action.Type = strings.ToLower(strings.TrimSpace(r.Action.Type))
 	r.Action.Profile = strings.TrimSpace(r.Action.Profile)
@@ -516,6 +455,92 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 	}
 
 	return r, nil
+}
+
+// normalizeScopeVhosts validates and canonicalizes a vhost scope (required,
+// de-duplicated, capped). Shared by traffic rules and challenge-access entries
+// so the per-vhost scoping grammar has one implementation (CLAUDE.md §5).
+func normalizeScopeVhosts(in TrafficRuleScope) (TrafficRuleScope, error) {
+	if len(in.Vhosts) == 0 {
+		return TrafficRuleScope{}, errors.New("scope.vhosts is required")
+	}
+	if len(in.Vhosts) > maxVhostsPerRule {
+		return TrafficRuleScope{}, fmt.Errorf("too many vhosts (max %d)", maxVhostsPerRule)
+	}
+	vhosts := make([]string, 0, len(in.Vhosts))
+	seen := map[string]struct{}{}
+	for _, h := range in.Vhosts {
+		h = normalizeControlHost(h)
+		if h == "" {
+			continue
+		}
+		if _, ok := seen[h]; ok {
+			continue
+		}
+		seen[h] = struct{}{}
+		vhosts = append(vhosts, h)
+	}
+	if len(vhosts) == 0 {
+		return TrafficRuleScope{}, errors.New("scope.vhosts is required")
+	}
+	return TrafficRuleScope{Vhosts: vhosts}, nil
+}
+
+// normalizeMatch validates and canonicalizes a match block (country/ip/ua/path/
+// method/qs selectors), compiling the IP prefixes and qs regexp. Shared by
+// traffic rules and challenge-access entries so there is ONE match grammar and
+// one validator (CLAUDE.md §5). VerifiedBot/HasQS are plain bools and need no
+// normalization. ASN (challenge-access only) is normalized by its own caller.
+func normalizeMatch(m TrafficRuleMatch) (TrafficRuleMatch, error) {
+	countries, err := normalizeCodeList(m.CountryIn, maxCountriesPerRule, true)
+	if err != nil {
+		return TrafficRuleMatch{}, fmt.Errorf("country_in: %w", err)
+	}
+	m.CountryIn = countries
+
+	countriesNot, err := normalizeCodeList(m.CountryNotIn, maxCountriesPerRule, true)
+	if err != nil {
+		return TrafficRuleMatch{}, fmt.Errorf("country_not_in: %w", err)
+	}
+	m.CountryNotIn = countriesNot
+	if len(m.CountryIn) > 0 && len(m.CountryNotIn) > 0 {
+		return TrafficRuleMatch{}, errors.New("country_in and country_not_in are mutually exclusive")
+	}
+
+	ips, prefixes, err := normalizeIPList(m.IPAny, maxPatternsPerField)
+	if err != nil {
+		return TrafficRuleMatch{}, fmt.Errorf("ip_any: %w", err)
+	}
+	m.IPAny = ips
+	m.ipAnyCompiled = prefixes
+
+	uas, err := normalizePatternList(m.UAAny, maxPatternsPerField, false)
+	if err != nil {
+		return TrafficRuleMatch{}, fmt.Errorf("ua_any: %w", err)
+	}
+	m.UAAny = uas
+
+	paths, err := normalizePatternList(m.PathAny, maxPatternsPerField, true)
+	if err != nil {
+		return TrafficRuleMatch{}, fmt.Errorf("path_any: %w", err)
+	}
+	m.PathAny = paths
+
+	methods, err := normalizeMethods(m.Methods, maxPatternsPerField)
+	if err != nil {
+		return TrafficRuleMatch{}, fmt.Errorf("methods: %w", err)
+	}
+	m.Methods = methods
+
+	if rx := strings.TrimSpace(m.QSNotRx); rx != "" {
+		compiled, err := regexp.Compile("(?i)" + rx)
+		if err != nil {
+			return TrafficRuleMatch{}, fmt.Errorf("qs_not_rx: invalid regexp: %w", err)
+		}
+		m.QSNotRx = rx
+		m.qsNotRxCompiled = compiled
+	}
+	return m, nil
 }
 
 func normalizeCodeList(in []string, max int, forceUpper bool) ([]string, error) {

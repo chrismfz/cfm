@@ -152,6 +152,19 @@ type NginxBridge struct {
 	// local snapshot enforcement in OpenResty Lua.
 	ListTrafficRules func() []TrafficRule
 
+	// ChallengeAccessExempt reports whether the request matches an operator
+	// Challenge Access-Control entry (allow-list, see challenge_access.go).
+	// When true, a would-be challenge is downgraded to allow — like
+	// goodBotDowngrade it NEVER softens a block and leaves the WAF /
+	// traffic-rule engine untouched. asnFn lazily resolves the origin ASN
+	// (invoked only when a candidate entry uses asn_in). Set once at startup.
+	ChallengeAccessExempt func(ChallengeAccessInput, func() uint32) bool
+	// ChallengeAccessNeedsVerifiedBot reports whether an enabled challenge-access
+	// entry scoped to host uses verified_bot, so the FCrDNS good-bot cache is
+	// consulted only when an entry for THIS host can use it (same gate as
+	// RuleNeedsVerifiedBot).
+	ChallengeAccessNeedsVerifiedBot func(host string) bool
+
 	// Clam
 	clamMgr      clam.Enqueuer
 	clamPending  string
@@ -1829,6 +1842,46 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		verifiedBot, verifiedBotChecked = b.goodBot.verified(ip, ptrFn, now), true
 		if verifiedBot != "" {
 			ipAction, vhAction = goodBotDowngrade(ipAction, vhAction, verifiedBot)
+		}
+	}
+
+	// Challenge Access-Control (operator allow-list): downgrade a would-be
+	// challenge to allow for a matching request (country/path/UA/IP/ASN/
+	// verified-bot, per-vhost or global). Mirrors goodBotDowngrade: NEVER
+	// softens a per-IP block, and the WAF / traffic-rule engine below still
+	// applies. Runs only when a challenge would otherwise be served.
+	if b.ChallengeAccessExempt != nil && ipAction != "block" &&
+		(ipAction == "challenge" || vhAction == "challenge") {
+		// verified_bot dimension: reuse the verdict the good-bot exemption
+		// already fetched; else consult the cache only when an entry scoped to
+		// THIS host uses it. A challenge exemption keeps the generic "google"
+		// verdict, so it is passed through unfiltered (no verifiedBotForRules).
+		if !verifiedBotChecked && b.goodBot != nil && ip != "" && b.enr != nil &&
+			b.ChallengeAccessNeedsVerifiedBot != nil && b.ChallengeAccessNeedsVerifiedBot(host) {
+			verifiedBot, verifiedBotChecked = b.goodBot.verified(ip, ptrFn, now), true
+		}
+		asnFn := func() uint32 {
+			if b.enr == nil || ip == "" {
+				return 0
+			}
+			return uint32(b.enr.LookupCachedOrAsync(ip).ASN)
+		}
+		if b.ChallengeAccessExempt(ChallengeAccessInput{
+			Host:        host,
+			IP:          ip,
+			UA:          ua,
+			Path:        uri,
+			Method:      method,
+			Country:     country,
+			QueryString: qs,
+			VerifiedBot: verifiedBot,
+		}, asnFn) {
+			if ipAction == "challenge" {
+				ipAction = "allow"
+			}
+			if vhAction == "challenge" {
+				vhAction = "allow"
+			}
 		}
 	}
 

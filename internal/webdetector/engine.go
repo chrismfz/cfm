@@ -487,6 +487,7 @@ type Engine struct {
 	clamSigIgnores    *clamSigIgnoreStore
 	http3Overrides    *http3OverrideStore
 	trafficRules      *trafficRuleStore
+	challengeAccess   *challengeAccessStore
 	history           *HistoryStore
 
 	// uaEmergency holds box-wide emergency rules keyed by normalized UA.
@@ -549,6 +550,7 @@ func NewEngine(cfg Config) *Engine {
 	e.clamSigIgnores = newClamSigIgnoreStore(cfg.ClamSigIgnoreStorePath)
 	e.http3Overrides = newHTTP3OverrideStore(cfg.HTTP3OverridesStorePath)
 	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
+	e.challengeAccess = newChallengeAccessStore(cfg.ChallengeAccessStorePath)
 	e.uaEmergency = NewUAEmergencyStore(cfg.UAEmergencyStorePath, cfg.UAEmergencyAuditLog)
 	// manual from api webtop challenge add// — init loads any persisted manual
 	// challenges from disk (filtering expired); restoreManualChallenges below
@@ -570,6 +572,10 @@ func NewEngine(cfg Config) *Engine {
 	e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 	e.nginxBridge.RuleNeedsVerifiedBot = e.trafficRules.NeedsVerifiedBotFor
 	e.nginxBridge.ListTrafficRules = e.TrafficRuleList
+	// Challenge Access-Control: operator allow-list that downgrades a would-be
+	// challenge to allow for matching requests (never a block, never the WAF).
+	e.nginxBridge.ChallengeAccessExempt = e.challengeAccess.MatchExempt
+	e.nginxBridge.ChallengeAccessNeedsVerifiedBot = e.challengeAccess.NeedsVerifiedBotFor
 
 	// Re-assert manual vhost challenges that survived a restart (loaded from
 	// disk in manualChal.init above) now that the bridge exists — push each with
@@ -3983,6 +3989,43 @@ func (e *Engine) TrafficRuleSimulate(in TrafficRuleEvalInput) TrafficRuleEvalRes
 	// cache-only good-bot check before calling. The inline FCrDNS resolution
 	// for operators lives in TrafficRuleSimulateForAPI only.
 	return e.trafficRules.Simulate(in)
+}
+
+// ── Challenge Access-Control (challenge exemption allow-list) ────────────────
+
+func (e *Engine) ChallengeAccessAdd(in ChallengeAccessEntry) (ChallengeAccessEntry, error) {
+	if e == nil || e.challengeAccess == nil {
+		return ChallengeAccessEntry{}, fmt.Errorf("challenge access store unavailable")
+	}
+	return e.challengeAccess.Add(in)
+}
+
+func (e *Engine) ChallengeAccessUpdate(id string, in ChallengeAccessEntry) (ChallengeAccessEntry, error) {
+	if e == nil || e.challengeAccess == nil {
+		return ChallengeAccessEntry{}, fmt.Errorf("challenge access store unavailable")
+	}
+	return e.challengeAccess.Update(id, in)
+}
+
+func (e *Engine) ChallengeAccessRemove(id string) bool {
+	if e == nil || e.challengeAccess == nil {
+		return false
+	}
+	return e.challengeAccess.Remove(id)
+}
+
+func (e *Engine) ChallengeAccessGet(id string) (ChallengeAccessEntry, bool) {
+	if e == nil || e.challengeAccess == nil {
+		return ChallengeAccessEntry{}, false
+	}
+	return e.challengeAccess.Get(id)
+}
+
+func (e *Engine) ChallengeAccessList() []ChallengeAccessEntry {
+	if e == nil || e.challengeAccess == nil {
+		return nil
+	}
+	return e.challengeAccess.List()
 }
 
 // TrafficRuleSimulateForAPI is the /api/v1/webdet/rules/simulate entry point:

@@ -18,6 +18,27 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Challenge Access-Control — a per-vhost/global allow-list that exempts
+  requests from the interactive challenge by country / URL-path / user-agent /
+  IP-CIDR / ASN / verified-crawler (backend + edge enforcement).** Fills the gap
+  where the only surgical control for the challenge was whole-host: the dynamic
+  exclude store is host-only for the challenge, `webdetector_challenge_exclude.txt`
+  is FCrDNS-crawler-only, and a traffic-rule `allow` is not a challenge bypass.
+  A matching entry downgrades a would-be `challenge` to `allow` in the edge
+  decision path (`nginx_bridge.go handleDecision`) — mirroring the good-bot
+  downgrade: it NEVER softens a per-IP block and leaves the WAF / traffic-rule
+  engine fully armed; unknown country/ASN fail open (never match). Reuses the
+  traffic-rule match grammar (`normalizeMatch`/`ruleMatchFilters`, one grammar —
+  CLAUDE.md §5) plus a new challenge-only `asn_in` dimension (resolved lazily
+  from the enrich cache, so a cold-IP mmdb read is spent only when an entry uses
+  it). New store `/var/lib/cfm/webdetector_challenge_access.json`
+  (`CHALLENGE_ACCESS_STORE_PATH`) and CRUD API under `/api/v1/challenge/access/*`
+  with the same scoped-token tenant isolation as the exclude API (a scoped user
+  may use the richer dimensions, but always pinned under a vhost in its own
+  scope). Motivating incident: Google's feed fetcher (`google-xrawler`, AS15169)
+  getting the challenge page instead of a WooCommerce product feed on an
+  auto-challenged shop. Design: `docs/challenge-access-control.md`. cfm-admin UI
+  and Challenge-Recipes to follow (Phase 1/2).
 - **cfm-admin traffic rules: nine new recipes + a "dataset crawlers" bot group,
   distilled from a 24 h review of live traffic on three fleet nodes.** In value
   order: *Block secret / dev-file probes* (one enabled `path_any` block for the
