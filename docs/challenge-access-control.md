@@ -323,9 +323,12 @@ to this new Challenge Access page.
    suppression (§2.4 B; decision-time downgrade is the shipped mechanism), and
    migrating the legacy host-only challenge excludes (§3.5 — the new store is
    additive, so M3 keeps working meanwhile). Forward-compat for unknown future
-   fields on downgrade is not yet implemented — consistent with the sibling WAF
-   exclude store, which also plain-decodes; the elaborate `frozen` guard is
-   traffic-rules-only.
+   match/scope keys IS implemented (post-review hardening): the store mirrors the
+   traffic-rules `frozen` mechanism — an entry a newer cfm wrote with a key this
+   build cannot decode loads as disabled+unsupported (never enforced, so a
+   narrowing condition can never be dropped into a broad exemption) and is kept
+   verbatim on disk. (The sibling WAF exclude store still plain-decodes; that is
+   a separate, lower-stakes gap.)
 2. **Phase 1 — UI.** §4: the Challenge Access page (builder + global/per-vhost
    table + nav slot + scope gating + read-only M2 panel).
 3. **Phase 2 — Challenge-Recipes.** §5, plus incident entry points (challenge

@@ -17,6 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **Challenge Access-Control store: forward-compat preservation of unknown match
+  keys (prevents an allow-list from silently WIDENING on a downgrade).** The
+  daemon store (`challenge_access.go`) now mirrors the traffic-rules `frozen`
+  mechanism: an exemption a newer cfm wrote with a match/scope key this build
+  cannot decode is loaded as **disabled + unsupported** (never enforced — so a
+  narrowing condition the newer cfm meant to apply can never be lost and thereby
+  turn a scoped exemption into a broad one), kept **verbatim on disk** (so
+  nothing is lost for the upgrade), and refused for edit/enable here. Previously
+  `load()` plain-decoded and `saveLocked()` re-marshalled from memory, so an
+  unknown key was dropped on load and permanently stripped on the next write.
+  The fix also closes the analog gap the traffic-rules `frozen` mechanism still
+  has (a frozen entry whose known-field normalization fails is NOT dropped).
+  Backend-only; the cfm-admin UI already preserved unknown keys on its own
+  round-trip (`_preserved`).
+
 ### Added
 - **Challenge Access-Control — a per-vhost/global allow-list that exempts
   requests from the interactive challenge by country / URL-path / user-agent /

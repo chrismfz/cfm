@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -212,6 +214,58 @@ func TestChallengeAccessPersistence(t *testing.T) {
 	if !s2.MatchExempt(ChallengeAccessInput{Host: "shop.gr", Country: "GR", Path: "/x/google.xml"},
 		func() uint32 { return 15169 }) {
 		t.Fatal("reloaded entry did not match")
+	}
+}
+
+// Forward-compat: an entry a newer cfm wrote with an unknown match key must be
+// kept verbatim, never enforced (dropping the key would WIDEN the allow-list),
+// and never dropped from disk on a later save.
+func TestChallengeAccessForwardCompat(t *testing.T) {
+	path := t.TempDir() + "/ca.json"
+	raw := `[
+	  {"id":"ca_future","enabled":true,"scope":{"vhosts":["shop.gr"]},
+	   "match":{"path_any":["/feed"],"header_in":["X-Api-Key: secret"]},"note":"future"},
+	  {"id":"ca_known","enabled":true,"scope":{"vhosts":["ok.gr"]},
+	   "match":{"path_any":["/x"]},"created_at":"2020-01-01T00:00:00Z"}
+	]`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newChallengeAccessStore(path)
+	fut, ok := s.Get("ca_future")
+	if !ok || !fut.Unsupported || fut.Enabled {
+		t.Fatalf("future entry should load as unsupported+disabled: %+v ok=%v", fut, ok)
+	}
+	// Never enforced — even though its known path matches, it is disabled.
+	if s.MatchExempt(ChallengeAccessInput{Host: "shop.gr", Path: "/feed"}, func() uint32 { return 0 }) {
+		t.Fatal("unsupported entry must never exempt (would widen the allow-list)")
+	}
+	// Editing it is refused.
+	if _, err := s.Update("ca_future", fut); err == nil {
+		t.Fatal("Update on an unsupported entry must be refused")
+	}
+
+	// A normal Add triggers saveLocked; the frozen entry's unknown key must
+	// survive verbatim on disk (not be stripped → widening the exemption).
+	if _, err := s.Add(ChallengeAccessEntry{
+		Enabled: true, Scope: TrafficRuleScope{Vhosts: []string{"new.gr"}},
+		Match: caMatch(TrafficRuleMatch{PathAny: []string{"/y"}}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), "header_in") || !strings.Contains(string(b), "X-Api-Key: secret") {
+		t.Fatalf("unknown key dropped on save (allow-list widened):\n%s", b)
+	}
+
+	// Reload: the known entry still enforces; the future one stays frozen.
+	s2 := newChallengeAccessStore(path)
+	if !s2.MatchExempt(ChallengeAccessInput{Host: "ok.gr", Path: "/x"}, func() uint32 { return 0 }) {
+		t.Fatal("known entry should still enforce after reload")
+	}
+	if f2, ok := s2.Get("ca_future"); !ok || !f2.Unsupported {
+		t.Fatalf("future entry lost frozen/unsupported status after reload: %+v ok=%v", f2, ok)
 	}
 }
 

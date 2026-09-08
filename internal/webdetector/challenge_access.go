@@ -33,11 +33,13 @@
 package webdetector
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -75,6 +77,13 @@ type ChallengeAccessEntry struct {
 	Note      string               `json:"note,omitempty"`
 	CreatedAt time.Time            `json:"created_at"`
 	UpdatedAt time.Time            `json:"updated_at"`
+	// Unsupported is an in-memory marker only: the stored entry carries match/
+	// scope keys THIS build does not understand (written by a newer cfm). Such
+	// an entry is NEVER enforced (dropping the unknown key would WIDEN the
+	// exemption — a narrowing condition the newer cfm meant to apply would be
+	// lost), cannot be edited or enabled here, and is written back to disk
+	// verbatim so nothing is lost for the upgrade. Same contract as TrafficRule.
+	Unsupported bool `json:"unsupported,omitempty"`
 }
 
 // ChallengeAccessInput is the per-request shape MatchExempt evaluates. The
@@ -99,6 +108,10 @@ type challengeAccessStore struct {
 	mu      sync.RWMutex
 	path    string
 	entries map[string]ChallengeAccessEntry // key=id
+	// frozen holds the verbatim JSON of entries this build cannot fully decode
+	// (unknown match/scope keys). They are persisted back byte-for-byte so a
+	// downgrade never rewrites — and thereby widens — a newer entry.
+	frozen map[string]json.RawMessage
 	// enabledCount is the lock-free-ish fast-path gate: MatchExempt returns
 	// immediately when zero, so the hot path costs one RLock + one int read
 	// when no exemptions exist.
@@ -113,6 +126,7 @@ func newChallengeAccessStore(path string) *challengeAccessStore {
 	s := &challengeAccessStore{
 		path:    strings.TrimSpace(path),
 		entries: make(map[string]ChallengeAccessEntry),
+		frozen:  make(map[string]json.RawMessage),
 	}
 	s.load()
 	return s
@@ -136,6 +150,7 @@ func (s *challengeAccessStore) recountLocked() {
 }
 
 func (s *challengeAccessStore) Add(in ChallengeAccessEntry) (ChallengeAccessEntry, error) {
+	in.Unsupported = false // in-memory marker only; never client-settable
 	norm, err := normalizeChallengeAccess(in, true)
 	if err != nil {
 		return ChallengeAccessEntry{}, err
@@ -167,6 +182,10 @@ func (s *challengeAccessStore) Update(id string, in ChallengeAccessEntry) (Chall
 	if !ok {
 		return ChallengeAccessEntry{}, errors.New("entry not found")
 	}
+	if cur.Unsupported {
+		return ChallengeAccessEntry{}, errors.New("entry uses match fields this cfm build does not understand; upgrade cfm to edit or enable it")
+	}
+	in.Unsupported = false
 	in.ID = id
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = cur.CreatedAt
@@ -194,6 +213,7 @@ func (s *challengeAccessStore) Remove(id string) bool {
 		return false
 	}
 	delete(s.entries, id)
+	delete(s.frozen, id)
 	s.recountLocked()
 	_ = s.saveLocked()
 	return true
@@ -296,8 +316,8 @@ func (s *challengeAccessStore) MatchExempt(in ChallengeAccessInput, asnFn func()
 	}
 
 	for _, e := range s.entries {
-		if !e.Enabled {
-			continue
+		if !e.Enabled || e.Unsupported {
+			continue // Unsupported entries are always disabled; belt-and-suspenders
 		}
 		if !ruleHostMatch(e.Scope.Vhosts, host) {
 			continue
@@ -402,14 +422,35 @@ func (s *challengeAccessStore) load() {
 	if err != nil || len(b) == 0 {
 		return
 	}
-	var raws []ChallengeAccessEntry
+	var raws []json.RawMessage
 	if err := json.Unmarshal(b, &raws); err != nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, e := range raws {
-		norm, err := normalizeChallengeAccess(e, false)
+	for _, raw := range raws {
+		e, unknown := decodeStoredCA(raw)
+		if e == nil || strings.TrimSpace(e.ID) == "" {
+			continue
+		}
+		if unknown {
+			// Written by a newer cfm: it carries a match/scope key this build
+			// cannot decode. Dropping the key would WIDEN the exemption (a
+			// narrowing condition the newer cfm meant to apply is lost), so keep
+			// the ORIGINAL bytes (re-emitted verbatim by saveLocked), list it as
+			// disabled + unsupported, never enforce it, and refuse Update on it.
+			// We do NOT normalize it here — a newer version may relax a field
+			// this build still requires, and a normalize failure must not drop
+			// (and thereby delete on next save) a frozen entry.
+			log.Printf("[webdet][challenge-access] entry %s uses match/scope fields this cfm build does not understand; kept on disk verbatim, not enforced, not editable here (upgrade cfm)", e.ID)
+			stub := *e
+			stub.Enabled = false
+			stub.Unsupported = true
+			s.entries[stub.ID] = stub
+			s.frozen[stub.ID] = append(json.RawMessage(nil), raw...)
+			continue
+		}
+		norm, err := normalizeChallengeAccess(*e, false)
 		if err != nil {
 			continue
 		}
@@ -421,23 +462,79 @@ func (s *challengeAccessStore) load() {
 	s.recountLocked()
 }
 
+// decodeStoredCA decodes one persisted entry. It reports unknown=true when the
+// stored `match` or `scope` block carries a key this build does not define — the
+// signal that a newer cfm wrote a selector we cannot honour (see load()). Only
+// those two selector blocks are probed: a whole-entry check would trip on
+// harmless future metadata (hit counters, tags). An entry that fails to decode
+// at all returns nil. Mirrors decodeStoredRule in traffic_rules.go.
+func decodeStoredCA(raw json.RawMessage) (*ChallengeAccessEntry, bool) {
+	var e ChallengeAccessEntry
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return nil, false
+	}
+	var probe struct {
+		Match json.RawMessage `json:"match"`
+		Scope json.RawMessage `json:"scope"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return &e, false
+	}
+	if len(probe.Match) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(probe.Match))
+		dec.DisallowUnknownFields()
+		var m challengeAccessMatch
+		if err := dec.Decode(&m); err != nil {
+			return &e, true
+		}
+	}
+	if len(probe.Scope) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(probe.Scope))
+		dec.DisallowUnknownFields()
+		var sc TrafficRuleScope
+		if err := dec.Decode(&sc); err != nil {
+			return &e, true
+		}
+	}
+	return &e, false
+}
+
 func (s *challengeAccessStore) saveLocked() error {
 	if s == nil || s.path == "" {
 		return nil
 	}
-	arr := make([]ChallengeAccessEntry, 0, len(s.entries))
-	for _, e := range s.entries {
-		arr = append(arr, e)
+	type stored struct {
+		scope string
+		id    string
+		raw   json.RawMessage
+	}
+	arr := make([]stored, 0, len(s.entries))
+	for id, e := range s.entries {
+		key := stored{scope: strings.Join(e.Scope.Vhosts, ","), id: id}
+		if raw, ok := s.frozen[id]; ok {
+			// Written by a newer cfm: persist the ORIGINAL bytes so the selectors
+			// this build cannot decode survive until the upgrade.
+			key.raw = raw
+		} else {
+			b, err := json.Marshal(e)
+			if err != nil {
+				return err
+			}
+			key.raw = b
+		}
+		arr = append(arr, key)
 	}
 	sort.Slice(arr, func(i, j int) bool {
-		si := strings.Join(arr[i].Scope.Vhosts, ",")
-		sj := strings.Join(arr[j].Scope.Vhosts, ",")
-		if si != sj {
-			return si < sj
+		if arr[i].scope != arr[j].scope {
+			return arr[i].scope < arr[j].scope
 		}
-		return arr[i].ID < arr[j].ID
+		return arr[i].id < arr[j].id
 	})
-	b, err := json.MarshalIndent(arr, "", "  ")
+	raws := make([]json.RawMessage, 0, len(arr))
+	for _, e := range arr {
+		raws = append(raws, e.raw)
+	}
+	b, err := json.MarshalIndent(raws, "", "  ")
 	if err != nil {
 		return err
 	}
