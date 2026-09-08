@@ -22,6 +22,7 @@ import {
   caRecipeVarsDefaults,
   caRecipeErrors,
   caRecipeBuild,
+  recipeOfEntry,
 } from "./challenge-access-recipes.js";
 
 export const challengeAccessMixin = {
@@ -110,6 +111,13 @@ export const challengeAccessMixin = {
     caMatchSummary(entry) {
       return describeCAMatch(entry?.match);
     },
+    // Recipe origin for the list (pill + human note text), like the rules table.
+    caRecipeOf(entry) {
+      return recipeOfEntry(entry);
+    },
+    caNoteText(entry) {
+      return String((entry && entry.note) || "").replace(/^\s*recipe:[a-z0-9_]+\s*(?:—\s*)?/i, "");
+    },
 
     // ── Recipes ───────────────────────────────────────────────────────────
     setCAEditorMode(mode) {
@@ -118,10 +126,11 @@ export const challengeAccessMixin = {
     selectCARecipe(key) {
       this.caRecipeKey = key;
       const seedVhost = this.caVhostFilter || (this.isScoped ? this.allowedVhosts.join(", ") : "");
-      this.caRecipeVars = caRecipeVarsDefaults(caRecipe(key), { vhosts: seedVhost });
-    },
-    caRecipePreviewSummary(entry) {
-      return describeCAMatch(entry?.match);
+      const vars = caRecipeVarsDefaults(caRecipe(key), { vhosts: seedVhost });
+      // A scoped token can never target "*" (a recipe's static default): force
+      // its own vhosts over the default so the create is in-scope, not a 403.
+      if (this.isScoped && this.allowedVhosts.length) vars.vhosts = this.allowedVhosts.join(", ");
+      this.caRecipeVars = vars;
     },
     async createCARecipe() {
       const entries = this.caRecipePreview;

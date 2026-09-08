@@ -86,7 +86,7 @@
                     <td>{{ i + 1 }}</td>
                     <td><span class="pill ok">on</span></td>
                     <td><code>{{ caScopeLabel(p.scope.vhosts) }}</code></td>
-                    <td>{{ caRecipePreviewSummary(p) }}</td>
+                    <td>{{ caMatchSummary(p) }}</td>
                     <td class="muted">{{ p.note }}</td>
                   </tr>
                 </tbody>
@@ -248,7 +248,10 @@
                 </td>
                 <td><code>{{ caScopeLabel(row.scope?.vhosts) }}</code></td>
                 <td>{{ caMatchSummary(row) }}</td>
-                <td>{{ row.note || '-' }}</td>
+                <td>
+                  <span class="pill info" v-if="caRecipeOf(row)" :title="'Created by recipe ' + caRecipeOf(row)">recipe:{{ caRecipeOf(row) }}</span>
+                  {{ caNoteText(row) || (caRecipeOf(row) ? '' : '-') }}
+                </td>
                 <td><code class="muted">{{ row.id }}</code></td>
                 <td class="actions-cell">
                   <button class="btn-quiet btn-sm" @click="loadCAIntoForm(row)">Edit</button>
