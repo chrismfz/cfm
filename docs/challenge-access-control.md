@@ -5,9 +5,9 @@ Phase 2 (Challenge-Recipes) LANDED.** As-built notes are inline in §3/§6; the 
 lives at `/cfm-admin/webdetector/challenge-access/`
 (`internal/webui/static/webdetector/challenge-access/`,
 `assets/webdet/feature-challenge-access.js`,
-`challenge-access-model.js`, `challenge-access-recipes.js`). Remaining
-follow-ups: a `challenge/access/simulate` endpoint for a "Test" button, CLI
-verbs, and the arming-time suppression (§2.4 B).
+`challenge-access-model.js`, `challenge-access-recipes.js`). The
+`challenge/access/simulate` endpoint + "Test" button landed too. Remaining
+follow-ups: CLI verbs and the arming-time suppression (§2.4 B).
 
 The ask (operator): *"If a client is auto-arm challenged by some rule, and I
 want to allow/bypass a specific **UA / IP / ASN / Country / URL path**, how do

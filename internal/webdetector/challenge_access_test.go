@@ -320,6 +320,33 @@ func TestNginxBridgeChallengeAccessDowngrade(t *testing.T) {
 	}
 }
 
+// Simulate reports whether a request shape is exempted, and by which entry.
+func TestChallengeAccessSimulate(t *testing.T) {
+	e := &Engine{challengeAccess: newChallengeAccessStore("")}
+	mustAddCA(t, e.challengeAccess, []string{"shop.gr"},
+		caMatch(TrafficRuleMatch{PathAny: []string{"*/google.xml"}}, 15169))
+
+	// asn + path both supplied → exempted, entry echoed.
+	res := e.ChallengeAccessSimulate(context.Background(), ChallengeAccessSimInput{
+		Host: "shop.gr", Path: "/x/google.xml", ASN: 15169,
+	})
+	if !res.Exempted || res.Entry == nil {
+		t.Fatalf("expected exempted with entry, got %+v", res)
+	}
+	// Wrong path → not exempted.
+	if r := e.ChallengeAccessSimulate(context.Background(), ChallengeAccessSimInput{
+		Host: "shop.gr", Path: "/index.php", ASN: 15169,
+	}); r.Exempted {
+		t.Fatalf("expected not exempted for wrong path, got %+v", r)
+	}
+	// Unresolved ASN (0) fails open → not exempted.
+	if r := e.ChallengeAccessSimulate(context.Background(), ChallengeAccessSimInput{
+		Host: "shop.gr", Path: "/x/google.xml", ASN: 0,
+	}); r.Exempted {
+		t.Fatalf("expected not exempted with unresolved ASN, got %+v", r)
+	}
+}
+
 // Scope filter hides entries whose vhosts are outside the token allowlist.
 func TestChallengeAccessScopeFilter(t *testing.T) {
 	entries := []ChallengeAccessEntry{

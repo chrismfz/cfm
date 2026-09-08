@@ -191,3 +191,32 @@ func (e *Engine) handleChallengeAccessRemove(w http.ResponseWriter, r *http.Requ
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// POST /api/v1/challenge/access/simulate
+// Read-only: reports whether a request shape would be exempted from the
+// challenge, and by which entry. Scoped tokens may only simulate their own hosts.
+func (e *Engine) handleChallengeAccessSimulate(w http.ResponseWriter, r *http.Request) {
+	if e == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine unavailable"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req ChallengeAccessSimInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json: " + err.Error()})
+		return
+	}
+	host := strings.TrimSpace(req.Host)
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
+	if !scopeAllowsVhosts(r, []string{host}) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
+	writeJSON(w, http.StatusOK, e.ChallengeAccessSimulate(r.Context(), req))
+}

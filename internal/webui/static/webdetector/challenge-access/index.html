@@ -197,28 +197,47 @@
 
             <div class="toolbar">
               <button :disabled="!canSaveCA" @click="saveCA">{{ caEditID ? 'Update exemption' : (caForm.enabled ? 'Save & enable' : 'Save disabled') }}</button>
+              <button class="btn-quiet" @click="prefillCASimFromForm" title="Fill the simulator with a request this exemption should match and run it">Test in simulator</button>
               <button class="btn-quiet" @click="resetCAForm">Clear</button>
             </div>
           </section>
 
-          <!-- ── Help ───────────────────────────────────────────────────── -->
+          <!-- ── Simulator ──────────────────────────────────────────────── -->
           <section class="mini-card">
-            <h3>How it works</h3>
-            <p class="muted">
-              Enforced at the edge decision as a <strong>challenge → allow</strong> downgrade,
-              after the built-in good-bot exemption. A flat allow-list: <strong>any enabled
-              entry that matches wins</strong> — no priorities, no ordering.
-            </p>
-            <p class="muted">
-              Conditions within one entry are combined with <strong>AND</strong>; values
-              inside one condition with <strong>OR</strong>. An entry with no conditions
-              exempts the whole vhost.
-            </p>
-            <p class="muted">
-              For the built-in verified-crawler defaults (Googlebot, Bing, Meta via FCrDNS)
-              see <code>/etc/cfm/webdetector_challenge_exclude.txt</code>. To keep a WAF rule
-              off a path instead, use <a href="/cfm-admin/webdetector/waf/">WAF excludes</a>.
-            </p>
+            <h3>Simulator</h3>
+            <p class="muted">Runs the exact check the edge uses. Country / ASN are resolved from the IP when left blank; the verified-crawler verdict is FCrDNS-checked (or override it below). A flat allow-list: <strong>any enabled entry that matches wins</strong> (conditions AND'd, values OR'd).</p>
+            <div class="form-grid">
+              <label for="ca-sim-host">Host</label>
+              <input id="ca-sim-host" class="input" type="text" v-model.trim="caSim.host" placeholder="shop.example.com" list="cfm-vhost-list" />
+              <label for="ca-sim-ip">IP</label>
+              <input id="ca-sim-ip" class="input" type="text" v-model.trim="caSim.ip" placeholder="74.125.76.1 (fills country/ASN when blank)" />
+              <label for="ca-sim-path">Path</label>
+              <input id="ca-sim-path" class="input" type="text" v-model.trim="caSim.path" placeholder="/wp-content/plugins/woofeed/files/google.xml" />
+              <label for="ca-sim-ua">UA</label>
+              <input id="ca-sim-ua" class="input" type="text" v-model.trim="caSim.ua" placeholder="google-xrawler" />
+              <label for="ca-sim-method">Method</label>
+              <input id="ca-sim-method" class="input input-small" type="text" v-model.trim="caSim.method" placeholder="GET" />
+              <label for="ca-sim-country">Country</label>
+              <input id="ca-sim-country" class="input input-small" type="text" v-model.trim="caSim.country" placeholder="US" />
+              <label for="ca-sim-asn">ASN</label>
+              <input id="ca-sim-asn" class="input input-small" type="text" v-model.trim="caSim.asn" placeholder="15169 (or from IP)" />
+              <label for="ca-sim-vbot">Crawler</label>
+              <label class="muted form-check"><input id="ca-sim-vbot" type="checkbox" v-model="caSim.verifiedBot" /> treat as a verified crawler (override; unticked = resolve the IP's reverse DNS)</label>
+            </div>
+            <div class="toolbar">
+              <button @click="runCASimulation">Run simulation</button>
+            </div>
+            <p class="muted" v-if="caSimNote">{{ caSimNote }}</p>
+            <div class="review-box" v-if="caSimResult">
+              <div class="rule-sentence" v-if="caSimResult.exempted">
+                <span class="pill ok">exempted</span> by <code>{{ caSimResult.entry && caSimResult.entry.id }}</code> — {{ caSimResultSummary() }}
+              </div>
+              <div class="rule-sentence" v-else>
+                <span class="pill warn">challenged</span> no exemption matches this request.
+              </div>
+              <p class="muted">Resolved: country <code>{{ caSimResult.country || '—' }}</code>, ASN <code>{{ caSimResult.asn ? 'AS' + caSimResult.asn : '—' }}</code>, crawler <code>{{ caSimResult.verified_bot || '—' }}</code><span v-if="caSimResult.verified_bot_inconclusive"> ({{ caSimResult.verified_bot_inconclusive }})</span>.</p>
+            </div>
+            <p class="muted" style="margin-top:10px">Verified-crawler defaults (Googlebot / Bing / Meta via FCrDNS) live in <code>/etc/cfm/webdetector_challenge_exclude.txt</code>. To keep a WAF rule off a path instead, use <a href="/cfm-admin/webdetector/waf/">WAF excludes</a>.</p>
           </section>
         </div>
 
@@ -254,6 +273,7 @@
                 </td>
                 <td><code class="muted">{{ row.id }}</code></td>
                 <td class="actions-cell">
+                  <button class="btn-quiet btn-sm" @click="testCARow(row)" title="Run the simulator with a request this exemption should match">Test</button>
                   <button class="btn-quiet btn-sm" @click="loadCAIntoForm(row)">Edit</button>
                   <button class="btn-quiet btn-sm" @click="duplicateCA(row)">Duplicate</button>
                   <button class="btn-quiet btn-sm btn-danger" :disabled="caBusy" @click="removeCA(row)">Delete</button>

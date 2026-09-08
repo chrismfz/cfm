@@ -43,6 +43,10 @@ export const challengeAccessMixin = {
       caRecipes: CA_RECIPES,
       caRecipeKey: "",
       caRecipeVars: {},
+      // Simulator.
+      caSim: { host: "", ip: "", ua: "", path: "", method: "", country: "", asn: "", verifiedBot: false },
+      caSimResult: null,
+      caSimNote: "",
     };
   },
 
@@ -159,6 +163,79 @@ export const challengeAccessMixin = {
       this.loadCAIntoForm(entries[0]); // no id on a recipe entry → opens as a new draft
       this.caEditorMode = "editor";
       this.caRecipeKey = "";
+    },
+
+    // ── Simulator ─────────────────────────────────────────────────────────
+    caFirst(csv) {
+      return String(csv || "").split(",")[0].trim();
+    },
+    concreteHost(h) {
+      // A wildcard scope is not a real host to simulate; make a concrete example.
+      return String(h || "").replace(/^\*\./, "www.").replace(/^\*$/, "");
+    },
+    // Prefill the simulator with a request the current draft should exempt.
+    prefillCASimFromForm() {
+      const f = this.caForm;
+      this.caSim = {
+        host: this.concreteHost(this.caFirst(f.vhosts)),
+        ip: this.caSim.ip || "",
+        ua: this.caFirst(f.uas).replace(/\*/g, ""),
+        path: (this.caFirst(f.paths) || "/").replace(/\*/g, "x"),
+        method: this.caFirst(f.methods) || "GET",
+        country: this.caFirst(f.countries).toUpperCase(),
+        asn: this.caFirst(f.asns).replace(/^as/i, ""),
+        verifiedBot: Boolean(f.verifiedBot),
+      };
+      this.caSimResult = null;
+      this.caSimNote = "";
+      this.runCASimulation();
+    },
+    // Prefill from a saved row and run.
+    testCARow(row) {
+      const m = row.match || {};
+      this.caSim = {
+        host: this.concreteHost((row.scope && row.scope.vhosts && row.scope.vhosts[0]) || ""),
+        ip: "",
+        ua: String((m.ua_any && m.ua_any[0]) || "").replace(/\*/g, ""),
+        path: String((m.path_any && m.path_any[0]) || "/").replace(/\*/g, "x"),
+        method: (m.methods && m.methods[0]) || "GET",
+        country: (m.country_in && m.country_in[0]) || "",
+        asn: m.asn_in && m.asn_in[0] ? String(m.asn_in[0]) : "",
+        verifiedBot: Boolean(m.verified_bot),
+      };
+      this.runCASimulation();
+    },
+    async runCASimulation() {
+      const s = this.caSim;
+      const host = String(s.host || "").trim();
+      if (!host) {
+        this.caSimNote = "Enter a host to simulate.";
+        this.caSimResult = null;
+        return;
+      }
+      const body = {
+        host,
+        ip: String(s.ip || "").trim(),
+        ua: s.ua || "",
+        path: String(s.path || "").trim(),
+        method: String(s.method || "").trim(),
+        country: String(s.country || "").trim(),
+        qs: "",
+        asn: Number(String(s.asn || "").replace(/^as/i, "")) || 0,
+        verified_bot: s.verifiedBot ? "googlebot" : "",
+      };
+      try {
+        this.caSimResult = await this.postJSON("v1/challenge/access/simulate", body);
+        this.caSimNote = "";
+      } catch (err) {
+        this.caSimResult = null;
+        this.caSimNote = `Simulation failed: ${this.formatApiError(err)}`;
+      }
+    },
+    caSimResultSummary() {
+      const r = this.caSimResult;
+      if (!r) return "";
+      return r.exempted ? describeCAMatch(r.entry && r.entry.match) : "";
     },
 
     toggleCAChip(name) {

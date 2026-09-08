@@ -95,6 +95,15 @@ back-filled here — see the git/PR history for that period.
   integration endpoint* (path + optional methods), *Exempt an office ASN /
   country*. Catalog + helpers in `challenge-access-recipes.js` with `node --test`
   coverage; a recipe can also be loaded into the editor to tweak before saving.
+- **Challenge Access-Control: simulate endpoint + "Test" button.**
+  `POST /api/v1/challenge/access/simulate` reports whether a request shape would
+  be exempted from the challenge and by which entry — resolving country/ASN from
+  the IP (geo only) and the verified-crawler verdict inline (bounded FCrDNS, or
+  an operator override), the same way the edge decides. The cfm-admin page gains
+  a Simulator card, a "Test in simulator" button on the editor (prefilled from
+  the current draft), and a per-row "Test". Read-only and scope-checked (scoped
+  tokens simulate only their own hosts). `MatchExempt` was refactored to expose
+  the winning entry (`matchExemptEntry`).
 - **cfm-admin traffic rules: nine new recipes + a "dataset crawlers" bot group,
   distilled from a 24 h review of live traffic on three fleet nodes.** In value
   order: *Block secret / dev-file probes* (one enabled `path_any` block for the
