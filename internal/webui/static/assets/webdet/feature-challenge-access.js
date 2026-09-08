@@ -16,6 +16,13 @@ import {
   CA_METHODS,
 } from "./challenge-access-model.js";
 import { hostPatternMatch } from "./rules-model.js";
+import {
+  CA_RECIPES,
+  caRecipe,
+  caRecipeVarsDefaults,
+  caRecipeErrors,
+  caRecipeBuild,
+} from "./challenge-access-recipes.js";
 
 export const challengeAccessMixin = {
   data() {
@@ -30,6 +37,11 @@ export const challengeAccessMixin = {
       caBotGroups: BOT_GROUPS,
       caVerifiedBotLabel: VERIFIED_BOT_LABEL,
       caKnownMethods: CA_METHODS,
+      // Editor vs recipes pane.
+      caEditorMode: "editor",
+      caRecipes: CA_RECIPES,
+      caRecipeKey: "",
+      caRecipeVars: {},
     };
   },
 
@@ -73,6 +85,15 @@ export const challengeAccessMixin = {
       const what = describeCAMatch(buildCAPayload(this.caForm).match);
       return `On ${vhosts}, exempt from the challenge: ${what}. WAF and IP blocking stay active.`;
     },
+    caSelectedRecipe() {
+      return caRecipe(this.caRecipeKey);
+    },
+    caRecipeVarErrors() {
+      return caRecipeErrors(this.caSelectedRecipe, this.caRecipeVars);
+    },
+    caRecipePreview() {
+      return caRecipeBuild(this.caSelectedRecipe, this.caRecipeVars);
+    },
   },
 
   methods: {
@@ -88,6 +109,47 @@ export const challengeAccessMixin = {
     caScopeLabel,
     caMatchSummary(entry) {
       return describeCAMatch(entry?.match);
+    },
+
+    // ── Recipes ───────────────────────────────────────────────────────────
+    setCAEditorMode(mode) {
+      this.caEditorMode = mode;
+    },
+    selectCARecipe(key) {
+      this.caRecipeKey = key;
+      const seedVhost = this.caVhostFilter || (this.isScoped ? this.allowedVhosts.join(", ") : "");
+      this.caRecipeVars = caRecipeVarsDefaults(caRecipe(key), { vhosts: seedVhost });
+    },
+    caRecipePreviewSummary(entry) {
+      return describeCAMatch(entry?.match);
+    },
+    async createCARecipe() {
+      const entries = this.caRecipePreview;
+      if (!entries.length) return;
+      this.caBusy = true;
+      try {
+        for (const body of entries) {
+          await this.postJSON("v1/challenge/access/add", body);
+        }
+        this.actionMsg = `Created ${entries.length} exemption(s) from recipe ${this.caRecipeKey}.`;
+        this.caSearch = "recipe:" + this.caRecipeKey; // group the new entries in the list
+        this.caRecipeKey = "";
+        this.caEditorMode = "editor";
+        await this.refreshChallengeAccess();
+      } catch (err) {
+        this.actionMsg = `Recipe failed: ${this.formatApiError(err)}`;
+        console.error("[cfm-admin] challenge-access recipe failed", err);
+      } finally {
+        this.caBusy = false;
+      }
+    },
+    // Load a single-entry recipe into the editor to tweak before saving.
+    loadCARecipeIntoEditor() {
+      const entries = this.caRecipePreview;
+      if (entries.length !== 1) return;
+      this.loadCAIntoForm(entries[0]); // no id on a recipe entry → opens as a new draft
+      this.caEditorMode = "editor";
+      this.caRecipeKey = "";
     },
 
     toggleCAChip(name) {

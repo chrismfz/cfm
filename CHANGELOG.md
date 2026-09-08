@@ -52,6 +52,16 @@ back-filled here — see the git/PR history for that period.
   and shares the traffic-rule grammar (`node --test` parity in
   `challenge-access-model.test.js`); scoped tokens manage only their own vhosts
   (same boundary as the exclude/rules APIs).
+- **cfm-admin: Challenge-Recipes (Phase 2).** A "Recipes" pane on the Challenge
+  Access page (same front-end-only pattern as the traffic-rules recipes): pick a
+  common case, fill the blanks, review a preview, create the exemption in one
+  click (tagged `recipe:<name>` so it groups in the list). Seed set:
+  *Let product-feed fetchers reach feeds* (the google-xrawler / AS15169 + feed
+  path case), *Let verified search / social crawlers through* (FCrDNS
+  verified_bot), *Exempt an uptime monitor* (ip_any), *Exempt a machine /
+  integration endpoint* (path + optional methods), *Exempt an office ASN /
+  country*. Catalog + helpers in `challenge-access-recipes.js` with `node --test`
+  coverage; a recipe can also be loaded into the editor to tweak before saving.
 - **cfm-admin traffic rules: nine new recipes + a "dataset crawlers" bot group,
   distilled from a 24 h review of live traffic on three fleet nodes.** In value
   order: *Block secret / dev-file probes* (one enabled `path_any` block for the

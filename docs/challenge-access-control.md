@@ -1,8 +1,13 @@
 # Challenge Access-Control — design proposal
 
-Status: **Phase 0 (backend + edge enforcement) LANDED** on branch
-`claude/challenge-enforce-points`; UI (Phase 1) and Challenge-Recipes (Phase 2)
-still proposed. As-built notes are inline in §3/§6.
+Status: **Phase 0 (backend + edge enforcement), Phase 1 (cfm-admin UI) and
+Phase 2 (Challenge-Recipes) LANDED.** As-built notes are inline in §3/§6; the UI
+lives at `/cfm-admin/webdetector/challenge-access/`
+(`internal/webui/static/webdetector/challenge-access/`,
+`assets/webdet/feature-challenge-access.js`,
+`challenge-access-model.js`, `challenge-access-recipes.js`). Remaining
+follow-ups: a `challenge/access/simulate` endpoint for a "Test" button, CLI
+verbs, and the arming-time suppression (§2.4 B).
 
 The ask (operator): *"If a client is auto-arm challenged by some rule, and I
 want to allow/bypass a specific **UA / IP / ASN / Country / URL path**, how do
