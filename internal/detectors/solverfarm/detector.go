@@ -240,8 +240,10 @@ type hostState struct {
 
 	// fps is the per-fingerprint aggregation for the concentration track, nil
 	// until the first usable-fingerprint solve. Every fp-tracked solve also feeds
-	// the per-host subnets set above, so fps never holds a subnet that set does
-	// not — prune stays consistent between them.
+	// the per-host subnets set above, so — below that set's own cap
+	// (MaxTrackedPerHost distinct subnets in one window, unreachable in practice)
+	// — fps never holds a subnet that set does not, and prune stays consistent
+	// between them.
 	fps map[string]*fpAgg
 }
 
@@ -442,7 +444,10 @@ func New(cfg Config) *Detector {
 // guard needs. The detectors manager calls it via an interface assertion, so the
 // register needs no change. LookupGeoFast reads Country/ASN only (no blocking PTR
 // rDNS) and is called in RunOnce, off the hot Enqueue path. A nil enricher leaves
-// countryFn nil, which fail-safe disables the concentration track.
+// countryFn nil, which fail-safe disables the concentration track; an enricher
+// present but with no geo DB returns empty countries, so no fingerprint meets the
+// country floor and the track cannot fire either — the same outcome, reached
+// differently (it still builds per-fp state, harmlessly).
 func (d *Detector) SetEnricher(e *enrich.Enricher) {
 	if e == nil {
 		return
@@ -667,7 +672,13 @@ func (d *Detector) topConcentratedFP(st *hostState) (fp string, subnets, countri
 	}
 	for k, a := range st.fps {
 		ns, nc := len(a.subnets), len(a.countries)
-		if ns >= d.cfg.MinFPSubnets && nc >= d.cfg.MinFPCountries && ns > subnets {
+		if ns < d.cfg.MinFPSubnets || nc < d.cfg.MinFPCountries {
+			continue
+		}
+		// Deterministic pick so the reported top_fp/fp_* evidence is stable across
+		// passes when two fingerprints tie: most subnets, then most countries, then
+		// the lexicographically smaller fingerprint. (map iteration order is random.)
+		if ns > subnets || (ns == subnets && (nc > countries || (nc == countries && k < fp))) {
 			fp, subnets, countries = k, ns, nc
 		}
 	}
@@ -801,8 +812,14 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 	}
 	alert.Extra["tracks"] = tracks
 	// logonly keeps the detector-log record but drops the mail: the finding stays
-	// true for hours on a vhost the operator has already triaged.
-	if d.cfg.Action == ActionLogonly {
+	// true for hours on a vhost the operator has already triaged. The
+	// fingerprint-concentration track ALSO ships log-only through its burn-in
+	// (loFP set, hiRate false): a new signal — whose global-audience FP class is
+	// not yet fully mitigated (see docs) — must not mail operators fleet-wide on
+	// upgrade. The proven subnet-spread track still notifies per ACTION, and a
+	// COMBINED finding (both tracks) is a confirmed high-rate farm and notifies
+	// too. Promote fp-only findings to notify after burn-in confirms the numbers.
+	if d.cfg.Action == ActionLogonly || (loFP != "" && !hiRate) {
 		alert.Extra[core.ExtraNotify] = core.NotifyNo
 	}
 	return alert

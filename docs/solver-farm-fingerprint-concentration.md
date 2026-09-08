@@ -296,13 +296,16 @@ supports an injectable `nowFn`) as the labelled positive, with the
 `MIN_SUBNETS = 40` figure was set with. Re-confirm against a fresh capture before
 the numbers ever gate enforcement.
 
-**Default-on, alert-only.** `FP_TRACK` defaults to `1`, so the track arms on the
-next binary upgrade for every `[challenge_solver_farm]` section (the parent
-detector is itself on-by-default). It is **alert/shadow-only** — it never blocks
-— so the effect on upgrade is new *shadow findings*, which is exactly the
-fleet-wide burn-in this needs, not the silent-BLOCK arm CLAUDE.md §6 warns of. An
-operator who wants opt-in sets `FP_TRACK = 0` until ready, or `ACTION = logonly`
-to keep the detector-log record without the mail.
+**Default-on, log-only through burn-in.** `FP_TRACK` defaults to `1`, so the
+track arms on the next binary upgrade for every `[challenge_solver_farm]` section
+(the parent detector is itself on-by-default). It never blocks, and an
+fp-concentration-**only** finding is **log-only** — it writes `cfm.detector.log`
+but sends **no notification** — so a new signal (whose global-audience FP class
+is not yet fully mitigated, §6) cannot mail operators fleet-wide on upgrade; it
+is not the silent-BLOCK arm CLAUDE.md §6 warns of. The proven subnet-spread track
+still notifies per `ACTION`, and a **combined** finding (both tracks — a confirmed
+high-rate farm) notifies too. Promote fp-only findings to notify after burn-in
+confirms the thresholds; `FP_TRACK = 0` turns the track off entirely.
 
 ## 9. Test plan
 

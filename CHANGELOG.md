@@ -28,10 +28,13 @@ back-filled here — see the git/PR history for that period.
   fingerprint is a group-by key, never a matched value, so a new tool's new
   fingerprint trips identically; country spread is the false-positive guard (a
   legit shared-fingerprint population — corporate fleet, carrier CGNAT — is
-  single-country). Alert-only/shadow like the parent track, and fail-safe OFF
-  without GeoIP. New `[challenge_solver_farm]` keys: `FP_TRACK` (default on),
-  `MIN_FP_SUBNETS` (8), `MIN_FP_COUNTRIES` (6), `ALLOW_FPS`. Calibrated on a live
-  fleet capture — see `docs/solver-farm-fingerprint-concentration.md`.
+  single-country). Never blocks, and fail-safe OFF without GeoIP; an
+  fp-concentration-only finding is **log-only** through its burn-in (recorded, not
+  mailed) so it cannot notify the fleet on upgrade — the subnet-spread track and
+  combined findings notify as before. New `[challenge_solver_farm]` keys:
+  `FP_TRACK` (default on), `MIN_FP_SUBNETS` (8), `MIN_FP_COUNTRIES` (6),
+  `ALLOW_FPS`. Calibrated on a live fleet capture — see
+  `docs/solver-farm-fingerprint-concentration.md`.
 - **Challenge Access-Control — a per-vhost/global allow-list that exempts
   requests from the interactive challenge by country / URL-path / user-agent /
   IP-CIDR / ASN / verified-crawler (backend + edge enforcement).** Fills the gap

@@ -634,6 +634,31 @@ func TestFPConcentrationLowAndSlowFarm(t *testing.T) {
 	if a.Extra["enforcement"] != "observe" {
 		t.Errorf("enforcement = %q, want observe (alert-only like the parent track)", a.Extra["enforcement"])
 	}
+	if got := a.Extra[core.ExtraNotify]; got != core.NotifyNo {
+		t.Errorf("%s = %q, want %q — an fp-only finding is log-only through burn-in (no mail on upgrade)", core.ExtraNotify, got, core.NotifyNo)
+	}
+}
+
+// A COMBINED finding — the high-rate subnet-spread AND fingerprint concentration
+// both fire on one vhost — is a confirmed farm and DOES notify. Only the fp-only
+// finding is held log-only through burn-in.
+func TestFPConcentrationCombinedWithSubnetSpreadNotifies(t *testing.T) {
+	h := newHarness(t, Config{FPTrack: true, MinSubnets: 40, MinSolves: 40, MinFPSubnets: 8, MinFPCountries: 6})
+	h.d.countryFn = ipCountry
+	for i := 0; i < 40; i++ { // 40 /24s (>= MinSubnets), all one fingerprint, 20 countries
+		h.solveFP("techking.example", fmt.Sprintf("203.0.%d.1", i), chromeUA, "c28caa00")
+	}
+	alerts := h.run(t)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1", len(alerts))
+	}
+	a := alerts[0]
+	if got := a.Extra["tracks"]; got != "subnet_spread+fp_concentration" {
+		t.Errorf("tracks = %q, want subnet_spread+fp_concentration", got)
+	}
+	if _, ok := a.Extra[core.ExtraNotify]; ok {
+		t.Errorf("a combined confirmed-farm finding must notify — %s must be absent", core.ExtraNotify)
+	}
 }
 
 func TestFPConcentrationCountryGuardAndDiversity(t *testing.T) {
