@@ -38,6 +38,10 @@ export const challengeAccessMixin = {
     caVhostOptions() {
       const set = new Set();
       for (const e of this.caEntries) for (const h of (e.scope?.vhosts || [])) set.add(h);
+      // Keep the active filter selectable even when it only matches Global /
+      // wildcard entries (a ?vhost= deep-link host is not a literal scope
+      // value), so the dropdown never disagrees with the applied filter.
+      if (this.caVhostFilter) set.add(this.caVhostFilter);
       return Array.from(set).sort();
     },
     caFiltered() {
@@ -131,9 +135,20 @@ export const challengeAccessMixin = {
       this.loadCAIntoForm(entry, { duplicate: true });
     },
 
+    // A no-condition exemption downgrades the challenge for EVERY request on the
+    // vhost (equivalent to turning the challenge off there). Confirm before
+    // committing such a security-loosening entry as enabled — same guard the
+    // rules page uses for a match-everything enabled rule.
+    confirmWholeVhostExempt(body) {
+      if (!body.enabled || Object.keys(body.match).length > 0) return true;
+      const hosts = (body.scope?.vhosts || []).join(", ") || "the selected vhosts";
+      return window.confirm(`This exemption has no conditions — it turns the challenge OFF for EVERY request on ${hosts}. Continue?`);
+    },
+
     async saveCA() {
       if (!this.canSaveCA) return;
       const body = buildCAPayload(this.caForm);
+      if (!this.confirmWholeVhostExempt(body)) return;
       this.caBusy = true;
       try {
         const path = this.caEditID
@@ -153,6 +168,7 @@ export const challengeAccessMixin = {
     async toggleCAEnabled(entry) {
       const body = buildCAPayload(caFormFromEntry(entry));
       body.enabled = !entry.enabled;
+      if (!this.confirmWholeVhostExempt(body)) return;
       this.caBusy = true;
       try {
         await this.postJSON(`v1/challenge/access/update?id=${encodeURIComponent(entry.id)}`, body);
@@ -166,6 +182,8 @@ export const challengeAccessMixin = {
     },
     async removeCA(entry) {
       if (!entry?.id) return;
+      const hosts = (entry.scope?.vhosts || []).join(", ") || entry.id;
+      if (!window.confirm(`Delete this challenge exemption for ${hosts}?`)) return;
       this.caBusy = true;
       try {
         await this.postJSON(`v1/challenge/access/remove?id=${encodeURIComponent(entry.id)}`, {});
