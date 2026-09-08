@@ -81,6 +81,37 @@ normal origin (a WAF-skip, not an auth bypass). If WAF coverage on app-routed
 `.well-known` endpoints is needed, scope the carve-out to `acme-challenge/` +
 `pki-validation/` only.
 
+## Operator carve-out (Challenge Access-Control)
+
+Where `/.well-known/` and the FCrDNS good-bot downgrade are *built-in* challenge
+carve-outs, **Challenge Access-Control** is the operator-managed one: a
+per-vhost/global allow-list (`internal/webdetector/challenge_access.go`, store
+`/var/lib/cfm/webdetector_challenge_access.json`, CRUD under
+`/api/v1/challenge/access/*`) whose entries EXEMPT matching requests from the
+interactive challenge by country / URL-path / user-agent / IP-CIDR / ASN /
+verified-crawler.
+
+Its scope model is the same host-bound tenant boundary used everywhere else in
+this doc:
+
+- **Enforcement** is a challenge→allow downgrade in `nginx_bridge.go`
+  `handleDecision`, applied *after* the good-bot downgrade and *before* the
+  response is built. Like `goodBotDowngrade` it **never softens a per-IP block**
+  and leaves the WAF / traffic-rule engine fully armed; unknown country/ASN
+  **fail open** (never match), so a geo/enrich hiccup can neither grant nor deny
+  an exemption.
+- **Tenant isolation** reuses `scopeAllowsVhosts`/`scopeFilterChallengeAccess`
+  (shared with `/api/v1/webdet/rules/*`): a scoped token may create the richer
+  multi-dimension entries, but only pinned to vhosts inside its own allowlist —
+  it can never author an exemption that reaches another tenant's vhost, and a
+  vhost-less scoped token is denied. See
+  `docs/endpoint_scope_inventory.md` and `docs/challenge-access-control.md`.
+- **DNAT vs in-path:** the downgrade runs in the in-path decision, so
+  path/UA/country/method dimensions apply in OpenResty/Angie mode only; in DNAT
+  mode a flagged IP is redirected before the in-path decision, so only
+  host/ASN/IP-level intent takes effect there (same class of caveat as the
+  `/.well-known/` two-sided treatment).
+
 Verify:
 
 ```bash

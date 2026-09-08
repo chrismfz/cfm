@@ -152,6 +152,19 @@ type NginxBridge struct {
 	// local snapshot enforcement in OpenResty Lua.
 	ListTrafficRules func() []TrafficRule
 
+	// ChallengeAccessExempt reports whether the request matches an operator
+	// Challenge Access-Control entry (allow-list, see challenge_access.go).
+	// When true, a would-be challenge is downgraded to allow — like
+	// goodBotDowngrade it NEVER softens a block and leaves the WAF /
+	// traffic-rule engine untouched. asnFn lazily resolves the origin ASN
+	// (invoked only when a candidate entry uses asn_in). Set once at startup.
+	ChallengeAccessExempt func(ChallengeAccessInput, func() uint32) bool
+	// ChallengeAccessNeedsVerifiedBot reports whether an enabled challenge-access
+	// entry scoped to host uses verified_bot, so the FCrDNS good-bot cache is
+	// consulted only when an entry for THIS host can use it (same gate as
+	// RuleNeedsVerifiedBot).
+	ChallengeAccessNeedsVerifiedBot func(host string) bool
+
 	// Clam
 	clamMgr      clam.Enqueuer
 	clamPending  string
@@ -1702,6 +1715,23 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	ua := strings.TrimSpace(r.URL.Query().Get("ua"))
 	country := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("country")))
 
+	// Memoized enrich lookup, shared by the country fallback here and the
+	// Challenge Access-Control asn_in check further down, so a challenged fresh
+	// IP that needs both resolves the mmdb read ONCE. LookupCachedOrAsync does
+	// not cache a partial miss, so two separate calls would repeat the cold
+	// read + async dispatch; this closure collapses them.
+	var geoResult enrich.Result
+	geoLoaded := false
+	lookupGeo := func() enrich.Result {
+		if !geoLoaded {
+			if b.enr != nil && ip != "" {
+				geoResult = b.enr.LookupCachedOrAsync(ip)
+			}
+			geoLoaded = true
+		}
+		return geoResult
+	}
+
 	if country == "" && ip != "" && b.enr != nil {
 		// LookupCachedOrAsync returns immediately: cache hit gives the real
 		// CountryISO, cache miss returns "" and warms the cache async. We
@@ -1709,7 +1739,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		// "every request blocks up to ~1s on PTR DNS + mmdb cold reads".
 		// Subsequent requests from that IP (typically the next one, ms
 		// later under load) will see the populated cache.
-		if geo := b.enr.LookupCachedOrAsync(ip); geo.CountryISO != "" {
+		if geo := lookupGeo(); geo.CountryISO != "" {
 			country = geo.CountryISO // "GR" not "Greece"
 		}
 	}
@@ -1829,6 +1859,41 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		verifiedBot, verifiedBotChecked = b.goodBot.verified(ip, ptrFn, now), true
 		if verifiedBot != "" {
 			ipAction, vhAction = goodBotDowngrade(ipAction, vhAction, verifiedBot)
+		}
+	}
+
+	// Challenge Access-Control (operator allow-list): downgrade a would-be
+	// challenge to allow for a matching request (country/path/UA/IP/ASN/
+	// verified-bot, per-vhost or global). Mirrors goodBotDowngrade: NEVER
+	// softens a per-IP block, and the WAF / traffic-rule engine below still
+	// applies. Runs only when a challenge would otherwise be served.
+	if b.ChallengeAccessExempt != nil && ipAction != "block" &&
+		(ipAction == "challenge" || vhAction == "challenge") {
+		// verified_bot dimension: reuse the verdict the good-bot exemption
+		// already fetched; else consult the cache only when an entry scoped to
+		// THIS host uses it. A challenge exemption keeps the generic "google"
+		// verdict, so it is passed through unfiltered (no verifiedBotForRules).
+		if !verifiedBotChecked && b.goodBot != nil && ip != "" && b.enr != nil &&
+			b.ChallengeAccessNeedsVerifiedBot != nil && b.ChallengeAccessNeedsVerifiedBot(host) {
+			verifiedBot, verifiedBotChecked = b.goodBot.verified(ip, ptrFn, now), true
+		}
+		asnFn := func() uint32 { return uint32(lookupGeo().ASN) }
+		if b.ChallengeAccessExempt(ChallengeAccessInput{
+			Host:        host,
+			IP:          ip,
+			UA:          ua,
+			Path:        uri,
+			Method:      method,
+			Country:     country,
+			QueryString: qs,
+			VerifiedBot: verifiedBot,
+		}, asnFn) {
+			if ipAction == "challenge" {
+				ipAction = "allow"
+			}
+			if vhAction == "challenge" {
+				vhAction = "allow"
+			}
 		}
 	}
 
