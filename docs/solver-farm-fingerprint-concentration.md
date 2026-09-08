@@ -216,6 +216,20 @@ CGNAT where many users egress the same in-app-browser stack.
   monitored synthetic-checker fleet) — the deliberate, auditable escape hatch.
 - **`solves_per_ip`** stays a sanity check: a real repeat-visitor population sits
   well above 1.0; a farm sits at ~1.0 by construction.
+- **Residual risk — a globally popular browser under a persistent challenge.**
+  The country guard's premise (a shared-fingerprint population is geographically
+  clustered) holds for corporate/CGNAT pools but weakens for a vhost whose
+  *legitimate* global audience is large AND under a persistent challenge
+  (under-attack mode): the dominant browser's fingerprint can then span many
+  countries honestly. In the 2026-09-08 capture no legitimate group exceeded 3
+  countries per window (the challenged vhosts had no such audience), but the case
+  is not excluded by construction — it is the signal to watch in burn-in. Because
+  the track is alert/shadow-only it surfaces as a would-alert, never a block, and
+  the levers are: raise `MIN_FP_COUNTRIES`, or add a `max_fp_share` guard (the
+  flagged fingerprint must be a super-majority of the vhost's window solves — a
+  farm's is ~100%, a legit dominant browser a minority), the natural next
+  refinement if burn-in shows this. Re-confirm on a high-traffic global vhost
+  before the numbers ever gate enforcement.
 
 Because the whole track is **alert/shadow-only**, a mis-tuned threshold *reports*
 a vhost, it never blocks one. Thresholds move to enforcement only after a
@@ -234,22 +248,32 @@ detector:
 - **`ChallengeSolve.InputEvent()`** (`internal/webdetector/challenge_solve_events.go`)
   maps `Scope/SrcIP/UA/Signal` into `core.InputEvent` but **drops `TLSFP`**.
 
-Changes:
+Changes (as built):
 
-1. `core.InputEvent` (`internal/detectors/core/input_event.go`): add
-   `Fingerprint string` (and, for the country corroborator, `Country string`).
-2. `ChallengeSolve.InputEvent()`: set `Fingerprint: s.TLSFP`. Country: either
-   enrich `SrcIP` in the detector (the daemon already GeoIP-enriches for
-   `abuse_shadow`/`detection_history`) **or** carry it on the event — decide in
-   review; enriching in the detector keeps the event envelope minimal.
-3. `solverfarm.Detector`: add the per-fp map, the `MIN_FP_SUBNETS` /
-   `MIN_FP_COUNTRIES` evaluation, and the new `Extra` fields. Drop events whose
-   `Fingerprint` is empty/`-` or `Truncated` from the fp track (they still count
-   toward the existing fp-blind subnet rule).
+1. `core.InputEvent` (`internal/detectors/core/input_event.go`): added
+   `Fingerprint string` — one new field. Country is **not** on the envelope; it
+   is enriched inside the detector (below), keeping the shared event minimal.
+2. `ChallengeSolve.InputEvent()`: sets `Fingerprint: s.TLSFP`.
+3. `solverfarm.Detector`: a `SetEnricher(*enrich.Enricher)` method the detectors
+   manager already auto-wires (`manager.go` asserts the interface), which builds
+   a `countryFn` from `LookupGeoFast().CountryISO` (Country/ASN only, no blocking
+   rDNS). Country is looked up in `RunOnce` — off the hot `Enqueue` path — only
+   for fp-bearing solves. A nil enricher leaves `countryFn` nil, which
+   **fail-safe disables** the track (it can never fire without confirming
+   geographic spread). The detector adds a per-`(host, fp)` aggregation (distinct
+   subnets + countries, pruned with the window), the
+   `MIN_FP_SUBNETS`/`MIN_FP_COUNTRIES` evaluation alongside the existing subnet
+   rule (sharing its mark, cooldown and alert), and the
+   `fp_track`/`top_fp`/`fp_subnets`/`fp_countries`/`tracks` alert `Extra` fields.
 
-**Usability filter.** Only non-truncated, GREASE-normalised fingerprints enter
-the concentration track. A truncated ClientHello (rare, edge-noted) is not a
-reliable group key; treat it as "no fingerprint" for this track.
+**Usability filter (as built).** The empty fingerprint is never a group key (it
+would pool unrelated clients). GREASE is already normalised into `TLSFP` by
+`tlsfp.Parse` at the edge — which is *why* `c28caa00` is stable — so no GREASE
+handling is needed here. The `Truncated` flag is **not** carried on
+`ChallengeSolve` today (only the `TLSFP` id is), so v1 does not separately
+exclude a truncated fingerprint; this is acceptable (truncated ClientHellos are
+rare and cannot plausibly reach the AND of the subnet and country floors by
+collision), and carrying the flag to exclude them is a small follow-up.
 
 ## 8. Config surface (new keys on `[challenge_solver_farm]`)
 
@@ -271,6 +295,14 @@ supports an injectable `nowFn`) as the labelled positive, with the
 `ba6b4aad`/`77a50fbb` groups as the negatives — the same methodology the
 `MIN_SUBNETS = 40` figure was set with. Re-confirm against a fresh capture before
 the numbers ever gate enforcement.
+
+**Default-on, alert-only.** `FP_TRACK` defaults to `1`, so the track arms on the
+next binary upgrade for every `[challenge_solver_farm]` section (the parent
+detector is itself on-by-default). It is **alert/shadow-only** — it never blocks
+— so the effect on upgrade is new *shadow findings*, which is exactly the
+fleet-wide burn-in this needs, not the silent-BLOCK arm CLAUDE.md §6 warns of. An
+operator who wants opt-in sets `FP_TRACK = 0` until ready, or `ACTION = logonly`
+to keep the detector-log record without the mail.
 
 ## 9. Test plan
 

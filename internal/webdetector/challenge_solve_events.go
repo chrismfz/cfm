@@ -14,16 +14,24 @@ import (
 // Signal carries the UA-plausibility verdict (empty when the UA is coherent), so
 // a detector can report what share of a cluster submitted a self-contradictory
 // User-Agent without re-parsing it.
+//
+// Fingerprint carries the client's TLS ClientHello id (TLSFP), the one signal a
+// solve does not author (its stack emits the handshake before any HTTP). The
+// solver-farm detector groups on it to spot a low-and-slow farm whose solvers
+// span many subnets/countries but collapse onto a single fingerprint — a shape
+// no diverse human audience produces. It is a group-by key, never matched to a
+// value: a new tool with a new fingerprint trips the same shape.
 func (s ChallengeSolve) InputEvent() core.InputEvent {
 	return core.InputEvent{
-		Source:    "challenge",
-		Reason:    "CHALLENGE_SOLVED",
-		Signal:    s.UAReason,
-		Scope:     s.Host,
-		SrcIP:     s.IP,
-		Path:      s.URI,
-		UserAgent: s.UA,
-		Count:     1,
+		Source:      "challenge",
+		Reason:      "CHALLENGE_SOLVED",
+		Signal:      s.UAReason,
+		Scope:       s.Host,
+		SrcIP:       s.IP,
+		Path:        s.URI,
+		UserAgent:   s.UA,
+		Fingerprint: s.TLSFP,
+		Count:       1,
 	}
 }
 

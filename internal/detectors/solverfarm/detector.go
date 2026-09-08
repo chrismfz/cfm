@@ -60,7 +60,16 @@ import (
 	"time"
 
 	core "cfm/internal/detectors/core"
+	enrich "cfm/internal/enrich"
 	"cfm/internal/logging"
+)
+
+// State bounds for the fingerprint-concentration track. Generous: a farm uses one
+// fingerprint, and there are ~249 countries, so these never bind in practice —
+// they only stop a pathological host from growing state without bound.
+const (
+	maxFPsPerHost       = 4096
+	maxCountriesTracked = 300
 )
 
 // Action is what the detector does with a flagged vhost, set by ACTION in
@@ -167,6 +176,26 @@ type Config struct {
 	AllowIPs        []string
 	AllowNets       []string
 	AllowUAContains []string
+
+	// FPTrack enables the fingerprint-concentration low-rate track: flag a vhost
+	// whose solvers span many subnets AND many countries but collapse onto a
+	// SINGLE client fingerprint — the low-and-slow farm the subnet-count rule
+	// above (calibrated for a ~110/min farm) misses at ~8/min. The fingerprint is
+	// a GROUP-BY key, never a matched value, so a new tool with a new fingerprint
+	// trips the same shape. See docs/solver-farm-fingerprint-concentration.md.
+	FPTrack bool
+	// MinFPSubnets / MinFPCountries are the low-rate thresholds, AND'd. Country is
+	// the load-bearing false-positive guard: a legit shared-fingerprint population
+	// (corporate fleet, carrier CGNAT) is geographically clustered; a residential
+	// farm is not. Calibrated on the 2026-09-08 fleet capture (farms 10–22
+	// countries per window, every legitimate group ≤3). MinFPSubnets is only a
+	// floor against a trickle — a legit group reached 17 /24s but 2 countries, so
+	// the subnet count alone does not discriminate; the country guard does.
+	MinFPSubnets   int
+	MinFPCountries int
+	// AllowFPs exempts known-legitimate shared fingerprints (e.g. a monitored
+	// synthetic-checker fleet) from the concentration track.
+	AllowFPs []string
 }
 
 type solveRec struct {
@@ -208,10 +237,24 @@ type hostState struct {
 	setsCapped bool
 
 	lastAlert time.Time
+
+	// fps is the per-fingerprint aggregation for the concentration track, nil
+	// until the first usable-fingerprint solve. Every fp-tracked solve also feeds
+	// the per-host subnets set above, so fps never holds a subnet that set does
+	// not — prune stays consistent between them.
+	fps map[string]*fpAgg
+}
+
+// fpAgg tracks, for one (host, fingerprint), the distinct subnets and countries
+// solving under it in the window — the concentration track's threshold inputs.
+// Both hold key -> newest solve time so prune drops what fell out of the window.
+type fpAgg struct {
+	subnets   map[string]time.Time
+	countries map[string]time.Time
 }
 
 func newHostState() *hostState {
-	return &hostState{subnets: map[string]time.Time{}, ips: map[string]time.Time{}}
+	return &hostState{subnets: map[string]time.Time{}, ips: map[string]time.Time{}, fps: map[string]*fpAgg{}}
 }
 
 // prune drops everything that fell out of the window and returns whether the
@@ -239,6 +282,21 @@ func (st *hostState) prune(cutoff time.Time) bool {
 		st.recs[i] = solveRec{}
 	}
 	st.recs = kept
+	for fp, a := range st.fps {
+		for k, t := range a.subnets {
+			if !t.After(cutoff) {
+				delete(a.subnets, k)
+			}
+		}
+		for k, t := range a.countries {
+			if !t.After(cutoff) {
+				delete(a.countries, k)
+			}
+		}
+		if len(a.subnets) == 0 && len(a.countries) == 0 {
+			delete(st.fps, fp)
+		}
+	}
 	return len(st.subnets) > 0 || len(st.recs) > 0
 }
 
@@ -262,6 +320,13 @@ type Detector struct {
 	allowHosts map[string]struct{}
 	allowIPs   map[string]struct{}
 	allowNets  []*net.IPNet
+	allowFPs   map[string]struct{}
+
+	// countryFn maps a client IP to its ISO-2 country ("" = unknown / no geodb).
+	// Set from the injected Enricher (SetEnricher); nil disables the country
+	// dimension, which FAIL-SAFE disables the concentration track — it can never
+	// fire without confirming geographic spread. Injectable directly in tests.
+	countryFn func(string) string
 
 	// onFarm is called for every over-threshold evaluation, BEFORE the alert
 	// cooldown is consulted. That distinction is the whole point: the alert is
@@ -332,6 +397,12 @@ func New(cfg Config) *Detector {
 		// healthy loop never reaches it.
 		cfg.MaxQueue = 20000
 	}
+	if cfg.MinFPSubnets <= 0 {
+		cfg.MinFPSubnets = 8
+	}
+	if cfg.MinFPCountries <= 0 {
+		cfg.MinFPCountries = 6
+	}
 
 	d := &Detector{
 		cfg:        cfg,
@@ -339,6 +410,7 @@ func New(cfg Config) *Detector {
 		hosts:      make(map[string]*hostState),
 		allowHosts: make(map[string]struct{}),
 		allowIPs:   make(map[string]struct{}),
+		allowFPs:   make(map[string]struct{}),
 	}
 	for _, h := range cfg.AllowHosts {
 		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
@@ -358,7 +430,26 @@ func New(cfg Config) *Detector {
 			d.allowNets = append(d.allowNets, n)
 		}
 	}
+	for _, fp := range cfg.AllowFPs {
+		if fp = strings.ToLower(strings.TrimSpace(fp)); fp != "" {
+			d.allowFPs[fp] = struct{}{}
+		}
+	}
 	return d
+}
+
+// SetEnricher wires the country lookup the concentration track's false-positive
+// guard needs. The detectors manager calls it via an interface assertion, so the
+// register needs no change. LookupGeoFast reads Country/ASN only (no blocking PTR
+// rDNS) and is called in RunOnce, off the hot Enqueue path. A nil enricher leaves
+// countryFn nil, which fail-safe disables the concentration track.
+func (d *Detector) SetEnricher(e *enrich.Enricher) {
+	if e == nil {
+		return
+	}
+	d.countryFn = func(ip string) string {
+		return strings.ToUpper(strings.TrimSpace(e.LookupGeoFast(ip).CountryISO))
+	}
 }
 
 func (d *Detector) SetName(name string) { d.name = name }
@@ -476,6 +567,34 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		} else {
 			st.setsCapped = true
 		}
+		// Fingerprint-concentration track: group usable fingerprints and, per fp,
+		// track the distinct subnets + countries solving under it. Done HERE —
+		// before the evidence cap's continue below — so an evidence flood cannot
+		// suppress it, exactly as the subnet/IP sets above cannot be suppressed.
+		// Country is looked up here (RunOnce, off the hot Enqueue path) and only
+		// for fp-bearing solves. Empty fingerprint is never a group key (it pools
+		// unrelated clients); allow-listed fingerprints are skipped.
+		if d.cfg.FPTrack && d.countryFn != nil {
+			if fp := strings.ToLower(strings.TrimSpace(ev.Fingerprint)); fp != "" {
+				if _, skip := d.allowFPs[fp]; !skip {
+					a := st.fps[fp]
+					if a == nil && len(st.fps) < maxFPsPerHost {
+						a = &fpAgg{subnets: map[string]time.Time{}, countries: map[string]time.Time{}}
+						st.fps[fp] = a
+					}
+					if a != nil {
+						if _, seen := a.subnets[sn]; seen || len(a.subnets) < d.cfg.MaxTrackedPerHost {
+							a.subnets[sn] = ev.When
+						}
+						if cc := d.countryFn(ev.SrcIP); cc != "" {
+							if _, seen := a.countries[cc]; seen || len(a.countries) < maxCountriesTracked {
+								a.countries[cc] = ev.When
+							}
+						}
+					}
+				}
+			}
+		}
 		if len(st.recs) >= d.cfg.MaxTrackedPerHost {
 			st.truncated++
 			continue
@@ -497,7 +616,11 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// Reset every pass, not only when an alert fires.
 		st.truncated, st.setsCapped = 0, false
 
-		if solves < d.cfg.MinSolves || len(st.subnets) < d.cfg.MinSubnets {
+		// Two independent verdicts share one alert/mark/cooldown: the original
+		// high-rate subnet spread, and the low-rate fingerprint concentration.
+		hiRate := solves >= d.cfg.MinSolves && len(st.subnets) >= d.cfg.MinSubnets
+		loFP, loFPSubs, loFPCcs := d.topConcentratedFP(st)
+		if !hiRate && loFP == "" {
 			continue
 		}
 		// Mark before the cooldown check, not after: the mark answers "is this
@@ -519,7 +642,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			}
 		}
 
-		alert := d.buildAlert(now, host, st, solves, truncated, setsCapped, uas, impossibleUA)
+		alert := d.buildAlert(now, host, st, solves, truncated, setsCapped, uas, impossibleUA, hiRate, loFP, loFPSubs, loFPCcs)
 		select {
 		case out <- alert:
 			// Stamp the cooldown only once the alert is actually handed off, so a
@@ -532,10 +655,30 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	return nil
 }
 
+// topConcentratedFP returns the fingerprint on this host whose in-window solves
+// span the most subnets while meeting BOTH low-rate thresholds (subnets AND
+// countries), or "" when none does. It is fingerprint-VALUE-blind: it ranks by
+// spread, never by which fingerprint, so a new tool's new fingerprint is treated
+// identically. With no countryFn (no geodb) the fps carry no countries, nothing
+// meets the country threshold, and the track is off — fail-safe.
+func (d *Detector) topConcentratedFP(st *hostState) (fp string, subnets, countries int) {
+	if !d.cfg.FPTrack {
+		return "", 0, 0
+	}
+	for k, a := range st.fps {
+		ns, nc := len(a.subnets), len(a.countries)
+		if ns >= d.cfg.MinFPSubnets && nc >= d.cfg.MinFPCountries && ns > subnets {
+			fp, subnets, countries = k, ns, nc
+		}
+	}
+	return fp, subnets, countries
+}
+
 // buildAlert renders the finding. It reads state but does not mutate it — the
 // caller owns the truncation counter and the cooldown stamp.
 func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
-	solves, truncated int, setsCapped bool, uas map[string]int, impossibleUA int) core.Alert {
+	solves, truncated int, setsCapped bool, uas map[string]int, impossibleUA int,
+	hiRate bool, loFP string, loFPSubs, loFPCcs int) core.Alert {
 
 	topUA, topUACount := "", 0
 	for ua, n := range uas {
@@ -561,6 +704,11 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 	samples := []string{
 		fmt.Sprintf("[challenge] host=%s solves=%d distinct_ips=%d distinct_subnets=%d solves_per_ip=%.2f window=%s",
 			host, solves, len(st.ips), len(st.subnets), solvesPerIP, d.cfg.Window),
+	}
+	if loFP != "" {
+		samples = append(samples, fmt.Sprintf(
+			"[challenge] fingerprint concentration: one fingerprint %s solving from distinct_subnets=%d distinct_countries=%d (single-fingerprint low-and-slow farm)",
+			loFP, loFPSubs, loFPCcs))
 	}
 	type uaCount struct {
 		ua string
@@ -633,6 +781,25 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			"impossible_ua": fmt.Sprint(impossibleUA),
 		},
 	}
+	// Which track(s) fired. The low-rate fingerprint-concentration evidence is
+	// attached only when that track flagged, so an operator can tell a subnet-spread
+	// farm from a single-fingerprint low-and-slow one.
+	tracks := ""
+	if hiRate {
+		tracks = "subnet_spread"
+	}
+	alert.Extra["fp_track"] = "0"
+	if loFP != "" {
+		if tracks != "" {
+			tracks += "+"
+		}
+		tracks += "fp_concentration"
+		alert.Extra["fp_track"] = "1"
+		alert.Extra["top_fp"] = loFP
+		alert.Extra["fp_subnets"] = fmt.Sprint(loFPSubs)
+		alert.Extra["fp_countries"] = fmt.Sprint(loFPCcs)
+	}
+	alert.Extra["tracks"] = tracks
 	// logonly keeps the detector-log record but drops the mail: the finding stays
 	// true for hours on a vhost the operator has already triaged.
 	if d.cfg.Action == ActionLogonly {

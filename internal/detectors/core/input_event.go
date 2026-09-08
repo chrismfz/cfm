@@ -15,4 +15,9 @@ type InputEvent struct {
 	Path      string
 	Status    int
 	UserAgent string
+	// Fingerprint is an opaque client identity id (e.g. a TLS ClientHello
+	// fingerprint) when the source carries one, "" otherwise. A detector may
+	// group on it, but must never treat "" as a group key — the empty value pools
+	// unrelated clients. It is a group-by key, never a signature to match.
+	Fingerprint string
 }

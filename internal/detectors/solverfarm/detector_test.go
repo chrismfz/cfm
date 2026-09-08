@@ -3,6 +3,7 @@ package solverfarm
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -576,5 +577,172 @@ func TestFarmHookRespectsAllowlist(t *testing.T) {
 	h.run(t)
 	if fired != 0 {
 		t.Fatalf("hook fired %d times for an allowlisted vhost, want 0", fired)
+	}
+}
+
+// ── Fingerprint-concentration track (the low-and-slow farm) ──────────────────
+
+func (h *harness) solveFP(host, ip, ua, fp string) {
+	h.d.Enqueue(core.InputEvent{When: h.clock, Scope: host, SrcIP: ip, UserAgent: ua, Fingerprint: fp, Source: "challenge"})
+}
+
+var fpTestCountries = []string{
+	"BR", "MX", "AR", "NP", "SY", "VN", "ZA", "NG", "UA", "KZ",
+	"BD", "OM", "CO", "RU", "ES", "TR", "PK", "CL", "PY", "KE",
+}
+
+// ipCountry maps 203.0.N.x to the N-th test country, so a test controls a solve's
+// country through its /24 — a stand-in for the GeoIP enricher's countryFn.
+func ipCountry(ip string) string {
+	v := net.ParseIP(ip).To4()
+	if v == nil {
+		return ""
+	}
+	return fpTestCountries[int(v[2])%len(fpTestCountries)]
+}
+
+// The c28caa00 shape: ~8/min, well below MIN_SUBNETS(40)/MIN_SOLVES(40) so the
+// subnet-spread track stays silent, but one fingerprint spans many subnets AND
+// many countries. The concentration track must catch it — this is the whole gap.
+func TestFPConcentrationLowAndSlowFarm(t *testing.T) {
+	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6})
+	h.d.countryFn = ipCountry
+	for i := 0; i < 12; i++ {
+		h.solveFP("techking.example", fmt.Sprintf("203.0.%d.1", i),
+			fmt.Sprintf("Mozilla/5.0 Chrome/%d.0.0.0 Safari/537.36", 135+i%15), "c28caa00")
+	}
+	alerts := h.run(t)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1 — 12 subnets/12 countries under one fingerprint is a low-and-slow farm", len(alerts))
+	}
+	a := alerts[0]
+	if a.Kind != "Challenge/SolverFarm" {
+		t.Errorf("Kind = %q", a.Kind)
+	}
+	if a.Extra["fp_track"] != "1" {
+		t.Errorf("fp_track = %q, want 1", a.Extra["fp_track"])
+	}
+	if a.Extra["tracks"] != "fp_concentration" {
+		t.Errorf("tracks = %q, want fp_concentration only (subnet-spread must NOT fire at 12<40 subnets)", a.Extra["tracks"])
+	}
+	if a.Extra["top_fp"] != "c28caa00" {
+		t.Errorf("top_fp = %q, want c28caa00 (the grouping fingerprint, reported as evidence)", a.Extra["top_fp"])
+	}
+	if a.Extra["fp_subnets"] != "12" || a.Extra["fp_countries"] != "12" {
+		t.Errorf("fp evidence = %q subnets / %q countries, want 12 / 12", a.Extra["fp_subnets"], a.Extra["fp_countries"])
+	}
+	if a.Extra["enforcement"] != "observe" {
+		t.Errorf("enforcement = %q, want observe (alert-only like the parent track)", a.Extra["enforcement"])
+	}
+}
+
+func TestFPConcentrationCountryGuardAndDiversity(t *testing.T) {
+	// A legit shared-fingerprint population (corporate fleet / carrier CGNAT):
+	// many subnets, ONE fingerprint, but ONE country. The country guard excludes
+	// it — this is the real 'ba6b4aad' near-FP (17 /24s, 2 countries) shape.
+	t.Run("single-country shared fingerprint is not a farm", func(t *testing.T) {
+		h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6})
+		h.d.countryFn = func(string) string { return "GR" }
+		for i := 0; i < 20; i++ {
+			h.solveFP("office.example", fmt.Sprintf("203.0.%d.1", i), chromeUA, "ba6b4aad")
+		}
+		if got := h.run(t); len(got) != 0 {
+			t.Fatalf("got %d alerts for 20 subnets of ONE country under one fingerprint, want 0", len(got))
+		}
+	})
+	// A real global audience: many subnets, many countries, but a DISTINCT
+	// fingerprint per solver. No single fingerprint concentrates → no farm.
+	t.Run("fingerprint diversity is not a farm", func(t *testing.T) {
+		h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6})
+		h.d.countryFn = ipCountry
+		for i := 0; i < 20; i++ {
+			h.solveFP("shop.example", fmt.Sprintf("203.0.%d.1", i), chromeUA, fmt.Sprintf("fp%04d", i))
+		}
+		if got := h.run(t); len(got) != 0 {
+			t.Fatalf("got %d alerts for 20 diverse fingerprints, want 0", len(got))
+		}
+	})
+}
+
+// The two thresholds are AND'd and are floors, not ceilings. The country floor is
+// load-bearing: a legit group can clear the subnet floor (the ba6b4aad case) yet
+// stay under the country floor.
+func TestFPConcentrationThresholds(t *testing.T) {
+	fire := func(t *testing.T, subnets, countries int) int {
+		t.Helper()
+		h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6})
+		h.d.countryFn = func(ip string) string {
+			v := net.ParseIP(ip).To4()
+			return fpTestCountries[int(v[2])%countries]
+		}
+		for i := 0; i < subnets; i++ {
+			h.solveFP("x.example", fmt.Sprintf("203.0.%d.1", i), chromeUA, "onefp")
+		}
+		return len(h.run(t))
+	}
+	if got := fire(t, 8, 6); got != 1 {
+		t.Errorf("8 subnets / 6 countries (exactly at both floors): got %d, want 1", got)
+	}
+	if got := fire(t, 7, 6); got != 0 {
+		t.Errorf("7 subnets (below MinFPSubnets=8): got %d, want 0", got)
+	}
+	if got := fire(t, 12, 5); got != 0 {
+		t.Errorf("5 countries (below MinFPCountries=6, subnets fine): got %d, want 0 — the country floor is load-bearing", got)
+	}
+}
+
+// An empty fingerprint (older edge, plain HTTP, DNAT) must NEVER be a group key:
+// pooling every no-fingerprint solver would manufacture a phantom farm.
+func TestFPConcentrationEmptyFingerprintNeverGroups(t *testing.T) {
+	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6})
+	h.d.countryFn = ipCountry
+	for i := 0; i < 20; i++ {
+		h.solveFP("shop.example", fmt.Sprintf("203.0.%d.1", i), chromeUA, "")
+	}
+	if got := h.run(t); len(got) != 0 {
+		t.Fatalf("got %d alerts, want 0 — an empty fingerprint must never group", len(got))
+	}
+}
+
+// ALLOW_FPS exempts a known-legitimate shared fingerprint, case-insensitively.
+func TestFPConcentrationAllowFP(t *testing.T) {
+	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6, AllowFPs: []string{"C28CAA00"}})
+	h.d.countryFn = ipCountry
+	for i := 0; i < 12; i++ {
+		h.solveFP("shop.example", fmt.Sprintf("203.0.%d.1", i), chromeUA, "c28caa00")
+	}
+	if got := h.run(t); len(got) != 0 {
+		t.Fatalf("got %d alerts for an allow-listed fingerprint, want 0", len(got))
+	}
+}
+
+// With no enricher wired (countryFn nil) the country dimension is unavailable, so
+// the track must stay silent — it must never fall back to firing on subnets alone.
+func TestFPConcentrationOffWithoutGeo(t *testing.T) {
+	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6})
+	// countryFn deliberately left nil (no SetEnricher / no geodb).
+	for i := 0; i < 20; i++ {
+		h.solveFP("shop.example", fmt.Sprintf("203.0.%d.1", i), chromeUA, "c28caa00")
+	}
+	if got := h.run(t); len(got) != 0 {
+		t.Fatalf("got %d alerts with no geo enricher, want 0 — the country guard must fail safe (off)", len(got))
+	}
+}
+
+// FPTrack on must not perturb the original high-rate subnet-spread track: a
+// classic farm carrying no fingerprint still fires, tagged subnet_spread.
+func TestFPConcentrationLeavesSubnetSpreadIntact(t *testing.T) {
+	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6})
+	h.d.countryFn = ipCountry
+	h.farmBurst("shop.example.com", 80, func(int) string { return chromeUA }) // no fingerprint
+	alerts := h.run(t)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1 — the high-rate track must be unaffected by FPTrack", len(alerts))
+	}
+	if got := alerts[0].Extra["tracks"]; got != "subnet_spread" {
+		t.Errorf("tracks = %q, want subnet_spread (no fingerprint present)", got)
+	}
+	if got := alerts[0].Extra["fp_track"]; got != "0" {
+		t.Errorf("fp_track = %q, want 0", got)
 	}
 }
