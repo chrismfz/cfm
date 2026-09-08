@@ -39,6 +39,19 @@ back-filled here — see the git/PR history for that period.
   getting the challenge page instead of a WooCommerce product feed on an
   auto-challenged shop. Design: `docs/challenge-access-control.md`. cfm-admin UI
   and Challenge-Recipes to follow (Phase 1/2).
+- **cfm-admin: Challenge Access page (Phase 1 UI for the above).** New
+  "Challenge access" page under Rules & engine
+  (`/cfm-admin/webdetector/challenge-access/`): a guided editor that reuses the
+  traffic-rules condition chips (path / user-agent + bot-group quick-add /
+  country is-or-is-not / IP-CIDR / ASN / method / verified-crawler) with a fixed
+  "exempt from challenge" action and a live plain-language review, plus a
+  global + per-vhost list (vhost filter, `?vhost=` deep-link, enable toggle,
+  edit / duplicate / delete). Banners spell out the safety model (exempts the
+  challenge only — WAF and IP blocks stay; unknown country/ASN fail open; DNAT
+  caveat). Client model `challenge-access-model.js` mirrors `challenge_access.go`
+  and shares the traffic-rule grammar (`node --test` parity in
+  `challenge-access-model.test.js`); scoped tokens manage only their own vhosts
+  (same boundary as the exclude/rules APIs).
 - **cfm-admin traffic rules: nine new recipes + a "dataset crawlers" bot group,
   distilled from a 24 h review of live traffic on three fleet nodes.** In value
   order: *Block secret / dev-file probes* (one enabled `path_any` block for the
