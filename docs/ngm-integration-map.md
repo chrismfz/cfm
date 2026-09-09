@@ -160,6 +160,13 @@ CFM's challenge/WAF guard". Feasible now with the alias + an NGM port entry.
 > risk, and correct for cPanel *and* DirectAdmin today (the doc string on
 > `panel_dnat.go` already says "cPanel/DirectAdmin"). It is the natural first
 > merge.
+>
+> **Status: SHIPPED** — `cfm dnat panel …` is accepted as an alias of
+> `cfm dnat cpanel …` (routing in `internal/dnat/cli.go`; help text + a
+> `panel_alias_test.go` regression guard). The remaining follow-up is
+> **parameterising `firewall.PanelDNATMappings()`** so the NGM panel port
+> (default `9601`) is covered — the alias today still applies the cPanel/DA port
+> set.
 
 ## 5. Detectors — add `ngm`, note the real gaps (§D)
 

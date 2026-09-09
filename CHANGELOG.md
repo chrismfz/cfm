@@ -33,6 +33,13 @@ back-filled here — see the git/PR history for that period.
   non-NGM host (the log is absent). Complements NGM's own per-account lockout
   with a fleet-wide nft ban of the source IP. Reference `[ngm_auth]` section
   added to `configs/detectors.conf`. See `docs/ngm-auth-detector.md`.
+- **`cfm dnat panel` — panel-neutral alias of `cfm dnat cpanel`.** The panel
+  DNAT chain (`inet cfm_panel_redirect`), its Lua guard (`cfm_panel.lua`), the
+  `$cfm_panel_challenge_mode` edge var and the DNAT scope are already
+  panel-agnostic and the shipped port map covers cPanel + DirectAdmin panel
+  ports, so `panel` now works everywhere `cpanel` does (both spellings route to
+  the same handler; help text documents the alias). NGM panel-port coverage
+  (parameterising the port map beyond the cPanel/DA set) is a follow-up.
 
 ## 2026.09.08
 
