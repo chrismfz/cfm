@@ -17,7 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **`ngm_auth` detector — abusive NGM control-panel login detection.** New
+  log-tail detector (`internal/detectors/ngmauth/`) for the NGM hosting panel's
+  auth log (`/var/log/ngm/auth.log`), which NGM writes expressly for a
+  fail2ban-family consumer. Keys on an allowlist of credential-abuse events
+  (FAIL / RATELIMIT / MFA_FAILURE / DAV_FAIL / PWRESET_FAILURE /
+  RECOVERY_VERIFY_FAILURE / TOKEN_FAIL) and ignores audit verbs (SUCCESS /
+  LOGOUT / MFA_SUCCESS / DAV_HOST / CONTAINER_* / ...); per-IP / per-user /
+  per-admin / per-token buckets emit `NGM/AUTHFAIL`, `NGM/ADMIN`, `NGM/TOKEN`.
+  Every failure counts toward the per-IP total (an admin+user spray from one IP
+  can't split buckets); per-user alerts declare host scope (a distributed
+  per-account attack is a notify, not a single-IP ban); IP decoration/PTR is left
+  to the section sink. Ships `BLOCK = dryrun` (watch-first) and no-ops on a
+  non-NGM host (the log is absent). Complements NGM's own per-account lockout
+  with a fleet-wide nft ban of the source IP. Reference `[ngm_auth]` section
+  added to `configs/detectors.conf`. See `docs/ngm-auth-detector.md`.
 
 ## 2026.09.08
 
