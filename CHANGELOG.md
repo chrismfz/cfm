@@ -41,6 +41,14 @@ back-filled here — see the git/PR history for that period.
   the same handler; help text documents the alias). NGM panel-port coverage
   (parameterising the port map beyond the cPanel/DA set) is a follow-up.
 
+### Fixed
+- **DNAT fail-safe runner goroutine is now joinable — clears a `go test -race`
+  flake.** `startDNATFailSafe` returns a channel closed when its goroutine exits,
+  and its tests cancel-and-join via `t.Cleanup` instead of leaving the goroutine
+  running (and logging) after the test returns — which data-raced a later
+  `os.Stdout` swap in an unrelated test. No production behaviour change (callers
+  fire-and-forget / ignore the return).
+
 ## 2026.09.08
 
 ### Security

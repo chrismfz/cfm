@@ -20,6 +20,25 @@ func waitUntil(t *testing.T, timeout time.Duration, pred func() bool) {
 	t.Fatalf("condition not met within %v", timeout)
 }
 
+// startFailSafeForTest starts the fail-safe runner and joins its goroutine at
+// test end: it cancels ctx and waits for the returned done channel. This keeps
+// the goroutine from outliving the test and racing a later os.Stdout swap under
+// `go test -race` (the runner logs via the shared logger). The join runs from
+// t.Cleanup — after the test's own `defer mu.Unlock()` — so waiting on the
+// goroutine (which may take mu on its way out) cannot deadlock.
+func startFailSafeForTest(t *testing.T, ctx context.Context, cancel context.CancelFunc, target dnatFailSafeTarget) {
+	t.Helper()
+	done := startDNATFailSafe(ctx, target)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Errorf("startDNATFailSafe goroutine did not exit within 2s of cancel")
+		}
+	})
+}
+
 func TestStartDNATFailSafeRunnerThresholdCleanupAndReset(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -30,7 +49,7 @@ func TestStartDNATFailSafeRunnerThresholdCleanupAndReset(t *testing.T) {
 	cleanups := 0
 	counterUpdates := []int{}
 
-	startDNATFailSafe(ctx, dnatFailSafeTarget{
+	startFailSafeForTest(t, ctx, cancel, dnatFailSafeTarget{
 		Name:             "test",
 		LogPrefix:        "[dnat:test:failsafe]",
 		Interval:         5 * time.Millisecond,
@@ -93,7 +112,7 @@ func TestStartDNATFailSafeRunnerRecoverPath(t *testing.T) {
 	recoveries := 0
 	var recoverCounts []int
 
-	startDNATFailSafe(ctx, dnatFailSafeTarget{
+	startFailSafeForTest(t, ctx, cancel, dnatFailSafeTarget{
 		Name:             "test",
 		LogPrefix:        "[dnat:test:failsafe]",
 		Interval:         3 * time.Millisecond,
@@ -158,7 +177,7 @@ func TestStartDNATFailSafeRunnerRecoverResetsOnProbeFailure(t *testing.T) {
 	probeIdx := 0
 	recoveries := 0
 
-	startDNATFailSafe(ctx, dnatFailSafeTarget{
+	startFailSafeForTest(t, ctx, cancel, dnatFailSafeTarget{
 		Name:             "test",
 		LogPrefix:        "[dnat:test:failsafe]",
 		Interval:         3 * time.Millisecond,
@@ -211,7 +230,7 @@ func TestStartDNATFailSafeRunnerRecoverSkippedWhenIntentOff(t *testing.T) {
 	var mu sync.Mutex
 	probes := 0
 
-	startDNATFailSafe(ctx, dnatFailSafeTarget{
+	startFailSafeForTest(t, ctx, cancel, dnatFailSafeTarget{
 		Name:             "test",
 		LogPrefix:        "[dnat:test:failsafe]",
 		Interval:         3 * time.Millisecond,
@@ -252,7 +271,7 @@ func TestStartDNATFailSafeRunnerRecoverSkippedWhenRecheckErrors(t *testing.T) {
 	statusCalls := 0
 	recoveries := 0
 
-	startDNATFailSafe(ctx, dnatFailSafeTarget{
+	startFailSafeForTest(t, ctx, cancel, dnatFailSafeTarget{
 		Name:             "test",
 		LogPrefix:        "[dnat:test:failsafe]",
 		Interval:         3 * time.Millisecond,
@@ -304,7 +323,7 @@ func TestStartDNATFailSafeRunnerOffSkipsProbeAndStatusErrorsDoNotCleanup(t *test
 	probes := 0
 	cleanups := 0
 
-	startDNATFailSafe(ctx, dnatFailSafeTarget{
+	startFailSafeForTest(t, ctx, cancel, dnatFailSafeTarget{
 		Name:             "test",
 		LogPrefix:        "[dnat:test:failsafe]",
 		Interval:         5 * time.Millisecond,
