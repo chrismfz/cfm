@@ -26,9 +26,17 @@ type dnatFailSafeTarget struct {
 	Recover          func(okCount int)
 }
 
-func startDNATFailSafe(ctx context.Context, target dnatFailSafeTarget) {
+// startDNATFailSafe launches the fail-safe runner goroutine and returns a channel
+// that is closed when that goroutine exits. Production callers fire-and-forget
+// (they ignore the return); tests wait on it after cancelling ctx so the
+// goroutine — which logs via the shared logger — cannot run on past the test and
+// data-race a later os.Stdout swap (see internal/dnat/panel_alias_test.go). On an
+// invalid target the returned channel is already closed.
+func startDNATFailSafe(ctx context.Context, target dnatFailSafeTarget) <-chan struct{} {
+	done := make(chan struct{})
 	if target.Interval <= 0 || target.FailureThreshold <= 0 || target.StatusCheck == nil || target.HealthProbe == nil || target.Cleanup == nil {
-		return
+		close(done)
+		return done
 	}
 	if target.LogPrefix == "" {
 		target.LogPrefix = "[dnat:failsafe]"
@@ -39,6 +47,7 @@ func startDNATFailSafe(ctx context.Context, target dnatFailSafeTarget) {
 
 	t := time.NewTicker(target.Interval)
 	go func() {
+		defer close(done) // signal exit last (after t.Stop below)
 		defer t.Stop()
 
 		failCount := 0
@@ -111,4 +120,5 @@ func startDNATFailSafe(ctx context.Context, target dnatFailSafeTarget) {
 			}
 		}
 	}()
+	return done
 }
