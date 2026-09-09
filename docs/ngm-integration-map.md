@@ -213,6 +213,16 @@ ranking deprioritises self-signed anyway). A domain that only has NGM's
 self-signed cert is an SNI-miss at the edge until it gets a real cert — note it,
 don't "fix" it by scanning the selfsigned dir.
 
+**Panel-port TLS (the `cfm dnat panel` case) uses a different cert.** If the edge
+fronts NGM's *panel* port, it needs the **system-hostname** cert, not a vhost
+cert. NGM's `hostname-cert` setup step issues that via Let's Encrypt too, so it
+also lands under the LE `live/` dir and is discovered by the same scan. NGM's
+last-resort panel identity is a self-signed pair under `/var/lib/ngm/panel-tls`
+(`api.tls.self_signed_dir`) — like the per-vhost self-signed, intentionally not
+served to real clients. So the panel-port case adds no new discovery work when
+the hostname cert is real; it is an SNI-miss only while the panel is on its
+self-signed identity.
+
 So the only real work is the **non-default path** case:
 
 - If the operator set a **custom** `certs.letsencrypt_live` (≠ `/etc/letsencrypt/live`),

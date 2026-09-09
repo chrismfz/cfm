@@ -26,6 +26,35 @@ existing `ssh`/`postfix_*`/`dovecot`/`ftpd` detectors; web-request abuse against
 customer vhosts is a separate future `ngm_web` detector (the `ngm_access` log),
 out of scope here.
 
+## Which events count — auth.log is a combined auth+AUDIT log
+
+**Important:** `/var/log/ngm/auth.log` is not a failures-only file. The same
+`authLog(event, …)` choke point emits a rich event vocabulary (verified in
+`internal/web/auth.go`), only some of which is abuse signal:
+
+- **Count as abuse** (key on these): `FAIL` (reasons `bad_password`, `lockout`,
+  `account_locked`, `reseller_suspended`, `account_suspended`,
+  `bad_mailbox_login`, `session_create`), `RATELIMIT`, `MFA_FAILURE`,
+  `TOKEN_FAIL`, `TOKEN_IP_REJECT`.
+- **Ignore** (audit/lifecycle noise): `SUCCESS`, `LOGOUT`, `MFA_REQUIRED`,
+  `MFA_SUCCESS`, `MFA_ENABLE`, `MFA_DISABLE`, `DAV_*`, `CONTAINER_*`, and any
+  future audit verb. Key on an **allowlist** of abuse events, not "anything not
+  SUCCESS" — new audit verbs get added over time and must not become false bans.
+
+Two events matter more than a naive "count FAIL":
+
+- **`RATELIMIT` is high-confidence abuse** — NGM's *own* per-source-IP login
+  throttle already fired (`auth.go` backoff), i.e. NGM already judged this IP
+  abusive. Count it; do not treat it as benign.
+- **NGM already does per-account lockout + per-IP throttle** (`IncrementFailedAttempts`
+  → `lockout`, `RATELIMIT`). That is app-layer and **per-account, per-box**. This
+  detector's distinct value is a **fleet-wide L3/L4 nft ban** of the source IP —
+  a second layer, not a duplicate. It also means raw `FAIL` volume *under-counts*
+  a sustained attack (later attempts convert to `RATELIMIT`), so thresholds must
+  count `RATELIMIT` too, or be set lower than an SSH/cPanel detector would use.
+- **`TOKEN_FAIL` / `TOKEN_IP_REJECT`** are API-token brute / CIDR-violation
+  events (`role=token`) — a distinct bucket from interactive login.
+
 ## Model it on `cpanel/login.go`
 
 The cPanel login detector (`internal/detectors/cpanel/login.go` +
@@ -52,7 +81,8 @@ type AuthConfig struct {
 
     AuthFailPerIP   int // default 25
     AuthFailPerUser int // default 15
-    AdminFailPerIP  int // default 5 — stricter for role=admin (mirrors cpanel ROOT_IP)
+    AdminFailPerIP  int // default 5  — stricter for role=admin (mirrors cpanel ROOT_IP)
+    TokenFailPerIP  int // default 10 — API-token brute (TOKEN_FAIL / TOKEN_IP_REJECT)
 
     UseEnrich, UsePTR bool
     EnrichDirs        []string
@@ -82,12 +112,28 @@ type Auth struct {
 // carry spaces inside quotes.
 func kvLine(line string) map[string]string { /* scan key="…"/key=… tokens */ }
 
+// abuseEvents is the ALLOWLIST of events that count (everything else — SUCCESS,
+// LOGOUT, MFA_SUCCESS/ENABLE/DISABLE, DAV_*, CONTAINER_*, … — is audit noise and
+// is ignored, so a new audit verb can never become a false ban).
+var abuseEvents = map[string]bool{
+    "FAIL": true, "RATELIMIT": true, "MFA_FAILURE": true,
+    "TOKEN_FAIL": true, "TOKEN_IP_REJECT": true,
+}
+
 func (a *Auth) processLine(now time.Time, line string) {
     f := kvLine(line)
-    if !strings.EqualFold(f["event"], "FAIL") { // only failures count
+    ev := strings.ToUpper(f["event"])
+    if !abuseEvents[ev] {
         return
     }
     ip, user, role := f["ip"], strings.ToLower(f["user"]), strings.ToLower(f["role"])
+
+    // API-token brute is its own bucket (role=token, may have no user).
+    if ev == "TOKEN_FAIL" || ev == "TOKEN_IP_REJECT" {
+        if ip != "" { a.bump(now, "TOKEN|ip", ip, line) }
+        return
+    }
+    // Interactive login abuse (FAIL / RATELIMIT / MFA_FAILURE).
     if ip != "" {
         if role == "admin" && a.cfg.AdminFailPerIP > 0 {
             a.bump(now, "ADMIN|ip", ip, line)   // stricter bucket, like cpanel ROOT
@@ -108,6 +154,10 @@ func (a *Auth) thresholdAndKey(kindKey, raw string) (limit int, kind, base strin
         lim := a.cfg.AdminFailPerIP
         if lim <= 0 { lim = a.cfg.AuthFailPerIP }
         return lim, "NGM/ADMIN", raw
+    case "TOKEN|ip":
+        lim := a.cfg.TokenFailPerIP
+        if lim <= 0 { lim = a.cfg.AuthFailPerIP }
+        return lim, "NGM/TOKEN", raw
     }
     return 0, "", raw
 }
@@ -143,6 +193,7 @@ func init() {
             AuthFailPerIP:   kvInt(kv, "AUTHFAIL_IP",   25),
             AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 15),
             AdminFailPerIP:  kvInt(kv, "ADMIN_IP",       5),
+            TokenFailPerIP:  kvInt(kv, "TOKEN_IP",      10),
             UseEnrich: kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true)),
             UsePTR:    kvBool(kv, "PTR",    kvBool(global, "PTR",    true)),
         }
@@ -170,7 +221,8 @@ COOLDOWN      = 20m
 LOG_PATH      = /var/log/ngm/auth.log
 AUTHFAIL_IP   = 25
 AUTHFAIL_USER = 15
-ADMIN_IP      = 5
+ADMIN_IP      = 5          ; stricter for role=admin
+TOKEN_IP      = 10         ; API-token brute (TOKEN_FAIL / TOKEN_IP_REJECT)
 BLOCK         = dryrun     ; watch-first; flip to a TTL ban after burn-in
 ```
 
