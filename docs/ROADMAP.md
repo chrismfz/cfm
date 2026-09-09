@@ -183,15 +183,24 @@ alone; NAT-aware.
   seed (`challenge_score` + `cookie_discard` + `solver_farm`) the edge reads and
   fuses with the edge tells (B1 + B2) into one decayed per-client score. Weights
   tuned from burn-in.
-- **Track-2 — solver-farm fingerprint-concentration (low-and-slow)** — [design].
-  Burn-in surfaced a live challenge-defeating farm (`c28caa00` on `techking.gr`,
-  2026-09-08): ~50 residential-proxy IPs across ~40 countries under **one** TLS
-  fingerprint, all SOLVING the PoW at ~8/min — under the existing
+- **Track-2 — solver-farm fingerprint-concentration (low-and-slow)** — [shipped,
+  burn-in]. Burn-in surfaced a live challenge-defeating farm (`c28caa00` on
+  `techking.gr`, 2026-09-08): ~50 residential-proxy IPs across ~40 countries under
+  **one** TLS fingerprint, all SOLVING the PoW at ~8/min — under the existing
   `challenge_solver_farm` subnet-spread bar (`MIN_SUBNETS` 40/60s, calibrated for
-  a ~110/min farm). Design adds a fingerprint-**concentration** track (group-by
-  fp, never a signature; country-spread as the FP-guard) to catch the low-rate
-  regime, feeding the `solver_farm` seed B3 already budgets. Grounded,
-  shadow-first: `docs/solver-farm-fingerprint-concentration.md`.
+  a ~110/min farm). Phase-1 added a fingerprint-**concentration** track (group-by
+  fp, never a signature; country-spread as the FP-guard) for the per-vhost low-rate
+  regime — shipped default-on/log-only, catching `techking.gr` + 3 more vhosts
+  across 2 nodes ~12 h post-deploy, zero observed collateral. Feeds the
+  `solver_farm` seed B3 budgets. `docs/solver-farm-fingerprint-concentration.md`.
+- **Track-2 — solver-farm cross-host fingerprint aggregation (Phase 2)** — [design].
+  The burn-in confirmed a *second* farm fingerprint (`95070673`) spread too thin
+  per vhost for the Phase-1 60 s country guard (per-host country-peak ≤ 6) yet
+  obvious per node (23 vhosts, 41 countries, ~1.05 solves/IP, 83–100 % of each
+  targeted vhost). Design adds a per-node, per-fingerprint aggregation with a
+  per-vhost dominance + `solves_per_ip` pre-gate (the two guards that keep a
+  global-audience browser out where cross-host loses per-vhost country
+  clustering). Grounded, shadow-first: `docs/solver-farm-cross-host-phase2.md`.
 - **Webtop visibility for the per-IP / edge-log shadow signals** — [post-burn-in].
   `challenge_score` (per-IP) and `cfm_pcw` (edge error log) don't map to the
   existing per-vhost webtop pills or the WAF-history analytics, so they're
