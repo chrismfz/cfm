@@ -24,15 +24,24 @@ import (
 )
 
 // abuseEvents is the allowlist of auth.log events that count as abuse signal.
-// Everything else in the log (SUCCESS, LOGOUT, MFA_REQUIRED/SUCCESS/ENABLE/
-// DISABLE, DAV_*, CONTAINER_*, ...) is audit/lifecycle noise and is ignored, so
-// a new audit verb added on the NGM side can never turn into a false ban.
+// It is an ALLOWLIST, not "anything not SUCCESS": the log is a combined
+// auth+audit stream, so audit/lifecycle verbs (SUCCESS, LOGOUT, MFA_REQUIRED/
+// SUCCESS/ENABLE/DISABLE, DAV_DISCOVERY/DAV_HOST/DAV_IMPORT_FAIL, CONTAINER_*,
+// PWRESET_REQUEST/SENT/SUCCESS, SERVICE_ENABLE_DENIED, …) are ignored and a new
+// audit verb can never become a false ban. Only genuine credential/brute events:
 //
-//   - FAIL         interactive login failure (bad_password/lockout/suspended/…)
-//   - RATELIMIT    NGM's own per-IP login throttle already fired — i.e. NGM has
-//     itself judged this source abusive (high-confidence)
-//   - MFA_FAILURE  credential-stuffing that cleared the password step
-//   - TOKEN_FAIL   API-token authentication failure (bad token value; role=token)
+//   - FAIL                     interactive login failure (bad_password/lockout/…)
+//   - RATELIMIT                NGM's own per-IP login throttle already fired —
+//     i.e. NGM has itself judged this source abusive (high-confidence)
+//   - MFA_FAILURE              credential-stuffing that cleared the password step
+//   - DAV_FAIL                 WebDAV/CalDAV/CardDAV mailbox auth failure
+//   - PWRESET_FAILURE          failed password-reset verification (token brute)
+//   - RECOVERY_VERIFY_FAILURE  failed recovery-code verification (code brute)
+//   - TOKEN_FAIL               API-token auth failure (bad token value; role=token)
+//
+// DAV_FAIL / PWRESET_FAILURE / RECOVERY_VERIFY_FAILURE are role=mailbox credential
+// failures and flow through the interactive path (per-IP + per-user), the same as
+// FAIL — NOT the audit DAV_*/PWRESET_* verbs above.
 //
 // TOKEN_IP_REJECT (a valid token presented from a not-yet-allowlisted source IP)
 // is deliberately NOT counted: NGM already refused the request on its own CIDR
@@ -40,10 +49,13 @@ import (
 // otherwise get that IP banned fleet-wide — a self-inflicted outage from a
 // benign misconfiguration.
 var abuseEvents = map[string]bool{
-	"FAIL":        true,
-	"RATELIMIT":   true,
-	"MFA_FAILURE": true,
-	"TOKEN_FAIL":  true,
+	"FAIL":                    true,
+	"RATELIMIT":               true,
+	"MFA_FAILURE":             true,
+	"DAV_FAIL":                true,
+	"PWRESET_FAILURE":         true,
+	"RECOVERY_VERIFY_FAILURE": true,
+	"TOKEN_FAIL":              true,
 }
 
 type AuthConfig struct {
@@ -104,7 +116,7 @@ func New(cfg AuthConfig) *Auth {
 		cfg.Cooldown = 20 * time.Minute
 	}
 	if cfg.SampleLimit <= 0 {
-		cfg.SampleLimit = 10
+		cfg.SampleLimit = 16 // matches the shipped [ngm_auth] reference config
 	}
 
 	a := &Auth{cfg: cfg}
@@ -232,12 +244,17 @@ func (a *Auth) processLine(now time.Time, line string) {
 		return
 	}
 
-	// Interactive login abuse (FAIL / RATELIMIT / MFA_FAILURE).
+	// Interactive / credential-verification abuse (all abuseEvents except the
+	// TOKEN_FAIL handled above): FAIL, RATELIMIT, MFA_FAILURE, DAV_FAIL,
+	// PWRESET_FAILURE, RECOVERY_VERIFY_FAILURE.
 	if ip != "" && ip != "-" {
 		// Every failure counts toward the general per-IP threshold, so a spray
 		// mixing admin + user logins from one IP cannot hide by splitting buckets.
 		a.bump(now, "AUTHFAIL|ip", ip, line)
-		// role=admin ALSO feeds the stricter admin bucket (fires earlier).
+		// role=admin ALSO feeds the stricter admin bucket (fires earlier). A
+		// sustained pure-admin brute therefore trips both NGM/ADMIN and
+		// NGM/AUTHFAIL for the same IP — accepted: the second nft ban is a no-op
+		// and mixed-spray coverage is worth one extra notification.
 		if role == "admin" && a.cfg.AdminFailPerIP > 0 {
 			a.bump(now, "ADMIN|ip", ip, line)
 		}
@@ -320,7 +337,7 @@ func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 
 func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 	for _, p := range a.pending {
-		limit, kindStr, _ := a.thresholdAndKey(p.kindKey, p.key)
+		limit, kindStr := a.threshold(p.kindKey)
 		if limit <= 0 {
 			continue
 		}
@@ -370,25 +387,25 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 	}
 }
 
-func (a *Auth) thresholdAndKey(kindKey, rawKey string) (limit int, alertKind, baseKey string) {
+func (a *Auth) threshold(kindKey string) (limit int, alertKind string) {
 	switch kindKey {
 	case "AUTHFAIL|ip":
-		return a.cfg.AuthFailPerIP, "NGM/AUTHFAIL", rawKey
+		return a.cfg.AuthFailPerIP, "NGM/AUTHFAIL"
 	case "AUTHFAIL|user":
-		return a.cfg.AuthFailPerUser, "NGM/AUTHFAIL", rawKey
+		return a.cfg.AuthFailPerUser, "NGM/AUTHFAIL"
 	case "ADMIN|ip":
 		lim := a.cfg.AdminFailPerIP
 		if lim <= 0 {
 			lim = a.cfg.AuthFailPerIP
 		}
-		return lim, "NGM/ADMIN", rawKey
+		return lim, "NGM/ADMIN"
 	case "TOKEN|ip":
 		lim := a.cfg.TokenFailPerIP
 		if lim <= 0 {
 			lim = a.cfg.AuthFailPerIP
 		}
-		return lim, "NGM/TOKEN", rawKey
+		return lim, "NGM/TOKEN"
 	default:
-		return 0, "", rawKey
+		return 0, ""
 	}
 }

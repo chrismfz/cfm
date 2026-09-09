@@ -18,7 +18,7 @@ func init() {
 		Title:             "NGM panel login",
 		Description:       "Detect abusive NGM control-panel login attempts.",
 		DefaultsTemplate:  map[string]string{"ENABLED": "1", "LOG_PATH": "/var/log/ngm/auth.log", "EVERY": "2s", "WINDOW": "10m", "COOLDOWN": "20m", "BLOCK": "dryrun"},
-		ExamplePresets:    []meta.Preset{{ID: "ngm", Title: "NGM", Description: "Default NGM panel auth.log path.", Template: map[string]string{"MODE": "file", "LOG_PATH": "/var/log/ngm/auth.log"}}},
+		ExamplePresets:    []meta.Preset{{ID: "ngm", Title: "NGM", Description: "Default NGM panel auth.log path.", Template: map[string]string{"LOG_PATH": "/var/log/ngm/auth.log"}}},
 		LeniencySupported: true,
 	})
 	Register("ngm_auth", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
@@ -33,7 +33,7 @@ func init() {
 			Every:       kvDur(kv, "EVERY", defEvery),
 			Window:      kvDur(kv, "WINDOW", defWindow),
 			Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
-			SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
+			SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 16),
 
 			AuthFailPerIP:   kvInt(kv, "AUTHFAIL_IP", 25),
 			AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 15),

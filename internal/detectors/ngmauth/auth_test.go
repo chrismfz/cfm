@@ -178,6 +178,38 @@ func TestUserBucketDeclaresHostScope(t *testing.T) {
 	}
 }
 
+// TestMailboxCredentialFailuresCount (F1/F2): DAV / password-reset / recovery
+// verification failures are genuine credential-brute events NGM writes to
+// auth.log and MUST count — while the audit DAV_*/PWRESET_* verbs must not.
+func TestMailboxCredentialFailuresCount(t *testing.T) {
+	alerts := runOnce(t, AuthConfig{
+		AuthFailPerIP:   3,
+		AuthFailPerUser: 100,
+		AdminFailPerIP:  100,
+		TokenFailPerIP:  100,
+	}, []string{
+		`2026-08-05T21:00:00Z event=DAV_FAIL user="bob@example.com" ip=4.4.4.4 role=mailbox reason=bad_password`,
+		`2026-08-05T21:00:01Z event=PWRESET_FAILURE user="bob@example.com" ip=4.4.4.4 role=mailbox reason=bad_token`,
+		`2026-08-05T21:00:02Z event=RECOVERY_VERIFY_FAILURE user="bob@example.com" ip=4.4.4.4 role=mailbox reason=bad_code`,
+		// audit DAV/PWRESET verbs that must NOT count:
+		`2026-08-05T21:00:03Z event=DAV_HOST user="bob@example.com" ip=4.4.4.4 role=mailbox reason=example.com`,
+		`2026-08-05T21:00:04Z event=PWRESET_SENT user="bob@example.com" ip=4.4.4.4 role=mailbox reason=sent`,
+		`2026-08-05T21:00:05Z event=DAV_IMPORT_FAIL user="bob@example.com" ip=4.4.4.4 role=mailbox reason=parse_error`,
+	})
+	var af *core.Alert
+	for i := range alerts {
+		if alerts[i].Kind == "NGM/AUTHFAIL" && alerts[i].Extra["ip"] == "4.4.4.4" {
+			af = &alerts[i]
+		}
+	}
+	if af == nil {
+		t.Fatalf("expected NGM/AUTHFAIL for 4.4.4.4 (DAV_FAIL + PWRESET_FAILURE + RECOVERY_VERIFY_FAILURE); got %v", alerts)
+	}
+	if af.Count != 3 { // exactly the 3 credential failures; the 3 audit lines ignored
+		t.Fatalf("NGM/AUTHFAIL count=%d, want 3 (audit DAV_HOST/PWRESET_SENT/DAV_IMPORT_FAIL must not count)", af.Count)
+	}
+}
+
 // TestAuditOnlyProducesNothing confirms a log of purely audit/success events (and
 // a TOKEN_IP_REJECT) never fires (a new audit verb must not become a false ban).
 func TestAuditOnlyProducesNothing(t *testing.T) {

@@ -36,13 +36,17 @@ out of scope here.
 
 - **Count as abuse** (key on these): `FAIL` (reasons `bad_password`, `lockout`,
   `account_locked`, `reseller_suspended`, `account_suspended`,
-  `bad_mailbox_login`, `session_create`), `RATELIMIT`, `MFA_FAILURE`,
+  `bad_mailbox_login`, `session_create`), `RATELIMIT`, `MFA_FAILURE`, `DAV_FAIL`
+  (WebDAV/CalDAV mailbox auth), `PWRESET_FAILURE`, `RECOVERY_VERIFY_FAILURE`,
   `TOKEN_FAIL`. **`TOKEN_IP_REJECT` is deliberately excluded** — see the token
   bullet below.
 - **Ignore** (audit/lifecycle noise): `SUCCESS`, `LOGOUT`, `MFA_REQUIRED`,
-  `MFA_SUCCESS`, `MFA_ENABLE`, `MFA_DISABLE`, `DAV_*`, `CONTAINER_*`, and any
-  future audit verb. Key on an **allowlist** of abuse events, not "anything not
-  SUCCESS" — new audit verbs get added over time and must not become false bans.
+  `MFA_SUCCESS`, `MFA_ENABLE`, `MFA_DISABLE`, the audit DAV verbs
+  (`DAV_DISCOVERY`/`DAV_HOST`/`DAV_IMPORT_FAIL`), `PWRESET_REQUEST`/`_SENT`/
+  `_SUCCESS`, `SERVICE_ENABLE_DENIED`, `CONTAINER_*`, and any future audit verb.
+  Key on an **allowlist** of abuse events, not "anything not SUCCESS" — new audit
+  verbs get added over time and must not become false bans. (`DAV_FAIL` is an
+  *auth* failure and IS counted; only the audit DAV verbs are ignored.)
 
 Two events matter more than a naive "count FAIL":
 
@@ -121,7 +125,9 @@ func kvLine(line string) map[string]string { /* scan key="…"/key=… tokens */
 // LOGOUT, MFA_SUCCESS/ENABLE/DISABLE, DAV_*, CONTAINER_*, … — is audit noise and
 // is ignored, so a new audit verb can never become a false ban).
 var abuseEvents = map[string]bool{
-    "FAIL": true, "RATELIMIT": true, "MFA_FAILURE": true, "TOKEN_FAIL": true,
+    "FAIL": true, "RATELIMIT": true, "MFA_FAILURE": true,
+    "DAV_FAIL": true, "PWRESET_FAILURE": true, "RECOVERY_VERIFY_FAILURE": true,
+    "TOKEN_FAIL": true,
     // TOKEN_IP_REJECT intentionally omitted (valid token from a new IP → self-ban).
 }
 
