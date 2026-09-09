@@ -154,19 +154,52 @@ say "cpanel":
   drop or generalise.
 
 The NGM side wants `cfm dnat panel on/off` to mean "put NGM's panel port behind
-CFM's challenge/WAF guard". Feasible now with the alias + an NGM port entry.
+CFM's challenge/WAF guard". The alias is the first half and is shipped; the port
+map itself is a genuine edge slice (an nft entry **plus** a hand-authored edge
+listener block **plus** Lua port-awareness **plus** the release gate) — scoped in
+the status note below, not "just an NGM port entry".
 
 > The alias is worth shipping **independently** of the rest: it is small, low
 > risk, and correct for cPanel *and* DirectAdmin today (the doc string on
 > `panel_dnat.go` already says "cPanel/DirectAdmin"). It is the natural first
 > merge.
 >
-> **Status: SHIPPED** — `cfm dnat panel …` is accepted as an alias of
-> `cfm dnat cpanel …` (routing in `internal/dnat/cli.go`; help text + a
-> `panel_alias_test.go` regression guard). The remaining follow-up is
-> **parameterising `firewall.PanelDNATMappings()`** so the NGM panel port
-> (default `9601`) is covered — the alias today still applies the cPanel/DA port
-> set.
+> **Status: alias SHIPPED; NGM port-map is a deferred follow-up (scoped below).**
+> `cfm dnat panel …` is accepted as an alias of `cfm dnat cpanel …` (routing in
+> `internal/dnat/cli.go`; help text + a `panel_alias_test.go` regression guard).
+> The alias today still applies the **cPanel/DA port set** — putting NGM's panel
+> port behind the guard is **not** a one-line change to `PanelDNATMappings()`, and
+> was deliberately left out of the alias PR. The real work, in one place so the
+> next session doesn't rediscover it:
+>
+> 1. **`firewall.PanelDNATMappings()`** (`internal/firewall/panel_dnat.go`) — the
+>    nft redirect set is a static slice (`2082→12082 … 2222→12222`). Add/parameterise
+>    the NGM entry (e.g. `9601→19601`). This half *is* small — but it only creates
+>    the L3/L4 redirect; nothing terminates the inner port yet.
+> 2. **`configs/cfm-panel-listeners.conf.in`** — the edge listeners are a **static
+>    ~40 KB template**, one hand-written `server{}` block per panel port (12083/
+>    12087/12096 SSL, 12082 HTTP, …), **not generated from `PanelDNATMappings()`**.
+>    Each block bakes its panel port into `listen`, `proxy_pass`, and every
+>    `X-Forwarded-Port` / `X-CFM-Panel-Port` header across ~5 `location` stanzas.
+>    Covering NGM means **authoring a new listener block** (`listen 19601 ssl` →
+>    origin `127.0.0.1:9601`, port stamped consistently throughout). It is included
+>    by **both** edges — `configs/angie.conf` (`include …/cfm-panel-listeners.conf`)
+>    and `configs/openresty.conf` — so the block must render valid under each.
+> 3. **`configs/lua/cfm_panel.lua` + `cfm_panel_tunnel.lua`** — per-port scope
+>    isolation and the `X-CFM-Panel-Port` replay guard (`panel:2083` scope must not
+>    be honoured on the 2087 listener) key on the known panel ports; the NGM port
+>    needs to be recognised there too, or its listener has no scope.
+> 4. **Edge-affecting → run the gate.** This touches in-path Lua and edge config, so
+>    `make lua` + the **challenge/WAF release checklist**
+>    (`docs/challenge-waf-release-checklist.md`) apply before it ships, plus the
+>    `internal/dnat` listener/reload tests.
+> 5. **NGM's panel port is operator-configurable** — hardcoding `9601` is fragile.
+>    Drive it from the panel's actual configured port rather than a literal, or the
+>    listener silently guards the wrong port on a customised install.
+>
+> Net: the alias is done and correct for cPanel/DA; the NGM port-map is a genuine
+> edge slice (a listener block + Lua port-awareness + the release gate), tracked
+> here rather than half-shipped.
 
 ## 5. Detectors — add `ngm`, note the real gaps (§D)
 
