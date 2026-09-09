@@ -193,29 +193,50 @@ Genuine gaps (net-new if we want them):
   the edge WAF, not the FPM log). NGM writes per-site
   `logs/php-fpm.{slow,error}.log`.
 
-## 6. sslcollector — `scanNGM`, or decide who terminates TLS (§E)
+## 6. sslcollector — mostly a non-problem: NGM already uses the LE `live/` layout (§E)
 
-`internal/sslcollector/sources.go` discovers certs from a fixed set of panel
-layouts (LE `live/`, cPanel, DirectAdmin `.../users/*/domains/*.cert`, Virtualmin
-`/home*/*/domains/*/ssl.*`, mailcow). **None know NGM's `~/sites/<domain>/…`
-layout** — a discovery gap *iff* CFM's edge terminates client TLS.
+**Correction to the first-pass assumption.** NGM does *not* keep per-vhost certs
+under `~/sites/<domain>/` (that is the webroot). Its real certs live at
+`certs.letsencrypt_live`, which **defaults to `/etc/letsencrypt/live`**
+(ngm `internal/config/config.go`), in the standard certbot layout
+`<live>/<domain>/{fullchain,privkey}.pem` — NGM even maintains a `/live/<domain>`
+alias there (`internal/certs/certbot.go`). CFM's `discoverPairs()` already runs
+`scanLetsEncrypt("/etc/letsencrypt/live")` (`internal/sslcollector/sources.go`),
+and `scanLetsEncrypt(liveDir)` reads exactly `<dir>/<name>/fullchain.pem` +
+`privkey.pem`. So **on a default NGM box, sslcollector discovers every real NGM
+cert with zero code changes** — the "για αρχή" answer.
 
-This is a **hard either/or**, not a config toggle:
+The self-signed fallback (`<nginx.root>/conf/selfsigned/<domain>/…`, materialised
+by NGM when no LE cert exists) is deliberately **not** discovered, and that is
+correct: the edge must not serve a self-signed cert to real clients (CFM's
+ranking deprioritises self-signed anyway). A domain that only has NGM's
+self-signed cert is an SNI-miss at the edge until it gets a real cert — note it,
+don't "fix" it by scanning the selfsigned dir.
 
-- **Edge-in-front (CFM terminates TLS):** add an `scanNGM(~/sites/…)` source
-  (mirror `scanDirectAdmin`) with a `Source` const + `prefer()` rank. The
-  socket-serving side needs no change. NGM must then **stop owning external
-  443** (DNAT hands it to the edge; NGM's nginx keeps binding real-IP 443 as the
-  origin). **OR**
-- **NGM stays the front door (NGM terminates TLS):** CFM does not need NGM certs;
-  the edge WAF/challenge for web is then out of scope, and CFM contributes
-  detectors + firewall + LSM only. `cfm dnat panel` (panel port) can still apply.
+So the only real work is the **non-default path** case:
 
-The NGM side owns `443 quic reuseport` and per-vhost certs today, and logs raw
-`$remote_addr` with **no inbound `real_ip`** — so edge-in-front additionally
-requires NGM to render `set_real_ip_from`/`real_ip_header` (§G) or every per-vhost
-log line and `limit_req` key sees the proxy IP. This is the single biggest
-topology decision; see the NGM doc §C.
+- If the operator set a **custom** `certs.letsencrypt_live` (≠ `/etc/letsencrypt/live`),
+  CFM's hardcoded call misses it. Smallest fix: `scanLetsEncrypt` is already
+  path-parameterised, so add one `out = append(out, scanLetsEncrypt(ngmLiveDir)…)`
+  in `discoverPairs()` reading the NGM-configured dir (a small `[sslcollector]`
+  extra-dir list, or an `ngmLiveDir()` probe of `/etc/ngm/config.yaml`). Or simply
+  keep NGM on the default. A dedicated `scanNGM` source const is **not** needed —
+  the certs are already LE-shaped; `SrcLetsEncrypt` + `prefer()` rank apply as-is.
+
+This still only matters **iff** CFM's edge terminates client TLS — the **hard
+either/or** that remains the real topology decision:
+
+- **Edge-in-front (CFM terminates TLS):** relies on the discovery above; NGM must
+  **stop owning external 443** (DNAT hands it to the edge; NGM's nginx keeps
+  binding real-IP 443 as origin) and hand over `443 quic reuseport`. Additionally
+  NGM logs raw `$remote_addr` with **no inbound `real_ip`**, so it must render
+  `set_real_ip_from`/`real_ip_header` (§G) or every per-vhost log line and
+  `limit_req` key sees the proxy IP. **OR**
+- **NGM stays the front door (NGM terminates TLS):** CFM does not need NGM certs
+  at all; the edge WAF/challenge for web is out of scope, and CFM contributes
+  detectors + firewall + LSM only. `cfm dnat panel` (panel port) still applies.
+
+See the NGM doc §C for the topology decision.
 
 ## 7. cfm-lsm — NGM paths as FS-005, honestly (§F)
 
@@ -316,7 +337,9 @@ CLAUDE.md §3). This doc is docs-only.
    DNAT) vs the full embed + edge WAF + LSM + eventual `cfm-php`. The ROADMAP's
    own answer is phased; this doc lets us pick the cut line per phase.
 
-> See also: `ngm/docs/cfm-integration-map.md` (NGM-side driver/surface view),
+> See also: `docs/ngm-auth-detector.md` (first-slice detector sketch),
+> `ngm/docs/cfm-embed-handshake.md` (first-slice embed-handshake sketch),
+> `ngm/docs/cfm-integration-map.md` (NGM-side driver/surface view),
 > `docs/cpanel-plugin-token-transport.md`, `docs/webui-api-curl-recipes.md`,
 > `docs/ssl-collector.md`, `docs/cfm-lsm.md`, `docs/cfm-php.md`,
 > `docs/dnat-bypass.md`.
