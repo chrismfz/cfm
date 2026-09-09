@@ -94,7 +94,7 @@ type AuthConfig struct {
 
     AuthFailPerIP   int // default 25
     AuthFailPerUser int // default 15
-    AdminFailPerIP  int // default 5  — stricter for role=admin (mirrors cpanel ROOT_IP)
+    AdminFailPerIP  int // default 5  — stricter for privileged roles admin+reseller (cf. cpanel ROOT_IP)
     TokenFailPerIP  int // default 10 — API-token brute (TOKEN_FAIL only)
 }
 
@@ -144,11 +144,12 @@ func (a *Auth) processLine(now time.Time, line string) {
         if ip != "" { a.bump(now, "TOKEN|ip", ip, line) }
         return
     }
-    // Interactive login abuse (FAIL / RATELIMIT / MFA_FAILURE).
+    // Interactive / credential-verification abuse (FAIL / RATELIMIT / MFA_FAILURE
+    // / DAV_FAIL / PWRESET_FAILURE / RECOVERY_VERIFY_FAILURE).
     if ip != "" {
         a.bump(now, "AUTHFAIL|ip", ip, line)           // every failure counts to the per-IP total
-        if role == "admin" && a.cfg.AdminFailPerIP > 0 {
-            a.bump(now, "ADMIN|ip", ip, line)           // AND the stricter admin bucket (fires earlier)
+        if (role == "admin" || role == "reseller") && a.cfg.AdminFailPerIP > 0 {
+            a.bump(now, "ADMIN|ip", ip, line)           // AND the stricter privileged bucket (admin+reseller)
         }
     }
     if user != "" && user != "-" {
@@ -156,20 +157,20 @@ func (a *Auth) processLine(now time.Time, line string) {
     }
 }
 
-func (a *Auth) thresholdAndKey(kindKey, raw string) (limit int, kind, base string) {
+func (a *Auth) threshold(kindKey string) (limit int, kind string) {
     switch kindKey {
-    case "AUTHFAIL|ip":   return a.cfg.AuthFailPerIP,   "NGM/AUTHFAIL", raw
-    case "AUTHFAIL|user": return a.cfg.AuthFailPerUser, "NGM/AUTHFAIL", raw
+    case "AUTHFAIL|ip":   return a.cfg.AuthFailPerIP,   "NGM/AUTHFAIL"
+    case "AUTHFAIL|user": return a.cfg.AuthFailPerUser, "NGM/AUTHFAIL"
     case "ADMIN|ip":
         lim := a.cfg.AdminFailPerIP
         if lim <= 0 { lim = a.cfg.AuthFailPerIP }
-        return lim, "NGM/ADMIN", raw
+        return lim, "NGM/ADMIN"
     case "TOKEN|ip":
         lim := a.cfg.TokenFailPerIP
         if lim <= 0 { lim = a.cfg.AuthFailPerIP }
-        return lim, "NGM/TOKEN", raw
+        return lim, "NGM/TOKEN"
     }
-    return 0, "", raw
+    return 0, ""
 }
 ```
 
@@ -232,7 +233,7 @@ COOLDOWN      = 20m
 LOG_PATH      = /var/log/ngm/auth.log
 AUTHFAIL_IP   = 25
 AUTHFAIL_USER = 15
-ADMIN_IP      = 5          ; stricter for role=admin
+ADMIN_IP      = 5          ; stricter, for privileged roles (admin + reseller)
 TOKEN_IP      = 10         ; API-token brute (TOKEN_FAIL only)
 BLOCK         = dryrun     ; watch-first; flip to a TTL ban after burn-in
 ```
@@ -241,6 +242,18 @@ BLOCK         = dryrun     ; watch-first; flip to a TTL ban after burn-in
 
 - **`BLOCK = dryrun` ships first** — same burn-in discipline as every new detector
   (CLAUDE.md §6). Flip to a soft TTL ban only after watching real traffic.
+- **False-positive profile to watch during burn-in:** the interactive bucket now
+  also counts `DAV_FAIL`, `PWRESET_FAILURE`, `RECOVERY_VERIFY_FAILURE` and
+  `RATELIMIT`. DAV/mail clients and password-reset flows **auto-retry**, so a
+  stale-password device or a NAT/office egress can accumulate failures far faster
+  than an interactive SSH/cPanel login would — `AUTHFAIL_IP = 25` may be too low
+  there. Watch `DAV_FAIL`/`RATELIMIT` volume per source before arming and tune
+  `AUTHFAIL_IP` to the fleet (that is exactly what the dryrun window is for).
+- **Privileged bucket = admin + reseller.** A reseller administers many customer
+  accounts, so it feeds the stricter `ADMIN_IP` bucket alongside `admin`; a plain
+  customer (`role=user`) and mailbox failures do not. A sustained single-IP
+  privileged brute can emit `NGM/ADMIN` + `NGM/AUTHFAIL` (per-IP) + a host-scoped
+  per-user notify — accepted noise (the extra nft ban is a no-op).
 - **Rotation:** NGM opens the file per-write and its logrotate uses plain rename
   (a new inode); the `FileTailer` resume already handles inode change. No
   `copytruncate` here (that's the php-fpm/panel logs, not auth.log).

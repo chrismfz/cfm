@@ -48,6 +48,11 @@ import (
 // gate, and a legitimate token retried from a new office/CI egress would
 // otherwise get that IP banned fleet-wide — a self-inflicted outage from a
 // benign misconfiguration.
+//
+// Keep this allowlist in sync with NGM's authLog() call sites (ngm
+// internal/web/authfilelog.go + its callers): the two repos are separate, so
+// there is no automated cross-repo parity test — a new NGM credential-failure
+// verb must be added here by hand or it is silently undetected.
 var abuseEvents = map[string]bool{
 	"FAIL":                    true,
 	"RATELIMIT":               true,
@@ -249,13 +254,16 @@ func (a *Auth) processLine(now time.Time, line string) {
 	// PWRESET_FAILURE, RECOVERY_VERIFY_FAILURE.
 	if ip != "" && ip != "-" {
 		// Every failure counts toward the general per-IP threshold, so a spray
-		// mixing admin + user logins from one IP cannot hide by splitting buckets.
+		// mixing privileged + user logins from one IP cannot hide by splitting
+		// buckets.
 		a.bump(now, "AUTHFAIL|ip", ip, line)
-		// role=admin ALSO feeds the stricter admin bucket (fires earlier). A
-		// sustained pure-admin brute therefore trips both NGM/ADMIN and
-		// NGM/AUTHFAIL for the same IP — accepted: the second nft ban is a no-op
-		// and mixed-spray coverage is worth one extra notification.
-		if role == "admin" && a.cfg.AdminFailPerIP > 0 {
+		// Privileged roles (admin AND reseller — a reseller administers many
+		// customer accounts, so it is as high-value as admin) ALSO feed the
+		// stricter bucket, which fires earlier. A sustained single-IP privileged
+		// brute therefore trips NGM/ADMIN and NGM/AUTHFAIL (per-IP) and, past
+		// AUTHFAIL_USER, a host-scoped per-user notify — accepted noise: the extra
+		// nft ban is a no-op and multi-bucket coverage is worth the notifications.
+		if (role == "admin" || role == "reseller") && a.cfg.AdminFailPerIP > 0 {
 			a.bump(now, "ADMIN|ip", ip, line)
 		}
 	}

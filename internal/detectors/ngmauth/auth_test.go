@@ -210,6 +210,37 @@ func TestMailboxCredentialFailuresCount(t *testing.T) {
 	}
 }
 
+// TestPrivilegedBucketFires (P3-F2/F6): admin AND reseller failures trip the
+// stricter NGM/ADMIN bucket, earlier than the generic per-IP threshold.
+func TestPrivilegedBucketFires(t *testing.T) {
+	for _, role := range []string{"admin", "reseller"} {
+		t.Run(role, func(t *testing.T) {
+			alerts := runOnce(t, AuthConfig{
+				AuthFailPerIP:   100, // generic bucket must NOT be what fires
+				AuthFailPerUser: 100,
+				AdminFailPerIP:  3,
+				TokenFailPerIP:  100,
+			}, []string{
+				`2026-08-05T22:00:00Z event=FAIL user="x" ip=6.6.6.6 role=` + role + ` reason=bad_password`,
+				`2026-08-05T22:00:01Z event=FAIL user="x" ip=6.6.6.6 role=` + role + ` reason=bad_password`,
+				`2026-08-05T22:00:02Z event=FAIL user="x" ip=6.6.6.6 role=` + role + ` reason=bad_password`,
+			})
+			var admin *core.Alert
+			for i := range alerts {
+				if alerts[i].Kind == "NGM/ADMIN" {
+					admin = &alerts[i]
+				}
+			}
+			if admin == nil {
+				t.Fatalf("role=%s: expected NGM/ADMIN to fire at AdminFailPerIP=3; got %v", role, alerts)
+			}
+			if admin.Extra["ip"] != "6.6.6.6" || admin.Count < 3 {
+				t.Fatalf("role=%s: NGM/ADMIN ip=%q count=%d, want 6.6.6.6 / >=3", role, admin.Extra["ip"], admin.Count)
+			}
+		})
+	}
+}
+
 // TestAuditOnlyProducesNothing confirms a log of purely audit/success events (and
 // a TOKEN_IP_REJECT) never fires (a new audit verb must not become a false ban).
 func TestAuditOnlyProducesNothing(t *testing.T) {
