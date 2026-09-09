@@ -184,14 +184,17 @@ distinct farm fingerprints — `c28caa00` (60 vhosts, ~58 countries fleet-wide)
 **and** `95070673` (36 vhosts, 15 countries). A rule keyed on `c28caa00` would
 already be blind to `95070673`; the concentration metric flags both by shape.
 
-**Known low-rate residue (Phase 2):** `95070673` is spread so thin *per vhost*
-(≈3 countries/60 s on its busiest host) that the per-`(host, fp)`/60 s test does
-not reach `MIN_FP_COUNTRIES` there, even though the fingerprint is unmistakably a
-farm **fleet-wide** (36 vhosts, 15 countries). Catching that regime needs a
-**cross-host, per-fingerprint** aggregation — a fleet-global fp tracker, a bigger
-change deferred to §11. The first cut catches the aggressive, single-vhost-heavy
-farm (`c28caa00` on its main targets) cleanly; the thin cross-host farm is a
-documented follow-up, not a reason to hold the first shadow deploy.
+**Known low-rate residue → Phase 2 (designed):** `95070673` is spread so thin
+*per vhost* that the per-`(host, fp)`/60 s test does not reach `MIN_FP_COUNTRIES`
+there (measured per-host 60 s country-peak ≤ 6, `1` on most hosts), even though
+the fingerprint is unmistakably a farm **per node** (23 vhosts, 41 countries,
+~1.05 solves/IP, 83–100 % of each targeted vhost's solves on the 2026-09-09
+capture). Catching that regime needs a **cross-host, per-fingerprint**
+aggregation with a per-vhost dominance + `solves_per_ip` pre-gate — designed in
+`docs/solver-farm-cross-host-phase2.md`. The first cut catches the aggressive,
+single-vhost-heavy farm (`c28caa00` on its main targets) cleanly; the thin
+cross-host farm is a documented follow-up, not a reason to hold the first shadow
+deploy.
 
 ## 6. False-positive analysis (the load-bearing part)
 
