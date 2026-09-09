@@ -8,21 +8,19 @@
 // The file is a COMBINED auth+audit log, so this detector keys on an allowlist
 // of abuse events and ignores audit verbs (SUCCESS/LOGOUT/MFA_SUCCESS/DAV_*/
 // CONTAINER_*/...). It is the panel-login analogue of the cpanel/login detector
-// and reuses the same core window primitives + file-tailer resume. Design:
-// docs/ngm-auth-detector.md.
+// and reuses the same core window primitives + file-tailer resume. The detector
+// only emits core.Alert; blocking/leniency/notify/IP-decoration are the section
+// sink's job (autoblock_sink.go). Design: docs/ngm-auth-detector.md.
 package ngmauth
 
 import (
 	"context"
 	"io"
-	"net"
 	"strconv"
 	"strings"
 	"time"
 
 	core "cfm/internal/detectors/core"
-	"cfm/internal/enrich"
-	"cfm/internal/logging"
 )
 
 // abuseEvents is the allowlist of auth.log events that count as abuse signal.
@@ -30,18 +28,22 @@ import (
 // DISABLE, DAV_*, CONTAINER_*, ...) is audit/lifecycle noise and is ignored, so
 // a new audit verb added on the NGM side can never turn into a false ban.
 //
-//   - FAIL            interactive login failure (bad_password/lockout/suspended/…)
-//   - RATELIMIT       NGM's own per-IP login throttle already fired — i.e. NGM
-//     has itself judged this source abusive (high-confidence)
-//   - MFA_FAILURE     credential-stuffing that cleared the password step
-//   - TOKEN_FAIL      API-token authentication failure (role=token)
-//   - TOKEN_IP_REJECT API-token presented from a disallowed source IP/CIDR
+//   - FAIL         interactive login failure (bad_password/lockout/suspended/…)
+//   - RATELIMIT    NGM's own per-IP login throttle already fired — i.e. NGM has
+//     itself judged this source abusive (high-confidence)
+//   - MFA_FAILURE  credential-stuffing that cleared the password step
+//   - TOKEN_FAIL   API-token authentication failure (bad token value; role=token)
+//
+// TOKEN_IP_REJECT (a valid token presented from a not-yet-allowlisted source IP)
+// is deliberately NOT counted: NGM already refused the request on its own CIDR
+// gate, and a legitimate token retried from a new office/CI egress would
+// otherwise get that IP banned fleet-wide — a self-inflicted outage from a
+// benign misconfiguration.
 var abuseEvents = map[string]bool{
-	"FAIL":            true,
-	"RATELIMIT":       true,
-	"MFA_FAILURE":     true,
-	"TOKEN_FAIL":      true,
-	"TOKEN_IP_REJECT": true,
+	"FAIL":        true,
+	"RATELIMIT":   true,
+	"MFA_FAILURE": true,
+	"TOKEN_FAIL":  true,
 }
 
 type AuthConfig struct {
@@ -59,12 +61,7 @@ type AuthConfig struct {
 	AuthFailPerIP   int // per source IP (interactive login)
 	AuthFailPerUser int // per targeted username
 	AdminFailPerIP  int // stricter, for role=admin (mirrors cpanel ROOT_IP)
-	TokenFailPerIP  int // API-token brute (TOKEN_FAIL / TOKEN_IP_REJECT)
-
-	// enrichment
-	UseEnrich  bool
-	UsePTR     bool
-	EnrichDirs []string
+	TokenFailPerIP  int // API-token brute (TOKEN_FAIL)
 }
 
 type pend struct {
@@ -88,9 +85,6 @@ type Auth struct {
 	samples *core.SampleRing
 	gate    *core.AlertGate
 	counts  *core.SlidingCounter
-
-	// enrichment
-	enr *enrich.Enricher
 }
 
 func New(cfg AuthConfig) *Auth {
@@ -112,28 +106,12 @@ func New(cfg AuthConfig) *Auth {
 	if cfg.SampleLimit <= 0 {
 		cfg.SampleLimit = 10
 	}
-	// NOTE: unlike cpanel/login, New does NOT force PTR on when both enrichment
-	// flags are off — it honours exactly what it is given, which keeps unit tests
-	// free of DNS. Production defaults PTR on at the registration layer
-	// (ngmauth_register.go: PTR defaults true), so behaviour is unchanged there.
-	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
-		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
-	}
 
 	a := &Auth{cfg: cfg}
 	a.pending = make(map[string]pend)
 	a.samples = core.NewSampleRing(cfg.SampleLimit)
 	a.gate = core.NewAlertGate(cfg.Cooldown)
 	a.counts = core.NewSlidingCounter(cfg.Window, 0) // cap=0 → unbounded per-key
-
-	if cfg.UseEnrich {
-		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
-			a.enr = e
-			logging.Logf("[detectors] ngm_auth enrichment enabled (dirs=%v)", cfg.EnrichDirs)
-		} else {
-			logging.Logf("[detectors] ngm_auth enrichment unavailable; PTR only")
-		}
-	}
 	return a
 }
 
@@ -246,8 +224,8 @@ func (a *Auth) processLine(now time.Time, line string) {
 	user := strings.ToLower(strings.TrimSpace(f["user"]))
 	role := strings.ToLower(strings.TrimSpace(f["role"]))
 
-	// API-token abuse is its own bucket (role=token; may carry no user).
-	if ev == "TOKEN_FAIL" || ev == "TOKEN_IP_REJECT" {
+	// API-token brute is its own bucket (role=token; carries no meaningful user).
+	if ev == "TOKEN_FAIL" {
 		if ip != "" && ip != "-" {
 			a.bump(now, "TOKEN|ip", ip, line)
 		}
@@ -256,10 +234,12 @@ func (a *Auth) processLine(now time.Time, line string) {
 
 	// Interactive login abuse (FAIL / RATELIMIT / MFA_FAILURE).
 	if ip != "" && ip != "-" {
+		// Every failure counts toward the general per-IP threshold, so a spray
+		// mixing admin + user logins from one IP cannot hide by splitting buckets.
+		a.bump(now, "AUTHFAIL|ip", ip, line)
+		// role=admin ALSO feeds the stricter admin bucket (fires earlier).
 		if role == "admin" && a.cfg.AdminFailPerIP > 0 {
-			a.bump(now, "ADMIN|ip", ip, line) // stricter bucket, like cpanel ROOT
-		} else {
-			a.bump(now, "AUTHFAIL|ip", ip, line)
+			a.bump(now, "ADMIN|ip", ip, line)
 		}
 	}
 	if user != "" && user != "-" {
@@ -340,7 +320,7 @@ func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 
 func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 	for _, p := range a.pending {
-		limit, kindStr, baseKey := a.thresholdAndKey(p.kindKey, p.key)
+		limit, kindStr, _ := a.thresholdAndKey(p.kindKey, p.key)
 		if limit <= 0 {
 			continue
 		}
@@ -353,7 +333,6 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 			continue
 		}
 
-		displayKey := a.enrichDisplay(p.kindKey, baseKey, p.key)
 		samples := a.samples.GetAndClear(sk)
 
 		extra := map[string]string{
@@ -363,18 +342,27 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 			"mode":     a.cfg.Mode,
 			"log":      a.cfg.LogPath,
 		}
-		// Annotate the entity for the sink.
 		if strings.Contains(p.kindKey, "|ip") {
+			// IP-keyed: the section sink reads Extra["ip"] as authoritative and
+			// overwrites Key with its own (cached, timeout-bounded) PTR/ASN
+			// decoration, so the detector does NOT do reverse-DNS on the hot path.
 			extra["ip"] = p.key
 		}
 		if strings.Contains(p.kindKey, "|user") {
+			// Per-account signal (one username, possibly many source IPs).
+			// Declaring the host scope stops the sink from banning an arbitrary
+			// sample IP — and from silently dropping the alert when that IP is
+			// self/loopback/ignored: a distributed per-account attack is a notify,
+			// not a single-IP ban. A single-source attack is already covered by
+			// the AUTHFAIL|ip bucket.
 			extra["user"] = p.key
+			extra[core.ExtraIPScope] = core.IPScopeHost
 		}
 
 		out <- core.Alert{
 			When:    now,
 			Kind:    core.AlertKind(kindStr),
-			Key:     displayKey,
+			Key:     p.key, // sink overwrites this with its decorated IP for |ip alerts
 			Count:   n,
 			Samples: samples,
 			Extra:   extra,
@@ -403,61 +391,4 @@ func (a *Auth) thresholdAndKey(kindKey, rawKey string) (limit int, alertKind, ba
 	default:
 		return 0, "", rawKey
 	}
-}
-
-// -------- enrichment (same approach as ssh / cpanel) --------
-
-func (a *Auth) enrichDisplay(kindKey, baseKey, rawKey string) string {
-	if !strings.Contains(kindKey, "|ip") {
-		return baseKey
-	}
-	if !a.cfg.UseEnrich && !a.cfg.UsePTR {
-		return baseKey
-	}
-	ip := rawKey
-
-	var ptr, country, asname string
-	var asn int
-
-	if a.enr != nil && a.cfg.UseEnrich {
-		res := a.enr.Lookup(ip)
-		if res.PTR != "" {
-			ptr = strings.TrimSuffix(res.PTR, ".")
-		}
-		if res.Country != "" {
-			country = res.Country
-		}
-		if res.ASN > 0 {
-			asn = int(res.ASN)
-		}
-		if res.ASNName != "" {
-			asname = res.ASNName
-		}
-	}
-	if a.cfg.UsePTR && ptr == "" {
-		if names, _ := net.LookupAddr(ip); len(names) > 0 {
-			ptr = strings.TrimSuffix(names[0], ".")
-		}
-	}
-
-	parts := []string{ip}
-	if ptr != "" {
-		parts = append(parts, ptr)
-	}
-	if asn > 0 || country != "" || asname != "" {
-		tag := strings.TrimSpace(strings.Join([]string{
-			func() string {
-				if asn > 0 {
-					return strconv.Itoa(asn)
-				}
-				return ""
-			}(),
-			asname,
-			country,
-		}, " "))
-		if tag != "" {
-			parts = append(parts, "["+tag+"]")
-		}
-	}
-	return strings.Join(parts, " ")
 }

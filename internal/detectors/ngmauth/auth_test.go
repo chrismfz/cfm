@@ -27,14 +27,51 @@ func TestKVLineQuoteAware(t *testing.T) {
 	}
 }
 
-// TestRunOnceEventAllowlistAndBuckets drives a real file through the detector and
-// asserts: abuse events count (FAIL + RATELIMIT into the same per-IP bucket),
-// audit events are ignored (SUCCESS / CONTAINER_*), and token events land in the
-// TOKEN bucket keyed by IP.
-func TestRunOnceEventAllowlistAndBuckets(t *testing.T) {
+// runOnce writes the fixture, replays it from BOF (production tails from EOF),
+// and returns every alert emitted in one RunOnce.
+func runOnce(t *testing.T, cfg AuthConfig, lines []string) []core.Alert {
+	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "auth.log")
-	lines := []string{
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Mode, cfg.LogPath = "file", path
+	if cfg.Window == 0 {
+		cfg.Window = time.Minute
+	}
+	if cfg.Cooldown == 0 {
+		cfg.Cooldown = time.Millisecond
+	}
+	a := New(cfg)
+	a.SetName("ngm_auth")
+	ft := core.NewFileTailer(path)
+	ft.StartAtEnd = false
+	a.SetSource(ft)
+
+	out := make(chan core.Alert, 32)
+	if err := a.RunOnce(context.Background(), out); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	close(out)
+	var got []core.Alert
+	for al := range out {
+		got = append(got, al)
+	}
+	return got
+}
+
+// TestRunOnceEventAllowlistAndBuckets: abuse events count (FAIL + RATELIMIT into
+// the same per-IP bucket), audit events are ignored (SUCCESS / CONTAINER_*),
+// TOKEN_FAIL lands in the TOKEN bucket, and TOKEN_IP_REJECT is NOT counted.
+func TestRunOnceEventAllowlistAndBuckets(t *testing.T) {
+	alerts := runOnce(t, AuthConfig{
+		SampleLimit:     10,
+		AuthFailPerIP:   3,
+		AuthFailPerUser: 100, // high, so only the per-IP bucket fires (simpler assert)
+		AdminFailPerIP:  100,
+		TokenFailPerIP:  2,
+	}, []string{
 		`2026-08-05T17:30:00Z event=FAIL user="bob" ip=1.2.3.4 role=user reason=bad_password`,
 		`2026-08-05T17:30:01Z event=FAIL user="bob" ip=1.2.3.4 role=user reason=bad_password`,
 		`2026-08-05T17:30:02Z event=FAIL user="bob" ip=1.2.3.4 role=user reason=bad_password`,
@@ -42,58 +79,32 @@ func TestRunOnceEventAllowlistAndBuckets(t *testing.T) {
 		`2026-08-05T17:30:04Z event=SUCCESS user="bob" ip=1.2.3.4 role=user reason=-`,            // ignored
 		`2026-08-05T17:30:05Z event=CONTAINER_LOG_READ user="bob" ip=1.2.3.4 role=user reason=x`, // ignored
 		`2026-08-05T17:30:06Z event=TOKEN_FAIL ip=9.9.9.9 role=token reason=bad_token`,
-		`2026-08-05T17:30:07Z event=TOKEN_IP_REJECT ip=9.9.9.9 role=token reason=source_ip_not_allowed`,
-	}
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	a := New(AuthConfig{
-		Mode: "file", LogPath: path,
-		Every: time.Second, Window: time.Minute, Cooldown: time.Millisecond,
-		SampleLimit:     10,
-		AuthFailPerIP:   3,
-		AuthFailPerUser: 100, // high, so only the per-IP bucket fires (simpler assert)
-		AdminFailPerIP:  100,
-		TokenFailPerIP:  2,
-		// enrichment OFF (both) → enrichDisplay is a no-op → no DNS in tests
-		UseEnrich: false, UsePTR: false,
+		`2026-08-05T17:30:07Z event=TOKEN_FAIL ip=9.9.9.9 role=token reason=bad_token`,
+		`2026-08-05T17:30:08Z event=TOKEN_IP_REJECT ip=8.8.8.8 role=token reason=source_ip_not_allowed`, // ignored (F3)
 	})
-	a.SetName("ngm_auth")
-	ft := core.NewFileTailer(path)
-	ft.StartAtEnd = false // replay the file we just wrote (production tails from EOF)
-	a.SetSource(ft)
-
-	out := make(chan core.Alert, 16)
-	if err := a.RunOnce(context.Background(), out); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	close(out)
 
 	byKind := map[string]core.Alert{}
-	var kinds []string
-	for al := range out {
+	for _, al := range alerts {
 		byKind[string(al.Kind)] = al
-		kinds = append(kinds, string(al.Kind))
+		if al.Extra["ip"] == "8.8.8.8" {
+			t.Fatalf("TOKEN_IP_REJECT must not produce an alert (F3): %s ip=8.8.8.8", al.Kind)
+		}
 	}
 
 	af, ok := byKind["NGM/AUTHFAIL"]
 	if !ok {
-		t.Fatalf("expected NGM/AUTHFAIL; got kinds %v", kinds)
+		t.Fatalf("expected NGM/AUTHFAIL; got %d alerts %v", len(alerts), alerts)
 	}
-	if af.Extra["ip"] != "1.2.3.4" {
-		t.Fatalf("NGM/AUTHFAIL ip = %q, want 1.2.3.4", af.Extra["ip"])
-	}
-	if af.Count < 4 { // 3 FAIL + 1 RATELIMIT
-		t.Fatalf("NGM/AUTHFAIL count = %d, want >= 4 (FAIL+RATELIMIT)", af.Count)
+	if af.Extra["ip"] != "1.2.3.4" || af.Count < 4 { // 3 FAIL + 1 RATELIMIT
+		t.Fatalf("NGM/AUTHFAIL ip=%q count=%d, want 1.2.3.4 / >=4", af.Extra["ip"], af.Count)
 	}
 
 	tk, ok := byKind["NGM/TOKEN"]
 	if !ok {
-		t.Fatalf("expected NGM/TOKEN; got kinds %v", kinds)
+		t.Fatalf("expected NGM/TOKEN; got %d alerts %v", len(alerts), alerts)
 	}
 	if tk.Extra["ip"] != "9.9.9.9" {
-		t.Fatalf("NGM/TOKEN ip = %q, want 9.9.9.9", tk.Extra["ip"])
+		t.Fatalf("NGM/TOKEN ip=%q, want 9.9.9.9", tk.Extra["ip"])
 	}
 
 	if _, ok := byKind["NGM/ADMIN"]; ok {
@@ -101,36 +112,85 @@ func TestRunOnceEventAllowlistAndBuckets(t *testing.T) {
 	}
 }
 
-// TestAuditOnlyProducesNothing confirms a log of purely audit/success events
-// never fires (a new audit verb must not become a false ban).
+// TestAdminFailuresCountTowardPerIP (F1): a spray mixing role=admin and role=user
+// failures from ONE IP must not evade detection by splitting across the ADMIN|ip
+// and AUTHFAIL|ip buckets — every failure counts toward the general per-IP total.
+func TestAdminFailuresCountTowardPerIP(t *testing.T) {
+	alerts := runOnce(t, AuthConfig{
+		AuthFailPerIP:   5,   // aggregate (3 admin + 2 user) = 5 → fires
+		AuthFailPerUser: 100, // don't let a user bucket fire
+		AdminFailPerIP:  100, // don't let the admin bucket fire on its own (3 < 100)
+		TokenFailPerIP:  100,
+	}, []string{
+		`2026-08-05T19:00:00Z event=FAIL user="root" ip=7.7.7.7 role=admin reason=bad_password`,
+		`2026-08-05T19:00:01Z event=FAIL user="root" ip=7.7.7.7 role=admin reason=bad_password`,
+		`2026-08-05T19:00:02Z event=FAIL user="root" ip=7.7.7.7 role=admin reason=bad_password`,
+		`2026-08-05T19:00:03Z event=FAIL user="carol" ip=7.7.7.7 role=user reason=bad_password`,
+		`2026-08-05T19:00:04Z event=FAIL user="dave" ip=7.7.7.7 role=user reason=bad_password`,
+	})
+
+	var af *core.Alert
+	for i := range alerts {
+		if alerts[i].Kind == "NGM/AUTHFAIL" && alerts[i].Extra["ip"] == "7.7.7.7" {
+			af = &alerts[i]
+		}
+		if alerts[i].Kind == "NGM/ADMIN" {
+			t.Fatalf("NGM/ADMIN should not fire (3 admin fails < AdminFailPerIP=100)")
+		}
+	}
+	if af == nil {
+		t.Fatalf("expected NGM/AUTHFAIL for 7.7.7.7 (admin+user failures must aggregate); got %v", alerts)
+	}
+	if af.Count < 5 {
+		t.Fatalf("NGM/AUTHFAIL count=%d, want >=5 (3 admin + 2 user)", af.Count)
+	}
+}
+
+// TestUserBucketDeclaresHostScope (F2): a per-account alert (one username, many
+// source IPs) must declare ip_scope=host so the sink treats it as a notify, not
+// a ban of some arbitrary sample IP.
+func TestUserBucketDeclaresHostScope(t *testing.T) {
+	alerts := runOnce(t, AuthConfig{
+		AuthFailPerIP:   100, // no single IP reaches this
+		AuthFailPerUser: 3,   // the account does
+		AdminFailPerIP:  100,
+		TokenFailPerIP:  100,
+	}, []string{
+		`2026-08-05T20:00:00Z event=FAIL user="admin" ip=1.1.1.1 role=user reason=bad_password`,
+		`2026-08-05T20:00:01Z event=FAIL user="admin" ip=2.2.2.2 role=user reason=bad_password`,
+		`2026-08-05T20:00:02Z event=FAIL user="admin" ip=3.3.3.3 role=user reason=bad_password`,
+	})
+
+	var found bool
+	for _, al := range alerts {
+		if al.Kind == "NGM/AUTHFAIL" && al.Extra["user"] == "admin" {
+			found = true
+			if al.Extra[core.ExtraIPScope] != core.IPScopeHost {
+				t.Fatalf("per-user alert must set ip_scope=host, got %q", al.Extra[core.ExtraIPScope])
+			}
+			if al.Extra["ip"] != "" {
+				t.Fatalf("per-user alert must not carry a single ip, got %q", al.Extra["ip"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a per-user NGM/AUTHFAIL for admin; got %v", alerts)
+	}
+}
+
+// TestAuditOnlyProducesNothing confirms a log of purely audit/success events (and
+// a TOKEN_IP_REJECT) never fires (a new audit verb must not become a false ban).
 func TestAuditOnlyProducesNothing(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "auth.log")
-	lines := []string{
+	alerts := runOnce(t, AuthConfig{
+		AuthFailPerIP: 1, AuthFailPerUser: 1, AdminFailPerIP: 1, TokenFailPerIP: 1,
+	}, []string{
 		`2026-08-05T18:00:00Z event=SUCCESS user="alice" ip=5.5.5.5 role=admin reason=-`,
 		`2026-08-05T18:00:01Z event=LOGOUT user="alice" ip=5.5.5.5 role=admin reason=webmail`,
 		`2026-08-05T18:00:02Z event=MFA_SUCCESS user="alice" ip=5.5.5.5 role=admin reason=-`,
 		`2026-08-05T18:00:03Z event=DAV_HOST user="alice" ip=5.5.5.5 role=admin reason=example.com`,
-	}
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := New(AuthConfig{
-		Mode: "file", LogPath: path, Window: time.Minute, Cooldown: time.Millisecond,
-		AuthFailPerIP: 1, AuthFailPerUser: 1, AdminFailPerIP: 1, TokenFailPerIP: 1,
+		`2026-08-05T18:00:04Z event=TOKEN_IP_REJECT ip=5.5.5.5 role=token reason=source_ip_not_allowed`,
 	})
-	a.SetName("ngm_auth")
-	ft := core.NewFileTailer(path)
-	ft.StartAtEnd = false
-	a.SetSource(ft)
-
-	out := make(chan core.Alert, 8)
-	if err := a.RunOnce(context.Background(), out); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	select {
-	case al := <-out:
-		t.Fatalf("expected no alert from audit-only log, got %s key=%q", al.Kind, al.Key)
-	default:
+	if len(alerts) != 0 {
+		t.Fatalf("expected no alerts from audit-only log, got %v", alerts)
 	}
 }

@@ -1,9 +1,11 @@
 # Sketch — the `ngm_auth` detector (CFM side)
 
-> First-slice design, not merged code. Companion to `docs/ngm-integration-map.md`
-> §D. This is the smallest, lowest-risk, immediately-useful CFM slice of the NGM
-> integration: a log-tail detector for **abusive NGM control-panel logins**,
-> because NGM already writes the input file *for us*.
+> As-built reference for the first code slice (the detector shipped in
+> `internal/detectors/ngmauth/`). Companion to `docs/ngm-integration-map.md` §D.
+> The smallest, lowest-risk, immediately-useful CFM slice of the NGM integration:
+> a log-tail detector for **abusive NGM control-panel logins**, because NGM
+> already writes the input file *for us*. The code blocks below are illustrative;
+> the package is the source of truth.
 
 ## Why this one first
 
@@ -35,7 +37,8 @@ out of scope here.
 - **Count as abuse** (key on these): `FAIL` (reasons `bad_password`, `lockout`,
   `account_locked`, `reseller_suspended`, `account_suspended`,
   `bad_mailbox_login`, `session_create`), `RATELIMIT`, `MFA_FAILURE`,
-  `TOKEN_FAIL`, `TOKEN_IP_REJECT`.
+  `TOKEN_FAIL`. **`TOKEN_IP_REJECT` is deliberately excluded** — see the token
+  bullet below.
 - **Ignore** (audit/lifecycle noise): `SUCCESS`, `LOGOUT`, `MFA_REQUIRED`,
   `MFA_SUCCESS`, `MFA_ENABLE`, `MFA_DISABLE`, `DAV_*`, `CONTAINER_*`, and any
   future audit verb. Key on an **allowlist** of abuse events, not "anything not
@@ -52,8 +55,11 @@ Two events matter more than a naive "count FAIL":
   a second layer, not a duplicate. It also means raw `FAIL` volume *under-counts*
   a sustained attack (later attempts convert to `RATELIMIT`), so thresholds must
   count `RATELIMIT` too, or be set lower than an SSH/cPanel detector would use.
-- **`TOKEN_FAIL` / `TOKEN_IP_REJECT`** are API-token brute / CIDR-violation
-  events (`role=token`) — a distinct bucket from interactive login.
+- **`TOKEN_FAIL`** (bad token value, `role=token`) is API-token brute-force — its
+  own `TOKEN|ip` bucket, distinct from interactive login. **`TOKEN_IP_REJECT`** (a
+  *valid* token presented from a not-yet-allowlisted source IP) is **not** counted:
+  NGM already refused it on its own CIDR gate, and a legit token retried from a new
+  office/CI egress would otherwise self-ban that IP fleet-wide.
 
 ## Model it on `cpanel/login.go`
 
@@ -62,8 +68,11 @@ The cPanel login detector (`internal/detectors/cpanel/login.go` +
 line is key=value, not three positional regex variants). Reuse verbatim: the
 `core` window primitives (`SlidingCounter`, `AlertGate`, `SampleRing`), the
 `FileTailer` source with inode/offset resume (`State` + `FileStateKey`), the
-`PeriodicDetector`/`PositionAware` method set, and the enrichment (`enrich` +
-PTR). Only `processLine` and the thresholds differ.
+`PeriodicDetector`/`PositionAware` method set. Only `processLine` and the
+thresholds differ — and, unlike `cpanel/login`, this detector does **no** IP
+enrichment of its own: the section sink already decorates IP alerts with a
+cached, timeout-bounded PTR/ASN and overwrites the alert `Key`, so a detector-side
+`net.LookupAddr` would be redundant and an unbounded-DNS risk on the 2s tick.
 
 ### Package `internal/detectors/ngmauth/auth.go` (skeleton)
 
@@ -82,10 +91,7 @@ type AuthConfig struct {
     AuthFailPerIP   int // default 25
     AuthFailPerUser int // default 15
     AdminFailPerIP  int // default 5  — stricter for role=admin (mirrors cpanel ROOT_IP)
-    TokenFailPerIP  int // default 10 — API-token brute (TOKEN_FAIL / TOKEN_IP_REJECT)
-
-    UseEnrich, UsePTR bool
-    EnrichDirs        []string
+    TokenFailPerIP  int // default 10 — API-token brute (TOKEN_FAIL only)
 }
 
 type Auth struct {
@@ -98,7 +104,6 @@ type Auth struct {
     samples  *core.SampleRing
     gate     *core.AlertGate
     counts   *core.SlidingCounter
-    enr      *enrich.Enricher
 }
 
 // --- PeriodicDetector / PositionAware: identical to cpanel/login.go ---
@@ -116,8 +121,8 @@ func kvLine(line string) map[string]string { /* scan key="…"/key=… tokens */
 // LOGOUT, MFA_SUCCESS/ENABLE/DISABLE, DAV_*, CONTAINER_*, … — is audit noise and
 // is ignored, so a new audit verb can never become a false ban).
 var abuseEvents = map[string]bool{
-    "FAIL": true, "RATELIMIT": true, "MFA_FAILURE": true,
-    "TOKEN_FAIL": true, "TOKEN_IP_REJECT": true,
+    "FAIL": true, "RATELIMIT": true, "MFA_FAILURE": true, "TOKEN_FAIL": true,
+    // TOKEN_IP_REJECT intentionally omitted (valid token from a new IP → self-ban).
 }
 
 func (a *Auth) processLine(now time.Time, line string) {
@@ -129,16 +134,15 @@ func (a *Auth) processLine(now time.Time, line string) {
     ip, user, role := f["ip"], strings.ToLower(f["user"]), strings.ToLower(f["role"])
 
     // API-token brute is its own bucket (role=token, may have no user).
-    if ev == "TOKEN_FAIL" || ev == "TOKEN_IP_REJECT" {
+    if ev == "TOKEN_FAIL" {
         if ip != "" { a.bump(now, "TOKEN|ip", ip, line) }
         return
     }
     // Interactive login abuse (FAIL / RATELIMIT / MFA_FAILURE).
     if ip != "" {
+        a.bump(now, "AUTHFAIL|ip", ip, line)           // every failure counts to the per-IP total
         if role == "admin" && a.cfg.AdminFailPerIP > 0 {
-            a.bump(now, "ADMIN|ip", ip, line)   // stricter bucket, like cpanel ROOT
-        } else {
-            a.bump(now, "AUTHFAIL|ip", ip, line)
+            a.bump(now, "ADMIN|ip", ip, line)           // AND the stricter admin bucket (fires earlier)
         }
     }
     if user != "" && user != "-" {
@@ -163,10 +167,13 @@ func (a *Auth) thresholdAndKey(kindKey, raw string) (limit int, kind, base strin
 }
 ```
 
-`bump`, `flush`, `enrichDisplay` and the helpers are copied unchanged from
-`cpanel/login.go` (they only touch the shared `core` primitives). Alert `Extra`
-carries `ip`/`user`, `window`, `cooldown`, `limit`, `log` — same keys the sink
-already understands.
+`bump` and `flush` follow `cpanel/login.go` (they only touch the shared `core`
+primitives), with two differences: there is **no** `enrichDisplay` (IP decoration
+is the sink's job), and a per-**user** alert sets `Extra[core.ExtraIPScope] =
+core.IPScopeHost` so the sink treats it as a per-account notify rather than banning
+an arbitrary sample IP (a single-source attack is already caught by `AUTHFAIL|ip`).
+Alert `Extra` carries `ip` (IP buckets) / `user`+`ip_scope` (user bucket),
+`window`, `cooldown`, `limit`, `log` — keys the sink understands.
 
 ### Registration `internal/detectors/ngmauth_register.go`
 
@@ -194,8 +201,6 @@ func init() {
             AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 15),
             AdminFailPerIP:  kvInt(kv, "ADMIN_IP",       5),
             TokenFailPerIP:  kvInt(kv, "TOKEN_IP",      10),
-            UseEnrich: kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true)),
-            UsePTR:    kvBool(kv, "PTR",    kvBool(global, "PTR",    true)),
         }
         d := ngmauth.New(cfg)
         d.SetName(section)
@@ -222,7 +227,7 @@ LOG_PATH      = /var/log/ngm/auth.log
 AUTHFAIL_IP   = 25
 AUTHFAIL_USER = 15
 ADMIN_IP      = 5          ; stricter for role=admin
-TOKEN_IP      = 10         ; API-token brute (TOKEN_FAIL / TOKEN_IP_REJECT)
+TOKEN_IP      = 10         ; API-token brute (TOKEN_FAIL only)
 BLOCK         = dryrun     ; watch-first; flip to a TTL ban after burn-in
 ```
 
@@ -236,12 +241,13 @@ BLOCK         = dryrun     ; watch-first; flip to a TTL ban after burn-in
 - **`kvLine` must be quote-aware** — `reason="…"` can contain spaces; don't
   `strings.Fields`. NGM sanitises control chars out on the write side, so a
   hostile username can't forge a second line, but still parse defensively.
-- **Presence self-disable:** unlike cPanel's `login_log`, `/var/log/ngm/auth.log`
-  only exists on an NGM host. Follow the `srcresolve`/presence pattern
-  (`mta_presence.go` style) so the section idles cleanly on non-NGM boxes rather
-  than erroring — or simply let the `FileTailer` no-op on a missing file (it
-  already tolerates absence), and gate `ENABLED` from NGM detection
-  (`/etc/ngm/config.yaml`) in the rendered config.
+- **Presence / non-NGM hosts:** `/var/log/ngm/auth.log` only exists on an NGM
+  host. The shipped `[ngm_auth]` ships `ENABLED = 1` (consistent with `[cpanel]`,
+  `[dovecot]`, etc., which also ship enabled and idle when their log/service is
+  absent): the `FileTailer` tolerates a missing file, so each tick is a cheap
+  `Open` that fails and no-ops — no alerts, no spam. A future `srcresolve`/presence
+  gate (`mta_presence.go` style) could self-disable it at render time, but that is
+  not required for correctness.
 - **Lua/id parity, CHANGELOG, adversarial review:** this is a Go-only detector
   (no edge Lua), so no `waf_rule_ids` parity; still carries a `[Unreleased]`
   CHANGELOG entry and the pre-PR adversarial review per CLAUDE.md §3/§9.

@@ -1,7 +1,6 @@
 package detectors
 
 import (
-	"strings"
 	"time"
 
 	core "cfm/internal/detectors/core"
@@ -27,21 +26,6 @@ func init() {
 		defWindow := kvDur(global, "DEFAULT_WINDOW", 10*time.Minute)
 		defCooldown := kvDur(global, "DEFAULT_COOLDOWN", 20*time.Minute)
 
-		// Enrichment defaults (same pattern as SSH / cpanel).
-		rawDirs := kvStrClean(kv, "ENRICH_DIRS", kvStrClean(global, "ENRICH_DIRS", ""))
-		var dirs []string
-		if rawDirs != "" {
-			for _, f := range strings.FieldsFunc(rawDirs, func(r rune) bool {
-				return r == ',' || r == ':' || r == ' ' || r == '\t'
-			}) {
-				if f != "" {
-					dirs = append(dirs, f)
-				}
-			}
-		}
-		useEnrich := kvBool(kv, "ENRICH", kvBool(global, "ENRICH", true))
-		usePTR := kvBool(kv, "PTR", kvBool(global, "PTR", true))
-
 		cfg := ngmauth.AuthConfig{
 			Mode:    "file", // auth.log is a file
 			LogPath: kvStrClean(kv, "LOG_PATH", "/var/log/ngm/auth.log"),
@@ -55,10 +39,6 @@ func init() {
 			AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 15),
 			AdminFailPerIP:  kvInt(kv, "ADMIN_IP", 5), // stricter for role=admin
 			TokenFailPerIP:  kvInt(kv, "TOKEN_IP", 10),
-
-			UseEnrich:  useEnrich,
-			UsePTR:     usePTR,
-			EnrichDirs: dirs,
 		}
 
 		d := ngmauth.New(cfg)
@@ -70,8 +50,8 @@ func init() {
 			d.SetState(ngmAuthState, core.FileStateKey(section, cfg.LogPath))
 		}
 
-		logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s limits: ip=%d user=%d admin=%d token=%d enrich=%t ptr=%t dirs=%v)",
-			section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.LogPath, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.AdminFailPerIP, cfg.TokenFailPerIP, cfg.UseEnrich, cfg.UsePTR, dirs)
+		logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s log=%s limits: ip=%d user=%d admin=%d token=%d)",
+			section, cfg.Every, cfg.Window, cfg.Cooldown, cfg.LogPath, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.AdminFailPerIP, cfg.TokenFailPerIP)
 
 		return d, nil
 	})
