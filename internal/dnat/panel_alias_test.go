@@ -1,41 +1,60 @@
 package dnat
 
 import (
-	"strings"
 	"testing"
+
+	"cfm/internal/firewall"
 )
 
+// panelRouteStub counts PanelDNATStatus calls so a test can prove a CLI
+// invocation reached runPanelCLI's status path *without* capturing output.
+//
+// We deliberately avoid the captureStreams helper here: it swaps the process
+// globals os.Stdout/os.Stderr, which data-races with any unrelated background
+// goroutine that logs concurrently (e.g. a `startDNATFailSafe` runner leaked by
+// another test in this package that cancels its context but does not join the
+// goroutine before returning). Asserting on a backend side effect keeps this
+// test race-clean regardless of test ordering.
+type panelRouteStub struct {
+	firewall.Backend
+	statusCalls int
+}
+
+func (b *panelRouteStub) PanelDNATStatus() (bool, string, error) {
+	b.statusCalls++
+	return false, "", nil
+}
+func (b *panelRouteStub) PanelDNATAcceptState() map[int]string { return nil }
+
 // TestPanelAliasRoutesToPanelCLI pins that `cfm dnat panel …` is accepted as the
-// panel-neutral alias of `cfm dnat cpanel …` and routes to the same runPanelCLI.
+// panel-neutral alias of `cfm dnat cpanel …`: `panel status` must reach
+// runPanelCLI's status path (proven by the backend's PanelDNATStatus being hit).
 func TestPanelAliasRoutesToPanelCLI(t *testing.T) {
-	be := panelStatusStub{} // non-nil firewall.Backend; help path calls no methods
-
-	_, errOut := captureStreams(t, func() {
-		if code := RunCLI([]string{"panel", "help"}, be); code != 0 {
-			t.Fatalf("`dnat panel help` expected code 0, got %d", code)
-		}
-	})
-
-	// panelHelp() is what `cpanel help` prints — its presence proves the alias
-	// reached runPanelCLI rather than the web-DNAT help.
-	if !strings.Contains(errOut, "Commands: status, on, off") {
-		t.Fatalf("`dnat panel help` did not reach panel help:\n%s", errOut)
+	be := &panelRouteStub{}
+	if code := RunCLI([]string{"panel", "status"}, be); code != 0 {
+		t.Fatalf("`dnat panel status` expected code 0, got %d", code)
 	}
-	if !strings.Contains(errOut, "alias of `cfm dnat cpanel") {
-		t.Fatalf("expected the alias note in panel help:\n%s", errOut)
+	if be.statusCalls == 0 {
+		t.Fatalf("`dnat panel status` did not route to runPanelCLI (PanelDNATStatus never called)")
 	}
 }
 
-// TestCpanelSubcommandStillWorks guards that adding the alias did not break the
-// original `cpanel` spelling.
-func TestCpanelSubcommandStillWorks(t *testing.T) {
-	be := panelStatusStub{}
-	_, errOut := captureStreams(t, func() {
-		if code := RunCLI([]string{"cpanel", "help"}, be); code != 0 {
-			t.Fatalf("`dnat cpanel help` expected code 0, got %d", code)
-		}
-	})
-	if !strings.Contains(errOut, "Commands: status, on, off") {
-		t.Fatalf("`dnat cpanel help` regressed:\n%s", errOut)
+// TestPanelAndCpanelRouteEquivalently pins that the alias is a true synonym for a
+// state-reaching subcommand (status), not a partial alias — both spellings must
+// reach the same runPanelCLI status path identically.
+func TestPanelAndCpanelRouteEquivalently(t *testing.T) {
+	pb := &panelRouteStub{}
+	if code := RunCLI([]string{"panel", "status"}, pb); code != 0 {
+		t.Fatalf("`dnat panel status` expected code 0, got %d", code)
+	}
+	cb := &panelRouteStub{}
+	if code := RunCLI([]string{"cpanel", "status"}, cb); code != 0 {
+		t.Fatalf("`dnat cpanel status` expected code 0, got %d", code)
+	}
+	if pb.statusCalls == 0 {
+		t.Fatalf("`dnat panel status` did not route to runPanelCLI")
+	}
+	if cb.statusCalls != pb.statusCalls {
+		t.Fatalf("panel/cpanel status routing diverged: panel=%d cpanel=%d", pb.statusCalls, cb.statusCalls)
 	}
 }
