@@ -164,13 +164,32 @@ the status note below, not "just an NGM port entry".
 > `panel_dnat.go` already says "cPanel/DirectAdmin"). It is the natural first
 > merge.
 >
-> **Status: alias SHIPPED; NGM port-map is a deferred follow-up (scoped below).**
-> `cfm dnat panel …` is accepted as an alias of `cfm dnat cpanel …` (routing in
-> `internal/dnat/cli.go`; help text + a `panel_alias_test.go` regression guard).
-> The alias today still applies the **cPanel/DA port set** — putting NGM's panel
-> port behind the guard is **not** a one-line change to `PanelDNATMappings()`, and
-> was deliberately left out of the alias PR. The real work, in one place so the
-> next session doesn't rediscover it:
+> **Decision (2026-09-09): the NGM port-map is deferred *by choice* — do NOT
+> build it without a new reason.** The `cfm dnat panel` alias is shipped and
+> correct for cPanel/DA; putting NGM's *own* panel port behind the DNAT+challenge
+> shield is intentionally **not** being built. Rationale: cPanel DNAT exists
+> because cPanel is closed source, ~1.5M servers, and ships pre-auth
+> auth-bypass CVEs you **cannot patch** (e.g. CVE-2026-41940) — the challenge
+> gate is the only lever until the vendor moves. NGM is *our* code: a pre-auth
+> hole is a same-day patch, its pre-auth surface is small and auditable
+> (`/ui/login` with lockout + per-IP RATELIMIT + MFA/TOTP + bcrypt, the webmail
+> reset/recovery flows, DAV with its own rate-limit), and **every auth-failure
+> path already feeds CFM autoblock via the `ngm_auth` detector**. The shield's
+> only marginal gain over that is a buffer against a 0-day in our own pre-auth
+> code — real but modest, and not worth a new edge listener block + Lua
+> port-awareness + a release-checklist run in CFM's most painful area. Cheaper
+> controls we already own cover the paranoid case (bind `9601` to loopback +
+> front it through NGM's own `:443` vhost, or firewall it to known IPs).
+> **Revisit only if NGM itself ships a pre-auth CVE** that we can't fix fast
+> enough; then the build scope below is ready to execute.
+>
+> **Status: alias SHIPPED; NGM port-map deferred by choice (build scope kept
+> below as a shelf plan).** `cfm dnat panel …` is accepted as an alias of
+> `cfm dnat cpanel …` (routing in `internal/dnat/cli.go`; help text + a
+> `panel_alias_test.go` regression guard). The alias today still applies the
+> **cPanel/DA port set**; covering NGM's port is **not** a one-line change to
+> `PanelDNATMappings()`. The real work, kept here so a future revisit doesn't
+> rediscover it:
 >
 > 1. **`firewall.PanelDNATMappings()`** (`internal/firewall/panel_dnat.go`) — the
 >    nft redirect set is a static slice (`2082→12082 … 2222→12222`). Add/parameterise
