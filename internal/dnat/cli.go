@@ -345,7 +345,12 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		return 2
 	}
 
-	if sub == "cpanel" {
+	// "panel" is the panel-neutral alias of "cpanel": the underlying chain
+	// (inet cfm_panel_redirect), the Lua guard (cfm_panel.lua), the edge var
+	// ($cfm_panel_challenge_mode) and the DNAT scope are already panel-agnostic,
+	// and the shipped port map covers cPanel + DirectAdmin panel ports. (NGM
+	// panel-port coverage is a follow-up that parameterises PanelDNATMappings.)
+	if sub == "cpanel" || sub == "panel" {
 		return runPanelCLI(fs.Args(), backend)
 	}
 	if sub == "bypass" {
@@ -600,7 +605,7 @@ func help() {
 	fmt.Fprintln(os.Stderr, "  cfm dnat on               (enable web DNAT: 80/443 -> openresty)")
 	fmt.Fprintln(os.Stderr, "  cfm dnat off              (disable web DNAT)")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel ...       (manage the cPanel panel DNAT chain; see `cfm dnat cpanel help`)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat panel ...        (manage the panel DNAT chain [cPanel/DirectAdmin]; alias: `cfm dnat cpanel`; see `cfm dnat panel help`)")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  cfm dnat bypass list             (show source IPs exempted from web DNAT)")
 	fmt.Fprintln(os.Stderr, "  cfm dnat bypass add    <IP|CIDR> (exempt this source from web DNAT)")
@@ -914,6 +919,7 @@ func normalizePanelArgs(args []string) ([]string, error) {
 
 func panelHelp() {
 	fmt.Fprintln(os.Stderr, "Usage:")
+	fmt.Fprintln(os.Stderr, "  (`cfm dnat panel …` is the panel-neutral alias of `cfm dnat cpanel …` — identical behaviour)")
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel status [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99]")
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel on     [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99]")
 	fmt.Fprintln(os.Stderr, "  cfm dnat cpanel off")
