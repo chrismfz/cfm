@@ -17,7 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **dovecot detector was silently inert on normal hosts — now matches, and
+  covers ManageSieve.** Its pre-filter required a bare `dovecot:` tag, but both
+  sources it reads are syslog-framed **with the pid** — `/var/log/maillog`
+  (rsyslog) and `journalctl -o short-unix` both emit `dovecot[<pid>]:` — so it
+  matched nothing and no mail-auth brute force (imap/pop3) was ever detected. The
+  anchor is now pid-tolerant (`dovecot(\[<pid>\])?:`), which revives per-IP
+  detection for **every** dovecot login service at once, including
+  `managesieve-login` (Sieve, :4190) and `submission-login` (:587) — the same
+  line shape. Pure-scan noise (`no_auth_attempts`: connection closed / too many
+  invalid commands, never an actual password attempt) stays filtered out. Note:
+  this is a behaviour change — the detector begins alerting/blocking on real
+  mail-auth brute force where it previously did nothing; set the `[dovecot]`
+  section `BLOCK = dryrun` to watch first. (Separately discovered and left as a
+  follow-up: the per-*user* matcher `reUser` never fires either — a trailing
+  `\b` after `>` — so the `AuthFailPerUser` threshold is still inert; fixing it
+  needs a host-scope pass so a single-mailbox spray notifies rather than banning
+  an arbitrary source IP.)
 
 ## 2026.09.10
 
