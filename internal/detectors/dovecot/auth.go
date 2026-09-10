@@ -14,14 +14,13 @@ import (
 	"cfm/internal/logging"
 )
 
-
 type Config struct {
-        // source
-        Mode           string // "file" | "journal" | "docker"
-        LogPath        string
-        JournalUnit    string
-        DockerContainer string
-        DockerArgs      []string
+	// source
+	Mode            string // "file" | "journal" | "docker"
+	LogPath         string
+	JournalUnit     string
+	DockerContainer string
+	DockerArgs      []string
 	// cadence
 	Every       time.Duration
 	Window      time.Duration
@@ -68,13 +67,27 @@ type Auth struct {
 func NewAuth(cfg Config) *Auth {
 
 	// sensible defaults (Mode επιλέγεται κυρίως στο register)
-	if cfg.Mode == "" { cfg.Mode = "file" }
-	if cfg.LogPath == "" && cfg.Mode == "file" { cfg.LogPath = "/var/log/maillog" }
-	if cfg.Every <= 0 { cfg.Every = 2 * time.Second }
-	if cfg.Window <= 0 { cfg.Window = 15 * time.Minute }
-	if cfg.Cooldown <= 0 { cfg.Cooldown = 20 * time.Minute }
-	if cfg.SampleLimit <= 0 { cfg.SampleLimit = 10 }
-	if !cfg.UseEnrich && !cfg.UsePTR { cfg.UsePTR = true }
+	if cfg.Mode == "" {
+		cfg.Mode = "file"
+	}
+	if cfg.LogPath == "" && cfg.Mode == "file" {
+		cfg.LogPath = "/var/log/maillog"
+	}
+	if cfg.Every <= 0 {
+		cfg.Every = 2 * time.Second
+	}
+	if cfg.Window <= 0 {
+		cfg.Window = 15 * time.Minute
+	}
+	if cfg.Cooldown <= 0 {
+		cfg.Cooldown = 20 * time.Minute
+	}
+	if cfg.SampleLimit <= 0 {
+		cfg.SampleLimit = 10
+	}
+	if !cfg.UseEnrich && !cfg.UsePTR {
+		cfg.UsePTR = true
+	}
 	if cfg.UseEnrich && len(cfg.EnrichDirs) == 0 {
 		cfg.EnrichDirs = []string{"/etc/cfm", "/var/lib/cfm/maxmind"}
 	}
@@ -83,17 +96,30 @@ func NewAuth(cfg Config) *Auth {
 	a.pending = make(map[string]pend)
 	// core window primitives
 	a.samples = core.NewSampleRing(cfg.SampleLimit)
-	a.gate    = core.NewAlertGate(cfg.Cooldown)
-	a.counts  = core.NewSlidingCounter(cfg.Window, 0)
-	// Lines we care about (keep this fast pre-filter)
-        // Expanded to also catch:
-        //   - auth-worker(...): Password mismatch
-        //   - passwd-file(...): Password mismatch
-        //   - imap-login: ... (auth failed, N attempts)
-        //   - any "authentication failure" or "aborted login"
-        a.reQuick = regexp.MustCompile(`dovecot:.*(auth failed|authentication failure|aborted login|password mismatch)`)
+	a.gate = core.NewAlertGate(cfg.Cooldown)
+	a.counts = core.NewSlidingCounter(cfg.Window, 0)
+	// Lines we care about (keep this fast pre-filter).
+	// The `dovecot` tag is PID-tolerant (`dovecot[1234]:`), because BOTH sources
+	// we read are syslog-framed WITH the pid: /var/log/maillog (rsyslog) and
+	// `journalctl -o short-unix` both emit `dovecot[<pid>]:`. The old anchor
+	// required a bare `dovecot:` and so matched NOTHING on a normal host — the
+	// detector was silently inert. This single `[pid]`-tolerant anchor revives it
+	// for EVERY dovecot login service in one go, since they share the format:
+	//   - imap-login / pop3-login  (auth failed, N attempts) (auth_failed)
+	//   - managesieve-login (Sieve, :4190) — same line shape, now covered
+	//   - submission-login (:587)
+	//   - auth-worker(...) / passwd-file(...): Password mismatch
+	//   - any "authentication failure" or "aborted login"
+	// The pure-scan noise (Login aborted with `no_auth_attempts` — connection
+	// closed / too many invalid commands, never an actual password try) does NOT
+	// contain any of these markers, so it stays filtered out.
+	a.reQuick = regexp.MustCompile(`dovecot(\[[0-9]+\])?:.*(auth failed|authentication failure|aborted login|password mismatch)`)
 	a.reRip = regexp.MustCompile(`\brip=([0-9a-f:.]+)(?:[,\s]|$)`)
-	a.reUser  = regexp.MustCompile(`\buser=<([^>]+)>\b`)
+	// NB: no trailing \b after `>`. A real line is `user=<addr>,` and there is no
+	// word boundary between `>` and `,`, so a `>\b` anchor matched NOTHING — the
+	// per-user bucket never populated and AuthFailPerUser was inert. `>` already
+	// delimits the capture; the trailing anchor was both wrong and unnecessary.
+	a.reUser = regexp.MustCompile(`\buser=<([^>]+)>`)
 
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -107,33 +133,39 @@ func NewAuth(cfg Config) *Auth {
 }
 
 // wiring (manager/factory will set these)
-func (a *Auth) SetName(n string)             { a.name = n }
+func (a *Auth) SetName(n string)              { a.name = n }
 func (a *Auth) SetSource(src core.LineSource) { a.src = src }
 
 func (a *Auth) Name() string {
-	if a.name != "" { return a.name }
+	if a.name != "" {
+		return a.name
+	}
 	return "dovecot/auth"
 }
 func (a *Auth) Every() time.Duration {
-	if a.cfg.Every > 0 { return a.cfg.Every }
+	if a.cfg.Every > 0 {
+		return a.cfg.Every
+	}
 	return 2 * time.Second
 }
 
 // PositionAware (optional) — keep parity with ssh detector
 func (a *Auth) ApplyPosition(p core.Position) {
-        if ft, ok := a.src.(*core.FileTailer); ok {
-                ft.ApplyResume(p.Inode, p.Offset)
-        }
-        if jt, ok := a.src.(*core.JournalTailer); ok {
-                jt.ApplyResume(0, 0, p.TS)
-        }
-        if dt, ok := a.src.(*core.DockerTailer); ok {
-                dt.ApplyResume(0, 0, p.TS)
-        }
+	if ft, ok := a.src.(*core.FileTailer); ok {
+		ft.ApplyResume(p.Inode, p.Offset)
+	}
+	if jt, ok := a.src.(*core.JournalTailer); ok {
+		jt.ApplyResume(0, 0, p.TS)
+	}
+	if dt, ok := a.src.(*core.DockerTailer); ok {
+		dt.ApplyResume(0, 0, p.TS)
+	}
 
 }
 func (a *Auth) Position() core.Position {
-	if a.src == nil { return core.Position{} }
+	if a.src == nil {
+		return core.Position{}
+	}
 	off, ino, ts := a.src.Position()
 	return core.Position{Offset: off, Inode: ino, TS: ts}
 }
@@ -141,12 +173,12 @@ func (a *Auth) Position() core.Position {
 // State wiring
 func (a *Auth) SetState(st *core.State, key string) { a.state = st; a.stateKey = key }
 
-
-
 // ---------- run loop ----------
 func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// reset pending map
-	for k := range a.pending { delete(a.pending, k) }
+	for k := range a.pending {
+		delete(a.pending, k)
+	}
 
 	if a.src == nil {
 		// source is wired by the factory; if nil, nothing to do
@@ -193,49 +225,46 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 }
 
 func (a *Auth) processLine(now time.Time, line string) {
-    ll := strings.ToLower(line)
-    if !a.reQuick.MatchString(ll) { return }
+	ll := strings.ToLower(line)
+	if !a.reQuick.MatchString(ll) {
+		return
+	}
 
-
-
-    // Ignore pure noise:
-    // e.g. "Aborted login by logging out (no auth attempts in 0 secs)"
-    if strings.Contains(ll, "no auth attempts in 0 secs") {
-        return
-    }
-
-
+	// Ignore pure noise:
+	// e.g. "Aborted login by logging out (no auth attempts in 0 secs)"
+	if strings.Contains(ll, "no auth attempts in 0 secs") {
+		return
+	}
 
 	// ip
-    ipStr := ""
-    if m := a.reRip.FindStringSubmatch(ll); m != nil && m[1] != "" {
-        ipStr = m[1]
-    } else {
-        ipStr = firstIPInLine(ll)
-    }
-    if ipStr != "" {
-        if ip := net.ParseIP(ipStr); ip != nil {
-            if v4 := ip.To4(); v4 != nil {
-                a.bump(now, "AUTHFAIL|ip", v4.String(), line)
-            } else {
-                a.bump(now, "AUTHFAIL|ip", ip.String(), line)
-            }
-        }
-    }
+	ipStr := ""
+	if m := a.reRip.FindStringSubmatch(ll); m != nil && m[1] != "" {
+		ipStr = m[1]
+	} else {
+		ipStr = firstIPInLine(ll)
+	}
+	if ipStr != "" {
+		if ip := net.ParseIP(ipStr); ip != nil {
+			if v4 := ip.To4(); v4 != nil {
+				a.bump(now, "AUTHFAIL|ip", v4.String(), line)
+			} else {
+				a.bump(now, "AUTHFAIL|ip", ip.String(), line)
+			}
+		}
+	}
 
-// user
-    if m := a.reUser.FindStringSubmatch(ll); m != nil {
-        for i := 1; i < len(m); i++ {
-            if m[i] != "" {
-                // already lowercased from ll
-                a.bump(now, "AUTHFAIL|user", m[i], line)
-                break
-            }
-        }
-    }
+	// user
+	if m := a.reUser.FindStringSubmatch(ll); m != nil {
+		for i := 1; i < len(m); i++ {
+			if m[i] != "" {
+				// already lowercased from ll
+				a.bump(now, "AUTHFAIL|user", m[i], line)
+				break
+			}
+		}
+	}
 
 }
-
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 	sk := kindKey + ":" + key
@@ -251,10 +280,16 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 
 	for sk, p := range a.pending {
 		limit, kindStr, baseKey := a.thresholdAndKey(p.kindKey, p.key)
-		if limit <= 0 { continue }
+		if limit <= 0 {
+			continue
+		}
 		n := a.counts.Count(sk, now)
-		if n < limit { continue }
-		if !a.gate.Allow(sk, now, n, limit) { continue }
+		if n < limit {
+			continue
+		}
+		if !a.gate.Allow(sk, now, n, limit) {
+			continue
+		}
 
 		displayKey := a.enrichDisplay(p.kindKey, baseKey, p.key)
 
@@ -265,19 +300,24 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 			"limit":    strconv.Itoa(limit),
 			"mode":     a.cfg.Mode,
 		}
-		// help the sink pick an IP when alert is per-user
 		if strings.Contains(p.kindKey, "|ip") {
 			extra["ip"] = p.key
+		} else {
+			// A per-USER finding (one mailbox sprayed) is HOST-scoped: the samples
+			// can span many source IPs, so the sink must NOT ban an arbitrary one —
+			// it notifies instead. Same stance as the ngm_auth user bucket
+			// (autoblock_sink honours Extra["ip_scope"]="host").
+			extra[core.ExtraIPScope] = core.IPScopeHost
 		}
 
-                switch strings.ToLower(a.cfg.Mode) {
-                case "file":
-                        extra["log"] = a.cfg.LogPath
-                case "docker":
-                        extra["container"] = a.cfg.DockerContainer
-                default:
-                        extra["unit"] = a.cfg.JournalUnit
-                }
+		switch strings.ToLower(a.cfg.Mode) {
+		case "file":
+			extra["log"] = a.cfg.LogPath
+		case "docker":
+			extra["container"] = a.cfg.DockerContainer
+		default:
+			extra["unit"] = a.cfg.JournalUnit
+		}
 
 		out <- core.Alert{
 			When:    now,
@@ -303,30 +343,28 @@ func (a *Auth) thresholdAndKey(kindKey, rawKey string) (limit int, alertKind, ba
 
 // ---------- helper: first valid IP in line (IPv4 or IPv6) ----------
 func firstIPInLine(s string) string {
-    // split tokens on non-IP chars
-    f := func(r rune) bool {
-        if r == '.' || r == ':' {
-            return false
-        }
-        if (r >= '0' && r <= '9') || (r|32 >= 'a' && r|32 <= 'f') {
-            return false
-        }
-        return true
-    }
+	// split tokens on non-IP chars
+	f := func(r rune) bool {
+		if r == '.' || r == ':' {
+			return false
+		}
+		if (r >= '0' && r <= '9') || (r|32 >= 'a' && r|32 <= 'f') {
+			return false
+		}
+		return true
+	}
 
-    toks := strings.FieldsFunc(s, f)
-    for _, tok := range toks {
-        if ip := net.ParseIP(tok); ip != nil {
-            if v4 := ip.To4(); v4 != nil {
-                return v4.String()
-            }
-            return ip.String()
-        }
-    }
-    return ""
+	toks := strings.FieldsFunc(s, f)
+	for _, tok := range toks {
+		if ip := net.ParseIP(tok); ip != nil {
+			if v4 := ip.To4(); v4 != nil {
+				return v4.String()
+			}
+			return ip.String()
+		}
+	}
+	return ""
 }
-
-
 
 // ---------- enrichment (only for IP keys) ----------
 func (a *Auth) enrichDisplay(kindKey, baseKey, rawKey string) string {
@@ -368,7 +406,12 @@ func (a *Auth) enrichDisplay(kindKey, baseKey, rawKey string) string {
 	}
 	if asn > 0 || country != "" || asname != "" {
 		tag := strings.TrimSpace(strings.Join([]string{
-			func() string { if asn > 0 { return strconv.Itoa(asn) } ; return "" }(),
+			func() string {
+				if asn > 0 {
+					return strconv.Itoa(asn)
+				}
+				return ""
+			}(),
 			asname,
 			country,
 		}, " "))
