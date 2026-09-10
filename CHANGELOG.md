@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.10
+
 ### Added
 - **`ngm_auth` detector — abusive NGM control-panel login detection.** New
   log-tail detector (`internal/detectors/ngmauth/`) for the NGM hosting panel's
