@@ -3,6 +3,8 @@ package dovecot
 import (
 	"testing"
 	"time"
+
+	core "cfm/internal/detectors/core"
 )
 
 // TestProcessLineSyslogFramedLoginServices locks the pre-filter against the
@@ -41,25 +43,69 @@ func TestProcessLineSyslogFramedLoginServices(t *testing.T) {
 	}
 }
 
-// TestProcessLineExtractsIP confirms a real failure produces the per-IP bucket
-// keyed on the rip= field — the primary, unambiguous abuse signal (an IP doing
-// many auth failures). This is what the PID-anchor fix revives for managesieve.
-//
-// NOTE: the per-USER bucket (AuthFailPerUser) is a SEPARATE, still-broken matter
-// — `reUser` ends with `>\b`, and a real line is `user=<addr>,`, where there is
-// no word boundary between `>` and `,`, so it never fires. Fixing that safely
-// needs a host-scope pass (a single-mailbox spray from many IPs must notify, not
-// ban an arbitrary sample IP), so it is deliberately a follow-up, not this PR.
-func TestProcessLineExtractsIP(t *testing.T) {
+// TestProcessLineExtractsIPAndUser confirms a real failure produces BOTH buckets:
+// per-IP keyed on rip= (the primary, unambiguous abuse signal) and per-user keyed
+// on the attempted mailbox (reUser no longer dies on the `user=<addr>,` shape).
+func TestProcessLineExtractsIPAndUser(t *testing.T) {
 	a := NewAuth(Config{Mode: "file"})
 	a.processLine(time.Now(), `Sep 10 17:14:04 ngm dovecot[2241633]: managesieve-login: Login aborted: Logged out (auth failed, 1 attempts in 2 secs) (auth_failed): user=<bogus@invalid.example>, method=PLAIN, rip=203.0.113.7, lip=127.0.0.1, TLS`)
-	var haveIP bool
+	var haveIP, haveUser bool
 	for _, p := range a.pending {
-		if p.kindKey == "AUTHFAIL|ip" && p.key == "203.0.113.7" {
+		switch {
+		case p.kindKey == "AUTHFAIL|ip" && p.key == "203.0.113.7":
 			haveIP = true
+		case p.kindKey == "AUTHFAIL|user" && p.key == "bogus@invalid.example":
+			haveUser = true
 		}
 	}
 	if !haveIP {
 		t.Errorf("expected AUTHFAIL|ip keyed on rip=203.0.113.7, pending=%v", a.pending)
+	}
+	if !haveUser {
+		t.Errorf("expected AUTHFAIL|user keyed on the attempted mailbox, pending=%v", a.pending)
+	}
+}
+
+// TestAlertScopes locks the enforcement stance: a per-IP finding carries the IP
+// (the sink bans it), while a per-USER finding is HOST-scoped (ip_scope=host) so
+// the sink notifies instead of banning an arbitrary source IP from a spray.
+func TestAlertScopes(t *testing.T) {
+	line := `Sep 10 17:14:04 ngm dovecot[2241633]: managesieve-login: Login aborted: Logged out (auth failed, 1 attempts in 2 secs) (auth_failed): user=<bogus@invalid.example>, method=PLAIN, rip=203.0.113.7, lip=127.0.0.1, TLS`
+
+	// Per-IP alert: has the ip, is NOT host-scoped (→ bannable).
+	ipOnly := NewAuth(Config{Mode: "file", AuthFailPerIP: 1, AuthFailPerUser: 0})
+	ipOnly.processLine(time.Now(), line)
+	ipCh := make(chan core.Alert, 4)
+	ipOnly.flush(time.Now(), ipCh)
+	close(ipCh)
+	gotIP := false
+	for a := range ipCh {
+		gotIP = true
+		if a.Extra[core.ExtraIPScope] == core.IPScopeHost {
+			t.Errorf("per-IP alert must NOT be host-scoped (must remain bannable), extra=%v", a.Extra)
+		}
+		if a.Extra["ip"] != "203.0.113.7" {
+			t.Errorf("per-IP alert should carry the source IP, extra=%v", a.Extra)
+		}
+	}
+	if !gotIP {
+		t.Fatal("expected a per-IP alert at threshold 1")
+	}
+
+	// Per-user alert: host-scoped (→ notify, no arbitrary ban).
+	userOnly := NewAuth(Config{Mode: "file", AuthFailPerIP: 0, AuthFailPerUser: 1})
+	userOnly.processLine(time.Now(), line)
+	uCh := make(chan core.Alert, 4)
+	userOnly.flush(time.Now(), uCh)
+	close(uCh)
+	gotUser := false
+	for a := range uCh {
+		gotUser = true
+		if a.Extra[core.ExtraIPScope] != core.IPScopeHost {
+			t.Errorf("per-user alert must be host-scoped (ip_scope=host), extra=%v", a.Extra)
+		}
+	}
+	if !gotUser {
+		t.Fatal("expected a per-user alert at threshold 1")
 	}
 }

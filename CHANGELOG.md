@@ -30,11 +30,14 @@ back-filled here — see the git/PR history for that period.
   invalid commands, never an actual password attempt) stays filtered out. Note:
   this is a behaviour change — the detector begins alerting/blocking on real
   mail-auth brute force where it previously did nothing; set the `[dovecot]`
-  section `BLOCK = dryrun` to watch first. (Separately discovered and left as a
-  follow-up: the per-*user* matcher `reUser` never fires either — a trailing
-  `\b` after `>` — so the `AuthFailPerUser` threshold is still inert; fixing it
-  needs a host-scope pass so a single-mailbox spray notifies rather than banning
-  an arbitrary source IP.)
+  section `BLOCK = dryrun` to watch first.
+- **dovecot per-*user* matcher was also dead — now works, host-scoped.** `reUser`
+  ended with `>\b`, but a real line is `user=<addr>,` (no word boundary between
+  `>` and `,`), so it never matched and the `AuthFailPerUser` threshold was inert
+  too. Dropped the bad anchor. A per-user finding (one mailbox sprayed from many
+  IPs) is now emitted **host-scoped** (`ip_scope=host`), so the autoblock sink
+  **notifies** rather than banning an arbitrary source IP — the same stance as
+  the `ngm_auth` user bucket. Per-IP findings stay bannable.
 
 ## 2026.09.10
 

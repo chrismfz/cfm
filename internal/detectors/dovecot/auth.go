@@ -115,7 +115,11 @@ func NewAuth(cfg Config) *Auth {
 	// contain any of these markers, so it stays filtered out.
 	a.reQuick = regexp.MustCompile(`dovecot(\[[0-9]+\])?:.*(auth failed|authentication failure|aborted login|password mismatch)`)
 	a.reRip = regexp.MustCompile(`\brip=([0-9a-f:.]+)(?:[,\s]|$)`)
-	a.reUser = regexp.MustCompile(`\buser=<([^>]+)>\b`)
+	// NB: no trailing \b after `>`. A real line is `user=<addr>,` and there is no
+	// word boundary between `>` and `,`, so a `>\b` anchor matched NOTHING — the
+	// per-user bucket never populated and AuthFailPerUser was inert. `>` already
+	// delimits the capture; the trailing anchor was both wrong and unnecessary.
+	a.reUser = regexp.MustCompile(`\buser=<([^>]+)>`)
 
 	if cfg.UseEnrich {
 		if e, _ := enrich.New(cfg.EnrichDirs...); e != nil {
@@ -296,9 +300,14 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 			"limit":    strconv.Itoa(limit),
 			"mode":     a.cfg.Mode,
 		}
-		// help the sink pick an IP when alert is per-user
 		if strings.Contains(p.kindKey, "|ip") {
 			extra["ip"] = p.key
+		} else {
+			// A per-USER finding (one mailbox sprayed) is HOST-scoped: the samples
+			// can span many source IPs, so the sink must NOT ban an arbitrary one —
+			// it notifies instead. Same stance as the ngm_auth user bucket
+			// (autoblock_sink honours Extra["ip_scope"]="host").
+			extra[core.ExtraIPScope] = core.IPScopeHost
 		}
 
 		switch strings.ToLower(a.cfg.Mode) {
