@@ -401,6 +401,31 @@ test("block_probe_paths: one ENABLED block on the probe list, extras appended, /
   assert.equal(simulateInputFromRule(rules[0]).path, "/.env");
 });
 
+test("k2_download_clearance: one disabled challenge on the K2 download path; glob catches the real URLs, not listings", () => {
+  const rcp = recipe("k2_download_clearance");
+  const rules = rcp.build({ vhosts: "seeg.example.gr" });
+  assert.equal(rules.length, 1);
+  const r = rules[0];
+  assert.equal(r.enabled, false, "created disabled — validate first");
+  assert.equal(r.action.type, "challenge", "default is the clearance-cookie challenge, not block");
+  assert.deepEqual(r.match.path_any, ["/*/item/download/*"]);
+  assert.deepEqual(r.match.methods, ["GET"]);
+  assert.deepEqual(r.match.ua_any, [], "gated by clearance cookie, never by (forgeable) UA");
+  assert.deepEqual(r.scope.vhosts, ["seeg.example.gr"]);
+  assert.equal(recipeOf(r), "k2_download_clearance");
+  // block variant for zero-tolerance operators
+  const blk = rcp.build({ vhosts: "a.gr", action: "block" });
+  assert.equal(blk[0].action.type, "block");
+  assert.ok(blk[0].priority > rules[0].priority, "block runs after the softer challenge band");
+  // the glob catches the real K2 download URLs (both /index.php/<cat>/… shapes and SEF), not the listing pages
+  const P = "/*/item/download/*";
+  assert.ok(pathPatternMatches(P, "/index.php/news/item/download/114_a220cad04b9e771c8c780a4a3a8dd795"), "category download");
+  assert.ok(pathPatternMatches(P, "/index.php/bg/2022-07-07-19-33-45/item/download/17_5966bb91e0164014bd3c6fc05f9095bb"), "multi-segment category ('*' crosses '/')");
+  assert.ok(pathPatternMatches(P, "/news/item/download/93_5ed4a61ac3ac621ee85fb3fee370e5f1"), "SEF URL without /index.php");
+  assert.ok(!pathPatternMatches(P, "/index.php/communication-material"), "a K2 listing page is not a download");
+  assert.ok(!pathPatternMatches(P, "/index.php/news"), "a normal article is not gated");
+});
+
 test("bots_read_only: no verified allow, one write-method block per group, search/scripts/empty start disabled", () => {
   const rcp = recipe("bots_read_only");
   const rules = rcp.build({ vhosts: "a.com", groups: "" });

@@ -1,0 +1,15 @@
+{
+  "enabled": false,
+  "priority": 240,
+  "scope": {
+    "vhosts": ["seeg.example.com"]
+  },
+  "match": {
+    "path_any": ["/*/item/download/*"],
+    "methods": ["GET"]
+  },
+  "action": {
+    "type": "challenge"
+  },
+  "note": "Gate Joomla/K2 file downloads (/index.php/<category>/item/download/<id>_<hash>) behind the clearance-cookie challenge. A visitor who solved the challenge once downloads freely; an uncleared one-shot scraper gets the challenge instead of the multi-MB file. Starts disabled - set your vhost(s) (or [\"*\"] for the whole server, admin only) and run the simulator with a real /item/download/ URL, then enable. Swap action.type to \"block\" (priority 306) for zero tolerance, accepting that an uncleared human hitting a download link cold gets a 403."
+}
