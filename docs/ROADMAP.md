@@ -201,6 +201,15 @@ alone; NAT-aware.
   per-vhost dominance + `solves_per_ip` pre-gate (the two guards that keep a
   global-audience browser out where cross-host loses per-vhost country
   clustering). Grounded, shadow-first: `docs/solver-farm-cross-host-phase2.md`.
+- **Fleet-shared fingerprint reputation (cfm-web)** — [idea]. A `fingerprints`
+  model in `cfm-web` that shares *convicted* client fingerprints (TLS `c28caa00`
+  + later JA4H) across the fleet with proof — the concentration detector produces
+  the verdict, cfm-web propagates it (like the existing `check_ip` IP blocklist),
+  a node acts on the first hit. Fingerprints beat IPs here (stable vs ephemeral);
+  the load-bearing risk is that a fingerprint is a *population* not an individual,
+  so shared action is `challenge` (self-targeting) not `block`, concentration-proof
+  only, soft TTL, ≥K-node corroboration, `ALLOW_FPS` override. Post-burn-in; cfm-web
+  repo not touched yet. Note: `docs/fleet-fingerprint-reputation.md`.
 - **Webtop visibility for the per-IP / edge-log shadow signals** — [post-burn-in].
   `challenge_score` (per-IP) and `cfm_pcw` (edge error log) don't map to the
   existing per-vhost webtop pills or the WAF-history analytics, so they're
