@@ -40,6 +40,19 @@ back-filled here — see the git/PR history for that period.
   ports, so `panel` now works everywhere `cpanel` does (both spellings route to
   the same handler; help text documents the alias). NGM panel-port coverage
   (parameterising the port map beyond the cPanel/DA set) is a follow-up.
+- **Traffic-rule recipe "Gate K2 file downloads behind the challenge"
+  (`k2_download_clearance`).** Joomla/K2 media downloads
+  (`/index.php/<category>/item/download/<id>_<hash>`) are multi-MB files a
+  distributed scraper pulls one-file-per-IP, turning a 100–200 MB/day site into
+  GBs — and because the scraper is one-shot per IP it never trips the per-IP
+  challenge, so each request is served the full file. The recipe puts one rule on
+  the download path: a visitor holding the clearance cookie (solved one challenge
+  anywhere on the vhost) downloads freely; an uncleared one-shot client gets the
+  challenge instead of the file. The **clearance cookie — not the User-Agent or
+  Referer, both forgeable — is the gate**, so it can't be spoofed. Created
+  DISABLED, per-vhost by default (scope to `*` admin-only after a clean simulator
+  run), with an `action` toggle for `block` instead of `challenge`
+  (`rules-model.js`; example `docs/examples/traffic-rule-k2-download-clearance.json`).
 
 ### Fixed
 - **DNAT fail-safe runner goroutine is now joinable — clears a `go test -race`

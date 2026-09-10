@@ -1102,6 +1102,23 @@ export const RECIPES = Object.freeze([
     },
   },
   {
+    key: "k2_download_clearance",
+    kind: "single",
+    title: "Gate K2 file downloads behind the challenge",
+    description: "Joomla/K2 media downloads (/index.php/<category>/item/download/<id>_<hash>) are large files (seen 2–6 MB each) that a distributed scraper pulls one-file-per-IP, turning a 100–200 MB/day site into GBs. One rule on the download path: a visitor who solved the challenge once (holds the clearance cookie) downloads freely; an uncleared one-shot client gets the challenge instead of the file. The clearance cookie — not the User-Agent or Referer, both forgeable — is the gate, so a scraper cannot spoof its way past.",
+    vars: [VAR_VHOSTS, { key: "action", label: "Uncleared clients get", type: "select", options: ["challenge", "block"], default: "challenge" }],
+    warnings: [
+      "Created DISABLED; set the vhost(s) and run the simulator with a real /item/download/ URL of the site, then enable.",
+      "Non-browser download consumers cannot solve a challenge: RSS / podcast enclosures, mobile apps, email direct-links and API / aggregators that fetch a download URL have no browser to pass it. Keep it per-vhost until a simulator / shadow run on the site is clean; scope to * (admin) for the whole server only after that.",
+      "A clearance cookie is earned by solving one challenge anywhere on the vhost, so a human who browsed to the file already holds it — only direct-to-file clients are gated.",
+      "block is harsher than challenge: an uncleared human hitting a download link cold (e.g. straight from a search result) gets a 403 with no way to earn the cookie on this path. Prefer challenge unless you accept that.",
+    ],
+    build(vars) {
+      const act = vars?.action === "block" ? "block" : "challenge";
+      return [rule("k2_download_clearance", { enabled: false, priority: act === "block" ? 306 : 240, vhosts: vhostsVar(vars), match: { path_any: ["/*/item/download/*"], methods: ["GET"] }, action: { type: act }, text: `${act} K2 file downloads (/item/download/) from clients without a clearance cookie` })];
+    },
+  },
+  {
     key: "bots_read_only",
     kind: "multi",
     title: "Crawlers are read-only",
