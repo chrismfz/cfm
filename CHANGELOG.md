@@ -63,6 +63,19 @@ back-filled here — see the git/PR history for that period.
   sparse. Applies to every track.
 
 ### Fixed
+- **Solver-farm `detection_history` finding carried a scope-mismatched subnet
+  count.** The persisted `solver_farm` evidence set `distinct_subnets` to the
+  whole-vhost subnet total for every track, while `distinct_countries` was
+  fingerprint-scoped — so the two fields described different populations for the
+  same fingerprint: a cross-host finding could record `distinct_subnets` (this
+  vhost's thin slice) *below* `distinct_countries` (the fp's node-wide spread),
+  which is impossible for one set of solvers, and a per-host finding over-counted
+  `/24s` by including the vhost's non-fingerprint traffic. Each track now reports
+  the spread at its own scope: cross-host carries the fp's **node-wide**
+  ips/subnets/countries (its true footprint — a new `distinct_ips` node-wide count
+  is surfaced too), per-host carries the fp's on-vhost subnet count. The evidence
+  now always satisfies `countries ≤ subnets ≤ ips`. This corrects the numbers the
+  fleet fingerprint-reputation store (cfm-web) ingests and derives verdicts from.
 - **`docs/examples/traffic-rule-k2-download-clearance.json` had a `note` over the
   256-byte limit** (`rules/add` would have rejected it, and
   `TestTrafficRuleExamplesNormalize` failed) — shortened to a valid length. No

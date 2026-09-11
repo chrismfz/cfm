@@ -1018,8 +1018,14 @@ func TestFindingSinkFiresWithEvidence(t *testing.T) {
 	if f.Tracks != "fp_concentration" {
 		t.Errorf("Tracks=%q, want fp_concentration", f.Tracks)
 	}
+	// Subnets is the fp's own /24 count on this vhost (loFPSubs), matching the
+	// fp's country count — not the vhost-wide subnet total.
 	if f.Subnets != 12 || f.Countries != 12 {
 		t.Errorf("subnets=%d countries=%d, want 12 / 12", f.Subnets, f.Countries)
+	}
+	if !(f.Countries <= f.Subnets && f.Subnets <= f.DistinctIPs) {
+		t.Errorf("finding countries=%d subnets=%d ips=%d must satisfy countries<=subnets<=ips",
+			f.Countries, f.Subnets, f.DistinctIPs)
 	}
 	if f.Solves != 12 || f.Hosts != 1 {
 		t.Errorf("Solves=%d Hosts=%d, want 12 / 1 (per-host finding)", f.Solves, f.Hosts)
@@ -1062,5 +1068,17 @@ func TestFindingSinkFiresEvenWhenLogOnly(t *testing.T) {
 	}
 	if f.HostShare == 0 {
 		t.Errorf("cross-host finding HostShare=0, want the per-vhost dominance carried as evidence")
+	}
+	// The spread must be the fp's NODE-WIDE footprint (6 vhosts × 6 /24s = 36),
+	// not this one vhost's slice (6) — otherwise distinct_subnets would be a
+	// thin-per-vhost number while distinct_countries is node-wide, and the two
+	// would describe different populations in the same fleet-store row.
+	if f.Subnets < 30 {
+		t.Errorf("cross-host finding Subnets=%d, want the node-wide fp subnet spread (>=30), not this vhost's slice", f.Subnets)
+	}
+	// Evidence integrity: one set of solvers satisfies countries ≤ subnets ≤ ips.
+	if !(f.Countries <= f.Subnets && f.Subnets <= f.DistinctIPs) {
+		t.Errorf("cross-host finding countries=%d subnets=%d ips=%d must satisfy countries<=subnets<=ips",
+			f.Countries, f.Subnets, f.DistinctIPs)
 	}
 }

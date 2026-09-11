@@ -114,7 +114,10 @@ node   → PERSIST   the challenge_solver_farm FINDING to the durable
                    preferred over the per-host top_fp), tracks, solves,
                    distinct_ips, distinct_subnets, distinct_countries,
                    host_share, solves_per_ip, hosts. host is the row's host
-                   column; distinct_ips is also the row's uniq_ip.
+                   column. ips/subnets/countries describe the FINGERPRINT's own
+                   spread (cross-host: node-wide across the dominated vhosts;
+                   per-host: the fp on that vhost) so they always satisfy
+                   countries≤subnets≤ips — not the vhost-wide totals.
 cfm-web ← PULL     that source via the fleet_ingest_cursors / NodeHardFaultIngestor
                    pattern (a new `source` value; no new node API)
 ...        (cfm-web aggregates → reputation record + policy; see its doc)
