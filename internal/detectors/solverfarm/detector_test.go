@@ -552,6 +552,44 @@ func TestFarmHookFiresThroughTheAlertCooldown(t *testing.T) {
 	}
 }
 
+// The fingerprint hook fires with the CONVICTING fingerprint — the fingerprint-
+// anchored spine the per-IP challenge score reads — on the same over-threshold
+// cadence as the vhost hook.
+func TestFarmFPHookFiresWithConvictingFingerprint(t *testing.T) {
+	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6})
+	h.d.countryFn = ipCountry
+	var fps []string
+	h.d.SetFarmFPHook(func(fp string, ttl time.Duration) { fps = append(fps, fp) })
+
+	for i := 0; i < 12; i++ {
+		h.solveFP("techking.example", fmt.Sprintf("203.0.%d.1", i),
+			fmt.Sprintf("Mozilla/5.0 Chrome/%d.0.0.0 Safari/537.36", 135+i%15), "c28caa00")
+	}
+	if alerts := h.run(t); len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1", len(alerts))
+	}
+	if len(fps) != 1 || fps[0] != "c28caa00" {
+		t.Fatalf("fp hook fired %v, want [c28caa00]", fps)
+	}
+}
+
+// A subnet-spread-only farm carries NO fingerprint, so it marks the vhost but not
+// a fingerprint — there is nothing to convict at the client-fingerprint grain.
+func TestFarmFPHookSilentWithoutFingerprint(t *testing.T) {
+	h := newHarness(t, Config{MinSubnets: 40, MinSolves: 40})
+	vhostMarks, fpMarks := 0, 0
+	h.d.SetFarmHook(func(string, time.Duration) { vhostMarks++ })
+	h.d.SetFarmFPHook(func(string, time.Duration) { fpMarks++ })
+
+	h.farmBurst("flood.example", 80, func(int) string { return chromeUA })
+	if alerts := h.run(t); len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1", len(alerts))
+	}
+	if vhostMarks != 1 || fpMarks != 0 {
+		t.Fatalf("vhostMarks=%d fpMarks=%d, want 1/0 (subnet-spread carries no fingerprint)", vhostMarks, fpMarks)
+	}
+}
+
 // Below threshold there is nothing to badge.
 func TestFarmHookSilentBelowThreshold(t *testing.T) {
 	h := newHarness(t, Config{MinSubnets: 40, MinSolves: 40})

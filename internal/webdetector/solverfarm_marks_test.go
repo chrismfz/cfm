@@ -156,3 +156,32 @@ func TestPackageLevelMarkAndDecorate(t *testing.T) {
 		t.Errorf("suspicious rows decorated wrong: %v / %v", susp[0].SolverFarm, susp[1].SolverFarm)
 	}
 }
+
+// The fingerprint-level marks are a separate instance of the same TTL store, so
+// they don't collide with the vhost marks, and ResetSolverFarmMarks clears both.
+func TestPackageLevelFingerprintMark(t *testing.T) {
+	ResetSolverFarmMarks()
+	t.Cleanup(ResetSolverFarmMarks)
+
+	MarkSolverFarmFingerprint("c28caa00", time.Hour)
+	if !IsSolverFarmFingerprint("c28caa00") {
+		t.Fatal("IsSolverFarmFingerprint = false right after MarkSolverFarmFingerprint")
+	}
+	if IsSolverFarmFingerprint("deadbeef") {
+		t.Fatal("an unmarked fingerprint reported as convicted")
+	}
+	// The fingerprint and vhost stores are independent — a fingerprint mark is not
+	// a vhost mark and vice-versa.
+	if IsSolverFarm("c28caa00") {
+		t.Error("fingerprint mark leaked into the vhost store")
+	}
+	MarkSolverFarm("farmed.example.com", time.Hour)
+	if IsSolverFarmFingerprint("farmed.example.com") {
+		t.Error("vhost mark leaked into the fingerprint store")
+	}
+	// One reset clears both.
+	ResetSolverFarmMarks()
+	if IsSolverFarmFingerprint("c28caa00") || IsSolverFarm("farmed.example.com") {
+		t.Fatal("ResetSolverFarmMarks left a mark behind")
+	}
+}

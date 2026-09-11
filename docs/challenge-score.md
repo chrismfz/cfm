@@ -198,6 +198,18 @@ shared with the vhost lane:
     row, +40, canonical-host collapsed) and edge issuance cadence — the only
     volume-shaped tells that genuinely discriminate a re-solving headless from a
     busy NAT.
+  - **Stage 1a+ — DONE (fingerprint-anchored spine, shadow).** B3's first slice
+    (`docs/traffic-classifier.md` § "Third grain"): the solver-farm detector now
+    marks the CONVICTING fingerprint (`MarkSolverFarmFingerprint`, the fingerprint
+    twin of the vhost farm mark), and `challenge_score` opens on
+    `IsSolverFarmFingerprint(solve.TLSFP)` as the **dominant spine tell**
+    (`chalScoreWFarmFP`, weighted above the vhost-farm and UA-lie tells) — so a
+    client repeatedly solving with a convicted fingerprint climbs to `would_deny`
+    while a single solve stays under T1. `farmfp=` in the shadow log. This is where
+    the score stops being purely per-IP and becomes fingerprint-anchored — and where
+    the shadow will show whether a coarse TLS bucket (`c28caa00`) lights up legit
+    shared-bucket solvers, the exact signal that decides whether a fingerprint may
+    be enforced bare or only with JA4H corroboration / an interactive challenge.
   - **Stage 1b — edge-Lua tells.** The two signals only the edge sees —
     post-clearance silence (tripwire) + Sec-Fetch — plus the hybrid seed map, per
     the architecture in §3. Follows the challenge-waf-release-checklist. Sliced:

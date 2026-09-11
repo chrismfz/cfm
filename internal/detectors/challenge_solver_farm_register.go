@@ -131,6 +131,9 @@ func init() {
 		// is suppressed for COOLDOWN (30m) while the farm keeps running — a badge
 		// driven by alerts would blink off mid-attack.
 		d.SetFarmHook(webdetector.MarkSolverFarm)
+		// Same, but keyed by the convicting fingerprint — the fingerprint-anchored
+		// spine the per-IP challenge score reads (docs/traffic-classifier.md B3).
+		d.SetFarmFPHook(webdetector.MarkSolverFarmFingerprint)
 
 		webdetector.SubscribeChallengeSolveEvents(func(s webdetector.ChallengeSolve) {
 			d.Enqueue(s.InputEvent())

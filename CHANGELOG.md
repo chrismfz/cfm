@@ -17,7 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Solver-farm score is now fingerprint-anchored (B3 slice 1, shadow-only).** The
+  `challenge_solver_farm` detector marks the CONVICTING fingerprint (a
+  fingerprint-level twin of the existing "farmed right now" vhost mark), and the
+  per-IP `challenge_score` shadow scorer opens on it as the dominant spine tell —
+  weighted above the vhost-farm and UA-lie tells, so a client repeatedly solving
+  with a convicted TLS fingerprint climbs to `would_deny` while a single solve
+  stays under threshold. Surfaced as `farmfp=` in `cfm.abuse_shadow.log`. Rides
+  `ABUSE_SHADOW`, no new config; **nothing is enforced** — this measures the
+  fingerprint-anchored three-grain hypothesis (`docs/traffic-classifier.md` §
+  "Third grain") before any enforcement keys on a fingerprint. A coarse TLS bucket
+  is shared by legit clients, so the shadow will deliberately show some
+  shared-bucket solvers — the signal that decides bare-deny vs JA4H-corroborated /
+  interactive-challenge later.
 
 ## 2026.09.11
 
