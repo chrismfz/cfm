@@ -77,7 +77,34 @@ const (
 	// dropped. A const (like the two above), not a config knob — an operator never
 	// needs to tune it, and CLAUDE.md §5 keeps hidden config keys out of the tree.
 	maxXHRecords = 100000
+	// maxFindingIPs caps the fingerprint-accurate IP sample carried on an emitted
+	// finding (for the fleet store's per-IP enrichment / block surface). A bounded
+	// sample, not the full set: a residential-proxy pool rotates through thousands
+	// of addresses over days, but the store dedups across findings and accumulates
+	// the population over time, so a per-finding cap keeps the payload small without
+	// losing coverage. Not a config knob (CLAUDE.md §5).
+	maxFindingIPs = 128
 )
+
+// sampleKeys returns up to limit keys of m (map iteration order is random, so the
+// sample is effectively arbitrary). nil for an empty map.
+func sampleKeys[V any](m map[string]V, limit int) []string {
+	n := len(m)
+	if n == 0 {
+		return nil
+	}
+	if n > limit {
+		n = limit
+	}
+	out := make([]string, 0, n)
+	for k := range m {
+		out = append(out, k)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
 
 // Action is what the detector does with a flagged vhost, set by ACTION in
 // detectors.conf. The full vocabulary is defined here even though only the first
@@ -301,6 +328,7 @@ type hostState struct {
 type fpAgg struct {
 	subnets   map[string]time.Time
 	countries map[string]time.Time
+	ips       map[string]time.Time // the fingerprint's OWN client addresses on this vhost
 }
 
 // xhRec is one fingerprinted solve, retained node-wide for the cross-host track's
@@ -367,6 +395,14 @@ func (st *hostState) prune(cutoff time.Time) bool {
 		for k, t := range a.countries {
 			if !t.After(cutoff) {
 				delete(a.countries, k)
+			}
+		}
+		// Prune the fp's address set to the window too, so a finding samples only
+		// the CURRENTLY-active addresses — a stale residential IP that rotated away
+		// must not linger in the block surface.
+		for k, t := range a.ips {
+			if !t.After(cutoff) {
+				delete(a.ips, k)
 			}
 		}
 		if len(a.subnets) == 0 && len(a.countries) == 0 {
@@ -694,7 +730,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 					if d.cfg.FPTrack {
 						a := st.fps[fp]
 						if a == nil && len(st.fps) < maxFPsPerHost {
-							a = &fpAgg{subnets: map[string]time.Time{}, countries: map[string]time.Time{}}
+							a = &fpAgg{subnets: map[string]time.Time{}, countries: map[string]time.Time{}, ips: map[string]time.Time{}}
 							st.fps[fp] = a
 						}
 						if a != nil {
@@ -705,6 +741,13 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 								if _, seen := a.countries[cc]; seen || len(a.countries) < maxCountriesTracked {
 									a.countries[cc] = ev.When
 								}
+							}
+							// The fp's OWN addresses (bounded), so a per-host finding ships
+							// fingerprint-accurate IPs — not the vhost's whole solver set,
+							// which could include non-fp visitors and make a downstream
+							// block hit an innocent address.
+							if _, seen := a.ips[ev.SrcIP]; seen || len(a.ips) < d.cfg.MaxTrackedPerHost {
+								a.ips[ev.SrcIP] = ev.When
 							}
 						}
 					}
@@ -843,6 +886,12 @@ type Finding struct {
 	HostShare   float64 // cross-host per-vhost dominance; 0 when not a cross-host finding
 	SolvesPerIP float64
 	Hosts       int // cross-host node-wide vhost count; 1 for a per-host-only finding
+	// IPs is a bounded, FINGERPRINT-accurate sample of the client addresses behind
+	// this finding (cross-host: the fp's node-wide set; per-host: the fp's own set
+	// on the vhost). Empty for a subnet-spread-only finding (no fingerprint). The
+	// fleet store enriches these (PTR/ASN/country/datacenter) so an operator can
+	// tell a residential-proxy pool from a datacenter crawler and act accordingly.
+	IPs []string
 }
 
 // findingSink, if set, receives every emitted Finding. Package-level and wired by
@@ -954,7 +1003,8 @@ type xhVerdict struct {
 	hosts       int
 	countries   int
 	subnets     int
-	ips         int // node-wide distinct fp IPs across the dominated vhosts
+	ips         int      // node-wide distinct fp IPs across the dominated vhosts
+	ipSample    []string // bounded sample of those node-wide fp IPs (for the fleet store)
 	solvesPerIP float64
 	hostShare   float64
 	hostSolves  int
@@ -1077,6 +1127,7 @@ func (d *Detector) evalCrossHost(now time.Time) map[string]xhVerdict {
 			spi = float64(agg.solves) / float64(len(agg.ips))
 		}
 		nh, nc, ns, ni := len(agg.hosts), len(agg.countries), len(agg.subnets), len(agg.ips)
+		ipSample := sampleKeys(agg.ips, maxFindingIPs) // the fp's node-wide addresses, bounded
 		for host, share := range qualHosts {
 			// A vhost dominated by two flagging fingerprints keeps the one with the
 			// wider subnet spread (deterministic: then more countries, then the
@@ -1090,7 +1141,7 @@ func (d *Detector) evalCrossHost(now time.Time) map[string]xhVerdict {
 			}
 			c := hosts[host]
 			out[host] = xhVerdict{
-				fp: fp, hosts: nh, countries: nc, subnets: ns, ips: ni, solvesPerIP: spi, hostShare: share,
+				fp: fp, hosts: nh, countries: nc, subnets: ns, ips: ni, ipSample: ipSample, solvesPerIP: spi, hostShare: share,
 				hostSolves: c.solves, hostSubnets: len(c.subnets), hostIPs: len(c.ips),
 			}
 		}
@@ -1301,9 +1352,15 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 		finding.Fingerprint, finding.Countries = xh.fp, xh.countries
 		finding.DistinctIPs, finding.Subnets = xh.ips, xh.subnets
 		finding.HostShare, finding.Hosts = xh.hostShare, xh.hosts
+		finding.IPs = xh.ipSample // the fp's node-wide addresses
 	case loFP != "":
 		finding.Fingerprint, finding.Countries = loFP, loFPCcs
 		finding.Subnets = loFPSubs
+		if a := st.fps[loFP]; a != nil {
+			finding.IPs = sampleKeys(a.ips, maxFindingIPs) // the fp's own addresses on this vhost
+		}
 	}
+	// (A subnet-spread-only finding carries no fingerprint and leaves IPs empty —
+	// the fleet store skips it, so there is nothing to attribute addresses to.)
 	return alert, finding
 }

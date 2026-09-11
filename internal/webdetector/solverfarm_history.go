@@ -38,6 +38,14 @@ func (e *Engine) RecordSolverFarmFinding(f solverfarm.Finding) {
 		"solves_per_ip":      f.SolvesPerIP,
 		"hosts":              f.Hosts,
 	}
+	// A bounded, fingerprint-accurate sample of the client addresses (the fleet
+	// store enriches these — PTR/ASN/country/datacenter — so an operator can tell a
+	// residential-proxy pool from a datacenter crawler and, on the non-edge nodes,
+	// block them via the firewall). Omitted when empty so older/spread-only rows
+	// stay compact.
+	if len(f.IPs) > 0 {
+		payload["ips"] = f.IPs
+	}
 	e.appendHistory(HistoryEvent{
 		TsUnix:  ts.Unix(),
 		Type:    "solver_farm",
