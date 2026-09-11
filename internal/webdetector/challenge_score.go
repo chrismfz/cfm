@@ -10,12 +10,14 @@ import (
 
 // challenge_score.go — Track-2 Stage 1a: a daemon-side, per-IP, LOG-ONLY
 // "challenge-abuse score" (docs/challenge-score.md). It fuses the daemon-visible
-// challenge-time TELLS CFM already records — an implausibly-fast solve, a
-// self-contradictory (UA-lie) solve, a solve from a solver-farm vhost — into one
-// decaying per-IP score, and logs `signal=challenge_score … verdict=would_harden|
-// would_deny` where that score crosses a threshold. Nothing here hardens, denies,
-// or blocks; it measures the headless / solver-farm class before any enforcement,
-// exactly like the abuse_shadow signals.
+// challenge-time TELLS CFM already records — a solve carrying a CONVICTED
+// solver-farm FINGERPRINT (the fingerprint-anchored spine, B3), an
+// implausibly-fast solve, a self-contradictory (UA-lie) solve, a solve from a
+// solver-farm vhost — into one decaying per-IP score, and logs
+// `signal=challenge_score … verdict=would_harden|would_deny` where that score
+// crosses a threshold. Nothing here hardens, denies, or blocks; it measures the
+// headless / solver-farm class before any enforcement, exactly like the
+// abuse_shadow signals.
 //
 // What it deliberately does NOT score: raw solve VOLUME. A flat per-solve weight
 // would make a benign shared egress (CGNAT / corporate NAT), where many real users
@@ -58,9 +60,22 @@ const (
 	// only these discriminating tells score, and the weakest (fast) only AMPLIFIES a
 	// solve that already carries a strong tell — it never opens a score on its own
 	// (chalSolveDelta corroboration gate).
-	chalScoreWFast  = 10.0 // fast solve — a weak AMPLIFIER only (see chalSolveDelta); common among honest clients
-	chalScoreWUAImp = 30.0 // self-contradictory User-Agent — a lie, not just old — the strongest tell
-	chalScoreWFarm  = 15.0 // the solve's vhost currently looks like a solver farm
+	chalScoreWFast   = 10.0 // fast solve — a weak AMPLIFIER only (see chalSolveDelta); common among honest clients
+	chalScoreWUAImp  = 30.0 // self-contradictory User-Agent — a lie, not just old — a strong tell
+	chalScoreWFarm   = 15.0 // the solve's VHOST currently looks like a solver farm
+	chalScoreWFarmFP = 40.0 // the solve's FINGERPRINT is a convicted solver farm — the fingerprint-anchored SPINE
+
+	// The fingerprint spine (chalScoreWFarmFP) is the dominant single tell: a
+	// convicted fingerprint is the strongest per-client guilt the fleet produces
+	// (docs/traffic-classifier.md § "Third grain"), and it travels with the client
+	// across vhosts and IPs where the vhost mark cannot. It is weighted above the
+	// vhost-farm and UA-lie tells so a client repeatedly solving with a convicted
+	// fingerprint climbs to would_deny while a single solve alone stays under T1.
+	// SHADOW ONLY: a coarse TLS bucket (e.g. c28caa00) is shared by legit clients,
+	// so this WILL light up some innocent shared-bucket solvers — which is exactly
+	// what the shadow measures before any enforcement keys on the fingerprint
+	// (the deny of a coarse bucket needs JA4H corroboration / an interactive
+	// challenge, never a bare per-IP anchor — see the B3 design).
 
 	// chalScoreFastMS: an issue→submit gap below this is "too fast" — native/GPU
 	// territory, under the PoW+HTML+RTT budget an honest browser normally needs. But
@@ -103,7 +118,7 @@ type chalScoreMark struct {
 	// Lifetime tell counters (NOT decayed) — logged so burn-in shows WHY an IP
 	// scored. They can outpace the decayed score (e.g. solves=100 on a faded
 	// score=51); the score is the live signal, the counts are the ledger.
-	solves, fast, uaImp, farm int
+	solves, fast, uaImp, farm, farmFP int
 }
 
 type chalScoreStore struct {
@@ -125,17 +140,21 @@ func chalDecay(score float64, last, now time.Time) float64 {
 // chalSolveDelta is the PURE per-solve score contribution and which tells fired.
 // Returns 0 when a solve carries no discriminating tell (that solve is not scored).
 //
-// Corroboration gate: the STRONG per-solve tells — a self-contradictory UA (a lie)
-// and a solver-farm vhost — OPEN a score. The fast-solve tell only AMPLIFIES: it
-// adds its weight solely when a strong tell already fired on the same solve. Fast is
-// far too common among honest clients to convict alone — at PoW difficulty 16 a
-// large minority (~15-23%) of HONEST browser solves land under the fast floor (PoW
+// Corroboration gate: the STRONG per-solve tells — a convicted solver-farm
+// FINGERPRINT (the spine), a self-contradictory UA (a lie), and a solver-farm
+// vhost — OPEN a score. The fast-solve tell only AMPLIFIES: it adds its weight
+// solely when a strong tell already fired on the same solve. Fast is far too
+// common among honest clients to convict alone — at PoW difficulty 16 a large
+// minority (~15-23%) of HONEST browser solves land under the fast floor (PoW
 // solve time is exponentially distributed; see pow.go). If fast could open a score,
 // a busy shared egress (CGNAT / corporate NAT) would accumulate its honest fast-tail
 // solves to would_deny — the exact §7 NAT false-positive the base-weight removal was
 // meant to close, re-entered through the fast tell. Gating fast to amplifier-only
 // closes that path and keeps the store free of pure-fast benign IPs.
-func chalSolveDelta(s ChallengeSolve, farm bool) (delta float64, fast, uaImp bool) {
+func chalSolveDelta(s ChallengeSolve, farm, farmFP bool) (delta float64, fast, uaImp bool) {
+	if farmFP { // the fingerprint-anchored spine — the dominant single tell
+		delta += chalScoreWFarmFP
+	}
 	if s.UAImpossible {
 		uaImp = true
 		delta += chalScoreWUAImp
@@ -169,7 +188,7 @@ func chalScoreVerdict(score float64) string {
 // IP at the cap is dropped (counted) rather than evicting an existing entry, matching
 // the maxShadowMarks precedent; the store stays small because only tell-bearing
 // solves reach here.
-func (m *chalScoreStore) bump(ip string, delta float64, fast, uaImp, farm bool, now time.Time) {
+func (m *chalScoreStore) bump(ip string, delta float64, fast, uaImp, farm, farmFP bool, now time.Time) {
 	if ip == "" || delta <= 0 {
 		return
 	}
@@ -192,14 +211,17 @@ func (m *chalScoreStore) bump(ip string, delta float64, fast, uaImp, farm bool, 
 	if farm {
 		mk.farm++
 	}
+	if farmFP {
+		mk.farmFP++
+	}
 	m.ips[ip] = mk
 }
 
 // chalScoreRow is one IP's decayed score + breakdown at collect time.
 type chalScoreRow struct {
-	ip                        string
-	score                     float64
-	solves, fast, uaImp, farm int
+	ip                                string
+	score                             float64
+	solves, fast, uaImp, farm, farmFP int
 }
 
 // collectDue decays every IP to now, PRUNES those below epsilon, and returns those
@@ -225,7 +247,7 @@ func (m *chalScoreStore) collectDue(now time.Time, reportFloor float64, logEvery
 		}
 		mk.lastLogged = now
 		m.ips[ip] = mk
-		out = append(out, chalScoreRow{ip: ip, score: d, solves: mk.solves, fast: mk.fast, uaImp: mk.uaImp, farm: mk.farm})
+		out = append(out, chalScoreRow{ip: ip, score: d, solves: mk.solves, fast: mk.fast, uaImp: mk.uaImp, farm: mk.farm, farmFP: mk.farmFP})
 	}
 	return out
 }
@@ -275,11 +297,14 @@ func (e *Engine) RecordChallengeScoreSolve(s ChallengeSolve) {
 		return
 	}
 	farm := IsSolverFarm(s.Host)
-	delta, fast, uaImp := chalSolveDelta(s, farm)
+	// The fingerprint-anchored spine: is THIS solve's fingerprint one the
+	// solver-farm detector has convicted? Empty TLSFP (no X-CFM-TLS) → false.
+	farmFP := IsSolverFarmFingerprint(s.TLSFP)
+	delta, fast, uaImp := chalSolveDelta(s, farm, farmFP)
 	if delta <= 0 {
 		return // no discriminating tell on this solve — not scored
 	}
-	challengeScoreMarks.bump(s.IP, delta, fast, uaImp, farm, time.Now())
+	challengeScoreMarks.bump(s.IP, delta, fast, uaImp, farm, farmFP, time.Now())
 }
 
 // emitChallengeScoreShadow logs the per-IP would_harden / would_deny lines, from the
@@ -306,8 +331,8 @@ func (e *Engine) emitChallengeScoreShadow(now time.Time) {
 			continue // floored at T1, so this can't happen — defensive
 		}
 		logging.LogfABUSESHADOW(
-			"[abuse-shadow] signal=challenge_score ip=%s score=%.1f solves=%d fast=%d uaimp=%d farm=%d verdict=%s",
-			r.ip, r.score, r.solves, r.fast, r.uaImp, r.farm, verdict,
+			"[abuse-shadow] signal=challenge_score ip=%s score=%.1f solves=%d fast=%d uaimp=%d farm=%d farmfp=%d verdict=%s",
+			r.ip, r.score, r.solves, r.fast, r.uaImp, r.farm, r.farmFP, verdict,
 		)
 	}
 	// Surface a full store so a reader isn't misled by silent truncation.

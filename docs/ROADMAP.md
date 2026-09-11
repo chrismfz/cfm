@@ -179,10 +179,18 @@ alone; NAT-aware.
 - **Burn-in** — [in flight]. Deploy 1a+B1+B2; watch `abuse_shadow` /
   `waf_activity rule=WAF_FETCH_METADATA` / `edge_error_tail [cfm_pcw]`; tune the
   fused-score weights before B3.
-- **Track-2 Stage 1b/B3 — hybrid seed map** — [next]. Daemon publishes a per-IP
-  seed (`challenge_score` + `cookie_discard` + `solver_farm`) the edge reads and
-  fuses with the edge tells (B1 + B2) into one decayed per-client score. Weights
-  tuned from burn-in.
+- **Track-2 Stage 1b/B3 — three-grain, fingerprint-anchored seed** — [in flight,
+  shadow]. Grounded 2026-09-11 (fleet read: the fingerprint grain is the hottest /
+  highest-confidence signal, grain-A `rate_outlier`-dominant, grain-B thin), the
+  seed is **anchored on the per-fingerprint reputation** (spine), with per-vhost
+  `abuse_shadow` (posture) and per-IP `challenge_score`/`cookie_discard` (soft)
+  corroborating. Design: `docs/traffic-classifier.md` § "Third grain".
+  **Slice 1 — DONE (shadow):** the daemon marks the CONVICTING fingerprint (twin of
+  the vhost farm mark) and the per-IP `challenge_score` opens on it as the dominant
+  spine tell (`farmfp=` in `cfm.abuse_shadow.log`) — a coarse TLS bucket will light
+  up some legit shared-bucket solvers, which is exactly what shadow measures before
+  any enforcement keys on a fingerprint. Next: the edge seed-map fusing the daemon
+  seed with the B1/B2 edge tells; weights tuned from burn-in.
 - **Track-2 — solver-farm fingerprint-concentration (low-and-slow)** — [shipped,
   burn-in]. Burn-in surfaced a live challenge-defeating farm (`c28caa00` on
   `techking.gr`, 2026-09-08): ~50 residential-proxy IPs across ~40 countries under
@@ -229,6 +237,21 @@ alone; NAT-aware.
   the signals are worth keeping, add a webtop pane (per-IP would_harden/would_deny
   from the shadow log; `cfm_pcw` aggregates). Deferred deliberately — don't build
   UI for a signal that may be retuned or dropped.
+- **Fingerprint in `suspicious_hosts` / cfm-admin** — [idea]. Surface the
+  convicting fingerprint(s) on the suspicious-vhost rows (and the cfm-admin webtop),
+  so an operator sees "this vhost is being hammered by fingerprint X", not just a
+  vhost + score. The fingerprint marks (B3 slice 1) + the solve stream's `tls_fp`
+  make the SOLVER case ready now; the WAF/scanner case (e.g. the live greek-sites.gr
+  SQLi — one IP, 30+ spoofed UAs, one tool) needs the `tls_fp`-on-WAF **attribution**
+  first (`cfm-web:docs/fingerprint-reputation.md §10`, roadmap #1 there). A natural
+  B3 follow-on.
+- **Durable node-side scoring memory (sqlite)** — [idea]. The per-IP
+  `challenge_score`, fingerprint convictions and abuse-shadow marks are all
+  in-memory today, so a daemon restart/reload resets a farm's accumulated score.
+  A small node-local sqlite store would let the node's OWN live scoring survive a
+  restart. Note the architectural boundary: the *durable reputation* memory lives
+  centrally in cfm-web BY DESIGN (node detects, cfm-web remembers) — this is not a
+  second reputation store, only restart-survival for the node's live scoring state.
 - **Stage E actuation ladder** — [track]. Shared per-client + per-vhost actuator:
   PoW-harden / ChallengeV2 puzzle / 403 / tarpit / drop, edge-local (the cleared
   path skips the in-path decision). Only after burn-in shows a clean would-act set.

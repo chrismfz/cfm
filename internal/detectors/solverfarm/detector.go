@@ -478,11 +478,23 @@ type Detector struct {
 	// hours, so anything driven by alerts — a UI badge, a live status — would
 	// blink off while the farm never stopped. See webdetector.MarkSolverFarm.
 	onFarm func(host string, ttl time.Duration)
+
+	// onFarmFP is the fingerprint-level twin of onFarm: called with the finding's
+	// RESOLVED fingerprint (cross-host preferred over per-host) on the same
+	// over-threshold evaluations, so a per-client consumer can mark "this
+	// fingerprint is convicted" the way onFarm marks the vhost. Empty fingerprint
+	// (subnet-spread-only finding, or no X-CFM-TLS) is never passed.
+	onFarmFP func(fp string, ttl time.Duration)
 }
 
 // SetFarmHook installs a callback invoked on every evaluation where a vhost is
 // over threshold. It must be cheap and non-blocking; it runs inside RunOnce.
 func (d *Detector) SetFarmHook(fn func(host string, ttl time.Duration)) { d.onFarm = fn }
+
+// SetFarmFPHook installs a callback invoked with the convicting fingerprint on
+// every over-threshold evaluation that resolves one. Cheap and non-blocking; it
+// runs inside RunOnce, alongside the vhost SetFarmHook.
+func (d *Detector) SetFarmFPHook(fn func(fp string, ttl time.Duration)) { d.onFarmFP = fn }
 
 // markTTL is how long a "farmed right now" mark should stay live. Three
 // evaluation intervals, floored at the measurement window, so the mark survives
@@ -847,6 +859,18 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		if d.onFarm != nil {
 			d.onFarm(host, d.markTTL())
 		}
+		// Mark the convicting fingerprint too (cross-host preferred over the
+		// per-host concentration fp, matching what the finding carries). Empty for
+		// a subnet-spread-only flag — nothing to attribute.
+		if d.onFarmFP != nil {
+			fp := loFP
+			if hasXH && xh.fp != "" {
+				fp = xh.fp
+			}
+			if fp != "" {
+				d.onFarmFP(fp, d.markTTL())
+			}
+		}
 		alerted[host] = true
 		if !st.lastAlert.IsZero() && now.Sub(st.lastAlert) < d.cfg.Cooldown {
 			continue
@@ -891,6 +915,10 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 		if d.onFarm != nil {
 			d.onFarm(host, d.markTTL())
+		}
+		// Cross-host-only: the convicting fingerprint is the cross-host fp.
+		if d.onFarmFP != nil && xh.fp != "" {
+			d.onFarmFP(xh.fp, d.markTTL())
 		}
 		if !st.lastAlert.IsZero() && now.Sub(st.lastAlert) < d.cfg.Cooldown {
 			continue

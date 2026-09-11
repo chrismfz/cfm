@@ -84,6 +84,19 @@ func (m *farmMarks) reset() {
 	m.mu.Unlock()
 }
 
+// solverFarmFPMarks is the FINGERPRINT-level twin of solverFarmMarks: which
+// client fingerprints (the X-CFM-TLS id) the detector currently convicts as
+// farming, keyed by fingerprint instead of vhost. Same TTL-mark store type (one
+// type, two instances — no second copy to drift, CLAUDE.md §5); a fingerprint is
+// the group-by key the cross-host and per-host-concentration tracks convict on.
+//
+// Why a fingerprint mark, not just the vhost one: the vhost mark answers "is a
+// farm active on this site", but the strongest per-client guilt is "is THIS
+// solve's fingerprint one the detector convicted" — a signal that travels with
+// the client across vhosts and IPs. The per-IP challenge score reads it as the
+// fingerprint-anchored SPINE (docs/traffic-classifier.md § "Third grain").
+var solverFarmFPMarks = newFarmMarks()
+
 // MarkSolverFarm records that host is currently being solved by a distributed
 // farm. Call it on every over-threshold evaluation, not only when an alert
 // fires — see the package comment above for why.
@@ -97,11 +110,24 @@ func MarkSolverFarm(host string, ttl time.Duration) { solverFarmMarks.mark(host,
 // IsSolverFarm reports whether host currently carries a live solver-farm mark.
 func IsSolverFarm(host string) bool { return solverFarmMarks.active(host) }
 
-// ResetSolverFarmMarks drops every mark. The detectors manager calls it when it
-// tears detectors down, so a config reload that disables or retunes
-// challenge_solver_farm cannot leave stale badges behind with nothing left
-// running to expire or refresh them.
-func ResetSolverFarmMarks() { solverFarmMarks.reset() }
+// MarkSolverFarmFingerprint records that a client fingerprint is currently
+// convicted as farming. Call it wherever the vhost is marked, passing the
+// finding's RESOLVED fingerprint (cross-host preferred over per-host). Same
+// cadence / TTL / no-unmark contract as MarkSolverFarm; an empty fingerprint is
+// a no-op (older edge, plain-HTTP, or legacy DNAT — no X-CFM-TLS stamp).
+func MarkSolverFarmFingerprint(fp string, ttl time.Duration) { solverFarmFPMarks.mark(fp, ttl) }
+
+// IsSolverFarmFingerprint reports whether fp currently carries a live conviction.
+func IsSolverFarmFingerprint(fp string) bool { return solverFarmFPMarks.active(fp) }
+
+// ResetSolverFarmMarks drops every mark (vhost AND fingerprint). The detectors
+// manager calls it when it tears detectors down, so a config reload that
+// disables or retunes challenge_solver_farm cannot leave stale badges/convictions
+// behind with nothing left running to expire or refresh them.
+func ResetSolverFarmMarks() {
+	solverFarmMarks.reset()
+	solverFarmFPMarks.reset()
+}
 
 // decorateSolverFarmShort stamps the mark onto short-window rows.
 func decorateSolverFarmShort(rows []ShortRow) []ShortRow {
