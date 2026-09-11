@@ -108,8 +108,13 @@ the **node** owes the pipeline:
 ```
 node   → PERSIST   the challenge_solver_farm FINDING to the durable
                    detection_history as event_type=solver_farm, carrying its
-                   evidence Extra (top_fp/xh_fp, host, solves, subnets,
-                   fp_countries/xh_countries, xh_host_share, solves_per_ip, tracks)
+                   evidence in the row's payload_json under normalized,
+                   source-agnostic keys (NOT the alert's raw Extra names):
+                   fingerprint (the resolved group-by fp — cross-host xh_fp
+                   preferred over the per-host top_fp), tracks, solves,
+                   distinct_ips, distinct_subnets, distinct_countries,
+                   host_share, solves_per_ip, hosts. host is the row's host
+                   column; distinct_ips is also the row's uniq_ip.
 cfm-web ← PULL     that source via the fleet_ingest_cursors / NodeHardFaultIngestor
                    pattern (a new `source` value; no new node API)
 ...        (cfm-web aggregates → reputation record + policy; see its doc)

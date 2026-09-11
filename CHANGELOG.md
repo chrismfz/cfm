@@ -37,6 +37,20 @@ back-filled here — see the git/PR history for that period.
   `[challenge_solver_farm]`: `XH_TRACK`, `XH_WINDOW`, `MIN_XH_HOST_SHARE_PCT`,
   `MIN_XH_HOSTS`, `MIN_XH_COUNTRIES`, `MIN_XH_SUBNETS`. See
   `docs/solver-farm-cross-host-phase2.md`.
+- **Solver-farm convictions now persist to `detection_history`
+  (`event_type=solver_farm`) — fleet fingerprint-reputation ingest, Phase A.**
+  Every emitted `challenge_solver_farm` finding (per-host or cross-host) is now
+  written to the durable web-detector history store alongside WAF/challenge/clam
+  events, carrying the structured evidence in its payload (grouping `fingerprint`,
+  `tracks`, `solves`, `distinct_ips`, `distinct_subnets`, `distinct_countries`,
+  `host_share`, `solves_per_ip`, `hosts`). A conviction that today reaches only
+  `cfm.detector.log` + mail thus becomes queryable via `detection_history` and
+  PULL-ingestible by cfm-web (a new source value, cursor-based like the hard-fault
+  ingestor). The record fires **once per emitted alert regardless of the mail
+  throttle** (the durable memory must not follow the mail cadence) and is empty
+  when nothing is wired — no behaviour change to alerting/marking. Payload keys are
+  the ingest contract; see `docs/fleet-fingerprint-reputation.md` §5 and
+  `cfm-web:docs/fingerprint-reputation.md`.
 
 ### Changed
 - **Per-host fingerprint-concentration findings now NOTIFY (promoted out of
