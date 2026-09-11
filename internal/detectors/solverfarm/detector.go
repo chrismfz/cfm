@@ -643,6 +643,14 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	for _, st := range d.hosts {
 		st.prune(cutoff)
 	}
+	// Same reasoning for the cross-host buffer: prune to XHWindow BEFORE ingest so
+	// the maxXHRecords cap is measured against live records only. Pruning inside
+	// evalCrossHost (after ingest) would let stale records hold cap budget and drop
+	// live solves during a high-rate burst — the track would go blind exactly when
+	// it matters. evalCrossHost then just aggregates the already-pruned buffer.
+	if d.cfg.XHTrack {
+		d.pruneXH(now.Add(-d.cfg.XHWindow))
+	}
 
 	for _, ev := range batch {
 		select {
@@ -895,6 +903,22 @@ type hostFPCell struct {
 	ips       map[string]struct{}
 }
 
+// pruneXH drops cross-host records older than the cutoff. Called BEFORE ingest so
+// the maxXHRecords cap is measured against live records only (see the call site).
+func (d *Detector) pruneXH(cutoff time.Time) {
+	kept := d.xhRecs[:0]
+	for _, r := range d.xhRecs {
+		if r.when.After(cutoff) {
+			kept = append(kept, r)
+		}
+	}
+	// Release the strings held by the pruned tail; the backing array is reused.
+	for i := len(kept); i < len(d.xhRecs); i++ {
+		d.xhRecs[i] = xhRec{}
+	}
+	d.xhRecs = kept
+}
+
 // evalCrossHost folds the node-level solve-record buffer (XHWindow) into a
 // per-vhost verdict for the cross-host track. A (host, fp) pair is admitted to a
 // fingerprint's tally ONLY when the fp is a super-majority of that vhost's
@@ -909,18 +933,8 @@ func (d *Detector) evalCrossHost(now time.Time) map[string]xhVerdict {
 	if !d.cfg.XHTrack || d.countryFn == nil {
 		return nil
 	}
-	cutoff := now.Add(-d.cfg.XHWindow)
-	// Prune the buffer to the window, then report/clear the overflow counter.
-	kept := d.xhRecs[:0]
-	for _, r := range d.xhRecs {
-		if r.when.After(cutoff) {
-			kept = append(kept, r)
-		}
-	}
-	for i := len(kept); i < len(d.xhRecs); i++ {
-		d.xhRecs[i] = xhRec{}
-	}
-	d.xhRecs = kept
+	// The buffer is already pruned to XHWindow by pruneXH (before ingest); here we
+	// only report/clear the overflow counter and fold what remains.
 	if d.xhDropped > 0 {
 		logging.Logf("[challenge_solver_farm] cross-host record buffer full: dropped %d solves (cap=%d)",
 			d.xhDropped, maxXHRecords)
@@ -1138,7 +1152,11 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			"solves_per_ip": fmt.Sprintf("%.2f", solvesPerIP),
 			"top_ua":        topUA,
 			"top_ua_share":  fmt.Sprintf("%d%%", uaShare),
-			"window":        d.cfg.Window.String(),
+			// dispWindow matches the counts: normally the 60s Window, but XHWindow
+			// for a reclaimed-vhost cross-host-only finding whose solves/ips/subnets
+			// were switched above — so a consumer computing solves/window gets the
+			// right rate, not a ~30x over-read.
+			"window": dispWindow.String(),
 			// Corroboration only — never part of the threshold.
 			"impossible_ua": fmt.Sprint(impossibleUA),
 		},
