@@ -23,8 +23,11 @@ back-filled here — see the git/PR history for that period.
   fingerprint-level twin of the existing "farmed right now" vhost mark), and the
   per-IP `challenge_score` shadow scorer opens on it as the dominant spine tell —
   weighted above the vhost-farm and UA-lie tells, so a client repeatedly solving
-  with a convicted TLS fingerprint climbs to `would_deny` while a single solve
-  stays under threshold. Surfaced as `farmfp=` in `cfm.abuse_shadow.log`. Rides
+  with a convicted TLS fingerprint climbs to `would_deny`. The fingerprint tell
+  alone is under the would_harden threshold, so a lone convicted-fp solve with no
+  other tell doesn't cross it; a second solve, or a corroborating tell on the same
+  solve (the vhost-farm mark that co-fires, or a fast solve), does. Surfaced as
+  `farmfp=` in `cfm.abuse_shadow.log`. Rides
   `ABUSE_SHADOW`, no new config; **nothing is enforced** — this measures the
   fingerprint-anchored three-grain hypothesis (`docs/traffic-classifier.md` §
   "Third grain") before any enforcement keys on a fingerprint. A coarse TLS bucket

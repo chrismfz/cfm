@@ -203,9 +203,13 @@ shared with the vhost lane:
     marks the CONVICTING fingerprint (`MarkSolverFarmFingerprint`, the fingerprint
     twin of the vhost farm mark), and `challenge_score` opens on
     `IsSolverFarmFingerprint(solve.TLSFP)` as the **dominant spine tell**
-    (`chalScoreWFarmFP`, weighted above the vhost-farm and UA-lie tells) — so a
-    client repeatedly solving with a convicted fingerprint climbs to `would_deny`
-    while a single solve stays under T1. `farmfp=` in the shadow log. This is where
+    (`chalScoreWFarmFP` = 40, weighted above the vhost-farm and UA-lie tells) — so
+    a client repeatedly solving with a convicted fingerprint climbs to `would_deny`.
+    The fingerprint tell ALONE (40) is under T1 (50), so a lone convicted-fp solve
+    with no other tell does not reach `would_harden`; a second solve — or a
+    corroborating tell on the same solve, e.g. the vhost-farm mark that co-fires on
+    the same detector pass (40+15=55) or a fast solve (40+10=50) — crosses it.
+    `farmfp=` in the shadow log. This is where
     the score stops being purely per-IP and becomes fingerprint-anchored — and where
     the shadow will show whether a coarse TLS bucket (`c28caa00`) lights up legit
     shared-bucket solvers, the exact signal that decides whether a fingerprint may
