@@ -344,6 +344,113 @@ emitting from a new `emitAbuseShadowFusedScore(now)` in the existing per-tick
 > 2**, and belongs in `docs/challenge-score.md` (edge-Lua hybrid), NOT a direct
 > `IPSignals.Score` edit, precisely because of the post-clearance blindness above.
 
+## Third grain — fingerprint reputation, fingerprint-anchored (2026-09-11)
+
+The two tracks above are per-vhost (Track 1) and per-IP (Track 2). A **third
+grain** now exists: the **per-fingerprint reputation store** — cfm-web's
+`fingerprints`, fed by the node `solver_farm` finding and now carrying each
+fingerprint's own captured client IPs, enriched and classified
+(`cfm-web:docs/fingerprint-reputation.md`; node capture/scope in
+`internal/detectors/solverfarm/`). The **B3 three-grain seed fuses all three,
+anchored on the fingerprint grain** — the decision below (fingerprint = the
+strongest, most reliable "guilty").
+
+### Why fingerprint-anchored (grounded — 2026-09-11 fleet read)
+
+A live read of titan/mars/earth/orion/rigel/virgo:
+
+- **Fingerprint grain is the hottest, highest-confidence signal.** On titan,
+  near-every `challenge_solved` carries `tls_fp=c28caa00`, solving continuously
+  across ≥4 vhosts from a wide rotating pool (dozens of countries; ASNs mixing
+  residential Etisalat/VNPT/Vodafone AND datacenter Datacamp/Leaseweb/HUAWEI),
+  **1 solve per IP**, fresh UA each. Store: `c28caa00` at 191 IPs / 48 countries
+  (verdict *farm*). A convicted farm fingerprint is the strongest guilt the fleet
+  produces.
+- **Grain A (Track-1 `abuse_shadow`) is populated, `rate_outlier`-dominant**
+  (titan 71, mars 58, earth 36; `dc_fraction` secondary; facet/cost tiny).
+- **Grain B (Track-2 `challenge_score`/`cookie_discard`) is THIN** —
+  `challenge_score`/`fused_score` barely surface (orion 2/1). The live per-IP tell
+  is the challenge *lifecycle* (issued → `expired_unsolved`, the non-solving
+  scanner), not the score.
+
+**The decisive insight: a solver farm SOLVES the PoW** (`c28caa00` at diff=16,
+300 ms–56 s). Challenging a fingerprint that *solves* is futile. So the fingerprint
+grain does not route to "harden PoW"; it routes to the **hard rung** — and the
+right hard action depends on two orthogonal axes that must not be conflated.
+
+### Two axes, two actions (this is the correction that shapes B3)
+
+Blocking is TWO different actuators with TWO different collateral models. Keep
+them separate:
+
+1. **Persistent IP-ban (nft, the shipped Phase-2 fleet block).** Collateral =
+   **ISP reassignment**: a residential IP is a DHCP lease, so a week-long ban
+   outlives the abuser's tenancy and later lands on whoever the ISP hands that
+   address to — collateral that is real *even when today's occupant is a
+   compromised botnet/IoT node* (the malware is cleaned or the lease rotates, the
+   ban remains). Datacenter IPs don't churn like that and are usually
+   single-tenant VMs (the whole IP *is* the abuser). ⟹ **the datacenter-vs-
+   residential gate belongs to THIS action only**: bulk-ban datacenter members,
+   never bulk-ban residential ones.
+2. **Fingerprint DENY (403) at the edge (Phase-C `X-CFM-TLS` match).** Self-
+   targeting *in time* — it acts per request, not as a standing ban — so it has
+   **no reassignment collateral**: when a residential IP is later reassigned to an
+   innocent customer, they present *their own* browser's fingerprint, never the
+   farm's, and are untouched; a compromised device is denied exactly while it
+   speaks the farm's fingerprint. It is also **per-device surgical on a shared
+   IP**: other devices behind the same router/CGNAT present their own fingerprints
+   and are never seen by the rule (an IP-ban takes the whole household down;
+   fingerprint-deny does not). ⟹ residential-vs-datacenter is **NOT** the gate for
+   this action.
+
+**The real gate for fingerprint-DENY is how SHARED the fingerprint is**, because a
+TLS fp is a *bucket*, not an identity (GREASE-normalised — see §7 "coarseness" in
+the cfm-web doc). `c28caa00` is a coarse Chrome bucket that legit shoppers also
+collapse onto, so a blanket 403 on it hits innocents — collateral from the same
+*browser build*, not the same IP (the only case where a different device on the
+farm's IP is NOT fine is when it runs that exact build). So:
+
+- **Fingerprint unique-enough to the farm** (seen only in farm-shaped traffic,
+  ideally corroborated by **JA4H** as a second axis) → **deny (403) outright**,
+  residential or datacenter. It is the guilty unit.
+- **Shared browser bucket** (`c28caa00`) → do NOT blanket-deny. Use a **harder
+  *interactive* challenge** (ChallengeV2 drag/puzzle — beats the headless farm the
+  PoW couldn't, and self-targets legit shared-bucket users), and/or narrow the
+  deny to `(fp × JA4H)` or `(fp × farm-context)`, and/or IP-ban only the
+  *datacenter* members while harder-challenging the rest.
+
+### The fingerprint-anchored seed
+
+- **Spine — fingerprint conviction → its member IPs + the fingerprint itself.** A
+  `farm`/`suspect` fingerprint maps its conviction onto each captured address's
+  per-client score, pre-weighted by `kind` for the IP-ban sub-action (datacenter
+  → ban-eligible; residential/unknown → not banned) AND onto the fingerprint-DENY
+  path per the uniqueness gate above. Dominant term.
+- **Mid — grain A (`rate_outlier` + `dc_fraction`, goodbot-exempt)** — the built
+  Track-1 fused score, corroborates per-vhost.
+- **Soft — grain B (`challenge_score`/`cookie_discard`, `challenge_expired_unsolved`)
+  + Sec-Fetch/WAF** — low weight (thin in the data); corroboration only, can raise
+  an IP alone only at higher combined weight.
+- **Fusion rule:** fingerprint-implicated clients start high; grains A/B add
+  capped, de-correlated deltas (same discipline as Track-1's fused score — never
+  triple-count one rate shape). **Shadow-first** (`would_*` lines), tuned against
+  the live magnitudes (rate_outlier carries weight; challenge_score cannot alone).
+
+### B3 open items
+
+- The fingerprint→IP mapping is only as complete as the captured sample (bounded,
+  accumulates), so a farm's long residential tail is never fully enumerated — the
+  seed must **degrade gracefully**: fingerprint-DENY/interactive-challenge for
+  un-captured IPs sharing the fp, IP-ban for captured *datacenter* members.
+- **JA4H as the uniqueness corroborator** is what makes "deny the bucket" safe —
+  prioritise it for any fingerprint-DENY of a coarse TLS bucket.
+- Thickening the spine with more conviction sources (WAF-block, abuse_shadow →
+  fingerprint) needs the **attribution prerequisite**: the 2026-09-11 read caught a
+  WAF scanner (Google Cloud, `WAF_TRAVERSAL`/`WAF_SQLI`/`WAF_PHP_WRAPPER` across
+  spoofed bot UAs) whose `waf_*` events carry **no `tls_fp`** — carrying the
+  edge-stamped `X-CFM-TLS` onto WAF findings is the first task there. See
+  `cfm-web:docs/fingerprint-reputation.md §10`.
+
 ## Plan (measure-first, mechanism-agnostic)
 
 ### Phase 0 — audit + zero-code (operator config; in progress)
