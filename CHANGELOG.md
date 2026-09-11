@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.11
+
 ### Added
 - **Solver-farm cross-host fingerprint track (`challenge_solver_farm`, Phase 2).**
   Catches a distributed solver farm spread so thin per vhost that it never trips
