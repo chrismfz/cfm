@@ -849,11 +849,43 @@ type Finding struct {
 // webdetector_register to the Engine's durable history recorder — a plain
 // callback, so this package takes no webdetector dependency (mirrors the ECC/clam
 // sinks). Unset by default: findings then only alert/log, exactly as before.
-var findingSink func(Finding)
+// Guarded by a mutex like the sibling sinks: the setter is re-invoked on every
+// config reload (the engine is rebuilt), so the write races the previous
+// detector's RunOnce readers unless the reload's stop-join-rebuild-start ordering
+// holds — the mutex makes correctness independent of that invariant.
+var (
+	findingSinkMu sync.RWMutex
+	findingSink   func(Finding)
+)
 
-// SetFindingSink installs the durable-record sink for emitted findings. Called
-// once at wiring time; safe to leave unset.
-func SetFindingSink(fn func(Finding)) { findingSink = fn }
+// SetFindingSink installs (replacing any prior) the durable-record sink for
+// emitted findings. Pass nil to detach. Called at wiring time and on each reload;
+// safe for concurrent use.
+func SetFindingSink(fn func(Finding)) {
+	findingSinkMu.Lock()
+	findingSink = fn
+	findingSinkMu.Unlock()
+}
+
+// publishFinding delivers f to the sink if one is set. A misbehaving sink must
+// never take down the detector's evaluation pass: a panic here would unwind
+// through emit → RunOnce and cost every other vhost this pass its mark refresh
+// and alert (the current alert is already delivered and its clocks stamped), so
+// panics are contained — mirrors clam.publishScanEvent.
+func publishFinding(f Finding) {
+	findingSinkMu.RLock()
+	fn := findingSink
+	findingSinkMu.RUnlock()
+	if fn == nil {
+		return
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			logging.Logf("[challenge_solver_farm] finding sink panic host=%s fp=%s err=%v", f.Host, f.Fingerprint, rec)
+		}
+	}()
+	fn(f)
+}
 
 // emit builds and sends one alert, applying the NotifyCooldown throttle and
 // stamping the per-vhost cooldown/notify clocks on a successful hand-off. It
@@ -879,9 +911,7 @@ func (d *Detector) emit(ctx context.Context, out chan<- core.Alert, now time.Tim
 		if !suppressNotify {
 			st.lastNotify = now
 		}
-		if findingSink != nil {
-			findingSink(finding)
-		}
+		publishFinding(finding)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
