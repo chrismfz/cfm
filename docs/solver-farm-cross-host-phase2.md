@@ -69,23 +69,31 @@ across vhosts **weakens that guarantee**: a genuinely global browser fingerprint
 pooled over many sites, could accumulate several countries honestly (Phase-1 §6
 "residual risk"). Cross-host therefore cannot lean on country spread alone.
 
-The live data hands us **two independent guards that a legit fingerprint cannot
-forge**, both measured above:
+The load-bearing guard is **`max_fp_share` per host** — the farm's fingerprint
+**dominates** each vhost it touches (`c28caa00` = 100/100/87/70 %; `95070673` =
+100/95/90/85/83 %), while a legit shared browser is a **minority** of a diverse
+population (`77a50fbb` ≤ 17 %, `42d907e9` ≤ 33 %, `19877aeb` ≈ 3 %). This is the
+axis a legit fingerprint *structurally* cannot cross — it is, by definition, one
+browser among many on an honest vhost. Country spread is the secondary guard
+(farms 27–79 on their dominant hosts, legit ≤ 9).
 
-- **`solves_per_ip`** — farms sit at **1.00–1.05** (one-shot proxy IPs); every
-  legit fp measured sits at **≥ 1.15**, most **≥ 1.4** (real visitors revisit and
-  navigate). A super-thin farm is ~1.0 *by construction* — it has one job per IP.
-- **`max_fp_share` per host** — the farm's fingerprint **dominates** each vhost it
-  touches: `c28caa00` = 100 % / 100 % / 87 % / 70 % of challenged solves on its
-  top vhosts; `95070673` = 100 % / 95 % / 85 % / 83 %. A legit shared browser is a
-  **minority** of a diverse population: `77a50fbb` peaks at **17 %** (mostly
-  6–10 %). This is the axis a legit fingerprint *structurally* cannot cross —
-  it is, by definition, one browser among many on an honest vhost.
+> **Burn-in correction (2026-09-11) — `solves_per_ip` is NOT a discriminator, do
+> not gate on it.** The Phase-1 §5.3 snapshot suggested farms sit at ~1.0 and
+> legit ≥ 1.15. The **weekday burn-in refuted that**: on a fleet of product-catalog
+> shops (few repeat visits) *everything* sits at ~1.0–1.2 — farm `95070673` = 1.11,
+> yet legit `7b6c7d83` = 1.00, `19877aeb` = 1.08, `6edad59b` = 1.08. A
+> `MAX_SOLVES_PER_IP ≤ 1.10` ceiling would have **excluded the 95070673 farm
+> (1.11) and admitted the legit fps** — backwards. So `solves_per_ip` is carried as
+> **evidence only**, never a gate. The real separation is **share (primary) +
+> country spread (secondary) + host/subnet floors**. The closest legit call,
+> `19877aeb` (a globally-distributed shared browser: 9 countries, s/ip 1.08), is
+> excluded decisively by **share ≈ 3 % vs the 50 % floor (~16× margin)** — which is
+> exactly why share, not s/ip, is the guard.
 
 So cross-host is **safer** than a naive "one fp, many countries" would be, not
-riskier: it requires country spread **AND** ~1 solve/IP **AND** per-host
-dominance together. A global-audience browser fails the last two even if it
-passes the first.
+riskier: it requires country spread **AND** per-host dominance together. A
+global-audience browser fails the dominance gate (it is a minority everywhere)
+even if it passes the country count.
 
 ## 3. Design — a cross-host track on the existing detector
 
@@ -97,37 +105,36 @@ and the `countryFn`).
 ### 3.1 Per-node, per-fingerprint aggregate
 
 Alongside the existing per-host `subnets` set (L2 high-rate) and per-`(host, fp)`
-aggregate (Phase-1 low-rate), maintain a **node-level** map keyed on **fingerprint
-only**, over a **longer** sliding window than 60 s (a thin farm emits few
-solves per host per minute; propose `XH_WINDOW = 10m`, calibrate in burn-in):
-
-- `hosts` — distinct vhosts this fp solved
-- `countries` — distinct ISO-2 under this fp (node-wide)
-- `subnets` — distinct client `/24` (v6 `/48`) under this fp
-- `ips`, `solves` — for the aggregate `solves_per_ip`
+aggregate (Phase-1 low-rate), aggregate over a **node-level window longer than
+60 s** — a thin farm emits few solves per host per minute, so the cross-host tally
+needs time to accumulate its spread. Burn-in measured `95070673` at ~63 solves/h;
+**`XH_WINDOW = 30m`** lets its dominant hosts accumulate well past the country
+floor (as-built: a single node-level buffer of fingerprinted solve records —
+`{host, fp, subnet, ip, country, when}` — pruned to the window each pass and
+re-aggregated, bounded by a cap). Per fingerprint the tally is: distinct hosts,
+countries, subnets, ips, solves.
 
 Each `(host, fp)` contribution is admitted to the fp's cross-host tally **only if
-that pair is itself farm-shaped on its vhost** — a **pre-gate** that keeps a legit
-minority fingerprint out of the pool entirely:
-
-- per-host `fp_share ≥ MIN_XH_HOST_SHARE`  (the fp is a super-majority of *that*
-  vhost's window solves), **and**
-- per-host `solves_per_ip ≤ MAX_XH_SOLVES_PER_IP`.
-
-Only the qualifying pairs' subnets/countries/hosts are summed. A popular browser
-that is a 10 % slice of every vhost never contributes a single host to any fp's
-cross-host tally, so it can never reach the host/country floors no matter how many
-sites it appears on.
+the fp is a super-majority of that vhost's fingerprinted solves in the window** —
+the **`fp_share ≥ MIN_XH_HOST_SHARE` pre-gate**, the one guard a legit minority
+browser cannot forge. Only the qualifying pairs' subnets/countries/hosts are
+summed. A popular browser that is a 10 % slice of every vhost never contributes a
+single host to any fp's cross-host tally, so it can never reach the host/country
+floors no matter how many sites it appears on. (`solves_per_ip` is **not** part of
+the pre-gate — burn-in showed it does not separate; see the §2.1 correction — it
+is carried on the alert as evidence.)
 
 ### 3.2 Cross-host verdict
 
 Flag a fingerprint (and mark **every** contributing vhost `solver_farm`) when,
 over the window, its qualifying contributions satisfy **all**:
 
-- `hosts     ≥ MIN_XH_HOSTS`
-- `countries ≥ MIN_XH_COUNTRIES`   (primary discriminator)
-- `subnets   ≥ MIN_XH_SUBNETS`
-- aggregate `solves_per_ip ≤ MAX_XH_SOLVES_PER_IP`
+- `hosts     ≥ MIN_XH_HOSTS`     (floor, counted over the pre-gated hosts)
+- `countries ≥ MIN_XH_COUNTRIES` (secondary guard; primary is the share pre-gate)
+- `subnets   ≥ MIN_XH_SUBNETS`   (floor)
+
+(No `solves_per_ip` gate — the burn-in correction. The **share pre-gate** in §3.1
+is the primary guard; these three are the spread floors it feeds.)
 
 The empty/`-` fingerprint is **never** a group key (same as Phase-1 — it would
 pool unrelated clients into a phantom fleet-wide farm, the worst possible false
@@ -137,39 +144,39 @@ The verdict raises the same `Challenge/SolverFarm` finding and the same
 `webdetector.MarkSolverFarm` mark as the other two tracks; downstream (WebUI
 badge, Track-2 seed) is unchanged. The alert carries `tracks=cross_host` (or a
 `+`-joined set when several tracks fire), plus `xh_fp`, `xh_hosts`,
-`xh_countries`, `xh_subnets`, `xh_solves_per_ip` evidence in `Extra`.
+`xh_countries`, `xh_subnets`, `xh_host_share`, `xh_solves_per_ip` evidence in
+`Extra` (the last as evidence, not a gate).
 
-## 4. Calibration — measured per node (2026-09-09)
+## 4. Calibration — measured per node (2026-09-11 weekday burn-in)
 
-The separation is decisive on **every** axis; the three guards are AND-ed so any
-one of them already excludes every legit fingerprint observed:
+Per-node aggregation over the ~15 h weekday window (the FP-guard's real test):
 
-| axis | farms (`c28caa00`, `95070673`) | legit (all observed) | proposed floor/ceiling | margin |
+| axis | farms (`c28caa00` titan, `95070673` orion) | legit (all observed) | floor/pre-gate | role |
 |---|---|---|---|---|
-| distinct **countries** / node / window | **41–69** | ≤ 3 | `MIN_XH_COUNTRIES = 10` | ~4× to the floor, ~13× farm-to-legit |
-| distinct `/24` | 449–1008 | ≤ 23 | `MIN_XH_SUBNETS = 30` | ~15× |
-| distinct **hosts** | 12–23 | ≤ 8 | `MIN_XH_HOSTS = 4` | *floor, not discriminator* |
-| **`solves_per_ip`** | 1.00–1.05 | ≥ 1.15 (mostly ≥ 1.4) | `MAX_XH_SOLVES_PER_IP = 1.10` | tight — corroborator |
-| per-host `max_fp_share` (pre-gate) | 70–100 % | ≤ 17 % | `MIN_XH_HOST_SHARE = 0.50` | ~3× |
+| per-host `max_fp_share` (**pre-gate**) | dominant hosts **85–100 %** | `42d907e9` ≤ 33 %, `77a50fbb` ≤ 39 %, `19877aeb` ≈ 3 % | `MIN_XH_HOST_SHARE = 0.50` | **primary guard** |
+| distinct **countries** (pre-gated hosts) | 27–79 | ≤ 9 (`19877aeb`) | `MIN_XH_COUNTRIES = 12` | secondary guard |
+| distinct `/24` | 489–1030 | ≤ 47 (`77a50fbb`) | `MIN_XH_SUBNETS = 30` | floor |
+| distinct **hosts** | 22 / 10 | ≤ 7 (`42d907e9`) | `MIN_XH_HOSTS = 4` | floor |
+| `solves_per_ip` | **1.01 / 1.11** | 1.00–1.57 (no separation) | — | **evidence only** |
 
-As with Phase-1's `MIN_SUBNETS = 40` and `MIN_FP_COUNTRIES = 6`, **hosts** is a
-*floor against a trickle*, not the discriminator — a legit fp reached **8** hosts
-(`7b6c7d83`), yet is excluded by every other guard (1 country, 1.57 solves/IP, and
-it never clears the 50 % per-host share pre-gate). `countries` is primary;
-`solves_per_ip` and `max_fp_share` are the two guards that make cross-host safe
-where country spread alone would not be.
+The **share pre-gate is the discriminator**: farms dominate the vhosts they hit
+(85–100 %), every legit fp is a minority (≤ 39 %, most ≤ 9 %), so the 50 % floor
+splits them with a clean gap and — crucially — a legit fp's `(host, fp)` pairs
+never enter the pool, so its country/subnet spread never even accrues. `countries`
+is the secondary guard, raised to **12** because the closest legit fp `19877aeb`
+reached **9** countries cross-host (a globally-distributed shared browser); its
+share of ~3 % excludes it on the pre-gate with a ~16× margin regardless.
 
-`MAX_XH_SOLVES_PER_IP = 1.10` is deliberately tight (the closest legit,
-`42d907e9`, sits at 1.15 with only 2 countries — already excluded by the country
-guard). It is a corroborator, not the primary gate; the country floor carries the
-decision, and the ceiling only hardens the global-audience edge case.
+**`solves_per_ip` is deliberately absent from the gate** (see the §2.1 burn-in
+correction): farm `95070673` = **1.11** while legit `7b6c7d83` = 1.00 and
+`19877aeb`/`6edad59b` = 1.08 — full overlap. A ceiling would have excluded the farm
+and admitted the legit fps. It is reported as evidence only.
 
-**Watch item surfaced by the capture:** `c2e09593` (titan, single host, 49 `/24`,
-6 countries/60 s, 1.00 solves/IP, but only ~5 % of that vhost's solves) looks
-farm-shaped on the concentration axes yet is a *minority* of its one vhost — a
-possible small/newer farm or a shared automation stack. The cross-host track's
-share pre-gate correctly declines to pool it (5 % < 50 %); Phase-1's per-host
-track may flag it borderline. It is a burn-in **watch**, not a threshold input.
+**Validated live:** on `www.vitolighting.com` (orion) `95070673` was 90 % share /
+27 countries — the per-host track flagged it there, and the cross-host track would
+additionally mark the ~21 other vhosts where the same fp stays under the per-host
+bar. The closest legit call, `19877aeb`, was excluded on all of share (3 %),
+per-host 60 s country-peak (1), and the country floor (9 < 12).
 
 ## 5. False-positive analysis — the global-audience case, now doubly guarded
 
@@ -180,15 +187,25 @@ aggregation would *seem* to make that worse (it pools countries across vhosts) �
 but the two added guards close it:
 
 - Such a browser is a **minority** of each vhost's diverse solves → fails
-  `MIN_XH_HOST_SHARE`, so its `(host, fp)` pairs never enter the pool.
-- Its users **revisit and navigate** → `solves_per_ip` well above 1.10.
+  `MIN_XH_HOST_SHARE`, so its `(host, fp)` pairs never enter the pool. This is the
+  guard, and burn-in confirmed it holds: `19877aeb`, a real globally-distributed
+  shared browser (9 countries cross-host), sat at ~3 % share and never entered the
+  pool.
 
-A farm fails neither: it *is* the traffic on the vhosts it targets, and it is
-one-shot per IP. So the case Phase-1 flagged as "the signal to watch" is, for the
-cross-host track, **excluded by design** rather than by threshold luck — provided
-burn-in confirms the share/`s-per-ip` separation holds on a high-traffic global
-vhost (the same re-confirmation Phase-1 asks for). Until then, **log-only**: a
-mis-tuned threshold *reports*, never blocks.
+A farm fails it: it *is* the traffic on the vhosts it targets. So the case Phase-1
+flagged as "the signal to watch" is, for the cross-host track, **excluded by
+design** (per-host dominance) rather than by threshold luck. Until burn-in of the
+cross-host track itself is clean, **log-only**: a mis-tuned threshold *reports*,
+never blocks.
+
+> **What "log-only" does and doesn't mean.** As with Phase-1, log-only suppresses
+> the *notification*, not the *mark*: a cross-host-only finding still MARKs every
+> contributing vhost `solver_farm` — that is precisely how the burn-in is observed
+> (`challenge_vhosts` shows `solver_farm: true`). The mark drives the WebUI badge
+> and the Track-2 seed, and the Track-2 seed is itself shadow (`AbuseShadow`,
+> would-harden logs only), so nothing the burn-in marks ever blocks or challenges a
+> visitor. "Log-only" is about mail; "never blocks" is about enforcement; the mark
+> sits between them as observation.
 
 Verified good bots remain excluded upstream (exempted from the challenge, absent
 from the solve stream); `ALLOW_HOSTS/IPS/NETS/UA_CONTAINS/FPS` still apply.
@@ -200,12 +217,13 @@ already flow into the detector (Phase-1: `core.InputEvent.Fingerprint`,
 `SetEnricher`/`countryFn`, off the hot `Enqueue` path). Cross-host adds, inside
 `solverfarm.Detector`:
 
-- a per-node `map[fp]*xhAgg` (hosts/countries/subnets/ips/solves), pruned with the
-  window like the existing per-`(host, fp)` map — its natural superset;
-- a per-`(host, fp)` **share + solves/IP** computation (both already derivable
-  from state Phase-1 tracks) to run the admission pre-gate;
-- the `MIN_XH_*` / `MAX_XH_SOLVES_PER_IP` / `MIN_XH_HOST_SHARE` evaluation in
-  `RunOnce`, sharing the mark, cooldown and alert;
+- a node-level buffer of fingerprinted solve records (`{host, fp, subnet, ip,
+  country, when}`), pruned to `XH_WINDOW` each pass and re-aggregated — one buffer,
+  bounded by a cap, cheaper to reason about than incrementally-windowed counters;
+- a per-`(host, fp)` **share** computation (per-host fp solves ÷ per-host
+  fingerprinted solves in the window) to run the admission pre-gate;
+- the `MIN_XH_*` / `MIN_XH_HOST_SHARE` evaluation in `RunOnce`, sharing the mark,
+  cooldown and alert (each qualifying vhost gets its own per-host alert + mark);
 - the `tracks=cross_host` + `xh_*` alert `Extra` fields.
 
 A nil enricher (no GeoIP) leaves `countryFn` nil, which **fail-safe disables**
@@ -219,12 +237,14 @@ Phase-1:
 | Key | Default | Meaning |
 |---|---|---|
 | `XH_TRACK` | `1` | enable the cross-host track (kill-switch) |
-| `XH_WINDOW` | `10m` | sliding window for cross-host aggregation |
-| `MIN_XH_HOSTS` | `4` | distinct vhosts one fp must span (floor) |
-| `MIN_XH_COUNTRIES` | `10` | distinct countries under that fp (primary guard) |
-| `MIN_XH_SUBNETS` | `30` | distinct `/24` under that fp |
-| `MIN_XH_HOST_SHARE` | `0.50` | per-vhost dominance to admit a `(host, fp)` pair |
-| `MAX_XH_SOLVES_PER_IP` | `1.10` | aggregate solves/IP ceiling (revisit guard) |
+| `XH_WINDOW` | `30m` | sliding window for cross-host aggregation |
+| `MIN_XH_HOST_SHARE` | `0.50` | **primary guard** — per-vhost dominance to admit a `(host, fp)` pair |
+| `MIN_XH_HOSTS` | `4` | distinct pre-gated vhosts one fp must span (floor) |
+| `MIN_XH_COUNTRIES` | `12` | distinct countries under that fp (secondary guard) |
+| `MIN_XH_SUBNETS` | `30` | distinct `/24` under that fp (floor) |
+
+(No `MAX_XH_SOLVES_PER_IP` — the burn-in showed `solves_per_ip` does not separate
+farm from legit, so it is evidence only, not a config gate.)
 
 **Default-on, log-only through burn-in** — identical discipline to Phase-1's
 `FP_TRACK`: the track arms on the next binary upgrade, never blocks, and a
@@ -241,18 +261,18 @@ has no bearing here; extend `solverfarm`'s own coverage test for the new keys.
 Unit tests (`internal/detectors/solverfarm/detector_test.go`, replayed via the
 injectable `nowFn` + `countryFn`, extending the Phase-1 harness):
 
-- **Positive — thin farm:** replay the `95070673` shape — one fp, ~1 solve/IP,
-  ≥ 4 hosts each ≥ 50 % share, ≥ 10 countries and ≥ 30 `/24` node-wide, but
-  **< 6 countries in any single host's 60 s window** → Phase-1 stays silent,
-  cross-host flags, and **every** contributing vhost is marked.
-- **Negative — popular browser across many sites:** one fp on 8 hosts, 1–3
-  countries, `solves_per_ip = 1.5`, **≤ 20 % share per host** → does not flag
-  (share pre-gate empties the pool).
-- **Negative — global-audience dominant browser:** one fp, ≥ 10 countries, but a
-  **minority** per host (share < 0.5) and `solves_per_ip > 1.1` → does not flag
-  (both added guards).
-- **Negative — single busy vhost:** the `c2e09593` shape (49 `/24`, 6 countries,
-  but 5 % share, one host) → not pooled cross-host (share + hosts floor).
+- **Positive — thin farm:** replay the `95070673` shape — one fp, ≥ 4 hosts each
+  ≥ 50 % share, ≥ 12 countries and ≥ 30 `/24` node-wide, but **< 6 countries in any
+  single host's 60 s window** → Phase-1 stays silent, cross-host flags, and
+  **every** contributing vhost is marked.
+- **Negative — popular browser across many sites:** one fp on 8 hosts, many
+  countries, **≤ 20 % share per host** → does not flag (share pre-gate empties the
+  pool, so no host's countries ever accrue). This is the `19877aeb` shape.
+- **Negative — s/ip does not rescue nor condemn:** a farm at `solves_per_ip = 1.1`
+  still flags (s/ip is not a gate); a legit minority at `solves_per_ip = 1.0` still
+  does not (share pre-gate) — the guard is share, not s/ip.
+- **Negative — single busy vhost minority:** one fp on 1 host, 49 `/24`, 6
+  countries, but ~5 % share → not pooled cross-host (share pre-gate + hosts floor).
 - **Regression:** Phase-1's per-`(host, fp)` path and the L2 `MIN_SUBNETS = 40`
   path are unchanged; the empty fingerprint is never a group key on any track.
 - **Fail-safe:** nil `countryFn` disables the cross-host track (never fires

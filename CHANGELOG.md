@@ -17,7 +17,42 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Solver-farm cross-host fingerprint track (`challenge_solver_farm`, Phase 2).**
+  Catches a distributed solver farm spread so thin per vhost that it never trips
+  the per-host 60s country bar, yet the same TLS fingerprint DOMINATES many vhosts
+  node-wide (measured on the fleet: one fp across 22 vhosts / 44 countries, ~1
+  solve/IP). Aggregates per fingerprint across the node over `XH_WINDOW` (30m) and
+  flags a fp that is a super-majority of each vhost it is counted on
+  (`MIN_XH_HOST_SHARE_PCT`, the primary guard — a legit shared browser is a
+  minority everywhere) and clears the host/country/subnet floors; every farmed
+  vhost is then marked. Fingerprint is a group-by key, never a matched value.
+  Default-on, **log-only through its own burn-in** — a cross-host-only finding
+  writes `cfm.detector.log` but does not mail; the vhost is still MARKED
+  `solver_farm` (that is how the burn-in is observed in `challenge_vhosts`), which
+  drives only the WebUI badge and the shadow, non-enforcing Track-2 seed — never a
+  block. `solves_per_ip` is **not** a gate — the weekday burn-in showed
+  it does not separate farm from legit (farm at 1.11, legit at 1.00–1.08) — it is
+  reported as evidence only. Needs GeoIP; fail-safe off without it. New keys on
+  `[challenge_solver_farm]`: `XH_TRACK`, `XH_WINDOW`, `MIN_XH_HOST_SHARE_PCT`,
+  `MIN_XH_HOSTS`, `MIN_XH_COUNTRIES`, `MIN_XH_SUBNETS`. See
+  `docs/solver-farm-cross-host-phase2.md`.
+
+### Changed
+- **Per-host fingerprint-concentration findings now NOTIFY (promoted out of
+  burn-in).** After a clean weekday burn-in (zero collateral, both live farms
+  cleanly separated), an fp-concentration-only finding mails per `ACTION` instead
+  of staying log-only. Notifications for any farmed vhost are throttled by a new
+  `NOTIFY_COOLDOWN` (default 6h): `COOLDOWN` (30m) still governs how often the
+  alert is logged and the "farmed now" mark refreshes, but a persistent farm now
+  mails at most once per `NOTIFY_COOLDOWN` — the log stays live, the mail stays
+  sparse. Applies to every track.
+
 ### Fixed
+- **`docs/examples/traffic-rule-k2-download-clearance.json` had a `note` over the
+  256-byte limit** (`rules/add` would have rejected it, and
+  `TestTrafficRuleExamplesNormalize` failed) — shortened to a valid length. No
+  behaviour change; the recipe itself was unaffected (its note is auto-clamped).
 - **dovecot detector was silently inert on normal hosts — now matches, and
   covers ManageSieve.** Its pre-filter required a bare `dovecot:` tag, but both
   sources it reads are syslog-framed **with the pid** — `/var/log/maillog`
