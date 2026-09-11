@@ -22,6 +22,31 @@ _Nothing yet._
 ## 2026.09.11
 
 ### Added
+- **Solver-farm findings now carry a fingerprint-accurate IP sample.** Each emitted
+  `challenge_solver_farm` finding persists a bounded sample (≤128) of the client
+  addresses behind the fingerprint in its `detection_history` payload (`ips`), so
+  the fleet store (cfm-web) can enrich them — PTR/ASN/country/datacenter — and an
+  operator can tell a residential-proxy pool from a datacenter crawler and act on
+  them (e.g. a fleet-wide firewall block on the non-edge nodes). The sample is
+  **fingerprint-accurate**: cross-host uses the fp's node-wide address set, per-host
+  the fp's own set on that vhost (a new `ips` map on the per-host `fpAgg`) — never
+  the vhost's whole solver population, so a downstream block can't hit an innocent
+  visitor who merely shared the vhost. Empty for a subnet-spread-only finding (no
+  fingerprint). Bounded and dedup-friendly (the store accumulates the population
+  across findings). In the same change the finding's `solves` / `distinct_ips` /
+  `solves_per_ip` are now fp-scoped too (matching `subnets`/`countries`) — per-host
+  the fp's own counts (a new per-address solve count on `fpAgg`), cross-host the
+  node-wide ones — so the persisted row is self-consistent (`distinct_ips ≤ solves`
+  always). This closes a scope mismatch left over from the 2026-09 evidence-scope
+  fix, which could record `distinct_ips > solves` on a cross-host row (impossible
+  for one solver population) or `distinct_ips` above the fingerprint's real reach
+  on a per-host row (it counted the vhost's non-fp visitors). Adversarial review
+  also caught the sibling break — a solve PAST the per-host IP cap still refreshed
+  its `/24`, so a subnet could outlive its (untracked) addresses and, after they
+  aged out, emit a per-host row claiming `distinct_subnets > distinct_ips (== 0)`;
+  the fp's subnets/countries are now counted only for a tracked address, keeping
+  the three maps in lockstep so `countries ≤ subnets ≤ distinct_ips ≤ solves` holds
+  on every emitted row.
 - **Solver-farm cross-host fingerprint track (`challenge_solver_farm`, Phase 2).**
   Catches a distributed solver farm spread so thin per vhost that it never trips
   the per-host 60s country bar, yet the same TLS fingerprint DOMINATES many vhosts

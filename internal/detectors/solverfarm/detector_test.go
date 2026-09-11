@@ -1030,6 +1030,149 @@ func TestFindingSinkFiresWithEvidence(t *testing.T) {
 	if f.Solves != 12 || f.Hosts != 1 {
 		t.Errorf("Solves=%d Hosts=%d, want 12 / 1 (per-host finding)", f.Solves, f.Hosts)
 	}
+	if len(f.IPs) != 12 {
+		t.Errorf("finding IPs=%d, want 12 (the fp's own addresses, for the fleet store)", len(f.IPs))
+	}
+}
+
+// A per-host finding must carry ONLY the flagged fingerprint's addresses, not the
+// vhost's whole solver set — otherwise a downstream block would hit an innocent
+// visitor who merely shared the vhost. Solve the same vhost with the farm fp AND a
+// separate benign fp; the finding's IPs must be exactly the farm's.
+func TestFindingIPsAreFingerprintAccurate(t *testing.T) {
+	var got []Finding
+	SetFindingSink(func(f Finding) { got = append(got, f) })
+	t.Cleanup(func() { SetFindingSink(nil) })
+
+	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6})
+	h.d.countryFn = ipCountry
+	// Farm fp: 8 distinct subnets/countries → flags.
+	for i := 0; i < 8; i++ {
+		h.solveFP("shared.example", fmt.Sprintf("203.0.%d.1", i), chromeUA, "c28caa00")
+	}
+	// A benign, different fingerprint on the SAME vhost (below the floor, never flags).
+	benign := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		ip := fmt.Sprintf("198.51.%d.9", i)
+		benign[ip] = true
+		h.solveFP("shared.example", ip, chromeUA, "77a50fbb")
+	}
+
+	if a := h.run(t); len(a) != 1 {
+		t.Fatalf("alerts=%d, want 1", len(a))
+	}
+	if len(got) != 1 {
+		t.Fatalf("findings=%d, want 1", len(got))
+	}
+	f := got[0]
+	if f.Fingerprint != "c28caa00" {
+		t.Fatalf("Fingerprint=%q, want c28caa00", f.Fingerprint)
+	}
+	if len(f.IPs) != 8 {
+		t.Errorf("finding IPs=%d, want 8 (only the farm fp's addresses)", len(f.IPs))
+	}
+	for _, ip := range f.IPs {
+		if benign[ip] {
+			t.Errorf("finding leaked a benign (non-fingerprint) address %q into the block surface", ip)
+		}
+	}
+	// The population counts must be the fp's own, not the vhost's (which is 11 with
+	// the 3 benign visitors) — otherwise distinct_ips would disagree with ips[].
+	if f.DistinctIPs != 8 {
+		t.Errorf("DistinctIPs=%d, want 8 (the fp's own, not the vhost's 11)", f.DistinctIPs)
+	}
+	if f.Solves != 8 {
+		t.Errorf("Solves=%d, want 8 (the fp's own solves, not the vhost's 11)", f.Solves)
+	}
+	if f.DistinctIPs > f.Solves {
+		t.Errorf("distinct_ips=%d > solves=%d is impossible for one population", f.DistinctIPs, f.Solves)
+	}
+}
+
+// prune must window the fp's address set (a.ips) exactly as it windows subnets/
+// countries — a stale address that rotated away before the cutoff must not linger
+// in the block surface. (RunOnce prunes each host before ingest, so the sampled
+// set is always window-current; this locks the map that carries it.)
+func TestPruneWindowsFingerprintIPs(t *testing.T) {
+	st := newHostState()
+	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	stale := base                       // before the cutoff
+	fresh := base.Add(2 * time.Minute)  // after the cutoff
+	cutoff := base.Add(1 * time.Minute) // window boundary
+
+	st.fps["c28caa00"] = &fpAgg{
+		subnets:   map[string]time.Time{"203.0.0": fresh},
+		countries: map[string]time.Time{"GR": fresh},
+		ips:       map[string]ipStat{"203.0.0.1": {solves: 1, last: stale}, "203.0.0.2": {solves: 1, last: fresh}},
+	}
+	st.prune(cutoff)
+
+	a := st.fps["c28caa00"]
+	if a == nil {
+		t.Fatal("fpAgg dropped though it still has a fresh subnet/country")
+	}
+	if _, ok := a.ips["203.0.0.1"]; ok {
+		t.Error("stale address survived prune into the block surface")
+	}
+	if _, ok := a.ips["203.0.0.2"]; !ok {
+		t.Error("fresh address was wrongly pruned")
+	}
+}
+
+// A solve PAST the per-host IP cap must not refresh its /24 (or country): the
+// three maps have to stay in lockstep so a subnet can never outlive the tracked
+// addresses that kept it in-window. Otherwise, once the real addresses age out,
+// prune keeps the "fresh" (untracked-refreshed) subnet while a.ips empties, and
+// the per-host finding claims distinct_subnets > distinct_ips (== 0) — a row
+// impossible for one solver population. Regression for the #1419 review finding.
+func TestFPSubnetsNeverOutliveTrackedIPs(t *testing.T) {
+	var got []Finding
+	SetFindingSink(func(f Finding) { got = append(got, f) })
+	t.Cleanup(func() { SetFindingSink(nil) })
+
+	// Tiny cap so it binds after two addresses; the divergence is scale-free.
+	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 2, MinFPCountries: 1, MaxTrackedPerHost: 2})
+	h.d.countryFn = ipCountry
+
+	// t0: two addresses in two distinct /24s fill the IP cap (both tracked).
+	h.solveFP("farm.example", "203.0.0.1", chromeUA, "c28caa00")
+	h.solveFP("farm.example", "203.0.1.1", chromeUA, "c28caa00")
+	h.run(t)
+
+	// t0+40s: two NEW addresses in the SAME /24s. The cap is full, so they are not
+	// tracked — and (the fix) must therefore not refresh those /24s either.
+	h.clock = h.clock.Add(40 * time.Second)
+	h.solveFP("farm.example", "203.0.0.77", chromeUA, "c28caa00")
+	h.solveFP("farm.example", "203.0.1.77", chromeUA, "c28caa00")
+	h.run(t)
+
+	// t0+65s: nothing new. The tracked t0 addresses are now outside the 60s window.
+	// With lockstep their /24s prune away with them; without it the /24s (refreshed
+	// to t0+40 by the untracked addresses) survive and the fp becomes a ghost.
+	h.clock = h.clock.Add(25 * time.Second)
+	h.run(t)
+
+	if a := h.d.hosts["farm.example"].fps["c28caa00"]; a != nil {
+		if len(a.subnets) > len(a.ips) {
+			t.Errorf("after aging: subnets=%d > tracked ips=%d — a /24 outlived its addresses (ghost fp)",
+				len(a.subnets), len(a.ips))
+		}
+		if len(a.countries) > len(a.subnets) {
+			t.Errorf("after aging: countries=%d > subnets=%d", len(a.countries), len(a.subnets))
+		}
+	}
+
+	// Every emitted finding must satisfy the population invariant — most importantly
+	// none may claim subnets while carrying zero distinct IPs.
+	for _, f := range got {
+		if f.Fingerprint == "" {
+			continue
+		}
+		if !(f.Countries <= f.Subnets && f.Subnets <= f.DistinctIPs && f.DistinctIPs <= f.Solves) {
+			t.Errorf("finding violates countries<=subnets<=distinct_ips<=solves: %d/%d/%d/%d",
+				f.Countries, f.Subnets, f.DistinctIPs, f.Solves)
+		}
+	}
 }
 
 // The durable finding must fire even when the alert is LOG-ONLY: the memory is
@@ -1080,5 +1223,15 @@ func TestFindingSinkFiresEvenWhenLogOnly(t *testing.T) {
 	if !(f.Countries <= f.Subnets && f.Subnets <= f.DistinctIPs) {
 		t.Errorf("cross-host finding countries=%d subnets=%d ips=%d must satisfy countries<=subnets<=ips",
 			f.Countries, f.Subnets, f.DistinctIPs)
+	}
+	// The finding carries the fp's node-wide address sample (6 hosts × 6 /24s = 36,
+	// under the 128 cap so all of them).
+	if len(f.IPs) != 36 {
+		t.Errorf("cross-host finding IPs=%d, want 36 (the fp's node-wide sample)", len(f.IPs))
+	}
+	// Solves is the fp's node-wide count too (not a per-vhost slice), so it can never
+	// be below the node-wide distinct_ips — the impossible-row bug this locks.
+	if f.DistinctIPs > f.Solves {
+		t.Errorf("cross-host distinct_ips=%d > solves=%d is impossible for one population", f.DistinctIPs, f.Solves)
 	}
 }
