@@ -201,15 +201,20 @@ alone; NAT-aware.
   per-vhost dominance + `solves_per_ip` pre-gate (the two guards that keep a
   global-audience browser out where cross-host loses per-vhost country
   clustering). Grounded, shadow-first: `docs/solver-farm-cross-host-phase2.md`.
-- **Fleet-shared fingerprint reputation (cfm-web)** — [idea]. A `fingerprints`
-  model in `cfm-web` that shares *convicted* client fingerprints (TLS `c28caa00`
-  + later JA4H) across the fleet with proof — the concentration detector produces
-  the verdict, cfm-web propagates it (like the existing `check_ip` IP blocklist),
-  a node acts on the first hit. Fingerprints beat IPs here (stable vs ephemeral);
-  the load-bearing risk is that a fingerprint is a *population* not an individual,
-  so shared action is `challenge` (self-targeting) not `block`, concentration-proof
-  only, soft TTL, ≥K-node corroboration, `ALLOW_FPS` override. Post-burn-in; cfm-web
-  repo not touched yet. Note: `docs/fleet-fingerprint-reputation.md`.
+- **Fleet fingerprint reputation & observability (cfm-web)** — [design]. A
+  central `fingerprints` model in `cfm-web` that remembers *convicted* client
+  fingerprints (TLS `c28caa00` + later JA4H) with hard evidence, shows them live
+  (Filament dashboard + per-fp drilldown), makes them MCP-searchable, and lets an
+  operator arm an action per fingerprint. **Durable record + re-armable policy**:
+  the fingerprint + evidence never expire (memory), only a separate per-fp policy
+  (action + TTL, `blocklists`-style) is armed/disarmed/re-armed. Fingerprints beat
+  IPs (stable vs ephemeral); the load-bearing risk is that a fingerprint is a
+  *population*, so shared action is `challenge` (self-targeting) not `block`,
+  share-proof only, ≥K-node corroboration, `ALLOW_FPS` override. Ingest reuses the
+  `fleet_ingest_cursors` PULL pattern; one node-side prereq (persist the finding to
+  `detection_history`). Rollout A (memory+MCP) → B (dashboard+policy) → C (edge
+  enforce). Grounded design: `cfm-web:docs/fingerprint-reputation.md`; cfm-side
+  concerns: `docs/fleet-fingerprint-reputation.md`.
 - **Webtop visibility for the per-IP / edge-log shadow signals** — [post-burn-in].
   `challenge_score` (per-IP) and `cfm_pcw` (edge error log) don't map to the
   existing per-vhost webtop pills or the WAF-history analytics, so they're
