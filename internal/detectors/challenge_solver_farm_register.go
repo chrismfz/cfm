@@ -55,6 +55,16 @@ func init() {
 			"FP_TRACK":         "1",
 			"MIN_FP_SUBNETS":   "8",
 			"MIN_FP_COUNTRIES": "6",
+			"NOTIFY_COOLDOWN":  "6h",
+			// Cross-host fingerprint-concentration track (Phase 2). Default-on,
+			// log-only through its own burn-in. Share is the primary guard;
+			// solves_per_ip is NOT a gate (burn-in showed it does not separate).
+			"XH_TRACK":              "1",
+			"XH_WINDOW":             "30m",
+			"MIN_XH_HOST_SHARE_PCT": "50",
+			"MIN_XH_HOSTS":          "4",
+			"MIN_XH_COUNTRIES":      "12",
+			"MIN_XH_SUBNETS":        "30",
 		},
 		LeniencySupported:   false,
 		LeniencyRecommended: false,
@@ -92,6 +102,16 @@ func init() {
 			MinFPSubnets:      kvInt(kv, "MIN_FP_SUBNETS", 8),
 			MinFPCountries:    kvInt(kv, "MIN_FP_COUNTRIES", 6),
 			AllowFPs:          csvKV(kv, "ALLOW_FPS"),
+			NotifyCooldown:    kvDur(kv, "NOTIFY_COOLDOWN", 6*time.Hour),
+			// Cross-host track. Share is read as an integer percent (idiomatic
+			// integer knob) and converted to a fraction; solves_per_ip is not a
+			// config gate (evidence only).
+			XHTrack:        kvBool(kv, "XH_TRACK", true),
+			XHWindow:       kvDur(kv, "XH_WINDOW", 30*time.Minute),
+			MinXHHostShare: float64(kvInt(kv, "MIN_XH_HOST_SHARE_PCT", 50)) / 100.0,
+			MinXHHosts:     kvInt(kv, "MIN_XH_HOSTS", 4),
+			MinXHCountries: kvInt(kv, "MIN_XH_COUNTRIES", 12),
+			MinXHSubnets:   kvInt(kv, "MIN_XH_SUBNETS", 30),
 		}
 		// Setting BLOCK here does not block — enforcement=observe wins — but it
 		// moves the alert onto a path that logs without notifying. "BLOCK = dryrun

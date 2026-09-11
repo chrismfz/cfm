@@ -634,14 +634,17 @@ func TestFPConcentrationLowAndSlowFarm(t *testing.T) {
 	if a.Extra["enforcement"] != "observe" {
 		t.Errorf("enforcement = %q, want observe (alert-only like the parent track)", a.Extra["enforcement"])
 	}
-	if got := a.Extra[core.ExtraNotify]; got != core.NotifyNo {
-		t.Errorf("%s = %q, want %q — an fp-only finding is log-only through burn-in (no mail on upgrade)", core.ExtraNotify, got, core.NotifyNo)
+	// As of the 2026-09-11 promotion (clean weekday burn-in) an fp-only finding
+	// NOTIFIES — ExtraNotify absent means notify. The throttle is NotifyCooldown,
+	// not a blanket suppression; this is the first alert so it is not throttled.
+	if _, ok := a.Extra[core.ExtraNotify]; ok {
+		t.Errorf("%s must be absent — an fp-only finding notifies after the burn-in promotion", core.ExtraNotify)
 	}
 }
 
 // A COMBINED finding — the high-rate subnet-spread AND fingerprint concentration
-// both fire on one vhost — is a confirmed farm and DOES notify. Only the fp-only
-// finding is held log-only through burn-in.
+// both fire on one vhost — is a confirmed farm and DOES notify (as does an fp-only
+// finding since the 2026-09-11 promotion).
 func TestFPConcentrationCombinedWithSubnetSpreadNotifies(t *testing.T) {
 	h := newHarness(t, Config{FPTrack: true, MinSubnets: 40, MinSolves: 40, MinFPSubnets: 8, MinFPCountries: 6})
 	h.d.countryFn = ipCountry
@@ -769,5 +772,218 @@ func TestFPConcentrationLeavesSubnetSpreadIntact(t *testing.T) {
 	}
 	if got := alerts[0].Extra["fp_track"]; got != "0" {
 		t.Errorf("fp_track = %q, want 0", got)
+	}
+}
+
+// ── cross-host track (Phase 2) ────────────────────────────────────────────────
+
+// xhCountry maps 10.b.c.x to a country by BOTH octets so a spread across hosts
+// (b) AND subnets (c) produces many distinct countries — the cross-host shape.
+func xhCountry(ip string) string {
+	v := net.ParseIP(ip).To4()
+	if v == nil {
+		return ""
+	}
+	return fpTestCountries[(int(v[1])*6+int(v[2]))%len(fpTestCountries)]
+}
+
+func xhCfg() Config {
+	return Config{
+		XHTrack: true, FPTrack: true,
+		MinFPSubnets: 8, MinFPCountries: 6, // per-host stays silent at 6 subnets/host
+		MinXHHosts: 4, MinXHCountries: 12, MinXHSubnets: 30, MinXHHostShare: 0.5,
+	}
+}
+
+// The thin farm: one fingerprint on 6 subnets per vhost across 6 vhosts — under
+// the per-host bar on every host (6 < MIN_FP_SUBNETS 8), yet node-wide it spans
+// 36 subnets / 20 countries under one dominant fingerprint. The cross-host track
+// must flag it and mark EVERY contributing vhost; per-host must stay silent.
+func TestCrossHostThinFarmFlagsEveryVhost(t *testing.T) {
+	h := newHarness(t, xhCfg())
+	h.d.countryFn = xhCountry
+	hosts := []string{"a.shop", "b.shop", "c.shop", "d.shop", "e.shop", "f.shop"}
+	for hi, host := range hosts {
+		for s := 0; s < 6; s++ {
+			h.solveFP(host, fmt.Sprintf("10.%d.%d.1", hi+1, s), chromeUA, "95070673")
+		}
+	}
+	alerts := h.run(t)
+	if len(alerts) != len(hosts) {
+		t.Fatalf("got %d alerts, want %d — every farmed vhost is marked", len(alerts), len(hosts))
+	}
+	seen := map[string]bool{}
+	for _, a := range alerts {
+		seen[a.Key] = true
+		if a.Extra["xh_track"] != "1" {
+			t.Errorf("%s: xh_track = %q, want 1", a.Key, a.Extra["xh_track"])
+		}
+		if a.Extra["tracks"] != "cross_host" {
+			t.Errorf("%s: tracks = %q, want cross_host only (per-host silent at 6<8 subnets)", a.Key, a.Extra["tracks"])
+		}
+		if a.Extra["xh_fp"] != "95070673" {
+			t.Errorf("%s: xh_fp = %q, want the grouping fingerprint", a.Key, a.Extra["xh_fp"])
+		}
+		if a.Extra["xh_host_share"] != "100%" {
+			t.Errorf("%s: xh_host_share = %q, want 100%% (fp is the only solver)", a.Key, a.Extra["xh_host_share"])
+		}
+		// cross-host-only is LOG-ONLY through its burn-in.
+		if got := a.Extra[core.ExtraNotify]; got != core.NotifyNo {
+			t.Errorf("%s: %s = %q, want %q — a cross-host-only finding is log-only through burn-in", a.Key, core.ExtraNotify, got, core.NotifyNo)
+		}
+	}
+	if len(seen) != len(hosts) {
+		t.Errorf("distinct flagged vhosts = %d, want %d", len(seen), len(hosts))
+	}
+}
+
+// The share pre-gate is the primary guard: a globally-distributed shared browser
+// (the 19877aeb shape — many hosts, many countries, ~1 solve/IP) that is a MINORITY
+// of every vhost must never enter the cross-host pool. Here the "farm" fp is 1 of 5
+// fingerprints on each host (20% share < 50%), so no host qualifies.
+func TestCrossHostMinorityBrowserIsNotPooled(t *testing.T) {
+	h := newHarness(t, xhCfg())
+	h.d.countryFn = xhCountry
+	hosts := []string{"a.shop", "b.shop", "c.shop", "d.shop", "e.shop", "f.shop"}
+	for hi, host := range hosts {
+		for s := 0; s < 6; s++ {
+			// the shared fp on one /24 …
+			h.solveFP(host, fmt.Sprintf("10.%d.%d.1", hi+1, s), chromeUA, "19877aeb")
+			// … drowned by 4 other fingerprints on the same /24 (distinct IPs), so
+			// 19877aeb is 20% of the vhost's fingerprinted solves.
+			for k := 0; k < 4; k++ {
+				h.solveFP(host, fmt.Sprintf("10.%d.%d.%d", hi+1, s, 10+k), chromeUA, fmt.Sprintf("other%d", k))
+			}
+		}
+	}
+	if got := h.run(t); len(got) != 0 {
+		t.Fatalf("got %d alerts for a 20%%-share shared browser, want 0 — the share pre-gate must empty the pool", len(got))
+	}
+}
+
+// solves_per_ip is NOT a gate: a farm at s/ip = 1.1 (repeat solves from some IPs)
+// still flags. The burn-in showed s/ip does not separate farm from legit, so it is
+// evidence only. Here each vhost has the fp on 6 /24s but a couple of IPs solve
+// twice, pushing s/ip above 1.0 — the flag must be unaffected.
+func TestCrossHostSolvesPerIPIsNotAGate(t *testing.T) {
+	h := newHarness(t, xhCfg())
+	h.d.countryFn = xhCountry
+	hosts := []string{"a.shop", "b.shop", "c.shop", "d.shop", "e.shop", "f.shop"}
+	for hi, host := range hosts {
+		for s := 0; s < 6; s++ {
+			h.solveFP(host, fmt.Sprintf("10.%d.%d.1", hi+1, s), chromeUA, "95070673")
+		}
+		// two repeat solves from already-seen addresses on this host
+		h.solveFP(host, fmt.Sprintf("10.%d.0.1", hi+1), chromeUA, "95070673")
+		h.solveFP(host, fmt.Sprintf("10.%d.1.1", hi+1), chromeUA, "95070673")
+	}
+	alerts := h.run(t)
+	if len(alerts) != len(hosts) {
+		t.Fatalf("got %d alerts, want %d — s/ip>1 must not suppress the cross-host flag", len(alerts), len(hosts))
+	}
+	if spi := alerts[0].Extra["xh_solves_per_ip"]; spi == "" || spi == "1.00" {
+		t.Errorf("xh_solves_per_ip = %q, want >1.00 carried as evidence", spi)
+	}
+}
+
+// Fail-safe: with no enricher (countryFn nil) the cross-host track — like the
+// per-host one — must stay silent rather than fire on subnet/host spread alone.
+func TestCrossHostOffWithoutGeo(t *testing.T) {
+	h := newHarness(t, xhCfg())
+	// countryFn deliberately nil.
+	for hi := 0; hi < 6; hi++ {
+		for s := 0; s < 6; s++ {
+			h.solveFP(fmt.Sprintf("h%d.shop", hi), fmt.Sprintf("10.%d.%d.1", hi+1, s), chromeUA, "95070673")
+		}
+	}
+	if got := h.run(t); len(got) != 0 {
+		t.Fatalf("got %d alerts with no geo enricher, want 0 — cross-host must fail safe (off)", len(got))
+	}
+}
+
+// XH_TRACK off leaves only the per-host tracks; a thin cross-host farm goes
+// unflagged (each host is under the per-host bar).
+func TestCrossHostOffByFlag(t *testing.T) {
+	cfg := xhCfg()
+	cfg.XHTrack = false
+	h := newHarness(t, cfg)
+	h.d.countryFn = xhCountry
+	for hi := 0; hi < 6; hi++ {
+		for s := 0; s < 6; s++ {
+			h.solveFP(fmt.Sprintf("h%d.shop", hi), fmt.Sprintf("10.%d.%d.1", hi+1, s), chromeUA, "95070673")
+		}
+	}
+	if got := h.run(t); len(got) != 0 {
+		t.Fatalf("got %d alerts with XHTrack off, want 0", len(got))
+	}
+}
+
+// NotifyCooldown throttles the MAIL for a persistent farm while COOLDOWN still
+// governs the logged alert and the mark: the first notifying alert stamps the
+// notify clock, and the next alert after COOLDOWN (but within NotifyCooldown) is
+// logged with NotifyNo. A subnet-spread farm (which notifies) exercises this.
+func TestNotifyCooldownThrottlesMailNotLog(t *testing.T) {
+	h := newHarness(t, Config{Cooldown: 30 * time.Minute, NotifyCooldown: 6 * time.Hour})
+	// pass 1: farm fires and notifies (ExtraNotify absent).
+	h.farmBurst("shop.example.com", 60, func(int) string { return chromeUA })
+	a1 := h.run(t)
+	if len(a1) != 1 {
+		t.Fatalf("pass 1: got %d alerts, want 1", len(a1))
+	}
+	if _, ok := a1[0].Extra[core.ExtraNotify]; ok {
+		t.Fatalf("pass 1: first alert must notify (ExtraNotify absent)")
+	}
+	// advance past COOLDOWN but well within NotifyCooldown, and re-run the farm.
+	h.clock = h.clock.Add(31 * time.Minute)
+	h.farmBurst("shop.example.com", 60, func(int) string { return chromeUA })
+	a2 := h.run(t)
+	if len(a2) != 1 {
+		t.Fatalf("pass 2: got %d alerts, want 1 (logged past COOLDOWN)", len(a2))
+	}
+	if got := a2[0].Extra[core.ExtraNotify]; got != core.NotifyNo {
+		t.Errorf("pass 2: %s = %q, want %q — logged but not mailed within NotifyCooldown", core.ExtraNotify, got, core.NotifyNo)
+	}
+	// advance past NotifyCooldown: mail is allowed again.
+	h.clock = h.clock.Add(6 * time.Hour)
+	h.farmBurst("shop.example.com", 60, func(int) string { return chromeUA })
+	a3 := h.run(t)
+	if len(a3) != 1 {
+		t.Fatalf("pass 3: got %d alerts, want 1", len(a3))
+	}
+	if _, ok := a3[0].Extra[core.ExtraNotify]; ok {
+		t.Errorf("pass 3: alert past NotifyCooldown must notify again (ExtraNotify absent)")
+	}
+}
+
+// A PULSING farm — active, then quiet past COOLDOWN, then active again within
+// NotifyCooldown — must not bypass the mail throttle. The hostState (which holds
+// lastNotify) must survive the idle gap, or the next burst mails again far inside
+// NotifyCooldown. This is the reclamation-bypass the review flagged.
+func TestNotifyCooldownSurvivesIdleReclamation(t *testing.T) {
+	h := newHarness(t, Config{Cooldown: 30 * time.Minute, NotifyCooldown: 6 * time.Hour})
+	// pass 1: fires and notifies.
+	h.farmBurst("shop.example.com", 60, func(int) string { return chromeUA })
+	if a := h.run(t); len(a) != 1 {
+		t.Fatalf("pass 1: got %d alerts, want 1", len(a))
+	}
+	// pass 2: fully idle and past COOLDOWN — the host must NOT be reclaimed (its
+	// lastNotify is still within NotifyCooldown).
+	h.clock = h.clock.Add(31 * time.Minute)
+	if a := h.run(t); len(a) != 0 {
+		t.Fatalf("pass 2 (idle): got %d alerts, want 0", len(a))
+	}
+	if _, ok := h.d.hosts["shop.example.com"]; !ok {
+		t.Fatalf("host was reclaimed during the idle gap — lastNotify is lost, the throttle can be bypassed")
+	}
+	// pass 3: the farm returns ~1h later, still within NotifyCooldown → logged, not
+	// mailed (proves lastNotify survived).
+	h.clock = h.clock.Add(30 * time.Minute)
+	h.farmBurst("shop.example.com", 60, func(int) string { return chromeUA })
+	a3 := h.run(t)
+	if len(a3) != 1 {
+		t.Fatalf("pass 3: got %d alerts, want 1", len(a3))
+	}
+	if got := a3[0].Extra[core.ExtraNotify]; got != core.NotifyNo {
+		t.Errorf("pass 3: %s = %q, want %q — a pulsing farm must not re-mail within NotifyCooldown", core.ExtraNotify, got, core.NotifyNo)
 	}
 }

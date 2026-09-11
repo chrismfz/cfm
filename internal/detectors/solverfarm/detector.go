@@ -70,6 +70,13 @@ import (
 const (
 	maxFPsPerHost       = 4096
 	maxCountriesTracked = 300
+	// maxXHRecords bounds the node-level cross-host solve-record buffer. A safety
+	// valve only: the buffer is pruned to XHWindow every pass, so it self-bounds to
+	// XHWindow × fingerprinted-solve-rate; the cap stops a pathological burst from
+	// growing it without bound. Overflow is counted and logged, not silently
+	// dropped. A const (like the two above), not a config knob — an operator never
+	// needs to tune it, and CLAUDE.md §5 keeps hidden config keys out of the tree.
+	maxXHRecords = 100000
 )
 
 // Action is what the detector does with a flagged vhost, set by ACTION in
@@ -194,8 +201,44 @@ type Config struct {
 	MinFPSubnets   int
 	MinFPCountries int
 	// AllowFPs exempts known-legitimate shared fingerprints (e.g. a monitored
-	// synthetic-checker fleet) from the concentration track.
+	// synthetic-checker fleet) from the concentration track. Applies to the
+	// cross-host track too.
 	AllowFPs []string
+
+	// NotifyCooldown throttles NOTIFICATIONS (mail/Slack) for a farmed vhost to at
+	// most one per this interval, independently of Cooldown. Cooldown (30m) still
+	// governs how often the alert is emitted at all — i.e. the detector-log record
+	// and the "farmed now" mark refresh — but a farm runs for hours, so mailing
+	// every 30m is noise once the operator knows. Between Cooldown and
+	// NotifyCooldown the alert is logged without a notification. Applies to every
+	// track (subnet-spread included): the log stays live, the mail stays sparse.
+	NotifyCooldown time.Duration
+
+	// XHTrack enables the CROSS-HOST fingerprint-concentration track: a single
+	// fingerprint that DOMINATES many vhosts (super-majority of each vhost's
+	// solves) and spans many countries+subnets across the NODE, even when it stays
+	// under the per-vhost 60s country bar on every individual host. This catches
+	// the thin farm the per-host FPTrack misses (measured: 95070673 across 22
+	// vhosts / 44 countries, ~1 solve/IP). Fingerprint is a GROUP-BY key, never a
+	// matched value. See docs/solver-farm-cross-host-phase2.md.
+	XHTrack bool
+	// XHWindow is the (longer) aggregation window for the cross-host track — a thin
+	// farm needs time to accumulate its spread. Independent of Window (60s).
+	XHWindow time.Duration
+	// MinXHHostShare is the PRIMARY cross-host guard: a (host, fp) pair is admitted
+	// to the fingerprint's cross-host tally only when that fp is at least this
+	// fraction of the vhost's fingerprinted solves in the window. A farm dominates
+	// the vhosts it targets (0.85–1.0); a legitimate shared browser is a minority
+	// (≤0.39 measured), so it never enters the pool and its spread never accrues.
+	MinXHHostShare float64
+	// MinXHHosts / MinXHCountries / MinXHSubnets are the spread FLOORS over the
+	// pre-gated hosts. Countries is the secondary guard (raised to 12: the closest
+	// legit fp reached 9 cross-host). solves_per_ip is deliberately NOT a gate —
+	// the burn-in showed it does not separate farm from legit (farm at 1.11, legit
+	// at 1.00–1.08) — it is carried on the alert as evidence only.
+	MinXHHosts     int
+	MinXHCountries int
+	MinXHSubnets   int
 }
 
 type solveRec struct {
@@ -237,6 +280,11 @@ type hostState struct {
 	setsCapped bool
 
 	lastAlert time.Time
+	// lastNotify stamps the last time an alert for this vhost actually NOTIFIED
+	// (not merely logged). Gated by Cfg.NotifyCooldown so a persistent farm mails
+	// sparsely while still logging every Cooldown. Separate from lastAlert on
+	// purpose: the log record and the mark stay live at the Cooldown cadence.
+	lastNotify time.Time
 
 	// fps is the per-fingerprint aggregation for the concentration track, nil
 	// until the first usable-fingerprint solve. Every fp-tracked solve also feeds
@@ -253,6 +301,32 @@ type hostState struct {
 type fpAgg struct {
 	subnets   map[string]time.Time
 	countries map[string]time.Time
+}
+
+// xhRec is one fingerprinted solve, retained node-wide for the cross-host track's
+// XHWindow (longer than the per-host Window). The track re-aggregates the whole
+// buffer each pass rather than maintaining incrementally-windowed counters —
+// per-solve records are what a sliding window actually needs, and a flat slice
+// pruned by time is far easier to reason about than decrementing counts on expiry.
+// Only fingerprinted solves are stored (an empty fingerprint is never a group
+// key), so the buffer self-bounds to the fingerprinted solve rate × XHWindow.
+type xhRec struct {
+	when    time.Time
+	host    string
+	fp      string
+	subnet  string
+	ip      string
+	country string
+}
+
+// xhAgg is the per-fingerprint cross-host tally, folded from the pre-gated hosts
+// (those where the fp is a super-majority). It is rebuilt each pass, never stored.
+type xhAgg struct {
+	hosts     map[string]struct{}
+	countries map[string]struct{}
+	subnets   map[string]struct{}
+	ips       map[string]struct{}
+	solves    int
 }
 
 func newHostState() *hostState {
@@ -314,6 +388,12 @@ type Detector struct {
 	// one is in flight) and Enqueue never touches it. Take mu here too if that
 	// ever stops being true.
 	hosts map[string]*hostState
+
+	// xhRecs is the node-level cross-host solve-record buffer (XHWindow). Owned by
+	// RunOnce, same as hosts. xhDropped counts records the cap refused since the
+	// last pass. Both are unused when XHTrack is off.
+	xhRecs    []xhRec
+	xhDropped int
 
 	// nowFn is the detector's clock. Injectable so tests can replay a recorded
 	// traffic window at its original timestamps instead of wall-clock.
@@ -404,6 +484,26 @@ func New(cfg Config) *Detector {
 	}
 	if cfg.MinFPCountries <= 0 {
 		cfg.MinFPCountries = 6
+	}
+	if cfg.NotifyCooldown <= 0 {
+		cfg.NotifyCooldown = 6 * time.Hour
+	}
+	// The cross-host window must not be shorter than the per-host Window; a thin
+	// farm is exactly what it exists to accumulate over time.
+	if cfg.XHWindow < cfg.Window {
+		cfg.XHWindow = 30 * time.Minute
+	}
+	if cfg.MinXHHostShare <= 0 || cfg.MinXHHostShare > 1 {
+		cfg.MinXHHostShare = 0.50
+	}
+	if cfg.MinXHHosts <= 0 {
+		cfg.MinXHHosts = 4
+	}
+	if cfg.MinXHCountries <= 0 {
+		cfg.MinXHCountries = 12
+	}
+	if cfg.MinXHSubnets <= 0 {
+		cfg.MinXHSubnets = 30
 	}
 
 	d := &Detector{
@@ -543,6 +643,14 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	for _, st := range d.hosts {
 		st.prune(cutoff)
 	}
+	// Same reasoning for the cross-host buffer: prune to XHWindow BEFORE ingest so
+	// the maxXHRecords cap is measured against live records only. Pruning inside
+	// evalCrossHost (after ingest) would let stale records hold cap budget and drop
+	// live solves during a high-rate burst — the track would go blind exactly when
+	// it matters. evalCrossHost then just aggregates the already-pruned buffer.
+	if d.cfg.XHTrack {
+		d.pruneXH(now.Add(-d.cfg.XHWindow))
+	}
 
 	for _, ev := range batch {
 		select {
@@ -572,29 +680,39 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		} else {
 			st.setsCapped = true
 		}
-		// Fingerprint-concentration track: group usable fingerprints and, per fp,
-		// track the distinct subnets + countries solving under it. Done HERE —
-		// before the evidence cap's continue below — so an evidence flood cannot
-		// suppress it, exactly as the subnet/IP sets above cannot be suppressed.
-		// Country is looked up here (RunOnce, off the hot Enqueue path) and only
-		// for fp-bearing solves. Empty fingerprint is never a group key (it pools
-		// unrelated clients); allow-listed fingerprints are skipped.
-		if d.cfg.FPTrack && d.countryFn != nil {
+		// Fingerprint tracks — per-host concentration (FPTrack) and cross-host
+		// (XHTrack). Both group usable fingerprints and need the client's country,
+		// so look it up HERE (RunOnce, off the hot Enqueue path) ONCE per fp-bearing
+		// solve and feed both. Done before the evidence cap's continue below, so an
+		// evidence flood cannot suppress either, exactly as the subnet/IP sets above
+		// cannot. Empty fingerprint is never a group key (it pools unrelated
+		// clients); allow-listed fingerprints are skipped from both tracks.
+		if (d.cfg.FPTrack || d.cfg.XHTrack) && d.countryFn != nil {
 			if fp := strings.ToLower(strings.TrimSpace(ev.Fingerprint)); fp != "" {
 				if _, skip := d.allowFPs[fp]; !skip {
-					a := st.fps[fp]
-					if a == nil && len(st.fps) < maxFPsPerHost {
-						a = &fpAgg{subnets: map[string]time.Time{}, countries: map[string]time.Time{}}
-						st.fps[fp] = a
-					}
-					if a != nil {
-						if _, seen := a.subnets[sn]; seen || len(a.subnets) < d.cfg.MaxTrackedPerHost {
-							a.subnets[sn] = ev.When
+					cc := d.countryFn(ev.SrcIP)
+					if d.cfg.FPTrack {
+						a := st.fps[fp]
+						if a == nil && len(st.fps) < maxFPsPerHost {
+							a = &fpAgg{subnets: map[string]time.Time{}, countries: map[string]time.Time{}}
+							st.fps[fp] = a
 						}
-						if cc := d.countryFn(ev.SrcIP); cc != "" {
-							if _, seen := a.countries[cc]; seen || len(a.countries) < maxCountriesTracked {
-								a.countries[cc] = ev.When
+						if a != nil {
+							if _, seen := a.subnets[sn]; seen || len(a.subnets) < d.cfg.MaxTrackedPerHost {
+								a.subnets[sn] = ev.When
 							}
+							if cc != "" {
+								if _, seen := a.countries[cc]; seen || len(a.countries) < maxCountriesTracked {
+									a.countries[cc] = ev.When
+								}
+							}
+						}
+					}
+					if d.cfg.XHTrack {
+						if len(d.xhRecs) < maxXHRecords {
+							d.xhRecs = append(d.xhRecs, xhRec{when: ev.When, host: host, fp: fp, subnet: sn, ip: ev.SrcIP, country: cc})
+						} else {
+							d.xhDropped++
 						}
 					}
 				}
@@ -607,13 +725,26 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		st.recs = append(st.recs, solveRec{when: ev.When, subnet: sn, ip: ev.SrcIP, ua: ev.UserAgent, uaBad: ev.Signal})
 	}
 
+	// Cross-host track: fold the node-level buffer once, up front, so the per-host
+	// loop below can (a) not reclaim a vhost that is flagged cross-host this pass
+	// and (b) attach the cross-host evidence to a combined finding.
+	xhVerdicts := d.evalCrossHost(now)
+	alerted := make(map[string]bool)
+
 	for host, st := range d.hosts {
 		// Drop vhosts that have gone quiet so state does not grow without bound.
-		// Guarded by the cooldown so state is never reclaimed while it still
-		// suppresses a repeat alert.
-		if len(st.subnets) == 0 && len(st.recs) == 0 && now.Sub(st.lastAlert) > d.cfg.Cooldown {
-			delete(d.hosts, host)
-			continue
+		// Guarded so state is never reclaimed while it still suppresses something:
+		// the alert cooldown, the NOTIFY cooldown (else a farm that idles past
+		// Cooldown loses lastNotify and re-mails within NotifyCooldown — the pulsing
+		// bypass), or a cross-host flag this pass (its per-host 60s state can be
+		// empty while the fp is farming it thin).
+		if len(st.subnets) == 0 && len(st.recs) == 0 &&
+			now.Sub(st.lastAlert) > d.cfg.Cooldown &&
+			(st.lastNotify.IsZero() || now.Sub(st.lastNotify) > d.cfg.NotifyCooldown) {
+			if _, xh := xhVerdicts[host]; !xh {
+				delete(d.hosts, host)
+				continue
+			}
 		}
 
 		solves := len(st.recs) + st.truncated
@@ -621,11 +752,13 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// Reset every pass, not only when an alert fires.
 		st.truncated, st.setsCapped = 0, false
 
-		// Two independent verdicts share one alert/mark/cooldown: the original
-		// high-rate subnet spread, and the low-rate fingerprint concentration.
+		// Three verdicts share one alert/mark/cooldown per vhost: the original
+		// high-rate subnet spread, the per-host low-rate fingerprint concentration,
+		// and (attached here when present) the cross-host concentration.
 		hiRate := solves >= d.cfg.MinSolves && len(st.subnets) >= d.cfg.MinSubnets
 		loFP, loFPSubs, loFPCcs := d.topConcentratedFP(st)
-		if !hiRate && loFP == "" {
+		xh, hasXH := xhVerdicts[host]
+		if !hiRate && loFP == "" && !hasXH {
 			continue
 		}
 		// Mark before the cooldown check, not after: the mark answers "is this
@@ -634,6 +767,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		if d.onFarm != nil {
 			d.onFarm(host, d.markTTL())
 		}
+		alerted[host] = true
 		if !st.lastAlert.IsZero() && now.Sub(st.lastAlert) < d.cfg.Cooldown {
 			continue
 		}
@@ -647,17 +781,75 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			}
 		}
 
-		alert := d.buildAlert(now, host, st, solves, truncated, setsCapped, uas, impossibleUA, hiRate, loFP, loFPSubs, loFPCcs)
-		select {
-		case out <- alert:
-			// Stamp the cooldown only once the alert is actually handed off, so a
-			// shutdown mid-send does not silence the next window.
-			st.lastAlert = now
-		case <-ctx.Done():
+		// Notify decision. A vhost carried by a per-host or subnet-spread verdict
+		// (or a combined finding that also includes cross-host) notifies per ACTION,
+		// throttled by NotifyCooldown so a persistent farm logs every Cooldown but
+		// mails sparsely. A finding that is CROSS-HOST ONLY (no per-host verdict this
+		// pass, even though it has a hostState) stays log-only through the cross-host
+		// burn-in — the same shadow-first discipline Phase-1's fp track shipped under.
+		xhArg := &xh
+		if !hasXH {
+			xhArg = nil
+		}
+		xhOnly := hasXH && !hiRate && loFP == ""
+		if d.emit(ctx, out, now, st, host, solves, truncated, setsCapped, uas, impossibleUA, hiRate, loFP, loFPSubs, loFPCcs, xhArg, xhOnly) != nil {
+			return ctx.Err()
+		}
+	}
+
+	// Cross-host-only vhosts: flagged solely by the cross-host track (no per-host
+	// or subnet-spread verdict this pass). These are the thin-farm vhosts Phase-1
+	// misses. Log-only through the cross-host burn-in.
+	for host, xh := range xhVerdicts {
+		if alerted[host] {
+			continue
+		}
+		st := d.hosts[host]
+		if st == nil {
+			st = newHostState()
+			d.hosts[host] = st
+		}
+		if d.onFarm != nil {
+			d.onFarm(host, d.markTTL())
+		}
+		if !st.lastAlert.IsZero() && now.Sub(st.lastAlert) < d.cfg.Cooldown {
+			continue
+		}
+		xh := xh
+		if d.emit(ctx, out, now, st, host, 0, 0, false, nil, 0, false, "", 0, 0, &xh, true) != nil {
 			return ctx.Err()
 		}
 	}
 	return nil
+}
+
+// emit builds and sends one alert, applying the NotifyCooldown throttle and
+// stamping the per-vhost cooldown/notify clocks on a successful hand-off. It
+// returns a non-nil error only on context cancellation (mirrors the caller's
+// `return ctx.Err()`). xhOnly forces the finding log-only (the cross-host
+// burn-in); otherwise the NotifyCooldown + ACTION=logonly decide whether it
+// notifies.
+func (d *Detector) emit(ctx context.Context, out chan<- core.Alert, now time.Time, st *hostState,
+	host string, solves, truncated int, setsCapped bool, uas map[string]int, impossibleUA int,
+	hiRate bool, loFP string, loFPSubs, loFPCcs int, xh *xhVerdict, xhOnly bool) error {
+
+	suppressNotify := xhOnly || d.cfg.Action == ActionLogonly
+	if !suppressNotify && !st.lastNotify.IsZero() && now.Sub(st.lastNotify) < d.cfg.NotifyCooldown {
+		suppressNotify = true
+	}
+	alert := d.buildAlert(now, host, st, solves, truncated, setsCapped, uas, impossibleUA, hiRate, loFP, loFPSubs, loFPCcs, xh, suppressNotify)
+	select {
+	case out <- alert:
+		// Stamp the clocks only once the alert is actually handed off, so a
+		// shutdown mid-send does not silence the next window.
+		st.lastAlert = now
+		if !suppressNotify {
+			st.lastNotify = now
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // topConcentratedFP returns the fingerprint on this host whose in-window solves
@@ -685,11 +877,168 @@ func (d *Detector) topConcentratedFP(st *hostState) (fp string, subnets, countri
 	return fp, subnets, countries
 }
 
+// xhVerdict is a cross-host finding for ONE vhost: the fingerprint that flagged
+// it, that fingerprint's node-wide tally (over the pre-gated hosts), the
+// aggregate solves-per-IP (evidence only), and THIS vhost's share of the fp. The
+// host* fields are this vhost's own counts over XHWindow, used to render an honest
+// headline when the per-host 60s state has already been reclaimed (a thin farm can
+// flag cross-host with no solve in the last 60s).
+type xhVerdict struct {
+	fp          string
+	hosts       int
+	countries   int
+	subnets     int
+	solvesPerIP float64
+	hostShare   float64
+	hostSolves  int
+	hostSubnets int
+	hostIPs     int
+}
+
+// hostFPCell is per-(host, fp) accumulation while folding the cross-host buffer.
+type hostFPCell struct {
+	solves    int
+	subnets   map[string]struct{}
+	countries map[string]struct{}
+	ips       map[string]struct{}
+}
+
+// pruneXH drops cross-host records older than the cutoff. Called BEFORE ingest so
+// the maxXHRecords cap is measured against live records only (see the call site).
+func (d *Detector) pruneXH(cutoff time.Time) {
+	kept := d.xhRecs[:0]
+	for _, r := range d.xhRecs {
+		if r.when.After(cutoff) {
+			kept = append(kept, r)
+		}
+	}
+	// Release the strings held by the pruned tail; the backing array is reused.
+	for i := len(kept); i < len(d.xhRecs); i++ {
+		d.xhRecs[i] = xhRec{}
+	}
+	d.xhRecs = kept
+}
+
+// evalCrossHost folds the node-level solve-record buffer (XHWindow) into a
+// per-vhost verdict for the cross-host track. A (host, fp) pair is admitted to a
+// fingerprint's tally ONLY when the fp is a super-majority of that vhost's
+// fingerprinted solves (MinXHHostShare) — the primary guard: a legit minority
+// browser never enters the pool, so its country/subnet spread never accrues. A
+// fingerprint whose pre-gated hosts clear the host/country/subnet floors flags,
+// and every one of those hosts is returned. solves_per_ip is computed for
+// evidence only — the burn-in showed it does not separate farm from legit, so it
+// is NOT a gate. Fingerprint is a GROUP-BY key throughout, never a matched value.
+// Returns nil when the track is off or nothing flags.
+func (d *Detector) evalCrossHost(now time.Time) map[string]xhVerdict {
+	if !d.cfg.XHTrack || d.countryFn == nil {
+		return nil
+	}
+	// The buffer is already pruned to XHWindow by pruneXH (before ingest); here we
+	// only report/clear the overflow counter and fold what remains.
+	if d.xhDropped > 0 {
+		logging.Logf("[challenge_solver_farm] cross-host record buffer full: dropped %d solves (cap=%d)",
+			d.xhDropped, maxXHRecords)
+		d.xhDropped = 0
+	}
+	if len(d.xhRecs) == 0 {
+		return nil
+	}
+
+	// hostTotal: fingerprinted solves per vhost in the window (the share
+	// denominator). fh: per-(fp, host) accumulation.
+	hostTotal := make(map[string]int)
+	fh := make(map[string]map[string]*hostFPCell)
+	for _, r := range d.xhRecs {
+		hostTotal[r.host]++
+		hosts := fh[r.fp]
+		if hosts == nil {
+			hosts = make(map[string]*hostFPCell)
+			fh[r.fp] = hosts
+		}
+		c := hosts[r.host]
+		if c == nil {
+			c = &hostFPCell{subnets: map[string]struct{}{}, countries: map[string]struct{}{}, ips: map[string]struct{}{}}
+			hosts[r.host] = c
+		}
+		c.solves++
+		c.subnets[r.subnet] = struct{}{}
+		if r.country != "" {
+			c.countries[r.country] = struct{}{}
+		}
+		c.ips[r.ip] = struct{}{}
+	}
+
+	out := map[string]xhVerdict{}
+	for fp, hosts := range fh {
+		agg := xhAgg{
+			hosts:     map[string]struct{}{},
+			countries: map[string]struct{}{},
+			subnets:   map[string]struct{}{},
+			ips:       map[string]struct{}{},
+		}
+		// share pre-gate: keep only vhosts this fp dominates.
+		qualHosts := make(map[string]float64) // host -> share
+		for host, c := range hosts {
+			tot := hostTotal[host]
+			if tot <= 0 {
+				continue
+			}
+			share := float64(c.solves) / float64(tot)
+			if share < d.cfg.MinXHHostShare {
+				continue
+			}
+			qualHosts[host] = share
+			agg.hosts[host] = struct{}{}
+			agg.solves += c.solves
+			for k := range c.subnets {
+				agg.subnets[k] = struct{}{}
+			}
+			for k := range c.countries {
+				agg.countries[k] = struct{}{}
+			}
+			for k := range c.ips {
+				agg.ips[k] = struct{}{}
+			}
+		}
+		if len(agg.hosts) < d.cfg.MinXHHosts ||
+			len(agg.countries) < d.cfg.MinXHCountries ||
+			len(agg.subnets) < d.cfg.MinXHSubnets {
+			continue
+		}
+		spi := 0.0
+		if len(agg.ips) > 0 {
+			spi = float64(agg.solves) / float64(len(agg.ips))
+		}
+		nh, nc, ns := len(agg.hosts), len(agg.countries), len(agg.subnets)
+		for host, share := range qualHosts {
+			// A vhost dominated by two flagging fingerprints keeps the one with the
+			// wider subnet spread (deterministic: then more countries, then the
+			// smaller fp string) so the reported evidence is stable across passes.
+			if prev, ok := out[host]; ok {
+				if !(ns > prev.subnets ||
+					(ns == prev.subnets && (nc > prev.countries ||
+						(nc == prev.countries && fp < prev.fp)))) {
+					continue
+				}
+			}
+			c := hosts[host]
+			out[host] = xhVerdict{
+				fp: fp, hosts: nh, countries: nc, subnets: ns, solvesPerIP: spi, hostShare: share,
+				hostSolves: c.solves, hostSubnets: len(c.subnets), hostIPs: len(c.ips),
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // buildAlert renders the finding. It reads state but does not mutate it — the
 // caller owns the truncation counter and the cooldown stamp.
 func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 	solves, truncated int, setsCapped bool, uas map[string]int, impossibleUA int,
-	hiRate bool, loFP string, loFPSubs, loFPCcs int) core.Alert {
+	hiRate bool, loFP string, loFPSubs, loFPCcs int, xh *xhVerdict, suppressNotify bool) core.Alert {
 
 	topUA, topUACount := "", 0
 	for ua, n := range uas {
@@ -704,22 +1053,38 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 	if sampled > 0 {
 		uaShare = topUACount * 100 / sampled
 	}
+	// Display counts. Normally the per-host 60s window; but a cross-host-only
+	// finding on a vhost whose 60s state was already reclaimed (a thin farm can
+	// flag with no solve in the last minute) would otherwise render solves=0 —
+	// misleading. In that one case, report this vhost's own counts over XHWindow,
+	// which the cross-host verdict carries. Combined findings keep the 60s counts.
+	dispSolves, dispIPs, dispSubnets := solves, len(st.ips), len(st.subnets)
+	dispWindow := d.cfg.Window
+	if xh != nil && solves == 0 && dispSubnets == 0 {
+		dispSolves, dispIPs, dispSubnets = xh.hostSolves, xh.hostIPs, xh.hostSubnets
+		dispWindow = d.cfg.XHWindow
+	}
 	// Solves per IP is the tell that per-IP thresholds cannot fire: a farm burns
 	// a fresh address per solve, so this sits at ~1.0 while a real repeat
 	// visitor population sits well above it.
 	solvesPerIP := 0.0
-	if len(st.ips) > 0 {
-		solvesPerIP = float64(solves) / float64(len(st.ips))
+	if dispIPs > 0 {
+		solvesPerIP = float64(dispSolves) / float64(dispIPs)
 	}
 
 	samples := []string{
 		fmt.Sprintf("[challenge] host=%s solves=%d distinct_ips=%d distinct_subnets=%d solves_per_ip=%.2f window=%s",
-			host, solves, len(st.ips), len(st.subnets), solvesPerIP, d.cfg.Window),
+			host, dispSolves, dispIPs, dispSubnets, solvesPerIP, dispWindow),
 	}
 	if loFP != "" {
 		samples = append(samples, fmt.Sprintf(
 			"[challenge] fingerprint concentration: one fingerprint %s solving from distinct_subnets=%d distinct_countries=%d (single-fingerprint low-and-slow farm)",
 			loFP, loFPSubs, loFPCcs))
+	}
+	if xh != nil {
+		samples = append(samples, fmt.Sprintf(
+			"[challenge] cross-host concentration: fingerprint %s dominates this vhost (share=%.0f%%) and spans hosts=%d countries=%d subnets=%d node-wide (solves_per_ip=%.2f, evidence only) — thin cross-host farm",
+			xh.fp, xh.hostShare*100, xh.hosts, xh.countries, xh.subnets, xh.solvesPerIP))
 	}
 	type uaCount struct {
 		ua string
@@ -767,7 +1132,7 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 		When:    now,
 		Kind:    core.AlertKind("Challenge/SolverFarm"),
 		Key:     host,
-		Count:   len(st.subnets),
+		Count:   dispSubnets,
 		Samples: samples,
 		Extra: map[string]string{
 			// The Key is a vhost, not an address, and Samples quote observed
@@ -781,13 +1146,17 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			"action":        string(d.cfg.Action),
 			"reason":        "CHALLENGE_SOLVER_FARM",
 			"host":          host,
-			"solves":        fmt.Sprint(solves),
-			"distinct_ips":  fmt.Sprint(len(st.ips)),
-			"subnets":       fmt.Sprint(len(st.subnets)),
+			"solves":        fmt.Sprint(dispSolves),
+			"distinct_ips":  fmt.Sprint(dispIPs),
+			"subnets":       fmt.Sprint(dispSubnets),
 			"solves_per_ip": fmt.Sprintf("%.2f", solvesPerIP),
 			"top_ua":        topUA,
 			"top_ua_share":  fmt.Sprintf("%d%%", uaShare),
-			"window":        d.cfg.Window.String(),
+			// dispWindow matches the counts: normally the 60s Window, but XHWindow
+			// for a reclaimed-vhost cross-host-only finding whose solves/ips/subnets
+			// were switched above — so a consumer computing solves/window gets the
+			// right rate, not a ~30x over-read.
+			"window": dispWindow.String(),
 			// Corroboration only — never part of the threshold.
 			"impossible_ua": fmt.Sprint(impossibleUA),
 		},
@@ -810,16 +1179,31 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 		alert.Extra["fp_subnets"] = fmt.Sprint(loFPSubs)
 		alert.Extra["fp_countries"] = fmt.Sprint(loFPCcs)
 	}
+	// Cross-host concentration evidence, attached only when that track flagged this
+	// vhost. xh_solves_per_ip is EVIDENCE ONLY (the burn-in showed it does not
+	// separate farm from legit) — never a threshold input.
+	alert.Extra["xh_track"] = "0"
+	if xh != nil {
+		if tracks != "" {
+			tracks += "+"
+		}
+		tracks += "cross_host"
+		alert.Extra["xh_track"] = "1"
+		alert.Extra["xh_fp"] = xh.fp
+		alert.Extra["xh_hosts"] = fmt.Sprint(xh.hosts)
+		alert.Extra["xh_countries"] = fmt.Sprint(xh.countries)
+		alert.Extra["xh_subnets"] = fmt.Sprint(xh.subnets)
+		alert.Extra["xh_host_share"] = fmt.Sprintf("%.0f%%", xh.hostShare*100)
+		alert.Extra["xh_solves_per_ip"] = fmt.Sprintf("%.2f", xh.solvesPerIP)
+	}
 	alert.Extra["tracks"] = tracks
-	// logonly keeps the detector-log record but drops the mail: the finding stays
-	// true for hours on a vhost the operator has already triaged. The
-	// fingerprint-concentration track ALSO ships log-only through its burn-in
-	// (loFP set, hiRate false): a new signal — whose global-audience FP class is
-	// not yet fully mitigated (see docs) — must not mail operators fleet-wide on
-	// upgrade. The proven subnet-spread track still notifies per ACTION, and a
-	// COMBINED finding (both tracks) is a confirmed high-rate farm and notifies
-	// too. Promote fp-only findings to notify after burn-in confirms the numbers.
-	if d.cfg.Action == ActionLogonly || (loFP != "" && !hiRate) {
+	// The caller decides notification and passes the verdict here: ACTION=logonly
+	// mutes the section; the NotifyCooldown throttles a persistent farm's mail; a
+	// CROSS-HOST-ONLY finding stays log-only through its burn-in. In every case the
+	// detector-log record and the "farmed now" mark are unaffected — only the mail
+	// is gated. (Per-host fp-concentration findings NOTIFY as of the 2026-09-11
+	// promotion, subject only to the throttle.)
+	if suppressNotify {
 		alert.Extra[core.ExtraNotify] = core.NotifyNo
 	}
 	return alert
