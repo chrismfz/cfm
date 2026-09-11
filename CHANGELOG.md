@@ -29,7 +29,14 @@ back-filled here — see the git/PR history for that period.
   the vhost's whole solver population, so a downstream block can't hit an innocent
   visitor who merely shared the vhost. Empty for a subnet-spread-only finding (no
   fingerprint). Bounded and dedup-friendly (the store accumulates the population
-  across findings).
+  across findings). In the same change the finding's `solves` / `distinct_ips` /
+  `solves_per_ip` are now fp-scoped too (matching `subnets`/`countries`) — per-host
+  the fp's own counts (a new per-address solve count on `fpAgg`), cross-host the
+  node-wide ones — so the persisted row is self-consistent (`distinct_ips ≤ solves`
+  always). This closes a scope mismatch left over from the 2026-09 evidence-scope
+  fix, which could record `distinct_ips > solves` on a cross-host row (impossible
+  for one solver population) or `distinct_ips` above the fingerprint's real reach
+  on a per-host row (it counted the vhost's non-fp visitors).
 - **Solver-farm cross-host fingerprint track (`challenge_solver_farm`, Phase 2).**
   Catches a distributed solver farm spread so thin per vhost that it never trips
   the per-host 60s country bar, yet the same TLS fingerprint DOMINATES many vhosts

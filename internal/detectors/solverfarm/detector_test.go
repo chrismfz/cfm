@@ -1076,6 +1076,17 @@ func TestFindingIPsAreFingerprintAccurate(t *testing.T) {
 			t.Errorf("finding leaked a benign (non-fingerprint) address %q into the block surface", ip)
 		}
 	}
+	// The population counts must be the fp's own, not the vhost's (which is 11 with
+	// the 3 benign visitors) — otherwise distinct_ips would disagree with ips[].
+	if f.DistinctIPs != 8 {
+		t.Errorf("DistinctIPs=%d, want 8 (the fp's own, not the vhost's 11)", f.DistinctIPs)
+	}
+	if f.Solves != 8 {
+		t.Errorf("Solves=%d, want 8 (the fp's own solves, not the vhost's 11)", f.Solves)
+	}
+	if f.DistinctIPs > f.Solves {
+		t.Errorf("distinct_ips=%d > solves=%d is impossible for one population", f.DistinctIPs, f.Solves)
+	}
 }
 
 // prune must window the fp's address set (a.ips) exactly as it windows subnets/
@@ -1092,7 +1103,7 @@ func TestPruneWindowsFingerprintIPs(t *testing.T) {
 	st.fps["c28caa00"] = &fpAgg{
 		subnets:   map[string]time.Time{"203.0.0": fresh},
 		countries: map[string]time.Time{"GR": fresh},
-		ips:       map[string]time.Time{"203.0.0.1": stale, "203.0.0.2": fresh},
+		ips:       map[string]ipStat{"203.0.0.1": {solves: 1, last: stale}, "203.0.0.2": {solves: 1, last: fresh}},
 	}
 	st.prune(cutoff)
 
@@ -1161,5 +1172,10 @@ func TestFindingSinkFiresEvenWhenLogOnly(t *testing.T) {
 	// under the 128 cap so all of them).
 	if len(f.IPs) != 36 {
 		t.Errorf("cross-host finding IPs=%d, want 36 (the fp's node-wide sample)", len(f.IPs))
+	}
+	// Solves is the fp's node-wide count too (not a per-vhost slice), so it can never
+	// be below the node-wide distinct_ips — the impossible-row bug this locks.
+	if f.DistinctIPs > f.Solves {
+		t.Errorf("cross-host distinct_ips=%d > solves=%d is impossible for one population", f.DistinctIPs, f.Solves)
 	}
 }
