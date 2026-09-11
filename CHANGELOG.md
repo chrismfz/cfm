@@ -34,6 +34,21 @@ back-filled here — see the git/PR history for that period.
   is shared by legit clients, so the shadow will deliberately show some
   shared-bucket solvers — the signal that decides bare-deny vs JA4H-corroborated /
   interactive-challenge later.
+- **`challenge_score` verdicts are now captured durably (B3 slice 2, shadow-only).**
+  The per-IP shadow scorer's `would_deny` verdicts are now persisted to the durable
+  `detection_history` sqlite as `event_type=challenge_score`, keyed by the convicting
+  fingerprint — so burn-in evidence survives log rotation and the score becomes the
+  fleet fingerprint-reputation ledger's **second source** (after `solver_farm`), pulled
+  by cfm-web through the same cursor machinery (no new node API, no push). Deliberately
+  lean so the sqlite can't balloon: **only the `would_deny` tier** is written (softer
+  `would_harden` stays log-only for grep), throttled to **one row per IP per hour** (a
+  sustained denier is ≤24 rows/day). The row carries the anchoring TLS fp (a convicted
+  fingerprint sticks over a merely-present one), `fp_convicted`, `score`, `verdict` and
+  the tell breakdown; an empty-fingerprint deny is a durable, IP-anchored record that is
+  simply not fingerprint-attributable. The `cfm.abuse_shadow.log` line stays (now with
+  `fp=`); nothing is enforced. `challenge_score_history.go`;
+  `docs/challenge-score.md` § "Durable capture", `docs/fleet-fingerprint-reputation.md`
+  §5.
 
 ## 2026.09.11
 
