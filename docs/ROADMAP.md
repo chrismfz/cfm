@@ -252,6 +252,32 @@ alone; NAT-aware.
   restart. Note the architectural boundary: the *durable reputation* memory lives
   centrally in cfm-web BY DESIGN (node detects, cfm-web remembers) — this is not a
   second reputation store, only restart-survival for the node's live scoring state.
+- **Fingerprint evidence ledger (node → UI + cfm-web)** — [track]. Converges the
+  two ideas above (sqlite persistence + fingerprint-in-UI) with roadmap #10
+  (multi-source): make the fingerprint the correlation key and fold every
+  *per-client* signal (`solver_farm`, `challenge_score` tells, `cookie_discard`,
+  WAF-block, challenge-fail) into one per-fingerprint rollup on the node's existing
+  sqlite `detection_history` — surfaced in the cfm-admin UI/TUI ("weird
+  fingerprints + why", clickable) and published to cfm-web as a compact per-fp
+  SUMMARY (same PULL-cursor pattern; you aggregate on the node, never stream the
+  raw firehose). Per-VHOST signals (`dc_fraction`/`facet`/`cost`/`suspicious`) stay
+  CONTEXT, not fp evidence. Makes "decide guilty" one row instead of a
+  cross-reference. Shadow-first. Design: `docs/traffic-classifier.md` §
+  "Fingerprint evidence ledger". Highest-leverage next build after burn-in.
+- **ChallengeV2 — interactive challenge rung** — [track]. The keystone that lets
+  Deny mean "100% guilty": Challenge (PoW) is *solved* by the farm and Deny is
+  dangerous for a coarse TLS bucket, leaving no good action for the "probably
+  guilty but shared/unsure" middle. An **interactive** challenge (genuine pointer/
+  touch/scroll + render, optionally a puzzle) is self-targeting (a real human
+  passes once) AND effective against headless (no real pointer/render), so it
+  absorbs that middle — arm it *instead of* deny on an uncertain shared bucket (zero
+  outage risk), reserving Deny for a farm-UNIQUE fp / confirmed datacenter IP.
+  Armable per-vhost (auto/force, like Challenge) and per-fingerprint
+  (`challenge_v2` in cfm-web `fingerprint_policies`). Stage it: **V2a** invisible
+  interaction proof (accessible, catches today's farm) → **V2b** visible puzzle
+  with an accessible fallback. Self-hosted, edge-local (challenge-waf-release-
+  checklist). After the ledger + burn-in. Design: `docs/traffic-classifier.md` §
+  "The ChallengeV2 rung", `docs/challenge-score.md` §6.
 - **Stage E actuation ladder** — [track]. Shared per-client + per-vhost actuator:
   PoW-harden / ChallengeV2 puzzle / 403 / tarpit / drop, edge-local (the cleared
   path skips the in-path decision). Only after burn-in shows a clean would-act set.

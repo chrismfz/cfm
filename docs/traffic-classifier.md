@@ -451,6 +451,112 @@ farm's IP is NOT fine is when it runs that exact build). So:
   edge-stamped `X-CFM-TLS` onto WAF findings is the first task there. See
   `cfm-web:docs/fingerprint-reputation.md §10`.
 
+## Fingerprint evidence ledger — node → UI + cfm-web (2026-09-11)
+
+The signals today are scattered: `abuse_shadow` per vhost, `challenge_score` /
+`cookie_discard` per IP, `solver_farm` per fingerprint, WAF hits per request — on
+the node, over MCP, and in the cfm-admin UI, and only `solver_farm` reaches
+cfm-web. To decide "guilty" you cross-reference all of them by hand. Make the
+**fingerprint the correlation key** and fold every *per-client* signal into one
+per-fingerprint **evidence ledger**, surfaced locally and published to cfm-web.
+
+**The distinction that makes this work — not every signal keys on a fingerprint:**
+
+- **Per-CLIENT signals** (are evidence *of* a fingerprint — things one client
+  does): `solver_farm` (fp), the `challenge_score` tells (UA-lie, fast-solve, and
+  the fp-conviction spine), `cookie_discard` (re-solve cadence), WAF-block hits
+  (once `tls_fp` is stamped on them — the attribution prereq above), challenge
+  FAIL / `expired_unsolved`.
+- **Per-VHOST signals** (are *context*, not client evidence): `dc_fraction`,
+  `facet_expansion`, `cost_pressure`, the `suspicious` score, vhost-aggregate rate.
+  `dc_fraction` = "this **site's** traffic is 86% datacenter" — it can't be pinned
+  on one fingerprint; it is the *environment* the fingerprint was seen in. These
+  attach to the ledger as "the vhosts this fp touched, and their posture" (already
+  what `fingerprint_events.host` + the finding carry), never as fp evidence.
+
+**The ledger is a rollup on a store that already exists.** The node's webdetector
+already runs a **sqlite `detection_history`** (where `solver_farm` is persisted).
+The ledger is a per-fingerprint rollup on top of it: `fingerprint → {farm?,
+challenge_score, cookie_discard, waf_hits, verdict}, vhosts[], ips[], counts,
+first/last seen`. That single row is the whole guilt picture (*"farm=yes,
+challenge_score=high, cookie_discard=8, WAF_SQLI×30, 12 vhosts, 191 IPs (48 dc /
+143 residential)"*) — the multi-source corroboration of
+`cfm-web:docs/fingerprint-reputation.md §10`, made visible.
+
+```
+node per-client signals ─► node sqlite fingerprint ledger ─┬─► cfm-admin UI / TUI: "weird" fingerprints + their evidence,
+   (solver_farm, chal_score,   (rollup on the existing      │      clickable to investigate (next to the signals)
+    cookie_discard, WAF, …)      detection_history sqlite;   └─► cfm-web: PULL the per-fp SUMMARY (not raw events),
+                                 survives restart)                  fleet-wide decide (same cursor pattern as solver_farm)
+```
+
+Three properties fall out: it **survives a daemon restart** (today marks/scores
+are ephemeral in-memory); it is the **UI/TUI surface** for "which fingerprints are
+weird, and why"; and it is the **compact thing cfm-web pulls** — a per-fingerprint
+*summary*, because `solver_farm` is rare but `challenge_score` / `cookie_discard` /
+WAF fire constantly (you aggregate on the node and publish the rollup; you never
+stream the raw firehose to cfm-web). Same PULL-cursor mechanism as `solver_farm`,
+just a richer payload with more `source`s.
+
+**Caveat (unchanged):** the ledger makes guilt easier to SEE and DECIDE; it does
+not change the ENFORCEMENT safety rules. A fingerprint is still a population, so
+the uniqueness gate (§ "Two axes, two actions") still governs whether a verdict
+becomes bare-deny, ChallengeV2, or an IP-ban.
+
+## The ChallengeV2 rung — the keystone that lets Deny mean "100% guilty"
+
+Every wall this design keeps hitting is the same one: **Challenge (PoW) is SOLVED
+by the farm** (the live data: `c28caa00` at diff 16, 300 ms–56 s), and **Deny is
+dangerous for a coarse bucket** (a shared Chrome TLS id hits legit shoppers). That
+leaves a gap with no good action for the large "probably guilty but shared/unsure"
+middle. **ChallengeV2 — an *interactive* challenge (genuine pointer/touch/scroll +
+render, optionally a puzzle) — is that missing middle rung.** Already named as the
+intended soft rung here (Stage E) and in `docs/challenge-score.md` §6; promote it
+to a first-class, **armable action**.
+
+It is both:
+- **self-targeting** (like a challenge) — a real human sharing the fingerprint does
+  the interaction once and passes; and
+- **effective against headless** (unlike PoW) — a headless solver has no real
+  pointer/render, so it fails the exact thing PoW (pure CPU) can never catch.
+
+What it buys:
+1. **Closes the coarse-bucket gap** — for an uncertain shared bucket, arm
+   ChallengeV2 *instead of* deny: legit users pass, the farm fails, **zero outage
+   risk**. Removes the scariest part of Phase C.
+2. **Pushes Deny to the edge of the ladder** — Deny then arms only on **100%
+   guilty**: a farm-UNIQUE fingerprint, or a confirmed datacenter IP. Everything
+   uncertain-but-suspect routes to ChallengeV2; Deny stops being the tool for
+   uncertainty.
+3. **Breaks the farm's economics** — real interaction/render per client costs far
+   more than the free CPU of PoW.
+
+```
+observe → Challenge (PoW) → ChallengeV2 (interactive) → Deny
+  log      cheap, 1st line     the teeth vs headless      last resort,
+           (the farm solves it)  self-targeting, safe       100%-guilty only
+```
+
+**Arming surfaces** (same model as Challenge today): per-vhost **auto-arm** on an
+"unsure" posture (a stronger tier than the current auto-challenge) or operator
+**force**; per-fingerprint **`challenge_v2`** policy action in cfm-web
+(`fingerprint_policies` gains it alongside observe/challenge/deny); per-IP at the
+`challenge_score` T1 rung.
+
+**The honest hard part is the front-end, not the logic** — and it must be staged:
+- **V2a — invisible interaction proof** (first): require genuine pointer/touch/
+  scroll entropy + render/timing before clearance. A headless client emitting no
+  pointer events fails silently; a real user never notices. Cheap, **accessible**,
+  and it catches *today's* farm.
+- **V2b — visible puzzle** (only if V2a is beaten): a rendered drag/rotate puzzle
+  **with an accessible fallback** (keyboard/screen-reader — a pure drag-puzzle
+  locks out disabled users: wrong, and a legal risk). Reserved for the hardest tier.
+
+Self-hosted (CFM's ethos — no third-party CAPTCHA), edge-local like the PoW
+challenge (the cleared path skips the daemon decision), so it goes through
+`docs/challenge-waf-release-checklist.md`. Sequence it **after** the evidence
+ledger (which says *who* to arm it on) and the B3 burn-in.
+
 ## Plan (measure-first, mechanism-agnostic)
 
 ### Phase 0 — audit + zero-code (operator config; in progress)
