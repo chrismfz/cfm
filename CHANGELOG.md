@@ -36,7 +36,13 @@ back-filled here — see the git/PR history for that period.
   always). This closes a scope mismatch left over from the 2026-09 evidence-scope
   fix, which could record `distinct_ips > solves` on a cross-host row (impossible
   for one solver population) or `distinct_ips` above the fingerprint's real reach
-  on a per-host row (it counted the vhost's non-fp visitors).
+  on a per-host row (it counted the vhost's non-fp visitors). Adversarial review
+  also caught the sibling break — a solve PAST the per-host IP cap still refreshed
+  its `/24`, so a subnet could outlive its (untracked) addresses and, after they
+  aged out, emit a per-host row claiming `distinct_subnets > distinct_ips (== 0)`;
+  the fp's subnets/countries are now counted only for a tracked address, keeping
+  the three maps in lockstep so `countries ≤ subnets ≤ distinct_ips ≤ solves` holds
+  on every emitted row.
 - **Solver-farm cross-host fingerprint track (`challenge_solver_farm`, Phase 2).**
   Catches a distributed solver farm spread so thin per vhost that it never trips
   the per-host 60s country bar, yet the same TLS fingerprint DOMINATES many vhosts

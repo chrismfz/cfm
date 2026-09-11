@@ -427,7 +427,11 @@ func (st *hostState) prune(cutoff time.Time) bool {
 				delete(a.ips, k)
 			}
 		}
-		if len(a.subnets) == 0 && len(a.countries) == 0 {
+		// Drop a fingerprint only when it has no live data of any kind. With the
+		// lockstep ingest an empty a.ips already implies empty subnets/countries,
+		// but check a.ips explicitly so a future change can't resurrect the
+		// "fresh subnet, zero IPs" finding this guards against.
+		if len(a.subnets) == 0 && len(a.countries) == 0 && len(a.ips) == 0 {
 			delete(st.fps, fp)
 		}
 	}
@@ -756,23 +760,31 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 							st.fps[fp] = a
 						}
 						if a != nil {
-							if _, seen := a.subnets[sn]; seen || len(a.subnets) < d.cfg.MaxTrackedPerHost {
-								a.subnets[sn] = ev.When
-							}
-							if cc != "" {
-								if _, seen := a.countries[cc]; seen || len(a.countries) < maxCountriesTracked {
-									a.countries[cc] = ev.When
-								}
-							}
-							// The fp's OWN addresses (bounded), each with its solve count, so
-							// a per-host finding ships fingerprint-accurate IPs AND an
-							// fp-scoped solve count — not the vhost's whole solver set,
-							// which could include non-fp visitors and make a downstream
-							// block hit an innocent address.
+							// Count subnets/countries ONLY for an address we actually
+							// track in a.ips, so all three maps describe the SAME
+							// population. This keeps the per-host finding self-consistent
+							// (distinct_countries ≤ distinct_subnets ≤ distinct_ips ≤
+							// solves) and prunes them in lockstep — a subnet can't outlive
+							// the addresses that put it there. Otherwise a solve PAST the
+							// a.ips cap still refreshed its subnet/country, so a subnet
+							// could stay "fresh" via an untracked IP, survive prune after
+							// its real IPs aged out, and emit a finding claiming
+							// subnets > distinct_ips (== 0). The a.ips cap is a memory
+							// bound, and distinct subnets ≤ distinct IPs always, so
+							// gating never loses a subnet before the (equal) cap binds.
 							if s, seen := a.ips[ev.SrcIP]; seen || len(a.ips) < d.cfg.MaxTrackedPerHost {
 								s.solves++
 								s.last = ev.When
 								a.ips[ev.SrcIP] = s
+
+								if _, sSeen := a.subnets[sn]; sSeen || len(a.subnets) < d.cfg.MaxTrackedPerHost {
+									a.subnets[sn] = ev.When
+								}
+								if cc != "" {
+									if _, cSeen := a.countries[cc]; cSeen || len(a.countries) < maxCountriesTracked {
+										a.countries[cc] = ev.When
+									}
+								}
 							}
 						}
 					}

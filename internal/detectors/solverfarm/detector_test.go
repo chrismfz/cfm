@@ -1119,6 +1119,62 @@ func TestPruneWindowsFingerprintIPs(t *testing.T) {
 	}
 }
 
+// A solve PAST the per-host IP cap must not refresh its /24 (or country): the
+// three maps have to stay in lockstep so a subnet can never outlive the tracked
+// addresses that kept it in-window. Otherwise, once the real addresses age out,
+// prune keeps the "fresh" (untracked-refreshed) subnet while a.ips empties, and
+// the per-host finding claims distinct_subnets > distinct_ips (== 0) — a row
+// impossible for one solver population. Regression for the #1419 review finding.
+func TestFPSubnetsNeverOutliveTrackedIPs(t *testing.T) {
+	var got []Finding
+	SetFindingSink(func(f Finding) { got = append(got, f) })
+	t.Cleanup(func() { SetFindingSink(nil) })
+
+	// Tiny cap so it binds after two addresses; the divergence is scale-free.
+	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 2, MinFPCountries: 1, MaxTrackedPerHost: 2})
+	h.d.countryFn = ipCountry
+
+	// t0: two addresses in two distinct /24s fill the IP cap (both tracked).
+	h.solveFP("farm.example", "203.0.0.1", chromeUA, "c28caa00")
+	h.solveFP("farm.example", "203.0.1.1", chromeUA, "c28caa00")
+	h.run(t)
+
+	// t0+40s: two NEW addresses in the SAME /24s. The cap is full, so they are not
+	// tracked — and (the fix) must therefore not refresh those /24s either.
+	h.clock = h.clock.Add(40 * time.Second)
+	h.solveFP("farm.example", "203.0.0.77", chromeUA, "c28caa00")
+	h.solveFP("farm.example", "203.0.1.77", chromeUA, "c28caa00")
+	h.run(t)
+
+	// t0+65s: nothing new. The tracked t0 addresses are now outside the 60s window.
+	// With lockstep their /24s prune away with them; without it the /24s (refreshed
+	// to t0+40 by the untracked addresses) survive and the fp becomes a ghost.
+	h.clock = h.clock.Add(25 * time.Second)
+	h.run(t)
+
+	if a := h.d.hosts["farm.example"].fps["c28caa00"]; a != nil {
+		if len(a.subnets) > len(a.ips) {
+			t.Errorf("after aging: subnets=%d > tracked ips=%d — a /24 outlived its addresses (ghost fp)",
+				len(a.subnets), len(a.ips))
+		}
+		if len(a.countries) > len(a.subnets) {
+			t.Errorf("after aging: countries=%d > subnets=%d", len(a.countries), len(a.subnets))
+		}
+	}
+
+	// Every emitted finding must satisfy the population invariant — most importantly
+	// none may claim subnets while carrying zero distinct IPs.
+	for _, f := range got {
+		if f.Fingerprint == "" {
+			continue
+		}
+		if !(f.Countries <= f.Subnets && f.Subnets <= f.DistinctIPs && f.DistinctIPs <= f.Solves) {
+			t.Errorf("finding violates countries<=subnets<=distinct_ips<=solves: %d/%d/%d/%d",
+				f.Countries, f.Subnets, f.DistinctIPs, f.Solves)
+		}
+	}
+}
+
 // The durable finding must fire even when the alert is LOG-ONLY: the memory is
 // not throttled by the mail decision. A cross-host-only finding (log-only through
 // its burn-in) still records, with the cross-host evidence resolved.
