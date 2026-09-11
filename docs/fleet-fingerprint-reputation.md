@@ -148,6 +148,26 @@ the farm's UA spoofing — two independent fingerprints agreeing makes a shared
 verdict materially safer, and gives an L3 fallback if a farm ever randomises its TLS
 ClientHello.
 
+**Second source: `challenge_score` (the per-IP shadow scorer).** Beyond the
+`solver_farm` finding, the node also PERSISTS its per-IP challenge-abuse verdicts to
+the same `detection_history` as `event_type=challenge_score`, so the ledger
+accumulates conviction from a second, independent angle (the fingerprint-anchored
+per-IP score, not the cross-host concentration proof). To keep the sqlite lean this
+is deliberately narrow: only the **`would_deny`** tier is written (the softer
+`would_harden` stays log-only, for grep), throttled to **one row per IP per hour**
+(a sustained denier is ≤24 rows/day; the fine detail is in the rotated
+`cfm.abuse_shadow.log`). The row's `ip` column is the client address; the payload
+carries the ingest-contract keys — `fingerprint` (the anchoring TLS fp: the convicted
+solver-farm fp when one drove the score, else the fp merely present on the scored
+solves, `""` when no `X-CFM-TLS`), `fp_convicted` (which of those it is, so a
+convicted-fp row can outweigh a present-fp one), `score`, `verdict`, and the tell
+breakdown (`solves`/`fast`/`uaimp`/`farm`/`farmfp`). cfm-web PULLs it through the SAME
+cursor machinery as `solver_farm` (a second `source` value) and folds it into the same
+per-fingerprint reputation — no new node API, no push. An empty-`fingerprint` row is a
+durable, IP-anchored deny that is simply not fingerprint-attributable (same convention
+as a subnet-spread-only `solver_farm` row). Implemented node-side in
+`challenge_score_history.go`; the cfm-web pull-ingest is the follow-up half.
+
 ## 6. Rollout
 
 Shadow-first, same discipline as everything else: shared verdicts land as **`watch`**

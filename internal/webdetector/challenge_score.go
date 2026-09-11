@@ -95,6 +95,15 @@ const (
 	// it dies with the score — unlike the shared shouldLogVhostSuppress map, which is
 	// never pruned and would grow one entry per attacker IP forever.
 	chalScoreLogEvery = 10 * time.Minute
+
+	// chalScorePersistEvery throttles the DURABLE (detection_history) write per IP,
+	// far coarser than the log throttle. The abuse_shadow.log line is for grep/burn-in
+	// and re-fires every chalScoreLogEvery; the ledger only needs a periodic heartbeat
+	// that an IP is STILL at would_deny, so one durable row per hour per IP keeps the
+	// sqlite lean — a sustained denier writes ≤24 rows/day, not one per log line. The
+	// full fine-grained detail stays in the (rotated) log. See persistDue + the
+	// "Durable capture" note in docs/challenge-score.md.
+	chalScorePersistEvery = time.Hour
 )
 
 // halfLifeDecayFactor is the exponential-decay multiplier for an elapsed dt at a
@@ -112,9 +121,16 @@ func halfLifeDecayFactor(dt, halfLife time.Duration) float64 {
 // burn-in shows WHY an IP scored) and its last-logged time (the per-IP log throttle,
 // bounded by the store's own cap/prune).
 type chalScoreMark struct {
-	score      float64
-	last       time.Time
-	lastLogged time.Time
+	score         float64
+	last          time.Time
+	lastLogged    time.Time
+	lastPersisted time.Time // per-IP DURABLE-write throttle (chalScorePersistEvery); see persistDue
+	// fp is the fingerprint anchoring this IP's score — the GROUP-BY spine the
+	// durable ledger (detection_history) and the fleet reputation store key on. A
+	// CONVICTED (farmFP) fingerprint sticks over a merely-present one: once a
+	// convicted solve is seen, a later plain solve's fp cannot overwrite it (bump).
+	// Empty when no solve carried an X-CFM-TLS stamp (older edge / plain-HTTP / DNAT).
+	fp string
 	// Lifetime tell counters (NOT decayed) — logged so burn-in shows WHY an IP
 	// scored. They can outpace the decayed score (e.g. solves=100 on a faded
 	// score=51); the score is the live signal, the counts are the ledger.
@@ -188,7 +204,7 @@ func chalScoreVerdict(score float64) string {
 // IP at the cap is dropped (counted) rather than evicting an existing entry, matching
 // the maxShadowMarks precedent; the store stays small because only tell-bearing
 // solves reach here.
-func (m *chalScoreStore) bump(ip string, delta float64, fast, uaImp, farm, farmFP bool, now time.Time) {
+func (m *chalScoreStore) bump(ip, fp string, delta float64, fast, uaImp, farm, farmFP bool, now time.Time) {
 	if ip == "" || delta <= 0 {
 		return
 	}
@@ -198,6 +214,13 @@ func (m *chalScoreStore) bump(ip string, delta float64, fast, uaImp, farm, farmF
 	if !ok && len(m.ips) >= maxChalScoreMarks {
 		m.dropped++ // reported by emit so a full store isn't silently blind
 		return
+	}
+	// Record the anchoring fingerprint. A convicted (farmFP) fingerprint is the
+	// spine and STICKS; a merely-present fingerprint only fills the slot while no
+	// convicted one has yet been seen (mk.farmFP is still the pre-increment count
+	// here, so mk.farmFP == 0 means "no convicted fp recorded on this IP yet").
+	if fp != "" && (farmFP || mk.farmFP == 0) {
+		mk.fp = fp
 	}
 	mk.score = chalDecay(mk.score, mk.last, now) + delta
 	mk.last = now
@@ -217,9 +240,12 @@ func (m *chalScoreStore) bump(ip string, delta float64, fast, uaImp, farm, farmF
 	m.ips[ip] = mk
 }
 
-// chalScoreRow is one IP's decayed score + breakdown at collect time.
+// chalScoreRow is one IP's decayed score + breakdown at collect time. fp is the
+// anchoring fingerprint (the durable ledger's GROUP-BY spine); it is a snapshot of
+// mk.fp at collect time.
 type chalScoreRow struct {
 	ip                                string
+	fp                                string
 	score                             float64
 	solves, fast, uaImp, farm, farmFP int
 }
@@ -247,9 +273,29 @@ func (m *chalScoreStore) collectDue(now time.Time, reportFloor float64, logEvery
 		}
 		mk.lastLogged = now
 		m.ips[ip] = mk
-		out = append(out, chalScoreRow{ip: ip, score: d, solves: mk.solves, fast: mk.fast, uaImp: mk.uaImp, farm: mk.farm, farmFP: mk.farmFP})
+		out = append(out, chalScoreRow{ip: ip, fp: mk.fp, score: d, solves: mk.solves, fast: mk.fast, uaImp: mk.uaImp, farm: mk.farm, farmFP: mk.farmFP})
 	}
 	return out
+}
+
+// persistDue reports whether ip is due for a DURABLE (detection_history) write and,
+// when it is, stamps lastPersisted so the next one waits a full chalScorePersistEvery.
+// Called from emit only for would_deny rows, so the coarse per-IP throttle decouples
+// durable-ledger volume from log volume (see chalScorePersistEvery). A vanished mark
+// (pruned between collect and here — same goroutine, so it won't be) returns false.
+func (m *chalScoreStore) persistDue(ip string, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mk, ok := m.ips[ip]
+	if !ok {
+		return false
+	}
+	if !mk.lastPersisted.IsZero() && now.Sub(mk.lastPersisted) < chalScorePersistEvery {
+		return false
+	}
+	mk.lastPersisted = now
+	m.ips[ip] = mk
+	return true
 }
 
 // takeDropped returns and clears the at-cap drop count.
@@ -304,7 +350,11 @@ func (e *Engine) RecordChallengeScoreSolve(s ChallengeSolve) {
 	if delta <= 0 {
 		return // no discriminating tell on this solve — not scored
 	}
-	challengeScoreMarks.bump(s.IP, delta, fast, uaImp, farm, farmFP, time.Now())
+	// Pass the solve's fingerprint even when it is not the CONVICTING tell (a UA-lie
+	// or vhost-farm solve can carry an as-yet-unconvicted fp): recording the fp present
+	// on scored solves is exactly the correlation the ledger accumulates conviction
+	// from. The mark keeps a convicted fp over a merely-present one (bump).
+	challengeScoreMarks.bump(s.IP, s.TLSFP, delta, fast, uaImp, farm, farmFP, time.Now())
 }
 
 // emitChallengeScoreShadow logs the per-IP would_harden / would_deny lines, from the
@@ -330,10 +380,21 @@ func (e *Engine) emitChallengeScoreShadow(now time.Time) {
 		if verdict == "" {
 			continue // floored at T1, so this can't happen — defensive
 		}
+		fp := r.fp
+		if fp == "" {
+			fp = "-" // keep the key=value line parseable; "-" reads as "no fp"
+		}
 		logging.LogfABUSESHADOW(
-			"[abuse-shadow] signal=challenge_score ip=%s score=%.1f solves=%d fast=%d uaimp=%d farm=%d farmfp=%d verdict=%s",
-			r.ip, r.score, r.solves, r.fast, r.uaImp, r.farm, r.farmFP, verdict,
+			"[abuse-shadow] signal=challenge_score ip=%s fp=%s score=%.1f solves=%d fast=%d uaimp=%d farm=%d farmfp=%d verdict=%s",
+			r.ip, fp, r.score, r.solves, r.fast, r.uaImp, r.farm, r.farmFP, verdict,
 		)
+		// Durable ledger capture: ONLY the would_deny tier, throttled per-IP to one
+		// row/hour, so burn-in evidence survives log rotation and becomes the fleet
+		// fingerprint-reputation store's second source (after solver_farm). would_harden
+		// stays log-only. Keyed by the convicting fingerprint (recordChallengeScoreVerdict).
+		if verdict == "would_deny" && challengeScoreMarks.persistDue(r.ip, now) {
+			e.recordChallengeScoreVerdict(r, verdict, now)
+		}
 	}
 	// Surface a full store so a reader isn't misled by silent truncation.
 	if dropped := challengeScoreMarks.takeDropped(); dropped > 0 {

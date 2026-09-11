@@ -155,6 +155,32 @@ shared with the vhost lane:
   `defaultPowDifficulty = 16`; the `n=20 → ⅓ mobile expiry` note lives here.
 - Edge-consumed map precedent: the generated Lua token files (`root:cfm`, `0640`).
 
+### Durable capture (as-built, B3 slice 2)
+
+The shadow scorer's verdicts reach `cfm.abuse_shadow.log` (grep/burn-in) AND, for the
+`would_deny` tier only, the durable `detection_history` sqlite as
+`event_type=challenge_score` — so burn-in evidence survives log rotation and the score
+becomes the fleet fingerprint-reputation ledger's **second source** after `solver_farm`
+(`challenge_score_history.go`, mirroring `RecordSolverFarmFinding`). Deliberately lean,
+because this is a per-IP shadow signal, not a rare finding:
+
+- **`would_deny` only.** `would_harden` stays log-only. The ledger is fingerprint
+  *reputation*; the deny tier is the reputation-grade signal, `would_harden` is
+  calibration best left in the rotating log.
+- **Per-IP hourly persist throttle** (`persistDue`, `chalScorePersistEvery = 1h`),
+  separate from and far coarser than the 10-min log throttle: a sustained denier writes
+  ≤24 durable rows/day. The log keeps the fine-grained per-10-min detail.
+- **Keyed by the anchoring fingerprint.** The mark now carries the convicting TLS fp
+  (a convicted `farmFP` fp sticks over a merely-present one); the row's payload carries
+  it as the stable `fingerprint` key plus `fp_convicted`, so cfm-web can PULL it through
+  the same cursor machinery as `solver_farm` and roll it into a per-fingerprint
+  **summary** (not the firehose). See `docs/fleet-fingerprint-reputation.md` §5.
+
+This answers open question #4 in the narrow, cheap way: no new log/schema — the existing
+`abuse_shadow.log` stays the grep surface and the existing `detection_history` becomes
+the durable + fleet-pullable surface. A dedicated `[cfm_challenge_score]` log/MCP tool
+remains an option if the edge-tell side ever needs its own writer.
+
 ## 9. Open questions (resolve before T-band code)
 
 1. **Deny shape**: 403 vs tarpit vs nft drop (shared with the master plan).

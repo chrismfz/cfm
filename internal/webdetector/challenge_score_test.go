@@ -67,6 +67,69 @@ func TestChalSolveDelta(t *testing.T) {
 	}
 }
 
+// The anchoring fingerprint on the mark: a CONVICTED (farmFP) fingerprint STICKS over
+// a merely-present one, and a present fp fills the slot only while none is convicted.
+// This is what the durable ledger keys on, so getting the anchor right matters.
+func TestChalScoreMark_FingerprintSticky(t *testing.T) {
+	ResetChallengeScoreMarks()
+	now := time.Now()
+
+	// A present-but-unconvicted fp fills the slot (uaImp opens the score; no conviction).
+	challengeScoreMarks.bump("1.2.3.4", "present1", 30, false, true, false, false, now)
+	if rows := challengeScoreMarks.collectDue(now, 0, 0); len(rows) != 1 || rows[0].fp != "present1" {
+		t.Fatalf("present fp not recorded: %+v", rows)
+	}
+
+	// A later present fp overwrites while still unconvicted (most-recent-present wins).
+	ResetChallengeScoreMarks()
+	challengeScoreMarks.bump("1.2.3.4", "present1", 30, false, true, false, false, now)
+	challengeScoreMarks.bump("1.2.3.4", "present2", 30, false, true, false, false, now)
+	if rows := challengeScoreMarks.collectDue(now, 0, 0); rows[0].fp != "present2" {
+		t.Errorf("later present fp did not overwrite: %q", rows[0].fp)
+	}
+
+	// A convicted (farmFP) fp overwrites a present one AND then STICKS against a later
+	// present-only solve — the conviction is the spine and must not be diluted.
+	ResetChallengeScoreMarks()
+	challengeScoreMarks.bump("1.2.3.4", "present", 30, false, true, false, false, now)       // present fills
+	challengeScoreMarks.bump("1.2.3.4", "convicted", 40, false, false, false, true, now)     // farmFP overwrites
+	challengeScoreMarks.bump("1.2.3.4", "present-again", 30, false, true, false, false, now) // must NOT dilute
+	rows := challengeScoreMarks.collectDue(now, 0, 0)
+	if len(rows) != 1 || rows[0].fp != "convicted" || rows[0].farmFP != 1 {
+		t.Errorf("convicted fp did not stick over later present fp: %+v", rows)
+	}
+
+	// An empty fp never clobbers an existing anchor.
+	ResetChallengeScoreMarks()
+	challengeScoreMarks.bump("1.2.3.4", "keep", 30, false, true, false, false, now)
+	challengeScoreMarks.bump("1.2.3.4", "", 30, false, true, false, false, now)
+	if rows := challengeScoreMarks.collectDue(now, 0, 0); rows[0].fp != "keep" {
+		t.Errorf("empty fp clobbered the anchor: %q", rows[0].fp)
+	}
+}
+
+// The DURABLE-write throttle is per-IP and hourly, decoupled from the 10-min log
+// throttle: a sustained denier writes at most one detection_history row per hour, so
+// the sqlite stays lean while the log keeps the fine detail.
+func TestChalScorePersistDue_Throttle(t *testing.T) {
+	ResetChallengeScoreMarks()
+	now := time.Now()
+	challengeScoreMarks.bump("9.9.9.9", "fp", 100, false, false, false, false, now)
+
+	if !challengeScoreMarks.persistDue("9.9.9.9", now) {
+		t.Fatal("first persistDue = false, want true (never persisted)")
+	}
+	if challengeScoreMarks.persistDue("9.9.9.9", now.Add(chalScorePersistEvery/2)) {
+		t.Error("persistDue within the window = true, want false")
+	}
+	if !challengeScoreMarks.persistDue("9.9.9.9", now.Add(chalScorePersistEvery+time.Second)) {
+		t.Error("persistDue after the window = false, want true")
+	}
+	if challengeScoreMarks.persistDue("no.such.ip", now) {
+		t.Error("persistDue for an unknown IP = true, want false")
+	}
+}
+
 func TestChalDecay(t *testing.T) {
 	now := time.Now()
 	if got := chalDecay(100, now.Add(-chalScoreHalfLife), now); math.Abs(got-50) > 1e-6 {
@@ -102,7 +165,7 @@ func TestChalScoreBump_AccumulateAndDecay(t *testing.T) {
 	ResetChallengeScoreMarks()
 	t0 := time.Now()
 	for i := 0; i < 3; i++ {
-		challengeScoreMarks.bump("9.9.9.9", 10.0, false, false, false, false, t0.Add(time.Duration(i)*time.Second))
+		challengeScoreMarks.bump("9.9.9.9", "", 10.0, false, false, false, false, t0.Add(time.Duration(i)*time.Second))
 	}
 	rows := challengeScoreMarks.collectDue(t0.Add(3*time.Second), 0, 0)
 	if len(rows) != 1 || rows[0].solves != 3 || math.Abs(rows[0].score-30) > 0.1 {
@@ -119,9 +182,9 @@ func TestChalScoreBump_AccumulateAndDecay(t *testing.T) {
 func TestChalScoreCollectDue_PruneAndFloor(t *testing.T) {
 	ResetChallengeScoreMarks()
 	t0 := time.Now()
-	challengeScoreMarks.bump("low", 20, false, false, false, false, t0)  // below T1
-	challengeScoreMarks.bump("high", 60, false, false, false, false, t0) // above T1
-	challengeScoreMarks.bump("ghost", 2, false, false, false, false, t0)
+	challengeScoreMarks.bump("low", "", 20, false, false, false, false, t0)  // below T1
+	challengeScoreMarks.bump("high", "", 60, false, false, false, false, t0) // above T1
+	challengeScoreMarks.bump("ghost", "", 2, false, false, false, false, t0)
 
 	rows := challengeScoreMarks.collectDue(t0, chalScoreT1, 0)
 	if len(rows) != 1 || rows[0].ip != "high" {
@@ -142,7 +205,7 @@ func TestChalScoreLogThrottle(t *testing.T) {
 	t0 := time.Now()
 	// Seed high enough that the score is still ≥ T1 after one logEvery of decay
 	// (120·2^(-10/30) ≈ 95), so this test isolates the THROTTLE, not decay.
-	challengeScoreMarks.bump("7.7.7.7", 120, false, false, false, false, t0)
+	challengeScoreMarks.bump("7.7.7.7", "", 120, false, false, false, false, t0)
 
 	if n := len(challengeScoreMarks.collectDue(t0, chalScoreT1, chalScoreLogEvery)); n != 1 {
 		t.Fatalf("first pass returned %d, want 1", n)
@@ -163,7 +226,7 @@ func TestChalScoreCapRejection(t *testing.T) {
 	ResetChallengeScoreMarks()
 	now := time.Now()
 	for i := 0; i < maxChalScoreMarks; i++ {
-		challengeScoreMarks.bump(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256), 10.0, false, false, false, false, now)
+		challengeScoreMarks.bump(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256), "", 10.0, false, false, false, false, now)
 	}
 	challengeScoreMarks.mu.Lock()
 	full := len(challengeScoreMarks.ips)
@@ -172,7 +235,7 @@ func TestChalScoreCapRejection(t *testing.T) {
 		t.Fatalf("store holds %d, want cap %d", full, maxChalScoreMarks)
 	}
 	// A brand-new IP at the cap is rejected…
-	challengeScoreMarks.bump("203.0.113.1", 10.0, false, false, false, false, now)
+	challengeScoreMarks.bump("203.0.113.1", "", 10.0, false, false, false, false, now)
 	challengeScoreMarks.mu.Lock()
 	after := len(challengeScoreMarks.ips)
 	challengeScoreMarks.mu.Unlock()
@@ -180,7 +243,7 @@ func TestChalScoreCapRejection(t *testing.T) {
 		t.Errorf("cap breached: %d, want %d", after, maxChalScoreMarks)
 	}
 	// …but an EXISTING IP still accumulates (not blocked by the cap).
-	challengeScoreMarks.bump("10.0.0.0", 10.0, false, false, false, false, now)
+	challengeScoreMarks.bump("10.0.0.0", "", 10.0, false, false, false, false, now)
 	rows := challengeScoreMarks.collectDue(now, 0, 0)
 	var got *chalScoreRow
 	for i := range rows {
@@ -204,7 +267,7 @@ func TestChalScoreConcurrent(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			for i := 0; i < 500; i++ {
-				challengeScoreMarks.bump(fmt.Sprintf("192.168.%d.%d", g, i%64), 10.0, i%2 == 0, i%3 == 0, i%5 == 0, i%7 == 0, now.Add(time.Duration(i)*time.Millisecond))
+				challengeScoreMarks.bump(fmt.Sprintf("192.168.%d.%d", g, i%64), "", 10.0, i%2 == 0, i%3 == 0, i%5 == 0, i%7 == 0, now.Add(time.Duration(i)*time.Millisecond))
 				if i%50 == 0 {
 					_ = challengeScoreMarks.collectDue(now.Add(time.Duration(i)*time.Millisecond), chalScoreT1, 0)
 				}
@@ -216,7 +279,7 @@ func TestChalScoreConcurrent(t *testing.T) {
 
 func TestChalScore_ResetIsolation(t *testing.T) {
 	ResetChallengeScoreMarks()
-	challengeScoreMarks.bump("1.1.1.1", 100, false, false, false, false, time.Now())
+	challengeScoreMarks.bump("1.1.1.1", "", 100, false, false, false, false, time.Now())
 	ResetChallengeScoreMarks()
 	if n := len(challengeScoreMarks.collectDue(time.Now(), 0, 0)); n != 0 {
 		t.Errorf("reset left %d rows", n)
@@ -294,6 +357,11 @@ func TestRecordChallengeScoreSolve_FingerprintSpine(t *testing.T) {
 	}
 	if math.Abs(rows[0].score-chalScoreWFarmFP) > 0.1 { // tiny decay between bump and collect
 		t.Errorf("spine score = %v, want ~%v", rows[0].score, chalScoreWFarmFP)
+	}
+	// The convicting fingerprint is captured on the row — it is the durable ledger's
+	// GROUP-BY anchor.
+	if rows[0].fp != "c28caa00" {
+		t.Errorf("row fp = %q, want the convicting fingerprint c28caa00", rows[0].fp)
 	}
 
 	// A DIFFERENT (unconvicted) fingerprint with no other tell is not scored.
