@@ -29,8 +29,12 @@ func TestChallengeScoreDurableCapture_DenyOnlyKeyedByFingerprint(t *testing.T) {
 	// The detector has convicted fingerprint c28caa00.
 	MarkSolverFarmFingerprint("c28caa00", time.Minute)
 
-	// IP-A: three convicted-fingerprint solves → ~120 ≥ T2 (would_deny).
-	for i := 0; i < 3; i++ {
+	// IP-A: four convicted-fingerprint solves → ~160 ≥ T2 (would_deny). Seeded high
+	// on purpose: the re-emit below must still find IP-A ≥ T2 after 11 min of decay so
+	// it actually EXERCISES the persist throttle (not just the log throttle). Four
+	// solves keeps a wide margin (~124 at 11 min) so a later T2/half-life retune can't
+	// silently drop this IP below T2 and turn the throttle assertion into a no-op.
+	for i := 0; i < 4; i++ {
 		e.RecordChallengeScoreSolve(ChallengeSolve{IP: "203.0.113.10", Host: "shop.example", TLSFP: "c28caa00"})
 	}
 	// IP-B: two convicted-fingerprint solves → ~80 ∈ [T1,T2) (would_harden only).

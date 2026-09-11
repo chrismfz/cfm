@@ -24,8 +24,11 @@ import (
 // anchoring TLS fp (the GROUP-BY spine — the convicted solver-farm fp when one drove
 // the score, else the fp present on the scored solves, "" when no X-CFM-TLS stamp);
 // `fp_convicted` says which of those it is, so the rollup can weight a convicted-fp
-// row above a merely-present one. `ip` is the history column (indexed) — the ledger
-// counts DISTINCT ips per fingerprint from it.
+// row above a merely-present one — it is the LIFETIME flag "this IP was ever convicted
+// (farmFP) while scoring", not "the fingerprint is convicted right now" (a conviction
+// TTL may already have expired by emit time), so the cfm-web rollup reads it as "was
+// convicted". `ip` is the history column (indexed) — the ledger counts DISTINCT ips
+// per fingerprint from it.
 func (e *Engine) recordChallengeScoreVerdict(r chalScoreRow, verdict string, now time.Time) {
 	if e == nil || e.history == nil {
 		return
