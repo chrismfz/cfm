@@ -1,11 +1,19 @@
 # Fleet-shared fingerprint reputation (idea note)
 
-> **Status:** IDEA / DESIGN NOTE — pre-code, **Phase 2+**, to revisit **after the
-> solver-farm fp-concentration burn-in** settles. Captured from a 2026-09-10
-> discussion (prompted by BitNinja's JA4H WAF-Pro writeup). **No code yet, and
-> deliberately not touching the `chrismfz/cfm-web` repo yet** — this note lives in
-> the `cfm` repo so we don't lose the design while the burn-in runs. Owner:
-> challenge/webdetector + cfm-web.
+> **Status:** IDEA NOTE (cfm-side / node concerns). Captured from a 2026-09-10
+> discussion (prompted by BitNinja's JA4H WAF-Pro writeup). The **grounded,
+> as-designed implementation now lives in `cfm-web`:
+> `chrismfz/cfm-web:docs/fingerprint-reputation.md`** (real schema, ingest,
+> Filament, MCP). Read that for the concrete plan; this note is kept for the
+> cfm/node-side concerns (what the node publishes) and the reasoning history.
+> Owner: challenge/webdetector + cfm-web.
+>
+> **Two corrections the cfm-web doc supersedes:** (1) §4's "soft, self-healing
+> TTL, never permanent" is **wrong for a stable fingerprint** — the record is now
+> **durable and never expires**; only a separate, re-armable per-fingerprint
+> *policy* carries a TTL (the record keeps the memory, the action expires). (2) The
+> node-side prerequisite is spelled out in §5 below: the `challenge_solver_farm`
+> finding must reach the durable `detection_history` so cfm-web can PULL it.
 >
 > Reads first: `docs/solver-farm-fingerprint-concentration.md` (Phase-1, shipped),
 > `docs/solver-farm-cross-host-phase2.md` (Phase-2 design), `docs/challenge-score.md`
@@ -77,7 +85,13 @@ Guardrails (all required, not optional):
    passes; the farm does not. This neutralises the shared-population risk. A shared
    `block` is the dangerous version — gate it behind far stronger corroboration, if
    ever.
-3. **Soft, self-healing TTL** (like the 6h autoblock), never `permanent`.
+3. **Durable record, re-armable policy** *(corrected — this replaces the original
+   "soft, self-healing TTL")*. A fingerprint is **stable**, so forgetting it
+   discards its only advantage over an IP: the memory. The **reputation record +
+   evidence never expire**; a separate, operator-controlled **per-fingerprint
+   policy** carries the action + a TTL (the `blocklists` `ttl`/`expires_at`
+   grammar) and is armed/disarmed/**re-armed** without touching the record. "6h"
+   becomes one duration *option*, not a mandatory forget. See the cfm-web doc §2.
 4. **Corroboration before promote** — a fingerprint reaches shared-enforce only
    after ≥K nodes or ≥N independent evidence rows agree (anti-poisoning: one
    compromised/misconfigured node must not be able to convict a fingerprint
@@ -86,27 +100,36 @@ Guardrails (all required, not optional):
    known-legitimate shared stack (a monitored synthetic-checker fleet, a corporate
    managed-browser fingerprint).
 
-## 5. Architecture sketch (aligned to the existing `check_ip` pattern)
+## 5. Node/edge side (the cfm concerns) — and the one prerequisite
+
+The full data model + ingest + storage + UI + MCP live in the cfm-web doc. What
+the **node** owes the pipeline:
 
 ```
-cfm-web:  fingerprints model
-  { fp, ja4h?, first_seen, last_seen,
-    evidence[]{ node, host, subnets, countries, solves_per_ip, ts },
-    confidence, verdict: watch | challenge | block, ttl,
-    source_nodes[], operator_override }
-
-nodes  → PUBLISH   a conviction (solverfarm concentration verdict + evidence),
-                   the same way the detector framework already reports autoblocks
-cfm-web → AGGREGATE + promote  (corroboration gate → verdict + soft TTL)
-nodes  ← PULL      shared verdicts, the way each node already pulls the IP blocklist
-edge   → MATCH     the request's X-CFM-TLS id (already stamped!) against the shared
+node   → PERSIST   the challenge_solver_farm FINDING to the durable
+                   detection_history as event_type=solver_farm, carrying its
+                   evidence Extra (top_fp/xh_fp, host, solves, subnets,
+                   fp_countries/xh_countries, xh_host_share, solves_per_ip, tracks)
+cfm-web ← PULL     that source via the fleet_ingest_cursors / NodeHardFaultIngestor
+                   pattern (a new `source` value; no new node API)
+...        (cfm-web aggregates → reputation record + policy; see its doc)
+nodes  ← PULL      the armed policies, the way each node already pulls the IP blocklist
+edge   → MATCH     the request's X-CFM-TLS id (already stamped!) against the armed
                    list → CHALLENGE on match (a new cfm-side check, cheap)
 ```
 
-Two things make this cheap: the **`X-CFM-TLS` stamping already exists** at the edge
-(matching an incoming request's fingerprint is nearly free), and the
-**publish/aggregate/pull plumbing already exists** for the IP blocklist — this is a
-second collection of the same shape.
+**The one cfm-side prerequisite (Phase A):** today the `Challenge/SolverFarm`
+finding reaches only `cfm.detector.log` + mail/Slack — **not** the durable,
+queryable `detection_history` the PULL ingest reads (that store holds the
+underlying `challenge_solved` rows, not the finding). So the node must write the
+finding there, as a first-class `solver_farm` event with the evidence above. This
+is the only node change Phase A needs; ingest/storage/UI/MCP are all cfm-web.
+
+Two things still make it cheap: **`X-CFM-TLS` stamping already exists** at the edge
+(matching a request's fingerprint is nearly free), and the **cursor pull +
+blocklist fetch plumbing already exist** — the fingerprint pipeline is a second
+collection of the same shape. (Push-to-web was the original sketch; PULL was
+chosen — it matches the established pattern and needs no new node API.)
 
 **JA4H as a second axis.** Add the HTTP-request fingerprint (JA4H) alongside the TLS
 one. It hashes header structure/order, not the UA string, so it stays stable across
@@ -131,11 +154,14 @@ itself is FP-clean — there is no point sharing a verdict we are still validati
 - **Who may publish, and trust.** Verdicts carry provenance (node + evidence);
   cfm-web decides the corroboration threshold; operators can override. Same
   fail-closed posture as the scoped-auth boundary.
-- **Retention / decay.** A fingerprint that stops offending should decay out
-  (soft TTL + last_seen), so the list tracks live threats, not history.
+- **Retention / decay** *(resolved — see cfm-web doc §9).* The **record does not
+  decay** (a stable fingerprint is worth remembering); the *evidence log* may be
+  pruned like `agent_events` (30 days) while the rollup persists, and enforcement
+  decays via the *policy* TTL, not the record. "Decay out" was the old
+  soft-TTL-forget thinking — corrected.
 - **Relationship to Track-2 seed.** This is arguably the fleet-global generalisation
   of the `solver_farm` seed in `docs/challenge-score.md` §4 — decide whether it
   feeds the per-client score or stands beside it.
-- **Repo boundary.** The model + aggregation live in `chrismfz/cfm-web`; the
-  publish/pull/edge-match live in `cfm`. Not started on either yet — this note is
-  the placeholder.
+- **Repo boundary.** Model + ingest + storage + UI + MCP live in
+  `chrismfz/cfm-web` (design: `cfm-web:docs/fingerprint-reputation.md`, merged);
+  the node-side finding-persist + the edge X-CFM-TLS match live in `cfm` (§5).
