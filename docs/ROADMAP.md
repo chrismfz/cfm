@@ -193,28 +193,35 @@ alone; NAT-aware.
   regime — shipped default-on/log-only, catching `techking.gr` + 3 more vhosts
   across 2 nodes ~12 h post-deploy, zero observed collateral. Feeds the
   `solver_farm` seed B3 budgets. `docs/solver-farm-fingerprint-concentration.md`.
-- **Track-2 — solver-farm cross-host fingerprint aggregation (Phase 2)** — [design].
-  The burn-in confirmed a *second* farm fingerprint (`95070673`) spread too thin
-  per vhost for the Phase-1 60 s country guard (per-host country-peak ≤ 6) yet
-  obvious per node (23 vhosts, 41 countries, ~1.05 solves/IP, 83–100 % of each
-  targeted vhost). Design adds a per-node, per-fingerprint aggregation with a
-  per-vhost dominance + `solves_per_ip` pre-gate (the two guards that keep a
-  global-audience browser out where cross-host loses per-vhost country
-  clustering). Grounded, shadow-first: `docs/solver-farm-cross-host-phase2.md`.
-- **Fleet fingerprint reputation & observability (cfm-web)** — [design]. A
-  central `fingerprints` model in `cfm-web` that remembers *convicted* client
-  fingerprints (TLS `c28caa00` + later JA4H) with hard evidence, shows them live
-  (Filament dashboard + per-fp drilldown), makes them MCP-searchable, and lets an
-  operator arm an action per fingerprint. **Durable record + re-armable policy**:
-  the fingerprint + evidence never expire (memory), only a separate per-fp policy
-  (action + TTL, `blocklists`-style) is armed/disarmed/re-armed. Fingerprints beat
-  IPs (stable vs ephemeral); the load-bearing risk is that a fingerprint is a
-  *population*, so shared action is `challenge` (self-targeting) not `block`,
-  share-proof only, ≥K-node corroboration, `ALLOW_FPS` override. Ingest reuses the
-  `fleet_ingest_cursors` PULL pattern; one node-side prereq (persist the finding to
-  `detection_history`). Rollout A (memory+MCP) → B (dashboard+policy) → C (edge
-  enforce). Grounded design: `cfm-web:docs/fingerprint-reputation.md`; cfm-side
-  concerns: `docs/fleet-fingerprint-reputation.md`.
+- **Track-2 — solver-farm cross-host fingerprint aggregation (Phase 2)** — [shipped,
+  burn-in]. Catches the *second* farm fingerprint (`95070673`) spread too thin per
+  vhost for the Phase-1 60 s country guard (per-host country-peak ≤ 6) yet obvious
+  per node (~23 vhosts / 44 countries). Per-node, per-fingerprint aggregation over
+  `XH_WINDOW` (30m) with a per-vhost dominance pre-gate (`MIN_XH_HOST_SHARE_PCT`,
+  the primary guard); `solves_per_ip` is **evidence only** (the weekday burn-in
+  proved it does not separate farm from legit — dropped as a gate). Shipped
+  default-on, **log-only through its own burn-in**; marks every farmed vhost.
+  `docs/solver-farm-cross-host-phase2.md`.
+- **Solver-farm convictions → `detection_history`** — [shipped]. Every emitted
+  `challenge_solver_farm` finding now persists as `event_type=solver_farm` with
+  fingerprint-scoped evidence (`countries ≤ subnets ≤ ips`), the node-side prereq
+  that feeds the fleet fingerprint-reputation ingest below.
+- **Fleet fingerprint reputation & observability (cfm-web)** — [A+B shipped, C
+  deferred]. A central `fingerprints` store in `cfm-web` that remembers *convicted*
+  client fingerprints (TLS `c28caa00`/`95070673` + later JA4H) with hard evidence.
+  **Phase A** (ingest + MCP): `SolverFarmIngestor` PULLs the `solver_farm` source
+  via `fleet_ingest_cursors` into durable `fingerprints` + `fingerprint_events`
+  tables; read-only `fingerprints` MCP tool. **Phase B** (dashboard + policy,
+  shadow): Filament reputation table + per-fp drilldown (`ExplainFingerprint`),
+  arm/disarm/action/duration `fingerprint_policies` (durable record + re-armable
+  policy — disarm ≠ delete), and a farming-fingerprints dashboard widget.
+  **Phase C** (edge enforce) — deferred behind an **entry gate**: needs weeks of
+  accumulated shadow data proving the verdict/share gates separate real farms from
+  legit near-FPs, then a cfm-web policy-fetch endpoint + node `X-CFM-TLS` match
+  with match-time re-validation, ≥K-node corroboration before `deny`, and a
+  dedicated arm permission. `challenge` (self-targeting) not `block`; `ALLOW_FPS`
+  override. Design + Phase-C plan: `cfm-web:docs/fingerprint-reputation.md`;
+  cfm-side: `docs/fleet-fingerprint-reputation.md`.
 - **Webtop visibility for the per-IP / edge-log shadow signals** — [post-burn-in].
   `challenge_score` (per-IP) and `cfm_pcw` (edge error log) don't map to the
   existing per-vhost webtop pills or the WAF-history analytics, so they're
