@@ -954,6 +954,7 @@ type xhVerdict struct {
 	hosts       int
 	countries   int
 	subnets     int
+	ips         int // node-wide distinct fp IPs across the dominated vhosts
 	solvesPerIP float64
 	hostShare   float64
 	hostSolves  int
@@ -1075,7 +1076,7 @@ func (d *Detector) evalCrossHost(now time.Time) map[string]xhVerdict {
 		if len(agg.ips) > 0 {
 			spi = float64(agg.solves) / float64(len(agg.ips))
 		}
-		nh, nc, ns := len(agg.hosts), len(agg.countries), len(agg.subnets)
+		nh, nc, ns, ni := len(agg.hosts), len(agg.countries), len(agg.subnets), len(agg.ips)
 		for host, share := range qualHosts {
 			// A vhost dominated by two flagging fingerprints keeps the one with the
 			// wider subnet spread (deterministic: then more countries, then the
@@ -1089,7 +1090,7 @@ func (d *Detector) evalCrossHost(now time.Time) map[string]xhVerdict {
 			}
 			c := hosts[host]
 			out[host] = xhVerdict{
-				fp: fp, hosts: nh, countries: nc, subnets: ns, solvesPerIP: spi, hostShare: share,
+				fp: fp, hosts: nh, countries: nc, subnets: ns, ips: ni, solvesPerIP: spi, hostShare: share,
 				hostSolves: c.solves, hostSubnets: len(c.subnets), hostIPs: len(c.ips),
 			}
 		}
@@ -1277,6 +1278,19 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 	// single fingerprint + spread (cross-host takes precedence over the per-host
 	// concentration fp; a subnet-spread-only finding carries no fingerprint). This
 	// is the structured record the fleet reputation store ingests.
+	//
+	// IPs/subnets/countries must describe the SAME population as the resolved
+	// fingerprint, or the row is self-contradictory (e.g. distinct_subnets <
+	// distinct_countries, which is impossible for one set of solvers). So each
+	// track sets the spread at its own scope, not the vhost-wide dispSubnets:
+	//   - cross-host: the fp's NODE-WIDE spread (xh.ips/subnets/countries) — the
+	//     farm's true footprint, and what makes countries≤subnets≤ips hold.
+	//   - fp-concentration: the fp's spread ON THIS VHOST (loFPSubs/loFPCcs);
+	//     distinct_ips stays the vhost IP count (a fp-dominated upper bound — the
+	//     per-host track doesn't carry an fp-only IP count), which still satisfies
+	//     loFPSubs ≤ dispIPs.
+	// A subnet-spread-only finding keeps the vhost counts and carries no fingerprint
+	// (the fleet store skips it), so its scope is moot.
 	finding := Finding{
 		When: now, Host: host, Tracks: tracks,
 		Solves: dispSolves, DistinctIPs: dispIPs, Subnets: dispSubnets,
@@ -1285,9 +1299,11 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 	switch {
 	case xh != nil:
 		finding.Fingerprint, finding.Countries = xh.fp, xh.countries
+		finding.DistinctIPs, finding.Subnets = xh.ips, xh.subnets
 		finding.HostShare, finding.Hosts = xh.hostShare, xh.hosts
 	case loFP != "":
 		finding.Fingerprint, finding.Countries = loFP, loFPCcs
+		finding.Subnets = loFPSubs
 	}
 	return alert, finding
 }
