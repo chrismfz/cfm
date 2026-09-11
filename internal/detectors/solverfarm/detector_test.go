@@ -987,3 +987,80 @@ func TestNotifyCooldownSurvivesIdleReclamation(t *testing.T) {
 		t.Errorf("pass 3: %s = %q, want %q — a pulsing farm must not re-mail within NotifyCooldown", core.ExtraNotify, got, core.NotifyNo)
 	}
 }
+
+// ── durable finding sink (Phase A: node persists the finding to detection_history) ──
+
+// An emitted finding fires the durable sink once, carrying the resolved evidence
+// (the grouping fingerprint, tracks, spread) — the record cfm-web ingests.
+func TestFindingSinkFiresWithEvidence(t *testing.T) {
+	var got []Finding
+	SetFindingSink(func(f Finding) { got = append(got, f) })
+	t.Cleanup(func() { SetFindingSink(nil) })
+
+	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 8, MinFPCountries: 6})
+	h.d.countryFn = ipCountry
+	for i := 0; i < 12; i++ {
+		h.solveFP("techking.example", fmt.Sprintf("203.0.%d.1", i), chromeUA, "c28caa00")
+	}
+	if a := h.run(t); len(a) != 1 {
+		t.Fatalf("alerts=%d, want 1", len(a))
+	}
+	if len(got) != 1 {
+		t.Fatalf("finding sink fired %d times, want 1 (once per emitted alert)", len(got))
+	}
+	f := got[0]
+	if f.Host != "techking.example" {
+		t.Errorf("Host=%q", f.Host)
+	}
+	if f.Fingerprint != "c28caa00" {
+		t.Errorf("Fingerprint=%q, want the grouping fp (evidence, not a signature)", f.Fingerprint)
+	}
+	if f.Tracks != "fp_concentration" {
+		t.Errorf("Tracks=%q, want fp_concentration", f.Tracks)
+	}
+	if f.Subnets != 12 || f.Countries != 12 {
+		t.Errorf("subnets=%d countries=%d, want 12 / 12", f.Subnets, f.Countries)
+	}
+	if f.Solves != 12 || f.Hosts != 1 {
+		t.Errorf("Solves=%d Hosts=%d, want 12 / 1 (per-host finding)", f.Solves, f.Hosts)
+	}
+}
+
+// The durable finding must fire even when the alert is LOG-ONLY: the memory is
+// not throttled by the mail decision. A cross-host-only finding (log-only through
+// its burn-in) still records, with the cross-host evidence resolved.
+func TestFindingSinkFiresEvenWhenLogOnly(t *testing.T) {
+	var got []Finding
+	SetFindingSink(func(f Finding) { got = append(got, f) })
+	t.Cleanup(func() { SetFindingSink(nil) })
+
+	h := newHarness(t, xhCfg())
+	h.d.countryFn = xhCountry
+	for hi := 0; hi < 6; hi++ {
+		for s := 0; s < 6; s++ {
+			h.solveFP(fmt.Sprintf("h%d.shop", hi), fmt.Sprintf("10.%d.%d.1", hi+1, s), chromeUA, "95070673")
+		}
+	}
+	alerts := h.run(t)
+	if len(alerts) == 0 {
+		t.Fatal("expected cross-host alerts")
+	}
+	for _, a := range alerts {
+		if a.Extra[core.ExtraNotify] != core.NotifyNo {
+			t.Fatal("cross-host-only alerts must be log-only")
+		}
+	}
+	if len(got) != len(alerts) {
+		t.Fatalf("findings=%d alerts=%d — the sink must fire once per emitted alert even when log-only", len(got), len(alerts))
+	}
+	f := got[0]
+	if f.Tracks != "cross_host" || f.Fingerprint != "95070673" {
+		t.Errorf("finding tracks=%q fp=%q, want cross_host / 95070673", f.Tracks, f.Fingerprint)
+	}
+	if f.Hosts < 4 {
+		t.Errorf("cross-host finding Hosts=%d, want >= 4 (node-wide dominated vhosts)", f.Hosts)
+	}
+	if f.HostShare == 0 {
+		t.Errorf("cross-host finding HostShare=0, want the per-vhost dominance carried as evidence")
+	}
+}

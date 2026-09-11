@@ -20,6 +20,7 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectors/health"
 	"cfm/internal/detectors/meta"
+	"cfm/internal/detectors/solverfarm"
 	"cfm/internal/logging"
 	webdet "cfm/internal/webdetector"
 )
@@ -1023,6 +1024,12 @@ func init() {
 		// Same for boolean STATE hard-faults (failed SMART device, degraded mdadm
 		// array): edge-triggered, persisted durably, pinned/ack'd fleet-side.
 		health.SetNodeFaultEventSink(engine.RecordNodeFaultEvent)
+		// Persist emitted challenge_solver_farm findings (distributed-farm
+		// convictions) into the same durable history store as event_type=solver_farm
+		// so they are queryable via detection_history and can be PULLed into the
+		// fleet fingerprint-reputation store (cfm-web). Same replace-not-append sink
+		// shape; fires once per emitted alert regardless of the mail throttle.
+		solverfarm.SetFindingSink(engine.RecordSolverFarmFinding)
 		// Runtime per-signature/per-vhost excludes: the scanner consults the
 		// engine's sig-ignore store on every infected verdict (after the
 		// CLAM_SIG_IGNORE config baseline). Same replace-not-append shape.

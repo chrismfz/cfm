@@ -823,12 +823,45 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	return nil
 }
 
+// Finding is the durable, structured record of one EMITTED solver-farm alert —
+// the evidence a fleet-central reputation store (cfm-web) ingests via the node's
+// detection_history (event_type=solver_farm). It fires once per emitted alert
+// (post-cooldown), regardless of whether the alert NOTIFIED: the durable memory
+// must not be throttled by the mail cadence. Fingerprint is the GROUP-BY key that
+// flagged the vhost (the cross-host fp when present, else the per-host
+// concentration fp; empty for a subnet-spread-only finding) — never a matched
+// signature. See docs/fleet-fingerprint-reputation.md §5 for the ingest contract.
+type Finding struct {
+	When        time.Time
+	Host        string
+	Fingerprint string
+	Tracks      string // subnet_spread[+fp_concentration][+cross_host]
+	Solves      int
+	DistinctIPs int
+	Subnets     int
+	Countries   int
+	HostShare   float64 // cross-host per-vhost dominance; 0 when not a cross-host finding
+	SolvesPerIP float64
+	Hosts       int // cross-host node-wide vhost count; 1 for a per-host-only finding
+}
+
+// findingSink, if set, receives every emitted Finding. Package-level and wired by
+// webdetector_register to the Engine's durable history recorder — a plain
+// callback, so this package takes no webdetector dependency (mirrors the ECC/clam
+// sinks). Unset by default: findings then only alert/log, exactly as before.
+var findingSink func(Finding)
+
+// SetFindingSink installs the durable-record sink for emitted findings. Called
+// once at wiring time; safe to leave unset.
+func SetFindingSink(fn func(Finding)) { findingSink = fn }
+
 // emit builds and sends one alert, applying the NotifyCooldown throttle and
 // stamping the per-vhost cooldown/notify clocks on a successful hand-off. It
 // returns a non-nil error only on context cancellation (mirrors the caller's
 // `return ctx.Err()`). xhOnly forces the finding log-only (the cross-host
 // burn-in); otherwise the NotifyCooldown + ACTION=logonly decide whether it
-// notifies.
+// notifies. On a successful hand-off it also fires the durable finding sink (if
+// wired) — independent of the notify decision.
 func (d *Detector) emit(ctx context.Context, out chan<- core.Alert, now time.Time, st *hostState,
 	host string, solves, truncated int, setsCapped bool, uas map[string]int, impossibleUA int,
 	hiRate bool, loFP string, loFPSubs, loFPCcs int, xh *xhVerdict, xhOnly bool) error {
@@ -837,7 +870,7 @@ func (d *Detector) emit(ctx context.Context, out chan<- core.Alert, now time.Tim
 	if !suppressNotify && !st.lastNotify.IsZero() && now.Sub(st.lastNotify) < d.cfg.NotifyCooldown {
 		suppressNotify = true
 	}
-	alert := d.buildAlert(now, host, st, solves, truncated, setsCapped, uas, impossibleUA, hiRate, loFP, loFPSubs, loFPCcs, xh, suppressNotify)
+	alert, finding := d.buildAlert(now, host, st, solves, truncated, setsCapped, uas, impossibleUA, hiRate, loFP, loFPSubs, loFPCcs, xh, suppressNotify)
 	select {
 	case out <- alert:
 		// Stamp the clocks only once the alert is actually handed off, so a
@@ -845,6 +878,9 @@ func (d *Detector) emit(ctx context.Context, out chan<- core.Alert, now time.Tim
 		st.lastAlert = now
 		if !suppressNotify {
 			st.lastNotify = now
+		}
+		if findingSink != nil {
+			findingSink(finding)
 		}
 		return nil
 	case <-ctx.Done():
@@ -1038,7 +1074,7 @@ func (d *Detector) evalCrossHost(now time.Time) map[string]xhVerdict {
 // caller owns the truncation counter and the cooldown stamp.
 func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 	solves, truncated int, setsCapped bool, uas map[string]int, impossibleUA int,
-	hiRate bool, loFP string, loFPSubs, loFPCcs int, xh *xhVerdict, suppressNotify bool) core.Alert {
+	hiRate bool, loFP string, loFPSubs, loFPCcs int, xh *xhVerdict, suppressNotify bool) (core.Alert, Finding) {
 
 	topUA, topUACount := "", 0
 	for ua, n := range uas {
@@ -1206,5 +1242,22 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 	if suppressNotify {
 		alert.Extra[core.ExtraNotify] = core.NotifyNo
 	}
-	return alert
+
+	// The durable finding mirrors the alert's headline evidence, resolved to a
+	// single fingerprint + spread (cross-host takes precedence over the per-host
+	// concentration fp; a subnet-spread-only finding carries no fingerprint). This
+	// is the structured record the fleet reputation store ingests.
+	finding := Finding{
+		When: now, Host: host, Tracks: tracks,
+		Solves: dispSolves, DistinctIPs: dispIPs, Subnets: dispSubnets,
+		SolvesPerIP: solvesPerIP, Hosts: 1,
+	}
+	switch {
+	case xh != nil:
+		finding.Fingerprint, finding.Countries = xh.fp, xh.countries
+		finding.HostShare, finding.Hosts = xh.hostShare, xh.hosts
+	case loFP != "":
+		finding.Fingerprint, finding.Countries = loFP, loFPCcs
+	}
+	return alert, finding
 }
