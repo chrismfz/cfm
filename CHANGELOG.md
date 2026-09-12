@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.12
+
 ### Added
 - **Solver-farm score is now fingerprint-anchored (B3 slice 1, shadow-only).** The
   `challenge_solver_farm` detector marks the CONVICTING fingerprint (a
