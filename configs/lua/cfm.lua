@@ -1349,6 +1349,16 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         -- attached. The single cfm.waf.log now emits one JSON record
         -- per trigger carrying everything Go knows: timestamp, action,
         -- TTL, ASN/country enrichment + these per-request headers.
+        -- Client TLS fingerprint for the fleet reputation ledger (source #3),
+        -- computed edge-side from the handshake ($ssl_* via cfm_tlsfp.value()) —
+        -- NOT the client-supplied X-CFM-TLS header, which this WAF path does not
+        -- clear (only /__cfm_verify does) and so would be client-SPOOFABLE. value()
+        -- is unspoofable and charset/length-bounded; Go parses it to the canonical
+        -- fp id. Computed only here, on a pushed trigger (rare) — no per-request
+        -- cost. pcall-guarded (like the /__cfm_verify stamp) so a missing/broken
+        -- cfm_tlsfp module can never 500 the request; nil on plain-HTTP or failure.
+        local ok_fp, tls_fp = pcall(function() return require("cfm_tlsfp").value() end)
+        if not ok_fp then tls_fp = nil end
         local push = {
           ip = ip, action = waf_action, ttl_sec = ttl or 600,
           reason = reason, host = p_host, uri = p_uri, method = p_meth,
@@ -1356,14 +1366,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
           ua           = req_headers["user-agent"],
           referer      = req_headers["referer"],
           content_type = req_headers["content-type"],
-          -- Client TLS fingerprint for the fleet reputation ledger (source #3).
-          -- Computed edge-side from the handshake ($ssl_* via cfm_tlsfp.value()),
-          -- NOT read from the client-supplied X-CFM-TLS header: this WAF path does
-          -- not clear that header (only /__cfm_verify does), so reading it would be
-          -- client-SPOOFABLE. value() is unspoofable and already charset/length-
-          -- bounded; Go parses it to the canonical fp id. Computed only here, on a
-          -- pushed trigger (rare) — no per-request cost. nil on plain-HTTP.
-          fingerprint  = require("cfm_tlsfp").value(),
+          fingerprint  = tls_fp,
         }
         decision:rpc("ip_push", "POST", "/nginx/ip", cjson.encode(push),
           { ip = ip, host = p_host, uri = p_uri, method = p_meth })

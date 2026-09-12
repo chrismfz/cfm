@@ -96,7 +96,8 @@ type NginxBridge struct {
 	// IP decision via POST /nginx/ip. The hook receives the IP, action
 	// ("challenge"|"block"), reason (e.g. "WAF_XSS"), TTL, the per-request
 	// forensic fields (UA / Referer / Content-Type) that Lua attaches to every
-	// push, and the client TLS fingerprint (X-CFM-TLS; empty when unstamped).
+	// push, and the client TLS fingerprint (the raw cfm_tlsfp.value() tuple,
+	// parsed to a canonical id by the daemon; empty on plain-HTTP).
 	// Set via SetTriggerHook. Called without b.mu held.
 	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType, fingerprint string)
 
@@ -368,10 +369,12 @@ type nginxIPMsg struct {
 	Referer     string `json:"referer,omitempty"`
 	ContentType string `json:"content_type,omitempty"`
 
-	// Fingerprint is the client's TLS ClientHello id (the X-CFM-TLS header that
-	// cfm_tlsfp.lua already stamps), attached so a WAF trigger becomes
-	// fingerprint-attributable evidence downstream (the fleet fingerprint-
-	// reputation ledger, source #3). Empty on older Lua clients / plain-HTTP.
+	// Fingerprint is the client's TLS ClientHello summary as the raw cfm_tlsfp.value()
+	// tuple (computed edge-side from the handshake $ssl_* — NOT a client-supplied
+	// header, which the WAF path does not clear; the daemon parses it to the canonical
+	// fp id via tlsfp.Parse). Attached so a WAF trigger becomes fingerprint-attributable
+	// evidence downstream (the fleet reputation ledger, source #3). Empty on older Lua
+	// clients / plain-HTTP.
 	Fingerprint string `json:"fingerprint,omitempty"`
 }
 

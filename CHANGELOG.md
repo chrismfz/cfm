@@ -20,12 +20,15 @@ back-filled here — see the git/PR history for that period.
 ### Added
 - **WAF triggers now carry the client TLS fingerprint (ledger source #3 groundwork,
   shadow).** Every in-path WAF trigger persisted to `detection_history`
-  (`event_type=waf_trigger`) now includes the client's `X-CFM-TLS` fingerprint in its
-  payload (and in the `cfm.waf.log` record), when the edge stamped one. The edge
-  (`cfm.lua`) forwards the already-stamped `X-CFM-TLS` header on the trigger push;
-  `nginx_bridge.go` and `RecordWAFTrigger` thread it into the event. This makes a WAF
-  block **fingerprint-attributable** — the groundwork for the fleet fingerprint-
-  reputation ledger's third source (WAF block-tier hits: SQLi/RCE/webshell/CVE, the
+  (`event_type=waf_trigger`) now carries the client's TLS fingerprint **id** in its
+  payload. The fingerprint is computed **edge-side from the TLS handshake**
+  (`cfm.lua` calls `cfm_tlsfp.value()` over `$ssl_*` on the trigger push) — NOT read
+  from the client-supplied `X-CFM-TLS` header, which the WAF path does not clear and
+  would therefore be client-spoofable; `nginx_bridge.go` forwards that raw tuple and
+  `RecordWAFTrigger` parses it with `tlsfp.Parse` to the same canonical 8-hex id the
+  challenge path uses (storing only the id, never the raw tuple). This makes a WAF
+  block **fingerprint-attributable** and correlatable with the other ledger sources —
+  the groundwork for the third source (WAF block-tier hits: SQLi/RCE/webshell/CVE, the
   highest-confidence population). Pure attribution: nothing is enforced and nothing
   keys on the fingerprint here — it is recorded only; the cfm-web ingest and the
   generic-tool-UA guard that decides what is safe to act on are a separate,
