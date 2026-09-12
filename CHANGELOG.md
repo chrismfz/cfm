@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.12
+
 ### Added
 - **Challenge solves now log `ua_family=` next to `tls_fp=` (Rung-1 / v1+ groundwork,
   shadow).** Each per-solve line in `cfm.challenges.log` now carries `uaplausible`'s
@@ -27,8 +31,6 @@ back-filled here — see the git/PR history for that period.
   real traffic** — the log-first prerequisite for a future JA4↔UA coherence tell.
   Pure logging: nothing scores or enforces on it. See `docs/traffic-classifier.md`
   § "The ChallengeV2 rung" and `docs/challenge-score.md` §8.
-
-## 2026.09.12
 
 ### Added
 - **WAF triggers now carry the client TLS fingerprint (ledger source #3 groundwork,
