@@ -429,6 +429,15 @@ type ChallengeSolve struct {
 	// a *lie*, not that it is old.
 	UAImpossible bool
 	UAReason     string
+	// UAFamily is uaplausible's browser-family classification of the submitted UA
+	// (Chrome — any Blink — / Firefox / Safari / CriOS), "" when the UA can't be
+	// classified: an empty/absent UA, curl/wget or other non-Blink/unknown clients,
+	// and notably a HeadlessChrome token (which uaplausible deliberately declines to
+	// call Chrome). Logged next to TLSFP so the fingerprint↔UA-family
+	// corpus is derivable straight from cfm.challenges.log. Log-first: nothing
+	// scores on it, and the fp→family mapping must be derived from captured
+	// traffic, never written from memory.
+	UAFamily string
 	// TLSFP is a short id for the client's TLS ClientHello, stamped by the edge
 	// (configs/lua/cfm_tlsfp.lua) and parsed by internal/tlsfp. Empty when the
 	// edge did not supply one — an older edge config, a plain-HTTP request, or
@@ -454,6 +463,19 @@ func (s ChallengeSolve) TLSFingerprintOrDash() string {
 		return "-"
 	}
 	return s.TLSFP
+}
+
+// UAFamilyOrDash renders UAFamily for a log line. Empty — any UA uaplausible can't
+// classify (empty/curl/non-Blink/unknown, HeadlessChrome among them) — becomes "-",
+// both so the key=value line stays parseable and because "-" can itself be a signal
+// (e.g. a "Chrome"-claiming UA uaplausible declines to call Chrome). Both writers of
+// the solve line go through this so they can never disagree about what absence looks
+// like, matching TLSFingerprintOrDash.
+func (s ChallengeSolve) UAFamilyOrDash() string {
+	if s.UAFamily == "" {
+		return "-"
+	}
+	return s.UAFamily
 }
 
 // SolveLatencyMS reports the real client-side solve latency and whether it is
@@ -689,6 +711,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			SolveMS:      powSolveLatencyMS(issuedAt, verifyAt, cfg.TTL),
 			UAImpossible: uaVerdict.Impossible,
 			UAReason:     uaVerdict.Reason(),
+			UAFamily:     uaVerdict.Family,
 			TLSFP:        fp.ID,
 			TLSRaw:       fp.Raw,
 		}
@@ -718,15 +741,26 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		if challengeSolvedHook != nil {
 			challengeSolvedHook(solve)
 		} else {
+			// Mirror the hook writer's rendering so the two solve-line writers agree:
+			// solve_ms goes through SolveLatencyMS() with a "-" sentinel (a raw %d
+			// would log solve_ms=0 for an unknown/clock-stepped solve and read as an
+			// instantaneous, maximally-suspicious one), and ua= carries the raw UA so
+			// a ua_family=- row is still interpretable.
+			solveMS := "-"
+			if ms, ok := solve.SolveLatencyMS(); ok {
+				solveMS = strconv.FormatInt(ms, 10)
+			}
 			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%d diff=%d tls_fp=%s",
+				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q",
 				solve.IP,
 				solve.Host,
 				solve.URI,
 				solve.VerifyMS,
-				solve.SolveMS,
+				solveMS,
 				solve.Diff,
 				solve.TLSFingerprintOrDash(),
+				solve.UAFamilyOrDash(),
+				solve.UA,
 			)
 		}
 

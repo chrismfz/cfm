@@ -17,7 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Challenge solves now log `ua_family=` next to `tls_fp=` (Rung-1 / v1+ groundwork,
+  shadow).** Each per-solve line in `cfm.challenges.log` now carries `uaplausible`'s
+  browser-family classification — `Chrome`/`Firefox`/`Safari`/`CriOS`, or `-` for any
+  UA it can't classify (empty/curl/non-Blink/unknown, a HeadlessChrome token among
+  them). This completes the fingerprint↔UA-family corpus already captured on that
+  line (`tls_fp=` + `ua=`) so the per-family TLS-fp distribution can be **derived from
+  real traffic** — the log-first prerequisite for a future JA4↔UA coherence tell.
+  Pure logging: nothing scores or enforces on it. See `docs/traffic-classifier.md`
+  § "The ChallengeV2 rung" and `docs/challenge-score.md` §8.
 
 ## 2026.09.12
 
