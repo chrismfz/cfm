@@ -832,7 +832,7 @@ func (e *Engine) appendHistory(ev HistoryEvent) {
 // ua, referer, contentType are the per-request forensic fields already
 // captured by the Lua bridge (see cfm.waf.log). They are persisted into
 // payload_json only when non-empty so older rows stay compact.
-func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country, countryISO string, wafRuleID int, ua, referer, contentType string) {
+func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country, countryISO string, wafRuleID int, ua, referer, contentType, fingerprint string) {
 	if e == nil {
 		return
 	}
@@ -862,6 +862,13 @@ func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, 
 	}
 	if contentType = strings.TrimSpace(contentType); contentType != "" {
 		payload["ct"] = contentType
+	}
+	// The client TLS fingerprint (X-CFM-TLS), when the edge stamped one. This is
+	// the GROUP-BY key that makes a WAF block fingerprint-attributable evidence
+	// for the fleet reputation ledger (source #3); omitted when unstamped so older
+	// rows stay compact. Shadow: recorded only — nothing here keys enforcement on it.
+	if fingerprint = strings.TrimSpace(fingerprint); fingerprint != "" {
+		payload["fingerprint"] = fingerprint
 	}
 	e.appendHistory(HistoryEvent{
 		TsUnix:  time.Now().Unix(),

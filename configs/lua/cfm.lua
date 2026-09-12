@@ -1356,6 +1356,10 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
           ua           = req_headers["user-agent"],
           referer      = req_headers["referer"],
           content_type = req_headers["content-type"],
+          -- Client TLS fingerprint (cfm_tlsfp.lua already stamped X-CFM-TLS on the
+          -- request); carry it so Go can attribute this WAF trigger to a
+          -- fingerprint (the fleet reputation ledger, source #3). nil when unstamped.
+          fingerprint  = req_headers["x-cfm-tls"],
         }
         decision:rpc("ip_push", "POST", "/nginx/ip", cjson.encode(push),
           { ip = ip, host = p_host, uri = p_uri, method = p_meth })

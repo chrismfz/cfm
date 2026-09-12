@@ -17,7 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **WAF triggers now carry the client TLS fingerprint (ledger source #3 groundwork,
+  shadow).** Every in-path WAF trigger persisted to `detection_history`
+  (`event_type=waf_trigger`) now includes the client's `X-CFM-TLS` fingerprint in its
+  payload (and in the `cfm.waf.log` record), when the edge stamped one. The edge
+  (`cfm.lua`) forwards the already-stamped `X-CFM-TLS` header on the trigger push;
+  `nginx_bridge.go` and `RecordWAFTrigger` thread it into the event. This makes a WAF
+  block **fingerprint-attributable** — the groundwork for the fleet fingerprint-
+  reputation ledger's third source (WAF block-tier hits: SQLi/RCE/webshell/CVE, the
+  highest-confidence population). Pure attribution: nothing is enforced and nothing
+  keys on the fingerprint here — it is recorded only; the cfm-web ingest and the
+  generic-tool-UA guard that decides what is safe to act on are a separate,
+  shadow-first slice. Edge-affecting: deploy the updated `cfm.lua` for the field to
+  start populating (older nodes simply omit it).
 
 ## 2026.09.12
 
