@@ -429,6 +429,14 @@ type ChallengeSolve struct {
 	// a *lie*, not that it is old.
 	UAImpossible bool
 	UAReason     string
+	// UAFamily is uaplausible's browser-family classification of the submitted UA
+	// (Chrome — any Blink — / Firefox / Safari / CriOS), "" when it cannot be
+	// classified — notably a HeadlessChrome token, which uaplausible deliberately
+	// refuses to call Chrome. Logged next to TLSFP so the fingerprint↔UA-family
+	// corpus is derivable straight from cfm.challenges.log. Log-first: nothing
+	// scores on it, and the fp→family mapping must be derived from captured
+	// traffic, never written from memory.
+	UAFamily string
 	// TLSFP is a short id for the client's TLS ClientHello, stamped by the edge
 	// (configs/lua/cfm_tlsfp.lua) and parsed by internal/tlsfp. Empty when the
 	// edge did not supply one — an older edge config, a plain-HTTP request, or
@@ -454,6 +462,18 @@ func (s ChallengeSolve) TLSFingerprintOrDash() string {
 		return "-"
 	}
 	return s.TLSFP
+}
+
+// UAFamilyOrDash renders UAFamily for a log line. Empty — an unclassifiable UA,
+// notably a HeadlessChrome token — becomes "-", both so the key=value line stays
+// parseable and because "-" is itself a signal (a "Chrome" UA that uaplausible
+// refuses to call Chrome). Both writers of the solve line go through this so they
+// can never disagree about what absence looks like, matching TLSFingerprintOrDash.
+func (s ChallengeSolve) UAFamilyOrDash() string {
+	if s.UAFamily == "" {
+		return "-"
+	}
+	return s.UAFamily
 }
 
 // SolveLatencyMS reports the real client-side solve latency and whether it is
@@ -689,6 +709,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			SolveMS:      powSolveLatencyMS(issuedAt, verifyAt, cfg.TTL),
 			UAImpossible: uaVerdict.Impossible,
 			UAReason:     uaVerdict.Reason(),
+			UAFamily:     uaVerdict.Family,
 			TLSFP:        fp.ID,
 			TLSRaw:       fp.Raw,
 		}
@@ -702,8 +723,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// trunc= is not decoration: a truncated list can be shared by two
 			// different clients whose offers agree up to the bound, so the id is
 			// weaker evidence and the line has to say which kind it is.
-			logging.LogfCHALLENGES("[challenge] tls_fp=%s first_seen grease=%t trunc=%t ua=%q tls=%q",
-				solve.TLSFP, fp.GREASE, fp.Truncated, solve.UA, solve.TLSRaw)
+			logging.LogfCHALLENGES("[challenge] tls_fp=%s first_seen grease=%t trunc=%t ua_family=%s ua=%q tls=%q",
+				solve.TLSFP, fp.GREASE, fp.Truncated, solve.UAFamilyOrDash(), solve.UA, solve.TLSRaw)
 		} else if solve.TLSFP != "" && tlsPrints.Capped() {
 			// No silent caps: say the dictionary stopped admitting entries, once,
 			// rather than let a reader conclude the daemon lost a first_seen line.
@@ -719,7 +740,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			challengeSolvedHook(solve)
 		} else {
 			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%d diff=%d tls_fp=%s",
+				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%d diff=%d tls_fp=%s ua_family=%s",
 				solve.IP,
 				solve.Host,
 				solve.URI,
@@ -727,6 +748,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				solve.SolveMS,
 				solve.Diff,
 				solve.TLSFingerprintOrDash(),
+				solve.UAFamilyOrDash(),
 			)
 		}
 
