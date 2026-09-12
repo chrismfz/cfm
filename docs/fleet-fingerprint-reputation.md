@@ -1,5 +1,10 @@
 # Fleet-shared fingerprint reputation (idea note)
 
+> **⚠️ SUPERSEDED — historical design note, NOT current state.** The canonical,
+> as-built reference is the node hub **`docs/traffic-classifier.md`** and the
+> central ledger **`cfm-web:docs/fingerprint-reputation.md`**. Kept for
+> archaeology; where this note disagrees with the hubs or the code, they win.
+
 > **Status:** IDEA NOTE (cfm-side / node concerns). Captured from a 2026-09-10
 > discussion (prompted by BitNinja's JA4H WAF-Pro writeup). The **grounded,
 > as-designed implementation now lives in `cfm-web`:

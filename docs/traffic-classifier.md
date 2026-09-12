@@ -1,5 +1,15 @@
 # Traffic classifier — living design notes
 
+> **⭐ SINGLE SOURCE OF TRUTH (node side).** Canonical node-side entry point for
+> the Traffic Classifier / Fingerprint Reputation work: the fingerprint evidence
+> ledger (node grains: `solver_farm`, `challenge_score`, WAF-hit fp attribution),
+> the actuator ladder, and the **ChallengeV2 rung**. The central store + policy
+> live in **cfm-web (`cfm-web:docs/fingerprint-reputation.md`)**. Per-IP score
+> deep-dive: `docs/challenge-score.md`. Everything here is **shadow** — the node
+> emits evidence only; nothing on the node keys enforcement on a fingerprint.
+> Superseded design notes folded into this hub: `docs/solver-farm-cross-host-phase2.md`,
+> `docs/solver-farm-fingerprint-concentration.md`, `docs/fleet-fingerprint-reputation.md`.
+
 > **Status:** WORKING NOTES (not a frozen spec). Accumulating the Phase-0 audit
 > and a grounded design before we commit to weights/actions. Authorised to live
 > on `main` while we converge. Owner: challenge/webdetector.

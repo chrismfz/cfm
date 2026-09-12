@@ -1,5 +1,10 @@
 # Solver-farm detection — fingerprint-concentration (low-and-slow) track
 
+> **⚠️ SUPERSEDED — historical design note, NOT current state.** The canonical,
+> as-built reference is the node hub **`docs/traffic-classifier.md`** and the
+> central ledger **`cfm-web:docs/fingerprint-reputation.md`**. Kept for
+> archaeology; where this note disagrees with the hubs or the code, they win.
+
 > **Status:** DESIGN NOTE (pre-code). Extends the existing
 > `challenge_solver_farm` detector (`internal/detectors/solverfarm/detector.go`)
 > with a **second, complementary** track that catches a *low-and-slow* farm the

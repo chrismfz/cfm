@@ -1,5 +1,10 @@
 # Solver-farm detection — cross-host fingerprint aggregation (Phase 2)
 
+> **⚠️ SUPERSEDED — historical design note, NOT current state.** The canonical,
+> as-built reference is the node hub **`docs/traffic-classifier.md`** and the
+> central ledger **`cfm-web:docs/fingerprint-reputation.md`**. Kept for
+> archaeology; where this note disagrees with the hubs or the code, they win.
+
 > **Status:** DESIGN NOTE (pre-code). Extends the shipped Phase-1
 > fingerprint-concentration track (`docs/solver-farm-fingerprint-concentration.md`,
 > `internal/detectors/solverfarm/detector.go`) with a **third** evaluation that

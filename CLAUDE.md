@@ -351,6 +351,21 @@ and snapshot-refresh races. When spawning subprocesses or background
 refreshers, ensure reaping, bounded backoff, and stale-snapshot markers
 rather than advancing heartbeats on failure.
 
+### Traffic classifier / fingerprint reputation ("evidence ledger") — shadow-first, move carefully
+New Sep 2026. The node convicts a **fingerprint** (TLS/JA4, e.g. `c28caa00`) and
+emits **evidence only** — it never enforces on a fingerprint. Three grains feed the
+central ledger in cfm-web: `solver_farm` (per-vhost solving farms), `challenge_score`
+(per-IP `would_deny`, persisted to `detection_history`), and WAF-hit fp attribution
+(the handshake-derived `cfm_tlsfp` stamped on `waf_trigger` — **not** the spoofable
+`X-CFM-TLS` client header). Hard-won invariant, **do not cross it**: shadow-first —
+nothing on the node keys enforcement on a fingerprint, the `WAFHitEvent` published to
+`waf_security` carries **no** fingerprint (so autoblock can't key on it), and a
+fingerprint is a **population, not one client** (a legit browser/residential IP shares
+a coarse TLS bucket with a farm). The intended non-`deny` escalation is **ChallengeV2**
+(an interactive, headless-defeating challenge — armable per-fingerprint), **designed,
+not built**. Hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
+(central). See also `docs/challenge-score.md`, `docs/roadmaps/challenge-engine.md` §8.1.
+
 ---
 
 ## 7. Key docs (pointers, not duplication)
@@ -369,6 +384,7 @@ rather than advancing heartbeats on failure.
 | Web detector history (as-built) | `docs/webdetector-history-design.md` |
 | `what's_wrong` root-cause engine (contract + roadmap) | `docs/whats-wrong-rootcause.md` |
 | Challenge engine design (PoW/solver/TLS-fp) | `docs/roadmaps/challenge-engine.md` |
+| Traffic classifier / fingerprint evidence ledger (node side) — **hub** | `docs/traffic-classifier.md` (node design: evidence grains + actuator ladder + ChallengeV2 rung) · per-IP score `docs/challenge-score.md` · central store in **cfm-web** (`cfm-web:docs/fingerprint-reputation.md`) |
 | Web detector abuse-targeting refactor (living) | `docs/webdetector-refactor.md` |
 | Under-Attack Mode (design: escalation state + campaign fingerprinter) | `docs/under-attack-mode.md` |
 | Edge unification & shared Lua (angie/openresty) | `docs/edge-unification-plan.md` |
@@ -387,7 +403,7 @@ rather than advancing heartbeats on failure.
 `docs/edge-lua-audit-2026-07-08.md` (audit closed) · `docs/waf-analysis-2026-05-08.md` (→ `docs/waf.md`) ·
 `docs/waf-gap-analysis-ninjafirewall.md` (decision record) · `WAF_CVE_PLAN.md` (→ `WAF_CVE.md`) ·
 `docs/webdetector-history-design.md` (as-built → `history_store.go`). Folded away: `Detectors.Leniency.md` → `docs/DETECTORS.md` §6;
-`docs/roadmaps/edge-shared-loaders.md` → `docs/edge-unification-plan.md` §10.
+`docs/roadmaps/edge-shared-loaders.md` → `docs/edge-unification-plan.md` §10. Also: `docs/fleet-fingerprint-reputation.md` (idea note → `cfm-web:docs/fingerprint-reputation.md`) · `docs/solver-farm-cross-host-phase2.md`, `docs/solver-farm-fingerprint-concentration.md` (shipped → `docs/traffic-classifier.md`).
 
 ---
 
