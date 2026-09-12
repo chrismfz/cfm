@@ -390,7 +390,6 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 						"ua":          ua,
 						"referer":     referer,
 						"ct":          contentType,
-						"fingerprint": fingerprint,
 						"asn":         asn,
 						"asn_name":    asnName,
 						"country":     country,

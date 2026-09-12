@@ -21,6 +21,7 @@ import (
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
 	"cfm/internal/telemetry"
+	"cfm/internal/tlsfp"
 	"cfm/internal/unblock"
 )
 
@@ -863,12 +864,16 @@ func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, 
 	if contentType = strings.TrimSpace(contentType); contentType != "" {
 		payload["ct"] = contentType
 	}
-	// The client TLS fingerprint (X-CFM-TLS), when the edge stamped one. This is
-	// the GROUP-BY key that makes a WAF block fingerprint-attributable evidence
-	// for the fleet reputation ledger (source #3); omitted when unstamped so older
-	// rows stay compact. Shadow: recorded only — nothing here keys enforcement on it.
-	if fingerprint = strings.TrimSpace(fingerprint); fingerprint != "" {
-		payload["fingerprint"] = fingerprint
+	// The client TLS fingerprint. The edge sends the RAW ClientHello tuple
+	// (cfm_tlsfp.value(), derived from the handshake $ssl_* — unspoofable, unlike a
+	// client-supplied X-CFM-TLS header, which is NOT cleared on the WAF path). Parse
+	// it to the canonical 8-hex id the challenge path uses (tlsfp.Parse also
+	// re-validates charset+length), so a WAF block correlates with the other ledger
+	// sources on ONE fingerprint and no unbounded/unsafe client bytes are ever
+	// stored. Dropped when absent / unparseable. Shadow: recorded only — nothing
+	// here keys enforcement on it (tlsfp.go §"Revisit before anything scores on it").
+	if fp, ok := tlsfp.Parse(fingerprint); ok && fp.ID != "" {
+		payload["fingerprint"] = fp.ID
 	}
 	e.appendHistory(HistoryEvent{
 		TsUnix:  time.Now().Unix(),

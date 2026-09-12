@@ -1356,10 +1356,14 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
           ua           = req_headers["user-agent"],
           referer      = req_headers["referer"],
           content_type = req_headers["content-type"],
-          -- Client TLS fingerprint (cfm_tlsfp.lua already stamped X-CFM-TLS on the
-          -- request); carry it so Go can attribute this WAF trigger to a
-          -- fingerprint (the fleet reputation ledger, source #3). nil when unstamped.
-          fingerprint  = req_headers["x-cfm-tls"],
+          -- Client TLS fingerprint for the fleet reputation ledger (source #3).
+          -- Computed edge-side from the handshake ($ssl_* via cfm_tlsfp.value()),
+          -- NOT read from the client-supplied X-CFM-TLS header: this WAF path does
+          -- not clear that header (only /__cfm_verify does), so reading it would be
+          -- client-SPOOFABLE. value() is unspoofable and already charset/length-
+          -- bounded; Go parses it to the canonical fp id. Computed only here, on a
+          -- pushed trigger (rare) — no per-request cost. nil on plain-HTTP.
+          fingerprint  = require("cfm_tlsfp").value(),
         }
         decision:rpc("ip_push", "POST", "/nginx/ip", cjson.encode(push),
           { ip = ip, host = p_host, uri = p_uri, method = p_meth })
