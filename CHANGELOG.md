@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.12
+
 ### Added
 - **WAF triggers now carry the client TLS fingerprint (ledger source #3 groundwork,
   shadow).** Every in-path WAF trigger persisted to `detection_history`
@@ -34,8 +38,6 @@ back-filled here — see the git/PR history for that period.
   generic-tool-UA guard that decides what is safe to act on are a separate,
   shadow-first slice. Edge-affecting: deploy the updated `cfm.lua` for the field to
   start populating (older nodes simply omit it).
-
-## 2026.09.12
 
 ### Added
 - **Solver-farm score is now fingerprint-anchored (B3 slice 1, shadow-only).** The
