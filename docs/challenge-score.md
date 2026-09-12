@@ -187,10 +187,10 @@ remains an option if the edge-tell side ever needs its own writer.
 2. **Client subject**: pure IP (simplest) vs `(IP, vhost)` (fairer multi-tenant)
    vs `/24` rollup (solver farms). Lean **IP-primary + a `/24` density feature**.
 3. **Aggregation site**: the hybrid seed-map (recommended) vs pure edge-Lua.
-4. **Burn-in log**: a new `[cfm_challenge_score]` shadow log (like `abuse_shadow`)
-   vs folding into an existing surface. Lean **new dedicated log** (the daemon
-   emits the seed side; the edge emits the edge-tell side — two writers, one
-   schema), surfaced by an MCP tool like `abuse_shadow`.
+4. **Burn-in log** — **RESOLVED (see §8, as-built):** no new log/schema — the
+   `would_deny` capture folds into the existing `abuse_shadow.log` (grep surface)
+   + `detection_history` (durable, fleet-pullable). A dedicated `[cfm_challenge_score]`
+   writer remains an option only if the edge-tell side ever needs its own.
 5. **Dual signals**: retire `cookie_discard` / `solver_farm` alerts once the score
    leads, or keep as belt-and-suspenders?
 
