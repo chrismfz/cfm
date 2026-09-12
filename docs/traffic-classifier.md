@@ -659,8 +659,8 @@ readout discipline as the `challenge_score` B-slice burn-in.
 
 **Slice 1 — shipped 2026-09-12 (log-first).** Challenge solves now log `ua_family=`
 (uaplausible's browser family) next to the existing `tls_fp=`/`ua=` on the
-`cfm.challenges.log` solve line (+ the per-fingerprint `first_seen` dictionary line),
-so the fingerprint↔UA-family corpus is derivable from real traffic. Two honest caveats
+`cfm.challenges.log` solve line, so the fingerprint↔UA-family corpus is derivable
+from real traffic. Two honest caveats
 that reshape the signal table above: the server-side fp is **JA3-grade** (nginx exposes
 ciphers/curves/ALPN/proto, **not** the extension list a true JA4 hashes) — a real JA4
 needs an edge module and is **deferred** (backlog); and the JA4↔UA *coherence tell* is
