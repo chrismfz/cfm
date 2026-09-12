@@ -94,11 +94,12 @@ type NginxBridge struct {
 
 	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
 	// IP decision via POST /nginx/ip. The hook receives the IP, action
-	// ("challenge"|"block"), reason (e.g. "WAF_XSS"), TTL, and the per-
-	// request forensic fields (UA / Referer / Content-Type) that Lua
-	// attaches to every push. Set via SetTriggerHook. Called without
-	// b.mu held.
-	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType string)
+	// ("challenge"|"block"), reason (e.g. "WAF_XSS"), TTL, the per-request
+	// forensic fields (UA / Referer / Content-Type) that Lua attaches to every
+	// push, and the client TLS fingerprint (the raw cfm_tlsfp.value() tuple,
+	// parsed to a canonical id by the daemon; empty on plain-HTTP).
+	// Set via SetTriggerHook. Called without b.mu held.
+	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType, fingerprint string)
 
 	// OnWAFStats is called once per row of the snapshot pushed by Lua.
 	// Each call carries an absolute count for the (hour_unix, host) tuple;
@@ -367,6 +368,14 @@ type nginxIPMsg struct {
 	UA          string `json:"ua,omitempty"`
 	Referer     string `json:"referer,omitempty"`
 	ContentType string `json:"content_type,omitempty"`
+
+	// Fingerprint is the client's TLS ClientHello summary as the raw cfm_tlsfp.value()
+	// tuple (computed edge-side from the handshake $ssl_* — NOT a client-supplied
+	// header, which the WAF path does not clear; the daemon parses it to the canonical
+	// fp id via tlsfp.Parse). Attached so a WAF trigger becomes fingerprint-attributable
+	// evidence downstream (the fleet reputation ledger, source #3). Empty on older Lua
+	// clients / plain-HTTP.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // nginxWAFStatsMsg is the snapshot pushed by Lua's maybe_flush_waf_insp.
@@ -915,7 +924,7 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 // SetTriggerHook registers a callback that fires whenever an external push
 // (POST /nginx/ip) sets a new IP decision. Use this to log WAF trigger events
 // to cfm.challenges.log with enrichment from the webdetector engine.
-func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType string)) {
+func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType, fingerprint string)) {
 	if b == nil {
 		return
 	}
@@ -1993,9 +2002,9 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	// allowed to exceed the Lua client's decision_timeout_ms.
 	if reason != "" && b.OnTrigger != nil {
 		ip, action, host, uri, method, wafRuleID := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method, msg.WAFRuleID
-		ua, referer, ct := msg.UA, msg.Referer, msg.ContentType
+		ua, referer, ct, fp := msg.UA, msg.Referer, msg.ContentType, msg.Fingerprint
 		b.dispatchHook(func() {
-			b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, ua, referer, ct)
+			b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, ua, referer, ct, fp)
 		})
 	}
 
@@ -2313,9 +2322,9 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			}
 			if reason != "" && b.OnTrigger != nil {
 				ip, action, host, uri, method, wafRuleID := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method, msg.WAFRuleID
-				ua, referer, ct := msg.UA, msg.Referer, msg.ContentType
+				ua, referer, ct, fp := msg.UA, msg.Referer, msg.ContentType, msg.Fingerprint
 				b.dispatchHook(func() {
-					b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, ua, referer, ct)
+					b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, ua, referer, ct, fp)
 				})
 			}
 			processed++
