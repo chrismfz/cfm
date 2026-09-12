@@ -124,6 +124,10 @@ shared with the vhost lane:
     *specifically against headless*: PoW is pure CPU (a farm solves it trivially),
     while a drag/puzzle needs real interaction/rendering. Prefer ChallengeV2 over
     PoW-harden for the solver-farm class; keep PoW-harden for cost-based hardening.
+    **Decision record + the Rung-1 passive-signal ladder + observability contract:**
+    `docs/traffic-classifier.md` § "The ChallengeV2 rung" — v2 is a rung the engine
+    climbs on the single challenge control, NOT a second on/off axis; Rung-1
+    (invisible passive signals) ships shadow-first before any puzzle.
 - **Hard rung — deny.** 403 static (leaning this, residential-proxy mercy — the
   innocent sees *something* and can refresh) **/** tarpit (delayed-empty 200,
   steals attacker concurrency, hides detection) **/** nft drop (silent, but
@@ -174,7 +178,8 @@ because this is a per-IP shadow signal, not a rare finding:
   (a convicted `farmFP` fp sticks over a merely-present one); the row's payload carries
   it as the stable `fingerprint` key plus `fp_convicted`, so cfm-web can PULL it through
   the same cursor machinery as `solver_farm` and roll it into a per-fingerprint
-  **summary** (not the firehose). See `docs/fleet-fingerprint-reputation.md` §5.
+  **summary** (not the firehose). See the ingest-summary shape in
+  `cfm-web:docs/fingerprint-reputation.md` §10; node hub `docs/traffic-classifier.md`.
 
 This answers open question #4 in the narrow, cheap way: no new log/schema — the existing
 `abuse_shadow.log` stays the grep surface and the existing `detection_history` becomes

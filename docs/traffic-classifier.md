@@ -567,6 +567,96 @@ challenge (the cleared path skips the daemon decision), so it goes through
 `docs/challenge-waf-release-checklist.md`. Sequence it **after** the evidence
 ledger (which says *who* to arm it on) and the B3 burn-in.
 
+### Decision record (2026-09-12) — v2 is a RUNG, not a second on/off axis; Rung-1 (passive) ships first
+
+Settles the recurring "how do we not create a config panic" question (operator,
+2026-09-12). The worry: if `challenge_v2` becomes a *parallel armable action*
+(off/auto/exclude per vhost AND per fingerprint, next to v1), the state space
+explodes — "v1 off but v2 on?", "auto-challenge → v1 or v2?", "who arms which?".
+
+**Decision.** There is ONE challenge control (off / auto / force + excludes), per
+vhost and per fingerprint — unchanged. The *difficulty* (invisible PoW → passive
+check → interactive) is a **rung the engine climbs from the request's
+score/evidence at serve time**, NOT a second operator knob. Therefore:
+
+- `challenge` off → nothing is served; there is no separate v2 to be "on". The
+  "v1 off / v2 on" state **cannot exist by construction**.
+- A vhost on auto-challenge (or a fingerprint armed to challenge) serves *the*
+  challenge; the engine picks the rung. There is no fork to configure.
+- `fingerprint_policies.action = challenge_v2` (the "armable action" named above)
+  means **"this fingerprint's challenge starts no lower than the v2 rung"** — a
+  *floor* on the single control, not an independent second control. Disarm the
+  fingerprint's challenge and nothing is served.
+
+This **refines** the "first-class armable action alongside observe/challenge/deny"
+wording earlier in this section: `challenge_v2` is a rung-floor selector, not a
+parallel axis.
+
+**Rung-1 (passive) ships BEFORE any puzzle, shadow-first.** The stronger insight
+(operator): against a *solver farm* an interactive puzzle is not obviously
+stronger than passive detection — the farm's business IS solving challenges (it
+already solves the PoW), and a puzzle a human can solve is exactly what its
+human-solver tier is paid for. Passive humanity/environment signals are harder to
+farm because they are invisible (the farm doesn't know what is measured) and must
+be produced by the real client stack, per request, on every rotating exit.
+
+- **Rung 0** — v1 invisible PoW + clearance cookie (shipped).
+- **Rung 1 (v2a) — passive**: the same invisible page also measures the signals
+  below, scores them (`hs=`), runs **shadow** (log-only, feeds the ledger as a new
+  per-client tell). No user-visible change. **Go here first.**
+- **Rung 2 (v2b) — interactive**: a genuine pointer/drag/touch gesture (accessible
+  fallback, never a pure drag-puzzle), only for the tail Rung-1 scores
+  likely-headless AND high-risk.
+- **deny** — farm-UNIQUE fingerprint / confirmed datacenter only (unchanged).
+
+#### Rung-1 signals → which headless-tell each catches
+
+Ordered by spoof-resistance (= weight). **None is a gate; the *combination*
+convicts.** Some are **positive-only** (fire → suspect; absent → proves nothing).
+
+| Layer | Signal | Headless-tell it catches | Weight | Trips legit (FP) |
+|---|---|---|---|---|
+| **Transport** (server-observed, unspoofable from JS; already stamped) | **JA4 (TLS) ↔ UA** | UA claims Chrome N but the ClientHello JA4 isn't that browser's (curl-impersonate, Go/Node, old Chrome) | ★★★★★ | ~0 (rare TLS-terminating proxy/AV) |
+| | **JA4H (HTTP/2)** — roadmap 2nd axis | h2 SETTINGS / header + pseudo-header order don't match the claimed browser | ★★★★★ | ~0 |
+| **Environment / render** (JS probe; costly to fake per-request at scale) | **WebGL UNMASKED_RENDERER** | SwiftShader / llvmpipe / Mesa software renderer = headless/VM | ★★★★ | RDP/VDI/GPU-blocklisted reals → confidence, not gate |
+| | **Canvas / audio hash** | software-render buckets; also session stability | ★★★ | Brave/Tor randomize → reals |
+| | **Screen / viewport coherence** | mobile UA + desktop DPR/screen; `outerHeight=0` | ★★★ | unusual-but-real setups |
+| | **hardwareConcurrency / deviceMemory / languages / plugins / fonts / timezone** | headless defaults; mobile UA + 32 cores; empty `languages`; tz vs Accept-Language mismatch | ★★ | locale-quirky reals; corroboration only |
+| **Behavioral** (passive; noisy → score only) | **Touch ↔ UA** | mobile UA but `pointerType=mouse` / no touch / constant pressure | ★★★★ | low |
+| | **Pointer entropy** | no motion before solve, or scripted linear / identical-`dt` vs human jitter | ★★★ | keyboard-only / touch users → absence ≠ bot |
+| | **deviceorientation / devicemotion** | "phone" UA but zero/static sensor events | ★★★ | meaningful only when UA claims mobile (iOS needs a permission gesture) |
+| | **rAF cadence / interaction latency** | cadence far from a real refresh; solve with zero input events / robotic timing | ★★ | throttled tabs; fast users |
+| **Positive-only** | **`navigator.webdriver` / CDP artifacts** | `true`; missing `window.chrome`; headless UA leaks | (positive) | `false` proves nothing (trivially spoofed) |
+
+Weighting rule: server-observed (JA4/JA4H) ≫ hard-to-fake render
+(WebGL/canvas/audio) > behavioral entropy > trivially-spoofable JS flags.
+
+#### Observability contract (shadow-first; reuses existing logs — no new log, per CLAUDE.md §5)
+
+Rung-1 writes the SAME surfaces `challenge_score` uses (open-question #4
+resolution — `docs/challenge-score.md` §8), so it is fully MCP-observable for
+burn-in and FP triage with no new plumbing and no logrotate change:
+
+- **`cfm.challenges.log`** (per solve; already logs `ua=`, `solve_ms=`,
+  `ua_impossible=`): add `hs=<humanity_score>`, `tells=<fired,comma,list>`,
+  `fp=<tlsfp>` — the raw grep surface for "which solve, and why".
+- **`cfm.abuse_shadow.log`**: `signal=humanity verdict=would_v2 …` when the score
+  *would* escalate — shadow, nothing served.
+- **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
+  into cfm-web's `fingerprints` ledger as another per-client tell.
+
+MCP surfaces: `abuse_shadow` (per-node signal/verdict counts), `detection_history`
+(durable; `node="all"` for the fleet), `challenge_events`; suspected-FP drilldown
+via `ip_forensics` / `edge_access_tail`; cross-signal per fingerprint via cfm-web
+`fingerprints`.
+
+**FP workflow.** A false positive = a real client that scored high but (shadow)
+was not acted on. Find it in `cfm.challenges.log` (`hs=` high + `tells=`) →
+understand the cause (e.g. RDP SwiftShader, keyboard-only) → downweight that tell
+/ `ALLOW_FPS` / `ALLOW_NETS` / raise threshold. A tell only graduates to actually
+gating Rung-2 after its FP population is understood — the same FP-cleanliness
+readout discipline as the `challenge_score` B-slice burn-in.
+
 ## Plan (measure-first, mechanism-agnostic)
 
 ### Phase 0 — audit + zero-code (operator config; in progress)

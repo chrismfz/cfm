@@ -200,7 +200,8 @@ alone; NAT-aware.
   fp, never a signature; country-spread as the FP-guard) for the per-vhost low-rate
   regime — shipped default-on/log-only, catching `techking.gr` + 3 more vhosts
   across 2 nodes ~12 h post-deploy, zero observed collateral. Feeds the
-  `solver_farm` seed B3 budgets. `docs/solver-farm-fingerprint-concentration.md`.
+  `solver_farm` seed B3 budgets. Node hub `docs/traffic-classifier.md` (design note
+  `docs/solver-farm-fingerprint-concentration.md`, superseded).
 - **Track-2 — solver-farm cross-host fingerprint aggregation (Phase 2)** — [shipped,
   burn-in]. Catches the *second* farm fingerprint (`95070673`) spread too thin per
   vhost for the Phase-1 60 s country guard (per-host country-peak ≤ 6) yet obvious
@@ -209,7 +210,8 @@ alone; NAT-aware.
   the primary guard); `solves_per_ip` is **evidence only** (the weekday burn-in
   proved it does not separate farm from legit — dropped as a gate). Shipped
   default-on, **log-only through its own burn-in**; marks every farmed vhost.
-  `docs/solver-farm-cross-host-phase2.md`.
+  Node hub `docs/traffic-classifier.md` (design note
+  `docs/solver-farm-cross-host-phase2.md`, superseded).
 - **Solver-farm convictions → `detection_history`** — [shipped]. Every emitted
   `challenge_solver_farm` finding now persists as `event_type=solver_farm` with
   fingerprint-scoped evidence (`countries ≤ subnets ≤ ips`), the node-side prereq
@@ -229,7 +231,8 @@ alone; NAT-aware.
   with match-time re-validation, ≥K-node corroboration before `deny`, and a
   dedicated arm permission. `challenge` (self-targeting) not `block`; `ALLOW_FPS`
   override. Design + Phase-C plan: `cfm-web:docs/fingerprint-reputation.md`;
-  cfm-side: `docs/fleet-fingerprint-reputation.md`.
+  cfm-side node hub: `docs/traffic-classifier.md` (idea note
+  `docs/fleet-fingerprint-reputation.md`, superseded).
 - **Webtop visibility for the per-IP / edge-log shadow signals** — [post-burn-in].
   `challenge_score` (per-IP) and `cfm_pcw` (edge error log) don't map to the
   existing per-vhost webtop pills or the WAF-history analytics, so they're
