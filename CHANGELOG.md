@@ -24,8 +24,9 @@ back-filled here — see the git/PR history for that period.
   before the last logrotate — so a debug isn't limited to the live tail window. It's
   bounded like the edge archival tools (a shared line budget across all siblings, one
   timeout, gz streamed, at most 60 files); `files_scanned` lists every file read
-  (live first) and `truncated=true` flags any reach bound (output cap, file cap,
-  budget, timeout, or a corrupt gz). The `which` set also gains `abuse_shadow` (the
+  (live first) and `truncated=true` flags any reach bound (a saturated live tail
+  window, output cap, file cap, budget, timeout, or a corrupt gz) so a coverage hole
+  is never silent. The `which` set also gains `abuse_shadow` (the
   log-only entity-abuse / `challenge_score` burn-in log) so its raw lines are
   greppable — e.g. `which=abuse_shadow grep="signal=challenge_score" rotated=10` to
   read historical `would_harden`/`would_deny` lines the aggregator's live window

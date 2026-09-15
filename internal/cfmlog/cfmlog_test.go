@@ -132,6 +132,17 @@ func TestTailFile_RotatedReadsPlainAndGzSiblings(t *testing.T) {
 	if res.Scanned != 5 {
 		t.Errorf("scanned across files = %d, want 5", res.Scanned)
 	}
+
+	// A SATURATED live tail in rotated mode (lines=1 on a 2-line live file) must set
+	// BOTH window_full and truncated: the un-scanned live line between the window and
+	// .1 is a real coverage hole, not silently complete.
+	res, err = TailFile(context.Background(), "abuse_shadow", 1, 0, 5, "MATCH")
+	if err != nil {
+		t.Fatalf("saturated-live rotated read err: %v", err)
+	}
+	if !res.WindowFull || !res.Truncated {
+		t.Errorf("saturated live tail in rotated mode must set window_full AND truncated: window_full=%v truncated=%v", res.WindowFull, res.Truncated)
+	}
 }
 
 func mustWrite(t *testing.T, path, body string) {

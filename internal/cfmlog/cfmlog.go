@@ -225,6 +225,15 @@ func TailFile(ctx context.Context, which string, lines, limit, rotated int, grep
 	if rotated <= 0 {
 		return res, err
 	}
+	// The live tail is a WINDOW: if it saturated, there are un-scanned live lines
+	// BETWEEN that window and the newest rotated sibling — a real hole in the
+	// now→archive reach that rotated mode promises. Flag it as Truncated (the sibling
+	// edgelog.GrepIP does the same on a capped live tail), because WindowFull's
+	// "raise lines / set rotated" hint is already satisfied here and would mislead a
+	// caller keying on truncated to judge coverage. Raise `lines` to close the hole.
+	if res.WindowFull {
+		res.Truncated = true
+	}
 	// Rotated reach: scan the newest `rotated` siblings, gz-transparent, under a
 	// shared line budget. A per-file open/gz/budget failure never fails the call —
 	// the live result is already in hand — but it is NEVER silent: it sets Truncated
