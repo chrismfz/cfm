@@ -1208,7 +1208,7 @@ Key invariants:
 
 1. **WAF runs even with valid clearance** for any request that reaches `cfm.lua`. No dynamic payload reaches origin without inspection.
 2. **Post-clearance challenge cannot loop.** Conversion happens before the action switch; the `challenge` branch in the WAF hit handler is unreachable when `clearance_allow=true`.
-3. **POST replays are safe.** `clearance_allow` is force-false on `cfm_resumed_post`; a re-challenged replay hits the `block_replayed` safety net.
+3. **POST replays are safe.** A resumed POST (`cfm_resumed_post`) is treated like any cleared client — `clearance_allow` keys on `clearance_ok` alone. A *cleared* replay runs the WAF (block-tier blocks; a challenge-tier hit is risk-downgraded by `post_clearance_action`) and then fast-paths to origin at Step 2b, so the stashed save is not lost. An *uncleared* replay that re-triggers a challenge still hits the `block_replayed` safety net (Step 2 challenge branch + Step 3) — the loop it exists to stop.
 4. **CFM control endpoints bypass `cfm.lua`.** `/__cfm_challenge`, `/__cfm_verify` are exact-match nginx locations — no WAF, no challenge, no origin.
 5. **Static-asset URIs bypass `cfm.lua`** (`.css/.js/.woff2?/.ttf/.eot/.png/.jpe?g/.gif/.webp/.ico/.map`). The `location` block in `openresty.conf` / `angie.conf` skips the access phase and proxies straight to Apache. `.svg` is NOT in the bypass — it can carry script.
 
@@ -1223,7 +1223,7 @@ Key invariants:
 | `block_pc` | challenge converted to block under clearance + high-risk reason |
 | `challenge` | WAF challenge, no clearance |
 | `challenge_resume` | Challenge with POST-resume token |
-| `block_replayed` | POST replay re-triggered WAF challenge → 403 |
+| `block_replayed` | UNCLEARED POST replay re-triggered a challenge → 403 (a cleared replay is converted / fast-pathed instead) |
 | `challenge_forced` | nginx-marked location forced challenge |
 
 ---
