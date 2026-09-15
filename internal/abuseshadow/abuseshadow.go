@@ -319,6 +319,17 @@ func Summarize(lines []string) Summary {
 		if !ok {
 			continue
 		}
+		// A NOTE line is OPERATIONAL, not a decision, so it must never inflate the
+		// generic Total / unique_ips / by_signal / by_verdict — not even the
+		// challenge_score store-cap note, which happens to carry verdict=would_shadow
+		// (so the verdict gate below would let it slip through). Account its dropped
+		// count for the challenge_score section here, then skip the generic tally.
+		if e.Note != "" {
+			if e.Signal == "challenge_score" {
+				csDropped += e.Dropped
+			}
+			continue
+		}
 		// Only DECISION lines are aggregated. dc_fraction also emits verdict-less
 		// OPERATIONAL lines to the same log — a `verified_crawler=… excluded` FCrDNS
 		// note (whose `ip=%s)` even carries a trailing paren) and a `deferred_vhosts=…
@@ -380,12 +391,12 @@ func Summarize(lines []string) Summary {
 				}
 			}
 		}
-		// challenge_score is a per-IP (host-less) signal with its own verdict space.
-		// A store-cap NOTE line (note=store_cap_reached, verdict=would_shadow) carries
-		// no decision — accumulate its dropped count only; every other challenge_score
-		// line is a would_harden/would_deny decision.
+		// challenge_score is a per-IP (host-less) signal with its own verdict space. Its
+		// store-cap NOTE line is accounted + skipped above, so a line reaching here is a
+		// would_harden/would_deny decision; a stray other verdict is defensively ignored
+		// (its Dropped is 0, so the add is a harmless no-op — notes never reach here).
 		if e.Signal == "challenge_score" {
-			if e.Note != "" || (e.Verdict != "would_harden" && e.Verdict != "would_deny") {
+			if e.Verdict != "would_harden" && e.Verdict != "would_deny" {
 				csDropped += e.Dropped
 			} else {
 				harden := e.Verdict == "would_harden"

@@ -145,6 +145,74 @@ func TestTailFile_RotatedReadsPlainAndGzSiblings(t *testing.T) {
 	}
 }
 
+// When the live window alone has more matches than `limit`, the NEWEST `limit` come
+// back (not the oldest scanned) and the rotated siblings are skipped entirely — no
+// point gunzipping strictly-older evidence that can't enter a newest-first view.
+func TestTailFile_KeepsNewestMatchesAndSkipsRotatedWhenLiveFull(t *testing.T) {
+	tmp := t.TempDir()
+	live := filepath.Join(tmp, "cfm.abuse_shadow.log")
+	mustWrite(t, live, "MATCH 1\nMATCH 2\nMATCH 3\nMATCH 4\n") // 4 matches, oldest→newest
+	rot1 := live + ".1"
+	mustWrite(t, rot1, "MATCH old\n")
+
+	old := fileCandidates["abuse_shadow"]
+	fileCandidates["abuse_shadow"] = []string{live}
+	t.Cleanup(func() { fileCandidates["abuse_shadow"] = old })
+
+	res, err := TailFile(context.Background(), "abuse_shadow", 0, 2, 5, "MATCH")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(res.Lines) != 2 || !strings.Contains(res.Lines[0], "MATCH 3") || !strings.Contains(res.Lines[1], "MATCH 4") {
+		t.Fatalf("want the newest 2 [MATCH 3, MATCH 4], got %v", res.Lines)
+	}
+	if !res.Truncated {
+		t.Errorf("older live matches were dropped → Truncated must be set")
+	}
+	// Early stop: only the live file is scanned; the sibling is never opened.
+	if len(res.FilesScanned) != 1 || res.FilesScanned[0] != live {
+		t.Errorf("rotated must be skipped when the live block fills limit: files=%v", res.FilesScanned)
+	}
+	if res.Matched != 4 {
+		t.Errorf("Matched counts every live match seen, got %d want 4", res.Matched)
+	}
+}
+
+// When the live window has FEWER matches than `limit`, the remainder is filled from
+// the rotated siblings (newest-first within each) — the historical reach `rotated`
+// promises, which the old live-first-cap logic silently withheld on a busy log.
+func TestTailFile_ReachesRotatedWhenLiveUnderLimit(t *testing.T) {
+	tmp := t.TempDir()
+	live := filepath.Join(tmp, "cfm.abuse_shadow.log")
+	mustWrite(t, live, "MATCH live\nnope\n") // 1 match
+	rot1 := live + ".1"
+	mustWrite(t, rot1, "MATCH r1a\nMATCH r1b\n") // 2 matches, older; r1b is the newest
+	now := time.Now()
+	_ = os.Chtimes(rot1, now.Add(-time.Hour), now.Add(-time.Hour))
+
+	old := fileCandidates["abuse_shadow"]
+	fileCandidates["abuse_shadow"] = []string{live}
+	t.Cleanup(func() { fileCandidates["abuse_shadow"] = old })
+
+	// limit=2: 1 live match + the sibling's NEWEST 1 (r1b).
+	res, err := TailFile(context.Background(), "abuse_shadow", 0, 2, 5, "MATCH")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(res.Lines) != 2 || !strings.Contains(res.Lines[0], "MATCH live") || !strings.Contains(res.Lines[1], "MATCH r1b") {
+		t.Fatalf("want [live, r1b (sibling's newest)], got %v", res.Lines)
+	}
+	if len(res.FilesScanned) != 2 || res.FilesScanned[1] != rot1 {
+		t.Errorf("the sibling must be reached: files=%v", res.FilesScanned)
+	}
+	if !res.Truncated {
+		t.Errorf("the sibling dropped an older match (r1a) → Truncated")
+	}
+	if res.Matched != 3 {
+		t.Errorf("Matched across live+sibling = %d, want 3", res.Matched)
+	}
+}
+
 func mustWrite(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
