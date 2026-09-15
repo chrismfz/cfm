@@ -44,13 +44,13 @@ const (
 
 	// Rotated-log reach (opt-in): the live tail only sees the current file, so an
 	// event from before the last logrotate is invisible until you also scan the
-	// rotated siblings (foo.log.1, foo.log.2.gz, …). That reach is bounded: at
-	// most MaxRotatedFiles siblings, a shared rotatedScanBudget of lines across ALL
-	// of them, and one timeout — so asking for history can't trigger an unbounded
-	// multi-GB decompress. The live tail window (`lines`) is unaffected.
-	DefaultRotatedFiles = 10
-	MaxRotatedFiles     = 60
-	rotatedScanBudget   = MaxLines * 10 // 200k lines across all rotated siblings
+	// rotated siblings (foo.log.1, foo.log.2.gz, …). Reach is caller-specified
+	// (`rotated=N`, 0 = live only) and bounded: at most MaxRotatedFiles siblings, a
+	// shared rotatedScanBudget of lines across ALL of them, and one timeout — so
+	// asking for history can't trigger an unbounded multi-GB decompress. The live
+	// tail window (`lines`) is unaffected.
+	MaxRotatedFiles   = 60
+	rotatedScanBudget = MaxLines * 10 // 200k lines across all rotated siblings
 )
 
 // ErrUnknownSource / ErrUnitNotAllowed classify caller (400) faults so the HTTP

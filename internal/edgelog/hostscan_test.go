@@ -571,7 +571,8 @@ func TestScanHost_MaxFilesCapTruncated(t *testing.T) {
 }
 
 // Budget dying INSIDE the last scanned sibling must also surface truncated=true
-// (scanWholeForIP returns a nil error on budget exhaustion — previously silent).
+// (logscan.ScanWhole returns ErrBudgetExceeded on budget exhaustion, which ScanHost
+// maps to truncated — this last-file case was previously silent).
 func TestScanHost_BudgetDiesMidLastSibling(t *testing.T) {
 	requireTail(t)
 	now := float64(time.Now().Unix())
