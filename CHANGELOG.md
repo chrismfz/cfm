@@ -17,7 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Challenge POST-resume now actually replays the saved submission (no more lost
+  saves behind a challenge).** When an interactive challenge intercepted a POST
+  (e.g. a WooCommerce product/order save), the edge stashed the body and replayed
+  it after the solve via `try_apply_post_resume` — but the replay called
+  `ngx.req.set_body_data()` without first reading the (absent) body of the
+  bodiless resume-carrier GET, so OpenResty raised "request body not read yet".
+  The access phase runs under `xpcall`+fail-open, so the throw was swallowed and
+  the request proceeded as the original GET with **no body**: `post.php` saw an
+  empty submit and WordPress bounced to `edit.php`, silently losing the user's
+  save. The replay now calls `ngx.req.read_body()` before `set_body_data()`, so
+  the stashed POST is re-injected intact and the save completes. Observed on a
+  vhost auto-challenged by a false-positive burst of legitimate traffic; the
+  failure was 100% for any resumed POST on the affected edge, not size/TTL-bound.
+  Regression-guarded by `scripts/tests/cfm_post_resume_readbody_test.lua`.
 
 ## 2026.09.12
 
