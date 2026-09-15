@@ -18,18 +18,17 @@ package edgelog
 
 import (
 	"bufio"
-	"compress/gzip"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"cfm/internal/logscan"
 )
 
 // accessLogCandidates are the known CFM edge access logs. The one selected by
@@ -77,8 +76,7 @@ const (
 	DefaultErrorTailLines = 5_000
 	MaxErrorTailLines     = 200_000
 
-	maxLineToken  = 4 * 1024 * 1024 // scanner ceiling: tolerate long URIs/UAs without aborting the call
-	maxStoredLine = 8 * 1024        // truncate each retained match so worst-case memory = limit×this
+	maxStoredLine = 8 * 1024 // truncate each retained match so worst-case memory = limit×this
 )
 
 // Result is the outcome of an IP lookup.
@@ -251,7 +249,7 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 			maxFiles = MaxRotatedFiles
 		}
 		budget := rotatedScanBudget
-		siblings, siblingsFound := rotatedSiblings(logFile, maxFiles)
+		siblings, siblingsFound := logscan.RotatedSiblings(logFile, maxFiles)
 		if siblingsFound > len(siblings) {
 			res.Truncated = true // the file cap hid older siblings
 		}
@@ -266,7 +264,7 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 			// A single unreadable/corrupt rotated file must not fail the whole
 			// lookup — the live-file result is already in hand; skip and go on,
 			// but NEVER silently: coverage is shorter than it looks.
-			if scanErr := scanWholeForIP(cctx, rf, &budget, onLine); scanErr != nil {
+			if scanErr := logscan.ScanWhole(cctx, rf, &budget, onLine); scanErr != nil {
 				if cctx.Err() != nil {
 					res.Truncated = true
 					break
@@ -282,99 +280,6 @@ func GrepIP(ctx context.Context, ip string, o Opts) (Result, error) {
 		}
 	}
 	return res, nil
-}
-
-// rotatedSiblings returns the rotated variants of live (same directory, name
-// starting with "<base>." or "<base>-": .1, .1.gz, -20260810.gz, …), most
-// recently modified FIRST, capped at maxFiles. The second return is the TOTAL
-// number of siblings found, so a caller can detect that the file cap silently
-// hid some (found > len(paths)). The live file itself, empty files, and
-// non-regular entries are excluded. A directory it can't read yields nothing
-// (best-effort — the live result still stands).
-func rotatedSiblings(live string, maxFiles int) ([]string, int) {
-	dir := filepath.Dir(live)
-	base := filepath.Base(live)
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, 0
-	}
-	type fe struct {
-		path string
-		mod  time.Time
-	}
-	var out []fe
-	for _, e := range ents {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if name == base {
-			continue
-		}
-		if !strings.HasPrefix(name, base+".") && !strings.HasPrefix(name, base+"-") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-			continue
-		}
-		out = append(out, fe{filepath.Join(dir, name), info.ModTime()})
-	}
-	total := len(out)
-	sort.SliceStable(out, func(i, j int) bool { return out[i].mod.After(out[j].mod) })
-	if len(out) > maxFiles {
-		out = out[:maxFiles]
-	}
-	paths := make([]string, len(out))
-	for i, e := range out {
-		paths[i] = e.path
-	}
-	return paths, total
-}
-
-// errScanBudgetExceeded is returned by scanWholeForIP when the scanner found
-// MORE lines while the private countdown was already at zero — i.e. the file
-// was cut short by the budget, not by EOF. Callers translate it into
-// truncation flags (never into files_failed: the file is fine).
-var errScanBudgetExceeded = errors.New("scan budget exceeded")
-
-// scanWholeForIP streams a rotated file from the start (gz-transparent) feeding
-// each line to fn, decrementing the shared budget. Unlike the live tail this
-// reads the whole file, but the caller's budget + ctx timeout bound the work,
-// and gz is streamed through gzip.Reader (never decompressed whole into memory).
-func scanWholeForIP(ctx context.Context, path string, budget *int, fn func(line string) bool) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	var r io.Reader = f
-	if strings.HasSuffix(path, ".gz") {
-		gz, err := gzip.NewReader(f)
-		if err != nil {
-			return err
-		}
-		defer gz.Close()
-		r = gz
-	}
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
-	for sc.Scan() {
-		if *budget <= 0 {
-			// The caller's budget is spent but the file has MORE lines: this
-			// distinction (budget-cut vs clean EOF) must reach the caller so
-			// truncation can be flagged even on the LAST scanned file.
-			return errScanBudgetExceeded
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		*budget--
-		if !fn(sc.Text()) {
-			return nil
-		}
-	}
-	return sc.Err()
 }
 
 // ErrorTailResult is the outcome of an edge error-log tail.
@@ -532,7 +437,7 @@ func tailHasMoreThan(ctx context.Context, file string, n int) (bool, error) {
 		return false, err
 	}
 	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
+	sc.Buffer(make([]byte, 0, 64*1024), logscan.MaxLineToken)
 	seen := 0
 	capped := false
 	for sc.Scan() {
@@ -578,7 +483,7 @@ func streamTailMatches(ctx context.Context, file string, tailLines int, fn func(
 		return err
 	}
 	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), maxLineToken)
+	sc.Buffer(make([]byte, 0, 64*1024), logscan.MaxLineToken)
 	stoppedEarly := false
 	for sc.Scan() {
 		if !fn(sc.Text()) {

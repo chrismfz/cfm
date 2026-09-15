@@ -58,6 +58,20 @@ type Entry struct {
 	DCFrac    float64 `json:"dc_frac,omitempty"`   // dc: unverified-datacenter fraction
 	DCReqs    int     `json:"dc_reqs,omitempty"`   // dc: datacenter requests
 	DCIPs     int     `json:"dc_ips,omitempty"`    // dc: distinct datacenter IPs
+
+	// Per-IP challenge_score signal metrics (internal/webdetector/challenge_score.go).
+	// A decision line carries fp/score/solves/tells + verdict=would_harden|would_deny;
+	// a store-cap NOTE line carries note=store_cap_reached + dropped= (verdict=would_shadow).
+	// Zero/empty when the line is a different signal.
+	FP      string  `json:"fp,omitempty"`      // anchoring TLS fingerprint ("-" → "")
+	Score   float64 `json:"score,omitempty"`   // decayed per-IP challenge score
+	Solves  int     `json:"solves,omitempty"`  // lifetime tell-bearing solves
+	Fast    int     `json:"fast,omitempty"`    // fast-solve tell count
+	UAImp   int     `json:"uaimp,omitempty"`   // UA-lie tell count
+	Farm    int     `json:"farm,omitempty"`    // solver-farm-vhost tell count
+	FarmFP  int     `json:"farmfp,omitempty"`  // convicted-fingerprint tell count (>0 → convicted fp seen)
+	Note    string  `json:"note,omitempty"`    // non-decision note (e.g. store_cap_reached)
+	Dropped int     `json:"dropped,omitempty"` // solves dropped at the store cap (note line)
 }
 
 // Parse extracts an Entry from one log line. Returns ok=false for a line that
@@ -120,6 +134,24 @@ func Parse(line string) (Entry, bool) {
 			e.DCReqs, _ = strconv.Atoi(v)
 		case "dc_ips":
 			e.DCIPs, _ = strconv.Atoi(v)
+		case "fp":
+			e.FP = dash(v) // emitter writes "-" when no X-CFM-TLS stamp
+		case "score":
+			e.Score, _ = strconv.ParseFloat(v, 64)
+		case "solves":
+			e.Solves, _ = strconv.Atoi(v)
+		case "fast":
+			e.Fast, _ = strconv.Atoi(v)
+		case "uaimp":
+			e.UAImp, _ = strconv.Atoi(v)
+		case "farm":
+			e.Farm, _ = strconv.Atoi(v)
+		case "farmfp":
+			e.FarmFP, _ = strconv.Atoi(v)
+		case "note":
+			e.Note = v
+		case "dropped":
+			e.Dropped, _ = strconv.Atoi(v)
 		}
 	}
 	if !got || e.Signal == "" {
@@ -192,6 +224,61 @@ type Summary struct {
 	TopFacet []sigHost `json:"top_facet,omitempty"` // by expansion (urls/paths)
 	TopCost  []sigHost `json:"top_cost,omitempty"`  // by 5xx fraction
 	TopDC    []sigHost `json:"top_dc,omitempty"`    // by datacenter fraction
+
+	// Per-IP challenge_score signal breakdown — the ONE view that surfaces the
+	// would_harden soft rung, which is LOG-ONLY (only would_deny is persisted to
+	// detection_history / the fleet ledger, throttled to 1/hr/IP). Omitted when no
+	// challenge_score line fired in the window. See ChalScoreSummary.
+	ChallengeScore *ChalScoreSummary `json:"challenge_score,omitempty"`
+}
+
+// ChalScoreSummary is the per-IP challenge_score signal's dedicated view. The
+// signal fuses a solve's tells (a convicted solver-farm FINGERPRINT — the spine,
+// a UA-lie, a solver-farm vhost, a too-fast solve) into a decaying per-IP score
+// and logs would_harden (soft, T1) / would_deny (hard, T2). Only would_deny is
+// persisted durably (detection_history → cfm-web), and throttled to one row/hour/IP,
+// so this LOG-derived view is the only place the would_harden population and the raw
+// per-fingerprint / per-IP structure are visible fleet-wide. Nothing here is
+// enforced. See internal/webdetector/challenge_score.go and docs/challenge-score.md.
+type ChalScoreSummary struct {
+	Lines       int     `json:"lines"`             // challenge_score DECISION lines in the window
+	WouldHarden int     `json:"would_harden"`      // soft rung (T1) — LOG-ONLY, never persisted
+	WouldDeny   int     `json:"would_deny"`        // hard rung (T2) — the ledger's 2nd source (throttled)
+	Dropped     int     `json:"dropped,omitempty"` // solves dropped at the store cap (from note lines)
+	DistinctIPs int     `json:"distinct_ips"`      // distinct source IPs across challenge_score lines
+	DistinctFPs int     `json:"distinct_fps"`      // distinct anchoring fingerprints (excludes the empty "-")
+	MaxScore    float64 `json:"max_score"`         // peak decayed score seen
+
+	ByFP []chalFP       `json:"by_fp"` // top anchoring fingerprints by line count
+	Top  []chalOffender `json:"top"`   // top offenders by peak score
+}
+
+// chalFP is one anchoring fingerprint's challenge_score footprint. `convicted` is
+// true when any line for it carried farmfp>0 — i.e. the fingerprint was, at least
+// once, a CONVICTED solver-farm fp while scoring (the strongest tell). fp "(none)"
+// groups the lines with no X-CFM-TLS stamp.
+type chalFP struct {
+	FP          string  `json:"fp"`
+	Lines       int     `json:"lines"`
+	DistinctIPs int     `json:"distinct_ips"`
+	WouldHarden int     `json:"would_harden"`
+	WouldDeny   int     `json:"would_deny"`
+	MaxScore    float64 `json:"max_score"`
+	Convicted   bool    `json:"convicted"`
+}
+
+// chalOffender is one source IP's strongest (peak-score) challenge_score line, with
+// the tell breakdown that opened the score.
+type chalOffender struct {
+	IP      string  `json:"ip"`
+	FP      string  `json:"fp,omitempty"`
+	Score   float64 `json:"score"`
+	Verdict string  `json:"verdict"`
+	Solves  int     `json:"solves"`
+	Fast    int     `json:"fast"`
+	UAImp   int     `json:"uaimp"`
+	Farm    int     `json:"farm"`
+	FarmFP  int     `json:"farmfp"`
 }
 
 // Summarize aggregates parsed lines. It ranks the top would_challenge entities
@@ -210,6 +297,22 @@ func Summarize(lines []string) Summary {
 	facetHosts := map[string]*sigHost{}
 	costHosts := map[string]*sigHost{}
 	dcHosts := map[string]*sigHost{}
+
+	// challenge_score (per-IP signal) accumulators — its own verdict space
+	// (would_harden/would_deny) and per-fingerprint structure. csFP is the running
+	// per-fingerprint tally; the maps are flattened + capped after the scan.
+	type csFP struct {
+		lines, harden, deny int
+		ips                 map[string]struct{}
+		maxScore            float64
+		convicted           bool
+	}
+	var csLines, csHarden, csDeny, csDropped int
+	csMaxScore := 0.0
+	csIPs := map[string]struct{}{}
+	csFPs := map[string]struct{}{}
+	csByFP := map[string]*csFP{}
+	csTop := map[string]*chalOffender{} // key ip; keep the peak-score line per IP
 
 	for _, ln := range lines {
 		e, ok := Parse(ln)
@@ -274,6 +377,64 @@ func Summarize(lines []string) Summary {
 					h.DCFrac = e.DCFrac
 					h.DCReqs = e.DCReqs
 					h.DCIPs = e.DCIPs
+				}
+			}
+		}
+		// challenge_score is a per-IP (host-less) signal with its own verdict space.
+		// A store-cap NOTE line (note=store_cap_reached, verdict=would_shadow) carries
+		// no decision — accumulate its dropped count only; every other challenge_score
+		// line is a would_harden/would_deny decision.
+		if e.Signal == "challenge_score" {
+			if e.Note != "" || (e.Verdict != "would_harden" && e.Verdict != "would_deny") {
+				csDropped += e.Dropped
+			} else {
+				harden := e.Verdict == "would_harden"
+				csLines++
+				if harden {
+					csHarden++
+				} else {
+					csDeny++
+				}
+				if e.IP != "" {
+					csIPs[e.IP] = struct{}{}
+				}
+				if e.FP != "" {
+					csFPs[e.FP] = struct{}{}
+				}
+				if e.Score > csMaxScore {
+					csMaxScore = e.Score
+				}
+				fpKey := e.FP
+				if fpKey == "" {
+					fpKey = "(none)" // no X-CFM-TLS stamp on the scored solves
+				}
+				a := csByFP[fpKey]
+				if a == nil {
+					a = &csFP{ips: map[string]struct{}{}}
+					csByFP[fpKey] = a
+				}
+				a.lines++
+				if harden {
+					a.harden++
+				} else {
+					a.deny++
+				}
+				if e.IP != "" {
+					a.ips[e.IP] = struct{}{}
+				}
+				if e.Score > a.maxScore {
+					a.maxScore = e.Score
+				}
+				if e.FarmFP > 0 {
+					a.convicted = true
+				}
+				if e.IP != "" {
+					if t := csTop[e.IP]; t == nil || e.Score > t.Score {
+						csTop[e.IP] = &chalOffender{
+							IP: e.IP, FP: e.FP, Score: e.Score, Verdict: e.Verdict,
+							Solves: e.Solves, Fast: e.Fast, UAImp: e.UAImp, Farm: e.Farm, FarmFP: e.FarmFP,
+						}
+					}
 				}
 			}
 		}
@@ -356,6 +517,53 @@ func Summarize(lines []string) Summary {
 		}
 		return a.Host < b.Host
 	})
+
+	// challenge_score section — omitted entirely when the signal never fired (a
+	// quiet node then simply has no `challenge_score` key, distinguishing it from a
+	// node that scored but stayed under the durable would_deny cut).
+	if csLines > 0 || csDropped > 0 {
+		cs := &ChalScoreSummary{
+			Lines: csLines, WouldHarden: csHarden, WouldDeny: csDeny, Dropped: csDropped,
+			DistinctIPs: len(csIPs), DistinctFPs: len(csFPs), MaxScore: csMaxScore,
+		}
+		// by_fp: rank by line count, then would_deny, then fp (deterministic tie-break).
+		fps := make([]chalFP, 0, len(csByFP))
+		for k, a := range csByFP {
+			fps = append(fps, chalFP{
+				FP: k, Lines: a.lines, DistinctIPs: len(a.ips),
+				WouldHarden: a.harden, WouldDeny: a.deny, MaxScore: a.maxScore, Convicted: a.convicted,
+			})
+		}
+		sort.Slice(fps, func(i, j int) bool {
+			if fps[i].Lines != fps[j].Lines {
+				return fps[i].Lines > fps[j].Lines
+			}
+			if fps[i].WouldDeny != fps[j].WouldDeny {
+				return fps[i].WouldDeny > fps[j].WouldDeny
+			}
+			return fps[i].FP < fps[j].FP
+		})
+		if len(fps) > 25 {
+			fps = fps[:25]
+		}
+		cs.ByFP = fps
+		// top offenders: rank by peak score, then ip (deterministic tie-break).
+		tops := make([]chalOffender, 0, len(csTop))
+		for _, t := range csTop {
+			tops = append(tops, *t)
+		}
+		sort.Slice(tops, func(i, j int) bool {
+			if tops[i].Score != tops[j].Score {
+				return tops[i].Score > tops[j].Score
+			}
+			return tops[i].IP < tops[j].IP
+		})
+		if len(tops) > 25 {
+			tops = tops[:25]
+		}
+		cs.Top = tops
+		s.ChallengeScore = cs
+	}
 	return s
 }
 

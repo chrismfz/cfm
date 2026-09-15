@@ -704,7 +704,7 @@ func handleSystemLSMDetections(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	res, err := cfmlog.TailFile(r.Context(), "lsm", lines, cfmlog.MaxLimit, "")
+	res, err := cfmlog.TailFile(r.Context(), "lsm", lines, cfmlog.MaxLimit, 0, "")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
@@ -909,11 +909,12 @@ func handleSystemMySQLLog(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSystemCFMLog tails one of CFM's own logs (GET /api/v1/system/cfm-log?
-// which=main|error|api|detector|challenges|smtp|mysql|waf|clam|socket|lsm|service
-// &lines=N&limit=M&grep=SUBSTR). Read-only, admin-only. Backs the MCP
-// cfm_log_tail tool — "what did the daemon/detector/WAF/challenge subsystem log?"
-// without shelling into the box. Bounded tail (window + timeout + capped output);
-// a missing log path is found=false, not an error (feature off / relocated).
+// which=main|error|api|detector|challenges|smtp|mysql|waf|clam|socket|lsm|service|
+// abuse_shadow&lines=N&limit=M&grep=SUBSTR&rotated=K). Read-only, admin-only. Backs
+// the MCP cfm_log_tail tool — "what did the daemon/detector/WAF/challenge subsystem
+// log?" without shelling into the box. Bounded tail (window + timeout + capped
+// output); rotated=K also scans the K newest rotated+gz siblings under a shared
+// budget. A missing log path is found=false, not an error (feature off / relocated).
 func handleSystemCFMLog(w http.ResponseWriter, r *http.Request) {
 	if !webdet.RequireAdmin(w, r) {
 		return
@@ -938,8 +939,14 @@ func handleSystemCFMLog(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	grep := strings.TrimSpace(r.URL.Query().Get("grep"))
+	rotated := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("rotated")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			rotated = n
+		}
+	}
 
-	res, err := cfmlog.TailFile(r.Context(), which, lines, limit, grep)
+	res, err := cfmlog.TailFile(r.Context(), which, lines, limit, rotated, grep)
 	if err != nil {
 		status := http.StatusBadGateway // stream/exec failure (timeout, unreadable) → server error
 		if errors.Is(err, cfmlog.ErrUnknownSource) {

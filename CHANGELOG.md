@@ -17,6 +17,37 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **`cfm_log_tail` can now reach ROTATED + gzipped history, and gained the
+  `abuse_shadow` log.** Pass `rotated=N` to also scan the N newest rotated siblings
+  (`foo.log.1`, `foo.log.2.gz`, …) newest-first, gz-transparent, for evidence from
+  before the last logrotate — so a debug isn't limited to the live tail window. It's
+  bounded like the edge archival tools (a shared line budget across all siblings, one
+  timeout, gz streamed, at most 60 files); `files_scanned` lists every file read
+  (live first) and `truncated=true` flags any reach bound (a saturated live tail
+  window, output cap, file cap, budget, timeout, or a corrupt gz) so a coverage hole
+  is never silent. The `which` set also gains `abuse_shadow` (the
+  log-only entity-abuse / `challenge_score` burn-in log) so its raw lines are
+  greppable — e.g. `which=abuse_shadow grep="signal=challenge_score" rotated=10` to
+  read historical `would_harden`/`would_deny` lines the aggregator's live window
+  can't reach. The rotated-sibling discovery + gz-streaming reader is factored into a
+  shared `internal/logscan` package now used by both `cfm_log_tail` and the edge log
+  tools (previously the edge tools' private copy) — one implementation, no drift.
+  Read-only; bounded; nothing enforced.
+- **`abuse_shadow` MCP tool now breaks out the per-IP `challenge_score` signal.** The
+  tool already tallied `challenge_score` lines generically in `by_signal`/`by_verdict`;
+  it now emits a dedicated `challenge_score` section: `would_harden` vs `would_deny`
+  counts, distinct IPs and fingerprints, a `by_fp` breakdown (each with a `convicted`
+  flag — a `farmfp>0` line was seen for that fingerprint) and the top offenders by
+  score. This is the ONLY fleet-visible view of the `would_harden` **soft rung**: only
+  the `would_deny` hard rung is persisted to `detection_history` / the fingerprint
+  ledger (throttled to 1 row/hour/IP), so `would_harden` — the large majority of the
+  signal — otherwise lives only in the rotating `cfm.abuse_shadow.log`. Lets a burn-in
+  readout see the soft rung and the per-fingerprint/per-IP structure below the deny
+  cut, and tell a genuinely quiet node (no `challenge_score` key) from one that scored
+  but stayed under `would_deny`. Read-only, log-derived; nothing enforced. See
+  `docs/challenge-score.md` § "Durable capture".
+
 ### Fixed
 - **Challenge POST-resume now actually replays the saved submission (no more lost
   saves behind a challenge).** When an interactive challenge intercepted a POST
@@ -72,8 +103,6 @@ back-filled here — see the git/PR history for that period.
   real traffic** — the log-first prerequisite for a future JA4↔UA coherence tell.
   Pure logging: nothing scores or enforces on it. See `docs/traffic-classifier.md`
   § "The ChallengeV2 rung" and `docs/challenge-score.md` §8.
-
-### Added
 - **WAF triggers now carry the client TLS fingerprint (ledger source #3 groundwork,
   shadow).** Every in-path WAF trigger persisted to `detection_history`
   (`event_type=waf_trigger`) now carries the client's TLS fingerprint **id** in its
