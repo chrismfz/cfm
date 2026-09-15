@@ -582,6 +582,18 @@ local function try_apply_post_resume(ip, host)
   if tostring(obj.host or "") ~= tostring(host or "") then return false end
   local body = ngx.decode_base64(obj.body_b64 or "")
   if not body or #body == 0 or #body > CFG.post_resume_max_len then return false end
+  -- set_body_data() requires the current request body to have been read first,
+  -- or it raises "request body not read yet". The resume carrier is a bodiless
+  -- GET (/…?cfm_rt=…), and nothing reads its (absent) body before this point —
+  -- the WAF body-read gate only fires for POST/PUT/PATCH, not this GET. Without
+  -- this read_body() the set_body_data() below THROWS; the access phase runs
+  -- under xpcall+fail_open, so the throw is swallowed and the request proceeds
+  -- as the original GET with NO body — post.php then sees an empty submit and
+  -- WordPress bounces to edit.php, silently losing the user's save. read_body()
+  -- on a bodiless GET is a cheap no-op that marks the body read; it must run
+  -- BEFORE set_body_data(). Idempotent w.r.t. a later WAF body-read on the now
+  -- POST-shaped request.
+  ngx.req.read_body()
   ngx.req.set_method(ngx.HTTP_POST)
   ngx.req.set_header("Content-Type", obj.ctype or "application/x-www-form-urlencoded")
   ngx.req.set_body_data(body)
