@@ -272,6 +272,34 @@ func TestSummarizeChallengeScore(t *testing.T) {
 	}
 }
 
+// A challenge_score store-cap NOTE line is operational: it contributes `dropped` to
+// the challenge_score section but must NOT inflate the generic Total / by_signal /
+// by_verdict — even though it carries verdict=would_shadow, which would otherwise
+// slip past the verdict gate (the bug this locks against).
+func TestSummarizeChallengeScoreNoteNotCounted(t *testing.T) {
+	// One real decision + the store-cap note.
+	s := Summarize([]string{lineCS_deny1, lineCS_note})
+	if s.Total != 1 {
+		t.Fatalf("total = %d, want 1 (the note is operational, not a decision)", s.Total)
+	}
+	if s.ChallengeScore == nil || s.ChallengeScore.Dropped != 7 {
+		t.Errorf("the note's dropped=7 must still reach the cs section, got %+v", s.ChallengeScore)
+	}
+
+	// A note-ONLY window: Total 0 and NO by_verdict/by_signal rows (the would_shadow
+	// note must not leak into the generic tally), yet the section still reports dropped.
+	only := Summarize([]string{lineCS_note})
+	if only.Total != 0 {
+		t.Errorf("note-only total = %d, want 0", only.Total)
+	}
+	if len(only.ByVerdict) != 0 || len(only.BySignal) != 0 {
+		t.Errorf("note-only must not create by_verdict/by_signal rows: verdict=%+v signal=%+v", only.ByVerdict, only.BySignal)
+	}
+	if only.ChallengeScore == nil || only.ChallengeScore.Dropped != 7 {
+		t.Errorf("note-only should still surface dropped=7, got %+v", only.ChallengeScore)
+	}
+}
+
 // TestSummarizeDropsOperationalLines locks the verdict gate: dc_fraction's
 // verdict-less operational lines must not inflate Total/unique_ips/by_signal and
 // must not leak an empty-key by_verdict row (and the malformed ip=…) must not

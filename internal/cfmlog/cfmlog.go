@@ -170,9 +170,17 @@ func clampLinesLimit(lines, limit int) (int, int) {
 // siblings (foo.log.1, foo.log.2.gz, …) newest→oldest, gz-transparent, to reach
 // evidence from before the last logrotate. That reach is bounded: at most
 // MaxRotatedFiles siblings, a shared rotatedScanBudget of lines across all of them,
-// and one timeout. Matches are collected live-window-first then newest-sibling-first
-// and still capped at `limit`; any scan bound hit (output cap, file cap, budget,
-// timeout, or a corrupt gz) sets Truncated.
+// and one timeout. The result is the NEWEST `limit` matches, assembled newest-source-
+// first (the live block, then each sibling newest→oldest) with chronological order
+// within each block. Two consequences worth knowing: the live block keeps its newest
+// matches (not the oldest scanned), and when it already fills `limit` the siblings are
+// skipped entirely (nothing older could enter a newest-first view) — so to reach
+// deeper history on a busy log, narrow `grep` or raise `limit`. One honest caveat: a
+// sibling cut short by the shared line budget yields its OLDEST scanned matches, not
+// its newest, because gz is read front-to-back — Truncated flags it, but the newest
+// evidence of a single >budget sibling is unreachable this way. Any scan bound hit
+// (matches dropped to fit `limit`, file cap, budget, timeout, a saturated live window,
+// or a corrupt gz) sets Truncated so a coverage gap is never silent.
 func TailFile(ctx context.Context, which string, lines, limit, rotated int, grep string) (Result, error) {
 	which = strings.ToLower(strings.TrimSpace(which))
 	if which == "" {
@@ -201,26 +209,35 @@ func TailFile(ctx context.Context, which string, lines, limit, rotated int, grep
 	defer cancel()
 
 	g := strings.ToLower(strings.TrimSpace(grep))
-	// One match handler shared by the live tail and every rotated scan, so Scanned/
-	// Matched/Lines accumulate identically across all files.
-	collect := func(line string) {
+	matches := func(line string) bool {
+		return g == "" || strings.Contains(strings.ToLower(line), g)
+	}
+
+	// Keep the NEWEST `limit` matches per source, not the FIRST `limit` scanned: a
+	// tail must return recent lines, and in rotated mode the newest live matches must
+	// not crowd the output full before the (older) siblings are even considered. A
+	// ring per source, assembled newest-source-first, gives both. res.Matched still
+	// counts every match seen (even those a ring evicts).
+	liveRing := newMatchRing(limit)
+	collectLive := func(line string) {
 		res.Scanned++
-		if g != "" && !strings.Contains(strings.ToLower(line), g) {
-			return
-		}
-		res.Matched++
-		if len(res.Lines) < limit {
-			res.Lines = append(res.Lines, truncLine(line))
-		} else {
-			res.Truncated = true
+		if matches(line) {
+			res.Matched++
+			liveRing.push(truncLine(line))
 		}
 	}
 
 	cmd := exec.CommandContext(cctx, tailPath(), "-n", fmt.Sprintf("%d", lines), logFile)
-	_, err := streamCmd(cctx, cmd, collect)
+	_, err := streamCmd(cctx, cmd, collectLive)
 	// WindowFull reflects the LIVE file only (the tail window), so it keeps meaning
 	// "this file has older lines" independent of rotated reach.
 	res.WindowFull = res.Scanned >= lines
+
+	// The live block: its newest matches, in chronological order.
+	res.Lines = append(res.Lines, liveRing.chrono()...)
+	if liveRing.dropped {
+		res.Truncated = true // older live matches didn't fit `limit`
+	}
 
 	if rotated <= 0 {
 		return res, err
@@ -234,11 +251,23 @@ func TailFile(ctx context.Context, which string, lines, limit, rotated int, grep
 	if res.WindowFull {
 		res.Truncated = true
 	}
+	res.FilesScanned = append(res.FilesScanned, logFile) // live first
+
+	// Once the live block already fills `limit`, the newest matches are all live and a
+	// strictly-older sibling can add nothing to a newest-first view — so skip the
+	// rotated scan rather than gunzip siblings for lines that can't be returned. Flag
+	// Truncated: rotated was NOT searched (it may or may not hold older matches) — a
+	// reach bound, so narrow `grep` or raise `limit` to actually look.
+	remaining := limit - len(res.Lines)
+	if remaining <= 0 {
+		res.Truncated = true
+		return res, err
+	}
+
 	// Rotated reach: scan the newest `rotated` siblings, gz-transparent, under a
 	// shared line budget. A per-file open/gz/budget failure never fails the call —
 	// the live result is already in hand — but it is NEVER silent: it sets Truncated
 	// so "coverage is shorter than it looks" reaches the caller.
-	res.FilesScanned = append(res.FilesScanned, logFile) // live first
 	if rotated > MaxRotatedFiles {
 		rotated = MaxRotatedFiles
 	}
@@ -248,12 +277,38 @@ func TailFile(ctx context.Context, which string, lines, limit, rotated int, grep
 	}
 	budget := rotatedScanBudget
 	for _, rf := range siblings {
-		if cctx.Err() != nil || budget <= 0 {
-			res.Truncated = true // ran out of time/budget before this file
+		if cctx.Err() != nil || budget <= 0 || remaining <= 0 {
+			res.Truncated = true // ran out of time/budget/room before this file
 			break
 		}
-		res.FilesScanned = append(res.FilesScanned, rf)
-		if scanErr := logscan.ScanWhole(cctx, rf, &budget, func(l string) bool { collect(l); return true }); scanErr != nil {
+		// This sibling's newest matches are at its END, so the whole file is read but
+		// only its newest `remaining` are retained (older ones fall out of the ring).
+		// A budget cut stops the read mid-file, so it then yields this sibling's OLDEST
+		// scanned matches, not its newest — accepted + flagged (gz is forward-only).
+		before := res.Scanned
+		sibRing := newMatchRing(remaining)
+		scanErr := logscan.ScanWhole(cctx, rf, &budget, func(l string) bool {
+			res.Scanned++
+			if matches(l) {
+				res.Matched++
+				sibRing.push(truncLine(l))
+			}
+			return true
+		})
+		// A hard OPEN failure (e.g. a logrotate rename mid-scan) errors having read
+		// NOTHING; everything else reached the file — a clean read (even of an empty
+		// sibling), a budget cut, or a corrupt gz that still yielded some lines — so
+		// list it. Don't overstate coverage by listing a file that never opened.
+		openFailed := scanErr != nil && res.Scanned == before
+		if !openFailed {
+			res.FilesScanned = append(res.FilesScanned, rf)
+			res.Lines = append(res.Lines, sibRing.chrono()...)
+			remaining -= sibRing.len()
+			if sibRing.dropped {
+				res.Truncated = true // this sibling had more matches than fit `remaining`
+			}
+		}
+		if scanErr != nil {
 			if cctx.Err() != nil {
 				res.Truncated = true
 				break
@@ -426,6 +481,54 @@ func truncLine(s string) string {
 		return s
 	}
 	return s[:maxStoredLine] + "…"
+}
+
+// matchRing keeps the newest `cap` pushed lines in chronological (push) order, in
+// O(1) per push and O(cap) memory — so a tail returns recent matches without
+// buffering an unbounded scan. `dropped` records whether any line was ever evicted
+// (older matches that didn't fit), which the caller surfaces as Truncated.
+type matchRing struct {
+	buf     []string
+	cap     int
+	start   int // index of the oldest retained element (once full)
+	size    int
+	dropped bool
+}
+
+func newMatchRing(capacity int) *matchRing {
+	if capacity < 0 {
+		capacity = 0
+	}
+	return &matchRing{cap: capacity}
+}
+
+func (r *matchRing) push(s string) {
+	if r.cap == 0 {
+		r.dropped = true
+		return
+	}
+	if r.size < r.cap {
+		r.buf = append(r.buf, s)
+		r.size++
+		return
+	}
+	r.buf[r.start] = s // full: overwrite the oldest
+	r.start = (r.start + 1) % r.cap
+	r.dropped = true
+}
+
+func (r *matchRing) len() int { return r.size }
+
+// chrono returns the retained lines oldest→newest (push order).
+func (r *matchRing) chrono() []string {
+	if r.size == 0 {
+		return nil
+	}
+	out := make([]string, 0, r.size)
+	for i := 0; i < r.size; i++ {
+		out = append(out, r.buf[(r.start+i)%r.cap])
+	}
+	return out
 }
 
 func sortedKeys(m map[string][]string) []string {

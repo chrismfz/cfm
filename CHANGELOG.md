@@ -69,6 +69,23 @@ back-filled here — see the git/PR history for that period.
   `docs/challenge-score.md` § "Durable capture".
 
 ### Fixed
+- **`cfm_log_tail` rotated mode now actually reaches history, and stops scanning
+  once it has enough.** The reader kept the FIRST `limit` matches it scanned (the
+  OLDEST of the live tail window) and filled that cap live-first, so on a busy log
+  `rotated=N` returned only live lines and **zero** rotated evidence — silently
+  defeating the reach it promises — while still gunzipping every sibling for lines it
+  could never return. It now keeps the NEWEST `limit` matches per source (a bounded
+  ring), fills the remainder from the siblings newest-first, and skips the rotated
+  scan entirely when the live window alone fills `limit` (narrow `grep` / raise
+  `limit` to reach deeper); `truncated=true` still flags every dropped match. Even a
+  live-only tail now returns the newest matches, not the oldest of the window.
+- **`abuse_shadow`: the `challenge_score` store-cap NOTE line no longer inflates the
+  generic totals.** The `note=store_cap_reached … verdict=would_shadow` line is
+  operational, not a decision, but its non-empty verdict slipped the verdict-less gate
+  and was counted into `total` / `by_signal` / `by_verdict` (the dedicated
+  challenge_score section already treated it as `dropped`-only). It is now accounted
+  for `dropped` and skipped from the generic tally, like dc_fraction's verdict-less
+  operational lines.
 - **Challenge POST-resume now actually replays the saved submission (no more lost
   saves behind a challenge).** When an interactive challenge intercepted a POST
   (e.g. a WooCommerce product/order save), the edge stashed the body and replayed
