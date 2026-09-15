@@ -744,22 +744,24 @@ func registerMySQLSlowQueries(srv *mcp.Server, d Deps) {
 }
 
 type cfmLogInput struct {
-	Which string `json:"which,omitempty" jsonschema:"which CFM log: main|error|api|detector|challenges|smtp|mysql|waf|clam|socket|lsm|service (default main)"`
-	Lines int    `json:"lines,omitempty" jsonschema:"trailing lines to scan (tail window); default 500, max 20000"`
-	Grep  string `json:"grep,omitempty" jsonschema:"case-insensitive substring filter; omit for all"`
-	Limit int    `json:"limit,omitempty" jsonschema:"max matching lines to return; default 200, max 2000"`
+	Which   string `json:"which,omitempty" jsonschema:"which CFM log: main|error|api|detector|challenges|smtp|mysql|waf|clam|socket|lsm|service|abuse_shadow (default main)"`
+	Lines   int    `json:"lines,omitempty" jsonschema:"trailing lines to scan in the LIVE file (tail window); default 500, max 20000"`
+	Grep    string `json:"grep,omitempty" jsonschema:"case-insensitive substring filter; omit for all"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"max matching lines to return; default 200, max 2000"`
+	Rotated int    `json:"rotated,omitempty" jsonschema:"also scan this many rotated siblings (foo.log.1, foo.log.2.gz, …) newest-first to reach evidence from before the last logrotate; default 0 (live file only), max 60. Bounded: shared line budget across all siblings + one timeout; gz is streamed. files_scanned lists what was read and truncated=true flags any reach bound hit"`
 }
 
 func registerCFMLogTail(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "cfm_log_tail",
-		Description: "Tail one of CFM's OWN logs (`/var/log/cfm/*`, with a few legacy `/var/log/cfm.*` fallbacks) — pick `which`: main (daemon), error, api, detector, challenges, smtp, mysql, waf, clam, socket, lsm, service. This is 'what did the CFM daemon / a subsystem log?' when a symptom isn't explained by the edge access/error logs (which edge_access_tail / edge_error_tail cover) — e.g. why a detector acted, a socket/API error, a challenge-engine note. Bounded on-demand tail (last N lines) + optional grep; a log that isn't present returns result.found=false (feature off or relocated), not an error. result.window_full=true means the tail window was saturated (older lines exist — raise `lines` if a grep found nothing).",
+		Description: "Tail one of CFM's OWN logs (`/var/log/cfm/*`, with a few legacy `/var/log/cfm.*` fallbacks) — pick `which`: main (daemon), error, api, detector, challenges, smtp, mysql, waf, clam, socket, lsm, service, abuse_shadow (the LOG-ONLY entity-abuse / challenge_score burn-in log — for aggregated counts use the `abuse_shadow` tool; use THIS for raw lines, e.g. grep=\"signal=challenge_score\"). This is 'what did the CFM daemon / a subsystem log?' when a symptom isn't explained by the edge access/error logs (which edge_access_tail / edge_error_tail cover) — e.g. why a detector acted, a socket/API error, a challenge-engine note. Bounded on-demand tail (last N lines) + optional grep; a log that isn't present returns result.found=false (feature off or relocated), not an error. result.window_full=true means the LIVE tail window was saturated (older lines exist — raise `lines`, or set `rotated` to reach past the last logrotate). Set `rotated=N` to ALSO scan the N newest rotated siblings (foo.log.1, foo.log.2.gz, …), gz-transparent — for evidence older than the live file; still bounded (a shared line budget across all siblings, one timeout, gz streamed). files_scanned then lists every file read (live first) and truncated=true flags any reach bound (output cap, sibling-file cap, budget, timeout, or a corrupt gz).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cfmLogInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{}
 		setStr(q, "which", in.Which)
 		setInt(q, "lines", in.Lines)
 		setInt(q, "limit", in.Limit)
+		setInt(q, "rotated", in.Rotated)
 		setStr(q, "grep", in.Grep)
 		return dispatchJSON(ctx, d, "/api/v1/system/cfm-log", q)
 	})

@@ -28,6 +28,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"cfm/internal/logscan"
 )
 
 const (
@@ -39,6 +41,16 @@ const (
 	scanTimeout   = 20 * time.Second
 	readerBufSize = 1024 * 1024
 	maxStderrCap  = 4 * 1024
+
+	// Rotated-log reach (opt-in): the live tail only sees the current file, so an
+	// event from before the last logrotate is invisible until you also scan the
+	// rotated siblings (foo.log.1, foo.log.2.gz, …). That reach is bounded: at
+	// most MaxRotatedFiles siblings, a shared rotatedScanBudget of lines across ALL
+	// of them, and one timeout — so asking for history can't trigger an unbounded
+	// multi-GB decompress. The live tail window (`lines`) is unaffected.
+	DefaultRotatedFiles = 10
+	MaxRotatedFiles     = 60
+	rotatedScanBudget   = MaxLines * 10 // 200k lines across all rotated siblings
 )
 
 // ErrUnknownSource / ErrUnitNotAllowed classify caller (400) faults so the HTTP
@@ -55,18 +67,19 @@ var (
 // keys); a config-overridden path is intentionally not followed (a read tool
 // missing a relocated log returns found=false, never an error).
 var fileCandidates = map[string][]string{
-	"main":       {"/var/log/cfm/cfm.log", "/var/log/cfm.log"},
-	"error":      {"/var/log/cfm/cfm-error.log"},
-	"api":        {"/var/log/cfm/cfm.api.log", "/var/log/cfm.api.log"},
-	"detector":   {"/var/log/cfm/cfm.detector.log", "/var/log/cfm/detectors.log"},
-	"challenges": {"/var/log/cfm/cfm.challenges.log", "/var/log/cfm/challenge.access.log"},
-	"smtp":       {"/var/log/cfm/cfm.smtp.log", "/var/log/cfm.smtp.log"},
-	"mysql":      {"/var/log/cfm/cfm.mysql.log"},
-	"waf":        {"/var/log/cfm/cfm.waf.log"},
-	"clam":       {"/var/log/cfm/cfm.clam.log"},
-	"socket":     {"/var/log/cfm/cfm.socket.log"},
-	"lsm":        {"/var/log/cfm/cfm.lsm.log", "/var/log/cfm/lsm.log"},
-	"service":    {"/var/log/cfm/cfm-service.log", "/var/log/cfm-service.log"},
+	"main":         {"/var/log/cfm/cfm.log", "/var/log/cfm.log"},
+	"error":        {"/var/log/cfm/cfm-error.log"},
+	"api":          {"/var/log/cfm/cfm.api.log", "/var/log/cfm.api.log"},
+	"detector":     {"/var/log/cfm/cfm.detector.log", "/var/log/cfm/detectors.log"},
+	"challenges":   {"/var/log/cfm/cfm.challenges.log", "/var/log/cfm/challenge.access.log"},
+	"smtp":         {"/var/log/cfm/cfm.smtp.log", "/var/log/cfm.smtp.log"},
+	"mysql":        {"/var/log/cfm/cfm.mysql.log"},
+	"waf":          {"/var/log/cfm/cfm.waf.log"},
+	"clam":         {"/var/log/cfm/cfm.clam.log"},
+	"socket":       {"/var/log/cfm/cfm.socket.log"},
+	"lsm":          {"/var/log/cfm/cfm.lsm.log", "/var/log/cfm/lsm.log"},
+	"service":      {"/var/log/cfm/cfm-service.log", "/var/log/cfm-service.log"},
+	"abuse_shadow": {"/var/log/cfm/cfm.abuse_shadow.log"},
 }
 
 // FileSources returns the sorted set of valid cfm-log keys (for docs/validation).
@@ -108,14 +121,15 @@ func JournalUnits() []string {
 // (`lines`) was saturated — i.e. older lines exist beyond what was scanned, so a
 // grep that matched nothing is NOT proof the event never happened (raise `lines`).
 type Result struct {
-	Kind       string   `json:"kind"`
-	LogFile    string   `json:"log_file"`
-	Found      bool     `json:"found"` // false when no candidate path exists (log elsewhere / feature off)
-	Lines      []string `json:"lines"`
-	Scanned    int      `json:"scanned"`
-	Matched    int      `json:"matched"`
-	Truncated  bool     `json:"truncated"`   // output capped at `limit`
-	WindowFull bool     `json:"window_full"` // tail window saturated — older lines exist
+	Kind         string   `json:"kind"`
+	LogFile      string   `json:"log_file"`
+	Found        bool     `json:"found"`                   // false when no candidate path exists (log elsewhere / feature off)
+	FilesScanned []string `json:"files_scanned,omitempty"` // set only in rotated mode: live first, then rotated siblings newest→oldest
+	Lines        []string `json:"lines"`
+	Scanned      int      `json:"scanned"`     // lines read across ALL scanned files
+	Matched      int      `json:"matched"`     // total grep matches (may exceed len(Lines))
+	Truncated    bool     `json:"truncated"`   // output capped at `limit`, or a rotated scan bound (budget/timeout/file cap/corrupt gz) was hit
+	WindowFull   bool     `json:"window_full"` // LIVE tail window saturated — older lines exist in this file (raise `lines` or set `rotated`)
 }
 
 // JournalResult is one journal-tail outcome. Note carries a journalctl failure
@@ -151,7 +165,15 @@ func clampLinesLimit(lines, limit int) (int, int) {
 // TailFile returns the last matching lines of a CFM log. A missing log is NOT an
 // error — Found=false is returned so the caller can say "that log isn't present"
 // rather than failing. An unknown key is ErrUnknownSource (a caller fault).
-func TailFile(ctx context.Context, which string, lines, limit int, grep string) (Result, error) {
+//
+// `rotated` (0 = live file only, the default) also scans up to that many rotated
+// siblings (foo.log.1, foo.log.2.gz, …) newest→oldest, gz-transparent, to reach
+// evidence from before the last logrotate. That reach is bounded: at most
+// MaxRotatedFiles siblings, a shared rotatedScanBudget of lines across all of them,
+// and one timeout. Matches are collected live-window-first then newest-sibling-first
+// and still capped at `limit`; any scan bound hit (output cap, file cap, budget,
+// timeout, or a corrupt gz) sets Truncated.
+func TailFile(ctx context.Context, which string, lines, limit, rotated int, grep string) (Result, error) {
 	which = strings.ToLower(strings.TrimSpace(which))
 	if which == "" {
 		which = "main"
@@ -179,8 +201,9 @@ func TailFile(ctx context.Context, which string, lines, limit int, grep string) 
 	defer cancel()
 
 	g := strings.ToLower(strings.TrimSpace(grep))
-	cmd := exec.CommandContext(cctx, tailPath(), "-n", fmt.Sprintf("%d", lines), logFile)
-	_, err := streamCmd(cctx, cmd, func(line string) {
+	// One match handler shared by the live tail and every rotated scan, so Scanned/
+	// Matched/Lines accumulate identically across all files.
+	collect := func(line string) {
 		res.Scanned++
 		if g != "" && !strings.Contains(strings.ToLower(line), g) {
 			return
@@ -191,8 +214,48 @@ func TailFile(ctx context.Context, which string, lines, limit int, grep string) 
 		} else {
 			res.Truncated = true
 		}
-	})
+	}
+
+	cmd := exec.CommandContext(cctx, tailPath(), "-n", fmt.Sprintf("%d", lines), logFile)
+	_, err := streamCmd(cctx, cmd, collect)
+	// WindowFull reflects the LIVE file only (the tail window), so it keeps meaning
+	// "this file has older lines" independent of rotated reach.
 	res.WindowFull = res.Scanned >= lines
+
+	if rotated <= 0 {
+		return res, err
+	}
+	// Rotated reach: scan the newest `rotated` siblings, gz-transparent, under a
+	// shared line budget. A per-file open/gz/budget failure never fails the call —
+	// the live result is already in hand — but it is NEVER silent: it sets Truncated
+	// so "coverage is shorter than it looks" reaches the caller.
+	res.FilesScanned = append(res.FilesScanned, logFile) // live first
+	if rotated > MaxRotatedFiles {
+		rotated = MaxRotatedFiles
+	}
+	siblings, found := logscan.RotatedSiblings(logFile, rotated)
+	if found > len(siblings) {
+		res.Truncated = true // the file cap hid older siblings
+	}
+	budget := rotatedScanBudget
+	for _, rf := range siblings {
+		if cctx.Err() != nil || budget <= 0 {
+			res.Truncated = true // ran out of time/budget before this file
+			break
+		}
+		res.FilesScanned = append(res.FilesScanned, rf)
+		if scanErr := logscan.ScanWhole(cctx, rf, &budget, func(l string) bool { collect(l); return true }); scanErr != nil {
+			if cctx.Err() != nil {
+				res.Truncated = true
+				break
+			}
+			res.Truncated = true // budget-cut or corrupt/unreadable sibling = evidence hole
+			continue
+		}
+		if budget <= 0 {
+			res.Truncated = true // budget exhausted mid-file (possibly the last one)
+		}
+	}
 	return res, err
 }
 

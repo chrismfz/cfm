@@ -2,22 +2,25 @@ package cfmlog
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTailFile_UnknownKey(t *testing.T) {
-	if _, err := TailFile(context.Background(), "bogus", 0, 0, ""); err == nil {
+	if _, err := TailFile(context.Background(), "bogus", 0, 0, 0, ""); err == nil {
 		t.Fatal("unknown key should error")
 	}
 }
 
 func TestTailFile_MissingIsFoundFalse(t *testing.T) {
 	// 'waf' has a single candidate that won't exist in the test env.
-	res, err := TailFile(context.Background(), "waf", 0, 0, "")
+	res, err := TailFile(context.Background(), "waf", 0, 0, 0, "")
 	if err != nil {
 		t.Fatalf("missing log must not error: %v", err)
 	}
@@ -39,7 +42,7 @@ func TestTailFile_ReadsAndGreps(t *testing.T) {
 	t.Cleanup(func() { fileCandidates["main"] = old })
 
 	// No grep: all three lines.
-	res, err := TailFile(context.Background(), "main", 0, 0, "")
+	res, err := TailFile(context.Background(), "main", 0, 0, 0, "")
 	if err != nil || !res.Found {
 		t.Fatalf("read failed: err=%v found=%v", err, res.Found)
 	}
@@ -48,24 +51,24 @@ func TestTailFile_ReadsAndGreps(t *testing.T) {
 	}
 
 	// Case-insensitive grep 'error' → one line.
-	res, _ = TailFile(context.Background(), "main", 0, 0, "ERROR")
+	res, _ = TailFile(context.Background(), "main", 0, 0, 0, "ERROR")
 	if res.Scanned != 3 || res.Matched != 1 || len(res.Lines) != 1 || !strings.Contains(res.Lines[0], "BRAVO") {
 		t.Errorf("grep result wrong: %+v", res)
 	}
 
 	// limit caps returned lines + sets Truncated.
-	res, _ = TailFile(context.Background(), "main", 0, 1, "alpha")
+	res, _ = TailFile(context.Background(), "main", 0, 1, 0, "alpha")
 	if res.Matched != 2 || len(res.Lines) != 1 || !res.Truncated {
 		t.Errorf("limit not honored: matched=%d lines=%d trunc=%v", res.Matched, len(res.Lines), res.Truncated)
 	}
 
 	// Full window (3 lines) is not saturated by default (lines=500).
-	res, _ = TailFile(context.Background(), "main", 0, 0, "")
+	res, _ = TailFile(context.Background(), "main", 0, 0, 0, "")
 	if res.WindowFull {
 		t.Errorf("3-line file should not report window_full at default window")
 	}
 	// A tiny window (lines=1) IS saturated → window_full true (older lines exist).
-	res, _ = TailFile(context.Background(), "main", 1, 0, "")
+	res, _ = TailFile(context.Background(), "main", 1, 0, 0, "")
 	if res.Scanned != 1 || !res.WindowFull {
 		t.Errorf("lines=1 should saturate window: scanned=%d window_full=%v", res.Scanned, res.WindowFull)
 	}
@@ -80,10 +83,75 @@ func TestTailFileReadsCanonicalAPILogSource(t *testing.T) {
 	fileCandidates["api"] = []string{logp}
 	t.Cleanup(func() { fileCandidates["api"] = old })
 
-	res, err := TailFile(context.Background(), "api", 10, 10, "auth_attempt")
+	res, err := TailFile(context.Background(), "api", 10, 10, 0, "auth_attempt")
 	if err != nil || !res.Found || res.Kind != "api" || len(res.Lines) != 1 {
 		t.Fatalf("api log tail failed: result=%+v err=%v", res, err)
 	}
+}
+
+func TestTailFile_RotatedReadsPlainAndGzSiblings(t *testing.T) {
+	tmp := t.TempDir()
+	live := filepath.Join(tmp, "cfm.abuse_shadow.log")
+	// live (newest), .1 (plain, older), .2.gz (gzipped, oldest).
+	mustWrite(t, live, "live MATCH a\nlive nope\n")
+	rot1 := live + ".1"
+	mustWrite(t, rot1, "rot1 MATCH b\n")
+	rot2 := live + ".2.gz"
+	mustWriteGz(t, rot2, "rot2 MATCH c\nrot2 nope\n")
+	// mtime order so RotatedSiblings ranks .1 before .2.gz (newest first).
+	now := time.Now()
+	_ = os.Chtimes(rot1, now.Add(-1*time.Hour), now.Add(-1*time.Hour))
+	_ = os.Chtimes(rot2, now.Add(-2*time.Hour), now.Add(-2*time.Hour))
+
+	old := fileCandidates["abuse_shadow"]
+	fileCandidates["abuse_shadow"] = []string{live}
+	t.Cleanup(func() { fileCandidates["abuse_shadow"] = old })
+
+	// rotated=0 → live only: one match, no files_scanned list.
+	res, err := TailFile(context.Background(), "abuse_shadow", 0, 0, 0, "MATCH")
+	if err != nil || res.Matched != 1 || len(res.FilesScanned) != 0 {
+		t.Fatalf("live-only: matched=%d files=%v err=%v", res.Matched, res.FilesScanned, err)
+	}
+
+	// rotated=5 → live + both siblings: three matches, collected live-first then
+	// newest-sibling-first, files_scanned = [live, .1, .2.gz].
+	res, err = TailFile(context.Background(), "abuse_shadow", 0, 0, 5, "MATCH")
+	if err != nil {
+		t.Fatalf("rotated read err: %v", err)
+	}
+	if res.Matched != 3 || len(res.Lines) != 3 {
+		t.Fatalf("rotated matched/lines = %d/%d, want 3/3 (%+v)", res.Matched, len(res.Lines), res.Lines)
+	}
+	if !strings.Contains(res.Lines[0], "live") || !strings.Contains(res.Lines[1], "rot1") || !strings.Contains(res.Lines[2], "rot2") {
+		t.Errorf("order wrong (want live, rot1, rot2): %v", res.Lines)
+	}
+	if len(res.FilesScanned) != 3 || res.FilesScanned[0] != live || res.FilesScanned[1] != rot1 || res.FilesScanned[2] != rot2 {
+		t.Errorf("files_scanned = %v, want [live, .1, .2.gz]", res.FilesScanned)
+	}
+	// Scanned counts lines across ALL files (2 live + 1 + 2 = 5).
+	if res.Scanned != 5 {
+		t.Errorf("scanned across files = %d, want 5", res.Scanned)
+	}
+}
+
+func mustWrite(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWriteGz(t *testing.T, path, body string) {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, path, buf.String())
 }
 
 func TestTailJournal_AllowlistAndNormalize(t *testing.T) {

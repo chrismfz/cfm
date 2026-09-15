@@ -45,6 +45,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/logscan"
 )
 
 const (
@@ -410,7 +412,7 @@ func WWWTwin(h string) string {
 // single aggregator, tracking per-source evidence. budgetUsed/budgetCap are
 // SHARED across chains (main + bad-request) so "shared line budget across all
 // files" is literal: budgetUsed is incremented EXACTLY ONCE per consumed line,
-// by onLine() alone (single source of truth — scanWholeForIP's private
+// by onLine() alone (single source of truth — logscan.ScanWhole's private
 // countdown is only a protective bound, never accounted again).
 type logChain struct {
 	agg           *hostAgg
@@ -489,7 +491,7 @@ type rotatedSnapshot struct {
 // changed while a scan was running.
 func snapshotRotated(live string) map[string]rotatedSnapshot {
 	out := map[string]rotatedSnapshot{}
-	siblings, _ := rotatedSiblings(live, MaxRotatedFiles)
+	siblings, _ := logscan.RotatedSiblings(live, MaxRotatedFiles)
 	for _, rf := range siblings {
 		if fi, err := os.Stat(rf); err == nil {
 			out[rf] = rotatedSnapshot{path: rf, size: fi.Size(), mod: fi.ModTime()}
@@ -519,7 +521,7 @@ func rotatedGenerationChanged(pre, post map[string]rotatedSnapshot) bool {
 // otherwise unstable — it must not be presented as completed evidence: it gets
 // a files_failed entry AND sets truncated/changed.
 func (lc *logChain) scanSiblings(ctx context.Context, live string, maxFiles int, from int64) {
-	siblings, found := rotatedSiblings(live, maxFiles)
+	siblings, found := logscan.RotatedSiblings(live, maxFiles)
 	if found > len(siblings) {
 		lc.truncated = true // the file cap silently hid older siblings
 	}
@@ -536,8 +538,8 @@ func (lc *logChain) scanSiblings(ctx context.Context, live string, maxFiles int,
 		}
 		lc.files = append(lc.files, rf)
 		remaining := int(lc.budgetCap - *lc.budgetUsed)
-		serr := scanWholeForIP(ctx, rf, &remaining, lc.onLine())
-		if errors.Is(serr, errScanBudgetExceeded) {
+		serr := logscan.ScanWhole(ctx, rf, &remaining, lc.onLine())
+		if errors.Is(serr, logscan.ErrBudgetExceeded) {
 			// The shared budget ran out while THIS file still had unread
 			// lines — including the critical last-sibling case where no loop
 			// iteration would notice afterwards. Not a corrupt file: flag
@@ -550,7 +552,7 @@ func (lc *logChain) scanSiblings(ctx context.Context, live string, maxFiles int,
 		if serr != nil && ctx.Err() == nil {
 			// A corrupt/unreadable sibling must not fail (or silently shorten,
 			// unreported) the whole archival lookup: record it and go on. A
-			// budget stop inside scanWholeForIP returns a nil error, so this
+			// budget stop inside logscan.ScanWhole returns a nil error, so this
 			// only fires for real read/gzip failures.
 			lc.failed = append(lc.failed, HostFileError{
 				File:   rf,
