@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Solver-farm findings now carry a per-IP verified good-bot tag (FCrDNS).** A
+  finding's bounded IP sample (`payload.ips`) gains a sparse `good_bots` {ip: name}
+  companion map naming the sampled addresses that are forward-confirmed crawlers
+  (Googlebot/Bingbot/…) — the fleet fingerprint-reputation store keys a per-IP block
+  EXEMPTION off it, so a real crawler that merely shares a farm's coarse TLS bucket is
+  never swept into a fingerprint-keyed block. Resolved via a CACHE-ONLY pass (cached
+  PTR → the FCrDNS good-bot verdict cache), on its own `solver_farm` good-bot instance
+  (never claiming a challenge exemption or datacenter-count exclusion the finding sink
+  didn't make), so a 128-address farm costs no per-finding DNS storm and a first-seen
+  crawler simply lands on a later finding once its verdict is warm. Only the canonical
+  PTR-suffix map is consulted for now; honouring the operator exclude file's
+  `verify_fcrdns` rules is a follow-up (they live in `internal/detectors`, which
+  `webdetector` can't import, and carry no bot name). Node-authoritative and
+  forward-confirmed, so the central store can trust it (a UA/PTR string is spoofable).
+  Omitted when none — the common case. Shadow-first; nothing enforced on the node.
 - **`cfm_log_tail` can now reach ROTATED + gzipped history, and gained the
   `abuse_shadow` log.** Pass `rotated=N` to also scan the N newest rotated siblings
   (`foo.log.1`, `foo.log.2.gz`, …) newest-first, gz-transparent, for evidence from
