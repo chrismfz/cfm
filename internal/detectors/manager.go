@@ -662,6 +662,23 @@ func (m *manager) maybeReload(parent context.Context) {
 			}
 		}
 
+		// Wire the operator good-bot name resolver (forward-confirmed verify_fcrdns
+		// PTR rules → a block-exemption tag on solver-farm finding IPs). Same rules,
+		// same presence condition as the exclude matcher above.
+		type chalGoodBotSetter interface {
+			SetChalGoodBotFunc(func(string, string, *int) (string, bool))
+		}
+		if gbs, ok := det.(chalGoodBotSetter); ok {
+			if secExclude != nil {
+				ce := secExclude
+				gbs.SetChalGoodBotFunc(func(ip, ptr string, budget *int) (string, bool) {
+					return ce.VerifiedGoodBotName(ip, ptr, budget)
+				})
+			} else {
+				gbs.SetChalGoodBotFunc(nil)
+			}
+		}
+
 		// --- Leniency: optional [section.leniency] companion ---
 		var leniency *leniencyPolicy
 		if lenKV, ok := secs.ByName[secName+".leniency"]; ok {

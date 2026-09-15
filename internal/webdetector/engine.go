@@ -416,6 +416,13 @@ type Engine struct {
 	// Set once at startup via SetChalExcludeFunc (no lock needed).
 	chalExcludeFunc func(ip, host, ua, asn, ptr, rule string) (string, bool)
 
+	// chalGoodBotFunc: resolves an operator `verify_fcrdns=1` PTR rule to a
+	// forward-confirmed good-bot NAME (registrable domain), for the solver-farm
+	// finding good_bots exemption tag. Spoof-proof (only fcrdns ptr rules); the
+	// *int budget bounds forward-confirm DNS across one finding. nil when no
+	// exclude file is loaded. Set once at startup via SetChalGoodBotFunc.
+	chalGoodBotFunc func(ip, ptr string, budget *int) (string, bool)
+
 	mu    sync.RWMutex
 	hosts map[string]*hostState
 
@@ -3640,6 +3647,13 @@ func (e *Engine) SetBypassFunc(fn func(string) bool) {
 // (action, matched).  Must be called before RunOnce.
 func (e *Engine) SetChalExcludeFunc(fn func(ip, host, ua, asn, ptr, rule string) (string, bool)) {
 	e.chalExcludeFunc = fn
+}
+
+// SetChalGoodBotFunc wires the operator-file good-bot name resolver (forward-
+// confirmed verify_fcrdns PTR rules → registrable-domain name), used to tag
+// solver-farm finding IPs as block-exempt crawlers. Must be called before RunOnce.
+func (e *Engine) SetChalGoodBotFunc(fn func(ip, ptr string, budget *int) (string, bool)) {
+	e.chalGoodBotFunc = fn
 }
 
 // isBypassed reports whether ip is in the global IGNORE_IPS / IGNORE_NETS list.

@@ -27,12 +27,17 @@ back-filled here — see the git/PR history for that period.
   PTR → the FCrDNS good-bot verdict cache), on its own `solver_farm` good-bot instance
   (never claiming a challenge exemption or datacenter-count exclusion the finding sink
   didn't make), so a 128-address farm costs no per-finding DNS storm and a first-seen
-  crawler simply lands on a later finding once its verdict is warm. Only the canonical
-  PTR-suffix map is consulted for now; honouring the operator exclude file's
-  `verify_fcrdns` rules is a follow-up (they live in `internal/detectors`, which
-  `webdetector` can't import, and carry no bot name). Node-authoritative and
-  forward-confirmed, so the central store can trust it (a UA/PTR string is spoofable).
-  Omitted when none — the common case. Shadow-first; nothing enforced on the node.
+  crawler simply lands on a later finding once its verdict is warm. Two identity
+  sources: the canonical PTR-suffix map (Googlebot/Bingbot/Meta/Apple/Yandex/Yahoo)
+  AND the operator-curated `webdetector_challenge_exclude.txt` `verify_fcrdns` PTR
+  rules (the list operators already enrich) — the latter via a new engine callback
+  (`SetChalGoodBotFunc` → `ChallengeExclude.VerifiedGoodBotName`, since the file lives
+  in `internal/detectors` which `webdetector` can't import), with a cheap glob
+  pre-filter and a per-finding forward-confirm budget so it adds no DNS storm; the name
+  is the confirmed PTR's registrable domain (e.g. `ahrefs.com`). Only forward-confirmed
+  PTR rules count — a spoofable ua/asn match never earns the exemption. Node-
+  authoritative and forward-confirmed, so the central store can trust it. Omitted when
+  none — the common case. Shadow-first; nothing enforced on the node.
 - **`cfm_log_tail` can now reach ROTATED + gzipped history, and gained the
   `abuse_shadow` log.** Pass `rotated=N` to also scan the N newest rotated siblings
   (`foo.log.1`, `foo.log.2.gz`, …) newest-first, gz-transparent, for evidence from
