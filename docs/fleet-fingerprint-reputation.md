@@ -118,10 +118,15 @@ node   → PERSIST   the challenge_solver_farm FINDING to the durable
                    fingerprint (the resolved group-by fp — cross-host xh_fp
                    preferred over the per-host top_fp), tracks, solves,
                    distinct_ips, distinct_subnets, distinct_countries,
-                   host_share, solves_per_ip, hosts, and ips (a bounded,
+                   host_share, solves_per_ip, hosts, ips (a bounded,
                    fingerprint-ACCURATE sample of the client addresses — the
                    fp's own set, never the vhost's whole solver population, so a
-                   downstream block can't hit an innocent visitor). host is the
+                   downstream block can't hit an innocent visitor), and good_bots
+                   (a sparse {ip: name} subset of ips that are FCrDNS-verified
+                   crawlers — Googlebot/Bingbot/…; the store keys a per-IP block
+                   EXEMPTION off it. Node-authoritative + forward-confirmed, so a
+                   spoofable UA/PTR string can't earn it; omitted when none).
+                   host is the
                    row's host column. distinct_ips/subnets/countries describe the
                    FINGERPRINT's own spread (cross-host: node-wide across the
                    dominated vhosts; per-host: the fp on that vhost) so they always
