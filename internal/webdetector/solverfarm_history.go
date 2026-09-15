@@ -86,43 +86,79 @@ func (e *Engine) RecordSolverFarmFinding(f solverfarm.Finding) {
 	})
 }
 
+// maxFindingFileConfirm bounds the operator-file forward-confirm DNS spent on a
+// single finding. The file layer's confirm is SYNCHRONOUS (like autoblock_sink's
+// reverse-DNS on its detector path), so this is the worst-case blocking budget:
+// only a NON-canonical PTR that glob-matches an operator verify_fcrdns rule reaches
+// a confirm — sparse for a farm, and canonical/guessable suffixes are excluded (the
+// async canonical path owns them), so an attacker can't cheaply burn it. A safety
+// ceiling, not a routine limit.
+const maxFindingFileConfirm = 8
+
 // goodBotsForFinding resolves the sparse {ip: name} good-bot map for a finding's
-// sampled IPs. For each IP it reads a PTR from the enrich cache
-// (LookupCachedOrAsync — never blocks; on a COLD IP it best-effort DISPATCHES an
-// async enrich lookup, bounded by the enricher's own semaphore) and feeds it to
-// solverFarmGoodBot's verdict cache: a cache hit returns the name instantly, and a
-// good-bot-suffix PTR miss kicks a bounded async forward-confirm and returns ""
-// for now. So the pass never blocks and fans out no burst of SYNCHRONOUS DNS,
-// though a fully-cold sample can dispatch up to len(ips) background lookups (the
-// same warming dcfrac does per tick).
+// sampled IPs, from TWO sources:
 //
-// solverFarmGoodBot is this path's OWN verdict cache (the separate-instance
-// principle), so a crawler the edge bridge already verified is unknown here until
-// THIS path confirms it — which needs a warm enrich PTR AND a completed async
-// forward-confirm kicked by an earlier finding. A genuinely first-seen crawler IP
-// is therefore absent from its FIRST finding and tagged on a later one; the fleet
-// store stamps good_bot sticky-positive, so one eventual confirmation is enough.
+//   - the canonical PTR-suffix map, via solverFarmGoodBot's verdict cache: a cached
+//     PTR (LookupCachedOrAsync — never blocks; a COLD IP best-effort DISPATCHES an
+//     async enrich lookup, bounded by the enricher's semaphore) fed to the cache
+//     (hit ⇒ instant; a good-bot-suffix miss kicks a bounded async forward-confirm
+//     and returns "" for now). solverFarmGoodBot is this path's OWN cache (the
+//     separate-instance principle), so a crawler the edge bridge already verified is
+//     unknown here until THIS path confirms it — a first-seen crawler is absent from
+//     its FIRST finding and tagged on a later one; the fleet store stamps good_bot
+//     sticky-positive, so one eventual confirmation is enough.
+//   - the operator exclude file's verify_fcrdns PTR rules, via chalGoodBotFunc (nil
+//     when no file is loaded): a cheap glob pre-filter (no DNS) on the cached PTR,
+//     then a forward-confirm ONLY for a glob candidate, sharing maxFindingFileConfirm
+//     confirms across the whole finding. The name is the confirmed PTR's registrable
+//     domain. This honours the operator's curated good-bot list beyond the canonical
+//     crawlers (the file lives in internal/detectors, reached via the callback since
+//     webdetector can't import it).
 //
-// Only the canonical PTR-suffix map is consulted here; the operator exclude file's
-// fcrdns rules are a follow-up (they live in internal/detectors, which webdetector
-// can't import, and carry no bot name).
+// So a 128-address farm fans out no burst of SYNCHRONOUS DNS: the canonical cache is
+// async, and the file layer blocks only on the sparse glob candidates (≤ the cap).
 func (e *Engine) goodBotsForFinding(ips []string) map[string]string {
 	if e == nil || e.enr == nil {
 		return nil
 	}
-	return goodBotsFor(ips, func(ip string) string { return e.enr.LookupCachedOrAsync(ip).PTR }, solverFarmGoodBot, time.Now())
+	ptrOf := func(ip string) string { return e.enr.LookupCachedOrAsync(ip).PTR }
+	return goodBotsFor(ips, ptrOf, solverFarmGoodBot, e.chalGoodBotFunc, maxFindingFileConfirm, time.Now())
 }
 
-// goodBotsFor is the pure core of goodBotsForFinding (PTR source + verdict cache
-// injected), so the sparse-map assembly is unit-testable without an Enricher or
-// live DNS. ptrOf is called at most once per IP, only on a verdict-cache miss.
-func goodBotsFor(ips []string, ptrOf func(string) string, gb *bridgeGoodBotState, now time.Time) map[string]string {
+// goodBotsFor is the pure core of goodBotsForFinding (PTR source, verdict cache and
+// operator-file matcher injected), so the sparse-map assembly is unit-testable
+// without an Enricher or live DNS. The canonical verdict cache is tried first
+// (async, non-blocking); an IP it doesn't claim is offered to fileFn ONLY when its
+// PTR is not a canonical good-bot suffix — those are the async path's job, and
+// excluding them keeps the file layer's synchronous confirm off guessable suffixes.
+// fileFn shares one fileBudget of forward-confirms across the whole finding, and is
+// nil when no exclude file is loaded. ptrOf is resolved lazily and at most once per
+// IP (a cached-verdict hit never resolves a PTR).
+func goodBotsFor(ips []string, ptrOf func(string) string, gb *bridgeGoodBotState, fileFn func(ip, ptr string, budget *int) (string, bool), fileBudget int, now time.Time) map[string]string {
 	if gb == nil || ptrOf == nil {
 		return nil
 	}
 	var out map[string]string
 	for _, ip := range ips {
-		name := gb.verified(ip, func() string { return ptrOf(ip) }, now)
+		// Resolve the PTR lazily and memoize it: gb.verified calls this only on a
+		// cache miss, and the file layer only when the canonical cache didn't claim
+		// the IP — so a cached-verdict hit costs no PTR lookup at all.
+		var ptr string
+		var resolved bool
+		resolve := func() string {
+			if !resolved {
+				ptr, resolved = ptrOf(ip), true
+			}
+			return ptr
+		}
+		name := gb.verified(ip, resolve, now)
+		if name == "" && fileFn != nil {
+			if p := resolve(); p != "" && !looksLikeGoodBotPTR(p) {
+				if n, ok := fileFn(ip, p, &fileBudget); ok {
+					name = n
+				}
+			}
+		}
 		if name == "" {
 			continue
 		}

@@ -1122,6 +1122,23 @@ func (w *webdetectorWrapped) SetChalExcludeFunc(fn func(string, string, string, 
 	w.eng.SetChalExcludeFunc(fn)
 }
 
+// SetChalGoodBotFunc forwards to the engine (the operator good-bot name resolver
+// for solver-farm finding tags). Like SetChalExcludeFunc, it is a named engine
+// field — NOT promoted through this wrapper — so it must be forwarded explicitly
+// or the manager's interface assertion silently misses and the feature is dead.
+// Called from manager.go via interface assertion.
+func (w *webdetectorWrapped) SetChalGoodBotFunc(fn func(string, string, *int) (string, bool)) {
+	w.eng.SetChalGoodBotFunc(fn)
+}
+
+// Compile-time guard: the manager wires the good-bot resolver via an interface
+// assertion on this wrapper, so dropping the forwarder above would silently disable
+// the feature (a named engine field is not method-promoted). This fails the build
+// instead, mirroring the assertion's shape in manager.go.
+var _ interface {
+	SetChalGoodBotFunc(func(string, string, *int) (string, bool))
+} = (*webdetectorWrapped)(nil)
+
 // resolveChallengeCookieLife resolves the clearance-cookie lifetime exactly as
 // the challenge server ends up using it: [webdetector] CHALLENGE_COOKIE_LIFE
 // when the key is present (CHALLENGE_COOLDOWN as its parse fallback), else the

@@ -233,6 +233,72 @@ func wildcardMatch(pattern, value string) bool {
     return pi == len(pattern)
 }
 
+// VerifiedGoodBotName reports whether ip is a good bot per an operator
+// `verify_fcrdns=1` PTR rule, and derives a display name for it. It considers ONLY
+// rules that carry a ptr pattern AND require forward-confirmation — a ua/asn match
+// is client-spoofable and grants no name here — so the answer is spoof-proof (the
+// name is the registrable domain of the forward-CONFIRMED PTR). ua/asn conditions on
+// such a rule are deliberately NOT required: a forward-confirmed PTR is definitive
+// identity on its own, and this feeds a block EXEMPTION where erring toward "is a
+// good bot" is the safe direction.
+//
+// ptr is the caller-resolved reverse-DNS name (the caller owns the cache; this does
+// no reverse lookup). The forward-confirm depends only on (ip, ptr), so at most ONE
+// is done per call regardless of how many globs match; a glob candidate spends one
+// unit of *budget before it, letting a caller bound total DNS across a batch (nil
+// budget = unbounded). Returns ("", false) when no fcrdns ptr rule confirms.
+func (ce *ChallengeExclude) VerifiedGoodBotName(ip, ptr string, budget *int) (string, bool) {
+    if ce == nil || len(ce.rules) == 0 {
+        return "", false
+    }
+    ptrL := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(ptr, ".")))
+    if ptrL == "" {
+        return "", false
+    }
+    // Cheap glob pre-filter (NO DNS): does ANY verify_fcrdns PTR rule match? Once one
+    // does there is nothing to gain by testing the rest — the confirm is keyed on
+    // (ip, ptr), so overlapping globs must never each re-run the identical lookup.
+    matched := false
+    for _, r := range ce.rules {
+        if r.verifyFcrdns && r.ptr != "" && globMatch(r.ptr, ptrL) {
+            matched = true
+            break
+        }
+    }
+    if !matched {
+        return "", false
+    }
+    // One budgeted forward-confirm for this (ip, ptr).
+    if budget != nil {
+        if *budget <= 0 {
+            return "", false
+        }
+        *budget--
+    }
+    if forwardConfirmPTR(ip, ptrL) {
+        return registrableDomain(ptrL), true
+    }
+    return "", false // matched a glob but failed forward-confirm (spoofed PTR)
+}
+
+// registrableDomain derives a good bot's display NAME from its forward-confirmed PTR
+// host: the last two dotted labels — crawl.ahrefs.com → ahrefs.com,
+// x.y.googlebot.com → googlebot.com. It is a LABEL only (the forward-confirm is what
+// makes the tag trustworthy, not this string), so it is intentionally not
+// public-suffix-aware; a crawler on a multi-label eTLD (rare) yields the eTLD,
+// harmless for display.
+func registrableDomain(host string) string {
+    host = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(host, ".")))
+    if host == "" {
+        return ""
+    }
+    labels := strings.Split(host, ".")
+    if len(labels) <= 2 {
+        return host
+    }
+    return strings.Join(labels[len(labels)-2:], ".")
+}
+
 // forwardConfirmPTR verifies FCrDNS: resolve PTR hostname and ensure it maps back to ip.
 func forwardConfirmPTR(ip, ptrName string) bool {
     ip = strings.TrimSpace(ip)
