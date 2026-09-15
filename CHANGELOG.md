@@ -32,6 +32,33 @@ back-filled here — see the git/PR history for that period.
   vhost auto-challenged by a false-positive burst of legitimate traffic; the
   failure was 100% for any resumed POST on the affected edge, not size/TTL-bound.
   Regression-guarded by `scripts/tests/cfm_post_resume_readbody_test.lua`.
+- **A challenge-cleared POST replay no longer 403s while a vhost is still armed.**
+  Follow-up to the resume fix above. With the replay path live, a resumed POST from
+  a client that had *already solved* the challenge could be hard-blocked
+  (`block_replayed`, 403) whenever the vhost/IP was still challenged, because the
+  clearance gate excluded resumed POSTs (`clearance_allow = clearance_ok and not
+  cfm_resumed_post`) — pushing a cleared replay past the Step 2b clearance fast-path
+  into the block_replayed guard. That turned a legitimate, solved save into a hard
+  failure in exactly the false-positive-burst case the resume mechanism exists for.
+  A resumed POST is now treated **exactly like any cleared client** (`clearance_allow
+  = clearance_ok`): the WAF still runs unconditionally (a block-tier hit blocks, and
+  a challenge-tier hit is risk-downgraded by `post_clearance_action` — high-risk →
+  block, low-risk → logonly), then a clean request fast-paths to origin at Step 2b so
+  the save lands. The `block_replayed` guards now fire only for an **uncleared**
+  replay. This also fixes the twin bridge-`block` and WAF-challenge-tier-FP cases the
+  narrower first cut would have missed.
+
+### Security
+- **A resumed (challenge-replayed) POST is now WAF-body-inspected like any other POST.**
+  The WAF body-read gate keyed on the `Content-Length` request header, which is nil on
+  the bodiless resume-carrier GET (the re-injected body's length lives in the request's
+  `content_length_n`, not that header), so a resumed POST to a non-allowlisted clean-URL
+  route skipped body inspection **entirely** — a solved-challenge client could replay a
+  body-borne payload to such a route with no WAF body scan at all (WordPress/`.php`/
+  `admin-ajax`/`/api/` routes were already covered by the read allowlist). A resumed
+  POST's captured body is now read on the same terms as any POST (still capped at
+  `waf_body_max_len` — this closes the "skipped wholesale" gap, not the shared body
+  window). Guarded by `scripts/tests/cfm_post_resume_clearance_test.lua`.
 
 ## 2026.09.12
 

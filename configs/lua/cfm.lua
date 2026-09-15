@@ -416,6 +416,18 @@ local function waf_should_read_body(uri, method)
   method = lower(method or "")
   if method ~= "post" and method ~= "put" and method ~= "patch" then return false end
 
+  -- A resumed POST (challenge replay, try_apply_post_resume) carries a body we
+  -- captured and re-injected via ngx.req.set_body_data. Its length lives in the
+  -- request's content_length_n, NOT in the $http_content_length HEADER the gate
+  -- below reads — the resume carrier was a bodiless GET, so that header is nil and
+  -- waf_body_gate() would return false on a clean-URL / non-allowlisted route,
+  -- skipping WAF body inspection entirely. The captured body is bounded
+  -- (post_resume_max_len) and already in memory, so inspect it on the SAME terms as
+  -- any other POST (get_req_body_for_waf still caps the scan at waf_body_max_len)
+  -- instead of skipping it wholesale — otherwise a solved-challenge client could
+  -- replay a body-borne payload to a clean-URL route with no body inspection at all.
+  if ngx.ctx.cfm_resumed_post then return true end
+
   local ct = lower(ngx.var.http_content_type or "")
   local cl = tonumber(ngx.var.http_content_length or "")
 
@@ -1232,14 +1244,23 @@ uri    = ngx.var.uri          or uri
 -- cfm_clearance proves the client passed the challenge gate. It does not
 -- prove the payload is safe, so the allow-to-origin is deferred until after
 -- WAF inspection in Step 2. The validation result is captured in
--- `clearance_allow` and `ngx.ctx.cfm_clearance_ok` so downstream steps and
--- the post-clearance WAF challenge converter can see it.
+-- `clearance_allow`, which the post-clearance WAF challenge converter (Step 2)
+-- and the Step 2b clearance fast-path read.
 local clearance_scope = "web"
 local clearance_cookie = ngx.var.cookie_cfm_clearance
 local clearance_ok, clearance_status = validate_clearance_token(clearance_cookie, ip, host, clearance_scope)
 if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
-local clearance_allow = clearance_ok and not ngx.ctx.cfm_resumed_post
-ngx.ctx.cfm_clearance_ok = clearance_allow
+-- A resumed POST (challenge replay) holding valid clearance is treated EXACTLY
+-- like any cleared client: the WAF still runs unconditionally in Step 2 (a solved
+-- challenge never authorises an exploit — a block-tier hit blocks, and
+-- post_clearance_action risk-downgrades a challenge-tier hit: high-risk → block,
+-- low-risk → logonly), then a clean request takes the Step 2b clearance fast-path
+-- so the stashed save lands at origin. Keying on clearance_ok (NOT the former
+-- `and not ngx.ctx.cfm_resumed_post`) is the fix: that exclusion pushed a cleared
+-- replay past Step 2b into the Step 3 block_replayed guard and 403'd the save. The
+-- block_replayed guards (Step 2 challenge branch + Step 3) now fire only for an
+-- UNCLEARED replay — the loop they exist to stop.
+local clearance_allow = clearance_ok
 
 -- ── Step 2: Inline WAF ───────────────────────────────────────────────────────
 -- Runs even when clearance is valid: a solved challenge does not authorise
@@ -1307,13 +1328,15 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- or is a rule-gap signal worth an alert, which is exactly what the scan
       -- is for. (Gated on the routing action, taken after the post-clearance
       -- challenge→block promotion so a promoted block is correctly skipped.)
-      -- A resumed POST that re-hits a CHALLENGE rule is force-blocked below
-      -- (block_replayed) while waf_action is still "challenge", so exclude
-      -- that combination too — otherwise we'd scan a payload we're about to
-      -- 403. The exclusion must stay challenge-only: a resumed POST whose hit
-      -- degraded to logonly on replay (e.g. the original challenge came from
-      -- a burst-window rule that is quiet now while a logonly rule still
-      -- matches) DOES reach origin and must still be scanned.
+      -- An UNCLEARED resumed POST that re-hits a CHALLENGE rule is force-blocked
+      -- below (block_replayed) while waf_action is still "challenge", so exclude
+      -- that combination too — otherwise we'd scan a payload we're about to 403.
+      -- (A CLEARED resumed POST never keeps waf_action=="challenge" here:
+      -- post_clearance_action converts it to logonly/block above.) The exclusion
+      -- must stay challenge-only: a resumed POST whose hit degraded to logonly on
+      -- replay — the post-clearance downgrade, or a burst-window rule that is quiet
+      -- now while a logonly rule still matches — DOES reach origin and must still
+      -- be scanned.
       if clamav_ok and waf_action ~= "block"
          and not (waf_action == "challenge" and ngx.ctx.cfm_resumed_post) then
         -- notify() returns non-nil ONLY when the vhost runs in inline mode and
@@ -1505,6 +1528,10 @@ end
 -- Challenge
 if ip_action == "challenge" or vh_action == "challenge" or rule_action == "challenge" then
   if ngx.ctx.cfm_resumed_post then
+    -- Only an UNCLEARED replay reaches here: a resumed POST that holds valid
+    -- clearance took the Step 2b fast-path to origin (clearance_allow now keys on
+    -- clearance_ok), and a WAF hit exited in Step 2. A replay that is still being
+    -- challenged and holds no clearance is the loop block_replayed exists to stop.
     ngx.header["X-CFM-Action"] = "block_replayed"
     ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
     return ngx.exit(CFG.block_code)
