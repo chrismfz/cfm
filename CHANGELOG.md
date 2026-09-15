@@ -17,6 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **`abuse_shadow` MCP tool now breaks out the per-IP `challenge_score` signal.** The
+  tool already tallied `challenge_score` lines generically in `by_signal`/`by_verdict`;
+  it now emits a dedicated `challenge_score` section: `would_harden` vs `would_deny`
+  counts, distinct IPs and fingerprints, a `by_fp` breakdown (each with a `convicted`
+  flag — a `farmfp>0` line was seen for that fingerprint) and the top offenders by
+  score. This is the ONLY fleet-visible view of the `would_harden` **soft rung**: only
+  the `would_deny` hard rung is persisted to `detection_history` / the fingerprint
+  ledger (throttled to 1 row/hour/IP), so `would_harden` — the large majority of the
+  signal — otherwise lives only in the rotating `cfm.abuse_shadow.log`. Lets a burn-in
+  readout see the soft rung and the per-fingerprint/per-IP structure below the deny
+  cut, and tell a genuinely quiet node (no `challenge_score` key) from one that scored
+  but stayed under `would_deny`. Read-only, log-derived; nothing enforced. See
+  `docs/challenge-score.md` § "Durable capture".
+
 ### Fixed
 - **Challenge POST-resume now actually replays the saved submission (no more lost
   saves behind a challenge).** When an interactive challenge intercepted a POST
@@ -45,8 +60,6 @@ back-filled here — see the git/PR history for that period.
   real traffic** — the log-first prerequisite for a future JA4↔UA coherence tell.
   Pure logging: nothing scores or enforces on it. See `docs/traffic-classifier.md`
   § "The ChallengeV2 rung" and `docs/challenge-score.md` §8.
-
-### Added
 - **WAF triggers now carry the client TLS fingerprint (ledger source #3 groundwork,
   shadow).** Every in-path WAF trigger persisted to `detection_history`
   (`event_type=waf_trigger`) now carries the client's TLS fingerprint **id** in its

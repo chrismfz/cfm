@@ -25,6 +25,16 @@ const (
 	// even parses a malformed ip=…) with a trailing paren.
 	lineDCVerified = `2026-08-21 12:07:00 [abuse-shadow] signal=dc_fraction verified_crawler="googlebot.com" excluded_from_datacenter_count (per-IP FCrDNS; e.g. ip=66.249.73.237)`
 	lineDCDeferred = `2026-08-21 12:07:30 [abuse-shadow] signal=dc_fraction deferred_vhosts=4 reason=ip_enrich_budget`
+
+	// Per-IP challenge_score lines. Verbatim shape from emitChallengeScoreShadow
+	// (internal/webdetector/challenge_score.go): host-less, own verdict space
+	// (would_harden/would_deny), fp="-" when no X-CFM-TLS stamp; plus the store-cap
+	// NOTE line (note=store_cap_reached, dropped=N, verdict=would_shadow).
+	lineCS_deny1 = `2026-08-21 12:08:00 [abuse-shadow] signal=challenge_score ip=203.0.113.10 fp=c28caa00 score=618.2 solves=40 fast=2 uaimp=0 farm=5 farmfp=30 verdict=would_deny`
+	lineCS_deny2 = `2026-08-21 12:08:30 [abuse-shadow] signal=challenge_score ip=203.0.113.10 fp=c28caa00 score=120.0 solves=41 fast=2 uaimp=0 farm=5 farmfp=31 verdict=would_deny`
+	lineCS_hard1 = `2026-08-21 12:09:00 [abuse-shadow] signal=challenge_score ip=203.0.113.11 fp=c28caa00 score=55.0 solves=3 fast=0 uaimp=0 farm=0 farmfp=1 verdict=would_harden`
+	lineCS_hard2 = `2026-08-21 12:09:30 [abuse-shadow] signal=challenge_score ip=203.0.113.12 fp=- score=52.0 solves=2 fast=0 uaimp=1 farm=0 farmfp=0 verdict=would_harden`
+	lineCS_note  = `2026-08-21 12:10:00 [abuse-shadow] signal=challenge_score note=store_cap_reached cap=10000 dropped=7 verdict=would_shadow`
 )
 
 func TestParse(t *testing.T) {
@@ -174,6 +184,91 @@ func TestSummarizePerSignal(t *testing.T) {
 	}
 	if d := s.TopDC[0]; d.DCFrac != 0.950 || d.DCReqs != 570 || d.DCIPs != 19 || d.Hits != 2 {
 		t.Errorf("top_dc[0] = %+v, want dc_frac0.95 dc_reqs570 dc_ips19 hits2 (peak)", d)
+	}
+}
+
+// TestParseChallengeScore locks the per-IP challenge_score line shape: the fp/score/
+// tell keys parse, fp="-" normalizes to empty, and the store-cap note line yields
+// note/dropped without a decision verdict.
+func TestParseChallengeScore(t *testing.T) {
+	e, ok := Parse(lineCS_deny1)
+	if !ok || e.Signal != "challenge_score" {
+		t.Fatalf("challenge_score parse: %+v ok=%v", e, ok)
+	}
+	if e.IP != "203.0.113.10" || e.FP != "c28caa00" || e.Score != 618.2 ||
+		e.Solves != 40 || e.Fast != 2 || e.UAImp != 0 || e.Farm != 5 || e.FarmFP != 30 ||
+		e.Verdict != "would_deny" {
+		t.Errorf("challenge_score fields = %+v", e)
+	}
+	// challenge_score lines carry none of the rate-outlier / vhost keys.
+	if e.Host != "" || e.Ratio != 0 || e.DCFrac != 0 {
+		t.Errorf("challenge_score line must not carry host/ratio/dc keys: %+v", e)
+	}
+	// fp="-" normalizes to empty (no X-CFM-TLS stamp).
+	if h, _ := Parse(lineCS_hard2); h.FP != "" {
+		t.Errorf("fp=- must normalize to empty, got %q", h.FP)
+	}
+	// The store-cap note line carries note + dropped, no decision verdict.
+	n, _ := Parse(lineCS_note)
+	if n.Note != "store_cap_reached" || n.Dropped != 7 {
+		t.Errorf("note line = %+v, want note=store_cap_reached dropped=7", n)
+	}
+}
+
+// TestSummarizeChallengeScore locks the dedicated challenge_score section: the
+// would_harden soft rung is counted (it is invisible to detection_history), the
+// per-fp footprint carries the convicted flag + distinct IPs, top offenders keep the
+// PEAK-score line per IP, and the store-cap note contributes only `dropped`.
+func TestSummarizeChallengeScore(t *testing.T) {
+	s := Summarize([]string{
+		lineCS_deny1, lineCS_deny2, lineCS_hard1, lineCS_hard2, lineCS_note, lineNoise,
+	})
+
+	cs := s.ChallengeScore
+	if cs == nil {
+		t.Fatalf("challenge_score section missing")
+	}
+	if cs.Lines != 4 || cs.WouldHarden != 2 || cs.WouldDeny != 2 {
+		t.Errorf("counts = lines%d harden%d deny%d, want 4/2/2", cs.Lines, cs.WouldHarden, cs.WouldDeny)
+	}
+	if cs.Dropped != 7 {
+		t.Errorf("dropped = %d, want 7 (from the note line, not a decision)", cs.Dropped)
+	}
+	if cs.DistinctIPs != 3 { // .10, .11, .12
+		t.Errorf("distinct_ips = %d, want 3", cs.DistinctIPs)
+	}
+	if cs.DistinctFPs != 1 { // c28caa00 only — the "-" fp is excluded
+		t.Errorf("distinct_fps = %d, want 1", cs.DistinctFPs)
+	}
+	if cs.MaxScore != 618.2 {
+		t.Errorf("max_score = %v, want 618.2", cs.MaxScore)
+	}
+
+	// by_fp: c28caa00 first (3 lines), then (none) (1 line).
+	if len(cs.ByFP) != 2 {
+		t.Fatalf("by_fp = %+v, want 2", cs.ByFP)
+	}
+	if f := cs.ByFP[0]; f.FP != "c28caa00" || f.Lines != 3 || f.DistinctIPs != 2 ||
+		f.WouldHarden != 1 || f.WouldDeny != 2 || f.MaxScore != 618.2 || !f.Convicted {
+		t.Errorf("by_fp[0] = %+v, want c28caa00 lines3 ips2 harden1 deny2 max618.2 convicted", f)
+	}
+	if f := cs.ByFP[1]; f.FP != "(none)" || f.Lines != 1 || f.WouldHarden != 1 || f.Convicted {
+		t.Errorf("by_fp[1] = %+v, want (none) lines1 harden1 not-convicted", f)
+	}
+
+	// top offenders: peak score per IP, ranked desc — .10 keeps 618.2, not the 120.0 re-fire.
+	if len(cs.Top) != 3 {
+		t.Fatalf("top = %+v, want 3", cs.Top)
+	}
+	if o := cs.Top[0]; o.IP != "203.0.113.10" || o.Score != 618.2 || o.Verdict != "would_deny" ||
+		o.FarmFP != 30 || o.Solves != 40 {
+		t.Errorf("top[0] = %+v, want .10 score618.2 deny farmfp30 solves40 (peak line)", o)
+	}
+
+	// A window with no challenge_score line omits the section entirely, so a quiet
+	// node is distinguishable from one that scored but stayed under would_deny.
+	if q := Summarize([]string{lineOutlier1, lineNoise}); q.ChallengeScore != nil {
+		t.Errorf("challenge_score must be nil when the signal never fired, got %+v", q.ChallengeScore)
 	}
 }
 

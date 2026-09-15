@@ -186,6 +186,21 @@ This answers open question #4 in the narrow, cheap way: no new log/schema — th
 the durable + fleet-pullable surface. A dedicated `[cfm_challenge_score]` log/MCP tool
 remains an option if the edge-tell side ever needs its own writer.
 
+**Reading the soft rung (the `abuse_shadow` MCP tool `challenge_score` section).** Because
+only `would_deny` is persisted (and throttled to 1/hr/IP), the `would_harden` rung — which
+is the large majority of the signal (e.g. observed ~2100 harden vs ~30 deny in one node's
+window) — lives *only* in the rotating log and is invisible to `detection_history`/cfm-web.
+The `abuse_shadow` tool now parses the `signal=challenge_score` lines into a dedicated
+`challenge_score` block: `would_harden`/`would_deny` counts, distinct IPs/fingerprints,
+`by_fp` (each with a `convicted` flag = a `farmfp>0` line was seen for it), and top
+offenders by score (`internal/abuseshadow`). That is the fleet-visible view of the soft
+rung and of the per-fingerprint / per-IP structure below the durable deny cut — use it to
+judge whether a "quiet" node truly saw no solver abuse (no `challenge_score` key at all) or
+merely stayed under `would_deny`, and to decide whether the soft rung is clean enough to
+promote (persist `would_harden`, or wire the score into the reputation verdict). It reads
+only the live tail (raise `lines`); older `would_harden` history is in the gzipped rotated
+logs.
+
 ## 9. Open questions (resolve before T-band code)
 
 1. **Deny shape**: 403 vs tarpit vs nft drop (shared with the master plan).
