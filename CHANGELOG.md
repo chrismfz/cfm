@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.16
+
 ### Added
 - **Solver-farm findings now carry a per-IP verified good-bot tag (FCrDNS).** A
   finding's bounded IP sample (`payload.ips`) gains a sparse `good_bots` {ip: name}
