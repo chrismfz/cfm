@@ -137,9 +137,11 @@ already opened.
       ahrefs/…) honoured before anything counts.
 - [ ] **E3 — Phase C minimal + ChallengeV2 Rung 1 with teeth** *(both repos;
       the keystone).*
-      - cfm-web: `/fingerprint-policies/fetch` (mirror `/blocklist/fetch`),
-        the dedicated arm permission, match-time verdict re-validation
-        (checklist already written: `cfm-web:docs/fingerprint-reputation.md` §7).
+      - [x] cfm-web slice 1 — **DONE 2026-09-18**: `GET /api/fingerprint-policies/fetch`
+        (token-authed; serve-time re-validation — `deny` withheld below a farm
+        verdict, `observe` never served), the dedicated `Arm:FingerprintPolicy`
+        permission, `challenge_v2` in the arm vocabulary. As-built:
+        `cfm-web:docs/fingerprint-reputation.md` §7.
       - cfm node: pull armed policies on the blocklist cadence; edge matches
         the handshake fp; actions `challenge` (floor), `challenge_v2` (floor,
         per the 2026-09-12 rung decision), `deny` (farm-unique only, D2).
