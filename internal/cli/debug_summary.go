@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/secretkeys"
 )
 
 // procMapsSummary is a tiny digest of /proc/<pid>/maps suitable for
@@ -76,11 +78,10 @@ func summariseProcMaps(content string) procMapsSummary {
 	return s
 }
 
-// secretKeyRE matches config keys that hold secrets and must be redacted.
-// Match is case-insensitive; we look for whole words containing the
-// listed roots so e.g. "bridge_token", "hmac_secret", "clamd_password",
-// "tls_key_path" are all caught.
-var secretKeyRE = regexp.MustCompile(`(?i)(token|secret|password|hmac|api_?key|private_?key)`)
+// Secret-key detection lives in internal/secretkeys (single source of truth,
+// shared with the read-only MCP detectors_config redactor) so the two paths
+// can't drift on what counts as a secret: e.g. "bridge_token", "hmac_secret",
+// "clamd_password", "api_key" are all caught (a bare "key" root is not).
 
 // configLineRE matches `key = value` (with optional whitespace and
 // surrounding quotes on the value). Comment lines and section headers
@@ -117,7 +118,7 @@ func sanitiseConfig(content string) string {
 			continue
 		}
 		key := m[2]
-		if !secretKeyRE.MatchString(key) {
+		if !secretkeys.IsSecret(key) {
 			b.WriteString(line)
 			b.WriteByte('\n')
 			continue

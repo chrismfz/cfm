@@ -17,7 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **New read-only MCP tool `detectors_config` — the parsed detectors.conf *with
+  values*.** Wraps the existing admin `/api/v1/detectors/config` endpoint (the one
+  behind the cfm-admin config editor) so an MCP client can read the literal
+  configured value of every detector knob — each section's keys map (MODE,
+  DRY_RUN, BLOCK durations, thresholds), the resolved path, `exists`, and
+  `overlay_files`. Closes the gap the drift/status/srcresolve trio left open on a
+  large config: `config_drift` reports presence + stock-vs-live diffs but not the
+  live values, `detectors_status` reports runtime activity, and
+  `detectors_srcresolve` only the source keys — so "did HUMANITY_MIN_OBS land at
+  100?" or "is this family still in dryrun instead of block?" was unanswerable
+  over MCP. Base-file only: overlays under `/etc/cfm/detectors.d/*.conf` are
+  listed by filename (not merged), so cross-check `config_drift` when
+  `overlay_files` is non-empty. Read-only, GET-only, no new endpoint; the data was
+  already admin-visible via the web UI. (Also corrects the MCP.md tool count,
+  which had drifted one behind the registered set: 53 → 55.)
 
 ## 2026.09.16
 
