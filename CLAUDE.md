@@ -363,7 +363,9 @@ nothing on the node keys enforcement on a fingerprint, the `WAFHitEvent` publish
 fingerprint is a **population, not one client** (a legit browser/residential IP shares
 a coarse TLS bucket with a farm). The intended non-`deny` escalation is **ChallengeV2**
 (an interactive, headless-defeating challenge — armable per-fingerprint), **designed,
-not built**. Hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
+not built**. **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
+the ONE roadmap/decision log; the other docs' phase checklists are frozen). Design
+hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
 (central). See also `docs/challenge-score.md`, `docs/roadmaps/challenge-engine.md` §8.1.
 
 ---
@@ -384,7 +386,8 @@ not built**. Hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerpri
 | Web detector history (as-built) | `docs/webdetector-history-design.md` |
 | `what's_wrong` root-cause engine (contract + roadmap) | `docs/whats-wrong-rootcause.md` |
 | Challenge engine design (PoW/solver/TLS-fp) | `docs/roadmaps/challenge-engine.md` |
-| Traffic classifier / fingerprint evidence ledger (node side) — **hub** | `docs/traffic-classifier.md` (node design: evidence grains + actuator ladder + ChallengeV2 rung) · per-IP score `docs/challenge-score.md` · central store in **cfm-web** (`cfm-web:docs/fingerprint-reputation.md`) |
+| Abuse defense (challenge / classifier / fingerprint) — **PLAN OF RECORD** | `docs/abuse-defense-master-plan.md` (the one roadmap + decision log, both repos) |
+| Traffic classifier / fingerprint evidence ledger (node side) — design hub | `docs/traffic-classifier.md` (node design: evidence grains + actuator ladder + ChallengeV2 rung) · per-IP score `docs/challenge-score.md` · central store in **cfm-web** (`cfm-web:docs/fingerprint-reputation.md`) |
 | Web detector abuse-targeting refactor (living) | `docs/webdetector-refactor.md` |
 | Under-Attack Mode (design: escalation state + campaign fingerprinter) | `docs/under-attack-mode.md` |
 | Edge unification & shared Lua (angie/openresty) | `docs/edge-unification-plan.md` |
@@ -403,7 +406,7 @@ not built**. Hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerpri
 `docs/edge-lua-audit-2026-07-08.md` (audit closed) · `docs/waf-analysis-2026-05-08.md` (→ `docs/waf.md`) ·
 `docs/waf-gap-analysis-ninjafirewall.md` (decision record) · `WAF_CVE_PLAN.md` (→ `WAF_CVE.md`) ·
 `docs/webdetector-history-design.md` (as-built → `history_store.go`). Folded away: `Detectors.Leniency.md` → `docs/DETECTORS.md` §6;
-`docs/roadmaps/edge-shared-loaders.md` → `docs/edge-unification-plan.md` §10. Also: `docs/fleet-fingerprint-reputation.md` (idea note → `cfm-web:docs/fingerprint-reputation.md`) · `docs/solver-farm-cross-host-phase2.md`, `docs/solver-farm-fingerprint-concentration.md` (shipped → `docs/traffic-classifier.md`).
+`docs/roadmaps/edge-shared-loaders.md` → `docs/edge-unification-plan.md` §10. Also: `docs/archive/fleet-fingerprint-reputation.md` (idea note → `cfm-web:docs/fingerprint-reputation.md`) · `docs/archive/solver-farm-cross-host-phase2.md`, `docs/archive/solver-farm-fingerprint-concentration.md` (shipped → `docs/traffic-classifier.md`).
 
 ---
 

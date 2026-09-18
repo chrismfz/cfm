@@ -20,8 +20,8 @@
 > node-side prerequisite is spelled out in §5 below: the `challenge_solver_farm`
 > finding must reach the durable `detection_history` so cfm-web can PULL it.
 >
-> Reads first: `docs/solver-farm-fingerprint-concentration.md` (Phase-1, shipped),
-> `docs/solver-farm-cross-host-phase2.md` (Phase-2 design), `docs/challenge-score.md`
+> Reads first: `docs/archive/solver-farm-fingerprint-concentration.md` (Phase-1, shipped),
+> `docs/archive/solver-farm-cross-host-phase2.md` (Phase-2 design), `docs/challenge-score.md`
 > (Track-2 seed the fleet already fuses).
 
 ---

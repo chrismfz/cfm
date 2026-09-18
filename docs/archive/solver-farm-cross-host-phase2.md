@@ -6,7 +6,7 @@
 > archaeology; where this note disagrees with the hubs or the code, they win.
 
 > **Status:** DESIGN NOTE (pre-code). Extends the shipped Phase-1
-> fingerprint-concentration track (`docs/solver-farm-fingerprint-concentration.md`,
+> fingerprint-concentration track (`docs/archive/solver-farm-fingerprint-concentration.md`,
 > `internal/detectors/solverfarm/detector.go`) with a **third** evaluation that
 > catches a farm spread so *thinly per vhost* that the per-`(host, fp)`/60 s
 > country guard structurally misses it — the "known low-rate residue" Phase-1
@@ -307,7 +307,7 @@ score. No enforcement lands from this doc.
 
 ### Grounding references
 
-- Phase-1 (as-built): `docs/solver-farm-fingerprint-concentration.md`,
+- Phase-1 (as-built): `docs/archive/solver-farm-fingerprint-concentration.md`,
   `internal/detectors/solverfarm/detector.go`,
   `internal/detectors/challenge_solver_farm_register.go`.
 - Live capture: `detection_history type=challenge_solved` on titan + orion,

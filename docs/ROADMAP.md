@@ -158,132 +158,27 @@ base conffile stays package-updateable (no more `.rpmnew`), global
 
 ## 9. Traffic classifier (distributed-scraper / challenge-defeat defense)
 
-Mechanism-agnostic per-client + per-vhost classification for scrapers that evade
-UA detection (headless browsers, AI crawlers, faceted-URL floods, solver farms).
-Design: `docs/traffic-classifier.md` (master plan, two tracks → one ladder),
-`docs/challenge-score.md` (Track-2 per-client), `docs/challenge-score-b2.md`
-(B2 as-built). All signals ship **shadow/log-only** first; `logonly → challenge/
-harden → deny`, never straight to deny; never an adverse decision on country/ASN
-alone; NAT-aware.
+**Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18
+consolidation — the ONE roadmap + decision log for the challenge /
+traffic-classifier / fingerprint-reputation effort, both repos). This section
+is deliberately only an index, per the "never keep a second copy of a list
+that can drift" rule.
 
-- **Track-1 vhost-anomaly fusion** — DONE (shadow). Robust-z baseline + fused
-  facet/cost/dc score → `cfm.abuse_shadow.log`; surfaced by `abuse_shadow` MCP +
-  per-vhost webtop pills.
-- **Track-2 Stage 1a — per-IP challenge-abuse score** — DONE (shadow). Daemon-side
-  `challenge_score` from the solve stream (fast/UA-lie/farm tells; NAT-safe).
-- **Track-2 Stage 1b/B1 — Sec-Fetch headless tell** — DONE (shadow). WAF rule 612
-  `WAF_FETCH_METADATA` (logonly); visible in the cfm-admin WAF analytics.
-- **Track-2 Stage 1b/B2 — post-clearance nav-cadence** — DONE (shadow). `cfm_pcw`
-  at `cfm.lua` Step 2b; `[cfm_pcw]` edge-log; config toggle
-  `[webdetector] POST_CLEARANCE_CADENCE`.
-- **Burn-in** — [in flight]. Deploy 1a+B1+B2; watch `abuse_shadow` /
-  `waf_activity rule=WAF_FETCH_METADATA` / `edge_error_tail [cfm_pcw]`; tune the
-  fused-score weights before B3.
-- **Track-2 Stage 1b/B3 — three-grain, fingerprint-anchored seed** — [in flight,
-  shadow]. Grounded 2026-09-11 (fleet read: the fingerprint grain is the hottest /
-  highest-confidence signal, grain-A `rate_outlier`-dominant, grain-B thin), the
-  seed is **anchored on the per-fingerprint reputation** (spine), with per-vhost
-  `abuse_shadow` (posture) and per-IP `challenge_score`/`cookie_discard` (soft)
-  corroborating. Design: `docs/traffic-classifier.md` § "Third grain".
-  **Slice 1 — DONE (shadow):** the daemon marks the CONVICTING fingerprint (twin of
-  the vhost farm mark) and the per-IP `challenge_score` opens on it as the dominant
-  spine tell (`farmfp=` in `cfm.abuse_shadow.log`) — a coarse TLS bucket will light
-  up some legit shared-bucket solvers, which is exactly what shadow measures before
-  any enforcement keys on a fingerprint. Next: the edge seed-map fusing the daemon
-  seed with the B1/B2 edge tells; weights tuned from burn-in.
-- **Track-2 — solver-farm fingerprint-concentration (low-and-slow)** — [shipped,
-  burn-in]. Burn-in surfaced a live challenge-defeating farm (`c28caa00` on
-  `techking.gr`, 2026-09-08): ~50 residential-proxy IPs across ~40 countries under
-  **one** TLS fingerprint, all SOLVING the PoW at ~8/min — under the existing
-  `challenge_solver_farm` subnet-spread bar (`MIN_SUBNETS` 40/60s, calibrated for
-  a ~110/min farm). Phase-1 added a fingerprint-**concentration** track (group-by
-  fp, never a signature; country-spread as the FP-guard) for the per-vhost low-rate
-  regime — shipped default-on/log-only, catching `techking.gr` + 3 more vhosts
-  across 2 nodes ~12 h post-deploy, zero observed collateral. Feeds the
-  `solver_farm` seed B3 budgets. Node hub `docs/traffic-classifier.md` (design note
-  `docs/solver-farm-fingerprint-concentration.md`, superseded).
-- **Track-2 — solver-farm cross-host fingerprint aggregation (Phase 2)** — [shipped,
-  burn-in]. Catches the *second* farm fingerprint (`95070673`) spread too thin per
-  vhost for the Phase-1 60 s country guard (per-host country-peak ≤ 6) yet obvious
-  per node (~23 vhosts / 44 countries). Per-node, per-fingerprint aggregation over
-  `XH_WINDOW` (30m) with a per-vhost dominance pre-gate (`MIN_XH_HOST_SHARE_PCT`,
-  the primary guard); `solves_per_ip` is **evidence only** (the weekday burn-in
-  proved it does not separate farm from legit — dropped as a gate). Shipped
-  default-on, **log-only through its own burn-in**; marks every farmed vhost.
-  Node hub `docs/traffic-classifier.md` (design note
-  `docs/solver-farm-cross-host-phase2.md`, superseded).
-- **Solver-farm convictions → `detection_history`** — [shipped]. Every emitted
-  `challenge_solver_farm` finding now persists as `event_type=solver_farm` with
-  fingerprint-scoped evidence (`countries ≤ subnets ≤ ips`), the node-side prereq
-  that feeds the fleet fingerprint-reputation ingest below.
-- **Fleet fingerprint reputation & observability (cfm-web)** — [A+B shipped, C
-  deferred]. A central `fingerprints` store in `cfm-web` that remembers *convicted*
-  client fingerprints (TLS `c28caa00`/`95070673` + later JA4H) with hard evidence.
-  **Phase A** (ingest + MCP): `SolverFarmIngestor` PULLs the `solver_farm` source
-  via `fleet_ingest_cursors` into durable `fingerprints` + `fingerprint_events`
-  tables; read-only `fingerprints` MCP tool. **Phase B** (dashboard + policy,
-  shadow): Filament reputation table + per-fp drilldown (`ExplainFingerprint`),
-  arm/disarm/action/duration `fingerprint_policies` (durable record + re-armable
-  policy — disarm ≠ delete), and a farming-fingerprints dashboard widget.
-  **Phase C** (edge enforce) — deferred behind an **entry gate**: needs weeks of
-  accumulated shadow data proving the verdict/share gates separate real farms from
-  legit near-FPs, then a cfm-web policy-fetch endpoint + node `X-CFM-TLS` match
-  with match-time re-validation, ≥K-node corroboration before `deny`, and a
-  dedicated arm permission. `challenge` (self-targeting) not `block`; `ALLOW_FPS`
-  override. Design + Phase-C plan: `cfm-web:docs/fingerprint-reputation.md`;
-  cfm-side node hub: `docs/traffic-classifier.md` (idea note
-  `docs/fleet-fingerprint-reputation.md`, superseded).
-- **Webtop visibility for the per-IP / edge-log shadow signals** — [post-burn-in].
-  `challenge_score` (per-IP) and `cfm_pcw` (edge error log) don't map to the
-  existing per-vhost webtop pills or the WAF-history analytics, so they're
-  currently MCP-only (`abuse_shadow` / `edge_error_tail`). Once burn-in confirms
-  the signals are worth keeping, add a webtop pane (per-IP would_harden/would_deny
-  from the shadow log; `cfm_pcw` aggregates). Deferred deliberately — don't build
-  UI for a signal that may be retuned or dropped.
-- **Fingerprint in `suspicious_hosts` / cfm-admin** — [idea]. Surface the
-  convicting fingerprint(s) on the suspicious-vhost rows (and the cfm-admin webtop),
-  so an operator sees "this vhost is being hammered by fingerprint X", not just a
-  vhost + score. The fingerprint marks (B3 slice 1) + the solve stream's `tls_fp`
-  make the SOLVER case ready now; the WAF/scanner case (e.g. the live greek-sites.gr
-  SQLi — one IP, 30+ spoofed UAs, one tool) needs the `tls_fp`-on-WAF **attribution**
-  first (`cfm-web:docs/fingerprint-reputation.md §10`, roadmap #1 there). A natural
-  B3 follow-on.
-- **Durable node-side scoring memory (sqlite)** — [idea]. The per-IP
-  `challenge_score`, fingerprint convictions and abuse-shadow marks are all
-  in-memory today, so a daemon restart/reload resets a farm's accumulated score.
-  A small node-local sqlite store would let the node's OWN live scoring survive a
-  restart. Note the architectural boundary: the *durable reputation* memory lives
-  centrally in cfm-web BY DESIGN (node detects, cfm-web remembers) — this is not a
-  second reputation store, only restart-survival for the node's live scoring state.
-- **Fingerprint evidence ledger (node → UI + cfm-web)** — [track]. Converges the
-  two ideas above (sqlite persistence + fingerprint-in-UI) with roadmap #10
-  (multi-source): make the fingerprint the correlation key and fold every
-  *per-client* signal (`solver_farm`, `challenge_score` tells, `cookie_discard`,
-  WAF-block, challenge-fail) into one per-fingerprint rollup on the node's existing
-  sqlite `detection_history` — surfaced in the cfm-admin UI/TUI ("weird
-  fingerprints + why", clickable) and published to cfm-web as a compact per-fp
-  SUMMARY (same PULL-cursor pattern; you aggregate on the node, never stream the
-  raw firehose). Per-VHOST signals (`dc_fraction`/`facet`/`cost`/`suspicious`) stay
-  CONTEXT, not fp evidence. Makes "decide guilty" one row instead of a
-  cross-reference. Shadow-first. Design: `docs/traffic-classifier.md` §
-  "Fingerprint evidence ledger". Highest-leverage next build after burn-in.
-- **ChallengeV2 — interactive challenge rung** — [track]. The keystone that lets
-  Deny mean "100% guilty": Challenge (PoW) is *solved* by the farm and Deny is
-  dangerous for a coarse TLS bucket, leaving no good action for the "probably
-  guilty but shared/unsure" middle. An **interactive** challenge (genuine pointer/
-  touch/scroll + render, optionally a puzzle) is self-targeting (a real human
-  passes once) AND effective against headless (no real pointer/render), so it
-  absorbs that middle — arm it *instead of* deny on an uncertain shared bucket (zero
-  outage risk), reserving Deny for a farm-UNIQUE fp / confirmed datacenter IP.
-  Armable per-vhost (auto/force, like Challenge) and per-fingerprint
-  (`challenge_v2` in cfm-web `fingerprint_policies`). Stage it: **V2a** invisible
-  interaction proof (accessible, catches today's farm) → **V2b** visible puzzle
-  with an accessible fallback. Self-hosted, edge-local (challenge-waf-release-
-  checklist). After the ledger + burn-in. Design: `docs/traffic-classifier.md` §
-  "The ChallengeV2 rung", `docs/challenge-score.md` §6.
-- **Stage E actuation ladder** — [track]. Shared per-client + per-vhost actuator:
-  PoW-harden / ChallengeV2 puzzle / 403 / tarpit / drop, edge-local (the cleared
-  path skips the in-path decision). Only after burn-in shows a clean would-act set.
+- **State (short):** the evidence pipeline is built and proven — three shadow
+  sources feed cfm-web's durable fingerprint ledger, which has convicted live
+  solver farms (`c28caa00`, `95070673`) with block-safe IP intelligence. The
+  missing piece is the action channel; the master plan's E1–E3 checklist is
+  the only live to-do list (datacenter-member TTL ban → fake-crawler autoblock
+  → Phase C policy fetch + ChallengeV2 Rung 1 with teeth).
+- **Standing decisions** (master plan §4): residential members of a
+  fingerprint are never auto-banned (ChallengeV2 is the residential path);
+  deny on a bare fingerprint only when farm-unique; every shadow burn-in gets
+  an exit contract; sensor freeze until E1–E3 ship.
+- **Design detail:** node side `docs/traffic-classifier.md` (grains, ladder,
+  ChallengeV2 rungs) · per-IP score `docs/challenge-score.md` · central ledger
+  `cfm-web:docs/fingerprint-reputation.md` · under-attack state machine
+  `docs/under-attack-mode.md`. Their embedded phase checklists are frozen and
+  defer to the master plan.
 
 ---
 

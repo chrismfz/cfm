@@ -17,7 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **Abuse-defense docs consolidated under one plan of record**:
+  `docs/abuse-defense-master-plan.md` now carries the single roadmap +
+  decision log for the challenge / traffic-classifier / fingerprint-reputation
+  effort (signal inventory with promote/keep/retire verdicts, the FP doctrine —
+  residential fingerprint members are never auto-banned, ChallengeV2 is the
+  residential path — and the E1–E3 enforcement checklist). The phase checklists
+  embedded in `traffic-classifier.md`, `challenge-score.md`,
+  `under-attack-mode.md` and `webdetector-refactor.md` are frozen with pointer
+  banners; `ROADMAP.md` §9 shrank to an index; the three superseded solver-farm
+  / fleet-fingerprint notes moved to `docs/archive/`. Docs-only (Go changes are
+  comment path updates).
 
 ## 2026.09.18
 

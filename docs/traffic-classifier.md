@@ -1,5 +1,10 @@
 # Traffic classifier — living design notes
 
+> **▶ PLAN OF RECORD: `docs/abuse-defense-master-plan.md`** (2026-09-18). The
+> phase/plan checklists embedded below ("Plan (measure-first)", Phase 0–2) are
+> **FROZEN** — kept as design context, no longer the to-do list. What happens
+> next lives only in the master plan (E1–E3 + standing decisions D1–D4).
+>
 > **⭐ SINGLE SOURCE OF TRUTH (node side).** Canonical node-side entry point for
 > the Traffic Classifier / Fingerprint Reputation work: the fingerprint evidence
 > ledger (node grains: `solver_farm`, `challenge_score`, WAF-hit fp attribution),
@@ -7,8 +12,8 @@
 > live in **cfm-web (`cfm-web:docs/fingerprint-reputation.md`)**. Per-IP score
 > deep-dive: `docs/challenge-score.md`. Everything here is **shadow** — the node
 > emits evidence only; nothing on the node keys enforcement on a fingerprint.
-> Superseded design notes folded into this hub: `docs/solver-farm-cross-host-phase2.md`,
-> `docs/solver-farm-fingerprint-concentration.md`, `docs/fleet-fingerprint-reputation.md`.
+> Superseded design notes folded into this hub: `docs/archive/solver-farm-cross-host-phase2.md`,
+> `docs/archive/solver-farm-fingerprint-concentration.md`, `docs/archive/fleet-fingerprint-reputation.md`.
 
 > **Status:** WORKING NOTES (not a frozen spec). Accumulating the Phase-0 audit
 > and a grounded design before we commit to weights/actions. Authorised to live
