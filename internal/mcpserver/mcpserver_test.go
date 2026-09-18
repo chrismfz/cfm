@@ -731,6 +731,38 @@ func TestDetectorsConfigDispatches(t *testing.T) {
 	}
 }
 
+func TestDetectorsConfigMergedDispatches(t *testing.T) {
+	fd := &fakeDispatch{body: []byte(`{"merged":true,"config":{"global":{},"core":[],"leniency":[],"advanced":[{"name":"webdetector","kind":"advanced","enabled":true,"keys":{"HUMANITY_MIN_OBS":"100","CHALLENGE_TOKEN":"SECRET_LIVE_VALUE"}}]},"path":"/etc/cfm/detectors.conf","exists":true,"overlay_files":["20-tuning.conf"],"overrides":[{"section":"webdetector","key":"HUMANITY_MIN_OBS","in_base":true,"base":"500","effective":"100","source":"20-tuning.conf"},{"section":"webdetector","key":"CHALLENGE_TOKEN","in_base":true,"base":"OLD_SECRET_BASE","effective":"NEW_SECRET_OVERLAY","source":"20-tuning.conf"}]}`)}
+	ts := newTestServer(t, fd)
+	_, body := mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"detectors_config","arguments":{"merged":true}}}`)
+	if fd.lastPath != "/api/v1/detectors/config" || fd.lastQuery.Get("view") != "merged" {
+		t.Errorf("merged dispatch path=%q view=%q, want …/detectors/config view=merged", fd.lastPath, fd.lastQuery.Get("view"))
+	}
+	text := toolText(t, body)
+
+	// Secrets in the merged config AND in the overrides (base + effective) must
+	// all be gone.
+	for _, secret := range []string{"SECRET_LIVE_VALUE", "OLD_SECRET_BASE", "NEW_SECRET_OVERLAY"} {
+		if strings.Contains(text, secret) {
+			t.Errorf("merged detectors_config LEAKED secret %q: %s", secret, text)
+		}
+	}
+	// The non-secret override survives with its provenance.
+	for _, want := range []string{`"effective": "100"`, `"base": "500"`, `"source": "20-tuning.conf"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("merged override dropped %q: %s", want, text)
+		}
+	}
+	// Merged note + redacted secret key present.
+	if !strings.Contains(text, "EFFECTIVE config the daemon runs") {
+		t.Errorf("merged note missing: %s", text)
+	}
+	if !strings.Contains(text, `"CHALLENGE_TOKEN"`) {
+		t.Errorf("redacted_keys should list CHALLENGE_TOKEN: %s", text)
+	}
+}
+
 func TestNetfilterPathDispatchesFilters(t *testing.T) {
 	fd := &fakeDispatch{body: []byte(`{"ok":true,"status":"warning","chains":[]}`)}
 	ts := newTestServer(t, fd)

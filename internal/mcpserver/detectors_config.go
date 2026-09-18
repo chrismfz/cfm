@@ -7,6 +7,15 @@ package mcpserver
 // diffs but not the live values, detectors_status reports runtime activity, and
 // detectors_srcresolve reports only the source-relevant keys.
 //
+// Two modes:
+//   - default: the BASE /etc/cfm/detectors.conf (what the editor edits), with
+//     overlay files listed by name.
+//   - merged=true (?view=merged): the EFFECTIVE config the daemon runs — the base
+//     with every /etc/cfm/detectors.d/*.conf overlay merged over it — plus
+//     `overrides`, the per-key delta the overlays introduced (base value,
+//     effective value, and which overlay file won each). Answers "which value
+//     actually wins, and where does it come from?" in one call.
+//
 // SECURITY — why this tool is NOT a plain dispatchJSON passthrough:
 // /api/v1/detectors/config is admin-only and backs the cfm-admin config editor,
 // so it returns detectors.conf VERBATIM — including the two live secrets that
@@ -20,9 +29,9 @@ package mcpserver
 //       re-emitted; and
 //   (2) redacts the value of any key whose NAME looks like a secret
 //       (secretkeys.IsSecret — shared with the CLI debug-bundle sanitiser so the
-//       two can't drift), keeping a small allowlist for the one known non-secret
-//       false positive (the TOKEN_IP auth-burst threshold), which operators do
-//       want to audit here.
+//       two can't drift), in the config maps AND in the merged `overrides`,
+//       keeping a small allowlist for the one known non-secret false positive
+//       (the TOKEN_IP auth-burst threshold), which operators do want to audit.
 // It fails CLOSED: a non-2xx response or a body that will not parse returns an
 // error, never the raw bytes.
 
@@ -30,6 +39,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -57,22 +67,45 @@ type dcConfig struct {
 	Advanced []dcSection       `json:"advanced"`
 }
 
+// dcOverride mirrors detectorscfg.Override (merged mode only).
+type dcOverride struct {
+	Section   string `json:"section"`
+	Key       string `json:"key"`
+	InBase    bool   `json:"in_base"`
+	Base      string `json:"base,omitempty"`
+	Effective string `json:"effective"`
+	Source    string `json:"source"`
+	Append    bool   `json:"append,omitempty"`
+}
+
 type dcResponse struct {
-	Config       dcConfig `json:"config"`
-	Path         string   `json:"path"`
-	Exists       bool     `json:"exists"`
-	OverlayFiles []string `json:"overlay_files"`
-	RedactedKeys []string `json:"redacted_keys,omitempty"`
-	Note         string   `json:"note"`
+	Merged       bool         `json:"merged,omitempty"`
+	Config       dcConfig     `json:"config"`
+	Path         string       `json:"path"`
+	Exists       bool         `json:"exists"`
+	OverlayFiles []string     `json:"overlay_files"`
+	Overrides    []dcOverride `json:"overrides,omitempty"`
+	RedactedKeys []string     `json:"redacted_keys,omitempty"`
+	Note         string       `json:"note"`
+}
+
+type detectorsConfigInput struct {
+	Merged bool `json:"merged,omitempty" jsonschema:"when true, return the EFFECTIVE config (base + detectors.d overlays merged) plus per-key overrides (which overlay file set each value); default false returns the base file with overlays listed by name only"`
 }
 
 const dcRedactSentinel = "[redacted]"
 
-const dcNote = "Values are the BASE /etc/cfm/detectors.conf (what the editor edits); " +
+const dcNoteBase = "Values are the BASE /etc/cfm/detectors.conf (what the editor edits); " +
 	"overlay files under /etc/cfm/detectors.d/ are listed by name in overlay_files " +
-	"but their overriding values are NOT merged here — cross-check config_drift. " +
-	"Secret-valued keys (e.g. CHALLENGE_TOKEN, OPENRESTY_TOKEN) are shown as " +
-	"\"[redacted]\"; their presence still confirms they are set."
+	"but their overriding values are NOT merged here — call again with merged=true " +
+	"for the effective view. Secret-valued keys (e.g. CHALLENGE_TOKEN, OPENRESTY_TOKEN) " +
+	"are shown as \"[redacted]\"; their presence still confirms they are set."
+
+const dcNoteMerged = "Values are the EFFECTIVE config the daemon runs: the base " +
+	"/etc/cfm/detectors.conf with every /etc/cfm/detectors.d/*.conf overlay merged over it. " +
+	"overrides lists the per-key delta the overlays introduced (base vs effective, and the " +
+	"source overlay file that won each). Secret-valued keys (e.g. CHALLENGE_TOKEN, " +
+	"OPENRESTY_TOKEN) are shown as \"[redacted]\"."
 
 // dcShowAnyway keeps a secret-name-shaped key visible because it is a known
 // non-secret an operator wants to audit here. Compared upper-cased.
@@ -80,17 +113,22 @@ var dcShowAnyway = map[string]bool{
 	"TOKEN_IP": true, // auth-burst threshold count, not a credential
 }
 
+// dcRedactKey reports whether a config key's VALUE must be redacted.
+func dcRedactKey(key string) bool {
+	if dcShowAnyway[strings.ToUpper(strings.TrimSpace(key))] {
+		return false
+	}
+	return secretkeys.IsSecret(key)
+}
+
 // redactSecretMap redacts secret-valued keys in a section/global keys map in
-// place and appends the redacted key names to acc.
+// place and records the redacted key names in acc.
 func redactSecretMap(keys map[string]string, acc map[string]bool) {
 	for k, v := range keys {
 		if v == "" {
 			continue
 		}
-		if dcShowAnyway[strings.ToUpper(strings.TrimSpace(k))] {
-			continue
-		}
-		if secretkeys.IsSecret(k) {
+		if dcRedactKey(k) {
 			keys[k] = dcRedactSentinel
 			acc[k] = true
 		}
@@ -101,10 +139,14 @@ func registerDetectorsConfig(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "detectors_config",
-		Description: "The parsed detectors.conf for this node WITH VALUES — the 'what is every knob actually set to?' read. Returns config.global plus config.core / config.leniency / config.advanced (each section: name, kind, enabled, and a keys map of the literal configured VALUES — MODE, DRY_RUN, BLOCK durations, thresholds like a challenge_cookie_discard MIN_SOLVES or a solver-farm HUMANITY_MIN_OBS/MINORITY_PCT), the resolved file path, exists, and overlay_files. Use it to confirm an exact value ('did HUMANITY_MIN_OBS land at 100?'), and to catch a knob left in monitor/observe/dryrun instead of block/enforce across a config that has grown large — neither config_drift (presence + stock-vs-live diffs, no live values) nor detectors_status (runtime activity) nor detectors_srcresolve (source keys only) can show this. Secret-valued keys (CHALLENGE_TOKEN, OPENRESTY_TOKEN, anything secret-name-shaped) are returned as \"[redacted]\" — their presence still confirms they are set; redacted_keys lists them. Caveat — BASE FILE ONLY: the values are the base /etc/cfm/detectors.conf (what the editor edits); overlays under /etc/cfm/detectors.d/*.conf are listed by name in overlay_files but their overriding values are NOT merged in here, so when overlay_files is non-empty a knob may be overridden by an overlay — cross-check with config_drift (which reads overlay section/key presence) and, for what actually took effect, the behavioural reads (detectors_status, detection_history, challenge_events). Pairs with config_drift (missing shipped features), detector_coverage (daemon-vs-detector gaps) and detectors_srcresolve (log-source resolution).",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
+		Description: "The parsed detectors.conf for this node WITH VALUES — the 'what is every knob actually set to?' read. Returns config.global plus config.core / config.leniency / config.advanced (each section: name, kind, enabled, and a keys map of the literal configured VALUES — MODE, DRY_RUN, BLOCK durations, thresholds like a challenge_cookie_discard MIN_SOLVES or a solver-farm HUMANITY_MIN_OBS/MINORITY_PCT), the resolved file path, exists, and overlay_files. Use it to confirm an exact value ('did HUMANITY_MIN_OBS land at 100?') and to catch a knob left in monitor/observe/dryrun instead of block/enforce across a config that has grown large — neither config_drift (presence + stock-vs-live diffs, no live values) nor detectors_status (runtime activity) nor detectors_srcresolve (source keys only) can show this. Pass merged=true for the EFFECTIVE view the daemon runs: the base file with every /etc/cfm/detectors.d/*.conf overlay merged over it, PLUS overrides — the per-key delta the overlays introduced (base value, effective value, and which overlay file set each). That answers 'which value actually wins, and where does it come from?' in one call; the default (merged=false) returns the base file with overlays listed by name only. Secret-valued keys (CHALLENGE_TOKEN, OPENRESTY_TOKEN, anything secret-name-shaped) are returned as \"[redacted]\" in both the config and overrides — their presence still confirms they are set; redacted_keys lists them. Pairs with config_drift (missing shipped features), detector_coverage (daemon-vs-detector gaps) and detectors_srcresolve (log-source resolution).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in detectorsConfigInput) (*mcp.CallToolResult, any, error) {
 		const path = "/api/v1/detectors/config"
-		status, body, err := d.Dispatch(ctx, path, nil)
+		var q url.Values
+		if in.Merged {
+			q = url.Values{"view": {"merged"}}
+		}
+		status, body, err := d.Dispatch(ctx, path, q)
 		if err != nil {
 			return nil, nil, fmt.Errorf("dispatch %s: %w", path, err)
 		}
@@ -114,8 +156,7 @@ func registerDetectorsConfig(srv *mcp.Server, d Deps) {
 		// Fail CLOSED: if the body will not parse into the whitelist shape we
 		// cannot prove it is secret-free, so never fall back to raw bytes.
 		var resp dcResponse
-		dec := json.NewDecoder(strings.NewReader(string(body)))
-		if err := dec.Decode(&resp); err != nil {
+		if err := json.Unmarshal(body, &resp); err != nil {
 			return nil, nil, fmt.Errorf("%s: parse for redaction failed: %w", path, err)
 		}
 		redacted := map[string]bool{}
@@ -125,6 +166,15 @@ func registerDetectorsConfig(srv *mcp.Server, d Deps) {
 				redactSecretMap(group[i].Keys, redacted)
 			}
 		}
+		for i := range resp.Overrides {
+			if dcRedactKey(resp.Overrides[i].Key) {
+				if resp.Overrides[i].Base != "" {
+					resp.Overrides[i].Base = dcRedactSentinel
+				}
+				resp.Overrides[i].Effective = dcRedactSentinel
+				redacted[resp.Overrides[i].Key] = true
+			}
+		}
 		if len(redacted) > 0 {
 			resp.RedactedKeys = make([]string, 0, len(redacted))
 			for k := range redacted {
@@ -132,7 +182,11 @@ func registerDetectorsConfig(srv *mcp.Server, d Deps) {
 			}
 			sort.Strings(resp.RedactedKeys)
 		}
-		resp.Note = dcNote
+		if in.Merged {
+			resp.Note = dcNoteMerged
+		} else {
+			resp.Note = dcNoteBase
+		}
 		out, err := marshal(resp)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s: marshal failed: %w", path, err)

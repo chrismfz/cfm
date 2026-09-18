@@ -115,6 +115,24 @@ func RegisterDetectorsEndpoints(m *http.ServeMux, cfgDir string) {
 func handleDetectorsConfig(w http.ResponseWriter, r *http.Request, cfgDir string) {
 	switch r.Method {
 	case http.MethodGet:
+		// ?view=merged returns the EFFECTIVE config: the base file with every
+		// /etc/cfm/detectors.d/*.conf overlay merged over it (the same layered
+		// reader the manager runs), plus the per-key `overrides` the overlays
+		// introduced (which file set each, base-vs-effective). No raw_lines/
+		// examples — a merge has no single line fidelity. Default (no view) keeps
+		// returning the BASE file the editor edits. Both are admin-only, read-only.
+		if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), "merged") {
+			m, err := detectorscfg.LoadMergedAdminConfig(cfgDir)
+			if err != nil {
+				writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			writeNotifierJSON(w, http.StatusOK, map[string]any{
+				"merged": true, "config": m.Config, "path": m.Path,
+				"exists": m.Exists, "overlay_files": m.OverlayFiles, "overrides": m.Overrides,
+			})
+			return
+		}
 		cfg, path, err := detectorscfg.LoadAdminConfig(cfgDir)
 		if err != nil {
 			writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})

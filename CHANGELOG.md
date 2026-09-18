@@ -19,20 +19,27 @@ back-filled here — see the git/PR history for that period.
 
 ### Added
 - **New read-only MCP tool `detectors_config` — the parsed detectors.conf *with
-  values*.** Wraps the existing admin `/api/v1/detectors/config` endpoint (the one
-  behind the cfm-admin config editor) so an MCP client can read the literal
-  configured value of every detector knob — each section's keys map (MODE,
-  DRY_RUN, BLOCK durations, thresholds), the resolved path, `exists`, and
+  values*, base and effective.** Wraps the existing admin `/api/v1/detectors/config`
+  endpoint (the one behind the cfm-admin config editor) so an MCP client can read
+  the literal configured value of every detector knob — each section's keys map
+  (MODE, DRY_RUN, BLOCK durations, thresholds), the resolved path, `exists`, and
   `overlay_files`. Closes the gap the drift/status/srcresolve trio left open on a
   large config: `config_drift` reports presence + stock-vs-live diffs but not the
   live values, `detectors_status` reports runtime activity, and
   `detectors_srcresolve` only the source keys — so "did HUMANITY_MIN_OBS land at
   100?" or "is this family still in dryrun instead of block?" was unanswerable
-  over MCP. Base-file only: overlays under `/etc/cfm/detectors.d/*.conf` are
-  listed by filename (not merged), so cross-check `config_drift` when
-  `overlay_files` is non-empty. Read-only, GET-only, no new endpoint; the data was
-  already admin-visible via the web UI. (Also corrects the MCP.md tool count,
-  which had drifted one behind the registered set: 53 → 55.)
+  over MCP. With **`merged=true`** it returns the EFFECTIVE view — the base file
+  with every `/etc/cfm/detectors.d/*.conf` overlay merged over it (the manager's
+  own `detconf.ReadLayered`) — plus `overrides`, the per-key delta the overlays
+  introduced (base value, effective value, and which overlay file won each), so
+  "which value actually wins, and where does it come from?" is answerable in one
+  call (new read-only endpoint mode `?view=merged`, `detectorscfg.LoadMergedAdminConfig`).
+  Secret-valued keys in detectors.conf (`CHALLENGE_TOKEN`, `OPENRESTY_TOKEN`, any
+  secret-name-shaped key) are returned as `[redacted]` in both the config and the
+  overrides — via a new shared `internal/secretkeys` matcher (also adopted by the
+  `cfm debug` bundle sanitiser), keeping "an MCP leak is not an admin leak". Read-
+  only, GET-only. (Also corrects the MCP.md tool count, which had drifted one
+  behind the registered set: 53 → 55.)
 
 ## 2026.09.16
 
