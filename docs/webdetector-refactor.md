@@ -1,6 +1,12 @@
 # Web-detector refactor — smarter, targeted abuse detection
 
-**Status: LIVING HANDOFF DOC.** This is the anchor for a multi-PR effort to make
+> **▶ HISTORICAL CONTEXT — plan of record is `docs/abuse-defense-master-plan.md`**
+> (2026-09-18). This doc's increments I0–I3 shipped as the `abuse_shadow`
+> signals; I4–I7 were never built and are superseded by the master plan
+> (Signal B/D sit in its backlog). Kept for the FP minefield analysis (§4/§4a)
+> and the two-abuse-classes evidence (§4b), which remain correct.
+
+**Status: HISTORICAL HANDOFF DOC (was: living).** This is the anchor for a multi-PR effort to make
 CFM's challenge engine catch abuse it currently misses, and to challenge the
 *abuser* rather than the *whole vhost*. It captures the why, the how, what we
 already do (and why it isn't enough), the false-positive minefield, the

@@ -34,7 +34,7 @@ func newSolverFarmGoodBot() *bridgeGoodBotState {
 // internal/detectors/webdetector_register.go; mirrors RecordClamScanEvent /
 // RecordHardwareECCEvent (the detector package publishes, this subscribes).
 //
-// The Payload keys are the ingest CONTRACT (docs/fleet-fingerprint-reputation.md
+// The Payload keys are the ingest CONTRACT (docs/archive/fleet-fingerprint-reputation.md
 // §5 → cfm-web:docs/fingerprint-reputation.md): keep them stable. `fingerprint`
 // is the GROUP-BY key that flagged the vhost (empty for a subnet-spread-only
 // finding), never a matched signature; `solves_per_ip` is evidence, not a gate.

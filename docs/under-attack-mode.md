@@ -1,5 +1,10 @@
 # Under-Attack Mode — per-vhost escalation state (design)
 
+> **▶ PLAN OF RECORD: `docs/abuse-defense-master-plan.md`** (2026-09-18). The
+> increment ladder below is **FROZEN** at I1/I2: I1 stays as the alarm; the I2
+> fingerprinter is frozen and I3–I5 are superseded by the master plan's E1–E3
+> enforcement path (revisit only if the draft-rule idea is picked up again).
+
 **Status: I0 shipped; I1 (detector + state + notify, detect-only) landed —
 surfacing (I1b) + the RT-baseline clause (§3 leg 3) still open.** Siblings:
 `docs/webdetector-refactor.md` (entity signals), `docs/roadmaps/challenge-engine.md`

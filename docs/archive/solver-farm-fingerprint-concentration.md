@@ -196,7 +196,7 @@ the fingerprint is unmistakably a farm **per node** (23 vhosts, 41 countries,
 ~1.05 solves/IP, 83–100 % of each targeted vhost's solves on the 2026-09-09
 capture). Catching that regime needs a **cross-host, per-fingerprint**
 aggregation with a per-vhost dominance + `solves_per_ip` pre-gate — designed in
-`docs/solver-farm-cross-host-phase2.md`. The first cut catches the aggressive,
+`docs/archive/solver-farm-cross-host-phase2.md`. The first cut catches the aggressive,
 single-vhost-heavy farm (`c28caa00` on its main targets) cleanly; the thin
 cross-host farm is a documented follow-up, not a reason to hold the first shadow
 deploy.

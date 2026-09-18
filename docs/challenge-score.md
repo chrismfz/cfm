@@ -1,5 +1,10 @@
 # Challenge-abuse score (per-client) — design notes
 
+> **▶ PLAN OF RECORD: `docs/abuse-defense-master-plan.md`** (2026-09-18). The
+> phased plan in §10 below is **FROZEN** as design context; next steps (the
+> B3 seed map, T-band enforcement, ChallengeV2 Rung 1) are sequenced only by
+> the master plan's E3.
+>
 > **Status:** WORKING NOTES (design, pre-code). The per-client half of the
 > traffic-classifier convergence — **Track 2**. Targets the *challenge-defeat*
 > problem (headless browsers that SOLVE the challenge), which is structurally

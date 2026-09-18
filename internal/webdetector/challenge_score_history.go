@@ -19,7 +19,7 @@ import (
 //   - a per-IP hourly throttle (chalScorePersistEvery, applied via persistDue) caps a
 //     sustained denier at ≤24 rows/day — the log keeps the fine-grained detail.
 //
-// The Payload keys are the ingest CONTRACT (docs/fleet-fingerprint-reputation.md §5 →
+// The Payload keys are the ingest CONTRACT (docs/archive/fleet-fingerprint-reputation.md §5 →
 // cfm-web:docs/fingerprint-reputation.md): keep them stable. `fingerprint` is the
 // anchoring TLS fp (the GROUP-BY spine — the convicted solver-farm fp when one drove
 // the score, else the fp present on the scored solves, "" when no X-CFM-TLS stamp);
