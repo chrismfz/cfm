@@ -116,8 +116,17 @@ already opened.
       guards (datacenter-only per D1, TTL'd via the fleet blacklist, good_bot
       exempt, critical-infra refused, never-downgrade). Ships operator-clicked
       first; a scheduled auto-run for `verdict=farm` is a separate opt-in PR
-      after the click flow proves clean. Today this takes ~4,000 member IPs of
-      the live farm out of the fight fleet-wide with zero residential risk.
+      after the click flow proves clean. **What E1 buys, honestly:** the
+      datacenter members are only ~11% of the captured footprint (~4,100 of
+      ~36,200 on `c28caa00`) — but they are the *stable, reused* part of the
+      farm's supply (EGIHOSTING/HostRoyale/Datacamp exits recur; the WAF side
+      shows repeat use), so a TTL ban there is durable damage. The rotating
+      residential ~85% is unbannable *by nature*, not just by policy
+      (`solves_per_ip = 1`: each exit is burned once and discarded — a ban
+      lands after the farm has already moved on). That majority is E3's job:
+      the per-request fingerprint match + ChallengeV2 catches every fresh
+      residential exit on first contact with no standing ban and no
+      reassignment collateral.
 - [ ] **E2 — Fake-crawler autoblock** *(cfm daemon-side).* A UA claiming a
       known crawler family (Googlebot/Bingbot/Applebot/ClaudeBot/GPTBot/
       Perplexity/Meta/…) whose IP fails FCrDNS verification is a
