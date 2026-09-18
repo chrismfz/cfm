@@ -190,7 +190,7 @@ func TestBearerGateAcceptsAdminTokenAndListsTools(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("admin /mcp tools/list: status = %d, body %s", res.StatusCode, body)
 	}
-	for _, want := range []string{"security_overview", "waf_activity", "challenge_vhosts", "suspicious_hosts", "firewall_blocks", "netfilter_path", "detectors_status", "system_health"} {
+	for _, want := range []string{"security_overview", "waf_activity", "challenge_vhosts", "suspicious_hosts", "firewall_blocks", "netfilter_path", "detectors_status", "detectors_config", "system_health"} {
 		if !strings.Contains(body, `"`+want+`"`) {
 			t.Errorf("tools/list missing %q: %s", want, body)
 		}
@@ -689,6 +689,77 @@ func TestFirewallSelfTestDispatches(t *testing.T) {
 	}
 	if !strings.Contains(body, "nftlib") {
 		t.Errorf("firewall_selftest result missing payload: %s", body)
+	}
+}
+
+func TestDetectorsConfigDispatches(t *testing.T) {
+	fd := &fakeDispatch{body: []byte(`{"config":{"global":{},"core":[{"name":"challenge_cookie_discard","kind":"core","enabled":true,"keys":{"MIN_SOLVES":"3","BLOCK":"24h"},"raw_lines":["MIN_SOLVES = 3"]},{"name":"ssh","kind":"core","enabled":true,"keys":{"TOKEN_IP":"10"}}],"advanced":[{"name":"webdetector","kind":"advanced","enabled":true,"keys":{"HUMANITY_MIN_OBS":"100","CHALLENGE_TOKEN":"SUPERSECRET_HMAC_abc123","OPENRESTY_TOKEN":"SOCKET_BEARER_xyz789"},"raw_lines":["CHALLENGE_TOKEN = SUPERSECRET_HMAC_abc123","OPENRESTY_TOKEN = SOCKET_BEARER_xyz789"]}],"examples":[{"id":"ex1","title":"t","section":"webdetector","kind":"advanced","preview":"CHALLENGE_TOKEN = SUPERSECRET_HMAC_abc123","keys":{"CHALLENGE_TOKEN":"SUPERSECRET_HMAC_abc123"}}]},"path":"/etc/cfm/detectors.conf","exists":true,"overlay_files":["/etc/cfm/detectors.d/local.conf"]}`)}
+	ts := newTestServer(t, fd)
+	_, body := mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"detectors_config","arguments":{}}}`)
+	if fd.lastPath != "/api/v1/detectors/config" {
+		t.Errorf("detectors_config dispatched to %q, want /api/v1/detectors/config", fd.lastPath)
+	}
+	// The envelope wraps the tool JSON as an escaped text string; decode it so we
+	// can assert on the real, unescaped tool output.
+	text := toolText(t, body)
+
+	// Secret values must never appear — not from the keys map, not from raw_lines,
+	// not from examples (all three carried the secret in the fake response).
+	for _, secret := range []string{"SUPERSECRET_HMAC_abc123", "SOCKET_BEARER_xyz789"} {
+		if strings.Contains(text, secret) {
+			t.Errorf("detectors_config LEAKED secret %q: %s", secret, text)
+		}
+	}
+	// raw_lines / examples must be structurally dropped.
+	if strings.Contains(text, "raw_lines") || strings.Contains(text, "examples") {
+		t.Errorf("detectors_config re-emitted raw_lines/examples: %s", text)
+	}
+	// Non-secret values (incl. thresholds) preserved.
+	for _, want := range []string{`"MIN_SOLVES": "3"`, `"HUMANITY_MIN_OBS": "100"`, `"TOKEN_IP": "10"`, `"overlay_files"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("detectors_config dropped %q: %s", want, text)
+		}
+	}
+	// Secret keys are still listed (presence confirmed) as the sentinel.
+	if !strings.Contains(text, `"CHALLENGE_TOKEN": "[redacted]"`) || !strings.Contains(text, `"OPENRESTY_TOKEN": "[redacted]"`) {
+		t.Errorf("detectors_config did not redact secret keys to sentinel: %s", text)
+	}
+	// redacted_keys names exactly the two secrets, not the TOKEN_IP threshold.
+	if !strings.Contains(text, `"CHALLENGE_TOKEN"`) || !strings.Contains(text, `"OPENRESTY_TOKEN"`) {
+		t.Errorf("detectors_config redacted_keys incomplete: %s", text)
+	}
+}
+
+func TestDetectorsConfigMergedDispatches(t *testing.T) {
+	fd := &fakeDispatch{body: []byte(`{"merged":true,"config":{"global":{},"core":[],"leniency":[],"advanced":[{"name":"webdetector","kind":"advanced","enabled":true,"keys":{"HUMANITY_MIN_OBS":"100","CHALLENGE_TOKEN":"SECRET_LIVE_VALUE"}}]},"path":"/etc/cfm/detectors.conf","exists":true,"overlay_files":["20-tuning.conf"],"overrides":[{"section":"webdetector","key":"HUMANITY_MIN_OBS","in_base":true,"base":"500","effective":"100","source":"20-tuning.conf"},{"section":"webdetector","key":"CHALLENGE_TOKEN","in_base":true,"base":"OLD_SECRET_BASE","effective":"NEW_SECRET_OVERLAY","source":"20-tuning.conf"}]}`)}
+	ts := newTestServer(t, fd)
+	_, body := mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"detectors_config","arguments":{"merged":true}}}`)
+	if fd.lastPath != "/api/v1/detectors/config" || fd.lastQuery.Get("view") != "merged" {
+		t.Errorf("merged dispatch path=%q view=%q, want …/detectors/config view=merged", fd.lastPath, fd.lastQuery.Get("view"))
+	}
+	text := toolText(t, body)
+
+	// Secrets in the merged config AND in the overrides (base + effective) must
+	// all be gone.
+	for _, secret := range []string{"SECRET_LIVE_VALUE", "OLD_SECRET_BASE", "NEW_SECRET_OVERLAY"} {
+		if strings.Contains(text, secret) {
+			t.Errorf("merged detectors_config LEAKED secret %q: %s", secret, text)
+		}
+	}
+	// The non-secret override survives with its provenance.
+	for _, want := range []string{`"effective": "100"`, `"base": "500"`, `"source": "20-tuning.conf"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("merged override dropped %q: %s", want, text)
+		}
+	}
+	// Merged note + redacted secret key present.
+	if !strings.Contains(text, "EFFECTIVE config the daemon runs") {
+		t.Errorf("merged note missing: %s", text)
+	}
+	if !strings.Contains(text, `"CHALLENGE_TOKEN"`) {
+		t.Errorf("redacted_keys should list CHALLENGE_TOKEN: %s", text)
 	}
 }
 

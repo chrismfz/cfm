@@ -56,6 +56,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerNetfilterPath(srv, d)
 	registerIPLocate(srv, d)
 	registerDetectorsStatus(srv, d)
+	registerDetectorsConfig(srv, d)
 	registerDetectorCoverage(srv, d)
 	registerDetectorSources(srv, d)
 	registerConfigDrift(srv, d)
