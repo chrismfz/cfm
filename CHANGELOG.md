@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.18
+
 ### Added
 - **New read-only MCP tool `detectors_config` — the parsed detectors.conf *with
   values*, base and effective.** Wraps the existing admin `/api/v1/detectors/config`
