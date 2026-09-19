@@ -367,9 +367,18 @@ enforcement path is the **operator-armed** per-fingerprint policy: cfm-web
 `internal/webdetector/fppolicy.go` store → `/nginx/fppolicy` bridge lookup →
 `cfm.lua` Step 0c (`deny` 403s pre-clearance; challenge/challenge_v2 are a floor
 for uncleared clients; web path only — the panel ports do not consult it yet).
-Knobs `[webdetector] FP_POLICY` / `FP_POLICY_ALLOW_FPS`. ChallengeV2 as an
-actual harder rung is **designed, not built** — `challenge_v2` currently behaves
-as `challenge` at the edge. **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
+Knobs `[webdetector] FP_POLICY` / `FP_POLICY_ALLOW_FPS`. **ChallengeV2 Rung 1
+is built** (2026-09-19, `challenge_v2.go` + the challenge-page passive
+collectors, guardrails D5): every solve is scored on positive-only headless
+evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived), and
+for an armed `challenge_v2` fingerprint a failing solve earns NO clearance
+(`result=v2_reject`, retry-able with backoff) — at the EDGE `challenge_v2`
+still serves the same challenge page as `challenge` (the rung difference is
+enforced at verify, not at serve). Teeth are web/edge-path-only (DNAT clients
+author their own `X-CFM-TLS`), and the client-authored report is spoofable by
+a signal-aware farm — deliberate D5b residuals, documented in
+`challenge_v2.go`; Rung 2 (visible interactive, accessible) is the designed
+escalation, not built. **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
 the ONE roadmap/decision log; the other docs' phase checklists are frozen). Design
 hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
 (central). See also `docs/challenge-score.md`, `docs/roadmaps/challenge-engine.md` §8.1.
