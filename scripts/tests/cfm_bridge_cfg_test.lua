@@ -86,6 +86,14 @@ cfg = bc.get()
 check(cfg.clearance_refresh == false, "old daemon file: clearance_refresh=false honoured")
 check(cfg.origin_keepalive == nil, "old daemon file: origin_keepalive nil → env fallback")
 check(cfg.origin_ka_idle_sec == nil, "old daemon file: idle_sec nil → env fallback")
+-- fp_policy (the Step-0c edge gate) follows the ~= false fail-safe idiom:
+-- absent on an old daemon's file → true (feature available), explicit false
+-- (FP_POLICY=0) → false (edge skips Step 0c entirely).
+check(cfg.fp_policy == true, "old daemon file: fp_policy absent → defaults true")
+expire()
+fixture = "return { clearance_refresh = true, fp_policy = false }"
+cfg = bc.get()
+check(cfg.fp_policy == false, "explicit FP_POLICY=0: fp_policy is false")
 
 -- 4b) Panel enforce modes: present strings pass through; absent → nil so
 --     cfm_panel.lua's resolver applies the "enforce" default.

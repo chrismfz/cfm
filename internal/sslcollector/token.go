@@ -413,6 +413,14 @@ type WebdetectorBridgeConfig struct {
 	// CFM_PCW env kill-switch so the toggle lives in config like the others and
 	// applies within ~10s without a proxy reload.
 	PostClearanceCadence bool
+	// FPPolicy mirrors [webdetector] FP_POLICY to the edge (default on). The
+	// daemon-side knob already makes every /nginx/fppolicy lookup answer "no
+	// action"; publishing it here lets cfm.lua skip Step 0c ENTIRELY — no
+	// tlsfp tuple build, no md5, no shared-dict traffic on the pre-clearance
+	// hot path — so FP_POLICY=0 removes the feature's whole per-request cost
+	// within ~10s, not just its answers (whats_wrong-side review finding on
+	// PR #1438).
+	FPPolicy bool
 }
 
 // WriteWebdetectorBridgeConfig atomically writes a Lua module exposing
@@ -454,6 +462,7 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 			"  panel_waf_mode = %q,\n"+
 			"  panel_decision_mode = %q,\n"+
 			"  post_clearance_cadence = %s,\n"+
+			"  fp_policy = %s,\n"+
 			"}\n",
 		luaBool(cfg.ClearanceRefresh),
 		luaBool(cfg.OriginKeepalive),
@@ -463,6 +472,7 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 		panelMode(cfg.PanelWAFMode),
 		panelMode(cfg.PanelDecisionMode),
 		luaBool(cfg.PostClearanceCadence),
+		luaBool(cfg.FPPolicy),
 	)
 	return writeLuaFileAtomic(luaPath, content, cfmGID, "sslcollector", "[sslcollector]", "webdetector bridge config")
 }

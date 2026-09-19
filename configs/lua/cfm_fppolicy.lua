@@ -31,9 +31,11 @@
 --
 -- FAIL-OPEN BY CONSTRUCTION: no fingerprint (plain HTTP), RPC error, daemon
 -- down, dict full — every failure path answers "" (no action). A short
--- negative cache (ERR_TTL) bounds retry pressure during a daemon outage so
--- this best-effort lookup never becomes a per-request timeout (its RPC kind
--- also never trips the decision circuit breaker — kind ~= "decision").
+-- negative cache (ERR_TTL) bounds retry pressure during a daemon outage, and
+-- the decision circuit breaker PROTECTS this kind too (a tripped breaker
+-- fails the lookup fast instead of paying decision_timeout_ms per uncached
+-- fingerprint on a hung daemon) while only decision outcomes trip/clear it —
+-- see cfm_decision.lua breaker_should_skip/breaker_note.
 -- Token-rotation note: unlike decision:get, this lookup has no 403-refresh
 -- retry of its own; after a bridge-token rotation it fails open for at most
 -- the decision path's ~10s token refresh plus ERR_TTL of cached negatives —

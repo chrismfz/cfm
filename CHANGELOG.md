@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **Fingerprint-policy hot-path hardening** (two review findings on the E3
+  node slice, surfaced by the whats_wrong work's self-review): (1) the edge's
+  per-fingerprint `fppolicy` lookup is now protected by the decision circuit
+  breaker — on a hung daemon it fails fast/open instead of blocking uncached
+  requests for the full decision timeout (tripping/clearing stays
+  decision-only); (2) `FP_POLICY = 0` now removes the WHOLE edge cost, not
+  just the answers: the knob is published to the edge via
+  `cfm_bridge_config.lua` (10s TTL, no proxy reload) and `cfm.lua` skips
+  Step 0c entirely — no tlsfp tuple build, no md5, no shared-dict traffic on
+  the pre-clearance path.
+
 ### Added
 - **ChallengeV2 Rung 1 — passive humanity check on the challenge (master plan
   E3).** The invisible challenge page now also reports passive

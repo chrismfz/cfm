@@ -449,6 +449,11 @@ func (m *manager) maybeReload(parent context.Context) {
 				// kill-switch so the toggle is config-driven (POST_CLEARANCE_CADENCE=0
 				// disables) and applies within ~10s without a proxy reload.
 				PostClearanceCadence: kvBool(wdKV, "POST_CLEARANCE_CADENCE", true),
+				// Fingerprint-policy edge gate. Same key the webdetector
+				// registration feeds into ConfigureFingerprintPolicyEnforcement
+				// (daemon-side answers); published here so FP_POLICY=0 also
+				// removes the edge's whole Step-0c cost, not just its answers.
+				FPPolicy: kvBool(wdKV, "FP_POLICY", true),
 			}
 			// Guard nonsense values; the Lua side re-guards but keep the
 			// published file sane. Idle must stay below Apache's
@@ -465,8 +470,8 @@ func (m *manager) maybeReload(parent context.Context) {
 			if err := sslcollector.WriteWebdetectorBridgeConfig(bridgeConfigPath, bridgeCfg, cfmGID); err != nil {
 				logging.Logf("[detectors] cfm_bridge_config.lua write failed path=%s err=%v", bridgeConfigPath, err)
 			} else {
-				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s post_clearance_cadence=%v",
-					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PostClearanceCadence)
+				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s post_clearance_cadence=%v fp_policy=%v",
+					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PostClearanceCadence, bridgeCfg.FPPolicy)
 			}
 		}
 	}

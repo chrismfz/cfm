@@ -198,6 +198,11 @@ local CFG = setmetatable({
   -- refreshes on the 10s TTL — flip [webdetector] POST_CLEARANCE_CADENCE with no
   -- proxy reload. Default on (nil/absent → true), matching the fail-safe idiom.
   post_clearance_cadence = (_bridge_cfg.post_clearance_cadence ~= false),
+  -- Fingerprint-policy edge gate (Step 0c). Bridge-derived, 10s TTL: flipping
+  -- [webdetector] FP_POLICY=0 removes the WHOLE per-request Step-0c cost
+  -- (tlsfp tuple build + md5 + dict + any /nginx/fppolicy lookup), not just
+  -- the daemon's answers. Default on (nil/absent → true), fail-safe idiom.
+  fp_policy = (_bridge_cfg.fp_policy ~= false),
 }, { __index = _cfg_static })
 
 local clamav_ok, clamav = pcall(require, "cfm_clamav")
@@ -1245,8 +1250,10 @@ local function cfm_enforce()
 -- uncleared clients (valid clearance still passes at Step 2b: the floor is
 -- satisfied by solving; v2 behaves as v1 until the Rung-1 engine ships).
 -- pcall-guarded + fail-open: any failure means no fingerprint action.
+-- CFG.fp_policy (bridge-published FP_POLICY, 10s TTL) gates the whole step:
+-- off = zero per-request cost here, not merely empty answers.
 local fp_action = ""
-do
+if CFG.fp_policy then
   local ok_fp, act, fpid = pcall(function()
     -- Stashed in ngx.ctx so the WAF push (Step 2) reuses the tuple instead of
     -- rebuilding it from the ssl_* vars.
@@ -1433,7 +1440,9 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         -- fp id. Step 0c (the fingerprint-policy lookup) already computed the
         -- tuple and stashed it in ngx.ctx.cfm_tlsfp_raw (false = plain-HTTP/
         -- none), so reuse it and rebuild only when the stash is absent (Step 0c
-        -- pcall failed). pcall-guarded (like the /__cfm_verify stamp) so a
+        -- pcall failed, or skipped entirely under FP_POLICY=0 — WAF-hit fp
+        -- attribution keeps working either way, paid only on WAF-hit
+        -- requests). pcall-guarded (like the /__cfm_verify stamp) so a
         -- missing/broken cfm_tlsfp module can never 500 the request.
         local stash = ngx.ctx.cfm_tlsfp_raw
         local ok_fp, tls_fp
