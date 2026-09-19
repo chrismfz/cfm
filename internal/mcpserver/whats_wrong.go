@@ -122,7 +122,7 @@ func registerWhatsWrong(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "whats_wrong",
-		Description: "Triage in one call: pulls host health, memory ECC/hardware errors, process-health anomalies, systemd services, netfilter priority diagnostics, MySQL saturation, mail/runtime anomalies, API abuse, and panel burn-in together, then returns a SEVERITY-RANKED list of concrete problems with the drill-down tool. Deliberately conservative: it flags equal-priority netfilter ambiguity and CFM runtime/config priority drift, but not intentional ordered Imunify/CFM overlap or routine WAF/firewall activity. `status:\"ok\"` means no problems among readable signals; `sources` shows unavailable/degraded/error inputs.",
+		Description: "Triage in one call: pulls host health, memory ECC/hardware errors, process-health anomalies, systemd services, netfilter priority diagnostics, MySQL saturation, mail/runtime anomalies, API abuse, panel burn-in, and the edge→origin hop (edge_health: origin premature-closes/gateway 5xx, cross-SNI 421 reuse, origin-keepalive degradation) together, then returns a SEVERITY-RANKED list of concrete problems with the drill-down tool. Catches the class where the edge and every daemon are 'up' but the ORIGIN is dropping requests — 502s no host metric shows. Deliberately conservative: it flags equal-priority netfilter ambiguity and CFM runtime/config priority drift, but not intentional ordered Imunify/CFM overlap or routine WAF/firewall activity. `status:\"ok\"` means no problems among readable signals; `sources` shows unavailable/degraded/error inputs.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		secs := []struct {
 			key, path string
@@ -138,6 +138,7 @@ func registerWhatsWrong(srv *mcp.Server, d Deps) {
 			{"mail_traffic", "/api/v1/mail/traffic", nil},
 			{"mail_runtime", "/api/v1/mail/runtime", nil},
 			{"panel_burnin", "/api/v1/system/waf-fp-hunt", nil},
+			{"edge_health", "/api/v1/system/edge-health", nil},
 		}
 		bodies := make(map[string]json.RawMessage, len(secs))
 		var mu sync.Mutex
@@ -240,6 +241,25 @@ func evaluateWhatsWrong(sections map[string]json.RawMessage) whatsWrongResult {
 	}
 	if body, ok := sections["panel_burnin"]; ok && usable("panel_burnin", body) {
 		fs = append(fs, evalPanelBurnIn(body)...)
+	}
+	// Edge→origin hop. Gated on the health snapshot resolving a KNOWN edge
+	// engine (the same edgeEngineUnits predicate evalServices uses): on a node
+	// that runs no edge, a stale access log left behind by a removed engine
+	// must not be read as live origin failure. When the engine is unresolved we
+	// evaluate nothing here — evalHealth still covers edge liveness, and the
+	// section's own read outcome is recorded in `sources` either way.
+	if body, ok := sections["edge_health"]; ok && usable("edge_health", body) {
+		if edgeEngineUnits[edgeService] {
+			fs = append(fs, evalEdgeHealth(body)...)
+		} else {
+			// The gate fired, so nothing here was evaluated. Say so: leaving
+			// `sources` reading "ok" would drop a live origin-drop critical with
+			// no trace in the output — and this path is reached not only on a
+			// node that runs no edge, but whenever the `health` section itself
+			// timed out or failed, which is precisely when a silent drop is
+			// most misleading.
+			sources["edge_health"] = "degraded: not evaluated — active edge engine unresolved (no edge on this node, or the health section was unreadable)"
+		}
 	}
 
 	sortFindings(fs)

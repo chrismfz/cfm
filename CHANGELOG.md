@@ -18,6 +18,35 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **`whats_wrong` now sees the edge→origin hop (origin premature-closes).**
+  Triage pulls `edge_health` as a section and ranks its warn/critical findings,
+  and `edge_health` gains **Check E**: gateway 5xx (502/503/504) where the
+  edge selected an origin peer and never got a response header back (`uht="-"`
+  with a real `uaddr=`, so a challenge/block page the edge served itself is
+  excluded while a connect failure still counts), reported with the
+  affected-vhost spread — many vhosts indicts the
+  origin itself, one indicts that app. An application 500 always carries a
+  header, so it is excluded by construction; severity needs **both** an event
+  floor and a rate (so neither a quiet node nor a huge window can fake one) and
+  is recency-aware, reading `warn` once a storm stops rather than a stale
+  `critical`. Closes a real blind spot: on a node whose Apache workers were
+  segfaulting in `mod_brotli`, ~900 requests/day across dozens of vhosts were
+  502ing while load/RAM/disk were green, the edge was up, `httpd` was `active`
+  and `whats_wrong` reported only an unrelated flapping unit — the 502s were
+  found only because an operator happened to be browsing one of the sites. The
+  finding names the drill-down path that actually solved it (`edge_error_tail`
+  → `dmesg_tail grep=segfault` → `service_status`). Rides the access-log pass
+  the 421 check already makes, so it adds no I/O. The status is read only from
+  unquoted text, so a crafted `CF-Connecting-IP`/`User-Agent` cannot forge
+  findings, and `uht` is parsed per upstream attempt so a pooled port-80 retry
+  (`uht="-, -"`) is not missed.
+- **`edge_health` fatal origin-keepalive tiers are now recency-aware.** A fatal
+  `[cfm_origin_ka]` line is worker-lifetime, not per-request, so it used to read
+  `critical` for as long as it sat in the error-log tail — a permanent false
+  alarm once the check feeds `whats_wrong`. Stale evidence now degrades to
+  `warn` (never to `ok`) and says so explicitly: the module loads once per
+  worker, so the fault is still live if the edge has not been reloaded since.
+  Ageing is per tier, so a fresh fault cannot mislabel an already-fixed one.
 - **Fleet-armed fingerprint-policy enforcement — Phase C node slice (master
   plan E3).** The daemon now pulls the operator-armed per-fingerprint actions
   (deny / challenge / challenge_v2) from cfm-web's

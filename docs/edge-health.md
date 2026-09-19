@@ -29,8 +29,9 @@ Read-only: it never blocks, reloads, or changes config. It may run
 
 ## Scope: Tier 1 (as shipped)
 
-Four correlated checks that, together, would have caught the 421 incident in
-minutes. Each finding carries a `severity`; the tool's `overall` is the max of
+Five correlated checks. A–D, together, would have caught the 421 incident in
+minutes; E covers the second origin-hop failure class we hit (below). Each
+finding carries a `severity`; the tool's `overall` is the max of
 them — **`ok | warn | critical | unknown`**, where `unknown` means a log/version
 couldn't be read and is NEVER silently downgraded to `ok`.
 
@@ -75,10 +76,84 @@ couldn't be read and is NEVER silently downgraded to `ok`.
   out of the live error log on a healthy edge — so an empty classification is
   `ok`, never a false "module inactive" warning.
 
+Check C (`[cfm_origin_ka]` tiers) gained the same treatment at the same time,
+for the same reason: a *fatal* tier line is **worker-lifetime**, not
+per-request, so it stayed `critical` for as long as it sat in the error-log
+tail. Once Check C feeds `whats_wrong` that becomes a permanent false critical.
+It is now degraded to `warn` when the newest fatal line is stale — never to
+`ok`, because the module loads once per worker and the fault is still live if
+the edge has not been reloaded since. The summary says exactly that, and the
+acute symptom of a genuinely-broken module (a 502 storm) is carried by Check E
+as its own `critical`, so nothing is hidden.
+
+Recency is tracked **per tier**, not as one maximum: the switch reports
+whichever problem tier matches first, so a shared "newest" would let a fresh
+`module_load_failed` grade an already-fixed, hours-old `balancer_unavailable` as
+a live `critical` — wrong severity *and* wrong root cause. The **degraded**
+tiers are aged the same way; unlike a fatal tier they describe a capability gap
+the edge tolerates (traffic still flows, just unpooled or without the
+keepalive-race retry), so stale evidence leaves triage rather than being
+downgraded one step, staying visible in the summary, the `tiers` map and
+`tier_age_sec`.
+
 ### D. ORIGIN_KEEPALIVE knob (published bridge config)
 - Read `origin_keepalive` from `/var/lib/cfm/lua/cfm_bridge_config.lua`
   (true/false/unknown); it drives the B and C correlations. Unreadable ⇒ feeds
   `unknown` into B rather than an all-clear.
+
+### E. Origin premature-close / gateway 5xx (edge access log)
+
+Added after a 2026-09 incident: on an Angie→Apache node, `mod_brotli` was
+segfaulting the Apache workers. Roughly **900 requests a day across dozens of
+vhosts** died with `upstream prematurely closed connection`, and nothing
+surfaced it — the edge was up, `httpd.service` was `active`, load/RAM/disk were
+green. `whats_wrong` returned two warnings, neither of them this. The 502s were
+found only because an operator happened to be working on one of the sites.
+
+The discriminator is **`uht="-"` on a gateway-class status** (502/503/504) **with
+a real `uaddr=`**: the edge selected an origin peer and never got a response
+header back.
+
+- An application error (PHP fatal, a real 500) **always carries a header**, so it
+  is excluded by construction — `500` is not even in the status set. This is what
+  keeps the signal clean: it means "the origin failed us", not "the app errored".
+- The `uaddr=` requirement is what keeps it about the ORIGIN hop. A response the
+  edge produced by *itself* — a challenge page, a block, the admin
+  upstream-error page while the daemon restarts — also logs `uht="-"` but names
+  no peer, so it never counts. A connect/TLS failure *does* name its peer (nginx
+  sets `$upstream_addr` once a peer is chosen) and correctly counts: never
+  getting a usable connection is an origin-hop fault too.
+- The status is read **only from unquoted text**. Several logged values are
+  client-controlled and nginx does not escape spaces in them — and `cf=`
+  (`$http_cf_connecting_ip`) sits *three fields before* `status=`, so
+  `CF-Connecting-IP: 0 status=502 0` on an aborted request (real `status=499`,
+  genuine `uht="-"`, genuine peer) would otherwise manufacture drops, and with
+  ~100 of them a fake `critical` that now reaches `whats_wrong`. Blanking quoted
+  regions before matching closes it for every such field at once, because nginx
+  escapes a literal `"` inside a value as `\x22` — a client can never break out.
+- `uht` carries **one value per upstream attempt**, comma-joined, and
+  `cfm_origin_ka` arms `set_more_tries(1)` on every pooled port-80 origin
+  request — so `uht="-, -"` is the *normal* failure shape on that path. Every
+  element must be `-`: a retry that did get a header (`uht="-, 0.412"`) served
+  the client and is not a drop.
+- Reported with the affected **vhost spread**, which is the useful discriminator
+  for whoever reads it: many vhosts ⇒ the origin itself (crashing workers,
+  exhausted pool); one vhost ⇒ that app.
+- Severity needs **both** an absolute event floor and a rate, so neither a quiet
+  node (1 drop in a 2-line window ≠ 50% incident) nor a huge window (a handful of
+  drops in 500k requests = background) can produce a false finding. Thresholds and
+  their fleet calibration live next to the constants in
+  `internal/apiserver/edge_health_endpoint.go`.
+- **Recency-aware**, exactly like Check B: only drops inside a freshness window
+  drive `critical`; a storm that has stopped but still sits in the file tail reads
+  `warn` ("appears to have stopped"), and unparseable timestamps fail *safe*
+  (treated as live) rather than silently downgrading a real incident.
+- It rides the **same access-log pass** as Check B — one tail of a multi-GB log,
+  two checks — so it costs no extra I/O.
+
+Drill-down path the finding names, which is the one that actually solved the
+incident: `edge_error_tail grep="upstream prematurely closed"` → `dmesg_tail
+grep=segfault` → `service_status` for the origin daemon.
 
 ## Output shape
 
@@ -125,10 +200,15 @@ is the max severity.
 
 ## How it plugs into monitoring (the "so we don't re-live it" part)
 
-1. **`whats_wrong` signal.** Add an edge-origin-hop check to `whats_wrong` that
-   fires on a 421 spike or an origin-config-invariant violation and points to
-   `edge_health` for the drill-down — so it surfaces *proactively*, not only when
-   asked.
+1. **`whats_wrong` signal — DONE (2026-09).** `whats_wrong` pulls
+   `/api/v1/system/edge-health` as a section and maps every `warn`/`critical`
+   finding into a ranked `edge` finding pointing back at `edge_health`
+   (`evalEdgeHealth`, `internal/mcpserver/whats_wrong_edge_health.go`). `ok` and
+   `unknown` emit nothing — `unknown` fires on any node with an unreadable
+   version string, and surfacing it would cry wolf fleet-wide. The section is
+   gated on the health snapshot resolving a **known** edge engine (the same
+   `edgeEngineUnits` predicate `evalServices` uses), so a stale access log on a
+   node that no longer runs an edge can't be read as live origin failure.
 2. **Alert threshold.** Wire a 421-rate threshold into the existing notifier so a
    recurrence pages, instead of sitting invisible for a week.
 3. **Cross-engine parity.** Because the fleet runs both OpenResty and Angie, the
@@ -146,8 +226,9 @@ is the max severity.
   **Apache-side AH02032** `421` fingerprint (origin error log), aborted lua
   threads, `openresty -t`/`angie -t` + reload-freshness (conf edited but not
   reloaded — the deployment gotcha), WAF/challenge Lua errors.
-- Tier 3: latency split distribution (`uct`/`uht`/`luams`/`sslr`), 5xx/502/499
-  rates, worker respawns, cert/SSL edge errors.
+- Tier 3: latency split distribution (`uct`/`uht`/`luams`/`sslr`), 499/client-abort
+  rates, worker respawns, cert/SSL edge errors. (The 5xx half of this landed
+  early as **Check E** — the origin premature-close signal above.)
 - The live **two-vhost same-IP integration test** (backend-observed SNI == Host,
   no connection/session crosses host, zero 421) — the runtime proof a static or
   unit test cannot give; it belongs in a test harness, not this read tool.

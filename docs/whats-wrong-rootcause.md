@@ -213,6 +213,21 @@ surface **only** when it is an operational problem, never routine.
   counter snapshot + timestamp and compute the delta ("18k SYN/s, firewall
   dropping"). A bare "7,000 blocked IPs" is noise and must stay out.
 
+### 5b-bis. Edge→origin hop — DONE (2026-09)
+
+`whats_wrong` now carries an `edge_health` section (`evalEdgeHealth`), so the
+"edge and every daemon are up, but the ORIGIN is dropping requests" class is
+covered: origin premature-closes / gateway 5xx, cross-SNI 421 reuse, and
+origin-keepalive degradation. Thresholds stay in the endpoint (it owns the
+logs and the calibration); this layer only ranks an already-classified
+severity, and `ok`/`unknown` emit nothing. Design: `docs/edge-health.md`
+Check E.
+
+The motivating miss: a node's Apache workers segfaulting in `mod_brotli` cost
+~900 requests/day across dozens of vhosts, and every signal `what's_wrong`
+read was green — a textbook case of §3's rule that an unread signal must never
+be assumed healthy, extended to a signal that simply was not wired in.
+
 ### 5c. Formalize the correlation layer
 
 Promote the ad-hoc #1278 pattern into the §2 contract (confidence, evidence,
