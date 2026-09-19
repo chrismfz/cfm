@@ -10,8 +10,11 @@
 > ledger (node grains: `solver_farm`, `challenge_score`, WAF-hit fp attribution),
 > the actuator ladder, and the **ChallengeV2 rung**. The central store + policy
 > live in **cfm-web (`cfm-web:docs/fingerprint-reputation.md`)**. Per-IP score
-> deep-dive: `docs/challenge-score.md`. Everything here is **shadow** — the node
-> emits evidence only; nothing on the node keys enforcement on a fingerprint.
+> deep-dive: `docs/challenge-score.md`. The SIGNALS here are **shadow** — the
+> node emits evidence only, and no signal keys enforcement on a fingerprint
+> AUTOMATICALLY. Since 2026-09-19 (master plan E3 node slice) the one
+> enforcement path is the OPERATOR-armed per-fingerprint policy pulled from
+> cfm-web (`internal/webdetector/fppolicy.go` + `configs/lua/cfm_fppolicy.lua`).
 > Superseded design notes folded into this hub: `docs/archive/solver-farm-cross-host-phase2.md`,
 > `docs/archive/solver-farm-fingerprint-concentration.md`, `docs/archive/fleet-fingerprint-reputation.md`.
 

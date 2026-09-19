@@ -20,6 +20,17 @@ type Lifecycle struct {
 	// internal state
 	runner  *Runner
 	lastKey string // "URL|TOKEN" — detects credential changes
+	fpSink  func([]FingerprintPolicyRow)
+}
+
+// SetFingerprintPolicySink wires the fingerprint-policy pull's destination
+// (see fppolicy_pull.go). Callable before or after the Runner exists; the
+// sink is (re)applied whenever ApplyConfig touches the Runner.
+func (l *Lifecycle) SetFingerprintPolicySink(fn func([]FingerprintPolicyRow)) {
+	l.fpSink = fn
+	if l.runner != nil {
+		l.runner.SetFingerprintPolicySink(fn)
+	}
 }
 
 // NewLifecycle returns a ready-to-use Lifecycle.
@@ -58,6 +69,7 @@ func (l *Lifecycle) ApplyConfig(cfg *cfgpkg.Config) {
 		l.runner = New(ac)
 		l.runner.SetBackend(l.be)
 		l.runner.SetConfigDir(l.cfgDir)
+		l.runner.SetFingerprintPolicySink(l.fpSink)
 		l.runner.Start()
 	} else {
 		// credentials changed — hot-update, no restart needed
