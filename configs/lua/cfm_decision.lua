@@ -197,9 +197,9 @@ end
 -- classify exposed so callers can key retry/log logic on the error class.
 M.classify_bridge_err = classify_bridge_err
 
--- breaker_should_skip: should this RPC be short-circuited? true only for a
--- `decision` RPC while the breaker is OPEN (BRK_UNTIL in the future). ONLY the
--- decision kind is gated — it is the per-cache-miss blocking path; the
+-- breaker_should_skip: should this RPC be short-circuited? true only for the
+-- hot-path READ kinds (`decision`, `fppolicy`) while the breaker is OPEN
+-- (BRK_UNTIL in the future) — they are the per-cache-miss blocking paths; the
 -- lower-frequency best-effort telemetry RPCs (observe / ip_push / ok_touch /
 -- waf_stats / waf_excludes) must never be silenced by a decision-only trip (the
 -- daemon may still be able to serve a push). Once the cooldown lapses requests
@@ -219,7 +219,16 @@ M.classify_bridge_err = classify_bridge_err
 -- ≤3s of fast-blocking after recovery — acceptable for a fail-CLOSED operator,
 -- who already blocks during the hang. The cooldown is kept short for this reason.
 function Client:breaker_should_skip(kind)
-  if kind ~= "decision" then return false end
+  -- The breaker SKIPS the hot-path READ kinds: `decision` (per-request
+  -- verdict) and `fppolicy` (per-fingerprint policy lookup, cfm_fppolicy —
+  -- also on the pre-clearance request path). With a hung daemon, an
+  -- unprotected fppolicy miss would block a request for the full
+  -- decision_timeout_ms, up to its RPC budget per second (whats_wrong-side
+  -- review finding on PR #1438); both kinds fail fast/open while tripped.
+  -- Telemetry pushes (observe / ip_push / ok_touch / waf_stats) stay
+  -- unskipped: they are best-effort and several run off the request path.
+  -- Tripping/clearing remains decision-only — see breaker_note.
+  if kind ~= "decision" and kind ~= "fppolicy" then return false end
   local SH = self.sh
   if not SH then return false end
   local until_ts = SH:get(BRK_UNTIL)

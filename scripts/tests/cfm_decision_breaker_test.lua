@@ -123,6 +123,16 @@ do
   -- ...but it DOES skip a decision RPC.
   local _, derr = c:rpc("decision", "GET", "/x")
   check(derr == "breaker_open" and st.calls == before + 1, "open breaker DOES skip the decision RPC")
+  -- ...and the fppolicy lookup — the other hot-path READ (pre-clearance,
+  -- cfm_fppolicy): an unprotected miss would block a request for the full
+  -- decision timeout on a hung daemon (PR #1438 review finding).
+  local _, fperr = c:rpc("fppolicy", "GET", "/nginx/fppolicy?fp=x")
+  check(fperr == "breaker_open" and st.calls == before + 1, "open breaker DOES skip the fppolicy RPC")
+  -- ...while an fppolicy timeout never TRIPS it (trip stays decision-only).
+  local c2, _, st2, alive2 = new_client()
+  st2.result = { nil, "timeout" }
+  for _ = 1, 6 do c2:rpc("fppolicy", "GET", "/nginx/fppolicy?fp=x") end
+  check(val(alive2, BRK_UNTIL) == nil, "fppolicy timeouts must NOT trip the breaker")
 end
 
 -- ── 3b) CONSECUTIVE semantics: a success resets the count (finding 2) ─────────
