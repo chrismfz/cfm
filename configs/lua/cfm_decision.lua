@@ -197,9 +197,9 @@ end
 -- classify exposed so callers can key retry/log logic on the error class.
 M.classify_bridge_err = classify_bridge_err
 
--- breaker_should_skip: should this RPC be short-circuited? true only for a
--- `decision` RPC while the breaker is OPEN (BRK_UNTIL in the future). ONLY the
--- decision kind is gated — it is the per-cache-miss blocking path; the
+-- breaker_should_skip: should this RPC be short-circuited? true only for the
+-- hot-path READ kinds (`decision`, `fppolicy`) while the breaker is OPEN
+-- (BRK_UNTIL in the future) — they are the per-cache-miss blocking paths; the
 -- lower-frequency best-effort telemetry RPCs (observe / ip_push / ok_touch /
 -- waf_stats / waf_excludes) must never be silenced by a decision-only trip (the
 -- daemon may still be able to serve a push). Once the cooldown lapses requests

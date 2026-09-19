@@ -167,7 +167,7 @@ local _bridge_cfg = _bridge.get()
 -- so they always take the defaults), making the once-per-worker read
 -- byte-identical. See cfm_cfg.lua.
 --
--- Only the four bridge-derived fields stay per-request: they refresh on the
+-- Only the bridge-derived fields stay per-request: they refresh on the
 -- bridge file's 10s TTL (_bridge_token / _bridge_cfg via cfm_bridge_cfg), so an
 -- operator toggle (ORIGIN_KEEPALIVE, clearance refresh, cookie life) still takes
 -- effect within 10s instead of freezing at worker start. They ride a small
