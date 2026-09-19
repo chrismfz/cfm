@@ -6,15 +6,15 @@
 //
 // Key bindings:
 //
-//   ↑/↓        navigate top pane (UA rows)
-//   j/k        navigate bottom pane (active rules)
-//   t/b        throttle / block the selected UA in the top pane
-//   T          (shift-T) force-confirm a Google verified crawler
-//   u          undo the rule selected in the bottom pane
-//   d          drill into the selected UA (drops out, runs cfm bots drill)
-//   1/2/3/4    cycle TTL preset (5m / 15m / 30m / 60m). Default 30m.
-//   r          refresh now (otherwise auto-tick 2s)
-//   q          quit
+//	↑/↓        navigate top pane (UA rows)
+//	j/k        navigate bottom pane (active rules)
+//	t/b        throttle / block the selected UA in the top pane
+//	T          (shift-T) force-confirm a Google verified crawler
+//	u          undo the rule selected in the bottom pane
+//	d          drill into the selected UA (drops out, runs cfm bots drill)
+//	1/2/3/4    cycle TTL preset (5m / 15m / 30m / 60m). Default 30m.
+//	r          refresh now (otherwise auto-tick 2s)
+//	q          quit
 //
 // "allow" is intentionally not exposed: UA-keyed bypass would be a
 // trivially spoofable WAF gap. Use per-vhost rules with IP/ASN

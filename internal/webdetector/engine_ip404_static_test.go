@@ -79,4 +79,3 @@ func TestIP404Flood_NonStatic404StillCounts(t *testing.T) {
 		t.Fatalf("expected 404_flood for non-static missing endpoint")
 	}
 }
-

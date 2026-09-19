@@ -168,13 +168,26 @@ already opened.
         the panel-port gate (`cfm_panel.lua`) does not consult the policy yet.
       - [ ] Panel-port fp-policy consult (`cfm_panel.lua` — same Step-0c
         lookup so an armed deny also covers `:2083/:2087/:2096`).
-      - [ ] ChallengeV2 Rung 1 (passive humanity probe): build it (the config
-        keys already live on the fleet ahead of the code — row 12), and give
-        it teeth from day one **for armed fingerprints only** under D5:
-        armed `challenge_v2` fp + failed passive check ⇒ no clearance issued
-        (retry-able re-challenge, never a silent wall). For everyone else it
-        stays invisible/shadow. This is what finally makes "the farm solves
-        the PoW" a dead end for the farm.
+      - [x] ChallengeV2 Rung 1 — **DONE 2026-09-19** (`challenge_v2.go` +
+        the challenge-page passive collectors): every solve is scored on
+        positive headless evidence only (webdriver / HeadlessChrome UA fail
+        alone at 100; SwiftShader-class renderer 60, touch-lie 50, outer-zero
+        40 each PASS alone; no-input is an amplifier that never opens — D5b),
+        logged as `hs=`/`tells=` on the solve line. Armed `challenge_v2` fp +
+        failing score ⇒ `result=v2_reject`, 403, no clearance — the page
+        reloads into a fresh challenge (D5c). Everyone else: shadow
+        `signal=humanity verdict=would_v2` (rides ABUSE_SHADOW). Knobs
+        `CHALLENGE_V2_PASSIVE` / `_FAIL_SCORE` / `_DEBUG` (X-CFM-HS header).
+        Solving the PoW stops paying for an armed fingerprint: the solve no
+        longer earns clearance. **Honest limits (documented in
+        `challenge_v2.go`):** the report is client-authored, so a
+        signal-aware farm can fabricate a clean one — Rung 1 catches standard
+        automation stacks and raises per-exit cost (a stripped body shows as
+        `hs=-`, so evasion is visible); the escalation if beaten is Rung 2.
+        Teeth are web/edge-path-only (DNAT clients author their own
+        `X-CFM-TLS`), the same limitation family as the slice-2 edge match.
+        (Operator row-12 cleanup stands: delete the orphan `HUMANITY_*` keys
+        from live configs — the built rung uses `CHALLENGE_V2_*`, not those.)
       - [ ] **Policy kinds: country / asn (E3 follow-up, operator decision
         2026-09-19).** Generalise the policy channel's `kind` (today only
         `tls`) to `country` and `asn` rows — same arm UI, feed, pull and TTL

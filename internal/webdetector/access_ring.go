@@ -67,9 +67,9 @@ type AccessFilter struct {
 	IP          string
 	Host        string
 	Method      string
-	Status      int    // exact status (0 = any); ignored when StatusClass > 0
-	StatusClass int    // 1..5 → match status/100 (0 = any)
-	PathSub     string // case-insensitive substring of URI
+	Status      int     // exact status (0 = any); ignored when StatusClass > 0
+	StatusClass int     // 1..5 → match status/100 (0 = any)
+	PathSub     string  // case-insensitive substring of URI
 	Since       float64 // unix seconds; entries older are skipped (0 = any)
 	Limit       int
 }

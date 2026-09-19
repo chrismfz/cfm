@@ -18,6 +18,34 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **ChallengeV2 Rung 1 — passive humanity check on the challenge (master plan
+  E3).** The invisible challenge page now also reports passive
+  environment/behaviour signals with the verify POST (webdriver flag, WebGL
+  renderer, window/touch coherence, input-event counts — no puzzle, nothing
+  visible, no extra wait) and the daemon scores them under the D5 guardrails:
+  a solve can fail only on POSITIVE headless evidence (`navigator.webdriver`
+  or a HeadlessChrome UA fail alone; a SwiftShader/RDP renderer, a touch-lie
+  or a zero-size window each pass alone; "no input" only ever amplifies) — a
+  missing payload or missing signals never convicts. **Teeth are scoped to
+  operator-armed `challenge_v2` fingerprints**: there, a failing solve gets
+  `result=v2_reject` + 403 and earns NO clearance — solving the PoW stops
+  paying for the farm — while the page reloads into a fresh challenge
+  (retry-able, never a silent wall). For everyone else a would-fail score is
+  shadow (`signal=humanity verdict=would_v2`, rides `ABUSE_SHADOW`). Every
+  scored solve logs `hs=`/`tells=` on its solve line; knobs
+  `CHALLENGE_V2_PASSIVE` (default 1), `CHALLENGE_V2_FAIL_SCORE` (100),
+  `CHALLENGE_V2_DEBUG` (X-CFM-HS response header for DevTools inspection,
+  default 0). A rejected client retries with capped exponential backoff and a
+  give-up message after 6 attempts (never a hot loop into the verify rate
+  limiter). **Honest limits:** the report is client-authored, so a
+  signal-aware farm can strip or fabricate it (a stripped body is visible as
+  `hs=-` vs `hs=0` for a scored-clean solve) — Rung 1 catches standard
+  automation stacks and raises the farm's per-exit cost, with Rung 2 as the
+  designed escalation; teeth are web/edge-path-only (DNAT clients author
+  their own `X-CFM-TLS`). Manual test recipe: arm `challenge_v2` on your own
+  browser's fingerprint with a short TTL, solve once (watch `hs=` in
+  cfm.challenges.log), then replay from a headless browser and watch it get
+  `result=v2_reject`.
 - **Fleet-armed fingerprint-policy enforcement — Phase C node slice (master
   plan E3).** The daemon now pulls the operator-armed per-fingerprint actions
   (deny / challenge / challenge_v2) from cfm-web's

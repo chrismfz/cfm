@@ -18,8 +18,8 @@ import (
 func newTickTestEngine(t *testing.T) *Engine {
 	t.Helper()
 	e := NewEngine(Config{
-		Every:         time.Second,
-		Window:        2 * time.Minute,
+		Every:  time.Second,
+		Window: 2 * time.Minute,
 		// Non-existent sock → bridge Enabled, POSTs fail fast, but the local
 		// vhState is updated before posting (same trick as the socket-only test).
 		OpenRestySock: "/nonexistent/cfm_manualwins_test.sock",

@@ -260,13 +260,13 @@ func TestUATop_HybridGate(t *testing.T) {
 
 func TestIsGoogleVerifiedBot(t *testing.T) {
 	cases := map[string]bool{
-		"googlebot":             true,
-		"GoogleBot":             true,
-		"adsbot-google":         true,
-		"mediapartners-google":  true,
-		"facebookexternalhit":   false,
-		"semrushbot":            false,
-		"":                      false,
+		"googlebot":            true,
+		"GoogleBot":            true,
+		"adsbot-google":        true,
+		"mediapartners-google": true,
+		"facebookexternalhit":  false,
+		"semrushbot":           false,
+		"":                     false,
 	}
 	for in, want := range cases {
 		if got := IsGoogleVerifiedBot(in); got != want {

@@ -347,8 +347,8 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 				// ChallengeSolve.TLSFingerprintOrDash so this and the challenge
 				// server's own fallback line cannot disagree.
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s",
-					ip, host, uri, s.VerifyMS, solveMS, diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA, uaBad, reasonPart, ridPart, suffix,
+					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s%s",
+					ip, host, uri, s.VerifyMS, solveMS, diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA, s.HumanitySuffix(), uaBad, reasonPart, ridPart, suffix,
 				)
 
 				// Record solve in challenge API store (best-effort)
@@ -1000,6 +1000,17 @@ func init() {
 		webdet.ConfigureFingerprintPolicyEnforcement(
 			kvBool(kv, "FP_POLICY", true),
 			csvKV(kv, "FP_POLICY_ALLOW_FPS"),
+		)
+
+		// ChallengeV2 Rung 1 posture (challenge_v2.go, guardrails D5 in the
+		// master plan): passive humanity scoring on every solve; teeth only for
+		// operator-armed challenge_v2 fingerprints. The would_v2 shadow lines
+		// ride the ABUSE_SHADOW master like every other shadow signal.
+		webdet.ConfigureChallengeV2(
+			kvBool(kv, "CHALLENGE_V2_PASSIVE", true),
+			kvInt(kv, "CHALLENGE_V2_FAIL_SCORE", 100),
+			kvBool(kv, "CHALLENGE_V2_DEBUG", false),
+			cfg.AbuseShadow,
 		)
 
 		engine := webdet.NewEngine(cfg)
