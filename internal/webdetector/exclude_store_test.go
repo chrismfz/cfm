@@ -207,9 +207,9 @@ func TestExcludeStore_RuleIDsPersistAcrossLoad(t *testing.T) {
 // the WAF still runs.
 func TestFilterWholeWAFEntries_DropsRuleScoped(t *testing.T) {
 	entries := []excludeEntry{
-		{Type: "host", Value: "noisy.example.com"},                      // whole-WAF — kept
+		{Type: "host", Value: "noisy.example.com"},                  // whole-WAF — kept
 		{Type: "host", Value: "tuned.example.com", RuleIDs: []int{321}}, // rule-scoped — dropped
-		{Type: "path", Value: "/admin"},                                 // whole-WAF — kept
+		{Type: "path", Value: "/admin"},                                // whole-WAF — kept
 	}
 	got := filterWholeWAFEntries(entries)
 	if len(got) != 2 {
@@ -226,7 +226,7 @@ func TestFilterWholeWAFEntries_DropsRuleScoped(t *testing.T) {
 // remove must not nuke a rule-scoped entry on the same host.
 func TestExcludeStore_RemoveDistinguishesRuleScoping(t *testing.T) {
 	s := newExcludeStore(filepath.Join(t.TempDir(), "excludes.json"))
-	_ = s.Add("host", "shared.example.com", nil)                        // whole-WAF
+	_ = s.Add("host", "shared.example.com", nil)                     // whole-WAF
 	_ = s.AddWithRuleIDs("host", "shared.example.com", nil, []int{320}) // rule-scoped
 
 	// Removing the whole-WAF entry leaves the rule-scoped one in place.

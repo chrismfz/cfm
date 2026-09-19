@@ -144,7 +144,11 @@ func challengeV2Settings() (enabled bool, failScore int, debug, shadowLines bool
 // unread body). nil on error/over-cap — "no payload", never evidence. The
 // handler must call this exactly once, before anything else touches r.Body:
 // the slice-3 review caught a drain-then-parse ordering that silently killed
-// every body-borne signal, and TestReadVerifyBodyKeepsPayload pins this.
+// every body-borne signal. TestReadVerifyBodyKeepsPayload pins this
+// function's keep+drain+degrade contract; the CALL-SITE ordering has no
+// end-to-end test yet (the verify handler needs full PoW plumbing to drive),
+// so treat the call-site comment in the handler as load-bearing — and watch
+// hs=- rates after any refactor there: a fleet-wide hs=- is the symptom.
 func readVerifyBody(w http.ResponseWriter, r *http.Request) []byte {
 	if r.Body == nil {
 		return nil
@@ -160,7 +164,9 @@ func readVerifyBody(w http.ResponseWriter, r *http.Request) []byte {
 
 // parseHumanityBody decodes the optional verify-POST body. Absent or
 // malformed bodies return nil — which the scorer treats as "nothing
-// reported", never as evidence (D5b).
+// reported", never as evidence (D5b). String fields are re-bounded here so a
+// client cannot smuggle an arbitrarily long value toward a log line, whatever
+// the page-side slice said.
 func parseHumanityBody(b []byte) *humanitySignals {
 	if len(b) == 0 {
 		return nil
@@ -168,6 +174,9 @@ func parseHumanityBody(b []byte) *humanitySignals {
 	var sig humanitySignals
 	if json.Unmarshal(b, &sig) != nil {
 		return nil
+	}
+	if len(sig.GLR) > 128 {
+		sig.GLR = sig.GLR[:128]
 	}
 	return &sig
 }

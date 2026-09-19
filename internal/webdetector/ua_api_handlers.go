@@ -2,11 +2,11 @@
 //
 // HTTP handlers for the bot-top control surface:
 //
-//	GET    /api/v1/webdet/ua-top                 — bot-top live rows
-//	GET    /api/v1/webdet/ua-drill?ua=<name>     — drilldown for one normalized UA
-//	GET    /api/v1/webdet/ua-emergency           — active emergency rules
-//	POST   /api/v1/webdet/ua-emergency           — install rule (JSON body)
-//	DELETE /api/v1/webdet/ua-emergency?ua=<name> — remove rule
+//   GET    /api/v1/webdet/ua-top                 — bot-top live rows
+//   GET    /api/v1/webdet/ua-drill?ua=<name>     — drilldown for one normalized UA
+//   GET    /api/v1/webdet/ua-emergency           — active emergency rules
+//   POST   /api/v1/webdet/ua-emergency           — install rule (JSON body)
+//   DELETE /api/v1/webdet/ua-emergency?ua=<name> — remove rule
 //
 // All endpoints are admin-only. Box-wide emergency rules are not appropriate
 // for scoped (per-vhost) tokens since their effect crosses tenant boundaries.
@@ -27,7 +27,7 @@ type uaEmergencyPostBody struct {
 	Action     string `json:"action"`
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`
 	Reason     string `json:"reason,omitempty"`
-	By         string `json:"by,omitempty"`      // optional operator identity tag
+	By         string `json:"by,omitempty"`     // optional operator identity tag
 	Confirm    bool   `json:"confirm,omitempty"` // required when UA is a verified Google crawler
 }
 

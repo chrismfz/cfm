@@ -753,29 +753,6 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			HumanityNoPayload: hsNoPayload,
 		}
 
-		// D5 gate — teeth ONLY for an operator-armed challenge_v2 fingerprint:
-		// a failing score there means the PoW solve earns NO clearance. The 403
-		// lands in the page's error path, which reloads into a fresh challenge —
-		// retry-able by construction (D5c), never a silent wall. The rejected
-		// solve is deliberately NOT published/hooked as a solved event (it did
-		// not clear anything); its own log line is the record. Everyone else:
-		// a would-fail score is shadow — one abuse-shadow line (rides the
-		// ABUSE_SHADOW master via ConfigureChallengeV2), clearance unaffected.
-		if v2On && hs >= v2Fail {
-			if FingerprintPolicyForID(solve.TLSFP) == "challenge_v2" {
-				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s tls_fp=%s ua=%q",
-					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.TLSFingerprintOrDash(), solve.UA)
-				http.Error(w, "verification failed", http.StatusForbidden)
-				return
-			}
-			if v2Shadow {
-				logging.LogfABUSESHADOW(
-					"[abuse-shadow] signal=humanity host=%s ip=%s hs=%d tells=%s fp=%s verdict=would_v2",
-					solve.Host, solve.IP, hs, hsTells, solve.TLSFingerprintOrDash())
-			}
-		}
-
 		// One dictionary line per distinct fingerprint, so every solve can carry
 		// the 8-character id instead of the full tuple. The UA rides along
 		// because the whole point of the signal is the pairing: this is the
@@ -794,6 +771,36 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				logging.LogfCHALLENGES("[challenge] tls_fp dictionary full at %d entries; new fingerprints still log tls_fp= but get no first_seen line",
 					tlsPrints.Len())
 			})
+		}
+
+		// D5 gate — teeth ONLY for an operator-armed challenge_v2 fingerprint:
+		// a failing score there means the PoW solve earns NO clearance. The 403
+		// carries `X-CFM-V2: reject` so the page can tell a Rung-1 reject from
+		// any other verify 403 and apply its bounded backoff to the right case;
+		// its error path then reloads into a fresh challenge — retry-able by
+		// construction (D5c), never a silent wall. Placed AFTER the first_seen
+		// dictionary write on purpose: a fingerprint seen only on rejected
+		// solves must still get its id→tuple line, or the burn-in operator
+		// cannot resolve the very fingerprint being rejected (D5d; verification
+		// -pass finding). The rejected solve is deliberately NOT published/
+		// hooked as a solved event (it cleared nothing); its own log line is
+		// the record. Everyone else: a would-fail score is shadow — one
+		// abuse-shadow line (rides the ABUSE_SHADOW master via
+		// ConfigureChallengeV2), clearance unaffected.
+		if v2On && hs >= v2Fail {
+			if FingerprintPolicyForID(solve.TLSFP) == "challenge_v2" {
+				logging.LogfCHALLENGES(
+					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s tls_fp=%s ua=%q",
+					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.TLSFingerprintOrDash(), solve.UA)
+				w.Header().Set("X-CFM-V2", "reject")
+				http.Error(w, "verification failed", http.StatusForbidden)
+				return
+			}
+			if v2Shadow {
+				logging.LogfABUSESHADOW(
+					"[abuse-shadow] signal=humanity host=%s ip=%s hs=%d tells=%s fp=%s verdict=would_v2",
+					solve.Host, solve.IP, hs, hsTells, solve.TLSFingerprintOrDash())
+			}
 		}
 
 		publishChallengeSolveEvent(solve)
@@ -2052,7 +2059,7 @@ func challengeHTML() string {
   // "| 0" here would manufacture positive evidence out of absence on old
   // WebViews, the exact D5b violation the slice-3 review caught).
   var HS = { v: 1, mv: 0, ptr: 0, tch: 0, key: 0 };
-  try { HS.wd = (navigator.webdriver === true); } catch (e) {}
+  try { if (typeof navigator.webdriver === 'boolean') HS.wd = navigator.webdriver; } catch (e) {}
   try { if (typeof navigator.maxTouchPoints === 'number') HS.mtp = navigator.maxTouchPoints; } catch (e) {}
   try { if (typeof navigator.hardwareConcurrency === 'number') HS.hc = navigator.hardwareConcurrency; } catch (e) {}
   try { if (typeof navigator.deviceMemory === 'number') HS.dm = navigator.deviceMemory; } catch (e) {}
@@ -2171,25 +2178,35 @@ func challengeHTML() string {
           try { sessionStorage.removeItem('cfm_v2r'); } catch (e) {}
           window.location = res.url; return;
         }
-        // A 403 here can be a Rung-1 v2_reject. Retry-able by design (D5c),
-        // but with capped exponential backoff and a give-up so a
-        // misclassified real client neither loops hot into the verify rate
-        // limiter nor burns CPU forever; after the cap the static help text
-        // stands and a manual reload starts fresh.
+        // Rung-1 v2_reject ONLY (marked by the X-CFM-V2 header — any other
+        // 403 cause, e.g. blocked cookies or an expired PoW token, keeps the
+        // page's original flat retry and its "enable JavaScript & cookies"
+        // hint). Rejects are retry-able by design (D5c) but with capped
+        // exponential backoff and a give-up, so a misclassified real client
+        // neither loops hot into the verify rate limiter nor burns CPU
+        // forever. The counter EXPIRES after 2 minutes of quiet, so a manual
+        // reload later genuinely starts fresh (sessionStorage outlives the
+        // reload itself).
+        var v2rej = false;
+        try { v2rej = (res.status === 403 && res.headers.get('X-CFM-V2') === 'reject'); } catch (e) {}
         var v2n = 0;
-        try { v2n = parseInt(sessionStorage.getItem('cfm_v2r') || '0', 10) || 0; } catch (e) {}
-        if (res.status === 403) {
+        if (v2rej) {
+          try {
+            var v2s = (sessionStorage.getItem('cfm_v2r') || '').split('|');
+            var v2ts = parseInt(v2s[1] || '0', 10) || 0;
+            if (Date.now() - v2ts < 120000) v2n = parseInt(v2s[0] || '0', 10) || 0;
+          } catch (e) {}
           v2n++;
-          try { sessionStorage.setItem('cfm_v2r', String(v2n)); } catch (e) {}
+          try { sessionStorage.setItem('cfm_v2r', v2n + '|' + Date.now()); } catch (e) {}
           if (v2n >= 6) {
             try {
               var m = document.querySelector('.muted');
-              if (m) m.textContent = "Verification could not complete. Please wait a minute and reload, or contact the site owner.";
+              if (m) m.textContent = "Verification could not complete. Please wait a minute and reload; if this keeps happening, contact the site owner.";
             } catch (e) {}
             return;
           }
         }
-        var v2wait = Math.min(1200 * Math.pow(2, v2n), 30000);
+        var v2wait = v2rej ? Math.min(1200 * Math.pow(2, v2n), 30000) : 1200;
         setTimeout(function(){ window.location = "/?next="+encodeURIComponent(next); }, v2wait);
       }).catch(function(){
         setTimeout(function(){ location.reload(); }, 1200);

@@ -45,8 +45,8 @@ func TestFingerprintPolicyStore(t *testing.T) {
 
 	SetFingerprintPolicies([]FingerprintPolicy{
 		{ID: id, Action: "deny"},
-		{ID: "AABBCCDD", Action: "challenge"}, // stored lowercased
-		{ID: "11223344", Action: "observe"},   // unknown action → dropped
+		{ID: "AABBCCDD", Action: "challenge"},                                       // stored lowercased
+		{ID: "11223344", Action: "observe"},                                         // unknown action → dropped
 		{ID: "55667788", Action: "challenge_v2", ExpiresAt: time.Now().Add(-time.Hour)}, // expired
 	})
 

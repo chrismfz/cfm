@@ -200,10 +200,10 @@ func (s *http3OverrideStore) IsEnabled(host string) bool {
 // pattern and whether it was an exact match (vs. wildcard). Used by the
 // cfm-admin UI to render the toggle row correctly:
 //
-//   - exact match  → row is toggleable (operator can flip it off here)
-//   - wildcard hit → row is enabled but NOT toggleable (the wildcard
-//     must be edited via CLI; flipping this single host
-//     would be confusing).
+//   * exact match  → row is toggleable (operator can flip it off here)
+//   * wildcard hit → row is enabled but NOT toggleable (the wildcard
+//                    must be edited via CLI; flipping this single host
+//                    would be confusing).
 //
 // CRITICAL: this is the ONLY function the UI should use for deciding
 // "is this host opted in?". Earlier versions reused matchHostExclude

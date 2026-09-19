@@ -125,13 +125,13 @@ func TestHTTP3OverrideStore_RejectsUnsupportedPatterns(t *testing.T) {
 	s := newHTTP3OverrideStore(filepath.Join(dir, "http3.json"))
 
 	rejected := []string{
-		"[abc].example.com",    // bracket class
-		"api?.example.com",     // single-char wildcard
-		"cdn.*.example.com",    // mid-pattern asterisk
-		"*foo.example.com",     // bare leading asterisk (no dot)
-		"foo.*",                // bare trailing asterisk
-		"*.*.example.com",      // multiple asterisks
-		"sub.[01].example.com", // bracket inside otherwise plain host
+		"[abc].example.com",     // bracket class
+		"api?.example.com",      // single-char wildcard
+		"cdn.*.example.com",     // mid-pattern asterisk
+		"*foo.example.com",      // bare leading asterisk (no dot)
+		"foo.*",                 // bare trailing asterisk
+		"*.*.example.com",       // multiple asterisks
+		"sub.[01].example.com",  // bracket inside otherwise plain host
 	}
 	for _, p := range rejected {
 		if s.Add(p, nil) {

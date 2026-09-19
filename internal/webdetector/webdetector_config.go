@@ -321,16 +321,16 @@ type Config struct {
 	// (host → expiry/reason) so a long TTL survives a daemon restart. Auto
 	// challenges are score-driven and self-restore, so they need no on-disk
 	// state; only the manual, operator-intended ones do.
-	ChallengeManualStorePath  string // CHALLENGE_MANUAL_STORE_PATH
-	ClamScanOverrideStorePath string // CLAM_SCAN_OVERRIDE_STORE_PATH (per-vhost ClamAV upload-scan opt-out)
-	ClamModeOverrideStorePath string // CLAM_MODE_OVERRIDE_STORE_PATH (per-vhost async/inline mode flip)
-	ClamSigIgnoreStorePath    string // CLAM_SIGIGNORE_STORE_PATH (per-signature ClamAV excludes, global + per-vhost)
-	HTTP3OverridesStorePath   string // HTTP3_OVERRIDES_STORE_PATH (per-vhost H3 opt-in)
-	TrafficRulesStorePath     string // TRAFFIC_RULES_STORE_PATH
+	ChallengeManualStorePath  string        // CHALLENGE_MANUAL_STORE_PATH
+	ClamScanOverrideStorePath string        // CLAM_SCAN_OVERRIDE_STORE_PATH (per-vhost ClamAV upload-scan opt-out)
+	ClamModeOverrideStorePath string        // CLAM_MODE_OVERRIDE_STORE_PATH (per-vhost async/inline mode flip)
+	ClamSigIgnoreStorePath    string        // CLAM_SIGIGNORE_STORE_PATH (per-signature ClamAV excludes, global + per-vhost)
+	HTTP3OverridesStorePath   string        // HTTP3_OVERRIDES_STORE_PATH (per-vhost H3 opt-in)
+	TrafficRulesStorePath     string        // TRAFFIC_RULES_STORE_PATH
 	// ChallengeAccessStorePath persists the Challenge Access-Control allow-list
 	// (multi-dimension per-vhost challenge exemptions; see challenge_access.go).
-	ChallengeAccessStorePath string        // CHALLENGE_ACCESS_STORE_PATH
-	IPScoreRules             []IPScoreRule // IP_SCORE_RULES = block:0.90,challenge:0.75
+	ChallengeAccessStorePath  string        // CHALLENGE_ACCESS_STORE_PATH
+	IPScoreRules              []IPScoreRule // IP_SCORE_RULES = block:0.90,challenge:0.75
 
 	// UA emergency control surface (bot-top).
 	// JSON snapshot consumed by the Lua enforcement layer, plus an
