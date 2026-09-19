@@ -137,12 +137,21 @@ already opened.
       ahrefs/…) honoured before anything counts.
 - [ ] **E3 — Phase C minimal + ChallengeV2 Rung 1 with teeth** *(both repos;
       the keystone).*
-      - cfm-web: `/fingerprint-policies/fetch` (mirror `/blocklist/fetch`),
-        the dedicated arm permission, match-time verdict re-validation
-        (checklist already written: `cfm-web:docs/fingerprint-reputation.md` §7).
-      - cfm node: pull armed policies on the blocklist cadence; edge matches
-        the handshake fp; actions `challenge` (floor), `challenge_v2` (floor,
-        per the 2026-09-12 rung decision), `deny` (farm-unique only, D2).
+      - [x] cfm-web slice 1 — **DONE 2026-09-18**: `GET /api/fingerprint-policies/fetch`
+        (token-authed; serve-time re-validation — `deny` withheld below a farm
+        verdict, `observe` never served), the dedicated `Arm:FingerprintPolicy`
+        permission, `challenge_v2` in the arm vocabulary. As-built:
+        `cfm-web:docs/fingerprint-reputation.md` §7.
+      - [x] cfm node slice — **DONE 2026-09-19**: agent-channel pull (~60s,
+        stale-ok) → package-level store → `GET /nginx/fppolicy` bridge lookup
+        (tuple→id stays single-sourced in `internal/tlsfp`) → edge
+        `cfm_fppolicy.lua` cache + `cfm.lua` Step 0c: `deny` 403s BEFORE the
+        clearance fast-path; challenge/challenge_v2 are a floor for uncleared
+        clients (v2 behaves as v1 until Rung 1 ships). Knobs `FP_POLICY` /
+        `FP_POLICY_ALLOW_FPS`; expires honoured at lookup. **Web path only** —
+        the panel-port gate (`cfm_panel.lua`) does not consult the policy yet.
+      - [ ] Panel-port fp-policy consult (`cfm_panel.lua` — same Step-0c
+        lookup so an armed deny also covers `:2083/:2087/:2096`).
       - ChallengeV2 Rung 1 (passive humanity probe): build it (the config keys
         already live on the fleet ahead of the code — row 12), and give it
         teeth from day one **for convicted fingerprints only**: convicted fp +

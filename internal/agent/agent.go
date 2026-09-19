@@ -38,6 +38,7 @@ type Runner struct {
 	backend            firewall.Backend
 	cfgDir             string
 	heartbeatSuccesses uint64
+	fpPull             fpPolicyPullState
 }
 
 func New(cfg Config) *Runner {
@@ -148,8 +149,11 @@ func (r *Runner) loop() {
 	t := time.NewTicker(r.cur().Interval)
 	defer t.Stop()
 
-	// fire immediately
+	// fire immediately — the policy pull too: the enforcement store is empty
+	// on every daemon restart, so waiting for the first 20s tick would open a
+	// window where an armed deny silently stops biting.
 	r.doHeartbeat(context.Background())
+	r.fetchFPPolicies(context.Background())
 
 	for {
 		select {
@@ -159,6 +163,7 @@ func (r *Runner) loop() {
 			r.doHeartbeat(context.Background())
 			r.fetchPendingUnblocks(context.Background())
 			r.syncConfigs(context.Background())
+			r.fetchFPPolicies(context.Background())
 
 		}
 		// (αν χρειαστεί dynamic interval, μπορούμε να αναδημιουργήσουμε ticker)

@@ -12,18 +12,28 @@
 // extension list or its order. Enough for a coherence check, and it needs no
 // module or patched edge. See configs/lua/cfm_tlsfp.lua for the producer.
 //
-// LOG-FIRST, deliberately. Nothing here decides anything: the id exists so
-// solves can be grouped and the fingerprint-to-UA mapping DERIVED from real
-// traffic. Writing that mapping from memory is the mistake internal/uaplausible
-// exists to warn about — the cipher names are also OpenSSL-build dependent, so a
-// table lifted from another fleet would not even be comparable.
+// The id was log-first through its burn-in, and AUTOMATIC decisions still
+// never key on it (the shadow-first invariant for signals). Since the E3 node
+// slice, one ENFORCEMENT path exists: an OPERATOR-armed per-fingerprint policy
+// (cfm-web fingerprint_policies → the agent pull → FingerprintPolicyForID →
+// the /nginx/fppolicy bridge lookup, webdetector/fppolicy.go). The
+// fingerprint-to-UA mapping remains something to DERIVE from real traffic —
+// writing it from memory is the mistake internal/uaplausible exists to warn
+// about; the cipher names are also OpenSSL-build dependent, so a table lifted
+// from another fleet would not even be comparable.
 //
-// TRUST BOUNDARY: the edge clears any client-supplied X-CFM-TLS before setting
-// its own, so in edge mode the value is edge-generated. A client that reaches
-// the daemon's listener directly (loopback / legacy DNAT) can still supply one.
-// That is acceptable while this is log-only and the value is sanitised to a safe
-// charset and bounded length — it means a client can write a fake fingerprint
-// for its own log lines, nothing more. Revisit before anything scores on it.
+// TRUST BOUNDARY (revisited for the E3 enforcement, as promised): the edge
+// clears any client-supplied X-CFM-TLS before setting its own, so in edge mode
+// the value is edge-generated. Enforcement inputs stay on that safe side —
+// the /nginx/fppolicy lookup's tuple is built by the edge itself
+// (cfm_tlsfp.value()) and travels over the token-authed bridge socket, never a
+// client header. A client that reaches the daemon's listener directly
+// (loopback / legacy DNAT) can still supply a header, which today taints only
+// LOG/EVIDENCE surfaces (solve lines, solver-farm findings): it cannot evade
+// an armed policy (its spoofed value never feeds the edge lookup), and using
+// it to frame a victim bucket into a conviction is bounded by the conviction
+// needing wide IP/subnet/country spread AND enforcement being a manual,
+// permission-gated operator arm on the corroborated evidence.
 package tlsfp
 
 import (

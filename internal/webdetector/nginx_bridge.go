@@ -1552,6 +1552,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/upload", b.instrument("/nginx/upload", b.handleUpload))
 	mux.HandleFunc("/nginx/upload/scan", b.instrument("/nginx/upload/scan", b.handleUploadScanSync))
 	mux.HandleFunc("/nginx/events/batch", b.instrument("/nginx/events/batch", b.handleEventsBatch))
+	mux.HandleFunc("/nginx/fppolicy", b.instrument("/nginx/fppolicy", b.handleFpPolicy))
 
 	srv := newBridgeHTTPServer(mux)
 

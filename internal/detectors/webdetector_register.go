@@ -991,6 +991,17 @@ func init() {
 			logging.Logf("[webdetector] ignore-nets lua cache write failed: %v", err)
 		}
 
+		// Fingerprint-policy enforcement posture (master plan E3 node slice):
+		// FP_POLICY (default ON — with nothing armed centrally the store is
+		// empty and every lookup answers ""; arming is the operator's explicit,
+		// permission-gated act in cfm-web) and FP_POLICY_ALLOW_FPS (per-id
+		// exemptions, the ALLOW_FPS-style escape hatch). Package-level like the
+		// solverfarm marks; re-applied on every reload.
+		webdet.ConfigureFingerprintPolicyEnforcement(
+			kvBool(kv, "FP_POLICY", true),
+			csvKV(kv, "FP_POLICY_ALLOW_FPS"),
+		)
+
 		engine := webdet.NewEngine(cfg)
 
 		// Under-Attack Mode (I1): feed the per-vhost solving-IP rate (entry leg 2

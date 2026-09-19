@@ -351,19 +351,25 @@ and snapshot-refresh races. When spawning subprocesses or background
 refreshers, ensure reaping, bounded backoff, and stale-snapshot markers
 rather than advancing heartbeats on failure.
 
-### Traffic classifier / fingerprint reputation ("evidence ledger") — shadow-first, move carefully
+### Traffic classifier / fingerprint reputation ("evidence ledger") — shadow-first signals, operator-armed enforcement
 New Sep 2026. The node convicts a **fingerprint** (TLS/JA4, e.g. `c28caa00`) and
-emits **evidence only** — it never enforces on a fingerprint. Three grains feed the
-central ledger in cfm-web: `solver_farm` (per-vhost solving farms), `challenge_score`
-(per-IP `would_deny`, persisted to `detection_history`), and WAF-hit fp attribution
-(the handshake-derived `cfm_tlsfp` stamped on `waf_trigger` — **not** the spoofable
-`X-CFM-TLS` client header). Hard-won invariant, **do not cross it**: shadow-first —
-nothing on the node keys enforcement on a fingerprint, the `WAFHitEvent` published to
-`waf_security` carries **no** fingerprint (so autoblock can't key on it), and a
-fingerprint is a **population, not one client** (a legit browser/residential IP shares
-a coarse TLS bucket with a farm). The intended non-`deny` escalation is **ChallengeV2**
-(an interactive, headless-defeating challenge — armable per-fingerprint), **designed,
-not built**. **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
+emits **evidence** for the central ledger in cfm-web — three grains: `solver_farm`
+(per-vhost solving farms), `challenge_score` (per-IP `would_deny`, persisted to
+`detection_history`), and WAF-hit fp attribution (the handshake-derived
+`cfm_tlsfp` stamped on `waf_trigger` — **not** the spoofable `X-CFM-TLS` client
+header). Hard-won invariant, **do not cross it**: no SIGNAL keys enforcement on a
+fingerprint **automatically** — the `WAFHitEvent` published to `waf_security`
+carries **no** fingerprint (so autoblock can't key on it), and a fingerprint is a
+**population, not one client** (a legit browser/residential IP shares a coarse
+TLS bucket with a farm). Since 2026-09-19 (master plan **E3 node slice**) the ONE
+enforcement path is the **operator-armed** per-fingerprint policy: cfm-web
+`fingerprint_policies` (arming is permission-gated there) → agent pull →
+`internal/webdetector/fppolicy.go` store → `/nginx/fppolicy` bridge lookup →
+`cfm.lua` Step 0c (`deny` 403s pre-clearance; challenge/challenge_v2 are a floor
+for uncleared clients; web path only — the panel ports do not consult it yet).
+Knobs `[webdetector] FP_POLICY` / `FP_POLICY_ALLOW_FPS`. ChallengeV2 as an
+actual harder rung is **designed, not built** — `challenge_v2` currently behaves
+as `challenge` at the edge. **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
 the ONE roadmap/decision log; the other docs' phase checklists are frozen). Design
 hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
 (central). See also `docs/challenge-score.md`, `docs/roadmaps/challenge-engine.md` §8.1.

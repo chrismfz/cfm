@@ -17,12 +17,15 @@
 -- or its order, which is what a real JA4 hashes. That needs a module or a
 -- patched edge; this needs nothing, which is why it goes first.
 --
--- LOG-FIRST. Nothing decides on this value. It is stamped so the daemon can
--- record it beside the UA and the solve latency, and so the fingerprint↔UA
--- mapping can be DERIVED FROM REAL TRAFFIC later. Do not turn it into a rule
--- from a hand-written table of "what Chrome 118 looks like" — that is the exact
--- mistake internal/uaplausible's doc comment warns about.
--- See docs/roadmaps/challenge-engine.md.
+-- The STAMP itself decides nothing — it exists so the daemon can record the
+-- value beside the UA and solve latency, and so the fingerprint↔UA mapping can
+-- be DERIVED FROM REAL TRAFFIC (never from a hand-written "what Chrome 118
+-- looks like" table — the exact mistake internal/uaplausible's doc warns
+-- about). Since the E3 node slice, value() is ALSO the input to the
+-- fingerprint-policy lookup (cfm_fppolicy.lua, cfm.lua Step 0c) — an
+-- OPERATOR-armed enforcement path; the tuple stays edge-generated end to end,
+-- so a client still cannot choose its fingerprint there.
+-- See docs/roadmaps/challenge-engine.md and docs/abuse-defense-master-plan.md.
 
 local M = {}
 

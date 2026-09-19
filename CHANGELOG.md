@@ -17,6 +17,33 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Fleet-armed fingerprint-policy enforcement — Phase C node slice (master
+  plan E3).** The daemon now pulls the operator-armed per-fingerprint actions
+  (deny / challenge / challenge_v2) from cfm-web's
+  `/api/fingerprint-policies/fetch` on the agent channel (~60s; stale-ok on
+  outage) and answers per-fingerprint lookups on the bridge socket
+  (`GET /nginx/fppolicy` — the raw handshake tuple in, the armed action out,
+  so the id hash stays single-sourced in `internal/tlsfp`). The edge
+  (`cfm_fppolicy.lua` + `cfm.lua` Step 0c) caches answers per distinct
+  fingerprint (GREASE-normalised key, shared dict, fail-open on every path)
+  and enforces: **`deny` → 403 BEFORE the clearance fast-path** (a solver farm
+  that beats the PoW is still denied; `X-CFM-Action: fp_deny`, logged with the
+  fingerprint id), **challenge/challenge_v2 → a challenge floor** for
+  uncleared clients (valid clearance still passes; v2 behaves as v1 until the
+  Rung-1 engine ships). Knobs: `[webdetector] FP_POLICY` (default 1 — a no-op
+  until something is armed centrally, arming being permission-gated in
+  cfm-web) and `FP_POLICY_ALLOW_FPS` (per-id operator escape hatch); policy
+  `expires_at` is honoured at lookup time. Lookup answers are cached in a new
+  dedicated `cfm_fppolicy` shared dict (declared in both edge confs; falls
+  back to the decisions dict on upgrade lag) with a node-wide RPC budget, so
+  a client minting fresh handshake tuples can neither churn the decision
+  cache nor force unbounded lookups. **Known limitation:** the web path only —
+  the panel ports (`:2083/:2087/:2096`, `cfm_panel.lua`) do not consult the
+  policy yet (follow-up slice). Edge-affecting: roll out per
+  `docs/challenge-waf-release-checklist.md` (the new shared dict needs the
+  proxy reload that ships the conf).
+
 ### Changed
 - **Abuse-defense docs consolidated under one plan of record**:
   `docs/abuse-defense-master-plan.md` now carries the single roadmap +

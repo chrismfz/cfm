@@ -1093,6 +1093,23 @@ func runDaemon(args []string) {
 	// agent
 	agLc := agentpkg.NewLifecycle(Version, be, cfgDir)
 	defer agLc.Stop()
+	// Fingerprint-policy pull → webdetector enforcement store (master plan E3
+	// node slice): the agent Runner pulls the armed per-fingerprint policies
+	// from cfm-web (same channel/creds as the heartbeat) and this sink swaps
+	// the snapshot into the package-level store the /nginx/fppolicy bridge
+	// lookup answers from. Enforcement posture (FP_POLICY / FP_POLICY_ALLOW_FPS)
+	// is applied separately from detectors.conf at webdetector registration.
+	agLc.SetFingerprintPolicySink(func(rows []agentpkg.FingerprintPolicyRow) {
+		ps := make([]webdet.FingerprintPolicy, 0, len(rows))
+		for _, row := range rows {
+			ps = append(ps, webdet.FingerprintPolicy{
+				ID:        row.Fingerprint,
+				Action:    row.Action,
+				ExpiresAt: row.ExpiresAt,
+			})
+		}
+		webdet.SetFingerprintPolicies(ps)
+	})
 
 	// (ctx, sslcol, sslSockLc moved to top of runDaemon — see the
 	// "SSL collector early-start" block right after cfm.conf is parsed.

@@ -1235,6 +1235,47 @@ end
 -- ─────────────────────────────────────────────────────────────────────────────
 local function cfm_enforce()
 
+-- ── Step 0c: Fleet-armed fingerprint policy (Phase C, master plan E3) ────────
+-- The operator arms a per-fingerprint action in cfm-web; the daemon pulls the
+-- list and answers /nginx/fppolicy lookups; cfm_fppolicy caches per distinct
+-- fingerprint so the hot path pays one shdict get. Runs BEFORE clearance on
+-- purpose: `deny` must bite a client that SOLVED the challenge (the farm
+-- does), and the fingerprint rides every request's handshake. challenge /
+-- challenge_v2 are a FLOOR only — recorded here, honoured at Step 3 for
+-- uncleared clients (valid clearance still passes at Step 2b: the floor is
+-- satisfied by solving; v2 behaves as v1 until the Rung-1 engine ships).
+-- pcall-guarded + fail-open: any failure means no fingerprint action.
+local fp_action = ""
+do
+  local ok_fp, act, fpid = pcall(function()
+    -- Stashed in ngx.ctx so the WAF push (Step 2) reuses the tuple instead of
+    -- rebuilding it from the ssl_* vars.
+    local raw = require("cfm_tlsfp").value()
+    ngx.ctx.cfm_tlsfp_raw = raw or false
+    if not raw then return "", nil end
+    return require("cfm_fppolicy").lookup({
+      raw = raw,
+      -- Dedicated dict (churn isolation — see cfm_fppolicy.lua); fall back to
+      -- the decisions dict only on upgrade lag before the proxy reloads the
+      -- conf that declares it.
+      sh  = ngx.shared.cfm_fppolicy or SH,
+      rpc = function(path)
+        return decision:rpc("fppolicy", "GET", path, nil, { ip = ip, host = host })
+      end,
+    })
+  end)
+  if ok_fp and type(act) == "string" and act ~= "" then
+    fp_action = act
+    if fp_action == "deny" then
+      ngx.header["X-CFM-Action"] = "fp_deny"
+      ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
+      log_route(ngx.WARN, "fp_deny ip=" .. ip .. " host=" .. host ..
+        " fpid=" .. tostring(fpid or "-"))
+      return ngx.exit(CFG.block_code)
+    end
+  end
+end
+
 -- ── POST resume ──────────────────────────────────────────────────────────────
 try_apply_post_resume(ip, host)
 method = ngx.req.get_method() or method
@@ -1389,10 +1430,18 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         -- NOT the client-supplied X-CFM-TLS header, which this WAF path does not
         -- clear (only /__cfm_verify does) and so would be client-SPOOFABLE. value()
         -- is unspoofable and charset/length-bounded; Go parses it to the canonical
-        -- fp id. Computed only here, on a pushed trigger (rare) — no per-request
-        -- cost. pcall-guarded (like the /__cfm_verify stamp) so a missing/broken
-        -- cfm_tlsfp module can never 500 the request; nil on plain-HTTP or failure.
-        local ok_fp, tls_fp = pcall(function() return require("cfm_tlsfp").value() end)
+        -- fp id. Step 0c (the fingerprint-policy lookup) already computed the
+        -- tuple and stashed it in ngx.ctx.cfm_tlsfp_raw (false = plain-HTTP/
+        -- none), so reuse it and rebuild only when the stash is absent (Step 0c
+        -- pcall failed). pcall-guarded (like the /__cfm_verify stamp) so a
+        -- missing/broken cfm_tlsfp module can never 500 the request.
+        local stash = ngx.ctx.cfm_tlsfp_raw
+        local ok_fp, tls_fp
+        if stash ~= nil then
+          ok_fp, tls_fp = true, (stash or nil)
+        else
+          ok_fp, tls_fp = pcall(function() return require("cfm_tlsfp").value() end)
+        end
         if not ok_fp then tls_fp = nil end
         local push = {
           ip = ip, action = waf_action, ttl_sec = ttl or 600,
@@ -1525,8 +1574,11 @@ if ip_action == "block" or vh_action == "block" or rule_action == "block" then
   return ngx.exit(CFG.block_code)
 end
 
--- Challenge
-if ip_action == "challenge" or vh_action == "challenge" or rule_action == "challenge" then
+-- Challenge — fp_action is the Step-0c fingerprint-policy FLOOR: an uncleared
+-- client whose fingerprint is armed challenge/challenge_v2 is challenged as if
+-- the vhost were challenge-armed (a cleared one already passed at Step 2b).
+if ip_action == "challenge" or vh_action == "challenge" or rule_action == "challenge"
+  or fp_action == "challenge" or fp_action == "challenge_v2" then
   if ngx.ctx.cfm_resumed_post then
     -- Only an UNCLEARED replay reaches here: a resumed POST that holds valid
     -- clearance took the Step 2b fast-path to origin (clearance_allow now keys on
@@ -1543,7 +1595,8 @@ if ip_action == "challenge" or vh_action == "challenge" or rule_action == "chall
   end
   ngx.header["X-CFM-Action"] = "challenge"
   ngx.var.cfm_upstream = "cfm_challenge"; ngx.var.cfm_pass = "http://cfm_challenge"
-  log_route(ngx.INFO, "challenge ip=" .. ip .. " host=" .. host .. cache_flag)
+  log_route(ngx.INFO, "challenge ip=" .. ip .. " host=" .. host .. cache_flag ..
+    ((fp_action == "challenge" or fp_action == "challenge_v2") and (" fp_floor=" .. fp_action) or ""))
   return
 end
 
