@@ -7,7 +7,6 @@ import (
 	"cfm/internal/uaplausible"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -451,6 +450,20 @@ type ChallengeSolve struct {
 	// TLSRaw is the full tuple behind TLSFP, kept so it can be written once per
 	// distinct fingerprint instead of on every solve.
 	TLSRaw string
+	// HumanityScore is the ChallengeV2 Rung-1 passive score for this solve
+	// (challenge_v2.go). -1 = scoring disabled; 0 = scored, nothing fired.
+	// Positive-evidence-only by construction (D5b): a missing payload or
+	// missing signals cannot raise it. Rendered via HumanitySuffix() on both
+	// solve-line writers.
+	HumanityScore int
+	// HumanityTells is the comma-joined list of tells that fired ("" when none).
+	HumanityTells string
+	// HumanityNoPayload is set when the verify carried no parseable humanity
+	// body (older cached page, blocked JS, or a client that stripped it). The
+	// log renders it as hs=- so "scored clean" and "reported nothing" are
+	// distinguishable — a fleet-wide hs=- is a regression or an evading farm,
+	// and either must be visible (D5d), never disguised as hs=0.
+	HumanityNoPayload bool
 }
 
 // TLSFingerprintOrDash renders TLSFP for a log line. Empty means "not
@@ -615,11 +628,15 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			}
 		}
 
-		// Hard cap body even though we don't use it (abuse / slowloris-ish clients)
-		r.Body = http.MaxBytesReader(w, r.Body, maxVerifyBodyBytes)
-		// Drain/close (some clients send junk; prevent resource pinning)
-		_, _ = io.Copy(io.Discard, r.Body)
-		_ = r.Body.Close()
+		// Bounded read of the OPTIONAL Rung-1 humanity payload (challenge_v2.go).
+		// This is also the historical drain: the body is fully consumed and
+		// closed here whatever it contains, so junk/slowloris-ish clients still
+		// cannot pin the connection. The bytes are KEPT for scoring below —
+		// draining to Discard first and parsing later is exactly the ordering
+		// bug the slice-3 review caught (the payload read as permanently
+		// absent). An over-cap or errored read degrades to "no payload", which
+		// the scorer treats as nothing-reported (D5b), never as evidence.
+		humanityBody := readVerifyBody(w, r)
 
 		// Header / Host / UA sanity (defense-in-depth)
 		if !basicHeaderSanity(w, r) {
@@ -701,19 +718,39 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		ua := strings.TrimSpace(r.UserAgent())
 		uaVerdict := uaplausible.Check(ua)
 		fp, _ := tlsfp.Parse(r.Header.Get(tlsFingerprintHeader))
+
+		// ChallengeV2 Rung 1 (challenge_v2.go): score the passive humanity
+		// payload the page posted with this verify. hs = -1 when the rung is
+		// disabled; an absent/malformed payload scores like an empty report
+		// (only UA-borne openers can fire) — absence never convicts (D5b).
+		v2On, v2Fail, v2Debug, v2Shadow := challengeV2Settings()
+		hs, hsTells, hsNoPayload := -1, "", false
+		if v2On {
+			sig := parseHumanityBody(humanityBody)
+			hsNoPayload = sig == nil
+			score, tells := scoreHumanity(sig, ua)
+			hs, hsTells = score, strings.Join(tells, ",")
+			if v2Debug {
+				w.Header().Set("X-CFM-HS", strconv.Itoa(score))
+			}
+		}
+
 		solve := ChallengeSolve{
-			IP:           ipStr,
-			Host:         host,
-			URI:          next,
-			Diff:         diff,
-			UA:           ua,
-			VerifyMS:     time.Since(verifyStart).Milliseconds(),
-			SolveMS:      powSolveLatencyMS(issuedAt, verifyAt, cfg.TTL),
-			UAImpossible: uaVerdict.Impossible,
-			UAReason:     uaVerdict.Reason(),
-			UAFamily:     uaVerdict.Family,
-			TLSFP:        fp.ID,
-			TLSRaw:       fp.Raw,
+			IP:                ipStr,
+			Host:              host,
+			URI:               next,
+			Diff:              diff,
+			UA:                ua,
+			VerifyMS:          time.Since(verifyStart).Milliseconds(),
+			SolveMS:           powSolveLatencyMS(issuedAt, verifyAt, cfg.TTL),
+			UAImpossible:      uaVerdict.Impossible,
+			UAReason:          uaVerdict.Reason(),
+			UAFamily:          uaVerdict.Family,
+			TLSFP:             fp.ID,
+			TLSRaw:            fp.Raw,
+			HumanityScore:     hs,
+			HumanityTells:     hsTells,
+			HumanityNoPayload: hsNoPayload,
 		}
 
 		// One dictionary line per distinct fingerprint, so every solve can carry
@@ -736,6 +773,36 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			})
 		}
 
+		// D5 gate — teeth ONLY for an operator-armed challenge_v2 fingerprint:
+		// a failing score there means the PoW solve earns NO clearance. The 403
+		// carries `X-CFM-V2: reject` so the page can tell a Rung-1 reject from
+		// any other verify 403 and apply its bounded backoff to the right case;
+		// its error path then reloads into a fresh challenge — retry-able by
+		// construction (D5c), never a silent wall. Placed AFTER the first_seen
+		// dictionary write on purpose: a fingerprint seen only on rejected
+		// solves must still get its id→tuple line, or the burn-in operator
+		// cannot resolve the very fingerprint being rejected (D5d; verification
+		// -pass finding). The rejected solve is deliberately NOT published/
+		// hooked as a solved event (it cleared nothing); its own log line is
+		// the record. Everyone else: a would-fail score is shadow — one
+		// abuse-shadow line (rides the ABUSE_SHADOW master via
+		// ConfigureChallengeV2), clearance unaffected.
+		if v2On && hs >= v2Fail {
+			if FingerprintPolicyForID(solve.TLSFP) == "challenge_v2" {
+				logging.LogfCHALLENGES(
+					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s tls_fp=%s ua=%q",
+					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.TLSFingerprintOrDash(), solve.UA)
+				w.Header().Set("X-CFM-V2", "reject")
+				http.Error(w, "verification failed", http.StatusForbidden)
+				return
+			}
+			if v2Shadow {
+				logging.LogfABUSESHADOW(
+					"[abuse-shadow] signal=humanity host=%s ip=%s hs=%d tells=%s fp=%s verdict=would_v2",
+					solve.Host, solve.IP, hs, hsTells, solve.TLSFingerprintOrDash())
+			}
+		}
+
 		publishChallengeSolveEvent(solve)
 
 		if challengeSolvedHook != nil {
@@ -751,7 +818,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				solveMS = strconv.FormatInt(ms, 10)
 			}
 			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q",
+				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s",
 				solve.IP,
 				solve.Host,
 				solve.URI,
@@ -761,6 +828,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				solve.TLSFingerprintOrDash(),
 				solve.UAFamilyOrDash(),
 				solve.UA,
+				solve.HumanitySuffix(),
 			)
 		}
 
@@ -1978,6 +2046,58 @@ func challengeHTML() string {
     return "";
   }
 
+  // ChallengeV2 Rung 1 — PASSIVE humanity signals, reported with the verify
+  // POST and scored server-side (internal/webdetector/challenge_v2.go, D5
+  // guardrails). Nothing here changes the user experience: no puzzle, no
+  // gesture requirement, no extra wait. Every probe is individually
+  // try/catch'd and an absent value is simply omitted — the server treats
+  // absence as "nothing reported", never as evidence. Do not add a probe
+  // that requires user interaction; that is Rung 2's job, with an
+  // accessibility fallback, if it is ever built.
+  // An ABSENT property is OMITTED, never coerced to a reported zero — the
+  // server may only convict on values the browser actually reported (a
+  // "| 0" here would manufacture positive evidence out of absence on old
+  // WebViews, the exact D5b violation the slice-3 review caught).
+  var HS = { v: 1, mv: 0, ptr: 0, tch: 0, key: 0 };
+  try { if (typeof navigator.webdriver === 'boolean') HS.wd = navigator.webdriver; } catch (e) {}
+  try { if (typeof navigator.maxTouchPoints === 'number') HS.mtp = navigator.maxTouchPoints; } catch (e) {}
+  try { if (typeof navigator.hardwareConcurrency === 'number') HS.hc = navigator.hardwareConcurrency; } catch (e) {}
+  try { if (typeof navigator.deviceMemory === 'number') HS.dm = navigator.deviceMemory; } catch (e) {}
+  try {
+    if (typeof window.outerWidth === 'number' && typeof window.outerHeight === 'number') {
+      HS.ow = window.outerWidth; HS.oh = window.outerHeight;
+    }
+  } catch (e) {}
+  try { if (typeof window.devicePixelRatio === 'number') HS.dpr = window.devicePixelRatio; } catch (e) {}
+  try {
+    var cv = document.createElement('canvas');
+    var gl = cv.getContext('webgl') || cv.getContext('experimental-webgl');
+    if (gl) {
+      var ex = gl.getExtension('WEBGL_debug_renderer_info');
+      if (ex) HS.glr = String(gl.getParameter(ex.UNMASKED_RENDERER_WEBGL) || '').slice(0, 128);
+    }
+  } catch (e) {}
+  try {
+    window.addEventListener('pointermove', function (ev) {
+      HS.ptr++;
+      HS.mv += Math.abs(ev.movementX || 0) + Math.abs(ev.movementY || 0);
+    }, { passive: true });
+    window.addEventListener('touchstart', function () { HS.tch++; }, { passive: true });
+    window.addEventListener('keydown', function () { HS.key++; }, { passive: true });
+  } catch (e) {}
+  try {
+    var rafT = 0, rafN = 0, rafAcc = 0;
+    var rafStep = function (ts) {
+      if (rafT) { rafAcc += ts - rafT; rafN++; }
+      rafT = ts;
+      if (rafN < 8) { requestAnimationFrame(rafStep); } else { HS.raf = rafAcc / rafN; }
+    };
+    requestAnimationFrame(rafStep);
+  } catch (e) {}
+  function hsBody(){
+    try { return JSON.stringify(HS); } catch (e) { return ""; }
+  }
+
   function b64urlToBytes(s){
     s = (s || "").replace(/-/g,'+').replace(/_/g,'/');
     while (s.length %% 4) s += '=';
@@ -2051,10 +2171,43 @@ func challengeHTML() string {
           "X-CFM-Pow": powTok,
           "X-CFM-Sol": sol,
         },
+        body: hsBody(),
         credentials: "include"
       }).then(function(res){
-        if (res.redirected) { window.location = res.url; return; }
-        setTimeout(function(){ window.location = "/?next="+encodeURIComponent(next); }, 1200);
+        if (res.redirected) {
+          try { sessionStorage.removeItem('cfm_v2r'); } catch (e) {}
+          window.location = res.url; return;
+        }
+        // Rung-1 v2_reject ONLY (marked by the X-CFM-V2 header — any other
+        // 403 cause, e.g. blocked cookies or an expired PoW token, keeps the
+        // page's original flat retry and its "enable JavaScript & cookies"
+        // hint). Rejects are retry-able by design (D5c) but with capped
+        // exponential backoff and a give-up, so a misclassified real client
+        // neither loops hot into the verify rate limiter nor burns CPU
+        // forever. The counter EXPIRES after 2 minutes of quiet, so a manual
+        // reload later genuinely starts fresh (sessionStorage outlives the
+        // reload itself).
+        var v2rej = false;
+        try { v2rej = (res.status === 403 && res.headers.get('X-CFM-V2') === 'reject'); } catch (e) {}
+        var v2n = 0;
+        if (v2rej) {
+          try {
+            var v2s = (sessionStorage.getItem('cfm_v2r') || '').split('|');
+            var v2ts = parseInt(v2s[1] || '0', 10) || 0;
+            if (Date.now() - v2ts < 120000) v2n = parseInt(v2s[0] || '0', 10) || 0;
+          } catch (e) {}
+          v2n++;
+          try { sessionStorage.setItem('cfm_v2r', v2n + '|' + Date.now()); } catch (e) {}
+          if (v2n >= 6) {
+            try {
+              var m = document.querySelector('.muted');
+              if (m) m.textContent = "Verification could not complete. Please wait a minute and reload; if this keeps happening, contact the site owner.";
+            } catch (e) {}
+            return;
+          }
+        }
+        var v2wait = v2rej ? Math.min(1200 * Math.pow(2, v2n), 30000) : 1200;
+        setTimeout(function(){ window.location = "/?next="+encodeURIComponent(next); }, v2wait);
       }).catch(function(){
         setTimeout(function(){ location.reload(); }, 1200);
       });

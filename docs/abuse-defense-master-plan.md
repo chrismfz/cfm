@@ -102,6 +102,22 @@ D3/D4 are the process fix.
 - **D4 — Sensor freeze.** No new shadow signals and no new design docs in
   this area until E1–E3 (§5) have shipped and been measured. The next PR here
   is an actuator.
+- **D5 — Humanity checks must not be authoritarian (operator, 2026-09-19;
+  governs ChallengeV2 Rung 1 and any successor).** Four locks, all hard
+  requirements: **(a) scope** — passive humanity scoring gets TEETH only for
+  fingerprints an operator explicitly armed (`challenge_v2`), TTL'd and
+  disarmable; for everyone else it is shadow/log-only. **(b) absence never
+  convicts** — a solve fails only on POSITIVE headless evidence (e.g.
+  `navigator.webdriver=true`, software-renderer + impossible-screen combos);
+  missing signals (keyboard-only users, privacy browsers blocking canvas,
+  partial JS) can never fail a solve on their own. **(c) failure is
+  retry-able, never a silent wall** — a failed passive check re-serves the
+  challenge (and, once Rung 2 exists, escalates to a VISIBLE interactive
+  check with an accessibility fallback); a no-recourse deny stays reserved
+  for farm-unique fingerprints per D2. **(d) full observability** — every
+  scored solve logs `hs=` + `tells=` so the operator can see exactly why any
+  client passed or failed, with a shadow burn-in + measured FP rate (D3 exit
+  contract) before teeth are trusted.
 
 ## 5. Enforcement roadmap — the only live checklist
 
@@ -152,12 +168,40 @@ already opened.
         the panel-port gate (`cfm_panel.lua`) does not consult the policy yet.
       - [ ] Panel-port fp-policy consult (`cfm_panel.lua` — same Step-0c
         lookup so an armed deny also covers `:2083/:2087/:2096`).
-      - ChallengeV2 Rung 1 (passive humanity probe): build it (the config keys
-        already live on the fleet ahead of the code — row 12), and give it
-        teeth from day one **for convicted fingerprints only**: convicted fp +
-        failed passive check ⇒ no clearance issued (re-challenge / deny per
-        score). For everyone else it stays invisible/shadow. This is what
-        finally makes "the farm solves the PoW" a dead end for the farm.
+      - [x] ChallengeV2 Rung 1 — **DONE 2026-09-19** (`challenge_v2.go` +
+        the challenge-page passive collectors): every solve is scored on
+        positive headless evidence only (webdriver / HeadlessChrome UA fail
+        alone at 100; SwiftShader-class renderer 60, touch-lie 50, outer-zero
+        40 each PASS alone; no-input is an amplifier that never opens — D5b),
+        logged as `hs=`/`tells=` on the solve line. Armed `challenge_v2` fp +
+        failing score ⇒ `result=v2_reject`, 403, no clearance — the page
+        reloads into a fresh challenge (D5c). Everyone else: shadow
+        `signal=humanity verdict=would_v2` (rides ABUSE_SHADOW). Knobs
+        `CHALLENGE_V2_PASSIVE` / `_FAIL_SCORE` / `_DEBUG` (X-CFM-HS header).
+        Solving the PoW stops paying for an armed fingerprint: the solve no
+        longer earns clearance. **Honest limits (documented in
+        `challenge_v2.go`):** the report is client-authored, so a
+        signal-aware farm can fabricate a clean one — Rung 1 catches standard
+        automation stacks and raises per-exit cost (a stripped body shows as
+        `hs=-`, so evasion is visible); the escalation if beaten is Rung 2.
+        Teeth are web/edge-path-only (DNAT clients author their own
+        `X-CFM-TLS`), the same limitation family as the slice-2 edge match.
+        (Operator row-12 cleanup stands: delete the orphan `HUMANITY_*` keys
+        from live configs — the built rung uses `CHALLENGE_V2_*`, not those.)
+      - [ ] **Policy kinds: country / asn (E3 follow-up, operator decision
+        2026-09-19).** Generalise the policy channel's `kind` (today only
+        `tls`) to `country` and `asn` rows — same arm UI, feed, pull and TTL
+        machinery. **Challenge tiers only: `deny` per country/ASN is excluded
+        by doctrine** (D1-adjacent: a whole country in 403 with no recourse is
+        the authoritarian failure mode; `challenge_v2` gives ~the same bot
+        protection with near-zero collateral — if a per-country deny is ever
+        truly needed it is a per-vhost business decision, never global). Note
+        the house rule stays intact: "never an adverse decision on country/ASN
+        alone" binds AUTOMATIC signals; a manual, TTL'd operator arm is the
+        sanctioned exception. Country matching is cheap at the edge (geo is
+        already cached per request — no RPC needed); ASN needs a daemon
+        lookup. Until built, the node-level equivalent exists today via
+        traffic rules (`country_in` → challenge, per-vhost or global, TTL'd).
 - [ ] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.
