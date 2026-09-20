@@ -138,9 +138,10 @@ already opened.
         section's Top networks / Top countries chips (and row Network cells)
         are toggle filters (country AND asn combine, URL-shareable,
         server-sanitized; `country` is the full GeoLite2 name), and ONE
-        `ipQuery()` feeds the table, the filtered counts and `blockKind()`,
-        so the bulk block buttons act on exactly the visible slice (kind
-        gates unchanged). Per-country/ASN *challenge* buttons deliberately
+        `ipQuery()` feeds the table and the filtered counts. Bulk blocks act
+        on the CONFIRMED scope (filter+count baked into the click; a
+        mid-flight toggle can't widen the set; drift aborts) — kind gates
+        unchanged. Per-country/ASN *challenge* buttons deliberately
         NOT faked here — they arrive with the policy-kinds item below. **What E1 buys, honestly:** the
       datacenter members are only ~11% of the captured footprint (~4,100 of
       ~36,200 on `c28caa00`) — but they are the *stable, reused* part of the
