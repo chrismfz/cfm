@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.20
+
 ### Fixed
 - **Fingerprint-policy hot-path hardening** (two review findings on the E3
   node slice, surfaced by the whats_wrong work's self-review): (1) the edge's
