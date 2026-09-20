@@ -128,3 +128,80 @@ func TestHandleFpPolicy(t *testing.T) {
 		t.Fatalf("garbage fp: code=%d out=%v", code, out)
 	}
 }
+
+// ── Geo kinds (policy-kinds slice): country/ASN challenge floors ─────────────
+
+func TestGeoPolicyStoreAndLookup(t *testing.T) {
+	resetFPPolicies(t)
+	t.Cleanup(func() { SetFingerprintPolicyGeoResolver(nil) })
+
+	asnCalls := 0
+	asnFn := func() uint64 { asnCalls++; return 6799 }
+
+	// Empty store: no lookup work at all (asnFn never consulted).
+	if got := GeoPolicyAction("GR", asnFn); got != "" || asnCalls != 0 {
+		t.Fatalf("empty store: got %q asnCalls=%d", got, asnCalls)
+	}
+
+	SetFingerprintPolicies([]FingerprintPolicy{
+		{ID: "gr", Kind: "country", Action: "challenge_v2"},
+		{ID: "6799", Kind: "asn", Action: "challenge"},
+		{ID: "US", Kind: "country", Action: "deny"},         // geo deny → dropped (doctrine)
+		{ID: "DE", Kind: "country", Action: "challenge", ExpiresAt: time.Now().Add(-time.Minute)}, // expired
+		{ID: "notanasn", Kind: "asn", Action: "challenge"},  // unparseable → dropped
+		{ID: "FR", Kind: "wat", Action: "challenge"},        // unknown kind → dropped
+	})
+
+	// Country match (case-insensitive), before any ASN work.
+	asnCalls = 0
+	if got := GeoPolicyAction("gr", asnFn); got != "challenge_v2" {
+		t.Fatalf("country lookup got %q", got)
+	}
+	if asnCalls != 0 {
+		t.Fatalf("asnFn consulted despite country hit")
+	}
+
+	// Country miss → ASN match.
+	if got := GeoPolicyAction("IT", asnFn); got != "challenge" {
+		t.Fatalf("asn lookup got %q", got)
+	}
+
+	// Geo deny was dropped, expired country answers nothing.
+	if got := GeoPolicyAction("US", func() uint64 { return 0 }); got != "" {
+		t.Fatalf("geo deny must never be enforceable, got %q", got)
+	}
+	if got := GeoPolicyAction("DE", func() uint64 { return 0 }); got != "" {
+		t.Fatalf("expired country policy answered %q", got)
+	}
+
+	// FP_POLICY master knob gates geo kinds too.
+	ConfigureFingerprintPolicyEnforcement(false, nil)
+	if got := GeoPolicyAction("GR", asnFn); got != "" {
+		t.Fatalf("disabled enforcement still answered %q", got)
+	}
+	ConfigureFingerprintPolicyEnforcement(true, nil)
+
+	// Verify-side helper: resolver-driven; nil resolver fails open.
+	if got := GeoPolicyActionForIP("203.0.113.9"); got != "" {
+		t.Fatalf("nil resolver must fail open, got %q", got)
+	}
+	SetFingerprintPolicyGeoResolver(func(ip string) (string, uint64) { return "", 6799 })
+	if got := GeoPolicyActionForIP("203.0.113.9"); got != "challenge" {
+		t.Fatalf("resolver-driven asn lookup got %q", got)
+	}
+	SetFingerprintPolicyGeoResolver(func(ip string) (string, uint64) { return "GR", 0 })
+	if got := GeoPolicyActionForIP("203.0.113.9"); got != "challenge_v2" {
+		t.Fatalf("resolver-driven country lookup got %q", got)
+	}
+}
+
+func TestGeoPoliciesDoNotLeakIntoFingerprintLookup(t *testing.T) {
+	resetFPPolicies(t)
+	SetFingerprintPolicies([]FingerprintPolicy{
+		{ID: "gr", Kind: "country", Action: "challenge"},
+	})
+	// A country target must never answer a fingerprint-id lookup (separate maps).
+	if got := FingerprintPolicyForID("gr"); got != "" {
+		t.Fatalf("country policy leaked into fp lookup: %q", got)
+	}
+}

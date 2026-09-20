@@ -367,7 +367,12 @@ enforcement path is the **operator-armed** per-fingerprint policy: cfm-web
 `internal/webdetector/fppolicy.go` store → `/nginx/fppolicy` bridge lookup →
 `cfm.lua` Step 0c (`deny` 403s pre-clearance; challenge/challenge_v2 are a floor
 for uncleared clients; web path only — the panel ports do not consult it yet).
-Knobs `[webdetector] FP_POLICY` / `FP_POLICY_ALLOW_FPS`. **ChallengeV2 Rung 1
+Knobs `[webdetector] FP_POLICY` / `FP_POLICY_ALLOW_FPS`. Since 2026-09-20 the
+same feed also carries **country / ASN policy kinds** (challenge tiers ONLY —
+a geo `deny` is excluded by doctrine and dropped at three gates), enforced
+daemon-side as a challenge floor in `handleDecision` (country from edge
+geo/enrich, ASN via the local mmdb) with `challenge_v2` biting at verify via
+the geo resolver; no edge Lua involved, `FP_POLICY=0` kills all kinds. **ChallengeV2 Rung 1
 is built** (2026-09-19, `challenge_v2.go` + the challenge-page passive
 collectors, guardrails D5): every solve is scored on positive-only headless
 evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived), and

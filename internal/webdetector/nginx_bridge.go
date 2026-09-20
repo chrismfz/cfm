@@ -1784,6 +1784,23 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	ipAction := "allow"
 	vhAction := "allow"
 
+	// Geo-policy challenge FLOOR (policy-kinds slice): a fleet-armed country/
+	// ASN policy (challenge tiers ONLY — the store drops a geo deny) raises
+	// this request's baseline to challenge. Ordering is deliberate:
+	//   - after the static/host bypasses above (they always win);
+	//   - BEFORE the state read below, so an existing ipState entry (a real
+	//     per-IP block/challenge) simply overrides, and the solved-ok check
+	//     clears it — a client that solves passes, exactly like the
+	//     fingerprint challenge floor at the edge;
+	//   - before the good-bot / Challenge Access exemptions, which downgrade
+	//     a would-be challenge (a verified crawler from an armed country is
+	//     never challenged).
+	// country is already resolved above (edge geo or enrich); the ASN lookup
+	// runs only when ASN policies are armed and the country missed.
+	if ga := GeoPolicyAction(country, func() uint64 { return uint64(lookupGeo().ASN) }); ga != "" {
+		ipAction = "challenge"
+	}
+
 	b.mu.RLock()
 	if e, ok := b.ipState[ip]; ok && e.Expires.After(now) {
 		ipAction = e.Action

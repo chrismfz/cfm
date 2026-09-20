@@ -1104,6 +1104,7 @@ func runDaemon(args []string) {
 		for _, row := range rows {
 			ps = append(ps, webdet.FingerprintPolicy{
 				ID:        row.Fingerprint,
+				Kind:      row.Kind,
 				Action:    row.Action,
 				ExpiresAt: row.ExpiresAt,
 			})
