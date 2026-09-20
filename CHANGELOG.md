@@ -17,7 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Fleet-armed country/ASN challenge policies (master plan "policy kinds").**
+  The fingerprint-policy feed now also carries operator-armed per-country
+  (ISO-2) and per-ASN policies — challenge tiers ONLY (a geo `deny` does not
+  exist by doctrine and the node drops one defensively). The daemon enforces
+  them as a challenge floor on the per-IP decision path (country from the
+  edge geo / enrichment, ASN via the local GeoLite2-ASN mmdb, consulted
+  lazily): uncleared clients from an armed scope get the challenge, solving
+  passes, verified good bots and Challenge Access entries stay exempt, and an
+  armed `challenge_v2` scope applies the Rung-1 humanity gate at verify. No
+  edge Lua changes; `FP_POLICY = 0` kills all policy kinds. Arm/disarm lives
+  in cfm-web (Explain Fingerprint, from the IP section's filters).
 
 ## 2026.09.20
 

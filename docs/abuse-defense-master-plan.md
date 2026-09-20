@@ -198,20 +198,35 @@ already opened.
         `X-CFM-TLS`), the same limitation family as the slice-2 edge match.
         (Operator row-12 cleanup stands: delete the orphan `HUMANITY_*` keys
         from live configs — the built rung uses `CHALLENGE_V2_*`, not those.)
-      - [ ] **Policy kinds: country / asn (E3 follow-up, operator decision
-        2026-09-19).** Generalise the policy channel's `kind` (today only
-        `tls`) to `country` and `asn` rows — same arm UI, feed, pull and TTL
-        machinery. **Challenge tiers only: `deny` per country/ASN is excluded
-        by doctrine** (D1-adjacent: a whole country in 403 with no recourse is
-        the authoritarian failure mode; `challenge_v2` gives ~the same bot
-        protection with near-zero collateral — if a per-country deny is ever
-        truly needed it is a per-vhost business decision, never global). Note
-        the house rule stays intact: "never an adverse decision on country/ASN
-        alone" binds AUTOMATIC signals; a manual, TTL'd operator arm is the
-        sanctioned exception. Country matching is cheap at the edge (geo is
-        already cached per request — no RPC needed); ASN needs a daemon
-        lookup. Until built, the node-level equivalent exists today via
-        traffic rules (`country_in` → challenge, per-vhost or global, TTL'd).
+      - [x] **Policy kinds: country / asn — DONE 2026-09-20** (operator
+        decision 2026-09-19; both repos). The policy channel's `kind`
+        generalised to `country` (ISO-2) and `asn` rows — same arm
+        permission, feed, pull and TTL machinery. **Challenge tiers only:
+        `deny` per country/ASN is excluded by doctrine** (D1-adjacent: a
+        whole country in 403 with no recourse is the authoritarian failure
+        mode), enforced THREE times: arm-time refusal (cfm-web
+        `armGeo`), serve-time withhold (`deny_unsupported_kind`), and the
+        node store drops a geo deny on ingest. The house rule stays intact:
+        "never an adverse decision on country/ASN alone" binds AUTOMATIC
+        signals; the manual, TTL'd operator arm is the sanctioned exception.
+        As-built: arm from Explain Fingerprint's active country/ASN filter
+        (country target resolved to the ISO code via a sample member IP —
+        the ledger stores display names); feed rows carry
+        `policy_kind` + target; the node enforces daemon-side as a challenge
+        FLOOR on the per-IP decision path (country from the edge-passed/
+        enrich ISO, ASN via the local mmdb, lazy) — solved-ok clears it,
+        verified good bots and Challenge Access exemptions still apply, and
+        `challenge_v2` bites at verify via the geo resolver (same D5 gate as
+        the fingerprint grain). Old nodes ignore geo rows harmlessly.
+        `FP_POLICY=0` kills all kinds. Web/edge decision path only (same
+        residual family as the fp grain). Known residuals: the M2M endpoint
+        carve-out clears a geo-floor-only challenge (payment webhooks from an
+        armed country keep working — review finding, fixed in-slice); the
+        panel ports consult the same decision so an armed country adds
+        `would_enforce` logonly WARN noise there (no enforcement — the panel
+        probe is block-tier only); country hit wins over ASN hit at lookup;
+        cold IPs (enrich cache miss) fail open for up to the 90s edge
+        decision-cache window.
 - [ ] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.

@@ -1784,9 +1784,33 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	ipAction := "allow"
 	vhAction := "allow"
 
+	// Geo-policy challenge FLOOR (policy-kinds slice): a fleet-armed country/
+	// ASN policy (challenge tiers ONLY — the store drops a geo deny) raises
+	// this request's baseline to challenge. Ordering is deliberate:
+	//   - after the static/host bypasses above (they always win);
+	//   - BEFORE the state read below, so an existing ipState entry (a real
+	//     per-IP block/challenge) simply overrides, and the solved-ok check
+	//     clears it — a client that solves passes, exactly like the
+	//     fingerprint challenge floor at the edge;
+	//   - before the good-bot / Challenge Access exemptions, which downgrade
+	//     a would-be challenge (a verified crawler from an armed country is
+	//     never challenged).
+	// country is already resolved above (edge geo or enrich); the ASN lookup
+	// runs only when ASN policies are armed and the country missed.
+	// geoFloored tracks that the challenge is ONLY the geo floor (no per-IP
+	// suspicion): the M2M endpoint carve-out below must still clear it, or an
+	// armed country breaks every payment/webhook/API callback originating
+	// there (machine clients cannot solve a JS challenge — review finding).
+	geoFloored := false
+	if ga := GeoPolicyAction(country, func() uint64 { return uint64(lookupGeo().ASN) }); ga != "" {
+		ipAction = "challenge"
+		geoFloored = true
+	}
+
 	b.mu.RLock()
 	if e, ok := b.ipState[ip]; ok && e.Expires.After(now) {
 		ipAction = e.Action
+		geoFloored = false // a real per-IP entry owns the action now
 	}
 
 	// vhost exact match first, else wildcard
@@ -1840,6 +1864,14 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	// caught. isChallengeExemptEndpoint is deliberately narrow (see there).
 	if vhAction == "challenge" && ipAction == "allow" && isChallengeExemptEndpoint(uri) {
 		vhAction = "allow"
+	}
+	// Same carve-out for a GEO-FLOOR-only challenge: the floor is population
+	// suspicion (country/ASN), not per-IP suspicion, so a machine-to-machine
+	// endpoint (payment webhooks, WooCommerce REST, courier callbacks — see
+	// isChallengeExemptEndpoint) from an armed country must keep working; a
+	// real per-IP challenge/block cleared geoFloored above and is unaffected.
+	if geoFloored && ipAction == "challenge" && isChallengeExemptEndpoint(uri) {
+		ipAction = "allow"
 	}
 
 	// Verified good-bot challenge exemption (per-IP scope; mirrors the subnet

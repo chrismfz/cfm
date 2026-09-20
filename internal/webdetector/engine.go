@@ -650,6 +650,17 @@ func NewEngine(cfg Config) *Engine {
 		e.nginxBridge.SetEnricher(e.enr)
 	}
 
+	// Geo resolver for the verify-side challenge_v2 gate (policy-kinds slice):
+	// lets GeoPolicyActionForIP map a solving client's IP to country/ASN.
+	// Cached-or-async — a cold IP resolves on a later solve attempt (fail-open).
+	if e.enr != nil {
+		enr := e.enr
+		SetFingerprintPolicyGeoResolver(func(ip string) (string, uint64) {
+			r := enr.LookupCachedOrAsync(ip)
+			return r.CountryISO, uint64(r.ASN)
+		})
+	}
+
 	return e
 }
 

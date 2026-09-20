@@ -39,6 +39,7 @@ package webdetector
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,9 +49,14 @@ import (
 )
 
 // FingerprintPolicy is one armed enforcement policy as pulled from cfm-web.
-// A zero ExpiresAt means "until disarmed" (permanent).
+// A zero ExpiresAt means "until disarmed" (permanent). Kind discriminates the
+// target in ID (policy-kinds slice): "tls" (8-hex fingerprint id — the
+// original grain, matched at the edge via /nginx/fppolicy), "country" (ISO-2,
+// matched daemon-side on the per-IP decision path) or "asn" (AS number
+// digits, likewise). An empty Kind reads as "tls" (older feed).
 type FingerprintPolicy struct {
 	ID        string
+	Kind      string // "tls" (default) | "country" | "asn"
 	Action    string // "deny" | "challenge" | "challenge_v2"
 	ExpiresAt time.Time
 }
@@ -68,15 +74,30 @@ var fpPolicyActions = map[string]bool{
 }
 
 type fpPolicyState struct {
-	mu       sync.RWMutex
-	byID     map[string]FingerprintPolicy
-	enabled  bool
-	allow    map[string]bool // ids never enforced (operator escape hatch)
-	lastSet  time.Time
-	lastSize int
+	mu        sync.RWMutex
+	byID      map[string]FingerprintPolicy
+	byCountry map[string]FingerprintPolicy // ISO-2 → challenge-tier policy
+	byASN     map[uint64]FingerprintPolicy // AS number → challenge-tier policy
+	enabled   bool
+	allow     map[string]bool // ids never enforced (operator escape hatch)
+	lastSet   time.Time
+	lastSize  int
+	// geoResolver maps an IP to (countryISO, asn) for the VERIFY-side v2
+	// check (GeoPolicyActionForIP). Wired from the engine's enricher; nil
+	// means geo policies simply can't influence verify (fail-open).
+	geoResolver func(ip string) (string, uint64)
 }
 
 var fpPolicies = fpPolicyState{enabled: true}
+
+// geoPolicyActions: the actions a country/asn policy may carry — CHALLENGE
+// TIERS ONLY. cfm-web refuses a geo deny at arm time AND withholds it at
+// serve time; this is the node's own third gate (doctrine: a whole country in
+// 403 is the authoritarian failure mode — never enforceable here).
+var geoPolicyActions = map[string]bool{
+	"challenge":    true,
+	"challenge_v2": true,
+}
 
 // SetFingerprintPolicies replaces the whole policy set (the pull is a full
 // snapshot, mirroring the blocklist feeds — a disarmed policy disappears from
@@ -85,31 +106,60 @@ var fpPolicies = fpPolicyState{enabled: true}
 // older node enforce something it does not understand.
 func SetFingerprintPolicies(ps []FingerprintPolicy) {
 	byID := make(map[string]FingerprintPolicy, len(ps))
+	byCountry := map[string]FingerprintPolicy{}
+	byASN := map[uint64]FingerprintPolicy{}
 	dropped := 0
 	for _, p := range ps {
 		id := strings.ToLower(strings.TrimSpace(p.ID))
 		if id == "" {
 			continue
 		}
-		if !fpPolicyActions[p.Action] {
+		switch strings.ToLower(strings.TrimSpace(p.Kind)) {
+		case "", "tls":
+			if !fpPolicyActions[p.Action] {
+				dropped++
+				continue
+			}
+			byID[id] = FingerprintPolicy{ID: id, Kind: "tls", Action: p.Action, ExpiresAt: p.ExpiresAt}
+		case "country":
+			// Challenge tiers only (geoPolicyActions) — a deny here is a
+			// doctrine violation upstream and is dropped, never enforced.
+			cc := strings.ToUpper(id)
+			if len(cc) != 2 || !geoPolicyActions[p.Action] {
+				dropped++
+				continue
+			}
+			byCountry[cc] = FingerprintPolicy{ID: cc, Kind: "country", Action: p.Action, ExpiresAt: p.ExpiresAt}
+		case "asn":
+			n, err := strconv.ParseUint(id, 10, 32)
+			if err != nil || n == 0 || !geoPolicyActions[p.Action] {
+				dropped++
+				continue
+			}
+			byASN[n] = FingerprintPolicy{ID: id, Kind: "asn", Action: p.Action, ExpiresAt: p.ExpiresAt}
+		default:
+			// Unknown kind from a newer cfm-web: never enforce what this node
+			// does not understand.
 			dropped++
-			continue
 		}
-		byID[id] = FingerprintPolicy{ID: id, Action: p.Action, ExpiresAt: p.ExpiresAt}
 	}
 
+	total := len(byID) + len(byCountry) + len(byASN)
 	fpPolicies.mu.Lock()
-	changed := len(byID) != fpPolicies.lastSize
+	changed := total != fpPolicies.lastSize
 	fpPolicies.byID = byID
+	fpPolicies.byCountry = byCountry
+	fpPolicies.byASN = byASN
 	fpPolicies.lastSet = time.Now()
-	fpPolicies.lastSize = len(byID)
+	fpPolicies.lastSize = total
 	fpPolicies.mu.Unlock()
 
 	if dropped > 0 {
-		logging.Logf("[fppolicy] dropped %d policies with unknown action (newer cfm-web?)", dropped)
+		logging.Logf("[fppolicy] dropped %d policies with unknown/ineligible kind or action (newer cfm-web, or a geo deny)", dropped)
 	}
 	if changed {
-		logging.Logf("[fppolicy] policy set updated: %d armed fingerprints", len(byID))
+		logging.Logf("[fppolicy] policy set updated: %d armed (%d tls, %d country, %d asn)",
+			total, len(byID), len(byCountry), len(byASN))
 	}
 }
 
@@ -152,6 +202,77 @@ func FingerprintPolicyForID(id string) string {
 		return ""
 	}
 	return p.Action
+}
+
+// SetFingerprintPolicyGeoResolver wires the IP→(countryISO, asn) resolver the
+// VERIFY-side geo check uses (GeoPolicyActionForIP). Called once at engine
+// start with the enricher's cached lookup; nil disables the verify-side check
+// (fail-open — the decision-path floor still works from its own inputs).
+func SetFingerprintPolicyGeoResolver(fn func(ip string) (string, uint64)) {
+	fpPolicies.mu.Lock()
+	fpPolicies.geoResolver = fn
+	fpPolicies.mu.Unlock()
+}
+
+// geoPolicyLive re-checks expiry at lookup time (same contract as
+// FingerprintPolicyForID: an expired policy stops biting between pulls).
+// Caller holds at least RLock.
+func geoPolicyLive(p FingerprintPolicy, ok bool) string {
+	if !ok {
+		return ""
+	}
+	if !p.ExpiresAt.IsZero() && !p.ExpiresAt.After(time.Now()) {
+		return ""
+	}
+	return p.Action
+}
+
+// GeoPolicyAction returns the armed challenge-tier action for a request's
+// country/ASN, or "". The country check is map-read cheap; asnFn is consulted
+// ONLY when ASN policies exist and the country missed, so a fleet with no ASN
+// policies pays nothing for the (potentially mmdb-backed) ASN resolution.
+// Honours the FP_POLICY master knob like the fingerprint grain.
+// PRECEDENCE: a country hit wins over an ASN hit — so with country=challenge
+// AND asn=challenge_v2 both matching one client, the country's plain
+// challenge is the answer and the Rung-1 verify gate does not bite. Arm the
+// country itself at challenge_v2 if the teeth are wanted there.
+func GeoPolicyAction(country string, asnFn func() uint64) string {
+	fpPolicies.mu.RLock()
+	defer fpPolicies.mu.RUnlock()
+	if !fpPolicies.enabled || (len(fpPolicies.byCountry) == 0 && len(fpPolicies.byASN) == 0) {
+		return ""
+	}
+	if country != "" {
+		p, ok := fpPolicies.byCountry[strings.ToUpper(country)]
+		if a := geoPolicyLive(p, ok); a != "" {
+			return a
+		}
+	}
+	if len(fpPolicies.byASN) > 0 && asnFn != nil {
+		if n := asnFn(); n != 0 {
+			p, ok := fpPolicies.byASN[n]
+			if a := geoPolicyLive(p, ok); a != "" {
+				return a
+			}
+		}
+	}
+	return ""
+}
+
+// GeoPolicyActionForIP resolves an IP's country/ASN via the wired resolver
+// and returns the armed action (""). Verify-side use (the Rung-1 v2 gate on
+// solves) — off the request hot path, so the resolver's cached-or-async
+// lookup cost is fine.
+func GeoPolicyActionForIP(ip string) string {
+	fpPolicies.mu.RLock()
+	resolver := fpPolicies.geoResolver
+	empty := len(fpPolicies.byCountry) == 0 && len(fpPolicies.byASN) == 0
+	fpPolicies.mu.RUnlock()
+	if resolver == nil || empty || ip == "" {
+		return ""
+	}
+	country, asn := resolver(ip)
+	return GeoPolicyAction(country, func() uint64 { return asn })
 }
 
 // handleFpPolicy answers the edge's per-fingerprint lookup:

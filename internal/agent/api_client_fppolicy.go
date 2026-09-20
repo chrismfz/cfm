@@ -25,6 +25,7 @@ import (
 // wiring in cmd/cfm converts.
 type FingerprintPolicyRow struct {
 	Fingerprint string
+	Kind        string // "" reads as "tls"; "country"/"asn" are the geo kinds
 	Action      string
 	ExpiresAt   time.Time // zero = until disarmed
 }
@@ -54,6 +55,7 @@ func (c *APIClient) FetchFingerprintPolicies(ctx context.Context) ([]Fingerprint
 	var out struct {
 		Policies []struct {
 			Fingerprint string `json:"fingerprint"`
+			PolicyKind  string `json:"policy_kind"` // absent on older cfm-web → tls
 			Action      string `json:"action"`
 			ExpiresAt   string `json:"expires_at"`
 		} `json:"policies"`
@@ -64,7 +66,7 @@ func (c *APIClient) FetchFingerprintPolicies(ctx context.Context) ([]Fingerprint
 
 	rows := make([]FingerprintPolicyRow, 0, len(out.Policies))
 	for _, p := range out.Policies {
-		row := FingerprintPolicyRow{Fingerprint: p.Fingerprint, Action: p.Action}
+		row := FingerprintPolicyRow{Fingerprint: p.Fingerprint, Kind: p.PolicyKind, Action: p.Action}
 		if p.ExpiresAt != "" {
 			// cfm-web emits ISO-8601; a malformed value degrades to
 			// permanent-until-next-pull (the feed re-validates server-side and
