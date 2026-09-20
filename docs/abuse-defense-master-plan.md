@@ -132,7 +132,17 @@ already opened.
       guards (datacenter-only per D1, TTL'd via the fleet blacklist, good_bot
       exempt, critical-infra refused, never-downgrade). Ships operator-clicked
       first; a scheduled auto-run for `verdict=farm` is a separate opt-in PR
-      after the click flow proves clean. **What E1 buys, honestly:** the
+      after the click flow proves clean.
+      - [x] Drill-down control slice — **DONE 2026-09-20** (cfm-web, operator
+        decision: "more manual control BEFORE any risky automation"). The IP
+        section's Top networks / Top countries chips (and row Network cells)
+        are toggle filters (country AND asn combine, URL-shareable,
+        server-sanitized; `country` is the full GeoLite2 name), and ONE
+        `ipQuery()` feeds the table and the filtered counts. Bulk blocks act
+        on the CONFIRMED scope (filter+count baked into the click; a
+        mid-flight toggle can't widen the set; drift aborts) — kind gates
+        unchanged. Per-country/ASN *challenge* buttons deliberately
+        NOT faked here — they arrive with the policy-kinds item below. **What E1 buys, honestly:** the
       datacenter members are only ~11% of the captured footprint (~4,100 of
       ~36,200 on `c28caa00`) — but they are the *stable, reused* part of the
       farm's supply (EGIHOSTING/HostRoyale/Datacamp exits recur; the WAF side
