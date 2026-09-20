@@ -227,6 +227,38 @@ already opened.
         probe is block-tier only); country hit wins over ASN hit at lookup;
         cold IPs (enrich cache miss) fail open for up to the 90s edge
         decision-cache window.
+      - [ ] **ChallengeV2 arm surfaces (operator ask 2026-09-20): v2 as an
+        on-demand tier from WAF rules / vhost control / traffic rules /
+        scoped customers.** Insight that makes this cheap: challenge_v2 is
+        a VERIFY-time distinction, not a serve-time one — so "arm v2 from
+        X" only needs verify to know the challenge came from a v2-tier
+        source. Foundation: a small per-(ip, host) **rung mark** TTL store
+        in webdetector, written as a side effect wherever a challenge is
+        already issued daemon-side (handleDecision for vhost mode / rules /
+        geo floors; RecordWAFTrigger→ChallengeIP for WAF pushes), OR'd into
+        the verify gate next to the fp/geo checks. D5 carries over verbatim
+        (an explicit rule mode / vhost toggle IS an operator arm; fails stay
+        retry-able; hs=- keeps evasion visible); consider a dedicated
+        CHALLENGE_V2_ENFORCE kill switch since v2 teeth stop being
+        fp-policy-only. Slices, in order:
+        - [ ] **A — rung-mark store + verify OR + per-vhost v2 mode**
+          (vhState rung; cfm-admin vhost control dropdown, API `rung=`
+          param, CLI `cfm challenge vhost <host> --rung v2 --ttl 2h`). The
+          operationally hottest: "farm is solving PoW on this shop → v2
+          for 2h".
+        - [ ] **B — traffic-rules action `challenge_v2`** (rules-model.js +
+          traffic_rules.go SAME PR — Simulate IS enforcement; rules builder
+          option). Gives per-vhost-per-condition v2.
+        - [ ] **C — WAF rule tier `challenge_v2`** (cfm_waf.lua mode + Go
+          registry + rule-mode UI): the missing rung in the promotion
+          ladder `logonly → challenge → challenge_v2 → block`. Challenge
+          tier ⇒ does NOT arm waf_security autoblock (Phase 1 is
+          block-only); panel gate stays block-tier.
+        - [ ] **D — scoped customer self-arm** (cPanel plugin "panic
+          button"): the FIRST scoped WRITE action, so it rides the hard
+          auth boundary — central validator, fail-closed, challenge tiers
+          only, OWN vhosts only, TTL cap (~24h). Last, and its own
+          security review.
 - [ ] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.
