@@ -232,6 +232,10 @@ func geoPolicyLive(p FingerprintPolicy, ok bool) string {
 // ONLY when ASN policies exist and the country missed, so a fleet with no ASN
 // policies pays nothing for the (potentially mmdb-backed) ASN resolution.
 // Honours the FP_POLICY master knob like the fingerprint grain.
+// PRECEDENCE: a country hit wins over an ASN hit — so with country=challenge
+// AND asn=challenge_v2 both matching one client, the country's plain
+// challenge is the answer and the Rung-1 verify gate does not bite. Arm the
+// country itself at challenge_v2 if the teeth are wanted there.
 func GeoPolicyAction(country string, asnFn func() uint64) string {
 	fpPolicies.mu.RLock()
 	defer fpPolicies.mu.RUnlock()

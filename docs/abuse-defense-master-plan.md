@@ -219,7 +219,14 @@ already opened.
         `challenge_v2` bites at verify via the geo resolver (same D5 gate as
         the fingerprint grain). Old nodes ignore geo rows harmlessly.
         `FP_POLICY=0` kills all kinds. Web/edge decision path only (same
-        residual family as the fp grain).
+        residual family as the fp grain). Known residuals: the M2M endpoint
+        carve-out clears a geo-floor-only challenge (payment webhooks from an
+        armed country keep working — review finding, fixed in-slice); the
+        panel ports consult the same decision so an armed country adds
+        `would_enforce` logonly WARN noise there (no enforcement — the panel
+        probe is block-tier only); country hit wins over ASN hit at lookup;
+        cold IPs (enrich cache miss) fail open for up to the 90s edge
+        decision-cache window.
 - [ ] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.
