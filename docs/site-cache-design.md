@@ -410,7 +410,6 @@ with no filesystem walking.
 | POST | `/api/v1/site-cache/update` | scope-checks existing **and** new vhosts |
 | POST | `/api/v1/site-cache/remove` | i.e. OFF for a vhost |
 | POST | `/api/v1/site-cache/purge` | `?host=` (per-vhost) or `?all=1` (global, admin) |
-| GET  | `/api/v1/site-cache/simulate?host=&uri=&method=&cookie=` | would-cache? which tier/recipe/TTL? why bypass? (read-only) |
 | GET  | `/api/v1/site-cache/stats?host=` | per-vhost cache stats (§11), scope-filtered (own vhosts / all) |
 
 Prefix `site-cache` added to `SharedAPIPrefixes()` so the shared apiserver
@@ -430,7 +429,6 @@ cfm webtop site-cache get <host>
 cfm webtop site-cache add <host> [--static RECIPE|--micro RECIPE] [--ttl D]
 cfm webtop site-cache off <host>          # remove / disable
 cfm webtop site-cache purge <host>        # or: purge --all
-cfm webtop site-cache simulate <host> <uri> [--method GET] [--cookie ...]
 cfm webtop site-cache stats [host]        # hit-ratio + HIT/MISS/BYPASS breakdown
 ```
 
@@ -446,7 +444,8 @@ Multi-page app, directory-routed (`internal/webui/embed.go`). Template =
 - a vhost table with **filter + sort** (host, tier(s) on, recipe, TTL, gen,
   updated, HIT-ratio), a per-row **OFF** and **Purge**, and a top-level
   **Purge all** (admin);
-- a **Recipes** panel (§8) and a **Simulate** panel (§8).
+- a **Recipes** panel (§8). Per-URL verification is done with the
+  `X-CFM-Cache` debug header (§8, §11.3), not a simulate panel.
 
 Scoped filtering: leave `site-cache` **out** of `ADMIN_ONLY_NAV_PATHS`
 (`controller-bootstrap.js`) so scoped cPanel users keep the link, and add
@@ -464,7 +463,7 @@ fail-closed regardless of the UI.
 
 ---
 
-## 8. Recipes + "start-disabled / Simulate"
+## 8. Recipes
 
 Recipes are a **front-end-only catalog** (each `build(vars)` emits ordinary CRUD
 payloads), exactly like `CA_RECIPES` (`challenge-access-recipes.js`). Catalog:
@@ -478,16 +477,23 @@ payloads), exactly like `CA_RECIPES` (`challenge-access-recipes.js`). Catalog:
 | `micro_custom` | micro | operator TTL (bucket) | enabled | full control |
 | `fullpage_advanced` | micro-zone, long TTL | hours | **DISABLED** | advanced, purge-aware only |
 
-A vhost can combine **one static + one micro** recipe. Per the repo's history
-(the `Simulate`-ignored-`Enabled` bug, CLAUDE.md §6), risky recipes are
-**built disabled** and there is a **Simulate** that answers, for a given
-`host + uri + method + cookie-state`: *would this be cached? which tier/recipe?
-what TTL? if bypassed, which rail bypassed it?* — so an operator (or tenant)
-**validates their login/redirect paths before arming**. Simulate is the direct
-answer to "how do I know it won't break my site."
+A vhost can combine **one static + one micro** recipe.
 
-The Simulate contract mirrors traffic-rules `disabled_match`: a disabled tier's
-would-be decision is returned for the UI but never enforced.
+**No Simulate.** Unlike traffic rules (where a wrong rule silently blocks
+legitimate traffic — hard to spot, high blast radius), a caching mistake is
+**bounded and reversible**: the §4 rails mean the worst case is *stale anonymous
+content*, never a security break, and the operator simply turns the vhost **OFF**
+(or **Purges**). Verification is therefore observational, not predictive:
+
+- **Live check for one URL:** `curl -I` and read the `X-CFM-Cache: HIT|MISS|BYPASS`
+  header (§11.3, behind a debug flag) — this is the per-URL "would it cache / why
+  bypassed" answer, for near-zero code.
+- **Aggregate check:** the §11 stats, especially the **BYPASS counter** — if a
+  vhost isn't behaving, its hit/bypass numbers show it immediately.
+
+`fullpage_advanced` still **ships disabled** simply as a safe default (the
+operator arms it when ready and watches the stats), not because a simulator gates
+it.
 
 ---
 
@@ -503,7 +509,7 @@ reuses the tested precedent verbatim:
   empty scope = deny; else every target host must be in the token allowlist.
 - Update re-checks **both** the existing entry's and the new host set (no
   re-scoping escalation). Remove/Purge re-fetch and scope-check first.
-- List/simulate are scope-filtered (`scopeFilterChallengeAccess` shape),
+- List/stats are scope-filtered (`scopeFilterChallengeAccess` shape),
   cross-tenant hosts redacted.
 - **Purge-all** (`?all=1`) is **admin-only**; a scoped `purge` is implicitly
   scoped to the caller's own vhosts.
@@ -513,7 +519,7 @@ ever cache their own anonymous, cookieless, non-redirect 200s — so full
 self-service power carries no cross-tenant or correctness risk.
 
 Update `docs/endpoint_scope_inventory.md` in the same change (hard rule,
-CLAUDE.md §5): site-cache list/get/simulate/stats = scoped-allowed (own host);
+CLAUDE.md §5): site-cache list/get/stats = scoped-allowed (own host);
 add/update/remove/purge = scoped-allowed (own host); purge-all = admin-only.
 
 ---
@@ -645,7 +651,7 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
    (`/nginx/cache/stats` pull) + `/api/v1/site-cache/stats` + the cfm-admin
    hit-ratio column + the new CI guard. Lowest-risk caching first, with the
    numbers to judge it.
-4. **Tier B (micro-cache)** + the full §4 rails + Simulate. Validate §5.5 items
+4. **Tier B (micro-cache)** + the full §4 rails. Validate §5.5 items
    on a live box (the `myip.gr` case) per the challenge/WAF release checklist.
 5. **cfm-admin page + Recipes** (+ `make test-js`), filter/sort, per-row + global
    Purge UI.
@@ -702,7 +708,7 @@ row, `CHANGELOG.md`.
   `assets/webdet/challenge-access-recipes.js` (recipe template),
   `assets/shared/nav.js`, `assets/webdet/core.js`,
   `assets/shared/controller-bootstrap.js`.
-- Docs: `docs/traffic-rules-ux-proposal.md` (recipes/Simulate UX),
+- Docs: `docs/traffic-rules-ux-proposal.md` (recipes UX),
   `docs/challenge-access-control.md`, `docs/endpoint_scope_inventory.md`,
   `docs/proxy-performance.md` (origin keepalive / proxy_ssl),
   `docs/challenge-waf-release-checklist.md` (edge release gate).
