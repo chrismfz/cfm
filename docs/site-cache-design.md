@@ -133,7 +133,7 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 | `GET`/`HEAD` only | `proxy_cache_methods` (default) | POST / logins cached |
 | Status: micro `200` only; static `200` (opt. `301/404`) | status gate + `proxy_cache_valid` | **3xx redirect / SSO loop cached** |
 | Response has `Set-Cookie` → never store | nginx default (we **never** add `Set-Cookie` to `proxy_ignore_headers`) | user A's session served to user B |
-| Request has an **auth/session cookie** → `$cfm_cache_skip=1` | Lua, cookie-name allowlist: `PHPSESSID`, `wordpress_logged_in_*`, `wordpress_sec_*`, `cpsession`, `roundcube_sessid`, roundcube/webmail, panel sessions, … | **logged-in users get stale/foreign content** |
+| Request carries a **named app-session cookie** → `$cfm_cache_skip=1` (see §4.1 — **allowlist by name**, NOT "any cookie") | Lua cookie-name allowlist | **logged-in users get stale/foreign content** |
 | Origin `Cache-Control: private\|no-store\|no-cache` → respect | nginx default (not ignored) | origin keeps the final say |
 | Panel hosts/ports (`:2083/:2087/:2096`), webmail hosts, `/.well-known/`, `/acctxfer*`, cPanel/webmail bypass paths → never | Lua gate, sits **after** `cfm.lua` Step 0a1 | **cPanel / webmail / SSO / AutoSSL broken** |
 | Cache key excludes cookies | `proxy_cache_key "$scheme$host$request_uri"` | per-user fragmentation / leakage |
@@ -143,6 +143,45 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 app, so they **may** be served micro-cache; the cache key never varies on the
 clearance cookie, and the clearance cookie is refreshed per-response by the edge
 (§5.5 flags the ordering item to verify in implementation).
+
+### 4.1 Cookie handling — why the challenge cookie does **not** block caching
+
+This is the single easiest way to accidentally neuter micro-cache, so it is a
+first-class rail, not a detail. The bypass is **not** "the request has a
+`Cookie` header." It is a **positive allowlist of app-session cookie names**,
+plus an explicit **ignore-list** that caching treats as anonymous:
+
+- **Auth allowlist (bypass → do not cache):** the cPanel-ecosystem session
+  cookies — `PHPSESSID`, `wordpress_logged_in_*`, `wordpress_sec_*`,
+  `wp-postpass_*`, `comment_author_*`, `woocommerce_*` / `wp_woocommerce_session_*`,
+  `cpsession`, `whmsession`, `roundcube_sessid` / `roundcube_sessauth`,
+  `horde_*`, `PrestaShop-*`, `laravel_session`, `ci_session`, `XSRF-TOKEN`
+  (session-bound), … — **operator/tenant-extensible** per vhost.
+- **Ignore-list (never bypass, treated as anonymous):** **`cfm_clearance` and
+  every `cfm_*` CFM-set cookie**, plus common non-session cookies (`_ga`,
+  `_gid`, `_gcl_*`, `_fbp`, consent/CMP cookies, …). A visitor whose **only**
+  cookies are these **IS cached.**
+
+So the answer to "won't our own challenge-solve cookie stop caching?" is **no**:
+`cfm_clearance` is on the ignore-list. A visitor who is *anonymous but cleared*
+(solved the challenge, no app login) is exactly the burst traffic micro-cache
+exists to absorb on a heavy page — and they get cached. Only a **named app
+session** bypasses.
+
+**The allowlist's blind spot** is an app using an unknown session-cookie name.
+Two layers cover it: (1) the **response-side rails** — a page that renders
+per-user almost always emits `Set-Cookie` and/or `Cache-Control:
+private|no-cache` (WordPress, Woo, Laravel, Roundcube all do), and both force
+"do not store"; (2) an **optional per-vhost `strict_cookies` flag** (advanced)
+that inverts the logic to *bypass on any cookie not on the ignore-list* — max
+safety at the cost of caching visitors who carry a stray analytics/consent
+cookie. Default is the allowlist (effective); `strict_cookies` is opt-in for a
+site the operator wants to be paranoid about. This is the same trade-off the
+classic nginx WordPress micro-cache recipe makes, tuned for the cPanel fleet.
+
+The §11 **BYPASS counter is how you validate this in production**: if a vhost
+shows high BYPASS + low HIT, the cookie allowlist (or `strict_cookies`) is
+bypassing traffic you expected to cache — tune it there, don't guess.
 
 ---
 
@@ -232,10 +271,16 @@ Lua picks the zone by setting `$cfm_cache_zone`. Each zone carries its own
 ### 5.5 Open edge items to validate during implementation
 
 1. **Clearance-cookie ordering.** Confirm the edge-set `cfm_clearance`
-   `Set-Cookie` (Step 2b refresh) does **not** mark the upstream response
-   uncacheable, and that every cache HIT still gets a fresh clearance cookie
-   in the header phase. If there is any interaction, micro-cache serves only the
-   Step 4 (uncleared-but-allowed) path in Phase 4 and Step 2b is added later.
+   `Set-Cookie` (Step 2b refresh) does **not** mark the *upstream* response
+   uncacheable — it must not: it is an edge-added cookie, not an origin one, and
+   nginx's "don't cache `Set-Cookie`" check looks at the upstream response
+   headers, which is processed before the edge adds the clearance cookie.
+   Verify the exact phase where the clearance cookie is set. Output header
+   filters (and `add_header` for 2xx/3xx) **do** run on cache HITs, so a cleared
+   visitor served from micro-cache still gets a fresh clearance cookie — that is
+   precisely why Step 2b is a valid cache-serving path. If any interaction is
+   found, Phase 4 ships micro-cache on the Step 4 (uncleared-but-allowed) path
+   only and Step 2b is added once verified.
 2. **Origin keepalive.** Caching sits in front of the origin regardless of the
    `ORIGIN_KEEPALIVE` pools; 443 `proxy_ssl_session_reuse off` is unaffected.
    Verify HIT/MISS accounting with KA armed.
@@ -260,6 +305,8 @@ and micro together:
   "generation": 3,                       // bumped by Purge (§10); part of the cache key
   "static": { "enabled": true,  "recipe": "static_aggressive", "ttl": "7d" },
   "micro":  { "enabled": false, "recipe": "micro_safe",        "ttl": "1s" },
+  "strict_cookies": false,               // §4.1 advanced: bypass on ANY non-ignored cookie
+  "auth_cookies": [],                    // §4.1 per-vhost extra app-session cookie names
   "created_at": "2026-09-21T...", "updated_at": "2026-09-21T..."
 }
 ```
@@ -284,6 +331,7 @@ with no filesystem walking.
 | POST | `/api/v1/site-cache/remove` | i.e. OFF for a vhost |
 | POST | `/api/v1/site-cache/purge` | `?host=` (per-vhost) or `?all=1` (global, admin) |
 | GET  | `/api/v1/site-cache/simulate?host=&uri=&method=&cookie=` | would-cache? which tier/recipe/TTL? why bypass? (read-only) |
+| GET  | `/api/v1/site-cache/stats?host=` | per-vhost cache stats (§11), scope-filtered (own vhosts / all) |
 
 Prefix `site-cache` added to `SharedAPIPrefixes()` so the shared apiserver
 proxies it to the engine mux. Never a bare `mux.HandleFunc` (a prefix-coverage
@@ -303,6 +351,7 @@ cfm webtop site-cache add <host> [--static RECIPE|--micro RECIPE] [--ttl D]
 cfm webtop site-cache off <host>          # remove / disable
 cfm webtop site-cache purge <host>        # or: purge --all
 cfm webtop site-cache simulate <host> <uri> [--method GET] [--cookie ...]
+cfm webtop site-cache stats [host]        # hit-ratio + HIT/MISS/BYPASS breakdown
 ```
 
 ### 7.3 cfm-admin page "Site Cache"
@@ -384,7 +433,7 @@ ever cache their own anonymous, cookieless, non-redirect 200s — so full
 self-service power carries no cross-tenant or correctness risk.
 
 Update `docs/endpoint_scope_inventory.md` in the same change (hard rule,
-CLAUDE.md §5): site-cache list/get/simulate = scoped-allowed (own host);
+CLAUDE.md §5): site-cache list/get/simulate/stats = scoped-allowed (own host);
 add/update/remove/purge = scoped-allowed (own host); purge-all = admin-only.
 
 ---
@@ -406,18 +455,58 @@ add/update/remove/purge = scoped-allowed (own host); purge-all = admin-only.
 
 ---
 
-## 11. Observability
+## 11. Cache statistics & observability
 
-Revive the orphaned plumbing instead of writing new:
+Yes — we persist per-vhost cache stats and show them in cfm-admin to **both**
+the admin (all vhosts) and the scoped user (their own vhosts only). It is cheap
+because every counter is incremented in `log_by_lua_block`, which runs **after**
+the response is served — zero cost on the serving path. We revive the orphaned
+plumbing instead of writing new.
+
+### 11.1 Edge counters (live, in-memory)
 
 - Declare `lua_shared_dict cfm_cache_stats` (both confs).
-- Wire `cfm_cache_log.lua` in a `log_by_lua_block` keyed on
-  `$upstream_cache_status` (HIT/MISS/BYPASS/EXPIRED/STALE/UPDATING/REVALIDATED)
-  per zone. `cfm_stats.lua:398-399` already reads this dict → the stats/dashboard
-  endpoint lights up for free.
-- Response header `X-CFM-Cache: HIT|MISS|BYPASS` (behind a debug flag) so an
-  operator can `curl` and verify a specific URL's decision.
-- cfm-admin per-vhost HIT-ratio column from the stats dict.
+- Extend `cfm_cache_log.lua` to take a **host** argument and key per-vhost, but
+  **only for cache-enabled vhosts** (bounded cardinality → the shdict cannot
+  blow up):
+  - `cache:host:<h>:status:<HIT|MISS|BYPASS|EXPIRED|STALE|UPDATING|REVALIDATED>`
+  - `cache:host:<h>:total`, `cache:host:<h>:last_seen_ts`
+  - `cache:host:<h>:tier:<static|micro>:...` (so the two tiers are separable)
+  - the existing per-zone + global totals (`cfm_stats.lua:398-399` already reads
+    these — the dashboard lights up for free).
+- Fed from `$upstream_cache_status` in `log_by_lua_block`. `BYPASS` = the rails
+  (§4/§4.1) declined to cache — the most useful diagnostic number (see §4.1).
+- Reset on nginx reload/restart (in-memory) — acceptable for a *live* ratio;
+  durability is handled by the daemon (§11.2).
+
+### 11.2 Daemon aggregate (durable, scoped, historical)
+
+The daemon pulls a counter snapshot on its existing tick via a new bridge read
+`GET /nginx/cache/stats` (token-gated, explicit Content-Length) → `{ hosts: {
+"<h>": {hit,miss,bypass,expired,stale,total,last_seen,tier:{...}}, … } }`. The
+daemon keeps a rolling per-vhost aggregate in memory (naturally **survives edge
+reloads**, since the daemon does not restart when nginx does) with an optional
+periodic disk snapshot to survive a daemon restart. This aggregate is the source
+the API/UI reads, so scoping is enforced daemon-side.
+
+- **v1 (Phase 3):** totals + HIT/MISS/BYPASS/EXPIRED/STALE breakdown + hit-ratio
+  + last-seen, per vhost and per tier. Cheap, immediate.
+- **v2 (later):** coarse hourly buckets (e.g. last 24×1h per vhost) for a
+  sparkline; optional bytes-saved estimate. Deferred — nice-to-have.
+
+### 11.3 Surfaces
+
+- **API:** `GET /api/v1/site-cache/stats[?host=]` — scope-filtered
+  (`vhostAllowed`): admin sees all, scoped user sees only their own vhosts.
+- **cfm-admin:** a **hit-ratio** column + a per-vhost detail card
+  (HIT/MISS/BYPASS breakdown, last-seen, per tier). A scoped cPanel user sees
+  their own site's effectiveness; the admin sees the fleet and a top-N.
+- **CLI:** `cfm webtop site-cache stats [host]`.
+- **`X-CFM-Cache: HIT|MISS|BYPASS`** response header (behind a debug flag) so an
+  operator can `curl -I` and verify a single URL's decision on the spot.
+
+New knob `SITE_CACHE_STATS = 1` (§12) gates the counting + snapshot; `0` drops
+even the log-phase increments.
 
 ---
 
@@ -429,6 +518,8 @@ Revive the orphaned plumbing instead of writing new:
 | `SITE_CACHE_STORE_PATH` | `/var/lib/cfm/webdetector_site_cache.json` | per-vhost store |
 | `SITE_CACHE_SCOPED` | `1` | allow scoped cPanel self-service (§9) |
 | `SITE_CACHE_CFG_REFRESH_SEC` | `10` | edge config-pull cadence |
+| `SITE_CACHE_STATS` | `1` | per-vhost cache counters + daemon snapshot (§11); `0` drops the log-phase increments |
+| `SITE_CACHE_AUTH_COOKIES` | (built-in allowlist) | extra app-session cookie names that force bypass, fleet-wide (§4.1); per-vhost extension lives in the store |
 
 Add the `SITE_CACHE` doc block to `configs/detectors.conf` under `[webdetector]`
 (mirror the `FP_POLICY` block), the `Config` fields + `FillDefaults` in
@@ -470,7 +561,10 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
    `proxy_cache` (observe-only). Lets us watch decisions in prod before any body
    is cached.
 3. **Tier A (static)** activation in both confs + `cfm_cache_stats` +
-   `cfm_cache_log` wiring + the new CI guard. Lowest-risk caching first.
+   `cfm_cache_log` (per-vhost) wiring + the daemon stats aggregate
+   (`/nginx/cache/stats` pull) + `/api/v1/site-cache/stats` + the cfm-admin
+   hit-ratio column + the new CI guard. Lowest-risk caching first, with the
+   numbers to judge it.
 4. **Tier B (micro-cache)** + the full §4 rails + Simulate. Validate §5.5 items
    on a live box (the `myip.gr` case) per the challenge/WAF release checklist.
 5. **cfm-admin page + Recipes** (+ `make test-js`), filter/sort, per-row + global
@@ -488,16 +582,19 @@ runtime PR adds a `CHANGELOG.md [Unreleased]` entry.
 resolve), `internal/webdetector/site_cache_api_handlers.go`,
 `internal/webdetector/cli_site_cache.go`.
 **Touch (Go):** `http_api.go` (`apiRoutes()` + `SharedAPIPrefixes()`),
-`cli.go` (dispatch + help), `nginx_bridge.go` (route + `handleCachePolicy` +
-`ListCachePolicy` hook), `engine.go` (construct store + wire hook),
+`cli.go` (dispatch + help), `nginx_bridge.go` (routes: `handleCachePolicy` +
+`ListCachePolicy` hook, and `handleCacheStats` snapshot read), `engine.go`
+(construct store + a per-vhost cache-stats aggregate the daemon fills from the
+`/nginx/cache/stats` pull + wire hooks),
 `webdetector_config.go` + `webdetector_register.go` + `manager.go` (knobs),
 `cmd/cfm/main.go` (canonical cache dirs already exist — reconcile bucket dirs).
 
 **Add (Lua):** `configs/lua/cfm_cache.lua`.
 **Touch (Lua/conf):** `configs/lua/cfm.lua` (Steps 2b/4 + static-location
 mini-gate + `$cfm_cache_*` var decls), `configs/openresty.conf` +
-`configs/angie.conf` (zones, `lua_shared_dict`, cache locations, fix stale
-comment), wire `cfm_cache_log.lua`.
+`configs/angie.conf` (zones, `lua_shared_dict cfm_cache_stats`, cache locations,
+`log_by_lua_block` wiring, fix stale comment), **extend** `cfm_cache_log.lua`
+(per-host arg, §11).
 
 **Add (UI):** the six files in §7.3.
 **Touch (UI):** `nav.js`, `core.js`, (leave `controller-bootstrap.js`'s
