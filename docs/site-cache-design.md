@@ -195,13 +195,24 @@ allows it. Declared identically in **both** confs, under
 `/var/cache/nginx/cfm_*` (the paths the daemon already creates):
 
 ```nginx
-# TTL buckets (see §5.4) — a small, admin-extensible menu, one zone per bucket.
+# TTL buckets (see §5.4) — an admin-extensible menu, one zone per bucket.
+# Static (disk): 1h / 7d / 30d
 proxy_cache_path /var/cache/nginx/cfm_static_1h  levels=1:2 keys_zone=cfm_static_1h:20m  max_size=5g  inactive=2h  use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_static_7d  levels=1:2 keys_zone=cfm_static_7d:20m  max_size=10g inactive=8d  use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_static_30d levels=1:2 keys_zone=cfm_static_30d:20m max_size=20g inactive=31d use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_micro_1s   levels=1:2 keys_zone=cfm_micro_1s:10m   max_size=1g  inactive=60s use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_micro_10s  levels=1:2 keys_zone=cfm_micro_10s:10m  max_size=1g  inactive=120s use_temp_path=off;
+# Micro (tiny, short-lived; may live on tmpfs — see §5.6): 1/2/5/10/30/60s
+proxy_cache_path /var/cache/nginx/cfm_micro_1s   levels=1:2 keys_zone=cfm_micro_1s:10m  max_size=512m inactive=30s  use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_2s   levels=1:2 keys_zone=cfm_micro_2s:10m  max_size=512m inactive=30s  use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_5s   levels=1:2 keys_zone=cfm_micro_5s:10m  max_size=512m inactive=60s  use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_10s  levels=1:2 keys_zone=cfm_micro_10s:10m max_size=512m inactive=60s  use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_30s  levels=1:2 keys_zone=cfm_micro_30s:10m max_size=1g   inactive=120s use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_60s  levels=1:2 keys_zone=cfm_micro_60s:10m max_size=1g   inactive=180s use_temp_path=off;
 ```
+
+Each cache location also carries the **anti-stampede** trio (§5.6):
+`proxy_cache_lock on;`, `proxy_cache_use_stale updating error timeout;`,
+`proxy_cache_background_update on;` — plus `proxy_cache_bypass`/`proxy_no_cache
+$cfm_cache_skip;` (§0) and `proxy_cache_key "g$cfm_cache_gen|$scheme$host$request_uri";` (§10).
 
 ### 5.2 Per-request decision transport: edge-pull → shared dict → local lookup
 
@@ -255,18 +266,31 @@ runs — so `X-Accel-Expires` set from Lua is **too late** and cannot drive TTL,
 and `proxy_cache_valid` is not variablizable. Truly arbitrary per-request TTL is
 therefore not natively supported.
 
-Resolution: **`proxy_cache` accepts a variable zone name.** We define a small,
-admin-extensible **menu of TTL buckets**, one cheap zone each (§5.1), and the
-Lua picks the zone by setting `$cfm_cache_zone`. Each zone carries its own
-`proxy_cache_valid`.
+Resolution: **`proxy_cache` accepts a variable zone name.** We define a
+**menu of TTL buckets**, one cheap zone each (§5.1), and the Lua picks the zone
+by setting `$cfm_cache_zone`. Each zone carries its own `proxy_cache_valid`. A
+cache HIT costs the same regardless of which zone, so more buckets = no
+per-request cost, only a little startup memory.
 
-- Per-vhost bucket choice is **reload-free** (it is just a policy value the edge
-  pulls).
-- "Custom TTL" = pick any bucket. If an admin needs a value not in the menu,
-  that adds a bucket = a rare zone-list regen + reload (not a per-vhost event).
-- Suggested starting buckets — micro: `1s, 5s, 30s`; static: `1h, 7d, 30d`.
-  Aggressive static also adds `Cache-Control: public, immutable` via `add_header`
-  on HIT for the asset location. Final bucket set is a Phase 3/4 tuning detail.
+**Micro — recommended presets AND custom, both work.** The recommended micro
+bucket set is **`{1, 2, 5, 10, 30, 60}s`** (6 tiny zones). The UI offers:
+- **Recommended presets:** `micro_safe → 1s`, `micro_aggressive → 15–30s`.
+- **Custom TTL field:** the operator types a value; it **snaps to the nearest
+  bucket**. For micro-cache (herd protection), the difference between 7s and 8s
+  is operationally meaningless, so the snapped set behaves as effectively
+  continuous — "custom" is honoured without fighting nginx. Per-vhost choice
+  (preset or custom) is **reload-free** (just a policy value the edge pulls). An
+  admin who wants a bucket outside the menu adds one = a rare zone-list regen +
+  reload (never a per-vhost event).
+
+**Static** buckets: `{1h, 7d, 30d}` (you said static is fine as-is). Aggressive
+static also adds `Cache-Control: public, immutable` via `add_header` on HIT for
+the asset location.
+
+If truly arbitrary (non-snapped) per-request TTL is ever required, the escape
+hatch is OpenResty `srcache` with a Lua-computed store TTL — but it needs a
+storage backend and is heavier, so it is **explicitly deferred**; the bucket
+model is the v1 answer.
 
 ### 5.5 Open edge items to validate during implementation
 
@@ -286,6 +310,62 @@ Lua picks the zone by setting `$cfm_cache_zone`. Each zone carries its own
    Verify HIT/MISS accounting with KA armed.
 3. **`Vary`.** Respect only a safe subset (e.g. `Accept-Encoding`); a
    `Vary: Cookie` from origin must force bypass, not key-fragment.
+
+### 5.6 Performance — this must LOWER CPU, not raise it
+
+The whole point is fewer origin round-trips, so the machinery itself must never
+become the cost. Three invariants make that a guarantee, not a hope:
+
+- **Invariant 1 — zero per-request daemon RPC.** A cache decision costs **one
+  shared-dict lookup** (`cfm_cache.policy_for`), never a bridge call. The policy
+  table is pulled by a background timer (`SITE_CACHE_CFG_REFRESH_SEC`, default
+  10s) into a shdict + per-worker module — the exact WAF-excludes refresh
+  pattern already in production (`cfm.lua:876`). This is *why* we chose edge-pull
+  over the fppolicy per-key RPC (§5.2): per-vhost is low-cardinality, the whole
+  table fits in a shdict, and **no request ever waits on the daemon.**
+- **Invariant 2 — near-zero cost when unused.** A `has_any` meta flag (like WAF
+  `handleWAFExcludedMeta`) gates both tiers: if `SITE_CACHE=0` or no vhost has
+  caching enabled, the static-location `access_by_lua_block` and the Step 2b/4
+  hooks short-circuit on a single boolean — the static path stays effectively as
+  cheap as today's bare `return`. A fleet that doesn't use caching pays nothing.
+- **Invariant 3 — the request path never blocks on the daemon.** Fail-open
+  everywhere: a failed/slow/absent config pull keeps the last snapshot, or (if
+  never pulled) leaves caching off (bypass-by-default). A daemon hiccup can only
+  ever mean "no caching," never a stalled or slowed request. The pull rides the
+  existing keepalive'd unix socket + circuit breaker.
+
+**Anti-stampede is the actual CPU win.** Every cache location sets
+`proxy_cache_lock on;` + `proxy_cache_use_stale updating error timeout;` +
+`proxy_cache_background_update on;`. Under a burst on a heavy page the origin
+sees ~**one** request per TTL window (one filler; everyone else served stale or
+briefly queued) instead of N/s of PHP execution. For micro-cache this is the
+mechanism that flattens a spike from an origin meltdown into a flat line — the
+explicit goal.
+
+**Per-request cost ledger (caching ON for a vhost):**
+
+| Cost | Magnitude | Notes |
+|---|---|---|
+| policy shdict lookup | µs | one lock-light read |
+| cache key md5 + lookup | µs | nginx-native, only in cache locations |
+| stats `incr` (log phase) | µs, off the serving path | gated by `SITE_CACHE_STATS`, cache-enabled hosts only |
+| background config pull | once / 10s / node | **not** per-request |
+| **on HIT** | **− origin round-trip, − PHP exec** | **large net CPU/latency saving** |
+| on MISS | + key hash + store | trivial vs the origin fetch it wraps |
+
+**Disk vs RAM.** `use_temp_path=off` avoids a cross-filesystem rename. Micro
+entries are tiny and short-lived, so the micro zones may optionally sit on
+**tmpfs** (RAM-backed, zero disk I/O) with a bounded `max_size` — a good default
+for herd protection. Static stays on disk (larger, longer-lived).
+
+**Validation before any real caching (Phase 2 is observe-only).** Phase 2 sets
+`$cfm_cache_*` + the `X-CFM-Cache` header but does **not** activate
+`proxy_cache`, so the added Lua cost (the shdict lookups) is measured in
+isolation on a live box — watch `$cfm_lua_ms` (already logged) before/after — and
+confirmed to be in the noise before Phase 3 turns on real caching. A `map`-based
+static gate (pure C, but reload-bound) is the fallback if the static-path lookup
+ever shows measurable overhead; we prefer shdict for no-reload consistency and
+expect no measurable delta.
 
 ---
 
