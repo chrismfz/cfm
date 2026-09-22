@@ -61,7 +61,9 @@ for f in "$ORT" "$ANG"; do
       body=body $0 "\n"
       t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d+=o-c
       if (d<=0) {
-        if (body ~ /proxy_cache[[:space:]]+cfm_static[[:space:]]*;/) {
+        # Tier A (cfm_static) and Tier B (cfm_micro_<n>s) cache locations share
+        # the same bypass-by-default + only-200 + buffering rails.
+        if (body ~ /proxy_cache[[:space:]]+(cfm_static|cfm_micro_[0-9]+s)[[:space:]]*;/) {
           m=""
           if (body !~ /proxy_cache_bypass[[:space:]]+\$cfm_cache_skip[[:space:]]*;/) m=m " proxy_cache_bypass-$cfm_cache_skip"
           if (body !~ /proxy_no_cache[[:space:]]+\$cfm_cache_skip[[:space:];]/)      m=m " proxy_no_cache-$cfm_cache_skip"
@@ -76,6 +78,10 @@ for f in "$ORT" "$ANG"; do
           # and forbid an OFF in the same location.
           if (body ~ /proxy_buffering[[:space:]]+off[[:space:]]*;/)                 m=m " proxy_buffering-off(cache-would-store-nothing)"
           if (body !~ /proxy_buffering[[:space:]]+on[[:space:]]*;/)                 m=m " missing-proxy_buffering-on"
+          # A Tier B micro location is reached ONLY via ngx.exec from the cfm.lua
+          # allow-path (Phase B3b); it must be `internal;` so a direct request can
+          # never hit an un-enforced cache-serving location.
+          if (body ~ /proxy_cache[[:space:]]+cfm_micro_[0-9]+s[[:space:]]*;/ && body !~ /[[:space:]]internal[[:space:]]*;/) m=m " missing-internal(micro-location-directly-reachable)"
           if (m!="") print "location@line" locline ":" m
         }
         loc=0; body=""
@@ -113,14 +119,19 @@ for f in "$ORT" "$ANG"; do
   fi
 
   # ── (b2) Tier B micro-cache zones (Phase B1): all six TTL buckets declared ───
-  # Inert until Phase B2 wires the per-bucket internal locations, but each zone's
-  # dir must exist before `-t` (the daemon + installers provision all six), and a
-  # partial set would [emerg] at reload the moment a B2 location names a missing
-  # zone. Assert every bucket is present in BOTH confs (the loop runs per conf, so
-  # a bucket added to one edge but not the other fails here — the parity guard).
+  # Each zone's dir must exist before `-t` (the daemon + installers provision all
+  # six), and a partial set would [emerg] at reload the moment a location names a
+  # missing zone. Assert every bucket zone AND its internal location is present in
+  # BOTH confs (the loop runs per conf, so a bucket added to one edge but not the
+  # other fails here — the parity guard). The per-location rails (bypass gate,
+  # only-200, buffering, internal) are checked in section (a) above.
   for ttl in 1s 2s 5s 10s 30s 60s; do
     if ! grep -Eq "^[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/cfm_micro_${ttl}[[:space:]]" "$f"; then
       err "$f: no 'proxy_cache_path .../cfm_micro_${ttl}' zone declared — Tier B micro bucket missing (all of {1,2,5,10,30,60}s are required)."
+    fi
+    # (b3, Phase B3a) each bucket has its internal @cfm_micro_<n>s location.
+    if ! grep -Eq "^[[:space:]]*location[[:space:]]+@cfm_micro_${ttl}[[:space:]]*\{" "$f"; then
+      err "$f: no 'location @cfm_micro_${ttl} { … }' — Tier B micro bucket has a zone but no internal serving location (B3b's ngx.exec would 500)."
     fi
   done
 
@@ -178,8 +189,32 @@ if ! diff <(micro_zones "$ORT") <(micro_zones "$ANG") >/dev/null 2>&1; then
   diff <(micro_zones "$ORT") <(micro_zones "$ANG") 2>/dev/null | sed 's/^/       /' >&2 || true
 fi
 
+# ── (f) micro-LOCATION body parity: the full @cfm_micro_<n>s serving blocks must
+# be byte-identical between the two edges. (b3) only checks the header is present
+# in both; this diffs the BODIES so a per-bucket drift in proxy_cache_valid, the
+# cache key ($cfm_cache_gen prefix), or any rail between angie and openresty is
+# caught — both edges are ngx.exec targets B3b routes to and must cache the same
+# way. Brace-depth capture tolerates any (future) nested block in a location.
+micro_blocks() {
+  awk '
+    !loc && /^[[:space:]]*location[[:space:]]+@cfm_micro_[0-9]+s[[:space:]]*\{/ {
+      loc=1; buf=$0 "\n"
+      t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d=o-c; next
+    }
+    loc {
+      buf=buf $0 "\n"
+      t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d+=o-c
+      if (d<=0) { printf "%s", buf; loc=0; buf="" }
+    }
+  ' "$1"
+}
+if ! diff <(micro_blocks "$ORT") <(micro_blocks "$ANG") >/dev/null 2>&1; then
+  err "openresty.conf and angie.conf define the @cfm_micro_<n>s LOCATIONS differently (a per-bucket TTL / cache-key / rail drift); the micro serving blocks must be byte-identical on both edges. Divergence:"
+  diff <(micro_blocks "$ORT") <(micro_blocks "$ANG") 2>/dev/null | sed 's/^/       /' >&2 || true
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "[site-cache-config] FAILED — see errors above (invariant: caching is bypass-by-default; the gate must come from Lua)." >&2
   exit 1
 fi
-echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets {1,2,5,10,30,60}s declared in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered, only-200 rail (\$cfm_cache_non200) enforced, Set-Cookie never ignored, openresty↔angie parity ($ort_n locations)."
+echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets {1,2,5,10,30,60}s (zone + internal @cfm_micro_<n>s location) declared in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered + (micro) internal, only-200 rail (\$cfm_cache_non200) enforced, Set-Cookie never ignored, openresty↔angie parity ($ort_n static locations)."

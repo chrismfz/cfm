@@ -18,6 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Site Cache — Tier B micro-cache internal locations (Phase B3a, inert).**
+  Adds the six per-bucket `@cfm_micro_<n>s` serving locations to the HTTPS server
+  of both edge confs — each `internal;` (unreachable by a direct request) and
+  wired to its `cfm_micro_<n>s` zone with its own `proxy_cache_valid 200 <n>s`,
+  the bypass-by-default gate, the only-200 rail, buffering ON and the
+  anti-stampede trio, i.e. the Tier A recipe at a micro TTL. **Still nothing
+  caches**: nothing `ngx.exec`s to these locations yet, so they are dead config
+  until Phase B3b adds the `cfm.lua` allow-path micro gate that routes to them.
+  The config guard now pins each micro location's rails + `internal;` + both-edge
+  parity; validated with a real `nginx -t`. No Go/packaging change.
 - **Site Cache — Tier B micro-cache foundation (Phase B1, inert).** Declares the
   six per-TTL micro-cache zones `cfm_micro_{1,2,5,10,30,60}s` in both edge confs
   and creates their `/var/cache/nginx/` dirs (daemon + both installers), so the
