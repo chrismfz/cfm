@@ -59,7 +59,7 @@ func hotSwapFixture(t *testing.T) (*Enricher, func()) {
 	return e, swap
 }
 
-// The weekly GeoLite2 update swaps the mmdb readers under live traffic. The
+// A GeoLite2 update swaps the mmdb readers under live traffic. The
 // old reader used to be closed (munmap'd) while a lookup that had already
 // copied its pointer was still decoding from it: an unrecoverable SIGSEGV that
 // took the daemon down — reproduced on the old code within ~2s by this test
@@ -179,4 +179,62 @@ func TestRefreshRateLimit(t *testing.T) {
 	if got := asn(); got != 1241 {
 		t.Fatalf("once statEvery has passed the change must be picked up; ASN = %d, want 1241", got)
 	}
+}
+
+// Close is final: a refresh after it must not reopen the databases — a reader
+// reopened then would never be closed, and Enabled/lookups would come back to
+// life on a closed Enricher. (A refresh already past its stat when Close runs
+// is covered by the same flag, checked again at the swap.)
+func TestCloseIsFinal(t *testing.T) {
+	e, swap := hotSwapFixture(t)
+	e.Close()
+	swap() // the files change and the rate limit is bypassed
+	if e.Enabled() {
+		t.Fatal("a refresh after Close reopened the databases")
+	}
+	if r := e.LookupGeoFast("94.68.42.127"); r.ASN != 0 || r.CountryISO != "" {
+		t.Fatalf("lookup after Close read a database: %+v", r)
+	}
+}
+
+// Fast-path lookups (LookupGeoFast, what challenge verify uses) while two
+// goroutines take full-Lookup cache misses back to back — and every miss
+// calls refreshIfChanged. Synthetic and miss-heavy, far above a production
+// miss rate: it exaggerates any cost the miss path imposes on readers, which
+// is the point. It caught a write lock taken on every miss just to test the
+// refresh rate limit (see statChk) stalling readers. Self-contained on
+// purpose (no hotSwapFixture), so the same file runs against older versions
+// of enrich.go for an A/B.
+func BenchmarkLookupGeoFastUnderMisses(b *testing.B) {
+	dir := b.TempDir()
+	mt := time.Now().Add(-time.Hour)
+	writeMMDB(b, dir, "GeoLite2-ASN.mmdb", buildMMDB("GeoLite2-ASN", asnRecord(6799, "Test AS")), mt)
+	writeMMDB(b, dir, "GeoLite2-City.mmdb", buildMMDB("GeoLite2-City", cityRecord("GR", "Greece", "Athens")), mt)
+	e, err := New(dir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer e.Close()
+	e.enablePTR = false // the miss path must not touch the network
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	for g := 0; g < 2; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; !stop.Load(); i++ {
+				_ = e.Lookup(fmt.Sprintf("%d.%d.%d.%d", 1+g, (i>>16)&255, (i>>8)&255, i&255))
+			}
+		}(g)
+	}
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = e.LookupGeoFast("94.68.42.127")
+		}
+	})
+	b.StopTimer()
+	stop.Store(true)
+	wg.Wait()
 }

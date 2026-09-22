@@ -435,12 +435,14 @@ detached under `mu.Lock`). Apply the same rule to any mmap'd or otherwise
 closeable shared resource. The corollary bit us in the same fix: once readers
 hold the RLock for real work, a WRITE lock on a hot path — even one held for
 nanoseconds just to test a rate limit — waits on them and, with Go's writer
-preference, stalls every new reader behind it (fast-path lookups −28%);
-`statChk` is an atomic for that reason. Real GeoLite2 files can't be
-committed, but `internal/enrich/mmdb_testutil_test.go` generates spec-valid
-`.mmdb` files at test time — use it rather than assuming mmdb code is
-untestable (`TestHotSwapNeverReadsAClosedReader` reproduces the crash on the
-old code within 2s).
+preference, stalls every new reader behind it
+(`BenchmarkLookupGeoFastUnderMisses`: ~3.0µs per fast-path lookup with the
+rate limit under the mutex, ~1.1µs with it on an atomic); `statChk` is an
+atomic for that reason. Real GeoLite2 files can't be committed, but
+`internal/enrich/mmdb_testutil_test.go` generates spec-valid `.mmdb` files at
+test time — use it rather than assuming mmdb code is untestable
+(`TestHotSwapNeverReadsAClosedReader` reproduces the crash on the old code
+within 2s).
 
 ### Traffic classifier / fingerprint reputation ("evidence ledger") — shadow-first signals, operator-armed enforcement
 New Sep 2026. The node convicts a **fingerprint** (TLS/JA4, e.g. `c28caa00`) and

@@ -73,9 +73,9 @@ back-filled here — see the git/PR history for that period.
   hit the just-closed database got an error and returned empty country/ASN —
   and the full lookup path then cached that empty answer for up to 24h.
   The same change removed a write lock that every enrichment cache miss used
-  to take just to check whether a refresh was due; in a benchmark, fast-path
-  lookups went from ~370k/s to ~820k/s and p99 latency roughly halved. No
-  configuration change.
+  to take just to check whether a refresh was due; in a synthetic, miss-heavy
+  benchmark (`BenchmarkLookupGeoFastUnderMisses`) fast-path lookups got ~2.5×
+  faster (~2.8µs → ~1.1µs each). No configuration change.
 
 ## 2026.09.22
 

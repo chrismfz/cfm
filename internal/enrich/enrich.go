@@ -99,9 +99,9 @@ type Enricher struct {
 	// unmapped memory, i.e. SIGSEGV, which Go cannot recover from. That
 	// crashed the daemon when a lookup overlapped a database refresh (CFM's
 	// own maxmindupdater, as often as every ~3 days; each Enricher swaps on
-	// its own). Reproduced: TestHotSwapNeverReadsAClosedReader. A writer now takes
-	// mu.Lock, which waits for every in-flight read, so a reader is closed
-	// only once nothing can still be reading it. Never call back into the
+	// its own). Reproduced: TestHotSwapNeverReadsAClosedReader. A writer now
+	// takes mu.Lock, which waits for every in-flight read, so a reader is
+	// closed only once nothing can still be reading it. Never call back into the
 	// Enricher while holding mu, and never do network I/O under it.
 	mu sync.RWMutex
 	// cache is a size-bounded TTL-expiring LRU. Eviction policy:
@@ -121,14 +121,16 @@ type Enricher struct {
 	searchDirs []string
 	asnMTime   time.Time
 	cityMTime  time.Time
+	// closed is set by Close; a refresh then installs nothing (under mu).
+	closed bool
 	// statChk is when the last on-disk change check ran, in monotonic
 	// nanoseconds since monoStart (0 = never). Atomic, NOT under mu:
 	// refreshIfChanged runs on every Lookup cache miss, and when
 	// its rate-limit test took mu.Lock, that write lock — now that readers
 	// hold mu.RLock for a whole decode — waited on in-flight reads and, with
 	// Go's writer preference, stalled every new reader behind it, on every
-	// miss (measured: fast-path lookups −28%). Now mu.Lock is taken only for
-	// an actual swap. CompareAndSwap lets one caller per statEvery check.
+	// miss (BenchmarkLookupGeoFastUnderMisses). Now mu.Lock is taken only
+	// for an actual swap. CompareAndSwap lets one caller per statEvery check.
 	statChk atomic.Int64
 	// options
 	enablePTR bool
@@ -203,11 +205,15 @@ func (e *Enricher) Close() {
 	// Detach under the write lock — which waits for every in-flight read —
 	// then close outside it. A lookup running concurrently with Close used to
 	// be able to read the unmapped reader; now it finishes first, and a
-	// lookup after Close sees no reader (empty geo). The daemon never closes
-	// its enrichers (ipquery's CLI path does); this is hardening.
+	// lookup after Close sees no reader (empty geo). Close is final: closed
+	// stops a later refresh from reopening the files, and a refresh already
+	// past its stat when Close runs discards what it opened (see the swap).
+	// Callers: the nflog SMTP snoop and outbound collector workers on
+	// shutdown, and the status / ipquery CLI paths.
 	e.mu.Lock()
 	asn, city := e.asnDB, e.cityDB
 	e.asnDB, e.cityDB = nil, nil
+	e.closed = true
 	e.mu.Unlock()
 	if asn != nil {
 		_ = asn.Close()
@@ -222,7 +228,9 @@ func (e *Enricher) Close() {
 // read — see the note on mu for why copying the pointer and unlocking first
 // is not enough. Only mmdb decoding here — no network or file I/O — though a
 // read of a cold page of the mmap'd file can page-fault. Readers share the
-// RLock, so that delays only a pending swap, never another lookup.
+// RLock, so a slow read holds up no other lookup — except while a swap is
+// waiting: a pending mu.Lock queues every new RLock behind it (Go's writer
+// preference), so for that one swap, lookups wait on the slowest read.
 func (e *Enricher) readGeo(ip net.IP, r *Result) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -458,6 +466,10 @@ func (e *Enricher) refreshIfChanged() {
 
 	// Snapshot under the read lock; these are written only by the swap below.
 	e.mu.RLock()
+	if e.closed {
+		e.mu.RUnlock()
+		return
+	}
 	asnPath := e.asnPath
 	cityPath := e.cityPath
 	searchDirs := append([]string(nil), e.searchDirs...)
@@ -527,23 +539,37 @@ func (e *Enricher) refreshIfChanged() {
 	// swapped no new read can reach the old readers — so they are closed
 	// (munmap'd) only after the unlock, when nothing can still be reading
 	// them. Closing them while a read was in flight is what used to fault.
+	//
+	// The snapshot above may be stale by now: Close may have run, or an
+	// overlapping check (one whose stat outlasted statEvery) may already have
+	// installed this file or a newer one. A reader opened here that is not
+	// newer than the installed one — or any, after Close — is closed instead
+	// of installed, so a swap never goes backwards and Close stays final.
 	var oldASN, oldCity *geoip2.Reader
 	e.mu.Lock()
 	if newASN != nil {
-		oldASN = e.asnDB
-		e.asnDB = newASN
-		if newASNPath != "" {
-			e.asnPath = newASNPath
+		if e.closed || !newASNTime.After(e.asnMTime) {
+			oldASN = newASN
+		} else {
+			oldASN = e.asnDB
+			e.asnDB = newASN
+			if newASNPath != "" {
+				e.asnPath = newASNPath
+			}
+			e.asnMTime = newASNTime
 		}
-		e.asnMTime = newASNTime
 	}
 	if newCity != nil {
-		oldCity = e.cityDB
-		e.cityDB = newCity
-		if newCityPath != "" {
-			e.cityPath = newCityPath
+		if e.closed || !newCityTime.After(e.cityMTime) {
+			oldCity = newCity
+		} else {
+			oldCity = e.cityDB
+			e.cityDB = newCity
+			if newCityPath != "" {
+				e.cityPath = newCityPath
+			}
+			e.cityMTime = newCityTime
 		}
-		e.cityMTime = newCityTime
 	}
 	e.mu.Unlock()
 	if oldASN != nil {
