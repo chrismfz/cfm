@@ -40,6 +40,20 @@ back-filled here — see the git/PR history for that period.
   overwritten on upgrade with no backup — that was always true, the loop never
   changed it. `rpm -V cfm` / `dpkg --verify cfm` report such edits. Edit
   `/etc/cfm/*`, never `/var/lib/cfm/lua/*`.
+- **A CI guardrail had been reporting success without ever running.**
+  `check_cli_transport.sh` (the CLAUDE.md §5 rule that CLI HTTP must go through
+  `internal/clihttp`) does its matching with `ripgrep`, piped as
+  `rg … || true`. ripgrep is **not** installed on the GitHub runner, so `rg`
+  exited 127, `|| true` swallowed it, the loop read zero matches and the script
+  printed `OK: CLI runtime HTTP calls use clihttp` and exited 0 — with a real
+  violation sitting in the tree. Verified by removing `rg` and running it
+  against a planted `http.Get` in CLI runtime code: the old script passed, the
+  fixed one fails loudly. CI now installs ripgrep alongside luajit (the edge
+  installers already apt/dnf-install it on real hosts for the same reason), and
+  **all seven** guardrail scripts that depend on it now refuse to run without
+  it rather than reporting OK. The same missing binary is what broke
+  `check_shared_lua_layout.sh` the moment it was wired into CI — that one at
+  least failed loudly.
 - **New CI gate: the Lua delivery chain is now asserted, not assumed.**
   `check_package_lua_delivery.sh` pins the invariants every upgrade depends on
   — every rsync into the Lua payload carries `--delete`, which is what makes a

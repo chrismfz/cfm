@@ -36,8 +36,16 @@ jobs:
       # OpenResty/Angie embed LuaJIT, so Lua-side regression checks run
       # against luajit to match production semantics (see the "lua" rule in
       # Makefile). ubuntu-latest doesn't ship luajit; install it explicitly.
-      - name: Install luajit (Lua interpreter for CI checks)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends luajit
+      #
+      # ripgrep is likewise a hard dependency of several guardrail scripts, and
+      # likewise absent from the runner (the edge installers apt/dnf-install it
+      # on real hosts for the same reason). Without it check_cli_transport.sh
+      # piped `rg … || true`, read zero matches and printed OK while a real
+      # violation sat in the tree — a guardrail reporting success for months
+      # without ever running. Those scripts now refuse to run without it; this
+      # step is what makes them able to.
+      - name: Install luajit + ripgrep (CI check dependencies)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends luajit ripgrep
       - name: Enforce CLI transport guardrail
         run: ./scripts/tests/check_cli_transport.sh
       - name: Enforce Lua clearance module load check

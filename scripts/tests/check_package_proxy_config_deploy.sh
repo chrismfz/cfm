@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# A guardrail that cannot run its own matcher must FAIL, never report OK.
+# check_cli_transport.sh used to pipe `rg ... || true`, so on a runner without
+# ripgrep it read zero matches and printed success while a real violation sat
+# in the tree (found 2026-09-22).
+command -v rg >/dev/null 2>&1 || {
+  echo "FAIL: ripgrep (rg) is required by $(basename "$0") and is not installed" >&2
+  exit 1
+}
+
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 

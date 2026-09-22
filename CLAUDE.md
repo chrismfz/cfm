@@ -63,7 +63,7 @@ go test -race ./...
 make lua
 make test-lua
 make test-js                                     # node --test on internal/webui/static/assets/**/*.test.{js,cjs}
-./scripts/tests/check_cli_transport.sh          # CLI transport guardrail (see §5)
+./scripts/tests/check_cli_transport.sh          # CLI transport guardrail (see §5; needs ripgrep)
 ./scripts/tests/check_cfm_clearance_require.sh   # Lua clearance module load check
 ./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf bounds + generator tests
 ./scripts/tests/check_logrotate_coverage.sh      # every CFM log path is rotated (see §5)
@@ -178,6 +178,14 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `check_package_lua_delivery.sh` pins all of it. A hand-edit under
   `/var/lib/cfm/lua/` is overwritten on upgrade with no backup; the operator
   edit surface is `/etc/cfm/*`.
+- **A guardrail that cannot run its matcher must FAIL, never report OK.**
+  Seven `scripts/tests/check_*.sh` shell out to `ripgrep`, which the runner
+  does not preinstall. `check_cli_transport.sh` piped `rg … || true`, so on CI
+  it read zero matches and printed success while checking nothing — a §5 rule
+  enforced by nothing, for as long as it had been wired. CI now installs
+  ripgrep next to luajit, and every rg-using script hard-fails when `rg` is
+  absent. Apply the same rule to any new guardrail: `|| true` may swallow "no
+  matches", never "no tool".
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
 - **`detectors.conf` scalar readers now tolerate an inline `;`/`#` comment.**
