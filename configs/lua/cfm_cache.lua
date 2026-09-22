@@ -73,6 +73,14 @@ local _refresh_in_progress = false
 -- nginx strips undeclared worker env, so it never fired on a real box).
 local _refresh_sec = 60
 
+-- Stats push (3c): the reverse direction of the config pull — the edge POSTs a
+-- per-vhost cache-verdict snapshot to the daemon every _stats_sec. Same fixed
+-- interval, config-driven ethos (no env). A node-wide cross-worker lock in the
+-- cfm_cache_stats dict ensures only ONE worker pushes per window.
+local _last_stats_flush_at   = 0
+local _stats_flush_in_progress = false
+local _stats_sec = 60
+
 -- The X-CFM-Cache observe header is a PER-REQUEST operator opt-in: it is stamped
 -- ONLY when the request carries `X-CFM-Cache-Debug` (any non-empty value), so
 -- internal cache policy (recipe / TTL bucket / purge generation) is never
@@ -139,6 +147,40 @@ local function bridge_fetch()
     local body = s:receive("*a") or ""
     s:close()
     return body, nil
+end
+
+-- bridge_push: POST a JSON body to a bridge path (the reverse of bridge_fetch).
+-- Explicit Content-Length (the daemon's minimal reader wants a non-chunked
+-- body). Returns true on HTTP 200, else nil+err. Runs inside a timer (never on
+-- the request path).
+local STATS_PATH = "/nginx/cache/stats"
+
+local function bridge_push(path, body)
+    local token = load_bridge_token()
+    if not token then return nil, "no bridge token yet" end
+
+    local s, err = ngx.socket.tcp()
+    if not s then return nil, "socket.tcp: " .. (err or "?") end
+    s:settimeouts(IO_TIMEOUT_MS, IO_TIMEOUT_MS, IO_TIMEOUT_MS)
+    local ok, cerr = s:connect("unix:" .. SOCK_PATH)
+    if not ok then s:close(); return nil, "connect: " .. (cerr or "?") end
+
+    local req = "POST " .. path .. " HTTP/1.1\r\n" ..
+                "Host: localhost\r\n" ..
+                "Connection: close\r\n" ..
+                TOKEN_HEADER .. ": " .. token .. "\r\n" ..
+                "Content-Type: application/json\r\n" ..
+                "Content-Length: " .. #body .. "\r\n\r\n" ..
+                body
+    local _, werr = s:send(req)
+    if werr then s:close(); return nil, "send: " .. (werr or "?") end
+
+    local status_line, rerr = s:receive("*l")
+    s:close()
+    if not status_line then return nil, "recv status: " .. (rerr or "?") end
+    local code = tonumber(status_line:match("%s(%d%d%d)%s"))
+    if code ~= 200 then return nil, "http " .. tostring(code) end
+    return true, nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -220,6 +262,58 @@ local function schedule_refresh_if_needed()
 end
 
 -- ---------------------------------------------------------------------------
+-- Stats push: snapshot the per-vhost cache-verdict counters (cfm_cache_log)
+-- and POST them to the daemon. Absolute counts; the daemon UPSERTs per vhost.
+
+local STATS_LOCK_KEY = "cache:stats:flush_lock"
+
+local function stats_flush_handler(premature)
+    local ok, err = pcall(function()
+        if premature then return end
+        local ok2, cl = pcall(require, "cfm_cache_log")
+        if not (ok2 and cl and cl.snapshot_vhosts) then return end
+        local vhosts = cl.snapshot_vhosts()
+        local rows = {}
+        for host, counts in pairs(vhosts) do
+            rows[#rows + 1] = { host = host, counts = counts }
+        end
+        if #rows == 0 then return end   -- nothing armed / no traffic yet
+        local _, perr = bridge_push(STATS_PATH, cjson.encode({ rows = rows }))
+        if perr then
+            ngx.log(ngx.WARN, "[cfm_cache] stats push failed: ", tostring(perr))
+        end
+    end)
+    _stats_flush_in_progress = false
+    if not ok then
+        ngx.log(ngx.ERR, "[cfm_cache] stats flush handler raised: ", tostring(err))
+    end
+end
+
+-- schedule_stats_flush_if_needed: per-worker throttle + a node-wide cross-worker
+-- lock (dict:add with TTL) so exactly one worker pushes per window. Fail-safe:
+-- any hiccup just skips this window; the counters keep accumulating.
+local function schedule_stats_flush_if_needed()
+    if _stats_flush_in_progress then return end
+    local now = ngx.now()
+    if (now - _last_stats_flush_at) < _stats_sec then return end
+    _last_stats_flush_at = now
+    local sh = ngx.shared
+    local d = sh and sh.cfm_cache_stats
+    if d then
+        -- add() succeeds only for the worker that wins the window; the TTL
+        -- releases it after _stats_sec so the next window has a fresh race.
+        local won = d:add(STATS_LOCK_KEY, 1, _stats_sec)
+        if not won then return end
+    end
+    _stats_flush_in_progress = true
+    local ok, err = ngx.timer.at(0, stats_flush_handler)
+    if not ok then
+        _stats_flush_in_progress = false
+        ngx.log(ngx.WARN, "[cfm_cache] could not schedule stats flush: ", tostring(err))
+    end
+end
+
+-- ---------------------------------------------------------------------------
 -- Public API
 
 -- policy_for: returns the policy table for the given host, or nil. Cheap path
@@ -271,6 +365,11 @@ function _M.observe()
     -- state as of the previous debug request. Cheap: a flag + one time compare
     -- when a refresh is not due; it never blocks the request.
     schedule_refresh_if_needed()
+    -- Reverse direction: push the accumulated per-vhost cache-verdict counters
+    -- to the daemon (throttled + cross-worker locked, so at most one worker
+    -- POSTs per window). Both are background timers; neither touches this
+    -- request's latency.
+    schedule_stats_flush_if_needed()
     -- Stamp only for an operator's opt-in debug request, so ordinary clients see
     -- nothing. NOTE (Phase 3): before real cache HIT/MISS/keys are exposed here,
     -- gate this on a shared secret or a trusted source, not just the presence of

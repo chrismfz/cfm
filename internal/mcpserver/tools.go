@@ -82,6 +82,8 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerClamStatus(srv, d)
 	registerNotifierStatus(srv, d)
 	registerHTTP3Status(srv, d)
+	registerSiteCacheStatus(srv, d)
+	registerSiteCacheStats(srv, d)
 	registerMailRuntime(srv, d)
 	registerMySQLLogTail(srv, d)
 	registerMySQLSlowQueries(srv, d)

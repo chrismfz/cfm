@@ -110,6 +110,14 @@ type NginxBridge struct {
 	// held; dispatched async.
 	OnWAFStats func(hourUnix int64, host string, count int)
 
+	// OnCacheStats is called once per row of the Site Cache stats snapshot
+	// pushed by Lua (cfm_cache maybe_flush_stats). Each row carries a per-vhost
+	// map of cache status (HIT/MISS/BYPASS/…) to an ABSOLUTE count since the
+	// edge dict was created; the persister UPSERTs (replaces) the vhost's
+	// counts. Set via SetCacheStatsHook. Called without b.mu held; dispatched
+	// async.
+	OnCacheStats func(host string, counts map[string]int)
+
 	// OnObserve is called when OpenResty (or others) reports an observed request outcome.
 	// Typical use: WAF returns 403, but we want webdetector to "see" that 403 and escalate.
 	// Called without b.mu held.
@@ -398,6 +406,19 @@ type nginxWAFStatsRow struct {
 	HourUnix int64  `json:"hour_unix"`
 	Host     string `json:"host"`
 	Count    int    `json:"count"`
+}
+
+// nginxCacheStatsMsg is the Site Cache snapshot pushed by Lua's
+// cfm_cache maybe_flush_stats. Each row is one armed vhost's absolute
+// cache-verdict counts (status -> count, plus "total"); Go upserts idempotently
+// so repeated pushes replace a vhost's counts.
+type nginxCacheStatsMsg struct {
+	Rows []nginxCacheStatsRow `json:"rows"`
+}
+
+type nginxCacheStatsRow struct {
+	Host   string         `json:"host"`
+	Counts map[string]int `json:"counts"`
 }
 
 type nginxIPClearMsg struct {
@@ -956,6 +977,17 @@ func (b *NginxBridge) SetWAFStatsHook(fn func(hourUnix int64, host string, count
 		return
 	}
 	b.OnWAFStats = fn
+}
+
+// SetCacheStatsHook registers a callback that fires once per row of the Site
+// Cache stats snapshot pushed by Lua. Rows carry a per-vhost map of cache
+// status to absolute count; the consumer should UPSERT (replace) the vhost's
+// counts.
+func (b *NginxBridge) SetCacheStatsHook(fn func(host string, counts map[string]int)) {
+	if b == nil {
+		return
+	}
+	b.OnCacheStats = fn
 }
 
 // hookQueueSize is the buffer depth for the async hook dispatcher. Sized so
@@ -1559,6 +1591,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/h3/config", b.instrument("/nginx/h3/config", b.handleHTTP3Config))
 	mux.HandleFunc("/nginx/cache/config", b.instrument("/nginx/cache/config", b.handleCacheConfig))
 	mux.HandleFunc("/nginx/waf/stats", b.instrument("/nginx/waf/stats", b.handleWAFStats))
+	mux.HandleFunc("/nginx/cache/stats", b.instrument("/nginx/cache/stats", b.handleCacheStats))
 	mux.HandleFunc("/nginx/snapshot", b.instrument("/nginx/snapshot", b.handleSnapshot))
 	mux.HandleFunc("/nginx/status", b.instrument("/nginx/status", b.handleStatus))
 	mux.HandleFunc("/nginx/upload", b.instrument("/nginx/upload", b.handleUpload))
@@ -2649,6 +2682,51 @@ func (b *NginxBridge) handleWAFStats(w http.ResponseWriter, r *http.Request) {
 			hr, host, cnt := msg.Rows[i].HourUnix, msg.Rows[i].Host, msg.Rows[i].Count
 			b.dispatchHook(func() {
 				b.OnWAFStats(hr, host, cnt)
+			})
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// maxCacheStatsRows bounds how many per-vhost rows a single /nginx/cache/stats
+// push may fan out into hooks. The edge only keys ARMED vhosts, so this sits
+// far above any real batch; excess rows from a buggy/compromised edge are
+// dropped rather than dispatched.
+const maxCacheStatsRows = 4096
+
+// handleCacheStats accepts the periodic Site Cache snapshot pushed by Lua's
+// cfm_cache maybe_flush_stats. Body: {"rows":[{host, counts:{status:count,…}}]}
+// with absolute counts per armed vhost; Go upserts each row idempotently.
+//
+// Set via b.OnCacheStats; if no consumer is wired the request is accepted
+// silently so the edge does not spin on retries during a config reload.
+func (b *NginxBridge) handleCacheStats(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	// Cap body size — armed vhosts are few and each row is a small map, so a
+	// legit push is tiny; this ceiling only stops a compromised edge streaming
+	// a huge array.
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+
+	var msg nginxCacheStatsMsg
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if b.OnCacheStats != nil && len(msg.Rows) > 0 {
+		for i := range msg.Rows {
+			if i >= maxCacheStatsRows {
+				break
+			}
+			host, counts := msg.Rows[i].Host, msg.Rows[i].Counts
+			b.dispatchHook(func() {
+				b.OnCacheStats(host, counts)
 			})
 		}
 	}

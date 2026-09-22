@@ -754,9 +754,26 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
        renders per-user with **neither** `Set-Cookie` **nor** a private
        `Cache-Control` would be cached and served cross-user on an armed vhost.
        `static_gate`'s doc-comment states the same scope so code and design agree.
-   - **3c — stats/logging** (`cfm_cache_stats` + `cfm_cache_log` + the daemon
-     `/nginx/cache/stats` aggregate + `/api/v1/site-cache/stats` + the cfm-admin
-     hit-ratio column): deferred from this list's item 3, still to build.
+   - **3c — stats/logging (as built).** The undeclared (→ dead) `cfm_cache_stats`
+     shared dict is now declared in both confs; `cfm_cache_log.lua` gained a host
+     arg (per-vhost keys `cache:vhost:<host>:status:<S>`) and `snapshot_vhosts()`,
+     wired in the http-level `log_by_lua` — counting per-vhost ONLY for ARMED
+     vhosts (`policy_for` non-nil) so key cardinality stays bounded. The edge
+     PUSHES an absolute per-vhost snapshot to a new bridge route
+     `POST /nginx/cache/stats` every ~60s (a cross-worker-locked timer in
+     `cfm_cache.lua`, mirroring the WAF-stats `maybe_flush`); the daemon
+     `handleCacheStats` → `OnCacheStats` hook → `siteCacheStatsStore` (UPSERT,
+     absolute counts, in-memory/node-local). Read paths: `GET
+     /api/v1/site-cache/stats[?host=]` (scope-filtered like the other site-cache
+     endpoints), `cfm webtop site-cache stats [host]`, and two MCP tools —
+     `site_cache_status` (armed vhosts + tiers) and `site_cache_stats`
+     (HIT/MISS/BYPASS + hit ratio). `ucache="$upstream_cache_status"` was added to
+     the `cfm` access log_format so `edge_access_tail` shows the verdict per
+     request. **v1 scope:** a live totals view (counts since the edge last
+     reloaded), not hour-bucketed history, and no cfm-admin column yet — both
+     follow-ups. **Deferred to a focused follow-up:** the `whats_wrong`
+     "armed but ~0 hits" signal (the automated form of what `site_cache_stats`
+     already shows on demand — it would have surfaced the 3b buffering no-op).
 4. **Tier B (micro-cache)** + the full §4 rails. Validate §5.5 items
    on a live box (the `myip.gr` case) per the challenge/WAF release checklist.
 5. **cfm-admin page + Recipes** (+ `make test-js`), filter/sort, per-row + global

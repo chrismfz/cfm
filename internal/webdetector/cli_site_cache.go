@@ -55,9 +55,11 @@ func runSiteCacheWebTop(baseURL string, args []string) error {
 		return runSiteCacheRemove(baseURL, args[1])
 	case "purge":
 		return runSiteCachePurge(baseURL, args[1:])
+	case "stats":
+		return runSiteCacheStats(baseURL, args[1:])
 	default:
 		printSiteCacheHelp()
-		return fmt.Errorf("unknown site-cache subcommand %q (use list|get|set|off|purge)", args[0])
+		return fmt.Errorf("unknown site-cache subcommand %q (use list|get|set|off|purge|stats)", args[0])
 	}
 }
 
@@ -77,6 +79,7 @@ Usage:
   cfm webtop site-cache off <vhost>                   turn caching OFF for a vhost
   cfm webtop site-cache purge <vhost>                 invalidate a vhost's cache
   cfm webtop site-cache purge --all                   invalidate ALL vhosts (admin only)
+  cfm webtop site-cache stats [vhost]                 per-vhost HIT/MISS/hit-ratio
 
 set flags:
   --static RECIPE        enable the static tier with RECIPE
@@ -131,6 +134,39 @@ func siteCacheTierCLI(t SiteCacheTier) string {
 		s += "/" + t.TTL
 	}
 	return s
+}
+
+func runSiteCacheStats(baseURL string, args []string) error {
+	u := strings.TrimRight(baseURL, "/") + "/api/v1/site-cache/stats"
+	if len(args) > 0 {
+		if h := strings.TrimSpace(args[0]); h != "" && !strings.HasPrefix(h, "-") {
+			u += "?host=" + url.QueryEscape(h)
+		}
+	}
+	resp, err := clihttp.Get(u)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("site-cache stats HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var payload siteCacheStatsResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return fmt.Errorf("site-cache stats: server returned non-JSON (%d bytes): %q", len(body), strings.TrimSpace(string(body)))
+	}
+	if len(payload.Rows) == 0 {
+		fmt.Println("No cache stats yet. The edge reports per-vhost HIT/MISS only for ARMED vhosts once they serve traffic (pushed ~every 60s).")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "VHOST\tHIT\tMISS\tEXPIRED\tSTALE\tBYPASS\tHIT%\tCACHEABLE")
+	for _, r := range payload.Rows {
+		fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%d\t%.1f\t%d\n",
+			r.Host, r.Hit, r.Miss, r.Expired, r.Stale, r.Bypass, r.HitRatioPct, r.CacheableTotal)
+	}
+	return w.Flush()
 }
 
 func runSiteCacheGet(baseURL, host string) error {
