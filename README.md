@@ -972,7 +972,7 @@ The `webdetector_challenge_rules.conf` system supports per-IP, per-vhost, per-UA
 
 ## 9. Web Application Firewall (WAF)
 
-CFM ships a fast in-path Lua WAF that inspects every dynamic request before it reaches origin — URI, query, body, and headers. **66 detectors across 9 rule-ID groups (1xx-9xx)** with stable IDs, severity aggregation (all rules run, strongest action wins, order-independent), and per-rule modes (`disabled | logonly | challenge | block`). Detectors are FP-tested against actual production traffic, not generic CRS lists.
+CFM ships a fast in-path Lua WAF that inspects every dynamic request before it reaches origin — URI, query, body, and headers. **66 detectors across 9 rule-ID groups (1xx-9xx)** with stable IDs, severity aggregation (all rules run, strongest action wins, order-independent), and per-rule modes (`disabled | logonly | challenge | challenge_v2 | block` — `challenge_v2` serves the same challenge page but the solve must also pass the passive humanity check, see docs/waf.md). Detectors are FP-tested against actual production traffic, not generic CRS lists.
 
 > Full reference: [`docs/waf.md`](docs/waf.md) — every rule, the operator playbook, per-vhost exclusions, hit-rate measurement pipeline, external-reference audit (libinjection / Coraza / CRS comparison), and the 2026-05 production-data triage.
 

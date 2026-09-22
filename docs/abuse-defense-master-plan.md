@@ -234,8 +234,8 @@ already opened.
         X" only needs verify to know the challenge came from a v2-tier
         source. Foundation: a small per-(ip, host) **rung mark** TTL store
         in webdetector, written as a side effect wherever a challenge is
-        already issued daemon-side (handleDecision for vhost mode / rules /
-        geo floors; RecordWAFTrigger→ChallengeIP for WAF pushes), OR'd into
+        already issued daemon-side (as built: handleDecision for v2-tier
+        traffic rules, handleIPPush for v2-tier WAF pushes), OR'd into
         the verify gate next to the fp/geo checks. D5 carries over verbatim
         (an explicit rule mode / vhost toggle IS an operator arm; fails stay
         retry-able; hs=- keeps evasion visible); consider a dedicated
@@ -285,11 +285,38 @@ already opened.
           at its cap so NEW marks degrade to plain v1 (fail-open by design) —
           roadmap note: an eviction-of-soonest-expiry + a status counter
           would remove that disarm lever if it ever shows up live.
-        - [ ] **C — WAF rule tier `challenge_v2`** (cfm_waf.lua mode + Go
-          registry + rule-mode UI): the missing rung in the promotion
-          ladder `logonly → challenge → challenge_v2 → block`. Challenge
-          tier ⇒ does NOT arm waf_security autoblock (Phase 1 is
-          block-only); panel gate stays block-tier.
+        - [x] **C — WAF rule tier `challenge_v2` — DONE 2026-09-22.** The
+          missing rung in the promotion ladder `logonly → challenge →
+          challenge_v2 → block`, set per rule via `cfm_waf_config.lua`.
+          One default ships at the new tier: `rule_xss` (302) promoted
+          challenge→challenge_v2 in the same change (operator decision —
+          XSS probes like `?q=<script>alert('XSS')</script>` are a scanner
+          smoke test, so their solvers face the humanity gate; revert per
+          fleet with `rule_xss = "challenge"`).
+          As-built: cfm_waf.lua accepts the mode (rule_mode/set_rule),
+          severity challenge(2) < challenge_v2(3) < block(4) — only block
+          short-circuits; the edge serves the SAME challenge page (cfm.lua's
+          challenge-tier else-branch) and, per review, presents plain
+          "challenge" to the client on both rungs (X-CFM-Action shows the
+          rung only under CFM_DEBUG_HEADERS — echoing it would hand a
+          signal-aware farm the exact solves under v2 scrutiny); the
+          ip_push carries the verbatim tier; handleIPPush (+ the events
+          batch) stores a plain "challenge" decision (edge wire vocabulary)
+          and writes the slice-B per-(ip,host) rung mark, which the verify
+          gate already ORs in — no verify change needed. Doctrine held:
+          challenge tier does NOT arm waf_security autoblock (wafsec feeds
+          on action=block pushes only, and should_push keys the v2 tier
+          separately so a v1 window never masks the mark-writing push);
+          post-clearance converts v2 exactly like challenge (no re-challenge
+          loop); the panel gate stays block-tier (a v2 rule is observe-only
+          on panel ports). Review catch folded in the same PR: the
+          challenge-resume redirect (challenged POST) used to return BEFORE
+          the ip_push — a body-carried v2 hit would never write its mark
+          (and a resumed challenge left no cfm.waf.log/history at any tier);
+          the push+log now runs on every route out of the action branch,
+          resume path included. Version-skew hazard documented in
+          docs/waf.md: an OLDER edge maps the unknown mode to `disabled` —
+          upgrade before setting the tier.
         - [ ] **D — scoped customer self-arm** (cPanel plugin "panic
           button"): the FIRST scoped WRITE action, so it rides the hard
           auth boundary — central validator, fail-closed, challenge tiers

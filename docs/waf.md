@@ -7,7 +7,8 @@ inspect every dynamic request before it reaches origin. Severity-aggregation
 returns the strongest rule's action; per-vhost exclusions let operators
 whitelist specific rules on noisy hosts; hit-rate counters and the per-
 trigger JSON hit log (`cfm.waf.log`) give operators data-driven evidence
-before promoting any rule from `logonly` to `challenge` to `block`.
+before promoting any rule up the `logonly` → `challenge` → `challenge_v2` →
+`block` ladder.
 
 Open follow-ups (none blocking):
 
@@ -37,10 +38,46 @@ Threat surface (shared hosting): outdated WordPress/Joomla/Drupal, vulnerable pl
 Every WAF rule produces an action:
 
 ```
-disabled (0) < logonly (1) < challenge (2) < block (3)
+disabled (0) < logonly (1) < challenge (2) < challenge_v2 (3) < block (4)
 ```
 
-`_M.check` collects every match into a `hits` array and returns the strongest action. A `block` hit short-circuits later detectors (block is the cap). Rule order no longer affects enforcement.
+`_M.check` collects every match into a `hits` array and returns the strongest action. A `block` hit short-circuits later detectors (block is the cap; a `challenge_v2` hit does **not** short-circuit). Rule order no longer affects enforcement.
+
+### The `challenge_v2` tier (arm-surfaces slice C, 2026-09-22)
+
+`challenge_v2` is a challenge-tier mode with verify-time teeth. At the edge it
+serves the **same** challenge page as `challenge`; the difference is that the
+`ip_push` carries the verbatim `challenge_v2`, the daemon records a
+per-(ip,host) rung mark, and a solve from that pair failing the passive
+humanity score earns **no clearance** (`result=v2_reject`, retry-able — see
+`challenge_v2.go` D5). Semantics to know:
+
+- **Set per rule** via `/etc/cfm/cfm_waf_config.lua`
+  (`return { rule_<name> = "challenge_v2" }`). One rule ships at this tier by
+  default: **`rule_xss` (302)** — promoted challenge→challenge_v2 on
+  2026-09-22, the day the tier landed (operator decision): XSS probes like
+  `?q=<script>alert('XSS')</script>` are a favourite scanner smoke test, so
+  their solvers face the humanity gate. Revert per fleet with
+  `rule_xss = "challenge"` in `cfm_waf_config.lua`.
+- On the wire and in the bridge the decision stays plain `challenge` (edge
+  vocabulary); autoblock (`waf_security`) is untouched — it feeds on
+  `action=block` pushes only, and a `challenge_v2` push is not one.
+- Post-clearance conversion treats it exactly like `challenge` (cleared
+  clients are never re-challenged on either rung).
+- The panel-port gate (`cfm_panel.lua`) enforces block-tier hits only, so a
+  `challenge_v2` rule stays observe-only on `:2083/:2087/:2096`.
+- TTL: the default (challenge) TTL, not the block TTL.
+- `CHALLENGE_V2_PASSIVE=0` (`[webdetector]`) is the kill switch for the
+  verify-time teeth; the edge then behaves as plain `challenge`.
+- **Version skew warning:** on a CFM older than 2026-09-22 the Lua
+  `rule_mode()` treats `challenge_v2` as an unknown value and maps it to
+  `disabled` — setting the tier in `cfm_waf_config.lua` before upgrading
+  **silently turns the rule off** on that edge. The reverse skew (new Lua
+  loaded before the daemon restarts mid-upgrade) is transient: the old daemon
+  rejects the `challenge_v2` push, so the hit is served as a challenge but
+  leaves no mark/log/history until the daemon comes back new. Upgrade first,
+  then set the tier (the Lua and the daemon ship in the same package, so a
+  normal upgrade moves both together).
 
 Return shape: `(hit, reason, ttl, action, hits, waf_rule_id)`. The first four are the original API; `hits` is per-rule diagnostics; `waf_rule_id` is the strongest rule's stable numeric ID (see [Rule IDs](#rule-ids) below).
 

@@ -340,7 +340,17 @@ points:
   section for that rule in the same review.
 - **Lua↔Go id parity is enforced.** A new `10xxx` id needs matching entries in
   `configs/lua/cfm_waf.lua` `RULE_IDS` **and** `internal/webdetector/waf_rule_ids.go`
-  (`TestWAFRuleIDs_LuaParity`), plus positive+negative Lua tests. Key the
+  (`TestWAFRuleIDs_LuaParity`), plus positive+negative Lua tests.
+  **Mode parity is enforced too** (`TestWAFRuleIDs_DefaultModeLuaParity`,
+  added 2026-09-22): a rule promotion/demotion must edit the Lua CFG default
+  **and** the Go mirror's `DefaultMode` in the same change. The test exists
+  because 12 entries had silently drifted — 11 were `logonly→challenge`
+  promotions where only the Lua side was edited and the mirror was forgotten
+  (`rule_crlf_injection` drifted the other way). Enforcement was never wrong
+  (the Lua CFG is what runs) and none touched `block`, but the CLI/panel/MCP
+  glossary showed stale tiers for months, and `DefaultMode == "block"` is
+  the `waf_security` arming source — a forgotten mirror edit on a **block**
+  promotion would have mis-armed autoblock. Key the
   detector on the exact endpoint/marker, reuse hardened helpers
   (`detect_upload_content`, not a raw `<?php` scan), and decide autoblock intent
   in the same change.
@@ -382,10 +392,19 @@ still serves the same challenge page as `challenge` (the rung difference is
 enforced at verify, not at serve). The verify gate ORs four arm grains:
 fingerprint policy, geo policy, a per-vhost `rung=v2` on the MANUAL vhost
 challenge (arm-surfaces slice A: API/CLI/cfm-admin Tier picker; persisted
-with the challenge), and a per-(ip,host) rung mark written at decision time
-by a traffic rule with action `challenge_v2` (slice B: the bridge serves
-plain "challenge" on the wire and records the v2 intent — rules-model.js
-and traffic_rules.go changed in the same PR, per the Simulate rule). Verify is reachable only through the
+with the challenge), and a per-(ip,host) rung mark with two writers — a
+traffic rule with action `challenge_v2` at decision time (slice B:
+rules-model.js and traffic_rules.go changed in the same PR, per the
+Simulate rule) and a WAF rule set to `"challenge_v2"` in cfm_waf_config.lua
+(slice C: severity challenge < challenge_v2 < block, only block
+short-circuits; handleIPPush records the mark; `rule_xss` 302 ships at
+challenge_v2 by default since 2026-09-22, and
+`TestWAFRuleIDs_DefaultModeLuaParity` now pins every Go DefaultMode to the
+Lua CFG default). Either way the wire/ipState
+stays plain "challenge" (the edge vocabulary), the verbatim tier reaches
+cfm.waf.log/history, and challenge-tier hits never feed waf_security
+autoblock. Version skew: an OLDER edge maps the unknown WAF mode to
+`disabled` — upgrade before setting the tier (docs/waf.md). Verify is reachable only through the
 edge (localhost listener; the per-IP challenge-DNAT is RETIRED per
 `docs/edge-unification-plan.md`), so the gate inputs (`X-CFM-TLS`, the
 verify host) are edge-authoritative on current confs; the client-authored

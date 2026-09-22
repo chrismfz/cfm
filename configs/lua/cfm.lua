@@ -1361,7 +1361,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         if did_convert then
           log_route(ngx.INFO, "waf_post_clearance_convert ip=" .. ip ..
             " reason=" .. tostring(reason) ..
-            " from=challenge to=" .. tostring(converted))
+            " from=" .. tostring(waf_action) .. " to=" .. tostring(converted))
           waf_action = converted
           converted_from_challenge = true
           if CFG.debug_headers then ngx.header["X-CFM-WAF-Converted"] = converted end
@@ -1376,17 +1376,19 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- or is a rule-gap signal worth an alert, which is exactly what the scan
       -- is for. (Gated on the routing action, taken after the post-clearance
       -- challenge→block promotion so a promoted block is correctly skipped.)
-      -- An UNCLEARED resumed POST that re-hits a CHALLENGE rule is force-blocked
-      -- below (block_replayed) while waf_action is still "challenge", so exclude
-      -- that combination too — otherwise we'd scan a payload we're about to 403.
-      -- (A CLEARED resumed POST never keeps waf_action=="challenge" here:
-      -- post_clearance_action converts it to logonly/block above.) The exclusion
-      -- must stay challenge-only: a resumed POST whose hit degraded to logonly on
-      -- replay — the post-clearance downgrade, or a burst-window rule that is quiet
-      -- now while a logonly rule still matches — DOES reach origin and must still
+      -- An UNCLEARED resumed POST that re-hits a CHALLENGE-tier rule (either
+      -- rung) is force-blocked below (block_replayed) while waf_action is still
+      -- challenge/challenge_v2, so exclude that combination too — otherwise
+      -- we'd scan a payload we're about to 403. (A CLEARED resumed POST never
+      -- keeps a challenge-tier waf_action here: post_clearance_action converts
+      -- it to logonly/block above.) The exclusion must stay challenge-tier-only:
+      -- a resumed POST whose hit degraded to logonly on replay — the
+      -- post-clearance downgrade, or a burst-window rule that is quiet now
+      -- while a logonly rule still matches — DOES reach origin and must still
       -- be scanned.
+      local waf_challenge_tier = (waf_action == "challenge" or waf_action == "challenge_v2")
       if clamav_ok and waf_action ~= "block"
-         and not (waf_action == "challenge" and ngx.ctx.cfm_resumed_post) then
+         and not (waf_challenge_tier and ngx.ctx.cfm_resumed_post) then
         -- notify() returns non-nil ONLY when the vhost runs in inline mode and
         -- the bridge answered block=true (infected, not sig-ignored, not
         -- dry-run). Every failure inside is fail-open (nil) by contract.
@@ -1397,6 +1399,62 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
             " sig=" .. tostring(cv.signature))
           return ngx.exit(CFG.block_code)
         end
+      end
+
+      -- ONE place for the ip_push + the waf_<action> log line, so every route
+      -- that issues this hit's decision reports it — including the
+      -- challenge-resume redirect, which returns before the shared
+      -- fallthrough. (The one exception is the block_replayed 403: an
+      -- uncleared resumed POST re-hitting a challenge-tier rule reports via
+      -- observe_waf instead — the original challenge that minted its resume
+      -- token already pushed+logged, and a blocked client never reaches
+      -- verify, so no v2 mark is owed.) The resume path used to skip both
+      -- (an under-report: a
+      -- challenged POST left no cfm.waf.log record, no waf_trigger history
+      -- and no ipState decision), and for challenge_v2 the push is
+      -- load-bearing: it is what writes the per-(ip,host) rung mark the
+      -- verify gate keys on, so a body-carried payload must not dodge it.
+      local function push_and_log_waf_hit()
+        if waf.should_push and waf.should_push(SH, ip, reason, waf_action) then
+          -- Forensic fields (UA / Referer / Content-Type) are always
+          -- attached. The single cfm.waf.log now emits one JSON record
+          -- per trigger carrying everything Go knows: timestamp, action,
+          -- TTL, ASN/country enrichment + these per-request headers.
+          -- Client TLS fingerprint for the fleet reputation ledger (source #3),
+          -- computed edge-side from the handshake ($ssl_* via cfm_tlsfp.value()) —
+          -- NOT the client-supplied X-CFM-TLS header, which this WAF path does not
+          -- clear (only /__cfm_verify does) and so would be client-SPOOFABLE. value()
+          -- is unspoofable and charset/length-bounded; Go parses it to the canonical
+          -- fp id. Step 0c (the fingerprint-policy lookup) already computed the
+          -- tuple and stashed it in ngx.ctx.cfm_tlsfp_raw (false = plain-HTTP/
+          -- none), so reuse it and rebuild only when the stash is absent (Step 0c
+          -- pcall failed, or skipped entirely under FP_POLICY=0 — WAF-hit fp
+          -- attribution keeps working either way, paid only on WAF-hit
+          -- requests). pcall-guarded (like the /__cfm_verify stamp) so a
+          -- missing/broken cfm_tlsfp module can never 500 the request.
+          local stash = ngx.ctx.cfm_tlsfp_raw
+          local ok_fp, tls_fp
+          if stash ~= nil then
+            ok_fp, tls_fp = true, (stash or nil)
+          else
+            ok_fp, tls_fp = pcall(function() return require("cfm_tlsfp").value() end)
+          end
+          if not ok_fp then tls_fp = nil end
+          local push = {
+            ip = ip, action = waf_action, ttl_sec = ttl or 600,
+            reason = reason, host = p_host, uri = p_uri, method = p_meth,
+            waf_rule_id  = waf_rule_id,
+            ua           = req_headers["user-agent"],
+            referer      = req_headers["referer"],
+            content_type = req_headers["content-type"],
+            fingerprint  = tls_fp,
+          }
+          decision:rpc("ip_push", "POST", "/nginx/ip", cjson.encode(push),
+            { ip = ip, host = p_host, uri = p_uri, method = p_meth })
+        end
+        log_route(ngx.INFO, "waf_" .. waf_action .. " ip=" .. ip .. " host=" .. host ..
+          " reason=" .. tostring(reason) ..
+          (waf_rule_id and (" waf_rule_id=" .. tostring(waf_rule_id)) or ""))
       end
 
       if waf_action == "logonly" then
@@ -1410,7 +1468,10 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         ngx.header["X-CFM-Action"] = converted_from_challenge and "block_pc" or "block"
         ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
         observe_waf(ip, host, p_uri, p_meth, 403, reason, waf_rule_id)
-      else -- challenge (only reachable when clearance_allow == false)
+      else -- challenge tier: "challenge" or "challenge_v2" (only reachable when
+           -- clearance_allow == false). Both rungs serve the SAME challenge
+           -- page here — the v2 rung difference bites at verify, keyed on the
+           -- per-(ip,host) mark the ip_push below records daemon-side.
         if ngx.ctx.cfm_resumed_post then
           ngx.header["X-CFM-Action"] = "block_replayed"
           ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
@@ -1419,54 +1480,26 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         end
         local rtok, rerr = store_post_resume(ip, host, ngx.var.request_uri or uri, method)
         if rtok then
+          -- This return leaves the branch before the shared fallthrough, so
+          -- push+log NOW: a body-carried challenge_v2 hit must still write
+          -- its rung mark (and every resumed challenge must still be
+          -- visible in cfm.waf.log / history).
+          push_and_log_waf_hit()
           ngx.header["X-CFM-Action"] = "challenge_resume"
           ngx.header["Cache-Control"] = "no-store"
           return ngx.redirect("/?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
         end
-        ngx.header["X-CFM-Action"] = "challenge"
+        -- Both rungs present to the CLIENT as a plain challenge: echoing
+        -- "challenge_v2" here would hand a signal-aware solver farm the
+        -- exact solves that face v2 scrutiny (it could fabricate a clean
+        -- humanity report only where needed, and A/B-probe which rules are
+        -- v2-armed). The rung is visible operator-side in cfm.waf.log and
+        -- the waf_trigger history; CFM_DEBUG_HEADERS=1 exposes it here too.
+        ngx.header["X-CFM-Action"] = CFG.debug_headers and waf_action or "challenge"
         ngx.var.cfm_upstream = "cfm_challenge"; ngx.var.cfm_pass = "http://cfm_challenge"
       end
 
-      if waf.should_push and waf.should_push(SH, ip, reason, waf_action) then
-        -- Forensic fields (UA / Referer / Content-Type) are always
-        -- attached. The single cfm.waf.log now emits one JSON record
-        -- per trigger carrying everything Go knows: timestamp, action,
-        -- TTL, ASN/country enrichment + these per-request headers.
-        -- Client TLS fingerprint for the fleet reputation ledger (source #3),
-        -- computed edge-side from the handshake ($ssl_* via cfm_tlsfp.value()) —
-        -- NOT the client-supplied X-CFM-TLS header, which this WAF path does not
-        -- clear (only /__cfm_verify does) and so would be client-SPOOFABLE. value()
-        -- is unspoofable and charset/length-bounded; Go parses it to the canonical
-        -- fp id. Step 0c (the fingerprint-policy lookup) already computed the
-        -- tuple and stashed it in ngx.ctx.cfm_tlsfp_raw (false = plain-HTTP/
-        -- none), so reuse it and rebuild only when the stash is absent (Step 0c
-        -- pcall failed, or skipped entirely under FP_POLICY=0 — WAF-hit fp
-        -- attribution keeps working either way, paid only on WAF-hit
-        -- requests). pcall-guarded (like the /__cfm_verify stamp) so a
-        -- missing/broken cfm_tlsfp module can never 500 the request.
-        local stash = ngx.ctx.cfm_tlsfp_raw
-        local ok_fp, tls_fp
-        if stash ~= nil then
-          ok_fp, tls_fp = true, (stash or nil)
-        else
-          ok_fp, tls_fp = pcall(function() return require("cfm_tlsfp").value() end)
-        end
-        if not ok_fp then tls_fp = nil end
-        local push = {
-          ip = ip, action = waf_action, ttl_sec = ttl or 600,
-          reason = reason, host = p_host, uri = p_uri, method = p_meth,
-          waf_rule_id  = waf_rule_id,
-          ua           = req_headers["user-agent"],
-          referer      = req_headers["referer"],
-          content_type = req_headers["content-type"],
-          fingerprint  = tls_fp,
-        }
-        decision:rpc("ip_push", "POST", "/nginx/ip", cjson.encode(push),
-          { ip = ip, host = p_host, uri = p_uri, method = p_meth })
-      end
-      log_route(ngx.INFO, "waf_" .. waf_action .. " ip=" .. ip .. " host=" .. host ..
-        " reason=" .. tostring(reason) ..
-        (waf_rule_id and (" waf_rule_id=" .. tostring(waf_rule_id)) or ""))
+      push_and_log_waf_hit()
       if waf_action == "block" then return ngx.exit(CFG.block_code) end
       return
     else

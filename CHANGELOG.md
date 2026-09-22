@@ -18,6 +18,23 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF rule tier `challenge_v2` (master plan "arm surfaces" slice C).** The
+  promotion ladder gains a rung between challenge and block:
+  `logonly → challenge → challenge_v2 → block`, set per rule in
+  `/etc/cfm/cfm_waf_config.lua` (e.g. `return { rule_serialize =
+  "challenge_v2" }`; `rule_xss` already ships at this tier — see the
+  Changed entry below). The edge serves the SAME
+  challenge page as `challenge`; the push carries the v2 tier and the daemon
+  marks the (ip,host) pair, so that client's solve must also pass the passive
+  humanity check to earn clearance (fails stay retry-able). Doctrine intact:
+  challenge-tier hits never feed `waf_security` autoblock, cleared clients
+  are converted (never re-challenged), and the panel-port gate stays
+  block-tier. Both rungs present to the client as a plain challenge
+  (`X-CFM-Action` reveals the rung only under `CFM_DEBUG_HEADERS=1`, so a
+  signal-aware solver farm can't see which solves face v2 scrutiny).
+  **Version skew:** an edge older than this release treats the
+  mode as unknown and DISABLES the rule — upgrade before setting the tier
+  (docs/waf.md "The challenge_v2 tier").
 - **Traffic-rules action `challenge_v2` (master plan "arm surfaces" slice
   B).** The rules builder (and API) gains a fourth enforcement action beside
   allow/block/challenge/throttle: matching requests get the SAME challenge
@@ -62,6 +79,36 @@ back-filled here — see the git/PR history for that period.
   armed `challenge_v2` scope applies the Rung-1 humanity gate at verify. No
   edge Lua changes; `FP_POLICY = 0` kills all policy kinds. Arm/disarm lives
   in cfm-web (Explain Fingerprint, from the IP section's filters).
+
+### Changed
+- **`rule_xss` (302) promoted `challenge` → `challenge_v2` by default**
+  (operator decision, same release that ships the tier). Reflected-XSS
+  probes are a favourite scanner/solver-farm smoke test, so their solves
+  now face the Rung-1 humanity gate at verify. The served page and FP cost
+  are unchanged — a real user's solve still passes (absence never
+  convicts). Revert per fleet with `rule_xss = "challenge"` in
+  `/etc/cfm/cfm_waf_config.lua`. Autoblock is unaffected (challenge tier
+  never feeds `waf_security`).
+
+### Fixed
+- **12 WAF rules showed the wrong default tier in the CLI / panel / MCP rule
+  glossary.** The Go mirror's informational `DefaultMode` had silently
+  drifted from the shipped Lua defaults (e.g. `rule_reverse_shell` shown as
+  `logonly` while the edge ships it at `challenge`; `rule_crlf_injection`
+  the reverse). Enforcement was never affected — the Lua CFG is what runs,
+  and none of the drift touched `block`, so autoblock arming was correct
+  throughout. Synced to the Lua truth and now pinned by a new parity test
+  (`TestWAFRuleIDs_DefaultModeLuaParity`), because `DefaultMode == "block"`
+  IS the `waf_security` arming source and a future one-sided edit there
+  would mis-arm autoblock.
+- **A challenged POST is no longer invisible to the daemon.** The
+  challenge-resume redirect (a POST whose body is stashed for replay after
+  the solve) returned before the WAF hit push, so the hit left no
+  cfm.waf.log record, no `waf_trigger` history row and no bridge decision —
+  and under the new `challenge_v2` tier a body-carried payload would never
+  have written its verify mark. The push + `waf_<action>` log line now run
+  on every route out of the WAF action branch, resume path included
+  (surfaced by the slice-C adversarial review).
 
 ## 2026.09.20
 

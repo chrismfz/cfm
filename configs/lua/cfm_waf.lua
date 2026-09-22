@@ -39,10 +39,17 @@ local CFG = {
   enabled = true,
 
   -- Rule modes:
-  --   "disabled"  -> detector skipped
-  --   "logonly"   -> log/push only, never challenge/block inline
-  --   "challenge" -> send to challenge server
-  --   "block"     -> return 403 immediately
+  --   "disabled"     -> detector skipped
+  --   "logonly"      -> log/push only, never challenge/block inline
+  --   "challenge"    -> send to challenge server
+  --   "challenge_v2" -> same challenge page as "challenge" at the edge; the
+  --                     rung difference bites at VERIFY: the push records a
+  --                     per-(ip,host) v2 mark daemon-side, and a solve that
+  --                     fails the passive humanity score earns no clearance
+  --                     (see challenge_v2.go D5). Set per rule via
+  --                     cfm_waf_config.lua; rule_xss ships at this tier
+  --                     (the one default, see its entry below).
+  --   "block"        -> return 403 immediately
 
   -- ── Core request-side protections ─────────────────────────────────────────
   rule_traversal       = "block",      -- ../, null bytes, basic traversal markers
@@ -61,7 +68,16 @@ local CFG = {
                                        -- on all six servers: 0 hits.
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
-  rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
+  rule_xss             = "challenge_v2", -- cheap reflected-XSS style patterns.
+                                       -- Promoted challenge→challenge_v2
+                                       -- 2026-09-22 (operator decision, same
+                                       -- day the tier shipped): XSS probes are
+                                       -- a favourite scanner/solver-farm smoke
+                                       -- test, so their solves get the Rung-1
+                                       -- humanity gate at verify. Same page
+                                       -- served; FP cost unchanged (a real
+                                       -- user's solve still passes — absence
+                                       -- never convicts, D5b).
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
   rule_sqli_blind_lexical = "block", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted challenge→block 2026-08-23 after expanded fleet burn-in; prior 188/188 TP, 0 FP review (docs/waf.md)
   rule_sqli_union_variant = "challenge",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23 after clean fleet review (docs/waf.md)
@@ -609,7 +625,8 @@ end
 --   true  -> default_mode
 --   false -> disabled
 local function rule_mode(v, default_mode)
-  if v == "disabled" or v == "logonly" or v == "challenge" or v == "block" then
+  if v == "disabled" or v == "logonly" or v == "challenge"
+     or v == "challenge_v2" or v == "block" then
     return v
   end
   if v == true then
@@ -626,11 +643,15 @@ end
 -- _M.check() records every rule hit and returns the strongest action,
 -- so a low-severity logonly never suppresses a later block/challenge.
 -- "disabled" stays at 0 so disabled rules never overwrite real findings.
+-- challenge_v2 sits between challenge and block: it serves the same page as
+-- challenge but arms verify-time scrutiny, so it must win over plain
+-- challenge — and only a block may short-circuit evaluation (SEV_BLOCK).
 local ACTION_SEVERITY = {
-  disabled  = 0,
-  logonly   = 1,
-  challenge = 2,
-  block     = 3,
+  disabled     = 0,
+  logonly      = 1,
+  challenge    = 2,
+  challenge_v2 = 3,
+  block        = 4,
 }
 local SEV_BLOCK = ACTION_SEVERITY.block
 
@@ -2267,15 +2288,19 @@ function _M.is_high_risk_reason(reason)
 end
 
 -- Post-clearance challenge-loop converter. Returns (action, was_converted).
--- Only "challenge" actions are eligible for conversion; everything else
--- passes through unchanged. Defence in depth: if either default is itself
--- "challenge", coerce it to the safe value for that slot. The CFG sanitizer
--- in cfm.lua already rejects "challenge" as an env value, but a buggy
--- caller passing it raw must not reintroduce the loop.
+-- Only challenge-tier actions ("challenge" and "challenge_v2") are eligible
+-- for conversion; everything else passes through unchanged. challenge_v2 gets
+-- the same treatment as challenge here: a cleared client already solved a
+-- challenge, so re-serving one (of either rung) would loop — the v2 rung is a
+-- floor for UNCLEARED clients only, enforced at verify. Defence in depth: if
+-- either default is itself "challenge", coerce it to the safe value for that
+-- slot. The CFG sanitizer in cfm_cfg.lua whitelists {block, logonly} for the
+-- after_* knobs, but a buggy caller passing "challenge" raw must not
+-- reintroduce the loop.
 function _M.post_clearance_action(action, reason, after_challenge, after_high_risk)
-  if action ~= "challenge" then return action, false end
-  if after_high_risk == "challenge" then after_high_risk = "block" end
-  if after_challenge == "challenge" then after_challenge = "logonly" end
+  if action ~= "challenge" and action ~= "challenge_v2" then return action, false end
+  if after_high_risk == "challenge" or after_high_risk == "challenge_v2" then after_high_risk = "block" end
+  if after_challenge == "challenge" or after_challenge == "challenge_v2" then after_challenge = "logonly" end
   if _M.is_high_risk_reason(reason) then
     return after_high_risk or "block", true
   end
@@ -2283,9 +2308,9 @@ function _M.post_clearance_action(action, reason, after_challenge, after_high_ri
 end
 
 -- Live rule-mode tuning. Accepts the same values rule_mode() does:
--- "disabled" | "logonly" | "challenge" | "block". Returns true on success,
--- (false, err) on rejection. Per-worker only — changes do not survive
--- reload. Intended for ops kill-switches and tests.
+-- "disabled" | "logonly" | "challenge" | "challenge_v2" | "block". Returns
+-- true on success, (false, err) on rejection. Per-worker only — changes do
+-- not survive reload. Intended for ops kill-switches and tests.
 --
 -- Name must start with "rule_": this prevents typos like
 -- set_rule("max_scan_len", "block") from silently overwriting unrelated
@@ -2294,7 +2319,8 @@ function _M.set_rule(name, mode)
   if type(name) ~= "string" or name:sub(1, 5) ~= "rule_" then
     return false, "invalid rule name"
   end
-  if mode ~= "disabled" and mode ~= "logonly" and mode ~= "challenge" and mode ~= "block" then
+  if mode ~= "disabled" and mode ~= "logonly" and mode ~= "challenge"
+     and mode ~= "challenge_v2" and mode ~= "block" then
     return false, "invalid mode"
   end
   CFG[name] = mode

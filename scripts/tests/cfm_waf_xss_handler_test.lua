@@ -1,5 +1,5 @@
 -- Tests for detect_xss event-handler matching (audit F33, rule 302 WAF_XSS,
--- production tier: challenge).
+-- production tier: challenge_v2 since 2026-09-22).
 --
 -- The old checks required the handler name to be immediately followed by "="
 -- (`onload=`), so an HTML-legal `onload =` / `onload\t=` (whitespace before the
