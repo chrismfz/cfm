@@ -17,6 +17,25 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **WAF: WordPress core page-template traversal, CVE-2026-87902 (critical,
+  4.7.0–7.1.1).** Unauthenticated `pagename` traversal makes WordPress include a
+  local `.php` file outside the theme, and it becomes RCE via `pearcmd.php` on
+  hosts with `register_argc_argv = On` (default on cPanel with PHP < 8.5). Two
+  block rules cover it until the sites are updated:
+  - **Rule 10017** (`WAF_CVE`, armed) matches a `pagename` value with a `..`
+    segment, from the query string or a POST body. Each hit gets a 6h nft ban
+    and a `WAF/CVE-2026-87902` alert.
+  - **Rule 103** (`WAF_TRAVERSAL`) matches a `..` segment in the **raw** request
+    path. It closes a general blind spot: the WAF inspected nginx's decoded,
+    dot-segment-resolved `$uri`, while the origin receives the raw path, so the
+    pretty-permalink route (and any other raw-path traversal) was never seen.
+    The family's autoblock stays held, so a hit is a 403 without an alert.
+
+  The real fix is the WordPress update (7.1.2 / 7.0.6 / 6.9.9 … 4.7.37).
+  Setting `register_argc_argv = Off` removes the RCE step on hosts whose sites
+  cannot be updated.
+
 ### Added
 - **Site Cache — Tier B micro-cache internal locations (Phase B3a, inert).**
   Adds the six per-bucket `@cfm_micro_<n>s` serving locations to the HTTPS server

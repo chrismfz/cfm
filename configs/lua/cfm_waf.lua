@@ -66,6 +66,18 @@ local CFG = {
                                        -- PANEL_WAF_MODE=enforce) now DENIES traversal
                                        -- on :2083/:2087/:2096 — 7-day panel burn-in
                                        -- on all six servers: 0 hits.
+  rule_traversal_raw_path = "block",   -- rule 103: a `..` segment in the RAW request path
+                                       -- ($request_uri). ngx.var.uri (what rule 101 sees)
+                                       -- is already decoded and dot-segment-RESOLVED by
+                                       -- nginx, while the origin gets the raw path — the
+                                       -- WordPress pretty-permalink route of CVE-2026-87902
+                                       -- (path -> `pagename`) was invisible to the WAF.
+                                       -- Block from day one (2026-09-22) for that critical,
+                                       -- actively-probed CVE: browsers and HTTP libraries
+                                       -- never send a dot segment (RFC 3986 §5.2.4), and a
+                                       -- root-escaping one is already a 400 from nginx.
+                                       -- Family WAF_TRAVERSAL: autoblock held (403 only).
+                                       -- Web edge only — the panel gate passes no raw_uri.
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge_v2", -- cheap reflected-XSS style patterns.
@@ -213,6 +225,7 @@ local CFG = {
   rule_cve_woocommerce_payments = "block", -- CVE-2023-28121: WooCommerce Payments (4.8.0–5.6.1) unauth auth-bypass->privesc. The X-WCPAY-Platform-Checkout-User request header is trusted as the current user id with no validation; an attacker sets it to 1 and mints an admin (POST /wp-json/wp/v2/users roles=administrator). Header is server-set by WooPay only — a client never sends it (near-zero FP); keyed on header presence, all methods. Exempt genuine WooPay source nets via waf_security ALLOW_NETS.
   rule_cve_gravity_smtp = "block", -- CVE-2026-4020: Gravity SMTP (<=2.1.4) unauth sensitive-info exposure. REST route /gravitysmtp/v1/tests/mock-data has permission_callback=true and dumps the full System Report (PHP/DB/server versions, paths, plugins, API keys/tokens). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate — the only legit caller is the wp-admin settings screen, which carries the logged-in cookie.
   rule_cve_sppagebuilder_upload = "block", -- CVE-2026-48908: Joomla SP Page Builder (com_sppagebuilder) asset.upload* (uploadCustomIcon/uploadImage/uploadFont) — unauth arbitrary file upload->RCE ("ANTONKILL", actively exploited 2026-07). Runs before rules 401/414 for CVE attribution. Keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content); reuses the hardened upload detectors. Near-zero FP (a legit icon/image/font upload never carries PHP). Body-budget caveat: a php entry past waf_body_max_len is ClamAV's backstop.
+  rule_cve_wp_pagename_traversal = "block", -- CVE-2026-87902 (GHSA-7hp8-65ch-5whp): WordPress core 4.7.0–7.1.1 unauth page-template path traversal. get_page_template() builds page-{$pagename}.php from the url-decoded `pagename` query var without the `..` check, so a readable local .php outside the theme gets included (RCE via pearcmd.php when register_argc_argv=On). Fires on a `pagename` value (query string, urlencoded or multipart POST — WP reads $_POST first) holding a `..` segment; a real pagename is a slug path and never does (near-zero FP). The pretty-permalink route (path -> pagename) is rule 103. Armed like every WAF_CVE block rule: 6h ban + WAF/CVE-2026-87902 alert.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
@@ -491,6 +504,7 @@ local RULE_IDS = {
   -- 1xx path / traversal
   rule_traversal               = 101,
   rule_long_path_segment       = 102,
+  rule_traversal_raw_path      = 103,
 
   -- 2xx client identity
   rule_bad_ua                  = 201,
@@ -601,6 +615,7 @@ local RULE_IDS = {
   -- 10015 is intentionally skipped: it was the (never-released, then removed)
   -- vBulletin runMaths CVE-2026-61511 block rule — see WAF_CVE.md "Removed".
   rule_cve_elementor_pro_form_upload = 10016,
+  rule_cve_wp_pagename_traversal = 10017,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -713,6 +728,9 @@ function _M.check(ctx)
   local headers = ctx.headers or {}
   local body    = ctx.body    or ""
   local cookie  = ctx.cookie  or ""
+  -- The RAW $request_uri (undecoded, dot segments intact) — only rule 103
+  -- reads it. nil when the caller does not pass it (the panel gate).
+  local raw_uri = ctx.raw_uri
   -- skip_rule_ids: optional set { [rule_id] = true } of IDs to suppress.
   -- Populated by cfm.lua from the per-vhost waf-excludes snapshot when the
   -- operator has marked specific rules as excluded for this host (e.g. to
@@ -1313,6 +1331,21 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_32475:ELEMENTOR_PRO:" .. tag, ttl, mode, RULE_IDS.rule_cve_elementor_pro_form_upload) then goto done end
+      end
+    end
+  end
+
+  -- WordPress core page-template traversal (CVE-2026-87902) — the `pagename`
+  -- query-var leg. Runs well before the traversal steps (101/103, last) so a
+  -- `pagename=` traversal is attributed to the CVE, which is armed (ban + alert)
+  -- where WAF_TRAVERSAL is held. All methods: WP takes pagename from GET or POST.
+  do
+    local mode = rule_mode(CFG.rule_cve_wp_pagename_traversal, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_wp_pagename_traversal(uri, m_lower, args, body, headers, get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_87902:WORDPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_wp_pagename_traversal) then goto done end
       end
     end
   end
@@ -2166,6 +2199,20 @@ function _M.check(ctx)
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
       if record("WAF_TRAVERSAL", ttl, mode, RULE_IDS.rule_traversal) then goto done end
+    end
+  end
+
+  -- ── Raw-path traversal (rule 103) — same family, same late position ───────
+  -- A `..` segment in the RAW request path, which nginx resolved away before
+  -- rule 101 saw `uri` (see detect_raw_path_dotdot). WAF_TRAVERSAL like 101, so
+  -- it sits beside it after every armed block family for the same shadowing
+  -- reason; 101 runs first so a request both catch keeps its classic label.
+  do
+    local mode = rule_mode(CFG.rule_traversal_raw_path, "block")
+    if mode ~= "disabled" and det.detect_raw_path_dotdot(raw_uri) then
+      local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+      ttl, mode = mode_ttl_action(mode, ttl)
+      if record("WAF_TRAVERSAL:RAW_PATH", ttl, mode, RULE_IDS.rule_traversal_raw_path) then goto done end
     end
   end
 

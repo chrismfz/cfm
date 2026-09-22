@@ -52,6 +52,11 @@ import (
 // The edge already returns 403 to every hit; the ban adds cross-request
 // persistence and notification, which the operator arms with `TRAVERSAL = 1`
 // once the alert volume is judged acceptable (or with DRY_RUN = 1 first).
+// Rule 103 (2026-09-22, a `..` segment in the RAW request path, the
+// pretty-permalink route of CVE-2026-87902) is in this family too: arming
+// TRAVERSAL bans its sources as well. It is not in the volume estimate above
+// (it was invisible before it existed) — check `waf_rule_detail rule=103`
+// before arming. The CVE's `pagename` leg is rule 10017, under WAF_CVE, armed.
 //
 // heldAutoblockFamilies is the ONE source for that hold: the default loop,
 // the DefaultsTemplate rendered into a fresh detectors.conf and
@@ -59,7 +64,7 @@ import (
 // one-line deletion here (plus the reference detectors.conf comment). The
 // rationale for each entry lives in the comment above, not in the map.
 var heldAutoblockFamilies = map[string]struct{}{
-	"WAF_TRAVERSAL": {}, // rule 101, block since 2026-09-05; held for burn-in (~2 300 scanner IPs/week)
+	"WAF_TRAVERSAL": {}, // rules 101 (block since 2026-09-05) + 103 (2026-09-22); held for burn-in (~2 300 scanner IPs/week)
 }
 
 func wafSecurityFamilies(kv KV) map[string]int {
