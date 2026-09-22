@@ -55,20 +55,27 @@ back-filled here — see the git/PR history for that period.
 
 ### Fixed
 - **The daemon could crash (SIGSEGV) when the GeoLite2 databases were
-  updated.** When the ASN/City `.mmdb` files change on disk — the weekly
-  `geoipupdate` — CFM reopens them and closes the old ones. The readers are
+  refreshed.** CFM's own MaxMind updater checks daily and installs a new
+  ASN/City `.mmdb` as often as every ~3 days; each enricher in the daemon then
+  reopens the files and closes the old ones on its own. The readers are
   memory-mapped, and closing one unmaps it, but a lookup that had already
   picked up the old reader could still be reading from it: a read of unmapped
   memory, which Go cannot recover from (`fatal error: fault` /
-  `signal SIGSEGV`). Every edge decision and every challenge solve does such a
-  lookup, so a busy node only needed one of them to overlap the swap. It was
-  reproduced with a real memory-mapped database in about two seconds of
-  lookups racing swaps. Lookups now hold the reader lock for the whole read,
-  and an old reader is closed only once nothing can still be reading it; the
-  same applies to shutting the enricher down. A lookup during an update now
-  sees either the old or the new database, never a closed one (which also
-  used to read back as empty country/ASN for an instant). No configuration
-  change.
+  `signal SIGSEGV`). Every challenge solve reads the database, and so does
+  every lookup for an address not yet in the enrichment cache (the edge's
+  country fallback, ASN policies, the detectors), so a busy node only needed
+  one of them to overlap a refresh. Reproduced before fixing, with a real
+  memory-mapped test database generated to the MaxMind spec, within two
+  seconds (usually under one) of lookups racing refreshes. Lookups now hold
+  the reader lock for the whole read, and an old reader is closed only once
+  nothing can still be reading it. A lookup during a refresh now sees either
+  the old or the new database, never a closed one. Previously a lookup that
+  hit the just-closed database got an error and returned empty country/ASN —
+  and the full lookup path then cached that empty answer for up to 24h.
+  The same change removed a write lock that every enrichment cache miss used
+  to take just to check whether a refresh was due; in a benchmark, fast-path
+  lookups went from ~370k/s to ~820k/s and p99 latency roughly halved. No
+  configuration change.
 
 ## 2026.09.22
 

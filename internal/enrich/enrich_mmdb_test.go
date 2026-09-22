@@ -53,9 +53,7 @@ func hotSwapFixture(t *testing.T) (*Enricher, func()) {
 			asn = 3329
 		}
 		install(asn, base.Add(time.Duration(n)*time.Second))
-		e.mu.Lock()
-		e.lastStatChk = time.Time{}
-		e.mu.Unlock()
+		e.statChk.Store(0) // bypass the 300s stat rate limit
 		e.refreshIfChanged()
 	}
 	return e, swap
@@ -93,9 +91,10 @@ func TestHotSwapNeverReadsAClosedReader(t *testing.T) {
 				if g%2 == 0 {
 					check(e.LookupGeoFast("94.68.42.127"))
 				} else {
-					// The full path, on ever-new addresses so the cache
-					// never answers for it; PTR is off, so no network.
-					check(e.Lookup(fmt.Sprintf("10.%d.%d.%d", g, (i>>8)&255, i&255)))
+					// The full path, on a fresh address each time (16M per
+					// goroutine before any repeats) so the cache never
+					// answers for it; PTR is off, so no network.
+					check(e.Lookup(fmt.Sprintf("%d.%d.%d.%d", 1+g, (i>>16)&255, (i>>8)&255, i&255)))
 				}
 			}
 		}(g)
