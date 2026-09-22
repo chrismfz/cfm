@@ -141,6 +141,13 @@ type NginxBridge struct {
 	// configs/lua/cfm_h3_config.lua and http3_overrides_store.go.
 	ListHTTP3Hosts func() []string
 
+	// ListCachePolicy returns the per-vhost Site Cache policy feed — only
+	// vhosts with at least one enabled tier appear. The Lua worker polls this
+	// via /nginx/cache/config to refresh its per-worker cache. PHASE 2 is
+	// observe-only: the edge merely stamps an X-CFM-Cache header, nothing is
+	// cached. See configs/lua/cfm_cache.lua and site_cache.go.
+	ListCachePolicy func() []CachePolicyRow
+
 	// RuleDecision evaluates dynamic traffic rules for the current request
 	// shape (host/ip/ua/path/method/country) and returns the matched action.
 	RuleDecision func(TrafficRuleEvalInput) TrafficRuleEvalResult
@@ -1550,6 +1557,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/clam/overrides", b.instrument("/nginx/clam/overrides", b.handleClamExcludes))
 	mux.HandleFunc("/nginx/clam/mode_overrides", b.instrument("/nginx/clam/mode_overrides", b.handleClamModeOverrides))
 	mux.HandleFunc("/nginx/h3/config", b.instrument("/nginx/h3/config", b.handleHTTP3Config))
+	mux.HandleFunc("/nginx/cache/config", b.instrument("/nginx/cache/config", b.handleCacheConfig))
 	mux.HandleFunc("/nginx/waf/stats", b.instrument("/nginx/waf/stats", b.handleWAFStats))
 	mux.HandleFunc("/nginx/snapshot", b.instrument("/nginx/snapshot", b.handleSnapshot))
 	mux.HandleFunc("/nginx/status", b.instrument("/nginx/status", b.handleStatus))
@@ -2560,6 +2568,39 @@ func (b *NginxBridge) handleHTTP3Config(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"hosts": hosts})
+}
+
+// handleCacheConfig returns the per-vhost Site Cache policy feed (only vhosts
+// with an enabled tier). Polled by configs/lua/cfm_cache.lua every ~60s. The
+// body is marshalled to a buffer and sent with an explicit Content-Length so
+// the minimal Lua cosocket reader is never handed a chunked-encoded body (the
+// same requirement the clam-override handlers document).
+//
+// PHASE 2 is observe-only: the edge stamps an X-CFM-Cache header from this feed
+// but does NOT cache anything (no proxy_cache is wired yet).
+func (b *NginxBridge) handleCacheConfig(w http.ResponseWriter, r *http.Request) {
+	if !b.checkToken(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	rows := make([]CachePolicyRow, 0)
+	if b.ListCachePolicy != nil {
+		if got := b.ListCachePolicy(); got != nil {
+			rows = got
+		}
+	}
+	buf, err := json.Marshal(map[string]any{"entries": rows})
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
+	_, _ = w.Write(buf)
 }
 
 // maxWAFStatsRows bounds how many (hour,host) rows a single /nginx/waf/stats

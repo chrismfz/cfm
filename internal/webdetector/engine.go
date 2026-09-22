@@ -579,6 +579,7 @@ func NewEngine(cfg Config) *Engine {
 	e.nginxBridge.ListClamScanOverrides = e.ClamOverrideList
 	e.nginxBridge.ListClamModeOverrides = e.ClamModeOverrideList
 	e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
+	e.nginxBridge.ListCachePolicy = e.SiteCachePolicyFeed
 	e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 	e.nginxBridge.RuleNeedsVerifiedBot = e.trafficRules.NeedsVerifiedBotFor
 	e.nginxBridge.ListTrafficRules = e.TrafficRuleList
@@ -4036,6 +4037,15 @@ func (e *Engine) SiteCacheHasAny() bool {
 		return false
 	}
 	return e.siteCache.HasAny()
+}
+
+// SiteCachePolicyFeed is the /nginx/cache/config bridge feed (enabled vhosts
+// only). Phase 2: observe-only at the edge.
+func (e *Engine) SiteCachePolicyFeed() []CachePolicyRow {
+	if e == nil || e.siteCache == nil {
+		return nil
+	}
+	return e.siteCache.PolicyFeed()
 }
 
 func (e *Engine) TrafficRuleAdd(rule TrafficRule) (TrafficRule, error) {
