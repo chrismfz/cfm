@@ -274,6 +274,29 @@ func TestEnsurePanelDNATAccepts_InsertFailureKeepsLegacy(t *testing.T) {
 	}
 }
 
+// A stale extra that won't delete must not fail the call: `cfm dnat cpanel on`
+// rolls the whole panel redirect back on an error, though the tagged accept
+// is already in place.
+func TestEnsurePanelDNATAccepts_DeleteFailureIsNotAnError(t *testing.T) {
+	c := legacyNodeChain()
+	c.runErr = func(cmd string) error {
+		if strings.HasPrefix(cmd, "delete ") {
+			return errors.New("No such file or directory")
+		}
+		return nil
+	}
+	changes, err := EnsurePanelDNATAccepts(c.ops())
+	if err != nil {
+		t.Fatalf("a failed delete of a legacy extra must not be an error: %v", err)
+	}
+	if n := strings.Count(strings.Join(c.cmds, "\n"), "insert rule"); n != len(PanelDNATMappings()) {
+		t.Errorf("%d inserts, want every mapping handled despite the failed deletes: %q", n, c.cmds)
+	}
+	if !strings.Contains(strings.Join(changes, "\n"), "could not remove") {
+		t.Errorf("changes %q don't report the failed delete", changes)
+	}
+}
+
 func TestRemovePanelDNATAccepts_RemovesTaggedAndLegacy(t *testing.T) {
 	maps := PanelDNATMappings()
 	c := newFakeInputChain(

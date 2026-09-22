@@ -116,14 +116,18 @@ grep -A3 -B3 'cfm/internal/detectors' /tmp/cfm.gor | head -50
 # The set/element contents are identical; only the write path changes.
 # Use the same `nft list` commands to verify state (kernel is the ground truth).
 #
-# Switch to nftlib (no restart needed for CLI commands; daemon needs restart):
+# Switch to nftlib: set CFM_FIREWALL_ENGINE = "nftlib" in /etc/cfm/cfm.conf,
+# then restart the daemon (it reads the engine only at startup). `cfm` CLI
+# commands read the same key, so they run on nftlib too:
+#   systemctl restart cfm
+# The CFM_FIREWALL_ENGINE environment variable overrides cfm.conf for the one
+# process it is set in, e.g. a one-off CLI test:
 #   CFM_FIREWALL_ENGINE=nftlib cfm status
-#   CFM_FIREWALL_ENGINE=nftlib cfm block 1.2.3.4 --ttl 1h
-#   systemctl set-environment CFM_FIREWALL_ENGINE=nftlib && systemctl restart cfm
+# Don't use `systemctl set-environment` for it: that changes only the daemon,
+# and the CLI (reading cfm.conf) would then run the other engine.
 #
-# Confirm which engine the running daemon is using:
-grep CFM_FIREWALL_ENGINE /proc/$(pgrep -f "cfm daemon" | head -1)/environ 2>/dev/null \
-  || echo "(env var not set → engine is nft)"
+# Confirm which engine the running daemon is using (logged at startup):
+grep 'firewall engine' /var/log/cfm/cfm.log | tail -1
 #
 # Confirm nftlib is NOT spawning nft subprocesses during a block:
 #   In one terminal, watch for nft forks:

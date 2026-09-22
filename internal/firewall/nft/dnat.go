@@ -84,7 +84,7 @@ func dnatAcceptRuleSpecs(httpPort, httpsPort int) []dnatAcceptRuleSpec {
 }
 
 func dnatAcceptRuleComment(label string, from, to int) string {
-	return fmt.Sprintf("cfm_dnat_accept:%s:%d:%d", label, from, to)
+	return fmt.Sprintf("%s:%s:%d:%d", firewall.WebDNATAcceptTagNFT, label, from, to)
 }
 
 func dnatAcceptRuleExpr(spec dnatAcceptRuleSpec, beforeHandle string) string {
@@ -133,7 +133,10 @@ func (b *Backend) cleanupScopedDNATAccepts() error {
 	}
 	for _, line := range strings.Split(out, "\n") {
 		norm := strings.ReplaceAll(line, `"`, "")
-		if !strings.Contains(norm, "cfm_dnat_accept:") || !strings.Contains(norm, " handle ") {
+		// Both engines' tags: an nftlib-written accept left behind after an
+		// engine switch would otherwise stay forever.
+		tagged := strings.Contains(norm, firewall.WebDNATAcceptTagNFT+":") || strings.Contains(norm, firewall.WebDNATAcceptTagNFTLib+":")
+		if !tagged || !strings.Contains(norm, " handle ") {
 			continue
 		}
 		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])

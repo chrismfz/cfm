@@ -51,7 +51,9 @@ Firewall backend is selectable at runtime: `FIREWALL_ENGINE` in `cfm.conf`
 exec-based) or `nftlib` (netlink, zero-fork set/feed writes). The daemon AND
 the one-shot CLI resolve it the same way (`cmd/cfm/engine.go`). The CLI used
 to read only the env var, so on an nftlib node `cfm dnat on` ran the exec
-backend and wrote a second copy of the daemon's DNAT rules. nftlib must never
+backend, whose untagged redirect the nftlib daemon later duplicated with its
+own. Set the engine in `cfm.conf`, not via `systemctl set-environment` (the
+CLI can't see a daemon-only env var). nftlib must never
 read `inet cfm input` over netlink: google/nftables v0.3.0 fails the whole
 dump on the `ct original …` match every DNAT accept carries, so those accepts
 are nft text on both backends (the cPanel ones in one shared implementation,

@@ -187,7 +187,8 @@ func parseLegacyPanelAccept(fields []string) (from, to int, ok bool) {
 // accept before the default drop. A tagged accept already in place is kept.
 // Otherwise a new one is inserted first, and only then are the others for
 // that mapping (misplaced, duplicate or legacy) deleted, so an accept that
-// was working stays in force until its replacement exists.
+// was working stays in force until its replacement exists. Only a failed
+// listing or insert is an error; a failed delete is reported in the changes.
 func EnsurePanelDNATAccepts(ops NFTTextOps) ([]string, error) {
 	_ = ops.Run("add table inet cfm")
 	_ = ops.Run("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
@@ -221,18 +222,25 @@ func EnsurePanelDNATAccepts(ops NFTTextOps) ([]string, error) {
 				return changes, err
 			}
 		}
+		removed := 0
 		for _, h := range stale {
+			// Best effort: the tagged accept is in place by now, so an extra
+			// that won't go (or is already gone) changes nothing for traffic.
+			// Failing here would make `cfm dnat cpanel on` roll back the
+			// whole panel redirect.
 			if err := ops.Run("delete rule inet cfm input handle " + h); err != nil {
-				return changes, err
+				changes = append(changes, fmt.Sprintf("could not remove an extra scoped %d->%d (handle %s): %v", m.From, m.To, h, err))
+				continue
 			}
+			removed++
 		}
 		switch {
 		case !keep && legacy:
 			changes = append(changes, fmt.Sprintf("re-created scoped %d->%d with its %s comment (nft cfm/input)", m.From, m.To, PanelDNATAcceptNamespace))
 		case !keep:
 			changes = append(changes, fmt.Sprintf("opened scoped %d->%d (nft cfm/input)", m.From, m.To))
-		case len(stale) > 0:
-			changes = append(changes, fmt.Sprintf("removed %d extra scoped %d->%d (nft cfm/input)", len(stale), m.From, m.To))
+		case removed > 0:
+			changes = append(changes, fmt.Sprintf("removed %d extra scoped %d->%d (nft cfm/input)", removed, m.From, m.To))
 		}
 	}
 	return changes, nil

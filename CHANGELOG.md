@@ -148,9 +148,9 @@ back-filled here — see the git/PR history for that period.
   benchmark (`BenchmarkLookupGeoFastUnderMisses`) fast-path lookups got ~2.5×
   faster (~2.8µs → ~1.1µs each). No configuration change.
 - **nftlib firewall backend: cPanel DNAT accepts can be re-checked and
-  repaired again, web DNAT accepts are reasserted, and `cfm dnat off` really
-  turns the web redirect off.** Three bugs, all on nodes running
-  `FIREWALL_ENGINE = nftlib`:
+  repaired again, web DNAT accepts are reasserted, and `cfm dnat off`,
+  `cfm dnat on --priority` and `cfm flush` do what they say.** All on nodes
+  running `FIREWALL_ENGINE = nftlib`:
   - Once the cPanel DNAT accepts existed, nftlib could no longer read its own
     input chain. google/nftables can't decode the `ct original proto-dst` match
     these rules carry, so every later check failed with "attribute 3 is not a
@@ -165,26 +165,40 @@ back-filled here — see the git/PR history for that period.
     table (`cfm` instead of `cfm_redirect`). Both backends now share that
     default.
   - `cfm dnat off` removed only the rules nftlib had tagged itself. Any other
-    redirect in `cfm_redirect`, such as the copy an exec-backend `cfm dnat on`
-    wrote, kept redirecting while status reported off. It now deletes the
-    `cfm_redirect` table whole, as the exec backend always did.
+    redirect in `cfm_redirect`, such as the exec backend's form of it, kept
+    redirecting while status reported off. It now deletes the `cfm_redirect`
+    table whole, as the exec backend always did. Both backends now also remove
+    each other's web DNAT accepts (`cfm_dnat_accept:` and
+    `cfm_edge_dnat_accept:`), so none are left behind by an engine switch.
+  - `cfm dnat on --priority X` kept the old chain priority while reporting X,
+    and the `cfm dnat` status showed the configured priority, not the live one.
+    A priority change now rebuilds `cfm_redirect` in one transaction, as the
+    exec backend does, and the status shows the live value.
+  - `cfm flush` failed with "device or resource busy": nftlib deleted and
+    recreated the block sets, which the kernel refuses while rules use them. It
+    now empties them in place.
   - `EnsureBase` re-declared the input chain on every call, and the kernel
     rejects the whole batch when the priority differs from the live chain's
     ("operation not supported"). From then on every `EnsureBase` failed, and
     so did every web `DNATOn`, which calls it (failsafe recovery included). The
     priority differs whenever `NFT_INPUT_PRIORITY` changed after the chain was
     created, and in any process without the config, such as a CLI command. An
-    existing chain is now kept with a warning, as the exec backend does;
-    `cfm reset` applies a new priority.
+    existing chain is now kept (with a warning when the daemon's config wants
+    another priority), as the exec backend does.
 - **`cfm` CLI commands now use the firewall engine configured in `cfm.conf`,
   like the daemon.** The CLI read only the `CFM_FIREWALL_ENGINE` environment
-  variable and otherwise used the exec `nft` backend. On an nftlib node,
-  `cfm dnat on` and `cfm dnat cpanel on` therefore wrote a second, differently
-  tagged copy of the daemon's DNAT rules (e.g. both `iif "lo"` and
-  `iifname "lo"` in `cfm_redirect`), and each backend misreported the other's
-  panel accepts (`firewall=blocked` from the exec side, `unknown` from
-  nftlib). The environment variable still overrides the config file. **One-time
-  step on an nftlib node that shows duplicate rules in
+  variable and otherwise used the exec `nft` backend, so on an nftlib node the
+  CLI and the daemon ran different engines:
+  - `cfm dnat on` wrote the web redirect in the exec backend's form. The nftlib
+    daemon didn't recognise it, and the next time it installed the redirect
+    (boot restore, failsafe recovery, a bypass reload) it added its own copy
+    beside it: e.g. both `iif "lo"` and `iifname "lo"` in `cfm_redirect`.
+  - Each backend misreported the other's panel accepts: `firewall=blocked` from
+    the exec side, `unknown` from nftlib.
+
+  The environment variable still overrides the config file; set the engine in
+  `cfm.conf`, not with `systemctl set-environment` (which the CLI can't see).
+  **One-time step on an nftlib node that shows duplicate rules in
   `nft list table inet cfm_redirect`:** after upgrading, run
   `cfm dnat off && cfm dnat on`.
 

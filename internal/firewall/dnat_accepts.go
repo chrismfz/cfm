@@ -22,6 +22,16 @@ const (
 	DNATDefaultTable  = "cfm_redirect"
 )
 
+// Comment tags on the web DNAT accepts: the nft backend writes
+// cfm_dnat_accept:<label>:<from>:<to>, nftlib cfm_edge_dnat_accept:…. Each
+// backend's cleanup removes both, so accepts the other engine wrote (before a
+// node switched engines, or from a CLI that ran the other one) don't linger.
+// The dnat CLI's status report reads both.
+const (
+	WebDNATAcceptTagNFT    = "cfm_dnat_accept"
+	WebDNATAcceptTagNFTLib = "cfm_edge_dnat_accept"
+)
+
 // IsInputDefaultDropLine reports whether a rendered `inet cfm input` chain line
 // is the catch-all NEW-state default drop that ApplyPortsPolicy installs
 // (`ct state new tcp|udp dport 0-65535 drop`). Scoped DNAT accepts must sit

@@ -17,9 +17,11 @@ import (
 // read only the CFM_FIREWALL_ENGINE environment variable and ignore
 // FIREWALL_ENGINE in cfm.conf. So on a node configured for nftlib the daemon ran
 // nftlib while every CLI command ran the exec nft backend. The two backends tag
-// their DNAT rules differently, so `cfm dnat on` from the CLI added a second copy
-// of the web redirect beside the daemon's, and each backend misread the other's
-// panel accepts.
+// their DNAT rules differently: the nftlib daemon didn't recognise the web
+// redirect a CLI `cfm dnat on` wrote and added its own copy beside it the next
+// time it installed the redirect, and each backend misread the other's panel
+// accepts. An engine set with `systemctl set-environment` still reaches only
+// the daemon; set it in cfm.conf.
 
 // cliEngineConfig is cfm.conf from the CLI's config dir (the daemon's, via the
 // state file it writes), read once per process.

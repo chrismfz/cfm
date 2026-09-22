@@ -22,7 +22,7 @@ import (
 const (
 	dnatRuleTag                  = "cfm-dnat-managed"
 	dnatLoopbackAcceptTag        = dnatRuleTag + ":loopback-accept:v1"
-	dnatAcceptNamespaceEdge = "cfm_edge_dnat_accept"
+	dnatAcceptNamespaceEdge = firewall.WebDNATAcceptTagNFTLib
 	dnatRuleNamespaceEdge   = "edge"
 )
 
@@ -380,7 +380,12 @@ func (b *Backend) DNATShow(family, table string) (string, error) {
 	var out strings.Builder
 	fmt.Fprintf(&out, "table %s %s {\n", family, table)
 	out.WriteString("  chain prerouting {\n")
-	out.WriteString(fmt.Sprintf("    type nat hook prerouting priority %d; policy accept;\n\n", b.dnatPriority()))
+	// The live chain's priority, so drift from the configured value shows.
+	prio := b.dnatPriority()
+	if ch.Priority != nil {
+		prio = int(*ch.Priority)
+	}
+	out.WriteString(fmt.Sprintf("    type nat hook prerouting priority %d; policy accept;\n\n", prio))
 	for _, spec := range found {
 		fmt.Fprintf(&out, "    %s\n", dnatShowRuleLine(spec))
 	}
@@ -510,7 +515,13 @@ func (b *Backend) cleanupScopedDNATAccepts(namespace string) error {
 	if err != nil {
 		return nil
 	}
-	for _, h := range scopedDNATAcceptHandles(out, namespace) {
+	handles := scopedDNATAcceptHandles(out, namespace)
+	if namespace == dnatAcceptNamespaceEdge {
+		// Also the nft backend's web accepts, e.g. from a CLI that ran it
+		// before the CLI followed cfm.conf's engine; they'd never go otherwise.
+		handles = append(handles, scopedDNATAcceptHandles(out, firewall.WebDNATAcceptTagNFT)...)
+	}
+	for _, h := range handles {
 		if err := b.nftExec("delete rule inet cfm input handle " + h); err != nil {
 			return err
 		}
@@ -610,6 +621,15 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	// nft CLI only (no b.mu inside), so safe to run under the lock.
 	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted); err != nil {
 		return err
+	}
+	// A chain's hook priority can't be changed in place. For CFM's own table,
+	// rebuild it at the wanted priority in this same batch, as the nft
+	// backend does, so `cfm dnat on --priority X` takes effect instead of
+	// silently keeping the old value. Another table keeps its chain.
+	if ch != nil && ch.Priority != nil && *ch.Priority != b.dnatChainPriority() &&
+		strings.EqualFold(family, firewall.DNATDefaultFamily) && table == firewall.DNATDefaultTable {
+		b.conn.DelTable(ch.Table)
+		ch, rules = nil, nil
 	}
 	if ch == nil {
 		b.conn.AddTable(t)

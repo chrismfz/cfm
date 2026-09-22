@@ -81,7 +81,7 @@ func (b *Backend) EnsureBase() (err error) {
 			Policy:   &acceptPolicy,
 		})
 	} else if b.cfg != nil && cur.Priority != nil && *cur.Priority != inputPrio {
-		logging.Logf("[nftlib] WARNING: input chain priority is %d, config wants %d; keeping the existing chain. Run 'cfm reset' to apply the new priority.",
+		logging.Logf("[nftlib] WARNING: input chain priority is %d, config wants %d; keeping the existing chain (NFT_INPUT_PRIORITY applies only when the chain is created)",
 			*cur.Priority, inputPrio)
 	}
 	b.conn.AddChain(&nftables.Chain{Table: table, Name: "flood"})
@@ -409,67 +409,32 @@ func setShape(v6 bool, isNet bool) (nftables.SetDatatype, bool) {
 	return nftables.TypeIPAddr, isNet
 }
 
-// FlushSet resets a named set by deleting and recreating it.
-//
-// The delete and recreate are intentionally split into separate Flush() calls
-// to keep transaction boundaries explicit: first commit set removal, then commit
-// empty set creation. Missing table/set conditions are treated as no-ops.
-// b.mu is held for each transaction individually so the conn queue stays coherent.
+// FlushSet empties a named set in place. It used to delete and recreate the
+// set, which the kernel refuses (EBUSY) for any set a rule references — and
+// the sets `cfm flush` empties, block_v4/block_v6, always are. A missing
+// table or set is a no-op.
 func (b *Backend) FlushSet(family, table, set string) error {
 	if !strings.EqualFold(family, "inet") || table != cfmTableName {
 		return fmt.Errorf("nftlib: unsupported set path %s %s %s", family, table, set)
 	}
-
-	// Transaction 1: look up and delete the existing set.
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	ns, err := b.lookupSet(set)
 	if err != nil {
-		b.mu.Unlock()
 		if isNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("nftlib: flush set %s %s %s: %w", family, table, set, err)
 	}
-	b.conn.DelSet(ns)
+	b.conn.FlushSet(ns)
 	if err := b.conn.Flush(); err != nil {
 		if isNotFound(err) {
 			b.invalidateCache()
-			b.mu.Unlock()
 			return nil
 		}
-		b.mu.Unlock()
-		return fmt.Errorf("nftlib: flush set %s %s %s (delete): %w", family, table, set, err)
+		return fmt.Errorf("nftlib: flush set %s %s %s: %w", family, table, set, err)
 	}
-	delete(b.namedSets, set)
 	delete(b.appliedHash, set) // set was just emptied → drop its applied-content hash
-	b.mu.Unlock()
-
-	// Transaction 2: recreate the set with the original schema.
-	recreated := &nftables.Set{
-		Table:      &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet},
-		Name:       ns.Name,
-		KeyType:    ns.KeyType,
-		HasTimeout: ns.HasTimeout,
-		Interval:   ns.Interval,
-	}
-	b.mu.Lock()
-	b.conn.AddSet(recreated, nil)
-	if err := b.conn.Flush(); err != nil {
-		if isNotFound(err) {
-			b.invalidateCache()
-			b.mu.Unlock()
-			return nil
-		}
-		if isAlreadyExists(err) {
-			delete(b.namedSets, set)
-			b.mu.Unlock()
-			return nil
-		}
-		b.mu.Unlock()
-		return fmt.Errorf("nftlib: flush set %s %s %s (recreate): %w", family, table, set, err)
-	}
-	delete(b.namedSets, set)
-	b.mu.Unlock()
 	return nil
 }
 

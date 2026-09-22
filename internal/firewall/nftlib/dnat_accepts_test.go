@@ -209,16 +209,16 @@ func TestDNATOff_CustomTableKeepsTheTable(t *testing.T) {
 	}
 }
 
-// inputChainMsg is a dump entry for inet cfm's input base chain at prio.
-func inputChainMsg(prio int32) netlink.Message {
-	hook := netlink.NewAttributeEncoder()
-	hook.ByteOrder = binary.BigEndian
-	hook.Uint32(unix.NFTA_HOOK_HOOKNUM, uint32(*nftables.ChainHookInput))
-	hook.Uint32(unix.NFTA_HOOK_PRIORITY, uint32(prio))
-	hb, _ := hook.Encode()
+// baseChainMsg is a dump entry for an inet base chain at prio.
+func baseChainMsg(table, name string, hook *nftables.ChainHook, prio int32) netlink.Message {
+	h := netlink.NewAttributeEncoder()
+	h.ByteOrder = binary.BigEndian
+	h.Uint32(unix.NFTA_HOOK_HOOKNUM, uint32(*hook))
+	h.Uint32(unix.NFTA_HOOK_PRIORITY, uint32(prio))
+	hb, _ := h.Encode()
 	ae := netlink.NewAttributeEncoder()
-	ae.String(unix.NFTA_CHAIN_TABLE, cfmTableName)
-	ae.String(unix.NFTA_CHAIN_NAME, "input")
+	ae.String(unix.NFTA_CHAIN_TABLE, table)
+	ae.String(unix.NFTA_CHAIN_NAME, name)
 	ae.Bytes(unix.NLA_F_NESTED|unix.NFTA_CHAIN_HOOK, hb)
 	attrs, _ := ae.Encode()
 	return netlink.Message{
@@ -251,7 +251,7 @@ func TestEnsureBase_KeepsAnExistingInputChain(t *testing.T) {
 			return nil, io.EOF
 		}
 		if nftMsgType(req[0]) == unix.NFT_MSG_GETCHAIN {
-			m := inputChainMsg(50)
+			m := baseChainMsg(cfmTableName, "input", nftables.ChainHookInput, 50)
 			m.Header.Sequence = req[0].Header.Sequence
 			return []netlink.Message{m}, nil
 		}
@@ -263,5 +263,124 @@ func TestEnsureBase_KeepsAnExistingInputChain(t *testing.T) {
 	}
 	if declaredInput {
 		t.Fatal("EnsureBase re-declared the existing input chain; with another priority that fails the whole batch")
+	}
+}
+
+// dnatPrioBackend serves a prerouting chain of table at livePrio with no rules,
+// and records the message types of every batch sent.
+func dnatPrioBackend(t *testing.T, table string, livePrio int32, sent *[]int) *Backend {
+	return nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
+		if len(req) == 0 {
+			return nil, io.EOF
+		}
+		if isBatch(req) {
+			for _, m := range req {
+				*sent = append(*sent, nftMsgType(m))
+			}
+			return nil, io.EOF
+		}
+		seq := req[0].Header.Sequence
+		switch nftMsgType(req[0]) {
+		case unix.NFT_MSG_GETCHAIN:
+			m := baseChainMsg(table, "prerouting", nftables.ChainHookPrerouting, livePrio)
+			m.Header.Sequence = seq
+			return []netlink.Message{m}, nil
+		case unix.NFT_MSG_GETRULE: // an empty chain: just the end of the dump
+			return []netlink.Message{{Header: netlink.Header{Type: netlink.Done, Flags: netlink.Multi, Sequence: seq}}}, nil
+		}
+		return nil, io.EOF
+	})
+}
+
+func contains(xs []int, x int) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// A chain's priority can't change in place, so `cfm dnat on --priority X`
+// used to keep the old one silently on nftlib while reporting X. On CFM's own
+// table the rebuild now deletes and recreates it in the same batch.
+func TestDNATOn_PriorityChangeRebuildsTheRedirectTable(t *testing.T) {
+	fakeNFT(t, "")
+	t.Setenv("NFT_DNAT_PRIORITY", "-101")
+	wanted := dnatUnscopedWantedSpecs(nftables.TableFamilyINet, 9080, 9043)
+
+	var sent []int
+	b := dnatPrioBackend(t, firewall.DNATDefaultTable, -99, &sent)
+	if err := b.installDNATRules("inet", firewall.DNATDefaultTable, wanted, dnatRuleNamespaceEdge, true); err != nil {
+		t.Fatalf("installDNATRules: %v", err)
+	}
+	if !contains(sent, unix.NFT_MSG_DELTABLE) || !contains(sent, unix.NFT_MSG_NEWCHAIN) {
+		t.Fatalf("priority -99 → -101 must rebuild the table (delete + new chain) in one batch; sent %v", sent)
+	}
+
+	sent = nil
+	same := dnatPrioBackend(t, firewall.DNATDefaultTable, -101, &sent)
+	if err := same.installDNATRules("inet", firewall.DNATDefaultTable, wanted, dnatRuleNamespaceEdge, true); err != nil {
+		t.Fatalf("installDNATRules: %v", err)
+	}
+	if contains(sent, unix.NFT_MSG_DELTABLE) {
+		t.Fatalf("same priority: the table must be kept; sent %v", sent)
+	}
+
+	sent = nil
+	custom := dnatPrioBackend(t, "operator_nat", -99, &sent)
+	if err := custom.installDNATRules("inet", "operator_nat", wanted, dnatRuleNamespaceEdge, true); err != nil {
+		t.Fatalf("installDNATRules: %v", err)
+	}
+	if contains(sent, unix.NFT_MSG_DELTABLE) {
+		t.Fatalf("a table that isn't cfm_redirect must never be deleted; sent %v", sent)
+	}
+}
+
+// `cfm flush` empties block_v4/block_v6. Deleting a set a rule references is
+// refused (EBUSY), so the old delete-and-recreate failed on every nftlib node
+// once the CLI ran nftlib; the elements are now flushed in place.
+func TestFlushSet_FlushesElementsInPlace(t *testing.T) {
+	var sent []int
+	b := nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
+		if isBatch(req) {
+			for _, m := range req {
+				sent = append(sent, nftMsgType(m))
+			}
+		}
+		return nil, io.EOF
+	})
+	b.namedSets[setBlockV4] = &nftables.Set{Name: setBlockV4, Table: &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}}
+	if err := b.FlushSet("inet", cfmTableName, setBlockV4); err != nil {
+		t.Fatalf("FlushSet: %v", err)
+	}
+	if contains(sent, unix.NFT_MSG_DELSET) || !contains(sent, unix.NFT_MSG_DELSETELEM) {
+		t.Fatalf("want an element flush and no set delete; sent %v", sent)
+	}
+}
+
+// DNATOff/DNATOn clean both engines' web accept tags, so accepts the exec
+// backend wrote (e.g. an earlier `cfm dnat on` from the CLI) don't linger.
+func TestCleanupScopedDNATAccepts_RemovesBothEnginesTags(t *testing.T) {
+	log := fakeNFT(t, `table inet cfm {
+	chain input { # handle 1
+		tcp dport 9080 ct state new ct status dnat ct original proto-dst 80 accept comment "cfm_dnat_accept:web_http_tcp:80:9080" # handle 21
+		tcp dport 9080 ct state new ct status dnat ct original proto-dst 80 accept comment "cfm_edge_dnat_accept:web_http_tcp:80:9080" # handle 22
+		tcp dport 12083 ct state new ct status dnat ct original proto-dst 2083 accept comment "cfm_cpanel_dnat:2083:12083" # handle 23
+	}
+}
+`)
+	b := &Backend{}
+	if err := b.cleanupScopedDNATAccepts(dnatAcceptNamespaceEdge); err != nil {
+		t.Fatal(err)
+	}
+	got := readLog(t, log)
+	for _, h := range []string{"21", "22"} {
+		if !strings.Contains(got, "delete rule inet cfm input handle "+h+";") {
+			t.Errorf("web accept handle %s not deleted:\n%s", h, got)
+		}
+	}
+	if strings.Contains(got, "handle 23") {
+		t.Errorf("deleted the panel accept:\n%s", got)
 	}
 }
