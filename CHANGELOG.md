@@ -37,6 +37,16 @@ back-filled here — see the git/PR history for that period.
   cannot be updated.
 
 ### Added
+- **Site Cache — Tier B micro-cache stats labelling (Phase B3c).** Micro-cache
+  hits are now counted under their own `cfm_micro` zone total instead of being
+  folded into `cfm_static`: the edge `log_by_lua` labels each cache verdict by
+  the serving tier (`$cfm_upstream` — `cfm_apache_micro` vs `cfm_apache_static`),
+  so `cfm_stats.lua`'s long-standing `cfm_micro` zone reader (previously always
+  zero — nothing wrote that key) now reflects real micro effectiveness. The
+  per-vhost HIT/MISS/BYPASS breakdown stays tier-agnostic on purpose (it answers
+  "is this vhost served from cache", either tier); a vhost armed micro-only reads
+  as pure micro stats. No behaviour change beyond the counter label; nothing
+  about what is cached changes.
 - **Site Cache — Tier B micro-cache activation gate (Phase B3b, dry-run default).**
   Wires the `cfm.lua` **Step 4 plain-allow** path to the Tier B micro gate: for
   an armed vhost, an anonymous, cacheable
