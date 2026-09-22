@@ -124,6 +124,30 @@ func TestSiteCacheStore_GenerationAndCreatedAtNotClientSettable(t *testing.T) {
 	}
 }
 
+func TestSiteCacheStore_ScopeHostsPreservedAcrossEdits(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	// A scoped tenant first enables caching (the API layer stamps scope_hosts).
+	if _, err := s.Set(SiteCacheEntry{
+		Host:       "alice.com",
+		ScopeHosts: []string{"alice.com"},
+		Micro:      SiteCacheTier{Enabled: true, Recipe: "micro_safe"},
+	}); err != nil {
+		t.Fatalf("Set create: %v", err)
+	}
+	// An admin later edits it (nil scope → empty scope_hosts). The original
+	// opt-in attribution must survive.
+	got, err := s.Set(SiteCacheEntry{
+		Host:  "alice.com",
+		Micro: SiteCacheTier{Enabled: true, Recipe: "micro_aggressive"},
+	})
+	if err != nil {
+		t.Fatalf("Set update: %v", err)
+	}
+	if len(got.ScopeHosts) != 1 || got.ScopeHosts[0] != "alice.com" {
+		t.Fatalf("scope_hosts attribution lost on admin edit: %+v", got.ScopeHosts)
+	}
+}
+
 func TestSiteCacheStore_PurgeAll(t *testing.T) {
 	s := newSiteCacheTestStore(t)
 	_, _ = s.Set(SiteCacheEntry{Host: "a.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})

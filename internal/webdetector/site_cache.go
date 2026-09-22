@@ -100,8 +100,12 @@ type SiteCacheTier struct {
 // SiteCacheEntry is one vhost's cache policy: independent static + micro tiers,
 // a purge generation, and the cookie-handling advanced knobs (docs §4.1, §6).
 type SiteCacheEntry struct {
-	Host       string   `json:"host"`
-	ScopeHosts []string `json:"scope_hosts,omitempty"` // who added it (audit); API gates access
+	Host string `json:"host"`
+	// ScopeHosts records who FIRST enabled caching for this vhost (audit trail),
+	// stamped from the token scope at creation and PRESERVED across later edits
+	// (an admin tweak does not erase the tenant that opted in). It does not gate
+	// access — that is the live token scope at the API layer.
+	ScopeHosts []string `json:"scope_hosts,omitempty"`
 	// Generation is folded into the edge cache key (later phase). A Purge bumps
 	// it so old keys become unreachable and age out — a config change never
 	// touches it.
@@ -278,6 +282,9 @@ func (s *siteCacheStore) Set(in SiteCacheEntry) (SiteCacheEntry, error) {
 	if existed {
 		norm.CreatedAt = prev.CreatedAt
 		norm.Generation = prev.Generation
+		// Preserve the original opt-in attribution: an admin edit (nil scope →
+		// empty ScopeHosts) must not erase which tenant first enabled caching.
+		norm.ScopeHosts = prev.ScopeHosts
 	} else {
 		if len(s.entries) >= maxSiteCacheEntries {
 			return SiteCacheEntry{}, fmt.Errorf("too many site-cache entries (max %d)", maxSiteCacheEntries)
@@ -434,6 +441,9 @@ func (s *siteCacheStore) load() {
 	for _, e := range arr {
 		norm, err := s.normalizeEntry(e)
 		if err != nil {
+			// Loud, not silent: a hand-edit typo or a recipe this build no longer
+			// knows would otherwise drop a policy with no trace.
+			logging.Logf("[webdetector][site-cache] dropping stored policy for %q on load: %v (path=%s)", e.Host, err, s.path)
 			continue
 		}
 		if norm.CreatedAt.IsZero() {
