@@ -35,10 +35,12 @@ back-filled here — see the git/PR history for that period.
   config sync, fingerprint-policy pull), which can wait on the same firewall
   lock; before, an unblock stuck behind a stalled read stopped heartbeats too.
   New `cfm.api.log` lines make a stall visible instead of silent: `heartbeat
-  dnat status probe slow` (≥1s), `timed out`, `still in flight` and
-  `returned late after …` (together at most one line per 5 min, with a
-  suppressed count), and `work loop tick busy for …` when that other work
-  runs over 2 minutes. This does not unstick the nftlib connection itself — a
+  dnat status probe slow` (≥1s), `check failed`, `timed out` and `still in
+  flight` (together at most one line per 5 min, with a suppressed count), and
+  `returned late after …`, which is always written when that stall's
+  `timed out` line was, so every logged stall shows how long it lasted. When
+  the other periodic work runs over 2 minutes, `work loop tick busy for …` is
+  logged, then `work loop tick finished after …` when it ends. This does not unstick the nftlib connection itself — a
   stalled read still delays firewall writes until it returns; that hardening
   is separate work.
 - **`make release` could not build the rpm (`error: line 179: second %install`).**

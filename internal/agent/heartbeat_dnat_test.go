@@ -3,9 +3,12 @@ package agent
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,6 +29,74 @@ func stubDNATProbe(t *testing.T, fn func(firewall.Backend) (bool, error), timeou
 	heartbeatDNATTimeout = timeout
 }
 
+// probeLog captures the probe's log lines.
+type probeLog struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func captureProbeLog(t *testing.T) *probeLog {
+	t.Helper()
+	l := &probeLog{}
+	orig := heartbeatLogf
+	t.Cleanup(func() { heartbeatLogf = orig })
+	heartbeatLogf = func(format string, args ...any) {
+		l.mu.Lock()
+		l.lines = append(l.lines, fmt.Sprintf(format, args...))
+		l.mu.Unlock()
+	}
+	return l
+}
+
+func (l *probeLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+func countContaining(lines []string, sub string) int {
+	n := 0
+	for _, s := range lines {
+		if strings.Contains(s, sub) {
+			n++
+		}
+	}
+	return n
+}
+
+// waitProbeIdle waits until no probe goroutine is running, so a test never
+// ends (and restores package state) while one still does.
+func waitProbeIdle(t *testing.T, r *Runner) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for r.dnatProbe.inflight.Load() {
+		if time.Now().After(deadline) {
+			t.Error("probe goroutine still running at test end")
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// wedgedProbe stubs a probe that blocks until release() is called. The
+// release + wait-for-idle cleanup is registered AFTER the stub's own restore,
+// so (cleanups run LIFO) it runs first, even when the test fails early.
+func wedgedProbe(t *testing.T, r *Runner, timeout time.Duration, block func(call int32) bool) (release func(), calls *atomic.Int32) {
+	t.Helper()
+	gate := make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	calls = &atomic.Int32{}
+	stubDNATProbe(t, func(firewall.Backend) (bool, error) {
+		if block(calls.Add(1)) {
+			<-gate
+		}
+		return true, nil
+	}, timeout)
+	t.Cleanup(func() { release(); waitProbeIdle(t, r) })
+	return release, calls
+}
+
 func TestHeartbeatDNATStatus_Fast(t *testing.T) {
 	for _, want := range []bool{true, false} {
 		stubDNATProbe(t, func(firewall.Backend) (bool, error) { return want, nil }, time.Second)
@@ -34,14 +105,23 @@ func TestHeartbeatDNATStatus_Fast(t *testing.T) {
 		if got == nil || *got != want {
 			t.Fatalf("want %v, got %v", want, got)
 		}
+		if r.dnatProbe.inflight.Load() {
+			t.Fatal("a delivered probe must clear the in-flight flag before returning")
+		}
 	}
 }
 
 func TestHeartbeatDNATStatus_ErrorOmits(t *testing.T) {
 	stubDNATProbe(t, func(firewall.Backend) (bool, error) { return true, errors.New("boom") }, time.Second)
+	log := captureProbeLog(t)
 	r := &Runner{backend: stubBackend{}}
-	if got := r.heartbeatDNATStatus(); got != nil {
-		t.Fatalf("probe error must omit dnat_enabled, got %v", *got)
+	for i := 0; i < 3; i++ {
+		if got := r.heartbeatDNATStatus(); got != nil {
+			t.Fatalf("probe error must omit dnat_enabled, got %v", *got)
+		}
+	}
+	if n := countContaining(log.snapshot(), "check failed"); n != 1 {
+		t.Fatalf("a repeating probe error must be throttled: %d lines", n)
 	}
 }
 
@@ -61,16 +141,9 @@ func TestHeartbeatDNATStatus_NilBackend(t *testing.T) {
 // not be restarted while stuck (no goroutine pile-up behind the backend lock),
 // and must be usable again once it returns.
 func TestHeartbeatDNATStatus_StallIsBoundedAndSingleFlight(t *testing.T) {
-	release := make(chan struct{})
-	var calls atomic.Int32
 	const timeout = time.Second
-	stubDNATProbe(t, func(firewall.Backend) (bool, error) {
-		if calls.Add(1) == 1 {
-			<-release // first probe wedges until released
-		}
-		return true, nil
-	}, timeout)
 	r := &Runner{backend: stubBackend{}}
+	release, calls := wedgedProbe(t, r, timeout, func(call int32) bool { return call == 1 })
 
 	start := time.Now()
 	if got := r.heartbeatDNATStatus(); got != nil {
@@ -94,15 +167,8 @@ func TestHeartbeatDNATStatus_StallIsBoundedAndSingleFlight(t *testing.T) {
 		t.Fatalf("probe started %d times while stuck, want 1", n)
 	}
 
-	close(release)
-	deadline := time.Now().Add(5 * time.Second)
-	for !r.dnatProbe.inflight.TryLock() {
-		if time.Now().After(deadline) {
-			t.Fatal("released probe never cleared the in-flight guard")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	r.dnatProbe.inflight.Unlock()
+	release()
+	waitProbeIdle(t, r)
 
 	got := r.heartbeatDNATStatus()
 	if got == nil || !*got {
@@ -113,26 +179,58 @@ func TestHeartbeatDNATStatus_StallIsBoundedAndSingleFlight(t *testing.T) {
 	}
 }
 
-func TestLogThrottled(t *testing.T) {
-	orig := heartbeatDNATLogEvery
-	t.Cleanup(func() { heartbeatDNATLogEvery = orig })
-	heartbeatDNATLogEvery = time.Hour
+// Every stall whose "timed out" line was written must also log how long it
+// lasted, even inside the throttle window; a stall whose start was throttled
+// away stays quiet at the end too.
+func TestHeartbeatDNATStatus_LateReturnPairsWithTimeoutLine(t *testing.T) {
+	log := captureProbeLog(t)
+	r := &Runner{backend: stubBackend{}}
+	release, _ := wedgedProbe(t, r, 20*time.Millisecond, func(int32) bool { return true })
 
+	// First stall: start and end both logged.
+	r.heartbeatDNATStatus()
+	release()
+	waitProbeIdle(t, r)
+	lines := log.snapshot()
+	if countContaining(lines, "timed out") != 1 || countContaining(lines, "returned late") != 1 {
+		t.Fatalf("first stall must log its timeout and its late return, got %q", lines)
+	}
+
+	// Second stall inside the 5-minute window: the timeout line is throttled,
+	// so the late line is too.
+	release2, _ := wedgedProbe(t, r, 20*time.Millisecond, func(int32) bool { return true })
+	r.heartbeatDNATStatus()
+	release2()
+	waitProbeIdle(t, r)
+	if got := log.snapshot(); len(got) != len(lines) {
+		t.Fatalf("throttled stall must stay quiet, got extra %q", got[len(lines):])
+	}
+}
+
+func TestLogThrottled(t *testing.T) {
+	log := captureProbeLog(t)
 	var p dnatProbeState
-	p.logThrottled("first %d", 1)
+
+	if !p.logThrottled(time.Hour, "first %d", 1) {
+		t.Fatal("the first line must be written")
+	}
 	first := p.lastLog
-	if first.IsZero() || p.suppressed != 0 {
-		t.Fatalf("first line must be written: lastLog=%v suppressed=%d", first, p.suppressed)
+	if p.logThrottled(time.Hour, "second") || p.logThrottled(time.Hour, "third") {
+		t.Fatal("lines inside the window must be held back")
 	}
-	p.logThrottled("second")
-	p.logThrottled("third")
 	if p.suppressed != 2 || !p.lastLog.Equal(first) {
-		t.Fatalf("lines inside the window must be held back: suppressed=%d", p.suppressed)
+		t.Fatalf("held-back lines must be counted: suppressed=%d", p.suppressed)
 	}
-	heartbeatDNATLogEvery = 0
-	p.logThrottled("after window")
-	if p.suppressed != 0 || !p.lastLog.After(first) {
-		t.Fatalf("a line after the window must be written and reset the count: suppressed=%d", p.suppressed)
+	p.logNow("late %s", "x")
+	if p.suppressed != 0 || !p.lastLog.Equal(first) {
+		t.Fatalf("logNow must flush the count without moving the window: suppressed=%d", p.suppressed)
+	}
+	if !p.logThrottled(0, "after window") || !p.lastLog.After(first) {
+		t.Fatal("a line after the window must be written")
+	}
+	want := []string{"first 1", "late x (2 similar suppressed)", "after window"}
+	if got := log.snapshot(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("lines = %q, want %q", got, want)
 	}
 }
 
@@ -140,10 +238,6 @@ func TestLogThrottled(t *testing.T) {
 // cfm-web promptly and carries no dnat_enabled key (so cfm-web keeps the last
 // known value instead of flipping it).
 func TestDoHeartbeat_SentDespiteStalledDNATProbe(t *testing.T) {
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	stubDNATProbe(t, func(firewall.Backend) (bool, error) { <-release; return true, nil }, 50*time.Millisecond)
-
 	origLook := edgeengine.LookPath
 	t.Cleanup(func() { edgeengine.LookPath = origLook })
 	edgeengine.LookPath = func(string) (string, error) { return "", errors.New("no systemctl in test") }
@@ -164,6 +258,7 @@ func TestDoHeartbeat_SentDespiteStalledDNATProbe(t *testing.T) {
 
 	r := New(Config{BaseURL: srv.URL, Token: "t", Interval: time.Hour})
 	r.SetBackend(stubBackend{})
+	wedgedProbe(t, r, 50*time.Millisecond, func(int32) bool { return true })
 
 	done := make(chan struct{})
 	go func() { r.doHeartbeat(t.Context()); close(done) }()

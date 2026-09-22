@@ -215,11 +215,16 @@ func (r *Runner) loop() {
 		case <-r.stop:
 			return
 		case <-t.C:
-			r.workBusySince.Store(time.Now().UnixNano())
+			tickStart := time.Now()
+			r.workBusySince.Store(tickStart.UnixNano())
 			r.fetchPendingUnblocks(context.Background())
 			r.syncConfigs(context.Background())
 			r.fetchFPPolicies(context.Background())
 			r.workBusySince.Store(0)
+			// Close out a "work loop tick busy" report with how long it took.
+			if took := time.Since(tickStart); took >= workLoopStuckAfter {
+				logging.LogfAPI("[agent] work loop tick finished after %s", took.Round(time.Second))
+			}
 		}
 		// (αν χρειαστεί dynamic interval, μπορούμε να αναδημιουργήσουμε ticker)
 	}

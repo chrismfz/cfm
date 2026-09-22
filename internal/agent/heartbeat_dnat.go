@@ -4,22 +4,24 @@ package agent
 //
 // The heartbeat reports dnat_enabled, which means reading the firewall BEFORE
 // the POST goes out. On the exec-nft backend that read is an `nft` subprocess
-// bounded by the command runner's timeout. On the nftlib backend it takes the
-// backend mutex and then does a netlink dump (ListChains + GetRules) on the one
-// lasting connection, with no deadline on either. If the dump stalls, or a
-// long write holds the mutex, the heartbeat used to wait with it: no POST, and
-// no log line either (the failure log sits after the send), so cfm-web's
-// last_seen went stale past its 3-minute threshold and the node was reported
-// "offline" while it was up. That is the intermittent false "agent down" seen
-// only on the nftlib node.
+// bounded by the command runner's 10s timeout. On the nftlib backend it takes
+// the backend mutex and then does a netlink dump (ListChains + GetRules) on
+// the one lasting connection, with no timeout on either. If the dump stalled,
+// or a long firewall write held the mutex, the heartbeat used to wait with it:
+// no POST, and no log line either (the failure log sits after the send), so
+// cfm-web's last_seen went stale past its 3-minute threshold and the node was
+// reported "offline" while it was up. That is the intermittent false
+// "agent down" seen only on the nftlib node.
 //
 // Liveness must not depend on the data plane, so the probe is bounded: past
 // heartbeatDNATTimeout the heartbeat goes out WITHOUT dnat_enabled. The field
 // is omitempty and cfm-web only updates dnat_enabled when the key is present,
-// so an omitted value keeps the last known state rather than flapping it (the
-// same outcome as the existing probe-error path). The heartbeat also runs on
-// its own goroutine (heartbeatLoop), so the work loop's firewall calls can't
-// hold it back either.
+// so an omitted value keeps the last known state rather than flapping it. A
+// probe error is omitted the same way — but note the exec-nft backend never
+// returns one: its DNATStatus reads any failed `nft list table` as "off"
+// (pre-existing), so there only a slow probe is omitted. The heartbeat also
+// runs on its own goroutine (heartbeatLoop), so the work loop's firewall calls
+// can't hold it back either.
 //
 // The probe is single-flight. A timed-out probe keeps running (neither the
 // mutex wait nor the netlink call can be cancelled), so starting another one
@@ -43,9 +45,10 @@ var (
 	heartbeatDNATStatusFn = dnat.Status
 
 	// heartbeatDNATTimeout bounds how long a heartbeat waits for the probe.
-	// A whole heartbeat is then bounded at roughly this + edgeengine.Detect
-	// (3s per systemctl probe + 3s for `-v`) + the 15s HTTP client timeout —
-	// under 30s, far below cfm-web's 3-minute offline threshold.
+	// A whole heartbeat is then bounded at this + edgeengine.Detect (up to
+	// 2×3s of `systemctl is-active` + 2×3s of `-v`) + the 15s HTTP client
+	// timeout — about 32s worst case, far below cfm-web's 3-minute offline
+	// threshold.
 	heartbeatDNATTimeout = 5 * time.Second
 
 	// heartbeatDNATSlowLog logs a probe that answered in time but slowly, so a
@@ -53,18 +56,21 @@ var (
 	heartbeatDNATSlowLog = 1 * time.Second
 
 	// heartbeatDNATLogEvery throttles the probe's diagnostic lines (slow,
-	// timed out, still in flight, returned late). One throttle covers all of
-	// them: a backend that stays slow or wedged must not write a line per
-	// beat forever. The first line after a quiet period always gets through.
+	// failed, timed out, still in flight). One throttle covers all of them: a
+	// backend that stays slow, failing or wedged must not write a line per
+	// beat forever. The first line after a quiet period always gets through,
+	// and a stall whose "timed out" line was written always gets its
+	// "returned late after …" line too, so every logged stall has a duration.
 	heartbeatDNATLogEvery = 5 * time.Minute
+
+	// heartbeatLogf is where the probe's lines go; a var so tests can read them.
+	heartbeatLogf = logging.LogfAPI
 )
 
 // dnatProbeState is the single-flight guard and log throttle for
 // heartbeatDNATStatus.
 type dnatProbeState struct {
-	// inflight is held by the probe goroutine for the whole probe and
-	// released when it returns, however late; TryLock is the skip test.
-	inflight  sync.Mutex
+	inflight  atomic.Bool  // set while a probe runs, however late it returns
 	startedAt atomic.Int64 // unix nanos of the in-flight probe's start
 
 	logMu      sync.Mutex
@@ -95,74 +101,102 @@ func (r *Runner) heartbeatDNATStatus() *bool {
 }
 
 func (p *dnatProbeState) run(be firewall.Backend) *bool {
+	// Read the knobs once: a probe can outlive this call, and its goroutine
+	// must not read package state after the caller has moved on.
+	probe, timeout, every := heartbeatDNATStatusFn, heartbeatDNATTimeout, heartbeatDNATLogEvery
+
 	start := time.Now()
-	if !p.inflight.TryLock() {
+	if !p.inflight.CompareAndSwap(false, true) {
 		started := time.Unix(0, p.startedAt.Load())
-		p.logThrottled("[agent] heartbeat dnat status probe still in flight after %s; sending heartbeat without dnat_enabled",
+		p.logThrottled(every, "[agent] heartbeat dnat status probe still in flight after %s; sending heartbeat without dnat_enabled",
 			start.Sub(started).Round(time.Millisecond))
 		return nil
 	}
 	p.startedAt.Store(start.UnixNano())
 
-	// Read the knobs here, not in the goroutine: a probe can outlive this call.
-	probe, timeout := heartbeatDNATStatusFn, heartbeatDNATTimeout
 	var state atomic.Int32
+	var timeoutLogged atomic.Bool
+	settled := make(chan struct{}) // closed once the caller has handled a timeout
 	ch := make(chan dnatProbeResult, 1)
 	go func() {
-		defer p.inflight.Unlock()
 		on, err := probe(be)
 		// Exactly one side wins: either the heartbeat is still waiting and
 		// gets the result, or it already gave up and the result is only logged.
 		if state.CompareAndSwap(probePending, probeDelivered) {
+			p.inflight.Store(false) // clear before handing over: the probe is done
 			ch <- dnatProbeResult{on: on, err: err}
 			return
 		}
-		p.logThrottled("[agent] heartbeat dnat status probe returned late after %s (err=%v)",
-			time.Since(start).Round(time.Millisecond), err)
+		<-settled
+		took := time.Since(start).Round(time.Millisecond)
+		if timeoutLogged.Load() {
+			// The stall's start was logged, so its end is too — unthrottled,
+			// at most one per probe.
+			p.logNow("[agent] heartbeat dnat status probe returned late after %s (err=%v)", took, err)
+		} else {
+			p.logThrottled(every, "[agent] heartbeat dnat status probe returned late after %s (err=%v)", took, err)
+		}
+		// Last: once the flag clears, this goroutine touches nothing else.
+		p.inflight.Store(false)
 	}()
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case res := <-ch:
-		return p.accept(res, start)
+		return p.accept(every, res, start)
 	case <-timer.C:
 		if !state.CompareAndSwap(probePending, probeAbandoned) {
 			// The probe won the race at the deadline; its send is imminent.
-			return p.accept(<-ch, start)
+			return p.accept(every, <-ch, start)
 		}
-		p.logThrottled("[agent] heartbeat dnat status probe timed out after %s; sending heartbeat without dnat_enabled",
-			timeout)
+		timeoutLogged.Store(p.logThrottled(every,
+			"[agent] heartbeat dnat status probe timed out after %s; sending heartbeat without dnat_enabled", timeout))
+		close(settled)
 		return nil
 	}
 }
 
-func (p *dnatProbeState) accept(res dnatProbeResult, start time.Time) *bool {
+func (p *dnatProbeState) accept(every time.Duration, res dnatProbeResult, start time.Time) *bool {
 	if res.err != nil {
-		logging.LogfAPI("[agent] heartbeat dnat status check failed: %v", res.err)
+		p.logThrottled(every, "[agent] heartbeat dnat status check failed: %v", res.err)
 		return nil
 	}
 	if took := time.Since(start); took >= heartbeatDNATSlowLog {
-		p.logThrottled("[agent] heartbeat dnat status probe slow: %s", took.Round(time.Millisecond))
+		p.logThrottled(every, "[agent] heartbeat dnat status probe slow: %s", took.Round(time.Millisecond))
 	}
 	on := res.on
 	return &on
 }
 
-// logThrottled writes at most one probe diagnostic per heartbeatDNATLogEvery,
-// noting how many were held back since the last one.
-func (p *dnatProbeState) logThrottled(format string, args ...any) {
+// logThrottled writes at most one probe diagnostic per `every`, noting how
+// many were held back since the last one. It reports whether it wrote.
+func (p *dnatProbeState) logThrottled(every time.Duration, format string, args ...any) bool {
 	p.logMu.Lock()
 	defer p.logMu.Unlock()
 	now := time.Now()
-	if !p.lastLog.IsZero() && now.Sub(p.lastLog) < heartbeatDNATLogEvery {
+	if !p.lastLog.IsZero() && now.Sub(p.lastLog) < every {
 		p.suppressed++
-		return
+		return false
 	}
+	p.lastLog = now
+	p.writeLocked(format, args...)
+	return true
+}
+
+// logNow writes regardless of the throttle window (and without moving it),
+// still flushing the held-back count.
+func (p *dnatProbeState) logNow(format string, args ...any) {
+	p.logMu.Lock()
+	defer p.logMu.Unlock()
+	p.writeLocked(format, args...)
+}
+
+func (p *dnatProbeState) writeLocked(format string, args ...any) {
 	if p.suppressed > 0 {
 		format += " (%d similar suppressed)"
 		args = append(args, p.suppressed)
+		p.suppressed = 0
 	}
-	p.lastLog, p.suppressed = now, 0
-	logging.LogfAPI(format, args...)
+	heartbeatLogf(format, args...)
 }
