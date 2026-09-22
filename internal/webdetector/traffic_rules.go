@@ -1007,6 +1007,21 @@ func (s *trafficRuleStore) load() {
 		}
 		norm, err := normalizeTrafficRule(*e, false)
 		if err != nil {
+			if unknown && e.ID != "" {
+				// The freeze-verbatim net must also hold when normalize
+				// itself rejects the rule — an unknown ACTION VALUE from a
+				// newer cfm (first case: challenge_v2 on an older binary)
+				// fails normalize, and dropping here would erase the rule
+				// from disk on the next save. Keep the disabled, unsupported
+				// placeholder; evaluation skips disabled rules, Update()
+				// refuses Unsupported ones, saveLocked writes the frozen
+				// original bytes.
+				if e.CreatedAt.IsZero() {
+					e.CreatedAt = time.Now().UTC()
+				}
+				s.rules[e.ID] = *e
+				s.frozen[e.ID] = append(json.RawMessage(nil), raw...)
+			}
 			continue
 		}
 		if norm.CreatedAt.IsZero() {
@@ -1053,6 +1068,17 @@ func decodeStoredRule(raw json.RawMessage) (*TrafficRule, bool) {
 		if err := dec.Decode(&sc); err != nil {
 			return &e, true
 		}
+	}
+	// An unknown action.type VALUE is the same hazard as an unknown selector
+	// key: this build's normalize would reject the rule, load() would drop it,
+	// and the next save would DELETE the newer cfm's rule from disk (slice-B
+	// review finding — challenge_v2 was the first new action value ever
+	// shipped). Freeze those verbatim too.
+	switch strings.ToLower(strings.TrimSpace(e.Action.Type)) {
+	case TrafficActionAllow, TrafficActionBlock, TrafficActionChallenge,
+		TrafficActionChallengeV2, TrafficActionThrottle, "":
+	default:
+		return &e, true
 	}
 	return &e, false
 }

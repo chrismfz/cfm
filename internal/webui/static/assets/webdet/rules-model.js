@@ -550,7 +550,7 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
   if (!narrow && p.action.type && p.action.type !== "allow") {
     (p.enabled ? errors : warnings).push(
       p.enabled
-        ? `No match conditions: this ENABLED ${p.action.type} rule would ${p.action.type} EVERY request on ${p.scope.vhosts.join(", ") || "the selected vhosts"}. Add a condition or save it disabled.`
+        ? `No match conditions: this ENABLED ${act ? act.label.toLowerCase() : p.action.type} rule would apply to EVERY request on ${p.scope.vhosts.join(", ") || "the selected vhosts"}. Add a condition or save it disabled.`
         : `No match conditions: this rule matches EVERY request on the selected vhosts (saved disabled).`,
     );
   }

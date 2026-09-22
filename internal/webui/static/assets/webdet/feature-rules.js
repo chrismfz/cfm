@@ -378,7 +378,7 @@ export const rulesMixin = {
       if (!id) return;
       const next = !row.enabled;
       if (next && !this.ruleMatchNarrows(row) && row?.action?.type !== "allow") {
-        const ok = window.confirm(`Enable ${id}? It has NO conditions and will ${row.action?.type} EVERY request on ${(row.scope?.vhosts || []).join(", ")}.`);
+        const ok = window.confirm(`Enable ${id}? It has NO conditions and its ${row.action?.type} action will apply to EVERY request on ${(row.scope?.vhosts || []).join(", ")}.`);
         if (!ok) return;
       }
       this.rulesBusy = true;

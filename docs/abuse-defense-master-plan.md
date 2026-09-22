@@ -275,7 +275,16 @@ already opened.
           pressure), which the verify gate ORs in as the FOURTH arm grain.
           The mark exists because a rule matches one request's attributes
           at decision time and verify cannot re-evaluate it later. Slice C
-          (WAF tier) reuses this store.
+          (WAF tier) reuses this store. Accepted residuals (review verdicts):
+          within the 15m TTL a mark can be consumed by a challenge a
+          DIFFERENT (v1) source caused on the same (ip,host) — acceptable:
+          the arm is operator-authored for exactly that pair, bounded, and
+          D5b/D5c still hold; marks are WEB-scope only (a panel decision
+          probe never writes one — v2 stays web-path until the panel consult
+          ships); and sustained new-pair pressure (~9/s) can pin the store
+          at its cap so NEW marks degrade to plain v1 (fail-open by design) —
+          roadmap note: an eviction-of-soonest-expiry + a status counter
+          would remove that disarm lever if it ever shows up live.
         - [ ] **C — WAF rule tier `challenge_v2`** (cfm_waf.lua mode + Go
           registry + rule-mode UI): the missing rung in the promotion
           ladder `logonly → challenge → challenge_v2 → block`. Challenge

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -142,5 +144,83 @@ func TestBridgeMapsChallengeV2RuleToChallengeAndMarks(t *testing.T) {
 	b.handleDecision(rr2, req2)
 	if challengeV2Marked("203.0.113.21", "shop.gr") {
 		t.Fatalf("plain challenge rule wrote a v2 mark")
+	}
+}
+
+// The freeze-verbatim net must cover unknown ACTION VALUES, not only unknown
+// selector keys: before this fix, load() dropped such a rule (normalize
+// rejects it) and the next save DELETED it from disk — a downgraded binary
+// would permanently erase a newer cfm's challenge_v2 rule (review finding).
+func TestUnknownActionValueIsFrozenNotDeleted(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/rules.json"
+	raw := `[{"id":"r_future","priority":250,"enabled":true,` +
+		`"scope":{"vhosts":["shop.gr"]},"match":{"path_any":["/x"]},` +
+		`"action":{"type":"challenge_v9"},"note":"from a newer cfm"}]`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	s := newTrafficRuleStore(path)
+
+	// The rule survives load: disabled, unsupported, never evaluated.
+	got, ok := s.rules["r_future"]
+	if !ok {
+		t.Fatalf("unknown-action rule dropped at load")
+	}
+	if got.Enabled || !got.Unsupported {
+		t.Fatalf("unknown-action rule enabled=%v unsupported=%v", got.Enabled, got.Unsupported)
+	}
+	if _, frozen := s.frozen["r_future"]; !frozen {
+		t.Fatalf("unknown-action rule not frozen verbatim")
+	}
+	if r := s.Simulate(TrafficRuleEvalInput{Host: "shop.gr", Path: "/x", IP: "203.0.113.5"}); r.Matched {
+		t.Fatalf("unsupported rule must never match")
+	}
+
+	// A save (triggered by adding an ordinary rule) keeps the ORIGINAL bytes.
+	if _, err := s.Add(TrafficRule{
+		Priority: 300,
+		Scope:    TrafficRuleScope{Vhosts: []string{"other.gr"}},
+		Match:    TrafficRuleMatch{PathAny: []string{"/y"}},
+		Action:   TrafficRuleAction{Type: TrafficActionBlock},
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(b), `"challenge_v9"`) || !strings.Contains(string(b), "from a newer cfm") {
+		t.Fatalf("save did not keep the frozen original bytes: %s", b)
+	}
+
+	// A second store (the upgrade path in reverse) still sees it frozen.
+	s2 := newTrafficRuleStore(path)
+	if _, frozen := s2.frozen["r_future"]; !frozen {
+		t.Fatalf("frozen rule lost across reload")
+	}
+}
+
+// The panel-port decision probe (scope=panel:<port>) is observe-only for
+// challenge tiers — a v2 rule matching a panel probe must NOT write the
+// per-(ip,host) mark, or v2 teeth would leak into the panel human-entry
+// verify (review finding).
+func TestBridgePanelScopeDoesNotWriteV2Mark(t *testing.T) {
+	resetChallengeV2Marks(t)
+	b := NewNginxBridge("/tmp/cfm-test-rulev2-panel.sock", "tok", time.Minute, time.Minute)
+	b.RuleDecision = func(in TrafficRuleEvalInput) TrafficRuleEvalResult {
+		return TrafficRuleEvalResult{Matched: true, Rule: TrafficRule{ID: "r_v2"}, Action: TrafficActionChallengeV2}
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/nginx/decision?ip=203.0.113.30&host=shop.gr&uri=%2F&method=GET&ua=x&scope=panel%3A2083", nil)
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleDecision(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	if challengeV2Marked("203.0.113.30", "shop.gr") {
+		t.Fatalf("panel-scope decision wrote a v2 mark")
 	}
 }

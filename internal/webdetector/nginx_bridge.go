@@ -1970,9 +1970,17 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 				// falls through to allow): serve the SAME challenge and
 				// record the v2 intent per (ip, host) for the verify gate —
 				// the rung is a verify-time distinction (arm-surfaces slice
-				// B). Old and new edges both work unchanged.
+				// B). Old and new edges both work unchanged. WEB scope only:
+				// the panel-port decision probe (cfm_panel.lua,
+				// scope=panel:<port>) is observe-only for challenge tiers,
+				// and a mark from a probe would leak v2 teeth into the
+				// panel human-entry verify — the doctrine keeps v2 arms
+				// web-path-only until the panel consult ships (review
+				// finding).
 				ruleAction = TrafficActionChallenge
-				MarkChallengeV2(ip, host)
+				if scope == "web" {
+					MarkChallengeV2(ip, host)
+				}
 			}
 			resp["rule_action"] = ruleAction
 			resp["rule_id"] = rr.Rule.ID
