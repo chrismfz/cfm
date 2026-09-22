@@ -2,9 +2,11 @@
 //
 // GET /api/v1/firewall/selftest — read-only diagnostics for the firewall backend.
 // Surfaces the nftlib self-test: recent EnsureBase timings split into
-// lock_wait / netlink / CLI, plus per-set feed-write sizes/errors. This is the
-// live view for root-causing an nftlib slowdown (EnsureBase duration climbing
-// over a run) or a feed that fails to apply ("message too long"). Admin-only
+// lock_wait / netlink / CLI, per-set feed-write sizes/errors, and `netlink` —
+// counts, timeouts and the recent slow calls across every netlink call the
+// backend makes. This is the live view for root-causing an nftlib slowdown
+// (EnsureBase duration climbing over a run), stalled netlink reads, or a feed
+// that fails to apply ("message too long"). Admin-only
 // like the other global firewall routes; a scoped vhost token has no business
 // with node-wide firewall internals. The exec-nft backend does not implement
 // firewall.SelfTester, so there the endpoint reports available=false.

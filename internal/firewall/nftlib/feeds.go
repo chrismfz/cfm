@@ -221,9 +221,10 @@ func (b *Backend) listSetsByPrefix(prefixes ...string) ([]string, error) {
 		b.mu.Unlock()
 		return nil, err
 	}
-	// Hold b.mu across the netlink read — b.conn is a single shared socket and is
-	// not safe for concurrent use (an unlocked read here races a locked writer and
-	// desyncs the socket: "unexpected header type").
+	// Hold b.mu across the netlink read — it serialises this backend's calls
+	// and guards the table cache. (On the old single shared socket, an unlocked
+	// read here raced a locked writer and desynced it: "unexpected header
+	// type"; per-call sockets, nlconn.go, remove that failure mode.)
 	sets, err := b.conn.GetSets(t)
 	b.mu.Unlock()
 	if err != nil {

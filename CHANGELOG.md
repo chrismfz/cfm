@@ -85,18 +85,59 @@ back-filled here — see the git/PR history for that period.
   scores on network identity.
 
 ### Fixed
+- **nftlib firewall backend: a failed netlink call can no longer corrupt the
+  next one, a stuck read can no longer freeze the firewall, and a read error
+  is no longer mistaken for "nothing there".** The nftlib backend used one
+  long-lived netlink socket for its whole life, and every firewall operation
+  takes its turn on it. When a batch write failed part-way (e.g. `ENOBUFS`),
+  the kernel's remaining replies stayed on that socket and the NEXT operation
+  read them as its own answer; rule and set listings don't check which request
+  a reply belongs to, so that could be a silently wrong result rather than an
+  error (the old "unexpected header type" wedge was one form of this). And a
+  reply that never came held every other operation — autoblocks, feed updates,
+  unblocks — forever. Now every netlink call opens its own socket and closes
+  it, so no reply can outlive the call that asked for it; measured on a real
+  kernel, a 120,000-address feed write takes the same ~250ms as before. Reads
+  (listings and lookups) also get a 30s deadline. Writes deliberately get none:
+  the kernel applies a batch while the call is in progress, possibly after
+  waiting behind another tool's `nft -f`, and a deadline there would report a
+  change that WAS applied as failed. Four places treated a failed read as an
+  empty or missing answer, which a read timeout (or any read error) could
+  trigger: `DNATOn` then re-added its DNAT rules on top of the live ones —
+  reproduced on a real kernel, 3 rules became 6 and new DNAT-bypass entries
+  stopped matching; it now reads first and fails before changing anything (the
+  input-chain accepts included, so they can't move to new ports while the
+  redirect still points at the old ones). `PanelDNATOn` likewise duplicated its
+  rules when it couldn't look up its table; it now fails first. The port
+  scanner's self-heal rebuilt the whole firewall base (flushing and rewriting
+  every feed set) on any failed table lookup; it now does that only when the
+  table is really gone and otherwise skips the tick. And an autoblock went
+  ahead against an address whose ignore/allow lists couldn't be read; it is now
+  skipped and notified as "not blocked: could not check …" (an allowlisted peer
+  is the operator's explicit trust decision). Also fixed: on nftlib an address
+  INSIDE an allow or ignore range (e.g. `10.9.0.5` under an ignored
+  `10.9.0.0/24`) was not recognised — only the range's first address was — so
+  it was autoblocked, written to `cfm.deny` and reported to the fleet
+  blacklist; ranges are now matched as ranges, as the exec `nft` backend
+  already did. `firewall_selftest` gains a `netlink` section covering every
+  netlink call, not just EnsureBase: counts, timeouts, sockets opened, and the
+  recent slow (≥5s) or timed-out calls by name; a read timeout is also logged
+  (`[firewall] engine=nftlib netlink <call> timed out after …`).
+  Startup still fails immediately if netlink is unusable. Only nodes running
+  `CFM_FIREWALL_ENGINE=nftlib` are affected.
 - **Files installed from the RPM all showed a modification date of May 4
   2026.** On EL10, `rpmbuild` sets every packaged file's timestamp to the
   newest entry in the spec's `%changelog` whenever that entry is older than
   the file. That entry was hand-written on May 4 and never updated, so in
   every later `.rpm` each file changed since then — most of
   `/var/lib/cfm/lua/*.lua` — read "May 4" after an upgrade. Only the dates
-  were wrong: the contents were always the current release's. The top `%changelog` entry is now dated
-  automatically with the build date, the same UTC date as the package version,
-  so `rpm -q --changelog cfm` shows the build itself. `make rpm` also sets the
-  timestamp source to the build time, so installed files keep their real
-  modification times — the same as an EL8/9 build or the `.deb`. Applies
-  from the next `.rpm` built; no action on the servers.
+  were wrong: the contents were always the current release's. The top
+  `%changelog` entry is now dated automatically with the build date, the same
+  UTC date as the package version, so `rpm -q --changelog cfm` shows the build
+  itself. `make rpm` also sets the timestamp source to the build time, so
+  installed files keep their real modification times — the same as an EL8/9
+  build or the `.deb`. Applies from the next `.rpm` built; no action on the
+  servers.
 - **The daemon could crash (SIGSEGV) when the GeoLite2 databases were
   refreshed.** CFM's own MaxMind updater checks daily and installs a new
   ASN/City `.mmdb` as often as every ~3 days; each enricher in the daemon then

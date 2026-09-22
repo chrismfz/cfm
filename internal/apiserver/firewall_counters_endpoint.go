@@ -94,8 +94,8 @@ func makeFirewallCountersHandler(be firewall.Backend) http.HandlerFunc {
 			// shape with no counter objects — so counters cannot be read here.
 			// Report available:false honestly instead of a misleading empty list
 			// (a zero-count list would read as "no firewall activity"). Reading
-			// them would need a netlink counter dump, which the nftlib shared
-			// connection must not do lightly (see the FIX B wedge history).
+			// them would need a netlink counter dump the nftlib backend does
+			// not implement.
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ok":        true,
 				"schema":    "firewall.counters.v1",

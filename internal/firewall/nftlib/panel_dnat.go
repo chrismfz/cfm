@@ -54,7 +54,13 @@ func (b *Backend) PanelDNATOn(priority int) (err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	t := &nftables.Table{Name: panelDNATTableName, Family: nftables.TableFamilyINet}
-	if old, err := b.findTable(panelDNATTableName, nftables.TableFamilyINet); err == nil && old != nil {
+	old, err := b.findTable(panelDNATTableName, nftables.TableFamilyINet)
+	if err != nil {
+		// Without knowing whether the table exists we can't delete it first,
+		// and adding on top of a live table would duplicate every rule.
+		return fmt.Errorf("nftlib: look up %s: %w", panelDNATTableName, err)
+	}
+	if old != nil {
 		b.conn.DelTable(old)
 		if err := b.conn.Flush(); err != nil {
 			return err

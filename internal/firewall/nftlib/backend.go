@@ -55,8 +55,13 @@ const (
 // Backend implements firewall.Backend using github.com/google/nftables.
 // All data-plane operations use netlink directly (zero forks, zero execs).
 type Backend struct {
-	conn *nftables.Conn
+	// conn is transient: every kernel call gets its own socket, and reads (not
+	// writes) carry a deadline (see nlconn.go). mu still serialises all conn
+	// use, because operations queue messages on conn and Flush sends them as
+	// one batch.
+	conn *nlConn
 	mu   sync.Mutex
+	nl   nlStats // every netlink round-trip, for firewall_selftest
 
 	// namedSets and table are lazy-populated on first use.
 	// Call invalidateCache() after any structural change.
@@ -118,14 +123,9 @@ type Backend struct {
 	feedWrites map[string]fwSample         // latest write per set name
 }
 
-// New opens a lasting netlink connection and returns a ready nftlib.Backend.
+// New checks netlink is usable and returns a ready nftlib.Backend.
 func New() (*Backend, error) {
-	conn, err := nftables.New(nftables.AsLasting())
-	if err != nil {
-		return nil, fmt.Errorf("nftlib: open netlink conn: %w", err)
-	}
-	return &Backend{
-		conn:                     conn,
+	b := &Backend{
 		namedSets:                make(map[string]*nftables.Set),
 		extAllow:                 make(map[string]extFeedData),
 		extBlock:                 make(map[string]extFeedData),
@@ -137,7 +137,13 @@ func New() (*Backend, error) {
 		selfResolver:             selfip.New(),
 		feedWrites:               make(map[string]fwSample),
 		appliedHash:              make(map[string]uint64),
-	}, nil
+	}
+	conn, err := newNLConn(&b.nl)
+	if err != nil {
+		return nil, fmt.Errorf("nftlib: open netlink conn: %w", err)
+	}
+	b.conn = conn
+	return b, nil
 }
 
 func (b *Backend) Capabilities() firewall.Capabilities {
