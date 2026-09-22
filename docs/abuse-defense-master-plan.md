@@ -341,12 +341,32 @@ already opened.
           `challenge/vhost/status` (single request, no per-row fan-out);
           single-vhost scopes preselect their host. Copy explicitly
           distinguishes it from the adjacent Challenge ON/OFF engine
-          toggle (recon flagged the naming trap). Accepted residuals:
+          toggle (recon flagged the naming trap). The slice's dedicated
+          SECURITY REVIEW ran (verdict FIX-FIRST → fixed in the same PR):
+          I1 the free-text `reason` could forge the flat audit logs — now
+          control-char-stripped + capped at the input boundary
+          (`sanitizeAuditReason`) and `%q`-quoted at every log site; I3
+          the `vhost/attack` override left no audit trail — now emits a
+          `challenge_vhost_attack_override` history event + CHALLENGES
+          line with the actor; I2 the scoped embed-bootstrap cookie
+          (SameSite=None) was exempt from the CSRF Origin check while
+          every arm endpoint accepts query-param POSTs — the CSRF
+          middleware now covers embed-cookie auth too (same-origin iframe
+          XHRs pass; a cross-site form 403s). Accepted residuals
+          (review-verified, all own-vhost/self-inflicted or same-tenant):
           no per-vhost flap throttle beyond the generic 120/60s write
-          bucket (arm/disarm flapping only affects the caller's own
-          vhost); the scoped Tier picker on the WebDetector overview
-          page pre-existed via slice A and is covered by the same
-          server-side scope checks.
+          bucket; re-arming resets the 24h window, so a scoped cron can
+          maintain a standing challenge on its own vhost (soft arms/day
+          counter is the future lever); the bridge's apex→www expansion
+          installs the www twin past the exact-match scope check
+          (same-account ServerAlias in cPanel practice); a scoped re-arm
+          may replace/downgrade an admin arm on the customer's own vhost
+          (owner self-service — an owner-immutable challenge belongs in
+          config-time CHALLENGE_VHOST); the scoped `vhost/attack`
+          override stays un-TTL'd (audited now; TTL-bound-or-admin-only
+          is a pending decision); the scoped Tier picker on the
+          WebDetector overview page pre-existed via slice A under the
+          same server-side scope checks.
 - [ ] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.

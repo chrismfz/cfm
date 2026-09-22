@@ -239,3 +239,74 @@ func TestManualChallengeHistoryCarriesRungAndActor(t *testing.T) {
 		t.Fatalf("wrapper must not fabricate an actor, got %#v", evs[0].Payload["actor"])
 	}
 }
+
+// ── Slice D security review folds: reason sanitization + attack audit ────────
+
+func TestSanitizeAuditReason(t *testing.T) {
+	if got := sanitizeAuditReason("panic-button"); got != "panic-button" {
+		t.Fatalf("plain reason mangled: %q", got)
+	}
+	// CR/LF and control chars must never survive into the flat audit logs —
+	// `reason="x\n...actor=admin"` was the review's forgery payload (I1).
+	if got := sanitizeAuditReason("x\n2026 [challenge][vhost] actor=admin\r\x00y"); got != "x2026 [challenge][vhost] actor=adminy" {
+		t.Fatalf("control chars survived: %q", got)
+	}
+	if got := sanitizeAuditReason(strings.Repeat("a", 500)); len(got) > 200 {
+		t.Fatalf("cap not applied: len=%d", len(got))
+	}
+}
+
+func TestManualChallengeReasonSanitizedAtInputBoundary(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.sqlite"), 30, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	t.Cleanup(hs.Close)
+	e := &Engine{history: hs}
+	e.manualChal.init("")
+
+	rr := httptest.NewRecorder()
+	e.handleChallengeVhostAdd(rr, scopedAddReq("/api/v1/challenge/vhost/add?host=tenant-a.example.com&ttl=1h&reason="+
+		"evil%0Aaction%3Dmanual_off%20actor%3Dadmin"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("arm failed: %d: %s", rr.Code, rr.Body.String())
+	}
+	evs, err := hs.QueryEvents("tenant-a.example.com", "", "challenge_vhost_manual_on", 5)
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("events: %v (err=%v)", evs, err)
+	}
+	if strings.ContainsAny(evs[0].Reason, "\r\n") {
+		t.Fatalf("newline survived into the audit reason: %q", evs[0].Reason)
+	}
+}
+
+func TestAttackOverrideIsAudited(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.sqlite"), 30, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	t.Cleanup(hs.Close)
+	e := &Engine{history: hs, cfg: Config{UnderAttack: true}}
+	e.manualChal.init("")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/attack?host=tenant-a.example.com&on=1", nil)
+	ctx := context.WithValue(req.Context(), CtxRoleKey{}, CtxRoleScoped)
+	ctx = context.WithValue(ctx, CtxScopeKey{}, map[string]struct{}{"tenant-a.example.com": {}})
+	rr := httptest.NewRecorder()
+	e.handleChallengeVhostAttack(rr, req.WithContext(ctx))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("attack override failed: %d: %s", rr.Code, rr.Body.String())
+	}
+	evs, err := hs.QueryEvents("tenant-a.example.com", "", "challenge_vhost_attack_override", 5)
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("attack override left no audit event (review I3): %v (err=%v)", evs, err)
+	}
+	if evs[0].Payload["actor"] != "scoped" || evs[0].Payload["on"] != true {
+		t.Fatalf("audit payload wrong: %#v", evs[0].Payload)
+	}
+	if evs[0].Reason != "attack_forced" {
+		t.Fatalf("audit reason = %q, want attack_forced", evs[0].Reason)
+	}
+}

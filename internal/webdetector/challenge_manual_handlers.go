@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"cfm/internal/logging"
 )
 
 type chalVhostAddRequest struct {
@@ -35,6 +37,27 @@ type chalVhostAddResponse struct {
 	// fields always carry the EFFECTIVE values, so a capped arm is visible,
 	// never silent.
 	TTLCapped bool `json:"ttl_capped,omitempty"`
+}
+
+// sanitizeAuditReason bounds the free-text reason a caller may attach to a
+// manual arm: control characters (incl. CR/LF) are stripped so the value can
+// never forge lines or key=value pairs in the flat audit logs (the log sites
+// also %q-quote it — defence in depth), and the length is capped so an
+// unbounded query-param reason cannot bloat the logs or the persist file
+// (slice-D security review I1/M3).
+func sanitizeAuditReason(s string) string {
+	const maxLen = 200
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+		if b.Len() >= maxLen {
+			break
+		}
+	}
+	return b.String()
 }
 
 // actorFromScope maps a request's vhost scope to the audit actor recorded on
@@ -137,6 +160,7 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		ttlCapped = true
 	}
 
+	req.Reason = sanitizeAuditReason(req.Reason)
 	if req.Reason == "" {
 		req.Reason = "manual"
 	}
@@ -265,7 +289,8 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	// Scope check: scoped tokens may only override their own vhosts.
-	if !vhostAllowed(host, vhostScopeFromContext(r.Context())) {
+	scope := vhostScopeFromContext(r.Context())
+	if !vhostAllowed(host, scope) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
@@ -277,6 +302,31 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 	}
 
 	e.SetVhostAttackOverride(host, on, time.Now())
+
+	// Audit (slice-D security review I3): this override used to leave NO
+	// trail beyond the generic api.log request line — a scoped customer
+	// could force (or clear) UNDER_ATTACK on their vhost invisibly. Record
+	// it like the manual arm/disarm: a CHALLENGES log line and a history
+	// event, both carrying the actor. (The override itself stays un-TTL'd —
+	// documented residual in the master plan, pending a TTL-or-admin-only
+	// decision.)
+	actor := actorFromScope(scope)
+	reason := "attack_cleared"
+	if on {
+		reason = "attack_forced"
+	}
+	logging.LogfCHALLENGES(
+		"[challenge][vhost] action=attack_override host=%s on=%v actor=%s",
+		host, on, actorOrDash(actor),
+	)
+	e.appendHistory(HistoryEvent{
+		TsUnix:  time.Now().Unix(),
+		Type:    "challenge_vhost_attack_override",
+		Host:    host,
+		Mode:    "manual",
+		Reason:  reason,
+		Payload: map[string]interface{}{"actor": actor, "on": on},
+	})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"host":   host,
 		"attack": on,

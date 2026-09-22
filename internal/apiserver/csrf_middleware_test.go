@@ -161,3 +161,65 @@ func TestCSRFMiddlewareAllowsTrustedForwardedHost(t *testing.T) {
 		t.Fatalf("expected 204, got %d", rr.Code)
 	}
 }
+
+// ── Slice-D security review I2: the scoped EMBED cookie is SameSite=None ─────
+// (the cPanel iframe needs it cross-site), so it is an ambient credential a
+// hostile page can ride into query-param POSTs (challenge disarm, WAF
+// exclude). Embed-cookie auth must go through the same same-origin check as
+// the admin session; the iframe's own XHRs are same-origin and pass.
+
+func TestCSRFMiddlewareRejectsEmbedCookieMutatingCrossSite(t *testing.T) {
+	nextCalled := false
+	h := CSRFMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	// A cross-site form POST: hostile Origin, victim's embed cookie.
+	req := httptest.NewRequest(http.MethodPost, "http://cfm.local/api/v1/challenge/vhost/remove?host=victim.com", nil)
+	req = req.WithContext(withAuthnMechanism(req.Context(), authnMechanismEmbedCookie))
+	req.Header.Set("Origin", "http://evil.example")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if nextCalled || rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-site embed-cookie POST must 403, got %d (nextCalled=%v)", rr.Code, nextCalled)
+	}
+
+	// No Origin and no Referer (a bare cross-site form) is rejected too.
+	nextCalled = false
+	req = httptest.NewRequest(http.MethodPost, "http://cfm.local/api/v1/challenge/vhost/add?host=victim.com&ttl=24h", nil)
+	req = req.WithContext(withAuthnMechanism(req.Context(), authnMechanismEmbedCookie))
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if nextCalled || rr.Code != http.StatusForbidden {
+		t.Fatalf("origin-less embed-cookie POST must 403, got %d (nextCalled=%v)", rr.Code, nextCalled)
+	}
+}
+
+func TestCSRFMiddlewareAllowsEmbedCookieSameOrigin(t *testing.T) {
+	nextCalled := false
+	h := CSRFMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	// The iframe's own XHR: Origin matches the request host.
+	req := httptest.NewRequest(http.MethodPost, "http://cfm.local/api/v1/challenge/vhost/add?host=own.com&ttl=1h", nil)
+	req = req.WithContext(withAuthnMechanism(req.Context(), authnMechanismEmbedCookie))
+	req.Header.Set("Origin", "http://cfm.local")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if !nextCalled || rr.Code != http.StatusNoContent {
+		t.Fatalf("same-origin embed-cookie POST must pass, got %d (nextCalled=%v)", rr.Code, nextCalled)
+	}
+
+	// GETs stay exempt regardless of mechanism.
+	nextCalled = false
+	req = httptest.NewRequest(http.MethodGet, "http://cfm.local/api/v1/challenge/vhost/status?host=own.com", nil)
+	req = req.WithContext(withAuthnMechanism(req.Context(), authnMechanismEmbedCookie))
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if !nextCalled {
+		t.Fatalf("GET under embed-cookie auth must not be CSRF-checked")
+	}
+}

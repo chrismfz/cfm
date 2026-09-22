@@ -300,8 +300,13 @@ func (e *Engine) ManualChallengeVhostAs(host string, ttl time.Duration, reason, 
 func (e *Engine) manualChallengeVhostRecord(host string, ttl time.Duration, reason, rung, actor string) {
 	e.manualChal.set(host, ttl, reason, rung)
 
+	// reason is %q-quoted: it can be attacker-influenced free text (a scoped
+	// customer's API field), and this line IS the audit trail — an unquoted
+	// %s would let `reason="x\n...actor=admin"` forge whole entries or
+	// key=value pairs (slice-D security review I1). The handler additionally
+	// strips control chars and caps the length at the input boundary.
 	logging.LogfCHALLENGES(
-		"[challenge][vhost] action=manual_on host=%s ttl=%s reason=%s rung=%s actor=%s",
+		"[challenge][vhost] action=manual_on host=%s ttl=%s reason=%q rung=%s actor=%s",
 		host, ttl, reason, rungOrV1(rung), actorOrDash(actor),
 	)
 

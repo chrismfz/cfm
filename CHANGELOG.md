@@ -105,6 +105,24 @@ back-filled here — see the git/PR history for that period.
   `/etc/cfm/cfm_waf_config.lua`. Autoblock is unaffected (challenge tier
   never feeds `waf_security`).
 
+### Security
+- **Manual-challenge audit lines can no longer be forged via the free-text
+  `reason`** (slice-D security review): the caller-supplied reason is
+  control-char-stripped and capped (200) at the API boundary and
+  `%q`-quoted at every flat-log site, so `reason="x\n… actor=admin"` can
+  no longer fabricate audit entries in cfm.challenges.log. The
+  Under-Attack `vhost/attack` override — which previously left **no**
+  audit trail — now records a `challenge_vhost_attack_override` history
+  event and a CHALLENGES log line, both with the acting principal.
+- **Cross-site request forgery closed on the scoped panel session**: the
+  cPanel-embed bootstrap cookie (deliberately `SameSite=None` for the
+  iframe) was exempt from the CSRF Origin/Referer check while the
+  challenge/exclude endpoints accept query-param POSTs — a malicious page
+  could disarm a customer's challenge or add a WAF exclude using the
+  customer's own browser session. Embed-cookie auth now goes through the
+  same same-origin validation as admin sessions; the plugin iframe's own
+  requests are same-origin and unaffected.
+
 ### Fixed
 - **12 WAF rules showed the wrong default tier in the CLI / panel / MCP rule
   glossary.** The Go mirror's informational `DefaultMode` had silently
