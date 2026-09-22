@@ -34,11 +34,14 @@ package webdetector
 //                    is retry-able, never a silent wall. Deny-with-no-recourse
 //                    stays a D2 decision, not this file's.
 //   (d) VISIBILITY — every scored solve carries hs=/tells= on its solve log
-//                    line (ChallengeSolve.HumanitySuffix, both writers), a
-//                    reject logs result=v2_reject, a would-fail unarmed solve
-//                    emits signal=humanity verdict=would_v2 to the abuse
-//                    shadow log, and CHALLENGE_V2_DEBUG=1 adds an X-CFM-HS
-//                    response header for DevTools-level inspection.
+//                    line, plus v2=<grain> naming the arm whenever one covers
+//                    the solve (ChallengeSolve.HumanitySuffix, both writers):
+//                    an armed solve that PASSES must not read like a plain v1
+//                    one, or a live tier looks like a forgotten one. A reject
+//                    logs result=v2_reject (naming the grain), a would-fail
+//                    unarmed solve emits signal=humanity verdict=would_v2 to
+//                    the abuse shadow log, and CHALLENGE_V2_DEBUG=1 adds an
+//                    X-CFM-HS response header for DevTools-level inspection.
 //
 // Knobs ([webdetector], applied per reload by ConfigureChallengeV2):
 //   CHALLENGE_V2_PASSIVE    (default 1) master for scoring + the armed gate
@@ -270,6 +273,45 @@ func challengeV2HostArmed(host string) bool {
 	return fn(host)
 }
 
+// Arm-grain names. They are a grep surface (`v2=` on the solve line), so keep
+// them short and stable.
+const (
+	v2GrainFP    = "fp"    // an armed challenge_v2 fingerprint policy
+	v2GrainGeo   = "geo"   // a fleet-armed country/ASN policy covering the IP
+	v2GrainVhost = "vhost" // a v2-tier manual vhost challenge on the host
+	v2GrainMark  = "mark"  // a per-(ip,host) rung mark (traffic rule / WAF rule)
+)
+
+// challengeV2ArmGrain answers D5a's "is this solve covered by an
+// operator-armed challenge_v2?" and NAMES the grain that armed it. It is the
+// single evaluation of the OR the verify gate applies (challenge_server.go),
+// so the teeth and the log line can never disagree about whether a solve was
+// armed — the two-writers-must-agree convention, applied to a predicate.
+// "" means unarmed: the score is shadow/log-only. Precedence is the gate's
+// documented order, and every lookup is fail-open when unwired or absent.
+//
+// Evaluated on EVERY scored solve, not only a failing one: "armed and passed"
+// is exactly what a burn-in operator needs to see (D5d). Without it an armed
+// solve that scores clean is byte-identical in cfm.challenges.log to a plain
+// v1 one, which reads as "the tier never fired" — the gap this function was
+// added to close. Cheap enough at solve rate (map reads plus, when geo
+// policies are loaded, one mmdb lookup), and reading a mark never consumes
+// it — challengeV2Marked only drops its own expired key — so the eager read
+// cannot starve the gate below.
+func challengeV2ArmGrain(fpID, ip, host string) string {
+	switch {
+	case FingerprintPolicyForID(fpID) == "challenge_v2":
+		return v2GrainFP
+	case GeoPolicyActionForIP(ip) == "challenge_v2":
+		return v2GrainGeo
+	case challengeV2HostArmed(host):
+		return v2GrainVhost
+	case challengeV2Marked(ip, host):
+		return v2GrainMark
+	}
+	return ""
+}
+
 // ConfigureChallengeV2 applies the [webdetector] knobs; called on every
 // detectors reload (webdetector_register.go).
 func ConfigureChallengeV2(enabled bool, failScore int, debug, shadowLines bool) {
@@ -391,23 +433,35 @@ func scoreHumanity(sig *humanitySignals, ua string) (hs int, tells []string) {
 }
 
 // HumanitySuffix renders the Rung-1 fields for a solve log line: " hs=N" plus
-// " tells=a,b" when any fired. Empty when scoring was disabled (-1 sentinel),
-// so pre-Rung-1 log tooling sees an unchanged line; " hs=-" when NO payload
-// arrived and nothing fired, so "scored clean" (hs=0) and "reported nothing"
-// stay distinguishable in the burn-in data (a fleet-wide hs=- means a
+// " tells=a,b" when any fired, then " v2=<grain>" when the solve was covered
+// by an operator-armed challenge_v2. Empty when scoring was disabled (-1
+// sentinel), so pre-Rung-1 log tooling sees an unchanged line; " hs=-" when NO
+// payload arrived and nothing fired, so "scored clean" (hs=0) and "reported
+// nothing" stay distinguishable in the burn-in data (a fleet-wide hs=- means a
 // regression or a body-stripping farm — D5d). Both solve-line writers
 // (challenge_server fallback + the detectors hook) go through this, per the
 // two-writers-must-agree convention.
+//
+// v2= rides here rather than on its own because an ARMED solve that passes is
+// otherwise invisible: result=solved with a clean score reads exactly like a
+// plain v1 solve, and an operator watching a freshly-promoted rule concludes
+// the tier never fired. Absent v2= = unarmed (score was shadow/log-only); a
+// rejected solve logs result=v2_reject and names the grain on its own line.
 func (s ChallengeSolve) HumanitySuffix() string {
 	if s.HumanityScore < 0 {
 		return ""
 	}
+	var out string
 	if s.HumanityNoPayload && s.HumanityScore == 0 {
-		return " hs=-"
+		out = " hs=-"
+	} else {
+		out = fmt.Sprintf(" hs=%d", s.HumanityScore)
+		if s.HumanityTells != "" {
+			out += " tells=" + s.HumanityTells
+		}
 	}
-	out := fmt.Sprintf(" hs=%d", s.HumanityScore)
-	if s.HumanityTells != "" {
-		out += " tells=" + s.HumanityTells
+	if s.V2Grain != "" {
+		out += " v2=" + s.V2Grain
 	}
 	return out
 }

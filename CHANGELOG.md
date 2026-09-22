@@ -17,7 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **`v2=<grain>` on the challenge solve line — a passed ChallengeV2 solve is
+  no longer invisible.** `cfm.challenges.log` scored every solve (`hs=`/
+  `tells=`) but said nothing about whether the solve was covered by an armed
+  `challenge_v2`, so a clean solve under an arm was byte-identical to a plain
+  v1 one — an operator promoting a rule to the tier (e.g. `rule_xss` 302) saw
+  `result=solved … hs=0` and could not tell the tier from a forgotten one.
+  Every scored solve now names the grain that armed it when one did:
+  `v2=fp` (fingerprint policy), `v2=geo` (country/ASN policy), `v2=vhost`
+  (v2-tier vhost challenge) or `v2=mark` (per-(ip,host) rung mark written by a
+  `challenge_v2` traffic rule or WAF rule). No `v2=` means unarmed — the score
+  was shadow/log-only. `result=v2_reject` lines carry the grain too. Nothing
+  about enforcement changed: the D5 arm check is the same OR, now resolved
+  once and shared by the gate and the log so the teeth and the line can never
+  disagree.
 
 ## 2026.09.22
 

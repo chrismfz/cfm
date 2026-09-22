@@ -647,7 +647,13 @@ burn-in and FP triage with no new plumbing and no logrotate change:
 
 - **`cfm.challenges.log`** (per solve; already logs `ua=`, `solve_ms=`,
   `ua_impossible=`): add `hs=<humanity_score>`, `tells=<fired,comma,list>`,
-  `fp=<tlsfp>` — the raw grep surface for "which solve, and why".
+  `fp=<tlsfp>` — the raw grep surface for "which solve, and why" — plus
+  `v2=<grain>` naming the arm that covered the solve (`fp` / `geo` / `vhost` /
+  `mark`), absent when unarmed. The grain is what separates "the tier is live
+  and this solve passed it" from "the tier never fired": without it a clean
+  armed solve reads exactly like a plain v1 one. `grep 'v2='` is the burn-in
+  question "is my newly-armed tier actually covering traffic?"; `grep
+  v2_reject` is "did it bite".
 - **`cfm.abuse_shadow.log`**: `signal=humanity verdict=would_v2 …` when the score
   *would* escalate — shadow, nothing served.
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls

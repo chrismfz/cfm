@@ -157,4 +157,75 @@ func TestHumanitySuffix(t *testing.T) {
 	if s := (ChallengeSolve{HumanityScore: 130, HumanityTells: "sw_renderer,outer_zero,no_input"}).HumanitySuffix(); s != " hs=130 tells=sw_renderer,outer_zero,no_input" {
 		t.Fatalf("failing solve: got %q", s)
 	}
+	// D5d: an ARMED solve that passes must be distinguishable from a plain v1
+	// one — otherwise a live tier reads as a forgotten one in the log.
+	if s := (ChallengeSolve{HumanityScore: 0, V2Grain: v2GrainMark}).HumanitySuffix(); s != " hs=0 v2=mark" {
+		t.Fatalf("armed clean solve must name its grain, got %q", s)
+	}
+	if s := (ChallengeSolve{HumanityScore: 0, HumanityNoPayload: true, V2Grain: v2GrainFP}).HumanitySuffix(); s != " hs=- v2=fp" {
+		t.Fatalf("armed no-payload solve must name its grain, got %q", s)
+	}
+	if s := (ChallengeSolve{HumanityScore: 100, HumanityTells: "webdriver", V2Grain: v2GrainVhost}).HumanitySuffix(); s != " hs=100 tells=webdriver v2=vhost" {
+		t.Fatalf("armed failing solve: got %q", s)
+	}
+	// The rung being off wins over everything: pre-Rung-1 log tooling must see
+	// an unchanged line even if a stale grain rode along.
+	if s := (ChallengeSolve{HumanityScore: -1, V2Grain: v2GrainGeo}).HumanitySuffix(); s != "" {
+		t.Fatalf("disabled rung must render nothing even with a grain, got %q", s)
+	}
+}
+
+// TestChallengeV2ArmGrain pins the D5a predicate the verify gate and the solve
+// line now SHARE: which grains arm, in which precedence, and that an unarmed
+// solve names none (teeth only where an operator armed — the whole point).
+func TestChallengeV2ArmGrain(t *testing.T) {
+	resetFPPolicies(t)
+	resetChallengeV2Marks(t)
+	id := fpTestID(t)
+
+	// Nothing armed anywhere.
+	if got := challengeV2ArmGrain(id, "203.0.113.5", "shop.gr"); got != "" {
+		t.Fatalf("unarmed solve must report no grain, got %q", got)
+	}
+
+	// mark (lowest precedence) alone.
+	MarkChallengeV2("203.0.113.5", "shop.gr")
+	if got := challengeV2ArmGrain(id, "203.0.113.5", "shop.gr"); got != v2GrainMark {
+		t.Fatalf("mark grain: got %q", got)
+	}
+	// A mark is keyed on the exact (ip, host) pair — another host is unarmed.
+	if got := challengeV2ArmGrain(id, "203.0.113.5", "other.gr"); got != "" {
+		t.Fatalf("mark must not leak across hosts, got %q", got)
+	}
+
+	// vhost arm outranks the mark.
+	SetChallengeV2HostArmed(func(host string) bool { return host == "shop.gr" })
+	t.Cleanup(func() { SetChallengeV2HostArmed(nil) })
+	if got := challengeV2ArmGrain(id, "203.0.113.5", "shop.gr"); got != v2GrainVhost {
+		t.Fatalf("vhost grain: got %q", got)
+	}
+
+	// geo policy outranks the vhost arm.
+	SetFingerprintPolicies([]FingerprintPolicy{{ID: "CN", Kind: "country", Action: "challenge_v2"}})
+	SetFingerprintPolicyGeoResolver(func(ip string) (string, uint64) { return "CN", 4134 })
+	t.Cleanup(func() { SetFingerprintPolicyGeoResolver(nil) })
+	if got := challengeV2ArmGrain(id, "203.0.113.5", "shop.gr"); got != v2GrainGeo {
+		t.Fatalf("geo grain: got %q", got)
+	}
+
+	// The fingerprint policy outranks everything.
+	SetFingerprintPolicies([]FingerprintPolicy{
+		{ID: "CN", Kind: "country", Action: "challenge_v2"},
+		{ID: id, Action: "challenge_v2"},
+	})
+	if got := challengeV2ArmGrain(id, "203.0.113.5", "shop.gr"); got != v2GrainFP {
+		t.Fatalf("fp grain: got %q", got)
+	}
+
+	// A non-v2 fingerprint policy is NOT a v2 arm: only the tier arms the rung
+	// (a plain "challenge" fp must fall through to the next grain, not arm).
+	SetFingerprintPolicies([]FingerprintPolicy{{ID: id, Action: "challenge"}})
+	if got := challengeV2ArmGrain(id, "203.0.113.5", "shop.gr"); got != v2GrainVhost {
+		t.Fatalf("plain-challenge fp must not arm v2, got %q", got)
+	}
 }

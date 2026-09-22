@@ -465,6 +465,13 @@ type ChallengeSolve struct {
 	// distinguishable — a fleet-wide hs=- is a regression or an evading farm,
 	// and either must be visible (D5d), never disguised as hs=0.
 	HumanityNoPayload bool
+	// V2Grain names the operator-armed challenge_v2 grain covering this solve
+	// ("fp" / "geo" / "vhost" / "mark"), "" when none did — i.e. exactly when
+	// the D5a gate would have teeth. Filled on every scored solve, not only a
+	// failing one, and rendered as v2=<grain> by HumanitySuffix: a clean score
+	// under an arm is otherwise byte-identical to a plain v1 solve, which reads
+	// as "the tier never fired" (D5d).
+	V2Grain string
 }
 
 // TLSFingerprintOrDash renders TLSFP for a log line. Empty means "not
@@ -725,7 +732,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// disabled; an absent/malformed payload scores like an empty report
 		// (only UA-borne openers can fire) — absence never convicts (D5b).
 		v2On, v2Fail, v2Debug, v2Shadow := challengeV2Settings()
-		hs, hsTells, hsNoPayload := -1, "", false
+		hs, hsTells, hsNoPayload, v2Grain := -1, "", false, ""
 		if v2On {
 			sig := parseHumanityBody(humanityBody)
 			hsNoPayload = sig == nil
@@ -734,6 +741,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			if v2Debug {
 				w.Header().Set("X-CFM-HS", strconv.Itoa(score))
 			}
+			// Resolve the D5a arm ONCE, for every scored solve — the gate
+			// below consumes this same answer, and the solve line renders it,
+			// so "did the teeth cover this solve" cannot be read two ways.
+			v2Grain = challengeV2ArmGrain(fp.ID, ipStr, host)
 		}
 
 		solve := ChallengeSolve{
@@ -752,6 +763,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			HumanityScore:     hs,
 			HumanityTells:     hsTells,
 			HumanityNoPayload: hsNoPayload,
+			V2Grain:           v2Grain,
 		}
 
 		// One dictionary line per distinct fingerprint, so every solve can carry
@@ -789,21 +801,20 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// abuse-shadow line (rides the ABUSE_SHADOW master via
 		// ConfigureChallengeV2), clearance unaffected.
 		if v2On && hs >= v2Fail {
-			// Armed challenge_v2 via ANY grain: the solve's TLS fingerprint
-			// (the original gate), a fleet-armed country/ASN policy covering
-			// the client IP (policy-kinds slice), a v2-tier VHOST arm
-			// covering the solve's host (arm-surfaces slice A), or a
-			// transient per-(ip,host) mark written at decision time by a
-			// v2-tier traffic rule (slice B). Each lookup is fail-open when
-			// unwired/absent. Same D5 semantics either way; the gate inputs
-			// are edge-authoritative — see HONEST LIMITS in challenge_v2.go.
-			if FingerprintPolicyForID(solve.TLSFP) == "challenge_v2" ||
-				GeoPolicyActionForIP(solve.IP) == "challenge_v2" ||
-				challengeV2HostArmed(solve.Host) ||
-				challengeV2Marked(solve.IP, solve.Host) {
+			// v2Grain is the ANY-grain arm resolved above (challengeV2ArmGrain):
+			// the solve's TLS fingerprint (the original gate), a fleet-armed
+			// country/ASN policy covering the client IP (policy-kinds slice),
+			// a v2-tier VHOST arm covering the solve's host (arm-surfaces
+			// slice A), or a transient per-(ip,host) mark written when a
+			// v2-tier traffic rule (slice B) or WAF rule (slice C) challenged
+			// this pair. Each lookup is fail-open when unwired/absent. Same D5
+			// semantics either way; the gate inputs are edge-authoritative —
+			// see HONEST LIMITS in challenge_v2.go. The grain also rides the
+			// solve line, so a passed-under-arm solve is greppable too.
+			if v2Grain != "" {
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s tls_fp=%s ua=%q",
-					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.TLSFingerprintOrDash(), solve.UA)
+					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s v2=%s tls_fp=%s ua=%q",
+					solve.IP, solve.Host, solve.URI, hs, hsTells, v2Grain, solve.TLSFingerprintOrDash(), solve.UA)
 				w.Header().Set("X-CFM-V2", "reject")
 				http.Error(w, "verification failed", http.StatusForbidden)
 				return

@@ -389,7 +389,9 @@ geo/enrich, ASN via the local mmdb) with `challenge_v2` biting at verify via
 the geo resolver; no edge Lua involved, `FP_POLICY=0` kills all kinds. **ChallengeV2 Rung 1
 is built** (2026-09-19, `challenge_v2.go` + the challenge-page passive
 collectors, guardrails D5): every solve is scored on positive-only headless
-evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived), and
+evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
+`v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
+so a passed-under-arm solve is greppable, not mistaken for a plain v1 one), and
 for an armed `challenge_v2` fingerprint a failing solve earns NO clearance
 (`result=v2_reject`, retry-able with backoff) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
