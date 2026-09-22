@@ -118,30 +118,47 @@ local function load_bridge_token()
     return nil
 end
 
-local function bridge_fetch()
+-- bridge_send: the shared client both directions use. Connects to the bridge
+-- unix socket, sends one request (GET when body is nil; POST with a JSON body +
+-- explicit Content-Length otherwise — the daemon's minimal reader wants a
+-- non-chunked body), reads the status line, and returns the STILL-OPEN socket +
+-- HTTP code so the caller can read (or discard) the response. On any pre-status
+-- failure the socket is closed and (nil, nil, err) is returned. One copy of the
+-- token/connect/send/status plumbing — no drift between fetch and push.
+local function bridge_send(method, path, body)
     local token = load_bridge_token()
-    if not token then return nil, "no bridge token yet" end
+    if not token then return nil, nil, "no bridge token yet" end
 
     local s, err = ngx.socket.tcp()
-    if not s then return nil, "socket.tcp: " .. (err or "?") end
+    if not s then return nil, nil, "socket.tcp: " .. (err or "?") end
     s:settimeouts(IO_TIMEOUT_MS, IO_TIMEOUT_MS, IO_TIMEOUT_MS)
     local ok, cerr = s:connect("unix:" .. SOCK_PATH)
-    if not ok then s:close(); return nil, "connect: " .. (cerr or "?") end
+    if not ok then s:close(); return nil, nil, "connect: " .. (cerr or "?") end
 
-    local req = "GET " .. BRIDGE_PATH .. " HTTP/1.1\r\n" ..
+    local req = method .. " " .. path .. " HTTP/1.1\r\n" ..
                 "Host: localhost\r\n" ..
                 "Connection: close\r\n" ..
-                TOKEN_HEADER .. ": " .. token .. "\r\n\r\n"
+                TOKEN_HEADER .. ": " .. token .. "\r\n"
+    if body then
+        req = req .. "Content-Type: application/json\r\n" ..
+                     "Content-Length: " .. #body .. "\r\n\r\n" .. body
+    else
+        req = req .. "\r\n"
+    end
     local _, werr = s:send(req)
-    if werr then s:close(); return nil, "send: " .. (werr or "?") end
+    if werr then s:close(); return nil, nil, "send: " .. (werr or "?") end
 
     local status_line, rerr = s:receive("*l")
-    if not status_line then s:close(); return nil, "recv status: " .. (rerr or "?") end
-    local code = tonumber(status_line:match("%s(%d%d%d)%s"))
-    if code ~= 200 then s:close(); return nil, "http " .. tostring(code) end
+    if not status_line then s:close(); return nil, nil, "recv status: " .. (rerr or "?") end
+    return s, tonumber(status_line:match("%s(%d%d%d)%s")), nil
+end
 
-    while true do
-        local line, _ = s:receive("*l")
+local function bridge_fetch()
+    local s, code, err = bridge_send("GET", BRIDGE_PATH, nil)
+    if err then return nil, err end
+    if code ~= 200 then s:close(); return nil, "http " .. tostring(code) end
+    while true do                          -- discard the response headers
+        local line = s:receive("*l")
         if not line or line == "" then break end
     end
     local body = s:receive("*a") or ""
@@ -149,36 +166,14 @@ local function bridge_fetch()
     return body, nil
 end
 
--- bridge_push: POST a JSON body to a bridge path (the reverse of bridge_fetch).
--- Explicit Content-Length (the daemon's minimal reader wants a non-chunked
--- body). Returns true on HTTP 200, else nil+err. Runs inside a timer (never on
--- the request path).
+-- bridge_push: POST a JSON body to a bridge path (the reverse of bridge_fetch);
+-- only the status matters. Returns true on HTTP 200, else nil+err. Timer-only.
 local STATS_PATH = "/nginx/cache/stats"
 
 local function bridge_push(path, body)
-    local token = load_bridge_token()
-    if not token then return nil, "no bridge token yet" end
-
-    local s, err = ngx.socket.tcp()
-    if not s then return nil, "socket.tcp: " .. (err or "?") end
-    s:settimeouts(IO_TIMEOUT_MS, IO_TIMEOUT_MS, IO_TIMEOUT_MS)
-    local ok, cerr = s:connect("unix:" .. SOCK_PATH)
-    if not ok then s:close(); return nil, "connect: " .. (cerr or "?") end
-
-    local req = "POST " .. path .. " HTTP/1.1\r\n" ..
-                "Host: localhost\r\n" ..
-                "Connection: close\r\n" ..
-                TOKEN_HEADER .. ": " .. token .. "\r\n" ..
-                "Content-Type: application/json\r\n" ..
-                "Content-Length: " .. #body .. "\r\n\r\n" ..
-                body
-    local _, werr = s:send(req)
-    if werr then s:close(); return nil, "send: " .. (werr or "?") end
-
-    local status_line, rerr = s:receive("*l")
+    local s, code, err = bridge_send("POST", path, body)
+    if err then return nil, err end
     s:close()
-    if not status_line then return nil, "recv status: " .. (rerr or "?") end
-    local code = tonumber(status_line:match("%s(%d%d%d)%s"))
     if code ~= 200 then return nil, "http " .. tostring(code) end
     return true, nil
 end
@@ -330,6 +325,25 @@ function _M.policy_for(host)
     if p then return p end
     for _, w in ipairs(_cache.wild) do
         if glob_match(w.pattern, h) then return w.policy end
+    end
+    return nil
+end
+
+-- policy_key_for: like policy_for, but returns the CANONICAL policy KEY that
+-- matched — the exact host, or the "*.suffix" pattern for a wildcard match — or
+-- nil when nothing is armed for `host`. Stats are keyed on THIS, never on the
+-- raw request Host: under an armed wildcard (`*.example.com`) a client can send
+-- unbounded distinct sub-hosts, so keying per request-host would blow the
+-- cfm_cache_stats dict; keying per policy bounds cardinality to the number of
+-- armed policies. Read-only (no refresh scheduling) — the log phase must not
+-- drive I/O; observe() keeps the cache warm.
+function _M.policy_key_for(host)
+    if not _cache.has_any then return nil end
+    local h = normalize_host(host)
+    if h == "" then return nil end
+    if _cache.policies[h] then return h end
+    for _, w in ipairs(_cache.wild) do
+        if glob_match(w.pattern, h) then return w.pattern end
     end
     return nil
 end

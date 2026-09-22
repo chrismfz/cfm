@@ -3,7 +3,7 @@
 // Site Cache — Tier A per-vhost stats aggregate (design §11.2). The edge counts
 // cache verdicts (HIT/MISS/BYPASS/…) per armed vhost in a lua_shared_dict and
 // pushes an absolute snapshot to /nginx/cache/stats every ~60s
-// (configs/lua/cfm_cache.lua maybe_flush_stats). This store holds the latest
+// (configs/lua/cfm_cache.lua schedule_stats_flush_if_needed). This store holds the latest
 // snapshot per vhost; the /api/v1/site-cache/stats endpoint + the MCP
 // site_cache_stats tool read it.
 //

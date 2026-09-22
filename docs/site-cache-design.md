@@ -757,8 +757,11 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
    - **3c — stats/logging (as built).** The undeclared (→ dead) `cfm_cache_stats`
      shared dict is now declared in both confs; `cfm_cache_log.lua` gained a host
      arg (per-vhost keys `cache:vhost:<host>:status:<S>`) and `snapshot_vhosts()`,
-     wired in the http-level `log_by_lua` — counting per-vhost ONLY for ARMED
-     vhosts (`policy_for` non-nil) so key cardinality stays bounded. The edge
+     wired in the http-level `log_by_lua` — keyed by the CANONICAL policy key
+     (`policy_key_for` → exact host, or the `*.suffix` pattern for a wildcard),
+     never the raw request Host, so an armed wildcard vhost cannot let a client
+     explode the dict with distinct sub-hosts; cardinality is bounded by the
+     number of armed policies. The edge
      PUSHES an absolute per-vhost snapshot to a new bridge route
      `POST /nginx/cache/stats` every ~60s (a cross-worker-locked timer in
      `cfm_cache.lua`, mirroring the WAF-stats `maybe_flush`); the daemon

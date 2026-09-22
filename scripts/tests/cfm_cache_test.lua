@@ -75,6 +75,16 @@ check(cache.policy_for("cdn.example.com") == nil, "wildcard does not match the b
 check(cache.policy_for("other.com") == nil, "unarmed host → nil")
 check(cache.policy_for("anything.bad.com") == nil, "unsupported pattern was dropped, never matches")
 
+-- ── policy_key_for: stats key by CANONICAL policy, never the raw request host ──
+-- (bounds cfm_cache_stats cardinality: an armed *.suffix must not let a client
+-- explode the dict with distinct sub-hosts — all fold onto the pattern key.)
+check(cache.policy_key_for("MyIP.gr") == "myip.gr", "exact match → the exact host key")
+check(cache.policy_key_for("www.myip.gr") == "www.myip.gr", "the www exact entry keys on itself")
+check(cache.policy_key_for("assets.cdn.example.com") == "*.cdn.example.com", "wildcard match → the PATTERN key, not the sub-host")
+check(cache.policy_key_for("images.cdn.example.com") == "*.cdn.example.com", "a different sub-host folds onto the SAME pattern key")
+check(cache.policy_key_for("other.com") == nil, "unarmed host → nil key (uncounted)")
+check(cache.policy_key_for("cdn.example.com") == nil, "wildcard bare-suffix does not match → nil")
+
 -- ── label_for: compact, greppable, tiers omitted when off ─────────────────────
 check(cache._label_for({ gen = 3,
         static = { on = true, recipe = "static_aggressive", ttl = "7d" },

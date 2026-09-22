@@ -111,7 +111,7 @@ type NginxBridge struct {
 	OnWAFStats func(hourUnix int64, host string, count int)
 
 	// OnCacheStats is called once per row of the Site Cache stats snapshot
-	// pushed by Lua (cfm_cache maybe_flush_stats). Each row carries a per-vhost
+	// pushed by Lua (cfm_cache.lua schedule_stats_flush_if_needed). Each row carries a per-vhost
 	// map of cache status (HIT/MISS/BYPASS/…) to an ABSOLUTE count since the
 	// edge dict was created; the persister UPSERTs (replaces) the vhost's
 	// counts. Set via SetCacheStatsHook. Called without b.mu held; dispatched
@@ -409,7 +409,7 @@ type nginxWAFStatsRow struct {
 }
 
 // nginxCacheStatsMsg is the Site Cache snapshot pushed by Lua's
-// cfm_cache maybe_flush_stats. Each row is one armed vhost's absolute
+// cfm_cache.lua schedule_stats_flush_if_needed. Each row is one armed vhost's absolute
 // cache-verdict counts (status -> count, plus "total"); Go upserts idempotently
 // so repeated pushes replace a vhost's counts.
 type nginxCacheStatsMsg struct {
@@ -2695,7 +2695,7 @@ func (b *NginxBridge) handleWAFStats(w http.ResponseWriter, r *http.Request) {
 const maxCacheStatsRows = 4096
 
 // handleCacheStats accepts the periodic Site Cache snapshot pushed by Lua's
-// cfm_cache maybe_flush_stats. Body: {"rows":[{host, counts:{status:count,…}}]}
+// cfm_cache.lua schedule_stats_flush_if_needed. Body: {"rows":[{host, counts:{status:count,…}}]}
 // with absolute counts per armed vhost; Go upserts each row idempotently.
 //
 // Set via b.OnCacheStats; if no consumer is wired the request is accepted
