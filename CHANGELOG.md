@@ -43,6 +43,10 @@ back-filled here — see the git/PR history for that period.
   logged, then `work loop tick finished after …` when it ends. This does not unstick the nftlib connection itself — a
   stalled read still delays firewall writes until it returns; that hardening
   is separate work.
+
+## 2026.09.22
+
+### Fixed
 - **`make release` could not build the rpm (`error: line 179: second %install`).**
   A comment block added to `cfm.spec` explained why the old `%post` Lua-sync
   loop was removed, and mentioned `%install` in prose. On EL hosts
@@ -308,8 +312,6 @@ back-filled here — see the git/PR history for that period.
   a new category of per-visitor data crosses that boundary only deliberately.
   Scoped callers keep the rest of the payload. See
   `docs/endpoint_scope_inventory.md`.
-
-## 2026.09.22
 
 ### Added
 - **Site Cache — per-vhost edge caching (Phase 1: control plane).** New opt-in
