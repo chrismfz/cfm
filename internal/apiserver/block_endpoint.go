@@ -118,9 +118,11 @@ func makeBlockHandler(be firewall.Backend) http.HandlerFunc {
 // The IPs that pass the guards are blocked with ONE AddBlockBatch call: a few
 // nft processes for the whole request, not up to three per IP. It only adds or
 // extends a block: an IP already blocked permanently, or for longer, keeps
-// that block (the single endpoint's AddBlock replaces it). The batch is one
-// transaction, so on failure every one of those IPs is reported failed, and
-// the UI keeps them selected for retry.
+// that block (the single endpoint's AddBlock replaces it); the response's
+// added/extended/kept counts say which. The write is a single transaction for
+// a request this size, so on failure every one of those IPs is reported failed
+// — the UI keeps them selected for retry, and retrying is harmless since the
+// call never shortens a block. The error itself is reported once, at the top.
 func makeBlockBatchHandler(be firewall.Backend, selfIPs selfIPChecker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -182,10 +184,14 @@ func makeBlockBatchHandler(be firewall.Backend, selfIPs selfIPChecker) http.Hand
 			selfIPs.Refresh()
 		}
 
-		var ttl time.Duration
-		if ttlPtr != nil {
-			ttl = *ttlPtr
+		entry := func(ip net.IP) firewall.BlockEntry {
+			if ttlPtr == nil {
+				return firewall.BlockEntry{IP: ip, Permanent: true}
+			}
+			return firewall.BlockEntry{IP: ip, TTL: *ttlPtr}
 		}
+		var res firewall.BlockBatchResult
+		batchErr := ""
 		pending := make([]string, 0, len(req.IPs))
 		entries := make([]firewall.BlockEntry, 0, len(req.IPs))
 		blocked := make([]string, 0, len(req.IPs))
@@ -199,6 +205,10 @@ func makeBlockBatchHandler(be firewall.Backend, selfIPs selfIPChecker) http.Hand
 				continue
 			}
 			canon := ip.String()
+			if ip.IsUnspecified() {
+				skipped = append(skipped, map[string]string{"ip": canon, "reason": "unspecified"})
+				continue
+			}
 			if _, dup := seen[canon]; dup {
 				skipped = append(skipped, map[string]string{"ip": canon, "reason": "duplicate"})
 				continue
@@ -213,34 +223,44 @@ func makeBlockBatchHandler(be firewall.Backend, selfIPs selfIPChecker) http.Hand
 				continue
 			}
 			pending = append(pending, canon)
-			entries = append(entries, firewall.BlockEntry{IP: ip, TTL: ttl})
+			entries = append(entries, entry(ip))
 		}
 		if len(entries) > 0 {
-			if _, err := be.AddBlockBatch(entries); err != nil {
+			r, err := be.AddBlockBatch(entries)
+			res = r
+			if err != nil {
+				batchErr = err.Error()
 				for _, canon := range pending {
-					failed = append(failed, map[string]string{"ip": canon, "error": err.Error()})
+					failed = append(failed, map[string]string{"ip": canon, "error": "batch failed"})
 				}
 			} else {
 				blocked = pending
 			}
 		}
 
-		logging.LogfAPI("[block.batch] requester=%s n=%d blocked=%d skipped=%d failed=%d ttl=%q reason=%q",
-			caller, len(req.IPs), len(blocked), len(skipped), len(failed),
-			strings.TrimSpace(req.TTL), strings.TrimSpace(req.Reason))
+		logging.LogfAPI("[block.batch] requester=%s n=%d blocked=%d (added=%d extended=%d kept=%d) skipped=%d failed=%d ttl=%q reason=%q err=%q",
+			caller, len(req.IPs), len(blocked), res.Added, res.Extended, res.Kept, len(skipped), len(failed),
+			strings.TrimSpace(req.TTL), strings.TrimSpace(req.Reason), batchErr)
 		for _, s := range skipped {
 			if s["reason"] == "self_ip" || s["reason"] == "caller_ip" {
 				logging.LogfAPI("[block.batch.skip] ip=%s reason=%s requester=%s", s["ip"], s["reason"], caller)
 			}
 		}
 
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":      len(failed) == 0,
-			"blocked": blocked,
-			"skipped": skipped,
-			"failed":  failed,
-			"ttl":     strings.TrimSpace(req.TTL),
-			"reason":  strings.TrimSpace(req.Reason),
-		})
+		out := map[string]any{
+			"ok":       len(failed) == 0,
+			"blocked":  blocked,
+			"added":    res.Added,
+			"extended": res.Extended,
+			"kept":     res.Kept,
+			"skipped":  skipped,
+			"failed":   failed,
+			"ttl":      strings.TrimSpace(req.TTL),
+			"reason":   strings.TrimSpace(req.Reason),
+		}
+		if batchErr != "" {
+			out["error"] = batchErr
+		}
+		_ = json.NewEncoder(w).Encode(out)
 	}
 }

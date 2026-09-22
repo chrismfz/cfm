@@ -77,7 +77,7 @@ func TestAddBlockBatch_OneTransactionForAnyBatchSize(t *testing.T) {
 	entries = append(entries,
 		firewall.BlockEntry{IP: net.ParseIP("198.51.100.7"), TTL: time.Hour},
 		firewall.BlockEntry{IP: net.ParseIP("198.51.100.8"), TTL: time.Hour},
-		firewall.BlockEntry{IP: net.ParseIP("2001:db8::1")})
+		firewall.BlockEntry{IP: net.ParseIP("2001:db8::1"), Permanent: true})
 
 	res, err := New().AddBlockBatch(entries)
 	if err != nil {
@@ -91,11 +91,11 @@ func TestAddBlockBatch_OneTransactionForAnyBatchSize(t *testing.T) {
 		t.Fatalf("%d nft processes, want 3 (list v4, list v6, one -f):\n%.600s", n, got)
 	}
 	del := strings.Index(got, "delete element inet cfm block_v4 { 198.51.100.7 }")
-	add := strings.Index(got, "add element inet cfm block_v4 {")
+	add := strings.Index(got, "create element inet cfm block_v4 {")
 	if del < 0 || add < 0 || del > add {
-		t.Errorf("want the replaced address deleted before the adds, in the same script:\n%.600s", got)
+		t.Errorf("want the replaced address deleted before the creates, in the same script:\n%.600s", got)
 	}
-	for _, want := range []string{"198.51.100.7 timeout 1h", "10.1.0.1 timeout 6h", "add element inet cfm block_v6 { 2001:db8::1 }"} {
+	for _, want := range []string{"198.51.100.7 timeout 1h", "10.1.0.1 timeout 6h", "create element inet cfm block_v6 { 2001:db8::1 }"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("script lacks %q", want)
 		}
@@ -103,16 +103,22 @@ func TestAddBlockBatch_OneTransactionForAnyBatchSize(t *testing.T) {
 	if strings.Contains(got, "198.51.100.8 ") {
 		t.Errorf("rewrote a permanent block")
 	}
-	if n := strings.Count(got, "add element inet cfm block_v4 {"); n != 3 {
-		t.Errorf("%d v4 add statements, want 3 (2501 elements in chunks of %d)", n, blockBatchStmtElems)
+	// Plain `add element` would rewrite the timeout of an element another
+	// writer added after the read (a permanent block would take this TTL);
+	// `create` aborts the transaction instead, and the retry re-plans.
+	if strings.Contains(got, "add element") {
+		t.Errorf("script uses a plain add; every add must be an exclusive create")
+	}
+	if n := strings.Count(got, "create element inet cfm block_v4 {"); n != 3 {
+		t.Errorf("%d v4 create statements, want 3 (2501 elements in chunks of %d)", n, blockBatchStmtElems)
 	}
 }
 
 // A failed write (e.g. an element that expired between the read and the
-// write) is retried once from a fresh read, then reported — never turned into
-// one nft process per address.
-func TestAddBlockBatch_RetriesOnceNeverPerAddress(t *testing.T) {
-	entries := []firewall.BlockEntry{{IP: net.ParseIP("198.51.100.1"), TTL: time.Hour}, {IP: net.ParseIP("198.51.100.2")}}
+// write) is retried from a fresh read, then reported with nft's own error
+// line — never turned into one nft process per address.
+func TestAddBlockBatch_RetriesNeverPerAddress(t *testing.T) {
+	entries := []firewall.BlockEntry{{IP: net.ParseIP("198.51.100.1"), TTL: time.Hour}, {IP: net.ParseIP("198.51.100.2"), Permanent: true}}
 
 	log := fakeNFTSets(t, setJSON("block_v4"), setJSON("block_v6"), 1)
 	if res, err := New().AddBlockBatch(entries); err != nil || res.Added != 2 {
@@ -123,11 +129,31 @@ func TestAddBlockBatch_RetriesOnceNeverPerAddress(t *testing.T) {
 	}
 
 	log = fakeNFTSets(t, setJSON("block_v4"), setJSON("block_v6"), 99)
-	if _, err := New().AddBlockBatch(entries); err == nil {
-		t.Fatal("want an error once the retry fails too")
+	_, err := New().AddBlockBatch(entries)
+	if err == nil {
+		t.Fatal("want an error once every attempt fails")
+	}
+	if !strings.Contains(err.Error(), "Error: Could not process rule") || len(err.Error()) > 400 {
+		t.Errorf("error = %q, want nft's own error line, trimmed", err)
 	}
 	got := readFile(t, log)
-	if n := strings.Count(got, "ARGS "); n != 4 {
-		t.Errorf("%d nft processes, want 4 (list + write, twice) — no per-address fallback:\n%s", n, got)
+	if n := strings.Count(got, "ARGS "); n != 2*blockBatchAttempts {
+		t.Errorf("%d nft processes, want %d (list + write per attempt) — no per-address fallback:\n%s", n, 2*blockBatchAttempts, got)
+	}
+}
+
+// nft prints expires in whole seconds: an element in its last second shows
+// "expires": 0. That must read as about to expire, not permanent — else the
+// batch keeps it and the address is unblocked a moment later.
+func TestAddBlockBatch_LastSecondIsNotPermanent(t *testing.T) {
+	log := fakeNFTSets(t,
+		setJSON("block_v4", `{"elem":{"val":"198.51.100.9","timeout":1,"expires":0}}`),
+		setJSON("block_v6"), 0)
+	res, err := New().AddBlockBatch([]firewall.BlockEntry{{IP: net.ParseIP("198.51.100.9"), TTL: 6 * time.Hour}})
+	if err != nil || res.Extended != 1 {
+		t.Fatalf("res=%+v err=%v, want the expiring block extended", res, err)
+	}
+	if got := readFile(t, log); !strings.Contains(got, "198.51.100.9 timeout 6h") {
+		t.Errorf("the block was not rewritten:\n%s", got)
 	}
 }

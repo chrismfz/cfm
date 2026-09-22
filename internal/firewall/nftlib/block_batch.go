@@ -10,93 +10,139 @@ import (
 	"github.com/google/nftables"
 )
 
+// blockBatchAttempts bounds the read-plan-write rounds of one AddBlockBatch.
+const blockBatchAttempts = 3
+
 // AddBlockBatch blocks many host addresses over netlink: one read of each
-// block set, then one transaction per family and per setWriteChunk addresses
-// (the netlink message-size bound), where AddBlock costs one transaction per
-// address. It only adds or extends, never shortens (firewall.PlanBlockBatch).
+// block set, then one transaction per setWriteChunk addresses (the netlink
+// message-size bound) — both families in the same transaction — where
+// AddBlock costs one transaction per address. It only adds or extends, never
+// shortens (firewall.PlanBlockBatch).
 //
-// Between the read and the write another writer can change the set: an
-// element due for replacement can expire (its delete then fails with ENOENT
-// and the kernel aborts that transaction), or an autoblock can add one of the
-// new addresses (harmless: an add without NLM_F_EXCL doesn't fail on an
-// existing element). A failed write is retried once from a fresh read; the
-// chunks already written are then kept, not rewritten.
+// Between the read and the write the set can change:
+//   - An element due for replacement can expire: its delete fails with ENOENT
+//     and the kernel aborts that transaction. The write is retried from a
+//     fresh read (up to blockBatchAttempts rounds); chunks that already
+//     committed are counted once and left out of the retry.
+//   - Another writer can add one of the new addresses. On current kernels a
+//     plain add then rewrites that element's timeout, so a permanent block
+//     could take the batch's TTL. google/nftables has no exclusive add, so
+//     this backend can't refuse it the way the nft backend's `create
+//     element` does. Within this process every writer holds b.mu, which this
+//     holds from the read to the last write; only another process (e.g. a
+//     CLI `cfm block` in the same instant) can race it.
 func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
 	v4, v6, skipped := firewall.SplitBlockEntries(entries)
 	res := firewall.BlockBatchResult{Skipped: skipped}
+	if len(v4)+len(v6) == 0 {
+		return res, nil
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, fam := range []struct {
-		set  string
+	fams := []struct {
+		name string
+		set  *nftables.Set
 		want []firewall.BlockEntry
-	}{{setBlockV4, v4}, {setBlockV6, v6}} {
-		if len(fam.want) == 0 {
+	}{{name: setBlockV4, want: v4}, {name: setBlockV6, want: v6}}
+	for i := range fams {
+		if len(fams[i].want) == 0 {
 			continue
 		}
-		r, err := b.blockBatchFamily(fam.set, fam.want)
-		res = res.Add(r)
+		set, err := b.lookupSet(fams[i].name)
 		if err != nil {
-			return res, err
+			return res, fmt.Errorf("nftlib AddBlockBatch %s: %w", fams[i].name, err)
 		}
+		fams[i].set = set
 	}
-	return res, nil
-}
-
-// blockBatchFamily writes one family's batch. Must be called with b.mu held.
-func (b *Backend) blockBatchFamily(setName string, want []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
-	set, err := b.lookupSet(setName)
-	if err != nil {
-		return firewall.BlockBatchResult{}, fmt.Errorf("nftlib AddBlockBatch %s: %w", setName, err)
-	}
-	var done firewall.BlockBatchResult // chunks written by an earlier attempt
 	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		elems, err := b.conn.GetSetElements(set)
-		if err != nil {
-			return done, fmt.Errorf("nftlib AddBlockBatch read %s: %w", setName, err)
+	for attempt := 0; attempt < blockBatchAttempts; attempt++ {
+		var writes []blockWrite
+		var planned firewall.BlockBatchResult
+		for _, f := range fams {
+			if len(f.want) == 0 {
+				continue
+			}
+			elems, err := b.conn.GetSetElements(f.set)
+			if err != nil {
+				return res, fmt.Errorf("nftlib AddBlockBatch read %s: %w", f.name, err)
+			}
+			plan := firewall.PlanBlockBatch(f.want, elemsToTimed(elems))
+			planned = planned.Add(plan.Result())
+			for _, w := range plan.Writes {
+				writes = append(writes, blockWrite{set: f.set, PlannedBlock: w})
+			}
 		}
-		plan := firewall.PlanBlockBatch(want, elemsToTimed(elems))
-		written, err := b.writeBlockBatch(set, plan.Writes)
+		n, err := b.writeBlockBatch(writes)
 		if err == nil {
-			// On a retry the earlier attempt's writes now read as kept; count
-			// them as the adds/extensions they were.
-			r := plan.Result()
-			r.Kept -= done.Added + done.Extended
-			return done.Add(r), nil
+			return res.Add(planned), nil
 		}
-		done = done.Add(written)
+		// Count what committed and leave it out of the next round: its fresh
+		// read would show those addresses as already blocked, i.e. kept.
+		done := map[string]bool{}
+		var committed []firewall.PlannedBlock
+		for _, w := range writes[:n] {
+			done[w.IP.String()] = true
+			committed = append(committed, w.PlannedBlock)
+		}
+		res = res.Add(firewall.BlockBatchPlan{Writes: committed}.Result())
+		for i := range fams {
+			var rest []firewall.BlockEntry
+			for _, e := range fams[i].want {
+				if !done[e.IP.String()] {
+					rest = append(rest, e)
+				}
+			}
+			fams[i].want = rest
+		}
 		lastErr = err
 	}
-	return done, fmt.Errorf("nftlib AddBlockBatch %s: %w", setName, lastErr)
+	return res, fmt.Errorf("nftlib AddBlockBatch: %w", lastErr)
 }
 
-// writeBlockBatch writes the plan in chunks, each one transaction: the
-// replaced addresses' deletes, then every add with its own timeout. It
-// returns what the chunks that committed wrote.
-func (b *Backend) writeBlockBatch(set *nftables.Set, writes []firewall.PlannedBlock) (firewall.BlockBatchResult, error) {
-	var written firewall.BlockBatchResult
+// blockWrite is one planned element and the set it goes to.
+type blockWrite struct {
+	set *nftables.Set
+	firewall.PlannedBlock
+}
+
+// writeBlockBatch writes the plan in chunks of setWriteChunk, each one
+// transaction: the replaced addresses' deletes, then every add with its own
+// timeout. It returns how many writes (a prefix) committed.
+func (b *Backend) writeBlockBatch(writes []blockWrite) (int, error) {
 	for i := 0; i < len(writes); i += setWriteChunk {
 		chunk := writes[i:min(i+setWriteChunk, len(writes))]
-		var dels, adds []nftables.SetElement
+		dels := map[*nftables.Set][]nftables.SetElement{}
+		adds := map[*nftables.Set][]nftables.SetElement{}
+		var order []*nftables.Set
 		for _, w := range chunk {
+			if _, seen := adds[w.set]; !seen {
+				order = append(order, w.set)
+			}
 			key := normalizeIP(w.IP)
 			if w.Replace {
-				dels = append(dels, nftables.SetElement{Key: key})
+				dels[w.set] = append(dels[w.set], nftables.SetElement{Key: key})
 			}
-			adds = append(adds, nftables.SetElement{Key: key, Timeout: w.TTL})
+			e := nftables.SetElement{Key: key}
+			if !w.Permanent {
+				e.Timeout = w.TTL
+			}
+			adds[w.set] = append(adds[w.set], e)
 		}
-		if len(dels) > 0 {
-			if err := b.conn.SetDeleteElements(set, dels); err != nil {
-				return written, err
+		for _, s := range order {
+			if len(dels[s]) > 0 {
+				if err := b.conn.SetDeleteElements(s, dels[s]); err != nil {
+					return i, err
+				}
 			}
 		}
-		if err := b.conn.SetAddElements(set, adds); err != nil {
-			return written, err
+		for _, s := range order {
+			if err := b.conn.SetAddElements(s, adds[s]); err != nil {
+				return i, err
+			}
 		}
 		if err := b.conn.Flush(); err != nil {
-			return written, err
+			return i, err
 		}
-		written = written.Add(firewall.BlockBatchPlan{Writes: chunk}.Result())
 	}
-	return written, nil
+	return len(writes), nil
 }

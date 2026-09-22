@@ -10,10 +10,11 @@ import (
 // AddBlock costs up to three `nft` processes per address on the exec backend
 // (RemoveBlock, add, a retry) and one netlink transaction per address on
 // nftlib. That is fine for one autoblock, but a batch — a fleet blocklist
-// delta, a bulk API call — would fork per address, and each `nft` process
-// loads the whole ruleset. AddBlockBatch instead reads each block set once and
-// writes the whole batch in one transaction per address family (per 1000
-// addresses): a few kernel round trips for any batch size.
+// delta, a bulk API call — would fork per address. AddBlockBatch instead reads
+// each block set once and writes the whole batch in one transaction (exec: one
+// `nft -f -` run; nftlib: one per 1000 addresses): a few kernel round trips for
+// any batch size, more only when the set changed between the read and the
+// write and the write is retried.
 //
 // It only ever adds or extends a block, never shortens or removes one. That is
 // the safe way to merge blocks from another source: a 6h block arriving for an
@@ -21,10 +22,13 @@ import (
 // quietly turn the permanent block into a 6h one. AddBlock, by contrast,
 // replaces whatever is there.
 
-// BlockEntry is one address for AddBlockBatch. TTL 0 blocks permanently.
+// BlockEntry is one address for AddBlockBatch: blocked permanently, or for
+// TTL. Permanence is explicit, never "TTL 0": a caller counting a TTL down to
+// an expiry must not turn a block whose time ran out into a permanent one.
 type BlockEntry struct {
-	IP  net.IP
-	TTL time.Duration
+	IP        net.IP
+	TTL       time.Duration // ignored when Permanent
+	Permanent bool
 }
 
 // BlockBatchResult counts what AddBlockBatch did.
@@ -32,7 +36,7 @@ type BlockBatchResult struct {
 	Added    int // weren't blocked
 	Extended int // were blocked for less time than asked; now for the new TTL
 	Kept     int // already blocked at least as long, or permanently: unchanged
-	Skipped  int // not usable: no IP, an unspecified address, or a TTL already expired
+	Skipped  int // not usable: no IP, an unspecified address, or no time left
 }
 
 // Add sums two results.
@@ -72,8 +76,9 @@ func (p BlockBatchPlan) Result() BlockBatchResult {
 	return r
 }
 
-// SplitBlockEntries drops unusable entries, merges repeats of an address
-// (the longest block wins; permanent beats any TTL) and splits by family,
+// SplitBlockEntries drops unusable entries (no IP, an unspecified address, a
+// non-permanent entry with no time left), merges repeats of an address (the
+// longest block wins; permanent beats any TTL) and splits by family,
 // preserving first-seen order. IPv4-mapped IPv6 addresses count as IPv4. A
 // TTL under one second is raised to one second, the kernel's timeout grain.
 func SplitBlockEntries(entries []BlockEntry) (v4, v6 []BlockEntry, skipped int) {
@@ -83,7 +88,7 @@ func SplitBlockEntries(entries []BlockEntry) (v4, v6 []BlockEntry, skipped int) 
 	}
 	seen := map[string]slot{}
 	for _, e := range entries {
-		if e.IP == nil || e.IP.IsUnspecified() || e.TTL < 0 {
+		if e.IP == nil || e.IP.IsUnspecified() || (!e.Permanent && e.TTL <= 0) {
 			skipped++
 			continue
 		}
@@ -93,17 +98,19 @@ func SplitBlockEntries(entries []BlockEntry) (v4, v6 []BlockEntry, skipped int) 
 			ip = ip.To4()
 		}
 		ttl := e.TTL
-		if ttl > 0 && ttl < time.Second {
+		if e.Permanent {
+			ttl = 0
+		} else if ttl < time.Second {
 			ttl = time.Second
 		}
-		e = BlockEntry{IP: ip, TTL: ttl}
+		e = BlockEntry{IP: ip, TTL: ttl, Permanent: e.Permanent}
 		key := ip.String()
 		if s, ok := seen[key]; ok {
 			list := v4
 			if s.v6 {
 				list = v6
 			}
-			if longerBlock(e.TTL, list[s.idx].TTL) {
+			if longerBlock(e, list[s.idx]) {
 				list[s.idx] = e
 			}
 			continue
@@ -119,13 +126,12 @@ func SplitBlockEntries(entries []BlockEntry) (v4, v6 []BlockEntry, skipped int) 
 	return v4, v6, skipped
 }
 
-// longerBlock reports whether a block of ttl a outlasts one of ttl b
-// (0 = permanent).
-func longerBlock(a, b time.Duration) bool {
-	if b == 0 {
+// longerBlock reports whether block a outlasts block b.
+func longerBlock(a, b BlockEntry) bool {
+	if b.Permanent {
 		return false
 	}
-	return a == 0 || a > b
+	return a.Permanent || a.TTL > b.TTL
 }
 
 // PlanBlockBatch decides, for one family's block set, which entries to add,
@@ -152,9 +158,9 @@ func PlanBlockBatch(want []BlockEntry, current []SetElementTimed) BlockBatchPlan
 		switch {
 		case !present:
 			p.Writes = append(p.Writes, PlannedBlock{BlockEntry: w})
-		case left == 0: // permanent
+		case left == 0: // permanent (backends report a timed element's last instant as > 0)
 			p.Kept++
-		case w.TTL != 0 && left+extendSlack(w.TTL) >= w.TTL:
+		case !w.Permanent && left+extendSlack(w.TTL) >= w.TTL:
 			p.Kept++
 		default:
 			p.Writes = append(p.Writes, PlannedBlock{BlockEntry: w, Replace: true})
