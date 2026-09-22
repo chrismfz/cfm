@@ -419,6 +419,59 @@ func (s *siteCacheStore) HasAny() bool {
 	return false
 }
 
+// CacheTierRow is one tier in the compact edge feed. Referenced by pointer in
+// CachePolicyRow so a disabled tier is OMITTED from the wire (a value-typed
+// field would always marshal, `omitempty` being a no-op on structs).
+type CacheTierRow struct {
+	On     bool   `json:"on"`
+	Recipe string `json:"recipe,omitempty"`
+	TTL    string `json:"ttl,omitempty"`
+}
+
+// CachePolicyRow is one vhost's policy as served to the edge on
+// /nginx/cache/config. Only vhosts with an enabled tier are emitted, and a
+// disabled tier is a nil pointer (absent from the JSON), so the edge sees only
+// what is armed. Deliberately omits created_at/updated_at/scope_hosts — the
+// edge does not need them.
+type CachePolicyRow struct {
+	Host          string        `json:"host"`
+	Generation    int           `json:"gen"`
+	Static        *CacheTierRow `json:"static,omitempty"`
+	Micro         *CacheTierRow `json:"micro,omitempty"`
+	StrictCookies bool          `json:"strict_cookies,omitempty"`
+	AuthCookies   []string      `json:"auth_cookies,omitempty"`
+}
+
+// PolicyFeed returns the compact per-vhost feed for the edge: only vhosts with
+// at least one ENABLED tier, sorted by host. Read-only snapshot (the returned
+// AuthCookies slices alias stored slices, which the store never mutates in
+// place — it replaces entries wholesale).
+func (s *siteCacheStore) PolicyFeed() []CachePolicyRow {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]CachePolicyRow, 0, len(s.entries))
+	for _, e := range s.entries {
+		if !e.Static.Enabled && !e.Micro.Enabled {
+			continue
+		}
+		row := CachePolicyRow{
+			Host:          e.Host,
+			Generation:    e.Generation,
+			StrictCookies: e.StrictCookies,
+			AuthCookies:   e.AuthCookies,
+		}
+		if e.Static.Enabled {
+			row.Static = &CacheTierRow{On: true, Recipe: e.Static.Recipe, TTL: e.Static.TTL}
+		}
+		if e.Micro.Enabled {
+			row.Micro = &CacheTierRow{On: true, Recipe: e.Micro.Recipe, TTL: e.Micro.TTL}
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Host < out[j].Host })
+	return out
+}
+
 func (s *siteCacheStore) load() {
 	if s == nil || s.path == "" {
 		return

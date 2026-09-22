@@ -641,10 +641,16 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
 1. **Store + API + CLI + scope** (daemon-only; no edge). Tests: scope
    (`scope_enforcement_test.go` shape), store round-trip. No behaviour on the
    edge yet.
-2. **Bridge `/nginx/cache/config` + `cfm_cache.lua`** (edge-pull → shdict), and
-   set `$cfm_cache_*` vars + `X-CFM-Cache` header **without** activating
-   `proxy_cache` (observe-only). Lets us watch decisions in prod before any body
-   is cached.
+2. **Bridge `/nginx/cache/config` + `cfm_cache.lua`** (edge-pull), stamping an
+   `X-CFM-Cache` header **without** activating `proxy_cache` (observe-only). Lets
+   us watch decisions in prod before any body is cached.
+   *As built:* the module mirrors `cfm_h3_config.lua` — a **per-worker** async
+   cache (no shared dict), consumed from the existing server-level
+   `header_filter_by_lua_block` (next to the H3 Alt-Svc call), so **`cfm.lua` and
+   the access path are untouched** and there is no new nginx var yet. The
+   access-phase `$cfm_cache_*` vars land in Phase 3 with `proxy_cache`, where they
+   are first needed; the `SITE_CACHE` master knob + edge kill-switch likewise land
+   with real caching (in this phase, un-configuring a vhost is the off switch).
 3. **Tier A (static)** activation in both confs + `cfm_cache_stats` +
    `cfm_cache_log` (per-vhost) wiring + the daemon stats aggregate
    (`/nginx/cache/stats` pull) + `/api/v1/site-cache/stats` + the cfm-admin

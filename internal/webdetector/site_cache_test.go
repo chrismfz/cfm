@@ -195,6 +195,39 @@ func TestSiteCacheStore_Validation(t *testing.T) {
 	}
 }
 
+func TestSiteCacheStore_PolicyFeed(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	// Enabled static tier → appears in the feed.
+	if _, err := s.Set(SiteCacheEntry{
+		Host:   "on.com",
+		Static: SiteCacheTier{Enabled: true, Recipe: "static_lean", TTL: "1h"},
+	}); err != nil {
+		t.Fatalf("Set on.com: %v", err)
+	}
+	// Configured but both tiers disabled (staged) → must NOT appear in the feed.
+	if _, err := s.Set(SiteCacheEntry{
+		Host:   "off.com",
+		Static: SiteCacheTier{Enabled: false, Recipe: "static_lean"},
+	}); err != nil {
+		t.Fatalf("Set off.com: %v", err)
+	}
+
+	feed := s.PolicyFeed()
+	if len(feed) != 1 {
+		t.Fatalf("feed should contain only vhosts with an enabled tier, got %d: %+v", len(feed), feed)
+	}
+	row := feed[0]
+	if row.Host != "on.com" {
+		t.Fatalf("wrong host in feed: %q", row.Host)
+	}
+	if row.Static == nil || !row.Static.On || row.Static.TTL != "1h" || row.Static.Recipe != "static_lean" {
+		t.Fatalf("static tier not carried: %+v", row.Static)
+	}
+	if row.Micro != nil {
+		t.Fatalf("disabled micro tier must be absent (nil), got: %+v", row.Micro)
+	}
+}
+
 func TestParseCacheTTL(t *testing.T) {
 	ok := []string{"1s", "30s", "5m", "1h", "7d", "30d"}
 	for _, v := range ok {
