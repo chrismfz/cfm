@@ -17,6 +17,42 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **ChallengeV2 rejects are now recorded durably, with country / ASN / PTR —
+  so false positives can actually be hunted.** Until now a solve the Rung-1
+  humanity gate refused (`result=v2_reject`) left exactly one trace: its log
+  line — the score, tells, raw readings, arm grain, TLS fingerprint and UA, but
+  no network identity. There was no history row, nothing MCP could query, and
+  judging whether a rejected client was a farm or a person meant a manual
+  lookup per address. Now:
+  - every `result=v2_reject` **and** every `result=solved` line carries
+    `cc=GR asn=6799 asn_name="OTEnet S.A." ptr=…` — the client's network
+    identity, resolved once at verify: country/ASN from a live mmdb read,
+    PTR from cache or filled in the background, so verify never waits on
+    reverse DNS. The reject line ends in them; the solved line keeps its old
+    free-text tail last (below). A key is omitted when it is not resolved (a
+    cold address has no `ptr` on its first solve), never fabricated. Note
+    `ptr=` here is reverse DNS; `sig=ptr:` is a pointer-event count.
+  - a reject writes its own **`challenge_v2_reject`** history row — never
+    `challenge_solved`, since it cleared nothing — built by the same payload
+    builder as a solve, so rejected and passing solves compare field for
+    field (`hs`, `tells`, `v2`, `sig`, `ua`, `tls_fp`, `country`, `asn`, `ptr`,
+    …). The fleet query is `detection_history type=challenge_v2_reject
+    node="all"` over MCP.
+  - the solved line keeps its free-text ` - (AS6799 OTEnet S.A., Greece)`
+    tail byte-for-byte for existing tooling, still read from the live mmdb as
+    before; it is now rendered from the same once-resolved fields rather than
+    a second lookup of its own, so it can no longer disagree with the new
+    fields or the history row.
+  - `payload.ptr` is stripped from history rows returned to scoped (cPanel)
+    callers, like `sig` — as defence in depth only: scoped callers already
+    see a per-IP PTR for their own vhosts via the drilldown and analyze-host
+    views. Country and ASN are not stripped — `enrich=1` already gives them
+    to scoped callers.
+
+  Log and corpus only: no tell, weight or threshold changed, and nothing
+  scores on network identity.
+
 ### Fixed
 - **nftlib firewall backend: a failed netlink call can no longer corrupt the
   next one, a stuck read can no longer freeze the firewall, and a read error
@@ -58,6 +94,10 @@ back-filled here — see the git/PR history for that period.
   (`[firewall] engine=nftlib netlink <call> timed out after …`).
   Startup still fails immediately if netlink is unusable. Only nodes running
   `CFM_FIREWALL_ENGINE=nftlib` are affected.
+
+## 2026.09.22
+
+### Fixed
 - **False "agent is down" alerts from nodes on the nftlib firewall backend.**
   Before every heartbeat the agent reads the firewall to report
   `dnat_enabled`. On the exec `nft` backend that read is a subprocess with a
@@ -80,8 +120,9 @@ back-filled here — see the git/PR history for that period.
   `returned late after …`, which is always written when that stall's
   `timed out` line was, so every logged stall shows how long it lasted. When
   the other periodic work runs over 2 minutes, `work loop tick busy for …` is
-  logged, then `work loop tick finished after …` when it ends. (The nftlib
-  netlink hardening above bounds the stalled read itself.)
+  logged, then `work loop tick finished after …` when it ends. This does not unstick the nftlib connection itself — a
+  stalled read still delays firewall writes until it returns; that hardening
+  is separate work.
 - **Site Cache: static assets could break on a host with a stale root-owned
   cache tree.** nginx creates the `levels=1:2` subdirs under
   `/var/cache/nginx/cfm_static` (and `cfm_micro`) as the edge worker, which now
@@ -95,8 +136,6 @@ back-filled here — see the git/PR history for that period.
   (`chown -R root:cfm` + `chmod -R g+rwX`), guarded by a cheap O(16) probe of the
   level-1 dirs so a healthy cache is never walked. Fleet-wide auto-heal on the
   next deploy; no operator action needed.
-
-## 2026.09.22
 
 ### Fixed
 - **`make release` could not build the rpm (`error: line 179: second %install`).**

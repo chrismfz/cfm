@@ -432,6 +432,33 @@ already opened.
 - [ ] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.
+      - Instrument landed 2026-09-22: a Rung-1 reject is now durable
+        (`challenge_v2_reject` history, same payload as `challenge_solved`)
+        and every solve/reject carries country/ASN/PTR, so "FP reports" is a
+        query (`detection_history type=challenge_v2_reject node="all"`), not
+        a manual per-IP lookup.
+      - Measured the same day from the fleet's shadow + solve logs (7 nodes,
+        before the instrument existed): `outer_zero` alone is common on REAL
+        people — 73 of 248 outer_zero solves arrived via Google Ads/Shopping
+        clicks on Greek e-shops, 62 of them Android Chrome — and all passed
+        (40 / 70 < 100), so the two-opener threshold is doing its job. Every
+        `sw_renderer`+`outer_zero` (=100) case readable was bot-shaped (AWS
+        EC2, and c28caa00 bursts on vhosts the independent solver-farm
+        detector convicted); no weight change was warranted.
+      - OPEN (enforcement): the verify-side geo arm check
+        (`GeoPolicyActionForIP`) matches the enricher's CACHED record — up to
+        24h stale after an mmdb update, empty if cached before the mmdb
+        loaded — while the solve line now shows the live identity. A
+        `v2=geo` reject whose `cc=` is outside the armed set is that lag
+        biting. Switching the gate to a live mmdb read is an enforcement
+        change, left out of #1462 on purpose.
+      - OPEN, decide before arming ad-running vhosts: Google's proxy (PTR
+        `google-proxy-*.google.com`, AS15169, fp `c41a0f3f`) scores 140
+        (`sw_renderer,touch_lie,no_input`) and WOULD be rejected — seen in
+        shadow on psixokinisi.gr, smart-tech.gr, e-vafeiadis.gr,
+        vitolighting.com and diora.gr. Candidate: exempt FCrDNS-verified
+        Google from the v2 reject (the fleet already verifies it for
+        `verified_good_bot_ips`).
 
 **Deliberately BACKLOG (not next, do not start):** surface-throttle +
 gate-before-origin (Track-1 Phase 2), PoW-difficulty knob, JA4/JA4H edge
