@@ -460,6 +460,12 @@ func (m *manager) maybeReload(parent context.Context) {
 				// (daemon-side answers); published here so FP_POLICY=0 also
 				// removes the edge's whole Step-0c cost, not just its answers.
 				FPPolicy: kvBool(wdKV, "FP_POLICY", true),
+				// Site Cache master gate (per-vhost edge caching). Default OFF:
+				// the feature ships installed but caches nothing until an
+				// operator sets SITE_CACHE=1; published here so SITE_CACHE=0
+				// makes cfm_cache.lua a no-op on the hot path (no feed poll, no
+				// lookup, no header), not just "no armed vhosts".
+				SiteCache: kvBool(wdKV, "SITE_CACHE", false),
 			}
 			// Guard nonsense values; the Lua side re-guards but keep the
 			// published file sane. Idle must stay below Apache's
@@ -476,8 +482,8 @@ func (m *manager) maybeReload(parent context.Context) {
 			if err := sslcollector.WriteWebdetectorBridgeConfig(bridgeConfigPath, bridgeCfg, cfmGID); err != nil {
 				logging.Logf("[detectors] cfm_bridge_config.lua write failed path=%s err=%v", bridgeConfigPath, err)
 			} else {
-				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s panel_fp_policy_mode=%s post_clearance_cadence=%v fp_policy=%v",
-					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PanelFPPolicyMode, bridgeCfg.PostClearanceCadence, bridgeCfg.FPPolicy)
+				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s panel_fp_policy_mode=%s post_clearance_cadence=%v fp_policy=%v site_cache=%v",
+					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PanelFPPolicyMode, bridgeCfg.PostClearanceCadence, bridgeCfg.FPPolicy, bridgeCfg.SiteCache)
 			}
 		}
 	}

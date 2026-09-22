@@ -429,6 +429,12 @@ type WebdetectorBridgeConfig struct {
 	// within ~10s, not just its answers (whats_wrong-side review finding on
 	// PR #1438).
 	FPPolicy bool
+	// SiteCache mirrors [webdetector] SITE_CACHE to the edge — the master gate
+	// for per-vhost edge caching (default OFF). false makes cfm_cache.lua a
+	// no-op (no feed poll, no lookup, no header) so the whole feature costs
+	// nothing on the hot path until an operator opts the node in; the per-vhost
+	// policy still governs WHICH armed vhosts cache once this is on.
+	SiteCache bool
 }
 
 // WriteWebdetectorBridgeConfig atomically writes a Lua module exposing
@@ -472,6 +478,7 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 			"  panel_fp_policy_mode = %q,\n"+
 			"  post_clearance_cadence = %s,\n"+
 			"  fp_policy = %s,\n"+
+			"  site_cache = %s,\n"+
 			"}\n",
 		luaBool(cfg.ClearanceRefresh),
 		luaBool(cfg.OriginKeepalive),
@@ -483,6 +490,7 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 		panelMode(cfg.PanelFPPolicyMode),
 		luaBool(cfg.PostClearanceCadence),
 		luaBool(cfg.FPPolicy),
+		luaBool(cfg.SiteCache),
 	)
 	return writeLuaFileAtomic(luaPath, content, cfmGID, "sslcollector", "[sslcollector]", "webdetector bridge config")
 }

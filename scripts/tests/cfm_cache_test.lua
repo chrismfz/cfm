@@ -9,6 +9,11 @@ package.path = "configs/lua/?.lua;" .. package.path
 
 package.loaded["cjson.safe"] = { decode = function() return nil end }
 
+-- Master SITE_CACHE gate stub (cfm_bridge_cfg). Default ON so the lookup/observe
+-- assertions below exercise the real path; flipped to false for the gate test.
+local _site_cache_on = true
+package.loaded["cfm_bridge_cfg"] = { get = function() return { site_cache = _site_cache_on } end }
+
 local _header = {}
 local _now = 0            -- mutable clock (0 keeps schedule_refresh a no-op)
 local _timer_calls = 0   -- counts async-refresh schedules
@@ -78,6 +83,18 @@ check(cache._label_for({ gen = 3,
 check(cache._label_for({ gen = 0, micro = { on = true, recipe = "micro_safe" } })
       == "micro=micro_safe gen=0", "micro-only label, no ttl")
 check(cache._label_for({ gen = 2 }) == "gen=2", "no tiers → just gen")
+
+-- ── master gate: SITE_CACHE off → full no-op even with the debug header ───────
+_site_cache_on = false
+_now = 1000000
+_timer_calls = 0
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.http_x_cfm_cache_debug = "1"
+ngx.var.host = "myip.gr"
+cache.observe()
+check(_header["X-CFM-Cache"] == nil, "SITE_CACHE off → observe stamps nothing even with the debug header")
+check(_timer_calls == 0, "SITE_CACHE off → observe schedules no refresh (full no-op)")
+_site_cache_on = true    -- restore for the remaining assertions
 
 -- ── observe warms the cache from ALL traffic, not only debug requests ─────────
 -- (regression guard: gating the refresh behind the debug header made every
