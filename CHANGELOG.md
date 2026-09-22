@@ -18,6 +18,23 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **`make release` could not build the rpm (`error: line 179: second %install`).**
+  A comment block added to `cfm.spec` explained why the old `%post` Lua-sync
+  loop was removed, and mentioned `%install` in prose. On EL hosts
+  `/usr/lib/rpm/redhat/macros` defines `%install` as a *macro* whose expansion
+  ends in a newline followed by `%install`; rpm expands macros on every spec
+  line including comments and then splits on newlines, so the comment injected
+  a second install section and aborted the build. The offending comments were
+  reworded to drop the macro names, the one remaining reference is escaped
+  (`%%{pkgroot}`), and `scripts/tests/check_rpm_spec_macros.sh` now rejects
+  unescaped ones — in CI *and* in `make rpm`, since the failure only surfaces
+  on an EL build host. Packaging is otherwise unchanged — no operator action
+  needed, the previous release simply could not be built.
+  Note this is EL-only: Debian/Ubuntu rpm ships no `redhat/macros` and parses
+  the broken spec without complaint, which is why it reached a release. The fix
+  was verified by building the rpm end-to-end in an AlmaLinux 8 container
+  (30 Lua modules package-owned under `/var/lib/cfm/lua/`, nothing under
+  `/usr/share/cfm/configs/lua`).
 - **`cfm` upgrades were doing pointless and misleading work with the Lua
   payload.** Both package scriptlets carried a hand-rolled "seed/refresh
   runtime Lua files" loop that copied from `/usr/share/cfm/configs/lua` over
