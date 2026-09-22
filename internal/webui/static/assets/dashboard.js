@@ -201,6 +201,7 @@ const el = {
   const MODE_COLORS = {
     block: 'color:#ffc9d3;border-color:#8f3b4d;background:rgba(217,81,111,.15)',
     challenge: 'color:#ffd27c;border-color:#91651f;background:rgba(170,115,22,.15)',
+    challenge_v2: 'color:#e6c9ff;border-color:#6f3b8f;background:rgba(163,81,217,.15)',
     logonly: 'color:#8dd0ff;border-color:#2a5f8f;background:rgba(77,163,255,.1)',
     disabled: 'color:var(--muted);border-color:var(--border);background:transparent',
   };

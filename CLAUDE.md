@@ -382,10 +382,16 @@ still serves the same challenge page as `challenge` (the rung difference is
 enforced at verify, not at serve). The verify gate ORs four arm grains:
 fingerprint policy, geo policy, a per-vhost `rung=v2` on the MANUAL vhost
 challenge (arm-surfaces slice A: API/CLI/cfm-admin Tier picker; persisted
-with the challenge), and a per-(ip,host) rung mark written at decision time
-by a traffic rule with action `challenge_v2` (slice B: the bridge serves
-plain "challenge" on the wire and records the v2 intent — rules-model.js
-and traffic_rules.go changed in the same PR, per the Simulate rule). Verify is reachable only through the
+with the challenge), and a per-(ip,host) rung mark with two writers — a
+traffic rule with action `challenge_v2` at decision time (slice B:
+rules-model.js and traffic_rules.go changed in the same PR, per the
+Simulate rule) and a WAF rule set to `"challenge_v2"` in cfm_waf_config.lua
+(slice C: severity challenge < challenge_v2 < block, only block
+short-circuits; handleIPPush records the mark). Either way the wire/ipState
+stays plain "challenge" (the edge vocabulary), the verbatim tier reaches
+cfm.waf.log/history, and challenge-tier hits never feed waf_security
+autoblock. Version skew: an OLDER edge maps the unknown WAF mode to
+`disabled` — upgrade before setting the tier (docs/waf.md). Verify is reachable only through the
 edge (localhost listener; the per-IP challenge-DNAT is RETIRED per
 `docs/edge-unification-plan.md`), so the gate inputs (`X-CFM-TLS`, the
 verify host) are edge-authoritative on current confs; the client-authored

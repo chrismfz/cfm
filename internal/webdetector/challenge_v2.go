@@ -15,10 +15,13 @@ package webdetector
 //                    fingerprint (FingerprintPolicyForID), a fleet-armed
 //                    country/ASN policy (GeoPolicyActionForIP), a v2-tier
 //                    manual vhost challenge (challengeV2HostArmed), or a
-//                    per-(ip,host) mark a v2-tier traffic rule wrote at
-//                    decision time (challengeV2Marked — same
-//                    edge-authoritative ip/host inputs as the decision and
-//                    verify paths); everyone else is scored shadow/log-only.
+//                    per-(ip,host) mark a v2-tier source wrote when it
+//                    challenged the client (challengeV2Marked; writers: a
+//                    traffic rule with action challenge_v2 at decision time,
+//                    and a WAF rule set to "challenge_v2" via its ip_push —
+//                    same edge-authoritative ip/host inputs as the decision
+//                    and verify paths); everyone else is scored
+//                    shadow/log-only.
 //   (b) ABSENCE    — a solve can fail ONLY on positive headless evidence
 //                    (webdriver true, a software renderer, a self-contradicting
 //                    report). A missing payload (old cached page, blocked JS,
@@ -143,10 +146,13 @@ var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore}
 //
 // Some v2-tier arm sources are TRANSIENT: a traffic rule with action
 // challenge_v2 matches one request's attributes (path/UA/country/…) at
-// DECISION time, and the verify handler cannot re-evaluate the rule later
-// (the verify POST has none of the original request's attributes). So the
-// decision handler records the v2 intent per (client IP, host) here, and the
-// verify gate ORs the mark in next to the fingerprint/geo/vhost grains. The
+// DECISION time, and a WAF rule in "challenge_v2" mode matches one request's
+// payload at the edge (slice C: the ip_push carries the verbatim tier and
+// handleIPPush records the mark) — the verify handler cannot re-evaluate
+// either later (the verify POST has none of the original request's
+// attributes). So the challenging path records the v2 intent per (client IP,
+// host) here, and the verify gate ORs the mark in next to the
+// fingerprint/geo/vhost grains. The
 // key is EXACT (ip, host): the verify POST rides the same origin the
 // challenged page was served on. Bounded and fail-open: over the cap a new
 // mark is dropped after an expiry sweep (the client then faces a plain v1

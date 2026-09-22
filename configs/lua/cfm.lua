@@ -1376,17 +1376,19 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- or is a rule-gap signal worth an alert, which is exactly what the scan
       -- is for. (Gated on the routing action, taken after the post-clearance
       -- challenge→block promotion so a promoted block is correctly skipped.)
-      -- An UNCLEARED resumed POST that re-hits a CHALLENGE rule is force-blocked
-      -- below (block_replayed) while waf_action is still "challenge", so exclude
-      -- that combination too — otherwise we'd scan a payload we're about to 403.
-      -- (A CLEARED resumed POST never keeps waf_action=="challenge" here:
-      -- post_clearance_action converts it to logonly/block above.) The exclusion
-      -- must stay challenge-only: a resumed POST whose hit degraded to logonly on
-      -- replay — the post-clearance downgrade, or a burst-window rule that is quiet
-      -- now while a logonly rule still matches — DOES reach origin and must still
+      -- An UNCLEARED resumed POST that re-hits a CHALLENGE-tier rule (either
+      -- rung) is force-blocked below (block_replayed) while waf_action is still
+      -- challenge/challenge_v2, so exclude that combination too — otherwise
+      -- we'd scan a payload we're about to 403. (A CLEARED resumed POST never
+      -- keeps a challenge-tier waf_action here: post_clearance_action converts
+      -- it to logonly/block above.) The exclusion must stay challenge-tier-only:
+      -- a resumed POST whose hit degraded to logonly on replay — the
+      -- post-clearance downgrade, or a burst-window rule that is quiet now
+      -- while a logonly rule still matches — DOES reach origin and must still
       -- be scanned.
+      local waf_challenge_tier = (waf_action == "challenge" or waf_action == "challenge_v2")
       if clamav_ok and waf_action ~= "block"
-         and not (waf_action == "challenge" and ngx.ctx.cfm_resumed_post) then
+         and not (waf_challenge_tier and ngx.ctx.cfm_resumed_post) then
         -- notify() returns non-nil ONLY when the vhost runs in inline mode and
         -- the bridge answered block=true (infected, not sig-ignored, not
         -- dry-run). Every failure inside is fail-open (nil) by contract.
@@ -1410,7 +1412,10 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
         ngx.header["X-CFM-Action"] = converted_from_challenge and "block_pc" or "block"
         ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
         observe_waf(ip, host, p_uri, p_meth, 403, reason, waf_rule_id)
-      else -- challenge (only reachable when clearance_allow == false)
+      else -- challenge tier: "challenge" or "challenge_v2" (only reachable when
+           -- clearance_allow == false). Both rungs serve the SAME challenge
+           -- page here — the v2 rung difference bites at verify, keyed on the
+           -- per-(ip,host) mark the ip_push below records daemon-side.
         if ngx.ctx.cfm_resumed_post then
           ngx.header["X-CFM-Action"] = "block_replayed"
           ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
@@ -1423,7 +1428,9 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
           ngx.header["Cache-Control"] = "no-store"
           return ngx.redirect("/?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
         end
-        ngx.header["X-CFM-Action"] = "challenge"
+        -- "challenge" or "challenge_v2" — the header reflects the rung for
+        -- operator observability; the served page is identical either way.
+        ngx.header["X-CFM-Action"] = waf_action
         ngx.var.cfm_upstream = "cfm_challenge"; ngx.var.cfm_pass = "http://cfm_challenge"
       end
 

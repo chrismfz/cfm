@@ -18,6 +18,19 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF rule tier `challenge_v2` (master plan "arm surfaces" slice C).** The
+  promotion ladder gains a rung between challenge and block:
+  `logonly → challenge → challenge_v2 → block`, set per rule in
+  `/etc/cfm/cfm_waf_config.lua` (e.g. `return { rule_xss = "challenge_v2" }`
+  arms the reflected-XSS smoke test, rule 302). The edge serves the SAME
+  challenge page as `challenge`; the push carries the v2 tier and the daemon
+  marks the (ip,host) pair, so that client's solve must also pass the passive
+  humanity check to earn clearance (fails stay retry-able). Doctrine intact:
+  challenge-tier hits never feed `waf_security` autoblock, cleared clients
+  are converted (never re-challenged), and the panel-port gate stays
+  block-tier. **Version skew:** an edge older than this release treats the
+  mode as unknown and DISABLES the rule — upgrade before setting the tier
+  (docs/waf.md "The challenge_v2 tier").
 - **Traffic-rules action `challenge_v2` (master plan "arm surfaces" slice
   B).** The rules builder (and API) gains a fourth enforcement action beside
   allow/block/challenge/throttle: matching requests get the SAME challenge

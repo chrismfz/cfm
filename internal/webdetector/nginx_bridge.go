@@ -94,7 +94,9 @@ type NginxBridge struct {
 
 	// OnTrigger is called when an external push (e.g. cfm_waf.lua) sets a new
 	// IP decision via POST /nginx/ip. The hook receives the IP, action
-	// ("challenge"|"block"), reason (e.g. "WAF_XSS"), TTL, the per-request
+	// ("logonly"|"challenge"|"challenge_v2"|"block" — the verbatim edge tier,
+	// even where ipState stores the normalized "challenge" for a
+	// challenge_v2 push), reason (e.g. "WAF_XSS"), TTL, the per-request
 	// forensic fields (UA / Referer / Content-Type) that Lua attaches to every
 	// push, and the client TLS fingerprint (the raw cfm_tlsfp.value() tuple,
 	// parsed to a canonical id by the daemon; empty on plain-HTTP).
@@ -2015,7 +2017,7 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	if msg.IP == "" || (msg.Action != "challenge" && msg.Action != "block" && msg.Action != "logonly") {
+	if msg.IP == "" || (msg.Action != "challenge" && msg.Action != "challenge_v2" && msg.Action != "block" && msg.Action != "logonly") {
 		http.Error(w, "bad fields", http.StatusBadRequest)
 		return
 	}
@@ -2032,13 +2034,31 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	msg.URI = strings.TrimSpace(msg.URI)
 	msg.Method = strings.ToLower(strings.TrimSpace(msg.Method))
 
+	// challenge_v2 is a WAF-rule push (cfm_waf.lua slice C): on the wire and in
+	// ipState the decision stays plain "challenge" (the edge vocabulary cfm.lua
+	// Step 3 enforces), while the v2 intent is recorded as a per-(ip,host) rung
+	// mark the verify D5 gate ORs in. Only the web edge pushes /nginx/ip
+	// (cfm_panel.lua never does), so there is no panel-scope leak to gate here.
+	// A push without a host cannot be marked — it degrades to a plain v1
+	// challenge (fail-open, same doctrine as the mark store's cap pressure).
+	// The OnTrigger hook below still receives the verbatim "challenge_v2" so
+	// cfm.waf.log / waf_trigger history / WAFHitEvent carry the real tier
+	// (wafsec feeds on action=="block" only, so autoblock stays un-keyed).
+	storeAction := msg.Action
+	if msg.Action == "challenge_v2" {
+		storeAction = "challenge"
+		if msg.Host != "" {
+			MarkChallengeV2(msg.IP, msg.Host)
+		}
+	}
+
 	// logonly is a "dry-run audit" action:
 	// - it should be logged (via OnTrigger hook)
 	// - but it MUST NOT create an active IP decision in the bridge
 	if msg.Action != "logonly" {
 		b.mu.Lock()
 		b.ipState[msg.IP] = bridgeIPEntry{
-			Action:    msg.Action,
+			Action:    storeAction,
 			Expires:   time.Now().Add(ttl),
 			Reason:    reason,
 			WAFRuleID: msg.WAFRuleID,
@@ -2350,7 +2370,7 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			if err := json.Unmarshal([]byte(body), &msg); err != nil {
 				continue
 			}
-			if msg.IP == "" || (msg.Action != "challenge" && msg.Action != "block" && msg.Action != "logonly") {
+			if msg.IP == "" || (msg.Action != "challenge" && msg.Action != "challenge_v2" && msg.Action != "block" && msg.Action != "logonly") {
 				continue
 			}
 			ttl := time.Duration(msg.TTLSec) * time.Second
@@ -2362,10 +2382,21 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			msg.URI = strings.TrimSpace(msg.URI)
 			msg.Method = strings.ToLower(strings.TrimSpace(msg.Method))
 
+			// Same challenge_v2 handling as handleIPPush: store plain
+			// "challenge", record the per-(ip,host) rung mark, keep the
+			// verbatim tier for OnTrigger.
+			storeAction := msg.Action
+			if msg.Action == "challenge_v2" {
+				storeAction = "challenge"
+				if msg.Host != "" {
+					MarkChallengeV2(msg.IP, msg.Host)
+				}
+			}
+
 			if msg.Action != "logonly" {
 				b.mu.Lock()
 				b.ipState[msg.IP] = bridgeIPEntry{
-					Action:    msg.Action,
+					Action:    storeAction,
 					Expires:   now.Add(ttl),
 					Reason:    reason,
 					WAFRuleID: msg.WAFRuleID,
