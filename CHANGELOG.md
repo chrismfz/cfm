@@ -17,7 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Site Cache — Tier B micro-cache foundation (Phase B1, inert).** Declares the
+  six per-TTL micro-cache zones `cfm_micro_{1,2,5,10,30,60}s` in both edge confs
+  and creates their `/var/cache/nginx/` dirs (daemon + both installers), so the
+  micro tier's storage exists and the edge config test passes ahead of the
+  Phase B2 wiring. **No behaviour change**: nothing activates `proxy_cache` on
+  these zones yet — a declared zone caches nothing until a location uses it — so
+  micro-caching is still off for every vhost. One TTL bucket per zone is required
+  because nginx's `proxy_cache_valid` is a per-location directive and is not
+  variablizable (a variable `proxy_cache $zone` selects only the storage zone),
+  so Phase B2 will route each armed vhost to the internal location that pins the
+  matching validity. `cfm_cache.lua` gains the pure, unit-tested TTL→bucket
+  snapper B2 will use, and the packaging cache-heal + config guard now cover the
+  new buckets.
 
 ## 2026.09.22
 

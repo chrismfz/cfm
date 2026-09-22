@@ -15,7 +15,7 @@
 #   Extra resty:   /etc/angie/lualib/         (lua-resty-maxminddb here)
 #   Dyn modules:   /usr/lib/angie/modules/
 #   Logs:          /var/log/angie/            (chowned to cfm:cfm)
-#   Caches:        /var/cache/nginx/          (cfm_static/cfm_micro; chowned to cfm)
+#   Caches:        /var/cache/nginx/          (cfm_static + cfm_micro_<ttl>s; chowned to cfm)
 #   Temp dirs:     /var/lib/cfm/nginx/*       (created & owned by cfm:cfm)
 #   Binary:        /usr/sbin/angie
 #
@@ -424,7 +424,12 @@ ensure_cache_dirs() {
     # the edge won't deploy.
     local dirs=(
         /var/cache/nginx/cfm_static
-        /var/cache/nginx/cfm_micro
+        /var/cache/nginx/cfm_micro_1s
+        /var/cache/nginx/cfm_micro_2s
+        /var/cache/nginx/cfm_micro_5s
+        /var/cache/nginx/cfm_micro_10s
+        /var/cache/nginx/cfm_micro_30s
+        /var/cache/nginx/cfm_micro_60s
     )
     local d
 
@@ -761,7 +766,7 @@ Pre-flight status:
   cfm user present:         $(id -u cfm >/dev/null 2>&1 && echo yes || echo "NO — angie will fail to start")
   Temp dirs (cfm:cfm):      /var/lib/cfm/nginx/{client_body_temp,proxy_temp}
   Log dir (cfm:cfm):        /var/log/angie/
-  Cache dirs (root:cfm):    /var/cache/nginx/cfm_{static,micro}
+  Cache dirs (root:cfm):    /var/cache/nginx/cfm_static + cfm_micro_{1,2,5,10,30,60}s
   Self-signed fallback:     /var/lib/cfm/certs/selfsigned/{fullchain,privkey}.pem
   CFM lua runtime checked:  /var/lib/cfm/lua/
   Extra resty (maxminddb):  /etc/angie/lualib/resty/

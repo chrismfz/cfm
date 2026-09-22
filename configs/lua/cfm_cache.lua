@@ -446,11 +446,57 @@ function _M.static_gate()
     ngx.var.cfm_cache_gen  = tostring(p.gen or 0)
 end
 
+-- ---------------------------------------------------------------------------
+-- Tier B micro-cache — TTL-bucket snapping (Phase B1, pure helper; INERT until
+-- Phase B2 wires the allow-path routing).
+--
+-- proxy_cache_valid is a per-LOCATION directive and is NOT variablizable
+-- (verified against nginx: `proxy_cache $var` selects only the storage zone; a
+-- single location's proxy_cache_valid applies to every zone it caches into). So
+-- a per-vhost micro TTL is served by one internal location per bucket
+-- (`@cfm_micro_<n>s`), each pinning `proxy_cache cfm_micro_<n>s;` +
+-- `proxy_cache_valid 200 <n>s;`. B2 will read a vhost's armed micro policy and
+-- ngx.exec to the bucket location; this helper is the mapping it uses. A stored
+-- TTL (recipe preset or operator custom) SNAPS to the nearest bucket — for herd
+-- protection the gap between 7s and 8s is operationally meaningless
+-- (design §5.4), so the snapped menu behaves as effectively continuous.
+local MICRO_BUCKETS = { 1, 2, 5, 10, 30, 60 } -- seconds; mirrors the declared cfm_micro_<n>s zones
+
+-- micro_bucket_seconds: snap a stored TTL to the nearest bucket. Accepts a
+-- number of seconds or a string ("5", "5s", "30 s"); nil/empty/unparseable or
+-- <=0 snaps to the smallest bucket (the safest, shortest TTL — closest to not
+-- caching). Ties snap DOWN (the shorter, safer TTL) because the buckets ascend
+-- and the comparison keeps the first minimum.
+local function micro_bucket_seconds(ttl)
+    local n
+    if type(ttl) == "number" then
+        n = ttl
+    elseif type(ttl) == "string" then
+        n = tonumber(ttl:match("%d+"))
+    end
+    if not n or n <= 0 then return MICRO_BUCKETS[1] end
+    local best, bestd = MICRO_BUCKETS[1], math.huge
+    for _, b in ipairs(MICRO_BUCKETS) do
+        local d = b - n; if d < 0 then d = -d end
+        if d < bestd then best, bestd = b, d end
+    end
+    return best
+end
+
+-- micro_zone_name: the storage zone / internal-location suffix for a stored TTL,
+-- e.g. 5 or "7s" → "cfm_micro_5s". The single source of truth for the bucket
+-- name so the conf zones, the daemon dirs and B2's ngx.exec target can't drift.
+local function micro_zone_name(ttl)
+    return "cfm_micro_" .. micro_bucket_seconds(ttl) .. "s"
+end
+
 -- Exposed for unit tests (scripts/tests/cfm_cache_test.lua): drive the cache
 -- without a live bridge/ngx, then assert lookups.
-_M._rebuild_cache   = rebuild_cache
-_M._label_for       = label_for
-_M._normalize_host  = normalize_host
-_M._has_any         = function() return _cache.has_any end
+_M._rebuild_cache      = rebuild_cache
+_M._label_for          = label_for
+_M._normalize_host     = normalize_host
+_M._has_any            = function() return _cache.has_any end
+_M._micro_bucket       = micro_bucket_seconds
+_M._micro_zone_name    = micro_zone_name
 
 return _M

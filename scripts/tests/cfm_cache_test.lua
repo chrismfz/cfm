@@ -192,6 +192,30 @@ cache.static_gate()
 check(ngx.var.cfm_cache_skip == "1", "SITE_CACHE off → static_gate is a full no-op (bypass stays)")
 _site_cache_on = true
 
+-- ── Tier B micro-cache: TTL-bucket snapping (Phase B1, pure helper) ────────────
+-- proxy_cache_valid is per-location + not variablizable, so a stored micro TTL
+-- snaps to one of the six declared cfm_micro_<n>s zones. Exact buckets pass
+-- through; between-bucket values snap to the nearest; ties snap DOWN (shorter,
+-- safer); junk/<=0/absent → the smallest bucket (closest to not caching).
+for _, b in ipairs({ 1, 2, 5, 10, 30, 60 }) do
+  check(cache._micro_bucket(b) == b, "micro bucket exact " .. b .. "s passes through")
+  check(cache._micro_bucket(b .. "s") == b, "micro bucket string \"" .. b .. "s\" parses")
+end
+check(cache._micro_bucket(3) == 2,  "3s snaps down to 2s (|3-2|<|3-5|)")
+check(cache._micro_bucket(4) == 5,  "4s snaps up to 5s (|4-5|<|4-2|)")
+check(cache._micro_bucket(8) == 10, "8s snaps to 10s")
+check(cache._micro_bucket(45) == 30, "45s snaps down to 30s (tie 30/60 → smaller)")
+check(cache._micro_bucket(1000) == 60, "huge TTL clamps to the largest bucket")
+check(cache._micro_bucket(0) == 1,  "0 → smallest bucket (no caching-adjacent)")
+check(cache._micro_bucket(-5) == 1, "negative → smallest bucket")
+check(cache._micro_bucket(nil) == 1, "nil → smallest bucket")
+check(cache._micro_bucket("") == 1, "empty string → smallest bucket")
+check(cache._micro_bucket("junk") == 1, "unparseable → smallest bucket")
+check(cache._micro_bucket("30 s") == 30, "TTL with spaces parses")
+check(cache._micro_zone_name(1) == "cfm_micro_1s", "zone name for 1s")
+check(cache._micro_zone_name("7s") == "cfm_micro_5s", "zone name snaps 7s → 5s bucket")
+check(cache._micro_zone_name(60) == "cfm_micro_60s", "zone name for 60s")
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)
