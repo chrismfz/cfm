@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.22
+
 ### Added
 - **Panel-port fingerprint-policy consult (master plan item).** The
   operator-armed per-fingerprint policy the web edge enforces pre-clearance
