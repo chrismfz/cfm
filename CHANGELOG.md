@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.22
+
 ### Security
 - **WAF: WordPress core page-template traversal, CVE-2026-87902 (critical,
   4.7.0–7.1.1).** Unauthenticated `pagename` traversal makes WordPress include a
@@ -352,8 +356,6 @@ back-filled here — see the git/PR history for that period.
   every `cfm dnat on`, which leaves a brief window of a second or two. It can take a minute, because nftlib's
   `EnsureBase` is slow on a large ruleset. Don't use `cfm dnat off` first:
   that leaves :80/:443 un-redirected for that whole time.
-
-## 2026.09.22
 
 ### Fixed
 - **False "agent is down" alerts from nodes on the nftlib firewall backend.**
