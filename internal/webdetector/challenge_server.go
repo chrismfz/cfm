@@ -439,8 +439,9 @@ type ChallengeSolve struct {
 	UAFamily string
 	// TLSFP is a short id for the client's TLS ClientHello, stamped by the edge
 	// (configs/lua/cfm_tlsfp.lua) and parsed by internal/tlsfp. Empty when the
-	// edge did not supply one — an older edge config, a plain-HTTP request, or
-	// the legacy DNAT path where the daemon terminates TLS itself.
+	// edge did not supply one — an older edge config or a plain-HTTP request.
+	// (The retired per-IP challenge-DNAT path, where the daemon terminated TLS
+	// itself, also produced none.)
 	//
 	// This is the one signal on a solve the client does not author: its TLS
 	// stack emits the handshake before any HTTP is sent. Log-first — nothing
@@ -467,8 +468,8 @@ type ChallengeSolve struct {
 }
 
 // TLSFingerprintOrDash renders TLSFP for a log line. Empty means "not
-// available" — an older edge config, a plain-HTTP request, or the legacy DNAT
-// path where no edge stamps the header — and "-" says so, where a bare %s would
+// available" — an older edge config or a plain-HTTP request (the retired
+// challenge-DNAT path also stamped none) — and "-" says so, where a bare %s would
 // produce `tls_fp= ` and read as a parse failure. Both writers of the solve line
 // go through this so the two can never disagree about what absence looks like.
 func (s ChallengeSolve) TLSFingerprintOrDash() string {
@@ -1566,8 +1567,9 @@ func clientIP(r *http.Request) net.IP {
 	}
 
 	// Trust proxy headers ONLY when the immediate peer is local/trusted
-	// (OpenResty connects from 127.0.0.1 or private addr). In DNAT mode
-	// peer is the real public client -> ignore spoofable headers.
+	// (OpenResty connects from 127.0.0.1 or private addr). A non-local peer
+	// (a mis-bound CHALLENGE_HTTP_LISTEN; under the retired challenge-DNAT
+	// this was the real public client) gets no header trust — spoofable.
 	if isTrustedProxyPeer(peer) {
 		// 1) Cloudflare real IP (if present)
 		if h := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); h != "" {

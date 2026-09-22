@@ -302,9 +302,9 @@ func (e *Engine) shouldLogVhostSuppress(host string, now time.Time) bool {
 // whose www carries the manual), it deliberately does NOT push a challenge on
 // host — that would challenge an excluded host that was never manually
 // challenged. The caller's skipped clear already preserves the sibling's entry.
-// In DNAT mode (no bridge) there is no bridge entry to keep or refresh, so it
-// only clears the auto flag and stays silent rather than logging a keep it did
-// not perform.
+// With no bridge wired (tests; edge mode always wires one) there is no bridge
+// entry to keep or refresh, so it only clears the auto flag and stays silent
+// rather than logging a keep it did not perform.
 func (e *Engine) keepManualOverSuppression(host, kind string, now time.Time, ips map[string]int) {
     func() {
         e.vhostMu.Lock()
@@ -2080,7 +2080,9 @@ if ha := short[host]; ha != nil {
                     Extra:   extra,
                 }
 
-               // DNAT mode: emit per-IP alert so nft sink can DNAT only those IPs.
+               // Emit the per-IP WEB/CHALLENGE alert for the detector sinks
+               // (notify/history). The retired per-IP challenge-DNAT redirect
+               // was once keyed off these alerts; nothing redirects on them now.
                // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
                if e.isBypassed(ipStr) || e.isExcluded(ipStr, host, "", rule) {
                    if e.cfg.ChallengeLogSuppressed {

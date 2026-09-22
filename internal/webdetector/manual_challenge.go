@@ -1,16 +1,18 @@
 // internal/webdetector/manual_challenge.go
 //
-// Runtime manual challenge API — lets operators challenge/unchallengetion
+// Runtime manual challenge API — lets operators challenge/unchallenge
 // a vhost at runtime without restarting or editing cfm.conf.
 //
-// Works for BOTH modes:
-//   - NginxBridge (OpenResty): pushes immediately via ChallengeVhost/ClearVhost
-//   - DNAT mode:               sets manualChalVhosts[host] which challenge_rules.go
-//                              picks up on the next tick (≤ engine.Every)
+// Enforcement is pushed to the edge immediately via the bridge
+// (ChallengeVhost/ClearVhost); the tick loop (challenge_rules.go) also keeps
+// a manual challenge asserted over auto-suppression
+// (keepManualOverSuppression). The legacy per-IP challenge-DNAT consumer of
+// this state is RETIRED (docs/edge-unification-plan.md) — edge mode is
+// unconditional.
 //
-// The manual state is stored in Engine.manualChalVhosts (protected by
-// manualMu).  It is separate from e.cfg.ChallengeVHost (config-time list)
-// so it can be added/removed at runtime without touching config.
+// The manual state is stored in Engine.manualChal (this file's store). It is
+// separate from e.cfg.ChallengeVHost (config-time list) so it can be
+// added/removed at runtime without touching config.
 
 package webdetector
 
@@ -39,8 +41,8 @@ type manualChalEntry struct {
 	// Rung is the challenge tier: "" (default, plain challenge) or "v2"
 	// (ChallengeV2 Rung 1 — the SERVE is identical, but at VERIFY a failing
 	// humanity score earns no clearance; master plan "arm surfaces" slice A).
-	// The rung changes nothing at the edge or in DNAT redirect terms; it is
-	// consulted only by the verify gate via challengeV2HostArmed.
+	// The rung changes nothing at the edge; it is consulted only by the
+	// verify gate via challengeV2HostArmed.
 	Rung string
 }
 
@@ -263,9 +265,8 @@ func (s *manualChalState) snapshot() map[string]manualChalEntry {
 
 const defaultManualChallengeTTL = 30 * time.Minute
 
-// ManualChallengeVhost adds a runtime manual challenge for host with the given TTL.
-//   - NginxBridge mode: pushed to OpenResty immediately.
-//   - DNAT mode:        picked up by challenge_rules.go on next tick.
+// ManualChallengeVhost adds a runtime manual challenge for host with the given
+// TTL — pushed to the edge immediately via the bridge.
 //
 // rung "" = plain challenge; "v2" = ChallengeV2 (same serve, but at verify a
 // failing humanity score earns no clearance — see challengeV2HostArmed). The
@@ -301,9 +302,8 @@ func (e *Engine) ManualChallengeVhost(host string, ttl time.Duration, reason, ru
 	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_on", Host: host, Mode: "manual", Reason: reason, TTLSec: int(ttl / time.Second)})
 }
 
-// ClearManualChallengeVhost removes the runtime manual challenge for host.
-//   - NginxBridge mode: clears immediately via bridge.
-//   - DNAT mode:        next tick will no longer emit for manual-only hosts.
+// ClearManualChallengeVhost removes the runtime manual challenge for host —
+// cleared at the edge immediately via the bridge.
 func (e *Engine) ClearManualChallengeVhost(host string) {
 	wasActive := e.manualChal.clear(host)
 

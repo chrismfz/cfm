@@ -49,7 +49,7 @@ func (e *Engine) handleForceUnblockIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// DNAT mode (no OpenResty bridge): nothing to clear, report empty.
+	// No bridge wired (tests / early startup): nothing to clear, report empty.
 	if e.nginxBridge == nil {
 		writeJSON(w, http.StatusOK, unblock.WAFResult{})
 		return
