@@ -23,7 +23,13 @@ const (
 	TrafficActionAllow     = "allow"
 	TrafficActionBlock     = "block"
 	TrafficActionChallenge = "challenge"
-	TrafficActionThrottle  = "throttle"
+	// TrafficActionChallengeV2 (arm-surfaces slice B): the SAME challenge is
+	// served — the edge vocabulary stays block/challenge/throttle, the bridge
+	// maps this to "challenge" on the wire — but the decision handler records
+	// a per-(ip,host) v2 mark, so at VERIFY a solve must also pass the
+	// passive humanity check to earn clearance (challenge_v2.go).
+	TrafficActionChallengeV2 = "challenge_v2"
+	TrafficActionThrottle    = "throttle"
 )
 
 const (
@@ -269,7 +275,7 @@ func (s *trafficRuleStore) Update(id string, in TrafficRule) (TrafficRule, error
 		return TrafficRule{}, errors.New("rule not found")
 	}
 	if cur.Unsupported {
-		return TrafficRule{}, errors.New("rule uses match fields this cfm build does not understand; upgrade cfm to edit or enable it")
+		return TrafficRule{}, errors.New("rule uses match/scope fields or an action this cfm build does not understand; upgrade cfm to edit or enable it")
 	}
 
 	in.Unsupported = false
@@ -444,7 +450,7 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 	r.Action.Type = strings.ToLower(strings.TrimSpace(r.Action.Type))
 	r.Action.Profile = strings.TrimSpace(r.Action.Profile)
 	switch r.Action.Type {
-	case TrafficActionAllow, TrafficActionBlock, TrafficActionChallenge:
+	case TrafficActionAllow, TrafficActionBlock, TrafficActionChallenge, TrafficActionChallengeV2:
 		r.Action.Profile = ""
 	case TrafficActionThrottle:
 		if r.Action.Profile == "" {
@@ -1001,6 +1007,21 @@ func (s *trafficRuleStore) load() {
 		}
 		norm, err := normalizeTrafficRule(*e, false)
 		if err != nil {
+			if unknown && e.ID != "" {
+				// The freeze-verbatim net must also hold when normalize
+				// itself rejects the rule — an unknown ACTION VALUE from a
+				// newer cfm (first case: challenge_v2 on an older binary)
+				// fails normalize, and dropping here would erase the rule
+				// from disk on the next save. Keep the disabled, unsupported
+				// placeholder; evaluation skips disabled rules, Update()
+				// refuses Unsupported ones, saveLocked writes the frozen
+				// original bytes.
+				if e.CreatedAt.IsZero() {
+					e.CreatedAt = time.Now().UTC()
+				}
+				s.rules[e.ID] = *e
+				s.frozen[e.ID] = append(json.RawMessage(nil), raw...)
+			}
 			continue
 		}
 		if norm.CreatedAt.IsZero() {
@@ -1047,6 +1068,17 @@ func decodeStoredRule(raw json.RawMessage) (*TrafficRule, bool) {
 		if err := dec.Decode(&sc); err != nil {
 			return &e, true
 		}
+	}
+	// An unknown action.type VALUE is the same hazard as an unknown selector
+	// key: this build's normalize would reject the rule, load() would drop it,
+	// and the next save would DELETE the newer cfm's rule from disk (slice-B
+	// review finding — challenge_v2 was the first new action value ever
+	// shipped). Freeze those verbatim too.
+	switch strings.ToLower(strings.TrimSpace(e.Action.Type)) {
+	case TrafficActionAllow, TrafficActionBlock, TrafficActionChallenge,
+		TrafficActionChallengeV2, TrafficActionThrottle, "":
+	default:
+		return &e, true
 	}
 	return &e, false
 }

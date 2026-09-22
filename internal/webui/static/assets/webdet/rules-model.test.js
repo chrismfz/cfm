@@ -288,7 +288,9 @@ test("validateRecipeVars: required + country shape", () => {
 });
 
 test("static tables are consistent", () => {
-  assert.deepEqual(ACTIONS.map((a) => a.key), ["allow", "block", "challenge", "throttle"]);
+  assert.deepEqual(ACTIONS.map((a) => a.key), ["allow", "block", "challenge", "challenge_v2", "throttle"]);
+  // Every action key must have a priority band (suggestPriority depends on it).
+  for (const a of ACTIONS) assert.ok(PRIORITY_BANDS[a.key], `band for ${a.key}`);
   assert.deepEqual(THROTTLE_PROFILES.map((p) => p.key), ["soft_bot", "medium_bot", "hard_bot"]);
   assert.ok(RECIPES.some((r) => r.kind === "link" && /exclude/i.test(r.title + r.description)));
   assert.equal(recipeOf({ note: "hand-written" }), "");

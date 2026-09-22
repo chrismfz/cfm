@@ -1801,11 +1801,14 @@ an empty `match` matches every request on the scoped vhosts):
 | `has_qs` / `qs_not_rx` | a query string is present / the query does **not** match the RE2 regex | `qs_not_rx` applies whenever a query is present, independently of `has_qs` |
 
 A rule whose `match` or `scope` carries a key the running binary does not know
-(written by a newer cfm) is listed disabled + `unsupported`, never evaluated,
-refused by update, and written back to disk **verbatim** (its original bytes,
-including `enabled`), so nothing is widened or lost until the upgrade;
-conversely a cfm older than 2026-09 drops `country_not_in` / `ip_any` silently
-— disable such rules before downgrading below that version.
+— or whose `action.type` is a value it does not know — (written by a newer
+cfm) is listed disabled + `unsupported`, never evaluated, refused by update,
+and written back to disk **verbatim** (its original bytes, including
+`enabled`), so nothing is widened or lost until the upgrade; conversely a cfm
+older than 2026-09 drops `country_not_in` / `ip_any` silently, and one older
+than 2026-09-22 **deletes** a `challenge_v2` rule from disk on its next save
+(the action-value freeze shipped together with the action) — disable such
+rules before downgrading below those versions.
 
 Quick API examples:
 
@@ -1828,11 +1831,13 @@ curl -sS -X POST http://127.0.0.1:9070/api/v1/webdet/rules/simulate \
 > priority order (lowest first) and the **first match wins**; **only enabled
 > rules are enforced**. In the in-path request path (OpenResty or Angie) the
 > edge enforces `block`, `challenge` and `throttle` (with `throttle_profile`).
+> `challenge_v2` stores/simulates as itself but rides the wire as plain
+> `challenge` (identical page; the daemon records the v2 intent per (ip, host)
+> so the SOLVE must also pass the passive humanity check — see ChallengeV2).
 > **`allow` is NOT an exemption** — it only stops the remaining rules from being
 > evaluated; it does not bypass the WAF, a vhost-wide challenge or a per-IP
 > block (use challenge/WAF excludes for that). Clients holding a valid clearance
-> cookie never reach the rule evaluation, and rules are not applied at all in
-> DNAT mode. The edge's short-TTL decision cache is keyed on ip/host/path (+query)
+> cookie never reach the rule evaluation. The edge's short-TTL decision cache is keyed on ip/host/path (+query)
 > but deliberately NOT on User-Agent, so a UA-keyed rule can be masked for up to
 > one cache TTL by a clean-allow the same IP just earned with a different UA.
 > `simulate` runs the exact enforcement evaluation and additionally

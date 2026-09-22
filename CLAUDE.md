@@ -379,10 +379,13 @@ evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived), and
 for an armed `challenge_v2` fingerprint a failing solve earns NO clearance
 (`result=v2_reject`, retry-able with backoff) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
-enforced at verify, not at serve). The verify gate ORs three arm grains:
-fingerprint policy, geo policy, and (since 2026-09-22, arm-surfaces slice A)
-a per-vhost `rung=v2` on the MANUAL vhost challenge (API/CLI/cfm-admin Tier
-picker; persisted with the challenge). Verify is reachable only through the
+enforced at verify, not at serve). The verify gate ORs four arm grains:
+fingerprint policy, geo policy, a per-vhost `rung=v2` on the MANUAL vhost
+challenge (arm-surfaces slice A: API/CLI/cfm-admin Tier picker; persisted
+with the challenge), and a per-(ip,host) rung mark written at decision time
+by a traffic rule with action `challenge_v2` (slice B: the bridge serves
+plain "challenge" on the wire and records the v2 intent — rules-model.js
+and traffic_rules.go changed in the same PR, per the Simulate rule). Verify is reachable only through the
 edge (localhost listener; the per-IP challenge-DNAT is RETIRED per
 `docs/edge-unification-plan.md`), so the gate inputs (`X-CFM-TLS`, the
 verify host) are edge-authoritative on current confs; the client-authored

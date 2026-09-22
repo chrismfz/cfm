@@ -45,6 +45,13 @@ export const ACTIONS = Object.freeze([
     caveat: "Non-browser clients (APIs, webhooks, mobile apps, crawlers) cannot pass it.",
   },
   {
+    key: "challenge_v2",
+    label: "Challenge v2",
+    tone: "warn",
+    summary: "Serve the same challenge, but a solve must ALSO pass the passive humanity check to earn clearance — headless farms that beat the plain challenge solve for nothing.",
+    caveat: "Non-browser clients cannot pass it. Real browsers are unaffected (privacy browsers / blocked JS included: absence never fails the humanity check, only positive headless evidence does).",
+  },
+  {
     key: "throttle",
     label: "Throttle",
     tone: "info",
@@ -112,6 +119,7 @@ export const PRIORITY_BANDS = Object.freeze({
   allow: { from: 10, to: 99, default: 50 },
   throttle: { from: 100, to: 199, default: 150 },
   challenge: { from: 200, to: 299, default: 250 },
+  challenge_v2: { from: 200, to: 299, default: 250 }, // same band: it IS a challenge, one rung up
   block: { from: 300, to: 899, default: 350 },
 });
 
@@ -476,7 +484,7 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
   const p = buildRulePayload(form);
   const act = actionInfo(p.action.type);
 
-  if (!p.action.type) errors.push("Choose what should happen (allow / block / challenge / throttle).");
+  if (!p.action.type) errors.push("Choose what should happen (allow / block / challenge / challenge v2 / throttle).");
   else if (!act) errors.push(`Unknown action "${p.action.type}".`);
 
   if (p.action.type === "throttle") {
@@ -542,7 +550,7 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
   if (!narrow && p.action.type && p.action.type !== "allow") {
     (p.enabled ? errors : warnings).push(
       p.enabled
-        ? `No match conditions: this ENABLED ${p.action.type} rule would ${p.action.type} EVERY request on ${p.scope.vhosts.join(", ") || "the selected vhosts"}. Add a condition or save it disabled.`
+        ? `No match conditions: this ENABLED ${act ? act.label.toLowerCase() : p.action.type} rule would apply to EVERY request on ${p.scope.vhosts.join(", ") || "the selected vhosts"}. Add a condition or save it disabled.`
         : `No match conditions: this rule matches EVERY request on the selected vhosts (saved disabled).`,
     );
   }

@@ -791,14 +791,16 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		if v2On && hs >= v2Fail {
 			// Armed challenge_v2 via ANY grain: the solve's TLS fingerprint
 			// (the original gate), a fleet-armed country/ASN policy covering
-			// the client IP (policy-kinds slice), or a v2-tier VHOST arm
-			// covering the solve's host (arm-surfaces slice A). Each lookup
-			// is fail-open when unwired. Same D5 semantics either way; the
-			// gate inputs are edge-authoritative — see HONEST LIMITS in
-			// challenge_v2.go.
+			// the client IP (policy-kinds slice), a v2-tier VHOST arm
+			// covering the solve's host (arm-surfaces slice A), or a
+			// transient per-(ip,host) mark written at decision time by a
+			// v2-tier traffic rule (slice B). Each lookup is fail-open when
+			// unwired/absent. Same D5 semantics either way; the gate inputs
+			// are edge-authoritative — see HONEST LIMITS in challenge_v2.go.
 			if FingerprintPolicyForID(solve.TLSFP) == "challenge_v2" ||
 				GeoPolicyActionForIP(solve.IP) == "challenge_v2" ||
-				challengeV2HostArmed(solve.Host) {
+				challengeV2HostArmed(solve.Host) ||
+				challengeV2Marked(solve.IP, solve.Host) {
 				logging.LogfCHALLENGES(
 					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s tls_fp=%s ua=%q",
 					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.TLSFingerprintOrDash(), solve.UA)
