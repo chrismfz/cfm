@@ -391,7 +391,11 @@ is built** (2026-09-19, `challenge_v2.go` + the challenge-page passive
 collectors, guardrails D5): every solve is scored on positive-only headless
 evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
 `v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
-so a passed-under-arm solve is greppable, not mistaken for a plain v1 one), and
+so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
+`sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` is the report AS
+REPORTED — mv/hc/dm/dpr/raf corpus-only and scored by nothing, ptr/tch/key
+also the no_input amplifier's inputs; absent keys = not reported, never a
+fabricated zero), and
 for an armed `challenge_v2` fingerprint a failing solve earns NO clearance
 (`result=v2_reject`, retry-able with backoff) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is

@@ -34,8 +34,9 @@ package webdetector
 //                    is retry-able, never a silent wall. Deny-with-no-recourse
 //                    stays a D2 decision, not this file's.
 //   (d) VISIBILITY — every scored solve carries hs=/tells= on its solve log
-//                    line, plus v2=<grain> naming the arm whenever one covers
-//                    the solve (ChallengeSolve.HumanitySuffix, both writers):
+//                    line, sig= with the signals exactly as the client
+//                    reported them, and v2=<grain> naming the arm whenever
+//                    one covers the solve (HumanitySuffix, both writers):
 //                    an armed solve that PASSES must not read like a plain v1
 //                    one, or a live tier looks like a forgotten one. A reject
 //                    logs result=v2_reject (naming the grain), a would-fail
@@ -81,6 +82,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -93,21 +95,56 @@ import (
 // needs that distinction. Unknown fields are ignored (older/newer pages mix on
 // a fleet).
 type humanitySignals struct {
-	V   int     `json:"v"`   // payload version
-	WD  *bool   `json:"wd"`  // navigator.webdriver
-	GLR string  `json:"glr"` // WebGL UNMASKED_RENDERER (bounded client-side; re-bounded here)
-	OW  *int    `json:"ow"`  // window.outerWidth
-	OH  *int    `json:"oh"`  // window.outerHeight
-	MTP *int    `json:"mtp"` // navigator.maxTouchPoints
-	PTR *int    `json:"ptr"` // pointer-move events observed while solving
-	TCH *int    `json:"tch"` // touchstart events observed
-	KEY *int    `json:"key"` // keydown events observed
-	MV  float64 `json:"mv"`  // accumulated |pointer movement| (recorded, not scored yet)
-	HC  int     `json:"hc"`  // hardwareConcurrency (recorded, not scored yet)
-	DM  float64 `json:"dm"`  // deviceMemory (recorded, not scored yet)
-	DPR float64 `json:"dpr"` // devicePixelRatio (recorded, not scored yet)
-	RAF float64 `json:"raf"` // avg requestAnimationFrame delta ms (recorded, not scored yet)
+	V   int    `json:"v"`   // payload version
+	WD  *bool  `json:"wd"`  // navigator.webdriver
+	GLR string `json:"glr"` // WebGL UNMASKED_RENDERER (bounded client-side; re-bounded here)
+	OW  *int   `json:"ow"`  // window.outerWidth
+	OH  *int   `json:"oh"`  // window.outerHeight
+	MTP *int   `json:"mtp"` // navigator.maxTouchPoints
+	PTR *int   `json:"ptr"` // pointer-move events observed while solving
+	TCH *int   `json:"tch"` // touchstart events observed
+	KEY *int   `json:"key"` // keydown events observed
+	// The five below are RETAINED BUT NEVER SCORED: they are logged verbatim
+	// (sig= on the solve line, payload.sig on the history row) to build the
+	// corpus from real traffic, so a future tell can be written from measured
+	// distributions rather than from memory. They were pointer-less and
+	// silently discarded until 2026-09-22 — a `dm` absent on every Firefox
+	// then read as a reported 0.0, which is exactly the absence/zero
+	// confusion the pointer convention above exists to prevent.
+	MV  *float64 `json:"mv"`  // accumulated |pointer movement| in px (page always sends it; 0 = really no movement)
+	HC  *int     `json:"hc"`  // hardwareConcurrency
+	DM  *float64 `json:"dm"`  // deviceMemory — Chrome-only, genuinely absent on Firefox/Safari
+	DPR *float64 `json:"dpr"` // devicePixelRatio
+	RAF *float64 `json:"raf"` // avg requestAnimationFrame delta ms; absent when <8 frames elapsed before submit
 }
+
+// Sanity bounds for the retained-but-unscored values. The body is
+// CLIENT-authored (HONEST LIMITS above), so a value outside what any real
+// browser reports is dropped rather than carried: an unbounded float reaches
+// a log line and a durable history row, and a corpus built for later analysis
+// must not have to defend itself against 1e308. Dropping degrades to
+// "absent", which every consumer already handles — never to a fabricated
+// zero. JSON has no NaN/Inf literal (such a body fails to parse and scores as
+// no payload), so these comparisons cannot be defeated by a non-number.
+const (
+	sigMaxEvents   = 1_000_000 // ptr/tch/key
+	sigMaxMovement = 1e9       // px, accumulated
+	sigMaxCores    = 4096
+	sigMaxMemoryGB = 4096
+	sigMaxDPR      = 64
+	sigMaxRAFms    = 60_000
+	// sigMinPositive is the floor for the two values whose range legitimately
+	// starts at 0 (mv, raf). A positive below it is not something any device
+	// reports, and allowing it would force the renderer to either print "0"
+	// for a non-zero value — manufacturing the impossible "ptr:1,mv:0" shape
+	// — or spend 300 characters of log line proving otherwise. Dropping it to
+	// absent keeps sigFloat's no-false-zero guarantee provable.
+	sigMinPositive = 1e-6
+	// sigMaxDecimals bounds sigFloat's fallback rendering. Paired with
+	// sigMinPositive: 1e-6 is exactly representable at 6 decimals, so the
+	// fallback can never itself round a surviving value to zero.
+	sigMaxDecimals = 6
+)
 
 // The verify body bound is maxVerifyBodyBytes (challenge_server.go, 1 KB) —
 // ONE bound, applied where the body is read (readVerifyBody). The page's
@@ -372,7 +409,54 @@ func parseHumanityBody(b []byte) *humanitySignals {
 	if len(sig.GLR) > 128 {
 		sig.GLR = sig.GLR[:128]
 	}
+	sig.sanitize()
 	return &sig
+}
+
+// sanitize drops retained values a real browser would never report, so the
+// log line and the history row can only ever carry plausible numbers. It runs
+// at the ONE parse choke point, before anything reads the payload.
+//
+// SCORING IS UNCHANGED, and that is load-bearing rather than incidental. The
+// scorer's own inputs (wd/glr/mtp/ow/oh) are not touched at all. PTR/TCH/KEY
+// ARE scorer inputs — the no_input amplifier — but a bound here still cannot
+// move a verdict: no_input needs all three REPORTED and all three exactly 0,
+// dropping only ever produces absent (never a fabricated zero — D5b), and a
+// count that fails these bounds is non-zero anyway, so it already failed the
+// `== 0` test before the drop. Net effect on every possible payload: the
+// amplifier fires exactly where it fired before. A bound must never become a
+// back-door tell.
+func (s *humanitySignals) sanitize() {
+	dropInt := func(p **int, min, max int) {
+		if *p != nil && (**p < min || **p > max) {
+			*p = nil
+		}
+	}
+	dropFloat := func(p **float64, min, max float64) {
+		if *p != nil && (**p < min || **p > max) {
+			*p = nil
+		}
+	}
+	dropInt(&s.PTR, 0, sigMaxEvents)
+	dropInt(&s.TCH, 0, sigMaxEvents)
+	dropInt(&s.KEY, 0, sigMaxEvents)
+	dropFloat(&s.MV, 0, sigMaxMovement)
+	dropInt(&s.HC, 1, sigMaxCores)
+	// deviceMemory is reported in GiB and can legitimately be fractional
+	// (0.25 on low-end Android), so the floor is "greater than zero", not 1.
+	dropFloat(&s.DM, 0.001, sigMaxMemoryGB)
+	dropFloat(&s.DPR, 0.001, sigMaxDPR)
+	dropFloat(&s.RAF, 0, sigMaxRAFms)
+	// mv and raf legitimately start at 0, so their range check admits a
+	// positive too small for any real device to have produced. Drop those
+	// (see sigMinPositive); an exact 0 is a real reading and is kept.
+	dropTiny := func(p **float64) {
+		if *p != nil && **p > 0 && **p < sigMinPositive {
+			*p = nil
+		}
+	}
+	dropTiny(&s.MV)
+	dropTiny(&s.RAF)
 }
 
 // uaClaimsMobile reports whether the UA presents itself as a touch device.
@@ -432,9 +516,120 @@ func scoreHumanity(sig *humanitySignals, ua string) (hs int, tells []string) {
 	return hs, tells
 }
 
-// HumanitySuffix renders the Rung-1 fields for a solve log line: " hs=N" plus
-// " tells=a,b" when any fired, then " v2=<grain>" when the solve was covered
-// by an operator-armed challenge_v2. Empty when scoring was disabled (-1
+// ── Retained-signal rendering (one source, two surfaces) ───────────────────
+//
+// The log line and the history row must show the SAME numbers, so both are
+// built from the same parsed payload and the same rounding. Rounding is
+// deliberate: a raw rAF average is 16.666666666666668, which bloats every row
+// and reads as false precision on a value averaged over 8 frames.
+
+// sigFloat formats a retained float at a fixed number of decimals, then trims
+// trailing zeros. 'f' (never 'g'/'e') on purpose: scientific notation in a
+// log field breaks a `grep`/`cut` corpus pass, and a %g-style verb has
+// misrendered a value in this repo before.
+func sigFloat(v float64, prec int) string {
+	trim := func(in string) string {
+		if strings.ContainsRune(in, '.') {
+			in = strings.TrimRight(in, "0")
+			in = strings.TrimSuffix(in, ".")
+		}
+		return in
+	}
+	out := trim(strconv.FormatFloat(v, 'f', prec, 64))
+	// A REPORTED non-zero must never render as "0". `ptr:1,mv:0` is a shape
+	// no real client produces, and writing it into the corpus is the same
+	// fabricated-zero failure the absent-key rule prevents everywhere else —
+	// a later analyst would read it as "events fired, pointer never moved".
+	// sanitize guarantees any surviving non-zero is >= sigMinPositive, so
+	// this fallback always renders something non-zero and stays bounded.
+	if out == "0" && v != 0 {
+		out = trim(strconv.FormatFloat(v, 'f', sigMaxDecimals, 64))
+	}
+	return out
+}
+
+// sigFields returns the retained signals in ONE fixed order — behavioural
+// first (the operational question is "did this client do anything?"), then
+// environment — as (key, rendered value) pairs. Absent values are omitted
+// entirely: a key that is not on the line was not reported, and no consumer
+// has to guess whether a 0 meant "none" or "unknown". Nil receiver / nil
+// payload yields nothing.
+func (s *humanitySignals) sigFields() [][2]string {
+	if s == nil {
+		return nil
+	}
+	var out [][2]string
+	addInt := func(k string, v *int) {
+		if v != nil {
+			out = append(out, [2]string{k, strconv.Itoa(*v)})
+		}
+	}
+	addFloat := func(k string, v *float64, prec int) {
+		if v != nil {
+			out = append(out, [2]string{k, sigFloat(*v, prec)})
+		}
+	}
+	addInt("ptr", s.PTR)
+	addInt("tch", s.TCH)
+	addInt("key", s.KEY)
+	// mv keeps one decimal: movementX/Y is fractional on HiDPI / fractional
+	// display scaling, so a genuine small drag really can total 0.5px.
+	addFloat("mv", s.MV, 1)
+	addInt("hc", s.HC)
+	addFloat("dm", s.DM, 2) // 0.25 / 0.5 / 1 / 2 / 4 / 8 GiB buckets
+	addFloat("dpr", s.DPR, 2)
+	addFloat("raf", s.RAF, 1)
+	return out
+}
+
+// SignalSuffix renders " sig=ptr:12,tch:0,key:0,mv:843,hc:8,dpr:1.5,raf:16.7"
+// — the Rung-1 report as REPORTED, before any scoring. Empty when nothing was
+// retained, so a no-payload solve adds no field.
+//
+// Precisely: mv/hc/dm/dpr/raf are scored by NOTHING — they are corpus only,
+// logged so a future tell can be written from measured distributions instead
+// of from memory. ptr/tch/key ARE scorer inputs (the no_input amplifier, and
+// only as an all-three-zero combination); logging them is what makes that
+// amplifier auditable rather than opaque. Either way the line shows the raw
+// reading, never a scored derivative — and "the client never moved the mouse"
+// is answerable from the log at all, which it was not: mv was parsed and
+// thrown away despite a comment claiming it was recorded.
+func (s ChallengeSolve) SignalSuffix() string {
+	fields := s.humanity.sigFields()
+	if len(fields) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(fields))
+	for _, f := range fields {
+		parts = append(parts, f[0]+":"+f[1])
+	}
+	return " sig=" + strings.Join(parts, ",")
+}
+
+// signalMap is the history-row spelling of the same report: payload.sig, with
+// the rendered (rounded) values as JSON numbers so a corpus pass can aggregate
+// them without re-parsing a log field. nil when nothing was retained, so the
+// key is simply absent on such a row — matching the log's "no sig= field".
+func (s ChallengeSolve) signalMap() map[string]any {
+	fields := s.humanity.sigFields()
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(fields))
+	for _, f := range fields {
+		if n, err := strconv.ParseFloat(f[1], 64); err == nil {
+			out[f[0]] = n
+			continue
+		}
+		out[f[0]] = f[1] // unreachable for current fields; never drop a value silently
+	}
+	return out
+}
+
+// HumanitySuffix renders the Rung-1 fields for a solve log line, in order:
+// " hs=N", " tells=a,b" when any fired, " sig=..." with the raw reported
+// signals (SignalSuffix), and " v2=<grain>" when the solve was covered by an
+// operator-armed challenge_v2. Empty when scoring was disabled (-1
 // sentinel), so pre-Rung-1 log tooling sees an unchanged line; " hs=-" when NO
 // payload arrived and nothing fired, so "scored clean" (hs=0) and "reported
 // nothing" stay distinguishable in the burn-in data (a fleet-wide hs=- means a
@@ -460,6 +655,7 @@ func (s ChallengeSolve) HumanitySuffix() string {
 			out += " tells=" + s.HumanityTells
 		}
 	}
+	out += s.SignalSuffix()
 	if s.V2Grain != "" {
 		out += " v2=" + s.V2Grain
 	}

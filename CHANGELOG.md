@@ -36,6 +36,24 @@ back-filled here — see the git/PR history for that period.
   so "is my armed tier covering real traffic, and what is it scoring?" is
   answerable from MCP/history instead of only by grepping each node's
   `cfm.challenges.log`.
+- **The raw ChallengeV2 signals are now actually recorded (`sig=`).** The
+  challenge page has always reported pointer/touch/key counts, accumulated
+  mouse movement, hardwareConcurrency, deviceMemory, devicePixelRatio and the
+  rAF cadence — but only the scored subset survived: `mv`/`hc`/`dm`/`dpr`/
+  `raf` were parsed and thrown away, despite code comments claiming they were
+  "recorded". So the obvious burn-in question, *"did this client move the
+  mouse at all?"*, was unanswerable from the logs. Every scored solve now
+  carries ` sig=ptr:0,tch:0,key:0,mv:0,hc:8,dpr:1.5,raf:16.7` on its line in
+  `cfm.challenges.log` (`result=v2_reject` lines too — a rejected solve is
+  exactly the population the corpus is for) and the same numbers as `payload.sig` on the durable
+  `challenge_solved` history row. **`mv`/`hc`/`dm`/`dpr`/`raf` are scored by
+  nothing** — they are corpus, collected so a future tell can be written from
+  measured distributions rather than from memory; `ptr`/`tch`/`key` already
+  fed the `no_input` amplifier, and logging them makes that auditable instead
+  of opaque. No scoring or enforcement changes in either case. A signal the browser did not report
+  (e.g. `deviceMemory`, which is Chrome-only) is an absent key, never a
+  fabricated zero, and an implausible client-authored value is dropped to
+  absent before it can reach a log line or a durable row.
 
 ## 2026.09.22
 

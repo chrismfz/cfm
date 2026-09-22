@@ -818,6 +818,16 @@ func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	if s.V2Grain != "" {
 		payload["v2"] = s.V2Grain
 	}
+	// The Rung-1 signals as REPORTED (payload.sig), same numbers and same
+	// rounding as the solve line's sig= field. mv/hc/dm/dpr/raf are scored by
+	// nothing — corpus, so a future tell can be written from measured
+	// distributions instead of from memory; ptr/tch/key additionally feed the
+	// no_input amplifier, and recording them is what makes it auditable. Absent when no payload
+	// arrived, and an individual signal the browser did not report is simply
+	// not a key — never a fabricated zero (D5b).
+	if sig := s.signalMap(); sig != nil {
+		payload["sig"] = sig
+	}
 	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_solved", Host: s.Host, IP: s.IP, Payload: payload})
 }
 

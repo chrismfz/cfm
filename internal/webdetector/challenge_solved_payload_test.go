@@ -146,3 +146,48 @@ func TestRecordChallengeSolved_PersistsHumanityAndV2Grain(t *testing.T) {
 		t.Errorf("disabled rung must persist no hs, got %v", ev4.Payload["hs"])
 	}
 }
+
+// The raw report must also reach durable history as payload.sig, with the same
+// numbers the log line shows, so a corpus pass can aggregate across the fleet
+// instead of parsing a log field on every node.
+func TestRecordChallengeSolved_PersistsRawSignals(t *testing.T) {
+	e := newSolveTestEngine(t)
+	e.RecordChallengeSolved(ChallengeSolve{
+		IP: "203.0.113.20", Host: "shop.example.com", URI: "/",
+		humanity: &humanitySignals{
+			PTR: iptr(0), TCH: iptr(0), KEY: iptr(0), MV: fptr(0),
+			HC: iptr(8), DPR: fptr(1.5), RAF: fptr(16.666666666666668),
+		},
+	})
+	sig, ok := latestSolveEvent(t, e).Payload["sig"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload.sig missing or not an object")
+	}
+	// Reported zeros are present AS zeros — that is the whole point: "the
+	// client never moved the mouse" must be readable, not inferred.
+	for k, want := range map[string]float64{"ptr": 0, "tch": 0, "key": 0, "mv": 0, "hc": 8, "dpr": 1.5} {
+		got, present := sig[k]
+		if !present {
+			t.Errorf("sig.%s missing", k)
+			continue
+		}
+		if toF(got) != want {
+			t.Errorf("sig.%s = %v, want %v", k, got, want)
+		}
+	}
+	// Same rounding as the log line, so the two surfaces cannot disagree.
+	if toF(sig["raf"]) != 16.7 {
+		t.Errorf("sig.raf = %v, want 16.7 (log-line rounding)", sig["raf"])
+	}
+	// An unreported signal is an ABSENT key, never a zero.
+	if _, present := sig["dm"]; present {
+		t.Errorf("unreported deviceMemory must not be persisted, got %v", sig["dm"])
+	}
+
+	// No payload at all → no sig key, matching the log's missing sig= field.
+	e2 := newSolveTestEngine(t)
+	e2.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.21", Host: "shop.example.com", URI: "/"})
+	if _, present := latestSolveEvent(t, e2).Payload["sig"]; present {
+		t.Errorf("a solve with no retained report must carry no sig key")
+	}
+}

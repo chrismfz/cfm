@@ -465,6 +465,13 @@ type ChallengeSolve struct {
 	// distinguishable — a fleet-wide hs=- is a regression or an evading farm,
 	// and either must be visible (D5d), never disguised as hs=0.
 	HumanityNoPayload bool
+	// humanity retains the PARSED Rung-1 payload (nil when none arrived or the
+	// rung is off) so the solve line and the history row render the same
+	// numbers from one source rather than two drifting copies. Unexported on
+	// purpose: the payload shape is this package's business, and every reader
+	// goes through SignalSuffix/signalMap. Nothing here is scored — see
+	// humanitySignals for which fields the scorer actually uses.
+	humanity *humanitySignals
 	// V2Grain names the operator-armed challenge_v2 grain covering this solve
 	// ("fp" / "geo" / "vhost" / "mark"), "" when none did — i.e. exactly when
 	// the D5a gate would have teeth. Filled on every scored solve, not only a
@@ -733,9 +740,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// (only UA-borne openers can fire) — absence never convicts (D5b).
 		v2On, v2Fail, v2Debug, v2Shadow := challengeV2Settings()
 		hs, hsTells, hsNoPayload, v2Grain := -1, "", false, ""
+		var hsSig *humanitySignals
 		if v2On {
 			sig := parseHumanityBody(humanityBody)
 			hsNoPayload = sig == nil
+			hsSig = sig
 			score, tells := scoreHumanity(sig, ua)
 			hs, hsTells = score, strings.Join(tells, ",")
 			if v2Debug {
@@ -763,6 +772,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			HumanityScore:     hs,
 			HumanityTells:     hsTells,
 			HumanityNoPayload: hsNoPayload,
+			humanity:          hsSig,
 			V2Grain:           v2Grain,
 		}
 
@@ -812,9 +822,15 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// see HONEST LIMITS in challenge_v2.go. The grain also rides the
 			// solve line, so a passed-under-arm solve is greppable too.
 			if v2Grain != "" {
+				// sig= rides this line too. The rejected solve is exactly
+				// the population the corpus exists to characterise, and
+				// this line is its ONLY record: the solve is deliberately
+				// not published/hooked as solved (it cleared nothing), so
+				// without sig= here every armed-and-rejected client would
+				// be missing from the very data used to tune the tells.
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s v2=%s tls_fp=%s ua=%q",
-					solve.IP, solve.Host, solve.URI, hs, hsTells, v2Grain, solve.TLSFingerprintOrDash(), solve.UA)
+					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q",
+					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.SignalSuffix(), v2Grain, solve.TLSFingerprintOrDash(), solve.UA)
 				w.Header().Set("X-CFM-V2", "reject")
 				http.Error(w, "verification failed", http.StatusForbidden)
 				return

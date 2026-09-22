@@ -229,3 +229,156 @@ func TestChallengeV2ArmGrain(t *testing.T) {
 		t.Fatalf("plain-challenge fp must not arm v2, got %q", got)
 	}
 }
+
+// ── Retained (unscored) signals ────────────────────────────────────────────
+
+func fptr(v float64) *float64 { return &v }
+func iptr(v int) *int         { return &v }
+
+// The retained report must reach the solve line verbatim-but-rounded, in a
+// fixed order, with absent signals simply missing. Regression anchor for the
+// bug this replaced: mv/hc/dm/dpr/raf were parsed and silently discarded, so
+// "did this client move the mouse at all?" was unanswerable from the logs.
+func TestSignalSuffix(t *testing.T) {
+	// Nothing retained (no payload) adds no field at all.
+	if got := (ChallengeSolve{}).SignalSuffix(); got != "" {
+		t.Fatalf("no payload must add no sig field, got %q", got)
+	}
+
+	// The operator's real case: a genuine browser that was opened and left
+	// alone. Every counter is a REPORTED zero, which must be visible as such.
+	quiet := ChallengeSolve{humanity: &humanitySignals{
+		PTR: iptr(0), TCH: iptr(0), KEY: iptr(0), MV: fptr(0),
+		HC: iptr(8), DPR: fptr(1.5), RAF: fptr(16.666666666666668),
+	}}
+	const want = " sig=ptr:0,tch:0,key:0,mv:0,hc:8,dpr:1.5,raf:16.7"
+	if got := quiet.SignalSuffix(); got != want {
+		t.Fatalf("quiet-browser solve:\n got %q\nwant %q", got, want)
+	}
+	// dm is Chrome-only: on this Firefox-shaped report the key must be ABSENT,
+	// not rendered as a reported 0 (the absence/zero confusion D5b forbids).
+	if strings.Contains(quiet.SignalSuffix(), "dm:") {
+		t.Fatalf("an unreported deviceMemory must not appear at all, got %q", quiet.SignalSuffix())
+	}
+
+	// Fractional deviceMemory (low-end Android) survives rounding, and movement
+	// keeps one decimal — fractional movementX on HiDPI is a real reading.
+	busy := ChallengeSolve{humanity: &humanitySignals{
+		PTR: iptr(137), MV: fptr(4821.73), DM: fptr(0.25),
+	}}
+	if got, want := busy.SignalSuffix(), " sig=ptr:137,mv:4821.7,dm:0.25"; got != want {
+		t.Fatalf("busy solve:\n got %q\nwant %q", got, want)
+	}
+
+	// Never scientific notation: a %g-style verb here would break a grep/cut
+	// corpus pass (and has misrendered a value in this repo before).
+	big := ChallengeSolve{humanity: &humanitySignals{MV: fptr(123456789)}}
+	if got := big.SignalSuffix(); strings.ContainsAny(got, "eE") {
+		t.Fatalf("no exponent form allowed on the log line, got %q", got)
+	}
+}
+
+// A REPORTED non-zero must never render as "0": `ptr:1,mv:0` is a shape no
+// real client produces, and putting it in the corpus would read as "events
+// fired, pointer never moved". Sub-pixel movementX is real on HiDPI and
+// fractional display scaling, so this is not a theoretical case.
+func TestSignalSuffixNeverFakesAZero(t *testing.T) {
+	for _, mv := range []float64{0.5, 0.04, 0.0001, sigMinPositive} {
+		got := (ChallengeSolve{humanity: &humanitySignals{PTR: iptr(1), MV: fptr(mv)}}).SignalSuffix()
+		if strings.Contains(got, "mv:0,") || strings.HasSuffix(got, "mv:0") {
+			t.Errorf("mv=%v rendered as a flat zero: %q", mv, got)
+		}
+		if strings.ContainsAny(got, "eE") {
+			t.Errorf("mv=%v rendered in exponent form: %q", mv, got)
+		}
+	}
+	// A genuine zero still renders as a plain zero — that reading is real and
+	// is exactly what "opened the page and touched nothing" looks like.
+	if got := (ChallengeSolve{humanity: &humanitySignals{MV: fptr(0)}}).SignalSuffix(); got != " sig=mv:0" {
+		t.Errorf("a reported zero must stay 0, got %q", got)
+	}
+	// The guarantee rests on sanitize: a positive too small for any device to
+	// report is dropped to absent rather than rendered, so the fallback
+	// precision can always express what survives.
+	tiny := parseHumanityBody([]byte(`{"v":1,"mv":1e-12,"raf":1e-12}`))
+	if tiny == nil || tiny.MV != nil || tiny.RAF != nil {
+		t.Errorf("sub-resolution positives must be dropped, got mv=%v raf=%v", tiny.MV, tiny.RAF)
+	}
+}
+
+// The suffix the two solve-line writers share must carry the retained report
+// between the score and the arm, and still render nothing when the rung is off.
+func TestHumanitySuffixIncludesSignals(t *testing.T) {
+	s := ChallengeSolve{
+		HumanityScore: 0,
+		V2Grain:       v2GrainMark,
+		humanity:      &humanitySignals{PTR: iptr(0), MV: fptr(0)},
+	}
+	if got, want := s.HumanitySuffix(), " hs=0 sig=ptr:0,mv:0 v2=mark"; got != want {
+		t.Fatalf("\n got %q\nwant %q", got, want)
+	}
+	off := ChallengeSolve{HumanityScore: -1, humanity: &humanitySignals{PTR: iptr(5)}}
+	if got := off.HumanitySuffix(); got != "" {
+		t.Fatalf("disabled rung must render nothing at all, got %q", got)
+	}
+}
+
+// The body is client-authored, so an implausible value must degrade to ABSENT
+// before it can reach a log line or a durable history row — never to a
+// fabricated zero, and never as a value a corpus pass has to defend against.
+func TestSanitizeDropsImplausibleSignals(t *testing.T) {
+	sig := parseHumanityBody([]byte(`{"v":1,"ptr":-3,"tch":9000000,"key":4,` +
+		`"mv":1e300,"hc":0,"dm":99999,"dpr":0,"raf":-1}`))
+	if sig == nil {
+		t.Fatal("a well-formed body must parse")
+	}
+	for name, got := range map[string]any{
+		"ptr": sig.PTR, "tch": sig.TCH, "mv": sig.MV,
+		"hc": sig.HC, "dm": sig.DM, "dpr": sig.DPR, "raf": sig.RAF,
+	} {
+		switch v := got.(type) {
+		case *int:
+			if v != nil {
+				t.Errorf("%s = %d, want dropped", name, *v)
+			}
+		case *float64:
+			if v != nil {
+				t.Errorf("%s = %v, want dropped", name, *v)
+			}
+		}
+	}
+	// The one in-bounds value survives untouched.
+	if sig.KEY == nil || *sig.KEY != 4 {
+		t.Errorf("an in-bounds value must survive, got %v", sig.KEY)
+	}
+	if got := (ChallengeSolve{humanity: sig}).SignalSuffix(); got != " sig=key:4" {
+		t.Errorf("only the surviving value may render, got %q", got)
+	}
+}
+
+// Bounding must not be able to move a verdict: no_input needs all three
+// counters REPORTED and all three exactly zero, and a count that fails the
+// bounds is non-zero anyway. Pins the invariant the sanitize doc-comment
+// claims, in both directions.
+func TestSanitizeCannotChangeScoring(t *testing.T) {
+	// Out-of-bounds counters: the amplifier did not fire before the drop
+	// (they are non-zero) and must not fire after it either.
+	sig := parseHumanityBody([]byte(`{"v":1,"wd":true,"ptr":-1,"tch":-1,"key":-1}`))
+	hs, tells := scoreHumanity(sig, "")
+	if hs != tellWebdriver || strings.Contains(strings.Join(tells, ","), "no_input") {
+		t.Fatalf("dropped counters must not amplify: hs=%d tells=%v", hs, tells)
+	}
+	// In-bounds zeros are untouched, so the amplifier still fires on top of a
+	// real opener exactly as it did before.
+	sig = parseHumanityBody([]byte(`{"v":1,"wd":true,"ptr":0,"tch":0,"key":0}`))
+	hs, tells = scoreHumanity(sig, "")
+	if hs != tellWebdriver+ampNoInput || !strings.Contains(strings.Join(tells, ","), "no_input") {
+		t.Fatalf("reported zeros must still amplify: hs=%d tells=%v", hs, tells)
+	}
+	// And the amplifier still cannot OPEN a score on its own (D5b) — the
+	// operator's quiet-browser case: zero input, nothing else, must pass.
+	sig = parseHumanityBody([]byte(`{"v":1,"wd":false,"ptr":0,"tch":0,"key":0,"mv":0,"hc":8,"dpr":1.5}`))
+	if hs, tells = scoreHumanity(sig, "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0"); hs != 0 || len(tells) != 0 {
+		t.Fatalf("an untouched real browser must score clean: hs=%d tells=%v", hs, tells)
+	}
+}

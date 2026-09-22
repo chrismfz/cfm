@@ -653,14 +653,26 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   and this solve passed it" from "the tier never fired": without it a clean
   armed solve reads exactly like a plain v1 one. `grep 'v2='` is the burn-in
   question "is my newly-armed tier actually covering traffic?"; `grep
-  v2_reject` is "did it bite".
+  v2_reject` is "did it bite". Finally `sig=` carries the report AS REPORTED
+  — `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
+  `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
+  browser did not report. `mv`/`hc`/`dm`/`dpr`/`raf` are scored by nothing;
+  `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, so logging
+  them makes that tell auditable. `result=v2_reject` lines carry `sig=` too —
+  a rejected solve is not published as a solved event, so its line is the only
+  place that population reaches the corpus. This is the corpus half of the table above: the
+  signals listed there as ★★/★★★ candidates are measured and logged long
+  before any of them is allowed to score, so a weight is set from real
+  distributions rather than written from memory. `sig=` is absent when no
+  payload arrived (the same solve shows `hs=-`).
 - **`cfm.abuse_shadow.log`**: `signal=humanity verdict=would_v2 …` when the score
   *would* escalate — shadow, nothing served.
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
   into cfm-web's `fingerprints` ledger as another per-client tell. The
-  `challenge_solved` row carries `hs`, `tells`, `v2` (the arm grain) and
-  `hs_nopayload` (the durable spelling of the log's `hs=-`), so the burn-in
-  readout does not require shell access to every node. `hs` is omitted
+  `challenge_solved` row carries `hs`, `tells`, `v2` (the arm grain),
+  `hs_nopayload` (the durable spelling of the log's `hs=-`) and `sig` (the raw
+  unscored report as a JSON object, same numbers and rounding as the log's
+  `sig=`), so the burn-in readout does not require shell access to every node. `hs` is omitted
   entirely when the rung is off — the -1 sentinel is never persisted as a
   score.
 
