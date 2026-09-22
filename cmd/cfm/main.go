@@ -622,11 +622,22 @@ func runDaemon(args []string) {
 		// OpenResty (cfm user) cannot read the snapshot on startup
 		// until it successfully writes a new one.
 		_ = os.Chown("/var/lib/cfm/sslcollector/dump.json", 0, cfmGID)
-		// nginx cache dirs: root:cfm 0770 so OpenResty workers (cfm
-		// group) can write.
+		// nginx cache dirs: root:cfm 0770 so the edge workers (cfm group)
+		// can write. Tier A is the single cfm_static zone; Tier B micro-cache
+		// (Phase B1) declares one zone per TTL bucket {1,2,5,10,30,60}s, and
+		// each proxy_cache_path dir MUST exist before `angie -t`/`openresty -t`
+		// or the config test fails [emerg]. This is TOP-DIR ownership only; the
+		// levels=1:2 subdirs are created by the worker, and the packaging/
+		// installer heal (chown -R root:cfm) fixes a tree left root-owned by an
+		// older run — see packaging/debian/DEBIAN/postinst.
 		for _, d := range []string{
 			"/var/cache/nginx/cfm_static",
-			"/var/cache/nginx/cfm_micro",
+			"/var/cache/nginx/cfm_micro_1s",
+			"/var/cache/nginx/cfm_micro_2s",
+			"/var/cache/nginx/cfm_micro_5s",
+			"/var/cache/nginx/cfm_micro_10s",
+			"/var/cache/nginx/cfm_micro_30s",
+			"/var/cache/nginx/cfm_micro_60s",
 		} {
 			_ = os.MkdirAll(d, 0o770)
 			_ = os.Chmod(d, 0o770)
