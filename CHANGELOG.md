@@ -28,12 +28,19 @@ back-filled here — see the git/PR history for that period.
   static hot path, double-`pcall`-guarded) flips `$cfm_cache_skip` to `0` and
   stamps the purge generation into the cache key; any error or an unarmed vhost
   leaves caching off, exactly as before. Cached responses honour the origin's
-  `Cache-Control`/`Expires` with a 1h fallback, never cache a `Set-Cookie`
-  response, and use anti-stampede locking so a burst hits the origin about once
-  per TTL. A new CI guard (`check_site_cache_config.sh`) asserts the
-  bypass-by-default invariant on every `proxy_cache` location and openresty↔angie
+  `Cache-Control`/`Expires` with a 1h fallback, only `200` is cached (a
+  transient deploy-time 404 must not stick), a `Set-Cookie` response is never
+  cached, and anti-stampede locking means a burst hits the origin about once per
+  TTL. The static-asset location now uses `proxy_buffering on` (it previously
+  streamed unbuffered): nginx populates `proxy_cache` only on the buffered path,
+  so buffering is required for the cache to store anything — small web assets
+  buffer in memory, larger ones spill into the cache dir; large media/archives
+  keep streaming from their own separate uncached location. A new CI guard
+  (`check_site_cache_config.sh`) asserts the bypass-by-default invariant and
+  buffering-on on every `proxy_cache` location, plus openresty↔angie location
   parity, so a future refactor cannot silently reintroduce the global,
-  page-breaking cache CFM removed once before. The Angie installer now
+  page-breaking cache CFM removed once before — or leave a cache location
+  unbuffered (which would silently store nothing). The Angie installer now
   provisions the cache directory at the canonical `/var/cache/nginx/cfm_static`
   (it had pointed at `/var/cache/angie/`, harmless until now but a mismatch with
   the conf and the daemon that would fail `angie -t` once caching went live). No

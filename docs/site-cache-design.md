@@ -675,14 +675,37 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      fail-safe `cfm_cache.static_gate()` (double-`pcall`) flips skip→`0` +
      stamps the generation **only** for a static-armed vhost while the master
      switch is on. **TTL is respect-origin + 1h fallback** (`proxy_cache_valid
-     200 1h` / `404 1m`, honouring the origin's `Cache-Control`/`Expires`) —
-     the simplest correct nginx config; a **per-vhost forced static TTL** needs
-     a location-per-bucket layout and is deferred to a follow-up. A single
+     200 1h`, honouring the origin's `Cache-Control`/`Expires`) — the simplest
+     correct nginx config; a **per-vhost forced static TTL** needs a
+     location-per-bucket layout and is deferred to a follow-up. A single
      `cfm_static` zone (not per-tier) keeps the conf minimal. Anti-stampede
      (`proxy_cache_lock` + `use_stale updating` + `background_update`) and a
      generation-prefixed key (`"g$cfm_cache_gen|$scheme://$host$request_uri"`).
      CI guard `check_site_cache_config.sh` pins the bypass-by-default invariant
      + openresty↔angie parity.
+     *Correctness constraints found in adversarial review (all folded into the
+     shipped 3b), each now pinned by the guard or documented as a limit:*
+     - **Response buffering MUST be on in the cache location.** nginx writes to
+       `proxy_cache` only on the buffered upstream path; the static-asset
+       location historically ran `proxy_buffering off` (a copy of the PHP/media
+       streaming pattern — *not* a documented static-asset decision; the
+       BUFFERING NOTE lists only PHP/admin + large media), which would make
+       Tier A a **silent no-op** (stores nothing, never a HIT — undetectable by
+       `nginx -t` or the Lua unit tests). Flipped to `proxy_buffering on`; the
+       guard now **fails** any `proxy_cache` location left with buffering off.
+       `proxy_request_buffering` stays off (the WAF F07/F08 large-upload
+       streaming path is unaffected — that is request-body buffering).
+     - **404s are not cached.** `proxy_cache_valid 404 1m` was dropped: on an
+       atomic deploy a transiently-404 asset would stick as a cached 404 for up
+       to a minute (the generation only bumps on explicit purge). Only `200`
+       is cached; a static 404 at the origin is cheap.
+     - **Encoding correctness relies on the origin's `Vary: Accept-Encoding`.**
+       The cache key omits `Accept-Encoding` (nginx honours a `Vary` response
+       header since 1.7.7, and Apache's mod_deflate sets it). A misconfigured
+       origin that gzips *without* `Vary` could serve compressed bytes to a
+       client that didn't ask for them — a documented residual of respect-origin
+       caching, not keyed in (keying would fragment the cache 3× for correct
+       origins).
    - **3c — stats/logging** (`cfm_cache_stats` + `cfm_cache_log` + the daemon
      `/nginx/cache/stats` aggregate + `/api/v1/site-cache/stats` + the cfm-admin
      hit-ratio column): deferred from this list's item 3, still to build.

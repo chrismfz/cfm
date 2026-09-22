@@ -61,6 +61,12 @@ for f in "$ORT" "$ANG"; do
           m=""
           if (body !~ /proxy_cache_bypass[[:space:]]+\$cfm_cache_skip[[:space:]]*;/) m=m " proxy_cache_bypass-$cfm_cache_skip"
           if (body !~ /proxy_no_cache[[:space:]]+\$cfm_cache_skip[[:space:]]*;/)     m=m " proxy_no_cache-$cfm_cache_skip"
+          # A cache location MUST buffer: nginx writes to proxy_cache only on the
+          # buffered upstream path, so `proxy_buffering off` here makes caching a
+          # silent no-op (stores nothing, never a HIT). Require an explicit ON
+          # and forbid an OFF in the same location.
+          if (body ~ /proxy_buffering[[:space:]]+off[[:space:]]*;/)                 m=m " proxy_buffering-off(cache-would-store-nothing)"
+          if (body !~ /proxy_buffering[[:space:]]+on[[:space:]]*;/)                 m=m " missing-proxy_buffering-on"
           if (m!="") print "location@line" locline ":" m
         }
         loc=0; body=""
@@ -69,7 +75,7 @@ for f in "$ORT" "$ANG"; do
   ' "$f")
   if [ -n "$missing" ]; then
     while IFS= read -r linfo; do
-      err "$f: cache $linfo — a proxy_cache location without the bypass-by-default gate reintroduces unconditional caching."
+      err "$f: cache $linfo — a proxy_cache location is missing a required directive (no bypass gate → unconditional caching; buffering off → nginx silently caches NOTHING)."
     done <<< "$missing"
   fi
 
@@ -98,11 +104,35 @@ for f in "$ORT" "$ANG"; do
   fi
 done
 
-# ── (d) parity: both edges activate proxy_cache on the same # of locations ─────
+# ── (d) parity: both edges cache the SAME locations (not just the same count) ──
+# Emit each cache location's own `location …{` header line (whitespace-normalised,
+# sorted) per conf and diff them. Comparing counts alone would pass a refactor
+# that added a cache to one path in openresty and a DIFFERENT path in angie —
+# the exact drift this guard exists to stop.
+cache_locs() {
+  awk '
+    !loc && /^[[:space:]]*location[[:space:]].*\{/ {
+      loc=1; body=$0 "\n"; first=$0
+      t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d=o-c
+      next
+    }
+    loc {
+      body=body $0 "\n"
+      t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d+=o-c
+      if (d<=0) {
+        if (body ~ /proxy_cache[[:space:]]+cfm_static[[:space:]]*;/) {
+          gsub(/^[[:space:]]+/,"",first); print first
+        }
+        loc=0; body=""
+      }
+    }
+  ' "$1" | sort
+}
 ort_n=$(grep -Ec '^[[:space:]]*proxy_cache[[:space:]]+cfm_static[[:space:]]*;' "$ORT" || true)
 ang_n=$(grep -Ec '^[[:space:]]*proxy_cache[[:space:]]+cfm_static[[:space:]]*;' "$ANG" || true)
-if [ "$ort_n" != "$ang_n" ]; then
-  err "openresty.conf has $ort_n 'proxy_cache cfm_static;' location(s) but angie.conf has $ang_n — the two edges must cache the same places."
+if ! diff <(cache_locs "$ORT") <(cache_locs "$ANG") >/dev/null 2>&1; then
+  err "openresty.conf and angie.conf cache DIFFERENT locations (not merely a count mismatch); the two edges must cache the same paths. Divergence:"
+  diff <(cache_locs "$ORT") <(cache_locs "$ANG") 2>/dev/null | sed 's/^/       /' >&2 || true
 fi
 
 if [ "$fail" -ne 0 ]; then
