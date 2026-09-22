@@ -68,6 +68,7 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf bounds + generator tests
 ./scripts/tests/check_logrotate_coverage.sh      # every CFM log path is rotated (see §5)
 ./scripts/tests/check_origin_ka_config.sh        # origin-keepalive 443 SNI-safety: keepalive 0 (OpenResty) + proxy_ssl_session_reuse off
+./scripts/tests/check_shared_lua_layout.sh       # installer CFM_LUA_MANIFEST == configs/lua/*.lua (see §5)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
 ./scripts/tests/check_changelog_entry.sh         # CHANGELOG structure (locally); per-PR "code changed → needs entry" runs in CI
 ```
@@ -389,7 +390,13 @@ geo/enrich, ASN via the local mmdb) with `challenge_v2` biting at verify via
 the geo resolver; no edge Lua involved, `FP_POLICY=0` kills all kinds. **ChallengeV2 Rung 1
 is built** (2026-09-19, `challenge_v2.go` + the challenge-page passive
 collectors, guardrails D5): every solve is scored on positive-only headless
-evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived), and
+evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
+`v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
+so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
+`sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` is the report AS
+REPORTED — mv/hc/dm/dpr/raf corpus-only and scored by nothing, ptr/tch/key
+also the no_input amplifier's inputs; absent keys = not reported, never a
+fabricated zero), and
 for an armed `challenge_v2` fingerprint a failing solve earns NO clearance
 (`result=v2_reject`, retry-able with backoff) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
@@ -532,6 +539,15 @@ entry.
   case-inconsistent join that false-flagged tenants; a `%.2g` value misrender).
   Docs-only / config-comment PRs may skip it; anything with runtime behaviour
   does not. Note in the PR body that the review ran and what it found.
+- **Never retire a signal/detector on reasoning alone — check the fleet
+  first** (`docs/abuse-defense-master-plan.md` §4 D3a, added after `cfm_pcw`
+  came one review away from being deleted while alive). "It fed no decision"
+  is not evidence: a log-only signal feeds no decision by construction. Before
+  deleting, show two things with the CFM MCP (`edge_error_tail` /
+  `cfm_log_tail` / `abuse_shadow`, `node="all"`): that it actually emitted,
+  and — if the case is "signal Y already covers it" — that Y's own output
+  contains the same events. Zero emissions is a DEPLOYMENT finding, not a
+  verdict on the signal.
 - After edge-affecting changes, run the relevant runbook/checklist in `docs/`
   before considering the change done.
 - Update `CHANGELOG.md` (`[Unreleased]`) as part of the change, per §8.

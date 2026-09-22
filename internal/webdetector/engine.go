@@ -800,6 +800,45 @@ func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	if s.TLSFP != "" {
 		payload["tls_fp"] = s.TLSFP
 	}
+	// ChallengeV2 Rung 1 (challenge_v2.go). ALL of it hangs off HumanityScored,
+	// the same single gate HumanitySuffix uses, so the log line and this row
+	// can never disagree about whether the scorer ran — and a ChallengeSolve
+	// literal that never went through verify cannot persist "scored clean"
+	// (hs 0 is a real score, so the zero value had to stop meaning it).
+	//
+	//   hs           the score; 0 means scored-and-clean, i.e. a PASS
+	//   hs_nopayload no parseable humanity body arrived (see the doc below)
+	//   tells        which tells fired, comma-joined
+	//   v2           the arm grain covering the solve, absent when unarmed
+	//   sig          the readings as reported, same numbers and rounding as
+	//                the solve line's sig= field
+	//
+	// mv/hc/dm/dpr/raf are scored by nothing — corpus, so a future tell can
+	// be written from measured distributions instead of from memory;
+	// ptr/tch/key additionally feed the no_input amplifier, and recording
+	// them is what makes it auditable. An individual signal the browser did
+	// not report is simply not a key — never a fabricated zero (D5b).
+	//
+	// hs_nopayload is NOT merely the durable spelling of the log's "hs=-":
+	// the log collapses to hs=- only when the score is also 0, so a
+	// HeadlessChrome UA that strips the body logs hs=100 tells=headless_ua
+	// while this row carries hs 100 AND hs_nopayload true. This row is the
+	// more precise of the two; don't "align" them by making it lossier.
+	if s.HumanityScored {
+		payload["hs"] = s.HumanityScore
+		if s.HumanityNoPayload {
+			payload["hs_nopayload"] = true
+		}
+		if s.HumanityTells != "" {
+			payload["tells"] = s.HumanityTells
+		}
+		if s.V2Grain != "" {
+			payload["v2"] = s.V2Grain
+		}
+		if sig := s.signalMap(); sig != nil {
+			payload["sig"] = sig
+		}
+	}
 	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_solved", Host: s.Host, IP: s.IP, Payload: payload})
 }
 

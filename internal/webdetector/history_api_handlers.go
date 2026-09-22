@@ -40,6 +40,49 @@ type historyEventView struct {
 	ASNName string `json:"asn_name,omitempty"`
 }
 
+// redactScopedHistoryRows strips admin-only payload keys from history rows
+// before they leave the endpoint for a SCOPED (cPanel) caller. Admin callers
+// see the rows untouched.
+//
+// Today that is exactly payload.sig — the ChallengeV2 Rung-1 device readings
+// (hardwareConcurrency, deviceMemory, devicePixelRatio, pointer/touch/key
+// counts) collected by CFM's own challenge page. A tenant could measure the
+// same things from their own site's JS, so this is not a secret; it is
+// nonetheless per-visitor browser-fingerprinting material that CFM gathered,
+// and the scoped surface previously exposed nothing of the kind (the UA was
+// the most it carried). Scoped-vs-admin is a hard boundary in this repo and
+// new categories of data cross it only deliberately, so the default here is
+// closed. Nothing is lost operationally: the burn-in readout that sig exists
+// for is admin/MCP.
+//
+// The payload map is copied rather than edited so the caller's own map is
+// never mutated, but note the LIMIT of that: the slice element is reassigned
+// in place, so this is safe only because QueryEvents builds a fresh
+// []HistoryEvent with one JSON unmarshal per row on every call. If it ever
+// returns a shared or cached slice, this must copy the slice too — otherwise
+// the first scoped request would strip sig from the cached row for every
+// later admin/MCP read. Keep the key list in sync with
+// docs/endpoint_scope_inventory.md.
+func redactScopedHistoryRows(r *http.Request, rows []HistoryEvent) {
+	if IsAdminRequest(r) {
+		return
+	}
+	const adminOnlyKey = "sig"
+	for i := range rows {
+		if _, present := rows[i].Payload[adminOnlyKey]; !present {
+			continue
+		}
+		clean := make(map[string]interface{}, len(rows[i].Payload))
+		for k, v := range rows[i].Payload {
+			if k == adminOnlyKey {
+				continue
+			}
+			clean[k] = v
+		}
+		rows[i].Payload = clean
+	}
+}
+
 func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
@@ -59,6 +102,7 @@ func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	redactScopedHistoryRows(r, rows)
 	enrichEnabled := strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "1") || strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "true")
 	if !enrichEnabled || e.enr == nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"rows": rows})
@@ -144,6 +188,12 @@ func (e *Engine) handleHistoryChallengeOutcomes(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Same redaction as handleHistoryEvents: `issued` rows are returned to the
+	// caller verbatim below, so they pass through the one helper rather than
+	// relying on challenge_issued happening not to carry an admin-only key
+	// today. `solvedRows` is only read for its (ip,host) keys and never
+	// returned, so it needs none.
+	redactScopedHistoryRows(r, issued)
 	solvedRows, _ := e.history.QueryEvents(host, q.Get("ip"), "challenge_solved", queryLimit)
 	solvedSet := make(map[string]struct{}, len(solvedRows))
 	for _, ev := range solvedRows {

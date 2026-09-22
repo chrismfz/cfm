@@ -47,6 +47,13 @@ the only live enforcement born from this effort is `cookie_discard`'s
 `BLOCK=24h` and the operator's manual per-IP "Block" button on Explain
 Fingerprint. Roughly 15 shadow signals run; zero have been promoted.
 
+> **⚠ This §2 snapshot is HISTORY, kept to show what E3 was answering — all
+> three of its "missing" claims were closed between 2026-09-18 and
+> 2026-09-22.** Nodes pull `fingerprint_policies` (E3 node slice), ChallengeV2
+> Rung 1 is built and armable from five grains (E3), and the action channel
+> enforces on the web edge, the panel ports and at verify. For current state
+> read **§5**, never this section.
+
 **The failure mode to stop repeating:** "shadow-first" became shadow-forever
 because burn-ins have no exit criteria, and each burn-in review spawned a new
 signal + a new doc instead of a promote/retire decision. Hence §4-D3/D4.
@@ -66,11 +73,11 @@ reviewed PR.
 | 5 | `abuse_shadow` rate_outlier (Signal C) | `abuse_shadow.go` | shadow | populated, dominant grain-A signal | **KEEP as evidence** (Track-1 fusion input). |
 | 6 | `abuse_shadow` facet / cost / dc_fraction / fused | `abuse_shadow_{facet,cost,dcfrac,fused}.go` | shadow | thin; no Class-2 flood observed since built | **KEEP-FROZEN**: no new sub-signals, no weight-tuning PRs until the next real Class-2 flood provides data. Review then, with §4-D3 criteria. |
 | 7 | WAF rule 612 `WAF_FETCH_METADATA` (Sec-Fetch tell) | `cfm_waf.lua` | logonly | fires as designed | **KEEP logonly**; E3 seed input. Not promoted alone. |
-| 8 | `cfm_pcw` post-clearance nav cadence (B2) | `configs/lua/cfm_pcw.lua` | log-only | documented structural blind spot (fetch()-based scrapers invisible); fed no decision in its lifetime | **RETIRE (proposed).** Remove the Lua + toggle; `rate_outlier` already sees cleared traffic in the access log. |
+| 8 | `cfm_pcw` post-clearance nav cadence (B2) | `configs/lua/cfm_pcw.lua` | log-only, **and it fires** | 2 episodes in the live window (rigel, `santorinitours.org`): two separate IPs each reaching 60 navs/60s post-clearance, both `would_deny`. **`rate_outlier` did NOT flag either** — that vhost appears in its output only under `dc_fraction` (50 reqs / 50 distinct DC IPs, the DISTRIBUTED shape). Different shape, not covered elsewhere. | **KEEP — retire REVERSED 2026-09-22.** It was proposed for retirement on "fed no decision in its lifetime", which is trivially true of every log-only signal and was never evidence. A fleet-wide check before deleting it found it alive and non-redundant. It is also the only sensor for the exact failure mode ChallengeV2 exists to address (a farm that SOLVES, then pulls pages). **Exit contract (D3), finally set:** its starting constants (`T1`=30, `T2`=60 navs/60s) were never tuned from real lines — tune them from the `[cfm_pcw]` lines and re-review by 2026-10-20 with promote / keep-as-evidence / retire. Known FP risk, unchanged and untested: the key is per-(ip,host), not per-browser, so a shared egress (CGNAT) could pool real users — neither observed episode has that shape. |
 | 9 | `under_attack` I1 state machine + notify | `under_attack.go` | detect-only (DRYRUN) | alarm value real ("challenge defeated" as an alert) | **KEEP as the alarm.** I1b read-surfaces optional. |
-| 10 | `under_attack` campaign fingerprinter I2 | `under_attack_fingerprint.go` | shadow | no consumer; I3–I5 never built | **FREEZE (proposed).** E1–E3 supersede its enforcement path; revisit only if the draft-rule idea (I3) is ever picked up. |
+| 10 | `under_attack` campaign fingerprinter I2 | `under_attack_fingerprint.go` | shadow | no consumer; I3–I5 never built | **FROZEN — operator-ratified 2026-09-22.** Code STAYS as-is (this is a freeze, not a retire: unlike `cfm_pcw` its mechanism is sound, it simply has no consumer). No new predicates, no weight tuning, no sub-signals, no I3–I5. E1–E3 superseded its enforcement path; revisit ONLY if the draft-rule idea (I3) is deliberately picked up, and then with a §4-D3 exit contract. |
 | 11 | `ua_family=` solve-log corpus | `challenge_server.go` | log-first | builds the fp↔UA corpus | **KEEP.** Feeds E2 and the future JA4↔UA coherence tell. |
-| 12 | Humanity scorer / would_v2 Rung-1 (`HUMANITY_MIN_OBS`, `MINORITY_PCT`) | **not built** | keys exist ONLY in live `/etc/cfm/detectors.conf` on the fleet — no code reads them | n/a | **Build inside E3** (with teeth, §5). Operator: delete the orphan keys from live configs until then. |
+| 12 | Humanity scorer / would_v2 Rung-1 | `challenge_v2.go` | **BUILT + ENFORCING** since 2026-09-19 (E3) | positive-only tells; `hs=`/`tells=`/`sig=`/`v2=` per solve | **KEEP.** Teeth only under an operator arm (D5a). The knobs are `CHALLENGE_V2_PASSIVE`/`_FAIL_SCORE`/`_DEBUG` — the old `HUMANITY_MIN_OBS`/`MINORITY_PCT` keys were never read by any code and are still orphans in live `/etc/cfm/detectors.conf`: **operator cleanup, still outstanding.** |
 
 Fleet-config cleanup that falls out of the table: remove the orphan
 `HUMANITY_*`/`MINORITY_PCT` keys (row 12); leave `UNDER_ATTACK*`,
@@ -99,6 +106,19 @@ D3/D4 are the process fix.
   and who decides. At review the only outcomes are promote / keep-as-evidence
   / retire — "extend with a new sub-signal" is not an outcome. Signals #6 are
   grandfathered under "review at next Class-2 flood".
+  - **D3a — a retire needs EVIDENCE, gathered before the delete (added
+    2026-09-22, the `cfm_pcw` near-miss).** "It fed no decision" is not
+    evidence: every log-only signal feeds no decision by construction. Two
+    things must be shown on the FLEET, not argued from the code, and recorded
+    in the row: (1) **liveness** — the signal actually ran and what it emitted
+    (`edge_error_tail` / `cfm_log_tail` / `abuse_shadow` with `node="all"`;
+    zero emissions means dark, which is a DEPLOYMENT finding, not a verdict on
+    the signal); and (2) **coverage** — if the case for retiring is "signal Y
+    already covers it", Y's own output must contain the same events. `cfm_pcw`
+    was one review away from deletion on both counts being assumed: it was
+    alive with two `would_deny` episodes, and the signal said to supersede it
+    had not flagged either. A structural criticism of a signal's design is a
+    reason to fix or bound it; only these two checks justify removing it.
 - **D4 — Sensor freeze.** No new shadow signals and no new design docs in
   this area until E1–E3 (§5) have shipped and been measured. The next PR here
   is an actuator.
@@ -116,8 +136,13 @@ D3/D4 are the process fix.
   check with an accessibility fallback); a no-recourse deny stays reserved
   for farm-unique fingerprints per D2. **(d) full observability** — every
   scored solve logs `hs=` + `tells=` so the operator can see exactly why any
-  client passed or failed, with a shadow burn-in + measured FP rate (D3 exit
-  contract) before teeth are trusted.
+  client passed or failed, `sig=` with the readings exactly as the client
+  reported them (corpus for future tells; absent key = not reported, never a
+  fabricated zero), and `v2=<fp|geo|vhost|mark>` naming the arm whenever one
+  covers the solve — an armed solve that PASSES must not read like a plain v1
+  one, or a live tier looks like a forgotten one (added 2026-09-22 after
+  exactly that confusion in the field). With a shadow burn-in + measured FP
+  rate (D3 exit contract) before teeth are trusted.
 
 ## 5. Enforcement roadmap — the only live checklist
 
@@ -161,8 +186,12 @@ already opened.
       `verifiedGoodBot` + the detector-sink autoblock rails; `logonly → block`
       promotion per house rule, with the partner allowlist (Skroutz/BestPrice/
       ahrefs/…) honoured before anything counts.
-- [ ] **E3 — Phase C minimal + ChallengeV2 Rung 1 with teeth** *(both repos;
-      the keystone).*
+- [x] **E3 — Phase C minimal + ChallengeV2 Rung 1 with teeth — DONE
+      2026-09-22** *(both repos; the keystone).* Every slice below shipped:
+      policy fetch, node pull + edge enforcement, panel-port consult, Rung 1,
+      country/ASN kinds, and all four arm surfaces. What remains of E3 is
+      BURN-IN, not build: watch `hs=`/`sig=`/`v2=` and `result=v2_reject`
+      against real traffic, and feed the result to E4.
       - [x] cfm-web slice 1 — **DONE 2026-09-18**: `GET /api/fingerprint-policies/fetch`
         (token-authed; serve-time re-validation — `deny` withheld below a farm
         verdict, `observe` never served), the dedicated `Arm:FingerprintPolicy`
@@ -205,7 +234,10 @@ already opened.
         positive headless evidence only (webdriver / HeadlessChrome UA fail
         alone at 100; SwiftShader-class renderer 60, touch-lie 50, outer-zero
         40 each PASS alone; no-input is an amplifier that never opens — D5b),
-        logged as `hs=`/`tells=` on the solve line. Armed `challenge_v2` fp +
+        logged as `hs=`/`tells=`/`sig=`/`v2=` on the solve line and as
+        `hs`/`tells`/`sig`/`v2`/`hs_nopayload` on the durable
+        `challenge_solved` history row (2026-09-22; `payload.sig` is stripped
+        for scoped callers — see docs/endpoint_scope_inventory.md). Armed `challenge_v2` fp +
         failing score ⇒ `result=v2_reject`, 403, no clearance — the page
         reloads into a fresh challenge (D5c). Everyone else: shadow
         `signal=humanity verdict=would_v2` (rides ABUSE_SHADOW). Knobs
@@ -249,9 +281,9 @@ already opened.
         probe is block-tier only); country hit wins over ASN hit at lookup;
         cold IPs (enrich cache miss) fail open for up to the 90s edge
         decision-cache window.
-      - [ ] **ChallengeV2 arm surfaces (operator ask 2026-09-20): v2 as an
-        on-demand tier from WAF rules / vhost control / traffic rules /
-        scoped customers.** Insight that makes this cheap: challenge_v2 is
+      - [x] **ChallengeV2 arm surfaces — DONE 2026-09-22 (slices A-D all
+        shipped): v2 as an on-demand tier from WAF rules / vhost control /
+        traffic rules / scoped customers.** Insight that makes this cheap: challenge_v2 is
         a VERIFY-time distinction, not a serve-time one — so "arm v2 from
         X" only needs verify to know the challenge came from a v2-tier
         source. Foundation: a small per-(ip, host) **rung mark** TTL store
@@ -414,7 +446,7 @@ Rung-2 visible puzzle (only if Rung 1 is beaten), under_attack I3–I5.
 | Node-side design detail (grains, ladder, ChallengeV2 rungs) — roadmap sections frozen | `docs/traffic-classifier.md` |
 | Central ledger as-built (schema, ingestors, Phase C checklist) | `cfm-web:docs/fingerprint-reputation.md` |
 | Track-2 per-IP score design detail — plan section frozen | `docs/challenge-score.md` |
-| B2 decision record (as-built `cfm_pcw`; retire-candidate per §3) | `docs/challenge-score-b2.md` |
+| B2 decision record (as-built `cfm_pcw`; retire proposed 2026-09-18, REVERSED 2026-09-22 on fleet evidence — §3 row 8) | `docs/challenge-score-b2.md` |
 | Under-attack state machine design — increments frozen | `docs/under-attack-mode.md` |
 | Historical context for the abuse_shadow signals | `docs/webdetector-refactor.md` |
 | Archived (superseded, kept for archaeology) | `docs/archive/solver-farm-fingerprint-concentration.md` · `docs/archive/solver-farm-cross-host-phase2.md` · `docs/archive/fleet-fingerprint-reputation.md` |

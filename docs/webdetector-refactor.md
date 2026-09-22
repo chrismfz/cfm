@@ -323,7 +323,10 @@ watch them accumulate from the gateway. Contract:
 - [x] **I3** — `abuse_shadow` MCP tool + `/api/v1/system/abuse-shadow` endpoint
   (`internal/abuseshadow` tail+aggregate). Fleet-wide via the gateway
   `node_call node="all"` (no gateway change — passthrough). Admin-only, read-only.
-- [ ] **I4** — Signal B (enumeration) shadow. **I5** — Signal C (rate outlier).
+- [ ] **I4** — Signal B (enumeration) shadow. *(I5 as originally written said
+  "Signal C (rate outlier)" — but Signal C shipped in I2 above; the open items
+  here are Signal B and the Signal D idea in §4b, both in the master plan's
+  do-not-start backlog.)*
 - [ ] **I6** — promote whatever the data justifies to per-IP/subnet challenge.
 - [ ] **I7** — smarter vhost-wide arm on concentration signals.
 

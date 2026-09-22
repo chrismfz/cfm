@@ -17,7 +17,76 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **Both edge installers were missing four Lua modules from their pre-flight
+  manifest.** `install-angie.sh` and `install-openresty.sh` verify every
+  packaged module is present in `/var/lib/cfm/lua/` before reloading the edge,
+  so a bad package fails early with a clear message. Their `CFM_LUA_MANIFEST`
+  arrays had drifted: `cfm_fppolicy.lua`, `cfm_h3_config.lua`,
+  `cfm_panel_hosts.lua` and `cfm_ua_emergency.lua` were never added. All four
+  are `pcall`-guarded at their call sites, so a package that failed to deliver
+  one would not have crashed — it would have **silently disabled that feature**,
+  which for `cfm_fppolicy` means armed fingerprint policies quietly stop
+  enforcing, with no error and no log line. Both manifests now cover the full
+  packaged set (30 modules, kept in step by the guardrail below).
+- **`check_shared_lua_layout.sh` was itself broken, and unwired.** It asserted
+  a `configs/<file>"` copy pattern the installers stopped using when the Lua
+  moved into the package, so it failed on its first assertion — which also made
+  the panel-template ownership checks after that loop unreachable. It now
+  DERIVES the expected set from `configs/lua/*.lua` (what the Makefile actually
+  packages) and asserts both installer arrays match it exactly, replacing three
+  hand-maintained copies of one list with one source of truth. **It is now run
+  by CI** (`security.yml` build-test, and CLAUDE.md §3): it had never been
+  wired, which is how it rotted unnoticed in the first place.
+
 ### Added
+- **`v2=<grain>` on the challenge solve line — a passed ChallengeV2 solve is
+  no longer invisible.** `cfm.challenges.log` scored every solve (`hs=`/
+  `tells=`) but said nothing about whether the solve was covered by an armed
+  `challenge_v2`, so a clean solve under an arm was byte-identical to a plain
+  v1 one — an operator promoting a rule to the tier (e.g. `rule_xss` 302) saw
+  `result=solved … hs=0` and could not tell the tier from a forgotten one.
+  Every scored solve now names the grain that armed it when one did:
+  `v2=fp` (fingerprint policy), `v2=geo` (country/ASN policy), `v2=vhost`
+  (v2-tier vhost challenge) or `v2=mark` (per-(ip,host) rung mark written by a
+  `challenge_v2` traffic rule or WAF rule). No `v2=` means unarmed — the score
+  was shadow/log-only. `result=v2_reject` lines carry the grain too. Nothing
+  about enforcement changed: the D5 arm check is the same OR, now resolved
+  once and shared by the gate and the log so the teeth and the line can never
+  disagree. The same facts (`hs`, `tells`, `v2`, plus `hs_nopayload` for the
+  log's `hs=-`) now also land on the durable `challenge_solved` history row,
+  so "is my armed tier covering real traffic, and what is it scoring?" is
+  answerable from MCP/history instead of only by grepping each node's
+  `cfm.challenges.log`.
+- **The raw ChallengeV2 signals are now actually recorded (`sig=`).** The
+  challenge page has always reported pointer/touch/key counts, accumulated
+  mouse movement, hardwareConcurrency, deviceMemory, devicePixelRatio and the
+  rAF cadence — but only the scored subset survived: `mv`/`hc`/`dm`/`dpr`/
+  `raf` were parsed and thrown away, despite code comments claiming they were
+  "recorded". So the obvious burn-in question, *"did this client move the
+  mouse at all?"*, was unanswerable from the logs. Every scored solve now
+  carries ` sig=ptr:0,tch:0,key:0,mv:0,hc:8,dpr:1.5,raf:16.7` on its line in
+  `cfm.challenges.log` (`result=v2_reject` lines too — a rejected solve is
+  exactly the population the corpus is for) and the same numbers as `payload.sig` on the durable
+  `challenge_solved` history row. **`mv`/`hc`/`dm`/`dpr`/`raf` are scored by
+  nothing** — they are corpus, collected so a future tell can be written from
+  measured distributions rather than from memory; `ptr`/`tch`/`key` already
+  fed the `no_input` amplifier, and logging them makes that auditable instead
+  of opaque. No scoring or enforcement changes in either case. A signal the browser did not report
+  (e.g. `deviceMemory`, which is Chrome-only) is an absent key, never a
+  fabricated zero. Client-authored values are bounded for digit sanity only —
+  a negative, an absurd magnitude or a positive below any sensor resolution is
+  dropped to absent — while an anomalous but *reported* reading (`hc:0`,
+  `dpr:0`, a throttled tab's huge rAF average) is kept verbatim, because that
+  is precisely the evidence the corpus is for.
+  **Storage note:** `challenge_solved` is the highest-volume history row, and
+  the new keys add roughly 50-80 bytes to each (`sig` is up to 8 numbers, plus
+  `hs`/`tells`/`v2`/`hs_nopayload`). `HistoryStore` is bounded by
+  `retentionDays`/`maxRows` — row counts, not bytes — so the history DB grows
+  on the order of a third to a half for that row type at unchanged retention.
+  On a busy node (~100k solves/day) that is tens of MB; revisit
+  `WEBDET_HISTORY_*` retention if the node is disk-tight.
+
 - **Site Cache — Phase 2: edge policy feed (observe-only).** The daemon now
   serves the per-vhost cache policy on the `/nginx/cache/config` bridge endpoint,
   and a new edge module `configs/lua/cfm_cache.lua` pulls it per-worker (async,
@@ -34,7 +103,46 @@ back-filled here — see the git/PR history for that period.
   cost on real traffic before any caching is turned on. Design:
   `docs/site-cache-design.md` §14.
 
-## 2026.09.22
+### Changed
+- **The proposed retirement of `cfm_pcw` (post-clearance nav-cadence shadow,
+  Track-2 B2) is REVERSED — the signal stays.** It had been marked
+  retire-candidate since 2026-09-18 on the grounds that it "fed no decision in
+  its lifetime". A fleet-wide check run before deleting it showed that
+  reasoning was wrong on both counts. It is alive: two episodes in the live
+  window on `rigel`, each a single IP reaching 60 navigations in 60 seconds on
+  `santorinitours.org` AFTER clearing the challenge, both scoring
+  `verdict=would_deny`. And it is not redundant: `rate_outlier`, the signal
+  said to supersede it, flagged neither IP — that vhost shows up in its output
+  only under `dc_fraction`, with 50 requests spread over 50 distinct
+  datacenter IPs, which is the opposite (distributed) shape. `cfm_pcw` is also
+  the only sensor for the exact failure mode ChallengeV2 addresses: a client
+  that solves the challenge and then behaves like a scraper. It now has the
+  D3 exit contract it never had — tune `T1`/`T2` from real `[cfm_pcw]` lines
+  (they are untuned starting constants) and re-review by 2026-10-20.
+  Its known FP risk is unchanged: the counter is keyed per-(ip,host), not
+  per-browser, so a shared egress could pool real users; neither observed
+  episode has that shape.
+- **`under_attack` campaign fingerprinter (I2) is frozen**, operator-ratified
+  2026-09-22. No code change — it stays in the tree exactly as it is; the
+  freeze is a rule about future work, not a removal. What the
+  freeze means going forward: no new predicates, no weight tuning, no
+  sub-signals, and I3-I5 (draft rule, auto-apply, repeat-offender escalation)
+  are not to be built — the master plan's E1-E3 superseded that enforcement
+  path. I1 stays as the alarm. See `docs/under-attack-mode.md`.
+
+
+### Security
+- **`payload.sig` is admin-only on `/api/v1/webdet/history/events`.** The new
+  ChallengeV2 device readings (`hardwareConcurrency`, `deviceMemory`,
+  `devicePixelRatio`, pointer/touch/key counts) that CFM's challenge page
+  collects from each visitor are stripped for scoped (cPanel) callers; admins
+  and MCP see rows untouched. A tenant could measure the same values from
+  their own site's JS, so this is not secret — but the scoped surface
+  previously exposed nothing of the kind (the UA was the most it carried), and
+  a new category of per-visitor data crosses that boundary only deliberately.
+  Scoped callers keep the rest of the payload. See
+  `docs/endpoint_scope_inventory.md`.
+
 
 ### Added
 - **Site Cache — per-vhost edge caching (Phase 1: control plane).** New opt-in

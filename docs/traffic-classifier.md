@@ -647,11 +647,50 @@ burn-in and FP triage with no new plumbing and no logrotate change:
 
 - **`cfm.challenges.log`** (per solve; already logs `ua=`, `solve_ms=`,
   `ua_impossible=`): add `hs=<humanity_score>`, `tells=<fired,comma,list>`,
-  `fp=<tlsfp>` — the raw grep surface for "which solve, and why".
+  `fp=<tlsfp>` — the raw grep surface for "which solve, and why" — plus
+  `v2=<grain>` naming the arm that covered the solve (`fp` / `geo` / `vhost` /
+  `mark`), absent when unarmed. The grain is what separates "the tier is live
+  and this solve passed it" from "the tier never fired": without it a clean
+  armed solve reads exactly like a plain v1 one. `grep 'v2='` is the burn-in
+  question "is my newly-armed tier actually covering traffic?"; `grep
+  v2_reject` is "did it bite". Finally `sig=` carries the report AS REPORTED
+  — `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
+  `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
+  browser did not report. `mv`/`hc`/`dm`/`dpr`/`raf` are scored by nothing;
+  `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, so logging
+  them makes that tell auditable. `result=v2_reject` lines carry `sig=` too —
+  a rejected solve is not published as a solved event, so its line is the only
+  place that population reaches the corpus. This is the corpus half of the table above: the
+  signals listed there as ★★/★★★ candidates are measured and logged long
+  before any of them is allowed to score, so a weight is set from real
+  distributions rather than written from memory. `sig=` absent means nothing was
+  RETAINED, which is a SUPERSET of "no payload arrived": a client that posts
+  `{}`, or a body whose every reading fails the bounds, parses fine and shows
+  `hs=0` with no `sig=` — that is not an `hs=-` case. Isolate the
+  body-stripping population with `hs=-` (or the row's `hs_nopayload`); `sig=`
+  absence alone does not identify it.
 - **`cfm.abuse_shadow.log`**: `signal=humanity verdict=would_v2 …` when the score
   *would* escalate — shadow, nothing served.
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
-  into cfm-web's `fingerprints` ledger as another per-client tell.
+  into cfm-web's `fingerprints` ledger as another per-client tell. The
+  `challenge_solved` row carries `hs`, `tells`, `v2` (the arm grain),
+  `hs_nopayload` and `sig` (the readings as a JSON
+  object, same numbers and rounding as the log's `sig=`), so the burn-in
+  readout does not require shell access to every node. `hs_nopayload` is the
+  MORE precise of the two surfaces, not a rename of the log's `hs=-`: the log
+  collapses to `hs=-` only when the score is also 0, so a HeadlessChrome UA
+  that strips the body logs `hs=100 tells=headless_ua` while the row carries
+  `hs:100` AND `hs_nopayload:true`. Grepping `hs=-` and querying
+  `hs_nopayload` therefore return different populations — use the row.
+  `payload.sig` is admin-only (stripped for scoped callers,
+  `docs/endpoint_scope_inventory.md`); the rest of the payload is unchanged.
+  `challenge_solved` is the highest-volume row type, so these keys add ~50-80
+  bytes each and the history DB grows accordingly at unchanged retention (it
+  is bounded by row count, not bytes) — see the CHANGELOG storage note.
+  Every humanity key is gated on the scorer having actually run, so an
+  unscored solve carries none of them rather than a default-looking `hs:0`. Every humanity key is omitted
+  entirely when the rung is off: there is no `-1` sentinel to look for, so the
+  ABSENCE of `hs` — not a magic value — is what says "never scored".
 
 MCP surfaces: `abuse_shadow` (per-node signal/verdict counts), `detection_history`
 (durable; `node="all"` for the fleet), `challenge_events`; suspected-FP drilldown
