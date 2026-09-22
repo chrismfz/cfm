@@ -205,9 +205,11 @@ func FingerprintPolicyForID(id string) string {
 }
 
 // SetFingerprintPolicyGeoResolver wires the IP→(countryISO, asn) resolver the
-// VERIFY-side geo check uses (GeoPolicyActionForIP). Called once at engine
-// start with the enricher's cached lookup; nil disables the verify-side check
-// (fail-open — the decision-path floor still works from its own inputs).
+// VERIFY-side geo check uses (GeoPolicyActionForIP). NewEngine calls it on
+// every engine build (i.e. on every reload): with the enricher's cached lookup
+// when that engine has one, with nil when it doesn't — so the gate always
+// follows the CURRENT config. nil disables the verify-side check (fail-open —
+// the decision-path floor still works from its own inputs).
 func SetFingerprintPolicyGeoResolver(fn func(ip string) (string, uint64)) {
 	fpPolicies.mu.Lock()
 	fpPolicies.geoResolver = fn

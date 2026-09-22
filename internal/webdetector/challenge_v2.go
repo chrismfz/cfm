@@ -292,7 +292,8 @@ func challengeV2Marked(ip, host string) bool {
 
 // SetChallengeV2HostArmed wires the per-vhost v2 lookup the verify gate ORs
 // in (see the D5 gate in challenge_server.go). Same lifecycle as
-// SetFingerprintPolicyGeoResolver: set once from NewEngine.
+// SetFingerprintPolicyGeoResolver: set from NewEngine on every engine build,
+// so it always points at the current engine.
 func SetChallengeV2HostArmed(fn func(host string) bool) {
 	challengeV2.mu.Lock()
 	challengeV2.hostArmed = fn

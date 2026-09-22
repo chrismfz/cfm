@@ -114,6 +114,18 @@ back-filled here — see the git/PR history for that period.
   scores on network identity.
 
 ### Fixed
+- **Turning web-detector enrichment off no longer leaves country/ASN
+  `challenge_v2` policies enforced at verify.** On every reload the web
+  detector is rebuilt, and each rebuild wired the verify-side geo lookup
+  (what lets an armed country/ASN `challenge_v2` policy reject a failing
+  solve) only when the new configuration HAD enrichment — it was never
+  cleared. So after a reload with enrichment off (or an enrichment init
+  failure), the verify gate kept enforcing through the previous
+  configuration's enricher, and kept that enricher (its GeoLite2 readers and
+  lookup caches) in memory. It now follows the current configuration: without
+  enrichment the verify-side geo check is off (fail-open, as documented), the
+  same as on a daemon started without it. Fingerprint policies and the
+  decision-path challenge floor are unchanged.
 - **nftlib firewall backend: a failed netlink call can no longer corrupt the
   next one, a stuck read can no longer freeze the firewall, and a read error
   is no longer mistaken for "nothing there".** The nftlib backend used one
